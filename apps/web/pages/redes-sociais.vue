@@ -33,14 +33,22 @@
 // token_conta_externa / token_expires_at. Por isso o plaintext do token não
 // é copiado pra nenhuma variável reativa nossa, não entra em log, :title,
 // URL nem localStorage, e é zerado ao fechar o sub-modal / sair da página.
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+//
+// Shopee Vídeo (Eduardo, 08/10/2026): a conta `shopee` é DE UMA LOJA (o select
+// "Loja Shopee" grava `integration_id`) e não usa token colado: o operador
+// digita o partner_id/partner_key do app de VÍDEO no sub-modal "Autorizar na
+// Shopee", o backend cifra e devolve o link de autorização, e o navegador vai
+// pra Shopee (login principal da loja). Na volta, `?shopee=ok|erro&code=…`
+// vira aviso e some da URL. A partner_key segue a mesma blindagem do token:
+// só no v-model do sub-modal, zerada ao fechar/sair, nunca em log/URL/title.
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import {
   AlertCircle, BadgeCheck, Check, Copy, ExternalLink, Eye, EyeOff, Loader2, Pencil, Plug, Plus, RefreshCw, Send, Trash2, Unlink, X,
 } from 'lucide-vue-next'
 import {
-  PLATAFORMAS, PLATAFORMA_LABELS, VERIFICACAO_GUIA, VERIFICACAO_LABELS, VERIFICACAO_STATUS, fmtFone, perfilUrl,
-  type Plataforma, type VerificacaoStatus,
+  PLATAFORMAS, PLATAFORMAS_DE_LOJA, PLATAFORMA_LABELS, VERIFICACAO_GUIA, VERIFICACAO_LABELS, VERIFICACAO_STATUS, fmtFone,
+  perfilUrl, type Plataforma, type VerificacaoStatus,
 } from '~/lib/redesSociais'
 import { apiErrMsg, MARCAS_ERROS } from '~/lib/apiError'
 
@@ -111,9 +119,17 @@ type RedeSocialOut = {
   token_status: string | null
   token_conta_externa: string | null
   token_expires_at: string | null
+  // Shopee Vídeo: a loja (integração) e se o app de vídeo já foi digitado —
+  // o partner em si nunca volta. Na Shopee `has_token` = loja AUTORIZADA.
+  integration_id?: string | null
+  integration_nome?: string | null
+  shopee_app_configurado?: boolean
   created_at: string
   updated_at: string
 }
+
+// GET /api/redes-sociais/lojas-shopee: o select "Loja Shopee".
+type LojaShopee = { id: string; nome: string; arquivada: boolean }
 
 // ContaExternaOut: o que o token enxerga (uma Página + a conta do Instagram
 // ligada a ela). Só chega quando o backend NÃO conseguiu decidir sozinho —
@@ -160,6 +176,8 @@ type Form = {
   postagem_intervalo_min: Teto
   postagem_hora_inicio: Teto
   adspower_user_id: string
+  // Shopee Vídeo: a loja da conta ('' = nenhuma).
+  integration_id: string
 }
 type Modo = 'create' | 'edit'
 
@@ -207,6 +225,9 @@ function montaBody(f: Form, modo: Modo, senhaSalva: string | null): Record<strin
     verificacao_obs: f.verificacao_obs.trim() || null,
     obs: f.obs.trim() || null,
   }
+  // A loja só existe na Shopee Vídeo (o backend recusa nas outras redes, e
+  // ao trocar a plataforma pra outra ele mesmo solta a loja).
+  if (PLATAFORMAS_DE_LOJA.includes(f.plataforma)) body.integration_id = (f.integration_id || '').trim() || null
   if (modo === 'edit') {
     body.ativo = f.ativo
     body.postagem_auto = f.postagem_auto
@@ -369,6 +390,68 @@ function senhaHintTexto(o: {
   else base = 'sem senha — nem na conta nem na marca'
   if (o.revelada) base += ` · mostrando a senha ${o.revelada === 'marca' ? 'da marca' : 'da conta'}`
   return base
+}
+
+// ---- Shopee Vídeo (08/10/2026)
+
+// Estado da conta de Shopee Vídeo, na ordem em que as coisas acontecem: app
+// digitado → loja autorizada → (cadeia viva). Nunca o partner nem o token.
+function shopeePillTexto(r: (TokenEstado & { shopee_app_configurado?: boolean }) | null | undefined): string {
+  if (!r?.shopee_app_configurado) return 'sem app de vídeo'
+  if (!r.has_token) return 'falta autorizar na Shopee'
+  if ((r.token_status || 'ok') !== 'ok') return 'autorização vencida — autorize de novo'
+  const loja = (r.token_conta_externa || '').trim()
+  return loja ? `autorizado · ${loja}` : 'autorizado'
+}
+
+function shopeePillClass(r: (TokenEstado & { shopee_app_configurado?: boolean }) | null | undefined): string {
+  if (!r?.shopee_app_configurado) return 'bg-muted text-muted-foreground'
+  return r.has_token && (r.token_status || 'ok') === 'ok'
+    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+}
+
+// Partner ID digitado: só número positivo inteiro (o app de vídeo é 2047721).
+function partnerIdOuNull(v: string | number | null | undefined): number | null {
+  const s = String(v ?? '').trim()
+  if (!/^\d+$/.test(s)) return null
+  const n = Number(s)
+  return Number.isSafeInteger(n) && n > 0 ? n : null
+}
+
+// Códigos do fluxo da Shopee (iniciar + retorno). Só desta tela.
+const SHOPEE_ERROS: Record<string, string> = {
+  conta_nao_e_shopee: 'esta conta não é de Shopee Vídeo',
+  conta_sem_loja: 'escolha a loja Shopee da conta e salve antes de autorizar',
+  loja_nao_e_shopee: 'a loja escolhida não é uma integração Shopee',
+  loja_so_para_shopee: 'loja só existe em conta de Shopee Vídeo',
+  loja_ja_tem_conta_shopee: 'essa loja já tem uma conta de Shopee Vídeo',
+  loja_sem_shop_id: 'a integração da loja não tem o shop_id — reconecte a loja em Integrações',
+  conta_sem_app_shopee: 'digite o Partner ID e a Partner Key do app de vídeo',
+  partner_incompleto: 'preencha o Partner ID E a Partner Key (os dois são do mesmo app)',
+  partner_key_invalida: 'Partner Key inválida — cole a chave inteira, sem espaços',
+  shopee_usa_autorizacao: 'na Shopee a conexão é pelo botão Autorizar na Shopee',
+  missing_shopee_video_redirect: 'endereço de retorno da Shopee não configurado no servidor',
+  state_not_found: 'link de autorização inválido — clique em Autorizar na Shopee de novo',
+  state_consumed: 'esse link de autorização já foi usado — clique em Autorizar na Shopee de novo',
+  state_expired: 'o link de autorização venceu (10 min) — clique em Autorizar na Shopee de novo',
+  sem_code: 'a Shopee voltou sem o código de autorização — tente de novo',
+  loja_errada: 'a Shopee autorizou OUTRA loja — entre com o login principal da loja certa',
+  autorizacao_sem_user_id: 'a Shopee não devolveu o usuário da loja — confira se o app é o de vídeo',
+  autorizacao_ambigua: 'a Shopee devolveu mais de um usuário — autorize de novo pela loja',
+  autorizacao_sem_token: 'a Shopee não devolveu os tokens — tente de novo',
+  troca_recusada: 'a Shopee recusou o código — tente de novo (o código vale 10 min, uma vez)',
+}
+
+// `?shopee=ok|erro&code=…` da volta da autorização → aviso pra tela.
+function shopeeRetorno(q: Record<string, unknown> | null | undefined): { ok: boolean; texto: string } | null {
+  const v = String(q?.shopee ?? '')
+  if (v === 'ok') return { ok: true, texto: 'Loja autorizada no app de vídeo da Shopee.' }
+  if (v === 'erro') {
+    const code = String(q?.code ?? '')
+    return { ok: false, texto: SHOPEE_ERROS[code] || code || 'a autorização não foi concluída' }
+  }
+  return null
 }
 
 // ---------- fim helpers puros
@@ -752,6 +835,24 @@ const form = ref<Form>(emptyForm())
 // TikTok aprovar nosso app, some dos dois lugares.
 const PLATAFORMAS_EXECUTOR_LOCAL = ['tiktok']
 const usaExecutorLocal = computed(() => PLATAFORMAS_EXECUTOR_LOCAL.includes(form.value.plataforma))
+// Shopee Vídeo: o select de loja segue o FORMULÁRIO (pode estar criando); o
+// bloco de autorização segue a conta SALVA (autorizar precisa dela gravada).
+const formDeLoja = computed(() => PLATAFORMAS_DE_LOJA.includes(form.value.plataforma))
+const redeDeLoja = computed(() =>
+  PLATAFORMAS_DE_LOJA.includes((modal.value?.rede?.plataforma || '') as Plataforma),
+)
+const lojasShopee = ref<LojaShopee[]>([])
+let lojasCarregadas = false
+async function carregaLojas() {
+  if (lojasCarregadas) return
+  try {
+    lojasShopee.value = await api<LojaShopee[]>('/api/redes-sociais/lojas-shopee')
+    lojasCarregadas = true
+  } catch (e: any) {
+    modalErr.value = apiErrMsg(e, { ...MARCAS_ERROS, ...SHOPEE_ERROS })
+  }
+}
+watch(formDeLoja, (v) => { if (v && modal.value) void carregaLojas() })
 const saving = ref(false)
 const modalErr = ref<string | null>(null)
 
@@ -776,6 +877,7 @@ function emptyForm(marcaId = '', plataforma: Plataforma = PLATAFORMAS[0]): Form 
     postagem_intervalo_min: '',
     postagem_hora_inicio: '',
     adspower_user_id: '',
+    integration_id: '',
   }
 }
 
@@ -802,6 +904,7 @@ function openCreate(marcaId = '', plataforma: Plataforma = PLATAFORMAS[0]) {
   form.value = emptyForm(marcaId, plataforma)
   modalErr.value = null
   modal.value = { rede: null }
+  if (formDeLoja.value) void carregaLojas()
 }
 
 function openEdit(r: RedeSocialOut) {
@@ -830,15 +933,18 @@ function openEdit(r: RedeSocialOut) {
     postagem_intervalo_min: r.postagem_intervalo_min == null ? '' : r.postagem_intervalo_min,
     postagem_hora_inicio: r.postagem_hora_inicio == null ? '' : r.postagem_hora_inicio,
     adspower_user_id: r.adspower_user_id || '',
+    integration_id: r.integration_id || '',
   }
   modalErr.value = null
   modal.value = { rede: r }
+  if (formDeLoja.value) void carregaLojas()
 }
 
 function closeModal() {
   // Zera o formulário inteiro (inclusive senha e o token colado) ao fechar — spec v2.
   hideSenhaModal()
   fecharConexao()
+  fecharShopee()
   form.value = emptyForm()
   modalErr.value = null
   modal.value = null
@@ -848,6 +954,10 @@ async function saveRede() {
   if (!modal.value || !canEdit.value) return
   if (!form.value.marca_id) {
     modalErr.value = 'escolha a marca'
+    return
+  }
+  if (formDeLoja.value && !form.value.integration_id) {
+    modalErr.value = 'escolha a loja Shopee da conta (o vídeo sai dentro dela)'
     return
   }
   saving.value = true
@@ -860,7 +970,7 @@ async function saveRede() {
     closeModal()
     await load()
   } catch (e: any) {
-    modalErr.value = apiErrMsg(e, MARCAS_ERROS)
+    modalErr.value = apiErrMsg(e, { ...MARCAS_ERROS, ...SHOPEE_ERROS })
   } finally {
     saving.value = false
   }
@@ -1056,6 +1166,10 @@ const conexaoPlataformaLabel = computed(() => {
 
 const tokenPillTitle = computed(() => {
   const rede = modal.value?.rede
+  if (rede && PLATAFORMAS_DE_LOJA.includes(rede.plataforma as Plataforma)) {
+    if (!rede.has_token) return 'sem autorização da loja — o robô não publica sozinho nesta conta'
+    return 'a loja autorizou o app de vídeo; o acesso renova sozinho e fica cifrado no servidor'
+  }
   if (!rede?.has_token) return 'sem credencial — o robô não publica sozinho nesta conta'
   const partes = ['a credencial fica cifrada no servidor e não é exibida']
   if (rede.token_expires_at) {
@@ -1144,7 +1258,7 @@ async function conectar() {
 
 async function desconectar() {
   const rede = modal.value?.rede
-  if (!rede?.has_token || !canEdit.value) return
+  if (!(rede?.has_token || rede?.shopee_app_configurado) || !canEdit.value) return
   const nome = rede.conta ? `@${rede.conta}` : 'esta conta'
   if (!confirm(`Desconectar a credencial de ${nome}?\n\nO robô para de publicar sozinho nesta conta na hora.`)) return
   saving.value = true
@@ -1156,6 +1270,7 @@ async function desconectar() {
       token_status: null,
       token_conta_externa: null,
       token_expires_at: null,
+      shopee_app_configurado: false,
     })
     fecharConexao()
   } catch (e: any) {
@@ -1164,6 +1279,85 @@ async function desconectar() {
     saving.value = false
   }
 }
+
+// ============================================ Shopee Vídeo: autorizar a loja
+// Sub-modal "Autorizar na Shopee". O Partner ID/Key do app de VÍDEO vão no
+// CORPO do POST /{id}/shopee/iniciar (cifrados lá, nunca voltam); a resposta
+// é o link de autorização da Shopee, e o navegador vai pra lá. A chave só
+// existe no v-model enquanto o sub-modal está aberto.
+const shopeeAut = ref<{ rede: RedeSocialOut } | null>(null)
+const partnerId = ref('')
+const partnerKey = ref('')
+const partnerKeyVisible = ref(false)
+const autorizando = ref(false)
+const shopeeAutErr = ref<string | null>(null)
+
+function abrirShopee() {
+  if (!modal.value?.rede || !canEdit.value) return
+  partnerId.value = ''
+  partnerKey.value = ''
+  partnerKeyVisible.value = false
+  shopeeAutErr.value = null
+  shopeeAut.value = { rede: modal.value.rede }
+}
+
+function fecharShopee() {
+  partnerId.value = ''
+  partnerKey.value = ''
+  partnerKeyVisible.value = false
+  shopeeAutErr.value = null
+  shopeeAut.value = null
+}
+
+async function autorizarShopee() {
+  const rede = shopeeAut.value?.rede
+  if (!rede || !canEdit.value || autorizando.value) return
+  const pid = partnerIdOuNull(partnerId.value)
+  const chave = partnerKey.value.trim()
+  const body: Record<string, unknown> = {}
+  if (partnerId.value.trim() || chave) {
+    if (!pid || !chave) {
+      shopeeAutErr.value = SHOPEE_ERROS.partner_incompleto
+      return
+    }
+    body.partner_id = pid
+    body.partner_key = chave
+  } else if (!rede.shopee_app_configurado) {
+    shopeeAutErr.value = SHOPEE_ERROS.conta_sem_app_shopee
+    return
+  }
+  autorizando.value = true
+  shopeeAutErr.value = null
+  try {
+    const r = await api<{ url: string }>(`/api/redes-sociais/${rede.id}/shopee/iniciar`, {
+      method: 'POST',
+      body,
+    })
+    aplicaConta(rede, { shopee_app_configurado: true })
+    fecharShopee()
+    // Login principal da loja na Shopee; a volta cai em /redes-sociais?shopee=…
+    await navigateTo(r.url, { external: true })
+  } catch (e: any) {
+    shopeeAutErr.value = apiErrMsg(e, { ...MARCAS_ERROS, ...SHOPEE_ERROS })
+  } finally {
+    autorizando.value = false
+  }
+}
+
+// Volta da Shopee: aviso e a URL limpa (recarregar não repete o aviso).
+const route = useRoute()
+const router = useRouter()
+const toasts = useToasts()
+onMounted(() => {
+  const aviso = shopeeRetorno(route.query as Record<string, unknown>)
+  if (!aviso) return
+  if (aviso.ok) toasts.success('Shopee Vídeo', aviso.texto)
+  else toasts.error('Shopee Vídeo', aviso.texto)
+  const resto = { ...route.query }
+  delete resto.shopee
+  delete resto.code
+  void router.replace({ query: resto })
+})
 
 // Filtrar também descarta senha revelada (SPEC v2) — célula e modal.
 watch(search, () => {
@@ -1175,9 +1369,11 @@ onUnmounted(() => {
   clearRevealed()
   hideSenhaModal()
   fecharConexao()
+  fecharShopee()
   form.value.senha = ''
   senhaMarcaValor.value = ''
   tokenValor.value = ''
+  partnerKey.value = ''
 })
 
 // O grid não tem senha — pode carregar no SSR (padrão store-info.vue).
@@ -1532,6 +1728,25 @@ await load()
               <option v-for="p in PLATAFORMAS" :key="p" :value="p">{{ PLATAFORMA_LABELS[p] }}</option>
             </select>
           </div>
+          <!-- Shopee Vídeo: a conta é DE UMA loja — o vídeo sai dentro dela, com
+               o anúncio dela, e a autorização da Shopee é conferida contra ela. -->
+          <div v-if="formDeLoja" class="col-span-2">
+            <Label>Loja Shopee *</Label>
+            <select
+              v-model="form.integration_id"
+              :disabled="!canEdit"
+              class="w-full h-10 border rounded-md px-2 text-sm bg-background"
+            >
+              <option value="">— escolha a loja —</option>
+              <option v-for="l in lojasShopee" :key="l.id" :value="l.id">
+                {{ l.arquivada ? `${l.nome} (arquivada)` : l.nome }}
+              </option>
+            </select>
+            <p class="text-[11px] text-muted-foreground mt-0.5">
+              o vídeo sai dentro desta loja, vinculado ao anúncio avulso do aparelho. Trocar a loja derruba a
+              autorização.
+            </p>
+          </div>
           <div>
             <Label>Conta</Label>
             <Input v-model="form.conta" :disabled="!canEdit" placeholder="sem @" autocomplete="off" />
@@ -1631,13 +1846,35 @@ await load()
               <h3 class="text-sm font-semibold">Publicação automática</h3>
               <span
                 class="text-[11px] rounded-full px-2 py-0.5 whitespace-nowrap"
-                :class="tokenPillClass(modal.rede)"
+                :class="redeDeLoja ? shopeePillClass(modal.rede) : tokenPillClass(modal.rede)"
                 :title="tokenPillTitle"
               >
-                {{ tokenPillTexto(modal.rede) }}
+                {{ redeDeLoja ? shopeePillTexto(modal.rede) : tokenPillTexto(modal.rede) }}
               </span>
               <div v-if="canEdit" class="ml-auto flex items-center gap-2">
-                <template v-if="modal.rede.has_token">
+                <!-- Shopee Vídeo: nada de token colado — app de vídeo + login da loja. -->
+                <template v-if="redeDeLoja">
+                  <Button
+                    v-if="modal.rede.has_token || modal.rede.shopee_app_configurado"
+                    size="sm"
+                    variant="ghost"
+                    class="text-destructive hover:text-destructive"
+                    :disabled="saving"
+                    @click="desconectar"
+                  >
+                    <Unlink class="size-4 mr-1" /> desconectar
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    :disabled="saving || !modal.rede.integration_id"
+                    :title="modal.rede.integration_id ? 'abre o login da loja na Shopee' : 'escolha a loja e salve antes'"
+                    @click="abrirShopee"
+                  >
+                    <Plug class="size-4 mr-1" /> {{ modal.rede.has_token ? 'autorizar de novo' : 'Autorizar na Shopee' }}
+                  </Button>
+                </template>
+                <template v-else-if="modal.rede.has_token">
                   <button
                     type="button"
                     class="text-[11px] text-muted-foreground hover:text-foreground hover:underline disabled:opacity-50"
@@ -1667,7 +1904,14 @@ await load()
               </span>
             </label>
             <p v-if="form.postagem_auto && !modal.rede.has_token" class="text-[11px] text-amber-600 dark:text-amber-400">
-              ligado, mas sem credencial — conecte o token para o robô conseguir publicar.
+              {{ redeDeLoja
+                ? 'ligado, mas a loja ainda não autorizou o app de vídeo — clique em Autorizar na Shopee.'
+                : 'ligado, mas sem credencial — conecte o token para o robô conseguir publicar.' }}
+            </p>
+            <p v-if="redeDeLoja" class="text-[11px] text-muted-foreground">
+              Shopee Vídeo: só sai vídeo aprovado, de 3 a 60 s, 720p ou mais (H.264), vinculado ao anúncio avulso
+              do aparelho nesta loja, ativo e com estoque — o vídeo sem anúncio aqui é pulado. A legenda sai curta
+              (até 150, sem WhatsApp) e com o selo de conteúdo feito por IA.
             </p>
 
             <div class="grid grid-cols-2 gap-3">
@@ -1876,6 +2120,87 @@ await load()
           <Button variant="ghost" size="sm" :disabled="conectando" @click="fecharConexao">cancelar</Button>
           <Button size="sm" :disabled="conectando || !tokenValor" @click="conectar">
             {{ conectando ? 'conectando…' : 'Conectar' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- sub-modal: autorizar a loja no app de VÍDEO da Shopee (POST
+         /{id}/shopee/iniciar → link da Shopee). A Partner Key é digitada
+         mascarada (mesma blindagem do token) e nunca volta do servidor. -->
+    <div v-if="shopeeAut" class="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4" @click.self="fecharShopee">
+      <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-3 max-h-[90vh] overflow-auto">
+        <div class="flex items-center gap-2">
+          <Plug class="size-4 text-muted-foreground shrink-0" />
+          <h2 class="text-base font-semibold">Autorizar na Shopee</h2>
+          <span class="text-xs text-muted-foreground truncate">
+            {{ shopeeAut.rede.integration_nome || 'loja' }} · Shopee Vídeo
+          </span>
+          <Button class="ml-auto" size="sm" variant="ghost" :disabled="autorizando" @click="fecharShopee">
+            <X class="size-4" />
+          </Button>
+        </div>
+
+        <p class="text-[11px] text-muted-foreground">
+          Use o app de <strong>vídeo</strong> da Open Platform (Shopee Video Management — "DaVinci Videos"), não o da
+          integração de pedidos. Depois de clicar em <strong>Ir para a Shopee</strong>, entre com o
+          <strong>login principal</strong> da loja (subconta não autoriza) e escolha 365 dias.
+          <template v-if="shopeeAut.rede.shopee_app_configurado">
+            O app já está salvo nesta conta — deixe os campos em branco para autorizar de novo com ele.
+          </template>
+        </p>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <Label>Partner ID</Label>
+            <Input
+              v-model="partnerId"
+              inputmode="numeric"
+              autocomplete="off"
+              data-1p-ignore
+              data-lpignore="true"
+              data-form-type="other"
+              name="shopee-partner-id"
+              placeholder="ex.: 2047721"
+            />
+          </div>
+          <div class="relative">
+            <Label>Partner Key</Label>
+            <Input
+              v-model="partnerKey"
+              type="text"
+              autocomplete="off"
+              data-1p-ignore
+              data-lpignore="true"
+              data-form-type="other"
+              name="shopee-partner-key"
+              spellcheck="false"
+              class="pr-9 font-mono"
+              :style="partnerKeyVisible ? undefined : { WebkitTextSecurity: 'disc' }"
+              placeholder="cole a chave live do app"
+              @keydown.enter.prevent="autorizarShopee"
+            />
+            <button
+              type="button"
+              class="absolute right-2 top-[30px] text-muted-foreground hover:text-foreground"
+              :title="partnerKeyVisible ? 'ocultar' : 'mostrar o que foi colado'"
+              @click="partnerKeyVisible = !partnerKeyVisible"
+            >
+              <EyeOff v-if="partnerKeyVisible" class="size-4" />
+              <Eye v-else class="size-4" />
+            </button>
+          </div>
+        </div>
+        <p class="text-[11px] text-muted-foreground">
+          A chave fica cifrada no servidor e não volta em tela, log ou link — para trocar, digite outra.
+        </p>
+
+        <div v-if="shopeeAutErr" class="text-sm text-red-500">erro: {{ shopeeAutErr }}</div>
+
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" size="sm" :disabled="autorizando" @click="fecharShopee">cancelar</Button>
+          <Button size="sm" :disabled="autorizando" @click="autorizarShopee">
+            {{ autorizando ? 'abrindo…' : 'Ir para a Shopee' }}
           </Button>
         </div>
       </div>

@@ -66,7 +66,9 @@ _CAMPOS_SO_DA_ABA_MARCAS = (
     "sac_senha_enc",
     "logo",
 )
-PLATAFORMAS_PLANILHA = ["instagram", "facebook", "twitter", "tiktok", "youtube"]
+# As 5 da planilha + a Shopee Vídeo (08/10/2026), no fim: a ordem é a das
+# colunas do grid.
+PLATAFORMAS_PLANILHA = ["instagram", "facebook", "twitter", "tiktok", "youtube", "shopee"]
 
 
 def _perms(*, view: bool = True, edit: bool = True, delete: bool = True) -> dict:
@@ -1141,7 +1143,8 @@ async def test_grid_plataformas_sao_as_5_da_planilha_e_marca_ref_completo(
     client, db, make_user, auth_as
 ):
     """Só instagram, facebook, twitter, tiktok, youtube — na ordem da planilha
-    (kwai/pinterest/linkedin/threads saíram na v3; POST com elas → 422).
+    (kwai/pinterest/linkedin/threads saíram na v3; POST com elas → 422) — e a
+    Shopee Vídeo no fim (08/10/2026).
     MarcaRef traz a linha da marca da aba r.social (fone/usuário/
     has_sac_senha/verificação do Zap/função/tipo/obs/has_logo) e NUNCA o
     login/e-mail/domínio do registro nem senha nem os bytes do logo."""
@@ -1171,7 +1174,7 @@ async def test_grid_plataformas_sao_as_5_da_planilha_e_marca_ref_completo(
     assert g.status_code == 200, g.text
     body = g.json()
     assert body["plataformas"] == PLATAFORMAS_PLANILHA
-    assert len(body["plataformas"]) == 5
+    assert len(body["plataformas"]) == 6
     assert list(REDES_SOCIAIS_PLATAFORMAS) == PLATAFORMAS_PLANILHA
     (row,) = body["rows"]
     assert set(row["marca"]) == _CAMPOS_MARCA_REF

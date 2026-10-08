@@ -20,21 +20,29 @@ sob edit com log (devolve a da conta ou, sem ela, a herdada da marca — com
 `origem`).
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from secrets import token_urlsafe
 from typing import Annotated
+from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session, is_unique_violation
 from app.deps.auth import require_permission
+from app.historico.contexto import identificar_por_id
 from app.models import (
     REDES_SOCIAIS_PLATAFORMAS,
+    Integration,
+    IntegrationPlatform,
     Marca,
+    OAuthState,
     RedeSocial,
     RedeSocialToken,
     User,
@@ -43,6 +51,7 @@ from app.schemas.marcas import (
     ConectarContaIn,
     ConexaoOut,
     ContaExternaOut,
+    LojaShopeeOut,
     MarcaRef,
     MarcaSocialPatch,
     RedeSocialCreate,
@@ -51,9 +60,11 @@ from app.schemas.marcas import (
     RedesSociaisGridOut,
     RedesSociaisGridRow,
     SenhaOut,
+    ShopeeIniciarIn,
+    ShopeeIniciarOut,
 )
-from app.security.cipher import decrypt, encrypt, encrypt_json
-from app.services.marketing import meta_client
+from app.security.cipher import decrypt, decrypt_json, encrypt, encrypt_json
+from app.services.marketing import meta_client, shopee_video, shopee_video_conta
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/redes-sociais", tags=["redes_sociais"])
@@ -88,7 +99,10 @@ async def _tokens_por_rede(
 
 
 def rede_out(
-    r: RedeSocial, marca: Marca, token: RedeSocialToken | None = None
+    r: RedeSocial,
+    marca: Marca,
+    token: RedeSocialToken | None = None,
+    lojas: dict[UUID, str] | None = None,
 ) -> RedeSocialOut:
     out = RedeSocialOut.model_validate(r)
     # Credencial de publicação: só o ESTADO vai pra tela (o token não sai por
@@ -98,6 +112,16 @@ def rede_out(
         out.token_status = token.status
         out.token_conta_externa = token.external_username or token.external_user_id
         out.token_expires_at = token.token_expires_at
+    if r.plataforma == shopee_video.PLATAFORMA_SHOPEE:
+        # Na Shopee o blob nasce com o app (partner) ANTES da autorização: só
+        # "conectado" depois que a loja autorizou (o user_id volta dela). O
+        # partner nunca sai daqui — só o fato de já ter sido digitado.
+        out.has_token = shopee_video_conta.autorizada(token)
+        out.shopee_app_configurado = shopee_video_conta.tem_partner(
+            shopee_video_conta.blob_de(token)
+        )
+        if r.integration_id is not None:
+            out.integration_nome = (lojas or {}).get(r.integration_id)
     out.marca_nome = marca.nome
     out.has_senha = bool(r.senha_enc)
     # Efetivos: o que a conta tem, senão o da marca (planilha: uma credencial
@@ -110,6 +134,34 @@ def rede_out(
         out.senha_origem = "marca"
     out.has_senha_efetiva = out.senha_origem is not None
     return out
+
+
+async def _nomes_das_lojas(session: AsyncSession, redes: list[RedeSocial]) -> dict[UUID, str]:
+    """Nome da loja (integração) de cada conta de Shopee Vídeo — uma query."""
+    ids = {r.integration_id for r in redes if r.integration_id is not None}
+    if not ids:
+        return {}
+    linhas = (
+        await session.execute(
+            select(Integration.id, Integration.name).where(Integration.id.in_(ids))
+        )
+    ).all()
+    return {linha[0]: linha[1] for linha in linhas}
+
+
+async def _valida_loja(
+    session: AsyncSession, plataforma: str, integration_id: UUID | None
+) -> None:
+    """A loja só existe pra Shopee Vídeo, e tem de ser uma integração SHOPEE."""
+    if integration_id is None:
+        return
+    if plataforma != shopee_video.PLATAFORMA_SHOPEE:
+        raise HTTPException(422, detail={"code": "loja_so_para_shopee"})
+    integ = await session.get(Integration, integration_id)
+    if integ is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    if integ.platform != IntegrationPlatform.SHOPEE:
+        raise HTTPException(422, detail={"code": "loja_nao_e_shopee"})
 
 
 async def _get_or_404(session: AsyncSession, rede_id: UUID) -> RedeSocial:
@@ -181,7 +233,10 @@ def _casa_conta(
     return None
 
 
-def _conflict_code(conta: str | None) -> str:
+def _conflict_code(conta: str | None, e: IntegrityError | None = None) -> str:
+    # Uma conta de Shopee Vídeo por loja (índice único parcial da 0383).
+    if e is not None and "uq_redes_sociais_integration_id" in str(e.orig):
+        return "loja_ja_tem_conta_shopee"
     return "rede_social_conta_conflict" if conta else "rede_social_placeholder_conflict"
 
 
@@ -258,6 +313,7 @@ async def redes_sociais_grid(
     ).scalars().all()
     by_id = {m.id: m for m in marcas}
     tokens = await _tokens_por_rede(session, [r.id for r in redes])
+    lojas = await _nomes_das_lojas(session, list(redes))
     cells_by_marca: dict[UUID, dict[str, list[RedeSocialOut]]] = {
         m.id: {p: [] for p in REDES_SOCIAIS_PLATAFORMAS} for m in marcas
     }
@@ -267,7 +323,7 @@ async def redes_sociais_grid(
             continue
         # Plataforma removida do enum ainda aparece (não some dado da tela).
         cells.setdefault(r.plataforma, []).append(
-            rede_out(r, by_id[r.marca_id], tokens.get(r.id))
+            rede_out(r, by_id[r.marca_id], tokens.get(r.id), lojas)
         )
     rows = [RedesSociaisGridRow(marca=marca_ref(m), cells=cells_by_marca[m.id]) for m in marcas]
     return RedesSociaisGridOut(plataformas=list(REDES_SOCIAIS_PLATAFORMAS), rows=rows)
@@ -295,7 +351,31 @@ async def list_redes_sociais(
         await session.execute(stmt.order_by(Marca.nome, RedeSocial.plataforma, RedeSocial.conta))
     ).all()
     tokens = await _tokens_por_rede(session, [r.id for r, _ in rows])
-    return [rede_out(r, m, tokens.get(r.id)) for r, m in rows]
+    lojas = await _nomes_das_lojas(session, [r for r, _ in rows])
+    return [rede_out(r, m, tokens.get(r.id), lojas) for r, m in rows]
+
+
+@router.get("/lojas-shopee", response_model=list[LojaShopeeOut])
+async def lojas_shopee(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_view)],
+) -> list[LojaShopeeOut]:
+    """As lojas Shopee (integrações) pro select da conta de Shopee Vídeo.
+
+    Aqui, e não em /api/integrations, porque quem cadastra rede social pode
+    não ter `integracoes:view` — e daqui sai só id e nome, nada de credencial.
+    Declarada ANTES de `/{rede_id}`, senão o FastAPI tentaria ler
+    "lojas-shopee" como UUID."""
+    linhas = (
+        await session.execute(
+            select(Integration.id, Integration.name, Integration.archived_at)
+            .where(Integration.platform == IntegrationPlatform.SHOPEE)
+            .order_by(Integration.name)
+        )
+    ).all()
+    return [
+        LojaShopeeOut(id=i, nome=n or "", arquivada=a is not None) for i, n, a in linhas
+    ]
 
 
 @router.get("/{rede_id}", response_model=RedeSocialOut)
@@ -307,7 +387,7 @@ async def get_rede_social(
     r = await _get_or_404(session, rede_id)
     m = await _marca_or_404(session, r.marca_id)
     tokens = await _tokens_por_rede(session, [r.id])
-    return rede_out(r, m, tokens.get(r.id))
+    return rede_out(r, m, tokens.get(r.id), await _nomes_das_lojas(session, [r]))
 
 
 @router.post("", response_model=RedeSocialOut, status_code=status.HTTP_201_CREATED)
@@ -320,6 +400,7 @@ async def create_rede_social(
     await _checa_conflito(
         session, marca_id=body.marca_id, plataforma=body.plataforma, conta=body.conta
     )
+    await _valida_loja(session, body.plataforma, body.integration_id)
     data = body.model_dump(exclude={"senha"})
     r = RedeSocial(senha_enc=encrypt(body.senha) if body.senha else None, **data)
     session.add(r)
@@ -329,7 +410,7 @@ async def create_rede_social(
         await session.rollback()
         if not is_unique_violation(e):
             raise
-        raise HTTPException(409, detail={"code": _conflict_code(body.conta)}) from e
+        raise HTTPException(409, detail={"code": _conflict_code(body.conta, e)}) from e
     await session.refresh(r)
     logger.info(
         "rede_social_created",
@@ -338,7 +419,7 @@ async def create_rede_social(
         plataforma=r.plataforma,
         conta=r.conta,
     )
-    return rede_out(r, m)
+    return rede_out(r, m, None, await _nomes_das_lojas(session, [r]))
 
 
 @router.patch("/{rede_id}", response_model=RedeSocialOut)
@@ -363,10 +444,20 @@ async def patch_rede_social(
     novo_marca_id = data.get("marca_id", r.marca_id)
     nova_plataforma = data.get("plataforma", r.plataforma)
     nova_conta = data["conta"] if "conta" in data else r.conta
-    mudou_identidade = (novo_marca_id, nova_plataforma, nova_conta) != (
+    nova_loja = data["integration_id"] if "integration_id" in data else r.integration_id
+    if nova_plataforma != shopee_video.PLATAFORMA_SHOPEE and "integration_id" not in data:
+        # Deixar de ser Shopee solta a loja junto (a coluna é só dela).
+        nova_loja = None
+        if r.integration_id is not None:
+            data["integration_id"] = None
+    await _valida_loja(session, nova_plataforma, nova_loja)
+    # A LOJA também é identidade na Shopee Vídeo: a autorização é de UMA loja,
+    # e o token de outra publicaria o vídeo na loja errada.
+    mudou_identidade = (novo_marca_id, nova_plataforma, nova_conta, nova_loja) != (
         r.marca_id,
         r.plataforma,
         r.conta,
+        r.integration_id,
     )
     if mudou_identidade:
         await _checa_conflito(
@@ -413,11 +504,11 @@ async def patch_rede_social(
         await session.rollback()
         if not is_unique_violation(e):
             raise
-        raise HTTPException(409, detail={"code": _conflict_code(nova_conta)}) from e
+        raise HTTPException(409, detail={"code": _conflict_code(nova_conta, e)}) from e
     await session.refresh(r)
     m = await _marca_or_404(session, r.marca_id)
     tokens = await _tokens_por_rede(session, [r.id])
-    return rede_out(r, m, tokens.get(r.id))
+    return rede_out(r, m, tokens.get(r.id), await _nomes_das_lojas(session, [r]))
 
 
 @router.delete("/{rede_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -450,6 +541,10 @@ async def conectar_conta(
     Instagram Login, a própria conta), casa com o @ cadastrado e grava.
     """
     r = await _get_or_404(session, rede_id)
+    if r.plataforma == shopee_video.PLATAFORMA_SHOPEE:
+        # A Shopee não usa token colado: é o app de vídeo + o login da loja
+        # (POST /{id}/shopee/iniciar). Colar aqui gravaria lixo no blob dela.
+        raise HTTPException(422, detail={"code": "shopee_usa_autorizacao"})
     contas: list[ContaExternaOut] = []
     escolhido = (body.external_user_id or "").strip() or None
     externo_id: str | None = None
@@ -629,3 +724,214 @@ async def reveal_rede_social_senha(
         )
         return SenhaOut(senha=senha, origem="marca")
     return SenhaOut(senha="")
+
+
+# ================================================================ Shopee Vídeo
+# Autorização do app de VÍDEO da Shopee ("DaVinci Videos", Shopee Video
+# Management) para a loja da conta (Eduardo, 08/10/2026). Molde do OAuth da
+# Shopee das integrações (routers/integrations.py): o `state` anda no PATH do
+# retorno, porque a Shopee acrescenta `?code=&shop_id=` e não preserva query
+# que já existia. Nada aqui toca na integração da loja: o app é OUTRO, com
+# partner próprio POR CONTA, e o token dele vive em `redes_sociais_tokens`.
+
+SHOPEE_STATE_TTL_MIN = 10
+_PREFIXO_STATE = "rede_social:"
+CALLBACK_SHOPEE = "/api/redes-sociais/shopee/callback"
+
+
+def _shopee_video_base() -> str:
+    """A ORIGEM pública do retorno (sem barra no fim). Tem de estar no
+    domínio cadastrado no app de vídeo (app.hadken.com)."""
+    s = get_settings()
+    base = (s.shopee_video_redirect_base or "").strip().rstrip("/")
+    if base:
+        return base
+    if s.shopee_redirect_uri:
+        u = urlsplit(s.shopee_redirect_uri)
+        if u.scheme and u.netloc:
+            return f"{u.scheme}://{u.netloc}"
+    return (s.app_url or "").rstrip("/")
+
+
+def _shop_id_da_loja(integ: Integration) -> int | None:
+    """O shop_id da integração (o que a loja já usa pra pedidos e estoque).
+    Só LEITURA do blob da integração, e só deste número."""
+    try:
+        creds = decrypt_json(integ.credentials) if integ.credentials else {}
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        n = int(str(creds.get("shop_id") or "").strip())
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+@router.post("/{rede_id}/shopee/iniciar", response_model=ShopeeIniciarOut)
+async def shopee_iniciar(
+    rede_id: UUID,
+    body: ShopeeIniciarIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> ShopeeIniciarOut:
+    """Grava o app de vídeo (se veio) e devolve o link de autorização.
+
+    O partner_id/partner_key vão no CORPO, são cifrados e nunca voltam. Sem
+    eles no corpo, reautoriza com o app já salvo. O link leva só partner_id,
+    o endereço de volta e o state — a chave nunca sai do servidor."""
+    r = await _get_or_404(session, rede_id)
+    if r.plataforma != shopee_video.PLATAFORMA_SHOPEE:
+        raise HTTPException(422, detail={"code": "conta_nao_e_shopee"})
+    if r.integration_id is None:
+        raise HTTPException(422, detail={"code": "conta_sem_loja"})
+    if (body.partner_id is None) != (body.partner_key is None):
+        raise HTTPException(422, detail={"code": "partner_incompleto"})
+    integ = await session.get(Integration, r.integration_id)
+    if integ is None or integ.platform != IntegrationPlatform.SHOPEE:
+        raise HTTPException(422, detail={"code": "loja_nao_e_shopee"})
+    if _shop_id_da_loja(integ) is None:
+        # Sem o shop_id da loja não há como conferir o retorno — e aceitar
+        # qualquer loja é o caminho pro vídeo sair na loja errada.
+        raise HTTPException(422, detail={"code": "loja_sem_shop_id"})
+    base = _shopee_video_base()
+    if not base.startswith("https://") and not base.startswith("http://"):
+        raise HTTPException(400, detail={"code": "missing_shopee_video_redirect"})
+
+    if body.partner_id is not None and body.partner_key is not None:
+        tok = await shopee_video_conta.salvar_partner(
+            session, r, partner_id=body.partner_id, partner_key=body.partner_key, user_id=user.id
+        )
+    else:
+        tok = (
+            await session.execute(
+                select(RedeSocialToken).where(RedeSocialToken.rede_social_id == r.id)
+            )
+        ).scalar_one_or_none()
+    blob = shopee_video_conta.blob_de(tok)
+    if not shopee_video_conta.tem_partner(blob):
+        raise HTTPException(422, detail={"code": "conta_sem_app_shopee"})
+
+    state = token_urlsafe(32)
+    session.add(
+        OAuthState(
+            state=state,
+            platform=IntegrationPlatform.SHOPEE,
+            store_id=None,
+            user_id=user.id,
+            # O prefixo separa do OAuth das INTEGRAÇÕES (mesma tabela, mesma
+            # plataforma): o callback de lá não acha integração com este
+            # valor, e o daqui recusa state que não tenha o prefixo.
+            code_verifier=f"{_PREFIXO_STATE}{r.id}",
+            expires_at=datetime.now(UTC) + timedelta(minutes=SHOPEE_STATE_TTL_MIN),
+        )
+    )
+    await session.commit()
+    url = shopee_video.link_autorizacao(
+        int(blob["partner_id"]), f"{base}{CALLBACK_SHOPEE}/{state}", state
+    )
+    logger.info("shopee_video_autorizacao_iniciada", rede_id=str(r.id), user_id=str(user.id))
+    return ShopeeIniciarOut(url=url)
+
+
+def _volta(resultado: str, code: str | None = None) -> RedirectResponse:
+    q = {"shopee": resultado}
+    if code:
+        q["code"] = code
+    return RedirectResponse(
+        f"{get_settings().app_url.rstrip('/')}/redes-sociais?{urlencode(q)}", status_code=302
+    )
+
+
+@router.get("/shopee/callback/{state}")
+async def shopee_callback(
+    state: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    code: Annotated[str | None, Query()] = None,
+    shop_id: Annotated[int | None, Query()] = None,
+    main_account_id: Annotated[int | None, Query()] = None,
+) -> RedirectResponse:
+    """Retorno da Shopee: troca o `code` (vale 1 vez, 10 min) e grava.
+
+    Sem login (é o navegador voltando da Shopee) — quem garante é o state:
+    existe, não foi usado, não venceu, e é DESTE fluxo. A loja que voltou
+    tem de ser a da integração ligada à conta. Erro volta pra tela como
+    `?shopee=erro&code=…`, nunca como página de erro crua."""
+    row = (
+        await session.execute(select(OAuthState).where(OAuthState.state == state))
+    ).scalar_one_or_none()
+    if (
+        row is None
+        or row.platform != IntegrationPlatform.SHOPEE
+        or not (row.code_verifier or "").startswith(_PREFIXO_STATE)
+    ):
+        return _volta("erro", "state_not_found")
+    if row.consumed_at is not None:
+        return _volta("erro", "state_consumed")
+    if row.expires_at < datetime.now(UTC):
+        return _volta("erro", "state_expired")
+    await identificar_por_id(session, row.user_id)
+    # Consumido JÁ: o code vale uma vez, e um segundo clique no mesmo link
+    # não pode tentar trocar de novo.
+    row.consumed_at = datetime.now(UTC)
+    await session.commit()
+    if not code:
+        return _volta("erro", "sem_code")
+    try:
+        rede_id = UUID(row.code_verifier[len(_PREFIXO_STATE):])
+    except ValueError:
+        return _volta("erro", "state_not_found")
+    r = await session.get(RedeSocial, rede_id)
+    if r is None or r.plataforma != shopee_video.PLATAFORMA_SHOPEE or r.integration_id is None:
+        return _volta("erro", "conta_sem_loja")
+    integ = await session.get(Integration, r.integration_id)
+    esperado = _shop_id_da_loja(integ) if integ is not None else None
+    if esperado is None:
+        return _volta("erro", "loja_sem_shop_id")
+    if shop_id is not None and int(shop_id) != esperado:
+        logger.warning("shopee_video_loja_errada", rede_id=str(r.id))
+        return _volta("erro", "loja_errada")
+
+    tok = (
+        await session.execute(
+            select(RedeSocialToken)
+            .where(RedeSocialToken.rede_social_id == r.id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    blob = shopee_video_conta.blob_de(tok)
+    if tok is None or not shopee_video_conta.tem_partner(blob):
+        return _volta("erro", "conta_sem_app_shopee")
+    cliente = shopee_video.ClienteShopeeVideo(int(blob["partner_id"]), str(blob["partner_key"]))
+    try:
+        resposta = await cliente.trocar_code(
+            code,
+            shop_id=shop_id if shop_id is not None else None,
+            main_account_id=main_account_id if shop_id is None else None,
+        )
+        uid, sid = shopee_video_conta.escolher_user_id(resposta, esperado)
+        shopee_video_conta.gravar_autorizacao(
+            tok,
+            resposta=resposta,
+            user_id=uid,
+            shop_id=sid,
+            nome_loja=integ.name if integ is not None else None,
+        )
+    except shopee_video.ShopeeVideoError as e:
+        await session.rollback()
+        # `rede_id` (o valor), nunca `r.id`: depois do rollback a linha está
+        # expirada e ler o atributo seria I/O fora de hora na sessão async.
+        logger.warning(
+            "shopee_video_troca_falhou",
+            rede_id=str(rede_id),
+            code=e.code,
+            request_id=e.request_id,
+        )
+        return _volta("erro", "troca_recusada")
+    except shopee_video_conta.ContaShopeeError as e:
+        await session.rollback()
+        logger.warning("shopee_video_autorizacao_recusada", rede_id=str(rede_id), code=e.code)
+        return _volta("erro", e.code)
+    tok.connected_by = row.user_id
+    await session.commit()
+    logger.info("shopee_video_autorizada", rede_id=str(rede_id))
+    return _volta("ok")

@@ -301,6 +301,56 @@ async def do_youtube(ids: list[str], refresh_token: str) -> dict[str, dict[str, 
     return saida
 
 
+async def do_shopee(rede_social_id: UUID, post_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Números dos vídeos de UMA conta de Shopee Vídeo, indexados pelo post_id.
+
+    A lista de publicados (`v2.video.get_video_list`, 20 por página) já traz
+    views, curtidas e comentários de cada post — uma chamada por página, em vez
+    de uma por vídeo. O que não aparecer na lista é perguntado um a um
+    (`get_video_detail`): status 400 é APAGADO, que a tela mostra como
+    removido, não como falha de leitura.
+    """
+    from app.services.marketing import shopee_video, shopee_video_conta
+
+    cred = await shopee_video_conta.credencial(rede_social_id)
+    cliente = cred.cliente()
+
+    def n(v: Any) -> int | None:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    def numeros(v: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "views": n(v.get("views")),
+            "curtidas": n(v.get("likes")),
+            "comentarios": n(v.get("comments")),
+            # A Shopee não dá compartilhamento, salvamento nem alcance por
+            # vídeo — ficam NULOS, que é diferente de zero.
+            "bruto": {k: v.get(k) for k in ("views", "likes", "comments", "status", "post_time")},
+        }
+
+    faltam = set(post_ids)
+    saida: dict[str, dict[str, Any]] = {}
+    for pagina in range(1, 11):
+        r = await cliente.lista(publicados=True, pagina=pagina, por_pagina=20)
+        for v in r.get("list") or []:
+            pid = str(v.get("post_id") or "")
+            if pid in faltam:
+                saida[pid] = numeros(v)
+                faltam.discard(pid)
+        if not faltam or not r.get("has_more"):
+            break
+    for pid in faltam:
+        d = await cliente.detalhe(post_id=pid)
+        if int(d.get("status") or 0) == shopee_video.STATUS_APAGADO:
+            saida[pid] = {"erro": f"{REMOVIDO} o vídeo não está mais na Shopee"}
+        else:
+            saida[pid] = numeros(d)
+    return saida
+
+
 async def do_instagram(media_id: str, access_token: str) -> dict[str, Any]:
     """Números de um Reel. Duas chamadas, e a segunda pode falhar.
 
@@ -816,9 +866,14 @@ async def coletar(
     # YouTube em lote POR CONTA: o token é por conta, e a API aceita 50 ids na
     # mesma chamada. Um por um gastaria cota à toa.
     por_rede: dict[UUID, list[dict[str, Any]]] = {}
+    # Shopee Vídeo, idem: a lista de publicados da conta traz os números de
+    # 20 posts por chamada, e a credencial é da conta (app de vídeo).
+    por_loja: dict[UUID, list[dict[str, Any]]] = {}
     for a in alvos:
         if a["p"].plataforma == "youtube" and a["p"].post_external_id and a["p"].rede_social_id:
             por_rede.setdefault(a["p"].rede_social_id, []).append(a)
+        if a["p"].plataforma == "shopee" and a["p"].post_external_id and a["p"].rede_social_id:
+            por_loja.setdefault(a["p"].rede_social_id, []).append(a)
 
     prontos: dict[UUID, dict[str, Any]] = {}
     for rede_id, doGrupo in por_rede.items():
@@ -839,12 +894,23 @@ async def coletar(
             for a in doGrupo:
                 prontos[a["p"].id] = {"erro": _msg(e)[:400]}
 
+    for rede_id, grupo in por_loja.items():
+        try:
+            mapa = await do_shopee(rede_id, [a["p"].post_external_id for a in grupo])
+            for a in grupo:
+                prontos[a["p"].id] = mapa.get(a["p"].post_external_id) or {
+                    "erro": "a Shopee não devolveu este vídeo"
+                }
+        except Exception as e:  # noqa: BLE001 — a falha de uma conta não derruba as outras
+            for a in grupo:
+                prontos[a["p"].id] = {"erro": _msg(e)[:400]}
+
     primeira_do_tiktok = True
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cliente:
         for a in alvos:
             p = a["p"]
             try:
-                if p.plataforma == "youtube":
+                if p.plataforma in ("youtube", "shopee"):
                     dados = prontos.get(p.id) or {"erro": "sem id do vídeo na postagem"}
                 elif p.plataforma == "tiktok":
                     if not p.post_url:

@@ -229,6 +229,10 @@ class RedeSocialPlataforma(StrEnum):
     TWITTER = "twitter"
     TIKTOK = "tiktok"
     YOUTUBE = "youtube"
+    # Shopee Vídeo (08/10/2026): o feed de vídeos curtos DENTRO da Shopee. A
+    # conta é de UMA loja (`redes_sociais.integration_id`) e o vídeo sai com o
+    # anúncio daquela loja. No fim de propósito: a ordem é a das colunas do grid.
+    SHOPEE = "shopee"
 
 
 REDES_SOCIAIS_PLATAFORMAS: tuple[str, ...] = tuple(p.value for p in RedeSocialPlataforma)

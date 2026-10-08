@@ -138,6 +138,14 @@ class Settings(BaseSettings):
     # Shopee appends `?code=&shop_id=` to the redirect and does not reliably
     # preserve pre-existing query strings, so the state must live in the path.
     shopee_redirect_uri: str = ""
+    # Shopee Vídeo (08/10/2026): origem pública (sem barra no fim) para onde a
+    # Shopee devolve o vendedor depois de autorizar o app de VÍDEO — a rota é
+    # sempre `/api/redes-sociais/shopee/callback/{state}`. Tem de estar no
+    # domínio cadastrado no app da Shopee (hoje https://app.hadken.com). Vazio
+    # = a origem do `shopee_redirect_uri` (mesmo host), senão o `app_url`.
+    # O partner_id/partner_key do app de vídeo NÃO ficam aqui: são por conta,
+    # digitados na tela e cifrados em redes_sociais_tokens.
+    shopee_video_redirect_base: str = ""
 
     ml_client_id: str = ""
     ml_client_secret: str = ""

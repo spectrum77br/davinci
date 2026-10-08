@@ -85,7 +85,9 @@ assert.match(tpl, /type="radio" value="agendar"/, 'opção agendar')
 
 // Rótulo da legenda (origem · variação · 412/2200) e trava no próprio input.
 assert.match(tpl, /\{\{ pubLegendaRotulo \}\}/, 'rótulo com origem e contador da legenda')
-assert.match(tpl, /:maxlength="LEGENDA_MAX"/, 'textarea limitada ao mesmo máximo')
+// O teto acompanha as contas marcadas (Shopee Vídeo, 08/10/2026: 150 com ela
+// marcada e texto escrito à mão; senão 2200).
+assert.match(tpl, /:maxlength="pubLegendaMax"/, 'textarea limitada ao mesmo máximo do rótulo')
 assert.ok(!/\{\{ pubLegenda\.length \}\}/.test(tpl), 'um contador só na caixa (o do rótulo)')
 
 // A legenda vem do backend JÁ RENDERIZADA; o roteiro (prompt de geração do
@@ -174,6 +176,7 @@ return {
   statusLabel, statusPill, podeCancelar, emVoo, ordenaPostagens, postagemQuando, postagemTitle,
   chaveConta, escondeFalhasSuperadas,
   POSTAGEM_ERR_MAP, legendaRotulo, normalizaLegenda, LEGENDA_ORIGEM_LABEL,
+  LEGENDA_MAX_SHOPEE, legendaMaxPara, CONTA_MOTIVO_PT,
   diaBrt, diaRotulo, noIntervalo, agrupaPorDia, grupoResumo, agrupaFila, moveItem,
   filaIdsAposMover, FILA_ERR_MAP, diaDaLinha, bloqueioRotulo,
 };
@@ -181,6 +184,23 @@ return {
 
 // Limite da legenda = 2200 (Instagram), igual ao que o template mostra.
 assert.equal(H.LEGENDA_MAX, 2200)
+// Shopee Vídeo: 150 — mas só pro texto escrito à mão (a biblioteca o backend
+// corta sozinho pra Shopee), e só com a Shopee entre as contas marcadas.
+assert.equal(H.LEGENDA_MAX_SHOPEE, 150)
+assert.equal(H.legendaMaxPara(['instagram', 'shopee'], 'manual'), 150)
+assert.equal(H.legendaMaxPara(['instagram', 'shopee'], 'marca'), 2200)
+assert.equal(H.legendaMaxPara(['instagram'], 'manual'), 2200)
+assert.equal(H.legendaRotulo({ origem: 'manual', total: 0, indice: 0, tamanho: 151, max: 150 }), 'escrita agora · 151/150')
+// Os motivos da Shopee chegam traduzidos no modal (sem código cru na tela).
+for (const code of ['conta_sem_loja', 'conta_sem_autorizacao_shopee', 'conta_shopee_reautorizar',
+  'sem_anuncio_na_loja', 'anuncio_so_em_kit', 'anuncio_sem_estoque', 'sku_ambiguo', 'criativo_sem_sku',
+  'video_fora_da_duracao', 'video_resolucao_baixa', 'video_formato_nao_aceito', 'video_ilegivel',
+  'video_ja_na_shopee_em_outra_loja']) {
+  assert.ok(H.CONTA_MOTIVO_PT[code], `motivo traduzido: ${code}`)
+  assert.ok(H.POSTAGEM_ERR_MAP[code], `erro traduzido: ${code}`)
+  assert.notEqual(H.motivoConta(code), code)
+}
+assert.match(H.POSTAGEM_ERR_MAP.legenda_longa_shopee, /150/)
 // Espelha STATUS_EM_VOO de app/models/marketing_postagem.py.
 assert.deepEqual(H.STATUS_EM_VOO, ['agendado', 'pendente', 'containering', 'publicando'])
 
@@ -675,7 +695,7 @@ const exportsForTest = `return {
   pub, pubFiles, pubFileId, pubMarcaId, pubMarcaNome, pubContas, pubSel, pubLegenda,
   pubQuando, pubDataHora, pubShareToFeed, pubCommit, pubErr, pubTemInstagram,
   pubLegendaOrigem, pubLegendaTotal, pubLegendaIndice, pubLegendaErro, pubLegendaRotulo,
-  pubSemLegenda, onLegendaInput,
+  pubSemLegenda, onLegendaInput, pubLegendaMax, pubTemShopee, pubLegendaShopee,
   openPublicar, closePublicar, toggleConta, salvarPostagem, cancelarPostagem, loadPostagens,
   motivoPublicar, pickFile, criarRoteiroDaLinha, criandoRoteiro,
   statusFilter, statusModel, dataDe, dataAte, limparDatas, filteredRows, gruposPorDia, videosFiltrados,
@@ -947,6 +967,38 @@ async function run() {
     assert.equal(s2.pubLegendaOrigem.value, 'nenhuma')
     assert.equal(s2.pubSemLegenda.value, true)
     assert.match(s2.pubLegendaRotulo.value, /^sem legenda · 3\/2200$/)
+  }
+
+  // Shopee Vídeo marcada junto do Instagram (08/10/2026): o textarea mostra a
+  // legenda do Instagram e o aviso traz a versão CURTA que vai pra Shopee; o
+  // texto escrito à mão passa a ter teto de 150 (vai igual pras duas).
+  {
+    const contas = [
+      { rede_social_id: 'r1', plataforma: 'instagram', conta: 'uranyx_br', pode_postar: true, motivo: null },
+      { rede_social_id: 'rs', plataforma: 'shopee', conta: 'barbosa', pode_postar: true, motivo: null },
+    ]
+    const { s, calls } = await tela({ contasResp: { commit: true, contas } })
+    s.openPublicar(s.rows.value[0])
+    await new Promise(setImmediate)
+    s.toggleConta(s.pubContas.value[0])
+    await new Promise(setImmediate)
+    s.toggleConta(s.pubContas.value[1])
+    await new Promise(setImmediate)
+    assert.equal(s.pubTemShopee.value, true)
+    const urls = calls.map((c) => c.url).filter((u) => u.startsWith('/api/marketing/legendas/resolvida'))
+    assert.match(urls.at(-1), /rede_social_id=rs/, 'pede a versão da Shopee também')
+    assert.equal(s.pubLegendaShopee.value, LEGENDA_FAKE.texto)
+    assert.equal(s.pubLegendaMax.value, 2200, 'texto da biblioteca: o backend corta pra Shopee')
+    s.onLegendaInput({ target: { value: 'x'.repeat(151) } })
+    assert.equal(s.pubLegendaMax.value, 150)
+    await s.salvarPostagem()
+    assert.match(s.pubErr.value, /150/)
+    assert.equal(posts(calls).filter((c) => c.url === '/api/marketing/postagens').length, 0, 'não posta')
+    s.onLegendaInput({ target: { value: 'F110L na lama #uranyx' } })
+    await s.salvarPostagem()
+    const body = posts(calls).at(-1).opts.body
+    assert.deepEqual(body.rede_social_ids, ['r1', 'rs'])
+    assert.equal(body.legenda, 'F110L na lama #uranyx')
   }
 
   // Endpoint fora do ar (404 do backend antigo / 403 sem permissão): textarea

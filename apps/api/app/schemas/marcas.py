@@ -21,8 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.schemas.segments import _slugify
 
 InpiStatus = Literal["nao_registrado", "aguardando", "registrado", "indeferido", "expirado"]
-# As 5 redes da planilha (enums.RedeSocialPlataforma).
-Plataforma = Literal["instagram", "facebook", "twitter", "tiktok", "youtube"]
+# As 5 redes da planilha (enums.RedeSocialPlataforma) + a Shopee Vídeo
+# (08/10/2026), no fim de propósito: a ordem é a das colunas do grid.
+Plataforma = Literal["instagram", "facebook", "twitter", "tiktok", "youtube", "shopee"]
 VerificacaoStatus = Literal["nao_solicitado", "em_andamento", "verificado", "recusado"]
 EmailContexto = Literal[
     "sac", "ml", "shopee", "amazon", "aliexpress", "temu", "tiktok", "shein", "magalu",
@@ -334,6 +335,9 @@ class RedeSocialCreate(BaseModel):
     # Perfil do AdsPower que o executor local abre pra publicar nesta conta.
     # Só nas plataformas sem API (hoje o TikTok). Vazio vira NULL.
     adspower_user_id: str | None = None
+    # Shopee Vídeo: a loja (integração Shopee) que esta conta representa. O
+    # vídeo sai DENTRO dela, com o anúncio dela. Só vale para `shopee`.
+    integration_id: UUID | None = None
     ativo: bool = True
 
     _v_conta = field_validator("conta", mode="before")(_handle)
@@ -369,6 +373,9 @@ class RedeSocialPatch(BaseModel):
     # Perfil do AdsPower que o executor local abre pra publicar nesta conta.
     # Só nas plataformas sem API (hoje o TikTok). Vazio vira NULL.
     adspower_user_id: str | None = None
+    # Shopee Vídeo: a loja (integração Shopee). Trocar derruba a autorização,
+    # como trocar o @ (a autorização da Shopee é DE UMA loja).
+    integration_id: UUID | None = None
 
     _v_conta = field_validator("conta", mode="before")(_handle)
     _v_texto = field_validator(*_TEXTO_REDE, mode="before")(_texto)
@@ -415,6 +422,11 @@ class RedeSocialOut(BaseModel):
     token_status: str | None = None
     token_conta_externa: str | None = None
     token_expires_at: datetime | None = None
+    # Shopee Vídeo: a loja e o estado do app de vídeo DESTA conta. O
+    # partner_id/partner_key nunca voltam — só se já foram digitados.
+    integration_id: UUID | None = None
+    integration_nome: str | None = None
+    shopee_app_configurado: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -466,6 +478,41 @@ class ConexaoOut(BaseModel):
     token_expires_at: datetime | None = None
     # O que o token enxerga (pra conferência visual na tela).
     contas: list[ContaExternaOut] = []
+
+
+class ShopeeIniciarIn(BaseModel):
+    """O app de VÍDEO da Shopee (Shopee Video Management) desta conta.
+
+    Os dois são opcionais pra reautorizar com o que já está salvo; mandar um
+    exige o outro (o par é um app só). A chave é `repr=False` pelo mesmo
+    motivo da senha: o repr do body vai pro Sentry num 500."""
+
+    partner_id: int | None = Field(default=None, gt=0)
+    partner_key: str | None = Field(default=None, repr=False)
+
+    @field_validator("partner_key", mode="before")
+    @classmethod
+    def _v_key(cls, v: Any) -> str | None:
+        s = str(v or "").strip()
+        if not s:
+            return None
+        if len(s) < 16 or any(c.isspace() for c in s):
+            raise ValueError("partner_key_invalida")
+        return s
+
+
+class ShopeeIniciarOut(BaseModel):
+    # O link de autorização da Shopee (público: leva só partner_id, o
+    # endereço de volta e o state — nenhuma chave).
+    url: str
+
+
+class LojaShopeeOut(BaseModel):
+    """Uma loja Shopee (integração) pro select da conta de Shopee Vídeo."""
+
+    id: UUID
+    nome: str
+    arquivada: bool = False
 
 
 class SenhaOut(BaseModel):

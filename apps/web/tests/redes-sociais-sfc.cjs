@@ -141,10 +141,11 @@ const start = script.indexOf('// ---------- helpers puros')
 const end = script.indexOf('// ---------- fim helpers puros')
 assert.ok(start > 0 && end > start, 'marcadores dos helpers puros presentes')
 const helpersJs = transpile(script.slice(start, end), ts.ModuleKind.ESNext)
-const H = new Function('PLATAFORMA_LABELS', 'VERIFICACAO_LABELS', 'fmtFone', helpersJs + `
+const H = new Function('PLATAFORMA_LABELS', 'VERIFICACAO_LABELS', 'fmtFone', 'PLATAFORMAS_DE_LOJA', helpersJs + `
 return { montaBody, chipTitle, rowMatches, sincronizaEfetivos, dotClass, VERIFICACAO_CURTO, verifLabel, senhaHintTexto,
-  tetoOuNull, horaOuNull, postagemAutoOn, tokenPillTexto, tokenPillClass, contaExternaId, contaExternaLabel, TOKEN_STATUS_LABELS };
-`)(redes.PLATAFORMA_LABELS, redes.VERIFICACAO_LABELS, redes.fmtFone)
+  tetoOuNull, horaOuNull, postagemAutoOn, tokenPillTexto, tokenPillClass, contaExternaId, contaExternaLabel, TOKEN_STATUS_LABELS,
+  shopeePillTexto, shopeePillClass, partnerIdOuNull, shopeeRetorno, SHOPEE_ERROS };
+`)(redes.PLATAFORMA_LABELS, redes.VERIFICACAO_LABELS, redes.fmtFone, redes.PLATAFORMAS_DE_LOJA)
 
 const SENHA_FALSA = 'senha-falsa-teste-123'
 // Token FALSO (>= 20 chars, como o validador do backend exige) — nada real.
@@ -406,6 +407,59 @@ function redeOut(over = {}) {
   assert.equal(H.senhaHintTexto({ ...base, modo: 'create', marcaTemSenha: false }), 'opcional')
 }
 
+// ---------------------------------------------------------------- Shopee Vídeo (helpers)
+// A conta de Shopee Vídeo é DE UMA loja e o estado dela vai em três passos:
+// app digitado → loja autorizada → cadeia viva. Nunca o partner nem o token.
+{
+  assert.deepEqual(redes.PLATAFORMAS, ['instagram', 'facebook', 'twitter', 'tiktok', 'youtube', 'shopee'],
+    'Shopee no fim — mesma ordem do enum do backend')
+  assert.equal(redes.PLATAFORMA_LABELS.shopee, 'Shopee Vídeo')
+  assert.equal(redes.perfilUrl('shopee', 'barbosa'), 'https://shopee.com.br/barbosa')
+  // montaBody: a loja só viaja na Shopee — e vazia vai como null explícito.
+  const bShopee = H.montaBody(form({ plataforma: 'shopee', integration_id: ' i-1 ' }), 'create', null)
+  assert.equal(bShopee.integration_id, 'i-1')
+  assert.equal(H.montaBody(form({ plataforma: 'shopee', integration_id: '' }), 'edit', null).integration_id, null)
+  assert.ok(!('integration_id' in H.montaBody(form({ integration_id: 'i-1' }), 'edit', null)),
+    'Instagram não manda loja')
+  // Pill: nunca "conectado" antes de a LOJA autorizar.
+  assert.equal(H.shopeePillTexto({}), 'sem app de vídeo')
+  assert.equal(H.shopeePillTexto({ shopee_app_configurado: true, has_token: false }), 'falta autorizar na Shopee')
+  assert.equal(H.shopeePillTexto({ shopee_app_configurado: true, has_token: true, token_conta_externa: 'Barbosa' }),
+    'autorizado · Barbosa')
+  assert.match(H.shopeePillTexto({ shopee_app_configurado: true, has_token: true, token_status: 'expirado' }),
+    /autorize de novo/)
+  assert.match(H.shopeePillClass({ shopee_app_configurado: true, has_token: true }), /emerald/)
+  assert.match(H.shopeePillClass({ shopee_app_configurado: true, has_token: false }), /amber/)
+  assert.match(H.shopeePillClass(null), /bg-muted/)
+  // Partner ID: só inteiro positivo.
+  assert.equal(H.partnerIdOuNull(' 2047721 '), 2047721)
+  for (const ruim of ['', 'abc', '-1', '0', '20.5', null]) assert.equal(H.partnerIdOuNull(ruim), null, String(ruim))
+  // Volta da Shopee → aviso.
+  assert.deepEqual(H.shopeeRetorno({ shopee: 'ok' }), { ok: true, texto: 'Loja autorizada no app de vídeo da Shopee.' })
+  assert.match(H.shopeeRetorno({ shopee: 'erro', code: 'loja_errada' }).texto, /OUTRA loja/)
+  assert.equal(H.shopeeRetorno({ shopee: 'erro', code: 'codigo_novo' }).texto, 'codigo_novo', 'código desconhecido passa cru')
+  assert.equal(H.shopeeRetorno({}), null)
+  assert.equal(H.shopeeRetorno(null), null)
+}
+// Partner Key com a mesma blindagem do token.
+{
+  assert.match(tpl, /name="shopee-partner-key"/, 'sub-modal tem o campo da partner key')
+  const campo = tpl.slice(tpl.indexOf('name="shopee-partner-key"') - 400, tpl.indexOf('name="shopee-partner-key"') + 400)
+  assert.match(campo, /data-1p-ignore/)
+  assert.match(campo, /WebkitTextSecurity/)
+  assert.match(campo, /autocomplete="off"/)
+  assert.ok(!/type="password"/.test(campo))
+  assert.ok(!/\$\{\s*(partnerKey|chave)\b/.test(script), 'partner key nunca interpolada em URL/template string')
+  assert.ok(!/(console\.\w+)\([^)]*\bpartnerKey\b/.test(script), 'partner key nunca vai pra log')
+  // (o `partnerKeyVisible` do olho pode; o VALOR da chave, não)
+  assert.ok(!/:title="[^"]*partnerKey\b(?!Visible)/.test(tpl), 'partner key nunca em title')
+  assert.match(script, /function fecharShopee\(\)[\s\S]*?partnerKey\.value = ''/, 'fecharShopee zera a chave')
+  assert.match(script, /onUnmounted\(\(\) => \{[\s\S]*?partnerKey\.value = ''/, 'onUnmounted zera a chave')
+  assert.match(script, /\/shopee\/iniciar`, \{\s*\n?\s*method: 'POST'/, 'POST /{id}/shopee/iniciar')
+  assert.match(tpl, /Loja Shopee \*/, 'select da loja no modal')
+  assert.match(tpl, /Autorizar na Shopee/, 'botão de autorizar')
+}
+
 // ---------------------------------------------------------------- script setup
 // Tira os imports (resolvidos por parâmetro abaixo) e mantém o `await load()`
 // de topo — a factory é async, então o grid inicial vem do api falso.
@@ -422,6 +476,8 @@ const exportsForTest = `return {
   conexao, tokenValor, tokenVisible, conectando, conexaoErr, conexaoContas, conexaoEscolha,
   abrirConexao, fecharConexao, conectar, desconectar, tokenPillTexto, tokenPillTitle, postagemAutoOn,
   conexaoPlataformaLabel, contaExternaId,
+  formDeLoja, redeDeLoja, lojasShopee, shopeeAut, partnerId, partnerKey, partnerKeyVisible, autorizando, shopeeAutErr,
+  abrirShopee, fecharShopee, autorizarShopee,
 }`
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const factory = new AsyncFunction(
@@ -430,6 +486,7 @@ const factory = new AsyncFunction(
   'setTimeout', 'clearTimeout', 'navigator', 'confirm',
   'TABS_CADASTROS', 'apiErrMsg', 'MARCAS_ERROS',
   'PLATAFORMAS', 'PLATAFORMA_LABELS', 'VERIFICACAO_GUIA', 'VERIFICACAO_LABELS', 'VERIFICACAO_STATUS', 'fmtFone', 'perfilUrl',
+  'onMounted', 'useRoute', 'useRouter', 'useToasts', 'navigateTo', 'PLATAFORMAS_DE_LOJA',
   transpile(pageScript, ts.ModuleKind.ESNext) + '\n' + exportsForTest,
 )
 
@@ -490,7 +547,7 @@ const conexaoDireta = () => ({
 
 async function page({
   canEdit = true, marcas = [marcaRef()], contas = [rede()], confirmAnswer = true, postError = null,
-  conexaoResp = conexaoDireta, conectarError = null,
+  conexaoResp = conexaoDireta, conectarError = null, query = {}, iniciarError = null,
 } = {}) {
   const calls = []
   const timers = []
@@ -499,9 +556,25 @@ async function page({
   const confirms = []
   // Corpos que chegaram no POST /conectar — é onde o token PODE aparecer.
   const conectarBodies = []
+  // Shopee Vídeo: corpos do /shopee/iniciar (onde a partner key PODE aparecer),
+  // o destino do navegador, os avisos e a URL limpa da volta.
+  const iniciarBodies = []
+  const navegou = []
+  const avisos = []
+  const replaces = []
+  const mountedHooks = []
   const api = (url, opts) => {
     calls.push({ url, opts })
     if (url === '/api/redes-sociais/grid') return Promise.resolve(gridOf(marcas, contas))
+    if (url === '/api/redes-sociais/lojas-shopee') {
+      return Promise.resolve([{ id: 'i-barbosa', nome: 'Barbosa', arquivada: false }])
+    }
+    if (/\/shopee\/iniciar$/.test(url)) {
+      assert.equal(opts?.method, 'POST', 'iniciar é POST')
+      iniciarBodies.push(opts.body)
+      if (iniciarError) return Promise.reject(iniciarError)
+      return Promise.resolve({ url: 'https://open.shopee.com.br/auth?partner_id=2047721&auth_type=seller' })
+    }
     if (/\/conectar$/.test(url)) {
       const r = contas.find((x) => `/api/redes-sociais/${x.id}/conectar` === url)
       assert.ok(r, `conta conhecida: ${url}`)
@@ -567,8 +640,15 @@ async function page({
     { clipboard: { writeText: async (t) => { clipboard.push(t) } } }, (msg) => { confirms.push(msg); return confirmAnswer },
     [], apiError.apiErrMsg, apiError.MARCAS_ERROS,
     redes.PLATAFORMAS, redes.PLATAFORMA_LABELS, redes.VERIFICACAO_GUIA, redes.VERIFICACAO_LABELS, redes.VERIFICACAO_STATUS, redes.fmtFone, redes.perfilUrl,
+    (fn) => mountedHooks.push(fn), () => ({ query }), () => ({ replace: (to) => { replaces.push(to); return Promise.resolve() } }),
+    () => ({ success: (t, l) => avisos.push({ ok: true, t, l }), error: (t, l) => avisos.push({ ok: false, t, l }) }),
+    (url, o) => { navegou.push({ url, o }); return Promise.resolve() }, redes.PLATAFORMAS_DE_LOJA,
   )
-  return { state, calls, timers, clipboard, unmountHooks, confirms, marcas, contas, conectarBodies }
+  for (const fn of mountedHooks) fn()
+  return {
+    state, calls, timers, clipboard, unmountHooks, confirms, marcas, contas, conectarBodies,
+    iniciarBodies, navegou, avisos, replaces,
+  }
 }
 const settle = () => new Promise(setImmediate)
 const senhaCalls = (calls) => calls.filter((c) => /\/senha$|\/sac-senha$/.test(c.url))
@@ -1057,10 +1137,120 @@ async function run() {
     await s.desconectar()
     assert.equal(calls.filter((c) => /\/conectar$/.test(c.url)).length, 0)
   }
+
+  // ---- Shopee Vídeo (08/10/2026)
+  const KEY_FALSA = 'PARTNER-KEY-FALSA-0123456789abcdef'
+  const shopeeRede = (over = {}) => rede({
+    id: 'rs', plataforma: 'shopee', conta: 'barbosa', integration_id: 'i-barbosa', integration_nome: 'Barbosa',
+    shopee_app_configurado: false, ...over,
+  })
+
+  // Nova conta de Shopee: o select de loja aparece, carrega as lojas e é exigido.
+  {
+    const { state: s, calls } = await page({ contas: [] })
+    s.openCreate('m1', 'shopee')
+    await settle()
+    assert.equal(s.formDeLoja.value, true)
+    assert.deepEqual(s.lojasShopee.value.map((l) => l.nome), ['Barbosa'])
+    s.form.value.conta = 'barbosa'
+    await s.saveRede()
+    assert.match(s.modalErr.value, /escolha a loja Shopee/)
+    s.form.value.integration_id = 'i-barbosa'
+    await s.saveRede()
+    const post = calls.find((c) => c.url === '/api/redes-sociais' && c.opts?.method === 'POST')
+    assert.equal(post.opts.body.integration_id, 'i-barbosa')
+    assert.equal(post.opts.body.plataforma, 'shopee')
+  }
+
+  // Autorizar: partner no CORPO, navegador vai pro link da Shopee, chave zerada.
+  {
+    const { state: s, iniciarBodies, navegou } = await page({ contas: [shopeeRede()] })
+    s.openEdit(s.grid.value.rows[0].cells.shopee[0])
+    assert.equal(s.redeDeLoja.value, true)
+    s.abrirShopee()
+    assert.ok(s.shopeeAut.value)
+    await s.autorizarShopee()
+    assert.match(s.shopeeAutErr.value, /Partner ID e a Partner Key/, 'sem app salvo exige os dois')
+    s.partnerId.value = '2047721'
+    await s.autorizarShopee()
+    assert.match(s.shopeeAutErr.value, /os dois são do mesmo app/, 'só um dos dois não vai')
+    assert.equal(iniciarBodies.length, 0)
+    s.partnerKey.value = KEY_FALSA
+    await s.autorizarShopee()
+    assert.deepEqual(iniciarBodies, [{ partner_id: 2047721, partner_key: KEY_FALSA }])
+    assert.equal(navegou.length, 1)
+    assert.match(navegou[0].url, /^https:\/\/open\.shopee\.com\.br\/auth\?/)
+    assert.deepEqual(navegou[0].o, { external: true })
+    assert.ok(!navegou[0].url.includes(KEY_FALSA), 'a chave nunca vai na URL')
+    assert.equal(s.partnerKey.value, '', 'chave zerada depois de usar')
+    assert.equal(s.shopeeAut.value, null)
+    assert.equal(s.modal.value.rede.shopee_app_configurado, true)
+  }
+
+  // App já salvo: reautoriza sem digitar nada (corpo vazio).
+  {
+    const { state: s, iniciarBodies } = await page({ contas: [shopeeRede({ shopee_app_configurado: true })] })
+    s.openEdit(s.grid.value.rows[0].cells.shopee[0])
+    s.abrirShopee()
+    await s.autorizarShopee()
+    assert.deepEqual(iniciarBodies, [{}])
+  }
+
+  // Erro do servidor vira frase; fechar zera a chave; desmontar também.
+  {
+    const erro = Object.assign(new Error('x'), { data: { detail: { code: 'loja_sem_shop_id' } } })
+    const { state: s, navegou, unmountHooks } = await page({ contas: [shopeeRede()], iniciarError: erro })
+    s.openEdit(s.grid.value.rows[0].cells.shopee[0])
+    s.abrirShopee()
+    s.partnerId.value = '2047721'
+    s.partnerKey.value = KEY_FALSA
+    await s.autorizarShopee()
+    assert.match(s.shopeeAutErr.value, /shop_id/)
+    assert.equal(navegou.length, 0)
+    s.fecharShopee()
+    assert.equal(s.partnerKey.value, '')
+    s.abrirShopee()
+    s.partnerKey.value = KEY_FALSA
+    for (const fn of unmountHooks) fn()
+    assert.equal(s.partnerKey.value, '')
+  }
+
+  // Só-view não abre o sub-modal da Shopee.
+  {
+    const { state: s, iniciarBodies } = await page({ canEdit: false, contas: [shopeeRede()] })
+    s.openEdit(s.grid.value.rows[0].cells.shopee[0])
+    s.abrirShopee()
+    assert.equal(s.shopeeAut.value, null)
+    await s.autorizarShopee()
+    assert.equal(iniciarBodies.length, 0)
+  }
+
+  // Volta da Shopee: aviso e URL limpa (o resto da query fica).
+  {
+    const { avisos, replaces } = await page({ query: { shopee: 'erro', code: 'loja_errada', aba: 'x' } })
+    assert.equal(avisos.length, 1)
+    assert.equal(avisos[0].ok, false)
+    assert.match(avisos[0].l, /OUTRA loja/)
+    assert.deepEqual(replaces, [{ query: { aba: 'x' } }])
+    const ok = await page({ query: { shopee: 'ok' } })
+    assert.equal(ok.avisos[0].ok, true)
+    const nada = await page()
+    assert.equal(nada.avisos.length, 0)
+    assert.equal(nada.replaces.length, 0)
+  }
+
+  // Desconectar uma conta da Shopee só com o app salvo (sem autorização).
+  {
+    const { state: s, calls } = await page({ contas: [shopeeRede({ shopee_app_configurado: true })] })
+    s.openEdit(s.grid.value.rows[0].cells.shopee[0])
+    await s.desconectar()
+    assert.equal(calls.filter((c) => /\/conectar$/.test(c.url) && c.opts?.method === 'DELETE').length, 1)
+    assert.equal(s.modal.value.rede.shopee_app_configurado, false)
+  }
 }
 
 run().then(() => {
-  console.log('PASS: SFC parse + template compile; higiene de senha e do token; helpers puros; script setup com api falso (grid, inline PATCH /marca, senha da marca, modal da conta, guia, publicação automática: conectar/escolher conta/desconectar e tetos por conta)')
+  console.log('PASS: SFC parse + template compile; higiene de senha, do token e da partner key; helpers puros; script setup com api falso (grid, inline PATCH /marca, senha da marca, modal da conta, guia, publicação automática: conectar/escolher conta/desconectar e tetos por conta; Shopee Vídeo: loja, autorizar, volta e desconectar)')
 }).catch((e) => {
   console.error(e)
   process.exit(1)

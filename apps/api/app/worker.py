@@ -1390,6 +1390,27 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                     secas += 1
                     continue
 
+                if alvo["plataforma"] == _postagens.PLATAFORMA_SHOPEE:
+                    # Shopee Vídeo (08/10/2026): máquina de estados RETOMÁVEL
+                    # — sobe, espera a Shopee processar, monta o rascunho e
+                    # posta, gravando cada passo. Quando a Shopee ainda está
+                    # processando, a linha volta pra `pendente` e o próximo
+                    # tique continua de onde parou. Credencial própria (app
+                    # de vídeo por conta, renovação com trava de linha) — não
+                    # passa pelo token genérico abaixo.
+                    from app.services.marketing import shopee_video_publicador
+
+                    acao = await shopee_video_publicador.publicar_postagem(
+                        s, alvo["id"], caminho
+                    )
+                    if acao == shopee_video_publicador.PUBLICADO:
+                        publicadas += 1
+                    elif acao == shopee_video_publicador.AGUARDANDO:
+                        adiadas += 1
+                    else:
+                        falhas += 1
+                    continue
+
                 tok = (
                     await s.execute(
                         select(RedeSocialToken).where(
@@ -1779,6 +1800,24 @@ async def marketing_postagens_reconciliar(ctx: dict) -> None:
         resolvidas = revisar = 0
         for alvo in alvos:
             ident = alvo["post_external_id"] or alvo["container_id"]
+            if alvo["plataforma"] == "shopee" and _settings.marketing_postagem_commit:
+                # Shopee Vídeo: pergunta pelo post_id/video_upload_id com a
+                # credencial da própria conta; o upload que parou ANTES de
+                # postar volta pra fila e continua (nada foi ao ar).
+                from app.services.marketing import shopee_video_publicador
+
+                try:
+                    acao = await shopee_video_publicador.reconciliar(s, alvo["id"])
+                    resolvidas += 1 if acao == shopee_video_publicador.PUBLICADO else 0
+                    revisar += 1 if acao == shopee_video_publicador.REVISAR else 0
+                except Exception as e:  # noqa: BLE001
+                    await s.rollback()
+                    logger.error(
+                        "marketing_postagens_reconciliar_item_failed",
+                        postagem=str(alvo["id"]),
+                        err=str(e)[:300],
+                    )
+                continue
             try:
                 token = ""
                 provedor = meta_client.PROVEDOR_FACEBOOK
@@ -2726,6 +2765,27 @@ async def meta_token_refresh(ctx: dict) -> None:
                     avisados += 1
         await s.commit()
     logger.info("meta_token_refresh_done", contas=len(linhas), avisados=avisados)
+
+
+async def shopee_video_token_refresh(ctx: dict) -> None:
+    """Shopee Vídeo (08/10/2026): renova a cadeia de tokens das contas.
+
+    O refresh token do app de vídeo vale 30 dias e é de USO ÚNICO. Com post
+    todo dia ele renova sozinho no uso; este cron garante que uma conta parada
+    (robô desligado, férias) não deixe a cadeia morrer — renova quando faltam
+    menos de 20 dias. A renovação passa pela MESMA trava de linha que o
+    publicador usa (`shopee_video_conta.credencial`), então os dois nunca
+    gastam o mesmo refresh. Cadeia morta vira `expirado` e o
+    `meta_token_refresh` avisa os admins.
+    """
+    if not _settings.enable_marketing:
+        return
+    from app.services.marketing import shopee_video_conta
+
+    try:
+        await shopee_video_conta.renovar_todas()
+    except Exception as e:  # noqa: BLE001
+        logger.error("shopee_video_token_refresh_failed", err=type(e).__name__)
 
 
 async def refunds_freight_backfill(ctx: dict) -> None:
@@ -4671,6 +4731,8 @@ class WorkerSettings:
         # é de 7 dias, então 1×/dia basta. 12:35 UTC = 09:35 BRT — o alerta cai
         # no sino em horário de expediente, com tempo de reconectar a conta.
         cron(meta_token_refresh, hour=12, minute=35, run_at_startup=False),
+        # Shopee Vídeo: 1×/dia, 09:50 BRT — longe das grades das 12h/19h.
+        cron(shopee_video_token_refresh, hour=12, minute=50, run_at_startup=False),
         cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
         # Conferência do preço vivo na Amazon depois dos envios da Tabela.
         cron(

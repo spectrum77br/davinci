@@ -280,10 +280,13 @@ export type OrdemGrupos = 'servidor' | 'mes' | 'semana' | 'por_video'
 export const ORDEM_REDES = ['instagram', 'youtube', 'tiktok', 'facebook']
 export const ROTULO_REDE: Record<string, string> = {
   instagram: 'Instagram', youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook',
+  // Shopee Vídeo (08/10/2026): entra nos totais e no cartão do vídeo; coluna
+  // própria nas tabelas fica pra quando houver volume (hoje é 1 loja).
+  shopee: 'Shopee',
 }
 // Sigla do cartão de vídeo no celular, onde "● Instagram" não cabe três vezes.
 export const SIGLA_REDE: Record<string, string> = {
-  instagram: 'IG', youtube: 'YT', tiktok: 'TT', facebook: 'FB',
+  instagram: 'IG', youtube: 'YT', tiktok: 'TT', facebook: 'FB', shopee: 'SH',
 }
 
 /** Cor da rede. É variável CSS (definida na raiz `.desempenho`) pra trocar no modo escuro. */

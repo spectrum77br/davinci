@@ -716,11 +716,15 @@ const nadaPublicado = computed(() => {
   --rede-youtube: #2a78d6;
   --rede-tiktok: #1baf7a;
   --rede-facebook: #4a3aa7;
+  /* Shopee Vídeo: magenta, longe do laranja do Instagram (o laranja da
+     marca Shopee seria confundido com ele no gráfico). */
+  --rede-shopee: #c2185b;
 }
 .dark .desempenho {
   --rede-instagram: #d95926;
   --rede-youtube: #3987e5;
   --rede-tiktok: #199e70;
   --rede-facebook: #9085e9;
+  --rede-shopee: #e0578f;
 }
 </style>

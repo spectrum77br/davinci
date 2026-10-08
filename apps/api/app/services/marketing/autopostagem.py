@@ -51,6 +51,7 @@ from app.models import (
 )
 from app.services.marketing.postagens import (
     BRT,
+    PLATAFORMA_SHOPEE,
     PLATAFORMAS_SUPORTADAS,
     STATUS_OCUPA_CONTA,
     RoboError,
@@ -59,6 +60,10 @@ from app.services.marketing.postagens import (
     agendar,
     motivo_do_arquivo,
 )
+from app.services.marketing.shopee_video_anuncio import (
+    MOTIVOS_DO_VIDEO as MOTIVOS_DO_VIDEO_SHOPEE,
+)
+from app.services.marketing.shopee_video_anuncio import motivo_do_video_na_loja
 
 logger = structlog.get_logger()
 
@@ -231,15 +236,26 @@ async def proximo_criativo(
     filtros = [*_candidatos(rede.marca_id), MarketingCreativeFile.id.notin_(saiu)]
     if excluir:
         filtros.append(MarketingCreativeFile.id.notin_(list(excluir)))
-    linha = (
-        await session.execute(
-            select(MarketingCreative, MarketingCreativeFile)
-            .join(MarketingCreativeFile, MarketingCreativeFile.creative_id == MarketingCreative.id)
-            .where(*filtros)
-            .order_by(*ordem_da_fila())
-            .limit(1)
-        )
-    ).first()
+    stmt = (
+        select(MarketingCreative, MarketingCreativeFile)
+        .join(MarketingCreativeFile, MarketingCreativeFile.creative_id == MarketingCreative.id)
+        .where(*filtros)
+        .order_by(*ordem_da_fila())
+    )
+    if (rede.plataforma or "").strip().lower() == PLATAFORMA_SHOPEE:
+        # Shopee Vídeo: boa parte da fila NÃO serve pra loja (sem anúncio
+        # avulso dela, SKU que cai em dois anúncios, HEVC, abaixo de 720p).
+        # Pular um por rodada esbarraria sempre nos mesmos 5 primeiros
+        # (`MAX_PULOS_POR_CONTA`) e o robô nunca chegaria a um vídeo bom. Aqui
+        # a fila é percorrida em ordem e sai o PRIMEIRO que a loja aceita —
+        # mesma função que o `agendar` roda, então não há dois critérios.
+        for criativo, arquivo in (await session.execute(stmt.limit(200))).all():
+            if motivo_do_arquivo(arquivo):
+                continue
+            if await motivo_do_video_na_loja(session, criativo, arquivo, rede) is None:
+                return criativo, arquivo
+        return None
+    linha = (await session.execute(stmt.limit(1))).first()
     return (linha[0], linha[1]) if linha else None
 
 
@@ -322,6 +338,18 @@ async def fila(
     itens = []
     for criativo, arquivo in linhas:
         pendente = [c for c in contas if (arquivo.id, c.id) not in saiu]
+        # Conta de Shopee Vídeo só "espera" o vídeo que a loja dela aceita
+        # (anúncio avulso com estoque). Sem isto a tela prometeria "ainda não
+        # saiu na Shopee" pra vídeo que nunca vai sair lá. Sem ffprobe aqui:
+        # a tela lista a fila inteira — o formato o robô confere ao escolher.
+        pendente = [
+            c
+            for c in pendente
+            if (c.plataforma or "").strip().lower() != PLATAFORMA_SHOPEE
+            or await motivo_do_video_na_loja(
+                session, criativo, arquivo, c, com_formato=False
+            ) is None
+        ]
         if pendente:
             itens.append(ItemFila(criativo, arquivo, pendente, motivo_do_arquivo(arquivo)))
     return itens
@@ -354,6 +382,9 @@ MOTIVOS_DO_VIDEO = frozenset({
     "sem_legenda",
     "legenda_template_invalido",
     "video_ja_usado_em_outra_marca",
+    # Shopee Vídeo (08/10/2026): sem anúncio na loja, só kit, sem estoque,
+    # SKU ambíguo, duração/resolução/codec, o vídeo já numa outra loja.
+    *MOTIVOS_DO_VIDEO_SHOPEE,
 })
 # Quantos vídeos recusados a rodada pula numa conta antes de desistir dela.
 # Sem teto, uma marca sem legenda cadastrada faria a rodada tentar a fila

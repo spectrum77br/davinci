@@ -40,7 +40,7 @@ aprovação humana, virando biblioteca — que é justamente o que esta tabela �
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -222,6 +222,111 @@ class LegendaResolvida:
 
 
 _NENHUMA = LegendaResolvida(texto=None, origem=ORIGEM_NENHUMA)
+
+
+# ──────────────────────────────────────────────────── legenda da Shopee Vídeo
+
+# Teto da Shopee Vídeo (`edit_video_info` recusa acima: "caption length is
+# more than 150"). Repetido em `shopee_video.LEGENDA_MAX` pelo mesmo motivo do
+# 2200 acima: este módulo não importa os clientes HTTP.
+LEGENDA_MAX_SHOPEE = 150
+
+# Linha de CONTATO fora da plataforma: WhatsApp, link, @ de outra rede,
+# e-mail, telefone. A Shopee não quer o comprador saindo pra fora dela, e os
+# modelos da Uranyx têm "Chama no WhatsApp {{ whatsapp }}" — no Instagram é o
+# certo, na Shopee é o que derruba o vídeo.
+_RE_CONTATO = re.compile(
+    r"whats\s*app|\bzap\b|wa\.me|https?://|www\.|\S+@\S+\.\S+|(?<!\w)@\w"
+    r"|\(?\b\d{2}\)?[\s.-]*9?\d{4}[\s.-]?\d{4}\b",
+    re.IGNORECASE,
+)
+
+
+def _tam_utf16(texto: str) -> int:
+    """Como a Shopee conta: unidades UTF-16 (emoji vale 2)."""
+    return len(texto.encode("utf-16-le")) // 2
+
+
+def _so_hashtags(linha: str) -> bool:
+    palavras = linha.split()
+    return bool(palavras) and all(p.startswith("#") for p in palavras)
+
+
+def _corta_em_palavra(linha: str, limite: int) -> str:
+    """Corta no último espaço que cabe e fecha com "…" — nunca no meio de
+    uma palavra nem de uma #hashtag (a hashtag cortada vira outra)."""
+    reticencias = "…"
+    palavras = linha.split()
+    out = ""
+    for p in palavras:
+        cand = f"{out} {p}" if out else p
+        if _tam_utf16(cand + reticencias) > limite:
+            break
+        out = cand
+    if not out:
+        # Uma "palavra" maior que o teto inteiro (link colado, por exemplo):
+        # não tem espaço onde cortar. Corta por unidade, sem deixar emoji
+        # partido ao meio.
+        for ch in linha:
+            if _tam_utf16(out + ch + reticencias) > limite:
+                break
+            out += ch
+    # Uma #tag sozinha no fim de frase cortada é ruído; pontuação solta também.
+    while out and (out.split()[-1].startswith("#") and " " in out):
+        out = out.rsplit(" ", 1)[0]
+    out = out.rstrip(" ,;:-–—")
+    return f"{out}{reticencias}" if out else ""
+
+
+def para_shopee(texto: str | None, limite: int = LEGENDA_MAX_SHOPEE) -> str | None:
+    """A legenda resolvida → a versão que cabe na Shopee Vídeo (≤ 150).
+
+    Regras (Eduardo, 06/10 e 08/10/2026: "legenda de até 150 caracteres"):
+
+      1. tira as linhas de contato (WhatsApp, link, @, e-mail, telefone);
+      2. separa a(s) linha(s) só de #hashtags;
+      3. soma as linhas INTEIRAS do corpo enquanto couberem;
+      4. completa com #hashtags INTEIRAS enquanto couberem;
+      5. se nem a primeira linha cabe, corta no último espaço com "…".
+
+    Nunca corta palavra nem hashtag no meio. Texto que já cabe e não tem
+    contato sai idêntico — a mesma legenda nas duas redes, quando dá.
+    """
+    if texto is None:
+        return None
+    corpo: list[str] = []
+    tags: list[str] = []
+    for bruta in texto.splitlines():
+        linha = " ".join(bruta.split())
+        if not linha:
+            continue
+        if _so_hashtags(linha):
+            for t in linha.split():
+                if len(t) > 1 and t.lower() not in {x.lower() for x in tags}:
+                    tags.append(t)
+            continue
+        if _RE_CONTATO.search(linha):
+            continue
+        corpo.append(linha)
+
+    out = ""
+    for linha in corpo:
+        cand = f"{out}\n{linha}" if out else linha
+        if _tam_utf16(cand) <= limite:
+            out = cand
+            continue
+        if not out:
+            out = _corta_em_palavra(linha, limite)
+        break
+    primeira_tag = True
+    for t in tags:
+        sep = ("\n" if primeira_tag else " ") if out else ""
+        cand = f"{out}{sep}{t}"
+        if _tam_utf16(cand) > limite:
+            break
+        out = cand
+        primeira_tag = False
+    return out.strip()
 
 
 # ──────────────────────────────────────────────────────── contexto e render
@@ -696,6 +801,17 @@ async def resolver(
         if manual:
             return LegendaResolvida(texto=manual[:LEGENDA_MAX], origem=ORIGEM_MANUAL)
         raise
+    if (rede is not None and (rede.plataforma or "").strip().lower() == "shopee"
+            and da_biblioteca.texto):
+        # Shopee Vídeo: a cascata sai já CURTA (≤ 150, sem contato). Aqui, e
+        # não no `agendar`, porque o `/legendas/resolvida` do modal chama esta
+        # mesma função — a tela mostra byte a byte o que vai pra Shopee. O
+        # texto escrito à mão NÃO é cortado: quem escreveu decide, e o
+        # `agendar` recusa o que passar de 150 (`legenda_longa_shopee`).
+        completo = da_biblioteca.texto
+        da_biblioteca = replace(da_biblioteca, texto=para_shopee(completo) or None)
+        if manual and manual in (completo.strip(), (da_biblioteca.texto or "").strip()):
+            return da_biblioteca
     if manual and manual != da_biblioteca.texto:
         return LegendaResolvida(texto=manual[:LEGENDA_MAX], origem=ORIGEM_MANUAL)
     return da_biblioteca

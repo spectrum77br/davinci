@@ -204,6 +204,17 @@ class RedeSocial(Base, TimestampMixin):
     # mesmo navegador é exatamente o que o AdsPower existe pra evitar.
     # NULL nas contas publicadas por API (Instagram, Facebook, YouTube).
     adspower_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Loja do marketplace que esta conta representa (migration 0383). Só a
+    # Shopee Vídeo usa: o vídeo é publicado DENTRO de uma loja e leva o anúncio
+    # dela junto — é por aqui que o robô acha o anúncio certo (product_links da
+    # integração) e que a autorização da Shopee é conferida (o shop_id que
+    # volta tem de ser o desta loja). Não é token: a credencial do app de vídeo
+    # continua cifrada em `redes_sociais_tokens`, como manda a docstring acima.
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     # ---- resposta automática de DM (migration 0288). Mesmo interruptor por
     # conta que o `postagem_auto`, e pelo mesmo motivo: ligar uma marca de
     # cada vez é toggle de linha, não deploy. Nasce DESLIGADO — responder
@@ -291,6 +302,14 @@ Index(
     RedeSocial.plataforma,
     unique=True,
     postgresql_where=text("conta IS NULL"),
+)
+# Uma conta de Shopee Vídeo por loja (migration 0383): duas contas na mesma
+# loja dobrariam o teto do dia sem ninguém ver.
+Index(
+    "uq_redes_sociais_integration_id",
+    RedeSocial.integration_id,
+    unique=True,
+    postgresql_where=text("integration_id IS NOT NULL"),
 )
 # Nome do padrão único por (marca, contexto) sem caixa — "Resposta SAC" e
 # "resposta sac" são o mesmo padrão.

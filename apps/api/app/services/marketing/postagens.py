@@ -80,11 +80,23 @@ BRT = ZoneInfo("America/Sao_Paulo")
 #      publicar pela Graph API da Meta e quebraria o que hoje funciona.
 PLATAFORMAS_EXECUTOR_LOCAL = ("tiktok",)
 
-PLATAFORMAS_SUPORTADAS = ("instagram", "facebook", "youtube", *PLATAFORMAS_EXECUTOR_LOCAL)
+# `shopee` (Shopee Vídeo) entrou em 08/10/2026: publica o SERVIDOR, pela API
+# oficial (app "DaVinci Videos"), dentro de UMA loja e com o anúncio dela —
+# ver services/marketing/shopee_video*.py. Fica fora do executor local de
+# propósito: assim entra sozinha no lease do worker.
+PLATAFORMA_SHOPEE = "shopee"
+
+PLATAFORMAS_SUPORTADAS = (
+    "instagram", "facebook", "youtube", PLATAFORMA_SHOPEE, *PLATAFORMAS_EXECUTOR_LOCAL,
+)
 
 # Limite da legenda na Meta (mesmo número no schema, que barra antes de
 # chegar aqui — a constante fica nos dois lados por clareza).
 LEGENDA_MAX = 2200
+# Teto da Shopee Vídeo (contado em UTF-16, como lá). A legenda da biblioteca
+# já sai cortada pra ela (`legenda.para_shopee`); a escrita à mão que passar
+# disso é recusada no `agendar` — quem escreveu decide o corte, não o robô.
+LEGENDA_MAX_SHOPEE = legenda_svc.LEGENDA_MAX_SHOPEE
 
 # Postagem que OCUPA a conta pro cálculo de limite/intervalo: as em voo, as
 # publicadas e as em `revisar` — esta última porque "revisar" quer dizer NÃO
@@ -242,6 +254,19 @@ def motivo_da_conta(
     # abrir o errado publica na conta de outra marca.
     if plataforma in PLATAFORMAS_EXECUTOR_LOCAL and not (rede.adspower_user_id or "").strip():
         return "conta_sem_perfil_adspower"
+    if plataforma == PLATAFORMA_SHOPEE:
+        # A conta de Shopee Vídeo é DE UMA loja: sem ela não há anúncio pra
+        # vincular nem como conferir a autorização.
+        if rede.integration_id is None:
+            return "conta_sem_loja"
+        # Aqui o token existe desde que o app (partner) foi digitado — mas só
+        # vale depois que a loja autorizou na Shopee (o user_id volta dela).
+        if not (token.external_user_id or "").strip():
+            return "conta_sem_autorizacao_shopee"
+        # `expirado` na Shopee é a cadeia de refresh morta: diferente da Meta,
+        # nenhum cron conserta — só autorizando de novo.
+        if token.status == "expirado":
+            return "conta_shopee_reautorizar"
     # Interruptor por conta (`redes_sociais.postagem_auto`): vale pro que o
     # ROBÔ faz sozinho (agendamento). O clique manual do operador passa —
     # quem decidiu foi uma pessoa olhando o vídeo.
@@ -409,6 +434,16 @@ async def pode_publicar(
     ).scalar_one()
     if perto:
         return "intervalo_curto"
+    if (rede.plataforma or "").strip().lower() == PLATAFORMA_SHOPEE:
+        # Shopee Vídeo: o vídeo precisa do anúncio DESTA loja (avulso,
+        # dedicado, com estoque) e do formato que a Shopee aceita. Por último
+        # de propósito: são as guardas mais caras (banco + ffprobe), e o que
+        # é da CONTA (teto, intervalo) já respondeu acima.
+        from app.services.marketing.shopee_video_anuncio import motivo_do_video_na_loja
+
+        return await motivo_do_video_na_loja(
+            session, creative, file, rede, excluir_id=excluir_id
+        )
     return None
 
 
@@ -533,6 +568,23 @@ async def agendar(
             # ali tem gente olhando e a tela já avisou.
             if automatico:
                 raise RoboError("sem_legenda")
+        opcoes_da_conta = dict(opcoes or {})
+        if (rede.plataforma or "").strip().lower() == PLATAFORMA_SHOPEE:
+            if legenda_svc._tam_utf16(resolvida.texto or "") > LEGENDA_MAX_SHOPEE:
+                raise RoboError("legenda_longa_shopee")
+            from app.services.marketing.shopee_video_anuncio import anuncio_para
+
+            escolha = await anuncio_para(session, creative, rede)
+            if isinstance(escolha, str):
+                raise RoboError(escolha)
+            # SNAPSHOT do anúncio conferido AGORA: o publicador vincula
+            # exatamente este item (e confere status/estoque de novo, ao vivo,
+            # antes de postar). `aigc_label` sempre ligado: a produção é IA
+            # desde 25/09/2026, e marcar falso em vídeo de IA dá penalidade.
+            opcoes_da_conta = {
+                **opcoes_da_conta,
+                "shopee": {**escolha.snapshot(), "aigc_label": True},
+            }
         criadas.append(
             MarketingPostagem(
                 creative_id=creative.id,
@@ -547,7 +599,7 @@ async def agendar(
                 # Qual variação saiu — é daqui que o rodízio da PRÓXIMA
                 # postagem descobre o que já foi usado nesta conta.
                 legenda_modelo_id=resolvida.modelo_id,
-                opcoes=opcoes or {},
+                opcoes=opcoes_da_conta,
                 agendado_para=quando,
                 status=STATUS_AGENDADO if quando else STATUS_PENDENTE,
                 origem=origem,

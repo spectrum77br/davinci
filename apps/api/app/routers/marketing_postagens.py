@@ -85,6 +85,8 @@ _HTTP_POR_CODE: dict[str, int] = {
     "postagem_precisa_conferir_na_meta": 409,
     "conta_de_outra_marca": 409,
     "criativo_sem_marca": 409,
+    # Shopee Vídeo: o mesmo vídeo já está (ou esteve) em outra loja da marca.
+    "video_ja_na_shopee_em_outra_loja": 409,
 }
 
 
@@ -385,6 +387,13 @@ async def patch_postagem(
         raise HTTPException(409, detail={"code": "postagem_nao_agendada"})
     data = body.model_dump(exclude_unset=True)
     if "legenda" in data:
+        # Shopee Vídeo: até 150 (contado como lá, em UTF-16). Acima disso o
+        # `edit_video_info` recusa a chamada inteira, já com o vídeo enviado.
+        if (
+            p.plataforma == svc.PLATAFORMA_SHOPEE
+            and len((data["legenda"] or "").encode("utf-16-le")) // 2 > svc.LEGENDA_MAX_SHOPEE
+        ):
+            raise _erro(svc.RoboError("legenda_longa_shopee"))
         p.legenda = data["legenda"]
     if "agendado_para" in data:
         quando = svc.para_utc(data["agendado_para"])

@@ -2,10 +2,11 @@
 // Espelham app/models/enums.py (RedeSocialPlataforma, VerificacaoStatus,
 // MarcaEmailTipo, MarcaInpiStatus). Valor novo: acrescentar lá e aqui.
 
-// As 5 redes da planilha do Eduardo, na ordem dela ("seguir bem a planilha").
-export type Plataforma = 'instagram' | 'facebook' | 'twitter' | 'tiktok' | 'youtube'
+// As 5 redes da planilha do Eduardo, na ordem dela ("seguir bem a planilha"),
+// e a Shopee Vídeo no fim (08/10/2026) — a mesma ordem do enum do backend.
+export type Plataforma = 'instagram' | 'facebook' | 'twitter' | 'tiktok' | 'youtube' | 'shopee'
 
-export const PLATAFORMAS: Plataforma[] = ['instagram', 'facebook', 'twitter', 'tiktok', 'youtube']
+export const PLATAFORMAS: Plataforma[] = ['instagram', 'facebook', 'twitter', 'tiktok', 'youtube', 'shopee']
 
 export const PLATAFORMA_LABELS: Record<Plataforma, string> = {
   instagram: 'Instagram',
@@ -13,15 +14,31 @@ export const PLATAFORMA_LABELS: Record<Plataforma, string> = {
   twitter: 'X (Twitter)',
   tiktok: 'TikTok',
   youtube: 'YouTube',
+  shopee: 'Shopee Vídeo',
 }
 
 // Link do perfil a partir do @ — usado como sugestão quando `url` está vazio.
+// Na Shopee a "conta" é o usuário da LOJA (shopee.com.br/<loja>).
 const PERFIL_URL: Record<Plataforma, (conta: string) => string> = {
   instagram: (c) => `https://www.instagram.com/${c}/`,
   facebook: (c) => `https://www.facebook.com/${c}`,
   twitter: (c) => `https://x.com/${c}`,
   tiktok: (c) => `https://www.tiktok.com/@${c}`,
   youtube: (c) => `https://www.youtube.com/@${c}`,
+  shopee: (c) => `https://shopee.com.br/${c}`,
+}
+
+// Plataformas em que o vídeo sai DENTRO de uma loja do marketplace: a conta
+// aponta pra uma integração (loja) e a credencial é o app de vídeo da Shopee
+// + a autorização da loja — não o token colado da Meta.
+export const PLATAFORMAS_DE_LOJA: Plataforma[] = ['shopee']
+
+// Legenda máxima na Shopee Vídeo (contada como lá: unidades UTF-16, emoji = 2).
+export const LEGENDA_MAX_SHOPEE = 150
+
+export function tamanhoShopee(texto: string | null | undefined): number {
+  // `String.length` já conta em unidades UTF-16 — exatamente como a Shopee.
+  return (texto || '').length
 }
 
 export function perfilUrl(plataforma: string, conta: string | null | undefined): string | null {

@@ -537,6 +537,16 @@ type ContaPostagem = {
 // Limite de legenda do Instagram (2200). O Facebook aceita mais, mas o menor
 // dos dois é o que vale pra um texto que vai pros dois.
 const LEGENDA_MAX = 2200
+// Shopee Vídeo (08/10/2026): até 150, contado como lá (unidades UTF-16 — o
+// `String.length` do JS já conta assim, emoji = 2). A legenda da biblioteca
+// sai cortada sozinha pra Shopee; a escrita à mão vai IGUAL pra todas as
+// contas marcadas, então com a Shopee junto ela tem de caber em 150.
+const LEGENDA_MAX_SHOPEE = 150
+
+// O teto que vale pro textarea com estas contas marcadas.
+function legendaMaxPara(plataformas: string[], origem: string): number {
+  return origem === 'manual' && plataformas.includes('shopee') ? LEGENDA_MAX_SHOPEE : LEGENDA_MAX
+}
 
 // De onde saiu o texto que está no textarea (cascata do backend:
 // postagem → criativo → produto → marca → nada). Traduzido aqui porque o
@@ -571,14 +581,14 @@ function normalizaLegenda(resp: any): LegendaResolvida {
 // Rótulo discreto acima do textarea: "padrão da marca · variação 2 de 4 ·
 // 412/2200". É o único contador da caixa — o operador precisa saber de onde
 // veio aquele texto ANTES de decidir editar.
-function legendaRotulo(o: { origem: string; total: number; indice: number; tamanho: number }): string {
+function legendaRotulo(o: { origem: string; total: number; indice: number; tamanho: number; max?: number }): string {
   const partes: string[] = []
   const org = (o.origem || '').trim()
   if (org) partes.push(LEGENDA_ORIGEM_LABEL[org] || org)
   // "variação 1 de 1" é ruído: o rodízio só interessa quando há mais de um
   // texto disputando a vez naquela conta.
   if (o.total > 1 && o.indice >= 1) partes.push(`variação ${o.indice} de ${o.total}`)
-  partes.push(`${o.tamanho}/${LEGENDA_MAX}`)
+  partes.push(`${o.tamanho}/${o.max ?? LEGENDA_MAX}`)
   return partes.join(' · ')
 }
 
@@ -703,6 +713,21 @@ const CONTA_MOTIVO_PT: Record<string, string> = {
   sem_conta: 'linha sem @ cadastrado',
   limite_diario: 'limite de posts do dia já batido',
   intervalo_curto: 'postou faz pouco — espere o intervalo',
+  // Shopee Vídeo (08/10/2026)
+  conta_sem_loja: 'conta sem loja Shopee — escolha em Cadastros › Redes Sociais',
+  conta_sem_autorizacao_shopee: 'loja ainda não autorizou o app de vídeo — autorize em Cadastros › Redes Sociais',
+  conta_shopee_reautorizar: 'autorização da Shopee vencida — autorize de novo',
+  sem_anuncio_na_loja: 'sem anúncio desse aparelho nesta loja',
+  anuncio_so_em_kit: 'nesta loja o aparelho só está em kit',
+  anuncio_sem_estoque: 'anúncio desta loja sem estoque',
+  sku_ambiguo: 'SKU do vídeo cai em mais de um anúncio',
+  criativo_sem_sku: 'vídeo sem SKU — não dá pra achar o anúncio',
+  video_fora_da_duracao: 'na Shopee o vídeo tem de ter de 3 a 60 s',
+  video_resolucao_baixa: 'na Shopee o vídeo tem de ter 720p ou mais',
+  video_formato_nao_aceito: 'na Shopee o vídeo tem de ser H.264',
+  video_ilegivel: 'não deu pra ler o vídeo (duração/formato)',
+  video_grande_demais: 'vídeo acima de 1 GB',
+  video_ja_na_shopee_em_outra_loja: 'esse vídeo já está em outra loja Shopee da marca',
 }
 
 function motivoConta(motivo: string | null | undefined): string {
@@ -897,6 +922,22 @@ const POSTAGEM_ERROS: Record<string, string> = {
   conta_de_outra_marca: 'Essa conta é de outra marca — só dá pra publicar nas contas da marca do criativo.',
   agendamento_longe_demais: 'Data muito à frente — confira o ano/mês escolhido.',
   agendamento_no_passado: 'Essa data já passou — escolha um horário à frente.',
+  // Shopee Vídeo (08/10/2026)
+  legenda_longa_shopee: 'Na Shopee a legenda vai até 150 caracteres — encurte o texto (ele vai igual pra todas as contas marcadas).',
+  conta_sem_loja: 'A conta da Shopee não tem loja — escolha em Cadastros › Redes Sociais.',
+  conta_sem_autorizacao_shopee: 'A loja ainda não autorizou o app de vídeo da Shopee — autorize em Cadastros › Redes Sociais.',
+  conta_shopee_reautorizar: 'A autorização da Shopee venceu — autorize de novo em Cadastros › Redes Sociais.',
+  sem_anuncio_na_loja: 'A loja não tem anúncio avulso desse aparelho — o vídeo não sai nela.',
+  anuncio_so_em_kit: 'Nessa loja o aparelho só está em anúncio de kit — vídeo de aparelho sozinho não vai em kit.',
+  anuncio_sem_estoque: 'O anúncio desse aparelho na loja está sem estoque.',
+  sku_ambiguo: 'O SKU do vídeo cai em mais de um anúncio — deixe só o SKU do aparelho que aparece no vídeo.',
+  criativo_sem_sku: 'O vídeo não tem SKU — preencha o SKU da linha pra achar o anúncio.',
+  video_fora_da_duracao: 'Na Shopee o vídeo tem de ter de 3 a 60 segundos.',
+  video_resolucao_baixa: 'Na Shopee o vídeo tem de ter 720p ou mais.',
+  video_formato_nao_aceito: 'Na Shopee o vídeo tem de ser H.264 (este é outro codec).',
+  video_ilegivel: 'Não deu pra ler a duração/formato do vídeo.',
+  video_grande_demais: 'O vídeo passa de 1 GB.',
+  video_ja_na_shopee_em_outra_loja: 'Esse vídeo já está (ou esteve) em outra loja Shopee da marca — uma loja por vídeo.',
 }
 const POSTAGEM_ERR_MAP: Record<string, string> = { ...MARCAS_ERROS, ...POSTAGEM_ERROS }
 
@@ -1205,6 +1246,14 @@ const pubMarcaNome = computed(() => {
 })
 const pubContasSel = computed(() => pubContas.value.filter((c) => pubSel.value.includes(c.id)))
 const pubTemInstagram = computed(() => pubContasSel.value.some((c) => c.plataforma === 'instagram'))
+// Shopee Vídeo: o teto da legenda escrita à mão cai pra 150 com ela marcada.
+const pubTemShopee = computed(() => pubContasSel.value.some((c) => c.plataforma === 'shopee'))
+const pubLegendaMax = computed(() =>
+  legendaMaxPara(pubContasSel.value.map((c) => c.plataforma), pubLegendaOrigem.value),
+)
+// A versão CURTA que a Shopee recebe quando o texto vem da biblioteca e a
+// primeira conta marcada é outra (o textarea mostra a dela). Só aviso.
+const pubLegendaShopee = ref('')
 
 // Quem manda no aviso é o TEXTO, não a origem: apagar à mão a legenda que veio
 // do padrão da marca deixa o post tão mudo quanto não ter achado modelo nenhum.
@@ -1214,6 +1263,7 @@ const pubLegendaRotulo = computed(() => legendaRotulo({
   total: pubLegendaTotal.value,
   indice: pubLegendaIndice.value,
   tamanho: pubLegenda.value.length,
+  max: pubLegendaMax.value,
 }))
 
 // A marca do criativo: `marca_id` quando o backend manda; senão casa o texto
@@ -1268,6 +1318,7 @@ function closePublicar() {
   pubLegendaIndice.value = 0
   pubLegendaLoading.value = false
   pubLegendaErro.value = false
+  pubLegendaShopee.value = ''
   pubErr.value = ''
 }
 
@@ -1356,6 +1407,20 @@ async function carregaLegenda() {
     pubLegendaOrigem.value = l.origem
     pubLegendaTotal.value = l.total
     pubLegendaIndice.value = l.indice
+    // Shopee marcada, mas não como primeira: mostra também a versão curta
+    // que vai pra ela (o backend corta a da biblioteca pra 150).
+    pubLegendaShopee.value = ''
+    const shopee = pubContasSel.value.find((c) => c.plataforma === 'shopee')
+    if (shopee && shopee.id !== conta) {
+      const qs = new URLSearchParams(q)
+      qs.set('rede_social_id', shopee.id)
+      try {
+        const curta = normalizaLegenda(await api<any>(`/api/marketing/legendas/resolvida?${qs.toString()}`))
+        if (seq === legendaSeq && pub.value === r) pubLegendaShopee.value = curta.texto
+      } catch {
+        // Só o aviso fica sem a prévia — a legenda principal já está no campo.
+      }
+    }
   } catch {
     if (seq !== legendaSeq || pub.value !== r) return
     // 404 (backend antigo, sem o endpoint) ou 403 (sem permissão): textarea
@@ -1398,8 +1463,10 @@ async function salvarPostagem() {
     pubErr.value = 'Marque pelo menos uma conta.'
     return
   }
-  if (pubLegenda.value.length > LEGENDA_MAX) {
-    pubErr.value = `A legenda passa de ${LEGENDA_MAX} caracteres.`
+  if (pubLegenda.value.length > pubLegendaMax.value) {
+    pubErr.value = pubLegendaMax.value === LEGENDA_MAX_SHOPEE
+      ? `Com a Shopee marcada, a legenda escrita à mão vai até ${LEGENDA_MAX_SHOPEE} caracteres (ela vai igual pra todas as contas).`
+      : `A legenda passa de ${LEGENDA_MAX} caracteres.`
     return
   }
   if (pubQuando.value === 'agendar' && !brtParaIso(pubDataHora.value)) {
@@ -2591,13 +2658,13 @@ function filaDropClass(i: number): string {
               <Loader2 v-if="pubLegendaLoading" class="size-3 shrink-0 animate-spin text-muted-foreground" />
               <span
                 class="ml-auto truncate font-normal"
-                :class="pubLegenda.length > LEGENDA_MAX ? 'text-destructive' : 'text-muted-foreground'"
+                :class="pubLegenda.length > pubLegendaMax ? 'text-destructive' : 'text-muted-foreground'"
               >{{ pubLegendaRotulo }}</span>
             </div>
             <textarea
               :value="pubLegenda"
               rows="5"
-              :maxlength="LEGENDA_MAX"
+              :maxlength="pubLegendaMax"
               class="w-full rounded-md border bg-background px-2 py-1.5 text-xs leading-snug outline-none focus:ring-2 focus:ring-ring"
               placeholder="Texto que vai junto do post…"
               @input="onLegendaInput"
@@ -2620,6 +2687,16 @@ function filaDropClass(i: number): string {
             <p v-if="pubLegendaErro" class="mt-1 text-[11px] text-muted-foreground">
               Não deu pra consultar a legenda padrão (servidor desatualizado ou sem permissão) —
               escreva a legenda à mão.
+            </p>
+            <!-- Shopee Vídeo: a biblioteca sai curta (até 150, sem WhatsApp) só nela. -->
+            <p v-if="pubTemShopee && pubLegendaOrigem !== 'manual'" class="mt-1 text-[11px] text-muted-foreground">
+              Na Shopee sai a versão curta (até {{ LEGENDA_MAX_SHOPEE }} caracteres, sem WhatsApp/@/link), com o
+              selo de conteúdo feito por IA e o anúncio avulso do aparelho na loja<template v-if="pubLegendaShopee">:
+                <span class="whitespace-pre-line text-foreground">«{{ pubLegendaShopee }}»</span></template>.
+            </p>
+            <p v-else-if="pubTemShopee" class="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+              Com a Shopee marcada, o texto escrito à mão vai igual pra todas as contas — até
+              {{ LEGENDA_MAX_SHOPEE }} caracteres.
             </p>
           </div>
 
