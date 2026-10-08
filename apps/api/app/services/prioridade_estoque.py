@@ -1247,7 +1247,7 @@ async def aplicar_prioridade_estoque(
 ) -> dict:
     """`_aplicar_prioridade_estoque` com o local de saída do Flex (o lote para
     onde o pedido Flex vai) relido e FIXADO na rodada inteira."""
-    local = await flex_local.carregar()
+    local = await flex_local.carregar(forcar=True)
     with flex_local.fixar(local):
         return await _aplicar_prioridade_estoque(session, numeros)
 

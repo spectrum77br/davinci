@@ -108,6 +108,11 @@ def _guardar(local: LocalFlex) -> LocalFlex:
     return local
 
 
+def local_da_linha(linha: FlexLocal | None) -> LocalFlex:
+    """O local de uma linha já lida (o router lê com a trava da linha)."""
+    return _da_linha(linha)
+
+
 def _da_linha(linha: FlexLocal | None) -> LocalFlex:
     if linha is None:
         return _PADRAO
@@ -177,7 +182,10 @@ def origem_ok(origem_cidade: str | None, local: LocalFlex | None = None) -> bool
 async def salvar(session: AsyncSession, *, cidade: str, lote: str, por: UUID | None) -> LocalFlex:
     """Troca o local (quem pode é conferido no router). Valida e grava na
     sessão de quem chama; o cache só troca com `usar` depois do commit."""
-    nome = " ".join("".join(c for c in (cidade or "") if c.isprintable()).split())
+    # Espaço especial (NBSP do texto copiado do ML, Option+Espaço, TAB) e
+    # caractere de controle viram espaço — nunca grudam as palavras.
+    limpo = "".join(c if c.isprintable() and not c.isspace() else " " for c in (cidade or ""))
+    nome = " ".join(limpo.split())
     if not nome:
         raise LocalFlexInvalidoError("cidade_vazia", "informe a cidade de onde o motoboy sai")
     if "," in nome or ";" in nome:

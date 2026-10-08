@@ -1367,7 +1367,9 @@ async def _conferir_contas(
                             c.origem_lida_em = agora if r.origem_cidade else None
                         c.lido_em = agora
                         c.erro = None
-                        if relidas is not None:
+                        # "in" sem `origin`: a assinatura respondeu, mas a
+                        # origem não foi confirmada — não libera o LIGAR.
+                        if relidas is not None and not r.origem_ausente:
                             relidas.add(iid)
                     c.atualizado_em = agora
                     out[iid] = replace(conta_flex_da_linha(c), plataforma=out[iid].plataforma)

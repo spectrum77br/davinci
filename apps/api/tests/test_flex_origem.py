@@ -735,7 +735,7 @@ async def test_deteccao_grava_o_lote_e_nao_troca_o_do_pedido_antigo(db, mundo):
             item_index=0,
             item_codigo="dg053.sp",
             item_quantidade=1,
-            situacao="6",
+            situacao="15",
             data=datetime.now(UTC),
         )
     )
@@ -753,7 +753,7 @@ async def test_deteccao_grava_o_lote_e_nao_troca_o_do_pedido_antigo(db, mundo):
     await db.commit()
     linha = await db.get(flex_motor.FlexPedido, 907001)
     assert (linha.lote, linha.no_sp) == ("sp", True)
-    # O local muda para .pi: o pedido já detectado fica com o .sp dele.
+    # O pedido já SAIU (15) e o local muda para .pi: ele fica com o .sp dele.
     await flex_local.salvar(db, cidade="Piracicaba", lote="pi", por=None)
     await db.commit()
     flex_local.limpar_cache()
@@ -762,3 +762,105 @@ async def test_deteccao_grava_o_lote_e_nao_troca_o_do_pedido_antigo(db, mundo):
     db.expire_all()
     linha = await db.get(flex_motor.FlexPedido, 907001)
     assert (linha.lote, linha.no_sp) == ("sp", True)
+
+
+@pytest.mark.asyncio
+async def test_pedido_aberto_acompanha_o_local_e_o_que_saiu_nao(db, mundo):
+    """Com o robô do pedido desligado (padrão), a detecção mantém o lote do
+    pedido que já saiu e passa o pedido ainda em aberto para o lote do local
+    de agora (achado da 3ª conferência, 08/10/2026)."""
+    from app.models import BlingOrder
+
+    for bid, sit in ((908001, "6"), (908002, "15")):
+        db.add(
+            BlingOrder(
+                numero=str(bid),
+                bling_id=bid,
+                loja="1",
+                item_index=0,
+                item_codigo="dg053.ci",
+                item_quantidade=1,
+                situacao=sit,
+                data=datetime.now(UTC),
+            )
+        )
+    await db.commit()
+    lidos = [
+        flex_envio.EnvioLido(
+            bling_id=b,
+            plataforma="ml",
+            integration_id=None,
+            numero=str(b),
+            numeroloja=str(b),
+            envio_tipo="self_service",
+            envio_flex=True,
+        )
+        for b in (908001, 908002)
+    ]
+    await flex_envio.registrar_pedidos_flex(db, lidos)
+    await db.commit()
+    await flex_local.salvar(db, cidade="Piracicaba", lote="pi", por=None)
+    await db.commit()
+    flex_local.limpar_cache()
+    await flex_envio.registrar_pedidos_flex(db, lidos)
+    await db.commit()
+    db.expire_all()
+    aberto = await db.get(flex_motor.FlexPedido, 908001)
+    saiu = await db.get(flex_motor.FlexPedido, 908002)
+    assert (aberto.lote, saiu.lote) == ("pi", "sp")
+
+
+@pytest.mark.asyncio
+async def test_in_sem_origin_nao_libera_o_ligar(db, mundo, monkeypatch):
+    """A releitura antes de ligar responde "in" sem `origin`: a origem não foi
+    confirmada — a aprovação espera."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()
+    ml.assinatura = AssinaturaFlex(True, "in", "assinatura do Flex ativa", origem_ausente=True)
+    ml.chamadas.clear()
+    res = await flex_motor.aprovar(mundo["conta_id"], "MLB1", por=mundo["dono_id"])
+    assert res["aplicado"] is False
+    assert ("ligar", "MLB1") not in ml.escritas
+    assert (await _estados(db))["MLB1"].aprovado_em is not None  # a aprovação fica
+
+
+def test_cidade_com_espaco_especial_nao_gruda():
+    import asyncio
+
+    class _S:
+        def add(self, *_a):
+            pass
+
+        async def get(self, *_a, **_k):
+            return None
+
+        async def flush(self):
+            pass
+
+    novo = asyncio.run(
+        flex_local.salvar(_S(), cidade="São Bernardo do\tCampo", lote="sp", por=None)
+    )
+    assert novo.cidade == "São Bernardo do Campo"
+
+
+@pytest.mark.asyncio
+async def test_config_conta_com_origem_vencida_aparece_parada(
+    client: AsyncClient, db: AsyncSession, cena, auth_as: Callable
+):
+    db.add(
+        FlexConta(
+            integration_id=cena["conta_id"],
+            plataforma="ml",
+            flex_ativo=True,
+            status="in",
+            lido_em=datetime.now(UTC),
+            origem_lida_em=datetime.now(UTC) - timedelta(hours=7),
+            origem_cep=ORIGEM_SB,
+            origem_cidade="São Bernardo do Campo",
+        )
+    )
+    await db.commit()
+    auth_as(cena["admin"])
+    c = await _conta_out(client, cena["conta_id"])
+    assert (c["flex_origem_ok"], c["flex_motivo"]) == (False, flex_motor.MOTIVO_SEM_ORIGEM)

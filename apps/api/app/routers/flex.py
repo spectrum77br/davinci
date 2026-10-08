@@ -57,6 +57,7 @@ from app.models import (
     FlexAnuncioEstado,
     FlexConta,
     FlexEmergencia,
+    FlexLocal,
     FlexLog,
     FlexPedido,
     Integration,
@@ -172,7 +173,10 @@ async def trocar_local(body: FlexLocalIn, session: Sessao, user: Agir) -> FlexLo
             status.HTTP_403_FORBIDDEN,
             detail={"code": "so_admin", "detalhe": "só um admin troca o local de saída do Flex"},
         )
-    atual = await flex_local.carregar(forcar=True)
+    # Trava a linha do local antes de comparar: dois PUTs ao mesmo tempo com o
+    # mesmo "antes" — o segundo espera o primeiro e recebe o 409.
+    linha = await session.get(FlexLocal, 1, with_for_update=True)
+    atual = flex_local.local_da_linha(linha)
     if body.cidade_antes is not None and (
         body.cidade_antes != atual.cidade or (body.lote_antes or "") != atual.lote
     ):
@@ -258,8 +262,8 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
             # cidade do local / não lida: a frase que os anúncios dela mostram.
             motivo = flex_motor.bloqueio_da_conta(c.plataforma, conta_flex)
         origem_ok = (
-            flex_local.origem_ok(c.origem_cidade)
-            if c is not None and c.plataforma == "ml" and c.flex_ativo
+            flex_motor.bloqueio_da_origem(conta_flex) is None
+            if conta_flex is not None and c.plataforma == "ml" and c.flex_ativo
             else None
         )
         contas.append(
@@ -946,7 +950,9 @@ async def acertado(bling_id: int, session: Sessao, user: Agir) -> FlexAcertoOut:
             status.HTTP_409_CONFLICT,
             detail={
                 "code": "sem_acerto_pendente",
-                "detalhe": "o pedido não saiu sem passar pelo .sp (ou já foi acertado)",
+                "detalhe": (
+                    f"o pedido não saiu sem passar pelo .{fp.lote or 'sp'} (ou já foi acertado)"
+                ),
             },
         )
     agora = datetime.now(UTC)
@@ -962,7 +968,10 @@ async def acertado(bling_id: int, session: Sessao, user: Agir) -> FlexAcertoOut:
             acao="acertar_estoque",
             modo=flex_config.modo(),
             resultado="ok",
-            motivo="estoque do pedido Flex acertado no Bling (saiu sem passar pelo .sp)",
+            motivo=(
+                "estoque do pedido Flex acertado no Bling "
+                f"(saiu sem passar pelo .{fp.lote or 'sp'})"
+            ),
             por=user.id,
         )
     )

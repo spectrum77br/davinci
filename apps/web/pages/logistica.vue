@@ -488,7 +488,7 @@ async function carregarResumoFlex() {
   if (!flexMontado || !podeVerFlex.value || !['ml', 'shopee', 'flex'].includes(tab.value)) return
   try {
     const [pedidos, anuncios] = await Promise.all([
-      api<Array<{ numero: string | null; alerta: string | null; acerto_pendente?: boolean }>>(
+      api<Array<{ numero: string | null; alerta: string | null; acerto_pendente?: boolean; lote?: string }>>(
         '/api/flex/pedidos?so_alerta=true&abertos=true',
       ),
       tab.value === 'flex'
@@ -500,8 +500,8 @@ async function carregarResumoFlex() {
       if (!p.numero) continue
       if (p.acerto_pendente)
         mapa[p.numero] =
-          `Saiu de ${flexLocal.value.cidade} sem passar pelo .${flexLocal.value.lote}: o Bling baixou outro lote. ` +
-          `Acerte o estoque no Bling (transferência para o .${flexLocal.value.lote}) e marque em Flex › Anúncios Flex.`
+          `Saiu pelo Flex sem passar pelo .${p.lote || flexLocal.value.lote}: o Bling baixou outro lote. ` +
+          `Acerte o estoque no Bling (transferência para o .${p.lote || flexLocal.value.lote}) e marque em Flex › Anúncios Flex.`
       else if (p.alerta) mapa[p.numero] = p.alerta
     }
     flexAlertas.value = mapa

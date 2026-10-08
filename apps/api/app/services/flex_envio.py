@@ -47,6 +47,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import BlingOrder, FlexPedido, Logistica
 from app.services import flex_local, logistica_rules
+from app.services.bling_situacoes import (
+    SITUACAO_ATENDIDO,
+    SITUACAO_CANCELADO,
+    SITUACAO_EM_ANDAMENTO,
+)
 from app.services.estoque_familia import lote_de
 
 logger = structlog.get_logger()
@@ -218,6 +223,16 @@ class EnvioLido:
     prazo: datetime | None = None
 
 
+# Pedido que já saiu do estoque (em andamento/atendido) ou acabou (cancelado/
+# excluído): o lote dele não muda mais com a troca do local de saída.
+SITUACOES_JA_SAIU = (
+    str(SITUACAO_EM_ANDAMENTO),
+    str(SITUACAO_ATENDIDO),
+    str(SITUACAO_CANCELADO),
+    "excluido",
+)
+
+
 def item_no_sp(codigo: str | None, lote: str | None = None) -> bool:
     """O item já sai do lote do Flex (o do local de saída da aba Flex — .sp de
     fábrica)? Todos os pedaços com lote são esse (kit `dg053.sp+a001` também
@@ -282,6 +297,19 @@ async def registrar_pedidos_flex(session: AsyncSession, lidos: Iterable[EnvioLid
     # de uma troca de local fica com o seu) ou o do local de agora.
     agora_lote = (await flex_local.carregar()).lote
     lotes = dict.fromkeys(flex, agora_lote)
+    # O pedido que JÁ SAIU fica com o lote gravado (o acerto dele é desse
+    # estoque); o que ainda está em aberto sai do local de AGORA — acompanha
+    # a troca do local, mesmo com o robô do pedido desligado.
+    situacao = {
+        int(bid): str(sit or "")
+        for bid, sit in (
+            await session.execute(
+                select(BlingOrder.bling_id, func.max(BlingOrder.situacao))
+                .where(BlingOrder.bling_id.in_(list(flex)))
+                .group_by(BlingOrder.bling_id)
+            )
+        ).all()
+    }
     for bid, lote in (
         await session.execute(
             select(FlexPedido.bling_id, FlexPedido.lote).where(
@@ -289,7 +317,8 @@ async def registrar_pedidos_flex(session: AsyncSession, lidos: Iterable[EnvioLid
             )
         )
     ).all():
-        lotes[int(bid)] = lote or agora_lote
+        if situacao.get(int(bid), "") in SITUACOES_JA_SAIU:
+            lotes[int(bid)] = lote or agora_lote
     no_sp = await _no_sp_por_pedido(session, flex.keys(), lotes)
     valores = [
         {
@@ -309,6 +338,7 @@ async def registrar_pedidos_flex(session: AsyncSession, lidos: Iterable[EnvioLid
     # Leitura que veio sem um campo (ex.: o ML só lê o prazo uma vez) não
     # apaga o que já estava gravado.
     mudar = {
+        "lote": novo.lote,
         "plataforma": novo.plataforma,
         "integration_id": func.coalesce(novo.integration_id, FlexPedido.integration_id),
         "numeroloja": func.coalesce(novo.numeroloja, FlexPedido.numeroloja),
