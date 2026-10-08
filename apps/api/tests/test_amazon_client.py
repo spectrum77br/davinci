@@ -349,3 +349,16 @@ async def test_get_buyer_cancel_sem_pedido_e_sem_resposta():
         assert await client.get_buyer_cancel("A") == {"pedido": False, "motivo": None}
         # Sem resposta = None (o chamador mantém o que já sabia).
         assert await client.get_buyer_cancel("B") is None
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_rejects_response_for_a_different_order():
+    client = AmazonClient(_amz_creds())
+    with respx.mock(base_url=SP_API_BASE_NA) as router:
+        router.get("/orders/v0/orders/701-3967231-6921832").mock(
+            return_value=httpx.Response(200, json={"payload": {
+                "AmazonOrderId": "701-9999999-9999999",
+                "OrderStatus": "Shipped", "FulfillmentChannel": "MFN",
+            }})
+        )
+        assert await client.get_order_status("701-3967231-6921832") is None

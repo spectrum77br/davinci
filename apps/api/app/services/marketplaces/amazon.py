@@ -197,6 +197,11 @@ class AmazonClient:
         body = r.json() or {}
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
         payload = payload or {}
+        # A returned order identity must agree with the requested order.
+        # Never promote a different package after a malformed/cached response.
+        returned_order_id = payload.get("AmazonOrderId")
+        if returned_order_id is not None and str(returned_order_id) != str(order_id):
+            return None
         status = payload.get("OrderStatus")
         if not status:
             return None

@@ -54,6 +54,11 @@ from app.services.amazon_shipment_status import (
     AMAZON_SHIPPED,
     amazon_shipment_confirmed,
 )
+from app.services.amazon_shipment_sync import (
+    AmazonShipmentConfirmation,
+    apply_amazon_shipment,
+    load_amazon_correios_confirmations,
+)
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 from app.services.magalu_shipment_status import MagaluShipmentStatus, get_magalu_shipment_status
 from app.services.magalu_shipment_sync import apply_magalu_shipment
@@ -424,12 +429,14 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
 
             deadlines: dict[int, datetime] = {}
             magalu_confirmations: dict[int, MagaluShipmentStatus] = {}
+            amazon_confirmations: dict[int, AmazonShipmentConfirmation] = {}
             query_errors: list[str] = []
             envios: dict[int, dict[str, Any]] = {}
             try:
                 shipped_bling_ids = await _check_marketplace_shipped(
                     session, integration, orders, deadlines,
                     magalu_confirmations=magalu_confirmations,
+                    amazon_confirmations=amazon_confirmations,
                     query_errors=query_errors,
                     envios=envios,
                 )
@@ -486,6 +493,32 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                     session, bling_integration, persist_in_session=False,
                 )
             for bling_id, real_ship_date in shipped_bling_ids.items():
+                if integration.platform == IntegrationPlatform.AMAZON:
+                    confirmation = amazon_confirmations.get(bling_id)
+                    candidate = cand_by_id.get(bling_id)
+                    if confirmation is None or candidate is None:
+                        continue
+                    try:
+                        async with session.begin_nested():
+                            applied = await apply_amazon_shipment(
+                                session, bling_client, candidate, confirmation,
+                            )
+                        summary["bling_updated"] += int(applied.bling_updated)
+                        summary["local_updated"] += applied.local_updated
+                        summary["errors"] += int(applied.error)
+                        logger.info(
+                            "shipment_check_amazon_apply", bling_id=bling_id,
+                            result=applied.reason, local_updated=applied.local_updated,
+                        )
+                        if applied.local_updated:
+                            await _enfileirar_financeiro_amazon(int(bling_id))
+                    except Exception as exc:
+                        summary["errors"] += 1
+                        logger.warning(
+                            "shipment_check_amazon_apply_failed", bling_id=bling_id,
+                            error_type=type(exc).__name__,
+                        )
+                    continue
                 if integration.platform == IntegrationPlatform.MAGALU:
                     confirmation = magalu_confirmations.get(bling_id)
                     candidate = cand_by_id.get(bling_id)
@@ -832,6 +865,7 @@ async def _check_marketplace_shipped(
     deadlines: dict[int, datetime] | None = None,
     *,
     magalu_confirmations: dict[int, MagaluShipmentStatus] | None = None,
+    amazon_confirmations: dict[int, AmazonShipmentConfirmation] | None = None,
     query_errors: list[str] | None = None,
     envios: dict[int, dict[str, Any]] | None = None,
 ) -> dict[int, date | None]:
@@ -997,9 +1031,14 @@ async def _check_marketplace_shipped(
         client = AmazonClient(creds, on_token_refresh=_persist)
         sem = asyncio.Semaphore(_PER_ORDER_CONCURRENCY)
 
+        own_shipping_orders: dict[int, BlingOrder] = {}
+
         async def _one_amazon(o: BlingOrder) -> tuple[int, date | None] | None:
             async with sem:
-                return await _amazon_shipped_for(client, o, deadlines)
+                return await _amazon_shipped_for(
+                    client, o, deadlines, own_shipping_orders=own_shipping_orders,
+                    amazon_confirmations=amazon_confirmations,
+                )
 
         targets = [o for o in orders if o.numeroloja and o.bling_id]
         results = await asyncio.gather(
@@ -1009,7 +1048,20 @@ async def _check_marketplace_shipped(
             if isinstance(res, BaseException) or res is None:
                 continue
             shipped[res[0]] = res[1]
-        logger.info("shipment_check_amazon", orders=len(orders), shipped=len(shipped))
+        # All SP-API tasks have finished before reusing the session. Only
+        # explicit seller-fulfilled Shipped orders with no EasyShip enter the
+        # physical Correios fallback; native Amazon confirmations are unchanged.
+        correios = await load_amazon_correios_confirmations(
+            session, list(own_shipping_orders.values()),
+        )
+        for bid, confirmation in correios.items():
+            shipped[bid] = confirmation.shipped_at.astimezone(_BRT).date()
+            if amazon_confirmations is not None:
+                amazon_confirmations[bid] = confirmation
+        logger.info(
+            "shipment_check_amazon", orders=len(orders), shipped=len(shipped),
+            correios=len(correios),
+        )
 
     else:
         logger.info(
@@ -1193,6 +1245,9 @@ async def _amazon_shipped_for(
     client: AmazonClient,
     o: BlingOrder,
     deadlines: dict[int, datetime] | None = None,
+    *,
+    own_shipping_orders: dict[int, BlingOrder] | None = None,
+    amazon_confirmations: dict[int, AmazonShipmentConfirmation] | None = None,
 ) -> tuple[int, date | None] | None:
     """`(bling_id, data_envio)` quando a Amazon confirma que o pacote saiu.
 
@@ -1203,6 +1258,8 @@ async def _amazon_shipped_for(
     "PendingDropOff" (esperando NÓS levarmos ao ponto) contam como não
     enviado, e estado desconhecido também. Sem EasyShip, só AFN explícito
     (expedição pela Amazon/FBA) permite confirmar pelo `order_status`.
+    MFN + Shipped sem EasyShip apenas entra na fila de verificação física
+    dos Correios; esse método nunca confirma esse caso sozinho.
     """
     try:
         result = await client.get_order_status(str(o.numeroloja))
@@ -1221,5 +1278,17 @@ async def _amazon_shipped_for(
         if dl is not None:
             deadlines[int(o.bling_id)] = dl
     if not amazon_shipment_confirmed(result):
+        if (
+            own_shipping_orders is not None
+            and str(result.get("order_status") or "").strip() == "Shipped"
+            and str(result.get("fulfillment_channel") or "").strip() == "MFN"
+            and not str(result.get("easyship_status") or "").strip()
+        ):
+            own_shipping_orders[int(o.bling_id)] = o
         return None
+    shipped_at = _iso_to_utc_dt(result.get("last_update_date"))
+    if shipped_at is not None and shipped_at > datetime.now(UTC):
+        return None
+    if amazon_confirmations is not None:
+        amazon_confirmations[int(o.bling_id)] = AmazonShipmentConfirmation(shipped_at=shipped_at)
     return int(o.bling_id), _iso_to_brt_date(result.get("last_update_date"))
