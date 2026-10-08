@@ -514,7 +514,7 @@ watch(selecionada, (id) => {
       :link="aba === 'caixa'"
       @abrir-lojas="aba = 'lojas'"
     />
-    <!-- A plataforma (08/10/2026: "ver só Mercado Livre, só Shopee"): chips com o "falta responder" de cada uma, à vista acima da Caixa -->
+    <!-- A plataforma (08/10/2026: "ver só Mercado Livre, só Shopee"): um botão que abre o menu com a logo e o "falta responder" de cada uma, acima da Caixa -->
     <AtendimentoFiltroPlataforma v-if="aba === 'caixa'" v-model:filtros="filtros" :resumo="resumo" />
     </div>
 

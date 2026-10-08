@@ -13,6 +13,14 @@
 // responder, Filtrar, busca) e fica lembrado no navegador (a página guarda
 // `filtros.plataforma`). "Redes" é um GRUPO: `instagram,facebook` — a API da
 // lista aceita várias plataformas separadas por vírgula.
+// MENU, NÃO FILEIRA (08/10/2026, Eduardo: "ficou muita informação desse
+// jeito, prefiro igual ao Duoke: clica e escolhe qual queremos — mas com o
+// número de mensagens e a logo igual no nosso"): um botão só ("Plataforma:
+// Todas 99+ ▾", ou a plataforma escolhida com a logo e o número) que abre a
+// lista — Todas e cada plataforma com a logo e o "falta responder". Mesmo
+// jeito do menu "Filtrar" da lista (clique fora ou Esc fecha). Escolher no
+// menu a plataforma que já está inteira só fecha (é escolha, não liga/desliga);
+// com uma loja dela escolhida na barra, mostra todas as lojas dela.
 // Funções puras aqui em cima (testadas em tests/atendimento-filtro-plataforma.cjs).
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import type { Resumo } from '~/components/AtendimentoPlataforma.vue'
@@ -100,86 +108,111 @@ export function contadorChip(n: number): string {
 </script>
 
 <script setup lang="ts">
+import { Check, ChevronDown } from 'lucide-vue-next'
+import { onClickOutside } from '@vueuse/core'
+
 const props = defineProps<{ resumo: Resumo | null }>()
 const filtros = defineModel<FiltrosLista>('filtros', { required: true })
 
 const chips = computed(() => chipsDoResumo(props.resumo, filtros.value.plataforma))
 const total = computed(() => (props.resumo?.plataformas || []).reduce((s, p) => s + (Number(p.aguardando) || 0), 0))
+// O que o botão mostra: a plataforma escolhida (inteira ou com uma loja dela
+// escolhida na barra) ou "Todas".
+const atual = computed(() => chips.value.find((c) => chipAtivo(c, filtros.value)) ?? null)
+
+const aberto = ref(false)
+const caixaRef = ref<HTMLElement | null>(null)
+onClickOutside(caixaRef, () => { aberto.value = false })
 
 function escolher(chip: GrupoCaixa | null) {
+  aberto.value = false
+  // Já está na plataforma inteira: escolher de novo não desfaz (é um menu).
+  if (chip && chipAtivo(chip, filtros.value) && soAPlataforma(filtros.value)) return
   filtros.value = filtrosDoChip(filtros.value, chip)
 }
 function titulo(chip: ChipPlataforma): string {
   const partes = [`Só ${chip.nome}: ${chip.aguardando} conversa(s) falta responder`]
   if (chipAtivo(chip, filtros.value) && !soAPlataforma(filtros.value)) partes.push(`Uma loja escolhida na barra — clique para ver todas as lojas ${chip.nome}`)
-  else if (chipAtivo(chip, filtros.value)) partes.push('Clique de novo para ver todas as plataformas')
   return partes.join('\n')
 }
-
-// Fileira que rola de lado: a roda do mouse (vertical) anda na fileira, e o
-// chip escolhido aparece sempre.
-const fileira = ref<HTMLElement | null>(null)
-function rolar(e: WheelEvent) {
-  const el = fileira.value
-  if (!el || el.scrollWidth <= el.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return
-  el.scrollLeft += e.deltaY
-  e.preventDefault()
-}
-watch(() => filtros.value.plataforma, () => {
-  void nextTick(() => fileira.value?.querySelector<HTMLElement>('[aria-pressed="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }))
-})
 </script>
 
 <template>
   <div
     v-if="chips.length"
-    ref="fileira"
-    class="flex items-center gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:thin] lg:flex-wrap lg:overflow-visible"
-    role="group"
-    aria-label="plataforma"
+    ref="caixaRef"
+    class="relative flex items-center gap-1.5"
     data-filtro-plataforma
-    @wheel="rolar"
+    @keydown.esc="aberto = false"
   >
     <span class="shrink-0 pr-0.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground" aria-hidden="true">Plataforma</span>
     <button
       type="button"
-      class="inline-flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition-colors"
-      :class="chipAtivo(null, filtros) ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground'"
-      :aria-pressed="chipAtivo(null, filtros)"
-      :title="`Todas as plataformas: ${total} conversa(s) falta responder`"
-      data-chip="todas"
-      @click="escolher(null)"
+      class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors"
+      :class="atual ? 'border-primary bg-primary/10 text-primary' : 'bg-background hover:bg-muted'"
+      aria-haspopup="menu"
+      :aria-expanded="aberto"
+      aria-label="plataforma"
+      :title="atual ? titulo(atual) : `Todas as plataformas: ${total} conversa(s) falta responder`"
+      data-plataforma-botao
+      @click="aberto = !aberto"
     >
-      Todas
-      <span
-        v-if="total"
-        class="min-w-[18px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
-        :class="chipAtivo(null, filtros) ? 'bg-white/25 text-current' : 'bg-red-500 text-white'"
-      >{{ contadorChip(total) }}</span>
-    </button>
-    <button
-      v-for="c in chips"
-      :key="c.valor"
-      type="button"
-      class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors"
-      :class="chipAtivo(c, filtros)
-        ? (soAPlataforma(filtros) ? 'border-primary bg-primary text-primary-foreground' : 'border-primary bg-primary/10 text-primary')
-        : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground'"
-      :aria-pressed="chipAtivo(c, filtros)"
-      :aria-label="`Só ${c.nome}${c.aguardando ? ` — ${c.aguardando} falta responder` : ''}`"
-      :title="titulo(c)"
-      :data-chip="c.valor"
-      @click="escolher(c)"
-    >
-      <span class="inline-flex shrink-0 items-center -space-x-1" aria-hidden="true">
-        <AtendimentoIconePlataforma v-for="p in c.plataformas" :key="p" :plataforma="p" :tamanho="14" decorativo />
+      <span v-if="atual" class="inline-flex shrink-0 items-center -space-x-1" aria-hidden="true">
+        <AtendimentoIconePlataforma v-for="p in atual.plataformas" :key="p" :plataforma="p" :tamanho="14" decorativo />
       </span>
-      <span>{{ c.nome }}</span>
+      <span>{{ atual ? atual.nome : 'Todas' }}</span>
       <span
-        v-if="c.aguardando"
-        class="min-w-[18px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
-        :class="chipAtivo(c, filtros) && soAPlataforma(filtros) ? 'bg-white/25 text-current' : 'bg-red-500 text-white'"
-      >{{ contadorChip(c.aguardando) }}</span>
+        v-if="atual ? atual.aguardando : total"
+        class="min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold tabular-nums text-white"
+      >{{ contadorChip(atual ? atual.aguardando : total) }}</span>
+      <ChevronDown class="size-3.5 shrink-0 opacity-70" aria-hidden="true" />
     </button>
+    <div
+      v-show="aberto"
+      role="menu"
+      aria-label="escolher a plataforma"
+      class="absolute left-0 top-full z-30 mt-1 w-60 rounded-md border bg-background p-1 shadow-lg"
+    >
+      <button
+        type="button"
+        role="menuitemradio"
+        class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+        :class="chipAtivo(null, filtros) ? 'font-medium text-primary' : ''"
+        :aria-checked="chipAtivo(null, filtros)"
+        :title="`Todas as plataformas: ${total} conversa(s) falta responder`"
+        data-chip="todas"
+        @click="escolher(null)"
+      >
+        <span class="min-w-0 flex-1 truncate">Todas</span>
+        <span
+          v-if="total"
+          class="min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold tabular-nums text-white"
+        >{{ contadorChip(total) }}</span>
+        <Check v-if="chipAtivo(null, filtros)" class="size-3.5 shrink-0" />
+      </button>
+      <button
+        v-for="c in chips"
+        :key="c.valor"
+        type="button"
+        role="menuitemradio"
+        class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+        :class="chipAtivo(c, filtros) ? 'font-medium text-primary' : ''"
+        :aria-checked="chipAtivo(c, filtros)"
+        :aria-label="`Só ${c.nome}${c.aguardando ? ` — ${c.aguardando} falta responder` : ''}`"
+        :title="titulo(c)"
+        :data-chip="c.valor"
+        @click="escolher(c)"
+      >
+        <span class="inline-flex w-5 shrink-0 items-center -space-x-1" aria-hidden="true">
+          <AtendimentoIconePlataforma v-for="p in c.plataformas" :key="p" :plataforma="p" :tamanho="14" decorativo />
+        </span>
+        <span class="min-w-0 flex-1 truncate">{{ c.nome }}</span>
+        <span
+          v-if="c.aguardando"
+          class="min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold tabular-nums text-white"
+        >{{ contadorChip(c.aguardando) }}</span>
+        <Check v-if="chipAtivo(c, filtros)" class="size-3.5 shrink-0" />
+      </button>
+    </div>
   </div>
 </template>

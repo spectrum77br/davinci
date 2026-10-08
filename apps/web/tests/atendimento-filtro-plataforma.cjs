@@ -138,8 +138,13 @@ const ICONE = { props: ['plataforma'], render() { return Vue.h('i', { 'data-icon
 
 async function principal() {
   let html = await renderizar(chipsSfc.descriptor, { resumo: RESUMO, filtros: filtros() }, { AtendimentoIconePlataforma: ICONE })
-  assert.match(html, /class="[^"]*lg:flex-wrap[^"]*" role="group" aria-label="plataforma"/, 'uma linha no computador (quebra se não couber); rola de lado na tela estreita')
+  // Um BOTÃO que abre o menu (08/10/2026, igual ao Duoke), não a fileira de chips.
   assert.match(html, />Plataforma<\/span>/)
+  assert.match(html, /aria-haspopup="menu" aria-expanded="false" aria-label="plataforma"/)
+  assert.match(html, /data-plataforma-botao[^>]*>[\s\S]*?Todas[\s\S]*?>12<[\s\S]*?<\/button>/, 'fechado, o botão diz "Todas" e o total')
+  assert.match(html, /<div role="menu" aria-label="escolher a plataforma"[^>]*style="display:none;"/, 'o menu começa fechado')
+  assert.doesNotMatch(html, /role="group"|aria-pressed/, 'a fileira de chips saiu')
+  // No menu: Todas e cada plataforma, com a logo e o "falta responder", na ordem da Caixa.
   const chips = [...html.matchAll(/data-chip="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)].map((m) => [m[1], m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()])
   assert.deepEqual(chips, [
     ['todas', 'Todas 12'],
@@ -149,16 +154,21 @@ async function principal() {
     ['site', 'Sites'],
     ['instagram,facebook', 'Redes 3'],
   ])
+  assert.match(html, /data-chip="ml"[^>]*>[\s\S]*?data-icone="ml"/, 'cada opção com a logo')
   assert.match(html, /data-chip="instagram,facebook"[\s\S]*?data-icone="instagram"[\s\S]*?data-icone="facebook"/, 'Redes mostra os dois ícones')
-  assert.match(html, /aria-pressed="true"[^>]*data-chip="todas"/)
-  // Escolhido o ML: aceso (cheio); com uma loja dele escolhida, aceso claro.
+  assert.match(html, /role="menuitemradio"[^>]*aria-checked="true"[^>]*data-chip="todas"/)
+  // Escolhido o ML: o botão mostra a logo, o nome e o número dele; a opção marcada.
   html = await renderizar(chipsSfc.descriptor, { resumo: RESUMO, filtros: filtros({ plataforma: 'ml' }) }, { AtendimentoIconePlataforma: ICONE })
-  assert.match(html, /class="[^"]*border-primary bg-primary text-primary-foreground[^"]*" aria-pressed="true"[^>]*data-chip="ml"/)
-  assert.match(html, /aria-pressed="false"[^>]*data-chip="todas"/)
+  assert.match(html, /data-plataforma-botao[^>]*>[\s\S]*?data-icone="ml"[\s\S]*?Mercado Livre[\s\S]*?>3<[\s\S]*?<\/button>/)
+  assert.match(html, /aria-checked="true"[^>]*data-chip="ml"/)
+  assert.match(html, /aria-checked="false"[^>]*data-chip="todas"/)
+  // Com uma loja do ML escolhida na barra: continua marcado, e o título explica.
   html = await renderizar(chipsSfc.descriptor, { resumo: RESUMO, filtros: filtros({ plataforma: 'ml', integration_id: 'i-ml' }) }, { AtendimentoIconePlataforma: ICONE })
-  assert.match(html, /class="[^"]*border-primary bg-primary\/10 text-primary[^"]*" aria-pressed="true"[^>]*data-chip="ml"/)
+  assert.match(html, /aria-checked="true"[^>]*data-chip="ml"/)
   assert.match(html, /title="Só Mercado Livre: 3 conversa\(s\) falta responder\nUma loja escolhida na barra — clique para ver todas as lojas Mercado Livre"/)
-  // Sem /resumo ainda: nada (sem chip pela metade).
+  // Escolher no menu a plataforma que já está inteira só fecha (não desfaz).
+  assert.match(chipsSfc.descriptor.scriptSetup.content, /if \(chip && chipAtivo\(chip, filtros\.value\) && soAPlataforma\(filtros\.value\)\) return/)
+  // Sem /resumo ainda: nada (sem botão pela metade).
   html = await renderizar(chipsSfc.descriptor, { resumo: null, filtros: filtros() }, { AtendimentoIconePlataforma: ICONE })
   assert.equal(html.trim(), '')
 }
