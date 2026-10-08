@@ -61,7 +61,9 @@ class _SoLeitura:
 
     async def ler_assinatura_flex(self):
         self.chamadas.append("assinatura")
-        return flex_api.AssinaturaFlex(True, "in", origem_cep="09750000")
+        return flex_api.AssinaturaFlex(
+            True, "in", origem_cep="09750000", origem_cidade="São Bernardo do Campo"
+        )
 
     async def ids_da_conta(self, status, *, max_paginas=100):
         self.chamadas.append(f"descoberta:{status}")
@@ -91,8 +93,12 @@ async def cena(db: AsyncSession, make_user, monkeypatch):
     monkeypatch.setattr(cfg, "flex_modo", "observar")
     monkeypatch.setattr(cfg, "flex_shopee_escrita", False)
     admin = await make_user(role=UserRole.ADMIN)
-    conta = Integration(user_id=admin.id, platform=IntegrationPlatform.ML, name="vita",
-                        credentials=encrypt_json({"access_token": "t"}))
+    conta = Integration(
+        user_id=admin.id,
+        platform=IntegrationPlatform.ML,
+        name="vita",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
     db.add(conta)
     await db.flush()
     fantasma = uuid.uuid4()
@@ -100,29 +106,84 @@ async def cena(db: AsyncSession, make_user, monkeypatch):
     agora = datetime.now(UTC)
     db.add_all(
         [
-            FlexAnuncioEstado(integration_id=conta.id, external_id="MLB1", plataforma="ml",
-                              desejado="ligado", motivo="saldo Flex 5", observado="desligado",
-                              observado_em=agora, aguardando_aprovacao=True, tentativas=0,
-                              saldo_sp=5, familias="dg053"),
-            FlexAnuncioEstado(integration_id=conta.id, external_id="MLB2", plataforma="ml",
-                              desejado="inelegivel", motivo="kit", observado="ligado",
-                              observado_em=agora, aguardando_aprovacao=False, tentativas=0),
-            FlexAnuncioEstado(integration_id=conta.id, external_id="MLB3", plataforma="ml",
-                              desejado="desligado", motivo="saldo 0", observado="desligado",
-                              observado_em=agora, aguardando_aprovacao=False, tentativas=0),
+            FlexAnuncioEstado(
+                integration_id=conta.id,
+                external_id="MLB1",
+                plataforma="ml",
+                desejado="ligado",
+                motivo="saldo Flex 5",
+                observado="desligado",
+                observado_em=agora,
+                aguardando_aprovacao=True,
+                tentativas=0,
+                saldo_sp=5,
+                familias="dg053",
+            ),
+            FlexAnuncioEstado(
+                integration_id=conta.id,
+                external_id="MLB2",
+                plataforma="ml",
+                desejado="inelegivel",
+                motivo="kit",
+                observado="ligado",
+                observado_em=agora,
+                aguardando_aprovacao=False,
+                tentativas=0,
+            ),
+            FlexAnuncioEstado(
+                integration_id=conta.id,
+                external_id="MLB3",
+                plataforma="ml",
+                desejado="desligado",
+                motivo="saldo 0",
+                observado="desligado",
+                observado_em=agora,
+                aguardando_aprovacao=False,
+                tentativas=0,
+            ),
         ]
     )
-    db.add(FlexLog(integration_id=conta.id, external_id="MLB1", plataforma="ml", acao="decidir",
-                   modo="observar", resultado="ok", estado_depois="ligado", motivo="saldo 5"))
+    db.add(
+        FlexLog(
+            integration_id=conta.id,
+            external_id="MLB1",
+            plataforma="ml",
+            acao="decidir",
+            modo="observar",
+            resultado="ok",
+            estado_depois="ligado",
+            motivo="saldo 5",
+        )
+    )
     db.add_all(
         [
-            BlingOrder(numero="5001", bling_id=5001, loja="1", item_index=0,
-                       item_codigo="dg053.ci", item_quantidade=1, situacao="6", data=agora),
-            FlexPedido(bling_id=5001, plataforma="ml", integration_id=conta.id,
-                       numeroloja="2000001", envio_tipo="self_service", no_sp=False,
-                       alerta="o .sp não cobre", prazo=agora + timedelta(hours=3)),
-            FlexPedido(bling_id=5002, plataforma="shopee", envio_tipo="90022", no_sp=True,
-                       prazo=agora + timedelta(hours=1)),
+            BlingOrder(
+                numero="5001",
+                bling_id=5001,
+                loja="1",
+                item_index=0,
+                item_codigo="dg053.ci",
+                item_quantidade=1,
+                situacao="6",
+                data=agora,
+            ),
+            FlexPedido(
+                bling_id=5001,
+                plataforma="ml",
+                integration_id=conta.id,
+                numeroloja="2000001",
+                envio_tipo="self_service",
+                no_sp=False,
+                alerta="o .sp não cobre",
+                prazo=agora + timedelta(hours=3),
+            ),
+            FlexPedido(
+                bling_id=5002,
+                plataforma="shopee",
+                envio_tipo="90022",
+                no_sp=True,
+                prazo=agora + timedelta(hours=1),
+            ),
         ]
     )
     await db.commit()
@@ -142,7 +203,9 @@ async def _emergencia(client: AsyncClient, cena) -> dict:
     assert corpo["status"] == "na_fila"
     nome, args, kw = cena["fila"].jobs[-1]
     assert (nome, args, kw["_job_id"]) == (
-        "flex_emergencia_run", (corpo["id"],), f"flex_emergencia:{corpo['id']}"
+        "flex_emergencia_run",
+        (corpo["id"],),
+        f"flex_emergencia:{corpo['id']}",
     )
     await worker.flex_emergencia_run({}, corpo["id"])
     r = await client.get(f"/api/flex/emergencia/{corpo['id']}")
@@ -161,12 +224,24 @@ async def test_config_sem_segredo(client: AsyncClient, cena, auth_as: Callable):
     assert c["shopee_canais"] == ["90022"]
     contas = {x["id"]: x for x in c["contas"]}
     assert contas[str(cena["conta_id"])] == {
-        "id": str(cena["conta_id"]), "nome": "vita", "plataforma": "ml", "existe": True,
+        "id": str(cena["conta_id"]),
+        "nome": "vita",
+        "plataforma": "ml",
+        "existe": True,
         # Ainda não conferida pelo motor: tudo vazio (a tela diz "não conferida").
-        "flex_ativo": None, "flex_status": None, "flex_detalhe": None, "flex_motivo": None,
-        "flex_origem_cep": None, "flex_origem_cidade": None, "flex_origem_ok": None,
-        "flex_lido_em": None, "flex_erro": None, "descoberta_em": None,
-        "descoberta_ok": None, "descoberta_total": None, "descoberta_novos": None,
+        "flex_ativo": None,
+        "flex_status": None,
+        "flex_detalhe": None,
+        "flex_motivo": None,
+        "flex_origem_cep": None,
+        "flex_origem_cidade": None,
+        "flex_origem_ok": None,
+        "flex_lido_em": None,
+        "flex_erro": None,
+        "descoberta_em": None,
+        "descoberta_ok": None,
+        "descoberta_total": None,
+        "descoberta_novos": None,
         "descoberta_erro": None,
     }
     assert contas[str(cena["fantasma"])]["existe"] is False
@@ -241,7 +316,9 @@ async def test_aprovar_em_piloto_liga_na_hora(
 
     class ML:
         async def ler_assinatura_flex(self):
-            return flex_api.AssinaturaFlex(True, "in", origem_cep="09750000")
+            return flex_api.AssinaturaFlex(
+                True, "in", origem_cep="09750000", origem_cidade="São Bernardo do Campo"
+            )
 
         async def ler_flex(self, item):
             chamadas.append(("ler", item))
@@ -268,9 +345,16 @@ async def test_aprovar_em_piloto_liga_na_hora(
     p_sp = Product(user_id=cena["admin"].id, sku="dg053.sp", name="x", stock=5, situacao="A")
     db.add_all([p_ci, p_sp])
     await db.flush()
-    db.add(ProductLink(user_id=cena["admin"].id, product_id=p_ci.id,
-                       integration_id=cena["conta_id"], platform=IntegrationPlatform.ML,
-                       external_id="MLB1", stock=3))
+    db.add(
+        ProductLink(
+            user_id=cena["admin"].id,
+            product_id=p_ci.id,
+            integration_id=cena["conta_id"],
+            platform=IntegrationPlatform.ML,
+            external_id="MLB1",
+            stock=3,
+        )
+    )
     await db.commit()
 
     auth_as(cena["admin"])
@@ -311,8 +395,9 @@ async def test_sincronizar_enfileira_no_modo_atual(
 
 
 @pytest.mark.asyncio
-async def test_emergencia_em_observar_simula(client: AsyncClient, cena, auth_as: Callable,
-                                             monkeypatch):
+async def test_emergencia_em_observar_simula(
+    client: AsyncClient, cena, auth_as: Callable, monkeypatch
+):
     cli = _SoLeitura()
 
     async def _montar(integ):
@@ -359,24 +444,60 @@ async def equipe(db: AsyncSession, cena, make_user):
     """Uma segunda conta liberada (da equipe 7) e um usuário só da equipe 7
     com logistica:view+edit. A conta "vita" do `cena` NÃO é da equipe dele."""
     admin = cena["admin"]
-    loja7 = Integration(user_id=admin.id, platform=IntegrationPlatform.ML, name="loja7",
-                        credentials=encrypt_json({"access_token": "t"}))
+    loja7 = Integration(
+        user_id=admin.id,
+        platform=IntegrationPlatform.ML,
+        name="loja7",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
     db.add(loja7)
     await db.flush()
-    db.add(StoreInfo(user_id=admin.id, platform="ml", account_name="loja7", sales_team=7,
-                     integration_id=loja7.id, bling_store_id="77"))
+    db.add(
+        StoreInfo(
+            user_id=admin.id,
+            platform="ml",
+            account_name="loja7",
+            sales_team=7,
+            integration_id=loja7.id,
+            bling_store_id="77",
+        )
+    )
     agora = datetime.now(UTC)
-    db.add_all([
-        FlexAnuncioEstado(integration_id=loja7.id, external_id="MLB70", plataforma="ml",
-                          desejado="ligado", motivo="saldo Flex 5", observado="desligado",
-                          observado_em=agora, aguardando_aprovacao=True, tentativas=0),
-        FlexLog(integration_id=loja7.id, external_id="MLB70", plataforma="ml", acao="decidir",
-                modo="observar", resultado="ok"),
-        BlingOrder(numero="7701", bling_id=7701, loja="77", item_index=0,
-                   item_codigo="dg053.ci", item_quantidade=1, situacao="6", data=agora),
-        # Pedido marcado só pela Logística: sem conta, casa pela loja do Bling.
-        FlexPedido(bling_id=7701, plataforma="ml", no_sp=False, alerta="o .sp não cobre"),
-    ])
+    db.add_all(
+        [
+            FlexAnuncioEstado(
+                integration_id=loja7.id,
+                external_id="MLB70",
+                plataforma="ml",
+                desejado="ligado",
+                motivo="saldo Flex 5",
+                observado="desligado",
+                observado_em=agora,
+                aguardando_aprovacao=True,
+                tentativas=0,
+            ),
+            FlexLog(
+                integration_id=loja7.id,
+                external_id="MLB70",
+                plataforma="ml",
+                acao="decidir",
+                modo="observar",
+                resultado="ok",
+            ),
+            BlingOrder(
+                numero="7701",
+                bling_id=7701,
+                loja="77",
+                item_index=0,
+                item_codigo="dg053.ci",
+                item_quantidade=1,
+                situacao="6",
+                data=agora,
+            ),
+            # Pedido marcado só pela Logística: sem conta, casa pela loja do Bling.
+            FlexPedido(bling_id=7701, plataforma="ml", no_sp=False, alerta="o .sp não cobre"),
+        ]
+    )
     await db.commit()
     membro = await make_user(permissions={"logistica": {"view": True, "edit": True}})
     membro.sales_teams = [7]
@@ -438,8 +559,9 @@ async def test_aguardando_so_conta_contas_liberadas(
     monkeypatch.setattr(cena["cfg"], "flex_contas", str(cena["conta_id"]))
     assert (await client.get("/api/flex/anuncios")).json()["resumo"]["aguardando"] == 1
     # Conta arquivada também sai (o motor não mexe mais nela).
-    await db.execute(text("UPDATE integrations SET archived_at = now() WHERE id = :i"),
-                     {"i": cena["conta_id"]})
+    await db.execute(
+        text("UPDATE integrations SET archived_at = now() WHERE id = :i"), {"i": cena["conta_id"]}
+    )
     await db.commit()
     assert (await client.get("/api/flex/anuncios")).json()["resumo"]["aguardando"] == 0
 
@@ -473,7 +595,6 @@ async def test_sem_login_nao_entra(client: AsyncClient, auth_as: Callable):
     assert (await client.get("/api/flex/config")).status_code == 401
 
 
-
 @pytest.mark.asyncio
 async def test_config_mostra_o_flex_de_cada_conta(
     client: AsyncClient, cena, db: AsyncSession, auth_as: Callable
@@ -483,10 +604,20 @@ async def test_config_mostra_o_flex_de_cada_conta(
     from app.models import FlexConta
 
     agora = datetime.now(UTC)
-    db.add(FlexConta(integration_id=cena["conta_id"], plataforma="ml", flex_ativo=False,
-                     status="pending", detalhe="assinatura do Flex: pending", lido_em=agora,
-                     descoberta_em=agora, descoberta_ok=True, descoberta_total=1545,
-                     descoberta_novos=12))
+    db.add(
+        FlexConta(
+            integration_id=cena["conta_id"],
+            plataforma="ml",
+            flex_ativo=False,
+            status="pending",
+            detalhe="assinatura do Flex: pending",
+            lido_em=agora,
+            descoberta_em=agora,
+            descoberta_ok=True,
+            descoberta_total=1545,
+            descoberta_novos=12,
+        )
+    )
     await db.commit()
     auth_as(cena["admin"])
     contas = {x["id"]: x for x in (await client.get("/api/flex/config")).json()["contas"]}
@@ -504,14 +635,27 @@ async def test_config_mostra_o_flex_de_cada_conta(
 async def test_aprovar_shopee_so_leitura_e_409(
     client: AsyncClient, cena, db: AsyncSession, auth_as: Callable, monkeypatch
 ):
-    loja = Integration(user_id=cena["admin"].id, platform=IntegrationPlatform.SHOPEE,
-                       name="loja", credentials=encrypt_json({"access_token": "t"}))
+    loja = Integration(
+        user_id=cena["admin"].id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="loja",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
     db.add(loja)
     await db.flush()
     loja_id = loja.id
-    db.add(FlexAnuncioEstado(integration_id=loja_id, external_id="777", plataforma="shopee",
-                             desejado="ligado", motivo="saldo Flex 5", observado="desligado",
-                             aguardando_aprovacao=False, tentativas=0))
+    db.add(
+        FlexAnuncioEstado(
+            integration_id=loja_id,
+            external_id="777",
+            plataforma="shopee",
+            desejado="ligado",
+            motivo="saldo Flex 5",
+            observado="desligado",
+            aguardando_aprovacao=False,
+            tentativas=0,
+        )
+    )
     await db.commit()
     monkeypatch.setattr(cena["cfg"], "flex_contas", f"{cena['conta_id']},{loja_id}")
     auth_as(cena["admin"])
@@ -537,8 +681,10 @@ async def test_emergencia_em_andamento_nao_cria_outra(
     # O job morreu no meio (worker reiniciado): "rodando" sem andamento há
     # mais de 10 min não segura o botão — o clique cria outra.
     await db.execute(
-        text("UPDATE flex_emergencia SET status = 'rodando',"
-             " atualizado_em = now() - interval '11 minutes' WHERE id = :i"),
+        text(
+            "UPDATE flex_emergencia SET status = 'rodando',"
+            " atualizado_em = now() - interval '11 minutes' WHERE id = :i"
+        ),
         {"i": r1["id"]},
     )
     await db.commit()

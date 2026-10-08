@@ -48,7 +48,9 @@ from app.services.marketplaces.ml import ML_API_BASE
 
 T0 = datetime(2026, 9, 1, tzinfo=UTC)
 
-# CEP de São Bernardo do Campo (dentro de flex_origem_ceps "09600-09899").
+# A saída do Flex das contas de teste: São Bernardo do Campo (o local de
+# saída de fábrica, services/flex_local) — e Piracicaba, a das contas reais
+# em 08/10/2026.
 ORIGEM_SB = "09750000"
 ORIGEM_PIRACICABA = "13400123"
 
@@ -171,9 +173,6 @@ async def mundo(db: AsyncSession, monkeypatch):
         "flex_shopee_escrita": False,
         "flex_shopee_canais": "90022",
         "flex_intervalo_min": 15,
-        # A saída do Flex tem de ser em São Bernardo (08/10/2026); o FakeML
-        # responde a assinatura com a origem ORIGEM_SB.
-        "flex_origem_ceps": "09600-09899",
     }.items():
         monkeypatch.setattr(cfg, chave, valor)
 

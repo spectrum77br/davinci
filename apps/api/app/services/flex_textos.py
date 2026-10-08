@@ -18,8 +18,14 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
-# "São Bernardo" é o lote .sp — é assim que a operação chama o estoque de lá.
-_SP = "São Bernardo"
+from app.services import flex_local
+
+
+def _local() -> str:
+    """A cidade do local de saída do Flex (aba Flex — São Bernardo do Campo de
+    fábrica): "5 peças livres em São Bernardo do Campo". Lida na hora de
+    traduzir (services/flex_local), não fixa."""
+    return flex_local.cidade()
 
 
 def _pecas(n: int) -> str:
@@ -32,6 +38,15 @@ def _so(n: int) -> str:
     """ "Só 2 peças livres" / "Sem peça livre" (saldo zero ou negativo: há
     pedido Flex esperando mais peça do que o .sp tem)."""
     return "Sem peça livre" if n <= 0 else f"Só {_pecas(n)}"
+
+
+def _fora_da_origem(local: str, cidades: str, cep: str | None) -> str:
+    onde = f"{cidades} (CEP {cep})" if cep else cidades
+    return (
+        f"A saída do Flex desta conta no Mercado Livre está em {onde}, não em {local}. "
+        "Troque o endereço do Flex no painel do Mercado Livre — até lá o sistema não mexe "
+        "nos anúncios dela."
+    )
 
 
 def _cap(texto: str) -> str:
@@ -72,19 +87,16 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
     # São Bernardo" — flex_motor.bloqueio_da_origem).
     (
         re.compile(
-            r"^saída do Flex da conta fora de São Bernardo: (?P<c>.+) \(CEP (?P<cep>[^)]+)\)$"
+            r"^saída do Flex da conta fora de (?P<local>[^:]+): (?P<c>[^(]+?)"
+            r"(?: \(CEP (?P<cep>[^)]+)\))?$"
         ),
-        lambda m: (
-            f"A saída do Flex desta conta no Mercado Livre está em {m['c']} (CEP {m['cep']}), "
-            f"não em {_SP}. Troque o endereço do Flex no painel do Mercado Livre — até lá o "
-            "sistema não mexe nos anúncios dela."
-        ),
+        lambda m: _fora_da_origem(m["local"], m["c"], m["cep"]),
     ),
     (
         re.compile(r"^não deu para ler de onde sai o Flex da conta no ML$"),
         lambda m: (
             "Ainda não deu para ler de onde sai o Flex desta conta no Mercado Livre — o sistema "
-            f"só mexe nos anúncios dela quando confirmar que a saída é em {_SP}."
+            f"só mexe nos anúncios dela quando confirmar que a saída é em {_local()}."
         ),
     ),
     (
@@ -140,35 +152,36 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
     (
         re.compile(rf"^{_SALDO} abaixo de (?P<d>\d+)$"),
         lambda m: (
-            f"{_so(int(m['n']))} em {_SP} ({m['sku']}) — com menos de {m['d']} "
+            f"{_so(int(m['n']))} em {_local()} ({m['sku']}) — com menos de {m['d']} "
             "o Flex fica desligado."
         ),
     ),
     (
         re.compile(rf"^{_SALDO} \(liga com (?P<l>\d+)\)$"),
         lambda m: (
-            f"{_cap(_pecas(int(m['n'])))} em {_SP} ({m['sku']}) — dá para ter Flex "
+            f"{_cap(_pecas(int(m['n'])))} em {_local()} ({m['sku']}) — dá para ter Flex "
             f"(o mínimo é {m['l']})."
         ),
     ),
     (
         re.compile(rf"^{_SALDO}: entre (?P<d>\d+) e (?P<l>\d+), continua ligado \(histerese\)$"),
         lambda m: (
-            f"{_cap(_pecas(int(m['n'])))} em {_SP} ({m['sku']}). O Flex já estava ligado e "
+            f"{_cap(_pecas(int(m['n'])))} em {_local()} ({m['sku']}). O Flex já estava ligado e "
             f"continua até ficar com menos de {m['d']}."
         ),
     ),
     (
         re.compile(rf"^{_SALDO}: precisa de (?P<l>\d+) para ligar$"),
         lambda m: (
-            f"{_so(int(m['n']))} em {_SP} ({m['sku']}) — precisa de {m['l']} para ligar o Flex."
+            f"{_so(int(m['n']))} em {_local()} ({m['sku']}) — precisa de {m['l']} para ligar "
+            "o Flex."
         ),
     ),
     (
-        re.compile(r"^(?P<sku>\S+) não existe ativo — sem estoque \.sp conhecido, nunca liga$"),
+        re.compile(r"^(?P<sku>\S+) não existe ativo — sem estoque \.\w+ conhecido, nunca liga$"),
         lambda m: (
             f"O produto {m['sku']} não existe (ou está inativo) no DaVinci — sem saber quanto "
-            f"há em {_SP}, o Flex não liga."
+            f"há em {_local()}, o Flex não liga."
         ),
     ),
     (
@@ -179,7 +192,7 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
         re.compile(r"^variação (?P<v>.+) com vínculo morto no DaVinci$"),
         lambda m: (
             f"A variação {m['v']} do anúncio não recebe mais o estoque do DaVinci (vínculo "
-            f"desfeito). Com Flex ela também sairia de {_SP}, sem peça garantida — o Flex "
+            f"desfeito). Com Flex ela também sairia de {_local()}, sem peça garantida — o Flex "
             "fica desligado."
         ),
     ),
@@ -187,18 +200,18 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
         re.compile(r"^variação (?P<v>.+) sem vínculo com produto do DaVinci$"),
         lambda m: (
             f"A variação {m['v']} do anúncio não está ligada a nenhum produto do DaVinci. Com "
-            f"Flex ela também sairia de {_SP}, sem peça garantida — o Flex fica desligado."
+            f"Flex ela também sairia de {_local()}, sem peça garantida — o Flex fica desligado."
         ),
     ),
     (
         re.compile(
-            r"^variação (?P<v>.+?) parada sem \.sp \((?P<x>.+)\) — volta a vender quando o "
+            r"^variação (?P<v>.+?) parada sem \.\w+ \((?P<x>.+)\) — volta a vender quando o "
             r"estoque for publicado$"
         ),
         lambda m: (
             f"A variação {m['v']} está sem estoque agora, mas não pode ter Flex "
             f"({_sem_ponto(motivo_claro(m['x']) or m['x'])}). Quando o estoque voltar, ela "
-            f"venderia pelo Flex sem peça em {_SP} — o Flex fica desligado."
+            f"venderia pelo Flex sem peça em {_local()} — o Flex fica desligado."
         ),
     ),
     (

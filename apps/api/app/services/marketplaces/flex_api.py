@@ -105,16 +105,19 @@ class AssinaturaFlex:
     "sem_assinatura", "sem_canal").
 
     `origem_cep` / `origem_cidade` (ML, só com assinatura "in"): de onde o
-    motoboy do Flex sai — `origin.zip_code` / `origin.city.name` de cada
-    assinatura "in" (só dígitos; mais de uma origem vem separada por
-    vírgula). None = a resposta não trouxe (a trava de origem do motor trata
-    como "não se sabe de onde sai")."""
+    motoboy do Flex sai — `origin.zip_code` (só dígitos ASCII) e
+    `origin.city.name` de cada assinatura "in", na MESMA ordem (mais de uma:
+    "cep1,cep2" e "cidade1, cidade2"). Uma assinatura "in" sem a cidade deixa
+    as duas None: não se sabe de onde a conta sai (a trava bloqueia).
+    `origem_ausente`: NENHUMA assinatura "in" trouxe `origin` — o formato da
+    resposta mudou; o motor mantém a origem que já tinha."""
 
     ativo: bool | None
     status: str | None = None
     detalhe: str = ""
     origem_cep: str | None = None
     origem_cidade: str | None = None
+    origem_ausente: bool = False
 
 
 @dataclass(frozen=True)
@@ -217,26 +220,39 @@ def _lista_de_assinaturas(corpo: Any) -> list[Mapping[str, Any]]:
     return [x for x in corpo if isinstance(x, Mapping)]
 
 
-def _origens_ml(assinaturas: Iterable[Mapping[str, Any]]) -> tuple[str | None, str | None]:
-    """CEP (só dígitos) e cidade da origem de cada assinatura "in", sem
-    repetir, separados por vírgula. Origem sem CEP não entra (a trava trata
-    a conta inteira como "não se sabe de onde sai")."""
-    ceps: list[str] = []
-    cidades: list[str] = []
+def _origens_ml(
+    assinaturas: Iterable[Mapping[str, Any]],
+) -> tuple[str | None, str | None, bool]:
+    """(CEPs, cidades, ausente) das assinaturas "in", em pares e sem repetir.
+
+    Uma assinatura "in" sem `origin.city.name` (é pela cidade que a trava
+    decide): (None, None, False) — a conta inteira fica "não se sabe de onde
+    sai". Nenhuma com `origin`: (None, None, True)."""
+    pares: list[tuple[str, str]] = []
+    alguma_origem = False
+    incompleta = False
     for a in assinaturas:
         origem = a.get("origin")
         if not isinstance(origem, Mapping):
+            incompleta = True
             continue
-        cep = "".join(ch for ch in str(origem.get("zip_code") or "") if ch.isdigit())
-        if not cep:
-            continue
-        if cep not in ceps:
-            ceps.append(cep)
+        alguma_origem = True
+        cep = "".join(ch for ch in str(origem.get("zip_code") or "") if ch in "0123456789")
         cidade = origem.get("city")
-        nome = str(cidade.get("name") or "").strip() if isinstance(cidade, Mapping) else ""
-        if nome and nome not in cidades:
-            cidades.append(nome)
-    return (",".join(ceps) or None), (", ".join(cidades)[:200] or None)
+        nome = (
+            " ".join(str(cidade.get("name") or "").split()) if isinstance(cidade, Mapping) else ""
+        )
+        if not nome:
+            incompleta = True
+            continue
+        if (cep, nome) not in pares:
+            pares.append((cep, nome))
+    if not alguma_origem:
+        return None, None, True
+    if incompleta or not pares:
+        return None, None, False
+    ceps = ",".join(c for c, _ in pares) or None
+    return ceps, ", ".join(n for _, n in pares)[:200], False
 
 
 def classificar_assinatura_ml(r: httpx.Response) -> AssinaturaFlex:
@@ -253,11 +269,16 @@ def classificar_assinatura_ml(r: httpx.Response) -> AssinaturaFlex:
         statuses = [str(x.get("status") or "").strip().lower() for x in assinaturas]
         statuses = [x for x in statuses if x]
         if "in" in statuses:
-            cep, cidade = _origens_ml(
+            cep, cidade, ausente = _origens_ml(
                 x for x in assinaturas if str(x.get("status") or "").strip().lower() == "in"
             )
             return AssinaturaFlex(
-                True, "in", "assinatura do Flex ativa", origem_cep=cep, origem_cidade=cidade
+                True,
+                "in",
+                "assinatura do Flex ativa",
+                origem_cep=cep,
+                origem_cidade=cidade,
+                origem_ausente=ausente,
             )
         if not statuses:
             return AssinaturaFlex(False, "sem_assinatura", "a conta não tem assinatura do Flex")
@@ -305,9 +326,7 @@ def classificar_canal_loja_shopee(
         if isinstance(c, Mapping) and str(c.get("logistics_channel_id") or "").strip() in alvo
     ]
     if not achados:
-        return AssinaturaFlex(
-            False, "sem_canal", "a loja não tem o canal Entrega Direta na Shopee"
-        )
+        return AssinaturaFlex(False, "sem_canal", "a loja não tem o canal Entrega Direta na Shopee")
     for c in achados:
         try:
             mascara = int(c.get("mask_channel_id") or 0)
@@ -316,7 +335,6 @@ def classificar_canal_loja_shopee(
         if c.get("enabled") is True and mascara == 0:
             return AssinaturaFlex(True, "in", "Entrega Direta ligada na loja")
     return AssinaturaFlex(False, "out", "Entrega Direta desligada na loja")
-
 
 
 def _id_canal(entrada: Mapping[str, Any]) -> str:

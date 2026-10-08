@@ -3528,7 +3528,7 @@ async def flex_motor_run(ctx: dict, por: str | None = None) -> dict:
         quem = UUID(por) if por else None
     except ValueError:
         quem = None
-    return await flex_motor.rodar_motor(origem="manual", por=quem)
+    return await flex_motor.rodar_motor(origem="manual", por=quem, reler_contas=True)
 
 
 async def flex_reavaliar_run(ctx: dict) -> dict:

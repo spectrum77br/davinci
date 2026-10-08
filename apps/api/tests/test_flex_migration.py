@@ -29,7 +29,14 @@ _VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 _MIGRATION = _VERSOES / "0367_flex.py"
 # 0383 (08/10/2026): a origem da assinatura do Flex em flex_conta.
 _MIGRATION_ORIGEM = _VERSOES / "0383_flex_origem.py"
-TABELAS = ["flex_anuncio_estado", "flex_conta", "flex_emergencia", "flex_log", "flex_pedido"]
+TABELAS = [
+    "flex_anuncio_estado",
+    "flex_conta",
+    "flex_emergencia",
+    "flex_local",  # 0383: o local de saída do Flex (editado por pessoas)
+    "flex_log",
+    "flex_pedido",
+]
 
 
 def _carregar(caminho: Path = _MIGRATION):
@@ -121,7 +128,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
         with Operations.context(ctx):
             # A 0367 cria; a 0383 completa a flex_conta (o model é o das duas).
-            for m in ([mod, origem] if passo == "upgrade" else [origem, mod]):
+            for m in [mod, origem] if passo == "upgrade" else [origem, mod]:
                 getattr(m, passo)()
 
     mod.SCHEMA = rascunho
@@ -178,6 +185,23 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         # 0383: a origem nasce vazia e sem default (o motor pergunta de novo).
         assert cols[("flex_conta", "origem_cep")][2:5] == ("text", "YES", None)
         assert cols[("flex_conta", "origem_cidade")][2:5] == ("text", "YES", None)
+        # 0383: o local de saída nasce com São Bernardo do Campo / .sp (o que
+        # o código fazia fixo) e aceita uma linha só.
+        local = (
+            await db.execute(text(f'SELECT id, cidade, lote FROM "{rascunho}".flex_local'))
+        ).all()
+        assert [tuple(r) for r in local] == [(1, "São Bernardo do Campo", "sp")]
+        await db.commit()
+        with pytest.raises(Exception, match="ck_flex_local_uma_linha"):
+            await db.execute(
+                text(
+                    f"INSERT INTO \"{rascunho}\".flex_local (id, cidade, lote) VALUES (2, 'x', 'sp')"
+                )
+            )
+        await db.rollback()
+        with pytest.raises(Exception, match="ck_flex_local_lote"):
+            await db.execute(text(f"UPDATE \"{rascunho}\".flex_local SET lote = 'xx'"))
+        await db.rollback()
 
         # O CHECK segura valor fora da lista (TEXT, não enum).
         await db.execute(
@@ -209,8 +233,10 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
 
 
 def test_historico_fica_fora_das_tabelas_do_flex():
+    # As da máquina ficam fora; o local de saída (trocado por uma pessoa na
+    # aba Flex) fica COM o gatilho — o Histórico mostra quem trocou.
     nomes = [*TABELAS, "logistica"]
-    assert hsql.a_cobrir(nomes) == ["logistica"]
+    assert hsql.a_cobrir(nomes) == ["flex_local", "logistica"]
 
 
 def test_alembic_tem_uma_ponta_so():

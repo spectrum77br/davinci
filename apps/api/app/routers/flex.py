@@ -63,6 +63,7 @@ from app.models import (
     Listing,
     ProductLink,
     User,
+    UserRole,
 )
 from app.models.flex import FLEX_ACOES
 from app.schemas.flex import (
@@ -73,12 +74,14 @@ from app.schemas.flex import (
     FlexConfigOut,
     FlexContaOut,
     FlexEmergenciaOut,
+    FlexLocalIn,
+    FlexLocalOut,
     FlexLogOut,
     FlexPedidoOut,
     FlexResumoOut,
     FlexSincronizarOut,
 )
-from app.services import flex_config, flex_envio, flex_motor, flex_textos
+from app.services import flex_config, flex_envio, flex_local, flex_motor, flex_textos
 
 logger = structlog.get_logger()
 
@@ -88,6 +91,9 @@ async def _so_quem_ve(user: Annotated[User | None, Depends(get_current_user)]) -
     # não descobre nem que o Flex existe.
     if not flex_config.pode_ver(user):
         raise HTTPException(404, detail="Not Found")
+    # O local de saída (cidade + lote) vale para os textos e as contas desta
+    # resposta (cache de 30 s; quem salva atualiza na hora).
+    await flex_local.carregar()
 
 
 router = APIRouter(
@@ -131,9 +137,49 @@ async def _permitidas(session: AsyncSession) -> frozenset[UUID]:
 
 
 @router.get("/acesso")
-async def acesso() -> dict[str, bool]:
-    """A tela mostra a aba Flex só quando isto responde 200."""
-    return {"ok": True}
+async def acesso() -> dict[str, bool | str]:
+    """A tela mostra a aba Flex só quando isto responde 200. Traz também o
+    local de saída (os textos da Logística dizem de onde o Flex sai)."""
+    local = flex_local.atual()
+    return {"ok": True, "cidade": local.cidade, "lote": local.lote}
+
+
+async def _local_out(session: AsyncSession, local: flex_local.LocalFlex) -> FlexLocalOut:
+    nome = None
+    if local.atualizado_por is not None:
+        quem = await session.get(User, local.atualizado_por)
+        nome = (quem.name or quem.email) if quem is not None else None
+    return FlexLocalOut(
+        cidade=local.cidade,
+        lote=local.lote,
+        atualizado_em=local.atualizado_em,
+        atualizado_por=nome,
+    )
+
+
+def _pode_alterar_local(user: User) -> bool:
+    """Trocar o local muda em que contas o robô mexe e de que estoque o Flex
+    vive: só admin (e só quem vê o Flex — o router já garante)."""
+    return user.role == UserRole.ADMIN
+
+
+@router.put("/local", response_model=FlexLocalOut)
+async def trocar_local(body: FlexLocalIn, session: Sessao, user: Agir) -> FlexLocalOut:
+    """Troca o local de saída do Flex (cidade + lote). Vale na próxima rodada
+    do robô (até 15 min) — o "Sincronizar agora" aplica na hora."""
+    if not _pode_alterar_local(user):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={"code": "so_admin", "detalhe": "só um admin troca o local de saída do Flex"},
+        )
+    try:
+        local = await flex_local.salvar(session, cidade=body.cidade, lote=body.lote, por=user.id)
+    except flex_local.LocalFlexInvalidoError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail={"code": e.codigo, "detalhe": e.detalhe}
+        ) from e
+    await session.commit()
+    return await _local_out(session, local)
 
 
 @router.get("/config", response_model=FlexConfigOut)
@@ -166,11 +212,11 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
         motivo = None
         conta_flex = flex_motor.conta_flex_da_linha(c) if c is not None else None
         if conta_flex is not None and conta_flex.ativo is not None:
-            # Sem Flex na plataforma, ou (ML) com a saída do Flex fora de São
-            # Bernardo / não lida: a frase que os anúncios dela mostram.
+            # Sem Flex na plataforma, ou (ML) com a saída do Flex fora da
+            # cidade do local / não lida: a frase que os anúncios dela mostram.
             motivo = flex_motor.bloqueio_da_conta(c.plataforma, conta_flex)
         origem_ok = (
-            flex_config.origem_permitida_todas(c.origem_cep)
+            flex_local.origem_ok(c.origem_cidade)
             if c is not None and c.plataforma == "ml" and c.flex_ativo
             else None
         )
@@ -197,6 +243,11 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
             )
         )
     m = flex_config.modo()
+    vistas: list[str] = []
+    for c in linhas.values():
+        for cid in flex_local.cidades_da_origem(c.origem_cidade):
+            if not any(flex_local.mesma_cidade(cid, v) for v in vistas):
+                vistas.append(cid)
     return FlexConfigOut(
         modo=m,
         pode_escrever=flex_config.pode_escrever(m),
@@ -210,6 +261,10 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
         shopee_escrita=bool(s.flex_shopee_escrita),
         intervalo_min=max(1, int(s.flex_intervalo_min or 15)),
         pedido_no_sp=bool(s.flex_pedido_no_sp),
+        local=await _local_out(session, flex_local.atual()),
+        pode_alterar_local=_pode_alterar_local(user),
+        cidades_vistas=sorted(vistas, key=flex_local.normalizar_cidade),
+        lotes=list(flex_local.LOTES),
     )
 
 
@@ -269,6 +324,37 @@ def _anuncio_out(
     return out
 
 
+async def _liberadas(session: AsyncSession, permitidas: frozenset[UUID]) -> frozenset[UUID]:
+    """Contas em que o robô mexe de verdade: em `flex_contas` e sem bloqueio
+    da conta (sem Flex, não conferida, ou a saída do Flex fora da cidade do
+    local de saída)."""
+    if not permitidas:
+        return frozenset()
+    linhas = (
+        await session.execute(
+            select(FlexConta).where(FlexConta.integration_id.in_(list(permitidas)))
+        )
+    ).scalars()
+    return frozenset(
+        c.integration_id
+        for c in linhas
+        if flex_motor.bloqueio_da_conta(c.plataforma, flex_motor.conta_flex_da_linha(c)) is None
+    )
+
+
+def _desligar(liberadas: frozenset[UUID]):
+    """"Ligados que deveriam desligar": ligado na plataforma, a regra não quer
+    e o robô mexe na conta (a de Piracicaba fica de fora: o robô não toca)."""
+    est = FlexAnuncioEstado
+    if not liberadas:
+        return false()
+    return and_(
+        est.observado == "ligado",
+        est.desejado != "ligado",
+        est.integration_id.in_(list(liberadas)),
+    )
+
+
 def _aguardando(permitidas: frozenset[UUID]):
     """Esperando aprovação DE VERDADE: só nas contas em que o motor mexe."""
     est = FlexAnuncioEstado
@@ -280,6 +366,7 @@ def _aguardando(permitidas: frozenset[UUID]):
 async def _resumo(
     session: AsyncSession, escopo: frozenset[UUID] | None, permitidas: frozenset[UUID]
 ) -> FlexResumoOut:
+    liberadas = await _liberadas(session, permitidas)
     """O quadro do topo da tela: todos os anúncios avaliados, sem os filtros
     da lista (o dono vê de cara quantos esperam por ele) — dentro do escopo
     da equipe."""
@@ -288,7 +375,7 @@ async def _resumo(
         func.count(),
         func.count().filter(est.observado == "ligado"),
         func.count().filter(_aguardando(permitidas)),
-        func.count().filter(est.observado == "ligado", est.desejado != "ligado"),
+        func.count().filter(_desligar(liberadas)),
         func.count().filter(est.observado.is_(None)),
     ).select_from(est)
     filtro = _no_escopo(est.integration_id, escopo)
@@ -343,8 +430,7 @@ async def anuncios(
     elif aguardando is False:
         filtros.append(not_(_aguardando(permitidas)))
     if desligar:
-        filtros.append(FlexAnuncioEstado.observado == "ligado")
-        filtros.append(FlexAnuncioEstado.desejado != "ligado")
+        filtros.append(_desligar(await _liberadas(session, permitidas)))
     termo = (busca or "").strip()
     if termo:
         filtros.append(

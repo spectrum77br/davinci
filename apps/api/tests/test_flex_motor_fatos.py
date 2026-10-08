@@ -172,7 +172,14 @@ async def test_assinatura_em_cache_e_erro_mantem_a_anterior(db, mundo, monkeypat
     assert ml.assinaturas_lidas == 2
     conta = await _conta(db, mundo["conta_id"])
     assert (conta.flex_ativo, conta.status, conta.erro) == (True, "in", "503 Service Unavailable")
-    assert ml.leituras  # a conta continua sendo lida
+    # Trava de origem (08/10/2026): a leitura da assinatura tem mais de 1 h e
+    # não se confirmou — não se sabe se o motoboy ainda sai da cidade do
+    # local. A conta fica parada (sem leitura nem escrita) até responder; o
+    # banco guarda a origem que se sabia.
+    assert ml.leituras == []
+    assert conta.origem_cidade == "São Bernardo do Campo"
+    est = await _estados(db)
+    assert {e.motivo for e in est.values()} == {flex_motor.MOTIVO_SEM_ORIGEM}
     # Volta a responder: a conta saiu do Flex ("out").
     ml.assinatura = AssinaturaFlex(False, "out", "assinatura do Flex: out")
     await flex_motor.rodar_motor()
@@ -214,20 +221,24 @@ async def test_shopee_com_entrega_direta_desligada_na_loja(db, mundo, shopee, mo
 
 
 @pytest.mark.asyncio
-async def test_shopee_so_leitura_nao_pede_aprovacao_nem_toma_vaga(
-    db, mundo, shopee, monkeypatch
-):
+async def test_shopee_so_leitura_nao_pede_aprovacao_nem_toma_vaga(db, mundo, shopee, monkeypatch):
     """Loja com a Entrega Direta ligada, mas `flex_shopee_escrita` desligado:
     o anúncio Shopee com saldo NÃO pede aprovação (aprovar não ligaria nada)
     e não toma a vaga da família dos anúncios do ML."""
     ci = (await db.execute(select(Product.id).where(Product.sku == "dg053.ci"))).scalar_one()
-    loja = (
-        await db.execute(select(Integration.id).where(Integration.name == "loja"))
-    ).scalar_one()
-    db.add(ProductLink(user_id=mundo["dono_id"], product_id=ci, integration_id=loja,
-                       platform=IntegrationPlatform.SHOPEE, external_id="888",
-                       variation_id="1", stock=4,
-                       created_at=datetime(2020, 1, 1, tzinfo=UTC)))  # o vínculo mais antigo
+    loja = (await db.execute(select(Integration.id).where(Integration.name == "loja"))).scalar_one()
+    db.add(
+        ProductLink(
+            user_id=mundo["dono_id"],
+            product_id=ci,
+            integration_id=loja,
+            platform=IntegrationPlatform.SHOPEE,
+            external_id="888",
+            variation_id="1",
+            stock=4,
+            created_at=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+    )  # o vínculo mais antigo
     await db.commit()
     shopee.canais["888"] = [
         {"logistic_id": 90001, "enabled": True, "is_free": False},
@@ -277,29 +288,45 @@ def test_escolher_leituras_rodizio_espera_e_aprovados_primeiro():
     lido = agora - timedelta(hours=1)
 
     def est(**kw):
-        base = {"plataforma": "ml", "desejado": "desligado", "observado": "desligado",
-                "observado_em": lido, "recusa": None, "leitura_em": lido}
+        base = {
+            "plataforma": "ml",
+            "desejado": "desligado",
+            "observado": "desligado",
+            "observado_em": lido,
+            "recusa": None,
+            "leitura_em": lido,
+        }
         return flex_motor._Estado(**{**base, **kw})
 
     estados = {
         # A0 falhou há pouco: espera a próxima leitura (não volta ao topo).
-        (a, "A0"): est(observado=None, observado_em=None, leitura_em=agora,
-                       proxima_leitura=agora + timedelta(minutes=15)),
+        (a, "A0"): est(
+            observado=None,
+            observado_em=None,
+            leitura_em=agora,
+            proxima_leitura=agora + timedelta(minutes=15),
+        ),
         # A1 lido há muito tempo; A2 nunca tentado; A3 aprovado por uma pessoa.
         (a, "A1"): est(leitura_em=agora - timedelta(days=1)),
         (a, "A3"): est(aprovado=True),
         (b, "B0"): est(),
         (b, "B1"): est(leitura_em=agora - timedelta(hours=2)),
     }
-    ordem = [x.external_id for x in flex_motor._escolher_leituras(
-        anuncios, decisoes, estados, None, agora)]
+    ordem = [
+        x.external_id
+        for x in flex_motor._escolher_leituras(anuncios, decisoes, estados, None, agora)
+    ]
     # A conta "a" vem primeiro (o aprovado); depois rodízio a, b, a, b, a.
     assert ordem == ["A3", "B1", "A2", "B0", "A1"]
     # Conta bloqueada (sem Flex): fora da fila.
-    bloqueados = [x if x.integration_id == a else
-                  flex_motor.replace(x, bloqueio="conta sem Flex") for x in anuncios]
-    ordem = [x.external_id for x in flex_motor._escolher_leituras(
-        bloqueados, decisoes, estados, None, agora)]
+    bloqueados = [
+        x if x.integration_id == a else flex_motor.replace(x, bloqueio="conta sem Flex")
+        for x in anuncios
+    ]
+    ordem = [
+        x.external_id
+        for x in flex_motor._escolher_leituras(bloqueados, decisoes, estados, None, agora)
+    ]
     assert ordem == ["A3", "A2", "A1"]
 
 
@@ -313,24 +340,36 @@ async def test_conta_com_403_nao_congela_as_outras(db, mundo, monkeypatch, statu
     monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
     monkeypatch.setattr(flex_motor, "_TETO_LEITURAS_ML", 3)
     dono = mundo["dono_id"]
-    quebrada = Integration(user_id=dono, platform=IntegrationPlatform.ML, name="quebrada",
-                           credentials=encrypt_json({"access_token": "x"}))
+    quebrada = Integration(
+        user_id=dono,
+        platform=IntegrationPlatform.ML,
+        name="quebrada",
+        credentials=encrypt_json({"access_token": "x"}),
+    )
     db.add(quebrada)
     await db.flush()
     quebrada_id = quebrada.id
     for i in range(6):
         # b009: sem lote — inelegível, não disputa a vaga da família.
-        db.add(ProductLink(user_id=dono, product_id=mundo["b009_id"],
-                           integration_id=quebrada_id, platform=IntegrationPlatform.ML,
-                           external_id=f"MLBQ{i}", stock=3))
+        db.add(
+            ProductLink(
+                user_id=dono,
+                product_id=mundo["b009_id"],
+                integration_id=quebrada_id,
+                platform=IntegrationPlatform.ML,
+                external_id=f"MLBQ{i}",
+                stock=3,
+            )
+        )
     await db.commit()
     monkeypatch.setattr(mundo["cfg"], "flex_contas", f"{mundo['conta_id']},{quebrada_id}")
 
     class Quebrada(FakeML):
         async def ler_flex(self, item):
             self.chamadas.append(("ler", item))
-            return ResultadoFlex(flex_api.SEM_PERMISSAO, status_http=status_http,
-                                 detalhe="forbidden")
+            return ResultadoFlex(
+                flex_api.SEM_PERMISSAO, status_http=status_http, detalhe="forbidden"
+            )
 
     q = Quebrada()
     boa = mundo["ml"]
@@ -352,11 +391,17 @@ async def test_conta_com_403_nao_congela_as_outras(db, mundo, monkeypatch, statu
     # A leitura que falhou espera (crescente) — não volta ao topo da fila.
     db.expire_all()
     falhas = (
-        await db.execute(
-            select(FlexAnuncioEstado).where(FlexAnuncioEstado.integration_id == quebrada_id,
-                                            FlexAnuncioEstado.leitura_falhas > 0)
+        (
+            await db.execute(
+                select(FlexAnuncioEstado).where(
+                    FlexAnuncioEstado.integration_id == quebrada_id,
+                    FlexAnuncioEstado.leitura_falhas > 0,
+                )
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert falhas
     for e in falhas:
         assert e.proxima_leitura > datetime.now(UTC) + timedelta(minutes=10)
@@ -374,8 +419,12 @@ async def test_leitura_que_falha_espera_crescente_e_volta_quando_le(db, mundo, m
     ml.chamadas.clear()
     await flex_motor.rodar_motor()
     assert "MLB3" not in ml.leituras  # esperando
-    await db.execute(text("UPDATE flex_anuncio_estado SET proxima_leitura = now()"
-                          " - interval '1 minute' WHERE external_id = 'MLB3'"))
+    await db.execute(
+        text(
+            "UPDATE flex_anuncio_estado SET proxima_leitura = now()"
+            " - interval '1 minute' WHERE external_id = 'MLB3'"
+        )
+    )
     await db.commit()
     await flex_motor.rodar_motor()
     est = (await _estados(db))["MLB3"]
@@ -401,10 +450,15 @@ def test_pausado_ligado_nao_ocupa_vaga_da_familia():
     antigo = datetime(2025, 1, 1, tzinfo=UTC)
     anuncios = [
         _anuncio(conta, "MLB1", variacoes=v, observado="ligado", status="paused", desde=antigo),
-        _anuncio(conta, "MLB2", variacoes=v, observado="ligado", status="active",
-                 desde=antigo + timedelta(days=1)),
-        _anuncio(conta, "MLB3", variacoes=v, observado="ligado",
-                 desde=antigo + timedelta(days=2)),
+        _anuncio(
+            conta,
+            "MLB2",
+            variacoes=v,
+            observado="ligado",
+            status="active",
+            desde=antigo + timedelta(days=1),
+        ),
+        _anuncio(conta, "MLB3", variacoes=v, observado="ligado", desde=antigo + timedelta(days=2)),
     ]
     d = flex_motor.decidir_lote(anuncios, saldos, cfg)
     assert d[(conta, "MLB1")].desejado == "desligado"
@@ -418,18 +472,31 @@ async def test_anuncio_pausado_desliga_e_nao_pede_aprovacao(db, mundo, monkeypat
     monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
     ml = mundo["ml"]
     ml.estado.update({"MLB1": True, "MLB2": False})
-    db.add_all([
-        # MLB1 pausado (importação de agora) e com Flex: desliga.
-        Listing(user_id=mundo["dono_id"], integration_id=mundo["conta_id"],
-                platform=IntegrationPlatform.ML, external_id="MLB1", title="mala",
-                status=ListingStatus.PAUSED, imported_at=datetime.now(UTC)),
-        # MLB2 ativo na importação de ONTEM, mas a descoberta de hoje o viu
-        # pausado: vale o mais novo — não pede aprovação.
-        Listing(user_id=mundo["dono_id"], integration_id=mundo["conta_id"],
-                platform=IntegrationPlatform.ML, external_id="MLB2", title="mala 2",
+    db.add_all(
+        [
+            # MLB1 pausado (importação de agora) e com Flex: desliga.
+            Listing(
+                user_id=mundo["dono_id"],
+                integration_id=mundo["conta_id"],
+                platform=IntegrationPlatform.ML,
+                external_id="MLB1",
+                title="mala",
+                status=ListingStatus.PAUSED,
+                imported_at=datetime.now(UTC),
+            ),
+            # MLB2 ativo na importação de ONTEM, mas a descoberta de hoje o viu
+            # pausado: vale o mais novo — não pede aprovação.
+            Listing(
+                user_id=mundo["dono_id"],
+                integration_id=mundo["conta_id"],
+                platform=IntegrationPlatform.ML,
+                external_id="MLB2",
+                title="mala 2",
                 status=ListingStatus.ACTIVE,
-                imported_at=datetime.now(UTC) - timedelta(days=1)),
-    ])
+                imported_at=datetime.now(UTC) - timedelta(days=1),
+            ),
+        ]
+    )
     await db.commit()
     ml.conta_itens = {"MLB2": "paused", "MLB3": "active"}
     await flex_motor.rodar_motor()
@@ -450,8 +517,9 @@ async def test_anuncio_pausado_desliga_e_nao_pede_aprovacao(db, mundo, monkeypat
 async def test_desligar_recusado_tenta_de_novo_em_1h(db, mundo, monkeypatch):
     monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
     ml = mundo["ml"]
-    ml.desligar_resposta["MLB9"] = ResultadoFlex(flex_api.INELEGIVEL, status_http=403,
-                                                 detalhe="item down")
+    ml.desligar_resposta["MLB9"] = ResultadoFlex(
+        flex_api.INELEGIVEL, status_http=403, detalhe="item down"
+    )
     await flex_motor.rodar_motor()
     est = (await _estados(db))["MLB9"]
     agora = datetime.now(UTC)
@@ -460,8 +528,12 @@ async def test_desligar_recusado_tenta_de_novo_em_1h(db, mundo, monkeypatch):
     assert est.recusa is None  # recusa só trava o LIGAR
     # Passou a hora: lê de novo (ainda ligado) e desliga.
     del ml.desligar_resposta["MLB9"]
-    await db.execute(text("UPDATE flex_anuncio_estado SET proxima_tentativa = now()"
-                          " - interval '1 minute' WHERE external_id = 'MLB9'"))
+    await db.execute(
+        text(
+            "UPDATE flex_anuncio_estado SET proxima_tentativa = now()"
+            " - interval '1 minute' WHERE external_id = 'MLB9'"
+        )
+    )
     await db.commit()
     await flex_motor.rodar_motor()
     assert ml.estado["MLB9"] is False
@@ -532,9 +604,7 @@ async def test_aprovar_com_rodada_ocupada_vai_para_a_fila(
 
 
 @pytest.mark.asyncio
-async def test_descoberta_poe_no_estado_o_anuncio_que_o_davinci_nao_conhece(
-    db, mundo, monkeypatch
-):
+async def test_descoberta_poe_no_estado_o_anuncio_que_o_davinci_nao_conhece(db, mundo, monkeypatch):
     monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
     ml = mundo["ml"]
     ml.conta_itens = {"MLB1": "active", "MLB500": "active", "MLB501": "paused"}
@@ -581,15 +651,17 @@ async def test_emergencia_desliga_o_anuncio_descoberto(db, mundo, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_emergencia_job_tira_aprovacoes_na_hora_e_grava_o_andamento(
-    db, mundo, monkeypatch
-):
+async def test_emergencia_job_tira_aprovacoes_na_hora_e_grava_o_andamento(db, mundo, monkeypatch):
     monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
     monkeypatch.setattr(flex_motor, "_EMERGENCIA_PROGRESSO_S", 0.0)
     ml = mundo["ml"]
     await flex_motor.rodar_motor()
-    await db.execute(text("UPDATE flex_anuncio_estado SET aprovado_em = now()"
-                          " WHERE external_id IN ('MLB2', 'MLB3')"))
+    await db.execute(
+        text(
+            "UPDATE flex_anuncio_estado SET aprovado_em = now()"
+            " WHERE external_id IN ('MLB2', 'MLB3')"
+        )
+    )
     await db.commit()
     ml.chamadas.clear()
     prep = await flex_motor.preparar_emergencia(por=mundo["dono_id"])
@@ -634,18 +706,28 @@ def test_leitura_velha_volta_para_a_fila_mesmo_batendo_com_a_regra():
     lido = agora - timedelta(hours=1)
 
     def est(obs, quando):
-        return flex_motor._Estado(plataforma="ml", desejado="desligado", observado=obs,
-                                  observado_em=quando, recusa=None, leitura_em=quando)
+        return flex_motor._Estado(
+            plataforma="ml",
+            desejado="desligado",
+            observado=obs,
+            observado_em=quando,
+            recusa=None,
+            leitura_em=quando,
+        )
 
     estados = {x.chave: est("ligado", lido) for x in muitos}
     estados[z.chave] = est("desligado", agora - timedelta(hours=7))
-    ordem = [x.external_id for x in flex_motor._escolher_leituras(
-        anuncios, decisoes, estados, None, agora)]
+    ordem = [
+        x.external_id
+        for x in flex_motor._escolher_leituras(anuncios, decisoes, estados, None, agora)
+    ]
     assert ordem.index("Z") < flex_motor._TETO_LEITURAS_ML
     # Lido há pouco e batendo com a regra: continua no fim da fila.
     estados[z.chave] = est("desligado", lido)
-    ordem = [x.external_id for x in flex_motor._escolher_leituras(
-        anuncios, decisoes, estados, None, agora)]
+    ordem = [
+        x.external_id
+        for x in flex_motor._escolher_leituras(anuncios, decisoes, estados, None, agora)
+    ]
     assert ordem.index("Z") == 1000
 
 
@@ -668,9 +750,7 @@ async def test_ler_para_a_conta_depois_de_5_erros_seguidos(db):
     escolhidos = [_anuncio(a, f"A{i}") for i in range(20)]
     escolhidos += [_anuncio(b, f"B{i}") for i in range(3)]
     resumo: dict = {}
-    out = await flex_motor._ler(
-        escolhidos, {a: _Integ(a), b: _Integ(b)}, {a: ruim, b: boa}, resumo
-    )
+    out = await flex_motor._ler(escolhidos, {a: _Integ(a), b: _Integ(b)}, {a: ruim, b: boa}, resumo)
     assert len(ruim.leituras) == flex_motor._REPETIR_SEGUIDOS
     assert boa.leituras == ["B0", "B1", "B2"]
     assert resumo["contas_interrompidas"] == 1

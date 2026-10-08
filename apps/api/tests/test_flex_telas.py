@@ -24,6 +24,7 @@ from app.config import get_settings
 from app.models import (
     BlingOrder,
     FlexAnuncioEstado,
+    FlexConta,
     FlexPedido,
     Integration,
     IntegrationPlatform,
@@ -76,6 +77,19 @@ async def cena(db: AsyncSession, make_user, monkeypatch):
         )
     )
     agora = datetime.now(UTC)
+    # A conta tem o Flex saindo de São Bernardo do Campo (o local de fábrica):
+    # o robô mexe nela, então os "ligados que deveriam desligar" contam.
+    db.add(
+        FlexConta(
+            integration_id=conta.id,
+            plataforma="ml",
+            flex_ativo=True,
+            status="in",
+            lido_em=agora,
+            origem_cep="09750000",
+            origem_cidade="São Bernardo do Campo",
+        )
+    )
     base = {"integration_id": conta.id, "plataforma": "ml", "tentativas": 0}
     db.add_all(
         [
@@ -124,7 +138,7 @@ async def test_anuncios_motivo_claro_e_resumo(client: AsyncClient, cena, auth_as
     por_id = {i["external_id"]: i for i in corpo["itens"]}
     assert por_id["MLB1"]["motivo"] == "saldo Flex 5 em dg053.sp (liga com 3)"
     assert por_id["MLB1"]["motivo_claro"] == (
-        "5 peças livres em São Bernardo (dg053.sp) — dá para ter Flex (o mínimo é 3)."
+        "5 peças livres em São Bernardo do Campo (dg053.sp) — dá para ter Flex (o mínimo é 3)."
     )
     assert por_id["MLB2"]["motivo_claro"].startswith("Sem peça livre em São Bernardo")
     # Motivo sem tradução aparece como veio.
@@ -187,24 +201,50 @@ async def test_anuncio_so_importado_mostra_o_titulo_e_e_achado_pela_busca(
     importação grava `item_model`: o título vale para o anúncio (a 1ª parte)."""
     conta = cena["conta_id"]
     admin = cena["admin"]
-    loja = Integration(user_id=admin.id, platform=IntegrationPlatform.SHOPEE, name="loja",
-                       credentials=encrypt_json({"access_token": "t"}))
+    loja = Integration(
+        user_id=admin.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="loja",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
     db.add(loja)
     await db.flush()
     loja_id = loja.id
-    base = {"tentativas": 0, "aguardando_aprovacao": False, "desejado": "inelegivel",
-            "motivo": "anúncio sem vínculo vivo com produto do DaVinci"}
-    db.add_all([
-        Listing(user_id=admin.id, integration_id=conta, platform=IntegrationPlatform.ML,
-                external_id="MLB4", title="Mochila Executiva Importada",
-                status=ListingStatus.PAUSED),
-        Listing(user_id=admin.id, integration_id=loja_id, platform=IntegrationPlatform.SHOPEE,
-                external_id="777_55", title="Bolsa da Shopee"),
-        FlexAnuncioEstado(integration_id=conta, external_id="MLB4", plataforma="ml",
-                          status_anuncio="paused", **base),
-        FlexAnuncioEstado(integration_id=loja_id, external_id="777", plataforma="shopee",
-                          **base),
-    ])
+    base = {
+        "tentativas": 0,
+        "aguardando_aprovacao": False,
+        "desejado": "inelegivel",
+        "motivo": "anúncio sem vínculo vivo com produto do DaVinci",
+    }
+    db.add_all(
+        [
+            Listing(
+                user_id=admin.id,
+                integration_id=conta,
+                platform=IntegrationPlatform.ML,
+                external_id="MLB4",
+                title="Mochila Executiva Importada",
+                status=ListingStatus.PAUSED,
+            ),
+            Listing(
+                user_id=admin.id,
+                integration_id=loja_id,
+                platform=IntegrationPlatform.SHOPEE,
+                external_id="777_55",
+                title="Bolsa da Shopee",
+            ),
+            FlexAnuncioEstado(
+                integration_id=conta,
+                external_id="MLB4",
+                plataforma="ml",
+                status_anuncio="paused",
+                **base,
+            ),
+            FlexAnuncioEstado(
+                integration_id=loja_id, external_id="777", plataforma="shopee", **base
+            ),
+        ]
+    )
     await db.commit()
     auth_as(admin)
     itens = {i["external_id"]: i for i in (await client.get("/api/flex/anuncios")).json()["itens"]}

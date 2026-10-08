@@ -104,7 +104,13 @@ from app.models import (
     User,
     UserRole,
 )
-from app.services import estoque_familia, flex_config, flex_envio, nf_emissao_gerar
+from app.services import (
+    estoque_familia,
+    flex_config,
+    flex_envio,
+    flex_local,
+    nf_emissao_gerar,
+)
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.alerts import emit_alert
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
@@ -774,7 +780,10 @@ async def _decidir_pedido(
 
 # ---- Pedido Flex: sai SEMPRE do .sp ------------------------------------------
 
-_LOTE_FLEX = "sp"
+# O lote do Flex (era "sp" fixo) vem do local de saída editável na aba Flex
+# (services/flex_local, Eduardo 08/10/2026) — lido no começo da rodada.
+def _lote_flex() -> str:
+    return flex_local.lote()
 _FALTA_NA_FILA_DA_NF = (
     "a planilha da NF já saiu com o lote antigo — troque o item para o .sp à mão e refaça a NF"
 )
@@ -807,8 +816,8 @@ def _reserva_flex(qtd_por_codigo: dict[str, int]) -> Counter:
         for pedaco in (cod or "").lower().split("+"):
             p = pedaco.strip()
             tag = _tag_de(p) if p else None
-            if tag in estoque_familia.LOTES_DE_VENDA and tag != _LOTE_FLEX:
-                reserva[f"{p[: -(len(tag) + 1)]}.{_LOTE_FLEX}"] += int(qtd or 1)
+            if tag in estoque_familia.LOTES_DE_VENDA and tag != _lote_flex():
+                reserva[f"{p[: -(len(tag) + 1)]}.{_lote_flex()}"] += int(qtd or 1)
     return reserva
 
 
@@ -1027,7 +1036,7 @@ async def _decidir_flex(client, cache: dict, *, qtd_por_codigo: dict[str, int]) 
     if faltas or not itens:
         return {"trocas": [], "consumo": {}, "faltas": faltas}
 
-    plano = await _cobertura(client, cache, itens, _LOTE_FLEX)
+    plano = await _cobertura(client, cache, itens, _lote_flex())
     if plano is not None:
         trocas: list[dict] = []
         for t in plano["trocas"]:
@@ -1042,10 +1051,10 @@ async def _decidir_flex(client, cache: dict, *, qtd_por_codigo: dict[str, int]) 
     # Não cobre: diz o quê, item a item, para quem vai decidir.
     demanda: Counter = Counter()
     for cod, _b, tag, qtd in itens:
-        if tag != _LOTE_FLEX:
-            demanda[sku_alvo(cod, tag, _LOTE_FLEX)] += qtd
+        if tag != _lote_flex():
+            demanda[sku_alvo(cod, tag, _lote_flex())] += qtd
     for cod, _b, tag, _qtd in itens:
-        if tag == _LOTE_FLEX:
+        if tag == _lote_flex():
             prod = await _produto_exato(client, cache, cod)
             saldo = _saldo(prod)
             if prod is None:
@@ -1053,7 +1062,7 @@ async def _decidir_flex(client, cache: dict, *, qtd_por_codigo: dict[str, int]) 
             elif saldo is None or saldo < 0:
                 faltas.append(f"{cod}: o .sp está com saldo {_n(saldo)} (já contando este pedido)")
             continue
-        alvo = sku_alvo(cod, tag, _LOTE_FLEX)
+        alvo = sku_alvo(cod, tag, _lote_flex())
         prod = await _produto_exato(client, cache, alvo)
         saldo = _saldo(prod)
         if prod is None:
@@ -1123,18 +1132,20 @@ async def _flex_avisar_pessoas(
     )
     rotulo = _ROTULO_PLATAFORMA.get(pf.plataforma, pf.plataforma)
     loja = f"{rotulo} {pf.numeroloja}" if pf.numeroloja else rotulo
+    local = flex_local.atual()
     if na_fila_da_nf:
         mensagem = (
-            f"O pedido {numero} ({loja}) sai pelo Flex, de São Bernardo, mas só foi reconhecido "
-            "como Flex DEPOIS de entrar na fila da NF — a planilha saiu com o lote antigo. O robô "
-            "NÃO trocou o lote. Troque o item para o .sp à mão e refaça a NF (ou separe em SP e "
-            "acerte o estoque no Bling depois)."
+            f"O pedido {numero} ({loja}) sai pelo Flex, de {local.cidade}, mas só foi "
+            "reconhecido como Flex DEPOIS de entrar na fila da NF — a planilha saiu com o lote "
+            f"antigo. O robô NÃO trocou o lote. Troque o item para o .{local.lote} à mão e refaça "
+            f"a NF (ou separe em {local.cidade} e acerte o estoque no Bling depois)."
         )
     else:
         mensagem = (
-            f"O pedido {numero} ({loja}) sai pelo Flex, de São Bernardo, mas o estoque "
-            f"SP não cobre: {'; '.join(faltas)}. O robô NÃO trocou o lote. Decida: "
-            "separar em SP, transferir a peça para o .sp ou cancelar o pedido."
+            f"O pedido {numero} ({loja}) sai pelo Flex, de {local.cidade}, mas o estoque "
+            f".{local.lote} não cobre: {'; '.join(faltas)}. O robô NÃO trocou o lote. Decida: "
+            f"separar em {local.cidade}, transferir a peça para o .{local.lote} ou cancelar o "
+            "pedido."
         )
     avisados = 0
     for uid in admins:
@@ -1233,6 +1244,9 @@ async def aplicar_prioridade_estoque(
     substituir_item = bool(get_settings().prioridade_substitui_item)
     estoque_unico = bool(getattr(get_settings(), "prioridade_pedido_estoque_unico", True))
     flex_ligado = bool(getattr(get_settings(), "flex_pedido_no_sp", True))
+    if flex_ligado:
+        # O lote do Flex (o do local de saída da aba Flex) vale a rodada.
+        await flex_local.carregar(session)
     mapa = await _mapa_prioridades(session)
     if not mapa and not estoque_unico and not flex_ligado:
         return summary  # ninguém preencheu Prioridade — no-op barato

@@ -115,7 +115,14 @@ from app.models.financeiro import (
     FinanceiroSuprimentos,
     NCMCache,
 )
-from app.models.flex import FlexAnuncioEstado, FlexConta, FlexEmergencia, FlexLog, FlexPedido
+from app.models.flex import (
+    FlexAnuncioEstado,
+    FlexConta,
+    FlexEmergencia,
+    FlexLocal,
+    FlexLog,
+    FlexPedido,
+)
 from app.models.garantia import (
     GARANTIA_COBERTURAS,
     GARANTIA_LOG_ACOES,
@@ -367,6 +374,7 @@ __all__ = [
     "FlexAnuncioEstado",
     "FlexConta",
     "FlexEmergencia",
+    "FlexLocal",
     "FlexLog",
     "FlexPedido",
     "Logistica",

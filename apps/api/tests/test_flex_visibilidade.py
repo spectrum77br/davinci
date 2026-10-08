@@ -69,7 +69,12 @@ async def test_quem_esta_na_lista_ve(
     client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, lista
 ):
     auth_as(await _pessoa(db, make_user, "HEISENBERG"))
-    assert (await client.get("/api/flex/acesso")).json() == {"ok": True}
+    assert (await client.get("/api/flex/acesso")).json() == {
+        "ok": True,
+        # O local de saída (de fábrica): os textos da Logística dizem de onde sai.
+        "cidade": "São Bernardo do Campo",
+        "lote": "sp",
+    }
     assert (await client.get("/api/flex/config")).status_code == 200
     auth_as(await _pessoa(db, make_user, "thorfinn", role=UserRole.USER))
     # Na lista, mas as rotas continuam pedindo a permissão da Logística.
@@ -97,12 +102,24 @@ async def test_rota_do_flex_fora_da_documentacao(client: AsyncClient):
 
 
 async def _linhas_logistica(db: AsyncSession) -> None:
-    db.add_all([
-        Logistica(pedido_bling="V1", plataforma="Mercado Livre", meli_status={},
-                  envio_flex=True, envio_tipo="self_service"),
-        Logistica(pedido_bling="V2", plataforma="Mercado Livre", meli_status={},
-                  envio_flex=False, envio_tipo="cross_docking"),
-    ])
+    db.add_all(
+        [
+            Logistica(
+                pedido_bling="V1",
+                plataforma="Mercado Livre",
+                meli_status={},
+                envio_flex=True,
+                envio_tipo="self_service",
+            ),
+            Logistica(
+                pedido_bling="V2",
+                plataforma="Mercado Livre",
+                meli_status={},
+                envio_flex=False,
+                envio_tipo="cross_docking",
+            ),
+        ]
+    )
     await db.commit()
 
 
@@ -143,11 +160,19 @@ async def test_controle_de_estoque_so_marca_flex_para_quem_ve(
     client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, lista
 ):
     d = date(2026, 5, 28)
-    db.add_all([
-        BlingOrder(bling_id=940001, numero="940001", item_codigo="sku-1", item_index=0,
-                   situacao="15", em_andamento_data=d),
-        FlexPedido(bling_id=940001, plataforma="shopee", envio_tipo="90022"),
-    ])
+    db.add_all(
+        [
+            BlingOrder(
+                bling_id=940001,
+                numero="940001",
+                item_codigo="sku-1",
+                item_index=0,
+                situacao="15",
+                em_andamento_data=d,
+            ),
+            FlexPedido(bling_id=940001, plataforma="shopee", envio_tipo="90022"),
+        ]
+    )
     await db.commit()
     url = "/api/estoque/pedidos?data_inicio=2026-05-28&data_fim=2026-05-28"
 

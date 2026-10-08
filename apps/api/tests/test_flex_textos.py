@@ -88,7 +88,7 @@ def _claro(motivo: str) -> str:
         (_an("b009"), {}, "não é de um lote de venda"),
         (_an("dg053.ci+a001.ci"), {}, "é um kit"),
         (_an("dg053.ci"), {}, "O produto dg053.sp não existe"),
-        (_an("dg053.ci"), _sp(dg053_sp=0), "Sem peça livre em São Bernardo (dg053.sp)"),
+        (_an("dg053.ci"), _sp(dg053_sp=0), "Sem peça livre em São Bernardo do Campo (dg053.sp)"),
         (_an("dg053.ci"), _sp(dg053_sp=5), "5 peças livres em São Bernardo"),
         (_an("dg053.ci"), _sp(dg053_sp=1), "Só 1 peça livre em São Bernardo"),
         (

@@ -27,9 +27,9 @@ class FlexContaOut(BaseModel):
     flex_detalhe: str | None = None
     flex_motivo: str | None = None
     # De onde o motoboy do Flex sai (ML): CEP(s) só com dígitos e cidade(s)
-    # da assinatura; `flex_origem_ok` True = em São Bernardo
-    # (`flex_origem_ceps`), False = fora ou não lida (o motor não mexe na
-    # conta), None = trava desligada ou conta sem Flex.
+    # da assinatura; `flex_origem_ok` True = na cidade do local de saída,
+    # False = fora ou não lida (o motor não mexe na conta), None = conta sem
+    # Flex (ou da Shopee).
     flex_origem_cep: str | None = None
     flex_origem_cidade: str | None = None
     flex_origem_ok: bool | None = None
@@ -42,6 +42,22 @@ class FlexContaOut(BaseModel):
     descoberta_total: int | None = None
     descoberta_novos: int | None = None
     descoberta_erro: str | None = None
+
+
+class FlexLocalOut(BaseModel):
+    """De onde o motoboy do Flex sai (aba Flex › Local de saída): a cidade
+    (como o ML mostra na saída do Flex de cada conta) e o lote do estoque de
+    lá. O motor só mexe na conta cuja saída é nessa cidade."""
+
+    cidade: str
+    lote: str
+    atualizado_em: datetime | None = None
+    atualizado_por: str | None = None  # nome de quem trocou
+
+
+class FlexLocalIn(BaseModel):
+    cidade: str = Field(min_length=1, max_length=100)
+    lote: str = Field(min_length=2, max_length=3)
 
 
 class FlexConfigOut(BaseModel):
@@ -60,6 +76,12 @@ class FlexConfigOut(BaseModel):
     shopee_escrita: bool
     intervalo_min: int
     pedido_no_sp: bool
+    # Local de saída do Flex (editável por admin) e as cidades de saída que
+    # o motor leu nas contas (sugestões para trocar).
+    local: FlexLocalOut | None = None
+    pode_alterar_local: bool = False
+    cidades_vistas: list[str] = []
+    lotes: list[str] = []
 
 
 class FlexAnuncioOut(BaseModel):

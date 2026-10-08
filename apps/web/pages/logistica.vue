@@ -49,10 +49,14 @@ type PlataformaTab = (typeof PLATAFORMA_TABS)[number]['key']
 // outros a aba Flex não aparece e o selo/aviso "Flex" some dos pedidos (a API
 // da Logística também já manda a linha sem o tipo de envio).
 const podeVerFlex = ref(false)
+// De onde o motoboy do Flex sai (aba Flex › Local de saída — editável por
+// admin; São Bernardo do Campo / .sp de fábrica): os textos seguem o local.
+const flexLocal = ref<{ cidade: string; lote: string }>({ cidade: 'São Bernardo do Campo', lote: 'sp' })
 const ABAS_VISIVEIS = computed(() => PLATAFORMA_TABS.filter((t) => t.key !== 'flex' || podeVerFlex.value))
 async function verificarFlex(): Promise<boolean> {
   try {
-    await api('/api/flex/acesso')
+    const acesso = await api<{ cidade?: string; lote?: string }>('/api/flex/acesso')
+    if (acesso?.cidade) flexLocal.value = { cidade: acesso.cidade, lote: acesso.lote || 'sp' }
     podeVerFlex.value = true
   } catch {
     podeVerFlex.value = false
@@ -491,8 +495,8 @@ async function carregarResumoFlex() {
       if (!p.numero) continue
       if (p.acerto_pendente)
         mapa[p.numero] =
-          'Saiu de São Bernardo sem passar pelo .sp: o Bling baixou outro lote. Acerte o estoque no Bling ' +
-          '(transferência para o .sp) e marque em Flex › Anúncios Flex.'
+          `Saiu de ${flexLocal.value.cidade} sem passar pelo .${flexLocal.value.lote}: o Bling baixou outro lote. ` +
+          `Acerte o estoque no Bling (transferência para o .${flexLocal.value.lote}) e marque em Flex › Anúncios Flex.`
       else if (p.alerta) mapa[p.numero] = p.alerta
     }
     flexAlertas.value = mapa
@@ -504,10 +508,13 @@ async function carregarResumoFlex() {
 function flexAlerta(c: Logistica): string | null {
   return (c.pedido_bling && flexAlertas.value[c.pedido_bling]) || null
 }
-const FLEX_SELO_TITULO =
-  'Envio Flex: sai de São Bernardo (estoque .sp) e é entregue no mesmo dia ou no dia seguinte (Mercado Livre Envios Flex / Shopee Entrega Direta).'
+const flexSeloTituloBase = computed(
+  () =>
+    `Envio Flex: sai de ${flexLocal.value.cidade} (estoque .${flexLocal.value.lote}) e é entregue no mesmo dia ou no dia seguinte (Mercado Livre Envios Flex / Shopee Entrega Direta).`,
+)
 function flexSeloTitulo(c: Logistica): string {
-  return c.envio_tipo ? `${FLEX_SELO_TITULO}\nTipo de envio na plataforma: ${c.envio_tipo}` : FLEX_SELO_TITULO
+  const base = flexSeloTituloBase.value
+  return c.envio_tipo ? `${base}\nTipo de envio na plataforma: ${c.envio_tipo}` : base
 }
 // Clique num pedido da lista "sem peça em SP" (sub-aba Anúncios Flex): volta
 // para "Pedidos Flex" já buscando o pedido.
@@ -2201,10 +2208,10 @@ async function aplicarStatusBling(c: Logistica) {
         v-if="Object.keys(flexAlertas).length && flexSub === 'pedidos'"
         type="button"
         class="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2.5 py-1 text-sm text-rose-800 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
-        title="Ver a lista dos pedidos Flex sem peça em São Bernardo (na sub-aba Anúncios Flex)"
+        :title="`Ver a lista dos pedidos Flex sem peça em ${flexLocal.cidade} (na sub-aba Anúncios Flex)`"
         @click="flexSub = 'anuncios'"
       >
-        {{ Object.keys(flexAlertas).length }} pedido(s) Flex sem peça em São Bernardo
+        {{ Object.keys(flexAlertas).length }} pedido(s) Flex sem peça em {{ flexLocal.cidade }}
       </button>
     </div>
     <LogisticaFlexAnuncios
@@ -2320,8 +2327,8 @@ async function aplicarStatusBling(c: Logistica) {
       </div>
 
       <p v-if="tab === 'flex'" class="text-sm text-muted-foreground">
-        Pedidos Flex do Mercado Livre (Envios Flex) e da Shopee (Entrega Direta): saem de São Bernardo
-        (estoque .sp) e são entregues no mesmo dia ou no dia seguinte. Eles continuam aparecendo também nas
+        Pedidos Flex do Mercado Livre (Envios Flex) e da Shopee (Entrega Direta): saem de {{ flexLocal.cidade }}
+        (estoque .{{ flexLocal.lote }}) e são entregues no mesmo dia ou no dia seguinte. Eles continuam aparecendo também nas
         abas Mercado Livre e Shopee, com o selo Flex.
       </p>
       <p v-else class="text-sm text-muted-foreground">
@@ -2432,7 +2439,7 @@ async function aplicarStatusBling(c: Logistica) {
                   v-if="flexAlerta(c)"
                   class="mt-0.5 max-w-[200px] whitespace-normal text-[11px] font-medium text-rose-700 dark:text-rose-400"
                   :title="flexAlerta(c) || ''"
-                >sem peça em São Bernardo</div>
+                >sem peça em {{ flexLocal.cidade }}</div>
               </td>
               <td class="px-3 py-2 text-xs max-w-[240px]">
                 <template v-if="c.produtos && c.produtos.length">
@@ -2769,7 +2776,7 @@ async function aplicarStatusBling(c: Logistica) {
                 · {{ c.conta || '—' }}
               </div>
               <div v-if="flexAlerta(c)" class="text-[11px] font-medium text-rose-700 dark:text-rose-400">
-                Flex sem peça em São Bernardo: {{ flexAlerta(c) }}
+                Flex sem peça em {{ flexLocal.cidade }}: {{ flexAlerta(c) }}
               </div>
               <div v-if="c.produtos && c.produtos.length" class="text-xs mt-0.5 space-y-0.5">
                 <div v-for="(p, pi) in c.produtos" :key="pi" class="min-w-0">

@@ -803,20 +803,6 @@ class Settings(BaseSettings):
     flex_shopee_canais: str = "90022"
     flex_shopee_escrita: bool = False
     flex_intervalo_min: int = 15
-    # De onde o motoboy do Flex sai (Eduardo, 08/10/2026: "o motoboy vai sair
-    # de São Bernardo" — procedimento-flex.md, seção 2). Faixas de CEP,
-    # separadas por vírgula ("09600-09899" = São Bernardo do Campo; aceita 5
-    # ou 8 dígitos). O motor lê a ORIGEM da assinatura do Flex de cada conta
-    # do ML (subscriptions/v1 → origin.zip_code) e só mexe na conta cuja
-    # saída do Flex está numa dessas faixas — com a saída em outra cidade, o
-    # Flex ligado por peça do .sp venderia para quem está longe de São
-    # Bernardo. Em 08/10/2026 as 17 contas "in" saíam de Piracicaba (CEP
-    # 134xx): o endereço do Flex é trocado À MÃO no painel do ML.
-    # Vazio = sem trava. Valor com erro de digitação = nenhuma faixa válida =
-    # nenhuma conta passa (o lado seguro, services/flex_config).
-    # Shopee: a Entrega Direta usa o endereço principal da loja (não vem na
-    # leitura do canal) e a escrita lá está desligada (flex_shopee_escrita).
-    flex_origem_ceps: str = "09600-09899"
     # Quem VÊ o Flex (Eduardo, 05/10/2026: "por enquanto somente os usuários
     # heisenberg e o thorfinn podem ver"): nomes de usuário (users.name),
     # separados por vírgula, sem diferença de maiúscula. Para os outros —

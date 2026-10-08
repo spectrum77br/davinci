@@ -128,7 +128,7 @@ from app.models import (
     ProductLink,
 )
 from app.models.flex import FLEX_STATUS_ANUNCIO
-from app.services import flex_config, flex_envio
+from app.services import flex_config, flex_envio, flex_local
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.bling_situacoes import (
     SITUACAO_ATENDIDO,
@@ -145,7 +145,10 @@ logger = structlog.get_logger()
 LIGADO = "ligado"
 DESLIGADO = "desligado"
 INELEGIVEL = "inelegivel"
-_LOTE_FLEX = "sp"
+# O lote do Flex (era "sp" fixo) vem do local de saída editável na aba Flex
+# (services/flex_local, Eduardo 08/10/2026) — lido no começo de cada rodada.
+def _lote_flex() -> str:
+    return flex_local.lote()
 
 # Trava da RODADA (uma de cada vez: cron, botão, aprovação, gancho). ASCII
 # "flex"; o namespace é o SYNC compartilhado do projeto (advisory_lock.py).
@@ -367,7 +370,7 @@ def analisar_sku(sku: str | None, *, kits: bool) -> tuple[str, str] | str:
         return f"{low}: lote .{tag} fora dos lotes de venda"
     if "+" in low and not kits:
         return f"{low}: kit — kits fora do Flex nesta fase (flex_kits)"
-    return familia, sku_alvo(low, tag, _LOTE_FLEX)
+    return familia, sku_alvo(low, tag, _lote_flex())
 
 
 def _estado_atual(anuncio: Anuncio) -> str:
@@ -446,8 +449,8 @@ def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) ->
             falta = r if isinstance(r, str) else f"{r[1]} não existe ativo"
             return Decisao(
                 INELEGIVEL,
-                f"variação {_nome_variacao(v)} parada sem .sp ({falta}) — volta a vender "
-                "quando o estoque for publicado",
+                f"variação {_nome_variacao(v)} parada sem .{_lote_flex()} ({falta}) — volta a "
+                "vender quando o estoque for publicado",
             )
         vendaveis.append(v)
     if not vendaveis:
@@ -470,7 +473,7 @@ def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) ->
         if sp is None or sp.saldo is None:
             return Decisao(
                 INELEGIVEL,
-                f"{sku_sp} não existe ativo — sem estoque .sp conhecido, nunca liga",
+                f"{sku_sp} não existe ativo — sem estoque .{_lote_flex()} conhecido, nunca liga",
                 familias,
                 None,
                 skus_sp,
@@ -839,7 +842,7 @@ def _demanda_por_peca(itens: Iterable[tuple[str | None, Any]]) -> Counter[str]:
         for pedaco in (codigo or "").lower().split("+"):
             p = pedaco.strip()
             lote = lote_de(p) if p else None
-            if lote in LOTES_DE_VENDA and lote != _LOTE_FLEX:
+            if lote in LOTES_DE_VENDA and lote != _lote_flex():
                 demanda[p[: -(len(lote) + 1)]] += q
     return demanda
 
@@ -859,9 +862,9 @@ def _pendentes(sku_sp: str, demanda: Mapping[str, int]) -> int:
     """Quanto o .sp deve aos pedidos Flex: no kit, a peça mais pedida (o
     estoque do kit .sp já é o da peça mais escassa — conservador)."""
     pecas = [
-        p.strip()[: -(len(_LOTE_FLEX) + 1)]
+        p.strip()[: -(len(_lote_flex()) + 1)]
         for p in sku_sp.split("+")
-        if lote_de(p.strip()) == _LOTE_FLEX
+        if lote_de(p.strip()) == _lote_flex()
     ]
     return max((int(demanda.get(p, 0)) for p in pecas), default=0)
 
@@ -877,7 +880,7 @@ def _demanda_no_sp(itens: Iterable[tuple[str | None, Any]]) -> Counter[str]:
             q = 1
         for pedaco in (codigo or "").lower().split("+"):
             p = pedaco.strip()
-            if p and lote_de(p) == _LOTE_FLEX:
+            if p and lote_de(p) == _lote_flex():
                 demanda[p] += q
     return demanda
 
@@ -964,7 +967,7 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
             for peca, q in _demanda_no_sp([(codigo, qtd)]).items():
                 visto = atualizado.get(peca)
                 if visto is None or visto <= sp_em:
-                    movidos[peca[: -(len(_LOTE_FLEX) + 1)]] += q
+                    movidos[peca[: -(len(_lote_flex()) + 1)]] += q
 
     out: dict[str, SaldoSp] = {}
     for sku in alvos:
@@ -1181,7 +1184,7 @@ def conta_flex_da_linha(c: FlexConta) -> ContaFlex:
 
 
 MOTIVO_SEM_ORIGEM = "não deu para ler de onde sai o Flex da conta no ML"
-_PREFIXO_FORA_DA_ORIGEM = "saída do Flex da conta fora de São Bernardo"
+_PREFIXO_FORA_DA_ORIGEM = "saída do Flex da conta fora de"
 
 
 def _cep_txt(cep: str) -> str:
@@ -1190,26 +1193,23 @@ def _cep_txt(cep: str) -> str:
 
 
 def bloqueio_da_origem(conta: ContaFlex) -> str | None:
-    """A saída do Flex da conta (ML) está em São Bernardo (`flex_origem_ceps`)?
-    None = está (ou a trava está desligada, `flex_origem_ceps` vazio).
+    """A saída do Flex da conta (ML) é na cidade do local de saída (aba Flex,
+    `flex_local` — São Bernardo do Campo de fábrica)? None = é.
 
-    Eduardo, 08/10/2026: "o motoboy vai sair de São Bernardo". Com a saída
-    em outra cidade, o Flex ligado pela peça do .sp venderia para quem mora
-    perto de lá — longe da peça. Conta "in" sem origem lida: negação por
-    padrão (o motor pergunta de novo na rodada seguinte)."""
-    faixas = flex_config.faixas_origem()
-    if faixas is None:
+    Eduardo, 08/10/2026: "o motoboy vai sair de São Bernardo" — e o local
+    pode mudar. Com a saída em outra cidade, o Flex ligado pela peça do lote
+    do local venderia para quem mora perto de lá, longe da peça. Conta "in"
+    sem a cidade da origem lida: negação por padrão (o motor pergunta de novo
+    na rodada seguinte)."""
+    local = flex_local.atual()
+    cidades = flex_local.cidades_da_origem(conta.origem_cidade)
+    if not cidades:
+        return MOTIVO_SEM_ORIGEM
+    if flex_local.origem_ok(conta.origem_cidade, local):
         return None
     ceps = [c.strip() for c in (conta.origem_cep or "").split(",") if c.strip()]
-    if not ceps:
-        return MOTIVO_SEM_ORIGEM
-    fora = [c for c in ceps if not flex_config.origem_permitida(c, faixas)]
-    if not fora:
-        return None
-    return (
-        f"{_PREFIXO_FORA_DA_ORIGEM}: {conta.origem_cidade or '?'} "
-        f"(CEP {', '.join(_cep_txt(c) for c in fora)})"
-    )
+    cep = f" (CEP {', '.join(_cep_txt(c) for c in ceps)})" if ceps else ""
+    return f"{_PREFIXO_FORA_DA_ORIGEM} {local.cidade}: {', '.join(cidades)}{cep}"
 
 
 def bloqueio_da_conta(plataforma: str, conta: ContaFlex | None) -> str | None:
@@ -1220,8 +1220,8 @@ def bloqueio_da_conta(plataforma: str, conta: ContaFlex | None) -> str | None:
     bloqueia: negação por padrão — sem saber se a conta tem Flex, o motor não
     pede aprovação nem escreve. O erro fica em `flex_conta.erro` (a tela).
 
-    ML com Flex ativo mas a SAÍDA do Flex fora de São Bernardo (ou não lida)
-    também bloqueia — `bloqueio_da_origem`. A emergência não passa por aqui:
+    ML com Flex ativo mas a SAÍDA do Flex fora da cidade do local de saída
+    (ou não lida) também bloqueia — `bloqueio_da_origem`. A emergência não passa por aqui:
     ela desliga tudo das contas com Flex, de onde quer que saiam."""
     ml = plataforma == flex_envio.PLATAFORMA_ML
     if conta is None or conta.ativo is None:
@@ -1262,6 +1262,7 @@ async def _conferir_contas(
     resumo: dict,
     *,
     perguntar: bool,
+    forcar: Collection[UUID] = (),
 ) -> dict[UUID, ContaFlex]:
     """A conta pode ter Flex? Vale o que está em `flex_conta` por até
     `_VALIDADE_CONTA`; depois disso (ou nunca conferida) pergunta à
@@ -1269,7 +1270,14 @@ async def _conferir_contas(
     pedido Flex): só o banco, qualquer idade.
 
     Resposta "não sei" (rede, 5xx) não apaga a anterior: fica o erro e a
-    próxima rodada pergunta de novo."""
+    próxima rodada pergunta de novo. Mas a ORIGEM (de onde o motoboy sai)
+    lida há mais de `_VALIDADE_CONTA` não vale sem confirmação: a conta fica
+    "não deu para ler de onde sai" até a plataforma responder (só na memória
+    da rodada — o banco guarda a última origem lida).
+
+    `forcar`: contas perguntadas agora mesmo, sem cache — antes de LIGAR um
+    anúncio aprovado e no "Sincronizar agora" (quem acabou de trocar o
+    endereço do Flex no painel não espera 1 h)."""
     if not integracoes:
         return {}
     async with session_scope() as s:
@@ -1298,13 +1306,14 @@ async def _conferir_contas(
             sem_origem = (
                 atual.plataforma == flex_envio.PLATAFORMA_ML
                 and atual.ativo is True
-                and not atual.origem_cep
+                and not atual.origem_cidade
             )
             if (
                 atual.ativo is not None
                 and atual.lido_em is not None
                 and atual.lido_em >= agora - _VALIDADE_CONTA
                 and not sem_origem
+                and iid not in forcar
             ):
                 continue
             cli = await _cliente(integ, clientes)
@@ -1328,12 +1337,21 @@ async def _conferir_contas(
                         c.flex_ativo = r.ativo
                         c.status = r.status
                         c.detalhe = (r.detalhe or None) and r.detalhe[:500]
-                        c.origem_cep = (r.origem_cep or None) and r.origem_cep[:200]
-                        c.origem_cidade = (r.origem_cidade or None) and r.origem_cidade[:200]
+                        if r.origem_ausente:
+                            # "in" sem `origin` em NENHUMA assinatura: o formato
+                            # da resposta mudou — fica a origem que já se sabia.
+                            logger.warning("flex_conta_sem_origin", integration_id=str(iid))
+                        else:
+                            c.origem_cep = (r.origem_cep or None) and r.origem_cep[:200]
+                            c.origem_cidade = (r.origem_cidade or None) and r.origem_cidade[:200]
                         c.lido_em = agora
                         c.erro = None
                     c.atualizado_em = agora
                     out[iid] = replace(conta_flex_da_linha(c), plataforma=out[iid].plataforma)
+                    velha = c.lido_em is None or c.lido_em < agora - _VALIDADE_CONTA
+                    if r.ativo is None and velha:
+                        # Origem velha sem confirmação: não vale (ver docstring).
+                        out[iid] = replace(out[iid], origem_cep=None, origem_cidade=None)
                     if (c.origem_cep, c.origem_cidade) != origem_antes:
                         logger.info(
                             "flex_conta_origem_mudou",
@@ -2231,10 +2249,10 @@ async def _conferir_no_bling(session: AsyncSession, skus_sp: Collection[str]) ->
     lote, mas a peça sai de São Bernardo)."""
     skus = sorted({x.strip().lower() for x in skus_sp if x and x.strip()})
     if not skus:
-        return "o anúncio não tem .sp para conferir no Bling"
+        return f"o anúncio não tem .{_lote_flex()} para conferir no Bling"
     bling = await saldos_bling(skus)
     if bling is None:
-        return "não deu para conferir o saldo do .sp no Bling agora"
+        return f"não deu para conferir o saldo do .{_lote_flex()} no Bling agora"
     banco = await calcular_saldos(session, skus)
     cfg = ConfigFlex.das_configuracoes()
     for sku in skus:
@@ -2504,8 +2522,13 @@ async def rodar_motor(
     somente: Collection[tuple[UUID, str]] | None = None,
     por: UUID | None = None,
     origem: str = "cron",
+    reler_contas: bool = False,
 ) -> dict:
     """Uma rodada do motor. Respeita o modo; uma rodada de cada vez.
+
+    `reler_contas`: pergunta a assinatura (e a origem) de todas as contas sem
+    o cache de 1 h — o "Sincronizar agora" (quem trocou o endereço do Flex
+    no painel do ML vê na hora).
 
     `ler=False, so_desligar=True`: o passe barato do gancho do pedido Flex —
     só banco + os DESLIGAR que o novo saldo pede (pelo último estado lido).
@@ -2520,6 +2543,9 @@ async def rodar_motor(
         resumo["motivo"] = "nenhuma conta em flex_contas"
         return resumo
     cfg = ConfigFlex.das_configuracoes()
+    # O local de saída (cidade + lote) vale a rodada inteira.
+    local = await flex_local.carregar()
+    resumo["local"] = f"{local.cidade} (.{local.lote})"
     async with session_scope() as trava:
         if not await _travar(trava, _MOTOR_LOCK_KEY):
             resumo["ocupado"] = True
@@ -2534,9 +2560,27 @@ async def rodar_motor(
             alvo=set(somente) if somente is not None else None,
             por=por,
             resumo=resumo,
+            reler_contas=reler_contas,
         )
     logger.info("flex_motor_rodada", **{k: v for k, v in resumo.items() if v not in (0, None)})
     return resumo
+
+
+async def _contas_com_aprovacao(contas: Collection[UUID]) -> set[UUID]:
+    """Contas com algum anúncio aprovado para LIGAR (a aprovação ainda não
+    usada) — a rodada relê a assinatura delas antes de ligar."""
+    if not contas:
+        return set()
+    async with session_scope() as s:
+        rows = await s.execute(
+            select(FlexAnuncioEstado.integration_id)
+            .where(
+                FlexAnuncioEstado.integration_id.in_(list(contas)),
+                FlexAnuncioEstado.aprovado_em.is_not(None),
+            )
+            .distinct()
+        )
+        return {r[0] for r in rows.all()}
 
 
 async def _rodada(
@@ -2549,6 +2593,7 @@ async def _rodada(
     alvo: set[tuple[UUID, str]] | None,
     por: UUID | None,
     resumo: dict,
+    reler_contas: bool = False,
 ) -> None:
     agora = _agora()
     # Conta desde o começo: a conferência das contas e a descoberta também
@@ -2561,7 +2606,20 @@ async def _rodada(
         return
     clientes: dict[UUID, Any] = {}
     # A conta pode ter Flex? (cache de 1 h; o passe barato só lê o banco.)
-    contas_flex = await _conferir_contas(integracoes, clientes, agora, resumo, perguntar=ler)
+    # Antes de LIGAR (anúncio aprovado — o desta aprovação ou um que ficou
+    # esperando), a assinatura e a origem são lidas de novo, sem o cache de
+    # 1 h: o endereço do Flex pode ter saído da cidade do local há pouco.
+    forcar: set[UUID] = set()
+    if ler:
+        if reler_contas:
+            forcar = set(integracoes)
+        else:
+            if alvo:
+                forcar |= {iid for iid, _ext in alvo}
+            forcar |= await _contas_com_aprovacao(integracoes.keys())
+    contas_flex = await _conferir_contas(
+        integracoes, clientes, agora, resumo, perguntar=ler, forcar=forcar
+    )
     vistos: dict[tuple[UUID, str], str] = {}
     if ler and alvo is None:
         vistos = await _descobrir(integracoes, contas_flex, clientes, agora, resumo, modo=modo)
@@ -2613,6 +2671,7 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
     m = flex_config.modo()
     if m == flex_config.MODO_DESLIGADO:
         raise FlexRegraError("flex_desligado", "o Flex está com flex_modo=desligado")
+    await flex_local.carregar()
     if integration_id not in flex_config.contas():
         raise FlexRegraError("conta_nao_permitida", "a conta não está em flex_contas")
     agora = _agora()
@@ -2636,7 +2695,7 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
                 or "a conta não pode ter Flex",
             )
         if conta is not None and conta.flex_ativo is True:
-            # Saída do Flex fora de São Bernardo: aprovar não pode ficar
+            # Saída do Flex fora da cidade do local: aprovar não pode ficar
             # pendurado até alguém trocar o endereço (aí ligaria sozinho).
             fora = bloqueio_da_conta(est.plataforma, conta_flex_da_linha(conta))
             if fora:
@@ -2824,6 +2883,7 @@ async def executar_emergencia(emergencia_id: int) -> dict:
 
     Andamento: `flex_emergencia.resumo`, regravado a cada
     `_EMERGENCIA_PROGRESSO_S` s (a tela consulta)."""
+    await flex_local.carregar()
     async with session_scope() as s:
         linha = await s.get(FlexEmergencia, emergencia_id)
         if linha is None:

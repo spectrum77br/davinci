@@ -1,23 +1,25 @@
-"""Trava de ORIGEM do Flex (Eduardo, 08/10/2026: "o motoboy vai sair de São
-Bernardo" — procedimento-flex.md, seção 2).
+"""Local de saída do Flex e trava de ORIGEM (Eduardo, 08/10/2026: "o motoboy
+vai sair de São Bernardo" e "não vai ser pra sempre fixo em São Bernardo, eu
+quero poder alterar").
 
-A leitura de 08/10 mostrou as 17 contas do ML com a assinatura "in" saindo
-de Piracicaba (CEP 134xx). O Flex ligado pela peça do .sp (São Bernardo)
-venderia para quem mora perto de Piracicaba. O motor guarda a origem da
-assinatura (subscriptions/v1 → origin.zip_code / city.name) e só mexe na
-conta cuja saída está em `flex_origem_ceps` (padrão 09600-09899).
+A leitura de 08/10 mostrou as 17 contas do ML com a assinatura "in" saindo de
+Piracicaba. O motor guarda a origem da assinatura (subscriptions/v1 →
+origin.zip_code / origin.city.name) e só mexe na conta cuja saída do Flex é
+na CIDADE do local de saída (`flex_local`, aba Flex — São Bernardo do Campo /
+.sp de fábrica). O LOTE do local é o estoque que liga/desliga o Flex.
 
 O que se confere aqui:
-  • a faixa de CEP (e o erro de digitação vira o lado seguro);
-  • a leitura da origem no formato real da resposta do ML;
+  • o local: padrão, troca (só admin), validação, cache e Histórico;
+  • a leitura da origem no formato real do ML (pares CEP+cidade; uma saída
+    sem cidade = não se sabe; nenhuma `origin` = formato mudou, fica a antiga);
   • conta saindo de Piracicaba: nem lê, nem desliga, nem liga, nem aprova —
     e o anúncio mostra o porquê em português claro;
-  • trocou o endereço para São Bernardo: na próxima conferência o motor volta
-    a mexer;
-  • conta "in" sem a origem (lida antes da 0383) é perguntada já, não espera 1 h;
+  • trocar o endereço (ou o local): o "Sincronizar agora" vê na hora; antes
+    de LIGAR um anúncio aprovado a assinatura é relida (sem o cache de 1 h);
+  • a plataforma fora do ar por mais de 1 h: a origem velha não vale;
+  • trocar o lote muda o estoque que o motor conta;
   • a emergência continua desligando tudo, de onde quer que saia;
-  • a trava desligada (`flex_origem_ceps` vazio) mexe como antes;
-  • a tela (GET /api/flex/config) mostra a origem e o motivo.
+  • a tela: /config, /acesso e o "ligados que deveriam desligar".
 """
 
 from __future__ import annotations
@@ -29,22 +31,17 @@ import httpx
 import pytest
 import respx
 from httpx import AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import FlexConta
-from app.services import flex_config, flex_motor, flex_textos
+from app.models import FlexAnuncioEstado, FlexConta, FlexLocal, Product, UserRole
+from app.services import flex_config, flex_envio, flex_local, flex_motor, flex_textos
 from app.services.marketplaces import flex_api
 from app.services.marketplaces.flex_api import AssinaturaFlex
 from app.services.marketplaces.ml import ML_API_BASE
 from tests.test_flex_api import cena
 from tests.test_flex_clientes import ASSINATURA, _ml
-from tests.test_flex_motor import (
-    ORIGEM_PIRACICABA,
-    ORIGEM_SB,
-    _estados,
-    mundo,
-)
+from tests.test_flex_motor import ORIGEM_PIRACICABA, ORIGEM_SB, _estados, mundo
 
 # Fixtures importadas: o pytest acha pelo nome do parâmetro.
 _FIXTURES = (cena, mundo)
@@ -63,7 +60,9 @@ SAO_BERNARDO = AssinaturaFlex(
     origem_cep=ORIGEM_SB,
     origem_cidade="São Bernardo do Campo",
 )
-MOTIVO_PIRACICABA = "saída do Flex da conta fora de São Bernardo: Piracicaba (CEP 13400-123)"
+MOTIVO_PIRACICABA = (
+    "saída do Flex da conta fora de São Bernardo do Campo: Piracicaba (CEP 13400-123)"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -76,49 +75,54 @@ async def _conta(db: AsyncSession, iid) -> FlexConta | None:
     return await db.get(FlexConta, iid)
 
 
-# ---- faixa de CEP ----------------------------------------------------------------
+async def _velha(db: AsyncSession) -> None:
+    """A leitura da assinatura passa da validade de 1 h."""
+    await db.execute(text("UPDATE flex_conta SET lido_em = now() - interval '2 hours'"))
+    await db.commit()
 
 
-def test_faixas_de_cep():
-    sb = ((9600000, 9899999),)
-    assert flex_config.faixas_origem("09600-09899") == sb
-    assert flex_config.faixas_origem("09600000-09899999") == sb
-    assert flex_config.faixas_origem(" 09750-000 ") == ((9750000, 9750000),)  # um CEP só
-    assert flex_config.faixas_origem("09600") == ((9600000, 9600999),)  # prefixo
-    assert flex_config.faixas_origem("09600-09899, 13400-13432") == (
-        (9600000, 9899999),
-        (13400000, 13432999),
-    )
-    # Vazio = trava desligada; lixo = nenhuma faixa válida = ninguém passa.
-    assert flex_config.faixas_origem("") is None
-    assert flex_config.faixas_origem("  ") is None
-    assert flex_config.faixas_origem("são bernardo") == ()
-    assert flex_config.faixas_origem("09899-09600") == ()  # fim antes do início
+# ---- o local de saída -------------------------------------------------------------
 
 
-def test_origem_permitida():
-    sb = flex_config.faixas_origem("09600-09899")
-    assert flex_config.origem_permitida("09750000", sb) is True
-    assert flex_config.origem_permitida("09750-000", sb) is True
-    assert flex_config.origem_permitida("09600000", sb) is True
-    assert flex_config.origem_permitida("09899999", sb) is True
-    assert flex_config.origem_permitida("09900000", sb) is False  # Diadema
-    assert flex_config.origem_permitida("13400123", sb) is False  # Piracicaba
-    assert flex_config.origem_permitida(None, sb) is False
-    assert flex_config.origem_permitida("0975", sb) is False  # ilegível
-    assert flex_config.origem_permitida("13400123", None) is None  # trava desligada
-    assert flex_config.origem_permitida("09750000", ()) is False  # .env com erro
+def test_cidade_sem_acento_nem_maiuscula():
+    assert flex_local.mesma_cidade("São Bernardo do Campo", "sao  bernardo do CAMPO")
+    assert flex_local.mesma_cidade(" Piracicaba ", "PIRACICABA")
+    assert not flex_local.mesma_cidade("São Bernardo do Campo", "Santo André")
+    assert not flex_local.mesma_cidade("", "")
+    sb = flex_local.LocalFlex("São Bernardo do Campo", "sp")
+    assert flex_local.origem_ok("São Bernardo do Campo", sb) is True
+    assert flex_local.origem_ok("Sao Bernardo do Campo", sb) is True
+    assert flex_local.origem_ok("Piracicaba", sb) is False
+    # Duas saídas: as duas têm de ser na cidade (uma fora já bloqueia).
+    assert flex_local.origem_ok("São Bernardo do Campo, Piracicaba", sb) is False
+    assert flex_local.origem_ok(None, sb) is False
 
 
-def test_origem_permitida_todas(monkeypatch):
-    from app.config import get_settings
-
-    monkeypatch.setattr(get_settings(), "flex_origem_ceps", "09600-09899")
-    assert flex_config.origem_permitida_todas("09750000") is True
-    assert flex_config.origem_permitida_todas("09750000,13400123") is False
-    assert flex_config.origem_permitida_todas(None) is False
-    monkeypatch.setattr(get_settings(), "flex_origem_ceps", "")
-    assert flex_config.origem_permitida_todas("13400123") is None
+@pytest.mark.asyncio
+async def test_local_de_fabrica_troca_e_cache(db: AsyncSession, make_user):
+    # Sem linha no banco: São Bernardo do Campo / .sp (o que era fixo).
+    local = await flex_local.carregar(db, forcar=True)
+    assert (local.cidade, local.lote) == ("São Bernardo do Campo", "sp")
+    assert (flex_local.cidade(), flex_local.lote()) == ("São Bernardo do Campo", "sp")
+    dono = await make_user(role=UserRole.ADMIN)
+    novo = await flex_local.salvar(db, cidade="  Piracicaba ", lote=".PI", por=dono.id)
+    await db.commit()
+    assert (novo.cidade, novo.lote, novo.atualizado_por) == ("Piracicaba", "pi", dono.id)
+    # O processo que salvou já usa o novo; outro processo relê do banco.
+    assert (flex_local.cidade(), flex_local.lote()) == ("Piracicaba", "pi")
+    flex_local.limpar_cache()
+    assert flex_local.lote() == "sp"  # sem carregar: o de fábrica
+    assert (await flex_local.carregar(db)).lote == "pi"
+    linha = (await db.execute(select(FlexLocal))).scalars().all()
+    assert [(x.id, x.cidade, x.lote) for x in linha] == [(1, "Piracicaba", "pi")]
+    for cidade, lote, codigo in [
+        ("", "sp", "cidade_vazia"),
+        ("x" * 101, "sp", "cidade_longa"),
+        ("Piracicaba", "cd", "lote_invalido"),
+    ]:
+        with pytest.raises(flex_local.LocalFlexInvalidoError) as e:
+            await flex_local.salvar(db, cidade=cidade, lote=lote, por=None)
+        assert e.value.codigo == codigo
 
 
 # ---- leitura da origem (formato real do ML) ---------------------------------------
@@ -136,80 +140,69 @@ def _assinatura(status: str, cep: str | None, cidade: str | None = None) -> dict
     return a
 
 
+SB_IN = _assinatura("in", "09750-000", "São Bernardo do Campo")
+PIRA_IN = _assinatura("in", "13400-123", "Piracicaba")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("corpo", "cep", "cidade"),
+    ("corpo", "cep", "cidade", "ausente"),
     [
         # Uma assinatura "in" (o caso das 17 contas em 08/10/2026).
-        ([_assinatura("in", "13400-123", "Piracicaba")], "13400123", "Piracicaba"),
+        ([PIRA_IN], "13400123", "Piracicaba", False),
+        ([SB_IN], "09750000", "São Bernardo do Campo", False),
+        # A origem da assinatura "out" não conta; duas "in" ficam as duas, em pares.
         (
-            [_assinatura("in", "09750000", "São Bernardo do Campo")],
+            [_assinatura("out", "13400000", "Piracicaba"), SB_IN],
             "09750000",
             "São Bernardo do Campo",
+            False,
         ),
-        # A origem da assinatura "out" não conta; duas "in" ficam as duas.
-        (
-            [
-                _assinatura("out", "13400000", "Piracicaba"),
-                _assinatura("in", "09750-000", "São Bernardo do Campo"),
-            ],
-            "09750000",
-            "São Bernardo do Campo",
-        ),
-        (
-            [
-                _assinatura("in", "09750-000", "São Bernardo do Campo"),
-                _assinatura("in", "13400-123", "Piracicaba"),
-            ],
-            "09750000,13400123",
-            "São Bernardo do Campo, Piracicaba",
-        ),
-        # Sem origem na resposta: None (a trava trata como "não se sabe").
-        ([_assinatura("in", None)], None, None),
-        ([_assinatura("in", "13400-123")], "13400123", None),
-        ({"results": [_assinatura("in", "13400-123", "Piracicaba")]}, "13400123", "Piracicaba"),
+        ([SB_IN, PIRA_IN], "09750000,13400123", "São Bernardo do Campo, Piracicaba", False),
+        # Uma "in" sem cidade (ou sem origin) junto de outra de São Bernardo:
+        # não se sabe de onde a conta sai — nada passa.
+        ([SB_IN, _assinatura("in", "13400-123")], None, None, False),
+        ([SB_IN, _assinatura("in", None)], None, None, False),
+        # Nenhuma "in" com origin: o formato mudou (o motor fica com a antiga).
+        ([_assinatura("in", None)], None, None, True),
+        ({"results": [PIRA_IN]}, "13400123", "Piracicaba", False),
     ],
 )
-async def test_ml_assinatura_traz_a_origem(corpo, cep, cidade):
+async def test_ml_assinatura_traz_a_origem(corpo, cep, cidade, ausente):
     with respx.mock(base_url=ML_API_BASE) as router:
         router.get(ASSINATURA).mock(return_value=httpx.Response(200, json=corpo))
         r = await _ml().ler_assinatura_flex()
     assert (r.ativo, r.status) == (True, "in")
-    assert (r.origem_cep, r.origem_cidade) == (cep, cidade)
+    assert (r.origem_cep, r.origem_cidade, r.origem_ausente) == (cep, cidade, ausente)
 
 
 def test_assinatura_sem_flex_nao_tem_origem():
-    r = flex_api.classificar_assinatura_ml(
-        httpx.Response(200, json=[_assinatura("out", "13400-123", "Piracicaba")])
-    )
+    r = flex_api.classificar_assinatura_ml(httpx.Response(200, json=[_assinatura("out", "1", "x")]))
     assert (r.ativo, r.origem_cep, r.origem_cidade) == (False, None, None)
+
+
+def test_cep_com_digito_estranho_nao_derruba():
+    r = flex_api.classificar_assinatura_ml(
+        httpx.Response(200, json=[_assinatura("in", "13400-12³", "Piracicaba")])
+    )
+    assert (r.origem_cep, r.origem_cidade) == ("1340012", "Piracicaba")
 
 
 # ---- a regra (pura) ---------------------------------------------------------------
 
 
-def test_bloqueio_da_conta_pela_origem(monkeypatch):
-    from app.config import get_settings
-
-    monkeypatch.setattr(get_settings(), "flex_origem_ceps", "09600-09899")
-    sb = flex_motor.ContaFlex("ml", True, "in", origem_cep=ORIGEM_SB)
+def test_bloqueio_da_conta_pela_cidade_do_local():
+    sb = flex_motor.ContaFlex(
+        "ml", True, "in", origem_cep=ORIGEM_SB, origem_cidade="São Bernardo do Campo"
+    )
     pira = flex_motor.ContaFlex(
         "ml", True, "in", origem_cep=ORIGEM_PIRACICABA, origem_cidade="Piracicaba"
     )
     sem = flex_motor.ContaFlex("ml", True, "in")
-    duas = flex_motor.ContaFlex(
-        "ml",
-        True,
-        "in",
-        origem_cep=f"{ORIGEM_SB},{ORIGEM_PIRACICABA}",
-        origem_cidade="São Bernardo do Campo, Piracicaba",
-    )
     assert flex_motor.bloqueio_da_conta("ml", sb) is None
     assert flex_motor.bloqueio_da_conta("ml", pira) == MOTIVO_PIRACICABA
     assert flex_motor.bloqueio_da_conta("ml", sem) == flex_motor.MOTIVO_SEM_ORIGEM
-    # Uma das origens fora já bloqueia (o comprador perto de Piracicaba vê o Flex).
-    assert "(CEP 13400-123)" in flex_motor.bloqueio_da_conta("ml", duas)
-    # Conta sem Flex continua com o motivo de antes (a origem nem entra).
+    # Conta sem Flex: o motivo de antes (a origem nem entra).
     assert flex_motor.bloqueio_da_conta("ml", flex_motor.ContaFlex("ml", False, "out")) == (
         "conta sem Flex ativo no ML (status out)"
     )
@@ -217,24 +210,30 @@ def test_bloqueio_da_conta_pela_origem(monkeypatch):
     assert (
         flex_motor.bloqueio_da_conta("shopee", flex_motor.ContaFlex("shopee", True, "in")) is None
     )
-    # Trava desligada: como antes.
-    monkeypatch.setattr(get_settings(), "flex_origem_ceps", "")
+    # O local passa a ser Piracicaba: inverte.
+    flex_local._guardar(flex_local.LocalFlex("Piracicaba", "pi"))
     assert flex_motor.bloqueio_da_conta("ml", pira) is None
-    assert flex_motor.bloqueio_da_conta("ml", sem) is None
-    # .env com erro de digitação: ninguém passa (o lado seguro).
-    monkeypatch.setattr(get_settings(), "flex_origem_ceps", "sao bernardo")
-    assert flex_motor.bloqueio_da_conta("ml", sb) is not None
+    assert flex_motor.bloqueio_da_conta("ml", sb) == (
+        "saída do Flex da conta fora de Piracicaba: São Bernardo do Campo (CEP 09750-000)"
+    )
 
 
 def test_textos_claros_da_origem():
     claro = flex_textos.motivo_claro(MOTIVO_PIRACICABA)
     assert claro.startswith(
         "A saída do Flex desta conta no Mercado Livre está em Piracicaba (CEP 13400-123), "
-        "não em São Bernardo."
+        "não em São Bernardo do Campo."
     )
     assert "Troque o endereço do Flex no painel do Mercado Livre" in claro
+    sem_cep = flex_textos.motivo_claro("saída do Flex da conta fora de Piracicaba: Campinas")
+    assert sem_cep.startswith("A saída do Flex desta conta no Mercado Livre está em Campinas, não")
     claro = flex_textos.motivo_claro(flex_motor.MOTIVO_SEM_ORIGEM)
     assert claro.startswith("Ainda não deu para ler de onde sai o Flex desta conta")
+    # Os textos seguem a cidade do local.
+    flex_local._guardar(flex_local.LocalFlex("Piracicaba", "pi"))
+    assert "5 peças livres em Piracicaba (dg053.pi)" in flex_textos.motivo_claro(
+        "saldo Flex 5 em dg053.pi (liga com 3)"
+    )
 
 
 # ---- o motor ----------------------------------------------------------------------
@@ -250,6 +249,7 @@ async def test_conta_saindo_de_piracicaba_o_motor_nao_mexe(db, mundo, monkeypatc
     resumo = await flex_motor.rodar_motor()
     assert ml.chamadas == []  # nem leitura por anúncio, nem escrita
     assert resumo["contas_fora_da_origem"] == 1
+    assert resumo["local"] == "São Bernardo do Campo (.sp)"
     est = await _estados(db)
     assert {e.motivo for e in est.values()} == {MOTIVO_PIRACICABA}
     assert {e.desejado for e in est.values()} == {"inelegivel"}
@@ -260,37 +260,70 @@ async def test_conta_saindo_de_piracicaba_o_motor_nao_mexe(db, mundo, monkeypatc
         ORIGEM_PIRACICABA,
         "Piracicaba",
     )
-    # Aprovar ligar numa conta assim é recusado (não fica pendurado até
-    # alguém trocar o endereço).
     with pytest.raises(flex_motor.FlexRegraError) as e:
         await flex_motor.aprovar(mundo["conta_id"], "MLB1", por=mundo["dono_id"])
     assert e.value.codigo == "conta_fora_da_origem"
     assert "Piracicaba" in e.value.detalhe
 
-    # O Eduardo troca o endereço do Flex para São Bernardo no painel do ML:
-    # na próxima conferência (validade de 1 h) o motor volta a mexer.
+    # O Eduardo troca o endereço do Flex para São Bernardo no painel do ML. A
+    # rodada do cron ainda usa a leitura de menos de 1 h…
     ml.assinatura = SAO_BERNARDO
     await flex_motor.rodar_motor()
-    assert ml.escritas == []  # ainda vale a leitura de menos de 1 h
-    await db.execute(text("UPDATE flex_conta SET lido_em = now() - interval '2 hours'"))
-    await db.commit()
-    resumo = await flex_motor.rodar_motor()
+    assert ml.escritas == []
+    # …mas o "Sincronizar agora" relê a assinatura na hora.
+    resumo = await flex_motor.rodar_motor(origem="manual", reler_contas=True)
     assert resumo["contas_fora_da_origem"] == 0
     assert sorted(ml.escritas) == [("desligar", "MLB77"), ("desligar", "MLB9")]
     conta = await _conta(db, mundo["conta_id"])
     assert (conta.origem_cep, conta.origem_cidade) == (ORIGEM_SB, "São Bernardo do Campo")
-    est = await _estados(db)
-    assert est["MLB1"].aguardando_aprovacao is True  # ligar volta a pedir aprovação
+    assert (await _estados(db))["MLB1"].aguardando_aprovacao is True
 
     # E se voltar para Piracicaba, para de mexer de novo.
     ml.assinatura = PIRACICABA
-    await db.execute(text("UPDATE flex_conta SET lido_em = now() - interval '2 hours'"))
-    await db.commit()
+    await _velha(db)
     ml.chamadas.clear()
     await flex_motor.rodar_motor()
     assert ml.chamadas == []
-    est = await _estados(db)
-    assert not any(e.aguardando_aprovacao for e in est.values())
+    assert not any(e.aguardando_aprovacao for e in (await _estados(db)).values())
+
+
+@pytest.mark.asyncio
+async def test_antes_de_ligar_o_aprovado_a_assinatura_e_relida(db, mundo, monkeypatch):
+    """A conta saía de São Bernardo (lida agora há pouco) e o endereço do Flex
+    foi trocado para Piracicaba: aprovar o MLB1 relê a assinatura antes de
+    ligar — não liga (achado da revisão de 08/10/2026)."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()
+    lidas = ml.assinaturas_lidas
+    ml.assinatura = PIRACICABA
+    ml.chamadas.clear()
+    res = await flex_motor.aprovar(mundo["conta_id"], "MLB1", por=mundo["dono_id"])
+    assert ml.assinaturas_lidas == lidas + 1
+    assert ("ligar", "MLB1") not in ml.chamadas
+    assert res["aplicado"] is False
+    est = (await _estados(db))["MLB1"]
+    assert (est.desejado, est.motivo) == ("inelegivel", MOTIVO_PIRACICABA)
+    assert est.aprovado_em is None  # a aprovação não fica pendurada
+
+
+@pytest.mark.asyncio
+async def test_aprovacao_pendente_faz_a_rodada_reler_a_conta(db, mundo, monkeypatch):
+    """Uma aprovação que ainda não ligou (o Bling não confirmou): a rodada do
+    cron relê a assinatura da conta dela antes de ligar."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()
+    await db.execute(
+        text("UPDATE flex_anuncio_estado SET aprovado_em = now() WHERE external_id = 'MLB1'")
+    )
+    await db.commit()
+    ml.assinatura = PIRACICABA
+    lidas = ml.assinaturas_lidas
+    ml.chamadas.clear()
+    await flex_motor.rodar_motor()
+    assert ml.assinaturas_lidas == lidas + 1
+    assert ml.chamadas == []
 
 
 @pytest.mark.asyncio
@@ -299,7 +332,6 @@ async def test_conta_in_sem_origem_e_perguntada_na_hora(db, mundo, monkeypatch):
     5 min): o motor pergunta de novo já — sem esperar a validade de 1 h."""
     monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
     ml = mundo["ml"]
-    agora = datetime.now(UTC)
     db.add(
         FlexConta(
             integration_id=mundo["conta_id"],
@@ -307,26 +339,91 @@ async def test_conta_in_sem_origem_e_perguntada_na_hora(db, mundo, monkeypatch):
             flex_ativo=True,
             status="in",
             detalhe="assinatura do Flex ativa",
-            lido_em=agora - timedelta(minutes=5),
+            lido_em=datetime.now(UTC) - timedelta(minutes=5),
         )
     )
     await db.commit()
     await flex_motor.rodar_motor()
     assert ml.assinaturas_lidas == 1
     conta = await _conta(db, mundo["conta_id"])
-    assert conta.origem_cep == ORIGEM_SB
+    assert conta.origem_cidade == "São Bernardo do Campo"
     assert ("desligar", "MLB9") in ml.escritas
-    # A resposta veio sem origem: fica bloqueada e pergunta de novo na próxima.
+
+
+@pytest.mark.asyncio
+async def test_saida_sem_cidade_bloqueia_e_sem_origin_fica_a_antiga(db, mundo, monkeypatch):
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()  # grava São Bernardo
+    # Uma saída sem cidade (a resposta veio incompleta): não se sabe — para.
     ml.assinatura = AssinaturaFlex(True, "in", "assinatura do Flex ativa")
-    await db.execute(text("UPDATE flex_conta SET lido_em = now() - interval '2 hours'"))
-    await db.commit()
+    await _velha(db)
     ml.chamadas.clear()
     await flex_motor.rodar_motor()
     assert ml.chamadas == []
-    est = await _estados(db)
-    assert {e.motivo for e in est.values()} == {flex_motor.MOTIVO_SEM_ORIGEM}
+    assert {e.motivo for e in (await _estados(db)).values()} == {flex_motor.MOTIVO_SEM_ORIGEM}
+    # Nenhuma `origin` na resposta (o formato mudou): fica a que se sabia.
+    await db.execute(
+        text("UPDATE flex_conta SET origem_cep = :c, origem_cidade = 'São Bernardo do Campo'"),
+        {"c": ORIGEM_SB},
+    )
+    await _velha(db)
+    ml.assinatura = AssinaturaFlex(True, "in", "assinatura do Flex ativa", origem_ausente=True)
     await flex_motor.rodar_motor()
-    assert ml.assinaturas_lidas == 3  # sem origem: não usa o cache de 1 h
+    conta = await _conta(db, mundo["conta_id"])
+    assert conta.origem_cidade == "São Bernardo do Campo"
+    assert ml.leituras  # a conta volta a ser lida
+
+
+@pytest.mark.asyncio
+async def test_plataforma_fora_do_ar_mais_de_1h_a_origem_velha_nao_vale(db, mundo, monkeypatch):
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()
+    await _velha(db)
+    ml.assinatura = AssinaturaFlex(None, None, "503 Service Unavailable")
+    ml.chamadas.clear()
+    await flex_motor.rodar_motor()
+    assert ml.chamadas == []
+    conta = await _conta(db, mundo["conta_id"])
+    # O banco guarda o que se sabia; só a rodada não confia.
+    assert (conta.flex_ativo, conta.origem_cidade) == (True, "São Bernardo do Campo")
+    # Voltou a responder: volta a mexer.
+    ml.assinatura = SAO_BERNARDO
+    await flex_motor.rodar_motor()
+    assert ml.leituras
+
+
+@pytest.mark.asyncio
+async def test_trocar_o_local_muda_a_cidade_e_o_lote(db, mundo, monkeypatch):
+    """O local vira Piracicaba / .pi: a conta que sai de Piracicaba é a que o
+    motor mexe e o estoque contado é o dg053.pi."""
+    ml = mundo["ml"]
+    ml.assinatura = PIRACICABA
+    db.add(
+        Product(
+            user_id=mundo["dono_id"],
+            sku="dg053.pi",
+            name="dg053.pi",
+            stock=7,
+            situacao="A",
+            bling_product_id=777001,
+        )
+    )
+    await db.commit()
+    await flex_local.salvar(db, cidade="Piracicaba", lote="pi", por=mundo["dono_id"])
+    await db.commit()
+    flex_local.limpar_cache()  # o worker relê do banco no começo da rodada
+    resumo = await flex_motor.rodar_motor()
+    assert resumo["local"] == "Piracicaba (.pi)"
+    assert resumo["contas_fora_da_origem"] == 0
+    est = await _estados(db)
+    assert est["MLB1"].motivo == "saldo Flex 7 em dg053.pi (liga com 3)"
+    assert est["MLB1"].desejado == "ligado"
+    assert ml.leituras  # a conta de Piracicaba agora é lida
+    # O pedido Flex já no lote do local conta como "no lote do Flex".
+    assert flex_envio.item_no_sp("dg053.pi") is True
+    assert flex_envio.item_no_sp("dg053.sp") is False
 
 
 @pytest.mark.asyncio
@@ -339,8 +436,7 @@ async def test_emergencia_desliga_tambem_na_conta_de_piracicaba(db, mundo, monke
     await flex_motor.rodar_motor()
     assert ml.escritas == []
     resumo = await flex_motor.emergencia(por=mundo["dono_id"])
-    # Os da conta bloqueada nunca foram lidos: a emergência desliga todos
-    # (o que não se sabe se está ligado também — test_emergencia_desliga_o_que_nunca_foi_lido).
+    # Os da conta bloqueada nunca foram lidos: a emergência desliga todos.
     assert sorted(ml.escritas) == [
         ("desligar", e) for e in ("MLB1", "MLB2", "MLB3", "MLB77", "MLB9")
     ]
@@ -348,37 +444,19 @@ async def test_emergencia_desliga_tambem_na_conta_de_piracicaba(db, mundo, monke
     assert resumo["restantes"] == 0
 
 
-@pytest.mark.asyncio
-async def test_trava_desligada_mexe_como_antes(db, mundo, monkeypatch):
-    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
-    monkeypatch.setattr(mundo["cfg"], "flex_origem_ceps", "")
-    ml = mundo["ml"]
-    ml.assinatura = PIRACICABA
-    await flex_motor.rodar_motor()
-    assert sorted(ml.escritas) == [("desligar", "MLB77"), ("desligar", "MLB9")]
-
-
-@pytest.mark.asyncio
-async def test_observar_com_conta_de_piracicaba_nao_le_nem_simula(db, mundo):
-    """Em observar (como está em produção): a conta de Piracicaba fica com o
-    motivo da origem e nenhuma leitura por anúncio é gasta."""
-    ml = mundo["ml"]
-    ml.assinatura = PIRACICABA
-    resumo = await flex_motor.rodar_motor()
-    assert ml.chamadas == [] and resumo["contas_fora_da_origem"] == 1
-    est = await _estados(db)
-    assert {e.motivo for e in est.values()} == {MOTIVO_PIRACICABA}
-
-
 # ---- a tela -----------------------------------------------------------------------
 
 
+async def _conta_out(client: AsyncClient, conta_id) -> dict:
+    r = await client.get("/api/flex/config")
+    assert r.status_code == 200, r.text
+    return {x["id"]: x for x in r.json()["contas"]}[str(conta_id)]
+
+
 @pytest.mark.asyncio
-async def test_config_mostra_a_origem_e_o_motivo(
-    client: AsyncClient, db: AsyncSession, cena, auth_as: Callable, monkeypatch
+async def test_config_mostra_o_local_a_origem_e_o_motivo(
+    client: AsyncClient, db: AsyncSession, cena, auth_as: Callable, make_user
 ):
-    monkeypatch.setattr(cena["cfg"], "flex_origem_ceps", "09600-09899")
-    agora = datetime.now(UTC)
     db.add(
         FlexConta(
             integration_id=cena["conta_id"],
@@ -386,7 +464,7 @@ async def test_config_mostra_a_origem_e_o_motivo(
             flex_ativo=True,
             status="in",
             detalhe="assinatura do Flex ativa",
-            lido_em=agora,
+            lido_em=datetime.now(UTC),
             origem_cep=ORIGEM_PIRACICABA,
             origem_cidade="Piracicaba",
         )
@@ -394,27 +472,79 @@ async def test_config_mostra_a_origem_e_o_motivo(
     await db.commit()
     auth_as(cena["admin"])
     r = await client.get("/api/flex/config")
-    assert r.status_code == 200, r.text
-    c = {x["id"]: x for x in r.json()["contas"]}[str(cena["conta_id"])]
-    assert (
-        c["flex_ativo"],
-        c["flex_origem_cep"],
-        c["flex_origem_cidade"],
-        c["flex_origem_ok"],
-    ) == (True, ORIGEM_PIRACICABA, "Piracicaba", False)
-    assert c["flex_motivo"] == MOTIVO_PIRACICABA
+    corpo = r.json()
+    assert corpo["local"]["cidade"] == "São Bernardo do Campo" and corpo["local"]["lote"] == "sp"
+    assert corpo["pode_alterar_local"] is True
+    assert corpo["cidades_vistas"] == ["Piracicaba"]
+    assert corpo["lotes"] == ["ci", "pi", "ra", "sa", "sp"]
+    c = await _conta_out(client, cena["conta_id"])
+    assert (c["flex_origem_cidade"], c["flex_origem_ok"], c["flex_motivo"]) == (
+        "Piracicaba",
+        False,
+        MOTIVO_PIRACICABA,
+    )
 
+    # O admin troca o local para Piracicaba / .pi: a conta passa.
+    r = await client.put("/api/flex/local", json={"cidade": "Piracicaba", "lote": "pi"})
+    assert r.status_code == 200, r.text
+    assert (r.json()["cidade"], r.json()["lote"]) == ("Piracicaba", "pi")
+    assert r.json()["atualizado_por"]
+    c = await _conta_out(client, cena["conta_id"])
+    assert (c["flex_origem_ok"], c["flex_motivo"]) == (True, None)
+    assert (await client.get("/api/flex/acesso")).json()["cidade"] == "Piracicaba"
+
+    # Erros de validação e quem pode.
+    r = await client.put("/api/flex/local", json={"cidade": "Piracicaba", "lote": "zz"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "lote_invalido"
+    r = await client.put("/api/flex/local", json={"cidade": "   ", "lote": "sp"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "cidade_vazia"
+    gerente = await make_user(role=UserRole.USER)
+    auth_as(gerente)
+    r = await client.put("/api/flex/local", json={"cidade": "Campinas", "lote": "sp"})
+    assert r.status_code in (403,), r.text
+    linha = (await db.execute(select(FlexLocal))).scalar_one()
+    await db.refresh(linha)
+    assert (linha.cidade, linha.lote) == ("Piracicaba", "pi")
+
+
+@pytest.mark.asyncio
+async def test_deveriam_desligar_so_conta_onde_o_robo_mexe(
+    client: AsyncClient, db: AsyncSession, cena, auth_as: Callable
+):
+    """MLB2 (ligado, a regra quer inelegível) só conta como "deveria desligar"
+    quando a conta sai da cidade do local — senão o robô não toca nela."""
+    db.add(
+        FlexConta(
+            integration_id=cena["conta_id"],
+            plataforma="ml",
+            flex_ativo=True,
+            status="in",
+            lido_em=datetime.now(UTC),
+            origem_cep=ORIGEM_PIRACICABA,
+            origem_cidade="Piracicaba",
+        )
+    )
+    await db.commit()
+    auth_as(cena["admin"])
+    r = await client.get("/api/flex/anuncios?desligar=true")
+    assert r.status_code == 200, r.text
+    assert (r.json()["itens"], r.json()["resumo"]["desligar"]) == ([], 0)
     await db.execute(
         text("UPDATE flex_conta SET origem_cep = :c, origem_cidade = 'São Bernardo do Campo'"),
         {"c": ORIGEM_SB},
     )
     await db.commit()
-    r = await client.get("/api/flex/config")
-    c = {x["id"]: x for x in r.json()["contas"]}[str(cena["conta_id"])]
-    assert (c["flex_origem_ok"], c["flex_motivo"]) == (True, None)
+    r = await client.get("/api/flex/anuncios?desligar=true")
+    assert [i["external_id"] for i in r.json()["itens"]] == ["MLB2"]
+    assert r.json()["resumo"]["desligar"] == 1
 
-    # Trava desligada: a tela não julga a origem.
-    monkeypatch.setattr(cena["cfg"], "flex_origem_ceps", "")
-    r = await client.get("/api/flex/config")
-    c = {x["id"]: x for x in r.json()["contas"]}[str(cena["conta_id"])]
-    assert (c["flex_origem_ok"], c["flex_motivo"]) == (None, None)
+
+@pytest.mark.asyncio
+async def test_estado_do_anuncio_nao_muda_com_a_leitura_da_tela(db, mundo):
+    """A tela não chama a plataforma (só o motor): ler /config com a conta
+    bloqueada não mexe em nada."""
+    ml = mundo["ml"]
+    ml.assinatura = PIRACICABA
+    await flex_motor.rodar_motor()
+    antes = (await db.execute(select(FlexAnuncioEstado.motivo))).scalars().all()
+    assert set(antes) == {MOTIVO_PIRACICABA}

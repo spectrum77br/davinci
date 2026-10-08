@@ -44,6 +44,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    SmallInteger,
     Text,
     func,
     text,
@@ -82,6 +83,8 @@ FLEX_RESULTADOS = ("ok", "erro", "simulado", "pendente", "ignorado")
 # o da Shopee (NORMAL, UNLIST…) é traduzido para estes (flex_api).
 FLEX_STATUS_ANUNCIO = ("active", "paused", "under_review", "inactive", "closed")
 FLEX_EMERGENCIA_STATUS = ("na_fila", "rodando", "concluida", "falhou")
+# Lotes de venda (services/estoque_familia.LOTES_DE_VENDA) — o do Flex é um deles.
+FLEX_LOTES = ("ci", "pi", "ra", "sa", "sp")
 
 
 def _in(coluna: str, valores: tuple[str, ...]) -> str:
@@ -283,6 +286,39 @@ class FlexConta(Base):
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class FlexLocal(Base):
+    """De onde o motoboy do Flex sai (Eduardo, 08/10/2026: "o motoboy vai
+    sair de São Bernardo" e "não vai ser pra sempre fixo em São Bernardo, eu
+    quero poder alterar"). Uma linha só (id = 1), editada na aba Flex:
+
+    - `cidade`: a cidade da SAÍDA do Flex, como o Mercado Livre mostra na
+      assinatura (`origin.city.name`). O motor só mexe na conta cuja saída
+      do Flex é nessa cidade (sem diferença de acento/maiúscula);
+    - `lote`: o lote do estoque de lá (`.sp` = São Bernardo). É o estoque que
+      liga/desliga o Flex e para onde o pedido Flex vai.
+
+    Sem linha vale São Bernardo do Campo / .sp (services/flex_local). Editada
+    por pessoas: fica COM o gatilho do Histórico."""
+
+    __tablename__ = "flex_local"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="uma_linha"),
+        CheckConstraint(_in("lote", FLEX_LOTES), name="lote"),
+        CheckConstraint("length(btrim(cidade)) > 0", name="cidade"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        SmallInteger, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    cidade: Mapped[str] = mapped_column(Text, nullable=False)
+    lote: Mapped[str] = mapped_column(Text, nullable=False)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # Quem trocou (sem FK, como o log: sobrevive ao usuário apagado).
+    atualizado_por: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
 
 class FlexEmergencia(Base):

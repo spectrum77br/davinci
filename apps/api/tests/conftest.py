@@ -5,6 +5,7 @@ Strategy: override DATABASE_SCHEMA before app imports so all models bind to
 engine that bakes `search_path = davinci_test, public` into every new asyncpg
 connection via `server_settings`.
 """
+
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -90,11 +91,25 @@ async def _setup_schema():
         "user_role": ("admin", "user"),
         "user_status": ("pending", "active", "suspended"),
         "marketplace": (
-            "ml", "shopee", "amazon", "aliexpress",
-            "temu", "tiktok", "shein", "magalu", "carrefour", "netshoes", "site",
+            "ml",
+            "shopee",
+            "amazon",
+            "aliexpress",
+            "temu",
+            "tiktok",
+            "shein",
+            "magalu",
+            "carrefour",
+            "netshoes",
+            "site",
         ),
         "store_status": (
-            "active", "inactive", "closing", "banned", "pending", "under_review",
+            "active",
+            "inactive",
+            "closing",
+            "banned",
+            "pending",
+            "under_review",
         ),
         "cadastro_tipo": ("fone", "email", "dominio", "servidor"),
         "cadastro_status": ("active", "inactive", "excluded"),
@@ -102,40 +117,87 @@ async def _setup_schema():
         # tiktok/temu/shein even a `platform == 'tiktok'` filter fails casting
         # the literal to the enum type in the test schema.
         "integration_platform": (
-            "bling", "ml", "shopee", "amazon", "tiktok", "temu", "shein", "magalu",
+            "bling",
+            "ml",
+            "shopee",
+            "amazon",
+            "tiktok",
+            "temu",
+            "shein",
+            "magalu",
         ),
         "link_sync_status": (
-            "ok", "skipped", "retryable", "fatal", "pending", "requires_review",
+            "ok",
+            "skipped",
+            "retryable",
+            "fatal",
+            "pending",
+            "requires_review",
         ),
         "background_job_type": (
-            "sync_all", "sync_product", "auto_link", "audit",
-            "sync_bling_costs", "import_listings",
-            "import_bling_products", "push_prices_batch",
-            "backfill_ml_stock", "ingest_bling_order",
+            "sync_all",
+            "sync_product",
+            "auto_link",
+            "audit",
+            "sync_bling_costs",
+            "import_listings",
+            "import_bling_products",
+            "push_prices_batch",
+            "backfill_ml_stock",
+            "ingest_bling_order",
         ),
         "background_job_status": (
-            "pending", "running", "succeeded", "failed", "cancelled",
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
         ),
         "sync_log_action": (
-            "refresh_bling", "update_stock", "update_price",
-            "store_status_change", "auto_link", "test_connection",
+            "refresh_bling",
+            "update_stock",
+            "update_price",
+            "store_status_change",
+            "auto_link",
+            "test_connection",
             "webhook_unmatched",
         ),
         "alert_type": (
-            "low_stock", "sync_failure", "listing_banned", "requires_review",
-            "daily_sync_completed", "token_expiring", "generic", "tarefa_atribuida",
+            "low_stock",
+            "sync_failure",
+            "listing_banned",
+            "requires_review",
+            "daily_sync_completed",
+            "token_expiring",
+            "generic",
+            "tarefa_atribuida",
         ),
         "alert_severity": ("info", "warning", "error", "success"),
         "listing_status": (
-            "active", "paused", "closed", "under_review", "inactive",
+            "active",
+            "paused",
+            "closed",
+            "under_review",
+            "inactive",
         ),
         "listing_request_status": (
-            "pending", "in_progress", "completed", "rejected",
+            "pending",
+            "in_progress",
+            "completed",
+            "rejected",
         ),
         "department": ("celular", "mala", "eletro", "catalogo"),
         "pricing_platform": (
-            "mercadolivre", "shopee", "temu", "amazon",
-            "aliexpress", "tiktok", "magalu", "shein", "carrefour", "netshoes",
+            "mercadolivre",
+            "shopee",
+            "temu",
+            "amazon",
+            "aliexpress",
+            "tiktok",
+            "magalu",
+            "shein",
+            "carrefour",
+            "netshoes",
         ),
         # Mesmos valores de produção (0021: NA/SV; 0040: error/no_link) — o
         # envio grava no_link/error na célula.
@@ -146,9 +208,7 @@ async def _setup_schema():
         await conn.execute(text(f'CREATE SCHEMA "{TEST_SCHEMA}"'))
         for name, values in enums.items():
             vals = ", ".join(f"'{v}'" for v in values)
-            await conn.execute(
-                text(f'CREATE TYPE "{TEST_SCHEMA}".{name} AS ENUM ({vals})')
-            )
+            await conn.execute(text(f'CREATE TYPE "{TEST_SCHEMA}".{name} AS ENUM ({vals})'))
         await conn.run_sync(Base.metadata.create_all)
         await conn.execute(
             text(
@@ -272,8 +332,9 @@ async def _setup_schema():
         # Nomes NÃO-qualificados de propósito: o search_path do engine de teste
         # (davinci_test,public) resolve tudo pro schema de teste — e evita o
         # S608 que f-strings com INSERT disparam.
-        await conn.execute(text(
-            """
+        await conn.execute(
+            text(
+                """
             CREATE OR REPLACE FUNCTION bling_envio_evento_capture_fn()
             RETURNS trigger LANGUAGE plpgsql AS $$
             DECLARE
@@ -322,16 +383,19 @@ async def _setup_schema():
             END;
             $$
             """
-        ))
-        await conn.execute(text(
-            """
+            )
+        )
+        await conn.execute(
+            text(
+                """
             CREATE TRIGGER bling_orders_envio_evento_capture
             AFTER INSERT OR UPDATE OF situacao
             ON bling_orders
             FOR EACH ROW
             EXECUTE FUNCTION bling_envio_evento_capture_fn()
             """
-        ))
+            )
+        )
         # Histórico (25/09/2026): as mesmas funções e o mesmo gatilho da
         # migration 0331, em todas as tabelas de negócio do schema de teste.
         # Só gravam quando um pedido de pessoa marca a transação — os testes
@@ -480,6 +544,7 @@ _CLEANUP_TABLES = (
     "background_jobs",
     # Flex (0367): FK → integrations (CASCADE/SET NULL) e users (SET NULL).
     "flex_emergencia",
+    "flex_local",  # o local de saída que um teste trocou volta ao de fábrica
     "flex_conta",
     "flex_log",
     "flex_anuncio_estado",
@@ -634,3 +699,15 @@ async def robo_margem(db: AsyncSession):
     for tbl in ("ouvidoria_ocorrencias", "ouvidoria_rodadas", "ouvidoria_robos"):
         await db.execute(text(f"DELETE FROM {tbl}"))  # noqa: S608
     await db.commit()
+
+
+@pytest.fixture(autouse=True)
+def _flex_local_de_fabrica():
+    """O local de saída do Flex (services/flex_local) fica num cache do
+    processo: cada teste começa — e termina — sem ele (vale o de fábrica,
+    São Bernardo do Campo / .sp, até o teste gravar outro no banco)."""
+    from app.services import flex_local
+
+    flex_local.limpar_cache()
+    yield
+    flex_local.limpar_cache()

@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import BlingOrder, FlexPedido, Logistica
-from app.services import logistica_rules
+from app.services import flex_local, logistica_rules
 from app.services.estoque_familia import lote_de
 
 logger = structlog.get_logger()
@@ -219,18 +219,20 @@ class EnvioLido:
 
 
 def item_no_sp(codigo: str | None) -> bool:
-    """O item já sai do lote .sp? Todos os pedaços com lote são `sp` (kit
-    `dg053.sp+a001` também conta; pedaço sem lote não decide)."""
+    """O item já sai do lote do Flex (o do local de saída da aba Flex — .sp de
+    fábrica)? Todos os pedaços com lote são esse (kit `dg053.sp+a001` também
+    conta; pedaço sem lote não decide). O nome ficou do tempo do .sp fixo."""
     pedacos = [p.strip() for p in (codigo or "").lower().split("+") if p.strip()]
     lotes = {lote_de(p) for p in pedacos}
     lotes.discard(None)
-    return lotes == {"sp"}
+    return lotes == {flex_local.lote()}
 
 
 async def _no_sp_por_pedido(session: AsyncSession, bling_ids: Collection[int]) -> dict[int, bool]:
     """bling_id → todos os itens do pedido já estão no .sp (espelho do Bling)."""
     if not bling_ids:
         return {}
+    await flex_local.carregar(session)
     itens: dict[int, list[str | None]] = defaultdict(list)
     rows = await session.execute(
         select(BlingOrder.bling_id, BlingOrder.item_codigo).where(
