@@ -55,9 +55,10 @@ definePageMeta({ middleware: ['atendimento'] })
 //   no DaVinci, por loja, começando em modo seco (registra o que mandaria e
 //   compara com o Duoke; nada sai). Desenho em docs/atendimento-automacoes.md.
 
-type Aba = 'caixa' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas'
+type Aba = 'caixa' | 'mail' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas'
 const ABAS: { value: Aba; label: string; icon: any }[] = [
   { value: 'caixa', label: 'Caixa', icon: Inbox },
+  { value: 'mail', label: 'E-mail', icon: Inbox },
   { value: 'lojas', label: 'Lojas e modo', icon: Store },
   { value: 'manual', label: 'Manual da IA', icon: BookOpen },
   { value: 'modelos', label: 'Respostas prontas', icon: MessageSquareText },
@@ -448,6 +449,7 @@ watch(selecionada, (id) => {
     <!-- quem só lê (fase de observação): um aviso discreto, uma linha -->
     <div
       v-if="soLeitura"
+      v-show="aba !== 'mail'"
       class="flex items-center gap-1.5 rounded-md border border-sky-300/60 bg-sky-50 px-3 py-1 text-xs text-sky-900 dark:border-sky-800/60 dark:bg-sky-900/20 dark:text-sky-200"
       data-aviso-so-leitura
     >
@@ -458,6 +460,7 @@ watch(selecionada, (id) => {
     <!-- o que está desligado no servidor: uma linha curta; a frase inteira no title e em "o que isso quer dizer?" -->
     <div
       v-if="avisos.length"
+      v-show="aba !== 'mail'"
       class="rounded-md border px-3 py-1.5 text-xs"
       :class="avisos.some((a) => a.forte) ? 'border-red-500/40 bg-red-500/10' : 'border-amber-500/40 bg-amber-500/10'"
     >
@@ -480,7 +483,7 @@ watch(selecionada, (id) => {
         <li v-for="a in avisos" :key="a.chave" :class="a.forte ? 'font-semibold text-red-700 dark:text-red-300' : 'text-amber-900 dark:text-amber-200'">{{ a.texto }}</li>
       </ul>
     </div>
-    <div v-if="resumoErro && !resumo" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
+    <div v-if="resumoErro && !resumo" v-show="aba !== 'mail'" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
       {{ resumoErro }}
     </div>
 
@@ -574,6 +577,7 @@ watch(selecionada, (id) => {
     </div>
 
     <AtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
+    <AtendimentoMail v-if="aba === 'mail'" :is-admin="isAdmin" />
     <AtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" />
     <AtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete" @mudou="(l: Modelo[]) => (modelos = l)" />
     <AtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" />

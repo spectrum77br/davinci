@@ -424,6 +424,10 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 
 _CLEANUP_TABLES = (
+    "mail_outbox",
+    "mail_attachments",
+    "mail_messages",
+    "mail_mailboxes",
     "historico_evento",  # FK SET NULL -> users
     "historico_alteracao",
     "historico_acesso",  # FK -> users: antes de users

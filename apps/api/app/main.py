@@ -53,6 +53,7 @@ from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
 from app.routers import logistica_track as logistica_track_router
+from app.routers import mail as mail_router
 from app.routers import marca_emails as marca_emails_router
 from app.routers import marcas as marcas_router
 from app.routers import nfse as nfse_router
@@ -268,6 +269,7 @@ app.include_router(chamados_router.router)
 app.include_router(devolutions_router.router)
 # Pós-venda › Atendimento (25/09/2026): caixa única das lojas + rascunho da IA.
 app.include_router(atendimento_router.router)
+app.include_router(mail_router.router)
 # Comunicador (01/10/2026): o painel do pedido (estoque, margem, Observações
 # do Bling, links, AdsPower), a nota interna e a foto; e o cartão das
 # reclamações/devoluções da plataforma (só leitura). Mesmo prefixo e a mesma

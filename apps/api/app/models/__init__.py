@@ -165,6 +165,7 @@ from app.models.logistica import (
     LogisticaStatus,
     LogisticaStatusAnexo,
 )
+from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
 from app.models.marca import Marca, MarcaEmail, MarcaEmailPadrao, RedeSocial
 from app.models.nfse import (
     CompanyFiscal,
@@ -262,6 +263,10 @@ from app.models.user import User
 from app.models.user_settings import UserSettings
 
 __all__ = [
+    "MailMailbox",
+    "MailMessage",
+    "MailAttachment",
+    "MailOutbox",
     "CompanyFiscal",
     "NfseChamada",
     "NfseEmissao",
