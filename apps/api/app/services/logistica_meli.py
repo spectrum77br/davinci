@@ -815,6 +815,102 @@ _SWEEP_JANELA_DIAS = 45
 # Janela do /orders/search por date_last_updated (1 chamada cobre 50 pedidos).
 _SWEEP_UPDATED_DIAS = 15
 _SWEEP_MAX_PAGINAS = 50
+# Reclamações (/post-purchase/v1/claims/search, 50 por página): as abertas
+# todas e as encerradas mais recentes primeiro, até sair da janela.
+_SWEEP_CLAIMS_PAGINA = 50
+_SWEEP_CLAIMS_MAX_PAGINAS = 6
+# Reclamação de pedido que não casou com nenhuma linha: pode ser um pedido de
+# pack (a linha guarda o pack_id; a reclamação vem pelo order). Lê o pedido no
+# ML pra achar o pack — no máximo isto por conta e rodada, com cache no
+# processo (o pack de um pedido não muda).
+_SWEEP_MAX_BUSCAS_PACK = 30
+_PACK_DO_PEDIDO: dict[str, str] = {}
+
+
+async def _reclamacoes_mexidas(client: MercadoLivreClient, *, desde: datetime) -> list[dict]:
+    """As reclamações da conta que podem ter mexido desde `desde`: TODAS as
+    abertas (uma aberta pode estar parada há semanas e a linha nunca ter sido
+    lida com ela) + as encerradas com `last_updated` >= `desde`."""
+    out: list[dict] = []
+    for status, ordem in (("opened", None), ("closed", "last_updated:desc")):
+        for pagina in range(_SWEEP_CLAIMS_MAX_PAGINAS):
+            corpo = await client.buscar_reclamacoes(
+                status=status,
+                offset=pagina * _SWEEP_CLAIMS_PAGINA,
+                limit=_SWEEP_CLAIMS_PAGINA,
+                sort=ordem,
+            )
+            lote = [c for c in (corpo.get("data") or []) if isinstance(c, dict)]
+            if status == "closed":
+                dentro = [c for c in lote if (iso_to_dt(c.get("last_updated")) or desde) >= desde]
+                out.extend(dentro)
+                if len(dentro) < len(lote):
+                    break
+            else:
+                out.extend(lote)
+            if len(lote) < _SWEEP_CLAIMS_PAGINA:
+                break
+    return out
+
+
+async def _reclamacoes_por_pedido(
+    client: MercadoLivreClient,
+    *,
+    conta: str,
+    pedidos: set[str],
+    pack_do_search: dict[str, str],
+    desde: datetime,
+    corte: datetime,
+) -> dict[str, datetime]:
+    """`pedido_marketplace` das linhas da conta → quando a reclamação daquele
+    pedido mexeu por último (`last_updated`). Best-effort: falha ao listar as
+    reclamações não derruba a varredura de pedidos — devolve vazio."""
+    try:
+        reclamacoes = await _reclamacoes_mexidas(client, desde=desde)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "logistica_ml_sweep_reclamacoes_falhou", conta=conta, err=str(e)[:200]
+        )
+        return {}
+    out: dict[str, datetime] = {}
+    buscas = 0
+    for c in reclamacoes:
+        if str(c.get("resource") or "order").strip().lower() != "order":
+            continue
+        oid = str(c.get("resource_id") or "").strip()
+        quando = iso_to_dt(c.get("last_updated")) or iso_to_dt(c.get("date_created"))
+        if not oid or quando is None:
+            continue
+        if oid in pedidos:
+            chave = oid
+        else:
+            pack = pack_do_search.get(oid)
+            if pack is None:
+                pack = _PACK_DO_PEDIDO.get(oid)
+            criada = iso_to_dt(c.get("date_created"))
+            # Reclamação aberta antes da janela é de pedido mais velho que ela
+            # — não tem linha na varredura, nem adianta procurar o pack.
+            if pack is None and buscas < _SWEEP_MAX_BUSCAS_PACK and (
+                criada is None or criada >= corte
+            ):
+                buscas += 1
+                try:
+                    pack = str((await client.get_order(oid)).get("pack_id") or "").strip()
+                except Exception as e:  # noqa: BLE001
+                    logger.info(
+                        "logistica_ml_sweep_pack_falhou",
+                        conta=conta,
+                        order_id=oid,
+                        err=str(e)[:120],
+                    )
+                    continue
+                _PACK_DO_PEDIDO[oid] = pack
+            if not pack or pack.lower() in ("none", "null") or pack not in pedidos:
+                continue
+            chave = pack
+        if chave not in out or quando > out[chave]:
+            out[chave] = quando
+    return out
 
 
 async def sweep_pos_venda(session: AsyncSession) -> dict:
@@ -848,10 +944,20 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
     o recarregar os passa como `extras` — furando o escondimento — e o enrich
     completo atualiza a linha e aplica a regra no Bling.
 
-    Limite honesto: claim/mediação que não muda status nem tags do pedido não
-    gera sinal (o search não expõe claims); pra isso segue valendo o ⟳ da
-    linha. `pedido_marketplace` pode ser order_id OU pack_id — casa contra os
-    dois índices."""
+    Reclamação/devolução/mediação NÃO mexe em status nem tags do pedido
+    enquanto está aberta — o pedido segue "pago" e "entregue" até o reembolso.
+    Era o ponto cego: 294515 ficou "Pago | Entregue" (lido em 17/09) com a
+    devolução já entregue na loja e a mediação aberta desde 06/10; 294472 e
+    294099 em "Mediação | Aberta" fechada a nosso favor havia 6 dias (Vinicius,
+    08/10: "se eu clicar no status plataforma ele vai pro correto"). Por isso a
+    varredura lê também as reclamações da conta (`_reclamacoes_mexidas`) e
+    marca a linha cuja reclamação mexeu DEPOIS da última leitura
+    (`last_updated > status_lido_em`) — depois do enrich o carimbo passa à
+    frente e ela para de ser marcada até mexer de novo.
+
+    `pedido_marketplace` pode ser order_id OU pack_id — casa contra os dois
+    índices (a reclamação vem pelo order: o pack sai do search de pedidos ou,
+    se não veio nele, de um GET do pedido)."""
     corte = datetime.now(UTC).date() - timedelta(days=_SWEEP_JANELA_DIAS)
     rows = (
         await session.execute(
@@ -873,7 +979,7 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
     date_from = (agora - timedelta(days=_SWEEP_UPDATED_DIAS)).strftime(fmt)
 
     mudados: set[UUID] = set()
-    contas_ok = n_hits = 0
+    contas_ok = n_hits = n_reclamacoes = 0
     for conta, linhas in por_conta.items():
         integ = await _ml_integration_for_conta(session, conta)
         if integ is None:
@@ -917,11 +1023,29 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
             )
             continue
 
+        reclamacao_em = await _reclamacoes_por_pedido(
+            client,
+            conta=conta,
+            pedidos={(r.pedido_marketplace or "").strip() for r in linhas},
+            pack_do_search={
+                oid: str(ordens[0].get("pack_id") or "").strip()
+                for oid, ordens in por_id.items()
+            },
+            desde=agora - timedelta(days=_SWEEP_UPDATED_DIAS),
+            corte=datetime.combine(corte, datetime.min.time(), tzinfo=UTC),
+        )
+
         for r in linhas:
             meli = r.meli_status or {}
             if not meli:
                 continue  # nunca enriquecida — o backfill normal cuida dela
             pedido = (r.pedido_marketplace or "").strip()
+            mexeu = reclamacao_em.get(pedido)
+            if mexeu is not None and (r.status_lido_em is None or mexeu > r.status_lido_em):
+                mudados.add(r.id)
+                n_hits += 1
+                n_reclamacoes += 1
+                continue
             cands = [*(por_id.get(pedido) or []), *(por_pack.get(pedido) or [])]
             if not cands:
                 continue
@@ -947,7 +1071,9 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
         await session.commit()
 
     await session.commit()  # persiste tokens que refrescarem durante o sweep
-    summary = {"seen": len(rows), "contas": contas_ok, "hits": n_hits}
+    summary = {
+        "seen": len(rows), "contas": contas_ok, "hits": n_hits, "reclamacoes": n_reclamacoes
+    }
     logger.info("logistica_ml_sweep_pos_venda", **summary)
     return {"ids": list(mudados), **summary}
 

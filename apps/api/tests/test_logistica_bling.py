@@ -1626,6 +1626,9 @@ async def test_sweep_ml_nao_marca_pedido_em_transito(db: AsyncSession, make_user
                 {"id": "MLB9005", "status": "paid", "tags": ["not_delivered", "paid"]},
             ], "paging": {"total": 5}}
 
+        async def buscar_reclamacoes(self, *, status, offset, limit, sort=None):
+            return {"data": [], "paging": {"total": 0}}
+
     monkeypatch.setattr(meli_svc, "_ml_integration_for_conta", _integ)
     monkeypatch.setattr(meli_svc, "_build_ml_client", lambda session, integ: _FakeClient())
     monkeypatch.setattr(
@@ -1639,6 +1642,123 @@ async def test_sweep_ml_nao_marca_pedido_em_transito(db: AsyncSession, make_user
     for linha in em_transito:
         assert str(linha.id) not in marcados, "pedido em trânsito NÃO pode ser marcado"
     assert out["hits"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sweep_ml_marca_reclamacao_que_mexeu_depois_da_leitura(
+    db: AsyncSession, make_user, monkeypatch
+):
+    """08/10, 294515: "Pago | Entregue" escondido, lido em 17/09; o comprador
+    devolveu e a mediação abriu em 06/10 — o pedido segue "pago" com a tag
+    "delivered", então a busca de pedidos não via nada e só o ⟳ trazia o
+    status certo. A varredura agora lê as reclamações e marca a linha cuja
+    reclamação mexeu DEPOIS da última leitura — inclusive a de pack (a
+    reclamação vem pelo order; a linha guarda o pack)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Integration, IntegrationPlatform
+    from app.security.cipher import encrypt_json
+    from app.services import logistica_meli as meli_svc
+
+    dono = await make_user(email="sweep-ml-claim@davinci-test.com")
+    integ = Integration(
+        platform=IntegrationPlatform.ML, name="conta-claim", status="active",
+        credentials=encrypt_json({"access_token": "x", "user_id": "1"}),
+        user_id=dono.id,
+    )
+    db.add(integ)
+
+    agora = datetime.now(UTC)
+    lido = agora - timedelta(days=20)
+
+    def _linha(numero: str, pedido: str, lido_em: datetime | None) -> Logistica:
+        return Logistica(
+            pedido_bling=numero, pedido_marketplace=pedido, plataforma="Mercado Livre",
+            conta="conta-claim", data=agora.date() - timedelta(days=30),
+            meli_status={"order_status": "paid", "ship_status": "delivered"},
+            status_lido_em=lido_em,
+        )
+
+    mediacao_nova = _linha("9101", "2001", lido)  # mexeu depois da leitura
+    ja_lida = _linha("9102", "2002", agora)  # lida depois da última mexida
+    encerrada = _linha("9103", "2003", lido)  # mediação fechada a nosso favor
+    de_pack = _linha("9104", "PACK9", lido)  # pack: reclamação vem pelo order
+    pack_fora_search = _linha("9105", "PACK8", lido)  # pack só via GET do pedido
+    sem_reclamacao = _linha("9106", "2006", lido)
+    for linha in [mediacao_nova, ja_lida, encerrada, de_pack, pack_fora_search, sem_reclamacao]:
+        db.add(linha)
+    await db.commit()
+
+    def _iso(d: datetime) -> str:
+        return d.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000-00:00")
+
+    dois_dias = _iso(agora - timedelta(days=2))
+    pedidos_lidos: list[str] = []
+
+    class _FakeClient:
+        async def search_orders_updated(self, *, seller_id, date_from, date_to, limit, offset):
+            # Pedido com reclamação continua "pago" + "delivered": sem sinal aqui.
+            return {"results": [
+                {"id": "2001", "status": "paid", "tags": ["delivered"]},
+                {"id": "3004", "pack_id": "PACK9", "status": "paid", "tags": ["delivered"]},
+            ], "paging": {"total": 2}}
+
+        async def buscar_reclamacoes(self, *, status, offset, limit, sort=None):
+            if offset:
+                return {"data": [], "paging": {"total": 0}}
+            if status == "opened":
+                return {"data": [
+                    {"id": 1, "resource": "order", "resource_id": 2001,
+                     "date_created": dois_dias, "last_updated": dois_dias},
+                    {"id": 2, "resource": "order", "resource_id": "2002",
+                     "date_created": dois_dias, "last_updated": dois_dias},
+                    {"id": 4, "resource": "order", "resource_id": "3004",
+                     "date_created": dois_dias, "last_updated": dois_dias},
+                    {"id": 5, "resource": "order", "resource_id": "3005",
+                     "date_created": dois_dias, "last_updated": dois_dias},
+                    # pedido de outra conta/fora da janela: nunca vira linha
+                    {"id": 7, "resource": "order", "resource_id": "7777",
+                     "date_created": _iso(agora - timedelta(days=90)),
+                     "last_updated": dois_dias},
+                ]}
+            return {"data": [
+                {"id": 3, "resource": "order", "resource_id": "2003",
+                 "date_created": dois_dias, "last_updated": dois_dias},
+                # encerrada há mais de 15 dias: fora da janela, para a paginação
+                {"id": 6, "resource": "order", "resource_id": "2006",
+                 "date_created": _iso(agora - timedelta(days=40)),
+                 "last_updated": _iso(agora - timedelta(days=16))},
+            ]}
+
+        async def get_order(self, order_id):
+            pedidos_lidos.append(order_id)
+            return {"id": order_id, "pack_id": "PACK8" if order_id == "3005" else None}
+
+    async def _integ(session, conta):
+        return integ
+
+    monkeypatch.setattr(meli_svc, "_ml_integration_for_conta", _integ)
+    monkeypatch.setattr(meli_svc, "_build_ml_client", lambda session, integ: _FakeClient())
+    monkeypatch.setattr(
+        meli_svc, "decrypt_json", lambda _c: {"access_token": "x", "user_id": "1"}
+    )
+    monkeypatch.setattr(meli_svc, "_PACK_DO_PEDIDO", {})
+
+    out = await meli_svc.sweep_pos_venda(db)
+    marcados = {str(i) for i in out["ids"]}
+    assert str(mediacao_nova.id) in marcados, "mediação aberta depois da leitura"
+    assert str(encerrada.id) in marcados, "mediação encerrada depois da leitura"
+    assert str(de_pack.id) in marcados, "pack casado pelo search de pedidos"
+    assert str(pack_fora_search.id) in marcados, "pack casado pelo GET do pedido"
+    assert str(ja_lida.id) not in marcados, "lida depois da mexida: nada a fazer"
+    assert str(sem_reclamacao.id) not in marcados
+    assert out["reclamacoes"] == 4
+    # Só o pedido que não casou e cuja reclamação é da janela foi lido no ML.
+    assert pedidos_lidos == ["3005"]
+
+    # Segunda rodada: o pack já está no cache — não lê o pedido de novo.
+    await meli_svc.sweep_pos_venda(db)
+    assert pedidos_lidos == ["3005"]
 
 
 # ── 07/10: Correios do painel fora da varredura + varredura que o deploy matou ──
