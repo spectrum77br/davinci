@@ -96,6 +96,8 @@ type DevolutionRow = {
   // Abertura automática no Mercado Livre (pendente | enviada | falhou) + motivo.
   chamado_ml_status?: string | null
   chamado_ml_erro?: string | null
+  // Quando a contestação saiu (só com `enviada`): foto anexada depois não vai.
+  chamado_enviada_at?: string | null
   chamado_plataforma?: string | null
   // Só na resposta do PATCH que trocou o motivo com chamado aberto (21/09):
   // atualizado | atualizado_sem_api | substituido | ja_enviada | encerrado | kit_parcial.
@@ -307,6 +309,30 @@ function mlStatusClass(row: DevolutionRow): string {
   if (st === 'registrada' && erro === 'contestacao_cancelada') return 'text-muted-foreground'
   if (st === 'registrada') return 'text-sky-700 dark:text-sky-300'
   return 'text-amber-700 dark:text-amber-300'
+}
+// Contestação já saiu na plataforma (08/10, 298350): ela só sai uma vez, então
+// foto anexada depois — inclusive num lançamento apagado e refeito — fica só
+// aqui. Chamado encerrado pelo motivo ("retirar a contestação") não avisa.
+function contestacaoJaSaiu(row: DevolutionRow): boolean {
+  return row.chamado_ml_status === 'enviada' && row.chamado_ml_erro !== 'retirar_contestacao'
+}
+function contestacaoSaiuEm(row: DevolutionRow): string {
+  return row.chamado_enviada_at ? ` em ${fmtDateTime(row.chamado_enviada_at)}` : ''
+}
+// O cartão do vídeo (QR) é gerado pela própria contestação — não é foto "depois".
+function fotoDepoisDaContestacao(row: DevolutionRow, a: DevolucaoAnexo): boolean {
+  if (!contestacaoJaSaiu(row) || !row.chamado_enviada_at) return false
+  if (a.content_type.startsWith('video/') || a.filename === 'video-expedicao.png') return false
+  return new Date(a.created_at).getTime() > new Date(row.chamado_enviada_at).getTime()
+}
+function avisoFotosDepois(row: DevolutionRow): string[] {
+  const plat = platNome(row)
+  return [
+    `A contestação na ${plat} já saiu${contestacaoSaiuEm(row)}, antes destas fotos — e ela só sai uma vez.`,
+    plat === 'Shopee'
+      ? 'As fotos ficam guardadas aqui. Se a Shopee pedir prova extra, elas vão junto.'
+      : 'As fotos ficam guardadas aqui. Pra mandar, use a Réplica manual na aba Chamados.',
+  ]
 }
 
 // Aviso da troca de motivo com chamado aberto (Vinicius 21/09). `encerrado` é o
@@ -1689,14 +1715,25 @@ async function createAllDevolutions() {
         let created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
         // Fotos escolhidas no rascunho sobem agora (a linha precisa existir) —
         // cada upload já re-dispara o chamado no ML se ele estiver esperando foto.
+        let fotosSubiram = 0
         for (const f of d.fotos || []) {
           const fd = new FormData()
           fd.append('file', f)
           try {
             created = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(created.id)}/anexos`, { method: 'POST', body: fd })
+            fotosSubiram += 1
           } catch (e: any) {
             lookupError.value = `foto ${f.name}: ${apiError(e)}`
           }
+        }
+        // Lançamento refeito com o chamado do pedido já enviado (298350): as fotos
+        // não vão pra contestação — avisa na hora, em vez de parecer que foram.
+        if (fotosSubiram && contestacaoJaSaiu(created)) {
+          pushToast({
+            kind: 'warning',
+            title: `Pedido ${created.pedido_bling || ''}: fotos não foram pra contestação`,
+            lines: avisoFotosDepois(created),
+          }, 12000)
         }
         if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
         total.value += 1
@@ -3261,6 +3298,13 @@ async function backfillAddresses() {
           class="rounded border px-2 py-1 text-xs"
           :class="mlStatusClass(anexosRow)"
         >{{ mlStatusLabel(anexosRow) }}</div>
+        <div
+          v-if="contestacaoJaSaiu(anexosRow)"
+          class="rounded border border-amber-500/40 bg-amber-500/5 px-2 py-1 text-xs text-amber-800 dark:text-amber-200"
+        >
+          A contestação já saiu{{ contestacaoSaiuEm(anexosRow) }}. Foto anexada agora não vai junto: ela só sai uma vez.
+          <template v-if="platNome(anexosRow) === 'Shopee'"> Se a Shopee pedir prova extra, as fotos daqui vão.</template>
+        </div>
         <div class="flex flex-wrap gap-3">
           <div v-for="a in anexosRow.anexos || []" :key="a.id" class="relative">
             <a :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
@@ -3271,6 +3315,11 @@ async function backfillAddresses() {
             <div class="mt-0.5 w-24 truncate text-[10px] text-muted-foreground" :title="a.filename">
               <span v-if="a.ml_file_name" class="text-emerald-600" title="já enviada ao ML">✓ </span>{{ a.filename }}
             </div>
+            <div
+              v-if="fotoDepoisDaContestacao(anexosRow, a)"
+              class="w-24 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+              :title="`Anexada em ${fmtDateTime(a.created_at)}, depois da contestação`"
+            >não foi na contestação</div>
             <button
               v-if="canEdit"
               type="button"

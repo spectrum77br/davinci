@@ -583,6 +583,19 @@ async def test_caso_sem_foto_ve_as_da_devolucao(client, db, cenario):
     ).json()["chamados"][0]
     assert [a["filename"] for a in caso["anexos"]] == ["chat14.png", "tela.jpg"]
 
+    # 08/10 (298350): a abertura saiu só com o cartão do vídeo e as fotos entraram
+    # depois na devolução — o cartão no chamado não conta como foto.
+    db.add(ChamadoAnexo(chamado_id=ch.id, filename="video-expedicao.png",
+                        content_type="image/png", size_bytes=3, blob=b"png"))
+    await db.commit()
+    caso = (
+        await client.post("/api/chamados/agent/caso", headers=hermes,
+                          json={"pedido_bling": "294654"})
+    ).json()["chamados"][0]
+    assert [a["filename"] for a in caso["anexos"]] == [
+        "chat14.png", "video-expedicao.png", "tela.jpg"
+    ]
+
     db.add(ChamadoAnexo(chamado_id=ch.id, filename="print.png", content_type="image/png",
                         size_bytes=3, blob=b"png"))
     await db.commit()
@@ -590,4 +603,6 @@ async def test_caso_sem_foto_ve_as_da_devolucao(client, db, cenario):
         await client.post("/api/chamados/agent/caso", headers=hermes,
                           json={"pedido_bling": "294654"})
     ).json()["chamados"][0]
-    assert [a["filename"] for a in caso["anexos"]] == ["chat14.png", "print.png"]
+    assert [a["filename"] for a in caso["anexos"]] == [
+        "chat14.png", "video-expedicao.png", "print.png"
+    ]

@@ -173,6 +173,7 @@ async def test_danificado_espera_foto_e_abre_ao_anexar(client, make_user, auth_a
     assert body["tem_chamado"] is True
     assert body["chamado_ml_status"] == "pendente"
     assert body["chamado_ml_erro"] == "devolucao_sem_foto"
+    assert body["chamado_enviada_at"] is None
     assert ml.reviews == []
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "293100"))).scalar_one()
     assert ch.origem == "devolucao" and ch.canal == "api" and ch.plataforma == "ml"
@@ -187,6 +188,7 @@ async def test_danificado_espera_foto_e_abre_ao_anexar(client, make_user, auth_a
     out = up.json()
     assert out["chamado_ml_status"] == "enviada"
     assert out["chamado_ml_erro"] is None
+    assert out["chamado_enviada_at"] is not None  # a tela avisa foto anexada depois
     assert [a["filename"] for a in out["anexos"]] == ["mala.png"]
     assert out["anexos"][0]["ml_file_name"] == "ml_1_mala.png"
     assert ml.uploads == [("777", "mala.png", len(PNG_1PX), "image/png")]
@@ -215,6 +217,7 @@ async def test_danificado_espera_foto_e_abre_ao_anexar(client, make_user, auth_a
     )
     assert up2.status_code == 201
     assert len(ml.reviews) == 1 and len(ml.uploads) == 1
+    assert up2.json()["chamado_enviada_at"] == out["chamado_enviada_at"]
 
 
 async def test_nao_recebido_abre_na_hora_sem_foto(client, make_user, auth_as, db, ml):

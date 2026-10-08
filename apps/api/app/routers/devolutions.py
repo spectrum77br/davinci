@@ -438,6 +438,7 @@ def _aplica_chamado(
             or abertura.erro == chamados_devolucao.ERRO_RETIRAR_CONTESTACAO
         )
         out.chamado_ml_erro = abertura.erro if mostra_erro else None
+        out.chamado_enviada_at = abertura.enviada_at if abertura.status == "enviada" else None
     return out
 
 

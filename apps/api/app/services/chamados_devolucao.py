@@ -659,7 +659,8 @@ def _ref_foto(anexo: DevolucaoAnexo) -> dict:
     return {"ref": raw} if raw else {}
 
 
-def _e_cartao_video(a: DevolucaoAnexo) -> bool:
+def _e_cartao_video(a: DevolucaoAnexo | ChamadoAnexo) -> bool:
+    """Vale pro anexo da devolução e pra cópia dele no chamado (mesmo nome, sem autor)."""
     return a.created_by is None and a.filename == cartao_video.CARTAO_VIDEO_NOME
 
 

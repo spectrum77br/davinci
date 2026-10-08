@@ -103,6 +103,9 @@ class DevolutionOut(BaseModel):
     # está enviada (ex.: devolucao_sem_foto, return_review_indisponivel).
     chamado_ml_status: str | None = None
     chamado_ml_erro: str | None = None
+    # Quando a contestação saiu (só com status `enviada`): foto anexada depois
+    # não vai mais pra plataforma — a tela avisa (08/10, 298350).
+    chamado_enviada_at: datetime | None = None
     # Plataforma do chamado (ml | tiktok | shopee | amazon…) — rotula o status.
     chamado_plataforma: str | None = None
     # Mensagem ao comprador pedindo a senha (motivo "Bloqueado"; só Shopee tem
