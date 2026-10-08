@@ -172,6 +172,19 @@ async def trocar_local(body: FlexLocalIn, session: Sessao, user: Agir) -> FlexLo
             status.HTTP_403_FORBIDDEN,
             detail={"code": "so_admin", "detalhe": "só um admin troca o local de saída do Flex"},
         )
+    atual = await flex_local.carregar(forcar=True)
+    if body.cidade_antes is not None and (
+        body.cidade_antes != atual.cidade or (body.lote_antes or "") != atual.lote
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "local_mudou",
+                "detalhe": (
+                    f"o local foi trocado para {atual.cidade} (.{atual.lote}) agora há pouco"
+                ),
+            },
+        )
     try:
         local = await flex_local.salvar(session, cidade=body.cidade, lote=body.lote, por=user.id)
     except flex_local.LocalFlexInvalidoError as e:
@@ -179,7 +192,36 @@ async def trocar_local(body: FlexLocalIn, session: Sessao, user: Agir) -> FlexLo
             status.HTTP_400_BAD_REQUEST, detail={"code": e.codigo, "detalhe": e.detalhe}
         ) from e
     await session.commit()
-    return await _local_out(session, local)
+    flex_local.usar(local)
+    out = await _local_out(session, local)
+    out.ligados_fora = await _ligados_fora_do_local(session, local)
+    return out
+
+
+async def _ligados_fora_do_local(session: AsyncSession, local: flex_local.LocalFlex) -> int:
+    """Anúncios com Flex ligado (última leitura) nas contas liberadas do ML
+    cuja saída do Flex NÃO é na cidade do local — o robô deixa de mexer neles."""
+    ids = flex_config.contas()
+    if not ids:
+        return 0
+    contas = (
+        await session.execute(select(FlexConta).where(FlexConta.integration_id.in_(list(ids))))
+    ).scalars()
+    fora = [
+        c.integration_id
+        for c in contas
+        if c.plataforma == flex_envio.PLATAFORMA_ML
+        and c.flex_ativo
+        and not flex_local.origem_ok(c.origem_cidade, local)
+    ]
+    if not fora:
+        return 0
+    n = await session.scalar(
+        select(func.count()).where(
+            FlexAnuncioEstado.integration_id.in_(fora), FlexAnuncioEstado.observado == "ligado"
+        )
+    )
+    return int(n or 0)
 
 
 @router.get("/config", response_model=FlexConfigOut)
@@ -355,6 +397,15 @@ def _desligar(liberadas: frozenset[UUID]):
     )
 
 
+def _sem_controle(permitidas: frozenset[UUID], liberadas: frozenset[UUID]):
+    """Flex ligado em conta liberada em que o robô não mexe (ver `_liberadas`)."""
+    est = FlexAnuncioEstado
+    fora = permitidas - liberadas
+    if not fora:
+        return false()
+    return and_(est.observado == "ligado", est.integration_id.in_(list(fora)))
+
+
 def _aguardando(permitidas: frozenset[UUID]):
     """Esperando aprovação DE VERDADE: só nas contas em que o motor mexe."""
     est = FlexAnuncioEstado
@@ -377,6 +428,7 @@ async def _resumo(
         func.count().filter(_aguardando(permitidas)),
         func.count().filter(_desligar(liberadas)),
         func.count().filter(est.observado.is_(None)),
+        func.count().filter(_sem_controle(permitidas, liberadas)),
     ).select_from(est)
     filtro = _no_escopo(est.integration_id, escopo)
     if filtro is not None:
@@ -388,6 +440,7 @@ async def _resumo(
         aguardando=int(row[2] or 0),
         desligar=int(row[3] or 0),
         nao_lidos=int(row[4] or 0),
+        sem_controle=int(row[5] or 0),
     )
 
 
@@ -831,7 +884,9 @@ async def pedidos(
     for fp, nome in linhas:
         info = itens.get(fp.bling_id, {})
         skus = info.get("skus", [])
-        pendente = flex_motor.acerto_pendente(info.get("situacao"), fp.no_sp, fp.acertado_em, skus)
+        pendente = flex_motor.acerto_pendente(
+            info.get("situacao"), fp.no_sp, fp.acertado_em, skus, fp.lote
+        )
         # O banco trouxe largo (`_saiu_sem_sp`); aqui só fica o que espera
         # mesmo o acerto — o resto segue as réguas de sempre.
         if not pendente:
@@ -853,6 +908,7 @@ async def pedidos(
                 prazo=fp.prazo,
                 detectado_em=fp.detectado_em,
                 no_sp=fp.no_sp,
+                lote=fp.lote or "sp",
                 alerta=fp.alerta,
                 situacao=info.get("situacao"),
                 skus=skus,
@@ -883,7 +939,9 @@ async def acertado(bling_id: int, session: Sessao, user: Agir) -> FlexAcertoOut:
         )
     ).all()
     situacao = itens[0][0] if itens else None
-    if not flex_motor.acerto_pendente(situacao, fp.no_sp, fp.acertado_em, [c for _, c in itens]):
+    if not flex_motor.acerto_pendente(
+        situacao, fp.no_sp, fp.acertado_em, [c for _, c in itens], fp.lote
+    ):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={

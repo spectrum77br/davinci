@@ -218,21 +218,23 @@ class EnvioLido:
     prazo: datetime | None = None
 
 
-def item_no_sp(codigo: str | None) -> bool:
+def item_no_sp(codigo: str | None, lote: str | None = None) -> bool:
     """O item já sai do lote do Flex (o do local de saída da aba Flex — .sp de
     fábrica)? Todos os pedaços com lote são esse (kit `dg053.sp+a001` também
     conta; pedaço sem lote não decide). O nome ficou do tempo do .sp fixo."""
     pedacos = [p.strip() for p in (codigo or "").lower().split("+") if p.strip()]
     lotes = {lote_de(p) for p in pedacos}
     lotes.discard(None)
-    return lotes == {flex_local.lote()}
+    return lotes == {lote or flex_local.lote()}
 
 
-async def _no_sp_por_pedido(session: AsyncSession, bling_ids: Collection[int]) -> dict[int, bool]:
-    """bling_id → todos os itens do pedido já estão no .sp (espelho do Bling)."""
+async def _no_sp_por_pedido(
+    session: AsyncSession, bling_ids: Collection[int], lotes: Mapping[int, str]
+) -> dict[int, bool]:
+    """bling_id → todos os itens do pedido já estão no lote DELE (`lotes`;
+    espelho do Bling)."""
     if not bling_ids:
         return {}
-    await flex_local.carregar(session)
     itens: dict[int, list[str | None]] = defaultdict(list)
     rows = await session.execute(
         select(BlingOrder.bling_id, BlingOrder.item_codigo).where(
@@ -242,7 +244,10 @@ async def _no_sp_por_pedido(session: AsyncSession, bling_ids: Collection[int]) -
     for bid, codigo in rows.all():
         if bid is not None:
             itens[int(bid)].append(codigo)
-    return {bid: bool(cods) and all(item_no_sp(c) for c in cods) for bid, cods in itens.items()}
+    return {
+        bid: bool(cods) and all(item_no_sp(c, lotes.get(bid)) for c in cods)
+        for bid, cods in itens.items()
+    }
 
 
 async def registrar_envios(session: AsyncSession, lidos: Iterable[EnvioLido]) -> dict[str, int]:
@@ -273,7 +278,19 @@ async def registrar_pedidos_flex(session: AsyncSession, lidos: Iterable[EnvioLid
     flex = {e.bling_id: e for e in lidos if e.envio_flex}
     if not flex:
         return 0
-    no_sp = await _no_sp_por_pedido(session, flex.keys())
+    # O lote de cada pedido: o que já está gravado (o pedido detectado antes
+    # de uma troca de local fica com o seu) ou o do local de agora.
+    agora_lote = (await flex_local.carregar()).lote
+    lotes = dict.fromkeys(flex, agora_lote)
+    for bid, lote in (
+        await session.execute(
+            select(FlexPedido.bling_id, FlexPedido.lote).where(
+                FlexPedido.bling_id.in_(list(flex))
+            )
+        )
+    ).all():
+        lotes[int(bid)] = lote or agora_lote
+    no_sp = await _no_sp_por_pedido(session, flex.keys(), lotes)
     valores = [
         {
             "bling_id": e.bling_id,
@@ -283,6 +300,7 @@ async def registrar_pedidos_flex(session: AsyncSession, lidos: Iterable[EnvioLid
             "envio_tipo": e.envio_tipo,
             "prazo": e.prazo,
             "no_sp": no_sp.get(e.bling_id, False),
+            "lote": lotes[e.bling_id],
         }
         for e in flex.values()
     ]

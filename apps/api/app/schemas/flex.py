@@ -53,11 +53,19 @@ class FlexLocalOut(BaseModel):
     lote: str
     atualizado_em: datetime | None = None
     atualizado_por: str | None = None  # nome de quem trocou
+    # Só na resposta da troca: anúncios com Flex LIGADO em contas que deixam
+    # de ser controladas (a saída do Flex delas não é na cidade nova) — o
+    # robô não mexe mais neles; a emergência continua desligando.
+    ligados_fora: int | None = None
 
 
 class FlexLocalIn(BaseModel):
     cidade: str = Field(min_length=1, max_length=100)
     lote: str = Field(min_length=2, max_length=3)
+    # O local que a tela mostrava ao abrir o formulário: se outro admin trocou
+    # nesse meio tempo, 409 (ninguém sobrescreve sem ver).
+    cidade_antes: str | None = Field(default=None, max_length=200)
+    lote_antes: str | None = Field(default=None, max_length=3)
 
 
 class FlexConfigOut(BaseModel):
@@ -131,6 +139,10 @@ class FlexResumoOut(BaseModel):
     aguardando: int = 0  # esperando uma pessoa aprovar o ligar
     desligar: int = 0  # ligado na plataforma, mas a regra quer desligado
     nao_lidos: int = 0  # o DaVinci ainda não leu o estado na plataforma
+    # Flex ligado (última leitura) em conta liberada que o robô NÃO controla:
+    # sem Flex conferido, ou com a saída do Flex fora da cidade do local de
+    # saída. Ninguém desliga sozinho — só a emergência ou uma pessoa.
+    sem_controle: int = 0
 
 
 class FlexAnunciosOut(BaseModel):
@@ -211,6 +223,8 @@ class FlexPedidoOut(BaseModel):
     prazo: datetime | None = None
     detectado_em: datetime
     no_sp: bool
+    # O lote do local de saída deste pedido (flex_pedido.lote).
+    lote: str = "sp"
     alerta: str | None = None
     situacao: str | None = None
     skus: list[str] = []

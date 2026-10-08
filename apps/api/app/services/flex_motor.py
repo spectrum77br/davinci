@@ -828,7 +828,9 @@ async def montar_anuncios(
     ]
 
 
-def _demanda_por_peca(itens: Iterable[tuple[str | None, Any]]) -> Counter[str]:
+def _demanda_por_peca(
+    itens: Iterable[tuple[str | None, Any]], lote_flex: str | None = None
+) -> Counter[str]:
     """Peças (base sem lote) que pedidos Flex fora do .sp vão tirar de São
     Bernardo. Pedaço já no .sp não conta (o saldo virtual do .sp já desconta a
     reserva dele); kit conta cada peça com lote — o fone a001 de um kit sai do
@@ -842,20 +844,26 @@ def _demanda_por_peca(itens: Iterable[tuple[str | None, Any]]) -> Counter[str]:
         for pedaco in (codigo or "").lower().split("+"):
             p = pedaco.strip()
             lote = lote_de(p) if p else None
-            if lote in LOTES_DE_VENDA and lote != _lote_flex():
+            if lote in LOTES_DE_VENDA and lote != (lote_flex or _lote_flex()):
                 demanda[p[: -(len(lote) + 1)]] += q
     return demanda
 
 
 def acerto_pendente(
-    situacao: str | None, no_sp: bool, acertado_em: datetime | None, skus: Iterable[str | None]
+    situacao: str | None,
+    no_sp: bool,
+    acertado_em: datetime | None,
+    skus: Iterable[str | None],
+    lote: str | None = None,
 ) -> bool:
     """O pedido Flex SAIU (em andamento/atendido) sem ter ido ao .sp e ainda
     espera alguém acertar o estoque no Bling? Só conta quem tem peça com lote
     de venda fora do .sp (é o que o saldo Flex desconta)."""
     if no_sp or acertado_em is not None or str(situacao or "") not in SITUACOES_SAIU:
         return False
-    return bool(_demanda_por_peca((s, 1) for s in skus))
+    # `lote`: o do PEDIDO (flex_pedido.lote) — trocar o local depois que ele
+    # saiu não muda o que falta acertar.
+    return bool(_demanda_por_peca(((s, 1) for s in skus), lote))
 
 
 def _pendentes(sku_sp: str, demanda: Mapping[str, int]) -> int:
@@ -926,6 +934,9 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
         .join(FlexPedido, FlexPedido.bling_id == BlingOrder.bling_id)
         .where(
             FlexPedido.no_sp.is_(False),
+            # Só os pedidos do lote do local de agora: o que saiu de outro
+            # local (antes de uma troca) não tira peça deste estoque.
+            FlexPedido.lote == _lote_flex(),
             or_(
                 and_(FlexPedido.detectado_em >= corte, situacao.notin_(_SITUACOES_FECHADAS)),
                 and_(situacao.in_(SITUACOES_SAIU), FlexPedido.acertado_em.is_(None)),
@@ -941,6 +952,7 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
             .join(FlexPedido, FlexPedido.bling_id == BlingOrder.bling_id)
             .where(
                 FlexPedido.no_sp.is_(True),
+                FlexPedido.lote == _lote_flex(),
                 FlexPedido.sp_em.is_not(None),
                 FlexPedido.detectado_em >= corte,
                 situacao.notin_(_SITUACOES_FECHADAS),
@@ -1167,6 +1179,7 @@ class ContaFlex:
     # De onde o motoboy do Flex sai (ML): CEP(s) só com dígitos e cidade(s).
     origem_cep: str | None = None
     origem_cidade: str | None = None
+    origem_lida_em: datetime | None = None
 
 
 def conta_flex_da_linha(c: FlexConta) -> ContaFlex:
@@ -1180,10 +1193,15 @@ def conta_flex_da_linha(c: FlexConta) -> ContaFlex:
         erro=c.erro,
         origem_cep=c.origem_cep,
         origem_cidade=c.origem_cidade,
+        origem_lida_em=c.origem_lida_em,
     )
 
 
 MOTIVO_SEM_ORIGEM = "não deu para ler de onde sai o Flex da conta no ML"
+# Quanto tempo a origem lida vale sem uma leitura nova que a confirme (a
+# plataforma fora do ar, a resposta sem `origin`): passou disso, a conta para
+# até ler de novo. Um 5xx isolado na releitura de hora em hora não para nada.
+_VALIDADE_ORIGEM = timedelta(hours=6)
 _PREFIXO_FORA_DA_ORIGEM = "saída do Flex da conta fora de"
 
 
@@ -1204,6 +1222,8 @@ def bloqueio_da_origem(conta: ContaFlex) -> str | None:
     local = flex_local.atual()
     cidades = flex_local.cidades_da_origem(conta.origem_cidade)
     if not cidades:
+        return MOTIVO_SEM_ORIGEM
+    if conta.origem_lida_em is not None and conta.origem_lida_em < _agora() - _VALIDADE_ORIGEM:
         return MOTIVO_SEM_ORIGEM
     if flex_local.origem_ok(conta.origem_cidade, local):
         return None
@@ -1263,6 +1283,7 @@ async def _conferir_contas(
     *,
     perguntar: bool,
     forcar: Collection[UUID] = (),
+    relidas: set[UUID] | None = None,
 ) -> dict[UUID, ContaFlex]:
     """A conta pode ter Flex? Vale o que está em `flex_conta` por até
     `_VALIDADE_CONTA`; depois disso (ou nunca conferida) pergunta à
@@ -1270,14 +1291,13 @@ async def _conferir_contas(
     pedido Flex): só o banco, qualquer idade.
 
     Resposta "não sei" (rede, 5xx) não apaga a anterior: fica o erro e a
-    próxima rodada pergunta de novo. Mas a ORIGEM (de onde o motoboy sai)
-    lida há mais de `_VALIDADE_CONTA` não vale sem confirmação: a conta fica
-    "não deu para ler de onde sai" até a plataforma responder (só na memória
-    da rodada — o banco guarda a última origem lida).
+    próxima rodada pergunta de novo. A ORIGEM (de onde o motoboy sai) só vale
+    `_VALIDADE_ORIGEM` sem uma leitura que a confirme (`origem_lida_em`).
 
     `forcar`: contas perguntadas agora mesmo, sem cache — antes de LIGAR um
     anúncio aprovado e no "Sincronizar agora" (quem acabou de trocar o
-    endereço do Flex no painel não espera 1 h)."""
+    endereço do Flex no painel não espera 1 h). `relidas` recebe as contas
+    que RESPONDERAM nesta rodada (o LIGAR só sai nelas)."""
     if not integracoes:
         return {}
     async with session_scope() as s:
@@ -1306,7 +1326,7 @@ async def _conferir_contas(
             sem_origem = (
                 atual.plataforma == flex_envio.PLATAFORMA_ML
                 and atual.ativo is True
-                and not atual.origem_cidade
+                and (not atual.origem_cidade or atual.origem_lida_em is None)
             )
             if (
                 atual.ativo is not None
@@ -1342,16 +1362,15 @@ async def _conferir_contas(
                             # da resposta mudou — fica a origem que já se sabia.
                             logger.warning("flex_conta_sem_origin", integration_id=str(iid))
                         else:
-                            c.origem_cep = (r.origem_cep or None) and r.origem_cep[:200]
-                            c.origem_cidade = (r.origem_cidade or None) and r.origem_cidade[:200]
+                            c.origem_cep = (r.origem_cep or None) and r.origem_cep[:1000]
+                            c.origem_cidade = (r.origem_cidade or None) and r.origem_cidade[:1000]
+                            c.origem_lida_em = agora if r.origem_cidade else None
                         c.lido_em = agora
                         c.erro = None
+                        if relidas is not None:
+                            relidas.add(iid)
                     c.atualizado_em = agora
                     out[iid] = replace(conta_flex_da_linha(c), plataforma=out[iid].plataforma)
-                    velha = c.lido_em is None or c.lido_em < agora - _VALIDADE_CONTA
-                    if r.ativo is None and velha:
-                        # Origem velha sem confirmação: não vale (ver docstring).
-                        out[iid] = replace(out[iid], origem_cep=None, origem_cidade=None)
                     if (c.origem_cep, c.origem_cidade) != origem_antes:
                         logger.info(
                             "flex_conta_origem_mudou",
@@ -2543,25 +2562,27 @@ async def rodar_motor(
         resumo["motivo"] = "nenhuma conta em flex_contas"
         return resumo
     cfg = ConfigFlex.das_configuracoes()
-    # O local de saída (cidade + lote) vale a rodada inteira.
-    local = await flex_local.carregar()
+    # O local de saída (cidade + lote), relido do banco e FIXADO: vale a rodada
+    # inteira, mesmo que alguém troque no meio dela.
+    local = await flex_local.carregar(forcar=True)
     resumo["local"] = f"{local.cidade} (.{local.lote})"
     async with session_scope() as trava:
         if not await _travar(trava, _MOTOR_LOCK_KEY):
             resumo["ocupado"] = True
             return resumo
         resumo["rodou"] = True
-        await _rodada(
-            cfg,
-            contas,
-            modo=m,
-            ler=ler,
-            so_desligar=so_desligar,
-            alvo=set(somente) if somente is not None else None,
-            por=por,
-            resumo=resumo,
-            reler_contas=reler_contas,
-        )
+        with flex_local.fixar(local):
+            await _rodada(
+                cfg,
+                contas,
+                modo=m,
+                ler=ler,
+                so_desligar=so_desligar,
+                alvo=set(somente) if somente is not None else None,
+                por=por,
+                resumo=resumo,
+                reler_contas=reler_contas,
+            )
     logger.info("flex_motor_rodada", **{k: v for k, v in resumo.items() if v not in (0, None)})
     return resumo
 
@@ -2617,8 +2638,9 @@ async def _rodada(
             if alvo:
                 forcar |= {iid for iid, _ext in alvo}
             forcar |= await _contas_com_aprovacao(integracoes.keys())
+    relidas: set[UUID] = set()
     contas_flex = await _conferir_contas(
-        integracoes, clientes, agora, resumo, perguntar=ler, forcar=forcar
+        integracoes, clientes, agora, resumo, perguntar=ler, forcar=forcar, relidas=relidas
     )
     vistos: dict[tuple[UUID, str], str] = {}
     if ler and alvo is None:
@@ -2655,6 +2677,13 @@ async def _rodada(
         so_desligar=so_desligar,
         resumo=resumo,
     )
+    # LIGAR só na conta cuja assinatura (e origem) foi relida AGORA: a
+    # aprovação que chegou no meio da rodada, ou a releitura que falhou,
+    # espera a próxima — a aprovação continua valendo (revisão de 08/10/2026).
+    sem_releitura = [a for a in acoes if a.acao == "ligar" and a.integration_id not in relidas]
+    if sem_releitura:
+        resumo["ligar_esperando_releitura"] = len(sem_releitura)
+        acoes = [a for a in acoes if not (a.acao == "ligar" and a.integration_id not in relidas)]
     await _aplicar(acoes, integracoes, clientes, modo=modo, por=por, resumo=resumo)
 
 
@@ -2883,7 +2912,7 @@ async def executar_emergencia(emergencia_id: int) -> dict:
 
     Andamento: `flex_emergencia.resumo`, regravado a cada
     `_EMERGENCIA_PROGRESSO_S` s (a tela consulta)."""
-    await flex_local.carregar()
+    local = await flex_local.carregar(forcar=True)
     async with session_scope() as s:
         linha = await s.get(FlexEmergencia, emergencia_id)
         if linha is None:
@@ -2901,10 +2930,11 @@ async def executar_emergencia(emergencia_id: int) -> dict:
     resumo["escreve"] = escreve
     try:
         await _gravar_andamento(emergencia_id, resumo, status="rodando")
-        await _executar_emergencia(
-            emergencia_id, resumo, modo=m, escreve=escreve, por=por, escopo=escopo,
-            aprovados=aprovados,
-        )
+        with flex_local.fixar(local):
+            await _executar_emergencia(
+                emergencia_id, resumo, modo=m, escreve=escreve, por=por, escopo=escopo,
+                aprovados=aprovados,
+            )
     except Exception as exc:  # noqa: BLE001 — a tela tem de ver que parou
         logger.exception("flex_emergencia_falhou", id=emergencia_id)
         await _gravar_andamento(emergencia_id, resumo, status="falhou", erro=str(exc))

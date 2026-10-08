@@ -86,6 +86,14 @@ async def _velha(db: AsyncSession) -> None:
 
 def test_cidade_sem_acento_nem_maiuscula():
     assert flex_local.mesma_cidade("São Bernardo do Campo", "sao  bernardo do CAMPO")
+    for variante in (
+        "São Bernardo do Campo - SP",
+        "São Bernardo do Campo/SP",
+        "São Bernardo do Campo (SP)",
+        "sao-bernardo do campo",
+    ):
+        assert flex_local.mesma_cidade("São Bernardo do Campo", variante), variante
+    assert flex_local.mesma_cidade("Santa Bárbara d’Oeste", "Santa Barbara d'Oeste")
     assert flex_local.mesma_cidade(" Piracicaba ", "PIRACICABA")
     assert not flex_local.mesma_cidade("São Bernardo do Campo", "Santo André")
     assert not flex_local.mesma_cidade("", "")
@@ -101,24 +109,27 @@ def test_cidade_sem_acento_nem_maiuscula():
 @pytest.mark.asyncio
 async def test_local_de_fabrica_troca_e_cache(db: AsyncSession, make_user):
     # Sem linha no banco: São Bernardo do Campo / .sp (o que era fixo).
-    local = await flex_local.carregar(db, forcar=True)
+    local = await flex_local.carregar(forcar=True)
     assert (local.cidade, local.lote) == ("São Bernardo do Campo", "sp")
     assert (flex_local.cidade(), flex_local.lote()) == ("São Bernardo do Campo", "sp")
     dono = await make_user(role=UserRole.ADMIN)
-    novo = await flex_local.salvar(db, cidade="  Piracicaba ", lote=".PI", por=dono.id)
+    novo = await flex_local.salvar(db, cidade="  Piracicaba\x00 ", lote=".PI", por=dono.id)
+    # Antes do commit o cache não troca (o commit pode falhar).
+    assert flex_local.lote() == "sp"
     await db.commit()
+    flex_local.usar(novo)
     assert (novo.cidade, novo.lote, novo.atualizado_por) == ("Piracicaba", "pi", dono.id)
-    # O processo que salvou já usa o novo; outro processo relê do banco.
     assert (flex_local.cidade(), flex_local.lote()) == ("Piracicaba", "pi")
     flex_local.limpar_cache()
     assert flex_local.lote() == "sp"  # sem carregar: o de fábrica
-    assert (await flex_local.carregar(db)).lote == "pi"
+    assert (await flex_local.carregar()).lote == "pi"
     linha = (await db.execute(select(FlexLocal))).scalars().all()
     assert [(x.id, x.cidade, x.lote) for x in linha] == [(1, "Piracicaba", "pi")]
     for cidade, lote, codigo in [
         ("", "sp", "cidade_vazia"),
         ("x" * 101, "sp", "cidade_longa"),
         ("Piracicaba", "cd", "lote_invalido"),
+        ("Piracicaba, SP", "sp", "cidade_invalida"),
     ]:
         with pytest.raises(flex_local.LocalFlexInvalidoError) as e:
             await flex_local.salvar(db, cidade=cidade, lote=lote, por=None)
@@ -376,22 +387,102 @@ async def test_saida_sem_cidade_bloqueia_e_sem_origin_fica_a_antiga(db, mundo, m
 
 
 @pytest.mark.asyncio
-async def test_plataforma_fora_do_ar_mais_de_1h_a_origem_velha_nao_vale(db, mundo, monkeypatch):
+async def test_plataforma_fora_do_ar_a_origem_vale_6h(db, mundo, monkeypatch):
+    """Um 5xx na releitura de hora em hora não para a conta; a origem lida há
+    mais de 6 h sem confirmação para (revisão de 08/10/2026)."""
     monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
     ml = mundo["ml"]
     await flex_motor.rodar_motor()
-    await _velha(db)
+    await _velha(db)  # 2 h
     ml.assinatura = AssinaturaFlex(None, None, "503 Service Unavailable")
     ml.chamadas.clear()
     await flex_motor.rodar_motor()
-    assert ml.chamadas == []
+    assert ml.leituras  # 2 h: continua
+    await db.execute(text("UPDATE flex_conta SET origem_lida_em = now() - interval '7 hours'"))
+    await _velha(db)
+    ml.chamadas.clear()
+    await flex_motor.rodar_motor()
+    assert ml.chamadas == []  # 7 h sem confirmar: para
     conta = await _conta(db, mundo["conta_id"])
-    # O banco guarda o que se sabia; só a rodada não confia.
     assert (conta.flex_ativo, conta.origem_cidade) == (True, "São Bernardo do Campo")
+    assert {e.motivo for e in (await _estados(db)).values()} == {flex_motor.MOTIVO_SEM_ORIGEM}
     # Voltou a responder: volta a mexer.
     ml.assinatura = SAO_BERNARDO
     await flex_motor.rodar_motor()
     assert ml.leituras
+
+
+@pytest.mark.asyncio
+async def test_troca_do_local_no_meio_da_rodada_nao_mistura_lote(db, mundo, monkeypatch):
+    """Alguém troca o local para .ci enquanto a rodada lê o ML: a rodada
+    termina com o local do começo (.sp) — não desliga anúncio com peça."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    monkeypatch.setattr(flex_local, "_VALIDADE_S", 0.0)
+    ml = mundo["ml"]
+    ml.estado.update({"MLB1": True, "MLB2": True})
+    ler = ml.ler_flex
+    trocou = []
+
+    async def ler_trocando(item):
+        if not trocou:
+            trocou.append(item)
+            async with flex_motor.session_scope() as s:
+                await flex_local.salvar(s, cidade="São Bernardo do Campo", lote="ci", por=None)
+            flex_local.limpar_cache()
+            await flex_local.carregar()  # outro job do worker relê o cache global
+        return await ler(item)
+
+    monkeypatch.setattr(ml, "ler_flex", ler_trocando)
+    resumo = await flex_motor.rodar_motor()
+    assert trocou and resumo["local"] == "São Bernardo do Campo (.sp)"
+    est = await _estados(db)
+    assert est["MLB1"].motivo == "saldo Flex 5 em dg053.sp (liga com 3)"
+    assert ("desligar", "MLB1") not in ml.escritas
+    assert ("desligar", "MLB2") not in ml.escritas
+    # A rodada seguinte já usa o .ci (o dg053.ci tem 100).
+    monkeypatch.setattr(ml, "ler_flex", ler)
+    resumo = await flex_motor.rodar_motor()
+    assert resumo["local"] == "São Bernardo do Campo (.ci)"
+
+
+@pytest.mark.asyncio
+async def test_aprovacao_no_meio_da_rodada_espera_a_releitura(db, mundo, monkeypatch):
+    """A aprovação cai depois da conferência das contas, no meio da rodada do
+    cron: a rodada NÃO liga (a conta não foi relida agora); a aprovação
+    continua valendo para a próxima."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()
+    ler = ml.ler_flex
+    marcou = []
+
+    async def ler_aprovando(item):
+        if not marcou:
+            marcou.append(item)
+            async with flex_motor.session_scope() as s:
+                await s.execute(
+                    text(
+                        "UPDATE flex_anuncio_estado SET aprovado_em = now() "
+                        "WHERE external_id = 'MLB1'"
+                    )
+                )
+        return await ler(item)
+
+    monkeypatch.setattr(ml, "ler_flex", ler_aprovando)
+    lidas = ml.assinaturas_lidas
+    ml.chamadas.clear()
+    resumo = await flex_motor.rodar_motor()
+    # A assinatura estava no cache (< 1 h) e não havia aprovação no começo:
+    # a conta NÃO foi relida nesta rodada — a aprovação que chegou no meio
+    # dela espera.
+    assert ml.assinaturas_lidas == lidas
+    assert ("ligar", "MLB1") not in ml.escritas
+    assert resumo["ligar_esperando_releitura"] == 1
+    monkeypatch.setattr(ml, "ler_flex", ler)
+    ml.chamadas.clear()
+    await flex_motor.rodar_motor()  # a próxima relê a conta (tem aprovação) e liga
+    assert ml.assinaturas_lidas == lidas + 1
+    assert ("ligar", "MLB1") in ml.escritas
 
 
 @pytest.mark.asyncio
@@ -498,6 +589,19 @@ async def test_config_mostra_o_local_a_origem_e_o_motivo(
     assert r.status_code == 400 and r.json()["detail"]["code"] == "lote_invalido"
     r = await client.put("/api/flex/local", json={"cidade": "   ", "lote": "sp"})
     assert r.status_code == 400 and r.json()["detail"]["code"] == "cidade_vazia"
+    r = await client.put("/api/flex/local", json={"cidade": "Piracicaba, SP", "lote": "sp"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "cidade_invalida"
+    # Outro admin trocou enquanto o formulário estava aberto: 409, nada muda.
+    r = await client.put(
+        "/api/flex/local",
+        json={
+            "cidade": "Campinas",
+            "lote": "sp",
+            "cidade_antes": "São Bernardo do Campo",
+            "lote_antes": "sp",
+        },
+    )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "local_mudou"
     gerente = await make_user(role=UserRole.USER)
     auth_as(gerente)
     r = await client.put("/api/flex/local", json={"cidade": "Campinas", "lote": "sp"})
@@ -537,6 +641,38 @@ async def test_deveriam_desligar_so_conta_onde_o_robo_mexe(
     r = await client.get("/api/flex/anuncios?desligar=true")
     assert [i["external_id"] for i in r.json()["itens"]] == ["MLB2"]
     assert r.json()["resumo"]["desligar"] == 1
+    assert r.json()["resumo"]["sem_controle"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sem_controle_e_ligados_fora_ao_trocar_o_local(
+    client: AsyncClient, db: AsyncSession, cena, auth_as: Callable
+):
+    """MLB2 tem Flex ligado numa conta que sai de São Bernardo. Trocar o local
+    para Piracicaba: a resposta avisa 1 anúncio que fica fora do controle, e o
+    resumo passa a mostrar "fora do controle"."""
+    db.add(
+        FlexConta(
+            integration_id=cena["conta_id"],
+            plataforma="ml",
+            flex_ativo=True,
+            status="in",
+            lido_em=datetime.now(UTC),
+            origem_lida_em=datetime.now(UTC),
+            origem_cep=ORIGEM_SB,
+            origem_cidade="São Bernardo do Campo",
+        )
+    )
+    await db.commit()
+    auth_as(cena["admin"])
+    r = await client.get("/api/flex/anuncios")
+    assert r.json()["resumo"]["sem_controle"] == 0
+    r = await client.put("/api/flex/local", json={"cidade": "Piracicaba", "lote": "pi"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ligados_fora"] == 1
+    r = await client.get("/api/flex/anuncios")
+    assert r.json()["resumo"]["sem_controle"] == 1
+    assert r.json()["resumo"]["desligar"] == 0
 
 
 @pytest.mark.asyncio
@@ -548,3 +684,81 @@ async def test_estado_do_anuncio_nao_muda_com_a_leitura_da_tela(db, mundo):
     await flex_motor.rodar_motor()
     antes = (await db.execute(select(FlexAnuncioEstado.motivo))).scalars().all()
     assert set(antes) == {MOTIVO_PIRACICABA}
+
+
+# ---- o lote de cada pedido Flex ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pedido_que_saiu_fica_com_o_lote_dele(db, mundo):
+    """Um pedido Flex saiu de São Bernardo (lote .sp) sem passar pelo .sp e
+    espera o acerto. O local muda para Piracicaba / .pi: o acerto continua
+    pendente (pelo .sp do pedido) e o pedido NÃO tira peça do .pi."""
+    from tests.test_flex_motor import _pedido_flex, _saldo
+
+    db.add(
+        Product(
+            user_id=mundo["dono_id"],
+            sku="dg053.pi",
+            name="dg053.pi",
+            stock=6,
+            situacao="A",
+            bling_product_id=777002,
+        )
+    )
+    await db.commit()
+    await _pedido_flex(db, 906001, "dg053.pi", 2, situacao="15")  # o Bling baixou o .pi
+    linha = await db.get(flex_motor.FlexPedido, 906001)
+    assert linha.lote == "sp"  # padrão (o local de quando foi detectado)
+    # No .sp: o pedido desconta 2 (saiu de lá sem passar pelo .sp).
+    assert (await _saldo(db)).saldo == 3
+    assert flex_motor.acerto_pendente("15", False, None, ["dg053.pi"], "sp") is True
+    # O local vira Piracicaba / .pi.
+    with flex_local.fixar(flex_local.LocalFlex("Piracicaba", "pi")):
+        # O pedido é do .sp: não desconta do .pi…
+        assert (await _saldo(db, "dg053.pi")).saldo == 6
+        # …e o acerto dele continua pendente (era do .sp).
+        assert flex_motor.acerto_pendente("15", False, None, ["dg053.pi"], "sp") is True
+        # Um pedido do .pi com o item no .pi não tem acerto.
+        assert flex_motor.acerto_pendente("15", False, None, ["dg053.pi"], "pi") is False
+
+
+@pytest.mark.asyncio
+async def test_deteccao_grava_o_lote_e_nao_troca_o_do_pedido_antigo(db, mundo):
+    from app.models import BlingOrder
+
+    db.add(
+        BlingOrder(
+            numero="907001",
+            bling_id=907001,
+            loja="1",
+            item_index=0,
+            item_codigo="dg053.sp",
+            item_quantidade=1,
+            situacao="6",
+            data=datetime.now(UTC),
+        )
+    )
+    await db.commit()
+    lido = flex_envio.EnvioLido(
+        bling_id=907001,
+        plataforma="ml",
+        integration_id=None,
+        numero="907001",
+        numeroloja="1",
+        envio_tipo="self_service",
+        envio_flex=True,
+    )
+    await flex_envio.registrar_pedidos_flex(db, [lido])
+    await db.commit()
+    linha = await db.get(flex_motor.FlexPedido, 907001)
+    assert (linha.lote, linha.no_sp) == ("sp", True)
+    # O local muda para .pi: o pedido já detectado fica com o .sp dele.
+    await flex_local.salvar(db, cidade="Piracicaba", lote="pi", por=None)
+    await db.commit()
+    flex_local.limpar_cache()
+    await flex_envio.registrar_pedidos_flex(db, [lido])
+    await db.commit()
+    db.expire_all()
+    linha = await db.get(flex_motor.FlexPedido, 907001)
+    assert (linha.lote, linha.no_sp) == ("sp", True)

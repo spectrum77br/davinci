@@ -21,8 +21,12 @@ vê a troca na rodada seguinte.
 
 from __future__ import annotations
 
+import re
 import time
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -52,6 +56,10 @@ class LocalFlex:
 
 _PADRAO = LocalFlex()
 _cache: tuple[float, LocalFlex] | None = None
+# O local de UMA rodada (motor, emergência, robô de prioridade): fixado no
+# começo dela e usado até o fim — trocar o local no meio da rodada não pode
+# misturar o lote velho com o novo (revisão de 08/10/2026).
+_da_rodada: ContextVar[LocalFlex | None] = ContextVar("flex_local_da_rodada", default=None)
 
 
 class LocalFlexInvalidoError(ValueError):
@@ -62,8 +70,22 @@ class LocalFlexInvalidoError(ValueError):
 
 
 def atual() -> LocalFlex:
-    """O local do cache do processo (o padrão se nunca carregou)."""
+    """O local da rodada em andamento (`fixar`); fora de rodada, o do cache do
+    processo (o padrão se nunca carregou)."""
+    fixo = _da_rodada.get()
+    if fixo is not None:
+        return fixo
     return _cache[1] if _cache is not None else _PADRAO
+
+
+@contextmanager
+def fixar(local: LocalFlex) -> Iterator[LocalFlex]:
+    """A rodada inteira usa ESTE local (e as tarefas que ela criar)."""
+    token = _da_rodada.set(local)
+    try:
+        yield local
+    finally:
+        _da_rodada.reset(token)
 
 
 def cidade() -> str:
@@ -97,34 +119,41 @@ def _da_linha(linha: FlexLocal | None) -> LocalFlex:
     return LocalFlex(linha.cidade.strip(), lote_ok, linha.atualizado_em, linha.atualizado_por)
 
 
-async def carregar(session: AsyncSession | None = None, *, forcar: bool = False) -> LocalFlex:
-    """Relê do banco se o cache tem mais de `_VALIDADE_S` (ou `forcar`).
+async def carregar(*, forcar: bool = False) -> LocalFlex:
+    """Relê do banco se o cache tem mais de `_VALIDADE_S` (ou `forcar`). Usa
+    sessão PRÓPRIA: um erro aqui não aborta a transação de quem chamou.
     Banco fora: fica o que já estava no cache (ou o padrão)."""
+    fixo = _da_rodada.get()
+    if fixo is not None and not forcar:
+        return fixo  # dentro de uma rodada: o local dela, sem reler
     if not forcar and _cache is not None and time.monotonic() - _cache[0] < _VALIDADE_S:
         return _cache[1]
     try:
-        if session is not None:
-            linha = await session.get(FlexLocal, 1)
-        else:
-            from app.db import session_scope
+        from app.db import session_scope
 
-            async with session_scope() as s:
-                linha = (
-                    await s.execute(select(FlexLocal).where(FlexLocal.id == 1))
-                ).scalar_one_or_none()
+        async with session_scope() as s:
+            linha = (
+                await s.execute(select(FlexLocal).where(FlexLocal.id == 1))
+            ).scalar_one_or_none()
     except Exception as exc:  # noqa: BLE001 — sem banco, fica o que se sabia
         logger.warning("flex_local_nao_carregou", erro=str(exc)[:200])
-        return atual()
+        return _cache[1] if _cache is not None else _PADRAO
     return _guardar(_da_linha(linha))
 
 
+_UF_NO_FIM = re.compile(r"\s*(?:[-/,(]\s*)[a-z]{2}\)?\s*$")
+_SEM_LETRA = re.compile(r"[^0-9a-z]+")
+
+
 def normalizar_cidade(texto: str | None) -> str:
-    """ "São Bernardo do Campo" ≈ "sao  bernardo do campo": sem acento, sem
-    diferença de maiúscula, espaços juntos."""
+    """ "São Bernardo do Campo" ≈ "sao-bernardo do CAMPO - SP": sem acento, sem
+    diferença de maiúscula, hífen/apóstrofo/ponto viram espaço e a UF no fim
+    (" - SP", "/SP", ", SP", "(SP)") sai."""
     sem_acento = "".join(
         c for c in unicodedata.normalize("NFKD", texto or "") if not unicodedata.combining(c)
-    )
-    return " ".join(sem_acento.casefold().split())
+    ).casefold()
+    sem_uf = _UF_NO_FIM.sub("", sem_acento.strip())
+    return " ".join(_SEM_LETRA.sub(" ", sem_uf).split())
 
 
 def mesma_cidade(a: str | None, b: str | None) -> bool:
@@ -146,11 +175,16 @@ def origem_ok(origem_cidade: str | None, local: LocalFlex | None = None) -> bool
 
 
 async def salvar(session: AsyncSession, *, cidade: str, lote: str, por: UUID | None) -> LocalFlex:
-    """Troca o local (quem pode é conferido no router). Valida e grava; o
-    cache deste processo já sai com o novo."""
-    nome = " ".join((cidade or "").split())
+    """Troca o local (quem pode é conferido no router). Valida e grava na
+    sessão de quem chama; o cache só troca com `usar` depois do commit."""
+    nome = " ".join("".join(c for c in (cidade or "") if c.isprintable()).split())
     if not nome:
         raise LocalFlexInvalidoError("cidade_vazia", "informe a cidade de onde o motoboy sai")
+    if "," in nome or ";" in nome:
+        raise LocalFlexInvalidoError(
+            "cidade_invalida",
+            "digite só o nome da cidade, como o Mercado Livre mostra (sem vírgula)",
+        )
     if len(nome) > _TAMANHO_CIDADE:
         raise LocalFlexInvalidoError("cidade_longa", "nome de cidade comprido demais")
     lote_ok = (lote or "").strip().lower().lstrip(".")
@@ -179,4 +213,10 @@ async def salvar(session: AsyncSession, *, cidade: str, lote: str, por: UUID | N
         lote=lote_ok,
         por=str(por) if por else None,
     )
-    return _guardar(novo)
+    # O cache do processo só troca DEPOIS do commit (quem chama: `usar`).
+    return novo
+
+
+def usar(local: LocalFlex) -> LocalFlex:
+    """Depois do commit da troca: o cache deste processo já sai com o novo."""
+    return _guardar(local)

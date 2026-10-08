@@ -98,7 +98,10 @@ class FlexPedido(Base):
     """Pedido de venda cujo envio é Flex, por `bling_id` (um pedido do Bling)."""
 
     __tablename__ = "flex_pedido"
-    __table_args__ = (CheckConstraint(_in("plataforma", FLEX_PLATAFORMAS), name="plataforma"),)
+    __table_args__ = (
+        CheckConstraint(_in("plataforma", FLEX_PLATAFORMAS), name="plataforma"),
+        CheckConstraint(_in("lote", FLEX_LOTES), name="lote"),
+    )
 
     bling_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     plataforma: Mapped[str] = mapped_column(Text, nullable=False)
@@ -127,6 +130,12 @@ class FlexPedido(Base):
     no_sp: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # O lote do local de saída do Flex para ESTE pedido (aba Flex › Local de
+    # saída; .sp de fábrica): o de quando ele foi detectado — ou o de agora,
+    # enquanto o robô de prioridade ainda o trata (em aberto). O pedido que já
+    # saiu fica com o seu: trocar o local depois não muda o acerto dele.
+    # `no_sp` quer dizer "já no lote DESTE pedido" (o nome é do tempo do .sp).
+    lote: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'sp'"))
     # Aviso para a operação: o .sp não cobre o pedido Flex e o robô de
     # prioridade NÃO o trocou de lote (services/prioridade_estoque). Volta a
     # NULL quando o pedido vai para o .sp.
@@ -271,6 +280,12 @@ class FlexConta(Base):
     # Bernardo — Eduardo, 08/10/2026). NULL = não lida ainda / conta sem Flex.
     origem_cep: Mapped[str | None] = mapped_column(Text, nullable=True)
     origem_cidade: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quando a origem foi lida de verdade (a resposta trouxe a `origin`). A
+    # trava só confia nela por algumas horas (flex_motor._VALIDADE_ORIGEM): a
+    # resposta sem `origin` ou a plataforma fora do ar não a renovam.
+    origem_lida_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Última conferência que trouxe resposta (a "validade" de ~1 h conta
     # daqui) e o erro da última que não trouxe (rede, 5xx) — nesse caso vale
     # a resposta anterior e a próxima rodada pergunta de novo.

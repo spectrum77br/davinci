@@ -172,14 +172,9 @@ async def test_assinatura_em_cache_e_erro_mantem_a_anterior(db, mundo, monkeypat
     assert ml.assinaturas_lidas == 2
     conta = await _conta(db, mundo["conta_id"])
     assert (conta.flex_ativo, conta.status, conta.erro) == (True, "in", "503 Service Unavailable")
-    # Trava de origem (08/10/2026): a leitura da assinatura tem mais de 1 h e
-    # não se confirmou — não se sabe se o motoboy ainda sai da cidade do
-    # local. A conta fica parada (sem leitura nem escrita) até responder; o
-    # banco guarda a origem que se sabia.
-    assert ml.leituras == []
-    assert conta.origem_cidade == "São Bernardo do Campo"
-    est = await _estados(db)
-    assert {e.motivo for e in est.values()} == {flex_motor.MOTIVO_SEM_ORIGEM}
+    # A origem (lida há pouco) vale até 6 h sem confirmação: um 5xx isolado
+    # não para a conta (test_flex_origem cobre a origem velha).
+    assert ml.leituras  # a conta continua sendo lida
     # Volta a responder: a conta saiu do Flex ("out").
     ml.assinatura = AssinaturaFlex(False, "out", "assinatura do Flex: out")
     await flex_motor.rodar_motor()

@@ -252,7 +252,7 @@ def _origens_ml(
     if incompleta or not pares:
         return None, None, False
     ceps = ",".join(c for c, _ in pares) or None
-    return ceps, ", ".join(n for _, n in pares)[:200], False
+    return ceps, ", ".join(n for _, n in pares), False
 
 
 def classificar_assinatura_ml(r: httpx.Response) -> AssinaturaFlex:

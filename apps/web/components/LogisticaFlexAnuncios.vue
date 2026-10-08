@@ -103,10 +103,20 @@ type FlexAnuncio = {
   status_anuncio: string | null
   atualizado_em: string
 }
-type FlexResumo = { avaliados: number; ligados: number; aguardando: number; desligar: number; nao_lidos: number }
+type FlexResumo = {
+  avaliados: number
+  ligados: number
+  aguardando: number
+  desligar: number
+  nao_lidos: number
+  // Flex ligado em contas que o sistema não controla (sem Flex conferido ou
+  // saída fora da cidade do local): só a emergência ou uma pessoa desliga.
+  sem_controle?: number
+}
 type FlexPedido = {
   bling_id: number
   numero: string | null
+  lote?: string
   plataforma: string
   conta: string | null
   numeroloja: string | null
@@ -521,7 +531,33 @@ const ERRO_LOCAL: Record<string, string> = {
   so_admin: 'Só um admin troca o local de saída do Flex.',
   cidade_vazia: 'Informe a cidade de onde o motoboy sai.',
   cidade_longa: 'Nome de cidade comprido demais.',
+  cidade_invalida: 'Digite só o nome da cidade, como o Mercado Livre mostra (sem vírgula).',
   lote_invalido: 'Escolha um dos lotes da lista.',
+  formulario: 'Confira a cidade e o estoque (lote).',
+  local_mudou: 'Outra pessoa trocou o local agora há pouco — a tela foi atualizada, confira e tente de novo.',
+}
+// "São Bernardo do Campo - SP" ≈ "sao bernardo do campo": a mesma régua do
+// servidor (services/flex_local.normalizar_cidade).
+function chaveCidade(t: string): string {
+  return t
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s*(?:[-/,(]\s*)[a-z]{2}\)?\s*$/, '')
+    .replace(/[^0-9a-z]+/g, ' ')
+    .trim()
+}
+// Contas do ML com Flex que já saem desta cidade (pela última leitura).
+function contasNaCidade(cidade: string): number {
+  const alvo = chaveCidade(cidade)
+  return (config.value?.contas || []).filter(
+    (c) =>
+      c.flex_ativo === true &&
+      c.plataforma === 'ml' &&
+      !!c.flex_origem_cidade &&
+      c.flex_origem_cidade.split(',').every((x) => chaveCidade(x) === alvo),
+  ).length
 }
 function abrirLocal() {
   localForm.value = { cidade: localCidade.value, lote: localLote.value }
@@ -538,24 +574,45 @@ async function salvarLocal() {
     editandoLocal.value = false
     return
   }
+  const naCidade = contasNaCidade(cidade)
+  const aviso =
+    naCidade === 0
+      ? `\n\n⚠️ Nenhuma conta do Mercado Livre sai de "${cidade}" hoje (pela última leitura): ` +
+        'o sistema vai parar de mexer em TODAS até o endereço do Flex delas ser essa cidade. ' +
+        'Confira se o nome está igual ao do Mercado Livre (use uma das sugestões da lista).'
+      : `\n\n${naCidade} conta(s) do Mercado Livre já saem dessa cidade.`
   const ok = confirm(
     `Trocar o local de saída do Flex?\n\nDe: ${localCidade.value} (estoque .${localLote.value})\n` +
       `Para: ${cidade} (estoque .${lote})\n\n` +
       'O sistema passa a contar as peças desse estoque e só mexe nas contas cuja saída do Flex ' +
-      'no Mercado Livre for nessa cidade.',
+      'no Mercado Livre for nessa cidade. Os anúncios das outras contas ficam como estão.' +
+      aviso,
   )
   if (!ok) return
   salvandoLocal.value = true
   try {
-    await api('/api/flex/local', { method: 'PUT', body: { cidade, lote } })
+    const r = await api<{ ligados_fora?: number | null }>('/api/flex/local', {
+      method: 'PUT',
+      body: { cidade, lote, cidade_antes: localCidade.value, lote_antes: localLote.value },
+    })
     toasts.success('Local de saída trocado', `${cidade} · estoque .${lote}`)
+    if (r?.ligados_fora)
+      toasts.warning('Anúncios com Flex ligado fora do local', [
+        `${r.ligados_fora} anúncio(s) continuam com Flex ligado em contas que não saem de ${cidade}.`,
+        'O sistema não mexe mais neles. Se precisar, use "Desligar tudo (emergência)".',
+      ])
     editandoLocal.value = false
     emit('mudou')
     await Promise.all([carregarConfig(), carregarAnuncios()])
   } catch (e: any) {
     const d = e?.data?.detail
-    const code = typeof d === 'object' && d ? d.code : null
+    // 422 (validação do formulário) vem como lista: mensagem simples.
+    const code = Array.isArray(d) ? 'formulario' : typeof d === 'object' && d ? d.code : null
     toasts.error('Local de saída', ERRO_LOCAL[code] || (typeof d === 'object' && d?.detalhe) || e?.message || 'erro')
+    if (code === 'local_mudou') {
+      editandoLocal.value = false
+      await carregarConfig()
+    }
   } finally {
     salvandoLocal.value = false
   }
@@ -789,8 +846,8 @@ async function marcarAcertado(p: FlexPedido) {
   if (!props.canEdit || acertando.value.has(p.bling_id)) return
   const ok = confirm(
     `Pedido ${p.numero || p.bling_id}: você já acertou o estoque no Bling?\n\n` +
-      `Ele saiu de ${localCidade.value}, mas o Bling baixou outro lote. Confirme só depois de transferir ` +
-      `a peça para o .${localLote.value} no Bling — até lá o sistema desconta o pedido das peças livres em ${localCidade.value}.`,
+      `Ele saiu pelo Flex (estoque .${p.lote || localLote.value}), mas o Bling baixou outro lote. Confirme só depois ` +
+      `de transferir a peça para o .${p.lote || localLote.value} no Bling — até lá o sistema desconta o pedido das peças livres de lá.`,
   )
   if (!ok) return
   acertando.value = new Set([...acertando.value, p.bling_id])
@@ -1003,6 +1060,14 @@ defineExpose({ recarregar: carregarTudo })
       >
         <strong>{{ resumo.nao_lidos }}</strong> ainda não conferidos na plataforma
       </button>
+      <span
+        v-if="resumo.sem_controle"
+        class="rounded-md border border-amber-300 px-2.5 py-1 text-amber-800 dark:border-amber-700 dark:text-amber-300"
+        data-flex-sem-controle
+        :title="`Anúncios com Flex ligado em contas cuja saída do Flex não é em ${localCidade} (ou ainda não conferida): o sistema não mexe neles. Para desligar, use “Desligar tudo (emergência)” ou o painel do Mercado Livre.`"
+      >
+        <strong>{{ resumo.sem_controle }}</strong> com Flex ligado fora do controle do sistema
+      </span>
     </div>
 
     <!-- Filtros (rotulados) -->
@@ -1059,7 +1124,7 @@ defineExpose({ recarregar: carregarTudo })
             <th
               class="px-3 py-2"
               :title="`Peças do lote .${localLote} (${localCidade}) livres para o Flex: o estoque do .${localLote} menos os pedidos Flex que ainda não saíram dele. Com mais de uma família, vale a menor.`"
-            >Peças em SP</th>
+            >Peças em {{ localCidade }}</th>
             <th class="px-3 py-2" title="O que a regra do sistema quer para este anúncio">O sistema quer</th>
             <th class="px-3 py-2" title="O que o Mercado Livre / a Shopee mostrou na última conferência">Na plataforma</th>
             <!-- Ação antes do "Por quê": o botão Aprovar não pode ficar escondido
@@ -1187,7 +1252,7 @@ defineExpose({ recarregar: carregarTudo })
         </div>
         <div class="grid grid-cols-2 gap-x-3 gap-y-1">
           <div><span class="text-muted-foreground">Famílias:</span> {{ familiasTexto(a) }}</div>
-          <div><span class="text-muted-foreground">Peças em SP:</span> <span :class="saldoCls(a)">{{ a.saldo_sp ?? '—' }}</span></div>
+          <div><span class="text-muted-foreground">Peças em {{ localCidade }}:</span> <span :class="saldoCls(a)">{{ a.saldo_sp ?? '—' }}</span></div>
           <div class="col-span-2">
             <span class="text-muted-foreground">Na plataforma: </span>
             <span :class="divergente(a) ? 'text-amber-700 dark:text-amber-400 font-medium' : ''">{{ observadoTexto(a) }}</span>
@@ -1276,7 +1341,7 @@ defineExpose({ recarregar: carregarTudo })
               </td>
               <td class="px-3 py-2 text-xs max-w-[380px]">
                 <div v-if="p.acerto_pendente" class="font-medium text-rose-700 dark:text-rose-400">
-                  Já saiu de {{ localCidade }} sem passar pelo .{{ localLote }} — acerte o estoque no Bling (transferência para o .{{ localLote }}).
+                  Já saiu sem passar pelo .{{ p.lote || localLote }} — acerte o estoque no Bling (transferência para o .{{ p.lote || localLote }}).
                 </div>
                 <div v-if="p.alerta">{{ p.alerta }}</div>
                 <span v-if="!p.alerta && !p.acerto_pendente">—</span>
@@ -1287,7 +1352,7 @@ defineExpose({ recarregar: carregarTudo })
                   type="button"
                   class="inline-flex items-center gap-1 rounded border border-emerald-400 px-2 py-1 font-medium text-emerald-800 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
                   :disabled="acertando.has(p.bling_id)"
-                  :title="`Já transferi a peça para o .${localLote} no Bling: parar de descontar este pedido`"
+                  :title="`Já transferi a peça para o .${p.lote || localLote} no Bling: parar de descontar este pedido`"
                   @click="marcarAcertado(p)"
                 >
                   <Check class="size-3.5" /> Estoque acertado

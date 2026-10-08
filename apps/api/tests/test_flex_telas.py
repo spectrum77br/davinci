@@ -88,6 +88,7 @@ async def cena(db: AsyncSession, make_user, monkeypatch):
             lido_em=agora,
             origem_cep="09750000",
             origem_cidade="São Bernardo do Campo",
+            origem_lida_em=agora,
         )
     )
     base = {"integration_id": conta.id, "plataforma": "ml", "tentativas": 0}
@@ -149,6 +150,7 @@ async def test_anuncios_motivo_claro_e_resumo(client: AsyncClient, cena, auth_as
         "aguardando": 1,
         "desligar": 1,
         "nao_lidos": 1,
+        "sem_controle": 0,
     }
     # O resumo é de tudo, mesmo com a lista filtrada.
     r = await client.get("/api/flex/anuncios?aguardando=true")

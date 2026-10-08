@@ -30,6 +30,18 @@ definePageMeta({
 })
 
 const { api } = useApi()
+// De onde o motoboy do Flex sai (aba Flex › Local de saída; São Bernardo do
+// Campo / .sp de fábrica): o selo "Flex" diz de onde separar. Só quem vê o
+// Flex recebe a resposta (os outros nem veem o selo).
+const flexLocal = ref<{ cidade: string; lote: string }>({ cidade: 'São Bernardo do Campo', lote: 'sp' })
+onMounted(async () => {
+  try {
+    const r = await api<{ cidade?: string; lote?: string }>('/api/flex/acesso')
+    if (r?.cidade) flexLocal.value = { cidade: r.cidade, lote: r.lote || 'sp' }
+  } catch {
+    // sem o Flex para este usuário: o selo nem aparece
+  }
+})
 const auth = useAuthStore()
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -2930,7 +2942,7 @@ async function conferirTodos() {
               <span
                 v-if="row.flex"
                 class="ml-1 inline-block px-1.5 py-px rounded border border-violet-300 bg-violet-50 text-[9px] font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
-                title="Envio Flex: sai de São Bernardo (estoque .sp) e é entregue no mesmo dia ou no dia seguinte. Separe a peça do .sp."
+                :title="`Envio Flex: sai de ${flexLocal.cidade} (estoque .${flexLocal.lote}) e é entregue no mesmo dia ou no dia seguinte. Separe a peça do .${flexLocal.lote}.`"
               >Flex</span>
               <!-- Horário de corte ("despachar até" do marketplace). Só em
                    pedido não enviado; some sozinho quando o envio confirma. -->

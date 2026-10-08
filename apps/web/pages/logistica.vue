@@ -63,6 +63,11 @@ async function verificarFlex(): Promise<boolean> {
   }
   return podeVerFlex.value
 }
+// A aba Flex mudou algo (aprovou, acertou estoque, trocou o local de saída):
+// relê o resumo e o local — os textos da Logística seguem o local novo.
+async function aoMudarFlex() {
+  await Promise.all([carregarResumoFlex(), verificarFlex()])
+}
 const tab = ref<PlataformaTab | 'status'>('ml')
 
 // Aba Amazon: a Amazon trata "Delivery by Amazon" (DBA) e "Envio próprio" como
@@ -2218,7 +2223,7 @@ async function aplicarStatusBling(c: Logistica) {
       v-if="flexAnuncios"
       :can-edit="canEdit"
       @buscar-pedido="buscarPedidoFlex"
-      @mudou="carregarResumoFlex"
+      @mudou="aoMudarFlex"
     />
 
     <!-- ============ ABAS DE MARKETPLACE (ML/Shopee/Amazon/TikTok/Flex) ============ -->

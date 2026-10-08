@@ -5,10 +5,13 @@ Decisões do Eduardo (08/10/2026): "o motoboy vai sair de São Bernardo"
 Bernardo, eu quero poder alterar". A leitura de 08/10 mostrou as 17 contas do
 ML com a assinatura "in" saindo de Piracicaba (origin.zip_code 134xx).
 
-- flex_conta.origem_cep / origem_cidade: a origem da assinatura do Flex
+- flex_conta.origem_cep / origem_cidade / origem_lida_em: a origem da
+  assinatura do Flex
   (`GET /flex/sites/MLB/users/{id}/subscriptions/v1` → origin.zip_code e
   origin.city.name; mais de uma: separadas por vírgula). O motor só mexe na
   conta cuja saída é na cidade do local.
+- flex_pedido.lote: o lote do local de saída de cada pedido Flex (os de hoje:
+  .sp). O pedido que já saiu fica com o seu ao trocar o local.
 - flex_local (uma linha, id = 1): a cidade de saída do Flex e o lote do
   estoque de lá, trocados na aba Flex. Nasce com São Bernardo do Campo / .sp
   — o mesmo que o código fazia fixo até aqui.
@@ -45,6 +48,24 @@ def upgrade() -> None:
     op.execute("SET lock_timeout = '3s'")
     op.add_column("flex_conta", sa.Column("origem_cep", sa.Text(), nullable=True), schema=SCHEMA)
     op.add_column("flex_conta", sa.Column("origem_cidade", sa.Text(), nullable=True), schema=SCHEMA)
+    op.add_column(
+        "flex_conta",
+        sa.Column("origem_lida_em", sa.DateTime(timezone=True), nullable=True),
+        schema=SCHEMA,
+    )
+    # O lote de cada pedido Flex (os de hoje são do .sp — o que era fixo).
+    # Default constante: não reescreve a tabela.
+    op.add_column(
+        "flex_pedido",
+        sa.Column("lote", sa.Text(), server_default=sa.text("'sp'"), nullable=False),
+        schema=SCHEMA,
+    )
+    op.create_check_constraint(
+        op.f("ck_flex_pedido_lote"),
+        "flex_pedido",
+        "lote IN (" + ", ".join(f"'{v}'" for v in LOTES) + ")",
+        schema=SCHEMA,
+    )
     op.create_table(
         "flex_local",
         sa.Column(
@@ -72,7 +93,7 @@ def upgrade() -> None:
         schema=SCHEMA,
     )
     op.execute(
-        f"INSERT INTO {SCHEMA}.flex_local (id, cidade, lote) "
+        f"INSERT INTO {SCHEMA}.flex_local (id, cidade, lote) "  # noqa: S608 — SCHEMA é constante
         "VALUES (1, 'São Bernardo do Campo', 'sp')"
     )
 
@@ -80,5 +101,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("SET lock_timeout = '3s'")
     op.drop_table("flex_local", schema=SCHEMA)
+    op.drop_constraint(op.f("ck_flex_pedido_lote"), "flex_pedido", schema=SCHEMA)
+    op.drop_column("flex_pedido", "lote", schema=SCHEMA)
+    op.drop_column("flex_conta", "origem_lida_em", schema=SCHEMA)
     op.drop_column("flex_conta", "origem_cidade", schema=SCHEMA)
     op.drop_column("flex_conta", "origem_cep", schema=SCHEMA)
