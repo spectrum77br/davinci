@@ -19,7 +19,18 @@
 // anúncios dela o DaVinci não conhecia; o anúncio pausado aparece marcado;
 // a emergência vira um job com andamento na tela.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RefreshCw, Search, X, PowerOff, Check, ExternalLink, TriangleAlert, ChevronLeft, ChevronRight } from 'lucide-vue-next'
+import {
+  RefreshCw,
+  Search,
+  X,
+  PowerOff,
+  Check,
+  ExternalLink,
+  TriangleAlert,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+} from 'lucide-vue-next'
 
 const props = defineProps<{ canEdit: boolean }>()
 const emit = defineEmits<{
@@ -377,6 +388,130 @@ function descobertaTexto(c: FlexConta): string {
   const novos = c.descoberta_novos ? `, ${c.descoberta_novos} fora do DaVinci (o sistema desliga)` : ''
   return `${c.descoberta_total} anúncio(s) na conta${novos} — lidos ${fmtDesde(c.descoberta_em)}${c.descoberta_ok === false ? ' (leitura incompleta)' : ''}`
 }
+// ---- Quadro do topo: as contas agrupadas pelo que falta para ficarem prontas ----
+// (Eduardo, 08/10/2026: "arrume esse flex automático e deixe ele mais
+// organizado"). Cada conta aparece UMA vez, no grupo da situação dela; o
+// grupo diz o que fazer. Os nomes abrem com um clique.
+type GrupoConta = {
+  chave: string
+  titulo: string
+  acao: string
+  cor: string // a bolinha do grupo
+  contas: { id: string; nome: string; detalhe: string; title: string }[]
+}
+const STATUS_SEM_FLEX: Record<string, string> = {
+  out: 'saiu do Flex',
+  pending: 'aguardando o ML',
+  sem_assinatura: 'nunca teve Flex',
+  http_404: 'nunca teve Flex',
+  http_403: 'sem acesso',
+}
+const gruposContas = computed<GrupoConta[]>(() => {
+  const contas = config.value?.contas || []
+  const cidade = localCidade.value
+  const g: Record<string, GrupoConta> = {
+    prontas: {
+      chave: 'prontas',
+      titulo: `Prontas — saída do Flex em ${cidade}`,
+      acao: 'O sistema controla o Flex dos anúncios destas contas.',
+      cor: 'bg-emerald-500',
+      contas: [],
+    },
+    fora: {
+      chave: 'fora',
+      titulo: 'Saída do Flex em outra cidade',
+      acao: `Troque o endereço do Flex para ${cidade} no painel do Mercado Livre e clique em Sincronizar Flex.`,
+      cor: 'bg-rose-500',
+      contas: [],
+    },
+    lendo: {
+      chave: 'lendo',
+      titulo: 'Ainda lendo de onde o Flex sai',
+      acao: 'O sistema confere de novo na próxima rodada (até 15 min).',
+      cor: 'bg-amber-400',
+      contas: [],
+    },
+    sem_flex: {
+      chave: 'sem_flex',
+      titulo: 'Sem Flex no Mercado Livre',
+      acao: 'Se quiser Flex nelas: ative o Envios Flex no painel do Mercado Livre.',
+      cor: 'bg-zinc-400',
+      contas: [],
+    },
+    erro: {
+      chave: 'erro',
+      titulo: 'Não deu para conferir',
+      acao: 'Reconecte a conta em Integrações.',
+      cor: 'bg-amber-500',
+      contas: [],
+    },
+    shopee: {
+      chave: 'shopee',
+      titulo: 'Lojas da Shopee',
+      acao: 'Na Shopee o sistema só confere: a Entrega Direta é ligada à mão no Seller Center.',
+      cor: 'bg-orange-400',
+      contas: [],
+    },
+  }
+  for (const c of contas) {
+    if (!c.existe) continue
+    const nome = c.nome || c.id.slice(0, 8)
+    const info = flexDaConta(c)
+    const title = [info.title, descobertaTexto(c)].filter(Boolean).join(' · ')
+    const item = (detalhe: string) => ({ id: c.id, nome, detalhe, title })
+    if (c.plataforma === 'shopee') {
+      g.shopee!.contas.push(
+        item(c.flex_ativo === true ? 'Entrega Direta ligada' : c.flex_ativo === false ? 'desligada' : 'não conferida'),
+      )
+    } else if (c.flex_ativo === null) {
+      g.erro!.contas.push(item(c.flex_erro ? 'erro na conferência' : 'ainda não conferida'))
+    } else if (c.flex_ativo === false) {
+      g.sem_flex!.contas.push(item(STATUS_SEM_FLEX[c.flex_status || ''] || c.flex_status || ''))
+    } else if (c.flex_origem_ok === false && c.flex_origem_cidade) {
+      g.fora!.contas.push(item(`sai de ${c.flex_origem_cidade}`))
+    } else if (c.flex_origem_ok === false) {
+      g.lendo!.contas.push(item(''))
+    } else {
+      g.prontas!.contas.push(item(''))
+    }
+  }
+  const shopee = g.shopee!
+  if (shopee.contas.length && shopee.contas.every((x) => x.detalhe === 'desligada'))
+    shopee.titulo = 'Lojas da Shopee — Entrega Direta desligada em todas'
+  // Prontas sempre aparece (mesmo com 0: é a meta); os outros, só com conta.
+  return Object.values(g).filter((x) => x.chave === 'prontas' || x.contas.length)
+})
+// A linha fechada do quadro: quantas contas do ML o sistema já controla.
+const contasMl = computed(() => {
+  const ml = (config.value?.contas || []).filter((c) => c.existe && c.plataforma === 'ml')
+  const prontas = gruposContas.value.find((g) => g.chave === 'prontas')?.contas.length || 0
+  return { total: ml.length, prontas }
+})
+// Fechado de fábrica; abrir/fechar fica lembrado neste navegador.
+const QUADRO_CHAVE = 'flex:quadro-aberto'
+const quadroAberto = ref(false)
+onMounted(() => {
+  try {
+    quadroAberto.value = localStorage.getItem(QUADRO_CHAVE) === '1'
+  } catch {
+    // sem localStorage (aba anônima): fica fechado
+  }
+})
+watch(quadroAberto, (v) => {
+  try {
+    localStorage.setItem(QUADRO_CHAVE, v ? '1' : '0')
+  } catch {
+    // idem
+  }
+})
+const contasFantasma = computed(() => (config.value?.contas || []).filter((c) => !c.existe).length)
+const gruposAbertos = ref<Set<string>>(new Set())
+function alternarGrupo(chave: string) {
+  const n = new Set(gruposAbertos.value)
+  if (n.has(chave)) n.delete(chave)
+  else n.add(chave)
+  gruposAbertos.value = n
+}
 const regraTexto = computed(() => {
   const c = config.value
   if (!c) return ''
@@ -560,6 +695,7 @@ function contasNaCidade(cidade: string): number {
   ).length
 }
 function abrirLocal() {
+  quadroAberto.value = true
   localForm.value = { cidade: localCidade.value, lote: localLote.value }
   editandoLocal.value = true
 }
@@ -884,10 +1020,29 @@ defineExpose({ recarregar: carregarTudo })
 
 <template>
   <div class="space-y-4">
-    <!-- Aviso fixo do MODO: é a primeira coisa que o dono precisa saber. -->
+    <!-- Quadro do Flex automático: uma linha só (o modo, de onde sai e quantas
+         contas estão prontas); os detalhes abrem com um clique (Eduardo,
+         08/10/2026: "queria esconder e deixar aparecer só quando eu clicar"). -->
     <div class="rounded-md border px-3 py-2 text-sm space-y-1" :class="modoInfo.cls" role="status">
-      <div class="font-semibold">{{ modoInfo.titulo }}</div>
-      <div>{{ modoInfo.texto }}</div>
+      <button
+        type="button"
+        class="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 text-left"
+        :aria-expanded="quadroAberto"
+        data-flex-quadro-toggle
+        @click="quadroAberto = !quadroAberto"
+      >
+        <span class="font-semibold">{{ modoInfo.titulo }}</span>
+        <span v-if="config" class="text-xs opacity-90">· saída em {{ localCidade }} (.{{ localLote }})</span>
+        <span v-if="config && contasMl.total" class="text-xs opacity-90">
+          · {{ contasMl.prontas }} de {{ contasMl.total }} contas do Mercado Livre prontas
+        </span>
+        <span class="ml-auto inline-flex items-center gap-1 text-xs font-medium">
+          {{ quadroAberto ? 'esconder' : 'ver detalhes' }}
+          <ChevronDown class="size-4 transition-transform" :class="quadroAberto ? 'rotate-180' : ''" />
+        </span>
+      </button>
+      <template v-if="quadroAberto">
+      <div class="opacity-90">{{ modoInfo.texto }}</div>
       <div v-if="config" class="text-sm" data-flex-local>
         <span class="font-medium">Local de saída do Flex:</span>{{ ' ' }}<strong>{{ localCidade }}</strong>
         · estoque <strong>.{{ localLote }}</strong>
@@ -941,31 +1096,70 @@ defineExpose({ recarregar: carregarTudo })
           </div>
         </div>
       </div>
-      <div v-if="config">
-        <span class="font-medium">Contas liberadas:</span>
-        <template v-if="!config.contas.length"> nenhuma — o sistema não mexe em nenhuma conta.</template>
-        <ul v-else class="mt-0.5 space-y-0.5">
-          <li v-for="c in config.contas" :key="c.id" class="text-xs">
-            <template v-if="c.existe">
-              <span class="font-medium">{{ c.nome || c.id }}</span> ({{ nomePlataforma(c.plataforma) }}) —
-              <span :class="flexDaConta(c).cls" :title="flexDaConta(c).title">{{ flexDaConta(c).texto }}</span>
-              <span v-if="descobertaTexto(c)" class="opacity-80"> · {{ descobertaTexto(c) }}</span>
+      <div v-if="config" class="space-y-1 pt-1" data-flex-grupos>
+        <div class="text-xs font-semibold uppercase tracking-wide opacity-80">
+          Contas — o que falta para cada uma ficar pronta
+        </div>
+        <div v-if="!config.contas.length" class="text-xs">
+          Nenhuma conta liberada — o sistema não mexe em nenhuma conta.
+        </div>
+        <div
+          v-for="g in gruposContas"
+          :key="g.chave"
+          class="rounded-md border bg-background/70 text-foreground"
+          :data-flex-grupo="g.chave"
+        >
+          <button
+            type="button"
+            class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-muted/40 disabled:cursor-default disabled:hover:bg-transparent"
+            :disabled="!g.contas.length"
+            @click="alternarGrupo(g.chave)"
+          >
+            <span class="size-2.5 shrink-0 rounded-full" :class="g.cor" />
+            <span class="font-medium">{{ g.titulo }}</span>
+            <span class="shrink-0 rounded-full border px-1.5 text-xs font-semibold">{{ g.contas.length }}</span>
+            <span class="hidden min-w-0 truncate text-xs text-muted-foreground md:inline">{{ g.acao }}</span>
+            <ChevronDown
+              v-if="g.contas.length"
+              class="ml-auto size-4 shrink-0 opacity-60 transition-transform"
+              :class="gruposAbertos.has(g.chave) ? 'rotate-180' : ''"
+            />
+          </button>
+          <div v-if="gruposAbertos.has(g.chave)" class="space-y-1 border-t px-2.5 py-1.5">
+            <div class="text-xs text-muted-foreground md:hidden">{{ g.acao }}</div>
+            <div class="flex flex-wrap gap-1">
+              <span
+                v-for="c in g.contas"
+                :key="c.id"
+                class="rounded border bg-muted/30 px-1.5 py-0.5 text-xs"
+                :title="c.title"
+              >
+                {{ c.nome }}<span v-if="c.detalhe" class="text-muted-foreground"> · {{ c.detalhe }}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <details v-if="config" class="text-xs" data-flex-regra>
+        <summary class="cursor-pointer select-none opacity-80 hover:opacity-100">Como o sistema decide</summary>
+        <div class="mt-1 space-y-1 opacity-90">
+          <div>{{ regraTexto }}</div>
+          <div v-if="!config.shopee_escrita">
+            Na Shopee o sistema só confere: ligar ou desligar lá é feito à mão no Seller Center.
+          </div>
+          <div>
+            Pedido Flex vai para o estoque .{{ localLote }}:
+            <strong>{{ config.pedido_no_sp ? 'sim' : 'NÃO (desligado na configuração)' }}</strong>.
+          </div>
+          <div class="opacity-75">
+            O modo e as contas liberadas ficam na configuração do servidor — para mudar, peça ao responsável técnico.
+            <template v-if="contasFantasma">
+              {{ contasFantasma }} conta(s) da configuração não existem mais no DaVinci.
             </template>
-            <template v-else>{{ c.id.slice(0, 8) }}… (conta não encontrada)</template>
-          </li>
-        </ul>
-      </div>
-      <div v-if="config" class="text-xs opacity-90">
-        {{ regraTexto }}
-        <template v-if="!config.shopee_escrita">
-          Na Shopee o sistema só confere: ligar ou desligar lá é feito à mão no Seller Center.
-        </template>
-        Pedido Flex vai para o estoque .{{ localLote }}:
-        <strong>{{ config.pedido_no_sp ? 'sim' : 'NÃO (desligado na configuração)' }}</strong>.
-      </div>
-      <div class="text-xs opacity-75">
-        O modo e as contas liberadas ficam na configuração do servidor — para mudar, peça ao responsável técnico.
-      </div>
+          </div>
+        </div>
+      </details>
+      </template>
     </div>
 
     <!-- Ações -->
