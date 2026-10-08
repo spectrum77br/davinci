@@ -1,6 +1,6 @@
 // Run from apps/web: node tests/conferencia-lib.cjs
 //
-// Conferência Shopee (06/10/2026): as regras de lib/conferencia.ts — formato
+// Conferência (06/10/2026; ML e Amazon desde 07/10/2026): as regras de lib/conferencia.ts — formato
 // pt-BR do dinheiro, do inteiro e do percentual, e a variação "▲ 12,3%" /
 // "▼ 0,8 p.p." / "novo" / "=" / "—" com a cor pelo que é bom em cada métrica.
 // São as MESMAS regras do servidor (Excel, CSV, MD, HTML, Threema; contrato §5):
@@ -275,6 +275,10 @@ const SEMANAS = [
 ]
 assert.equal(L.tituloRelatorio(SEMANAS), 'Conferência Shopee — 28/09 a 04/10/2026')
 assert.equal(L.tituloRelatorio([]), 'Conferência Shopee')
+assert.equal(L.tituloRelatorio(SEMANAS, 'ml'), 'Conferência Mercado Livre — 28/09 a 04/10/2026')
+assert.equal(L.tituloRelatorio(SEMANAS, 'amazon'), 'Conferência Amazon — 28/09 a 04/10/2026')
+assert.equal(L.tituloRelatorio(null, 'ml'), 'Conferência Mercado Livre')
+assert.equal(L.tituloRelatorio(SEMANAS, 'outra'), 'Conferência Shopee — 28/09 a 04/10/2026', 'desconhecida = Shopee')
 assert.equal(L.comparadoCom(SEMANAS), 'comparado com 21/09 a 27/09')
 assert.equal(L.comparadoCom(SEMANAS.slice(0, 1)), '')
 assert.equal(L.rotuloSemana(SEMANAS[0]), '28/09–04/10', 'monta das datas')
@@ -400,9 +404,145 @@ assert.equal(L.contasTxt(null), '0 contas')
   assert.equal(L.semanaPlanilha(null), '—')
 }
 
+// ---------------------------------------------------------------- plataformas e estados (07/10/2026)
+// Um relatório por marketplace. O que o marketplace não dá vem em
+// relatorio.estados e a planilha mostra o texto do estado na linha inteira.
+{
+  assert.deepEqual(L.PLATAFORMAS.map((p) => [p.chave, p.rotulo]), [
+    ['shopee', 'Shopee'], ['ml', 'Mercado Livre'], ['amazon', 'Amazon'],
+  ], 'ordem do seletor da tela')
+  assert.equal(L.plataformaValida('ml'), 'ml')
+  assert.equal(L.plataformaValida('amazon'), 'amazon')
+  assert.equal(L.plataformaValida('shopee'), 'shopee')
+  for (const lixo of ['', 'ML', 'tiktok', 'constructor', '__proto__', 'toString', null, undefined, 1, ['ml'], {}]) {
+    assert.equal(L.plataformaValida(lixo), null, `plataforma inválida: ${String(lixo)}`)
+  }
+  assert.equal(L.rotuloPlataforma('ml'), 'Mercado Livre')
+  // Com o artigo certo (a tela escreve "Nenhum relatório da Amazon", "bloqueada pelo Mercado Livre").
+  assert.deepEqual(L.PLATAFORMAS.map((p) => [p.da, p.pela]), [
+    ['da Shopee', 'pela Shopee'], ['do Mercado Livre', 'pelo Mercado Livre'], ['da Amazon', 'pela Amazon'],
+  ])
+  assert.equal(L.infoPlataforma('amazon').da, 'da Amazon')
+  assert.equal(L.infoPlataforma('xyz').chave, 'shopee', 'desconhecida = Shopee')
+  assert.equal(L.infoPlataforma(undefined).rotulo, 'Shopee')
+  assert.equal(L.rotuloPlataforma(undefined), 'Shopee', 'sem plataforma = Shopee (relatório de antes)')
+  assert.deepEqual(L.ROTULO_ESTADO, {
+    nao_coletado: 'não coletado', nao_se_aplica: 'não se aplica', aguardando_acesso: 'aguardando acesso',
+  })
+  assert.equal(L.rotuloEstado('nao_coletado'), 'não coletado')
+  assert.equal(L.rotuloEstado('sem_api'), 'sem api', 'estado novo aparece legível, não some')
+  assert.equal(L.rotuloEstado('constructor'), 'constructor', 'nada do protótipo vira rótulo')
+  assert.equal(L.rotuloStatusColeta('constructor', 'ml'), 'constructor')
+  assert.equal(L.estadoDe({}, 'constructor'), null)
+  assert.equal(L.estadoDe({}, 'toString'), null)
+  assert.equal(L.rotuloEstado(null), '—')
+  assert.equal(L.estadoDe({ vendas_afiliados: 'nao_coletado' }, 'vendas_afiliados'), 'nao_coletado')
+  assert.equal(L.estadoDe({ vendas_afiliados: 'nao_coletado' }, 'vendas_ads'), null)
+  assert.equal(L.estadoDe({ vendas_afiliados: '' }, 'vendas_afiliados'), null, 'estado vazio = sem estado')
+  assert.equal(L.estadoDe({ vendas_afiliados: 3 }, 'vendas_afiliados'), null, 'estado que não é texto = sem estado')
+  assert.equal(L.estadoDe(null, 'vendas'), null)
+  assert.equal(L.estadoDe([], 'vendas'), null)
+  assert.equal(L.estadoDe({ vendas: 'nao_se_aplica' }, null), null)
+
+  // Os MESMOS textos do servidor (tests/conferencia-arredondamento.json, "plataformas").
+  const casos = JSON.parse(fs.readFileSync(path.join(__dirname, 'conferencia-arredondamento.json'), 'utf8'))
+  assert.deepEqual(casos.plataformas, L.PLATAFORMAS.map((p) => [p.chave, p.rotulo]))
+  assert.ok(casos.estados.length >= 4)
+  for (const [e, texto] of casos.estados) assert.equal(L.rotuloEstado(e), texto, e)
+  for (const [p, ini, fim, texto] of casos.titulos) {
+    assert.equal(L.tituloRelatorio([{ inicio: ini, fim }], p ?? undefined), texto, `título ${p}`)
+  }
+  for (const [p, ini, fim, fmt, nome] of casos.nomes_arquivo) {
+    assert.equal(L.nomeArquivo([{ inicio: ini, fim }], fmt, p ?? undefined), nome, `arquivo ${p}`)
+  }
+
+  // A planilha com estados. Mesmos números em todo lugar: o que muda é só o estado.
+  const SEM = [
+    { inicio: '2026-09-28', fim: '2026-10-04', rotulo: '28/09–04/10' },
+    { inicio: '2026-09-21', fim: '2026-09-27', rotulo: '21/09–27/09' },
+  ]
+  const s = (over = {}) => ({
+    vendas_afiliados: null, vendas_ads: 300, impressoes: 9000, invest_afiliados: null, invest_ads: 40,
+    pct: 4, vendas: 1000, cliques_afiliados: null, pedidos_afiliados: null, conversao_afiliados: null,
+    cliques_ads: 300, pedidos_ads: 6, conversao_ads: 2, ...over,
+  })
+  const tot = () => ({ contas: 2, sem_dados: 0, semanas: [s({ vendas: 1100 }), s()] })
+  const base = {
+    semanas: SEM,
+    grupos: [
+      { chave: 'mala', rotulo: 'Mala', linhas: [], total: tot() },
+      { chave: 'celular', rotulo: 'Celular', linhas: [], total: tot() },
+      { chave: 'eletro', rotulo: 'Eletro', linhas: [], total: tot() },
+    ],
+    geral: tot(),
+  }
+  const linha = (p, cat, sub) => p.linhas.find((l) => l.categoria === cat && l.sub === sub)
+  const todas = (l, texto) => l.valores.every((sem) => sem.length === 4 && sem.every((x) => x === texto))
+    && l.variacoes.length === 4 && l.variacoes.every((v) => v.texto === texto && v.cor === 'cinza' && v.direcao === null)
+
+  // Mercado Livre: os afiliados (sem API) ficam "não coletado" — inclusive as
+  // impressões de afiliados, que não têm métrica e procuram 'impressoes_afiliados'.
+  const ml = L.planilhaResumo({
+    ...base,
+    plataforma: 'ml',
+    estados: {
+      vendas_afiliados: 'nao_coletado', impressoes_afiliados: 'nao_coletado', conversao_afiliados: 'nao_coletado',
+      invest_afiliados: 'nao_coletado', cliques_afiliados: 'nao_coletado', pedidos_afiliados: 'nao_coletado',
+      saldo_ads: 'nao_se_aplica',
+    },
+  })
+  for (const cat of ['Vendas', 'Impressões', 'Conversão', 'Investimento']) {
+    const l = linha(ml, cat, 'afiliados')
+    assert.equal(l.estado, 'nao_coletado', `${cat} afiliados: estado`)
+    assert.ok(todas(l, 'não coletado'), `${cat} afiliados: "não coletado" nas semanas e na Variação`)
+  }
+  const vAds = linha(ml, 'Vendas', 'Ads')
+  assert.equal(vAds.estado, null, 'Ads do ML tem número')
+  assert.deepEqual(vAds.valores[1], ['R$ 300,00', 'R$ 300,00', 'R$ 300,00', 'R$ 300,00'])
+  assert.deepEqual(linha(ml, 'Conversão', 'Ads').valores[1], ['2,00%', '2,00%', '2,00%', '2,00%'])
+  assert.deepEqual(linha(ml, 'Resumo', 'Vendas no período').variacoes.map((v) => v.texto), Array(4).fill('▲ 10,0%'))
+  assert.equal(ml.linhas.length, 10, 'mesmas 10 linhas da Shopee')
+  assert.deepEqual(ml.linhas.map((l) => [l.categoria, l.sub, l.span]), L.planilhaResumo(base).linhas.map((l) => [l.categoria, l.sub, l.span]), 'mesmo desenho')
+
+  // Amazon: afiliados "não se aplica"; Ads "aguardando acesso" (a API de Ads ainda não foi liberada).
+  const amz = L.planilhaResumo({
+    ...base,
+    plataforma: 'amazon',
+    estados: {
+      vendas_afiliados: 'nao_se_aplica', impressoes_afiliados: 'nao_se_aplica', conversao_afiliados: 'nao_se_aplica',
+      invest_afiliados: 'nao_se_aplica', vendas_ads: 'aguardando_acesso', impressoes: 'aguardando_acesso',
+      conversao_ads: 'aguardando_acesso', invest_ads: 'aguardando_acesso',
+    },
+  })
+  for (const cat of ['Vendas', 'Impressões', 'Conversão', 'Investimento']) {
+    assert.ok(todas(linha(amz, cat, 'afiliados'), 'não se aplica'), `${cat} afiliados: "não se aplica"`)
+    // O estado ganha do número: a métrica não existe (ainda) naquele marketplace.
+    assert.ok(todas(linha(amz, cat, 'Ads'), 'aguardando acesso'), `${cat} Ads: "aguardando acesso"`)
+  }
+  assert.equal(linha(amz, 'Resumo', 'Vendas no período').estado, null, 'Vendas sai do Bling: tem número')
+  assert.deepEqual(linha(amz, 'Resumo', 'Vendas no período').valores[1], ['R$ 1.100,00', 'R$ 1.100,00', 'R$ 1.100,00', 'R$ 1.100,00'])
+
+  // Estado só onde o relatório diz; chave única continua única; estado desconhecido legível.
+  const outro = L.planilhaResumo({ ...base, estados: { pct: 'sem_api' } })
+  assert.ok(todas(linha(outro, 'Resumo', '% investimento / vendas'), 'sem api'))
+  assert.equal(new Set(outro.linhas.map((l) => l.chave)).size, 10)
+  // Shopee (sem estados, ou estados vazios/tortos): igual a antes, "—" nas impressões de afiliados.
+  for (const estados of [undefined, null, {}, [], 'nao_coletado', { vendas_afiliados: 7 }]) {
+    const p = L.planilhaResumo({ ...base, estados })
+    assert.ok(p.linhas.every((l) => l.estado === null), `sem estado: ${JSON.stringify(estados)}`)
+    assert.ok(todas(linha(p, 'Impressões', 'afiliados'), '—'))
+  }
+}
+
 // ---------------------------------------------------------------- arquivos
 assert.equal(L.nomeArquivo(SEMANAS, 'xlsx'), 'conferencia-shopee-2026-09-28_2026-10-04.xlsx', 'mesmo nome do servidor')
 assert.equal(L.nomeArquivo([], 'csv'), 'conferencia-shopee.csv')
+// Um por marketplace (07/10/2026): a plataforma no nome; sem ela, o nome de antes.
+assert.equal(L.nomeArquivo(SEMANAS, 'xlsx', 'ml'), 'conferencia-ml-2026-09-28_2026-10-04.xlsx')
+assert.equal(L.nomeArquivo(SEMANAS, 'html', 'amazon'), 'conferencia-amazon-2026-09-28_2026-10-04.html')
+assert.equal(L.nomeArquivo([], 'csv', 'amazon'), 'conferencia-amazon.csv')
+assert.equal(L.nomeArquivo(SEMANAS, 'md', 'tiktok'), 'conferencia-shopee-2026-09-28_2026-10-04.md', 'desconhecida = Shopee')
+assert.equal(L.nomeArquivo(SEMANAS, 'md', '../x'), 'conferencia-shopee-2026-09-28_2026-10-04.md', 'nada de fora entra no nome')
 assert.equal(L.nomeDoCabecalho('attachment; filename="conferencia-shopee-2026-09-28_2026-10-04.csv"'), 'conferencia-shopee-2026-09-28_2026-10-04.csv')
 assert.equal(L.nomeDoCabecalho('attachment; filename=relatorio.md'), 'relatorio.md')
 assert.equal(L.nomeDoCabecalho("attachment; filename=\"x.csv\"; filename*=UTF-8''confer%C3%AAncia.csv"), 'conferência.csv', 'filename* ganha')
@@ -415,6 +555,13 @@ assert.equal(L.rotuloStatusColeta('sem_automacao'), 'perfil Firefox, o robô nã
 assert.equal(L.rotuloStatusColeta('pendente'), 'na fila')
 assert.equal(L.rotuloStatusColeta('expirada'), 'não coletada a tempo')
 assert.equal(L.rotuloStatusColeta('status_novo'), 'status novo', 'desconhecido aparece legível')
+// "bloqueada" diz por quem (07/10/2026); sem plataforma, a Shopee de sempre.
+assert.equal(L.rotuloStatusColeta('bloqueada'), 'bloqueada pela Shopee')
+assert.equal(L.rotuloStatusColeta('bloqueada', 'shopee'), 'bloqueada pela Shopee')
+assert.equal(L.rotuloStatusColeta('bloqueada', 'ml'), 'bloqueada pelo Mercado Livre')
+assert.equal(L.rotuloStatusColeta('bloqueada', 'amazon'), 'bloqueada pela Amazon')
+assert.equal(L.rotuloStatusColeta('bloqueada', 'xyz'), 'bloqueada pela Shopee')
+assert.equal(L.rotuloStatusColeta('erro', 'ml'), 'erro')
 assert.equal(L.tomStatusColeta('ok'), 'ok')
 assert.equal(L.tomStatusColeta('parcial'), 'alerta')
 assert.equal(L.tomStatusColeta('coletando'), 'andamento')

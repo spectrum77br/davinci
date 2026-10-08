@@ -181,11 +181,13 @@ def _linha(rel: dict, grupo: str, conta: str) -> dict:
 def test_forma_do_relatorio_e_a_do_contrato():
     rel = relatorio_exemplo()
     assert set(rel) == {
-        "versao", "execucao_id", "tipo", "origem", "gerado_em", "criado_em", "semanas",
-        "metricas", "grupos", "geral", "notas", "contas_sem_dados", "afiliados_incompletos",
-        "divergencias", "nao_atribuido_ads",
+        "versao", "plataforma", "estados", "execucao_id", "tipo", "origem", "gerado_em",
+        "criado_em", "semanas", "metricas", "grupos", "geral", "notas", "contas_sem_dados",
+        "afiliados_incompletos", "divergencias", "nao_atribuido_ads",
     }
     assert rel["versao"] == 1
+    # Execução sem plataforma (como as de antes de 07/10/2026) = Shopee, sem estados.
+    assert (rel["plataforma"], rel["estados"]) == ("shopee", {})
     assert rel["execucao_id"] == "11111111-1111-1111-1111-111111111111"
     assert rel["gerado_em"] == "2026-10-06T19:00:00+00:00"
     assert rel["criado_em"] == "2026-10-06T16:30:00+00:00"

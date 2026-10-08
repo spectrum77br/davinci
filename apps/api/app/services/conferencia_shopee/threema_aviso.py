@@ -2,7 +2,8 @@
 
 Molde do relatório da Denúncia (services/denuncia_relatorio_threema):
 
-  • só com `conferencia_shopee_threema` ligado (CONFERENCIA_SHOPEE_THREEMA);
+  • só com a chave da plataforma ligada (`ligado`: CONFERENCIA_SHOPEE_THREEMA,
+    CONFERENCIA_ML_THREEMA, CONFERENCIA_AMAZON_THREEMA);
   • quem recebe: cadastro `conferencia_shopee` do Informar (a migration 0377
     deixa a linha vazia: ninguém recebe até alguém escolher);
   • remetente: o ID do Threema de chamados (ThreemaClient(contexto="chamados"),
@@ -16,6 +17,16 @@ Molde do relatório da Denúncia (services/denuncia_relatorio_threema):
     aquela execução) e o link da aba no DaVinci.
 
 Nada aqui faz commit: quem chama decide (rota do resultado ou worker).
+
+Mercado Livre e Amazon (07/10/2026): o mesmo aviso e o mesmo cadastro "Quem
+recebe", mas cada marketplace com a SUA chave — CONFERENCIA_ML_THREEMA e
+CONFERENCIA_AMAZON_THREEMA, desligadas de fábrica: ligar a da Shopee depois do
+piloto não começa a mandar o relatório do ML/Amazon (nem as rodadas de teste
+de "Gerar agora") antes de ele ser aprovado. O título diz a plataforma
+("Conferência Mercado Livre — …"), o link do DaVinci abre a aba dela
+(`&conf=ml`) e métrica com estado sai com o texto do estado ("invest.
+aguardando acesso") em vez de "—". Com UMA das partes do investimento sem
+número (ML: afiliados não coletados), a linha diz que o número é só do Ads.
 """
 
 from __future__ import annotations
@@ -34,7 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import ConferenciaShopeeExecucao, ThreemaInformarConfig
 from app.services import threema
-from app.services.conferencia_shopee import calculo, saida
+from app.services.conferencia_shopee import calculo, plataformas, saida
 
 logger = structlog.get_logger()
 
@@ -44,6 +55,25 @@ VALE_LINK = timedelta(days=7)
 # (Threema ligado depois, cadastro feito dias depois) não dispara aviso.
 JANELA_REENVIO = timedelta(hours=6)
 MAX_BYTES = 3500
+
+
+# ─────────────────────────────────────────────── chave por plataforma
+
+
+def ligado(plataforma: str | None) -> bool:
+    """O aviso desta plataforma está ligado? Cada marketplace tem a sua chave
+    (desligadas de fábrica); plataforma vazia = Shopee (rodada antiga)."""
+    cfg = get_settings()
+    chave = {
+        "shopee": cfg.conferencia_shopee_threema,
+        "ml": cfg.conferencia_ml_threema,
+        "amazon": cfg.conferencia_amazon_threema,
+    }
+    return bool(chave.get(plataformas.de({"plataforma": plataforma}), False))
+
+
+def plataformas_ligadas() -> list[str]:
+    return [p for p in plataformas.PLATAFORMAS if ligado(p)]
 
 
 # ─────────────────────────────────────────────── link do Excel (sem login)
@@ -87,11 +117,16 @@ def link_excel(execucao_id: UUID | str, agora: datetime) -> str:
     )
 
 
-def link_davinci(execucao_id: UUID | str) -> str:
-    return f"{_base()}/marketing?aba=conferencia&execucao={execucao_id}"
+def link_davinci(execucao_id: UUID | str, plataforma: str | None = None) -> str:
+    conf = "" if (plataforma or plataformas.PADRAO) == plataformas.PADRAO else f"&conf={plataforma}"
+    return f"{_base()}/marketing?aba=conferencia{conf}&execucao={execucao_id}"
 
 
 # ─────────────────────────────────────────────── mensagem
+
+
+# As duas partes do investimento (calculo.investimento) e como a mensagem as chama.
+_PARTES_INVEST = {"invest_afiliados": "afiliados", "invest_ads": "Ads"}
 
 
 def _entre_parenteses(var: Mapping[str, Any]) -> str:
@@ -99,17 +134,39 @@ def _entre_parenteses(var: Mapping[str, Any]) -> str:
     return "" if texto == "—" else f" ({texto})"
 
 
-def _linha_grupo(rotulo: str, total: Mapping[str, Any]) -> str:
+def _linha_grupo(
+    rotulo: str, total: Mapping[str, Any], estados: Mapping[str, str] | None = None
+) -> str:
     """"Mala: vendas R$ 120.345 (▲ 8,2%) · invest. R$ 9.876 · 8,2% s/ vendas
-    (▼ 0,4 p.p.)" — S1 comparada com S2."""
+    (▼ 0,4 p.p.)" — S1 comparada com S2. Com estado nos dois investimentos
+    (Amazon sem Ads): "invest. aguardando acesso · % s/ vendas aguardando
+    acesso". Com estado em UM só (ML: afiliados não coletados), o número diz de
+    qual parte é — "invest. Ads R$ 182 (afiliados não coletado) · 17,7% Ads s/
+    vendas" —, para não parecer comparável com o investimento total da Shopee."""
+    estados = estados or {}
     semanas = list(total.get("semanas") or [])
     s1 = semanas[0] if semanas else {}
     var_vendas, _ = calculo.variacoes(semanas, "vendas")
     var_pct, _ = calculo.variacoes(semanas, "pct")
+    invest = f"invest. {calculo.dinheiro(calculo.investimento(s1), 0)}"
+    s_vendas = "s/ vendas"
+    com_estado = [k for k in _PARTES_INVEST if k in estados]
+    if len(com_estado) == 2:
+        invest = f"invest. {plataformas.rotulo_estado(estados['invest_ads'])}"
+    elif com_estado:
+        sem = com_estado[0]
+        com = next(k for k in _PARTES_INVEST if k != sem)
+        invest = (
+            f"invest. {_PARTES_INVEST[com]} {calculo.dinheiro(calculo.investimento(s1), 0)}"
+            f" ({_PARTES_INVEST[sem]} {plataformas.rotulo_estado(estados[sem])})"
+        )
+        s_vendas = f"{_PARTES_INVEST[com]} s/ vendas"
+    pct = f"{calculo.percentual(s1.get('pct'))} {s_vendas}{_entre_parenteses(var_pct)}"
+    if "pct" in estados:
+        pct = f"% s/ vendas {plataformas.rotulo_estado(estados['pct'])}"
     return (
         f"{rotulo}: vendas {calculo.dinheiro(s1.get('vendas'), 0)}{_entre_parenteses(var_vendas)}"
-        f" · invest. {calculo.dinheiro(calculo.investimento(s1), 0)}"
-        f" · {calculo.percentual(s1.get('pct'))} s/ vendas{_entre_parenteses(var_pct)}"
+        f" · {invest} · {pct}"
     )
 
 
@@ -127,12 +184,13 @@ def _ddmm(dia: str | None) -> str:
 def texto(rel: Mapping[str, Any], link: str, link_davinci: str) -> str:
     """A mensagem inteira (≤ 3500 bytes: as listas encurtam se precisar)."""
     cabecalho = f"📊 {saida.titulo(rel)} ({saida.tipo_texto(rel)})"
+    estados = saida.estados(rel)
     grupos = [
-        _linha_grupo(g.get("rotulo") or "", g.get("total") or {})
+        _linha_grupo(g.get("rotulo") or "", g.get("total") or {}, estados)
         for g in rel.get("grupos") or []
         if (g.get("total") or {}).get("contas")
     ]
-    grupos.append(_linha_grupo("Geral", rel.get("geral") or {}))
+    grupos.append(_linha_grupo("Geral", rel.get("geral") or {}, estados))
     sem_dados = [
         f"{d.get('conta')} ({saida.ROTULO_STATUS.get(d.get('status') or '', d.get('status'))})"
         for d in rel.get("contas_sem_dados") or []
@@ -208,7 +266,7 @@ async def enviar_pendente(
     """Manda o aviso da execução pronta, se ainda não foi. Trava a linha da
     execução enquanto manda: a rota e o varredor juntos não mandam dois."""
     agora = agora or datetime.now(UTC)
-    if not get_settings().conferencia_shopee_threema:
+    if not ligado(getattr(execucao, "plataforma", None)):
         return {"enviado": False, "motivo": "aviso no Threema desligado"}
     row = (
         await session.execute(
@@ -220,6 +278,8 @@ async def enviar_pendente(
     ).scalar_one_or_none()
     if row is None or row.status != "pronto" or not row.relatorio:
         return {"enviado": False, "motivo": "sem relatório"}
+    if not ligado(row.plataforma):
+        return {"enviado": False, "motivo": "aviso no Threema desligado"}
     if row.threema_enviado_em is not None:
         return {"enviado": False, "motivo": "já enviado"}
     alvos = await destinatarios(session)
@@ -230,7 +290,9 @@ async def enviar_pendente(
             "conferencia_shopee_threema_sem_destino", execucao=str(row.id), motivo=motivo
         )
         return {"enviado": False, "motivo": motivo}
-    msg = texto(row.relatorio, link_excel(row.id, agora), link_davinci(row.id))
+    msg = texto(
+        row.relatorio, link_excel(row.id, agora), link_davinci(row.id, row.plataforma)
+    )
     r = await _enviar_um_a_um(client, msg, alvos, row.id)
     if not r.get("sent"):
         logger.warning(
@@ -255,14 +317,17 @@ async def enviar_pendente(
 
 async def enviar_pendentes(session: AsyncSession, agora: datetime | None = None) -> list[dict]:
     """O varredor: avisa as execuções prontas nas últimas horas que ainda não
-    foram avisadas (o envio na hora falhou ou não tinha ninguém cadastrado)."""
+    foram avisadas (o envio na hora falhou ou não tinha ninguém cadastrado) —
+    só das plataformas com o aviso ligado."""
     agora = agora or datetime.now(UTC)
-    if not get_settings().conferencia_shopee_threema:
+    ligadas = plataformas_ligadas()
+    if not ligadas:
         return []
     pendentes = (
         await session.execute(
             select(ConferenciaShopeeExecucao)
             .where(
+                ConferenciaShopeeExecucao.plataforma.in_(ligadas),
                 ConferenciaShopeeExecucao.status == "pronto",
                 ConferenciaShopeeExecucao.threema_enviado_em.is_(None),
                 ConferenciaShopeeExecucao.finalizado_em >= agora - JANELA_REENVIO,

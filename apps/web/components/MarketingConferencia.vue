@@ -24,6 +24,14 @@
  * velha pra mais nova, e o bloco Variação (semana atual × anterior) no fim.
  * As linhas e colunas saem de planilhaResumo() (lib/conferencia.ts), o mesmo
  * desenho do Excel e do HTML.
+ *
+ * 07/10/2026 (tarde): o mesmo relatório para o Mercado Livre e a Amazon — um
+ * por marketplace, escolhido no seletor Shopee | Mercado Livre | Amazon (vai
+ * pra URL como ?conf=ml / ?conf=amazon; sem nada = Shopee). No ML e na Amazon
+ * quem coleta é o servidor (vendas do Bling + Ads pela API), sem AdsPower. O
+ * que o marketplace não dá vem em `relatorio.estados` e a célula mostra "não
+ * coletado" / "não se aplica" / "aguardando acesso" numa pílula cinza, no
+ * lugar do "—" (que continua sendo "faltou o dado").
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
@@ -32,11 +40,12 @@ import {
 } from 'lucide-vue-next'
 import { apiErrMsg } from '~/lib/apiError'
 import {
-  ERROS_CONFERENCIA,
+  ERROS_CONFERENCIA, PLATAFORMAS,
   coletaTerminou, comparadoCom, dataHoraBr, ddmm, horaBr,
-  nomeArquivo, nomeDoCabecalho, planilhaResumo, rotuloExecucao,
-  rotuloStatusColeta, rotuloStatusExecucao, tituloRelatorio, tomStatusColeta,
+  nomeArquivo, nomeDoCabecalho, planilhaResumo, plataformaValida, rotuloExecucao,
+  infoPlataforma, rotuloStatusColeta, rotuloStatusExecucao, tituloRelatorio, tomStatusColeta,
   type Coleta, type ContaConferencia, type Cor, type DetalheExecucao, type ExecucaoResumo, type Formato,
+  type IntegracaoConferencia, type Plataforma,
 } from '~/lib/conferencia'
 
 const { api } = useApi()
@@ -48,6 +57,8 @@ const isAdmin = computed(() => auth.user?.role === 'admin')
 const route = useRoute()
 const router = useRouter()
 
+// O prefixo continua o da Shopee (o router é um só): o marketplace vai no
+// ?plataforma= da lista, do "Gerar agora" e das contas.
 const BASE = '/api/marketing/conferencia-shopee'
 // Enquanto coleta, relê a cada 20 s (contrato da tela).
 const INTERVALO_ACOMPANHAMENTO = 20_000
@@ -77,6 +88,35 @@ const FORMATOS: { fmt: Formato; rotulo: string; icone: any; dica: string }[] = [
 // seguem na API para quem precisar dos dados.
 const FORMATOS_NA_TELA = FORMATOS.filter((f) => f.fmt === 'xlsx')
 
+// Quem coleta em cada marketplace, nas frases da tela: na Shopee é o robô do
+// Mac pelo AdsPower; no ML e na Amazon é o servidor, pelas APIs e pelo Bling.
+const COLETA_TXT: Record<Plataforma, { confirmar: string; iniciada: string; andamento: string }> = {
+  shopee: {
+    confirmar: 'O robô do Mac abre o perfil de cada loja no AdsPower, uma de cada vez.',
+    iniciada: 'O robô do Mac vai passar loja por loja. Esta tela acompanha sozinha.',
+    andamento: 'O robô do Mac abre uma loja por vez.',
+  },
+  ml: {
+    confirmar: 'O servidor lê as vendas do Bling e o Ads do Mercado Livre pela API, conta por conta (sem abrir o AdsPower). '
+      + 'Afiliados ficam "não coletado" nesta versão.',
+    iniciada: 'O servidor vai passar conta por conta (vendas do Bling e Ads pela API). Esta tela acompanha sozinha.',
+    andamento: 'O servidor lê uma conta por vez: vendas do Bling e Ads pela API do Mercado Livre.',
+  },
+  amazon: {
+    confirmar: 'O servidor lê as vendas do Bling, conta por conta (sem abrir o AdsPower). '
+      + 'O Ads da Amazon fica "aguardando acesso" até a API de Ads ser liberada.',
+    iniciada: 'O servidor vai passar conta por conta (vendas do Bling). Esta tela acompanha sozinha.',
+    andamento: 'O servidor lê uma conta por vez: vendas do Bling (o Ads da Amazon ainda aguarda acesso).',
+  },
+}
+
+// ---------- marketplace (Shopee | Mercado Livre | Amazon)
+
+// ?conf=ml abre direto no Mercado Livre (F5, link). Valor estranho → Shopee.
+const plataforma = ref<Plataforma>(plataformaValida(route.query.conf) ?? 'shopee')
+// Os textos do marketplace escolhido ("Mercado Livre", "do Mercado Livre"…).
+const plat = computed(() => infoPlataforma(plataforma.value))
+
 // ---------- lista de execuções e a escolhida
 
 const execucoes = ref<ExecucaoResumo[]>([])
@@ -101,12 +141,16 @@ const opcoes = computed<ExecucaoResumo[]>(() => {
 const emAndamento = computed(() => execucoes.value.find((e) => e.status === 'coletando') ?? null)
 
 async function carregarLista(): Promise<ExecucaoResumo[] | null> {
+  // Trocou de marketplace no meio do caminho: a lista velha não escreve na tela.
+  const p = plataforma.value
   try {
-    const r = await api<ExecucaoResumo[]>(`${BASE}/execucoes?limite=30`)
+    const r = await api<ExecucaoResumo[]>(`${BASE}/execucoes?limite=30&plataforma=${p}`)
+    if (p !== plataforma.value) return null
     execucoes.value = Array.isArray(r) ? r : []
     erro.value = null
     return execucoes.value
   } catch (e: any) {
+    if (p !== plataforma.value) return null
     erro.value = apiErrMsg(e, ERROS_CONFERENCIA)
     return null
   }
@@ -137,6 +181,10 @@ async function carregarDetalhe(id: string, silencioso = false) {
       relatorio: r.relatorio ?? null,
     }
     erroDetalhe.value = null
+    // Link do Threema de um relatório do ML aberto na Shopee (ou ao contrário):
+    // a tela vai pro marketplace dele, sem perder o relatório já carregado.
+    const dele = plataformaValida(r.execucao?.plataforma) ?? plataformaValida(r.relatorio?.plataforma)
+    if (dele && dele !== plataforma.value) adotarPlataforma(dele)
     // Acompanhando a coleta e ela terminou: a lista (seletor e aviso) muda junto.
     if (antes?.id === id && antes.status === 'coletando' && r.execucao?.status !== 'coletando') {
       void carregarLista()
@@ -166,13 +214,55 @@ function escolher(id: string) {
   void router.replace({ query: { ...route.query, execucao: id } })
 }
 
-async function iniciar() {
+/** ?conf= da URL: o marketplace (Shopee não escreve nada, é o padrão). */
+function queryComPlataforma(p: Plataforma, semExecucao: boolean): Record<string, any> {
+  const query: Record<string, any> = { ...route.query, conf: p }
+  if (p === 'shopee') delete query.conf
+  if (semExecucao) delete query.execucao
+  return query
+}
+
+/**
+ * A pessoa trocou o marketplace: tudo do outro sai da tela (lista, relatório,
+ * acompanhamento, contas) e entra o último relatório pronto deste.
+ */
+function trocarPlataforma(p: Plataforma) {
+  if (p === plataforma.value) return
+  plataforma.value = p
+  // Resposta do marketplace de antes que ainda chegar não escreve mais nada.
+  geracao++
+  window.clearTimeout(timer)
+  timer = undefined
+  execucoes.value = []
+  listaCarregada.value = false
+  erro.value = null
+  selecionada.value = null
+  detalhe.value = null
+  erroDetalhe.value = null
+  carregandoDetalhe.value = false
+  void router.replace({ query: queryComPlataforma(p, true) })
+  void iniciar('')
+}
+
+/** O relatório aberto é de outro marketplace (link): só o seletor e a lista acompanham. */
+function adotarPlataforma(p: Plataforma) {
+  plataforma.value = p
+  void router.replace({ query: queryComPlataforma(p, false) })
+  void carregarLista()
+}
+
+// `pedida`: o ?execucao= do link; na troca de marketplace, nenhuma (a URL
+// ainda pode estar com a do outro enquanto o router.replace não termina).
+async function iniciar(pedida = String(route.query.execucao || '')) {
+  const p = plataforma.value
   carregandoLista.value = true
   const lista = await carregarLista()
+  // Trocou de marketplace enquanto lia: quem manda agora é o iniciar() do novo.
+  if (p !== plataforma.value) return
   carregandoLista.value = false
   listaCarregada.value = true
   if (!lista) return
-  selecionada.value = escolhaPadrao(lista, String(route.query.execucao || ''))
+  selecionada.value = escolhaPadrao(lista, pedida)
 }
 
 async function recarregar() {
@@ -276,22 +366,30 @@ function erroJaColetando(e: any): boolean {
 
 async function gerar() {
   if (gerando.value) return
+  const p = plataforma.value
+  const txt = COLETA_TXT[p]
   const qual = tipoNovo.value === 'parcial' ? 'parcial (segunda até ontem)' : 'da semana fechada (segunda a domingo)'
   if (!window.confirm(
-    `Gerar agora a conferência ${qual}?\n\nO robô do Mac abre o perfil de cada loja no AdsPower, uma de cada vez. `
+    `Gerar agora a conferência ${infoPlataforma(p).da} ${qual}?\n\n${txt.confirmar} `
     + 'Numa segunda-feira a parcial vira semanal (ainda não tem dia na semana).',
   )) return
   gerando.value = true
   try {
-    const r = await api<any>(`${BASE}/execucoes`, { method: 'POST', body: { tipo: tipoNovo.value } })
-    toasts.success('Conferência iniciada', 'O robô do Mac vai passar loja por loja. Esta tela acompanha sozinha.')
+    // ?plataforma= como na lista e nas contas; o corpo leva o mesmo valor.
+    const r = await api<any>(`${BASE}/execucoes?plataforma=${p}`, {
+      method: 'POST', body: { tipo: tipoNovo.value, plataforma: p },
+    })
+    toasts.success('Conferência iniciada', txt.iniciada)
     const lista = await carregarLista()
+    // Trocou de marketplace enquanto gerava: a nova fica na lista do outro.
+    if (p !== plataforma.value) return
     const novo = r?.id ?? r?.execucao?.id ?? lista?.find((x) => x.status === 'coletando')?.id
     if (novo) escolher(String(novo))
   } catch (e: any) {
     if (erroJaColetando(e)) {
       toasts.warning('Já tem uma conferência coletando', 'Espere ela terminar ou cancele antes de gerar outra.')
       const lista = await carregarLista()
+      if (p !== plataforma.value) return
       const andando = lista?.find((x) => x.status === 'coletando')
       if (andando) escolher(andando.id)
     } else {
@@ -368,7 +466,7 @@ async function baixar(fmt: Formato) {
   // O HTML abre numa aba nova, aberta JÁ no clique: depois do await o
   // navegador trata como pop-up e bloqueia.
   const aba = fmt === 'html' ? window.open('', '_blank') : null
-  let nome = nomeArquivo(d.relatorio.semanas, fmt)
+  let nome = nomeArquivo(d.relatorio.semanas, fmt, plataformaAberta.value)
   baixando.value = fmt
   try {
     const blob = await api<Blob>(`${BASE}/execucoes/${encodeURIComponent(d.execucao.id)}/arquivo/${fmt}`, {
@@ -398,11 +496,15 @@ async function baixar(fmt: Formato) {
 // A planilha do Resumo (linhas, colunas, textos e cores já prontos). Relatório
 // de antes de 07/10 não tem cliques/pedidos/conversão: essas linhas saem "—".
 const planilha = computed(() => planilhaResumo(rel.value))
+// O marketplace do que está aberto: o que o relatório (ou a execução) diz; sem
+// o campo — relatório de antes de 07/10, que é da Shopee —, o do seletor.
+const plataformaAberta = computed<Plataforma>(() =>
+  plataformaValida(rel.value?.plataforma) ?? plataformaValida(exec.value?.plataforma) ?? plataforma.value)
 // Blocos de 4 colunas no 2º cabeçalho: uma por semana + a Variação.
 const blocosCab = computed(() => (planilha.value ? planilha.value.semanas.length + 1 : 0))
 
 const semDadosTxt = computed(() =>
-  (rel.value?.contas_sem_dados ?? []).map((c) => `${c.conta} (${rotuloStatusColeta(c.status)})`).join(', '),
+  (rel.value?.contas_sem_dados ?? []).map((c) => `${c.conta} (${rotuloStatusColeta(c.status, plataformaAberta.value)})`).join(', '),
 )
 const afiliadosIncompletosTxt = computed(() =>
   (rel.value?.afiliados_incompletos ?? []).map((a) => `${a.conta} (até ${ddmm(a.ate)})`).join(', '),
@@ -417,6 +519,13 @@ const contasErro = ref<string | null>(null)
 const salvandoConta = ref<string | null>(null)
 // Rascunho do nome de cada conta: só vai pro servidor no Enter ou ao sair do campo.
 const nomes = ref<Record<string, string>>({})
+// ML e Amazon: o mesmo rascunho para o id da loja do Bling.
+const lojas = ref<Record<string, string>>({})
+// As integrações do DaVinci deste marketplace, para ligar a uma conta (ML/Amazon).
+const integracoes = ref<IntegracaoConferencia[] | null>(null)
+// Salvamento que falhou (ou foi ignorado): as linhas redesenham e o select e a
+// caixinha voltam ao que está salvo — senão mostrariam a escolha que não pegou.
+const versaoContas = ref(0)
 
 const contasOrdenadas = computed(() => [...(contas.value ?? [])].sort((a, b) =>
   (a.grupo === b.grupo ? 0 : a.grupo === 'mala' ? -1 : 1)
@@ -424,37 +533,96 @@ const contasOrdenadas = computed(() => [...(contas.value ?? [])].sort((a, b) =>
 ))
 
 async function carregarContas() {
+  const p = plataforma.value
   contasCarregando.value = true
   contasErro.value = null
+  if (p !== 'shopee') void carregarIntegracoes(p)
   try {
-    const r = await api<ContaConferencia[]>(`${BASE}/contas`)
+    const r = await api<ContaConferencia[]>(`${BASE}/contas?plataforma=${p}`)
+    if (p !== plataforma.value) return
     contas.value = Array.isArray(r) ? r : []
     nomes.value = Object.fromEntries(contas.value.map((c) => [c.id, c.nome]))
+    lojas.value = Object.fromEntries(contas.value.map((c) => [c.id, c.bling_loja_id ?? '']))
   } catch (e: any) {
-    contasErro.value = apiErrMsg(e, ERROS_CONFERENCIA)
+    if (p === plataforma.value) contasErro.value = apiErrMsg(e, ERROS_CONFERENCIA)
   } finally {
-    contasCarregando.value = false
+    if (p === plataforma.value) contasCarregando.value = false
+  }
+}
+async function carregarIntegracoes(p: Plataforma) {
+  try {
+    const r = await api<IntegracaoConferencia[]>(`${BASE}/contas/integracoes?plataforma=${p}`)
+    if (p === plataforma.value) integracoes.value = Array.isArray(r) ? r : []
+  } catch {
+    // Sem a lista, a tela mostra só o nome da integração ligada (sem o select).
   }
 }
 watch(contasAberto, (aberto) => {
   if (aberto && !contas.value && !contasCarregando.value) void carregarContas()
 })
+// Cada marketplace tem as suas contas: trocou, as do outro saem (e as deste
+// entram, se a seção estiver aberta).
+watch(plataforma, () => {
+  contas.value = null
+  nomes.value = {}
+  lojas.value = {}
+  integracoes.value = null
+  contasErro.value = null
+  contasCarregando.value = false
+  if (contasAberto.value) void carregarContas()
+})
+// No ML e na Amazon a conta vem de uma integração do DaVinci (não de um perfil
+// do AdsPower): é ela que a tabela mostra.
+const contasPorIntegracao = computed(() => plataforma.value !== 'shopee')
+/**
+ * Conta do ML/Amazon sem a integração do DaVinci ou sem a loja do Bling não tem
+ * de onde ler (Ads / vendas): não dá pra colocar na conferência.
+ */
+function semVinculo(c: ContaConferencia): boolean {
+  return contasPorIntegracao.value && (!c.integration_id || !c.bling_loja_id)
+}
+/** Outra conta da lista já usa essa integração (o servidor recusa com integracao_em_uso). */
+function usadaPor(integracaoId: string, contaId: string): string | null {
+  return (contas.value ?? []).find((x) => x.id !== contaId && x.integration_id === integracaoId)?.nome ?? null
+}
 
-async function salvarConta(c: ContaConferencia, campos: Partial<Pick<ContaConferencia, 'nome' | 'grupo' | 'ativo'>>) {
-  if (salvandoConta.value) return
+type CamposConta = Partial<Pick<ContaConferencia, 'nome' | 'grupo' | 'ativo' | 'integration_id' | 'bling_loja_id'>>
+async function salvarConta(c: ContaConferencia, campos: CamposConta) {
+  if (salvandoConta.value) {
+    versaoContas.value++
+    return
+  }
   salvandoConta.value = c.id
   try {
     const r = await api<ContaConferencia>(`${BASE}/contas/${encodeURIComponent(c.id)}`, { method: 'PUT', body: campos })
     const nova: ContaConferencia = r && typeof r === 'object' && 'id' in r ? r : { ...c, ...campos }
     contas.value = (contas.value ?? []).map((x) => (x.id === c.id ? nova : x))
     nomes.value = { ...nomes.value, [c.id]: nova.nome }
+    lojas.value = { ...lojas.value, [c.id]: nova.bling_loja_id ?? '' }
     toasts.success('Conta salva', `${nova.nome}: vale a partir da próxima conferência.`)
   } catch (e: any) {
     nomes.value = { ...nomes.value, [c.id]: c.nome }
+    lojas.value = { ...lojas.value, [c.id]: c.bling_loja_id ?? '' }
+    versaoContas.value++
     toasts.error('Não consegui salvar a conta', apiErrMsg(e, ERROS_CONFERENCIA))
   } finally {
     salvandoConta.value = null
   }
+}
+/** Integração escolhida no select ('' = desligar). */
+function salvarIntegracao(c: ContaConferencia, id: string) {
+  const nova = id || null
+  if (nova !== (c.integration_id ?? null)) void salvarConta(c, { integration_id: nova })
+}
+/** Loja do Bling: só número (o servidor recusa o resto); vazio desliga. */
+function salvarLoja(c: ContaConferencia) {
+  const v = (lojas.value[c.id] ?? '').trim()
+  if (v && !/^\d{1,20}$/.test(v)) {
+    lojas.value = { ...lojas.value, [c.id]: c.bling_loja_id ?? '' }
+    toasts.error('Loja do Bling inválida', 'O id da loja do Bling é só número (ex.: 204438129).')
+    return
+  }
+  if (v !== (c.bling_loja_id ?? '')) void salvarConta(c, { bling_loja_id: v || null })
 }
 function salvarNome(c: ContaConferencia) {
   const n = (nomes.value[c.id] ?? '').trim()
@@ -472,6 +640,19 @@ const informarAberto = ref(false)
 
 <template>
   <div class="conferencia min-w-0 space-y-5">
+    <!-- qual marketplace: um relatório por marketplace (07/10/2026) -->
+    <div class="flex w-fit max-w-full gap-1 overflow-x-auto rounded-md bg-muted/40 p-1" role="tablist" aria-label="Marketplace da conferência">
+      <button
+        v-for="p in PLATAFORMAS" :key="p.chave"
+        role="tab" :aria-selected="plataforma === p.chave"
+        class="whitespace-nowrap rounded px-3 py-1 text-sm transition-colors"
+        :class="plataforma === p.chave ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground hover:bg-background/60'"
+        @click="trocarPlataforma(p.chave)"
+      >
+        {{ p.rotulo }}
+      </button>
+    </div>
+
     <!-- barra de cima: qual relatório, situação, gerar e Threema -->
     <div class="flex flex-wrap items-center gap-2">
       <label class="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
@@ -603,7 +784,7 @@ const informarAberto = ref(false)
       class="space-y-2 rounded-md border p-6 text-center text-sm text-muted-foreground"
     >
       <Inbox class="mx-auto size-6" />
-      <p class="font-medium text-foreground">Nenhum relatório ainda</p>
+      <p class="font-medium text-foreground">Nenhum relatório {{ plat.da }} ainda</p>
       <p>
         A conferência roda terça (semana fechada) e quinta (parcial) às 13:30, quando a agenda está ligada.
         <template v-if="canEdit">Dá para gerar uma agora pelo botão <b>Gerar agora</b>.</template>
@@ -625,12 +806,12 @@ const informarAberto = ref(false)
             {{ exec.status === 'coletando' ? 'Coletando as lojas' : 'Lojas desta conferência' }}
           </h3>
           <span class="text-xs text-muted-foreground">
-            {{ concluidas }} de {{ coletas.length }} concluídas · {{ tituloRelatorio(exec.semanas) }}
+            {{ concluidas }} de {{ coletas.length }} concluídas · {{ tituloRelatorio(exec.semanas, plataformaAberta) }}
           </span>
           <span v-if="exec.status === 'coletando'" class="text-xs text-muted-foreground">· atualiza sozinho a cada 20 s</span>
         </div>
         <p v-if="exec.status === 'coletando'" class="text-xs text-muted-foreground">
-          O robô do Mac abre uma loja por vez. {{ prazosTxt }}
+          {{ COLETA_TXT[plataformaAberta].andamento }} {{ prazosTxt }}
         </p>
         <p v-else-if="exec.status === 'cancelado'" class="text-xs text-muted-foreground">
           Conferência cancelada — não saiu relatório.
@@ -658,7 +839,7 @@ const informarAberto = ref(false)
                 <td>
                   <span :class="PILL_TOM[tomStatusColeta(c.status)]">
                     <Loader2 v-if="c.status === 'coletando'" class="size-3 animate-spin" />
-                    {{ rotuloStatusColeta(c.status) }}
+                    {{ rotuloStatusColeta(c.status, plataformaAberta) }}
                   </span>
                 </td>
                 <td class="max-w-[24rem] text-muted-foreground">
@@ -682,7 +863,7 @@ const informarAberto = ref(false)
       <div v-if="rel" class="space-y-6">
         <header class="space-y-1">
           <h2 class="flex flex-wrap items-center gap-2 text-lg font-semibold">
-            {{ tituloRelatorio(rel.semanas) }}
+            {{ tituloRelatorio(rel.semanas, plataformaAberta) }}
             <span :class="rel.tipo === 'parcial' ? 'pill-warning' : 'pill-muted'">
               {{ rel.tipo === 'parcial' ? 'semana parcial' : 'semana fechada' }}
             </span>
@@ -735,20 +916,41 @@ const informarAberto = ref(false)
                   {{ l.categoria }}
                 </th>
                 <th scope="row" class="sub">{{ l.sub }}</th>
-                <template v-for="(sem, i) in l.valores" :key="i">
+                <!-- métrica que este marketplace não dá ("não coletado", "não se aplica",
+                     "aguardando acesso"): a linha inteira com o texto numa pílula cinza, no
+                     lugar do número e do "—" -->
+                <template v-if="l.estado">
+                  <template v-for="(sem, i) in l.valores" :key="i">
+                    <td
+                      v-for="(v, j) in sem" :key="j"
+                      class="estado" :class="planilha.grupos[j]?.chave === 'geral' && 'geral'"
+                    >
+                      <span class="pill-muted">{{ v }}</span>
+                    </td>
+                  </template>
                   <td
-                    v-for="(v, j) in sem" :key="j"
-                    class="num" :class="planilha.grupos[j]?.chave === 'geral' && 'geral'"
+                    v-for="(v, j) in l.variacoes" :key="`var-${j}`"
+                    class="var estado" :class="planilha.grupos[j]?.chave === 'geral' && 'geral'"
                   >
-                    {{ v }}
+                    <span class="pill-muted">{{ v.texto }}</span>
                   </td>
                 </template>
-                <td
-                  v-for="(v, j) in l.variacoes" :key="`var-${j}`"
-                  class="var" :class="[COR[v.cor], planilha.grupos[j]?.chave === 'geral' && 'geral']"
-                >
-                  {{ v.texto }}
-                </td>
+                <template v-else>
+                  <template v-for="(sem, i) in l.valores" :key="i">
+                    <td
+                      v-for="(v, j) in sem" :key="j"
+                      class="num" :class="planilha.grupos[j]?.chave === 'geral' && 'geral'"
+                    >
+                      {{ v }}
+                    </td>
+                  </template>
+                  <td
+                    v-for="(v, j) in l.variacoes" :key="`var-${j}`"
+                    class="var" :class="[COR[v.cor], planilha.grupos[j]?.chave === 'geral' && 'geral']"
+                  >
+                    {{ v.texto }}
+                  </td>
+                </template>
               </tr>
             </tbody>
           </table>
@@ -774,12 +976,16 @@ const informarAberto = ref(false)
       >
         <ChevronRight class="size-4 shrink-0 transition-transform" :class="contasAberto && 'rotate-90'" />
         Contas da conferência
-        <span class="text-xs font-normal text-muted-foreground">quem entra, em que grupo e com que nome</span>
+        <span class="text-xs font-normal text-muted-foreground">{{ plat.rotulo }} · quem entra, em que grupo e com que nome</span>
       </button>
       <div v-if="contasAberto" class="space-y-2 border-t p-4">
         <p class="text-xs text-muted-foreground">
           Vale a partir da próxima conferência — relatório já gerado não muda. Eletro não é conta: sai dos produtos de
           eletro das contas de Celular.
+          <template v-if="contasPorIntegracao">
+            Cada conta {{ plat.da }} lê o Ads da integração do DaVinci e as vendas da loja do Bling; sem as duas
+            ligadas, a conta não entra.
+          </template>
         </p>
         <div v-if="contasCarregando && !contas" class="space-y-2" aria-busy="true">
           <div v-for="i in 4" :key="i" class="h-9 animate-pulse rounded-md bg-muted/40" />
@@ -792,21 +998,27 @@ const informarAberto = ref(false)
           <button class="btn btn-xs" @click="carregarContas">Tentar de novo</button>
         </div>
         <div v-else-if="contas" class="table-card overflow-x-auto">
-          <table class="w-full min-w-[640px] text-xs">
+          <table class="w-full text-xs" :class="contasPorIntegracao ? 'min-w-[760px]' : 'min-w-[640px]'">
             <thead>
               <tr>
                 <th>Nome no relatório</th>
                 <th>Grupo</th>
                 <th>Entra na conferência</th>
-                <th>Perfil AdsPower</th>
-                <th>Conta no DaVinci</th>
+                <template v-if="contasPorIntegracao">
+                  <th>Integração no DaVinci</th>
+                  <th>Loja no Bling</th>
+                </template>
+                <template v-else>
+                  <th>Perfil AdsPower</th>
+                  <th>Conta no DaVinci</th>
+                </template>
               </tr>
             </thead>
             <tbody>
               <tr v-if="!contasOrdenadas.length">
                 <td colspan="5" class="py-4 text-center text-muted-foreground">Nenhuma conta cadastrada.</td>
               </tr>
-              <tr v-for="c in contasOrdenadas" :key="c.id" :class="!c.ativo && 'text-muted-foreground'">
+              <tr v-for="c in contasOrdenadas" :key="`${c.id}:${versaoContas}`" :class="!c.ativo && 'text-muted-foreground'">
                 <td>
                   <input
                     v-model="nomes[c.id]"
@@ -831,19 +1043,65 @@ const informarAberto = ref(false)
                   </select>
                 </td>
                 <td>
-                  <label class="inline-flex cursor-pointer items-center gap-1.5">
+                  <label
+                    class="inline-flex items-center gap-1.5"
+                    :class="semVinculo(c) && !c.ativo ? 'cursor-not-allowed' : 'cursor-pointer'"
+                    :title="semVinculo(c) && !c.ativo ? 'Falta ligar a integração do DaVinci e a loja do Bling: sem elas não tem de onde ler os números' : undefined"
+                  >
                     <input
                       type="checkbox" class="size-4"
                       :checked="c.ativo"
-                      :disabled="salvandoConta === c.id"
+                      :disabled="salvandoConta === c.id || (semVinculo(c) && !c.ativo)"
                       @change="salvarConta(c, { ativo: !c.ativo })"
                     >
                     {{ c.ativo ? 'sim' : 'não' }}
                     <Loader2 v-if="salvandoConta === c.id" class="size-3 animate-spin" />
                   </label>
                 </td>
-                <td class="whitespace-nowrap font-mono text-[11px] text-muted-foreground">{{ c.adspower_user_id }}</td>
-                <td class="text-muted-foreground">{{ c.conta_key || '—' }}</td>
+                <template v-if="contasPorIntegracao">
+                  <td class="max-w-[18rem]">
+                    <!-- a lista das integrações deste marketplace; sem ela (falhou), só o nome -->
+                    <select
+                      v-if="integracoes"
+                      :value="c.integration_id ?? ''"
+                      class="h-8 w-56 max-w-full rounded-md border bg-background px-2 text-sm text-foreground"
+                      aria-label="Integração no DaVinci"
+                      :disabled="salvandoConta === c.id"
+                      @change="(e) => salvarIntegracao(c, (e.target as HTMLSelectElement).value)"
+                    >
+                      <option value="">— sem integração —</option>
+                      <option v-if="c.integration_id && !integracoes.some((i) => i.id === c.integration_id)" :value="c.integration_id">
+                        {{ c.integracao_nome || 'integração ligada' }}
+                      </option>
+                      <option v-for="i in integracoes" :key="i.id" :value="i.id" :disabled="!!usadaPor(i.id, c.id)">
+                        {{ i.nome }}{{ i.arquivada ? ' (arquivada)' : '' }}{{ usadaPor(i.id, c.id) ? ` — já em ${usadaPor(i.id, c.id)}` : '' }}
+                      </option>
+                    </select>
+                    <template v-else>
+                      <span v-if="c.integration_id" class="text-foreground">{{ c.integracao_nome || 'integração ligada' }}</span>
+                      <span v-else class="pill-muted">sem integração</span>
+                    </template>
+                    <span v-if="c.integracao_arquivada" class="pill-warning ml-1">arquivada</span>
+                    <span v-if="c.observacao" class="mt-0.5 block whitespace-normal text-[11px] text-muted-foreground" :title="c.observacao">
+                      {{ c.observacao }}
+                    </span>
+                  </td>
+                  <td>
+                    <input
+                      v-model="lojas[c.id]"
+                      class="h-8 w-28 rounded-md border bg-background px-2 font-mono text-xs text-foreground"
+                      inputmode="numeric" maxlength="20" placeholder="id da loja"
+                      aria-label="Id da loja no Bling"
+                      :disabled="salvandoConta === c.id"
+                      @keydown.enter="($event.target as HTMLInputElement).blur()"
+                      @change="salvarLoja(c)"
+                    >
+                  </td>
+                </template>
+                <template v-else>
+                  <td class="whitespace-nowrap font-mono text-[11px] text-muted-foreground">{{ c.adspower_user_id || '—' }}</td>
+                  <td class="text-muted-foreground">{{ c.conta_key || '—' }}</td>
+                </template>
               </tr>
             </tbody>
           </table>
@@ -855,7 +1113,7 @@ const informarAberto = ref(false)
       :open="informarAberto"
       contexto="conferencia_shopee"
       somente-cadastro
-      descricao="Quem está marcado recebe no Threema o resumo da Conferência Shopee quando ela termina (terça e quinta à tarde): vendas, investimento e % s/ vendas de Mala, Celular, Eletro e Geral, as contas sem dados e o link do Excel. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
+      descricao="Quem está marcado recebe no Threema o resumo de cada Conferência quando ela termina (Shopee, Mercado Livre e Amazon, cada uma na sua mensagem; terça e quinta à tarde quando a agenda está ligada): vendas, investimento e % s/ vendas de Mala, Celular, Eletro e Geral, as contas sem dados e o link do Excel. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
       @close="informarAberto = false"
     />
   </div>
@@ -880,7 +1138,11 @@ const informarAberto = ref(false)
   /* largura da 2ª coluna parada: cat + sub = onde a data da semana gruda */
   --conf-sub-w: 11rem;
 }
-:global(.dark) .conferencia {
+/* ".dark .conferencia", não ":global(.dark) .conferencia": o Vue compila o
+   :global(...) seguido de mais seletor para só ".dark" — as variáveis escuras
+   iam pro <html> e as claras do .conferencia ganhavam (célula branca com texto
+   claro no modo escuro). Com o scoped, só o .conferencia ganha o data-v. */
+.dark .conferencia {
   --conf-azul: #1f3864;
   --conf-azul-txt: #f1f5fb;
   --conf-grade: #3a4556;
@@ -960,6 +1222,8 @@ const informarAberto = ref(false)
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
+/* métrica que o marketplace não dá: a pílula cinza no meio da célula */
+.planilha td.estado { text-align: center; }
 .planilha td.geral {
   background: var(--conf-bege);
   font-weight: 600;

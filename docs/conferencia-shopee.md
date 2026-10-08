@@ -188,3 +188,122 @@ Pedido de 07/10/2026 ("mais ou menos desse jeito"): o Resumo tem o desenho da pl
 | Vendas pelo painel geral (30 dias) | Soma diária por produto | Mesma fonte para total e eletro, sem limite de 30 dias |
 | "A agenda do DaVinci liga e desliga o Ads" | Quem liga e desliga é o robô `marionete` (18–22h) | O texto original está errado |
 | Saldo anterior: "±2 dias do início" e "dia seguinte ao fim ±1" | Leitura mais próxima do dia seguinte ao fim, ±1 dia | Uma regra só |
+
+## 9. Mercado Livre e Amazon (07/10/2026)
+
+Decisão do dono: o **mesmo relatório** (a planilha da seção 5, as mesmas semanas da seção 1, as
+mesmas regras de grupo, de total e de variação) para o Mercado Livre e a Amazon, **um por
+marketplace**. Na tela, Marketing → Conferência ganha a troca **Shopee | Mercado Livre | Amazon**
+(`?conf=ml`). As tabelas são as mesmas (`conferencia_shopee_*`, migration 0382): a conta e a
+rodada ganharam `plataforma`, e há **uma rodada coletando por plataforma** (a da Shopee, que vai até
+17:30–18:00, não segura a do ML).
+
+**Quem coleta.** ML e Amazon são coletados pelo **servidor** (job `conferencia_coletar_servidor` no
+worker), sem AdsPower e sem o Mac: o executor do Mac (`/agent/lease`) só recebe coleta da Shopee.
+"Gerar agora" cria a rodada e põe o job na fila na hora; a agenda (terça e quinta 13:30 BRT, como a
+Shopee) só com `CONFERENCIA_ML_CRON=true` / `CONFERENCIA_AMAZON_CRON=true` (desligadas de fábrica).
+O job pega as lojas uma a uma (3 tentativas, 10 min por loja); se a rodada parar (Redis fora,
+worker reiniciado), o varredor de 10 em 10 min põe o job na fila de novo. A coleta é `parcial` quando
+faltou uma semana ou uma seção que a plataforma tem de trazer (ML: Vendas e Ads; Amazon: Vendas).
+
+**Contas.** Não têm perfil do AdsPower: cada uma é ligada à **integração do DaVinci** (pelo nome,
+na migration; depois, em Contas) e à **loja do Bling** de onde saem as Vendas. Conta sem uma das
+duas ligações fica desativada, com a observação do que falta.
+
+| Marketplace | Mala | Celular (eletro separado) | Desativadas de início |
+|---|---|---|---|
+| Mercado Livre | Marquezini, Forpaper, KFA, Poofy | Jlas 2, KFA 2, Inova, Barbosa, Injox, Aguiar, Aguiar 2, Kia, Velasco, Victor MEI, Mega, Dream 2, Zorvex, Mini, Vita | Atlas, Fiore, VR (contas novas, sem integração ainda), Jlas, Eron, Lucas MEI, Counhago |
+| Amazon | KFA (loja Bling 204438129), Poofy (206099015) | Kia (204713113) | Nexus (206064394) |
+
+**Vendas** (ML e Amazon): itens dos pedidos do Bling da semana, pela data do pedido (a mesma da aba
+Faturamento), valor de tabela dos produtos — **sem frete** e **sem** tirar os descontos e promoções do
+pedido (pode ficar acima do que o cliente pagou; na Amazon KFA, 28/09–04/10, R$ 9.156 nos itens
+contra R$ 8.566,30 nos totais dos pedidos) —, sem os pedidos que estão cancelados na hora da coleta.
+**Eletro** pelo SKU de cada item (a lista de eletro do DaVinci: SKU, categoria do Bling "Eletro…" ou
+segmento Eletro), refeito a cada cálculo — "Recalcular" pega categoria nova do produto.
+
+**Ads do ML**: API de Anúncios (Product Ads), dia a dia: Vendas Ads = receita total, Impressões,
+Cliques, Invest. Ads = custo, Pedidos Ads = unidades; Conversão Ads = pedidos ÷ cliques. O eletro do
+Ads vai anúncio a anúncio pelo vínculo do DaVinci; conta sem os anúncios por item fica com o Ads
+inteiro em Celular (com aviso).
+
+**Células sem número por um motivo conhecido** (não é o "—", que continua querendo dizer "não veio"):
+
+| Estado | Onde |
+|---|---|
+| **não coletado** | afiliados do ML (Venda com Afiliados não tem API; a leitura do painel pelo AdsPower vem depois) |
+| **não se aplica** | afiliados da Amazon; Saldo Ads no ML e na Amazon (os dois cobram depois) |
+| **aguardando acesso** | Ads da Amazon e o % investimento / vendas dela, até a API de Anúncios da Amazon ser conectada |
+
+O relatório guarda `plataforma` e `estados` (`{métrica: estado}`; a linha "Impressões afiliados"
+usa a chave `impressoes_afiliados`). A célula com estado fica sem número em toda linha, total e Geral
+— no valor e na Variação — e a tela, o Excel, o HTML, o CSV e o MD escrevem o texto do estado, em
+cinza. O % investimento / vendas do ML é só o Ads (os afiliados não entram enquanto não são
+coletados). Título e arquivo dizem o marketplace: "Conferência Mercado Livre — …",
+`conferencia-ml-<S1>.xlsx`. O aviso no Threema usa o mesmo cadastro "Quem recebe" da Shopee, mas
+cada marketplace tem a sua chave — `CONFERENCIA_ML_THREEMA` / `CONFERENCIA_AMAZON_THREEMA`
+(desligadas de fábrica): ligar a da Shopee depois do piloto não manda o do ML/Amazon (nem as rodadas
+de teste) antes de ele ser aprovado. No ML a linha do aviso diz que o investimento é só do Ads
+("invest. Ads R$ 182 (afiliados não coletado) · 17,7% Ads s/ vendas").
+
+**Loja do Bling**: uma por conta em cada marketplace (a mesma loja em duas contas contaria as
+vendas duas vezes): a tela recusa (`loja_bling_em_uso`) e a migration, se a busca achar a mesma
+loja para duas contas, deixa só na primeira da lista (a outra entra desativada, com a nota).
+
+Código: `services/conferencia_shopee/plataformas.py` (o perfil de cada marketplace),
+`servidor.py` (o job), `coletores/` (a interface; um módulo por marketplace).
+
+### 9.1 Como cada número é lido (coletores do servidor)
+
+Tudo no servidor, sem AdsPower; nenhum número de `marketing_metrics` entra (o ML lá ficou zerado de
+~15/07 a 07/10 e a Amazon lá era do robô de demonstração): as 4 semanas são lidas de novo a cada
+rodada.
+
+**Vendas** (`coletores/vendas_bling.py`, ML e Amazon) — só leitura do banco:
+
+- linhas de item de `bling_orders` com `loja` = a loja do Bling da conta;
+- semana pelo dia do pedido (`data`) em Brasília — a mesma data da aba Faturamento;
+- valor = `itemvalor × item_quantidade` (os produtos, **sem frete** e sem os descontos/promoções do
+  pedido — o `bling_orders` não guarda o desconto; a soma das linhas é o `totalprodutos` do
+  pedido); linha sem quantidade conta 1; linha sem valor conta R$ 0,00 e a semana ganha aviso;
+- fora: situação **12 (Cancelado)** e `excluido` na hora da coleta. Todo o resto entra — "Em
+  digitação" (na Amazon é pedido normal com etiqueta), situação vazia, devolução em andamento;
+- item = o SKU da linha (`item_codigo`, que é o SKU do DaVinci); linha sem SKU vira
+  "(sem SKU) <descrição>" e o eletro dela sai pelo nome;
+- zero só quando dá para confiar nele (falha do Bling nunca vira R$ 0,00):
+  - semana que termina depois do pedido mais novo do espelho **inteiro** (de qualquer loja) fica
+    **sem** Vendas ("—", coleta `parcial`), com aviso: o espelho do Bling parou;
+  - loja que o espelho não conhece (nenhum pedido dela, nunca — loja errada em Contas): nenhuma
+    semana tem Vendas ("—"; na Amazon a coleta vira `erro`) e a loja ganha aviso;
+  - loja conhecida sem pedido nas 4 semanas: R$ 0,00 com aviso (a data do último pedido dela);
+  - S1 zerada com pedido nas anteriores: R$ 0,00 com aviso para conferir o espelho;
+  - fora isso, semana sem pedido = R$ 0,00 (não é falha).
+
+**Ads do Mercado Livre** (`coletores/ml.py`), pelo cliente consertado em 07/10/2026
+(`services/ml_ads.py`, docs/marketing-ml-ads.md):
+
+- totais: `campaigns/search` com `aggregation_type=DAILY` de S4.inicio a S1.fim (uma chamada; o ML
+  guarda 90 dias) e a soma dos dias de cada semana. Semana com um dia **já fechado** que o ML não
+  trouxe fica **sem** Ads ("—", com aviso): o ML manda todo dia, até os zerados, então dia faltando
+  é resposta incompleta;
+- eletro (só contas de Celular): `ad_groups/search` com as métricas de cada semana (uma busca por
+  semana). Grupo **ITEM** = o próprio anúncio (MLB…); **FAMILY** (User Products) e **CATALOG** juntam
+  variações — os itens deles vêm de `ad_groups/{id}/ads` (uma chamada por grupo com movimento nas
+  4 semanas). Item → SKU pelo vínculo **vivo** do DaVinci (`product_links` do ML; o da própria
+  integração primeiro, depois o de outra integração; vínculo morto não conta, como na Shopee).
+  Grupo com **qualquer** item eletro é eletro (a regra da Shopee). Sem a lista de itens ou sem
+  vínculo vivo: eletro pelo título do anúncio (com aviso);
+- a busca por anúncio de uma semana falhou (ou acabou o tempo, 6 min por loja para o detalhe): a
+  semana fica sem os anúncios e o Ads inteiro dela vai para Celular, com aviso. A soma dos anúncios
+  que não fecha com o total da conta (> R$ 1 e > 1%) também vira aviso;
+- conta sem Publicidade, token sem o escopo, token recusado na renovação ou API fora: a seção Ads
+  fica de fora (a coleta vira `parcial`, o relatório mostra "—") e o motivo vai nos avisos. Nunca
+  zero no lugar de erro. Conta de Mala não busca anúncio por anúncio (entra inteira em Mala).
+
+Chamadas por loja de Celular: anunciante (1) + DAILY (1) + 4 buscas de grupos (1 página a cada 50
+grupos) + 1 por grupo FAMILY/CATALOG com movimento. O token renovado no meio é gravado na hora
+(o refresh_token do ML é de uso único).
+
+**Amazon** (`coletores/amazon.py`): só Vendas por enquanto; sem loja do Bling ligada a coleta vira
+`erro`. Quando a API de Anúncios da Amazon for conectada, o Ads entra no mesmo coletor (relatório
+`spAdvertisedProduct` diário por SKU anunciado — o SKU da Amazon é o do DaVinci).

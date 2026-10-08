@@ -31,6 +31,13 @@ O ciclo de uma rodada (contrato §3, §5 e §7):
 Travas: quem mexe em várias coletas de uma execução (varredor, cancelar,
 fechar) trava ANTES a linha da execução; o lease e o resultado travam só a
 coleta. Nada aqui faz commit: quem chama decide (rota ou worker).
+
+Plataformas (07/10/2026, plataformas.py): a mesma fila serve à Shopee, ao
+Mercado Livre e à Amazon. Uma rodada coletando POR PLATAFORMA (a da Shopee
+vai até 17:30–18:00 e não pode segurar a do ML). O `lease` do executor do Mac
+só entrega coleta da SHOPEE; as do ML e da Amazon são pegas pelo job do
+servidor (`lease_servidor`, servidor.py), uma a uma, com as mesmas regras de
+tentativa e de coleta largada.
 """
 
 from __future__ import annotations
@@ -43,7 +50,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -53,7 +60,7 @@ from app.models import (
     ConferenciaShopeeSaldo,
 )
 from app.models.conferencia_shopee import CONFERENCIA_ORIGENS
-from app.services.conferencia_shopee import calculo, classificacao, periodos
+from app.services.conferencia_shopee import calculo, classificacao, periodos, plataformas
 
 logger = structlog.get_logger()
 
@@ -91,6 +98,8 @@ ERRO_DADOS_INVALIDOS = "os números desta loja vieram num formato que o relatór
 
 _TRAVA_CRIAR = "conferencia_shopee_criar"
 _LISTAS_DE_ITENS = ("afiliados_itens", "ads_itens", "vendas_itens")
+# Quem pega as coletas do ML e da Amazon (o `agente` da coleta).
+AGENTE_SERVIDOR = "servidor"
 
 
 class FilaError(Exception):
@@ -110,21 +119,31 @@ async def criar_execucao(
     origem: str,
     criado_por: str | None,
     agora: datetime,
+    plataforma: str = plataformas.PADRAO,
 ) -> ConferenciaShopeeExecucao:
-    """Uma rodada nova com uma coleta `pendente` por loja ativa.
+    """Uma rodada nova da plataforma com uma coleta `pendente` por loja ativa
+    DELA.
 
-    `conferencia_em_andamento` se outra ainda coleta (a trava de transação
-    impede dois cliques simultâneos de criarem duas); `conferencia_sem_contas`
-    se nenhuma loja está ativa."""
+    `conferencia_em_andamento` se outra da MESMA plataforma ainda coleta (a
+    trava de transação, uma por plataforma, impede dois cliques simultâneos
+    de criarem duas); `conferencia_sem_contas` se nenhuma loja dela está
+    ativa. As semanas e os prazos são os mesmos para as três plataformas."""
     if tipo not in periodos.TIPOS:
         raise FilaError("tipo_invalido")
     if origem not in CONFERENCIA_ORIGENS:
         raise FilaError("origem_invalida")
-    await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": _TRAVA_CRIAR})
+    if plataforma not in plataformas.PLATAFORMAS:
+        raise FilaError("plataforma_invalida")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"{_TRAVA_CRIAR}:{plataforma}"}
+    )
     andando = (
         await session.execute(
             select(ConferenciaShopeeExecucao.id)
-            .where(ConferenciaShopeeExecucao.status == "coletando")
+            .where(
+                ConferenciaShopeeExecucao.status == "coletando",
+                ConferenciaShopeeExecucao.plataforma == plataforma,
+            )
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -132,7 +151,10 @@ async def criar_execucao(
         raise FilaError("conferencia_em_andamento")
     contas = (
         await session.execute(
-            select(ConferenciaShopeeConta).where(ConferenciaShopeeConta.ativo.is_(True))
+            select(ConferenciaShopeeConta).where(
+                ConferenciaShopeeConta.ativo.is_(True),
+                ConferenciaShopeeConta.plataforma == plataforma,
+            )
         )
     ).scalars().all()
     if not contas:
@@ -140,6 +162,7 @@ async def criar_execucao(
 
     plano = periodos.planejar(tipo, agora)
     execucao = ConferenciaShopeeExecucao(
+        plataforma=plataforma,
         tipo=plano["tipo"],
         origem=origem,
         criado_por=criado_por,
@@ -172,6 +195,7 @@ async def criar_execucao(
     logger.info(
         "conferencia_shopee_criada",
         execucao=str(execucao.id),
+        plataforma=plataforma,
         tipo=execucao.tipo,
         origem=origem,
         contas=len(ordenadas),
@@ -205,15 +229,47 @@ def job(
     }
 
 
-async def lease(
-    session: AsyncSession, agente: str, agora: datetime, *, login_auto: bool = True
-) -> tuple[dict[str, Any] | None, set[UUID]]:
-    """(job | None, execuções com coleta encerrada por "muitas tentativas").
+async def _reservar(
+    session: AsyncSession,
+    agente: str,
+    agora: datetime,
+    *,
+    servidor: bool,
+    execucao_id: UUID | None = None,
+) -> tuple[ConferenciaShopeeColeta | None, ConferenciaShopeeExecucao | None, set[UUID]]:
+    """A próxima coleta da fila, já marcada `coletando` (tentativa + 1), e as
+    execuções com coleta encerrada por "muitas tentativas".
 
-    A segunda parte é para quem chama fechar essas execuções DEPOIS do
-    commit (fechar_se_terminou trava a execução; aqui só a coleta)."""
+    `servidor=False` → só coleta da SHOPEE (o executor do Mac); `True` → só do
+    ML e da Amazon (o job do servidor), opcionalmente de UMA execução."""
     limite_stale = agora - LEASE_STALE
     esgotadas: set[UUID] = set()
+    filtro_plataforma: ColumnElement[bool] = (
+        ConferenciaShopeeExecucao.plataforma.in_(plataformas.SERVIDOR)
+        if servidor
+        else ConferenciaShopeeExecucao.plataforma == "shopee"
+    )
+    filtros = [
+        ConferenciaShopeeExecucao.status == "coletando",
+        ConferenciaShopeeExecucao.corte > agora,
+        filtro_plataforma,
+        or_(
+            ConferenciaShopeeColeta.status == "pendente",
+            and_(
+                ConferenciaShopeeColeta.status == "coletando",
+                or_(
+                    ConferenciaShopeeColeta.claimed_at.is_(None),
+                    ConferenciaShopeeColeta.claimed_at < limite_stale,
+                ),
+            ),
+        ),
+        or_(
+            ConferenciaShopeeColeta.disponivel_apos.is_(None),
+            ConferenciaShopeeColeta.disponivel_apos <= agora,
+        ),
+    ]
+    if execucao_id is not None:
+        filtros.append(ConferenciaShopeeColeta.execucao_id == execucao_id)
     while True:
         linha = (
             await session.execute(
@@ -222,24 +278,7 @@ async def lease(
                     ConferenciaShopeeExecucao,
                     ConferenciaShopeeExecucao.id == ConferenciaShopeeColeta.execucao_id,
                 )
-                .where(
-                    ConferenciaShopeeExecucao.status == "coletando",
-                    ConferenciaShopeeExecucao.corte > agora,
-                    or_(
-                        ConferenciaShopeeColeta.status == "pendente",
-                        and_(
-                            ConferenciaShopeeColeta.status == "coletando",
-                            or_(
-                                ConferenciaShopeeColeta.claimed_at.is_(None),
-                                ConferenciaShopeeColeta.claimed_at < limite_stale,
-                            ),
-                        ),
-                    ),
-                    or_(
-                        ConferenciaShopeeColeta.disponivel_apos.is_(None),
-                        ConferenciaShopeeColeta.disponivel_apos <= agora,
-                    ),
-                )
+                .where(*filtros)
                 .order_by(
                     ConferenciaShopeeColeta.criado_em.asc(), ConferenciaShopeeColeta.id.asc()
                 )
@@ -251,7 +290,7 @@ async def lease(
             )
         ).first()
         if linha is None:
-            return None, esgotadas
+            return None, None, esgotadas
         coleta, execucao = linha
         if coleta.tentativas >= MAX_TENTATIVAS:
             coleta.status = "erro"
@@ -275,10 +314,82 @@ async def lease(
             "conferencia_shopee_lease",
             coleta=str(coleta.id),
             conta=coleta.nome,
+            plataforma=execucao.plataforma,
             tentativa=coleta.tentativas,
             agente=coleta.agente,
         )
-        return job(coleta, execucao, login_auto), esgotadas
+        return coleta, execucao, esgotadas
+
+
+async def lease(
+    session: AsyncSession, agente: str, agora: datetime, *, login_auto: bool = True
+) -> tuple[dict[str, Any] | None, set[UUID]]:
+    """(job | None, execuções com coleta encerrada por "muitas tentativas").
+
+    Só coleta da SHOPEE: as do ML e da Amazon não têm perfil do AdsPower e
+    são do job do servidor. A segunda parte é para quem chama fechar essas
+    execuções DEPOIS do commit (fechar_se_terminou trava a execução; aqui só
+    a coleta)."""
+    coleta, execucao, esgotadas = await _reservar(session, agente, agora, servidor=False)
+    if coleta is None or execucao is None:
+        return None, esgotadas
+    return job(coleta, execucao, login_auto), esgotadas
+
+
+async def lease_servidor(
+    session: AsyncSession, execucao_id: UUID, agora: datetime
+) -> tuple[ConferenciaShopeeColeta | None, set[UUID]]:
+    """A próxima coleta do ML/Amazon DESTA execução para o job do servidor
+    (mesmas regras do lease: mais antiga primeiro, largada há 20 min volta, 3
+    tentativas e acabou)."""
+    coleta, _execucao, esgotadas = await _reservar(
+        session, AGENTE_SERVIDOR, agora, servidor=True, execucao_id=execucao_id
+    )
+    return coleta, esgotadas
+
+
+async def execucoes_servidor_paradas(session: AsyncSession, agora: datetime) -> list[UUID]:
+    """Rodadas do ML/Amazon com coleta para pegar e NINGUÉM coletando há 20
+    min (o job não foi enfileirado — Redis fora — ou o worker caiu no meio):
+    o varredor enfileira o job de novo. Rodada criada há menos de 5 min ainda
+    está esperando o job que a criação enfileirou."""
+    limite_stale = agora - LEASE_STALE
+    c = ConferenciaShopeeColeta
+    e = ConferenciaShopeeExecucao
+    disponivel = (
+        select(c.id)
+        .where(
+            c.execucao_id == e.id,
+            or_(
+                c.status == "pendente",
+                and_(
+                    c.status == "coletando",
+                    or_(c.claimed_at.is_(None), c.claimed_at < limite_stale),
+                ),
+            ),
+            or_(c.disponivel_apos.is_(None), c.disponivel_apos <= agora),
+        )
+        .exists()
+    )
+    trabalhando = (
+        select(c.id)
+        .where(c.execucao_id == e.id, c.status == "coletando", c.claimed_at >= limite_stale)
+        .exists()
+    )
+    return list(
+        (
+            await session.execute(
+                select(e.id).where(
+                    e.status == "coletando",
+                    e.plataforma.in_(plataformas.SERVIDOR),
+                    e.corte > agora,
+                    e.criado_em <= agora - timedelta(minutes=5),
+                    disponivel,
+                    ~trabalhando,
+                )
+            )
+        ).scalars().all()
+    )
 
 
 # ───────────────────────────────────────────────────────────── resultado
@@ -385,7 +496,9 @@ async def registrar_resultado(
     if isinstance(dados, Mapping):
         coleta.dados = dict(dados)
         valor = _saldo(dados)
-        if valor is not None:
+        # Saldo de Ads é da Shopee (a chave do histórico é o perfil); o ML e a
+        # Amazon não têm.
+        if valor is not None and coleta.adspower_user_id:
             session.add(
                 ConferenciaShopeeSaldo(
                     adspower_user_id=coleta.adspower_user_id,
@@ -452,10 +565,46 @@ async def _saldos(
     return dict(saida)
 
 
+def _skus(dados: Mapping | None) -> dict[str, str]:
+    """item_id → SKU dos itens de vendas e de Ads (coletas do ML/Amazon: o
+    coletor põe o SKU do DaVinci em cada item)."""
+    saida: dict[str, str] = {}
+    semanas = (dados or {}).get("semanas")
+    for semana in semanas if isinstance(semanas, list) else []:
+        if not isinstance(semana, Mapping):
+            continue
+        for lista in ("vendas_itens", "ads_itens"):
+            itens = semana.get(lista)
+            for item in itens if isinstance(itens, list) else []:
+                if not isinstance(item, Mapping):
+                    continue
+                item_id, sku = item.get("item_id"), item.get("sku")
+                if item_id is not None and isinstance(sku, str) and sku.strip():
+                    saida.setdefault(str(item_id), sku)
+    return saida
+
+
+def _execucao_dict(execucao: ConferenciaShopeeExecucao) -> dict[str, Any]:
+    return {
+        "id": execucao.id,
+        "plataforma": execucao.plataforma or plataformas.PADRAO,
+        "tipo": execucao.tipo,
+        "origem": execucao.origem,
+        "semanas": execucao.semanas,
+        "afiliados_ate": execucao.afiliados_ate,
+        "criado_em": execucao.criado_em,
+    }
+
+
 async def montar(
     session: AsyncSession, execucao: ConferenciaShopeeExecucao, agora: datetime
 ) -> dict[str, Any]:
-    """O relatório da execução a partir das coletas guardadas (não grava)."""
+    """O relatório da execução a partir das coletas guardadas (não grava).
+
+    Eletro: na Shopee, o vínculo do DaVinci de cada item (pela loja); no ML e
+    na Amazon, o SKU que o coletor pôs em cada item, classificado AGORA (um
+    "Recalcular" pega categoria/segmento novo do produto). O saldo de Ads só
+    existe na Shopee."""
     linhas = (
         await session.execute(
             select(ConferenciaShopeeColeta, ConferenciaShopeeConta.conta_key)
@@ -469,14 +618,18 @@ async def montar(
             .execution_options(populate_existing=True)
         )
     ).all()
+    servidor = plataformas.do_servidor(execucao.plataforma)
     coletas: list[dict[str, Any]] = []
     chaves_celular: set[str] = set()
     itens: set[str] = set()
+    skus: dict[str, dict[str, str]] = {}
     for coleta, conta_key in linhas:
+        # ML/Amazon: o mapa de eletro é por coleta (cada uma com os SKUs dela).
+        chave = str(coleta.id) if servidor else conta_key
         coletas.append(
             {
                 "conta_id": coleta.conta_id,
-                "conta_key": conta_key,
+                "conta_key": chave,
                 "adspower_user_id": coleta.adspower_user_id,
                 "nome": coleta.nome,
                 "grupo": coleta.grupo,
@@ -486,20 +639,23 @@ async def montar(
             }
         )
         # Só o Celular separa eletro; Mala nem consulta o vínculo.
-        if coleta.grupo == "celular" and conta_key and coleta.dados:
+        if coleta.grupo != "celular" or not coleta.dados:
+            continue
+        if servidor:
+            skus[chave] = _skus(coleta.dados)
+        elif conta_key:
             chaves_celular.add(conta_key)
             itens |= _itens(coleta.dados)
-    mapa = await classificacao.carregar_mapa_davinci(session, chaves_celular, item_ids=itens)
-    saldos = await _saldos(session, (c["adspower_user_id"] for c in coletas), execucao.semanas)
+    if servidor:
+        mapa = await classificacao.carregar_mapa_por_sku(session, skus)
+        saldos: dict[str, list[tuple[datetime, float]]] = {}
+    else:
+        mapa = await classificacao.carregar_mapa_davinci(session, chaves_celular, item_ids=itens)
+        saldos = await _saldos(
+            session, (c["adspower_user_id"] for c in coletas), execucao.semanas
+        )
     return calculo.montar_relatorio(
-        {
-            "id": execucao.id,
-            "tipo": execucao.tipo,
-            "origem": execucao.origem,
-            "semanas": execucao.semanas,
-            "afiliados_ate": execucao.afiliados_ate,
-            "criado_em": execucao.criado_em,
-        },
+        _execucao_dict(execucao),
         coletas,
         mapa_davinci=mapa,
         saldos=saldos,
@@ -515,7 +671,9 @@ async def finalizar(
     execucao.status = "pronto"
     execucao.finalizado_em = agora
     await session.flush()
-    logger.info("conferencia_shopee_pronta", execucao=str(execucao.id))
+    logger.info(
+        "conferencia_shopee_pronta", execucao=str(execucao.id), plataforma=execucao.plataforma
+    )
     return execucao
 
 
@@ -525,14 +683,7 @@ def _so_esta_coleta(
     """O cálculo com UMA loja (sem vínculo do DaVinci nem saldos): levanta se
     os `dados` dela sozinhos derrubam o relatório."""
     calculo.montar_relatorio(
-        {
-            "id": execucao.id,
-            "tipo": execucao.tipo,
-            "origem": execucao.origem,
-            "semanas": execucao.semanas,
-            "afiliados_ate": execucao.afiliados_ate,
-            "criado_em": execucao.criado_em,
-        },
+        _execucao_dict(execucao),
         [
             {
                 "conta_id": coleta.conta_id,

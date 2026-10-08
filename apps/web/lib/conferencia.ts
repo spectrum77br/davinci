@@ -11,6 +11,13 @@
 // bom em cada métrica. Mudou aqui, muda lá — senão a tela e a planilha
 // contam histórias diferentes do mesmo número.
 //
+// 07/10/2026 (tarde): o mesmo relatório para o Mercado Livre e a Amazon (um por
+// marketplace; Shopee | Mercado Livre | Amazon na tela). O relatório traz a
+// `plataforma` e os `estados` das métricas que aquele marketplace não tem
+// número: "não coletado" (afiliados do ML, sem API), "não se aplica" (afiliados
+// da Amazon) e "aguardando acesso" (Ads da Amazon, sem a API liberada). Esses
+// saem no lugar do "—", que continua querendo dizer "faltou o dado".
+//
 // O teste (tests/conferencia-lib.cjs) roda este arquivo de verdade, sem nada
 // em volta: nenhum import. E nenhuma classe do Tailwind — o Tailwind não varre
 // lib/, então classe escrita aqui sairia sem CSS. Os helpers devolvem o
@@ -36,6 +43,12 @@ export type ChaveMetrica =
   | 'pedidos_ads'
   | 'conversao_ads'
 export type ChaveGrupo = 'mala' | 'celular' | 'eletro'
+export type Plataforma = 'shopee' | 'ml' | 'amazon'
+/**
+ * Métrica que o marketplace não dá (contrato de 07/10/2026, `relatorio.estados`):
+ * a célula mostra o estado, não um número nem o "—".
+ */
+export type EstadoMetrica = 'nao_coletado' | 'nao_se_aplica' | 'aguardando_acesso'
 /** Uma semana de uma linha (ou de um total): número, ou null = "sem dados". */
 export type Valores = Partial<Record<ChaveMetrica, number | null>>
 
@@ -78,6 +91,14 @@ export interface GrupoRelatorio {
 export interface Relatorio {
   versao: number
   execucao_id: string
+  /** Relatório de antes de 07/10/2026 não tem: é da Shopee. */
+  plataforma?: Plataforma
+  /**
+   * Métricas sem número NESTE marketplace → o estado (vale a linha inteira, em
+   * todas as semanas e grupos). A chave é a da métrica; a linha "Impressões
+   * afiliados" da planilha, que não tem métrica, usa 'impressoes_afiliados'.
+   */
+  estados?: Partial<Record<string, EstadoMetrica | string>> | null
   tipo: 'semanal' | 'parcial'
   origem: 'agenda' | 'manual'
   gerado_em: string
@@ -100,6 +121,7 @@ export type StatusColeta =
 
 export interface ExecucaoResumo {
   id: string
+  plataforma?: Plataforma
   tipo: 'semanal' | 'parcial'
   origem: 'agenda' | 'manual'
   status: StatusExecucao
@@ -138,13 +160,30 @@ export interface DetalheExecucao {
 
 export interface ContaConferencia {
   id: string
-  adspower_user_id: string
+  plataforma?: Plataforma
+  /** Só a Shopee abre perfil no AdsPower; no ML e na Amazon é null. */
+  adspower_user_id: string | null
   nome: string
   grupo: 'mala' | 'celular'
   ativo: boolean
   ordem: number
   conta_key: string | null
   observacao: string | null
+  /** ML e Amazon: a integração do DaVinci de onde saem as vendas e o Ads. */
+  integration_id?: string | null
+  /** Nome da integração (o `name` dela no DaVinci), quando ligada. */
+  integracao_nome?: string | null
+  /** A integração ligada foi arquivada no DaVinci (a coleta não lê mais dela). */
+  integracao_arquivada?: boolean | null
+  /** ML e Amazon: a loja do Bling de onde saem as Vendas (só número). */
+  bling_loja_id?: string | null
+}
+
+/** Uma integração do DaVinci que dá pra ligar a uma conta do ML/Amazon (GET /contas/integracoes). */
+export interface IntegracaoConferencia {
+  id: string
+  nome: string
+  arquivada: boolean
 }
 
 export type Formato = 'xlsx' | 'csv' | 'md' | 'json' | 'html'
@@ -161,10 +200,85 @@ export const ERROS_CONFERENCIA: Record<string, string> = {
   conferencia_nao_pronta: 'Só dá para recalcular uma conferência que já terminou.',
   conferencia_nao_coletando: 'Essa conferência já terminou — não tem mais o que cancelar.',
   conta_nao_encontrada: 'Essa conta não existe mais.',
+  // ML e Amazon: conta que entra na conferência precisa da integração e da loja do Bling.
+  conta_sem_integracao: 'Ligue a integração do DaVinci antes de colocar a conta na conferência — sem ela não tem de onde ler o Ads.',
+  conta_sem_loja_bling: 'Informe a loja do Bling antes de colocar a conta na conferência — sem ela não tem de onde ler as vendas.',
+  conta_sem_vinculo: 'Conta do Mercado Livre ou da Amazon só entra na conferência ligada a uma integração do DaVinci e a uma loja do Bling.',
+  integracao_invalida: 'Essa integração não é deste marketplace (ou não existe mais).',
+  integracao_em_uso: 'Essa integração já está ligada a outra conta da conferência.',
+  loja_bling_em_uso: 'Essa loja do Bling já está ligada a outra conta deste marketplace — as vendas dela contariam duas vezes.',
+  campo_so_ml_amazon: 'Integração e loja do Bling só valem para contas do Mercado Livre e da Amazon.',
+  plataforma_invalida: 'Marketplace desconhecido.',
   forbidden: 'Sem permissão para isso (Marketing › editar).',
 }
 
 // ---------- helpers puros (travados em tests/conferencia-lib.cjs)
+
+// ── plataforma (07/10/2026) ─────────────────────────────────────────────
+
+export interface InfoPlataforma {
+  chave: Plataforma
+  rotulo: string
+  // Com o artigo certo: "da Shopee", "do Mercado Livre", "pela Amazon"…
+  da: string
+  pela: string
+}
+/** Os marketplaces da Conferência, na ordem do seletor da tela. */
+export const PLATAFORMAS: InfoPlataforma[] = [
+  { chave: 'shopee', rotulo: 'Shopee', da: 'da Shopee', pela: 'pela Shopee' },
+  { chave: 'ml', rotulo: 'Mercado Livre', da: 'do Mercado Livre', pela: 'pelo Mercado Livre' },
+  { chave: 'amazon', rotulo: 'Amazon', da: 'da Amazon', pela: 'pela Amazon' },
+]
+
+/** "ml" → 'ml'; qualquer outra coisa (vazio, "ML", "constructor"…) → null. */
+export function plataformaValida(v: unknown): Plataforma | null {
+  return PLATAFORMAS.find((p) => p.chave === v)?.chave ?? null
+}
+/** O marketplace com os textos dele; desconhecido → a Shopee (a de sempre). */
+export function infoPlataforma(p: unknown): InfoPlataforma {
+  return PLATAFORMAS.find((x) => x.chave === p) ?? PLATAFORMAS[0]
+}
+/** 'ml' → "Mercado Livre"; desconhecida → "Shopee". */
+export function rotuloPlataforma(p: unknown): string {
+  return infoPlataforma(p).rotulo
+}
+
+// ── estados das métricas que o marketplace não dá (07/10/2026) ──────────
+
+// Chave do próprio objeto: "constructor" ou "toString" vindos da API não podem
+// achar coisa do protótipo (Object.hasOwn não existe no Safari < 15.4).
+function proprio(o: object, k: string): boolean {
+  return Object.prototype.hasOwnProperty.call(o, k)
+}
+
+/**
+ * O texto da célula de cada estado. Os MESMOS do servidor (Excel, HTML, CSV,
+ * MD): "—" continua sendo "faltou o dado"; estes dizem por que NÃO tem número.
+ */
+export const ROTULO_ESTADO: Record<EstadoMetrica, string> = {
+  nao_coletado: 'não coletado',
+  nao_se_aplica: 'não se aplica',
+  aguardando_acesso: 'aguardando acesso',
+}
+/**
+ * Estado da métrica `chave` em `estados` (o `relatorio.estados`); sem estado →
+ * null (a célula mostra o número, ou "—"). Estado que a tela ainda não conhece
+ * aparece legível ("sem_api" → "sem api"), nunca some.
+ */
+export function estadoDe(
+  estados: Relatorio['estados'] | null | undefined,
+  chave: string | null | undefined,
+): string | null {
+  if (!chave || !estados || typeof estados !== 'object') return null
+  if (!proprio(estados, chave)) return null
+  const e = (estados as Record<string, unknown>)[chave]
+  return typeof e === 'string' && e.trim() ? e : null
+}
+/** "nao_coletado" → "não coletado"; desconhecido → sublinhado vira espaço. */
+export function rotuloEstado(e: string | null | undefined): string {
+  if (!e) return '—'
+  return proprio(ROTULO_ESTADO, e) ? ROTULO_ESTADO[e as EstadoMetrica] : e.replace(/_/g, ' ')
+}
 
 /**
  * As métricas, nesta ordem (contrato §5 + as 6 de cliques/pedidos/conversão de
@@ -198,15 +312,21 @@ const ROTULO_STATUS_COLETA: Record<string, string> = {
   deslogada: 'deslogada',
   perfil_em_uso: 'perfil em uso',
   sem_automacao: 'perfil Firefox, o robô não abre',
-  bloqueada: 'bloqueada pela Shopee',
+  bloqueada: 'bloqueada {pela}',
   interrompida: 'interrompida',
   erro: 'erro',
   expirada: 'não coletada a tempo',
 }
-/** "sem_automacao" → "sem automação". Status desconhecido aparece cru. */
-export function rotuloStatusColeta(s: string | null | undefined): string {
+/**
+ * "sem_automacao" → "perfil Firefox, o robô não abre"; "bloqueada" diz por
+ * quem ("bloqueada pela Shopee" / "pelo Mercado Livre"…). Status desconhecido
+ * aparece legível.
+ */
+export function rotuloStatusColeta(s: string | null | undefined, plataforma?: unknown): string {
   if (!s) return '—'
-  return ROTULO_STATUS_COLETA[s] ?? s.replace(/_/g, ' ')
+  if (!proprio(ROTULO_STATUS_COLETA, s)) return s.replace(/_/g, ' ')
+  // "pela Shopee", "pela Amazon", mas "pelo Mercado Livre".
+  return ROTULO_STATUS_COLETA[s].replace('{pela}', infoPlataforma(plataforma).pela)
 }
 /** Tom do status da coleta: o componente traduz pra pill. */
 export function tomStatusColeta(s: string | null | undefined): 'ok' | 'alerta' | 'erro' | 'andamento' | 'neutro' {
@@ -483,11 +603,16 @@ export function rotuloSemana(s: SemanaPeriodo | null | undefined): string {
   if (!s) return '—'
   return s.rotulo || `${ddmm(s.inicio)}–${ddmm(s.fim)}`
 }
-/** "Conferência Shopee — 28/09 a 04/10/2026". */
-export function tituloRelatorio(semanas: SemanaPeriodo[] | null | undefined): string {
+/**
+ * "Conferência Shopee — 28/09 a 04/10/2026" / "Conferência Mercado Livre — …" /
+ * "Conferência Amazon — …" (igual ao título do Excel e do HTML do servidor).
+ * Sem plataforma = Shopee.
+ */
+export function tituloRelatorio(semanas: SemanaPeriodo[] | null | undefined, plataforma?: unknown): string {
+  const base = `Conferência ${rotuloPlataforma(plataforma)}`
   const s1 = semanas?.[0]
-  if (!s1) return 'Conferência Shopee'
-  return `Conferência Shopee — ${ddmm(s1.inicio)} a ${ddmmaaaa(s1.fim)}`
+  if (!s1) return base
+  return `${base} — ${ddmm(s1.inicio)} a ${ddmmaaaa(s1.fim)}`
 }
 /** "comparado com 21/09 a 27/09". */
 export function comparadoCom(semanas: SemanaPeriodo[] | null | undefined): string {
@@ -518,10 +643,15 @@ export function rotuloExecucao(e: ExecucaoResumo): string {
   return [quando, e.tipo, rotuloSemana(e.semanas?.[0]), rotuloStatusExecucao(e.status)].filter(Boolean).join(' · ')
 }
 
-/** Nome do arquivo igual ao do servidor: conferencia-shopee-<S1.inicio>_<S1.fim>.<ext>. */
-export function nomeArquivo(semanas: SemanaPeriodo[] | null | undefined, fmt: Formato): string {
+/**
+ * Nome do arquivo igual ao do servidor: conferencia-<plataforma>-<S1.inicio>_<S1.fim>.<ext>
+ * (conferencia-shopee-…, conferencia-ml-…, conferencia-amazon-…). Sem plataforma = Shopee,
+ * o nome de antes. Só vale quando a resposta não traz o Content-Disposition.
+ */
+export function nomeArquivo(semanas: SemanaPeriodo[] | null | undefined, fmt: Formato, plataforma?: unknown): string {
+  const base = `conferencia-${plataformaValida(plataforma) ?? 'shopee'}`
   const s1 = semanas?.[0]
-  return s1 ? `conferencia-shopee-${s1.inicio}_${s1.fim}.${fmt}` : `conferencia-shopee.${fmt}`
+  return s1 ? `${base}-${s1.inicio}_${s1.fim}.${fmt}` : `${base}.${fmt}`
 }
 /** Nome do Content-Disposition (filename*=UTF-8''… ou filename="…"); sem nome → null. */
 export function nomeDoCabecalho(cd: string | null | undefined): string | null {
@@ -572,12 +702,14 @@ export const GRUPOS_PLANILHA: { chave: ChaveColunaPlanilha; rotulo: string }[] =
 /**
  * As linhas, na ordem da planilha: categoria (mesclada nas linhas seguidas
  * dela) + sub-rótulo. `chave` null = não existe na Shopee (impressões de
- * afiliados): sempre "—".
+ * afiliados): sempre "—". `estado` = a chave procurada em `relatorio.estados`
+ * (sem ela, a da métrica): a linha sem métrica também pode ter estado — no ML
+ * as impressões de afiliados ficam "não coletado" como o resto dos afiliados.
  */
-export const LINHAS_PLANILHA: { categoria: string; sub: string; chave: ChaveMetrica | null }[] = [
+export const LINHAS_PLANILHA: { categoria: string; sub: string; chave: ChaveMetrica | null; estado?: string }[] = [
   { categoria: 'Vendas', sub: 'afiliados', chave: 'vendas_afiliados' },
   { categoria: 'Vendas', sub: 'Ads', chave: 'vendas_ads' },
-  { categoria: 'Impressões', sub: 'afiliados', chave: null },
+  { categoria: 'Impressões', sub: 'afiliados', chave: null, estado: 'impressoes_afiliados' },
   { categoria: 'Impressões', sub: 'Ads', chave: 'impressoes' },
   { categoria: 'Conversão', sub: 'afiliados', chave: 'conversao_afiliados' },
   { categoria: 'Conversão', sub: 'Ads', chave: 'conversao_ads' },
@@ -602,6 +734,12 @@ export interface LinhaPlanilha {
   chave: string // única na tabela (a métrica, ou "categoria|sub" pra linha sem métrica)
   categoria: string
   sub: string
+  /**
+   * Métrica que este marketplace não dá ('nao_coletado', 'nao_se_aplica',
+   * 'aguardando_acesso'): a linha inteira (semanas e Variação) mostra o texto
+   * do estado, em cinza. null = linha normal.
+   */
+  estado: string | null
   /** Linhas que a célula da categoria cobre (rowspan); 0 = coberta pela de cima, não desenha. */
   span: number
   /** [semana, da mais velha pra mais nova][grupo, na ordem de GRUPOS_PLANILHA] → texto. */
@@ -621,9 +759,15 @@ export interface Planilha {
  * (rel.grupos[].total) e o Geral (rel.geral). Grupo que falta, semana que
  * falta ou métrica que o relatório não tem (relatório de antes de 07/10 não
  * tem cliques/pedidos/conversão) viram "—"; nunca 0, nunca erro.
+ *
+ * Métrica com estado em `rel.estados` (ML/Amazon, 07/10/2026): a linha
+ * inteira — as 4 semanas × 4 grupos e as 4 variações — mostra o texto do
+ * estado ("não coletado", "não se aplica", "aguardando acesso"), em cinza, no
+ * lugar do número e do "—". O estado ganha do número: ele diz que a métrica
+ * não existe (ainda) naquele marketplace.
  */
 export function planilhaResumo(
-  rel: Pick<Relatorio, 'semanas' | 'grupos' | 'geral'> | null | undefined,
+  rel: (Pick<Relatorio, 'semanas' | 'grupos' | 'geral'> & Partial<Pick<Relatorio, 'estados'>>) | null | undefined,
 ): Planilha | null {
   if (!rel) return null
   const periodos = (Array.isArray(rel.semanas) ? rel.semanas : []).slice(0, 4)
@@ -640,10 +784,25 @@ export function planilhaResumo(
       span = 1
       while (LINHAS_PLANILHA[k + span]?.categoria === def.categoria) span++
     }
+    const chave = m ? m.chave : `${def.categoria}|${def.sub}`
+    const estado = estadoDe(rel.estados, def.estado ?? def.chave)
+    if (estado) {
+      const texto = rotuloEstado(estado)
+      return {
+        chave,
+        categoria: def.categoria,
+        sub: def.sub,
+        estado,
+        span,
+        valores: semanas.map(() => totais.map(() => texto)),
+        variacoes: totais.map((): Variacao => ({ texto, direcao: null, cor: 'cinza' })),
+      }
+    }
     return {
-      chave: m ? m.chave : `${def.categoria}|${def.sub}`,
+      chave,
       categoria: def.categoria,
       sub: def.sub,
+      estado: null,
       span,
       valores: semanas.map((s) => totais.map((t) => (m ? fmtPlanilha(valor(semanaDe(t, s.indice), m.chave), m.tipo) : '—'))),
       variacoes: totais.map((t) => (m

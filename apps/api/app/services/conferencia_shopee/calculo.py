@@ -44,6 +44,18 @@ métrica fica vazia ("—"), nunca zero.
 As regras de variação ("▲ 12,3%", "▼ 0,8 p.p.", "novo", "=", "—") e da média
 das 3 semanas são as MESMAS de apps/web/lib/conferencia.ts: mudou lá, muda
 aqui.
+
+Mercado Livre e Amazon (07/10/2026, plataformas.py): o MESMO cálculo. O que
+muda vem do perfil da plataforma:
+  • `estados` — métricas sem número por um motivo conhecido ("não coletado",
+    "não se aplica", "aguardando acesso"). A métrica com estado fica SEM
+    número em toda linha, total e Geral (mesmo que a coleta tenha mandado
+    algo) e o relatório leva `"estados": {métrica: estado}` para a tela e os
+    arquivos escreverem o texto no lugar do "—" (que continua querendo dizer
+    "não veio");
+  • as notas fixas;
+  • o eletro de cada item: o mapa do DaVinci (pelo SKU, fila.montar), senão a
+    marca `eletro` que o coletor pôs no item, senão o título.
 """
 
 from __future__ import annotations
@@ -53,7 +65,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Context, Decimal
 from typing import Any
 
-from app.services.conferencia_shopee import classificacao
+from app.services.conferencia_shopee import classificacao, plataformas
 from app.services.conferencia_shopee.periodos import FUSO, dia_da_semana, rotulo
 
 VERSAO = 1
@@ -478,16 +490,22 @@ class _Classificador:
         self.nomes = _nome_item(dados)
         self._cache: dict[str, bool] = {}
 
-    def eletro(self, item_id: Any, nome: Any) -> bool:
+    def eletro(self, item_id: Any, nome: Any, marca: Any = None) -> bool:
+        """`marca` = o `eletro` que o coletor do servidor pôs no item (ML e
+        Amazon): vale depois do mapa do DaVinci e antes da categoria e do
+        título."""
         if item_id is None:
             # Ads sem item (anúncio da loja, GMV Max): fica em Celular.
             return False
         chave = str(item_id)
         if chave not in self._cache:
-            nome = self.nomes.get(chave) or (str(nome) if nome else None)
-            self._cache[chave], _ = classificacao.classificar(
-                chave, nome, self.categorias, self.mapa
-            )
+            if chave not in self.mapa and isinstance(marca, bool):
+                self._cache[chave] = marca
+            else:
+                nome = self.nomes.get(chave) or (str(nome) if nome else None)
+                self._cache[chave], _ = classificacao.classificar(
+                    chave, nome, self.categorias, self.mapa
+                )
         return self._cache[chave]
 
 
@@ -536,7 +554,7 @@ def _total_e_eletro(
         valores_eletro = [
             _num(it.get(campo_item))
             for it in validos
-            if classificador.eletro(it.get("item_id"), it.get("nome"))
+            if classificador.eletro(it.get("item_id"), it.get("nome"), it.get("eletro"))
         ]
         if chave in _RATEIO:
             eletro[chave] = _rateio(
@@ -645,9 +663,14 @@ def montar_relatorio(
       (mala | celular), "status", "erro", "dados" (ColetaDados | None)}] — a
       `conta_key` vem da conta (`conferencia_shopee_conta`), não da coleta.
     mapa_davinci: conta_key → {item_id: eletro?}
-      (classificacao.carregar_mapa_davinci).
+      (classificacao.carregar_mapa_davinci; ML/Amazon: carregar_mapa_por_sku,
+      com a chave da coleta no lugar da conta_key).
     saldos: adspower_user_id → [(lido_em, valor)] de conferencia_shopee_saldo.
+    execucao["plataforma"] (shopee | ml | amazon; sem = shopee) escolhe os
+    estados e as notas (plataformas.py).
     """
+    plataforma = plataformas.de(execucao)
+    estados = plataformas.estados(plataforma)
     semanas_exec = [
         {"inicio": str(s["inicio"])[:10], "fim": str(s["fim"])[:10]}
         for s in (execucao.get("semanas") or [])
@@ -699,7 +722,21 @@ def montar_relatorio(
         for i, sem in enumerate(semanas_exec):
             s = _semana_dos_dados(dados, sem)
             total, eletro, sem_itens, sem_campo = _total_e_eletro(s, classificador)
-            if i == 0:
+            # Métrica com estado (não coletado, não se aplica, aguardando
+            # acesso) não tem número, venha o que vier na coleta.
+            for c in DIVISIVEIS:
+                if c in estados:
+                    total[c] = None
+                    eletro[c] = None
+            # …nem aviso de item/campo que faltou nela.
+            sem_itens = [
+                lista for lista in sem_itens
+                if not all(c in estados for c, sec in _SECOES.items() if sec[2] == lista)
+            ]
+            sem_campo = [c for c in sem_campo if c not in estados]
+            if "saldo_ads" in estados:
+                saldo = None
+            elif i == 0:
                 saldo = _num(dados.get("saldo_ads"))
             else:
                 saldo = saldo_da_semana(leituras, date.fromisoformat(sem["fim"]))
@@ -753,7 +790,7 @@ def montar_relatorio(
         if classificador is not None:
             divergencias.extend(_divergencias(nome, dados, classificador))
             gasto = _gasto_sem_item(dados, semanas_exec[0] if semanas_exec else None)
-            if gasto:
+            if gasto and "invest_ads" not in estados:
                 nao_atribuido.append({"conta": nome, "gasto": float(meio_para_cima(gasto, 2))})
 
     grupos = []
@@ -780,8 +817,20 @@ def montar_relatorio(
         )
         geral_semanas.append(semana)
 
+    # As derivadas (% e conversões) com estado também ficam sem número.
+    _limpar_estados(
+        [
+            *(lin["semanas"] for g in grupos for lin in g["linhas"]),
+            *(g["total"]["semanas"] for g in grupos),
+            geral_semanas,
+        ],
+        estados,
+    )
+
     return {
         "versao": VERSAO,
+        "plataforma": plataforma,
+        "estados": estados,
         "execucao_id": str(execucao.get("id") or ""),
         "tipo": execucao.get("tipo"),
         "origem": execucao.get("origem"),
@@ -795,7 +844,7 @@ def montar_relatorio(
             "sem_dados": sum(1 for tem in contas_vistas.values() if not tem),
             "semanas": geral_semanas,
         },
-        "notas": notas(execucao.get("tipo"), semanas_exec),
+        "notas": notas(execucao.get("tipo"), semanas_exec, plataforma),
         "contas_sem_dados": sorted(sem_dados, key=lambda d: classificacao.sem_acento(d["conta"])),
         "afiliados_incompletos": sorted(
             incompletos, key=lambda d: classificacao.sem_acento(d["conta"])
@@ -807,6 +856,14 @@ def montar_relatorio(
             nao_atribuido, key=lambda d: classificacao.sem_acento(d["conta"])
         ),
     }
+
+
+def _limpar_estados(listas: Iterable[Sequence[dict]], estados: Mapping[str, str]) -> None:
+    chaves = [c for c in estados if c in METRICA]
+    for semanas in listas:
+        for semana in semanas:
+            for c in chaves:
+                semana[c] = None
 
 
 def _iso(valor: Any) -> str | None:
@@ -842,9 +899,14 @@ def _gasto_sem_item(dados: Mapping, s1: Mapping | None) -> float:
     )
 
 
-def notas(tipo: str | None, semanas: Sequence[Mapping[str, str]]) -> list[str]:
-    """As notas fixas do relatório (pt-BR) e, na parcial, o trecho comparado."""
-    saida = list(NOTAS_FIXAS)
+def notas(
+    tipo: str | None,
+    semanas: Sequence[Mapping[str, str]],
+    plataforma: str = plataformas.PADRAO,
+) -> list[str]:
+    """As notas fixas do relatório (pt-BR) da plataforma e, na parcial, o
+    trecho comparado."""
+    saida = list(plataformas.NOTAS.get(plataforma, NOTAS_FIXAS))
     if tipo == "parcial" and semanas:
         de = dia_da_semana(semanas[0]["inicio"])
         ate = dia_da_semana(semanas[0]["fim"])

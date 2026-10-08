@@ -1,7 +1,7 @@
 // Run from apps/web: node tests/marketing-conferencia-sfc.cjs
 //
-// Marketing › Conferência Shopee (06/10/2026): components/MarketingConferencia.vue,
-// a aba nova em pages/marketing.vue e o contexto do Threema.
+// Marketing › Conferência (06/10/2026; ML e Amazon desde 07/10/2026):
+// components/MarketingConferencia.vue, a aba em pages/marketing.vue e o contexto do Threema.
 //
 // Trava o que a tela promete:
 //  - abre no último relatório PRONTO, ou no ?execucao= do link do Threema
@@ -16,7 +16,11 @@
 //    no fim, as duas colunas de rótulo paradas; tudo de lib/conferencia.ts;
 //  - conta sem dados continua contada (aviso embaixo da tabela);
 //  - só quem edita gera, recalcula, cancela e mexe nas contas; o cadastro do
-//    Threema é só de admin (routers/informar.py).
+//    Threema é só de admin (routers/informar.py);
+//  - um relatório por marketplace (07/10/2026): Shopee | Mercado Livre | Amazon
+//    em cima, ?conf= na URL, ?plataforma= na API, o relatório aberto por link
+//    leva a tela pro marketplace dele, e o que o marketplace não dá aparece
+//    como "não coletado" / "não se aplica" / "aguardando acesso" numa pílula.
 // Só dados FALSOS aqui; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -54,13 +58,13 @@ const { script, tpl } = tela
 const BASE = '/api/marketing/conferencia-shopee'
 assert.match(script, /const BASE = '\/api\/marketing\/conferencia-shopee'/, 'prefixo do router')
 for (const trecho of [
-  '`${BASE}/execucoes?limite=30`',
+  '`${BASE}/execucoes?limite=30&plataforma=${p}`',
   '`${BASE}/execucoes/${encodeURIComponent(id)}`',
-  '`${BASE}/execucoes`, { method: \'POST\', body: { tipo: tipoNovo.value } }',
+  '`${BASE}/execucoes?plataforma=${p}`, {\n      method: \'POST\', body: { tipo: tipoNovo.value, plataforma: p },',
   '/recalcular`, { method: \'POST\' }',
   '/cancelar`, { method: \'POST\' }',
   '/arquivo/${fmt}`',
-  '`${BASE}/contas`',
+  '`${BASE}/contas?plataforma=${p}`',
   '`${BASE}/contas/${encodeURIComponent(c.id)}`, { method: \'PUT\', body: campos }',
 ]) assert.ok(script.includes(trecho), `endpoint: ${trecho}`)
 assert.match(script, /useCan\('marketing', 'edit'\)/, 'escrita atrás de marketing:edit')
@@ -77,14 +81,21 @@ assert.match(tpl, /<Button v-if="isAdmin"[^>]*>\s*<Bell[^>]*\/> Quem recebe no T
 assert.match(tpl, /<section v-if="canEdit" class="rounded-xl border bg-card">/, 'Contas só com edit')
 assert.match(tpl, /contexto="conferencia_shopee"\s+somente-cadastro/, 'modal do Threema só cadastro')
 assert.match(modal.script, /\| 'conferencia_shopee'/, 'contexto no union do modal')
+// Um relatório por marketplace (07/10/2026): o seletor em cima, ?conf= na URL.
+assert.match(tpl, /role="tablist" aria-label="Marketplace da conferência"/, 'seletor de marketplace')
+assert.match(tpl, /v-for="p in PLATAFORMAS" :key="p\.chave"\s+role="tab" :aria-selected="plataforma === p\.chave"/)
+assert.match(tpl, /@click="trocarPlataforma\(p\.chave\)"/)
+assert.match(script, /const plataforma = ref<Plataforma>\(plataformaValida\(route\.query\.conf\) \?\? 'shopee'\)/, 'lê ?conf=')
+// O mesmo cadastro do Threema serve os 3 (um aviso por marketplace).
+assert.match(tpl, /contexto="conferencia_shopee"[\s\S]{0,200}descricao="[^"]*Shopee, Mercado Livre e Amazon/)
 // Layout do relatório: SÓ o Resumo, no formato da planilha antiga do dono (pedido
 // de 07/10/2026 — "mais ou menos desse jeito"), igual ao Excel e ao HTML.
 for (const trecho of [
-  'tituloRelatorio(rel.semanas)', 'comparadoCom(rel.semanas)', 'gerado em', // título
+  'tituloRelatorio(rel.semanas, plataformaAberta)', 'comparadoCom(rel.semanas)', 'gerado em', // título
   '<div v-if="planilha" class="planilha overflow-x-auto', // a planilha, com rolagem pro lado
   'v-for="(l, k) in planilha.linhas"', 'Métrica',
   'Sem dados:', 'Afiliados incompletos:', // avisos que mudam a leitura
-  'Nenhum relatório ainda', // estado vazio
+  'Nenhum relatório {{ plat.da }} ainda', // estado vazio
   'Não consegui carregar a conferência agora.', // erro
   'animate-pulse', // esqueleto
   'Contas da conferência',
@@ -111,7 +122,15 @@ assert.equal(rolagens, tabelas, 'toda tabela dentro de overflow-x-auto')
   assert.match(estilo, /--conf-azul: #1f3864;/)
   assert.match(estilo, /--conf-bege: #ddd9c4;/)
   assert.match(estilo, /--conf-grade: #bfbfbf;/)
-  assert.match(estilo, /:global\(\.dark\) \.conferencia \{[^}]*--conf-azul: #1f3864;[^}]*--conf-bege: #[0-9a-f]{6};/, 'escuro mantém o azul e tem um bege próprio')
+  assert.match(estilo, /\n\.dark \.conferencia \{[^}]*--conf-azul: #1f3864;[^}]*--conf-bege: #[0-9a-f]{6};/, 'escuro mantém o azul e tem um bege próprio')
+  // ":global(.dark) .conferencia" o Vue compila para só ".dark" (as variáveis claras do
+  // .conferencia ganhavam e o escuro saía com célula branca e texto claro).
+  assert.ok(!/:global\(\.dark\)/.test(estilo.replace(/\/\*[\s\S]*?\*\//g, '')), 'escuro sem :global(.dark) (vira só ".dark")')
+  {
+    const { compileStyle } = require('vue/compiler-sfc')
+    const css = compileStyle({ source: estilo.split('</style>')[0], filename: 'x.vue', id: 'data-v-teste', scoped: true }).code
+    assert.match(css, /\.dark \.conferencia\[data-v-teste\] \{[^}]*--conf-bege: #3b3829/, 'o escuro compila preso ao .conferencia')
+  }
   assert.match(estilo, /\.planilha thead th \{[^}]*background: var\(--conf-azul\);[^}]*color: var\(--conf-azul-txt\);[^}]*font-weight: 700;/)
   assert.match(estilo, /\.planilha td\.geral \{[^}]*background: var\(--conf-bege\);/)
   assert.match(estilo, /\.planilha tbody th \{[^}]*background: var\(--conf-bege\);/)
@@ -144,12 +163,14 @@ for (const m of tpl.matchAll(/(?<!dark:)\btext-(?:emerald|red|amber)-\d00\b(?![^
   // ?aba= lido no setup e escrito na troca; ?execucao sai fora da Conferência.
   assert.match(s, /const platform = ref<Platform>\(abaDaUrl\(\) \?\? 'ml'\)/, 'lê ?aba=')
   assert.match(s, /if \(q === 'conferencia' && canConferencia\.value\) return q/, 'aba só se puder ver')
-  assert.match(s, /if \(p !== 'conferencia'\) delete query\.execucao/, 'execucao só na aba')
+  assert.match(s, /if \(p !== 'conferencia'\) \{\s*delete query\.execucao\s*delete query\.conf\s*\}/, 'execucao e conf só na aba')
   assert.match(s, /void router\.replace\(\{ query \}\)/, 'escreve a aba na URL')
   // Summary/timeseries não pedem platform=conferencia.
   assert.match(s, /platform=\$\{plataformaAds\.value\}/, 'summary pela plataforma de Ads')
   assert.match(s, /platform: plataformaAds\.value/, 'timeseries pela plataforma de Ads')
-  assert.match(t, /<button v-if="canConferencia"[\s\S]{0,400}platform = 'conferencia'[\s\S]{0,200}Conferência Shopee/, 'botão da aba')
+  // Um botão só: o marketplace é escolhido lá dentro (Shopee | Mercado Livre | Amazon).
+  assert.match(t, /<button v-if="canConferencia"[\s\S]{0,400}platform = 'conferencia'[\s\S]{0,200}<ClipboardCheck class="size-3\.5" \/>\s*Conferência\s*<\/button>/, 'botão da aba')
+  assert.ok(!t.includes('Conferência Shopee'), 'a aba não diz mais só Shopee')
   assert.match(t, /<MarketingConferencia v-else-if="platform === 'conferencia' && canConferencia" \/>/, 'render da aba')
   assert.match(t, /\|\| canCriativos \|\| canConferencia" class="flex flex-wrap items-center gap-3">/, 'barra de abas aparece pra quem só vê a Conferência')
 
@@ -280,6 +301,8 @@ const RETORNO = `return {
   planilha, blocosCab, semDadosTxt, afiliadosIncompletosTxt,
   contasAberto, contas, contasOrdenadas, contasErro, nomes, salvarConta, salvarNome, salvandoConta,
   isAdmin, informarAberto, COR,
+  plataforma, plat, plataformaAberta, trocarPlataforma, contasPorIntegracao, semVinculo, COLETA_TXT,
+  lojas, integracoes, versaoContas, salvarLoja, salvarIntegracao, usadaPor,
 }`
 const fabrica = new AsyncFunction(
   'computed', 'onBeforeUnmount', 'onMounted', 'ref', 'watch',
@@ -307,9 +330,11 @@ function relogioFalso() {
 }
 const esperar = () => new Promise(setImmediate)
 
+// `lista` = a da Shopee; `listas` = a dos outros marketplaces ({ ml: [...] }).
+// Array ou função (que pode devolver uma Promise, pra segurar a resposta).
 async function montar({
-  lista = LISTA, detalhes = {}, query = {}, canEdit = true, admin = true, confirmar = true,
-  post, contasResp = CONTAS, put, listaErro = null, arquivo,
+  lista = LISTA, listas = {}, detalhes = {}, query = {}, canEdit = true, admin = true, confirmar = true,
+  post, contasResp = CONTAS, contasPlat = {}, integracoesPlat = {}, put, listaErro = null, arquivo,
 } = {}) {
   const calls = []
   const toastLog = []
@@ -323,11 +348,15 @@ async function montar({
   const montados = []
   const desmontados = []
   const route = { query: { ...query } }
+  const salvas = new Map()
   const api = (url, opts = {}) => {
     calls.push({ url, opts })
     const m = opts.method || 'GET'
-    if (m === 'GET' && url === `${BASE}/execucoes?limite=30`) {
-      return listaErro ? Promise.reject(listaErro) : Promise.resolve(typeof lista === 'function' ? lista() : lista)
+    const lst = new RegExp(`^${BASE}/execucoes\\?limite=30&plataforma=(\\w+)$`).exec(url)
+    if (m === 'GET' && lst) {
+      if (listaErro) return Promise.reject(listaErro)
+      const l = lst[1] === 'shopee' ? lista : (listas[lst[1]] ?? [])
+      return Promise.resolve(typeof l === 'function' ? l() : l)
     }
     const arq = new RegExp(`^${BASE}/execucoes/([^/]+)/arquivo/(\\w+)$`).exec(url)
     if (m === 'GET' && arq) {
@@ -343,13 +372,26 @@ async function montar({
       if (d) return Promise.resolve(JSON.parse(JSON.stringify(d)))
       return Promise.reject({ statusCode: 404, data: { detail: { code: 'conferencia_nao_encontrada' } } })
     }
-    if (m === 'POST' && url === `${BASE}/execucoes`) return post ? post(opts.body) : Promise.reject(new Error('sem POST'))
+    const criar = new RegExp(`^${BASE}/execucoes\\?plataforma=(\\w+)$`).exec(url)
+    if (m === 'POST' && criar) return post ? post(opts.body, criar[1]) : Promise.reject(new Error('sem POST'))
     if (m === 'POST' && /\/(recalcular|cancelar)$/.test(url)) return Promise.resolve({ ok: true })
-    if (m === 'GET' && url === `${BASE}/contas`) return Promise.resolve(JSON.parse(JSON.stringify(contasResp)))
+    const integ = new RegExp(`^${BASE}/contas/integracoes\\?plataforma=(\\w+)$`).exec(url)
+    if (m === 'GET' && integ) {
+      const i = integracoesPlat[integ[1]] ?? []
+      return typeof i === 'function' ? i() : Promise.resolve(JSON.parse(JSON.stringify(i)))
+    }
+    const cts = new RegExp(`^${BASE}/contas\\?plataforma=(\\w+)$`).exec(url)
+    if (m === 'GET' && cts) {
+      const c = cts[1] === 'shopee' ? contasResp : (contasPlat[cts[1]] ?? [])
+      return typeof c === 'function' ? c() : Promise.resolve(JSON.parse(JSON.stringify(c)))
+    }
     const conta = new RegExp(`^${BASE}/contas/([^/]+)$`).exec(url)
     if (m === 'PUT' && conta) {
       if (put) return put(conta[1], opts.body)
-      const c = contasResp.find((x) => x.id === conta[1])
+      // Guarda o que foi salvo: o PUT seguinte parte dele, como no servidor.
+      const c = salvas.get(conta[1])
+        ?? [...(Array.isArray(contasResp) ? contasResp : []), ...Object.values(contasPlat).flat()].find((x) => x.id === conta[1])
+      salvas.set(conta[1], { ...c, ...opts.body })
       return Promise.resolve({ ...c, ...opts.body })
     }
     return Promise.reject(new Error(`api falso não conhece ${m} ${url}`))
@@ -390,6 +432,7 @@ async function montar({
   }
 }
 const urls = (calls) => calls.map((c) => `${c.opts?.method || 'GET'} ${c.url}`)
+const LISTA_URL = (p = 'shopee') => `${BASE}/execucoes?limite=30&plataforma=${p}`
 const DET = {
   [ID_PRONTO]: detalhe(ID_PRONTO, 'pronto'),
   [ID_VELHO]: detalhe(ID_VELHO, 'pronto'),
@@ -422,7 +465,9 @@ async function run() {
     const t = await montar({ detalhes: DET })
     const { s } = t
     assert.equal(s.selecionada.value, ID_PRONTO, 'último pronto')
-    assert.deepEqual(urls(t.calls), [`GET ${BASE}/execucoes?limite=30`, `GET ${BASE}/execucoes/${ID_PRONTO}`])
+    assert.deepEqual(urls(t.calls), [`GET ${LISTA_URL()}`, `GET ${BASE}/execucoes/${ID_PRONTO}`])
+    assert.equal(s.plataforma.value, 'shopee', 'sem ?conf= abre na Shopee')
+    assert.equal(s.plataformaAberta.value, 'shopee', 'relatório sem plataforma (de antes) é da Shopee')
     assert.equal(s.emAndamento.value.id, ID_COLETANDO, 'aviso da coleta em andamento')
     assert.equal(t.routerCalls.length, 0, 'escolha automática não mexe na URL')
     assert.equal(t.relogio.pendentes().length, 0, 'relatório pronto não fica relendo')
@@ -562,7 +607,7 @@ async function run() {
     assert.equal(s.exec.value.status, 'pronto')
     assert.ok(s.rel.value, 'relatório na tela')
     assert.ok(t.toastLog.some((x) => x[0] === 'success' && x[1] === 'Conferência pronta'))
-    assert.ok(urls(t.calls.slice(antes)).includes(`GET ${BASE}/execucoes?limite=30`), 'lista recarregada')
+    assert.ok(urls(t.calls.slice(antes)).includes(`GET ${LISTA_URL()}`), 'lista recarregada')
     assert.equal(t.relogio.pendentes().length, 0, 'pronto: parou')
   }
 
@@ -620,7 +665,9 @@ async function run() {
     await esperar()
     assert.equal(t.confirms.length, 1)
     assert.match(t.confirms[0], /parcial \(segunda até ontem\)/)
-    assert.deepEqual(corpo, { tipo: 'parcial' })
+    assert.deepEqual(corpo, { tipo: 'parcial', plataforma: 'shopee' })
+    assert.match(t.confirms[0], /^Gerar agora a conferência da Shopee parcial/)
+    assert.match(t.confirms[0], /robô do Mac abre o perfil de cada loja no AdsPower/)
     assert.equal(t.s.selecionada.value, ID_NOVO)
     assert.deepEqual(t.routerCalls.at(-1), { query: { execucao: ID_NOVO } })
     assert.equal(t.toastLog.at(-1)[1], 'Conferência iniciada')
@@ -630,7 +677,7 @@ async function run() {
   {
     const t = await montar({ detalhes: DET, confirmar: false, post: () => assert.fail('não podia gerar') })
     await t.s.gerar()
-    assert.ok(!urls(t.calls).includes(`POST ${BASE}/execucoes`))
+    assert.ok(!urls(t.calls).some((u) => u.startsWith(`POST ${BASE}/execucoes`)))
   }
 
   // Gerar agora com uma já coletando: 409 vira aviso e leva até ela.
@@ -730,7 +777,7 @@ async function run() {
   // Contas: carrega ao abrir, ordena Mala antes, salva só o que mudou.
   {
     const t = await montar({ detalhes: DET })
-    assert.ok(!urls(t.calls).includes(`GET ${BASE}/contas`), 'só carrega ao abrir')
+    assert.ok(!urls(t.calls).includes(`GET ${BASE}/contas?plataforma=shopee`), 'só carrega ao abrir')
     t.s.contasAberto.value = true
     await esperar()
     await esperar()
@@ -773,7 +820,529 @@ async function run() {
     assert.equal(t.s.salvandoConta.value, null)
   }
 
+  // ════════════════════ Mercado Livre e Amazon (07/10/2026) ════════════════════
+  await plataformas()
+
   console.log('marketing-conferencia-sfc: ok')
+}
+
+// ---------------------------------------------------------------- dados falsos do ML e da Amazon
+const ID_ML = '66666666-6666-4666-8666-666666666666'
+const ID_ML_VELHO = '77777777-7777-4777-8777-777777777777'
+const ID_AMZ = '88888888-8888-4888-8888-888888888888'
+const ID_ML_NOVO = '99999999-9999-4999-8999-999999999999'
+const AFILIADOS = ['vendas_afiliados', 'impressoes_afiliados', 'conversao_afiliados', 'invest_afiliados', 'cliques_afiliados', 'pedidos_afiliados']
+const ADS = ['vendas_ads', 'impressoes', 'conversao_ads', 'invest_ads', 'cliques_ads', 'pedidos_ads']
+const de = (chaves, estado) => Object.fromEntries(chaves.map((k) => [k, estado]))
+// ML: afiliados sem API ("não coletado"); Amazon: afiliados "não se aplica" e Ads "aguardando acesso".
+const ESTADOS = {
+  ml: { ...de(AFILIADOS, 'nao_coletado'), saldo_ads: 'nao_se_aplica' },
+  amazon: { ...de(AFILIADOS, 'nao_se_aplica'), ...de(ADS, 'aguardando_acesso'), saldo_ads: 'nao_se_aplica' },
+}
+const semAfiliados = (over = {}) => vals({
+  vendas_afiliados: null, invest_afiliados: null, cliques_afiliados: null, pedidos_afiliados: null,
+  conversao_afiliados: null, saldo_ads: null, ...over,
+})
+function relatorioPlat(plataforma, id) {
+  const sem4 = (v) => [semAfiliados({ vendas: v }), semAfiliados(), semAfiliados(), semAfiliados()]
+  return relatorio({
+    execucao_id: id, plataforma, estados: ESTADOS[plataforma],
+    grupos: [
+      { chave: 'mala', rotulo: 'Mala', linhas: [], total: total(2, 0, sem4(1300)) },
+      { chave: 'celular', rotulo: 'Celular', linhas: [], total: total(3, 1, sem4(2600)) },
+      { chave: 'eletro', rotulo: 'Eletro', linhas: [], total: total(1, 0, sem4(700)) },
+    ],
+    geral: total(5, 1, sem4(4600)),
+    notas: ['Vendas: itens dos pedidos do Bling da semana, sem frete (dados falsos do teste).'],
+    contas_sem_dados: [{ conta: 'Velasco', status: 'bloqueada', erro: 'Ads respondeu 403' }],
+    afiliados_incompletos: [],
+    divergencias: [],
+    nao_atribuido_ads: [],
+  })
+}
+function detalhePlat(plataforma, id, status) {
+  return {
+    execucao: {
+      ...execResumo(id, status, '2026-10-06T16:31:00Z', { plataforma }),
+      afiliados_ate: null, esperar_afiliados_ate: null, corte: null, prazo: null,
+    },
+    coletas: [
+      coleta('Marquezini', 'ok', { grupo: 'mala', concluido_em: '2026-10-06T16:32:00Z' }),
+      coleta('Velasco', status === 'coletando' ? 'coletando' : 'bloqueada', { erro: status === 'coletando' ? null : 'Ads respondeu 403' }),
+    ],
+    relatorio: status === 'pronto' ? relatorioPlat(plataforma, id) : null,
+  }
+}
+const LISTA_ML = [
+  execResumo(ID_ML, 'pronto', '2026-10-06T16:31:00Z', { plataforma: 'ml' }),
+  execResumo(ID_ML_VELHO, 'pronto', '2026-10-01T16:31:00Z', { plataforma: 'ml' }),
+]
+const LISTA_AMZ = [execResumo(ID_AMZ, 'pronto', '2026-10-06T16:32:00Z', { plataforma: 'amazon' })]
+const DET_PLAT = {
+  [ID_ML]: detalhePlat('ml', ID_ML, 'pronto'),
+  [ID_ML_VELHO]: detalhePlat('ml', ID_ML_VELHO, 'pronto'),
+  [ID_AMZ]: detalhePlat('amazon', ID_AMZ, 'pronto'),
+}
+const contaPlat = (plataforma, id, nome, grupo, over = {}) => ({
+  id, plataforma, adspower_user_id: null, nome, grupo, ativo: true, ordem: 0, conta_key: null, observacao: null,
+  integration_id: `int-${id}`, integracao_nome: `${nome} (integração)`, bling_loja_id: `20500000${id.slice(-1)}`, ...over,
+})
+const CONTAS_ML = [
+  contaPlat('ml', 'm1', 'Marquezini', 'mala'),
+  contaPlat('ml', 'm2', 'Atlas', 'celular', {
+    ativo: false, integration_id: null, integracao_nome: null, bling_loja_id: null,
+    observacao: 'Conta nova do ML: ainda sem integração no DaVinci.',
+  }),
+  // Integração ligada, mas sem a loja do Bling: também não entra.
+  contaPlat('ml', 'm3', 'Velasco', 'celular', { ativo: false, bling_loja_id: null, integracao_arquivada: true }),
+]
+const INTEGRACOES_ML = [
+  { id: 'int-m1', nome: 'Marquezini (integração)', arquivada: false },
+  { id: 'int-livre', nome: 'Atlas ML', arquivada: false },
+  { id: 'int-m3', nome: 'Velasco (integração)', arquivada: true },
+]
+const CONTAS_AMZ = [contaPlat('amazon', 'a1', 'Kia', 'celular')]
+const LISTAS = { ml: LISTA_ML, amazon: LISTA_AMZ }
+const TODOS = { ...DET, ...DET_PLAT }
+
+// A tabela das contas, renderizada com o estado da tela (SSR).
+const renderContas = (() => {
+  const ini = tpl.indexOf('<table class="w-full text-xs" :class="contasPorIntegracao ? \'min-w-[760px]\' : \'min-w-[640px]\'">')
+  assert.ok(ini > 0, 'template tem a tabela das contas')
+  const trecho = tpl.slice(ini, tpl.indexOf('</table>', ini) + '</table>'.length)
+  const c = compileTemplate({ source: trecho, filename: 'contas.vue', id: 'contas-check' })
+  assert.deepEqual(c.errors, [])
+  const mod = {}
+  new Function('exports', 'require', transpile(c.code))(mod, require)
+  return mod.render
+})()
+function htmlContas(s) {
+  const estado = {
+    contasOrdenadas: s.contasOrdenadas, nomes: s.nomes, salvandoConta: s.salvandoConta, contasPorIntegracao: s.contasPorIntegracao,
+    semVinculo: s.semVinculo, salvarNome: s.salvarNome, salvarConta: s.salvarConta, versaoContas: s.versaoContas,
+    integracoes: s.integracoes, usadaPor: s.usadaPor, salvarIntegracao: s.salvarIntegracao, lojas: s.lojas, salvarLoja: s.salvarLoja,
+  }
+  const app = Vue.createSSRApp({ setup: () => estado, render: renderContas })
+  app.component('Loader2', { render: () => null })
+  return renderToString(app)
+}
+
+async function plataformas() {
+  // Trocar de marketplace: o da Shopee sai todo, entra o último pronto do ML.
+  {
+    const t = await montar({ detalhes: TODOS, listas: LISTAS, query: { aba: 'conferencia', execucao: ID_PRONTO } })
+    const { s } = t
+    assert.equal(s.selecionada.value, ID_PRONTO)
+    const antes = t.calls.length
+    s.trocarPlataforma('ml')
+    assert.equal(s.plataforma.value, 'ml')
+    assert.equal(s.detalhe.value, null, 'o relatório da Shopee sai na hora')
+    assert.deepEqual(t.routerCalls.at(-1), { query: { aba: 'conferencia', conf: 'ml' } }, '?conf=ml na URL; a execução da Shopee sai')
+    await esperar()
+    await esperar()
+    assert.deepEqual(urls(t.calls.slice(antes)), [`GET ${LISTA_URL('ml')}`, `GET ${BASE}/execucoes/${ID_ML}`], 'lista e relatório do ML')
+    assert.equal(s.selecionada.value, ID_ML, 'último pronto do ML')
+    assert.deepEqual(s.opcoes.value.map((e) => e.id), [ID_ML, ID_ML_VELHO], 'seletor só com as do ML')
+    assert.equal(s.plataformaAberta.value, 'ml')
+    assert.deepEqual([s.plat.value.rotulo, s.plat.value.da], ['Mercado Livre', 'do Mercado Livre'])
+    assert.equal(L.tituloRelatorio(s.rel.value.semanas, s.plataformaAberta.value), 'Conferência Mercado Livre — 28/09 a 04/10/2026')
+    assert.equal(s.semDadosTxt.value, 'Velasco (bloqueada pelo Mercado Livre)', 'o motivo diz o marketplace')
+    assert.equal(s.afiliadosIncompletosTxt.value, '')
+
+    // A planilha: as 4 linhas de afiliados "não coletado"; Ads e Vendas com número.
+    const p = s.planilha.value
+    const lin = (cat, sub) => p.linhas.find((l) => l.categoria === cat && l.sub === sub)
+    for (const cat of ['Vendas', 'Impressões', 'Conversão', 'Investimento']) {
+      assert.equal(lin(cat, 'afiliados').estado, 'nao_coletado', `${cat} afiliados`)
+      assert.equal(lin(cat, 'Ads').estado, null, `${cat} Ads tem número`)
+    }
+    assert.deepEqual(lin('Resumo', 'Vendas no período').valores[3], ['R$ 1.300,00', 'R$ 2.600,00', 'R$ 700,00', 'R$ 4.600,00'])
+    const html = await renderPlanilha(s)
+    const linhasHtml = html.split('<tbody>')[1].split('</tr>').filter((x) => x.includes('<td'))
+    assert.equal(linhasHtml.length, 10, 'mesmo desenho da Shopee')
+    for (const k of [0, 2, 4, 6]) {
+      const l = linhasHtml[k]
+      assert.equal((l.match(/<td/g) || []).length, 20, '4 semanas × 4 grupos + 4 variações')
+      assert.equal((l.match(/<td class="estado( geral)?"/g) || []).length, 16, 'semanas: célula de estado')
+      assert.equal((l.match(/<td class="var estado( geral)?"/g) || []).length, 4, 'variação: célula de estado')
+      assert.equal((l.match(/<span class="pill-muted">não coletado<\/span>/g) || []).length, 20, 'pílula cinza em todas')
+      assert.ok(!/>—</.test(l) && !/text-(emerald|red)/.test(l), 'nem "—" nem cor de variação')
+    }
+    for (const k of [1, 3, 5, 7, 8, 9]) assert.ok(!linhasHtml[k].includes('pill-muted'), `linha ${k} normal`)
+    assert.equal((html.match(/class="pill-muted"/g) || []).length, 80)
+
+    // O arquivo é pedido pela execução (a rota não muda); o nome sem cabeçalho está abaixo (Amazon).
+    await s.baixar('xlsx')
+    assert.ok(t.calls.some((c) => c.url === `${BASE}/execucoes/${ID_ML}/arquivo/xlsx`))
+
+    // De volta pra Shopee: o ?conf= sai da URL e volta o último pronto da Shopee.
+    s.trocarPlataforma('shopee')
+    assert.deepEqual(t.routerCalls.at(-1), { query: { aba: 'conferencia' } })
+    await esperar()
+    await esperar()
+    assert.equal(s.selecionada.value, ID_PRONTO)
+    assert.equal(s.plataformaAberta.value, 'shopee')
+    // Clicar no que já está escolhido não recarrega nada.
+    const n = t.calls.length
+    s.trocarPlataforma('shopee')
+    assert.equal(t.calls.length, n)
+  }
+
+  // ?conf=amazon abre direto na Amazon: afiliados "não se aplica", Ads "aguardando acesso".
+  {
+    const t = await montar({ detalhes: TODOS, listas: LISTAS, query: { aba: 'conferencia', conf: 'amazon' }, arquivo: () => Promise.resolve(new Blob(['x'])) })
+    const { s } = t
+    assert.equal(s.plataforma.value, 'amazon')
+    assert.deepEqual(urls(t.calls), [`GET ${LISTA_URL('amazon')}`, `GET ${BASE}/execucoes/${ID_AMZ}`])
+    const p = s.planilha.value
+    for (const l of p.linhas.slice(0, 8)) {
+      const esperado = l.sub === 'afiliados' ? 'não se aplica' : 'aguardando acesso'
+      assert.ok(l.valores.every((x) => x.every((v) => v === esperado)) && l.variacoes.every((v) => v.texto === esperado), `${l.categoria} ${l.sub}`)
+    }
+    assert.equal(p.linhas[9].estado, null, 'Vendas no período vem do Bling')
+    const html = await renderPlanilha(s)
+    assert.equal((html.match(/<span class="pill-muted">aguardando acesso<\/span>/g) || []).length, 80)
+    assert.equal((html.match(/<span class="pill-muted">não se aplica<\/span>/g) || []).length, 80)
+    // Sem Content-Disposition: o nome que o servidor daria.
+    await s.baixar('csv')
+    assert.equal(t.ancoras.at(-1).download, 'conferencia-amazon-2026-09-28_2026-10-04.csv')
+    // ?conf= estranho cai na Shopee.
+    const t2 = await montar({ detalhes: TODOS, listas: LISTAS, query: { conf: 'constructor' } })
+    assert.equal(t2.s.plataforma.value, 'shopee')
+    assert.equal(t2.calls[0].url, LISTA_URL('shopee'))
+  }
+
+  // Link do Threema de um relatório do ML sem ?conf=: a tela vai pro ML sozinha,
+  // sem ler o relatório de novo, e o seletor passa a ser o do ML.
+  {
+    const t = await montar({ detalhes: TODOS, listas: LISTAS, query: { aba: 'conferencia', execucao: ID_ML_VELHO } })
+    const { s } = t
+    assert.equal(s.selecionada.value, ID_ML_VELHO)
+    assert.equal(s.plataforma.value, 'ml', 'foi pro marketplace do relatório')
+    assert.deepEqual(t.routerCalls.at(-1), { query: { aba: 'conferencia', execucao: ID_ML_VELHO, conf: 'ml' } }, 'a URL ganha o ?conf=, o link continua')
+    await esperar()
+    assert.deepEqual(urls(t.calls), [`GET ${LISTA_URL('shopee')}`, `GET ${BASE}/execucoes/${ID_ML_VELHO}`, `GET ${LISTA_URL('ml')}`])
+    assert.deepEqual(s.opcoes.value.map((e) => e.id), [ID_ML, ID_ML_VELHO])
+    assert.equal(s.exec.value.id, ID_ML_VELHO)
+    // Com o ?conf= certo no link, nada muda de lugar.
+    const t2 = await montar({ detalhes: TODOS, listas: LISTAS, query: { aba: 'conferencia', conf: 'ml', execucao: ID_ML_VELHO } })
+    assert.equal(t2.routerCalls.length, 0)
+    assert.deepEqual(urls(t2.calls), [`GET ${LISTA_URL('ml')}`, `GET ${BASE}/execucoes/${ID_ML_VELHO}`])
+  }
+
+  // Execução sem o campo plataforma (API antiga) na aba do ML: vale a aba.
+  {
+    const semCampo = JSON.parse(JSON.stringify(DET_PLAT[ID_ML]))
+    delete semCampo.execucao.plataforma
+    delete semCampo.relatorio.plataforma
+    const t = await montar({ detalhes: { [ID_ML]: semCampo }, listas: LISTAS, query: { conf: 'ml' } })
+    assert.equal(t.s.plataforma.value, 'ml')
+    assert.equal(t.s.plataformaAberta.value, 'ml')
+    assert.equal(t.routerCalls.length, 0)
+  }
+
+  // Resposta da Shopee que chega depois da troca não escreve na tela (nem puxa de volta).
+  {
+    let soltarDetalhe
+    const det = { ...TODOS, [ID_PRONTO]: () => new Promise((r) => { soltarDetalhe = () => r(detalhe(ID_PRONTO, 'pronto')) }) }
+    const t = await montar({ detalhes: det, listas: LISTAS })
+    t.s.trocarPlataforma('ml')
+    await esperar()
+    await esperar()
+    soltarDetalhe()
+    await esperar()
+    assert.equal(t.s.exec.value.id, ID_ML)
+    assert.equal(t.s.plataforma.value, 'ml')
+
+    let soltarLista
+    const t2 = await montar({ lista: () => new Promise((r) => { soltarLista = () => r(LISTA) }), detalhes: TODOS, listas: LISTAS })
+    t2.s.trocarPlataforma('ml')
+    await esperar()
+    await esperar()
+    soltarLista()
+    await esperar()
+    await esperar()
+    assert.deepEqual(t2.s.execucoes.value.map((e) => e.id), [ID_ML, ID_ML_VELHO], 'lista velha da Shopee não entra')
+    assert.equal(t2.s.selecionada.value, ID_ML)
+    assert.equal(t2.s.emAndamento.value, null, 'a coleta da Shopee não aparece no aviso do ML')
+
+    // O relatório da Shopee chega ENQUANTO a lista do ML ainda carrega (nenhum
+    // relatório do ML pedido ainda): também não entra, nem leva a tela de volta.
+    let soltarDet3
+    let soltarListaMl
+    const t3 = await montar({
+      detalhes: { ...TODOS, [ID_PRONTO]: () => new Promise((r) => { soltarDet3 = () => r(detalhe(ID_PRONTO, 'pronto')) }) },
+      listas: { ml: () => new Promise((r) => { soltarListaMl = () => r(LISTA_ML) }) },
+    })
+    t3.s.trocarPlataforma('ml')
+    await esperar()
+    soltarDet3()
+    await esperar()
+    await esperar()
+    assert.equal(t3.s.detalhe.value, null, 'relatório da Shopee descartado')
+    assert.equal(t3.s.plataforma.value, 'ml', 'continua no ML')
+    assert.equal(t3.routerCalls.at(-1).query.conf, 'ml')
+    soltarListaMl()
+    await esperar()
+    await esperar()
+    assert.equal(t3.s.exec.value.id, ID_ML)
+  }
+
+  // A lista da Shopee chega depois da troca, com a do ML ainda carregando: a tela
+  // continua no esqueleto (não pisca "Nenhum relatório do Mercado Livre ainda").
+  {
+    let soltarShopee
+    let soltarMl
+    const t = await montar({
+      lista: () => new Promise((r) => { soltarShopee = () => r(LISTA) }),
+      listas: { ml: () => new Promise((r) => { soltarMl = () => r(LISTA_ML) }) },
+      detalhes: TODOS,
+    })
+    t.s.trocarPlataforma('ml')
+    await esperar()
+    soltarShopee()
+    await esperar()
+    await esperar()
+    assert.equal(t.s.listaCarregada.value, false, 'ainda carregando a do ML')
+    assert.equal(t.s.carregandoLista.value, true)
+    soltarMl()
+    await esperar()
+    await esperar()
+    assert.equal(t.s.listaCarregada.value, true)
+    assert.equal(t.s.selecionada.value, ID_ML)
+  }
+
+  // "Gerar agora" na Shopee e troca pro ML antes da resposta: a tela fica no ML.
+  {
+    let soltarPost
+    const t = await montar({
+      detalhes: TODOS, listas: LISTAS,
+      post: () => new Promise((r) => { soltarPost = () => r({ execucao: { id: ID_NOVO } }) }),
+    })
+    const gerando = t.s.gerar()
+    await esperar()
+    t.s.trocarPlataforma('ml')
+    await esperar()
+    await esperar()
+    soltarPost()
+    await gerando
+    await esperar()
+    assert.equal(t.s.plataforma.value, 'ml')
+    assert.equal(t.s.selecionada.value, ID_ML, 'não pulou pra execução nova da Shopee')
+    assert.ok(!t.calls.some((c) => c.url === `${BASE}/execucoes/${ID_NOVO}`))
+    assert.ok(t.calls.some((c) => c.url === `${BASE}/execucoes?plataforma=shopee` && c.opts?.method === 'POST'), 'a da Shopee foi gerada mesmo')
+  }
+
+  // Trocar no meio do acompanhamento: o timer da coleta da Shopee para.
+  {
+    const t = await montar({ lista: [LISTA[0]], detalhes: TODOS, listas: LISTAS })
+    assert.deepEqual(t.relogio.pendentes().map((x) => x.ms), [20000])
+    t.s.trocarPlataforma('amazon')
+    assert.equal(t.relogio.pendentes().length, 0, 'parou de reler a da Shopee')
+    await esperar()
+    await esperar()
+    assert.equal(t.s.exec.value.id, ID_AMZ)
+  }
+
+  // Gerar agora no ML: ?plataforma=ml (e no corpo), frases do servidor (sem AdsPower).
+  {
+    let corpo = null
+    let plat = null
+    let lista = [...LISTA_ML]
+    const t = await montar({
+      query: { aba: 'conferencia', conf: 'ml' },
+      detalhes: { ...TODOS, [ID_ML_NOVO]: detalhePlat('ml', ID_ML_NOVO, 'coletando') },
+      listas: { ml: () => lista },
+      post: (body, p) => {
+        corpo = body
+        plat = p
+        lista = [execResumo(ID_ML_NOVO, 'coletando', '2026-10-09T12:00:00Z', { plataforma: 'ml' }), ...lista]
+        return Promise.resolve({ execucao: { id: ID_ML_NOVO } })
+      },
+    })
+    await t.s.gerar()
+    await esperar()
+    assert.equal(plat, 'ml')
+    assert.deepEqual(corpo, { tipo: 'semanal', plataforma: 'ml' })
+    assert.match(t.confirms[0], /^Gerar agora a conferência do Mercado Livre da semana fechada/)
+    assert.match(t.confirms[0], /servidor lê as vendas do Bling e o Ads do Mercado Livre pela API/)
+    assert.ok(!t.confirms[0].includes('robô do Mac'), 'no ML não é o robô do Mac')
+    assert.deepEqual(t.toastLog.at(-1), ['success', 'Conferência iniciada', t.s.COLETA_TXT.ml.iniciada])
+    assert.equal(t.s.selecionada.value, ID_ML_NOVO)
+    assert.deepEqual(t.routerCalls.at(-1), { query: { aba: 'conferencia', conf: 'ml', execucao: ID_ML_NOVO } })
+    assert.equal(t.s.exec.value.status, 'coletando')
+    assert.deepEqual(t.relogio.pendentes().map((x) => x.ms), [20000], 'acompanha a cada 20 s igual')
+    for (const p of ['shopee', 'ml', 'amazon']) {
+      assert.ok(t.s.COLETA_TXT[p].confirmar && t.s.COLETA_TXT[p].iniciada && t.s.COLETA_TXT[p].andamento, `frases de ${p}`)
+    }
+    assert.ok(!/AdsPower/.test(t.s.COLETA_TXT.amazon.andamento + t.s.COLETA_TXT.ml.andamento))
+
+    // 409 de uma já coletando (na Amazon): leva até a que está coletando DESTE marketplace.
+    const ID_AMZ_COLETANDO = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const t2 = await montar({
+      query: { conf: 'amazon' },
+      detalhes: { ...TODOS, [ID_AMZ_COLETANDO]: detalhePlat('amazon', ID_AMZ_COLETANDO, 'coletando') },
+      listas: { amazon: [execResumo(ID_AMZ_COLETANDO, 'coletando', '2026-10-08T16:32:00Z', { plataforma: 'amazon' }), ...LISTA_AMZ] },
+      post: () => Promise.reject({ statusCode: 409, data: { detail: { code: 'conferencia_em_andamento' } } }),
+    })
+    assert.equal(t2.s.selecionada.value, ID_AMZ, 'abriu no último pronto da Amazon')
+    await t2.s.gerar()
+    await esperar()
+    assert.match(t2.confirms[0], /^Gerar agora a conferência da Amazon da semana fechada/)
+    assert.match(t2.confirms[0], /O Ads da Amazon fica "aguardando acesso"/)
+    assert.deepEqual(t2.toastLog.at(-1).slice(0, 2), ['warning', 'Já tem uma conferência coletando'])
+    assert.equal(t2.s.selecionada.value, ID_AMZ_COLETANDO)
+    assert.deepEqual(t2.calls.find((c) => c.opts?.method === 'POST').url, `${BASE}/execucoes?plataforma=amazon`)
+  }
+
+  // Contas do ML: por integração do DaVinci + loja do Bling, não por perfil do AdsPower.
+  {
+    const t = await montar({
+      detalhes: TODOS, listas: LISTAS, contasPlat: { ml: CONTAS_ML, amazon: CONTAS_AMZ }, integracoesPlat: { ml: INTEGRACOES_ML },
+    })
+    const { s } = t
+    s.contasAberto.value = true
+    await esperar()
+    await esperar()
+    assert.ok(urls(t.calls).includes(`GET ${BASE}/contas?plataforma=shopee`))
+    assert.equal(s.contasPorIntegracao.value, false)
+    assert.equal(s.semVinculo(s.contas.value[0]), false, 'Shopee não depende de integração')
+    assert.ok(!urls(t.calls).some((u) => u.includes('/contas/integracoes')), 'Shopee não lista integrações')
+    let html = await htmlContas(s)
+    assert.match(html, /<th>Perfil AdsPower<\/th>/)
+    assert.ok(html.includes('perfil1'), 'Shopee mostra o perfil do AdsPower')
+    assert.ok(!html.includes('Integração no DaVinci'))
+
+    // Trocou com a seção aberta: as contas do ML entram no lugar.
+    s.trocarPlataforma('ml')
+    await esperar()
+    await esperar()
+    assert.ok(urls(t.calls).includes(`GET ${BASE}/contas?plataforma=ml`))
+    assert.ok(urls(t.calls).includes(`GET ${BASE}/contas/integracoes?plataforma=ml`), 'lista as integrações do ML')
+    assert.deepEqual(s.contasOrdenadas.value.map((c) => c.nome), ['Marquezini', 'Atlas', 'Velasco'], 'Mala antes')
+    assert.equal(s.contasPorIntegracao.value, true)
+    const [marq, atlas, velasco] = s.contasOrdenadas.value
+    assert.equal(s.semVinculo(marq), false)
+    assert.equal(s.semVinculo(atlas), true, 'sem integração e sem loja')
+    assert.equal(s.semVinculo(velasco), true, 'com integração, sem loja do Bling')
+    assert.equal(s.usadaPor('int-m1', 'm2'), 'Marquezini', 'integração já usada por outra conta')
+    assert.equal(s.usadaPor('int-m1', 'm1'), null, 'a própria não conta')
+    assert.equal(s.usadaPor('int-livre', 'm2'), null)
+    assert.deepEqual(s.lojas.value, { m1: '205000001', m2: '', m3: '' }, 'rascunho da loja do Bling')
+    html = await htmlContas(s)
+    assert.match(html, /<th>Integração no DaVinci<\/th>\s*<th>Loja no Bling<\/th>/)
+    assert.ok(!html.includes('Perfil AdsPower'))
+    const linhas = html.split('<tbody>')[1].split('</tr>').filter((x) => x.includes('<td'))
+    const caixa = (l) => l.split('type="checkbox"')[1].split('>')[0]
+    // Marquezini: a integração dela escolhida no select; a loja no campo.
+    // (no SSR o valor escolhido sai no value do <select>)
+    assert.match(linhas[0], /<select value="int-m1" [^>]*aria-label="Integração no DaVinci">/)
+    assert.match(linhas[0], /<option value="int-m1">Marquezini \(integração\)<\/option>/)
+    assert.match(linhas[0], /value="205000001"/)
+    assert.ok(!/disabled/.test(caixa(linhas[0])), 'Marquezini pode sair/entrar')
+    // Atlas: nada ligado; a integração da Marquezini aparece mas não dá pra escolher.
+    assert.match(linhas[1], /<select value(="")? [^>]*aria-label="Integração no DaVinci"><option value(="")?>— sem integração —<\/option>/)
+    assert.match(linhas[1], /<option value="int-m1" disabled>Marquezini \(integração\) — já em Marquezini<\/option>/)
+    assert.match(linhas[1], /<option value="int-livre">Atlas ML<\/option>/)
+    assert.match(linhas[1], /Conta nova do ML: ainda sem integração no DaVinci\./, 'a observação aparece')
+    assert.match(caixa(linhas[1]), /disabled/, 'sem integração não dá pra ativar')
+    assert.match(linhas[1], /cursor-not-allowed/)
+    // Velasco: integração arquivada marcada; sem loja, não entra.
+    assert.match(linhas[2], /Velasco \(integração\) \(arquivada\)/)
+    assert.match(linhas[2], /<span class="pill-warning ml-1">arquivada<\/span>/)
+    assert.match(caixa(linhas[2]), /disabled/, 'sem loja do Bling não dá pra ativar')
+
+    // Salvar continua pelo id (a rota não muda).
+    await s.salvarConta(marq, { grupo: 'celular' })
+    const puts = () => t.calls.filter((c) => c.opts?.method === 'PUT')
+    assert.deepEqual(puts().at(-1).url, `${BASE}/contas/m1`)
+
+    // Ligar a integração: PUT só com ela; escolher a mesma não salva.
+    const atlasAgora = () => s.contas.value.find((c) => c.id === 'm2')
+    s.salvarIntegracao(atlasAgora(), 'int-livre')
+    await esperar()
+    assert.deepEqual([puts().at(-1).url, puts().at(-1).opts.body], [`${BASE}/contas/m2`, { integration_id: 'int-livre' }])
+    assert.equal(atlasAgora().integration_id, 'int-livre')
+    const n = puts().length
+    s.salvarIntegracao(atlasAgora(), 'int-livre')
+    assert.equal(puts().length, n, 'mesma integração: nada')
+    // Loja do Bling: só número; vazio desliga; igual não salva.
+    s.lojas.value = { ...s.lojas.value, m2: ' 20a ' }
+    s.salvarLoja(atlasAgora())
+    assert.equal(puts().length, n, 'loja com letra não vai')
+    assert.equal(s.lojas.value.m2, '', 'voltou o que estava')
+    assert.deepEqual(t.toastLog.at(-1).slice(0, 2), ['error', 'Loja do Bling inválida'])
+    s.lojas.value = { ...s.lojas.value, m2: ' 204438129 ' }
+    s.salvarLoja(atlasAgora())
+    await esperar()
+    assert.deepEqual(puts().at(-1).opts.body, { bling_loja_id: '204438129' })
+    assert.equal(s.semVinculo(atlasAgora()), false, 'agora dá pra ativar')
+    s.salvarLoja(atlasAgora())
+    assert.equal(puts().length, n + 1, 'loja igual: nada')
+    s.lojas.value = { ...s.lojas.value, m2: '' }
+    s.salvarLoja(atlasAgora())
+    await esperar()
+    assert.deepEqual(puts().at(-1).opts.body, { bling_loja_id: null }, 'vazio desliga')
+
+    // Contas da Shopee que chegam depois da troca não entram no lugar das da Amazon.
+    let soltar
+    const t2 = await montar({
+      detalhes: TODOS, listas: LISTAS,
+      contasResp: () => new Promise((r) => { soltar = () => r(JSON.parse(JSON.stringify(CONTAS))) }),
+      contasPlat: { amazon: CONTAS_AMZ },
+    })
+    t2.s.contasAberto.value = true
+    await esperar()
+    assert.equal(typeof soltar, 'function', 'pediu as da Shopee')
+    t2.s.trocarPlataforma('amazon')
+    await esperar()
+    await esperar()
+    soltar()
+    await esperar()
+    assert.deepEqual(t2.s.contas.value.map((c) => c.nome), ['Kia'])
+    assert.deepEqual(Object.keys(t2.s.nomes.value), ['a1'])
+
+    // O servidor recusou (ativar sem a loja do Bling): frase certa, rascunho volta e as linhas redesenham.
+    const t3 = await montar({
+      query: { conf: 'ml' }, detalhes: TODOS, listas: LISTAS, contasPlat: { ml: CONTAS_ML },
+      integracoesPlat: { ml: () => Promise.reject({ statusCode: 500 }) },
+      put: () => Promise.reject({ statusCode: 422, data: { detail: { code: 'conta_sem_loja_bling' } } }),
+    })
+    t3.s.contasAberto.value = true
+    await esperar()
+    await esperar()
+    assert.equal(t3.s.integracoes.value, null, 'lista de integrações falhou: fica só o nome')
+    const htmlSemLista = await htmlContas(t3.s)
+    assert.ok(!htmlSemLista.includes('<select aria-label="Integração no DaVinci"') && !/Integração no DaVinci"[^>]*>\s*<option/.test(htmlSemLista))
+    assert.match(htmlSemLista, /<span class="text-foreground">Marquezini \(integração\)<\/span>/)
+    assert.match(htmlSemLista, /<span class="pill-muted">sem integração<\/span>/)
+    const vel = t3.s.contas.value.find((c) => c.id === 'm3')
+    t3.s.lojas.value = { ...t3.s.lojas.value, m3: '999' }
+    const versao = t3.s.versaoContas.value
+    t3.s.salvarLoja(vel)
+    await esperar()
+    await esperar()
+    assert.deepEqual(t3.toastLog.at(-1), ['error', 'Não consegui salvar a conta', L.ERROS_CONFERENCIA.conta_sem_loja_bling])
+    assert.equal(t3.s.lojas.value.m3, '', 'rascunho voltou')
+    assert.equal(t3.s.versaoContas.value, versao + 1, 'linhas redesenham (select e caixinha voltam)')
+    // Trocou de marketplace: as integrações do ML não ficam no select da Amazon.
+    const t4 = await montar({
+      query: { conf: 'ml' }, detalhes: TODOS, listas: LISTAS, contasPlat: { ml: CONTAS_ML, amazon: CONTAS_AMZ },
+      integracoesPlat: { ml: INTEGRACOES_ML, amazon: () => Promise.reject({ statusCode: 500 }) },
+    })
+    t4.s.contasAberto.value = true
+    await esperar()
+    await esperar()
+    assert.equal(t4.s.integracoes.value.length, 3)
+    t4.s.trocarPlataforma('amazon')
+    await esperar()
+    await esperar()
+    assert.equal(t4.s.integracoes.value, null, 'as do ML saíram')
+    assert.deepEqual(t4.s.contas.value.map((c) => c.nome), ['Kia'])
+    for (const code of ['conta_sem_integracao', 'conta_sem_loja_bling', 'integracao_em_uso', 'loja_bling_em_uso', 'integracao_invalida', 'campo_so_ml_amazon', 'plataforma_invalida']) {
+      assert.ok(L.ERROS_CONFERENCIA[code], `frase para ${code}`)
+    }
+  }
 }
 
 run().catch((e) => {

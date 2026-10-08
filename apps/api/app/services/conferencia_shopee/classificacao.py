@@ -285,3 +285,57 @@ async def carregar_mapa_davinci(
             for item_id, eletro in por_integracao.get(integracao, {}).items():
                 mapa[item_id] = mapa.get(item_id, False) or eletro
     return saida
+
+
+# ───────────────────────────────────────────── Mercado Livre e Amazon: pelo SKU
+
+
+def _sku_chave(sku: str | None) -> str:
+    return (sku or "").strip().lower()
+
+
+async def eletro_por_sku(session: AsyncSession, skus: Iterable[str | None]) -> dict[str, bool]:
+    """SKU (minúsculo, sem espaço nas pontas) → eletro? — a regra 1 sem o
+    vínculo: no ML e na Amazon o item do pedido do Bling (e o anúncio, pelo
+    vínculo) já traz o SKU do DaVinci. SKU com produto no DaVinci →
+    `produto_eletro` (SKU, categoria do Bling ou segmento); sem produto → só o
+    SKU (sku_tags)."""
+    chaves = {_sku_chave(s) for s in skus if _sku_chave(s)}
+    if not chaves:
+        return {}
+    linhas = (
+        await session.execute(
+            select(Product.sku, Product.category, Product.segment_id).where(
+                func.lower(func.btrim(Product.sku)).in_(sorted(chaves))
+            )
+        )
+    ).all()
+    achados: dict[str, bool] = {}
+    if linhas:
+        por_id = await _categorias_bling(session)
+        segmentos = await _segmentos_eletro(session)
+        for sku, categoria, segmento in linhas:
+            k = _sku_chave(sku)
+            achados[k] = achados.get(k, False) or produto_eletro(
+                sku, categoria, segmento, por_id, segmentos
+            )
+    return {c: achados[c] if c in achados else classify_sku_tag(c) == "eletro" for c in chaves}
+
+
+async def carregar_mapa_por_sku(
+    session: AsyncSession, skus_por_chave: Mapping[str, Mapping[str, str]]
+) -> dict[str, dict[str, bool]]:
+    """{chave da coleta: {item_id: SKU}} → {chave: {item_id: eletro?}} — o
+    `mapa_davinci` do cálculo para as coletas do ML e da Amazon (só os itens
+    com SKU; os outros caem na marca do coletor ou no título)."""
+    eletro = await eletro_por_sku(
+        session, (sku for itens in skus_por_chave.values() for sku in itens.values())
+    )
+    return {
+        chave: {
+            str(item_id): eletro[_sku_chave(sku)]
+            for item_id, sku in itens.items()
+            if _sku_chave(sku) in eletro
+        }
+        for chave, itens in skus_por_chave.items()
+    }

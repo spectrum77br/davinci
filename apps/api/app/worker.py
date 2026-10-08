@@ -2760,19 +2760,76 @@ async def conferencia_shopee_varrer(ctx: dict) -> None:
     """Conferência Shopee: de 10 em 10 min e a cada restart — rodada que passou do prazo (corte
     + 30 min) marca o que sobrou como `expirada` e fecha o relatório com o que chegou; rodada sem
     loja na fila que ficou aberta também fecha. Depois o aviso no Threema do que ainda não foi
-    (`conferencia_shopee_threema`; carimbo na execução: manda uma vez)."""
-    from app.services.conferencia_shopee import fila, threema_aviso
+    (a chave de cada plataforma: `conferencia_shopee_threema`, `conferencia_ml_threema`,
+    `conferencia_amazon_threema`; carimbo na execução: manda uma vez)."""
+    from app.services.conferencia_shopee import fila, servidor, threema_aviso
 
     async with session_scope() as s:
         fechadas = await fila.varrer(s, datetime.now(UTC))
     if fechadas:
         logger.info("conferencia_shopee_varrer", fechadas=[str(e.id) for e in fechadas])
-    if not _settings.conferencia_shopee_threema:
+    # ML/Amazon (07/10/2026): rodada com loja na fila e ninguém coletando (Redis fora na
+    # criação, worker reiniciado no meio) volta para a fila do worker.
+    paradas = await servidor.enfileirar_paradas(datetime.now(UTC))
+    if paradas:
+        logger.info("conferencia_servidor_reenfileiradas", execucoes=[str(i) for i in paradas])
+    if not (
+        _settings.conferencia_shopee_threema
+        or _settings.conferencia_ml_threema
+        or _settings.conferencia_amazon_threema
+    ):
         return
     async with session_scope() as s:
         enviados = await threema_aviso.enviar_pendentes(s, datetime.now(UTC))
     if any(r.get("enviado") for r in enviados):
         logger.info("conferencia_shopee_threema_enviado", envios=enviados)
+
+
+async def _conferencia_servidor_agenda(plataforma: str, ligada: bool) -> None:
+    if not (_settings.enable_marketing and ligada):
+        return
+    from app.services.conferencia_shopee import fila, periodos, servidor
+
+    agora = datetime.now(UTC)
+    tipo = periodos.tipo_da_agenda(periodos.no_fuso(agora).date())
+    if tipo is None:
+        logger.warning(
+            "conferencia_agenda_dia_errado", plataforma=plataforma, dia=agora.isoformat()
+        )
+        return
+    async with session_scope() as s:
+        try:
+            ex = await fila.criar_execucao(s, tipo, "agenda", None, agora, plataforma=plataforma)
+        except fila.FilaError as e:
+            logger.info("conferencia_agenda_pulou", plataforma=plataforma, motivo=e.code)
+            return
+    # Depois do commit: o job lê a rodada do banco.
+    await servidor.enfileirar(ex.id, agora)
+    logger.info("conferencia_agenda", plataforma=plataforma, execucao=str(ex.id), tipo=ex.tipo)
+
+
+async def conferencia_ml_agenda(ctx: dict) -> None:
+    """Conferência do Mercado Livre (07/10/2026, docs/conferencia-shopee.md): terça e quinta
+    13:30 BRT cria a rodada (mesmas semanas da Shopee) e enfileira a coleta do SERVIDOR
+    (`conferencia_coletar_servidor`: pedidos do Bling + API de Anúncios do ML, sem AdsPower).
+    Só com `conferencia_ml_cron` (e o Marketing ligado). Já tem uma do ML coletando: pula."""
+    await _conferencia_servidor_agenda("ml", _settings.conferencia_ml_cron)
+
+
+async def conferencia_amazon_agenda(ctx: dict) -> None:
+    """Conferência da Amazon (07/10/2026): igual à do Mercado Livre, com a chave
+    `conferencia_amazon_cron`. Por enquanto só Vendas (pedidos do Bling): o Ads fica
+    "aguardando acesso"."""
+    await _conferencia_servidor_agenda("amazon", _settings.conferencia_amazon_cron)
+
+
+async def conferencia_coletar_servidor(ctx: dict, execucao_id: str) -> dict:
+    """Conferência ML/Amazon: coleta as lojas que sobraram na fila da rodada, uma a uma, e fecha
+    o relatório (services/conferencia_shopee/servidor.py). Enfileirado pela criação (agenda ou
+    "Gerar agora") e, se a rodada parou, pelo varredor. Rodar duas vezes não duplica nada."""
+    from app.services.conferencia_shopee import servidor
+
+    return await servidor.coletar_execucao(UUID(execucao_id))
 
 
 async def denuncia_robo_aviso_tick(ctx: dict) -> None:
@@ -4447,6 +4504,9 @@ class WorkerSettings:
         # roda uma vez, à mão, depois da aprovação. Uma tentativa só: é
         # retomável, e quem decide rodar de novo é pessoa.
         func(atendimento_importar_historico, timeout=6 * 3600, max_tries=1),
+        # Conferência ML/Amazon (07/10/2026): a coleta do servidor de uma rodada. Cada loja tem
+        # limite próprio (servidor.LIMITE_POR_CONTA_S); o que passar da hora o varredor retoma.
+        func(conferencia_coletar_servidor, timeout=3600),
     ]
     cron_jobs = [
         # A consulta bem-sucedida agenda a próxima em 24h; falhas tentam de novo em 1h.
@@ -4597,7 +4657,26 @@ class WorkerSettings:
             run_at_startup=False,
             timeout=120,
         ),
-        # Prazo das rodadas + fechamento de rodada esquecida + reenvio do Threema (só banco).
+        # Conferência ML e Amazon (07/10/2026): a mesma agenda, coleta no servidor; chaves
+        # CONFERENCIA_ML_CRON / CONFERENCIA_AMAZON_CRON (desligadas de fábrica).
+        cron(
+            conferencia_ml_agenda,
+            weekday={1, 3},
+            hour=16,
+            minute=30,
+            run_at_startup=False,
+            timeout=120,
+        ),
+        cron(
+            conferencia_amazon_agenda,
+            weekday={1, 3},
+            hour=16,
+            minute=30,
+            run_at_startup=False,
+            timeout=120,
+        ),
+        # Prazo das rodadas + fechamento de rodada esquecida + reenvio do Threema (só banco) +
+        # re-enfileirar rodada do ML/Amazon parada.
         cron(
             conferencia_shopee_varrer,
             minute={2, 12, 22, 32, 42, 52},
@@ -5258,6 +5337,9 @@ __all__ = [
     "bling_orders_safety_net_tick",
     "bling_orders_period_sync_tick",
     "bling_token_refresh",
+    "conferencia_amazon_agenda",
+    "conferencia_coletar_servidor",
+    "conferencia_ml_agenda",
     "conferencia_shopee_agenda",
     "conferencia_shopee_varrer",
     "daily_sync_scheduler",

@@ -19,6 +19,13 @@ conferencia_shopee/calculo) e o congela na execução.
 
 As três últimas são da MÁQUINA (fora do Histórico, historico/sql.EXCLUIDAS).
 Valores fechados em TEXT com CHECK — nada de enum do Postgres.
+
+Migration 0382 (07/10/2026): as mesmas tabelas servem também ao Mercado Livre
+e à Amazon (`plataforma` na conta e na execução; uma rodada coletando por
+plataforma). Conta do ML/Amazon não tem perfil do AdsPower: é achada pela
+integração do DaVinci (`integration_id`) e pela loja do Bling
+(`bling_loja_id`). Os nomes `conferencia_shopee_*` ficaram (renomear mexeria
+nas exclusões do Histórico).
 """
 
 from __future__ import annotations
@@ -48,7 +55,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
-# Valores fechados (espelhados nos CHECK da migration 0377).
+# Valores fechados (espelhados nos CHECK das migrations 0377 e 0382).
+CONFERENCIA_PLATAFORMAS = ("shopee", "ml", "amazon")
 CONFERENCIA_GRUPOS = ("mala", "celular")
 CONFERENCIA_TIPOS = ("semanal", "parcial")
 CONFERENCIA_ORIGENS = ("agenda", "manual")
@@ -85,14 +93,47 @@ def _uuid_pk() -> Mapped[UUID]:
 
 
 class ConferenciaShopeeConta(Base):
-    """Uma loja Shopee da conferência. A chave é o id do perfil no AdsPower
-    (`k1d…`): o número do perfil muda quando o AdsPower renumera, o id não."""
+    """Uma loja da conferência. Na Shopee a chave é o id do perfil no AdsPower
+    (`k1d…`): o número do perfil muda quando o AdsPower renumera, o id não. No
+    Mercado Livre e na Amazon é a integração do DaVinci (sem perfil)."""
 
     __tablename__ = "conferencia_shopee_conta"
-    __table_args__ = (CheckConstraint(_in("grupo", CONFERENCIA_GRUPOS), name="grupo"),)
+    __table_args__ = (
+        CheckConstraint(_in("grupo", CONFERENCIA_GRUPOS), name="grupo"),
+        CheckConstraint(_in("plataforma", CONFERENCIA_PLATAFORMAS), name="plataforma"),
+        # Um perfil, uma integração e uma loja do Bling aparecem uma vez só em
+        # cada plataforma.
+        Index(
+            "uq_conferencia_shopee_conta_plataforma_adspower_user_id",
+            "plataforma",
+            "adspower_user_id",
+            unique=True,
+            postgresql_where=text("adspower_user_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_conferencia_shopee_conta_plataforma_integration_id",
+            "plataforma",
+            "integration_id",
+            unique=True,
+            postgresql_where=text("integration_id IS NOT NULL"),
+        ),
+        # A mesma loja do Bling em duas contas contaria as vendas duas vezes.
+        Index(
+            "uq_conferencia_shopee_conta_plataforma_bling_loja_id",
+            "plataforma",
+            "bling_loja_id",
+            unique=True,
+            postgresql_where=text("bling_loja_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = _uuid_pk()
-    adspower_user_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # shopee | ml | amazon.
+    plataforma: Mapped[str] = mapped_column(
+        Text, nullable=False, default="shopee", server_default=text("'shopee'")
+    )
+    # Só da Shopee (o executor abre a loja por ele); NULL no ML e na Amazon.
+    adspower_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Nome exibido no relatório (KIA aparece como Fiore, JLAS como Atlas).
     nome: Mapped[str] = mapped_column(Text, nullable=False)
     # mala | celular. Eletro não é grupo de conta: é a parte eletro de cada
@@ -102,9 +143,25 @@ class ConferenciaShopeeConta(Base):
         Boolean, nullable=False, default=True, server_default=text("true")
     )
     ordem: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
-    # `store_info.account_name` em minúsculas: acha a loja e a integração do
-    # DaVinci (vínculos dos anúncios → o que é eletro). NULL = sem vínculo.
+    # Shopee: `store_info.account_name` em minúsculas — acha a loja e a
+    # integração do DaVinci (vínculos dos anúncios → o que é eletro). ML e
+    # Amazon: o nome da integração sem espaço nem pontuação ("jlas2"), a chave
+    # da semente da 0382. NULL = sem vínculo.
     conta_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ML e Amazon: a integração do DaVinci (Ads do ML, vínculos dos anúncios).
+    # SET NULL: integração apagada deixa a conta sem vínculo (a coleta avisa).
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "integrations.id",
+            ondelete="SET NULL",
+            name="fk_conferencia_shopee_conta_integration",
+        ),
+        nullable=True,
+    )
+    # ML e Amazon: o id da loja no Bling (`bling_orders.loja`) de onde saem as
+    # Vendas. Texto, como em `bling_orders.loja`.
+    bling_loja_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -123,10 +180,23 @@ class ConferenciaShopeeExecucao(Base):
         CheckConstraint(_in("tipo", CONFERENCIA_TIPOS), name="tipo"),
         CheckConstraint(_in("origem", CONFERENCIA_ORIGENS), name="origem"),
         CheckConstraint(_in("status", CONFERENCIA_EXECUCAO_STATUS), name="status"),
+        CheckConstraint(_in("plataforma", CONFERENCIA_PLATAFORMAS), name="plataforma"),
         Index("ix_conferencia_shopee_execucao_criado_em", text("criado_em DESC")),
+        # Uma rodada coletando por plataforma (a trava da criação já garante;
+        # isto é o cinto).
+        Index(
+            "uq_conferencia_shopee_execucao_plataforma_coletando",
+            "plataforma",
+            unique=True,
+            postgresql_where=text("status = 'coletando'"),
+        ),
     )
 
     id: Mapped[UUID] = _uuid_pk()
+    # shopee | ml | amazon.
+    plataforma: Mapped[str] = mapped_column(
+        Text, nullable=False, default="shopee", server_default=text("'shopee'")
+    )
     tipo: Mapped[str] = mapped_column(Text, nullable=False)
     origem: Mapped[str] = mapped_column(Text, nullable=False)
     # E-mail de quem apertou "Gerar agora"; NULL = agenda.
@@ -189,7 +259,8 @@ class ConferenciaShopeeColeta(Base):
         ),
         nullable=True,
     )
-    adspower_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Só da Shopee; NULL nas coletas do ML e da Amazon (servidor).
+    adspower_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     nome: Mapped[str] = mapped_column(Text, nullable=False)
     grupo: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
@@ -215,7 +286,8 @@ class ConferenciaShopeeColeta(Base):
     concluido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     agente: Mapped[str | None] = mapped_column(Text, nullable=True)
     erro: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # ColetaDados versao 1 (docs/conferencia-shopee.md §4).
+    # ColetaDados versao 1 (docs/conferencia-shopee.md §4; services/
+    # conferencia_shopee/dados.py).
     dados: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

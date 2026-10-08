@@ -17,7 +17,8 @@ const canCriativos = useCan('marketing_criativos', 'view')
 // migration de backfill de permissão neste repositório — a aba subiria
 // impossível de usar até alguém liberar usuário por usuário.
 // Conferência Shopee (06/10/2026): pelo mesmo motivo, pendura em "marketing"
-// (quem vê os dashboards de Ads vê o relatório semanal da Shopee).
+// (quem vê os dashboards de Ads vê o relatório semanal; desde 07/10/2026 o da
+// Shopee, o do Mercado Livre e o da Amazon).
 const canConferencia = useCan('marketing', 'view')
 const route = useRoute()
 const router = useRouter()
@@ -806,11 +807,15 @@ watch(platform, async () => {
     loadSummary(), loadCreditAlerts(), loadTimeseries(),
   ])
 })
-// A aba vai pra URL (?aba=), pra dar F5 e mandar link. O id da execução da
-// Conferência só vale lá dentro: sai junto quando a aba muda.
+// A aba vai pra URL (?aba=), pra dar F5 e mandar link. O id da execução e o
+// marketplace da Conferência (?conf=ml) só valem lá dentro: saem junto quando a
+// aba muda.
 watch(platform, (p) => {
   const query: Record<string, any> = { ...route.query, aba: p === 'ml' ? undefined : p }
-  if (p !== 'conferencia') delete query.execucao
+  if (p !== 'conferencia') {
+    delete query.execucao
+    delete query.conf
+  }
   void router.replace({ query })
 })
 watch(chartDays, () => {
@@ -905,14 +910,14 @@ definePageMeta({ middleware: [] })
           <TrendingUp class="size-3.5" />
           Desempenho
         </button>
-        <!-- Conferência Shopee: o relatório semanal Mala · Celular · Eletro que o
-             robô do Mac coleta terça e quinta. -->
+        <!-- Conferência: o relatório semanal Mala · Celular · Eletro de terça e
+             quinta, um por marketplace (Shopee | Mercado Livre | Amazon lá dentro). -->
         <button v-if="canConferencia"
           class="px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
           :class="platform === 'conferencia' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="platform = 'conferencia'">
           <ClipboardCheck class="size-3.5" />
-          Conferência Shopee
+          Conferência
         </button>
 </div>
     </div>

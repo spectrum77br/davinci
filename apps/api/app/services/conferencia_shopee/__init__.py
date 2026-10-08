@@ -14,4 +14,12 @@ peças de cálculo são PURAS (sem banco, sem relógio), testadas sozinhas:
                   a regra das variações (▲/▼, novo, =, —, p.p.) e da média.
   saida         — os arquivos do relatório: Excel, CSV, Markdown, JSON e HTML
                   (o Resumo no desenho da planilha do dono, 07/10/2026).
+
+Mercado Livre e Amazon (07/10/2026) usam as mesmas peças:
+  plataformas   — o perfil de cada marketplace (rótulo, estados das células
+                  sem número, seções esperadas, notas).
+  dados         — a forma do ColetaDados v1 (executor do Mac e coletores).
+  coletores/    — a interface dos coletores do servidor (ML e Amazon).
+  servidor      — o job do worker que coleta as lojas do ML/Amazon e fecha a
+                  rodada (a Shopee segue no executor do Mac).
 """

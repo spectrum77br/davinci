@@ -30,6 +30,12 @@ do `planilhaResumo()` de apps/web/lib/conferencia.ts — mudou lá, muda aqui.
     planilha × 4 semanas + Variação), vendas por conta, avisos e notas.
   • json_bytes — o relatório como está guardado.
   • html — página única (CSS embutido, tema claro) com a mesma planilha.
+
+Mercado Livre e Amazon (07/10/2026): título e nome do arquivo com a
+plataforma (rel["plataforma"]; relatório antigo = Shopee) e, nas métricas com
+estado (rel["estados"], plataformas.py), o texto do estado ("não coletado",
+"não se aplica", "aguardando acesso") no lugar do "—" — no valor E na
+variação — em cinza, para não parecer falha de coleta.
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from app.services.conferencia_shopee import plataformas
 from app.services.conferencia_shopee.calculo import (
     CASAS_PLANILHA,
     METRICA,
@@ -85,11 +92,26 @@ def _ddmmaaaa(d: str) -> str:
 
 
 def titulo(rel: Mapping) -> str:
-    """"Conferência Shopee — 28/09 a 04/10/2026"."""
+    """"Conferência Shopee — 28/09 a 04/10/2026" ("Conferência Mercado Livre
+    — …", "Conferência Amazon — …")."""
+    nome = f"Conferência {plataformas.rotulo(plataformas.de(rel))}"
     s = (rel.get("semanas") or [None])[0]
     if not s:
-        return "Conferência Shopee"
-    return f"Conferência Shopee — {_ddmm(s['inicio'])} a {_ddmmaaaa(s['fim'])}"
+        return nome
+    return f"{nome} — {_ddmm(s['inicio'])} a {_ddmmaaaa(s['fim'])}"
+
+
+def estados(rel: Mapping) -> dict[str, str]:
+    """{métrica: estado} do relatório (estado = texto não vazio)."""
+    bruto = rel.get("estados")
+    if not isinstance(bruto, Mapping):
+        return {}
+    return {str(k): str(v) for k, v in bruto.items() if isinstance(v, str) and v}
+
+
+def texto_estado(estado: str | None) -> str | None:
+    """"não coletado" / "não se aplica" / "aguardando acesso"; sem estado → None."""
+    return plataformas.rotulo_estado(estado)
 
 
 def comparado_com(rel: Mapping) -> str:
@@ -154,12 +176,13 @@ def _valor(semanas: Sequence[Mapping] | None, i: int, chave: str) -> float | Non
 
 
 def _nome_arquivo_base(rel: Mapping) -> str:
+    base = f"conferencia-{plataformas.SLUG_ARQUIVO[plataformas.de(rel)]}"
     s = (rel.get("semanas") or [None])[0]
-    return f"conferencia-shopee-{s['inicio']}_{s['fim']}" if s else "conferencia-shopee"
+    return f"{base}-{s['inicio']}_{s['fim']}" if s else base
 
 
 def nome_arquivo(rel: Mapping, ext: str) -> str:
-    """conferencia-shopee-<S1.inicio>_<S1.fim>.<ext>."""
+    """conferencia-<shopee | ml | amazon>-<S1.inicio>_<S1.fim>.<ext>."""
     return f"{_nome_arquivo_base(rel)}.{ext}"
 
 
@@ -220,11 +243,15 @@ def planilha(rel: Mapping) -> dict[str, Any]:
      "variacao": "Variação (28/09–04/10 × 21/09–27/09)",
      "linhas": [{"categoria", "sub", "chave" (métrica | None), "tipo", "span"
        (linhas que a categoria cobre; 0 = coberta pela de cima),
+       "estado" (nao_coletado | nao_se_aplica | aguardando_acesso | None),
        "valores": [[número | None] por grupo] por semana,
        "variacoes": [variação S1 × S2] por grupo}]}
 
     Grupo, semana ou métrica que o relatório não tem (relatório de antes de
-    07/10/2026 não tem cliques/pedidos/conversão) → None ("—"), nunca 0."""
+    07/10/2026 não tem cliques/pedidos/conversão) → None ("—"), nunca 0.
+    Linha com estado (ML/Amazon): valores None e a variação com o texto do
+    estado (cinza) — quem escreve põe o texto do estado nas células."""
+    estados_rel = estados(rel)
     periodos = [s for s in (rel.get("semanas") or []) if isinstance(s, Mapping)][:4]
     semanas = [{"indice": i, "rotulo": semana_planilha(s)} for i, s in enumerate(periodos)]
     semanas.reverse()
@@ -238,7 +265,14 @@ def planilha(rel: Mapping) -> dict[str, Any]:
             while k + span < len(LINHAS_PLANILHA) and LINHAS_PLANILHA[k + span][0] == categoria:
                 span += 1
         m = METRICA.get(chave) if chave else None
-        if m is None:
+        estado = estados_rel.get(chave or plataformas.IMPRESSOES_AFILIADOS)
+        if estado is not None:
+            valores = [[None] * len(GRUPOS_PLANILHA) for _ in semanas]
+            variacoes = [
+                {"texto": texto_estado(estado), "direcao": None, "cor": "cinza"}
+                for _ in GRUPOS_PLANILHA
+            ]
+        elif m is None:
             valores = [[None] * len(GRUPOS_PLANILHA) for _ in semanas]
             variacoes = [dict(_SEM_VARIACAO) for _ in GRUPOS_PLANILHA]
         else:
@@ -257,6 +291,7 @@ def planilha(rel: Mapping) -> dict[str, Any]:
                 "chave": chave,
                 "tipo": m["tipo"] if m else None,
                 "span": span,
+                "estado": estado,
                 "valores": valores,
                 "variacoes": variacoes,
             }
@@ -269,7 +304,9 @@ def planilha(rel: Mapping) -> dict[str, Any]:
     }
 
 
-def _texto_planilha(v: float | None, tipo: str | None) -> str:
+def _texto_planilha(v: float | None, tipo: str | None, estado: str | None = None) -> str:
+    if estado is not None:
+        return texto_estado(estado) or "—"
     return "—" if v is None or tipo is None else formatar_planilha(v, tipo)
 
 
@@ -304,6 +341,9 @@ _BEGE = PatternFill("solid", fgColor="DDD9C4")
 _NORMAL = Font(name=_FONTE, size=10)
 _NEGRITO = Font(name=_FONTE, size=10, bold=True)
 _AVISO = Font(name=_FONTE, size=10, color="B45309")
+# Célula com estado (não coletado, não se aplica, aguardando acesso): cinza e
+# itálico, como uma etiqueta — não é falha de coleta ("—").
+_ESTADO = Font(name=_FONTE, size=9, italic=True, color="808080")
 _fino = Side(style="thin", color="BFBFBF")
 _BORDA = Border(left=_fino, right=_fino, top=_fino, bottom=_fino)
 _COR_XLSX = {"verde": "008000", "vermelho": "C00000", "cinza": "808080"}
@@ -351,23 +391,39 @@ def _texto_xlsx(ws, linha: int, col: int, valor: Any):
     return c
 
 
-def _celula_valor(ws, linha: int, col: int, valor: float | None, tipo: str | None, bege: bool):
-    """Número com o formato da métrica (% como fração); vazio → "—"."""
-    if valor is None or tipo is None:
+def _celula_valor(
+    ws,
+    linha: int,
+    col: int,
+    valor: float | None,
+    tipo: str | None,
+    bege: bool,
+    estado: str | None = None,
+):
+    """Número com o formato da métrica (% como fração); vazio → "—"; com
+    estado → o texto do estado, em cinza."""
+    fonte = _NORMAL
+    if estado is not None:
+        c = _texto_xlsx(ws, linha, col, texto_estado(estado) or "—")
+        c.alignment = _CENTRO
+        fonte = _ESTADO
+    elif valor is None or tipo is None:
         c = _texto_xlsx(ws, linha, col, "—")
         c.alignment = _CENTRO
     else:
         c = ws.cell(linha, col, valor / 100 if tipo == "percentual" else valor)
         c.number_format = _FORMATO[tipo]
-    c.font, c.border = _NORMAL, _BORDA
+    c.font, c.border = fonte, _BORDA
     if bege:
         c.fill = _BEGE
     return c
 
 
-def _celula_variacao(ws, linha: int, col: int, var: Mapping, bege: bool):
+def _celula_variacao(ws, linha: int, col: int, var: Mapping, bege: bool, estado: bool = False):
     c = _texto_xlsx(ws, linha, col, var["texto"])
-    c.font = Font(name=_FONTE, size=10, color=_COR_XLSX.get(var.get("cor") or "", "808080"))
+    c.font = _ESTADO if estado else Font(
+        name=_FONTE, size=10, color=_COR_XLSX.get(var.get("cor") or "", "808080")
+    )
     c.alignment, c.border = _CENTRO, _BORDA
     if bege:
         c.fill = _BEGE
@@ -401,13 +457,14 @@ def _tabela_planilha(ws, p: Mapping) -> int:
         cat.alignment = Alignment(horizontal="left", vertical="center")
         sub = ws.cell(r, 2, lin["sub"])
         sub.font, sub.fill, sub.border = _NORMAL, _BEGE, _BORDA
+        estado = lin.get("estado")
         for b, valores in enumerate(lin["valores"]):
             for j, v in enumerate(valores):
                 _celula_valor(ws, r, _COLS_ROTULO + 1 + b * n + j, v, lin["tipo"],
-                              bege=j == n - 1)
+                              bege=j == n - 1, estado=estado)
         col_var = _COLS_ROTULO + 1 + len(lin["valores"]) * n
         for j, var in enumerate(lin["variacoes"]):
-            _celula_variacao(ws, r, col_var + j, var, bege=j == n - 1)
+            _celula_variacao(ws, r, col_var + j, var, bege=j == n - 1, estado=estado is not None)
     return primeira + len(p["linhas"]) - 1
 
 
@@ -519,7 +576,14 @@ def _num_csv(v: Any, tipo: str) -> str:
 def csv(rel: Mapping) -> bytes:
     """`;`, vírgula decimal, UTF-8 com BOM: uma linha por grupo × conta ×
     semana, todas as métricas (relatório antigo sai com as colunas novas
-    vazias)."""
+    vazias; métrica com estado sai com o texto dele, ex. "não se aplica")."""
+    est = estados(rel)
+
+    def celula(valores: Mapping, m: Mapping) -> str:
+        if m["chave"] in est:
+            return texto_estado(est[m["chave"]]) or ""
+        return _num_csv(valores.get(m["chave"]), m["tipo"])
+
     buf = io.StringIO()
     w = _csv.writer(buf, delimiter=";", lineterminator="\r\n")
     w.writerow(
@@ -540,7 +604,7 @@ def csv(rel: Mapping) -> bytes:
                         sem.get("rotulo") or "",
                         _ddmmaaaa(sem["inicio"]),
                         _ddmmaaaa(sem["fim"]),
-                        *[_num_csv(valores.get(m["chave"]), m["tipo"]) for m in METRICAS],
+                        *[celula(valores, m) for m in METRICAS],
                     ]
                 )
     return buf.getvalue().encode("utf-8-sig")
@@ -590,7 +654,8 @@ def markdown(rel: Mapping) -> str:
     for j, g in enumerate(p["grupos"]):
         out += ["", f"### {g['rotulo']} {_qtd_grupo(g['chave'], totais[j])}", "", cab, sep]
         for lin in p["linhas"]:
-            valores = [_texto_planilha(v[j], lin["tipo"]) for v in lin["valores"]]
+            valores = [_texto_planilha(v[j], lin["tipo"], lin.get("estado"))
+                       for v in lin["valores"]]
             out.append(
                 f"| {lin['categoria'] if lin['span'] else ''} | {lin['sub']} | "
                 + " | ".join(valores) + f" | {lin['variacoes'][j]['texto']} |"
@@ -698,6 +763,11 @@ table.planilha { border-collapse: separate; border-spacing: 0; font-size: 13px; 
 @media (max-width: 640px) { .planilha th.bloco { text-align: left; }
   .planilha th .semana { right: auto; max-width: 90px; white-space: normal; } }
 .verde { color: #1a7f37; } .vermelho { color: #c62828; } .cinza { color: #6b7280; }
+/* Estado (não coletado, não se aplica, aguardando acesso): etiqueta apagada —
+   não é falha de coleta ("—"). */
+.planilha td.estado { text-align: center; }
+.estado-pill { display: inline-block; padding: 1px 8px; border-radius: 999px;
+  background: #f3f4f6; color: #6b7280; font-size: 11px; font-style: italic; }
 .avisos { margin: 16px 0 0; padding: 8px 12px; border: 1px solid #f59e0b55; background: #fffbeb;
   color: #b45309; border-radius: 6px; font-size: 13px; } .avisos p { margin: 2px 0; }
 """
@@ -705,6 +775,10 @@ table.planilha { border-collapse: separate; border-spacing: 0; font-size: 13px; 
 
 def _var_html(var: Mapping) -> str:
     return f'<span class="{escape(var.get("cor") or "cinza")}">{escape(var["texto"])}</span>'
+
+
+def _estado_html(estado: str) -> str:
+    return f'<span class="estado-pill">{escape(texto_estado(estado) or "—")}</span>'
 
 
 def _tabela_html(p: Mapping) -> str:
@@ -721,6 +795,7 @@ def _tabela_html(p: Mapping) -> str:
     cab2 = '<tr><th class="rotulo c12" colspan="2">Métrica</th>' + grupos * len(blocos) + "</tr>"
     corpo = []
     for lin in p["linhas"]:
+        estado = lin.get("estado")
         partes = ["<tr>"]
         if lin["span"]:
             rs = f' rowspan="{lin["span"]}"' if lin["span"] > 1 else ""
@@ -728,11 +803,19 @@ def _tabela_html(p: Mapping) -> str:
         partes.append(f'<td class="rotulo subr c2">{escape(lin["sub"])}</td>')
         for valores in lin["valores"]:
             for j, v in enumerate(valores):
+                if estado is not None:
+                    cl = "estado geral" if j == n - 1 else "estado"
+                    partes.append(f'<td class="{cl}">{_estado_html(estado)}</td>')
+                    continue
                 classes = [c for c in ("geral" if j == n - 1 else "",
                                        "vazio" if v is None or lin["tipo"] is None else "") if c]
                 cl = f' class="{" ".join(classes)}"' if classes else ""
                 partes.append(f"<td{cl}>{escape(_texto_planilha(v, lin['tipo']))}</td>")
         for j, var in enumerate(lin["variacoes"]):
+            if estado is not None:
+                cl = "estado geral" if j == n - 1 else "estado"
+                partes.append(f'<td class="{cl}">{_estado_html(estado)}</td>')
+                continue
             cl = "var geral" if j == n - 1 else "var"
             partes.append(f'<td class="{cl}">{_var_html(var)}</td>')
         partes.append("</tr>")

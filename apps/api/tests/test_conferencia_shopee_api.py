@@ -434,8 +434,10 @@ async def test_lista_mais_nova_primeiro_com_placar(client, db, admin):
     assert lista[1]["resumo"] == {"contas": 3, "ok": 0, "sem_dados": 3}  # expiradas
     assert lista[0]["tipo"] == "parcial" and lista[1]["status"] == "cancelado"
     assert set(lista[0]) == {
-        "id", "tipo", "origem", "status", "criado_em", "finalizado_em", "semanas", "resumo"
+        "id", "plataforma", "tipo", "origem", "status", "criado_em", "finalizado_em", "semanas",
+        "resumo",
     }
+    assert lista[0]["plataforma"] == "shopee"
     assert len((await client.get(f"{API}/execucoes?limite=1")).json()) == 1
 
 
@@ -570,8 +572,10 @@ async def test_contas_listar_e_editar(client, db, admin):
     lista = (await client.get(f"{API}/contas")).json()
     assert [c["nome"] for c in lista] == ["Caio", "Velha", "Ana", "Bia"]
     assert lista[0] == {
-        "id": str(contas["Caio"].id), "adspower_user_id": "k-caio", "nome": "Caio",
-        "grupo": "celular", "ativo": True, "ordem": 0, "conta_key": "caio", "observacao": None,
+        "id": str(contas["Caio"].id), "plataforma": "shopee", "adspower_user_id": "k-caio",
+        "integration_id": None, "integracao_nome": None, "integracao_arquivada": None,
+        "bling_loja_id": None, "nome": "Caio", "grupo": "celular", "ativo": True, "ordem": 0,
+        "conta_key": "caio", "observacao": None,
     }
     url = f"{API}/contas/{contas['Bia'].id}"
     r = await client.put(url, json={"nome": "  Bia Nova ", "grupo": "mala", "ativo": False,

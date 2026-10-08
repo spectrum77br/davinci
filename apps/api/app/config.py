@@ -295,6 +295,19 @@ class Settings(BaseSettings):
     # "Entrar" (decisão do usuário, 06/10/2026). Código ou captcha nunca: a
     # loja fica "deslogada". CONFERENCIA_SHOPEE_LOGIN_AUTO=false desliga.
     conferencia_shopee_login_auto: bool = True
+    # Conferência do Mercado Livre e da Amazon (07/10/2026): o mesmo relatório,
+    # coletado pelo SERVIDOR (pedidos do Bling + API de Anúncios do ML; sem
+    # AdsPower). A agenda (terça/quinta 13:30 BRT, como a Shopee) só cria a
+    # rodada com true; "Gerar agora" funciona com elas desligadas. O worker lê
+    # na SUBIDA. CONFERENCIA_ML_CRON=true / CONFERENCIA_AMAZON_CRON=true.
+    conferencia_ml_cron: bool = False
+    conferencia_amazon_cron: bool = False
+    # O aviso no Threema de cada um (mesmo cadastro "Quem recebe" da Shopee),
+    # com chave PRÓPRIA: ligar CONFERENCIA_SHOPEE_THREEMA depois do piloto da
+    # Shopee não manda o do ML/Amazon antes de ele ser aprovado.
+    # CONFERENCIA_ML_THREEMA=true / CONFERENCIA_AMAZON_THREEMA=true.
+    conferencia_ml_threema: bool = False
+    conferencia_amazon_threema: bool = False
 
     # ─── Robô de postagem dos criativos (Marketing × Redes Sociais) ───────
     # `marketing_postagem_commit` é a TRAVA, no espírito do SELECTORS_

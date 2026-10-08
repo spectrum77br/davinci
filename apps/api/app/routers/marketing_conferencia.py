@@ -1,4 +1,4 @@
-"""Marketing › Conferência Shopee — relatório semanal por loja (06/10/2026).
+"""Marketing › Conferência — relatório semanal por loja (Shopee 06/10/2026; ML e Amazon 07/10).
 
 Doc para a equipe: docs/conferencia-shopee.md. A regra mora em
 services/conferencia_shopee (fila, cálculo, arquivos, aviso no Threema); aqui
@@ -11,14 +11,22 @@ horários da Shopee; vazio = fechado):
                                             do ColetaDados v1 conferida → 422)
 
 Tela (Marketing ver/editar):
-  GET  /execucoes                           as últimas rodadas
-  POST /execucoes                           "Gerar agora" (editar)
+  GET  /execucoes?plataforma=               as últimas rodadas da plataforma
+  POST /execucoes?plataforma=               "Gerar agora" (editar)
   GET  /execucoes/{id}                      rodada + coletas + relatório
   POST /execucoes/{id}/recalcular           refaz o relatório (editar)
   POST /execucoes/{id}/cancelar             para a rodada (editar)
   GET  /execucoes/{id}/arquivo/{fmt}        xlsx | csv | md | json | html
   GET  /execucoes/{id}/excel/link?t=…       o Excel do Threema, SEM login
-  GET  /contas · PUT /contas/{id}           a lista de lojas (PUT: editar)
+  GET  /contas?plataforma= · PUT /contas/{id}
+                                            a lista de lojas (PUT: editar)
+  GET  /contas/integracoes?plataforma=      integrações do DaVinci para ligar
+                                            uma conta do ML/Amazon
+
+`plataforma` = shopee (padrão) | ml | amazon. ML e Amazon são coletados pelo
+SERVIDOR (services/conferencia_shopee/servidor.py): "Gerar agora" cria a
+rodada e enfileira o job no worker. O executor do Mac (/agent/*) só recebe
+coleta da Shopee.
 
 As rotas /agent/* vêm antes de qualquer rota com {id}. Montado no main.py só
 com `enable_marketing`, como o resto do Marketing.
@@ -34,20 +42,34 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db import get_session
+from app.db import get_session, is_unique_violation
 from app.deps.auth import require_permission
 from app.models import (
     ConferenciaShopeeColeta,
     ConferenciaShopeeConta,
     ConferenciaShopeeExecucao,
+    Integration,
     User,
 )
-from app.services.conferencia_shopee import calculo, classificacao, fila, saida, threema_aviso
+from app.services.conferencia_shopee import (
+    calculo,
+    classificacao,
+    fila,
+    plataformas,
+    saida,
+    servidor,
+    threema_aviso,
+)
+from app.services.conferencia_shopee.dados import ColetaDadosV1, ConfereDados
+
+# Reexportado: o modelo do ColetaDados morava aqui até 07/10/2026.
+__all__ = ["ColetaDadosV1", "router"]
 
 logger = structlog.get_logger()
 
@@ -68,8 +90,11 @@ _STATUS_HTTP = {
     "coleta_nao_encontrada": 404,
     "tipo_invalido": 422,
     "origem_invalida": 422,
+    "plataforma_invalida": 422,
     "status_invalido": 422,
 }
+
+Plataforma = Literal["shopee", "ml", "amazon"]
 
 _ARQUIVOS: dict[str, tuple[str, str]] = {
     # fmt → (extensão, media type)
@@ -114,95 +139,9 @@ class LeaseIn(BaseModel):
     agente: str = "executor"
 
 
-# ColetaDados versao 1 (contrato §4; apps/executor/src/conferencia_util.ts).
-# Só CONFERE a forma — o que se guarda é o dict cru que chegou. Campo a mais
-# passa; lista de coisa que não é objeto, número que não é número ou versão
-# desconhecida → 422: um item torto guardado derrubaria o cálculo da rodada.
-_Numero = float | None
-
-
-class _Forma(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-
-class _AfiliadosTotais(_Forma):
-    vendas: _Numero = None
-    comissao: _Numero = None
-    pedidos: _Numero = None
-    # 07/10/2026 (seller_daily → data.clicks). Opcional: o executor antigo não
-    # manda e a métrica fica "—" no relatório.
-    cliques: _Numero = None
-
-
-class _AfiliadoItem(_Forma):
-    item_id: str | int | None = None
-    nome: str | None = None
-    categoria_id: int | str | None = None
-    vendas: _Numero = None
-    comissao: _Numero = None
-    pedidos: _Numero = None
-    # 07/10/2026 (seller_item_detail → clicks). Opcional, como o de cima.
-    cliques: _Numero = None
-
-
-class _AdsTotais(_Forma):
-    impressoes: _Numero = None
-    cliques: _Numero = None
-    gasto: _Numero = None
-    vendas: _Numero = None
-    pedidos: _Numero = None
-
-
-class _AdsItem(_AdsTotais):
-    item_id: str | int | None = None
-    nome: str | None = None
-    tipo: str | None = None
-
-
-class _VendasTotais(_Forma):
-    valor: _Numero = None
-    pedidos: _Numero = None
-
-
-class _VendaItem(_VendasTotais):
-    item_id: str | int | None = None
-    nome: str | None = None
-
-
-class _SemanaDados(_Forma):
-    inicio: str
-    fim: str
-    afiliados: _AfiliadosTotais | None = None
-    afiliados_itens: list[_AfiliadoItem] | None = None
-    ads: _AdsTotais | None = None
-    ads_itens: list[_AdsItem] | None = None
-    vendas: _VendasTotais | None = None
-    vendas_itens: list[_VendaItem] | None = None
-    avisos: list[str] | None = None
-
-
-class _LoginLoja(_Forma):
-    username: str | None = None
-    shopid: int | str | None = None
-    shop_name: str | None = None
-
-
-class ColetaDadosV1(_Forma):
-    versao: Literal[1]
-    coletado_em: str | None = None
-    duracao_s: _Numero = None
-    chamadas: _Numero = None
-    login: _LoginLoja | None = None
-    login_auto_usado: bool | None = None
-    saldo_ads: _Numero = None
-    afiliados_ultimo_dia: str | None = None
-    semanas: list[_SemanaDados]
-    avisos: list[str] | None = None
-
-
-class _ConfereDados(BaseModel):
-    # Embrulho só para o erro apontar ("dados", "semanas", 0, …).
-    dados: ColetaDadosV1
+# ColetaDados versao 1 (contrato §4; apps/executor/src/conferencia_util.ts): a
+# forma conferida mora em services/conferencia_shopee/dados.py (o job do
+# servidor usa a mesma régua).
 
 
 class ResultadoIn(BaseModel):
@@ -222,26 +161,9 @@ class ResultadoIn(BaseModel):
 
 
 async def _fechar_e_avisar(session: AsyncSession, execucao_id: UUID, agora: datetime) -> bool:
-    """Fecha a execução se não sobrou loja na fila e manda o aviso. Depois do
-    commit do resultado: se o cálculo falhar, o resultado da loja já está
-    salvo e o varredor do worker tenta fechar de novo. O Threema nunca
-    derruba a resposta."""
-    try:
-        execucao = await fila.fechar_se_terminou(session, execucao_id, agora)
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        logger.exception("conferencia_shopee_fechar_falhou", execucao=str(execucao_id))
-        return False
-    if execucao is None:
-        return False
-    try:
-        await threema_aviso.enviar_pendente(session, execucao, agora)
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        logger.exception("conferencia_shopee_threema_falhou", execucao=str(execucao_id))
-    return True
+    """Fecha a execução se não sobrou loja na fila e manda o aviso (o mesmo do
+    job do servidor: servidor.fechar_e_avisar)."""
+    return await servidor.fechar_e_avisar(session, execucao_id, agora)
 
 
 @router.post("/agent/lease")
@@ -293,7 +215,7 @@ async def agent_resultado(
     try:
         body = ResultadoIn.model_validate(json.loads(bruto or b"null"))
         if body.dados is not None:
-            _ConfereDados.model_validate({"dados": body.dados})
+            ConfereDados.model_validate({"dados": body.dados})
     except (ValueError, RecursionError, ValidationError) as e:
         erros = (
             e.errors(include_url=False, include_input=False, include_context=False)
@@ -330,6 +252,7 @@ async def agent_resultado(
 def _execucao_out(ex: ConferenciaShopeeExecucao) -> dict[str, Any]:
     return {
         "id": ex.id,
+        "plataforma": ex.plataforma,
         "tipo": ex.tipo,
         "origem": ex.origem,
         "status": ex.status,
@@ -361,10 +284,19 @@ def _coleta_out(c: ConferenciaShopeeColeta) -> dict[str, Any]:
     }
 
 
-def _conta_out(c: ConferenciaShopeeConta) -> dict[str, Any]:
+def _conta_out(c: ConferenciaShopeeConta, integracao: Integration | None = None) -> dict[str, Any]:
+    """`integracao_nome`: o que a tela mostra no ML/Amazon no lugar do perfil
+    do AdsPower (a Shopee continua com `adspower_user_id`)."""
     return {
         "id": c.id,
+        "plataforma": c.plataforma,
         "adspower_user_id": c.adspower_user_id,
+        "integration_id": c.integration_id,
+        "integracao_nome": integracao.name if integracao is not None else None,
+        "integracao_arquivada": (
+            integracao.archived_at is not None if integracao is not None else None
+        ),
+        "bling_loja_id": c.bling_loja_id,
         "nome": c.nome,
         "grupo": c.grupo,
         "ativo": c.ativo,
@@ -403,12 +335,14 @@ async def listar_execucoes(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(_ver)],
     limite: Annotated[int, Query(ge=1, le=200)] = 30,
+    plataforma: Plataforma = "shopee",
 ) -> list[dict]:
-    """As últimas rodadas, mais nova primeiro, com o placar das lojas
-    (`ok` = com números, ok ou parcial; `sem_dados` = encerradas sem)."""
+    """As últimas rodadas da plataforma, mais nova primeiro, com o placar das
+    lojas (`ok` = com números, ok ou parcial; `sem_dados` = encerradas sem)."""
     execucoes = (
         await session.execute(
             select(ConferenciaShopeeExecucao)
+            .where(ConferenciaShopeeExecucao.plataforma == plataforma)
             .order_by(ConferenciaShopeeExecucao.criado_em.desc())
             .limit(limite)
         )
@@ -438,6 +372,7 @@ async def listar_execucoes(
     return [
         {
             "id": e.id,
+            "plataforma": e.plataforma,
             "tipo": e.tipo,
             "origem": e.origem,
             "status": e.status,
@@ -452,6 +387,8 @@ async def listar_execucoes(
 
 class ExecucaoIn(BaseModel):
     tipo: Literal["semanal", "parcial"]
+    # Também pode vir na query (?plataforma=); o corpo vence.
+    plataforma: Plataforma | None = None
 
 
 @router.post("/execucoes")
@@ -459,13 +396,22 @@ async def criar_execucao(
     body: ExecucaoIn,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_editar)],
+    plataforma: Plataforma = "shopee",
 ) -> dict:
-    """"Gerar agora": parcial numa segunda vira semanal (não há dia ainda)."""
+    """"Gerar agora": parcial numa segunda vira semanal (não há dia ainda). No
+    ML e na Amazon a coleta é do servidor: a rodada nasce e o job entra na
+    fila do worker na hora (Redis fora → o varredor enfileira em até 10 min)."""
+    plataforma = body.plataforma or plataforma
+    agora = _agora()
     try:
-        ex = await fila.criar_execucao(session, body.tipo, "manual", user.email, _agora())
+        ex = await fila.criar_execucao(
+            session, body.tipo, "manual", user.email, agora, plataforma=plataforma
+        )
     except fila.FilaError as e:
         raise _http(e) from e
     await session.commit()
+    if plataformas.do_servidor(plataforma):
+        await servidor.enfileirar(ex.id, agora)
     return await _detalhe(session, ex)
 
 
@@ -592,10 +538,40 @@ def mascarar_link_no_access_log() -> None:
 async def listar_contas(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(_ver)],
+    plataforma: Plataforma = "shopee",
 ) -> list[dict]:
-    contas = (await session.execute(select(ConferenciaShopeeConta))).scalars().all()
-    contas = sorted(contas, key=lambda c: (c.ordem, classificacao.sem_acento(c.nome)))
-    return [_conta_out(c) for c in contas]
+    linhas = (
+        await session.execute(
+            select(ConferenciaShopeeConta, Integration)
+            .outerjoin(Integration, Integration.id == ConferenciaShopeeConta.integration_id)
+            .where(ConferenciaShopeeConta.plataforma == plataforma)
+        )
+    ).all()
+    linhas = sorted(linhas, key=lambda r: (r[0].ordem, classificacao.sem_acento(r[0].nome)))
+    return [_conta_out(c, i) for c, i in linhas]
+
+
+@router.get("/contas/integracoes")
+async def listar_integracoes(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    plataforma: Literal["ml", "amazon"] = "ml",
+) -> list[dict]:
+    """As integrações do DaVinci da plataforma, para ligar uma conta do
+    ML/Amazon (`integration_id` no PUT). Arquivadas vêm marcadas, no fim."""
+    integracoes = (
+        await session.execute(
+            select(Integration).where(Integration.platform == plataforma)
+        )
+    ).scalars().all()
+    integracoes = sorted(
+        integracoes,
+        key=lambda i: (i.archived_at is not None, classificacao.sem_acento(i.name)),
+    )
+    return [
+        {"id": i.id, "nome": i.name, "arquivada": i.archived_at is not None}
+        for i in integracoes
+    ]
 
 
 class ContaIn(BaseModel):
@@ -604,6 +580,21 @@ class ContaIn(BaseModel):
     ativo: bool | None = None
     ordem: int | None = Field(default=None, ge=0, le=9999)
     observacao: str | None = Field(default=None, max_length=500)
+    # Só ML/Amazon: a integração do DaVinci e a loja do Bling (null desliga).
+    integration_id: UUID | None = None
+    bling_loja_id: str | None = Field(default=None, max_length=20)
+
+    @field_validator("bling_loja_id")
+    @classmethod
+    def _loja(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not (v.isascii() and v.isdigit()):
+            raise ValueError("o id da loja do Bling é só número")
+        return v
 
     @field_validator("nome")
     @classmethod
@@ -623,18 +614,70 @@ async def editar_conta(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(_editar)],
 ) -> dict:
-    """Muda nome/grupo/ativo/ordem/observação. Vale da PRÓXIMA rodada em
-    diante: a rodada guarda a foto do nome e do grupo de cada loja."""
+    """Muda nome/grupo/ativo/ordem/observação (e, no ML/Amazon, a integração e
+    a loja do Bling). Vale da PRÓXIMA rodada em diante: a rodada guarda a foto
+    do nome e do grupo de cada loja.
+
+    ML/Amazon: a integração tem de ser da mesma plataforma
+    (`integracao_invalida`) e não estar em outra conta (`integracao_em_uso`);
+    a loja do Bling também não pode estar em outra conta da plataforma
+    (`loja_bling_em_uso` — contaria as mesmas vendas duas vezes); conta ativa
+    precisa das duas ligações (`conta_sem_integracao`, `conta_sem_loja_bling`)
+    — sem elas a coleta do servidor não tem de onde ler."""
     conta = await session.get(ConferenciaShopeeConta, conta_id)
     if conta is None:
         raise HTTPException(404, detail={"code": "conta_nao_encontrada"})
     campos = body.model_fields_set
+    servidor_ = plataformas.do_servidor(conta.plataforma)
+    if not servidor_ and campos & {"integration_id", "bling_loja_id"}:
+        raise HTTPException(422, detail={"code": "campo_so_ml_amazon"})
+    integracao: Integration | None = None
+    if "integration_id" in campos and body.integration_id is not None:
+        integracao = await session.get(Integration, body.integration_id)
+        if integracao is None or str(integracao.platform) != conta.plataforma:
+            raise HTTPException(422, detail={"code": "integracao_invalida"})
+    if "bling_loja_id" in campos and body.bling_loja_id:
+        # Antes de mexer na conta (o autoflush do SELECT gravaria a loja nova).
+        outra = (
+            await session.execute(
+                select(ConferenciaShopeeConta.nome)
+                .where(
+                    ConferenciaShopeeConta.plataforma == conta.plataforma,
+                    ConferenciaShopeeConta.bling_loja_id == body.bling_loja_id,
+                    ConferenciaShopeeConta.id != conta.id,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if outra is not None:
+            raise HTTPException(409, detail={"code": "loja_bling_em_uso", "conta": outra})
     for campo in ("nome", "grupo", "ativo", "ordem"):
         valor = getattr(body, campo)
         if campo in campos and valor is not None:
             setattr(conta, campo, valor)
     if "observacao" in campos:
         conta.observacao = (body.observacao or "").strip() or None
-    await session.commit()
+    if "integration_id" in campos:
+        conta.integration_id = body.integration_id
+    if "bling_loja_id" in campos:
+        conta.bling_loja_id = body.bling_loja_id
+    if servidor_ and conta.ativo and conta.integration_id is None:
+        await session.rollback()
+        raise HTTPException(422, detail={"code": "conta_sem_integracao"})
+    if servidor_ and conta.ativo and not conta.bling_loja_id:
+        await session.rollback()
+        raise HTTPException(422, detail={"code": "conta_sem_loja_bling"})
+    try:
+        await session.commit()
+    except IntegrityError as e:
+        await session.rollback()
+        if is_unique_violation(e):
+            # Dois salvando ao mesmo tempo: o único parcial diz qual ligação bateu.
+            loja = "bling_loja_id" in str(e.orig)
+            codigo = "loja_bling_em_uso" if loja else "integracao_em_uso"
+            raise HTTPException(409, detail={"code": codigo}) from e
+        raise
     await session.refresh(conta)
-    return _conta_out(conta)
+    if integracao is None and conta.integration_id is not None:
+        integracao = await session.get(Integration, conta.integration_id)
+    return _conta_out(conta, integracao)

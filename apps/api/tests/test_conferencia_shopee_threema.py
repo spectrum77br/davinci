@@ -3,9 +3,11 @@
 Threema (services/conferencia_shopee/threema_aviso): o texto do contrato §7
 ("📊 … (semana fechada)", uma linha por grupo + Geral, sem dados, afiliados
 incompletos, os dois links) em até 3500 bytes; o token do link (7 dias, só
-daquela execução); manda UMA vez (carimbo), só com a chave ligada e alguém
-cadastrado, e falha de envio não carimba; a última loja pelo HTTP avisa, e o
-Threema que explode não derruba o resultado.
+daquela execução); manda UMA vez (carimbo), só com a chave DA PLATAFORMA
+ligada (Shopee, ML e Amazon têm cada uma a sua) e alguém cadastrado, e falha
+de envio não carimba; a última loja pelo HTTP avisa, e o Threema que explode
+não derruba o resultado. No ML (afiliados não coletados) a linha diz que o
+investimento é só do Ads.
 
 Worker: `conferencia_shopee_agenda` só cria com CONFERENCIA_SHOPEE_CRON (e o
 Marketing ligado), pula com outra coletando; `conferencia_shopee_varrer`
@@ -24,7 +26,7 @@ from app.config import get_settings
 from app.models import ConferenciaShopeeExecucao, ThreemaInformarConfig
 from app.routers import marketing_conferencia as mc
 from app.services import threema
-from app.services.conferencia_shopee import fila, periodos
+from app.services.conferencia_shopee import fila, periodos, plataformas
 from app.services.conferencia_shopee import threema_aviso as ta
 from tests.test_conferencia_shopee_calculo import relatorio_exemplo
 from tests.test_conferencia_shopee_fila import AGORA, coletas_de, dados_loja, semear_contas
@@ -58,6 +60,8 @@ def _config(monkeypatch):
     liga("app_url", "https://davinci.teste")
     liga("marketing_agent_token", TOKEN)
     liga("conferencia_shopee_threema", True)
+    liga("conferencia_ml_threema", False)
+    liga("conferencia_amazon_threema", False)
     liga("conferencia_shopee_cron", False)
     monkeypatch.setattr(mc, "_agora", lambda: AGORA)
     return liga
@@ -91,12 +95,14 @@ async def _cadastro(db, ids: str = "M5TT27JA,9BH6R7HJ") -> None:
     await db.commit()
 
 
-async def _pronta(db, *, finalizado: datetime = AGORA, enviado: datetime | None = None):
+async def _pronta(db, *, finalizado: datetime = AGORA, enviado: datetime | None = None,
+                 plataforma: str = "shopee"):
     ex = ConferenciaShopeeExecucao(
+        plataforma=plataforma,
         tipo="semanal", origem="agenda", semanas=SEMANAS, afiliados_ate=date(2026, 10, 4),
         esperar_afiliados_ate=AGORA, corte=AGORA, prazo=AGORA, status="pronto",
-        relatorio=relatorio_exemplo(), finalizado_em=finalizado, threema_enviado_em=enviado,
-        criado_em=AGORA,
+        relatorio={**relatorio_exemplo(), "plataforma": plataforma},
+        finalizado_em=finalizado, threema_enviado_em=enviado, criado_em=AGORA,
     )
     db.add(ex)
     await db.commit()
@@ -154,6 +160,28 @@ async def test_texto_do_contrato():
         "⚠️ Afiliados incompletos: Mega (até 03/10)\n"
         "📎 Excel: https://app/x\n"
         "🔗 No DaVinci: https://app/marketing?aba=conferencia&execucao=1"
+    )
+
+
+async def test_texto_do_ml_diz_que_o_investimento_e_so_do_ads():
+    """ML: afiliados "não coletado" — o investimento e o % da linha são só do
+    Ads; sem dizer, pareceriam o total (afiliados + Ads) da linha da Shopee."""
+    s1 = {"vendas": 1030.0, "invest_afiliados": None, "invest_ads": 182.0, "pct": 17.67}
+    s2 = {"vendas": 190.0, "invest_afiliados": None, "invest_ads": 76.0, "pct": 40.0}
+    rel = _rel(plataforma="ml", estados=plataformas.estados("ml"), grupos=[],
+               geral=_total(3, s1, s2), contas_sem_dados=[], afiliados_incompletos=[])
+    msg = ta.texto(rel, "https://app/x", ta.link_davinci("1", "ml"))
+    assert msg.splitlines()[:2] == [
+        "📊 Conferência Mercado Livre — 28/09 a 04/10/2026 (semana fechada)",
+        "Geral: vendas R$ 1.030 (▲ 442,1%) · invest. Ads R$ 182 (afiliados não coletado) · "
+        "17,7% Ads s/ vendas (▼ 22,3 p.p.)",
+    ]
+    # Amazon (as duas partes sem número): o estado no lugar, como antes.
+    rel = _rel(plataforma="amazon", estados=plataformas.estados("amazon"), grupos=[],
+               geral=_total(3, {**s1, "invest_ads": None, "pct": None}),
+               contas_sem_dados=[], afiliados_incompletos=[])
+    assert ta.texto(rel, "x", "y").splitlines()[1] == (
+        "Geral: vendas R$ 1.030 · invest. aguardando acesso · % s/ vendas aguardando acesso"
     )
 
 
@@ -413,6 +441,42 @@ async def test_varrer_fecha_no_prazo_e_avisa_uma_vez(db, enviados):
     assert len(enviados) == 2  # um envio por destinatário
     await worker.conferencia_shopee_varrer({})
     assert len(enviados) == 2
+
+
+async def test_ml_e_amazon_tem_a_chave_propria_do_threema(db, enviados, _config):
+    """Ligar a chave da Shopee (depois do piloto) não manda o relatório do ML
+    nem o da Amazon — nem as rodadas de teste de "Gerar agora": cada
+    marketplace tem a sua (CONFERENCIA_ML_THREEMA / CONFERENCIA_AMAZON_THREEMA)."""
+    await _cadastro(db)
+    shopee = await _pronta(db)
+    ml = await _pronta(db, plataforma="ml")
+    amazon = await _pronta(db, plataforma="amazon")
+    assert (await ta.enviar_pendente(db, ml, AGORA))["motivo"] == "aviso no Threema desligado"
+    r = await ta.enviar_pendentes(db, AGORA)
+    await db.commit()
+    assert [x["execucao"] for x in r] == [str(shopee.id)]
+    assert ta.plataformas_ligadas() == ["shopee"]
+    # Só a do ML ligada: vai só a do ML.
+    _config("conferencia_shopee_threema", False)
+    _config("conferencia_ml_threema", True)
+    assert ta.plataformas_ligadas() == ["ml"]
+    assert (await ta.enviar_pendente(db, amazon, AGORA))["motivo"] == (
+        "aviso no Threema desligado"
+    )
+    r = await ta.enviar_pendentes(db, AGORA)
+    await db.commit()
+    assert [x["execucao"] for x in r] == [str(ml.id)]
+    assert enviados[-1][0].startswith("📊 Conferência Mercado Livre")
+    await db.refresh(amazon)
+    assert amazon.threema_enviado_em is None
+    # O varredor do worker roda com qualquer uma das chaves ligada.
+    _config("conferencia_ml_threema", False)
+    _config("conferencia_amazon_threema", True)
+    recente = await _pronta(db, plataforma="amazon", finalizado=datetime.now(UTC))
+    await worker.conferencia_shopee_varrer({})
+    await db.refresh(recente)
+    assert recente.threema_enviado_em is not None
+    assert enviados[-1][0].startswith("📊 Conferência Amazon")
 
 
 async def test_varrer_sem_a_chave_do_threema_nao_manda(db, enviados, _config):

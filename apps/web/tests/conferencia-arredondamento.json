@@ -70,5 +70,29 @@
     [0.44, 0.44, "percentual", "sobe", "conversao_afiliados", "=", "cinza"],
     [112.25, 100, "dinheiro", "sobe", null, "▲ 12,3%", "verde"],
     [1025, 1000, "inteiro", "sobe", "pedidos_ads", "▲ 2,5%", "verde"]
+  ],
+  "_leia_plataformas": "07/10/2026: um relatório por marketplace (Shopee | Mercado Livre | Amazon). Tela (lib/conferencia.ts) e servidor (saida.py) escrevem igual: o nome do marketplace, o título, o nome do arquivo (sem plataforma = shopee, o de antes) e o texto de cada estado de relatorio.estados, que vale a LINHA inteira da planilha (semanas e Variação) no lugar do número e do '—'. A linha 'Impressões afiliados', sem métrica, procura o estado em 'impressoes_afiliados'. Estado desconhecido: sublinhado vira espaço.",
+  "plataformas": [
+    ["shopee", "Shopee"],
+    ["ml", "Mercado Livre"],
+    ["amazon", "Amazon"]
+  ],
+  "estados": [
+    ["nao_coletado", "não coletado"],
+    ["nao_se_aplica", "não se aplica"],
+    ["aguardando_acesso", "aguardando acesso"],
+    ["sem_api", "sem api"]
+  ],
+  "titulos": [
+    ["shopee", "2026-09-28", "2026-10-04", "Conferência Shopee — 28/09 a 04/10/2026"],
+    ["ml", "2026-09-28", "2026-10-04", "Conferência Mercado Livre — 28/09 a 04/10/2026"],
+    ["amazon", "2026-10-05", "2026-10-07", "Conferência Amazon — 05/10 a 07/10/2026"],
+    [null, "2026-09-28", "2026-10-04", "Conferência Shopee — 28/09 a 04/10/2026"]
+  ],
+  "nomes_arquivo": [
+    ["shopee", "2026-09-28", "2026-10-04", "xlsx", "conferencia-shopee-2026-09-28_2026-10-04.xlsx"],
+    ["ml", "2026-09-28", "2026-10-04", "xlsx", "conferencia-ml-2026-09-28_2026-10-04.xlsx"],
+    ["amazon", "2026-09-28", "2026-10-04", "csv", "conferencia-amazon-2026-09-28_2026-10-04.csv"],
+    [null, "2026-09-28", "2026-10-04", "html", "conferencia-shopee-2026-09-28_2026-10-04.html"]
   ]
 }
