@@ -150,42 +150,96 @@ for (const m of tpl.matchAll(/(?<!dark:)\btext-(?:emerald|red|amber)-\d00\b(?![^
   assert.fail(`cor sem dark: perto de "${tpl.slice(m.index - 40, m.index + 40)}"`)
 }
 
-// ---------------------------------------------------------------- página: a aba nova
+// ---------------------------------------------------------------- página: as abas
+// 08/10/2026: as abas Mercado Livre e Shopee (painéis de Ads) saíram; ficaram
+// Conferência | Criativos | Roteiros | Desempenho, e a Conferência é a padrão.
 {
   const s = pagina.script
   const t = pagina.tpl
-  assert.match(s, /type Platform = [^\n]*\| 'conferencia'/, 'Platform tem conferencia')
-  assert.match(s, /const emOutraAba = computed\([\s\S]{0,300}platform\.value === 'conferencia'/, 'emOutraAba inclui conferencia')
+  assert.match(s, /type Aba = 'conferencia' \| 'criativos' \| 'roteiros' \| 'desempenho'\n/, 'só as 4 abas')
   assert.match(s, /const canConferencia = useCan\('marketing', 'view'\)/, 'permissão da aba')
-  assert.match(s, /if \(!canAds\.value && !canCriativos\.value && !canConferencia\.value\) \{\s*await navigateTo\('\/403'\)/, 'guarda 403')
-  // O watch que recarrega o Ads usa emOutraAba (antes Desempenho recarregava o Ads).
-  assert.match(s, /watch\(platform, async \(\) => \{[\s\S]{0,300}if \(emOutraAba\.value \|\| !canAds\.value\) return/, 'watch usa emOutraAba')
-  // ?aba= lido no setup e escrito na troca; ?execucao sai fora da Conferência.
-  assert.match(s, /const platform = ref<Platform>\(abaDaUrl\(\) \?\? 'ml'\)/, 'lê ?aba=')
-  assert.match(s, /if \(q === 'conferencia' && canConferencia\.value\) return q/, 'aba só se puder ver')
-  assert.match(s, /if \(p !== 'conferencia'\) \{\s*delete query\.execucao\s*delete query\.conf\s*\}/, 'execucao e conf só na aba')
+  assert.match(s, /const canCriativos = useCan\('marketing_criativos', 'view'\)/, 'permissão de Criativos')
+  assert.match(s, /if \(!canCriativos\.value && !canConferencia\.value\) await navigateTo\('\/403'\)/, 'guarda 403')
+  // ?aba= lido no setup e escrito na troca; ?execucao, ?conf e ?horario saem fora da Conferência.
+  assert.match(s, /const aba = ref<Aba>\(abaDaUrl\(\) \?\? abaPadrao\(\)\)/, 'lê ?aba=, senão o padrão')
+  assert.match(s, /if \(a !== 'conferencia'\) \{\s*delete query\.execucao\s*delete query\.conf\s*delete query\.horario\s*\}/, 'execucao, conf e horario só na aba')
   assert.match(s, /void router\.replace\(\{ query \}\)/, 'escreve a aba na URL')
-  // Summary/timeseries não pedem platform=conferencia.
-  assert.match(s, /platform=\$\{plataformaAds\.value\}/, 'summary pela plataforma de Ads')
-  assert.match(s, /platform: plataformaAds\.value/, 'timeseries pela plataforma de Ads')
-  // Um botão só: o marketplace é escolhido lá dentro (Shopee | Mercado Livre | Amazon).
-  assert.match(t, /<button v-if="canConferencia"[\s\S]{0,400}platform = 'conferencia'[\s\S]{0,200}<ClipboardCheck class="size-3\.5" \/>\s*Conferência\s*<\/button>/, 'botão da aba')
+  // Nada dos painéis de Ads sobrou na página (nem rede, nem polling, nem estado).
+  // Comentários contam a história; o que vale é o código e a tela.
+  const codigo = s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const tela = t.replace(/<!--[\s\S]*?-->/g, '')
+  for (const fora of [
+    'plataformaAds', '/api/marketing/metrics/summary', '/api/marketing/timeseries', '/api/marketing/credit-alerts',
+    '/api/marketing/agent/status', '/api/marketing/trigger-all', '/schedule`', '/commands`', '/schedules/',
+    'setInterval', 'summary', 'timeseries', 'heatmap', 'scheduleState', 'creditAlerts', 'agentPresence',
+    'flashBusy', 'executorBadge', 'canAds', 'emOutraAba',
+  ]) assert.ok(!codigo.includes(fora), `página sem: ${fora}`)
+  for (const fora of [
+    'Mercado Livre', 'Shopee', 'Heatmap', 'Agenda automática', 'Oferta Relâmpago', 'Alertas de crédito',
+    'Evolução', 'Executor local', 'rodar ciclo agora', 'recarregar', "platform = p",
+  ]) assert.ok(!tela.includes(fora), `aba removida não aparece: ${fora}`)
+  // Um botão por aba, cada um com a permissão de antes; a Conferência primeiro.
+  const botoes = [...t.matchAll(/<button v-if="(\w+)"[\s\S]*?@click="aba = '(\w+)'">/g)].map((m) => `${m[2]}:${m[1]}`)
+  assert.deepEqual(botoes, ['conferencia:canConferencia', 'criativos:canCriativos', 'roteiros:canCriativos', 'desempenho:canCriativos'])
+  assert.match(t, /<button v-if="canConferencia"[\s\S]{0,400}aba = 'conferencia'[\s\S]{0,200}<ClipboardCheck class="size-3\.5" \/>\s*Conferência\s*<\/button>/, 'botão da aba')
   assert.ok(!t.includes('Conferência Shopee'), 'a aba não diz mais só Shopee')
-  assert.match(t, /<MarketingConferencia v-else-if="platform === 'conferencia' && canConferencia" \/>/, 'render da aba')
-  assert.match(t, /\|\| canCriativos \|\| canConferencia" class="flex flex-wrap items-center gap-3">/, 'barra de abas aparece pra quem só vê a Conferência')
+  assert.match(t, /<MarketingConferencia v-if="aba === 'conferencia' && canConferencia" \/>/, 'render da aba')
+  assert.match(t, /<MarketingCriativos\s+v-else-if="aba === 'criativos' && canCriativos"\s+@abrir-roteiro="abrirRoteiro"/)
+  assert.match(t, /<MarketingRoteiros\s+v-else-if="aba === 'roteiros' && canCriativos"\s+ref="roteirosEl"\s+:foco="focoRoteiro"/)
+  assert.match(t, /<MarketingDesempenho v-else-if="aba === 'desempenho' && canCriativos" \/>/)
+  assert.match(t, /<div v-if="canConferencia \|\| canCriativos" class="flex max-w-full">/, 'barra de abas pra quem vê alguma')
+  // Celular: a barra de abas rola pro lado em vez de estourar a tela.
+  assert.match(t, /class="flex w-fit max-w-full gap-1 overflow-x-auto rounded-md bg-muted\/40 p-1"/)
 
-  // abaDaUrl de verdade, com permissões falsas.
+  // abaDaUrl e abaPadrao de verdade, com permissões falsas.
   const ini = s.indexOf('function abaDaUrl')
-  const corpo = transpile(s.slice(ini, s.indexOf('const platform = ref')), ts.ModuleKind.ESNext)
-  const aba = (q, perms) => new Function('route', 'canAds', 'canCriativos', 'canConferencia', `${corpo}; return abaDaUrl()`)(
-    { query: q }, { value: !!perms.ads }, { value: !!perms.criativos }, { value: !!perms.conferencia },
+  const corpo = transpile(s.slice(ini, s.indexOf('const aba = ref')), ts.ModuleKind.ESNext)
+  const aba = (q, perms) => new Function('route', 'canCriativos', 'canConferencia', `${corpo}; return abaDaUrl() ?? abaPadrao()`)(
+    { query: q }, { value: !!perms.criativos }, { value: !!perms.conferencia },
   )
-  assert.equal(aba({ aba: 'conferencia' }, { ads: true, conferencia: true }), 'conferencia')
-  assert.equal(aba({ aba: 'conferencia' }, { criativos: true }), null, 'sem permissão cai no padrão')
+  assert.equal(aba({}, { conferencia: true, criativos: true }), 'conferencia', 'padrão de quem vê o Marketing')
+  assert.equal(aba({}, { criativos: true }), 'criativos', 'padrão de quem só tem Criativos')
+  assert.equal(aba({ aba: 'conferencia' }, { conferencia: true }), 'conferencia')
+  assert.equal(aba({ aba: 'conferencia' }, { criativos: true }), 'criativos', 'sem permissão cai no padrão')
   assert.equal(aba({ aba: 'roteiros' }, { criativos: true }), 'roteiros')
-  assert.equal(aba({ aba: 'shopee' }, { ads: true }), 'shopee')
-  assert.equal(aba({ aba: 'qualquer' }, { ads: true }), null)
-  assert.equal(aba({}, { ads: true }), null)
+  assert.equal(aba({ aba: 'roteiros' }, { conferencia: true }), 'conferencia', 'Roteiros sem permissão cai no padrão')
+  assert.equal(aba({ aba: 'ml' }, { conferencia: true }), 'conferencia', 'link antigo do ML cai na Conferência')
+  assert.equal(aba({ aba: 'shopee' }, { conferencia: true, criativos: true }), 'conferencia', 'link antigo da Shopee cai na Conferência')
+  assert.equal(aba({ aba: 'shopee' }, { criativos: true }), 'criativos', 'link antigo sem permissão cai no padrão')
+  assert.equal(aba({ aba: 'qualquer' }, { conferencia: true }), 'conferencia')
+
+  // O middleware da página: link antigo vira ?aba=conferencia (+ ?conf=ml no ML) antes de montar.
+  const mIni = s.indexOf('middleware: [')
+  assert.ok(mIni > 0, 'página tem o middleware dos links antigos')
+  const mFim = s.indexOf('\n  ],', mIni)
+  const lista = transpile(`const lista = [${s.slice(mIni + 'middleware: ['.length, mFim)}\n]`, ts.ModuleKind.ESNext)
+  const mw = new Function('navigateTo', `${lista}; return lista[0]`)(
+    (alvo, opts) => ({ alvo, opts }),
+  )
+  assert.deepEqual(mw({ path: '/marketing', query: { aba: 'ml' }, hash: '' }),
+    { alvo: { path: '/marketing', query: { aba: 'conferencia', conf: 'ml' }, hash: '' }, opts: { replace: true } })
+  assert.deepEqual(mw({ path: '/marketing', query: { aba: 'shopee', conf: 'amazon', x: '1' }, hash: '#h' }),
+    { alvo: { path: '/marketing', query: { aba: 'conferencia', x: '1' }, hash: '#h' }, opts: { replace: true } })
+  for (const q of [{}, { aba: 'conferencia', conf: 'ml' }, { aba: 'criativos' }]) {
+    assert.equal(mw({ path: '/marketing', query: q, hash: '' }), undefined, `sem redirecionar: ${JSON.stringify(q)}`)
+  }
+}
+
+// ---------------------------------------------------------------- Conferência: os horários embaixo
+{
+  // Shopee e ML têm o heatmap; a Amazon não. Fora da cadeia de estados do relatório
+  // (aparece mesmo sem relatório) e antes das contas da conferência.
+  const tag = '<MarketingHorarios v-if="plataforma === \'shopee\' || plataforma === \'ml\'" :plataforma="plataforma" />'
+  const pos = tpl.indexOf(tag)
+  assert.ok(pos > 0, 'Conferência renderiza os horários')
+  assert.ok(pos > tpl.indexOf('Afiliados incompletos:'), 'embaixo do relatório')
+  assert.ok(pos < tpl.indexOf('<!-- contas: quem entra'), 'antes das contas')
+  // Fora da cadeia v-if/v-else-if dos estados: o elemento anterior fecha o v-else-if="exec".
+  const antes = tpl.slice(tpl.indexOf('v-else-if="exec"'), pos)
+  const abre = (antes.match(/<div\b/g) || []).length
+  const fecha = (antes.match(/<\/div>/g) || []).length
+  assert.equal(abre, fecha, 'os horários ficam fora do bloco do relatório')
+  assert.ok(!script.includes('/api/marketing/schedules') && !script.includes('/api/marketing/accounts'), 'a Conferência não lê os horários: o componente lê')
 }
 
 // ---------------------------------------------------------------- lib real

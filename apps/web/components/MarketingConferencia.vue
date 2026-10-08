@@ -32,6 +32,10 @@
  * que o marketplace não dá vem em `relatorio.estados` e a célula mostra "não
  * coletado" / "não se aplica" / "aguardando acesso" numa pílula cinza, no
  * lugar do "—" (que continua sendo "faltou o dado").
+ *
+ * 08/10/2026: as abas Mercado Livre e Shopee da página saíram; o heatmap de
+ * horários de cada uma veio pra cá (MarketingHorarios), embaixo do relatório
+ * do mesmo marketplace.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
@@ -966,6 +970,11 @@ const informarAberto = ref(false)
         </div>
       </div>
     </div>
+
+    <!-- horários dos anúncios (08/10/2026): o heatmap que ficou das abas Shopee e
+         Mercado Livre, embaixo do relatório do mesmo marketplace — aparece mesmo
+         sem relatório. A Amazon não tem. -->
+    <MarketingHorarios v-if="plataforma === 'shopee' || plataforma === 'ml'" :plataforma="plataforma" />
 
     <!-- contas: quem entra, em que grupo e com que nome (só quem edita) -->
     <section v-if="canEdit" class="rounded-xl border bg-card">

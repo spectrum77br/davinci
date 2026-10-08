@@ -56,7 +56,7 @@ type Creative = {
 type Field = 'modelo' | 'marca' | 'sku' | 'equipe'
 
 // A célula do Roteiro leva pra aba Roteiros — quem troca de aba é a página
-// (`pages/marketing.vue`), dona do estado `platform`.
+// (`pages/marketing.vue`), dona do estado `aba`.
 const emit = defineEmits<{ (e: 'abrir-roteiro', id: string): void }>()
 
 const { api } = useApi()
