@@ -20,6 +20,9 @@ def test_padroes_das_decisoes_de_02_10(monkeypatch):
     assert padrao["flex_shopee_canais"] == "90022"
     assert padrao["flex_shopee_escrita"] is False
     assert padrao["flex_intervalo_min"] == 15
+    # 08/10/2026: "o motoboy vai sair de São Bernardo" — só mexe na conta
+    # cuja saída do Flex está nos CEPs de São Bernardo do Campo.
+    assert padrao["flex_origem_ceps"] == "09600-09899"
     # 05/10/2026: o Flex entrou só para quem vê (flex_usuarios) — o lado do
     # pedido (levar ao .sp e a espera da NF) vem DESLIGADO de fábrica, para a
     # rotina da equipe não mudar; ninguém vê o Flex sem estar na lista.

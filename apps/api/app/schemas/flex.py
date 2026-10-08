@@ -26,6 +26,13 @@ class FlexContaOut(BaseModel):
     flex_status: str | None = None
     flex_detalhe: str | None = None
     flex_motivo: str | None = None
+    # De onde o motoboy do Flex sai (ML): CEP(s) só com dígitos e cidade(s)
+    # da assinatura; `flex_origem_ok` True = em São Bernardo
+    # (`flex_origem_ceps`), False = fora ou não lida (o motor não mexe na
+    # conta), None = trava desligada ou conta sem Flex.
+    flex_origem_cep: str | None = None
+    flex_origem_cidade: str | None = None
+    flex_origem_ok: bool | None = None
     flex_lido_em: datetime | None = None
     flex_erro: str | None = None
     # Descoberta dos anúncios da conta (ML): quando, se leu tudo, quantos

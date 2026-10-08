@@ -48,6 +48,10 @@ from app.services.marketplaces.ml import ML_API_BASE
 
 T0 = datetime(2026, 9, 1, tzinfo=UTC)
 
+# CEP de São Bernardo do Campo (dentro de flex_origem_ceps "09600-09899").
+ORIGEM_SB = "09750000"
+ORIGEM_PIRACICABA = "13400123"
+
 
 class FakeML:
     """Mercado Livre de mentira: guarda o Flex de cada anúncio e cada chamada."""
@@ -57,8 +61,12 @@ class FakeML:
         self.chamadas: list[tuple[str, str]] = []
         self.ligar_resposta: dict[str, ResultadoFlex] = {}
         self.desligar_resposta: dict[str, ResultadoFlex] = {}
-        # A conta tem o Flex (subscriptions/v1 "in") — o padrão dos cenários.
-        self.assinatura = flex_api.AssinaturaFlex(True, "in", "assinatura do Flex ativa")
+        # A conta tem o Flex (subscriptions/v1 "in") saindo de São Bernardo
+        # (a trava de origem, 08/10/2026) — o padrão dos cenários.
+        self.assinatura = flex_api.AssinaturaFlex(
+            True, "in", "assinatura do Flex ativa",
+            origem_cep=ORIGEM_SB, origem_cidade="São Bernardo do Campo",
+        )
         self.assinaturas_lidas = 0
         # Descoberta: {id: "active" | "paused"} que a busca da conta devolve.
         self.conta_itens: dict[str, str] = {}
@@ -163,6 +171,9 @@ async def mundo(db: AsyncSession, monkeypatch):
         "flex_shopee_escrita": False,
         "flex_shopee_canais": "90022",
         "flex_intervalo_min": 15,
+        # A saída do Flex tem de ser em São Bernardo (08/10/2026); o FakeML
+        # responde a assinatura com a origem ORIGEM_SB.
+        "flex_origem_ceps": "09600-09899",
     }.items():
         monkeypatch.setattr(cfg, chave, valor)
 
@@ -362,7 +373,20 @@ async def test_observar_com_cliente_de_verdade_nao_chama_post_nem_delete(db, mun
         # descoberta (busca dos ids — vazia aqui). Tudo GET.
         router.get("/users/me").mock(return_value=httpx.Response(200, json={"id": 4242}))
         router.get("/flex/sites/MLB/users/4242/subscriptions/v1").mock(
-            return_value=httpx.Response(200, json=[{"status": "in"}])
+            # Formato real (leitura de 08/10/2026): a origem de onde o motoboy sai.
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "status": "in",
+                        "mode": "FLEX",
+                        "origin": {
+                            "zip_code": "09750-000",
+                            "city": {"id": "BR-SP-99", "name": "São Bernardo do Campo"},
+                        },
+                    }
+                ],
+            )
         )
         router.get("/users/4242/items/search").mock(
             return_value=httpx.Response(200, json={"results": [], "scroll_id": "s1"})

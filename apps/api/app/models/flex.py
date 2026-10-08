@@ -262,6 +262,12 @@ class FlexConta(Base):
     # "sem_assinatura" (ML); "in", "out", "sem_canal" (Shopee).
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
     detalhe: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # De onde o motoboy do Flex sai (ML, assinatura "in"): CEP só com dígitos
+    # e cidade da `origin` da assinatura (mais de uma: separados por vírgula).
+    # O motor só mexe na conta cuja saída está em `flex_origem_ceps` (São
+    # Bernardo — Eduardo, 08/10/2026). NULL = não lida ainda / conta sem Flex.
+    origem_cep: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origem_cidade: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Última conferência que trouxe resposta (a "validade" de ~1 h conta
     # daqui) e o erro da última que não trouxe (rede, 5xx) — nesse caso vale
     # a resposta anterior e a próxima rodada pergunta de novo.

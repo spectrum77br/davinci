@@ -42,6 +42,12 @@ type FlexConta = {
   flex_ativo: boolean | null
   flex_status: string | null
   flex_motivo: string | null
+  // De onde o motoboy do Flex sai (ML, lido da assinatura): o sistema só mexe
+  // na conta com a saída em São Bernardo (Eduardo, 08/10/2026). ok: true =
+  // São Bernardo; false = outra cidade ou ainda não lida; null = sem trava.
+  flex_origem_cep: string | null
+  flex_origem_cidade: string | null
+  flex_origem_ok: boolean | null
   flex_lido_em: string | null
   flex_erro: string | null
   // Descoberta (ML): todos os anúncios da conta, e os que o DaVinci não conhecia.
@@ -263,12 +269,12 @@ const MODOS: Record<string, { titulo: string; texto: string; cls: string }> = {
   },
   piloto: {
     titulo: 'Flex automático: PILOTO',
-    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em São Bernardo, só nas contas liberadas abaixo. Para LIGAR, ele espera você aprovar.',
+    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em São Bernardo, só nas contas liberadas abaixo com a saída do Flex em São Bernardo. Para LIGAR, ele espera você aprovar.',
     cls: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200',
   },
   ativo: {
     titulo: 'Flex automático: ATIVO',
-    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em São Bernardo, nas contas liberadas abaixo. Para LIGAR, ele espera você aprovar.',
+    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em São Bernardo, nas contas liberadas abaixo com a saída do Flex em São Bernardo. Para LIGAR, ele espera você aprovar.',
     cls: 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200',
   },
 }
@@ -289,15 +295,45 @@ function nomePlataforma(p: string | null | undefined): string {
   return p || '—'
 }
 const contasPermitidas = computed(() => new Set((config.value?.contas || []).filter((c) => c.existe).map((c) => c.id)))
-// Contas que a plataforma diz que NÃO podem ter Flex: ninguém aprova lá.
+// Contas que a plataforma diz que NÃO podem ter Flex, ou com a saída do Flex
+// fora de São Bernardo: ninguém aprova lá (o sistema não mexe nelas).
 const contasSemFlex = computed(
-  () => new Set((config.value?.contas || []).filter((c) => c.flex_ativo === false).map((c) => c.id)),
+  () =>
+    new Set(
+      (config.value?.contas || [])
+        .filter((c) => c.flex_ativo === false || (c.flex_ativo === true && c.flex_origem_ok === false))
+        .map((c) => c.id),
+    ),
 )
+// "13400123,13421000" → "13400-123, 13421-000"
+function cepTexto(ceps: string | null): string {
+  return (ceps || '')
+    .split(',')
+    .filter(Boolean)
+    .map((c) => (c.length === 8 ? `${c.slice(0, 5)}-${c.slice(5)}` : c))
+    .join(', ')
+}
 function flexDaConta(c: FlexConta): { texto: string; cls: string; title: string } {
   const loja = c.plataforma === 'shopee'
+  if (c.flex_ativo === true && c.flex_origem_ok === false)
+    return {
+      texto: c.flex_origem_cep
+        ? `Flex ativo, mas a saída é em ${c.flex_origem_cidade || '?'} (CEP ${cepTexto(c.flex_origem_cep)}) — fora de São Bernardo`
+        : 'Flex ativo, mas ainda não deu para ler de onde ele sai',
+      cls: 'text-rose-700 dark:text-rose-400 font-medium',
+      title:
+        (c.flex_origem_cep
+          ? 'O motoboy do Flex sai de São Bernardo: troque o endereço do Flex desta conta no painel do Mercado Livre.'
+          : 'O sistema lê de novo na próxima rodada.') +
+        ` Até lá o sistema não mexe nos anúncios dela. Conferido ${fmtDesde(c.flex_lido_em)}.`,
+    }
   if (c.flex_ativo === true)
     return {
-      texto: loja ? 'Entrega Direta ligada na loja' : 'Flex ativo na conta',
+      texto: loja
+        ? 'Entrega Direta ligada na loja'
+        : c.flex_origem_ok === true
+          ? `Flex ativo na conta · saída em ${c.flex_origem_cidade || 'São Bernardo'}`
+          : 'Flex ativo na conta',
       cls: 'text-emerald-700 dark:text-emerald-400',
       title: `Conferido ${fmtDesde(c.flex_lido_em)}.`,
     }
@@ -454,6 +490,7 @@ const ERRO_APROVAR: Record<string, string> = {
   nao_avaliado: 'O sistema ainda não conferiu este anúncio.',
   nao_elegivel: 'Este anúncio não pode ligar o Flex agora.',
   conta_sem_flex: 'Esta conta não tem o Flex ativo na plataforma.',
+  conta_fora_da_origem: 'A saída do Flex desta conta não é em São Bernardo — troque o endereço do Flex no painel do Mercado Livre primeiro.',
   shopee_so_leitura: 'Na Shopee o sistema só confere: ligue a Entrega Direta à mão no Seller Center.',
 }
 

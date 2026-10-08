@@ -61,7 +61,7 @@ class _SoLeitura:
 
     async def ler_assinatura_flex(self):
         self.chamadas.append("assinatura")
-        return flex_api.AssinaturaFlex(True, "in")
+        return flex_api.AssinaturaFlex(True, "in", origem_cep="09750000")
 
     async def ids_da_conta(self, status, *, max_paginas=100):
         self.chamadas.append(f"descoberta:{status}")
@@ -164,6 +164,7 @@ async def test_config_sem_segredo(client: AsyncClient, cena, auth_as: Callable):
         "id": str(cena["conta_id"]), "nome": "vita", "plataforma": "ml", "existe": True,
         # Ainda não conferida pelo motor: tudo vazio (a tela diz "não conferida").
         "flex_ativo": None, "flex_status": None, "flex_detalhe": None, "flex_motivo": None,
+        "flex_origem_cep": None, "flex_origem_cidade": None, "flex_origem_ok": None,
         "flex_lido_em": None, "flex_erro": None, "descoberta_em": None,
         "descoberta_ok": None, "descoberta_total": None, "descoberta_novos": None,
         "descoberta_erro": None,
@@ -240,7 +241,7 @@ async def test_aprovar_em_piloto_liga_na_hora(
 
     class ML:
         async def ler_assinatura_flex(self):
-            return flex_api.AssinaturaFlex(True, "in")
+            return flex_api.AssinaturaFlex(True, "in", origem_cep="09750000")
 
         async def ler_flex(self, item):
             chamadas.append(("ler", item))

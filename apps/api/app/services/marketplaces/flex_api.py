@@ -102,11 +102,19 @@ class AssinaturaFlex:
     respondeu que não: out/pending/404/403, canal desligado na loja); None =
     não deu para saber agora (rede, 429, 5xx) — vale a resposta anterior.
     `status`: o que veio, cru ("in", "pending", "out", "http_404",
-    "sem_assinatura", "sem_canal")."""
+    "sem_assinatura", "sem_canal").
+
+    `origem_cep` / `origem_cidade` (ML, só com assinatura "in"): de onde o
+    motoboy do Flex sai — `origin.zip_code` / `origin.city.name` de cada
+    assinatura "in" (só dígitos; mais de uma origem vem separada por
+    vírgula). None = a resposta não trouxe (a trava de origem do motor trata
+    como "não se sabe de onde sai")."""
 
     ativo: bool | None
     status: str | None = None
     detalhe: str = ""
+    origem_cep: str | None = None
+    origem_cidade: str | None = None
 
 
 @dataclass(frozen=True)
@@ -209,6 +217,28 @@ def _lista_de_assinaturas(corpo: Any) -> list[Mapping[str, Any]]:
     return [x for x in corpo if isinstance(x, Mapping)]
 
 
+def _origens_ml(assinaturas: Iterable[Mapping[str, Any]]) -> tuple[str | None, str | None]:
+    """CEP (só dígitos) e cidade da origem de cada assinatura "in", sem
+    repetir, separados por vírgula. Origem sem CEP não entra (a trava trata
+    a conta inteira como "não se sabe de onde sai")."""
+    ceps: list[str] = []
+    cidades: list[str] = []
+    for a in assinaturas:
+        origem = a.get("origin")
+        if not isinstance(origem, Mapping):
+            continue
+        cep = "".join(ch for ch in str(origem.get("zip_code") or "") if ch.isdigit())
+        if not cep:
+            continue
+        if cep not in ceps:
+            ceps.append(cep)
+        cidade = origem.get("city")
+        nome = str(cidade.get("name") or "").strip() if isinstance(cidade, Mapping) else ""
+        if nome and nome not in cidades:
+            cidades.append(nome)
+    return (",".join(ceps) or None), (", ".join(cidades)[:200] or None)
+
+
 def classificar_assinatura_ml(r: httpx.Response) -> AssinaturaFlex:
     """A conta do ML tem o Flex? Só a assinatura "in" vale ("pending" ainda
     não; "out" saiu). 401/403/404: a conta não tem Flex (fato: eron, mega e
@@ -219,12 +249,16 @@ def classificar_assinatura_ml(r: httpx.Response) -> AssinaturaFlex:
             corpo = r.json()
         except ValueError:
             return AssinaturaFlex(None, None, "resposta não-JSON")
-        statuses = [
-            str(x.get("status") or "").strip().lower() for x in _lista_de_assinaturas(corpo)
-        ]
+        assinaturas = _lista_de_assinaturas(corpo)
+        statuses = [str(x.get("status") or "").strip().lower() for x in assinaturas]
         statuses = [x for x in statuses if x]
         if "in" in statuses:
-            return AssinaturaFlex(True, "in", "assinatura do Flex ativa")
+            cep, cidade = _origens_ml(
+                x for x in assinaturas if str(x.get("status") or "").strip().lower() == "in"
+            )
+            return AssinaturaFlex(
+                True, "in", "assinatura do Flex ativa", origem_cep=cep, origem_cidade=cidade
+            )
         if not statuses:
             return AssinaturaFlex(False, "sem_assinatura", "a conta não tem assinatura do Flex")
         # "pending" diz mais que "out" (a assinatura está a caminho).

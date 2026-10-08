@@ -1161,6 +1161,55 @@ class ContaFlex:
     detalhe: str | None = None
     lido_em: datetime | None = None
     erro: str | None = None
+    # De onde o motoboy do Flex sai (ML): CEP(s) só com dígitos e cidade(s).
+    origem_cep: str | None = None
+    origem_cidade: str | None = None
+
+
+def conta_flex_da_linha(c: FlexConta) -> ContaFlex:
+    """O que o motor guardou da conta (`flex_conta`), no formato da regra."""
+    return ContaFlex(
+        plataforma=c.plataforma,
+        ativo=c.flex_ativo,
+        status=c.status,
+        detalhe=c.detalhe,
+        lido_em=c.lido_em,
+        erro=c.erro,
+        origem_cep=c.origem_cep,
+        origem_cidade=c.origem_cidade,
+    )
+
+
+MOTIVO_SEM_ORIGEM = "não deu para ler de onde sai o Flex da conta no ML"
+_PREFIXO_FORA_DA_ORIGEM = "saída do Flex da conta fora de São Bernardo"
+
+
+def _cep_txt(cep: str) -> str:
+    """CEP de 8 dígitos com hífen: 13400123 → 13400-123."""
+    return f"{cep[:5]}-{cep[5:]}" if len(cep) == 8 else cep
+
+
+def bloqueio_da_origem(conta: ContaFlex) -> str | None:
+    """A saída do Flex da conta (ML) está em São Bernardo (`flex_origem_ceps`)?
+    None = está (ou a trava está desligada, `flex_origem_ceps` vazio).
+
+    Eduardo, 08/10/2026: "o motoboy vai sair de São Bernardo". Com a saída
+    em outra cidade, o Flex ligado pela peça do .sp venderia para quem mora
+    perto de lá — longe da peça. Conta "in" sem origem lida: negação por
+    padrão (o motor pergunta de novo na rodada seguinte)."""
+    faixas = flex_config.faixas_origem()
+    if faixas is None:
+        return None
+    ceps = [c.strip() for c in (conta.origem_cep or "").split(",") if c.strip()]
+    if not ceps:
+        return MOTIVO_SEM_ORIGEM
+    fora = [c for c in ceps if not flex_config.origem_permitida(c, faixas)]
+    if not fora:
+        return None
+    return (
+        f"{_PREFIXO_FORA_DA_ORIGEM}: {conta.origem_cidade or '?'} "
+        f"(CEP {', '.join(_cep_txt(c) for c in fora)})"
+    )
 
 
 def bloqueio_da_conta(plataforma: str, conta: ContaFlex | None) -> str | None:
@@ -1169,14 +1218,18 @@ def bloqueio_da_conta(plataforma: str, conta: ContaFlex | None) -> str | None:
 
     Sem resposta da plataforma (nunca conferida, ou só erro de rede) também
     bloqueia: negação por padrão — sem saber se a conta tem Flex, o motor não
-    pede aprovação nem escreve. O erro fica em `flex_conta.erro` (a tela)."""
+    pede aprovação nem escreve. O erro fica em `flex_conta.erro` (a tela).
+
+    ML com Flex ativo mas a SAÍDA do Flex fora de São Bernardo (ou não lida)
+    também bloqueia — `bloqueio_da_origem`. A emergência não passa por aqui:
+    ela desliga tudo das contas com Flex, de onde quer que saiam."""
     ml = plataforma == flex_envio.PLATAFORMA_ML
     if conta is None or conta.ativo is None:
         if ml:
             return "não deu para conferir a assinatura do Flex da conta no ML"
         return "não deu para conferir a Entrega Direta da loja na Shopee"
     if conta.ativo:
-        return None
+        return bloqueio_da_origem(conta) if ml else None
     if ml:
         return f"conta sem Flex ativo no ML (status {conta.status or '?'})"
     if conta.status == "sem_canal":
@@ -1234,22 +1287,24 @@ async def _conferir_contas(
         for iid, integ in integracoes.items():
             plat = _plataforma_de(integ) or ""
             c = linhas.get(iid)
-            out[iid] = ContaFlex(
-                plataforma=plat,
-                ativo=c.flex_ativo if c else None,
-                status=c.status if c else None,
-                detalhe=c.detalhe if c else None,
-                lido_em=c.lido_em if c else None,
-                erro=c.erro if c else None,
-            )
+            out[iid] = replace(conta_flex_da_linha(c), plataforma=plat) if c else ContaFlex(plat)
     if perguntar:
         respostas: dict[UUID, flex_api.AssinaturaFlex] = {}
         for iid, integ in integracoes.items():
             atual = out[iid]
+            # Conta do ML com Flex e SEM a origem (lida antes da 0383, ou a
+            # resposta não trouxe): pergunta já — sem a origem ela fica
+            # bloqueada (bloqueio_da_origem), não espera a validade de 1 h.
+            sem_origem = (
+                atual.plataforma == flex_envio.PLATAFORMA_ML
+                and atual.ativo is True
+                and not atual.origem_cep
+            )
             if (
                 atual.ativo is not None
                 and atual.lido_em is not None
                 and atual.lido_em >= agora - _VALIDADE_CONTA
+                and not sem_origem
             ):
                 continue
             cli = await _cliente(integ, clientes)
@@ -1265,6 +1320,7 @@ async def _conferir_contas(
                     if c is None:
                         c = FlexConta(integration_id=iid, plataforma=out[iid].plataforma)
                         s.add(c)
+                    origem_antes = (c.origem_cep, c.origem_cidade)
                     if r.ativo is None:
                         # Não deu para saber: vale a resposta anterior.
                         c.erro = (r.detalhe or "sem resposta")[:500]
@@ -1272,17 +1328,20 @@ async def _conferir_contas(
                         c.flex_ativo = r.ativo
                         c.status = r.status
                         c.detalhe = (r.detalhe or None) and r.detalhe[:500]
+                        c.origem_cep = (r.origem_cep or None) and r.origem_cep[:200]
+                        c.origem_cidade = (r.origem_cidade or None) and r.origem_cidade[:200]
                         c.lido_em = agora
                         c.erro = None
                     c.atualizado_em = agora
-                    out[iid] = ContaFlex(
-                        plataforma=out[iid].plataforma,
-                        ativo=c.flex_ativo,
-                        status=c.status,
-                        detalhe=c.detalhe,
-                        lido_em=c.lido_em,
-                        erro=c.erro,
-                    )
+                    out[iid] = replace(conta_flex_da_linha(c), plataforma=out[iid].plataforma)
+                    if (c.origem_cep, c.origem_cidade) != origem_antes:
+                        logger.info(
+                            "flex_conta_origem_mudou",
+                            integration_id=str(iid),
+                            origem_cep=c.origem_cep,
+                            origem_cidade=c.origem_cidade,
+                            antes=origem_antes[0],
+                        )
                     if r.ativo is not None and r.ativo != (
                         linhas[iid].flex_ativo if iid in linhas else None
                     ):
@@ -1293,6 +1352,11 @@ async def _conferir_contas(
                             status=r.status,
                         )
     resumo["contas_sem_flex"] = sum(1 for c in out.values() if not c.ativo)
+    resumo["contas_fora_da_origem"] = sum(
+        1
+        for c in out.values()
+        if c.ativo and c.plataforma == flex_envio.PLATAFORMA_ML and bloqueio_da_origem(c)
+    )
     return out
 
 
@@ -2568,12 +2632,15 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
         if conta is not None and conta.flex_ativo is False:
             raise FlexRegraError(
                 "conta_sem_flex",
-                bloqueio_da_conta(
-                    est.plataforma,
-                    ContaFlex(est.plataforma, conta.flex_ativo, conta.status, conta.detalhe),
-                )
+                bloqueio_da_conta(est.plataforma, conta_flex_da_linha(conta))
                 or "a conta não pode ter Flex",
             )
+        if conta is not None and conta.flex_ativo is True:
+            # Saída do Flex fora de São Bernardo: aprovar não pode ficar
+            # pendurado até alguém trocar o endereço (aí ligaria sozinho).
+            fora = bloqueio_da_conta(est.plataforma, conta_flex_da_linha(conta))
+            if fora:
+                raise FlexRegraError("conta_fora_da_origem", fora)
         if est.desejado != LIGADO and not est.recusa:
             raise FlexRegraError("nao_elegivel", est.motivo or "a regra não quer o Flex ligado")
         recusa_antes = est.recusa

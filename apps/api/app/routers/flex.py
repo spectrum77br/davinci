@@ -164,11 +164,16 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
         c = linhas.get(i)
         plataforma = _plataforma_txt(integ)
         motivo = None
-        if c is not None and c.flex_ativo is False:
-            motivo = flex_motor.bloqueio_da_conta(
-                c.plataforma,
-                flex_motor.ContaFlex(c.plataforma, c.flex_ativo, c.status, c.detalhe),
-            )
+        conta_flex = flex_motor.conta_flex_da_linha(c) if c is not None else None
+        if conta_flex is not None and conta_flex.ativo is not None:
+            # Sem Flex na plataforma, ou (ML) com a saída do Flex fora de São
+            # Bernardo / não lida: a frase que os anúncios dela mostram.
+            motivo = flex_motor.bloqueio_da_conta(c.plataforma, conta_flex)
+        origem_ok = (
+            flex_config.origem_permitida_todas(c.origem_cep)
+            if c is not None and c.plataforma == "ml" and c.flex_ativo
+            else None
+        )
         contas.append(
             FlexContaOut(
                 id=i,
@@ -179,6 +184,9 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
                 flex_status=c.status if c else None,
                 flex_detalhe=c.detalhe if c else None,
                 flex_motivo=motivo,
+                flex_origem_cep=c.origem_cep if c else None,
+                flex_origem_cidade=c.origem_cidade if c else None,
+                flex_origem_ok=origem_ok,
                 flex_lido_em=c.lido_em if c else None,
                 flex_erro=c.erro if c else None,
                 descoberta_em=c.descoberta_em if c else None,

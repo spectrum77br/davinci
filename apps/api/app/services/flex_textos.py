@@ -68,6 +68,25 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
             "não mexe nos anúncios dela até conferir."
         ),
     ),
+    # A SAÍDA do Flex da conta (Eduardo, 08/10/2026: "o motoboy vai sair de
+    # São Bernardo" — flex_motor.bloqueio_da_origem).
+    (
+        re.compile(
+            r"^saída do Flex da conta fora de São Bernardo: (?P<c>.+) \(CEP (?P<cep>[^)]+)\)$"
+        ),
+        lambda m: (
+            f"A saída do Flex desta conta no Mercado Livre está em {m['c']} (CEP {m['cep']}), "
+            f"não em {_SP}. Troque o endereço do Flex no painel do Mercado Livre — até lá o "
+            "sistema não mexe nos anúncios dela."
+        ),
+    ),
+    (
+        re.compile(r"^não deu para ler de onde sai o Flex da conta no ML$"),
+        lambda m: (
+            "Ainda não deu para ler de onde sai o Flex desta conta no Mercado Livre — o sistema "
+            f"só mexe nos anúncios dela quando confirmar que a saída é em {_SP}."
+        ),
+    ),
     (
         re.compile(r"^não deu para conferir a Entrega Direta da loja na Shopee$"),
         lambda m: (
