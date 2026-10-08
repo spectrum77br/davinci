@@ -61,7 +61,11 @@ COMO LIGAR CONVERSA → PEDIDO DO BLING (o mesmo caminho do painel do pedido,
 O que JÁ é fonte (01/10/2026):
   • pré × pós-venda: a regra dos filtros da lista (`e_pos_venda`);
   • Ag. cancelamento: Bling em 83955 (`ag_cancelamento_visivel`), com a
-    trilha da Margem para separar a trava do robô;
+    trilha da Margem para separar a trava do robô e, desde 02/10/2026 (item
+    4), o MOTIVO (`ag_cancelamento.classificar`): os fatos da NF
+    (`nf_faturamento`, `nf_nota`, `nf_etiqueta_arquivo`) e a trilha mais
+    nova da `margem_audit` são lidos só para os pedidos em 83955
+    (`_fatos_nf`);
   • Devolução: Bling em 83957 + `atendimento_reclamacoes` tipo `devolucao`;
   • Reclamação: `atendimento_reclamacoes` tipo `reclamacao`/`mediacao` +
     a reserva do pack do ML (`_claims_do_pack`): `dados.claim_ids` SÓ com o
@@ -89,8 +93,12 @@ A LOGÍSTICA ENTRA PELA TABELA: `reclamacoes.sincronizar_reclamacoes_ml` e
   claims do ML. Nada de consulta nova à Logística neste módulo: uma fonte
   só para a etiqueta e para o cartão da reclamação — duas leituras com
   regras de "encerrado" diferentes dariam etiqueta e cartão discordando.
-TODO(item 4, outro dev): a classificação do motivo do 83955 troca a regra
-  SÓ dentro de `ag_cancelamento_visivel`.
+ITEM 4 (02/10/2026): a classificação do motivo do 83955 mora em
+  `ag_cancelamento.py` (puro); `ag_cancelamento_visivel` só delega a ela, e
+  o motivo da etiqueta passa a dizer o porquê (`_montar_fatos`). A lista Ag.
+  cancelamento (fase 4b, 05/10/2026) parte do PEDIDO: `pedidos_em_83955`
+  monta os pedidos em 83955 com as mesmas funções, e a conversa (quando
+  houver) vem de `conversas_do_pedido_bling`.
 
 DUAS PORTAS, A MESMA REGRA: `fatos_da_conversa` (uma conversa — o gancho do
 sync, a troca à mão) e `fatos_em_lote` (o cron e o preenchimento, centenas
@@ -109,7 +117,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+import structlog
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -119,7 +128,19 @@ from app.models import (
     AtendimentoReclamacao,
     BlingOrder,
     MargemAudit,
+    NfEtiquetaArquivo,
+    NfFaturamento,
+    NfNota,
     StoreInfo,
+)
+from app.services.atendimento.ag_cancelamento import (
+    MARCAS_DA_NF,
+    ORIGEM_ROBO_MARGEM,  # noqa: F401 — reexportada
+    PINO_MARGEM_PENDENTE,  # noqa: F401 — reexportada
+    PINO_MARGEM_REPROVADO,  # noqa: F401 — reexportada
+    classificar,
+    cortar,
+    status_na_plataforma,
 )
 from app.services.atendimento.constantes import (
     CANAIS_SEMPRE_POS_VENDA,
@@ -143,15 +164,11 @@ from app.services.bling_situacoes import (
     SITUACAO_AGUARDANDO_DEVOLUCAO_STR,
 )
 
-# `margem_audit.origem` do robô da Margem (services/margem_auto_hold.py): a
-# trava interna de margem, que NÃO é cancelamento para o comprador.
-ORIGEM_ROBO_MARGEM = "margens_auto"
-# O pino que só a análise de margem grava (`bling_orders.status`): segurado
-# para alguém decidir — também não é cancelamento.
-PINO_MARGEM_PENDENTE = "Pendente"
-# O pino da reprovação. Gravado por PESSOA (o Reprovar da aba Margem, com
-# `bling_orders.aprovado_por` = quem clicou) é cancelamento de verdade.
-PINO_MARGEM_REPROVADO = "Reprovado"
+logger = structlog.get_logger()
+
+# `ORIGEM_ROBO_MARGEM` (a trilha do robô da Margem), `PINO_MARGEM_PENDENTE`
+# e `PINO_MARGEM_REPROVADO` moram em `ag_cancelamento.py` desde 02/10/2026 e
+# continuam importáveis daqui (reexportadas acima).
 
 # Como o atendimento chama a plataforma (`atendimento_conversas.plataforma`)
 # a partir do que outros cadastros gravam (`store_info.platform`, o enum das
@@ -223,6 +240,26 @@ class PedidoBling:
     # isto, a última trilha continuaria sendo a do robô e a venda que vai ser
     # cancelada ficaria escondida.
     pino_por_pessoa: bool = False
+    # Os SKUs dos itens do pedido no espelho (`bling_orders.item_codigo`),
+    # na ordem dos itens: a marca de falta de estoque só vale com algum SKU
+    # do erro ainda no pedido (`ag_cancelamento.nf_vencida`).
+    skus_itens: tuple[str, ...] = ()
+    # ── Os fatos da NF: lidos SÓ para o pedido em 83955 (`_fatos_nf`) ──
+    # `nf_faturamento.status_faturamento` ('sem_estoque'/'restricao' = o
+    # sweep de NF pôs em 83955; 'ok'/'processando' = a NF já saiu).
+    nf_status: str | None = None
+    # `nf_faturamento.erro_faturamento` ("… — saldo negativo: <skus>").
+    nf_erro: str | None = None
+    # Quando a marca foi gravada (`nf_faturamento.updated_at`).
+    nf_marcada_em: datetime | None = None
+    # A trilha mais nova da `margem_audit` de mudança de situação (qualquer
+    # direção, qualquer origem) ou de troca de SKU — o pedido mexeu depois
+    # da marca? Só lida quando há marca do sweep ('sem_estoque'/'restricao').
+    ultima_trilha_em: datetime | None = None
+    # O pedido tem NF (`nf_nota.pedido_bling`) ou etiqueta
+    # (`nf_etiqueta_arquivo.pedido_bling`, ou `nf_faturamento.status_etiqueta`
+    # preenchido): o 83955 veio depois, à mão.
+    tem_nf_ou_etiqueta: bool = False
 
 
 def normalizar_plataforma(plataforma: str | None) -> str | None:
@@ -255,10 +292,19 @@ def e_pos_venda(canal: str | None, pedido_marketplace: str | None) -> bool:
 def ag_cancelamento_visivel(pedido: PedidoBling | None) -> bool:
     """O pedido em "Aguardando Cancelamento" (83955) vira etiqueta Ag. cancelamento?
 
-    O ENCAIXE DO ITEM 4 (o outro dev): quando a classificação do motivo
-    existir, a regra muda SÓ aqui dentro.
+    O ENCAIXE DO ITEM 4 (02/10/2026): a regra é a do classificador do motivo
+    (`ag_cancelamento.classificar`, `Motivo.etiqueta`); aqui só se delega.
+    A tabela-verdade de antes continua a mesma (os 8 casos). DUAS entradas
+    mudaram de visibilidade: (1) trilha `margens_auto` + pino 'Aprovado' +
+    marca viva de falta de estoque/restrição — a pessoa já aprovou a margem
+    e o que segura o pedido é a NF (passa a aparecer); (2) o pino 'Pendente'
+    com trilha da PESSOA (`margens`) passa a ser trava da Margem (oculto),
+    como o 'Pendente' sem trilha (crítica A2). E a reprovação da Margem sem
+    pessoa registrada continua aparecendo, mas sem falar em cancelamento
+    (`Motivo.fala_cancelamento`).
 
-    Regra de hoje (01/10/2026): sim, MENOS quando quem pôs o pedido lá foi o
+    HISTÓRICO — a regra de 01/10/2026 (a base do item 4; o que mudou está
+    acima): sim, MENOS quando quem pôs o pedido lá foi o
     robô da Margem — a trava interna de margem (264 pedidos em 30 dias, 182
     voltaram para Em aberto; levantamento §2.3). Abrir cartão ou avisar o
     comprador nesses casos falaria de cancelamento a quem só está com o
@@ -268,21 +314,15 @@ def ag_cancelamento_visivel(pedido: PedidoBling | None) -> bool:
     'Pendente' (segurado para análise) está gravado. A reprovação feita por
     PESSOA na aba Margem (origem `margens`, ou o pino 'Reprovado' gravado
     por pessoa — `PedidoBling.pino_por_pessoa` — mesmo num pedido que o
-    robô segurou) é cancelamento de verdade: aparece. Falta de estoque e
+    robô segurou) aparece (desde o item 4, só o 'Reprovado' com pessoa
+    registrada fala em cancelamento). Falta de estoque e
     restrição de envio (sweep de NF) e o
     movimento à mão no Bling não gravam trilha: aparecem — inclusive o
     pedido que o robô segurou, resgatou (83955 → Em aberto, pino
     'Aprovado') e que depois voltou a 83955 por outro motivo.
     """
-    if pedido is None or (pedido.situacao or "").strip() != SITUACAO_AGUARDANDO_CANCELAMENTO_STR:
-        return False
-    if pedido.pino_margem == PINO_MARGEM_REPROVADO and pedido.pino_por_pessoa:
-        return True
-    if pedido.origem_ag_cancelamento == ORIGEM_ROBO_MARGEM:
-        return False
-    return not (
-        pedido.origem_ag_cancelamento is None and pedido.pino_margem == PINO_MARGEM_PENDENTE
-    )
+    motivo = classificar(pedido)
+    return bool(motivo and motivo.etiqueta)
 
 
 # ── Pedido do Bling ───────────────────────────────────────────────────────
@@ -298,6 +338,9 @@ _COLUNAS_BLING = (
     BlingOrder.data,
     BlingOrder.item_index,
     BlingOrder.aprovado_por,
+    # O SKU do item: a marca de falta de estoque vale só com o SKU do erro
+    # ainda no pedido (item 4).
+    BlingOrder.item_codigo,
 )
 # Teto de chaves por consulta ao espelho (o lote do cron manda centenas).
 _CHAVES_POR_CONSULTA = 1000
@@ -328,6 +371,7 @@ def _pedido_das_linhas(chaves: Sequence[str], linhas: Sequence[Any]) -> PedidoBl
         # pela Margem, mas basta uma preenchida.
         do_pedido = [r for r in casam if r.numero == primeira.numero]
         com_pino = next((r for r in do_pedido if r.status), None)
+        skus = (str(getattr(r, "item_codigo", None) or "").strip() for r in do_pedido)
         return PedidoBling(
             numero=primeira.numero,
             numeroloja=primeira.numeroloja,
@@ -338,6 +382,7 @@ def _pedido_das_linhas(chaves: Sequence[str], linhas: Sequence[Any]) -> PedidoBl
             pino_por_pessoa=bool(
                 com_pino is not None and getattr(com_pino, "aprovado_por", None) is not None
             ),
+            skus_itens=tuple(dict.fromkeys(s for s in skus if s)),
         )
     return None
 
@@ -388,17 +433,125 @@ async def _origens_ag_cancelamento(
     }
 
 
+async def _fatos_nf(session: AsyncSession, numeros: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """{nº do Bling: campos da NF do `PedidoBling`} — o que o motivo do 83955 precisa.
+
+    Em lote, 2 ou 3 consultas: `nf_faturamento` (a marca do sweep, o erro,
+    a hora da marca e o status da etiqueta); `nf_nota` ∪ `nf_etiqueta_arquivo`
+    (o pedido já tem NF ou etiqueta); e, SÓ para quem tem a marca do sweep
+    ('sem_estoque'/'restricao'), a trilha mais nova da `margem_audit` de
+    situação (qualquer direção) ou de SKU — a marca é velha se algo mexeu
+    no pedido depois dela (`ag_cancelamento.nf_vencida`). Quem chama passa
+    só os pedidos em 83955.
+
+    LIMITES CONHECIDOS (4a): a hora da marca é o `updated_at` da linha, que
+    anda com QUALQUER update dela (etiqueta, impressão, `nf_recuperar`) — uma
+    marca velha pode parecer mais nova que a trilha que a envelheceu (na
+    falta de estoque o SKU do erro ainda segura; na restrição, só a trilha).
+    E qualquer `status_etiqueta` preenchido conta como etiqueta, inclusive
+    'erro'/'processando' de um ciclo anterior: a marca viva vira
+    `pos_nf_manual` (o lado seguro, sem falar em cancelamento).
+    """
+    lista = sorted({n for n in numeros if n})
+    if not lista:
+        return {}
+    marcas = {
+        r.pedido_bling: r
+        for r in (
+            await session.execute(
+                select(
+                    NfFaturamento.pedido_bling,
+                    NfFaturamento.status_faturamento,
+                    NfFaturamento.erro_faturamento,
+                    NfFaturamento.status_etiqueta,
+                    NfFaturamento.updated_at,
+                ).where(NfFaturamento.pedido_bling.in_(lista))
+            )
+        ).all()
+    }
+    com_nf_ou_etiqueta = set(
+        (
+            await session.execute(
+                select(NfNota.pedido_bling)
+                .where(NfNota.pedido_bling.in_(lista))
+                .union(
+                    select(NfEtiquetaArquivo.pedido_bling).where(
+                        NfEtiquetaArquivo.pedido_bling.in_(lista)
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    marcados = sorted(
+        n for n, r in marcas.items() if (r.status_faturamento or "").strip().lower() in MARCAS_DA_NF
+    )
+    trilhas: dict[str, datetime] = {}
+    if marcados:
+        trilhas = {
+            r.pedido_bling: r.em
+            for r in (
+                await session.execute(
+                    select(MargemAudit.pedido_bling, func.max(MargemAudit.created_at).label("em"))
+                    .where(
+                        MargemAudit.pedido_bling.in_(marcados),
+                        MargemAudit.acao.in_(("situacao", "sku")),
+                    )
+                    .group_by(MargemAudit.pedido_bling)
+                )
+            ).all()
+        }
+    fatos: dict[str, dict[str, Any]] = {}
+    for numero in lista:
+        tem = numero in com_nf_ou_etiqueta
+        marca = marcas.get(numero)
+        if marca is None:
+            fatos[numero] = {"tem_nf_ou_etiqueta": tem}
+            continue
+        fatos[numero] = {
+            "nf_status": (marca.status_faturamento or "").strip() or None,
+            "nf_erro": marca.erro_faturamento,
+            "nf_marcada_em": marca.updated_at,
+            "ultima_trilha_em": trilhas.get(numero),
+            "tem_nf_ou_etiqueta": tem or bool((marca.status_etiqueta or "").strip()),
+        }
+    return fatos
+
+
 async def _com_origem(
     session: AsyncSession, pedidos: Iterable[PedidoBling | None]
 ) -> dict[str, PedidoBling]:
-    """{nº do Bling: pedido} com a origem do 83955 preenchida (uma consulta só)."""
+    """{nº do Bling: pedido} com a origem do 83955 e os fatos da NF preenchidos.
+
+    Só os pedidos em 83955 consultam (a trilha da Margem e `_fatos_nf`): um
+    lote sem pedido em 83955 não faz consulta nenhuma aqui.
+
+    Os fatos da NF têm SAVEPOINT e `try` PRÓPRIOS: se a leitura falhar, os
+    campos da NF ficam no padrão e o resto segue — o painel não perde o
+    pedido inteiro (`_seguro`) e o cron não perde o lote. É o lado seguro:
+    sem marca viva da NF, a trava da Margem (regras 1 a 4) é a mesma de
+    antes do item 4 e o resto cai em "movido à mão", sem falar em
+    cancelamento.
+    """
     por_numero = {p.numero: p for p in pedidos if p is not None}
     em_83955 = [
         n for n, p in por_numero.items() if p.situacao == SITUACAO_AGUARDANDO_CANCELAMENTO_STR
     ]
+    if not em_83955:
+        return por_numero
     origens = await _origens_ag_cancelamento(session, em_83955)
+    nf: dict[str, dict[str, Any]] = {}
+    try:
+        async with session.begin_nested():
+            nf = await _fatos_nf(session, em_83955)
+    except Exception as e:  # noqa: BLE001 — os fatos da NF nunca derrubam o pedido
+        logger.warning("atendimento_fatos_nf_falhou", pedidos=len(em_83955), err=type(e).__name__)
+        nf = {}
     for numero in em_83955:
-        por_numero[numero] = replace(por_numero[numero], origem_ag_cancelamento=origens.get(numero))
+        por_numero[numero] = replace(
+            por_numero[numero], origem_ag_cancelamento=origens.get(numero), **nf.get(numero, {})
+        )
     return por_numero
 
 
@@ -406,7 +559,8 @@ async def pedido_bling(session: AsyncSession, chaves: str | Iterable[str]) -> Pe
     """O pedido do Bling por nº do Bling OU nº na plataforma; chaves em ordem.
 
     A primeira chave que achar vale (como o painel). Lê a trilha da Margem
-    só quando o pedido está em 83955 — é a única regra que precisa dela.
+    e os fatos da NF só quando o pedido está em 83955 — é a única regra que
+    precisa deles.
     """
     lista = [chaves] if isinstance(chaves, str) else list(chaves)
     lista = [str(c).strip() for c in lista if str(c or "").strip()]
@@ -425,6 +579,36 @@ async def pedido_bling_da_conversa(
     if not chaves:
         return None
     return await pedido_bling(session, chaves)
+
+
+# Teto de pedidos da lista Ag. cancelamento (em produção são 10 a 20).
+MAX_PEDIDOS_83955 = 300
+
+
+async def pedidos_em_83955(session: AsyncSession, desde: datetime) -> list[PedidoBling]:
+    """Os pedidos em 83955 (Aguardando Cancelamento) desde `desde`, o mais recente antes.
+
+    A lista Ag. cancelamento do item 4 (fase 4b): pelo PEDIDO, não pela
+    conversa — só 27 dos 78 pedidos sem estoque tinham conversa no DaVinci.
+    As mesmas funções da etiqueta (`_pedido_das_linhas`, `_com_origem` com a
+    trilha da Margem e os fatos da NF): o motivo sai igual ao do painel.
+    """
+    linhas = (
+        await session.execute(
+            select(*_COLUNAS_BLING).where(
+                BlingOrder.situacao == SITUACAO_AGUARDANDO_CANCELAMENTO_STR,
+                BlingOrder.data >= desde,
+            )
+        )
+    ).all()
+    por_numero: dict[str, list[Any]] = {}
+    for r in sorted(linhas, key=_recentes_primeiro):
+        if r.numero:
+            por_numero.setdefault(r.numero, []).append(r)
+    numeros = list(por_numero)[:MAX_PEDIDOS_83955]
+    pedidos = [_pedido_das_linhas([n], por_numero[n]) for n in numeros]
+    com_origem = await _com_origem(session, pedidos)
+    return [com_origem[n] for n in numeros if n in com_origem]
 
 
 # ── Reclamações da plataforma ─────────────────────────────────────────────
@@ -718,7 +902,8 @@ def _montar_fatos(
 ) -> FatosEtiqueta:
     """Os fatos de UMA conversa a partir do que já foi lido. PURA.
 
-    `pedido` = o pedido do Bling dela (com a origem do 83955); `abertas` =
+    `pedido` = o pedido do Bling dela (com a origem do 83955 e, em 83955,
+    os fatos da NF que decidem o motivo — `_com_origem`); `abertas` =
     as reclamações abertas dela, a mais urgente primeiro; `conhecidos` =
     os `claim_ids` do pack que já são linha em `atendimento_reclamacoes` (a
     tabela decide o tipo e se está aberta — o pack só vale para o resto);
@@ -754,12 +939,18 @@ def _montar_fatos(
         motivo_midia = f"{o_que} no {rede}"
 
     # Bling: 83955 (Ag. cancelamento, filtrando a trava da Margem) e 83957.
+    # O motivo diz o PORQUÊ (item 4): o classificador, com o status do
+    # pedido na plataforma pelo retrato da conversa (o comprador pediu?).
+    # Com a etiqueta visível o pedido está em 83955: o classificador sempre
+    # devolve o motivo (o status da plataforma só escolhe entre regras visíveis).
     ag_cancelamento = ag_cancelamento_visivel(pedido)
-    motivo_ag = (
-        f"pedido {pedido.numero} em Aguardando Cancelamento no Bling"
-        if ag_cancelamento and pedido is not None
-        else None
-    )
+    motivo_ag = None
+    if ag_cancelamento and pedido is not None:
+        m = classificar(pedido, status_plataforma=status_na_plataforma(conversa.dados))
+        if m is not None:
+            motivo_ag = cortar(
+                f"pedido {pedido.numero} em Aguardando Cancelamento — {m.texto_interno}"
+            )
     devolucao_bling = pedido is not None and pedido.situacao == SITUACAO_AGUARDANDO_DEVOLUCAO_STR
 
     # Reclamações da plataforma (a tabela) + o claim do pack do ML.
@@ -808,13 +999,15 @@ def _montar_fatos(
 async def fatos_em_lote(
     session: AsyncSession, conversas: Sequence[AtendimentoConversa]
 ) -> dict[UUID, FatosEtiqueta]:
-    """Os fatos de VÁRIAS conversas, lidos do banco em 4 a 6 consultas. Não escreve nada.
+    """Os fatos de VÁRIAS conversas, lidos do banco em 4 a 9 consultas. Não escreve nada.
 
     O espelho do Bling (uma consulta para as chaves de todas), a trilha da
-    Margem (só os pedidos em 83955), as reclamações abertas e as avaliações
-    pendentes (pela conversa ou pelo pedido). É o caminho do cron e do
-    preenchimento: centenas de conversas sem uma consulta por conversa. Pode
-    levantar (erro de banco): quem chama roda num SAVEPOINT.
+    Margem (só os pedidos em 83955) e, desde o item 4, os fatos da NF
+    (também só em 83955: 2 a 3 consultas a mais, `_fatos_nf`; lote sem
+    pedido em 83955 não faz nenhuma), as reclamações abertas e as
+    avaliações pendentes (pela conversa ou pelo pedido). É o caminho do
+    cron e do preenchimento: centenas de conversas sem uma consulta por
+    conversa. Pode levantar (erro de banco): quem chama roda num SAVEPOINT.
     """
     if not conversas:
         return {}

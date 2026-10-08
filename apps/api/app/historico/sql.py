@@ -85,6 +85,11 @@ TETO_POR_PEDIDO = 200
 # do atendimento. As quatro já têm trilha própria (`garantia_log`: quem
 # consultou, cadastrou, alterou — CPF mascarado — e o robô que recalculou), e
 # o Histórico geral continua com o evento de cada ação (nomes.ACOES).
+# Troca de produto (07/10/2026, migration 0383): `atendimento_trocas` guarda a
+# resposta do comprador colada como prova do aceite (`aceite_texto`) e JÁ É a
+# trilha da troca (quem, quando, cada passo no Bling). Fora. O que a troca muda
+# em `bling_orders` e `nf_faturamento` continua no Histórico, em nome de quem
+# clicou (cada commit dos passos nasce marcado pelo `after_begin`).
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -100,7 +105,7 @@ EXCLUIDAS = re.compile(
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"
-    r"|automacao_registros)$"
+    r"|automacao_registros|trocas)$"
     # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)
     r"|garantias$|garantia_(atendimentos|atendimento_anexos|log)$)"
     r"|(_bak|bkp|backup)",

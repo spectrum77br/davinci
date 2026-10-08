@@ -630,7 +630,10 @@ async def test_hold_nao_segura_de_novo_o_liberado(db: AsyncSession):
 
     res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
 
-    assert res["reprovados"] == 0 and res["held"] == 0
+    # `pulados` também 0: o fake responde 83955 no GET, então um liberado que
+    # voltasse a ser candidato seria PULADO (não segurado) — sem isto o teste
+    # não provaria que ele saiu dos candidatos.
+    assert res["reprovados"] == 0 and res["held"] == 0 and res["pulados"] == 0
     assert tuple(await _bling_order(db, 717)) == ("6", "Aprovado", None)
 
 

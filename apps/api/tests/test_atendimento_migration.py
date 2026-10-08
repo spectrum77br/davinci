@@ -44,6 +44,12 @@ marca, sem `atendimento_*`); o downgrade dela volta o catálogo ao de depois da
 resposta da avaliação, "pedido recebido" do TikTok — todas só simulação) são
 semeadas pela 0371, que só insere regras (nenhuma tabela) e cujo downgrade
 apaga só as dela.
+
+A 0379 (07/10/2026, troca de produto — item 4, fase 4c) cria
+`atendimento_trocas`: CHECK do estado e da fonte do aceite, UNIQUE da
+`idem_key` e o índice único PARCIAL de uma troca aberta por pedido. Roda em
+cima de todas (as 0372–0378 do meio não tocam em `atendimento_*`); o
+downgrade dela volta o catálogo ao de depois da 0371.
 """
 
 # ruff: noqa: S608
@@ -70,6 +76,7 @@ _MIGRATION_AVALIACOES = _VERSOES / "0358_atendimento_avaliacoes.py"
 _MIGRATION_CARRINHO_REDES = _VERSOES / "0362_atendimento_carrinho_redes.py"
 _MIGRATION_AUTOMACOES = _VERSOES / "0366_atendimento_automacoes.py"
 _MIGRATION_SIMULACAO = _VERSOES / "0371_atendimento_automacoes_simulacao.py"
+_MIGRATION_TROCAS = _VERSOES / "0383_atendimento_trocas.py"
 TABELAS = sorted(t.name for t in Base.metadata.sorted_tables if t.name.startswith("atendimento_"))
 
 
@@ -172,11 +179,16 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     assert simulacao.revision == "0371_atendimento_automacoes_simulacao"
     # Depois do último head do origin em 05/10 à noite (0367: flex; 0368–0370: denúncia).
     assert simulacao.down_revision == "0370_denuncia_robo_agenda_replica_19h"
+    trocas = _carregar_migration(_MIGRATION_TROCAS)
+    assert trocas.revision == "0383_atendimento_trocas"
+    # Nasceu 0379 em 07/10 e foi renumerada para 0383 em 08/10, quando o origin
+    # chegou primeiro com 0379–0382 (preços, garantias, anúncios e conferência).
+    assert trocas.down_revision == "0382_conferencia_plataformas"
     # 7 da primeira parte + 3 da parte 2 (categorias e os índices do cartão
     # "Cliente") + 2 da 0353 (histórico da etiqueta e reclamações) + 3 da
     # 0362 (carrinhos, publicações e comentários) + 2 da 0366 (regras e
-    # registro das mensagens automáticas).
-    assert len(TABELAS) == 17
+    # registro das mensagens automáticas) + 1 da 0383 (trocas de produto).
+    assert len(TABELAS) == 18
     assert {
         "atendimento_categorias",
         "atendimento_pedidos_comprador",
@@ -188,6 +200,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         "atendimento_comentarios",
         "atendimento_automacao_regras",
         "atendimento_automacao_registros",
+        "atendimento_trocas",
     } <= set(TABELAS)
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
@@ -224,6 +237,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     externo.SCHEMA = rascunho
     automacoes.SCHEMA = rascunho
     simulacao.SCHEMA = rascunho
+    trocas.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -433,6 +447,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await db.execute(text(f'DELETE FROM "{rascunho}".integrations'))
         await db.commit()
 
+        # 0379: a troca de produto.
+        antes_da_0379 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (trocas,))
+        await db.commit()
+
         da_migration = await _catalogo(db, rascunho, rascunho)
         do_model = await _catalogo(db, schema_model, schema_model)
         assert da_migration["tabelas"] == TABELAS
@@ -487,6 +507,15 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "fk_atendimento_automacao_registros_conversa",
             "fk_atendimento_automacao_registros_gatilho",
             "fk_atendimento_automacao_registros_duoke",
+            # 0379: a troca (CHECKs do estado e do aceite, a idem_key, a FK
+            # da mensagem do aceite com nome à mão).
+            "pk_atendimento_trocas",
+            "ck_atendimento_trocas_estado",
+            "ck_atendimento_trocas_aceite_fonte",
+            "uq_atendimento_trocas_idem_key",
+            "fk_atendimento_trocas_conversa_id_atendimento_conversas",
+            "fk_atendimento_trocas_mensagem_aceite",
+            "fk_atendimento_trocas_criado_por_users",
         } <= nomes
         assert "ck_atendimento_canais_integracao_ou_robo" not in nomes
         assert da_migration["colunas"] == do_model["colunas"]
@@ -608,6 +637,22 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "(integration_id, automacao, devido_em)" in defs[
             "ix_atendimento_automacao_registros_tela"
         ]
+
+        # 0379: UMA troca aberta por pedido (parcial: a concluída e a abortada não contam).
+        assert "UNIQUE" in defs["uq_atendimento_trocas_aberta"]
+        assert "(pedido_bling)" in defs["uq_atendimento_trocas_aberta"]
+        assert "concluida" in defs["uq_atendimento_trocas_aberta"]
+        assert "abortada" in defs["uq_atendimento_trocas_aberta"]
+        assert cols[("atendimento_trocas", "automatica")][4:] == ("NO", "false")
+        assert cols[("atendimento_trocas", "passos")][4:] == ("NO", "'[]'::jsonb")
+        assert cols[("atendimento_trocas", "criado_por")][4] == "YES"
+        assert cols[("atendimento_trocas", "aceite_fonte")][4] == "YES"
+
+        # O downgrade da 0379 volta EXATAMENTE ao catálogo de depois da 0371.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (trocas,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0379
 
         # O downgrade da 0366 volta EXATAMENTE ao catálogo de depois da 0362.
         conn = await db.connection()

@@ -16,12 +16,23 @@ O que estes testes seguram:
 - AdsPower: o perfil pela integração, pelo nome da conta, ou o motivo de
   não haver; o registro de quem abriu;
 - busca por nº do Bling e por SKU (o encaixe da lista);
-- as rotas novas têm a MESMA trava de acesso da caixa (`_so_admin`).
+- as rotas novas têm a MESMA trava de acesso da caixa (`_so_admin`);
+- AGUARDANDO CANCELAMENTO (item 4, 02/10/2026): o bloco do porquê só em
+  83955, com o que o painel já leu (nenhum GET a mais); a trava da Margem
+  é interna (`etiqueta=False`, sem falar em cancelamento); o status da
+  plataforma entra (o comprador pediu); a 1ª linha das Observações só no
+  "movido à mão", sem o recado do robô da Margem; falha do classificador
+  vira `desconhecido` (só em 83955) e falha nos fatos da NF não derruba o
+  pedido;
+- SUGESTÕES DE TROCA (item 4, fase 4b, 05/10/2026): só na falta de
+  estoque e com `atendimento_troca_sugestoes_ativa`; nenhuma chamada ao
+  Bling além das Observações; o % do custo só para quem vê a Margem.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Annotated
 from uuid import uuid4
 
@@ -29,7 +40,7 @@ import httpx
 import pytest
 from fastapi import Depends
 from fastapi.routing import APIRoute
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -43,6 +54,8 @@ from app.models import (
     BlingOrder,
     Integration,
     IntegrationPlatform,
+    MargemAudit,
+    NfFaturamento,
     Product,
     StoreInfo,
     User,
@@ -52,7 +65,7 @@ from app.routers import atendimento as rota
 from app.routers import atendimento_painel
 from app.security.cipher import encrypt_json
 from app.services import links_shopee
-from app.services.atendimento import gravar, ia, painel
+from app.services.atendimento import etiqueta_fatos, gravar, ia, painel, troca_sugestoes
 from app.services.atendimento.constantes import e_nota
 
 URL = "/api/atendimento"
@@ -72,6 +85,8 @@ def _chaves(monkeypatch):
         "atendimento_ia_ativa",
         "atendimento_auto_ativo",
         "atendimento_simulador",
+        # A troca (4b) vem desligada: o .env local pode trazer ligada.
+        "atendimento_troca_sugestoes_ativa",
     ):
         monkeypatch.setattr(s, nome, False)
     monkeypatch.setattr(s, "atendimento_usuarios", "")
@@ -80,8 +95,9 @@ def _chaves(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _sem_cache(monkeypatch):
-    """Memória das Observações limpa a cada teste (Redis falso: sempre falha)."""
+    """Memórias limpas a cada teste: Observações (Redis falso: sempre falha) e catálogo da troca."""
     painel._OBS_LOCAL.clear()
+    troca_sugestoes.limpar_memoria()
 
     class _RedisFora:
         async def get(self, *a, **k):
@@ -98,6 +114,7 @@ def _sem_cache(monkeypatch):
     monkeypatch.setattr(rc, "redis", _RedisFora())
     yield
     painel._OBS_LOCAL.clear()
+    troca_sugestoes.limpar_memoria()
 
 
 @pytest.fixture(autouse=True)
@@ -898,3 +915,479 @@ async def test_painel_do_instagram_e_vazio(client, admin):
     assert r.status_code == 200
     assert r.json()["adspower"]["perfil"] is None
     assert r.json()["envio_foto"]["pode"] is False
+
+
+# ─────────────── Aguardando Cancelamento (item 4) ───────────────
+
+
+async def _marca_nf(db, numero, status, erro, quando):
+    """A marca do sweep de NF (`nf_faturamento`), com a hora dela."""
+    db.add(
+        NfFaturamento(
+            pedido_bling=numero,
+            status_faturamento=status,
+            erro_faturamento=erro,
+            created_at=quando,
+            updated_at=quando,
+        )
+    )
+    await db.commit()
+
+
+async def test_painel_bloco_ag_cancelamento(db, client, admin, make_user, bling):
+    """Falta de estoque viva: o porquê com os SKUs, sem GET a mais; fora de 83955, sem bloco."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925ABC")
+    await _pedido_bling(
+        db,
+        numero="297840",
+        numeroloja="250925ABC",
+        itens=(("dg053.sp", 1), ("a001.sp", 1)),
+        situacao="83955",
+    )
+    await _marca_nf(
+        db,
+        "297840",
+        "sem_estoque",
+        "Aguardando Cancelamento — saldo negativo: dg053.sp",
+        AGORA - timedelta(hours=1),
+    )
+
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    assert r.json()["ag_cancelamento"] == {
+        "codigo": "sem_estoque",
+        "titulo": "Falta de estoque",
+        "texto": "falta de estoque: dg053.sp",
+        "etiqueta": True,
+        "fala_cancelamento": True,
+        "pode_sugerir_troca": True,
+        "skus": ["dg053.sp"],
+        "conflito": None,
+        # A 1ª linha das Observações só entra no "movido à mão".
+        "observacao_topo": None,
+        # Até a troca de produto (4c).
+        "troca_aberta": None,
+        # O "Trocar" (4c) e o "Enviar oferta" (4d): a troca nasce desligada.
+        "troca_envio": {
+            "disponivel": False,
+            "motivo": "troca_desligada",
+            "texto_motivo": "A troca de produto está desligada (ATENDIMENTO_TROCA_ATIVA).",
+        },
+        "oferta_envio": {
+            "disponivel": False,
+            "motivo": "troca_desligada",
+            "texto_motivo": "A troca de produto está desligada (ATENDIMENTO_TROCA_ATIVA).",
+            "ultima_mensagem_id": None,
+        },
+    }
+    # Nenhuma troca aberta no pedido (o `troca_aberta` do painel é o de fora de 83955).
+    assert r.json()["troca_aberta"] is None
+    # O único GET ao Bling é o das Observações (o motivo usa o que já foi lido).
+    assert bling.chamadas == [9001]
+
+    # Fora de 83955: sem bloco.
+    await db.execute(update(BlingOrder).where(BlingOrder.numero == "297840").values(situacao="6"))
+    await db.commit()
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    assert r.json()["ag_cancelamento"] is None
+
+
+async def test_painel_trava_da_margem_e_interna(db, client, admin, make_user, bling):
+    """O robô da Margem segurou: o cartão diz que é trava interna, sem etiqueta nem cancelamento."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925MRG")
+    await _pedido_bling(db, numero="297841", numeroloja="250925MRG", situacao="83955")
+    await db.execute(
+        update(BlingOrder).where(BlingOrder.numero == "297841").values(status="Pendente")
+    )
+    db.add(
+        MargemAudit(
+            pedido_bling="297841",
+            acao="situacao",
+            valor_antigo="6",
+            valor_novo="83955",
+            origem="margens_auto",
+            mudado_por=None,
+            created_at=AGORA - timedelta(hours=2),
+        )
+    )
+    await db.commit()
+
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    ag = r.json()["ag_cancelamento"]
+    assert (ag["codigo"], ag["etiqueta"], ag["fala_cancelamento"], ag["pode_sugerir_troca"]) == (
+        "margem_trava",
+        False,
+        False,
+        False,
+    )
+    assert ag["titulo"] == "Trava interna da Margem"
+    assert ag["texto"] == "trava interna da Margem (segurado para análise): não é cancelamento"
+    assert (ag["skus"], ag["conflito"], ag["observacao_topo"]) == ([], None, None)
+
+    # A NF também marcou falta de estoque: a Margem vence, e o cartão avisa.
+    await _marca_nf(
+        db,
+        "297841",
+        "sem_estoque",
+        "Aguardando Cancelamento — saldo negativo: dg053.ci",
+        AGORA - timedelta(hours=1),
+    )
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    ag = r.json()["ag_cancelamento"]
+    assert (ag["codigo"], ag["etiqueta"]) == ("margem_trava", False)
+    assert ag["conflito"] == "a NF também marcou falta de estoque: dg053.ci"
+
+
+async def test_painel_movido_a_mao_mostra_a_observacao_do_topo(
+    db, client, admin, make_user, bling
+):
+    """Sem registro do motivo: a 1ª linha das Observações do Bling (as que o painel já leu)."""
+    bling.obs = "\n   02/10 - cliente pediu para   cancelar pelo chat  \nlinha de baixo"
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925MAO")
+    await _pedido_bling(db, numero="297842", numeroloja="250925MAO", situacao="83955")
+
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    ag = r.json()["ag_cancelamento"]
+    assert (ag["codigo"], ag["titulo"], ag["etiqueta"], ag["fala_cancelamento"]) == (
+        "manual",
+        "Motivo não registrado",
+        True,
+        False,
+    )
+    assert ag["observacao_topo"] == "02/10 - cliente pediu para cancelar pelo chat"
+
+    # NF já emitida: o 83955 veio depois, à mão — a observação também entra.
+    await _marca_nf(db, "297842", "ok", None, AGORA - timedelta(hours=1))
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    ag = r.json()["ag_cancelamento"]
+    assert ag["codigo"] == "pos_nf_manual"
+    assert ag["texto"] == "motivo não registrado, movido à mão no Bling (NF já emitida)"
+    assert ag["observacao_topo"] == "02/10 - cliente pediu para cancelar pelo chat"
+    # Uma leitura só das Observações: a segunda veio da memória de 5 min.
+    assert bling.chamadas == [9001]
+
+
+async def test_painel_ag_cancelamento_falha_sozinho(
+    db, client, admin, make_user, bling, monkeypatch
+):
+    """O classificador quebrou: o bloco fecha do lado seguro e o resto do painel aparece."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925ERR")
+    await _pedido_bling(db, numero="297843", numeroloja="250925ERR", situacao="83955")
+
+    def _quebra(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(painel, "classificar", _quebra)
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert p["pedido"]["numero_bling"] == "297843"
+    assert p["observacoes_bling"]["observacoes"] == "23/09 - restrição de envio"
+    ag = p["ag_cancelamento"]
+    assert (ag["codigo"], ag["titulo"], ag["etiqueta"], ag["fala_cancelamento"]) == (
+        "desconhecido",
+        "Motivo não conferido",
+        False,
+        False,
+    )
+
+    # Fora de 83955, a falha do classificador não inventa cartão.
+    await db.execute(update(BlingOrder).where(BlingOrder.numero == "297843").values(situacao="6"))
+    await db.commit()
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido"]["numero_bling"] == "297843"
+    assert r.json()["ag_cancelamento"] is None
+
+
+async def test_painel_comprador_pediu_o_cancelamento(db, client, admin, make_user, bling):
+    """O retrato da conversa diz IN_CANCEL: o painel classifica COM o status da plataforma."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(
+        db, integ, canal, pedido="250925CLI", dados={"pedido_mkt": {"status": "IN_CANCEL"}}
+    )
+    await _pedido_bling(db, numero="297844", numeroloja="250925CLI", situacao="83955")
+
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    ag = r.json()["ag_cancelamento"]
+    assert (ag["codigo"], ag["titulo"], ag["etiqueta"], ag["fala_cancelamento"]) == (
+        "pedido_cliente",
+        "Cancelamento pedido pelo comprador",
+        True,
+        True,
+    )
+    assert ag["texto"] == "o comprador pediu o cancelamento na plataforma (IN_CANCEL)"
+    assert ag["observacao_topo"] is None
+
+
+async def test_painel_fatos_da_nf_quebrados_mantem_o_pedido(
+    db, client, admin, make_user, bling, monkeypatch
+):
+    """Erro de banco nos fatos da NF: o painel mantém pedido e estoque, e a trava segue oculta."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925NFX")
+    await _pedido_bling(db, numero="297845", numeroloja="250925NFX", situacao="83955")
+    await db.execute(
+        update(BlingOrder).where(BlingOrder.numero == "297845").values(status="Pendente")
+    )
+    db.add(
+        MargemAudit(
+            pedido_bling="297845",
+            acao="situacao",
+            valor_antigo="6",
+            valor_novo="83955",
+            origem="margens_auto",
+            mudado_por=None,
+            created_at=AGORA - timedelta(hours=2),
+        )
+    )
+    await db.commit()
+
+    async def _quebra(session, numeros):
+        await session.execute(text("SELECT 1 FROM tabela_que_nao_existe"))
+
+    monkeypatch.setattr(etiqueta_fatos, "_fatos_nf", _quebra)
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert p["pedido"]["numero_bling"] == "297845"
+    assert [i["sku"] for i in p["estoque"]["itens"]] == ["dg053.ci"]
+    ag = p["ag_cancelamento"]
+    assert (ag["codigo"], ag["etiqueta"], ag["fala_cancelamento"]) == ("margem_trava", False, False)
+
+
+async def test_painel_recado_do_robo_nao_e_observacao_da_equipe(
+    db, client, admin, make_user, bling
+):
+    """O recado do robô da Margem no topo das Observações não vira "Observação do Bling"."""
+    bling.obs = (
+        "02/10 - Margem DaVinci: pedido segurado para análise (saldo divergente) — situação "
+        "movida para Aguardando Cancelamento.\n01/10 - cliente pediu troca de cor"
+    )
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925ROB")
+    await _pedido_bling(db, numero="297846", numeroloja="250925ROB", situacao="83955")
+
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    ag = r.json()["ag_cancelamento"]
+    assert ag["codigo"] == "manual"
+    assert ag["observacao_topo"] == "01/10 - cliente pediu troca de cor"
+
+
+def test_primeira_linha_das_observacoes():
+    assert painel.primeira_linha(None) is None
+    assert painel.primeira_linha(" \n\t\n") is None
+    assert painel.primeira_linha("\n a  b \nc") == "a b"
+    longa = painel.primeira_linha("x" * 400)
+    assert len(longa) == 300 and longa.endswith("…")
+    # O recado do robô da Margem (`compose_observacoes`) é pulado.
+    assert painel.primeira_linha("02/10 - Margem DaVinci: pedido reprovado\nfoi à mão") == (
+        "foi à mão"
+    )
+    assert painel.primeira_linha("02/10 - Margem DaVinci: pedido liberado automaticamente") is None
+    assert painel.primeira_linha("Margem DaVinci citada pela equipe") == (
+        "Margem DaVinci citada pela equipe"
+    )
+
+
+# ─────────────── Sugestões de troca (item 4, fase 4b) ───────────────
+
+
+async def _catalogo_a17(db, dono):
+    """A17 Pro Max 12.64: o Branco sem peça, o Laranja com 9 (o mesmo modelo, outra cor)."""
+    for sku, nome, estoque, bid in (
+        ("dg053.sp", "Uranyx A17 Pro Max 12.64 - Branco", 0, 501),
+        ("dg054.sp", "Uranyx A17 Pro Max 12.64 - Laranja", 9, 502),
+    ):
+        db.add(
+            Product(
+                user_id=dono.id,
+                sku=sku,
+                name=nome,
+                stock=estoque,
+                formato="S",
+                situacao="A",
+                bling_cost_price=Decimal("495"),
+                bling_product_id=bid,
+            )
+        )
+    await db.commit()
+
+
+async def _pedido_em_falta(db, *, numero="297850", numeroloja="250925TRC", erro_sku="dg053.sp"):
+    await _pedido_bling(
+        db, numero=numero, numeroloja=numeroloja, itens=(("dg053.sp", 1),), situacao="83955"
+    )
+    await _marca_nf(
+        db,
+        numero,
+        "sem_estoque",
+        f"Aguardando Cancelamento — saldo negativo: {erro_sku}",
+        AGORA - timedelta(hours=1),
+    )
+
+
+@pytest.fixture
+def troca_ligada(_chaves, monkeypatch):
+    monkeypatch.setattr(_chaves, "atendimento_troca_sugestoes_ativa", True)
+    monkeypatch.setattr(_chaves, "atendimento_troca_teto_custo_pct", 5.0)
+    monkeypatch.setattr(_chaves, "atendimento_troca_piso_nivel2_pct", -10.0)
+    return _chaves
+
+
+def test_chave_da_troca_vem_desligada():
+    from app.config import Settings
+
+    campos = Settings.model_fields
+    assert campos["atendimento_troca_sugestoes_ativa"].default is False
+    assert campos["atendimento_troca_teto_custo_pct"].default == 5.0
+    assert campos["atendimento_troca_piso_nivel2_pct"].default == -10.0
+
+
+async def test_sugestoes_so_para_falta_de_estoque(
+    db, client, admin, make_user, bling, _chaves, monkeypatch
+):
+    """Falta de estoque + chave ligada: até 3 parecidos e o texto da oferta; o resto, sem bloco."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925TRC")
+    await _catalogo_a17(db, dono)
+    await _pedido_em_falta(db)
+
+    # A chave DESLIGADA (o padrão): o motivo aparece, as sugestões não.
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    assert r.json()["ag_cancelamento"]["pode_sugerir_troca"] is True
+    assert r.json()["sugestoes_troca"] is None
+
+    monkeypatch.setattr(_chaves, "atendimento_troca_sugestoes_ativa", True)
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    st = r.json()["sugestoes_troca"]
+    assert (st["falhou"], st["aviso"], st["ve_custo"]) == (False, None, True)
+    assert st["catalogo_lido_em"]
+    [item] = st["itens"]
+    assert (item["sku_original"], item["quantidade"], item["sem_parecido"]) == (
+        "dg053.sp",
+        1,
+        False,
+    )
+    assert item["nome_original"] == "Uranyx A17 Pro Max 12.64 - Branco"
+    [sug] = item["sugestoes"]
+    assert (sug["sku"], sug["nivel"], sug["estoque"], sug["dif_custo_pct"]) == (
+        "dg054.sp",
+        1,
+        9,
+        0.0,
+    )
+    assert sug["produto_id"] == 502 and sug["motivo_fora"] is None
+    assert "Laranja" in item["texto_oferta"] and "pelo mesmo valor" in item["texto_oferta"]
+    assert item["texto_oferta"] == sug["texto_oferta"]
+
+    # Trava da Margem por cima da marca: sem sugestão (a Margem vence).
+    await db.execute(
+        update(BlingOrder).where(BlingOrder.numero == "297850").values(status="Pendente")
+    )
+    await db.commit()
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.json()["ag_cancelamento"]["codigo"] == "margem_trava"
+    assert r.json()["sugestoes_troca"] is None
+
+    # Restrição de envio: sem troca.
+    await db.execute(
+        update(BlingOrder).where(BlingOrder.numero == "297850").values(status=None)
+    )
+    await db.execute(
+        update(NfFaturamento)
+        .where(NfFaturamento.pedido_bling == "297850")
+        .values(status_faturamento="restricao", erro_faturamento="Restrição Shopee — RJ")
+    )
+    await db.commit()
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.json()["ag_cancelamento"]["codigo"] == "restricao_envio"
+    assert r.json()["sugestoes_troca"] is None
+
+    # Movido à mão (sem marca da NF): sem troca.
+    await db.execute(text("DELETE FROM nf_faturamento WHERE pedido_bling = '297850'"))
+    await db.commit()
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.json()["ag_cancelamento"]["codigo"] == "manual"
+    assert r.json()["sugestoes_troca"] is None
+
+
+async def test_sugestoes_nao_chamam_o_bling(db, client, admin, make_user, bling, troca_ligada):
+    """O único GET ao Bling do painel é o das Observações (as sugestões leem o DaVinci)."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925TRC")
+    await _catalogo_a17(db, dono)
+    await _pedido_em_falta(db)
+
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    assert r.json()["sugestoes_troca"]["itens"][0]["sugestoes"]
+    assert bling.chamadas == [9001]
+    # A 2ª abertura usa a memória das Observações (5 min) e a do catálogo (10 min).
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.json()["sugestoes_troca"]["itens"][0]["sugestoes"]
+    assert bling.chamadas == [9001]
+
+
+async def test_sugestoes_sem_o_custo_para_quem_nao_ve_a_margem(
+    db, client, make_user, auth_as, monkeypatch, bling, troca_ligada
+):
+    monkeypatch.setattr(rota, "SO_ADMIN", False)
+    u = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
+    auth_as(u)
+    integ, canal = await _loja(db, u)
+    conversa = await _conversa(db, integ, canal, pedido="250925TRC")
+    await _catalogo_a17(db, u)
+    await _pedido_em_falta(db)
+
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    st = r.json()["sugestoes_troca"]
+    assert st["ve_custo"] is False
+    assert st["itens"][0]["sugestoes"][0]["sku"] == "dg054.sp"
+    assert st["itens"][0]["sugestoes"][0]["dif_custo_pct"] is None
+
+
+async def test_sugestoes_falham_sozinhas(
+    db, client, admin, make_user, bling, troca_ligada, monkeypatch
+):
+    """O catálogo quebrou: o bloco vem vazio com `falhou`, e o resto do painel aparece."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal, pedido="250925TRC")
+    await _pedido_em_falta(db)
+
+    async def _quebra(session):
+        await session.execute(text("SELECT 1 FROM tabela_que_nao_existe"))
+
+    monkeypatch.setattr(troca_sugestoes, "_ler_catalogo", _quebra)
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert p["ag_cancelamento"]["codigo"] == "sem_estoque"
+    assert p["sugestoes_troca"] == {
+        "itens": [],
+        "aviso": None,
+        "catalogo_lido_em": None,
+        "ve_custo": True,
+        "falhou": True,
+    }
+    assert p["estoque"]["itens"][0]["sku"] == "dg053.sp"

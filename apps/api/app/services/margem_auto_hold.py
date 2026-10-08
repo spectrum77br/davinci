@@ -127,6 +127,28 @@ Agora o modo do painel manda em tudo:
 E uma lista só: os avisos na hora vão pra lista "Avisar" do robô na
 Ouvidoria (a mesma que o modal Informar da aba Margem edita — o contexto
 `margem_auto` do Informar virou uma janela pra ela, migração 0325).
+
+CONFERE A SITUAÇÃO AO VIVO ANTES DE SEGURAR (02/10/2026 — caso 291997): a
+seleção vem do snapshot, que pode estar velho, e o hold escrevia sem olhar a
+situação do GET — o 291997 ganhou duas trilhas `margens_auto` 6→83955 com 21
+min de diferença (24/08), e um pedido já em Aguardando Cancelamento por falta
+de estoque (sweep de NF), ou que já tinha andado (9/21/15), recebia recado,
+pino e trilha como se o robô o tivesse segurado. Agora `_hold_one` lê a
+situação no GET que já fazia: diferente de Em aberto (inclusive ausente) →
+nada vai ao Bling; a situação que o Bling informou corrige o espelho e o
+snapshot (GET sem situação não apaga nada) e o pedido sai dos candidatos. E o
+PATCH que volta "já estava nessa situação" (alguém moveu entre o PUT do
+recado e o PATCH — ou entre o GET e o PATCH, quando o recado já estava lá e
+não houve PUT) não grava pino nem trilha. Os dois casos contam como
+`pulados` no `run`, sem aviso no Threema.
+RISCO CONHECIDO (crítica M3; já existia antes): o PUT do recado leva a
+situação que veio no GET (`build_observacoes_put_body`). Se alguém puser o
+pedido em 83955 entre o GET e o PUT (ex.: o sweep de NF), o PUT pode
+devolvê-lo para Em aberto — aí o PATCH do robô muda de verdade e grava pino
+e trilha `margens_auto`, e o pedido sem estoque aparece como trava da Margem.
+A janela é de uma chamada HTTP. Inverter a ordem (PATCH antes do PUT) foi
+avaliado e não entrou: com o PUT falhando depois do PATCH, o pedido ficaria
+em 83955 sem pino nem trilha e viraria "movido à mão" visível.
 """
 
 from __future__ import annotations
@@ -282,6 +304,26 @@ async def _bling_client(session: AsyncSession) -> BlingClient | None:
     return BlingClient(decrypt_json(integ.credentials), integration_id=integ.id)
 
 
+async def _espelhar_situacao(session: AsyncSession, *, bling_id: int, situacao: str) -> None:
+    """Grava nos espelhos locais (bling_orders + snapshot) a situação que o
+    Bling informou, SEM tocar no pino — é o caminho de quando o robô não
+    segura (ver docstring do módulo). Não faz commit."""
+    await session.execute(
+        update(BlingOrder).where(BlingOrder.bling_id == bling_id).values(situacao=situacao)
+    )
+    await session.execute(
+        text(
+            f"UPDATE {SNAPSHOT_TABLE} "
+            "SET situacao = :sit, "
+            "    situacao_nome = COALESCE("
+            f"       (SELECT s.nome FROM {SITUACAO_BLING_TABLE} s"
+            "         WHERE s.id::text = :sit), situacao_nome) "
+            "WHERE bling_id = :bling_id"
+        ),
+        {"sit": situacao, "bling_id": bling_id},
+    )
+
+
 async def _hold_one(
     session: AsyncSession,
     client: BlingClient,
@@ -291,13 +333,34 @@ async def _hold_one(
     motivo: str,
     hoje: date | None,
     reprovar: bool = False,
-) -> None:
+) -> bool:
+    """Segura (ou reprova) um pedido no Bling. True = o robô segurou agora;
+    False = pulou sem pino nem trilha (o Bling já não tinha o pedido em Em
+    aberto, ou o PATCH voltou "já estava"). Erro de Bling propaga."""
+    # 0) Situação AO VIVO (02/10, caso 291997): o candidato vem do snapshot,
+    #    que pode estar velho. Só Em aberto é segurado; qualquer outra —
+    #    inclusive ausente — não escreve NADA no Bling. A situação que veio
+    #    corrige os espelhos (o pedido sai dos candidatos); GET sem situação
+    #    não grava vazio — fica como está e o próximo tick confere de novo.
+    order = await client.get_order(bling_id)
+    situacao_bling = str((order.get("situacao") or {}).get("id") or "").strip()
+    if situacao_bling != str(SITUACAO_EM_ABERTO):
+        if situacao_bling:
+            await _espelhar_situacao(session, bling_id=bling_id, situacao=situacao_bling)
+            await session.commit()
+        logger.info(
+            "margem_auto_hold_situacao_mudou",
+            pedido_bling=pedido_bling,
+            bling_id=bling_id,
+            situacao_bling=situacao_bling or None,
+        )
+        return False
+
     # 1) Observações (o recado) — antes da situação: se o PUT falhar por erro
     #    transiente, o pedido continua candidato e o próximo tick refaz os dois
     #    passos. 4xx (menos 429) = o Bling recusou a VENDA em validação (ex.:
     #    erro 67, estoque insuficiente) — determinístico, retry não resolve:
     #    loga o corpo do erro e segue pro passo essencial (segurar).
-    order = await client.get_order(bling_id)
     atual = order.get("observacoes")
     novo = compose_observacoes(atual, _mensagem(motivo, reprovado=reprovar), hoje=hoje)
     if novo != (atual or "").strip():
@@ -315,8 +378,21 @@ async def _hold_one(
                 bling=e.response.text[:300],
             )
 
-    # 2) Situação: endpoint dedicado do Bling (não reenvia o pedido).
-    await client.update_order_situacao(bling_id, SITUACAO_AGUARDANDO_CANCELAMENTO)
+    # 2) Situação: endpoint dedicado do Bling (não reenvia o pedido). False =
+    #    "a venda possui a mesma situação": alguém pôs o pedido em 83955 depois
+    #    do PUT do recado (ou do GET, sem PUT) — ex.: o sweep de NF por falta
+    #    de estoque. O hold não é do robô, então nada de pino nem trilha
+    #    `margens_auto`; só o espelho acompanha o Bling. Entre o GET e o PUT, o
+    #    PUT com a situação do GET pode desfazer o 83955 (risco conhecido,
+    #    docstring do módulo). `is False` de propósito: None é sucesso.
+    mudou = await client.update_order_situacao(bling_id, SITUACAO_AGUARDANDO_CANCELAMENTO)
+    if mudou is False:
+        await _espelhar_situacao(
+            session, bling_id=bling_id, situacao=str(SITUACAO_AGUARDANDO_CANCELAMENTO)
+        )
+        await session.commit()
+        logger.info("margem_auto_hold_ja_estava", pedido_bling=pedido_bling, bling_id=bling_id)
+        return False
 
     # 3) Espelhos locais (todas as linhas-item do pedido) + auditoria.
     #    Pino 'Reprovado' (margem abaixo da mínima) tira a linha da aba Pendentes na
@@ -363,6 +439,7 @@ async def _hold_one(
             mudado_por=None,
         )
     await session.commit()
+    return True
 
 
 def _loja(r: Mapping) -> str:
@@ -668,14 +745,22 @@ async def run(
     hoje: date | None = None,
 ) -> dict:
     """Segura/reprova os pendentes "Em aberto" e alerta margens fora do
-    normal. Retorna contadores p/ log/response. Robô da Margem `desligado`
-    na Ouvidoria → não faz nada (vale pro cron, pro "atualizar" da aba e pro
-    auto-refresh da página)."""
+    normal. Retorna contadores p/ log/response (`pulados` = candidatos que o
+    Bling, ao vivo, já não tinha em Em aberto — ver `_hold_one`). Robô da
+    Margem `desligado` na Ouvidoria → não faz nada (vale pro cron, pro
+    "atualizar" da aba e pro auto-refresh da página)."""
     if await _modo_do_robo(session) == "desligado":
-        return {"held": 0, "reprovados": 0, "failed": 0, "alertas": 0, "skipped": "desligado"}
+        return {
+            "held": 0,
+            "reprovados": 0,
+            "pulados": 0,
+            "failed": 0,
+            "alertas": 0,
+            "skipped": "desligado",
+        }
 
     rows = (await session.execute(text(_candidatos_sql()))).mappings().all()
-    held = reprovados = failed = 0
+    held = reprovados = pulados = failed = 0
     skipped: str | None = None
     if rows:
         client = client or await _bling_client(session)
@@ -694,7 +779,7 @@ async def run(
             bool(r["saldo_pendente"]),
         )
         try:
-            await _hold_one(
+            segurou = await _hold_one(
                 session,
                 client,
                 pedido_bling=str(r["pedido_bling"]),
@@ -703,6 +788,13 @@ async def run(
                 hoje=hoje,
                 reprovar=reprovar,
             )
+            if not segurou:
+                # O Bling já não tinha o pedido em Em aberto (ou "já estava"
+                # em 83955): o robô não segurou nada — sem Threema, e a
+                # ocorrência de falha (se houver) não é fechada aqui, porque
+                # não foi a operação que deu certo.
+                pulados += 1
+                continue
             if reprovar:
                 reprovados += 1
             else:
@@ -744,7 +836,13 @@ async def run(
     # Alerta de margem fora do normal (> 60%): independe do Bling (não toca
     # no pedido) — roda mesmo sem candidatos de hold ou sem integração.
     alertas = await _alertar_margem_alta(session)
-    out: dict = {"held": held, "reprovados": reprovados, "failed": failed, "alertas": alertas}
+    out: dict = {
+        "held": held,
+        "reprovados": reprovados,
+        "pulados": pulados,
+        "failed": failed,
+        "alertas": alertas,
+    }
     if skipped:
         out["skipped"] = skipped
     return out

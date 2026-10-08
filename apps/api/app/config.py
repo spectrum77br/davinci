@@ -545,6 +545,41 @@ class Settings(BaseSettings):
     atendimento_automacoes_envio: bool = False
     atendimento_automacoes_teto_dia: int = 400
     atendimento_automacoes_shopee_auto_reply: bool = False
+
+    # Sugestões de TROCA DE PRODUTO no pedido em "Aguardando Cancelamento" por
+    # falta de estoque (item 4, fase 4b, 05/10/2026): o painel do pedido e a
+    # lista Ag. cancelamento mostram até 3 produtos parecidos com estoque no
+    # DaVinci e o texto da oferta para copiar (services/atendimento/
+    # troca_sugestoes.py). SÓ LEITURA: nada vai ao Bling (o botão Trocar é a
+    # 4c). Desligado = o painel não traz `sugestoes_troca`.
+    atendimento_troca_sugestoes_ativa: bool = False
+    # O NOSSO custo pode subir até isto (%) nos níveis 1 e 2 — o cliente paga o
+    # mesmo (regra do Eduardo: outra cor do mesmo modelo primeiro; outro modelo
+    # com a mesma especificação só se o custo subir no máximo 5%).
+    atendimento_troca_teto_custo_pct: float = 5.0
+    # Piso do custo no nível 2 (%): bem mais barato é rebaixar o produto do
+    # comprador (ex.: F109S → G1 a −12%).
+    atendimento_troca_piso_nivel2_pct: float = -10.0
+    # O BOTÃO de troca (item 4, fase 4c, 07/10/2026): troca o item do pedido
+    # em 83955 por falta de estoque no Bling (PUT dos itens) e devolve o
+    # pedido para Em aberto (83955 → 9 → 6), com a Margem aprovada por quem
+    # clicou (services/atendimento/troca.py). Desligado = as rotas respondem
+    # 409 `troca_desligada`. A primeira troca é acompanhada pelo dono: nasce
+    # desligado E com a lista piloto.
+    atendimento_troca_ativa: bool = False
+    # Piloto: nº do Bling separados por vírgula. Preenchida, SÓ esses pedidos
+    # podem ser trocados (pela pessoa e pelo robô); vazia = todos.
+    atendimento_troca_pedidos: str = ""
+    # Recusa a troca se o prazo de envio na plataforma vence em menos disto (h).
+    atendimento_troca_folga_prazo_horas: float = 2.0
+    # A prova do aceite (a mensagem do cliente ou a resposta colada do Duoke)
+    # vale até isto (dias).
+    atendimento_troca_aceite_max_dias: int = 7
+    # O nível 0 (o MESMO produto em outro lote, ex. dg053.ci → dg053.sp) troca
+    # SOZINHO, sem aceite do cliente, como o robô de lote — mas só com esta
+    # chave E `atendimento_troca_ativa` ligadas, e respeitando o piloto
+    # (Eduardo, 07/10/2026). Níveis 1 e 2 sempre pedem o clique de pessoa.
+    atendimento_troca_lote_auto: bool = False
     # Aviso no Telegram de conversa com prazo vencendo/vencido.
     atendimento_alerta_telegram: bool = False
     # SÓ LOCAL: o envio vai para um simulador que finge sucesso (externo_id

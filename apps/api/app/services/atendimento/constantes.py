@@ -434,6 +434,27 @@ def rotulo_etiqueta(etiqueta: str | None) -> str:
     return ROTULO_ETIQUETA.get(etiqueta, etiqueta)
 
 
+# ── Troca de produto (item 4, fase 4b, 05/10/2026) ───────────────────────
+# O texto da OFERTA de troca que a pessoa copia e manda ao comprador do pedido
+# em "Aguardando Cancelamento" por falta de estoque
+# (`troca_sugestoes.texto_oferta`). SEM NÚMERO (nem do pedido, nem preço,
+# nem quantidade), SEM PRAZO e SEM MARGEM: só os nomes dos produtos, "pelo
+# mesmo valor, sem custo a mais" e "se preferir, cancelamos". O lote irmão
+# que o robô de lote já trocaria sozinho (nível 0) não tem texto.
+TEXTO_OFERTA_TROCA = (
+    "Olá! O produto que você comprou ({original}) ficou sem estoque. "
+    "Podemos enviar no lugar: {novo} — pelo mesmo valor, sem custo a mais para você. "
+    "Se preferir, cancelamos o pedido. Podemos seguir com a troca?"
+)
+# O MESMO produto de outro lote do estoque, quando o robô de lote não está
+# ligado para a linha (crítica M1): o comprador confirma antes.
+TEXTO_OFERTA_MESMO_PRODUTO = (
+    "Olá! Para enviar o seu pedido ({original}), vamos separar o mesmo produto de "
+    "outro lote do nosso estoque — pelo mesmo valor, sem custo a mais para você. "
+    "Se preferir, cancelamos o pedido. Podemos seguir assim?"
+)
+
+
 # ── Reclamações, mediações e devoluções da plataforma (RF2) ──────────────
 # `atendimento_reclamacoes.tipo`. A reclamação do ML que subiu para a
 # plataforma decidir é `mediacao`; Shopee/TikTok: disputa = `reclamacao`,

@@ -17,6 +17,7 @@ from app.models.atendimento import (
     AtendimentoRascunho,
     AtendimentoReclamacao,
     AtendimentoRegra,
+    AtendimentoTroca,
 )
 from app.models.audit import AuditFinding, AuditRun, AuditUpload
 from app.models.auth_code import AuthCode
@@ -278,6 +279,7 @@ __all__ = [
     "AtendimentoRascunho",
     "AtendimentoReclamacao",
     "AtendimentoRegra",
+    "AtendimentoTroca",
     "ClaudeConector",
     "AlertSeverity",
     "AlertType",

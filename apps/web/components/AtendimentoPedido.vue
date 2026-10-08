@@ -1,5 +1,7 @@
 <script lang="ts">
 import type { PerfilAdsPower } from '~/components/AtendimentoAdsPower.vue'
+import type { TrocaAberta } from '~/components/AtendimentoTroca.vue'
+import type { OfertaEnvio, TrocaEnvio } from '~/components/AtendimentoTrocaSugestoes.vue'
 
 // Hora do último "atualizar" por conversa, fora do componente: o painel é
 // remontado a cada troca de conversa, e a trava de 60 s (a mesma do backend)
@@ -48,6 +50,91 @@ export type ItemEstoque = {
   saldo_outros_lotes: number
   kit: boolean
   componentes: ComponentePainel[]
+  falhou: boolean
+}
+// Por que o pedido está em "Aguardando Cancelamento" (83955) — item 4, fase
+// 4a (02/10/2026). É o `AgCancelamentoOut` (schemas/atendimento_painel.py):
+// o classificador (services/atendimento/ag_cancelamento.py) com o que o
+// painel já leu; só leitura. Vem só com o pedido em 83955 (null no resto).
+// Quem desenha é o AtendimentoAgCancelamento: o cartão aqui e a faixa da
+// conversa. `codigo`: sem_estoque, restricao_envio, margem_trava,
+// margem_reprovada, pedido_cliente, cancelado_plataforma, pos_nf_manual,
+// manual — ou desconhecido (a classificação falhou: o lado seguro), ou
+// em_analise (o motivo da Margem para quem não vê a Margem: o backend tira
+// os SKUs, o conflito e o porquê).
+export type AgCancelamento = {
+  codigo: string
+  titulo: string
+  // O texto INTERNO do motivo (é a equipe que lê; pode falar da Margem).
+  texto: string
+  // == a etiqueta Ag. cancelamento da conversa.
+  etiqueta: boolean
+  // Pode falar em cancelamento com o comprador?
+  fala_cancelamento: boolean
+  // A troca pode ser sugerida (só falta de estoque); quem decide se há
+  // sugestões é o bloco `sugestoes_troca` (a tela não lê este).
+  pode_sugerir_troca: boolean
+  // Os SKUs em falta (só com a marca de falta de estoque viva), os que ainda estão no pedido.
+  skus: string[]
+  // A trava da Margem venceu, mas a NF também marcou falta de estoque ou restrição.
+  conflito: string | null
+  // A 1ª linha das Observações do Bling — só no "movido à mão".
+  observacao_topo: string | null
+  // A troca de produto em andamento (fase 4c, `TrocaAbertaOut`): o cartão
+  // mostra o estado e o Retomar; null sem ela.
+  troca_aberta: TrocaAberta | null
+  // O "Trocar" pelo DaVinci está liberado (fase 4c: a chave, o piloto, as
+  // travas do pedido)? Ausente na API antiga.
+  troca_envio?: TrocaEnvio | null
+  // O "enviar oferta" pelo DaVinci está liberado (fase 4d)? Ausente na API antiga.
+  oferta_envio?: OfertaEnvio | null
+}
+// Sugestões de TROCA DE PRODUTO (item 4, fase 4b, 05/10/2026): o
+// `SugestoesTrocaOut` (schemas/atendimento_painel.py), de
+// services/atendimento/troca_sugestoes.py. Só na falta de estoque com a chave
+// `atendimento_troca_sugestoes_ativa`; do catálogo do DaVinci (o estoque não
+// é o ao vivo), sem nenhuma chamada ao Bling. Quem desenha é o
+// AtendimentoTrocaSugestoes (dentro do cartão do Ag. cancelamento e na lista
+// Ag. cancelamento), com o "Trocar" (4c) e o "enviar oferta" (4d).
+export type SugestaoTroca = {
+  sku: string
+  nome: string | null
+  // 0 = o mesmo produto em outro lote (o robô de lote faria; sem aceite);
+  // 1 = o mesmo modelo em outra cor (ou o mesmo produto, com aceite);
+  // 2 = outro modelo com a mesma especificação.
+  nivel: number
+  mesmo_produto: boolean
+  // `products.stock` e a hora da linha do produto.
+  estoque: number | null
+  estoque_em: string | null
+  produto_id: number | null
+  // Quanto o NOSSO custo muda (%): só para quem vê a Margem (senão null).
+  dif_custo_pct: number | null
+  // null = elegível; sem_estoque, custo_acima ou custo_abaixo_piso (esmaecida).
+  motivo_fora: string | null
+  // A oferta ao comprador para ESTA sugestão (só na elegível; o nível 0 não tem).
+  texto_oferta: string | null
+}
+export type ItemTroca = {
+  sku_original: string
+  quantidade: number
+  nome_original: string | null
+  sugestoes: SugestaoTroca[]
+  fora: SugestaoTroca[]
+  // O texto da oferta da 1ª sugestão (null no nível 0 ou sem sugestão).
+  texto_oferta: string | null
+  sem_parecido: boolean
+  motivo_sem_sugestao: string | null
+}
+export type SugestoesTroca = {
+  itens: ItemTroca[]
+  // "o item em falta já não está no pedido: <skus>".
+  aviso: string | null
+  // Quando o catálogo (estoque do DaVinci) foi lido — memória de 10 min.
+  catalogo_lido_em: string | null
+  // Quem pediu vê a Margem (recebe `dif_custo_pct`).
+  ve_custo: boolean
+  // A montagem quebrou (o resto do painel segue).
   falhou: boolean
 }
 export type ItemMargem = {
@@ -101,6 +188,13 @@ export type Painel = {
   // O tipo mora no botão (AtendimentoAdsPower.vue).
   adspower: PerfilAdsPower
   envio_foto: EnvioFoto
+  // Só com o pedido em "Aguardando Cancelamento" (item 4); ausente na API antiga.
+  ag_cancelamento?: AgCancelamento | null
+  // Só na falta de estoque com a chave da troca ligada (fase 4b); ausente na API antiga.
+  sugestoes_troca?: SugestoesTroca | null
+  // A troca de produto aberta do pedido em QUALQUER situação (fase 4c): a
+  // parada no meio com o pedido fora de 83955 (em 9 ou já em 6) só vem aqui.
+  troca_aberta?: TrocaAberta | null
   gerado_em: string | null
 }
 
@@ -154,6 +248,18 @@ export function situacaoDoSaldo(it: Pick<ItemEstoque, 'existe' | 'saldo' | 'quan
 //   garantia e o "Vincular à garantia" (AtendimentoGarantia). Vem em
 //   `garantia` (a conversa busca); o botão segue a permissão "Registrar
 //   atendimento", não o `canEdit` da caixa (só leitura não bloqueia).
+// - Aguardando Cancelamento (item 4, fase 4a, 02/10/2026), na aba Pedido: com
+//   o pedido em 83955, o cartão do PORQUÊ (AtendimentoAgCancelamento) logo
+//   abaixo do estoque — falta de estoque, restrição, trava interna da Margem
+//   (não é cancelamento), pedido do comprador, movido à mão. Vem em
+//   `painel.ag_cancelamento`, o mesmo bloco que a faixa da conversa lê. Na
+//   falta de estoque (fase 4b, 05/10/2026), dentro do cartão, até 3 produtos
+//   parecidos e o texto da oferta para copiar (`painel.sugestoes_troca`); com
+//   o "Trocar" e o "enviar oferta" (fases 4c e 4d, 08/10/2026) para quem
+//   mexe. O diálogo da troca (AtendimentoTroca) mora AQUI, fora do cartão.
+//   A troca parada no meio com o pedido FORA de 83955 (o PATCH 6 que falhou
+//   deixa o pedido em Atendido) não tem cartão do porquê: vem no
+//   `painel.troca_aberta`, numa faixa própria com o Retomar.
 import {
   CheckCircle2,
   ChevronDown,
@@ -209,6 +315,7 @@ import {
   type PedidoMkt,
 } from '~/components/AtendimentoPlataforma.vue'
 import type { AcessoGarantia, SituacaoConversa } from '~/lib/garantias'
+import { quemTroca, rotuloEstado, useAcessoDaTroca, type EscolhaTroca } from '~/components/AtendimentoTroca.vue'
 
 const props = withDefaults(defineProps<{
   conversa: ConversaDetalhe
@@ -479,11 +586,39 @@ const linksPedido = computed(() => pnl.value?.links ?? { bling: null, plataforma
 const itensEstoque = computed(() => pnl.value?.estoque?.itens ?? [])
 const margemPedido = computed(() => pnl.value?.margem ?? null)
 const obsBling = computed(() => pnl.value?.observacoes_bling ?? null)
+// O porquê do "Aguardando Cancelamento" (item 4); null fora de 83955.
+const agCancelamento = computed(() => pnl.value?.ag_cancelamento ?? null)
+// As sugestões de troca (fase 4b): vão dentro do cartão do porquê.
+const sugestoesTroca = computed(() => pnl.value?.sugestoes_troca ?? null)
+const numeroBling = computed(() => pnl.value?.pedido?.numero_bling ?? null)
+// O diálogo da troca de produto (fase 4c) mora aqui, fora do cartão: a troca
+// tira o pedido de 83955, o painel relido (a cada 2 min ou ao fechar) some
+// com o cartão — e o resultado não pode sumir junto. O pedido e a troca
+// aberta ficam guardados na abertura; ao fechar depois de uma escrita, o
+// painel é relido (`mudou`).
+const trocaDialogo = ref(false)
+const trocaNumero = ref<string | null>(null)
+const trocaEscolha = ref<EscolhaTroca | null>(null)
+const trocaAbertaDoDialogo = ref<AgCancelamento['troca_aberta']>(null)
+// A troca aberta do pedido: a do cartão (em 83955) ou a do painel (fora dele).
+const trocaAbertaDoPedido = computed(() => agCancelamento.value?.troca_aberta ?? pnl.value?.troca_aberta ?? null)
+// A faixa da troca parada no meio fora de 83955 (sem o cartão do porquê).
+const trocaForaDe83955 = computed(() => (agCancelamento.value ? null : (pnl.value?.troca_aberta ?? null)))
+function abrirTroca(escolha: EscolhaTroca | null) {
+  const aberta = escolha ? null : trocaAbertaDoPedido.value
+  if (!numeroBling.value || (!escolha && !aberta)) return
+  trocaNumero.value = numeroBling.value
+  trocaEscolha.value = escolha
+  trocaAbertaDoDialogo.value = aberta
+  trocaDialogo.value = true
+}
 const NIVEL_SALDO_CLS = {
   cobre: 'bg-emerald-500/15 text-emerald-800 dark:text-emerald-300',
   falta: 'bg-red-500/15 text-red-700 dark:text-red-300',
   sem_dado: 'bg-muted text-muted-foreground',
 } as const
+// Quem retoma a troca parada fora de 83955 (o mesmo critério do cartão).
+const acessoTroca = useAcessoDaTroca()
 function lotesIrmaos(it: ItemEstoque) {
   return (it.lotes || []).filter((l) => !l.proprio)
 }
@@ -793,9 +928,47 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
           </ul>
         </section>
 
-        <!-- ENCAIXE (item 4, outro dev): o cartão de Ag. cancelamento e o botão
-             "Sugerir troca" entram AQUI, logo abaixo do estoque (contrato:
-             davinci-atendimento-nomes-para-o-dev.md §4 "Lugar reservado"). -->
+        <!-- ENCAIXE (item 4): o cartão de Ag. cancelamento (fase 4a), com as
+             sugestões de troca dentro (fase 4b), o "Trocar" (4c) e o
+             "enviar oferta" (4d) — AQUI, logo abaixo do estoque. -->
+        <AtendimentoAgCancelamento
+          v-if="agCancelamento"
+          :ag="agCancelamento"
+          :sugestoes="sugestoesTroca"
+          :numero="numeroBling"
+          :conversa-id="conversa.id"
+          @trocar="abrirTroca"
+          @retomar="abrirTroca(null)"
+          @mudou="emit('recarregarPainel', false)"
+        />
+        <!-- A troca parada no meio com o pedido FORA de 83955 (fase 4c): o
+             PATCH 6 que falhou deixa o pedido em Atendido (9), o limbo que
+             nenhum robô pega — o estado e o Retomar não podem sumir. -->
+        <section
+          v-if="trocaForaDe83955"
+          class="flex flex-wrap items-start gap-x-2 gap-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px]"
+          data-troca-aberta-fora
+          :data-estado="trocaForaDe83955.estado"
+        >
+          <RotateCcw class="mt-px size-3.5 shrink-0 text-amber-700 dark:text-amber-300" />
+          <div class="min-w-0 flex-1 break-words">
+            <p><span class="font-medium">Troca de produto parada no meio:</span> {{ rotuloEstado(trocaForaDe83955.estado) }}</p>
+            <p class="text-muted-foreground">
+              <span class="font-mono">{{ trocaForaDe83955.sku_antigo }}</span> → <span class="font-mono">{{ trocaForaDe83955.sku_novo }}</span> · {{ quemTroca(trocaForaDe83955) }}
+            </p>
+            <p v-if="trocaForaDe83955.erro">{{ trocaForaDe83955.erro }}</p>
+          </div>
+          <button
+            v-if="acessoTroca.trocar && trocaForaDe83955.pode_retomar"
+            type="button"
+            class="inline-flex shrink-0 items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] hover:bg-muted"
+            data-retomar-troca
+            @click="abrirTroca(null)"
+          >
+            <RotateCcw class="size-3" /> Retomar
+          </button>
+          <span v-else-if="!trocaForaDe83955.pode_retomar" class="shrink-0 text-[10px] text-muted-foreground">alguém está conduzindo agora</span>
+        </section>
 
         <!-- MARGEM (a mesma da aba Margem) -->
         <section v-if="pnl && pnl.pedido && !pnl.ve_margem" class="text-[11px] text-muted-foreground">
@@ -1110,5 +1283,16 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
         </div>
       </div>
     </div>
+
+    <!-- A troca de produto (item 4, fase 4c): fora do cartão, que some quando o pedido sai de 83955. -->
+    <AtendimentoTroca
+      v-if="trocaDialogo && trocaNumero"
+      v-model:aberto="trocaDialogo"
+      :numero="trocaNumero"
+      :escolha="trocaEscolha"
+      :conversa-id="conversa.id"
+      :troca-aberta="trocaAbertaDoDialogo"
+      @mudou="emit('recarregarPainel', false)"
+    />
   </div>
 </template>

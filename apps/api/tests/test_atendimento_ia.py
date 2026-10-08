@@ -22,6 +22,13 @@ CÓDIGO faz em volta dele:
 
 E o contexto (contexto.py), que dá os fatos: pedido, itens, rastreio, NF,
 chamados e devoluções — e nunca levanta.
+
+AGUARDANDO CANCELAMENTO (item 4, 02/10/2026): o pedido em 83955 sempre vai
+para pessoa; a trava da Margem (e o resto sem `fala_cancelamento`) vira
+"em processamento" para o modelo, que nunca vê "Aguardando Cancelamento"
+nem "margem"; a falta de estoque passa o motivo do vocabulário fechado; sem
+o bloco, a máscara vale pelo nome e pelo id cru "83955"; e a falha do
+classificador não derruba o pedido no contexto.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ import httpx
 import pytest
 import respx
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -56,6 +63,8 @@ from app.models import (
     Integration,
     IntegrationPlatform,
     Logistica,
+    MargemAudit,
+    NfFaturamento,
     NfNota,
     User,
     UserRole,
@@ -343,7 +352,7 @@ async def test_rascunho_ok_com_lacunas_preenchidas_pelo_codigo(
     assert r.mensagem_gatilho_id == gatilho.id
     assert (r.tokens_entrada, r.tokens_saida) == (812, 64)
     assert r.modelo == "modelo-falso"
-    assert r.prompt_versao == ia.PROMPT_VERSAO == "v6"
+    assert r.prompt_versao == ia.PROMPT_VERSAO == "v7"
     assert r.manual_hash is None  # sem regras cadastradas
     assert r.fatos["lacunas"]["rastreio"] == RASTREIO
     assert r.fatos["pedido"]["itens"][1] == {
@@ -3296,7 +3305,7 @@ async def test_manual_base_classificacao_e_resposta_nos_tetos_e_max_tokens(
     assert falso.max_tokens == [300, 900]
     assert "Pedido postado: onde está, quando chega ou atraso." in sis_r  # regra do assunto
     assert "REGRAS DE SEGURANÇA DA LOJA" in sis_r
-    assert r.categoria == "rastreio" and r.prompt_versao == "v6"
+    assert r.categoria == "rastreio" and r.prompt_versao == "v7"
     assert r.fatos["categoria_classificada"] == "rastreio"
 
 
@@ -3763,3 +3772,254 @@ async def test_corte_do_cron_bate_com_a_regua_pura(db: AsyncSession, make_user):
     )
     assert {i for i, sim in esperado.items() if sim} == no_sql
     assert sum(esperado.values()) == 5
+
+
+# ─────────────── Aguardando Cancelamento (item 4) ───────────────
+
+
+async def _em_83955(db: AsyncSession, *, pino: str | None = None) -> None:
+    """O pedido completo vai para "Aguardando Cancelamento" (com o pino da Margem, se houver)."""
+    await db.execute(
+        update(BlingOrder)
+        .where(BlingOrder.numero == PEDIDO_BLING)
+        .values(situacao="83955", status=pino)
+    )
+    await db.commit()
+
+
+def _o_modelo_viu(modelo: ModeloFalso) -> str:
+    """Tudo o que foi para o provedor como DADO (as mensagens), em minúsculas."""
+    return "\n".join(usuario for _, usuario in modelo.chamadas).lower()
+
+
+async def test_trava_da_margem_vira_em_processamento(
+    db: AsyncSession, make_user, ia_ligada, modelo
+):
+    await _pedido_completo(db)
+    await _em_83955(db, pino="Pendente")
+    db.add(
+        MargemAudit(
+            pedido_bling=PEDIDO_BLING,
+            acao="situacao",
+            valor_antigo="6",
+            valor_novo="83955",
+            origem="margens_auto",
+            mudado_por=None,
+            created_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+    )
+    await db.commit()
+    conversa = await _conversa(db, make_user)
+    await _msg(db, conversa, "cadê meu pedido?")
+
+    # O contexto (que vai para a TELA) diz o porquê; a máscara é só da IA.
+    ctx = await contexto.contexto_da_conversa(db, conversa)
+    assert ctx["pedido"]["ag_cancelamento"] == {
+        "codigo": "margem_trava",
+        "fala_cancelamento": False,
+        "texto_ia": None,
+    }
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.fatos["pedido"]["situacao_no_sistema"] == "em processamento"
+    assert "motivo_aguardando_cancelamento" not in r.fatos["pedido"]
+    viu = _o_modelo_viu(modelo)
+    assert "em processamento" in viu
+    for proibido in ("aguardando cancelamento", "83955", "margem", "margens_auto", "trava"):
+        assert proibido not in viu, proibido
+    # O prompt manda nunca falar da análise interna nem em cancelamento.
+    sistema = " ".join(modelo.sistema.split())
+    assert "Nunca fale de margem, custo interno, lucro ou análise interna." in sistema
+    assert 'Pedido "em processamento" não está cancelado: não fale em cancelamento.' in sistema
+    assert r.precisa_humano is True
+    assert ia.MOTIVO_AG_CANCELAMENTO in r.motivo
+
+
+async def test_falta_de_estoque_passa_o_motivo(db: AsyncSession, make_user, ia_ligada, modelo):
+    await _pedido_completo(db)
+    await _em_83955(db)
+    agora = datetime.now(UTC)
+    db.add(
+        NfFaturamento(
+            pedido_bling=PEDIDO_BLING,
+            status_faturamento="sem_estoque",
+            erro_faturamento="Aguardando Cancelamento — saldo negativo: MALA-P-10",
+            created_at=agora - timedelta(hours=1),
+            updated_at=agora - timedelta(hours=1),
+        )
+    )
+    await db.commit()
+    conversa = await _conversa(db, make_user)
+    await _msg(db, conversa, "vocês vão cancelar meu pedido?")
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.fatos["pedido"]["situacao_no_sistema"] == "Aguardando Cancelamento"
+    assert r.fatos["pedido"]["motivo_aguardando_cancelamento"] == "falta de estoque do item"
+    assert "falta de estoque do item" in _o_modelo_viu(modelo)
+    assert "margem" not in _o_modelo_viu(modelo)
+    assert r.precisa_humano is True
+    assert ia.MOTIVO_AG_CANCELAMENTO in r.motivo
+
+    # O comprador pediu o cancelamento na plataforma (o retrato da conversa):
+    # a regra do comprador vem antes da falta de estoque.
+    conversa.dados = {**(conversa.dados or {}), "pedido_mkt": {"status": "IN_CANCEL"}}
+    await db.commit()
+    ctx = await contexto.contexto_da_conversa(db, conversa)
+    assert ctx["pedido"]["ag_cancelamento"] == {
+        "codigo": "pedido_cliente",
+        "fala_cancelamento": True,
+        "texto_ia": "cancelamento pedido pelo comprador",
+    }
+
+
+async def test_83955_sempre_precisa_humano(
+    db: AsyncSession, make_user, ia_ligada, modelo, envios
+):
+    """Com TODAS as travas do automático abertas, o 83955 ainda vai para pessoa."""
+    conversa = await _cenario_auto(db, make_user, ia_ligada, modelo)
+    await _em_83955(db)  # movido à mão: sem marca da NF nem trilha da Margem
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r is not None and r.precisa_humano is True
+    assert ia.MOTIVO_AG_CANCELAMENTO in r.motivo
+    # Sem falar em cancelamento: "em processamento".
+    assert r.fatos["pedido"]["situacao_no_sistema"] == "em processamento"
+    assert envios == []
+
+
+@pytest.mark.parametrize(
+    "situacao",
+    ["Aguardando Cancelamento", "aguardando  cancelamento", " AGUARDANDO CANCELAMENTO ", "83955"],
+)
+def test_sem_bloco_mascara_pelo_nome_e_pelo_id_cru(situacao):
+    """Sem o bloco do motivo (a classificação nem rodou): a máscara vale pela situação."""
+    conversa = AtendimentoConversa(plataforma="shopee", canal="chat", pedido_marketplace=PEDIDO_MKT)
+    pedido = {"numero": PEDIDO_BLING, "situacao": situacao, "data": "2026-09-20", "itens": []}
+    ctx = {**contexto.vazio(), "pedido": pedido}
+
+    fatos = ia._fatos_para_o_modelo(conversa, ctx, {})
+
+    assert fatos["pedido"]["situacao_no_sistema"] == "em processamento"
+    assert "motivo_aguardando_cancelamento" not in fatos["pedido"]
+    assert ia.em_aguardando_cancelamento(pedido) is True
+
+
+def test_mascara_fecha_do_lado_seguro():
+    conversa = AtendimentoConversa(plataforma="shopee", canal="chat", pedido_marketplace=PEDIDO_MKT)
+
+    def _fatos(pedido: dict) -> dict:
+        return ia._fatos_para_o_modelo(conversa, {**contexto.vazio(), "pedido": pedido}, {})[
+            "pedido"
+        ]
+
+    # Fora de 83955, a situação passa como veio.
+    for situacao in ("Em aberto", "Atendido", "9", None):
+        assert _fatos({"situacao": situacao})["situacao_no_sistema"] == situacao
+        assert ia.em_aguardando_cancelamento({"situacao": situacao}) is False
+    # O motivo que não deu para conferir: em processamento.
+    desconhecido = {"codigo": "desconhecido", "fala_cancelamento": False}
+    assert _fatos({"situacao": "83955", "ag_cancelamento": desconhecido}) == {
+        "situacao_no_sistema": "em processamento",
+        "data_da_compra": None,
+        "itens": [],
+    }
+    # Texto fora do vocabulário fechado nunca chega ao modelo.
+    torto = {"codigo": "sem_estoque", "fala_cancelamento": True, "texto_ia": "margem baixa"}
+    assert _fatos({"situacao": "83955", "ag_cancelamento": torto})["situacao_no_sistema"] == (
+        "em processamento"
+    )
+    # O bloco vale mesmo com a situação já sem nome conhecido.
+    estoque = {
+        "codigo": "sem_estoque",
+        "fala_cancelamento": True,
+        "texto_ia": "falta de estoque do item",
+    }
+    assert _fatos({"situacao": "83955", "ag_cancelamento": estoque}) == {
+        "situacao_no_sistema": "Aguardando Cancelamento",
+        "data_da_compra": None,
+        "itens": [],
+        "motivo_aguardando_cancelamento": "falta de estoque do item",
+    }
+    # Situação com outro texto (renomeada no Bling, nome fora da tabela): o
+    # BLOCO sozinho já força a máscara e o 83955.
+    renomeada = {
+        "situacao": "Aguardando cancelamento (loja)",
+        "ag_cancelamento": {"codigo": "margem_trava", "fala_cancelamento": False},
+    }
+    assert _fatos(renomeada)["situacao_no_sistema"] == "em processamento"
+    assert ia.em_aguardando_cancelamento(renomeada) is True
+
+
+async def test_sem_bloco_pelo_nome_tambem_vai_para_pessoa(
+    db: AsyncSession, make_user, ia_ligada, modelo, monkeypatch
+):
+    """O contexto sem o bloco (outro caminho, versão antiga): o nome da situação basta."""
+    await _pedido_completo(db)
+    conversa = await _conversa(db, make_user)
+    await _msg(db, conversa, "cadê meu pedido?")
+    original = contexto.contexto_da_conversa
+
+    async def _sem_bloco(session, c):
+        ctx = await original(session, c)
+        ctx["pedido"] = {**ctx["pedido"], "situacao": "Aguardando Cancelamento"}
+        ctx["pedido"].pop("ag_cancelamento", None)
+        return ctx
+
+    monkeypatch.setattr(contexto, "contexto_da_conversa", _sem_bloco)
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.fatos["pedido"]["situacao_no_sistema"] == "em processamento"
+    assert "aguardando cancelamento" not in _o_modelo_viu(modelo)
+    assert r.precisa_humano is True and ia.MOTIVO_AG_CANCELAMENTO in r.motivo
+
+
+async def test_falha_do_classificador_nao_derruba_o_pedido_no_contexto(
+    db: AsyncSession, make_user, monkeypatch
+):
+    from app.services.atendimento import ag_cancelamento, etiqueta_fatos
+
+    await _pedido_completo(db)
+    await _em_83955(db)
+    conversa = await _conversa(db, make_user)
+    lado_seguro = {"codigo": "desconhecido", "fala_cancelamento": False}
+
+    async def _explode(session, chaves):
+        # Erro DE BANCO: sem o SAVEPOINT próprio, o do pedido abortaria.
+        from sqlalchemy import text
+
+        await session.execute(text("SELECT * FROM tabela_que_nao_existe"))
+
+    original = etiqueta_fatos.pedido_bling
+    monkeypatch.setattr(etiqueta_fatos, "pedido_bling", _explode)
+    with structlog.testing.capture_logs() as logs:
+        ctx = await contexto.contexto_da_conversa(db, conversa)
+
+    # O pedido inteiro segue (nº, itens) — só o motivo fecha do lado seguro.
+    assert ctx["pedido"]["numero"] == PEDIDO_BLING
+    assert len(ctx["pedido"]["itens"]) == 2
+    assert ctx["pedido"]["ag_cancelamento"] == lado_seguro
+    # E o resto do contexto, na mesma transação, também.
+    assert ctx["logistica"]["rastreio"] == RASTREIO
+    assert any(
+        log["event"] == "atendimento_contexto_falhou" and log["etapa"] == "ag_cancelamento"
+        for log in logs
+    )
+    fatos = ia._fatos_para_o_modelo(conversa, ctx, ia.valores_das_lacunas(conversa, ctx))
+    assert fatos["pedido"]["situacao_no_sistema"] == "em processamento"
+
+    # Erro fora do banco (o próprio classificador): o mesmo lado seguro.
+    monkeypatch.setattr(etiqueta_fatos, "pedido_bling", original)
+
+    def _quebra(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(ag_cancelamento, "classificar", _quebra)
+    ctx = await contexto.contexto_da_conversa(db, conversa)
+    assert ctx["pedido"]["ag_cancelamento"] == lado_seguro
+    assert len(ctx["pedido"]["itens"]) == 2
+    # A sessão segue viva.
+    assert (await db.get(AtendimentoConversa, conversa.id)) is not None

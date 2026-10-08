@@ -42,6 +42,29 @@ E o que a tela usa por aqui:
       "Abrir no Bling" e "Abrir na plataforma" (Shopee: o order_id interno
       de `links_shopee`, lido em `ids_shopee_do_painel`; sem ele, a busca)
   perfil_adspower(session, conversa)  o perfil (campo Servidor do store-info)
+  ag_cancelamento_do_pedido(pedido, conversa, observacoes)
+      o PORQUÊ do pedido em "Aguardando Cancelamento" (item 4, 02/10/2026):
+      o classificador (`ag_cancelamento.classificar`) com o que o painel já
+      leu — sem consulta nem GET a mais. `bloco_do_motivo` é o mesmo bloco
+      para a lista Ag. cancelamento (`routers/atendimento_troca.py`).
+  sugestões de troca (item 4, fase 4b, 05/10/2026): com a falta de estoque
+      (`pode_sugerir_troca`) e `atendimento_troca_sugestoes_ativa`, até 3
+      produtos parecidos e o texto da oferta (`troca_sugestoes`) — do
+      catálogo do DaVinci, sem nenhum GET ao Bling.
+  troca de produto (item 4, fase 4c, 07/10/2026): o bloco Ag. cancelamento
+      traz a troca ABERTA do pedido (`troca_aberta`, de `troca.
+      troca_aberta_do_pedido`, num SAVEPOINT: a tabela pode ainda não existir)
+      e o `troca_envio` (o "Trocar" pode, ou o porquê — `troca.
+      situacao_da_troca`). Fora de 83955 (a troca parada no meio com o
+      pedido em 9 ou já em 6) a troca aberta vem no `troca_aberta` do painel.
+  oferta de troca pelo chat (fase 4d, 07/10/2026): o bloco traz também
+      `oferta_envio` — o botão "Enviar oferta" pode, ou o porquê de não
+      (`troca_oferta.situacao_da_oferta`: as travas da rota e as do envio).
+  quem não vê a Margem (07/10/2026, a caixa aberta para a equipe em só
+      leitura): o motivo da Margem (`margem_trava`/`margem_reprovada`) vira
+      "em análise" (`mascarar_motivo`), sem texto, conflito nem custo; e as
+      Observações do Bling vêm sem o recado do robô da Margem
+      (`observacoes_sem_margem`).
   painel_da_conversa(session, conversa, *, user)
       monta o GET /conversas/{id}/painel; cada bloco falha SOZINHO (num
       SAVEPOINT): uma consulta que quebre deixa o bloco vazio com o porquê,
@@ -99,6 +122,21 @@ from app.models import (
     UserRole,
 )
 from app.services import links_shopee
+from app.services.atendimento.ag_cancelamento import (
+    CANCELADO_PLATAFORMA,
+    DESCONHECIDO,
+    MANUAL,
+    MARGEM_REPROVADA,
+    MARGEM_TRAVA,
+    PEDIDO_CLIENTE,
+    POS_NF_MANUAL,
+    RESTRICAO_ENVIO,
+    SEM_ESTOQUE,
+    Motivo,
+    classificar,
+    cortar,
+    status_na_plataforma,
+)
 from app.services.atendimento.constantes import (
     AUTOR_EQUIPE,
     MSG_RECEBIDA,
@@ -110,6 +148,11 @@ from app.services.atendimento.etiqueta_fatos import (
     PedidoBling,
     normalizar_plataforma,
     pedido_bling_da_conversa,
+)
+from app.services.atendimento.troca_sugestoes import sugestoes_do_pedido, sugestoes_falhou
+from app.services.bling_situacoes import (
+    NOME_AGUARDANDO_CANCELAMENTO,
+    SITUACAO_AGUARDANDO_CANCELAMENTO_STR,
 )
 from app.services.sku_tags import SUFFIX_TAGS
 
@@ -1127,6 +1170,165 @@ async def situacao_da_foto(session: AsyncSession, conversa: AtendimentoConversa)
     return {**base, "pode": True, "motivo": None, "codigo": None}
 
 
+# ── Aguardando Cancelamento (item 4) ──────────────────────────────────────
+# O título do cartão por motivo (`ag_cancelamento.classificar`); o texto é o
+# `texto_interno` do motivo, e a tela pinta pelo código.
+TITULO_AG_CANCELAMENTO = {
+    MARGEM_TRAVA: "Trava interna da Margem",
+    MARGEM_REPROVADA: "Reprovado na Margem",
+    PEDIDO_CLIENTE: "Cancelamento pedido pelo comprador",
+    CANCELADO_PLATAFORMA: "Cancelado na plataforma",
+    SEM_ESTOQUE: "Falta de estoque",
+    RESTRICAO_ENVIO: "Restrição de envio",
+    POS_NF_MANUAL: "Motivo não registrado",
+    MANUAL: "Motivo não registrado",
+    DESCONHECIDO: "Motivo não conferido",
+}
+# Só no "movido à mão" a 1ª linha das Observações do Bling entra no cartão:
+# é onde a equipe costuma escrever o porquê.
+_COM_OBSERVACAO_TOPO = frozenset({POS_NF_MANUAL, MANUAL})
+# O recado do robô da Margem nas Observações ("02/10 - Margem DaVinci: pedido
+# segurado…", `margem_auto_hold._mensagem` via `compose_observacoes`): não é
+# o porquê da equipe — no "movido à mão" leria como trava da Margem (ex.: o
+# recado que ficou de um hold antigo, ou do PATCH que voltou "já estava").
+_RECADO_DA_MARGEM = re.compile(r"^\d{2}/\d{2}\s*-\s*Margem DaVinci:")
+
+
+def primeira_linha(texto: str | None) -> str | None:
+    """A 1ª linha não vazia das Observações do Bling que não é recado do robô da Margem (<= 300)."""
+    for linha in (texto or "").splitlines():
+        linha = " ".join(linha.split())
+        if linha and not _RECADO_DA_MARGEM.match(linha):
+            return cortar(linha)
+    return None
+
+
+def ag_cancelamento_do_pedido(
+    pedido: PedidoBling | None,
+    conversa: AtendimentoConversa,
+    observacoes: dict | None,
+    *,
+    ve_margem: bool = True,
+) -> dict | None:
+    """O bloco "Aguardando Cancelamento" do painel — None fora de 83955. PURA.
+
+    O motivo é o do classificador, com o pedido que o painel já leu
+    (`pedido_bling_da_conversa` traz, em 83955, a trilha da Margem e os
+    fatos da NF) e o status do pedido na plataforma pelo retrato da conversa
+    (o comprador pediu?). Nenhuma consulta e nenhum GET a mais: as
+    Observações são as que o painel já buscou. `troca_aberta` vem depois
+    (`painel_da_conversa`, que lê a troca de produto aberta do pedido).
+    `ve_margem` False = o motivo da Margem mascarado (`mascarar_motivo`).
+    """
+    m = classificar(pedido, status_plataforma=status_na_plataforma(conversa.dados))
+    if m is None:
+        return None
+    obs = (observacoes or {}).get("observacoes") if m.codigo in _COM_OBSERVACAO_TOPO else None
+    return bloco_do_motivo(m, observacao_topo=primeira_linha(obs), ve_margem=ve_margem)
+
+
+# Quem NÃO vê a Margem (07/10/2026: a caixa abriu para toda a equipe em só
+# leitura — `acesso.pode_ver`): o motivo da Margem (a trava do robô e a
+# reprovação) não diz que é da Margem nem traz o porquê; vira "em análise".
+# Os sinais de comportamento (`etiqueta`, `fala_cancelamento`) ficam: a
+# tela e a IA seguem iguais. Não é código do classificador (como o
+# DESCONHECIDO): o título fica fora de TITULO_AG_CANCELAMENTO.
+EM_ANALISE = "em_analise"
+TITULO_EM_ANALISE = "Em análise"
+TEXTO_EM_ANALISE = "em análise pela equipe"
+_MOTIVOS_DA_MARGEM = frozenset({MARGEM_TRAVA, MARGEM_REPROVADA})
+
+
+def mascarar_motivo(bloco: dict) -> dict:
+    """O bloco Ag. cancelamento para quem não vê a Margem. PURA."""
+    if bloco.get("codigo") not in _MOTIVOS_DA_MARGEM:
+        return bloco
+    return {
+        **bloco,
+        "codigo": EM_ANALISE,
+        "titulo": TITULO_EM_ANALISE,
+        "texto": TEXTO_EM_ANALISE,
+        "skus": [],
+        "conflito": None,
+        "observacao_topo": None,
+    }
+
+
+def _sem_recado_da_margem(texto: str | None) -> str | None:
+    # O recado vem com a data na frente ("02/10 - Margem DaVinci: …",
+    # `compose_observacoes`): a linha que o cita sai inteira.
+    linhas = [x for x in (texto or "").splitlines() if "margem davinci:" not in x.lower()]
+    return "\n".join(linhas).strip() or None
+
+
+def observacoes_sem_margem(observacoes: dict | None) -> dict | None:
+    """As Observações do Bling para quem NÃO vê a Margem: sem o recado do robô. PURA.
+
+    O robô da Margem escreve o porquê nas Observações do pedido ("dd/mm -
+    Margem DaVinci: pedido reprovado automaticamente (margem abaixo do
+    mínimo)…", `margem_auto_hold._mensagem`): mostrar o bloco cru furaria a
+    máscara do cartão (`mascarar_motivo`). Só as linhas do recado saem; o
+    resto (a equipe, a troca, o robô de lote) fica.
+    """
+    if not observacoes:
+        return observacoes
+    return {
+        **observacoes,
+        "observacoes": _sem_recado_da_margem(observacoes.get("observacoes")),
+        "observacoes_internas": _sem_recado_da_margem(observacoes.get("observacoes_internas")),
+    }
+
+
+def bloco_do_motivo(
+    m: Motivo, *, observacao_topo: str | None = None, ve_margem: bool = True
+) -> dict:
+    """O `AgCancelamentoOut` de um motivo — o do painel e o da lista Ag. cancelamento. PURA.
+
+    `ve_margem` False mascara o motivo da Margem (`mascarar_motivo`).
+    """
+    bloco = {
+        "codigo": m.codigo,
+        "titulo": TITULO_AG_CANCELAMENTO.get(m.codigo, NOME_AGUARDANDO_CANCELAMENTO),
+        "texto": m.texto_interno,
+        "etiqueta": m.etiqueta,
+        "fala_cancelamento": m.fala_cancelamento,
+        "pode_sugerir_troca": m.pode_sugerir_troca,
+        "skus": list(m.skus),
+        "conflito": m.conflito,
+        "observacao_topo": observacao_topo,
+        "troca_aberta": None,
+    }
+    return bloco if ve_margem else mascarar_motivo(bloco)
+
+
+async def troca_aberta(session: AsyncSession, numero: str) -> dict | None:
+    """A troca de produto ABERTA do pedido (fase 4c), o resumo sem custo; None sem ela."""
+    # Import tardio: a troca usa o painel (nota, Observações, cliente do Bling).
+    from app.services.atendimento import troca
+
+    return await troca.troca_aberta_do_pedido(session, numero)
+
+
+def _ag_cancelamento_desconhecido() -> dict:
+    """O bloco quando a classificação falhou: o lado seguro, sem falar em cancelamento.
+
+    `etiqueta` vai False, mas NÃO foi conferida (a etiqueta da conversa pode
+    estar ligada): a tela não lê o campo.
+    """
+    return {
+        "codigo": DESCONHECIDO,
+        "titulo": TITULO_AG_CANCELAMENTO[DESCONHECIDO],
+        "texto": "não consegui conferir o motivo agora: não fale em cancelamento antes de conferir",
+        "etiqueta": False,
+        "fala_cancelamento": False,
+        "pode_sugerir_troca": False,
+        "skus": [],
+        "conflito": None,
+        "observacao_topo": None,
+        "troca_aberta": None,
+    }
+
+
 # ── O painel inteiro ──────────────────────────────────────────────────────
 
 
@@ -1145,6 +1347,10 @@ async def painel_da_conversa(
     forcar_observacoes: bool = False,
 ) -> dict:
     """O GET /conversas/{id}/painel: pedido, estoque, margem, observações, links, AdsPower, foto.
+
+    E, com o pedido em "Aguardando Cancelamento", o porquê
+    (`ag_cancelamento_do_pedido`, item 4) e, na falta de estoque com a chave
+    ligada, as sugestões de troca (`troca_sugestoes`, fase 4b).
 
     Cada bloco roda sozinho (SAVEPOINT): o que falhar volta vazio com
     `falhou=True` no bloco, e o resto do painel aparece. Nada aqui escreve
@@ -1202,6 +1408,89 @@ async def painel_da_conversa(
             pedido.bling_id, session=session, forcar=forcar_observacoes
         )
 
+    # Aguardando Cancelamento (item 4): o porquê, com o que já foi lido.
+    ag_cancelamento = None
+    if pedido is not None:
+        try:
+            ag_cancelamento = ag_cancelamento_do_pedido(
+                pedido, conversa, observacoes, ve_margem=ve_margem(user)
+            )
+        except Exception as e:  # noqa: BLE001 — um bloco do painel nunca derruba os outros
+            logger.warning(
+                "atendimento_painel_falhou",
+                etapa="ag_cancelamento",
+                conversa_id=str(cid),
+                err=type(e).__name__,
+            )
+            if (pedido.situacao or "").strip() == SITUACAO_AGUARDANDO_CANCELAMENTO_STR:
+                ag_cancelamento = _ag_cancelamento_desconhecido()
+    # A troca de produto aberta do pedido (fase 4c): num SAVEPOINT — a tabela
+    # pode ainda não existir (o deploy do código antes do alembic). Lida em
+    # QUALQUER situação: a troca parada no meio (o PATCH 6 que falhou deixa o
+    # pedido em 9; o espelho sai de 83955) continua com o Retomar no painel
+    # (`troca_aberta` do painel; dentro do bloco quando ainda em 83955).
+    aberta = None
+    if pedido is not None:
+        aberta, _ = await _seguro(
+            session, "troca_aberta", lambda: troca_aberta(session, pedido.numero), None, cid
+        )
+    if ag_cancelamento is not None and pedido is not None:
+        ag_cancelamento["troca_aberta"] = aberta
+        # Import tardio: a troca e a oferta usam o painel (a nota interna).
+        from app.services.atendimento import troca as _troca
+        from app.services.atendimento import troca_oferta
+
+        # O "Trocar" (fase 4c) e o "Enviar oferta" (fase 4d): as travas que
+        # não dependem do produto, com UMA leitura das do pedido (`memo`).
+        memo: dict = {}
+        ag_cancelamento["troca_envio"], _ = await _seguro(
+            session,
+            "troca_envio",
+            lambda: _troca.situacao_da_troca(
+                session, numero=pedido.numero, motivo=ag_cancelamento, user=user, memo=memo
+            ),
+            dict(_troca.TROCA_NAO_CONFERIDA),
+            cid,
+        )
+        ag_cancelamento["oferta_envio"], _ = await _seguro(
+            session,
+            "oferta_envio",
+            lambda: troca_oferta.situacao_da_oferta(
+                session,
+                numero=pedido.numero,
+                motivo=ag_cancelamento,
+                conversa=conversa,
+                user=user,
+                memo=memo,
+            ),
+            dict(troca_oferta.OFERTA_NAO_CONFERIDA),
+            cid,
+        )
+
+    # Sugestões de troca (item 4, fase 4b): só na falta de estoque, com a
+    # chave ligada; do catálogo do DaVinci, sem GET ao Bling.
+    sugestoes_troca = None
+    if (
+        ag_cancelamento is not None
+        and ag_cancelamento.get("pode_sugerir_troca")
+        and get_settings().atendimento_troca_sugestoes_ativa
+    ):
+        # Os itens já lidos; se a leitura falhou, os SKUs do espelho (quantidade 1).
+        itens_troca = (
+            itens if ok_itens else [{"sku": s, "quantidade": None} for s in pedido.skus_itens]
+        )
+        sugestoes_troca, ok_troca = await _seguro(
+            session,
+            "troca",
+            lambda: sugestoes_do_pedido(
+                session, ag_cancelamento["skus"], itens_troca, ve_custo=ve_margem(user)
+            ),
+            None,
+            cid,
+        )
+        if not ok_troca or sugestoes_troca is None:
+            sugestoes_troca = sugestoes_falhou(ve_custo=ve_margem(user))
+
     if ve_lojas(user):
         adspower, _ = await _seguro(
             session, "adspower", lambda: perfil_adspower(session, conversa), None, cid
@@ -1223,6 +1512,7 @@ async def painel_da_conversa(
         session, "link_shopee", lambda: ids_shopee_do_painel(session, conversa, pedido), None, cid
     )
 
+    observacoes_tela = observacoes if ve_margem(user) else observacoes_sem_margem(observacoes)
     return {
         "pedido": (
             {
@@ -1246,11 +1536,15 @@ async def painel_da_conversa(
             else ({"falhou": True, "itens": []} if margem_falhou else None)
         ),
         "ve_margem": ve_margem(user),
-        "observacoes_bling": observacoes,
+        # Quem não vê a Margem não lê o recado do robô dela (a máscara do cartão).
+        "observacoes_bling": observacoes_tela,
         "links": links_do_pedido(conversa, pedido, ids_shopee),
         "adspower": adspower,
         "envio_foto": envio_foto
         if envio_foto is not None
         else {"pode": False, "motivo": "Não consegui conferir o envio agora.", "codigo": "falhou"},
+        "ag_cancelamento": ag_cancelamento,
+        "sugestoes_troca": sugestoes_troca,
+        "troca_aberta": aberta,
         "gerado_em": datetime.now(UTC).isoformat(),
     }

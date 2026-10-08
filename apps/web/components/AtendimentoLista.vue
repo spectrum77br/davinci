@@ -67,8 +67,11 @@ export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 // qualquer largura; "Redes" é um grupo (`instagram,facebook`). A loja se
 // escolhe na barra de lojas (AtendimentoLojas); em tela estreita, onde a
 // barra some, volta o seletor de loja aqui.
+// No cabeçalho, o botão "Ag. cancel." abre a lista dos pedidos em Aguardando
+// Cancelamento no Bling, com ou sem conversa (AtendimentoAgCancelamentoLista,
+// item 4, fase 4b); "Abrir conversa" de lá seleciona a conversa aqui.
 import { onClickOutside } from '@vueuse/core'
-import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
+import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PackageX, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
 import { ETIQUETAS_INFO, faixaDaEtiqueta, secundariasDe } from '~/components/AtendimentoEtiqueta.vue'
 import {
   canaisDa,
@@ -98,6 +101,13 @@ const emit = defineEmits<{
   (e: 'carregarMais'): void
   (e: 'recarregar'): void
 }>()
+
+// A lista Ag. cancelamento (item 4, fase 4b): pelo pedido, não pela conversa.
+const agListaAberta = ref(false)
+function abrirDaListaAg(id: string) {
+  agListaAberta.value = false
+  emit('selecionar', id)
+}
 
 function mudar<K extends keyof FiltrosLista>(k: K, v: FiltrosLista[K]) {
   const novo = { ...filtros.value, [k]: v }
@@ -426,6 +436,15 @@ function mover(delta: number) {
             >{{ contagem.aguardando > 99 ? '99+' : contagem.aguardando }}</span>
           </button>
         </div>
+        <button
+          type="button"
+          class="mb-1 inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-[11px] transition-colors hover:bg-muted"
+          title="Pedidos em Aguardando Cancelamento no Bling, com ou sem conversa: o motivo e as sugestões de troca"
+          data-abrir-ag-cancelamento
+          @click="agListaAberta = true"
+        >
+          <PackageX class="size-3.5" /> Ag. cancel.
+        </button>
         <div ref="menuRef" class="relative mb-1 shrink-0" @keydown.esc="menuAberto = false">
           <button
             type="button"
@@ -642,5 +661,6 @@ function mover(delta: number) {
         </button>
       </div>
     </div>
+    <AtendimentoAgCancelamentoLista v-if="agListaAberta" v-model:aberto="agListaAberta" @abrir-conversa="abrirDaListaAg" />
   </div>
 </template>

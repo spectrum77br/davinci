@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.db as _db
@@ -32,6 +32,8 @@ from app.models import (
     AtendimentoReclamacao,
     BlingOrder,
     MargemAudit,
+    NfFaturamento,
+    NfNota,
 )
 from app.redis_client import redis
 from app.services.atendimento import etiqueta as etiqueta_svc
@@ -242,6 +244,82 @@ async def test_trilha_da_margem_resgate_e_volta_por_outro_motivo(db):
     assert await etiqueta_fatos.pedido_bling(db, ["", "  "]) is None
 
 
+async def test_lote_le_nf_so_dos_83955(db, monkeypatch):
+    """Item 4: os fatos da NF (motivo do 83955) só se leem para pedido em 83955.
+
+    Pedido em 6 ou 15 — mesmo com marca de NF e nota — não dispara consulta
+    nenhuma a `nf_*` nem à trilha da Margem; com pedidos em 83955, a carga é
+    em LOTE (as mesmas consultas para um ou para dois pedidos).
+    """
+    em_aberto = await _conversa(db, "nf-6", pedido="2510NF6")
+    enviado = await _conversa(db, "nf-15", pedido="2510NF15")
+    await _bling(db, "300050", "2510NF6", 6)
+    await _bling(db, "300051", "2510NF15", 15)
+    db.add(
+        NfFaturamento(
+            pedido_bling="300050",
+            status_faturamento="sem_estoque",
+            erro_faturamento="Aguardando Cancelamento — saldo negativo: SKU-300050-0",
+        )
+    )
+    db.add(NfNota(chave="5" * 44, pedido_bling="300051", numero="9", xml=b"<nfe/>"))
+    await db.commit()
+
+    pedidos_lidos: list[list[str]] = []
+    original = etiqueta_fatos._fatos_nf
+
+    async def _espiao(session, numeros):
+        numeros = list(numeros)
+        pedidos_lidos.append(sorted(numeros))
+        return await original(session, numeros)
+
+    monkeypatch.setattr(etiqueta_fatos, "_fatos_nf", _espiao)
+    consultas: list[str] = []
+
+    def _antes(_conn, _cursor, sql, *_a, **_kw) -> None:
+        consultas.append(sql)
+
+    def _da_nf() -> list[str]:
+        tabelas = ("nf_faturamento", "nf_nota", "nf_etiqueta_arquivo", "margem_audit")
+        return [q for q in consultas if any(t in q for t in tabelas)]
+
+    motor = _db.engine.sync_engine
+    event.listen(motor, "before_cursor_execute", _antes)
+    try:
+        fatos = await etiqueta_fatos.fatos_em_lote(db, [em_aberto, enviado])
+        assert pedidos_lidos == [] and _da_nf() == []
+        assert fatos[em_aberto.id].ag_cancelamento is False
+
+        # Dois pedidos em 83955 (um com a marca de falta de estoque): uma
+        # leitura em lote, só deles.
+        um = await _conversa(db, "nf-a", pedido="2510NFA")
+        dois = await _conversa(db, "nf-b", pedido="2510NFB")
+        await _bling(db, "300052", "2510NFA", 83955)
+        await _bling(db, "300053", "2510NFB", 83955)
+        db.add(
+            NfFaturamento(
+                pedido_bling="300052",
+                status_faturamento="sem_estoque",
+                erro_faturamento="Aguardando Cancelamento — saldo negativo: SKU-300052-0",
+            )
+        )
+        await db.commit()
+        consultas.clear()
+        fatos = await etiqueta_fatos.fatos_em_lote(db, [em_aberto, enviado, um, dois])
+    finally:
+        event.remove(motor, "before_cursor_execute", _antes)
+    assert pedidos_lidos == [["300052", "300053"]]
+    # A origem (trilha da Margem), a marca, NF ∪ etiqueta e a trilha mais
+    # nova (só do pedido marcado): 4 consultas para o lote inteiro.
+    assert len(_da_nf()) == 4
+    assert fatos[um.id].motivo_ag_cancelamento == (
+        "pedido 300052 em Aguardando Cancelamento — falta de estoque: SKU-300052-0"
+    )
+    assert fatos[dois.id].motivo_ag_cancelamento == (
+        "pedido 300053 em Aguardando Cancelamento — motivo não registrado, movido à mão no Bling"
+    )
+
+
 # ─────────────── a rodada do cron ───────────────
 
 
@@ -313,11 +391,14 @@ async def test_rodada_grava_etiqueta_historico_e_respeita_a_troca_a_mao(db, make
     assert resumo == {"conversas": 2, "mudaram": 1, "ocupadas": 0, "falhas": 0, "cortadas": 0}
     c = await _relida(db, c)
     assert (c.etiqueta, c.etiqueta_manual) == ("ag_cancelamento", False)
+    # O motivo diz o PORQUÊ desde o item 4 (antes: "… no Bling"): sem trilha
+    # da Margem e sem marca da NF, é o movimento à mão no Bling.
     assert await _historico(db, c) == [
         (
             "pos_venda",
             "ag_cancelamento",
-            "Pedido 300030 em Aguardando Cancelamento no Bling (conferência periódica)",
+            "Pedido 300030 em Aguardando Cancelamento — motivo não registrado, movido à "
+            "mão no Bling (conferência periódica)",
         ),
     ]
     d = await _relida(db, d)

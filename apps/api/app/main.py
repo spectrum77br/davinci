@@ -23,6 +23,7 @@ from app.routers import atendimento_painel as atendimento_painel_router
 from app.routers import atendimento_reclamacoes as atendimento_reclamacoes_router
 from app.routers import atendimento_redes as atendimento_redes_router
 from app.routers import atendimento_robo as atendimento_robo_router
+from app.routers import atendimento_troca as atendimento_troca_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import automacoes as automacoes_router
@@ -273,6 +274,9 @@ app.include_router(atendimento_router.router)
 # trava (`_so_admin`) da caixa.
 app.include_router(atendimento_painel_router.router)
 app.include_router(atendimento_reclamacoes_router.router)
+# Item 4, fase 4b (05/10/2026): a lista Ag. cancelamento (pedidos em 83955,
+# com ou sem conversa) com as sugestões de troca. Só leitura, sem Bling.
+app.include_router(atendimento_troca_router.router)
 # Avaliações de venda (02/10/2026): a aba ★ Avaliação (Shopee e ML), o
 # "responder em público" (atrás do envio) e o "marcar como tratada".
 app.include_router(atendimento_avaliacoes_router.router)

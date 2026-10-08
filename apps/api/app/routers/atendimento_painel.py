@@ -9,7 +9,8 @@ mesmo escopo por equipe (`_conversa_ou_404`):
   GET  /api/atendimento/conversas/{id}/painel   estoque por item (lote comprado,
        lotes irmãos, kit), margem (a da aba Margem), Observações do Bling (GET
        ao vivo, 5 min de memória; `?atualizar=1` relê), links "Abrir no Bling"
-       / "Abrir na plataforma", perfil do AdsPower e se a foto pode sair agora.
+       / "Abrir na plataforma", perfil do AdsPower e se a foto pode sair agora;
+       e, com o pedido em 83955, o porquê (`ag_cancelamento`, item 4).
   POST /api/atendimento/conversas/{id}/notas    nota interna (só a equipe vê).
   POST /api/atendimento/conversas/{id}/foto     UMA foto ao comprador (multipart:
        `arquivo`, `legenda` só no ML, `ultima_vista_id`, `confirmar`) — pelo

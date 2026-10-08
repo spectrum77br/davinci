@@ -389,6 +389,8 @@ _CLEANUP_TABLES = (
     # as regras (FK → integrations/users): antes de todas.
     "atendimento_automacao_registros",
     "atendimento_automacao_regras",
+    # 0379: a troca de produto (FK → conversas/mensagens/users): antes delas.
+    "atendimento_trocas",
     # 0353: histórico da etiqueta e reclamações (FK → conversas/users/integrations).
     "atendimento_etiquetas_historico",
     "atendimento_reclamacoes",

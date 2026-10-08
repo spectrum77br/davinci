@@ -87,8 +87,9 @@ async def admin_id(db: AsyncSession) -> uuid.UUID:
 class FakeBling:
     """Mesmo contrato do fake de test_margem_auto_hold: só o que o hold usa."""
 
-    def __init__(self, *, fail_situacao_for: set[int] | None = None) -> None:
+    def __init__(self, *, fail_situacao_for: set[int] | None = None, situacao: int = 6) -> None:
         self.fail_situacao_for = fail_situacao_for or set()
+        self.situacao = situacao
         self.situacao_calls: list[tuple[int, int]] = []
 
     async def get_order(self, bling_id: int) -> dict:
@@ -96,6 +97,8 @@ class FakeBling:
             "id": bling_id,
             "numero": "291670",
             "observacoes": None,
+            # O hold só segura o que o GET ao vivo diz Em aberto (02/10).
+            "situacao": {"id": self.situacao, "valor": 0},
             "contato": {"id": 1, "nome": "Cliente"},
             "itens": [{"id": 10, "codigo": "sku-1"}],
         }
@@ -458,6 +461,25 @@ async def test_falha_do_hold_abre_ocorrencia_e_o_tick_seguinte_fecha(db: AsyncSe
     assert res3["held"] == 1
     await db.refresh(o)
     assert o.fechada_em is not None and o.fechamento == "sumiu"
+
+
+async def test_pulado_nao_fecha_a_falha_aberta(db: AsyncSession):
+    """O GET ao vivo já diz Aguardando Cancelamento (alguém moveu por fora): o
+    hold PULA sem segurar — e a falha do tick anterior não fecha por aí (não
+    foi a operação do robô que deu certo; quem confere o 83955 do espelho é a
+    rodada do vigia)."""
+    await _seed_linha(
+        db, pedido="291670", bling_id=111, situacao="6", status=None, saldo_gap=True
+    )
+    res = await margem_auto_hold.run(db, client=FakeBling(fail_situacao_for={111}), hoje=HOJE)
+    assert res["failed"] == 1
+    o = (await _abertas(db))["falha:291670"]
+
+    res2 = await margem_auto_hold.run(db, client=FakeBling(situacao=83955), hoje=HOJE)
+    assert (res2["pulados"], res2["held"], res2["failed"]) == (1, 0, 0)
+    await db.refresh(o)
+    assert o.fechada_em is None
+    assert "falha:291670" in await _abertas(db)
 
 
 async def test_rodada_fecha_falha_que_ja_se_resolveu_por_fora(db: AsyncSession):

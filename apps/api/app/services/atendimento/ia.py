@@ -28,8 +28,17 @@ O que vai para PESSOA (precisa_humano), mesmo com a sugestão salva:
 categoria de dinheiro/direito/dado pessoal (troca, cancelamento, defeito,
 reembolso...), Procon/Justiça/golpe/xingamento, pedido de atendente, texto
 com cara de instrução para a IA, chamado ou devolução aberta, pedido não
-encontrado, lacuna sem dado, mensagem só com foto, e o que o validador
-reprovar.
+encontrado, pedido em "Aguardando Cancelamento", lacuna sem dado, mensagem
+só com foto, e o que o validador reprovar.
+
+AGUARDANDO CANCELAMENTO (item 4, 02/10/2026). O pedido em 83955 nunca sai
+sem pessoa. E o modelo só vê "Aguardando Cancelamento" quando o motivo
+deixa falar em cancelamento (`contexto` → `ag_cancelamento`: pessoa
+reprovou, comprador pediu, pedido já cancelado na plataforma, falta de
+estoque ou restrição) — com o motivo no vocabulário fechado. A trava da
+Margem, o movido à mão e o que não deu para conferir viram "em
+processamento": nunca margem, custo interno ou análise interna
+(`_situacao_para_o_modelo`).
 
 A categoria e a confiança são o que o PRÓPRIO modelo declara — por isso o
 código confere: se o texto do cliente tem pista de assunto só-humano
@@ -199,6 +208,7 @@ from app.services import dm_ia
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import gravar, validador
 from app.services.atendimento import manual as manual_svc
+from app.services.atendimento.ag_cancelamento import TEXTOS_IA
 from app.services.atendimento.constantes import (
     ACENTOS_DE,
     ACENTOS_PARA,
@@ -237,7 +247,12 @@ from app.services.atendimento.constantes import (
     TIPOS_REGRA,
     limite_caracteres,
     motivo_canal_sem_envio,
+    normalizar_inicio,
     reclamacao_aberta,
+)
+from app.services.bling_situacoes import (
+    NOME_AGUARDANDO_CANCELAMENTO,
+    SITUACAO_AGUARDANDO_CANCELAMENTO_STR,
 )
 
 logger = structlog.get_logger()
@@ -258,7 +273,10 @@ SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 # PELO DaVinci — o texto não diz mais "dadas fora do DaVinci".
 # v6 (07/10): GARANTIA — o bloco "garantia" dos FATOS (Painel de Garantia) e
 # a regra de usar só as datas dele.
-PROMPT_VERSAO = "v6"
+# v7 (item 4): nunca falar de margem, custo interno, lucro ou análise
+# interna ("custo" sozinho faria o modelo fugir do custo do frete); pedido
+# "em processamento" não é cancelamento.
+PROMPT_VERSAO = "v7"
 
 # Cliente escreve em rajada ("oi" / "meu pedido" / "não chegou"). Esperar
 # 90 s de silêncio junta a rajada numa sugestão só, em vez de três.
@@ -348,6 +366,17 @@ _CHAVE_TETO = "atendimento:ia:chamadas:{}:{}"
 _TETO_TTL_S = 2 * 24 * 3600
 
 MOTIVO_NUMERO_INVENTADO = "número que não veio do sistema"
+
+# Item 4 (02/10/2026): o pedido em "Aguardando Cancelamento" (83955) sempre
+# vai para pessoa; e o que o modelo vê quando o motivo não deixa falar em
+# cancelamento (a trava da Margem, o movido à mão, o que não deu para conferir).
+MOTIVO_AG_CANCELAMENTO = "pedido em Aguardando Cancelamento: só pessoa responde"
+SITUACAO_EM_PROCESSAMENTO = "em processamento"
+# A situação do contexto que é o 83955 sem o bloco do motivo: o NOME
+# normalizado ou o id cru (`chamados.lookup_pedido` cai no id sem o nome).
+_SITUACOES_AG_CANCELAMENTO = frozenset(
+    {normalizar_inicio(NOME_AGUARDANDO_CANCELAMENTO), SITUACAO_AGUARDANDO_CANCELAMENTO_STR}
+)
 
 # As únicas lacunas que o modelo pode escrever (`constantes.LACUNAS`, aqui
 # reexportada como `ia.LACUNAS`). O código preenche.
@@ -2325,16 +2354,52 @@ def _avaliacoes_pendentes(ctx: dict) -> list[int]:
     )
 
 
+def em_aguardando_cancelamento(pedido: Any) -> bool:
+    """O pedido do contexto está em "Aguardando Cancelamento" (83955)? PURA.
+
+    Pelo bloco do motivo (`contexto._pedido`) ou, sem ele, pela situação: o
+    NOME normalizado (sem acento, sem caixa) ou o id cru "83955" — o
+    `status_bling` cai no id quando falta o nome (`chamados.lookup_pedido`).
+    """
+    if not isinstance(pedido, dict):
+        return False
+    if pedido.get("ag_cancelamento") is not None:
+        return True
+    return normalizar_inicio(str(pedido.get("situacao") or "")) in _SITUACOES_AG_CANCELAMENTO
+
+
+def _situacao_para_o_modelo(pedido: dict) -> tuple[Any, str | None]:
+    """(situação, motivo do 83955) do pedido como o MODELO pode ver. PURA.
+
+    Fora de 83955, a situação do sistema como veio. Em 83955, o modelo só
+    vê "Aguardando Cancelamento" quando o motivo deixa falar em cancelamento
+    (`fala_cancelamento`) — e recebe o motivo no vocabulário fechado
+    (`ag_cancelamento.TEXTOS_IA`). No resto (a trava da Margem, o movido à
+    mão, o motivo que não deu para conferir, o bloco ausente ou torto): "em
+    processamento", sem motivo. Fecha do lado seguro.
+    """
+    if not em_aguardando_cancelamento(pedido):
+        return pedido.get("situacao"), None
+    bloco = pedido.get("ag_cancelamento")
+    if isinstance(bloco, dict) and bloco.get("fala_cancelamento") is True:
+        texto = bloco.get("texto_ia")
+        if texto in TEXTOS_IA:
+            return NOME_AGUARDANDO_CANCELAMENTO, texto
+    return SITUACAO_EM_PROCESSAMENTO, None
+
+
 def _fatos_para_o_modelo(
     conversa: AtendimentoConversa, ctx: dict, valores: dict[str, str | None]
 ) -> dict:
     """O que o modelo sabe do pedido — sem os VALORES das lacunas.
 
     Ele vê que existe rastreio, não o código: assim escreve `{rastreio}` em
-    vez de copiar (ou inventar) um número. E nada de dado pessoal.
+    vez de copiar (ou inventar) um número. E nada de dado pessoal. Em
+    "Aguardando Cancelamento", a máscara de `_situacao_para_o_modelo`.
     """
     pedido = ctx.get("pedido")
     log = ctx.get("logistica")
+    situacao, motivo_ag = _situacao_para_o_modelo(pedido) if pedido else (None, None)
     return {
         "plataforma": conversa.plataforma,
         "canal": conversa.canal,
@@ -2343,9 +2408,10 @@ def _fatos_para_o_modelo(
         "pedido": None
         if not pedido
         else {
-            "situacao_no_sistema": pedido.get("situacao"),
+            "situacao_no_sistema": situacao,
             "data_da_compra": _data_br(pedido.get("data")),
             "itens": pedido.get("itens") or [],
+            **({"motivo_aguardando_cancelamento": motivo_ag} if motivo_ag else {}),
         },
         "entrega": None
         if not log
@@ -2587,7 +2653,10 @@ data de entrega: não diga que está coberto — diga que a equipe vai verificar
 
 Troca, devolução, cancelamento, defeito, reembolso, garantia, endereço, desconto
 e reclamação forte: escreva uma resposta acolhedora, sem prometer nada, e marque
-precisa_humano=true."""
+precisa_humano=true.
+
+Nunca fale de margem, custo interno, lucro ou análise interna. Pedido "em processamento"
+não está cancelado: não fale em cancelamento."""
 
 def _formato_saida(ids_categorias: Collection[str]) -> str:
     return (
@@ -3672,6 +3741,9 @@ async def _gerar(
         motivos.append(f"{MOTIVO_NUMERO_INVENTADO} ({', '.join(inventados[:5])})")
     if ctx.get("chamados") or ctx.get("devolucoes"):
         motivos.append("pedido com chamado ou devolução")
+    if em_aguardando_cancelamento(ctx.get("pedido")):
+        # Item 4: o 83955 nunca sai sem pessoa — seja qual for o motivo.
+        motivos.append(MOTIVO_AG_CANCELAMENTO)
     if reclamacao_aberta(conversa.dados):
         motivos.append("reclamação/mediação aberta no ML")
     elif _reclamacoes_abertas(ctx):

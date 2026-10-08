@@ -12,7 +12,10 @@ pedido no espelho do Bling por `numero` OU `numeroloja`; daí saem o número
 do Bling e o resto:
 
     {"pedido": {"numero", "numeroloja", "data", "situacao", "enviado_em",
-                "itens": [{"descricao", "sku", "quantidade"}]} | None,
+                "itens": [{"descricao", "sku", "quantidade"}],
+                # só em "Aguardando Cancelamento" (83955) — item 4:
+                "ag_cancelamento": {"codigo", "fala_cancelamento", "texto_ia"}}
+               | None,
      "logistica": {"rastreio", "transportadora", "previsao", "entregue_em",
                    "status", "data_envio"} | None,
      "chamados": [{"id", "status", "titulo"}],     # só os NÃO resolvidos
@@ -47,6 +50,17 @@ cinco conversas. É texto do comprador: vai para a TELA, nunca para o modelo
 
 `enviado_em`, `data_envio` e `nota_fiscal` vão além do mínimo da spec: são
 as lacunas `{data_envio}` e `{nf_numero}` da IA.
+
+`pedido.ag_cancelamento` (item 4, 02/10/2026) = o PORQUÊ do pedido em
+"Aguardando Cancelamento" (`ag_cancelamento.classificar`, com os fatos da NF
+de `etiqueta_fatos.pedido_bling` e o status na plataforma pelo retrato da
+conversa): o código, se pode falar em cancelamento e o texto do vocabulário
+fechado da IA. Só existe em 83955 (os outros pedidos não pagam consulta).
+Se a classificação falhar, fecha do lado SEGURO (`desconhecido`, sem falar
+em cancelamento) sem derrubar o resto do pedido. A MÁSCARA ("em
+processamento" no lugar da trava da Margem) é da IA
+(`ia._fatos_para_o_modelo`), não daqui: este dicionário também vai para a
+tela.
 
 Sem NENHUM dado pessoal do comprador (nome, CPF, endereço, e-mail): este
 dicionário vai para a tela, para o log do rascunho (`fatos`) e, em parte,
@@ -103,6 +117,8 @@ from app.models import (
     NfNota,
 )
 from app.services import garantia as garantia_svc
+from app.services.atendimento import ag_cancelamento
+from app.services.bling_situacoes import SITUACAO_AGUARDANDO_CANCELAMENTO_STR
 from app.services.chamados import lookup_pedido
 
 logger = structlog.get_logger()
@@ -185,7 +201,51 @@ async def _seguro[T](
 # ── Pedido ────────────────────────────────────────────────────────────────
 
 
-async def _pedido(session: AsyncSession, numero_mkt: str) -> dict | None:
+async def _ag_cancelamento(
+    session: AsyncSession, numero: str, status_plataforma: str | None
+) -> dict:
+    """O porquê do pedido em 83955: `{codigo, fala_cancelamento, texto_ia}`. Nunca levanta.
+
+    O pedido com a trilha da Margem e os fatos da NF vem de
+    `etiqueta_fatos.pedido_bling` — import tardio: `etiqueta_fatos` importa
+    este módulo. SAVEPOINT e `try` PRÓPRIOS: se a classificação falhar (ou
+    não reconhecer o pedido como 83955), fecha do lado SEGURO
+    (`desconhecido`, sem falar em cancelamento) e o resto do pedido segue —
+    sem isto, o `_seguro` do pedido sumiria com o pedido inteiro.
+    """
+    motivo = None
+    try:
+        async with session.begin_nested():
+            from app.services.atendimento import etiqueta_fatos
+
+            pedido = await etiqueta_fatos.pedido_bling(session, numero)
+            if pedido is not None and pedido.numero == numero:
+                motivo = ag_cancelamento.classificar(pedido, status_plataforma=status_plataforma)
+    except Exception as e:  # noqa: BLE001 — o motivo nunca derruba o pedido
+        logger.warning(
+            "atendimento_contexto_falhou",
+            etapa="ag_cancelamento",
+            pedido_bling=numero,
+            err=type(e).__name__,
+        )
+        motivo = None
+    if motivo is None:
+        return {"codigo": ag_cancelamento.DESCONHECIDO, "fala_cancelamento": False}
+    return {
+        "codigo": motivo.codigo,
+        "fala_cancelamento": motivo.fala_cancelamento,
+        "texto_ia": motivo.texto_ia,
+    }
+
+
+async def _pedido(
+    session: AsyncSession, numero_mkt: str, *, status_plataforma: str | None = None
+) -> dict | None:
+    """O pedido do Bling pelo número; `status_plataforma` = o do retrato da conversa.
+
+    Em "Aguardando Cancelamento" (83955), o bloco `ag_cancelamento` com o
+    porquê (item 4) — os outros pedidos não fazem consulta a mais.
+    """
     info = await lookup_pedido(session, numero_mkt)
     if info is None:
         return None
@@ -210,7 +270,7 @@ async def _pedido(session: AsyncSession, numero_mkt: str) -> dict | None:
     # `em_andamento_data` = dia em que o pedido foi para "Em andamento" no
     # Bling, que na operação é o despacho. Replicada em todas as linhas.
     enviado_em = next((r.em_andamento_data for r in linhas if r.em_andamento_data), None)
-    return {
+    saida = {
         "numero": numero,
         "numeroloja": info.get("pedido_marketplace"),
         "data": _iso(info.get("data")),
@@ -218,6 +278,10 @@ async def _pedido(session: AsyncSession, numero_mkt: str) -> dict | None:
         "enviado_em": _iso(enviado_em),
         "itens": itens,
     }
+    # O id cru do espelho (o `status_bling` acima pode ser o NOME da situação).
+    if any((r.situacao or "").strip() == SITUACAO_AGUARDANDO_CANCELAMENTO_STR for r in linhas):
+        saida["ag_cancelamento"] = await _ag_cancelamento(session, numero, status_plataforma)
+    return saida
 
 
 # ── Logística ─────────────────────────────────────────────────────────────
@@ -905,10 +969,16 @@ async def contexto_da_conversa(session: AsyncSession, conversa: AtendimentoConve
     chaves = _chaves_do_pedido(conversa)
     numero_mkt = chaves[0]
     cid = conversa.id
+    # O comprador pediu o cancelamento na plataforma? (o motivo do 83955)
+    status_plataforma = ag_cancelamento.status_na_plataforma(conversa.dados)
 
     for chave in chaves:
         pedido = await _seguro(
-            session, "pedido", lambda chave=chave: _pedido(session, chave), None, cid
+            session,
+            "pedido",
+            lambda chave=chave: _pedido(session, chave, status_plataforma=status_plataforma),
+            None,
+            cid,
         )
         if pedido is not None:
             ctx["pedido"] = pedido

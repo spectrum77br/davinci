@@ -149,9 +149,15 @@ export function frasesDaEtiqueta(h: MudancaDeEtiqueta): { titulo: string; detalh
 //   é outra → a caixa da aba (AtendimentoAbaResposta, com as travas daquela
 //   conversa); Mediador → só leitura. Sem a rota (ou se ela falhar), a
 //   conversa fica como sempre foi.
+// - Aguardando Cancelamento (item 4, fase 4a, 02/10/2026): com o pedido em
+//   83955, a FAIXA de uma linha (`data-faixa-ag-cancelamento`) com o porquê e
+//   se pode falar em cancelamento com o comprador (a trava interna da Margem
+//   NÃO é cancelamento). Lê o mesmo bloco do painel (`painel.ag_cancelamento`);
+//   o cartão completo (AtendimentoAgCancelamento) fica no painel do pedido.
 import {
   Archive,
   ArrowLeft,
+  Ban,
   Bot,
   Check,
   CheckCheck,
@@ -199,6 +205,7 @@ import {
 } from '~/components/AtendimentoAbas.vue'
 import { etiquetaInfo } from '~/components/AtendimentoEtiqueta.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
+import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
@@ -1805,6 +1812,12 @@ function aoVincularGarantia(a: AtendimentoDaGarantia) {
   toasts.success(`Vinculado à garantia #${a.garantia_id}`, `${a.tipo_problema === 'hardware' ? 'Hardware' : 'Software'} · ${a.cobertura_rotulo}`)
   void carregarGarantia(props.conversaId)
 }
+// Aguardando Cancelamento (item 4): a faixa lê o MESMO bloco do painel — o
+// porquê do 83955 e se pode falar em cancelamento. null fora de 83955.
+const agCancelamento = computed(() => {
+  const ag = painelDados.value?.ag_cancelamento
+  return ag ? leituraAgCancelamento(ag) : null
+})
 
 // ─── caixa: Responder × Nota interna ────────────────────────────────────────
 // A nota interna funciona SEMPRE (até no modo observação): ela não sai para
@@ -2364,7 +2377,7 @@ watch(() => props.conversaId, (novo, velho) => {
           </div>
         </div>
 
-        <!-- faixas: bloqueio, janela, fechada, não precisa -->
+        <!-- faixas: bloqueio, janela, fechada, não precisa, Ag. cancelamento -->
         <!-- Conversa da reclamação/mediação (canal 'reclamacao'): só leitura POR
              ESCOLHA nossa (por enquanto) — não é a plataforma que bloqueou, e
              "reabrir" não faz sentido aqui (02/10/2026). -->
@@ -2431,6 +2444,20 @@ watch(() => props.conversaId, (novo, velho) => {
               (marca o caso como resolvido na Amazon).</template>
             <template v-else> Na Amazon, marque também "Não é necessária resposta" no Seller Central.</template>
           </template>
+        </div>
+        <!-- Aguardando Cancelamento (item 4): o porquê do 83955 em UMA linha (o
+             mesmo bloco do painel) e se pode falar em cancelamento; o cartão
+             completo fica no painel do pedido. -->
+        <div
+          v-if="agCancelamento"
+          class="flex shrink-0 items-center gap-1.5 border-b px-3 py-1.5 text-xs"
+          :class="CLS_AG_CANCELAMENTO[agCancelamento.tom].faixa"
+          :title="agCancelamento.faixa"
+          data-faixa-ag-cancelamento
+        >
+          <Ban class="size-3.5 shrink-0" />
+          <span class="min-w-0 flex-1 truncate">{{ agCancelamento.faixa }}</span>
+          <button v-if="!pedidoVisivel && !canalExterno" type="button" class="shrink-0 underline hover:opacity-80" title="abrir o painel do pedido, com o motivo completo" @click="alternarPedido">ver no pedido</button>
         </div>
 
         <!-- Cartão da reclamação/mediação/devolução da plataforma (item 1): nº,

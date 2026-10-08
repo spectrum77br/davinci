@@ -93,21 +93,32 @@ SECO (registra o que mandaria e compara com o Duoke; nada sai) —
                                       sairia, o que o motor decidiu e por quê,
                                       e o que o Duoke fez. Sem texto nenhum.
 
+Troca de produto (07/10/2026, migration 0379 — item 4, fase 4c):
+
+  `atendimento_trocas` — uma linha por troca de item no pedido em
+                         "Aguardando Cancelamento" por falta de estoque: o
+                         antes e o depois, o aceite do cliente (a prova) e
+                         cada passo no Bling (`passos`). Não é atômica: o
+                         `estado` diz onde parou e o `retomar` segue dali.
+
 Os valores válidos das colunas de estado estão em
 `services/atendimento/constantes.py` — um lugar só, lido pelo model, pelo
 sync, pela IA e pela tela.
 """
 
 from datetime import datetime, time
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Float,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -1361,6 +1372,131 @@ class AtendimentoAutomacaoRegistro(Base, TimestampMixin):
     # quem devolveu ou cancelou).
     alerta: Mapped[str | None] = mapped_column(String(32), nullable=True)
     comparado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AtendimentoTroca(Base, TimestampMixin):
+    """Uma troca de item no pedido em "Aguardando Cancelamento" (item 4, fase 4c, migration 0379).
+
+    O item em falta sai e o parecido entra (`services/atendimento/troca.py`):
+    um PUT no Bling, a Margem aprovada (pela pessoa), 83955 → 9 → 6 e a NF de
+    volta à fila. NÃO é atômica — o fato no Bling já aconteceu a cada passo —,
+    então cada passo grava em `passos` ({passo, em, ok, detalhe}) e faz
+    commit, e o `estado` diz onde parou:
+
+      iniciada → item_trocado → em_atendido → em_aberto → nf_liberada →
+      concluida;  abortada (nada mudou no Bling, ou a situação mudou no meio);
+      incerta (o PUT falhou sem resposta: o `retomar` confere por GET).
+
+    UMA troca aberta por pedido (`uq_atendimento_trocas_aberta`, parcial):
+    dois cliques, duas abas ou a pessoa e o robô — só um INSERT passa. A
+    `idem_key` (uma por abertura do diálogo) devolve a troca que já existe
+    em vez de refazer.
+
+    O ACEITE (Eduardo, 07/10/2026): nos níveis 1 e 2 a caixinha "o cliente
+    aceitou" é obrigatória; a prova é opcional — `davinci` (uma mensagem do
+    cliente na mesma conversa, `mensagem_aceite_id`), `duoke` (a resposta
+    colada do Duoke, `aceite_texto` + `aceite_em`) ou `declarado` (sem prova:
+    vale o nome de quem clicou). No nível 0 (o mesmo produto em outro lote)
+    não há aceite (NULL), e o robô de lote troca sozinho (`automatica`,
+    `criado_por` NULL).
+
+    `aceite_texto` é texto de comprador: a tabela fica FORA do Histórico
+    (`historico/sql.EXCLUIDAS`) — ela mesma já é a trilha da troca.
+    """
+
+    __tablename__ = "atendimento_trocas"
+    __table_args__ = (
+        CheckConstraint(
+            "estado IN ('iniciada', 'item_trocado', 'em_atendido', 'em_aberto',"
+            " 'nf_liberada', 'concluida', 'abortada', 'incerta')",
+            name="estado",
+        ),
+        CheckConstraint(
+            "aceite_fonte IS NULL OR aceite_fonte IN ('davinci', 'duoke', 'declarado')",
+            name="aceite_fonte",
+        ),
+        # UMA troca aberta por pedido.
+        Index(
+            "uq_atendimento_trocas_aberta",
+            "pedido_bling",
+            unique=True,
+            postgresql_where=text("estado NOT IN ('concluida', 'abortada')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # O pedido no Bling (`bling_orders.numero` / `bling_id`) e na plataforma.
+    pedido_bling: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    bling_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    numeroloja: Mapped[str | None] = mapped_column(Text, nullable=True)
+    plataforma: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # A conversa da nota interna (o pedido pode não ter conversa).
+    conversa_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # O motivo do 83955 na hora do clique (`ag_cancelamento.classificar`).
+    motivo_codigo: Mapped[str] = mapped_column(String(24), nullable=False)
+    sku_antigo: Mapped[str] = mapped_column(Text, nullable=False)
+    sku_novo: Mapped[str] = mapped_column(Text, nullable=False)
+    # `produto.id` do item novo no Bling (o PUT referencia por id).
+    produto_novo_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    descricao_nova: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quantidade: Mapped[int] = mapped_column(Integer, nullable=False)
+    # O valor unitário do item (o mesmo antes e depois: o cliente paga igual).
+    valor_unitario: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # 0 = o mesmo produto em outro lote; 1 = outra cor; 2 = outro modelo.
+    nivel: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    # O robô de lote trocou sozinho (nível 0, sem pessoa e sem aceite).
+    automatica: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # `products.bling_cost_price` dos dois SKUs (o que a Margem carimba).
+    custo_antigo: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    custo_novo: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    # O saldo virtual do SKU novo no Bling, conferido ao vivo antes do PUT.
+    saldo_ao_vivo: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # davinci | duoke | declarado — NULL só no nível 0.
+    aceite_fonte: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Nome à mão: pela convenção ficaria a 1 caractere do teto do Postgres.
+    mensagem_aceite_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_mensagens.id",
+            ondelete="SET NULL",
+            name="fk_atendimento_trocas_mensagem_aceite",
+        ),
+        nullable=True,
+    )
+    # A resposta do cliente (colada do Duoke, ou a da mensagem escolhida).
+    aceite_texto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aceite_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A mensagem da oferta enviada pelo DaVinci (fase 4d). Sem FK: só referência.
+    oferta_mensagem_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    # O que havia antes (o pino da Margem e a marca da NF que o passo 6 limpa).
+    pino_anterior: Mapped[str | None] = mapped_column(Text, nullable=True)
+    nf_status_anterior: Mapped[str | None] = mapped_column(Text, nullable=True)
+    nf_erro_anterior: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estado: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Código estável da trava ou da falha (a tela traduz); `erro`, a frase.
+    codigo_erro: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    passos: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    idem_key: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, unique=True)
+    # A troca está sendo conduzida AGORA por alguém (executar ou retomar) até
+    # esta hora. O lock do banco cai a cada commit; esta marca não (crítica M5).
+    em_execucao_ate: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Quem clicou. NULL = o robô de lote (`automatica`).
+    criado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    criado_por_nome: Mapped[str] = mapped_column(Text, nullable=False)
+    concluida_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # UMA resposta em voo por conversa — declarado no model (create_all dos testes)

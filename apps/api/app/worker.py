@@ -1176,6 +1176,38 @@ async def atendimento_automacoes(ctx: dict) -> dict | None:
         return None
 
 
+# Troca de lote automática (item 4, fase 4c — decisão (a) do Eduardo,
+# 07/10/2026): a cada 10 min no :03… — ímpar como o robô de lote
+# (`prioridade_estoque_tick`), fora do :00/:30 dos crons de token, do :15 do
+# token do Bling e do :15/:45 do Robô da Margem, e logo antes de um minuto
+# par do sweep de NF, que pega o pedido de volta em Em aberto.
+_ATENDIMENTO_TROCA_LOTE_MINUTOS = {3, 13, 23, 33, 43, 53}
+
+
+async def atendimento_troca_lote(ctx: dict) -> dict | None:
+    """A cada 10 min (:03…): troca o LOTE do pedido em 83955 por falta de estoque.
+
+    O mesmo produto em outro lote (nível 0: dg053.ci → dg053.sp), sem aceite
+    do cliente, pelos passos do botão Trocar (`troca.executar` no modo
+    automático: um PUT, 83955 → 9 → 6, a NF de volta à fila) — ver
+    services/atendimento/troca_lote_auto.py. Até 10 pedidos por rodada, uma
+    troca por pedido, uma rodada por vez (trava no Redis, 540 s).
+
+    Só roda com `atendimento_troca_ativa` E `atendimento_troca_lote_auto` (as
+    duas nascem desligadas) e respeita a lista piloto. Desligado não lê nem o
+    banco — nenhum GET no Bling.
+    """
+    if not (_settings.atendimento_troca_ativa and _settings.atendimento_troca_lote_auto):
+        return None
+    from app.services.atendimento import troca_lote_auto as _troca_lote_auto
+
+    try:
+        return await _troca_lote_auto.atendimento_troca_lote(ctx)
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_troca_lote_falhou", err=type(e).__name__)
+        return None
+
+
 async def atendimento_redes(ctx: dict) -> dict | None:
     """A cada 15 min (:09/:24/:39/:54): comentários e menções do Instagram e do Facebook.
 
@@ -4500,6 +4532,10 @@ class WorkerSettings:
         # Mensagens automáticas (05/10/2026): em `functions` para dar para
         # enfileirar uma rodada à mão.
         func(atendimento_automacoes, timeout=110),
+        # Troca de lote automática (item 4, 08/10/2026): aqui também para dar
+        # para enfileirar uma rodada à mão (a primeira é acompanhada pelo
+        # dono). Uma tentativa só: quem escreve no Bling não repete sozinho.
+        func(atendimento_troca_lote, timeout=540, max_tries=1),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
         # roda uma vez, à mão, depois da aprovação. Uma tentativa só: é
         # retomável, e quem decide rodar de novo é pessoa.
@@ -4880,6 +4916,17 @@ class WorkerSettings:
             minute=_ATENDIMENTO_AUTOMACOES_MINUTOS,
             run_at_startup=False,
             timeout=110,
+        ),
+        # Troca de lote automática (item 4, 08/10/2026) no :03…. `timeout=540`
+        # = a trava da rodada no Redis: o job morto pelo arq não deixa a trava
+        # viva por cima da próxima rodada; e nenhuma troca começa depois de
+        # 6 min (`troca_lote_auto.ORCAMENTO_S`), então o arq não mata o job
+        # no meio de uma. Sai na hora com as chaves da troca desligadas.
+        cron(
+            atendimento_troca_lote,
+            minute=_ATENDIMENTO_TROCA_LOTE_MINUTOS,
+            run_at_startup=False,
+            timeout=540,
         ),
         # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
         # :00): postagem presa é CONSULTADA, nunca retentada.
