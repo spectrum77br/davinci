@@ -34,11 +34,12 @@ function mount({ allowed = true, failOnce = false } = {}) {
       if (url === '/api/mail/mailboxes') return { items: [{ ...mailbox }] }
       if (url.includes('/messages?')) return { items: [{ ...incoming }], more: false }
       if (url === '/api/mail/messages/message1') return structuredClone(incoming)
+    if (/\/(lista|pastas)(?:\?|$)/.test(url)) throw Object.assign(new Error('Older API route missing'), { status: 404 })
       throw new Error(`Unexpected request: ${url}`)
     } }),
     crypto: { randomUUID: () => 'f093d57f-065b-4914-90d6-1aebebdeed5e' },
-    window: { confirm: (text) => { confirmations.push(text); return allowed } },
-    document: { hidden: false }, setInterval: () => 1, clearInterval: () => {},
+    window: { addEventListener: () => {}, removeEventListener: () => {}, confirm: (text) => { confirmations.push(text); return allowed } },
+    document: { hidden: false, addEventListener: () => {}, removeEventListener: () => {} }, setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, clearTimeout: () => {},
   }
   const requiring = (name) => name === 'lucide-vue-next' ? new Proxy({}, { get: () => ({ render: () => Vue.h('i') }) }) : require(name)
   const module = { exports: {} }

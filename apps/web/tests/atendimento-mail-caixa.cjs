@@ -111,8 +111,8 @@ function montarCentral(props, respostas) {
     onMounted: (fn) => montados.push(fn), onBeforeUnmount: () => {},
     useApi: () => ({ url: (v) => v, api: responder }),
     crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000' },
-    window: { confirm: (t) => { perguntas.push(t); return true } },
-    document: { hidden: false }, setInterval: () => 1, clearInterval: () => {},
+    window: { addEventListener: () => {}, removeEventListener: () => {}, confirm: (t) => { perguntas.push(t); return true } },
+    document: { hidden: false, addEventListener: () => {}, removeEventListener: () => {} }, setInterval: () => 1, clearInterval: () => {},
     setTimeout: (fn, ms) => { relogios.push({ fn, ms }); return relogios.length }, clearTimeout: () => {},
   }
   const nomes = Object.keys(g)
@@ -353,7 +353,7 @@ async function principal() {
     assert.match(e3, /data-selo-tipo="site"[\s\S]*Site Uranyx[\s\S]*\*7buyers/)
     assert.match(html, />Carregar mais</)
 
-    // Faltam e-mails no índice: lê de novo daqui a pouco (um relógio só, com teto).
+    // Faltam e-mails no índice: lê de novo daqui a pouco (a mesma agenda de atualização, sem outro relógio).
     assert.equal(m.relogios.length, 1)
     assert.equal(m.relogios[0].ms, 5000)
     const antesDoRelogio = m.chamadas.length
@@ -362,7 +362,7 @@ async function principal() {
     assert.deepEqual(urls().slice(antesDoRelogio), ['/api/mail/mailboxes/box1/lista?limite=50', '/api/mail/mailboxes/box1/pastas'])
     assert.equal(m.relogios.length, 2, 'ainda faltam: outro relógio')
     for (let i = 0; i < 20; i++) { const r = m.relogios.at(-1); r.fn(); await assentar() }
-    assert.equal(m.relogios.length, 12, 'no máximo 12 seguidos')
+    assert.equal(m.relogios.length, 22, 'continua atualizando enquanto a tela está aberta')
 
     // Carregar mais: o cursor da rota; sem repetir.
     await m.estado.loadMessages(true)

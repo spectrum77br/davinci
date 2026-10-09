@@ -79,6 +79,7 @@ function montar(rel, props, { respostas = {}, confirmar = true, filhos = {} } = 
         return structuredClone(v)
       }
     }
+    if (/\/(lista|pastas)(?:\?|$)/.test(url)) throw Object.assign(new Error('Older API route missing'), { status: 404 })
     throw new Error(`rota inesperada: ${url}`)
   }
   const pergunta = (t) => { perguntas.push(t); return typeof confirmar === 'function' ? confirmar(t) : confirmar }
@@ -88,9 +89,9 @@ function montar(rel, props, { respostas = {}, confirmar = true, filhos = {} } = 
     useApi: () => ({ url: (v) => v, api: responder }),
     useToasts: () => ({ success: (t) => avisos.push(['ok', t]), error: (t) => avisos.push(['erro', t]), info: (t) => avisos.push(['info', t]), warning: (t) => avisos.push(['aviso', t]) }),
     confirm: pergunta,
-    window: { confirm: pergunta },
+    window: { addEventListener: () => {}, removeEventListener: () => {}, confirm: pergunta },
     crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000' },
-    document: { hidden: false }, setInterval: () => 1, clearInterval: () => {},
+    document: { hidden: false, addEventListener: () => {}, removeEventListener: () => {} }, setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, clearTimeout: () => {},
   }
   const nomes = Object.keys(g)
   const mod = { exports: {} }

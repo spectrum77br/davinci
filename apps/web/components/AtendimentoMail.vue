@@ -62,14 +62,24 @@ const organizing = ref(0)
 // The list entry of the open message: its store badge and folder for the header.
 const openedSummary = ref<Summary | null>(null)
 let foldersGeneration = 0
-// While the index is still sorting new emails, the list and the counts are
-// read again a few seconds later (at most CATCH_UP_TRIES in a row).
-const CATCH_UP_TRIES = 12
-let catchUpTimer: ReturnType<typeof setTimeout> | undefined
-let catchUpTries = 0
+const POLL_MS = 5_000
+const METADATA_MS = 30_000
+const READ_OPTIONS = { timeout: 15_000, retry: 0 }
+let timer: ReturnType<typeof setTimeout> | undefined
+let disposed = false
+let mounted = false
+let lastMailboxesAt = 0
+let lastFoldersAt = 0
+let lastDetailAt = 0
+let paginated = false
+let selectionEpoch = 0
+let mailboxRequest: Promise<void> | null = null
+let folderRequest: { key: string; promise: Promise<void> } | null = null
+let listRequest: { key: string; append: boolean; promise: Promise<void> } | null = null
+let refreshRequest: Promise<void> | null = null
+let manualRefreshRequested = false
 const currentFolder = computed(() => folders.value.find((item) => item.id === folderId.value) || null)
 const currentStore = computed(() => (storeKey.value ? mailStores.value.find((item) => item.chave === storeKey.value) || null : null))
-let timer: ReturnType<typeof setInterval> | undefined
 // Sections (08/10/2026): "Caixas" is this screen, unchanged; "Filas" is the
 // Atendimento layer on top of it (emails without store/link, suspicious,
 // summaries, sends to review). Whoever is neither a mailbox owner nor an admin
@@ -144,11 +154,11 @@ function fromIndex(item: IndexItem): Summary {
   }
 }
 
-// Only a missing route (older API) means "use the plain list". A request with
-// no HTTP status (the offline test doubles) behaves the same way.
+// Only a missing route (older API) permits the plain list. Network failures
+// must not bypass the index, which hides sensitive security-email subjects.
 function indexRouteMissing(reason: any) {
   const status = Number(reason?.status ?? reason?.statusCode ?? reason?.response?.status ?? 0)
-  return !status || status === 404 || status === 405
+  return status === 404 || status === 405
 }
 
 async function loadIndexed(id: string, append: boolean) {
@@ -156,11 +166,29 @@ async function loadIndexed(id: string, append: boolean) {
   if (folderId.value) query.set('pasta', folderId.value)
   if (storeKey.value) query.set('loja', storeKey.value)
   if (append && nextCursor.value) query.set('antes', nextCursor.value)
-  const result = await api<{ itens: IndexItem[]; proximo: string | null; faltam: number }>(`/api/mail/mailboxes/${id}/lista?${query}`)
+  const result = await api<{ itens: IndexItem[]; proximo: string | null; faltam: number }>(`/api/mail/mailboxes/${id}/lista?${query}`, READ_OPTIONS)
   return { items: result.itens.map(fromIndex), next: result.proximo, missing: result.faltam }
 }
 
-async function loadFolders() {
+function listKey() {
+  return JSON.stringify([mailboxId.value, folderId.value, storeKey.value, selectionEpoch])
+}
+
+async function loadFolders(): Promise<void> {
+  if (disposed) return
+  const key = listKey()
+  if (folderRequest) {
+    const previous = folderRequest
+    await previous.promise
+    if (disposed || key !== listKey() || previous.key === key) return
+    return loadFolders()
+  }
+  const promise = readFolders(key)
+  folderRequest = { key, promise }
+  try { await promise } finally { if (folderRequest?.promise === promise) folderRequest = null }
+}
+
+async function readFolders(key: string) {
   if (!mailboxId.value) { folders.value = []; mailStores.value = []; return }
   const generation = ++foldersGeneration
   const id = mailboxId.value
@@ -169,18 +197,21 @@ async function loadFolders() {
   if (storeKey.value) query.set('loja', storeKey.value)
   const search = query.toString()
   try {
-    const result = await api<{ pastas: FolderItem[]; lojas: StoreItem[]; faltam: number }>(`/api/mail/mailboxes/${id}/pastas${search ? `?${search}` : ''}`)
-    if (generation !== foldersGeneration || id !== mailboxId.value) return
+    const result = await api<{ pastas: FolderItem[]; lojas: StoreItem[]; faltam: number }>(`/api/mail/mailboxes/${id}/pastas${search ? `?${search}` : ''}`, READ_OPTIONS)
+    if (disposed || generation !== foldersGeneration || key !== listKey()) return
     folders.value = result.pastas
     mailStores.value = result.lojas
     organizing.value = result.faltam
+    lastFoldersAt = Date.now()
     // The chosen folder/store is gone (emails moved away): back to all.
     const lostFolder = !!folderId.value && !result.pastas.some((item) => item.id === folderId.value)
     const lostStore = !!storeKey.value && !result.lojas.some((item) => item.chave === storeKey.value)
     if (lostFolder) folderId.value = null
     if (lostStore) storeKey.value = null
-    if (lostFolder || lostStore) void loadList()
-    else catchUp()
+    if (lostFolder || lostStore) {
+      resetList()
+      void loadList()
+    }
   } catch {
     // Keeps the column it had; without the routes there is no column at all.
   }
@@ -189,74 +220,118 @@ async function loadFolders() {
 // The list first (its route indexes what just arrived), then the counts, so
 // both read the same index.
 async function loadList() {
+  const key = listKey()
   await loadMessages()
-  await loadFolders()
+  if (!disposed && key === listKey()) await loadFolders()
 }
 
-function catchUp() {
-  if (!organizing.value) { catchUpTries = 0; return }
-  if (catchUpTimer || catchUpTries >= CATCH_UP_TRIES) return
-  catchUpTries++
-  catchUpTimer = setTimeout(() => {
-    catchUpTimer = undefined
-    if (!document.hidden && !sending.value && !loading.value) void loadList()
-  }, 5_000)
-}
-
-function chooseFilter(kind: 'folder' | 'store', value: string | null) {
-  if (sending.value) return
-  if (kind === 'folder') folderId.value = value
-  else storeKey.value = value
+function resetList() {
+  ++selectionEpoch
+  loading.value = false
+  ++listGeneration
+  ++foldersGeneration
   messages.value = []
   more.value = false
   nextCursor.value = null
+  paginated = false
+}
+
+function chooseFilter(kind: 'folder' | 'store', value: string | null) {
+  if (sending.value || disposed) return
+  if (kind === 'folder') folderId.value = value
+  else storeKey.value = value
+  resetList()
   void loadList()
 }
 
 async function loadMailboxes() {
-  try {
-    const result = await api<{ items: Mailbox[] }>('/api/mail/mailboxes')
-    mailboxes.value = result.items
-    if (!result.items.some((item) => item.id === mailboxId.value)) mailboxId.value = result.items[0]?.id || ''
-  } catch (reason) { error.value = errorText(reason) }
+  if (disposed) return
+  if (mailboxRequest) return mailboxRequest
+  const promise = (async () => {
+    try {
+      const result = await api<{ items: Mailbox[] }>('/api/mail/mailboxes', READ_OPTIONS)
+      if (disposed) return
+      mailboxes.value = result.items
+      lastMailboxesAt = Date.now()
+      if (!result.items.some((item) => item.id === mailboxId.value)) mailboxId.value = result.items[0]?.id || ''
+    } catch (reason) { if (!disposed) error.value = errorText(reason) }
+  })()
+  mailboxRequest = promise
+  try { await promise } finally { if (mailboxRequest === promise) mailboxRequest = null }
 }
 
-async function loadMessages(append = false) {
+// Share the current read instead of invalidating a page that is still loading.
+// A different box/filter waits for that read, then fetches its own selection.
+async function loadMessages(append = false, preservePages = false): Promise<void> {
+  if (disposed) return
+  const key = listKey()
+  if (listRequest) {
+    const previous = listRequest
+    await previous.promise
+    if (disposed || key !== listKey()) return
+    if (previous.key === key && previous.append === append) return
+    return loadMessages(append, preservePages)
+  }
+  const promise = readMessages(append, preservePages, key)
+  listRequest = { key, append, promise }
+  try { await promise } finally { if (listRequest?.promise === promise) listRequest = null }
+}
+
+function applyPage(items: Summary[], append: boolean, preservePages: boolean, hasMore: boolean, cursor: string | null, source: 'index' | 'plain') {
+  if (append) {
+    messages.value = [...new Map([...messages.value, ...items].map((item) => [item.id, item])).values()]
+    paginated = true
+  } else {
+    // Keep the older pages only when the refreshed page overlaps them. If more
+    // than a whole page arrived, restart at the new cursor rather than skip a gap.
+    const ids = new Set(items.map((item) => item.id))
+    let boundary = -1
+    if (preservePages && paginated && hasMore && source === listSource.value) {
+      messages.value.forEach((item, index) => { if (ids.has(item.id)) boundary = index })
+    }
+    if (boundary >= 0) {
+      messages.value = [...items, ...messages.value.slice(boundary + 1).filter((item) => !ids.has(item.id))]
+      return // The cursor and `more` still describe the last loaded page.
+    }
+    messages.value = items
+    paginated = false
+  }
+  more.value = hasMore
+  nextCursor.value = cursor
+  listSource.value = source
+}
+
+async function readMessages(append: boolean, preservePages: boolean, key: string) {
   if (!mailboxId.value) { messages.value = []; return }
   const generation = ++listGeneration
   const id = mailboxId.value
   loading.value = true
+  const current = () => !disposed && generation === listGeneration && key === listKey()
   try {
     if (!append || listSource.value === 'index') {
       const indexed = await loadIndexed(id, append).catch((reason) => {
-        // Folder/store filters only exist in the index: their error shows. So
-        // does a server error (only an older API without the route falls back).
+        // Filters require the index; only a missing unfiltered route falls back.
         if (append || folderId.value || storeKey.value || !indexRouteMissing(reason)) throw reason
         return null
       })
-      if (generation !== listGeneration || id !== mailboxId.value) return
+      if (!current()) return
       if (indexed) {
-        messages.value = append ? [...new Map([...messages.value, ...indexed.items].map((item) => [item.id, item])).values()] : indexed.items
-        more.value = !!indexed.next
-        nextCursor.value = indexed.next
+        applyPage(indexed.items, append, preservePages, !!indexed.next, indexed.next, 'index')
         organizing.value = indexed.missing
-        listSource.value = 'index'
         return
       }
     }
-    listSource.value = 'plain'
-    nextCursor.value = null
-    organizing.value = 0
     const offset = append ? messages.value.length : 0
-    const result = await api<{ items: Summary[]; more: boolean }>(`/api/mail/mailboxes/${id}/messages?limit=50&offset=${offset}`)
-    if (generation !== listGeneration || id !== mailboxId.value) return
-    messages.value = append ? [...new Map([...messages.value, ...result.items].map((item) => [item.id, item])).values()] : result.items
-    more.value = result.more
-  } catch (reason) { if (generation === listGeneration) error.value = errorText(reason) }
-  finally { if (generation === listGeneration) loading.value = false }
+    const result = await api<{ items: Summary[]; more: boolean }>(`/api/mail/mailboxes/${id}/messages?limit=50&offset=${offset}`, READ_OPTIONS)
+    if (!current()) return
+    applyPage(result.items, append, preservePages, result.more, null, 'plain')
+    organizing.value = 0
+  } catch (reason) { if (current()) error.value = errorText(reason) }
+  finally { if (!disposed && generation === listGeneration) loading.value = false }
 }
 
 async function openMessage(id: string, preserveDraft = false) {
+  if (disposed) return
   if (!preserveDraft && draft.value.trim() && detail.value?.id !== id && !window.confirm('Descartar o rascunho desta resposta e abrir outra mensagem?')) return
   const listed = messages.value.find((item) => item.id === id)
   if (listed || !preserveDraft) openedSummary.value = listed?.store ? listed : null
@@ -269,23 +344,64 @@ async function openMessage(id: string, preserveDraft = false) {
   }
   error.value = ''
   try {
-    const result = await api<Detail>(`/api/mail/messages/${id}`)
-    if (generation !== detailGeneration || mailboxId.value !== selectedMailbox) return
+    const result = await api<Detail>(`/api/mail/messages/${id}`, READ_OPTIONS)
+    if (disposed || generation !== detailGeneration || mailboxId.value !== selectedMailbox) return
     detail.value = result
+    lastDetailAt = Date.now()
     if (!preserveDraft) fromAddress.value = result.reply.from_address
-  } catch (reason) { if (generation === detailGeneration) error.value = errorText(reason) }
+  } catch (reason) { if (!disposed && generation === detailGeneration) error.value = errorText(reason) }
 }
 
-async function refresh() {
-  error.value = ''
-  await loadMailboxes()
-  await loadMessages()
-  await loadFolders()
-  if (detail.value) await openMessage(detail.value.id, true)
+// One refresh at a time, including manual clicks and the two resume events.
+// A manual request during polling is fulfilled as a full refresh afterwards.
+async function refresh(background = false): Promise<void> {
+  if (disposed) return
+  if (!background) manualRefreshRequested = true
+  if (refreshRequest) return refreshRequest
+  const promise = (async () => {
+    do {
+      const full = manualRefreshRequested
+      manualRefreshRequested = false
+      if (full) error.value = ''
+      if (full || Date.now() - lastMailboxesAt >= METADATA_MS) await loadMailboxes()
+      if (disposed || (background && document.hidden)) return
+      const key = listKey()
+      await loadMessages(false, !full)
+      if (disposed || key !== listKey() || (background && document.hidden)) return
+      if (manualRefreshRequested && !full) continue
+      if (full || organizing.value || Date.now() - lastFoldersAt >= METADATA_MS) await loadFolders()
+      if (disposed || key !== listKey() || (background && document.hidden)) return
+      if (detail.value && (full || pending.value || Date.now() - lastDetailAt >= METADATA_MS)) await openMessage(detail.value.id, true)
+    } while (manualRefreshRequested && !disposed)
+  })()
+  refreshRequest = promise
+  try { await promise } finally { if (refreshRequest === promise) refreshRequest = null }
+}
+
+function schedulePoll() {
+  clearTimeout(timer)
+  timer = undefined
+  if (!mounted || disposed || document.hidden) return
+  timer = setTimeout(() => { timer = undefined; void poll() }, POLL_MS)
+}
+
+async function poll() {
+  if (!mounted || disposed || document.hidden) return
+  try {
+    if (!sending.value && !resolving.value) await refresh(true)
+  } finally { schedulePoll() }
+}
+
+function resumePolling() {
+  clearTimeout(timer)
+  timer = undefined
+  if (!document.hidden) void poll()
 }
 
 watch(mailboxId, () => {
+  if (disposed) return
   ++detailGeneration
+  resetList()
   detail.value = null
   messages.value = []
   draft.value = ''
@@ -297,7 +413,8 @@ watch(mailboxId, () => {
   nextCursor.value = null
   organizing.value = 0
   openedSummary.value = null
-  catchUpTries = 0
+  lastFoldersAt = 0
+  lastDetailAt = 0
   void loadList()
 })
 
@@ -369,10 +486,25 @@ async function resolveJob(job: Outbox, sent: boolean) {
 watch(newMailboxId, (id) => { if (id && props.isAdmin) configuring.value = true })
 
 onMounted(async () => {
+  mounted = true
+  document.addEventListener('visibilitychange', resumePolling)
+  window.addEventListener('focus', resumePolling)
   await loadMailboxes()
-  timer = setInterval(() => { if (!document.hidden && !sending.value) void refresh() }, 30_000)
+  if (!disposed) {
+    await loadList()
+    schedulePoll()
+  }
 })
-onBeforeUnmount(() => { clearInterval(timer); clearTimeout(catchUpTimer); ++listGeneration; ++detailGeneration })
+onBeforeUnmount(() => {
+  disposed = true
+  mounted = false
+  clearTimeout(timer)
+  document.removeEventListener('visibilitychange', resumePolling)
+  window.removeEventListener('focus', resumePolling)
+  ++listGeneration
+  ++foldersGeneration
+  ++detailGeneration
+})
 </script>
 
 <template>
@@ -385,7 +517,7 @@ onBeforeUnmount(() => { clearInterval(timer); clearTimeout(catchUpTimer); ++list
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
         <button v-if="isAdmin" class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" @click="showSetup = !showSetup"><Plus class="h-4 w-4" /> Cadastrar caixa</button>
-        <button class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" :disabled="loading || sending" @click="refresh"><RefreshCw class="h-4 w-4" /> Atualizar</button>
+        <button class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" :disabled="loading || sending" @click="refresh()"><RefreshCw class="h-4 w-4" /> Atualizar</button>
       </div>
     </div>
 
