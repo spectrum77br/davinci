@@ -1411,10 +1411,11 @@ async function principal() {
 // ------------------------------------------------ a página e a conversa
 {
   const pagina = web('pages/atendimento.vue')
-  assert.match(pagina, /type Aba = 'caixa' \| 'lojas' \| 'manual' \| 'modelos' \| 'automaticas' \| 'metricas'/)
+  // A Caixa Humano (09/10/2026) logo depois da Caixa; o E-mail (08/10/2026) depois.
+  assert.match(pagina, /type Aba = 'caixa' \| 'humano' \| 'mail' \| 'lojas' \| 'manual' \| 'modelos' \| 'automaticas' \| 'metricas'/)
   const abas = [...(pagina.match(/const ABAS[\s\S]*?\n\]/) || [''])[0].matchAll(/value: '([a-z]+)', label: '([^']+)', icon: (\w+)/g)].map((m) => [m[1], m[2], m[3]])
-  assert.deepEqual(abas.map((a) => a[0]), ['caixa', 'lojas', 'manual', 'modelos', 'automaticas', 'metricas'], 'entre "Respostas prontas" e "Métricas"')
-  assert.deepEqual(abas[4], ['automaticas', 'Automáticas', 'Bot'])
+  assert.deepEqual(abas.map((a) => a[0]), ['caixa', 'humano', 'mail', 'lojas', 'manual', 'modelos', 'automaticas', 'metricas'], 'entre "Respostas prontas" e "Métricas"')
+  assert.deepEqual(abas[6], ['automaticas', 'Automáticas', 'Bot'])
   assert.match(pagina, /import \{[^}]*\bBot\b[^}]*\} from 'lucide-vue-next'/)
   // `?tab=automaticas` abre direto (a regra geral das abas).
   assert.match(pagina, /const aba = ref<Aba>\(ABAS\.some\(\(a\) => a\.value === abaQuery\) \? \(abaQuery as Aba\) : 'caixa'\)/)

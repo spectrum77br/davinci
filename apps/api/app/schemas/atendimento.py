@@ -95,6 +95,23 @@ def _categoria(valor: str | None) -> str | None:
 # ── Conversa ──────────────────────────────────────────────────────────────
 
 
+class HumanoOut(BaseModel):
+    """Por que a conversa está na Caixa Humano (09/10/2026; `services/atendimento/humano`).
+
+    `motivos` = os códigos (`constantes.ORDEM_HUMANO`), do mais importante
+    para o menos — o chip da lista mostra o primeiro; `rotulos` = como a tela
+    escreve cada um (mesma ordem). `assuntos` = os assuntos só de pessoa que
+    o cliente citou (motivo `assunto`), com o nome em `assuntos_rotulos`. Só
+    códigos e rótulos fixos: nada do texto do comprador nem do motivo que o
+    modelo escreveu (esse fica no painel da sugestão).
+    """
+
+    motivos: list[str] = Field(default_factory=list)
+    rotulos: list[str] = Field(default_factory=list)
+    assuntos: list[str] = Field(default_factory=list)
+    assuntos_rotulos: list[str] = Field(default_factory=list)
+
+
 class ConversaResumoOut(BaseModel):
     """Uma linha da lista (marketplace ou Instagram)."""
 
@@ -153,6 +170,10 @@ class ConversaResumoOut(BaseModel):
     # (`dm_conversas.rede_social_id`) — a barra de lojas separa por conta.
     # None nas outras.
     rede_social_id: UUID | None = None
+    # Caixa Humano (09/10/2026): a conversa está nela AGORA (falta responder
+    # e a IA não pode) — com os motivos. None = não está (vem também na Caixa
+    # normal: o chip âmbar da linha).
+    humano: HumanoOut | None = None
 
 
 class CopiaAmazonOut(BaseModel):
@@ -737,6 +758,8 @@ class PlataformaResumoOut(BaseModel):
     # Só no "site": os chamados NÃO fechados por tipo (RF6 — sac, atacado,
     # duvidas), os números dos chips SAC / Atacado / Dúvidas e sugestões.
     chamados: dict[str, int] = Field(default_factory=dict)
+    # Na Caixa Humano (09/10/2026): falta responder e a IA não pode.
+    humano: int = 0
 
 
 class LojaResumoOut(BaseModel):
@@ -782,6 +805,8 @@ class LojaResumoOut(BaseModel):
     etiquetas: dict[str, int] = Field(default_factory=dict)
     # O "E-mail sem vínculo" da loja (ver PlataformaResumoOut).
     email_sem_vinculo: int = 0
+    # Na Caixa Humano (ver PlataformaResumoOut).
+    humano: int = 0
 
 
 class FlagsOut(BaseModel):
@@ -795,6 +820,9 @@ class FlagsOut(BaseModel):
     # Vazio sem o simulador.
     simulador_exceto: list[str] = Field(default_factory=list)
     alerta_telegram: bool
+    # A triagem da Caixa Humano está rodando (`atendimento_humano_ativa` E a
+    # leitura). Desligada, a Caixa Humano só mostra as de IA pausada.
+    humano_ativa: bool = False
 
 
 class LeituraParadaOut(BaseModel):
@@ -835,6 +863,8 @@ class ResumoOut(BaseModel):
     etiquetas: dict[str, int] = Field(default_factory=dict)
     # O "E-mail sem vínculo" somando as plataformas (ver PlataformaResumoOut).
     email_sem_vinculo: int = 0
+    # A Caixa Humano somando as plataformas (o número da aba).
+    humano: int = 0
     lojas: list[LojaResumoOut]
     canais: list[CanalOut]
     flags: FlagsOut

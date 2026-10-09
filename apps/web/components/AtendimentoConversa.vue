@@ -201,6 +201,7 @@ import {
   Undo2,
   UserMinus,
   UserPlus,
+  UserRound,
   X,
 } from 'lucide-vue-next'
 import { eNota } from '~/components/AtendimentoNota.vue'
@@ -264,6 +265,7 @@ import {
   respondidaNoSellerCenter,
   respondidaNoSellerCentral,
   rotuloDia,
+  rotulosHumano,
   sellerCenterDe,
   statusDoErro,
   tamanhoDoEnvio,
@@ -2546,6 +2548,17 @@ watch(() => props.conversaId, (novo, velho) => {
           </div>
         </div>
 
+        <!-- Caixa Humano (09/10/2026): a conversa está nela — por que a IA não
+             responde esta (os motivos da triagem; o motivo inteiro da IA, quando
+             ela sugeriu, fica no painel da sugestão). Some quando alguém responde. -->
+        <div
+          v-if="conversa.humano"
+          class="shrink-0 border-b border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs text-amber-900 dark:text-amber-200"
+          role="note"
+          data-faixa-humano
+        >
+          <UserRound class="mr-1 inline size-3.5 align-[-2px]" aria-hidden="true" /><span class="font-semibold">Caixa Humano</span> — a IA não responde esta: {{ rotulosHumano(conversa.humano).join(' · ') }}
+        </div>
         <!-- faixas: bloqueio, janela, fechada, não precisa, Ag. cancelamento -->
         <!-- Conversa da reclamação/mediação (canal 'reclamacao'): só leitura POR
              ESCOLHA nossa (por enquanto) — não é a plataforma que bloqueou, e

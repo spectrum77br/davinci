@@ -37,6 +37,16 @@ function exportsDe(descriptor) {
 
 const P = exportsDe(sfc('../components/AtendimentoPlataforma.vue'))
 const lojasSfc = sfc('../components/AtendimentoLojas.vue')
+// As funções puras do <script> da barra (o corte pela plataforma do topo,
+// 09/10/2026) — o trecho do setup usa elas.
+const LJ = (() => {
+  const F = exportsDe(sfc('../components/AtendimentoFiltroPlataforma.vue'))
+  const req = (n) => (n === '~/components/AtendimentoFiltroPlataforma.vue' ? F : n === '~/components/AtendimentoPlataforma.vue' ? P : require(n))
+  const mod = { exports: {} }
+  new Function('require', 'module', 'exports', transpile(lojasSfc.script.content))(req, mod, mod.exports)
+  return mod.exports
+})()
+const CORTE = ['corteDaBarra', 'gruposVisiveis', 'nomeDoCorte', 'ativaTodasDoCorte', 'filtrosTodasDoCorte', 'numeroDoCorte', 'filtrosDoGrupo']
 sfc('../components/AtendimentoCarrinho.vue')
 sfc('../components/AtendimentoPublicacao.vue')
 sfc('../components/AtendimentoIconePlataforma.vue')
@@ -71,8 +81,8 @@ const fns = setup.slice(setup.indexOf('function escolherTodas'))
 function barra(resumo, filtrosIniciais = {}) {
   const filtros = Vue.ref({ plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '', ...filtrosIniciais })
   const corpo = transpile(setup.slice(inicio, fim) + '\n' + fns) + '\nreturn { lojas, grupos, mostrarInstagram, escolherLoja, ativaLoja, escolherPlataforma, ativaPlataforma }'
-  const r = new Function('computed', 'props', 'filtros', 'viaRobo', 'statusCanalCodigo', 'semLeitura', 'leituraParada', 'nomeDoGrupo', 'plataformaInfo', 'sellerCenterDe', 'statusCanalInfo', corpo)(
-    Vue.computed, { resumo }, filtros, P.viaRobo, P.statusCanalCodigo, P.semLeitura, P.leituraParada, P.nomeDoGrupo, P.plataformaInfo, P.sellerCenterDe, P.statusCanalInfo,
+  const r = new Function('computed', 'props', 'filtros', 'viaRobo', 'statusCanalCodigo', 'semLeitura', 'leituraParada', 'nomeDoGrupo', 'plataformaInfo', 'sellerCenterDe', 'statusCanalInfo', ...CORTE, corpo)(
+    Vue.computed, { resumo }, filtros, P.viaRobo, P.statusCanalCodigo, P.semLeitura, P.leituraParada, P.nomeDoGrupo, P.plataformaInfo, P.sellerCenterDe, P.statusCanalInfo, ...CORTE.map((n) => LJ[n]),
   )
   return { ...r, filtros }
 }

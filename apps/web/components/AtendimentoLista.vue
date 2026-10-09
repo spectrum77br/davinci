@@ -16,6 +16,13 @@ export type FiltrosLista = {
   // O tipo do chamado dos sites (RF6, 09/10/2026): os chips SAC / Atacado /
   // Dúvidas e sugestões do grupo Site (`?tipo_chamado=`). '' = todos.
   tipo_chamado?: string
+  // A plataforma ESCOLHIDA — no menu do topo ou pelo nome do grupo na barra
+  // (09/10/2026, Eduardo: "quando selecionar a plataforma lá em cima, corta
+  // as outras ali da listagem"): a barra de lojas mostra só as lojas dela, e
+  // o botão do topo mostra ela. Não vai para a API (a lista filtra por
+  // `plataforma`); clicar numa LOJA na barra não mexe aqui — senão a barra
+  // encolhia a cada clique numa loja.
+  plataforma_topo?: string
 }
 type OpcaoFiltro = { value: string; label: string; hint: string }
 // Como o Duoke (01/10/2026): duas abas em cima — "Todas" (o All, onde a lista
@@ -58,6 +65,18 @@ export const FILTROS_MENU: OpcaoFiltro[] = [
 // Os filtros do menu que são ETIQUETA (contam pelo /resumo `etiquetas`).
 export const FILTROS_ETIQUETA = new Set(['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'carrinho', 'midia', 'pre_venda', 'pos_venda'])
 export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
+// Na Caixa Humano (09/10/2026) o menu Filtrar não mostra o que nunca entra
+// nela: a fechada, o carrinho do site e as redes (Mídia) — o servidor só põe
+// lá o que falta responder num canal que tem resposta.
+export const FILTROS_FORA_DA_HUMANO = new Set(['fechadas', 'carrinho', 'midia'])
+export function opcoesDoFiltrar(caixa: string | null | undefined): OpcaoFiltro[] {
+  return caixa === 'humano' ? FILTROS_MENU.filter((f) => !FILTROS_FORA_DA_HUMANO.has(f.value)) : FILTROS_MENU
+}
+// O filtro em que a lista abre (e para onde volta ao tirar o do menu): na
+// Caixa, "Todas"; na Caixa Humano, "Falta responder" (pelo prazo).
+export function filtroPadrao(caixa: string | null | undefined): string {
+  return caixa === 'humano' ? 'aguardando' : 'todas'
+}
 
 // Os TIPOS do chamado dos sites (RF6, 09/10/2026): os chips do grupo Site,
 // com os códigos da API (`ROTULO_TIPO_CAIXA` de mail_atendimento/constantes.py,
@@ -105,12 +124,19 @@ export function contagemDosChamados(resumo: ResumoDaCaixa | null | undefined): R
 // No cabeçalho, o botão "Ag. cancel." abre a lista dos pedidos em Aguardando
 // Cancelamento no Bling, com ou sem conversa (AtendimentoAgCancelamentoLista,
 // item 4, fase 4b); "Abrir conversa" de lá seleciona a conversa aqui.
+// CAIXA HUMANO (09/10/2026, `caixa="humano"`): a mesma lista, filtrada pelo
+// servidor — só o que falta responder e a IA não pode responder. No lugar
+// das abas Todas/Falta responder, o título com o número (da loja, da
+// plataforma ou o total); o menu Filtrar continua (sem os números, que são
+// da Caixa). Toda linha que está na Caixa Humano — também na Caixa — leva o
+// chip âmbar com o motivo (o primeiro; todos no title).
 import { onClickOutside } from '@vueuse/core'
 import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PackageX, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
 import { ETIQUETAS_INFO, faixaDaEtiqueta, secundariasDe } from '~/components/AtendimentoEtiqueta.vue'
 import {
   canaisDa,
   canalLabel,
+  chipHumano,
   horaLista,
   plataformaInfo,
   prazoDe,
@@ -129,8 +155,12 @@ const props = defineProps<{
   resumo: Resumo | null
   agora: number
   meuId: string | null
+  // '' = a Caixa; 'humano' = a Caixa Humano (09/10/2026).
+  caixa?: string
 }>()
 const filtros = defineModel<FiltrosLista>('filtros', { required: true })
+const emHumano = computed(() => props.caixa === 'humano')
+const padrao = computed(() => filtroPadrao(props.caixa))
 const emit = defineEmits<{
   (e: 'selecionar', id: string): void
   (e: 'carregarMais'): void
@@ -191,6 +221,12 @@ function semVinculo(linhas: ({ email_sem_vinculo?: number } | null | undefined)[
   if (!linhas.length || !linhas.every((x) => typeof x?.email_sem_vinculo === 'number')) return null
   return linhas.reduce((s, x) => s + (Number(x?.email_sem_vinculo) || 0), 0)
 }
+// A Caixa Humano (09/10/2026): o título dela na lista. Do mesmo jeito; a API
+// antiga não manda — sem número.
+function naHumano(linhas: ({ humano?: number } | null | undefined)[]): number | null {
+  if (!linhas.length || !linhas.every((x) => typeof x?.humano === 'number')) return null
+  return linhas.reduce((s, x) => s + (Number(x?.humano) || 0), 0)
+}
 const contagem = computed((): Record<string, number | null> => {
   const r = props.resumo
   if (!r) return {}
@@ -211,6 +247,7 @@ const contagem = computed((): Record<string, number | null> => {
       vencendo: null,
       a_conferir: semIntegracao.a_conferir ?? null,
       email_sem_vinculo: semVinculo([semIntegracao]),
+      humano: naHumano([semIntegracao]),
       ...porEtiqueta([semIntegracao.etiquetas]),
     }
   }
@@ -222,6 +259,7 @@ const contagem = computed((): Record<string, number | null> => {
       vencendo: null,
       a_conferir: l?.a_conferir ?? null,
       email_sem_vinculo: l ? semVinculo([l]) : 0,
+      humano: l ? naHumano([l]) : 0,
       ...porEtiqueta(l ? [l.etiquetas] : []),
     }
   }
@@ -235,6 +273,7 @@ const contagem = computed((): Record<string, number | null> => {
     vencidas: ps.reduce((s, p) => s + (p.vencidas || 0), 0),
     a_conferir: porPlataforma ? ps.reduce((s, p) => s + (p.a_conferir || 0), 0) : (f.plataforma ? null : (r.a_conferir ?? null)),
     email_sem_vinculo: f.plataforma ? (ps.length ? semVinculo(ps) : 0) : semVinculo([r]),
+    humano: f.plataforma ? (ps.length ? naHumano(ps) : 0) : naHumano([r]),
     // Sem plataforma escolhida, o total do topo; com ela, o da plataforma
     // (a que não tem conversa não manda `etiquetas`: conta zero).
     ...(f.plataforma
@@ -256,10 +295,13 @@ const menuAberto = ref(false)
 const menuRef = ref<HTMLElement | null>(null)
 onClickOutside(menuRef, () => { menuAberto.value = false })
 const filtroDoMenu = computed(() => FILTROS_MENU.find((f) => f.value === filtros.value.filtro) ?? null)
+// As opções do menu (na Caixa Humano, sem o que nunca entra nela).
+const opcoesDoMenu = computed(() => opcoesDoFiltrar(props.caixa))
 function escolherDoMenu(value: string) {
   menuAberto.value = false
-  // Clicar de novo no filtro escolhido tira o filtro (volta para Todas).
-  mudar('filtro', filtros.value.filtro === value ? 'todas' : value)
+  // Clicar de novo no filtro escolhido tira o filtro (volta para Todas — na
+  // Caixa Humano, para "Falta responder").
+  mudar('filtro', filtros.value.filtro === value ? padrao.value : value)
 }
 
 // ─── chips do tipo do chamado (grupo Site, RF6) ─────────────────────────────
@@ -378,13 +420,21 @@ function temEtiqueta(c: ConversaResumo) {
   return !!(faixaDaEtiqueta(c.etiqueta) || secundariasDe(c.etiqueta, c.etiquetas_secundarias).length)
 }
 function temSelos(c: ConversaResumo) {
-  return !!(temEtiqueta(c) || c.eh_pergunta || c.envio_a_conferir || c.tem_rascunho || c.atribuido_a || c.ia_pausada || c.somente_leitura || c.sem_resposta_necessaria || c.situacao === 'bloqueada' || c.situacao === 'fechada')
+  return !!(c.humano || temEtiqueta(c) || c.eh_pergunta || c.envio_a_conferir || c.tem_rascunho || c.atribuido_a || c.ia_pausada || c.somente_leitura || c.sem_resposta_necessaria || c.situacao === 'bloqueada' || c.situacao === 'fechada')
 }
 // Na linha escolhida (fundo azul) os selos coloridos viram translúcidos —
 // âmbar/violeta em cima do azul não se lê.
 function selo(sel: boolean, cls: string) {
   return sel ? 'bg-white/20 text-current' : cls
 }
+
+// A Caixa Humano vazia: sem filtro nenhum, a boa notícia; com filtro, o de
+// sempre (com a busca, "nada encontrado").
+const textoVazioHumano = computed(() => {
+  if (filtros.value.q) return 'Nada encontrado para essa busca na Caixa Humano.'
+  if (filtros.value.filtro === padrao.value) return 'Nada esperando uma pessoa agora — o que a IA não puder responder aparece aqui.'
+  return 'Nenhuma conversa na Caixa Humano com esses filtros.'
+})
 
 const VAZIO: Record<string, string> = {
   aguardando: 'Nada esperando resposta agora.',
@@ -462,7 +512,7 @@ function mover(delta: number) {
         >
           <option value="">todas lojas</option>
           <option v-for="l in lojas" :key="l.chave" :value="l.chave">
-            {{ umaPlataforma ? '' : `${plataformaInfo(l.plataforma).curto} · ` }}{{ l.conta || 'sem nome' }}<template v-if="l.aguardando"> ({{ l.aguardando }})</template>
+            {{ umaPlataforma ? '' : `${plataformaInfo(l.plataforma).curto} · ` }}{{ l.conta || 'sem nome' }}<template v-if="emHumano ? l.humano : l.aguardando"> ({{ emHumano ? l.humano : l.aguardando }})</template>
           </option>
         </select>
         <select
@@ -476,9 +526,23 @@ function mover(delta: number) {
           <option v-for="c in canais" :key="c.value" :value="c.value">{{ c.label }}</option>
         </select>
       </div>
-      <!-- abas (Todas / Falta responder) + menu Filtrar, como o Duoke -->
+      <!-- abas (Todas / Falta responder) + menu Filtrar, como o Duoke; na Caixa
+           Humano, o título dela com o número no lugar das abas -->
       <div class="flex items-end gap-2 border-b">
-        <div class="flex min-w-0 flex-1 items-end gap-3" role="tablist" aria-label="conversas">
+        <div
+          v-if="emHumano"
+          class="flex min-w-0 flex-1 items-center gap-1 pb-1.5 text-xs font-medium text-primary"
+          title="Só o que falta responder e a IA não pode responder (reclamação, devolução, pediu atendente, assunto de dinheiro ou direito…) — respondeu, sai daqui"
+          data-titulo-humano
+        >
+          <UserRound class="size-3.5 shrink-0" aria-hidden="true" />
+          <span class="truncate">Caixa Humano</span>
+          <span
+            v-if="contagem.humano"
+            class="min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold tabular-nums text-white"
+          >{{ contagem.humano > 99 ? '99+' : contagem.humano }}</span>
+        </div>
+        <div v-else class="flex min-w-0 flex-1 items-end gap-3" role="tablist" aria-label="conversas">
           <button
             v-for="a in ABAS_LISTA"
             :key="a.value"
@@ -523,9 +587,9 @@ function mover(delta: number) {
             aria-label="filtrar conversas"
             class="absolute right-0 z-30 mt-1 w-60 rounded-md border bg-background p-1 shadow-lg"
           >
-            <template v-for="(f, i) in FILTROS_MENU" :key="f.value">
+            <template v-for="(f, i) in opcoesDoMenu" :key="f.value">
               <div
-                v-if="FILTROS_ETIQUETA.has(f.value) && (i === 0 || !FILTROS_ETIQUETA.has(FILTROS_MENU[i - 1].value))"
+                v-if="FILTROS_ETIQUETA.has(f.value) && (i === 0 || !FILTROS_ETIQUETA.has(opcoesDoMenu[i - 1].value))"
                 role="separator"
                 class="mx-2 mt-1 border-t pt-1 text-[10px] uppercase tracking-wide text-muted-foreground"
               >Etiqueta</div>
@@ -540,7 +604,7 @@ function mover(delta: number) {
               >
                 <span class="min-w-0 flex-1 truncate">{{ f.label }}</span>
                 <span
-                  v-if="contagem[f.value] !== undefined && contagem[f.value] !== null"
+                  v-if="!emHumano && contagem[f.value] !== undefined && contagem[f.value] !== null"
                   class="min-w-[18px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
                   :class="contadorCls(f.value, contagem[f.value])"
                 >{{ contagem[f.value] }}</span>
@@ -580,11 +644,18 @@ function mover(delta: number) {
           >{{ numerosDoChamado[t.value] > 99 ? '99+' : numerosDoChamado[t.value] }}</span>
         </button>
       </div>
+      <!-- Caixa Humano: o que é, numa linha; e o aviso quando a triagem está desligada no servidor -->
+      <p v-if="emHumano" class="text-[11px] leading-snug text-muted-foreground" data-dica-humano>
+        Só o que a IA não pode responder e falta responder — respondeu, sai daqui.
+        <span v-if="resumo?.flags?.humano_ativa === false" class="block text-amber-700 dark:text-amber-300" data-humano-desligada>
+          A triagem está desligada no servidor: aqui só aparecem as conversas com a IA pausada.
+        </span>
+      </p>
       <div v-if="filtroDoMenu" class="flex items-center gap-1 text-[11px]">
         <span class="text-muted-foreground">Filtro:</span>
         <span class="inline-flex items-center gap-1 rounded-full border border-primary bg-primary/10 px-2 py-0.5 text-primary" :title="filtroDoMenu.hint">
           {{ filtroDoMenu.label }}
-          <button type="button" class="rounded-full hover:bg-primary/20" aria-label="tirar o filtro" @click="mudar('filtro', 'todas')">
+          <button type="button" class="rounded-full hover:bg-primary/20" aria-label="tirar o filtro" @click="mudar('filtro', padrao)">
             <X class="size-3" />
           </button>
         </span>
@@ -607,10 +678,10 @@ function mover(delta: number) {
       </div>
 
       <div v-else-if="!itens.length && !erro" class="px-4 py-10 text-center text-sm text-muted-foreground">
-        <Inbox class="mx-auto mb-2 size-6 opacity-60" />
-        {{ textoVazio }}
-        <div v-if="filtros.filtro !== 'todas'" class="mt-2">
-          <button type="button" class="text-xs underline" @click="mudar('filtro', 'todas')">ver todas</button>
+        <component :is="emHumano ? UserRound : Inbox" class="mx-auto mb-2 size-6 opacity-60" />
+        {{ emHumano ? textoVazioHumano : textoVazio }}
+        <div v-if="filtros.filtro !== padrao" class="mt-2">
+          <button type="button" class="text-xs underline" @click="mudar('filtro', padrao)">{{ emHumano ? 'tirar o filtro' : 'ver todas' }}</button>
         </div>
       </div>
 
@@ -689,6 +760,19 @@ function mover(delta: number) {
                 >{{ prazoDe(c, agora)!.texto }}</span>
               </span>
               <span v-if="temSelos(c)" class="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
+                <!-- Caixa Humano (09/10/2026): por que a IA não responde esta —
+                     o primeiro motivo, "+N" os outros, todos no title. -->
+                <span
+                  v-if="c.humano"
+                  class="inline-flex min-w-0 max-w-full items-center gap-0.5 rounded px-1.5 py-px font-medium"
+                  :class="selo(c.id === selecionada, 'bg-amber-500/20 text-amber-900 ring-1 ring-inset ring-amber-500/40 dark:text-amber-200')"
+                  :title="chipHumano(c.humano)?.titulo"
+                  data-selo-humano
+                >
+                  <UserRound class="size-3 shrink-0" aria-hidden="true" />
+                  <span class="truncate">{{ chipHumano(c.humano)?.texto }}</span>
+                  <span v-if="(chipHumano(c.humano)?.mais ?? 0) > 0" class="shrink-0 opacity-75">+{{ chipHumano(c.humano)?.mais }}</span>
+                </span>
                 <AtendimentoEtiqueta
                   v-if="temEtiqueta(c)"
                   :etiqueta="c.etiqueta"

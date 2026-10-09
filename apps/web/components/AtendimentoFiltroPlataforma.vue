@@ -21,7 +21,22 @@
 // jeito do menu "Filtrar" da lista (clique fora ou Esc fecha). Escolher no
 // menu a plataforma que já está inteira só fecha (é escolha, não liga/desliga);
 // com uma loja dela escolhida na barra, mostra todas as lojas dela.
-// Funções puras aqui em cima (testadas em tests/atendimento-filtro-plataforma.cjs).
+// A BARRA CORTA (09/10/2026, Eduardo: "quando selecionar a plataforma lá em
+// cima, corta as outras ali da listagem: deixa só as lojas da plataforma
+// mesmo naquele navegável na esquerda"): escolher aqui grava também
+// `filtros.plataforma_topo`, e a barra de lojas (AtendimentoLojas) mostra só
+// as lojas dela, com "Todas · Shopee" no topo. "Todas" aqui volta a barra
+// inteira. Escolher a plataforma pelo NOME do grupo na barra também corta (é
+// escolher a plataforma); clicar numa LOJA na barra não corta.
+// O BOTÃO MOSTRA O CORTE (`chipDoTopo`): a plataforma só aparece aqui quando
+// a barra está cortada nela — com uma loja Shopee clicada na barra inteira, o
+// botão continua "Todas". Assim botão e barra nunca dizem coisas diferentes
+// (antes o botão dizia "Shopee" com TikTok e ML na barra).
+// NA CAIXA HUMANO (09/10/2026) o número de cada plataforma é o da Caixa
+// Humano (`numero="humano"`), não o "falta responder"; as plataformas que
+// aparecem são as mesmas.
+// Funções puras aqui em cima (testadas em tests/atendimento-filtro-plataforma.cjs
+// e tests/atendimento-caixa-humano.cjs).
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import type { Resumo } from '~/components/AtendimentoPlataforma.vue'
 
@@ -39,6 +54,10 @@ export const GRUPOS_CAIXA: GrupoCaixa[] = [
   { valor: 'instagram,facebook', plataformas: ['instagram', 'facebook'], nome: 'Redes' },
 ]
 
+// O número do chip: o "falta responder" (`aguardando`, na Caixa) ou o da
+// Caixa Humano (`humano`) — o mesmo campo do /resumo em cada nível.
+export type NumeroDaCaixa = 'aguardando' | 'humano'
+// `aguardando` = o número que o chip mostra (o do `NumeroDaCaixa` escolhido).
 export type ChipPlataforma = GrupoCaixa & { aguardando: number }
 
 // `filtros.plataforma` → as plataformas ("instagram,facebook" → duas).
@@ -51,27 +70,65 @@ export function plataformasDoValor(valor: string | null | undefined): string[] {
   return saida
 }
 
-// O "falta responder" de um conjunto de plataformas (do /resumo).
-export function aguardandoDe(resumo: Resumo | null | undefined, plataformas: string[]): number {
+// O grupo do menu que contém estas plataformas ('' = nenhum): "shopee" →
+// "shopee"; "instagram" → "instagram,facebook" (Redes). É o corte de quem
+// escolhe a plataforma pela barra, e o do filtro salvo antes do corte.
+export function topoDoValor(valor: string | null | undefined): string {
+  const ps = plataformasDoValor(valor)
+  if (!ps.length) return ''
+  return GRUPOS_CAIXA.find((g) => ps.every((p) => g.plataformas.includes(p)))?.valor ?? ''
+}
+
+// O CORTE da barra de lojas ([] = a barra inteira): a plataforma do topo,
+// enquanto o filtro da lista está DENTRO dela (a plataforma inteira ou uma
+// loja dela). Se o filtro saiu dela por outro caminho, a barra volta inteira
+// — e o botão, para "Todas".
+export function corteDaBarra(f: Pick<FiltrosLista, 'plataforma' | 'plataforma_topo'>): string[] {
+  const topo = plataformasDoValor(f.plataforma_topo)
+  const atual = plataformasDoValor(f.plataforma)
+  if (!topo.length || !atual.length || !atual.every((p) => topo.includes(p))) return []
+  return topo
+}
+
+// O que o botão do topo mostra e o menu marca: a plataforma do CORTE (null =
+// "Todas", a barra inteira).
+export function chipDoTopo(chip: GrupoCaixa | null, f: Pick<FiltrosLista, 'plataforma' | 'plataforma_topo'>): boolean {
+  const corte = corteDaBarra(f)
+  if (!chip) return corte.length === 0
+  return corte.length > 0 && topoDoValor(corte.join(',')) === chip.valor
+}
+
+// O "falta responder" de um conjunto de plataformas (do /resumo) — ou, com
+// `numero = 'humano'`, quantas delas estão na Caixa Humano.
+export function aguardandoDe(resumo: Resumo | null | undefined, plataformas: string[], numero: NumeroDaCaixa = 'aguardando'): number {
   return (resumo?.plataformas || [])
     .filter((p) => plataformas.includes(p.plataforma))
-    .reduce((s, p) => s + (Number(p.aguardando) || 0), 0)
+    .reduce((s, p) => s + (Number(p[numero]) || 0), 0)
+}
+
+// Como o número se lê no title ("3 conversa(s) falta responder").
+export function textoDoNumero(numero: NumeroDaCaixa = 'aguardando'): string {
+  return numero === 'humano' ? 'conversa(s) esperando uma pessoa (a IA não pode responder)' : 'conversa(s) falta responder'
 }
 
 // Os chips da pessoa: a plataforma EXISTE para ela quando o /resumo traz uma
 // loja dela (o /resumo já vem no escopo da equipe), ou conversa esperando —
 // e a que está escolhida fica sempre, para ela ver o que está filtrando.
-export function chipsDoResumo(resumo: Resumo | null | undefined, atual = ''): ChipPlataforma[] {
+// Na Caixa Humano o número muda, as plataformas não (quem existe é pelo
+// "falta responder").
+export function chipsDoResumo(resumo: Resumo | null | undefined, atual = '', numero: NumeroDaCaixa = 'aguardando'): ChipPlataforma[] {
   if (!resumo) return []
   const escolhidas = plataformasDoValor(atual)
   const comLoja = new Set((resumo.lojas || []).map((l) => l.plataforma))
   return GRUPOS_CAIXA
     .map((g) => ({ ...g, aguardando: aguardandoDe(resumo, g.plataformas) }))
     .filter((g) => g.plataformas.some((p) => comLoja.has(p)) || g.aguardando > 0 || (escolhidas.length > 0 && escolhidas.every((p) => g.plataformas.includes(p))))
+    .map((g) => (numero === 'aguardando' ? g : { ...g, aguardando: aguardandoDe(resumo, g.plataformas, numero) }))
 }
 
-// O chip aceso: o filtro está DENTRO dele (a plataforma inteira, ou uma loja
-// dela escolhida na barra). "Todas" = nenhuma plataforma escolhida.
+// O filtro da lista está DENTRO do chip (a plataforma inteira, ou uma loja
+// dela escolhida na barra). "Todas" = nenhuma plataforma escolhida. (O que o
+// botão mostra e o menu marca é o corte: `chipDoTopo`.)
 export function chipAtivo(chip: GrupoCaixa | null, filtros: Pick<FiltrosLista, 'plataforma'>): boolean {
   const escolhidas = plataformasDoValor(filtros.plataforma)
   if (!chip) return escolhidas.length === 0
@@ -102,6 +159,21 @@ export function filtrosDoChip(filtros: FiltrosLista, chip: GrupoCaixa | null): F
   }
 }
 
+// A escolha NO MENU (09/10/2026): a plataforma (ou "Todas" com `null`) vira o
+// filtro E o corte da barra de lojas (`plataforma_topo`). Escolher a que já
+// está inteira não desfaz (é um menu) — só passa a cortar a barra, se ela
+// tinha sido escolhida pela barra. Mesmo objeto = nada mudou.
+export function filtrosDoMenu(filtros: FiltrosLista, chip: GrupoCaixa | null): FiltrosLista {
+  const inteira = chip && chipAtivo(chip, filtros) && soAPlataforma(filtros)
+    && plataformasDoValor(filtros.plataforma).join(',') === chip.plataformas.join(',')
+  if (chip && inteira) {
+    return (filtros.plataforma_topo || '') === chip.valor ? filtros : { ...filtros, plataforma_topo: chip.valor }
+  }
+  const novo = filtrosDoChip(filtros, chip)
+  novo.plataforma_topo = novo.plataforma
+  return novo
+}
+
 export function contadorChip(n: number): string {
   return n > 99 ? '99+' : String(n)
 }
@@ -111,14 +183,16 @@ export function contadorChip(n: number): string {
 import { Check, ChevronDown } from 'lucide-vue-next'
 import { onClickOutside } from '@vueuse/core'
 
-const props = defineProps<{ resumo: Resumo | null }>()
+const props = defineProps<{ resumo: Resumo | null; numero?: NumeroDaCaixa }>()
 const filtros = defineModel<FiltrosLista>('filtros', { required: true })
 
-const chips = computed(() => chipsDoResumo(props.resumo, filtros.value.plataforma))
-const total = computed(() => (props.resumo?.plataformas || []).reduce((s, p) => s + (Number(p.aguardando) || 0), 0))
-// O que o botão mostra: a plataforma escolhida (inteira ou com uma loja dela
-// escolhida na barra) ou "Todas".
-const atual = computed(() => chips.value.find((c) => chipAtivo(c, filtros.value)) ?? null)
+const campo = computed<NumeroDaCaixa>(() => (props.numero === 'humano' ? 'humano' : 'aguardando'))
+const chips = computed(() => chipsDoResumo(props.resumo, filtros.value.plataforma, campo.value))
+const total = computed(() => (props.resumo?.plataformas || []).reduce((s, p) => s + (Number(p[campo.value]) || 0), 0))
+// O que o botão mostra: a plataforma do corte da barra (inteira ou com uma
+// loja dela escolhida) ou "Todas" — a barra inteira, mesmo com uma loja
+// clicada nela.
+const atual = computed(() => chips.value.find((c) => chipDoTopo(c, filtros.value)) ?? null)
 
 const aberto = ref(false)
 const caixaRef = ref<HTMLElement | null>(null)
@@ -126,15 +200,16 @@ onClickOutside(caixaRef, () => { aberto.value = false })
 
 function escolher(chip: GrupoCaixa | null) {
   aberto.value = false
-  // Já está na plataforma inteira: escolher de novo não desfaz (é um menu).
-  if (chip && chipAtivo(chip, filtros.value) && soAPlataforma(filtros.value)) return
-  const novo = filtrosDoChip(filtros.value, chip)
+  // Já está na plataforma inteira (e cortando a barra): escolher de novo não
+  // desfaz (é um menu) — `filtrosDoMenu` devolve o mesmo objeto.
+  const novo = filtrosDoMenu(filtros.value, chip)
+  if (novo === filtros.value) return
   // O tipo do chamado (os chips do grupo Site, na lista) é da plataforma de antes.
   if (novo.plataforma !== filtros.value.plataforma) novo.tipo_chamado = ''
   filtros.value = novo
 }
 function titulo(chip: ChipPlataforma): string {
-  const partes = [`Só ${chip.nome}: ${chip.aguardando} conversa(s) falta responder`]
+  const partes = [`Só ${chip.nome}: ${chip.aguardando} ${textoDoNumero(campo.value)}`]
   if (chipAtivo(chip, filtros.value) && !soAPlataforma(filtros.value)) partes.push(`Uma loja escolhida na barra — clique para ver todas as lojas ${chip.nome}`)
   return partes.join('\n')
 }
@@ -156,7 +231,7 @@ function titulo(chip: ChipPlataforma): string {
       aria-haspopup="menu"
       :aria-expanded="aberto"
       aria-label="plataforma"
-      :title="atual ? titulo(atual) : `Todas as plataformas: ${total} conversa(s) falta responder`"
+      :title="atual ? titulo(atual) : `Todas as plataformas: ${total} ${textoDoNumero(campo)}`"
       data-plataforma-botao
       @click="aberto = !aberto"
     >
@@ -180,9 +255,9 @@ function titulo(chip: ChipPlataforma): string {
         type="button"
         role="menuitemradio"
         class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
-        :class="chipAtivo(null, filtros) ? 'font-medium text-primary' : ''"
-        :aria-checked="chipAtivo(null, filtros)"
-        :title="`Todas as plataformas: ${total} conversa(s) falta responder`"
+        :class="chipDoTopo(null, filtros) ? 'font-medium text-primary' : ''"
+        :aria-checked="chipDoTopo(null, filtros)"
+        :title="`Todas as plataformas: ${total} ${textoDoNumero(campo)}`"
         data-chip="todas"
         @click="escolher(null)"
       >
@@ -191,7 +266,7 @@ function titulo(chip: ChipPlataforma): string {
           v-if="total"
           class="min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold tabular-nums text-white"
         >{{ contadorChip(total) }}</span>
-        <Check v-if="chipAtivo(null, filtros)" class="size-3.5 shrink-0" />
+        <Check v-if="chipDoTopo(null, filtros)" class="size-3.5 shrink-0" />
       </button>
       <button
         v-for="c in chips"
@@ -199,9 +274,9 @@ function titulo(chip: ChipPlataforma): string {
         type="button"
         role="menuitemradio"
         class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
-        :class="chipAtivo(c, filtros) ? 'font-medium text-primary' : ''"
-        :aria-checked="chipAtivo(c, filtros)"
-        :aria-label="`Só ${c.nome}${c.aguardando ? ` — ${c.aguardando} falta responder` : ''}`"
+        :class="chipDoTopo(c, filtros) ? 'font-medium text-primary' : ''"
+        :aria-checked="chipDoTopo(c, filtros)"
+        :aria-label="`Só ${c.nome}${c.aguardando ? ` — ${c.aguardando} ${campo === 'humano' ? 'esperando uma pessoa' : 'falta responder'}` : ''}`"
         :title="titulo(c)"
         :data-chip="c.valor"
         @click="escolher(c)"
@@ -214,7 +289,7 @@ function titulo(chip: ChipPlataforma): string {
           v-if="c.aguardando"
           class="min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold tabular-nums text-white"
         >{{ contadorChip(c.aguardando) }}</span>
-        <Check v-if="chipAtivo(c, filtros)" class="size-3.5 shrink-0" />
+        <Check v-if="chipDoTopo(c, filtros)" class="size-3.5 shrink-0" />
       </button>
     </div>
   </div>

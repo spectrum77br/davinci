@@ -223,6 +223,10 @@ from app.services.atendimento.constantes import (
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
     FONTE_TUTA,
+    HUMANO_ALERTA,
+    HUMANO_ATENDENTE,
+    HUMANO_INSTRUCAO,
+    HUMANO_XINGAMENTO,
     LACUNAS,
     MODO_AUTO,
     MODOS,
@@ -1171,29 +1175,63 @@ def _tem_injecao(texto: str) -> bool:
     )
 
 
-def sinais_do_cliente(textos: list[str]) -> list[str]:
-    """Motivos para pessoa que vêm do que o CLIENTE escreveu."""
-    motivos: list[str] = []
+def sinais_com_codigo(textos: list[str]) -> list[tuple[str, str]]:
+    """Os sinais do texto do CLIENTE como (código, frase), sem repetir. PURA.
+
+    O código (`constantes.HUMANO_ALERTA`/`_XINGAMENTO`/`_ATENDENTE`/
+    `_INSTRUCAO`) é o que a Caixa Humano grava (`humano.triar`) — ela não
+    depende do texto da frase; a frase é o motivo da sugestão.
+    """
+    sinais: list[tuple[str, str]] = []
     for texto in textos:
         busca = validador.plano_de(texto)
         m = _ALERTA.search(busca)
         if m:
-            motivos.append(f"palavra de alerta na conversa ({m.group(0)})")
+            sinais.append((HUMANO_ALERTA, f"palavra de alerta na conversa ({m.group(0)})"))
         if _XINGAMENTO.search(busca):
-            motivos.append("cliente exaltado (xingamento)")
+            sinais.append((HUMANO_XINGAMENTO, "cliente exaltado (xingamento)"))
         if _ATENDENTE.search(busca):
-            motivos.append("cliente pediu atendente")
+            sinais.append((HUMANO_ATENDENTE, "cliente pediu atendente"))
         if _tem_injecao(texto):
-            motivos.append(MOTIVO_INJECAO)
-    return list(dict.fromkeys(motivos))
+            sinais.append((HUMANO_INSTRUCAO, MOTIVO_INJECAO))
+    return list(dict.fromkeys(sinais))
+
+
+def sinais_do_cliente(textos: list[str]) -> list[str]:
+    """Motivos para pessoa que vêm do que o CLIENTE escreveu."""
+    return list(dict.fromkeys(frase for _codigo, frase in sinais_com_codigo(textos)))
 
 
 # Palpite de categoria ANTES do modelo, só para escolher exemplos parecidos.
 # Quem decide a categoria de verdade é o modelo (e o código confere).
+# É também a régua do assunto só de pessoa da Caixa Humano (`humano.triar`,
+# que não chama o modelo): por isso os assuntos de dinheiro/direito são
+# pegos também ditos com outras palavras (09/10/2026: "parou de funcionar",
+# "veio errado", "faltou o carregador", "quero meu dinheiro", "desisti",
+# "vou abrir uma reclamação"). Falso positivo só custa o automático.
 _PISTAS_CATEGORIA: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("cancelamento", re.compile(r"\bcancel\w*")),
-    ("reembolso", re.compile(r"\b(?:reembols\w*|estorn\w*|dinheiro\s+de\s+volta)")),
-    ("defeito", re.compile(r"\b(?:defeit\w*|quebrad\w*|nao\s+funciona\w*|estragad\w*|avariad\w*)")),
+    ("cancelamento", re.compile(r"\b(?:cancel\w*|desist\w*|nao\s+quero\s+mais)")),
+    (
+        "reembolso",
+        re.compile(
+            r"\b(?:reembols\w*|estorn\w*|extorn\w*|ressarc\w*|restitu\w*|dinheiro\s+de\s+volta"
+            r"|(?:quero|devolv\w*|cade)\s+(?:o\s+|meu\s+)?dinheiro)"
+        ),
+    ),
+    (
+        "defeito",
+        re.compile(
+            r"\b(?:defeit\w*|quebrad\w*|nao\s+funciona\w*|estragad\w*|avariad\w*"
+            r"|nao\s+(?:esta|ta|tah)\s+funcionando|parou\s+de\s+funcionar"
+            r"|nao\s+(?:liga|ligou|carrega|carregou|acende|acendeu)\b(?!\s+(?:pra|para|pro)\b)"
+            r"|danificad\w*|trincad\w*|rachad\w*|amassad\w*|arranhad\w*|falsificad\w*"
+            # Faltando peça e diferente do anúncio (a descrição de "defeito").
+            r"|(?:veio|vieram|chegou|chegaram|esta|ta|estava)\s+faltando"
+            r"|faltou\s+(?:o|a|os|as|um|uma|peca\w*|item|itens)\b"
+            r"|(?:veio|vieram|chegou|chegaram|mandaram|enviaram|recebi)\s+(?:\w+\s+){0,3}?"
+            r"(?:errad\w*|diferente\w*|usad[oa]s?)\b)"
+        ),
+    ),
     ("troca_devolucao", re.compile(r"\b(?:troc\w*|devolv\w*|devoluc\w*)")),
     # "Validade" é como o dono e o comprador chamam a garantia ("quando
     # perguntarem de validade") — menos a do cupom/oferta.
@@ -1221,6 +1259,9 @@ _PISTAS_CATEGORIA: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("endereco", re.compile(r"\bendereco\b")),
     ("desconto", re.compile(r"\b(?:desconto|cupom|mais\s+barato)\b")),
+    # Reclamação/disputa/mediação na plataforma (o Procon e a Justiça são
+    # "palavra de alerta", em `_ALERTA`).
+    ("reclamacao_forte", re.compile(r"\b(?:reclamac\w*|reclamar\w*|disputa\w*|mediac\w*)")),
     ("agradecimento", re.compile(r"\b(?:obrigad\w*|valeu|agradec\w*)")),
 )
 

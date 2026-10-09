@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BarChart3, BookOpen, Bot, Eye, Inbox, MessageSquareText, RotateCcw, Store, TriangleAlert } from 'lucide-vue-next'
+import { BarChart3, BookOpen, Bot, Eye, Inbox, MessageSquareText, RotateCcw, Store, TriangleAlert, UserRound } from 'lucide-vue-next'
 import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import {
   AVISO_SO_LEITURA,
@@ -19,6 +19,7 @@ import {
   type Resumo,
 } from '~/components/AtendimentoPlataforma.vue'
 import { tipoChamadoAtivo, type FiltrosLista } from '~/components/AtendimentoLista.vue'
+import { topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
 // mesma trava do menu (AppSidebar) e da API. Desde 07/10/2026 ("pode liberar
@@ -54,10 +55,20 @@ definePageMeta({ middleware: ['atendimento'] })
 // - "Automáticas" (05/10/2026): as mensagens automáticas do Duoke recriadas
 //   no DaVinci, por loja, começando em modo seco (registra o que mandaria e
 //   compara com o Duoke; nada sai). Desenho em docs/atendimento-automacoes.md.
+// - "Caixa Humano" (09/10/2026), ao lado da Caixa — o Eduardo: "criaremos ao
+//   lado da Caixa uma Caixa Humano, que virá quando a IA não puder responder
+//   a questão [...] só as que falta responder por um humano que a IA não
+//   conseguiu". As MESMAS colunas da Caixa (lojas | lista | conversa), com a
+//   lista filtrada pelo servidor (`?caixa=humano`: a régua da IA, sem chamar
+//   o modelo — services/atendimento/humano.py), os números da Caixa Humano na
+//   barra, no menu do topo e na aba, o motivo em cada linha e a faixa na
+//   conversa. Plataforma, loja e busca valem nas duas; a lista abre pelo
+//   prazo (a mais urgente primeiro). Respondeu, sai.
 
-type Aba = 'caixa' | 'mail' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas'
+type Aba = 'caixa' | 'humano' | 'mail' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas'
 const ABAS: { value: Aba; label: string; icon: any }[] = [
   { value: 'caixa', label: 'Caixa', icon: Inbox },
+  { value: 'humano', label: 'Caixa Humano', icon: UserRound },
   { value: 'mail', label: 'E-mail', icon: Inbox },
   { value: 'lojas', label: 'Lojas e modo', icon: Store },
   { value: 'manual', label: 'Manual da IA', icon: BookOpen },
@@ -90,12 +101,21 @@ const agora = useRelogio()
 const abaQuery = typeof route.query.tab === 'string' ? route.query.tab : ''
 const aba = ref<Aba>(ABAS.some((a) => a.value === abaQuery) ? (abaQuery as Aba) : 'caixa')
 const selecionada = ref<string | null>(typeof route.query.conversa === 'string' && route.query.conversa ? route.query.conversa : null)
+// A Caixa e a Caixa Humano usam as mesmas colunas, filtros e conversa aberta.
+const naCaixa = computed(() => aba.value === 'caixa' || aba.value === 'humano')
+const emHumano = computed(() => aba.value === 'humano')
+// A lista de cada uma abre num filtro: a Caixa em "Todas" (como o Duoke); a
+// Caixa Humano em "Falta responder" — tudo nela espera resposta, e assim vem
+// pelo prazo, a mais urgente primeiro.
+function filtroPadraoDa(a: Aba): string {
+  return a === 'humano' ? 'aguardando' : 'todas'
+}
 
 function sincronizarUrl() {
   const query = { ...route.query }
   if (aba.value === 'caixa') delete query.tab
   else query.tab = aba.value
-  if (selecionada.value && aba.value === 'caixa') query.conversa = selecionada.value
+  if (selecionada.value && naCaixa.value) query.conversa = selecionada.value
   else delete query.conversa
   void router.replace({ query })
 }
@@ -139,7 +159,7 @@ const semLer = computed(() => leiturasParadas(resumo.value))
 // ─── lista ──────────────────────────────────────────────────────────────────
 const FILTROS_KEY = 'davinci.atendimento.filtros'
 // Abre em "Todas", como o All do Duoke (01/10/2026); "Falta responder" é a aba ao lado.
-const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '', tipo_chamado: '' })
+const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: filtroPadraoDa(aba.value), q: '', externo_ref: '', rede_social_id: '', tipo_chamado: '', plataforma_topo: '' })
 const itens = ref<ConversaResumo[]>([])
 const proximo = ref<string | null>(null)
 const carregando = ref(false)
@@ -152,6 +172,9 @@ let temPaginasExtras = false
 // Resposta que chega depois de o filtro ter mudado não pode sobrescrever a
 // lista nova — cada consulta leva o número da geração em que saiu.
 let geracao = 0
+// De qual caixa é a lista carregada (a Caixa ou a Caixa Humano): ao voltar
+// para a mesma, só atualiza; para a outra, recarrega do zero.
+let caixaDaLista: 'caixa' | 'humano' = 'caixa'
 
 type Pagina = { itens: ConversaResumo[]; proximo: string | null }
 
@@ -169,6 +192,8 @@ function params(antesDe?: string | null) {
   if (tipo) p.set('tipo_chamado', tipo)
   p.set('filtro', f.filtro || 'todas')
   if (f.q) p.set('q', f.q)
+  // A Caixa Humano: só o que falta responder e a IA não pode (o servidor decide).
+  if (emHumano.value) p.set('caixa', 'humano')
   if (antesDe) p.set('antes_de', antesDe)
   p.set('limite', String(LIMITE))
   return p.toString()
@@ -176,6 +201,7 @@ function params(antesDe?: string | null) {
 
 async function carregarLista() {
   const g = ++geracao
+  caixaDaLista = emHumano.value ? 'humano' : 'caixa'
   carregando.value = true
   listaErro.value = null
   try {
@@ -199,6 +225,8 @@ async function carregarLista() {
 // segue como estava até a próxima troca de filtro.
 async function atualizarLista() {
   if (carregando.value || carregandoMais.value) return
+  // A lista é da outra caixa (trocou de aba): quem recarrega é o watch da aba.
+  if ((emHumano.value ? 'humano' : 'caixa') !== caixaDaLista) return
   const g = geracao
   try {
     const r = await api<Pagina>(`/api/atendimento/conversas?${params()}`)
@@ -251,9 +279,16 @@ function aoMudarConversa(c: ConversaResumo) {
   const i = itens.value.findIndex((x) => x.id === c.id)
   const antes = i >= 0 ? itens.value[i] : null
   if (i >= 0) itens.value[i] = { ...itens.value[i], ...c }
+  // Caixa Humano: respondeu, "não precisa", fechou, a IA voltou — o servidor
+  // diz pelo `humano` (null = saiu) e a linha sai na hora, sem esperar o
+  // próximo tique. A conversa continua aberta à direita.
+  const saiuDaHumano = c.humano !== undefined && !c.humano
+  if (i >= 0 && emHumano.value && saiuDaHumano) itens.value.splice(i, 1)
   // A etiqueta também (troca à mão): as contagens do menu Filtrar acompanham.
+  // E a Caixa Humano (o número da aba e da barra).
   if (antes && (antes.aguardando_resposta !== c.aguardando_resposta || !!antes.envio_a_conferir !== !!c.envio_a_conferir
-    || (c.etiqueta !== undefined && (antes.etiqueta ?? null) !== (c.etiqueta ?? null)))) {
+    || (c.etiqueta !== undefined && (antes.etiqueta ?? null) !== (c.etiqueta ?? null))
+    || (c.humano !== undefined && !!antes.humano !== !!c.humano))) {
     void carregarResumo()
   }
 }
@@ -287,7 +322,7 @@ const polling = usePollingVisivel(async () => {
   // Na aba "Lojas e modo", só o resumo: a faixa e a marca das lojas sem ler
   // somem sozinhas quando a loja volta a ler.
   if (aba.value === 'lojas') return carregarResumo()
-  if (aba.value !== 'caixa') return
+  if (!naCaixa.value) return
   await Promise.all([atualizarLista(), carregarResumo()])
 }, 30_000)
 
@@ -330,6 +365,12 @@ onMounted(() => {
         for (const k of ['plataforma', 'integration_id', 'canal', 'externo_ref', 'rede_social_id'] as const) {
           if (typeof salvo[k] === 'string') f[k] = salvo[k]
         }
+        // A plataforma do menu do topo (o corte da barra de lojas). O filtro
+        // salvo ANTES do corte (sem a chave) mostrava a plataforma no botão do
+        // topo: ela vale como a escolha do topo — senão o botão dizia
+        // "Shopee" e a barra vinha inteira (o print do Eduardo, 09/10/2026).
+        if (typeof salvo.plataforma_topo === 'string') f.plataforma_topo = salvo.plataforma_topo
+        else if (typeof salvo.plataforma === 'string') f.plataforma_topo = topoDoValor(salvo.plataforma)
         if (JSON.stringify(f) !== JSON.stringify(filtros.value)) filtros.value = f
       }
     }
@@ -347,11 +388,22 @@ watch(filtros, (f) => {
   void carregarLista()
 }, { deep: true })
 
+// Entrou na Caixa ou na Caixa Humano: a mesma caixa de antes só atualiza; a
+// outra recarrega do zero (sem mostrar a lista da outra enquanto chega), no
+// filtro da aba — plataforma, loja e busca continuam.
 watch(aba, (a) => {
-  if (a === 'caixa') {
-    void carregarResumo()
+  if (a !== 'caixa' && a !== 'humano') return
+  void carregarResumo()
+  if (a === caixaDaLista) {
     void atualizarLista()
+    return
   }
+  itens.value = []
+  proximo.value = null
+  const padrao = filtroPadraoDa(a)
+  // Mudou o filtro: o watch dos filtros recarrega; senão, recarrega aqui.
+  if (filtros.value.filtro !== padrao) filtros.value = { ...filtros.value, filtro: padrao }
+  else void carregarLista()
 })
 
 async function atualizarTudo() {
@@ -395,7 +447,7 @@ const folgaBaixo = ref(24)
 function medirCaixa() {
   const el = caixaEl.value
   // Escondida (v-show em outra aba) mede zero.
-  if (!el || aba.value !== 'caixa') return
+  if (!el || !naCaixa.value) return
   topoCaixa.value = el.getBoundingClientRect().top + window.scrollY
   const main = el.closest('main')
   const pb = main ? Number.parseFloat(getComputedStyle(main).paddingBottom) : Number.NaN
@@ -405,7 +457,7 @@ function medirCaixa() {
 useResizeObserver(topoEl, medirCaixa)
 watch(alturaJanela, () => medirCaixa())
 watch(aba, (a) => {
-  if (a === 'caixa') void nextTick(medirCaixa)
+  if (a === 'caixa' || a === 'humano') void nextTick(medirCaixa)
 })
 onMounted(() => { void nextTick(medirCaixa) })
 const alturaCaixa = computed(() => {
@@ -420,7 +472,7 @@ const alturaCaixa = computed(() => {
 // ela ficar logo abaixo da barra do topo (uma vez — depois ela já cabe).
 function mostrarCaixaInteira() {
   const el = caixaEl.value
-  if (!el || aba.value !== 'caixa') return
+  if (!el || !naCaixa.value) return
   const r = el.getBoundingClientRect()
   if (r.top >= TOPO_FIXO - 8 && r.bottom <= window.innerHeight) return
   let suave = true
@@ -502,6 +554,14 @@ watch(selecionada, (id) => {
       >
         <component :is="a.icon" class="size-4" />
         {{ a.label }}
+        <!-- Caixa Humano: quantas esperam uma pessoa (a IA não pode responder) -->
+        <span
+          v-if="a.value === 'humano' && resumo?.humano"
+          class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
+          :title="`${resumo.humano} conversa(s) esperando uma pessoa: falta responder e a IA não pode`"
+          :aria-label="`${resumo.humano} esperando uma pessoa`"
+          data-marca-humano
+        >{{ resumo.humano > 99 ? '99+' : resumo.humano }}</span>
         <span
           v-if="a.value === 'lojas' && semLer.length"
           class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white"
@@ -514,19 +574,20 @@ watch(selecionada, (id) => {
 
     <!-- lojas sem ler: no topo da Caixa (com o link para a aba) e na própria aba "Lojas e modo" -->
     <AtendimentoLeituraParada
-      v-if="aba === 'caixa' || aba === 'lojas'"
+      v-if="naCaixa || aba === 'lojas'"
       :itens="semLer"
       :agora="agora"
-      :link="aba === 'caixa'"
+      :link="naCaixa"
       @abrir-lojas="aba = 'lojas'"
     />
-    <!-- A plataforma (08/10/2026: "ver só Mercado Livre, só Shopee"): um botão que abre o menu com a logo e o "falta responder" de cada uma, acima da Caixa -->
-    <AtendimentoFiltroPlataforma v-if="aba === 'caixa'" v-model:filtros="filtros" :resumo="resumo" />
+    <!-- A plataforma (08/10/2026: "ver só Mercado Livre, só Shopee"): um botão que abre o menu com a logo e o "falta responder" de cada uma, acima da Caixa; escolher corta a barra de lojas (09/10/2026). Na Caixa Humano, os números dela. -->
+    <AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? 'humano' : 'aguardando'" />
     </div>
 
     <!-- Caixa: lojas | fila | conversa + pedido -->
+    <!-- (a Caixa Humano usa as mesmas colunas: a lista vem filtrada pelo servidor) -->
     <div
-      v-show="aba === 'caixa'"
+      v-show="naCaixa"
       ref="caixaEl"
       class="flex min-h-[420px] overflow-hidden rounded-lg border bg-card"
       :style="{ height: alturaCaixa }"
@@ -535,7 +596,7 @@ watch(selecionada, (id) => {
         class="hidden min-h-0 shrink-0 flex-col border-r bg-muted/30 lg:flex"
         :class="lojasRecolhidas ? 'w-[64px]' : 'w-[196px]'"
       >
-        <AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" />
+        <AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano ? 'humano' : 'aguardando'" />
       </aside>
       <aside
         class="min-h-0 w-full flex-col border-r lg:flex lg:w-[300px] lg:shrink-0 2xl:w-[330px]"
@@ -552,6 +613,7 @@ watch(selecionada, (id) => {
           :resumo="resumo"
           :agora="agora"
           :meu-id="auth.user?.id || null"
+          :caixa="emHumano ? 'humano' : ''"
           @selecionar="selecionar"
           @carregar-mais="carregarMais"
           @recarregar="carregarLista"
@@ -567,7 +629,7 @@ watch(selecionada, (id) => {
           :flags="resumo?.flags || null"
           :meu-id="auth.user?.id || null"
           :lojas="resumo?.lojas || []"
-          :ativa="aba === 'caixa'"
+          :ativa="naCaixa"
           @mudou="aoMudarConversa"
           @voltar="selecionada = null"
           @abrir-aba="abrirAba"
