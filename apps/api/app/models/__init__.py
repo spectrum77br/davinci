@@ -169,6 +169,7 @@ from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
 from app.models.mail_atendimento import (
     AtendimentoRegraPastaEmail,
     MailAgenteV2,
+    MailCaixaIndice,
     MailFolder,
     MailMailboxSettings,
     MailMessageMeta,
@@ -285,6 +286,7 @@ __all__ = [
     "MailAgenteV2",
     "MailMessageTuta",
     "MailReconciliation",
+    "MailCaixaIndice",
     "CompanyFiscal",
     "NfseChamada",
     "NfseEmissao",

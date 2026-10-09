@@ -577,3 +577,79 @@ class MailReconciliation(Base, TimestampMixin):
     )
     motivo: Mapped[str | None] = mapped_column(String(48))
     conferido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+# O selo PROVÁVEL que o índice da aba E-mail › Caixas guarda (a segurança é a
+# coluna à parte `seguranca`; a decisão da ponte, quando há, vale mais).
+SELOS_INDICE = ("loja", "site", "sem_loja", "privado")
+
+
+class MailCaixaIndice(Base):
+    """O índice LEVE da aba E-mail › Caixas (09/10/2026, migration 0388). 1:1, CASCADE.
+
+    A pasta e a loja de cada e-mail ficam DENTRO do conteúdo cifrado da
+    Central: separar a caixa por pasta e por loja sem este índice é decifrar
+    todos os e-mails a cada clique. Aqui fica só o que a tela precisa para
+    contar, filtrar e paginar — nunca assunto, remetente, texto ou endereço:
+
+      • `pasta_chave` — a pasta de sistema pelo tipo do Tuta ("s1" Entrada,
+        "s2" Enviados…); a pessoal por uma chave OPACA (HMAC, com segredo do
+        servidor, da chave da pasta). O NOME da pasta não fica em claro (a
+        pasta de um e-mail privado nunca vira linha em claro); ele sai do
+        e-mail decifrado na hora de mostrar. "x" = conteúdo que não se leu;
+      • `pasta_tipo` — o MailSetKind do Tuta (o v1 diz pelo nome);
+      • `seguranca` — `codigos.e_de_seguranca` (a regra estrita) deu sim: a
+        lista não mostra o assunto;
+      • a loja PROVÁVEL (`rotear.rotear`, puro): `selo`, a ficha, a
+        integração ou a marca, e a plataforma. Sem FK de propósito: é cache —
+        o cadastro mudou, a `base` muda e a linha é refeita.
+
+    `fonte_em` é o `updated_at` do e-mail quando foi indexado (o conector v2
+    regrava a pasta ao mover); `base` é o hash do que decide o selo (cadastro
+    de lojas, regras de palavras, endereços da caixa, escolha de pessoa das
+    pastas); `regras_versao` é a versão do cálculo. Qualquer um diferente =
+    a linha é refeita. Escrito pela máquina (o job a cada minuto e a rota):
+    fora do Histórico.
+    """
+
+    __tablename__ = "mail_caixa_indice"
+    __table_args__ = (
+        CheckConstraint(f"selo IN ({_lista(SELOS_INDICE)})", name="selo"),
+        Index("ix_mail_caixa_indice_caixa_recebido", "mailbox_id", "recebido_em", "message_id"),
+        Index(
+            "ix_mail_caixa_indice_caixa_pasta",
+            "mailbox_id",
+            "pasta_chave",
+            "recebido_em",
+            "message_id",
+        ),
+    )
+
+    message_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("mail_messages.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # SEM FK de propósito (revisão de 09/10): a FK pegaria FOR KEY SHARE na
+    # linha da caixa a cada gravação, e o agente do Mac segura essa linha com
+    # FOR UPDATE a cada sinal — a GET da tela esperava. A caixa apagada leva o
+    # índice junto pelo CASCADE de `message_id` (mail_messages → mail_mailboxes).
+    mailbox_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    # Cópia do `received_at` do e-mail (a ordem da lista sem ir à tabela dele).
+    recebido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    pasta_chave: Mapped[str] = mapped_column(String(32), nullable=False)
+    pasta_tipo: Mapped[str] = mapped_column(String(8), nullable=False)
+    seguranca: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    selo: Mapped[str] = mapped_column(String(12), nullable=False)
+    store_info_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    integration_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    marca_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    plataforma: Mapped[str | None] = mapped_column(String(16))
+    fonte_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    base: Mapped[str] = mapped_column(String(16), nullable=False)
+    regras_versao: Mapped[int] = mapped_column(Integer, nullable=False)
+    indexado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

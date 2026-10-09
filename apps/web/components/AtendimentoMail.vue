@@ -1,10 +1,24 @@
 <script setup lang="ts">
-import { Download, Mail, Plus, RefreshCw, Send, Settings2, ShieldCheck } from 'lucide-vue-next'
+import { Download, Folder, Mail, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldAlert, ShieldCheck, X } from 'lucide-vue-next'
 import type { ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 
 type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null }
-type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean }
+type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean; store?: StoreBadge; folder_id?: string; subject_hidden?: boolean }
+// Folders and store badges ("Caixas", 09/10/2026 — the owner: "bring the store
+// name here too; keep it separate and looking like Tuta"). routers/mail_caixa.py:
+// GET …/pastas = the folders (Tuta order, Portuguese names) and the stores of
+// the mailbox, with counts; GET …/lista = a page of summaries with the folder
+// and the store badge (never the body; a security email comes without its
+// subject), filtered by folder and store. Both read a light index of the
+// encrypted content. Without those routes (older API: 404/405) and with no
+// filter chosen, the list falls back to …/messages. A server error does NOT
+// fall back: the plain list shows a security email's subject, which the
+// folder/store view never does — the error shows instead.
+type StoreBadge = { tipo: string; rotulo: string; plataforma: string | null; loja?: string | null; chave?: string; provavel?: boolean }
+type FolderItem = { id: string | null; nome: string; caminho: string | null; tipo: string; quantidade: number; total: number }
+type StoreItem = StoreBadge & { chave: string; quantidade: number; total: number }
+type IndexItem = { id: string; recebido_em: string; direcao: string; tem_anexos: boolean; ponte: string | null; de: string | null; de_nome: string | null; assunto: string | null; assunto_oculto: boolean; pasta: { id: string; nome: string; tipo: string }; selo: StoreBadge }
 type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null }
 type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
 
@@ -33,6 +47,25 @@ const newAgentToken = ref('')
 const newMailboxId = ref('')
 let listGeneration = 0
 let detailGeneration = 0
+// Folders/stores of the selected mailbox (empty = routes unavailable: no column).
+const folders = ref<FolderItem[]>([])
+const mailStores = ref<StoreItem[]>([])
+const folderId = ref<string | null>(null)
+const storeKey = ref<string | null>(null)
+const nextCursor = ref<string | null>(null)
+const listSource = ref<'index' | 'plain'>('plain')
+// Emails the index still has to sort (the worker job catches up in ~1 min).
+const organizing = ref(0)
+// The list entry of the open message: its store badge and folder for the header.
+const openedSummary = ref<Summary | null>(null)
+let foldersGeneration = 0
+// While the index is still sorting new emails, the list and the counts are
+// read again a few seconds later (at most CATCH_UP_TRIES in a row).
+const CATCH_UP_TRIES = 12
+let catchUpTimer: ReturnType<typeof setTimeout> | undefined
+let catchUpTries = 0
+const currentFolder = computed(() => folders.value.find((item) => item.id === folderId.value) || null)
+const currentStore = computed(() => (storeKey.value ? mailStores.value.find((item) => item.chave === storeKey.value) || null : null))
 let timer: ReturnType<typeof setInterval> | undefined
 // Sections (08/10/2026): "Caixas" is this screen, unchanged; "Filas" is the
 // Atendimento layer on top of it (emails without store/link, suspicious,
@@ -93,6 +126,90 @@ function date(value: string | null) {
   return value ? new Date(value).toLocaleString('pt-BR') : 'Ainda não sincronizada'
 }
 
+// The list date, like Tuta: the time today, the day otherwise.
+function shortDate(value: string) {
+  const when = new Date(value)
+  const now = new Date()
+  if (when.toDateString() === now.toDateString()) return when.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  return when.toLocaleDateString('pt-BR', when.getFullYear() === now.getFullYear() ? { day: '2-digit', month: '2-digit' } : { day: '2-digit', month: '2-digit', year: '2-digit' })
+}
+
+function fromIndex(item: IndexItem): Summary {
+  return {
+    id: item.id, subject: item.assunto || '', from_address: item.de || '', from_name: item.de_nome || '', received_at: item.recebido_em,
+    direction: item.direcao, folder: item.pasta.nome, has_attachments: item.tem_anexos, store: item.selo, folder_id: item.pasta.id, subject_hidden: item.assunto_oculto,
+  }
+}
+
+// Only a missing route (older API) means "use the plain list". A request with
+// no HTTP status (the offline test doubles) behaves the same way.
+function indexRouteMissing(reason: any) {
+  const status = Number(reason?.status ?? reason?.statusCode ?? reason?.response?.status ?? 0)
+  return !status || status === 404 || status === 405
+}
+
+async function loadIndexed(id: string, append: boolean) {
+  const query = new URLSearchParams({ limite: '50' })
+  if (folderId.value) query.set('pasta', folderId.value)
+  if (storeKey.value) query.set('loja', storeKey.value)
+  if (append && nextCursor.value) query.set('antes', nextCursor.value)
+  const result = await api<{ itens: IndexItem[]; proximo: string | null; faltam: number }>(`/api/mail/mailboxes/${id}/lista?${query}`)
+  return { items: result.itens.map(fromIndex), next: result.proximo, missing: result.faltam }
+}
+
+async function loadFolders() {
+  if (!mailboxId.value) { folders.value = []; mailStores.value = []; return }
+  const generation = ++foldersGeneration
+  const id = mailboxId.value
+  const query = new URLSearchParams()
+  if (folderId.value) query.set('pasta', folderId.value)
+  if (storeKey.value) query.set('loja', storeKey.value)
+  const search = query.toString()
+  try {
+    const result = await api<{ pastas: FolderItem[]; lojas: StoreItem[]; faltam: number }>(`/api/mail/mailboxes/${id}/pastas${search ? `?${search}` : ''}`)
+    if (generation !== foldersGeneration || id !== mailboxId.value) return
+    folders.value = result.pastas
+    mailStores.value = result.lojas
+    organizing.value = result.faltam
+    // The chosen folder/store is gone (emails moved away): back to all.
+    const lostFolder = !!folderId.value && !result.pastas.some((item) => item.id === folderId.value)
+    const lostStore = !!storeKey.value && !result.lojas.some((item) => item.chave === storeKey.value)
+    if (lostFolder) folderId.value = null
+    if (lostStore) storeKey.value = null
+    if (lostFolder || lostStore) void loadList()
+    else catchUp()
+  } catch {
+    // Keeps the column it had; without the routes there is no column at all.
+  }
+}
+
+// The list first (its route indexes what just arrived), then the counts, so
+// both read the same index.
+async function loadList() {
+  await loadMessages()
+  await loadFolders()
+}
+
+function catchUp() {
+  if (!organizing.value) { catchUpTries = 0; return }
+  if (catchUpTimer || catchUpTries >= CATCH_UP_TRIES) return
+  catchUpTries++
+  catchUpTimer = setTimeout(() => {
+    catchUpTimer = undefined
+    if (!document.hidden && !sending.value && !loading.value) void loadList()
+  }, 5_000)
+}
+
+function chooseFilter(kind: 'folder' | 'store', value: string | null) {
+  if (sending.value) return
+  if (kind === 'folder') folderId.value = value
+  else storeKey.value = value
+  messages.value = []
+  more.value = false
+  nextCursor.value = null
+  void loadList()
+}
+
 async function loadMailboxes() {
   try {
     const result = await api<{ items: Mailbox[] }>('/api/mail/mailboxes')
@@ -107,6 +224,26 @@ async function loadMessages(append = false) {
   const id = mailboxId.value
   loading.value = true
   try {
+    if (!append || listSource.value === 'index') {
+      const indexed = await loadIndexed(id, append).catch((reason) => {
+        // Folder/store filters only exist in the index: their error shows. So
+        // does a server error (only an older API without the route falls back).
+        if (append || folderId.value || storeKey.value || !indexRouteMissing(reason)) throw reason
+        return null
+      })
+      if (generation !== listGeneration || id !== mailboxId.value) return
+      if (indexed) {
+        messages.value = append ? [...new Map([...messages.value, ...indexed.items].map((item) => [item.id, item])).values()] : indexed.items
+        more.value = !!indexed.next
+        nextCursor.value = indexed.next
+        organizing.value = indexed.missing
+        listSource.value = 'index'
+        return
+      }
+    }
+    listSource.value = 'plain'
+    nextCursor.value = null
+    organizing.value = 0
     const offset = append ? messages.value.length : 0
     const result = await api<{ items: Summary[]; more: boolean }>(`/api/mail/mailboxes/${id}/messages?limit=50&offset=${offset}`)
     if (generation !== listGeneration || id !== mailboxId.value) return
@@ -118,6 +255,8 @@ async function loadMessages(append = false) {
 
 async function openMessage(id: string, preserveDraft = false) {
   if (!preserveDraft && draft.value.trim() && detail.value?.id !== id && !window.confirm('Descartar o rascunho desta resposta e abrir outra mensagem?')) return
+  const listed = messages.value.find((item) => item.id === id)
+  if (listed || !preserveDraft) openedSummary.value = listed?.store ? listed : null
   const generation = ++detailGeneration
   const selectedMailbox = mailboxId.value
   if (!preserveDraft) {
@@ -138,6 +277,7 @@ async function refresh() {
   error.value = ''
   await loadMailboxes()
   await loadMessages()
+  await loadFolders()
   if (detail.value) await openMessage(detail.value.id, true)
 }
 
@@ -147,7 +287,15 @@ watch(mailboxId, () => {
   messages.value = []
   draft.value = ''
   draftRequestId.value = ''
-  void loadMessages()
+  folders.value = []
+  mailStores.value = []
+  folderId.value = null
+  storeKey.value = null
+  nextCursor.value = null
+  organizing.value = 0
+  openedSummary.value = null
+  catchUpTries = 0
+  void loadList()
 })
 
 async function createMailbox() {
@@ -221,7 +369,7 @@ onMounted(async () => {
   await loadMailboxes()
   timer = setInterval(() => { if (!document.hidden && !sending.value) void refresh() }, 30_000)
 })
-onBeforeUnmount(() => { clearInterval(timer); ++listGeneration; ++detailGeneration })
+onBeforeUnmount(() => { clearInterval(timer); clearTimeout(catchUpTimer); ++listGeneration; ++detailGeneration })
 </script>
 
 <template>
@@ -303,14 +451,73 @@ onBeforeUnmount(() => { clearInterval(timer); ++listGeneration; ++detailGenerati
           @fechar="configuring = false"
         />
 
-        <div class="grid min-h-[520px] overflow-hidden rounded-lg border lg:grid-cols-[340px_1fr]">
+        <!-- Like Tuta: folders (and stores) | list | reading. Below xl the folder and store selectors sit on top of the list. -->
+        <div class="grid min-h-[520px] overflow-hidden rounded-lg border" :class="folders.length ? 'lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[230px_340px_minmax(0,1fr)]' : 'lg:grid-cols-[340px_1fr]'">
+          <AtendimentoMailPastasDaCaixa
+            v-if="folders.length"
+            modo="coluna"
+            class="hidden max-h-[760px] border-r xl:flex"
+            :pastas="folders"
+            :lojas="mailStores"
+            :pasta="folderId"
+            :loja="storeKey"
+            :desligado="sending"
+            @pasta="(value: string | null) => chooseFilter('folder', value)"
+            @loja="(value: string | null) => chooseFilter('store', value)"
+          />
           <aside class="max-h-[760px] overflow-y-auto border-b lg:border-b-0 lg:border-r" aria-label="Mensagens">
+            <div v-if="folders.length" class="sticky top-0 z-10 space-y-2 border-b bg-background/95 p-3 backdrop-blur" data-mail-list-header>
+              <AtendimentoMailPastasDaCaixa
+                modo="seletor"
+                class="xl:hidden"
+                :pastas="folders"
+                :lojas="mailStores"
+                :pasta="folderId"
+                :loja="storeKey"
+                :desligado="sending"
+                @pasta="(value: string | null) => chooseFilter('folder', value)"
+                @loja="(value: string | null) => chooseFilter('store', value)"
+              />
+              <div class="flex min-w-0 items-center gap-2">
+                <h3 class="min-w-0 truncate text-sm font-semibold">{{ currentFolder?.nome || 'Todas' }}</h3>
+                <span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{ (currentFolder?.quantidade ?? 0).toLocaleString('pt-BR') }}</span>
+                <button
+                  v-if="currentStore"
+                  type="button"
+                  class="ml-auto inline-flex min-w-0 items-center gap-1 rounded text-xs text-muted-foreground hover:text-foreground"
+                  :disabled="sending"
+                  :aria-label="`Mostrar todas as lojas (agora: ${currentStore.rotulo})`"
+                  data-mail-store-filter
+                  @click="chooseFilter('store', null)"
+                ><AtendimentoMailSelo :selo="currentStore" /><X class="h-3.5 w-3.5 shrink-0" /></button>
+              </div>
+              <p v-if="organizing" class="text-xs text-muted-foreground" data-mail-organizing>Organizando {{ organizing.toLocaleString('pt-BR') }} e-mail(s) por pasta e loja — as contagens se completam em instantes.</p>
+            </div>
             <p v-if="loading && !messages.length" class="p-5 text-sm text-muted-foreground">Carregando mensagens…</p>
+            <p v-else-if="!messages.length && (folderId || storeKey)" class="p-5 text-sm text-muted-foreground">{{ folderId ? (storeKey ? 'Nenhum e-mail desta loja nesta pasta.' : 'Nenhum e-mail nesta pasta.') : 'Nenhum e-mail desta loja.' }}</p>
             <p v-else-if="!messages.length" class="p-5 text-sm text-muted-foreground">Nenhuma mensagem recebida pelo conector ainda. Os originais continuam no Tuta.</p>
-            <button v-for="item in messages" :key="item.id" :disabled="sending" class="block w-full space-y-1 border-b p-4 text-left hover:bg-muted/40" :class="detail?.id === item.id ? 'bg-muted' : ''" @click="openMessage(item.id)">
-              <div class="truncate text-sm font-medium">{{ item.from_name || item.from_address }}</div>
-              <div class="truncate text-sm">{{ item.subject || '(Sem assunto)' }}</div>
-              <div class="flex justify-between gap-2 text-xs text-muted-foreground"><span>{{ date(item.received_at) }}</span><span>{{ item.direction === 'sent' ? 'Enviado' : item.has_attachments ? 'Com anexo' : '' }}</span></div>
+            <button v-for="item in messages" :key="item.id" :disabled="sending" class="block w-full space-y-1 border-b p-4 text-left hover:bg-muted/40" :class="detail?.id === item.id ? 'bg-muted' : ''" :data-mail-item="item.id" @click="openMessage(item.id)">
+              <template v-if="item.store">
+                <div class="flex items-baseline gap-2">
+                  <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ item.from_name || item.from_address || '(remetente ilegível)' }}</span>
+                  <span class="shrink-0 text-xs text-muted-foreground" :title="date(item.received_at)">{{ shortDate(item.received_at) }}</span>
+                </div>
+                <div v-if="item.subject_hidden" class="flex items-center gap-1 truncate text-sm italic text-muted-foreground"><ShieldAlert class="h-3.5 w-3.5 shrink-0" />{{ item.subject }}</div>
+                <div v-else class="truncate text-sm">{{ item.subject || '(Sem assunto)' }}</div>
+                <div class="flex min-w-0 items-center gap-2 pt-0.5 text-xs text-muted-foreground">
+                  <AtendimentoMailSelo :selo="item.store" />
+                  <span v-if="!folderId" class="inline-flex min-w-0 items-center gap-1 truncate" data-mail-item-folder><Folder class="h-3 w-3 shrink-0" />{{ item.folder }}</span>
+                  <span class="ml-auto flex shrink-0 items-center gap-1">
+                    <Paperclip v-if="item.has_attachments" class="h-3 w-3" aria-label="Com anexo" />
+                    <span v-if="item.direction === 'sent'">Enviado</span>
+                  </span>
+                </div>
+              </template>
+              <template v-else>
+                <div class="truncate text-sm font-medium">{{ item.from_name || item.from_address }}</div>
+                <div class="truncate text-sm">{{ item.subject || '(Sem assunto)' }}</div>
+                <div class="flex justify-between gap-2 text-xs text-muted-foreground"><span>{{ date(item.received_at) }}</span><span>{{ item.direction === 'sent' ? 'Enviado' : item.has_attachments ? 'Com anexo' : '' }}</span></div>
+              </template>
             </button>
             <button v-if="more" class="w-full p-3 text-sm text-primary" :disabled="loading" @click="loadMessages(true)">Carregar mais</button>
           </aside>
@@ -321,7 +528,11 @@ onBeforeUnmount(() => { clearInterval(timer); ++listGeneration; ++detailGenerati
               <p class="break-all text-sm"><span class="text-muted-foreground">De:</span> {{ detail.from_name }} &lt;{{ detail.from_address }}&gt;</p>
               <p class="break-all text-sm"><span class="text-muted-foreground">Para:</span> {{ detail.to.join(', ') }}</p>
               <p v-if="detail.cc.length" class="break-all text-sm"><span class="text-muted-foreground">Cc:</span> {{ detail.cc.join(', ') }}</p>
-              <p class="text-xs text-muted-foreground">{{ date(detail.received_at) }} · {{ detail.folder }}</p>
+              <p class="text-xs text-muted-foreground">{{ date(detail.received_at) }}<template v-if="!openedSummary?.store"> · {{ detail.folder }}</template></p>
+              <div v-if="openedSummary?.store" class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground" data-mail-open-badge>
+                <span class="inline-flex min-w-0 items-center gap-1">Loja: <AtendimentoMailSelo :selo="openedSummary.store" /></span>
+                <span class="inline-flex min-w-0 items-center gap-1">Pasta: <Folder class="h-3 w-3 shrink-0" /><span class="truncate text-foreground">{{ openedSummary.folder }}</span></span>
+              </div>
             </header>
             <AtendimentoMailBody v-if="detail.html" :key="detail.id" :html="detail.html" :text="detail.text" :attachments="detail.attachments" />
             <pre v-else class="max-h-[480px] whitespace-pre-wrap break-words overflow-y-auto font-sans text-sm leading-relaxed">{{ detail.text || '(Mensagem sem texto)' }}</pre>

@@ -1274,6 +1274,46 @@ async def mail_ponte(ctx: dict) -> dict | None:  # noqa: ARG001
             pass
 
 
+# O índice leve da aba E-mail › Caixas (09/10/2026): uma volta por minuto,
+# com a trava no Redis (a trava por caixa no Postgres é a segunda defesa —
+# a rota também indexa quando falta pouco).
+_MAIL_CAIXA_TRAVA = "davinci:mail:caixa_indice:trava"
+_MAIL_CAIXA_TRAVA_TTL_S = 300
+
+
+async def mail_caixa_indice(ctx: dict) -> dict | None:  # noqa: ARG001
+    """A cada minuto (segundo 30): a pasta e a loja PROVÁVEL dos e-mails que faltam no índice.
+
+    Um lote de cada caixa por vez, o mais novo primeiro (commit por lote), até
+    o teto da volta (`indice.JOB_MAXIMO` e-mails ou `indice.JOB_SEGUNDOS`),
+    descansando entre um e-mail e outro o tempo que gastou nele (no máximo
+    metade do event loop deste worker, que também roda a ponte). Só lê a
+    Central (decifra em memória) e escreve o índice: nunca grava meta, nunca
+    cria conversa, nunca muda a ponte. Ver services/mail_atendimento/indice.py.
+    """
+    from app.redis_client import redis as _redis
+    from app.services.mail_atendimento import indice as _mail_indice
+
+    try:
+        pegou = await _redis.set(_MAIL_CAIXA_TRAVA, "1", nx=True, ex=_MAIL_CAIXA_TRAVA_TTL_S)
+    except Exception as e:  # noqa: BLE001 — sem Redis, a trava por caixa segura
+        logger.warning("mail_caixa_indice_trava_indisponivel", err=type(e).__name__)
+        pegou = True
+    if not pegou:
+        return {"pulado": True}
+    try:
+        async with session_scope() as s:
+            return await _mail_indice.rodar(s)
+    except Exception as e:  # noqa: BLE001 — a próxima volta continua de onde parou
+        logger.error("mail_caixa_indice_falhou", err=type(e).__name__)
+        return None
+    finally:
+        try:
+            await _redis.delete(_MAIL_CAIXA_TRAVA)
+        except Exception:  # noqa: BLE001, S110 — a trava vence sozinha (TTL)
+            pass
+
+
 async def atendimento_importar_historico(
     ctx: dict,
     dias: int = 90,
@@ -5015,6 +5055,11 @@ class WorkerSettings:
         # A ponte da Central de e-mail (08/10/2026): a cada minuto; sem caixa
         # com a ponte ligada, não faz nada.
         cron(mail_ponte, run_at_startup=False, timeout=240),
+        # O índice da aba E-mail › Caixas (09/10/2026): a cada minuto, só o que
+        # falta, em lotes. No SEGUNDO 30 (os outros crons deste worker, a ponte
+        # entre eles, começam no segundo 0) e a volta para em ~25 s, antes do
+        # minuto seguinte; o timeout é a folga.
+        cron(mail_caixa_indice, second={30}, run_at_startup=False, timeout=120),
         # Índice de pedidos/avaliações da Shopee para o cartão "Cliente": de
         # hora em hora, janela de 2 h (uma rodada que falha não deixa buraco).
         cron(atendimento_indexar_pedidos, minute={22}, run_at_startup=False, timeout=1200),
