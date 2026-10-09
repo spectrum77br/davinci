@@ -50,6 +50,7 @@ from app.models import (
 from app.models.pricing import StoreInfo
 from app.redis_client import redis
 from app.routers import atendimento as rota
+from app.routers import atendimento_email as rota_email
 from app.security.cipher import encrypt_json
 from app.services import vigia_leitura_atendimento
 from app.services.atendimento import gravar, ia
@@ -219,6 +220,10 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
     assert {r.path for r in do_robo} == {f"{URL}/robo/pulso", f"{URL}/robo/eventos"}
     for r in do_robo:
         assert rota._so_admin not in [d.call for d in r.dependant.dependencies]
+    # As leituras de e-mail que só quem mexe faz são rotas de verdade (e da caixa).
+    assert rota_email.LEITURAS_SO_DE_QUEM_MEXE <= existentes, (
+        rota_email.LEITURAS_SO_DE_QUEM_MEXE - existentes
+    )
 
 
 @pytest.mark.parametrize(
@@ -235,7 +240,12 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
     assert chamadas
     for metodo, molde, caminho in chamadas:
         r = await client.request(metodo, caminho)
-        if metodo == "GET" or (metodo, molde) in rota.ROTAS_DE_QUEM_LE:
+        if (metodo, molde) in rota_email.LEITURAS_SO_DE_QUEM_MEXE:
+            # As filas de e-mail (08/10/2026): só quem mexe — podem ter e-mail
+            # de qualquer loja e de endereço interno.
+            assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
+            assert r.json()["detail"]["code"] == "atendimento_so_quem_mexe", (metodo, caminho)
+        elif metodo == "GET" or (metodo, molde) in rota.ROTAS_DE_QUEM_LE:
             # Passa da trava (cai no 404/409/422 da própria rota, ou 200).
             assert r.status_code not in (401, 403), (metodo, caminho, r.status_code, r.text)
         else:

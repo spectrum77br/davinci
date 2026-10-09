@@ -77,7 +77,15 @@ _MIGRATION_CARRINHO_REDES = _VERSOES / "0362_atendimento_carrinho_redes.py"
 _MIGRATION_AUTOMACOES = _VERSOES / "0366_atendimento_automacoes.py"
 _MIGRATION_SIMULACAO = _VERSOES / "0371_atendimento_automacoes_simulacao.py"
 _MIGRATION_TROCAS = _VERSOES / "0383_atendimento_trocas.py"
-TABELAS = sorted(t.name for t in Base.metadata.sorted_tables if t.name.startswith("atendimento_"))
+# A regra de palavras das pastas de e-mail (0387, a camada do atendimento sobre
+# a Central de e-mail) é conferida em `test_mail_atendimento_migration.py`,
+# junto das tabelas `mail_*` da mesma migration.
+DE_OUTRA_MIGRATION = frozenset({"atendimento_regras_pasta_email"})
+TABELAS = sorted(
+    t.name
+    for t in Base.metadata.sorted_tables
+    if t.name.startswith("atendimento_") and t.name not in DE_OUTRA_MIGRATION
+)
 
 
 def _carregar_migration(caminho: Path = _MIGRATION):
@@ -103,10 +111,11 @@ async def _catalogo(db: AsyncSession, schema: str, *remover: str) -> dict[str, l
                        is_nullable, column_default
                   FROM information_schema.columns
                  WHERE table_schema = :schema AND table_name LIKE 'atendimento\\_%'
+                   AND NOT (table_name = ANY(:fora))
                  ORDER BY table_name, column_name
                 """
             ),
-            {"schema": schema},
+            {"schema": schema, "fora": sorted(DE_OUTRA_MIGRATION)},
         )
     ).all()
     constraints = (
@@ -118,10 +127,11 @@ async def _catalogo(db: AsyncSession, schema: str, *remover: str) -> dict[str, l
                   JOIN pg_class cl ON cl.oid = co.conrelid
                   JOIN pg_namespace n ON n.oid = cl.relnamespace
                  WHERE n.nspname = :schema AND cl.relname LIKE 'atendimento\\_%'
+                   AND NOT (cl.relname = ANY(:fora))
                  ORDER BY cl.relname, co.conname
                 """
             ),
-            {"schema": schema},
+            {"schema": schema, "fora": sorted(DE_OUTRA_MIGRATION)},
         )
     ).all()
     indices = (
@@ -131,10 +141,11 @@ async def _catalogo(db: AsyncSession, schema: str, *remover: str) -> dict[str, l
                 SELECT tablename, indexname, indexdef
                   FROM pg_indexes
                  WHERE schemaname = :schema AND tablename LIKE 'atendimento\\_%'
+                   AND NOT (tablename = ANY(:fora))
                  ORDER BY tablename, indexname
                 """
             ),
-            {"schema": schema},
+            {"schema": schema, "fora": sorted(DE_OUTRA_MIGRATION)},
         )
     ).all()
     return {

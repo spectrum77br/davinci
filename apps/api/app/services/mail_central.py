@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -14,6 +15,14 @@ from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
 from app.models.user import User
 from app.schemas.mail import Ingest, ReplyIn
 from app.security.cipher import decrypt_json, encrypt_bytes, encrypt_json
+from app.services.mail_atendimento import caixa as mailbox_settings
+
+# A leased job without a receipt after this long is ambiguous (never resent).
+LEASE_TIMEOUT = timedelta(minutes=15)
+# Jobs handed to the agent per lease, and how many queued rows one lease looks
+# at (held jobs — see `mailbox_settings.trava_no_lease` — must not starve the rest).
+LEASE_BATCH = 5
+LEASE_SCAN = 50
 
 
 class MailError(ValueError):
@@ -78,19 +87,62 @@ def message_view(message: MailMessage, *, detail: bool = False) -> dict:
     return result
 
 
-def reply_envelope(mailbox: MailMailbox, message: MailMessage) -> dict:
+def receiving_aliases(aliases: set[str], content: dict) -> list[str]:
+    """Mailbox addresses that actually received this message, in order.
+
+    `delivered_to` (optional, from a v2 agent) first, then To, then Cc.
+    """
+    found = (
+        address.lower()
+        for address in [
+            *(content.get("delivered_to") or []),
+            *content.get("to", []),
+            *content.get("cc", []),
+        ]
+    )
+    return list(dict.fromkeys(address for address in found if address in aliases))
+
+
+def reply_envelope(
+    mailbox: MailMailbox,
+    message: MailMessage,
+    *,
+    strict: bool = False,
+    main_allowed: bool = True,
+) -> dict:
     config = decrypt_json(mailbox.config_enc)
     content = decrypt_json(message.content_enc)
     aliases = {address.lower() for address in config["aliases"]}
     recipient = content.get("reply_to") or content["from_address"]
-    sender = next(
-        (address for address in content["to"] if address.lower() in aliases),
-        config["address"],
-    ).lower()
+    received = receiving_aliases(aliases, content)
+    if not main_allowed:
+        # Company mailboxes (our settings table): the main address is the Tuta
+        # LOGIN of the account and never answers a customer — not even when
+        # it was the one that received the message.
+        main = str(config["address"]).lower()
+        received = [address for address in received if address != main]
+    if strict:
+        # Strict sender (per-mailbox setting): only an address that received
+        # the message may answer it; never fall back to the main address.
+        sender = received[0] if received else None
+    elif main_allowed:
+        sender = next(
+            (address for address in content["to"] if address.lower() in aliases),
+            config["address"],
+        ).lower()
+    else:
+        sender = received[0] if received else None
     return {
         "to": recipient,
         "from_address": sender,
-        "can_reply": message.direction == "inbound" and recipient.lower() not in aliases,
+        # Strict: no receiving alias = no reply. Otherwise a person may still
+        # pick an authorized alias by hand (the company mailbox without a
+        # receiving alias suggests none rather than the main address).
+        "can_reply": message.direction == "inbound"
+        and recipient.lower() not in aliases
+        and (sender is not None or not strict),
+        "strict_sender": strict,
+        "receiving_aliases": received,
     }
 
 
@@ -149,25 +201,68 @@ async def ingest(session: AsyncSession, mailbox: MailMailbox, body: Ingest) -> d
     return {"accepted": accepted, "duplicates": duplicates}
 
 
+FORM_TAG = re.compile(r"^[A-Z0-9][A-Z0-9-]{0,31}$")
+
+
 async def queue_reply(
     session: AsyncSession,
     mailbox: MailMailbox,
     message: MailMessage,
     user: User,
     body: ReplyIn,
+    *,
+    form_recipient: str | None = None,
+    subject_tag: str | None = None,
 ) -> MailOutbox:
     # The route locks the original message. A repeated request never sends twice.
+    #
+    # `form_recipient` / `subject_tag` are internal-only (never from HTTP: the
+    # raw /reply route does not pass them). The Atendimento layer uses them for
+    # site contact forms (RF6), which arrive FROM our own sac@ alias TO it with
+    # the customer's address in the body: the recipient is computed server-side
+    # from the original message, only in company mailboxes, and only when the
+    # original sender is one of this mailbox's addresses. `subject_tag` puts the
+    # site protocol ("US-26-0014") in brackets when the subject lacks it.
     existing = await session.scalar(
         select(MailOutbox).where(
             MailOutbox.mailbox_id == mailbox.id,
             MailOutbox.request_id == body.request_id,
         )
     )
-    envelope = reply_envelope(mailbox, message)
+    settings = await mailbox_settings.config_da_caixa(session, mailbox.id)
+    envelope = reply_envelope(
+        mailbox, message, strict=settings.remetente_estrito, main_allowed=not settings.empresa
+    )
     config = decrypt_json(mailbox.config_enc)
-    sender = str(body.from_address or envelope["from_address"])
+    if form_recipient is not None:
+        own = {address.lower() for address in config["aliases"]}
+        original_from = str(decrypt_json(message.content_enc).get("from_address") or "").lower()
+        recipient = form_recipient.strip().lower()
+        if (
+            not settings.empresa
+            or original_from not in own
+            or not recipient
+            or recipient in own
+            or "@" not in recipient
+        ):
+            raise MailError("form_recipient_not_allowed")
+        envelope = {
+            **envelope,
+            "to": recipient,
+            "can_reply": message.direction == "inbound" and envelope["from_address"] is not None,
+        }
+    if subject_tag is not None and not FORM_TAG.match(subject_tag):
+        raise MailError("invalid_subject_tag")
+    sender = str(body.from_address or envelope["from_address"] or "")
+    if not sender:
+        raise MailError("no_receiving_alias")
+    if settings.empresa and sender.lower() == str(config["address"]).lower():
+        # Company mailbox: the main address (the Tuta login) never sends.
+        raise MailError("main_address_not_allowed")
     if sender.lower() not in {address.lower() for address in config["aliases"]}:
         raise MailError("sender_not_authorized")
+    if settings.remetente_estrito and sender.lower() not in envelope["receiving_aliases"]:
+        raise MailError("sender_not_receiving_alias")
     if existing:
         original = decrypt_json(existing.content_enc)
         if (
@@ -181,6 +276,11 @@ async def queue_reply(
         raise MailError("message_not_replyable")
     if not send_ready(mailbox):
         raise MailError("sending_unavailable")
+    # Company mailboxes: pause, test-mode recipients and rate limits are
+    # checked when queueing (private mailboxes keep the rules above).
+    blocked = await mailbox_settings.trava_de_envio(session, settings, envelope["to"])
+    if blocked:
+        raise MailError(blocked)
     active = await session.scalar(
         select(MailOutbox.id).where(
             MailOutbox.message_id == message.id,
@@ -192,6 +292,10 @@ async def queue_reply(
     content = decrypt_json(message.content_enc)
     job_id = uuid4()
     subject = content["subject"]
+    if subject_tag and subject_tag.lower() not in subject.lower():
+        # One "Re:" in front of the tag ("Re: [US-26-0014] ...").
+        base = subject[3:].lstrip() if subject.lower().startswith("re:") else subject
+        subject = f"Re: [{subject_tag}] {base}"[:990]
     payload = {
         "from_address": sender,
         "to": envelope["to"],
@@ -213,6 +317,9 @@ async def queue_reply(
     )
     session.add(job)
     await session.flush()
+    # Company mailboxes: the job keeps the company rules (brake, pause, test
+    # mode) at lease time even if the mailbox later goes back to private.
+    await mailbox_settings.registrar_job(session, job, settings)
     return job
 
 
@@ -239,7 +346,7 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
             .where(
                 MailOutbox.mailbox_id == mailbox.id,
                 MailOutbox.status == "leased",
-                MailOutbox.leased_at < now - timedelta(minutes=15),
+                MailOutbox.leased_at < now - LEASE_TIMEOUT,
             )
             .with_for_update()
         )
@@ -257,12 +364,17 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
                 MailOutbox.status == "queued",
             )
             .order_by(MailOutbox.created_at)
-            .limit(5)
+            .limit(LEASE_SCAN)
             .with_for_update(skip_locked=True)
         )
     ).all()
     result = []
+    config = decrypt_json(mailbox.config_enc) if jobs else {"address": "", "aliases": []}
+    aliases = {address.lower() for address in config["aliases"]}
+    main = str(config["address"]).lower()
     for job in jobs:
+        if len(result) >= LEASE_BATCH:
+            break
         # Recheck the author still has access before dispatching a queued reply.
         author = await session.get(User, job.author_user_id)
         if author is None or author.status.value != "active" or not allowed(mailbox, author):
@@ -270,13 +382,73 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
             job.error_code = "author_access_revoked"
             job.completed_at = now
             continue
+        payload = decrypt_json(job.content_enc)
+        # Aliases can be edited after queueing: a removed sender never goes out.
+        if payload["from_address"].lower() not in aliases:
+            job.status = "failed"
+            job.error_code = "sender_not_authorized"
+            job.completed_at = now
+            continue
+        # Atendimento replies and company mailboxes: the global brake, a pause
+        # or test mode switched on after queueing hold/fail the job here; one
+        # queued for too long fails. Raw replies of a private mailbox: no-op.
+        held = await mailbox_settings.trava_no_lease(
+            session,
+            job,
+            payload.get("to"),
+            agora=now,
+            from_main=payload["from_address"].lower() == main,
+        )
+        if held == mailbox_settings.SEGURAR:
+            continue
+        if held:
+            job.status = "failed"
+            job.error_code = held
+            job.completed_at = now
+            continue
         token = secrets.token_urlsafe(32)
         job.lease_token_hash = token_hash(token)
         job.leased_at = now
         job.status = "leased"
-        result.append({"id": str(job.id), "lease_token": token, **decrypt_json(job.content_enc)})
+        result.append({"id": str(job.id), "lease_token": token, **payload})
     await session.flush()
     return result
+
+
+def resolve_uncertain(job: MailOutbox, user: User, *, sent: bool) -> None:
+    """A person checked Tuta and says whether an ambiguous reply went out.
+
+    Only `uncertain` jobs, or `leased` ones past the receipt timeout (the next
+    lease would mark them uncertain), can be resolved. Nothing is resent: a
+    resolved job just leaves the active set, so the message can be answered
+    again if it did not go out. The decision is final and kept encrypted in
+    `receipt_enc` with who made it; a late agent receipt then gets the usual
+    409 receipt_conflict instead of overwriting it.
+    """
+    now = datetime.now(UTC)
+    stale_lease = (
+        job.status == "leased" and job.leased_at is not None and job.leased_at < now - LEASE_TIMEOUT
+    )
+    if job.status != "uncertain" and not stale_lease:
+        raise MailError("job_not_uncertain")
+    previous = {
+        "status": job.status,
+        "error_code": job.error_code,
+        "receipt": decrypt_json(job.receipt_enc) if job.receipt_enc else None,
+    }
+    job.status = "sent" if sent else "failed"
+    job.error_code = None if sent else "resolved_not_sent"
+    job.completed_at = now
+    job.receipt_enc = encrypt_json(
+        {
+            "status": job.status,
+            "message_id": None,
+            "error_code": job.error_code,
+            "resolved_by": str(user.id),
+            "resolved_at": now.isoformat(),
+            "previous": previous,
+        }
+    )
 
 
 def verify_receipt(job: MailOutbox, lease_token: str) -> None:

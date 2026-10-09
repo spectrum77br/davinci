@@ -1,0 +1,53 @@
+From: DaVinci conector do Tuta
+Subject: [so-testes] Testes oficiais da 361 sem o campo `plugins` do User
+
+SÓ PARA RODAR OS TESTES DO SDK (scripts/atualizar-sdk.sh --testar-sdk).
+NUNCA entra no vendor/ nem no binário: o script aplica isto numa CÓPIA
+(target/sdk-testes-src).
+
+Na tag oficial 361.260929.0 o User ganhou o campo `plugins` (atributo 2811),
+mas os testes do SDK não: o teste do login_facade.rs não compila e três
+testes leem JSON de teste sem o "2811". Este arquivo é EXATAMENTE a
+diferença 361.260929.0 → master do Tuta (bbc38dbe, 361.261006.0) dentro de
+tuta-sdk/rust: são só esses 4 arquivos de teste, mais nada.
+---
+--- a/tuta-sdk/rust/sdk/src/login/login_facade.rs
++++ b/tuta-sdk/rust/sdk/src/login/login_facade.rs
+@@ -368,6 +368,7 @@
+ 			salt: Some(salt),
+ 			customer: None,
+ 			successfulLogins: Default::default(),
++			plugins: None,
+ 		}
+ 	}
+ }
+--- a/tuta-sdk/rust/sdk/test_data/user_response.json
++++ b/tuta-sdk/rust/sdk/test_data/user_response.json
+@@ -62,5 +62,6 @@
+ 			"28": "0",
+ 			"230": [["O0IlmJp--7-0", "O0IlmJr--F-0"]]
+ 		}
+-	]
++	],
++	"2811": []
+ }
+--- a/tuta-sdk/rust/sdk/test_data/user_response_empty_group_key.json
++++ b/tuta-sdk/rust/sdk/test_data/user_response_empty_group_key.json
+@@ -134,5 +134,6 @@
+ 		}
+ 	],
+ 	"92": "1",
+-	"90": "IqruvXwkktNa8bnP0Mya8Q=="
++	"90": "IqruvXwkktNa8bnP0Mya8Q==",
++	"2811": []
+ }
+--- a/tuta-sdk/rust/sdk/tests/download_mail_test/user.json
++++ b/tuta-sdk/rust/sdk/tests/download_mail_test/user.json
+@@ -134,5 +134,6 @@
+ 			"1550": "XEDkhA"
+ 		}
+ 	],
+-	"101": ["O1qC702-17-0"]
++	"101": ["O1qC702-17-0"],
++	"2811": []
+ }

@@ -1055,6 +1055,7 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
         # Vai também no PATCH e no "conferir" (mesmo `_conversa_out`): a tela
         # junta com spread, e o link do caso não pode sumir depois de um clique.
         **_links_amazon(c),
+        email_da_ponte=_email_da_ponte(c),
     )
     # O cabeçalho com o nome da loja (lido DEPOIS dos atributos: ver
     # `_nomes_das_lojas`).
@@ -1137,7 +1138,25 @@ def _mensagem_out(
         status=m.status,
         erro=m.erro,
         simulado=_simulado(m),
+        email=_email_da_mensagem(m),
     )
+
+
+def _email_da_ponte(c: AtendimentoConversa) -> bool:
+    """A conversa de e-mail é da PONTE da Central (não a da Amazon pelo Gmail)?"""
+    from app.services.mail_atendimento import ponte as mail_ponte
+
+    return mail_ponte.e_conversa_da_ponte(c)
+
+
+def _email_da_mensagem(m: AtendimentoMensagem) -> dict[str, Any] | None:
+    """O resumo do e-mail da mensagem (a ponte da Central de e-mail), sem o texto."""
+    payload = m.payload if isinstance(m.payload, dict) else {}
+    for chave in ("mail", "mail_envio"):
+        valor = payload.get(chave)
+        if isinstance(valor, dict):
+            return {"tipo": "recebido" if chave == "mail" else "resposta", **valor}
+    return None
 
 
 def _rascunho_out(r: AtendimentoRascunho | None) -> RascunhoOut | None:
@@ -2366,6 +2385,8 @@ async def responder(
             origem=ORIGEM_HUMANO,
             ultima_vista_id=body.ultima_vista_id,
             confirmar=body.confirmar,
+            confirmar_nao_responde=body.confirmar_nao_responde,
+            mail_message_id=body.mail_message_id,
         )
     except EnvioRecusado as e:
         logger.info(
@@ -2842,6 +2863,19 @@ async def conferir_mensagem(
     if m.status != MSG_REVISAR or m.origem not in ORIGENS_DAVINCI:
         # O sync pode ter adotado (virou `enviada`) enquanto a pessoa olhava.
         raise HTTPException(409, detail={"code": "mensagem_nao_revisar", "status": m.status})
+    # E-mail (08/10/2026): a resposta pela fila da Central em `revisar` é um
+    # job "incerto" lá — conferir aqui resolve o job DELA (sem reenviar).
+    from app.services.mail_atendimento import responder as mail_responder
+
+    ligacao = await mail_responder.ligacao_da_mensagem(session, m.id)
+    if ligacao is not None:
+        _liga, job = ligacao
+        if job.status in ("uncertain", "leased"):
+            try:
+                await mail_responder.resolver_job(session, job, user, saiu=body.saiu)
+            except mail_responder.mail_central.MailError as erro:
+                raise HTTPException(409, detail={"code": erro.code}) from None
+            await session.refresh(m)
     conferido = {
         "saiu": body.saiu,
         "user_id": str(user.id),

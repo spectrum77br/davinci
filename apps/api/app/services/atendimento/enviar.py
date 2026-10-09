@@ -10,6 +10,16 @@ Mensagem para comprador não se desenvia; por isso a ordem abaixo é rígida:
      máximo 5 s pela trava (`conversa_ocupada`: a rodada do sync está
      gravando esta conversa — tente de novo).
 
+  E-MAIL (08/10/2026, RF5/RF6): a conversa que a PONTE da Central de e-mail
+  criou (`mail_atendimento/ponte.e_conversa_da_ponte`: canal `email` +
+  `dados.fonte = 'tuta'` + `dados.mail`) NÃO passa pelos adaptadores — nunca
+  pelo chat do marketplace nem pelo SMTP da Amazon. `enviar_resposta` a
+  entrega ANTES de tudo a `mail_atendimento/responder.enfileirar_resposta`
+  (as travas do e-mail, a mensagem `enviando` + o job na fila da Central,
+  que o Mac envia). Qualquer outro caminho (foto, automática) que chegar ao
+  `_destino` com ela é recusado ali. A resposta `enviando` com o job VIVO
+  na fila (`responder.fila_viva_existe`) não é "envio preso".
+
   1. TRAVAS (`EnvioRecusado`, nada vai à plataforma):
        canal_sem_envio     — e-mail do Tuta ou Zap (05/10/2026): o envio deles
                              ainda não existe no DaVinci, e sem esta trava
@@ -129,7 +139,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -200,6 +210,11 @@ ADAPTADORES: dict[str, str] = {
 # onde responder (`constantes.motivo_canal_sem_envio`).
 RECUSA_CANAL_SEM_ENVIO = "canal_sem_envio"
 RECUSA_SOMENTE_LEITURA = "somente_leitura"
+# O e-mail da ponte por um caminho que não é a resposta de texto (foto,
+# automática): não sai.
+MOTIVO_EMAIL_SO_RESPOSTA = (
+    "E-mail: só a resposta de texto sai pelo DaVinci (na fila da Central de e-mail)."
+)
 # Os canais de fora dos marketplaces (02/10/2026): a frase da caixa de baixo.
 MOTIVO_CARRINHO_SO_LEITURA = (
     "Carrinho do site: nada é mandado ao lojista pelo DaVinci. Fale com ele pelo "
@@ -373,6 +388,13 @@ async def _destino(
     minutos com a mesma sessão, e a loja posta em `observar` (ou a categoria
     tirada do automático) no meio disso tem que valer já.
     """
+    from app.services.mail_atendimento.ponte import e_conversa_da_ponte
+
+    if e_conversa_da_ponte(conversa):
+        # E-mail da ponte (08/10/2026): só sai pela fila da Central
+        # (`enviar_resposta` → `responder.enfileirar_resposta`). Quem chega
+        # aqui com ele (foto, automática, um caminho novo) é recusado.
+        raise EnvioRecusado(RECUSA_CANAL_SEM_ENVIO, MOTIVO_EMAIL_SO_RESPOSTA)
     motivo_sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
     if motivo_sem_envio:
         # E-mail do Tuta e Zap (05/10/2026): a PRIMEIRA trava, antes até do
@@ -559,15 +581,21 @@ async def _tem_envio_em_voo(session: AsyncSession, conversa_id: UUID) -> bool:
     A linha `enviando` mais velha que `ENVIO_PRESO` é de um envio que morreu
     no meio; o próprio envio a aposenta (vira `revisar`) antes de gravar a
     nova. Sem este corte, com a leitura desligada ninguém a aposentaria, e a
-    tela travaria a caixa de resposta para sempre.
+    tela travaria a caixa de resposta para sempre. A resposta de e-mail com o
+    job VIVO na fila da Central (o Mac pode levar mais) continua em voo.
     """
+    from app.services.mail_atendimento.responder import fila_viva_existe
+
     return (
         await session.scalar(
             select(AtendimentoMensagem.id)
             .where(
                 AtendimentoMensagem.conversa_id == conversa_id,
                 AtendimentoMensagem.status == MSG_ENVIANDO,
-                AtendimentoMensagem.created_at >= datetime.now(UTC) - ENVIO_PRESO,
+                or_(
+                    AtendimentoMensagem.created_at >= datetime.now(UTC) - ENVIO_PRESO,
+                    fila_viva_existe(),
+                ),
             )
             .limit(1)
         )
@@ -581,7 +609,21 @@ async def motivo_para_nao_enviar(
 
     É o que a tela mostra na faixa acima da caixa de resposta — as MESMAS
     travas do envio, para a faixa nunca dizer "pode" e o botão dizer "não".
+    No e-mail da ponte, as travas dele (`responder.motivo_sem_envio`).
     """
+    from app.services.mail_atendimento.ponte import e_conversa_da_ponte
+
+    if e_conversa_da_ponte(conversa):
+        from app.services.mail_atendimento import responder
+
+        recusa = await responder.motivo_sem_envio(session, conversa, origem=origem)
+        if recusa is not None:
+            return recusa
+        if await _tem_envio_em_voo(session, conversa.id):
+            return EnvioRecusado(
+                RECUSA_ENVIO_EM_ANDAMENTO, "Há uma resposta de e-mail na fila nesta conversa."
+            )
+        return None
     try:
         await _destino(session, conversa, origem=origem)
     except EnvioRecusado as recusa:
@@ -615,13 +657,17 @@ async def aposentar_envios_presos(
     Sem isto, um deploy no meio de um envio deixaria a conversa com uma linha
     em voo para sempre — e o índice de "uma em voo" recusaria toda resposta
     seguinte. `revisar`, e não `falhou`: a plataforma pode ter recebido.
-    Nunca commita.
+    A resposta de e-mail com o job VIVO na fila da Central não é "parada":
+    o Mac está cuidando dela (o recibo dele decide). Nunca commita.
     """
+    from app.services.mail_atendimento.responder import fila_viva_existe
+
     q = (
         update(AtendimentoMensagem)
         .where(
             AtendimentoMensagem.status == MSG_ENVIANDO,
             AtendimentoMensagem.created_at < datetime.now(UTC) - ENVIO_PRESO,
+            ~fila_viva_existe(),
         )
         .values(status=MSG_REVISAR, erro="envio_interrompido")
         .execution_options(synchronize_session=False)
@@ -1160,6 +1206,8 @@ async def enviar_resposta(
     origem: str = ORIGEM_HUMANO,
     ultima_vista_id: UUID | None = None,
     confirmar: bool = False,
+    confirmar_nao_responde: bool = False,
+    mail_message_id: UUID | None = None,
 ) -> AtendimentoMensagem:
     """Envia a resposta pela plataforma; devolve a mensagem gravada.
 
@@ -1174,7 +1222,29 @@ async def enviar_resposta(
     respondeu depois dela, recusa com `conversa_mudou` (outra pessoa, a IA ou
     o Duoke respondeu enquanto ela escrevia). `confirmar=True` é a pessoa
     dizendo "vi, envie mesmo assim".
+
+    E-MAIL DA PONTE: vai para a fila da Central (`responder.enfileirar_resposta`),
+    com `confirmar_nao_responde` (o "enviar mesmo assim" do remetente "não
+    responder") e `mail_message_id` (qual e-mail responder; sem ele, o mais
+    novo que não é nosso). A mensagem volta `enviando` — quem envia é o Mac.
     """
+    from app.services.mail_atendimento.ponte import e_conversa_da_ponte
+
+    if e_conversa_da_ponte(conversa):
+        from app.services.mail_atendimento import responder
+
+        return await responder.enfileirar_resposta(
+            session,
+            conversa,
+            texto,
+            user=user,
+            rascunho_id=rascunho_id,
+            origem=origem,
+            ultima_vista_id=ultima_vista_id,
+            confirmar=confirmar,
+            confirmar_nao_responde=confirmar_nao_responde,
+            mail_message_id=mail_message_id,
+        )
     # ── 0. a conversa travada e relida: daqui em diante, o estado é o de AGORA
     # Tudo até a linha em voo roda num SAVEPOINT: numa recusa ele é desfeito
     # e a trava da conversa SOLTA na hora (trava pega num savepoint desfeito

@@ -1,0 +1,12 @@
+# Release OFICIAL do Tuta de onde vem o SDK em Rust do conector (decisão 2).
+#
+# - Só release publicada pelo Tuta (tag do GitHub tutao/tutanota). O número de
+#   versão do SDK (o cabeçalho `cv` que o servidor confere; abaixo do piso ele
+#   responde 474) é o DA RELEASE e NUNCA é editado à mão.
+# - A 361 não tem tag "tutanota-release-361.*" (a do webapp); as tags oficiais
+#   da 361.260929.0 são desktop/android/ios, TODAS no mesmo commit f7b4a552.
+#   Usamos a do desktop. O script confere que a tag aponta para este commit.
+# - Trocar de release: scripts/atualizar-sdk.sh <tag nova> (LEIA-ME, "Atualizar o SDK").
+tag=tutanota-desktop-release-361.260929.0
+commit=f7b4a552dbd0c3b95d2f937135f64a436cee8421
+versao=361.260929.0

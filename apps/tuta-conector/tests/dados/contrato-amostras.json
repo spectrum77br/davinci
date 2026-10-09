@@ -1,0 +1,258 @@
+{
+  "changes": {
+    "changes": [
+      {
+        "deleted": true,
+        "source_id": "tuta:3----------7/3----------Y"
+      }
+    ]
+  },
+  "count": {
+    "complete": true,
+    "day": null,
+    "folder_key": "3----------O",
+    "ids": [
+      "tuta:3----------7/3----------Y"
+    ],
+    "since": "2026-10-01T06:13:20Z",
+    "total": 1,
+    "until": null
+  },
+  "estados": [
+    {
+      "can_send": true,
+      "error_code": "iniciando",
+      "state": "online"
+    },
+    {
+      "can_send": true,
+      "error_code": null,
+      "state": "online"
+    },
+    {
+      "can_send": false,
+      "error_code": "sessao_caiu",
+      "state": "login_required"
+    },
+    {
+      "can_send": false,
+      "error_code": "versao_recusada",
+      "state": "error"
+    },
+    {
+      "can_send": true,
+      "error_code": "ilegivel",
+      "state": "online"
+    },
+    {
+      "can_send": true,
+      "error_code": "limitado",
+      "state": "online"
+    },
+    {
+      "can_send": true,
+      "error_code": "tuta_fora",
+      "state": "online"
+    },
+    {
+      "can_send": true,
+      "error_code": "atrasado",
+      "state": "online"
+    },
+    {
+      "can_send": false,
+      "error_code": "erro",
+      "state": "error"
+    },
+    {
+      "can_send": false,
+      "error_code": "sem_v2",
+      "state": "error"
+    }
+  ],
+  "heartbeat": {
+    "can_send": false,
+    "error_code": null,
+    "state": "online"
+  },
+  "ingest": {
+    "messages": [
+      {
+        "attachments": [
+          {
+            "content_type": "application/pdf",
+            "data_base64": "JVBERi10ZXN0ZQ==",
+            "filename": "nota.pdf"
+          }
+        ],
+        "cc": [
+          "copia@exemplo.com.br"
+        ],
+        "delivered_to": [
+          "21max@tuta.com"
+        ],
+        "direction": "inbound",
+        "folder": "problema ml",
+        "from_address": "comprador@exemplo.com.br",
+        "from_name": "Comprador Exemplo",
+        "in_reply_to": "<pai@exemplo.com.br>",
+        "message_id": "<amostra-completa@exemplo.test>",
+        "omitted_attachments": [
+          {
+            "content_type": "application/x-msdownload",
+            "filename": "x.exe",
+            "reason": "perigoso",
+            "size": 4
+          }
+        ],
+        "raw_headers": "Authentication-Results: mx; dkim=pass",
+        "received_at": "2026-10-08T05:43:20Z",
+        "references": [
+          "<pai@exemplo.com.br>"
+        ],
+        "reply_to": "responder@exemplo.com.br",
+        "source_id": "tuta:3----------7/3----------Y",
+        "subject": "amostra completa",
+        "text": "Olá, amostra completa",
+        "text_from_html": true,
+        "to": [
+          "21max@tuta.com"
+        ],
+        "tuta": {
+          "auth_status": "0",
+          "codes_masked": false,
+          "conversation_id": "3----------8",
+          "envelope_sender": "bounce@envio.exemplo.com.br",
+          "folder_key": "3----------O",
+          "folder_kind": "0",
+          "folder_path": "problema ml",
+          "labels": [
+            "3----------W"
+          ],
+          "links_removed": 0,
+          "mail_id": "3----------7/3----------Y",
+          "phishing_status": "1",
+          "replied": 0,
+          "sent_at": "2026-10-08T05:43:15Z",
+          "state": 2,
+          "unread": true
+        }
+      }
+    ]
+  },
+  "receipt": {
+    "error_code": "envio_sem_confirmacao",
+    "lease_token": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "message_id": null,
+    "status": "uncertain"
+  },
+  "sync": {
+    "agent_version": "tuta-conector/0.1.0 sdk/361.260929.0",
+    "aliases": [
+      "21max@tuta.com",
+      "22max@tuta.com",
+      "conta.teste@tuta.com"
+    ],
+    "counters": {
+      "anexos": 0,
+      "anexos_omitidos": 0,
+      "apagados": 0,
+      "enviados_conector_hora": 0,
+      "enviados_conta_hora": 0,
+      "erros_401": 0,
+      "erros_429": 0,
+      "erros_474": 0,
+      "erros_5xx": 0,
+      "ilegiveis": 0,
+      "lidos": 0,
+      "movidos": 0,
+      "pastas_ilegiveis": 0,
+      "processando_regra": 0,
+      "recusados": 0,
+      "releases_atras": 0,
+      "so_contados": 0
+    },
+    "folders": [
+      {
+        "key": "3----------C",
+        "kind": 1,
+        "name": "Entrada",
+        "parent": null,
+        "path": "Entrada"
+      },
+      {
+        "key": "3----------E",
+        "kind": 2,
+        "name": "Enviados",
+        "parent": null,
+        "path": "Enviados"
+      },
+      {
+        "key": "3----------G",
+        "kind": 3,
+        "name": "Lixeira",
+        "parent": null,
+        "path": "Lixeira"
+      },
+      {
+        "key": "3----------I",
+        "kind": 4,
+        "name": "Arquivo",
+        "parent": null,
+        "path": "Arquivo"
+      },
+      {
+        "key": "3----------K",
+        "kind": 5,
+        "name": "Spam",
+        "parent": null,
+        "path": "Spam"
+      },
+      {
+        "key": "3----------M",
+        "kind": 6,
+        "name": "Rascunhos",
+        "parent": null,
+        "path": "Rascunhos"
+      },
+      {
+        "key": "3----------O",
+        "kind": 0,
+        "name": "problema ml",
+        "parent": null,
+        "path": "problema ml"
+      },
+      {
+        "key": "3----------Q",
+        "kind": 0,
+        "name": "reclamação ml",
+        "parent": null,
+        "path": "reclamação ml"
+      },
+      {
+        "key": "3----------S",
+        "kind": 0,
+        "name": "vendas shopee",
+        "parent": null,
+        "path": "vendas shopee"
+      },
+      {
+        "key": "3----------U",
+        "kind": 0,
+        "name": "financeiro",
+        "parent": null,
+        "path": "financeiro"
+      },
+      {
+        "key": "3----------W",
+        "kind": 8,
+        "name": "urgente",
+        "parent": null,
+        "path": "urgente"
+      }
+    ],
+    "folders_complete": true,
+    "instance": "9c3da4ce76a038d7cff53728b2fa5d99",
+    "tuta_version": "361.260929.0"
+  }
+}

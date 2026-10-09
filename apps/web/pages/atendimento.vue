@@ -577,7 +577,8 @@ watch(selecionada, (id) => {
     </div>
 
     <AtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
-    <AtendimentoMail v-if="aba === 'mail'" :is-admin="isAdmin" />
+    <!-- E-mail: a Central (Caixas) e, para quem mexe, as Filas do e-mail das lojas (08/10/2026) -->
+    <AtendimentoMail v-if="aba === 'mail'" :is-admin="isAdmin" :can-operate="mexe" :stores="resumo?.lojas || []" @open-conversation="abrirConversaNaCaixa" />
     <AtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" />
     <AtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete" @mudou="(l: Modelo[]) => (modelos = l)" />
     <AtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" />

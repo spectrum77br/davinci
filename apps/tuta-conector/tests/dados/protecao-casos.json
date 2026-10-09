@@ -1,0 +1,2012 @@
+[
+ {
+  "assunto": "Acesso à conta",
+  "texto": "Use o código 482913 para entrar na sua conta.",
+  "esperado": {
+   "assunto": "Acesso à conta",
+   "texto": "Use o código •••••• para entrar na sua conta.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Confirme sua identidade",
+  "texto": "Digite o código 482913 no aplicativo.",
+  "esperado": {
+   "assunto": "Confirme sua identidade",
+   "texto": "Digite o código •••••• no aplicativo.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Shopee",
+  "texto": "Código Shopee: 482913. Não compartilhe.",
+  "esperado": {
+   "assunto": "Shopee",
+   "texto": "Código Shopee: ••••••. Não compartilhe.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Token",
+  "texto": "Seu token de acesso: 482913",
+  "esperado": {
+   "assunto": "Token",
+   "texto": "Seu token de acesso: ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Dados de acesso",
+  "texto": "Usuário: barbosa\nSenha gerada: Kx81mq2z",
+  "esperado": {
+   "assunto": "Dados de acesso",
+   "texto": "Usuário: barbosa\nSenha gerada: ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Bem-vindo",
+  "texto": "Seu login é barbosa e sua senha Kx81mq2z",
+  "esperado": {
+   "assunto": "Bem-vindo",
+   "texto": "Seu login é barbosa e sua senha ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Dados",
+  "texto": "Login: barbosa Senha: xyz",
+  "esperado": {
+   "assunto": "Dados",
+   "texto": "Login: barbosa Senha: •••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Dados",
+  "texto": "Login: barbosa Senha: xyz123",
+  "esperado": {
+   "assunto": "Dados",
+   "texto": "Login: barbosa Senha: ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Painel",
+  "texto": "Senha do painel: Kx81mq2z",
+  "esperado": {
+   "assunto": "Painel",
+   "texto": "Senha do painel: ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Painel",
+  "texto": "Senha - Kx81mq2z",
+  "esperado": {
+   "assunto": "Painel",
+   "texto": "Senha - ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Painel",
+  "texto": "Sua senha provisória Kx81mq2z",
+  "esperado": {
+   "assunto": "Painel",
+   "texto": "Sua senha provisória ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código de verificação",
+  "texto": "Código: k7x9q2",
+  "esperado": {
+   "assunto": "Seu código de verificação",
+   "texto": "Código: ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código de verificação",
+  "texto": "Seu código: 48 29 13",
+  "esperado": {
+   "assunto": "Seu código de verificação",
+   "texto": "Seu código: •• •• ••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "482913 is your Facebook confirmation code",
+  "texto": "Enter this code to confirm your account: 482913",
+  "esperado": {
+   "assunto": "•••••• is your Facebook confirmation code",
+   "texto": "Enter this code to confirm your account: ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Your Instagram code",
+  "texto": "123456 is your Instagram code. Don't share it.",
+  "esperado": {
+   "assunto": "Your Instagram code",
+   "texto": "•••••• is your Instagram code. Don't share it.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Sign in",
+  "texto": "Your sign-in code is 482913",
+  "esperado": {
+   "assunto": "Sign in",
+   "texto": "Your sign-in code is ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Access code",
+  "texto": "Your access code is 482913",
+  "esperado": {
+   "assunto": "Access code",
+   "texto": "Your access code is ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Log in",
+  "texto": "Enter 482913 to log in.",
+  "esperado": {
+   "assunto": "Log in",
+   "texto": "Enter •••••• to log in.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "WhatsApp",
+  "texto": "Your WhatsApp code: 123-456",
+  "esperado": {
+   "assunto": "WhatsApp",
+   "texto": "Your WhatsApp code: •••-•••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "PIN",
+  "texto": "Your PIN is 4829",
+  "esperado": {
+   "assunto": "PIN",
+   "texto": "Your PIN is ••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Account",
+  "texto": "Temporary password - Kx81mq2z",
+  "esperado": {
+   "assunto": "Account",
+   "texto": "Temporary password - ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Account",
+  "texto": "Password for login: Kx81mq2z",
+  "esperado": {
+   "assunto": "Account",
+   "texto": "Password for login: ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código de confirmación",
+  "texto": "El código de confirmación es 482913",
+  "esperado": {
+   "assunto": "Código de confirmación",
+   "texto": "El código de confirmación es ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Tu cuenta",
+  "texto": "Tu clave temporal es Kx81mq2z",
+  "esperado": {
+   "assunto": "Tu cuenta",
+   "texto": "Tu clave temporal es ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Tu cuenta",
+  "texto": "Tu contraseña temporal es: Kx81mq2z",
+  "esperado": {
+   "assunto": "Tu cuenta",
+   "texto": "Tu contraseña temporal es: ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acceso",
+  "texto": "Código: 482913",
+  "esperado": {
+   "assunto": "Acceso",
+   "texto": "Código: ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acceso",
+  "texto": "Ingresa el código 482913 para iniciar sesión.",
+  "esperado": {
+   "assunto": "Acceso",
+   "texto": "Ingresa el código •••••• para iniciar sesión.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Entrar",
+  "texto": "Clique para entrar: https://bit.ly/3xYz",
+  "esperado": {
+   "assunto": "Entrar",
+   "texto": "Clique para entrar: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Sua conta",
+  "texto": "Acesse sua conta: https://lnk.to/aB3",
+  "esperado": {
+   "assunto": "Sua conta",
+   "texto": "Acesse sua conta: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Reset",
+  "texto": "Reset here: https://t.co/AbCd",
+  "esperado": {
+   "assunto": "Reset",
+   "texto": "Reset here: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "482913 is your Facebook confirmation code",
+  "texto": "Enter this code: 482913",
+  "esperado": {
+   "assunto": "•••••• is your Facebook confirmation code",
+   "texto": "Enter this code: ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Sign in",
+  "texto": "Your sign-in code is 482913",
+  "esperado": {
+   "assunto": "Sign in",
+   "texto": "Your sign-in code is ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acesso",
+  "texto": "Sua nova senha de acesso é: Ab12cd34",
+  "esperado": {
+   "assunto": "Acesso",
+   "texto": "Sua nova senha de acesso é: ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Redefinição de senha",
+  "texto": "Clique para redefinir sua senha: https://www.bling.com.br/r/AbCdEf",
+  "esperado": {
+   "assunto": "Redefinição de senha",
+   "texto": "Clique para redefinir sua senha: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "x",
+  "texto": "G-482913 é o seu código de verificação do Google",
+  "esperado": {
+   "assunto": "x",
+   "texto": "G-•••••• é o seu código de verificação do Google",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "x",
+  "texto": "Tu código de verificación es 482913",
+  "esperado": {
+   "assunto": "x",
+   "texto": "Tu código de verificación es ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "x",
+  "texto": "A senha é importante e o login também",
+  "esperado": {
+   "assunto": "x",
+   "texto": "A senha é importante e o login também",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "x",
+  "texto": "senha=abc12345 e Password: hunter2",
+  "esperado": {
+   "assunto": "x",
+   "texto": "senha=•••••••• e Password: •••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "x",
+  "texto": "contraseña: Qwerty12",
+  "esperado": {
+   "assunto": "x",
+   "texto": "contraseña: ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "x",
+  "texto": "Your password is Xy7!abc.",
+  "esperado": {
+   "assunto": "x",
+   "texto": "Your password is •••••••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código de acesso",
+  "texto": "Use 123456. Ou clique em https://x.example/login?u=1. Pedido: https://loja.example/pedido/9",
+  "esperado": {
+   "assunto": "Seu código de acesso",
+   "texto": "Use ••••••. Ou clique em [link de acesso removido]. Pedido: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 2
+  }
+ },
+ {
+  "assunto": "Pedido",
+  "texto": "Clique em https://x.example/login?u=1. Pedido: https://loja.example/pedido/9",
+  "esperado": {
+   "assunto": "Pedido",
+   "texto": "Clique em [link de acesso removido]. Pedido: https://loja.example/pedido/9",
+   "codigo_mascarado": false,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Pedido 4821 chegou",
+  "texto": "Rastreie em https://x.example/r/BR123",
+  "esperado": {
+   "assunto": "Pedido 4821 chegou",
+   "texto": "Rastreie em https://x.example/r/BR123",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Entrar",
+  "texto": "Clique aqui <https://x.example/magic/abc>.",
+  "esperado": {
+   "assunto": "Entrar",
+   "texto": "Clique aqui <[link de acesso removido]>.",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Seu código 482913",
+  "texto": "Código: 482913\nhttps://x.com/login?token=abc\nfim",
+  "esperado": {
+   "assunto": "Seu código ••••••",
+   "texto": "Código: ••••••\n[link de acesso removido]\nfim",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Pedido",
+  "texto": "Quando chega o pedido 2000012345678901?",
+  "esperado": {
+   "assunto": "Pedido",
+   "texto": "Quando chega o pedido 2000012345678901?",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código",
+  "texto": "use 123 456 ou 123.456 ou 123-456",
+  "esperado": {
+   "assunto": "Seu código",
+   "texto": "use ••• ••• ou •••.••• ou •••-•••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código",
+  "texto": "x1234y 1234 é1234 ação 4821",
+  "esperado": {
+   "assunto": "Seu código",
+   "texto": "x1234y •••• é1234 ação ••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código",
+  "texto": "PO-211-12345678 e US-26-0014 e 2026-10 e ABCDEF",
+  "esperado": {
+   "assunto": "Seu código",
+   "texto": "PO-211-12345678 e US-26-0014 e 2026-10 e ABCDEF",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Login",
+  "texto": "seu codigo: ••• ••• (login)",
+  "esperado": {
+   "assunto": "Login",
+   "texto": "seu codigo: ••• ••• (login)",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código",
+  "texto": "Use o código •••••• para entrar na sua conta.",
+  "esperado": {
+   "assunto": "Seu código",
+   "texto": "Use o código •••••• para entrar na sua conta.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código",
+  "texto": "Seu código de verificação: G-••••••",
+  "esperado": {
+   "assunto": "Seu código",
+   "texto": "Seu código de verificação: G-••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Oi",
+  "texto": "pontinhos •• soltos",
+  "esperado": {
+   "assunto": "Oi",
+   "texto": "pontinhos •• soltos",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Pedido não chegou",
+  "texto": "Meu pedido 2000012345678901 ainda não chegou. Código de rastreio: AA123456789BR. CEP 01310-100. Paguei R$ 1.299,00 em 05/10/2026.",
+  "esperado": {
+   "assunto": "Pedido não chegou",
+   "texto": "Meu pedido 2000012345678901 ainda não chegou. Código de rastreio: AA123456789BR. CEP 01310-100. Paguei R$ 1.299,00 em 05/10/2026.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Troca",
+  "texto": "Comprei dia 05/10/2026 o celular de 5000 mAh por 1500 reais, pedido 241008ABCD1234, quero trocar. Meu CPF 123.456.789-09. Telefone (11) 3456-7890",
+  "esperado": {
+   "assunto": "Troca",
+   "texto": "Comprei dia 05/10/2026 o celular de 5000 mAh por 1500 reais, pedido 241008ABCD1234, quero trocar. Meu CPF 123.456.789-09. Telefone (11) 3456-7890",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Nota",
+  "texto": "Segue a NF 52341 do pedido 2000012345678901, valor R$ 899,90",
+  "esperado": {
+   "assunto": "Nota",
+   "texto": "Segue a NF 52341 do pedido 2000012345678901, valor R$ 899,90",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Dúvida",
+  "texto": "Qual o código do produto? Vi o anúncio MLB1234567890 e quero entrar em contato",
+  "esperado": {
+   "assunto": "Dúvida",
+   "texto": "Qual o código do produto? Vi o anúncio MLB1234567890 e quero entrar em contato",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Rastreio",
+  "texto": "O código de rastreio NX1234567BR não atualiza desde 2026",
+  "esperado": {
+   "assunto": "Rastreio",
+   "texto": "O código de rastreio NX1234567BR não atualiza desde 2026",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Amazon",
+  "texto": "Order 701-1234567-1234567 not delivered, tracking code 1Z999AA10123456784",
+  "esperado": {
+   "assunto": "Amazon",
+   "texto": "Order 701-1234567-1234567 not delivered, tracking code 1Z999AA10123456784",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código",
+  "texto": "Seu código: 482913. Pedido 2000012345678901, rastreio AA123456789BR, CEP 01310-100, CEP 01310100, valor R$ 150,00, R$ 1500, 1500,00, R$ 150.000, CPF 123.456.789-09, data 08/10/2026, telefone (11) 3456-7890, 11 98765-4321, +55 11 98765 4321, Shopee 241008ABCD1234, Amazon 701-1234567-1234567, chave 3524 1012 3456 7800 0123 5500 1000 0012 3410 0012 3456, 5000 mAh, 1500 reais, pedido #4521, 15%, ano 2026",
+  "esperado": {
+   "assunto": "Código",
+   "texto": "Seu código: ••••••. Pedido 2000012345678901, rastreio AA123456789BR, CEP 01310-100, CEP 01310100, valor R$ 150,00, R$ 1500, 1500,00, R$ 150.000, CPF 123.456.789-09, data 08/10/2026, telefone (11) 3456-7890, 11 98765-4321, +55 11 98765 4321, Shopee 241008ABCD1234, Amazon 701-1234567-1234567, chave 3524 1012 3456 7800 0123 5500 1000 0012 3410 0012 3456, 5000 mAh, 1500 reais, pedido #4521, 15%, ano 2026",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Pergunta sobre o pedido",
+  "texto": "Quando chega?",
+  "esperado": {
+   "assunto": "Pergunta sobre o pedido",
+   "texto": "Quando chega?",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Esqueci minha senha",
+  "texto": "Não consigo entrar no app. O link https://app.uranyx.com.br/redefinir-senha?t=9 não abre. Veja também https://uranyx.com.br/produto/capa",
+  "esperado": {
+   "assunto": "Esqueci minha senha",
+   "texto": "Não consigo entrar no app. O link [link de acesso removido] não abre. Veja também [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 2
+  }
+ },
+ {
+  "assunto": "Pergunta",
+  "texto": "Oi, veja: https://www.mercadolivre.com.br/vendas/2000012345678901/detalhe\ne https://loja.com/login?token=abcdef0123456789abcdef",
+  "esperado": {
+   "assunto": "Pergunta",
+   "texto": "Oi, veja: https://www.mercadolivre.com.br/vendas/2000012345678901/detalhe\ne [link de acesso removido]",
+   "codigo_mascarado": false,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Ajuda",
+  "texto": "Esqueci minha senha do app, como faço?",
+  "esperado": {
+   "assunto": "Ajuda",
+   "texto": "Esqueci minha senha do app, como faço?",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "minha senha do app 2000012345678901 não funciona",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "minha senha do app 2000012345678901 não funciona",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "a senha do pedido: 2000012345678901",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "a senha do pedido: 2000012345678901",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Celular",
+  "texto": "A senha do celular é 1234",
+  "esperado": {
+   "assunto": "Celular",
+   "texto": "A senha do celular é ••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Code",
+  "texto": "Your code is 4 8 2 9 1 3",
+  "esperado": {
+   "assunto": "Code",
+   "texto": "Your code is • • • • • •",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código",
+  "texto": "Seu código: 4829 1300",
+  "esperado": {
+   "assunto": "Código",
+   "texto": "Seu código: •••• ••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código",
+  "texto": "Seu código: 4829 1300 7777",
+  "esperado": {
+   "assunto": "Código",
+   "texto": "Seu código: 4829 1300 7777",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "PIN",
+  "texto": "2019 is your PIN",
+  "esperado": {
+   "assunto": "PIN",
+   "texto": "•••• is your PIN",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "Password: ab",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "Password: ab",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "Senha: [link de acesso removido]",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "Senha: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "senha: https://x.example/a",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "senha: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Mesmo",
+  "texto": "Your code is 482913. Your code is 482913.",
+  "esperado": {
+   "assunto": "Mesmo",
+   "texto": "Your code is ••••••. Your code is ••••••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Bolinhas",
+  "texto": "Use •••• •••• ou ••-••-•• ou •••-•••",
+  "esperado": {
+   "assunto": "Bolinhas",
+   "texto": "Use •••• •••• ou ••-••-•• ou •••-•••",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Empty",
+  "texto": "",
+  "esperado": {
+   "assunto": "Empty",
+   "texto": "",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "",
+  "texto": "   ",
+  "esperado": {
+   "assunto": "",
+   "texto": "   ",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Code",
+  "texto": "AB12CD34EF e ab12cd e AB12cd e aBcDeF1",
+  "esperado": {
+   "assunto": "Code",
+   "texto": "AB12CD34EF e ab12cd e AB12cd e aBcDeF1",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Code",
+  "texto": "Código promocional: SAVE20, código do cupom XYZ123 e QR code 123456",
+  "esperado": {
+   "assunto": "Code",
+   "texto": "Código promocional: ••••••, código do cupom •••••• e QR code ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Clave",
+  "texto": "Palabra clave: ABC123 importante",
+  "esperado": {
+   "assunto": "Clave",
+   "texto": "Palabra clave: •••••• importante",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Entrar em contato",
+  "texto": "Vou entrar em contato pelo https://loja.example/contato",
+  "esperado": {
+   "assunto": "Entrar em contato",
+   "texto": "Vou entrar em contato pelo https://loja.example/contato",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acessar",
+  "texto": "Para acessar o rastreio: https://loja.example/r/9",
+  "esperado": {
+   "assunto": "Acessar",
+   "texto": "Para acessar o rastreio: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Login",
+  "texto": "Faça login em https://loja.example/conta e veja o pedido 2000012345678901",
+  "esperado": {
+   "assunto": "Login",
+   "texto": "Faça login em [link de acesso removido] e veja o pedido 2000012345678901",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Token",
+  "texto": "token=abcdef123456 e tokenizado 123456",
+  "esperado": {
+   "assunto": "Token",
+   "texto": "token=•••••••••••• e tokenizado ••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "SENHA: Ab1!xyz, LOGIN: barbosa; senha2: x",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "SENHA: •••••••, LOGIN: barbosa; ••••••: x",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Contraseña",
+  "texto": "Contraseña nueva Kx81mq2z y clave de acceso: 4829",
+  "esperado": {
+   "assunto": "Contraseña",
+   "texto": "Contraseña nueva •••••••• y clave de acceso: ••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Code",
+  "texto": "Use code SAVE20 at checkout for 20% off",
+  "esperado": {
+   "assunto": "Code",
+   "texto": "Use code •••••• at checkout for 20% off",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Code",
+  "texto": "Código: ٤٨٢٩١٣ e ４８２９１３",
+  "esperado": {
+   "assunto": "Code",
+   "texto": "Código: ٤٨٢٩١٣ e ４８２９１３",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Code",
+  "texto": "Código\n482913\n\nNão compartilhe.",
+  "esperado": {
+   "assunto": "Code",
+   "texto": "Código\n••••••\n\nNão compartilhe.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Code",
+  "texto": "código:482913;código=123456",
+  "esperado": {
+   "assunto": "Code",
+   "texto": "código:••••••;código=••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Code",
+  "texto": "R$482913 e $ 123456 e (482913) e [482913]",
+  "esperado": {
+   "assunto": "Code",
+   "texto": "R$482913 e $ 123456 e (••••••) e [••••••]",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código de verificação 482913",
+  "texto": "Use o código 482913 para entrar.\n\nRedefinir senha <https://contas.example/redefinir-senha?token=abcdef>\n\nSeu pedido 2000012345678901 segue.",
+  "esperado": {
+   "assunto": "Seu código de verificação ••••••",
+   "texto": "Use o código •••••• para entrar.\n\nRedefinir senha <[link de acesso removido]>\n\nSeu pedido 2000012345678901 segue.",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "Sua senha (https://x.example/a) e senha «Kx81mq2z»",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "Sua senha ([link de acesso removido]) e senha «••••••••»",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "Senha: <Kx81mq2z> e password=(hunter2).",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "Senha: <••••••••> e password=(•••••••).",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código de verificação do Google",
+  "texto": "Olá,\n\nRecebemos uma solicitação para usar 21max@tuta.com como e-mail de recuperação da Conta do Google.\n\nUse este código para concluir a configuração:\n\n482913\n\nSe você não fez essa solicitação, ignore este e-mail.",
+  "esperado": {
+   "assunto": "Código de verificação do Google",
+   "texto": "Olá,\n\nRecebemos uma solicitação para usar 21max@tuta.com como e-mail de recuperação da Conta do Google.\n\nUse este código para concluir a configuração:\n\n••••••\n\nSe você não fez essa solicitação, ignore este e-mail.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Confirme que é você",
+  "texto": "Olá, Barbosa!\n\nPara continuar, digite este número no Mercado Livre:\n\n731 604\n\nEle vence em 30 minutos. Não compartilhe com ninguém.",
+  "esperado": {
+   "assunto": "Confirme que é você",
+   "texto": "Olá, Barbosa!\n\nPara continuar, digite este número no Mercado Livre:\n\n••• •••\n\nEle vence em 30 minutos. Não compartilhe com ninguém.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu OTP Shopee",
+  "texto": "Seu OTP Shopee é 559201. Não compartilhe este código com ninguém, nem com funcionários da Shopee.",
+  "esperado": {
+   "assunto": "Seu OTP Shopee",
+   "texto": "Seu OTP Shopee é ••••••. Não compartilhe este código com ninguém, nem com funcionários da Shopee.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Bling - Verificação em duas etapas",
+  "texto": "Olá,\n\nSeu código de verificação em duas etapas é:\n\nK7Q2M9\n\nEquipe Bling",
+  "esperado": {
+   "assunto": "Bling - Verificação em duas etapas",
+   "texto": "Olá,\n\nSeu código de verificação em duas etapas é:\n\n••••••\n\nEquipe Bling",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acesse sua loja",
+  "texto": "Clique no botão abaixo para abrir o painel da sua loja sem precisar de senha.\n\nAbrir minha loja <https://www.nuvemshop.com.br/admin/m/3f9Kd02LmQ>\n\nO link vale por 15 minutos.",
+  "esperado": {
+   "assunto": "Acesse sua loja",
+   "texto": "Clique no botão abaixo para abrir o painel da sua loja sem precisar de senha.\n\nAbrir minha loja <[link de acesso removido]>\n\nO link vale por 15 minutos.",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Itaú: habilitação de aparelho",
+  "texto": "Para habilitar o iToken no seu novo aparelho, informe a chave 804 117 no app Itaú.\n\nSe não foi você, ligue 4004 4828.",
+  "esperado": {
+   "assunto": "Itaú: habilitação de aparelho",
+   "texto": "Para habilitar o iToken no seu novo aparelho, informe a chave ••• ••• no app Itaú.\n\nSe não foi você, ligue •••• ••••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código de autorização",
+  "texto": "Código de autorização: 650 318\n\nVálido por 5 minutos.",
+  "esperado": {
+   "assunto": "Seu código de autorização",
+   "texto": "Código de autorização: ••• •••\n\nVálido por 5 minutos.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Meu Correios - nova senha",
+  "texto": "Sua senha foi redefinida.\n\nSenha temporária: Cr7#pX29\n\nAltere no primeiro acesso.",
+  "esperado": {
+   "assunto": "Meu Correios - nova senha",
+   "texto": "Sua senha foi redefinida.\n\nSenha temporária: ••••••••\n\nAltere no primeiro acesso.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acesso ao portal Jadlog",
+  "texto": "Seu cadastro foi aprovado.\n\nUsuário: uranyx\nSenha inicial: Jd!2026uX",
+  "esperado": {
+   "assunto": "Acesso ao portal Jadlog",
+   "texto": "Seu cadastro foi aprovado.\n\nUsuário: uranyx\nSenha inicial: •••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu link para entrar no Melhor Envio",
+  "texto": "Use o link abaixo, válido por 10 minutos:\n\nhttps://melhorenvio.com.br/l/Ab12Cd",
+  "esperado": {
+   "assunto": "Seu link para entrar no Melhor Envio",
+   "texto": "Use o link abaixo, válido por 10 minutos:\n\n[link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Confirme seu login no Tiny",
+  "texto": "Use o código abaixo para confirmar seu login:\n\n3 9 4 8 1 2",
+  "esperado": {
+   "assunto": "Confirme seu login no Tiny",
+   "texto": "Use o código abaixo para confirmar seu login:\n\n• • • • • •",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acesso ao B2B",
+  "texto": "Bom dia Eduardo,\n\nLiberei o acesso de vocês ao nosso portal de pedidos. O login é o CNPJ e a senha ficou Alfa@2026uranyx (pode trocar depois).\n\nAbraço, Carlos",
+  "esperado": {
+   "assunto": "Acesso ao B2B",
+   "texto": "Bom dia Eduardo,\n\nLiberei o acesso de vocês ao nosso portal de pedidos. O login é o CNPJ e a senha ficou ••••••••••••••• (pode trocar depois).\n\nAbraço, Carlos",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Painel da loja",
+  "texto": "Fala pessoal, troquei a senha do painel da Nuvemshop, agora é Ur4nyx!Painel. Me avisa se der certo.",
+  "esperado": {
+   "assunto": "Painel da loja",
+   "texto": "Fala pessoal, troquei a senha do painel da Nuvemshop, agora é •••••••••••••. Me avisa se der certo.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Certificado digital A1",
+  "texto": "Segue o certificado A1 em anexo. A senha do certificado é 8R2k9!mQ",
+  "esperado": {
+   "assunto": "Certificado digital A1",
+   "texto": "Segue o certificado A1 em anexo. A senha do certificado é ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código de acesso gov.br",
+  "texto": "Seu código para acessar o gov.br é: 920 471.",
+  "esperado": {
+   "assunto": "Código de acesso gov.br",
+   "texto": "Seu código para acessar o gov.br é: ••• •••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Liberação do novo celular",
+  "texto": "Sua chave de segurança para liberar o novo celular é 7 3 1 8 2 0.\n\nNão informe a ninguém.",
+  "esperado": {
+   "assunto": "Liberação do novo celular",
+   "texto": "Sua chave de segurança para liberar o novo celular é • • • • • •.\n\nNão informe a ninguém.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "482913 é o seu código de recuperação de conta do Facebook",
+  "texto": "Olá, Barbosa,\n\nRecebemos uma solicitação para redefinir sua senha do Facebook.\n\nInsira o seguinte código de redefinição de senha:\n\n482913",
+  "esperado": {
+   "assunto": "•••••• é o seu código de recuperação de conta do Facebook",
+   "texto": "Olá, Barbosa,\n\nRecebemos uma solicitação para redefinir sua senha do Facebook.\n\nInsira o seguinte código de redefinição de senha:\n\n••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Confirme sua identidade",
+  "texto": "Para concluir, digite o número 615 029 no app.",
+  "esperado": {
+   "assunto": "Confirme sua identidade",
+   "texto": "Para concluir, digite o número ••• ••• no app.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha redefinida",
+  "texto": "Olá, sua senha foi redefinida para Xp7!kL2wQz. Recomendamos trocá-la no próximo acesso.",
+  "esperado": {
+   "assunto": "Senha redefinida",
+   "texto": "Olá, sua senha foi redefinida para ••••••••••. Recomendamos trocá-la no próximo acesso.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Cadastro aprovado",
+  "texto": "Sua senha de acesso foi gerada: Kx81mq2z",
+  "esperado": {
+   "assunto": "Cadastro aprovado",
+   "texto": "Sua senha de acesso foi gerada: ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Verify your Apple Account email address",
+  "texto": "Apple Account\n\nVerification code\n\n482 913\n\nTo verify your email address, enter this code in your browser.",
+  "esperado": {
+   "assunto": "Verify your Apple Account email address",
+   "texto": "Apple Account\n\nVerification code\n\n••• •••\n\nTo verify your email address, enter this code in your browser.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Microsoft account security code",
+  "texto": "Please use the following security code for the Microsoft account 21****@tuta.com.\n\nSecurity code: 6038172\n\nIf you don't recognize the Microsoft account 21****@tuta.com, you can click here <https://account.live.com/dp?ft=Ab12> to remove your email address from that account.",
+  "esperado": {
+   "assunto": "Microsoft account security code",
+   "texto": "Please use the following security code for the Microsoft account 21****@tuta.com.\n\nSecurity code: •••••••\n\nIf you don't recognize the Microsoft account 21****@tuta.com, you can click here <[link de acesso removido]> to remove your email address from that account.",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Your Instagram code",
+  "texto": "Hi uranyx.oficial,\n\nSomeone tried to log in to your Instagram account. If this was you, enter this code to confirm:\n\n739 214",
+  "esperado": {
+   "assunto": "Your Instagram code",
+   "texto": "Hi uranyx.oficial,\n\nSomeone tried to log in to your Instagram account. If this was you, enter this code to confirm:\n\n••• •••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Amazon password assistance",
+  "texto": "To authenticate, please use the following One Time Password (OTP):\n\n918273\n\nDo not share this OTP with anyone.",
+  "esperado": {
+   "assunto": "Amazon password assistance",
+   "texto": "To authenticate, please use the following One Time Password (OTP):\n\n••••••\n\nDo not share this OTP with anyone.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Your Shopify login link",
+  "texto": "Click the button below to log into your Shopify account.\n\nLog in <https://accounts.shopify.com/m/Xk29fLp0aQ>",
+  "esperado": {
+   "assunto": "Your Shopify login link",
+   "texto": "Click the button below to log into your Shopify account.\n\nLog in <[link de acesso removido]>",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Slack confirmation code: QXF-7KT",
+  "texto": "Your confirmation code is below — enter it in your open browser window and we'll help you get signed in.\n\nQXF-7KT",
+  "esperado": {
+   "assunto": "Slack confirmation code: •••-•••",
+   "texto": "Your confirmation code is below — enter it in your open browser window and we'll help you get signed in.\n\n•••-•••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Your Steam account: Access from new web or mobile device",
+  "texto": "Dear uranyx,\n\nHere is the Steam Guard code you need to login to account uranyx:\n\nF4K2T",
+  "esperado": {
+   "assunto": "Your Steam account: Access from new web or mobile device",
+   "texto": "Dear uranyx,\n\nHere is the Steam Guard code you need to login to account uranyx:\n\n•••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Confirm it's you",
+  "texto": "Enter 604 381 on the Wise website to approve this request. It expires in 10 minutes.",
+  "esperado": {
+   "assunto": "Confirm it's you",
+   "texto": "Enter ••• ••• on the Wise website to approve this request. It expires in 10 minutes.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "PayPal: your security code",
+  "texto": "305588 is your PayPal security code. Your code expires in 10 minutes. Don't share your code with anyone.",
+  "esperado": {
+   "assunto": "PayPal: your security code",
+   "texto": "•••••• is your PayPal security code. Your code expires in 10 minutes. Don't share your code with anyone.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Account for our B2B platform",
+  "texto": "Dear partner,\nyour account is ready. Username: uranyx / Password: Sz#88tradeX. Please change it after first login.",
+  "esperado": {
+   "assunto": "Account for our B2B platform",
+   "texto": "Dear partner,\nyour account is ready. Username: uranyx / Password: •••••••••••. Please change it after first login.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "[GitHub] Please verify your device",
+  "texto": "Hey uranyx!\n\nA sign in attempt requires further verification because we did not recognize your device. To complete the sign in, enter the verification code on the unrecognized device.\n\nVerification code: 41827365",
+  "esperado": {
+   "assunto": "[GitHub] Please verify your device",
+   "texto": "Hey uranyx!\n\nA sign in attempt requires further verification because we did not recognize your device. To complete the sign in, enter the verification code on the unrecognized device.\n\nVerification code: ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Welcome back to SellerApp",
+  "texto": "Click here to log into your dashboard: https://getsellerapp.io/m/7QpX2v (expires in 15 minutes)",
+  "esperado": {
+   "assunto": "Welcome back to SellerApp",
+   "texto": "Click here to log into your dashboard: [link de acesso removido] (expires in 15 minutes)",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Your LabelHub account",
+  "texto": "Your password has been reset to Zq!8mw#Lp4. Please sign in and change it.",
+  "esperado": {
+   "assunto": "Your LabelHub account",
+   "texto": "Your password has been reset to ••••••••••. Please sign in and change it.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Zoom verification code",
+  "texto": "Your verification code is 827364.",
+  "esperado": {
+   "assunto": "Zoom verification code",
+   "texto": "Your verification code is ••••••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Login verification",
+  "texto": "Your login verification code:\n\n5\n8\n1\n0\n7\n3",
+  "esperado": {
+   "assunto": "Login verification",
+   "texto": "Your login verification code:\n\n5\n8\n1\n0\n7\n3",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "TikTok Shop Seller Center verification",
+  "texto": "Your verification code is 266104. This code will expire in 5 minutes.",
+  "esperado": {
+   "assunto": "TikTok Shop Seller Center verification",
+   "texto": "Your verification code is ••••••. This code will expire in 5 minutes.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "WhatsApp Business account verification",
+  "texto": "Your WhatsApp Business code: 128-845",
+  "esperado": {
+   "assunto": "WhatsApp Business account verification",
+   "texto": "Your WhatsApp Business code: •••-•••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Tu código de seguridad",
+  "texto": "Ingresá este código en Mercado Libre para continuar: 482 105",
+  "esperado": {
+   "assunto": "Tu código de seguridad",
+   "texto": "Ingresá este código en Mercado Libre para continuar: ••• •••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Contraseña de un solo uso",
+  "texto": "Tu contraseña de un solo uso (OTP) es: 774102\n\nNo compartas esta contraseña con nadie.",
+  "esperado": {
+   "assunto": "Contraseña de un solo uso",
+   "texto": "Tu contraseña de un solo uso (OTP) es: ••••••\n\nNo compartas esta contraseña con nadie.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Restablecé tu contraseña",
+  "texto": "Hacé clic en el siguiente enlace para crear una nueva contraseña:\n\nhttps://www.tiendanube.com/r/9fK2Lm",
+  "esperado": {
+   "assunto": "Restablecé tu contraseña",
+   "texto": "Hacé clic en el siguiente enlace para crear una nueva contraseña:\n\n[link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Clave dinámica",
+  "texto": "Tu clave dinámica para autorizar la operación es 518 204.",
+  "esperado": {
+   "assunto": "Clave dinámica",
+   "texto": "Tu clave dinámica para autorizar la operación es ••• •••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Tu acceso",
+  "texto": "Hola, tu usuario es uranyx y tu contraseña quedó como Prov#2026mx. Cualquier cosa me avisas.",
+  "esperado": {
+   "assunto": "Tu acceso",
+   "texto": "Hola, tu usuario es uranyx y tu contraseña quedó como •••••••••••. Cualquier cosa me avisas.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Tu enlace de acceso",
+  "texto": "Accede a tu cuenta con este enlace: https://tiendita.mx/e/Qm3x9\n\nCaduca en 15 minutos.",
+  "esperado": {
+   "assunto": "Tu enlace de acceso",
+   "texto": "Accede a tu cuenta con este enlace: [link de acesso removido]\n\nCaduca en 15 minutos.",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Verificación en dos pasos",
+  "texto": "Tu código de verificación en dos pasos es 448 120.",
+  "esperado": {
+   "assunto": "Verificación en dos pasos",
+   "texto": "Tu código de verificación en dos pasos es ••• •••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Confirmá tu identidad",
+  "texto": "Tu número de verificación es 903 512. Vence en 5 minutos.",
+  "esperado": {
+   "assunto": "Confirmá tu identidad",
+   "texto": "Tu número de verificación es ••• •••. Vence en 5 minutos.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Bienvenido",
+  "texto": "Usuario: uranyx\nClave: Vt$2026qa",
+  "esperado": {
+   "assunto": "Bienvenido",
+   "texto": "Usuario: uranyx\nClave: •••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código de confirmação",
+  "texto": "Seu código de confirmação: 482 913",
+  "esperado": {
+   "assunto": "Código de confirmação",
+   "texto": "Seu código de confirmação: ••• •••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código de segurança Mercado Pago",
+  "texto": "Seu código de segurança é 3 1 4 1 5 9. Ele expira em 10 minutos.",
+  "esperado": {
+   "assunto": "Código de segurança Mercado Pago",
+   "texto": "Seu código de segurança é • • • • • •. Ele expira em 10 minutos.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "código da shopee",
+  "texto": "Edu, chegou esse aqui no meu celular, é o da Shopee: 663 902",
+  "esperado": {
+   "assunto": "código da shopee",
+   "texto": "Edu, chegou esse aqui no meu celular, é o da Shopee: ••• •••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "senha nova do ML",
+  "texto": "Troquei a do ML pra MlBarb0sa#26, anota aí",
+  "esperado": {
+   "assunto": "senha nova do ML",
+   "texto": "Troquei a do ML pra ••••••••••••, anota aí",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Your temporary Notion login code",
+  "texto": "Your temporary login code is below. Copy and paste it in your browser:\n\nfluffy-panda-42",
+  "esperado": {
+   "assunto": "Your temporary Notion login code",
+   "texto": "Your temporary login code is below. Copy and paste it in your browser:\n\nfluffy-panda-42",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu código de acesso",
+  "texto": "Use o código A1B2C3D4E5 para entrar.",
+  "esperado": {
+   "assunto": "Seu código de acesso",
+   "texto": "Use o código A1B2C3D4E5 para entrar.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu acesso à Loggi",
+  "texto": "Toque para abrir o app já logado: abrir <https://lg.gy/a/Zp81Kd>",
+  "esperado": {
+   "assunto": "Seu acesso à Loggi",
+   "texto": "Toque para abrir o app já logado: abrir <[link de acesso removido]>",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Shopee: 402117 é o seu código",
+  "texto": "",
+  "esperado": {
+   "assunto": "Shopee: •••••• é o seu código",
+   "texto": "",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Pedido não chegou",
+  "texto": "Olá, comprei o Uranyx U12 no pedido 2000012345678901 do Mercado Livre e ainda não chegou. Meu CPF é 123.456.789-09 e o CEP 01310-100.",
+  "esperado": {
+   "assunto": "Pedido não chegou",
+   "texto": "Olá, comprei o Uranyx U12 no pedido 2000012345678901 do Mercado Livre e ainda não chegou. Meu CPF é 123.456.789-09 e o CEP 01310-100.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Tela trincada",
+  "texto": "O pedido 240915ABCD1234 da Shopee chegou com a tela trincada. Nota fiscal 45872, valor R$ 1.299,90.",
+  "esperado": {
+   "assunto": "Tela trincada",
+   "texto": "O pedido 240915ABCD1234 da Shopee chegou com a tela trincada. Nota fiscal 45872, valor R$ 1.299,90.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Rastreio parado",
+  "texto": "O código de rastreio BR123456789BR não atualiza desde 02/10. Podem verificar?",
+  "esperado": {
+   "assunto": "Rastreio parado",
+   "texto": "O código de rastreio BR123456789BR não atualiza desde 02/10. Podem verificar?",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Dúvida de SKU",
+  "texto": "Qual a diferença entre o SKU URX-U12-128 e o URX-U12-256? Quero o de 256GB.",
+  "esperado": {
+   "assunto": "Dúvida de SKU",
+   "texto": "Qual a diferença entre o SKU URX-U12-128 e o URX-U12-256? Quero o de 256GB.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Não liga",
+  "texto": "O IMEI do meu aparelho é 356938035643809 e ele não liga desde ontem.",
+  "esperado": {
+   "assunto": "Não liga",
+   "texto": "O IMEI do meu aparelho é 356938035643809 e ele não liga desde ontem.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Contato",
+  "texto": "Pode me chamar no WhatsApp (11) 98765-4321 ou 11 98765 4321.",
+  "esperado": {
+   "assunto": "Contato",
+   "texto": "Pode me chamar no WhatsApp (11) 98765-4321 ou 11 98765 4321.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Cobrança errada",
+  "texto": "Paguei R$ 1500 no boleto e veio cobrado 1.599,90 no cartão em 3 parcelas.",
+  "esperado": {
+   "assunto": "Cobrança errada",
+   "texto": "Paguei R$ 1500 no boleto e veio cobrado 1.599,90 no cartão em 3 parcelas.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Segunda via da nota",
+  "texto": "Chave de acesso da NF-e: 3525 1012 3456 7800 0199 5500 1000 0458 7210 0000 0001. Preciso da segunda via.",
+  "esperado": {
+   "assunto": "Segunda via da nota",
+   "texto": "Chave de acesso da NF-e: 3525 1012 3456 7800 0199 5500 1000 0458 7210 0000 0001. Preciso da segunda via.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Nota com CNPJ errado",
+  "texto": "A NF 004587 veio com o CNPJ errado. O correto é 12.345.678/0001-90.",
+  "esperado": {
+   "assunto": "Nota com CNPJ errado",
+   "texto": "A NF 004587 veio com o CNPJ errado. O correto é 12.345.678/0001-90.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "CEP não aceito",
+  "texto": "Meu CEP é 04567000, mas o sistema não aceita.",
+  "esperado": {
+   "assunto": "CEP não aceito",
+   "texto": "Meu CEP é 04567000, mas o sistema não aceita.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Carregador com defeito",
+  "texto": "Pedido 701-1234567-1234567: o carregador veio com defeito.",
+  "esperado": {
+   "assunto": "Carregador com defeito",
+   "texto": "Pedido 701-1234567-1234567: o carregador veio com defeito.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Cupom",
+  "texto": "Tentei usar o código do cupom URANYX10 e deu erro.",
+  "esperado": {
+   "assunto": "Cupom",
+   "texto": "Tentei usar o código do cupom URANYX10 e deu erro.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "App Uranyx Care",
+  "texto": "Não consigo entrar no app Uranyx Care. Número de série K81Q2X, pedido 2000012345678901.",
+  "esperado": {
+   "assunto": "App Uranyx Care",
+   "texto": "Não consigo entrar no app Uranyx Care. Número de série K81Q2X, pedido 2000012345678901.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Você recebeu uma mensagem",
+  "texto": "Pedido 2000009876543210\n\nMensagem do comprador: Olá, quando chega meu pedido? Moro no CEP 13010-000.",
+  "esperado": {
+   "assunto": "Você recebeu uma mensagem",
+   "texto": "Pedido 2000009876543210\n\nMensagem do comprador: Olá, quando chega meu pedido? Moro no CEP 13010-000.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Pedido entregue",
+  "texto": "Pedido 241008XYZ12345 foi entregue. Valor total R$ 89,90.",
+  "esperado": {
+   "assunto": "Pedido entregue",
+   "texto": "Pedido 241008XYZ12345 foi entregue. Valor total R$ 89,90.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Comprovante PIX",
+  "texto": "Fiz o PIX de R$ 89,90, ID da transação E12345678202610081234abcdef. Segue comprovante.",
+  "esperado": {
+   "assunto": "Comprovante PIX",
+   "texto": "Fiz o PIX de R$ 89,90, ID da transação E12345678202610081234abcdef. Segue comprovante.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Pedido incompleto",
+  "texto": "Mi pedido 2000011112222333 llegó incompleto, falta el cargador. Mi teléfono es +52 55 1234 5678.",
+  "esperado": {
+   "assunto": "Pedido incompleto",
+   "texto": "Mi pedido 2000011112222333 llegó incompleto, falta el cargador. Mi teléfono es +52 55 1234 5678.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Not delivered",
+  "texto": "Order 112-3456789-0123456, tracking number 9400 1112 0123 4567 8901 23 shows delivered but I got nothing.",
+  "esperado": {
+   "assunto": "Not delivered",
+   "texto": "Order 112-3456789-0123456, tracking number 9400 1112 0123 4567 8901 23 shows delivered but I got nothing.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Reclamação",
+  "texto": "Já abri o protocolo 482913 no Procon e o 20261008123 no Reclame Aqui.",
+  "esperado": {
+   "assunto": "Reclamação",
+   "texto": "Já abri o protocolo 482913 no Procon e o 20261008123 no Reclame Aqui.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Garantia",
+  "texto": "Meu Redmi Note 13 5G 256GB parou de carregar. Comprei em 15/08/2026, NF 7781.",
+  "esperado": {
+   "assunto": "Garantia",
+   "texto": "Meu Redmi Note 13 5G 256GB parou de carregar. Comprei em 15/08/2026, NF 7781.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Esqueci a senha do app",
+  "texto": "Esqueci minha senha do app Uranyx Care, como recupero? Meu e-mail de cadastro é joao.silva@gmail.com.",
+  "esperado": {
+   "assunto": "Esqueci a senha do app",
+   "texto": "Esqueci minha senha do app Uranyx Care, como recupero? Meu e-mail de cadastro é joao.silva@gmail.com.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "EAN diferente",
+  "texto": "O código do produto 7891234567895 (EAN) está diferente da embalagem.",
+  "esperado": {
+   "assunto": "EAN diferente",
+   "texto": "O código do produto 7891234567895 (EAN) está diferente da embalagem.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Nova pergunta no anúncio",
+  "texto": "Pergunta: o modelo 220333 serve no meu carro? Anúncio MLB3456789012.",
+  "esperado": {
+   "assunto": "Nova pergunta no anúncio",
+   "texto": "Pergunta: o modelo 220333 serve no meu carro? Anúncio MLB3456789012.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Você recebeu uma mensagem",
+  "texto": "Pedido 2000005555666677\n\nMensagem do comprador: não consigo acessar o rastreio, o número 48291375 não funciona.",
+  "esperado": {
+   "assunto": "Você recebeu uma mensagem",
+   "texto": "Pedido 2000005555666677\n\nMensagem do comprador: não consigo acessar o rastreio, o número 48291375 não funciona.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Account",
+  "texto": "Your password was reset to Xp7!kL2wQz",
+  "esperado": {
+   "assunto": "Account",
+   "texto": "Your password was reset to ••••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha redefinida",
+  "texto": "Sua senha foi alterada para Xp7!kL2wQz.",
+  "esperado": {
+   "assunto": "Senha redefinida",
+   "texto": "Sua senha foi alterada para ••••••••••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acesso",
+  "texto": "Sua senha agora é Xp7!kL2wQz",
+  "esperado": {
+   "assunto": "Acesso",
+   "texto": "Sua senha agora é ••••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acesso",
+  "texto": "Senha (temporária): Xp7!kL2wQz",
+  "esperado": {
+   "assunto": "Acesso",
+   "texto": "Senha (temporária): ••••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acesso",
+  "texto": "Senha → Xp7!kL2wQz",
+  "esperado": {
+   "assunto": "Acesso",
+   "texto": "Senha → ••••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acesso",
+  "texto": "Your new password: Xp7!kL2wQz",
+  "esperado": {
+   "assunto": "Acesso",
+   "texto": "Your new password: ••••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Acceso",
+  "texto": "Tu nueva contraseña será Xp7!kL2wQz",
+  "esperado": {
+   "assunto": "Acceso",
+   "texto": "Tu nueva contraseña será ••••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "Sua senha foi redefinida para abc12345.",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "Sua senha foi redefinida para ••••••••.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Link",
+  "texto": "Click to log into your account: https://x.io/m/7QpX2v",
+  "esperado": {
+   "assunto": "Link",
+   "texto": "Click to log into your account: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Link",
+  "texto": "Click to log in to your account: https://x.io/m/7QpX2v",
+  "esperado": {
+   "assunto": "Link",
+   "texto": "Click to log in to your account: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Enlace",
+  "texto": "Accede a tu cuenta: https://x.mx/e/Qm3x9",
+  "esperado": {
+   "assunto": "Enlace",
+   "texto": "Accede a tu cuenta: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Slack confirmation code: QXF-7KT",
+  "texto": "QXF-7KT",
+  "esperado": {
+   "assunto": "Slack confirmation code: •••-•••",
+   "texto": "•••-•••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Seu link",
+  "texto": "Use o link abaixo, válido por 10 minutos: https://loja.example/l/Ab12Cd",
+  "esperado": {
+   "assunto": "Seu link",
+   "texto": "Use o link abaixo, válido por 10 minutos: [link de acesso removido]",
+   "codigo_mascarado": true,
+   "links_removidos": 1
+  }
+ },
+ {
+  "assunto": "Garantia",
+  "texto": "A senha do celular é 1234",
+  "esperado": {
+   "assunto": "Garantia",
+   "texto": "A senha do celular é ••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código",
+  "texto": "Seu código: 482913. Pedido número 48291375. O rastreio, o número 48291375. Your order number is 12345678. Meu CEP é 04567000. Número de série K81Q2X.",
+  "esperado": {
+   "assunto": "Código",
+   "texto": "Seu código: ••••••. Pedido número 48291375. O rastreio, o número 48291375. Your order number is 12345678. Meu CEP é 04567000. Número de série K81Q2X.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Código",
+  "texto": "Seu código é 482913 e o código SAVE-20 e QXF-7KT e F4K2T e US-26",
+  "esperado": {
+   "assunto": "Código",
+   "texto": "Seu código é •••••• e o código ••••-•• e •••-••• e F4K2T e US-26",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Mensagem",
+  "texto": "Confirme a entrega do pedido 2000012345678901. Pacote 43210987654.",
+  "esperado": {
+   "assunto": "Mensagem",
+   "texto": "Confirme a entrega do pedido 2000012345678901. Pacote 43210987654.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Mensagem",
+  "texto": "Confirme os dados de envio. Rua das Flores, 1578 - CEP 01310-100.",
+  "esperado": {
+   "assunto": "Mensagem",
+   "texto": "Confirme os dados de envio. Rua das Flores, 1578 - CEP 01310-100.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Mensagem",
+  "texto": "O pedido 241008XYZ12345 vence em 2 dias. Envie até 10/10.",
+  "esperado": {
+   "assunto": "Mensagem",
+   "texto": "O pedido 241008XYZ12345 vence em 2 dias. Envie até 10/10.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Mensagem",
+  "texto": "Devolução 48291375 aprovada. Confirme o envio até 12/10.",
+  "esperado": {
+   "assunto": "Mensagem",
+   "texto": "Devolução 48291375 aprovada. Confirme o envio até 12/10.",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Mensagem",
+  "texto": "Mensagem do comprador: o número do pedido é 48291375, confirme por favor",
+  "esperado": {
+   "assunto": "Mensagem",
+   "texto": "Mensagem do comprador: o número do pedido é 48291375, confirme por favor",
+   "codigo_mascarado": false,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Mensagem",
+  "texto": "Por segurança, não compartilhe sua senha. Venda #2000012345678901 do produto Redmi Note 13 5G.",
+  "esperado": {
+   "assunto": "Mensagem",
+   "texto": "Por segurança, não compartilhe sua senha. Venda #2000012345678901 do produto Redmi Note 13 5G.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Ajuda",
+  "texto": "Esqueci minha senha do app Uranyx Care, como recupero? Meu e-mail de cadastro é joao.silva@gmail.com.",
+  "esperado": {
+   "assunto": "Ajuda",
+   "texto": "Esqueci minha senha do app Uranyx Care, como recupero? Meu e-mail de cadastro é joao.silva@gmail.com.",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Senha",
+  "texto": "E-mail e senha: joao@gmail.com / Kx81mq2z",
+  "esperado": {
+   "assunto": "Senha",
+   "texto": "E-mail e senha: joao@gmail.com / ••••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "senha nova",
+  "texto": "Login: joao@gmail.com, ficou pra Kx81mq2z!",
+  "esperado": {
+   "assunto": "senha nova",
+   "texto": "Login: joao@gmail.com, ficou pra ••••••••!",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "x",
+  "texto": "Sua senha provİsórİa Kx81mq2z e senha ınicial Ab12cd34 e password ıs Xy7!abc",
+  "esperado": {
+   "assunto": "x",
+   "texto": "Sua senha provİsórİa •••••••• e senha ınicial •••••••• e password ıs •••••••",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Sign in",
+  "texto": "xyz\ttoken\n\nİſ  B!4OTP<for login ,a",
+  "esperado": {
+   "assunto": "Sign in",
+   "texto": "xyz\ttoken\n\nİſ  •••••••••• login ,a",
+   "codigo_mascarado": true,
+   "links_removidos": 0
+  }
+ },
+ {
+  "assunto": "Pedido",
+  "texto": "Veja https://bit.ly/3xYz?\u001cCode=1 e https://x.example/a?%1Ccode=2",
+  "esperado": {
+   "assunto": "Pedido",
+   "texto": "Veja [link de acesso removido] e [link de acesso removido]",
+   "codigo_mascarado": false,
+   "links_removidos": 2
+  }
+ }
+]

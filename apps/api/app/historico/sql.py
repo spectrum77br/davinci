@@ -90,6 +90,14 @@ TETO_POR_PEDIDO = 200
 # trilha da troca (quem, quando, cada passo no Bling). Fora. O que a troca muda
 # em `bling_orders` e `nf_faturamento` continua no Histórico, em nome de quem
 # clicou (cada commit dos passos nasce marcado pelo `after_begin`).
+# E-mail no /atendimento (08/10/2026, migration 0387): o que a PONTE decide de
+# cada e-mail (`mail_message_meta`) e as pastas que ela vê (`mail_folders`) são
+# escritos pela máquina a cada minuto. Fora. A configuração da caixa
+# (`mail_mailbox_settings`: quem ligou a ponte, quem passou o envio para
+# "real"), a ligação fila ↔ conversa (`mail_outbox_meta`: quem resolveu um
+# envio incerto) e a regra de palavras das pastas são de pessoa: ficam. O que o
+# conector v2 escreve a cada volta (`mail_agente_v2`, `mail_message_tuta`,
+# `mail_reconciliation`) também é máquina: fora.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -106,6 +114,8 @@ EXCLUIDAS = re.compile(
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"
     r"|automacao_registros|trocas)$"
+    # a ponte do e-mail: o que a máquina decide de cada e-mail e as pastas
+    r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation)$"
     # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)
     r"|garantias$|garantia_(atendimentos|atendimento_anexos|log)$)"
     r"|(_bak|bkp|backup)",

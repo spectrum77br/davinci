@@ -11,6 +11,9 @@
 // isso, "abrir a conversa" leva à conversa de origem, com a caixa completa.
 // Na avaliação a resposta é PÚBLICA: a mesma confirmação do cartão antes de
 // qualquer envio.
+// Na aba E-mail com a conversa de e-mail da PONTE (08/10/2026), a caixa ganha
+// a prévia (AtendimentoEmailResposta: De, Para, Assunto e as travas do e-mail
+// escolhido) e o corpo leva `mail_message_id` e `confirmar_nao_responde`.
 import type { Aba } from '~/components/AtendimentoAbas.vue'
 import { AVISO_SO_LEITURA, ERROS, motivoLegivel } from '~/components/AtendimentoPlataforma.vue'
 
@@ -39,6 +42,7 @@ export function bloqueioDaAba(aba: Pick<Aba, 'responde' | 'chave'> | null | unde
 <script setup lang="ts">
 import { ExternalLink, Globe, Loader2, Lock, Send, X } from 'lucide-vue-next'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica } from '~/components/AtendimentoAvaliacao.vue'
+import { CODIGOS_CONFIRMAVEIS, LIMITE_RESPOSTA_EMAIL, TRAVAS_GERAIS_DO_EMAIL, corpoDoEmail } from '~/components/AtendimentoEmailResposta.vue'
 import { erroDaApi, statusDoErro, tamanhoDoEnvio, type Mensagem } from '~/components/AtendimentoPlataforma.vue'
 
 const props = defineProps<{
@@ -48,10 +52,13 @@ const props = defineProps<{
   plataforma: string | null
   // O aviso de resposta pública (o do backend das avaliações), quando houver.
   avisoPublica?: string | null
+  // E-mail: o escolhido no cartão ("responder este e-mail"); null = o mais novo.
+  mailMessageId?: string | null
 }>()
 const emit = defineEmits<{
   (e: 'enviada', m: Mensagem | null): void
   (e: 'abrirConversa', id: string): void
+  (e: 'responderMaisNovo'): void
 }>()
 
 const { api } = useApi()
@@ -60,7 +67,22 @@ const toasts = useToasts()
 const responde = computed(() => props.aba.responde)
 const conversaId = computed(() => responde.value?.conversa_id ?? null)
 const origem = computed(() => props.aba.conversas.find((c) => c.id === conversaId.value) ?? null)
-const bloqueio = computed(() => bloqueioDaAba(props.aba, props.canEdit))
+// A conversa que responde é de e-mail da ponte: canal `email` E as mensagens
+// dela trazem o resumo do e-mail. A conversa de chat/pós-venda que recebeu o
+// AVISO por e-mail da plataforma (a ponte grava `email` nela) NÃO é e-mail: a
+// resposta sai pelo chat, com o limite e o aviso do canal.
+const ehEmail = computed(() => !!conversaId.value && responde.value?.canal === 'email' && props.aba.mensagens.some((m) => m.conversa_id === conversaId.value && !!m.email?.tipo))
+const confirmouNaoResponde = ref(false)
+const travaEmail = ref<string | null>(null)
+// No e-mail, as travas do e-mail escolhido vêm da prévia (como na caixa da conversa).
+const bloqueio = computed(() => {
+  const r = responde.value
+  if (!ehEmail.value || !props.canEdit || !r?.conversa_id) return bloqueioDaAba(props.aba, props.canEdit)
+  if (!r.pode_enviar && TRAVAS_GERAIS_DO_EMAIL.has(r.codigo || '')) return bloqueioDaAba(props.aba, props.canEdit)
+  if (travaEmail.value !== null) return travaEmail.value
+  if (r.pode_enviar || CODIGOS_CONFIRMAVEIS.has(r.codigo || '')) return ''
+  return bloqueioDaAba(props.aba, props.canEdit)
+})
 
 const texto = ref((conversaId.value && rascunhosAba.get(conversaId.value)) || '')
 watch(conversaId, (novo) => {
@@ -74,24 +96,27 @@ watch(texto, (t) => {
   else rascunhosAba.delete(id)
 })
 
-const limite = computed(() => responde.value?.limite_caracteres || 0)
+const limite = computed(() => (ehEmail.value ? LIMITE_RESPOSTA_EMAIL : 0) || responde.value?.limite_caracteres || 0)
+// No e-mail, a trava que veio da prévia já aparece nela (a faixa não repete).
+const faixa = computed(() => (ehEmail.value && travaEmail.value && bloqueio.value === travaEmail.value ? '' : bloqueio.value))
 const tamanho = computed(() => tamanhoDoEnvio(texto.value, props.plataforma))
 const acimaDoLimite = computed(() => !!limite.value && tamanho.value > limite.value)
 const enviando = ref(false)
-type Erro = { texto: string; motivos: string[]; confirmar?: boolean }
+type Erro = { texto: string; motivos: string[]; confirmar?: boolean; naoResponde?: boolean }
 const erro = ref<Erro | null>(null)
 const podeEnviar = computed(() => !bloqueio.value && !!tamanho.value && !acimaDoLimite.value && !enviando.value)
 
-async function enviar(opcoes?: { confirmar?: boolean }) {
+async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boolean }) {
   const id = conversaId.value
   const r = responde.value
   const t = texto.value.trim()
   if (!id || !r || !podeEnviar.value) return
   // Avaliação: a resposta aparece no anúncio, para qualquer comprador.
   if (r.publica && !confirm(perguntaRespostaPublica(props.avisoPublica, t))) return
-  const body: { texto: string; ultima_vista_id?: string; confirmar?: boolean } = { texto: t }
+  const body: { texto: string; ultima_vista_id?: string; confirmar?: boolean; mail_message_id?: string; confirmar_nao_responde?: boolean } = { texto: t }
   if (r.ultima_vista_id) body.ultima_vista_id = r.ultima_vista_id
   if (opcoes?.confirmar === true) body.confirmar = true
+  if (ehEmail.value) Object.assign(body, corpoDoEmail(props.mailMessageId, confirmouNaoResponde.value || opcoes?.confirmarNaoResponde === true))
   enviando.value = true
   erro.value = null
   try {
@@ -102,7 +127,9 @@ async function enviar(opcoes?: { confirmar?: boolean }) {
     } else {
       rascunhosAba.delete(id)
       if (conversaId.value === id) texto.value = ''
-      toasts.success(`Resposta enviada (${r.canal_rotulo || 'outra conversa'})`)
+      confirmouNaoResponde.value = false
+      if (ehEmail.value) toasts.success(`Resposta na fila do e-mail (${r.canal_rotulo || 'outra conversa'})`)
+      else toasts.success(`Resposta enviada (${r.canal_rotulo || 'outra conversa'})`)
     }
     emit('enviada', m)
   } catch (e: any) {
@@ -113,7 +140,7 @@ async function enviar(opcoes?: { confirmar?: boolean }) {
       erro.value = { texto: 'Não deu para confirmar o envio — pode ter saído.', motivos: ['Abra a conversa de origem e confira antes de mandar de novo.'] }
       emit('enviada', null)
     } else {
-      erro.value = { ...erroDaApi(e, 'Não consegui enviar'), confirmar: code === 'conversa_mudou' }
+      erro.value = { ...erroDaApi(e, 'Não consegui enviar'), confirmar: code === 'conversa_mudou' || CODIGOS_CONFIRMAVEIS.has(code), naoResponde: CODIGOS_CONFIRMAVEIS.has(code) }
     }
   } finally {
     enviando.value = false
@@ -137,12 +164,22 @@ function aoTeclar(e: KeyboardEvent) {
       </button>
     </div>
 
-    <div v-if="bloqueio" class="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-200" data-bloqueio-aba>
+    <div v-if="faixa" class="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-200" data-bloqueio-aba>
       <Lock class="mt-0.5 size-3.5 shrink-0" />
-      <span class="flex-1">{{ bloqueio }}</span>
+      <span class="flex-1">{{ faixa }}</span>
     </div>
 
     <template v-if="conversaId">
+      <!-- E-mail da ponte: como a resposta vai sair e as travas do e-mail escolhido -->
+      <AtendimentoEmailResposta
+        v-if="ehEmail && canEdit"
+        v-model:confirmou-nao-responde="confirmouNaoResponde"
+        v-model:trava="travaEmail"
+        :conversa-id="conversaId"
+        :mail-message-id="mailMessageId ?? null"
+        :versao="aba.total"
+        @responder-mais-novo="emit('responderMaisNovo')"
+      />
       <div v-if="responde.publica && !bloqueio" class="flex items-start gap-1.5 px-0.5 text-[11px] leading-4 text-amber-800 dark:text-amber-300">
         <Globe class="mt-px size-3.5 shrink-0" aria-hidden="true" />
         <span>{{ avisoPublica || AVISO_RESPOSTA_PUBLICA }}</span>
@@ -168,7 +205,7 @@ function aoTeclar(e: KeyboardEvent) {
           v-if="erro.confirmar && podeEnviar"
           type="button"
           class="mt-1 rounded border border-red-500/40 bg-background px-1.5 py-0.5 font-medium hover:bg-red-500/10"
-          @click="enviar({ confirmar: true })"
+          @click="enviar(erro.naoResponde ? { confirmarNaoResponde: true } : { confirmar: true })"
         >Conferi — enviar mesmo assim</button>
       </div>
       <div class="flex items-center gap-1.5">

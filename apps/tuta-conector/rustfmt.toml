@@ -1,0 +1,8 @@
+# Mesmo estilo do SDK do Tuta (tabs), para o `cargo fmt` não brigar com o vendor/.
+edition = "2021"
+hard_tabs = true
+tab_spaces = 4
+newline_style = "Unix"
+max_width = 100
+match_block_trailing_comma = true
+use_field_init_shorthand = true

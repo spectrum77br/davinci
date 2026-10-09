@@ -424,6 +424,16 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 
 _CLEANUP_TABLES = (
+    # 0387: as tabelas NOSSAS por cima da Central (FK → mail_*, users,
+    # atendimento_*, integrations, store_info, marcas): antes de todas.
+    "mail_reconciliation",
+    "mail_message_tuta",
+    "mail_agente_v2",
+    "mail_outbox_meta",
+    "mail_message_meta",
+    "mail_folders",
+    "atendimento_regras_pasta_email",
+    "mail_mailbox_settings",
     "mail_outbox",
     "mail_attachments",
     "mail_messages",

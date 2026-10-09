@@ -33,7 +33,12 @@ gravada por quem lê:
 - loja do robô do Mac mini (Temu, AliExpress): o pulso "lendo", a cada ~1 min
   (`atendimento/robo.py`);
 - carrinho dos sites: a cada 30 min (`atendimento/carrinhos.py`);
-- comentários das redes: a cada 15 min (`atendimento/redes.py`).
+- comentários das redes: a cada 15 min (`atendimento/redes.py`);
+- caixa de e-mail da EMPRESA com a ponte ligada (08/10/2026): o sinal do
+  agente do Mac na Central de e-mail (`mail_mailboxes.last_seen_at`, a cada
+  ≤ 3 min) — 30 min sem sinal, ou o agente pedindo login/avisando erro
+  (`mail_atendimento/saude.caixas_paradas`). A caixa PRIVADA nunca entra
+  (todo o /atendimento vê esta lista).
 
 E as duas rodadas que não têm caixa — reclamações (10 min) e avaliações
 (30 min) —, pelo carimbo no Redis: o último sucesso e a primeira vez que a
@@ -47,7 +52,7 @@ token, a caixa `desligado` e a integração arquivada.
 ## O limite é pelo ritmo de cada leitura (`LIMITES`)
 
     loja por API 30 min · Magalu 6 h · robô 60 min · redes 60 min ·
-    carrinho 2 h · reclamações 60 min · avaliações 2 h
+    carrinho 2 h · reclamações 60 min · avaliações 2 h · e-mail 30 min
 
 Medido em produção em 05/10 (13 h de log do worker): nenhuma loja por API
 passou de 6 min sem ler; o robô, 31 min (o perfil do AliExpress aberto por
@@ -313,6 +318,13 @@ ACAO_GERAL_ROBO = (
 ACAO_RODADA = (
     "Ver o log do worker (atendimento_{nome}_falhou) — enquanto isso o que é novo "
     "não entra no atendimento"
+)
+# A caixa de e-mail da empresa (a Central de e-mail, lida pelo agente do Mac).
+PLATAFORMA_EMAIL = "email"
+ROTULO_CAIXA_EMAIL = "E-mail"
+ACAO_CAIXA_EMAIL = (
+    "Ver o agente do Mac mini desta caixa (aba E-mail › Saúde): ligado, com a sessão do "
+    "Tuta aberta e a chave da caixa certa — enquanto isso os e-mails das lojas não entram"
 )
 
 
@@ -698,6 +710,39 @@ async def _rodadas(agora: datetime, corte: datetime | None) -> list[LeituraParad
     return out
 
 
+# ── As caixas de e-mail da empresa (a Central de e-mail) ──────────────────
+
+
+async def _caixas_de_email(session: AsyncSession, agora: datetime) -> list[LeituraParada]:
+    """As caixas `empresa` com a ponte ligada que não leem (nunca as privadas)."""
+    from app.services.mail_atendimento import saude as mail_saude
+
+    try:
+        # SAVEPOINT: uma consulta que falhe aqui não estraga a transação do /resumo.
+        async with session.begin_nested():
+            paradas = await mail_saude.caixas_paradas(session, agora=agora)
+    except Exception as e:  # noqa: BLE001 — o vigia nunca derruba o /resumo
+        logger.warning("atendimento_leitura_parada_email_falhou", err=type(e).__name__)
+        return []
+    return [
+        LeituraParada(
+            chave=f"mail:{p.mailbox_id}",
+            tipo=TIPO_LOJA,
+            plataforma=PLATAFORMA_EMAIL,
+            loja=p.nome,
+            motivo=p.motivo,
+            acao=ACAO_CAIXA_EMAIL,
+            desde=p.desde,
+            nunca_leu=p.nunca_leu,
+            minutos=p.minutos,
+            limite_min=_limite_min(mail_saude.LIMITE_SEM_SINAL),
+            caixas=(ROTULO_CAIXA_EMAIL,),
+            detalhe=_texto_curto(p.detalhe),
+        )
+        for p in paradas
+    ]
+
+
 # ── A lista ───────────────────────────────────────────────────────────────
 
 _ORDEM_TIPO = {TIPO_GERAL: 0, TIPO_LOJA: 1, TIPO_RODADA: 2}
@@ -743,6 +788,7 @@ async def leitura_parada(
 
     out.extend(_externos(por_classe[CLASSE_SITE] + por_classe[CLASSE_REDES], corte))
     out.extend(await _rodadas(agora, corte))
+    out.extend(await _caixas_de_email(session, agora))
     return sorted(
         out,
         key=lambda x: (_ORDEM_TIPO.get(x.tipo, 9), x.plataforma, x.loja.lower(), x.chave),

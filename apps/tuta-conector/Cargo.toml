@@ -1,0 +1,72 @@
+[package]
+name = "tuta-conector"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89.0"
+publish = false
+# Uso INTERNO do DaVinci. O SDK do Tuta é GPL-3 e os remendos vêm da
+# tutabridge (GPL-3): enquanto o programa não for entregue a terceiros, a GPL
+# não obriga a publicar nada (LEIA-ME, "Licença").
+license = "GPL-3.0-only"
+description = "Conector do DaVinci com as contas do Tuta: lê por consulta periódica (nunca websocket) e entrega à Central de e-mail (/api/mail/agent/{caixa}, v1 + v2); envia só respostas de pessoa pela fila da Central"
+build = "build.rs"
+
+# O SDK oficial mora em vendor/ (baixado por scripts/atualizar-sdk.sh, fora do
+# git) e tem o workspace DELE: não é membro deste.
+[workspace]
+exclude = ["vendor"]
+
+[lib]
+name = "tuta_conector"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tuta-conector"
+path = "src/main.rs"
+
+[dependencies]
+# SDK oficial do Tuta (release fixada em SDK_VERSAO + remendos/*.patch).
+# "net" liga só o cliente HTTPS do próprio SDK (hyper + rustls, raízes do macOS).
+tuta-sdk = { path = "vendor/tutanota/tuta-sdk/rust/sdk", features = ["net"] }
+crypto-primitives = { path = "vendor/tutanota/tuta-sdk/rust/crypto-primitives", default-features = false }
+# Todas abaixo JÁ estão no Cargo.lock oficial do Tuta (mesma cadeia do SDK),
+# menos rpassword/rtoolbox (ler a senha sem eco direto do /dev/tty).
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "time", "sync"] }
+async-trait = "0.1.77"
+futures = "0.3.31"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.117"
+base64 = "0.22.1"
+log = { version = "0.4.22", features = ["std"] }
+regex = "1.11.1"
+http = "1"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+zeroize = "1.8.1"
+time = { version = "0.3.37", features = ["formatting", "macros"] }
+rpassword = "7.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.2"
+
+[build-dependencies]
+sha2 = "0.10.8"
+
+[lints.rust]
+# Nada de código inseguro nosso: o FFI do Chaveiro fica no security-framework.
+unsafe_code = "forbid"
+
+[profile.release]
+# Precisa ser "unwind": um pânico do SDK é isolado (catch_unwind) e vira
+# "ilegível" no pulso, sem derrubar o processo.
+panic = "unwind"
+
+[dev-dependencies]
+# Só para ler a query dos pedidos nos servidores FALSOS dos testes (já no Cargo.lock do Tuta).
+form_urlencoded = "1.2.1"
+
+# Argon2 em modo debug é muito lento: otimiza só ele (e o blake2 que ele usa)
+# nos testes. Não muda nada no binário de release.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

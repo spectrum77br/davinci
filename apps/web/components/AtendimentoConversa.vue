@@ -154,6 +154,17 @@ export function frasesDaEtiqueta(h: MudancaDeEtiqueta): { titulo: string; detalh
 //   se pode falar em cancelamento com o comprador (a trava interna da Margem
 //   NÃO é cancelamento). Lê o mesmo bloco do painel (`painel.ag_cancelamento`);
 //   o cartão completo (AtendimentoAgCancelamento) fica no painel do pedido.
+// - E-MAIL das lojas (RF5/RF6, 08/10/2026; a ponte da Central de e-mail): a
+//   mensagem que veio de e-mail (`mensagem.email`) ganha o CARTÃO
+//   (AtendimentoEmailCartao: pasta, destinatário → loja, remetente, texto
+//   protegido, anexos, aviso de golpe, "só histórico", "Abrir no Tuta"), lido
+//   de GET /api/atendimento/email/conversas/{id}/emails para as conversas que
+//   estão na linha do tempo. Na conversa de e-mail, a caixa de baixo mostra a
+//   PRÉVIA (AtendimentoEmailResposta: De, Para, Assunto, assinatura, citação e
+//   as travas) e a resposta sai pelo mesmo POST /responder, com o e-mail
+//   escolhido e o "enviar mesmo assim" do "não responder" — para a fila da
+//   Central, que o Mac envia. O chamado do site (RF6) ganha a faixa com o
+//   protocolo, o tipo e o "agrupar" (AtendimentoEmailChamado).
 import {
   Archive,
   ArrowLeft,
@@ -204,6 +215,8 @@ import {
   type AbasResposta,
 } from '~/components/AtendimentoAbas.vue'
 import { etiquetaInfo } from '~/components/AtendimentoEtiqueta.vue'
+import { CODIGOS_CONFIRMAVEIS, LIMITE_RESPOSTA_EMAIL, TRAVAS_GERAIS_DO_EMAIL, corpoDoEmail, ehEmailDaPonte } from '~/components/AtendimentoEmailResposta.vue'
+import { conversasComEmail, ehCartaoDeEmail, urlDosCartoes, type CartaoEmail, type CartoesDaConversa } from '~/components/AtendimentoEmailCartao.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
@@ -741,6 +754,10 @@ function partesComLink(t: string | null): Parte[] {
   if (ultimo < s.length) out.push(...comNegrito(s.slice(ultimo)))
   return out
 }
+// E-mail que pode ser golpe (08/10/2026): o texto sai sem link clicável.
+function partesDaMensagem(m: Mensagem): Parte[] {
+  return m.email?.suspeito ? [{ t: 'txt', v: m.texto || '' }] : partesComLink(m.texto)
+}
 
 // Anexo: cada plataforma manda um formato. O cartão de pedido/produto que o
 // sync preenche pela API da loja vira o cartão do Duoke; o resto, pega o que
@@ -1039,6 +1056,98 @@ const contasAmazon = computed(() =>
     .sort((a, b) => (a.conta || '').localeCompare(b.conta || '', 'pt-BR')),
 )
 
+// ─── e-mail (a ponte da Central de e-mail, 08/10/2026) ──────────────────────
+// A conversa de e-mail da PONTE (canal `email` com o resumo do e-mail nas
+// mensagens): a resposta sai pela fila da Central (o Mac envia), por clique.
+// `emailResponder` = qual e-mail a caixa responde (null = o mais novo que não
+// é nosso); `travaEmail` = a trava da prévia para esse e-mail ('' = pode;
+// null = a prévia não veio: vale o `envio` da conversa).
+const ehEmail = computed(() => ehEmailDaPonte(conversa.value, detalhe.value?.mensagens))
+const emailResponder = ref<string | null>(null)
+const confirmouNaoResponde = ref(false)
+const travaEmail = ref<string | null>(null)
+function responderEmail(id: string) {
+  if (!id) return
+  emailResponder.value = id
+  modoCaixa.value = 'responder'
+  void nextTick(() => caixa.value?.focus())
+}
+// O pedaço do corpo do POST /responder que é do e-mail (vazio fora dele).
+function extrasDoEmail(confirmarNaoResponde: boolean) {
+  if (!ehEmail.value) return {}
+  return corpoDoEmail(emailResponder.value, confirmouNaoResponde.value || confirmarNaoResponde)
+}
+// "responder este e-mail": o da conversa aberta pela caixa de sempre; o de
+// outra conversa da aba, só se é ela que responde nesta aba (a caixa da aba)
+// E ela é de e-mail — o aviso da plataforma que a ponte grava na conversa
+// do chat/pós-venda nunca vira "responder este e-mail" (sairia pelo chat).
+function podeResponderEmail(de: string | null): boolean {
+  if (!props.canEdit) return false
+  if (!de) return ehEmail.value && !respondePorOutra.value
+  const r = abaAtual.value?.responde
+  return respondePorOutra.value && r?.conversa_id === de && r?.canal === 'email'
+}
+// Trocou de aba: o e-mail escolhido era de outra conversa.
+watch(abaAtiva, () => { emailResponder.value = null })
+
+// Os CARTÕES dos e-mails da linha do tempo, por conversa (a aberta e as outras
+// da aba). Relidos quando muda o número de e-mails de uma delas; a resposta
+// de outra conversa (trocou no meio) não entra.
+const cartoesEmail = ref<Record<string, CartoesDaConversa>>({})
+const cartoesLidos = new Map<string, number>()
+let geracaoCartoes = 0
+async function carregarCartoesEmail(alvo: Record<string, number>) {
+  const g = geracaoCartoes
+  for (const [id, n] of Object.entries(alvo)) {
+    if (cartoesLidos.get(id) === n) continue
+    cartoesLidos.set(id, n)
+    try {
+      const r = await api<CartoesDaConversa>(urlDosCartoes(id))
+      if (g !== geracaoCartoes) return
+      cartoesEmail.value = { ...cartoesEmail.value, [id]: r }
+    } catch {
+      // Sem os cartões a mensagem continua lá (o texto já protegido); tenta de novo depois.
+      if (g === geracaoCartoes) cartoesLidos.delete(id)
+    }
+  }
+}
+const emailsNaTela = computed(() => conversasComEmail(linhas.value, conversa.value?.id))
+watch(() => JSON.stringify(emailsNaTela.value), () => { void carregarCartoesEmail(emailsNaTela.value) }, { immediate: true })
+const cartaoPorEmail = computed(() => {
+  const out: Record<string, CartaoEmail> = {}
+  for (const r of Object.values(cartoesEmail.value)) for (const e of r?.emails || []) out[e.id] = e
+  return out
+})
+function cartaoDe(m: Mensagem): CartaoEmail | null {
+  const id = m.email?.tipo === 'recebido' ? m.email.message_id : null
+  return id ? cartaoPorEmail.value[id] ?? null : null
+}
+// O chamado do site (RF6) que está na tela: o da conversa aberta, senão o de
+// outra conversa de e-mail da aba.
+const chamadoNaTela = computed<CartoesDaConversa | null>(() => {
+  const propria = conversa.value?.id
+  const ids = Object.keys(emailsNaTela.value)
+  if (propria && !ids.includes(propria) && cartoesEmail.value[propria]?.chamado) ids.unshift(propria)
+  ids.sort((a, b) => (a === propria ? -1 : b === propria ? 1 : 0))
+  for (const id of ids) {
+    const r = cartoesEmail.value[id]
+    if (r?.chamado) return r
+  }
+  return null
+})
+function aoAgruparChamado(destino: string) {
+  const origem = chamadoNaTela.value?.chamado?.conversa_id
+  if (origem && origem === props.conversaId && destino !== origem) {
+    emit('abrirConversa', destino)
+    return
+  }
+  cartoesLidos.clear()
+  if (props.conversaId) {
+    void carregarAbas(props.conversaId)
+    void carregar(props.conversaId, true)
+  }
+}
+
 // Por que não dá para responder, em linguagem simples.
 const bloqueioEnvio = computed(() => {
   const d = detalhe.value
@@ -1055,6 +1164,18 @@ const bloqueioEnvio = computed(() => {
   // Conversa da avaliação (RF8) já respondida: a caixa de baixo não manda
   // uma segunda resposta PÚBLICA (o backend do chat não confere isso).
   if (avaliacaoDaConversa.value?.respondida) return 'Esta avaliação já foi respondida — a resposta pública da loja já está no anúncio.'
+  // E-mail da ponte: as travas gerais (envio desligado, conversa bloqueada,
+  // resposta na fila) valem para a conversa toda; as do e-mail (suspeito,
+  // vendas, sem o endereço que recebeu, caixa sem envio, Mac desconectado,
+  // modo teste, "não responder"…) dependem de QUAL e-mail se responde — quem
+  // diz é a prévia (o servidor confere de novo no Enviar).
+  if (ehEmail.value) {
+    const cod = d.envio.codigo || ''
+    if (!d.envio.pode_enviar && TRAVAS_GERAIS_DO_EMAIL.has(cod)) return motivoLegivel(d.envio.motivo) || ERROS[cod] || 'O envio não está liberado para esta conversa.'
+    if (travaEmail.value !== null) return travaEmail.value
+    if (d.envio.pode_enviar || CODIGOS_CONFIRMAVEIS.has(cod)) return ''
+    return motivoLegivel(d.envio.motivo) || 'O envio não está liberado para esta conversa.'
+  }
   if (d.envio.pode_enviar) return ''
   const codigo = d.envio.codigo || ''
   // Bloqueio: a frase do backend traz o porquê do caso (janela fechou,
@@ -1074,9 +1195,12 @@ const bloqueioEnvio = computed(() => {
   return 'O envio não está liberado para esta conversa.'
 })
 const podeDigitar = computed(() => !!detalhe.value && !bloqueioEnvio.value)
+// A faixa acima da caixa: no e-mail, a trava que veio da prévia já aparece nela (não repete).
+const faixaDoBloqueio = computed(() => (ehEmail.value && travaEmail.value && bloqueioEnvio.value === travaEmail.value ? '' : bloqueioEnvio.value))
 // O da API manda; sem ele (API antiga, canal novo), a cópia da tela — a
 // Magalu chat/SAC tem o limite da documentação, a pergunta não tem nenhum.
-const limite = computed(() => detalhe.value?.envio.limite_caracteres || limiteDe(conversa.value?.plataforma ?? null, conversa.value?.canal ?? null) || 0)
+// E-mail da ponte: o limite é o da resposta de e-mail, não o do canal da plataforma.
+const limite = computed(() => (ehEmail.value ? LIMITE_RESPOSTA_EMAIL : 0) || detalhe.value?.envio.limite_caracteres || limiteDe(conversa.value?.plataforma ?? null, conversa.value?.canal ?? null) || 0)
 // Conta como o backend conta (texto normalizado, em code points) — o
 // limite é do texto que SAI, não do que está na caixa.
 const tamanho = computed(() => tamanhoDoEnvio(texto.value, conversa.value?.plataforma))
@@ -1102,7 +1226,9 @@ async function copiarTexto(t: string | null | undefined, rotulo: string) {
 // embaixo da B — e o Enviar da B não fica travado pelo envio da A.
 // `confirmar` = a recusa foi `conversa_mudou`: a pessoa pode, depois de ver
 // o que mudou, enviar mesmo assim.
-type ErroEnvio = { texto: string; motivos: string[]; confirmar?: boolean }
+// `naoResponde` = a recusa foi o "não responder" do e-mail: o "enviar mesmo
+// assim" confirma ESSE aviso (não o da conversa que mudou).
+type ErroEnvio = { texto: string; motivos: string[]; confirmar?: boolean; naoResponde?: boolean }
 type Sugestao = { id: string; usada: boolean }
 const enviandoIds = reactive(new Set<string>())
 const enviando = computed(() => enviandoIds.has(props.conversaId))
@@ -1142,6 +1268,9 @@ function mostrarErroEnvio(id: string, er: ErroEnvio | null) {
 // leitura atrasada ainda a trouxer como pendente.
 function limparCaixa(id: string, sugestaoId: string | null) {
   if (aberta(id)) {
+    // E-mail: a próxima resposta volta para o mais novo, sem o "enviar mesmo assim".
+    emailResponder.value = null
+    confirmouNaoResponde.value = false
     texto.value = ''
     prefill.value = ''
     baseRascunhoId.value = null
@@ -1211,7 +1340,7 @@ function resolverIncerto(d: Detalhe) {
 
 // `opcoes` (e não um booleano solto) porque o @click passa o evento como
 // primeiro argumento — um evento não pode virar "confirmar".
-async function enviar(opcoes?: { confirmar?: boolean }) {
+async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boolean }) {
   const d = detalhe.value
   if (!d || !podeEnviar.value) {
     if (d && lacunas.value.length) erroEnvio.value = { texto: `Troque ${lacunas.value.join(', ')} pelo dado antes de enviar.`, motivos: [] }
@@ -1223,11 +1352,13 @@ async function enviar(opcoes?: { confirmar?: boolean }) {
   if (!confirmaSePublica(d.conversa.canal, texto.value.trim())) return
   const id = d.conversa.id
   const nome = titulo(d.conversa)
-  const body: { texto: string; rascunho_id?: string; ultima_vista_id?: string; confirmar?: boolean } = { texto: texto.value.trim() }
+  const body: { texto: string; rascunho_id?: string; ultima_vista_id?: string; confirmar?: boolean; mail_message_id?: string; confirmar_nao_responde?: boolean } = { texto: texto.value.trim() }
   if (baseRascunhoId.value && d.rascunho?.id === baseRascunhoId.value) body.rascunho_id = baseRascunhoId.value
   const vista = ultimaVista(d)
   if (vista) body.ultima_vista_id = vista
   if (opcoes?.confirmar === true) body.confirmar = true
+  // E-mail da ponte: qual e-mail responder e o "enviar mesmo assim" do "não responder".
+  Object.assign(body, extrasDoEmail(opcoes?.confirmarNaoResponde === true))
   // Depois do envio a pergunta "a sugestão estava boa?" é sobre a sugestão
   // que estava na tela — usada (foi como rascunho_id) ou não.
   const sugestao: Sugestao | null = d.rascunho?.texto ? { id: d.rascunho.id, usada: !!body.rascunho_id } : null
@@ -1259,7 +1390,11 @@ async function enviar(opcoes?: { confirmar?: boolean }) {
       else toasts.warning(`Não deu para confirmar o envio (${nome})`, 'Abra a conversa para ver se a resposta saiu antes de mandar de novo.')
       return
     }
-    const er: ErroEnvio = { ...erroDaApi(e, 'Não consegui enviar'), confirmar: code === 'conversa_mudou' }
+    const er: ErroEnvio = {
+      ...erroDaApi(e, 'Não consegui enviar'),
+      confirmar: code === 'conversa_mudou' || CODIGOS_CONFIRMAVEIS.has(code),
+      naoResponde: CODIGOS_CONFIRMAVEIS.has(code),
+    }
     mostrarErroEnvio(id, er)
     if (!aberta(id)) toasts.error(`Não consegui enviar (${nome})`, [er.texto, ...er.motivos])
     else if (RELER_APOS_RECUSA.has(code)) await carregar(id, true)
@@ -2016,6 +2151,15 @@ const pedidoVisivel = computed(() => (telaLarga.value ? !recolhido.value : gavet
 // Troca de conversa: guarda o que estava escrito na anterior, limpa o estado
 // da tela e abre a nova. Fica no fim do setup porque roda na hora (immediate)
 // e mexe em estado declarado lá embaixo.
+// E-mail: o escolhido, a confirmação, a trava da prévia e os cartões eram da anterior.
+watch(() => props.conversaId, () => {
+  emailResponder.value = null
+  confirmouNaoResponde.value = false
+  travaEmail.value = null
+  geracaoCartoes++
+  cartoesLidos.clear()
+  cartoesEmail.value = {}
+})
 watch(() => props.conversaId, (novo, velho) => {
   if (velho) {
     guardar(velho)
@@ -2527,6 +2671,16 @@ watch(() => props.conversaId, (novo, velho) => {
           />
         </div>
 
+        <!-- E-mail: o chamado do site (RF6) — protocolo, tipo e o "agrupar" -->
+        <AtendimentoEmailChamado
+          v-if="chamadoNaTela?.chamado"
+          :key="chamadoNaTela.chamado.conversa_id"
+          :chamado="chamadoNaTela.chamado"
+          :outros="chamadoNaTela.outros_chamados || []"
+          :pode-mexer="canEdit"
+          @agrupado="aoAgruparChamado"
+        />
+
         <!-- mensagens -->
         <div ref="rolagem" class="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain bg-muted/40 px-3 py-3 dark:bg-muted/20">
           <!-- Abas (RF2): a página das mais antigas daquela aba -->
@@ -2569,7 +2723,19 @@ watch(() => props.conversaId, (novo, velho) => {
               class="flex justify-center"
               :data-msg-id="l.m.id"
             >
-              <div class="max-w-[85%] whitespace-pre-wrap break-words px-3 py-1 text-center text-xs text-muted-foreground" :title="fmtDataHora(l.m.enviada_em)">{{ l.m.texto || TIPO_LABEL[l.m.tipo] || '' }}</div>
+              <!-- e-mail que é aviso (da plataforma, de vendas, resposta automática): o cartão do e-mail, no meio -->
+              <div v-if="l.m.email && ehCartaoDeEmail(l.m.email)" class="w-full max-w-[85%] rounded-lg border bg-background px-3 py-2 md:max-w-[75%]" :title="fmtDataHora(l.m.enviada_em)">
+                <AtendimentoEmailCartao
+                  :email="l.m.email"
+                  :cartao="cartaoDe(l.m)"
+                  mostrar-texto
+                  :texto="l.m.texto"
+                  :pode-responder="podeResponderEmail(l.de)"
+                  :respondendo="!!l.m.email.message_id && emailResponder === l.m.email.message_id"
+                  @responder="responderEmail"
+                />
+              </div>
+              <div v-else class="max-w-[85%] whitespace-pre-wrap break-words px-3 py-1 text-center text-xs text-muted-foreground" :title="fmtDataHora(l.m.enviada_em)">{{ l.m.texto || TIPO_LABEL[l.m.tipo] || '' }}</div>
             </div>
             <div v-else class="flex flex-col" :class="lado(l.m) === 'cliente' || lado(l.m) === 'mediador' ? 'items-start' : 'items-end'" :data-msg-id="l.m.id">
               <div v-if="lado(l.m) === 'mediador'" class="mb-0.5 px-1 text-[11px] font-medium text-violet-700 dark:text-violet-300" title="a plataforma falando na reclamação (mediação)">Mediador · {{ plataformaInfo(conversa.plataforma).nome }}</div>
@@ -2586,7 +2752,17 @@ watch(() => props.conversaId, (novo, velho) => {
                     {{ STATUS_MSG[l.m.status].label }}
                   </span>
                 </div>
-                <div v-if="l.m.texto" class="whitespace-pre-wrap break-words text-sm leading-relaxed"><template v-for="(p, i) in partesComLink(l.m.texto)" :key="i"><a v-if="p.t === 'url'" :href="p.v" target="_blank" rel="noopener noreferrer" class="break-all underline">{{ p.v }}</a><strong v-else-if="p.t === 'b'" class="font-semibold">{{ p.v }}</strong><template v-else>{{ p.v }}</template></template></div>
+                <!-- e-mail: a pasta, o destinatário → loja, o remetente, o assunto e o e-mail inteiro -->
+                <AtendimentoEmailCartao
+                  v-if="l.m.email && ehCartaoDeEmail(l.m.email)"
+                  class="mb-1 border-b border-border/60 pb-1"
+                  :email="l.m.email"
+                  :cartao="cartaoDe(l.m)"
+                  :pode-responder="lado(l.m) === 'cliente' && podeResponderEmail(l.de)"
+                  :respondendo="!!l.m.email.message_id && emailResponder === l.m.email.message_id"
+                  @responder="responderEmail"
+                />
+                <div v-if="l.m.texto" class="whitespace-pre-wrap break-words text-sm leading-relaxed"><template v-for="(p, i) in partesDaMensagem(l.m)" :key="i"><a v-if="p.t === 'url'" :href="p.v" target="_blank" rel="noopener noreferrer" class="break-all underline">{{ p.v }}</a><strong v-else-if="p.t === 'b'" class="font-semibold">{{ p.v }}</strong><template v-else>{{ p.v }}</template></template></div>
                 <div v-else-if="!pecasDaMsg(l.m).length" class="text-sm italic text-muted-foreground">[{{ TIPO_LABEL[l.m.tipo] || 'sem texto' }}]</div>
                 <div v-if="pecasDaMsg(l.m).length" class="flex flex-wrap gap-2" :class="l.m.texto ? 'mt-2' : ''">
                   <template v-for="pc in pecasDaMsg(l.m)" :key="pc.chave">
@@ -2769,8 +2945,10 @@ watch(() => props.conversaId, (novo, velho) => {
             :can-edit="canEdit"
             :plataforma="conversa.plataforma"
             :aviso-publica="avaliacoesDados?.aviso ?? null"
+            :mail-message-id="emailResponder"
             @enviada="aoResponderPelaAba"
             @abrir-conversa="(id: string) => emit('abrirConversa', id)"
+            @responder-mais-novo="emailResponder = null"
           />
 
           <!-- Carrinho/comentário: nada sai por esta caixa (nem a IA sugere) —
@@ -2807,9 +2985,9 @@ watch(() => props.conversaId, (novo, velho) => {
           />
 
           <template v-else>
-          <div v-if="bloqueioEnvio" class="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-200">
+          <div v-if="faixaDoBloqueio" class="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-200">
             <Lock class="mt-0.5 size-3.5 shrink-0" />
-            <span class="flex-1">{{ bloqueioEnvio }}</span>
+            <span class="flex-1">{{ faixaDoBloqueio }}</span>
             <!-- Só quando o motivo mostrado É o modo da loja: com o envio
                  desligado no servidor (ou a conversa bloqueada), trocar o modo
                  não resolve e só tira a loja de Observar à toa. -->
@@ -2886,6 +3064,17 @@ watch(() => props.conversaId, (novo, velho) => {
             <span>{{ avaliacoesDados?.aviso || AVISO_RESPOSTA_PUBLICA }}</span>
           </div>
 
+          <!-- E-mail da ponte: como a resposta vai sair (De, Para, Assunto, assinatura, citação) e as travas -->
+          <AtendimentoEmailResposta
+            v-if="ehEmail && canEdit && !conversa.somente_leitura && !respondePorOutra"
+            v-model:confirmou-nao-responde="confirmouNaoResponde"
+            v-model:trava="travaEmail"
+            :conversa-id="conversa.id"
+            :mail-message-id="emailResponder"
+            :versao="detalhe.mensagens.length"
+            @responder-mais-novo="emailResponder = null"
+          />
+
           <!-- Magalu: a resposta não chega direto — a moderação decide. -->
           <div v-if="moderacao && podeDigitar" class="flex items-start gap-1.5 px-0.5 text-[11px] leading-4 text-sky-800 dark:text-sky-300">
             <ShieldCheck class="mt-px size-3.5 shrink-0" aria-hidden="true" />
@@ -2917,8 +3106,8 @@ watch(() => props.conversaId, (novo, velho) => {
               v-if="erroEnvio.confirmar && podeEnviar"
               type="button"
               class="mt-1 rounded border border-red-500/40 bg-background px-1.5 py-0.5 font-medium hover:bg-red-500/10"
-              title="você viu a resposta que já saiu e quer mandar a sua também"
-              @click="enviar({ confirmar: true })"
+              :title="erroEnvio.naoResponde ? 'você sabe que o endereço é de não responder e quer mandar mesmo assim' : 'você viu a resposta que já saiu e quer mandar a sua também'"
+              @click="enviar(erroEnvio.naoResponde ? { confirmarNaoResponde: true } : { confirmar: true })"
             >Conferi — enviar mesmo assim</button>
           </div>
           <div v-else-if="lacunas.length && podeDigitar" class="text-[11px] text-amber-800 dark:text-amber-300">

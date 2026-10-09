@@ -1,0 +1,69 @@
+From: DaVinci conector do Tuta (adaptado do PR #52 da tutabridge, 07-parse-raw.patch, commit 2da8887)
+Date: Thu, 8 Oct 2026 15:00:00 -0300
+Subject: [PATCH] [sdk] Expose parsing of a raw entity
+
+EntityClient::parse_raw runs a raw JSON entity through the serializer
+with the server type model, as load does internally, so payloads that
+arrive another way (blob elements: o MailDetailsBlob do remendo 06)
+enter the same decryption pipeline.
+
+ADAPTAÇÃO NOSSA: o 07 original não aplica na 361 sem o 04 (load_multiple),
+porque o teste usava o helper `test_entity_client` que o 04 cria. Aqui o
+código é o MESMO do original (parse_raw + a linha do mock) e o teste monta o
+EntityClient na mão, do jeito que os testes oficiais vizinhos já fazem.
+---
+diff --git a/tuta-sdk/rust/sdk/src/entity_client.rs b/tuta-sdk/rust/sdk/src/entity_client.rs
+index bc1786b..826c3c0 100644
+--- a/tuta-sdk/rust/sdk/src/entity_client.rs
++++ b/tuta-sdk/rust/sdk/src/entity_client.rs
+@@ -43,6 +43,16 @@ impl EntityClient {
+ 		}
+ 	}
+ 
++	/// Parses a raw JSON entity with the server type model, as `load` does, for
++	/// payloads that arrive by another way (inline event bus data, blobs).
++	pub fn parse_raw(
++		&self,
++		type_ref: &TypeRef,
++		raw_entity: RawEntity,
++	) -> Result<ParsedEntity, ApiCallError> {
++		Ok(self.json_serializer.parse(type_ref, raw_entity)?)
++	}
++
+ 	#[allow(clippy::unused_async, unused)]
+ 	/// Gets an entity/instance of type `type_ref` from the backend
+ 	pub async fn load<Id: IdType>(
+@@ -428,6 +438,7 @@ mockall::mock! {
+ 		pub fn get_type_model_provider() -> Arc<TypeModelProvider>;
+ 		pub fn resolve_client_type_ref<'a>(&'a self, type_ref: &TypeRef) -> Result<&'a TypeModel, ApiCallError>;
+ 		pub fn resolve_server_type_ref(&self, type_ref: &TypeRef) -> Result<Arc<TypeModel>, ApiCallError>;
++		pub fn parse_raw(&self, type_ref: &TypeRef, raw_entity: RawEntity) -> Result<ParsedEntity, ApiCallError>;
+ 		pub async fn load<Id: IdType>(
+ 			&self,
+ 			type_ref: &TypeRef,
+@@ -572,6 +583,25 @@ mod stests {
+ 		assert_eq!(result_entity, vec![entity_map]);
+ 	}
+ 
++	#[test]
++	fn test_parse_raw_uses_the_server_type_model() {
++		let type_provider = Arc::new(mock_type_model_provider());
++		let entity_client = EntityClient::new(
++			Arc::new(MockRestClient::new()),
++			Arc::new(JsonSerializer::new(type_provider.clone())),
++			"http://test.com".to_owned(),
++			Arc::new(HeadersProvider::new(Some("123".to_owned()))),
++			type_provider,
++		);
++		let raw: RawEntity =
++			serde_json::from_str(r#"{"101":["list_id","element_id"],"102":"AQID"}"#).unwrap();
++
++		let parsed = entity_client
++			.parse_raw(&TestListGeneratedElementIdEntity::type_ref(), raw)
++			.expect("success");
++		assert_eq!(parsed["102"], ElementValue::Bytes(vec![1, 2, 3]));
++	}
++
+ 	#[tokio::test]
+ 	async fn test_load_range_custom_element_id() {
+ 		let type_model_provider = Arc::new(mock_type_model_provider());

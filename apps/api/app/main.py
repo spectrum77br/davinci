@@ -19,6 +19,7 @@ from app.routers import atendimento_abas as atendimento_abas_router
 from app.routers import atendimento_automacoes as atendimento_automacoes_router
 from app.routers import atendimento_avaliacoes as atendimento_avaliacoes_router
 from app.routers import atendimento_carrinhos as atendimento_carrinhos_router
+from app.routers import atendimento_email as atendimento_email_router
 from app.routers import atendimento_painel as atendimento_painel_router
 from app.routers import atendimento_reclamacoes as atendimento_reclamacoes_router
 from app.routers import atendimento_redes as atendimento_redes_router
@@ -54,6 +55,8 @@ from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
 from app.routers import logistica_track as logistica_track_router
 from app.routers import mail as mail_router
+from app.routers import mail_agent_v2 as mail_agent_v2_router
+from app.routers import mail_atendimento as mail_atendimento_router
 from app.routers import marca_emails as marca_emails_router
 from app.routers import marcas as marcas_router
 from app.routers import nfse as nfse_router
@@ -270,6 +273,16 @@ app.include_router(devolutions_router.router)
 # Pós-venda › Atendimento (25/09/2026): caixa única das lojas + rascunho da IA.
 app.include_router(atendimento_router.router)
 app.include_router(mail_router.router)
+# 08/10/2026: a configuração NOSSA de cada caixa da Central (privada × empresa,
+# ponte para o /atendimento, remetente estrito, modo de envio e tetos).
+app.include_router(mail_atendimento_router.router)
+# 08/10/2026: o contrato v2 do agente do Mac (o NOSSO conector do Tuta): ids e
+# pastas do Tuta, aliases da conta, contagem e movido/apagado. O v1 não muda.
+app.include_router(mail_agent_v2_router.router)
+# 08/10/2026: o e-mail das lojas DENTRO do /atendimento (a ponte da Central):
+# os cartões da conversa, as filas sem loja/sem vínculo, a prévia da resposta,
+# os chamados dos sites (RF6), as pastas e a saúde. Mesma trava da caixa.
+app.include_router(atendimento_email_router.router)
 # Comunicador (01/10/2026): o painel do pedido (estoque, margem, Observações
 # do Bling, links, AdsPower), a nota interna e a foto; e o cartão das
 # reclamações/devoluções da plataforma (só leitura). Mesmo prefixo e a mesma

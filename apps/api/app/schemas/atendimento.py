@@ -204,6 +204,10 @@ class ConversaOut(ConversaResumoOut):
     #   escolha de 1 clique (POST /conversas/{id}/amazon-copia). Mesma regra
     #   de quando aparecem; a mais nova por último.
     amazon_copias_a_conferir: list[CopiaAmazonOut] = Field(default_factory=list)
+    # A conversa de e-mail que a PONTE da Central criou (`dados.fonte='tuta'` +
+    # `dados.mail`, 08/10/2026): só nela a tela responde pela fila da Central.
+    # A da Amazon que veio pelo Gmail (canal email também) fica False.
+    email_da_ponte: bool = False
 
 
 class ListaConversasOut(BaseModel):
@@ -231,6 +235,11 @@ class MensagemOut(BaseModel):
     # envio gravou, não da chave de hoje — com a Amazon na exceção do
     # simulador, a resposta dela CHEGA ao comprador (a tela avisa pelo campo).
     simulado: bool = False
+    # E-mail (08/10/2026, a ponte da Central de e-mail): o resumo do e-mail
+    # desta mensagem (pasta, alias, assunto já protegido, suspeito, anexos) —
+    # o cartão pede o resto a GET /api/atendimento/email/conversas/{id}/emails.
+    # Na nossa resposta pela fila da Central: de, para, assunto e o status do job.
+    email: dict[str, Any] | None = None
 
 
 class RascunhoOut(BaseModel):
@@ -407,6 +416,12 @@ class ResponderIn(BaseModel):
     ultima_vista_id: UUID | None = None
     # "Vi que mudou, envie mesmo assim" (depois do `conversa_mudou`).
     confirmar: bool = False
+    # E-mail (08/10/2026): "enviar mesmo assim" para o remetente "não
+    # responder" (409 `remetente_nao_responde`) — separado do `confirmar`, que
+    # é o da conversa que mudou; e qual e-mail responder (o id da Central; sem
+    # ele, o mais novo que não é nosso).
+    confirmar_nao_responde: bool = False
+    mail_message_id: UUID | None = None
 
 
 class ResponderOut(BaseModel):

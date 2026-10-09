@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Conector do Tuta (DaVinci), conta "goslin": leitura + envio pela Central de e-mail.
+  NÃO instalado. Para instalar (LEIA-ME, seção 6):
+    mkdir -p ~/Library/Logs/davinci-tuta-conector
+    cp launchd/com.davinci.tuta-conector.goslin.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davinci.tuta-conector.goslin.plist
+  Parar: launchctl bootout gui/$(id -u)/com.davinci.tuta-conector.goslin
+  Começa SÓ CONTANDO (--contar): tire o "--contar" quando a conciliação bater.
+  Nenhum segredo aqui: a sessão do Tuta e a chave da caixa ficam no Chaveiro.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.davinci.tuta-conector.goslin</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/thorfinn/Library/Application Support/davinci-tuta-conector/bin/tuta-conector</string>
+		<string>rodar</string>
+		<string>--conta</string>
+		<string>goslin</string>
+		<string>--contar</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>StandardOutPath</key>
+	<string>/Users/thorfinn/Library/Logs/davinci-tuta-conector/goslin.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/thorfinn/Library/Logs/davinci-tuta-conector/goslin.log</string>
+</dict>
+</plist>

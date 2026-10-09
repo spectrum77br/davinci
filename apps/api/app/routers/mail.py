@@ -16,9 +16,19 @@ from app.deps.auth import require_active_user, require_admin
 from app.models.enums import UserRole, UserStatus
 from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
 from app.models.user import User
-from app.schemas.mail import Heartbeat, Ingest, MailboxCreate, MailboxPatch, Receipt, ReplyIn
+from app.schemas.mail import (
+    Heartbeat,
+    Ingest,
+    MailboxCreate,
+    MailboxPatch,
+    OutboxResolve,
+    Receipt,
+    ReplyIn,
+)
 from app.security.cipher import decrypt_bytes, decrypt_json, encrypt_json
 from app.services import mail_central as service
+from app.services.mail_atendimento import caixa as mailbox_settings
+from app.services.mail_atendimento import responder as mail_responder
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -55,6 +65,13 @@ async def user_mailbox(session: AsyncSession, mailbox_id: UUID, user: User) -> M
     if mailbox is None or not service.allowed(mailbox, user):
         raise fail("mailbox_not_found")
     return mailbox
+
+
+async def require_operator(session: AsyncSession, mailbox: MailMailbox, user: User) -> None:
+    # Company mailboxes (our settings table): sending-related actions through the
+    # raw mailbox also need the Atendimento "mexe" permission. Private: unchanged.
+    if await mailbox_settings.bloqueia_sem_mexer(session, mailbox.id, user):
+        raise fail("atendimento_permission_required", 403)
 
 
 async def user_message(
@@ -130,10 +147,19 @@ async def create_mailbox(body: MailboxCreate, session: Session, user: Admin, res
 @router.patch("/mailboxes/{mailbox_id}")
 async def update_mailbox(mailbox_id: UUID, body: MailboxPatch, session: Session, user: Admin):
     mailbox = await user_mailbox(session, mailbox_id, user)
+    if body.send_enabled is not None or body.aliases is not None:
+        await require_operator(session, mailbox, user)
     if body.label is not None:
         mailbox.label = body.label
     if body.send_enabled is not None:
         mailbox.send_enabled = body.send_enabled
+    if body.aliases is not None:
+        config = decrypt_json(mailbox.config_enc)
+        address = str(config["address"])
+        config["aliases"] = list(
+            dict.fromkeys([address.lower(), *(str(a).lower() for a in body.aliases)])
+        )
+        mailbox.config_enc = encrypt_json(config)
     await session.commit()
     return service.mailbox_view(mailbox)
 
@@ -141,6 +167,7 @@ async def update_mailbox(mailbox_id: UUID, body: MailboxPatch, session: Session,
 @router.post("/mailboxes/{mailbox_id}/token")
 async def rotate_token(mailbox_id: UUID, session: Session, user: Admin, response: Response):
     mailbox = await user_mailbox(session, mailbox_id, user)
+    await require_operator(session, mailbox, user)
     token = secrets.token_urlsafe(32)
     mailbox.agent_token_hash = service.token_hash(token)
     mailbox.agent_can_send = False
@@ -197,6 +224,7 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
             .order_by(MailOutbox.created_at)
         )
     ).all()
+    caixa_cfg = await mailbox_settings.config_da_caixa(session, mailbox.id)
     response.headers["Cache-Control"] = "no-store"
     return {
         **service.message_view(message, detail=True),
@@ -205,7 +233,12 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
             for item in attachments
         ],
         "reply": {
-            **service.reply_envelope(mailbox, message),
+            **service.reply_envelope(
+                mailbox,
+                message,
+                strict=caixa_cfg.remetente_estrito,
+                main_allowed=not caixa_cfg.empresa,
+            ),
             "send_ready": service.send_ready(mailbox),
         },
         "outbox": [service.outbox_view(job) for job in outbox],
@@ -235,6 +268,7 @@ async def download_attachment(attachment_id: UUID, session: Session, user: Activ
 @router.post("/messages/{message_id}/reply", status_code=202)
 async def reply(message_id: UUID, request: Request, session: Session, user: ActiveUser):
     message, mailbox = await user_message(session, message_id, user, lock=True)
+    await require_operator(session, mailbox, user)
     mailbox = await session.scalar(
         select(MailMailbox)
         .where(MailMailbox.id == mailbox.id)
@@ -250,6 +284,30 @@ async def reply(message_id: UUID, request: Request, session: Session, user: Acti
     return service.outbox_view(job)
 
 
+@router.post("/outbox/{job_id}/resolve")
+async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, user: ActiveUser):
+    # A person checked Tuta; never resends. Owner/admin only, like reading.
+    job = await session.get(MailOutbox, job_id)
+    mailbox = await session.get(MailMailbox, job.mailbox_id) if job else None
+    if job is None or mailbox is None or not service.allowed(mailbox, user):
+        raise fail("job_not_found")
+    await require_operator(session, mailbox, user)
+    job = await session.scalar(
+        select(MailOutbox)
+        .where(MailOutbox.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    try:
+        service.resolve_uncertain(job, user, sent=body.saiu)
+    except service.MailError as error:
+        raise fail(error.code, error.status) from None
+    # Our side table records who resolved it (and syncs an Atendimento reply).
+    await mail_responder.apos_resolver_na_caixa(session, job, user, saiu=body.saiu)
+    await session.commit()
+    return service.outbox_view(job)
+
+
 @router.post("/agent/{mailbox_id}/heartbeat")
 async def heartbeat(request: Request, session: Session, mailbox: AgentMailbox):
     body = await limited_body(request, Heartbeat, 4096)
@@ -257,8 +315,10 @@ async def heartbeat(request: Request, session: Session, mailbox: AgentMailbox):
     mailbox.state = body.state
     mailbox.agent_can_send = body.can_send
     mailbox.error_code = body.error_code
+    # Company mailboxes: off as well while the global brake or a pause is on.
+    send_enabled = await mailbox_settings.envio_efetivo(session, mailbox)
     await session.commit()
-    return {"ok": True, "send_enabled": mailbox.send_enabled}
+    return {"ok": True, "send_enabled": send_enabled}
 
 
 @router.post("/agent/{mailbox_id}/ingest")
@@ -300,6 +360,10 @@ async def receipt(job_id: UUID, request: Request, session: Session, mailbox: Age
     recorded = body.model_dump(exclude={"lease_token"})
     if job.completed_at is not None:
         if job.status != body.status or decrypt_json(job.receipt_enc) != recorded:
+            # A person resolved it first: keep the late receipt aside (the job
+            # itself never changes) so the conversation can warn about it.
+            await mail_responder.registrar_recibo_tardio(session, job, status=body.status)
+            await session.commit()
             raise fail("receipt_conflict", 409)
         return {"ok": True, "status": job.status}
     job.status = body.status

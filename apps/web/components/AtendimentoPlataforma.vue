@@ -192,6 +192,9 @@ export type ConversaDetalhe = ConversaResumo & {
   // A Central respondeu alguém com este nome e a cópia empatou entre duas ou
   // mais conversas (nenhuma saiu da fila): a tela pede para conferir.
   amazon_copia_a_conferir_em?: string | null
+  // A conversa de e-mail que a PONTE da Central criou (08/10/2026): só nela
+  // a resposta sai pela fila da Central (a da Amazon pelo Gmail fica false).
+  email_da_ponte?: boolean
   dados?: Record<string, unknown> | null
 }
 export type Anexo = Record<string, unknown>
@@ -209,6 +212,11 @@ export type Mensagem = {
   // "Saiu" pelo simulador (só local): não chegou a ninguém. É o que o envio
   // gravou — vale mais que as flags de agora (ver `envioSimulado`).
   simulado?: boolean
+  // E-mail (08/10/2026, a ponte da Central de e-mail): o resumo do e-mail
+  // desta mensagem — o recebido (pasta, alias, assunto protegido, suspeito)
+  // ou a nossa resposta na fila da Central (de, para, assunto, status do job).
+  // O cartão é o AtendimentoEmailCartao.
+  email?: (Record<string, any> & { tipo: 'recebido' | 'resposta' }) | null
 }
 export type Rascunho = {
   id: string
@@ -1660,6 +1668,9 @@ const ERROS_ENVIO: [RegExp, string][] = [
 export function erroEnvioLegivel(erro: string | null | undefined): string {
   const e = (erro || '').trim()
   if (!e) return 'A plataforma recusou a mensagem — ela não chegou ao comprador.'
+  // A resposta de e-mail (a fila da Central, 08/10/2026): "mail:<código> — <frase>".
+  const mail = /^mail:[a-z_]+ — (.+)$/s.exec(e)
+  if (mail) return `O e-mail não saiu: ${mail[1]}.`
   for (const [re, frase] of ERROS_ENVIO) if (re.test(e)) return frase
   const codigo = /code=(\S+)/.exec(e)?.[1] || /HTTP \d+\s+(\S+)/.exec(e)?.[1]
   return codigo ? `A plataforma recusou a mensagem (código ${codigo}).` : 'A plataforma recusou a mensagem — ela não chegou ao comprador.'

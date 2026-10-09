@@ -15,16 +15,23 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# A shared Tuta account can carry many aliases (the company one has 54 plus
+# the main address); the list is both "who received" and "who may reply".
+MAX_ALIASES = 200
+
+
 class MailboxCreate(StrictModel):
     label: str = Field(min_length=1, max_length=120)
     address: EmailStr
-    aliases: list[EmailStr] = Field(default_factory=list, max_length=50)
+    aliases: list[EmailStr] = Field(default_factory=list, max_length=MAX_ALIASES)
     owner_user_id: UUID | None = None
 
 
 class MailboxPatch(StrictModel):
     label: str | None = Field(default=None, min_length=1, max_length=120)
     send_enabled: bool | None = None
+    # Replaces the whole list; the main address always stays in it.
+    aliases: list[EmailStr] | None = Field(default=None, max_length=MAX_ALIASES)
 
 
 class AttachmentIn(StrictModel):
@@ -87,6 +94,12 @@ class ReplyIn(StrictModel):
         if not value.strip() or "\x00" in value:
             raise ValueError("empty_or_invalid_text")
         return value
+
+
+class OutboxResolve(StrictModel):
+    """A person checked Tuta: did the ambiguous reply go out (`saiu`)?"""
+
+    saiu: bool
 
 
 class Receipt(StrictModel):

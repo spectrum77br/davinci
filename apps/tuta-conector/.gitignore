@@ -1,0 +1,5 @@
+# Compilação (cargo) e o SDK oficial baixado pelo scripts/atualizar-sdk.sh:
+# nenhum dos dois vai para o git. O que vai: nosso código, remendos/*.patch,
+# SDK_VERSAO (a tag fixada) e o Cargo.lock.
+/target/
+/vendor/

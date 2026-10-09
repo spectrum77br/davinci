@@ -552,13 +552,16 @@ async function testarCaixaDeBaixo() {
       'detalhe', 'podeEnviar', 'lacunas', 'erroEnvio', 'titulo', 'texto', 'baseRascunhoId', 'ultimaVista',
       'enviandoIds', 'api', 'rolarProFim', 'concluirEnvio', 'aberta', 'carregar', 'statusDoErro', 'incertos',
       'mostrarErroEnvio', 'toasts', 'erroDaApi', 'RELER_APOS_RECUSA', 'avaliacoesDados', 'perguntaRespostaPublica', 'confirm',
+      // E-mail (08/10/2026): o pedaço do corpo que é do e-mail — vazio fora dele.
+      'extrasDoEmail', 'CODIGOS_CONFIRMAVEIS',
       js,
     )(
       detalhe, Vue.ref(true), Vue.ref([]), Vue.ref(null), () => 'Fulano', Vue.ref('  Obrigado pela avaliação!  '), Vue.ref(null), () => null,
       new Set(), async (url, opts) => { chamadas.push({ url, opts }); return { mensagem: null } }, () => {}, () => {}, () => false, async () => {},
       P.statusDoErro, new Map(), () => {}, { success() {}, error() {}, warning() {}, info() {} }, P.erroDaApi, new Set(),
       Vue.ref({ itens: [], aviso: 'aviso do backend' }), A.perguntaRespostaPublica,
-      (t) => { perguntas.push(t); return confirmar }
+      (t) => { perguntas.push(t); return confirmar },
+      () => ({}), new Set(['remetente_nao_responde', 'ja_respondido_pela_caixa']),
     )
     return { ...x, perguntas, chamadas }
   }

@@ -1231,6 +1231,44 @@ async def atendimento_redes(ctx: dict) -> dict | None:
         return None
 
 
+# A ponte da Central de e-mail (08/10/2026): uma volta por minuto, com a
+# trava no Redis (uma de cada vez — a reserva da meta é a segunda defesa).
+_MAIL_PONTE_TRAVA = "davinci:mail:ponte:trava"
+_MAIL_PONTE_TRAVA_TTL_S = 300
+
+
+async def mail_ponte(ctx: dict) -> dict | None:  # noqa: ARG001
+    """A cada minuto: os e-mails novos da Central → a conversa do /atendimento.
+
+    SÓ nas caixas com a ponte LIGADA (`mail_mailbox_settings.ponte_ligada`,
+    nasce desligada) e só o que chegou depois do corte: sem caixa ligada, não
+    faz nada (nem decifra). Também passa o status das respostas pela fila da
+    Central para a mensagem da conversa (enviada, falhou, revisar). Nada sai
+    para fora daqui: quem envia é o Mac. Ver services/mail_atendimento/ponte.py.
+    """
+    from app.redis_client import redis as _redis
+    from app.services.mail_atendimento import ponte as _mail_ponte
+
+    try:
+        pegou = await _redis.set(_MAIL_PONTE_TRAVA, "1", nx=True, ex=_MAIL_PONTE_TRAVA_TTL_S)
+    except Exception as e:  # noqa: BLE001 — sem Redis, a reserva da meta segura
+        logger.warning("mail_ponte_trava_indisponivel", err=type(e).__name__)
+        pegou = True
+    if not pegou:
+        return {"pulado": True}
+    try:
+        async with session_scope() as s:
+            return await _mail_ponte.rodar(s)
+    except Exception as e:  # noqa: BLE001 — a próxima volta tenta de novo
+        logger.error("mail_ponte_falhou", err=type(e).__name__)
+        return None
+    finally:
+        try:
+            await _redis.delete(_MAIL_PONTE_TRAVA)
+        except Exception:  # noqa: BLE001, S110 — a trava vence sozinha (TTL)
+            pass
+
+
 async def atendimento_importar_historico(
     ctx: dict,
     dias: int = 90,
@@ -4969,6 +5007,9 @@ class WorkerSettings:
         ),
         cron(atendimento_rascunhos, run_at_startup=False, timeout=300),
         cron(atendimento_prazos, minute={0, 15, 30, 45}, run_at_startup=False, timeout=120),
+        # A ponte da Central de e-mail (08/10/2026): a cada minuto; sem caixa
+        # com a ponte ligada, não faz nada.
+        cron(mail_ponte, run_at_startup=False, timeout=240),
         # Índice de pedidos/avaliações da Shopee para o cartão "Cliente": de
         # hora em hora, janela de 2 h (uma rodada que falha não deixa buraco).
         cron(atendimento_indexar_pedidos, minute={22}, run_at_startup=False, timeout=1200),

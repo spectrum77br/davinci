@@ -166,6 +166,16 @@ from app.models.logistica import (
     LogisticaStatusAnexo,
 )
 from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
+from app.models.mail_atendimento import (
+    AtendimentoRegraPastaEmail,
+    MailAgenteV2,
+    MailFolder,
+    MailMailboxSettings,
+    MailMessageMeta,
+    MailMessageTuta,
+    MailOutboxMeta,
+    MailReconciliation,
+)
 from app.models.marca import Marca, MarcaEmail, MarcaEmailPadrao, RedeSocial
 from app.models.nfse import (
     CompanyFiscal,
@@ -267,6 +277,14 @@ __all__ = [
     "MailMessage",
     "MailAttachment",
     "MailOutbox",
+    "MailMailboxSettings",
+    "MailFolder",
+    "MailMessageMeta",
+    "MailOutboxMeta",
+    "AtendimentoRegraPastaEmail",
+    "MailAgenteV2",
+    "MailMessageTuta",
+    "MailReconciliation",
     "CompanyFiscal",
     "NfseChamada",
     "NfseEmissao",
