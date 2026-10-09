@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { Download, Mail, Plus, RefreshCw, Send, Settings2, ShieldCheck } from 'lucide-vue-next'
 import type { ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
+import type { MailAttachment } from '~/lib/mailHtml'
 
 type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null }
 type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean }
 type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null }
-type Detail = Summary & { text: string; to: string[]; cc: string[]; reply_to: string | null; attachments: { id: string; filename: string; size: number }[]; reply: { to: string; from_address: string; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
+type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
 
 // `canOperate` = the person operates /atendimento (`atendimento_mexe`): sees the
 // Atendimento queues ("Filas", AtendimentoMailFilas). `stores` = the stores of
@@ -322,7 +323,8 @@ onBeforeUnmount(() => { clearInterval(timer); ++listGeneration; ++detailGenerati
               <p v-if="detail.cc.length" class="break-all text-sm"><span class="text-muted-foreground">Cc:</span> {{ detail.cc.join(', ') }}</p>
               <p class="text-xs text-muted-foreground">{{ date(detail.received_at) }} · {{ detail.folder }}</p>
             </header>
-            <pre class="max-h-[480px] whitespace-pre-wrap break-words overflow-y-auto font-sans text-sm leading-relaxed">{{ detail.text || '(Mensagem sem texto)' }}</pre>
+            <AtendimentoMailBody v-if="detail.html" :key="detail.id" :html="detail.html" :text="detail.text" :attachments="detail.attachments" />
+            <pre v-else class="max-h-[480px] whitespace-pre-wrap break-words overflow-y-auto font-sans text-sm leading-relaxed">{{ detail.text || '(Mensagem sem texto)' }}</pre>
             <div v-if="detail.attachments.length" class="flex flex-wrap gap-2">
               <a v-for="attachment in detail.attachments" :key="attachment.id" :href="url(`/api/mail/attachments/${attachment.id}`)" class="inline-flex max-w-full items-center gap-2 rounded border px-3 py-2 text-sm"><Download class="h-4 w-4 shrink-0" /><span class="truncate">{{ attachment.filename }}</span><span class="shrink-0 text-xs text-muted-foreground">{{ Math.ceil(attachment.size / 1024) }} KB</span></a>
             </div>

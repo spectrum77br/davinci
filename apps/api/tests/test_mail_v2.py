@@ -254,11 +254,7 @@ async def test_v1_responde_byte_a_byte_igual_com_o_v2_no_meio(client, make_user,
         (200, b'{"ok":true,"send_enabled":false}'),
         (200, b'{"accepted":1,"duplicates":0}'),
         (200, b'{"accepted":0,"duplicates":1}'),
-        (
-            422,
-            b'{"detail":{"code":"invalid_body","fields":[{"field":"messages.0.html",'
-            b'"type":"extra_forbidden"}]}}',
-        ),
+        (200, b'{"accepted":0,"duplicates":1,"updated":1}'),
         (
             422,
             b'{"detail":{"code":"invalid_body","fields":[{"field":"messages.0.to.0",'
@@ -395,7 +391,7 @@ async def test_ingest_um_por_um_e_so_de_pasta_lida(client, caixa, db):
     bom = _v2(tuta={"phishing_status": "1", "envelope_sender": "bounce@ses.example.com"})
     repetido = dict(bom)
     invalido = _v2(to=["sem-arroba"], text="segredo do cliente")
-    html = _v2(html="<b>x</b>")
+    html = _v2(html={"invalid": "HTML type"})
     outro_id = _v2(source_id="tuta:aaa/bbb")
     financeiro = _v2(pasta="Pfinanceiro", caminho="financeiro")
     desconhecida = _v2(pasta="Pnaoexiste", caminho="x")
@@ -655,3 +651,45 @@ def test_codigo_mascarado_no_mac_continua_de_seguranca():
     assert codigos.e_de_seguranca("Ajuda", "meu código de verificação é ••••••", de_pessoa=True)
     assert not codigos.e_de_seguranca("Pedido", "Seu pedido ••••• chegou", de_pessoa=True)
     assert not codigos.e_de_seguranca("Oi", "pontinhos •• soltos")
+
+
+async def test_html_repair_v2_preserves_routing_and_rejects_conflicting_item_only(
+    client, caixa, db, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    await _sync(client, caixa)
+    first = _v2()
+    await _ingerir(client, caixa, first)
+    m = await _mensagem(db, caixa, first["source_id"])
+    before = decrypt_json(m.content_enc)
+    # Existing v1 rows can lack this mapping. Enrichment must not create it.
+    local = await db.get(MailMessageTuta, m.id)
+    await db.delete(local)
+    await db.commit()
+    process = AsyncMock()
+    monkeypatch.setattr(ponte, "processar", process)
+    good = {
+        **first,
+        "html": '<p>Olá <img src="cid:Logo"></p>',
+        "text": "must not replace",
+        "folder": "changed",
+        "tuta": {**first["tuta"], "folder_key": "Psac"},
+    }
+    bad = {**good, "subject": "different identity"}
+    result = await _ingerir(client, caixa, bad, good)
+    assert (result["accepted"], result["duplicates"], result["rejected"], result["updated"]) == (
+        0,
+        1,
+        1,
+        1,
+    )
+    assert result["results"][0]["code"] == "mail_enrichment_identity_conflict"
+    await db.refresh(m)
+    after = decrypt_json(m.content_enc)
+    assert after == {**before, "html": good["html"]}
+    assert await db.get(MailMessageTuta, m.id) is None
+    again = await _ingerir(client, caixa, good)
+    assert again["duplicates"] == 1 and "updated" not in again
+    assert await db.get(MailMessageTuta, m.id) is None
+    process.assert_not_awaited()

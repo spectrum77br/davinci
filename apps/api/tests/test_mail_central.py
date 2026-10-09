@@ -199,7 +199,7 @@ async def test_agent_limits_validate_before_echoing_sensitive_input(client, acco
     )
     assert result.status_code == 413
     for changes in [
-        {"html": "SECRET HTML"},
+        {"html": {"SECRET": "invalid type"}},
         {"subject": "SECRET\r\nBcc:bad@example.com"},
         {"attachments": [{"filename": "secret", "data_base64": "SECRET_BAD"}]},
     ]:
@@ -341,3 +341,274 @@ async def test_chunked_agent_body_is_bounded_without_content_length(client, acco
         f"{account['agent']}/heartbeat", headers=account["headers"], content=stream()
     )
     assert result.status_code == 413
+
+
+async def test_html_is_encrypted_private_and_returned_as_inert_json(
+    client, account, db, make_user, auth_as
+):
+    html = '<p>Olá <img src="cid:Logo@Tuta"></p><script>never-execute()</script>'
+    part = {
+        "filename": "logo.png",
+        "content_type": "image/png",
+        "data_base64": base64.b64encode(b"private image").decode(),
+        "content_id": " <Logo@Tuta> ",
+        "disposition": "inline",
+    }
+    mid = await ingest(client, account, html=html, attachments=[part])
+    result = await client.get(f"{ROOT}/messages/{mid}")
+    assert result.headers["content-type"].startswith("application/json")
+    detail = result.json()
+    assert detail["html"] == html
+    assert detail["text"] == message()["text"]
+    assert detail["attachments"][0]["content_id"] == "Logo@Tuta"
+    assert detail["attachments"][0]["disposition"] == "inline"
+    stored = await db.get(MailMessage, UUID(mid))
+    assert html.encode() not in stored.content_enc
+    assert decrypt_json(stored.content_enc)["html"] == html
+    attachment = await db.scalar(select(MailAttachment))
+    assert b"Logo@Tuta" not in attachment.metadata_enc
+    listing = await client.get(f"{ROOT}/mailboxes/{account['mailbox']['id']}/messages")
+    assert "html" not in listing.json()["items"][0]
+    other = await make_user()
+    auth_as(other)
+    assert (await client.get(f"{ROOT}/messages/{mid}")).status_code == 404
+    assert (await client.get(f"{ROOT}/attachments/{attachment.id}")).status_code == 404
+
+
+async def test_presentation_repair_is_idempotent_keeps_ids_and_reply_state(
+    client, account, db, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    from app.services.mail_atendimento import ponte
+
+    process = AsyncMock()
+    monkeypatch.setattr(ponte, "processar", process)
+    mid, _, _ = await queued(client, account)
+    before = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    old_part = {**message()["attachments"][0], "content_id": "old-part", "disposition": "inline"}
+    new_part = {
+        "filename": "Logo.PNG",
+        "content_type": "image/png",
+        "data_base64": base64.b64encode(b"new private image").decode(),
+        "content_id": "new-part",
+        "disposition": "inline",
+    }
+    repaired = message(
+        html='<p><img src="cid:new-part"></p>',
+        text="must not overwrite text",
+        folder="MOVED",
+        direction="sent",
+        received_at=(datetime.now(UTC) - timedelta(days=365)).isoformat(),
+        to=["unrelated@example.com"],
+        attachments=[old_part, new_part],
+    )
+    body = {"messages": [repaired], "enrich_existing_only": True}
+    url = f"{account['agent']}/ingest"
+    result = await client.post(url, headers=account["headers"], json=body)
+    assert result.status_code == 200, result.text
+    assert result.json() == {"accepted": 0, "duplicates": 1, "updated": 1}
+    after = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    for key in before.keys() - {"html", "attachments", "has_attachments"}:
+        assert after[key] == before[key], key
+    assert len(after["attachments"]) == 2
+    original = next(a for a in after["attachments"] if a["content_id"] == "old-part")
+    assert original["id"] == before["attachments"][0]["id"]
+    again = await client.post(url, headers=account["headers"], json=body)
+    assert again.json() == {"accepted": 0, "duplicates": 1}
+    detail = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    assert {a["id"] for a in detail["attachments"]} == {a["id"] for a in after["attachments"]}
+    assert await db.scalar(select(func.count()).select_from(MailMessage)) == 1
+    assert await db.scalar(select(func.count()).select_from(MailOutbox)) == 1
+    process.assert_not_awaited()
+
+
+async def test_repair_missing_source_never_creates_and_batch_is_atomic(client, account, db):
+    mid = await ingest(client, account)
+    before = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    result = await client.post(
+        f"{account['agent']}/ingest",
+        headers=account["headers"],
+        json={
+            "enrich_existing_only": True,
+            "messages": [
+                message(html="<p>Valid repair</p>"),
+                message(source_id="missing-message", html="<p>Never insert</p>"),
+            ],
+        },
+    )
+    assert result.status_code == 404, result.text
+    assert result.json()["detail"]["code"] == "mail_enrichment_source_not_found"
+    assert (await client.get(f"{ROOT}/messages/{mid}")).json() == before
+    assert await db.scalar(select(func.count()).select_from(MailMessage)) == 1
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"from_address": "someoneelse@example.com"},
+        {"subject": "different message"},
+        {"message_id": "<different@example.com>"},
+    ],
+)
+async def test_repair_rejects_identity_conflict(client, account, changed):
+    mid = await ingest(client, account)
+    before = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    result = await client.post(
+        f"{account['agent']}/ingest",
+        headers=account["headers"],
+        json={"enrich_existing_only": True, "messages": [message(html="<p>repair</p>", **changed)]},
+    )
+    assert result.status_code == 409
+    assert result.json()["detail"]["code"] == "mail_enrichment_identity_conflict"
+    assert (await client.get(f"{ROOT}/messages/{mid}")).json() == before
+
+
+async def test_html_byte_limit_and_invalid_cid_do_not_echo_input(client, account):
+    url = f"{account['agent']}/ingest"
+    part = message()["attachments"][0]
+    changes = [
+        {"html": "á" * (1024 * 1024 + 1)},
+        {"attachments": [{**part, "disposition": "SECRET_invalid"}]},
+        {"attachments": [{**part, "content_id": "same"}, {**part, "content_id": "same"}]},
+    ]
+    for cid in ["SECRET space", "SECRET\n", "<SECRET>trailing", "é", "x" * 256, ""]:
+        changes.append({"attachments": [{**part, "content_id": cid}]})
+    for change in changes:
+        result = await client.post(
+            url, headers=account["headers"], json={"messages": [message(**change)]}
+        )
+        assert result.status_code == 422, (change.keys(), result.text)
+        assert "SECRET" not in result.text
+    result = await client.post(
+        url,
+        headers=account["headers"],
+        json={"messages": [message(html="á" * (1024 * 1024), attachments=[])]},
+    )
+    assert result.status_code == 200, result.text
+
+
+async def test_repair_never_replaces_html_or_reassigns_existing_cid(client, account):
+    part = {**message()["attachments"][0], "content_id": "existing", "disposition": "inline"}
+    mid = await ingest(client, account, html="<p>Original</p>", attachments=[part])
+    before = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    for changed, code in [
+        ({"html": "<p>Replacement</p>", "attachments": [part]}, "mail_enrichment_html_conflict"),
+        (
+            {"html": "<p>Original</p>", "attachments": [{**part, "content_id": "different"}]},
+            "mail_enrichment_attachment_conflict",
+        ),
+    ]:
+        result = await client.post(
+            f"{account['agent']}/ingest",
+            headers=account["headers"],
+            json={"messages": [message(**changed)], "enrich_existing_only": True},
+        )
+        assert result.status_code == 409, result.text
+        assert result.json()["detail"]["code"] == code
+        assert (await client.get(f"{ROOT}/messages/{mid}")).json() == before
+
+
+async def test_repair_adds_only_missing_inline_parts_and_checks_content(client, account):
+    mid = await ingest(client, account)
+    before = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    changed = {
+        **message()["attachments"][0],
+        "content_id": "cid",
+        "disposition": "inline",
+        "data_base64": base64.b64encode(b"changed bytes").decode(),
+    }
+    for part, code in [
+        (changed, "mail_enrichment_attachment_conflict"),
+        (
+            {**changed, "filename": "new", "disposition": "attachment"},
+            "mail_enrichment_attachment_not_inline",
+        ),
+    ]:
+        result = await client.post(
+            f"{account['agent']}/ingest",
+            headers=account["headers"],
+            json={
+                "enrich_existing_only": True,
+                "messages": [message(html="<p>repair</p>", attachments=[part])],
+            },
+        )
+        assert result.status_code == 409
+        assert result.json()["detail"]["code"] == code
+        assert (await client.get(f"{ROOT}/messages/{mid}")).json() == before
+
+
+async def test_repair_conflict_rolls_back_entire_batch_and_valid_batch_ack(client, account):
+    first = await ingest(client, account)
+    second = await ingest(client, account, source_id="second")
+    url = f"{account['agent']}/ingest"
+    before = (await client.get(f"{ROOT}/messages/{first}")).json()
+    result = await client.post(
+        url,
+        headers=account["headers"],
+        json={
+            "enrich_existing_only": True,
+            "messages": [
+                message(html="<p>first</p>"),
+                message(source_id="second", html="<p>second</p>", subject="different"),
+            ],
+        },
+    )
+    assert result.status_code == 409
+    assert (await client.get(f"{ROOT}/messages/{first}")).json() == before
+    result = await client.post(
+        url,
+        headers=account["headers"],
+        json={
+            "enrich_existing_only": True,
+            "messages": [
+                message(html="<p>first</p>"),
+                message(source_id="second", html="<p>second</p>"),
+            ],
+        },
+    )
+    assert result.json() == {"accepted": 0, "duplicates": 2, "updated": 2}
+    assert (await client.get(f"{ROOT}/messages/{second}")).json()["html"] == "<p>second</p>"
+
+
+async def test_repair_attachment_fingerprint_preserves_exact_filename_and_ids(client, account):
+    part = {"filename": "Logo.PNG", "content_type": "image/png", "data_base64": "aW1hZ2U="}
+    mid = await ingest(client, account, attachments=[part, part])
+    before = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    repaired = [
+        dict(part, content_id="One", disposition="inline"),
+        dict(part, content_id="Two", disposition="inline"),
+    ]
+    body = {
+        "messages": [message(html="<p>two parts</p>", attachments=repaired)],
+        "enrich_existing_only": True,
+    }
+    for expected in [1, 0]:
+        result = await client.post(
+            f"{account['agent']}/ingest", headers=account["headers"], json=body
+        )
+        assert result.status_code == 200, result.text
+        assert result.json().get("updated", 0) == expected
+        after = (await client.get(f"{ROOT}/messages/{mid}")).json()
+        assert len(after["attachments"]) == 2
+        assert {a["id"] for a in after["attachments"]} == {a["id"] for a in before["attachments"]}
+        assert {a["filename"] for a in after["attachments"]} == {"Logo.PNG"}
+        assert {a["content_id"] for a in after["attachments"]} == {"One", "Two"}
+
+
+async def test_repair_attachment_limit_includes_preexisting_parts(client, account):
+    parts = [dict(message()["attachments"][0], filename=f"part-{i}") for i in range(10)]
+    mid = await ingest(client, account, attachments=parts)
+    before = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    part = dict(parts[0], filename="new", content_id="new", disposition="inline")
+    result = await client.post(
+        f"{account['agent']}/ingest",
+        headers=account["headers"],
+        json={
+            "enrich_existing_only": True,
+            "messages": [message(html="<p>repair</p>", attachments=[part])],
+        },
+    )
+    assert result.status_code == 409
+    assert result.json()["detail"]["code"] == "mail_enrichment_attachment_limit"
+    assert (await client.get(f"{ROOT}/messages/{mid}")).json() == before

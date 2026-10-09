@@ -1,11 +1,19 @@
-"""Version 1 of the Mac worker contract; never accepts HTML or account passwords."""
+"""Mac worker contract: HTML is inert encrypted content; no account passwords."""
 
 import base64
 import binascii
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 Header = Annotated[str, Field(max_length=998, pattern=r"^[^\r\n\x00]*$")]
 ErrorCode = Annotated[str, Field(max_length=64, pattern=r"^[a-z0-9_:-]+$")]
@@ -42,6 +50,22 @@ class AttachmentIn(StrictModel):
         pattern=r"^[a-zA-Z0-9!#$&^_.+-]+/[a-zA-Z0-9!#$&^_.+-]+$",
     )
     data_base64: str = Field(max_length=14 * 1024 * 1024)
+    content_id: str | None = Field(default=None, max_length=255)
+    disposition: Literal["inline", "attachment"] = "attachment"
+
+    @field_validator("content_id", mode="before")
+    @classmethod
+    def normalized_content_id(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, str) or any(ord(c) < 32 or ord(c) > 126 for c in value):
+            raise ValueError("invalid_content_id")
+        value = value.strip(" ")
+        if value.startswith("<") and value.endswith(">"):
+            value = value[1:-1]
+        if not value or any(ord(c) < 33 or c in "<>" for c in value):
+            raise ValueError("invalid_content_id")
+        return value
 
     @field_validator("data_base64")
     @classmethod
@@ -70,11 +94,27 @@ class MessageIn(StrictModel):
     in_reply_to: Header | None = None
     references: list[Header] = Field(default_factory=list, max_length=50)
     text: str = Field(default="", max_length=2 * 1024 * 1024)
+    html: str | None = Field(default=None, max_length=2 * 1024 * 1024)
     attachments: list[AttachmentIn] = Field(default_factory=list, max_length=10)
+
+    @field_validator("html")
+    @classmethod
+    def limited_html(cls, value: str | None) -> str | None:
+        if value is not None and len(value.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("html_too_large")
+        return value
+
+    @model_validator(mode="after")
+    def unique_inline_ids(self):
+        ids = [a.content_id for a in self.attachments if a.content_id is not None]
+        if len(ids) != len(set(ids)):
+            raise ValueError("duplicate_content_id")
+        return self
 
 
 class Ingest(StrictModel):
     messages: list[MessageIn] = Field(max_length=20)
+    enrich_existing_only: bool = Field(default=False, strict=True)
 
 
 class Heartbeat(StrictModel):

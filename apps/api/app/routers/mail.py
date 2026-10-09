@@ -324,7 +324,10 @@ async def heartbeat(request: Request, session: Session, mailbox: AgentMailbox):
 @router.post("/agent/{mailbox_id}/ingest")
 async def ingest(request: Request, session: Session, mailbox: AgentMailbox):
     body = await limited_body(request, Ingest, 25 * 1024 * 1024)
-    result = await service.ingest(session, mailbox, body)
+    try:
+        result = await service.ingest(session, mailbox, body)
+    except service.MailError as error:
+        raise fail(error.code, error.status) from None
     await session.commit()
     return result
 

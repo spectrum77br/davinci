@@ -245,7 +245,7 @@ async def _garantir_local(
 async def ingest(session: AsyncSession, mailbox: MailMailbox, body: IngestV2) -> dict:
     """Cada e-mail sozinho: inválido, de pasta desconhecida ou de pasta que não se
     lê → `rejected` (com os campos, sem os valores); o resto entra pelo ingest
-    da Central (repetido = `duplicate`, nada muda)."""
+    da Central (repetido = `duplicate`, só enriquece HTML/CID ausentes)."""
     linhas = await _pastas_da_caixa(session, mailbox.id)
     resultados: list[dict] = []
     contas = {"accepted": 0, "duplicates": 0, "rejected": 0}
@@ -279,13 +279,22 @@ async def ingest(session: AsyncSession, mailbox: MailMailbox, body: IngestV2) ->
             contas["rejected"] += 1
             continue
         # O MESMO ingest da Central (o subtipo leva os campos do v2 para o cifrado).
-        r = await mail_central.ingest(session, mailbox, Ingest.model_construct(messages=[item]))
+        try:
+            r = await mail_central.ingest(session, mailbox, Ingest.model_construct(messages=[item]))
+        except mail_central.MailError as error:
+            resultados.append({"source_id": sid, "status": "rejected", "code": error.code})
+            contas["rejected"] += 1
+            continue
+        if r.get("updated"):
+            contas["updated"] = contas.get("updated", 0) + r["updated"]
         message_id = await session.scalar(
             select(MailMessage.id).where(
                 MailMessage.mailbox_id == mailbox.id, MailMessage.source_id == item.source_id
             )
         )
-        if message_id is not None:
+        presentation = item.html is not None or any(a.content_id for a in item.attachments)
+        # HTML/CID repairs (including an identical retry) never alter routing.
+        if message_id is not None and (r["accepted"] or not presentation):
             await _garantir_local(session, mailbox.id, message_id, item.tuta.folder_key)
         status = "accepted" if r["accepted"] else "duplicate"
         contas["accepted" if r["accepted"] else "duplicates"] += 1

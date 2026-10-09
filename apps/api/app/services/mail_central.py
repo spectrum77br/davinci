@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import UserRole
 from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
 from app.models.user import User
-from app.schemas.mail import Ingest, ReplyIn
-from app.security.cipher import decrypt_json, encrypt_bytes, encrypt_json
+from app.schemas.mail import Ingest, MessageIn, ReplyIn
+from app.security.cipher import decrypt_bytes, decrypt_json, encrypt_bytes, encrypt_json
 from app.services.mail_atendimento import caixa as mailbox_settings
 
 # A leased job without a receipt after this long is ambiguous (never resent).
@@ -146,20 +146,129 @@ def reply_envelope(
     }
 
 
+def attachment_metadata(attachment) -> dict:
+    return {
+        "filename": attachment.filename,
+        "content_type": attachment.content_type,
+        "content_id": attachment.content_id,
+        "disposition": attachment.disposition,
+    }
+
+
+async def enrich_presentation(session: AsyncSession, message: MailMessage, item: MessageIn) -> bool:
+    """Repair presentation only. Never reclassify, move, reply or process a queue."""
+    if item.html is None and not any(a.content_id for a in item.attachments):
+        return False
+    content = decrypt_json(message.content_enc)
+    if (
+        str(content.get("from_address", "")).lower() != str(item.from_address).lower()
+        or content.get("subject", "") != item.subject
+        or content.get("message_id", "") != item.message_id
+    ):
+        raise MailError("mail_enrichment_identity_conflict")
+    # Populate missing presentation; a conflicting existing HTML is not a repair.
+    if item.html is not None and content.get("html") not in (None, "", item.html):
+        raise MailError("mail_enrichment_html_conflict")
+    stored = (
+        await session.scalars(
+            select(MailAttachment)
+            .where(MailAttachment.message_id == message.id)
+            .order_by(MailAttachment.id)
+        )
+    ).all()
+    existing = []
+    for attachment in stored:
+        meta = decrypt_json(attachment.metadata_enc)
+        signature = (
+            meta["filename"],
+            meta["content_type"],
+            hashlib.sha256(decrypt_bytes(attachment.content_enc)).digest(),
+        )
+        existing.append((attachment, meta, signature))
+    updates = []
+    additions = []
+    used = set()
+    known_cids = {
+        meta.get("content_id"): attachment.id
+        for attachment, meta, _ in existing
+        if meta.get("content_id")
+    }
+    for attachment in item.attachments:
+        if attachment.content_id is None:
+            continue
+        data = base64.b64decode(attachment.data_base64, validate=True)
+        signature = (attachment.filename, attachment.content_type, hashlib.sha256(data).digest())
+        candidates = [
+            (old, meta) for old, meta, sig in existing if sig == signature and old.id not in used
+        ]
+        candidates.sort(key=lambda pair: pair[1].get("content_id") != attachment.content_id)
+        if candidates:
+            old, meta = candidates[0]
+            if meta.get("content_id") not in (None, attachment.content_id) or (
+                attachment.content_id in known_cids and known_cids[attachment.content_id] != old.id
+            ):
+                raise MailError("mail_enrichment_attachment_conflict")
+            used.add(old.id)
+            updated = dict(meta, content_id=attachment.content_id)
+            if attachment.disposition == "inline" or "disposition" not in updated:
+                updated["disposition"] = attachment.disposition
+            if updated != meta:
+                updates.append((old, updated))
+            known_cids[attachment.content_id] = old.id
+        else:
+            if attachment.content_id in known_cids or any(
+                sig[:2] == signature[:2] for _, _, sig in existing
+            ):
+                # Same name/type with different bytes is ambiguous, not a
+                # missing inline part. Never append a replacement version.
+                raise MailError("mail_enrichment_attachment_conflict")
+            if attachment.disposition != "inline" or item.html is None:
+                raise MailError("mail_enrichment_attachment_not_inline")
+            additions.append((attachment, data))
+            known_cids[attachment.content_id] = None
+    if len(stored) + len(additions) > 10:
+        raise MailError("mail_enrichment_attachment_limit")
+    html_changed = item.html is not None and content.get("html") != item.html
+    changed = html_changed or bool(updates or additions)
+    if not changed:
+        return False
+    # Every validation above precedes writes, including v2 per-message rejection.
+    if html_changed:
+        content["html"] = item.html
+        message.content_enc = encrypt_json(content)
+    for old, meta in updates:
+        old.metadata_enc = encrypt_json(meta)
+    for attachment, data in additions:
+        session.add(
+            MailAttachment(
+                message_id=message.id,
+                metadata_enc=encrypt_json(attachment_metadata(attachment)),
+                content_enc=encrypt_bytes(data),
+                size=len(data),
+            )
+        )
+    message.attachment_count = len(stored) + len(additions)
+    return True
+
+
 async def ingest(session: AsyncSession, mailbox: MailMailbox, body: Ingest) -> dict:
     # The route locks the mailbox: ingestion is serial per account and the
     # unique constraint is the second defense against replay/concurrent batches.
-    accepted = duplicates = 0
+    accepted = duplicates = updated = 0
     for item in body.messages:
         exists = await session.scalar(
-            select(MailMessage.id).where(
+            select(MailMessage).where(
                 MailMessage.mailbox_id == mailbox.id,
                 MailMessage.source_id == item.source_id,
             )
         )
         if exists:
+            if await enrich_presentation(session, exists, item):
+                updated += 1
             duplicates += 1
             continue
+        if body.enrich_existing_only:
+            raise MailError("mail_enrichment_source_not_found", 404)
         content = item.model_dump(
             mode="json",
             exclude={
@@ -185,12 +294,7 @@ async def ingest(session: AsyncSession, mailbox: MailMailbox, body: Ingest) -> d
             session.add(
                 MailAttachment(
                     message_id=message.id,
-                    metadata_enc=encrypt_json(
-                        {
-                            "filename": attachment.filename,
-                            "content_type": attachment.content_type,
-                        }
-                    ),
+                    metadata_enc=encrypt_json(attachment_metadata(attachment)),
                     content_enc=encrypt_bytes(data),
                     size=len(data),
                 )
@@ -198,7 +302,10 @@ async def ingest(session: AsyncSession, mailbox: MailMailbox, body: Ingest) -> d
         accepted += 1
     mailbox.last_sync_at = datetime.now(UTC)
     await session.flush()
-    return {"accepted": accepted, "duplicates": duplicates}
+    result = {"accepted": accepted, "duplicates": duplicates}
+    if updated:
+        result["updated"] = updated
+    return result
 
 
 FORM_TAG = re.compile(r"^[A-Z0-9][A-Z0-9-]{0,31}$")
