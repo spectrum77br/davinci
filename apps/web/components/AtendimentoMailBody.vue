@@ -4,8 +4,6 @@ import { loadInlineImages, MAIL_FRAME_SANDBOX, renderMailHtml, type MailAttachme
 const props = defineProps<{ html: string; text: string; attachments: MailAttachment[] }>()
 const { api } = useApi()
 const srcdoc = ref('')
-const hasRemoteImages = ref(false)
-const showRemoteImages = ref(false)
 const showText = ref(false)
 const loading = ref(true)
 const failed = ref(false)
@@ -15,15 +13,13 @@ let inlineImages: Record<string, string> = {}
 let mounted = false
 
 function build() {
-  const rendered = renderMailHtml(props.html, { images: inlineImages, showRemoteImages: showRemoteImages.value })
+  const rendered = renderMailHtml(props.html, { images: inlineImages, showRemoteImages: true })
   srcdoc.value = rendered.srcdoc
-  hasRemoteImages.value = rendered.hasRemoteImages
   return rendered
 }
 
 async function prepare() {
   const current = ++generation
-  showRemoteImages.value = false
   showText.value = false
   failed.value = false
   loading.value = true
@@ -43,11 +39,6 @@ async function prepare() {
   }
 }
 
-function allowRemoteImages() {
-  showRemoteImages.value = true
-  build()
-}
-
 watch(() => props.html, () => { if (mounted) void prepare() })
 onMounted(() => { mounted = true; void prepare() })
 onBeforeUnmount(() => { mounted = false; ++generation })
@@ -56,11 +47,7 @@ onBeforeUnmount(() => { mounted = false; ++generation })
 <template>
   <section class="min-w-0 space-y-2" aria-label="Conteúdo do e-mail" data-mail-body>
     <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-      <div v-if="hasRemoteImages && !showRemoteImages && !showText" class="flex flex-wrap items-center gap-2 text-muted-foreground">
-        <span>Imagens externas ocultas.</span>
-        <button type="button" class="rounded border px-2 py-1 text-foreground hover:bg-muted" @click="allowRemoteImages">Mostrar imagens externas</button>
-      </div>
-      <span v-else-if="loading" class="text-muted-foreground">Carregando mensagem…</span>
+      <span v-if="loading" class="text-muted-foreground">Carregando mensagem…</span>
       <span v-else />
       <div class="flex items-center gap-2">
         <button v-if="!failed" type="button" class="rounded border px-2 py-1 hover:bg-muted" @click="showText = !showText">{{ showText ? 'Ver mensagem formatada' : 'Ver texto' }}</button>
