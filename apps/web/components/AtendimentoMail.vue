@@ -253,7 +253,11 @@ async function loadMailboxes() {
       if (disposed) return
       mailboxes.value = result.items
       lastMailboxesAt = Date.now()
-      if (!result.items.some((item) => item.id === mailboxId.value)) mailboxId.value = result.items[0]?.id || ''
+      if (!result.items.some((item) => item.id === mailboxId.value)) {
+        // Open the primary account by default; polling keeps a valid manual choice.
+        const primary = result.items.find((item) => item.address.trim().toLowerCase() === '061083.jf@tuta.com')
+        mailboxId.value = primary?.id || result.items[0]?.id || ''
+      }
     } catch (reason) { if (!disposed) error.value = errorText(reason) }
   })()
   mailboxRequest = promise
