@@ -34,7 +34,7 @@ from alembic import op
 
 revision: str = "0389_mail_leitores"
 # No merge com a 0388 (outra frente): trocar para "0388_mail_caixa_indice".
-down_revision: str | None = "0387_mail_atendimento"
+down_revision: str | None = "0388_mail_caixa_indice"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

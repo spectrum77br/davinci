@@ -17,9 +17,9 @@ visualmente igual ao Tuta".
       SEGURANÇA não traz o assunto ("e-mail de acesso/código"). `antes` = o
       `proximo` da página anterior.
 
-A MESMA permissão da caixa da Central (`routers/mail.user_mailbox`: o dono da
-caixa ou um admin; quem não pode recebe 404 — nem fica sabendo que a caixa
-existe). O conteúdo continua cifrado: o índice
+A permissão de LER a caixa da Central (`routers/mail.readable_mailbox`: o dono da
+caixa, um admin ou um leitor ativo de "Quem mais vê"; quem não pode recebe 404 —
+nem fica sabendo que a caixa existe). O conteúdo continua cifrado: o índice
 (`services/mail_atendimento/indice.py`) guarda só a pasta e a loja; o
 assunto, o remetente e o nome da pasta são decifrados aqui, na hora, só os da
 página. A rota completa o índice quando falta pouco (o resto é do job). Nada
@@ -44,7 +44,7 @@ from app.models.mail import MailMessage
 from app.models.mail_atendimento import MailCaixaIndice
 from app.models.user import User
 from app.routers.atendimento import _nomes_das_lojas
-from app.routers.mail import user_mailbox
+from app.routers.mail import readable_mailbox
 from app.services.atendimento import lojas as lojas_svc
 from app.services.mail_atendimento import indice, pastas, ponte, regras, rotear
 
@@ -291,7 +291,7 @@ async def pastas_da_caixa(
     loja: str | None = Query(default=None, max_length=40),
     pasta: str | None = Query(default=None, max_length=40),
 ) -> dict[str, Any]:
-    mailbox = await user_mailbox(session, mailbox_id, user)
+    mailbox = await readable_mailbox(session, mailbox_id, user)
     loja, pasta = _loja(loja), _pasta(pasta)
     base, faltam = await indice.preparar(session, mailbox)
     await session.commit()
@@ -373,7 +373,7 @@ async def lista_da_caixa(
     antes: str | None = Query(default=None, max_length=64),
     limite: int = Query(default=POR_PAGINA, ge=1, le=100),
 ) -> dict[str, Any]:
-    mailbox = await user_mailbox(session, mailbox_id, user)
+    mailbox = await readable_mailbox(session, mailbox_id, user)
     pasta, loja, depois_de = _pasta(pasta), _loja(loja), _antes(antes)
     base, faltam = await indice.preparar(session, mailbox)
     await session.commit()
