@@ -823,6 +823,8 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
         # 09/10/2026: o "E-mail sem vínculo" e os chips do site (RF5/RF6).
         "email_sem_vinculo": 0,
         "chamados": {},
+        # 09/10/2026: a Caixa Humano — o Direct (sem IA) nunca entra nela.
+        "humano": 0,
     } in resumo["plataformas"]
 
 

@@ -56,6 +56,16 @@ por etiqueta. A troca à mão é o POST /conversas/{id}/etiqueta (fica na
 linha do tempo, `etiqueta_historico` do detalhe). A aba "Falta responder"
 vem pelo prazo mais curto (cursor `prazo:`), e a busca acha também pelo nº
 do Bling e pelo SKU.
+
+CAIXA HUMANO (09/10/2026, `services/atendimento/humano.py`): ao lado da
+Caixa, só o que falta responder e a IA NÃO pode responder — a régua da IA,
+sem chamar o modelo, calculada pelo cron `atendimento_humano` e guardada em
+`dados.humano` (só os códigos dos motivos). A lista filtra com
+`?caixa=humano` (junto de plataforma, loja, canal, etiqueta, busca e
+filtro; sem o Direct do Instagram), toda linha que está nela traz `humano`
+(motivos e rótulos — o chip da Caixa normal também) e o /resumo conta
+`humano` por plataforma, por loja e no total, no escopo da equipe. Só
+leitura: nenhuma rota nova de escrita.
 """
 
 from __future__ import annotations
@@ -341,6 +351,10 @@ FILTROS = (
     "email_sem_vinculo",
 )
 FILTRO_EMAIL_SEM_VINCULO = "email_sem_vinculo"
+# A caixa da lista (09/10/2026): "" = a Caixa; "humano" = a Caixa Humano (só o
+# que falta responder e a IA não pode — `services/atendimento/humano.py`).
+CAIXA_HUMANO = "humano"
+CAIXAS = ("", CAIXA_HUMANO)
 # Os tipos do chamado dos sites (RF6): os chips SAC / Atacado / Dúvidas e
 # sugestões do grupo Site (`?tipo_chamado=`, sobre `dados.mail.caixa`).
 TIPOS_CHAMADO = tuple(ROTULO_TIPO_CAIXA)
@@ -1015,6 +1029,7 @@ def _resumo_dict(
     a_conferir: bool = False,
     ultimo_tipo: str | None = None,
     pendentes: int = 0,
+    humano: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": str(c.id),
@@ -1057,6 +1072,9 @@ def _resumo_dict(
             e for e in (c.etiquetas_secundarias or []) if isinstance(e, str)
         ],
         "etiqueta_manual": bool(c.etiqueta_manual),
+        # Caixa Humano (09/10/2026): os motivos, só se ela está lá AGORA
+        # (`humano.para_tela` sobre o `humano.triagem_da_linha_sql`).
+        "humano": humano,
     }
 
 
@@ -1087,6 +1105,11 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
         select(_ultimo_tipo()).where(AtendimentoConversa.id == c.id)
     )
     pendentes = await session.scalar(select(_pendentes()).where(AtendimentoConversa.id == c.id))
+    from app.services.atendimento import humano as humano_svc
+
+    na_caixa_humano = await session.scalar(
+        select(humano_svc.triagem_da_linha_sql()).where(AtendimentoConversa.id == c.id)
+    )
     base = _resumo_dict(
         c,
         tem_rascunho=tem,
@@ -1094,6 +1117,7 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
         a_conferir=a_conferir,
         ultimo_tipo=ultimo_tipo,
         pendentes=pendentes or 0,
+        humano=humano_svc.para_tela(na_caixa_humano, ia_pausada=c.ia_pausada),
     )
     base.update(
         comprador_id=c.comprador_id,
@@ -1467,6 +1491,8 @@ async def resumo(
     user: Annotated[User, Depends(_view)],
 ) -> ResumoOut:
     """Contadores da fila (por plataforma e por loja), saúde dos canais e as chaves."""
+    from app.services.atendimento import humano as humano_svc
+
     scope = await resolve_team_scope(session, user)
     agora = datetime.now(UTC)
     aguardando = AtendimentoConversa.aguardando_resposta.is_(True)
@@ -1482,6 +1508,8 @@ async def resumo(
     efetiva = _etiqueta_efetiva()
     por_etiqueta = [func.count().filter(aberta, efetiva == e) for e in ETIQUETAS]
     sem_vinculo = func.count().filter(aberta, _email_sem_vinculo())
+    # A Caixa Humano (09/10/2026): falta responder e a IA não pode.
+    na_caixa_humano = func.count().filter(humano_svc.caixa_humano_sql())
 
     def _etiquetas(contagens) -> dict[str, int]:
         return {e: int(n or 0) for e, n in zip(ETIQUETAS, contagens, strict=True)}
@@ -1494,6 +1522,7 @@ async def resumo(
         func.count().filter(_a_conferir_existe()),
         nao_lidas,
         sem_vinculo,
+        na_caixa_humano,
         *por_etiqueta,
     ).group_by(AtendimentoConversa.plataforma)
     if cond is not None:
@@ -1508,8 +1537,9 @@ async def resumo(
             nao_lidas=int(n or 0),
             etiquetas=_etiquetas(etq),
             email_sem_vinculo=int(sv or 0),
+            humano=int(h or 0),
         )
-        for p, a, v, x, r, n, sv, *etq in (await session.execute(q_plat)).all()
+        for p, a, v, x, r, n, sv, h, *etq in (await session.execute(q_plat)).all()
     }
     if PLATAFORMA_SITE in por_plataforma:
         # Os chips SAC / Atacado / Dúvidas e sugestões do grupo Site (RF6).
@@ -1570,6 +1600,7 @@ async def resumo(
         func.count().filter(vencidas),
         nao_lidas,
         sem_vinculo,
+        na_caixa_humano,
         *por_etiqueta,
     ).group_by(
         AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_sem_integracao
@@ -1587,8 +1618,9 @@ async def resumo(
             vencidas=x or 0,
             etiquetas=_etiquetas(etq),
             email_sem_vinculo=int(sv or 0),
+            humano=int(h or 0),
         )
-        for i, p, rc, conta, a, x, n, sv, *etq in (await session.execute(q_loja)).all()
+        for i, p, rc, conta, a, x, n, sv, h, *etq in (await session.execute(q_loja)).all()
     }
     canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]] = {}
     for c in canais:
@@ -1634,6 +1666,7 @@ async def resumo(
         a_conferir=sum(p.a_conferir for p in plataformas),
         etiquetas={e: sum(p.etiquetas.get(e, 0) for p in plataformas) for e in ETIQUETAS},
         email_sem_vinculo=sum(p.email_sem_vinculo for p in plataformas),
+        humano=sum(p.humano for p in plataformas),
         lojas=sorted(
             barra,
             key=lambda lj: (
@@ -1652,6 +1685,7 @@ async def resumo(
             simulador=s.atendimento_simulador,
             simulador_exceto=enviar.fora_do_simulador(),
             alerta_telegram=s.atendimento_alerta_telegram,
+            humano_ativa=s.atendimento_leitura_ativa and s.atendimento_humano_ativa,
         ),
         leitura_parada=leitura_parada,
     )
@@ -1707,7 +1741,10 @@ async def _listar_marketplace(
     rede_social_id: UUID | None = None,
     perguntas_primeiro: bool = False,
     tipo_chamado: str | None = None,
+    caixa_humano: bool = False,
 ) -> list[dict[str, Any]]:
+    from app.services.atendimento import humano as humano_svc
+
     agora = datetime.now(UTC)
     tem = _pendente_existe()
     a_conferir = _a_conferir_existe()
@@ -1717,11 +1754,16 @@ async def _listar_marketplace(
         a_conferir.label("a_conferir"),
         _ultimo_tipo().label("ultimo_tipo"),
         _pendentes().label("pendentes"),
+        # Caixa Humano (09/10/2026): o motivo de quem está nela (None fora).
+        humano_svc.triagem_da_linha_sql().label("humano"),
         User,
     ).outerjoin(User, User.id == AtendimentoConversa.atribuido_a)
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
     if cond is not None:
         consulta = consulta.where(cond)
+    if caixa_humano:
+        # Só o que falta responder e a IA não pode (junto de qualquer filtro).
+        consulta = consulta.where(humano_svc.caixa_humano_sql())
     if len(plataforma) == 1:
         consulta = consulta.where(AtendimentoConversa.plataforma == plataforma[0])
     elif plataforma:
@@ -1886,8 +1928,9 @@ async def _listar_marketplace(
             a_conferir=bool(r),
             ultimo_tipo=tipo,
             pendentes=pend,
+            humano=humano_svc.para_tela(hum, ia_pausada=c.ia_pausada),
         )
-        for c, tem_r, r, tipo, pend, u in (
+        for c, tem_r, r, tipo, pend, hum, u in (
             await session.execute(consulta.limit(limite))
         ).all()
     ]
@@ -1909,6 +1952,7 @@ async def listar_conversas(
     externo_ref: Annotated[str | None, Query(max_length=191)] = None,
     rede_social_id: Annotated[UUID | None, Query()] = None,
     tipo_chamado: Annotated[str | None, Query(max_length=16)] = None,
+    caixa: Annotated[str | None, Query(max_length=16)] = None,
 ) -> ListaConversasOut:
     """A fila, mais recente primeiro; página seguinte com `antes_de=<proximo>`.
 
@@ -1929,6 +1973,9 @@ async def listar_conversas(
     `tipo_chamado` (sac | atacado | duvidas) filtra os chamados dos sites pelo
     tipo (os chips do grupo Site, RF6); `filtro=email_sem_vinculo` traz as
     conversas de e-mail das lojas ainda sem pedido (RF5).
+    `caixa=humano` (09/10/2026) = a Caixa Humano: só o que falta responder e a
+    IA não pode (`services/atendimento/humano.py`), junto de qualquer outro
+    filtro; o Direct do Instagram não entra.
     """
     plataformas = _plataformas_do_filtro(plataforma)
     canal = (canal or "").strip().lower() or None
@@ -1946,6 +1993,10 @@ async def listar_conversas(
     tipo_chamado = (tipo_chamado or "").strip().lower() or None
     if tipo_chamado and tipo_chamado not in TIPOS_CHAMADO:
         raise HTTPException(422, detail={"code": "tipo_chamado_invalido"})
+    caixa = (caixa or "").strip().lower()
+    if caixa not in CAIXAS:
+        raise HTTPException(422, detail={"code": "caixa_invalida"})
+    caixa_humano = caixa == CAIXA_HUMANO
     pelo_prazo = filtro in FILTROS_PELO_PRAZO
     perguntas_primeiro = filtro in FILTROS_PERGUNTA_PRIMEIRO
     # Cursor inválido (ou da outra ordem) → 422 antes de ir ao banco.
@@ -1973,6 +2024,7 @@ async def listar_conversas(
             rede_social_id=rede_social_id,
             perguntas_primeiro=perguntas_primeiro,
             tipo_chamado=tipo_chamado,
+            caixa_humano=caixa_humano,
         )
     quer_instagram = (
         (not plataformas or instagram.PLATAFORMA in plataformas)
@@ -1988,6 +2040,9 @@ async def listar_conversas(
         # O e-mail das lojas e o chamado do site nunca são o Direct.
         and filtro != FILTRO_EMAIL_SEM_VINCULO
         and tipo_chamado is None
+        # A Caixa Humano é a régua da IA da caixa: o Direct (adaptador só
+        # leitura, sem IA) não entra nela.
+        and not caixa_humano
     )
     # No filtro Mídia, o DM vale como "todas" (as não silenciadas).
     filtro_dm = "todas" if filtro == ETIQUETA_MIDIA else filtro

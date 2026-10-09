@@ -198,9 +198,11 @@ async function principal() {
   // A faixa no topo da Caixa, com o link; na aba Lojas, sem ele.
   const faixa = (pagina.match(/<AtendimentoLeituraParada[\s\S]*?\/>/) || [])[0] || ''
   assert.ok(faixa, 'a faixa está na página')
-  assert.match(faixa, /v-if="aba === 'caixa' \|\| aba === 'lojas'"/)
+  // A Caixa Humano (09/10/2026) é a Caixa também: a faixa e o link valem nela.
+  assert.match(faixa, /v-if="naCaixa \|\| aba === 'lojas'"/)
+  assert.match(pagina, /const naCaixa = computed\(\(\) => aba\.value === 'caixa' \|\| aba\.value === 'humano'\)/)
   assert.match(faixa, /:itens="semLer"/)
-  assert.match(faixa, /:link="aba === 'caixa'"/)
+  assert.match(faixa, /:link="naCaixa"/)
   assert.match(faixa, /@abrir-lojas="aba = 'lojas'"/)
   // Dentro do bloco medido acima da Caixa (a altura da Caixa conta com ela).
   const iTopo = pagina.indexOf('<div ref="topoEl"')
@@ -211,7 +213,7 @@ async function principal() {
   assert.match(pagina, /v-if="a\.value === 'lojas' && semLer\.length"[\s\S]{0,400}data-marca-leitura-parada\s*>\{\{ semLer\.length \}\}<\/span>/)
   assert.match(pagina, /:title="tituloLeituraParada\(semLer\)"/)
   // Some sozinha: o resumo é relido a cada 30 s na Caixa e também na aba Lojas.
-  assert.match(pagina, /if \(aba\.value === 'lojas'\) return carregarResumo\(\)\n\s+if \(aba\.value !== 'caixa'\) return\n\s+await Promise\.all\(\[atualizarLista\(\), carregarResumo\(\)\]\)/)
+  assert.match(pagina, /if \(aba\.value === 'lojas'\) return carregarResumo\(\)\n\s+if \(!naCaixa\.value\) return\n\s+await Promise\.all\(\[atualizarLista\(\), carregarResumo\(\)\]\)/)
 }
 
 // ------------------------------------------------ a Ouvidoria ficou como estava

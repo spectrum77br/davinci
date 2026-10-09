@@ -947,6 +947,27 @@ async def atendimento_rascunhos(ctx: dict) -> None:
         logger.info("atendimento_rascunhos_tick", gerados=gerados)
 
 
+async def atendimento_humano(ctx: dict) -> dict | None:
+    """A cada minuto: a triagem da Caixa Humano (09/10/2026).
+
+    Tria as conversas esperando resposta pela régua da IA — sem chamar o
+    modelo — e grava só os códigos dos motivos em `dados.humano`
+    (services/atendimento/humano.py). Uma rodada por vez (trava no Redis),
+    até 200 conversas, as de mensagem nova primeiro. Só roda com
+    `atendimento_humano_ativa` (nasce ligado: é só cache) E a leitura
+    (`atendimento_leitura_ativa`).
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_humano_ativa):
+        return None
+    from app.services.atendimento import humano as _atendimento_humano
+
+    try:
+        return await _atendimento_humano.atendimento_humano(ctx)
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_humano_falhou", err=type(e).__name__)
+        return None
+
+
 async def atendimento_prazos(ctx: dict) -> None:
     """A cada 15 min: aviso no Telegram das conversas com prazo vencendo ou vencido.
 
@@ -4707,6 +4728,9 @@ class WorkerSettings:
         # botão "Sincronizar" da tela poder enfileirar a leitura.
         func(atendimento_sincronizar, timeout=300),
         atendimento_rascunhos,
+        # A triagem da Caixa Humano (09/10/2026): aqui também para dar para
+        # enfileirar uma rodada à mão.
+        func(atendimento_humano, timeout=120),
         atendimento_prazos,
         func(atendimento_indexar_pedidos, timeout=1200),
         # Comunicador (01/10/2026): reclamações da plataforma e etiqueta. Aqui
@@ -5051,6 +5075,10 @@ class WorkerSettings:
             timeout=300,
         ),
         cron(atendimento_rascunhos, run_at_startup=False, timeout=300),
+        # A Caixa Humano (09/10/2026): a triagem a cada minuto (só banco, sem
+        # modelo). `timeout=120` < a trava da rodada (150 s); a rodada para
+        # sozinha aos 90 s (`humano.ORCAMENTO_S`) e o resto fica para a próxima.
+        cron(atendimento_humano, run_at_startup=False, timeout=120),
         cron(atendimento_prazos, minute={0, 15, 30, 45}, run_at_startup=False, timeout=120),
         # A ponte da Central de e-mail (08/10/2026): a cada minuto; sem caixa
         # com a ponte ligada, não faz nada.

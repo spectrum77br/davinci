@@ -731,6 +731,95 @@ LACUNAS = (
     "nf_numero",
 )
 
+# ── Caixa Humano (09/10/2026) ─────────────────────────────────────────────
+# Ao lado da Caixa, só o que a IA NÃO pode responder e falta responder — o
+# que ela mandaria para pessoa (`services/atendimento/humano.py`). Os códigos
+# dos motivos, da MAIS importante para a menos (o chip da lista mostra o
+# primeiro). Ficam gravados em `atendimento_conversas.dados.humano`: só o
+# código, nunca texto de comprador.
+HUMANO_RECLAMACAO = "reclamacao"
+HUMANO_AG_CANCELAMENTO = "ag_cancelamento"
+HUMANO_DEVOLUCAO = "devolucao"
+HUMANO_CHAMADO = "chamado"
+HUMANO_AVALIACAO = "avaliacao"
+HUMANO_ALERTA = "alerta"
+HUMANO_XINGAMENTO = "xingamento"
+HUMANO_ATENDENTE = "atendente"
+HUMANO_INSTRUCAO = "instrucao"
+HUMANO_EMAIL = "e_mail"
+HUMANO_PEDIDO_NAO_ACHADO = "pedido_nao_achado"
+HUMANO_SEM_DADO = "sem_dado"
+HUMANO_ASSUNTO = "assunto"
+HUMANO_SO_ANEXO = "so_anexo"
+HUMANO_IA = "ia"
+# A conversa BLOQUEADA (a plataforma não deixa responder pelo DaVinci: a
+# reclamação só leitura, a avaliação do ML, a janela do TikTok) entra só com
+# um motivo de ESTADO (`HUMANO_DE_ESTADO`), e com este junto: quem resolve
+# é uma pessoa, na plataforma.
+HUMANO_BLOQUEADA = "bloqueada"
+# A triagem desta conversa deu erro: na dúvida, ela aparece (e a rodada só
+# tenta de novo na revisão de 30 min, sem travar a fila).
+HUMANO_FALHA = "falha"
+# Não é gravado: a tela pausou a IA nesta conversa (entra na hora, pela consulta).
+HUMANO_IA_PAUSADA = "ia_pausada"
+# Os motivos do estado do pedido/conversa (os únicos que põem a bloqueada na Caixa Humano).
+HUMANO_DE_ESTADO = frozenset(
+    {
+        HUMANO_RECLAMACAO,
+        HUMANO_AG_CANCELAMENTO,
+        HUMANO_DEVOLUCAO,
+        HUMANO_CHAMADO,
+        HUMANO_AVALIACAO,
+    }
+)
+ORDEM_HUMANO: tuple[str, ...] = (
+    HUMANO_RECLAMACAO,
+    HUMANO_AG_CANCELAMENTO,
+    HUMANO_DEVOLUCAO,
+    HUMANO_CHAMADO,
+    HUMANO_AVALIACAO,
+    HUMANO_BLOQUEADA,
+    HUMANO_ALERTA,
+    HUMANO_XINGAMENTO,
+    HUMANO_ATENDENTE,
+    HUMANO_INSTRUCAO,
+    HUMANO_EMAIL,
+    HUMANO_PEDIDO_NAO_ACHADO,
+    HUMANO_SEM_DADO,
+    HUMANO_ASSUNTO,
+    HUMANO_SO_ANEXO,
+    HUMANO_IA,
+    HUMANO_FALHA,
+    HUMANO_IA_PAUSADA,
+)
+# Como a tela escreve (a API manda junto; a tela só tem reserva para código novo).
+ROTULO_HUMANO: dict[str, str] = {
+    HUMANO_RECLAMACAO: "Reclamação aberta",
+    HUMANO_AG_CANCELAMENTO: "Pedido em Ag. cancelamento",
+    HUMANO_DEVOLUCAO: "Pedido com devolução",
+    HUMANO_CHAMADO: "Pedido com chamado aberto",
+    HUMANO_AVALIACAO: "Avaliação com nota baixa",
+    HUMANO_BLOQUEADA: "Bloqueada: responder na plataforma",
+    HUMANO_ALERTA: "Procon, Justiça ou golpe",
+    HUMANO_XINGAMENTO: "Cliente exaltado",
+    HUMANO_ATENDENTE: "Pediu atendente",
+    HUMANO_INSTRUCAO: "Texto com cara de instrução",
+    HUMANO_EMAIL: "E-mail: só pessoa",
+    HUMANO_PEDIDO_NAO_ACHADO: "Pedido não achado no Bling",
+    HUMANO_SEM_DADO: "Falta dado (rastreio/NF)",
+    HUMANO_ASSUNTO: "Assunto só de pessoa",
+    HUMANO_SO_ANEXO: "Só foto/vídeo/arquivo",
+    HUMANO_IA: "A IA marcou: precisa de pessoa",
+    HUMANO_FALHA: "Não deu para triar: confira",
+    HUMANO_IA_PAUSADA: "IA pausada",
+}
+
+
+def rotulo_humano(codigo: str) -> str:
+    """"Reclamação aberta", "Pediu atendente"... — o código cru para motivo sem nome."""
+    return ROTULO_HUMANO.get(codigo, codigo)
+
+
 # ── Manual da IA: tipo da regra (parte 2, P7) ─────────────────────────────
 # A ordem da tupla é a ordem no prompt:
 #   seguranca — vale para TODA mensagem e vem primeiro;

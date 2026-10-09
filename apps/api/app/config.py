@@ -516,6 +516,15 @@ class Settings(BaseSettings):
     # `dm_ia_ativa`: dá pra ler uma semana do que ela TERIA dito antes de
     # deixar alguém enviar.
     atendimento_ia_ativa: bool = False
+    # CAIXA HUMANO (09/10/2026, services/atendimento/humano.py): o cron
+    # `atendimento_humano` (a cada minuto) tria as conversas esperando
+    # resposta pela régua da IA, SEM chamar o modelo, e grava só o código dos
+    # motivos em `atendimento_conversas.dados.humano` — a aba "Caixa Humano".
+    # A EXCEÇÃO ao "tudo nasce desligado": só lê o nosso banco e grava esse
+    # cache, nada sai para a plataforma nem para o provedor; desligado, a
+    # Caixa Humano só mostra as de IA pausada. Também precisa da leitura
+    # (`atendimento_leitura_ativa`).
+    atendimento_humano_ativa: bool = True
     # Envio AUTOMÁTICO. Só vale para canal em modo `auto` e categoria liberada
     # nele — os três precisam concordar.
     atendimento_auto_ativo: bool = False

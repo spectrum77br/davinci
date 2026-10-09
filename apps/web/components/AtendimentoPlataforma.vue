@@ -20,6 +20,9 @@ export type Flags = {
   // CHEGA ao comprador (`atendimento_simulador_exceto`). Vazio sem simulador.
   simulador_exceto?: string[]
   alerta_telegram?: boolean
+  // A triagem da Caixa Humano está rodando (09/10/2026). false = desligada no
+  // servidor: a Caixa Humano só mostra as de IA pausada. A API antiga não manda.
+  humano_ativa?: boolean
 }
 export type Canal = {
   id: string
@@ -59,6 +62,9 @@ export type ResumoPlataforma = {
   // por tipo — sac, atacado, duvidas (RF6, os chips do grupo Site).
   email_sem_vinculo?: number
   chamados?: Record<string, number>
+  // Na Caixa Humano (09/10/2026): falta responder e a IA não pode. A API
+  // antiga não manda (a aba fica sem número).
+  humano?: number
 }
 // `nao_lidas` = o número da PLATAFORMA (o mesmo contador vermelho do Duoke) e
 // `status_canal` = a saúde da leitura da loja (spec Duoke 2.4). Opcionais: a
@@ -92,6 +98,8 @@ export type ResumoLoja = {
   etiquetas?: ContagemEtiquetas
   // O "E-mail sem vínculo" da loja (RF5).
   email_sem_vinculo?: number
+  // Na Caixa Humano (ver ResumoPlataforma).
+  humano?: number
 }
 export type Resumo = {
   plataformas: ResumoPlataforma[]
@@ -103,6 +111,8 @@ export type Resumo = {
   etiquetas?: ContagemEtiquetas
   // O "E-mail sem vínculo" somando as plataformas (RF5).
   email_sem_vinculo?: number
+  // A Caixa Humano somando as plataformas: o número da aba (09/10/2026).
+  humano?: number
   // Lojas sem ler além do limite (05/10/2026): a faixa da Caixa e a marca
   // da aba "Lojas e modo". Opcional: a API antiga não manda (sem faixa).
   leitura_parada?: LeituraParada[]
@@ -178,6 +188,21 @@ export type ConversaResumo = {
   avaliacao_estrelas?: number | null
   // A conta do cadastro Redes Sociais no Direct do Instagram (02/10/2026).
   rede_social_id?: string | null
+  // Caixa Humano (09/10/2026): a conversa está nela AGORA (falta responder e
+  // a IA não pode responder), com os motivos. null = não está. Vem também na
+  // Caixa (o chip da linha) e no detalhe (a faixa da conversa). A API antiga
+  // não manda.
+  humano?: HumanoConversa | null
+}
+// Por que a conversa está na Caixa Humano (HumanoOut do backend): os códigos
+// (`constantes.ORDEM_HUMANO`, do mais importante para o menos), como a tela
+// escreve cada um (mesma ordem) e os assuntos só de pessoa que o cliente
+// citou. Só códigos e rótulos fixos — nada do texto do comprador.
+export type HumanoConversa = {
+  motivos: string[]
+  rotulos: string[]
+  assuntos: string[]
+  assuntos_rotulos: string[]
 }
 // Uma mudança de etiqueta (a linha do tempo): `por_nome` null = o sistema.
 export type EtiquetaHistorico = {
@@ -978,6 +1003,58 @@ export function categoriasDe(r: unknown): Categoria[] {
       ativa: o.ativa !== false,
       ordem: numero(o.ordem),
     }))
+}
+
+// ─── Caixa Humano (09/10/2026) ──────────────────────────────────────────────
+// O Eduardo: "criaremos ao lado da Caixa uma Caixa Humano [...] só as que
+// falta responder por um humano que a IA não conseguiu". Quem decide é o
+// backend (services/atendimento/humano.py: a régua da IA, sem chamar o
+// modelo); a tela só escreve os motivos. Os rótulos vêm da API
+// (`constantes.ROTULO_HUMANO`); estes são a reserva para código que a API
+// mandar sem rótulo — o atendimento-caixa-humano.cjs confere que são iguais.
+export const ROTULO_HUMANO: Record<string, string> = {
+  reclamacao: 'Reclamação aberta',
+  ag_cancelamento: 'Pedido em Ag. cancelamento',
+  devolucao: 'Pedido com devolução',
+  chamado: 'Pedido com chamado aberto',
+  avaliacao: 'Avaliação com nota baixa',
+  bloqueada: 'Bloqueada: responder na plataforma',
+  alerta: 'Procon, Justiça ou golpe',
+  xingamento: 'Cliente exaltado',
+  atendente: 'Pediu atendente',
+  instrucao: 'Texto com cara de instrução',
+  e_mail: 'E-mail: só pessoa',
+  pedido_nao_achado: 'Pedido não achado no Bling',
+  sem_dado: 'Falta dado (rastreio/NF)',
+  assunto: 'Assunto só de pessoa',
+  so_anexo: 'Só foto/vídeo/arquivo',
+  ia: 'A IA marcou: precisa de pessoa',
+  falha: 'Não deu para triar: confira',
+  ia_pausada: 'IA pausada',
+}
+// Os motivos escritos, na ordem da API; o "assunto" leva quais (Garantia,
+// Reembolso). Sem motivo nenhum (API estranha): "Precisa de uma pessoa".
+export function rotulosHumano(h: HumanoConversa | null | undefined): string[] {
+  if (!h) return []
+  const motivos = Array.isArray(h.motivos) ? h.motivos : []
+  const rotulos = Array.isArray(h.rotulos) ? h.rotulos : []
+  const assuntos = (Array.isArray(h.assuntos_rotulos) && h.assuntos_rotulos.length ? h.assuntos_rotulos : (h.assuntos || []).map((a) => categoriaLabel(a)))
+    .filter(Boolean)
+  const saida = motivos.map((m, i) => {
+    const r = rotulos[i] || ROTULO_HUMANO[m] || m
+    return m === 'assunto' && assuntos.length ? `${r}: ${assuntos.join(', ')}` : r
+  })
+  return saida.length ? saida : ['Precisa de uma pessoa']
+}
+// O chip da linha da lista: o primeiro motivo, "+N" os outros e todos no title.
+export function chipHumano(h: HumanoConversa | null | undefined): { texto: string; mais: number; titulo: string } | null {
+  if (!h) return null
+  const rs = rotulosHumano(h)
+  return {
+    texto: rs[0],
+    mais: rs.length - 1,
+    titulo: ['Caixa Humano — a IA não responde esta:', ...rs.map((r) => `• ${r}`)].join('\n'),
+  }
 }
 
 // ─── quem escreveu ──────────────────────────────────────────────────────────
