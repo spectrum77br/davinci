@@ -57,6 +57,7 @@ from app.routers import logistica_track as logistica_track_router
 from app.routers import mail as mail_router
 from app.routers import mail_agent_v2 as mail_agent_v2_router
 from app.routers import mail_atendimento as mail_atendimento_router
+from app.routers import mail_caixa as mail_caixa_router
 from app.routers import marca_emails as marca_emails_router
 from app.routers import marcas as marcas_router
 from app.routers import nfse as nfse_router
@@ -276,6 +277,10 @@ app.include_router(mail_router.router)
 # 08/10/2026: a configuração NOSSA de cada caixa da Central (privada × empresa,
 # ponte para o /atendimento, remetente estrito, modo de envio e tetos).
 app.include_router(mail_atendimento_router.router)
+# 09/10/2026: a aba E-mail › Caixas como no Tuta — as pastas (com a quantidade)
+# e a LOJA de cada e-mail (o selo), pelo índice leve da caixa. Mesma trava da
+# caixa dele (dono ou admin; quem não pode recebe 404).
+app.include_router(mail_caixa_router.router)
 # 08/10/2026: o contrato v2 do agente do Mac (o NOSSO conector do Tuta): ids e
 # pastas do Tuta, aliases da conta, contagem e movido/apagado. O v1 não muda.
 app.include_router(mail_agent_v2_router.router)

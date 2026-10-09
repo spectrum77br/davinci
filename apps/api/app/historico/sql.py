@@ -98,6 +98,9 @@ TETO_POR_PEDIDO = 200
 # envio incerto) e a regra de palavras das pastas são de pessoa: ficam. O que o
 # conector v2 escreve a cada volta (`mail_agente_v2`, `mail_message_tuta`,
 # `mail_reconciliation`) também é máquina: fora.
+# Aba E-mail › Caixas (09/10/2026, migration 0388): o índice leve da caixa
+# (`mail_caixa_indice`: a pasta e a loja provável de cada e-mail) é cache
+# escrito pela máquina a cada minuto. Fora.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -115,7 +118,7 @@ EXCLUIDAS = re.compile(
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"
     r"|automacao_registros|trocas)$"
     # a ponte do e-mail: o que a máquina decide de cada e-mail e as pastas
-    r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation)$"
+    r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation|caixa_indice)$"
     # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)
     r"|garantias$|garantia_(atendimentos|atendimento_anexos|log)$)"
     r"|(_bak|bkp|backup)",
