@@ -184,8 +184,8 @@ async function principal() {
     assert.match(rotas, /@router\.get\("\/mailboxes\/\{mailbox_id\}\/pastas"\)/)
     assert.match(rotas, /@router\.get\("\/mailboxes\/\{mailbox_id\}\/lista"\)/)
     assert.match(api('main.py'), /app\.include_router\(mail_caixa_router\.router\)/)
-    // A mesma permissão da caixa dele.
-    assert.equal((rotas.match(/mailbox = await user_mailbox\(session, mailbox_id, user\)/g) || []).length, 2)
+    // A permissão de LER a caixa dele (dono, admin ou leitor de "Quem mais vê").
+    assert.equal((rotas.match(/mailbox = await readable_mailbox\(session, mailbox_id, user\)/g) || []).length, 2)
     // Os parâmetros que a tela manda, com os nomes que a rota lê.
     const lista = rotas.slice(rotas.indexOf('async def lista_da_caixa('))
     for (const p of ['pasta', 'loja', 'antes', 'limite']) assert.match(lista, new RegExp(`\\n    ${p}: `), `lista: ${p}`)
