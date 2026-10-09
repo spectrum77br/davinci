@@ -11,6 +11,9 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
                                       códigos fora; nunca HTML) + os outros
                                       chamados abertos da cliente (RF6, agrupar)
     GET   …/anexos/{id}             — o anexo (octet-stream, nosniff, CSP sandbox)
+    GET   …/conversas/{id}/emails-da-venda — o resumo dos e-mails da venda (a
+                                      conversa e a família dela): caixa → loja,
+                                      pastas e quantos (o bloco do painel ④)
     GET   …/conversas/{id}/previa   — como a resposta vai sair e as travas de agora
     GET   …/saude                   — as caixas da EMPRESA (a privada só para o
                                       dono/admin) — e, para quem mexe, as lojas
@@ -25,7 +28,10 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
     POST  …/emails/{id}/ignorar     — tirar da fila (fica registrado)
     POST  …/emails/{id}/reprocessar — de novo pela ponte (sem loja, erro)
     POST  …/reprocessar             — a fila "sem loja" inteira (cadastro corrigido)
-    POST  …/conversas/{id}/agrupar  — juntar o chamado do site em outro (RF6)
+    POST  …/conversas/{id}/agrupar  — juntar dois chamados do site (RF6; fica o
+                                      mais antigo)
+    POST  …/conversas/{id}/nao-agrupar — "Não agrupar": a sugestão do par some
+                                      (lembrado nos dois, com quem e quando)
     GET   …/envios                  — as respostas pela fila da Central ("revisar envio")
     POST  …/envios/{job}/resolver   — saiu / não saiu (nunca reenvia)
     GET   …/pastas · PATCH …/pastas/{id} · GET …/regras · PUT …/regras
@@ -45,6 +51,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 from urllib.parse import quote
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -83,7 +90,7 @@ from app.routers.atendimento import (
 )
 from app.security.cipher import decrypt_bytes, decrypt_json
 from app.services import mail_central
-from app.services.atendimento import acesso, gravar
+from app.services.atendimento import abas, acesso, gravar
 from app.services.atendimento.constantes import AUTOR_SISTEMA, CANAL_EMAIL, FONTE_TUTA
 from app.services.mail_atendimento import (
     chamados,
@@ -125,6 +132,7 @@ Leitor = Annotated[User, Depends(_view)]
 
 POR_PAGINA = 50
 _PREFIXO = "/api/atendimento/email"
+_SP = ZoneInfo("America/Sao_Paulo")
 # As LEITURAS que só quem mexe faz: a exceção ao "quem só lê lê tudo" do
 # /atendimento (crítica de 08/10: as filas podem ter e-mail de qualquer loja e
 # de endereço interno). `tests/test_atendimento_so_leitura.py` confere a lista.
@@ -427,6 +435,19 @@ async def escolher_loja(
     else:
         raise HTTPException(422, detail={"code": "loja_vazia"})
     estado = await ponte.reprocessar(session, message_id, rota_forcada=rota)
+    if estado != ESTADO_SEM_LOJA:
+        # Auditoria (RF5, "toda ação registra quem e quando"): no cartão do
+        # e-mail e, se ele entrou numa conversa do e-mail, uma nota nela.
+        novo = await session.get(MailMessageMeta, message_id)
+        if novo is not None:
+            await _registrar_pessoa(
+                session,
+                novo,
+                user,
+                codigo="loja_escolhida",
+                frase=f"loja escolhida à mão por {_nome(user)}",
+                nota="E-mail ligado a esta loja à mão (fila sem loja) por {quem}.",
+            )
     await session.commit()
     logger.info(
         "mail_atendimento_loja_escolhida",
@@ -531,12 +552,64 @@ async def vincular(
         enviada_em=agora,
         payload={ponte.CHAVE: {"vinculado": True}},
     )
+    # A mesma auditoria no cartão do e-mail (quem e quando, também fora da conversa).
+    await session.refresh(meta)
+    await _registrar_pessoa(
+        session,
+        meta,
+        user,
+        codigo="vinculado_por_pessoa",
+        frase=f"vinculado ao pedido {pedido} por {_nome(user)}",
+    )
     await gravar._recalcular_etiqueta(
         session, alvo_final, motivo=gravar.MOTIVO_ETIQUETA_LEITURA, travar=False
     )
     await session.commit()
     logger.info("mail_atendimento_vinculado", message_id=str(message_id), user_id=str(user.id))
     return {"conversa_id": str(alvo_final.id), "pedido": pedido}
+
+
+def _nome(user: User) -> str:
+    return user.name or user.email
+
+
+async def _registrar_pessoa(
+    session: AsyncSession,
+    meta: MailMessageMeta,
+    user: User,
+    *,
+    codigo: str,
+    frase: str,
+    nota: str | None = None,
+) -> None:
+    """Quem fez e quando, no cartão do e-mail (`meta.alertas`: código, frase, o
+    id da pessoa e a hora) — e, com `nota`, uma nota de sistema na conversa
+    do e-mail (só na conversa da ponte). Não commita."""
+    agora = datetime.now(UTC)
+    quando = agora.astimezone(_SP).strftime("%d/%m/%Y %H:%M")
+    meta.alertas = [
+        *(meta.alertas or []),
+        {
+            "codigo": codigo,
+            "texto": f"{frase} em {quando}"[:300],
+            "por": str(user.id),
+            "em": agora.isoformat(),
+        },
+    ]
+    if nota is None or meta.conversa_id is None:
+        return
+    conversa = await session.get(AtendimentoConversa, meta.conversa_id)
+    if conversa is None or not ponte.e_conversa_da_ponte(conversa):
+        return
+    await gravar.gravar_mensagem(
+        session,
+        conversa,
+        externo_id=f"mail-{codigo}:{meta.message_id}:{int(agora.timestamp())}",
+        autor=AUTOR_SISTEMA,
+        texto=nota.format(quem=_nome(user)),
+        enviada_em=agora,
+        payload={ponte.CHAVE: {codigo: True}},
+    )
 
 
 async def _mover(session: AsyncSession, de: AtendimentoConversa, para: AtendimentoConversa) -> None:
@@ -573,11 +646,9 @@ async def ignorar(message_id: UUID, session: Session, user: Leitor) -> dict[str,
     )
     meta.estado = ESTADO_IGNORADO
     meta.motivo = IGNORADO_POR_PESSOA
-    alertas = list(meta.alertas or [])
-    alertas.append(
-        {"codigo": "ignorado_por_pessoa", "texto": f"ignorado por {user.name or user.email}"}
+    await _registrar_pessoa(
+        session, meta, user, codigo="ignorado_por_pessoa", frase=f"ignorado por {_nome(user)}"
     )
-    meta.alertas = alertas
     await session.commit()
     logger.info("mail_atendimento_ignorado", message_id=str(message_id), user_id=str(user.id))
     return {"id": str(message_id), "estado": meta.estado}
@@ -649,11 +720,115 @@ async def emails_da_conversa(
     ).all()
     nomes = await _nomes_das_lojas(session, {m.integration_id for m, _ in linhas})
     response.headers["Cache-Control"] = "no-store"
+    chamado = None
+    if chamados.e_chamado(conversa):
+        chamado = {
+            **chamados.resumo_do_chamado(
+                conversa, resposta_na_fila=await chamados.resposta_na_fila(session, conversa)
+            ),
+            # O pedido escrito no formulário, no Bling: só SUGESTÃO (nunca liga sozinho).
+            "pedido_sugerido": await chamados.pedido_sugerido(session, conversa, scope),
+        }
     return {
         "emails": [await _cartao(session, m, msg, nomes, com_texto=True) for m, msg in linhas],
-        "chamado": chamados.resumo_do_chamado(conversa) if chamados.e_chamado(conversa) else None,
+        "chamado": chamado,
         "outros_chamados": await chamados.outros_chamados(session, conversa),
     }
+
+
+@router.get("/conversas/{conversa_id}/emails-da-venda")
+async def emails_da_venda(
+    conversa_id: str, session: Session, user: Leitor, response: Response
+) -> dict[str, Any]:
+    """O bloco "E-mails da venda" do painel ④ (RF1/RF5, 09/10/2026).
+
+    Os e-mails que a ponte ligou à conversa aberta OU às conversas da mesma
+    venda (a família das abas: o mesmo comprador e pedido, na mesma loja —
+    `abas.familia`), resumidos por CAIXA (o endereço que recebeu → a loja do
+    cadastro) e PASTA, com quantos e o último. Sem texto, assunto nem
+    remetente: só o que o cartão de cada e-mail já mostra (pasta, endereço,
+    loja). No escopo da equipe, como a conversa.
+    """
+    scope = await resolve_team_scope(session, user)
+    conversa = await _conversa_ou_404(session, conversa_id, scope)
+    familia = await abas.familia(session, conversa)
+    ids = {c.id for c in familia.conversas} | {conversa.id}
+    linhas = (
+        await session.execute(
+            select(
+                MailMessageMeta.alias_recebido,
+                MailMessageMeta.integration_id,
+                MailMessageMeta.store_info_id,
+                MailMessageMeta.plataforma,
+                MailMessageMeta.folder_id,
+                MailMessageMeta.finalidade,
+                func.count(),
+                func.max(MailMessage.received_at),
+            )
+            .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
+            .where(
+                MailMessageMeta.conversa_id.in_(ids),
+                MailMessageMeta.estado.in_(ESTADOS_COM_TEXTO),
+            )
+            .group_by(
+                MailMessageMeta.alias_recebido,
+                MailMessageMeta.integration_id,
+                MailMessageMeta.store_info_id,
+                MailMessageMeta.plataforma,
+                MailMessageMeta.folder_id,
+                MailMessageMeta.finalidade,
+            )
+        )
+    ).all()
+    response.headers["Cache-Control"] = "no-store"
+    nomes = await _nomes_das_lojas(session, {i for _, i, *_ in linhas if i is not None})
+    fichas: dict[UUID, str | None] = {}
+    pastas: dict[UUID, str] = {}
+    caixas: dict[tuple, dict[str, Any]] = {}
+    for linha in linhas:
+        alias, integration_id, store_info_id, plataforma, folder_id, finalidade, n, ultimo = linha
+        loja = nomes.get(integration_id) if integration_id else None
+        if loja is None and store_info_id is not None:
+            if store_info_id not in fichas:
+                ficha = await session.get(StoreInfo, store_info_id)
+                nome = " ".join((ficha.account_name or "").split()) if ficha else ""
+                fichas[store_info_id] = nome or None
+            loja = fichas[store_info_id]
+        if folder_id is not None and folder_id not in pastas:
+            pasta = await session.get(MailFolder, folder_id)
+            pastas[folder_id] = pasta.nome if pasta is not None else ""
+        chave = (alias, integration_id, store_info_id, plataforma)
+        caixa = caixas.setdefault(
+            chave,
+            {
+                "caixa": alias,
+                "loja": loja,
+                "plataforma": plataforma,
+                "quantidade": 0,
+                "ultimo_em": None,
+                "pastas": [],
+            },
+        )
+        ultimo = gravar._utc(ultimo)
+        caixa["quantidade"] += int(n)
+        if ultimo is not None and (caixa["ultimo_em"] is None or ultimo > caixa["ultimo_em"]):
+            caixa["ultimo_em"] = ultimo
+        caixa["pastas"].append(
+            {
+                "pasta": (pastas.get(folder_id) or None) if folder_id is not None else None,
+                "finalidade": finalidade,
+                "destaque": finalidade in FINALIDADES_DESTAQUE,
+                "quantidade": int(n),
+            }
+        )
+    saida = sorted(
+        caixas.values(),
+        key=lambda c: c["ultimo_em"] or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+    for c in saida:
+        c["pastas"].sort(key=lambda p: (-p["quantidade"], p["pasta"] or ""))
+    return {"total": sum(c["quantidade"] for c in saida), "caixas": saida}
 
 
 @router.get("/anexos/{attachment_id}")
@@ -730,11 +905,15 @@ class AgruparIn(BaseModel):
 async def agrupar(
     conversa_id: str, body: AgruparIn, session: Session, user: Leitor
 ) -> dict[str, Any]:
-    """RF6: junta este chamado no chamado escolhido (mesma cliente, mesma marca), por clique."""
+    """RF6: junta este chamado e o escolhido (mesma cliente, mesma marca), por clique.
+
+    FICA o mais antigo dos dois (o protocolo principal), qualquer que seja o
+    lado de onde a pessoa clicou; a resposta diz qual ficou."""
     _mexe(user)
     scope = await resolve_team_scope(session, user)
-    origem = await _conversa_ou_404(session, conversa_id, scope)
-    destino = await _conversa_ou_404(session, str(body.conversa_id), scope)
+    este = await _conversa_ou_404(session, conversa_id, scope)
+    outro = await _conversa_ou_404(session, str(body.conversa_id), scope)
+    origem, destino = await chamados.ordem_do_agrupamento(session, este, outro)
     await _travar_ou_409(session, origem, "conversa_ocupada")
     await _travar_ou_409(session, destino, "conversa_ocupada")
     try:
@@ -749,7 +928,41 @@ async def agrupar(
         destino=str(destino.id),
         user_id=str(user.id),
     )
-    return {"conversa_id": str(destino.id)}
+    return {
+        "conversa_id": str(destino.id),
+        "protocolo": ponte.dados_mail(destino).get("protocolo"),
+        "protocolos": chamados.protocolos(destino),
+    }
+
+
+@router.post("/conversas/{conversa_id}/nao-agrupar")
+async def nao_agrupar(
+    conversa_id: str, body: AgruparIn, session: Session, user: Leitor
+) -> dict[str, Any]:
+    """RF6: "Não agrupar" — a sugestão deste par some (lembrado nos dois chamados,
+    com quem e quando). Agrupar à mão continua possível."""
+    _mexe(user)
+    scope = await resolve_team_scope(session, user)
+    este = await _conversa_ou_404(session, conversa_id, scope)
+    outro = await _conversa_ou_404(session, str(body.conversa_id), scope)
+    await _travar_ou_409(session, este, "conversa_ocupada")
+    await _travar_ou_409(session, outro, "conversa_ocupada")
+    try:
+        await chamados.recusar_agrupar(session, este, outro, user)
+    except chamados.AgruparError as erro:
+        await session.rollback()
+        raise HTTPException(erro.status, detail={"code": erro.codigo}) from None
+    await session.commit()
+    logger.info(
+        "mail_atendimento_agrupar_recusado",
+        conversa_id=str(este.id),
+        outro=str(outro.id),
+        user_id=str(user.id),
+    )
+    return {
+        "conversa_id": str(este.id),
+        "outros_chamados": await chamados.outros_chamados(session, este),
+    }
 
 
 # ── Revisar envio (quem mexe) ─────────────────────────────────────────────
@@ -870,6 +1083,13 @@ async def listar_pastas(
     if mailbox_id is not None:
         q = q.where(MailFolder.mailbox_id == mailbox_id)
     itens = []
+    # O nome de cada caixa (a tela Pastas e regras agrupa por caixa).
+    caixas = {
+        m.id: m.label
+        for m in (
+            await session.execute(select(MailMailbox).where(MailMailbox.id.in_(visiveis)))
+        ).scalars()
+    }
     for p in (await session.execute(q)).scalars():
         classe = regras.efetiva(p, r)
         itens.append(
@@ -892,8 +1112,12 @@ async def listar_pastas(
                 "sumiu_em": gravar._utc(p.sumiu_em),
             }
         )
+    usadas = {i["mailbox_id"] for i in itens}
     return {
         "itens": itens,
+        "caixas": [
+            {"id": str(mid), "nome": nome} for mid, nome in caixas.items() if str(mid) in usadas
+        ],
         "plataformas": list(PLATAFORMAS_PASTA),
         "finalidades": list(regras.FINALIDADES_VALIDAS),
     }

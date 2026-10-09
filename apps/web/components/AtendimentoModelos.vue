@@ -4,7 +4,8 @@
 // conversa). Cada uma pode valer para todas as lojas ou só para uma
 // plataforma/caixa — o menu da conversa mostra só as que servem ali.
 //
-// Lacunas: {numero_pedido}, {rastreio}, {transportadora}, {previsao_entrega} e
+// Lacunas: {numero_pedido}, {rastreio}, {transportadora}, {previsao_entrega},
+// {protocolo} (o chamado dos sites) e
 // {comprador} são trocadas pelo dado do pedido na hora de inserir. O que não
 // tiver dado fica entre chaves e a tela segura o envio até a pessoa trocar —
 // comprador nenhum recebe "{rastreio}".
@@ -176,7 +177,7 @@ async function apagar(m: Modelo) {
 // "{rastreio}" — escrito no script porque "}}" dentro de {{ }} fecha a
 // interpolação antes da hora no template.
 const comChaves = (chave: string) => `{${chave}}`
-const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'transportadora', 'previsao_entrega', 'comprador'].includes(l.chave))
+const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'transportadora', 'previsao_entrega', 'comprador', 'protocolo'].includes(l.chave))
 </script>
 
 <template>

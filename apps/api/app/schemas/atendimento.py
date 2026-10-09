@@ -731,6 +731,12 @@ class PlataformaResumoOut(BaseModel):
     # números do menu Filtrar. A ainda não calculada conta pela regra de
     # pré/pós-venda (a mesma do filtro).
     etiquetas: dict[str, int] = Field(default_factory=dict)
+    # O filtro "E-mail sem vínculo" (RF5, 09/10/2026): as conversas de e-mail
+    # da ponte (Tuta), NÃO fechadas, ainda sem pedido (fora os chamados dos sites).
+    email_sem_vinculo: int = 0
+    # Só no "site": os chamados NÃO fechados por tipo (RF6 — sac, atacado,
+    # duvidas), os números dos chips SAC / Atacado / Dúvidas e sugestões.
+    chamados: dict[str, int] = Field(default_factory=dict)
 
 
 class LojaResumoOut(BaseModel):
@@ -774,6 +780,8 @@ class LojaResumoOut(BaseModel):
     status_motivo: str | None = None
     # Conversas NÃO fechadas da loja por etiqueta (ver PlataformaResumoOut).
     etiquetas: dict[str, int] = Field(default_factory=dict)
+    # O "E-mail sem vínculo" da loja (ver PlataformaResumoOut).
+    email_sem_vinculo: int = 0
 
 
 class FlagsOut(BaseModel):
@@ -825,6 +833,8 @@ class ResumoOut(BaseModel):
     a_conferir: int = 0
     # Conversas NÃO fechadas por etiqueta, somando as plataformas.
     etiquetas: dict[str, int] = Field(default_factory=dict)
+    # O "E-mail sem vínculo" somando as plataformas (ver PlataformaResumoOut).
+    email_sem_vinculo: int = 0
     lojas: list[LojaResumoOut]
     canais: list[CanalOut]
     flags: FlagsOut

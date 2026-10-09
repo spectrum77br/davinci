@@ -350,9 +350,12 @@ const props = withDefaults(defineProps<{
   garantiaCarregando?: boolean
   garantiaErro?: string | null
   garantiaAcesso?: AcessoGarantia | null
+  // "E-mails da venda" (RF1/RF5, 09/10/2026): o `sinalDeEmails` da conversa
+  // (AtendimentoEmailVenda). 0 = a conversa não tem e-mail: o bloco não aparece.
+  emailsSinal?: number
 }>(), {
   cliente: null, leituraAtiva: true, atualizavel: null, painel: null, painelCarregando: false, painelErro: null, avaliacoes: null,
-  garantia: null, garantiaCarregando: false, garantiaErro: null, garantiaAcesso: null,
+  garantia: null, garantiaCarregando: false, garantiaErro: null, garantiaAcesso: null, emailsSinal: 0,
 })
 const emit = defineEmits<{
   (e: 'fechar'): void
@@ -1004,6 +1007,9 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
           </template>
           <p v-else class="text-[11px] text-muted-foreground">{{ margemPedido.aviso }}</p>
         </section>
+
+        <!-- E-MAILS DA VENDA (RF5): caixa → loja, pastas e quantos — só quando há e-mail -->
+        <AtendimentoEmailVenda v-if="emailsSinal" :conversa-id="conversa.id" :sinal="emailsSinal" />
 
         <!-- OBSERVAÇÕES DO BLING (GET ao vivo do pedido, só leitura) -->
         <section v-if="obsBling" class="space-y-1.5">

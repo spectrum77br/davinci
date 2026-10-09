@@ -175,6 +175,7 @@ from app.services.atendimento.constantes import (
     ETIQUETA_POS_VENDA,
     ETIQUETA_PRE_VENDA,
     ETIQUETAS,
+    FONTE_TUTA,
     MODO_AUTO,
     MODO_OBSERVAR,
     MODOS_QUE_ENVIAM,
@@ -208,6 +209,7 @@ from app.services.atendimento.constantes import (
     sla_horas,
 )
 from app.services.atendimento.enviar import EnvioRecusado
+from app.services.mail_atendimento.constantes import ROTULO_TIPO_CAIXA
 
 logger = structlog.get_logger()
 
@@ -334,7 +336,14 @@ FILTROS = (
     # Direct das redes (RF7), 02/10/2026.
     "carrinho",
     "midia",
+    # O e-mail das lojas que ainda não achou o pedido (RF5, 09/10/2026) — a
+    # fila "E-mail sem vínculo" de E-mail › Filas, aqui por conversa.
+    "email_sem_vinculo",
 )
+FILTRO_EMAIL_SEM_VINCULO = "email_sem_vinculo"
+# Os tipos do chamado dos sites (RF6): os chips SAC / Atacado / Dúvidas e
+# sugestões do grupo Site (`?tipo_chamado=`, sobre `dados.mail.caixa`).
+TIPOS_CHAMADO = tuple(ROTULO_TIPO_CAIXA)
 # "Vencendo" = prazo da plataforma em menos de 2 h (e ainda não vencido).
 VENCENDO = timedelta(hours=2)
 # A aba "Falta responder" vem pelo PRAZO mais curto (sem prazo no fim), não
@@ -738,6 +747,45 @@ def _etiqueta_efetiva():
             else_=ETIQUETA_PRE_VENDA,
         ),
     )
+
+
+def _email_sem_vinculo():
+    """O filtro "E-mail sem vínculo" (RF5, 09/10/2026), pela CONVERSA.
+
+    A conversa de e-mail da PONTE (canal e-mail, `dados.fonte = 'tuta'` com
+    `dados.mail`) que ainda não achou o pedido — a mesma régua do estado
+    `sem_vinculo` da ponte (`ponte.py`: gravado só com pedido). O chamado do
+    site (plataforma `site`) nunca tem pedido e fica de fora (ele tem os chips
+    do tipo). A situação (aberta/fechada) fica com quem chama.
+    """
+    pedido = func.coalesce(func.btrim(AtendimentoConversa.pedido_marketplace), "")
+    return and_(
+        AtendimentoConversa.canal == CANAL_EMAIL,
+        AtendimentoConversa.dados["fonte"].astext == FONTE_TUTA,
+        AtendimentoConversa.dados.has_key("mail"),
+        pedido == "",
+        AtendimentoConversa.plataforma != PLATAFORMA_SITE,
+    )
+
+
+def _tipo_do_chamado():
+    """O tipo do chamado do site (RF6): `dados.mail.caixa` — sac | atacado | duvidas."""
+    return AtendimentoConversa.dados["mail"]["caixa"].astext
+
+
+async def _chamados_por_tipo(session: AsyncSession, cond) -> dict[str, int]:
+    """Os chamados NÃO fechados dos sites por tipo (os números dos chips do
+    grupo Site), no escopo de quem pede — uma consulta, só quando há site."""
+    tipo = _tipo_do_chamado()
+    q = select(*[func.count().filter(tipo == t) for t in TIPOS_CHAMADO]).where(
+        AtendimentoConversa.plataforma == PLATAFORMA_SITE,
+        AtendimentoConversa.canal == CANAL_EMAIL,
+        AtendimentoConversa.situacao != CONVERSA_FECHADA,
+    )
+    if cond is not None:
+        q = q.where(cond)
+    linha = (await session.execute(q)).one()
+    return {t: int(n or 0) for t, n in zip(TIPOS_CHAMADO, linha, strict=True)}
 
 
 def _cursor(
@@ -1347,6 +1395,7 @@ def _juntar_externas(
         alvo.aguardando += lj.aguardando
         alvo.vencidas += lj.vencidas
         alvo.nao_lidas += lj.nao_lidas
+        alvo.email_sem_vinculo += lj.email_sem_vinculo
         alvo.etiquetas = {
             e: alvo.etiquetas.get(e, 0) + lj.etiquetas.get(e, 0)
             for e in {*alvo.etiquetas, *lj.etiquetas}
@@ -1432,6 +1481,7 @@ async def resumo(
     aberta = AtendimentoConversa.situacao != CONVERSA_FECHADA
     efetiva = _etiqueta_efetiva()
     por_etiqueta = [func.count().filter(aberta, efetiva == e) for e in ETIQUETAS]
+    sem_vinculo = func.count().filter(aberta, _email_sem_vinculo())
 
     def _etiquetas(contagens) -> dict[str, int]:
         return {e: int(n or 0) for e, n in zip(ETIQUETAS, contagens, strict=True)}
@@ -1443,6 +1493,7 @@ async def resumo(
         func.count().filter(vencidas),
         func.count().filter(_a_conferir_existe()),
         nao_lidas,
+        sem_vinculo,
         *por_etiqueta,
     ).group_by(AtendimentoConversa.plataforma)
     if cond is not None:
@@ -1456,9 +1507,13 @@ async def resumo(
             a_conferir=r or 0,
             nao_lidas=int(n or 0),
             etiquetas=_etiquetas(etq),
+            email_sem_vinculo=int(sv or 0),
         )
-        for p, a, v, x, r, n, *etq in (await session.execute(q_plat)).all()
+        for p, a, v, x, r, n, sv, *etq in (await session.execute(q_plat)).all()
     }
+    if PLATAFORMA_SITE in por_plataforma:
+        # Os chips SAC / Atacado / Dúvidas e sugestões do grupo Site (RF6).
+        por_plataforma[PLATAFORMA_SITE].chamados = await _chamados_por_tipo(session, cond)
     canais = await _canais(session, scope)
     # As do robô (Temu/AliExpress) e as externas (sites, redes — 02/10/2026)
     # só quando existem: loja com canal ou conversa. O Direct do Instagram
@@ -1514,6 +1569,7 @@ async def resumo(
         func.count().filter(aguardando),
         func.count().filter(vencidas),
         nao_lidas,
+        sem_vinculo,
         *por_etiqueta,
     ).group_by(
         AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_sem_integracao
@@ -1530,8 +1586,9 @@ async def resumo(
             aguardando=a or 0,
             vencidas=x or 0,
             etiquetas=_etiquetas(etq),
+            email_sem_vinculo=int(sv or 0),
         )
-        for i, p, rc, conta, a, x, n, *etq in (await session.execute(q_loja)).all()
+        for i, p, rc, conta, a, x, n, sv, *etq in (await session.execute(q_loja)).all()
     }
     canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]] = {}
     for c in canais:
@@ -1576,6 +1633,7 @@ async def resumo(
         plataformas=plataformas,
         a_conferir=sum(p.a_conferir for p in plataformas),
         etiquetas={e: sum(p.etiquetas.get(e, 0) for p in plataformas) for e in ETIQUETAS},
+        email_sem_vinculo=sum(p.email_sem_vinculo for p in plataformas),
         lojas=sorted(
             barra,
             key=lambda lj: (
@@ -1648,6 +1706,7 @@ async def _listar_marketplace(
     externo_ref: str | None = None,
     rede_social_id: UUID | None = None,
     perguntas_primeiro: bool = False,
+    tipo_chamado: str | None = None,
 ) -> list[dict[str, Any]]:
     agora = datetime.now(UTC)
     tem = _pendente_existe()
@@ -1716,6 +1775,11 @@ async def _listar_marketplace(
         # (robô ou campanha do Duoke, cartão da Shopee, senha da devolução —
         # `constantes.e_mensagem_automatica`) falou depois do comprador.
         consulta = consulta.where(aguardando, AtendimentoConversa.ultima_autor == AUTOR_LOJA)
+    elif filtro == FILTRO_EMAIL_SEM_VINCULO:
+        # O e-mail das lojas sem pedido (RF5): as abertas, como em "todas".
+        consulta = consulta.where(
+            AtendimentoConversa.situacao != CONVERSA_FECHADA, _email_sem_vinculo()
+        )
     elif filtro in ETIQUETAS:
         # Pela ETIQUETA (status atual): Pré-venda, Pós-venda, Reclamação,
         # Devolução, Ag. cancelamento — as abertas (a fechada sai, como em
@@ -1727,6 +1791,14 @@ async def _listar_marketplace(
     if etiqueta:
         # `?etiqueta=` junto de qualquer filtro (ex.: Falta responder + Reclamação).
         consulta = consulta.where(_etiqueta_efetiva() == etiqueta)
+    if tipo_chamado:
+        # Os chips do grupo Site (RF6): o chamado do tipo, junto de qualquer
+        # filtro (Todas, Falta responder…). Só o chamado da ponte tem o tipo.
+        consulta = consulta.where(
+            AtendimentoConversa.plataforma == PLATAFORMA_SITE,
+            AtendimentoConversa.canal == CANAL_EMAIL,
+            _tipo_do_chamado() == tipo_chamado,
+        )
     if q and q.strip():
         termo_exato = q.strip()
         termo = f"%{_escapar_like(termo_exato)}%"
@@ -1749,6 +1821,15 @@ async def _listar_marketplace(
                 AtendimentoConversa.pedido_marketplace.in_(no_bling),
                 AtendimentoConversa.dados["pack_id"].astext.in_(no_bling),
                 AtendimentoConversa.dados["order_id"].astext.in_(no_bling),
+                # Os chamados dos sites (RF6): TODOS os protocolos do chamado —
+                # o principal e os agrupados nele (o 2º sumia de "Todas" assim
+                # que chegava mensagem nova: só o resumo da última o achava).
+                AtendimentoConversa.dados["mail"]["protocolo"].astext.ilike(
+                    termo, escape="\\"
+                ),
+                AtendimentoConversa.dados["mail"]["protocolos"].astext.ilike(
+                    termo, escape="\\"
+                ),
             )
         )
     if filtro in FILTROS_PELO_PRAZO:
@@ -1827,6 +1908,7 @@ async def listar_conversas(
     etiqueta: Annotated[str | None, Query(max_length=24)] = None,
     externo_ref: Annotated[str | None, Query(max_length=191)] = None,
     rede_social_id: Annotated[UUID | None, Query()] = None,
+    tipo_chamado: Annotated[str | None, Query(max_length=16)] = None,
 ) -> ListaConversasOut:
     """A fila, mais recente primeiro; página seguinte com `antes_de=<proximo>`.
 
@@ -1844,6 +1926,9 @@ async def listar_conversas(
     Na etiqueta Avaliação, `avaliacao_estrelas` traz a pior nota pendente. A aba
     "Falta responder" (`aguardando`) vem pelo PRAZO mais curto, sem prazo no
     fim — e o cursor (`proximo`) é o do prazo.
+    `tipo_chamado` (sac | atacado | duvidas) filtra os chamados dos sites pelo
+    tipo (os chips do grupo Site, RF6); `filtro=email_sem_vinculo` traz as
+    conversas de e-mail das lojas ainda sem pedido (RF5).
     """
     plataformas = _plataformas_do_filtro(plataforma)
     canal = (canal or "").strip().lower() or None
@@ -1858,6 +1943,9 @@ async def listar_conversas(
         raise HTTPException(422, detail={"code": "filtro_invalido"})
     if etiqueta and etiqueta not in ETIQUETAS:
         raise HTTPException(422, detail={"code": "etiqueta_invalida"})
+    tipo_chamado = (tipo_chamado or "").strip().lower() or None
+    if tipo_chamado and tipo_chamado not in TIPOS_CHAMADO:
+        raise HTTPException(422, detail={"code": "tipo_chamado_invalido"})
     pelo_prazo = filtro in FILTROS_PELO_PRAZO
     perguntas_primeiro = filtro in FILTROS_PERGUNTA_PRIMEIRO
     # Cursor inválido (ou da outra ordem) → 422 antes de ir ao banco.
@@ -1884,6 +1972,7 @@ async def listar_conversas(
             externo_ref=externo_ref,
             rede_social_id=rede_social_id,
             perguntas_primeiro=perguntas_primeiro,
+            tipo_chamado=tipo_chamado,
         )
     quer_instagram = (
         (not plataformas or instagram.PLATAFORMA in plataformas)
@@ -1896,6 +1985,9 @@ async def listar_conversas(
         # MÍDIA (RF7: a mensagem privada das redes é Mídia).
         and etiqueta in (None, ETIQUETA_MIDIA)
         and (filtro not in ETIQUETAS or filtro == ETIQUETA_MIDIA)
+        # O e-mail das lojas e o chamado do site nunca são o Direct.
+        and filtro != FILTRO_EMAIL_SEM_VINCULO
+        and tipo_chamado is None
     )
     # No filtro Mídia, o DM vale como "todas" (as não silenciadas).
     filtro_dm = "todas" if filtro == ETIQUETA_MIDIA else filtro
@@ -2061,6 +2153,17 @@ async def _pedido_atualizavel(session: AsyncSession, conversa: AtendimentoConver
     return canal is None or canal.status != _CANAL_DESLIGADO
 
 
+def _limite_da_resposta(conversa: AtendimentoConversa) -> int:
+    """O tamanho máximo da resposta: o do canal; no e-mail da ponte, o do e-mail
+    (`mail_atendimento.constantes.RESPOSTA_MAX_CARACTERES` — o mesmo que o
+    envio confere), não os 1000 do canal."""
+    if _email_da_ponte(conversa):
+        from app.services.mail_atendimento.constantes import RESPOSTA_MAX_CARACTERES
+
+        return RESPOSTA_MAX_CARACTERES
+    return limite_caracteres(conversa.plataforma, conversa.canal)
+
+
 async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioOut:
     # Modo observação = quem responde é o Duoke/Seller Center: a loja em
     # `observar` ou o envio desligado no servidor. A tela troca a caixa de
@@ -2093,7 +2196,7 @@ async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioO
         pode_enviar=recusa is None,
         motivo=str(recusa.detail) if recusa else None,
         codigo=recusa.code if recusa else None,
-        limite_caracteres=limite_caracteres(conversa.plataforma, conversa.canal),
+        limite_caracteres=_limite_da_resposta(conversa),
         # Sem canal não há modo: "observar" diria que a loja existe e só lê.
         modo=canal.modo if canal is not None else None,
         sla_horas=sla_horas(conversa.plataforma, conversa.canal),

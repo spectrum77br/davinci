@@ -18,6 +18,9 @@
 //                   ou pegou e sumiu há mais de 15 min): conferir nos Enviados
 //                   do Tuta e marcar Saiu / Não saiu — nunca reenvia (a regra
 //                   da Central).
+//   Pastas e regras — (não é fila) as pastas de cada caixa e a tabela de
+//                   palavras (AtendimentoMailPastas, 09/10/2026): ver todos
+//                   que mexem; mudar, admin.
 //
 // O texto (protegido: links de acesso e códigos fora, nunca HTML) só abre no
 // "ver o e-mail" (GET …/emails/{id}). Rotas: routers/atendimento_email.py.
@@ -184,6 +187,12 @@ const lojaEscolhida = reactive<Record<string, string>>({})
 let geracao = 0
 
 const acoes = computed(() => acoesDaFila(fila.value, props.isAdmin))
+// "Pastas e regras" não é fila: a aba ao lado das filas (a fila fica guardada).
+const pastasAbertas = ref(false)
+function verFila(f: Fila) {
+  pastasAbertas.value = false
+  fila.value = f
+}
 const filaInfo = computed(() => FILAS.find((f) => f.value === fila.value) || FILAS[0])
 
 async function carregarContagens() {
@@ -342,32 +351,46 @@ const curto = (p: string) => plataformaInfo(p).curto
         :key="f.value"
         type="button"
         role="tab"
-        :aria-selected="fila === f.value"
+        :aria-selected="!pastasAbertas && fila === f.value"
         class="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs"
-        :class="fila === f.value ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60'"
+        :class="!pastasAbertas && fila === f.value ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60'"
         :title="f.dica"
         :data-fila="f.value"
-        @click="fila = f.value"
+        @click="verFila(f.value)"
       >
         {{ f.label }}
         <span v-if="contagens[f.value]" class="rounded-full bg-background px-1.5 text-[10px] tabular-nums ring-1 ring-border">{{ contagens[f.value] }}</span>
       </button>
-      <button type="button" class="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" :disabled="carregando" @click="atualizar">
+      <button
+        type="button"
+        role="tab"
+        :aria-selected="pastasAbertas"
+        class="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs"
+        :class="pastasAbertas ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60'"
+        title="As pastas de cada caixa (o que entra no Atendimento) e as palavras que dizem a plataforma"
+        data-fila="pastas"
+        @click="pastasAbertas = true"
+      >Pastas e regras</button>
+      <button v-if="!pastasAbertas" type="button" class="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" :disabled="carregando" @click="atualizar">
         <RefreshCw class="size-3.5" :class="{ 'animate-spin': carregando }" /> atualizar
       </button>
     </div>
 
-    <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+    <!-- pastas e regras (não é fila) -->
+    <AtendimentoMailPastas v-if="pastasAbertas" :is-admin="isAdmin" />
+
+    <div v-if="!pastasAbertas" class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       <span>{{ filaInfo.dica }}</span>
       <button v-if="acoes.reprocessarFila" type="button" class="ml-auto inline-flex items-center gap-1 rounded border px-2 py-0.5 text-foreground hover:bg-muted" :disabled="!!ocupado" title="depois de corrigir o cadastro (Cadastros › Lojas), passa a fila de novo pela ponte" @click="reprocessarFila">
         <RotateCcw class="size-3.5" /> reprocessar a fila
       </button>
     </div>
 
-    <div v-if="erro" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">{{ erro }}</div>
+    <div v-if="erro && !pastasAbertas" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">{{ erro }}</div>
 
     <!-- revisar envio -->
-    <template v-if="fila === 'revisar_envio'">
+    <template v-if="pastasAbertas" />
+    <template v-else-if="fila === 'revisar_envio'">
       <div v-if="carregando && !envios.length" class="flex justify-center py-8"><Loader2 class="size-5 animate-spin" /></div>
       <div v-else-if="!envios.length" class="py-8 text-center text-xs text-muted-foreground">Nenhuma resposta esperando conferência.</div>
       <ul v-else class="space-y-2">

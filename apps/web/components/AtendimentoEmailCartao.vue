@@ -91,16 +91,43 @@ export type CartaoEmail = {
   links_removidos?: number
   anexos?: AnexoDoEmail[]
 }
+export type PedidoSugerido = {
+  numero: string
+  achado: boolean
+  // `confere`: o destinatário tem o nome da cliente (true), outro nome (false:
+  // pode ser o pedido de OUTRA pessoa — o nome dela nunca vem) ou não dá para saber.
+  pedidos: { numero_bling: string | null; numero_loja: string | null; data: string | null; confere: boolean | null }[]
+}
 export type Chamado = {
   conversa_id: string
   protocolo: string | null
+  // Todos os protocolos do chamado: o principal primeiro e os agrupados nele.
+  protocolos?: string[]
   marca: string | null
   marca_nome: string | null
   tipo: string | null
   tipo_rotulo: string | null
   situacao: string
+  // Aberto · Aguardando cliente · Resolvido (derivado da conversa).
+  status?: string
+  status_rotulo?: string
+  criado_em?: string | null
   ultima_mensagem_em: string | null
+  // Do formulário do site (RF6).
+  cliente_nome?: string | null
+  telefone?: string | null
+  pedido_citado?: string | null
+  alertas?: { codigo: string; texto: string }[]
+  pedido_sugerido?: PedidoSugerido | null
+  // Só nos "outros chamados" (a sugestão de agrupar): por que é a mesma
+  // cliente e se é ESTE que fica ao agrupar (o mais antigo).
+  motivo?: string
+  motivo_rotulo?: string
+  fica_este?: boolean
 }
+// Os registros de quem fez (auditoria) que vêm junto dos alertas do cartão:
+// não são alerta, a tela mostra sem o triângulo.
+export const REGISTROS_DE_PESSOA = new Set(['loja_escolhida', 'vinculado_por_pessoa', 'ignorado_por_pessoa'])
 export type CartoesDaConversa = { emails: CartaoEmail[]; chamado: Chamado | null; outros_chamados: Chamado[] }
 
 // A mensagem tem CARTÃO de e-mail? A nossa resposta, ou um e-mail recebido de
@@ -305,9 +332,12 @@ const respondivel = computed(() => !!props.podeResponder && !!props.email.messag
           <template v-if="cartao.pedido"><span class="text-muted-foreground">Pedido</span><span>{{ cartao.pedido }}</span></template>
           <template v-if="cartao.protocolo"><span class="text-muted-foreground">Protocolo</span><span>{{ cartao.protocolo }}<template v-if="cartao.tipo_caixa_rotulo"> · {{ cartao.tipo_caixa_rotulo }}</template></span></template>
         </div>
-        <div v-for="a in cartao.alertas" :key="a.codigo" class="flex items-start gap-1 text-amber-800 dark:text-amber-300">
-          <TriangleAlert class="mt-px size-3 shrink-0" aria-hidden="true" /><span>{{ a.texto }}</span>
-        </div>
+        <template v-for="(a, i) in cartao.alertas" :key="`${a.codigo}-${i}`">
+          <div v-if="REGISTROS_DE_PESSOA.has(a.codigo)" class="text-[11px] text-muted-foreground" data-email-registro>{{ a.texto }}</div>
+          <div v-else class="flex items-start gap-1 text-amber-800 dark:text-amber-300">
+            <TriangleAlert class="mt-px size-3 shrink-0" aria-hidden="true" /><span>{{ a.texto }}</span>
+          </div>
+        </template>
         <div v-for="(p, i) in protecao" :key="i" class="text-[11px] text-muted-foreground" data-email-protecao>{{ p }}</div>
         <!-- texto só (nunca HTML), já protegido no servidor -->
         <pre class="max-h-[360px] overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">{{ cartao.texto || '(e-mail sem texto)' }}</pre>

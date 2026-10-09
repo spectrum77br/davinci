@@ -215,8 +215,9 @@ import {
   type AbasResposta,
 } from '~/components/AtendimentoAbas.vue'
 import { etiquetaInfo } from '~/components/AtendimentoEtiqueta.vue'
-import { CODIGOS_CONFIRMAVEIS, LIMITE_RESPOSTA_EMAIL, TRAVAS_GERAIS_DO_EMAIL, corpoDoEmail, ehEmailDaPonte } from '~/components/AtendimentoEmailResposta.vue'
+import { AVISO_EMAIL_NA_FILA, CODIGOS_CONFIRMAVEIS, LIMITE_RESPOSTA_EMAIL, TRAVAS_GERAIS_DO_EMAIL, corpoDoEmail, ehEmailDaPonte } from '~/components/AtendimentoEmailResposta.vue'
 import { conversasComEmail, ehCartaoDeEmail, urlDosCartoes, type CartaoEmail, type CartoesDaConversa } from '~/components/AtendimentoEmailCartao.vue'
+import { sinalDeEmails } from '~/components/AtendimentoEmailVenda.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
@@ -903,6 +904,10 @@ const moderacao = computed(() => passaPelaModeracao(conversa.value?.plataforma))
 const observacao = computed(() => {
   const d = detalhe.value
   if (!d) return false
+  // E-mail da ponte — até o da loja Temu/AliExpress (a ficha sem integração):
+  // quem responde é uma pessoa, pela caixa de resposta (o e-mail sai pelo Tuta);
+  // nunca o painel "o que a IA responderia" (a IA não responde e-mail, S11).
+  if (ehEmail.value) return false
   if (sellerCenterDe(d.conversa.plataforma)) return true
   if (d.conversa.somente_leitura) return false
   if (typeof d.envio.modo_observacao === 'boolean') return d.envio.modo_observacao
@@ -1135,6 +1140,12 @@ const chamadoNaTela = computed<CartoesDaConversa | null>(() => {
   }
   return null
 })
+// "Não agrupar": a faixa já tirou a sugestão; os cartões são relidos (a
+// sugestão sumiu dos dois chamados no servidor).
+function aoRecusarAgrupar() {
+  cartoesLidos.clear()
+  void carregarCartoesEmail(emailsNaTela.value)
+}
 function aoAgruparChamado(destino: string) {
   const origem = chamadoNaTela.value?.chamado?.conversa_id
   if (origem && origem === props.conversaId && destino !== origem) {
@@ -1153,8 +1164,11 @@ const bloqueioEnvio = computed(() => {
   const d = detalhe.value
   if (!d) return ''
   // Temu/AliExpress: a caixa nem aparece (observação); isto trava o envio
-  // também por qualquer outro caminho (Ctrl+Enter, "enviar mesmo assim").
-  if (sellerCenterDe(d.conversa.plataforma)) return motivoSellerCenter(d.conversa.plataforma)
+  // também por qualquer outro caminho (Ctrl+Enter, "enviar mesmo assim"). O
+  // e-mail da ponte dessas lojas não: ele sai pelo Tuta (as travas do e-mail).
+  if (!ehEmail.value) {
+    if (sellerCenterDe(d.conversa.plataforma)) return motivoSellerCenter(d.conversa.plataforma)
+  }
   if (d.conversa.somente_leitura) {
     return d.conversa.plataforma === 'instagram'
       ? 'Direct do Instagram: aqui é só leitura — responda pela caixa de entrada do Instagram.'
@@ -1316,6 +1330,7 @@ function concluirEnvio(id: string, m: Mensagem | null | undefined, sugestao: Sug
   const detalheEnvio = sim || (passaPelaModeracao(plataforma) ? MODERACAO_MAGALU_ENVIADA : '')
   if (!m || m.status === 'enviada') toasts.success(`Resposta enviada${onde}`, detalheEnvio || undefined)
   else if (m.status === 'revisar') toasts.warning(`Não deu para confirmar o envio${onde}`, 'Pode ter saído. Confira na plataforma e marque no balão se saiu — o DaVinci não tenta de novo sozinho.')
+  else if (m.email?.tipo === 'resposta') toasts.info(`${AVISO_EMAIL_NA_FILA.titulo}${onde}`, AVISO_EMAIL_NA_FILA.texto)
   else toasts.info(`Resposta saindo${onde}`, 'Acompanhe o status no balão.')
 }
 
@@ -1730,6 +1745,8 @@ const dadosLacunas = computed<Record<string, string | null | undefined>>(() => {
     data_envio: envio ? fmtData(envio) : '',
     nf_numero: ctx?.nota_fiscal?.numero,
     comprador: primeiroNome(c?.comprador_nome),
+    // O chamado do site (RF6): o protocolo principal.
+    protocolo: chamadoNaTela.value?.chamado?.protocolo,
   }
 })
 function inserirModelo(m: Modelo) {
@@ -2095,6 +2112,10 @@ async function tentarDeNovo(m: Mensagem) {
   const body: Record<string, unknown> = { texto: m.texto }
   const vista = ultimaVista(d)
   if (vista) body.ultima_vista_id = vista
+  // E-mail: de novo para o MESMO e-mail que a resposta respondia (sem o id, o
+  // servidor responderia o mais novo).
+  const mailId = m.email?.tipo === 'resposta' ? m.email.message_id : null
+  if (mailId) body.mail_message_id = mailId
   tentandoId.value = m.id
   enviandoIds.add(id)
   try {
@@ -2102,6 +2123,7 @@ async function tentarDeNovo(m: Mensagem) {
     const nova = r?.mensagem
     if (nova?.status === 'falhou') toasts.error('A plataforma recusou de novo', erroEnvioLegivel(nova.erro))
     else if (nova?.status === 'revisar') toasts.warning('Não deu para confirmar o envio', 'Pode ter saído. Confira na plataforma e marque no balão se saiu.')
+    else if (nova?.status === 'enviando' && nova.email?.tipo === 'resposta') toasts.info(AVISO_EMAIL_NA_FILA.titulo, AVISO_EMAIL_NA_FILA.texto)
     else toasts.success('Resposta enviada')
   } catch (e: any) {
     const code = e?.data?.detail?.code
@@ -2147,6 +2169,9 @@ function alternarPedido() {
   }
 }
 const pedidoVisivel = computed(() => (telaLarga.value ? !recolhido.value : gaveta.value))
+// "E-mails da venda" no painel (RF5): a conversa (ou a venda dela) tem e-mail?
+// O número muda quando chega e-mail — o bloco relê.
+const emailsSinal = computed(() => sinalDeEmails(abasDados.value, detalhe.value?.mensagens))
 
 // Troca de conversa: guarda o que estava escrito na anterior, limpa o estado
 // da tela e abre a nova. Fica no fim do setup porque roda na hora (immediate)
@@ -2679,6 +2704,8 @@ watch(() => props.conversaId, (novo, velho) => {
           :outros="chamadoNaTela.outros_chamados || []"
           :pode-mexer="canEdit"
           @agrupado="aoAgruparChamado"
+          @abrir="(id: string) => emit('abrirConversa', id)"
+          @recusado="aoRecusarAgrupar"
         />
 
         <!-- mensagens -->
@@ -3148,7 +3175,9 @@ watch(() => props.conversaId, (novo, velho) => {
                 </PopoverContent>
               </PopoverPortal>
             </PopoverRoot>
-            <Button v-if="podeSugerir" size="sm" variant="outline" class="h-8 px-2 text-xs" :disabled="gerando" title="pedir uma sugestão de resposta à IA agora" @click="sugerir">
+            <!-- E-mail da ponte: a IA nunca responde e-mail — o botão nem aparece (o
+                 servidor recusa com a mesma frase, MOTIVO_EMAIL_SO_PESSOA). -->
+            <Button v-if="podeSugerir && !ehEmail" size="sm" variant="outline" class="h-8 px-2 text-xs" :disabled="gerando" title="pedir uma sugestão de resposta à IA agora" @click="sugerir">
               <Loader2 v-if="gerando" class="mr-1 size-3.5 animate-spin" />
               <Sparkles v-else class="mr-1 size-3.5" />
               Sugerir resposta
@@ -3204,6 +3233,7 @@ watch(() => props.conversaId, (novo, velho) => {
         :garantia-carregando="garantiaCarregando"
         :garantia-erro="garantiaErro"
         :garantia-acesso="garantiaAcesso"
+        :emails-sinal="emailsSinal"
         @vincular-garantia="vincularAberto = true"
         @recarregar-garantia="carregarGarantia(detalhe!.conversa.id)"
         @fechar="alternarPedido"

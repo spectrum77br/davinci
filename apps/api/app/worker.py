@@ -1248,6 +1248,7 @@ async def mail_ponte(ctx: dict) -> dict | None:  # noqa: ARG001
     """
     from app.redis_client import redis as _redis
     from app.services.mail_atendimento import ponte as _mail_ponte
+    from app.services.mail_atendimento import saude as _mail_saude
 
     try:
         pegou = await _redis.set(_MAIL_PONTE_TRAVA, "1", nx=True, ex=_MAIL_PONTE_TRAVA_TTL_S)
@@ -1258,7 +1259,11 @@ async def mail_ponte(ctx: dict) -> dict | None:  # noqa: ARG001
         return {"pulado": True}
     try:
         async with session_scope() as s:
-            return await _mail_ponte.rodar(s)
+            resumo = await _mail_ponte.rodar(s)
+        # A volta terminou: o carimbo que a faixa "sem ler" olha (a ponte parada
+        # com e-mail esperando acende a faixa — saude.caixas_paradas).
+        await _mail_saude.carimbar_ponte()
+        return resumo
     except Exception as e:  # noqa: BLE001 — a próxima volta tenta de novo
         logger.error("mail_ponte_falhou", err=type(e).__name__)
         return None

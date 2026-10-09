@@ -150,7 +150,8 @@ async function principal() {
       ['get', '/filas'], ['get', '/emails'], ['get', '/emails/{message_id}'], ['post', '/emails/{message_id}/loja'],
       ['post', '/emails/{message_id}/vincular'], ['post', '/emails/{message_id}/ignorar'], ['post', '/emails/{message_id}/reprocessar'],
       ['post', '/reprocessar'], ['get', '/conversas/{conversa_id}/emails'], ['get', '/anexos/{attachment_id}'],
-      ['get', '/conversas/{conversa_id}/previa'], ['post', '/conversas/{conversa_id}/agrupar'], ['get', '/envios'],
+      ['get', '/conversas/{conversa_id}/previa'], ['post', '/conversas/{conversa_id}/agrupar'],
+      ['post', '/conversas/{conversa_id}/nao-agrupar'], ['get', '/envios'],
       ['post', '/envios/{job_id}/resolver'], ['get', '/saude'],
     ]) assert.ok(rotas.includes(`@router.${metodo}("${caminho}")`), `rota ${metodo} ${caminho}`)
     assert.match(rotas, /prefix="\/api\/atendimento\/email"/)
@@ -178,8 +179,9 @@ async function principal() {
     // O "não responder" confirmável e as travas gerais: os códigos do backend.
     assert.match(responder, new RegExp(`^RECUSA_NAO_RESPONDE = "${R.CODIGO_NAO_RESPONDE}"$`, 'm'))
     assert.match(responder, new RegExp(`^RECUSA_JA_RESPONDIDO = "${R.CODIGO_JA_RESPONDIDO}"$`, 'm'))
-    assert.match(responder, /CONFIRMAVEIS = frozenset\(\{RECUSA_NAO_RESPONDE, RECUSA_JA_RESPONDIDO\}\)/)
-    assert.deepEqual([...R.CODIGOS_CONFIRMAVEIS].sort(), [R.CODIGO_JA_RESPONDIDO, R.CODIGO_NAO_RESPONDE].sort())
+    assert.match(responder, new RegExp(`^RECUSA_PARA_FORA_DO_CHAMADO = "${R.CODIGO_PARA_FORA_DO_CHAMADO}"$`, 'm'))
+    assert.match(responder, /CONFIRMAVEIS = frozenset\(\s*\{RECUSA_NAO_RESPONDE, RECUSA_JA_RESPONDIDO, RECUSA_PARA_FORA_DO_CHAMADO\}\s*\)/)
+    assert.deepEqual([...R.CODIGOS_CONFIRMAVEIS].sort(), [R.CODIGO_JA_RESPONDIDO, R.CODIGO_NAO_RESPONDE, R.CODIGO_PARA_FORA_DO_CHAMADO].sort())
     for (const c of R.TRAVAS_GERAIS_DO_EMAIL) assert.match(enviar, new RegExp(`^RECUSA_[A-Z_]+ = "${c}"$`, 'm'), `trava geral ${c}`)
     assert.match(schemas, /class ResponderIn\(BaseModel\):[\s\S]*?confirmar_nao_responde: bool = False\s+mail_message_id: UUID \| None = None/)
     assert.match(schemas, /class MensagemOut\(BaseModel\):[\s\S]*?email: dict\[str, Any\] \| None = None/)
@@ -271,6 +273,11 @@ async function principal() {
     assert.match(R.rotuloDaConfirmacao(previa([nr])), /não responder/)
     assert.match(R.rotuloDaConfirmacao(previa([jr])), /caixa da Central não basta/)
     assert.match(R.rotuloDaConfirmacao(previa([nr, jr])), /avisos acima/)
+    // O chamado do site: a resposta para quem não é a cliente do chamado pede confirmação.
+    const fora = { codigo: 'para_fora_do_chamado', texto: 'A resposta iria para x@y.com, que não é o e-mail da cliente deste chamado.', confirmavel: true }
+    assert.match(R.rotuloDaConfirmacao(previa([fora])), /mesma cliente do chamado/)
+    assert.match(R.travaDaPrevia(previa([fora]), false), /não é o e-mail da cliente[\s\S]*enviar mesmo assim/)
+    assert.equal(R.travaDaPrevia(previa([fora]), true), '', 'confirmou: passa')
     assert.equal(R.travaDaPrevia(previa([jr, nr]), true), '', 'a mesma confirmação passa as duas')
     assert.equal(R.urlDaPrevia('c1', null), '/api/atendimento/email/conversas/c1/previa')
     assert.equal(R.urlDaPrevia('c1', 'e 1'), '/api/atendimento/email/conversas/c1/previa?mail_message_id=e%201')
@@ -340,6 +347,41 @@ async function principal() {
     assert.equal(H.rotuloDoChamado({ protocolo: 'US-26-0014', tipo_rotulo: 'SAC', marca_nome: 'Uranyx' }), 'US-26-0014 · SAC · Uranyx')
     assert.equal(H.rotuloDoChamado({ protocolo: null, tipo_rotulo: null, marca_nome: null }), 'sem protocolo')
     assert.match(H.perguntaAgrupar({ protocolo: 'US-1' }, { protocolo: 'US-2' }), /^Agrupar o chamado US-1 no US-2\?[\s\S]*nada se apaga/)
+    // Fica o MAIS ANTIGO (o servidor diz qual: `fica_este`), de qualquer lado que se clique.
+    assert.match(H.perguntaAgrupar({ protocolo: 'US-1' }, { protocolo: 'US-2', fica_este: false }), /^Agrupar o chamado US-2 no US-1\?[\s\S]*Fica o mais antigo/)
+    assert.match(H.perguntaAgrupar({ protocolo: 'US-2' }, { protocolo: 'US-1', fica_este: true }), /^Agrupar o chamado US-2 no US-1\?/)
+    // Os dois nomes na pergunta; pelo telefone/pedido (e-mails diferentes), o aviso para conferir.
+    const pTel = H.perguntaAgrupar({ protocolo: 'US-2', cliente_nome: 'Maria S.' }, { protocolo: 'US-1', cliente_nome: 'Maria Souza', fica_este: true, motivo: 'pedido', motivo_rotulo: 'mesmo nº de pedido, e-mail diferente' })
+    assert.match(pTel, /^Agrupar o chamado US-2 \(Maria S\.\) no US-1 \(Maria Souza\)\?/)
+    assert.match(pTel, /ATENÇÃO: o que liga os dois é só o mesmo nº de pedido, e-mail diferente\. Confira que é a MESMA pessoa/)
+    assert.doesNotMatch(H.perguntaAgrupar({ protocolo: 'US-2' }, { protocolo: 'US-1', motivo: 'email' }), /ATENÇÃO/)
+    assert.equal(H.fraseDasSugestoes([]), '')
+    assert.match(H.fraseDasSugestoes([{ motivo: 'email' }]), /^Esta cliente tem outro chamado aberto nesta marca/)
+    assert.match(H.fraseDasSugestoes([{ motivo: 'email' }, { motivo: 'telefone' }]), /^Pode ser a mesma cliente: há 2 outros chamados abertos[\s\S]*confira o nome/)
+    // O servidor só sugere/agrupa por telefone ou pedido com nomes que não são de pessoas diferentes.
+    const chamadosSrv = api('services/mail_atendimento/chamados.py')
+    assert.match(chamadosSrv, /if enderecos\.mesmo_nome\(a\.comprador_nome, b\.comprador_nome\) is False:\s+return None\s+if ma\.get\("telefone"\)/)
+    assert.match(chamadosSrv, /^SUFIXO_EMAIL_DIFERENTE = ", e-mail diferente"$/m)
+    assert.match(H.perguntaNaoAgrupar({ protocolo: 'US-1' }), /^Não agrupar com US-1\?[\s\S]*fica registrado/)
+    // Todos os protocolos do chamado: o principal primeiro, sem repetir.
+    assert.deepEqual(H.protocolosDoChamado({ protocolo: 'US-1', protocolos: ['US-1', 'UDS-2'] }), ['US-1', 'UDS-2'])
+    assert.deepEqual(H.protocolosDoChamado({ protocolo: null, protocolos: [] }), [])
+    // O pedido do formulário: só sugestão, nunca o nome da outra pessoa.
+    assert.equal(H.frasePedidoSugerido({ pedido_citado: null, pedido_sugerido: null }), '')
+    assert.match(H.frasePedidoSugerido({ pedido_citado: '777', pedido_sugerido: { numero: '777', achado: false, pedidos: [] } }), /777 \(não achado no Bling\)/)
+    assert.match(
+      H.frasePedidoSugerido({ pedido_citado: '777', pedido_sugerido: { numero: '777', achado: true, pedidos: [{ numero_bling: '55001', numero_loja: '777', data: null, confere: false }] } }),
+      /Bling 55001 \/ loja 777 \(OUTRO nome: confira antes de ligar\)[\s\S]*Só sugestão: nada foi ligado/,
+    )
+    // Os campos novos do chamado vêm do servidor (resumo, sugestão e pedido).
+    const chamadosPy = api('services/mail_atendimento/chamados.py')
+    for (const campo of ['protocolos', 'status', 'status_rotulo', 'criado_em', 'cliente_nome', 'telefone', 'pedido_citado', 'alertas']) assert.ok(chamadosPy.includes(`"${campo}":`), `chamado: ${campo}`)
+    for (const campo of ['motivo', 'motivo_rotulo', 'fica_este']) assert.ok(chamadosPy.includes(`"${campo}":`), `outros: ${campo}`)
+    assert.match(rotas, /"pedido_sugerido": await chamados\.pedido_sugerido\(session, conversa, scope\)/)
+    // O alerta de OUTRO endereço no chamado: o código da faixa existe no servidor.
+    assert.match(constantes, /^ALERTA_OUTRO_REMETENTE = "outro_remetente"$/m)
+    // Os registros de quem fez (auditoria) no cartão: os códigos da rota.
+    for (const codigo of C.REGISTROS_DE_PESSOA) assert.ok(rotas.includes(`codigo="${codigo}"`), `registro ${codigo}`)
 
     // A resposta de e-mail que não saiu: a frase da ponte ("mail:<código> — <frase>").
     assert.equal(P.erroEnvioLegivel('mail:resolved_not_sent — alguém conferiu no Tuta: não saiu'), 'O e-mail não saiu: alguém conferiu no Tuta: não saiu.')
@@ -689,7 +731,46 @@ async function principal() {
     assert.deepEqual([m.chamadas[0].url, m.chamadas[0].body], ['/api/atendimento/email/conversas/c1/agrupar', { conversa_id: 'c0' }])
     assert.deepEqual(m.emitidos.at(-1), ['agrupado', 'c0'])
     const so = montar('../components/AtendimentoEmailChamado.vue', { chamado, outros: [outro], podeMexer: false })
-    assert.doesNotMatch(await so.html(), /data-email-agrupar/, 'quem só lê: sem agrupar')
+    const htmlSo = await so.html()
+    assert.doesNotMatch(htmlSo, /data-email-agrupar|data-email-nao-agrupar/, 'quem só lê: sem agrupar nem "não agrupar"')
+    assert.match(htmlSo, /data-email-ver-chamado/, 'quem só lê: "Ver chamado" fica')
+    // Ver chamado: o botão emite "abrir" com o id do outro (a conversa abre).
+    const tplChamado = sfc('../components/AtendimentoEmailChamado.vue').descriptor.template.content
+    assert.match(tplChamado, /data-email-ver-chamado\s+@click="emit\('abrir', o\.conversa_id\)"/)
+    // Não agrupar: pergunta, manda, some da faixa e avisa a conversa.
+    const completo = {
+      ...chamado,
+      protocolos: ['US-26-0014', 'US-26-0002'],
+      status: 'aguardando_cliente',
+      status_rotulo: 'Aguardando cliente',
+      cliente_nome: 'Maria Souza',
+      telefone: '11987654321',
+      alertas: [{ codigo: 'protocolo_repetido', texto: 'Protocolo repetido: outra cliente' }],
+      pedido_citado: '777',
+      pedido_sugerido: { numero: '777', achado: true, pedidos: [{ numero_bling: '55001', numero_loja: '777', data: null, confere: true }] },
+    }
+    const sug = { ...outro, motivo: 'telefone', motivo_rotulo: 'mesmo telefone, e-mail diferente', fica_este: true, cliente_nome: 'Maria S.' }
+    let confirmaNao = false
+    const n = montar('../components/AtendimentoEmailChamado.vue', { chamado: completo, outros: [sug], podeMexer: true }, { confirmar: () => confirmaNao, respostas: { '/api/atendimento/email/conversas/c1/nao-agrupar': { conversa_id: 'c1', outros_chamados: [] } } })
+    let h = await n.html()
+    assert.match(h, /data-email-protocolo[^>]*>US-26-0014<[\s\S]*data-email-protocolo[^>]*>US-26-0002</)
+    assert.match(h, /data-email-chamado-status[^>]*>Aguardando cliente</)
+    assert.match(h, /data-email-chamado-cliente[^>]*>\s*Cliente: Maria Souza · 11987654321/)
+    assert.match(h, /data-email-pedido-sugerido[^>]*>Pedido citado no formulário: 777 — no Bling: Bling 55001 \/ loja 777 \(o nome confere\)/)
+    assert.match(h, /data-email-chamado-alerta[\s\S]*Protocolo repetido: outra cliente/)
+    assert.match(h, /mesmo telefone, e-mail diferente[\s\S]*data-email-ver-chamado[\s\S]*data-email-agrupar[\s\S]*data-email-nao-agrupar/)
+    assert.match(h, /data-email-outro-cliente[^>]*>· Maria S\.</, 'o nome da cliente do outro chamado aparece')
+    assert.match(h, /Pode ser a mesma cliente/, 'pelo telefone: "pode ser", não "esta cliente"')
+    await n.estado.naoAgrupar(sug)
+    assert.equal(n.chamadas.length, 0, '"não agrupar" também pergunta antes')
+    confirmaNao = true
+    await n.estado.naoAgrupar(sug)
+    assert.deepEqual([n.chamadas[0].url, n.chamadas[0].metodo, n.chamadas[0].body], ['/api/atendimento/email/conversas/c1/nao-agrupar', 'POST', { conversa_id: 'c0' }])
+    assert.deepEqual(n.emitidos.at(-1), ['recusado', 'c0'])
+    assert.doesNotMatch(await n.html(), /data-email-outros-chamados/, 'a sugestão some da faixa')
+    // Sem protocolo: o selo "sem protocolo".
+    const sem = montar('../components/AtendimentoEmailChamado.vue', { chamado: { ...chamado, protocolo: null, protocolos: [] }, outros: [], podeMexer: true })
+    assert.match(await sem.html(), />sem protocolo</)
   }
 
   // ------------------------------------------------ a caixa da aba E-mail (outra conversa responde)
@@ -779,6 +860,26 @@ async function principal() {
     const iCaixa = tela.indexOf('ref="caixa"')
     assert.ok(iPrevia > 0 && iPrevia < iCaixa, 'a prévia fica logo acima da caixa de resposta')
     assert.match(tela, /<AtendimentoEmailChamado\s+v-if="chamadoNaTela\?\.chamado"/)
+    // "Ver chamado" abre a outra conversa; "Não agrupar" relê os cartões.
+    assert.match(tela, /<AtendimentoEmailChamado[\s\S]*?@abrir="\(id: string\) => emit\('abrirConversa', id\)"[\s\S]*?@recusado="aoRecusarAgrupar"/)
+    // A IA nunca responde e-mail: o "Sugerir resposta" nem aparece no e-mail da ponte.
+    assert.match(tela, /<Button v-if="podeSugerir && !ehEmail"[^>]*@click="sugerir">/)
+    // {protocolo} nas respostas prontas: o do chamado na tela.
+    assert.ok(P.LACUNAS.some((l) => l.chave === 'protocolo'))
+    assert.equal(P.preencherLacunas('Chamado {protocolo}', { protocolo: 'US-26-0001' }), 'Chamado US-26-0001')
+    assert.deepEqual(P.lacunasAbertas('Chamado {protocolo}'), ['{protocolo}'])
+    assert.match(setup, /protocolo: chamadoNaTela\.value\?\.chamado\?\.protocolo,/)
+    assert.match(responder, /normalizado = preparar_texto\(preencher_protocolo\(texto_pessoa, conversa\)\)/)
+    // "Tentar de novo" de uma resposta de e-mail: o MESMO e-mail (o id que ela respondia).
+    const cru = (ini, fim) => setup.slice(setup.indexOf(ini), setup.indexOf(fim, setup.indexOf(ini) + 1))
+    assert.match(cru('async function tentarDeNovo', '// ─── painel do pedido'), /const mailId = m\.email\?\.tipo === 'resposta' \? m\.email\.message_id : null\s+if \(mailId\) body\.mail_message_id = mailId/)
+    assert.match(api('services/mail_atendimento/responder.py'), /"mail_envio": \{[\s\S]*?"message_id": str\(p\.message\.id\)/)
+    // O aviso depois do Enviar no e-mail: a fila do Mac, não "saindo para a plataforma".
+    assert.match(cru('function concluirEnvio', '// A conversa recarregada'), /else if \(m\.email\?\.tipo === 'resposta'\) toasts\.info\(`\$\{AVISO_EMAIL_NA_FILA\.titulo\}\$\{onde\}`, AVISO_EMAIL_NA_FILA\.texto\)/)
+    assert.match(R.AVISO_EMAIL_NA_FILA.titulo, /fila do e-mail/)
+    // O limite do e-mail também vem do servidor (não os 1000 do canal).
+    assert.equal(R.LIMITE_RESPOSTA_EMAIL, Number((constantes.match(/^RESPOSTA_MAX_CARACTERES = ([\d_]+)$/m) || [])[1].replace(/_/g, '')))
+    assert.match(api('routers/atendimento.py'), /limite_caracteres=_limite_da_resposta\(conversa\)/)
     assert.ok(tela.indexOf('<AtendimentoEmailChamado') < tela.indexOf('<!-- mensagens -->'))
     assert.match(tela, /<AtendimentoAbaResposta[\s\S]*?:mail-message-id="emailResponder"[\s\S]*?@responder-mais-novo="emailResponder = null"/)
     assert.match(tela, /@click="enviar\(erroEnvio\.naoResponde \? \{ confirmarNaoResponde: true \} : \{ confirmar: true \}\)"/)
@@ -869,7 +970,289 @@ async function principal() {
     assert.match(setup, /watch\(\(\) => props\.conversaId, \(\) => \{\s+emailResponder\.value = null\s+confirmouNaoResponde\.value = false\s+travaEmail\.value = null\s+geracaoCartoes\+\+\s+cartoesLidos\.clear\(\)\s+cartoesEmail\.value = \{\}/)
   }
 
-  console.log('ok — atendimento-mail-atendimento: contrato, regras, seções, filas, configurar, prévia, cartão, chamado, caixa da aba e conversa')
+  // ================================================ a LISTA e o PAINEL ④ (09/10/2026)
+  const L = requerer('~/components/AtendimentoLista.vue')
+  const PA = requerer('~/components/AtendimentoMailPastas.vue')
+  const V = requerer('~/components/AtendimentoEmailVenda.vue')
+  const listaSrc = sfc('../components/AtendimentoLista.vue').descriptor
+  const listaSetup = listaSrc.scriptSetup.content
+  const listaTpl = listaSrc.template.content
+  const rotasAtd = api('routers/atendimento.py')
+  const rotasEmail = api('routers/atendimento_email.py')
+  const schemasAtd = api('schemas/atendimento.py')
+
+  // ------------------------------------------------ W1: os chips SAC / Atacado / Dúvidas no grupo Site
+  {
+    // Os tipos da tela = os da API (ROTULO_TIPO_CAIXA, sobre dados.mail.caixa).
+    const tiposPy = [...(api('services/mail_atendimento/constantes.py').match(/^ROTULO_TIPO_CAIXA = \{([\s\S]*?)^\}/m) || [])[1].matchAll(/^\s+(TIPO_[A-Z]+):/gm)].map((m) => m[1])
+    const valorPy = (nome) => (api('services/mail_atendimento/constantes.py').match(new RegExp(`^${nome} = "([a-z]+)"$`, 'm')) || [])[1]
+    assert.deepEqual(L.TIPOS_CHAMADO.map((t) => t.value), tiposPy.map(valorPy))
+    assert.deepEqual(L.TIPOS_CHAMADO.map((t) => t.label), ['SAC', 'Atacado', 'Dúvidas e sugestões'])
+    assert.match(rotasAtd, /^TIPOS_CHAMADO = tuple\(ROTULO_TIPO_CAIXA\)$/m)
+    assert.match(rotasAtd, /tipo_chamado: Annotated\[str \| None, Query\(max_length=16\)\] = None,/)
+    assert.match(rotasAtd, /raise HTTPException\(422, detail=\{"code": "tipo_chamado_invalido"\}\)/)
+    assert.match(rotasAtd, /return AtendimentoConversa\.dados\["mail"\]\["caixa"\]\.astext/)
+    assert.match(schemasAtd, /class PlataformaResumoOut\(BaseModel\):[\s\S]*?chamados: dict\[str, int\] = Field\(default_factory=dict\)/)
+    // Só no grupo Site inteiro (com um site escolhido na barra, o chamado do e-mail não é dele).
+    const f = (x = {}) => ({ plataforma: 'site', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '', tipo_chamado: '', ...x })
+    assert.equal(L.temChipsDoChamado(f()), true)
+    assert.equal(L.temChipsDoChamado(f({ externo_ref: 'site:charlots' })), false)
+    assert.equal(L.temChipsDoChamado(f({ plataforma: 'ml' })), false)
+    assert.equal(L.tipoChamadoAtivo(f({ tipo_chamado: 'SAC' })), 'sac')
+    assert.equal(L.tipoChamadoAtivo(f({ tipo_chamado: 'sac', plataforma: 'ml' })), '', 'o lembrado fora do Site não filtra')
+    assert.equal(L.tipoChamadoAtivo(f({ tipo_chamado: 'outro' })), '')
+    // Os números: os chamados abertos do /resumo (a plataforma site); API antiga, sem número.
+    const resumoSite = { plataformas: [{ plataforma: 'site', aguardando: 1, vencendo: 0, vencidas: 0, chamados: { sac: 3, duvidas: 1 } }], lojas: [] }
+    assert.deepEqual(L.contagemDosChamados(resumoSite), { sac: 3, atacado: 0, duvidas: 1 })
+    assert.equal(L.contagemDosChamados({ plataformas: [{ plataforma: 'site', aguardando: 0, vencendo: 0, vencidas: 0 }], lojas: [] }), null)
+    assert.equal(L.contagemDosChamados(null), null)
+    // O clique (o trecho de verdade): liga, e clicar no aceso volta para todos.
+    const filtros = Vue.ref(f())
+    const js = trecho(listaSetup, 'function mudar', '// Busca com espera') + '\n' + trecho(listaSetup, '// ─── chips do tipo do chamado', '// A escolha da plataforma')
+      + '\nreturn { mudar, chipsDoChamado, tipoAtivo, numerosDoChamado, escolherTipo }'
+    const x = new Function('computed', 'filtros', 'props', 'temChipsDoChamado', 'tipoChamadoAtivo', 'contagemDosChamados', js)(
+      Vue.computed, filtros, { resumo: resumoSite }, L.temChipsDoChamado, L.tipoChamadoAtivo, L.contagemDosChamados,
+    )
+    assert.equal(x.chipsDoChamado.value, true)
+    assert.deepEqual(x.numerosDoChamado.value, { sac: 3, atacado: 0, duvidas: 1 })
+    x.escolherTipo('atacado')
+    assert.equal(filtros.value.tipo_chamado, 'atacado')
+    assert.equal(x.tipoAtivo.value, 'atacado')
+    x.escolherTipo('atacado')
+    assert.equal(filtros.value.tipo_chamado, '', 'de novo no aceso: todos')
+    x.escolherTipo('sac')
+    x.mudar('plataforma', 'ml')
+    assert.equal(filtros.value.tipo_chamado, '', 'trocou a plataforma: o tipo sai')
+    assert.equal(x.chipsDoChamado.value, false)
+    // O vazio diz o tipo.
+    const vazio = new Function('computed', 'filtros', 'TIPOS_CHAMADO', 'tipoAtivo', trecho(listaSetup, 'const VAZIO', '// ↑/↓ com o foco') + '\nreturn textoVazio')
+    assert.equal(vazio(Vue.computed, Vue.ref(f({ tipo_chamado: 'duvidas' })), L.TIPOS_CHAMADO, Vue.ref('duvidas')).value, 'Nenhum chamado de Dúvidas e sugestões com esses filtros.')
+    assert.equal(vazio(Vue.computed, Vue.ref(f({ filtro: 'email_sem_vinculo' })), L.TIPOS_CHAMADO, Vue.ref('')).value, 'Nenhum e-mail de loja sem vínculo — todos acharam o pedido.')
+    // A tela: os chips logo abaixo das abas, com o número; a página manda o tipo só no Site.
+    assert.match(listaTpl, /<div v-if="chipsDoChamado"[^>]*role="group" aria-label="tipo do chamado" data-chips-chamado>/)
+    assert.match(listaTpl, /v-for="t in TIPOS_CHAMADO"[\s\S]*?:aria-pressed="tipoAtivo === t\.value"[\s\S]*?@click="escolherTipo\(t\.value\)"/)
+    assert.ok(listaTpl.indexOf('data-chips-chamado') > listaTpl.indexOf('role="tablist"'), 'abaixo das abas')
+    const pagina = web('pages/atendimento.vue')
+    assert.match(pagina, /const tipo = tipoChamadoAtivo\(f\)\s+if \(tipo\) p\.set\('tipo_chamado', tipo\)/)
+    assert.match(web('components/AtendimentoFiltroPlataforma.vue'), /if \(novo\.plataforma !== filtros\.value\.plataforma\) novo\.tipo_chamado = ''/)
+  }
+
+  // ------------------------------------------------ W2: o filtro "E-mail sem vínculo" na lista
+  {
+    const filtrosApi = [...((rotasAtd.match(/^FILTROS = \(([\s\S]*?)^\)/m) || [])[1] || '').matchAll(/"([a-z_]+)"/g)].map((m) => m[1])
+    assert.ok(filtrosApi.includes('email_sem_vinculo'))
+    const item = L.FILTROS_MENU.find((x) => x.value === 'email_sem_vinculo')
+    assert.equal(item.label, 'E-mail sem vínculo')
+    assert.ok(!L.FILTROS_ETIQUETA.has('email_sem_vinculo'), 'não é etiqueta')
+    const menu = L.FILTROS_MENU.map((x) => x.value)
+    assert.ok(menu.indexOf('email_sem_vinculo') < menu.indexOf('reclamacao'), 'antes do grupo Etiqueta')
+    // A régua do servidor: e-mail da ponte (Tuta), sem pedido, fora do site; as abertas.
+    const regua = rotasAtd.slice(rotasAtd.indexOf('def _email_sem_vinculo('), rotasAtd.indexOf('def _tipo_do_chamado('))
+    for (const pedaco of ['AtendimentoConversa.canal == CANAL_EMAIL', 'AtendimentoConversa.dados["fonte"].astext == FONTE_TUTA', 'pedido == ""', 'AtendimentoConversa.plataforma != PLATAFORMA_SITE']) assert.ok(regua.includes(pedaco), pedaco)
+    assert.match(rotasAtd, /elif filtro == FILTRO_EMAIL_SEM_VINCULO:\s+# [^\n]*\n\s+consulta = consulta\.where\(\s+AtendimentoConversa\.situacao != CONVERSA_FECHADA, _email_sem_vinculo\(\)/)
+    assert.match(rotasAtd, /and filtro != FILTRO_EMAIL_SEM_VINCULO\s+and tipo_chamado is None/, 'o Direct nunca entra')
+    for (const classe of ['PlataformaResumoOut', 'LojaResumoOut', 'ResumoOut']) {
+      assert.match(schemasAtd, new RegExp(`class ${classe}\\(BaseModel\\):[\\s\\S]*?email_sem_vinculo: int = 0`), classe)
+    }
+    // O número do menu (o trecho de verdade): da linha, da loja, das plataformas ou do total.
+    const corpo = listaSetup.slice(listaSetup.indexOf('function porEtiqueta'), listaSetup.indexOf('function contadorCls'))
+    const contagem = (resumo, filtros) => new Function('computed', 'props', 'filtros', 'FILTROS_ETIQUETA', transpile(corpo) + '\nreturn contagem')(
+      Vue.computed, { resumo }, { value: { plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', ...filtros } }, L.FILTROS_ETIQUETA,
+    ).value
+    const resumo = {
+      email_sem_vinculo: 3,
+      plataformas: [
+        { plataforma: 'ml', aguardando: 0, vencendo: 0, vencidas: 0, email_sem_vinculo: 2 },
+        { plataforma: 'shopee', aguardando: 0, vencendo: 0, vencidas: 0, email_sem_vinculo: 1 },
+      ],
+      lojas: [{ integration_id: 'L1', plataforma: 'ml', aguardando: 0, vencidas: 0, email_sem_vinculo: 2 }],
+    }
+    assert.equal(contagem(resumo, {}).email_sem_vinculo, 3)
+    assert.equal(contagem(resumo, { plataforma: 'shopee' }).email_sem_vinculo, 1)
+    assert.equal(contagem(resumo, { integration_id: 'L1' }).email_sem_vinculo, 2)
+    assert.equal(contagem({ ...resumo, email_sem_vinculo: undefined }, {}).email_sem_vinculo, null, 'API antiga: sem número')
+    assert.match(listaSetup, /value === 'a_conferir' \|\| value === 'email_sem_vinculo'\) return 'bg-amber-500 text-white'/)
+  }
+
+  // ------------------------------------------------ W3: Pastas e regras (E-mail › Filas)
+  {
+    for (const [metodo, caminho] of [['get', '/pastas'], ['patch', '/pastas/{pasta_id}'], ['get', '/regras'], ['put', '/regras']]) {
+      assert.ok(rotasEmail.includes(`@router.${metodo}("${caminho}")`), `rota ${metodo} ${caminho}`)
+    }
+    const listar = rotasEmail.slice(rotasEmail.indexOf('async def listar_pastas('), rotasEmail.indexOf('class PastaPatch'))
+    for (const campo of ['id', 'mailbox_id', 'chave', 'nome', 'caminho', 'tipo', 'plataforma', 'finalidade', 'marca', 'ler', 'plataforma_manual', 'finalidade_manual', 'ignorar', 'revisada', 'vista_em', 'sumiu_em', 'caixas', 'plataformas', 'finalidades']) {
+      assert.ok(listar.includes(`"${campo}":`), `pastas: ${campo}`)
+    }
+    assert.match(rotasEmail, /class PastaPatch\(BaseModel\):[\s\S]*?plataforma: str \| None[\s\S]*?finalidade: str \| None[\s\S]*?ignorar: bool \| None/)
+    assert.match(rotasEmail, /class RegraIn\(BaseModel\):[\s\S]*?tipo: str[\s\S]*?palavra: str[\s\S]*?valor: str[\s\S]*?ativa: bool = True/)
+    // O "ler" e os tipos de palavra da tela = os do backend.
+    const regrasPy = api('services/mail_atendimento/regras.py')
+    for (const [chave, v] of [['LER_CORPO', 'corpo'], ['LER_SO_CONTAR', 'so_contar'], ['LER_NAO', 'nao']]) {
+      assert.match(regrasPy, new RegExp(`^${chave} = "${v}"$`, 'm'))
+      assert.ok(PA.LER[v], `rótulo do ler ${v}`)
+    }
+    assert.deepEqual(PA.TIPOS_DE_REGRA.map((t) => t.value), ['plataforma', 'finalidade', 'marca'])
+    assert.match(regrasPy, /^TIPOS = \(TIPO_PLATAFORMA, TIPO_FINALIDADE, TIPO_MARCA\)$/m)
+    for (const codigo of Object.keys(PA.ERROS_PASTAS)) assert.ok(rotasEmail.includes(`"${codigo}"`), `código ${codigo}`)
+
+    // As regras puras.
+    const pasta = (id, x = {}) => ({ id, mailbox_id: 'b1', chave: id, nome: id, caminho: null, tipo: 'pessoal', plataforma: 'ml', finalidade: 'mensagens', marca: null, ler: 'corpo', plataforma_manual: null, finalidade_manual: null, ignorar: false, revisada: true, vista_em: null, sumiu_em: null, ...x })
+    const grupos = PA.pastasPorCaixa({ itens: [pasta('velha', { sumiu_em: '2026-10-01T00:00:00Z' }), pasta('mensagens ml'), pasta('outra', { mailbox_id: 'b2' })], caixas: [{ id: 'b1', nome: 'Geral — Tuta' }], plataformas: [], finalidades: [] })
+    assert.deepEqual(grupos.map((g) => [g.nome, g.pastas.map((p) => p.id)]), [['Geral — Tuta', ['mensagens ml', 'velha']], ['Caixa', ['outra']]], 'a que sumiu no fim; caixa sem nome = "Caixa"')
+    assert.deepEqual(PA.edicaoDe(pasta('a', { plataforma_manual: 'shopee' })), { plataforma: 'shopee', finalidade: '', ignorar: false })
+    assert.equal(PA.corpoDaPasta(pasta('a'), { plataforma: '', finalidade: '', ignorar: false }), null, 'nada mudou: nada vai')
+    assert.deepEqual(PA.corpoDaPasta(pasta('a'), { plataforma: 'shopee', finalidade: '', ignorar: true }), { plataforma: 'shopee', ignorar: true }, 'só o que mudou')
+    assert.deepEqual(PA.corpoDaPasta(pasta('a', { plataforma_manual: 'shopee' }), { plataforma: '', finalidade: '', ignorar: false }), { plataforma: '' }, "'' = volta para a palavra")
+    const porTipo = PA.regrasPorTipo([{ id: '1', tipo: 'plataforma', palavra: 'shopee', valor: 'shopee', ativa: true }, { id: '2', tipo: 'plataforma', palavra: 'ml', valor: 'ml', ativa: true }, { id: '3', tipo: 'finalidade', palavra: 'vendas', valor: 'vendas', ativa: false }])
+    assert.deepEqual(Object.keys(porTipo), ['plataforma', 'finalidade', 'marca'])
+    assert.deepEqual(porTipo.plataforma.map((r) => r.palavra), ['ml', 'shopee'])
+    assert.deepEqual(porTipo.marca, [])
+    const ops = { plataformas: ['ml', 'shopee', 'site'], finalidades: ['vendas', 'mensagens', 'problema', 'reclamacao'] }
+    assert.equal(PA.erroDaRegra({ tipo: 'plataforma', palavra: 'kwai', valor: 'ml' }, ops), '')
+    assert.equal(PA.erroDaRegra({ tipo: 'plataforma', palavra: '', valor: 'ml' }, ops), 'Escreva a palavra.')
+    assert.match(PA.erroDaRegra({ tipo: 'plataforma', palavra: 'duas palavras', valor: 'ml' }, ops), /uma só/)
+    assert.equal(PA.erroDaRegra({ tipo: 'plataforma', palavra: 'kwai', valor: 'kwai' }, ops), 'Plataforma desconhecida.')
+    assert.equal(PA.erroDaRegra({ tipo: 'finalidade', palavra: 'duvida', valor: 'outra' }, ops), 'Finalidade desconhecida.')
+    assert.equal(PA.erroDaRegra({ tipo: 'marca', palavra: 'charlots', valor: 'charlots' }, ops), '', 'marca: valor livre')
+    assert.deepEqual(PA.corpoDaRegra({ tipo: 'plataforma', palavra: ' Kwai ', valor: ' ML ', ativa: true }), { tipo: 'plataforma', palavra: 'Kwai', valor: 'ml', ativa: true })
+
+    // O componente de verdade: quem mexe vê; admin muda.
+    const respostas = {
+      '/api/atendimento/email/pastas': { itens: [pasta('mensagens ml'), pasta('nova shopee', { plataforma: 'shopee', revisada: false, ler: 'corpo' }), pasta('financeiro', { plataforma: null, finalidade: null, ler: 'so_contar' })], caixas: [{ id: 'b1', nome: 'Geral — Tuta' }], ...ops },
+      '/api/atendimento/email/regras': { itens: [{ id: '1', tipo: 'plataforma', palavra: 'ml', valor: 'ml', ativa: true }, { id: '2', tipo: 'finalidade', palavra: 'vendas', valor: 'vendas', ativa: true }] },
+      '/api/atendimento/email/pastas/mensagens ml': { id: 'mensagens ml', ler: 'nao', revisada: true },
+      '/api/atendimento/email/pastas/nova shopee': { id: 'nova shopee', ler: 'corpo', revisada: true },
+    }
+    const so = montar('../components/AtendimentoMailPastas.vue', { isAdmin: false }, { respostas })
+    await so.montar()
+    let html = await so.html()
+    assert.deepEqual(so.chamadas.map((c) => c.url).sort(), ['/api/atendimento/email/pastas', '/api/atendimento/email/regras'])
+    assert.match(html, /data-pastas-caixa="b1"[\s\S]*?Geral — Tuta[\s\S]*?3 pasta\(s\)/)
+    assert.match(html, /data-pasta="nova shopee"[\s\S]*?>nova<[\s\S]*?data-pasta-ler[^>]*>lê o corpo</)
+    assert.match(html, /data-pasta="financeiro"[\s\S]*?data-pasta-ler[^>]*>só conta</)
+    assert.match(html, /data-regras-tipo="plataforma"[\s\S]*?data-regra="plataforma:ml"/)
+    assert.match(html, /Só admin muda/)
+    assert.doesNotMatch(html, /data-salvar-pasta|data-regra-nova|data-alternar-regra|data-confirmar-pasta/, 'quem não é admin: sem mudar')
+    await so.estado.salvarPasta(respostas['/api/atendimento/email/pastas'].itens[0])
+    assert.equal(so.chamadas.filter((c) => c.metodo !== 'GET').length, 0, 'nem pela função')
+
+    const ad = montar('../components/AtendimentoMailPastas.vue', { isAdmin: true }, { respostas: { ...respostas, '/api/atendimento/email/regras': (url, opts) => (opts.method === 'PUT' ? { ...opts.body, id: '9' } : respostas['/api/atendimento/email/regras']) } })
+    await ad.montar()
+    html = await ad.html()
+    assert.match(html, /data-pasta="mensagens ml"[\s\S]*?data-salvar-pasta/)
+    assert.match(html, /data-pasta="nova shopee"[\s\S]*?data-confirmar-pasta/, 'pasta nova: "está certa"')
+    assert.match(html, /data-regra-nova/)
+    // Salvar a pasta: só o que mudou; nada mudou, nada vai.
+    const ml = ad.estado.dados.itens[0]
+    await ad.estado.salvarPasta(ml)
+    assert.equal(ad.chamadas.filter((c) => c.metodo === 'PATCH').length, 0)
+    ad.estado.edicao['mensagens ml'].ignorar = true
+    await ad.estado.salvarPasta(ml)
+    let mud = ad.chamadas.filter((c) => c.metodo !== 'GET').at(-1)
+    assert.deepEqual([mud.url, mud.metodo, mud.body], ['/api/atendimento/email/pastas/mensagens%20ml', 'PATCH', { ignorar: true }])
+    // "está certa" = PATCH vazio (marca a pasta nova como conferida).
+    await ad.estado.confirmarPasta(ad.estado.dados.itens[1])
+    mud = ad.chamadas.filter((c) => c.metodo !== 'GET').at(-1)
+    assert.deepEqual([mud.url, mud.body], ['/api/atendimento/email/pastas/nova%20shopee', {}])
+    // Desligar uma palavra e criar outra (PUT, a rota acha pelo tipo + palavra).
+    await ad.estado.salvarRegra(ad.estado.regras[0], { ativa: false })
+    mud = ad.chamadas.filter((c) => c.metodo !== 'GET').at(-1)
+    assert.deepEqual([mud.url, mud.metodo, mud.body], ['/api/atendimento/email/regras', 'PUT', { tipo: 'plataforma', palavra: 'ml', valor: 'ml', ativa: false }])
+    ad.estado.nova.tipo = 'plataforma'
+    ad.estado.nova.palavra = 'kwai'
+    await Vue.nextTick()
+    ad.estado.nova.valor = 'kwai'
+    assert.equal(ad.estado.erroNova, 'Plataforma desconhecida.')
+    const antes = ad.chamadas.length
+    await ad.estado.adicionarRegra()
+    assert.equal(ad.chamadas.length, antes, 'inválida: nada vai')
+    ad.estado.nova.valor = 'shopee'
+    await ad.estado.adicionarRegra()
+    mud = ad.chamadas.filter((c) => c.metodo !== 'GET').at(-1)
+    assert.deepEqual(mud.body, { tipo: 'plataforma', palavra: 'kwai', valor: 'shopee', ativa: true })
+    assert.equal(ad.estado.nova.palavra, '', 'a caixa da palavra nova limpa')
+    assert.ok(ad.avisos.some(([t, m]) => t === 'ok' && /kwai/.test(m)))
+
+    // Nas Filas: a aba "Pastas e regras" ao lado das filas (não é fila).
+    const filasFonte = sfc('../components/AtendimentoMailFilas.vue').descriptor.template.content
+    assert.match(filasFonte, /data-fila="pastas"\s+@click="pastasAbertas = true"\s*>Pastas e regras<\/button>/)
+    assert.match(filasFonte, /<AtendimentoMailPastas v-if="pastasAbertas" :is-admin="isAdmin" \/>/)
+    const fl = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, {
+      respostas: { '/api/atendimento/email/filas': {}, '/api/atendimento/email/saude': { caixas: [] }, '/api/atendimento/email/emails?fila=sem_loja': { itens: [], proximo: null } },
+      filhos: { AtendimentoMailPastas: { props: ['isAdmin'], setup: (p) => () => Vue.h('div', { 'data-pastas-stub': String(p.isAdmin) }) } },
+    })
+    await fl.montar()
+    assert.doesNotMatch(await fl.html(), /data-pastas-stub/)
+    fl.estado.pastasAbertas = true
+    html = await fl.html()
+    assert.match(html, /data-pastas-stub="true"/)
+    assert.doesNotMatch(html, /Nada nesta fila/, 'a fila some enquanto as pastas estão abertas')
+    fl.estado.verFila('erro')
+    assert.equal(fl.estado.pastasAbertas, false)
+    assert.equal(fl.estado.fila, 'erro')
+  }
+
+  // ------------------------------------------------ W4: "E-mails da venda" no painel ④
+  {
+    assert.ok(rotasEmail.includes('@router.get("/conversas/{conversa_id}/emails-da-venda")'))
+    const rota = rotasEmail.slice(rotasEmail.indexOf('async def emails_da_venda('), rotasEmail.indexOf('@router.get("/anexos/{attachment_id}")'))
+    assert.match(rota, /familia = await abas\.familia\(session, conversa\)/)
+    assert.match(rota, /MailMessageMeta\.estado\.in_\(ESTADOS_COM_TEXTO\)/)
+    for (const campo of ['caixa', 'loja', 'plataforma', 'quantidade', 'ultimo_em', 'pastas', 'pasta', 'finalidade', 'destaque', 'total', 'caixas']) assert.ok(rota.includes(`"${campo}"`), `venda: ${campo}`)
+    assert.doesNotMatch(rota, /decifrar|"texto"|"assunto"|"de":/, 'nada do e-mail em si')
+    assert.equal(V.urlEmailsDaVenda('c 1'), '/api/atendimento/email/conversas/c%201/emails-da-venda')
+    // O sinal: a aba E-mail da venda e os recebidos da própria conversa.
+    assert.equal(V.sinalDeEmails(null, []), 0)
+    assert.equal(V.sinalDeEmails({ abas: [{ chave: 'pos_venda', total: 4 }, { chave: 'email', total: 2 }] }, [{ email: null }]), 2)
+    assert.equal(V.sinalDeEmails({ abas: [] }, [{ email: { tipo: 'recebido' } }, { email: { tipo: 'resposta' } }]), 1, 'o aviso por e-mail no chat também conta; a nossa resposta não')
+    assert.equal(V.rotuloDasPastas([{ pasta: 'problema ml', quantidade: 2 }, { pasta: null, quantidade: 1 }]), 'problema ml (2) · sem pasta')
+    // O componente: lê ao montar e relê quando o sinal muda.
+    const venda = { total: 3, caixas: [{ caixa: '21max@tuta.com', loja: 'Barbosa', plataforma: 'ml', quantidade: 3, ultimo_em: '2026-10-09T03:00:00Z', pastas: [{ pasta: 'problema ml', finalidade: 'problema', destaque: true, quantidade: 2 }, { pasta: 'mensagens ml', finalidade: 'mensagens', destaque: false, quantidade: 1 }] }] }
+    const ve = montar('../components/AtendimentoEmailVenda.vue', { conversaId: 'p1', sinal: 2 }, { respostas: { '/api/atendimento/email/conversas/p1/emails-da-venda': venda } })
+    await ve.montar()
+    let html = await ve.html()
+    assert.match(html, /data-painel-emails-venda[\s\S]*?E-mails da venda[\s\S]*?>3</)
+    assert.match(html, /data-email-venda-caixa[\s\S]*?21max@tuta\.com → Barbosa[\s\S]*?3 e-mails/)
+    assert.match(html, /data-email-venda-pastas[^>]*>problema ml \(2\) · mensagens ml</)
+    assert.match(html, /class="mt-0\.5 text-red-700/, 'pasta de problema em destaque')
+    ve.reativo.sinal = 3
+    await Vue.nextTick(); await esperar()
+    assert.equal(ve.chamadas.length, 2, 'chegou e-mail: relê')
+    const vazio = montar('../components/AtendimentoEmailVenda.vue', { conversaId: 'p2', sinal: 1 }, { respostas: { '/api/atendimento/email/conversas/p2/emails-da-venda': { total: 0, caixas: [] } } })
+    await vazio.montar()
+    assert.match(await vazio.html(), /Nenhum e-mail das lojas ligado a esta venda\./)
+    const falha = montar('../components/AtendimentoEmailVenda.vue', { conversaId: 'p3', sinal: 1 }, { respostas: { '/api/atendimento/email/conversas/p3/emails-da-venda': new Error('500') } })
+    await falha.montar()
+    assert.match(await falha.html(), /Não consegui ler os e-mails da venda agora\./)
+    // O painel: o bloco só com e-mail, antes das Observações do Bling; a conversa passa o sinal.
+    const pedidoTpl = sfc('../components/AtendimentoPedido.vue').descriptor.template.content
+    assert.match(pedidoTpl, /<AtendimentoEmailVenda v-if="emailsSinal" :conversa-id="conversa\.id" :sinal="emailsSinal" \/>/)
+    assert.ok(pedidoTpl.indexOf('<AtendimentoEmailVenda') < pedidoTpl.indexOf('OBSERVAÇÕES DO BLING'))
+    assert.match(sfc('../components/AtendimentoPedido.vue').descriptor.scriptSetup.content, /emailsSinal\?: number[\s\S]*?garantiaAcesso: null, emailsSinal: 0,/)
+    const conversaSfc = sfc('../components/AtendimentoConversa.vue').descriptor
+    assert.match(conversaSfc.scriptSetup.content, /const emailsSinal = computed\(\(\) => sinalDeEmails\(abasDados\.value, detalhe\.value\?\.mensagens\)\)/)
+    assert.match(conversaSfc.template.content, /<AtendimentoPedido[\s\S]*?:emails-sinal="emailsSinal"/)
+  }
+
+  // ------------------------------------------------ S11: o e-mail da ponte da loja Temu/AliExpress (ficha sem integração)
+  {
+    // Nunca o painel "o que a IA responderia" (com o Sugerir) nem a trava do
+    // Seller Center: o e-mail sai pelo Tuta, com as travas do e-mail.
+    const setupConversa = sfc('../components/AtendimentoConversa.vue').descriptor.scriptSetup.content
+    assert.match(setupConversa, /if \(ehEmail\.value\) return false\n\s+if \(sellerCenterDe\(d\.conversa\.plataforma\)\) return true/)
+    const js = trecho(setupConversa, 'const bloqueioEnvio = computed', 'const podeDigitar') + '\nreturn bloqueioEnvio'
+    const travaDe = (email) => new Function('computed', 'detalhe', 'props', 'sellerCenterDe', 'motivoSellerCenter', 'ERROS', 'AVISO_SO_LEITURA', 'avaliacaoDaConversa', 'ehEmail', 'TRAVAS_GERAIS_DO_EMAIL', 'motivoLegivel', 'travaEmail', 'CODIGOS_CONFIRMAVEIS', 'bloqueioLegivel', 'semConta', js)(
+      Vue.computed, Vue.ref({ conversa: { plataforma: 'temu', somente_leitura: false, situacao: 'aberta' }, envio: { pode_enviar: true } }), { canEdit: true, flags: null }, P.sellerCenterDe, P.motivoSellerCenter, P.ERROS, P.AVISO_SO_LEITURA, Vue.ref(null), Vue.ref(email),
+      R.TRAVAS_GERAIS_DO_EMAIL, P.motivoLegivel, Vue.ref(''), R.CODIGOS_CONFIRMAVEIS, (x) => x, Vue.ref(false),
+    ).value
+    assert.equal(travaDe(true), '', 'e-mail da Temu: a caixa de resposta do e-mail')
+    assert.equal(travaDe(false), P.motivoSellerCenter('temu'), 'o chat da Temu: continua no Seller Center')
+  }
+
+  // ------------------------------------------------ a caixa da aba: o mesmo aviso da fila do e-mail
+  assert.match(web('components/AtendimentoAbaResposta.vue'), /if \(ehEmail\.value\) toasts\.success\(`\$\{AVISO_EMAIL_NA_FILA\.titulo\} \(\$\{r\.canal_rotulo \|\| 'outra conversa'\}\)`, AVISO_EMAIL_NA_FILA\.texto\)/)
+
+  console.log('ok — atendimento-mail-atendimento: contrato, regras, seções, filas, configurar, prévia, cartão, chamado, caixa da aba, conversa, lista (chips e sem vínculo), pastas e regras, e-mails da venda')
 }
 
 principal().catch((e) => {

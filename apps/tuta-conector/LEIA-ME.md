@@ -35,6 +35,27 @@ fixa (`SDK_VERSAO`) mais 7 remendos auditados (`remendos/AUDITORIA.md`).
 - Em disco, só estado e ids (nada de e-mail):
   `~/Library/Application Support/davinci-tuta-conector/<conta>/`.
 
+## Por que um leitor local (a opção A do PROJETO-COMUNICADOR, RF5)
+
+A Fase 0 pede o registro da escolha. Ficou a **A — leitor local**, e não a B
+nem a C, porque:
+
+1. o Tuta não tem IMAP, SMTP nem API pública, e a resposta precisa sair **pelo
+   próprio endereço @tuta.com que recebeu** (nenhum outro serviço envia por
+   tuta.com) — só um leitor com a sessão do Tuta lê **e** envia;
+2. a **B** (trocar o provedor) obrigaria a trocar o e-mail de ~30 contas nos
+   marketplaces e mexer no DNS das 4 marcas (verificação, risco de bloqueio,
+   semanas) — e o que entra hoje continuaria no Tuta até lá;
+3. a **C** (exportar à mão) não é tempo real nem responde, e é trabalho de
+   pessoa todo dia;
+4. a A não muda nada nas lojas nem no DNS, usa o **SDK oficial** do Tuta numa
+   versão fixa (não "raspa" a tela) e a senha nunca fica no DaVinci: só a
+   sessão, no Chaveiro deste Mac;
+5. o custo da A (o Mac ligado e logado) está coberto pela faixa vermelha do
+   /atendimento: sem sinal, sem leitura ou a ponte parada acendem
+   (`mail_atendimento/saude.caixas_paradas`). Se um dia o volume ou o Tuta
+   mudarem, a B continua possível sem mexer na Central.
+
 ## Estado desta versão
 
 | Comando | Situação |

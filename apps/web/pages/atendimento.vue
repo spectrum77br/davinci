@@ -18,7 +18,7 @@ import {
   type Modelo,
   type Resumo,
 } from '~/components/AtendimentoPlataforma.vue'
-import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
+import { tipoChamadoAtivo, type FiltrosLista } from '~/components/AtendimentoLista.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
 // mesma trava do menu (AppSidebar) e da API. Desde 07/10/2026 ("pode liberar
@@ -139,7 +139,7 @@ const semLer = computed(() => leiturasParadas(resumo.value))
 // ─── lista ──────────────────────────────────────────────────────────────────
 const FILTROS_KEY = 'davinci.atendimento.filtros'
 // Abre em "Todas", como o All do Duoke (01/10/2026); "Falta responder" é a aba ao lado.
-const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '' })
+const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '', tipo_chamado: '' })
 const itens = ref<ConversaResumo[]>([])
 const proximo = ref<string | null>(null)
 const carregando = ref(false)
@@ -164,6 +164,9 @@ function params(antesDe?: string | null) {
   if (f.externo_ref) p.set('externo_ref', f.externo_ref)
   if (f.rede_social_id) p.set('rede_social_id', f.rede_social_id)
   if (f.canal) p.set('canal', f.canal)
+  // O tipo do chamado (os chips do grupo Site, RF6): só no grupo Site inteiro.
+  const tipo = tipoChamadoAtivo(f)
+  if (tipo) p.set('tipo_chamado', tipo)
   p.set('filtro', f.filtro || 'todas')
   if (f.q) p.set('q', f.q)
   if (antesDe) p.set('antes_de', antesDe)

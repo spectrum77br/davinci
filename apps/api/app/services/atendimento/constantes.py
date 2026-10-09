@@ -125,6 +125,15 @@ MOTIVO_TUTA_SEM_ENVIO = (
 MOTIVO_ZAP_SEM_ENVIO = (
     "Zap (WhatsApp): o envio do Zap ainda não existe no DaVinci. Responda pelo Duoke."
 )
+# O e-mail que a PONTE da Central levou à conversa (`dados.fonte='tuta'` +
+# `dados.mail`, 08/10/2026): a pessoa responde pela caixa da conversa (a fila
+# da Central de e-mail); a IA e a mensagem automática NUNCA respondem e-mail.
+# É a frase do "Sugerir resposta" e da automática nessa conversa (a velha, "o
+# envio ainda não existe", enganava).
+MOTIVO_EMAIL_SO_PESSOA = (
+    "E-mail: a IA não sugere nem manda resposta de e-mail (nem a mensagem automática). "
+    "Quem responde é uma pessoa, pela caixa de resposta desta conversa."
+)
 
 
 def motivo_canal_sem_envio(canal: str | None, plataforma: str | None, dados: object) -> str | None:
@@ -140,6 +149,9 @@ def motivo_canal_sem_envio(canal: str | None, plataforma: str | None, dados: obj
         return None
     fonte = dados.get("fonte") if isinstance(dados, dict) else None
     marca = "" if fonte is None or isinstance(fonte, bool) else str(fonte).strip()
+    if marca == FONTE_TUTA and isinstance(dados, dict) and isinstance(dados.get("mail"), dict):
+        # A conversa da ponte: responde a PESSOA (a IA e a automática nunca).
+        return MOTIVO_EMAIL_SO_PESSOA
     if plataforma != "amazon" or marca == FONTE_TUTA:
         return MOTIVO_TUTA_SEM_ENVIO
     return None

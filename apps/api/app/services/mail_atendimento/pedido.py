@@ -225,6 +225,34 @@ class Protocolo:
     valido: bool  # False = "LA-…" (a Locagil não tem atacado)
 
 
+# Um número com CARA de protocolo (letras-dígitos-dígitos) no assunto, ou
+# depois de "Protocolo:" no corpo — para o alerta de formato errado (RF6). No
+# assunto, só com a letra de uma marca na frente (U, C, 7, L) ou entre
+# colchetes ("[XX-26-0001]"): o cupom "BF-25-10" e a "NF-1-123" não são.
+_RE_PROTOCOLO_SOLTO = re.compile(
+    r"(\[\s*)?(?<![A-Z0-9-])([A-Z0-9]{1,4})-(\d{1,4})-(\d{1,8})(?![\d-])(\s*\])?"
+)
+_RE_CAMPO_PROTOCOLO = re.compile(
+    r"protocolo\s*(?:n[º°o.]*)?\s*[:#=\-]\s*([A-Z0-9][A-Z0-9\-]{3,24})", re.IGNORECASE
+)
+
+
+def protocolo_fora_do_formato(assunto: str | None, corpo: str | None) -> bool:
+    """O formulário traz um protocolo FORA do formato ("US-2026-0001", "UX-26-0001",
+    "US-26-001")? Só faz sentido quando `protocolo` não achou nenhum válido."""
+    for m in _RE_PROTOCOLO_SOLTO.finditer((assunto or "").upper()):
+        prefixo = m.group(2)
+        if not re.search(r"[A-Z]", prefixo):
+            continue
+        if prefixo[0] in MARCA_DA_LETRA or (m.group(1) and m.group(5)):
+            return True
+    for m in _RE_CAMPO_PROTOCOLO.finditer(corpo or ""):
+        valor = m.group(1)
+        if "-" in valor and re.search(r"\d", valor):
+            return True
+    return False
+
+
 def protocolo(*textos: str | None) -> Protocolo | None:
     """O primeiro protocolo do assunto (depois do texto): "[US-26-0014] Troca" → US-26-0014."""
     for texto in textos:

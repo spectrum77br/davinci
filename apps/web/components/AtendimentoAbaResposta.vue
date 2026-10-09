@@ -42,7 +42,7 @@ export function bloqueioDaAba(aba: Pick<Aba, 'responde' | 'chave'> | null | unde
 <script setup lang="ts">
 import { ExternalLink, Globe, Loader2, Lock, Send, X } from 'lucide-vue-next'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica } from '~/components/AtendimentoAvaliacao.vue'
-import { CODIGOS_CONFIRMAVEIS, LIMITE_RESPOSTA_EMAIL, TRAVAS_GERAIS_DO_EMAIL, corpoDoEmail } from '~/components/AtendimentoEmailResposta.vue'
+import { AVISO_EMAIL_NA_FILA, CODIGOS_CONFIRMAVEIS, LIMITE_RESPOSTA_EMAIL, TRAVAS_GERAIS_DO_EMAIL, corpoDoEmail } from '~/components/AtendimentoEmailResposta.vue'
 import { erroDaApi, statusDoErro, tamanhoDoEnvio, type Mensagem } from '~/components/AtendimentoPlataforma.vue'
 
 const props = defineProps<{
@@ -128,7 +128,8 @@ async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boo
       rascunhosAba.delete(id)
       if (conversaId.value === id) texto.value = ''
       confirmouNaoResponde.value = false
-      if (ehEmail.value) toasts.success(`Resposta na fila do e-mail (${r.canal_rotulo || 'outra conversa'})`)
+      // E-mail: a resposta entrou na FILA (o Mac manda pelo Tuta) — o mesmo aviso da caixa de sempre.
+      if (ehEmail.value) toasts.success(`${AVISO_EMAIL_NA_FILA.titulo} (${r.canal_rotulo || 'outra conversa'})`, AVISO_EMAIL_NA_FILA.texto)
       else toasts.success(`Resposta enviada (${r.canal_rotulo || 'outra conversa'})`)
     }
     emit('enviada', m)

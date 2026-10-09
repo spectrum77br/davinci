@@ -48,7 +48,18 @@ export type Canal = {
 // pre_venda, pos_venda, reclamacao, devolucao, ag_cancelamento) — os números
 // do menu Filtrar. Opcional: a API antiga não manda (o menu fica sem número).
 export type ContagemEtiquetas = Record<string, number>
-export type ResumoPlataforma = { plataforma: string; aguardando: number; vencendo: number; vencidas: number; a_conferir?: number; etiquetas?: ContagemEtiquetas }
+export type ResumoPlataforma = {
+  plataforma: string
+  aguardando: number
+  vencendo: number
+  vencidas: number
+  a_conferir?: number
+  etiquetas?: ContagemEtiquetas
+  // O filtro "E-mail sem vínculo" (RF5) e, só no site, os chamados abertos
+  // por tipo — sac, atacado, duvidas (RF6, os chips do grupo Site).
+  email_sem_vinculo?: number
+  chamados?: Record<string, number>
+}
 // `nao_lidas` = o número da PLATAFORMA (o mesmo contador vermelho do Duoke) e
 // `status_canal` = a saúde da leitura da loja (spec Duoke 2.4). Opcionais: a
 // API antiga não manda — a barra de lojas cai em `aguardando` e no status dos
@@ -79,6 +90,8 @@ export type ResumoLoja = {
   status_canal?: string | null
   status_motivo?: string | null
   etiquetas?: ContagemEtiquetas
+  // O "E-mail sem vínculo" da loja (RF5).
+  email_sem_vinculo?: number
 }
 export type Resumo = {
   plataformas: ResumoPlataforma[]
@@ -88,6 +101,8 @@ export type Resumo = {
   a_conferir?: number
   // Total por etiqueta (somando as plataformas).
   etiquetas?: ContagemEtiquetas
+  // O "E-mail sem vínculo" somando as plataformas (RF5).
+  email_sem_vinculo?: number
   // Lojas sem ler além do limite (05/10/2026): a faixa da Caixa e a marca
   // da aba "Lojas e modo". Opcional: a API antiga não manda (sem faixa).
   leitura_parada?: LeituraParada[]
@@ -1052,6 +1067,9 @@ export const LACUNAS: { chave: string; label: string }[] = [
   { chave: 'data_envio', label: 'data de envio' },
   { chave: 'nf_numero', label: 'nº da nota fiscal' },
   { chave: 'comprador', label: 'primeiro nome do comprador' },
+  // O chamado do site (RF6): o protocolo principal (US-26-0001). Fora de
+  // chamado fica entre chaves e o envio segura; o servidor também preenche.
+  { chave: 'protocolo', label: 'protocolo do chamado (sites)' },
 ]
 const RE_LACUNA = new RegExp(`\\{(${LACUNAS.map((l) => l.chave).join('|')})\\}`, 'g')
 export function preencherLacunas(texto: string, dados: Record<string, string | null | undefined>): string {

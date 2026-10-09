@@ -125,9 +125,10 @@ RECUSA_TETO_CONTA = "teto_da_conta"
 RECUSA_NAO_RESPONDE = "remetente_nao_responde"
 RECUSA_SO_PRINCIPAL = "so_endereco_principal"
 RECUSA_JA_RESPONDIDO = "ja_respondido_pela_caixa"
+RECUSA_PARA_FORA_DO_CHAMADO = "para_fora_do_chamado"
 # As recusas que a pessoa pode passar por cima confirmando ("enviar mesmo
-# assim" — o `confirmar_nao_responde` do corpo vale para as duas).
-CONFIRMAVEIS = frozenset({RECUSA_NAO_RESPONDE, RECUSA_JA_RESPONDIDO})
+# assim" — o `confirmar_nao_responde` do corpo vale para todas).
+CONFIRMAVEIS = frozenset({RECUSA_NAO_RESPONDE, RECUSA_JA_RESPONDIDO, RECUSA_PARA_FORA_DO_CHAMADO})
 
 MOTIVO_IA = "A IA não envia e-mail: a resposta é sempre de uma pessoa."
 MOTIVO_SEM_EMAIL = "Não há e-mail para responder nesta conversa."
@@ -191,6 +192,10 @@ MOTIVO_TRAVA = {
 MOTIVO_NAO_RESPONDE = (
     'A resposta iria para um endereço "não responder"/aviso da plataforma ({endereco}): '
     'provavelmente ninguém lê. Use o canal da plataforma — ou confirme "enviar mesmo assim".'
+)
+MOTIVO_PARA_FORA_DO_CHAMADO = (
+    "A resposta iria para {para}, que não é o e-mail da cliente deste chamado ({cliente}). "
+    'Confira se é a mesma pessoa — ou confirme "enviar mesmo assim".'
 )
 MOTIVO_TEXTO_VAZIO = "A resposta está vazia."
 MOTIVO_TEXTO_LONGO = "A resposta passou de {n} caracteres."
@@ -476,6 +481,24 @@ async def previa(
         if trava and trava != "sending_disabled":  # o freio já está acima
             codigo, frase = MOTIVO_TRAVA.get(trava, (trava, trava))
             p.bloqueios.append(Bloqueio(codigo, frase))
+    if (
+        p.para
+        and conversa.plataforma == PLATAFORMA_SITE
+        and p.para != (conversa.comprador_id or "").lower()
+    ):
+        # O chamado do site: a resposta para um endereço que NÃO é o da cliente
+        # do chamado (o e-mail direto de outro endereço com o protocolo dela, o
+        # outro e-mail de um chamado agrupado) só sai com a pessoa confirmando.
+        cliente = " · ".join(x for x in (conversa.comprador_nome, conversa.comprador_id) if x)
+        p.bloqueios.append(
+            Bloqueio(
+                RECUSA_PARA_FORA_DO_CHAMADO,
+                MOTIVO_PARA_FORA_DO_CHAMADO.format(
+                    para=p.para, cliente=cliente or "sem e-mail no formulário"
+                ),
+                confirmavel=True,
+            )
+        )
     if p.para and (enderecos.nao_responde(p.para) or enderecos.e_aviso(p.para)):
         p.bloqueios.append(
             Bloqueio(
@@ -551,6 +574,20 @@ async def motivo_sem_envio(
     p = await previa(session, conversa, mail_message_id=mail_message_id, origem=origem)
     trava = primeira_trava(p, confirmar_nao_responde=confirmar_nao_responde)
     return EnvioRecusado(trava.codigo, trava.texto) if trava else None
+
+
+LACUNA_PROTOCOLO = "{protocolo}"
+
+
+def preencher_protocolo(texto_pessoa: str | None, conversa: AtendimentoConversa) -> str:
+    """A lacuna {protocolo} das respostas prontas → o protocolo PRINCIPAL do
+    chamado do site (RF6/§7 `modelo_resposta`). Fora de chamado (ou chamado
+    sem protocolo) a lacuna fica: o envio segura ("lacuna não preenchida")."""
+    bruto = texto_pessoa or ""
+    if LACUNA_PROTOCOLO not in bruto or conversa.plataforma != PLATAFORMA_SITE:
+        return bruto
+    protocolo = ponte.dados_mail(conversa).get("protocolo")
+    return bruto.replace(LACUNA_PROTOCOLO, protocolo) if protocolo else bruto
 
 
 def preparar_texto(texto_pessoa: str | None) -> str:
@@ -634,7 +671,7 @@ async def enfileirar_resposta(
         )
         if recusa is not None:
             raise recusa
-        normalizado = preparar_texto(texto_pessoa)
+        normalizado = preparar_texto(preencher_protocolo(texto_pessoa, conversa))
         p = await previa(session, conversa, mail_message_id=mail_message_id, origem=origem)
         if p.meta is None or p.message is None or not p.de or not p.para:
             raise enviar.EnvioRecusado(RECUSA_SEM_EMAIL, MOTIVO_SEM_EMAIL)

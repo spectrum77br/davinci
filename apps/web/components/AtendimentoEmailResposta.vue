@@ -42,9 +42,12 @@ export type PreviaEmail = {
 export const CODIGO_NAO_RESPONDE = 'remetente_nao_responde'
 // O mesmo e-mail já tem resposta pela caixa crua da Central (responder.RECUSA_JA_RESPONDIDO).
 export const CODIGO_JA_RESPONDIDO = 'ja_respondido_pela_caixa'
+// No chamado do site, a resposta iria para um endereço que não é o da cliente
+// do chamado (responder.RECUSA_PARA_FORA_DO_CHAMADO).
+export const CODIGO_PARA_FORA_DO_CHAMADO = 'para_fora_do_chamado'
 // Todas as que se passam confirmando (responder.CONFIRMAVEIS): o mesmo
 // `confirmar_nao_responde` do corpo vale para elas.
-export const CODIGOS_CONFIRMAVEIS = new Set([CODIGO_NAO_RESPONDE, CODIGO_JA_RESPONDIDO])
+export const CODIGOS_CONFIRMAVEIS = new Set([CODIGO_NAO_RESPONDE, CODIGO_JA_RESPONDIDO, CODIGO_PARA_FORA_DO_CHAMADO])
 // As travas GERAIS que vêm no `envio` da conversa e valem para qualquer
 // e-mail dela (as do e-mail em si dependem de QUAL e-mail se responde: quem
 // diz é a prévia).
@@ -92,6 +95,7 @@ export function rotuloDaConfirmacao(p: PreviaEmail | null | undefined): string {
   const codigos = new Set((p?.bloqueios || []).filter((b) => b.confirmavel).map((b) => b.codigo))
   if (codigos.size > 1) return 'Enviar mesmo assim (conferi os avisos acima).'
   if (codigos.has(CODIGO_JA_RESPONDIDO)) return 'Enviar mesmo assim (conferi: a resposta que já saiu pela caixa da Central não basta).'
+  if (codigos.has(CODIGO_PARA_FORA_DO_CHAMADO)) return 'Enviar mesmo assim (conferi: este endereço é da mesma cliente do chamado).'
   return 'Enviar mesmo assim (sei que o endereço é "não responder" e que provavelmente ninguém lê).'
 }
 
@@ -108,9 +112,17 @@ export function corpoDoEmail(mailMessageId: string | null | undefined, confirmou
   return out
 }
 
-// O tamanho da resposta de e-mail (responder.RESPOSTA_MAX_CARACTERES): o
-// `limite_caracteres` do envio da conversa é o do canal da plataforma.
+// O tamanho da resposta de e-mail (responder.RESPOSTA_MAX_CARACTERES) — o
+// mesmo que o `limite_caracteres` do envio da conversa de e-mail devolve
+// (09/10/2026; antes vinha o do canal da plataforma).
 export const LIMITE_RESPOSTA_EMAIL = 10_000
+
+// O aviso depois do Enviar no e-mail: a resposta entrou na FILA (quem envia é
+// o Mac, pelo Tuta) — não "saiu" ainda; o balão mostra quando sair ou falhar.
+export const AVISO_EMAIL_NA_FILA = {
+  titulo: 'Resposta na fila do e-mail',
+  texto: 'O Mac do escritório manda pelo Tuta em alguns minutos. O balão mostra quando sair (ou se não sair).',
+}
 
 // Os avisos da prévia sem o que o selo "modo de teste" já diz.
 export function avisosVisiveis(p: Pick<PreviaEmail, 'modo' | 'avisos'> | null | undefined): string[] {

@@ -128,7 +128,10 @@ function escolher(chip: GrupoCaixa | null) {
   aberto.value = false
   // Já está na plataforma inteira: escolher de novo não desfaz (é um menu).
   if (chip && chipAtivo(chip, filtros.value) && soAPlataforma(filtros.value)) return
-  filtros.value = filtrosDoChip(filtros.value, chip)
+  const novo = filtrosDoChip(filtros.value, chip)
+  // O tipo do chamado (os chips do grupo Site, na lista) é da plataforma de antes.
+  if (novo.plataforma !== filtros.value.plataforma) novo.tipo_chamado = ''
+  filtros.value = novo
 }
 function titulo(chip: ChipPlataforma): string {
   const partes = [`Só ${chip.nome}: ${chip.aguardando} conversa(s) falta responder`]

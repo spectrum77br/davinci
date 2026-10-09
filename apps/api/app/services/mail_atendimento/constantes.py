@@ -129,6 +129,46 @@ ROTULO_TIPO_CAIXA = {
     TIPO_DUVIDAS: "Dúvidas e sugestões",
 }
 
+# Os alertas do CHAMADO (RF6): ficam no cartão do e-mail (`meta.alertas`) e,
+# somados, na conversa (`dados.mail.alertas`) — a faixa do chamado mostra.
+ALERTA_SEM_PROTOCOLO = "sem_protocolo"
+ALERTA_PROTOCOLO_FORMATO = "protocolo_formato"
+ALERTA_PROTOCOLO_INVALIDO = "protocolo_invalido"
+ALERTA_PROTOCOLO_OUTRA_MARCA = "protocolo_outra_marca"
+ALERTA_TIPO_X_CAIXA = "tipo_x_caixa"
+ALERTA_PROTOCOLO_REPETIDO = "protocolo_repetido"
+# O e-mail que entrou no chamado (pelo protocolo ou pelo fio) veio de um
+# endereço que NÃO é o da cliente do chamado: confira antes de responder.
+ALERTA_OUTRO_REMETENTE = "outro_remetente"
+ROTULO_ALERTA_DO_CHAMADO = {
+    ALERTA_SEM_PROTOCOLO: "SEM PROTOCOLO: o formulário veio sem o número do site",
+    ALERTA_PROTOCOLO_FORMATO: (
+        "Protocolo fora do formato (marca + tipo + -AA-NNNN, ex.: US-26-0001): avise o time do site"
+    ),
+    ALERTA_PROTOCOLO_INVALIDO: "O protocolo não existe (a Locagil não tem Atacado)",
+    ALERTA_PROTOCOLO_OUTRA_MARCA: "A marca do protocolo não é a da caixa que recebeu",
+    ALERTA_TIPO_X_CAIXA: "O tipo do protocolo não é o da caixa que recebeu (vale o protocolo)",
+    ALERTA_PROTOCOLO_REPETIDO: (
+        "Protocolo repetido: o mesmo número já veio no formulário de OUTRA cliente "
+        "(cada uma tem a sua conversa)"
+    ),
+    ALERTA_OUTRO_REMETENTE: (
+        "E-mail de OUTRO endereço neste chamado (não é o e-mail da cliente do formulário): "
+        "confira se é a mesma pessoa antes de responder"
+    ),
+}
+ALERTAS_DO_CHAMADO = frozenset(ROTULO_ALERTA_DO_CHAMADO)
+
+# O status do chamado na faixa (RF6), derivado da conversa.
+STATUS_CHAMADO_ABERTO = "aberto"
+STATUS_CHAMADO_AGUARDANDO = "aguardando_cliente"
+STATUS_CHAMADO_RESOLVIDO = "resolvido"
+ROTULO_STATUS_CHAMADO = {
+    STATUS_CHAMADO_ABERTO: "Aberto",
+    STATUS_CHAMADO_AGUARDANDO: "Aguardando cliente",
+    STATUS_CHAMADO_RESOLVIDO: "Resolvido",
+}
+
 # ── Por que o e-mail ficou SEM LOJA (`motivo`) ─────────────────────────────
 SEM_LOJA_ALIAS_SEM_CADASTRO = "alias_sem_cadastro"
 SEM_LOJA_AMBIGUO = "ambiguo"

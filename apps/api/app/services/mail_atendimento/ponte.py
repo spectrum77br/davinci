@@ -106,6 +106,14 @@ from app.services.mail_atendimento import (
 )
 from app.services.mail_atendimento.constantes import (
     ALERTA_LOJA_SEM_INTEGRACAO,
+    ALERTA_OUTRO_REMETENTE,
+    ALERTA_PROTOCOLO_FORMATO,
+    ALERTA_PROTOCOLO_INVALIDO,
+    ALERTA_PROTOCOLO_OUTRA_MARCA,
+    ALERTA_PROTOCOLO_REPETIDO,
+    ALERTA_SEM_PROTOCOLO,
+    ALERTA_TIPO_X_CAIXA,
+    ALERTAS_DO_CHAMADO,
     ASSUNTOS_SEM_PENDENCIA,
     DOMINIOS_DO_TUTA_SISTEMA,
     ESPERA_GMAIL_AMAZON,
@@ -146,6 +154,7 @@ from app.services.mail_atendimento.constantes import (
     REMETENTE_COMPRADOR,
     REMETENTE_NOSSO,
     REMETENTE_TUTA,
+    ROTULO_ALERTA_DO_CHAMADO,
     ROTULO_TIPO_CAIXA,
     SEGURANCA_CODIGO,
     SEM_LOJA_ALIAS_SEM_CADASTRO,
@@ -182,6 +191,8 @@ _SEM_LOJA_PELO_FIO = (
 # Os canais da conversa da API que recebem o aviso por e-mail da plataforma.
 _CANAIS_SEM_AVISO = (CANAL_EMAIL, CANAL_AVALIACAO)
 _TEXTO_CORTADO = "[…] (o texto inteiro está no cartão do e-mail)"
+# O que o e-mail novo nunca troca numa conversa de chamado que já tem (RF6).
+_FIXOS_DO_CHAMADO = ("protocolo", "caixa", "caixa_rotulo", "marca", "marca_nome")
 
 
 class _Esperar(Exception):  # noqa: N818 — controle de fluxo, não erro
@@ -376,6 +387,37 @@ def dados_mail(conversa: AtendimentoConversa) -> dict:
     dados = conversa.dados if isinstance(conversa.dados, dict) else {}
     valor = dados.get(CHAVE)
     return valor if isinstance(valor, dict) else {}
+
+
+def clientes_da_conversa(conversa: AtendimentoConversa) -> set[str]:
+    """Os e-mails de cliente da conversa: o comprador e os dos chamados agrupados nela."""
+    saida = {c for c in (dados_mail(conversa).get("clientes") or []) if isinstance(c, str) and c}
+    if conversa.comprador_id:
+        saida.add(conversa.comprador_id)
+    return saida
+
+
+def _mesma_cliente(
+    conversa: AtendimentoConversa,
+    contato: str | None,
+    campos: dict[str, str | None] | None = None,
+) -> bool:
+    """O formulário é da cliente da conversa?
+
+    Com e-mail dos dois lados, vale o e-mail (o do formulário é um dos
+    clientes da conversa). Sem e-mail para comparar (o formulário sem e-mail,
+    ou a conversa sem cliente), desempatam os campos do formulário: o
+    telefone (os dois têm: igual = sim, diferente = não) e o nome (de pessoas
+    diferentes = não). Sem como saber, vale como sim — o protocolo é a chave
+    do chamado."""
+    clientes = clientes_da_conversa(conversa)
+    if contato and clientes:
+        return contato in clientes
+    campos = campos or {}
+    telefone, da_conversa = campos.get("telefone"), dados_mail(conversa).get("telefone")
+    if telefone and da_conversa:
+        return telefone == da_conversa
+    return enderecos.mesmo_nome(campos.get("nome"), conversa.comprador_nome) is not False
 
 
 def e_conversa_da_ponte(conversa: AtendimentoConversa) -> bool:
@@ -654,6 +696,9 @@ async def achar_conversa(
     *,
     pedido_marketplace: str | None,
     agora: datetime | None = None,
+    contato: str | None = None,
+    so_mesma_cliente: bool = False,
+    campos: dict[str, str | None] | None = None,
 ) -> tuple[AtendimentoConversa | None, str | None]:
     """A conversa onde o e-mail entra (e por quê): fio → referência → protocolo → pedido.
 
@@ -662,7 +707,19 @@ async def achar_conversa(
     mensagem daqui — na Amazon, espera o Gmail (`_esperar_o_gmail`), MESMO
     que o fio também tenha uma conversa da ponte (a "à parte" de uma
     mensagem que já passou da espera): a do Gmail é a de verdade, e a
-    mensagem que o Gmail ainda vai ler não pode ficar nas duas."""
+    mensagem que o Gmail ainda vai ler não pode ficar nas duas.
+
+    PROTOCOLO (RF6): primeiro a conversa onde o remetente (`contato`) já é
+    cliente — a dele, mesmo com o número repetido. No FORMULÁRIO
+    (`so_mesma_cliente`) só a conversa da MESMA cliente (`_mesma_cliente`:
+    o e-mail; sem e-mail, o telefone e o nome dos `campos`): o mesmo número
+    no formulário de OUTRA cliente nunca entra na conversa dela — "nunca
+    agrupar sozinho": abre conversa própria, com o alerta de protocolo
+    repetido (`_protocolo_repetido`). No e-mail DIRETO (a cliente que escreve
+    com o protocolo no assunto, às vezes de outro endereço), entra na
+    conversa do protocolo só se ela for a ÚNICA — com duas ou mais (o número
+    repetido de duas clientes), abre conversa própria. Quem responde vê o
+    alerta de outro endereço na faixa e confirma antes (`responder.previa`)."""
     fora: list[AtendimentoConversa] = []
     amazon = rota.plataforma == "amazon"
     achada: tuple[AtendimentoConversa, str] | None = None
@@ -734,9 +791,21 @@ async def achar_conversa(
                 )
             ).scalars()
         )
-        for c in await _conversas(session, {i for i in ids if i is not None}):
-            if _da_mesma_loja(c, rota) and e_conversa_da_ponte(c):
-                return c, "protocolo"
+        candidatas = [
+            c
+            for c in await _conversas(session, {i for i in ids if i is not None})
+            if _da_mesma_loja(c, rota) and e_conversa_da_ponte(c)
+        ]
+        if contato:
+            for c in candidatas:
+                if contato in clientes_da_conversa(c):
+                    return c, "protocolo"
+        if so_mesma_cliente:
+            for c in candidatas:
+                if _mesma_cliente(c, contato, campos):
+                    return c, "protocolo"
+        elif len(candidatas) == 1:
+            return candidatas[0], "protocolo"
     if pedido_marketplace and not rota.site:
         if rota.integration_id is not None:
             da_loja: tuple = (AtendimentoConversa.integration_id == rota.integration_id,)
@@ -818,13 +887,19 @@ async def gravar_na_conversa(
     abre: bool,
     origem: str | None = None,
     principal: str | None = None,
+    formulario: dict[str, str | None] | None = None,
+    externo: str | None = None,
 ) -> tuple[AtendimentoConversa, AtendimentoMensagem]:
     """A mensagem do e-mail na conversa (achada ou nova). Não commita.
 
     `abre` = o e-mail abre a vez da loja. A conversa NOVA que não abre nasce
     "não precisa de resposta" (o histórico de vendas, o aviso das plataformas
     com API). `principal`: o endereço de login da conta, que nunca vira "o
-    alias" da conversa (a resposta nunca sai por ele).
+    alias" da conversa (a resposta nunca sai por ele). `formulario`: os
+    campos do formulário do site (nome, telefone, pedido — RF6): o nome vira
+    o da cliente do chamado e os três ficam em `dados.mail` (o primeiro que
+    veio fica). `externo`: a chave da conversa nova quando não é a de sempre
+    (o protocolo repetido de outra cliente).
     """
     alias = rota.alias or meta.alias_recebido
     if principal and alias == principal:
@@ -852,6 +927,42 @@ async def gravar_na_conversa(
                 "protocolo": meta.protocolo,
             }
         )
+    # Os campos do formulário e os alertas do chamado: SOMAM ao que a conversa
+    # já tem (o 1º nome/telefone/pedido fica; o alerta nunca some sozinho).
+    extras: dict[str, Any] = {}
+    if formulario:
+        extras = {
+            "cliente_nome": formulario.get("nome"),
+            "telefone": formulario.get("telefone"),
+            "pedido_citado": formulario.get("pedido"),
+        }
+    # O "protocolo repetido" só vira alerta DA CONVERSA quando ela é a conversa
+    # própria da outra cliente (`externo`); no resto fica só no cartão do e-mail.
+    alertas_novos = [
+        str(a.get("codigo"))
+        for a in (meta.alertas or [])
+        if isinstance(a, dict)
+        and a.get("codigo") in ALERTAS_DO_CHAMADO
+        and a.get("codigo") != ALERTA_PROTOCOLO_REPETIDO
+    ]
+    if externo:
+        alertas_novos.append(ALERTA_PROTOCOLO_REPETIDO)
+    if (
+        rota.site
+        and conversa is not None
+        and formulario is None
+        and autor == AUTOR_CLIENTE
+        and contato
+        and contato not in clientes_da_conversa(conversa)
+    ):
+        # O e-mail direto (ou no fio) de um endereço que NÃO é o da cliente do
+        # chamado: a faixa avisa (a resposta iria para ele — a prévia pede
+        # confirmação). Ele nunca vira "cliente" do chamado por isso.
+        alertas_novos.append(ALERTA_OUTRO_REMETENTE)
+    if formulario is not None:
+        nome_cliente = formulario.get("nome") or None
+    else:
+        nome_cliente = (email.de_nome or None) if autor == AUTOR_CLIENTE else None
     if conversa is None:
         plataforma = rota.plataforma or PLATAFORMA_SITE
         if integration is not None:
@@ -865,10 +976,10 @@ async def gravar_na_conversa(
             integration=integration,
             plataforma=plataforma,
             canal_nome=CANAL_EMAIL,
-            externo_id=_externo_da_conversa(meta, rota),
+            externo_id=externo or _externo_da_conversa(meta, rota),
             conta=rota.marca_nome if rota.site else (rota.loja_nome if rota.so_ficha else None),
             comprador_id=_comprador(contato),
-            comprador_nome=(email.de_nome or None) if autor == AUTOR_CLIENTE else None,
+            comprador_nome=nome_cliente,
             pedido_marketplace=pedido_marketplace,
             dados={"fonte": FONTE_TUTA, CHAVE: mail},
         )
@@ -879,6 +990,12 @@ async def gravar_na_conversa(
         atual = dict(dados.get(CHAVE) or {})
         # O destaque fica se algum e-mail da conversa veio de problema/reclamação.
         mail["destaque"] = bool(atual.get("destaque")) or mail["destaque"]
+        # O CHAMADO não muda pelo e-mail novo (RF6): o protocolo principal, o
+        # tipo e a marca ficam os da conversa — no chamado agrupado, o e-mail
+        # com o protocolo do outro não troca o principal (o mais antigo).
+        for chave in _FIXOS_DO_CHAMADO:
+            if atual.get(chave):
+                mail.pop(chave, None)
         dados[CHAVE] = {**atual, **{k: v for k, v in mail.items() if v is not None}}
         dados["fonte"] = FONTE_TUTA
         conversa.dados = dados
@@ -886,9 +1003,21 @@ async def gravar_na_conversa(
             c = _comprador(contato)
             if c:
                 conversa.comprador_id = c
-                conversa.comprador_nome = conversa.comprador_nome or email.de_nome or None
+                conversa.comprador_nome = conversa.comprador_nome or nome_cliente
+        if formulario is not None and nome_cliente and not conversa.comprador_nome:
+            conversa.comprador_nome = nome_cliente
         if pedido_marketplace and not conversa.pedido_marketplace:
             conversa.pedido_marketplace = pedido_marketplace[:64]
+    if rota.site and (any(extras.values()) or alertas_novos):
+        dados = dict(conversa.dados or {})
+        atual = dict(dados.get(CHAVE) or {})
+        for chave, valor in extras.items():
+            if valor and not atual.get(chave):
+                atual[chave] = valor
+        if alertas_novos:
+            atual["alertas"] = list(dict.fromkeys([*(atual.get("alertas") or []), *alertas_novos]))
+        dados[CHAVE] = atual
+        conversa.dados = dados
     momento = gravar._utc(email.message.received_at) or datetime.now(UTC)
     if criada and not abre and autor != AUTOR_LOJA:
         # Histórico: a conversa nasce fora da fila e da métrica (RF5, vendas).
@@ -975,47 +1104,87 @@ async def _amazon_pelo_gmail(
 
 
 def _conferir_protocolo(meta: MailMessageMeta, email: Email, rota: rotear.Rota) -> None:
-    """RF6: lê o protocolo (nunca gera), confere a marca e o tipo × a caixa."""
+    """RF6: lê o protocolo (nunca gera), confere a marca e o tipo × a caixa.
+
+    Sem protocolo no formato → "SEM PROTOCOLO"; se há um número com CARA de
+    protocolo fora do formato ("US-2026-0001", "UX-26-0001", "US-26-001"), o
+    alerta diz isso (é o site que precisa corrigir) — o número errado nunca
+    vira a chave do chamado."""
     prot = pedido.protocolo(email.assunto, texto.legivel(email.texto))
     if prot is None:
         meta.protocolo = None
-        _alerta(meta, "sem_protocolo", "SEM PROTOCOLO: formulário sem o número do site")
+        if pedido.protocolo_fora_do_formato(email.assunto, texto.legivel(email.texto)):
+            _alerta(
+                meta, ALERTA_PROTOCOLO_FORMATO, ROTULO_ALERTA_DO_CHAMADO[ALERTA_PROTOCOLO_FORMATO]
+            )
+        else:
+            _alerta(meta, ALERTA_SEM_PROTOCOLO, "SEM PROTOCOLO: formulário sem o número do site")
         return
     meta.protocolo = prot.numero
     if not prot.valido:
-        _alerta(meta, "protocolo_invalido", f"o protocolo {prot.numero} não existe (sem Atacado)")
+        _alerta(
+            meta, ALERTA_PROTOCOLO_INVALIDO, f"o protocolo {prot.numero} não existe (sem Atacado)"
+        )
     marcas = pedido.MARCA_DA_LETRA.get(prot.letra, ())
     if rota.marca_slug and rota.marca_slug not in marcas:
-        _alerta(meta, "protocolo_outra_marca", "a marca do protocolo não é a da caixa que recebeu")
+        _alerta(
+            meta, ALERTA_PROTOCOLO_OUTRA_MARCA, "a marca do protocolo não é a da caixa que recebeu"
+        )
     if rota.tipo_caixa and rota.tipo_caixa != prot.tipo:
         # Vale o protocolo (RF6), com alerta.
-        _alerta(meta, "tipo_x_caixa", f"o tipo do protocolo ({prot.tipo}) não é o da caixa")
+        _alerta(meta, ALERTA_TIPO_X_CAIXA, f"o tipo do protocolo ({prot.tipo}) não é o da caixa")
     rota.tipo_caixa = prot.tipo
     meta.tipo_caixa = prot.tipo
 
 
 async def _protocolo_repetido(
-    session: AsyncSession, meta: MailMessageMeta, contato: str | None
+    session: AsyncSession,
+    meta: MailMessageMeta,
+    contato: str | None,
+    campos: dict[str, str | None] | None = None,
 ) -> None:
-    """O mesmo protocolo em outra conversa (outro cliente) → alerta (nunca junta sozinho)."""
-    if not meta.protocolo:
+    """O mesmo protocolo em outra conversa (outro cliente) → alerta (nunca junta sozinho).
+
+    "Outro cliente" = não é a cliente da conversa (`_mesma_cliente`: o e-mail
+    não é nenhum dos clientes dela — o comprador e os dos chamados agrupados
+    nela; sem e-mail, o telefone ou o nome do formulário diferentes)."""
+    if not meta.protocolo or not (contato or any((campos or {}).values())):
         return
     outras = (
         await session.execute(
-            select(AtendimentoConversa.comprador_id)
+            select(AtendimentoConversa)
             .join(MailMessageMeta, MailMessageMeta.conversa_id == AtendimentoConversa.id)
             .where(
                 MailMessageMeta.protocolo == meta.protocolo,
                 MailMessageMeta.message_id != meta.message_id,
             )
+            .distinct()
         )
     ).scalars()
-    if any(c and contato and c != contato for c in outras):
+    if any(not _mesma_cliente(c, contato, campos) for c in outras):
         _alerta(
             meta,
-            "protocolo_repetido",
+            ALERTA_PROTOCOLO_REPETIDO,
             f"o protocolo {meta.protocolo} já apareceu noutro formulário",
         )
+
+
+async def _externo_do_protocolo_repetido(
+    session: AsyncSession, meta: MailMessageMeta
+) -> str | None:
+    """A chave da conversa NOVA de um protocolo que já tem conversa (de outra
+    cliente, ou de outra marca): `mail-protocolo:<nº>:<id do e-mail>` — a de
+    sempre (`mail-protocolo:<nº>`) devolveria a conversa da outra. None = a
+    chave de sempre está livre."""
+    base = f"{PREFIXO_PROTOCOLO}{meta.protocolo}"
+    tomada = await session.scalar(
+        select(AtendimentoConversa.id)
+        .where(AtendimentoConversa.canal == CANAL_EMAIL, AtendimentoConversa.externo_id == base)
+        .limit(1)
+    )
+    if tomada is None:
+        return None
+    return f"{base}:{meta.message_id}"[:191]
 
 
 # ── Enviados: a nossa resposta voltando ou a resposta dada no Tuta ────────
@@ -1351,11 +1520,16 @@ async def processar(
     # O formulário do site chega DE sac@ PARA sac@: o cliente está no corpo (E5).
     formulario = False
     contato_form = ""
+    campos_form: dict[str, str | None] = {}
     if tipo == REMETENTE_NOSSO:
         if not rota.site:
             return _so_estado(meta, ESTADO_INTERNO, None, agora)
         formulario = True
         contato_form = enderecos.email_do_formulario(texto.legivel(email.texto), conhecidos)
+        # Nome, telefone e nº do pedido do formulário (RF6), lidos do texto JÁ
+        # protegido (o mesmo que a equipe vê): o nome do chamado é o da
+        # cliente, nunca o do site que mandou o e-mail.
+        campos_form = enderecos.campos_do_formulario(protegido.texto)
         tipo = REMETENTE_COMPRADOR
         meta.remetente_tipo = tipo
     if rota_forcada is None and not rota.tem_loja and rota.motivo_sem_loja in _SEM_LOJA_PELO_FIO:
@@ -1430,7 +1604,7 @@ async def processar(
         contato = email.de if autor == AUTOR_CLIENTE else None
     if rota.site:
         _conferir_protocolo(meta, email, rota)
-        await _protocolo_repetido(session, meta, contato)
+        await _protocolo_repetido(session, meta, contato, campos_form if formulario else None)
     else:
         textos = (email.assunto, texto.texto_novo(email.texto))
         citados = pedido.citados(rota.plataforma, *textos)
@@ -1507,8 +1681,20 @@ async def processar(
             return meta.estado
 
     conversa, vinculado = await achar_conversa(
-        session, meta, email, rota, pedido_marketplace=pedido_achado, agora=agora
+        session,
+        meta,
+        email,
+        rota,
+        pedido_marketplace=pedido_achado,
+        agora=agora,
+        contato=contato,
+        # O protocolo do FORMULÁRIO só junta com a conversa da mesma cliente (RF6).
+        so_mesma_cliente=formulario,
+        campos=campos_form if formulario else None,
     )
+    externo = None
+    if conversa is None and rota.site and meta.protocolo:
+        externo = await _externo_do_protocolo_repetido(session, meta)
     conversa, _ = await gravar_na_conversa(
         session,
         meta,
@@ -1523,6 +1709,8 @@ async def processar(
         vinculado_por=vinculado,
         abre=abre,
         principal=principal,
+        formulario=campos_form if formulario else None,
+        externo=externo,
     )
     if rota.site:
         meta.estado = ESTADO_GRAVADO

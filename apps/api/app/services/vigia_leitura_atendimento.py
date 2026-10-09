@@ -36,9 +36,10 @@ gravada por quem lê:
 - comentários das redes: a cada 15 min (`atendimento/redes.py`);
 - caixa de e-mail da EMPRESA com a ponte ligada (08/10/2026): o sinal do
   agente do Mac na Central de e-mail (`mail_mailboxes.last_seen_at`, a cada
-  ≤ 3 min) — 30 min sem sinal, ou o agente pedindo login/avisando erro
-  (`mail_atendimento/saude.caixas_paradas`). A caixa PRIVADA nunca entra
-  (todo o /atendimento vê esta lista).
+  ≤ 3 min) — 30 min sem sinal, ou o agente pedindo login/avisando erro; o
+  Mac com sinal mas sem LER há 30 min; ou a ponte do worker parada com
+  e-mail esperando há 15 min (`mail_atendimento/saude.caixas_paradas`). A
+  caixa PRIVADA nunca entra (todo o /atendimento vê esta lista).
 
 E as duas rodadas que não têm caixa — reclamações (10 min) e avaliações
 (30 min) —, pelo carimbo no Redis: o último sucesso e a primeira vez que a
@@ -731,11 +732,11 @@ async def _caixas_de_email(session: AsyncSession, agora: datetime) -> list[Leitu
             plataforma=PLATAFORMA_EMAIL,
             loja=p.nome,
             motivo=p.motivo,
-            acao=ACAO_CAIXA_EMAIL,
+            acao=p.acao or ACAO_CAIXA_EMAIL,
             desde=p.desde,
             nunca_leu=p.nunca_leu,
             minutos=p.minutos,
-            limite_min=_limite_min(mail_saude.LIMITE_SEM_SINAL),
+            limite_min=_limite_min(p.limite),
             caixas=(ROTULO_CAIXA_EMAIL,),
             detalhe=_texto_curto(p.detalhe),
         )
