@@ -28,6 +28,7 @@ from app.schemas.mail import (
 from app.security.cipher import decrypt_bytes, decrypt_json, encrypt_json
 from app.services import mail_central as service
 from app.services.mail_atendimento import caixa as mailbox_settings
+from app.services.mail_atendimento import leitores as mailbox_readers
 from app.services.mail_atendimento import responder as mail_responder
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
@@ -67,6 +68,16 @@ async def user_mailbox(session: AsyncSession, mailbox_id: UUID, user: User) -> M
     return mailbox
 
 
+async def readable_mailbox(session: AsyncSession, mailbox_id: UUID, user: User) -> MailMailbox:
+    # READ-only routes: owner/admin, or an active user on the mailbox's
+    # "Quem mais vê" list (mailbox_readers.pode_ver_caixa). Writing stays on
+    # `user_mailbox` (allowed()). Same 404 for whoever cannot see it.
+    mailbox = await session.get(MailMailbox, mailbox_id)
+    if mailbox is None or not await mailbox_readers.pode_ver_caixa(session, mailbox, user):
+        raise fail("mailbox_not_found")
+    return mailbox
+
+
 async def require_operator(session: AsyncSession, mailbox: MailMailbox, user: User) -> None:
     # Company mailboxes (our settings table): sending-related actions through the
     # raw mailbox also need the Atendimento "mexe" permission. Private: unchanged.
@@ -80,6 +91,7 @@ async def user_message(
     user: User,
     *,
     lock: bool = False,
+    read: bool = False,
 ) -> tuple[MailMessage, MailMailbox]:
     query = select(MailMessage).where(MailMessage.id == message_id)
     if lock:
@@ -87,7 +99,8 @@ async def user_message(
     message = await session.scalar(query)
     if message is None:
         raise fail("message_not_found")
-    return message, await user_mailbox(session, message.mailbox_id, user)
+    check = readable_mailbox if read else user_mailbox
+    return message, await check(session, message.mailbox_id, user)
 
 
 async def agent_mailbox(
@@ -115,9 +128,16 @@ async def list_mailboxes(session: Session, user: ActiveUser, response: Response)
     response.headers["Cache-Control"] = "no-store"
     query = select(MailMailbox).order_by(MailMailbox.label)
     if user.role != UserRole.ADMIN:
-        query = query.where(MailMailbox.owner_user_id == user.id)
+        query = query.where(mailbox_readers.filtro_de_leitura(user))
     mailboxes = (await session.scalars(query)).all()
-    return {"items": [service.mailbox_view(mailbox) for mailbox in mailboxes]}
+    return {
+        "items": [
+            service.mailbox_view(mailbox)
+            if service.allowed(mailbox, user)
+            else {**service.mailbox_view(mailbox), "so_leitura": True}
+            for mailbox in mailboxes
+        ]
+    }
 
 
 @router.post("/mailboxes", status_code=201)
@@ -186,7 +206,7 @@ async def list_messages(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=100_000),
 ):
-    await user_mailbox(session, mailbox_id, user)
+    await readable_mailbox(session, mailbox_id, user)
     messages = (
         await session.scalars(
             select(MailMessage)
@@ -207,7 +227,7 @@ async def list_messages(
 
 @router.get("/messages/{message_id}")
 async def get_message(message_id: UUID, session: Session, user: ActiveUser, response: Response):
-    message, mailbox = await user_message(session, message_id, user)
+    message, mailbox = await user_message(session, message_id, user, read=True)
     attachments = (
         await session.scalars(
             select(MailAttachment).where(
@@ -250,7 +270,7 @@ async def download_attachment(attachment_id: UUID, session: Session, user: Activ
     attachment = await session.get(MailAttachment, attachment_id)
     if attachment is None:
         raise fail("attachment_not_found")
-    await user_message(session, attachment.message_id, user)
+    await user_message(session, attachment.message_id, user, read=True)
     metadata = decrypt_json(attachment.metadata_enc)
     filename = metadata["filename"].replace("\\", "/").rsplit("/", 1)[-1] or "attachment"
     return Response(

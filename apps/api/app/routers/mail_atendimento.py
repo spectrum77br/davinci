@@ -5,6 +5,10 @@
   PATCH /api/mail/mailboxes/{id}/settings — admin, como o PATCH da Central;
         numa caixa `empresa`, ou mudando a ponte/visibilidade de qualquer
         caixa, também quem MEXE no /atendimento (`acesso.pode_mexer`).
+  GET   /api/mail/mailboxes/{id}/leitores — "Quem mais vê" (09/10/2026): a
+        lista de leitores, os candidatos e quem/quando mudou. Admin.
+  PUT   /api/mail/mailboxes/{id}/leitores — troca a lista: admin que MEXE (na
+        caixa privada de outro dono também). Ver `mail_atendimento/leitores.py`.
 
 O que cada campo faz está em `models/mail_atendimento.py`. Sem linha, a caixa
 segue os padrões (privada, ponte desligada, remetente como a Central sempre
@@ -21,9 +25,9 @@ from app.db import get_session
 from app.deps.auth import require_active_user, require_admin
 from app.models.user import User
 from app.routers.mail import fail, user_mailbox
-from app.schemas.mail_atendimento import ConfigCaixaPatch
+from app.schemas.mail_atendimento import ConfigCaixaPatch, LeitoresPut
 from app.services.atendimento import acesso
-from app.services.mail_atendimento import caixa
+from app.services.mail_atendimento import caixa, leitores
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -61,3 +65,33 @@ async def mudar_configuracao(
     await session.commit()
     response.headers["Cache-Control"] = "no-store"
     return caixa.visao(nova)
+
+
+@router.get("/mailboxes/{mailbox_id}/leitores")
+async def ver_leitores(mailbox_id: UUID, session: Session, user: Admin, response: Response):
+    mailbox = await user_mailbox(session, mailbox_id, user)
+    response.headers["Cache-Control"] = "no-store"
+    return await leitores.visao(session, mailbox)
+
+
+@router.put("/mailboxes/{mailbox_id}/leitores")
+async def mudar_leitores(
+    mailbox_id: UUID,
+    body: LeitoresPut,
+    session: Session,
+    user: Admin,
+    response: Response,
+):
+    mailbox = await user_mailbox(session, mailbox_id, user)
+    # Liberar a caixa para mais gente é do dono do negócio: admin que MEXE no
+    # /atendimento, em qualquer caixa (a privada de outro dono também).
+    if not acesso.pode_mexer(user):
+        raise fail("atendimento_permission_required", 403)
+    try:
+        await leitores.salvar(session, mailbox, body.leitores, user)
+    except leitores.LeitoresError as erro:
+        await session.rollback()
+        raise HTTPException(erro.status, detail={"code": erro.codigo}) from None
+    await session.commit()
+    response.headers["Cache-Control"] = "no-store"
+    return await leitores.visao(session, mailbox)

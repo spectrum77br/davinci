@@ -33,6 +33,9 @@ from app.models import Base
 _ALEMBIC = Path(__file__).resolve().parent.parent / "alembic"
 _DELE = _ALEMBIC / "versions" / "0386_mail_central.py"
 _NOSSA = _ALEMBIC / "versions" / "0387_mail_atendimento.py"
+# A 0389 (leitores, 09/10) só acrescenta colunas na configuração: o model de
+# hoje = 0387 + 0389 (o teste dela é `test_mail_leitores.py`).
+_LEITORES = _ALEMBIC / "versions" / "0389_mail_leitores.py"
 TABELAS = [
     "atendimento_regras_pasta_email",
     "mail_agente_v2",
@@ -134,7 +137,7 @@ async def _catalogo(db: AsyncSession, schema: str, tabelas: list[str]) -> dict[s
 async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession):
     schema_model = Base.metadata.schema
     rascunho = f"{schema_model}_mig0387"
-    dele, nossa = _carregar(_DELE), _carregar(_NOSSA)
+    dele, nossa, leitores = _carregar(_DELE), _carregar(_NOSSA), _carregar(_LEITORES)
     assert (nossa.revision, nossa.down_revision) == ("0387_mail_atendimento", "0386_mail_central")
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
@@ -151,13 +154,14 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
 
     dele.SCHEMA = rascunho
     nossa.SCHEMA = rascunho
+    leitores.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, [(dele, "upgrade")])
         await db.commit()
         dele_antes = await _catalogo(db, rascunho, DELE)
         conn = await db.connection()
-        await conn.run_sync(_rodar, [(nossa, "upgrade")])
+        await conn.run_sync(_rodar, [(nossa, "upgrade"), (leitores, "upgrade")])
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho, TABELAS)
@@ -297,7 +301,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
 
         # O downgrade da 0387 tira só o que é nosso.
         conn = await db.connection()
-        await conn.run_sync(_rodar, [(nossa, "downgrade")])
+        await conn.run_sync(_rodar, [(leitores, "downgrade"), (nossa, "downgrade")])
         await db.commit()
         depois = await _catalogo(db, rascunho, TABELAS)
         assert depois == {"tabelas": [], "colunas": [], "constraints": [], "indices": []}

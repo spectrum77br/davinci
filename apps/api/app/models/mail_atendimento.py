@@ -163,6 +163,7 @@ class MailMailboxSettings(Base, TimestampMixin):
         CheckConstraint("teto_hora >= 0 AND teto_dia >= 0 AND teto_conta_hora >= 0", name="tetos"),
         CheckConstraint("jsonb_typeof(destinatarios_teste) = 'array'", name="destinatarios_lista"),
         CheckConstraint("jsonb_typeof(agente_info) = 'object'", name="agente_info_objeto"),
+        CheckConstraint("jsonb_typeof(leitores) = 'array'", name="leitores_lista"),
     )
 
     # CASCADE: a configuração não sobrevive à caixa.
@@ -209,6 +210,18 @@ class MailMailboxSettings(Base, TimestampMixin):
     updated_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+    # "Quem mais vê" (09/10/2026, migration 0389): user_ids (texto) que LEEM a
+    # caixa inteira além do dono e dos admins — lista, mensagem e anexo; nunca
+    # respondem, resolvem, configuram nem trocam a chave. Só conta quem está
+    # ATIVO (`services/mail_atendimento/leitores.pode_ver_caixa`). Quem mexe na
+    # lista: admin que MEXE no /atendimento; quem/quando ficam ao lado.
+    leitores: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    leitores_updated_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    leitores_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MailFolder(Base, TimestampMixin):

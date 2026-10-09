@@ -3,7 +3,7 @@ import { Download, Mail, Plus, RefreshCw, Send, Settings2, ShieldCheck } from 'l
 import type { ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 
-type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null }
+type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean }
 type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean }
 type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null }
 type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
@@ -17,6 +17,9 @@ const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
 const mailboxId = ref('')
 const mailbox = computed(() => mailboxes.value.find((item) => item.id === mailboxId.value))
+// "Quem mais vê" (09/10/2026): the API marks a mailbox the person only READS
+// (`so_leitura`): no reply, no resolve, no settings, no token.
+const readOnly = computed(() => mailbox.value?.so_leitura === true)
 const messages = ref<Summary[]>([])
 const detail = ref<Detail | null>(null)
 const loading = ref(false)
@@ -50,7 +53,7 @@ const configuring = ref(false)
 const resolving = ref('')
 
 const pending = computed(() => detail.value?.outbox.some((job) => ['queued', 'leased', 'uncertain'].includes(job.status)) ?? false)
-const canReply = computed(() => detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value)
+const canReply = computed(() => !readOnly.value && detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value)
 const states: Record<string, string> = { online: 'Conectada', offline: 'Mac desconectado', login_required: 'Faça login no Mac', error: 'Conexão precisa de atenção' }
 const statuses: Record<string, string> = { queued: 'Na fila do Mac', leased: 'Envio em andamento', sent: 'Aceita pelo serviço de e-mail', failed: 'Não enviada', uncertain: 'Precisa conferir no Tuta — não reenviada' }
 
@@ -230,7 +233,7 @@ onBeforeUnmount(() => { clearInterval(timer); ++listGeneration; ++detailGenerati
       <div>
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
         <p v-if="section === 'queues'" class="text-sm text-muted-foreground">Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, suspeitos, resumos e respostas a conferir.</p>
-        <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável e aos administradores.</p>
+        <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável, aos administradores e a quem um admin liberar (só leitura).</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
         <button v-if="isAdmin" class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" @click="showSetup = !showSetup"><Plus class="h-4 w-4" /> Cadastrar caixa</button>
@@ -291,12 +294,13 @@ onBeforeUnmount(() => { clearInterval(timer); ++listGeneration; ++detailGenerati
           <select v-model="mailboxId" aria-label="Caixa de e-mail" :disabled="sending" class="max-w-full rounded border bg-background p-2 text-sm"><option v-for="item in mailboxes" :key="item.id" :value="item.id">{{ item.label }} · {{ item.address }}</option></select>
           <span class="text-sm">{{ states[mailbox.state] || 'Conexão precisa de atenção' }}</span>
           <span class="text-xs text-muted-foreground">Última leitura: {{ date(mailbox.last_sync_at) }}</span>
-          <button v-if="isAdmin" class="ml-auto rounded border px-3 py-2 text-xs" @click="changeSending">{{ mailbox.send_enabled ? 'Desativar respostas' : 'Permitir respostas humanas' }}</button>
-          <button v-if="isAdmin" class="inline-flex items-center gap-1 rounded border px-3 py-2 text-xs" :aria-expanded="configuring" data-mail-configure @click="configuring = !configuring"><Settings2 class="h-3.5 w-3.5" /> Configurar</button>
+          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>Você só vê esta caixa (sem responder nem configurar).</span>
+          <button v-if="isAdmin && !readOnly" class="ml-auto rounded border px-3 py-2 text-xs" @click="changeSending">{{ mailbox.send_enabled ? 'Desativar respostas' : 'Permitir respostas humanas' }}</button>
+          <button v-if="isAdmin && !readOnly" class="inline-flex items-center gap-1 rounded border px-3 py-2 text-xs" :aria-expanded="configuring" data-mail-configure @click="configuring = !configuring"><Settings2 class="h-3.5 w-3.5" /> Configurar</button>
         </div>
 
         <AtendimentoMailConfigurar
-          v-if="isAdmin && configuring"
+          v-if="isAdmin && !readOnly && configuring"
           :key="mailbox.id"
           :mailbox="mailbox"
           @mudou="refresh"
@@ -334,14 +338,14 @@ onBeforeUnmount(() => { clearInterval(timer); ++listGeneration; ++detailGenerati
                 <p class="break-all text-xs text-muted-foreground">{{ job.from_address }} → {{ job.to }}</p>
                 <p v-if="job.status === 'failed' && jobFailure(job.error_code)" class="text-xs text-red-700">{{ jobFailure(job.error_code) }}</p>
                 <p class="whitespace-pre-wrap break-words text-sm">{{ job.text }}</p>
-                <div v-if="job.status === 'uncertain'" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
+                <div v-if="job.status === 'uncertain' && !readOnly" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
                   <span class="text-xs text-muted-foreground">Conferiu nos Enviados do Tuta?</span>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving" @click="resolveJob(job, true)">Saiu</button>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving" @click="resolveJob(job, false)">Não saiu</button>
                 </div>
               </div>
             </section>
-            <form v-if="detail.reply.can_reply" class="space-y-3 border-t pt-4" @submit.prevent="sendReply">
+            <form v-if="detail.reply.can_reply && !readOnly" class="space-y-3 border-t pt-4" @submit.prevent="sendReply">
               <h4 class="font-medium">Responder</h4>
               <p class="break-all text-sm">Para: <strong>{{ detail.reply.to }}</strong></p>
               <p v-if="detail.reply_to && detail.reply_to !== detail.from_address" class="text-xs text-amber-700">A mensagem indica este endereço de resposta, diferente do remetente. Confira antes de enviar.</p>

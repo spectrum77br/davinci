@@ -4,6 +4,7 @@ Mesma regra da Central: campo desconhecido = 422 (extra="forbid").
 """
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, EmailStr, Field, model_validator
 
@@ -50,3 +51,11 @@ class ConfigCaixaPatch(BaseModel):
 
     def mudancas(self) -> dict:
         return {nome: getattr(self, nome) for nome in self.model_fields_set}
+
+
+class LeitoresPut(BaseModel):
+    """Quem mais vê a caixa (só leitura): a lista INTEIRA de user_ids."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    leitores: list[UUID] = Field(max_length=50)
