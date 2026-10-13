@@ -11,7 +11,8 @@ existe) e:
   - restrição    → Shopee + produto Apple (pelo nome) + destino RJ não é
                    enviado: "restrição" nas Observações do pedido no Bling +
                    Aguardando Cancelamento + status 'restricao';
-  - sem estoque  → Aguardando Cancelamento no Bling + status 'sem_estoque'
+  - sem estoque  → "Sem estoque — saldo negativo: <SKUs>" nas Observações +
+                   Aguardando Cancelamento no Bling + status 'sem_estoque'
                    (não emite NF/etiqueta de peça que não existe);
   - com estoque  → gera a planilha por faturador e cria os NfCommand de
                    `import_avulsa` (source='auto') — daí a cadeia normal segue
@@ -310,8 +311,15 @@ async def run_auto_enfileirar_nf() -> dict:
 
         # 1) Estoque primeiro: saldo virtual negativo → Aguardando Cancelamento.
         #    Só os candidatos NOVOS — o backlog já passou no check ao entrar.
+        #    Mesma ordem da restrição: recado nas Observações (GET→PUT)
+        #    PRIMEIRO, situação (PATCH 83955) DEPOIS.
         sem_estoque = await _pedidos_sem_estoque(session, numeros) if numeros else {}
         if sem_estoque:
+            await escrever_observacoes(
+                session,
+                {n: observacao_sem_estoque(skus) for n, skus in sem_estoque.items()},
+                evento="nf_sem_estoque_observacao",
+            )
             await _marcar_aguardando_cancelamento(session, list(sem_estoque))
             # Erro por pedido com os SKUs negativos — o painel mostra no
             # tooltip do badge "Sem estoque" QUAL peça travou.
@@ -675,26 +683,34 @@ async def _pedidos_restricao_loja(
     return bloqueio
 
 
-async def _escrever_observacao_restricao(
-    session, numeros: list[str]
-) -> None:
-    """Escreve "restrição" nas Observações do pedido no Bling.
+def observacao_sem_estoque(skus: list[str]) -> str:
+    """Recado nas Observações do pedido segurado por falta de estoque (Vinicius
+    13/10: "faz o sem estoque escrever também") — mesmo texto do badge."""
+    return "Sem estoque — saldo negativo: " + ", ".join(skus)
+
+
+async def escrever_observacoes(session, textos: dict[str, str], *, evento: str) -> None:
+    """Escreve `textos[numero]` nas Observações do pedido no Bling (linha
+    datada no topo, sem apagar o que já estava).
 
     A API v3 não tem endpoint de Ocorrência (404 nos caminhos candidatos) —
     o usuário escolheu as Observações. Reusa o round-trip já validado da
     Mensagem Bling (GET → compose → sanitiza → PUT). BEST-EFFORT por pedido:
-    falha só loga, nunca segura o bloqueio (a situação muda mesmo assim).
-    Chamar ANTES do PATCH de situação — o PUT leva o body inteiro e um GET
-    stale reverteria o 83955.
+    falha só loga (`<evento>_falhou`), nunca segura o bloqueio (a situação muda
+    mesmo assim). Chamar ANTES do PATCH de situação — o PUT leva o body
+    inteiro e um GET stale reverteria o 83955.
     """
     from app.services.logistica_bling import (
         build_observacoes_put_body,
         compose_observacoes,
     )
 
+    numeros = list(textos)
+    if not numeros:
+        return
     client = await nf_emissao_gerar._bling_client_opt(session)
     if client is None:
-        logger.warning("nf_restricao_observacao_sem_bling", pedidos=numeros)
+        logger.warning(f"{evento}_sem_bling", pedidos=numeros)
         return
     bling_ids = dict(
         (
@@ -708,20 +724,27 @@ async def _escrever_observacao_restricao(
     for numero in numeros:
         bling_id = bling_ids.get(numero)
         if not bling_id:
-            logger.warning("nf_restricao_observacao_sem_bling_id", pedido=numero)
+            logger.warning(f"{evento}_sem_bling_id", pedido=numero)
             continue
         try:
             order = await client.get_order(int(bling_id))
-            novo = compose_observacoes(
-                order.get("observacoes"), _RESTRICAO_OBSERVACAO
-            )
+            novo = compose_observacoes(order.get("observacoes"), textos[numero])
             if novo != (order.get("observacoes") or ""):
                 body = build_observacoes_put_body(order, novo)
                 await client.update_order(int(bling_id), body)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "nf_restricao_observacao_falhou", pedido=numero, erro=str(exc)
-            )
+            logger.warning(f"{evento}_falhou", pedido=numero, erro=str(exc))
+
+
+async def _escrever_observacao_restricao(
+    session, numeros: list[str]
+) -> None:
+    """Escreve "restrição" nas Observações do pedido no Bling."""
+    await escrever_observacoes(
+        session,
+        dict.fromkeys(numeros, _RESTRICAO_OBSERVACAO),
+        evento="nf_restricao_observacao",
+    )
 
 
 async def _candidatos(session) -> list[str]:

@@ -1434,6 +1434,14 @@ async def enfileirar_importacao(
         for numero, skus in sem_estoque.items()
     ]
     if sem_estoque:
+        # Recado nas Observações ANTES da situação (o PUT leva o body inteiro).
+        from app.services.nf_auto_enfileirar import escrever_observacoes, observacao_sem_estoque
+
+        await escrever_observacoes(
+            session,
+            {n: observacao_sem_estoque(skus) for n, skus in sem_estoque.items()},
+            evento="nf_sem_estoque_observacao",
+        )
         await _marcar_aguardando_cancelamento(session, list(sem_estoque))
         # Erro por pedido com os SKUs negativos — o painel mostra no tooltip
         # do badge "Sem estoque" QUAL peça travou (sem ir caçar no log).

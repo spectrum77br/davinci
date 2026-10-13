@@ -555,7 +555,7 @@ async def test_sweep_sem_estoque_vai_para_aguardando_cancelamento(
     await _seed_pedido(db, numero="830001", loja="930001", sku="x1", bling_id=700009)
     db.add(Product(user_id=admin.id, sku="x1", name="X1", stock=-2))
     await db.commit()
-    fake = _FakeBlingSituacao()
+    fake = _FakeBlingSituacao(orders={700009: {"id": 700009, "observacoes": ""}})
     monkeypatch.setattr(
         nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
     )
@@ -566,6 +566,10 @@ async def test_sweep_sem_estoque_vai_para_aguardando_cancelamento(
     assert summary["enfileirados"] == 0
 
     assert fake.chamadas == [(700009, 83955)]
+    # recado nas Observações (13/10) ANTES da situação, com o SKU que travou
+    assert fake.eventos == [("put", 700009), ("situacao", 700009)]
+    [(_put_id, body)] = fake.puts
+    assert body["observacoes"].endswith(" - Sem estoque — saldo negativo: x1")
     db.expire_all()
     assert (await db.execute(select(NfCommand))).scalars().all() == []
     situacao = (

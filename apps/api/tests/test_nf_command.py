@@ -171,13 +171,25 @@ async def test_enfileirar_sem_faturador_422(
 
 
 class _FakeBlingSituacao:
-    """Captura os PATCH de situação que o motor manda pro Bling."""
+    """Captura os PATCH de situação que o motor manda pro Bling e o PUT das
+    Observações (recado do sem estoque)."""
 
     def __init__(self) -> None:
         self.chamadas: list[tuple[int, int]] = []
+        self.puts: list[tuple[int, dict]] = []
+        self.eventos: list[tuple[str, int]] = []
 
     async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
         self.chamadas.append((bling_order_id, situacao_id))
+        self.eventos.append(("situacao", bling_order_id))
+
+    async def get_order(self, bling_order_id: int) -> dict:
+        return {"id": bling_order_id, "observacoes": "obs antiga"}
+
+    async def update_order(self, bling_order_id: int, body: dict) -> dict:
+        self.puts.append((bling_order_id, body))
+        self.eventos.append(("put", bling_order_id))
+        return body
 
 
 @pytest.mark.asyncio
@@ -212,8 +224,13 @@ async def test_enfileirar_pula_pedido_sem_estoque(
     cmds = (await db.execute(select(NfCommand))).scalars().all()
     assert [n for c in cmds for n in c.numeros] == ["830001"]
 
-    # o sem estoque foi pra Aguardando Cancelamento no Bling e localmente
+    # o sem estoque foi pra Aguardando Cancelamento no Bling e localmente,
+    # com o recado nas Observações ANTES da situação (o PUT leva o body todo)
     assert fake.chamadas == [(700002, 83955)]
+    assert fake.eventos == [("put", 700002), ("situacao", 700002)]
+    [(_bid, put)] = fake.puts
+    assert put["observacoes"].splitlines()[0].endswith(" - Sem estoque — saldo negativo: x1")
+    assert put["observacoes"].endswith("obs antiga")
     situacoes = {
         r.numero: r.situacao
         for r in (
