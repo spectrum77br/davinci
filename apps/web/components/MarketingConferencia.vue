@@ -218,11 +218,20 @@ function escolher(id: string) {
   void router.replace({ query: { ...route.query, execucao: id } })
 }
 
-/** ?conf= da URL: o marketplace (Shopee não escreve nada, é o padrão). */
+/**
+ * ?conf= da URL: o marketplace (Shopee não escreve nada, é o padrão). Na troca
+ * feita pela pessoa (`semExecucao`) saem também a conta e o segmento dos
+ * Horários (?horario=, ?seg=): eram do marketplace de antes — o Horários do
+ * novo abre no lembrado dele e põe no link se for preciso.
+ */
 function queryComPlataforma(p: Plataforma, semExecucao: boolean): Record<string, any> {
   const query: Record<string, any> = { ...route.query, conf: p }
   if (p === 'shopee') delete query.conf
-  if (semExecucao) delete query.execucao
+  if (semExecucao) {
+    delete query.execucao
+    delete query.horario
+    delete query.seg
+  }
   return query
 }
 

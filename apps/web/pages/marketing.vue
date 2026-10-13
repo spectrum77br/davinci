@@ -52,14 +52,15 @@ onMounted(async () => {
 })
 
 // A aba vai pra URL (?aba=), pra dar F5 e mandar link. O id da execução, o
-// marketplace da Conferência (?conf=ml) e a conta dos horários (?horario=) só
-// valem lá dentro: saem junto quando a aba muda.
+// marketplace da Conferência (?conf=ml) e a conta e o segmento dos horários
+// (?horario=, ?seg=) só valem lá dentro: saem junto quando a aba muda.
 watch(aba, (a) => {
   const query: Record<string, any> = { ...route.query, aba: a }
   if (a !== 'conferencia') {
     delete query.execucao
     delete query.conf
     delete query.horario
+    delete query.seg
   }
   void router.replace({ query })
 })

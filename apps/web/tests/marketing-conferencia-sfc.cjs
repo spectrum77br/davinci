@@ -160,9 +160,9 @@ for (const m of tpl.matchAll(/(?<!dark:)\btext-(?:emerald|red|amber)-\d00\b(?![^
   assert.match(s, /const canConferencia = useCan\('marketing', 'view'\)/, 'permissão da aba')
   assert.match(s, /const canCriativos = useCan\('marketing_criativos', 'view'\)/, 'permissão de Criativos')
   assert.match(s, /if \(!canCriativos\.value && !canConferencia\.value\) await navigateTo\('\/403'\)/, 'guarda 403')
-  // ?aba= lido no setup e escrito na troca; ?execucao, ?conf e ?horario saem fora da Conferência.
+  // ?aba= lido no setup e escrito na troca; ?execucao, ?conf, ?horario e ?seg saem fora da Conferência.
   assert.match(s, /const aba = ref<Aba>\(abaDaUrl\(\) \?\? abaPadrao\(\)\)/, 'lê ?aba=, senão o padrão')
-  assert.match(s, /if \(a !== 'conferencia'\) \{\s*delete query\.execucao\s*delete query\.conf\s*delete query\.horario\s*\}/, 'execucao, conf e horario só na aba')
+  assert.match(s, /if \(a !== 'conferencia'\) \{\s*delete query\.execucao\s*delete query\.conf\s*delete query\.horario\s*delete query\.seg\s*\}/, 'execucao, conf, horario e seg só na aba')
   assert.match(s, /void router\.replace\(\{ query \}\)/, 'escreve a aba na URL')
   // Nada dos painéis de Ads sobrou na página (nem rede, nem polling, nem estado).
   // Comentários contam a história; o que vale é o código e a tela.
@@ -1042,6 +1042,20 @@ async function plataformas() {
     assert.equal(t.calls.length, n)
   }
 
+  // A conta e o segmento dos Horários (?horario=, ?seg=) eram do marketplace de
+  // antes: saem na troca feita pela pessoa (o ?seg da Shopee não abre o ML).
+  {
+    const query = { aba: 'conferencia', execucao: ID_PRONTO, horario: 'conta-shopee', seg: 'celular' }
+    const t = await montar({ detalhes: TODOS, listas: LISTAS, query })
+    t.s.trocarPlataforma('ml')
+    assert.deepEqual(t.routerCalls.at(-1), { query: { aba: 'conferencia', conf: 'ml' } }, 'sem ?horario/?seg da Shopee')
+    await esperar()
+    await esperar()
+    t.route.query = { ...t.route.query, horario: 'conta-ml', seg: 'mala' }
+    t.s.trocarPlataforma('amazon')
+    assert.deepEqual(t.routerCalls.at(-1), { query: { aba: 'conferencia', conf: 'amazon' } }, 'nem na Amazon')
+  }
+
   // ?conf=amazon abre direto na Amazon: afiliados "não se aplica", Ads "aguardando acesso".
   {
     const t = await montar({ detalhes: TODOS, listas: LISTAS, query: { aba: 'conferencia', conf: 'amazon' }, arquivo: () => Promise.resolve(new Blob(['x'])) })
@@ -1078,6 +1092,9 @@ async function plataformas() {
     assert.deepEqual(urls(t.calls), [`GET ${LISTA_URL('shopee')}`, `GET ${BASE}/execucoes/${ID_ML_VELHO}`, `GET ${LISTA_URL('ml')}`])
     assert.deepEqual(s.opcoes.value.map((e) => e.id), [ID_ML, ID_ML_VELHO])
     assert.equal(s.exec.value.id, ID_ML_VELHO)
+    // O link com a conta dos Horários do ML (?horario=, ?seg=): ir pro ML sozinho não tira.
+    const t1 = await montar({ detalhes: TODOS, listas: LISTAS, query: { aba: 'conferencia', execucao: ID_ML_VELHO, horario: 'conta-ml', seg: 'mala' } })
+    assert.deepEqual(t1.routerCalls.at(-1), { query: { aba: 'conferencia', execucao: ID_ML_VELHO, horario: 'conta-ml', seg: 'mala', conf: 'ml' } })
     // Com o ?conf= certo no link, nada muda de lugar.
     const t2 = await montar({ detalhes: TODOS, listas: LISTAS, query: { aba: 'conferencia', conf: 'ml', execucao: ID_ML_VELHO } })
     assert.equal(t2.routerCalls.length, 0)

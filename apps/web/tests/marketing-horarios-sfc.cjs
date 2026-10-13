@@ -6,9 +6,17 @@
 // relatório da Conferência do mesmo marketplace.
 //
 // Trava o que a tela promete:
-//  - lê as contas de Ads do marketplace (/accounts?platform=), em ordem A–Z, e
-//    abre no ?horario= do link, senão na última vista nesse marketplace, senão
-//    na primeira;
+//  - lê as contas de Ads do marketplace (/horarios/contas?platform=), em ordem
+//    A–Z, e abre no ?horario= do link, senão na última vista nesse marketplace,
+//    senão na primeira do segmento;
+//  - 13/10/2026: os botões Mala | Celular | Eletro e a lista das contas do
+//    segmento (clique abre o mapa), com o saldo de Ads só na Shopee (R$ pt-BR,
+//    0 em vermelho, "sem leitura") e o rodapé "saldo lido em…"; Eletro com o
+//    aviso de que as contas também estão em Celular e os vazios (sem relatório /
+//    ninguém vendeu eletro); ?seg= no link e o segmento lembrado por marketplace;
+//    quando a lembrança abre outra coisa que o link abriria (volta de outro
+//    marketplace / da Amazon / de outra aba), o link passa a dizer o que está na
+//    tela (F5 e link copiado abrem o mesmo);
 //  - o mapa 7×24 com as mesmas cores, legenda e dica da aba antiga;
 //  - o clique liga/desliga a hora com o mesmo PUT da aba antiga (a lista
 //    inteira, uma janela de 1 h por célula), a tela muda na hora e os PUTs saem
@@ -47,7 +55,7 @@ const tpl = descriptor.template.content
 
 // ---------------------------------------------------------------- higiene estática
 for (const trecho of [
-  '`/api/marketing/accounts?platform=${p}`',
+  '`/api/marketing/horarios/contas?platform=${p}`',
   '`/api/marketing/schedules/${id}`)',
   '`/api/marketing/schedules/${id}/heatmap`',
   '`/api/marketing/schedules/${id}`, {\n        method: \'PUT\',\n        body: blocks,',
@@ -70,7 +78,14 @@ assert.ok(!/localStorage|sessionStorage|document\.cookie/.test(script + tpl), 's
   ]) assert.ok(!tela.includes(fora), `tela sem: ${fora}`)
 }
 assert.ok(tpl.includes('Horários dos anúncios'), 'título')
-assert.ok(tpl.includes('— clique para ligar/desligar'), 'subtítulo')
+assert.ok(tpl.includes('— escolha o segmento e clique na conta'), 'subtítulo')
+assert.ok(tpl.includes('clique nas horas para ligar/desligar'), 'dica em cima da grade')
+assert.ok(!script.includes('/api/marketing/accounts'), 'a lista vem de /horarios/contas (com segmento e saldo)')
+assert.ok(tpl.includes('As contas aparecem também em Celular; o horário é um só por conta.'), 'aviso do Eletro')
+assert.ok(tpl.includes('Sem relatório da Conferência para saber quem vende eletro.'), 'Eletro sem relatório')
+// Lista à esquerda (290px) no computador; no celular, em cima do mapa.
+assert.match(tpl, /class="flex flex-col gap-4 md:flex-row md:items-start"/)
+assert.match(tpl, /md:w-\[290px\]/)
 // Celular: a grade (24 colunas) rola pro lado.
 assert.match(tpl, /<div class="overflow-x-auto">\s*<table /, 'grade dentro de overflow-x-auto')
 // Cor fixa de texto sempre com a variante do escuro.
@@ -92,6 +107,7 @@ new Function('exports', transpile(fs.readFileSync(path.join(__dirname, '../lib/a
 const RETORNO = `return {
   props, DIAS, DO_MARKETPLACE, lembradas, canEdit,
   contas, contasCarregadas, carregandoContas, erroContas, contaId, conta, carregarContas, escolherConta,
+  SEGMENTOS, ROTULO_SEGMENTO, segmento, lista, escolherSegmento, eletroExecucao, saldoLido, fmtSaldo, classeSaldo,
   schedules, heatmap, mapaDe, erroMapa, carregarMapa, mapaPronto, scheduleSet, alvoAcos,
   heatmapCellClass, heatmapTooltip, toggleScheduleCell, salvando,
 }`
@@ -111,18 +127,22 @@ function segurada() {
   return { p, resolve, reject }
 }
 
-// Contas de mentira (os ids são uuid na vida real; aqui, legíveis).
+// Contas de mentira (os ids são uuid na vida real; aqui, legíveis). Mala:
+// alfa; Celular: beta e zeta; Eletro: beta (vende eletro, é de Celular).
 const CONTAS = {
   shopee: [
-    { id: 'zeta', name: ' \u200bZeta  Malas', platform: 'shopee', acos_target: 10 }, // espaço + invisível na frente (apelido do ML)
-    { id: 'alfa', name: 'alfa celulares', platform: 'shopee', acos_target: 10 },
-    { id: 'beta', name: 'Beta Eletro', platform: 'shopee', acos_target: 8 },
+    // espaço + invisível na frente (apelido do ML); saldo zerado
+    { id: 'zeta', name: ' \u200bZeta  Celulares', segmento: 'celular', eletro: false, acos_target: 10, saldo: 0, saldo_em: '2026-10-06T18:40:00Z' },
+    { id: 'alfa', name: 'alfa malas', segmento: 'mala', eletro: false, acos_target: 10, saldo: 3446.72, saldo_em: '2026-10-06T18:05:00Z' },
+    { id: 'beta', name: 'Beta Eletro', segmento: 'celular', eletro: true, acos_target: 8, saldo: null, saldo_em: null },
   ],
   ml: [
-    { id: 'ml2', name: 'Mercado Dois', platform: 'ml', acos_target: 12 },
-    { id: 'ml1', name: 'Mercado Um', platform: 'ml', acos_target: 12 },
+    // O ML não tem saldo (cobra depois): mesmo que viesse, a tela não mostra.
+    { id: 'ml2', name: 'Mercado Dois', segmento: 'celular', eletro: false, acos_target: 12, saldo: 999, saldo_em: '2026-10-06T18:05:00Z' },
+    { id: 'ml1', name: 'Mercado Um', segmento: 'mala', eletro: false, acos_target: 12 },
   ],
 }
+const ELETRO = { shopee: { id: 'ex1', gerado_em: '2026-10-06T19:00:00Z' }, ml: null }
 // alfa: seg 18–22 (4 h) e dom 22→2 (vira a meia-noite: 22, 23, 0, 1).
 const SCHEDULES = {
   alfa: [
@@ -147,7 +167,7 @@ const HEATMAPS = {
 // O "servidor" guarda o que o PUT mandou (como o replace_schedules).
 async function montar({
   plataforma = 'shopee', canEdit = true, query = {}, contas = CONTAS, schedules = SCHEDULES, heatmaps = HEATMAPS,
-  put, nuxt = new Map(), contasErro, mapaErro,
+  put, nuxt = new Map(), contasErro, mapaErro, eletro = ELETRO,
 } = {}) {
   const calls = []
   const toastLog = []
@@ -159,11 +179,12 @@ async function montar({
   const api = (url, opts = {}) => {
     calls.push({ url, opts })
     const m = opts.method || 'GET'
-    const acc = /^\/api\/marketing\/accounts\?platform=(\w+)$/.exec(url)
+    const acc = /^\/api\/marketing\/horarios\/contas\?platform=(\w+)$/.exec(url)
     if (m === 'GET' && acc) {
-      if (contasErro) return contasErro(acc[1])
+      const corpo = (l) => ({ plataforma: acc[1], contas: JSON.parse(JSON.stringify(l)), eletro_execucao: eletro[acc[1]] ?? null })
+      if (contasErro) return contasErro(acc[1]).then(corpo)
       const l = contas[acc[1]] ?? []
-      return typeof l === 'function' ? l() : Promise.resolve(JSON.parse(JSON.stringify(l)))
+      return typeof l === 'function' ? l().then(corpo) : Promise.resolve(corpo(l))
     }
     const hm = /^\/api\/marketing\/schedules\/([^/]+)\/heatmap$/.exec(url)
     if (m === 'GET' && hm) {
@@ -222,6 +243,15 @@ async function montar({
 const urls = (calls) => calls.map((c) => `${c.opts?.method || 'GET'} ${c.url}`)
 const puts = (calls) => calls.filter((c) => c.opts?.method === 'PUT')
 
+/** As linhas da lista renderizada: nome, saldo (texto, NBSP → espaço), classe do saldo e se está aberta. */
+function linhas(html) {
+  return [...html.matchAll(/<li class="border-b last:border-b-0"><button type="button" class="([^"]*)"[^>]*>(.*?)<\/button><\/li>/g)].map((m) => {
+    const nome = /<span class="min-w-0 truncate">([^<]*)<\/span>/.exec(m[2])?.[1] ?? null
+    const sal = /<span class="shrink-0 tabular-nums ([^"]*)">([^<]*)<\/span>/.exec(m[2])
+    return { nome, saldo: sal ? sal[2].replace(/\u00a0/g, ' ') : null, classe: sal ? sal[1] : null, aberta: m[1].includes('border-l-blue-600') }
+  })
+}
+
 /** A tela inteira, renderizada (SSR) com o estado do componente. */
 function renderizar(t) {
   const estado = { ...t.s, plataforma: Vue.computed(() => t.props.plataforma) }
@@ -231,20 +261,23 @@ function renderizar(t) {
 }
 
 async function run() {
-  // Shopee: contas A–Z, abre na primeira, lê janelas e heatmap dela.
+  // Shopee: contas A–Z, abre em Mala na primeira, lê janelas e heatmap dela.
   {
     const t = await montar()
     const { s } = t
     assert.deepEqual(s.contas.value.map((c) => c.id), ['alfa', 'beta', 'zeta'], 'contas em ordem A–Z (sem ligar pra maiúscula)')
-    assert.equal(s.contaId.value, 'alfa', 'abre na primeira')
+    assert.equal(s.contas.value[2].name, 'Zeta Celulares', 'nome limpo (espaço e invisível)')
+    assert.equal(s.segmento.value, 'mala', 'sem link nem lembrança: Mala')
+    assert.equal(s.contaId.value, 'alfa', 'abre na primeira do segmento')
     assert.deepEqual(urls(t.calls), [
-      'GET /api/marketing/accounts?platform=shopee',
+      'GET /api/marketing/horarios/contas?platform=shopee',
       'GET /api/marketing/schedules/alfa',
       'GET /api/marketing/schedules/alfa/heatmap',
     ])
     assert.equal(s.mapaPronto.value, true)
     assert.deepEqual(t.routerCalls, [], 'abrir não escreve na URL')
     assert.equal(t.nuxt.get('marketing:horarios-conta').value.shopee, 'alfa', 'lembra a conta vista')
+    assert.equal(t.nuxt.get('marketing:horarios-segmento').value.shopee, 'mala', 'lembra o segmento visto')
 
     // A grade: seg 18–21 ligadas (fim 22 fora); dom 22→2 vira a meia-noite.
     const set = s.scheduleSet.value
@@ -273,19 +306,22 @@ async function run() {
     assert.deepEqual(s.heatmapTooltip(6, 3).split('\n'), ['Dom 3:00 — desligado', 'Sem dados nesse horário'])
     assert.equal(s.heatmapTooltip(0, 21).split('\n')[1], 'ACOS: —')
 
-    // A tela: 7 × 24 botões, título, subtítulo, legenda com o alvo, o seletor A–Z e o aviso da Shopee.
+    // A tela: 7 × 24 botões, título, subtítulo, legenda com o alvo, a lista do segmento e o aviso da Shopee.
     const html = await renderizar(t)
     assert.equal((html.match(/<button type="button" class="block size-6 rounded/g) || []).length, 7 * 24, '168 células')
     assert.equal((html.match(/aria-pressed="true"/g) || []).length, 8, '8 horas ligadas')
     for (const d of ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']) assert.ok(html.includes(`>${d}</th>`), `linha ${d}`)
     assert.ok(html.includes('Horários dos anúncios'))
-    assert.ok(html.includes('— clique para ligar/desligar'))
+    assert.ok(html.includes('— escolha o segmento e clique na conta'))
+    assert.ok(html.includes('clique nas horas para ligar/desligar'))
     assert.ok(html.includes('ACOS &lt; 10.0%'), 'legenda com o alvo')
     assert.ok(html.includes('ACOS médio (até 15.0%)'))
     for (const l of ['ACOS ruim', 'Ligado, sem dados', 'Desligado']) assert.ok(html.includes(l), `legenda: ${l}`)
     assert.ok(html.includes('Os anúncios da Shopee são ligados e desligados pelo robô do Mac (18h–22h). Este mapa guarda os horários, mas ainda não comanda o robô.'), 'aviso do robô na Shopee')
-    const opcoes = [...html.matchAll(/<option value="(\w+)"[^>]*>([^<]*)<\/option>/g)].map((m) => m[2])
-    assert.deepEqual(opcoes, ['alfa celulares', 'Beta Eletro', 'Zeta Malas'], 'seletor A–Z')
+    assert.ok(!html.includes('<select'), 'sem o seletor antigo')
+    assert.deepEqual(linhas(html).map((l) => l.nome), ['alfa malas'], 'a lista de Mala')
+    assert.ok(html.includes('Contas de Mala (1)'))
+    assert.equal((html.match(/aria-selected="true"/g) || []).length, 1, 'um segmento marcado')
     assert.ok(!html.includes('aria-disabled'), 'quem edita clica')
 
     // Clique liga uma hora: o mesmo PUT da aba antiga, com TODAS as horas ligadas,
@@ -323,7 +359,8 @@ async function run() {
     s.escolherConta('beta')
     await esperarTudo()
     assert.equal(s.contaId.value, 'beta')
-    assert.deepEqual(t.routerCalls.at(-1), { query: { horario: 'beta' } })
+    assert.equal(s.segmento.value, 'celular', 'conta de outro segmento: vai pro dela')
+    assert.deepEqual(t.routerCalls.at(-1), { query: { horario: 'beta', seg: 'celular' } })
     assert.equal(t.nuxt.get('marketing:horarios-conta').value.shopee, 'beta')
     assert.deepEqual(urls(t.calls).slice(-2), ['GET /api/marketing/schedules/beta', 'GET /api/marketing/schedules/beta/heatmap'])
     assert.deepEqual([...s.scheduleSet.value], ['1-9'])
@@ -336,6 +373,7 @@ async function run() {
   {
     const t1 = await montar({ query: { horario: 'zeta', aba: 'conferencia' } })
     assert.equal(t1.s.contaId.value, 'zeta')
+    assert.equal(t1.s.segmento.value, 'celular', 'o segmento da conta do link')
     const nuxt = new Map([['marketing:horarios-conta', Vue.ref({ shopee: 'beta' })]])
     const t2 = await montar({ query: { horario: 'ml1' }, nuxt })
     assert.equal(t2.s.contaId.value, 'beta', 'id do outro marketplace no link: vale a lembrada')
@@ -354,10 +392,17 @@ async function run() {
     await esperarTudo()
     assert.deepEqual(t.s.contas.value.map((c) => c.id), ['ml2', 'ml1'], 'contas do ML, A–Z')
     assert.equal(t.s.contaId.value, 'ml2')
-    assert.ok(urls(t.calls).includes('GET /api/marketing/accounts?platform=ml'))
+    assert.ok(urls(t.calls).includes('GET /api/marketing/horarios/contas?platform=ml'))
     assert.deepEqual(urls(t.calls).slice(-2), ['GET /api/marketing/schedules/ml2', 'GET /api/marketing/schedules/ml2/heatmap'])
+    // (Na tela de verdade a Conferência tira o ?seg/?horario da Shopee na troca;
+    // aqui o link ficou com eles: um ?seg= no link vale.)
+    assert.equal(t.s.segmento.value, 'celular', 'sem lembrança no ML: o ?seg= que estiver no link')
     const htmlMl = await renderizar(t)
     assert.ok(!htmlMl.includes('robô do Mac'), 'ML sem o aviso do robô')
+    // ML: nada de saldo (o ML cobra depois), mesmo que a API mandasse.
+    for (const fora of ['Saldo Ads', 'sem leitura', 'saldo lido', '999']) assert.ok(!htmlMl.includes(fora), `ML sem: ${fora}`)
+    assert.equal(t.s.saldoLido.value, null)
+    assert.deepEqual(linhas(htmlMl), [{ nome: 'Mercado Dois', saldo: null, classe: null, aberta: true }])
     assert.ok(htmlMl.includes('Horários dos anúncios'))
     t.s.escolherConta('ml1')
     await esperarTudo()
@@ -377,7 +422,7 @@ async function run() {
     assert.equal(t.s.heatmapCellClass(0, 18), 'bg-emerald-500/80 cursor-default', 'sem hover de clique')
     const html = await renderizar(t)
     assert.ok(html.includes('só quem edita o Marketing liga/desliga'), 'dica pra quem só vê')
-    assert.ok(!html.includes('clique para ligar/desligar'))
+    assert.ok(!html.includes('clique nas horas'))
     assert.equal((html.match(/aria-disabled="true"/g) || []).length, 7 * 24)
   }
 
@@ -512,16 +557,17 @@ async function run() {
     lenta.resolve(CONTAS.shopee)
     await esperarTudo()
     assert.deepEqual(t.s.contas.value.map((c) => c.id), ['ml2', 'ml1'])
-    assert.equal(t.s.contaId.value, 'ml2')
+    assert.deepEqual([t.s.segmento.value, t.s.contaId.value], ['mala', 'ml1'], 'o ML abre em Mala (sem link nem lembrança)')
   }
 
   // Nenhuma conta: diz isso, não pede mapa; o aviso da Shopee continua.
   {
     const t = await montar({ contas: { shopee: [], ml: [] } })
-    assert.deepEqual(urls(t.calls), ['GET /api/marketing/accounts?platform=shopee'])
+    assert.deepEqual(urls(t.calls), ['GET /api/marketing/horarios/contas?platform=shopee'])
     const html = await renderizar(t)
     assert.ok(html.includes('Nenhuma conta de Ads da Shopee no DaVinci ainda.'))
     assert.ok(!html.includes('<select'), 'sem seletor vazio')
+    assert.ok(!html.includes('role="tablist"'), 'sem os botões de segmento')
     assert.ok(html.includes('robô do Mac'))
     const tm = await montar({ plataforma: 'ml', contas: { ml: [] } })
     assert.ok((await renderizar(tm)).includes('Nenhuma conta de Ads do Mercado Livre no DaVinci ainda.'))
@@ -556,13 +602,215 @@ async function run() {
     })
     assert.equal(t.s.erroMapa.value, 'account_not_found')
     const html = await renderizar(t)
-    assert.ok(html.includes('Não consegui carregar os horários de alfa celulares (account_not_found).'))
+    assert.ok(html.includes('Não consegui carregar os horários de alfa malas (account_not_found).'))
     await t.s.toggleScheduleCell(0, 1)
     assert.equal(puts(t.calls).length, 0, 'sem mapa, sem clique')
     falhar = false
     await t.s.carregarMapa()
     assert.equal(t.s.mapaPronto.value, true)
     assert.equal(t.s.scheduleSet.value.size, 8)
+  }
+
+
+  // Segmentos: Mala → Celular → Eletro. Trocar mantém a conta aberta se ela é do
+  // segmento, senão abre a primeira; o link e a lembrança acompanham.
+  {
+    const nuxt = new Map()
+    const t = await montar({ nuxt })
+    const { s } = t
+    assert.deepEqual(s.SEGMENTOS.map((x) => x.rotulo), ['Mala', 'Celular', 'Eletro'])
+    s.escolherSegmento('celular')
+    await esperarTudo()
+    assert.deepEqual(s.lista.value.map((c) => c.id), ['beta', 'zeta'], 'Celular A–Z')
+    assert.equal(s.contaId.value, 'beta', 'a aberta (Mala) não é de Celular: a primeira')
+    assert.deepEqual(t.routerCalls.at(-1), { query: { seg: 'celular', horario: 'beta' } })
+    assert.deepEqual(urls(t.calls).slice(-2), ['GET /api/marketing/schedules/beta', 'GET /api/marketing/schedules/beta/heatmap'])
+    let html = await renderizar(t)
+    assert.ok(html.includes('Contas de Celular (2)'))
+    assert.ok(!html.includes('As contas aparecem também em Celular'), 'o aviso é só do Eletro')
+    assert.deepEqual(linhas(html).map((l) => [l.nome, l.aberta]), [['Beta Eletro', true], ['Zeta Celulares', false]], 'a aberta destacada')
+    assert.match(html, /<h3 class="text-sm font-semibold">Beta Eletro<\/h3>/, 'o nome da conta em cima da grade')
+    s.escolherConta('zeta')
+    await esperarTudo()
+    s.escolherSegmento('eletro')
+    await esperarTudo()
+    assert.deepEqual(s.lista.value.map((c) => c.id), ['beta'])
+    assert.equal(s.contaId.value, 'beta')
+    s.escolherConta('beta')
+    await esperarTudo()
+    s.escolherSegmento('celular')
+    await esperarTudo()
+    assert.equal(s.contaId.value, 'beta', 'beta é de Eletro e de Celular: fica aberta')
+    s.escolherSegmento('eletro')
+    await esperarTudo()
+    html = await renderizar(t)
+    assert.ok(html.includes('Contas de Eletro (1)'))
+    assert.ok(html.includes('As contas aparecem também em Celular; o horário é um só por conta.'))
+    assert.equal(nuxt.get('marketing:horarios-segmento').value.shopee, 'eletro')
+    const getsAntes = t.calls.length
+    s.escolherSegmento('eletro')
+    assert.equal(t.calls.length, getsAntes, 'o mesmo segmento não faz nada')
+    // Voltar (componente novo, mesma sessão): o segmento e a conta lembrados,
+    // e o link (que voltou limpo) passa a dizer isso.
+    const t2 = await montar({ nuxt })
+    assert.equal(t2.s.segmento.value, 'eletro')
+    assert.equal(t2.s.contaId.value, 'beta')
+    assert.deepEqual(t2.routerCalls, [{ query: { seg: 'eletro', horario: 'beta' } }])
+  }
+
+  // Saldo de Ads (Shopee): R$ pt-BR, 0 em vermelho e negrito, sem leitura apagado;
+  // em cima da grade também; rodapé com a hora da leitura (Brasília).
+  {
+    const t = await montar({ query: { seg: 'celular' } })
+    assert.equal(t.s.segmento.value, 'celular')
+    let html = await renderizar(t)
+    assert.ok(html.includes('Saldo Ads</span>'), 'a coluna Saldo Ads')
+    assert.deepEqual(linhas(html), [
+      { nome: 'Beta Eletro', saldo: 'sem leitura', classe: 'text-xs text-muted-foreground', aberta: true },
+      { nome: 'Zeta Celulares', saldo: 'R$ 0,00', classe: 'font-semibold text-red-600 dark:text-red-400', aberta: false },
+    ])
+    assert.equal(t.s.saldoLido.value, 'saldo lido em 06/10 às 15:40', 'só as leituras da lista')
+    assert.ok(html.includes('saldo lido em 06/10 às 15:40'))
+    assert.match(html, /Saldo Ads <span class="tabular-nums text-xs text-muted-foreground">sem leitura<\/span>/, 'em cima da grade')
+    t.s.escolherSegmento('mala')
+    await esperarTudo()
+    html = await renderizar(t)
+    assert.deepEqual(linhas(html).map((l) => [l.saldo, l.classe]), [['R$ 3.446,72', 'text-foreground']])
+    assert.match(html.replace(/\u00a0/g, ' '), /Saldo Ads <span class="tabular-nums text-foreground">R\$ 3\.446,72<\/span>/)
+    assert.equal(t.s.saldoLido.value, 'saldo lido em 06/10 às 15:05')
+    assert.equal(t.s.fmtSaldo(1883.79).replace(/\u00a0/g, ' '), 'R$ 1.883,79')
+
+    // Leituras em horas diferentes do mesmo dia; e em dias diferentes.
+    const mesmoDia = [
+      { id: 'a', name: 'A', segmento: 'mala', eletro: false, acos_target: 7, saldo: 1, saldo_em: '2026-10-06T18:05:00Z' },
+      { id: 'b', name: 'B', segmento: 'mala', eletro: false, acos_target: 7, saldo: 2, saldo_em: '2026-10-06T18:40:00Z' },
+      { id: 'c', name: 'C', segmento: 'mala', eletro: false, acos_target: 7, saldo: null, saldo_em: null },
+    ]
+    const t2 = await montar({ contas: { shopee: mesmoDia } })
+    assert.equal(t2.s.saldoLido.value, 'saldo lido em 06/10 às 15:05–15:40')
+    const t3 = await montar({ contas: { shopee: [...mesmoDia, { ...mesmoDia[0], id: 'd', name: 'D', saldo_em: '2026-10-03T13:00:00Z' }] } })
+    assert.equal(t3.s.saldoLido.value, 'saldo lido em 03/10–06/10')
+    // 02:30 UTC de 07/10 ainda é 06/10 em Brasília.
+    const t4 = await montar({ contas: { shopee: [{ ...mesmoDia[0], saldo_em: '2026-10-07T02:30:00Z' }] } })
+    assert.equal(t4.s.saldoLido.value, 'saldo lido em 06/10 às 23:30')
+    // Ninguém com leitura: sem rodapé.
+    const t5 = await montar({ contas: { shopee: [mesmoDia[2]] } })
+    assert.equal(t5.s.saldoLido.value, null)
+    assert.ok(!(await renderizar(t5)).includes('saldo lido'))
+  }
+
+  // Eletro vazio: sem relatório da Conferência / relatório sem ninguém de eletro.
+  // Sem conta no segmento, o link perde o ?horario= e nada de mapa.
+  {
+    const semEletro = { shopee: CONTAS.shopee.map((c) => ({ ...c, eletro: false })) }
+    const t = await montar({ contas: semEletro, eletro: { shopee: null } })
+    t.s.escolherSegmento('eletro')
+    await esperarTudo()
+    assert.equal(t.s.contaId.value, null)
+    assert.deepEqual(t.routerCalls.at(-1), { query: { seg: 'eletro' } })
+    let html = await renderizar(t)
+    assert.ok(html.includes('Contas de Eletro (0)'))
+    assert.ok(html.includes('Sem relatório da Conferência para saber quem vende eletro.'))
+    assert.ok(!html.includes('size-6 rounded'), 'sem grade')
+    assert.ok(!html.includes('As contas aparecem também em Celular'))
+    assert.ok(!html.includes('Escolha uma conta na lista.'))
+    const t2 = await montar({ contas: semEletro, query: { seg: 'eletro' } })
+    html = await renderizar(t2)
+    assert.ok(html.includes('Nenhuma conta vendeu nem anunciou eletro nas 4 semanas do último relatório da Conferência.'))
+    assert.deepEqual(urls(t2.calls), ['GET /api/marketing/horarios/contas?platform=shopee'], 'sem conta, sem mapa')
+    // Volta pra Celular: abre a primeira de lá.
+    t2.s.escolherSegmento('celular')
+    await esperarTudo()
+    assert.equal(t2.s.contaId.value, 'beta')
+  }
+
+  // ?seg= do link: com a conta do link, só vale se ela for do segmento.
+  {
+    const casos = [
+      [{ seg: 'eletro' }, 'eletro', 'beta'],
+      [{ horario: 'beta', seg: 'eletro' }, 'eletro', 'beta'],
+      [{ horario: 'beta', seg: 'mala' }, 'celular', 'beta'],
+      [{ horario: 'zeta', seg: 'eletro' }, 'celular', 'zeta'],
+      [{ seg: 'lixo' }, 'mala', 'alfa'],
+      [{ seg: ['celular', 'mala'] }, 'mala', 'alfa'],
+    ]
+    for (const [query, seg, id] of casos) {
+      const t = await montar({ query })
+      assert.deepEqual([t.s.segmento.value, t.s.contaId.value], [seg, id], JSON.stringify(query))
+      assert.deepEqual(t.routerCalls, [], 'abrir não escreve na URL')
+    }
+    // Lembrança de outro segmento vence o ?seg= de outro marketplace — e o link
+    // passa a dizer o que está na tela.
+    const nuxt = new Map([['marketing:horarios-segmento', Vue.ref({ shopee: 'celular' })]])
+    const t = await montar({ nuxt, query: { seg: 'mala' } })
+    assert.deepEqual([t.s.segmento.value, t.s.contaId.value], ['celular', 'beta'])
+    assert.deepEqual(t.routerCalls, [{ query: { seg: 'celular', horario: 'beta' } }])
+    // Lembrança que bate com o link: nada a escrever.
+    const t2 = await montar({ nuxt, query: { seg: 'celular', horario: 'beta' } })
+    assert.deepEqual(t2.routerCalls, [])
+  }
+
+  // Tela e link andam juntos depois de trocar de marketplace (achado da revisão):
+  // Shopee → ML → Celular no ML → volta pra Shopee. A tela volta na lembrada e
+  // o link abre o mesmo; F5 (sessão nova) abre igual.
+  {
+    // (a) Como na Conferência de verdade: a troca tira ?horario/?seg do outro.
+    // Shopee em Celular/zeta → ML (abre no dele, Mala) → Celular → volta.
+    const nuxt = new Map()
+    const t = await montar({ nuxt })
+    t.s.escolherConta('zeta')
+    await esperarTudo()
+    assert.deepEqual(t.route.query, { horario: 'zeta', seg: 'celular' })
+    t.route.query = { conf: 'ml' }
+    t.props.plataforma = 'ml'
+    await esperarTudo()
+    assert.deepEqual([t.s.segmento.value, t.s.contaId.value], ['mala', 'ml1'], 'o ML abre no dele (Mala), não no ?seg da Shopee')
+    assert.deepEqual(t.route.query, { conf: 'ml' }, 'sem lembrança no ML: nada a escrever')
+    t.s.escolherSegmento('celular')
+    await esperarTudo()
+    assert.deepEqual(t.route.query, { conf: 'ml', seg: 'celular', horario: 'ml2' })
+    t.route.query = {}
+    t.props.plataforma = 'shopee'
+    await esperarTudo()
+    assert.deepEqual([t.s.segmento.value, t.s.contaId.value], ['celular', 'zeta'], 'a Shopee volta na lembrada')
+    assert.deepEqual(t.route.query, { seg: 'celular', horario: 'zeta' }, 'o link diz o que está na tela')
+    const f5 = await montar({ query: t.route.query })
+    assert.deepEqual([f5.s.segmento.value, f5.s.contaId.value], ['celular', 'zeta'], 'F5 abre o mesmo')
+    assert.deepEqual(f5.routerCalls, [])
+    // Lembrada = o que o link limpo já abre (Mala/alfa): nada a escrever.
+    const nuxtA = new Map()
+    const ta = await montar({ nuxt: nuxtA })
+    ta.props.plataforma = 'ml'
+    await esperarTudo()
+    ta.route.query = {}
+    ta.props.plataforma = 'shopee'
+    await esperarTudo()
+    assert.deepEqual([ta.s.segmento.value, ta.s.contaId.value], ['mala', 'alfa'])
+    assert.deepEqual(ta.routerCalls, [])
+
+    // (b) Link que ficou com a conta e o segmento do ML: corrigido do mesmo jeito.
+    const nuxt2 = new Map()
+    const u = await montar({ nuxt: nuxt2 })
+    u.s.escolherConta('alfa')
+    await esperarTudo()
+    u.props.plataforma = 'ml'
+    await esperarTudo()
+    u.s.escolherSegmento('celular')
+    await esperarTudo()
+    assert.deepEqual(u.route.query, { horario: 'ml2', seg: 'celular' })
+    u.props.plataforma = 'shopee'
+    await esperarTudo()
+    assert.deepEqual([u.s.segmento.value, u.s.contaId.value], ['mala', 'alfa'])
+    assert.deepEqual(u.route.query, { horario: 'alfa', seg: 'mala' })
+    const f5b = await montar({ query: u.route.query })
+    assert.deepEqual([f5b.s.segmento.value, f5b.s.contaId.value], ['mala', 'alfa'])
+
+    // (c) Lembrado um segmento sem conta: o link fica só com o ?seg=.
+    const semEletro = { ...CONTAS, shopee: CONTAS.shopee.map((c) => ({ ...c, eletro: false })) }
+    const nuxt3 = new Map([['marketing:horarios-segmento', Vue.ref({ shopee: 'eletro' })]])
+    const v = await montar({ nuxt: nuxt3, contas: semEletro, query: { horario: 'ml2', aba: 'conferencia' } })
+    assert.deepEqual([v.s.segmento.value, v.s.contaId.value], ['eletro', null])
+    assert.deepEqual(v.routerCalls, [{ query: { aba: 'conferencia', seg: 'eletro' } }])
   }
 
   terminou = true

@@ -1,7 +1,8 @@
 """Marketing module HTTP API.
 
 Endpoints (all under /api/marketing):
-  accounts, metrics (summary + per-account), schedules CRUD,
+  accounts, metrics (summary + per-account), schedules CRUD, horarios/contas
+  (a lista dos Horários dos anúncios da Conferência),
   agents/status, decisions, intensity, patterns, chart-data, seed, trigger.
 
 Auth: require_permission("marketing", view/edit) — GETs pedem view,
@@ -14,7 +15,7 @@ from __future__ import annotations
 import random
 import secrets
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import structlog
@@ -39,6 +40,7 @@ from app.models.marketing import (
     MarketingPattern,
     MarketingSchedule,
 )
+from app.services.marketing import horarios_contas as horarios_contas_svc
 from app.services.marketing.agent import (
     agent_decision_cycle,
     calculate_intensity,
@@ -424,6 +426,21 @@ async def metrics_timeseries(
 
 
 # ─── SCHEDULES ────────────────────────────────────────────────────────
+
+
+@router.get("/horarios/contas")
+async def horarios_contas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
+    platform: Literal["shopee", "ml"] = Query(...),
+) -> dict:
+    """As contas de Ads de Conferência › Horários dos anúncios (13/10/2026):
+    cada uma com o segmento (mala | celular, o grupo da conta da Conferência),
+    se vende eletro (a última rodada pronta da Conferência) e, só na Shopee, o
+    último saldo de Ads lido pela Conferência (`saldo`, `saldo_em`; null =
+    sem leitura). No ML não há saldo (cobra depois). Contas arquivadas ficam
+    fora, como em /accounts. Regras: services/marketing/horarios_contas.py."""
+    return await horarios_contas_svc.contas_dos_horarios(session, platform)
 
 
 @router.get("/schedules/{account_id}")

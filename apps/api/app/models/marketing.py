@@ -135,6 +135,34 @@ class MarketingAccount(Base, TimestampMixin):
     )
     arquivada_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # ─── A conta da Conferência (13/10/2026, migration 0392) ─────────────
+    # A mesma loja na lista da Conferência (`conferencia_shopee_conta`): de lá
+    # vem o segmento dos Horários dos anúncios (grupo Mala/Celular — o
+    # `department` daqui está 'geral' em toda a Shopee e errado no kfa do ML),
+    # o saldo de Ads da Shopee (pelo perfil do AdsPower da conta) e quem vende
+    # eletro. A 0392 semeia (ML pela integração; Shopee pelo nome, com JLAS =
+    # Atlas e KIA = Fiore); NULL = a tela acha na hora pelas mesmas regras
+    # (services/marketing/horarios_contas.py). Uma conta da Conferência fica
+    # com UMA conta de Ads no máximo (índice único parcial).
+    conferencia_conta_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "conferencia_shopee_conta.id",
+            ondelete="SET NULL",
+            name="fk_marketing_accounts_conferencia_conta",
+        ),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_marketing_accounts_conferencia_conta_id",
+            "conferencia_conta_id",
+            unique=True,
+            postgresql_where=text("conferencia_conta_id IS NOT NULL"),
+        ),
+    )
+
 
 class MarketingCommand(Base, TimestampMixin):
     """Outbox queue for ad actions. Every action — manual (a button click)
