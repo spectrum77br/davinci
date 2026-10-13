@@ -318,7 +318,9 @@ def test_painel_frentes_agenda_e_alarme():
         "procura": {"ligado": True, "horarios": ["06:00", "12:00"]},
         "anatel": {"ligado": True, "horarios": ["12:00"]},
         "compras": {"ligado": False, "horarios": ["06:00"]},   # desligado: não é alarme
-        "juridico": {"ligado": True, "horarios": ["12:15"]},   # ainda nos 20 min de folga
+        "ativos_inativos": {"ligado": True, "horarios": ["12:15"]},   # ainda nos 20 min de folga
+        # 13/10: o Jurídico saiu da lista (virou botão na ficha do caso) — agenda velha não alarma
+        "juridico": {"ligado": True, "horarios": ["06:00"]},
     }
     p = montar_painel(resumo, agora, agora, agenda=agenda)
 
@@ -333,21 +335,23 @@ def test_painel_frentes_agenda_e_alarme():
     passos = {x["acao"]: x for x in p["passos"]}
     # 05/10: sem Compras e sem Perguntas; Jurídico no fim e os números em sequência
     # 05/10: + Réplica no 6 e Tempo parado no 8
-    assert [x["ordem"] for x in p["passos"]] == list(range(10))
-    assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "juridico"
+    # 13/10: o Jurídico (9) saiu — virou botão na ficha do caso; o Ativos/inativos fica no fim
+    assert [x["ordem"] for x in p["passos"]] == list(range(9))
+    assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "ativos_inativos"
+    assert "juridico" not in passos
     # 07/10: numeração nova — 4 Diversos, 5 Prints, 6 Anatel, 7 Réplica, 8 Ativos; o Tempo parado saiu
     assert [x["acao"] for x in p["passos"][5:9]] == [
         "prints", "anatel", "replica_diversos", "ativos_inativos"]
     assert "capa_perguntas" not in [x["acao"] for x in p["passos"]]
     assert "aproveitar_parado" not in passos
     assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "denuncias", "diversos"]
-    assert passos["prints"]["em_criacao"] is False and passos["juridico"]["em_criacao"] is True
+    assert not any(x["em_criacao"] for x in p["passos"])
     assert passos["anatel"]["em_criacao"] is False and passos["anatel"]["explicacao"]["passos"]
     assert any("148" in q for q in passos["prints"]["explicacao"]["quem"])
     assert "varredura_mercadolivre" not in passos and "conferencia" not in passos
     assert passos["procura"]["ultima"]["status"] == "rodando"
     assert passos["denuncias"]["ultima"]["vezes"] == 2
-    assert "compras" not in passos and passos["juridico"]["ultima"] is None
+    assert "compras" not in passos and passos["ativos_inativos"]["ultima"] is None
     assert passos["procura"]["agenda"] == {"ligado": True, "horarios": ["06:00", "12:00"], "no_robo": None}
     assert passos["denuncias"]["agenda"] == {"ligado": False, "horarios": [], "no_robo": None}
 
@@ -355,7 +359,8 @@ def test_painel_frentes_agenda_e_alarme():
     assert "SEI esperando a assinatura da titular" in pessoa
     assert "código do sei" in pessoa
     # procura das 06:00 nunca pedida e anatel das 12:00 sem tarefa: alarme; o das 12:00 da
-    # procura rodou, a checagem foi pedida, compras está desligado e o jurídico ainda tem folga
+    # procura rodou, a checagem foi pedida, compras está desligado, o ativos/inativos ainda tem
+    # folga e o jurídico não é mais passo
     nao = sorted(x["titulo"] for x in p["ocorrencias"] if "não começou" in x["titulo"])
     assert nao == ["2 · Procurar anúncios novos das 06:00 não começou",
                    "6 · Denúncias Anatel das 12:00 não começou"]
@@ -520,7 +525,7 @@ def test_painel_modo_manual_nao_acusa_rodada():
     passos = {x["acao"]: x for x in p["passos"]}
     assert passos["procura"]["agenda"]["no_robo"] is True     # o robô já segue
     assert passos["anatel"]["agenda"]["no_robo"] is False     # ainda não chegou lá
-    assert passos["juridico"]["agenda"]["no_robo"] is True    # desligado nos dois
+    assert passos["ativos_inativos"]["agenda"]["no_robo"] is True    # desligado nos dois
 
 
 
@@ -538,10 +543,10 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     assert r.status_code == 200
     r = await client.post("/api/denuncia/robo/passo", json={"acao": "varredura_mercadolivre"})
     assert r.status_code == 422  # passo antigo (até 02/10) não tem mais botão
-    # 07/10: Jurídico está "em criação": nem rodar, nem agenda (Prints saiu daqui com o agente v36); Tempo parado saiu
+    # 13/10: o Jurídico saiu da lista (virou botão na ficha do caso): nem rodar, nem agenda; Tempo parado saiu
     for acao in ("juridico",):
         r = await client.post("/api/denuncia/robo/passo", json={"acao": acao})
-        assert r.status_code == 422 and r.json()["detail"]["code"] == "denuncia_robo_passo_em_criacao"
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "denuncia_robo_passo_invalido"
         r = await client.put(f"/api/denuncia/robo/agenda/{acao}", json={"ligado": True})
         assert r.status_code == 422
     r = await client.post("/api/denuncia/robo/passo", json={"acao": "aproveitar_parado"})
@@ -563,7 +568,7 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
     assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
-    assert len(j["passos"]) == 10  # 05/10: 0 a 9 (Réplica no 6, Tempo parado no 8, Jurídico no fim)
+    assert len(j["passos"]) == 9  # 13/10: 0 a 8 (o Jurídico virou botão na ficha do caso)
 
 
 async def test_robo_agenda_salva_e_mini_puxa(client, make_user, auth_as):

@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Index, Integer, Text, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Index, Integer, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -229,10 +229,53 @@ class DenunciaCasoExtra(Base):
     status_manual_por: Mapped[str | None] = mapped_column(Text)
     status_manual_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     juridico_data: Mapped[date | None] = mapped_column(Date)
+    # 13/10 (Vinicius, checklist do jurídico): "Selo Anatel aparece nas fotos?" — 'sim' | 'nao'
+    selo_anatel: Mapped[str | None] = mapped_column(Text)
     atualizado_por: Mapped[str | None] = mapped_column(Text)
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class DenunciaJuridicoPasta(Base):
+    """Pasta do caso para o advogado (13/10/2026, Vinicius: "eu acionar esses botão dentro dos casos
+    e enviar quando eu quiser"). "Montar pasta jurídico" cria a linha (`status` 'pedida') e o
+    comando `juridico_montar`; o mini monta o dossiê + anexos + vídeo, zipa, sobe o zip
+    (`arquivo_local`, em uploads) e marca 'pronta' (ou 'erro'), com o que montou em `info`
+    (arquivos, avisos, nome_zip, para/cc/de do e-mail). "Enviar ao jurídico" preenche `envio_*` e o
+    comando `juridico_enviar`; o mini manda pelo Tuta e responde. Enviado ao advogado = o caso vira
+    "Com jurídico"; enviado a outro e-mail (teste) = `envio_status` 'teste' e o caso não muda.
+    A tela mostra só a última linha do caso."""
+
+    __tablename__ = "denuncia_juridico_pastas"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    caso_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pedido_por: Mapped[str | None] = mapped_column(Text)
+    pedido_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # 'pedida' | 'montando' | 'pronta' | 'erro'
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pedida", server_default="pedida"
+    )
+    resultado: Mapped[str | None] = mapped_column(Text)
+    info: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    arquivo_local: Mapped[str | None] = mapped_column(Text)
+    tamanho: Mapped[int | None] = mapped_column(BigInteger)
+    pronta_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 'pedido' | 'enviando' | 'enviado' | 'teste' | 'erro'
+    envio_status: Mapped[str | None] = mapped_column(Text)
+    envio_pedido_por: Mapped[str | None] = mapped_column(Text)
+    envio_pedido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    envio_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    envio_resultado: Mapped[str | None] = mapped_column(Text)
+    # {para, cc, teste} escolhidos na tela (+ o que o mini contar ao responder)
+    envio_info: Mapped[dict | None] = mapped_column(JSONB)
+
+    __table_args__ = (Index("ix_denuncia_juridico_pastas_caso", "caso_id"),)
 
 
 class DenunciaRoboAgenda(Base):

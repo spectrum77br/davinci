@@ -45,6 +45,8 @@ SEM_NOTICIA = timedelta(minutes=5)
 # A chave de cada passo NÃO muda (agenda e "Rodar" de antes valem). Histórico até 06/10: 02/10 a procura e as
 # denúncias viraram passos próprios; 03/10 o Nosso parou nas lojas; 05/10 o passo 1 virou a conferência inteira
 # (e-mails + Shopee no perfil 50 + Anatel/SEI) e entrou a Réplica.
+# 13/10/2026 (Vinicius: "eu acionar esses botão dentro dos casos e enviar quando eu quiser"): o 9 Jurídico saiu da
+# lista — virou os botões "Montar pasta jurídico" / "Enviar ao jurídico" na ficha do caso (aba Casos), sem agenda.
 PASSOS: dict[str, tuple[int, str, str, str]] = {
     "checagem": (0, "Checagem antes da rodada", "perfil 50 + 148 + contas das lojas + Safari + Tuta",
                  "confere logins, perfis, captcha, Safari e Tuta antes da rodada — não muda nada"),
@@ -64,11 +66,10 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                          "denuncia de novo, com a conta de outra empresa, o Diversos que a loja recusou e já está na Anatel"),
     "ativos_inativos": (8, "Ativos/inativos", "perfil 148 (Shopee) + perfil 50",
                         "abre os anúncios denunciados e vê quem saiu do ar"),
-    "juridico": (9, "Jurídico", "escritório", "monta a pasta do caso para o advogado — em criação"),
 }
-# passos que estão sendo refeitos (Jurídico): a tela mostra "em criação" e não deixa ligar nem rodar. Prints saiu
-# daqui em 07/10 (agente v36 tem a ação "prints").
-EM_CRIACAO = {"juridico"}
+# passos que estão sendo refeitos: a tela mostra "em criação" e não deixa ligar nem rodar. Prints saiu daqui em 07/10
+# (agente v36 tem a ação "prints"); o Jurídico em 13/10 (saiu da lista, ver acima). Vazio hoje.
+EM_CRIACAO: set[str] = set()
 # 07/10/2026: o que a tela mostra ao abrir o passo — o passo a passo, quem faz (cada perfil pelo nome), quem confere
 # depois e o que ainda está sendo consertado. Texto do mapa do processo, conferido no robô em 07/10.
 _LOJAS = "Contas das lojas da Réplica: ML 93 Mega · ML 78 KIA · Shopee 155 Aguiar · Shopee 146 Vortan · TikTok 137 Atv · TikTok 131 Barbosa"
@@ -205,12 +206,6 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
             "Mercado Livre pela API não dá (responde 403 para anúncio de outro vendedor) — segue no perfil 50.",
         ],
     },
-    "juridico": {
-        "passos": ["Monta a pasta do caso para o advogado (não envia).", "Em criação: hoje o pacote é montado à mão quando precisa."],
-        "quem": ["Escritório"],
-        "confere": [],
-        "consertando": [],
-    },
 }
 # passos de antes de 02/10: só pra dar nome às rodadas que ainda os têm (não têm botão)
 ANTIGOS: dict[str, tuple[int, str]] = {
@@ -228,6 +223,8 @@ ANTIGOS: dict[str, tuple[int, str]] = {
     # ciclo_emails)
     "conferencia_perfil50": (1, "Conferência — resultados da Shopee"),
     "conferencia_safari": (1, "Conferência — Anatel e SEI"),
+    # 13/10: o Jurídico saiu da lista (virou botão na ficha do caso)
+    "juridico": (9, "Jurídico (virou botão na ficha do caso)"),
 }
 # 05/10: o passo 1 da tela junta as três partes (nome curto na coluna Resultado)
 PARTES_PASSO1 = (("ciclo_emails", "e-mails"), ("conferencia_perfil50", "Shopee"),
