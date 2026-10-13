@@ -493,6 +493,9 @@ const error = ref<string | null>(null)
 const search = ref('')
 const reembolsoFilter = ref<ReembolsoFilter>('all')
 const tagFilter = ref('all')
+// Tag destino = tag do SKU em que o item voltou ao estoque (selo verde da
+// coluna "Data devolvido estoque"); pode diferir da origem (saiu .sp, entrou .sa).
+const tagDestinoFilter = ref('all')
 const condicaoFilter = ref('all')
 // Filtro de período (data de devolução = created_at). Inclusivo nas duas pontas.
 const dataInicioFilter = ref('')
@@ -968,6 +971,7 @@ function listParams(limit: number, offset: number): URLSearchParams {
   if (search.value.trim()) params.set('search', search.value.trim())
   if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
   if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
+  if (tagDestinoFilter.value !== 'all') params.set('tag_destino', tagDestinoFilter.value)
   if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
   if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
   if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
@@ -1020,6 +1024,7 @@ async function exportXlsx() {
     if (search.value.trim()) params.set('search', search.value.trim())
     if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
     if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
+    if (tagDestinoFilter.value !== 'all') params.set('tag_destino', tagDestinoFilter.value)
     if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
     if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
     if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
@@ -1480,7 +1485,7 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch([reembolsoFilter, tagFilter, condicaoFilter, dataInicioFilter, dataFimFilter, manutencaoFilter, prazoDiasFilter], () => { page.value = 1; load() })
+watch([reembolsoFilter, tagFilter, tagDestinoFilter, condicaoFilter, dataInicioFilter, dataFimFilter, manutencaoFilter, prazoDiasFilter], () => { page.value = 1; load() })
 watch(page, () => load())
 
 function openAdd() {
@@ -2813,9 +2818,21 @@ async function backfillAddresses() {
         <option value="true">enviada para reembolso</option>
         <option value="false">sem reembolso</option>
       </select>
-      <select v-model="tagFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
-        <option value="all">todas tags</option>
-        <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">{{ opt.label }}</option>
+      <select
+        v-model="tagFilter"
+        class="h-9 rounded-md border bg-background px-2 text-sm"
+        title="Tag de origem: a do SKU vendido"
+      >
+        <option value="all">todas tags origem</option>
+        <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">origem: {{ opt.label }}</option>
+      </select>
+      <select
+        v-model="tagDestinoFilter"
+        class="h-9 rounded-md border bg-background px-2 text-sm"
+        title="Tag de destino: a do SKU em que o item voltou ao estoque (selo verde em 'Data devolvido estoque'). Estornado não conta."
+      >
+        <option value="all">todas tags destino</option>
+        <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">destino: {{ opt.label }}</option>
       </select>
       <select v-model="condicaoFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
         <option value="all">todas condições</option>

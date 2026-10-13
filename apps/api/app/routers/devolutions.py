@@ -71,6 +71,7 @@ from app.services.devolution_stock_return import (
 )
 from app.services.link_mega import erro_link_mega
 from app.services.margem_audit import record_margem_audit
+from app.services.sku_tags import sql_clause_for_tag
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
@@ -244,6 +245,7 @@ def _build_where(
     manutencao: bool | None = None,
     prazo_dias: int | None = None,
     prazo_vencido: bool | None = None,
+    tag_destino: str | None = None,
 ) -> list:
     where = []
     if search and search.strip():
@@ -254,6 +256,18 @@ def _build_where(
         where.append(Devolution.manutencao.is_(True))
     if tag and tag.strip() and tag.strip().lower() != "all":
         where.append(Devolution.tag == tag.strip().lower().lstrip("."))
+    # Tag destino (Vinicius 13/10): `tag` é a do SKU vendido; o item pode voltar
+    # ao estoque em outra (saiu .sp, entrou .sa). Destino = tag do SKU em que o
+    # Bling recebeu a entrada (`estoque_mov_sku`), pela regra do Controle de
+    # Estoque. Estornado não conta — o item saiu de novo do estoque.
+    if tag_destino and tag_destino.strip() and tag_destino.strip().lower() != "all":
+        where.append(Devolution.estoque_mov_sku.is_not(None))
+        where.append(Devolution.estoque_mov_revertido_at.is_(None))
+        where.append(
+            sql_clause_for_tag(
+                Devolution.estoque_mov_sku, tag_destino.strip().lower().lstrip(".")
+            )
+        )
     if condicao and condicao.strip() and condicao.strip().lower() != "all":
         where.append(Devolution.condicao_produto == condicao.strip())
     # Prazo de manutenção (só linhas com prazo setado = condição Manutenção):
@@ -513,10 +527,11 @@ async def list_devolutions(
     manutencao: bool | None = Query(None),
     prazo_dias: int | None = Query(None, ge=1, le=365),
     prazo_vencido: bool | None = Query(None),
+    tag_destino: str | None = Query(None),
 ) -> DevolutionPage:
     where = _build_where(
         search, reembolso, tag, data_inicio, data_fim, condicao, manutencao,
-        prazo_dias, prazo_vencido,
+        prazo_dias, prazo_vencido, tag_destino,
     )
 
     stmt = (
@@ -1356,6 +1371,7 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Qtd", "quantidade"),
     ("Devolver estoque", "devolver_estoque"),
     ("SKU novo", "estoque_mov_sku"),
+    ("Tag destino", "tag_destino"),  # virtual: tag do "SKU novo" (vazio se estornado)
     ("Passou manutenção", "manutencao"),
     ("Data devolvido estoque", "data_devolvido_estoque"),
     ("Prazo", "prazo"),
@@ -1491,11 +1507,12 @@ async def export_devolutions(
     manutencao: bool | None = Query(None),
     prazo_dias: int | None = Query(None, ge=1, le=365),
     prazo_vencido: bool | None = Query(None),
+    tag_destino: str | None = Query(None),
 ) -> StreamingResponse:
     """Exporta as devoluções (com os mesmos filtros da lista) em XLSX."""
     where = _build_where(
         search, reembolso, tag, data_inicio, data_fim, condicao, manutencao,
-        prazo_dias, prazo_vencido,
+        prazo_dias, prazo_vencido, tag_destino,
     )
     rows = (
         await session.execute(
@@ -1539,6 +1556,12 @@ async def export_devolutions(
                     line.append(f"{value} (estornado)")
                 else:
                     line.append(value or "")
+            elif field == "tag_destino":
+                # Mesma regra do filtro "tag destino" (_build_where).
+                if r.estoque_mov_revertido_at is None:
+                    line.append(_sku_tag(r.estoque_mov_sku) or "")
+                else:
+                    line.append("")
             else:
                 line.append(value if value is not None else "")
         ws.append(line)
