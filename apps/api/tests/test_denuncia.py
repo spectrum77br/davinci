@@ -1093,6 +1093,82 @@ async def test_criar_caso_deixa_descartado_de_fora(client, make_user, auth_as):
     assert [c["dados"]["anuncio_ids"] for c in cmds] == [["M2"]]
 
 
+async def test_trocar_anuncio_principal_do_caso(client, make_user, auth_as):
+    """13/10 (Caso 008, morcego_cell): na Lista de compra a pessoa escolhe o anúncio do caso que
+    vai comprar (o WP60, não o WP58 Pro que vendia mais) — o DaVinci pede ao mini; só antes da
+    compra."""
+    await client.post(
+        "/api/denuncia/sync/anuncios",
+        json={"linhas": [
+            _anuncio("W58", shop_id="555", loja="morcego", vendas=473, hom="09604-24-17288"),
+            _anuncio("W60", shop_id="555", loja="morcego", vendas=195, preco=2327.6),
+            _anuncio("OUT", shop_id="999", loja="outra"),
+        ]},
+        headers=H,
+    )
+    caso = {"id": 8, "codigo": "Caso 008", "anuncio_id": "W58", "titulo": "morcego · 2 anúncios",
+            "status": "Aberto", "aberto_em": "2026-10-13", "shop_id": "555",
+            "marketplace": "Shopee", "anuncios": '["W58", "W60"]'}
+    await client.post("/api/denuncia/sync/casos", json={"linhas": [caso]}, headers=H)
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    r = await client.post("/api/denuncia/casos/8/principal", json={"anuncio_id": "W60"})
+    assert r.status_code == 403
+
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    # a ficha traz os anúncios do caso para escolher (com o certificado de cada)
+    d = (await client.get("/api/denuncia/casos/8")).json()
+    assert [(a["id"], a["hom"]) for a in d["anuncios_do_caso"]] == [
+        ("W58", "09604-24-17288"), ("W60", "09604-24-17288")]
+    r = await client.post("/api/denuncia/casos/8/principal", json={"anuncio_id": "OUT"})
+    assert r.json()["detail"]["code"] == "denuncia_anuncio_fora_do_caso"
+    r = await client.post("/api/denuncia/casos/8/principal", json={"anuncio_id": "W58"})
+    assert r.json() == {"ok": True, "ja_e": True}
+    r = await client.post("/api/denuncia/casos/8/principal", json={"anuncio_id": "W60"})
+    assert r.status_code == 200, r.text
+
+    cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [(c["tipo"], c["dados"]) for c in cmds] == [("trocar_principal", {
+        "caso_id": 8, "codigo": "Caso 008", "anuncio_id": "W60", "anterior": "W58"})]
+    casos = (await client.get("/api/denuncia/casos")).json()
+    assert casos["itens"][0]["trocando_para"] == "W60"
+
+    # o mini troca e a cópia traz o caso com o principal novo: sai do "trocando…"
+    await client.post(f"/api/denuncia/sync/robo/comandos/{cmds[0]['id']}",
+                      json={"ok": True, "resultado": "Caso 008: principal W60"}, headers=H)
+    await client.post("/api/denuncia/sync/casos", json={"linhas": [
+        {**caso, "anuncio_id": "W60", "anuncios": '["W60", "W58"]'}]}, headers=H)
+    casos = (await client.get("/api/denuncia/casos")).json()
+    item = casos["itens"][0]
+    assert (item["anuncio_id"], item["preco"], item["trocando_para"]) == ("W60", 2327.6, None)
+    assert casos["falhas_caso"] == []
+
+    # depois da compra de prova, não troca mais
+    await client.post("/api/denuncia/sync/compras", json={"linhas": [
+        {"id": 9, "anuncio_id": "W60", "caso_id": None, "status": "Aguardando entrega"},
+    ]}, headers=H)
+    r = await client.post("/api/denuncia/casos/8/principal", json={"anuncio_id": "W58"})
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "denuncia_caso_ja_tem_compra")
+
+
+async def test_trocar_principal_que_falhou_aparece(client, make_user, auth_as):
+    await client.post("/api/denuncia/sync/anuncios", json={"linhas": [
+        _anuncio("W58", shop_id="555", loja="morcego"),
+        _anuncio("W60", shop_id="555", loja="morcego"),
+    ]}, headers=H)
+    await client.post("/api/denuncia/sync/casos", json={"linhas": [
+        {"id": 8, "codigo": "Caso 008", "anuncio_id": "W58", "status": "Aberto",
+         "shop_id": "555", "marketplace": "Shopee", "anuncios": '["W58", "W60"]'}]}, headers=H)
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    await client.post("/api/denuncia/casos/8/principal", json={"anuncio_id": "W60"})
+    cmd = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"][0]
+    await client.post(f"/api/denuncia/sync/robo/comandos/{cmd['id']}",
+                      json={"ok": False, "resultado": "erro: caso já tem compra"}, headers=H)
+    j = (await client.get("/api/denuncia/casos")).json()
+    assert j["itens"][0]["trocando_para"] is None
+    assert [(f["texto"], f["resultado"]) for f in j["falhas_caso"]] == [
+        ("trocar o anúncio do Caso 008", "erro: caso já tem compra")]
+
+
 # ───────────────────────────────── relatório do dia (05/10/2026)
 
 

@@ -36,6 +36,8 @@ type Caso = {
   // 01/10: caso por loja (todos os anúncios dela)
   n_anuncios?: number
   por_loja?: boolean
+  // 13/10: o anúncio escolhido na Lista de compra enquanto o mini não troca o principal
+  trocando_para?: string | null
   // 02/10: certificado do anúncio principal (GRUPO 1 = Nosso, GRUPO 2 = Diversos) e, no caso por
   // loja, quantos anúncios de cada
   grupo?: string | null
@@ -106,7 +108,7 @@ type Anexo = {
   resultado: string | null
 }
 type Detalhe = {
-  anuncios_do_caso?: { id: string; titulo: string | null; situacao: string | null; vendas: number | null; grupo: string | null; url: string | null; preco?: number | null }[]
+  anuncios_do_caso?: { id: string; titulo: string | null; situacao: string | null; vendas: number | null; grupo: string | null; url: string | null; preco?: number | null; hom?: string | null }[]
   extra?: CasoExtra
   status_tela?: string
   status_auto?: string
@@ -152,6 +154,7 @@ const lista = computed(() =>
   itens.value
     .filter((c) => selecionados.value.has(c.id))
     .map((c) => ({
+      id: c.id,
       caso: c.codigo || `#${c.id}`,
       loja: c.loja || '—',
       marketplace: c.marketplace || '',
@@ -164,6 +167,8 @@ const lista = computed(() =>
       comprado: c.compra || c.extra?.compra_pedido
         ? `${c.compra?.status || 'comprado'}${(c.extra?.compra_pedido || c.compra?.pedido) ? ` · pedido ${c.extra?.compra_pedido || c.compra?.pedido}` : ''}`
         : 'não',
+      trocando: c.trocando_para || null,
+      podeTrocar: (c.n_anuncios || 0) > 1 && !c.compra && !c.extra?.compra_pedido,
     })),
 )
 const COLUNAS: [keyof (typeof lista.value)[number], string][] = [
@@ -195,6 +200,61 @@ function baixarLista() {
   a.download = `lista-de-compra-${new Date().toISOString().slice(0, 10)}.csv`
   a.click()
   URL.revokeObjectURL(a.href)
+}
+
+// ── 13/10 (Vinicius, Lista de compra: "selecionar anúncio… dai eu escolho qual produto eu quero"): no
+// caso por loja o principal é o mais vendido (no 008, o WP58 Pro — o nosso é o WP60). "trocar anúncio"
+// lista os anúncios do caso; o escolhido vira o principal no mini (vale para a lista e para a pasta do
+// jurídico). Só antes da compra de prova — a API recusa depois.
+type AnuncioDoCaso = NonNullable<Detalhe['anuncios_do_caso']>[number]
+const trocaAberta = ref<number | null>(null)
+const opcoesTroca = ref<AnuncioDoCaso[] | null>(null)
+const trocaErro = ref<string | null>(null)
+const pedindoTroca = ref<string | null>(null)
+const ERROS_TROCA: Record<string, string> = {
+  denuncia_caso_ja_tem_compra: 'Este caso já tem compra de prova — o anúncio não troca mais.',
+  denuncia_anuncio_fora_do_caso: 'Esse anúncio não está no caso.',
+  denuncia_caso_ja_excluido: 'O caso foi excluído.',
+}
+async function abrirTroca(id: number) {
+  trocaErro.value = null
+  if (trocaAberta.value === id) {
+    trocaAberta.value = null
+    return
+  }
+  trocaAberta.value = id
+  opcoesTroca.value = null
+  try {
+    opcoesTroca.value = (await api<Detalhe>(`/api/denuncia/casos/${id}`)).anuncios_do_caso || []
+  } catch (e: any) {
+    trocaErro.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+async function escolherAnuncio(casoId: number, anuncioId: string) {
+  pedindoTroca.value = anuncioId
+  trocaErro.value = null
+  try {
+    await api(`/api/denuncia/casos/${casoId}/principal`, { method: 'POST', body: { anuncio_id: anuncioId } })
+    trocaAberta.value = null
+    await carregar()
+    vigiarTrocas(Date.now())
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    trocaErro.value = ERROS_TROCA[code] || code || e?.message || 'erro'
+  } finally {
+    pedindoTroca.value = null
+  }
+}
+// enquanto o mini não troca, o cartão diz "trocando…": recarrega de 8 em 8 s (até 3 min)
+let vigiaTroca: ReturnType<typeof setTimeout> | null = null
+function vigiarTrocas(desde: number) {
+  if (vigiaTroca) clearTimeout(vigiaTroca)
+  vigiaTroca = null
+  if (!itens.value.some((c) => c.trocando_para) || Date.now() - desde > 180_000) return
+  vigiaTroca = setTimeout(async () => {
+    await carregar()
+    vigiarTrocas(desde)
+  }, 8000)
 }
 
 // ── 01/10 (Vinicius: "um botão excluir caso, vai que faço errado — clico na lixeira, ele estorna
@@ -555,6 +615,7 @@ watch([pastaAndando, aberto], ([andando, id]) => {
 })
 onBeforeUnmount(() => {
   if (relogioPasta) clearInterval(relogioPasta)
+  if (vigiaTroca) clearTimeout(vigiaTroca)
 })
 watch(aberto, () => {
   envioAberto.value = false
@@ -848,6 +909,35 @@ defineExpose({ carregar })
             <span v-if="l.valor !== null">pago: {{ dinheiro(l.valor) }}</span>
             <span>comprado: {{ l.comprado }}</span>
             <a v-if="l.url" :href="l.url" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">abrir o anúncio</a>
+            <span v-if="l.trocando" class="text-sky-700 dark:text-sky-300">trocando o anúncio… o robô do mini confirma em alguns segundos</span>
+            <button
+              v-else-if="l.podeTrocar && podeAnexar"
+              type="button"
+              class="text-primary hover:underline"
+              @click="abrirTroca(l.id)"
+            >{{ trocaAberta === l.id ? 'fechar' : 'trocar anúncio' }}</button>
+          </div>
+          <div v-if="trocaAberta === l.id" class="mt-1 rounded-md border bg-muted/30 p-2 space-y-2">
+            <div class="text-xs text-muted-foreground">Escolha o anúncio que vai ser comprado. Ele vira o principal do caso (vale também para a pasta do jurídico).</div>
+            <div v-if="!opcoesTroca && !trocaErro" class="text-xs text-muted-foreground">carregando…</div>
+            <div v-for="o in opcoesTroca || []" :key="o.id" class="flex items-center gap-2 text-xs">
+              <div class="min-w-0 flex-1 space-y-0.5">
+                <div class="truncate" :title="o.titulo || ''">{{ o.titulo || o.id }}</div>
+                <div class="flex flex-wrap items-center gap-x-2 text-muted-foreground">
+                  <span class="text-foreground">{{ o.preco != null ? dinheiro(o.preco) : '—' }}</span>
+                  <span>{{ numero(o.vendas) }} vendas</span>
+                  <span v-if="o.grupo" :class="pillGrupo(o.grupo)">{{ nomeGrupo(o.grupo) }}</span>
+                  <span v-if="o.hom" class="font-mono">{{ o.hom }}</span>
+                  <span v-if="o.situacao && o.situacao !== 'ativo'">{{ o.situacao }}</span>
+                  <a v-if="o.url" :href="o.url" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">abrir</a>
+                </div>
+              </div>
+              <span v-if="o.id === l.anuncio" class="shrink-0 text-muted-foreground">atual</span>
+              <Button v-else size="sm" variant="outline" class="shrink-0" :disabled="!!pedindoTroca" @click="escolherAnuncio(l.id, o.id)">
+                {{ pedindoTroca === o.id ? 'pedindo…' : 'escolher' }}
+              </Button>
+            </div>
+            <div v-if="trocaErro" class="text-xs text-red-600">{{ trocaErro }}</div>
           </div>
         </div>
       </div>

@@ -1445,30 +1445,39 @@ def _loja_do_caso(k: DenunciaCaso) -> tuple[str | None, str | None]:
 
 
 async def _pedidos_de_caso(session: AsyncSession) -> dict:
-    """criar/excluir caso pedidos ao mini que a cópia ainda não mostra, e os que deram errado."""
+    """criar/excluir caso e trocar o anúncio principal pedidos ao mini que a cópia ainda não
+    mostra, e os que deram errado."""
     agora = datetime.now(UTC)
     rows = (
         await session.execute(
             select(DenunciaRoboComando)
             .where(
-                DenunciaRoboComando.tipo.in_(("criar_caso", "excluir_caso")),
+                DenunciaRoboComando.tipo.in_(("criar_caso", "excluir_caso", "trocar_principal")),
                 DenunciaRoboComando.pedido_em >= agora - FALHA_CASO_VALE,
             )
             .order_by(DenunciaRoboComando.id)
         )
     ).scalars().all()
     # o caso novo já chegou na cópia (linha da loja recebida depois do pedido)? sai do "criando…"
+    # — e a troca do principal já chegou (a cópia mostra o anúncio novo)? sai do "trocando…"
     chegou: dict[str, datetime] = {}
-    if any(c.tipo == "criar_caso" for c in rows):
+    principal: dict[int, str | None] = {}
+    if any(c.tipo in ("criar_caso", "trocar_principal") for c in rows):
         for k in (await session.execute(select(DenunciaCaso))).scalars():
+            principal[k.id] = k.anuncio_id
             shop = _loja_do_caso(k)[1]
             if shop and (shop not in chegou or k.recebido_em > chegou[shop]):
                 chegou[shop] = k.recebido_em
     criando: set[tuple[str | None, str]] = set()
     excluindo: set[int] = set()
+    trocando: dict[int, str] = {}
     falhas: list[dict] = []
     for c in rows:
         d = c.dados or {}
+        if c.tipo == "trocar_principal" and principal.get(int(d.get("caso_id") or 0)) == d.get(
+            "anuncio_id"
+        ):
+            continue  # a cópia já mostra o anúncio novo
         no_ar = (c.entregue_em is None and agora - c.pedido_em <= COMANDO_VALE) or (
             c.ok and c.entregue_em is not None and agora - c.entregue_em <= PEDIDO_CASO_VALE
         )
@@ -1480,19 +1489,22 @@ async def _pedidos_de_caso(session: AsyncSession) -> dict:
                 criando.add((d.get("marketplace"), str(d["shop_id"])))
             elif c.tipo == "excluir_caso" and d.get("caso_id") is not None:
                 excluindo.add(int(d["caso_id"]))
+            elif c.tipo == "trocar_principal" and d.get("caso_id") is not None:
+                trocando[int(d["caso_id"])] = str(d.get("anuncio_id") or "")
             continue
         if c.entregue_em is None or c.ok is False:
-            o_que = (
-                f"criar o caso da loja {d.get('loja') or d.get('shop_id')}"
-                if c.tipo == "criar_caso" else f"excluir o {d.get('codigo') or 'caso'}"
-            )
+            o_que = {
+                "criar_caso": f"criar o caso da loja {d.get('loja') or d.get('shop_id')}",
+                "excluir_caso": f"excluir o {d.get('codigo') or 'caso'}",
+                "trocar_principal": f"trocar o anúncio do {d.get('codigo') or 'caso'}",
+            }[c.tipo]
             falhas.append({
                 "id": c.id, "tipo": c.tipo, "texto": o_que, "pedido_em": c.pedido_em,
                 "por": c.pedido_por,
                 "resultado": c.resultado if c.entregue_em
                 else "o robô do mini não pegou o pedido em 1 h (Mac desligado?)",
             })
-    return {"criando": criando, "excluindo": excluindo, "falhas": falhas}
+    return {"criando": criando, "excluindo": excluindo, "trocando": trocando, "falhas": falhas}
 
 
 async def _casos_ativos(session: AsyncSession, pedidos: dict | None = None) -> list[DenunciaCaso]:
@@ -1976,6 +1988,8 @@ async def listar_casos(
                 "shop_id": shop_id or _loja_do_caso(c)[1],
                 "n_anuncios": len(_anuncios_do_caso(c)),
                 "por_loja": bool(_loja_do_caso(c)[1]),
+                # 13/10: o anúncio escolhido na Lista de compra enquanto o mini não troca
+                "trocando_para": pedidos["trocando"].get(c.id),
                 "grupo": ad.get("grupo"),
                 "nosso": grupos.count("GRUPO 1"),
                 "diversos": grupos.count("GRUPO 2"),
@@ -2077,6 +2091,49 @@ async def excluir_caso(
     ))
     await session.commit()
     logger.info("denuncia_excluir_caso", caso=c.codigo, por=u.email)
+    return {"ok": True}
+
+
+@router.post("/casos/{caso_id}/principal")
+async def trocar_principal(
+    caso_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """13/10 (Vinicius, Lista de compra: "selecionar anúncio… dai eu escolho qual produto eu
+    quero"): o anúncio escolhido vira o principal do caso — é o que vai na lista de compra e na
+    pasta do jurídico. Pede ao mini (lá é a fonte); só antes da compra de prova, para a compra
+    não ficar ligada a um anúncio e o caso a outro. Corpo: {anuncio_id}."""
+    anuncio_id = _txt(corpo.get("anuncio_id"))
+    c = await session.get(DenunciaCaso, caso_id)
+    if c is None:
+        raise HTTPException(404, detail={"code": "denuncia_caso_nao_encontrado"})
+    pedidos = await _pedidos_de_caso(session)
+    if c.status == CASO_EXCLUIDO or caso_id in pedidos["excluindo"]:
+        raise HTTPException(409, detail={"code": "denuncia_caso_ja_excluido"})
+    if not anuncio_id or anuncio_id not in _anuncios_do_caso(c):
+        raise HTTPException(422, detail={"code": "denuncia_anuncio_fora_do_caso"})
+    if anuncio_id == c.anuncio_id:
+        return {"ok": True, "ja_e": True}
+    compra = (
+        await session.execute(
+            select(DenunciaCompra.id).where(or_(
+                DenunciaCompra.caso_id == caso_id, DenunciaCompra.anuncio_id == c.anuncio_id,
+            )).limit(1)
+        )
+    ).first()
+    extra = await session.get(DenunciaCasoExtra, caso_id)
+    if compra is not None or (extra is not None and extra.compra_pedido):
+        raise HTTPException(409, detail={"code": "denuncia_caso_ja_tem_compra"})
+    session.add(DenunciaRoboComando(
+        tipo="trocar_principal",
+        dados={"caso_id": caso_id, "codigo": c.codigo, "anuncio_id": anuncio_id,
+               "anterior": c.anuncio_id},
+        pedido_por=u.name or u.email,
+    ))
+    await session.commit()
+    logger.info("denuncia_trocar_principal", caso=c.codigo, anuncio=anuncio_id, por=u.email)
     return {"ok": True}
 
 
@@ -2222,7 +2279,9 @@ async def ver_caso(
         do_caso = [
             {"id": i, "titulo": por_id[i].titulo, "situacao": por_id[i].situacao,
              "vendas": por_id[i].vendas, "grupo": por_id[i].grupo,
-             "url": (por_id[i].dados or {}).get("url"), "preco": (por_id[i].dados or {}).get("preco")}
+             "url": (por_id[i].dados or {}).get("url"),
+             "preco": (por_id[i].dados or {}).get("preco"),
+             "hom": (por_id[i].dados or {}).get("hom")}
             for i in ids if i in por_id
         ]
     extra = await session.get(DenunciaCasoExtra, caso_id)
