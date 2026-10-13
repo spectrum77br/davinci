@@ -11,6 +11,13 @@
 // Abre o perfil se estiver fechado (quem chama FECHA no fim: adspower.py fechar).
 // A aba escolhida fica em tmp/.aba-<perfil>. Coordenadas em px CSS (print ÷ 2).
 //
+// 13/10/2026 (mudança pro Mac mini, onde o robô de Denúncia abre as mesmas lojas):
+// a IA só mexe no perfil que ELA abriu. `estado/perfis-abertos.json` guarda os
+// perfis que ela abriu, com a sessão do AdsPower. Perfil "Active" fora da lista —
+// ou cuja sessão mudou (alguém fechou e outro abriu) — é de outro robô ou de uma
+// pessoa: o comando para com PERFIL EM USO e a IA decide `esperar`. O perfil que
+// ela mesma deixou aberto (captcha/login) continua entrando normal.
+//
 // 30/09 (297130): o formulário "Fale conosco › E-mail" do ML tem caixas sem
 // placeholder de verdade e o `escrever` antigo só achava por placeholder — a IA
 // chegou no formulário e não conseguiu escrever. Agora `campos` numera as caixas
@@ -35,12 +42,47 @@ const [perfil, cmd, ...args] = process.argv.slice(2);
 const ABA = `tmp/.aba-${perfil}`;
 const espera = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
+// Lista dos perfis abertos pela IA (a mesma que ferramentas/adspower.py usa).
+const ABERTOS = path.join(process.env.DAVINCI_CEREBRO_DIR || process.cwd(), "estado", "perfis-abertos.json");
+function abertos() {
+  try {
+    return JSON.parse(fs.readFileSync(ABERTOS, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function gravarAbertos(lista) {
+  fs.mkdirSync(path.dirname(ABERTOS), { recursive: true });
+  fs.writeFileSync(ABERTOS, JSON.stringify(lista, null, 1));
+}
+// A sessão de agora é a que a IA abriu? A porta muda a cada abertura do perfil.
+const mesmaSessao = (meu, dados) =>
+  meu.porta && dados.debug_port ? String(meu.porta) === String(dados.debug_port) : !meu.ws || meu.ws === dados.ws?.puppeteer;
+
 async function ws() {
   let r = await (await fetch(`${BASE}/api/v1/browser/active?user_id=${perfil}`)).json();
-  if (r?.data?.status === "Active") return r.data.ws.puppeteer;
+  const lista = abertos();
+  const meu = lista[perfil];
+  if (r?.data?.status === "Active") {
+    if (meu && mesmaSessao(meu, r.data)) return r.data.ws.puppeteer; // deixado aberto pela IA: segue nele
+    if (meu) {
+      delete lista[perfil]; // a sessão mudou: alguém fechou e outro abriu
+      gravarAbertos(lista);
+    }
+    throw new Error(
+      `PERFIL EM USO: o perfil ${perfil} está aberto por outro robô ou por uma pessoa — não mexa nele; ` +
+        `decida esperar ("perfil em uso, tento na próxima rodada").`,
+    );
+  }
+  if (meu) {
+    delete lista[perfil]; // estava na lista da IA, mas alguém fechou
+    gravarAbertos(lista);
+  }
   await espera(1200); // limite da API local do AdsPower: ~1 chamada/s
   r = await (await fetch(`${BASE}/api/v1/browser/start?user_id=${perfil}&open_tabs=1`)).json();
   if (r.code !== 0) throw new Error(`AdsPower: ${r.msg}`);
+  lista[perfil] = { em: new Date().toISOString(), ws: r.data.ws.puppeteer, porta: r.data.debug_port };
+  gravarAbertos(lista);
   return r.data.ws.puppeteer;
 }
 
@@ -344,7 +386,14 @@ async function anexarPorDentro(page, seletor, arquivos) {
   );
 }
 
-const browser = await conectar(await ws());
+let browser;
+try {
+  browser = await conectar(await ws());
+} catch (e) {
+  // PERFIL EM USO ou AdsPower fora do ar: mensagem limpa pra IA, sem pilha de erro
+  console.log(String(e?.message || e));
+  process.exit(2);
+}
 try {
   const paginas = await abas();
   let n = fs.existsSync(ABA) ? Number(fs.readFileSync(ABA, "utf8")) : -1;

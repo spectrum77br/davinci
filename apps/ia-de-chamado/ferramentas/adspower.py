@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AdsPower do Mac Santiago para a IA de Chamado: achar o perfil da loja e abrir.
+"""AdsPower do Mac dos robôs para a IA de Chamado: achar o perfil da loja e abrir.
 
 Vinicius, 24/09/2026: "ele tem que identificar qual perfil é e abrir no
 AdsPower". Os perfis seguem "Loja - Plataforma" ("Vortan - Shopee", "Aguiar 2 -
@@ -10,6 +10,13 @@ Contabilidade tem cópias ("Mega - ml sh") e só entra se não houver outro.
   abrir PERFIL_ID                                      → endereço CDP do navegador
   fechar PERFIL_ID
   perfis                                               → todos (nome, grupo, id)
+
+13/10/2026 (mudança pro Mac mini, onde o robô de Denúncia abre as mesmas lojas): a
+IA só mexe no perfil que ELA abriu. `estado/perfis-abertos.json` guarda os perfis
+abertos por ela (com a sessão do AdsPower). `abrir` num perfil "Active" fora da
+lista — ou cuja sessão mudou — dá "PERFIL EM USO" (outro robô ou pessoa); `fechar`
+só fecha o que está na lista. O perfil que a IA deixou aberto (captcha/login)
+continua entrando normal. A mesma lista é lida por ferramentas/tela.mjs.
 
 Local API do AdsPower: no máximo ~1 chamada/s. Só biblioteca padrão.
 """
@@ -27,11 +34,10 @@ import urllib.request
 from pathlib import Path
 
 BASE = os.environ.get("ADSPOWER_API_BASE", "http://local.adspower.net:50325").rstrip("/")
-CACHE = (
-    Path(os.environ.get("DAVINCI_CEREBRO_DIR", "~/DaVinci/ia-de-chamado")).expanduser()
-    / "estado" / "adspower_perfis.json"
-)
+PASTA = Path(os.environ.get("DAVINCI_CEREBRO_DIR", "~/DaVinci/ia-de-chamado")).expanduser()
+CACHE = PASTA / "estado" / "adspower_perfis.json"
 CACHE_VALE_S = 3600
+ABERTOS = PASTA / "estado" / "perfis-abertos.json"  # perfis abertos pela IA (ver o topo)
 # 29/09: os grupos viraram "Lojas" (operação) e "Contabilidade" (cópias). Sem
 # "lojas" aqui a cópia da Contabilidade empatava com o perfil da operação.
 GRUPOS_OPERACAO = {"lojas", "israel", "marrocos", "contas"}
@@ -174,17 +180,66 @@ def achar(conta: str, plataforma: str | None) -> dict:
     }
 
 
+def _abertos() -> dict:
+    try:
+        return json.loads(ABERTOS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _gravar_abertos(lista: dict) -> None:
+    ABERTOS.parent.mkdir(parents=True, exist_ok=True)
+    ABERTOS.write_text(json.dumps(lista, ensure_ascii=False, indent=1))
+
+
+def _mesma_sessao(meu: dict, dados: dict) -> bool:
+    """A sessão de agora é a que a IA abriu? A porta muda a cada abertura do perfil."""
+    if meu.get("porta") and dados.get("debug_port"):
+        return str(meu["porta"]) == str(dados["debug_port"])
+    return not meu.get("ws") or meu.get("ws") == (dados.get("ws") or {}).get("puppeteer")
+
+
 def abrir(perfil_id: str) -> dict:
+    ativo = _api(f"/api/v1/browser/active?user_id={perfil_id}")
+    lista = _abertos()
+    meu = lista.get(perfil_id)
+    if ativo.get("status") == "Active":
+        if meu and _mesma_sessao(meu, ativo):
+            return {"perfil": perfil_id, "cdp": (ativo.get("ws") or {}).get("puppeteer"),
+                    "porta": ativo.get("debug_port"), "ja_estava_aberto": True,
+                    "nota": "você deixou esse perfil aberto — siga nele de onde parou"}
+        if meu:  # a sessão mudou: alguém fechou e outro abriu
+            lista.pop(perfil_id, None)
+            _gravar_abertos(lista)
+        raise RuntimeError(
+            f"PERFIL EM USO: o perfil {perfil_id} está aberto por outro robô ou por uma pessoa — "
+            "não mexa nele; decida esperar (\"perfil em uso, tento na próxima rodada\")"
+        )
+    if meu:  # estava na lista da IA, mas alguém fechou
+        lista.pop(perfil_id, None)
+        _gravar_abertos(lista)
     d = _api(f"/api/v1/browser/start?user_id={perfil_id}&open_tabs=1")
     ws = (d.get("ws") or {}).get("puppeteer")
     if not ws:
         raise RuntimeError("AdsPower não devolveu o endereço do navegador (o perfil abriu?)")
-    return {"perfil": perfil_id, "cdp": ws, "porta": d.get("debug_port")}
+    lista[perfil_id] = {"em": time.strftime("%Y-%m-%dT%H:%M:%S"), "ws": ws, "porta": d.get("debug_port")}
+    _gravar_abertos(lista)
+    return {"perfil": perfil_id, "cdp": ws, "porta": d.get("debug_port"), "ja_estava_aberto": False}
 
 
 def fechar(perfil_id: str) -> dict:
-    _api(f"/api/v1/browser/stop?user_id={perfil_id}")
-    return {"perfil": perfil_id, "fechado": True}
+    lista = _abertos()
+    if perfil_id not in lista:
+        return {"perfil": perfil_id, "fechado": False,
+                "motivo": "não foi você que abriu esse perfil (outro robô ou pessoa está usando) — não fecho"}
+    nota = None
+    try:
+        _api(f"/api/v1/browser/stop?user_id={perfil_id}")
+    except RuntimeError as e:  # já estava fechado (alguém fechou antes)
+        nota = str(e)
+    lista.pop(perfil_id, None)
+    _gravar_abertos(lista)
+    return {"perfil": perfil_id, "fechado": True, **({"nota": nota} if nota else {})}
 
 
 def main() -> None:
