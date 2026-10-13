@@ -47,6 +47,7 @@ from app.services.marketing.anexos import (
     caminho_confinado,
     mime_seguro,
 )
+from app.services.marketing.medidas_video import medir_arquivos
 from app.services.marketing.vinculos import _marca_id_do_texto, _product_id_do_sku
 from app.services.mega_fotos import MegaError, sidecar_request
 
@@ -645,6 +646,11 @@ async def upload_arquivos(
         row.files.append(rec)
         existing[name] = rec
         added.append(name)
+
+    # Duração e resolução, pelo ffprobe, no mesmo commit do arquivo — é daqui
+    # que sai o relatório de vídeos do portal (migration 0392). Falhar a
+    # medição deixa NULL e o envio segue: `medir_arquivos` não levanta.
+    await medir_arquivos(f for f in row.files if f.file_name in added)
 
     row.aprovado = None  # arquivo novo volta pra "pendente"
     # E perde o lugar na fila, como na reprovação: aprovada de novo, não volta

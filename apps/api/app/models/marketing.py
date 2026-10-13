@@ -9,6 +9,7 @@ vertical instead of treating the whole shop as one bucket.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -20,6 +21,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     text,
@@ -438,6 +440,14 @@ class MarketingCreative(Base, TimestampMixin):
     )
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pushed_dest: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Qual gerador fez o vídeo e quanto custou (migration 0392). Declarado pela
+    # agência no envio, OPCIONAL: o portal não pode travar a entrega por isso
+    # (Marco, 13/10/2026: "não precisa tornar obrigatório"). Serve ao
+    # relatório do portal — qual IA mais sai e quanto crédito cada vídeo
+    # queima. Fica na LINHA e não no arquivo porque é o que a agência informa
+    # por entrega; NULL = não informado, nunca "zero".
+    ia_modelo: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ia_creditos: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -479,5 +489,13 @@ class MarketingCreativeFile(Base, TimestampMixin):
     # TikTok punem conteúdo repetido entre contas em SILÊNCIO (a conta perde
     # recomendação; não vem erro nenhum de API).
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Medidas do VÍDEO, carimbadas no envio pelo ffprobe (migration 0392). É o
+    # que responde "quantos segundos a agência entregou" sem abrir arquivo por
+    # arquivo. NULL = não medido: ffprobe ausente, arquivo ilegível ou anexo
+    # que não é vídeo — a medição nunca barra o envio. As linhas de antes da
+    # 0392 se preenchem com scripts/creatives_duracao_backfill.py.
+    duracao_s: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    largura: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    altura: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     creative: Mapped[MarketingCreative] = relationship(back_populates="files")

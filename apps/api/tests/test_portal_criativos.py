@@ -321,12 +321,15 @@ async def test_agencia_nao_escreve_roteiro_nem_referencia(
 ):
     """Quem escreve briefing é a equipe interna, no DaVinci. Este teste aponta
     pros caminhos NOVOS de propósito — um teste que só confere 404 em rota
-    inexistente não é trava de nada."""
+    inexistente não é trava de nada.
+
+    `POST /roteiros` saiu da lista em 13/10/2026: ele passou a existir, mas
+    cria ideia NOVA (tests/test_portal_ideias_relatorio.py). Editar, apagar e
+    mexer em referência de roteiro existente continuam fechados."""
     rot = await _roteiro(db, destino=None)
     ref = await _ref_imagem(db, rot)
     h = {"X-Portal-Token": TOK_A}
     tentativas = [
-        client.post("/api/portal/roteiros", headers=h, json={"titulo": "x"}),
         client.patch(f"/api/portal/roteiros/{rot.id}", headers=h, json={"texto": "x"}),
         client.delete(f"/api/portal/roteiros/{rot.id}", headers=h),
         client.post(

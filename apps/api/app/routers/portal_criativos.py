@@ -52,14 +52,27 @@ colunas estão em tabelas diferentes.
 
 Não aprova, não apaga, não edita a linha, não fala com o MEGA. O envio pro
 MEGA continua acontecendo só no clique do admin dentro do DaVinci.
+
+## A única escrita de briefing: ideia NOVA (13/10/2026)
+
+Marco, 13/10/2026, pensando no Claude conectado ao portal: "ela lê, pode gerar
+novas?". `POST /roteiros` cria uma ideia — nunca edita nem apaga uma que já
+existe (para isso continua valendo a versão, `POST /roteiros/{id}/versao`). A
+ideia nasce endereçada à agência do token; "as duas" (`equipe_destino` NULL)
+só quando o portal pede, e quem decide se a pessoa pode pedir é o portal (só o
+login admin, que enxerga as duas agências).
 """
 
 from __future__ import annotations
 
 import secrets
+import statistics
+from collections import Counter
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 import structlog
@@ -76,7 +89,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -91,7 +104,12 @@ from app.models.marketing_personagem_requisicao import (
     STATUS_PENDENTE,
     MarketingPersonagemRequisicao,
 )
-from app.models.marketing_roteiro import MarketingRoteiro, MarketingRoteiroRef
+from app.models.marketing_postagem import STATUS_PUBLICADO, MarketingPostagem
+from app.models.marketing_roteiro import (
+    MarketingRoteiro,
+    MarketingRoteiroPersonagem,
+    MarketingRoteiroRef,
+)
 from app.models.pricing import PricingProduct
 from app.models.segment import Segment
 from app.routers.marketing_creatives import (
@@ -110,8 +128,10 @@ from app.services.marketing.anexos import (
     mime_seguro,
 )
 from app.services.marketing.anexos import disposicao_segura as _disposicao
+from app.services.marketing.medidas_video import eh_video_sql, medir_arquivos
 from app.services.marketing.vinculos import _marca_id_do_texto, _product_id_do_sku
 from app.services.mega_fotos import MegaError, eh_de_embalagens, sidecar_bytes, sidecar_request
+from app.services.rate_limit import RateLimitError, sliding_window_check
 
 logger = structlog.get_logger()
 
@@ -120,6 +140,30 @@ router = APIRouter(prefix="/api/portal", tags=["portal-criativos"])
 # Teto do que uma listagem devolve. Agência com muito histórico não derruba a
 # chamada nem entrega o catálogo inteiro de uma vez.
 LIMITE_PADRAO = 200
+
+# As IDEIAS têm teto próprio, bem mais alto. Em 13/10/2026 havia 264 ideias
+# visíveis e a lista cortava em 200: as 64 mais antigas simplesmente não
+# existiam no portal, sem aviso nenhum. O padrão cobre o catálogo inteiro com
+# folga; quem quiser página pede `limite`/`offset`, e o total vem no
+# cabeçalho `X-Total-Count`.
+LIMITE_ROTEIROS = 2000
+LIMITE_ROTEIROS_MAX = 5000
+# `resumo=1`: o texto da ideia cortado para o card da lista. O texto inteiro
+# chega a milhares de caracteres e a lista só mostra o começo.
+RESUMO_CARACTERES = 300
+
+# Ideia nova vinda do portal (e do Claude conectado a ele): um teto por
+# agência, para um laço errado não encher a aba Roteiros de lixo.
+LIMITE_IDEIAS_MIN = 30
+MAX_PERSONAGENS_IDEIA = 5
+TITULO_MAX = 160
+TEXTO_MAX = 20000
+
+# O gerador informado no envio (migration 0392). Texto livre: a lista de IAs
+# muda toda semana, e quem mantém o select é o portal.
+IA_MODELO_MAX = 64
+# NUMERIC(10,2): até 99.999.999,99.
+_IA_CREDITOS_TETO = Decimal("100000000")
 
 
 def _mapa_tokens() -> dict[str, str]:
@@ -213,8 +257,63 @@ def _linha_out(
         # mesma coisa de novo.
         "feedback": row.feedback,
         "feedback_em": row.feedback_em.isoformat() if row.feedback_em else None,
+        # O que a PRÓPRIA agência declarou no envio (migration 0392) — volta
+        # para ela ver o que informou. NULL = não informado.
+        "ia_modelo": row.ia_modelo,
+        "ia_creditos": float(row.ia_creditos) if row.ia_creditos is not None else None,
         "criado_em": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+def _ia_do_envio(
+    ia_modelo: str | None, ia_creditos: str | None
+) -> tuple[str | None, Decimal | None]:
+    """Os dois campos OPCIONAIS de IA do formulário de envio: vazio = NULL.
+
+    Conferidos ANTES de gravar o vídeo em disco: recusar depois deixaria
+    arquivo órfão (o mesmo cuidado do "outro personagem" do vídeo autoral).
+    Crédito aceita vírgula — é o que a pessoa digita no Brasil.
+    """
+    modelo = (ia_modelo or "").strip() or None
+    if modelo is not None and len(modelo) > IA_MODELO_MAX:
+        raise HTTPException(400, detail={"code": "ia_modelo_invalido", "max": IA_MODELO_MAX})
+    bruto = (ia_creditos or "").strip().replace(",", ".")
+    if not bruto:
+        return modelo, None
+    try:
+        creditos = Decimal(bruto)
+    except InvalidOperation:
+        raise HTTPException(400, detail={"code": "ia_creditos_invalido"}) from None
+    # "Até 2 casas": 12,5 e 12,50 passam; 12,555 não — arredondar calado
+    # gravaria um número que ninguém digitou.
+    if (
+        not creditos.is_finite()
+        or creditos < 0
+        or creditos >= _IA_CREDITOS_TETO
+        or creditos != creditos.quantize(Decimal("0.01"))
+    ):
+        raise HTTPException(400, detail={"code": "ia_creditos_invalido"})
+    # `+ 0` tira o sinal de "-0", que o Decimal guarda.
+    return modelo, creditos.quantize(Decimal("0.01")) + Decimal("0.00")
+
+
+def _aplica_ia(row: MarketingCreative, modelo: str | None, creditos: Decimal | None) -> None:
+    """Só grava o que VEIO. Reenviar o vídeo sem preencher a IA não apaga o
+    que a agência já tinha dito desta entrega."""
+    if modelo is not None:
+        row.ia_modelo = modelo
+    if creditos is not None:
+        row.ia_creditos = creditos
+
+
+async def _medir_os_novos(row: MarketingCreative, entraram: list[str]) -> None:
+    """Duração e resolução dos vídeos que acabaram de entrar (migration 0392).
+
+    No mesmo commit do arquivo. `medir_arquivos` nunca levanta: ffprobe que
+    falha deixa NULL e a entrega segue — medir é para o relatório, não é
+    condição de envio.
+    """
+    await medir_arquivos(f for f in row.files if f.file_name in entraram)
 
 
 async def _roteiros_visiveis(
@@ -320,8 +419,20 @@ def _visivel_pra_fora(equipe: str):
     )
 
 
-def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
-    """LISTA BRANCA. `created_by` e `file_rel` não são da conta de terceiro."""
+def _roteiro_out(
+    row: MarketingRoteiro,
+    entrega: dict[str, Any] | None = None,
+    *,
+    resumo: bool = False,
+) -> dict[str, Any]:
+    """LISTA BRANCA. `created_by` e `file_rel` não são da conta de terceiro.
+
+    `entrega` vem pronta de `_entregas_por_ideia` (uma consulta para a página
+    inteira); None = esta agência ainda não mandou vídeo para a ideia.
+    """
+    texto = row.texto
+    if resumo and texto and len(texto) > RESUMO_CARACTERES:
+        texto = texto[:RESUMO_CARACTERES].rstrip() + "…"
     return {
         "id": str(row.id),
         # Sai daqui porque a versão herda o título do original quando a agência
@@ -330,7 +441,7 @@ def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
         # Não vaza nada: só quem enxerga a ideia consegue criar versão dela.
         "origem_id": str(row.origem_id) if row.origem_id else None,
         "titulo": row.titulo,
-        "texto": row.texto,
+        "texto": texto,
         "marca": row.marca,
         "sku": row.sku,
         "referencias": [
@@ -356,7 +467,157 @@ def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
             if v.personagem and v.personagem.ativo
         ],
         "criado_em": row.created_at.isoformat() if row.created_at else None,
+        # "Esta ideia já foi feita?" — a pergunta que a agência fazia de cabeça
+        # ao abrir a lista de ideias. Só da agência do TOKEN: a entrega da
+        # outra agência não é da conta desta (as duas competem pelo mesmo
+        # briefing).
+        "entrega": entrega,
     }
+
+
+def _raiz(row: MarketingRoteiro) -> UUID:
+    """A ideia da casa por trás da linha. A entrega feita a partir de uma
+    versão aponta para a RAIZ (`entregar_do_roteiro`), então é pela raiz que
+    se pergunta "já foi feita"."""
+    return row.origem_id or row.id
+
+
+def _estado_da_entrega(aprovados: int, pendentes: int) -> str:
+    """Um selo só por ideia: aprovado vence (a casa já assinou embaixo de um
+    vídeo dela); senão, havendo vídeo esperando olhar, está em análise; senão,
+    tudo o que foi mandado foi recusado."""
+    if aprovados:
+        return "aprovado"
+    if pendentes:
+        return "em_analise"
+    return "recusado"
+
+
+async def _entregas_por_ideia(
+    session: AsyncSession, raizes: set[UUID], equipe: str
+) -> dict[UUID, dict[str, Any]]:
+    """O resumo da entrega DESTA agência por ideia raiz — uma consulta só.
+
+    Conta só linha COM arquivo: a linha vazia que `_sincronizar_entregas`
+    abria em 22/09 é entrega aberta, não vídeo mandado. `videos` é o número de
+    arquivos dessas linhas (o portal só envia vídeo; em 13/10/2026 eram 181
+    arquivos, todos video/mp4). "Publicado" é ter postagem que de fato SAIU
+    (status publicado) — agendada, cancelada ou falha não é vídeo no ar.
+    """
+    if not raizes:
+        return {}
+    publicada = (
+        select(MarketingPostagem.id)
+        .where(
+            MarketingPostagem.creative_id == MarketingCreative.id,
+            MarketingPostagem.status == STATUS_PUBLICADO,
+        )
+        .exists()
+    )
+    linhas = (
+        await session.execute(
+            select(
+                MarketingCreative.roteiro_id,
+                MarketingCreative.aprovado,
+                func.count(MarketingCreativeFile.id),
+                func.max(MarketingCreativeFile.created_at),
+                publicada,
+            )
+            .join(MarketingCreativeFile, MarketingCreativeFile.creative_id == MarketingCreative.id)
+            .where(MarketingCreative.roteiro_id.in_(raizes), _da_equipe(equipe))
+            .group_by(MarketingCreative.id)
+        )
+    ).all()
+    soma: dict[UUID, dict[str, Any]] = {}
+    for roteiro_id, aprovado, arquivos, ultimo, publicado in linhas:
+        s = soma.setdefault(
+            roteiro_id,
+            {"aprovados": 0, "pendentes": 0, "videos": 0, "ultimo": None, "publicado": False},
+        )
+        if aprovado is True:
+            s["aprovados"] += 1
+        elif aprovado is None:
+            s["pendentes"] += 1
+        s["videos"] += int(arquivos or 0)
+        if ultimo is not None and (s["ultimo"] is None or ultimo > s["ultimo"]):
+            s["ultimo"] = ultimo
+        s["publicado"] = s["publicado"] or bool(publicado)
+    return {
+        rid: {
+            "estado": _estado_da_entrega(s["aprovados"], s["pendentes"]),
+            "videos": s["videos"],
+            "ultimo_em": s["ultimo"].isoformat() if s["ultimo"] else None,
+            "publicado": s["publicado"],
+        }
+        for rid, s in soma.items()
+    }
+
+
+def _entregue_pela_equipe(equipe: str, *extra):
+    """EXISTS correlacionado: esta agência mandou vídeo para a ideia raiz da
+    linha de `marketing_roteiros` da consulta de fora. É o filtro de situação
+    da lista — a mesma regra do `_entregas_por_ideia`, no WHERE, para o total
+    e a paginação baterem com o que a tela mostra."""
+    tem_arquivo = (
+        select(MarketingCreativeFile.id)
+        .where(MarketingCreativeFile.creative_id == MarketingCreative.id)
+        .exists()
+    )
+    return (
+        select(MarketingCreative.id)
+        .where(
+            MarketingCreative.roteiro_id
+            == func.coalesce(MarketingRoteiro.origem_id, MarketingRoteiro.id),
+            _da_equipe(equipe),
+            tem_arquivo,
+            *extra,
+        )
+        .correlate(MarketingRoteiro)
+        .exists()
+    )
+
+
+def _filtro_de_situacao(situacao: str, equipe: str):
+    if situacao == "feitas":
+        return _entregue_pela_equipe(equipe)
+    if situacao == "a_fazer":
+        return ~_entregue_pela_equipe(equipe)
+    if situacao == "aprovadas":
+        return _entregue_pela_equipe(equipe, MarketingCreative.aprovado.is_(True))
+    if situacao == "em_analise":
+        # Mesma precedência do selo: com um aprovado, a ideia é "aprovada",
+        # mesmo que outro vídeo dela ainda espere análise.
+        return _entregue_pela_equipe(equipe, MarketingCreative.aprovado.is_(None)) & ~(
+            _entregue_pela_equipe(equipe, MarketingCreative.aprovado.is_(True))
+        )
+    return None
+
+
+def _filtro_de_personagem(bruto: str | None):
+    """`personagem_id`: o UUID de um personagem, ou "nenhum" (ideia sem
+    personagem). Conta só personagem LIGADO — o desligado já não aparece no
+    card (`_roteiro_out`), e filtrar por ele mostraria ideia "sem" a pessoa."""
+    valor = (bruto or "").strip()
+    if not valor:
+        return None
+    ligado = (
+        select(MarketingRoteiroPersonagem.id)
+        .join(
+            MarketingPersonagem,
+            MarketingPersonagem.id == MarketingRoteiroPersonagem.personagem_id,
+        )
+        .where(
+            MarketingRoteiroPersonagem.roteiro_id == MarketingRoteiro.id,
+            MarketingPersonagem.ativo.is_(True),
+        )
+    )
+    if valor.lower() == "nenhum":
+        return ~ligado.exists()
+    try:
+        alvo = UUID(valor)
+    except ValueError:
+        raise HTTPException(400, detail={"code": "personagem_invalido"}) from None
+    return ligado.where(MarketingRoteiroPersonagem.personagem_id == alvo).exists()
 
 
 async def _roteiro_visivel(
@@ -374,30 +635,91 @@ async def _roteiro_visivel(
     return row
 
 
+Situacao = Literal["todas", "a_fazer", "feitas", "em_analise", "aprovadas"]
+
+
 @router.get("/roteiros")
 async def listar_roteiros(
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     equipe: Annotated[str, Depends(equipe_do_token)],
+    limite: Annotated[int, Query(ge=1, le=LIMITE_ROTEIROS_MAX)] = LIMITE_ROTEIROS,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    personagem_id: Annotated[str | None, Query(max_length=64)] = None,
+    situacao: Situacao = "todas",
+    desde_dias: Annotated[int | None, Query(gt=0, le=36500)] = None,
+    q: Annotated[str | None, Query(max_length=200)] = None,
+    resumo: bool = False,
 ) -> dict[str, Any]:
     """A tela de roteiros: o briefing endereçado a esta agência — mais os que
     não têm destinatário, que são de todas.
 
-    Quem escreve é a equipe interna, no DaVinci. Aqui é leitura: não existe
-    rota de escrita de roteiro neste arquivo, de propósito.
+    Quem escreve o briefing da casa é a equipe interna, no DaVinci. Daqui só
+    nasce versão (`/versao`) ou ideia NOVA (`POST /roteiros`); nenhuma rota
+    deste arquivo edita ou apaga roteiro existente, de propósito.
+
+    O corpo é o MESMO de antes de 13/10/2026 (o portal que está no ar precisa
+    continuar lendo entre os dois deploys), mais o campo `entrega` em cada
+    ideia. O total vai no cabeçalho `X-Total-Count`, não no corpo.
+
+    Filtros, todos opcionais e combináveis:
+    - `situacao`: a_fazer / feitas (esta agência mandou vídeo) / em_analise /
+      aprovadas — a mesma regra do selo `entrega`;
+    - `personagem_id`: UUID, ou "nenhum" para ideia sem personagem;
+    - `desde_dias`: criadas nos últimos N dias;
+    - `q`: busca em título, texto, marca e SKU, sem diferenciar maiúsculas.
     """
+    filtros: list[Any] = list(_visivel_pra_fora(equipe))
+    por_situacao = _filtro_de_situacao(situacao, equipe)
+    if por_situacao is not None:
+        filtros.append(por_situacao)
+    por_personagem = _filtro_de_personagem(personagem_id)
+    if por_personagem is not None:
+        filtros.append(por_personagem)
+    if desde_dias:
+        desde = datetime.now(UTC) - timedelta(days=desde_dias)
+        filtros.append(MarketingRoteiro.created_at >= desde)
+    termo = (q or "").strip()
+    if termo:
+        # `autoescape`: "50%" ou "dg_23" digitados na busca não viram curinga.
+        filtros.append(
+            or_(
+                *(
+                    col.icontains(termo, autoescape=True)
+                    for col in (
+                        MarketingRoteiro.titulo,
+                        MarketingRoteiro.texto,
+                        MarketingRoteiro.marca,
+                        MarketingRoteiro.sku,
+                    )
+                )
+            )
+        )
+
+    total = (
+        await session.execute(select(func.count()).select_from(MarketingRoteiro).where(*filtros))
+    ).scalar_one()
     linhas = (
         (
             await session.execute(
                 select(MarketingRoteiro)
-                .where(*_visivel_pra_fora(equipe))
-                .order_by(MarketingRoteiro.created_at.desc())
-                .limit(LIMITE_PADRAO)
+                .where(*filtros)
+                # `id` desempata: sem ele, duas ideias criadas no mesmo instante
+                # (o import) trocariam de página entre uma chamada e outra.
+                .order_by(MarketingRoteiro.created_at.desc(), MarketingRoteiro.id.desc())
+                .offset(offset)
+                .limit(limite)
             )
         )
         .scalars()
         .all()
     )
-    return {"equipe": equipe, "roteiros": [_roteiro_out(r) for r in linhas]}
+    entregas = await _entregas_por_ideia(session, {_raiz(r) for r in linhas}, equipe)
+    response.headers["X-Total-Count"] = str(total)
+    return {
+        "equipe": equipe,
+        "roteiros": [_roteiro_out(r, entregas.get(_raiz(r)), resumo=resumo) for r in linhas],
+    }
 
 
 @router.get("/roteiros/{roteiro_id}")
@@ -408,13 +730,127 @@ async def ver_roteiro(
 ) -> dict[str, Any]:
     """Um roteiro só — a tela de "abrir" do portal, e o link colável.
 
-    Existe porque a listagem tem teto de 200: procurar dentro da lista faria
-    a tela de detalhe sumir pra quem já tem histórico.
+    Existe porque a listagem tem teto: procurar dentro da lista faria a tela
+    de detalhe sumir pra quem já tem histórico.
     """
-    return {
-        "equipe": equipe,
-        "roteiro": _roteiro_out(await _roteiro_visivel(session, roteiro_id, equipe)),
-    }
+    row = await _roteiro_visivel(session, roteiro_id, equipe)
+    entregas = await _entregas_por_ideia(session, {_raiz(row)}, equipe)
+    return {"equipe": equipe, "roteiro": _roteiro_out(row, entregas.get(_raiz(row)))}
+
+
+class IdeiaIn(BaseModel):
+    """Ideia nova vinda do portal. Os tetos são os das colunas: estourar vira
+    422 explicando o campo, e não 500 de constraint."""
+
+    titulo: str = Field(max_length=TITULO_MAX)
+    texto: str = Field(max_length=TEXTO_MAX)
+    marca: str | None = Field(default=None, max_length=64)
+    sku: str | None = Field(default=None, max_length=512)
+    personagem_ids: list[UUID] = Field(default_factory=list, max_length=MAX_PERSONAGENS_IDEIA)
+    # Quem pode pedir "todas" é decisão do PORTAL (só o login admin, que
+    # enxerga as duas agências). Daqui, o token só sabe de uma equipe.
+    para: Literal["minha_equipe", "todas"] = "minha_equipe"
+
+
+async def _limite_de_ideias(equipe: str) -> None:
+    """30 ideias por minuto por agência. Redis fora do ar deixa passar, como
+    no estoque dos sites: o teto é contra laço errado, não é trava de
+    segurança — e criar ideia não pode depender do Redis."""
+    try:
+        await sliding_window_check(
+            key=f"portal_ideias:rl:{equipe.strip().lower()}",
+            limit=LIMITE_IDEIAS_MIN,
+            window_seconds=60,
+        )
+    except RateLimitError as e:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"code": "limite_de_ideias"},
+            headers={"Retry-After": str(e.retry_after)},
+        ) from None
+    except Exception as e:  # noqa: BLE001 — Redis fora do ar não derruba a criação
+        logger.warning("portal_ideias_rate_limit_indisponivel", equipe=equipe, err=str(e)[:120])
+
+
+@router.post("/roteiros", status_code=201)
+async def criar_ideia(
+    payload: IdeiaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Ideia NOVA, escrita do lado de fora — pela pessoa no portal ou pelo
+    Claude conectado a ele (Marco, 13/10/2026: "ela lê, pode gerar novas?").
+
+    Nasce ligada (`ativo`) e com texto, então aparece na hora na lista de
+    quem ela endereça — igual ao roteiro que a equipe interna salva com texto.
+    `created_by` fica NULL: quem escreveu não tem conta no DaVinci, e a
+    agência que pediu fica no log (`portal_ideia_criada`).
+
+    A marca e o produto se resolvem pelo texto, como na criação interna
+    (`marketing_roteiros.criar`): é o `marca_id` que leva a entrega para a
+    fila certa do robô de postagem.
+    """
+    await _limite_de_ideias(equipe)
+    titulo = payload.titulo.strip()
+    if not titulo:
+        raise HTTPException(400, detail={"code": "titulo_obrigatorio"})
+    texto = payload.texto.strip()
+    if not texto:
+        raise HTTPException(400, detail={"code": "texto_obrigatorio"})
+    marca = (payload.marca or "").strip() or None
+    sku = (payload.sku or "").strip() or None
+
+    # Só personagem LIGADO: o desligado some do catálogo e do card, e ligá-lo
+    # aqui criaria ideia pedindo um rosto que a agência não consegue baixar.
+    ids = list(dict.fromkeys(payload.personagem_ids))
+    if ids:
+        ativos = set(
+            (
+                await session.execute(
+                    select(MarketingPersonagem.id).where(
+                        MarketingPersonagem.id.in_(ids), MarketingPersonagem.ativo.is_(True)
+                    )
+                )
+            ).scalars()
+        )
+        faltam = [str(i) for i in ids if i not in ativos]
+        if faltam:
+            raise HTTPException(
+                400, detail={"code": "personagem_nao_encontrado", "personagem_ids": faltam}
+            )
+
+    row = MarketingRoteiro(
+        id=uuid4(),
+        titulo=titulo,
+        texto=texto,
+        marca=marca,
+        marca_id=await _marca_id_do_texto(session, marca),
+        sku=sku,
+        product_id=await _product_id_do_sku(session, sku),
+        # NULL = as duas agências (a regra invertida — ver o docstring do model).
+        equipe_destino=None if payload.para == "todas" else equipe,
+        ativo=True,
+        created_by=None,
+    )
+    session.add(row)
+    for pid in ids:
+        session.add(MarketingRoteiroPersonagem(id=uuid4(), roteiro_id=row.id, personagem_id=pid))
+    await session.commit()
+    rid = row.id
+    logger.info(
+        "portal_ideia_criada",
+        roteiro_id=str(rid),
+        equipe=equipe,
+        para=payload.para,
+        personagens=len(ids),
+    )
+    # Relê do banco: os elos de personagem entraram por `session.add`, e sem
+    # o expire o identity map devolveria a ideia com a coleção vazia (mesmo
+    # tropeço do `ligar_personagem` da aba interna). O id sai ANTES do
+    # expire: lido depois, ele mesmo iria ao banco fora do await.
+    session.expire_all()
+    nova = await _roteiro_visivel(session, rid, equipe)
+    return {"equipe": equipe, "roteiro": _roteiro_out(nova, None)}
 
 
 @router.get("/roteiros/{roteiro_id}/referencia/{ref_id}")
@@ -677,6 +1113,8 @@ async def enviar_arquivo(
     files: Annotated[list[UploadFile], File(...)],
     session: Annotated[AsyncSession, Depends(get_session)],
     equipe: Annotated[str, Depends(equipe_do_token)],
+    ia_modelo: Annotated[str, Form()] = "",
+    ia_creditos: Annotated[str, Form()] = "",
 ) -> dict[str, Any]:
     """Anexa vídeo numa linha da PRÓPRIA equipe.
 
@@ -684,6 +1122,8 @@ async def enviar_arquivo(
     não divergirem com o tempo: grava em streaming (nunca o arquivo inteiro na
     memória), aborta e apaga ao passar do teto, e o sha256 sai do mesmo fluxo
     de bytes — é ele que denuncia o mesmo vídeo publicado em duas marcas.
+
+    `ia_modelo`/`ia_creditos`: opcionais (migration 0392), ver `_ia_do_envio`.
     """
     row = await _linha_da_equipe(session, creative_id, equipe)
     if row.pushed_at is not None:
@@ -692,8 +1132,11 @@ async def enviar_arquivo(
         raise HTTPException(400, detail={"code": "sem_arquivo"})
     if len(row.files) + len(files) > MAX_FILES_PER_ROW:
         raise HTTPException(400, detail={"code": "muitos_arquivos"})
+    modelo, creditos = _ia_do_envio(ia_modelo, ia_creditos)
 
     entraram = _gravar_arquivos(row, files)
+    await _medir_os_novos(row, entraram)
+    _aplica_ia(row, modelo, creditos)
 
     # Arquivo novo volta a linha pra "pendente" — mesmo comportamento do
     # caminho interno. A agência precisa ver isso na tela dela, senão parece
@@ -714,6 +1157,8 @@ async def entregar_do_roteiro(
     files: Annotated[list[UploadFile], File(...)],
     session: Annotated[AsyncSession, Depends(get_session)],
     equipe: Annotated[str, Depends(equipe_do_token)],
+    ia_modelo: Annotated[str, Form()] = "",
+    ia_creditos: Annotated[str, Form()] = "",
 ) -> dict[str, Any]:
     """A agência entrega o vídeo A PARTIR do roteiro, e o vínculo nasce junto.
 
@@ -743,6 +1188,7 @@ async def entregar_do_roteiro(
         raise HTTPException(400, detail={"code": "sem_arquivo"})
     if len(files) > MAX_FILES_PER_ROW:
         raise HTTPException(400, detail={"code": "muitos_arquivos"})
+    modelo, creditos = _ia_do_envio(ia_modelo, ia_creditos)
 
     # O vínculo aponta pro BRIEFING DA CASA, não pro texto que a agência
     # escreveu em cima dele. A rota existe para responder "qual ideia virou
@@ -811,6 +1257,8 @@ async def entregar_do_roteiro(
     await session.flush()
 
     entraram = _gravar_arquivos(row, files)
+    await _medir_os_novos(row, entraram)
+    _aplica_ia(row, modelo, creditos)
     await session.commit()
     logger.info(
         "portal_entrega_do_roteiro",
@@ -1084,6 +1532,8 @@ async def propor_video(
     sku: Annotated[str, Form()] = "",
     personagem_id: Annotated[str, Form()] = "",
     personagem_outro: Annotated[str, Form()] = "",
+    ia_modelo: Annotated[str, Form()] = "",
+    ia_creditos: Annotated[str, Form()] = "",
 ) -> dict[str, Any]:
     """A agência publica um vídeo DELA, com o conceito junto, e cai na revisão.
 
@@ -1113,6 +1563,7 @@ async def propor_video(
     conceito = (conceito or "").strip()
     marca_txt = (marca or "").strip() or None
     sku_txt = (sku or "").strip() or None
+    modelo, creditos = _ia_do_envio(ia_modelo, ia_creditos)
 
     # Qual persona está na peça. Vem do elenco e é conferida contra ele: id
     # inventado no formulário não pode virar ponteiro no banco.
@@ -1160,12 +1611,15 @@ async def propor_video(
         product_id=await _product_id_do_sku(session, sku_txt),
         equipe=equipe,
         aprovado=None,
+        ia_modelo=modelo,
+        ia_creditos=creditos,
         files=[],
     )
     session.add(row)
     await session.flush()
 
     entraram = _gravar_arquivos(row, files)
+    await _medir_os_novos(row, entraram)
 
     # O conceito NÃO vira roteiro aqui. A lista de roteiros é o que a casa
     # escreveu; texto que chega de fora não entra nela por chegada — nem
@@ -1223,6 +1677,148 @@ async def baixar_entrega(
     if rec is None:
         raise HTTPException(404, detail={"code": "nao_encontrado"})
     return _entrega(rec, permitidos=MIMES_VIDEO, baixar=download)
+
+
+# ──────────────── relatório: o que a agência entregou na janela ────────────────
+
+# Faixas de duração do relatório, em segundos (limite de cima incluído). O
+# vídeo curto é o que a casa pede; a faixa diz se a agência está entregando
+# isso ou esticando.
+_FAIXAS: tuple[tuple[str, float | None], ...] = (
+    ("ate_10", 10),
+    ("11_15", 15),
+    ("16_20", 20),
+    ("21_30", 30),
+    ("31_45", 45),
+    ("acima_45", None),
+)
+
+
+def _faixa(segundos: float) -> str:
+    for nome, teto in _FAIXAS:
+        if teto is None or segundos <= teto:
+            return nome
+    return _FAIXAS[-1][0]
+
+
+def _num(valor: Decimal | float | None) -> float | None:
+    return round(float(valor), 2) if valor is not None else None
+
+
+@router.get("/relatorio")
+async def relatorio(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+    dias: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> dict[str, Any]:
+    """Os vídeos que ESTA agência mandou nos últimos `dias` (Marco, 13/10/2026).
+
+    A janela é pela data do ARQUIVO, não da linha: a linha nasce quando a
+    entrega é aberta e o vídeo pode chegar dias depois — ou de novo, depois de
+    uma recusa, e aí os dois envios contam (foram dois vídeos produzidos).
+
+    Só vídeo (`medidas_video.eh_video`). Duração NULL (arquivo de antes da
+    0392 ainda sem backfill, ou que o ffprobe não leu) entra na contagem de
+    vídeos e em `sem_duracao`, nunca como zero nas médias.
+
+    Recorte e lista branca de sempre: `_da_equipe` no WHERE, e o título da
+    ideia só sai se ela estiver visível para esta agência (mesma regra do
+    `roteiro_id` da aba Entregas).
+    """
+    desde = datetime.now(UTC) - timedelta(days=dias)
+    # Por ARQUIVO: a postagem aponta para um arquivo, e é este vídeo que
+    # saiu (ou não) numa rede.
+    publicado = (
+        select(MarketingPostagem.id)
+        .where(
+            MarketingPostagem.file_id == MarketingCreativeFile.id,
+            MarketingPostagem.status == STATUS_PUBLICADO,
+        )
+        .exists()
+        .label("publicado")
+    )
+    linhas = (
+        await session.execute(
+            select(
+                MarketingCreativeFile.id.label("arquivo_id"),
+                MarketingCreativeFile.created_at.label("enviado_em"),
+                MarketingCreativeFile.duracao_s,
+                MarketingCreativeFile.largura,
+                MarketingCreativeFile.altura,
+                MarketingCreative.id.label("creative_id"),
+                MarketingCreative.modelo,
+                MarketingCreative.roteiro_id,
+                MarketingCreative.marca,
+                MarketingCreative.sku,
+                MarketingCreative.aprovado,
+                MarketingCreative.ia_modelo,
+                MarketingCreative.ia_creditos,
+                publicado,
+            )
+            .join(MarketingCreative, MarketingCreative.id == MarketingCreativeFile.creative_id)
+            .where(
+                _da_equipe(equipe),
+                MarketingCreativeFile.created_at >= desde,
+                eh_video_sql(),
+            )
+            .order_by(MarketingCreativeFile.created_at.desc(), MarketingCreativeFile.id)
+        )
+    ).all()
+
+    ids = {r.roteiro_id for r in linhas if r.roteiro_id}
+    titulos: dict[UUID, str] = {}
+    if ids:
+        titulos = dict(
+            (
+                await session.execute(
+                    select(MarketingRoteiro.id, MarketingRoteiro.titulo).where(
+                        MarketingRoteiro.id.in_(ids), *_visivel_pra_fora(equipe)
+                    )
+                )
+            )
+            .tuples()
+            .all()
+        )
+
+    duracoes = [float(r.duracao_s) for r in linhas if r.duracao_s is not None]
+    faixas = {nome: 0 for nome, _ in _FAIXAS}
+    for d in duracoes:
+        faixas[_faixa(d)] += 1
+    por_ia = Counter((r.ia_modelo or "").strip() or "nao_informada" for r in linhas)
+
+    return {
+        "equipe": equipe,
+        "dias": dias,
+        "desde": desde.isoformat(),
+        "total_videos": len(linhas),
+        "total_segundos": round(sum(duracoes), 2),
+        "media_s": round(statistics.fmean(duracoes), 2) if duracoes else None,
+        "mediana_s": round(statistics.median(duracoes), 2) if duracoes else None,
+        "sem_duracao": len(linhas) - len(duracoes),
+        "faixas": faixas,
+        # Do mais usado para o menos; empate em ordem alfabética.
+        "por_ia": dict(sorted(por_ia.items(), key=lambda kv: (-kv[1], kv[0].lower()))),
+        "videos": [
+            {
+                "creative_id": str(r.creative_id),
+                "arquivo_id": str(r.arquivo_id),
+                "titulo": r.modelo,
+                "roteiro_id": str(r.roteiro_id) if r.roteiro_id in titulos else None,
+                "roteiro_titulo": titulos.get(r.roteiro_id) if r.roteiro_id else None,
+                "marca": r.marca,
+                "sku": r.sku,
+                "enviado_em": r.enviado_em.isoformat() if r.enviado_em else None,
+                "duracao_s": _num(r.duracao_s),
+                "largura": r.largura,
+                "altura": r.altura,
+                "aprovado": r.aprovado,
+                "publicado": bool(r.publicado),
+                "ia_modelo": r.ia_modelo,
+                "ia_creditos": _num(r.ia_creditos),
+            }
+            for r in linhas
+        ],
+    }
 
 
 # ──────────────── o catálogo: foto do produto para a agência ────────────────
