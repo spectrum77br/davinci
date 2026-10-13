@@ -1997,8 +1997,8 @@ async def criar_casos(
     corpo: Annotated[dict, Body()],
 ) -> dict:
     """Aba Anúncios e denúncias: "criar" (uma loja) ou "enviar para caso" (as marcadas). Um caso
-    por loja com TODOS os anúncios dela (concorrentes) — o mais vendido no ar é o principal. Loja
-    que já tem caso (ou pedido em andamento) fica de fora.
+    por loja com todos os anúncios dela (concorrentes, menos os descartados pelo robô) — o mais
+    vendido no ar é o principal. Loja que já tem caso (ou pedido em andamento) fica de fora.
     Corpo: {lojas: [{marketplace, shop_id}]}."""
     lojas = corpo.get("lojas")
     if not isinstance(lojas, list) or not lojas or len(lojas) > 200:
@@ -2036,7 +2036,13 @@ async def criar_casos(
             codigos = ", ".join(sorted(c or "?" for c in ja))
             pulados.append({"loja": nome, "motivo": f"já tem caso ({codigos})"})
             continue
-        ordem = sorted(anuncios, key=lambda a: (a.situacao != "ativo", -(a.vendas or 0), a.id))
+        # 13/10: o descartado pelo robô (itel, Poco… fora do escopo) não entra no caso — no Caso 010
+        # o itel A90 (378 vendas) virou o principal no lugar do A17 Pro Max e a compra iria errada.
+        validos = [a for a in anuncios if (a.grupo or "") not in GRUPOS_ESCONDIDOS]
+        if not validos:
+            pulados.append({"loja": nome, "motivo": "só tem anúncios descartados pelo robô"})
+            continue
+        ordem = sorted(validos, key=lambda a: (a.situacao != "ativo", -(a.vendas or 0), a.id))
         dados = {"shop_id": shop, "marketplace": mp or ordem[0].marketplace, "loja": nome,
                  "anuncio_ids": [a.id for a in ordem]}
         session.add(

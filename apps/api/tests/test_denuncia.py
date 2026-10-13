@@ -1071,6 +1071,28 @@ async def test_criar_caso_que_falhou_aparece(client, make_user, auth_as):
     assert lojas["loja_y"]["caso_pendente"] is False
 
 
+async def test_criar_caso_deixa_descartado_de_fora(client, make_user, auth_as):
+    """13/10 (Caso 010, MARFIM_SHOP): o itel A90 descartado vendia mais e virou o principal no lugar
+    do A17 Pro Max — o descartado pelo robô não entra no caso."""
+    await client.post(
+        "/api/denuncia/sync/anuncios",
+        json={"linhas": [
+            _anuncio("M1", shop_id="333", loja="marfim", vendas=378, grupo="DESCARTADO"),
+            _anuncio("M2", shop_id="333", loja="marfim", vendas=200),
+            _anuncio("Z1", shop_id="444", loja="so_itel", vendas=50, grupo="DESCARTADO"),
+        ]},
+        headers=H,
+    )
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    r = await client.post("/api/denuncia/casos/criar", json={"lojas": [
+        {"marketplace": "Shopee", "shop_id": "333"}, {"marketplace": "Shopee", "shop_id": "444"}]})
+    j = r.json()
+    assert j["criados"] == [{"loja": "marfim", "shop_id": "333", "anuncios": 1}]
+    assert j["pulados"] == [{"loja": "so_itel", "motivo": "só tem anúncios descartados pelo robô"}]
+    cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [c["dados"]["anuncio_ids"] for c in cmds] == [["M2"]]
+
+
 # ───────────────────────────────── relatório do dia (05/10/2026)
 
 
