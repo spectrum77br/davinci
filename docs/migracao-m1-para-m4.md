@@ -49,6 +49,44 @@ mini, **igual ao que está hoje**, e o M1 fica livre.
   Aquecimento: Melhor Envio logado; Shopee quase todas logadas; TikTok só
   Inova e Poofy logadas — as outras 9 são sessões vencidas (a IA avisa no
   Threema quando precisar de login; o leitor grava no chamado).
+- **13/10 15:10–15:45 — fechamento do dia (ele saiu; "resolver tudo e deixar
+  só as telas de login"):** executor renomeado pra `makisa` na Ouvidoria
+  (`AGENT_NAME`, backup `.env.bak-20261013-santiago`); textos "Mac
+  Santiago" → "Mac mini da Makisa" (aviso Threema da IA, LEIAME, READMEs,
+  despertadores do repositório, commit `3dbabc3e`, publicado no
+  `origin/main`); **o deploy ficou pra ele** (barrado pelo modo automático:
+  `ssh davinci-prod 'sudo davinci-deploy'`, só texto). IA batendo a cada 10
+  min no mini (15:14, 15:24…), sem caso ainda; executor já recebeu a 1ª
+  tarefa (senha TikTok Mini 294738 → "precisa_login", espera o login do
+  perfil 129); leitor passando sem erro, sem leitura vencida ainda.
+  Aquecimento terminado: **42 logadas, 14 deslogadas, 1 bloqueio**.
+
+### O que precisa de login (pela tela do mini: abrir o perfil, logar, FECHAR)
+
+| Plataforma | Perfis |
+|---|---|
+| TikTok | **Mini - TikTok (129)** — tem tarefa de senha esperando (294738); Barbosa 131; JLAS 123; Injox 140; Atv 137; Eron 133; Uranyx 204; VR 211; Mini - ml sh tk (47, Firefox, a IA usa pra contestação) |
+| Shopee | Aguiar 155 (presa em verificação desde 08/10); Minas 153; VR 210; ATV - sh tk te 159 (cópia da Contabilidade) |
+| Mercado Livre | Vita 66 (pede identificação); **Nexus 83** (não é login: bloqueio antirrobô "experience-shield" — abrir e passar a verificação) |
+
+Tudo o mais (42 perfis: Melhor Envio 70, as 15 Shopee e as 24 ML restantes,
+Inova e Poofy TikTok) veio logado pela nuvem do AdsPower.
+
+### Próximos dias
+
+- Observar: Ouvidoria › Robôs (Vigia Robô Melhor Envio deve mostrar
+  `logistica:makisa`; Vigia Robô Leitura), `registros/` da IA e `logs/` dos
+  executores no mini (`~/DaVinci/...`), e a aba Robô da Denúncia (se as
+  rodadas dela sofreram com os robôs do DaVinci na mesma máquina —
+  "PerfilOcupado" nas contas da Réplica é o esperado, não erro).
+- Rodar o deploy pendente (texto do aviso Threema).
+- Nobreak pro mini.
+- M1: fica duas semanas como reserva (despertadores descarregados, AdsPower
+  deslogado). Voltar atrás = logar o Cairo no M1 (derruba o mini) e
+  `launchctl load` dos três lá. Depois das duas semanas, apagar `~/DaVinci`,
+  `~/.hermes`, prints em `debug/` (mostrar a lista antes).
+- A pasta `~/DaVinci/_migracao` do mini (ferramenta de aquecer + resultado)
+  pode ser apagada quando não servir mais.
 
 ## 1. Resposta curta
 
