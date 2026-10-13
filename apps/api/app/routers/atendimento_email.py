@@ -6,6 +6,12 @@ dela e os admins. Aqui fica só o que a PONTE levou ao /atendimento
 trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
 
   quem VÊ o /atendimento (pela conversa, no escopo da equipe):
+    GET   …/contagens               — os números das entradas da aba E-mail que
+                                      vêm das CONVERSAS de e-mail (13/10/2026:
+                                      o e-mail saiu da Caixa): falta responder e
+                                      os chamados abertos dos sites (por tipo);
+                                      as listas vêm de GET /api/atendimento/
+                                      conversas?caixa=email
     GET   …/conversas/{id}/emails   — os cartões dos e-mails da conversa (texto
                                       inteiro PROTEGIDO: links de acesso e
                                       códigos fora; nunca HTML) + os outros
@@ -13,7 +19,9 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
     GET   …/anexos/{id}             — o anexo (octet-stream, nosniff, CSP sandbox)
     GET   …/conversas/{id}/emails-da-venda — o resumo dos e-mails da venda (a
                                       conversa e a família dela): caixa → loja,
-                                      pastas e quantos (o bloco do painel ④)
+                                      pastas e quantos (o bloco do painel ④);
+                                      no chat, só os números e o id das
+                                      conversas de e-mail da venda
     GET   …/conversas/{id}/previa   — como a resposta vai sair e as travas de agora
     GET   …/saude                   — as caixas da EMPRESA (a privada só para o
                                       dono/admin) — e, para quem mexe, as lojas
@@ -25,6 +33,8 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
     GET   …/emails/{id}             — o cartão de um e-mail da fila
     POST  …/emails/{id}/loja        — escolher a loja (e-mail sem loja, 1 clique)
     POST  …/emails/{id}/vincular    — ligar a um pedido/conversa (e-mail sem vínculo)
+    POST  …/conversas/{id}/vincular — o mesmo, pela conversa de e-mail aberta na
+                                      aba E-mail (13/10/2026)
     POST  …/emails/{id}/ignorar     — tirar da fila (fica registrado)
     POST  …/emails/{id}/reprocessar — de novo pela ponte (sem loja, erro)
     POST  …/reprocessar             — a fila "sem loja" inteira (cadastro corrigido)
@@ -37,6 +47,14 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
     GET   …/pastas · PATCH …/pastas/{id} · GET …/regras · PUT …/regras
 
 (… = /api/atendimento/email)
+
+E-MAIL × CHAT (13/10/2026, `services/atendimento/separa_email.py`): os
+cartões e o resumo "E-mails da venda" são só da conversa de E-MAIL — numa
+conversa de chat (o aviso que a ponte gravava lá até 13/10) os cartões
+voltam vazios, como a própria conversa, que não mostra mais o e-mail. O
+"E-mails da venda" do chat diz só QUANTOS e-mails a venda tem nas conversas
+de e-mail, quantas esperam resposta e o id delas (o link "abrir na aba
+E-mail"): nunca caixa, pasta, assunto, remetente nem texto.
 
 O e-mail de SEGURANÇA (código, senha, acesso), o PRIVADO (caixa só com
 aliases de loja) e o da pasta que só se conta NUNCA aparecem aqui: só na
@@ -82,16 +100,26 @@ from app.models.mail_atendimento import (
     MailOutboxMeta,
 )
 from app.routers.atendimento import (
+    TIPOS_CHAMADO,
+    _clausula_escopo,
     _conversa_ou_404,
     _nomes_das_lojas,
     _so_admin,
+    _tipo_do_chamado,
     _travar_ou_409,
     _view,
 )
 from app.security.cipher import decrypt_bytes, decrypt_json
 from app.services import mail_central
-from app.services.atendimento import abas, acesso, gravar
-from app.services.atendimento.constantes import AUTOR_SISTEMA, CANAL_EMAIL, FONTE_TUTA
+from app.services.atendimento import abas, acesso, gravar, separa_email
+from app.services.atendimento.constantes import (
+    AUTOR_SISTEMA,
+    CANAL_EMAIL,
+    CONVERSA_FECHADA,
+    FONTE_TUTA,
+    PLATAFORMA_SITE,
+    PLATAFORMAS_EXTERNAS,
+)
 from app.services.mail_atendimento import (
     chamados,
     codigos,
@@ -480,6 +508,50 @@ async def vincular(
         raise HTTPException(409, detail={"code": "email_sem_conversa"})
     scope = await resolve_team_scope(session, user)
     conversa = await _conversa_ou_404(session, str(meta.conversa_id), scope)
+    return await _vincular(session, meta, conversa, body, user, scope)
+
+
+@router.post("/conversas/{conversa_id}/vincular")
+async def vincular_conversa(
+    conversa_id: str, body: VincularIn, session: Session, user: Leitor
+) -> dict[str, Any]:
+    """A conversa de e-mail ligada a um pedido PELA CONVERSA (13/10/2026).
+
+    O e-mail saiu da Caixa: a aba E-mail abre a conversa de e-mail pelo id
+    (das Filas, das Caixas) e o "vincular ao pedido" fica nela, sem precisar
+    do id de um e-mail. O mesmo `vincular` (só quem mexe, só na conversa da
+    ponte, a mesma loja), pelo e-mail mais novo da conversa.
+    """
+    _mexe(user)
+    scope = await resolve_team_scope(session, user)
+    conversa = await _conversa_ou_404(session, conversa_id, scope)
+    meta = (
+        await session.execute(
+            select(MailMessageMeta)
+            .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
+            .where(
+                MailMessageMeta.conversa_id == conversa.id,
+                MailMessageMeta.estado.in_((ESTADO_SEM_VINCULO, ESTADO_GRAVADO)),
+            )
+            .order_by(MailMessage.received_at.desc(), MailMessage.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if meta is None:
+        raise HTTPException(409, detail={"code": "conversa_sem_email"})
+    return await _vincular(session, meta, conversa, body, user, scope)
+
+
+async def _vincular(
+    session: AsyncSession,
+    meta: MailMessageMeta,
+    conversa: AtendimentoConversa,
+    body: VincularIn,
+    user: User,
+    scope: TeamScope,
+) -> dict[str, Any]:
+    """O vínculo ao pedido (a conversa da ponte; a do pedido, se já existe, recebe tudo)."""
+    message_id = meta.message_id
     if not ponte.e_conversa_da_ponte(conversa):
         raise HTTPException(409, detail={"code": "nao_e_conversa_de_email"})
     pedido = (body.pedido or "").strip()
@@ -696,6 +768,40 @@ async def reprocessar_fila(session: Session, user: Leitor) -> dict[str, int]:
     return {"total": len(ids), "resolvidos": resolvidos}
 
 
+# ── As conversas de e-mail (quem vê) ─────────────────────────────────────
+
+
+@router.get("/contagens")
+async def contagens(session: Session, user: Leitor, response: Response) -> dict[str, Any]:
+    """Os números da aba E-mail que vêm das CONVERSAS de e-mail (13/10/2026).
+
+    O e-mail saiu da Caixa (`separa_email`): o que falta responder e os
+    chamados abertos dos sites (RF6, por tipo) são contados aqui, para as
+    entradas "Falta responder" e "Chamados dos sites" da aba E-mail. Quem vê
+    o /atendimento, no escopo da equipe — as mesmas conversas que ela via na
+    Caixa. Uma consulta; só quando a aba E-mail pede (não é a lista quente).
+    """
+    c = AtendimentoConversa
+    aberta = c.situacao != CONVERSA_FECHADA
+    chamado = and_(c.plataforma == PLATAFORMA_SITE, aberta)
+    tipo = _tipo_do_chamado()
+    q = select(
+        func.count().filter(c.aguardando_resposta.is_(True)),
+        func.count().filter(chamado),
+        *[func.count().filter(chamado, tipo == t) for t in TIPOS_CHAMADO],
+    ).where(separa_email.conversa_de_email_sql())
+    cond = _clausula_escopo(await resolve_team_scope(session, user), c.integration_id)
+    if cond is not None:
+        q = q.where(cond)
+    aguardando, chamados, *por_tipo = (await session.execute(q)).one()
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "aguardando": int(aguardando or 0),
+        "chamados": int(chamados or 0),
+        "chamados_por_tipo": {t: int(n or 0) for t, n in zip(TIPOS_CHAMADO, por_tipo, strict=True)},
+    }
+
+
 # ── Na conversa (quem vê) ─────────────────────────────────────────────────
 
 
@@ -703,9 +809,15 @@ async def reprocessar_fila(session: Session, user: Leitor) -> dict[str, int]:
 async def emails_da_conversa(
     conversa_id: str, session: Session, user: Leitor, response: Response
 ) -> dict[str, Any]:
-    """Os cartões dos e-mails da conversa — no escopo da equipe, texto protegido."""
+    """Os cartões dos e-mails da conversa — no escopo da equipe, texto protegido.
+
+    Só a conversa de E-MAIL tem cartões (13/10/2026): a de chat volta vazia —
+    o e-mail que a ponte gravou nela não aparece mais (`separa_email`)."""
     scope = await resolve_team_scope(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
+    response.headers["Cache-Control"] = "no-store"
+    if not separa_email.e_conversa_de_email(conversa):
+        return {"emails": [], "chamado": None, "outros_chamados": []}
     linhas = (
         await session.execute(
             select(MailMessageMeta, MailMessage)
@@ -748,10 +860,19 @@ async def emails_da_venda(
     cadastro) e PASTA, com quantos e o último. Sem texto, assunto nem
     remetente: só o que o cartão de cada e-mail já mostra (pasta, endereço,
     loja). No escopo da equipe, como a conversa.
+
+    Assim só na conversa de E-MAIL (13/10/2026, `separa_email`): o chat não
+    mostra e-mail. Na conversa de CHAT volta só QUANTOS e-mails as conversas
+    de e-mail da mesma venda têm, quantas esperam resposta e o id delas
+    (`_emails_da_venda_no_chat`, o link "abrir na aba E-mail"); sem nenhuma,
+    o zero de sempre (`{"total": 0, "caixas": []}`).
     """
     scope = await resolve_team_scope(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
+    response.headers["Cache-Control"] = "no-store"
     familia = await abas.familia(session, conversa)
+    if not separa_email.e_conversa_de_email(conversa):
+        return await _emails_da_venda_no_chat(session, conversa, familia, scope)
     ids = {c.id for c in familia.conversas} | {conversa.id}
     linhas = (
         await session.execute(
@@ -780,7 +901,6 @@ async def emails_da_venda(
             )
         )
     ).all()
-    response.headers["Cache-Control"] = "no-store"
     nomes = await _nomes_das_lojas(session, {i for _, i, *_ in linhas if i is not None})
     fichas: dict[UUID, str | None] = {}
     pastas: dict[UUID, str] = {}
@@ -829,6 +949,96 @@ async def emails_da_venda(
     for c in saida:
         c["pastas"].sort(key=lambda p: (-p["quantidade"], p["pasta"] or ""))
     return {"total": sum(c["quantidade"] for c in saida), "caixas": saida}
+
+
+async def _emails_da_venda_no_chat(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    familia: abas.Familia,
+    scope: TeamScope,
+) -> dict[str, Any]:
+    """O "E-mails da venda" de uma conversa de CHAT (13/10/2026): só números e ids.
+
+    O dono: "o e-mail aparece só na aba de e-mail; a do chat aparece só no
+    chat" — mas quem atende no chat precisa saber que a venda tem e-mail. Volta
+    QUANTOS e-mails (os estados dos cartões) as conversas de e-mail da ponte
+    da MESMA VENDA têm, quantas delas esperam resposta e o id de cada uma (o
+    link "abrir na aba E-mail"). Nada do e-mail: nem caixa, pasta, assunto,
+    remetente ou texto — `caixas` vem sempre vazia.
+
+    A MESMA VENDA = a régua da família de antes de 13/10 (`abas._membro`: a
+    mesma loja e um nº do pedido da família ou, no e-mail SEM pedido, o mesmo
+    comprador), sobre as conversas de e-mail que a família do chat não traz
+    mais. O escopo é o da lista `?caixa=email` (a rota já pede o `_view`; aqui
+    o `_clausula_escopo`): quem não abre a conversa de e-mail não recebe nem
+    o id nem o número. O e-mail que a ponte ligou à PRÓPRIA conversa de chat
+    (o aviso de antes de 13/10, a mensagem da Amazon pelo Gmail) não conta:
+    não há conversa de e-mail para abrir.
+    """
+    vazio: dict[str, Any] = {"total": 0, "caixas": []}
+    loja = abas._clausula_loja(conversa)
+    if (
+        loja is None
+        or conversa.canal in abas.CANAIS_SEM_ABAS
+        or conversa.plataforma in PLATAFORMAS_EXTERNAS
+    ):
+        return vazio
+    c = AtendimentoConversa
+    ref = abas.pessoa(conversa)
+    pedido = set(familia.pedido)
+    conds = []
+    if pedido:
+        conds.append(abas._condicao_chaves(sorted(pedido)))
+    if ref.plataforma:
+        # O e-mail sem pedido entra pelo comprador (o id dele NA PLATAFORMA).
+        conds.append(c.dados[abas.CHAVE_COMPRADOR_PLATAFORMA].astext == ref.plataforma)
+    if not conds:
+        return vazio
+    consulta = (
+        select(c)
+        .where(loja, or_(*conds), separa_email.conversa_de_email_sql(c))
+        .order_by(c.ultima_mensagem_em.desc().nulls_last(), c.created_at.desc())
+        .limit(abas.MAX_CONVERSAS)
+    )
+    cond = _clausula_escopo(scope, c.integration_id)
+    if cond is not None:
+        consulta = consulta.where(cond)
+    # O anúncio só decide a PERGUNTA da família, nunca o e-mail.
+    sem_produtos = abas.Produtos()
+    emails = [
+        x
+        for x in (await session.execute(consulta)).scalars()
+        if abas._membro(x, conversa, ref, pedido, set(), sem_produtos, familia.compra_em)
+    ]
+    if not emails:
+        return vazio
+    m = MailMessageMeta
+    quantos: dict[UUID, int] = {
+        conversa_id: int(n)
+        for conversa_id, n in (
+            await session.execute(
+                select(m.conversa_id, func.count())
+                .where(m.conversa_id.in_([x.id for x in emails]), m.estado.in_(ESTADOS_COM_TEXTO))
+                .group_by(m.conversa_id)
+            )
+        ).all()
+    }
+    # A que espera resposta primeiro (o link abre a primeira); depois a mais recente.
+    emails.sort(key=lambda x: not x.aguardando_resposta)
+    conversas = [
+        {
+            "id": str(x.id),
+            "emails": quantos.get(x.id, 0),
+            "aguardando": bool(x.aguardando_resposta),
+        }
+        for x in emails
+    ]
+    return {
+        "total": sum(x["emails"] for x in conversas),
+        "caixas": [],
+        "aguardando": sum(1 for x in conversas if x["aguardando"]),
+        "conversas": conversas,
+    }
 
 
 @router.get("/anexos/{attachment_id}")

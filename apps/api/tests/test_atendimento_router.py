@@ -820,9 +820,8 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
         "nao_lidas": 0,
         # 02/10/2026: o Direct é Mídia (RF7) — a DM não silenciada conta nela.
         "etiquetas": {"midia": 1},
-        # 09/10/2026: o "E-mail sem vínculo" e os chips do site (RF5/RF6).
-        "email_sem_vinculo": 0,
-        "chamados": {},
+        # (13/10/2026: o "E-mail sem vínculo" e os chips do site saíram do
+        # /resumo com o e-mail — `separa_email`; os números: /email/contagens.)
         # 09/10/2026: a Caixa Humano — o Direct (sem IA) nunca entra nela.
         "humano": 0,
     } in resumo["plataformas"]

@@ -15,7 +15,12 @@ visualmente igual ao Tuta".
       Uma página de resumos, o mais novo primeiro: data, direção, remetente,
       assunto, anexos, a pasta e o SELO da loja — nunca o texto. O de
       SEGURANÇA não traz o assunto ("e-mail de acesso/código"). `antes` = o
-      `proximo` da página anterior.
+      `proximo` da página anterior. `conversa_id` (13/10/2026) = a conversa
+      de E-MAIL da ponte onde está o e-mail (`separa_email`), só para quem vê
+      o /atendimento e no escopo da equipe — a aba E-mail abre a conversa por
+      ela (vincular ao pedido, responder) sem passar pela Caixa do chat. O
+      que a ponte ligou a uma conversa de CHAT (o aviso de até 13/10, a mesma
+      mensagem da Amazon pelo Gmail) não leva: o chat não mostra e-mail.
 
 A permissão de LER a caixa da Central (`routers/mail.readable_mailbox`: o dono da
 caixa, um admin ou um leitor ativo de "Quem mais vê"; quem não pode recebe 404 —
@@ -39,12 +44,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_active_user
-from app.models import Integration, Marca, StoreInfo
+from app.deps.team_scope import resolve_team_scope
+from app.models import AtendimentoConversa, Integration, Marca, StoreInfo
 from app.models.mail import MailMessage
 from app.models.mail_atendimento import MailCaixaIndice
 from app.models.user import User
 from app.routers.atendimento import _nomes_das_lojas
 from app.routers.mail import readable_mailbox
+from app.services.atendimento import acesso, separa_email
 from app.services.atendimento import lojas as lojas_svc
 from app.services.mail_atendimento import indice, pastas, ponte, regras, rotear
 
@@ -362,6 +369,28 @@ async def pastas_da_caixa(
     }
 
 
+async def _conversas_abriveis(session: AsyncSession, user: User, ids: set[UUID]) -> set[UUID]:
+    """As conversas de E-MAIL da ponte destes ids que a pessoa abre no
+    /atendimento (quem vê, no escopo da equipe) — uma consulta, só a página."""
+    if not ids or not acesso.pode_ver(user):
+        return set()
+    scope = await resolve_team_scope(session, user)
+    c = AtendimentoConversa
+    linhas = (
+        await session.execute(
+            select(c.id, c.integration_id).where(
+                c.id.in_(ids), separa_email.conversa_de_email_sql(c)
+            )
+        )
+    ).all()
+    return {
+        i
+        for i, integration_id in linhas
+        if scope.unrestricted
+        or (integration_id is not None and integration_id in scope.integration_ids)
+    }
+
+
 @router.get("/mailboxes/{mailbox_id}/lista")
 async def lista_da_caixa(
     mailbox_id: UUID,
@@ -408,6 +437,9 @@ async def lista_da_caixa(
     )
     chaves = {indice.canonica(r.chave, base.cad) for r in pagina}
     selos = await rotulos(session, chaves, base.cad)
+    abriveis = await _conversas_abriveis(
+        session, user, {r.conversa_id for r in pagina if r.conversa_id is not None}
+    )
 
     itens = []
     for r in pagina:
@@ -422,6 +454,7 @@ async def lista_da_caixa(
             "direcao": message.direction,
             "tem_anexos": message.attachment_count > 0,
             "ponte": r.estado,
+            "conversa_id": str(r.conversa_id) if r.conversa_id in abriveis else None,
             "selo": {**selos[chave], "chave": chave, "provavel": r.fonte == indice.FONTE_INDICE},
         }
         try:

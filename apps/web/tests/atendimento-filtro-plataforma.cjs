@@ -352,17 +352,18 @@ async function principal() {
   assert.equal(LJ.nomeDoCorte(['ml']), 'Mercado Livre')
   assert.equal(LJ.nomeDoCorte(['instagram', 'facebook']), 'Redes')
   // "Todas · Shopee": acesa com a Shopee inteira; o clique tira a loja e
-  // guarda a caixa (Pergunta/Pós-venda do ML) e o tipo do chamado.
+  // guarda a caixa (Pergunta/Pós-venda do ML). (O tipo do chamado do Site
+  // saiu da Caixa com o e-mail em 13/10/2026.)
   assert.equal(LJ.ativaTodasDoCorte(filtros({ plataforma: 'shopee', plataforma_topo: 'shopee' }), ['shopee']), true)
   assert.equal(LJ.ativaTodasDoCorte(filtros({ plataforma: 'shopee', integration_id: 'i-sh', plataforma_topo: 'shopee' }), ['shopee']), false)
   assert.equal(LJ.ativaTodasDoCorte(filtros({ plataforma: 'instagram', plataforma_topo: 'instagram,facebook' }), ['instagram', 'facebook']), false)
   assert.deepEqual(
     LJ.filtrosTodasDoCorte(filtros({ plataforma: 'ml', integration_id: 'i-ml', canal: 'pos_venda', plataforma_topo: 'ml' }), ['ml']),
-    filtros({ plataforma: 'ml', canal: 'pos_venda', plataforma_topo: 'ml', tipo_chamado: undefined }),
+    filtros({ plataforma: 'ml', canal: 'pos_venda', plataforma_topo: 'ml' }),
   )
   assert.deepEqual(
-    LJ.filtrosTodasDoCorte(filtros({ plataforma: 'instagram', rede_social_id: 'r1', plataforma_topo: 'instagram,facebook', tipo_chamado: 'sac' }), ['instagram', 'facebook']),
-    filtros({ plataforma: 'instagram,facebook', plataforma_topo: 'instagram,facebook', tipo_chamado: '' }),
+    LJ.filtrosTodasDoCorte(filtros({ plataforma: 'instagram', rede_social_id: 'r1', plataforma_topo: 'instagram,facebook' }), ['instagram', 'facebook']),
+    filtros({ plataforma: 'instagram,facebook', plataforma_topo: 'instagram,facebook' }),
   )
 }
 

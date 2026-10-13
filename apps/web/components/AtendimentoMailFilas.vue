@@ -1,16 +1,40 @@
 <script lang="ts">
 // As FILAS do e-mail das lojas (RF5/RF6, 08/10/2026), na aba E-mail do
 // /atendimento (a seção "Filas" do AtendimentoMail, a Central do outro dev).
-// Só quem MEXE no /atendimento: as filas podem ter e-mail de qualquer loja e
-// de endereço interno (a rota recusa os outros com `atendimento_so_quem_mexe`).
+// As filas de E-MAIL (sem loja, sem vínculo, suspeitos, resumos, com erro,
+// revisar envio, pastas): só quem MEXE no /atendimento — podem ter e-mail de
+// qualquer loja e de endereço interno (a rota recusa os outros com
+// `atendimento_so_quem_mexe`).
+//
+// O E-MAIL SAIU DA CAIXA (13/10/2026 — o dono: "o e-mail aparece só na aba de
+// e-mail; a do chat aparece só no chat"): as conversas de e-mail da ponte não
+// estão mais na Caixa do chat. Por isso as filas de CONVERSA ficam aqui, com
+// as mesmas regras de quem as via na Caixa (quem vê o /atendimento, no escopo
+// da equipe — `podeMexer` falso mostra só elas):
+//   Chamados dos sites — os chamados ABERTOS do RF6 (SAC, Atacado, Dúvidas e
+//                   sugestões), com os chips do tipo (antes no grupo Site da Caixa);
+//   Falta responder — as conversas de e-mail esperando resposta (o cliente
+//                   escreveu e ninguém respondeu).
+//   Todas as conversas — TODAS as conversas de e-mail, abertas ou (no chip)
+//                   fechadas: o histórico que a Caixa achava pela busca e pelo
+//                   filtro Fechadas (o chamado fechado, o e-mail já respondido).
+//                   Quem só lê também vê: na Caixa ele achava essas mesmas
+//                   conversas (as do escopo da equipe); a busca vazia numa
+//                   metade oferece a outra ("procurar nas fechadas").
+// As três vêm de GET /api/atendimento/conversas?caixa=email (a lista da Caixa,
+// só com o e-mail; a busca acha pelo nome, pelo pedido e por QUALQUER protocolo
+// do chamado — como achava na Caixa) e os números de GET /api/atendimento/
+// email/contagens. "abrir
+// a conversa" abre a conversa de e-mail NA PRÓPRIA aba E-mail (a página), nunca
+// na Caixa — é lá que se vincula ao pedido, se escolhe a loja e se responde.
 //
 //   Sem loja      — o endereço/pasta não diz de qual loja é (alias sem
 //                   cadastro, de duas lojas, marca ambígua…): escolher a loja
 //                   ou a marca (as sugestões são 1 clique; a ficha SEM
 //                   integração também vale — o e-mail entra na conversa dela).
 //                   "Reprocessar" depois de corrigir o cadastro (Cadastros › Lojas).
-//   Sem vínculo   — na conversa da loja, sem pedido: vincular ao pedido (o
-//                   citado que existe é 1 clique).
+//   Sem vínculo   — na conversa de e-mail da loja, sem pedido: vincular ao
+//                   pedido (o citado que existe é 1 clique).
 //   Suspeitos     — remetente pode ser falso: ler, conferir no Tuta, nunca responder.
 //   Resumos       — resumo diário/lista de vários pedidos: só histórico.
 //   Com erro      — a ponte não conseguiu ler: reprocessar ou tirar da fila.
@@ -26,18 +50,43 @@
 // "ver o e-mail" (GET …/emails/{id}). Rotas: routers/atendimento_email.py.
 // Funções puras aqui em cima (tests/atendimento-mail-atendimento.cjs).
 
-import type { ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
+import type { ConversaResumo, ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
 
-export type Fila = 'sem_loja' | 'sem_vinculo' | 'suspeito' | 'resumo' | 'erro' | 'revisar_envio'
-// A ordem e os nomes da tela (as chaves = FILAS de mail_atendimento/constantes.py + o "revisar envio").
+export type Fila = 'sem_loja' | 'sem_vinculo' | 'chamados' | 'aguardando' | 'todas' | 'suspeito' | 'resumo' | 'erro' | 'revisar_envio'
+// A ordem e os nomes da tela (as chaves = FILAS de mail_atendimento/constantes.py,
+// os "chamados" e o "falta responder" das conversas de e-mail e o "revisar envio").
 export const FILAS: { value: Fila; label: string; dica: string }[] = [
   { value: 'sem_loja', label: 'Sem loja', dica: 'O endereço que recebeu (e a pasta) não diz de qual loja é: escolha a loja.' },
-  { value: 'sem_vinculo', label: 'Sem vínculo', dica: 'Já está na conversa da loja, mas sem pedido: vincule ao pedido.' },
+  { value: 'sem_vinculo', label: 'Sem vínculo', dica: 'Já está na conversa de e-mail da loja, mas sem pedido: vincule ao pedido.' },
+  { value: 'chamados', label: 'Chamados dos sites', dica: 'Os chamados abertos dos formulários dos sites (SAC, Atacado, Dúvidas e sugestões): abra a conversa para responder.' },
+  { value: 'aguardando', label: 'Falta responder', dica: 'E-mails de loja esperando resposta (o cliente escreveu e ninguém respondeu): abra a conversa para responder.' },
+  { value: 'todas', label: 'Todas as conversas', dica: 'Todas as conversas de e-mail (as abertas, ou as fechadas no chip): busque pelo nome, pelo pedido ou pelo protocolo.' },
   { value: 'suspeito', label: 'Suspeitos', dica: 'O remetente pode ser falso: confira no Tuta. Não responda nem clique em links.' },
   { value: 'resumo', label: 'Resumos', dica: 'Resumo diário ou lista com vários pedidos: fica só como histórico.' },
   { value: 'erro', label: 'Com erro', dica: 'A ponte não conseguiu ler este e-mail: reprocesse ou tire da fila.' },
   { value: 'revisar_envio', label: 'Revisar envio', dica: 'A resposta pode ter saído (o Mac não confirmou): confira nos Enviados do Tuta e marque.' },
 ]
+
+// As filas que são CONVERSAS de e-mail (13/10/2026): quem vê o /atendimento
+// vê estas (as mesmas que via na Caixa); as outras são de quem mexe.
+export const FILAS_DE_CONVERSA: ReadonlySet<Fila> = new Set<Fila>(['chamados', 'aguardando', 'todas'])
+export function filasDaPessoa(podeMexer: boolean) {
+  return podeMexer ? FILAS : FILAS.filter((f) => FILAS_DE_CONVERSA.has(f.value))
+}
+// Os TIPOS do chamado dos sites (RF6, 09/10/2026; na Caixa até 13/10/2026):
+// os chips da fila "Chamados dos sites", com os códigos da API
+// (`ROTULO_TIPO_CAIXA` de mail_atendimento/constantes.py, sobre
+// `dados.mail.caixa`). Filtro da lista (`?tipo_chamado=`), não etiqueta.
+export const TIPOS_CHAMADO: { value: string; label: string; hint: string }[] = [
+  { value: 'sac', label: 'SAC', hint: 'chamados do SAC dos sites (protocolo S: US-26-0001…)' },
+  { value: 'atacado', label: 'Atacado', hint: 'chamados de Atacado dos sites (protocolo A: UA-26-0001…)' },
+  { value: 'duvidas', label: 'Dúvidas e sugestões', hint: 'chamados de Dúvidas e sugestões dos sites (protocolo DS: UDS-26-0001…)' },
+]
+// Os números das filas de conversa (GET /api/atendimento/email/contagens).
+export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number> }
+export function juntarContagens(filas: Record<string, number> | null, conversas: ContagensDeConversa | null): Record<string, number> {
+  return { ...(filas || {}), ...(conversas ? { chamados: conversas.chamados, aguardando: conversas.aguardando } : {}) }
+}
 
 export type ItemFila = {
   id: string
@@ -135,11 +184,36 @@ export function acoesDaFila(fila: Fila, isAdmin: boolean) {
   }
 }
 
-export function urlDaFila(fila: Fila, antesDe?: string | null): string {
+// `fechadas` (só em "Todas as conversas"): as fechadas em vez das abertas.
+export function urlDaFila(fila: Fila, antesDe?: string | null, tipoChamado?: string | null, busca?: string | null, fechadas?: boolean): string {
   if (fila === 'revisar_envio') return '/api/atendimento/email/envios?estado=revisar'
+  if (FILAS_DE_CONVERSA.has(fila)) {
+    // A lista da Caixa, só com as conversas de e-mail (`caixa=email`), no escopo.
+    const q = new URLSearchParams({ caixa: 'email' })
+    if (fila === 'chamados') {
+      q.set('plataforma', 'site')
+      q.set('filtro', 'todas')
+      const tipo = (tipoChamado || '').trim().toLowerCase()
+      if (TIPOS_CHAMADO.some((t) => t.value === tipo)) q.set('tipo_chamado', tipo)
+    } else if (fila === 'todas') {
+      q.set('filtro', fechadas ? 'fechadas' : 'todas')
+    } else {
+      q.set('filtro', 'aguardando')
+    }
+    const termo = (busca || '').trim()
+    if (termo) q.set('q', termo.slice(0, 200))
+    q.set('limite', '50')
+    if (antesDe) q.set('antes_de', antesDe)
+    return `/api/atendimento/conversas?${q.toString()}`
+  }
   const q = new URLSearchParams({ fila })
   if (antesDe) q.set('antes_de', antesDe)
   return `/api/atendimento/email/emails?${q.toString()}`
+}
+
+// A linha de uma conversa de e-mail: quem, de qual loja/site e a prévia.
+export function lojaDaConversa(c: Pick<ConversaResumo, 'conta' | 'email'>): string {
+  return c.email?.marca || c.conta || ''
 }
 
 // A pergunta antes de marcar (o "não saiu" libera responder de novo: o cliente pode receber duas vezes).
@@ -147,6 +221,14 @@ export function perguntaResolver(saiu: boolean): string {
   return saiu
     ? 'Confirmar que esta resposta aparece nos Enviados do Tuta?'
     : 'Marcar que esta resposta NÃO saiu?\n\nConfira nos Enviados do Tuta antes: se ela saiu e alguém responder de novo, o cliente recebe duas vezes.'
+}
+
+// A lista de conversa vazia: o porquê, pela fila (e pela busca).
+export function vazioDaConversa(fila: Fila, busca: string, fechadas: boolean): string {
+  if (busca) return 'Nada encontrado para essa busca.'
+  if (fila === 'chamados') return 'Nenhum chamado aberto dos sites.'
+  if (fila === 'todas') return fechadas ? 'Nenhuma conversa de e-mail fechada.' : 'Nenhuma conversa de e-mail aberta.'
+  return 'Nenhum e-mail esperando resposta.'
 }
 
 export const ESTADO_DA_CAIXA: Record<string, string> = {
@@ -159,20 +241,39 @@ export const ESTADO_DA_CAIXA: Record<string, string> = {
 
 <script setup lang="ts">
 import { ChevronDown, ChevronUp, Download, ExternalLink, Loader2, MailWarning, RefreshCw, RotateCcw, ShieldAlert, TriangleAlert } from 'lucide-vue-next'
-import { erroDaApi, fmtDataHora, plataformaInfo } from '~/components/AtendimentoPlataforma.vue'
+import { erroDaApi, fmtDataHora, plataformaInfo, prazoDe } from '~/components/AtendimentoPlataforma.vue'
 import { avisosDeProtecao, destinoDaLoja, remetenteLegivel, tamanhoLegivel, urlDoAnexo, type CartaoEmail } from '~/components/AtendimentoEmailCartao.vue'
 
 const props = defineProps<{
   isAdmin: boolean
   lojas: ResumoLoja[]
+  // Mexe no /atendimento: as filas de e-mail e as ações. Falso (quem só lê,
+  // 13/10/2026) = só as filas de CONVERSA (os chamados, o falta responder e todas).
+  podeMexer?: boolean
+  // A página mostra uma conversa de e-mail por cima (a aba E-mail, 13/10/2026):
+  // esta tela fica montada, escondida; na volta, a fila e os números de novo.
+  pausado?: boolean
 }>()
 const emit = defineEmits<{ (e: 'abrirConversa', id: string): void }>()
 
 const { api, url } = useApi()
 const toasts = useToasts()
 
-const fila = ref<Fila>('sem_loja')
-const contagens = ref<Record<string, number>>({})
+const mexe = computed(() => props.podeMexer !== false)
+const filasVisiveis = computed(() => filasDaPessoa(mexe.value))
+const fila = ref<Fila>(mexe.value ? 'sem_loja' : 'chamados')
+const contagensFilas = ref<Record<string, number> | null>(null)
+const contagensConversa = ref<ContagensDeConversa | null>(null)
+const contagens = computed(() => juntarContagens(contagensFilas.value, contagensConversa.value))
+// As filas de conversa (chamados dos sites, falta responder): linhas da lista.
+const conversas = ref<ConversaResumo[]>([])
+// O chip do tipo do chamado ('' = todos) e a busca das filas de conversa
+// (o que está na caixa de texto × o que filtra: só no Enter/buscar).
+const tipoChamado = ref('')
+// "Todas as conversas": as abertas (padrão) ou as fechadas (o chip).
+const fechadas = ref(false)
+const buscaTexto = ref('')
+const busca = ref('')
 const itens = ref<ItemFila[]>([])
 const proximo = ref<string | null>(null)
 const envios = ref<EnvioARevisar[]>([])
@@ -195,14 +296,19 @@ function verFila(f: Fila) {
 }
 const filaInfo = computed(() => FILAS.find((f) => f.value === fila.value) || FILAS[0])
 
+// As contagens são ajuda: a fila aberta mostra o erro dela. As das filas de
+// e-mail só para quem mexe (a rota recusa os outros); as das conversas, todos.
 async function carregarContagens() {
-  try {
-    contagens.value = await api<Record<string, number>>('/api/atendimento/email/filas')
-  } catch {
-    // As contagens são ajuda: a fila aberta mostra o erro dela.
+  const pedidos: Promise<void>[] = [
+    api<ContagensDeConversa>('/api/atendimento/email/contagens').then((r) => { contagensConversa.value = r }).catch(() => {}),
+  ]
+  if (mexe.value) {
+    pedidos.push(api<Record<string, number>>('/api/atendimento/email/filas').then((r) => { contagensFilas.value = r }).catch(() => {}))
   }
+  await Promise.all(pedidos)
 }
 async function carregarSaude() {
+  if (!mexe.value) return
   try {
     saude.value = await api('/api/atendimento/email/saude')
   } catch {
@@ -219,6 +325,11 @@ async function carregar(mais = false) {
       const r = await api<{ itens: EnvioARevisar[] }>(urlDaFila(f))
       if (g !== geracao) return
       envios.value = r.itens || []
+    } else if (FILAS_DE_CONVERSA.has(f)) {
+      const r = await api<{ itens: ConversaResumo[]; proximo: string | null }>(urlDaFila(f, mais ? proximo.value : null, f === 'chamados' ? tipoChamado.value : null, busca.value, f === 'todas' && fechadas.value))
+      if (g !== geracao) return
+      conversas.value = mais ? [...conversas.value, ...(r.itens || []).filter((x) => !conversas.value.some((y) => y.id === x.id))] : r.itens || []
+      proximo.value = r.proximo || null
     } else {
       const r = await api<{ itens: ItemFila[]; proximo: string | null }>(urlDaFila(f, mais ? proximo.value : null))
       if (g !== geracao) return
@@ -240,10 +351,38 @@ watch(fila, () => {
   detalhe.value = null
   itens.value = []
   envios.value = []
+  conversas.value = []
   proximo.value = null
   void carregar()
 })
+// O chip do tipo do chamado: a lista dos chamados de novo, desde o começo.
+function escolherTipo(t: string) {
+  tipoChamado.value = tipoChamado.value === t ? '' : t
+  conversas.value = []
+  proximo.value = null
+  void carregar()
+}
+// O chip Abertas/Fechadas de "Todas as conversas": a lista de novo, desde o começo.
+function verFechadas(v: boolean) {
+  if (fechadas.value === v) return
+  fechadas.value = v
+  conversas.value = []
+  proximo.value = null
+  void carregar()
+}
+// A busca (nome, pedido, protocolo): a lista de novo, desde o começo.
+function buscar() {
+  busca.value = buscaTexto.value.trim()
+  conversas.value = []
+  proximo.value = null
+  void carregar()
+}
 onMounted(() => { void atualizar() })
+// Voltou da conversa de e-mail (respondeu, fechou, vinculou): a fila e os
+// números relidos, como depois de uma ação aqui — a lista recomeça da 1ª página.
+watch(() => props.pausado, (pausado, antes) => {
+  if (antes && !pausado) void Promise.all([carregar(), carregarContagens()])
+})
 
 async function abrir(item: ItemFila) {
   if (aberto.value === item.id) {
@@ -347,7 +486,7 @@ const curto = (p: string) => plataformaInfo(p).curto
 
     <div class="flex flex-wrap items-center gap-1 border-b pb-1" role="tablist" aria-label="Filas de e-mail">
       <button
-        v-for="f in FILAS"
+        v-for="f in filasVisiveis"
         :key="f.value"
         type="button"
         role="tab"
@@ -362,6 +501,7 @@ const curto = (p: string) => plataformaInfo(p).curto
         <span v-if="contagens[f.value]" class="rounded-full bg-background px-1.5 text-[10px] tabular-nums ring-1 ring-border">{{ contagens[f.value] }}</span>
       </button>
       <button
+        v-if="mexe"
         type="button"
         role="tab"
         :aria-selected="pastasAbertas"
@@ -406,6 +546,84 @@ const curto = (p: string) => plataformaInfo(p).curto
           </div>
         </li>
       </ul>
+    </template>
+
+    <!-- as filas de CONVERSA de e-mail (13/10/2026): os chamados dos sites, o que falta responder e todas -->
+    <template v-else-if="FILAS_DE_CONVERSA.has(fila)">
+      <form class="flex items-center gap-1.5 text-xs" role="search" data-busca-conversa-email @submit.prevent="buscar">
+        <input v-model="buscaTexto" type="search" class="h-7 w-64 max-w-full rounded border bg-background px-1.5" placeholder="buscar: nome, pedido ou protocolo" aria-label="buscar nas conversas de e-mail" />
+        <button type="submit" class="rounded border px-2 py-0.5 hover:bg-muted disabled:opacity-50" :disabled="carregando">buscar</button>
+        <button v-if="busca" type="button" class="text-muted-foreground underline" @click="buscaTexto = ''; buscar()">limpar</button>
+      </form>
+      <div v-if="fila === 'chamados'" class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="tipo do chamado" data-chips-chamado>
+        <button
+          type="button"
+          class="rounded-full border px-2 py-0.5 transition-colors"
+          :class="!tipoChamado ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'"
+          :aria-pressed="!tipoChamado"
+          title="todos os chamados abertos dos sites"
+          data-tipo-chamado=""
+          @click="escolherTipo('')"
+        >Todos</button>
+        <button
+          v-for="t in TIPOS_CHAMADO"
+          :key="t.value"
+          type="button"
+          class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors"
+          :class="tipoChamado === t.value ? 'border-teal-600 bg-teal-500/15 text-teal-800 dark:text-teal-300' : 'text-muted-foreground hover:bg-muted'"
+          :aria-pressed="tipoChamado === t.value"
+          :title="contagensConversa ? `${t.hint} — ${contagensConversa.chamados_por_tipo?.[t.value] ?? 0} aberto(s)` : t.hint"
+          :data-tipo-chamado="t.value"
+          @click="escolherTipo(t.value)"
+        >
+          {{ t.label }}
+          <span
+            v-if="contagensConversa"
+            class="min-w-[16px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
+            :class="contagensConversa.chamados_por_tipo?.[t.value] ? 'bg-teal-600 text-white' : 'bg-muted text-muted-foreground'"
+          >{{ contagensConversa.chamados_por_tipo?.[t.value] ?? 0 }}</span>
+        </button>
+      </div>
+      <div v-if="fila === 'todas'" class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="abertas ou fechadas" data-chips-situacao>
+        <button
+          v-for="op in [{ v: false, label: 'Abertas', dica: 'as conversas de e-mail abertas (respondidas ou não)' }, { v: true, label: 'Fechadas', dica: 'as conversas de e-mail fechadas (resolvidas)' }]"
+          :key="op.label"
+          type="button"
+          class="rounded-full border px-2 py-0.5 transition-colors"
+          :class="fechadas === op.v ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'"
+          :aria-pressed="fechadas === op.v"
+          :title="op.dica"
+          :data-situacao="op.v ? 'fechadas' : 'abertas'"
+          @click="verFechadas(op.v)"
+        >{{ op.label }}</button>
+      </div>
+      <div v-if="carregando && !conversas.length" class="flex justify-center py-8"><Loader2 class="size-5 animate-spin" /></div>
+      <div v-else-if="!conversas.length" class="py-8 text-center text-xs text-muted-foreground">
+        {{ vazioDaConversa(fila, busca, fechadas) }}
+        <!-- a busca em "Todas as conversas" não achou nas abertas (ou nas fechadas): a outra metade é 1 clique -->
+        <button v-if="fila === 'todas' && busca" type="button" class="ml-1 underline hover:text-foreground" data-buscar-na-outra @click="verFechadas(!fechadas)">procurar nas {{ fechadas ? 'abertas' : 'fechadas' }}</button>
+      </div>
+      <ul v-else class="space-y-2">
+        <li v-for="c in conversas" :key="c.id" class="space-y-1 rounded-lg border p-2.5 text-xs" :data-conversa-email="c.id">
+          <div class="flex flex-wrap items-center gap-1.5">
+            <span v-if="c.email?.protocolo" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">{{ c.email.protocolo }}</span>
+            <span v-if="c.email?.tipo_rotulo" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">{{ c.email.tipo_rotulo }}</span>
+            <span class="text-muted-foreground">{{ [plataformaInfo(c.plataforma).curto, lojaDaConversa(c)].filter(Boolean).join(' ') }}</span>
+            <span v-if="prazoDe(c)" class="rounded px-1.5 py-px text-[11px]" :class="prazoDe(c)!.cls" :title="prazoDe(c)!.titulo">{{ prazoDe(c)!.texto }}</span>
+            <span v-else-if="c.aguardando_resposta" class="rounded bg-red-500/15 px-1.5 py-px text-[11px] text-red-700 dark:text-red-300">falta responder</span>
+            <span class="ml-auto text-muted-foreground">{{ fmtDataHora(c.ultima_mensagem_em) }}</span>
+          </div>
+          <div class="break-words font-medium">{{ c.comprador_nome || (c.pedido_marketplace ? `Pedido ${c.pedido_marketplace}` : 'Cliente') }}</div>
+          <div v-if="c.ultima_mensagem_resumo" class="line-clamp-2 break-words text-muted-foreground">{{ c.ultima_mensagem_resumo }}</div>
+          <div class="flex flex-wrap items-center gap-2 pt-1">
+            <button type="button" class="underline" data-abrir-conversa-email @click="emit('abrirConversa', c.id)">abrir a conversa</button>
+            <span v-if="c.email?.alias" class="ml-auto break-all text-muted-foreground">para {{ c.email.alias }}</span>
+          </div>
+        </li>
+      </ul>
+      <div v-if="proximo" class="flex justify-center">
+        <button type="button" class="rounded border px-3 py-1 text-xs hover:bg-muted disabled:opacity-50" :disabled="carregando" @click="carregar(true)">carregar mais</button>
+      </div>
     </template>
 
     <!-- as filas de e-mail -->

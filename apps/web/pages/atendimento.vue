@@ -18,7 +18,7 @@ import {
   type Modelo,
   type Resumo,
 } from '~/components/AtendimentoPlataforma.vue'
-import { tipoChamadoAtivo, type FiltrosLista } from '~/components/AtendimentoLista.vue'
+import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import { topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
@@ -64,6 +64,14 @@ definePageMeta({ middleware: ['atendimento'] })
 //   barra, no menu do topo e na aba, o motivo em cada linha e a faixa na
 //   conversa. Plataforma, loja e busca valem nas duas; a lista abre pelo
 //   prazo (a mais urgente primeiro). Respondeu, sai.
+// - E-MAIL SÓ NA ABA E-MAIL (13/10/2026) — o Eduardo: "vamos deixar o e-mail
+//   aparecer só na aba de e-mail; a do chat de atendimento aparece só no chat
+//   mesmo". A conversa de e-mail da ponte saiu da Caixa e da Caixa Humano
+//   (o servidor, `services/atendimento/separa_email.py`); ela abre AQUI, na
+//   aba E-mail (das Filas e das Caixas), com a barra "voltar aos e-mails" e o
+//   "vincular ao pedido" (AtendimentoEmailConversaBarra). Conversa de chat que
+//   chega à aba E-mail (um link de dentro da conversa) vai para a Caixa, e a
+//   de e-mail que chega à Caixa pelo id (`?conversa=`) vem para a aba E-mail.
 
 type Aba = 'caixa' | 'humano' | 'mail' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas'
 const ABAS: { value: Aba; label: string; icon: any }[] = [
@@ -97,10 +105,18 @@ const canSugerir = computed(() => auth.user?.atendimento === true)
 const agora = useRelogio()
 
 // `?tab=lojas` abre direto na aba; `?conversa=<id>` abre a conversa (é o link
-// que o alerta de prazo no Telegram manda).
+// que o alerta de prazo no Telegram manda) — com `?tab=mail`, a conversa de
+// e-mail na aba E-mail.
 const abaQuery = typeof route.query.tab === 'string' ? route.query.tab : ''
 const aba = ref<Aba>(ABAS.some((a) => a.value === abaQuery) ? (abaQuery as Aba) : 'caixa')
-const selecionada = ref<string | null>(typeof route.query.conversa === 'string' && route.query.conversa ? route.query.conversa : null)
+const conversaQuery = typeof route.query.conversa === 'string' && route.query.conversa ? route.query.conversa : null
+const selecionada = ref<string | null>(aba.value === 'mail' ? null : conversaQuery)
+// A conversa de E-MAIL aberta na aba E-mail (13/10/2026): nunca na Caixa.
+const emailConversa = ref<string | null>(aba.value === 'mail' ? conversaQuery : null)
+// A linha dela (o `mudou` da conversa): a barra decide o "vincular ao pedido".
+const emailConversaLinha = ref<ConversaResumo | null>(null)
+// Depois do vínculo na mesma conversa: relê do zero (a conversa remonta).
+const emailConversaVersao = ref(0)
 // A Caixa e a Caixa Humano usam as mesmas colunas, filtros e conversa aberta.
 const naCaixa = computed(() => aba.value === 'caixa' || aba.value === 'humano')
 const emHumano = computed(() => aba.value === 'humano')
@@ -115,11 +131,12 @@ function sincronizarUrl() {
   const query = { ...route.query }
   if (aba.value === 'caixa') delete query.tab
   else query.tab = aba.value
-  if (selecionada.value && naCaixa.value) query.conversa = selecionada.value
+  const aberta = naCaixa.value ? selecionada.value : aba.value === 'mail' ? emailConversa.value : null
+  if (aberta) query.conversa = aberta
   else delete query.conversa
   void router.replace({ query })
 }
-watch([aba, selecionada], sincronizarUrl)
+watch([aba, selecionada, emailConversa], sincronizarUrl)
 
 // ─── resumo (contadores, lojas, flags) ──────────────────────────────────────
 const resumo = ref<Resumo | null>(null)
@@ -130,6 +147,29 @@ async function carregarResumo() {
     resumoErro.value = null
   } catch (e: any) {
     resumoErro.value = erroDaApi(e, 'Não consegui carregar o resumo do atendimento').texto
+  }
+}
+
+// O número da aba E-mail (13/10/2026): o e-mail saiu da Caixa e da Caixa
+// Humano, e o que falta responder nele acende AQUI (e em E-mail › Filas) —
+// GET /api/atendimento/email/contagens, no escopo da equipe. É ajuda: sem
+// ele, a aba fica sem número. O número é o `aguardando` (o e-mail esperando
+// resposta: o chamado do site que espera já está nele — os `chamados` são os
+// ABERTOS, respondidos ou não, e não somam); quem só lê vê "Falta responder"
+// com essas mesmas conversas, do escopo dele. Relido junto com o /resumo
+// (o polling de 30 s, o "atualizar") e quando a conversa de e-mail muda.
+const emailContagens = ref<{ aguardando: number; chamados: number } | null>(null)
+const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
+// A seção da aba E-mail que a pessoa escolheu nesta visita (Caixas | Filas):
+// o AtendimentoMail monta de novo a cada vez que a aba abre e respeita a escolha.
+const emailSecao = ref<'' | 'mailboxes' | 'queues'>('')
+async function carregarContagensEmail() {
+  // Sem o /atendimento, sem as conversas de e-mail (a rota recusaria): não pergunta.
+  if (!canSugerir.value) return
+  try {
+    emailContagens.value = await api<{ aguardando: number; chamados: number }>('/api/atendimento/email/contagens')
+  } catch {
+    // só o número da aba
   }
 }
 
@@ -159,7 +199,7 @@ const semLer = computed(() => leiturasParadas(resumo.value))
 // ─── lista ──────────────────────────────────────────────────────────────────
 const FILTROS_KEY = 'davinci.atendimento.filtros'
 // Abre em "Todas", como o All do Duoke (01/10/2026); "Falta responder" é a aba ao lado.
-const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: filtroPadraoDa(aba.value), q: '', externo_ref: '', rede_social_id: '', tipo_chamado: '', plataforma_topo: '' })
+const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: filtroPadraoDa(aba.value), q: '', externo_ref: '', rede_social_id: '', plataforma_topo: '' })
 const itens = ref<ConversaResumo[]>([])
 const proximo = ref<string | null>(null)
 const carregando = ref(false)
@@ -187,9 +227,6 @@ function params(antesDe?: string | null) {
   if (f.externo_ref) p.set('externo_ref', f.externo_ref)
   if (f.rede_social_id) p.set('rede_social_id', f.rede_social_id)
   if (f.canal) p.set('canal', f.canal)
-  // O tipo do chamado (os chips do grupo Site, RF6): só no grupo Site inteiro.
-  const tipo = tipoChamadoAtivo(f)
-  if (tipo) p.set('tipo_chamado', tipo)
   p.set('filtro', f.filtro || 'todas')
   if (f.q) p.set('q', f.q)
   // A Caixa Humano: só o que falta responder e a IA não pode (o servidor decide).
@@ -276,6 +313,13 @@ async function carregarMais() {
 // contadores contam (aguardando, "a conferir"), o resumo também é relido —
 // senão o "A conferir (1)" ficava lá até 30 s depois de a pessoa marcar.
 function aoMudarConversa(c: ConversaResumo) {
+  // A conversa de e-mail que chegou à Caixa pelo id (um link antigo, o alerta):
+  // ela mora na aba E-mail (13/10/2026).
+  if (c.email && c.id === selecionada.value) {
+    selecionada.value = null
+    abrirConversaDoEmail(c.id)
+    return
+  }
   const i = itens.value.findIndex((x) => x.id === c.id)
   const antes = i >= 0 ? itens.value[i] : null
   if (i >= 0) itens.value[i] = { ...itens.value[i], ...c }
@@ -319,6 +363,8 @@ onMounted(async () => {
 // Registrada antes do primeiro await (os ganchos de ciclo de vida precisam do
 // componente ainda montando).
 const polling = usePollingVisivel(async () => {
+  // O número da aba E-mail, em qualquer aba (a aba E-mail se atualiza sozinha).
+  void carregarContagensEmail()
   // Na aba "Lojas e modo", só o resumo: a faixa e a marca das lojas sem ler
   // somem sozinhas quando a loja volta a ler.
   if (aba.value === 'lojas') return carregarResumo()
@@ -407,10 +453,10 @@ watch(aba, (a) => {
 })
 
 async function atualizarTudo() {
-  await Promise.all([carregarResumo(), carregarLista(), carregarModelos()])
+  await Promise.all([carregarResumo(), carregarLista(), carregarModelos(), carregarContagensEmail()])
 }
 
-await Promise.all([carregarResumo(), carregarLista(), carregarModelos()])
+await Promise.all([carregarResumo(), carregarLista(), carregarModelos(), carregarContagensEmail()])
 
 function selecionar(id: string) {
   selecionada.value = id
@@ -422,6 +468,39 @@ function abrirAba(a: string) {
 function abrirConversaNaCaixa(id: string) {
   aba.value = 'caixa'
   selecionar(id)
+}
+// A conversa de E-MAIL (das Filas, das Caixas, de um chamado agrupado): na aba
+// E-mail, nunca na Caixa do chat (13/10/2026).
+function abrirConversaDoEmail(id: string) {
+  aba.value = 'mail'
+  if (emailConversa.value !== id) emailConversaLinha.value = null
+  emailConversa.value = id
+}
+function fecharConversaDoEmail() {
+  emailConversa.value = null
+  emailConversaLinha.value = null
+  // Voltou aos e-mails: o número pode ter mudado (respondeu, fechou).
+  void carregarContagensEmail()
+}
+// A conversa aberta na aba E-mail mandou a linha dela: a de CHAT (um link de
+// dentro da conversa apontou o chat do comprador) vai para a Caixa.
+function aoMudarConversaDoEmail(c: ConversaResumo) {
+  if (c.id !== emailConversa.value) return
+  if (c.email === null) {
+    fecharConversaDoEmail()
+    abrirConversaNaCaixa(c.id)
+    return
+  }
+  const antes = emailConversaLinha.value
+  emailConversaLinha.value = c
+  // Respondeu, fechou, reabriu: o número da aba E-mail na hora.
+  if (antes && (!!antes.aguardando_resposta !== !!c.aguardando_resposta || antes.situacao !== c.situacao)) void carregarContagensEmail()
+}
+// Vinculou ao pedido: as mensagens podem ter ido para a conversa de e-mail do
+// pedido (outra); na mesma, relê do zero.
+function aoVincularConversaDoEmail(id: string) {
+  if (id && id !== emailConversa.value) abrirConversaDoEmail(id)
+  else emailConversaVersao.value++
 }
 
 // A Caixa ocupa a altura da janela para as colunas rolarem cada uma por si,
@@ -569,6 +648,14 @@ watch(selecionada, (id) => {
           :aria-label="tituloLeituraParada(semLer)"
           data-marca-leitura-parada
         >{{ semLer.length }}</span>
+        <!-- E-mail: quantos e-mails esperam resposta (o e-mail saiu da Caixa Humano, 13/10/2026) -->
+        <span
+          v-if="a.value === 'mail' && emailEsperando"
+          class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
+          :title="`${emailEsperando} e-mail(s) esperando resposta: em E-mail › Filas › Falta responder`"
+          :aria-label="`${emailEsperando} e-mail(s) esperando resposta`"
+          data-marca-email
+        >{{ emailEsperando > 99 ? '99+' : emailEsperando }}</span>
       </button>
     </div>
 
@@ -642,8 +729,47 @@ watch(selecionada, (id) => {
     </div>
 
     <AtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
-    <!-- E-mail: a Central (Caixas) e, para quem mexe, as Filas do e-mail das lojas (08/10/2026) -->
-    <AtendimentoMail v-if="aba === 'mail'" :is-admin="isAdmin" :can-operate="mexe" :stores="resumo?.lojas || []" @open-conversation="abrirConversaNaCaixa" />
+    <!-- E-mail: a Central (Caixas) e as Filas do e-mail das lojas (08/10/2026); a conversa de e-mail abre AQUI (13/10/2026) -->
+    <template v-if="aba === 'mail'">
+      <div v-if="emailConversa" class="space-y-2" data-conversa-de-email>
+        <AtendimentoEmailConversaBarra
+          :conversa="emailConversaLinha"
+          :pode-mexer="mexe"
+          @voltar="fecharConversaDoEmail"
+          @vinculado="aoVincularConversaDoEmail"
+        />
+        <div class="flex min-h-[520px] overflow-hidden rounded-lg border bg-card" style="height: calc(100dvh - 15rem)">
+          <section class="flex min-h-0 min-w-0 flex-1">
+            <AtendimentoConversa
+              :key="`${emailConversa}:${emailConversaVersao}`"
+              :conversa-id="emailConversa"
+              :can-edit="canEdit"
+              :can-sugerir="canSugerir"
+              :modelos="modelos"
+              :flags="resumo?.flags || null"
+              :meu-id="auth.user?.id || null"
+              :lojas="resumo?.lojas || []"
+              :ativa="aba === 'mail'"
+              @mudou="aoMudarConversaDoEmail"
+              @voltar="fecharConversaDoEmail"
+              @abrir-aba="abrirAba"
+              @abrir-conversa="abrirConversaDoEmail"
+            />
+          </section>
+        </div>
+      </div>
+      <AtendimentoMail
+        v-show="!emailConversa"
+        :is-admin="isAdmin"
+        :can-operate="mexe"
+        :can-view="canSugerir"
+        :stores="resumo?.lojas || []"
+        :waiting="emailEsperando"
+        :paused="!!emailConversa"
+        v-model:remembered-section="emailSecao"
+        @open-conversation="abrirConversaDoEmail"
+      />
+    </template>
     <AtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" />
     <AtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete" @mudou="(l: Modelo[]) => (modelos = l)" />
     <AtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" />

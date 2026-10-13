@@ -58,10 +58,9 @@ export type ResumoPlataforma = {
   vencidas: number
   a_conferir?: number
   etiquetas?: ContagemEtiquetas
-  // O filtro "E-mail sem vínculo" (RF5) e, só no site, os chamados abertos
-  // por tipo — sac, atacado, duvidas (RF6, os chips do grupo Site).
-  email_sem_vinculo?: number
-  chamados?: Record<string, number>
+  // (13/10/2026: o "E-mail sem vínculo" e os chamados dos sites saíram do
+  // /resumo com o e-mail — os números deles vêm de GET /api/atendimento/
+  // email/contagens, na aba E-mail.)
   // Na Caixa Humano (09/10/2026): falta responder e a IA não pode. A API
   // antiga não manda (a aba fica sem número).
   humano?: number
@@ -96,8 +95,6 @@ export type ResumoLoja = {
   status_canal?: string | null
   status_motivo?: string | null
   etiquetas?: ContagemEtiquetas
-  // O "E-mail sem vínculo" da loja (RF5).
-  email_sem_vinculo?: number
   // Na Caixa Humano (ver ResumoPlataforma).
   humano?: number
 }
@@ -109,8 +106,6 @@ export type Resumo = {
   a_conferir?: number
   // Total por etiqueta (somando as plataformas).
   etiquetas?: ContagemEtiquetas
-  // O "E-mail sem vínculo" somando as plataformas (RF5).
-  email_sem_vinculo?: number
   // A Caixa Humano somando as plataformas: o número da aba (09/10/2026).
   humano?: number
   // Lojas sem ler além do limite (05/10/2026): a faixa da Caixa e a marca
@@ -193,6 +188,19 @@ export type ConversaResumo = {
   // Caixa (o chip da linha) e no detalhe (a faixa da conversa). A API antiga
   // não manda.
   humano?: HumanoConversa | null
+  // Só na conversa de E-MAIL da ponte (a lista da aba E-mail, `?caixa=email`,
+  // 13/10/2026): o chamado do site e a caixa da loja. null nas outras.
+  email?: EmailDaLinha | null
+}
+// O `email` da linha (EmailResumoOut do backend): do `dados.mail` da
+// conversa, sem texto. `tipo` = sac | atacado | duvidas (o chamado do site).
+export type EmailDaLinha = {
+  protocolo: string | null
+  tipo: string | null
+  tipo_rotulo: string | null
+  marca: string | null
+  alias: string | null
+  destaque: boolean
 }
 // Por que a conversa está na Caixa Humano (HumanoOut do backend): os códigos
 // (`constantes.ORDEM_HUMANO`, do mais importante para o menos), como a tela
@@ -1672,6 +1680,12 @@ export const ERROS: Record<string, string> = {
   avaliacao_de_outra_pessoa: 'Esta sugestão já foi avaliada por outra pessoa — a nota dela fica.',
   conversa_nao_encontrada: 'Conversa não encontrada (pode ter sido apagada).',
   not_found: 'Não encontrado.',
+  // O "vincular ao pedido" da conversa de e-mail (aba E-mail, 13/10/2026).
+  pedido_vazio: 'Escreva o número do pedido na plataforma.',
+  conversa_ja_tem_pedido: 'Esta conversa de e-mail já está ligada a outro pedido.',
+  nao_e_conversa_de_email: 'Esta conversa não é de e-mail da ponte.',
+  conversa_sem_email: 'Esta conversa não tem e-mail para vincular.',
+  caixa_invalida: 'Caixa desconhecida.',
 }
 // Códigos em que a frase do backend traz o específico do caso: o porquê do
 // bloqueio; quem respondeu e a que horas (conversa_mudou).

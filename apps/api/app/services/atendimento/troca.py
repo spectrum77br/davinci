@@ -111,7 +111,7 @@ from app.models import (
     User,
     UserRole,
 )
-from app.services.atendimento import etiqueta_fatos, troca_sugestoes
+from app.services.atendimento import etiqueta_fatos, separa_email, troca_sugestoes
 from app.services.atendimento.ag_cancelamento import (
     NF_RESTRICAO,
     NF_SEM_ESTOQUE,
@@ -417,7 +417,16 @@ def conferir_chaves(numero: str, *, automatica: bool = False) -> None:
 
 
 async def _carregar(session: AsyncSession, numero: str, conversa_id: UUID | None = None) -> _Pedido:
-    """O pedido do espelho, o motivo do 83955, a loja, a conversa e a marca da NF."""
+    """O pedido do espelho, o motivo do 83955, a loja, a conversa e a marca da NF.
+
+    A conversa é a da CAIXA (o chat do pedido): a principal, ou a escolhida.
+    A conversa de E-MAIL da ponte (`separa_email`, 13/10/2026) nunca é a da
+    troca — sem o retrato `dados.pedido_mkt`, o motivo perderia o IN_CANCEL/
+    CANCELLED (o comprador pediu: troca recusada) e viraria falta de estoque;
+    as falas dela são e-mails (o aviso da plataforma), não o aceite no chat.
+    Escolhida pela tela (o painel da conversa de e-mail), vale a do chat (ou
+    nenhuma).
+    """
     linhas = (
         await session.execute(
             select(
@@ -456,12 +465,15 @@ async def _carregar(session: AsyncSession, numero: str, conversa_id: UUID | None
         else:
             atual["quantidade"] += int(r.item_quantidade or 1)
     primeira = linhas[0]
-    conversas = await etiqueta_fatos.conversas_do_pedido_bling(session, numero)
-    conversa = conversas[0] if conversas else None
+    conversas = await etiqueta_fatos.conversas_do_pedido_bling(session, numero, com_email=True)
+    da_caixa = [c for c in conversas if not separa_email.e_conversa_de_email(c)]
+    conversa = da_caixa[0] if da_caixa else None
     if conversa_id is not None:
-        conversa = next((c for c in conversas if c.id == conversa_id), None)
-        if conversa is None:
+        escolhida = next((c for c in conversas if c.id == conversa_id), None)
+        if escolhida is None:
             raise TrocaRecusada("conversa_de_outro_pedido", status=422)
+        if not separa_email.e_conversa_de_email(escolhida):
+            conversa = escolhida
     pedido = await etiqueta_fatos.pedido_bling(session, numero)
     motivo = classificar(
         pedido, status_plataforma=status_na_plataforma(conversa.dados) if conversa else None

@@ -529,9 +529,12 @@ async def test_outra_loja_nunca_ve_nada_do_pedido(db, client, admin):
     assert _conversas(corpo) == {str(n.x_comprador.id)}
 
 
-async def test_email_e_zap_do_pedido_e_do_comprador(db, client, admin):
-    """O contrato com o outro dev: e-mail do Tuta e Zap entram pelo nº do pedido
-    ou pelo id do comprador NA PLATAFORMA (`dados.comprador_plataforma`)."""
+async def test_zap_do_pedido_e_do_comprador_e_o_email_sozinho(db, client, admin):
+    """O contrato com o outro dev: o Zap entra pelo nº do pedido ou pelo id do
+    comprador NA PLATAFORMA (`dados.comprador_plataforma`). O e-mail do Tuta,
+    desde 13/10/2026, NUNCA entra nas abas do chat (o dono: "o e-mail aparece
+    só na aba de e-mail; a do chat aparece só no chat") — e aberto (na aba
+    E-mail) fica sozinho."""
     n = await _cenario_ml(db, admin)
     email = await _conversa(
         db, n.loja, "ml", "email", "msgid-1", comprador_id="fulano@exemplo.com",
@@ -555,32 +558,26 @@ async def test_email_e_zap_do_pedido_e_do_comprador(db, client, admin):
 
     corpo = await _abas(client, n.pack.id)
     assert [a["chave"] for a in corpo["abas"]] == [
-        "pre_venda", "pos_venda", "reclamacao", "mediador", "email", "zap", "avaliacao",
+        "pre_venda", "pos_venda", "reclamacao", "mediador", "zap", "avaliacao",
     ]  # fmt: skip
-    assert [m["id"] for m in _aba(corpo, "email")["mensagens"]] == email_msgs
+    assert not _ids(corpo) & set(email_msgs), "o e-mail não aparece no chat"
+    assert str(email.id) not in _conversas(corpo)
     assert [m["id"] for m in _aba(corpo, "zap")["mensagens"]] == zap_msgs
     assert _aba(corpo, "zap")["responde"]["conversa_id"] == str(zap.id)
-    assert _aba(corpo, "email")["responde"]["canal_rotulo"] == "E-mail"
     assert not _ids(corpo) & set(zap_outro_msgs)
 
-    # Aberto pelo e-mail (só o contato, sem o id da plataforma): o comprador
-    # é o do pedido — mas aqui o pedido diz DOIS (o 222 torto e o Zap dele).
-    # Sem saber quem é, ninguém com id da plataforma entra.
-    corpo = await _abas(client, email.id)
-    assert corpo["aba_da_conversa"] == "email"
-    assert _conversas(corpo) == {str(email.id)}
-    # Sem o dado torto, o pedido diz um comprador só: as abas dele.
-    await db.delete(n.x_comprador)
-    await db.delete(zap_outro)
-    await db.commit()
-    corpo = await _abas(client, email.id)
-    assert [a["chave"] for a in corpo["abas"]] == [
-        "pre_venda", "pos_venda", "reclamacao", "mediador", "email", "zap", "avaliacao",
-    ]  # fmt: skip
-    assert {m["id"] for m in _aba(corpo, "pre_venda")["mensagens"]} == set(n.p1_msgs + n.p5_msgs)
-    assert [m["id"] for m in _aba(corpo, "zap")["mensagens"]] == zap_msgs
-    assert _aba(corpo, "email")["mensagens"] == []  # a aberta: vem no detalhe
-    assert not _ids(corpo) & set(n.p4_msgs + n.x_loja_msgs)
+    # Aberto pelo e-mail (na aba E-mail): sozinho — nem o chat, nem o Zap do
+    # pedido; mesmo com o pedido dizendo um comprador só (sem o dado torto).
+    for limpar in (False, True):
+        if limpar:
+            await db.delete(n.x_comprador)
+            await db.delete(zap_outro)
+            await db.commit()
+        corpo = await _abas(client, email.id)
+        assert corpo["aba_da_conversa"] == "email"
+        assert [a["chave"] for a in corpo["abas"]] == ["email"]
+        assert _conversas(corpo) == {str(email.id)}
+        assert _aba(corpo, "email")["mensagens"] == []  # a aberta: vem no detalhe
 
     # Aberto pelo Zap sem venda ligada: só ele (a venda entra pelo nº, quando
     # for transferido para uma venda — RF10).
@@ -591,7 +588,9 @@ async def test_email_e_zap_do_pedido_e_do_comprador(db, client, admin):
 
 async def test_email_de_aviso_nunca_junta_compradores(db, client, admin):
     """O mesmo remetente de AVISO (o noreply da plataforma) em e-mails do Tuta
-    de compradores diferentes: o remetente não é o comprador — nunca junta."""
+    de compradores diferentes: nunca junta — e, desde 13/10/2026, o e-mail do
+    Tuta não entra em família nenhuma (cada conversa de e-mail é sozinha, e o
+    chat do pedido não mostra e-mail)."""
     n = await _cenario_ml(db, admin)
     await db.delete(n.x_comprador)  # sem o dado torto: o pedido diz um comprador só
     noreply = "noreply@mercadolivre.com"
@@ -618,13 +617,12 @@ async def test_email_de_aviso_nunca_junta_compradores(db, client, admin):
     e4_msgs = await _msgs(db, e4, ("cliente", T0 - timedelta(hours=2), "OUTRO AVISO GERAL"))
     await db.commit()
 
-    for aberta in (e1.id, n.pack.id):
-        corpo = await _abas(client, aberta)
-        assert not _ids(corpo) & set(e2_msgs + e3_msgs), aberta
-        assert not _conversas(corpo) & {str(e2.id), str(e3.id)}, aberta
-        email = _aba(corpo, "email")
-        assert email["responde"]["conversa_id"] == str(e1.id)
-    assert [m["id"] for m in _aba(await _abas(client, n.pack.id), "email")["mensagens"]] == e1_msgs
+    corpo = await _abas(client, e1.id)
+    assert _conversas(corpo) == {str(e1.id)}
+    assert _aba(corpo, "email")["responde"]["conversa_id"] == str(e1.id)
+    corpo = await _abas(client, n.pack.id)
+    assert "email" not in [a["chave"] for a in corpo["abas"]]
+    assert not _ids(corpo) & set(e1_msgs + e2_msgs + e3_msgs + e4_msgs)
     # Aberto pelo aviso sem pedido: só ele — o outro aviso do mesmo remetente
     # (sem pedido também) não é "o mesmo comprador".
     corpo = await _abas(client, e3.id)
@@ -632,10 +630,10 @@ async def test_email_de_aviso_nunca_junta_compradores(db, client, admin):
     assert not _ids(corpo) & set(e1_msgs + e2_msgs + e4_msgs)
 
 
-async def test_contato_so_junta_o_sem_vinculo(db, client, admin):
-    """O MESMO endereço (de verdade, não de aviso): o e-mail de OUTRO pedido é de
-    outra compra; o sem pedido não entra nas abas de um pedido — e, aberto,
-    mostra os outros sem vínculo do mesmo endereço."""
+async def test_email_do_mesmo_contato_fica_sozinho(db, client, admin):
+    """O MESMO endereço (de verdade, não de aviso): desde 13/10/2026 cada
+    conversa de e-mail do Tuta é sozinha nas abas (ela mora na aba E-mail) —
+    nem a de outro pedido, nem a sem pedido do mesmo endereço entram."""
     n = await _cenario_ml(db, admin)
     fulano = "fulano@exemplo.com"
     e1 = await _conversa(
@@ -660,11 +658,9 @@ async def test_contato_so_junta_o_sem_vinculo(db, client, admin):
     corpo = await _abas(client, e1.id)
     assert not _ids(corpo) & set(e2_msgs + e3_msgs + e4_msgs)
     assert _aba(corpo, "email")["responde"]["conversa_id"] == str(e1.id)
-    # O sem vínculo, aberto: os outros sem vínculo do mesmo endereço — nunca
-    # os de um pedido.
     corpo = await _abas(client, e3.id)
-    assert _conversas(corpo) == {str(e3.id), str(e4.id)}
-    assert [m["id"] for m in _aba(corpo, "email")["mensagens"]] == e4_msgs
+    assert _conversas(corpo) == {str(e3.id)}
+    assert not _ids(corpo) & set(e2_msgs + e4_msgs)
 
 
 async def test_zap_de_outra_compra_do_mesmo_comprador_nao_entra(db, client, admin):
@@ -687,9 +683,11 @@ async def test_zap_de_outra_compra_do_mesmo_comprador_nao_entra(db, client, admi
 
 
 async def test_amazon_e_tuta_na_mesma_venda(db, client, admin):
-    """Amazon: o e-mail DA AMAZON é o pós-venda da plataforma (aba Pós-venda); o
-    e-mail do Tuta da mesma venda (`dados.fonte = 'tuta'`) entra na aba E-mail
-    pelo nº. O e-mail da Amazon de OUTRO pedido do mesmo comprador, nunca."""
+    """Amazon: o e-mail DA AMAZON (o Gmail) é o pós-venda da plataforma (aba
+    Pós-venda) — é o CHAT da Amazon. O e-mail do Tuta da mesma venda
+    (`dados.fonte = 'tuta'`), desde 13/10/2026, não entra nas abas do chat: ele
+    mora na aba E-mail, sozinho. O e-mail da Amazon de OUTRO pedido do mesmo
+    comprador, nunca."""
     a = await _loja(db, admin, IntegrationPlatform.AMAZON, "kfa")
     pedido = "701-1111111-1111111"
     amz = await _conversa(
@@ -721,22 +719,18 @@ async def test_amazon_e_tuta_na_mesma_venda(db, client, admin):
 
     corpo = await _abas(client, amz.id)
     assert corpo["aba_da_conversa"] == "pos_venda"
-    assert [a["chave"] for a in corpo["abas"]] == ["pos_venda", "email"]
+    assert [a["chave"] for a in corpo["abas"]] == ["pos_venda"]
     pos = _aba(corpo, "pos_venda")
     assert [m["id"] for m in pos["mensagens"]] == sem_msgs  # as da aberta vêm no detalhe
     assert {c["canal_rotulo"] for c in pos["conversas"]} == {abas.ROTULO_EMAIL_AMAZON}
-    email = _aba(corpo, "email")
-    assert [m["id"] for m in email["mensagens"]] == tuta_msgs
-    assert email["responde"]["conversa_id"] == str(tuta.id)
-    assert email["responde"]["canal_rotulo"] == "E-mail"
-    assert not _ids(corpo) & set(outro_msgs + sem_marca_msgs)
+    assert not _ids(corpo) & set(outro_msgs + sem_marca_msgs + tuta_msgs)
 
-    # Aberto pelo Tuta: a aba dele é E-mail; a Amazon, Pós-venda.
+    # Aberto pelo Tuta (na aba E-mail): sozinho — a Amazon é o chat.
     corpo = await _abas(client, tuta.id)
     assert corpo["aba_da_conversa"] == "email"
-    assert {m["id"] for m in _aba(corpo, "pos_venda")["mensagens"]} == set(amz_msgs + sem_msgs)
-    assert _aba(corpo, "pos_venda")["responde"]["conversa_id"] == str(amz.id)
-    assert not _ids(corpo) & set(outro_msgs + sem_marca_msgs)
+    assert [a["chave"] for a in corpo["abas"]] == ["email"]
+    assert _conversas(corpo) == {str(tuta.id)}
+    assert not _ids(corpo) & set(amz_msgs + sem_msgs + outro_msgs + sem_marca_msgs)
 
 
 # ─────────────── Shopee ───────────────

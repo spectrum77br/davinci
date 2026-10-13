@@ -26,7 +26,12 @@ AS TRAVAS DA OFERTA vêm antes das do envio (nada sai; 409 `{code, detail}`):
       v1), `nf_emitida`, `em_fila_nf`, `etiqueta_gerada`, `rastreio`,
       `pedido_saiu`, `pedido_em_dobro`, `prazo_vencido`;
   sem_conversa — o pedido não tem conversa no DaVinci (abrir a conversa
-      pelo DaVinci fica fora da 4d);
+      pelo DaVinci fica fora da 4d); a conversa de E-MAIL da ponte não conta
+      (`separa_email`, 13/10/2026: o pedido só com ela não tem conversa);
+  conversa_de_email — a conversa escolhida (a do painel aberto na aba
+      E-mail) é a de e-mail da ponte: a resposta dela iria por e-mail ao
+      remetente do aviso da plataforma, não ao comprador. A oferta sai só
+      pelo chat do pedido;
   conversa_mudou — chegou mensagem (do CLIENTE ou da loja) depois da última
       que a tela tinha (`ultima_vista_id` = o `oferta_envio.
       ultima_mensagem_id`; sem ele, a marca da falta de estoque): o cliente
@@ -70,7 +75,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import AtendimentoConversa, AtendimentoMensagem, User
-from app.services.atendimento import enviar, etiqueta_fatos, gravar, troca, troca_sugestoes
+from app.services.atendimento import (
+    enviar,
+    etiqueta_fatos,
+    gravar,
+    separa_email,
+    troca,
+    troca_sugestoes,
+)
 from app.services.atendimento.ag_cancelamento import SEM_ESTOQUE
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
@@ -87,6 +99,7 @@ logger = structlog.get_logger()
 
 # ── Códigos de recusa (estáveis: a tela traduz) ───────────────────────────
 SEM_CONVERSA = "sem_conversa"
+CONVERSA_DE_EMAIL = "conversa_de_email"
 CANAL_NAO_ENVIA = "canal_nao_envia"
 SO_LEITURA = troca.SO_LEITURA
 # O mesmo código do `enviar` (a tela já trata o "enviar mesmo assim").
@@ -98,6 +111,10 @@ _CODIGO_DO_ENVIO = {enviar.RECUSA_CANAL_EM_OBSERVACAO: CANAL_NAO_ENVIA}
 TEXTOS = {
     SEM_CONVERSA: (
         "O pedido não tem conversa no DaVinci: mande a oferta pelo Duoke ou pela plataforma."
+    ),
+    CONVERSA_DE_EMAIL: (
+        "A oferta sai pelo chat do pedido, não pelo e-mail: abra a conversa do pedido na Caixa "
+        "(ou mande pelo Duoke ou pela plataforma)."
     ),
     SO_LEITURA: (
         "Só leitura por enquanto: a oferta sai por quem cuida do Atendimento e mexe na Margem."
@@ -228,7 +245,9 @@ async def _conversa(
     conversa_id: UUID | None,
     integracoes: Collection[UUID] | None,
 ) -> AtendimentoConversa | None:
-    """A conversa do pedido DENTRO do escopo da equipe (a escolhida, ou a 1ª visível)."""
+    """A conversa do pedido DENTRO do escopo da equipe (a escolhida, ou a 1ª visível).
+
+    Só as da Caixa (`conversas_do_pedido_bling`): a de e-mail da ponte nunca."""
     if carregada is None or _visivel(carregada, integracoes):
         return carregada
     if conversa_id is not None:
@@ -425,11 +444,19 @@ async def enviar_oferta(
     # O que a troca recusaria com certeza vem antes da conversa: sem a troca,
     # nem pelo Duoke se oferece.
     await _conferir_pedido(session, p)
+    # A escolhida é a conversa de e-mail (o painel dela, na aba E-mail): a troca
+    # segue com o chat (`troca._carregar`), mas a oferta não sai por uma
+    # conversa que a pessoa não estava vendo — recusa.
+    escolhida = await session.get(AtendimentoConversa, conversa_id) if conversa_id else None
+    if escolhida is not None and separa_email.e_conversa_de_email(escolhida):
+        raise OfertaRecusada(CONVERSA_DE_EMAIL)
     conversa = await _conversa(
         session, numero, p.conversa, conversa_id=conversa_id, integracoes=integracoes
     )
     if conversa is None:
         raise OfertaRecusada(SEM_CONVERSA)
+    if separa_email.e_conversa_de_email(conversa):
+        raise OfertaRecusada(CONVERSA_DE_EMAIL)
     if not confirmar:
         marcada_em = p.pedido.nf_marcada_em if p.pedido is not None else None
         if marcada_em is not None and marcada_em.tzinfo is None:
@@ -538,6 +565,9 @@ async def situacao_da_oferta(
         return _indisponivel(str(falha["code"]), falha["texto"])
     if conversa is None:
         return _indisponivel(SEM_CONVERSA, TEXTOS[SEM_CONVERSA])
+    if separa_email.e_conversa_de_email(conversa):
+        # O painel da conversa de e-mail (aba E-mail): a oferta não sai por ela.
+        return _indisponivel(CONVERSA_DE_EMAIL, TEXTOS[CONVERSA_DE_EMAIL])
     recusa = await enviar.motivo_para_nao_enviar(session, conversa, origem=ORIGEM_HUMANO)
     if recusa is not None:
         return _indisponivel(_CODIGO_DO_ENVIO.get(recusa.code, recusa.code), recusa.detail)

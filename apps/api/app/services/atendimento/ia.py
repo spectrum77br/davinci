@@ -206,7 +206,7 @@ from app.models import (
 from app.redis_client import redis
 from app.services import dm_ia
 from app.services.atendimento import contexto as contexto_svc
-from app.services.atendimento import gravar, validador
+from app.services.atendimento import gravar, separa_email, validador
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.ag_cancelamento import TEXTOS_IA
 from app.services.atendimento.constantes import (
@@ -1352,8 +1352,11 @@ async def _mensagens_recentes(
 
     Resposta da loja que FALHOU não entra: não chegou ao cliente, e o
     modelo leria como se a loja já tivesse dito aquilo. A NOTA INTERNA
-    também não (só a equipe vê; nunca vira fala na transcrição).
+    também não (só a equipe vê; nunca vira fala na transcrição). Nem o
+    e-mail que a ponte gravou numa conversa de chat (até 13/10/2026): o
+    chat não mostra e-mail (`separa_email`).
     """
+    visivel = separa_email.mensagem_visivel_sql(conversa)
     linhas = (
         (
             await session.execute(
@@ -1362,6 +1365,7 @@ async def _mensagens_recentes(
                     AtendimentoMensagem.conversa_id == conversa.id,
                     AtendimentoMensagem.status != MSG_FALHOU,
                     AtendimentoMensagem.origem != ORIGEM_NOTA,
+                    *([visivel] if visivel is not None else []),
                 )
                 .order_by(_momento_col().desc(), AtendimentoMensagem.created_at.desc())
                 .limit(MAX_TROCAS)

@@ -877,6 +877,9 @@ def linhas_da_caixa(mailbox_id: UUID):
             col["chave"].label("chave"),
             col["fonte"].label("fonte"),
             m.estado.label("estado"),
+            # A conversa da ponte (13/10/2026: o e-mail da Caixas abre a
+            # conversa de e-mail dele, na aba E-mail — nunca na Caixa do chat).
+            m.conversa_id.label("conversa_id"),
         )
         .select_from(i)
         .outerjoin(m, m.message_id == i.message_id)

@@ -8,6 +8,13 @@ números por plataforma e por loja. RF5: o nome da caixa nas Pastas (a tela
 Pastas e regras agrupa por caixa). RF1 ④: o resumo "E-mails da venda" (caixa
 → loja, pasta, quantos) da conversa e da família dela.
 
+13/10/2026 (o dono: "o e-mail aparece só na aba de e-mail; a do chat aparece
+só no chat"): os chips do tipo e o "E-mail sem vínculo" saíram da Caixa — a
+lista é a mesma rota com `?caixa=email` (a aba E-mail), os números saíram do
+/resumo para GET /api/atendimento/email/contagens, e o "E-mails da venda" é só
+da conversa de e-mail (o aviso da plataforma não entra mais no chat) — no chat,
+só quantos e o id da conversa de e-mail (o link para a aba E-mail).
+
 Postgres local de verdade (o mundo `cena` da ponte); nunca conta do Tuta.
 """
 
@@ -71,32 +78,41 @@ async def test_w1_tipo_do_chamado_filtra_a_lista_e_conta_no_resumo(db, cena, cli
     await entrar(db, cena.geral, pasta="mensagens ml")
     await rodar(db)
 
+    # Na Caixa (o chat), nunca: o chamado é e-mail (13/10/2026).
     r = await client.get(f"{API}/conversas", params={"plataforma": "site", "tipo_chamado": "sac"})
+    assert _ids(r) == []
+    email = {"caixa": "email"}
+    r = await client.get(
+        f"{API}/conversas", params={**email, "plataforma": "site", "tipo_chamado": "sac"}
+    )
     assert _ids(r) == [str(c_sac)]
-    r = await client.get(f"{API}/conversas", params={"tipo_chamado": "duvidas"})
+    r = await client.get(f"{API}/conversas", params={**email, "tipo_chamado": "duvidas"})
     assert _ids(r) == [str(c_duv)], "sem plataforma, o tipo já é só do site"
     r = await client.get(
-        f"{API}/conversas", params={"plataforma": "site", "tipo_chamado": "atacado"}
+        f"{API}/conversas", params={**email, "plataforma": "site", "tipo_chamado": "atacado"}
     )
     assert _ids(r) == []
     # Junto de qualquer filtro (o chamado novo espera resposta).
     r = await client.get(
         f"{API}/conversas",
-        params={"plataforma": "site", "tipo_chamado": "SAC", "filtro": "aguardando"},
+        params={**email, "plataforma": "site", "tipo_chamado": "SAC", "filtro": "aguardando"},
     )
     assert _ids(r) == [str(c_sac)]
-    r = await client.get(f"{API}/conversas", params={"tipo_chamado": "outro"})
+    r = await client.get(f"{API}/conversas", params={**email, "tipo_chamado": "outro"})
     assert r.status_code == 422 and r.json()["detail"]["code"] == "tipo_chamado_invalido"
 
-    resumo = (await client.get(f"{API}/resumo")).json()
-    assert _plataforma(resumo, "site")["chamados"] == {"sac": 1, "atacado": 0, "duvidas": 1}
+    # Os números: da aba E-mail (o /resumo é da Caixa e não tem mais chamados).
+    contagens = (await client.get(f"{EMAIL}/contagens")).json()
+    assert contagens["chamados_por_tipo"] == {"sac": 1, "atacado": 0, "duvidas": 1}
+    assert contagens["chamados"] == 2
     # Fechado sai da conta (como as etiquetas).
     c = await conversa(db, c_duv)
     c.situacao = "fechada"
     await db.commit()
+    contagens = (await client.get(f"{EMAIL}/contagens")).json()
+    assert contagens["chamados_por_tipo"] == {"sac": 1, "atacado": 0, "duvidas": 0}
     resumo = (await client.get(f"{API}/resumo")).json()
-    assert _plataforma(resumo, "site")["chamados"] == {"sac": 1, "atacado": 0, "duvidas": 0}
-    assert _plataforma(resumo, "ml").get("chamados") == {}
+    assert all("chamados" not in p for p in resumo["plataformas"])
 
 
 # ─────────────── W2: o filtro "E-mail sem vínculo" ───────────────
@@ -125,40 +141,42 @@ async def test_w2_email_sem_vinculo_filtra_e_conta(db, cena, client, admin):
     )
     await db.commit()
 
+    # Na Caixa (o chat), nunca (13/10/2026); na lista do e-mail, o filtro vale.
     r = await client.get(f"{API}/conversas", params={"filtro": "email_sem_vinculo"})
+    assert _ids(r) == []
+    email = {"caixa": "email", "filtro": "email_sem_vinculo"}
+    r = await client.get(f"{API}/conversas", params=email)
     assert _ids(r) == [str(m_sem.conversa_id)]
-    r = await client.get(
-        f"{API}/conversas", params={"filtro": "email_sem_vinculo", "plataforma": "ml"}
-    )
+    r = await client.get(f"{API}/conversas", params={**email, "plataforma": "ml"})
     assert _ids(r) == [str(m_sem.conversa_id)]
-    r = await client.get(
-        f"{API}/conversas", params={"filtro": "email_sem_vinculo", "plataforma": "site"}
-    )
+    r = await client.get(f"{API}/conversas", params={**email, "plataforma": "site"})
     assert _ids(r) == [], "o chamado do site nunca é 'sem vínculo'"
     assert (await meta_de(db, chamado)).conversa_id is not None
 
+    # O /resumo é da Caixa: sem o número do e-mail (a fila "Sem vínculo" conta).
     resumo = (await client.get(f"{API}/resumo")).json()
-    assert resumo["email_sem_vinculo"] == 1
-    assert _plataforma(resumo, "ml")["email_sem_vinculo"] == 1
-    assert _plataforma(resumo, "site")["email_sem_vinculo"] == 0
-    loja = next(lj for lj in resumo["lojas"] if lj["integration_id"] == str(cena.ml.id))
-    assert loja["email_sem_vinculo"] == 1
+    assert "email_sem_vinculo" not in resumo
+    assert all("email_sem_vinculo" not in p for p in resumo["plataformas"])
+    assert all("email_sem_vinculo" not in lj for lj in resumo["lojas"])
 
-    # Vinculou ao pedido: sai do filtro e da conta.
+    # Vinculou ao pedido: sai do filtro.
     r = await client.post(f"{EMAIL}/emails/{sem}/vincular", json={"pedido": "2000012345678901"})
     assert r.status_code == 200, r.text
-    r = await client.get(f"{API}/conversas", params={"filtro": "email_sem_vinculo"})
+    r = await client.get(f"{API}/conversas", params=email)
     assert _ids(r) == []
-    assert (await client.get(f"{API}/resumo")).json()["email_sem_vinculo"] == 0
 
 
 async def test_w2_quem_so_le_ve_o_filtro_no_escopo(db, cena, client, make_user, auth_as):
     await entrar(db, cena.geral, pasta="mensagens ml")
     await rodar(db)
-    # Quem só lê (a fase de observação) usa o filtro como qualquer filtro da lista.
+    # Quem só lê (a fase de observação) usa o filtro como qualquer filtro da
+    # lista — na lista do e-mail (a aba E-mail), como via na Caixa até 13/10.
     auth_as(await make_user(role=UserRole.USER))
-    r = await client.get(f"{API}/conversas", params={"filtro": "email_sem_vinculo"})
+    r = await client.get(
+        f"{API}/conversas", params={"caixa": "email", "filtro": "email_sem_vinculo"}
+    )
     assert r.status_code == 200, r.text
+    assert len(r.json()["itens"]) == 1
 
 
 # ─────────────── W3: o nome da caixa nas pastas ───────────────
@@ -198,7 +216,8 @@ async def test_w4_emails_da_venda_resume_a_conversa_e_a_familia(db, cena, client
             assunto="Pedido 2000012345678901",
             corpo=corpo,
         )
-    # O aviso do ML com o pedido: na própria conversa da API.
+    # O aviso do ML com o pedido: desde 13/10/2026, na conversa de E-MAIL do
+    # pedido (nunca no chat).
     aviso = await entrar(
         db,
         cena.geral,
@@ -209,9 +228,10 @@ async def test_w4_emails_da_venda_resume_a_conversa_e_a_familia(db, cena, client
         corpo="O comprador mandou uma mensagem.",
     )
     await rodar(db)
-    assert (await meta_de(db, aviso)).conversa_id == pack.id
+    email = (await meta_de(db, aviso)).conversa_id
+    assert email != pack.id
 
-    r = await client.get(f"{EMAIL}/conversas/{pack.id}/emails-da-venda")
+    r = await client.get(f"{EMAIL}/conversas/{email}/emails-da-venda")
     assert r.status_code == 200, r.text
     assert r.headers["cache-control"] == "no-store"
     corpo = r.json()
@@ -228,19 +248,26 @@ async def test_w4_emails_da_venda_resume_a_conversa_e_a_familia(db, cena, client
     for proibido in ("quebrado", "novidade", "maria@gmail.com", "Pedido 2000012345678901"):
         assert proibido not in plano, proibido
 
-    # A conversa de e-mail vê a mesma venda.
-    email = (await meta_de(db, (await _um_email_da_conversa(db, pack.id)))).conversa_id
-    r = (await client.get(f"{EMAIL}/conversas/{email}/emails-da-venda")).json()
-    assert r["total"] == 3
-
-
-async def _um_email_da_conversa(db, pack_id: UUID) -> UUID:
-    """Um e-mail do cliente (o que NÃO está na conversa da API)."""
-    return await db.scalar(
-        select(MailMessageMeta.message_id).where(
-            MailMessageMeta.conversa_id != pack_id, MailMessageMeta.conversa_id.is_not(None)
-        )
+    # O chat do pedido não mostra e-mail (13/10/2026): só QUANTOS e o id da
+    # conversa de e-mail (o link para a aba E-mail) — nem caixa, nem pasta
+    # (tests/test_atendimento_separa_email_venda.py).
+    r = await client.get(f"{EMAIL}/conversas/{pack.id}/emails-da-venda")
+    assert r.json() == {
+        "total": 3,
+        "caixas": [],
+        "aguardando": 1,
+        "conversas": [{"id": str(email), "emails": 3, "aguardando": True}],
+    }
+    for proibido in ("quebrado", "novidade", "maria@gmail.com", "21max", "problema ml"):
+        assert proibido not in r.text, proibido
+    ligadas = set(
+        (
+            await db.execute(
+                select(MailMessageMeta.conversa_id).where(MailMessageMeta.conversa_id.is_not(None))
+            )
+        ).scalars()
     )
+    assert ligadas == {email}, "os três e-mails na conversa de e-mail do pedido"
 
 
 async def test_w4_sem_email_e_fora_do_escopo(db, cena, client, admin, make_user, auth_as):

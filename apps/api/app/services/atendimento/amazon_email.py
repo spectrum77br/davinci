@@ -124,7 +124,7 @@ from app.models import (
     StoreInfo,
 )
 from app.redis_client import redis
-from app.services.atendimento import gravar, lojas
+from app.services.atendimento import gravar, lojas, separa_email
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
@@ -1703,10 +1703,14 @@ async def _conversa_da_thread(
        comprador ou a nossa resposta) — a prova da thread;
     2. sem isso, a conversa mais recente do mesmo endereço de retransmissão,
        com movimento nos últimos 30 dias.
-    Sem nenhuma das duas, None (a conversa é `<endereço>|-`).
+    Sem nenhuma das duas, None (a conversa é `<endereço>|-`). Nunca a
+    conversa de e-mail da ponte (`separa_email`): ela também é `canal =
+    'email'` da Amazon, mas mora na aba E-mail — a fala do comprador é chat.
     """
     base = select(AtendimentoConversa).where(
-        AtendimentoConversa.plataforma == PLATAFORMA, AtendimentoConversa.canal == CANAL
+        AtendimentoConversa.plataforma == PLATAFORMA,
+        AtendimentoConversa.canal == CANAL,
+        separa_email.na_caixa_sql(),
     )
     if email_.referencias:
         achada = (
@@ -1960,6 +1964,9 @@ async def _conversa_da_confirmacao(
                     AtendimentoConversa.canal == CANAL,
                     AtendimentoConversa.integration_id == integ.id,
                     tem_pergunta,
+                    # A resposta do Seller Central é do chat, nunca da
+                    # conversa de e-mail da ponte (`separa_email`).
+                    separa_email.na_caixa_sql(),
                 )
                 .order_by(AtendimentoConversa.ultima_do_cliente_em.desc().nulls_last())
             )

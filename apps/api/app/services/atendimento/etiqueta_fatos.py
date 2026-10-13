@@ -56,7 +56,10 @@ COMO LIGAR CONVERSA → PEDIDO DO BLING (o mesmo caminho do painel do pedido,
   O CAMINHO INVERSO (pedido → conversa) é `conversas_do_pedido` /
   `conversa_do_pedido` (pelo nº na plataforma) e `conversas_do_pedido_bling`
   (pelo nº do Bling): o gancho do webhook do Bling e o cartão de Ag.
-  cancelamento (item 4) chegam à conversa que já existe por aqui.
+  cancelamento (item 4) chegam à conversa que já existe por aqui. A conversa
+  de E-MAIL da ponte (`separa_email`, 13/10/2026) vem por último, e a
+  principal (`conversa_do_pedido`) e as da troca (`conversas_do_pedido_bling`)
+  nunca são ela.
 
 O que JÁ é fonte (01/10/2026):
   • pré × pós-venda: a regra dos filtros da lista (`e_pos_venda`);
@@ -133,6 +136,7 @@ from app.models import (
     NfNota,
     StoreInfo,
 )
+from app.services.atendimento import separa_email
 from app.services.atendimento.ag_cancelamento import (
     MARCAS_DA_NF,
     ORIGEM_ROBO_MARGEM,  # noqa: F401 — reexportada
@@ -1064,7 +1068,14 @@ async def conversas_do_pedido(
     order e a conversa do pack de carrinho guarda o pack.
     `plataforma` aceita o nome do cadastro ('mercadolivre' = 'ml'); None =
     qualquer uma. Ordem: as conversas com o comprador antes da conversa da
-    reclamação, e dentro delas a de mensagem mais recente.
+    reclamação, e dentro delas a de mensagem mais recente. A conversa de
+    E-MAIL da ponte (`separa_email`, aba E-mail) vai por último de todas
+    (depois até da reclamação, que está na Caixa): desde 13/10/2026 o aviso
+    por e-mail das plataformas com API cai nela, com o pedido e um horário
+    mais novo que o do chat — e quem pega a primeira (Ag. cancelamento,
+    troca, oferta de troca, devolução) quer a conversa da Caixa. E quem
+    escolhe "a do pedido" nunca a escolhe, nem sem chat: `conversa_do_pedido`,
+    `conversas_do_pedido_bling` e `reclamacoes_devolucoes.e_com_o_comprador`.
     """
     chave = str(pedido_marketplace or "").strip()
     if not chave:
@@ -1084,6 +1095,8 @@ async def conversas_do_pedido(
     if plat:
         consulta = consulta.where(AtendimentoConversa.plataforma == plat)
     consulta = consulta.order_by(
+        # A conversa de e-mail (aba E-mail) depois de todas as da Caixa.
+        separa_email.conversa_de_email_sql().asc(),
         # As conversas com o comprador primeiro; as que nasceram de uma
         # reclamação ou de uma avaliação, depois.
         AtendimentoConversa.canal.in_((CANAL_RECLAMACAO, CANAL_AVALIACAO)).asc(),
@@ -1098,20 +1111,34 @@ async def conversa_do_pedido(
 ) -> AtendimentoConversa | None:
     """A conversa principal de um pedido — onde vai o cartão (Ag. cancelamento, reclamação).
 
-    None = o pedido não tem conversa (o item 4 cria a conversa interna).
+    None = o pedido não tem conversa (o item 4 cria a conversa interna). Nunca
+    a conversa de e-mail da ponte (`separa_email`): o pedido só com ela não
+    tem conversa da Caixa — e é None.
     """
     conversas = await conversas_do_pedido(session, plataforma, pedido_marketplace)
-    return conversas[0] if conversas else None
+    return next((c for c in conversas if not separa_email.e_conversa_de_email(c)), None)
 
 
 async def conversas_do_pedido_bling(
-    session: AsyncSession, numero_bling: str | None
+    session: AsyncSession, numero_bling: str | None, *, com_email: bool = False
 ) -> list[AtendimentoConversa]:
     """As conversas de um pedido pelo nº do BLING (o gancho do webhook de situação).
 
     Acha o nº na plataforma (`numeroloja`) e a plataforma da loja
     (`store_info.bling_store_id` → `platform`) no espelho; loja sem cadastro
     = procura em todas as plataformas.
+
+    SÓ AS DA CAIXA, a não ser com `com_email` (13/10/2026, `separa_email`):
+    quem chama é a troca — a lista Ag. cancelamento (o `conversa_id` e o
+    retrato `dados.pedido_mkt` que classifica o IN_CANCEL/CANCELLED), a
+    prévia/execução da troca (a classificação, o aceite do comprador) e a
+    oferta de troca (que SAI pela conversa). A conversa de e-mail da ponte
+    não tem o retrato, as falas dela são e-mails (o aviso da plataforma), não
+    o aceite do comprador no chat, e a resposta iria por e-mail ao remetente:
+    o pedido só com ela é o pedido SEM conversa (sem oferta pelo DaVinci; a
+    troca segue sem conversa).
+    `com_email` = a de e-mail também (por último) — a troca a reconhece quando
+    a tela a manda como a escolhida (`troca._carregar`).
     """
     numero = str(numero_bling or "").strip()
     if not numero:
@@ -1131,4 +1158,7 @@ async def conversas_do_pedido_bling(
         plataforma = await session.scalar(
             select(StoreInfo.platform).where(StoreInfo.bling_store_id == str(linha.loja)).limit(1)
         )
-    return await conversas_do_pedido(session, plataforma, linha.numeroloja)
+    conversas = await conversas_do_pedido(session, plataforma, linha.numeroloja)
+    if com_email:
+        return conversas
+    return [c for c in conversas if not separa_email.e_conversa_de_email(c)]

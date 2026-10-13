@@ -715,7 +715,11 @@ async def test_remetente_que_imita_a_plataforma_e_suspeito_e_nao_liga_ao_pedido(
 # ─────────────── aviso da plataforma com API ───────────────
 
 
-async def test_aviso_do_ml_vai_para_a_conversa_da_api_sem_pendencia(db, cena):
+async def test_aviso_do_ml_fica_na_conversa_de_email_nunca_no_chat(db, cena):
+    """13/10/2026 (o dono: "o e-mail aparece só na aba de e-mail; a do chat
+    aparece só no chat"): o aviso da plataforma com API NÃO entra mais na
+    conversa de chat do pedido — vai para a conversa de e-mail da loja, ligada
+    ao pedido e sem pendência; o chat fica intacto."""
     api = AtendimentoConversa(
         integration_id=cena.ml.id,
         plataforma="ml",
@@ -738,13 +742,27 @@ async def test_aviso_do_ml_vai_para_a_conversa_da_api_sem_pendencia(db, cena):
     )
     await rodar(db)
     m = await meta_de(db, mid)
-    assert (m.estado, m.vinculado_por, m.conversa_id) == ("gravado", "aviso_api", api.id)
+    assert (m.estado, m.vinculado_por) == ("gravado", "pedido")
+    assert m.conversa_id is not None and m.conversa_id != api.id
+    # A conversa de E-MAIL da loja (a da ponte), com o pedido e sem pendência.
+    email = await conversa(db, m.conversa_id)
+    assert (email.canal, email.dados["fonte"], email.integration_id) == (
+        "email",
+        "tuta",
+        cena.ml.id,
+    )
+    assert email.pedido_marketplace == "2000012345678901"
+    assert email.aguardando_resposta is False and email.sem_resposta_necessaria is True
+    msg = (await mensagens(db, email.id))[-1]
+    assert msg.autor == "sistema" and "aviso_api" not in msg.payload["mail"]
+    # O CHAT do pedido não ganhou nada: nem mensagem, nem prévia, nem fila.
+    assert await mensagens(db, api.id) == []
     c = await conversa(db, api.id)
-    assert c.aguardando_resposta is False
-    msg = (await mensagens(db, api.id))[-1]
-    assert msg.autor == "sistema" and msg.payload["mail"]["aviso_api"] is True
-    # Nenhuma conversa de e-mail nova.
-    assert await db.scalar(select(func.count()).where(AtendimentoConversa.canal == "email")) == 0
+    assert (c.ultima_mensagem_em, c.ultima_mensagem_resumo, c.aguardando_resposta) == (
+        None,
+        None,
+        False,
+    )
 
 
 # ─────────────── RF6: chamados dos sites ───────────────

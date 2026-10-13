@@ -204,8 +204,6 @@ function escolher(chip: GrupoCaixa | null) {
   // desfaz (é um menu) — `filtrosDoMenu` devolve o mesmo objeto.
   const novo = filtrosDoMenu(filtros.value, chip)
   if (novo === filtros.value) return
-  // O tipo do chamado (os chips do grupo Site, na lista) é da plataforma de antes.
-  if (novo.plataforma !== filtros.value.plataforma) novo.tipo_chamado = ''
   filtros.value = novo
 }
 function titulo(chip: ChipPlataforma): string {

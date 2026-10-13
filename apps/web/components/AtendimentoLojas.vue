@@ -60,8 +60,7 @@ export function filtrosDoGrupo(f: FiltrosLista, plataforma: string): FiltrosList
   }
 }
 // O clique em "Todas · Shopee": a plataforma do corte inteira; a caixa
-// (Pergunta/Pós-venda do ML) e o tipo do chamado do Site ficam se a
-// plataforma não mudou.
+// (Pergunta/Pós-venda do ML) fica se a plataforma não mudou.
 export function filtrosTodasDoCorte(f: FiltrosLista, corte: string[]): FiltrosLista {
   const valor = corte.join(',')
   const mesma = plataformasDoValor(f.plataforma).join(',') === valor
@@ -72,7 +71,6 @@ export function filtrosTodasDoCorte(f: FiltrosLista, corte: string[]): FiltrosLi
     externo_ref: '',
     rede_social_id: '',
     canal: mesma ? f.canal : '',
-    tipo_chamado: mesma ? f.tipo_chamado : '',
   }
 }
 </script>

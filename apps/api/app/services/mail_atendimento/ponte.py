@@ -32,10 +32,12 @@ decifrado). Um e-mail por vez, commit por e-mail:
     protocolo, o pedido — senão uma conversa nova da loja (`canal='email'`,
     `dados.fonte='tuta'`, `dados.mail`). Na Amazon, o fio que aponta para a
     conversa do Gmail espera a mensagem chegar por lá (nunca grava cópia). O
-    aviso das plataformas com API (ML, Shopee, TikTok, Amazon) vai para a
-    conversa DA API do pedido (sem pendência). Sem loja → fila "E-mail sem
-    loja" (SEM conversa); sem pedido → "E-mail sem vínculo"; mais de 3
-    pedidos → `resumo`; pasta vendas → só histórico.
+    aviso das plataformas com API (ML, Shopee, TikTok, Amazon) entra na
+    conversa de E-MAIL da loja, sem pendência — desde 13/10/2026 nunca mais
+    dentro da conversa de CHAT (o dono: "o e-mail aparece só na aba de
+    e-mail; a do chat aparece só no chat" — `atendimento/separa_email.py`).
+    Sem loja → fila "E-mail sem loja" (SEM conversa); sem pedido → "E-mail
+    sem vínculo"; mais de 3 pedidos → `resumo`; pasta vendas → só histórico.
  7. A MENSAGEM leva SÓ o texto NOVO (sem a citação), com os links de acesso
     removidos e o código mascarado, cortado. O corpo inteiro e os anexos
     continuam só cifrados na Central (o cartão decifra na hora).
@@ -82,7 +84,6 @@ from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
     AUTOR_SISTEMA,
-    CANAL_AVALIACAO,
     CANAL_EMAIL,
     CHAVE_VEZ_DA_LOJA,
     CONVERSA_ABERTA,
@@ -188,8 +189,6 @@ _SEM_LOJA_PELO_FIO = (
     SEM_LOJA_SEM_ALIAS,
     SEM_LOJA_ALIAS_SEM_CADASTRO,
 )
-# Os canais da conversa da API que recebem o aviso por e-mail da plataforma.
-_CANAIS_SEM_AVISO = (CANAL_EMAIL, CANAL_AVALIACAO)
 _TEXTO_CORTADO = "[…] (o texto inteiro está no cartão do e-mail)"
 # O que o e-mail novo nunca troca numa conversa de chamado que já tem (RF6).
 _FIXOS_DO_CHAMADO = ("protocolo", "caixa", "caixa_rotulo", "marca", "marca_nome")
@@ -1051,30 +1050,6 @@ def _texto_da_mensagem(protegido: codigos.Protegido, email: Email) -> str:
     return texto.cortar(corpo, TEXTO_NA_CONVERSA_MAX, _TEXTO_CORTADO)
 
 
-async def _conversa_da_api(
-    session: AsyncSession, integration_id: UUID | None, numero: str
-) -> AtendimentoConversa | None:
-    """A conversa da API (chat, pós-venda, SAC…) do pedido na loja — a mais recente."""
-    if integration_id is None or not numero:
-        return None
-    return (
-        await session.execute(
-            select(AtendimentoConversa)
-            .where(
-                AtendimentoConversa.integration_id == integration_id,
-                AtendimentoConversa.canal.not_in(_CANAIS_SEM_AVISO),
-                or_(
-                    AtendimentoConversa.pedido_marketplace == numero,
-                    AtendimentoConversa.dados["pack_id"].astext == numero,
-                    AtendimentoConversa.dados["order_id"].astext == numero,
-                ),
-            )
-            .order_by(AtendimentoConversa.ultima_mensagem_em.desc().nulls_last())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-
-
 async def _amazon_pelo_gmail(
     session: AsyncSession, email: Email, rota: rotear.Rota
 ) -> AtendimentoMensagem | None:
@@ -1642,44 +1617,10 @@ async def processar(
         if meta.suspeito and existentes:
             _alerta(meta, "suspeito_sem_vinculo", "remetente suspeito: não foi ligado ao pedido")
 
-    # O aviso da plataforma com API vai para a conversa DA API do pedido.
-    if (
-        autor == AUTOR_SISTEMA
-        and tipo == REMETENTE_AVISO
-        and pedido_achado
-        and rota.plataforma in PLATAFORMAS_EMAIL_SO_AVISO
-        and not meta.suspeito
-    ):
-        da_api = await _conversa_da_api(session, rota.integration_id, pedido_achado)
-        if da_api is not None:
-            await gravar.travar_linha(session, da_api)
-            mensagem, _nova = await gravar.gravar_mensagem(
-                session,
-                da_api,
-                externo_id=f"{PREFIXO_EMAIL}{meta.message_id}",
-                autor=AUTOR_SISTEMA,
-                texto=texto.cortar(
-                    f"E-mail da plataforma ({pasta.nome}): {protegido.assunto or '(sem assunto)'}"
-                    f"\n\n{_texto_da_mensagem(protegido, email)}",
-                    TEXTO_NA_CONVERSA_MAX,
-                    _TEXTO_CORTADO,
-                ),
-                enviada_em=gravar._utc(message.received_at),
-                payload={
-                    CHAVE: {
-                        **payload_da_mensagem(meta, pasta, protegido, message.attachment_count)[
-                            CHAVE
-                        ],
-                        "aviso_api": True,
-                    }
-                },
-            )
-            meta.conversa_id = da_api.id
-            meta.mensagem_id = mensagem.id
-            meta.vinculado_por = "aviso_api"
-            meta.estado = ESTADO_GRAVADO
-            return meta.estado
-
+    # O aviso da plataforma com API (ML, Shopee, TikTok, Amazon) NÃO vai mais
+    # para a conversa de chat do pedido (13/10/2026, `separa_email`): entra na
+    # conversa de E-MAIL da loja como qualquer e-mail, sem pendência
+    # (`abre_pendencia`) — o chat fica só com o chat.
     conversa, vinculado = await achar_conversa(
         session,
         meta,

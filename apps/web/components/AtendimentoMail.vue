@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { Download, Folder, Mail, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldAlert, ShieldCheck, X } from 'lucide-vue-next'
+import { Download, Folder, Mail, MessageSquare, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldAlert, ShieldCheck, X } from 'lucide-vue-next'
 import type { ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 
 type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean }
-type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean; store?: StoreBadge; folder_id?: string; subject_hidden?: boolean }
+type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean; store?: StoreBadge; folder_id?: string; subject_hidden?: boolean; conversation_id?: string | null }
 // Folders and store badges ("Caixas", 09/10/2026 — the owner: "bring the store
 // name here too; keep it separate and looking like Tuta"). routers/mail_caixa.py:
 // GET …/pastas = the folders (Tuta order, Portuguese names) and the stores of
@@ -15,18 +15,33 @@ type Summary = { id: string; subject: string; from_address: string; from_name: s
 // filter chosen, the list falls back to …/messages. A server error does NOT
 // fall back: the plain list shows a security email's subject, which the
 // folder/store view never does — the error shows instead.
+// `conversa_id` (13/10/2026): the email conversation the bridge put this email
+// in (only for whoever sees /atendimento, within the team scope). Email no
+// longer shows in the chat inbox ("Caixa"): opening it goes to that email
+// conversation inside this tab (link to an order, pick the store, reply).
 type StoreBadge = { tipo: string; rotulo: string; plataforma: string | null; loja?: string | null; chave?: string; provavel?: boolean }
 type FolderItem = { id: string | null; nome: string; caminho: string | null; tipo: string; quantidade: number; total: number }
 type StoreItem = StoreBadge & { chave: string; quantidade: number; total: number }
-type IndexItem = { id: string; recebido_em: string; direcao: string; tem_anexos: boolean; ponte: string | null; de: string | null; de_nome: string | null; assunto: string | null; assunto_oculto: boolean; pasta: { id: string; nome: string; tipo: string }; selo: StoreBadge }
+type IndexItem = { id: string; recebido_em: string; direcao: string; tem_anexos: boolean; ponte: string | null; conversa_id?: string | null; de: string | null; de_nome: string | null; assunto: string | null; assunto_oculto: boolean; pasta: { id: string; nome: string; tipo: string }; selo: StoreBadge }
 type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null }
 type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
 
 // `canOperate` = the person operates /atendimento (`atendimento_mexe`): sees the
-// Atendimento queues ("Filas", AtendimentoMailFilas). `stores` = the stores of
-// the /atendimento summary, to pick one for an email without store.
-const props = defineProps<{ isAdmin: boolean; canOperate?: boolean; stores?: ResumoLoja[] }>()
-const emit = defineEmits<{ (e: 'openConversation', id: string): void }>()
+// Atendimento queues ("Filas", AtendimentoMailFilas). `canView` (13/10/2026) =
+// the person sees /atendimento (read-only included): email left the chat inbox,
+// so whoever read the email conversations there sees the conversation queues
+// here (site tickets, waiting for a reply) — only those. `stores` = the stores
+// of the /atendimento summary, to pick one for an email without store.
+// `waiting` (13/10/2026) = email conversations waiting for a reply (GET
+// /api/atendimento/email/contagens, read by the page): the number on "Filas".
+// `paused` = the page shows an email conversation over this component (kept
+// mounted, hidden): no background refresh while nobody sees it.
+// `rememberedSection` (v-model) = the section the person clicked earlier in
+// this visit to /atendimento: the page keeps it, since this component mounts
+// again every time the E-mail tab opens.
+type Section = 'mailboxes' | 'queues'
+const props = defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; paused?: boolean; rememberedSection?: '' | Section }>()
+const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
 const mailboxId = ref('')
@@ -84,11 +99,24 @@ const currentStore = computed(() => (storeKey.value ? mailStores.value.find((ite
 // Atendimento layer on top of it (emails without store/link, suspicious,
 // summaries, sends to review). Whoever is neither a mailbox owner nor an admin
 // lands on "Filas" when they can see it.
-const chosenSection = ref<'' | 'mailboxes' | 'queues'>('')
+// Who sees "Filas": whoever operates Atendimento (every queue) and whoever only
+// reads it (the conversation queues only — AtendimentoMailFilas `podeMexer`).
+const seesQueues = computed(() => !!props.canOperate || !!props.canView)
+// Email waiting for a reply when the tab opens (13/10/2026 — it no longer
+// counts in the Caixa Humano): the tab opens on "Filas", admins and mailbox
+// owners included. Decided ONCE, when the tab opens (this component mounts
+// with it): the number changing later never moves someone working in
+// "Caixas", and a section clicked earlier in this visit wins (the page keeps
+// it across tab switches) — whoever picked "Caixas" keeps landing there.
+const chosenSection = ref<'' | Section>(props.rememberedSection || (seesQueues.value && (props.waiting ?? 0) > 0 ? 'queues' : ''))
+function chooseSection(value: Section) {
+  chosenSection.value = value
+  emit('update:rememberedSection', value)
+}
 const section = computed(() => {
-  if (chosenSection.value === 'queues' && props.canOperate) return 'queues'
+  if (chosenSection.value === 'queues' && seesQueues.value) return 'queues'
   if (chosenSection.value === 'mailboxes') return 'mailboxes'
-  return props.canOperate && !props.isAdmin && !mailboxes.value.length ? 'queues' : 'mailboxes'
+  return seesQueues.value && !props.isAdmin && !mailboxes.value.length ? 'queues' : 'mailboxes'
 })
 // "Configurar": aliases and the Atendimento settings of the selected mailbox
 // (AtendimentoMailConfigurar) — admins who operate Atendimento only.
@@ -151,6 +179,7 @@ function fromIndex(item: IndexItem): Summary {
   return {
     id: item.id, subject: item.assunto || '', from_address: item.de || '', from_name: item.de_nome || '', received_at: item.recebido_em,
     direction: item.direcao, folder: item.pasta.nome, has_attachments: item.tem_anexos, store: item.selo, folder_id: item.pasta.id, subject_hidden: item.assunto_oculto,
+    conversation_id: item.conversa_id ?? null,
   }
 }
 
@@ -385,12 +414,12 @@ async function refresh(background = false): Promise<void> {
 function schedulePoll() {
   clearTimeout(timer)
   timer = undefined
-  if (!mounted || disposed || document.hidden) return
+  if (!mounted || disposed || document.hidden || props.paused) return
   timer = setTimeout(() => { timer = undefined; void poll() }, POLL_MS)
 }
 
 async function poll() {
-  if (!mounted || disposed || document.hidden) return
+  if (!mounted || disposed || document.hidden || props.paused) return
   try {
     if (!sending.value && !resolving.value) await refresh(true)
   } finally { schedulePoll() }
@@ -486,6 +515,20 @@ async function resolveJob(job: Outbox, sent: boolean) {
   finally { resolving.value = '' }
 }
 
+// The email conversation of the open email (13/10/2026): the page opens it in this tab.
+function openConversation() {
+  const id = openedSummary.value?.conversation_id
+  if (id) emit('openConversation', id)
+}
+
+// Paused (an email conversation open over this tab): stop; back: refresh now.
+watch(() => props.paused, (paused) => {
+  if (paused) {
+    clearTimeout(timer)
+    timer = undefined
+  } else resumePolling()
+})
+
 // A mailbox was just registered: open its settings (aliases, Atendimento).
 watch(newMailboxId, (id) => { if (id && props.isAdmin) configuring.value = true })
 
@@ -516,7 +559,7 @@ onBeforeUnmount(() => {
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
-        <p v-if="section === 'queues'" class="text-sm text-muted-foreground">Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, suspeitos, resumos e respostas a conferir.</p>
+        <p v-if="section === 'queues'" class="text-sm text-muted-foreground">{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
         <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável, aos administradores e a quem um admin liberar (só leitura).</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
@@ -526,14 +569,14 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Sections: the mailboxes (this screen) and the Atendimento queues (who operates Atendimento) -->
-    <div v-if="canOperate" class="flex gap-1 border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>
+    <div v-if="seesQueues" class="flex gap-1 border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>
       <button
         type="button"
         role="tab"
         :aria-selected="section === 'mailboxes'"
         class="-mb-px border-b-2 px-3 py-1.5 text-sm"
         :class="section === 'mailboxes' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'"
-        @click="chosenSection = 'mailboxes'"
+        @click="chooseSection('mailboxes')"
       >Caixas</button>
       <button
         type="button"
@@ -541,14 +584,25 @@ onBeforeUnmount(() => {
         :aria-selected="section === 'queues'"
         class="-mb-px border-b-2 px-3 py-1.5 text-sm"
         :class="section === 'queues' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'"
-        @click="chosenSection = 'queues'"
-      >Filas</button>
+        @click="chooseSection('queues')"
+      >
+        Filas
+        <span
+          v-if="waiting"
+          class="ml-1 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
+          :title="`${waiting} e-mail(s) esperando resposta`"
+          :aria-label="`${waiting} e-mail(s) esperando resposta`"
+          data-mail-waiting
+        >{{ waiting > 99 ? '99+' : waiting }}</span>
+      </button>
     </div>
 
     <AtendimentoMailFilas
-      v-if="canOperate && section === 'queues'"
+      v-if="seesQueues && section === 'queues'"
       :is-admin="isAdmin"
+      :pode-mexer="!!canOperate"
       :lojas="stores || []"
+      :pausado="!!paused"
       @abrir-conversa="(id: string) => emit('openConversation', id)"
     />
 
@@ -673,6 +727,15 @@ onBeforeUnmount(() => {
                 <span class="inline-flex min-w-0 items-center gap-1">Loja: <AtendimentoMailSelo :selo="openedSummary.store" /></span>
                 <span class="inline-flex min-w-0 items-center gap-1">Pasta: <Folder class="h-3 w-3 shrink-0" /><span class="truncate text-foreground">{{ openedSummary.folder }}</span></span>
               </div>
+              <!-- The email conversation of this email (13/10/2026): opens here, in the E-mail tab — never in the chat inbox. -->
+              <button
+                v-if="openedSummary?.conversation_id"
+                type="button"
+                class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-muted"
+                title="Abre a conversa deste e-mail aqui na aba E-mail: vincular ao pedido, escolher a loja, responder"
+                data-mail-open-conversation
+                @click="openConversation"
+              ><MessageSquare class="h-3.5 w-3.5" /> Abrir a conversa deste e-mail</button>
             </header>
             <AtendimentoMailBody v-if="detail.html" :key="detail.id" :html="detail.html" :text="detail.text" :attachments="detail.attachments" />
             <pre v-else class="max-h-[480px] whitespace-pre-wrap break-words overflow-y-auto font-sans text-sm leading-relaxed">{{ detail.text || '(Mensagem sem texto)' }}</pre>

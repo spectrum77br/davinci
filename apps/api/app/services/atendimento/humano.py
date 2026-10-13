@@ -14,10 +14,11 @@ régua da IA mudar, muda aqui junto.
 
 QUEM ENTRA (`no_escopo` / `escopo_sql`, os dois iguais): conversa esperando
 resposta ("Falta responder"), não fechada, num canal que TEM resposta — as
-plataformas da caixa (`PLATAFORMAS_CAIXA`) fora do Zap e do e-mail antigo do
-Tuta (`motivo_canal_sem_envio`) — ou o e-mail da PONTE da Central
-(`dados.fonte = 'tuta'` + `dados.mail`). Ficam de fora: Zap,
-e-mail antigo do Tuta, carrinho do site e comentário das redes.
+plataformas da caixa (`PLATAFORMAS_CAIXA`) fora do Zap e do e-mail do Tuta
+(`motivo_canal_sem_envio`). Ficam de fora: Zap, carrinho do site, comentário
+das redes e — desde 13/10/2026 — TODO e-mail da ponte (`separa_email`: o
+e-mail mora na aba E-mail, nunca na Caixa nem na Caixa Humano; o motivo
+`e_mail` de `triar` não tem mais quem o alcance pela rodada).
 A BLOQUEADA (a plataforma não deixa responder pelo DaVinci: a reclamação só
 leitura, a avaliação que o ML não deixa responder, a janela do TikTok, o
 pós-venda bloqueado do ML) é triada também, mas só entra com um motivo de
@@ -160,13 +161,12 @@ from app.config import get_settings
 from app.models import AtendimentoConversa, AtendimentoMensagem, AtendimentoRascunho
 from app.redis_client import redis
 from app.services.atendimento import contexto as contexto_svc
-from app.services.atendimento import ia
+from app.services.atendimento import ia, separa_email
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
     CANAL_AVALIACAO,
-    CANAL_EMAIL,
     CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
     CATEGORIAS_INFO,
@@ -175,7 +175,6 @@ from app.services.atendimento.constantes import (
     ETIQUETA_AG_CANCELAMENTO,
     ETIQUETA_DEVOLUCAO,
     ETIQUETA_RECLAMACAO,
-    FONTE_TUTA,
     HUMANO_AG_CANCELAMENTO,
     HUMANO_ASSUNTO,
     HUMANO_AVALIACAO,
@@ -254,9 +253,10 @@ def no_escopo(conversa: Any) -> bool:
     # A bloqueada entra no escopo: a régua decide (só pelo estado — `triar`).
     if conversa.situacao == CONVERSA_FECHADA:
         return False
+    # O e-mail da ponte mora na aba E-mail (13/10/2026): nunca na Caixa Humano.
+    if separa_email.e_conversa_de_email(conversa):
+        return False
     sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
-    if sem_envio == MOTIVO_EMAIL_SO_PESSOA:
-        return True
     return conversa.plataforma in PLATAFORMAS_CAIXA and sem_envio is None
 
 
@@ -486,17 +486,13 @@ def turno_sql():
 def escopo_sql():
     """WHERE de quem pode estar na Caixa Humano — a gêmea de `no_escopo`. Nunca NULL."""
     c = AtendimentoConversa
-    fonte = func.coalesce(func.btrim(c.dados["fonte"].astext), "")
-    ponte = and_(
-        c.canal == CANAL_EMAIL,
-        fonte == FONTE_TUTA,
-        func.coalesce(func.jsonb_typeof(c.dados["mail"]), "") == "object",
-    )
-    caixa = and_(c.plataforma.in_(PLATAFORMAS_CAIXA), ~ia._sql_canal_sem_envio())
     return and_(
         c.aguardando_resposta.is_(True),
         c.situacao != CONVERSA_FECHADA,
-        or_(caixa, ponte),
+        # O e-mail da ponte mora na aba E-mail (13/10/2026, `separa_email`).
+        separa_email.na_caixa_sql(c),
+        c.plataforma.in_(PLATAFORMAS_CAIXA),
+        ~ia._sql_canal_sem_envio(),
     )
 
 

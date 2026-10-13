@@ -658,6 +658,41 @@ async def test_aberta_sem_chat_ganha_a_conversa_da_devolucao_com_o_motivo(db, ma
     assert len(await _conversas(db, canal="reclamacao")) == 1
 
 
+async def test_conversa_de_email_da_ponte_nao_e_o_chat_com_o_comprador(db, make_user):
+    """13/10/2026 (`separa_email`): o aviso da plataforma por e-mail cai na
+    conversa de E-MAIL da loja, com o pedido — e ela mora na aba E-mail, fora
+    da Caixa. Não conta como chat com o comprador: a devolução aberta ganha a
+    conversa dela (na Caixa); com o chat, o cartão vai para o chat."""
+    integ = await _loja(db, make_user)
+    email = AtendimentoConversa(
+        integration_id=integ.id,
+        plataforma="shopee",
+        canal="email",
+        externo_id="mail-fio:aviso-1",
+        pedido_marketplace=SN,
+        dados={"fonte": "tuta", "mail": {"alias": "kfa@tuta.com"}},
+        ultima_mensagem_em=T0 - timedelta(hours=1),
+    )
+    db.add(email)
+    await db.commit()
+    email_id = email.id
+    await _logistica(db)
+    await _rastreio(db, prazo=T0 + timedelta(days=2))
+    falsa = _Plataforma()
+
+    resumo = await _ligar(db, fabrica_cliente=_fabrica(falsa))
+
+    assert (resumo["novas"], resumo["conversas_novas"], resumo["erros"]) == (1, 1, 0)
+    [linha] = await _linhas(db)
+    [devolucao] = await _conversas(db, canal="reclamacao")
+    assert linha.conversa_id == devolucao.id != email_id
+    # O chat aparece: a principal é ele (a de e-mail, mais nova, fica de fora).
+    chat_id = await _chat(db, esperada="devolucao")
+    await _ligar(db, T0 + timedelta(minutes=20), fabrica_cliente=_fabrica(falsa))
+    [linha] = await _linhas(db)
+    assert linha.conversa_id == chat_id
+
+
 async def test_encerrada_sem_chat_nao_ganha_conversa(db, make_user):
     await _loja(db, make_user)
     await _logistica(db, status="CANCELLED", mudou=T0 - timedelta(days=2))

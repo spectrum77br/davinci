@@ -193,8 +193,8 @@ const paginaTpl = paginaSfc.descriptor.template.content
   assert.match(paginaTpl, /<AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano \? 'humano' : 'aguardando'" \/>/)
   assert.match(paginaTpl, /<AtendimentoLista\s+v-model:filtros="filtros"[\s\S]*?:caixa="emHumano \? 'humano' : ''"/)
   assert.match(paginaTpl, /:ativa="naCaixa"/)
-  // A conversa aberta fica no link nas duas.
-  assert.match(pagina, /if \(selecionada\.value && naCaixa\.value\) query\.conversa = selecionada\.value/)
+  // A conversa aberta fica no link nas duas (e, desde 13/10/2026, a de e-mail na aba E-mail).
+  assert.match(pagina, /const aberta = naCaixa\.value \? selecionada\.value : aba\.value === 'mail' \? emailConversa\.value : null\n  if \(aberta\) query\.conversa = aberta/)
   // Polling e altura valem nas duas.
   assert.match(pagina, /if \(!el \|\| !naCaixa\.value\) return/)
   assert.doesNotMatch(pagina, /aba\.value !== 'caixa'/)

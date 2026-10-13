@@ -330,6 +330,44 @@ async def test_lista_os_pedidos_em_83955_com_o_motivo(db, client, admin, make_us
     assert (await client.get(URL, params={"dias": 0})).status_code == 422
 
 
+async def test_lista_aponta_o_chat_mesmo_com_o_aviso_por_email(db, client, admin, make_user):
+    """13/10/2026 (`separa_email`): o aviso da plataforma por e-mail entra na
+    conversa de E-MAIL da loja, com o pedido e mais nova que o chat. A lista
+    continua apontando o CHAT (a de e-mail mora na aba E-mail) e classifica
+    pelo retrato dele (o IN_CANCEL da Shopee = o comprador pediu)."""
+    dono = await make_user()
+    chat = await _cenario(db, dono)
+    chat.dados = {**(chat.dados or {}), "pedido_mkt": {"status": "IN_CANCEL"}}
+    await db.commit()
+    integ = await db.get(Integration, chat.integration_id)
+    email, _ = await gravar.upsert_conversa(
+        db,
+        canal=None,
+        integration=integ,
+        plataforma="shopee",
+        canal_nome="email",
+        externo_id="mail-fio:aviso-1",
+        pedido_marketplace="SHPTROCA1",
+        dados={"fonte": "tuta", "mail": {"alias": "kfa@tuta.com"}},
+    )
+    await gravar.gravar_mensagem(
+        db,
+        email,
+        externo_id="mail:aviso-1",
+        autor="sistema",
+        texto="E-mail da plataforma: pedido em cancelamento",
+        enviada_em=AGORA,
+        payload={"mail": {"message_id": "aviso-1"}},
+    )
+    await db.commit()
+
+    r = await client.get(URL)
+    assert r.status_code == 200, r.text
+    falta = {p["numero"]: p for p in r.json()["pedidos"]}["300101"]
+    assert falta["conversa_id"] == str(chat.id)
+    assert falta["motivo"]["codigo"] == "pedido_cliente"
+
+
 async def test_lista_mascara_a_margem_para_quem_nao_ve(db, client, make_user, auth_as):
     """Quem só lê e não vê a Margem: o motivo da Margem vira "em análise" (e conta assim)."""
     u = await make_user(permissions={"atendimento": {"view": True}})

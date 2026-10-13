@@ -64,7 +64,7 @@ from app.models import (
     Integration,
 )
 from app.services.atendimento import etiqueta as etiqueta_svc
-from app.services.atendimento import lojas
+from app.services.atendimento import lojas, separa_email
 from app.services.atendimento.constantes import (
     AUTOMACOES_QUE_FECHAM_A_VEZ,
     AUTOR_CLIENTE,
@@ -940,6 +940,11 @@ async def gravar_mensagem(
             raise
         return existente, False
 
+    if not separa_email.visivel_na_conversa(conversa, mensagem):
+        # E-mail numa conversa de CHAT (`separa_email`, 13/10/2026): fica
+        # gravado, mas não mexe na prévia, na ordem nem na fila do chat.
+        await session.flush()
+        return mensagem, True
     if autor == AUTOR_CLIENTE:
         _reabrir_se_nova(conversa, mensagem)
     recalcular(conversa, [mensagem])
@@ -1171,6 +1176,11 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
         AtendimentoMensagem.conversa_id == conversa.id,
         AtendimentoMensagem.origem != ORIGEM_NOTA,
     )
+    # E o e-mail numa conversa de CHAT (o aviso que a ponte gravava até
+    # 13/10/2026, `separa_email`): nem prévia, nem ordem, nem fila.
+    visivel = separa_email.mensagem_visivel_sql(conversa)
+    if visivel is not None:
+        base = base.where(visivel)
 
     async def _uma(q) -> AtendimentoMensagem | None:
         return (await session.execute(q.limit(1))).scalar_one_or_none()

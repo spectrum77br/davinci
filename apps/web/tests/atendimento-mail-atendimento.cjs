@@ -163,10 +163,42 @@ async function principal() {
     assert.match(api('schemas/mail.py'), /class OutboxResolve\(StrictModel\):[\s\S]*?saiu: bool/)
     assert.match(api('schemas/mail.py'), /class MailboxPatch\(StrictModel\):[\s\S]*?aliases: list\[EmailStr\] \| None/)
 
-    // As filas da tela = as do backend (+ o "revisar envio" das contagens).
+    // As filas da tela = as do backend (+ as de CONVERSA de e-mail, 13/10/2026,
+    // e o "revisar envio" das contagens).
     const nomes = Object.fromEntries([...constantes.matchAll(/^(FILA_[A-Z_]+) = "([a-z_]+)"$/gm)].map((m) => [m[1], m[2]]))
     const filas = ((constantes.match(/^FILAS = \(([^)]*)\)$/m) || [])[1] || '').split(',').map((x) => nomes[x.trim()]).filter(Boolean)
-    assert.deepEqual(F.FILAS.map((f) => f.value), [...filas, 'revisar_envio'])
+    const deConversa = F.FILAS.map((f) => f.value).filter((v) => F.FILAS_DE_CONVERSA.has(v))
+    assert.deepEqual(deConversa, ['chamados', 'aguardando', 'todas'])
+    assert.deepEqual(F.FILAS.map((f) => f.value).filter((v) => !F.FILAS_DE_CONVERSA.has(v)), [...filas, 'revisar_envio'])
+    assert.deepEqual(F.FILAS.map((f) => f.label).slice(0, 5), ['Sem loja', 'Sem vínculo', 'Chamados dos sites', 'Falta responder', 'Todas as conversas'])
+    // Quem só lê vê só as de conversa; quem mexe, todas.
+    assert.deepEqual(F.filasDaPessoa(false).map((f) => f.value), ['chamados', 'aguardando', 'todas'])
+    assert.equal(F.filasDaPessoa(true), F.FILAS)
+    // As de conversa: a lista da Caixa SÓ com o e-mail (`caixa=email`), no escopo.
+    assert.equal(F.urlDaFila('chamados'), '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&limite=50')
+    assert.equal(F.urlDaFila('chamados', 'X', 'SAC'), '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&tipo_chamado=sac&limite=50&antes_de=X')
+    assert.equal(F.urlDaFila('chamados', null, 'outro'), '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&limite=50', 'tipo desconhecido: todos')
+    assert.equal(F.urlDaFila('aguardando', 'prazo:|c1'), '/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50&antes_de=prazo%3A%7Cc1')
+    // A busca (nome, pedido, QUALQUER protocolo — como na Caixa até 13/10/2026).
+    assert.equal(F.urlDaFila('chamados', null, '', ' US-26-0302 '), '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&q=US-26-0302&limite=50')
+    assert.equal(F.urlDaFila('sem_loja', null, null, 'x'), '/api/atendimento/email/emails?fila=sem_loja', 'as filas de e-mail não buscam')
+    // "Todas as conversas" (o histórico que a Caixa achava): as abertas ou, no chip, as fechadas — com a busca.
+    assert.equal(F.urlDaFila('todas'), '/api/atendimento/conversas?caixa=email&filtro=todas&limite=50')
+    assert.equal(F.urlDaFila('todas', 'X', 'sac', ' Maria ', true), '/api/atendimento/conversas?caixa=email&filtro=fechadas&q=Maria&limite=50&antes_de=X', 'o tipo do chamado é só dos chamados')
+    assert.equal(F.urlDaFila('aguardando', null, null, null, true), '/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50', 'o "fechadas" é só de Todas')
+    assert.equal(F.vazioDaConversa('todas', '', false), 'Nenhuma conversa de e-mail aberta.')
+    assert.equal(F.vazioDaConversa('todas', '', true), 'Nenhuma conversa de e-mail fechada.')
+    assert.equal(F.vazioDaConversa('todas', 'x', true), 'Nada encontrado para essa busca.')
+    assert.equal(F.vazioDaConversa('chamados', '', false), 'Nenhum chamado aberto dos sites.')
+    assert.equal(F.vazioDaConversa('aguardando', '', false), 'Nenhum e-mail esperando resposta.')
+    // Os números: as filas de e-mail + as de conversa (GET /email/contagens).
+    assert.deepEqual(F.juntarContagens({ sem_loja: 2 }, { aguardando: 4, chamados: 3, chamados_por_tipo: { sac: 3 } }), { sem_loja: 2, chamados: 3, aguardando: 4 })
+    assert.deepEqual(F.juntarContagens(null, null), {})
+    assert.ok(rotas.includes('@router.get("/contagens")'))
+    const contagensPy = rotas.slice(rotas.indexOf('async def contagens('), rotas.indexOf('# ── Na conversa (quem vê)'))
+    assert.match(contagensPy, /\.where\(separa_email\.conversa_de_email_sql\(\)\)/)
+    for (const campo of ['aguardando', 'chamados', 'chamados_por_tipo']) assert.ok(contagensPy.includes(`"${campo}":`), `contagens: ${campo}`)
+    assert.ok(!rotas.includes('(f"{_PREFIXO}/contagens")'), 'as contagens das conversas: quem vê (não é leitura só de quem mexe)')
     assert.match(rotas, /saida\["revisar_envio"\] = /)
     assert.equal(F.urlDaFila('revisar_envio'), '/api/atendimento/email/envios?estado=revisar')
     // "revisar" = o incerto E o lease vencido (o Mac pegou e sumiu): a mesma regra nas contagens.
@@ -222,8 +254,114 @@ async function principal() {
     }
     // O job que falhou mostra o porquê (o principal da caixa empresa, a caixa que virou privada).
     assert.match(mail, /<p v-if="job\.status === 'failed' && jobFailure\(job\.error_code\)" class="text-xs text-red-700">\{\{ jobFailure\(job\.error_code\) \}\}<\/p>/)
-    // A página passa quem mexe, as lojas e o "abrir a conversa".
-    assert.match(web('pages/atendimento.vue'), /<AtendimentoMail v-if="aba === 'mail'" :is-admin="isAdmin" :can-operate="mexe" :stores="resumo\?\.lojas \|\| \[\]" @open-conversation="abrirConversaNaCaixa" \/>/)
+    // A página passa quem mexe, quem vê, as lojas e o "abrir a conversa" — que
+    // abre a conversa de e-mail NA aba E-mail (13/10/2026), nunca na Caixa.
+    const paginaTpl = sfc('../pages/atendimento.vue').descriptor.template.content
+    assert.match(paginaTpl, /<AtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:paused="!!emailConversa"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
+    // O número da aba E-mail (o e-mail saiu da Caixa Humano): o que falta responder nele.
+    assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
+    assert.match(paginaTpl, /<template v-if="aba === 'mail'">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
+    assert.match(paginaTpl, /<AtendimentoConversa\s+:key="`\$\{emailConversa\}:\$\{emailConversaVersao\}`"\s+:conversa-id="emailConversa"[\s\S]*?:ativa="aba === 'mail'"\s+@mudou="aoMudarConversaDoEmail"[\s\S]*?@abrir-conversa="abrirConversaDoEmail"/)
+  }
+
+  // ------------------------------------------------ a página: a conversa de e-mail na aba E-mail (13/10/2026)
+  {
+    const pagina = sfc('../pages/atendimento.vue').descriptor.scriptSetup.content
+    const js = trecho(pagina, '// O registro das Automáticas abre a conversa na Caixa.', '// A Caixa ocupa a altura da janela')
+      + '\n' + trecho(pagina, 'function aoMudarConversa(c: ConversaResumo) {', '// ─── respostas prontas')
+      + '\nreturn { abrirConversaNaCaixa, abrirConversaDoEmail, fecharConversaDoEmail, aoMudarConversaDoEmail, aoVincularConversaDoEmail, aoMudarConversa }'
+    const novo = () => {
+      const st = { aba: Vue.ref('mail'), selecionada: Vue.ref(null), emailConversa: Vue.ref(null), emailConversaLinha: Vue.ref(null), emailConversaVersao: Vue.ref(0), itens: Vue.ref([]), emHumano: Vue.ref(false) }
+      st.contagensLidas = 0
+      const f = new Function('aba', 'selecionada', 'emailConversa', 'emailConversaLinha', 'emailConversaVersao', 'itens', 'emHumano', 'selecionar', 'carregarResumo', 'carregarContagensEmail', js)(
+        st.aba, st.selecionada, st.emailConversa, st.emailConversaLinha, st.emailConversaVersao, st.itens, st.emHumano, (id) => { st.selecionada.value = id }, () => {}, () => { st.contagensLidas++ },
+      )
+      return { st, f }
+    }
+    // Das Filas/Caixas: abre na aba E-mail.
+    let { st, f } = novo()
+    st.aba.value = 'caixa'
+    f.abrirConversaDoEmail('c-email')
+    assert.deepEqual([st.aba.value, st.emailConversa.value, st.selecionada.value], ['mail', 'c-email', null])
+    // A linha que a conversa manda: a de e-mail fica (a barra lê), a de CHAT vai para a Caixa.
+    f.aoMudarConversaDoEmail({ id: 'c-email', email: { protocolo: null }, aguardando_resposta: true, situacao: 'aberta' })
+    assert.equal(st.emailConversaLinha.value.id, 'c-email')
+    assert.equal(st.contagensLidas, 0, 'a primeira linha: o número já é o da aba')
+    f.aoMudarConversaDoEmail({ id: 'c-email', email: { protocolo: null }, aguardando_resposta: false, situacao: 'respondida' })
+    assert.equal(st.contagensLidas, 1, 'respondeu: o número da aba E-mail na hora')
+    f.aoMudarConversaDoEmail({ id: 'c-email', email: { protocolo: null }, aguardando_resposta: false, situacao: 'respondida' })
+    assert.equal(st.contagensLidas, 1, 'nada mudou na fila: não relê')
+    f.abrirConversaDoEmail('c-chat')
+    assert.equal(st.emailConversaLinha.value, null, 'outra conversa: a linha de antes sai')
+    f.aoMudarConversaDoEmail({ id: 'c-chat', email: null })
+    assert.deepEqual([st.aba.value, st.selecionada.value, st.emailConversa.value], ['caixa', 'c-chat', null], 'o chat nunca na aba E-mail')
+    // A de e-mail que chega à Caixa pelo id (o link antigo): vem para a aba E-mail.
+    ;({ st, f } = novo())
+    st.aba.value = 'caixa'
+    st.selecionada.value = 'c-email'
+    f.aoMudarConversa({ id: 'c-email', email: { protocolo: 'US-26-0001' } })
+    assert.deepEqual([st.aba.value, st.selecionada.value, st.emailConversa.value], ['mail', null, 'c-email'])
+    // A resposta da linha da Caixa (sem `email`) segue como sempre.
+    st.aba.value = 'caixa'
+    st.itens.value = [{ id: 'c1', aguardando_resposta: true }]
+    st.selecionada.value = 'c1'
+    f.aoMudarConversa({ id: 'c1', aguardando_resposta: false })
+    assert.equal(st.itens.value[0].aguardando_resposta, false)
+    // Vinculou: na mesma conversa relê (a chave muda); na do pedido (outra), abre ela.
+    ;({ st, f } = novo())
+    f.abrirConversaDoEmail('c-email')
+    f.aoVincularConversaDoEmail('c-email')
+    assert.equal(st.emailConversaVersao.value, 1)
+    f.aoVincularConversaDoEmail('c-pedido')
+    assert.equal(st.emailConversa.value, 'c-pedido')
+    const lidas = st.contagensLidas
+    f.fecharConversaDoEmail()
+    assert.deepEqual([st.emailConversa.value, st.emailConversaLinha.value], [null, null])
+    assert.equal(st.contagensLidas, lidas + 1, 'voltou aos e-mails: relê o número')
+    // O número: GET /email/contagens no carregar e no polling (qualquer aba).
+    assert.match(pagina, /const emailEsperando = computed\(\(\) => emailContagens\.value\?\.aguardando \|\| 0\)/)
+    assert.match(pagina, /emailContagens\.value = await api<[^>]+>\('\/api\/atendimento\/email\/contagens'\)/)
+    // Quem não vê o /atendimento não pergunta (a rota recusaria); a seção escolhida na visita fica na página.
+    assert.match(pagina, /async function carregarContagensEmail\(\) \{\n(?:\s*\/\/[^\n]*\n)*\s+if \(!canSugerir\.value\) return\n/)
+    assert.match(pagina, /const emailSecao = ref<'' \| 'mailboxes' \| 'queues'>\(''\)/)
+    assert.match(pagina, /const polling = usePollingVisivel\(async \(\) => \{\s+\/\/[^\n]*\n\s+void carregarContagensEmail\(\)/)
+    assert.match(pagina, /await Promise\.all\(\[carregarResumo\(\), carregarLista\(\), carregarModelos\(\), carregarContagensEmail\(\)\]\)\n/)
+    // O link: `?tab=mail&conversa=<id>` abre a conversa de e-mail.
+    assert.match(pagina, /const selecionada = ref<string \| null>\(aba\.value === 'mail' \? null : conversaQuery\)/)
+    assert.match(pagina, /const emailConversa = ref<string \| null>\(aba\.value === 'mail' \? conversaQuery : null\)/)
+    assert.match(pagina, /watch\(\[aba, selecionada, emailConversa\], sincronizarUrl\)/)
+  }
+
+  // ------------------------------------------------ a barra da conversa de e-mail (vincular ao pedido)
+  {
+    const B = requerer('~/components/AtendimentoEmailConversaBarra.vue')
+    const emailDaLinha = { protocolo: null, tipo: null, tipo_rotulo: null, marca: null, alias: '21max@tuta.com', destaque: false }
+    assert.equal(B.podeVincular({ plataforma: 'shopee', pedido_marketplace: null, email: emailDaLinha }, true), true)
+    assert.equal(B.podeVincular({ plataforma: 'shopee', pedido_marketplace: null, email: emailDaLinha }, false), false, 'quem só lê não vincula')
+    assert.equal(B.podeVincular({ plataforma: 'shopee', pedido_marketplace: '123', email: emailDaLinha }, true), false, 'já tem pedido')
+    assert.equal(B.podeVincular({ plataforma: 'site', pedido_marketplace: null, email: emailDaLinha }, true), false, 'o chamado do site não tem pedido')
+    assert.equal(B.podeVincular({ plataforma: 'shopee', pedido_marketplace: null, email: null }, true), false, 'não é conversa de e-mail')
+    assert.equal(B.urlVincularConversa('c 1'), '/api/atendimento/email/conversas/c%201/vincular')
+    assert.ok(rotas.includes('@router.post("/conversas/{conversa_id}/vincular")'))
+    const vincularPy = rotas.slice(rotas.indexOf('async def vincular_conversa('), rotas.indexOf('async def _vincular('))
+    assert.match(vincularPy, /_mexe\(user\)/)
+    assert.match(vincularPy, /return await _vincular\(session, meta, conversa, body, user, scope\)/)
+    const conversaEmail = { id: 'c1', plataforma: 'shopee', pedido_marketplace: null, email: emailDaLinha }
+    const b = montar('../components/AtendimentoEmailConversaBarra.vue', { conversa: conversaEmail, podeMexer: true }, {
+      respostas: { '/api/atendimento/email/conversas/c1/vincular': { conversa_id: 'c9', pedido: '2000001' } },
+    })
+    let html = await b.html()
+    assert.match(html, /voltar aos e-mails/)
+    assert.match(html, /data-vincular-conversa-email/)
+    b.estado.pedido = ' 2000001 '
+    await b.estado.vincular()
+    const post = b.chamadas.find((c) => c.metodo === 'POST')
+    assert.deepEqual([post.url, post.body], ['/api/atendimento/email/conversas/c1/vincular', { pedido: '2000001' }])
+    assert.deepEqual(b.emitidos.at(-1), ['vinculado', 'c9'])
+    assert.equal(b.estado.pedido, '')
+    const leitor = montar('../components/AtendimentoEmailConversaBarra.vue', { conversa: conversaEmail, podeMexer: false })
+    html = await leitor.html()
+    assert.doesNotMatch(html, /data-vincular-conversa-email/, 'quem só lê: só o voltar')
   }
 
   // ------------------------------------------------ regras puras: o cartão
@@ -429,6 +567,93 @@ async function principal() {
       assert.equal(m.estado.section, 'mailboxes')
       assert.doesNotMatch(html, /data-mail-sections|data-filas-stub/)
     }
+    // Quem só lê o /atendimento (13/10/2026: o e-mail saiu da Caixa): as Filas
+    // com as de conversa só (a Filas recebe `podeMexer` falso).
+    {
+      const filhosLe = { ...filhos, AtendimentoMailFilas: { props: ['isAdmin', 'lojas', 'podeMexer'], setup: (p) => () => Vue.h('div', { 'data-filas-stub': '', 'data-pode-mexer': String(p.podeMexer) }) } }
+      const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canView: true, stores: [], waiting: 3 }, { respostas: { '/api/mail/mailboxes': { items: [] } }, filhos: filhosLe })
+      const html = await m.html()
+      assert.equal(m.estado.section, 'queues')
+      assert.match(html, /data-mail-sections/)
+      // O número de "Filas": os e-mails esperando resposta (a página lê /email/contagens).
+      assert.match(html, />\s*Filas\s*<span[^>]*data-mail-waiting[^>]*>3<\/span>/)
+      assert.match(html, /data-filas-stub data-pode-mexer="false"/)
+      assert.match(html, /Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail\./)
+    }
+    // Sem e-mail esperando: "Filas" sem número.
+    {
+      const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canOperate: true, stores: [], waiting: 0 }, { respostas: { '/api/mail/mailboxes': { items: [] } }, filhos })
+      assert.doesNotMatch(await m.html(), /data-mail-waiting/)
+    }
+    // Pausada (a conversa de e-mail aberta por cima, componente escondido):
+    // nada se atualiza sem ninguém ver; voltou aos e-mails, atualiza na hora.
+    {
+      const m = montar('../components/AtendimentoMail.vue', { isAdmin: true, canOperate: true, stores: [], paused: true }, { respostas: { '/api/mail/mailboxes': { items: [caixaUm] }, '/api/mail/mailboxes/box1/messages': { items: [], more: false } }, filhos })
+      await m.html()
+      await m.montar()
+      const antes = m.chamadas.length
+      await m.estado.poll()
+      m.estado.resumePolling()
+      await esperar()
+      assert.equal(m.chamadas.length, antes, 'pausada: nem o poll nem a volta do foco leem')
+      m.reativo.paused = false
+      await Vue.nextTick(); await esperar(); await esperar()
+      assert.ok(m.chamadas.length > antes, 'voltou: lê na hora')
+    }
+    // E-mail esperando resposta ao ABRIR a aba (13/10/2026: ele saiu da Caixa
+    // Humano): abre em "Filas" — admin e dono de caixa também. Decide-se ao
+    // abrir (o componente monta com a aba); depois, nada tira quem está nas Caixas.
+    {
+      const respostas = { '/api/mail/mailboxes': { items: [caixaUm] }, '/api/mail/mailboxes/box1/messages': { items: [], more: false } }
+      const m = montar('../components/AtendimentoMail.vue', { isAdmin: true, canOperate: true, stores: [], waiting: 2 }, { respostas, filhos })
+      await m.html()
+      await m.estado.loadMailboxes()
+      assert.equal(m.estado.section, 'queues', 'admin com caixa e e-mail esperando: abre nas Filas')
+      // Clicou em Caixas: fica lá, e a página guarda a escolha da visita.
+      m.estado.chooseSection('mailboxes')
+      assert.equal(m.estado.section, 'mailboxes')
+      assert.deepEqual(m.emitidos.at(-1), ['update:rememberedSection', 'mailboxes'])
+      m.reativo.waiting = 5
+      assert.equal(m.estado.section, 'mailboxes', 'o número subindo não tira das Caixas')
+      m.estado.chooseSection('queues')
+      assert.deepEqual([m.estado.section, m.emitidos.at(-1)], ['queues', ['update:rememberedSection', 'queues']])
+      // Abriu sem e-mail esperando: Caixas; o número que chega depois (o polling) não muda a seção.
+      const n = montar('../components/AtendimentoMail.vue', { isAdmin: true, canOperate: true, stores: [], waiting: 0 }, { respostas, filhos })
+      await n.estado.loadMailboxes()
+      n.reativo.waiting = 3
+      assert.equal(n.estado.section, 'mailboxes')
+      assert.deepEqual(n.emitidos, [], 'sem clique, nada a guardar')
+      // Reabriu a aba: a escolha da visita (a página passa) vale mais que o número.
+      const c = montar('../components/AtendimentoMail.vue', { isAdmin: true, canOperate: true, stores: [], waiting: 2, rememberedSection: 'mailboxes' }, { respostas, filhos })
+      assert.equal(c.estado.section, 'mailboxes')
+      const f = montar('../components/AtendimentoMail.vue', { isAdmin: true, canOperate: true, stores: [], waiting: 0, rememberedSection: 'queues' }, { respostas, filhos })
+      assert.equal(f.estado.section, 'queues')
+      // Quem não vê as Filas: o número não leva para lá.
+      const s = montar('../components/AtendimentoMail.vue', { isAdmin: false, stores: [], waiting: 4 }, { filhos })
+      assert.equal(s.estado.section, 'mailboxes')
+      // A Filas sabe quando a conversa de e-mail está por cima (relê na volta).
+      const fonteMail = web('components/AtendimentoMail.vue')
+      assert.match(fonteMail, /<AtendimentoMailFilas[\s\S]*?:pausado="!!paused"[\s\S]*?\/>/)
+      assert.match(fonteMail, /@click="chooseSection\('mailboxes'\)"\s*>Caixas<\/button>/)
+    }
+    // Caixas: o e-mail que tem conversa de e-mail abre a conversa (na aba E-mail).
+    {
+      const m = montar('../components/AtendimentoMail.vue', { isAdmin: true, canOperate: true, stores: [] }, { respostas: { '/api/mail/mailboxes/box1/messages': { items: [], more: false } }, filhos })
+      await m.html()
+      m.estado.mailboxes = [caixaUm]
+      m.estado.mailboxId = 'box1'
+      await Vue.nextTick(); await esperar()
+      const resumoDaLista = { id: 'm1', subject: 'Oi', from_address: 'c@x.com', from_name: 'C', received_at: '2026-10-08T12:00:00Z', direction: 'inbound', folder: 'Entrada', has_attachments: false, store: { tipo: 'loja', rotulo: 'Barbosa · ML', plataforma: 'ml' }, conversation_id: 'conv-mail' }
+      assert.equal(m.estado.fromIndex({ id: 'm1', recebido_em: 'x', direcao: 'inbound', tem_anexos: false, ponte: 'gravado', conversa_id: 'conv-mail', de: null, de_nome: null, assunto: null, assunto_oculto: false, pasta: { id: 's1', nome: 'Entrada', tipo: 'entrada' }, selo: resumoDaLista.store }).conversation_id, 'conv-mail')
+      m.estado.openedSummary = resumoDaLista
+      m.estado.detail = structuredClone(mensagem)
+      const html = await m.html()
+      assert.match(html, /data-mail-open-conversation[^>]*>[\s\S]*?Abrir a conversa deste e-mail/)
+      m.estado.openConversation()
+      assert.deepEqual(m.emitidos.at(-1), ['openConversation', 'conv-mail'])
+      m.estado.openedSummary = { ...resumoDaLista, conversation_id: null }
+      assert.doesNotMatch(await m.html(), /data-mail-open-conversation/, 'sem conversa de e-mail: sem o botão')
+    }
     // "Configurar": só admin (que mexe — o isAdmin da página já é admin E mexe); o Saiu/Não saiu da caixa crua.
     {
       let confirma = false
@@ -504,7 +729,7 @@ async function principal() {
       },
     })
     await m.montar()
-    assert.deepEqual(m.chamadas.map((c) => c.url).sort(), ['/api/atendimento/email/emails?fila=sem_loja', '/api/atendimento/email/filas', '/api/atendimento/email/saude'])
+    assert.deepEqual(m.chamadas.map((c) => c.url).sort(), ['/api/atendimento/email/contagens', '/api/atendimento/email/emails?fila=sem_loja', '/api/atendimento/email/filas', '/api/atendimento/email/saude'])
     let html = await m.html()
     assert.match(html, /Sem loja[\s\S]*?>1</)
     assert.match(html, /Pergunta &lt;b&gt;importante&lt;\/b&gt;/, 'o assunto é texto, nunca HTML')
@@ -560,7 +785,7 @@ async function principal() {
     post = m.chamadas.filter((c) => c.metodo === 'POST').at(-1)
     assert.deepEqual([post.url, post.body], ['/api/atendimento/email/envios/job1/resolver', { saiu: false }])
     assert.ok(!m.chamadas.some((c) => /\/reply|\/responder/.test(c.url)), 'nada é reenviado')
-    // Abrir a conversa (a página abre na Caixa).
+    // Abrir a conversa (a página abre na aba E-mail — 13/10/2026 — nunca na Caixa).
     assert.match(html, /abrir a conversa/)
     // Admin: o reprocessar da fila inteira, com pergunta.
     const a = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, {
@@ -571,6 +796,109 @@ async function principal() {
     await a.estado.reprocessarFila()
     assert.equal(a.perguntas.length, 1)
     assert.ok(a.avisos.some(([, t]) => t === '2 de 3 acharam a loja'))
+  }
+
+  // ------------------------------------------------ as Filas de CONVERSA de e-mail (13/10/2026)
+  {
+    const email = (o = {}) => ({ protocolo: null, tipo: null, tipo_rotulo: null, marca: null, alias: null, destaque: false, ...o })
+    const chamado = { id: 'cv1', plataforma: 'site', canal: 'email', conta: 'Uranyx', comprador_nome: 'Maria <b>', pedido_marketplace: null, ultima_mensagem_em: '2026-10-13T09:00:00Z', ultima_mensagem_resumo: 'Quero trocar', aguardando_resposta: true, prazo_resposta_em: null, situacao: 'aberta', email: email({ protocolo: 'US-26-0007', tipo: 'sac', tipo_rotulo: 'SAC', marca: 'Uranyx', alias: 'sac@uranyx.com.br' }) }
+    const esperando = { ...chamado, id: 'cv2', plataforma: 'shopee', conta: 'Barbosa', comprador_nome: 'João', email: email({ alias: '21max@tuta.com' }) }
+    const contagens = { aguardando: 2, chamados: 1, chamados_por_tipo: { sac: 1, atacado: 0, duvidas: 0 } }
+    const respostas = {
+      '/api/atendimento/email/contagens': contagens,
+      '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&limite=50': { itens: [chamado], proximo: null },
+      '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&tipo_chamado=sac&limite=50': { itens: [chamado], proximo: null },
+      '/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50': { itens: [chamado, esperando], proximo: 'prazo:|cv2' },
+      '/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50&antes_de=prazo%3A%7Ccv2': { itens: [{ ...esperando, id: 'cv3' }], proximo: null },
+      '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&q=US-26-0007&limite=50': { itens: [chamado], proximo: null },
+      '/api/atendimento/conversas?caixa=email&filtro=todas&limite=50': { itens: [esperando], proximo: null },
+      '/api/atendimento/conversas?caixa=email&filtro=fechadas&limite=50': { itens: [], proximo: null },
+      '/api/atendimento/conversas?caixa=email&filtro=todas&q=US-26-0001&limite=50': { itens: [], proximo: null },
+      '/api/atendimento/conversas?caixa=email&filtro=fechadas&q=US-26-0001&limite=50': { itens: [], proximo: null },
+    }
+    // Quem só lê: só as filas de conversa (sem as de e-mail, sem a saúde, sem pastas), abrindo nos chamados.
+    const r = montar('../components/AtendimentoMailFilas.vue', { isAdmin: false, lojas: [], podeMexer: false }, { respostas })
+    await r.montar()
+    assert.equal(r.estado.fila, 'chamados')
+    assert.deepEqual(r.chamadas.map((c) => c.url).sort(), ['/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&limite=50', '/api/atendimento/email/contagens'])
+    let html = await r.html()
+    assert.doesNotMatch(html, /data-fila="sem_loja"|data-fila="pastas"|data-mail-saude/)
+    assert.match(html, /data-fila="chamados"[^>]*>\s*Chamados dos sites\s*<span[^>]*>1</)
+    assert.match(html, /data-fila="aguardando"[^>]*>\s*Falta responder\s*<span[^>]*>2</)
+    assert.match(html, /data-conversa-email="cv1"[\s\S]*US-26-0007[\s\S]*SAC[\s\S]*Site Uranyx[\s\S]*falta responder[\s\S]*Maria &lt;b&gt;[\s\S]*Quero trocar[\s\S]*abrir a conversa[\s\S]*para sac@uranyx\.com\.br/)
+    assert.match(html, /data-chips-chamado[\s\S]*SAC[\s\S]*>1</)
+    // O chip do tipo filtra; clicar de novo, todos.
+    r.estado.escolherTipo('sac')
+    await esperar()
+    assert.ok(r.chamadas.some((c) => c.url.endsWith('tipo_chamado=sac&limite=50')))
+    assert.equal(r.estado.tipoChamado, 'sac')
+    r.estado.escolherTipo('sac')
+    assert.equal(r.estado.tipoChamado, '')
+    // A busca: só no Enter/"buscar"; a lista recomeça.
+    r.estado.buscaTexto = ' US-26-0007 '
+    r.estado.buscar()
+    await esperar()
+    assert.equal(r.estado.busca, 'US-26-0007')
+    assert.ok(r.chamadas.some((c) => c.url === '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&q=US-26-0007&limite=50'))
+    assert.match(await r.html(), /data-busca-conversa-email[\s\S]*limpar/)
+    r.estado.buscaTexto = ''
+    r.estado.buscar()
+    // Falta responder, com a página seguinte; "abrir a conversa" avisa a aba E-mail.
+    r.estado.fila = 'aguardando'
+    await Vue.nextTick(); await esperar()
+    assert.deepEqual(r.estado.conversas.map((c) => c.id), ['cv1', 'cv2'])
+    await r.estado.carregar(true)
+    assert.deepEqual(r.estado.conversas.map((c) => c.id), ['cv1', 'cv2', 'cv3'])
+    html = await r.html()
+    assert.match(html, /data-conversa-email="cv2"[\s\S]*Shopee Barbosa[\s\S]*João/)
+    // Todas as conversas (o histórico): as abertas; no chip, as fechadas.
+    r.estado.fila = 'todas'
+    await Vue.nextTick(); await esperar()
+    assert.deepEqual(r.estado.conversas.map((c) => c.id), ['cv2'])
+    html = await r.html()
+    assert.match(html, /data-fila="todas"[^>]*>\s*Todas as conversas\s*<\/button>/, 'sem número')
+    assert.match(html, /data-chips-situacao[\s\S]*aria-pressed="true"[^>]*data-situacao="abertas"/)
+    assert.doesNotMatch(html, /data-chips-chamado/, 'o tipo do chamado é só dos chamados')
+    r.estado.verFechadas(true)
+    await esperar()
+    assert.ok(r.chamadas.some((c) => c.url === '/api/atendimento/conversas?caixa=email&filtro=fechadas&limite=50'))
+    html = await r.html()
+    assert.match(html, /Nenhuma conversa de e-mail fechada\./)
+    assert.doesNotMatch(html, /data-buscar-na-outra/, 'sem busca: nada a oferecer')
+    // A busca que não acha numa metade oferece a outra (1 clique), com a mesma busca.
+    r.estado.verFechadas(false)
+    await esperar()
+    r.estado.buscaTexto = 'US-26-0001'
+    r.estado.buscar()
+    await esperar()
+    assert.match(await r.html(), /Nada encontrado para essa busca\.\s*<button[^>]*data-buscar-na-outra[^>]*>procurar nas fechadas<\/button>/)
+    r.estado.verFechadas(true)
+    await esperar()
+    assert.ok(r.chamadas.some((c) => c.url === '/api/atendimento/conversas?caixa=email&filtro=fechadas&q=US-26-0001&limite=50'))
+    assert.match(await r.html(), /data-buscar-na-outra[^>]*>procurar nas abertas<\/button>/)
+    r.estado.buscaTexto = ''
+    r.estado.buscar()
+    await esperar()
+    r.estado.fila = 'aguardando'
+    await Vue.nextTick(); await esperar()
+    assert.ok(!r.chamadas.some((c) => /\/email\/(filas|saude|emails)/.test(c.url)), 'quem só lê não pede as filas de e-mail')
+    // A conversa de e-mail aberta por cima (a página pausa) e a volta: a fila e os números de novo.
+    const antesDaVolta = r.chamadas.length
+    r.reativo.pausado = true
+    await Vue.nextTick(); await esperar()
+    assert.equal(r.chamadas.length, antesDaVolta, 'pausar não lê nada')
+    r.reativo.pausado = false
+    await Vue.nextTick(); await esperar()
+    assert.deepEqual(r.chamadas.slice(antesDaVolta).map((c) => c.url).sort(), ['/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50', '/api/atendimento/email/contagens'])
+    // Quem mexe vê as duas no meio das outras, e as contagens juntas.
+    const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, {
+      respostas: { ...respostas, '/api/atendimento/email/filas': { sem_loja: 3 }, '/api/atendimento/email/saude': { caixas: [] }, '/api/atendimento/email/emails?fila=sem_loja': { itens: [], proximo: null } },
+    })
+    await m.montar()
+    assert.equal(m.estado.fila, 'sem_loja')
+    assert.deepEqual(m.estado.contagens, { sem_loja: 3, chamados: 1, aguardando: 2 })
+    html = await m.html()
+    assert.match(html, /data-fila="sem_loja"[\s\S]*data-fila="sem_vinculo"[\s\S]*data-fila="chamados"[\s\S]*data-fila="aguardando"[\s\S]*data-fila="todas"[\s\S]*data-fila="suspeito"[\s\S]*data-fila="revisar_envio"[\s\S]*data-fila="pastas"/)
   }
 
   // ------------------------------------------------ Configurar
@@ -666,7 +994,7 @@ async function principal() {
     const x = montar('../components/AtendimentoEmailResposta.vue', { conversaId: 'c3', mailMessageId: null, versao: 1 }, { respostas: { '/api/atendimento/email/conversas/c3/previa': Object.assign(new Error('x'), { data: { detail: { code: 'nao_e_conversa_de_email' } } }) } })
     await x.html(); await esperar()
     assert.equal(x.estado.trava, null)
-    assert.match(await x.html(), /nao_e_conversa_de_email|Não consegui/)
+    assert.match(await x.html(), /Esta conversa não é de e-mail da ponte\./)
   }
 
   // ------------------------------------------------ o cartão do e-mail
@@ -982,97 +1310,56 @@ async function principal() {
   const rotasEmail = api('routers/atendimento_email.py')
   const schemasAtd = api('schemas/atendimento.py')
 
-  // ------------------------------------------------ W1: os chips SAC / Atacado / Dúvidas no grupo Site
+  // ------------------------------------------------ W1/W2 (13/10/2026): o e-mail saiu da Caixa
+  // O dono: "vamos deixar o e-mail aparecer só na aba de e-mail; a do chat de
+  // atendimento aparece só no chat mesmo". Os chips do chamado do Site e o
+  // filtro "E-mail sem vínculo" saíram da Caixa; moram em E-mail › Filas.
   {
-    // Os tipos da tela = os da API (ROTULO_TIPO_CAIXA, sobre dados.mail.caixa).
+    const separa = api('services/atendimento/separa_email.py')
+    // A régua única: canal email + dados.fonte = 'tuta' (a Amazon pelo Gmail fica).
+    assert.match(separa, /def conversa_de_email_sql\(c: Any = AtendimentoConversa\):[\s\S]*?c\.canal == CANAL_EMAIL,\s+func\.coalesce\(func\.btrim\(c\.dados\[CHAVE_FONTE\]\.astext\), ""\) == FONTE_TUTA/)
+    assert.match(separa, /def na_caixa_sql\(c: Any = AtendimentoConversa\):[\s\S]*?return not_\(conversa_de_email_sql\(c\)\)/)
+    // A lista: a Caixa só com o chat; `caixa=email` só com o e-mail.
+    assert.match(rotasAtd, /^CAIXAS = \("", CAIXA_HUMANO, CAIXA_EMAIL\)$/m)
+    assert.match(rotasAtd, /if caixa_email:\s+consulta = consulta\.where\(separa_email\.conversa_de_email_sql\(\)\)\s+else:\s+consulta = consulta\.where\(separa_email\.na_caixa_sql\(\)\)/)
+    assert.match(rotasAtd, /and not caixa_email\n\s+\)/, 'o Direct nunca entra na lista do e-mail')
+    // O /resumo (plataformas, barra de lojas, etiquetas, Caixa Humano): só a Caixa.
+    assert.match(rotasAtd, /cond = and_\(separa_email\.na_caixa_sql\(\), \*\(\[escopo\] if escopo is not None else \[\]\)\)/)
+    assert.match(rotasAtd, /q_plat = q_plat\.where\(cond\)/)
+    assert.match(rotasAtd, /q_loja = q_loja\.where\(cond\)/)
+    for (const classe of ['PlataformaResumoOut', 'LojaResumoOut', 'ResumoOut']) {
+      const corpo = (schemasAtd.match(new RegExp(`class ${classe}\\(BaseModel\\):([\\s\\S]*?)\\n\\n\\nclass `)) || [])[1] || ''
+      assert.ok(corpo && !/email_sem_vinculo:/.test(corpo) && !/^\s+chamados:/m.test(corpo), `${classe} sem o e-mail`)
+    }
+    // As métricas e a Caixa Humano: sem o e-mail.
+    assert.match(rotasAtd, /filtro = \[AtendimentoConversa\.ultima_mensagem_em >= desde, separa_email\.na_caixa_sql\(\)\]/)
+    assert.match(api('services/atendimento/humano.py'), /separa_email\.na_caixa_sql\(c\),\s+c\.plataforma\.in_\(PLATAFORMAS_CAIXA\)/)
+    // A linha da lista do e-mail traz o chamado (sem texto).
+    assert.match(schemasAtd, /class EmailResumoOut\(BaseModel\):[\s\S]*?protocolo: str \| None = None\s+tipo: str \| None = None\s+tipo_rotulo: str \| None = None/)
+    assert.match(rotasAtd, /"email": _email_resumo\(c\),/)
+    // Os tipos do chamado: na fila "Chamados dos sites" (= os da API).
     const tiposPy = [...(api('services/mail_atendimento/constantes.py').match(/^ROTULO_TIPO_CAIXA = \{([\s\S]*?)^\}/m) || [])[1].matchAll(/^\s+(TIPO_[A-Z]+):/gm)].map((m) => m[1])
     const valorPy = (nome) => (api('services/mail_atendimento/constantes.py').match(new RegExp(`^${nome} = "([a-z]+)"$`, 'm')) || [])[1]
-    assert.deepEqual(L.TIPOS_CHAMADO.map((t) => t.value), tiposPy.map(valorPy))
-    assert.deepEqual(L.TIPOS_CHAMADO.map((t) => t.label), ['SAC', 'Atacado', 'Dúvidas e sugestões'])
+    assert.deepEqual(F.TIPOS_CHAMADO.map((t) => t.value), tiposPy.map(valorPy))
+    assert.deepEqual(F.TIPOS_CHAMADO.map((t) => t.label), ['SAC', 'Atacado', 'Dúvidas e sugestões'])
     assert.match(rotasAtd, /^TIPOS_CHAMADO = tuple\(ROTULO_TIPO_CAIXA\)$/m)
     assert.match(rotasAtd, /tipo_chamado: Annotated\[str \| None, Query\(max_length=16\)\] = None,/)
-    assert.match(rotasAtd, /raise HTTPException\(422, detail=\{"code": "tipo_chamado_invalido"\}\)/)
     assert.match(rotasAtd, /return AtendimentoConversa\.dados\["mail"\]\["caixa"\]\.astext/)
-    assert.match(schemasAtd, /class PlataformaResumoOut\(BaseModel\):[\s\S]*?chamados: dict\[str, int\] = Field\(default_factory=dict\)/)
-    // Só no grupo Site inteiro (com um site escolhido na barra, o chamado do e-mail não é dele).
-    const f = (x = {}) => ({ plataforma: 'site', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '', tipo_chamado: '', ...x })
-    assert.equal(L.temChipsDoChamado(f()), true)
-    assert.equal(L.temChipsDoChamado(f({ externo_ref: 'site:charlots' })), false)
-    assert.equal(L.temChipsDoChamado(f({ plataforma: 'ml' })), false)
-    assert.equal(L.tipoChamadoAtivo(f({ tipo_chamado: 'SAC' })), 'sac')
-    assert.equal(L.tipoChamadoAtivo(f({ tipo_chamado: 'sac', plataforma: 'ml' })), '', 'o lembrado fora do Site não filtra')
-    assert.equal(L.tipoChamadoAtivo(f({ tipo_chamado: 'outro' })), '')
-    // Os números: os chamados abertos do /resumo (a plataforma site); API antiga, sem número.
-    const resumoSite = { plataformas: [{ plataforma: 'site', aguardando: 1, vencendo: 0, vencidas: 0, chamados: { sac: 3, duvidas: 1 } }], lojas: [] }
-    assert.deepEqual(L.contagemDosChamados(resumoSite), { sac: 3, atacado: 0, duvidas: 1 })
-    assert.equal(L.contagemDosChamados({ plataformas: [{ plataforma: 'site', aguardando: 0, vencendo: 0, vencidas: 0 }], lojas: [] }), null)
-    assert.equal(L.contagemDosChamados(null), null)
-    // O clique (o trecho de verdade): liga, e clicar no aceso volta para todos.
-    const filtros = Vue.ref(f())
-    const js = trecho(listaSetup, 'function mudar', '// Busca com espera') + '\n' + trecho(listaSetup, '// ─── chips do tipo do chamado', '// A escolha da plataforma')
-      + '\nreturn { mudar, chipsDoChamado, tipoAtivo, numerosDoChamado, escolherTipo }'
-    const x = new Function('computed', 'filtros', 'props', 'temChipsDoChamado', 'tipoChamadoAtivo', 'contagemDosChamados', js)(
-      Vue.computed, filtros, { resumo: resumoSite }, L.temChipsDoChamado, L.tipoChamadoAtivo, L.contagemDosChamados,
-    )
-    assert.equal(x.chipsDoChamado.value, true)
-    assert.deepEqual(x.numerosDoChamado.value, { sac: 3, atacado: 0, duvidas: 1 })
-    x.escolherTipo('atacado')
-    assert.equal(filtros.value.tipo_chamado, 'atacado')
-    assert.equal(x.tipoAtivo.value, 'atacado')
-    x.escolherTipo('atacado')
-    assert.equal(filtros.value.tipo_chamado, '', 'de novo no aceso: todos')
-    x.escolherTipo('sac')
-    x.mudar('plataforma', 'ml')
-    assert.equal(filtros.value.tipo_chamado, '', 'trocou a plataforma: o tipo sai')
-    assert.equal(x.chipsDoChamado.value, false)
-    // O vazio diz o tipo.
-    const vazio = new Function('computed', 'filtros', 'TIPOS_CHAMADO', 'tipoAtivo', trecho(listaSetup, 'const VAZIO', '// ↑/↓ com o foco') + '\nreturn textoVazio')
-    assert.equal(vazio(Vue.computed, Vue.ref(f({ tipo_chamado: 'duvidas' })), L.TIPOS_CHAMADO, Vue.ref('duvidas')).value, 'Nenhum chamado de Dúvidas e sugestões com esses filtros.')
-    assert.equal(vazio(Vue.computed, Vue.ref(f({ filtro: 'email_sem_vinculo' })), L.TIPOS_CHAMADO, Vue.ref('')).value, 'Nenhum e-mail de loja sem vínculo — todos acharam o pedido.')
-    // A tela: os chips logo abaixo das abas, com o número; a página manda o tipo só no Site.
-    assert.match(listaTpl, /<div v-if="chipsDoChamado"[^>]*role="group" aria-label="tipo do chamado" data-chips-chamado>/)
-    assert.match(listaTpl, /v-for="t in TIPOS_CHAMADO"[\s\S]*?:aria-pressed="tipoAtivo === t\.value"[\s\S]*?@click="escolherTipo\(t\.value\)"/)
-    assert.ok(listaTpl.indexOf('data-chips-chamado') > listaTpl.indexOf('role="tablist"'), 'abaixo das abas')
+    // A Caixa: sem chips do chamado, sem "E-mail sem vínculo" no menu, sem o tipo na consulta.
+    for (const nome of ['TIPOS_CHAMADO', 'temChipsDoChamado', 'tipoChamadoAtivo', 'contagemDosChamados']) assert.equal(L[nome], undefined, nome)
+    assert.ok(!L.FILTROS_MENU.some((x) => x.value === 'email_sem_vinculo'), 'o filtro do e-mail saiu do menu')
+    assert.doesNotMatch(listaTpl, /data-chips-chamado|escolherTipo/)
+    assert.doesNotMatch(listaSetup, /email_sem_vinculo|tipo_chamado/)
     const pagina = web('pages/atendimento.vue')
-    assert.match(pagina, /const tipo = tipoChamadoAtivo\(f\)\s+if \(tipo\) p\.set\('tipo_chamado', tipo\)/)
-    assert.match(web('components/AtendimentoFiltroPlataforma.vue'), /if \(novo\.plataforma !== filtros\.value\.plataforma\) novo\.tipo_chamado = ''/)
-  }
-
-  // ------------------------------------------------ W2: o filtro "E-mail sem vínculo" na lista
-  {
+    assert.doesNotMatch(pagina, /tipo_chamado|tipoChamadoAtivo/)
+    assert.doesNotMatch(web('components/AtendimentoFiltroPlataforma.vue'), /tipo_chamado/)
+    assert.doesNotMatch(web('components/AtendimentoLojas.vue'), /tipo_chamado/)
+    // O filtro do servidor continua (a lista do e-mail usa: `caixa=email&filtro=email_sem_vinculo`).
     const filtrosApi = [...((rotasAtd.match(/^FILTROS = \(([\s\S]*?)^\)/m) || [])[1] || '').matchAll(/"([a-z_]+)"/g)].map((m) => m[1])
     assert.ok(filtrosApi.includes('email_sem_vinculo'))
-    const item = L.FILTROS_MENU.find((x) => x.value === 'email_sem_vinculo')
-    assert.equal(item.label, 'E-mail sem vínculo')
-    assert.ok(!L.FILTROS_ETIQUETA.has('email_sem_vinculo'), 'não é etiqueta')
-    const menu = L.FILTROS_MENU.map((x) => x.value)
-    assert.ok(menu.indexOf('email_sem_vinculo') < menu.indexOf('reclamacao'), 'antes do grupo Etiqueta')
-    // A régua do servidor: e-mail da ponte (Tuta), sem pedido, fora do site; as abertas.
-    const regua = rotasAtd.slice(rotasAtd.indexOf('def _email_sem_vinculo('), rotasAtd.indexOf('def _tipo_do_chamado('))
-    for (const pedaco of ['AtendimentoConversa.canal == CANAL_EMAIL', 'AtendimentoConversa.dados["fonte"].astext == FONTE_TUTA', 'pedido == ""', 'AtendimentoConversa.plataforma != PLATAFORMA_SITE']) assert.ok(regua.includes(pedaco), pedaco)
-    assert.match(rotasAtd, /elif filtro == FILTRO_EMAIL_SEM_VINCULO:\s+# [^\n]*\n\s+consulta = consulta\.where\(\s+AtendimentoConversa\.situacao != CONVERSA_FECHADA, _email_sem_vinculo\(\)/)
-    assert.match(rotasAtd, /and filtro != FILTRO_EMAIL_SEM_VINCULO\s+and tipo_chamado is None/, 'o Direct nunca entra')
-    for (const classe of ['PlataformaResumoOut', 'LojaResumoOut', 'ResumoOut']) {
-      assert.match(schemasAtd, new RegExp(`class ${classe}\\(BaseModel\\):[\\s\\S]*?email_sem_vinculo: int = 0`), classe)
-    }
-    // O número do menu (o trecho de verdade): da linha, da loja, das plataformas ou do total.
-    const corpo = listaSetup.slice(listaSetup.indexOf('function porEtiqueta'), listaSetup.indexOf('function contadorCls'))
-    const contagem = (resumo, filtros) => new Function('computed', 'props', 'filtros', 'FILTROS_ETIQUETA', transpile(corpo) + '\nreturn contagem')(
-      Vue.computed, { resumo }, { value: { plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', ...filtros } }, L.FILTROS_ETIQUETA,
-    ).value
-    const resumo = {
-      email_sem_vinculo: 3,
-      plataformas: [
-        { plataforma: 'ml', aguardando: 0, vencendo: 0, vencidas: 0, email_sem_vinculo: 2 },
-        { plataforma: 'shopee', aguardando: 0, vencendo: 0, vencidas: 0, email_sem_vinculo: 1 },
-      ],
-      lojas: [{ integration_id: 'L1', plataforma: 'ml', aguardando: 0, vencidas: 0, email_sem_vinculo: 2 }],
-    }
-    assert.equal(contagem(resumo, {}).email_sem_vinculo, 3)
-    assert.equal(contagem(resumo, { plataforma: 'shopee' }).email_sem_vinculo, 1)
-    assert.equal(contagem(resumo, { integration_id: 'L1' }).email_sem_vinculo, 2)
-    assert.equal(contagem({ ...resumo, email_sem_vinculo: undefined }, {}).email_sem_vinculo, null, 'API antiga: sem número')
-    assert.match(listaSetup, /value === 'a_conferir' \|\| value === 'email_sem_vinculo'\) return 'bg-amber-500 text-white'/)
+    // O vazio do "Todas" de sempre.
+    const vazio = new Function('computed', 'filtros', trecho(listaSetup, 'const VAZIO', '// ↑/↓ com o foco') + '\nreturn textoVazio')
+    assert.equal(vazio(Vue.computed, Vue.ref({ filtro: 'todas', q: '' })).value, 'Nenhuma conversa com esses filtros.')
   }
 
   // ------------------------------------------------ W3: Pastas e regras (E-mail › Filas)
@@ -1253,7 +1540,7 @@ async function principal() {
   // ------------------------------------------------ a caixa da aba: o mesmo aviso da fila do e-mail
   assert.match(web('components/AtendimentoAbaResposta.vue'), /if \(ehEmail\.value\) toasts\.success\(`\$\{AVISO_EMAIL_NA_FILA\.titulo\} \(\$\{r\.canal_rotulo \|\| 'outra conversa'\}\)`, AVISO_EMAIL_NA_FILA\.texto\)/)
 
-  console.log('ok — atendimento-mail-atendimento: contrato, regras, seções, filas, configurar, prévia, cartão, chamado, caixa da aba, conversa, lista (chips e sem vínculo), pastas e regras, e-mails da venda')
+  console.log('ok — atendimento-mail-atendimento: contrato, regras, seções, filas (e as de conversa), configurar, prévia, cartão, chamado, caixa da aba, conversa, o e-mail fora da Caixa (lista, página, barra), pastas e regras, e-mails da venda')
 }
 
 principal().catch((e) => {

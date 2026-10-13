@@ -47,6 +47,14 @@ QUEM ENTRA NA FAMÍLIA (`familia`):
      deste pedido) só entra o e-mail/Zap SEM pedido próprio — o de outro
      pedido é de outra compra, mesmo sendo do mesmo comprador.
 
+E-MAIL × CHAT (13/10/2026, `separa_email`): o e-mail da ponte mora na aba
+E-mail da tela, nunca na família de uma conversa de chat — a conversa de
+e-mail não entra nas candidatas, e a conversa de e-mail aberta (pela aba
+E-mail) é uma família sozinha: nem o chat aparece nela. O e-mail que a ponte
+gravou DENTRO de uma conversa de chat (o aviso de antes de 13/10) não entra
+nas mensagens (`mensagens_leves`). Sobra a aba E-mail só para a conversa de
+e-mail aberta (a casa dela); o Zap continua como era.
+
 NUNCA MISTURA (a regra que não pode falhar):
   - LOJA: mesma `integration_id` (nas lojas do robô, sem integração, o mesmo
     `canal_id`). Conversa sem loja conhecida (a Amazon que chegou sem conta)
@@ -106,6 +114,7 @@ from app.models import (
     AtendimentoPedidoComprador,
     AtendimentoReclamacao,
 )
+from app.services.atendimento import separa_email
 from app.services.atendimento.constantes import (
     AUTOR_MEDIADOR,
     CANAL_AVALIACAO,
@@ -118,7 +127,6 @@ from app.services.atendimento.constantes import (
     CANAL_RECLAMACAO,
     CANAL_SAC,
     CANAL_ZAP,
-    FONTE_TUTA,
     PLATAFORMAS_EXTERNAS,
     e_nota,
 )
@@ -305,8 +313,8 @@ def mesma_loja(a: AtendimentoConversa, b: AtendimentoConversa) -> bool:
 
 
 def e_email_tuta(c: AtendimentoConversa) -> bool:
-    """O e-mail veio do Tuta (`dados.fonte = 'tuta'`)."""
-    return c.canal == CANAL_EMAIL and _texto(_dados(c).get(CHAVE_FONTE)) == FONTE_TUTA
+    """O e-mail veio do Tuta (`dados.fonte = 'tuta'`): a régua única de `separa_email`."""
+    return separa_email.e_conversa_de_email(c)
 
 
 def e_contato(c: AtendimentoConversa) -> bool:
@@ -644,7 +652,13 @@ async def _candidatas(
     ordem = [case((or_(*do_pedido), 0), else_=1)] if do_pedido else []
     consulta = (
         select(c)
-        .where(loja, or_(*conds), c.canal.not_in(sorted(CANAIS_SEM_ABAS)))
+        .where(
+            loja,
+            or_(*conds),
+            c.canal.not_in(sorted(CANAIS_SEM_ABAS)),
+            # O e-mail da ponte mora na aba E-mail da tela (13/10/2026).
+            separa_email.na_caixa_sql(c),
+        )
         .order_by(*ordem, c.ultima_mensagem_em.desc().nulls_last(), c.created_at.desc())
         .limit(MAX_CONVERSAS)
     )
@@ -805,7 +819,9 @@ async def familia(session: AsyncSession, aberta: AtendimentoConversa) -> Familia
         return Familia(aberta=aberta, conversas=[aberta])
     pedido = chaves(aberta)
     loja = _clausula_loja(aberta)
-    if loja is None:
+    if loja is None or separa_email.e_conversa_de_email(aberta):
+        # Sem loja conhecida — ou a conversa de E-MAIL (13/10/2026): ela vive
+        # na aba E-mail, sozinha; o chat do pedido fica na Caixa.
         return Familia(
             aberta=aberta,
             conversas=[aberta],
@@ -908,16 +924,26 @@ class Leve:
         return (self.momento, str(self.id))
 
 
-async def mensagens_leves(session: AsyncSession, ids: Sequence[UUID]) -> list[Leve]:
-    """As mensagens de toda a família, sem texto, da mais antiga para a mais nova (1 consulta)."""
+async def mensagens_leves(
+    session: AsyncSession, ids: Sequence[UUID], *, de_email: Iterable[UUID] = ()
+) -> list[Leve]:
+    """As mensagens de toda a família, sem texto, da mais antiga para a mais nova (1 consulta).
+
+    `de_email` = as conversas de E-MAIL entre `ids` (mostram tudo); nas outras
+    (o chat), o e-mail que a ponte gravou lá fica de fora (`separa_email`).
+    """
     if not ids:
         return []
     m = AtendimentoMensagem
     momento = func.coalesce(m.enviada_em, m.created_at)
+    emails = sorted(set(de_email))
+    visivel = ~separa_email.mensagem_de_email_sql(m)
+    if emails:
+        visivel = or_(m.conversa_id.in_(emails), visivel)
     linhas = (
         await session.execute(
             select(m.id, m.conversa_id, m.autor, m.origem, m.tipo, momento.label("momento")).where(
-                m.conversa_id.in_(list(ids))
+                m.conversa_id.in_(list(ids)), visivel
             )
         )
     ).all()
@@ -1058,5 +1084,9 @@ async def abas_da_conversa(session: AsyncSession, aberta: AtendimentoConversa) -
     fam = await familia(session, aberta)
     if aberta.canal in CANAIS_SEM_ABAS or aberta.plataforma in PLATAFORMAS_EXTERNAS:
         return Abas(familia=fam, aba_da_conversa=None, abas=[], fora_da_aba={})
-    leves = await mensagens_leves(session, [c.id for c in fam.conversas])
+    leves = await mensagens_leves(
+        session,
+        [c.id for c in fam.conversas],
+        de_email=[c.id for c in fam.conversas if separa_email.e_conversa_de_email(c)],
+    )
     return separar(fam, leves)

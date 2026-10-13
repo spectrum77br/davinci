@@ -1,6 +1,4 @@
 <script lang="ts">
-import type { Resumo as ResumoDaCaixa } from '~/components/AtendimentoPlataforma.vue'
-
 // Filtros da lista — a página guarda e manda para a API (`GET /conversas`).
 export type FiltrosLista = {
   plataforma: string
@@ -13,9 +11,8 @@ export type FiltrosLista = {
   // Direct e os comentários da mesma conta). Opcionais: '' = sem filtro.
   externo_ref?: string
   rede_social_id?: string
-  // O tipo do chamado dos sites (RF6, 09/10/2026): os chips SAC / Atacado /
-  // Dúvidas e sugestões do grupo Site (`?tipo_chamado=`). '' = todos.
-  tipo_chamado?: string
+  // (13/10/2026: os chips do tipo do chamado dos sites saíram daqui com o
+  // e-mail — eles moram em E-mail › Filas › Chamados dos sites.)
   // A plataforma ESCOLHIDA — no menu do topo ou pelo nome do grupo na barra
   // (09/10/2026, Eduardo: "quando selecionar a plataforma lá em cima, corta
   // as outras ali da listagem"): a barra de lojas mostra só as lojas dela, e
@@ -41,9 +38,8 @@ export const FILTROS_MENU: OpcaoFiltro[] = [
   { value: 'a_conferir', label: 'A conferir', hint: 'resposta enviada pelo DaVinci que a plataforma não confirmou — confira se chegou ao comprador' },
   { value: 'minhas', label: 'Minhas', hint: 'conversas atribuídas a você' },
   { value: 'fechadas', label: 'Fechadas', hint: 'fechadas por alguém da equipe' },
-  // O e-mail das lojas (Tuta) que ainda não achou o pedido (RF5, 09/10/2026):
-  // a fila "Sem vínculo" de E-mail › Filas, aqui pela conversa. Não é etiqueta.
-  { value: 'email_sem_vinculo', label: 'E-mail sem vínculo', hint: 'e-mail das lojas (Tuta) ainda sem pedido ligado — quem cuida do Atendimento vincula em E-mail › Filas' },
+  // (13/10/2026: o "E-mail sem vínculo" saiu do menu — o e-mail não está mais
+  // na Caixa; a fila dele é E-mail › Filas › Sem vínculo.)
   // Pela ETIQUETA (status atual, 01/10/2026), da mais urgente para a menos —
   // os mesmos códigos da API (`filtro=reclamacao`…). Pré-venda e Pós-venda
   // passaram a ser a etiqueta: a conversa com reclamação aberta está em
@@ -76,33 +72,6 @@ export function opcoesDoFiltrar(caixa: string | null | undefined): OpcaoFiltro[]
 // Caixa, "Todas"; na Caixa Humano, "Falta responder" (pelo prazo).
 export function filtroPadrao(caixa: string | null | undefined): string {
   return caixa === 'humano' ? 'aguardando' : 'todas'
-}
-
-// Os TIPOS do chamado dos sites (RF6, 09/10/2026): os chips do grupo Site,
-// com os códigos da API (`ROTULO_TIPO_CAIXA` de mail_atendimento/constantes.py,
-// sobre `dados.mail.caixa`). Filtro da lista, não etiqueta: o motor de
-// etiqueta não muda (o chamado continua Pré-venda/Pós-venda no menu Filtrar).
-export const TIPOS_CHAMADO: OpcaoFiltro[] = [
-  { value: 'sac', label: 'SAC', hint: 'chamados do SAC dos sites (protocolo S: US-26-0001…)' },
-  { value: 'atacado', label: 'Atacado', hint: 'chamados de Atacado dos sites (protocolo A: UA-26-0001…)' },
-  { value: 'duvidas', label: 'Dúvidas e sugestões', hint: 'chamados de Dúvidas e sugestões dos sites (protocolo DS: UDS-26-0001…)' },
-]
-// Os chips aparecem no grupo Site inteiro — com um site escolhido na barra
-// (a caixa do carrinho), o chamado do e-mail não é dele.
-export function temChipsDoChamado(f: Pick<FiltrosLista, 'plataforma' | 'integration_id' | 'externo_ref'>): boolean {
-  return f.plataforma === 'site' && !f.integration_id && !f.externo_ref
-}
-// O tipo que filtra de verdade: o lembrado fora do grupo Site não vale.
-export function tipoChamadoAtivo(f: FiltrosLista): string {
-  const t = (f.tipo_chamado || '').trim().toLowerCase()
-  return temChipsDoChamado(f) && TIPOS_CHAMADO.some((x) => x.value === t) ? t : ''
-}
-// Os números dos chips: os chamados abertos por tipo (o `chamados` da
-// plataforma site no /resumo). API antiga (sem a chave): sem número.
-export function contagemDosChamados(resumo: ResumoDaCaixa | null | undefined): Record<string, number> | null {
-  const site = (resumo?.plataformas || []).find((p) => p.plataforma === 'site')
-  if (!site?.chamados) return null
-  return Object.fromEntries(TIPOS_CHAMADO.map((t) => [t.value, Number(site.chamados?.[t.value]) || 0]))
 }
 </script>
 
@@ -182,7 +151,6 @@ function mudar<K extends keyof FiltrosLista>(k: K, v: FiltrosLista[K]) {
     novo.canal = ''
     novo.externo_ref = ''
     novo.rede_social_id = ''
-    novo.tipo_chamado = ''
   }
   // Escolheu a loja no seletor (só as com integração): sai a linha sem
   // integração (site, conta de rede) que estivesse escolhida na barra.
@@ -215,12 +183,6 @@ function porEtiqueta(contagens: (Record<string, number> | undefined)[]): Record<
   for (const e of FILTROS_ETIQUETA) out[e] = tem ? contagens.reduce((s, c) => s + (Number(c?.[e]) || 0), 0) : null
   return out
 }
-// "E-mail sem vínculo" (RF5): o número da linha, da loja ou das plataformas;
-// a API antiga não manda — sem número.
-function semVinculo(linhas: ({ email_sem_vinculo?: number } | null | undefined)[]): number | null {
-  if (!linhas.length || !linhas.every((x) => typeof x?.email_sem_vinculo === 'number')) return null
-  return linhas.reduce((s, x) => s + (Number(x?.email_sem_vinculo) || 0), 0)
-}
 // A Caixa Humano (09/10/2026): o título dela na lista. Do mesmo jeito; a API
 // antiga não manda — sem número.
 function naHumano(linhas: ({ humano?: number } | null | undefined)[]): number | null {
@@ -246,7 +208,6 @@ const contagem = computed((): Record<string, number | null> => {
       vencidas: semIntegracao.vencidas ?? 0,
       vencendo: null,
       a_conferir: semIntegracao.a_conferir ?? null,
-      email_sem_vinculo: semVinculo([semIntegracao]),
       humano: naHumano([semIntegracao]),
       ...porEtiqueta([semIntegracao.etiquetas]),
     }
@@ -258,7 +219,6 @@ const contagem = computed((): Record<string, number | null> => {
       vencidas: l?.vencidas ?? 0,
       vencendo: null,
       a_conferir: l?.a_conferir ?? null,
-      email_sem_vinculo: l ? semVinculo([l]) : 0,
       humano: l ? naHumano([l]) : 0,
       ...porEtiqueta(l ? [l.etiquetas] : []),
     }
@@ -272,7 +232,6 @@ const contagem = computed((): Record<string, number | null> => {
     vencendo: ps.reduce((s, p) => s + (p.vencendo || 0), 0),
     vencidas: ps.reduce((s, p) => s + (p.vencidas || 0), 0),
     a_conferir: porPlataforma ? ps.reduce((s, p) => s + (p.a_conferir || 0), 0) : (f.plataforma ? null : (r.a_conferir ?? null)),
-    email_sem_vinculo: f.plataforma ? (ps.length ? semVinculo(ps) : 0) : semVinculo([r]),
     humano: f.plataforma ? (ps.length ? naHumano(ps) : 0) : naHumano([r]),
     // Sem plataforma escolhida, o total do topo; com ela, o da plataforma
     // (a que não tem conversa não manda `etiquetas`: conta zero).
@@ -284,7 +243,7 @@ const contagem = computed((): Record<string, number | null> => {
 function contadorCls(value: string, n: number | null | undefined) {
   if (!n) return 'bg-muted text-muted-foreground'
   if (value === 'vencidas') return 'bg-red-500 text-white'
-  if (value === 'vencendo' || value === 'a_conferir' || value === 'email_sem_vinculo') return 'bg-amber-500 text-white'
+  if (value === 'vencendo' || value === 'a_conferir') return 'bg-amber-500 text-white'
   // Etiqueta: a cor dela (Reclamação vermelho, Devolução roxo…).
   if (FILTROS_ETIQUETA.has(value)) return ETIQUETAS_INFO[value]?.cls || 'bg-primary/15 text-primary'
   return 'bg-primary/15 text-primary'
@@ -302,16 +261,6 @@ function escolherDoMenu(value: string) {
   // Clicar de novo no filtro escolhido tira o filtro (volta para Todas — na
   // Caixa Humano, para "Falta responder").
   mudar('filtro', filtros.value.filtro === value ? padrao.value : value)
-}
-
-// ─── chips do tipo do chamado (grupo Site, RF6) ─────────────────────────────
-// SAC / Atacado / Dúvidas e sugestões com os chamados abertos de cada tipo;
-// clicar no aceso volta para todos. Junto do resto (aba, Filtrar, busca).
-const chipsDoChamado = computed(() => temChipsDoChamado(filtros.value))
-const tipoAtivo = computed(() => tipoChamadoAtivo(filtros.value))
-const numerosDoChamado = computed(() => contagemDosChamados(props.resumo))
-function escolherTipo(tipo: string) {
-  mudar('tipo_chamado', tipoAtivo.value === tipo ? '' : tipo)
 }
 
 // A escolha da plataforma (antes um <select> só em tela estreita) virou os
@@ -451,13 +400,10 @@ const VAZIO: Record<string, string> = {
   a_conferir: 'Nenhuma resposta esperando conferência — tudo que saiu pelo DaVinci foi confirmado.',
   minhas: 'Nenhuma conversa atribuída a você.',
   fechadas: 'Nenhuma conversa fechada com esses filtros.',
-  email_sem_vinculo: 'Nenhum e-mail de loja sem vínculo — todos acharam o pedido.',
   todas: 'Nenhuma conversa com esses filtros.',
 }
 const textoVazio = computed(() => {
   if (filtros.value.q) return 'Nada encontrado para essa busca.'
-  const tipo = TIPOS_CHAMADO.find((t) => t.value === tipoAtivo.value)
-  if (tipo) return `Nenhum chamado de ${tipo.label} com esses filtros.`
   return VAZIO[filtros.value.filtro] || VAZIO.todas
 })
 
@@ -613,36 +559,6 @@ function mover(delta: number) {
             </template>
           </div>
         </div>
-      </div>
-      <!-- O tipo do chamado (grupo Site, RF6): SAC · Atacado · Dúvidas e sugestões -->
-      <div v-if="chipsDoChamado" class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="tipo do chamado" data-chips-chamado>
-        <button
-          type="button"
-          class="rounded-full border px-2 py-0.5 transition-colors"
-          :class="!tipoAtivo ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'"
-          :aria-pressed="!tipoAtivo"
-          title="todos os chamados e conversas dos sites"
-          data-tipo-chamado=""
-          @click="escolherTipo('')"
-        >Todos</button>
-        <button
-          v-for="t in TIPOS_CHAMADO"
-          :key="t.value"
-          type="button"
-          class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors"
-          :class="tipoAtivo === t.value ? 'border-teal-600 bg-teal-500/15 text-teal-800 dark:text-teal-300' : 'text-muted-foreground hover:bg-muted'"
-          :aria-pressed="tipoAtivo === t.value"
-          :title="numerosDoChamado ? `${t.hint} — ${numerosDoChamado[t.value]} aberto(s)` : t.hint"
-          :data-tipo-chamado="t.value"
-          @click="escolherTipo(t.value)"
-        >
-          {{ t.label }}
-          <span
-            v-if="numerosDoChamado"
-            class="min-w-[16px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
-            :class="numerosDoChamado[t.value] ? 'bg-teal-600 text-white' : 'bg-muted text-muted-foreground'"
-          >{{ numerosDoChamado[t.value] > 99 ? '99+' : numerosDoChamado[t.value] }}</span>
-        </button>
       </div>
       <!-- Caixa Humano: o que é, numa linha; e o aviso quando a triagem está desligada no servidor -->
       <p v-if="emHumano" class="text-[11px] leading-snug text-muted-foreground" data-dica-humano>

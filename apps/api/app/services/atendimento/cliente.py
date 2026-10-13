@@ -76,7 +76,7 @@ from app.models import (
     Integration,
 )
 from app.redis_client import redis
-from app.services.atendimento import clientes, indice
+from app.services.atendimento import clientes, indice, separa_email
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     CANAL_CHAT,
@@ -513,22 +513,19 @@ async def _avaliacoes_do_indice(
 async def _conversas_do_comprador(
     session: AsyncSession, conversa: AtendimentoConversa, comprador: str
 ) -> list[AtendimentoConversa]:
-    """As conversas do mesmo comprador NA MESMA LOJA (inclui a aberta)."""
-    return list(
-        (
-            await session.execute(
-                select(AtendimentoConversa)
-                .where(
-                    AtendimentoConversa.integration_id == conversa.integration_id,
-                    AtendimentoConversa.comprador_id == comprador,
-                )
-                .order_by(AtendimentoConversa.ultima_mensagem_em.desc().nulls_last())
-                .limit(MAX_CONVERSAS)
-            )
-        )
-        .scalars()
-        .all()
+    """As conversas do mesmo comprador NA MESMA LOJA (inclui a aberta).
+
+    Aberta uma conversa da Caixa, a conversa de e-mail da ponte não entra
+    (`separa_email`: o e-mail mora na aba E-mail — na Amazon, o endereço de
+    retransmissão do comprador é o mesmo do chat pelo Gmail)."""
+    consulta = select(AtendimentoConversa).where(
+        AtendimentoConversa.integration_id == conversa.integration_id,
+        AtendimentoConversa.comprador_id == comprador,
     )
+    if not separa_email.e_conversa_de_email(conversa):
+        consulta = consulta.where(separa_email.na_caixa_sql())
+    consulta = consulta.order_by(AtendimentoConversa.ultima_mensagem_em.desc().nulls_last())
+    return list((await session.execute(consulta.limit(MAX_CONVERSAS))).scalars().all())
 
 
 def _compras_das_conversas(conversas: list[AtendimentoConversa]) -> list[_Compra]:

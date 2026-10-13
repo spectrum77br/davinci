@@ -112,6 +112,23 @@ class HumanoOut(BaseModel):
     assuntos_rotulos: list[str] = Field(default_factory=list)
 
 
+class EmailResumoOut(BaseModel):
+    """O e-mail da linha, só na conversa de E-MAIL da ponte (13/10/2026: a lista
+    da aba E-mail, `?caixa=email`). Do `dados.mail` da conversa — nada do texto.
+
+    `protocolo`/`tipo`/`tipo_rotulo`/`marca` = o chamado do site (RF6; tipo =
+    sac | atacado | duvidas); `alias` = o endereço da loja que recebeu;
+    `destaque` = veio de pasta de problema/reclamação.
+    """
+
+    protocolo: str | None = None
+    tipo: str | None = None
+    tipo_rotulo: str | None = None
+    marca: str | None = None
+    alias: str | None = None
+    destaque: bool = False
+
+
 class ConversaResumoOut(BaseModel):
     """Uma linha da lista (marketplace ou Instagram)."""
 
@@ -174,6 +191,8 @@ class ConversaResumoOut(BaseModel):
     # e a IA não pode) — com os motivos. None = não está (vem também na Caixa
     # normal: o chip âmbar da linha).
     humano: HumanoOut | None = None
+    # Só na conversa de e-mail da ponte (a lista da aba E-mail); None nas outras.
+    email: EmailResumoOut | None = None
 
 
 class CopiaAmazonOut(BaseModel):
@@ -752,12 +771,8 @@ class PlataformaResumoOut(BaseModel):
     # números do menu Filtrar. A ainda não calculada conta pela regra de
     # pré/pós-venda (a mesma do filtro).
     etiquetas: dict[str, int] = Field(default_factory=dict)
-    # O filtro "E-mail sem vínculo" (RF5, 09/10/2026): as conversas de e-mail
-    # da ponte (Tuta), NÃO fechadas, ainda sem pedido (fora os chamados dos sites).
-    email_sem_vinculo: int = 0
-    # Só no "site": os chamados NÃO fechados por tipo (RF6 — sac, atacado,
-    # duvidas), os números dos chips SAC / Atacado / Dúvidas e sugestões.
-    chamados: dict[str, int] = Field(default_factory=dict)
+    # (13/10/2026: o "E-mail sem vínculo" e os chamados dos sites saíram
+    # daqui com o e-mail — os números deles: GET /api/atendimento/email/contagens.)
     # Na Caixa Humano (09/10/2026): falta responder e a IA não pode.
     humano: int = 0
 
@@ -803,8 +818,6 @@ class LojaResumoOut(BaseModel):
     status_motivo: str | None = None
     # Conversas NÃO fechadas da loja por etiqueta (ver PlataformaResumoOut).
     etiquetas: dict[str, int] = Field(default_factory=dict)
-    # O "E-mail sem vínculo" da loja (ver PlataformaResumoOut).
-    email_sem_vinculo: int = 0
     # Na Caixa Humano (ver PlataformaResumoOut).
     humano: int = 0
 
@@ -861,8 +874,6 @@ class ResumoOut(BaseModel):
     a_conferir: int = 0
     # Conversas NÃO fechadas por etiqueta, somando as plataformas.
     etiquetas: dict[str, int] = Field(default_factory=dict)
-    # O "E-mail sem vínculo" somando as plataformas (ver PlataformaResumoOut).
-    email_sem_vinculo: int = 0
     # A Caixa Humano somando as plataformas (o número da aba).
     humano: int = 0
     lojas: list[LojaResumoOut]

@@ -50,7 +50,7 @@ import app.db as _db
 from app.config import get_settings
 from app.models import AtendimentoCanal, AtendimentoConversa, Integration, IntegrationPlatform
 from app.redis_client import redis
-from app.services.atendimento import clientes, enviar
+from app.services.atendimento import clientes, enviar, separa_email
 from app.services.atendimento.constantes import (
     CANAIS_POR_PLATAFORMA,
     CONVERSA_FECHADA,
@@ -538,6 +538,9 @@ async def alertar_prazos(session: AsyncSession) -> int:
         AtendimentoConversa.prazo_resposta_em.is_not(None),
         AtendimentoConversa.situacao != CONVERSA_FECHADA,
         AtendimentoConversa.sem_resposta_necessaria.is_(False),
+        # Só a Caixa (o filtro "vencendo" da tela): a conversa de e-mail da
+        # ponte mora na aba E-mail, com o número dela (`separa_email`).
+        separa_email.na_caixa_sql(),
     )
     # DUAS consultas, cada uma com o seu teto. Numa só, pelo prazo mais
     # antigo, as vencidas de semanas atrás (o "ok, obrigado" que ficou na

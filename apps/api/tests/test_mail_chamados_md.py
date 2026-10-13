@@ -337,12 +337,17 @@ async def test_s3_busca_acha_o_chamado_agrupado_por_qualquer_protocolo(db, cena,
     )
     await rodar(db)
     assert (await meta_de(db, volta)).conversa_id == a.conversa_id
+    # A busca da lista do e-mail (a aba E-mail, 13/10/2026: o chamado não está na Caixa).
     for q in ("US-26-0302", "us-26-0301", "26-0302"):
-        r = await client.get(f"{API}/conversas", params={"q": q, "filtro": "todas"})
+        r = await client.get(
+            f"{API}/conversas", params={"q": q, "filtro": "todas", "caixa": "email"}
+        )
         assert r.status_code == 200, r.text
         assert [i["id"] for i in r.json()["itens"]] == [str(a.conversa_id)], q
-    r = await client.get(f"{API}/conversas", params={"q": "US-26-0399"})
+    r = await client.get(f"{API}/conversas", params={"q": "US-26-0399", "caixa": "email"})
     assert r.json()["itens"] == []
+    r = await client.get(f"{API}/conversas", params={"q": "US-26-0302"})
+    assert r.json()["itens"] == [], "na Caixa (o chat), nunca"
 
 
 # ─────────────── S4: a sugestão de agrupar ───────────────

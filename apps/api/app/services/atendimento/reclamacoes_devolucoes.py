@@ -119,7 +119,14 @@ from app.models import (
     Logistica,
 )
 from app.services import logistica_rules
-from app.services.atendimento import constantes, etiqueta_fatos, gravar, lojas, reclamacoes
+from app.services.atendimento import (
+    constantes,
+    etiqueta_fatos,
+    gravar,
+    lojas,
+    reclamacoes,
+    separa_email,
+)
 from app.services.atendimento.constantes import (
     AUTOR_SISTEMA,
     CANAL_RECLAMACAO,
@@ -239,6 +246,20 @@ MAX_TENTATIVAS_COMPRADOR = 3
 CANAIS_SEM_O_COMPRADOR = frozenset(
     {CANAL_RECLAMACAO, getattr(constantes, "CANAL_AVALIACAO", "avaliacao")}
 )
+
+
+def e_com_o_comprador(conversa: AtendimentoConversa) -> bool:
+    """A conversa é com o comprador (o chat da Caixa)? PURA.
+
+    Nem a da reclamação, nem a da avaliação, nem a conversa de E-MAIL da
+    ponte (`separa_email`: desde 13/10/2026 o aviso da plataforma por e-mail
+    cai nela, com o pedido; ela mora na aba E-mail, fora da Caixa — o cartão
+    da devolução ali ninguém veria)."""
+    if conversa.canal in CANAIS_SEM_O_COMPRADOR:
+        return False
+    return not separa_email.e_conversa_de_email(conversa)
+
+
 _NA = {"shopee": "na Shopee", "tiktok": "no TikTok"}
 _DA = {"shopee": "da Shopee", "tiktok": "do TikTok"}
 
@@ -552,6 +573,8 @@ async def _conversas_dos_pedidos(
                 ).where(
                     AtendimentoConversa.plataforma.in_(PLATAFORMAS_LIGADAS),
                     AtendimentoConversa.pedido_marketplace.in_(lote),
+                    # A conversa de e-mail da ponte não é chat com o comprador.
+                    separa_email.na_caixa_sql(),
                 )
             )
         ).all():
@@ -966,7 +989,7 @@ async def _conversa_da_devolucao(
     conversa = next((c for c in conversas if c.canal == CANAL_RECLAMACAO), None)
     criada = False
     if conversa is None:
-        com_o_comprador = [c for c in conversas if c.canal not in CANAIS_SEM_O_COMPRADOR]
+        com_o_comprador = [c for c in conversas if e_com_o_comprador(c)]
         if not aberto or com_o_comprador or integracao is None:
             return None, False
         if leitura is not None and leitura.adiada:
@@ -1173,11 +1196,12 @@ async def ligar_caso(
         session, caso, alvo, aberto, integracao, leitura, conversas, agora
     )
     # A conversa principal do pedido: a do chat com o comprador; sem chat, a
-    # da devolução (o cartão aparece nas duas, pelo pedido).
-    com_o_comprador = [c for c in conversas if c.canal not in CANAIS_SEM_O_COMPRADOR]
-    principal = (
-        com_o_comprador[0] if com_o_comprador else da_devolucao or next(iter(conversas), None)
-    )
+    # da devolução (o cartão aparece nas duas, pelo pedido). Nunca a conversa
+    # de e-mail da ponte (`separa_email`, aba E-mail): só com ela, a linha
+    # fica sem conversa (ou com a de antes).
+    com_o_comprador = [c for c in conversas if e_com_o_comprador(c)]
+    da_caixa = (c for c in conversas if not separa_email.e_conversa_de_email(c))
+    principal = com_o_comprador[0] if com_o_comprador else da_devolucao or next(da_caixa, None)
     if principal is not None:
         alvo.conversa_id = principal.id
     await session.flush()

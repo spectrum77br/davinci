@@ -388,7 +388,8 @@ def test_sinais_com_codigo_e_as_frases_da_ia_iguais():
         ({"canal": "zap"}, False),
         # E-mail antigo do Tuta (sem a ponte) numa loja Shopee: sem envio.
         ({"canal": "email", "dados": {"fonte": "tuta"}}, False),
-        ({"canal": "email", "dados": {"fonte": "tuta", "mail": {}}}, True),
+        # O e-mail da ponte mora na aba E-mail (13/10/2026): nunca na Caixa Humano.
+        ({"canal": "email", "dados": {"fonte": "tuta", "mail": {}}}, False),
         ({"canal": "email", "plataforma": "amazon"}, True),
         ({"canal": "carrinho", "plataforma": "site"}, False),
         ({"canal": "comentario", "plataforma": "instagram"}, False),
@@ -731,8 +732,9 @@ async def test_ia_pausada_entra_na_hora(client, db, make_user, pessoa, ctx_falso
 
 
 async def test_canal_sem_resposta_bloqueada_e_ponte(client, db, make_user, pessoa, ctx_falso):
-    """Zap, e-mail antigo do Tuta e carrinho do site ficam fora; a ponte entra; a
-    bloqueada só pelo estado (com "responder na plataforma")."""
+    """Zap, e-mail antigo do Tuta, carrinho do site e — desde 13/10/2026 — o
+    e-mail da ponte ficam fora (o e-mail mora na aba E-mail); a bloqueada só
+    pelo estado (com "responder na plataforma")."""
     dono = await make_user()
     integ, canal = await _loja_db(db, dono)
     texto = "quero cancelar, vou no Procon"
@@ -769,12 +771,13 @@ async def test_canal_sem_resposta_bloqueada_e_ponte(client, db, make_user, pesso
     )
 
     resumo = await _recalcular()
-    assert (resumo["candidatas"], resumo["na_caixa"]) == (3, 2)
+    assert (resumo["candidatas"], resumo["na_caixa"]) == (2, 1)
     assert (await _cache(db, bloqueada))["motivos"] == []
     r = await client.get(f"{URL}/conversas", params={"caixa": "humano"})
     por_id = {i["id"]: i["humano"]["motivos"] for i in r.json()["itens"]}
-    assert por_id == {str(ponte.id): ["e_mail"], str(reclamacao.id): ["reclamacao", "bloqueada"]}
-    assert (await client.get(f"{URL}/resumo")).json()["humano"] == 2
+    assert por_id == {str(reclamacao.id): ["reclamacao", "bloqueada"]}
+    assert str(ponte.id) not in por_id, "o e-mail da ponte não entra na Caixa Humano"
+    assert (await client.get(f"{URL}/resumo")).json()["humano"] == 1
 
     # As duas réguas do escopo (Python e SQL) dizem o mesmo para cada uma.
     async with _db.SessionLocal() as s:

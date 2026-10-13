@@ -66,6 +66,15 @@ filtro; sem o Direct do Instagram), toda linha que está nela traz `humano`
 (motivos e rótulos — o chip da Caixa normal também) e o /resumo conta
 `humano` por plataforma, por loja e no total, no escopo da equipe. Só
 leitura: nenhuma rota nova de escrita.
+
+E-MAIL SÓ NA ABA E-MAIL (13/10/2026, `services/atendimento/separa_email.py`):
+a conversa de e-mail da ponte (canal `email` + `dados.fonte = 'tuta'`) sai da
+Caixa — da lista, do /resumo (plataformas, lojas da barra, etiquetas, Caixa
+Humano), das métricas — e o e-mail que a ponte gravou dentro de uma conversa
+de chat não aparece mais nela (detalhe, prévia, abas). A Amazon pelo Gmail é
+o chat da Amazon e fica. A lista das conversas de e-mail é a mesma rota com
+`?caixa=email` (a aba E-mail: os chamados dos sites, o que falta responder) e
+o GET de UMA conversa pelo id continua abrindo qualquer uma, no escopo.
 """
 
 from __future__ import annotations
@@ -164,6 +173,7 @@ from app.services.atendimento import (
     gravar,
     instagram,
     robo,
+    separa_email,
 )
 from app.services.atendimento import etiqueta as etiqueta_svc
 from app.services.atendimento.constantes import (
@@ -347,14 +357,19 @@ FILTROS = (
     "carrinho",
     "midia",
     # O e-mail das lojas que ainda não achou o pedido (RF5, 09/10/2026) — a
-    # fila "E-mail sem vínculo" de E-mail › Filas, aqui por conversa.
+    # fila "E-mail sem vínculo" de E-mail › Filas, aqui por conversa (só com
+    # `caixa=email`: desde 13/10/2026 o e-mail não está na Caixa).
     "email_sem_vinculo",
 )
 FILTRO_EMAIL_SEM_VINCULO = "email_sem_vinculo"
 # A caixa da lista (09/10/2026): "" = a Caixa; "humano" = a Caixa Humano (só o
-# que falta responder e a IA não pode — `services/atendimento/humano.py`).
+# que falta responder e a IA não pode — `services/atendimento/humano.py`);
+# "email" (13/10/2026) = SÓ as conversas de e-mail da ponte, que saíram das
+# outras duas (`separa_email`) — a aba E-mail lista os chamados dos sites e o
+# e-mail que falta responder por aqui.
 CAIXA_HUMANO = "humano"
-CAIXAS = ("", CAIXA_HUMANO)
+CAIXA_EMAIL = "email"
+CAIXAS = ("", CAIXA_HUMANO, CAIXA_EMAIL)
 # Os tipos do chamado dos sites (RF6): os chips SAC / Atacado / Dúvidas e
 # sugestões do grupo Site (`?tipo_chamado=`, sobre `dados.mail.caixa`).
 TIPOS_CHAMADO = tuple(ROTULO_TIPO_CAIXA)
@@ -730,6 +745,8 @@ def _ultimo_tipo():
             # prévia — como em `gravar.recalcular` (`constantes.e_nota`).
             AtendimentoMensagem.origem != ORIGEM_NOTA,
             AtendimentoMensagem.tipo != TIPO_NOTA,
+            # Nem o e-mail numa conversa de chat (`separa_email`, 13/10/2026).
+            separa_email.mensagem_visivel_correlata_sql(),
         )
         .order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
         .limit(1)
@@ -785,21 +802,6 @@ def _email_sem_vinculo():
 def _tipo_do_chamado():
     """O tipo do chamado do site (RF6): `dados.mail.caixa` — sac | atacado | duvidas."""
     return AtendimentoConversa.dados["mail"]["caixa"].astext
-
-
-async def _chamados_por_tipo(session: AsyncSession, cond) -> dict[str, int]:
-    """Os chamados NÃO fechados dos sites por tipo (os números dos chips do
-    grupo Site), no escopo de quem pede — uma consulta, só quando há site."""
-    tipo = _tipo_do_chamado()
-    q = select(*[func.count().filter(tipo == t) for t in TIPOS_CHAMADO]).where(
-        AtendimentoConversa.plataforma == PLATAFORMA_SITE,
-        AtendimentoConversa.canal == CANAL_EMAIL,
-        AtendimentoConversa.situacao != CONVERSA_FECHADA,
-    )
-    if cond is not None:
-        q = q.where(cond)
-    linha = (await session.execute(q)).one()
-    return {t: int(n or 0) for t, n in zip(TIPOS_CHAMADO, linha, strict=True)}
 
 
 def _cursor(
@@ -1075,6 +1077,30 @@ def _resumo_dict(
         # Caixa Humano (09/10/2026): os motivos, só se ela está lá AGORA
         # (`humano.para_tela` sobre o `humano.triagem_da_linha_sql`).
         "humano": humano,
+        # Só na conversa de e-mail (a lista da aba E-mail, 13/10/2026).
+        "email": _email_resumo(c),
+    }
+
+
+def _email_resumo(c: AtendimentoConversa) -> dict[str, Any] | None:
+    """O `email` da linha: o chamado do site e a caixa da loja (`dados.mail`), sem texto."""
+    if not separa_email.e_conversa_de_email(c):
+        return None
+    mail = (c.dados or {}).get(separa_email.CHAVE_MAIL) if isinstance(c.dados, dict) else None
+    mail = mail if isinstance(mail, dict) else {}
+
+    def _txt(chave: str) -> str | None:
+        valor = mail.get(chave)
+        return str(valor)[:191] if isinstance(valor, str) and valor.strip() else None
+
+    tipo = _txt("caixa")
+    return {
+        "protocolo": _txt("protocolo"),
+        "tipo": tipo,
+        "tipo_rotulo": ROTULO_TIPO_CAIXA.get(tipo or "") or _txt("caixa_rotulo"),
+        "marca": _txt("marca_nome"),
+        "alias": _txt("alias"),
+        "destaque": mail.get("destaque") is True,
     }
 
 
@@ -1419,7 +1445,6 @@ def _juntar_externas(
         alvo.aguardando += lj.aguardando
         alvo.vencidas += lj.vencidas
         alvo.nao_lidas += lj.nao_lidas
-        alvo.email_sem_vinculo += lj.email_sem_vinculo
         alvo.etiquetas = {
             e: alvo.etiquetas.get(e, 0) + lj.etiquetas.get(e, 0)
             for e in {*alvo.etiquetas, *lj.etiquetas}
@@ -1499,7 +1524,11 @@ async def resumo(
     prazo = AtendimentoConversa.prazo_resposta_em
     vencendo = and_(aguardando, prazo >= agora, prazo < agora + VENCENDO)
     vencidas = and_(aguardando, prazo < agora)
-    cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
+    # Só a CAIXA (13/10/2026): a conversa de e-mail da ponte mora na aba
+    # E-mail e não conta aqui em nada — plataformas, barra de lojas,
+    # etiquetas, Caixa Humano (os números dela: GET /email/contagens).
+    escopo = _clausula_escopo(scope, AtendimentoConversa.integration_id)
+    cond = and_(separa_email.na_caixa_sql(), *([escopo] if escopo is not None else []))
 
     nao_lidas = func.coalesce(func.sum(AtendimentoConversa.nao_lidas), 0)
     # Conversas NÃO fechadas por etiqueta (o menu Filtrar), na mesma ordem de
@@ -1507,7 +1536,6 @@ async def resumo(
     aberta = AtendimentoConversa.situacao != CONVERSA_FECHADA
     efetiva = _etiqueta_efetiva()
     por_etiqueta = [func.count().filter(aberta, efetiva == e) for e in ETIQUETAS]
-    sem_vinculo = func.count().filter(aberta, _email_sem_vinculo())
     # A Caixa Humano (09/10/2026): falta responder e a IA não pode.
     na_caixa_humano = func.count().filter(humano_svc.caixa_humano_sql())
 
@@ -1521,12 +1549,10 @@ async def resumo(
         func.count().filter(vencidas),
         func.count().filter(_a_conferir_existe()),
         nao_lidas,
-        sem_vinculo,
         na_caixa_humano,
         *por_etiqueta,
     ).group_by(AtendimentoConversa.plataforma)
-    if cond is not None:
-        q_plat = q_plat.where(cond)
+    q_plat = q_plat.where(cond)
     por_plataforma = {
         p: PlataformaResumoOut(
             plataforma=p,
@@ -1536,14 +1562,10 @@ async def resumo(
             a_conferir=r or 0,
             nao_lidas=int(n or 0),
             etiquetas=_etiquetas(etq),
-            email_sem_vinculo=int(sv or 0),
             humano=int(h or 0),
         )
-        for p, a, v, x, r, n, sv, h, *etq in (await session.execute(q_plat)).all()
+        for p, a, v, x, r, n, h, *etq in (await session.execute(q_plat)).all()
     }
-    if PLATAFORMA_SITE in por_plataforma:
-        # Os chips SAC / Atacado / Dúvidas e sugestões do grupo Site (RF6).
-        por_plataforma[PLATAFORMA_SITE].chamados = await _chamados_por_tipo(session, cond)
     canais = await _canais(session, scope)
     # As do robô (Temu/AliExpress) e as externas (sites, redes — 02/10/2026)
     # só quando existem: loja com canal ou conversa. O Direct do Instagram
@@ -1599,14 +1621,12 @@ async def resumo(
         func.count().filter(aguardando),
         func.count().filter(vencidas),
         nao_lidas,
-        sem_vinculo,
         na_caixa_humano,
         *por_etiqueta,
     ).group_by(
         AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_sem_integracao
     )
-    if cond is not None:
-        q_loja = q_loja.where(cond)
+    q_loja = q_loja.where(cond)
     lojas: dict[tuple[UUID | None, str, UUID | None], LojaResumoOut] = {
         (i, p, rc): LojaResumoOut(
             integration_id=i,
@@ -1617,10 +1637,9 @@ async def resumo(
             aguardando=a or 0,
             vencidas=x or 0,
             etiquetas=_etiquetas(etq),
-            email_sem_vinculo=int(sv or 0),
             humano=int(h or 0),
         )
-        for i, p, rc, conta, a, x, n, sv, h, *etq in (await session.execute(q_loja)).all()
+        for i, p, rc, conta, a, x, n, h, *etq in (await session.execute(q_loja)).all()
     }
     canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]] = {}
     for c in canais:
@@ -1665,7 +1684,6 @@ async def resumo(
         plataformas=plataformas,
         a_conferir=sum(p.a_conferir for p in plataformas),
         etiquetas={e: sum(p.etiquetas.get(e, 0) for p in plataformas) for e in ETIQUETAS},
-        email_sem_vinculo=sum(p.email_sem_vinculo for p in plataformas),
         humano=sum(p.humano for p in plataformas),
         lojas=sorted(
             barra,
@@ -1742,6 +1760,7 @@ async def _listar_marketplace(
     perguntas_primeiro: bool = False,
     tipo_chamado: str | None = None,
     caixa_humano: bool = False,
+    caixa_email: bool = False,
 ) -> list[dict[str, Any]]:
     from app.services.atendimento import humano as humano_svc
 
@@ -1761,6 +1780,12 @@ async def _listar_marketplace(
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
     if cond is not None:
         consulta = consulta.where(cond)
+    # A Caixa (e a Caixa Humano) é só o CHAT; a conversa de e-mail da ponte
+    # vem só na aba E-mail (`caixa=email`) — 13/10/2026, `separa_email`.
+    if caixa_email:
+        consulta = consulta.where(separa_email.conversa_de_email_sql())
+    else:
+        consulta = consulta.where(separa_email.na_caixa_sql())
     if caixa_humano:
         # Só o que falta responder e a IA não pode (junto de qualquer filtro).
         consulta = consulta.where(humano_svc.caixa_humano_sql())
@@ -1976,6 +2001,9 @@ async def listar_conversas(
     `caixa=humano` (09/10/2026) = a Caixa Humano: só o que falta responder e a
     IA não pode (`services/atendimento/humano.py`), junto de qualquer outro
     filtro; o Direct do Instagram não entra.
+    A conversa de e-mail da ponte NUNCA vem na Caixa nem na Caixa Humano
+    (13/10/2026, `separa_email`): `caixa=email` traz SÓ elas (a aba E-mail),
+    com os mesmos filtros e o mesmo escopo; sem o Direct do Instagram.
     """
     plataformas = _plataformas_do_filtro(plataforma)
     canal = (canal or "").strip().lower() or None
@@ -1997,6 +2025,7 @@ async def listar_conversas(
     if caixa not in CAIXAS:
         raise HTTPException(422, detail={"code": "caixa_invalida"})
     caixa_humano = caixa == CAIXA_HUMANO
+    caixa_email = caixa == CAIXA_EMAIL
     pelo_prazo = filtro in FILTROS_PELO_PRAZO
     perguntas_primeiro = filtro in FILTROS_PERGUNTA_PRIMEIRO
     # Cursor inválido (ou da outra ordem) → 422 antes de ir ao banco.
@@ -2025,6 +2054,7 @@ async def listar_conversas(
             perguntas_primeiro=perguntas_primeiro,
             tipo_chamado=tipo_chamado,
             caixa_humano=caixa_humano,
+            caixa_email=caixa_email,
         )
     quer_instagram = (
         (not plataformas or instagram.PLATAFORMA in plataformas)
@@ -2043,6 +2073,8 @@ async def listar_conversas(
         # A Caixa Humano é a régua da IA da caixa: o Direct (adaptador só
         # leitura, sem IA) não entra nela.
         and not caixa_humano
+        # A lista do e-mail (aba E-mail) é só e-mail.
+        and not caixa_email
     )
     # No filtro Mídia, o DM vale como "todas" (as não silenciadas).
     filtro_dm = "todas" if filtro == ETIQUETA_MIDIA else filtro
@@ -2401,12 +2433,18 @@ async def detalhe_conversa(
     if await enviar.aposentar_envios_presos(session, conversa_id=c.id):
         await session.commit()
     momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    # Numa conversa de CHAT, o e-mail que a ponte gravou lá (até 13/10/2026)
+    # não aparece: ele mora na aba E-mail (`separa_email`; nada é apagado).
+    visivel = separa_email.mensagem_visivel_sql(c)
     mensagens = list(
         reversed(
             (
                 await session.execute(
                     select(AtendimentoMensagem)
-                    .where(AtendimentoMensagem.conversa_id == c.id)
+                    .where(
+                        AtendimentoMensagem.conversa_id == c.id,
+                        *([visivel] if visivel is not None else []),
+                    )
                     .order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
                     .limit(MAX_MENSAGENS_DETALHE)
                 )
@@ -3977,7 +4015,9 @@ async def _metricas_lojas(
     escondia a de quem responde de verdade (com a régua inteira: Shopee
     ~297 min e 48,6% no prazo; TikTok ~753 min e 88,8%).
     """
-    filtro = [AtendimentoConversa.ultima_mensagem_em >= desde]
+    # Só o CHAT (13/10/2026): o e-mail da ponte mora na aba E-mail e não
+    # entra no tempo de resposta das lojas (`separa_email`).
+    filtro = [AtendimentoConversa.ultima_mensagem_em >= desde, separa_email.na_caixa_sql()]
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
     if cond is not None:
         filtro.append(cond)

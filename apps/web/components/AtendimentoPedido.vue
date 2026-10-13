@@ -572,6 +572,13 @@ function irPara(ev: EventoCliente) {
   }
   emit('irPara', ev)
 }
+// "E-mails da venda" no CHAT (13/10/2026): abrir a conversa de e-mail da venda
+// sobe como a linha do tempo sobe outra conversa (o `ref` = o id): a conversa
+// emite `abrirConversa` e a página leva a conversa de e-mail para a aba E-mail
+// (pages/atendimento.vue, `aoMudarConversa`) — o chat nunca a mostra.
+function abrirEmailDaVenda(id: string) {
+  emit('irPara', { tipo: 'mensagem', em: null, texto: null, ref: id })
+}
 
 // Situação da NF como a Shopee manda (`invoice_data.status`): o código cru
 // ("pending") não diz nada a quem atende. Código desconhecido aparece como veio.
@@ -1010,6 +1017,8 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
 
         <!-- E-MAILS DA VENDA (RF5): caixa → loja, pastas e quantos — só quando há e-mail -->
         <AtendimentoEmailVenda v-if="emailsSinal" :conversa-id="conversa.id" :sinal="emailsSinal" />
+        <!-- no CHAT (13/10/2026): só quantos e o link para a aba E-mail — nada do e-mail; sem e-mail, some -->
+        <AtendimentoEmailVenda v-else-if="!conversa.email" :conversa-id="conversa.id" :sinal="0" chat @abrir="abrirEmailDaVenda" />
 
         <!-- OBSERVAÇÕES DO BLING (GET ao vivo do pedido, só leitura) -->
         <section v-if="obsBling" class="space-y-1.5">
