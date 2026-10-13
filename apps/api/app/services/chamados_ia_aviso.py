@@ -3,7 +3,8 @@
 30/09/2026 (297130): a IA chegou no formulário "Fale conosco › E-mail" do
 Mercado Livre e parou. O pedido do Cairo: "se travar não sou robô me avisa" —
 a mensagem vem pra ele. A IA não tenta passar CAPTCHA nem login (CLAUDE.md da
-IA): deixa a loja aberta naquela tela no Mac Santiago, decide `humano` com
+IA): deixa a loja aberta naquela tela no Mac dos robôs (o mini da Makisa desde
+13/10/2026; antes o Mac Santiago), decide `humano` com
 `parado` ("captcha" | "login") e o DaVinci manda UM Threema pra quem está no
 cadastro `chamados_ia` (botão "quem recebe o aviso" na aba Chamados › IA de
 Chamado). A pessoa resolve na tela e manda a instrução "continua" no chamado.
@@ -47,7 +48,7 @@ def texto(ch: Chamado, parado: str, resumo: str) -> str:
         f"Pedido {ch.pedido_bling or '-'} / {ch.pedido_marketplace or '-'} · {plat} · "
         f"conta {ch.conta or '-'}",
         f"Onde parou: {resumo.strip()[:400]}",
-        "A loja ficou aberta nessa tela no Mac Santiago (AdsPower). Resolva lá e "
+        "A loja ficou aberta nessa tela no Mac mini da Makisa (AdsPower). Resolva lá e "
         'mande a instrução "continua" no chamado.',
         link_chamado(ch),
     ]

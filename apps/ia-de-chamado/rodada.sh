@@ -1,5 +1,6 @@
 #!/bin/sh
-# Rodada da IA de Chamado (Claude Code) — o despertador do Mac Santiago chama a
+# Rodada da IA de Chamado (Claude Code) — o despertador do Mac dos robôs (o mini
+# da Makisa desde 13/10/2026; antes o Mac Santiago) chama a
 # cada 10 minutos (com.davinci.ia-de-chamado.plist).
 #
 # 1. Pergunta ao DaVinci se há trabalho (sem IA, segundos, não gasta o plano).

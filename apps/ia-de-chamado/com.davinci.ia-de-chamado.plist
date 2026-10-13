@@ -9,15 +9,15 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
-    <string>/Users/santiagogeral/DaVinci/ia-de-chamado/rodada.sh</string>
+    <string>/Users/makisatradingltda/DaVinci/ia-de-chamado/rodada.sh</string>
   </array>
   <key>StartInterval</key>
   <integer>600</integer>
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>
-  <string>/Users/santiagogeral/DaVinci/ia-de-chamado/registros/despertador.log</string>
+  <string>/Users/makisatradingltda/DaVinci/ia-de-chamado/registros/despertador.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/santiagogeral/DaVinci/ia-de-chamado/registros/despertador.log</string>
+  <string>/Users/makisatradingltda/DaVinci/ia-de-chamado/registros/despertador.log</string>
 </dict>
 </plist>

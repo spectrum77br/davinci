@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  LaunchAgent do Executor de leitura de chamado (Mac Santiago).
+  LaunchAgent do Executor de leitura de chamado (Mac mini da Makisa; até 13/10/2026 era o Mac Santiago).
   TEM que ser LaunchAgent (sessão gráfica do usuário) para enxergar o AdsPower.
 
     cp com.davinci.executor-leitura-chamado.plist ~/Library/LaunchAgents/
@@ -17,20 +17,20 @@
     <array>
         <string>/usr/bin/caffeinate</string>
         <string>-i</string>
-        <string>/Users/santiagogeral/DaVinci/executor-leitura-chamado/node_modules/.bin/tsx</string>
-        <string>/Users/santiagogeral/DaVinci/executor-leitura-chamado/src/index.ts</string>
+        <string>/Users/makisatradingltda/DaVinci/executor-leitura-chamado/node_modules/.bin/tsx</string>
+        <string>/Users/makisatradingltda/DaVinci/executor-leitura-chamado/src/index.ts</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/santiagogeral/DaVinci/executor-leitura-chamado</string>
+    <string>/Users/makisatradingltda/DaVinci/executor-leitura-chamado</string>
 
     <key>UserName</key>
-    <string>santiagogeral</string>
+    <string>makisatradingltda</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/santiagogeral/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/makisatradingltda/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -40,9 +40,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/santiagogeral/DaVinci/executor-leitura-chamado/logs/executor.out.log</string>
+    <string>/Users/makisatradingltda/DaVinci/executor-leitura-chamado/logs/executor.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/santiagogeral/DaVinci/executor-leitura-chamado/logs/executor.err.log</string>
+    <string>/Users/makisatradingltda/DaVinci/executor-leitura-chamado/logs/executor.err.log</string>
 </dict>
 </plist>

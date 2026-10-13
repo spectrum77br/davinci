@@ -24,7 +24,7 @@ O mesmo código roda em mais de um Mac; cada um liga só o que faz:
 | Máquina | `EXECUTOR_FILAS` | O que faz |
 |---|---|---|
 | executor do Eduardo | `shopee,tuta` (default) | anúncios/Oferta Relâmpago da Shopee + caixa do Tuta |
-| Mac Santiago (desde 24/09/2026) | `melhorenvio,tiktok` | "Suspender entrega" da Logística + pedido de senha no chat da TikTok (29/09) |
+| Mac mini da Makisa (desde 13/10/2026; de 24/09 a 13/10 foi o Mac Santiago) | `melhorenvio,tiktok` | "Suspender entrega" da Logística + pedido de senha no chat da TikTok (29/09) |
 | quem for coletar a Conferência | `…,conferencia` | Conferência Shopee (06/10/2026): lê afiliados, Ads, vendas e saldo de cada loja — ver abaixo |
 
 O servidor só entrega a suspensão (`melhorenvio_suspender`) pra quem a declara

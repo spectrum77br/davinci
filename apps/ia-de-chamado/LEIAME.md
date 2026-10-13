@@ -1,7 +1,9 @@
 # IA de Chamado (Claude Code)
 
 A partir de 29/09/2026 a IA de Chamado do DaVinci é o **Claude Code**, rodando no
-**Mac Santiago** (o Mac do robô). Ela substitui o Hermes com a mesma identidade:
+**Mac mini da Makisa** (o Mac dos robôs — até 13/10/2026 era o Mac mini da Makisa, M1;
+a mudança está em `docs/migracao-m1-para-m4.md`). Ela substitui o Hermes com a
+mesma identidade:
 na aba Chamados › IA de Chamado tudo continua igual (liga/desliga, manual, ✓/✗).
 
 ## Como funciona
@@ -22,9 +24,9 @@ Captcha, login ou código: a IA **para**, deixa a tela aberta e chama uma pessoa
 ## Onde ver o que ela fez
 
 - **No DaVinci**, no histórico de cada chamado (assinado "IA de Chamado").
-- No Mac Santiago, em `registros/` — um arquivo por dia com cada rodada.
+- No Mac mini da Makisa, em `registros/` — um arquivo por dia com cada rodada.
 
-## A pasta no Mac Santiago (`~/DaVinci/ia-de-chamado`)
+## A pasta no Mac mini da Makisa (`~/DaVinci/ia-de-chamado`)
 
 | O quê | Pra quê |
 |---|---|
@@ -48,7 +50,7 @@ este LEIAME.
 ## Ligar e desligar
 
 - **Pela aba IA de Chamado** (liga/desliga): desligada, a rodada não acorda ninguém.
-- **O despertador** (no Mac Santiago):
+- **O despertador** (no Mac mini da Makisa):
   - ligar: `launchctl load ~/Library/LaunchAgents/com.davinci.ia-de-chamado.plist`
   - desligar: `launchctl unload ~/Library/LaunchAgents/com.davinci.ia-de-chamado.plist`
 
@@ -56,5 +58,5 @@ este LEIAME.
 
 Regra de negócio ("QUANDO → FAÇA") vai no **manual**, na aba IA de Chamado. Mudança
 nas instruções (`CLAUDE.md`) ou nas ferramentas é feita no projeto, junto com o
-Vinicius no Claude Code, e copiada pro Mac Santiago. A IA não muda as próprias
+Vinicius no Claude Code, e copiada pro Mac mini da Makisa. A IA não muda as próprias
 instruções sozinha — quando aprende algo, deixa uma "sugestão de regra" no chamado.

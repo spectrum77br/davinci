@@ -19,6 +19,36 @@ mini, **igual ao que está hoje**, e o M1 fica livre.
   rodou o comando permitido e negou ler o `.env`); os dois executores
   compilam com o Node novo; atalho na Mesa. Faltam só os testes que abrem
   perfil, que ficam pro passo 3.
+- **13/10 14:30 — Passo 2 FEITO** (código de convivência, testado sem tocar em
+  loja): a IA só mexe no perfil que ela abriu (`estado/perfis-abertos.json`;
+  `tela`/`abrir` param com "PERFIL EM USO" se for de outro; `fechar` só fecha
+  o dela) — commit `769c77d2`, já nos dois Macs (no M1 entrou entre rodadas,
+  sem perfil aberto; backups `*.bak-20261013`). Na Denúncia, o `servidor.py`
+  vivo já dava `PerfilOcupado` pra perfil aberto por outro; o remendo foi só no
+  `Fiscalizacao/perfil_aberto.py`: a anotação "deixei aberto" guarda a porta da
+  sessão e, se a sessão trocou (outro abriu depois), ele não conecta nem fecha
+  (backup `_arquivo/backups/perfil_aberto_20261013_antes_sessao.py`). Decisão
+  dele: o mini fica com o login **Viena** do AdsPower, que ganha os grupos
+  Administrativo + Contabilidade (ainda não concedidos às 14:30).
+- **13/10 14:26 — mudança: o mini usa o login do Cairo** (= o do M1 e deste
+  Mac). 112 "Uranyx - Amazon EUA" movido pro grupo Lojas (API do mini, OK
+  dele). **14:36 ele logou o Cairo no mini e o M1 caiu no mesmo minuto**
+  ("Login failed"): o Cairo não fica em dois Macs ao mesmo tempo. O AdsPower
+  do mini fechou na troca; reaberto por ssh, API em 10 s, 151 perfis visíveis,
+  todos os perfis-chave dos robôs. **Ele escolheu a Opção B (seguir agora)**:
+  o M1 fica sem AdsPower e os três robôs vão pro mini hoje, um por vez.
+  Anotações "deixei aberto" da Denúncia limpas (backup). Aquecer rodando em
+  `~/DaVinci/_migracao/` (57 perfis). Voltar atrás = relogar o Cairo no M1
+  (derruba o mini) e religar os três lá.
+- **13/10 14:56–15:04 — VIRADA FEITA, um robô por vez (OK dele em cada):**
+  leitor 14:56 (v1.4.0, mesmas 20 lojas Shopee / 27 ML com perfil), executor
+  14:58 (v1.2.0, Melhor Envio + TikTok; os 502 na subida eram um deploy no
+  servidor às 14:54, depois lease e sinal de vida 200), IA 15:04 (estado,
+  registros, decisões e conversas copiados com o M1 parado). **Os três robôs
+  rodam no mini.** No M1 ficaram os despertadores descarregados (reserva).
+  Aquecimento: Melhor Envio logado; Shopee quase todas logadas; TikTok só
+  Inova e Poofy logadas — as outras 9 são sessões vencidas (a IA avisa no
+  Threema quando precisar de login; o leitor grava no chamado).
 
 ## 1. Resposta curta
 
@@ -92,6 +122,40 @@ consegue ler a Mesa**. Por isso os três robôs vão pra `~/DaVinci` (na pasta
 pessoal, como no M1), com um atalho na Mesa.
 
 ## 4. AdsPower: trocar o login do mini pelo do M1?
+
+> **Atualizado 13/10 15:00 — decisão: o mini passa a usar o login do Cairo.**
+> Descobri que o login do M1 **é** o Cairo (o mesmo deste Mac do Vinicius:
+> as pastas de perfil dos dois têm o código `h19v0sf`). E o risco que eu
+> apontei abaixo ficou bem menor: o perfil 50 e o 148 **já abriram sob o
+> Cairo neste Mac** (têm pasta aqui), e as pastas mostram que o AdsPower
+> sincroniza pela nuvem cookies, local storage, IndexedDB, histórico e
+> configurações de extensão — não só cookies. Ou seja, trocando o mini pro
+> Cairo, o perfil 50 vem da nuvem logado, como vem neste Mac.
+>
+> **O que o Viena tem que o Cairo não tem:** só o perfil **112 "Uranyx -
+> Amazon EUA"** (grupo Amzon EUA) e o grupo "Viena", vazio. Todo o resto que
+> o Viena vê (os 117 de Lojas) o Cairo vê também, e o Cairo ainda vê
+> Contabilidade (29) e Administrativo (3). Pra "trazer tudo": mover o 112
+> pro grupo Lojas (pela API do mini, enquanto ainda está no Viena) ou dar ao
+> Cairo o grupo Amzon EUA em Equipe › Membros.
+>
+> **Dados no disco do mini sob o Viena:** 21 perfis, 8,1 GB (50 com 2,2 GB,
+> 148 com 1,2 GB, as contas da Réplica, 118 Mini Shopee, 87, 81, 155, 94,
+> 113, 116, 160, 195, 83, 135, 164, 166, 32). Ficam no disco (não se apaga
+> nada) e os mesmos perfis são usados hoje do M1/deste Mac sob o Cairo, logo
+> vêm pela nuvem.
+>
+> **Cuidados da troca:** (1) fazer com o robô de Denúncia parado e nenhum
+> perfil aberto no mini (a nuvem recebe o estado na hora de fechar); (2) a
+> senha do Cairo é digitada por você no mini (Compartilhamento de Tela);
+> (3) o Cairo fica em **três** Macs ao mesmo tempo até o M1 aposentar — se o
+> plano do AdsPower limitar os aparelhos, o M1 pode ser desconectado na hora
+> em que o mini entrar: eu confiro a API do M1 logo depois; (4) depois da
+> troca, apagar as anotações "deixei aberto" da Denúncia
+> (`_logs/perfis_deixados_abertos.json`) e rodar a checagem (passo 0) pra
+> ver as quatro lojas do perfil 50 logadas.
+>
+> O texto abaixo é o levantamento original (ainda vale como explicação).
 
 ### O que cada login enxerga
 

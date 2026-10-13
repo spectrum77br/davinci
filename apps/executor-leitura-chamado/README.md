@@ -1,6 +1,7 @@
 # Executor de leitura de chamado
 
-Robô do Mac Santiago que **lê** o "Histórico da Solicitação" das devoluções da
+Robô do Mac mini da Makisa (até 13/10/2026, do Mac Santiago) que **lê** o
+"Histórico da Solicitação" das devoluções da
 Shopee no Seller Center — e, desde 25/09, as **consultas do Portal de
 Atendimento ao Vendedor** — e devolve o texto pro chamado do DaVinci. Nasceu no
 chamado 2609200FUTKM4JD (pedido 296012, 24/09/2026): a Shopee recusou a disputa
@@ -77,7 +78,7 @@ npm start -- --uma-vez                                               # uma passa
 LEITURA_MODO=real npm start -- --uma-vez --so 296012                  # um caso, de verdade
 ```
 
-No Mac Santiago a pasta é `~/DaVinci/executor-leitura-chamado` (atalho na
+No Mac mini a pasta é `~/DaVinci/executor-leitura-chamado` (atalho na
 Mesa: `DaVinci`). Atualizar = copiar `apps/executor-leitura-chamado/` sem
 `node_modules`, `.env`, `logs` e `debug`. Ligar sozinho com o Mac: o `.plist`
 desta pasta (instruções dentro dele).
