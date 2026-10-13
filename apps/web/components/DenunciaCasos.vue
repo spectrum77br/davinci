@@ -3,11 +3,11 @@
 // Casos jurídicos (CASO-00N): o anúncio, a compra de prova (pedido, NF-e,
 // entrega), as provas obrigatórias e o envio ao advogado. Cópia só leitura
 // do sistema de Fiscalização do Mac mini da Makisa.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ExternalLink, Trash2 } from 'lucide-vue-next'
 import {
   type FalhaCaso, type Prova, ativoSimNao, dataBr, dinheiro, nomeGrupo, numero, pillAtivo, pillGrupo, pillResultado,
-  pillSituacaoDenuncia, pillStatusCompra,
+  pillSituacaoDenuncia, pillStatusCompra, tamanho,
 } from '~/lib/denuncia'
 
 
@@ -66,8 +66,32 @@ type CasoExtra = {
   status_manual_por?: string | null
   status_manual_em?: string | null
   juridico_data?: string | null
+  // 13/10 (Vinicius, checklist do jurídico): "Selo Anatel aparece nas fotos?" — 'sim' | 'nao'; salva na hora
+  selo_anatel?: string | null
 }
-type Resposta = { total: number; itens: Caso[]; por_status: Record<string, number>; falhas_caso?: FalhaCaso[] }
+// 13/10 (Vinicius: "eu acionar esses botão dentro dos casos e enviar quando eu quiser"): a pasta do jurídico que o
+// Mac mini monta (dossiê + anexos + vídeo, zipados) e manda por e-mail pelo Tuta de lá. A API manda só a última.
+type PastaJuridico = {
+  id: number
+  status: 'pedida' | 'montando' | 'pronta' | 'erro'
+  resultado: string | null
+  info: {
+    arquivos?: string[]; avisos?: string[]; nome_zip?: string
+    para?: { nome?: string | null; email?: string | null } | null; cc?: string | string[] | null; de?: string | null
+  }
+  tamanho: number | null
+  tem_arquivo: boolean
+  pedido_por: string | null
+  pedido_em: string | null
+  pronta_em: string | null
+  envio_status: 'pedido' | 'enviando' | 'enviado' | 'teste' | 'erro' | null
+  envio_pedido_por: string | null
+  envio_pedido_em: string | null
+  envio_em: string | null
+  envio_resultado: string | null
+  envio_info: { para?: string; cc?: string | null; teste?: boolean } | null
+}
+type Resposta ={ total: number; itens: Caso[]; por_status: Record<string, number>; falhas_caso?: FalhaCaso[] }
 type Anexo = {
   id: number
   tipo: string
@@ -93,6 +117,7 @@ type Detalhe = {
   compras: Record<string, any>[]
   provas: Prova[]
   denuncias: Record<string, any>[]
+  pasta?: PastaJuridico | null
 }
 
 const { api } = useApi()
@@ -219,7 +244,8 @@ async function carregar() {
 }
 
 
-type AbaCaso = 'resumo' | 'juridico' | 'compra' | 'provas' | 'denuncias'
+// 13/10 (Vinicius): a Compra de prova virou parte da aba Jurídico (não tem mais aba própria)
+type AbaCaso = 'resumo' | 'juridico' | 'provas' | 'denuncias'
 const abaCaso = ref<AbaCaso>('resumo')
 
 async function abrir(c: Caso, focoJuridico = false) {
@@ -244,20 +270,19 @@ const k = computed(() => detalhe.value?.caso || {})
 // 01/10 (Vinicius: "quais são os itens obrigatórios para enviar ao jurídico?") — as mesmas listas do
 // sistema do mini: para ABRIR o caso (db.DOCS_CASO) e o "pronto para o advogado" (modelos.CHECKLIST_ADVOGADO).
 // O certificado (PDF do nº declarado) o robô confere na hora de montar o pacote.
+// 13/10 (Vinicius, o advogado não precisa): saíram o comprovante na fatura do cartão e a devolução pedida na loja.
 const checklist = computed(() => {
   const d = detalhe.value
   if (!d) return []
   const tem = (...tipos: string[]) => d.provas.filter((p) => p.tipo && tipos.includes(p.tipo)).length
-  const devolucao = d.compras.some((c) => c.devolucao_pedida_em || c.status === 'Devolvido')
-    || d.provas.some((p) => /devolu/i.test(`${p.tipo} ${p.nome} ${p.obs || ''}`))
   return [
     { grupo: 'para abrir o caso', nome: 'Tela do anúncio (print)', n: tem('Captura no ato', 'Print', 'PDF do anúncio') },
     { grupo: 'para abrir o caso', nome: 'Tela do pedido (compra de prova)', n: tem('Tela do pedido') },
-    { grupo: 'para abrir o caso', nome: 'Comprovante na fatura do cartão', n: tem('Fatura do cartão') },
     { grupo: 'quando o produto chega', nome: 'Vídeo da embalagem sendo aberta', n: tem('Vídeo') },
     { grupo: 'quando o produto chega', nome: 'Fotos do produto (com o selo Anatel)', n: tem('Foto') },
     { grupo: 'quando o produto chega', nome: 'NF-e da compra (PDF)', n: tem('NF-e') },
-    { grupo: 'quando o produto chega', nome: 'Devolução pedida na loja', n: devolucao ? 1 : 0 },
+    // 13/10: a pergunta do selo (vai no dossiê) — a API confere o mesmo checklist antes de pedir a pasta
+    { grupo: 'quando o produto chega', nome: 'Selo Anatel respondido', n: d.extra?.selo_anatel ? 1 : 0 },
     { grupo: 'denúncias', nome: 'Comprovantes das denúncias', n: tem('Captura no ato', 'Registro da denúncia', 'Protocolo') || d.denuncias.length },
   ]
 })
@@ -413,10 +438,141 @@ async function trocarStatus(id: number, codigo: string | null, novo: string | nu
   }
 }
 
+// ── 13/10 (Vinicius: "eu acionar esses botão dentro dos casos e enviar quando eu quiser"): o passo 9 do robô
+// (Jurídico) virou botões aqui. "Montar pasta jurídico" pede ao mini o dossiê + anexos + vídeo (zip); "Enviar ao
+// jurídico" manda pelo Tuta do mini para o e-mail escolhido na hora — o do advogado vira "Com jurídico"; outro
+// e-mail é teste (ele manda pra ele mesmo antes) e o caso não muda.
+const pasta = computed(() => detalhe.value?.pasta || null)
+const ERROS_PASTA: Record<string, string> = {
+  denuncia_juridico_incompleto: 'Falta item do checklist.',
+  denuncia_pasta_em_andamento: 'A pasta já está sendo montada no mini.',
+  denuncia_envio_em_andamento: 'A pasta já está sendo enviada.',
+  denuncia_juridico_ja_enviado: 'Este caso já foi enviado ao jurídico.',
+  denuncia_pasta_nao_pronta: 'A pasta ainda não está pronta — monte de novo.',
+  denuncia_email_invalido: 'E-mail inválido (na cópia, separe por vírgula).',
+  denuncia_selo_invalido: 'Resposta inválida.',
+  denuncia_caso_nao_encontrado: 'Caso não encontrado.',
+}
+const pastaErro = ref<string | null>(null)
+function erroPasta(e: any): string {
+  const det = e?.data?.detail
+  if (det?.code === 'denuncia_juridico_incompleto' && det.faltam?.length) return `Falta: ${det.faltam.join(', ')}.`
+  return ERROS_PASTA[det?.code] || det?.code || e?.message || 'erro'
+}
+const salvandoSelo = ref(false)
+async function salvarSelo(v: 'sim' | 'nao') {
+  const id = aberto.value
+  if (id === null || !detalhe.value || detalhe.value.extra?.selo_anatel === v) return
+  salvandoSelo.value = true
+  pastaErro.value = null
+  try {
+    const r = await api<{ extra: CasoExtra }>(`/api/denuncia/casos/${id}/extra`, { method: 'PUT', body: { selo_anatel: v } })
+    // só o selo: trocar o extra inteiro apagaria o que está sendo digitado nos formulários da aba
+    if (detalhe.value && aberto.value === id) detalhe.value.extra = { ...(detalhe.value.extra || VAZIO_EXTRA), selo_anatel: r.extra.selo_anatel }
+    const item = itens.value.find((c) => c.id === id)
+    if (item) item.extra = r.extra
+  } catch (e: any) {
+    pastaErro.value = erroPasta(e)
+  } finally {
+    salvandoSelo.value = false
+  }
+}
+const pedindoPasta = ref(false)
+async function montarPasta() {
+  const id = aberto.value
+  if (id === null || !detalhe.value) return
+  pedindoPasta.value = true
+  pastaErro.value = null
+  envioAberto.value = false
+  try {
+    const r = await api<{ pasta: PastaJuridico }>(`/api/denuncia/casos/${id}/pasta`, { method: 'POST', body: {} })
+    if (detalhe.value && aberto.value === id) detalhe.value.pasta = r.pasta
+  } catch (e: any) {
+    pastaErro.value = erroPasta(e)
+  } finally {
+    pedindoPasta.value = false
+  }
+}
+// o e-mail sai do Tuta do mini (sac@makisa); a pasta traz o advogado (para) e a cópia (cc) que o mini vai usar
+const envioAberto = ref(false)
+const envioPara = ref('')
+const envioCc = ref('')
+const enviando = ref(false)
+const emailAdvogado = computed(() => (pasta.value?.info?.para?.email || '').trim())
+const envioDeTeste = computed(() => envioPara.value.trim().toLowerCase() !== emailAdvogado.value.toLowerCase())
+function abrirEnvio() {
+  const cc = pasta.value?.info?.cc
+  envioPara.value = emailAdvogado.value
+  envioCc.value = Array.isArray(cc) ? cc.join(', ') : cc || ''
+  pastaErro.value = null
+  envioAberto.value = true
+}
+async function enviarPasta() {
+  const id = aberto.value
+  if (id === null || !envioPara.value.trim()) return
+  enviando.value = true
+  pastaErro.value = null
+  try {
+    const r = await api<{ pasta: PastaJuridico }>(`/api/denuncia/casos/${id}/enviar`, {
+      method: 'POST', body: { para: envioPara.value.trim(), cc: envioCc.value.trim() || null },
+    })
+    if (detalhe.value && aberto.value === id) detalhe.value.pasta = r.pasta
+    envioAberto.value = false
+  } catch (e: any) {
+    pastaErro.value = erroPasta(e)
+  } finally {
+    enviando.value = false
+  }
+}
+// enquanto o mini monta ou envia, a ficha pergunta de 5 em 5 s (só com a ficha aberta). Troca só a pasta e o que o
+// envio muda (status, data do jurídico) — trocar o detalhe inteiro apagaria o que está sendo digitado nos formulários.
+const pastaAndando = computed(() => {
+  const p = pasta.value
+  return !!p && (['pedida', 'montando'].includes(p.status) || ['pedido', 'enviando'].includes(p.envio_status || ''))
+})
+async function atualizarPasta() {
+  const id = aberto.value
+  if (id === null) return
+  try {
+    const d = await api<Detalhe>(`/api/denuncia/casos/${id}`)
+    const atual = detalhe.value
+    if (!atual || aberto.value !== id) return
+    const enviouAgora = atual.pasta?.envio_status !== 'enviado' && d.pasta?.envio_status === 'enviado'
+    atual.pasta = d.pasta
+    atual.status_tela = d.status_tela
+    atual.status_auto = d.status_auto
+    atual.caso = { ...atual.caso, juridico_enviado_em: d.caso.juridico_enviado_em }
+    if (atual.extra) atual.extra = { ...atual.extra, juridico_data: d.extra?.juridico_data ?? null }
+    if (enviouAgora) await carregar()   // a tabela mostra a data e o "Com jurídico"
+  } catch {
+    // de 5 em 5 s: a próxima pergunta tenta de novo
+  }
+}
+let relogioPasta: ReturnType<typeof setInterval> | null = null
+watch([pastaAndando, aberto], ([andando, id]) => {
+  if (relogioPasta) clearInterval(relogioPasta)
+  relogioPasta = andando && id !== null ? setInterval(() => void atualizarPasta(), 5000) : null
+})
+onBeforeUnmount(() => {
+  if (relogioPasta) clearInterval(relogioPasta)
+})
+watch(aberto, () => {
+  envioAberto.value = false
+  pastaErro.value = null
+})
+// o quadrinho "Jurídico" do topo da ficha
+const quadroJuridico = computed(() => {
+  const p = pasta.value
+  if (p && ['pedido', 'enviando'].includes(p.envio_status || '')) return { texto: 'enviando…', cls: 'pill-info' }
+  if (p && ['pedida', 'montando'].includes(p.status)) return { texto: 'montando…', cls: 'pill-info' }
+  if (p?.status === 'pronta') return { texto: 'pasta montada', cls: 'pill-success' }
+  if (faltam.value.length) return { texto: `falta${faltam.value.length > 1 ? 'm' : ''} ${faltam.value.length}`, cls: 'pill-warning' }
+  return { texto: 'pronto', cls: 'pill-success' }
+})
+
 const abasCaso = computed(() => [
   { k: 'resumo' as AbaCaso, t: 'Resumo' },
   { k: 'juridico' as AbaCaso, t: faltam.value.length ? `Jurídico (falta ${faltam.value.length})` : 'Jurídico' },
-  { k: 'compra' as AbaCaso, t: `Compra de prova (${detalhe.value?.compras.length || 0})` },
   { k: 'provas' as AbaCaso, t: `Provas (${detalhe.value?.provas.length || 0})` },
   { k: 'denuncias' as AbaCaso, t: `Denúncias (${detalhe.value?.denuncias.length || 0})` },
 ])
@@ -732,13 +888,14 @@ defineExpose({ carregar })
           </div>
           <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
             <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Jurídico</div>
-            <template v-if="k.juridico_enviado_em">
-              <span class="pill-success">enviado {{ dataBr(k.juridico_enviado_em, false) }}</span>
+            <template v-if="k.juridico_enviado_em || pasta?.envio_status === 'enviado'">
+              <span class="pill-success">enviado {{ k.juridico_enviado_em ? dataBr(k.juridico_enviado_em, false) : quando(pasta?.envio_em || null).slice(0, 5) }}</span>
               <div v-if="detalhe.extra?.processo_numero" class="font-mono text-[11px] text-muted-foreground truncate" :title="detalhe.extra.processo_numero">{{ detalhe.extra.processo_numero }}</div>
               <div v-else class="text-[11px] text-muted-foreground">sem nº de processo</div>
             </template>
             <template v-else>
-              <span :class="faltam.length ? 'pill-warning' : 'pill-success'">{{ faltam.length ? `falta${faltam.length > 1 ? 'm' : ''} ${faltam.length}` : 'pronto' }}</span>
+              <!-- 13/10: a pasta do jurídico (montando… / pasta montada / enviando…) e, sem pasta, o checklist -->
+              <span :class="quadroJuridico.cls">{{ quadroJuridico.texto }}</span>
               <div class="text-[11px] text-muted-foreground">não enviado</div>
             </template>
           </div>
@@ -794,37 +951,6 @@ defineExpose({ carregar })
 
         <!-- Jurídico -->
         <section v-else-if="abaCaso === 'juridico'" class="space-y-3">
-          <!-- 01/10 (Vinicius): "nº do processo, última movimentação, status, link de consulta — vamos logar no Jusbrasil" -->
-          <div class="rounded-lg border px-3 py-2.5 space-y-2">
-            <div class="flex items-center gap-2 text-sm">
-              <span class="font-medium">Processo</span>
-              <span v-if="k.juridico_enviado_em" class="text-xs text-muted-foreground">enviado ao advogado em {{ dataBr(k.juridico_enviado_em, false) }}</span>
-              <span class="flex-1" />
-              <a v-if="extraForm.processo_link" :href="extraForm.processo_link" target="_blank" rel="noopener noreferrer" class="text-xs text-primary hover:underline">consultar no Jusbrasil</a>
-            </div>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label class="text-[11px] text-muted-foreground space-y-0.5">Nº do processo
-                <Input v-model="extraForm.processo_numero" :disabled="!podeAnexar" placeholder="0000000-00.0000.0.00.0000" class="font-mono" />
-              </label>
-              <label class="text-[11px] text-muted-foreground space-y-0.5">Link de consulta (Jusbrasil)
-                <Input v-model="extraForm.processo_link" :disabled="!podeAnexar" placeholder="https://www.jusbrasil.com.br/…" />
-              </label>
-              <label class="text-[11px] text-muted-foreground space-y-0.5">Última movimentação (data)
-                <Input v-model="extraForm.mov_data" :disabled="!podeAnexar" type="date" />
-              </label>
-              <label class="text-[11px] text-muted-foreground space-y-0.5">Status da última movimentação
-                <Input v-model="extraForm.mov_status" :disabled="!podeAnexar" placeholder="ex.: em andamento, audiência marcada" />
-              </label>
-              <label class="text-[11px] text-muted-foreground space-y-0.5 sm:col-span-2">O que aconteceu
-                <Input v-model="extraForm.mov_texto" :disabled="!podeAnexar" placeholder="ex.: petição inicial distribuída" />
-              </label>
-            </div>
-            <div v-if="podeAnexar" class="flex items-center gap-2">
-              <Button size="sm" :disabled="salvandoExtra" @click="salvarExtra">{{ salvandoExtra ? 'salvando…' : 'salvar' }}</Button>
-              <span v-if="extraSalvo" class="text-xs text-emerald-600">salvo ✓</span>
-              <span v-if="extraErro" class="text-xs text-red-600">{{ extraErro }}</span>
-            </div>
-          </div>
           <div class="rounded-lg border px-3 py-2.5 space-y-2">
             <div class="flex items-center gap-2 text-sm">
               <span class="font-medium">Pronto para enviar ao advogado?</span>
@@ -841,47 +967,79 @@ defineExpose({ carregar })
                 </li>
               </ul>
             </template>
-          </div>
-          <div v-if="podeAnexar" class="rounded-lg border px-3 py-2.5 space-y-2">
-            <div class="text-sm font-medium">Anexar prova</div>
-            <div class="flex flex-wrap items-center gap-2">
-              <select v-model="anexoTipo" class="h-9 rounded-md border bg-background px-2 text-sm">
-                <option v-for="tp in detalhe.tipos_anexo || []" :key="tp.chave" :value="tp.chave">{{ tp.nome }}</option>
-              </select>
-              <Input v-if="anexoTipo === 'video'" v-model="anexoLink" placeholder="link do MEGA (com a chave #…)" class="w-72" />
-              <input
-                v-else
-                id="anexo-arquivo"
-                type="file"
-                class="text-xs file:mr-2 file:rounded-md file:border file:bg-background file:px-2 file:py-1 file:text-xs"
-                @change="(e) => (anexoArquivo = (e.target as HTMLInputElement).files?.[0] || null)"
-              >
+            <!-- 13/10 (Vinicius): a pergunta do selo vai no dossiê — salva na hora -->
+            <div class="flex flex-wrap items-center gap-2 pt-1 text-xs">
+              <span>Selo Anatel aparece nas fotos?</span>
+              <div class="inline-flex overflow-hidden rounded-md border" role="radiogroup" aria-label="Selo Anatel aparece nas fotos?">
+                <button
+                  v-for="o in ([['sim', 'Sim'], ['nao', 'Não']] as const)"
+                  :key="o[0]"
+                  type="button"
+                  role="radio"
+                  :aria-checked="detalhe.extra?.selo_anatel === o[0]"
+                  :disabled="!podeAnexar || salvandoSelo"
+                  class="h-7 px-3 text-xs font-medium transition-colors first:border-r disabled:cursor-default"
+                  :class="detalhe.extra?.selo_anatel === o[0] ? 'bg-primary text-primary-foreground' : 'text-muted-foreground enabled:hover:bg-muted'"
+                  @click="salvarSelo(o[0])"
+                >
+                  {{ o[1] }}
+                </button>
+              </div>
             </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <Input v-model="anexoObs" placeholder="observação (opcional)" class="flex-1 min-w-[200px]" />
-              <Button size="sm" :disabled="anexando || !podeEnviarAnexo" @click="anexar">{{ anexando ? 'enviando…' : 'anexar' }}</Button>
+            <!-- 13/10 (Vinicius: "eu acionar esses botão dentro dos casos e enviar quando eu quiser"): montar a pasta no
+                 mini, baixar, enviar ao jurídico pelo Tuta (ou um teste pra outro e-mail). Quem só vê enxerga o estado. -->
+            <div class="space-y-1.5 border-t pt-2 text-xs">
+              <template v-if="!pasta || pasta.status === 'erro'">
+                <p v-if="pasta" class="text-red-600">{{ pasta.resultado || 'o mini não conseguiu montar a pasta' }}</p>
+                <div v-if="podeAnexar" class="flex flex-wrap items-center gap-2">
+                  <Button size="sm" :disabled="pedindoPasta || faltam.length > 0" @click="montarPasta">{{ pedindoPasta ? 'pedindo…' : 'Montar pasta jurídico' }}</Button>
+                  <span v-if="faltam.length" class="text-muted-foreground">complete o checklist para montar a pasta</span>
+                </div>
+                <p v-else-if="!pasta" class="text-muted-foreground">pasta do jurídico ainda não montada</p>
+              </template>
+              <p v-else-if="pasta.status === 'pedida' || pasta.status === 'montando'" class="text-muted-foreground">montando a pasta no mini… (1–2 min)</p>
+              <template v-else>
+                <div>
+                  Pasta montada {{ quando(pasta.pronta_em) }} · {{ pasta.info.arquivos?.length || 0 }} arquivos<template v-if="pasta.tamanho"> · {{ tamanho(pasta.tamanho) }}</template>
+                </div>
+                <ul v-if="pasta.info.avisos?.length" class="space-y-0.5 text-amber-700 dark:text-amber-400">
+                  <li v-for="(a, i) in pasta.info.avisos" :key="i">• {{ a }}</li>
+                </ul>
+                <p v-if="pasta.envio_status === 'pedido' || pasta.envio_status === 'enviando'" class="text-muted-foreground">enviando pelo Tuta do mini…</p>
+                <span v-else-if="pasta.envio_status === 'enviado'" class="pill-success">enviado ao jurídico em {{ quando(pasta.envio_em) }}</span>
+                <p v-else-if="pasta.envio_status === 'teste'" class="text-muted-foreground">teste enviado para {{ pasta.envio_info?.para }} em {{ quando(pasta.envio_em) }}</p>
+                <p v-else-if="pasta.envio_status === 'erro'" class="text-red-600">{{ pasta.envio_resultado || 'o mini não conseguiu enviar o e-mail' }}</p>
+                <div v-if="podeAnexar" class="flex flex-wrap items-center gap-2">
+                  <Button v-if="pasta.tem_arquivo" as="a" :href="`/api/denuncia/casos/${aberto}/pasta/arquivo`" size="sm" variant="outline">Baixar pasta</Button>
+                  <template v-if="!pasta.envio_status || pasta.envio_status === 'teste' || pasta.envio_status === 'erro'">
+                    <Button size="sm" variant="outline" :disabled="pedindoPasta" @click="montarPasta">{{ pedindoPasta ? 'pedindo…' : 'Montar de novo' }}</Button>
+                    <Button size="sm" :disabled="envioAberto || !pasta.tem_arquivo" @click="abrirEnvio">Enviar ao jurídico</Button>
+                  </template>
+                </div>
+                <!-- quem recebe: o advogado da pasta já vem preenchido; outro e-mail = teste -->
+                <form v-if="envioAberto && podeAnexar" class="space-y-2 rounded-md border bg-muted/30 px-3 py-2.5" @submit.prevent="enviarPasta">
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <label class="text-[11px] text-muted-foreground space-y-0.5">Para
+                      <Input v-model="envioPara" type="email" required :placeholder="emailAdvogado || 'e-mail do advogado'" />
+                    </label>
+                    <label class="text-[11px] text-muted-foreground space-y-0.5">Cópia
+                      <Input v-model="envioCc" placeholder="(sem cópia)" />
+                    </label>
+                  </div>
+                  <p class="text-muted-foreground">
+                    Vai a pasta do {{ k.codigo }}<template v-if="pasta.info.para?.nome && !envioDeTeste"> para {{ pasta.info.para.nome }}</template>, pelo e-mail {{ pasta.info.de || 'sac@makisa.com.br' }} (Tuta do mini).
+                  </p>
+                  <p v-if="envioDeTeste" class="text-muted-foreground">envio de teste: o caso não muda para Com jurídico</p>
+                  <div class="flex items-center gap-2">
+                    <Button type="submit" size="sm" :disabled="enviando || !envioPara.trim()">{{ enviando ? 'enviando…' : 'Enviar' }}</Button>
+                    <Button type="button" size="sm" variant="ghost" :disabled="enviando" @click="envioAberto = false">Cancelar</Button>
+                  </div>
+                </form>
+              </template>
+              <p v-if="pastaErro" class="text-red-600">{{ pastaErro }}</p>
             </div>
-            <p v-if="anexoErro" class="text-xs text-red-600">{{ anexoErro }}</p>
-            <p class="text-[11px] text-muted-foreground">O robô do mini guarda no sistema e no MEGA; a prova aparece em "Provas" em até 5 min. Vídeo: só o link do MEGA.</p>
-            <ul v-if="detalhe.anexos?.length" class="space-y-1 pt-1">
-              <li v-for="x in detalhe.anexos" :key="x.id" class="flex items-center gap-2 text-xs min-w-0">
-                <span class="font-medium whitespace-nowrap">{{ x.tipo_nome }}</span>
-                <span class="truncate text-muted-foreground" :title="x.nome || x.link || ''">{{ x.nome || x.link }}</span>
-                <span class="text-muted-foreground whitespace-nowrap tabular-nums">{{ quando(x.enviado_em) }}</span>
-                <span class="flex-1" />
-                <span :class="situacaoAnexo(x).cls" :title="x.resultado || ''">{{ situacaoAnexo(x).texto }}</span>
-              </li>
-            </ul>
           </div>
-          <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            <div><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">Advogado</dt><dd>{{ k.juridico || '—' }}</dd></div>
-            <div><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">Enviado em</dt><dd>{{ dataBr(k.juridico_enviado_em) }}</dd></div>
-            <div v-if="k.juridico_email" class="col-span-2"><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">E-mail</dt><dd class="truncate">{{ k.juridico_email }}</dd></div>
-          </dl>
-        </section>
-
-        <!-- Compra de prova -->
-        <section v-else-if="abaCaso === 'compra'" class="space-y-2">
+          <!-- 13/10 (Vinicius): a Compra de prova fica aqui, junto do Anexar prova (era uma aba própria) -->
           <!-- 01/10 (Vinicius): "por onde compramos, qual loja, número do pedido, previsão de entrega" -->
           <div class="rounded-lg border px-3 py-2.5 space-y-2">
             <div class="text-sm font-medium">Compra de prova</div>
@@ -921,6 +1079,74 @@ defineExpose({ carregar })
             </dl>
             <p v-if="c.nfe_chave" class="font-mono text-[10px] text-muted-foreground break-all">{{ c.nfe_chave }}</p>
           </div>
+          <div v-if="podeAnexar" class="rounded-lg border px-3 py-2.5 space-y-2">
+            <div class="text-sm font-medium">Anexar prova</div>
+            <div class="flex flex-wrap items-center gap-2">
+              <select v-model="anexoTipo" class="h-9 rounded-md border bg-background px-2 text-sm">
+                <option v-for="tp in detalhe.tipos_anexo || []" :key="tp.chave" :value="tp.chave">{{ tp.nome }}</option>
+              </select>
+              <Input v-if="anexoTipo === 'video'" v-model="anexoLink" placeholder="link do MEGA (com a chave #…)" class="w-72" />
+              <input
+                v-else
+                id="anexo-arquivo"
+                type="file"
+                class="text-xs file:mr-2 file:rounded-md file:border file:bg-background file:px-2 file:py-1 file:text-xs"
+                @change="(e) => (anexoArquivo = (e.target as HTMLInputElement).files?.[0] || null)"
+              >
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <Input v-model="anexoObs" placeholder="observação (opcional)" class="flex-1 min-w-[200px]" />
+              <Button size="sm" :disabled="anexando || !podeEnviarAnexo" @click="anexar">{{ anexando ? 'enviando…' : 'anexar' }}</Button>
+            </div>
+            <p v-if="anexoErro" class="text-xs text-red-600">{{ anexoErro }}</p>
+            <p class="text-[11px] text-muted-foreground">O robô do mini guarda no sistema e no MEGA; a prova aparece em "Provas" em até 5 min. Vídeo: só o link do MEGA.</p>
+            <ul v-if="detalhe.anexos?.length" class="space-y-1 pt-1">
+              <li v-for="x in detalhe.anexos" :key="x.id" class="flex items-center gap-2 text-xs min-w-0">
+                <span class="font-medium whitespace-nowrap">{{ x.tipo_nome }}</span>
+                <span class="truncate text-muted-foreground" :title="x.nome || x.link || ''">{{ x.nome || x.link }}</span>
+                <span class="text-muted-foreground whitespace-nowrap tabular-nums">{{ quando(x.enviado_em) }}</span>
+                <span class="flex-1" />
+                <span :class="situacaoAnexo(x).cls" :title="x.resultado || ''">{{ situacaoAnexo(x).texto }}</span>
+              </li>
+            </ul>
+          </div>
+          <!-- 13/10 (Vinicius): o Processo fica por último (só é usado depois do envio ao advogado) -->
+          <!-- 01/10 (Vinicius): "nº do processo, última movimentação, status, link de consulta — vamos logar no Jusbrasil" -->
+          <div class="rounded-lg border px-3 py-2.5 space-y-2">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="font-medium">Processo</span>
+              <span v-if="k.juridico_enviado_em" class="text-xs text-muted-foreground">enviado ao advogado em {{ dataBr(k.juridico_enviado_em, false) }}</span>
+              <span class="flex-1" />
+              <a v-if="extraForm.processo_link" :href="extraForm.processo_link" target="_blank" rel="noopener noreferrer" class="text-xs text-primary hover:underline">consultar no Jusbrasil</a>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Nº do processo
+                <Input v-model="extraForm.processo_numero" :disabled="!podeAnexar" placeholder="0000000-00.0000.0.00.0000" class="font-mono" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Link de consulta (Jusbrasil)
+                <Input v-model="extraForm.processo_link" :disabled="!podeAnexar" placeholder="https://www.jusbrasil.com.br/…" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Última movimentação (data)
+                <Input v-model="extraForm.mov_data" :disabled="!podeAnexar" type="date" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Status da última movimentação
+                <Input v-model="extraForm.mov_status" :disabled="!podeAnexar" placeholder="ex.: em andamento, audiência marcada" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5 sm:col-span-2">O que aconteceu
+                <Input v-model="extraForm.mov_texto" :disabled="!podeAnexar" placeholder="ex.: petição inicial distribuída" />
+              </label>
+            </div>
+            <div v-if="podeAnexar" class="flex items-center gap-2">
+              <Button size="sm" :disabled="salvandoExtra" @click="salvarExtra">{{ salvandoExtra ? 'salvando…' : 'salvar' }}</Button>
+              <span v-if="extraSalvo" class="text-xs text-emerald-600">salvo ✓</span>
+              <span v-if="extraErro" class="text-xs text-red-600">{{ extraErro }}</span>
+            </div>
+          </div>
+          <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+            <div><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">Advogado</dt><dd>{{ k.juridico || '—' }}</dd></div>
+            <div><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">Enviado em</dt><dd>{{ dataBr(k.juridico_enviado_em) }}</dd></div>
+            <div v-if="k.juridico_email" class="col-span-2"><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">E-mail</dt><dd class="truncate">{{ k.juridico_email }}</dd></div>
+          </dl>
         </section>
 
         <!-- Provas -->

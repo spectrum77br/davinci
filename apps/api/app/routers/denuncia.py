@@ -59,6 +59,7 @@ from app.models.denuncia import (
     DenunciaCasoExtra,
     DenunciaCompra,
     DenunciaDenuncia,
+    DenunciaJuridicoPasta,
     DenunciaLoja,
     DenunciaProva,
     DenunciaRelatorio,
@@ -100,6 +101,10 @@ TIPOS_ANEXO: dict[str, tuple[str, str]] = {
     "print": ("Print", "Print do anúncio"),
     "outro": ("Outro", "Outro documento"),
 }
+# "Montar pasta jurídico" (13/10): o zip que o mini monta (dossiê + anexos + vídeo) fica aqui para
+# baixar; só o da última pasta de cada caso (as velhas saem do disco quando chega uma nova)
+PASTA_JURIDICO = "denuncia/juridico"
+TETO_PASTA_BYTES = 80 * 1024 * 1024
 # Um lote do sync: o mini manda de 500 em 500.
 MAX_LINHAS_LOTE = 2000
 # Provas sob demanda (01/10): pedido que o mini não atendeu em 10 min caduca
@@ -427,6 +432,141 @@ async def sync_anexo_entregue(
         (Path(get_settings().uploads_dir) / x.arquivo_local).unlink(missing_ok=True)
         x.arquivo_local = None
     await session.commit()
+    return {"ok": True}
+
+
+# ── pasta do jurídico (13/10/2026) — o mini conta como foi a montagem e o envio ──────────────────
+# Vinicius: "eu acionar esses botão dentro dos casos e enviar quando eu quiser". O mini pega os
+# comandos `juridico_montar` / `juridico_enviar` (GET …/robo/comandos) e responde por aqui: a
+# montagem (status + o que montou em `info`), o zip (PUT …/arquivo — de preferência ANTES do
+# "pronta") e o envio pelo Tuta.
+_STATUS_PASTA_MINI = ("montando", "pronta", "erro")
+_STATUS_ENVIO_MINI = ("enviando", "enviado", "erro")
+
+
+def _pasta_juridico() -> Path:
+    p = Path(get_settings().uploads_dir) / PASTA_JURIDICO
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+async def _pasta_do_sync(session: AsyncSession, pasta_id: int) -> DenunciaJuridicoPasta:
+    p = await session.get(DenunciaJuridicoPasta, pasta_id)
+    if p is None:
+        raise HTTPException(404, detail={"code": "denuncia_pasta_nao_encontrada"})
+    return p
+
+
+@sync_router.post("/juridico/pastas/{pasta_id}")
+async def sync_pasta_juridico(
+    pasta_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """Corpo: {status: 'montando' | 'pronta' | 'erro', resultado?, info?}. `info` (arquivos,
+    avisos, nome_zip, para/cc/de do e-mail…) junta com o que já veio."""
+    p = await _pasta_do_sync(session, pasta_id)
+    status = corpo.get("status")
+    info = corpo.get("info")
+    if status not in _STATUS_PASTA_MINI or (info is not None and not isinstance(info, dict)):
+        raise HTTPException(422, detail={"code": "denuncia_pasta_status_invalido"})
+    p.status = status
+    p.resultado = str(corpo.get("resultado") or "")[:2000] or None
+    if info:
+        p.info = {**(p.info or {}), **info}
+    if status == "pronta":
+        p.pronta_em = datetime.now(UTC)
+    await session.commit()
+    logger.info("denuncia_pasta_juridico", pasta=pasta_id, caso=p.caso_id, status=status)
+    return {"ok": True}
+
+
+@sync_router.put("/juridico/pastas/{pasta_id}/arquivo")
+async def sync_pasta_juridico_arquivo(
+    pasta_id: int,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+) -> dict:
+    """Corpo = o zip cru (até `TETO_PASTA_BYTES`). Chegou: o zip das pastas mais velhas do mesmo
+    caso sai do disco (disco do servidor curto — só a última pasta interessa)."""
+    p = await _pasta_do_sync(session, pasta_id)
+    pasta = _pasta_juridico()
+    h, total = hashlib.sha256(), 0
+    fd, tmp = tempfile.mkstemp(dir=pasta, prefix=f".{pasta_id}-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > TETO_PASTA_BYTES:
+                    raise HTTPException(413, detail={"code": "denuncia_pasta_grande_demais"})
+                h.update(chunk)
+                f.write(chunk)
+        os.replace(tmp, pasta / f"{pasta_id}.zip")
+        tmp = ""
+    finally:
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
+    p.arquivo_local, p.tamanho = f"{PASTA_JURIDICO}/{pasta_id}.zip", total
+    velhas = (
+        await session.execute(
+            select(DenunciaJuridicoPasta).where(
+                DenunciaJuridicoPasta.caso_id == p.caso_id,
+                DenunciaJuridicoPasta.id < p.id,
+                DenunciaJuridicoPasta.arquivo_local.is_not(None),
+            )
+        )
+    ).scalars().all()
+    for v in velhas:
+        (Path(get_settings().uploads_dir) / str(v.arquivo_local)).unlink(missing_ok=True)
+        v.arquivo_local = None
+    await session.commit()
+    return {"ok": True, "tamanho": total, "sha256": h.hexdigest()}
+
+
+@sync_router.post("/juridico/pastas/{pasta_id}/envio")
+async def sync_pasta_juridico_envio(
+    pasta_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """Corpo: {status: 'enviando' | 'enviado' | 'erro', resultado?, enviado_em? (ISO), info?}.
+    Enviado ao advogado: o caso vira "Com jurídico" na hora (`juridico_data` = dia do envio, em
+    Brasília — o mesmo campo do status trocado à mão; o status escolhido à mão não muda). Enviado a
+    outro e-mail (teste, escolhido na tela): fica 'teste' e o caso não muda."""
+    p = await _pasta_do_sync(session, pasta_id)
+    status = corpo.get("status")
+    info = corpo.get("info")
+    if status not in _STATUS_ENVIO_MINI or (info is not None and not isinstance(info, dict)):
+        raise HTTPException(422, detail={"code": "denuncia_envio_status_invalido"})
+    quando = datetime.now(UTC)
+    if status == "enviado" and corpo.get("enviado_em"):
+        try:
+            quando = datetime.fromisoformat(str(corpo["enviado_em"]))
+        except ValueError:
+            raise HTTPException(
+                422, detail={"code": "denuncia_data_invalida", "campo": "enviado_em"}
+            ) from None
+        if quando.tzinfo is None:   # sem fuso = hora do mini (Brasília)
+            quando = quando.replace(tzinfo=relatorio_dia.FUSO)
+    teste = bool((p.envio_info or {}).get("teste"))
+    p.envio_status = "teste" if status == "enviado" and teste else status
+    p.envio_resultado = str(corpo.get("resultado") or "")[:2000] or None
+    if info:
+        p.envio_info = {**(p.envio_info or {}), **info}
+    if status == "enviado":
+        p.envio_em = quando
+        if not teste:
+            x = await session.get(DenunciaCasoExtra, p.caso_id)
+            if x is None:
+                x = DenunciaCasoExtra(caso_id=p.caso_id)
+                session.add(x)
+            x.juridico_data = quando.astimezone(relatorio_dia.FUSO).date()
+    await session.commit()
+    logger.info("denuncia_pasta_juridico_envio", pasta=pasta_id, caso=p.caso_id,
+                status=p.envio_status)
     return {"ok": True}
 
 
@@ -766,7 +906,7 @@ async def robo_passo(
     acao = corpo.get("acao")
     if acao not in PASSOS:
         raise HTTPException(422, detail={"code": "denuncia_robo_passo_invalido", "acao": acao})
-    if acao in EM_CRIACAO:   # 07/10: o robô ainda não tem este passo (Prints) ou ele está sendo refeito (Jurídico)
+    if acao in EM_CRIACAO:   # 07/10: passo ainda sem robô ou sendo refeito (13/10: nenhum)
         raise HTTPException(422, detail={"code": "denuncia_robo_passo_em_criacao", "acao": acao})
     return await _comando(session, u, "passo", {"acao": acao})
 
@@ -782,7 +922,7 @@ async def robo_agenda(
     passa a seguir na hora (comando "agenda"; e o mini relê a agenda a cada minuto)."""
     if acao not in PASSOS:
         raise HTTPException(422, detail={"code": "denuncia_robo_passo_invalido", "acao": acao})
-    if acao in EM_CRIACAO:   # 07/10: o robô ainda não tem este passo (Prints) ou ele está sendo refeito (Jurídico)
+    if acao in EM_CRIACAO:   # 07/10: passo ainda sem robô ou sendo refeito (13/10: nenhum)
         raise HTTPException(422, detail={"code": "denuncia_robo_passo_em_criacao", "acao": acao})
     if "ligado" in corpo and not isinstance(corpo["ligado"], bool):
         raise HTTPException(422, detail={"code": "denuncia_robo_ligado_invalido"})
@@ -1747,7 +1887,8 @@ def _status_caso(
 def _extra_dict(x: DenunciaCasoExtra | None) -> dict:
     campos = ("compra_data", "compra_loja", "compra_pedido", "compra_previsao", "processo_numero",
               "processo_link", "mov_data", "mov_texto", "mov_status", "atualizado_por",
-              "status_manual", "status_manual_por", "status_manual_em", "juridico_data")
+              "status_manual", "status_manual_por", "status_manual_em", "juridico_data",
+              "selo_anatel")
     if x is None:
         return dict.fromkeys(campos)
     out = {k: getattr(x, k) for k in campos}
@@ -1946,7 +2087,8 @@ async def editar_caso_extra(
     corpo: Annotated[dict, Body()],
 ) -> dict:
     """Onde comprou / pedido / previsão de entrega e o processo (nº, link do Jusbrasil, última
-    movimentação). Só os campos enviados mudam; "" apaga."""
+    movimentação). Só os campos enviados mudam; "" apaga. 13/10: + `selo_anatel` ('sim' | 'nao',
+    a pergunta "Selo Anatel aparece nas fotos?" do checklist do jurídico)."""
     c = (
         await session.execute(select(DenunciaCaso).where(DenunciaCaso.id == caso_id))
     ).scalar_one_or_none()
@@ -1967,6 +2109,11 @@ async def editar_caso_extra(
                 setattr(x, k, datetime.strptime(v[:10], "%Y-%m-%d").date() if v else None)
             except ValueError:
                 raise HTTPException(422, detail={"code": "denuncia_data_invalida", "campo": k}) from None
+    if "selo_anatel" in corpo:
+        v = str(corpo["selo_anatel"] or "").strip().lower().replace("não", "nao")
+        if v not in ("", "sim", "nao"):
+            raise HTTPException(422, detail={"code": "denuncia_selo_invalido"})
+        x.selo_anatel = v or None
     link = x.processo_link or ""
     if link and not link.startswith(("https://", "http://")):
         raise HTTPException(422, detail={"code": "denuncia_link_invalido"})
@@ -2091,6 +2238,8 @@ async def ver_caso(
         ),
         "status_auto": _status_caso(c.status, caso["juridico_enviado_em"], compra),
         "tipos_anexo": [{"chave": k, "nome": v[1]} for k, v in TIPOS_ANEXO.items()],
+        # 13/10: a última pasta do jurídico (montar / baixar / enviar)
+        "pasta": _pasta_resumo(await _ultima_pasta(session, caso_id)),
     }
 
 
@@ -2158,6 +2307,222 @@ async def anexar_ao_caso(
         x.arquivo_local, x.tamanho, x.sha256 = f"{PASTA_ANEXOS}/{x.id}{ext}", total, h.hexdigest()
     await session.commit()
     return {"ok": True, "anexos": await _anexos_do_caso(session, caso_id)}
+
+
+# ── pasta do jurídico (13/10/2026) ───────────────────────────────────────────────────────────────
+# Vinicius: o passo 9 do robô (Jurídico) virou botão na ficha do caso — "eu acionar esses botão
+# dentro dos casos e enviar quando eu quiser". "Montar pasta jurídico" confere o checklist aqui e
+# pede ao mini (comando `juridico_montar`); o mini monta o dossiê + anexos + vídeo, sobe o zip e
+# conta como foi (sync acima). "Enviar ao jurídico" pede o e-mail pelo Tuta do mini (comando
+# `juridico_enviar`) para o destinatário escolhido na tela: o advogado (info.para da pasta) ou
+# outro e-mail = teste, que não muda o caso.
+# O checklist "Pronto para enviar ao advogado?" (o mesmo da tela, DenunciaCasos.vue): nome → tipos
+# de prova que valem. Comprovante das denúncias também vale qualquer denúncia do anúncio.
+CHECKLIST_JURIDICO: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Tela do anúncio (print)", ("Captura no ato", "Print", "PDF do anúncio")),
+    ("Tela do pedido (compra de prova)", ("Tela do pedido",)),
+    ("Vídeo da embalagem sendo aberta", ("Vídeo",)),
+    ("Fotos do produto (com o selo Anatel)", ("Foto",)),
+    ("NF-e da compra (PDF)", ("NF-e",)),
+    ("Comprovantes das denúncias", ("Captura no ato", "Registro da denúncia", "Protocolo")),
+)
+SELO_RESPONDIDO = "Selo Anatel respondido"
+# pedido que o mini não pegou em COMANDO_VALE (ele só vê comando de até 1 h) não vai mais rodar; e a
+# montagem/envio que começou e não terminou nesse tempo também não (o mini parou no meio)
+PASTA_CADUCOU = "o robô do mini não pegou o pedido em 1 h (mini desligado?) — monte de novo"
+PASTA_PAROU = "o robô do mini começou a montar e não terminou em 1 h — monte de novo"
+ENVIO_CADUCOU = "o robô do mini não pegou o envio em 1 h — envie de novo"
+ENVIO_PAROU = ("o robô do mini começou a enviar e não respondeu em 1 h — confira a caixa de saída "
+               "do Tuta antes de enviar de novo")
+_RE_EMAIL = re.compile(r"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$")
+
+
+async def _ultima_pasta(session: AsyncSession, caso_id: int) -> DenunciaJuridicoPasta | None:
+    return (
+        await session.execute(
+            select(DenunciaJuridicoPasta)
+            .where(DenunciaJuridicoPasta.caso_id == caso_id)
+            .order_by(DenunciaJuridicoPasta.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+def _estado_pasta(
+    p: DenunciaJuridicoPasta, agora: datetime
+) -> tuple[str, str | None, str | None, str | None]:
+    """(status, resultado, envio_status, envio_resultado) valendo agora: o pedido que caducou vira
+    'erro' (só na resposta — o mini que responder depois ainda grava o que fez)."""
+    status, resultado = p.status, p.resultado
+    if status in ("pedida", "montando") and agora - p.pedido_em > COMANDO_VALE:
+        status, resultado = "erro", PASTA_CADUCOU if status == "pedida" else PASTA_PAROU
+    envio, envio_resultado = p.envio_status, p.envio_resultado
+    pedido_envio = p.envio_pedido_em
+    if envio in ("pedido", "enviando") and pedido_envio and agora - pedido_envio > COMANDO_VALE:
+        envio, envio_resultado = "erro", ENVIO_CADUCOU if envio == "pedido" else ENVIO_PAROU
+    return status, resultado, envio, envio_resultado
+
+
+def _iso(v: datetime | None) -> str | None:
+    return v.isoformat() if v else None
+
+
+def _pasta_resumo(p: DenunciaJuridicoPasta | None) -> dict | None:
+    if p is None:
+        return None
+    status, resultado, envio, envio_resultado = _estado_pasta(p, datetime.now(UTC))
+    return {
+        "id": p.id, "status": status, "resultado": resultado, "info": p.info or {},
+        "tamanho": p.tamanho, "tem_arquivo": bool(p.arquivo_local),
+        "pedido_por": p.pedido_por, "pedido_em": _iso(p.pedido_em), "pronta_em": _iso(p.pronta_em),
+        "envio_status": envio, "envio_pedido_por": p.envio_pedido_por,
+        "envio_pedido_em": _iso(p.envio_pedido_em), "envio_em": _iso(p.envio_em),
+        "envio_resultado": envio_resultado, "envio_info": p.envio_info,
+    }
+
+
+def _barrar_pasta_ocupada(p: DenunciaJuridicoPasta | None) -> None:
+    """409 enquanto a última pasta do caso está sendo montada/enviada ou já foi ao advogado
+    (o envio de teste não prende nada)."""
+    if p is None:
+        return
+    status, _r, envio, _er = _estado_pasta(p, datetime.now(UTC))
+    if status in ("pedida", "montando"):
+        raise HTTPException(409, detail={"code": "denuncia_pasta_em_andamento"})
+    if envio in ("pedido", "enviando"):
+        raise HTTPException(409, detail={"code": "denuncia_envio_em_andamento"})
+    if envio == "enviado":
+        raise HTTPException(409, detail={"code": "denuncia_juridico_ja_enviado"})
+
+
+async def _faltam_para_o_juridico(
+    session: AsyncSession, c: DenunciaCaso, x: DenunciaCasoExtra | None
+) -> list[str]:
+    """O checklist com a cópia daqui: as provas do caso e do anúncio principal e as denúncias dos
+    anúncios do caso (os mesmos que a ficha mostra)."""
+    conds = [DenunciaProva.caso_id == c.id]
+    if c.anuncio_id:
+        conds.append(DenunciaProva.anuncio_id == c.anuncio_id)
+    tipos = set(
+        (await session.execute(select(DenunciaProva.tipo).where(or_(*conds)).distinct())).scalars()
+    )
+    excluido = (c.dados or {}).get("excluido_anuncio_id")
+    ids = _anuncios_do_caso(c) or ([excluido] if excluido else [])
+    tem_denuncia = bool(ids) and bool(
+        (await session.execute(
+            select(func.count()).select_from(DenunciaDenuncia)
+            .where(DenunciaDenuncia.anuncio_id.in_(ids))
+        )).scalar()
+    )
+    faltam = []
+    for nome, aceitos in CHECKLIST_JURIDICO:
+        if tipos & set(aceitos) or (nome == "Comprovantes das denúncias" and tem_denuncia):
+            continue
+        faltam.append(nome)
+    if not (x is not None and x.selo_anatel):
+        faltam.append(SELO_RESPONDIDO)
+    return faltam
+
+
+async def _caso_para_pasta(session: AsyncSession, caso_id: int) -> DenunciaCaso:
+    c = await session.get(DenunciaCaso, caso_id)
+    if c is None or c.status == CASO_EXCLUIDO:
+        raise HTTPException(404, detail={"code": "denuncia_caso_nao_encontrado"})
+    return c
+
+
+def _dados_do_comando(c: DenunciaCaso, p: DenunciaJuridicoPasta) -> dict:
+    return {"pasta_id": p.id, "caso_id": c.id, "codigo": c.codigo or f"CASO-{c.id:03d}",
+            "anuncio_id": c.anuncio_id}
+
+
+@router.post("/casos/{caso_id}/pasta")
+async def montar_pasta_juridico(
+    caso_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+) -> dict:
+    """"Montar pasta jurídico": o checklist completo (422 com o que falta) e nada em andamento
+    (409) → pede ao mini. "Montar de novo" é o mesmo botão: cria outra pasta."""
+    c = await _caso_para_pasta(session, caso_id)
+    _barrar_pasta_ocupada(await _ultima_pasta(session, caso_id))
+    x = await session.get(DenunciaCasoExtra, caso_id)
+    faltam = await _faltam_para_o_juridico(session, c, x)
+    if faltam:
+        raise HTTPException(422, detail={"code": "denuncia_juridico_incompleto", "faltam": faltam})
+    p = DenunciaJuridicoPasta(
+        caso_id=caso_id, pedido_por=u.name or u.email, pedido_em=datetime.now(UTC),
+        status="pedida", info={},
+    )
+    session.add(p)
+    await session.flush()
+    session.add(DenunciaRoboComando(
+        tipo="juridico_montar",
+        dados={**_dados_do_comando(c, p), "selo_anatel": x.selo_anatel if x else None},
+        pedido_por=u.name or u.email,
+    ))
+    await session.commit()
+    logger.info("denuncia_pasta_juridico_pedida", caso=c.codigo, pasta=p.id, por=u.email)
+    return {"ok": True, "pasta": _pasta_resumo(p)}
+
+
+@router.get("/casos/{caso_id}/pasta/arquivo")
+async def baixar_pasta_juridico(
+    caso_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+) -> FileResponse:
+    p = await _ultima_pasta(session, caso_id)
+    if p is None or not p.arquivo_local:
+        raise HTTPException(404, detail={"code": "denuncia_pasta_sem_arquivo"})
+    caminho = Path(get_settings().uploads_dir) / p.arquivo_local
+    if not caminho.is_file():
+        raise HTTPException(404, detail={"code": "denuncia_pasta_sem_arquivo"})
+    nome = os.path.basename(str((p.info or {}).get("nome_zip") or ""))
+    return FileResponse(caminho, media_type="application/zip",
+                        filename=nome or f"Caso_{caso_id}_juridico.zip")
+
+
+@router.post("/casos/{caso_id}/enviar")
+async def enviar_pasta_juridico(
+    caso_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """"Enviar ao jurídico": a pasta pronta vai por e-mail pelo Tuta do mini. Corpo: {para, cc?}.
+    `para` diferente do advogado da pasta (info.para.email) = teste: a pessoa manda pra ela mesma
+    antes, e o caso não muda."""
+    c = await _caso_para_pasta(session, caso_id)
+    para = str(corpo.get("para") or "").strip()
+    cc = str(corpo.get("cc") or "").strip() or None
+    if not _RE_EMAIL.match(para) or (
+        cc and not all(_RE_EMAIL.match(e.strip()) for e in re.split(r"[,;]", cc) if e.strip())
+    ):
+        raise HTTPException(422, detail={"code": "denuncia_email_invalido"})
+    p = await _ultima_pasta(session, caso_id)
+    status, _r, envio, _er = _estado_pasta(p, datetime.now(UTC)) if p else (None, None, None, None)
+    if p is None or status != "pronta" or not p.arquivo_local:
+        raise HTTPException(409, detail={"code": "denuncia_pasta_nao_pronta"})
+    if envio in ("pedido", "enviando"):
+        raise HTTPException(409, detail={"code": "denuncia_envio_em_andamento"})
+    if envio == "enviado":
+        raise HTTPException(409, detail={"code": "denuncia_juridico_ja_enviado"})
+    advogado = (p.info or {}).get("para")
+    email_adv = str((advogado.get("email") if isinstance(advogado, dict) else None) or "")
+    teste = para.lower() != email_adv.strip().lower()
+    p.envio_status, p.envio_resultado, p.envio_em = "pedido", None, None
+    p.envio_pedido_por, p.envio_pedido_em = u.name or u.email, datetime.now(UTC)
+    p.envio_info = {"para": para, "cc": cc, "teste": teste}
+    session.add(DenunciaRoboComando(
+        tipo="juridico_enviar",
+        dados={**_dados_do_comando(c, p), "para": para, "cc": cc, "teste": teste},
+        pedido_por=u.name or u.email,
+    ))
+    await session.commit()
+    logger.info("denuncia_pasta_juridico_enviar", caso=c.codigo, pasta=p.id, teste=teste,
+                por=u.email)
+    return {"ok": True, "pasta": _pasta_resumo(p)}
 
 
 @router.post("/provas/{prova_id}/preparar")
