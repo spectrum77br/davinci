@@ -1748,8 +1748,12 @@ _FAIXAS: tuple[tuple[str, float | None], ...] = (
 
 
 def _faixa(segundos: float) -> str:
+    # Segundo inteiro, arredondado para cima a partir de ,5: o MP4 de "15 s"
+    # sai do editor com 15,07 s (quadros a mais no fim), e sem arredondar os
+    # vídeos de 15 s caíam todos em "16 a 20 s" (Mindset, 13/10: 30 de 31).
+    inteiro = int(segundos + 0.5)
     for nome, teto in _FAIXAS:
-        if teto is None or segundos <= teto:
+        if teto is None or inteiro <= teto:
             return nome
     return _FAIXAS[-1][0]
 

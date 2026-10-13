@@ -1053,3 +1053,16 @@ async def test_0393_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession):
     finally:
         await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
         await db.commit()
+
+
+def test_faixa_arredonda_ao_segundo_inteiro():
+    """O "15 s" do editor tem 15,07 s: fica em 11 a 15, não em 16 a 20."""
+    from app.routers.portal_criativos import _faixa
+
+    assert _faixa(10.4) == "ate_10"
+    assert _faixa(10.5) == "11_15"
+    assert _faixa(15.07) == "11_15"
+    assert _faixa(15.49) == "11_15"
+    assert _faixa(15.5) == "16_20"
+    assert _faixa(45.4) == "31_45"
+    assert _faixa(45.5) == "acima_45"
