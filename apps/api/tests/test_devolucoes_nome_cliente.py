@@ -63,6 +63,23 @@ async def test_generico_sem_fallback_mantem_generico() -> None:
     assert got == "Amazon DBA"
 
 
+async def test_correios_do_melhor_envio_cai_pra_etiqueta() -> None:
+    # 13/10: SEDEX do Melhor Envio no Bling grava transporte.contato.nome = "Correios".
+    got = _melhor_nome_destinatario("Correios", "Cristhian", "Cristhian")
+    assert got == "Cristhian"
+
+
+async def test_transportadora_sem_etiqueta_cai_pro_contato() -> None:
+    assert _melhor_nome_destinatario("Jadlog", None, "Leandro") == "Leandro"
+    assert _melhor_nome_destinatario("CORREIOS", "", "Leidiane Barbosa") == "Leidiane Barbosa"
+
+
+async def test_cliente_com_nome_de_transportadora_no_meio_nao_e_generico() -> None:
+    # Só o nome EXATO da transportadora (ou "Correios" no começo) é genérico.
+    assert _melhor_nome_destinatario("Maria Correios", "Outro", None) == "Maria Correios"
+    assert _melhor_nome_destinatario("Kangu Silva", "Outro", None) == "Kangu Silva"
+
+
 async def test_tudo_vazio_vira_none() -> None:
     assert _melhor_nome_destinatario(None, None, None) is None
     assert _melhor_nome_destinatario("  ", "", None) is None

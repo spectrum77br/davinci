@@ -159,7 +159,15 @@ async def _bling_client_for_user(
 # inverter a precedência geral (nos demais marketplaces transporte.contato
 # é o destinatário correto) — então só quando o nome é genérico da conta
 # caímos pra etiqueta/contato.
-_GENERIC_TRANSPORT_NAME = re.compile(r"^amazon\b", re.IGNORECASE)
+# 13/10 (Eduardo): SEDEX gerado pelo Melhor Envio dentro do pedido do Bling
+# grava transporte.contato = {"id": 0, "nome": "Correios"} — o DaVinci mostrava
+# "Correios" como cliente. Transportadora também é nome genérico: "Correios"
+# como palavra inicial; as demais só com o nome EXATO (não pegar cliente real).
+_GENERIC_TRANSPORT_NAME = re.compile(
+    r"^(?:amazon\b|correios\b|(?:melhor envio|jadlog|loggi|j&t express|total express"
+    r"|azul cargo(?: express)?|kangu|buslog|braspress)\s*$)",
+    re.IGNORECASE,
+)
 
 
 def _melhor_nome_destinatario(
