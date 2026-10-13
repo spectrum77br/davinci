@@ -569,7 +569,7 @@ assert.equal(H.diaRotulo(''), 'sem data')
   assert.equal(H.noIntervalo(null, '2026-09-01', ''), false, 'com filtro, sem data fica de fora')
 }
 
-// agrupaPorDia: ordem de entrada, um cabeçalho por dia, vídeo = ARQUIVO de vídeo.
+// agrupaPorDia: mais novos em cima (13/10/2026), um cabeçalho por dia, vídeo = ARQUIVO de vídeo.
 {
   const vid = { file_mime: 'video/mp4' }
   const img = { file_mime: 'image/png' }
@@ -580,12 +580,12 @@ assert.equal(H.diaRotulo(''), 'sem data')
     { id: 'd', created_at: null, files: [vid] },
   ]
   const g = H.agrupaPorDia(lista)
-  assert.deepEqual(g.map((x) => x.dia), ['2026-09-25', '2026-09-26', ''])
-  assert.deepEqual(g[0].rows.map((r) => r.id), ['a', 'b'], 'mantém a ordem da API')
-  assert.equal(g[0].criativos, 2)
-  assert.equal(g[0].videos, 3, 'conta arquivo de vídeo, não imagem')
-  assert.equal(H.grupoResumo(g[0], '2026-09-26'), 'sex, 25/09 · 2 criativos · 3 vídeos')
-  assert.equal(H.grupoResumo(g[1], '2026-09-26'), 'sáb, 26/09 · 1 criativo · 0 vídeos')
+  assert.deepEqual(g.map((x) => x.dia), ['2026-09-26', '2026-09-25', ''], 'dia mais novo em cima, sem data no fim')
+  assert.deepEqual(g[1].rows.map((r) => r.id), ['b', 'a'], 'dentro do dia, a mais nova em cima')
+  assert.equal(g[1].criativos, 2)
+  assert.equal(g[1].videos, 3, 'conta arquivo de vídeo, não imagem')
+  assert.equal(H.grupoResumo(g[1], '2026-09-26'), 'sex, 25/09 · 2 criativos · 3 vídeos')
+  assert.equal(H.grupoResumo(g[0], '2026-09-26'), 'sáb, 26/09 · 1 criativo · 0 vídeos')
   assert.equal(H.grupoResumo(g[2], '2026-09-26'), 'sem data · 1 criativo · 1 vídeo')
   assert.deepEqual(H.agrupaPorDia([]), [])
 }
@@ -608,17 +608,18 @@ assert.equal(H.diaRotulo(''), 'sem data')
   assert.equal(H.diaDaLinha(lin(null, [])), '')
 
   // No agrupamento: a linha de 25 cujo vídeo chegou dia 27 conta no 27, e os
-  // dias continuam em ordem mesmo ela vindo da API antes das linhas do 26.
+  // dias continuam em ordem (mais novo em cima) mesmo ela vindo da API antes
+  // das linhas do 26. Dentro do dia manda a hora do vídeo, não a da linha.
   const g = H.agrupaPorDia([
     { id: 'a', ...lin('2026-09-25T13:00:00Z', [v('2026-09-27T13:00:00Z')]) },
     { id: 'b', ...lin('2026-09-26T13:00:00Z', [v('2026-09-26T13:00:00Z')]) },
     { id: 'c', ...lin(null, []) },
     { id: 'd', ...lin('2026-09-27T15:00:00Z', [v('2026-09-27T15:00:00Z'), v('2026-09-27T16:00:00Z')]) },
   ])
-  assert.deepEqual(g.map((x) => x.dia), ['2026-09-26', '2026-09-27', ''], 'dias crescentes, sem data no fim')
-  assert.deepEqual(g[1].rows.map((r) => r.id), ['a', 'd'], 'dentro do dia, a ordem da API')
-  assert.equal(g[1].videos, 3)
-  assert.equal(g[0].videos, 1)
+  assert.deepEqual(g.map((x) => x.dia), ['2026-09-27', '2026-09-26', ''], 'dias decrescentes, sem data no fim')
+  assert.deepEqual(g[0].rows.map((r) => r.id), ['d', 'a'], 'dentro do dia, o vídeo mais novo em cima')
+  assert.equal(g[0].videos, 3)
+  assert.equal(g[1].videos, 1)
 }
 
 // O aviso do vídeo que o robô vai pular (GET /fila `bloqueado`).
@@ -1169,8 +1170,8 @@ async function run() {
       criativo({ id: 'd4', created_at: null, files: [] }),
     ]
     const { s } = await tela({ linhas })
-    assert.deepEqual(s.gruposPorDia.value.map((g) => g.dia), ['2026-09-24', '2026-09-25', ''])
-    assert.deepEqual(s.gruposPorDia.value[1].rows.map((r) => r.id), ['d2', 'd3'], 'ordem da API mantida')
+    assert.deepEqual(s.gruposPorDia.value.map((g) => g.dia), ['2026-09-25', '2026-09-24', ''], 'mais novos em cima')
+    assert.deepEqual(s.gruposPorDia.value[0].rows.map((r) => r.id), ['d3', 'd2'], 'dentro do dia, a mais nova em cima')
     assert.equal(s.videosFiltrados.value, 4)
 
     s.dataDe.value = '2026-09-25'

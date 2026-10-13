@@ -168,13 +168,19 @@ function limparDatas() {
   dataAte.value = ''
 }
 
+// Equipe que enviou (Eduardo, 13/10/2026). null = todas; '' = sem equipe;
+// senão a `equipeChave`. Só na tela, como as datas.
+const equipeFiltro = ref<string | null>(null)
+
 const filteredRows = computed(() => {
   const term = q.value.trim().toLowerCase()
+  const eq = equipeFiltro.value
   return rows.value.filter((r) => {
     if (statusFilter.value === 'pendente' && r.aprovado !== null) return false
     if (statusFilter.value === 'aprovado' && r.aprovado !== true) return false
     if (statusFilter.value === 'reprovado' && r.aprovado !== false) return false
     if (!diaNoIntervalo(diaDaLinha(r), dataDe.value, dataAte.value)) return false
+    if (eq !== null && equipeChave(r.equipe) !== eq) return false
     if (!term) return true
     const hay = [r.modelo, r.marca, r.sku, r.equipe, r.roteiro_titulo, ...r.files.map((f) => f.file_name)]
       .filter(Boolean)
@@ -183,6 +189,41 @@ const filteredRows = computed(() => {
     return hay.includes(term)
   })
 })
+
+// Opções do seletor: as equipes que têm linha (todas as linhas, não só as do
+// filtro — a opção não some quando o texto muda), em ordem alfabética e
+// "sem equipe" no fim. A equipe escolhida fica na lista mesmo quando a última
+// linha dela sai (apagada ou trocada de equipe): sem a opção, o seletor
+// ficaria em branco.
+const equipeOpcoes = computed(() => {
+  const lista = resumoPorEquipe(rows.value, equipeOptions.value)
+  const eq = equipeFiltro.value
+  if (eq !== null && !lista.some((e) => e.chave === eq)) {
+    const nome = eq ? (equipeOptions.value.find((n) => equipeChave(n) === eq) ?? eq) : 'sem equipe'
+    lista.push({ chave: eq, nome, criativos: 0, videos: 0 })
+  }
+  return lista.sort((a, b) => {
+    if (!a.chave !== !b.chave) return a.chave ? -1 : 1
+    return a.nome.localeCompare(b.nome, 'pt-BR')
+  })
+})
+
+// Contador do topo: vídeos enviados por equipe dentro de TODOS os filtros —
+// texto, status, datas e a própria equipe. Com uma equipe escolhida fica só
+// ela (com 0 se não sobrou nada no recorte); clicar nela volta pra "todas".
+const resumoEquipes = computed<ResumoEquipe[]>(() => {
+  const lista = resumoPorEquipe(filteredRows.value, equipeOptions.value)
+  const eq = equipeFiltro.value
+  if (eq !== null && !lista.length) {
+    const nome = equipeOpcoes.value.find((e) => e.chave === eq)?.nome ?? eq
+    lista.push({ chave: eq, nome, criativos: 0, videos: 0 })
+  }
+  return lista
+})
+
+function alternaEquipe(chave: string) {
+  equipeFiltro.value = equipeFiltro.value === chave ? null : chave
+}
 
 // Por dia de chegada do vídeo, com um cabeçalho por dia (`agrupaPorDia`).
 const gruposPorDia = computed(() => agrupaPorDia(filteredRows.value))
@@ -1014,13 +1055,30 @@ function diaNoIntervalo(d: string, de: string, ate: string): boolean {
 
 type GrupoDia<T> = { dia: string; criativos: number; videos: number; rows: T[] }
 
-// Um grupo por `diaDaLinha`, dias em ordem crescente (a da API) e "sem data"
-// no fim; dentro do dia, a ordem de entrada (created_at). A ordenação dos
-// grupos é necessária: a linha criada dia 25 cujo vídeo chegou dia 27 vem
-// da API antes das linhas do dia 26.
+// Instante (ms) em que a linha "apareceu" — o mesmo critério do `diaDaLinha`,
+// com a hora: o do vídeo MAIS NOVO dela; sem vídeo com data, o da criação da
+// linha. 0 = sem data nenhuma.
+function momentoDaLinha(r: LinhaComData): number {
+  let t = 0
+  for (const f of r.files) {
+    if (!ehVideo(f) || !f.enviado_em) continue
+    const ms = Date.parse(f.enviado_em)
+    if (ms > t) t = ms
+  }
+  if (t) return t
+  const c = r.created_at ? Date.parse(r.created_at) : NaN
+  return Number.isNaN(c) ? 0 : c
+}
+
+// Um grupo por `diaDaLinha`. Mais novos em cima (Eduardo, 13/10/2026: "agora
+// os mais novos vão aparecer ali em cima"): dias do mais novo pro mais antigo,
+// "sem data" no fim; dentro do dia, o vídeo que chegou por último primeiro.
+// A API manda por created_at crescente — virada de trás pra frente antes de
+// ordenar, no empate de hora a linha criada por último fica em cima.
 function agrupaPorDia<T extends LinhaComData>(list: readonly T[]): GrupoDia<T>[] {
   const grupos = new Map<string, GrupoDia<T>>()
-  for (const r of list) {
+  const novasPrimeiro = [...list].reverse().sort((a, b) => momentoDaLinha(b) - momentoDaLinha(a))
+  for (const r of novasPrimeiro) {
     const dia = diaDaLinha(r)
     let g = grupos.get(dia)
     if (!g) {
@@ -1035,12 +1093,55 @@ function agrupaPorDia<T extends LinhaComData>(list: readonly T[]): GrupoDia<T>[]
     if (a.dia === b.dia) return 0
     if (!a.dia) return 1
     if (!b.dia) return -1
-    return a.dia < b.dia ? -1 : 1
+    return a.dia > b.dia ? -1 : 1
   })
 }
 
 function plural(n: number, um: string, varios: string): string {
   return `${n} ${n === 1 ? um : varios}`
+}
+
+// ---- vídeos enviados por equipe (Eduardo, 13/10/2026)
+//
+// "mostrará cada pessoa a quantidade de cada que enviou — Mindset e Bill
+// Gates": um contador por equipe no topo, que respeita todos os filtros do topo
+// (texto, status, datas e a própria equipe), e o filtro por equipe ao lado.
+
+// A equipe da linha pra comparar: sem caixa e sem espaço nas pontas, como o
+// backend compara (`_user_equipes`). '' = linha sem equipe.
+function equipeChave(equipe: string | null | undefined): string {
+  return (equipe || '').trim().toLowerCase()
+}
+
+type ResumoEquipe = { chave: string; nome: string; criativos: number; videos: number }
+
+// Uma entrada por equipe: vídeo conta ARQUIVO de vídeo (o mesmo número do
+// cabeçalho do dia). Quem mandou mais vídeos primeiro, empate pelo nome;
+// "sem equipe" sempre no fim. O nome é a grafia de `nomes` (a lista de
+// /creatives/equipes, dona da grafia) e, fora dela, a da primeira linha vista.
+function resumoPorEquipe(
+  list: readonly { equipe: string | null; files: { file_mime: string | null }[] }[],
+  nomes: readonly string[] = [],
+): ResumoEquipe[] {
+  const m = new Map<string, ResumoEquipe>()
+  for (const r of list) {
+    const chave = equipeChave(r.equipe)
+    let e = m.get(chave)
+    if (!e) {
+      const nome = chave
+        ? (nomes.find((n) => equipeChave(n) === chave) ?? (r.equipe || '').trim())
+        : 'sem equipe'
+      e = { chave, nome, criativos: 0, videos: 0 }
+      m.set(chave, e)
+    }
+    e.criativos += 1
+    e.videos += r.files.filter(ehVideo).length
+  }
+  return [...m.values()].sort((a, b) => {
+    if (!a.chave !== !b.chave) return a.chave ? -1 : 1
+    if (a.videos !== b.videos) return b.videos - a.videos
+    return a.nome.localeCompare(b.nome, 'pt-BR')
+  })
 }
 
 // Cabeçalho do dia: "qui, 25/09 · 7 criativos · 9 vídeos". Vídeo conta
@@ -1813,6 +1914,17 @@ function filaDropClass(i: number): string {
         <option value="reprovado">não aprovados</option>
         <option value="fila">fila do robô</option>
       </select>
+      <!-- equipe que enviou o vídeo (coluna Equipe) -->
+      <select
+        v-if="statusFilter !== 'fila'"
+        v-model="equipeFiltro"
+        title="Equipe que enviou o vídeo"
+        class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+        :class="{ 'border-primary text-primary': equipeFiltro !== null }"
+      >
+        <option :value="null">todas as equipes</option>
+        <option v-for="e in equipeOpcoes" :key="`eqo-${e.chave}`" :value="e.chave">{{ e.nome }}</option>
+      </select>
       <!-- fila do robô: é por marca (as contas de rede social são da marca) -->
       <select
         v-if="statusFilter === 'fila'"
@@ -1863,6 +1975,28 @@ function filaDropClass(i: number): string {
       </span>
     </div>
 
+    <!-- vídeos enviados por equipe (respeita todos os filtros, a equipe também); clicar filtra -->
+    <div
+      v-if="statusFilter !== 'fila' && resumoEquipes.length"
+      class="flex flex-wrap items-center gap-1.5 text-xs"
+    >
+      <span class="text-muted-foreground">Vídeos enviados por equipe:</span>
+      <button
+        v-for="e in resumoEquipes"
+        :key="`eq-${e.chave}`"
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 transition-colors"
+        :class="equipeFiltro === e.chave
+          ? 'border-primary bg-primary text-primary-foreground'
+          : 'bg-background hover:bg-accent'"
+        :title="`${e.nome}: ${plural(e.videos, 'vídeo enviado', 'vídeos enviados')} em ${plural(e.criativos, 'criativo', 'criativos')} — ${equipeFiltro === e.chave ? 'clique pra ver todas as equipes' : 'clique pra ver só esta equipe'}`"
+        @click="alternaEquipe(e.chave)"
+      >
+        <span :class="{ italic: !e.chave }">{{ e.nome }}</span>
+        <b class="tabular-nums">{{ e.videos }}</b>
+      </button>
+    </div>
+
     <div v-if="statusFilter !== 'fila'" class="border rounded-lg overflow-auto max-h-[calc(100vh-300px)]">
       <table class="w-full text-sm border-collapse">
         <thead class="sticky top-0 bg-muted z-10">
@@ -1895,6 +2029,63 @@ function filaDropClass(i: number): string {
             </td>
           </tr>
 
+        </tbody>
+        <tbody>
+          <!-- add row: em cima, junto dos mais novos (a linha nova entra no dia de hoje, logo abaixo) -->
+          <tr v-if="canEdit" class="bg-blue-50/40 dark:bg-blue-900/10">
+            <td class="border border-border px-1 py-1">
+              <select
+                v-model="newRow.modelo"
+                class="w-full text-xs border rounded px-1.5 py-1 bg-background"
+                :class="{ 'text-muted-foreground': !newRow.modelo }"
+              >
+                <option value="" disabled>modelo…</option>
+                <option v-for="o in MODELO_OPTIONS" :key="o" :value="o" :title="MODELO_HINTS[o]">{{ o }}</option>
+              </select>
+            </td>
+            <td class="border border-border px-1 py-1">
+              <select
+                v-model="newRow.marca"
+                class="w-full text-xs border rounded px-1.5 py-1 bg-background"
+                :class="{ 'text-muted-foreground': !newRow.marca }"
+              >
+                <option value="">marca —</option>
+                <option v-for="o in marcaOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+            </td>
+            <td class="border border-border px-1 py-1">
+              <select
+                v-model="newRow.equipe"
+                class="w-full text-xs border rounded px-1.5 py-1 bg-background"
+                :class="{ 'text-muted-foreground': !newRow.equipe }"
+              >
+                <option value="">equipe —</option>
+                <option v-for="o in equipeOptions" :key="o" :value="o">{{ o }}</option>
+              </select>
+            </td>
+            <td class="border border-border px-1 py-1">
+              <input
+                v-model="newRow.sku"
+                type="text" placeholder="SKU"
+                class="w-full text-xs border rounded px-1.5 py-1 bg-background font-mono"
+                @keydown.enter="addRow"
+              />
+            </td>
+            <td colspan="4" class="border border-border px-2 py-1 text-[11px] text-muted-foreground align-middle">
+              Arquivos e roteiro você preenche na linha, depois de adicionar.
+            </td>
+            <td class="border border-border px-1 py-1 text-center">
+              <button
+                class="inline-flex items-center justify-center rounded bg-primary text-primary-foreground p-1.5 disabled:opacity-50"
+                title="Adicionar linha"
+                :disabled="adding"
+                @click="addRow"
+              >
+                <Loader2 v-if="adding" class="size-3.5 animate-spin" />
+                <Plus v-else class="size-3.5" />
+              </button>
+            </td>
+          </tr>
         </tbody>
         <!-- data rows: um tbody por dia de chegada (BRT), com o cabeçalho do dia -->
         <tbody v-for="g in gruposPorDia" :key="`dia-${g.dia}`">
@@ -2231,63 +2422,6 @@ function filaDropClass(i: number): string {
             </td>
           </tr>
         </tbody>
-        <tbody>
-          <!-- add row -->
-          <tr v-if="canEdit" class="bg-blue-50/40 dark:bg-blue-900/10">
-            <td class="border border-border px-1 py-1">
-              <select
-                v-model="newRow.modelo"
-                class="w-full text-xs border rounded px-1.5 py-1 bg-background"
-                :class="{ 'text-muted-foreground': !newRow.modelo }"
-              >
-                <option value="" disabled>modelo…</option>
-                <option v-for="o in MODELO_OPTIONS" :key="o" :value="o" :title="MODELO_HINTS[o]">{{ o }}</option>
-              </select>
-            </td>
-            <td class="border border-border px-1 py-1">
-              <select
-                v-model="newRow.marca"
-                class="w-full text-xs border rounded px-1.5 py-1 bg-background"
-                :class="{ 'text-muted-foreground': !newRow.marca }"
-              >
-                <option value="">marca —</option>
-                <option v-for="o in marcaOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-              </select>
-            </td>
-            <td class="border border-border px-1 py-1">
-              <select
-                v-model="newRow.equipe"
-                class="w-full text-xs border rounded px-1.5 py-1 bg-background"
-                :class="{ 'text-muted-foreground': !newRow.equipe }"
-              >
-                <option value="">equipe —</option>
-                <option v-for="o in equipeOptions" :key="o" :value="o">{{ o }}</option>
-              </select>
-            </td>
-            <td class="border border-border px-1 py-1">
-              <input
-                v-model="newRow.sku"
-                type="text" placeholder="SKU"
-                class="w-full text-xs border rounded px-1.5 py-1 bg-background font-mono"
-                @keydown.enter="addRow"
-              />
-            </td>
-            <td colspan="4" class="border border-border px-2 py-1 text-[11px] text-muted-foreground align-middle">
-              Arquivos e roteiro você preenche na linha, depois de adicionar.
-            </td>
-            <td class="border border-border px-1 py-1 text-center">
-              <button
-                class="inline-flex items-center justify-center rounded bg-primary text-primary-foreground p-1.5 disabled:opacity-50"
-                title="Adicionar linha"
-                :disabled="adding"
-                @click="addRow"
-              >
-                <Loader2 v-if="adding" class="size-3.5 animate-spin" />
-                <Plus v-else class="size-3.5" />
-              </button>
-            </td>
-          </tr>
-        </tbody>
       </table>
     </div>
 
@@ -2466,7 +2600,8 @@ function filaDropClass(i: number): string {
       servidor, na hora marcada (BRT). Sozinho, o robô posta o aprovado mais recente
       primeiro; "⤒ frente da fila" põe um vídeo mais antigo antes dos outros, e a
       ordem inteira (com arrastar) fica em "fila do robô", no filtro. As linhas vêm
-      agrupadas pelo dia em que chegaram — use "de"/"até" pra contar os vídeos de um período.
+      agrupadas pelo dia em que chegaram, as mais novas em cima — use "de"/"até" pra contar
+      os vídeos de um período, e a equipe (no seletor ou clicando no contador) pra ver só os de uma equipe.
     </p>
 
     <!-- recusa com motivo -->
