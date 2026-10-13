@@ -148,7 +148,17 @@ async def test_entregue_e_booleano_nao_caminho(client: AsyncClient, db: AsyncSes
     # `mime` entrou em 23/09 para a tela saber se o arquivo DÁ pra tocar — sem
     # ele o portal não distingue vídeo de qualquer outro anexo. É o tipo do
     # conteúdo, não caminho no disco: continua sem dizer ONDE o arquivo mora.
-    assert set(d["arquivos"][0]) == {"id", "nome", "mime", "tamanho", "enviado_em"}
+    # `ia_modelo`/`ia_creditos` (13/10/2026, migration 0393) são o que a
+    # PRÓPRIA agência declarou ao mandar este vídeo.
+    assert set(d["arquivos"][0]) == {
+        "id",
+        "nome",
+        "mime",
+        "tamanho",
+        "enviado_em",
+        "ia_modelo",
+        "ia_creditos",
+    }
 
 # ─────────────── roteiros (entidade própria, migration 0299) ───────────────
 #

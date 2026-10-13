@@ -110,6 +110,14 @@ class MarketingRoteiro(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # A agência por cuja porta a ideia NOVA entrou (`POST /api/portal/roteiros`,
+    # migration 0393): a pessoa no portal ou o Claude conectado a ele. NULL =
+    # escrita pela casa, aqui dentro. É a procedência que faltava: sem ela, o
+    # texto de terceiro chegava na aba Roteiros idêntico ao briefing da casa —
+    # e "a lista de roteiros é o que a casa escreveu" (Eduardo, 23/09/2026,
+    # `marketing_ideia_requisicao.py`). Quem reendereça uma ideia destas para
+    # as duas agências precisa saber que ela veio de uma delas.
+    criado_pela_equipe: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     refs: Mapped[list[MarketingRoteiroRef]] = relationship(
         back_populates="roteiro",

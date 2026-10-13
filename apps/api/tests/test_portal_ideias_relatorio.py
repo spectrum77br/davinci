@@ -11,7 +11,10 @@ O que estes testes travam, na ordem do pedido do Marco:
    `equipe_destino` NULL; personagem desligado é recusado; 30 por minuto.
 4. O relatório conta só vídeo, na janela do ARQUIVO, e trata duração NULL à
    parte (nunca como zero).
-5. Duração e IA: medidas no envio sem nunca barrar o envio.
+5. Duração e IA: medidas no envio sem nunca barrar o envio; a IA é do
+   ARQUIVO, e o reenvio na mesma linha não reescreve a do vídeo antigo.
+6. Procedência: a ideia que entra pelo portal fica marcada como da agência,
+   na aba Roteiros e no portal; caractere de controle é recusado com 400.
 """
 
 from __future__ import annotations
@@ -143,8 +146,6 @@ async def _entrega(
         equipe=equipe,
         roteiro_id=roteiro_id,
         aprovado=aprovado,
-        ia_modelo=ia_modelo,
-        ia_creditos=Decimal(ia_creditos) if ia_creditos is not None else None,
     )
     db.add(c)
     await db.flush()
@@ -158,6 +159,8 @@ async def _entrega(
             file_rel=f"creatives/{c.id}/{nome}",
             sha256=uuid4().hex + uuid4().hex,
             duracao_s=Decimal(duracao) if duracao is not None else None,
+            ia_modelo=ia_modelo,
+            ia_creditos=Decimal(ia_creditos) if ia_creditos is not None else None,
         )
         if enviado_em is not None:
             f.created_at = enviado_em
@@ -418,6 +421,9 @@ async def test_cria_ideia_so_para_a_propria_agencia(client: AsyncClient, db):
     assert row.ativo is True
     assert row.created_by is None
     assert row.origem_id is None
+    # A procedência: texto de terceiro não fica igual ao briefing da casa.
+    assert row.criado_pela_equipe == "alpha"
+    assert ideia["escrita_no_portal"] is True
     # Mesmo formato do detalhe, e a beta não enxerga.
     d = await client.get(f"/api/portal/roteiros/{ideia['id']}", headers=A)
     assert d.json()["roteiro"] == ideia
@@ -432,8 +438,69 @@ async def test_cria_ideia_para_as_duas(client: AsyncClient, db):
     )
     assert r.status_code == 201
     rid = r.json()["roteiro"]["id"]
-    assert (await db.get(MarketingRoteiro, UUID(rid))).equipe_destino is None
-    assert (await client.get(f"/api/portal/roteiros/{rid}", headers=B)).status_code == 200
+    row = await db.get(MarketingRoteiro, UUID(rid))
+    assert row.equipe_destino is None
+    assert row.criado_pela_equipe == "alpha", "a porta por onde entrou fica gravada"
+    d = await client.get(f"/api/portal/roteiros/{rid}", headers=B)
+    assert d.status_code == 200
+    # A beta sabe que o texto veio de fora, mas não de qual agência.
+    assert d.json()["roteiro"]["escrita_no_portal"] is True
+    assert "alpha" not in d.text
+
+
+async def test_ideia_da_agencia_aparece_marcada_na_aba_roteiros(
+    client: AsyncClient, db, auth_as, make_user
+):
+    """A revisão de 13/10/2026: na aba Roteiros (GET /api/marketing/roteiros) a
+    ideia criada pelo portal saía com os mesmos campos do briefing da casa.
+    "A lista de roteiros é o que a casa escreveu" (marketing_ideia_requisicao)."""
+    casa = await _ideia(db, titulo="Briefing da casa", destino="alpha")
+    versao = await _ideia(db, titulo="Versão da alpha", destino="alpha", origem_id=casa.id)
+    r = await client.post(
+        "/api/portal/roteiros", headers=A, json={"titulo": "Da alpha", "texto": "briefing"}
+    )
+    assert r.status_code == 201
+
+    portal = _por_titulo(await _lista(client))
+    assert portal["Briefing da casa"]["escrita_no_portal"] is False
+    assert portal["Versão da alpha"]["escrita_no_portal"] is True
+    assert portal["Da alpha"]["escrita_no_portal"] is True
+
+    auth_as(await make_user(role=UserRole.ADMIN))
+    interna = await client.get("/api/marketing/roteiros")
+    assert interna.status_code == 200, interna.text
+    por_titulo = {x["titulo"]: x for x in interna.json()}
+    assert por_titulo["Da alpha"]["criado_pela_equipe"] == "alpha"
+    assert por_titulo["Briefing da casa"]["criado_pela_equipe"] is None
+    assert por_titulo["Versão da alpha"]["origem_id"] == str(versao.origem_id)
+
+
+@pytest.mark.parametrize("campo", ["titulo", "texto", "marca", "sku"])
+async def test_ideia_com_caractere_de_controle_e_400_e_nao_gasta_vaga(
+    client: AsyncClient, db, limite, campo
+):
+    """Um \x00 derrubava o INSERT em 500 (o Postgres não guarda NUL em texto)
+    depois de gastar uma das 30 vagas do minuto."""
+    corpo = {"titulo": "t", "texto": "x", "marca": "poofy", "sku": "dgd23"}
+    corpo[campo] = "a\x00b"
+    r = await client.post("/api/portal/roteiros", headers=A, json=corpo)
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == {"code": "caractere_invalido", "campo": campo}
+    assert limite == {}, "recusa antes do teto por minuto"
+    assert (await db.execute(select(MarketingRoteiro))).scalars().all() == []
+
+
+async def test_ideia_aceita_quebra_de_linha_e_tabulacao(client: AsyncClient, db):
+    texto = '0-3s: abre a mala\n\tfala: "cabe tudo"\r\n3-6s: fecha'
+    r = await client.post("/api/portal/roteiros", headers=A, json={"titulo": "t", "texto": texto})
+    assert r.status_code == 201, r.text
+    assert r.json()["roteiro"]["texto"] == texto
+
+
+async def test_busca_com_caractere_de_controle_nao_derruba(client: AsyncClient, db):
+    await _ideia(db, titulo="Mala de bordo")
+    assert [x["titulo"] for x in await _lista(client, q="bor\x00do")] == ["Mala de bordo"]
+    assert len(await _lista(client, q="\x00")) == 1, "só controle = sem busca"
 
 
 async def test_ideia_nova_resolve_a_marca_pelo_texto(client: AsyncClient, db):
@@ -623,8 +690,14 @@ async def test_relatorio_sem_videos_e_publicado_por_arquivo(client: AsyncClient,
 
     c, f = await _entrega(db, equipe="alpha", duracao="9.00")
     await _publicar(db, c, f, "publicado")
-    v = (await client.get("/api/portal/relatorio", headers=A)).json()["videos"][0]
-    assert v["publicado"] is True
+    c2, f2 = await _entrega(db, equipe="alpha", duracao="8.00", nome="outro.mp4")
+    await _publicar(db, c2, f2, "falhou")
+    _, f3 = await _entrega(db, equipe="alpha", duracao="7.00", nome="nunca.mp4")
+    v = {
+        x["arquivo_id"]: x["publicado"]
+        for x in (await client.get("/api/portal/relatorio", headers=A)).json()["videos"]
+    }
+    assert v == {str(f.id): True, str(f2.id): False, str(f3.id): False}
 
 
 async def test_relatorio_sem_token_401(client: AsyncClient):
@@ -649,13 +722,16 @@ async def test_entrega_grava_ia_e_duracao(client: AsyncClient, db, sonda):
     row = (
         await db.execute(select(MarketingCreative).where(MarketingCreative.roteiro_id == r0.id))
     ).scalar_one()
-    assert row.ia_modelo == "Kling"
-    assert row.ia_creditos == Decimal("12.50")
     f = row.files[0]
+    assert (f.ia_modelo, f.ia_creditos) == ("Kling", Decimal("12.50"))
     assert (f.duracao_s, f.largura, f.altura) == (Decimal("12.50"), 1080, 1920)
 
     lista = (await client.get("/api/portal/criativos", headers=A)).json()["criativos"][0]
     assert (lista["ia_modelo"], lista["ia_creditos"]) == ("Kling", 12.5)
+    assert (lista["arquivos"][0]["ia_modelo"], lista["arquivos"][0]["ia_creditos"]) == (
+        "Kling",
+        12.5,
+    )
 
 
 async def test_ia_vazia_e_nula_e_ffprobe_que_falha_nao_barra(client: AsyncClient, db, sonda):
@@ -672,7 +748,7 @@ async def test_ia_vazia_e_nula_e_ffprobe_que_falha_nao_barra(client: AsyncClient
     row = (
         await db.execute(select(MarketingCreative).where(MarketingCreative.roteiro_id == r0.id))
     ).scalar_one()
-    assert row.ia_modelo is None and row.ia_creditos is None
+    assert row.files[0].ia_modelo is None and row.files[0].ia_creditos is None
     assert row.files[0].duracao_s is None and row.files[0].largura is None
 
 
@@ -685,6 +761,7 @@ async def test_ia_vazia_e_nula_e_ffprobe_que_falha_nao_barra(client: AsyncClient
         ({"ia_creditos": "NaN"}, "ia_creditos_invalido"),
         ({"ia_creditos": "100000000"}, "ia_creditos_invalido"),
         ({"ia_modelo": "m" * 65}, "ia_modelo_invalido"),
+        ({"ia_modelo": "Kl\x00ing"}, "ia_modelo_invalido"),
     ],
 )
 async def test_ia_invalida_recusa_antes_de_gravar(client: AsyncClient, db, dados, code):
@@ -700,24 +777,46 @@ async def test_ia_invalida_recusa_antes_de_gravar(client: AsyncClient, db, dados
     assert (await db.execute(select(MarketingCreative))).scalars().all() == []
 
 
-async def test_reenvio_sem_ia_nao_apaga_o_que_ja_foi_dito(client: AsyncClient, db):
-    c, _ = await _entrega(
-        db, equipe="alpha", com_arquivo=False, ia_modelo="Veo", ia_creditos="3.00"
-    )
+async def test_reenvio_na_mesma_linha_nao_muda_a_ia_do_video_antigo(client: AsyncClient, db):
+    """A revisão de 13/10/2026: com a IA na LINHA, o reenvio pela aba Entregas
+    (que anexa à linha que já tem vídeo) fazia o vídeo antigo, que era Veo,
+    contar como Sora no relatório, e os créditos se repetiam nos dois."""
+    c, antigo = await _entrega(db, equipe="alpha", ia_modelo="Veo", ia_creditos="3.00")
     r = await client.post(
         f"/api/portal/criativos/{c.id}/arquivo",
         headers=A,
+        data={"ia_modelo": "Sora", "ia_creditos": "5"},
         files={"files": ("novo.mp4", b"x" * 10, "video/mp4")},
     )
     assert r.status_code == 200, r.text
-    assert (r.json()["ia_modelo"], r.json()["ia_creditos"]) == ("Veo", 3.0)
+    # A linha mostra a do último envio; cada vídeo guarda a sua.
+    assert (r.json()["ia_modelo"], r.json()["ia_creditos"]) == ("Sora", 5.0)
+    por_nome = {a["nome"]: a for a in r.json()["arquivos"]}
+    assert (por_nome["video.mp4"]["ia_modelo"], por_nome["video.mp4"]["ia_creditos"]) == (
+        "Veo",
+        3.0,
+    )
+    assert (por_nome["novo.mp4"]["ia_modelo"], por_nome["novo.mp4"]["ia_creditos"]) == (
+        "Sora",
+        5.0,
+    )
+
+    d = (await client.get("/api/portal/relatorio", headers=A)).json()
+    assert d["por_ia"] == {"Sora": 1, "Veo": 1}
+    creditos = {v["arquivo_id"]: v["ia_creditos"] for v in d["videos"]}
+    assert creditos[str(antigo.id)] == 3.0, "o crédito do vídeo antigo não vira o do novo"
+    assert sorted(creditos.values()) == [3.0, 5.0]
+
+    # Reenviar SEM preencher: o vídeo novo fica sem IA no relatório, e a
+    # linha continua mostrando o que a agência já tinha dito.
     r = await client.post(
         f"/api/portal/criativos/{c.id}/arquivo",
         headers=A,
-        data={"ia_modelo": "Sora", "ia_creditos": "0"},
-        files={"files": ("outro.mp4", b"y" * 10, "video/mp4")},
+        files={"files": ("terceiro.mp4", b"y" * 10, "video/mp4")},
     )
-    assert (r.json()["ia_modelo"], r.json()["ia_creditos"]) == ("Sora", 0.0)
+    assert (r.json()["ia_modelo"], r.json()["ia_creditos"]) == ("Sora", 5.0)
+    d = (await client.get("/api/portal/relatorio", headers=A)).json()
+    assert d["por_ia"] == {"nao_informada": 1, "Sora": 1, "Veo": 1}
 
 
 async def test_video_autoral_grava_ia(client: AsyncClient, db, sonda):
@@ -730,7 +829,8 @@ async def test_video_autoral_grava_ia(client: AsyncClient, db, sonda):
     )
     assert r.status_code == 200, r.text
     row = await db.get(MarketingCreative, UUID(r.json()["id"]))
-    assert (row.ia_modelo, row.ia_creditos) == ("Higgsfield", Decimal("40.00"))
+    assert (row.files[0].ia_modelo, row.files[0].ia_creditos) == ("Higgsfield", Decimal("40.00"))
+    assert (r.json()["ia_modelo"], r.json()["ia_creditos"]) == ("Higgsfield", 40.0)
     # Sem duração no cabeçalho: a resolução entra, a duração fica NULL.
     assert (row.files[0].largura, row.files[0].duracao_s) == (720, None)
 
@@ -853,29 +953,34 @@ async def test_backfill_mede_so_o_que_falta_e_e_idempotente(db, sonda, monkeypat
 # ─────────────── a migration ───────────────
 
 
-def _carregar_0392():
-    caminho = _ALEMBIC / "versions" / "0392_criativos_duracao_ia.py"
-    spec = importlib.util.spec_from_file_location("migration_0392_teste", caminho)
+def _carregar_0393():
+    caminho = _ALEMBIC / "versions" / "0393_criativos_duracao_ia.py"
+    spec = importlib.util.spec_from_file_location("migration_0393_teste", caminho)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-def test_0392_uma_ponta_so_e_depois_da_0391():
+def test_0393_uma_ponta_so_e_depois_da_0392():
+    """Era a 0392 até a `0392_marketing_conta_conferencia` entrar no main (e em
+    produção) com a mesma base: duas pontas e o `alembic upgrade head` do
+    deploy falharia."""
     config = Config()
     config.set_main_option("script_location", str(_ALEMBIC))
     scripts = ScriptDirectory.from_config(config)
-    assert len(scripts.get_heads()) == 1
-    nossa = scripts.get_revision("0392_criativos_duracao_ia")
-    assert nossa.down_revision == "0391_email_fora_do_chat"
+    assert scripts.get_heads() == ["0393_criativos_duracao_ia"]
+    nossa = scripts.get_revision("0393_criativos_duracao_ia")
+    assert nossa.down_revision == "0392_marketing_conta_conferencia"
 
 
-_COLUNAS_0392 = {
+_TABELAS_0393 = ("marketing_creative_files", "marketing_roteiros")
+_COLUNAS_0393 = {
     ("marketing_creative_files", "duracao_s"),
     ("marketing_creative_files", "largura"),
     ("marketing_creative_files", "altura"),
-    ("marketing_creatives", "ia_modelo"),
-    ("marketing_creatives", "ia_creditos"),
+    ("marketing_creative_files", "ia_modelo"),
+    ("marketing_creative_files", "ia_creditos"),
+    ("marketing_roteiros", "criado_pela_equipe"),
 }
 
 
@@ -886,24 +991,24 @@ async def _colunas(db: AsyncSession, schema: str) -> dict[tuple[str, str], tuple
                 "SELECT table_name, column_name, data_type, numeric_precision, numeric_scale,"
                 " character_maximum_length, is_nullable, column_default"
                 " FROM information_schema.columns WHERE table_schema = :s"
-                " AND table_name IN ('marketing_creative_files', 'marketing_creatives')"
+                " AND table_name = ANY(:t)"
             ),
-            {"s": schema},
+            {"s": schema, "t": list(_TABELAS_0393)},
         )
     ).all()
-    return {(r[0], r[1]): tuple(r[2:]) for r in linhas if (r[0], r[1]) in _COLUNAS_0392}
+    return {(r[0], r[1]): tuple(r[2:]) for r in linhas if (r[0], r[1]) in _COLUNAS_0393}
 
 
-async def test_0392_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession):
-    nossa = _carregar_0392()
-    rascunho = f"{Base.metadata.schema}_mig0392"
+async def test_0393_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession):
+    nossa = _carregar_0393()
+    # Nome próprio: `_mig0392` é o rascunho do teste da 0392 do main
+    # (test_marketing_horarios_migration), e os dois dão DROP SCHEMA CASCADE.
+    rascunho = f"{Base.metadata.schema}_mig0393"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
-    # Só o esqueleto das duas tabelas: a 0392 só acrescenta coluna.
-    await db.execute(text(f'CREATE TABLE "{rascunho}".marketing_creatives (id uuid PRIMARY KEY)'))
-    await db.execute(
-        text(f'CREATE TABLE "{rascunho}".marketing_creative_files (id uuid PRIMARY KEY)')
-    )
+    # Só o esqueleto das tabelas: a 0393 só acrescenta coluna.
+    for tabela in _TABELAS_0393:
+        await db.execute(text(f'CREATE TABLE "{rascunho}".{tabela} (id uuid PRIMARY KEY)'))
     await db.commit()
 
     def _rodar(conn, passo: str) -> None:
@@ -918,12 +1023,28 @@ async def test_0392_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession):
         await db.commit()
         da_migration = await _colunas(db, rascunho)
         do_model = await _colunas(db, Base.metadata.schema)
-        assert set(da_migration) == _COLUNAS_0392
+        assert set(da_migration) == _COLUNAS_0393
         assert da_migration == do_model
         assert da_migration[("marketing_creative_files", "duracao_s")][:3] == ("numeric", 8, 2)
-        assert da_migration[("marketing_creatives", "ia_creditos")][:3] == ("numeric", 10, 2)
-        assert da_migration[("marketing_creatives", "ia_modelo")][3] == 64
+        assert da_migration[("marketing_creative_files", "ia_creditos")][:3] == ("numeric", 10, 2)
+        assert da_migration[("marketing_creative_files", "ia_modelo")][3] == 64
+        assert da_migration[("marketing_roteiros", "criado_pela_equipe")][3] == 64
         assert all(v[4] == "YES" and v[5] is None for v in da_migration.values())
+        # A IA é do arquivo; na linha do criativo ela não existe.
+        sobra = (
+            (
+                await db.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns WHERE table_schema = :s"
+                        " AND table_name = 'marketing_creatives' AND column_name LIKE 'ia\\_%'"
+                    ),
+                    {"s": Base.metadata.schema},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert sobra == []
 
         conn = await db.connection()
         await conn.run_sync(_rodar, "downgrade")

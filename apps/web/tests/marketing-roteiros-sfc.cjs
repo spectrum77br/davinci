@@ -51,6 +51,11 @@ const tpl = descriptor.template.content
     tpl.includes('as duas agências'),
     'o seletor de destino diz o que "vazio" faz, em vez de ficar em branco',
   )
+  // Ideia NOVA que entrou pelo portal (13/10/2026): a procedência aparece na
+  // lista e no editor, senão o texto de terceiro passa por briefing da casa e
+  // "as duas agências" o entrega à outra sem ninguém notar.
+  assert.ok(/v-if="r\.criado_pela_equipe"/.test(tpl), 'a lista marca a ideia escrita pela agência')
+  assert.ok(/v-if="sel\.criado_pela_equipe"/.test(tpl), 'o editor avisa quem escreveu')
 }
 
 // ---------------------------------------------------------------- script setup

@@ -70,6 +70,9 @@ type Roteiro = {
   // Preenchido quando a linha é a VERSÃO que a agência escreveu em cima de uma
   // ideia da casa — o original continua intacto, e os dois ficam lado a lado.
   origem_id: string | null
+  // A agência por cuja porta a ideia NOVA entrou (portal ou o Claude conectado
+  // a ele). NULL = escrita aqui dentro, pela casa.
+  criado_pela_equipe: string | null
   ativo: boolean
   referencias: Ref_[]
   personagens: Personagem[]
@@ -803,6 +806,14 @@ async function recusarPedido(r: Requisicao) {
                 class="rounded bg-primary/10 px-1 py-px text-primary"
                 :title="`Versão escrita pela agência sobre «${tituloDaOrigem(r.origem_id)}»`"
               >versão da agência</span>
+              <!-- Ideia NOVA escrita do lado de fora. Sem esta marca ela fica
+                   idêntica ao briefing da casa, e "as duas agências" no
+                   destino mandaria o texto de uma agência para a outra. -->
+              <span
+                v-if="r.criado_pela_equipe"
+                class="rounded bg-amber-500/15 px-1 py-px text-amber-700 dark:text-amber-400"
+                :title="`Escrita do lado de fora, pelo portal da agência ${r.criado_pela_equipe} (a pessoa ou o Claude conectado a ele) — não é briefing da casa`"
+              >ideia da agência · {{ r.criado_pela_equipe }}</span>
             </div>
           </button>
         </div>
@@ -883,6 +894,14 @@ async function recusarPedido(r: Requisicao) {
             </select>
           </div>
         </div>
+        <p
+          v-if="sel.criado_pela_equipe"
+          class="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px]"
+        >
+          <span class="font-medium text-amber-600 dark:text-amber-400">Escrita pela agência {{ sel.criado_pela_equipe }}</span>
+          no portal (a pessoa ou o Claude conectado a ele), não pela casa. Mandar para
+          "as duas agências" entrega este texto também à outra.
+        </p>
 
         <!-- o texto -->
         <div>

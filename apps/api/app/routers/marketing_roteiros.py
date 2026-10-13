@@ -141,6 +141,12 @@ def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
         # de uma ideia da casa. Sem isto na resposta, a versão chega na tela
         # parecendo uma ideia duplicada e ninguém sabe de onde saiu.
         "origem_id": str(row.origem_id) if row.origem_id else None,
+        # Preenchido quando a ideia NOVA entrou pelo portal das agências (a
+        # pessoa ou o Claude conectado a ele) — a agência por cuja porta ela
+        # veio. Sem isto, o texto de terceiro chegava aqui idêntico ao
+        # briefing da casa, e reendereçá-lo para "as duas" mandaria o texto de
+        # uma agência para a outra sem ninguém perceber.
+        "criado_pela_equipe": row.criado_pela_equipe,
         "ativo": row.ativo,
         "referencias": [_ref_out(r) for r in row.refs],
         "personagens": [

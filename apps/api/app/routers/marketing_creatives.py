@@ -648,7 +648,7 @@ async def upload_arquivos(
         added.append(name)
 
     # Duração e resolução, pelo ffprobe, no mesmo commit do arquivo — é daqui
-    # que sai o relatório de vídeos do portal (migration 0392). Falhar a
+    # que sai o relatório de vídeos do portal (migration 0393). Falhar a
     # medição deixa NULL e o envio segue: `medir_arquivos` não levanta.
     await medir_arquivos(f for f in row.files if f.file_name in added)
 

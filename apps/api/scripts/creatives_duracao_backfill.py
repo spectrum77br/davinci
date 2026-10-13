@@ -1,6 +1,6 @@
-"""Mede a duração e a resolução dos vídeos de criativo que ainda não têm (migration 0392).
+"""Mede a duração e a resolução dos vídeos de criativo que ainda não têm (migration 0393).
 
-Do deploy da 0392 em diante, o envio (portal das agências e aba Criativos)
+Do deploy da 0393 em diante, o envio (portal das agências e aba Criativos)
 já carimba `duracao_s`, `largura` e `altura` pelo ffprobe. Os vídeos que
 chegaram ANTES ficam NULL até este script — e o relatório do portal os conta
 em `sem_duracao` enquanto isso.
@@ -45,7 +45,7 @@ from app.services.marketing.medidas_video import eh_video_sql, medir
 def _argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="creatives_duracao_backfill",
-        description="Mede duração/resolução dos vídeos de criativo sem medida (0392).",
+        description="Mede duração/resolução dos vídeos de criativo sem medida (0393).",
     )
     p.add_argument("--dry-run", action="store_true", help="só conta; não mede nem grava")
     p.add_argument("--lote", type=int, default=50, help="arquivos por transação (padrão 50)")

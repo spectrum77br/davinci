@@ -1,4 +1,4 @@
-"""Duração e resolução do vídeo entregue, carimbadas no envio (migration 0392).
+"""Duração e resolução do vídeo entregue, carimbadas no envio (migration 0393).
 
 Marco, 13/10/2026: o Studio DaVinci (portal das agências) ganha um relatório
 dos vídeos entregues — minutos, média, mediana, faixas de duração. Medir na

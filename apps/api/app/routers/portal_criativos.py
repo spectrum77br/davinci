@@ -65,6 +65,7 @@ login admin, que enxerga as duas agências).
 
 from __future__ import annotations
 
+import re
 import secrets
 import statistics
 from collections import Counter
@@ -159,11 +160,17 @@ MAX_PERSONAGENS_IDEIA = 5
 TITULO_MAX = 160
 TEXTO_MAX = 20000
 
-# O gerador informado no envio (migration 0392). Texto livre: a lista de IAs
+# O gerador informado no envio (migration 0393). Texto livre: a lista de IAs
 # muda toda semana, e quem mantém o select é o portal.
 IA_MODELO_MAX = 64
 # NUMERIC(10,2): até 99.999.999,99.
 _IA_CREDITOS_TETO = Decimal("100000000")
+
+# Caractere de controle no texto que vem de fora. O \x00 derrubava o INSERT em
+# 500 (o Postgres não guarda NUL em texto) — e, na ideia nova, depois de gastar
+# uma das 30 vagas do minuto. Os outros não têm o que fazer num briefing.
+# Quebra de linha e tabulação são texto e passam.
+_CONTROLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _mapa_tokens() -> dict[str, str]:
@@ -226,13 +233,32 @@ def _arquivo_out(f: MarketingCreativeFile) -> dict[str, Any]:
         "mime": f.file_mime,
         "tamanho": f.file_size,
         "enviado_em": f.created_at.isoformat() if f.created_at else None,
+        # A IA que a agência declarou para ESTE vídeo (migration 0393).
+        "ia_modelo": f.ia_modelo,
+        "ia_creditos": float(f.ia_creditos) if f.ia_creditos is not None else None,
     }
+
+
+def _ia_da_linha(row: MarketingCreative) -> MarketingCreativeFile | None:
+    """O último envio da linha em que a agência declarou a IA.
+
+    A IA mora no arquivo; a linha mostra a do envio mais recente que disse
+    alguma coisa. Reenviar sem preencher não apaga da tela o que a agência já
+    tinha dito — o vídeo novo só fica sem IA no relatório, que é por arquivo.
+    `files` vem na ordem do envio (o relacionamento ordena por `created_at`
+    e o arquivo novo entra no fim da lista).
+    """
+    return next(
+        (f for f in reversed(row.files) if f.ia_modelo is not None or f.ia_creditos is not None),
+        None,
+    )
 
 
 def _linha_out(
     row: MarketingCreative, visiveis: frozenset[UUID] = frozenset()
 ) -> dict[str, Any]:
     """LISTA BRANCA. Campo novo no modelo não vaza sozinho por aqui."""
+    ia = _ia_da_linha(row)
     return {
         "id": str(row.id),
         "modelo": row.modelo,
@@ -257,10 +283,12 @@ def _linha_out(
         # mesma coisa de novo.
         "feedback": row.feedback,
         "feedback_em": row.feedback_em.isoformat() if row.feedback_em else None,
-        # O que a PRÓPRIA agência declarou no envio (migration 0392) — volta
-        # para ela ver o que informou. NULL = não informado.
-        "ia_modelo": row.ia_modelo,
-        "ia_creditos": float(row.ia_creditos) if row.ia_creditos is not None else None,
+        # O que a PRÓPRIA agência declarou no envio (migration 0393) — volta
+        # para ela ver o que informou. É a do último envio que declarou
+        # (`_ia_da_linha`); cada vídeo tem a sua em `arquivos`. NULL = não
+        # informado.
+        "ia_modelo": ia.ia_modelo if ia else None,
+        "ia_creditos": float(ia.ia_creditos) if ia and ia.ia_creditos is not None else None,
         "criado_em": row.created_at.isoformat() if row.created_at else None,
     }
 
@@ -275,7 +303,7 @@ def _ia_do_envio(
     Crédito aceita vírgula — é o que a pessoa digita no Brasil.
     """
     modelo = (ia_modelo or "").strip() or None
-    if modelo is not None and len(modelo) > IA_MODELO_MAX:
+    if modelo is not None and (len(modelo) > IA_MODELO_MAX or _CONTROLE.search(modelo)):
         raise HTTPException(400, detail={"code": "ia_modelo_invalido", "max": IA_MODELO_MAX})
     bruto = (ia_creditos or "").strip().replace(",", ".")
     if not bruto:
@@ -297,17 +325,23 @@ def _ia_do_envio(
     return modelo, creditos.quantize(Decimal("0.01")) + Decimal("0.00")
 
 
-def _aplica_ia(row: MarketingCreative, modelo: str | None, creditos: Decimal | None) -> None:
-    """Só grava o que VEIO. Reenviar o vídeo sem preencher a IA não apaga o
-    que a agência já tinha dito desta entrega."""
-    if modelo is not None:
-        row.ia_modelo = modelo
-    if creditos is not None:
-        row.ia_creditos = creditos
+def _aplica_ia(
+    row: MarketingCreative, entraram: list[str], modelo: str | None, creditos: Decimal | None
+) -> None:
+    """A IA declarada vai para os vídeos DESTE envio, e só para eles.
+
+    Gravada na linha, o reenvio pela aba Entregas (que anexa à linha que já
+    tem vídeo) trocava a IA do vídeo antigo pela do novo e repetia os
+    créditos nos dois — o relatório, que é por arquivo, contava errado.
+    """
+    for f in row.files:
+        if f.file_name in entraram:
+            f.ia_modelo = modelo
+            f.ia_creditos = creditos
 
 
 async def _medir_os_novos(row: MarketingCreative, entraram: list[str]) -> None:
-    """Duração e resolução dos vídeos que acabaram de entrar (migration 0392).
+    """Duração e resolução dos vídeos que acabaram de entrar (migration 0393).
 
     No mesmo commit do arquivo. `medir_arquivos` nunca levanta: ffprobe que
     falha deixa NULL e a entrega segue — medir é para o relatório, não é
@@ -440,6 +474,14 @@ def _roteiro_out(
         # cards com título, marca e SKU idênticos e nada dizendo qual é qual.
         # Não vaza nada: só quem enxerga a ideia consegue criar versão dela.
         "origem_id": str(row.origem_id) if row.origem_id else None,
+        # O texto veio de FORA da casa: ideia nova criada pelo portal
+        # (`criado_pela_equipe`) ou versão escrita por uma agência
+        # (`origem_id`). O Claude conectado ao portal lê as ideias das duas
+        # agências no login admin, e precisa saber qual texto é de terceiro
+        # para tratá-lo como dado, não como instrução. Booleano e não o nome
+        # da agência: quem fez não sai para a outra (o mesmo cuidado das
+        # Referências).
+        "escrita_no_portal": row.criado_pela_equipe is not None or row.origem_id is not None,
         "titulo": row.titulo,
         "texto": texto,
         "marca": row.marca,
@@ -679,7 +721,9 @@ async def listar_roteiros(
     if desde_dias:
         desde = datetime.now(UTC) - timedelta(days=desde_dias)
         filtros.append(MarketingRoteiro.created_at >= desde)
-    termo = (q or "").strip()
+    # Controle sai da busca em vez de recusar: um \x00 no termo derrubava a
+    # consulta em 500, e o resto do que foi digitado ainda é uma busca.
+    termo = _CONTROLE.sub("", q or "").strip()
     if termo:
         # `autoescape`: "50%" ou "dg_23" digitados na busca não viram curinga.
         filtros.append(
@@ -783,13 +827,19 @@ async def criar_ideia(
 
     Nasce ligada (`ativo`) e com texto, então aparece na hora na lista de
     quem ela endereça — igual ao roteiro que a equipe interna salva com texto.
-    `created_by` fica NULL: quem escreveu não tem conta no DaVinci, e a
-    agência que pediu fica no log (`portal_ideia_criada`).
+    `created_by` fica NULL: quem escreveu não tem conta no DaVinci. A agência
+    do token fica GRAVADA em `criado_pela_equipe` (e no log,
+    `portal_ideia_criada`): é o que separa, na aba Roteiros, texto de terceiro
+    de briefing da casa.
 
     A marca e o produto se resolvem pelo texto, como na criação interna
     (`marketing_roteiros.criar`): é o `marca_id` que leva a entrega para a
     fila certa do robô de postagem.
     """
+    # Antes do teto por minuto: texto que o banco recusaria não gasta vaga.
+    for campo in ("titulo", "texto", "marca", "sku"):
+        if _CONTROLE.search(getattr(payload, campo) or ""):
+            raise HTTPException(400, detail={"code": "caractere_invalido", "campo": campo})
     await _limite_de_ideias(equipe)
     titulo = payload.titulo.strip()
     if not titulo:
@@ -831,6 +881,10 @@ async def criar_ideia(
         equipe_destino=None if payload.para == "todas" else equipe,
         ativo=True,
         created_by=None,
+        # A porta por onde o texto entrou. Com "todas" (que só o login admin
+        # do portal pede) é o token que o portal usou, não necessariamente
+        # quem escreveu — mas continua sendo texto que veio de fora da casa.
+        criado_pela_equipe=equipe,
     )
     session.add(row)
     for pid in ids:
@@ -1123,7 +1177,7 @@ async def enviar_arquivo(
     memória), aborta e apaga ao passar do teto, e o sha256 sai do mesmo fluxo
     de bytes — é ele que denuncia o mesmo vídeo publicado em duas marcas.
 
-    `ia_modelo`/`ia_creditos`: opcionais (migration 0392), ver `_ia_do_envio`.
+    `ia_modelo`/`ia_creditos`: opcionais (migration 0393), ver `_ia_do_envio`.
     """
     row = await _linha_da_equipe(session, creative_id, equipe)
     if row.pushed_at is not None:
@@ -1136,7 +1190,7 @@ async def enviar_arquivo(
 
     entraram = _gravar_arquivos(row, files)
     await _medir_os_novos(row, entraram)
-    _aplica_ia(row, modelo, creditos)
+    _aplica_ia(row, entraram, modelo, creditos)
 
     # Arquivo novo volta a linha pra "pendente" — mesmo comportamento do
     # caminho interno. A agência precisa ver isso na tela dela, senão parece
@@ -1258,7 +1312,7 @@ async def entregar_do_roteiro(
 
     entraram = _gravar_arquivos(row, files)
     await _medir_os_novos(row, entraram)
-    _aplica_ia(row, modelo, creditos)
+    _aplica_ia(row, entraram, modelo, creditos)
     await session.commit()
     logger.info(
         "portal_entrega_do_roteiro",
@@ -1611,8 +1665,6 @@ async def propor_video(
         product_id=await _product_id_do_sku(session, sku_txt),
         equipe=equipe,
         aprovado=None,
-        ia_modelo=modelo,
-        ia_creditos=creditos,
         files=[],
     )
     session.add(row)
@@ -1620,6 +1672,7 @@ async def propor_video(
 
     entraram = _gravar_arquivos(row, files)
     await _medir_os_novos(row, entraram)
+    _aplica_ia(row, entraram, modelo, creditos)
 
     # O conceito NÃO vira roteiro aqui. A lista de roteiros é o que a casa
     # escreveu; texto que chega de fora não entra nela por chegada — nem
@@ -1718,7 +1771,7 @@ async def relatorio(
     uma recusa, e aí os dois envios contam (foram dois vídeos produzidos).
 
     Só vídeo (`medidas_video.eh_video`). Duração NULL (arquivo de antes da
-    0392 ainda sem backfill, ou que o ffprobe não leu) entra na contagem de
+    0393 ainda sem backfill, ou que o ffprobe não leu) entra na contagem de
     vídeos e em `sem_duracao`, nunca como zero nas médias.
 
     Recorte e lista branca de sempre: `_da_equipe` no WHERE, e o título da
@@ -1727,16 +1780,15 @@ async def relatorio(
     """
     desde = datetime.now(UTC) - timedelta(days=dias)
     # Por ARQUIVO: a postagem aponta para um arquivo, e é este vídeo que
-    # saiu (ou não) numa rede.
-    publicado = (
-        select(MarketingPostagem.id)
-        .where(
-            MarketingPostagem.file_id == MarketingCreativeFile.id,
-            MarketingPostagem.status == STATUS_PUBLICADO,
-        )
-        .exists()
-        .label("publicado")
-    )
+    # saiu (ou não) numa rede. `IN` sem correlação, e não EXISTS por linha:
+    # `marketing_postagens.file_id` não tem índice (o único é o parcial dos
+    # status em voo), e o EXISTS fazia um Seq Scan nas postagens POR ARQUIVO
+    # (154 voltas na janela de 365 dias da Bill Gates em 13/10/2026). Assim o
+    # Postgres lê as postagens publicadas uma vez e consulta um hash.
+    # (`file_id` é NOT NULL: o IN nunca vê NULL, e o não publicado sai falso.)
+    publicado = MarketingCreativeFile.id.in_(
+        select(MarketingPostagem.file_id).where(MarketingPostagem.status == STATUS_PUBLICADO)
+    ).label("publicado")
     linhas = (
         await session.execute(
             select(
@@ -1751,8 +1803,10 @@ async def relatorio(
                 MarketingCreative.marca,
                 MarketingCreative.sku,
                 MarketingCreative.aprovado,
-                MarketingCreative.ia_modelo,
-                MarketingCreative.ia_creditos,
+                # Do ARQUIVO (migration 0393): dois vídeos da mesma linha
+                # podem ter saído de IAs diferentes.
+                MarketingCreativeFile.ia_modelo,
+                MarketingCreativeFile.ia_creditos,
                 publicado,
             )
             .join(MarketingCreative, MarketingCreative.id == MarketingCreativeFile.creative_id)
