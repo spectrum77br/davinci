@@ -257,10 +257,11 @@ async function principal() {
     // A página passa quem mexe, quem vê, as lojas e o "abrir a conversa" — que
     // abre a conversa de e-mail NA aba E-mail (13/10/2026), nunca na Caixa.
     const paginaTpl = sfc('../pages/atendimento.vue').descriptor.template.content
-    assert.match(paginaTpl, /<AtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:paused="!!emailConversa"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /<AtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
     // O número da aba E-mail (o e-mail saiu da Caixa Humano): o que falta responder nele.
     assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
     assert.match(paginaTpl, /<template v-if="aba === 'mail'">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
+    assert.match(paginaTpl, /<AtendimentoEmailConversaBarra\s+:conversa="emailConversaLinha"\s+:pode-mexer="mexe"\s+:com-chat="!!chatDeOrigem"\s+@voltar="fecharConversaDoEmail"\s+@voltar-ao-chat="voltarAoChat"\s+@vinculado="aoVincularConversaDoEmail"\s+\/>/)
     assert.match(paginaTpl, /<AtendimentoConversa\s+:key="`\$\{emailConversa\}:\$\{emailConversaVersao\}`"\s+:conversa-id="emailConversa"[\s\S]*?:ativa="aba === 'mail'"\s+@mudou="aoMudarConversaDoEmail"[\s\S]*?@abrir-conversa="abrirConversaDoEmail"/)
   }
 
@@ -269,12 +270,13 @@ async function principal() {
     const pagina = sfc('../pages/atendimento.vue').descriptor.scriptSetup.content
     const js = trecho(pagina, '// O registro das Automáticas abre a conversa na Caixa.', '// A Caixa ocupa a altura da janela')
       + '\n' + trecho(pagina, 'function aoMudarConversa(c: ConversaResumo) {', '// ─── respostas prontas')
-      + '\nreturn { abrirConversaNaCaixa, abrirConversaDoEmail, fecharConversaDoEmail, aoMudarConversaDoEmail, aoVincularConversaDoEmail, aoMudarConversa }'
+      + '\n' + trecho(pagina, 'function abrirDoChat(id: string) {', '\nfunction abrirAba(')
+      + '\nreturn { abrirConversaNaCaixa, abrirConversaDoEmail, fecharConversaDoEmail, voltarAoChat, aoMudarConversaDoEmail, aoVincularConversaDoEmail, aoMudarConversa, abrirDoChat }'
     const novo = () => {
-      const st = { aba: Vue.ref('mail'), selecionada: Vue.ref(null), emailConversa: Vue.ref(null), emailConversaLinha: Vue.ref(null), emailConversaVersao: Vue.ref(0), itens: Vue.ref([]), emHumano: Vue.ref(false) }
+      const st = { aba: Vue.ref('mail'), selecionada: Vue.ref(null), emailConversa: Vue.ref(null), emailConversaLinha: Vue.ref(null), emailConversaVersao: Vue.ref(0), chatDeOrigem: Vue.ref(null), itens: Vue.ref([]), emHumano: Vue.ref(false) }
       st.contagensLidas = 0
-      const f = new Function('aba', 'selecionada', 'emailConversa', 'emailConversaLinha', 'emailConversaVersao', 'itens', 'emHumano', 'selecionar', 'carregarResumo', 'carregarContagensEmail', js)(
-        st.aba, st.selecionada, st.emailConversa, st.emailConversaLinha, st.emailConversaVersao, st.itens, st.emHumano, (id) => { st.selecionada.value = id }, () => {}, () => { st.contagensLidas++ },
+      const f = new Function('aba', 'selecionada', 'emailConversa', 'emailConversaLinha', 'emailConversaVersao', 'chatDeOrigem', 'itens', 'emHumano', 'selecionar', 'carregarResumo', 'carregarContagensEmail', `let linkDoChat = null\n${js}`)(
+        st.aba, st.selecionada, st.emailConversa, st.emailConversaLinha, st.emailConversaVersao, st.chatDeOrigem, st.itens, st.emHumano, (id) => { st.selecionada.value = id }, () => {}, () => { st.contagensLidas++ },
       )
       return { st, f }
     }
@@ -301,6 +303,38 @@ async function principal() {
     st.selecionada.value = 'c-email'
     f.aoMudarConversa({ id: 'c-email', email: { protocolo: 'US-26-0001' } })
     assert.deepEqual([st.aba.value, st.selecionada.value, st.emailConversa.value], ['mail', null, 'c-email'])
+    assert.equal(st.chatDeOrigem.value, null, 'pelo id: sem "voltar ao chat"')
+    // Aberta de dentro do chat (o "abrir na aba E-mail" do painel): o chat fica
+    // aberto na Caixa e a barra volta a ele; "voltar aos e-mails" esquece o chat.
+    ;({ st, f } = novo())
+    st.aba.value = 'caixa'
+    st.selecionada.value = 'c-chat'
+    f.abrirDoChat('c-email')
+    assert.equal(st.selecionada.value, 'c-email')
+    f.aoMudarConversa({ id: 'c-email', email: { protocolo: null } })
+    assert.deepEqual([st.aba.value, st.selecionada.value, st.emailConversa.value], ['mail', 'c-chat', 'c-email'])
+    assert.deepEqual(st.chatDeOrigem.value, { id: 'c-chat', aba: 'caixa' })
+    // Vinculou e as mensagens foram para a conversa de e-mail do pedido: o chat de origem fica.
+    f.aoVincularConversaDoEmail('c-pedido')
+    assert.deepEqual([st.emailConversa.value, st.chatDeOrigem.value], ['c-pedido', { id: 'c-chat', aba: 'caixa' }])
+    f.voltarAoChat()
+    assert.deepEqual([st.aba.value, st.selecionada.value, st.emailConversa.value, st.chatDeOrigem.value], ['caixa', 'c-chat', null, null])
+    // Da Caixa Humano: volta para ela.
+    st.aba.value = 'humano'
+    f.abrirDoChat('c-email')
+    f.aoMudarConversa({ id: 'c-email', email: { protocolo: null } })
+    f.voltarAoChat()
+    assert.deepEqual([st.aba.value, st.selecionada.value], ['humano', 'c-chat'])
+    // "voltar aos e-mails": a conversa de e-mail fecha e o chat de origem sai da barra.
+    f.abrirDoChat('c-email')
+    f.aoMudarConversa({ id: 'c-email', email: { protocolo: null } })
+    f.fecharConversaDoEmail()
+    assert.deepEqual([st.aba.value, st.emailConversa.value, st.chatDeOrigem.value, st.selecionada.value], ['mail', null, null, 'c-chat'])
+    f.voltarAoChat()
+    assert.equal(st.aba.value, 'mail', 'sem chat de origem, o "voltar ao chat" não faz nada')
+    // Das Filas (sem chat): sem "voltar ao chat", mesmo depois de uma vinda do chat.
+    f.abrirConversaDoEmail('c-outra')
+    assert.equal(st.chatDeOrigem.value, null)
     // A resposta da linha da Caixa (sem `email`) segue como sempre.
     st.aba.value = 'caixa'
     st.itens.value = [{ id: 'c1', aguardando_resposta: true }]
@@ -324,7 +358,7 @@ async function principal() {
     // Quem não vê o /atendimento não pergunta (a rota recusaria); a seção escolhida na visita fica na página.
     assert.match(pagina, /async function carregarContagensEmail\(\) \{\n(?:\s*\/\/[^\n]*\n)*\s+if \(!canSugerir\.value\) return\n/)
     assert.match(pagina, /const emailSecao = ref<'' \| 'mailboxes' \| 'queues'>\(''\)/)
-    assert.match(pagina, /const polling = usePollingVisivel\(async \(\) => \{\s+\/\/[^\n]*\n\s+void carregarContagensEmail\(\)/)
+    assert.match(pagina, /const polling = usePollingVisivel\(async \(\) => \{\s+\/\/[^\n]*\n\s+void carregarContagensEmail\(\)\n\s+\/\/[^\n]*\n\s+emailTique\.value\+\+\n/)
     assert.match(pagina, /await Promise\.all\(\[carregarResumo\(\), carregarLista\(\), carregarModelos\(\), carregarContagensEmail\(\)\]\)\n/)
     // O link: `?tab=mail&conversa=<id>` abre a conversa de e-mail.
     assert.match(pagina, /const selecionada = ref<string \| null>\(aba\.value === 'mail' \? null : conversaQuery\)/)
@@ -359,9 +393,15 @@ async function principal() {
     assert.deepEqual([post.url, post.body], ['/api/atendimento/email/conversas/c1/vincular', { pedido: '2000001' }])
     assert.deepEqual(b.emitidos.at(-1), ['vinculado', 'c9'])
     assert.equal(b.estado.pedido, '')
+    assert.doesNotMatch(html, /data-voltar-chat/, 'das Filas: sem "voltar ao chat"')
     const leitor = montar('../components/AtendimentoEmailConversaBarra.vue', { conversa: conversaEmail, podeMexer: false })
     html = await leitor.html()
     assert.doesNotMatch(html, /data-vincular-conversa-email/, 'quem só lê: só o voltar')
+    // Aberta de dentro do chat: o "voltar ao chat" (a página volta ao chat de origem).
+    const doChat = montar('../components/AtendimentoEmailConversaBarra.vue', { conversa: conversaEmail, podeMexer: false, comChat: true })
+    html = await doChat.html()
+    assert.match(html, /data-voltar-chat[^>]*>[\s\S]*?voltar ao chat\s*<\/button>/)
+    assert.match(sfc('../components/AtendimentoEmailConversaBarra.vue').descriptor.template.content, /data-voltar-chat @click="emit\('voltarAoChat'\)"/)
   }
 
   // ------------------------------------------------ regras puras: o cartão
@@ -890,6 +930,69 @@ async function principal() {
     r.reativo.pausado = false
     await Vue.nextTick(); await esperar()
     assert.deepEqual(r.chamadas.slice(antesDaVolta).map((c) => c.url).sort(), ['/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50', '/api/atendimento/email/contagens'])
+    // O polling de 30 s da página (o `tique`): chegou um e-mail esperando
+    // resposta — o número da aba sobe e o chip e a lista de "Falta responder"
+    // acompanham (o e-mail saiu da Caixa, que se relê sozinha).
+    {
+      let servidor = { ...contagens, aguardando: 1 }
+      let lista = [esperando]
+      let maisPaginas = false
+      const URL_AG = '/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50'
+      const p = montar('../components/AtendimentoMailFilas.vue', { isAdmin: false, lojas: [], podeMexer: false, tique: 0 }, {
+        respostas: {
+          ...respostas,
+          '/api/atendimento/email/contagens': () => servidor,
+          [URL_AG]: () => (lista instanceof Error ? lista : { itens: lista, proximo: maisPaginas ? 'prazo:|cv2' : null }),
+        },
+      })
+      await p.montar()
+      p.estado.fila = 'aguardando'
+      await Vue.nextTick(); await esperar()
+      const chip = (h) => /data-fila="aguardando"[^>]*>\s*Falta responder\s*<span[^>]*>(\d+)</.exec(h)?.[1]
+      const linhas = (h) => (h.match(/data-conversa-email="/g) || []).length
+      let h = await p.html()
+      assert.deepEqual([chip(h), linhas(h)], ['1', 1])
+      servidor = { ...servidor, aguardando: 2 }
+      lista = [esperando, { ...esperando, id: 'cv9', comprador_nome: 'Novo' }]
+      let antes = p.chamadas.length
+      p.reativo.tique = 1
+      await Vue.nextTick(); await esperar()
+      assert.deepEqual(p.chamadas.slice(antes).map((c) => c.url).sort(), [URL_AG, '/api/atendimento/email/contagens'])
+      h = await p.html()
+      assert.deepEqual([chip(h), linhas(h)], ['2', 2], 'o chip e a lista com o número da aba')
+      // Escondida (a conversa de e-mail por cima): o tique não lê nada.
+      p.reativo.pausado = true
+      await Vue.nextTick(); await esperar()
+      antes = p.chamadas.length
+      p.reativo.tique = 2
+      await Vue.nextTick(); await esperar()
+      assert.equal(p.chamadas.length, antes, 'pausada: nada')
+      p.reativo.pausado = false
+      await Vue.nextTick(); await esperar()
+      // Com o "carregar mais": só os números (reler voltaria para a 1ª página).
+      maisPaginas = true
+      await p.estado.carregar()
+      await p.estado.carregar(true)
+      assert.deepEqual(p.estado.conversas.map((c) => c.id), ['cv2', 'cv9', 'cv3'])
+      antes = p.chamadas.length
+      p.reativo.tique = 3
+      await Vue.nextTick(); await esperar()
+      assert.deepEqual(p.chamadas.slice(antes).map((c) => c.url), ['/api/atendimento/email/contagens'])
+      assert.deepEqual(p.estado.conversas.map((c) => c.id), ['cv2', 'cv9', 'cv3'], 'a lista com as páginas fica')
+      // A 1ª página de novo (a fila relida): o polling volta a reler a lista. A
+      // falha no automático não mostra erro e não apaga a lista.
+      maisPaginas = false
+      await p.estado.carregar()
+      lista = new Error('500')
+      antes = p.chamadas.length
+      p.reativo.tique = 4
+      await Vue.nextTick(); await esperar()
+      assert.ok(p.chamadas.slice(antes).some((c) => c.url === URL_AG))
+      assert.equal(p.estado.erro, null, 'o automático que falhou não mostra erro')
+      assert.deepEqual(p.estado.conversas.map((c) => c.id), ['cv2', 'cv9'])
+      // A página passa o tique (o polling) pela Central até as Filas.
+      assert.match(web('components/AtendimentoMail.vue'), /<AtendimentoMailFilas[\s\S]*?:tique="refreshTick"[\s\S]*?\/>/)
+    }
     // Quem mexe vê as duas no meio das outras, e as contagens juntas.
     const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, {
       respostas: { ...respostas, '/api/atendimento/email/filas': { sem_loja: 3 }, '/api/atendimento/email/saude': { caixas: [] }, '/api/atendimento/email/emails?fila=sem_loja': { itens: [], proximo: null } },

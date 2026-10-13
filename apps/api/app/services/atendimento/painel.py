@@ -46,7 +46,9 @@ E o que a tela usa por aqui:
       o PORQUÊ do pedido em "Aguardando Cancelamento" (item 4, 02/10/2026):
       o classificador (`ag_cancelamento.classificar`) com o que o painel já
       leu — sem consulta nem GET a mais. `bloco_do_motivo` é o mesmo bloco
-      para a lista Ag. cancelamento (`routers/atendimento_troca.py`).
+      para a lista Ag. cancelamento (`routers/atendimento_troca.py`). O
+      status na plataforma é o do retrato da conversa (`conversa_do_retrato`):
+      no painel da conversa de E-MAIL da ponte, o do chat do pedido.
   sugestões de troca (item 4, fase 4b, 05/10/2026): com a falta de estoque
       (`pode_sugerir_troca`) e `atendimento_troca_sugestoes_ativa`, até 3
       produtos parecidos e o texto da oferta (`troca_sugestoes`) — do
@@ -122,6 +124,7 @@ from app.models import (
     UserRole,
 )
 from app.services import links_shopee
+from app.services.atendimento import separa_email
 from app.services.atendimento.ag_cancelamento import (
     CANCELADO_PLATAFORMA,
     DESCONHECIDO,
@@ -146,6 +149,7 @@ from app.services.atendimento.constantes import (
 )
 from app.services.atendimento.etiqueta_fatos import (
     PedidoBling,
+    conversas_do_pedido_bling,
     normalizar_plataforma,
     pedido_bling_da_conversa,
 )
@@ -1205,7 +1209,7 @@ def primeira_linha(texto: str | None) -> str | None:
 
 def ag_cancelamento_do_pedido(
     pedido: PedidoBling | None,
-    conversa: AtendimentoConversa,
+    conversa: AtendimentoConversa | None,
     observacoes: dict | None,
     *,
     ve_margem: bool = True,
@@ -1218,13 +1222,34 @@ def ag_cancelamento_do_pedido(
     (o comprador pediu?). Nenhuma consulta e nenhum GET a mais: as
     Observações são as que o painel já buscou. `troca_aberta` vem depois
     (`painel_da_conversa`, que lê a troca de produto aberta do pedido).
+    `conversa` = a do retrato (`conversa_do_retrato`); None = sem retrato.
     `ve_margem` False = o motivo da Margem mascarado (`mascarar_motivo`).
     """
-    m = classificar(pedido, status_plataforma=status_na_plataforma(conversa.dados))
+    dados = conversa.dados if conversa is not None else None
+    m = classificar(pedido, status_plataforma=status_na_plataforma(dados))
     if m is None:
         return None
     obs = (observacoes or {}).get("observacoes") if m.codigo in _COM_OBSERVACAO_TOPO else None
     return bloco_do_motivo(m, observacao_topo=primeira_linha(obs), ve_margem=ve_margem)
+
+
+async def conversa_do_retrato(
+    session: AsyncSession, conversa: AtendimentoConversa, pedido: PedidoBling
+) -> AtendimentoConversa | None:
+    """A conversa cujo retrato (`dados.pedido_mkt`) diz o status do pedido na plataforma.
+
+    A própria, como sempre. A conversa de E-MAIL da ponte (`separa_email`,
+    13/10/2026) não tem o retrato: no painel dela o IN_CANCEL/CANCELLED do
+    comprador virava "Falta de estoque", com o "Trocar" liberado e as
+    sugestões de troca. Nela vale o CHAT do pedido — o mesmo da troca e da
+    lista Ag. cancelamento (a 1ª de `conversas_do_pedido_bling`, como em
+    `troca._carregar`); sem chat, nenhum (a classificação do pedido sem
+    conversa, a mesma da lista).
+    """
+    if not separa_email.e_conversa_de_email(conversa):
+        return conversa
+    conversas = await conversas_do_pedido_bling(session, pedido.numero)
+    return conversas[0] if conversas else None
 
 
 # Quem NÃO vê a Margem (07/10/2026: a caixa abriu para toda a equipe em só
@@ -1408,12 +1433,24 @@ async def painel_da_conversa(
             pedido.bling_id, session=session, forcar=forcar_observacoes
         )
 
-    # Aguardando Cancelamento (item 4): o porquê, com o que já foi lido.
+    # Aguardando Cancelamento (item 4): o porquê, com o que já foi lido. Na
+    # conversa de e-mail da ponte, o status na plataforma vem do chat do
+    # pedido (`conversa_do_retrato`); a leitura que falhar fecha do lado
+    # seguro (o "não conferido", sem troca nem sugestão).
     ag_cancelamento = None
-    if pedido is not None:
+    retrato: AtendimentoConversa | None = conversa
+    ok_retrato = True
+    if pedido is not None and separa_email.e_conversa_de_email(conversa):
+        retrato, ok_retrato = await _seguro(
+            session, "retrato", lambda: conversa_do_retrato(session, conversa, pedido), None, cid
+        )
+    if pedido is not None and not ok_retrato:
+        if (pedido.situacao or "").strip() == SITUACAO_AGUARDANDO_CANCELAMENTO_STR:
+            ag_cancelamento = _ag_cancelamento_desconhecido()
+    elif pedido is not None:
         try:
             ag_cancelamento = ag_cancelamento_do_pedido(
-                pedido, conversa, observacoes, ve_margem=ve_margem(user)
+                pedido, retrato, observacoes, ve_margem=ve_margem(user)
             )
         except Exception as e:  # noqa: BLE001 — um bloco do painel nunca derruba os outros
             logger.warning(

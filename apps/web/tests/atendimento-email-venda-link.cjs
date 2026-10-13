@@ -246,16 +246,45 @@ async function principal() {
     )
     irPara(emitidos[0][1])
     assert.deepEqual(daConversa, [['abrirConversa', ID1]], 'a conversa pede para abrir a conversa de e-mail')
-    // A página: na Caixa, abrir a conversa seleciona; a de e-mail que chega à
-    // Caixa pelo id vai para a aba E-mail (não editamos a página: é o que ela já faz).
+    // A página: na Caixa, o link de dentro do chat (`abrirDoChat`) seleciona a
+    // conversa lembrando de qual chat saiu; a de e-mail que chega à Caixa vai
+    // para a aba E-mail — e o CHAT continua aberto na Caixa, com o "voltar ao
+    // chat" na barra (a revisão, 13/10/2026: antes o chat se perdia).
     const pagina = sfc('../pages/atendimento.vue').descriptor
-    assert.match(pagina.template.content, /<AtendimentoConversa\s+v-if="selecionada"[\s\S]*?@mudou="aoMudarConversa"[\s\S]*?@abrir-conversa="selecionar"/)
+    assert.match(pagina.template.content, /<AtendimentoConversa\s+v-if="selecionada"[\s\S]*?@mudou="aoMudarConversa"[\s\S]*?@abrir-conversa="abrirDoChat"/)
     const js = trecho(pagina.scriptSetup.content, 'function aoMudarConversa(c: ConversaResumo) {', '\n  const i = itens.value.findIndex', '\n}\n')
-    const st = { selecionada: Vue.ref(ID1), abertas: [] }
-    new Function('selecionada', 'abrirConversaDoEmail', `${js}\nreturn aoMudarConversa`)(st.selecionada, (id) => st.abertas.push(id))({ id: ID1, email: { protocolo: null } })
+      + trecho(pagina.scriptSetup.content, 'function abrirDoChat(id: string) {', '\nfunction abrirAba(')
+    const novo = (inicial) => {
+      const st = { selecionada: Vue.ref(inicial), aba: Vue.ref('caixa'), abertas: [] }
+      const f = new Function('selecionada', 'aba', 'selecionar', 'abrirConversaDoEmail', `let linkDoChat = null\n${js}\nreturn { aoMudarConversa, abrirDoChat }`)(
+        st.selecionada, st.aba, (id) => { st.selecionada.value = id }, (id, origem) => st.abertas.push([id, origem]),
+      )
+      return { st, f }
+    }
+    // Do chat: o clique no "abrir na aba E-mail" (a conversa emite `abrirConversa`).
+    let { st, f } = novo('chat-1')
+    f.abrirDoChat(ID1)
+    assert.equal(st.selecionada.value, ID1, 'a conversa abre (a página ainda não sabe que é de e-mail)')
+    f.aoMudarConversa({ id: ID1, email: { protocolo: null } })
+    assert.equal(st.selecionada.value, 'chat-1', 'o chat continua aberto na Caixa')
+    assert.deepEqual(st.abertas, [[ID1, { id: 'chat-1', aba: 'caixa' }]], 'abriu na aba E-mail, com o chat de origem')
+    // Da Caixa Humano: volta para ela.
+    ;({ st, f } = novo('chat-2'))
+    st.aba.value = 'humano'
+    f.abrirDoChat(ID2)
+    f.aoMudarConversa({ id: ID2, email: { protocolo: null } })
+    assert.deepEqual([st.selecionada.value, st.abertas], ['chat-2', [[ID2, { id: 'chat-2', aba: 'humano' }]]])
+    // Pelo id, sem chat de origem (o link antigo, o alerta): sai da Caixa, sem "voltar ao chat".
+    ;({ st, f } = novo(ID1))
+    f.aoMudarConversa({ id: ID1, email: { protocolo: null } })
     assert.equal(st.selecionada.value, null, 'saiu da Caixa')
-    assert.deepEqual(st.abertas, [ID1], 'abriu na aba E-mail')
-    assert.match(pagina.scriptSetup.content, /function abrirConversaDoEmail\(id: string\) \{\n\s+aba\.value = 'mail'/)
+    assert.deepEqual(st.abertas, [[ID1, null]], 'abriu na aba E-mail')
+    // O link do chat para OUTRO chat: segue na Caixa, como sempre.
+    ;({ st, f } = novo('chat-1'))
+    f.abrirDoChat('chat-9')
+    f.aoMudarConversa({ id: 'chat-9', email: null })
+    assert.deepEqual([st.selecionada.value, st.abertas], ['chat-9', []])
+    assert.match(pagina.scriptSetup.content, /function abrirConversaDoEmail\(id: string, origem: Origem \| null = null\) \{\n\s+aba\.value = 'mail'/)
   }
 
   console.log('atendimento-email-venda-link: ok')

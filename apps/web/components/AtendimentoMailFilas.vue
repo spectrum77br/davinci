@@ -253,6 +253,9 @@ const props = defineProps<{
   // A página mostra uma conversa de e-mail por cima (a aba E-mail, 13/10/2026):
   // esta tela fica montada, escondida; na volta, a fila e os números de novo.
   pausado?: boolean
+  // Sobe a cada tique do polling de 30 s da página (o número da aba E-mail):
+  // as filas de conversa acompanham (o watch do `tique`, lá embaixo).
+  tique?: number
 }>()
 const emit = defineEmits<{ (e: 'abrirConversa', id: string): void }>()
 
@@ -298,10 +301,11 @@ const filaInfo = computed(() => FILAS.find((f) => f.value === fila.value) || FIL
 
 // As contagens são ajuda: a fila aberta mostra o erro dela. As das filas de
 // e-mail só para quem mexe (a rota recusa os outros); as das conversas, todos.
+function carregarContagensDeConversa(): Promise<void> {
+  return api<ContagensDeConversa>('/api/atendimento/email/contagens').then((r) => { contagensConversa.value = r }).catch(() => {})
+}
 async function carregarContagens() {
-  const pedidos: Promise<void>[] = [
-    api<ContagensDeConversa>('/api/atendimento/email/contagens').then((r) => { contagensConversa.value = r }).catch(() => {}),
-  ]
+  const pedidos: Promise<void>[] = [carregarContagensDeConversa()]
   if (mexe.value) {
     pedidos.push(api<Record<string, number>>('/api/atendimento/email/filas').then((r) => { contagensFilas.value = r }).catch(() => {}))
   }
@@ -315,11 +319,15 @@ async function carregarSaude() {
     saude.value = null
   }
 }
-async function carregar(mais = false) {
+// A lista tem mais que a 1ª página (o "carregar mais"): o polling não relê.
+let paginasExtras = false
+// `automatico` (o polling): a falha não mostra erro — a lista fica e o próximo tique tenta de novo.
+async function carregar(mais = false, automatico = false) {
   const g = ++geracao
   const f = fila.value
   carregando.value = true
-  erro.value = null
+  if (!automatico) erro.value = null
+  if (!mais) paginasExtras = false
   try {
     if (f === 'revisar_envio') {
       const r = await api<{ itens: EnvioARevisar[] }>(urlDaFila(f))
@@ -330,15 +338,19 @@ async function carregar(mais = false) {
       if (g !== geracao) return
       conversas.value = mais ? [...conversas.value, ...(r.itens || []).filter((x) => !conversas.value.some((y) => y.id === x.id))] : r.itens || []
       proximo.value = r.proximo || null
+      if (mais) paginasExtras = true
     } else {
       const r = await api<{ itens: ItemFila[]; proximo: string | null }>(urlDaFila(f, mais ? proximo.value : null))
       if (g !== geracao) return
       itens.value = mais ? [...itens.value, ...(r.itens || []).filter((x) => !itens.value.some((y) => y.id === x.id))] : r.itens || []
       for (const i of itens.value) lojaEscolhida[i.id] ??= ''
       proximo.value = r.proximo || null
+      if (mais) paginasExtras = true
     }
+    // O automático que deu certo tira o erro de antes.
+    if (automatico) erro.value = null
   } catch (e: any) {
-    if (g === geracao) erro.value = erroDaApi(e, 'Não consegui carregar a fila de e-mail').texto
+    if (g === geracao && !automatico) erro.value = erroDaApi(e, 'Não consegui carregar a fila de e-mail').texto
   } finally {
     if (g === geracao) carregando.value = false
   }
@@ -382,6 +394,20 @@ onMounted(() => { void atualizar() })
 // números relidos, como depois de uma ação aqui — a lista recomeça da 1ª página.
 watch(() => props.pausado, (pausado, antes) => {
   if (antes && !pausado) void Promise.all([carregar(), carregarContagens()])
+})
+// O polling de 30 s da página (o `tique`, 13/10/2026): o número da aba E-mail
+// sobe e os das filas de CONVERSA e a lista aberta delas acompanham — o e-mail
+// saiu da Caixa, que se relê sozinha; sem isto a aba dizia 2 e "Falta
+// responder" ficava em 1. Escondida (`pausado`), nada. A lista só sem o
+// "carregar mais" (reler voltaria para a 1ª página), sem ação no meio e sem
+// leitura em andamento. As filas de E-MAIL (sem loja, suspeitos…) seguem
+// relidas na ação, na volta da conversa e no "atualizar", como sempre.
+watch(() => props.tique, () => {
+  if (props.pausado) return
+  void carregarContagensDeConversa()
+  if (pastasAbertas.value || !FILAS_DE_CONVERSA.has(fila.value)) return
+  if (paginasExtras || ocupado.value || carregando.value) return
+  void carregar(false, true)
 })
 
 async function abrir(item: ItemFila) {

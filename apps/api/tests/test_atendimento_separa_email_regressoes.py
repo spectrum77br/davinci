@@ -16,7 +16,9 @@ PONTE de verdade, `tests/test_mail_ponte.cena`, quando o cenário é do ML):
     (`conversa_do_pedido`, `conversas_do_pedido_bling`);
   • a lista Ag. cancelamento aponta o chat e classifica pelo retrato dele;
   • a troca escolhida pela tela da conversa de e-mail classifica pelo chat
-    (o IN_CANCEL do comprador continua recusando a troca);
+    (o IN_CANCEL do comprador continua recusando a troca) — e o PAINEL dela
+    também (o motivo, o "Trocar" e as sugestões de troca, `painel.
+    conversa_do_retrato`);
   • a oferta nunca sai pela conversa de e-mail (painel e rota); o pedido SÓ
     com a conversa de e-mail é o pedido sem conversa (sem oferta pelo DaVinci);
   • a devolução liga o chat — e só com a conversa de e-mail, nenhuma;
@@ -353,6 +355,79 @@ async def test_troca_pela_tela_do_email_classifica_pelo_chat(
     assert falha["code"] == "motivo_nao_permite"
     p = await troca._carregar(db, of.NUMERO, email.id)
     assert (p.conversa.id, p.motivo.codigo) == (c.conversa.id, "pedido_cliente")
+
+
+async def test_painel_da_conversa_de_email_classifica_pelo_chat(
+    db, make_user, monkeypatch, troca_ligada
+):
+    """O comprador pediu o cancelamento (IN_CANCEL no retrato do chat): o PAINEL
+    da conversa de e-mail do mesmo pedido mostra o que o do chat mostra — o
+    pedido do comprador, o "Trocar" cinza (`motivo_nao_permite`) e nenhuma
+    sugestão de troca. Sem o retrato (a de e-mail não tem), dava "Falta de
+    estoque", o "Trocar" liberado e a sugestão (a revisão, 13/10/2026). Sem o
+    IN_CANCEL, os dois painéis dão a falta de estoque com a sugestão."""
+    c = await of._cenario(db, make_user, monkeypatch)
+    email = await _email_shopee(db, c)
+    monkeypatch.setattr(get_settings(), "atendimento_troca_sugestoes_ativa", True)
+
+    # A falta de estoque de verdade: os dois com o "Trocar" e a sugestão.
+    for alvo in (c.conversa, email):
+        out = await painel.painel_da_conversa(db, alvo, user=c.adm)
+        ag = out["ag_cancelamento"]
+        assert (ag["codigo"], ag["pode_sugerir_troca"]) == ("sem_estoque", True), alvo.canal
+        assert ag["troca_envio"]["disponivel"] is True, alvo.canal
+        assert out["sugestoes_troca"] is not None, alvo.canal
+
+    c.conversa.dados = {**(c.conversa.dados or {}), "pedido_mkt": {"status": "IN_CANCEL"}}
+    await db.commit()
+    for alvo in (c.conversa, email):
+        out = await painel.painel_da_conversa(db, alvo, user=c.adm)
+        ag = out["ag_cancelamento"]
+        assert (ag["codigo"], ag["pode_sugerir_troca"]) == ("pedido_cliente", False), alvo.canal
+        troca_envio = ag["troca_envio"]
+        assert (troca_envio["disponivel"], troca_envio["motivo"]) == (False, "motivo_nao_permite")
+        assert ag["oferta_envio"]["disponivel"] is False, alvo.canal
+        assert out["sugestoes_troca"] is None, alvo.canal
+
+    # O retrato: o do chat é ele mesmo; o da conversa de e-mail, o chat do pedido.
+    pedido = await etiqueta_fatos.pedido_bling(db, of.NUMERO)
+    assert (await painel.conversa_do_retrato(db, c.conversa, pedido)).id == c.conversa.id
+    assert (await painel.conversa_do_retrato(db, email, pedido)).id == c.conversa.id
+
+    # Não deu para ler o chat do pedido: o lado seguro (não conferido, sem troca
+    # nem sugestão) — nunca a falta de estoque.
+    async def _quebrou(*args, **kwargs):
+        raise RuntimeError("banco fora")
+
+    monkeypatch.setattr(painel, "conversas_do_pedido_bling", _quebrou)
+    out = await painel.painel_da_conversa(db, email, user=c.adm)
+    ag = out["ag_cancelamento"]
+    assert (ag["codigo"], ag["pode_sugerir_troca"]) == ("desconhecido", False)
+    assert ag["troca_envio"]["disponivel"] is False
+    assert out["sugestoes_troca"] is None
+    # O painel do chat não lê o retrato de ninguém: segue igual.
+    out = await painel.painel_da_conversa(db, c.conversa, user=c.adm)
+    assert out["ag_cancelamento"]["codigo"] == "pedido_cliente"
+
+
+async def test_painel_da_conversa_de_email_do_ml_pelo_chat(db, cena, troca_ligada):
+    """O ML pela ponte de verdade: o chat diz `cancelled`, e o painel da conversa
+    de e-mail do aviso diz "Cancelado na plataforma" (como o do chat e a lista),
+    sem sugerir troca. O pedido SÓ com o aviso (sem chat): a classificação do
+    pedido sem conversa (a mesma da lista Ag. cancelamento)."""
+    await _ml_em_83955(db, cena, NUMERO_ML, PED)
+    await _ml_em_83955(db, cena, NUMERO_ML_SO_EMAIL, PED_SO_EMAIL)
+    chat = await _chat_ml(db, cena, externo="pack-1", pedido=PED, status="cancelled")
+    email = await _aviso_pela_ponte(db, cena, PED)
+    so_email = await _aviso_pela_ponte(db, cena, PED_SO_EMAIL)
+
+    for alvo in (chat, email):
+        ag = (await painel.painel_da_conversa(db, alvo, user=cena.dono))["ag_cancelamento"]
+        assert (ag["codigo"], ag["pode_sugerir_troca"]) == ("cancelado_plataforma", False)
+        assert ag["troca_envio"]["disponivel"] is False
+    ag = (await painel.painel_da_conversa(db, so_email, user=cena.dono))["ag_cancelamento"]
+    assert ag["codigo"] == "sem_estoque"
+    assert ag["oferta_envio"]["disponivel"] is False
 
 
 async def test_oferta_nunca_sai_pela_conversa_de_email(

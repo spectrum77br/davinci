@@ -3,7 +3,9 @@
 // e-mail aparece só na aba de e-mail; a do chat aparece só no chat"). A
 // conversa de e-mail da ponte não está mais na Caixa: as Filas e as Caixas da
 // aba E-mail abrem ela na própria aba, pelo id (a página). Em cima dela:
-// "voltar aos e-mails" e, para quem mexe, o VINCULAR AO PEDIDO da conversa
+// "voltar aos e-mails", o "voltar ao chat" quando ela foi aberta de dentro de
+// um chat (o "abrir na aba E-mail" do painel: `comChat`; o chat continua
+// aberto na Caixa) e, para quem mexe, o VINCULAR AO PEDIDO da conversa
 // sem pedido (fora os chamados dos sites, que não têm pedido de plataforma) —
 // POST /api/atendimento/email/conversas/{id}/vincular, o mesmo vínculo da fila
 // "Sem vínculo". Responder é a caixa da própria conversa, embaixo; escolher a
@@ -25,16 +27,19 @@ export function urlVincularConversa(id: string): string {
 </script>
 
 <script setup lang="ts">
-import { ArrowLeft, Link2, Loader2, Mail } from 'lucide-vue-next'
+import { ArrowLeft, Link2, Loader2, Mail, MessageSquare } from 'lucide-vue-next'
 import { erroDaApi } from '~/components/AtendimentoPlataforma.vue'
 
 const props = defineProps<{
   // A conversa aberta (a linha que a conversa manda no `mudou`); null enquanto carrega.
   conversa: ConversaResumo | null
   podeMexer: boolean
+  // Aberta de dentro de um chat: o "voltar ao chat" (a página sabe qual).
+  comChat?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'voltar'): void
+  (e: 'voltarAoChat'): void
   // O vínculo pode MOVER as mensagens para a conversa de e-mail do pedido que já existia.
   (e: 'vinculado', id: string): void
 }>()
@@ -68,6 +73,9 @@ async function vincular() {
   <div class="flex flex-wrap items-center gap-2 text-xs" data-barra-conversa-email>
     <button type="button" class="inline-flex items-center gap-1 rounded border px-2 py-1 hover:bg-muted" data-voltar-emails @click="emit('voltar')">
       <ArrowLeft class="size-3.5" /> voltar aos e-mails
+    </button>
+    <button v-if="comChat" type="button" class="inline-flex items-center gap-1 rounded border px-2 py-1 hover:bg-muted" title="volta ao chat de onde esta conversa de e-mail foi aberta" data-voltar-chat @click="emit('voltarAoChat')">
+      <MessageSquare class="size-3.5" /> voltar ao chat
     </button>
     <span class="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
       <Mail class="size-3.5 shrink-0" />Conversa de e-mail: fica só aqui, na aba E-mail (não aparece na Caixa do chat).

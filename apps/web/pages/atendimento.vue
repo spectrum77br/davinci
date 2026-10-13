@@ -117,6 +117,13 @@ const emailConversa = ref<string | null>(aba.value === 'mail' ? conversaQuery : 
 const emailConversaLinha = ref<ConversaResumo | null>(null)
 // Depois do vínculo na mesma conversa: relê do zero (a conversa remonta).
 const emailConversaVersao = ref(0)
+// O CHAT de onde a conversa de e-mail foi aberta (o "abrir na aba E-mail" do
+// painel do chat): a barra dela oferece "voltar ao chat" e a Caixa continua
+// com o chat aberto. `linkDoChat` = o link clicado dentro do chat, até a
+// conversa que ele abriu dizer se é de e-mail (`aoMudarConversa`).
+type Origem = { id: string; aba: Aba }
+const chatDeOrigem = ref<Origem | null>(null)
+let linkDoChat: { de: string; aba: Aba; para: string } | null = null
 // A Caixa e a Caixa Humano usam as mesmas colunas, filtros e conversa aberta.
 const naCaixa = computed(() => aba.value === 'caixa' || aba.value === 'humano')
 const emHumano = computed(() => aba.value === 'humano')
@@ -160,6 +167,8 @@ async function carregarResumo() {
 // (o polling de 30 s, o "atualizar") e quando a conversa de e-mail muda.
 const emailContagens = ref<{ aguardando: number; chamados: number } | null>(null)
 const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
+// Sobe a cada tique do polling: as Filas da aba E-mail se releem junto com o número.
+const emailTique = ref(0)
 // A seção da aba E-mail que a pessoa escolheu nesta visita (Caixas | Filas):
 // o AtendimentoMail monta de novo a cada vez que a aba abre e respeita a escolha.
 const emailSecao = ref<'' | 'mailboxes' | 'queues'>('')
@@ -313,11 +322,15 @@ async function carregarMais() {
 // contadores contam (aguardando, "a conferir"), o resumo também é relido —
 // senão o "A conferir (1)" ficava lá até 30 s depois de a pessoa marcar.
 function aoMudarConversa(c: ConversaResumo) {
-  // A conversa de e-mail que chegou à Caixa pelo id (um link antigo, o alerta):
-  // ela mora na aba E-mail (13/10/2026).
+  // A conversa de e-mail que chegou à Caixa pelo id (um link antigo, o alerta,
+  // o "abrir na aba E-mail" do painel do chat): ela mora na aba E-mail
+  // (13/10/2026). Veio de um link de dentro do chat: o chat continua aberto
+  // na Caixa e a barra da conversa de e-mail oferece "voltar ao chat".
   if (c.email && c.id === selecionada.value) {
-    selecionada.value = null
-    abrirConversaDoEmail(c.id)
+    const origem = linkDoChat && linkDoChat.para === c.id ? { id: linkDoChat.de, aba: linkDoChat.aba } : null
+    linkDoChat = null
+    selecionada.value = origem ? origem.id : null
+    abrirConversaDoEmail(c.id, origem)
     return
   }
   const i = itens.value.findIndex((x) => x.id === c.id)
@@ -365,6 +378,8 @@ onMounted(async () => {
 const polling = usePollingVisivel(async () => {
   // O número da aba E-mail, em qualquer aba (a aba E-mail se atualiza sozinha).
   void carregarContagensEmail()
+  // E as Filas da aba E-mail, se estiverem na tela (o mesmo tique).
+  emailTique.value++
   // Na aba "Lojas e modo", só o resumo: a faixa e a marca das lojas sem ler
   // somem sozinhas quando a loja volta a ler.
   if (aba.value === 'lojas') return carregarResumo()
@@ -461,6 +476,14 @@ await Promise.all([carregarResumo(), carregarLista(), carregarModelos(), carrega
 function selecionar(id: string) {
   selecionada.value = id
 }
+// Um link de dentro do chat aberto (a linha do tempo, o "abrir na aba E-mail"
+// do painel): abre a conversa na Caixa lembrando de qual chat saiu — se ela
+// for de e-mail, vai para a aba E-mail (`aoMudarConversa`) sem perder o chat.
+function abrirDoChat(id: string) {
+  const de = selecionada.value
+  linkDoChat = de && de !== id ? { de, aba: aba.value, para: id } : null
+  selecionar(id)
+}
 function abrirAba(a: string) {
   if (ABAS.some((x) => x.value === a)) aba.value = a as Aba
 }
@@ -471,16 +494,28 @@ function abrirConversaNaCaixa(id: string) {
 }
 // A conversa de E-MAIL (das Filas, das Caixas, de um chamado agrupado): na aba
 // E-mail, nunca na Caixa do chat (13/10/2026).
-function abrirConversaDoEmail(id: string) {
+// `origem` = o chat de onde veio (o "voltar ao chat" da barra); das Filas e das
+// Caixas, nenhum.
+function abrirConversaDoEmail(id: string, origem: Origem | null = null) {
   aba.value = 'mail'
   if (emailConversa.value !== id) emailConversaLinha.value = null
   emailConversa.value = id
+  chatDeOrigem.value = origem
 }
 function fecharConversaDoEmail() {
   emailConversa.value = null
   emailConversaLinha.value = null
+  chatDeOrigem.value = null
   // Voltou aos e-mails: o número pode ter mudado (respondeu, fechou).
   void carregarContagensEmail()
+}
+// "voltar ao chat" (a barra): a Caixa (ou a Caixa Humano) de onde saiu, com o chat aberto.
+function voltarAoChat() {
+  const origem = chatDeOrigem.value
+  fecharConversaDoEmail()
+  if (!origem) return
+  aba.value = origem.aba
+  selecionar(origem.id)
 }
 // A conversa aberta na aba E-mail mandou a linha dela: a de CHAT (um link de
 // dentro da conversa apontou o chat do comprador) vai para a Caixa.
@@ -499,7 +534,7 @@ function aoMudarConversaDoEmail(c: ConversaResumo) {
 // Vinculou ao pedido: as mensagens podem ter ido para a conversa de e-mail do
 // pedido (outra); na mesma, relê do zero.
 function aoVincularConversaDoEmail(id: string) {
-  if (id && id !== emailConversa.value) abrirConversaDoEmail(id)
+  if (id && id !== emailConversa.value) abrirConversaDoEmail(id, chatDeOrigem.value)
   else emailConversaVersao.value++
 }
 
@@ -720,7 +755,7 @@ watch(selecionada, (id) => {
           @mudou="aoMudarConversa"
           @voltar="selecionada = null"
           @abrir-aba="abrirAba"
-          @abrir-conversa="selecionar"
+          @abrir-conversa="abrirDoChat"
         />
         <div v-else class="flex flex-1 items-center justify-center p-6">
           <EmptyState :icon="Inbox" title="Escolha uma conversa" description="A conversa abre aqui, com o que a IA responderia e o pedido da loja ao lado. Dica: com o foco na lista, ↑ e ↓ andam pelas conversas." />
@@ -735,7 +770,9 @@ watch(selecionada, (id) => {
         <AtendimentoEmailConversaBarra
           :conversa="emailConversaLinha"
           :pode-mexer="mexe"
+          :com-chat="!!chatDeOrigem"
           @voltar="fecharConversaDoEmail"
+          @voltar-ao-chat="voltarAoChat"
           @vinculado="aoVincularConversaDoEmail"
         />
         <div class="flex min-h-[520px] overflow-hidden rounded-lg border bg-card" style="height: calc(100dvh - 15rem)">
@@ -766,6 +803,7 @@ watch(selecionada, (id) => {
         :stores="resumo?.lojas || []"
         :waiting="emailEsperando"
         :paused="!!emailConversa"
+        :refresh-tick="emailTique"
         v-model:remembered-section="emailSecao"
         @open-conversation="abrirConversaDoEmail"
       />

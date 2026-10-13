@@ -36,11 +36,13 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // /api/atendimento/email/contagens, read by the page): the number on "Filas".
 // `paused` = the page shows an email conversation over this component (kept
 // mounted, hidden): no background refresh while nobody sees it.
+// `refreshTick` = goes up on every 30 s poll of the page (the number of the
+// E-mail tab): the conversation queues follow it (AtendimentoMailFilas `tique`).
 // `rememberedSection` (v-model) = the section the person clicked earlier in
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
 type Section = 'mailboxes' | 'queues'
-const props = defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; paused?: boolean; rememberedSection?: '' | Section }>()
+const props = defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>()
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
@@ -603,6 +605,7 @@ onBeforeUnmount(() => {
       :pode-mexer="!!canOperate"
       :lojas="stores || []"
       :pausado="!!paused"
+      :tique="refreshTick"
       @abrir-conversa="(id: string) => emit('openConversation', id)"
     />
 
