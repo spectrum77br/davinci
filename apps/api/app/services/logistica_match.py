@@ -289,6 +289,7 @@ def estado_resolvido(
     *,
     threema_enviado: bool = False,
     chamado_aberto: bool = False,
+    mensagem_bling_regra_id: UUID | None = None,
 ) -> bool:
     """True quando o pedido casa uma regra da aba Status e NÃO há mais nada a
     fazer — o painel esconde esses (`resolvido and not monitorar`).
@@ -304,7 +305,9 @@ def estado_resolvido(
     Qualquer ação pendente (abrir chamado/reembolso ou mensagem de
     chamado/Bling/Threema) mantém a linha visível — ainda há trabalho. A
     Mensagem Threema deixa de contar quando `threema_enviado` é True (aviso da
-    linha já disparado, pelo motor ou pelo operador → feito); "Abrir chamado" e
+    linha já disparado, pelo motor ou pelo operador → feito); a Mensagem Bling
+    deixa de contar quando ESTA regra já escreveu (`mensagem_bling_regra_id`
+    igual ao id dela — outra regra com mensagem ainda conta); "Abrir chamado" e
     "Mensagem do chamado" deixam de contar quando `chamado_aberto` é True (a
     linha já tem o nº do chamado — o motor abriu, ou o operador). O
     monitoramento é ortogonal (o front combina com `not acao_monitorar`)."""
@@ -321,7 +324,9 @@ def estado_resolvido(
             return False
         if (r.abrir_chamado or (r.mensagem_chamado or "").strip()) and not chamado_aberto:
             return False
-        if (r.mensagem_bling or "").strip():
+        if (r.mensagem_bling or "").strip() and (
+            mensagem_bling_regra_id is None or r.id != mensagem_bling_regra_id
+        ):
             return False
         if (r.mensagem_threema or "").strip() and not threema_enviado:
             return False

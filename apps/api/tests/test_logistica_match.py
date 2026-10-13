@@ -442,6 +442,21 @@ def test_estado_resolvido_threema_enviado_resolve():
     )
 
 
+def test_estado_resolvido_mensagem_bling_feita_pela_regra():
+    # Mensagem Bling: pendente até ESTA regra escrever no pedido (carimbo com o
+    # id dela, pelo motor ou pelo botão). O carimbo de OUTRA regra não vale.
+    regra = _rule(id=uuid.uuid4(), status_plataforma="x", mensagem_bling="Cancelado pela Amazon")
+    assert logistica_match.estado_resolvido([regra], "Em aberto") is False
+    assert (
+        logistica_match.estado_resolvido([regra], "Em aberto", mensagem_bling_regra_id=uuid.uuid4())
+        is False
+    )
+    assert (
+        logistica_match.estado_resolvido([regra], "Em aberto", mensagem_bling_regra_id=regra.id)
+        is True
+    )
+
+
 def test_problemas_sem_passe_livre_obedece_o_monitorar_do_estado():
     # Caso real 17/09: 6 TikTok em "Problemas" (Reembolso solicitado / pago sem
     # devolução / Devolução solicitada) com regra cadastrada pro estado, sem

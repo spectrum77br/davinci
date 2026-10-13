@@ -5,6 +5,7 @@ Threema), ambos com dedupe e sem martelar API."""
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -12,7 +13,7 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from app.models import Chamado, ChamadoMensagem, Logistica, LogisticaStatus
+from app.models import BlingOrder, Chamado, ChamadoMensagem, Logistica, LogisticaStatus
 from app.services import (
     logistica_bling,
     logistica_match,
@@ -222,6 +223,147 @@ async def test_enviar_threema_em_lote_gateway_falha_nao_carimba(db):
     assert out == {"enviados": 0, "falhas": 1}
     await db.refresh(row)
     assert row.threema_enviado_at is None  # tenta de novo na próxima rodada
+
+
+# ---------------------------------------------------------------- mensagem bling
+
+
+class _FakeBling:
+    def __init__(self, observacoes="linha antiga", erro: int | None = None):
+        self.observacoes = observacoes
+        self.erro = erro
+        self.puts: list[dict] = []
+
+    async def get_order(self, bling_id):
+        return {"id": bling_id, "numero": 1, "observacoes": self.observacoes, "total": 10}
+
+    async def update_order(self, bling_id, body):
+        if self.erro:
+            raise httpx.HTTPStatusError(
+                "bling",
+                request=httpx.Request("PUT", "https://bling.test"),
+                response=httpx.Response(self.erro, text="erro do bling"),
+            )
+        self.puts.append(body)
+        self.observacoes = body["observacoes"]
+        return body
+
+
+def _patch_bling(monkeypatch, fake):
+    async def _client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _client)
+
+
+async def test_mensagem_bling_em_lote_escreve_uma_vez_e_resolve(db, monkeypatch):
+    # Caso 13/10 (Amazon 303203): a regra com Mensagem Bling escreve sozinha nas
+    # Observações, uma vez; depois a linha resolve no painel.
+    chave = logistica_rules.assinatura_pt(MELI)
+    regra = LogisticaStatus(
+        status_plataforma=chave, status_atual="Entregue", mensagem_bling="Cancelado pela Amazon"
+    )
+    db.add(regra)
+    row = _linha(pedido_bling="303203")
+    db.add_all([row, BlingOrder(bling_id=555, numero="303203", item_codigo="s", item_index=0)])
+    await db.commit()
+    fake = _FakeBling()
+    _patch_bling(monkeypatch, fake)
+
+    out = await logistica_bling.escrever_mensagem_bling_em_lote(db, None)
+    assert out == {"escritas": 1, "recusadas": 0, "falhas": 0}
+    assert len(fake.puts) == 1
+    obs = fake.puts[0]["observacoes"]
+    assert obs.splitlines()[0].endswith(" - Cancelado pela Amazon")
+    assert obs.endswith("linha antiga")  # não apaga o que já estava
+    assert "total" not in fake.puts[0]  # body sanitizado
+    await db.refresh(row)
+    assert row.mensagem_bling_regra_id == regra.id
+    assert row.mensagem_bling_at is not None
+
+    # 2ª passada: já escrita por esta regra → nada
+    out2 = await logistica_bling.escrever_mensagem_bling_em_lote(db, None)
+    assert out2 == {"escritas": 0, "recusadas": 0, "falhas": 0}
+    assert len(fake.puts) == 1
+    assert (
+        logistica_match.estado_resolvido(
+            [regra], row.status_bling, mensagem_bling_regra_id=row.mensagem_bling_regra_id
+        )
+        is True
+    )
+
+
+async def test_mensagem_bling_em_lote_outra_regra_escreve_a_dela(db, monkeypatch):
+    # Shopee "Devolução solicitada" e depois "Concluído": o carimbo de uma regra
+    # não segura a mensagem da outra.
+    chave = logistica_rules.assinatura_pt(MELI)
+    regra = LogisticaStatus(status_plataforma=chave, mensagem_bling="Cliente cancelou a devolução")
+    db.add(regra)
+    row = _linha(pedido_bling="77", mensagem_bling_regra_id=uuid.uuid4())
+    db.add_all([row, BlingOrder(bling_id=77, numero="77", item_codigo="s", item_index=0)])
+    await db.commit()
+    fake = _FakeBling()
+    _patch_bling(monkeypatch, fake)
+    out = await logistica_bling.escrever_mensagem_bling_em_lote(db, None)
+    assert out["escritas"] == 1
+    await db.refresh(row)
+    assert row.mensagem_bling_regra_id == regra.id
+
+
+async def test_mensagem_bling_em_lote_respeita_estado_e_plataforma(db, monkeypatch):
+    chave = logistica_rules.assinatura_pt(MELI)
+    db.add(LogisticaStatus(status_plataforma=chave, status_atual="Em aberto", mensagem_bling="x"))
+    db.add_all(
+        [
+            _linha(pedido_bling="1", status_bling="Entregue"),  # regra é de outro estado
+            _linha(pedido_bling="2", status_bling="Em aberto", plataforma="Manual"),
+        ]
+    )
+    await db.commit()
+    fake = _FakeBling()
+    _patch_bling(monkeypatch, fake)
+    out = await logistica_bling.escrever_mensagem_bling_em_lote(db, None)
+    assert out == {"escritas": 0, "recusadas": 0, "falhas": 0}
+    assert fake.puts == []
+
+
+async def test_mensagem_bling_em_lote_bling_fora_tenta_de_novo_recusa_carimba(db, monkeypatch):
+    chave = logistica_rules.assinatura_pt(MELI)
+    db.add(LogisticaStatus(status_plataforma=chave, mensagem_bling="avisar"))
+    row = _linha(pedido_bling="88")
+    db.add_all([row, BlingOrder(bling_id=88, numero="88", item_codigo="s", item_index=0)])
+    await db.commit()
+    row_id = row.id
+
+    # Bling fora do ar: não carimba, tenta no próximo passe.
+    _patch_bling(monkeypatch, _FakeBling(erro=503))
+    out = await logistica_bling.escrever_mensagem_bling_em_lote(db, None)
+    assert out == {"escritas": 0, "recusadas": 0, "falhas": 1}
+    row = await db.get(Logistica, row_id)
+    await db.refresh(row)
+    assert row.mensagem_bling_regra_id is None
+
+    # Bling recusou o pedido (4xx): repetir não resolve → carimba e não martela.
+    _patch_bling(monkeypatch, _FakeBling(erro=400))
+    out = await logistica_bling.escrever_mensagem_bling_em_lote(db, None)
+    assert out == {"escritas": 0, "recusadas": 1, "falhas": 0}
+    await db.refresh(row)
+    assert row.mensagem_bling_regra_id is not None
+
+
+async def test_mensagem_bling_em_lote_pedido_fora_do_espelho_espera(db, monkeypatch):
+    chave = logistica_rules.assinatura_pt(MELI)
+    db.add(LogisticaStatus(status_plataforma=chave, mensagem_bling="avisar"))
+    row = _linha(pedido_bling="999")  # sem BlingOrder
+    db.add(row)
+    await db.commit()
+    fake = _FakeBling()
+    _patch_bling(monkeypatch, fake)
+    out = await logistica_bling.escrever_mensagem_bling_em_lote(db, None)
+    assert out == {"escritas": 0, "recusadas": 0, "falhas": 1}
+    assert fake.puts == []
+    await db.refresh(row)
+    assert row.mensagem_bling_regra_id is None
 
 
 # ---------------------------------------------------------------- pelo formulário (robô)

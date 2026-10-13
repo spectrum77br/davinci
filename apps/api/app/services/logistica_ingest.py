@@ -597,7 +597,10 @@ async def _ids_pendentes(
             regras, assinatura=assinatura, plataforma=r.plataforma, localizacao=r.localizacao
         )
         resolvido = logistica_match.estado_resolvido(
-            cands, r.status_bling, threema_enviado=r.threema_enviado_at is not None
+            cands,
+            r.status_bling,
+            threema_enviado=r.threema_enviado_at is not None,
+            mensagem_bling_regra_id=r.mensagem_bling_regra_id,
         )
         if (
             resolvido
@@ -636,13 +639,15 @@ async def _enriquecer_e_aplicar(
     ids_alvo = [i for ids in alvo.values() for i in ids]
     # Executores da aba Status (Eduardo 07/09: "não está abrindo chamado
     # automático e nem mandando a mensagem no Threema"): abrir chamado (ML pela
-    # API/robô do formulário; TikTok e Shopee direto pro robô do Seller Center)
-    # e Threema rodam ANTES da troca de situação no Bling — a regra com
-    # `status_atual` ainda é a ativa nesse instante; depois que o status muda
-    # ela deixa de valer e o chamado/aviso nunca sairia.
+    # API/robô do formulário; TikTok e Shopee direto pro robô do Seller Center),
+    # Threema e Mensagem Bling (Vinicius 13/10) rodam ANTES da troca de
+    # situação no Bling — a regra com `status_atual` ainda é a ativa nesse
+    # instante; depois que o status muda ela deixa de valer e o
+    # chamado/aviso/observação nunca sairia.
     chamados = await logistica_meli.abrir_chamados_em_lote(session, ids_alvo)
     chamados_robo = await logistica_chamados_robo.abrir_chamados_em_lote(session, ids_alvo)
     threema_lote = await logistica_bling.enviar_threema_em_lote(session, ids_alvo)
+    obs_lote = await logistica_bling.escrever_mensagem_bling_em_lote(session, ids_alvo)
     lote = await logistica_bling.aplicar_status_em_lote(session, ids_alvo)
     resumo = {
         **{f"enrich_{k}": v for k, v in enr.items()},
@@ -653,6 +658,7 @@ async def _enriquecer_e_aplicar(
         **{f"chamado_{k}": v for k, v in chamados.items()},
         **{f"chamado_robo_{k}": v for k, v in chamados_robo.items()},
         **{f"threema_{k}": v for k, v in threema_lote.items()},
+        **{f"mensagem_bling_{k}": v for k, v in obs_lote.items()},
         **{f"status_{k}": v for k, v in lote.items()},
     }
     logger.info(f"logistica_{origem}_aplicado", **resumo)

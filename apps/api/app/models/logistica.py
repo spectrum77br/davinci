@@ -121,6 +121,17 @@ class Logistica(Base, TimestampMixin):
     threema_enviado_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Regra da aba Status cuja Mensagem Bling já foi escrita nas Observações do
+    # pedido (pelo motor ou pelo botão) + quando. Por regra, não um carimbo só:
+    # a linha que passa por outra regra com mensagem ganha a linha dela também.
+    # Regra casada com o mesmo id = mensagem feita, deixa de contar como
+    # pendência no painel.
+    mensagem_bling_regra_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
+    mensagem_bling_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Abertura AUTOMÁTICA do chamado pelo motor do recarregar (regra da aba
     # Status com "Abrir chamado"): quando tentou pela última vez e, se recusou,
     # o código do motivo (ex. logistica_sem_reclamacao). Sucesso = `chamado`

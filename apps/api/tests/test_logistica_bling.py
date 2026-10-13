@@ -249,6 +249,10 @@ async def test_preview_e_aplicar(
     assert fake.put_body is not None
     assert fake.put_body["observacoes"] == ra.json()["observacoes_novo"]
     assert "produto voltou ao trânsito" in fake.put_body["observacoes"]
+    # O botão carimba a regra na linha: o motor não escreve de novo.
+    row = await db.get(Logistica, uuid.UUID(lid))
+    await db.refresh(row)
+    assert row.mensagem_bling_regra_id == uuid.UUID(rs.json()["id"])
 
 
 @pytest.mark.asyncio

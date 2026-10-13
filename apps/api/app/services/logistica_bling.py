@@ -24,6 +24,7 @@ from collections.abc import Collection
 from datetime import UTC, date, datetime
 from uuid import UUID
 
+import httpx
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -135,8 +136,10 @@ def build_observacoes_put_body(order: dict, novo_texto: str) -> dict:
     return body
 
 
-def mensagem_bling_para(rows: list[LogisticaStatus], row: Logistica) -> str | None:
-    """`mensagem_bling` da regra da aba Status que vale AGORA pra linha: chave
+def regra_mensagem_bling_para(
+    rows: list[LogisticaStatus], row: Logistica
+) -> LogisticaStatus | None:
+    """Regra da aba Status cuja `mensagem_bling` vale AGORA pra linha: chave
     (assinatura PT) casada — específica da plataforma > geral — E aplicável ao
     estado atual do Bling (status_atual igual ou curinga). Regra de outro
     estado não empresta mensagem. None se nenhuma aplicável tiver."""
@@ -145,10 +148,15 @@ def mensagem_bling_para(rows: list[LogisticaStatus], row: Logistica) -> str | No
         rows, assinatura=assinatura, plataforma=row.plataforma, localizacao=row.localizacao
     )
     for r in logistica_match.regras_aplicaveis(cands, row.status_bling):
-        msg = (r.mensagem_bling or "").strip()
-        if msg:
-            return msg
+        if (r.mensagem_bling or "").strip():
+            return r
     return None
+
+
+def mensagem_bling_para(rows: list[LogisticaStatus], row: Logistica) -> str | None:
+    """Texto da `regra_mensagem_bling_para` (None se nenhuma aplicável tiver)."""
+    rule = regra_mensagem_bling_para(rows, row)
+    return (rule.mensagem_bling or "").strip() if rule is not None else None
 
 
 async def _bling_order_id_for_row(session: AsyncSession, row: Logistica) -> int:
@@ -186,23 +194,33 @@ async def _bling_client(session: AsyncSession) -> BlingClient:
     return BlingClient(creds, on_token_refresh=_persist, integration_id=integ.id)
 
 
-async def _resolve(session: AsyncSession, row: Logistica) -> tuple[int, str, BlingClient]:
-    """Valida a linha e devolve (bling_order_id, mensagem, client). Levanta
-    BlingObsError com código quando falta algo."""
+async def _resolve(
+    session: AsyncSession, row: Logistica
+) -> tuple[int, LogisticaStatus, BlingClient]:
+    """Valida a linha e devolve (bling_order_id, regra com a mensagem, client).
+    Levanta BlingObsError com código quando falta algo."""
     rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
-    mensagem = mensagem_bling_para(rows, row)
-    if not mensagem:
+    rule = regra_mensagem_bling_para(rows, row)
+    if rule is None:
         raise BlingObsError("logistica_sem_mensagem_bling")
     bling_id = await _bling_order_id_for_row(session, row)
     client = await _bling_client(session)
-    return bling_id, mensagem, client
+    return bling_id, rule, client
+
+
+def _carimbar_mensagem_bling(row: Logistica, regra_id: UUID) -> None:
+    """Mensagem Bling desta regra feita: deixa de contar como pendência no
+    painel e o motor não escreve de novo (`escrever_mensagem_bling_em_lote`)."""
+    row.mensagem_bling_regra_id = regra_id
+    row.mensagem_bling_at = datetime.now(UTC)
 
 
 async def preview_mensagem_bling(session: AsyncSession, row: Logistica) -> dict:
     """Dry-run: faz só GET (leitura) e devolve o que SERIA feito, sem escrever
     no Bling. `{bling_order_id, mensagem, observacoes_atual, observacoes_novo,
     put_body}`."""
-    bling_id, mensagem, client = await _resolve(session, row)
+    bling_id, rule, client = await _resolve(session, row)
+    mensagem = (rule.mensagem_bling or "").strip()
     order = await client.get_order(bling_id)
     atual = order.get("observacoes")
     novo = compose_observacoes(atual, mensagem)
@@ -217,15 +235,99 @@ async def preview_mensagem_bling(session: AsyncSession, row: Logistica) -> dict:
 
 
 async def apply_mensagem_bling(session: AsyncSession, row: Logistica) -> dict:
-    """Aplica de verdade: GET -> compõe Observações -> PUT. Retorna
-    `{bling_order_id, observacoes_novo}`."""
-    bling_id, mensagem, client = await _resolve(session, row)
+    """Aplica de verdade: GET -> compõe Observações -> PUT, e carimba a regra
+    na linha (o motor não repete). Retorna `{bling_order_id, observacoes_novo}`."""
+    bling_id, rule, client = await _resolve(session, row)
     order = await client.get_order(bling_id)
-    novo = compose_observacoes(order.get("observacoes"), mensagem)
+    novo = compose_observacoes(order.get("observacoes"), rule.mensagem_bling or "")
     body = build_observacoes_put_body(order, novo)
     await client.update_order(bling_id, body)
+    _carimbar_mensagem_bling(row, rule.id)
     logger.info("logistica_mensagem_bling_aplicada", bling_order_id=bling_id, pedido=row.pedido_bling)
     return {"bling_order_id": bling_id, "observacoes_novo": novo}
+
+
+async def escrever_mensagem_bling_em_lote(
+    session: AsyncSession, ids: Collection[UUID] | None = None
+) -> dict[str, int]:
+    """Executor AUTOMÁTICO da "Mensagem Bling" da aba Status (Vinicius, 13/10:
+    Amazon 303203 cancelado pela regra "Cancelado" + "Em aberto" — o Threema
+    saiu e o status mudou, mas nada ficou escrito no pedido). Pra cada linha de
+    marketplace que casa uma regra APLICÁVEL AO ESTADO ATUAL com
+    `mensagem_bling` que ESSA regra ainda não escreveu
+    (`mensagem_bling_regra_id`), anexa a linha datada no topo das Observações
+    — o mesmo que o botão por linha faz — e carimba a regra.
+
+    Roda ANTES da troca de situação, pelo mesmo motivo do Threema: depois que
+    o status muda a regra deixa de valer e a mensagem nunca sairia (e no
+    Bling o pedido ainda está editável, ex. "Em aberto" antes de Cancelado).
+
+    - escritas: PUT feito (ou a linha de hoje já estava no topo) e carimbou.
+    - recusadas: o Bling recusou o pedido (4xx que não é 429) — determinístico,
+      repetir não resolve: loga o corpo e carimba pra não martelar a cada 5 min.
+    - falhas: Bling fora do ar/429/rede, ou pedido ainda não espelhado — não
+      carimba, tenta no próximo passe.
+    Commit por linha; re-busca a linha por id (o rollback de uma falha expira
+    as instâncias da sessão — ver `aplicar_status_em_lote`)."""
+    status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
+    stmt = select(Logistica)
+    if ids is not None:
+        stmt = stmt.where(Logistica.id.in_(list(ids)))
+    alvo = _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
+    pendentes: list[tuple[UUID, UUID]] = []
+    for r in (await session.execute(stmt)).scalars().all():
+        if (r.plataforma or "").strip().lower() not in alvo:
+            continue
+        rule = regra_mensagem_bling_para(status_rows, r)
+        if rule is not None and rule.id != r.mensagem_bling_regra_id:
+            pendentes.append((r.id, rule.id))
+    escritas = recusadas = falhas = 0
+    for row_id, regra_id in pendentes:
+        row = await session.get(Logistica, row_id)
+        rule = await session.get(LogisticaStatus, regra_id)
+        if row is None or rule is None:  # apagada por outro fluxo no meio do lote
+            continue
+        pedido = row.pedido_bling
+        try:
+            bling_id = await _bling_order_id_for_row(session, row)
+            client = await _bling_client(session)
+            order = await client.get_order(bling_id)
+            atual = order.get("observacoes")
+            novo = compose_observacoes(atual, rule.mensagem_bling or "")
+            if novo != (atual or "").strip():
+                await client.update_order(bling_id, build_observacoes_put_body(order, novo))
+            escritas += 1
+        except BlingObsError as e:
+            falhas += 1
+            logger.info("logistica_mensagem_bling_lote_pulada", pedido=pedido, motivo=e.code)
+            continue
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status >= 500 or status == 429:
+                falhas += 1
+                await session.rollback()
+                logger.warning(
+                    "logistica_mensagem_bling_lote_falha", pedido=pedido, status=status
+                )
+                continue
+            recusadas += 1
+            logger.warning(
+                "logistica_mensagem_bling_lote_recusada",
+                pedido=pedido,
+                status=status,
+                bling=e.response.text[:300],
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort, não derruba o lote
+            falhas += 1
+            await session.rollback()
+            # NUNCA tocar `row.*` aqui: pós-rollback a instância está expirada.
+            logger.warning("logistica_mensagem_bling_lote_falha", pedido=pedido, err=str(e)[:200])
+            continue
+        _carimbar_mensagem_bling(row, regra_id)
+        await session.commit()
+        logger.info("logistica_mensagem_bling_auto", pedido=pedido, regra=str(regra_id))
+    await session.commit()
+    return {"escritas": escritas, "recusadas": recusadas, "falhas": falhas}
 
 
 # ---- Executor: Alterar Status Bling (muda a situação do pedido no Bling) ----

@@ -347,6 +347,7 @@ def _to_out(
             c.status_bling,
             threema_enviado=c.threema_enviado_at is not None,
             chamado_aberto=bool((c.chamado or "").strip()),
+            mensagem_bling_regra_id=c.mensagem_bling_regra_id,
         )
         and not logistica_match.devolucao_travada(
             rules,
