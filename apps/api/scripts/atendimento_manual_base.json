@@ -598,7 +598,7 @@
       "canal": null,
       "prioridade": 6,
       "quando": "Atraso, problema ou dúvida de responsabilidade.",
-      "faca": "Nunca dizer que a loja não tem acesso, que o transporte ou o problema é da plataforma, da transportadora ou do fabricante; nunca culpar o cliente, insinuar mau uso ou fraude. A loja responde pela compra: dar os dados e o próximo passo."
+      "faca": "Nunca culpar plataforma, transportadora, fabricante ou cliente (mau uso, fraude); a loja responde: dados e próximo passo. Exceção: reembolso/estorno é feito pela plataforma da compra, que define o prazo; a loja não acessa o pagamento."
     },
     {
       "tipo": "seguranca",
