@@ -16,6 +16,13 @@ alertar". A regra é dele, conta a conta, pelo Horário Etiqueta da tela Lojas:
   DaVinci (`bling_orders.created_at`), todo dia. A Amazon fica contínua de
   propósito ("se não está emitindo sempre que cai, eu vou cobrar o menino").
 
+**ML com prazo de fabricação** (303265, 14/10: "o mercado livre não vai deixar
+emitir ele antes do dia 23/10"): enquanto o envio está `pending` no ML (a
+Logística mostra "Pendente | Programado" — `buffered`), o ML não libera a
+etiqueta e o vigia não cobra. Quando o envio vira `ready_to_ship`, a contagem
+começa da hora dessa mudança (`logistica.status_datas.ship_status`), e não da
+hora em que o pedido caiu. A Logística relê o ML a cada 30 min.
+
 Só olha pedido de loja com cadastro de Etiqueta (Carrefour/Netshoes ficam de
 fora) que ainda está "Em aberto" (6): quando a etiqueta sobe, o pedido vai
 pra "Em digitação"; cancelado, Aguardando Cancelamento (sem estoque, trava da
@@ -41,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import session_scope
 from app.models import (
     BlingOrder,
+    Logistica,
     NfEtiquetaArquivo,
     NfFaturamento,
     OuvidoriaRobo,
@@ -62,6 +70,10 @@ _SWEEP_LOCK_KEY = 0x76657467  # ascii "vetg"
 # nasce com estes mesmos valores — services/ouvidoria.ROBOS).
 _PRAZO_MIN = 90
 _JANELA_DIAS = 7
+# Prazo de fabricação do ML: o pedido pode cair semanas antes de o ML liberar
+# a etiqueta. A busca vai até aqui pra trás; a janela (`janela_dias`) conta
+# da liberação nesses pedidos.
+_FABRICACAO_MAX = timedelta(days=45)
 
 _TZ_BR = ZoneInfo("America/Sao_Paulo")
 _SABADO = 5
@@ -89,7 +101,10 @@ _ROTULO_PLATAFORMA = {
     "aliexpress": "AliExpress",
 }
 
-_CONTADORES = ("pedidos_sem_etiqueta", "no_prazo", "fora_do_prazo", "novas", "persistem", "sumiram")
+_CONTADORES = (
+    "pedidos_sem_etiqueta", "aguardando_ml", "no_prazo", "fora_do_prazo",
+    "novas", "persistem", "sumiram",
+)
 
 
 def _br(dt: datetime) -> str:
@@ -198,6 +213,46 @@ def etapa(
     return "não passou pela fila da nota do DaVinci", ACAO_COBRAR
 
 
+@dataclass(frozen=True)
+class EnvioMl:
+    """O que a Logística sabe do envio no ML: o status e desde quando."""
+
+    ship_status: str | None
+    desde: datetime | None
+
+
+def _dt(valor: object) -> datetime | None:
+    if not isinstance(valor, str) or not valor:
+        return None
+    try:
+        dt = datetime.fromisoformat(valor.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+async def _envios_ml(session: AsyncSession, numeros: list[str]) -> dict[str, EnvioMl]:
+    """pedido Bling → status do envio no ML, pela linha da Logística (a mais
+    recém-lida, se houver mais de uma)."""
+    if not numeros:
+        return {}
+    linhas = (
+        await session.execute(
+            select(Logistica.pedido_bling, Logistica.meli_status, Logistica.status_datas)
+            .where(Logistica.pedido_bling.in_(numeros))
+            .order_by(Logistica.status_lido_em.asc().nulls_first())
+        )
+    ).all()
+    out: dict[str, EnvioMl] = {}
+    for numero, meli, datas in linhas:
+        meli, datas = meli or {}, datas or {}
+        status = (meli.get("ship_status") or "").strip().lower() or None
+        carimbo = datas.get("ship_status") if isinstance(datas, dict) else None
+        desde = _dt(carimbo.get("em")) if isinstance(carimbo, dict) else None
+        out[numero] = EnvioMl(ship_status=status, desde=desde)  # a última lida vence
+    return out
+
+
 async def _registrar(r: ouvidoria.Rodada, agora: datetime, **campos) -> None:
     """`r.registrar` + os contadores novas/persistem (ocorrência que o núcleo
     devolveu fechada — ignorada, ou tratada há < 24 h — não conta)."""
@@ -277,18 +332,33 @@ async def vigia_etiquetas_run(session: AsyncSession, *, agora: datetime | None =
         janela = timedelta(days=int(cfg.get("janela_dias") or _JANELA_DIAS))
         agora = agora or datetime.now(UTC)
 
-        linhas = await _pedidos_sem_etiqueta(session, desde=agora - janela)
-        r.contadores["pedidos_sem_etiqueta"] = len(linhas)
+        linhas = await _pedidos_sem_etiqueta(session, desde=agora - janela - _FABRICACAO_MAX)
+        envios = await _envios_ml(session, [p.numero for p in linhas if p.plataforma == "ml"])
         for p in linhas:
             caiu = p.caiu if p.caiu.tzinfo else p.caiu.replace(tzinfo=UTC)
+            base, liberado = caiu, None
+            envio = envios.get(p.numero) if p.plataforma == "ml" else None
+            if envio is not None and envio.ship_status == "pending":
+                # Programado/fabricação: o ML ainda não solta a etiqueta.
+                r.contadores["pedidos_sem_etiqueta"] += 1
+                r.contadores["aguardando_ml"] += 1
+                continue
+            if envio is not None and envio.ship_status == "ready_to_ship" and envio.desde:
+                if envio.desde > caiu:
+                    base = liberado = envio.desde
+            if base < agora - janela:
+                continue
+            r.contadores["pedidos_sem_etiqueta"] += 1
             inicio = inicio_da_contagem(
-                caiu,
+                base,
                 horarios=horarios_de(p.etiqueta_horarios),
                 sabado=next(iter(horarios_de(p.etiqueta_sabado_horario)), None),
                 sai_no_sabado=pedido_sai_no_sabado(
                     list(p.skus or []), tags_de(p.etiqueta_sabado_tags)
                 ),
             )
+            if inicio is not None and liberado and inicio.regra.startswith("contínuo"):
+                inicio = Inicio(em=inicio.em, regra="contínuo: 1h30 depois que o ML liberou")
             if inicio is None or agora <= inicio.em + prazo:
                 r.contadores["no_prazo"] += 1
                 continue
@@ -307,7 +377,11 @@ async def vigia_etiquetas_run(session: AsyncSession, *, agora: datetime | None =
                 conta=f"{rotulo} {(p.account_name or '').strip()}".strip(),
                 pedido=p.numero,
                 titulo=f"Sem etiqueta — prazo {_br(vence)} passou há {_idade(atraso_min)}",
-                detalhe=f"Caiu {_br(caiu)} · {inicio.regra} · {onde}",
+                detalhe=(
+                    f"Caiu {_br(caiu)}"
+                    + (f" · ML liberou {_br(liberado)}" if liberado else "")
+                    + f" · {inicio.regra} · {onde}"
+                ),
                 acao=acao,
                 link=LINK_PAINEL,
                 severidade="pessoa",
@@ -315,6 +389,7 @@ async def vigia_etiquetas_run(session: AsyncSession, *, agora: datetime | None =
                 dados={
                     "pedido_marketplace": p.numeroloja,
                     "caiu_em": caiu.isoformat(),
+                    "ml_liberou_em": liberado.isoformat() if liberado else None,
                     "prazo": vence.isoformat(),
                     "regra": inicio.regra,
                     "etapa": onde,
@@ -326,11 +401,17 @@ async def vigia_etiquetas_run(session: AsyncSession, *, agora: datetime | None =
         # re-viu (etiqueta chegou, pedido saiu de Em aberto), sumiu.
         r.contadores["sumiram"] = await r.fechar_nao_vistas()
 
-        partes = [_plural(len(linhas), "pedido sem etiqueta", "pedidos sem etiqueta")]
+        partes = [
+            _plural(
+                r.contadores["pedidos_sem_etiqueta"], "pedido sem etiqueta", "pedidos sem etiqueta"
+            )
+        ]
+        if r.contadores["aguardando_ml"]:
+            partes.append(f"{r.contadores['aguardando_ml']} esperando o ML liberar")
         if r.contadores["fora_do_prazo"]:
             partes.append(f"{r.contadores['fora_do_prazo']} fora do prazo")
         else:
-            partes.append("todos no prazo")
+            partes.append("nenhum fora do prazo")
         r.resumo = " · ".join(partes)
 
     aviso = await ouvidoria.avisar_pendentes(session, ROBO)

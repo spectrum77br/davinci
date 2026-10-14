@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     BlingOrder,
+    Logistica,
     NfEtiqueta,
     NfEtiquetaArquivo,
     NfFaturamento,
@@ -221,7 +222,7 @@ async def test_continuo_abre_depois_de_1h30_e_fecha_quando_a_etiqueta_chega(db, 
 
     r = await _rodar(db, _brt(14, 11, 20))
     assert await _abertas(db) == [] and r["no_prazo"] == 1
-    assert r["resumo"] == "1 pedido sem etiqueta · todos no prazo"
+    assert r["resumo"] == "1 pedido sem etiqueta · nenhum fora do prazo"
 
     r = await _rodar(db, _brt(14, 11, 40))
     (o,) = await _abertas(db)
@@ -316,6 +317,55 @@ async def test_amazon_continua_e_etapa_travada(db, admin):
     assert o.conta == "Amazon kia" and o.acao == vigia.ACAO_TRAVADO
     assert "contínuo" in o.detalhe and o.detalhe.endswith("sem estoque quando a nota ia sair")
     assert "passou há 4 h" in o.titulo
+
+
+async def _envio_ml(db: AsyncSession, numero: str, *, status: str, sub: str, desde: datetime):
+    db.add(
+        Logistica(
+            pedido_bling=numero,
+            plataforma="Mercado Livre",
+            meli_status={"order_status": "paid", "ship_status": status, "ship_substatus": sub},
+            status_datas={"ship_status": {"em": desde.astimezone(UTC).isoformat()}},
+            status_lido_em=datetime.now(UTC),
+        )
+    )
+    await db.commit()
+
+
+async def test_ml_programado_espera_o_ml_liberar_e_conta_da_liberacao(db, admin):
+    """303265 (injox, 14/10): prazo de fabricação — o ML só solta a etiqueta
+    em 23/10. Enquanto o envio está pending/buffered não cobra; quando vira
+    ready_to_ship, o 1h30 conta da liberação."""
+    loja = await _loja(db, admin, plataforma="ml", conta="injox")
+    numero = await _pedido(db, loja, caiu=_brt(11, 21, 20))
+    await _envio_ml(db, numero, status="pending", sub="buffered", desde=_brt(11, 21, 20))
+
+    r = await _rodar(db, _brt(14, 15))
+    assert await _abertas(db) == [] and r["aguardando_ml"] == 1
+    assert r["resumo"] == "1 pedido sem etiqueta · 1 esperando o ML liberar · nenhum fora do prazo"
+
+    lg = (await db.execute(select(Logistica).where(Logistica.pedido_bling == numero))).scalar_one()
+    lg.meli_status = {"order_status": "paid", "ship_status": "ready_to_ship",
+                      "ship_substatus": "invoice_pending"}
+    lg.status_datas = {"ship_status": {"em": _brt(23, 8).astimezone(UTC).isoformat()}}
+    await db.commit()
+    await _rodar(db, _brt(23, 9, 20))
+    assert await _abertas(db) == []
+    await _rodar(db, _brt(23, 9, 40))
+    (o,) = await _abertas(db)
+    assert "ML liberou 23/10 08:00" in o.detalhe and "prazo 23/10 09:30" in o.titulo
+    assert "contínuo: 1h30 depois que o ML liberou" in o.detalhe
+
+
+async def test_ml_liberado_antes_de_cair_conta_de_quando_caiu(db, admin):
+    loja = await _loja(db, admin, plataforma="ml", conta="kia")
+    numero = await _pedido(db, loja, caiu=_brt(14, 10))
+    await _envio_ml(
+        db, numero, status="ready_to_ship", sub="invoice_pending", desde=_brt(14, 9, 59)
+    )
+    await _rodar(db, _brt(14, 11, 40))
+    (o,) = await _abertas(db)
+    assert "ML liberou" not in o.detalhe and "prazo 14/10 11:30" in o.titulo
 
 
 async def test_pedido_fora_da_janela_nao_entra(db, admin):
