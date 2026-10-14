@@ -3910,6 +3910,64 @@ async def vigia_etiquetas_tick(ctx: dict) -> None:
         logger.exception("vigia_etiquetas_unhandled")
 
 
+# --- Conciliação (14/10/2026) ---------------------------------------------
+# Rodadas por loja ligada em `conciliacao_lojas`: fatura do ML (2×/dia — a
+# API aceita 5 chamadas/min, a leitura é incremental), extrato do Mercado
+# Pago (a cada 10 min: pede a janela do dia anterior / lê o arquivo quando
+# fica pronto) e recálculo dos pedidos (de hora em hora). Trava por loja em
+# `conciliacao_jobs.sincronizar_loja`.
+async def conciliacao_fatura_tick(ctx: dict) -> None:
+    try:
+        from app.services.conciliacao_jobs import rodar_todas
+
+        for r in await rodar_todas(fatura=True, extrato=False, recalculo=True):
+            logger.info(
+                "conciliacao_fatura_tick_done", loja=r.get("loja"), skipped=r.get("skipped")
+            )
+    except Exception:
+        logger.exception("conciliacao_fatura_tick_unhandled")
+
+
+async def conciliacao_extrato_tick(ctx: dict) -> None:
+    try:
+        from app.services.conciliacao_jobs import rodar_todas
+
+        for r in await rodar_todas(fatura=False, extrato=True, recalculo=True):
+            ext = r.get("extrato") or {}
+            logger.info(
+                "conciliacao_extrato_tick_done",
+                loja=r.get("loja"),
+                skipped=r.get("skipped"),
+                pedido=ext.get("pedido"),
+                lidos=len(ext.get("lidos") or []),
+            )
+    except Exception:
+        logger.exception("conciliacao_extrato_tick_unhandled")
+
+
+async def conciliacao_recalculo_tick(ctx: dict) -> None:
+    try:
+        from app.services.conciliacao_jobs import rodar_todas
+
+        for r in await rodar_todas(fatura=False, extrato=False, recalculo=True):
+            logger.info(
+                "conciliacao_recalculo_tick_done", loja=r.get("loja"), **(r.get("recalculo") or {})
+            )
+    except Exception:
+        logger.exception("conciliacao_recalculo_tick_unhandled")
+
+
+async def conciliacao_sincronizar_loja(ctx: dict, integration_id: str) -> dict:
+    """Botão "sincronizar agora" da loja: fatura + extrato + recálculo."""
+    from uuid import UUID as _UUID
+
+    from app.services.conciliacao_jobs import sincronizar_loja
+
+    r = await sincronizar_loja(_UUID(integration_id))
+    logger.info("conciliacao_sincronizar_loja_done", loja=r.get("loja"), skipped=r.get("skipped"))
+    return {k: v for k, v in r.items() if k != "fatura"}
+
+
 async def vigia_nota_cheia_tick(ctx: dict) -> None:
     """Vigia de Nota Cheia (robô da Ouvidoria): pedido enviado sem a NF
     produto (nota cheia) no painel Notas fiscais — uma ocorrência por dia de
@@ -4770,6 +4828,10 @@ class WorkerSettings:
         vigia_robo_leitura_tick,
         vigia_etiquetas_tick,
         vigia_nota_cheia_tick,
+        conciliacao_fatura_tick,
+        conciliacao_extrato_tick,
+        conciliacao_recalculo_tick,
+        func(conciliacao_sincronizar_loja, timeout=1500),
         # Atendimento unificado (25/09/2026). Em `functions` também para o
         # botão "Sincronizar" da tela poder enfileirar a leitura.
         func(atendimento_sincronizar, timeout=300),
@@ -5360,6 +5422,17 @@ class WorkerSettings:
         # Vigia de Nota Cheia: 1×/h em :08, 4 min depois do espelho das NF-e
         # (pos_vendas_notas_sync em :04…) — a das 07:08 é a que cobra o dia.
         cron(vigia_nota_cheia_tick, minute=8, run_at_startup=False, timeout=600),
+        # Conciliação (14/10/2026): fatura do ML 2×/dia (06:12 e 18:12 BRT), extrato
+        # do Mercado Pago a cada 10 min (pede/lê a janela do dia anterior), recálculo
+        # dos pedidos de hora em hora em :40.
+        cron(conciliacao_fatura_tick, hour={9, 21}, minute=12, run_at_startup=False, timeout=1500),
+        cron(
+            conciliacao_extrato_tick,
+            minute={7, 17, 27, 37, 47, 57},
+            run_at_startup=False,
+            timeout=900,
+        ),
+        cron(conciliacao_recalculo_tick, minute=40, run_at_startup=False, timeout=900),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As
         # contas bling_notas são apps OAuth próprios — rate independente do
         # app principal; o custo por rodada é 1-2 páginas de lista por conta
@@ -5648,6 +5721,10 @@ class WorkerSettingsMarketingApi:
 # Re-export for tests / introspection
 __all__ = [
     "WorkerSettings",
+    "conciliacao_extrato_tick",
+    "conciliacao_fatura_tick",
+    "conciliacao_recalculo_tick",
+    "conciliacao_sincronizar_loja",
     "WorkerSettingsMarketingAgent",
     "WorkerSettingsMarketingApi",
     "WorkerSettingsMarketplace",

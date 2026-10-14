@@ -238,6 +238,13 @@ from app.models.nf import (
     NfImpressao,
     NfNota,
 )
+from app.models.conciliacao import (
+    ConciliacaoDia,
+    ConciliacaoLoja,
+    ConciliacaoMovimento,
+    ConciliacaoPedido,
+    ConciliacaoSync,
+)
 from app.models.ouvidoria import (
     FECHADA_PELO_ROBO,
     FECHAMENTOS,
@@ -458,6 +465,11 @@ __all__ = [
     "FECHAMENTOS",
     "MODOS",
     "SEVERIDADES",
+    "ConciliacaoDia",
+    "ConciliacaoLoja",
+    "ConciliacaoMovimento",
+    "ConciliacaoPedido",
+    "ConciliacaoSync",
     "OuvidoriaOcorrencia",
     "OuvidoriaRobo",
     "OuvidoriaRodada",

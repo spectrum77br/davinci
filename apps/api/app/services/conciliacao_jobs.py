@@ -1,0 +1,138 @@
+"""Conciliação — as rodadas (cron e botão "sincronizar agora").
+
+Por loja ligada (`conciliacao_lojas.ativa`): lê a fatura do ML, lê/pede o
+extrato do Mercado Pago e recalcula os pedidos. Serializado por advisory lock
+por loja (duas rodadas da mesma loja nunca correm juntas). O token do ML vem
+pelo caminho blindado do Atendimento (`cliente_da_integracao`): a renovação
+grava em sessão própria, porque o refresh token do ML é de uso único.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID
+
+import structlog
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import session_scope
+from app.models import ConciliacaoLoja, Integration
+from app.services.advisory_lock import SYNC_NAMESPACE
+from app.services.atendimento.clientes import cliente_da_integracao
+from app.services.conciliacao_calculo import recalcular_loja
+from app.services.conciliacao_extrato import run_extrato_sync
+from app.services.conciliacao_fatura import run_fatura_sync
+
+logger = structlog.get_logger()
+
+
+def _lock_key(integration_id: UUID) -> int:
+    h = hashlib.blake2b(b"conciliacao:" + integration_id.bytes, digest_size=4).digest()
+    val = int.from_bytes(h, "big", signed=False)
+    return val - 2**32 if val >= 2**31 else val
+
+
+async def lojas_ativas(session: AsyncSession) -> list[ConciliacaoLoja]:
+    return list(
+        (
+            await session.execute(
+                select(ConciliacaoLoja)
+                .where(ConciliacaoLoja.ativa.is_(True))
+                .order_by(ConciliacaoLoja.conta)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def loja_por_conta(session: AsyncSession, conta: str) -> ConciliacaoLoja | None:
+    chave = (conta or "").strip().lower()
+    for loja in await lojas_ativas(session):
+        if loja.conta.strip().lower() == chave:
+            return loja
+    return None
+
+
+async def _cliente(session: AsyncSession, loja: ConciliacaoLoja) -> Any:
+    integ = await session.get(Integration, loja.integration_id)
+    if integ is None:
+        raise RuntimeError(f"integração da loja {loja.conta} não existe mais")
+    return await cliente_da_integracao(integ)
+
+
+async def sincronizar_loja(
+    integration_id: UUID, *, fatura: bool = True, extrato: bool = True, recalculo: bool = True
+) -> dict[str, Any]:
+    """Uma rodada completa (ou parcial) de uma loja, com trava por loja."""
+    async with session_scope() as trava:
+        got = (
+            await trava.execute(
+                text("SELECT pg_try_advisory_xact_lock(:ns, :key)"),
+                {"ns": SYNC_NAMESPACE, "key": _lock_key(integration_id)},
+            )
+        ).scalar()
+        if not got:
+            return {"skipped": "rodada_em_andamento", "integration_id": str(integration_id)}
+        resultado: dict[str, Any] = {"integration_id": str(integration_id)}
+        async with session_scope() as session:
+            loja = (
+                await session.execute(
+                    select(ConciliacaoLoja).where(ConciliacaoLoja.integration_id == integration_id)
+                )
+            ).scalar_one_or_none()
+            if loja is None:
+                return {"skipped": "loja_nao_ligada", "integration_id": str(integration_id)}
+            resultado["loja"] = loja.conta
+            cliente = await _cliente(session, loja) if (fatura or extrato) else None
+            if fatura:
+                try:
+                    resultado["fatura"] = await run_fatura_sync(session, loja, cliente)
+                except Exception as e:  # noqa: BLE001
+                    loja.ultimo_erro = f"fatura: {type(e).__name__}: {str(e)[:300]}"
+                    resultado["fatura"] = {"erro": loja.ultimo_erro}
+                    logger.exception("conciliacao_fatura_unhandled", loja=loja.conta)
+                await session.commit()
+            if extrato:
+                try:
+                    resultado["extrato"] = await run_extrato_sync(session, loja, cliente)
+                except Exception as e:  # noqa: BLE001
+                    loja.ultimo_erro = f"extrato: {type(e).__name__}: {str(e)[:300]}"
+                    resultado["extrato"] = {"erro": loja.ultimo_erro}
+                    logger.exception("conciliacao_extrato_unhandled", loja=loja.conta)
+                await session.commit()
+            if recalculo:
+                try:
+                    resultado["recalculo"] = await recalcular_loja(session, loja)
+                except Exception as e:  # noqa: BLE001
+                    loja.ultimo_erro = f"recálculo: {type(e).__name__}: {str(e)[:300]}"
+                    resultado["recalculo"] = {"erro": loja.ultimo_erro}
+                    logger.exception("conciliacao_recalculo_unhandled", loja=loja.conta)
+                await session.commit()
+            if all(
+                "erro" not in (resultado.get(k) or {}) for k in ("fatura", "extrato", "recalculo")
+            ):
+                loja.ultimo_erro = None
+                await session.commit()
+        resultado["quando"] = datetime.now(UTC).isoformat()
+        logger.info(
+            "conciliacao_rodada", **{k: v for k, v in resultado.items() if k in ("loja", "quando")}
+        )
+        return resultado
+
+
+async def rodar_todas(*, fatura: bool, extrato: bool, recalculo: bool) -> list[dict[str, Any]]:
+    async with session_scope() as session:
+        lojas = await lojas_ativas(session)
+        ids = [(loja.integration_id, loja.conta) for loja in lojas]
+    saida: list[dict[str, Any]] = []
+    for integration_id, _conta in ids:
+        saida.append(
+            await sincronizar_loja(
+                integration_id, fatura=fatura, extrato=extrato, recalculo=recalculo
+            )
+        )
+    return saida

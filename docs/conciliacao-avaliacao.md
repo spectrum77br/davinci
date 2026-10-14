@@ -330,3 +330,16 @@ Com o OK do Vinicius, a configuração do relatório foi criada na conta (36 col
 4. Reclamação perdida = `mediation` (−bruto) + `refund` (+tarifas) no mesmo `SOURCE_ID`; reserva por disputa = par débito/crédito, dinheiro travado.
 5. Fatura do ML por período: 1 página de 1.000 por chamada, no máximo 5 chamadas por minuto; bonificações com `detail_type=BONUS`; período da loja vai do dia 23 ao 22.
 6. Prova dos nove: saldo inicial + créditos − débitos = líquido da linha `total` (2.591,22 no período lido).
+
+---
+
+## 14. Passo 2a (14/10, noite) — a base: tabelas e leituras diárias
+
+Com o OK do Vinicius ("Ok" ao passo 2), entrou a base do painel, sem tela ainda:
+
+- **Migration 0397**: `conciliacao_lojas` (jlas2 ligada, início 01/10/2026), `conciliacao_movimentos` (livro-razão), `conciliacao_pedidos` (uma linha por pedido do Bling), `conciliacao_sync` (controle das leituras) e `conciliacao_dias` (fechamento do dia, ainda sem uso).
+- **Leitura do extrato** (`services/conciliacao_extrato.py`): a cada 10 min o worker olha as lojas ligadas; se há janela pedida e o arquivo ficou pronto, lê e grava os movimentos (sem duplicar: identidade = hash da linha); senão pede a próxima janela, do dia seguinte ao último lido até ontem (a primeira pede desde o início da loja). Cria a configuração do relatório na conta se faltar. Linha de saque já nasce classificada; linha de venda/mediação/estorno/reserva guarda o nº da venda, o pack e, quando o Bling já importou, o pedido do Bling.
+- **Leitura da fatura** (`services/conciliacao_fatura.py`): 2× por dia (06:12 e 18:12), cobranças e bonificações do período aberto e do anterior, incremental (`from_id` = último id lido), uma página de 1.000 por chamada e **13 s entre chamadas** (limite de 5/min do ML); resumo do período aberto guardado. Product Ads nasce classificado "publicidade".
+- **Recálculo** (`services/conciliacao_calculo.py`): de hora em hora (:40) e no fim de cada leitura. Pedidos da loja desde o início; venda = o que a Margem já leu; recebido = créditos − débitos do extrato sem as reservas; situação e etapa pelas regras da seção 12 (tolerância R$ 0,05; bateu finaliza sozinho em 7 dias; movimento novo depois de finalizado reabre); sobrou = recebido (ou previsto) − custo − reembolso do painel Reembolso. Linha de pedido anterior ao início vira `anterior_ao_inicio`.
+- **Endpoints**: `GET /api/conciliacao/status` (o painel "cru": leituras, movimentos por tipo, pedidos por situação/etapa) e `POST /api/conciliacao/lojas/{conta}/sincronizar` (rodada completa no worker, trava por loja).
+- Testes: `tests/test_conciliacao_base.py` (normalização do extrato e da fatura com os dados reais da sondagem, ingestão sem duplicar, janelas do extrato, leitura incremental com pausa, recálculo com as situações, etapas) e `tests/test_conciliacao_sonda.py`.

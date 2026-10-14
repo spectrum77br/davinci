@@ -26,11 +26,13 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Annotated, Any
 
 import httpx
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -38,11 +40,21 @@ from app.deps.auth import require_permission_any
 from app.models import User
 from app.services import logistica_meli as lm
 from app.services.atendimento.clientes import cliente_da_integracao
+from app.services.conciliacao_extrato import (
+    MP_API_BASE,
+    baixar_relatorio,
+    garantir_config,
+    listar_relatorios,
+    mp_get,
+    pedir_relatorio,
+)
+from app.services.conciliacao_jobs import loja_por_conta, lojas_ativas
+from app.services.conciliacao_mp_csv import ler_csv_mp
+from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/conciliacao", tags=["conciliacao"])
 
-MP_API_BASE = "https://api.mercadopago.com"
 _PERM = require_permission_any(("margem", "logistica"), "view")
 _PERM_EDIT = require_permission_any(("margem", "logistica"), "edit")
 _AMOSTRA = 5
@@ -77,79 +89,6 @@ def _recorta(obj: Any) -> Any:
     if isinstance(obj, str) and len(obj) > _MAX_TEXTO:
         return obj[:_MAX_TEXTO] + "…"
     return obj
-
-
-def dividir_linha_mp(linha: str, sep: str = ",") -> list[str]:
-    """Divide uma linha do CSV do Mercado Pago tolerando o formato deles.
-
-    Visto em 14/10/2026 no Relatório de liberações da jlas2: as colunas de
-    JSON (`METADATA` = `"{"fee_discount": "2.85", ...}"`, `OPERATION_TAGS` =
-    `"[{"logistic_type":"drop_off"}]"`) vêm entre aspas SEM escapar as aspas
-    de dentro, o que não é CSV válido e desloca as colunas seguintes
-    (`BALANCE_AMOUNT`, `ITEM_ID`, `PRODUCT_SKU`…) em qualquer parser padrão.
-    Já `SALE_DETAIL` vem no padrão (aspas internas duplicadas). Aqui: campo que começa
-    com `"{` ou `"[` é lido até fechar o colchete/chave; o resto segue a
-    regra normal de aspas duplicadas.
-    """
-    campos: list[str] = []
-    atual: list[str] = []
-    i, n = 0, len(linha)
-    while i < n:
-        ch = linha[i]
-        if ch == sep:
-            campos.append("".join(atual))
-            atual = []
-            i += 1
-            continue
-        if ch == '"' and not atual:
-            if i + 1 < n and linha[i + 1] in "{[":
-                profundidade = 0
-                j = i + 1
-                while j < n:
-                    if linha[j] in "{[":
-                        profundidade += 1
-                    elif linha[j] in "}]":
-                        profundidade -= 1
-                        if profundidade == 0:
-                            break
-                    j += 1
-                atual.append(linha[i + 1 : j + 1])
-                i = j + 1
-                if i < n and linha[i] == '"':
-                    i += 1
-                continue
-            j = i + 1
-            buf: list[str] = []
-            while j < n:
-                if linha[j] == '"':
-                    if j + 1 < n and linha[j + 1] == '"':
-                        buf.append('"')
-                        j += 2
-                        continue
-                    break
-                buf.append(linha[j])
-                j += 1
-            atual.append("".join(buf))
-            i = j + 1
-            continue
-        atual.append(ch)
-        i += 1
-    campos.append("".join(atual))
-    return campos
-
-
-def ler_csv_mp(texto: str) -> tuple[list[str], list[dict[str, str]], str]:
-    """Cabeçalho, linhas (dict por coluna) e separador de um CSV do Mercado Pago."""
-    linhas = [x for x in texto.splitlines() if x.strip()]
-    if not linhas:
-        return [], [], ","
-    sep = ";" if linhas[0].count(";") >= linhas[0].count(",") else ","
-    cab = [c.strip() for c in linhas[0].split(sep)]
-    rows: list[dict[str, str]] = []
-    for linha in linhas[1:]:
-        campos = dividir_linha_mp(linha, sep)
-        rows.append({cab[k]: (campos[k] if k < len(campos) else "") for k in range(len(cab))})
-    return cab, rows, sep
 
 
 def _amostra_csv(texto: str) -> dict[str, Any]:
@@ -189,17 +128,6 @@ async def _chamada(
     except ValueError:
         item["amostra"] = (r.text or "")[:_MAX_TEXTO]
     return item
-
-
-async def _mp_get(cliente: Any, path: str, params: dict | None = None) -> httpx.Response:
-    """GET em api.mercadopago.com com a mesma chave da loja (host diferente do
-    cliente do ML, por isso não passa pelo `_request` dele). Renova antes se
-    estiver vencida — pelo `refresh` blindado que `cliente_da_integracao` instalou."""
-    if cliente._expired():
-        await cliente.refresh()
-    headers = {"Authorization": f"Bearer {cliente.access_token}", "Accept": "application/json"}
-    async with httpx.AsyncClient(timeout=60.0) as c:
-        return await c.get(f"{MP_API_BASE}{path}", headers=headers, params=params)
 
 
 @router.get("/sonda")
@@ -248,7 +176,7 @@ async def sonda(
         item = await _chamada(
             nome,
             f"{MP_API_BASE}{path}",
-            lambda: _mp_get(cliente, path, params),
+            lambda: mp_get(cliente, path, params),
             csv_texto=csv_texto,
         )
         chamadas.append(item)
@@ -374,181 +302,99 @@ async def sonda(
 
 
 # --- Extrato do Mercado Pago (Relatório de liberações) ----------------------
-# 14/10/2026, com OK do Vinicius: a conta da jlas2 nunca gerou o relatório, nem
-# pelo painel nem por API. Pra ver as linhas de verdade são duas escritas de
-# configuração na conta da loja (nunca em dinheiro ou pedido): criar a
-# configuração (colunas, fuso) e pedir um relatório de um período. Depois o
-# arquivo é lido e resumido aqui, sem gravar nada no DaVinci.
-
-_COLUNAS_EXTRATO = [
-    "DATE",
-    "SOURCE_ID",
-    "EXTERNAL_REFERENCE",
-    "RECORD_TYPE",
-    "DESCRIPTION",
-    "NET_CREDIT_AMOUNT",
-    "NET_DEBIT_AMOUNT",
-    "GROSS_AMOUNT",
-    "MP_FEE_AMOUNT",
-    "FINANCING_FEE_AMOUNT",
-    "SHIPPING_FEE_AMOUNT",
-    "TAXES_AMOUNT",
-    "COUPON_AMOUNT",
-    "EFFECTIVE_COUPON_AMOUNT",
-    "INSTALLMENTS",
-    "PAYMENT_METHOD",
-    "PAYMENT_METHOD_TYPE",
-    "TRANSACTION_APPROVAL_DATE",
-    "TRANSACTION_DATE",
-    "ORDER_ID",
-    "SHIPPING_ID",
-    "SHIPMENT_MODE",
-    "PACK_ID",
-    "ITEM_ID",
-    "PRODUCT_SKU",
-    "SALE_DETAIL",
-    "BALANCE_AMOUNT",
-    "METADATA",
-    "OPERATION_TAGS",
-    "SELLER_AMOUNT",
-    "TAX_DETAIL",
-    "PAYOUT_BANK_ACCOUNT_NUMBER",
-    "CURRENCY",
-    "PURCHASE_ID",
-    "ORDER_MP",
-    "SHIPPING_ORDER_ID",
-]
-# Conjunto mínimo (todos documentados) pra quando a conta recusar alguma coluna.
-_COLUNAS_EXTRATO_MINIMO = _COLUNAS_EXTRATO[:13] + [
-    "INSTALLMENTS",
-    "PAYMENT_METHOD",
-    "ORDER_ID",
-    "SHIPPING_ID",
-    "PACK_ID",
-    "BALANCE_AMOUNT",
-    "METADATA",
-]
-
-
-def _config_extrato(colunas: list[str]) -> dict[str, Any]:
-    return {
-        "file_name_prefix": "davinci-liberacoes",
-        "include_withdrawal_at_end": False,
-        "execute_after_withdrawal": False,
-        "display_timezone": "GMT-03",
-        "frequency": {"hour": 0, "type": "monthly", "value": 1},
-        "columns": [{"key": c} for c in colunas],
-    }
-
-
-async def _mp_post(cliente: Any, path: str, body: dict) -> httpx.Response:
-    if cliente._expired():
-        await cliente.refresh()
-    headers = {"Authorization": f"Bearer {cliente.access_token}", "Accept": "application/json"}
-    async with httpx.AsyncClient(timeout=60.0) as c:
-        return await c.post(f"{MP_API_BASE}{path}", headers=headers, json=body)
-
-
-def _num(v: Any) -> float:
-    if v is None:
-        return 0.0
-    t = str(v).strip()
-    if not t:
-        return 0.0
-    if "," in t and "." not in t:
-        t = t.replace(".", "").replace(",", ".")
-    try:
-        return float(t)
-    except ValueError:
-        return 0.0
-
-
-def _coluna(cabecalho: list[str], *candidatas: str) -> str | None:
-    baixo = {c.strip().lower(): c for c in cabecalho}
-    for cand in candidatas:
-        if cand.lower() in baixo:
-            return baixo[cand.lower()]
-    return None
+# 14/10/2026, com OK do Vinicius: duas escritas de configuração na conta da loja
+# (criar a configuração do relatório e pedir um período) e a leitura do arquivo.
+# A rotina diária de verdade está em `services/conciliacao_extrato.py`; estes
+# endpoints são a sondagem manual e o resumo de um arquivo pronto.
 
 
 def resumir_extrato(texto: str) -> dict[str, Any]:
     """Resumo de um CSV do Relatório de liberações: tipos de movimento, somas,
     quantas linhas têm número de pedido, e uma amostra por tipo. Não grava."""
+    from app.services.conciliacao_mp_csv import dinheiro
+
     cab, rows, sep = ler_csv_mp(texto)
     if not cab:
         return {"total_linhas": 0}
-    c_tipo = _coluna(cab, "DESCRIPTION", "Descrição", "DESCRICAO")
-    c_reg = _coluna(cab, "RECORD_TYPE", "Tipo de registro")
-    c_cred = _coluna(cab, "NET_CREDIT_AMOUNT")
-    c_deb = _coluna(cab, "NET_DEBIT_AMOUNT")
-    c_pedido = _coluna(cab, "ORDER_ID")
-    c_pack = _coluna(cab, "PACK_ID")
-    c_ref = _coluna(cab, "EXTERNAL_REFERENCE")
-    c_saldo = _coluna(cab, "BALANCE_AMOUNT")
     por_tipo: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"linhas": 0, "credito": 0.0, "debito": 0.0, "com_pedido": 0, "sem_pedido": 0}
+        lambda: {
+            "linhas": 0,
+            "credito": Decimal("0"),
+            "debito": Decimal("0"),
+            "com_pedido": 0,
+            "sem_pedido": 0,
+        }
     )
     registros: Counter[str] = Counter()
     amostra: dict[str, list[dict[str, Any]]] = defaultdict(list)
     com_pedido = sem_pedido = 0
-    campos_amostra = [
+    campos = [
         c
         for c in (
-            _coluna(cab, "DATE"),
-            _coluna(cab, "SOURCE_ID"),
-            c_ref,
-            c_reg,
-            c_tipo,
-            _coluna(cab, "GROSS_AMOUNT"),
-            _coluna(cab, "MP_FEE_AMOUNT"),
-            _coluna(cab, "FINANCING_FEE_AMOUNT"),
-            _coluna(cab, "SHIPPING_FEE_AMOUNT"),
-            _coluna(cab, "COUPON_AMOUNT"),
-            c_cred,
-            c_deb,
-            c_saldo,
-            c_pedido,
-            c_pack,
-            _coluna(cab, "SHIPPING_ID"),
-            _coluna(cab, "INSTALLMENTS"),
-            _coluna(cab, "PAYMENT_METHOD"),
-            _coluna(cab, "METADATA"),
+            "DATE",
+            "SOURCE_ID",
+            "EXTERNAL_REFERENCE",
+            "RECORD_TYPE",
+            "DESCRIPTION",
+            "GROSS_AMOUNT",
+            "MP_FEE_AMOUNT",
+            "FINANCING_FEE_AMOUNT",
+            "SHIPPING_FEE_AMOUNT",
+            "COUPON_AMOUNT",
+            "NET_CREDIT_AMOUNT",
+            "NET_DEBIT_AMOUNT",
+            "BALANCE_AMOUNT",
+            "ORDER_ID",
+            "PACK_ID",
+            "SHIPPING_ID",
+            "INSTALLMENTS",
+            "PAYMENT_METHOD",
+            "PRODUCT_SKU",
+            "METADATA",
         )
-        if c
+        if c in cab
     ]
     for r in rows:
-        tipo = (r.get(c_tipo) or "").strip() if c_tipo else "?"
-        reg = (r.get(c_reg) or "").strip() if c_reg else "?"
-        registros[reg] += 1
+        tipo = (r.get("DESCRIPTION") or "").strip()
+        registros[(r.get("RECORD_TYPE") or "").strip()] += 1
         t = por_tipo[tipo]
         t["linhas"] += 1
-        t["credito"] = round(t["credito"] + _num(r.get(c_cred)), 2) if c_cred else 0.0
-        t["debito"] = round(t["debito"] + _num(r.get(c_deb)), 2) if c_deb else 0.0
-        tem_pedido = bool((r.get(c_pedido) or "").strip() if c_pedido else "") or bool(
-            (r.get(c_pack) or "").strip() if c_pack else ""
-        )
+        t["credito"] += dinheiro(r.get("NET_CREDIT_AMOUNT"))
+        t["debito"] += dinheiro(r.get("NET_DEBIT_AMOUNT"))
+        tem_pedido = bool((r.get("ORDER_ID") or "").strip() or (r.get("PACK_ID") or "").strip())
+        t["com_pedido" if tem_pedido else "sem_pedido"] += 1
         if tem_pedido:
-            t["com_pedido"] += 1
             com_pedido += 1
         else:
-            t["sem_pedido"] += 1
             sem_pedido += 1
         if len(amostra[tipo]) < 3:
-            amostra[tipo].append({c: (r.get(c) or "")[:120] for c in campos_amostra})
+            amostra[tipo].append({c: (r.get(c) or "")[:120] for c in campos})
     return {
         "total_linhas": len(rows),
         "separador": sep,
         "colunas": cab,
         "registros": dict(registros),
-        "por_tipo": dict(por_tipo),
+        "por_tipo": {
+            k: {**v, "credito": str(v["credito"]), "debito": str(v["debito"])}
+            for k, v in por_tipo.items()
+        },
         "com_pedido": com_pedido,
         "sem_pedido": sem_pedido,
-        "credito_total": round(sum(t["credito"] for t in por_tipo.values()), 2),
-        "debito_total": round(sum(t["debito"] for t in por_tipo.values()), 2),
-        "saldo_primeira_linha": (rows[0].get(c_saldo) if rows and c_saldo else None),
-        "saldo_ultima_linha": (rows[-1].get(c_saldo) if rows and c_saldo else None),
+        "credito_total": str(sum((v["credito"] for v in por_tipo.values()), Decimal("0"))),
+        "debito_total": str(sum((v["debito"] for v in por_tipo.values()), Decimal("0"))),
+        "saldo_primeira_linha": rows[0].get("BALANCE_AMOUNT") if rows else None,
+        "saldo_ultima_linha": rows[-1].get("BALANCE_AMOUNT") if rows else None,
         "amostra_por_tipo": dict(amostra),
     }
+
+
+async def _cliente_da_conta(session: AsyncSession, conta: str) -> Any:
+    integ = await lm._ml_integration_for_conta(session, conta)
+    if integ is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"code": "conta_ml_nao_encontrada", "conta": conta}
+        )
+    return await cliente_da_integracao(integ)
 
 
 @router.post("/sonda/extrato/pedir")
@@ -560,69 +406,18 @@ async def sonda_extrato_pedir(
     ate: Annotated[date, Query(description="último dia (BRT), inclusive")],
     _body: Annotated[dict | None, Body()] = None,
 ) -> dict[str, Any]:
-    """Duas escritas de configuração na conta Mercado Pago da loja: cria a
-    configuração do Relatório de liberações se não existir e pede o relatório
-    do período. Nada de dinheiro, nada de pedido, nada gravado no DaVinci."""
-    integ = await lm._ml_integration_for_conta(session, conta)
-    if integ is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, detail={"code": "conta_ml_nao_encontrada", "conta": conta}
-        )
-    cliente = await cliente_da_integracao(integ)
-    chamadas: list[dict[str, Any]] = []
-
-    cfg = await _chamada(
-        "mp_extrato_config_antes",
-        f"{MP_API_BASE}/v1/account/release_report/config",
-        lambda: _mp_get(cliente, "/v1/account/release_report/config"),
-    )
-    chamadas.append(cfg)
-    if cfg.get("status") == 404:
-        criada = await _chamada(
-            "mp_extrato_config_criar",
-            f"{MP_API_BASE}/v1/account/release_report/config",
-            lambda: _mp_post(
-                cliente, "/v1/account/release_report/config", _config_extrato(_COLUNAS_EXTRATO)
-            ),
-        )
-        chamadas.append(criada)
-        if criada.get("status") not in (200, 201):
-            minima = await _chamada(
-                "mp_extrato_config_criar_minima",
-                f"{MP_API_BASE}/v1/account/release_report/config",
-                lambda: _mp_post(
-                    cliente,
-                    "/v1/account/release_report/config",
-                    _config_extrato(_COLUNAS_EXTRATO_MINIMO),
-                ),
-            )
-            chamadas.append(minima)
-
-    inicio = datetime(de.year, de.month, de.day, 3, 0, 0, tzinfo=UTC)  # 00:00 BRT
-    fim = datetime(ate.year, ate.month, ate.day, 3, 0, 0, tzinfo=UTC).replace(
-        hour=2, minute=59, second=59
-    )
-    fim = fim + (
-        datetime(1, 1, 2) - datetime(1, 1, 1)
-    )  # 23:59:59 BRT do último dia = 02:59:59Z do dia seguinte
-    corpo = {
-        "begin_date": inicio.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end_date": fim.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    pedido = await _chamada(
-        "mp_extrato_pedir",
-        f"{MP_API_BASE}/v1/account/release_report",
-        lambda: _mp_post(cliente, "/v1/account/release_report", corpo),
-    )
-    pedido["corpo_enviado"] = corpo
-    chamadas.append(pedido)
+    """Cria a configuração do Relatório de liberações se não existir e pede o
+    relatório do período. Nada de dinheiro, nada de pedido, nada gravado no DaVinci."""
+    cliente = await _cliente_da_conta(session, conta)
+    config = await garantir_config(cliente)
+    pedido = await pedir_relatorio(cliente, de, ate)
     logger.info(
         "conciliacao_sonda_extrato_pedido",
         conta=conta,
-        integration_id=str(integ.id),
-        chamadas={c["nome"]: c.get("status") or c.get("erro") for c in chamadas},
+        config=config.get("status"),
+        http=pedido["status"],
     )
-    return {"conta": conta, "periodo": corpo, "chamadas": chamadas}
+    return {"conta": conta, "config": config, "periodo": pedido["janela"], "pedido": pedido}
 
 
 @router.get("/sonda/extrato")
@@ -631,70 +426,156 @@ async def sonda_extrato_ler(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(_PERM)],
     bruto: Annotated[
-        int,
-        Query(ge=0, le=20, description="devolve também as N primeiras linhas cruas do CSV"),
+        int, Query(ge=0, le=20, description="devolve também as N primeiras linhas cruas do CSV")
     ] = 0,
 ) -> dict[str, Any]:
     """Lista os relatórios da conta e, se o mais novo estiver pronto, baixa o
-    CSV e devolve um resumo (tipos de movimento, somas, com/sem pedido, amostra).
-    Só leitura."""
-    integ = await lm._ml_integration_for_conta(session, conta)
-    if integ is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, detail={"code": "conta_ml_nao_encontrada", "conta": conta}
-        )
-    cliente = await cliente_da_integracao(integ)
-    chamadas: list[dict[str, Any]] = []
-    lista = await _chamada(
-        "mp_extrato_lista",
-        f"{MP_API_BASE}/v1/account/release_report/list",
-        lambda: _mp_get(cliente, "/v1/account/release_report/list"),
-    )
-    chamadas.append(lista)
-    amostra = lista.get("amostra")
-    itens = (
-        amostra.get("primeiros")
-        if isinstance(amostra, dict)
-        else (amostra if isinstance(amostra, list) else [])
-    )
-    relatorios = [x for x in (itens or []) if isinstance(x, dict)]
+    CSV e devolve um resumo. Só leitura."""
+    cliente = await _cliente_da_conta(session, conta)
+    relatorios = await listar_relatorios(cliente)
     pronto = next((x for x in relatorios if x.get("file_name")), None)
     resumo: dict[str, Any] | None = None
     if pronto:
-        nome = str(pronto["file_name"])
-        r_arq = await _chamada(
-            "mp_extrato_arquivo",
-            f"{MP_API_BASE}/v1/account/release_report/{nome}",
-            lambda: _mp_get(cliente, f"/v1/account/release_report/{nome}"),
-            csv_texto=True,
-        )
-        chamadas.append(r_arq)
-        if r_arq.get("ok"):
-            # relê o arquivo inteiro pro resumo (a amostra acima é só o começo)
-            r2 = await _mp_get(cliente, f"/v1/account/release_report/{nome}")
-            if r2.status_code == 200:
-                resumo = resumir_extrato(r2.text)
-                if bruto:
-                    linhas = r2.text.splitlines()
-                    # cabeçalho + primeiras linhas + a primeira linha com METADATA "cheio"
-                    # (tem vírgula dentro: é ela que quebra o parser se não vier entre aspas)
-                    cheia = next(
-                        (x for x in linhas[1:] if '"payments_group_uuid' in x or '{"' in x), None
-                    )
-                    resumo["linhas_cruas"] = linhas[: bruto + 1] + ([cheia] if cheia else [])
+        texto = await baixar_relatorio(cliente, str(pronto["file_name"]))
+        if texto is not None:
+            resumo = resumir_extrato(texto)
+            if bruto:
+                linhas = texto.splitlines()
+                cheia = next((x for x in linhas[1:] if '"{' in x or '"[' in x), None)
+                resumo["linhas_cruas"] = linhas[: bruto + 1] + ([cheia] if cheia else [])
     logger.info(
         "conciliacao_sonda_extrato_lido",
         conta=conta,
-        integration_id=str(integ.id),
         relatorios=len(relatorios),
         pronto=bool(pronto),
         total_linhas=(resumo or {}).get("total_linhas"),
-        tipos=list(((resumo or {}).get("por_tipo") or {}).keys()),
+    )
+    return {"conta": conta, "relatorios": relatorios, "pronto": pronto, "resumo": resumo}
+
+
+# --- Painel: status das lojas ligadas e "sincronizar agora" -------------------
+
+
+@router.get("/status")
+async def status_lojas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+) -> dict[str, Any]:
+    """Por loja ligada: últimas leituras, movimentos por origem/tipo e pedidos por
+    situação e etapa. É o painel "cru" da fase 2a — a tela vem na 2b."""
+    from sqlalchemy import func
+
+    from app.models import ConciliacaoMovimento, ConciliacaoPedido, ConciliacaoSync
+
+    saida: list[dict[str, Any]] = []
+    for loja in await lojas_ativas(session):
+        por_tipo = (
+            await session.execute(
+                select(
+                    ConciliacaoMovimento.origem,
+                    ConciliacaoMovimento.tipo,
+                    func.count(),
+                    func.sum(ConciliacaoMovimento.credito),
+                    func.sum(ConciliacaoMovimento.debito),
+                )
+                .where(ConciliacaoMovimento.integration_id == loja.integration_id)
+                .group_by(ConciliacaoMovimento.origem, ConciliacaoMovimento.tipo)
+                .order_by(ConciliacaoMovimento.origem, ConciliacaoMovimento.tipo)
+            )
+        ).all()
+        por_situacao = (
+            await session.execute(
+                select(ConciliacaoPedido.situacao, func.count())
+                .where(ConciliacaoPedido.integration_id == loja.integration_id)
+                .group_by(ConciliacaoPedido.situacao)
+            )
+        ).all()
+        por_etapa = (
+            await session.execute(
+                select(ConciliacaoPedido.etapa, func.count())
+                .where(ConciliacaoPedido.integration_id == loja.integration_id)
+                .group_by(ConciliacaoPedido.etapa)
+            )
+        ).all()
+        syncs = (
+            (
+                await session.execute(
+                    select(ConciliacaoSync)
+                    .where(ConciliacaoSync.integration_id == loja.integration_id)
+                    .order_by(ConciliacaoSync.origem, ConciliacaoSync.chave)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        sem_pedido = (
+            await session.execute(
+                select(func.count()).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.pedido_bling.is_(None),
+                    ConciliacaoMovimento.classificacao.is_(None),
+                )
+            )
+        ).scalar()
+        saida.append(
+            {
+                "conta": loja.conta,
+                "integration_id": str(loja.integration_id),
+                "inicio": loja.inicio.isoformat(),
+                "ultimo_extrato_em": loja.ultimo_extrato_em,
+                "ultimo_fatura_em": loja.ultimo_fatura_em,
+                "ultimo_recalculo_em": loja.ultimo_recalculo_em,
+                "ultimo_erro": loja.ultimo_erro,
+                "movimentos": [
+                    {
+                        "origem": o,
+                        "tipo": t,
+                        "linhas": n,
+                        "credito": str(c or 0),
+                        "debito": str(d or 0),
+                    }
+                    for o, t, n, c, d in por_tipo
+                ],
+                "movimentos_sem_dono": sem_pedido,
+                "pedidos_por_situacao": dict(por_situacao),
+                "pedidos_por_etapa": dict(por_etapa),
+                "leituras": [
+                    {
+                        "origem": x.origem,
+                        "chave": x.chave,
+                        "status": x.status,
+                        "linhas": x.linhas,
+                        "lido_em": x.lido_em,
+                        "erro": x.erro,
+                        "last_id": (x.detalhe or {}).get("last_id"),
+                    }
+                    for x in syncs
+                ],
+            }
+        )
+    return {"lojas": saida}
+
+
+@router.post("/lojas/{conta}/sincronizar")
+async def sincronizar_agora(
+    conta: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_EDIT)],
+) -> dict[str, Any]:
+    """Enfileira uma rodada completa da loja (fatura + extrato + recálculo) no worker."""
+    loja = await loja_por_conta(session, conta)
+    if loja is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"code": "loja_nao_ligada", "conta": conta}
+        )
+    pool = await get_arq_pool()
+    job = await pool.enqueue_job(
+        "conciliacao_sincronizar_loja",
+        str(loja.integration_id),
+        _job_id=f"conciliacao_sincronizar_loja:{loja.integration_id}",
     )
     return {
-        "conta": conta,
-        "relatorios": relatorios,
-        "pronto": pronto,
-        "resumo": resumo,
-        "chamadas": chamadas,
+        "conta": loja.conta,
+        "job_id": job.job_id if job else None,
+        "enfileirado": job is not None,
     }

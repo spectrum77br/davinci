@@ -226,13 +226,15 @@ async def test_pedir_extrato_cria_config_se_nao_existe_e_pede_o_periodo(
             for c in router.calls
             if c.request.method == "POST" and c.request.url.path == "/v1/account/release_report"
         ]
+        configs = [
+            c
+            for c in router.calls
+            if c.request.method == "POST"
+            and c.request.url.path == "/v1/account/release_report/config"
+        ]
     assert r.status_code == 200, r.text
     corpo = r.json()
-    assert [c["nome"] for c in corpo["chamadas"]] == [
-        "mp_extrato_config_antes",
-        "mp_extrato_config_criar",
-        "mp_extrato_pedir",
-    ]
+    assert corpo["config"]["status"] == "criada" and len(configs) == 1
     # 01/10 00:00 BRT → 03:00Z; 14/10 23:59:59 BRT → 15/10 02:59:59Z
     assert corpo["periodo"] == {
         "begin_date": "2026-10-01T03:00:00Z",
@@ -241,6 +243,7 @@ async def test_pedir_extrato_cria_config_se_nao_existe_e_pede_o_periodo(
     import json
 
     assert json.loads(pedido[0].request.content) == corpo["periodo"]
+    assert corpo["pedido"]["ok"] is True
     assert CHAVE not in r.text
 
 
@@ -265,15 +268,15 @@ async def test_ler_extrato_resume_o_arquivo_pronto(db, make_user, auth_as, clien
     assert resumo["total_linhas"] == 4
     assert resumo["por_tipo"]["payment"] == {
         "linhas": 2,
-        "credito": 147.48,
-        "debito": 1843.2,
+        "credito": "147.48",
+        "debito": "1843.20",
         "com_pedido": 1,
         "sem_pedido": 1,
     }
     assert resumo["por_tipo"]["payout"]["sem_pedido"] == 1
     assert resumo["por_tipo"]["refund"]["com_pedido"] == 1
     assert resumo["com_pedido"] == 2 and resumo["sem_pedido"] == 2
-    assert resumo["credito_total"] == 147.48 and resumo["debito_total"] == 7951.18
+    assert resumo["credito_total"] == "147.48" and resumo["debito_total"] == "7951.18"
     assert resumo["saldo_ultima_linha"] == "4541.97"
     assert resumo["amostra_por_tipo"]["payout"][0]["DESCRIPTION"] == "payout"
 
@@ -290,7 +293,7 @@ async def test_ler_extrato_sem_arquivo_pronto(db, make_user, auth_as, client):
 
 
 def test_dividir_linha_mp_tolera_json_sem_escape():
-    from app.routers.conciliacao import dividir_linha_mp, ler_csv_mp
+    from app.services.conciliacao_mp_csv import dividir_linha_mp, ler_csv_mp
 
     cab = "A,B,METADATA,TAGS,BALANCE_AMOUNT,SALE_DETAIL,Z"
     linha = (
