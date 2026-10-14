@@ -292,3 +292,29 @@ Soma = `sales_info.sale_fee.net` (183,05; `gross` 186,91 e `rebate` 3,86 = desco
 - **Pagamentos da fatura** do mês fechado: 6 pagamentos. A fatura do ML é paga por **débito automático na conta Mercado Pago** (`payment_type = collections_forced` "Débito automático por fatura vencida", `payment_method = account_money`, ex.: R$ 2.268,55 em 29/09 07:56, id `000g6i7t62`) e tem **nota de crédito** (`CREDIT_NOTE` "Estorno", R$ 702,63, "em processo de faturamento"). Esse é o débito "sem pedido" que vai aparecer no extrato e que o painel casa pela fatura.
 
 **Conclusão da sondagem:** tudo que o desenho precisa do lado do ML já responde com a chave atual. Do lado do Mercado Pago, a porta abre; pra ver as linhas do extrato faltam duas escritas de configuração na conta da loja: criar a configuração do Relatório de liberações (colunas, fuso, separador) e pedir um relatório de um período (ex.: 01/10→14/10). A loja nunca gerou relatório por API nem pelo painel (lista vazia), então não há rotina manual pra atrapalhar.
+
+### Extrato real da jlas2 (Relatório de liberações, 01/10 → 14/10, lido 14/10 18:38)
+
+Com o OK do Vinicius, a configuração do relatório foi criada na conta (36 colunas, fuso GMT-03, sem agendamento) e um relatório do período foi pedido: ficou pronto em menos de 2 minutos. **422 linhas**: 1 saldo inicial, 420 movimentos (`release`), 1 total.
+
+| Tipo (`DESCRIPTION`) | Linhas | Crédito | Débito | Com nº de pedido |
+|---|---|---|---|---|
+| `payment` — venda liberada | 95 | 68.330,63 | — | 95 de 95 |
+| `mediation` — reclamação perdida, valor devolvido ao comprador | 77 | — | 46.623,76 | 77 de 77 |
+| `refund` — **tarifas devolvidas** quando a venda cai (crédito) | 47 | 9.609,84 | — | 47 de 47 |
+| `reserve_for_dispute` — reserva por reclamação (débito ao abrir, crédito ao fechar) | 162 | 50.734,75 | 49.538,56 | 162 de 162 |
+| `reserve_for_bpp_shipping_return` — reserva do frete de devolução | 7 | 808,43 | 146,70 | 7 de 7 |
+| `reserve_for_refund` / `mediation_cancel` | 4 / 2 | 97,80 / 97,80 | 97,80 / — | todos |
+| `shipping` — crédito de frete | 2 | 65,98 | — | 2 de 2 |
+| `reserve_for_payout` — reserva antes do saque (débito e crédito) | 16 | 39.895,00 | 39.895,00 | nenhum (não é de pedido) |
+| `payout` — **saque pra conta bancária** | 8 | — | 39.895,00 | nenhum |
+
+**Prova dos nove fecha:** 9.147,81 (saldo inicial) + 68.330,63 − 46.623,76 + 9.609,84 + 1.196,19 (reservas liberadas) + 661,73 + 97,80 + 65,98 − 39.895,00 = **2.591,22** = o líquido que a linha `total` do relatório traz. É exatamente a conta do rodapé da tela "Extrato do dia".
+
+**O que uma linha de venda traz:** `payment` de 880,98 (cartão 10×): `MP_FEE_AMOUNT` −92,36 (custo por vender + custo por cobrar), `FINANCING_FEE_AMOUNT` −115,64 (taxa de parcelamento), `SHIPPING_FEE_AMOUNT` −62,33 (frete) → `NET_CREDIT_AMOUNT` **610,65**. Bate com os três pedaços da fatura (CVVML + CVVPRC = MP_FEE; CVVFN = FINANCING_FEE; CDSB = SHIPPING_FEE). `SOURCE_ID` = id do pagamento, `EXTERNAL_REFERENCE` = nº da venda, `ORDER_ID` e `PACK_ID` preenchidos (pack presente nas vendas de carrinho), `SHIPPING_ID`, parcelas e meio de pagamento.
+
+**Como uma reclamação perdida aparece:** no mesmo pagamento, `mediation` (débito do valor cheio, ex.: −732,35) e, 5 segundos depois, `refund` (crédito das tarifas: +92,36 de tarifa +24,45 de frete = 116,81). Ou seja, perder a mediação devolve a loja a zero naquela venda: sai o bruto, voltam as tarifas. A reserva (`reserve_for_dispute`) entra como débito quando a reclamação abre e volta como crédito quando fecha — não é dinheiro perdido, é dinheiro travado.
+
+**Atenção pro desenho:** a coluna `METADATA` traz um JSON com vírgulas (`payments_group_uuid`, `fee_discount`); sem aspas na célula, as colunas depois dela (`BALANCE_AMOUNT`, `ITEM_ID`, `PRODUCT_SKU`, `SALE_DETAIL`…) deslocam. Os valores, o nº do pedido e o pack vêm ANTES da `METADATA`, então os totais acima não são afetados. A confirmar na linha crua se é falta de aspas (solução: separador `;` na configuração) ou outro formato.
+
+**Leitura do negócio:** em duas semanas a jlas2 liberou R$ 68,3 mil de vendas e perdeu R$ 46,6 mil em mediações — o painel vai expor isso pedido a pedido no primeiro dia.
