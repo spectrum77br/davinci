@@ -1419,7 +1419,17 @@ async def _sincronizar_pos_venda(
             # Só agora a página conta como lida (ver `_varrer_pedidos`).
             canal.cursor = {**(canal.cursor or {}), "varredura_offset": novo_offset}
 
-    await _zerar_nao_lidas(session, canal, CANAL_POS_VENDA, set(nao_lidos))
+    # O não lido de agora em TODO pack gravado (14/10/2026, o "Falta
+    # responder" igual ao Duoke): o da lista fica com o número dela — também o
+    # que passou do teto de leituras desta rodada —, e quem saiu da lista (lido
+    # no Duoke) zera. Lista que falhou não chega aqui (a rodada já parou).
+    await gravar.aplicar_nao_lidas(
+        session,
+        integration_id=canal.integration_id,
+        canal_nome=CANAL_POS_VENDA,
+        contagens={pack: max(1, count) for pack, (_, count) in nao_lidos.items()},
+        completa=True,
+    )
     if cota is not None:
         # O que sobrou da cota: o retrato do pedido de quem ficou sem.
         await enriquecer.enriquecer_canal(session, canal, integration, cliente, cota)

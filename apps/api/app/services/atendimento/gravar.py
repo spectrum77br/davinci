@@ -20,7 +20,9 @@ coisas que ninguém pode esquecer ficam num lugar só:
    mensagem e para o alerta de prazo ter uma coluna só para olhar. Mensagem
    automática (`constantes.e_mensagem_automatica`) não é resposta: não fecha
    a vez do comprador (menos no turno em que ele só mandou cartão) nem
-   aposenta a sugestão da IA.
+   aposenta a sugestão da IA. O "Falta responder" da Caixa (igual ao Duoke,
+   14/10/2026) é OUTRA régua (`pendente.py`): lá qualquer mensagem da loja
+   conta — por isso a `ultima_loja_qualquer_em`, derivada aqui também.
 
 4. A ORDEM DAS TRAVAS — quem muda mensagem trava a CONVERSA antes (sync,
    envio e a tela). Com a mesma ordem em todo lugar, o sync que adota a
@@ -51,7 +53,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
-from sqlalchemy import and_, case, false, func, inspect, or_, select, text
+from sqlalchemy import and_, case, false, func, inspect, or_, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -651,6 +653,62 @@ async def upsert_conversa(
     return conversa, False
 
 
+async def aplicar_nao_lidas(
+    session: AsyncSession,
+    *,
+    integration_id,
+    canal_nome: str,
+    contagens: dict[str, int],
+    completa: bool,
+) -> int:
+    """O NÃO LIDO fresco da plataforma (14/10/2026) → quantas conversas mudaram.
+
+    O `nao_lidas` de cada conversa só andava quando chegava mensagem nova: a
+    equipe abria a conversa no Duoke (a plataforma zera o não lido) e o
+    DaVinci continuava achando que estava não lida. O adaptador lê o não lido
+    de agora (barato, SÓ LEITURA, nunca marca nada como lido) e passa aqui:
+
+      `contagens` — {id externo: não lidas} do que a plataforma MOSTROU: vale
+                    o número dela (0 inclusive). Id que não temos fica de fora
+                    (não cria conversa).
+      `completa`  — a plataforma mostrou TUDO o que está não lido: a conversa
+                    deste canal com não lida que não veio zera. Lista cortada
+                    (teto de páginas) não zera ninguém.
+
+    Só mexe em `nao_lidas` (a fila, a etiqueta e a IA não dependem dele); um
+    UPDATE só por valor, que pula quem já está certo — e acerta a conversa
+    que já está carregada na sessão (`fetch`: a sessão não expira no commit,
+    e um retrato velho esconderia a próxima mudança). Nunca commita.
+    """
+    if integration_id is None:
+        return 0
+    c = AtendimentoConversa
+    do_canal = and_(c.integration_id == integration_id, c.canal == canal_nome)
+    mudaram = 0
+    por_valor: dict[int, list[str]] = {}
+    for externo, n in contagens.items():
+        if externo:
+            por_valor.setdefault(max(0, int(n)), []).append(_cabe(str(externo), 191))
+    for n, ids in sorted(por_valor.items()):
+        r = await session.execute(
+            update(c)
+            .where(do_canal, c.externo_id.in_(ids), c.nao_lidas != n)
+            .values(nao_lidas=n)
+            .execution_options(synchronize_session="fetch")
+        )
+        mudaram += r.rowcount or 0
+    if completa:
+        vistos = [i for ids in por_valor.values() for i in ids]
+        zerar = update(c).where(do_canal, c.nao_lidas > 0)
+        if vistos:
+            zerar = zerar.where(c.externo_id.notin_(vistos))
+        r = await session.execute(
+            zerar.values(nao_lidas=0).execution_options(synchronize_session="fetch")
+        )
+        mudaram += r.rowcount or 0
+    return mudaram
+
+
 # ── Mensagem ──────────────────────────────────────────────────────────────
 
 
@@ -1074,7 +1132,9 @@ def recalcular(
     TikTok), a figurinha 0007 da campanha e os cartões `server`/`crm` da
     Shopee (pelo `payload`) e a senha da devolução que o DaVinci manda
     sozinho. Ela continua sendo a última mensagem da lista; só não fecha a
-    vez do comprador.
+    vez do comprador. Mas conta na `ultima_loja_qualquer_em` (14/10/2026):
+    no "Falta responder" igual ao Duoke (`pendente.py`), qualquer mensagem da
+    loja depois do comprador é resposta.
 
     TURNO SÓ DE CARTÃO (05/10/2026, `constantes.e_cartao_do_comprador`): se,
     desde a última resposta de pessoa, o comprador só mandou o cartão do
@@ -1098,19 +1158,20 @@ def recalcular(
             atual = _utc(conversa.ultima_do_cliente_em)
             if atual is None or quando > atual:
                 conversa.ultima_do_cliente_em = quando
-        elif (
-            m.autor == AUTOR_LOJA
-            and m.status != MSG_FALHOU
-            # A mensagem automática não responde o comprador (menos a que
-            # fecha o turno só de cartão).
-            and (
-                not e_mensagem_automatica(m.texto, getattr(m, "payload", None))
-                or any(m is f for f in fecham)
-            )
-        ):
-            atual = _utc(conversa.ultima_da_loja_em)
+        elif m.autor == AUTOR_LOJA and m.status != MSG_FALHOU:
+            # Qualquer mensagem da loja — até a automática — é o lado da loja
+            # do "Falta responder" igual ao Duoke (`pendente.py`, 14/10/2026).
+            atual = _utc(conversa.ultima_loja_qualquer_em)
             if atual is None or quando > atual:
-                conversa.ultima_da_loja_em = quando
+                conversa.ultima_loja_qualquer_em = quando
+            # A mensagem automática não responde o comprador na FILA (menos a
+            # que fecha o turno só de cartão).
+            if not e_mensagem_automatica(m.texto, getattr(m, "payload", None)) or any(
+                m is f for f in fecham
+            ):
+                atual = _utc(conversa.ultima_da_loja_em)
+                if atual is None or quando > atual:
+                    conversa.ultima_da_loja_em = quando
     _derivar(conversa)
 
 
@@ -1191,6 +1252,14 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
     do_cliente = await _uma(
         base.where(AtendimentoMensagem.autor == AUTOR_CLIENTE).order_by(momento.desc())
     )
+    # A última da loja de QUALQUER tipo (até a automática; a que falhou não
+    # saiu): a `ultima_loja_qualquer_em` do "Falta responder" igual ao Duoke.
+    da_loja_qualquer = await _uma(
+        base.where(
+            AtendimentoMensagem.autor == AUTOR_LOJA,
+            AtendimentoMensagem.status != MSG_FALHOU,
+        ).order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
+    )
     # A última resposta da loja que NÃO é mensagem automática — no próprio
     # SQL (`mensagem_automatica_sql`, a gêmea do Python que o `recalcular`
     # usa): a figurinha da campanha e os cartões da Shopee chegam em fileira,
@@ -1233,10 +1302,13 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
     conversa.ultima_autor = None
     conversa.ultima_do_cliente_em = None
     conversa.ultima_da_loja_em = None
-    # A última por último: em empate de horário, é ela que dá o resumo.
+    conversa.ultima_loja_qualquer_em = None
+    # A última por último: em empate de horário, é ela que dá o resumo. A da
+    # loja de qualquer tipo, se for automática, não fecha a vez (não está em
+    # `fecham_a_vez`, a menos que seja a mesma do turno só de cartão).
     recalcular(
         conversa,
-        [m for m in (do_cliente, da_loja, so_cartao, ultima) if m is not None],
+        [m for m in (do_cliente, da_loja, da_loja_qualquer, so_cartao, ultima) if m is not None],
         fecham_a_vez=() if so_cartao is None else (so_cartao,),
     )
     if da_loja is not None:

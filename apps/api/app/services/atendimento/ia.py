@@ -170,11 +170,14 @@ Parte 2 (28/09/2026):
   pedido), os FATOS levam o bloco "ficha_do_anuncio" (`ficha.py`): título
   ATUAL, atributos e a descrição LIMPA — a ficha fresca que a loja devolveu
   ao enriquecimento do cartão (Redis); senão o nosso catálogo (`listings`)
-  importado há até 30 dias e com o mesmo título; senão o mesmo produto em
-  outro anúncio (`product_links`) —, até 2 anúncios e 2.500 caracteres. Vai
-  na MENSAGEM, fora do orçamento do prompt de sistema (não tira correção nem
-  regra) e fora da classificação. No automático, a resposta de dado do
-  produto com a ficha vai para pessoa (`MOTIVO_FICHA_NO_AUTOMATICO`).
+  importado há até 30 dias e com o mesmo título; senão a LOJA, buscada na
+  hora (`ficha_loja.py`: Shopee, ML, TikTok; 6 s por anúncio, cota por
+  rodada — "se necessário acessa o produto na loja", o dono); senão o mesmo
+  produto em outro anúncio (`product_links`) —, até 2 anúncios e 2.500
+  caracteres. Vai na MENSAGEM, fora do orçamento do prompt de sistema (não
+  tira correção nem regra) e fora da classificação. No automático, a
+  resposta de dado do produto com a ficha vai para pessoa
+  (`MOTIVO_FICHA_NO_AUTOMATICO`).
 
   PROVEDOR (28/09). Dois caminhos, escolhidos só pelo `.env`
   (`escolher_provedor`): o Groq — ou qualquer API compatível com a da
@@ -239,7 +242,7 @@ from app.redis_client import redis
 from app.services import dm_ia
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ficha as ficha_svc
-from app.services.atendimento import gravar, separa_email, validador
+from app.services.atendimento import ficha_loja, gravar, separa_email, validador
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.ag_cancelamento import TEXTOS_IA
 from app.services.atendimento.constantes import (
@@ -3868,8 +3871,9 @@ async def _gerar(
     )
 
     # A ficha do anúncio (14/10/2026, o dono: "busca a ficha caso seja
-    # linkado com algum produto"): título, atributos e descrição LIMPA do
-    # catálogo, dos anúncios ligados à conversa (`ficha.py`). Na mensagem
+    # linkado com algum produto"): título, atributos e descrição LIMPA da
+    # loja ou do catálogo, dos anúncios ligados à conversa (`ficha.py`; sem
+    # ficha guardada, vai à loja: `ficha_loja.py`, nunca derruba). Na mensagem
     # (FATOS), com teto próprio — fora do orçamento do prompt de sistema, não
     # tira correção nem regra; e fora da classificação, que não precisa dela.
     # Os números dela passam a valer na conferência (`permitidos`, abaixo).
@@ -4465,7 +4469,9 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
         logger.info("atendimento_ia_rodada_ocupada")
         return 0
     try:
-        geradas = await _gerar_pendentes(session, limite=limite, modos=modos)
+        # A cota da rodada para buscar a ficha do anúncio na loja (`ficha_loja.py`).
+        with ficha_loja.rodada():
+            geradas = await _gerar_pendentes(session, limite=limite, modos=modos)
         if MODO_AUTO in modos:
             await reenviar_pendentes(session)
         return geradas

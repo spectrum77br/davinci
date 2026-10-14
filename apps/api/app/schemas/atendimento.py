@@ -161,6 +161,13 @@ class ConversaResumoOut(BaseModel):
     prazo_resposta_em: datetime | None = None
     situacao: str
     nao_lidas: int = 0
+    # No "Falta responder" da Caixa, IGUAL AO DUOKE (14/10/2026,
+    # `services/atendimento/pendente.py`): o comprador por último (qualquer
+    # mensagem da loja responde, até a automática) ou não lida no chat da
+    # Shopee/TikTok; onde a plataforma diz de quem é a vez, a fila. A tela
+    # marca a linha (negrito, bolinha) por ele. A fila de verdade (a IA, o
+    # prazo) continua `aguardando_resposta`.
+    falta_responder: bool = False
     # Mensagens do comprador desde a última resposta de verdade (a bolinha).
     pendentes: int = 0
     tem_rascunho: bool = False

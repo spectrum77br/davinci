@@ -287,7 +287,10 @@ async def test_menu_filtrar_e_bolinha_de_pendentes(client, db, make_user, pessoa
         return _ids(resposta)
 
     assert await filtro("automatica") == [ids["auto"]]
-    assert ids["auto"] in await filtro("aguardando")
+    # Desde 14/10/2026 o "Falta responder" é o do Duoke (`pendente.py`): a
+    # resposta automática responde — e a conversa não está não lida. A FILA
+    # continua esperando (o filtro "automatica" acima é dela).
+    assert ids["auto"] not in await filtro("aguardando")
     assert await filtro("pre_venda") == [
         ids["auto"], ids["respondida"], ids["aguardando"], ids["vencendo"]
     ]
