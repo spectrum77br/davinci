@@ -703,8 +703,11 @@ async def _cliente_bling(session: AsyncSession):
     Com `integration_id`: se o token vencer no meio, a renovação é gravada
     pelo próprio cliente numa sessão independente (`_persist_bling_creds`) —
     o Bling invalida o refresh token velho, e perder o novo trancaria a conta.
+    E blindada (`clientes.blindar_renovacao`): o teto de
+    `OBSERVACOES_TEMPO_MAXIMO_S` corta o GET, nunca a renovação no meio.
     """
     from app.security.cipher import decrypt_json
+    from app.services.atendimento.clientes import blindar_renovacao
     from app.services.marketplaces.bling import BlingClient
 
     integ = (
@@ -719,7 +722,9 @@ async def _cliente_bling(session: AsyncSession):
     ).scalar_one_or_none()
     if integ is None:
         return None
-    return BlingClient(decrypt_json(integ.credentials), integration_id=integ.id)
+    cliente = BlingClient(decrypt_json(integ.credentials), integration_id=integ.id)
+    blindar_renovacao(cliente, integ.id)
+    return cliente
 
 
 async def _ler_cache_obs(chave: str) -> dict | None:

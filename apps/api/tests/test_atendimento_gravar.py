@@ -9,11 +9,13 @@ Amazon) e o envio vão TOMAR COMO CERTAS:
 - resposta dada fora do DaVinci é `externo` e aposenta o rascunho da IA;
 - a fila (aguardando/prazo/situação) sai certa para cada plataforma;
 - as duas travas do banco (envio em voo, rascunho pendente) seguram;
-- o token renovado sobrevive ao rollback de quem chamou, e só um renova.
+- o token renovado sobrevive ao rollback de quem chamou, e só um renova;
+- o teto de tempo de quem chama nunca corta a renovação no meio.
 """
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -32,6 +34,7 @@ from app.models import (
     IntegrationPlatform,
     User,
 )
+from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.atendimento import clientes, gravar
 from app.services.atendimento.constantes import (
@@ -851,6 +854,136 @@ async def test_pegou_a_trava_mas_o_banco_ja_tem_token_novo(
     await cliente.refresh()
     assert cliente_falso[0].renovacoes == 0
     assert cliente.creds["refresh_token"] == "rt-2"
+
+
+# ─────────────── clientes: a renovação nunca é cortada no meio (14/10) ───────────────
+
+
+class _ClienteLento(_ClienteFalso):
+    """A plataforma ACEITA o refresh token (o velho morre ali) e a resposta demora."""
+
+    def __init__(self, creds, on_token_refresh=None, integration_id=None):
+        super().__init__(creds, on_token_refresh, integration_id)
+        self.gastos: list[str] = []
+        self.chegou = asyncio.Event()
+        self.libera = asyncio.Event()
+        self.falha: Exception | None = None
+
+    async def refresh(self) -> None:
+        self.gastos.append(self.creds.get("refresh_token"))  # morreu na plataforma
+        self.chegou.set()
+        await self.libera.wait()
+        if self.falha is not None:
+            raise self.falha
+        await super().refresh()
+
+
+@pytest.fixture
+def cliente_lento(monkeypatch):
+    feitos: list[_ClienteLento] = []
+
+    def _client_for(platform, creds, on_token_refresh=None, integration_id=None):
+        c = _ClienteLento(creds, on_token_refresh, integration_id)
+        feitos.append(c)
+        return c
+
+    monkeypatch.setattr(factory, "client_for", _client_for)
+    return feitos
+
+
+async def _esperar_renovacoes(segundos: float = 20.0) -> None:
+    """Espera as renovações que seguiram sozinhas (blindadas) acabarem."""
+    fim = asyncio.get_running_loop().time() + segundos
+    while clientes._RENOVACOES_EM_SEGUNDO_PLANO and asyncio.get_running_loop().time() < fim:
+        await asyncio.gather(*list(clientes._RENOVACOES_EM_SEGUNDO_PLANO), return_exceptions=True)
+    assert not clientes._RENOVACOES_EM_SEGUNDO_PLANO
+
+
+async def test_teto_de_quem_chama_nao_corta_a_renovacao_no_meio(
+    db: AsyncSession, make_user, cliente_lento
+):
+    """O `wait_for` do envio (ou o timeout do job) estoura com a renovação no
+    meio: a plataforma já aceitou o refresh token de USO ÚNICO. Quem esperava
+    é cortado na hora, mas a renovação segue sozinha até gravar o token novo
+    no banco — e quem precisa da loja nesse meio tempo espera a trava e relê,
+    sem gastar o refresh token velho de novo. Trava de verdade (Redis)."""
+    user = await make_user()
+    integ = await _integ(db, user)
+    cliente = await clientes.cliente_da_integracao(integ)
+    lento = cliente_lento[0]
+    espera: asyncio.Future | None = None
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(cliente.chamada(), timeout=0.3)
+        assert lento.chegou.is_set() and lento.gastos == ["rt-velho"]
+        # Ainda renovando: segue em segundo plano, com a trava da loja pega.
+        assert clientes._RENOVACOES_EM_SEGUNDO_PLANO
+        assert await redis.exists(f"token_refresh_lock:{integ.id}")
+        creds, _ = await _creds_no_banco(integ.id)
+        assert creds["refresh_token"] == "rt-velho"
+
+        # A rodada seguinte (outra aba, o sync) monta o cliente com o token
+        # velho do banco e precisa renovar: espera a trava, não gasta o velho.
+        outro = await clientes.cliente_da_integracao(integ)
+        espera = asyncio.ensure_future(outro.refresh())
+        await asyncio.sleep(0.2)
+        assert not espera.done()
+    finally:
+        for c in cliente_lento:
+            c.libera.set()
+    assert espera is not None
+    await asyncio.wait_for(espera, timeout=20)
+    await _esperar_renovacoes()
+
+    creds, expira = await _creds_no_banco(integ.id)
+    assert creds["access_token"] == "novo-1"
+    assert creds["refresh_token"] == "rt-novo-1"  # o novo chegou ao banco
+    assert expira == datetime.fromtimestamp(2_000_000_000, tz=UTC)
+    assert lento.creds["refresh_token"] == "rt-novo-1"  # e ao cliente que pediu
+    assert outro.creds["refresh_token"] == "rt-novo-1"  # o outro relê o do banco
+    assert [c.gastos for c in cliente_lento] == [["rt-velho"], []]  # gasto UMA vez
+    assert not await redis.exists(f"token_refresh_lock:{integ.id}")
+
+
+async def test_renovacao_que_falha_sozinha_solta_a_trava_e_nao_grava(
+    db: AsyncSession, make_user, cliente_lento
+):
+    """A plataforma recusou depois que quem esperava já tinha sido cortado:
+    nada é gravado (o banco fica com o que tinha) e a trava solta."""
+    user = await make_user()
+    integ = await _integ(db, user)
+    cliente = await clientes.cliente_da_integracao(integ)
+    lento = cliente_lento[0]
+    lento.falha = RuntimeError("shopee_refresh error_auth")
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(cliente.chamada(), timeout=0.3)
+    finally:
+        lento.libera.set()
+    await _esperar_renovacoes()
+    creds, _ = await _creds_no_banco(integ.id)
+    assert creds["refresh_token"] == "rt-velho"
+    assert not await redis.exists(f"token_refresh_lock:{integ.id}")
+
+
+async def test_blindagem_cobre_todos_os_clientes_e_nao_embrulha_duas_vezes(
+    db: AsyncSession, make_user, cliente_falso
+):
+    user = await make_user()
+    integ = await _integ(db, user)
+    cliente = await clientes.cliente_da_integracao(integ)
+    blindado = cliente.refresh
+    assert blindado._blindado is True
+    # Por fora da trava da loja: a blindagem cobre a trava, a releitura e o commit.
+    assert blindado.__wrapped__.__name__ == "refresh_com_trava"
+    clientes.blindar_renovacao(cliente, integ.id)
+    assert cliente.refresh is blindado
+    # Sem `refresh` (cliente que não renova): nada a blindar.
+    sem = object()
+    clientes.blindar_renovacao(sem, integ.id)
+    # E sem cancelamento é a renovação de sempre (o mesmo resultado, a mesma trava).
+    assert await cliente.chamada() == "novo-1"
+    assert cliente_falso[0].renovacoes == 1
 
 
 async def test_expiracao_em_varios_formatos():
