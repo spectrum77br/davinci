@@ -394,6 +394,38 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
+    # Vinicius, 14/10/2026: "100% dos pedidos estão com nota cheia, isso que
+    # preciso saber" — uma ocorrência por DIA de envio, não por pedido.
+    "vigia_nota_cheia": RoboDef(
+        chave="vigia_nota_cheia",
+        nome="Vigia de Nota Cheia",
+        descricao=(
+            "Pedido enviado sem a nota cheia (coluna NF produto do painel Notas "
+            "fiscais), de toda conta com faturador na tela Lojas. Confere os "
+            "envios de cada dia às 07:00 do dia seguinte (etiqueta depois das "
+            "22h é do dia seguinte) e abre UMA ocorrência por dia com a lista "
+            "por conta; o número baixa de hora em hora e fecha sozinho quando "
+            "todos têm nota."
+        ),
+        area="pedidos",
+        cadencia_texto="a cada 1 h (:08)",
+        plataformas=("ml", "shopee", "tiktok", "amazon", "magalu", "shein", "temu", "aliexpress"),
+        config_padrao={
+            "cadencia_min": 60,
+            "hora_conferencia": 7,
+            "corte_hora": 22,
+            "janela_dias": 7,
+        },
+        env_threema_recipients=None,
+        contexto="estoque",
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "hora_conferencia": Parametro("Conferir às (dia seguinte)", 0, 23, "h"),
+            "corte_hora": Parametro("Etiqueta depois de (vai pro dia seguinte)", 12, 23, "h"),
+            "janela_dias": Parametro("Olhar envios dos últimos", 1, 30, "dias"),
+        },
+        modo_padrao="silencioso",
+    ),
 }
 
 # Threema ID: 8 caracteres (A-Z, 0-9); ID de gateway começa com "*".

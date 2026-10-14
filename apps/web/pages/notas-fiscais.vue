@@ -49,8 +49,12 @@ type PosVendasPage = { items: PosVendaRow[]; total: number }
 const { api } = useApi()
 
 // ---- carga (server: range de datas do ENVIO; máx. 62 dias) ----
-const dateFrom = ref(isoDaysAgo(7))
-const dateTo = ref(isoToday())
+// O link do Vigia de Nota Cheia (Ouvidoria) abre já no dia e no filtro:
+// ?de=AAAA-MM-DD&ate=AAAA-MM-DD&nf=sem_produto.
+const route = useRoute()
+const queryData = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null)
+const dateFrom = ref(queryData(route.query.de) ?? isoDaysAgo(7))
+const dateTo = ref(queryData(route.query.ate) ?? isoToday())
 const rows = ref<PosVendaRow[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -85,7 +89,8 @@ watch([dateFrom, dateTo], carregar)
 // ---- filtros client-side (padrão das outras telas) ----
 const search = ref('')
 const lojaFilter = ref('all')
-const nfFilter = ref('all')
+const NF_FILTROS = ['all', 'sem_embalagem', 'sem_produto', 'sem_nf', 'completas']
+const nfFilter = ref(NF_FILTROS.includes(String(route.query.nf)) ? String(route.query.nf) : 'all')
 
 const lojas = computed(() =>
   Array.from(new Set(rows.value.map((r) => r.loja).filter(Boolean) as string[])).sort(),

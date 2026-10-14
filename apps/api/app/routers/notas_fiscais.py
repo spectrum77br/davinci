@@ -826,7 +826,16 @@ async def list_pos_vendas(
                 "message": f"período máximo de {MAX_POS_VENDAS_DAYS} dias",
             },
         )
+    items = await montar_pos_vendas(session, date_from, date_to)
+    return PosVendasPage(items=items, total=len(items))
 
+
+async def montar_pos_vendas(
+    session: AsyncSession, date_from: date, date_to: date
+) -> list[PosVendaRowOut]:
+    """As linhas do Pós Vendas (pedidos enviados no período + as duas notas
+    casadas). Fora da rota porque o Vigia de Nota Cheia (Ouvidoria) confere
+    exatamente o que esta tela mostra."""
     bo = BlingOrder
     pedidos_rows = (
         await session.execute(
@@ -1026,7 +1035,7 @@ async def list_pos_vendas(
             )
         )
     items.sort(key=lambda i: i.data_envio or "", reverse=True)
-    return PosVendasPage(items=items, total=len(items))
+    return items
 
 
 @router.get("/pos-vendas/nota/{nota_id}/xml")

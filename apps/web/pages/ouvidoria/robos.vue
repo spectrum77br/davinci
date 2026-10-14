@@ -971,6 +971,8 @@ function linkInfo(link: string | null): { label: string; interno: boolean } | nu
     if (l.startsWith('/chamados')) return { label: 'Chamados', interno: true }
     if (l.startsWith('/margem')) return { label: 'Margem', interno: true }
     if (l.startsWith('/logistica')) return { label: 'Logística', interno: true }
+    if (l.startsWith('/notas-fiscais')) return { label: 'Notas fiscais', interno: true }
+    if (l.startsWith('/nf-faturamento')) return { label: 'Faturamento NF', interno: true }
     return { label: 'Abrir', interno: true }
   }
   if (l.includes('bling.com')) return { label: 'Abrir no Bling', interno: false }

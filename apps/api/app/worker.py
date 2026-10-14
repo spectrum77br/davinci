@@ -3910,6 +3910,27 @@ async def vigia_etiquetas_tick(ctx: dict) -> None:
         logger.exception("vigia_etiquetas_unhandled")
 
 
+async def vigia_nota_cheia_tick(ctx: dict) -> None:
+    """Vigia de Nota Cheia (robô da Ouvidoria): pedido enviado sem a NF
+    produto (nota cheia) no painel Notas fiscais — uma ocorrência por dia de
+    envio, cobrada às 07:00 do dia seguinte."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_nota_cheia")
+        if modo == "desligado":
+            logger.debug("vigia_nota_cheia_desligado")
+            return
+        from app.services.vigia_nota_cheia import vigia_nota_cheia_sweep
+
+        summary = await vigia_nota_cheia_sweep() or {}
+        if any(summary.get(k) for k in ("novas", "sumiram", "avisadas")):
+            logger.info("vigia_nota_cheia_done", **summary)
+        else:
+            logger.debug("vigia_nota_cheia_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_nota_cheia_unhandled")
+
+
 async def vigia_margem_tick(ctx: dict) -> None:
     """Robô da Margem (Ouvidoria), :15/:45 — desde 25/09/2026 o robô que age
     e o fiscal são um só: `vigia_margem_sweep` reconstrói o snapshot, o robô
@@ -4748,6 +4769,7 @@ class WorkerSettings:
         vigia_robo_melhorenvio_tick,
         vigia_robo_leitura_tick,
         vigia_etiquetas_tick,
+        vigia_nota_cheia_tick,
         # Atendimento unificado (25/09/2026). Em `functions` também para o
         # botão "Sincronizar" da tela poder enfileirar a leitura.
         func(atendimento_sincronizar, timeout=300),
@@ -5335,6 +5357,9 @@ class WorkerSettings:
             minute={1, 11, 21, 31, 41, 51},
             run_at_startup=False,
         ),
+        # Vigia de Nota Cheia: 1×/h em :08, 4 min depois do espelho das NF-e
+        # (pos_vendas_notas_sync em :04…) — a das 07:08 é a que cobra o dia.
+        cron(vigia_nota_cheia_tick, minute=8, run_at_startup=False, timeout=600),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As
         # contas bling_notas são apps OAuth próprios — rate independente do
         # app principal; o custo por rodada é 1-2 páginas de lista por conta

@@ -213,6 +213,12 @@ SEIS_ROBOS = {
                         ["ml", "shopee", "tiktok", "amazon", "magalu", "shein", "temu",
                          "aliexpress"],
                         {"cadencia_min": 10, "prazo_min": 90, "janela_dias": 7}),
+    # 14/10/2026: pedido enviado sem nota cheia — uma ocorrência por dia.
+    "vigia_nota_cheia": ("pedidos",
+                         ["ml", "shopee", "tiktok", "amazon", "magalu", "shein", "temu",
+                          "aliexpress"],
+                         {"cadencia_min": 60, "hora_conferencia": 7, "corte_hora": 22,
+                          "janela_dias": 7}),
 }
 
 
