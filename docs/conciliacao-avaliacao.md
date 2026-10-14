@@ -320,3 +320,13 @@ Com o OK do Vinicius, a configuração do relatório foi criada na conta (36 col
 **Leitura do negócio:** em duas semanas a jlas2 liberou R$ 68,3 mil de vendas e perdeu R$ 46,6 mil em mediações — o painel vai expor isso pedido a pedido no primeiro dia.
 
 **Linha crua conferida (14/10 18:52):** o arquivo é CSV com vírgula; as colunas de JSON (`METADATA` = `"{"fee_discount": "2.85", "device_id": …, "payments_group_uuid": …}"` e `OPERATION_TAGS` = `"[{"logistic_type":"drop_off"}]"`) vêm entre aspas **sem escapar as aspas de dentro** (CSV inválido); `SALE_DETAIL` vem no padrão (`"""título"""`). Solução adotada na sondagem: um divisor próprio que lê `"{…}"`/`"[…]"` até fechar o colchete — não depende de trocar o separador na conta. Outras colunas úteis vistas na linha de venda: `TRANSACTION_APPROVAL_DATE` (pago 11/09, liberado 01/10 = 20 dias), `SHIPMENT_MODE` me2, `ITEM_ID`, **`PRODUCT_SKU` = o SKU do anúncio (ex.: `dg057.ci+a001.ci`)**, `SALE_DETAIL` = título, `PAYMENT_METHOD_TYPE` credit_card, `BALANCE_AMOUNT` = saldo após a linha.
+
+**Passo 1 concluído (14/10, 19:00).** Com o leitor próprio, o arquivo inteiro lê certo: 422 linhas, saldo após cada linha correto (ex.: 611,46 depois da primeira venda liberada), `METADATA` e `PRODUCT_SKU` íntegros. Ficou na conta Mercado Pago da jlas2 a configuração `davinci-liberacoes` (sem agendamento) e um relatório de 01/10→14/10 na lista (aparece no painel do Mercado Pago em Relatórios › Liberações). Nada foi gravado no DaVinci.
+
+**O que o passo 2 (painel v1) pode assumir como certo:**
+1. Extrato por API, sem conectar o Mercado Pago à parte; pedir um relatório por dia (ou por janela) e ler o CSV com o leitor próprio.
+2. Toda linha de venda, mediação, estorno de tarifa e reserva traz `ORDER_ID` (e `PACK_ID` no carrinho); saques não têm. Casamento com o Bling pelo `numeroloja`.
+3. Líquido da venda no extrato = `GROSS − MP_FEE − FINANCING_FEE − SHIPPING_FEE` (coupon à parte), e bate com a fatura (CVVML + CVVPRC, CVVFN, CDSB).
+4. Reclamação perdida = `mediation` (−bruto) + `refund` (+tarifas) no mesmo `SOURCE_ID`; reserva por disputa = par débito/crédito, dinheiro travado.
+5. Fatura do ML por período: 1 página de 1.000 por chamada, no máximo 5 chamadas por minuto; bonificações com `detail_type=BONUS`; período da loja vai do dia 23 ao 22.
+6. Prova dos nove: saldo inicial + créditos − débitos = líquido da linha `total` (2.591,22 no período lido).
