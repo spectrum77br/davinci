@@ -1036,6 +1036,11 @@ async def _cenario_auto(db, make_user, ia_ligada, modelo, **kw):
         )
     if kw.pop("externo_recente", False):
         await _msg(db, conversa, "respondido pelo Duoke", autor="loja", ha=timedelta(hours=2))
+    if kw.pop("externo_antigo", False):
+        await _msg(db, conversa, "respondido pelo Duoke", autor="loja", ha=timedelta(hours=25))
+    if kw.pop("atribuida", False):
+        conversa.atribuido_a = (await make_user()).id
+        await db.commit()
     await _msg(db, conversa, "cadê meu pedido?", ha=timedelta(minutes=5))
     modelo.saida = _saida(
         "Seu pedido foi enviado pela {transportadora}; o rastreio é {rastreio}.",
@@ -1075,8 +1080,10 @@ async def test_auto_envia_com_todas_as_condicoes(
         {"auto_categorias": []},
         {"confianca": 0.84},
         {"precisa_humano": True},
-        {"humano_recente": True},
+        # Pessoa POR FORA (Duoke/Seller Center) nas últimas 24 h: ainda cala.
         {"externo_recente": True},
+        # "Atribuir a mim" (14/10/2026): a pessoa assumiu — a IA só sugere.
+        {"atribuida": True},
     ],
 )
 async def test_auto_nao_envia_sem_alguma_condicao(
@@ -1088,6 +1095,20 @@ async def test_auto_nao_envia_sem_alguma_condicao(
 
     assert r is not None
     assert envios == []
+
+
+@pytest.mark.parametrize("antes", [{"humano_recente": True}, {"externo_antigo": True}])
+async def test_auto_envia_depois_de_pessoa_pelo_davinci_ou_de_fora_ha_mais_de_24h(
+    db: AsyncSession, make_user, ia_ligada, modelo, envios, antes
+):
+    """14/10/2026 ("ela pode ser o atendente"): a resposta de pessoa PELO
+    DAVINCI não cala mais a IA; a de fora cala só nas últimas 24 h."""
+    conversa = await _cenario_auto(db, make_user, ia_ligada, modelo, **antes)
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.status == RASCUNHO_PENDENTE and not r.precisa_humano
+    assert [e["origem"] for e in envios] == [ORIGEM_IA]
 
 
 async def test_auto_nao_envia_com_reclamacao_aberta_no_ml(

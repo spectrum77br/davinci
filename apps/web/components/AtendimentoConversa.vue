@@ -1475,7 +1475,8 @@ function atribuir() {
   if (!c || !props.meuId) return
   if (atribuidaAMim.value) return patch({ atribuido_a: null }, 'atribuir', 'Conversa solta — volta para a fila de todos')
   if (c.atribuido_a && !confirm(`Esta conversa está com ${c.atribuido_a_nome || 'outra pessoa'}. Assumir mesmo assim?`)) return
-  return patch({ atribuido_a: props.meuId }, 'atribuir', 'Conversa atribuída a você')
+  // Atribuída a alguém, a IA sugere mas não responde sozinha (14/10/2026).
+  return patch({ atribuido_a: props.meuId }, 'atribuir', 'Conversa atribuída a você — a IA não responde sozinha aqui')
 }
 function pausarIa() {
   const c = conversa.value
@@ -2356,7 +2357,7 @@ watch(() => props.conversaId, (novo, velho) => {
                   variant="outline"
                   class="h-7 px-2 text-xs"
                   :disabled="!!acao || !meuId"
-                  :title="atribuidaAMim ? 'soltar: a conversa volta para a fila de todos' : conversa.atribuido_a ? `está com ${conversa.atribuido_a_nome || 'outra pessoa'} — assumir` : 'atribuir a mim'"
+                  :title="atribuidaAMim ? 'soltar: a conversa volta para a fila de todos (e a IA pode voltar a responder sozinha)' : conversa.atribuido_a ? `está com ${conversa.atribuido_a_nome || 'outra pessoa'} — assumir` : 'atribuir a mim (a IA continua sugerindo, mas não responde sozinha)'"
                   :aria-label="atribuidaAMim ? 'soltar a conversa' : 'atribuir a mim'"
                   @click="atribuir"
                 >

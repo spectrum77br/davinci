@@ -736,6 +736,30 @@ async def test_ia_nao_envia_se_a_tela_tirou_a_conversa_dela_no_meio(
     assert await _mensagens_da_loja(db, conversa.id) == []
 
 
+async def test_ia_nao_envia_conversa_atribuida_a_uma_pessoa(
+    db, make_user, ligado, plataforma, monkeypatch
+):
+    """14/10/2026 ("ela pode ser o atendente"): "Atribuir a mim" é a pessoa
+    assumindo a conversa. Atribuída enquanto o modelo escrevia, o envio relê
+    sob a trava e recusa a IA; a pessoa continua respondendo normalmente."""
+    monkeypatch.setattr(get_settings(), "atendimento_auto_ativo", True)
+    conversa, user = await _cenario(db, make_user, modo="auto")
+    assert conversa.atribuido_a is None  # o objeto em memória é o velho
+    async with _db.SessionLocal() as tela:
+        c = await tela.get(AtendimentoConversa, conversa.id)
+        c.atribuido_a = user.id
+        await tela.commit()
+
+    e = await _recusa(enviar.enviar_resposta(db, conversa, "Olá!", user=None, origem="davinci_ia"))
+    assert e.code == "nao_aguarda"
+    assert "atribuída a uma pessoa" in e.detail
+    assert plataforma.chamadas == []
+    assert await _mensagens_da_loja(db, conversa.id) == []
+
+    m = await enviar.enviar_resposta(db, conversa, "Olá, vou verificar.", user=user)
+    assert m.status == "enviada"
+
+
 @pytest.mark.parametrize("mudanca", ["reclamacao", "amazon"])
 async def test_ia_nao_envia_com_reclamacao_aberta_nem_na_amazon(
     db, make_user, ligado, plataforma, monkeypatch, mudanca
@@ -798,6 +822,60 @@ async def test_ia_nao_responde_de_novo_a_pergunta_ja_respondida(
     )
     assert e.code == "nao_aguarda"
     assert plataforma.chamadas == ["Já saiu!"]
+
+
+MENU_DUOKE = (
+    "Olá, por favor selecione sua dúvida e logo um dos nossos consultores irá atendê-lo!\n\n"
+    "1 - Previsão de entrega / envio\n2 - Nota fiscal\n6 - Falar com Atendente"
+)
+
+
+@pytest.mark.parametrize(
+    "resposta_da_loja,sai",
+    [
+        (MENU_DUOKE, True),  # o menu do robô do Duoke não responde a pergunta
+        ("Oi! Já verifiquei, seu pedido sai amanhã.", False),  # pessoa por fora respondeu
+    ],
+)
+async def test_ia_so_para_se_a_loja_respondeu_de_verdade_depois_da_pergunta(
+    db, make_user, ligado, plataforma, monkeypatch, resposta_da_loja, sai
+):
+    """Piloto da Kia (14/10/2026): o robô do Duoke manda o menu segundos depois
+    de cada mensagem do comprador. Contando o menu como resposta, a conferência
+    do gatilho recusava TODO envio automático ("a conversa já foi respondida").
+    Mensagem automática não fecha a pergunta (a mesma régua da vez do
+    comprador); resposta de pessoa fecha."""
+    monkeypatch.setattr(get_settings(), "atendimento_auto_ativo", True)
+    conversa, _user = await _cenario(db, make_user, modo="auto")
+    gatilho = await db.scalar(
+        select(AtendimentoMensagem).where(AtendimentoMensagem.conversa_id == conversa.id)
+    )
+    await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id="loja-1",
+        autor="loja",
+        texto=resposta_da_loja,
+        enviada_em=T_CLIENTE + timedelta(seconds=20),
+    )
+    rascunho = AtendimentoRascunho(
+        conversa_id=conversa.id, mensagem_gatilho_id=gatilho.id, texto="Seu pedido saiu hoje.",
+        status="pendente",
+    )
+    db.add(rascunho)
+    await db.commit()
+
+    envio = enviar.enviar_resposta(
+        db, conversa, rascunho.texto, user=None, rascunho_id=rascunho.id, origem="davinci_ia"
+    )
+    if sai:
+        m = await envio
+        assert m.status == "enviada"
+        assert plataforma.chamadas == ["Seu pedido saiu hoje."]
+    else:
+        e = await _recusa(envio)
+        assert e.code == "nao_aguarda"
+        assert plataforma.chamadas == []
 
 
 async def test_mesma_resposta_em_menos_de_2_minutos_e_envio_repetido(
