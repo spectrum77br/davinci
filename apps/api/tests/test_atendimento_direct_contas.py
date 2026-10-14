@@ -231,20 +231,38 @@ async def test_resumo_uma_linha_por_conta_com_a_bolinha_de_cada(client, db, pess
         (instagram.NOME_SEM_CADASTRO, None),
     ]
     por = {lj["conta"]: lj for lj in linhas}
-    # A bolinha de cada uma: as esperando (Direct + comentários da conta).
+    # O "Falta responder" de cada uma: o Direct (desde 14/10/2026 é só o chat:
+    # o comentário da Charlots fica no filtro Mídia); vencidas pela fila.
     assert [
         (por[n]["aguardando"], por[n]["direct_aguardando"], por[n]["vencidas"])
         for n in ("@7buyers_br", "@charlots_br", "@uranyx_br")
-    ] == [(1, 1, 0), (3, 2, 0), (1, 1, 1)]
+    ] == [(1, 1, 0), (2, 2, 0), (1, 1, 1)]
+    # A bolinha (o número do Duoke): 1 por Direct esperando (sem o não lido da
+    # plataforma) DENTRO da janela de 24 h da Meta — o da Uranyx (30 h) passou
+    # dela: fica no "Falta responder" e em "Vencidas", não no número.
+    assert [por[n]["nao_lidas_duoke"] for n in ("@7buyers_br", "@charlots_br", "@uranyx_br")] == [
+        1,
+        2,
+        0,
+    ]
     # Mídia = DMs não silenciadas + o comentário aberto.
     assert por["@charlots_br"]["etiquetas"]["midia"] == 4
     assert por["@7buyers_br"]["etiquetas"]["midia"] == 1
     assert por["@7buyers_br"]["integracao"] == "Direct do Instagram (só leitura)"
     assert por["@7buyers_br"]["integration_id"] is None
     assert not [lj for lj in corpo["lojas"] if lj["conta"] == "Direct"]
-    # A plataforma soma tudo: 5 DMs esperando + o comentário.
+    # A plataforma: 5 DMs esperando (o comentário saiu do "Falta responder" em
+    # 14/10/2026; vencendo/vencidas são a fila, com ele).
     ig = next(p for p in corpo["plataformas"] if p["plataforma"] == "instagram")
-    assert (ig["aguardando"], ig["vencendo"], ig["vencidas"]) == (6, 1, 1)
+    assert (ig["aguardando"], ig["vencendo"], ig["vencidas"]) == (5, 1, 1)
+    # O número do Duoke: as 5 menos a vencida (a da Uranyx) — a soma das linhas.
+    assert ig["nao_lidas_duoke"] == 4
+    linhas_ig = [lj for lj in corpo["lojas"] if lj["plataforma"] == "instagram"]
+    assert sum(lj["nao_lidas_duoke"] for lj in linhas_ig) == 4
+    # A aba Caixa (o total) soma as plataformas, com o Direct: só ele conta aqui
+    # (o comentário da Charlots fica no filtro Mídia).
+    assert corpo["nao_lidas_duoke"] == sum(p["nao_lidas_duoke"] for p in corpo["plataformas"])
+    assert corpo["nao_lidas_duoke"] == 4
     assert ig["etiquetas"]["midia"] == 7
 
 
@@ -272,7 +290,7 @@ async def test_caixa_de_comentarios_sem_permissao_nao_apaga_o_direct(client, db,
     assert ch["status_canal"] == "sem_escopo"
     assert ch["status_motivo"].startswith("Sem permissão no token do DaVinci Publicador")
     # ...e o Direct continua contando na linha (a tela a deixa acesa).
-    assert (ch["aguardando"], ch["direct_aguardando"]) == (3, 2)
+    assert (ch["aguardando"], ch["direct_aguardando"], ch["nao_lidas_duoke"]) == (2, 2, 2)
     # A 7buyers (só Direct) não herda o problema da Charlots.
     assert por["@7buyers_br"]["status_canal"] is None
 

@@ -163,6 +163,10 @@ async function carregarResumo() {
     resumoErro.value = erroDaApi(e, 'Não consegui carregar o resumo do atendimento').texto
   }
 }
+// O número da aba Caixa (14/10/2026): o do DUOKE — a soma das mensagens não
+// lidas das conversas de chat esperando resposta, de todas as plataformas
+// (o "Todas" do menu Plataforma). A API antiga não manda: sem número.
+const naoLidasDuoke = computed(() => Number(resumo.value?.nao_lidas_duoke) || 0)
 
 // O número da aba E-mail (13/10/2026): o e-mail saiu da Caixa e da Caixa
 // Humano, e o que falta responder nele acende AQUI (e em E-mail › Filas) —
@@ -329,8 +333,9 @@ async function carregarMais() {
 // A conversa aberta mudou (enviou, fechou, atribuiu, a IA sugeriu): a linha
 // dela na lista acompanha sem esperar o próximo tique. Se mudou o que os
 // contadores contam (aguardando, o "Falta responder" igual ao Duoke — o
-// `falta_responder` da linha —, "a conferir"), o resumo também é relido —
-// senão o "A conferir (1)" ficava lá até 30 s depois de a pessoa marcar.
+// `falta_responder` da linha —, "a conferir", as não lidas do número do
+// Duoke — marcou como lida ao abrir), o resumo também é relido — senão o
+// "A conferir (1)" ficava lá até 30 s depois de a pessoa marcar.
 function aoMudarConversa(c: ConversaResumo) {
   // A conversa de e-mail que chegou à Caixa pelo id (um link antigo, o alerta,
   // o "abrir na aba E-mail" do painel do chat): ela mora na aba E-mail
@@ -355,6 +360,7 @@ function aoMudarConversa(c: ConversaResumo) {
   // E a Caixa Humano (o número da aba e da barra).
   if (antes && (antes.aguardando_resposta !== c.aguardando_resposta || !!antes.envio_a_conferir !== !!c.envio_a_conferir
     || (c.falta_responder !== undefined && !!antes.falta_responder !== !!c.falta_responder)
+    || (c.nao_lidas !== undefined && (Number(antes.nao_lidas) || 0) !== (Number(c.nao_lidas) || 0))
     || (c.etiqueta !== undefined && (antes.etiqueta ?? null) !== (c.etiqueta ?? null))
     || (c.humano !== undefined && !!antes.humano !== !!c.humano))) {
     void carregarResumo()
@@ -679,6 +685,14 @@ watch(selecionada, (id) => {
       >
         <component :is="a.icon" class="size-4" />
         {{ a.label }}
+        <!-- Caixa: o número do Duoke (mensagens não lidas esperando resposta, 14/10/2026) -->
+        <span
+          v-if="a.value === 'caixa' && naoLidasDuoke"
+          class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
+          :title="`${naoLidasDuoke} mensagem(ns) não lida(s) esperando resposta (como no Duoke): o chat de todas as plataformas`"
+          :aria-label="`${naoLidasDuoke} mensagem(ns) não lida(s) esperando resposta`"
+          data-marca-caixa
+        >{{ naoLidasDuoke > 99 ? '99+' : naoLidasDuoke }}</span>
         <!-- Caixa Humano: quantas esperam uma pessoa (a IA não pode responder) -->
         <span
           v-if="a.value === 'humano' && resumo?.humano"
@@ -713,8 +727,8 @@ watch(selecionada, (id) => {
       :link="naCaixa"
       @abrir-lojas="aba = 'lojas'"
     />
-    <!-- A plataforma (08/10/2026: "ver só Mercado Livre, só Shopee"): um botão que abre o menu com a logo e o "falta responder" de cada uma, acima da Caixa; escolher corta a barra de lojas (09/10/2026). Na Caixa Humano, os números dela. -->
-    <AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? 'humano' : 'aguardando'" />
+    <!-- A plataforma (08/10/2026: "ver só Mercado Livre, só Shopee"): um botão que abre o menu com a logo e o número de cada uma (14/10/2026: o do Duoke, mensagens não lidas esperando resposta), acima da Caixa; escolher corta a barra de lojas (09/10/2026). Na Caixa Humano, os números dela. -->
+    <AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? 'humano' : 'nao_lidas_duoke'" />
     </div>
 
     <!-- Caixa: lojas | fila | conversa + pedido -->
@@ -729,7 +743,7 @@ watch(selecionada, (id) => {
         class="hidden min-h-0 shrink-0 flex-col border-r bg-muted/30 lg:flex"
         :class="lojasRecolhidas ? 'w-[64px]' : 'w-[196px]'"
       >
-        <AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano ? 'humano' : 'aguardando'" />
+        <AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano ? 'humano' : 'nao_lidas_duoke'" />
       </aside>
       <aside
         class="min-h-0 w-full flex-col border-r lg:flex lg:w-[300px] lg:shrink-0 2xl:w-[330px]"

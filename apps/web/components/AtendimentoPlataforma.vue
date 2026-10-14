@@ -68,6 +68,11 @@ export type ResumoPlataforma = {
   // Na Caixa Humano (09/10/2026): falta responder e a IA não pode. A API
   // antiga não manda (a aba fica sem número).
   humano?: number
+  // O número do DUOKE (14/10/2026): a soma das mensagens não lidas das
+  // conversas de chat esperando resposta (1 por conversa onde a plataforma
+  // não dá o não lido) — o menu de plataformas, a barra de lojas e a aba
+  // Caixa. A API antiga não manda (a tela cai no `aguardando`).
+  nao_lidas_duoke?: number
 }
 // `nao_lidas` = o número da PLATAFORMA (o mesmo contador vermelho do Duoke) e
 // `status_canal` = a saúde da leitura da loja (spec Duoke 2.4). Opcionais: a
@@ -101,6 +106,8 @@ export type ResumoLoja = {
   etiquetas?: ContagemEtiquetas
   // Na Caixa Humano (ver ResumoPlataforma).
   humano?: number
+  // O número do Duoke da loja: a bolinha da barra (ver ResumoPlataforma).
+  nao_lidas_duoke?: number
 }
 export type Resumo = {
   plataformas: ResumoPlataforma[]
@@ -112,6 +119,8 @@ export type Resumo = {
   etiquetas?: ContagemEtiquetas
   // A Caixa Humano somando as plataformas: o número da aba (09/10/2026).
   humano?: number
+  // O número do Duoke somando as plataformas: o número da aba Caixa (14/10/2026).
+  nao_lidas_duoke?: number
   // Lojas sem ler além do limite (05/10/2026): a faixa da Caixa e a marca
   // da aba "Lojas e modo". Opcional: a API antiga não manda (sem faixa).
   leitura_parada?: LeituraParada[]

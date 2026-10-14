@@ -1145,7 +1145,8 @@ def _resumo_dict(
         "nao_lidas": c.nao_lidas or 0,
         # No "Falta responder" da Caixa (igual ao Duoke, `pendente.py`): a
         # marca da linha (negrito, bolinha) e a tela relê os números quando
-        # ele muda.
+        # ele muda. Em todo canal: a avaliação esperando resposta continua
+        # marcada em "Todas", mesmo fora do filtro (14/10/2026, só o chat).
         "falta_responder": pendente.falta_responder(c),
         "pendentes": int(pendentes or 0) if c.aguardando_resposta else 0,
         "tem_rascunho": bool(tem_rascunho),
@@ -1547,6 +1548,7 @@ def _juntar_externas(
         alvo.aguardando += lj.aguardando
         alvo.vencidas += lj.vencidas
         alvo.nao_lidas += lj.nao_lidas
+        alvo.nao_lidas_duoke += lj.nao_lidas_duoke
         alvo.etiquetas = {
             e: alvo.etiquetas.get(e, 0) + lj.etiquetas.get(e, 0)
             for e in {*alvo.etiquetas, *lj.etiquetas}
@@ -1602,6 +1604,9 @@ def _com_direct(lojas: list[LojaResumoOut], contas: list[dict]) -> list[LojaResu
             )
             saida.append(alvo)
         alvo.aguardando += int(d.get("aguardando") or 0)
+        # O número do Duoke: 1 por Direct esperando na janela da Meta (sem o
+        # não lido da plataforma; o vencido fica no "Falta responder").
+        alvo.nao_lidas_duoke += instagram.no_numero_do_duoke(d)
         alvo.vencidas += int(d.get("vencidas") or 0)
         alvo.direct_aguardando += int(d.get("aguardando") or 0)
         alvo.direct_total += int(d.get("total") or 0)
@@ -1623,14 +1628,19 @@ async def resumo(
     scope = await resolve_team_scope(session, user)
     agora = datetime.now(UTC)
     aguardando = AtendimentoConversa.aguardando_resposta.is_(True)
-    # O "Falta responder" (o `aguardando` da resposta: total do topo, menu de
-    # plataformas, barra de lojas) é IGUAL AO DUOKE desde 14/10/2026: o
-    # comprador por último (qualquer mensagem da loja responde, até a
-    # automática) ou não lida no chat da Shopee/TikTok; onde a plataforma diz
-    # de quem é a vez (reclamação, avaliação, SAC, carrinho), a fila
-    # (`pendente.py`). Vencendo/vencidas seguem o PRAZO da fila
-    # (`aguardando_resposta`).
-    falta = pendente.falta_responder_sql()
+    # O "Falta responder" (o `aguardando` da resposta: o número da aba
+    # "Falta responder") é IGUAL AO DUOKE desde 14/10/2026: o comprador por
+    # último (qualquer mensagem da loja responde, até a automática) ou não
+    # lida no chat da Shopee/TikTok; onde a plataforma diz de quem é a vez
+    # (SAC), a fila — e SÓ O CHAT (14/10/2026, o dono: "tá pegando uns
+    # antigos de avaliação"): a avaliação, a reclamação, o carrinho e os
+    # comentários têm os filtros próprios (`pendente.py`). Vencendo/vencidas
+    # seguem o PRAZO da fila (`aguardando_resposta`), em todo canal.
+    falta = pendente.falta_responder_no_chat_sql()
+    # O número do DUOKE (14/10/2026: o menu de plataformas, a barra de lojas,
+    # "Todas · Shopee" e a aba Caixa): a soma das mensagens não lidas das
+    # conversas de chat esperando resposta (`pendente.nao_lidas_duoke`).
+    duoke = func.coalesce(func.sum(pendente.nao_lidas_duoke_sql()), 0)
     prazo = AtendimentoConversa.prazo_resposta_em
     vencendo = and_(aguardando, prazo >= agora, prazo < agora + VENCENDO)
     vencidas = and_(aguardando, prazo < agora)
@@ -1669,6 +1679,7 @@ async def resumo(
         func.count().filter(_a_conferir_existe()),
         nao_lidas,
         na_caixa_humano,
+        duoke,
         *por_etiqueta,
     ).group_by(AtendimentoConversa.plataforma)
     q_plat = q_plat.where(cond)
@@ -1688,8 +1699,9 @@ async def resumo(
             nao_lidas=int(n or 0),
             etiquetas=_etiquetas(etq),
             humano=int(h or 0),
+            nao_lidas_duoke=int(d or 0),
         )
-        for p, a, v, x, r, n, h, *etq in (await session.execute(q_plat)).all()
+        for p, a, v, x, r, n, h, d, *etq in (await session.execute(q_plat)).all()
     }
     canais = await _canais(session, scope)
     # As do robô (Temu/AliExpress) e as externas (sites, redes — 02/10/2026)
@@ -1715,6 +1727,9 @@ async def resumo(
         # só da plataforma; as DMs não fechadas contam na etiqueta MÍDIA.
         p_ig = next(p for p in plataformas if p.plataforma == instagram.PLATAFORMA)
         p_ig.aguardando += ig["aguardando"]
+        # O Direct não tem o não lido da plataforma: 1 por conversa esperando
+        # na janela de 24 h da Meta (`instagram.no_numero_do_duoke`).
+        p_ig.nao_lidas_duoke += instagram.no_numero_do_duoke(ig)
         p_ig.vencendo += ig["vencendo"]
         p_ig.vencidas += ig["vencidas"]
         p_ig.etiquetas = {
@@ -1747,6 +1762,7 @@ async def resumo(
         func.count().filter(vencidas),
         nao_lidas,
         na_caixa_humano,
+        duoke,
         *por_etiqueta,
     ).group_by(
         AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_sem_integracao
@@ -1763,8 +1779,9 @@ async def resumo(
             vencidas=x or 0,
             etiquetas=_etiquetas(etq),
             humano=int(h or 0),
+            nao_lidas_duoke=int(d or 0),
         )
-        for i, p, rc, conta, a, x, n, h, *etq in (await session.execute(q_loja)).all()
+        for i, p, rc, conta, a, x, n, h, d, *etq in (await session.execute(q_loja)).all()
     }
     canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]] = {}
     for c in canais:
@@ -1810,6 +1827,7 @@ async def resumo(
         a_conferir=sum(p.a_conferir for p in plataformas),
         etiquetas={e: sum(p.etiquetas.get(e, 0) for p in plataformas) for e in ETIQUETAS},
         humano=sum(p.humano for p in plataformas),
+        nao_lidas_duoke=sum(p.nao_lidas_duoke for p in plataformas),
         lojas=sorted(
             barra,
             key=lambda lj: (
@@ -1955,10 +1973,12 @@ async def _listar_marketplace(
         # Fechada = resolvida: sai da frente (volta sozinha se o cliente escrever).
         consulta = consulta.where(AtendimentoConversa.situacao != CONVERSA_FECHADA)
     elif filtro == "aguardando":
-        # "Falta responder" da Caixa = IGUAL AO DUOKE (14/10/2026, `pendente.py`).
-        # A Caixa Humano e a aba E-mail continuam na régua delas (a fila).
+        # "Falta responder" da Caixa = IGUAL AO DUOKE e SÓ O CHAT (14/10/2026,
+        # `pendente.py`: a avaliação, a reclamação, o carrinho e os comentários
+        # têm os filtros próprios). A Caixa Humano e a aba E-mail continuam na
+        # régua delas (a fila), em todo canal.
         consulta = consulta.where(
-            aguardando if caixa_humano or caixa_email else pendente.falta_responder_sql()
+            aguardando if caixa_humano or caixa_email else pendente.falta_responder_no_chat_sql()
         )
     elif filtro == "vencendo":
         consulta = consulta.where(aguardando, prazo >= agora, prazo < agora + VENCENDO)
@@ -2180,8 +2200,9 @@ async def listar_conversas(
     Na etiqueta Avaliação, `avaliacao_estrelas` traz a pior nota pendente. A aba
     "Falta responder" (`aguardando`) vem pelo PRAZO mais curto, sem prazo no
     fim (a mais recente primeiro) — e o cursor (`proximo`) é o do prazo. Na
-    Caixa, o "Falta responder" é a régua do Duoke (`services/atendimento/
-    pendente.py`); na Caixa Humano e na aba E-mail, a fila.
+    Caixa, o "Falta responder" é a régua do Duoke, só nas conversas de chat
+    (`services/atendimento/pendente.py`: sem avaliação, reclamação, carrinho e
+    comentários desde 14/10/2026); na Caixa Humano e na aba E-mail, a fila.
     `tipo_chamado` (sac | atacado | duvidas) filtra os chamados dos sites pelo
     tipo (os chips do grupo Site, RF6); `filtro=email_sem_vinculo` traz as
     conversas de e-mail das lojas ainda sem pedido (RF5).

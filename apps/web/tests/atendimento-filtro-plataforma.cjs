@@ -250,8 +250,9 @@ async function principal() {
 {
   const pagina = web('pages/atendimento.vue')
   const chips = (pagina.match(/<AtendimentoFiltroPlataforma[^>]*\/>/) || [])[0] || ''
-  // Na Caixa e na Caixa Humano (09/10/2026: com os números dela).
-  assert.equal(chips, '<AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? \'humano\' : \'aguardando\'" />')
+  // Na Caixa e na Caixa Humano (09/10/2026: com os números dela; 14/10/2026:
+  // na Caixa, o número do Duoke).
+  assert.equal(chips, '<AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? \'humano\' : \'nao_lidas_duoke\'" />')
   // No bloco medido acima da Caixa (a altura da Caixa conta com ele), sem
   // classe de "só tela larga/estreita": à vista em qualquer largura.
   const iTopo = pagina.indexOf('<div ref="topoEl"')
@@ -479,7 +480,7 @@ async function barraRenderizada() {
   assert.match(pagina, /plataforma_topo: '' \}\)/)
   // Não vai para a API (a lista filtra por `plataforma`).
   assert.doesNotMatch(pagina, /p\.set\('plataforma_topo'/)
-  assert.match(pagina, /<AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano \? 'humano' : 'aguardando'" \/>/)
+  assert.match(pagina, /<AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano \? 'humano' : 'nao_lidas_duoke'" \/>/)
 }
 
 // ------------------------------------------------ o contrato com a API

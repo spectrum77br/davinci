@@ -55,7 +55,7 @@ const LJ = (() => {
   new Function('require', 'module', 'exports', transpile(lojasSfc.script.content))(req, mod, mod.exports)
   return mod.exports
 })()
-const CORTE = ['corteDaBarra', 'gruposVisiveis', 'nomeDoCorte', 'ativaTodasDoCorte', 'filtrosTodasDoCorte', 'numeroDoCorte', 'filtrosDoGrupo']
+const CORTE = ['corteDaBarra', 'gruposVisiveis', 'nomeDoCorte', 'ativaTodasDoCorte', 'filtrosTodasDoCorte', 'numeroDoCorte', 'filtrosDoGrupo', 'campoDaBarra', 'numeroDaLoja', 'numeroDe']
 const listaSfc = sfc('../components/AtendimentoLista.vue')
 
 const vazio = { plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '' }
@@ -121,7 +121,8 @@ function barra(r, filtrosIniciais = {}) {
   assert.equal(b.total.value, 6, 'Todas = Shopee 1 + Instagram 5')
   const titulo = b.motivo(por['@charlots_br'])
   assert.match(titulo, /Atenção — Sem permissão no token do DaVinci Publicador/)
-  assert.match(titulo, /Direct: 2 esperando \(só leitura\) · comentários: 0 esperando/)
+  // Os comentários saíram dos números (14/10/2026, só o chat): o title manda para o filtro Mídia.
+  assert.match(titulo, /Direct: 2 esperando \(só leitura\) · comentários: no filtro Mídia/)
   // 7buyers: só Direct — o title não fala de comentários que não existem.
   assert.equal(por['@7buyers_br'].comentarios, false)
   assert.equal(por['@7buyers_br'].apagada, false)

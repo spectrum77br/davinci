@@ -411,6 +411,16 @@ async def contar_por_conta(session: AsyncSession) -> list[dict]:
     return sorted(contas, key=lambda c: (c["rede_social_id"] is None, (c["conta"] or "").lower()))
 
 
+def no_numero_do_duoke(numeros: dict) -> int:
+    """Quanto o Direct soma no número do Duoke da Caixa (14/10/2026): 1 por
+    conversa esperando DENTRO da janela de 24 h da Meta (`aguardando` menos
+    `vencidas`). O Direct não tem o não lido da plataforma, e o que passou da
+    janela não se responde mais por mensagem comum — fica no "Falta
+    responder" e em "Vencidas", não no número (o dono, 14/10/2026: "tá
+    pegando uns antigos"; eram Directs de 23/09 e 02/10 no número da aba)."""
+    return max(0, int(numeros.get("aguardando") or 0) - int(numeros.get("vencidas") or 0))
+
+
 def somar(contas: list[dict]) -> dict[str, int]:
     """O total do Instagram (o `contar`) a partir das contas — uma consulta só no /resumo."""
     return {

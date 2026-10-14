@@ -1334,10 +1334,14 @@ async def test_lista_filtra_por_avaliacao_com_as_estrelas_e_conta_no_resumo(
     assert {i["id"] for i in itens} == {str(chat_id), str(conversa.id)}
     assert {i["avaliacao_estrelas"] for i in itens} == {1}
     assert all(i["etiqueta"] == "avaliacao" for i in itens)
+    # "Falta responder" + Avaliação: vazio desde 14/10/2026 (o "Falta
+    # responder" da Caixa é só o chat) — a avaliação mora no filtro dela,
+    # marcada como esperando resposta.
     r = await client.get(
         "/api/atendimento/conversas", params={"filtro": "aguardando", "etiqueta": "avaliacao"}
     )
-    assert [i["id"] for i in r.json()["itens"]] == [str(conversa.id)]
+    assert r.json()["itens"] == []
+    assert next(i for i in itens if i["id"] == str(conversa.id))["falta_responder"] is True
     r = await client.get("/api/atendimento/resumo")
     assert r.json()["etiquetas"]["avaliacao"] == 2
     # O detalhe também traz as estrelas.

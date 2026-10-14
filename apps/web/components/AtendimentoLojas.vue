@@ -19,7 +19,7 @@
 // - cortada, o número de "Todas · Shopee" é o da plataforma no /resumo (o
 //   mesmo do botão do topo e da lista: conta também a conversa sem loja
 //   identificada, que não tem linha na barra).
-import { GRUPOS_CAIXA, aguardandoDe, corteDaBarra, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
+import { GRUPOS_CAIXA, aguardandoDe, corteDaBarra, numeroDe, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import { lojaNosModos, nomeDoGrupo } from '~/components/AtendimentoPlataforma.vue'
 
@@ -36,8 +36,9 @@ export function lojasDaCaixaHumano<L extends { integration_id?: string | null; e
   if (!modos) return lojas
   return lojas.filter((l) => (Number(l.humano) || 0) > 0 || lojaNosModos(canais, l, modos) === true)
 }
-// As plataformas que a barra mostra ([] = todas) — a régua mora no menu do topo.
-export { corteDaBarra }
+// As plataformas que a barra mostra ([] = todas) — a régua mora no menu do topo
+// (e o número de uma linha do /resumo também).
+export { corteDaBarra, numeroDe }
 export function gruposVisiveis<G extends { plataforma: string }>(grupos: G[], corte: string[]): G[] {
   return corte.length ? grupos.filter((g) => corte.includes(g.plataforma)) : grupos
 }
@@ -52,11 +53,20 @@ export function ativaTodasDoCorte(f: FiltrosLista, corte: string[]): boolean {
   return corte.length > 0 && plataformasDoValor(f.plataforma).join(',') === corte.join(',')
     && !f.integration_id && !f.externo_ref && !f.rede_social_id
 }
-// O número de "Todas · Shopee": o da plataforma no /resumo (o "falta
-// responder", ou o da Caixa Humano).
+// O campo do /resumo que a barra mostra: o da Caixa Humano, o do Duoke (a
+// Caixa, desde 14/10/2026) ou o "falta responder" (sem `numero`).
 // (Os tipos pelo `aguardandoDe`: o Resumo e o NumeroDaCaixa já são importados no setup.)
+export function campoDaBarra(numero?: string | null): NonNullable<Parameters<typeof aguardandoDe>[2]> {
+  return numero === 'humano' || numero === 'nao_lidas_duoke' ? numero : 'aguardando'
+}
+// O número de "Todas · Shopee": o da plataforma no /resumo (o do Duoke, o
+// "falta responder", ou o da Caixa Humano).
 export function numeroDoCorte(resumo: Parameters<typeof aguardandoDe>[0], corte: string[], numero?: string | null): number {
-  return aguardandoDe(resumo, corte, numero === 'humano' ? 'humano' : 'aguardando')
+  return aguardandoDe(resumo, corte, campoDaBarra(numero))
+}
+// A bolinha da loja: o mesmo campo, da linha da loja no /resumo.
+export function numeroDaLoja(loja: Parameters<typeof numeroDe>[0], numero?: string | null): number {
+  return numeroDe(loja, campoDaBarra(numero))
 }
 // O clique no NOME do grupo: a plataforma inteira E o corte (é escolher a
 // plataforma, como no menu do topo). Instagram ou Facebook cortam para Redes
@@ -128,6 +138,16 @@ export function filtrosTodasDoCorte(f: FiltrosLista, corte: string[]): FiltrosLi
 // conversas que esperam uma pessoa (a IA não pode responder), não o "falta
 // responder". Desde 14/10/2026 ela é só das lojas no Automático (o servidor
 // manda zero para as outras: sem bolinha); o title da loja fora diz por quê.
+// NA CAIXA, O NÚMERO DO DUOKE (`numero="nao_lidas_duoke"`, 14/10/2026, o
+// dono: "o nosso ATV mostra 9, o deles 5 … tá pegando uns antigos de
+// avaliação"): a bolinha é a soma das MENSAGENS não lidas das conversas de
+// chat esperando resposta — medido no Duoke, ATV 5 = uma conversa com 4 não
+// lidas + outra com 1. Avaliação, reclamação/devolução, carrinho e
+// comentários não entram (têm os filtros próprios); onde a plataforma não dá
+// o não lido (e-mail da Amazon, Direct na janela de 24 h…), 1 por conversa
+// esperando. Só conta conversa que está no "Falta responder" (a linha
+// marcada): a pessoa acha o que está contado. O "falta responder"
+// (conversas) fica no title.
 import { ChevronsLeft, ChevronsRight, Inbox, Lock, TriangleAlert, Unplug } from 'lucide-vue-next'
 import type { NumeroDaCaixa } from '~/components/AtendimentoFiltroPlataforma.vue'
 import {
@@ -174,8 +194,9 @@ type LojaBarra = {
   comentarios: boolean
   plataforma: string
   conta: string
-  // A bolinha: conversas esperando resposta (= `aguardando`) — na Caixa
-  // Humano, as que esperam uma pessoa (= `humano`).
+  // A bolinha: na Caixa, o número do Duoke (= `nao_lidas_duoke`: mensagens
+  // não lidas esperando resposta); na Caixa Humano, as que esperam uma
+  // pessoa (= `humano`); sem `numero`, o "falta responder" (= `aguardando`).
   nao_lidas: number
   // O "não lida" que a própria plataforma informa (só no title).
   nao_lidas_plataforma: number | null
@@ -230,7 +251,7 @@ const lojas = computed<LojaBarra[]>(() => {
       comentarios: !!rede && contasComCaixa.has(rede),
       plataforma: l.plataforma,
       conta: l.conta || 'sem nome',
-      nao_lidas: (props.numero === 'humano' ? Number(l.humano) : l.aguardando) || 0,
+      nao_lidas: numeroDaLoja(l, props.numero),
       nao_lidas_plataforma: typeof l.nao_lidas === 'number' ? l.nao_lidas : null,
       aguardando: l.aguardando || 0,
       humano: Number(l.humano) || 0,
@@ -321,7 +342,7 @@ const total = computed(() => (corte.value.length
 // Instagram, acima) e esta linha some.
 const plataformaInstagram = computed(() => props.resumo?.plataformas?.find((p) => p.plataforma === 'instagram') ?? null)
 const temContasInstagram = computed(() => grupos.value.some((g) => g.plataforma === 'instagram'))
-const instagram = computed(() => (props.numero === 'humano' ? Number(plataformaInstagram.value?.humano) || 0 : plataformaInstagram.value?.aguardando ?? 0))
+const instagram = computed(() => numeroDe(plataformaInstagram.value, campoDaBarra(props.numero)))
 const mostrarInstagram = computed(() => !!props.resumo && !temContasInstagram.value && (!!plataformaInstagram.value || filtros.value.plataforma === 'instagram')
   && (!corte.value.length || corte.value.includes('instagram'))
   // Na Caixa Humano, só com conversa contada lá (rede não fica no Automático).
@@ -344,7 +365,12 @@ function motivo(l: LojaBarra): string {
     partes.push(st ? `${st.label}: ${st.hint}` : l.status)
     if (l.motivo) partes.push(l.motivo)
   } else {
-    partes.push(`${l.aguardando} conversa(s) esperando resposta`)
+    // Na Caixa, o número do Duoke e, ao lado, o "Falta responder" (conversas,
+    // só o chat). Na Caixa Humano (e sem `numero`), o texto de sempre.
+    if (props.numero === 'nao_lidas_duoke') {
+      partes.push(`${l.nao_lidas} mensagem(ns) não lida(s) esperando resposta (como no Duoke)`)
+      partes.push(`${l.aguardando} conversa(s) no Falta responder (só o chat)`)
+    } else partes.push(`${l.aguardando} conversa(s) esperando resposta`)
     if (props.numero === 'humano' && foraDaCaixaHumano(l)) partes.push(`Fora da Caixa Humano: a loja não está ${textoModosHumano(modosHumano.value || [])} (mude em Lojas e modo)`)
     else if (l.humano || props.numero === 'humano') partes.push(`${l.humano} na Caixa Humano (a IA não pode responder)`)
     if (typeof l.nao_lidas_plataforma === 'number') partes.push(`${l.nao_lidas_plataforma} não lida(s) segundo a plataforma`)
@@ -357,10 +383,15 @@ function motivo(l: LojaBarra): string {
     partes.push(`Direct de conta que não está em Cadastros › Redes Sociais: ${l.direct} esperando (só leitura)`)
   }
   if (l.plataforma === 'instagram' && l.rede_social_id) {
+    // Na Caixa, o Direct que passou da janela de 24 h da Meta fica fora do
+    // número do Duoke (continua no "Falta responder" e em "Vencidas").
+    const foraDaJanela = props.numero === 'nao_lidas_duoke' ? Math.max(0, l.direct - l.nao_lidas) : 0
+    const direct = `Direct: ${l.direct} esperando (só leitura)${foraDaJanela ? ` — ${foraDaJanela} passou(aram) da janela de 24 h: fora do número, no Falta responder` : ''}`
     partes.push(
       l.comentarios
-        ? `Direct: ${l.direct} esperando (só leitura) · comentários: ${Math.max(0, l.aguardando - l.direct)} esperando`
-        : `Direct: ${l.direct} esperando (só leitura) — a conta não tem leitura de comentários`,
+        // Os comentários não entram nos números desde 14/10/2026 (só o chat): o filtro Mídia.
+        ? `${direct} · comentários: no filtro Mídia`
+        : `${direct} — a conta não tem leitura de comentários`,
     )
   }
   if (l.plataforma === 'site') partes.push('Carrinho abandonado do lojista no site (lido do site, servidor a servidor)')
@@ -420,7 +451,11 @@ function escolherLoja(l: LojaBarra) {
 }
 const ativaTodas = computed(() => (corte.value.length ? ativaTodasDoCorte(filtros.value, corte.value) : !filtros.value.plataforma))
 const tituloTodas = computed(() => {
-  const n = props.numero === 'humano' ? `${total.value} esperando uma pessoa (a IA não pode responder)` : `${total.value} não lida(s)`
+  const n = props.numero === 'humano'
+    ? `${total.value} esperando uma pessoa (a IA não pode responder)`
+    : props.numero === 'nao_lidas_duoke'
+      ? `${total.value} mensagem(ns) não lida(s) esperando resposta (como no Duoke)`
+      : `${total.value} não lida(s)`
   return corte.value.length
     ? `Todas as lojas ${nomeCorte.value} — ${n}\nPara ver as outras plataformas: "Todas" no menu Plataforma, acima`
     : `Todas as lojas — ${n}`
@@ -505,7 +540,7 @@ function ativaLoja(l: LojaBarra) {
             :class="ativaPlataforma(g.plataforma) ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
             :aria-pressed="ativaPlataforma(g.plataforma)"
             :aria-label="`Só ${g.nome}: todas as lojas ${g.nome}`"
-            :title="`Só ${g.nome}: todas as lojas ${g.nome}${g.nao_lidas ? ` — ${g.nao_lidas} ${numero === 'humano' ? 'esperando uma pessoa' : 'esperando resposta'}` : ''}`"
+            :title="`Só ${g.nome}: todas as lojas ${g.nome}${g.nao_lidas ? ` — ${g.nao_lidas} ${numero === 'humano' ? 'esperando uma pessoa' : numero === 'nao_lidas_duoke' ? 'mensagem(ns) não lida(s) esperando resposta (como no Duoke)' : 'esperando resposta'}` : ''}`"
             :data-grupo="g.plataforma"
             @click="escolherGrupo(g.plataforma)"
           >{{ plataformaInfo(g.plataforma).curto }}</button>

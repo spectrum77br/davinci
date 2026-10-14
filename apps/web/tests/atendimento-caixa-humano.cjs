@@ -319,7 +319,7 @@ const paginaTpl = paginaSfc.descriptor.template.content
   // As MESMAS colunas (lojas | lista | conversa) nas duas.
   assert.match(pagina, /const naCaixa = computed\(\(\) => aba\.value === 'caixa' \|\| aba\.value === 'humano'\)/)
   assert.match(paginaTpl, /<!-- Caixa: lojas \| fila \| conversa \+ pedido -->[\s\S]*?<div\s+v-show="naCaixa"\s+ref="caixaEl"/)
-  assert.match(paginaTpl, /<AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano \? 'humano' : 'aguardando'" \/>/)
+  assert.match(paginaTpl, /<AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano \? 'humano' : 'nao_lidas_duoke'" \/>/)
   assert.match(paginaTpl, /<AtendimentoLista\s+v-model:filtros="filtros"[\s\S]*?:caixa="emHumano \? 'humano' : ''"/)
   // O vazio sem loja no modo abre "Lojas e modo" (14/10/2026).
   assert.match(paginaTpl, /<AtendimentoLista\s+v-model:filtros="filtros"[^/]*?@abrir-aba="abrirAba"\s*\/>/)

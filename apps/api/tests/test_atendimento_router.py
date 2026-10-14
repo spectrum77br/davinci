@@ -827,6 +827,9 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
         # /resumo com o e-mail — `separa_email`; os números: /email/contagens.)
         # 09/10/2026: a Caixa Humano — o Direct (sem IA) nunca entra nela.
         "humano": 0,
+        # 14/10/2026: o número do Duoke — o Direct não tem o não lido da
+        # plataforma, conta 1 por conversa esperando.
+        "nao_lidas_duoke": 1,
     } in resumo["plataformas"]
 
 

@@ -925,9 +925,10 @@ async def test_interagiu_antes_liga_mencao_e_comentario_pelo_arroba(
 
 
 async def test_pergunta_vai_para_o_topo_da_lista(client, db, graph, contas, pessoa):
-    """RF7: a pergunta passa à frente do comentário comum (mesmo vencido) em
-    "Falta responder" e vem primeiro no filtro Mídia; a linha traz o selo; a
-    paginação (cursor com o grupo) não perde nem repete ninguém."""
+    """RF7: a pergunta vem primeiro no filtro Mídia; a linha traz o selo; a
+    paginação (cursor com o grupo) não perde nem repete ninguém. Desde
+    14/10/2026 o "Falta responder" da Caixa é só o chat: o comentário (a
+    pergunta também) mora no filtro Mídia."""
 
     def comentario(id_, quem, texto, horas):
         return {
@@ -967,17 +968,13 @@ async def test_pergunta_vai_para_o_topo_da_lista(client, db, graph, contas, pess
             cursores.append(cursor)
         raise AssertionError("a paginação não terminou")
 
-    # "Falta responder": as perguntas pelo prazo (Dani vence antes da Bia);
-    # o comentário comum no FIM, mesmo o da Cris, já vencido.
+    # "Falta responder" (14/10/2026): só o chat — nenhum comentário, nem a
+    # pergunta (ela vem primeiro no Mídia, abaixo). Continuam esperando na fila.
     r = await client.get(f"{URL}/conversas", params={"filtro": "aguardando"})
-    itens = r.json()["itens"]
-    assert [nome[i["id"]] for i in itens] == ["p-dani", "p-bia", "p-cris", "p-eva"]
-    assert [i["eh_pergunta"] for i in itens] == [True, True, False, False]
-    vistos, cursores = await todas_as_paginas("aguardando", 3)
-    assert vistos == ["p-dani", "p-bia", "p-cris", "p-eva"]
-    assert cursores[0].startswith("prazo:comum:") and cursores[0].endswith(f"|{ids['p-cris']}")
-    for limite in (1, 2):
-        assert (await todas_as_paginas("aguardando", limite))[0] == vistos
+    assert r.json()["itens"] == []
+    assert await todas_as_paginas("aguardando", 1) == ([], [])
+    r = await client.get(f"{URL}/conversas", params={"filtro": "vencidas"})
+    assert "p-cris" in {nome[i["id"]] for i in r.json()["itens"]}, "o prazo da fila não muda"
 
     # Mídia: as perguntas pendentes primeiro (pela recência), depois o resto.
     r = await client.get(f"{URL}/conversas", params={"filtro": "midia", "plataforma": "instagram"})

@@ -19,6 +19,7 @@ O que se garante aqui (as frentes constroem em cima):
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -38,6 +39,7 @@ from app.models import (
 )
 from app.models.marca import Marca, RedeSocial
 from app.routers import atendimento as rota
+from app.schemas.atendimento import LojaResumoOut
 from app.services.atendimento import canais_externos, carrinhos, etiqueta, gravar
 from app.services.atendimento.constantes import (
     CANAL_CARRINHO,
@@ -127,6 +129,33 @@ def test_calcular_carrinho_e_midia():
 
 
 # ── Canal externo ─────────────────────────────────────────────────────────
+
+
+def test_caixas_do_mesmo_site_somam_os_numeros():
+    """`_juntar_externas`: as caixas do mesmo site viram UMA linha, que soma o
+    "Falta responder", as vencidas, o não lido e o número do Duoke (14/10/2026)
+    — hoje o site só tem o carrinho (que não entra no número); o SAC, quando
+    vier, soma na mesma linha."""
+
+    def linha(canal_id, aguardando, vencidas, nao_lidas, duoke):
+        return LojaResumoOut(
+            plataforma="site",
+            externo_ref="site:charlots",
+            canal_id=canal_id,
+            conta="Charlots",
+            aguardando=aguardando,
+            vencidas=vencidas,
+            nao_lidas=nao_lidas,
+            nao_lidas_duoke=duoke,
+            etiquetas={"carrinho": 1},
+        )
+
+    carrinho, sac = linha(uuid4(), 0, 1, 0, 0), linha(uuid4(), 2, 0, 1, 3)
+    outra = LojaResumoOut(plataforma="shopee", conta="ATV", aguardando=1, vencidas=0)
+    [site, atv] = rota._juntar_externas([carrinho, sac, outra], {})
+    assert (site.aguardando, site.vencidas, site.nao_lidas, site.nao_lidas_duoke) == (2, 1, 1, 3)
+    assert site.etiquetas == {"carrinho": 2} and site.canal_id is None
+    assert atv is outra
 
 
 def test_referencias():
@@ -415,17 +444,22 @@ async def test_resumo_e_lista_com_site_e_contas_de_rede(client, db, pessoa):
     corpo = r.json()
     plats = {p["plataforma"]: p for p in corpo["plataformas"]}
     assert {"site", "instagram"} <= set(plats)
-    # Instagram = 1 comentário + 2 DMs esperando; as DMs contam na Mídia.
-    assert plats["instagram"]["aguardando"] == 3
+    # Instagram = 2 DMs esperando (o comentário saiu do "Falta responder" e
+    # dos números em 14/10/2026: só o chat; ele fica no Mídia); as DMs contam
+    # na Mídia e, uma por conversa, no número do Duoke.
+    assert plats["instagram"]["aguardando"] == 2
+    assert plats["instagram"]["nao_lidas_duoke"] == 2
+    assert (plats["site"]["aguardando"], plats["site"]["nao_lidas_duoke"]) == (0, 0)
     assert plats["instagram"]["etiquetas"]["midia"] == 3
     assert plats["site"]["etiquetas"]["carrinho"] == 0
     assert plats["site"]["etiquetas"]["pre_venda"] == 1
     lojas = {(lj["plataforma"], lj["conta"]): lj for lj in corpo["lojas"]}
     site = lojas[("site", "Charlots")]
+    # O carrinho esperando não entra no "Falta responder" (filtro Carrinho).
     assert (site["externo_ref"], site["integration_id"], site["aguardando"]) == (
         "site:charlots",
         None,
-        1,
+        0,
     )
     assert site["status_canal"] == "novo"
     # Uma linha por conta: a Charlots soma o Direct e o comentário; a 7buyers
@@ -433,9 +467,10 @@ async def test_resumo_e_lista_com_site_e_contas_de_rede(client, db, pessoa):
     ch = lojas[("instagram", "@charlots_br")]
     assert (ch["rede_social_id"], ch["aguardando"], ch["direct_aguardando"]) == (
         str(rede_ch.id),
-        2,
+        1,
         1,
     )
+    assert ch["nao_lidas_duoke"] == 1
     sete = lojas[("instagram", "@7buyers_br")]
     assert (sete["rede_social_id"], sete["aguardando"], sete["direct_aguardando"]) == (
         str(rede_7b.id),

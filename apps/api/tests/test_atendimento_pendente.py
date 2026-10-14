@@ -24,7 +24,18 @@ e o "Pendente" do Duoke, 15. O que não pode falhar
     relida em passadas que continuam na rodada seguinte, só pelas não lidas
     que contam) e ML pós-venda (a lista de não lidos acerta todo pack
     gravado) — falha não zera nada, lista cortada não zera ninguém, e nenhum
-    "marcar como lido" sai.
+    "marcar como lido" sai;
+  • SÓ O CHAT e o NÚMERO DO DUOKE (14/10/2026, o dono: "o nosso ATV mostra
+    9, o deles 5 … tá pegando uns antigos de avaliação"): o filtro e o
+    número da aba "Falta responder" deixam de fora a avaliação, a
+    reclamação, o carrinho e os comentários (a marca da linha fica em
+    todas); os números da Caixa (`nao_lidas_duoke`: menu de plataformas,
+    barra de lojas, aba Caixa) são a soma das mensagens não lidas das
+    conversas de chat esperando resposta na fila, não fechadas — 1 por
+    conversa onde a plataforma não dá o não lido —, Python e SQL gêmeos;
+    só conta a conversa que está no "Falta responder" (o não lido do ML não
+    zera quando a automática responde: o número não acende sem linha
+    marcada); a Caixa Humano não muda.
 """
 
 from __future__ import annotations
@@ -316,10 +327,16 @@ async def test_resumo_e_lista_contam_pela_regua_do_duoke(
     auth_as(await make_user(permissions=PODE_TUDO))
     # O e-mail da ponte mora na aba E-mail: não conta na Caixa.
     na_caixa = {n: (c, e) for n, (c, e) in mundo.items() if n != "email_da_ponte"}
-    esperados = {nome for nome, (_, e) in na_caixa.items() if e}
+    # O filtro e o número são SÓ O CHAT (14/10/2026): a reclamação tem o filtro
+    # dela; a marca da linha continua em todas.
+    marcadas_esperadas = {nome for nome, (_, e) in na_caixa.items() if e}
+    esperados = {nome for nome, (c, e) in na_caixa.items() if e and pendente.do_chat(c)}
+    assert marcadas_esperadas - esperados == {"reclamacao_vez_da_loja"}
     r = (await client.get(f"{URL}/resumo")).json()
     for plat in ("shopee", "ml", "tiktok"):
-        da_plat = sum(1 for c, e in na_caixa.values() if e and c.plataforma == plat)
+        da_plat = sum(
+            1 for n, (c, _) in na_caixa.items() if n in esperados and c.plataforma == plat
+        )
         p = next(p for p in r["plataformas"] if p["plataforma"] == plat)
         assert p["aguardando"] == da_plat, plat
         (loja,) = [lj for lj in r["lojas"] if lj["conta"] == "kfa" and lj["plataforma"] == plat]
@@ -336,14 +353,18 @@ async def test_resumo_e_lista_contam_pela_regua_do_duoke(
     # Em "Todas", a linha diz se está no "Falta responder" (a tela relê os números).
     todas = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
     marcadas = {nomes[i["id"]] for i in todas if i["falta_responder"]}
-    assert marcadas == esperados
+    assert marcadas == marcadas_esperadas
     menu = next(i for i in todas if nomes[i["id"]] == "menu_do_duoke")
     assert menu["aguardando_resposta"] is True and menu["falta_responder"] is False
 
 
-async def test_vencidas_cabe_no_falta_responder_da_reclamacao(client, db, make_user, auth_as):
+async def test_reclamacao_vencida_fica_em_vencidas_e_fora_do_falta_responder(
+    client, db, make_user, auth_as
+):
     """A reclamação em que a plataforma diz que é a vez da loja (só o aviso do
-    mediador), com o prazo vencido: está em "Vencidas" E em "Falta responder"."""
+    mediador), com o prazo vencido: está em "Vencidas" e marcada — mas, desde
+    14/10/2026 (só o chat), fora do filtro e do número "Falta responder" e do
+    número do Duoke (a reclamação tem o filtro dela)."""
     integ, canal = await _loja(db, await make_user(), "kfa")
     await _cena(
         db,
@@ -357,11 +378,242 @@ async def test_vencidas_cabe_no_falta_responder_da_reclamacao(client, db, make_u
     auth_as(await make_user(permissions=PODE_TUDO))
     r = (await client.get(f"{URL}/resumo")).json()
     sh = next(p for p in r["plataformas"] if p["plataforma"] == "shopee")
-    assert (sh["aguardando"], sh["vencidas"]) == (1, 1)
+    assert (sh["aguardando"], sh["vencidas"], sh["nao_lidas_duoke"]) == (0, 1, 0)
     itens = (
         await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 100})
     ).json()["itens"]
+    assert itens == []
+    itens = (
+        await client.get(f"{URL}/conversas", params={"filtro": "vencidas", "limite": 100})
+    ).json()["itens"]
     assert [i["falta_responder"] for i in itens] == [True]
+
+
+# ─────────────── só o chat e o número do Duoke (14/10/2026) ───────────────
+
+
+async def _mundo_duoke(
+    db, make_user, nome_loja: str = "atv"
+) -> dict[str, tuple[AtendimentoConversa, int]]:
+    """Cada caso do número do Duoke → (conversa, quanto ela soma)."""
+    integ, canal = await _loja(db, await make_user(), nome_loja)
+    c = {}
+
+    async def caso(nome, esperado, *falas, **campos):
+        c[nome] = (await _cena(db, integ, canal, f"{nome_loja}:{nome}", *falas, **campos), esperado)
+
+    vez = {CHAVE_VEZ_DA_LOJA: (AGORA - timedelta(minutes=60)).isoformat()}
+    # A ATV no Duoke (14/10 13:47): uma conversa com 4 não lidas + outra com 1.
+    await caso("quatro_nao_lidas", 4, ("cliente", 60), nao_lidas=4)
+    # O menu do robô do Duoke NÃO fecha a vez na fila: as não lidas contam.
+    await caso("uma_e_o_menu", 1, ("cliente", 60), ("loja", 59, MENU_DUOKE), nao_lidas=1)
+    # A equipe leu no Duoke (o não lido zerou): esperando, mas sem número.
+    await caso("lida", 0, ("cliente", 60))
+    # A loja respondeu (a plataforma ainda diz não lida): não espera.
+    await caso("respondida", 0, ("cliente", 60), ("loja", 30), nao_lidas=2)
+    await caso("fechada", 0, ("cliente", 60), situacao="fechada", nao_lidas=3)
+    await caso("nao_precisa", 0, ("cliente", 60), sem_resposta_necessaria=True, nao_lidas=2)
+    await caso("bloqueada", 2, ("cliente", 60), situacao="bloqueada", nao_lidas=2)
+    # Fora do chat (não está no Duoke): nada, mesmo esperando e não lida.
+    await caso(
+        "avaliacao", 0, ("cliente", 3 * 24 * 60), dados=vez, canal_nome="avaliacao", nao_lidas=1
+    )
+    await caso("reclamacao", 0, ("sistema", 60), dados=vez, canal_nome="reclamacao", nao_lidas=1)
+    await caso("carrinho", 0, ("cliente", 60), dados=vez, plataforma="site", canal_nome="carrinho")
+    await caso("comentario", 0, ("cliente", 60), plataforma="instagram", canal_nome="comentario")
+    # O e-mail da ponte mora na aba E-mail.
+    await caso("email_da_ponte", 0, ("cliente", 60), dados={"fonte": "tuta"}, canal_nome="email")
+    # O não lido da plataforma, conversa a conversa: TikTok e ML pós-venda.
+    await caso("tiktok", 3, ("cliente", 60), nao_lidas=3, plataforma="tiktok")
+    await caso(
+        "ml_pos_venda",
+        2,
+        ("loja", 90),
+        ("cliente", 60),
+        nao_lidas=2,
+        plataforma="ml",
+        canal_nome="pos_venda",
+    )
+    await caso(
+        "ml_pos_venda_lida",
+        0,
+        ("loja", 90),
+        ("cliente", 60),
+        plataforma="ml",
+        canal_nome="pos_venda",
+    )
+    # O não lido do ML NÃO zera quando a loja responde, e a automática não
+    # fecha a fila: a conversa respondida pela automática 1 min depois do
+    # comprador ficava no número sem linha marcada (Marquezini ML 14, medido
+    # 14/10/2026 17:21). O número só conta o que está no "Falta responder".
+    ml_auto = {"plataforma": "ml", "canal_nome": "pos_venda", "nao_lidas": 3}
+    await caso("ml_automatica", 0, ("cliente", 60), ("loja", 59, MENU_DUOKE), **ml_auto)
+    await caso(
+        "ml_bloqueada_automatica",
+        0,
+        ("cliente", 60),
+        ("loja", 59, MENU_DUOKE),
+        situacao="bloqueada",
+        **ml_auto,
+    )
+    # A bloqueada com o comprador por último está no "Falta responder" (a
+    # conversa espera alguém): conta, como a linha marcada.
+    await caso(
+        "ml_bloqueada",
+        2,
+        ("loja", 90),
+        ("cliente", 60),
+        situacao="bloqueada",
+        nao_lidas=2,
+        plataforma="ml",
+        canal_nome="pos_venda",
+    )
+    # Onde a plataforma não dá o não lido: 1 por conversa esperando resposta.
+    await caso("ml_pergunta", 1, ("cliente", 60), plataforma="ml", canal_nome="pergunta")
+    await caso("amazon_email", 1, ("cliente", 60), plataforma="amazon", canal_nome="email")
+    await caso(
+        "amazon_respondida",
+        0,
+        ("cliente", 60),
+        ("loja", 30),
+        plataforma="amazon",
+        canal_nome="email",
+    )
+    await caso("magalu_sac", 1, ("sistema", 60), dados=vez, plataforma="magalu", canal_nome="sac")
+    return c
+
+
+async def test_numero_do_duoke_python_e_sql_sao_gemeos(db, make_user):
+    mundo = await _mundo_duoke(db, make_user)
+    for nome, (conversa, esperado) in mundo.items():
+        await db.refresh(conversa)
+        assert pendente.nao_lidas_duoke(conversa) == esperado, nome
+        # O que conta no número está no "Falta responder" (a linha marcada).
+        if esperado:
+            assert pendente.falta_responder_no_chat(conversa), nome
+    # A automática do ML não fecha a FILA — é o "Falta responder" que tira.
+    for nome in ("ml_automatica", "ml_bloqueada_automatica"):
+        c = mundo[nome][0]
+        assert c.aguardando_resposta and c.nao_lidas == 3, nome
+        assert not pendente.falta_responder(c), nome
+    linhas = (
+        await db.execute(
+            select(AtendimentoConversa.externo_id, pendente.nao_lidas_duoke_sql()).where(
+                AtendimentoConversa.externo_id.like("atv:%")
+            )
+        )
+    ).all()
+    assert {e.removeprefix("atv:"): n for e, n in linhas} == {
+        nome: esperado for nome, (_, esperado) in mundo.items()
+    }
+    # O "não lido" de quem não espera resposta não vale nada — nem a fechada
+    # com o carimbo da fila de antes de fechar (o `gravar` zera; aqui, direto
+    # no banco), nem a do SAC, em que o "Falta responder" é a própria fila.
+    for nome in ("fechada", "magalu_sac"):
+        c = mundo[nome][0]
+        await db.execute(
+            update(AtendimentoConversa)
+            .where(AtendimentoConversa.id == c.id)
+            .values(situacao="fechada", aguardando_resposta=True, nao_lidas=3)
+        )
+        await db.refresh(c)
+        assert pendente.nao_lidas_duoke(c) == 0, nome
+        n = (
+            await db.execute(
+                select(pendente.nao_lidas_duoke_sql()).where(AtendimentoConversa.id == c.id)
+            )
+        ).scalar_one()
+        assert n == 0, nome
+    await db.rollback()
+
+
+async def test_falta_responder_no_chat_python_e_sql_sao_gemeas(db, make_user):
+    """O filtro "Falta responder" da Caixa: a régua do Duoke, só no chat."""
+    mundo = await _mundo(db, make_user)
+    esperado = set()
+    for nome, (conversa, falta) in mundo.items():
+        await db.refresh(conversa)
+        no_chat = falta and conversa.canal not in pendente.CANAIS_FORA_DO_CHAT
+        no_chat = no_chat and nome != "email_da_ponte"
+        assert pendente.falta_responder_no_chat(conversa) is no_chat, nome
+        if no_chat:
+            esperado.add(nome)
+    assert "reclamacao_vez_da_loja" not in esperado and "cliente_por_ultimo" in esperado
+    no_sql = set(
+        (
+            await db.execute(
+                select(AtendimentoConversa.externo_id).where(pendente.falta_responder_no_chat_sql())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert no_sql == esperado
+
+
+async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, auth_as):
+    """O /resumo: o número do Duoke por plataforma, por loja e o total (a aba
+    Caixa); o "Falta responder" (`aguardando`) só no chat; a Caixa Humano e o
+    não lido da plataforma (`nao_lidas`) como antes."""
+    mundo = await _mundo_duoke(db, make_user, "atv")
+    # Outra loja Shopee: a do Aguiar, 1 = 1 no Duoke.
+    aguiar, canal_ag = await _loja(db, await make_user(), "aguiar")
+    await _cena(db, aguiar, canal_ag, "aguiar:um", ("cliente", 30), nao_lidas=1)
+    auth_as(await make_user(permissions=PODE_TUDO))
+    r = (await client.get(f"{URL}/resumo")).json()
+    plats = {p["plataforma"]: p for p in r["plataformas"]}
+    soma: dict[str, int] = {"shopee": 1}  # o Aguiar
+    falta: dict[str, int] = {"shopee": 1}
+    for c, n in mundo.values():
+        await db.refresh(c)
+        soma[c.plataforma] = soma.get(c.plataforma, 0) + n
+        falta[c.plataforma] = falta.get(c.plataforma, 0) + pendente.falta_responder_no_chat(c)
+    assert soma == {
+        "shopee": 4 + 1 + 2 + 1,
+        "tiktok": 3,
+        # O pós-venda com o comprador por último e a bloqueada; a pergunta.
+        # As respondidas pela automática (3 não lidas cada) ficam de fora.
+        "ml": 2 + 2 + 1,
+        "amazon": 1,
+        "magalu": 1,
+        "site": 0,
+        "instagram": 0,
+    }
+    for plat, n in soma.items():
+        assert plats[plat]["nao_lidas_duoke"] == n, plat
+        assert plats[plat]["aguardando"] == falta[plat], plat
+    assert r["nao_lidas_duoke"] == sum(soma.values()) == 18
+    # Por loja: a ATV soma 4 + 1 + 2 (a bloqueada) na Shopee; o Aguiar, 1.
+    lojas = {(lj["plataforma"], lj["conta"]): lj for lj in r["lojas"]}
+    assert lojas[("shopee", "atv")]["nao_lidas_duoke"] == 7
+    assert lojas[("shopee", "aguiar")]["nao_lidas_duoke"] == 1
+    assert lojas[("tiktok", "atv")]["nao_lidas_duoke"] == 3
+    assert lojas[("ml", "atv")]["nao_lidas_duoke"] == 5
+    # A avaliação e a reclamação esperando (e marcadas) NÃO entram no
+    # "Falta responder" da ATV: o chat que falta são 5 conversas.
+    for nome in ("avaliacao", "reclamacao"):
+        c = mundo[nome][0]
+        assert c.aguardando_resposta and pendente.falta_responder(c), nome
+    atv = lojas[("shopee", "atv")]
+    assert atv["aguardando"] == falta["shopee"] - 1 == 5
+    # O não lido da plataforma (`nao_lidas`) continua a soma de tudo da loja na Caixa.
+    assert atv["nao_lidas"] == sum(
+        c.nao_lidas for n, (c, _) in mundo.items() if c.plataforma == "shopee"
+    )
+    itens = (
+        await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 100})
+    ).json()["itens"]
+    nomes = {str(c.id): n for n, (c, _) in mundo.items()}
+    vistos = {nomes.get(i["id"], "outra") for i in itens}
+    assert not vistos & {"avaliacao", "reclamacao", "carrinho", "comentario", "email_da_ponte"}
+    assert {"quatro_nao_lidas", "ml_pergunta", "amazon_email", "magalu_sac"} <= vistos
+    # Todo ponto do número está numa linha do "Falta responder", marcada.
+    contadas = {n for n, (_, e) in mundo.items() if e}
+    assert contadas <= vistos
+    assert all(i["falta_responder"] for i in itens if nomes.get(i["id"]) in contadas)
+    assert not {"ml_automatica", "ml_bloqueada_automatica"} & vistos
+    # A Caixa Humano não muda (as lojas daqui estão em Observar: nada nela).
+    assert r["humano"] == sum(p["humano"] for p in r["plataformas"]) == 0
 
 
 # ─────────────── a ordem da lista "Falta responder" ───────────────

@@ -35,6 +35,11 @@
 // NA CAIXA HUMANO (09/10/2026) o número de cada plataforma é o da Caixa
 // Humano (`numero="humano"`), não o "falta responder"; as plataformas que
 // aparecem são as mesmas.
+// NA CAIXA, O NÚMERO DO DUOKE (14/10/2026, o dono: "o nosso ATV mostra 9, o
+// deles 5 … tá pegando uns antigos de avaliação"): `numero="nao_lidas_duoke"`
+// — a soma das mensagens não lidas das conversas de chat esperando resposta,
+// como o Duoke mostra (services/atendimento/pendente.py, `nao_lidas_duoke`).
+// A API antiga não manda: cai no "falta responder".
 // Funções puras aqui em cima (testadas em tests/atendimento-filtro-plataforma.cjs
 // e tests/atendimento-caixa-humano.cjs).
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
@@ -54,9 +59,10 @@ export const GRUPOS_CAIXA: GrupoCaixa[] = [
   { valor: 'instagram,facebook', plataformas: ['instagram', 'facebook'], nome: 'Redes' },
 ]
 
-// O número do chip: o "falta responder" (`aguardando`, na Caixa) ou o da
-// Caixa Humano (`humano`) — o mesmo campo do /resumo em cada nível.
-export type NumeroDaCaixa = 'aguardando' | 'humano'
+// O número do chip: o do Duoke (`nao_lidas_duoke`, na Caixa), o "falta
+// responder" (`aguardando`) ou o da Caixa Humano (`humano`) — o mesmo campo
+// do /resumo em cada nível.
+export type NumeroDaCaixa = 'aguardando' | 'humano' | 'nao_lidas_duoke'
 // `aguardando` = o número que o chip mostra (o do `NumeroDaCaixa` escolhido).
 export type ChipPlataforma = GrupoCaixa & { aguardando: number }
 
@@ -98,24 +104,41 @@ export function chipDoTopo(chip: GrupoCaixa | null, f: Pick<FiltrosLista, 'plata
   return corte.length > 0 && topoDoValor(corte.join(',')) === chip.valor
 }
 
+// O número de uma linha do /resumo (plataforma ou loja). O do Duoke, na API
+// antiga (sem o campo), é o "falta responder".
+export function numeroDe(linha: { aguardando?: number; humano?: number; nao_lidas_duoke?: number } | null | undefined, numero: NumeroDaCaixa = 'aguardando'): number {
+  if (!linha) return 0
+  if (numero === 'nao_lidas_duoke' && typeof linha.nao_lidas_duoke !== 'number') return Number(linha.aguardando) || 0
+  return Number(linha[numero]) || 0
+}
+
 // O "falta responder" de um conjunto de plataformas (do /resumo) — ou, com
-// `numero = 'humano'`, quantas delas estão na Caixa Humano.
+// `numero = 'humano'`, quantas delas estão na Caixa Humano; com
+// `numero = 'nao_lidas_duoke'`, o número do Duoke.
 export function aguardandoDe(resumo: Resumo | null | undefined, plataformas: string[], numero: NumeroDaCaixa = 'aguardando'): number {
   return (resumo?.plataformas || [])
     .filter((p) => plataformas.includes(p.plataforma))
-    .reduce((s, p) => s + (Number(p[numero]) || 0), 0)
+    .reduce((s, p) => s + numeroDe(p, numero), 0)
 }
 
 // Como o número se lê no title ("3 conversa(s) falta responder").
 export function textoDoNumero(numero: NumeroDaCaixa = 'aguardando'): string {
-  return numero === 'humano' ? 'conversa(s) esperando uma pessoa (a IA não pode responder)' : 'conversa(s) falta responder'
+  if (numero === 'humano') return 'conversa(s) esperando uma pessoa (a IA não pode responder)'
+  if (numero === 'nao_lidas_duoke') return 'mensagem(ns) não lida(s) esperando resposta (como no Duoke)'
+  return 'conversa(s) falta responder'
+}
+// O mesmo, curto (o aria-label do item do menu).
+export function textoCurtoDoNumero(numero: NumeroDaCaixa = 'aguardando'): string {
+  if (numero === 'humano') return 'esperando uma pessoa'
+  if (numero === 'nao_lidas_duoke') return 'não lida(s) esperando resposta'
+  return 'falta responder'
 }
 
 // Os chips da pessoa: a plataforma EXISTE para ela quando o /resumo traz uma
-// loja dela (o /resumo já vem no escopo da equipe), ou conversa esperando —
-// e a que está escolhida fica sempre, para ela ver o que está filtrando.
-// Na Caixa Humano o número muda, as plataformas não (quem existe é pelo
-// "falta responder").
+// loja dela (o /resumo já vem no escopo da equipe), ou conversa esperando (o
+// "falta responder" ou o número do chip) — e a que está escolhida fica
+// sempre, para ela ver o que está filtrando. Na Caixa Humano o número muda,
+// as plataformas não.
 export function chipsDoResumo(resumo: Resumo | null | undefined, atual = '', numero: NumeroDaCaixa = 'aguardando'): ChipPlataforma[] {
   if (!resumo) return []
   const escolhidas = plataformasDoValor(atual)
@@ -127,9 +150,11 @@ export function chipsDoResumo(resumo: Resumo | null | undefined, atual = '', num
   const m = numero === 'humano' ? resumo.flags?.humano_modos : null
   const modos = Array.isArray(m) && m.length ? m : null
   const noModo = (g: GrupoCaixa) => !modos || (resumo.canais || []).some((c) => g.plataformas.includes(c.plataforma) && modos.includes(c.modo))
+  // O número do Duoke também diz que existe (nenhum número some da tela).
+  const pelaContagem = (g: GrupoCaixa) => numero === 'nao_lidas_duoke' && aguardandoDe(resumo, g.plataformas, numero) > 0
   return GRUPOS_CAIXA
     .map((g) => ({ ...g, aguardando: aguardandoDe(resumo, g.plataformas) }))
-    .filter((g) => g.plataformas.some((p) => comLoja.has(p)) || g.aguardando > 0 || escolhida(g))
+    .filter((g) => g.plataformas.some((p) => comLoja.has(p)) || g.aguardando > 0 || pelaContagem(g) || escolhida(g))
     .map((g) => (numero === 'aguardando' ? g : { ...g, aguardando: aguardandoDe(resumo, g.plataformas, numero) }))
     .filter((g) => noModo(g) || g.aguardando > 0 || escolhida(g))
 }
@@ -194,9 +219,9 @@ import { onClickOutside } from '@vueuse/core'
 const props = defineProps<{ resumo: Resumo | null; numero?: NumeroDaCaixa }>()
 const filtros = defineModel<FiltrosLista>('filtros', { required: true })
 
-const campo = computed<NumeroDaCaixa>(() => (props.numero === 'humano' ? 'humano' : 'aguardando'))
+const campo = computed<NumeroDaCaixa>(() => (props.numero === 'humano' || props.numero === 'nao_lidas_duoke' ? props.numero : 'aguardando'))
 const chips = computed(() => chipsDoResumo(props.resumo, filtros.value.plataforma, campo.value))
-const total = computed(() => (props.resumo?.plataformas || []).reduce((s, p) => s + (Number(p[campo.value]) || 0), 0))
+const total = computed(() => (props.resumo?.plataformas || []).reduce((s, p) => s + numeroDe(p, campo.value), 0))
 // O que o botão mostra: a plataforma do corte da barra (inteira ou com uma
 // loja dela escolhida) ou "Todas" — a barra inteira, mesmo com uma loja
 // clicada nela.
@@ -282,7 +307,7 @@ function titulo(chip: ChipPlataforma): string {
         class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
         :class="chipDoTopo(c, filtros) ? 'font-medium text-primary' : ''"
         :aria-checked="chipDoTopo(c, filtros)"
-        :aria-label="`Só ${c.nome}${c.aguardando ? ` — ${c.aguardando} ${campo === 'humano' ? 'esperando uma pessoa' : 'falta responder'}` : ''}`"
+        :aria-label="`Só ${c.nome}${c.aguardando ? ` — ${c.aguardando} ${textoCurtoDoNumero(campo)}` : ''}`"
         :title="titulo(c)"
         :data-chip="c.valor"
         @click="escolher(c)"

@@ -46,7 +46,7 @@ const LJ = (() => {
   new Function('require', 'module', 'exports', transpile(lojasSfc.script.content))(req, mod, mod.exports)
   return mod.exports
 })()
-const CORTE = ['corteDaBarra', 'gruposVisiveis', 'nomeDoCorte', 'ativaTodasDoCorte', 'filtrosTodasDoCorte', 'numeroDoCorte', 'filtrosDoGrupo']
+const CORTE = ['corteDaBarra', 'gruposVisiveis', 'nomeDoCorte', 'ativaTodasDoCorte', 'filtrosTodasDoCorte', 'numeroDoCorte', 'filtrosDoGrupo', 'campoDaBarra', 'numeroDaLoja', 'numeroDe']
 sfc('../components/AtendimentoCarrinho.vue')
 sfc('../components/AtendimentoPublicacao.vue')
 sfc('../components/AtendimentoIconePlataforma.vue')

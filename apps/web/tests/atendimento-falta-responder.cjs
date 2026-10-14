@@ -12,8 +12,9 @@
 //    antiga, pela fila; o selo de prazo é o da fila e o title diz quando o
 //    Duoke já dá a conversa por respondida;
 //  - e o contrato com a API: o /resumo conta pela régua nova (o `aguardando`
-//    da plataforma e da loja), o filtro `aguardando` da Caixa também, e a
-//    linha traz o `falta_responder`.
+//    da plataforma e da loja), o filtro `aguardando` da Caixa também — desde
+//    14/10/2026 só nas conversas de chat (`falta_responder_no_chat`) —, e a
+//    linha traz o `falta_responder` (em todo canal).
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -96,11 +97,11 @@ assert.match(tipos, /falta_responder\?: boolean/, 'a linha tem o campo (opcional
 const router = ler('../../api/app/routers/atendimento.py')
 const resumo = (router.match(/async def resumo\([\s\S]*?\n\nasync def _leitura_parada/) || [])[0]
 assert.ok(resumo, 'o /resumo existe')
-assert.match(resumo, /falta = pendente\.falta_responder_sql\(\)/)
+assert.match(resumo, /falta = pendente\.falta_responder_no_chat_sql\(\)/, 'só o chat (14/10/2026)')
 assert.equal((resumo.match(/func\.count\(\)\.filter\(falta\)/g) || []).length, 2, 'por plataforma e por loja')
 assert.equal((resumo.match(/func\.count\(\)\.filter\(aguardando\)/g) || []).length, 0, 'o número não é mais a fila')
-assert.match(router, /aguardando if caixa_humano or caixa_email else pendente\.falta_responder_sql\(\)/,
-  'o filtro da Caixa é a régua nova; a Caixa Humano e a aba E-mail ficam na fila')
+assert.match(router, /aguardando if caixa_humano or caixa_email else pendente\.falta_responder_no_chat_sql\(\)/,
+  'o filtro da Caixa é a régua nova, só no chat; a Caixa Humano e a aba E-mail ficam na fila')
 assert.match(router, /"falta_responder": pendente\.falta_responder\(c\)/, 'a linha traz o campo')
 const schemas = ler('../../api/app/schemas/atendimento.py')
 assert.match(schemas, /falta_responder: bool = False/)

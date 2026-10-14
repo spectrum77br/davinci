@@ -791,9 +791,18 @@ class ModeloOut(BaseModel):
 
 class PlataformaResumoOut(BaseModel):
     plataforma: str
+    # O "Falta responder" da Caixa (`pendente.falta_responder_no_chat`): o
+    # número da aba "Falta responder" — conversas de chat (14/10/2026: sem a
+    # avaliação, a reclamação, o carrinho e os comentários).
     aguardando: int
     vencendo: int
     vencidas: int
+    # O número do DUOKE (14/10/2026, `pendente.nao_lidas_duoke`): a soma das
+    # mensagens não lidas das conversas de chat esperando resposta — só as
+    # que estão no "Falta responder" (a linha marcada); 1 por conversa onde a
+    # plataforma não dá o não lido; o Direct, na janela de 24 h — o menu de
+    # plataformas, a barra de lojas e a aba Caixa.
+    nao_lidas_duoke: int = 0
     # Conversas com resposta nossa em `revisar` (ver `envio_a_conferir`).
     a_conferir: int = 0
     # Soma das não lidas das lojas da plataforma (o número da plataforma).
@@ -838,8 +847,11 @@ class LojaResumoOut(BaseModel):
     # do Duoke). O DaVinci só marca como lido quando a pessoa que mexe ABRE a
     # conversa de uma loja em que ele responde (14/10/2026, `atendimento/lida.py`).
     nao_lidas: int = 0
+    # O "Falta responder" da loja (ver PlataformaResumoOut).
     aguardando: int
     vencidas: int
+    # O número do Duoke da loja — a bolinha da barra (ver PlataformaResumoOut).
+    nao_lidas_duoke: int = 0
     # O pior estado entre os canais da loja (parado > sessao_caiu >
     # sem_escopo > erro > desligado > novo > ok): a loja que não está sendo
     # lida aparece apagada na barra. `parado` = o robô do Mac mini sem sinal
@@ -911,6 +923,8 @@ class ResumoOut(BaseModel):
     etiquetas: dict[str, int] = Field(default_factory=dict)
     # A Caixa Humano somando as plataformas (o número da aba).
     humano: int = 0
+    # O número do Duoke somando as plataformas (o número da aba Caixa).
+    nao_lidas_duoke: int = 0
     lojas: list[LojaResumoOut]
     canais: list[CanalOut]
     flags: FlagsOut

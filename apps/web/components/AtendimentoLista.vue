@@ -31,9 +31,14 @@ type OpcaoFiltro = { value: string; label: string; hint: string }
 // devolução, avaliação, SAC e carrinho seguem a fila (a plataforma diz de
 // quem é a vez). "Só resposta automática", "Vencendo" e "Vencidas" são o
 // PRAZO DA FILA — nela a automática não responde.
+// SÓ O CHAT (14/10/2026, o dono: "tá pegando uns antigos de avaliação"): o
+// "Falta responder" (a lista e o número da aba) é só das conversas de chat —
+// avaliação, reclamação/devolução, carrinho e comentários ficam nos filtros
+// próprios (o servidor decide: `pendente.falta_responder_no_chat`). A marca
+// da linha continua em todas.
 export const ABAS_LISTA: OpcaoFiltro[] = [
   { value: 'todas', label: 'Todas', hint: 'todas as conversas abertas, da mais recente para a mais antiga' },
-  { value: 'aguardando', label: 'Falta responder', hint: 'como o Pendente do Duoke: o comprador falou por último (qualquer mensagem da loja responde, até a automática) ou a conversa está não lida na Shopee/TikTok' },
+  { value: 'aguardando', label: 'Falta responder', hint: 'como o Pendente do Duoke: as conversas de chat em que o comprador falou por último (qualquer mensagem da loja responde, até a automática) ou que estão não lidas na Shopee/TikTok — avaliação, reclamação/devolução, carrinho e comentários ficam nos filtros próprios' },
 ]
 export const FILTROS_MENU: OpcaoFiltro[] = [
   { value: 'vencendo', label: 'Vencendo', hint: 'o prazo da fila acaba em menos de 2 h (na fila, a resposta automática não conta)' },
@@ -144,7 +149,7 @@ export function tituloDoPrazo(c: LinhaMarcavel, titulo: string, pelaFila = false
 import { onClickOutside } from '@vueuse/core'
 import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PackageX, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
 import { ETIQUETAS_INFO, faixaDaEtiqueta, secundariasDe } from '~/components/AtendimentoEtiqueta.vue'
-import { plataformasDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
+import { numeroDe, plataformasDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 import {
   canaisDa,
   canaisNosModos,
@@ -346,6 +351,11 @@ const lojas = computed(() => {
     .filter((l) => !f.length || f.includes(l.plataforma))
     .sort((a, b) => a.plataforma.localeCompare(b.plataforma) || (a.conta || '').localeCompare(b.conta || '', 'pt-BR'))
 })
+// O número da loja no seletor: o mesmo da barra (o do Duoke na Caixa, o da
+// Caixa Humano nela).
+function numeroNoSeletor(l: ResumoLojaLista): number {
+  return numeroDe(l, emHumano.value ? 'humano' : 'nao_lidas_duoke')
+}
 const lojaEscolhida = computed(() => chaveDaLoja({
   integration_id: filtros.value.integration_id || null,
   externo_ref: filtros.value.externo_ref || null,
@@ -493,8 +503,12 @@ const VAZIO: Record<string, string> = {
   fechadas: 'Nenhuma conversa fechada com esses filtros.',
   todas: 'Nenhuma conversa com esses filtros.',
 }
+// Os comentários das redes não entram no "Falta responder" (só o chat,
+// 14/10/2026): na caixa Comentários, o vazio aponta o filtro Mídia.
+const comentariosForaDoFalta = computed(() => filtros.value.filtro === 'aguardando' && filtros.value.canal === 'comentario')
 const textoVazio = computed(() => {
   if (filtros.value.q) return 'Nada encontrado para essa busca.'
+  if (comentariosForaDoFalta.value) return 'Os comentários não entram no "Falta responder" (só o chat): os que esperam a resposta da marca ficam no filtro Mídia.'
   return VAZIO[filtros.value.filtro] || VAZIO.todas
 })
 
@@ -549,7 +563,7 @@ function mover(delta: number) {
         >
           <option value="">todas lojas</option>
           <option v-for="l in lojas" :key="l.chave" :value="l.chave">
-            {{ umaPlataforma ? '' : `${plataformaInfo(l.plataforma).curto} · ` }}{{ l.conta || 'sem nome' }}<template v-if="emHumano ? l.humano : l.aguardando"> ({{ emHumano ? l.humano : l.aguardando }})</template>
+            {{ umaPlataforma ? '' : `${plataformaInfo(l.plataforma).curto} · ` }}{{ l.conta || 'sem nome' }}<template v-if="numeroNoSeletor(l)"> ({{ numeroNoSeletor(l) }})</template>
           </option>
         </select>
         <select
@@ -690,6 +704,9 @@ function mover(delta: number) {
         <div v-if="emHumano && foraDosModos" class="mt-2">
           <button type="button" class="text-xs underline" data-abrir-lojas @click="emit('abrirAba', 'lojas')">ver em Lojas e modo</button>
         </div>
+        <div v-if="!emHumano && comentariosForaDoFalta" class="mt-2">
+          <button type="button" class="text-xs underline" data-ver-midia @click="mudar('filtro', 'midia')">ver no filtro Mídia</button>
+        </div>
         <div v-if="filtros.filtro !== padrao" class="mt-2">
           <button type="button" class="text-xs underline" @click="mudar('filtro', padrao)">{{ emHumano ? 'tirar o filtro' : 'ver todas' }}</button>
         </div>
@@ -794,12 +811,13 @@ function mover(delta: number) {
                   esconder-pos-venda
                 />
                 <!-- RF7: comentário com pergunta ainda sem resposta da marca — vem
-                     primeiro no filtro Mídia e em "Falta responder". -->
+                     primeiro no filtro Mídia (desde 14/10/2026 o "Falta responder"
+                     é só o chat: o comentário não entra nele). -->
                 <span
                   v-if="c.eh_pergunta"
                   class="inline-flex items-center gap-0.5 rounded px-1.5 py-px font-medium"
                   :class="selo(c.id === selecionada, 'bg-pink-500/15 text-pink-700 dark:text-pink-300')"
-                  title="pergunta sem resposta da marca: vem primeiro no filtro Mídia e em Falta responder"
+                  title="pergunta sem resposta da marca: vem primeiro no filtro Mídia"
                   data-selo-pergunta
                 >
                   <span class="font-bold" aria-hidden="true">?</span> pergunta
