@@ -5,8 +5,14 @@ conversas vem da mais recente para a mais antiga, e cada rodada desce por ela
 até encontrar o ponto em que a rodada anterior parou. Formato das respostas
 medido em produção em 25/09/2026 e o sentido da lista em 28/09 (só leitura).
 
-NUNCA marcar como lido. O cliente não tem `read_conversation` de propósito:
+NUNCA marcar como lido AQUI (leitura e envio). Desde 14/10/2026 (Eduardo: "ao
+passar também tem que marcar como visto, igual lá no Duoke") o cliente tem o
+`chat_read_conversation`, e só o `lida.py` o chama — quando a PESSOA que mexe
+abre a conversa de uma loja em que o DaVinci responde. Fora disso,
 enquanto o Duoke estiver ligado, o "não lido" da Shopee é o aviso da equipe.
+E ele é LIDO toda rodada (14/10/2026, `_atualizar_nao_lidas`): o total e a
+lista só das não lidas (`type=unread`) acertam o `nao_lidas` de cada conversa
+— a que a equipe abriu no Duoke volta a zero sem esperar mensagem nova.
 
 O cursor do canal (`atendimento_canais.cursor`):
 
@@ -136,6 +142,11 @@ JANELA_PRIMEIRA_LEITURA = timedelta(days=7)
 DIRECAO_MAIS_ANTIGAS = "older"
 DIRECAO_TOPO = DIRECAO_MAIS_ANTIGAS
 TIPO_LISTA = "all"
+# O NÃO LIDO fresco (14/10/2026, `_atualizar_nao_lidas`): a lista só das não
+# lidas (`type=unread`), no máximo 4 páginas (100 conversas) por rodada —
+# passou disso, marca o que viu e não zera ninguém.
+TIPO_NAO_LIDAS = "unread"
+MAX_PAGINAS_NAO_LIDAS = 4
 # Lacunas guardadas no cursor: acima disso, as duas mais antigas viram uma
 # só (relendo o trecho entre elas, que o `gravar` deduplica).
 MAX_LACUNAS = 5
@@ -854,6 +865,95 @@ async def _reconferir_enviadas(
     return novas
 
 
+async def _atualizar_nao_lidas(
+    session: AsyncSession, canal: AtendimentoCanal, cliente: Any, total: int
+) -> None:
+    """O NÃO LIDO de agora em todas as conversas do canal (14/10/2026). SÓ LEITURA.
+
+    O `nao_lidas` de cada conversa só andava quando chegava mensagem nova: a
+    equipe abria a conversa no Duoke (a Shopee zera o não lido) e o DaVinci
+    continuava contando como não lida (Inova: 25 no DaVinci, 0 no Duoke). É
+    metade do "Falta responder" igual ao Duoke (`pendente.py`).
+
+    `total` = o `get_unread_conversation_count` desta rodada. Zero: ninguém
+    está não lido — zera, sem chamada. Senão, a lista SÓ das não lidas
+    (`type=unread`, a mesma paginação da caminhada), até
+    `MAX_PAGINAS_NAO_LIDAS`: a conversa que veio fica com o número dela (no
+    mínimo 1 — estar nessa lista já é estar não lida); a que não veio zera,
+    se a lista acabou. Falhou: não mexe em nada (fica o valor de antes) e a
+    rodada segue. Roda ANTES da caminhada: a conversa que ela relê fica com o
+    número da lista dela, que é mais novo.
+    """
+    candidatas = await session.scalar(
+        select(func.count())
+        .select_from(AtendimentoConversa)
+        .where(
+            AtendimentoConversa.integration_id == canal.integration_id,
+            AtendimentoConversa.canal == CANAL_CHAT,
+            *([AtendimentoConversa.nao_lidas > 0] if total <= 0 else []),
+        )
+    )
+    if not candidatas:
+        return  # nada gravado a acertar (loja nova, ou ninguém não lido dos dois lados)
+    contagens: dict[str, int] = {}
+    completa = True
+    if total > 0:
+        pagina: dict | None = None
+        completa = False
+        try:
+            for _ in range(MAX_PAGINAS_NAO_LIDAS):
+                resp = await cliente.chat_conversation_list(
+                    direction=DIRECAO_TOPO if pagina is None else DIRECAO_MAIS_ANTIGAS,
+                    tipo=TIPO_NAO_LIDAS,
+                    page_size=PAGINA_CONVERSAS,
+                    next_timestamp_nano=(pagina or {}).get("next_message_time_nano"),
+                )
+                conversas = [c for c in (resp.get("conversations") or []) if isinstance(c, dict)]
+                for conv in conversas:
+                    externo_id = str(conv.get("conversation_id") or "").strip()
+                    if externo_id:
+                        contagens[externo_id] = max(1, _int(conv.get("unread_count")) or 0)
+                info = resp.get("page_result") or {}
+                proximo = info.get("next_cursor")
+                if (
+                    not conversas
+                    or not info.get("more")
+                    or not isinstance(proximo, dict)
+                    or not proximo.get("next_message_time_nano")
+                ):
+                    completa = True
+                    break
+                seguinte = {"next_message_time_nano": str(proximo["next_message_time_nano"])}
+                if seguinte == pagina:
+                    completa = True  # o mesmo cursor de novo: a lista acabou
+                    break
+                pagina = seguinte
+        except (httpx.HTTPError, RuntimeError) as exc:
+            logger.warning(
+                "atendimento_shopee_lista_nao_lidas_falhou",
+                canal_id=str(canal.id),
+                erro=_erro_operacao(exc),
+            )
+            return
+    mudaram = await gravar.aplicar_nao_lidas(
+        session,
+        integration_id=canal.integration_id,
+        canal_nome=CANAL_CHAT,
+        contagens=contagens,
+        completa=completa,
+    )
+    await gravar.fim_do_item(session)
+    if mudaram or not completa:
+        logger.info(
+            "atendimento_shopee_nao_lidas",
+            canal_id=str(canal.id),
+            total=total,
+            vistas=len(contagens),
+            completa=completa,
+            mudaram=mudaram,
+        )
+
+
 async def sincronizar(
     session: AsyncSession,
     canal: AtendimentoCanal,
@@ -893,6 +993,9 @@ async def sincronizar(
         # aqui o deixaria travado durante todas as chamadas à Shopee, e a troca
         # de modo pela tela esperaria.
         resultado.nao_lidas = nao_lidas
+        # 1b) O não lido de agora em cada conversa (o "Falta responder" igual
+        #     ao Duoke). Sem o total (a chamada acima falhou), nada muda.
+        await _atualizar_nao_lidas(session, canal, cliente, nao_lidas)
 
     # 2) O TOPO primeiro (do agora até o `ultimo_ts`), depois as lacunas com o
     #    que sobrar do teto de conversas por rodada.

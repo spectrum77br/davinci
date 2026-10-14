@@ -957,8 +957,11 @@ class TikTokClient:
     # escopo `seller.customer_service` (pedido manual no Partner Center). Os
     # métodos devolvem o corpo CRU (`code`/`message`/`data`) — é quem chama que
     # decide que 401/105005 é "sem escopo" e não erro a cada rodada. Formato
-    # pela documentação oficial (não medido). Nenhum método aqui chama o
-    # `Read Message`: ler pelo DaVinci apagaria o "não lido" da equipe.
+    # pela documentação oficial (não medido). Nenhum método de LEITURA aqui
+    # chama o `Read Message`: ler pelo DaVinci apagaria o "não lido" da equipe.
+    # 14/10/2026 (decisão do dono): o `cs_read_message` existe, mas só a
+    # PESSOA que mexe na caixa marca, ao ABRIR a conversa de uma loja em que o
+    # DaVinci responde (`services/atendimento/lida.py`).
 
     async def cs_conversations(
         self, page_size: int = 20, page_token: str | None = None
@@ -985,7 +988,8 @@ class TikTokClient:
         page_token: str | None = None,
     ) -> dict:
         """Uma página das mensagens de UMA conversa, das mais novas para as
-        mais antigas (`sort_order=DESC` por `create_time`). Não marca como lida.
+        mais antigas (`sort_order=DESC` por `create_time`). Não marca como lida
+        (quem marca é o `cs_read_message`, só pela pessoa — 14/10/2026).
 
             GET /customer_service/202309/conversations/{conversation_id}/messages
 
@@ -1066,6 +1070,24 @@ class TikTokClient:
         corpo = {"type": "IMAGE", "content": json.dumps(conteudo, ensure_ascii=False)}
         return await self._post(
             f"/customer_service/202309/conversations/{conversation_id}/messages", corpo
+        )
+
+    async def cs_read_message(self, conversation_id: str) -> dict:
+        """Marca TODAS as mensagens da conversa como lidas (`Read Message`).
+
+            POST /customer_service/202309/conversations/{conversation_id}/messages/read
+            (sem corpo — o `_post` assina e manda `{}`)
+
+        Devolve o corpo cru (`code` 0 = marcou; 401/105005 = o app sem
+        `seller.customer_service`, como hoje em todas as lojas). Formato pela
+        documentação (o mesmo caminho do SDK EcomPHP), não medido numa loja.
+
+        14/10/2026: SÓ o `services/atendimento/lida.py` chama isto — a PESSOA
+        que mexe na caixa abriu a conversa de uma loja em que o DaVinci
+        responde. A leitura (`cs_conversations`, `cs_messages`) continua sem
+        marcar nada."""
+        return await self._post(
+            f"/customer_service/202309/conversations/{conversation_id}/messages/read"
         )
 
     async def update_stock(

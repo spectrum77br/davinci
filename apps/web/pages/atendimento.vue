@@ -328,7 +328,8 @@ async function carregarMais() {
 
 // A conversa aberta mudou (enviou, fechou, atribuiu, a IA sugeriu): a linha
 // dela na lista acompanha sem esperar o próximo tique. Se mudou o que os
-// contadores contam (aguardando, "a conferir"), o resumo também é relido —
+// contadores contam (aguardando, o "Falta responder" igual ao Duoke — o
+// `falta_responder` da linha —, "a conferir"), o resumo também é relido —
 // senão o "A conferir (1)" ficava lá até 30 s depois de a pessoa marcar.
 function aoMudarConversa(c: ConversaResumo) {
   // A conversa de e-mail que chegou à Caixa pelo id (um link antigo, o alerta,
@@ -353,6 +354,7 @@ function aoMudarConversa(c: ConversaResumo) {
   // A etiqueta também (troca à mão): as contagens do menu Filtrar acompanham.
   // E a Caixa Humano (o número da aba e da barra).
   if (antes && (antes.aguardando_resposta !== c.aguardando_resposta || !!antes.envio_a_conferir !== !!c.envio_a_conferir
+    || (c.falta_responder !== undefined && !!antes.falta_responder !== !!c.falta_responder)
     || (c.etiqueta !== undefined && (antes.etiqueta ?? null) !== (c.etiqueta ?? null))
     || (c.humano !== undefined && !!antes.humano !== !!c.humano))) {
     void carregarResumo()

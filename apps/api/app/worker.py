@@ -908,7 +908,9 @@ async def atendimento_sincronizar(ctx: dict) -> dict | None:
     Também é o job que o botão "Sincronizar" da tela enfileira.
 
     Desligado por padrão (`atendimento_leitura_ativa`): deploy não liga nada.
-    Nunca marca como lido — o Duoke continua ligado e depende do "não lido".
+    Nunca marca como lido — o Duoke continua ligado e depende do "não lido"
+    (desde 14/10/2026 só a pessoa marca, ao abrir a conversa de uma loja em
+    que o DaVinci responde: services/atendimento/lida.py).
     """
     if not _settings.atendimento_leitura_ativa:
         return None

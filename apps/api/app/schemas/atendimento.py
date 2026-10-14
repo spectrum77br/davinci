@@ -161,6 +161,13 @@ class ConversaResumoOut(BaseModel):
     prazo_resposta_em: datetime | None = None
     situacao: str
     nao_lidas: int = 0
+    # No "Falta responder" da Caixa, IGUAL AO DUOKE (14/10/2026,
+    # `services/atendimento/pendente.py`): o comprador por último (qualquer
+    # mensagem da loja responde, até a automática) ou não lida no chat da
+    # Shopee/TikTok; onde a plataforma diz de quem é a vez, a fila. A tela
+    # marca a linha (negrito, bolinha) por ele. A fila de verdade (a IA, o
+    # prazo) continua `aguardando_resposta`.
+    falta_responder: bool = False
     # Mensagens do comprador desde a última resposta de verdade (a bolinha).
     pendentes: int = 0
     tem_rascunho: bool = False
@@ -422,6 +429,12 @@ class ConversaDetalheOut(BaseModel):
     # desligado — os mesmos portões do POST /pedido/atualizar. False = a tela
     # esconde o botão em vez de mostrar o 409.
     pedido_atualizavel: bool = False
+    # A tela marca a conversa como LIDA ao abrir (POST /conversas/{id}/lida,
+    # 14/10/2026)? Quem vê mexe na caixa, a loja está num modo em que o
+    # DaVinci responde (nunca `observar`), o envio está ligado, a plataforma
+    # tem "lida" (chat da Shopee e da TikTok, pós-venda do ML) e há não lidas
+    # — as mesmas travas da rota (`services/atendimento/lida.py`).
+    marcar_lida: bool = False
     # As mudanças de etiqueta da conversa, da mais antiga para a mais nova
     # (`etiqueta.historico_da_conversa`) — a linha do tempo da etiqueta.
     etiqueta_historico: list[EtiquetaHistoricoOut] = Field(default_factory=list)
@@ -822,7 +835,8 @@ class LojaResumoOut(BaseModel):
     # O nome da integração, para o `title` (quem tem duas conexões na mesma loja).
     integracao: str | None = None
     # Soma de `conversa.nao_lidas` — o número que a PLATAFORMA dá (o mesmo
-    # do Duoke): o DaVinci nunca marca como lido.
+    # do Duoke). O DaVinci só marca como lido quando a pessoa que mexe ABRE a
+    # conversa de uma loja em que ele responde (14/10/2026, `atendimento/lida.py`).
     nao_lidas: int = 0
     aguardando: int
     vencidas: int

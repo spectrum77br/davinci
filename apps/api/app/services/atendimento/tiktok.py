@@ -6,6 +6,12 @@ de vídeo da tela funcionando). Então o adaptador existe para o dia da
 aprovação e, até lá, devolve `sem_escopo` SEM gravar nada e sem levantar —
 o canal fica marcado e a rodada seguinte não vira alarme.
 
+Marcar como lida (14/10/2026, Eduardo: "ao passar também tem que marcar como
+visto, igual lá no Duoke"): ESTE módulo continua sem marcar nada — o `Read
+Message` (`cs_read_message`) só é chamado pelo `lida.py`, quando a PESSOA que
+mexe abre a conversa de uma loja em que o DaVinci responde (e, enquanto faltar
+o escopo, a TikTok recusa e a conversa continua não lida).
+
 O formato é o da documentação oficial (nunca medido, sem escopo não dá);
 por isso a leitura é DEFENSIVA: campo que falta vira None, `content` que não
 é JSON vira mensagem `outro`, e nada disso derruba a rodada.
@@ -19,6 +25,9 @@ Cursor do canal (mesma ideia da Shopee — ver `atendimento/shopee.py`):
               quando uma passada para no teto de conversas
               (`atendimento_sync_max_conversas`) antes do fim.
 
+  nao_lidas — a passada do não lido pela lista (`_Passada`, 14/10/2026), só
+              enquanto há conversa a conferir.
+
 Toda rodada lê primeiro o TOPO (até o `ultimo_ts`) e só com o que sobrar do
 teto continua as lacunas: a mensagem nova não espera a caminhada antiga.
 
@@ -26,8 +35,11 @@ A doc não garante a ORDEM da lista de conversas. Para não depender dela, a
 passada só termina numa página em que TODAS as conversas são antigas (e a
 rodada nunca passa de `MAX_PAGINAS_POR_RODADA` páginas).
 
-Nunca marca como lido (o `Read Message` não é chamado). Texto de comprador
-nunca vai para o log — só ids e contagens.
+Nunca marca como lido (o `Read Message` não é chamado). O não lido da TikTok
+é RELIDO nas conversas gravadas como não lidas em que ele conta no "Falta
+responder" (14/10/2026, `_atualizar_nao_lidas`): a que a equipe leu no Duoke
+volta a zero sem esperar mensagem nova. Texto de comprador nunca vai para o
+log — só ids e contagens.
 """
 
 from __future__ import annotations
@@ -44,7 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import AtendimentoCanal, AtendimentoConversa, AtendimentoMensagem, Integration
-from app.services.atendimento import enriquecer, gravar, lojas
+from app.services.atendimento import enriquecer, gravar, lojas, pendente
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
@@ -81,6 +93,12 @@ PAGINA_CONVERSAS = 20
 PAGINA_MENSAGENS = 10
 PAGINAS_MENSAGENS = 3
 MAX_PAGINAS_POR_RODADA = 10
+# O NÃO LIDO fresco (14/10/2026, `_atualizar_nao_lidas`): a lista de conversas
+# relida em passadas de no máximo 3 páginas (60 conversas) por rodada — a
+# passada continua na rodada seguinte (`nao_lidas` no cursor) —, só quando há
+# conversa gravada com não lida que conta no "Falta responder".
+MAX_PAGINAS_NAO_LIDAS = 3
+CHAVE_PASSADA_NAO_LIDAS = "nao_lidas"
 # Lacunas guardadas no cursor: acima disso, as duas mais antigas viram uma.
 MAX_LACUNAS = 5
 JANELA_PRIMEIRA_LEITURA = timedelta(days=7)
@@ -215,6 +233,8 @@ class _Cursor:
     ultimo_ts: int | None = None
     lacunas: list[_Lacuna] = field(default_factory=list)
     falhas: dict[str, int] = field(default_factory=dict)
+    # A passada do não lido (`_Passada`, 14/10/2026): passa intacta pela caminhada.
+    nao_lidas: dict | None = None
 
     @classmethod
     def ler(cls, bruto: Any, *, piso_inicial: int) -> _Cursor:
@@ -236,20 +256,25 @@ class _Cursor:
             teto = _int(d.get("teto"))
             ultimo = teto if teto is not None else ultimo
         falhas = d.get("falhas")
+        passada = d.get(CHAVE_PASSADA_NAO_LIDAS)
         return cls(
             ultimo_ts=ultimo,
             lacunas=lacunas,
             falhas={str(k): n for k, v in falhas.items() if (n := _int(v))}
             if isinstance(falhas, dict)
             else {},
+            nao_lidas=passada if isinstance(passada, dict) else None,
         )
 
     def json(self) -> dict:
-        return {
+        saida = {
             "ultimo_ts": self.ultimo_ts,
             "lacunas": [lac.json() for lac in self.lacunas],
             "falhas": dict(self.falhas),
         }
+        if self.nao_lidas is not None:
+            saida[CHAVE_PASSADA_NAO_LIDAS] = self.nao_lidas
+        return saida
 
 
 def _juntar_lacunas(lacunas: list[_Lacuna]) -> list[_Lacuna]:
@@ -601,6 +626,177 @@ async def _caminhar(
     return _Passo(False, pagina, visto, processadas, paginas)
 
 
+@dataclass
+class _Passada:
+    """A passada do NÃO LIDO pela lista (`_atualizar_nao_lidas`), no cursor do canal.
+
+    retomar — o `page_token` de onde a próxima rodada continua (None = o topo);
+    desde   — quando a passada começou (s): a conversa com mensagem depois
+              disso a caminhada já releu, com o número fresco;
+    vistas  — as conferidas nesta passada que continuam NÃO lidas na TikTok;
+    sem_numero — alguma veio sem `unread_count`: no fim, não zera ninguém.
+    """
+
+    retomar: str | None
+    desde: int
+    vistas: set[str] = field(default_factory=set)
+    sem_numero: bool = False
+
+    @classmethod
+    def ler(cls, bruto: Any) -> _Passada | None:
+        if not isinstance(bruto, dict) or _int(bruto.get("desde")) is None:
+            return None
+        vistas = bruto.get("vistas")
+        return cls(
+            retomar=str(bruto.get("retomar") or "").strip() or None,
+            desde=int(bruto["desde"]),
+            vistas={str(v) for v in vistas} if isinstance(vistas, list) else set(),
+            sem_numero=bool(bruto.get("sem_numero")),
+        )
+
+    def json(self) -> dict:
+        return {
+            "retomar": self.retomar,
+            "desde": self.desde,
+            "vistas": sorted(self.vistas),
+            "sem_numero": self.sem_numero,
+        }
+
+
+def _guardar_passada(canal: AtendimentoCanal, passada: _Passada | None) -> None:
+    """A passada no cursor do canal (None = acabou: a próxima começa do topo)."""
+    atual = dict(canal.cursor or {})
+    if passada is None and CHAVE_PASSADA_NAO_LIDAS not in atual:
+        return
+    if passada is None:
+        atual.pop(CHAVE_PASSADA_NAO_LIDAS, None)
+    else:
+        atual[CHAVE_PASSADA_NAO_LIDAS] = passada.json()
+    canal.cursor = atual
+
+
+async def _atualizar_nao_lidas(
+    session: AsyncSession, canal: AtendimentoCanal, cliente: Any
+) -> None:
+    """O NÃO LIDO de agora nas conversas em que ele conta (14/10/2026). SÓ LEITURA.
+
+    A mesma ideia da Shopee (`shopee._atualizar_nao_lidas`), sem a lista só
+    das não lidas: a TikTok não tem filtro, mas cada conversa da lista traz
+    o `unread_count`. O não lido SOBE com mensagem nova (a caminhada já grava
+    o número); o que fica velho é o que DESCE — a equipe leu no Duoke.
+
+    CANDIDATAS: as gravadas com não lida em que ela põe a conversa no "Falta
+    responder" (`pendente.nao_lida_conta_sql`: com fala do comprador). A
+    conversa só de aviso (o cartão de status do pedido, "já segue nossa
+    loja") fica não lida na TikTok para sempre e não conta — conferir ela
+    custava 3 chamadas por rodada, sempre (medido em 14/10/2026: 27 assim,
+    até a posição 377 da lista).
+
+    Sem candidata: nada (nenhuma chamada). Com: a lista em PASSADAS de no
+    máximo `MAX_PAGINAS_NAO_LIDAS` páginas por rodada; a passada continua na
+    rodada seguinte de onde parou (`_Passada` no cursor) e acaba quando viu
+    todas as candidatas (a que mudou depois do começo dela a caminhada já
+    releu) ou quando a lista acaba — aí a candidata que não apareceu não
+    lida zera. Cada conversa vista fica com o número dela. Falhou: não mexe
+    em nada e a próxima rodada recomeça do topo (o `page_token` guardado pode
+    ter vencido). Roda ANTES da caminhada (a conversa que ela relê fica com o
+    número dela, mais novo). Nunca chama o `Read Message`.
+    """
+    consulta = select(AtendimentoConversa.externo_id, AtendimentoConversa.ultima_mensagem_em).where(
+        AtendimentoConversa.integration_id == canal.integration_id,
+        AtendimentoConversa.canal == CANAL_CHAT,
+        pendente.nao_lida_conta_sql(),
+    )
+    candidatas: dict[str, int | None] = {
+        externo: (int(ultima.timestamp()) if ultima else None)
+        for externo, ultima in (await session.execute(consulta)).all()
+    }
+    if not candidatas:
+        _guardar_passada(canal, None)
+        return
+    passada = _Passada.ler((canal.cursor or {}).get(CHAVE_PASSADA_NAO_LIDAS)) or _Passada(
+        retomar=None, desde=int(datetime.now(UTC).timestamp())
+    )
+    contagens: dict[str, int] = {}
+
+    def faltam() -> set[str]:
+        """As candidatas ainda por ver nesta passada (sem mensagem desde o começo dela)."""
+        return {
+            externo
+            for externo, ts in candidatas.items()
+            if externo not in passada.vistas
+            and externo not in contagens
+            and (ts is None or ts < passada.desde)
+        }
+
+    fim_da_lista = False
+    pagina = passada.retomar
+    try:
+        for _ in range(MAX_PAGINAS_NAO_LIDAS):
+            data = _conferir(
+                await cliente.cs_conversations(page_size=PAGINA_CONVERSAS, page_token=pagina)
+            )
+            conversas = [c for c in (data.get("conversations") or []) if isinstance(c, dict)]
+            for conv in conversas:
+                externo_id = str(conv.get("id") or "").strip()
+                n = _int(conv.get("unread_count"))
+                if externo_id and n is not None and n >= 0:
+                    contagens[externo_id] = n
+                    if n > 0:
+                        passada.vistas.add(externo_id)
+                    else:
+                        passada.vistas.discard(externo_id)
+                elif externo_id:
+                    # Formato inesperado: não dá para dizer que as outras
+                    # estão lidas — no fim da passada, ninguém zera.
+                    passada.sem_numero = True
+            proximo = str(data.get("next_page_token") or "").strip()
+            if not conversas or not proximo or proximo == pagina:
+                fim_da_lista = True
+                break
+            pagina = proximo
+            if not faltam():
+                break  # já viu todas
+    except (_RecusaError, httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            "atendimento_tiktok_nao_lidas_falhou",
+            canal_id=str(canal.id),
+            erro=_erro_operacao(exc),
+        )
+        _guardar_passada(canal, None)
+        return
+    restantes = faltam()
+    zeradas = 0
+    if restantes and fim_da_lista and not passada.sem_numero:
+        # A lista inteira passou e elas não vieram não lidas: lidas no Duoke.
+        contagens.update(dict.fromkeys(restantes, 0))
+        zeradas = len(restantes)
+    if not restantes or fim_da_lista:
+        _guardar_passada(canal, None)
+    else:
+        passada.retomar = pagina
+        passada.vistas &= set(candidatas)
+        _guardar_passada(canal, passada)
+    mudaram = await gravar.aplicar_nao_lidas(
+        session,
+        integration_id=canal.integration_id,
+        canal_nome=CANAL_CHAT,
+        contagens=contagens,
+        completa=False,
+    )
+    await gravar.fim_do_item(session)
+    if mudaram or (restantes and not fim_da_lista):
+        logger.info(
+            "atendimento_tiktok_nao_lidas",
+            canal_id=str(canal.id),
+            candidatas=len(candidatas),
+            vistas=len(contagens),
+            faltam=0 if fim_da_lista else len(restantes),
+            zeradas=zeradas,
+            mudaram=mudaram,
+        )
+
+
 async def sincronizar(
     session: AsyncSession,
     canal: AtendimentoCanal,
@@ -621,6 +817,9 @@ async def sincronizar(
     caminhada antiga terminar (ver `atendimento/shopee.py`).
     """
     resultado = ResultadoSync(status=STATUS_OK)
+    # O não lido de agora nas conversas gravadas como não lidas (o "Falta
+    # responder" igual ao Duoke). Falhou, nada muda e a rodada segue.
+    await _atualizar_nao_lidas(session, canal, cliente)
     maximo = max(1, int(get_settings().atendimento_sync_max_conversas or 1))
     janela = int((datetime.now(UTC) - JANELA_PRIMEIRA_LEITURA).timestamp())
     cursor = _Cursor.ler(canal.cursor, piso_inicial=janela)
@@ -698,6 +897,7 @@ async def sincronizar(
             ultimo_ts=ultimo_ts,
             lacunas=_juntar_lacunas(novas_lacunas + pendentes),
             falhas=cursor.falhas,
+            nao_lidas=cursor.nao_lidas,
         ).json()
         resultado.status = STATUS_SEM_ESCOPO if sem_escopo else STATUS_ERRO
         resultado.erro = _erro_operacao(exc)
@@ -711,7 +911,9 @@ async def sincronizar(
         return resultado
 
     lacunas = _juntar_lacunas(novas_lacunas + pendentes)
-    canal.cursor = _Cursor(ultimo_ts=ultimo_ts, lacunas=lacunas, falhas=cursor.falhas).json()
+    canal.cursor = _Cursor(
+        ultimo_ts=ultimo_ts, lacunas=lacunas, falhas=cursor.falhas, nao_lidas=cursor.nao_lidas
+    ).json()
     logger.info(
         "atendimento_tiktok_sync",
         canal_id=str(canal.id),

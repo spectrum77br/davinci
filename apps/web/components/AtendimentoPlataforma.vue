@@ -157,6 +157,10 @@ export type ConversaResumo = {
   prazo_resposta_em: string | null
   situacao: string
   nao_lidas: number
+  // No "Falta responder" da Caixa, igual ao Duoke (14/10/2026): o comprador
+  // por último (até a automática responde) ou não lida na plataforma. A API
+  // antiga não manda.
+  falta_responder?: boolean
   // Mensagens do comprador desde a última resposta de verdade (a bolinha);
   // a API antiga não manda — cai no `nao_lidas` da plataforma.
   pendentes?: number
@@ -519,6 +523,10 @@ export type Detalhe = {
   // O "atualizar" do painel Pedido passaria nos portões do POST agora?
   // (plataforma com retrato, loja conectada, leitura ligada, canal ligado)
   pedido_atualizavel?: boolean
+  // Marcar como lida ao abrir (14/10/2026): quem vê mexe, a loja num modo em
+  // que o DaVinci responde (nunca Observar), plataforma com "lida" e há não
+  // lidas — as travas do POST /lida (lib/atendimentoLida.ts).
+  marcar_lida?: boolean
   // As mudanças de etiqueta, da mais antiga para a mais nova.
   etiqueta_historico?: EtiquetaHistorico[]
 }

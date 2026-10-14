@@ -222,6 +222,7 @@ import { sinalDeEmails } from '~/components/AtendimentoEmailVenda.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
+import { criarMarcadorDeLida, querMarcarLida } from '~/lib/atendimentoLida'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
@@ -502,6 +503,44 @@ usePollingVisivel(async () => {
   atualizacaoFalhou.value = false
   await carregar(props.conversaId, true)
 }, 15_000)
+
+// ─── marcar como lida ao abrir (14/10/2026) ─────────────────────────────────
+// O Eduardo: "ao passar também tem que marcar como visto, igual lá no Duoke
+// quando clicar na conversa". Quem MEXE abriu a conversa de uma loja em que o
+// DaVinci responde (o detalhe diz `marcar_lida`; em Observar, nunca) e ela
+// ficou 1,5 s aberta com a aba visível: POST /lida, uma vez por abertura — a
+// plataforma marca e o número de não lidas zera. Quem passou rápido pela lista
+// com as setas não marca nada. Falhou, segue: a conversa continua não lida (a
+// regra inteira em lib/atendimentoLida.ts e services/atendimento/lida.py).
+type LidaResposta = { marcada: boolean; motivo?: string | null; aviso?: string | null; conversa?: ConversaResumo | null }
+const marcadorLida = criarMarcadorDeLida({
+  atual: () => props.conversaId || null,
+  visivel: () => props.ativa !== false && (typeof document === 'undefined' || document.visibilityState === 'visible'),
+  marcar: async (id) => {
+    const r = await api<LidaResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/lida`, { method: 'POST' })
+    const d = detalhe.value
+    if (!r?.marcada || id !== props.conversaId || !d || d.conversa.id !== id) return
+    const c = { ...d.conversa, ...(r.conversa || {}), nao_lidas: r.conversa?.nao_lidas ?? 0 }
+    detalhe.value = { ...d, conversa: c }
+    emit('mudou', c)
+  },
+})
+// Cada detalhe que chega (ao abrir e no polling) diz se é para marcar.
+watch(() => detalhe.value, (d) => {
+  if (d) marcadorLida.abrir(d.conversa.id, querMarcarLida(d, props.canEdit))
+})
+watch(() => props.conversaId, () => marcadorLida.fechar())
+watch(() => props.ativa, (a) => {
+  if (a !== false) marcadorLida.retomar()
+})
+function lidaAoVoltarAba() {
+  if (document.visibilityState === 'visible') marcadorLida.retomar()
+}
+onMounted(() => document.addEventListener('visibilitychange', lidaAoVoltarAba))
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', lidaAoVoltarAba)
+  marcadorLida.fechar()
+})
 
 // ─── abas (RF2): tudo do mesmo comprador e pedido ───────────────────────────
 // GET /conversas/{id}/abas, relido ao abrir a conversa, quando chega mensagem

@@ -23,14 +23,21 @@ export type FiltrosLista = {
 }
 type OpcaoFiltro = { value: string; label: string; hint: string }
 // Como o Duoke (01/10/2026): duas abas em cima — "Todas" (o All, onde a lista
-// abre) e "Falta responder" (a Fila) — e o resto no menu "Filtrar" ao lado.
+// abre) e "Falta responder" (o "Pendente" do Duoke) — e o resto no menu
+// "Filtrar" ao lado. Desde 14/10/2026 o "Falta responder" (o número dele em
+// todo lugar e a marca da linha — `linhaMarcada`) é a régua do Duoke
+// (services/atendimento/pendente.py): qualquer mensagem da loja responde, até
+// a automática; e a não lida no chat da Shopee/TikTok conta. Reclamação,
+// devolução, avaliação, SAC e carrinho seguem a fila (a plataforma diz de
+// quem é a vez). "Só resposta automática", "Vencendo" e "Vencidas" são o
+// PRAZO DA FILA — nela a automática não responde.
 export const ABAS_LISTA: OpcaoFiltro[] = [
   { value: 'todas', label: 'Todas', hint: 'todas as conversas abertas, da mais recente para a mais antiga' },
-  { value: 'aguardando', label: 'Falta responder', hint: 'o comprador falou por último e ninguém respondeu de verdade (resposta automática não conta)' },
+  { value: 'aguardando', label: 'Falta responder', hint: 'como o Pendente do Duoke: o comprador falou por último (qualquer mensagem da loja responde, até a automática) ou a conversa está não lida na Shopee/TikTok' },
 ]
 export const FILTROS_MENU: OpcaoFiltro[] = [
-  { value: 'vencendo', label: 'Vencendo', hint: 'o prazo de resposta acaba em menos de 2 h' },
-  { value: 'vencidas', label: 'Vencidas', hint: 'passou do prazo sem resposta' },
+  { value: 'vencendo', label: 'Vencendo', hint: 'o prazo da fila acaba em menos de 2 h (na fila, a resposta automática não conta)' },
+  { value: 'vencidas', label: 'Vencidas', hint: 'passou do prazo da fila sem resposta de pessoa (a automática não conta)' },
   { value: 'automatica', label: 'Só resposta automática', hint: 'o robô do Duoke (ou uma campanha) respondeu e nenhuma pessoa ainda' },
   { value: 'com_rascunho', label: 'Com sugestão da IA', hint: 'a IA deixou uma resposta pronta para conferir (para a última mensagem do cliente)' },
   // Resposta nossa que a plataforma não confirmou: pode ter chegado ou não.
@@ -74,6 +81,25 @@ export function opcoesDoFiltrar(caixa: string | null | undefined): OpcaoFiltro[]
 // qualquer filtro — `vemDepoisNaLista`).
 export function filtroPadrao(caixa: string | null | undefined): string {
   return caixa === 'humano' ? 'aguardando' : 'todas'
+}
+// A MARCA da linha (14/10/2026, o dono: "pra estar marcado literalmente as
+// mesmas" que o Duoke): na Caixa, negrito e bolinha só em quem está no "Falta
+// responder" (`falta_responder`, a régua do Duoke); a bolinha mostra o maior
+// entre as mensagens do comprador sem resposta e as não lidas na plataforma.
+// Na Caixa Humano (a régua dela é a fila) e com a API antiga (sem o campo),
+// pela fila, como antes.
+type LinhaMarcavel = { aguardando_resposta?: boolean; falta_responder?: boolean; pendentes?: number; nao_lidas?: number }
+export function linhaMarcada(c: LinhaMarcavel, pelaFila = false): boolean {
+  return pelaFila || c.falta_responder === undefined ? !!c.aguardando_resposta : !!c.falta_responder
+}
+export function bolinhaDaLinha(c: LinhaMarcavel, pelaFila = false): number {
+  if (pelaFila || c.falta_responder === undefined) return c.pendentes ?? c.nao_lidas ?? 0
+  return c.falta_responder ? Math.max(c.pendentes ?? 0, c.nao_lidas ?? 0) : 0
+}
+// O selo de prazo é o da FILA: na linha que o Duoke já dá por respondida (só a
+// automática falou depois do comprador), o title diz isso.
+export function tituloDoPrazo(c: LinhaMarcavel, titulo: string, pelaFila = false): string {
+  return linhaMarcada(c, pelaFila) ? titulo : `${titulo} — prazo da fila: só a resposta automática falou depois do comprador`
 }
 </script>
 
@@ -710,12 +736,12 @@ function mover(delta: number) {
               :nome="c.comprador_nome || c.pedido_marketplace"
               :foto="c.comprador_avatar"
               :plataforma="c.plataforma"
-              :nao-lidas="c.pendentes ?? c.nao_lidas"
+              :nao-lidas="bolinhaDaLinha(c, emHumano)"
               :tamanho="40"
             />
             <span class="min-w-0 flex-1">
               <span class="flex items-center gap-1 text-[13px] leading-5">
-                <span class="min-w-0 truncate" :class="c.aguardando_resposta ? 'font-semibold' : 'font-medium'" :title="titulo(c)">{{ titulo(c) }}</span>
+                <span class="min-w-0 truncate" :class="linhaMarcada(c, emHumano) ? 'font-semibold' : 'font-medium'" :title="titulo(c)">{{ titulo(c) }}</span>
                 <span class="shrink-0 opacity-40" aria-hidden="true">|</span>
                 <span class="min-w-0 max-w-[48%] shrink-[2] truncate" :class="c.id === selecionada ? '' : 'text-foreground/80'" :title="loja(c)">{{ loja(c) }}</span>
                 <span
@@ -734,13 +760,13 @@ function mover(delta: number) {
                   v-if="prazoDe(c, agora) && prazoDe(c, agora)!.nivel !== 'ok'"
                   class="shrink-0 rounded px-1 py-px text-[10px] font-medium"
                   :class="selo(c.id === selecionada, prazoDe(c, agora)!.cls)"
-                  :title="prazoDe(c, agora)!.titulo"
+                  :title="tituloDoPrazo(c, prazoDe(c, agora)!.titulo, emHumano)"
                 >{{ prazoDe(c, agora)!.texto }}</span>
                 <span
                   v-else-if="prazoDe(c, agora)"
                   class="shrink-0 text-[10px] tabular-nums"
                   :class="c.id === selecionada ? 'text-primary-foreground/70' : 'text-muted-foreground'"
-                  :title="prazoDe(c, agora)!.titulo"
+                  :title="tituloDoPrazo(c, prazoDe(c, agora)!.titulo, emHumano)"
                 >{{ prazoDe(c, agora)!.texto }}</span>
               </span>
               <span v-if="temSelos(c)" class="mt-1 flex flex-wrap items-center gap-1 text-[10px]">

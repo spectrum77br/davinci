@@ -229,6 +229,8 @@ def _resumo(
         "prazo_resposta_em": do_cliente + JANELA if aguardando else None,
         "situacao": situacao,
         "nao_lidas": 0,
+        # O Direct tem a régua dele (só leitura): o "Falta responder" é a fila.
+        "falta_responder": aguardando,
         "tem_rascunho": False,
         "atribuido_a": conversa.assumido_por,
         "atribuido_a_nome": atribuido_nome,
