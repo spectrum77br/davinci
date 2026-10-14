@@ -484,7 +484,7 @@ await carregar()
     </div>
 
     <div class="grid gap-3 xl:grid-cols-[1fr_460px]">
-      <div class="flex min-h-0 flex-col rounded-md border bg-card">
+      <div class="flex min-h-0 min-w-0 flex-col rounded-md border bg-card">
         <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
           <span>Pedidos — uma linha por pedido do Bling</span>
           <span class="text-[11px] font-normal text-slate-300">o que a loja deveria receber × o que entrou de fato × quanto sobrou</span>
@@ -605,7 +605,7 @@ await carregar()
         </div>
       </div>
 
-      <div class="flex min-h-0 flex-col rounded-md border bg-card">
+      <div class="flex min-h-0 min-w-0 flex-col rounded-md border bg-card">
         <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
           <span>Raio-X {{ selecionado ? 'do pedido ' + selecionado.pedido_bling : '' }}</span>
           <span class="text-[11px] font-normal text-slate-300">as quatro versões do dinheiro, lado a lado</span>

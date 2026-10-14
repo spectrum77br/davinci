@@ -404,6 +404,10 @@ async def recalcular_loja(
             ),
         }
         bling_total = _d(cab.total)
+        # O total do Bling traz o frete que o cliente pagou; a venda do ML (total_amount)
+        # é só produto. Compara produto com produto (14/10: "Bling +9,99" em tudo que
+        # tinha frete de R$ 9,99 pago pelo comprador).
+        bling_produtos = _d(cab.totalprodutos) if cab.totalprodutos is not None else bling_total
         custo = _soma(
             [(_d(i.preco_custo) or ZERO) * Decimal(int(i.item_quantidade or 1)) for i in itens]
         )
@@ -411,7 +415,7 @@ async def recalcular_loja(
         calc = situacao_do_pedido(
             agora=agora,
             data_pedido=cab.data,
-            bling_total=bling_total,
+            bling_total=bling_produtos,
             venda=venda,
             previsao=previsao,
             movs_extrato=extrato,
@@ -430,12 +434,17 @@ async def recalcular_loja(
             if calc["recebido"] is not None
             else (_d(venda.net_amount) if venda else None)
         )
-        sobrou = (base_resultado - custo - reembolso) if base_resultado is not None else None
-        margem = (
-            (sobrou / custo).quantize(Decimal("0.0001"))
-            if (sobrou is not None and custo > ZERO)
-            else None
-        )
+        if calc["situacao"] == "cancelado":
+            # Venda desfeita: o produto não saiu (ou voltou) — o custo não é perda.
+            sobrou = (base_resultado or ZERO) - reembolso
+            margem = None
+        else:
+            sobrou = (base_resultado - custo - reembolso) if base_resultado is not None else None
+            margem = (
+                (sobrou / custo).quantize(Decimal("0.0001"))
+                if (sobrou is not None and custo > ZERO)
+                else None
+            )
         valores = {
             "platform": loja.platform,
             "bling_id": cab.bling_id,
