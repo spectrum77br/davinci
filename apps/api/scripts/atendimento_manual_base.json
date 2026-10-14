@@ -503,7 +503,7 @@
         "diz que já perguntou e ninguém respondeu",
         "reclama que só recebe mensagem automática"
       ],
-      "so_humano": true,
+      "so_humano": false,
       "lacunas": [
         "numero_pedido"
       ]
@@ -1057,7 +1057,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Pede atendente ou cobra resposta, sem pergunta pendente.",
-      "faca": "Sugestão: 'Olá! Desculpe a demora. Nossa equipe já está com a sua conversa; se puder, conte aqui a sua dúvida.' Não prometer tempo de resposta."
+      "faca": "Responder como o atendimento da loja: veio uma dúvida junto, responder a dúvida; sem dúvida, pedir que conte aqui. Modelo, quando cobra resposta: 'Olá! Desculpe a demora. Estamos com a sua conversa; conte aqui a sua dúvida que ajudamos você.' Nunca dizer que é uma pessoa nem inventar nome de atendente. Perguntou se é robô: dizer que é o atendimento automático da loja e que a nossa equipe acompanha a conversa. Insistiu em falar com uma pessoa depois dessa resposta, ou há insulto ou ameaça: precisa_humano=true. Não prometer tempo de resposta."
     },
     {
       "tipo": "categoria",

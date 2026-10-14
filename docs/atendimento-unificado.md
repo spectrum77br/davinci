@@ -229,8 +229,17 @@ pedir/repetir CPF, telefone, e-mail, endereço; qualquer contato para fora da lo
 (WhatsApp, link, @, PIX); pedir avaliação ou desestimular reclamação; Procon,
 Reclame Aqui, advogado, xingamento; conversa com reclamação/mediação/chamado
 aberto; mensagem só com foto/áudio; pedido não encontrado; comprador pedindo
-atendente ou texto com cara de instrução para a IA; conversa em que humano já
-respondeu (pelo DaVinci ou por fora).
+atendente ou texto com cara de instrução para a IA; conversa em que alguém
+respondeu por fora (Duoke/Seller Center) nas últimas 24 h; conversa com a IA
+pausada ou atribuída a uma pessoa ("Atribuir a mim").
+
+Mudou em 14/10/2026 (o dono, no piloto da Shopee Kia: "ela pode ser o
+atendente"): a resposta de pessoa **pelo DaVinci** não cala mais a IA — o
+comprador escreveu de novo, a IA segue; quem quer assumir a conversa pausa a
+IA ou atribui a si. E na loja em `auto` com o assunto "Pede atendente"
+liberado, a IA responde o pedido de atendente (e o "é robô?") como o
+atendimento da loja; vai para pessoa quando o comprador insiste depois dessa
+resposta (por texto ou pela opção 6 do menu), xinga ou ameaça.
 
 Limites por loja no validador: ML 350 caracteres e só ISO-8859-1; TikTok 2.000 sem
 link; Shopee sem contato externo; Amazon sem link/e-mail/telefone/emoji e com ID do

@@ -37,8 +37,9 @@ Mensagem para comprador não se desenvia; por isso a ordem abaixo é rígida:
        canal_em_observacao — o canal está em `observar` (o Duoke responde);
        auto_desligado      — origem IA sem o automático ligado no canal;
        nao_aguarda         — origem IA numa conversa que não espera mais a
-                             IA (pausada, fechada, "não precisa de resposta",
-                             ou a loja já respondeu depois da pergunta);
+                             IA (pausada, atribuída a uma pessoa, fechada,
+                             "não precisa de resposta", ou a loja já
+                             respondeu depois da pergunta);
        texto_invalido      — o validador reprovou (detail = motivos);
        envio_repetido      — a MESMA resposta saiu nesta conversa há menos de
                              2 min (clique duplo, aba duplicada);
@@ -547,12 +548,16 @@ def _motivo_ia_sem_vez(conversa: AtendimentoConversa) -> str | None:
     """Por que a IA não responde ESTA conversa agora (None = pode).
 
     A pessoa pode escrever de novo numa conversa respondida ou fechada — ela
-    sabe o que faz. A IA não: a tela pode ter pausado a IA, fechado a conversa
-    ou marcado "não precisa de resposta" enquanto o modelo escrevia, e a loja
-    (inclusive a própria IA, numa rodada paralela) pode já ter respondido.
+    sabe o que faz. A IA não: a tela pode ter pausado a IA, atribuído ou
+    fechado a conversa ou marcado "não precisa de resposta" enquanto o modelo
+    escrevia, e a loja (inclusive a própria IA, numa rodada paralela) pode já
+    ter respondido. Conversa ATRIBUÍDA ("Atribuir a mim", 14/10/2026) é de
+    quem assumiu: a IA sugere, mas não envia sozinha.
     """
     if conversa.ia_pausada:
         return "A IA está pausada nesta conversa."
+    if conversa.atribuido_a is not None:
+        return "A conversa está atribuída a uma pessoa: a IA não responde sozinha."
     if conversa.situacao == CONVERSA_FECHADA:
         return "A conversa foi fechada."
     if conversa.sem_resposta_necessaria:
@@ -1064,23 +1069,34 @@ async def _conferir_repetido(
 
 
 async def _resposta_da_loja_depois(
-    session: AsyncSession, conversa: AtendimentoConversa, referencia: AtendimentoMensagem
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    referencia: AtendimentoMensagem,
+    *,
+    sem_automaticas: bool = False,
 ) -> AtendimentoMensagem | None:
-    """A resposta da loja (que não falhou) mais recente DEPOIS de `referencia`."""
+    """A resposta da loja (que não falhou) mais recente DEPOIS de `referencia`.
+
+    `sem_automaticas`: o menu, o "aguarde" e as campanhas do Duoke, os cartões
+    da Shopee e o motor de automações não respondem a pergunta
+    (`gravar.mensagem_automatica_sql`, a mesma régua da vez do comprador).
+    """
     momento = _momento_col()
     quando = referencia.enviada_em or referencia.created_at
+    condicoes = [
+        AtendimentoMensagem.conversa_id == conversa.id,
+        AtendimentoMensagem.autor == AUTOR_LOJA,
+        AtendimentoMensagem.status != MSG_FALHOU,
+        AtendimentoMensagem.id != referencia.id,
+        momento >= quando,
+    ]
+    if sem_automaticas:
+        condicoes.append(
+            ~gravar.mensagem_automatica_sql(AtendimentoMensagem.texto, AtendimentoMensagem.payload)
+        )
     return (
         await session.execute(
-            select(AtendimentoMensagem)
-            .where(
-                AtendimentoMensagem.conversa_id == conversa.id,
-                AtendimentoMensagem.autor == AUTOR_LOJA,
-                AtendimentoMensagem.status != MSG_FALHOU,
-                AtendimentoMensagem.id != referencia.id,
-                momento >= quando,
-            )
-            .order_by(momento.desc())
-            .limit(1)
+            select(AtendimentoMensagem).where(*condicoes).order_by(momento.desc()).limit(1)
         )
     ).scalar_one_or_none()
 
@@ -1134,7 +1150,12 @@ async def _conferir_gatilho_ia(
     if rascunho.status != RASCUNHO_PENDENTE:
         raise EnvioRecusado(RECUSA_NAO_AGUARDA, "A sugestão não está mais pendente.")
     gatilho = await session.get(AtendimentoMensagem, rascunho.mensagem_gatilho_id)
-    if gatilho is not None and await _resposta_da_loja_depois(session, conversa, gatilho):
+    # Só resposta de verdade (pessoa ou a própria IA) fecha a pergunta: o menu
+    # do Duoke chega segundos depois de cada mensagem do comprador e, contando,
+    # recusava TODO envio automático (piloto da Kia, 14/10/2026).
+    if gatilho is not None and await _resposta_da_loja_depois(
+        session, conversa, gatilho, sem_automaticas=True
+    ):
         raise EnvioRecusado(RECUSA_NAO_AGUARDA, "A conversa já foi respondida.")
 
 

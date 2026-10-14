@@ -9,7 +9,7 @@
 - **42 assuntos**, em ordem de precedência (se a mensagem tem dois assuntos, vale o que vem primeiro na lista).
 - **64 regras**: 16 de segurança (valem sempre), 44 de assunto (uma por assunto e por canal — o sistema recusa duas no mesmo lugar) e 4 de estilo.
 - **48 respostas prontas** para a equipe usar na tela.
-- **15 assuntos só para pessoa**: a IA escreve a sugestão, mas quem envia é alguém da equipe.
+- **14 assuntos só para pessoa**: a IA escreve a sugestão, mas quem envia é alguém da equipe. "Pede atendente" deixou de ser só pessoa em 14/10/2026 (o dono: "ela pode ser o atendente").
 - **Teste em conversas que o manual nunca viu:** 339 de 343 mensagens com caminho claro (98,8%), 4 ambíguas, 0 sem assunto. Detalhe na seção 8.
 - **O que falta para ligar:** as respostas às perguntas da seção 10 e a sua conferência dos fatos da seção 6.
 
@@ -23,7 +23,7 @@ O código confere toda resposta antes de sair, seja da IA ou de pessoa. O manual
 - Fato do pedido só entra por **lacuna** que o sistema preenche: `{numero_pedido}`, `{rastreio}`, `{transportadora}`, `{previsao_entrega}`, `{data_envio}`, `{nf_numero}`. Lacuna sem dado segura a resposta.
 - Limite de caracteres por canal: Mercado Livre pós-venda 350, pergunta 2.000; Shopee 1.000; TikTok 2.000; Amazon 2.000 (sem emoji, sem link).
 - Cancelamento, reembolso, troca ou devolução, defeito, garantia, endereço, desconto e reclamação forte **sempre** vão para pessoa, e isso não se desliga pelo manual.
-- Cliente que xinga, pede atendente, tem reclamação aberta no ML, chamado ou devolução no pedido: vai para pessoa.
+- Cliente que xinga, pede atendente, tem reclamação aberta no ML, chamado ou devolução no pedido: vai para pessoa. Exceção (14/10/2026): na loja em automático com "Pede atendente" liberado, a IA é o atendente e responde quem pede atendente ou pergunta se é robô; só vai para pessoa quando o cliente insiste depois dessa resposta (ou xinga, ou ameaça).
 - A Amazon nunca recebe resposta automática.
 
 ## 2. Como a IA decide, passo a passo
@@ -81,7 +81,7 @@ Frequência = quantas mensagens do teste (seção 8: 343 mensagens de 259 conver
 | 36 | Opinião, comparação e indicação | `opiniao_recomendacao` |  | 9 (2,6%) |
 | 37 | Parceria, amostra, personalização e recursos da plataforma | `parceria_fora_escopo` |  | 0 (0,0%) |
 | 38 | Contato fora da plataforma ou dados pessoais | `canal_externo_dados` |  | 0 (0,0%) |
-| 39 | Pede atendente ou cobra resposta | `pede_atendente` | sim | 1 (0,3%) |
+| 39 | Pede atendente ou cobra resposta | `pede_atendente` |  | 1 (0,3%) |
 | 40 | Saudação, card sem texto ou mensagem vaga | `saudacao_ou_vaga` |  | 10 (2,9%) |
 | 41 | Agradecimento, elogio ou confirmação | `agradecimento` |  | 28 (8,2%) |
 | 42 | Outro assunto | `outro` | sim | 0 (0,0%) |
@@ -333,7 +333,7 @@ A descrição de cada assunto é o que a IA lê para classificar. O **desempate*
 - **Desempate:** se a mensagem tem outro assunto, vale o outro (esta categoria só quando não há); dado enviado para mudar a entrega é endereco.
 - **Exemplos (paráfrases):** pede o número da loja; oferece pagar a diferença por Pix; manda documento e telefone para ser chamado.
 
-### 39. Pede atendente ou cobra resposta (`pede_atendente`) — só pessoa
+### 39. Pede atendente ou cobra resposta (`pede_atendente`)
 
 - **O que é:** Pede uma pessoa, reclama da demora, do menu repetido ou do robô, sem outro assunto e sem insulto ou ameaça (inclui a opção seis do menu).
 - **Desempate:** se há pergunta do cliente ainda sem resposta na conversa, classificar pela pergunta; com insulto ou ameaça é reclamacao_forte.
@@ -428,7 +428,7 @@ Cada regra é "QUANDO acontece isto → FAÇA aquilo". "Sugestão" quer dizer qu
 | Opinião, comparação e indicação | todas | Pedido de opinião, comparação ou indicação. | Trocar adjetivo por dado do título e dos fatos aprovados. Não prometer que não trava, não comparar qualidade com outras marcas. Indicar outro anúncio: precisa_humano=true. |
 | Parceria, amostra, personalização e recursos da plataforma | todas | Parceria, amostra, personalização ou recurso da plataforma. | Parceria ou divulgação: agradecer, dizer que a proposta será repassada e precisa_humano=true (motivo 'parceria'). Amostra ou personalização: precisa_humano=true. Recurso da própria plataforma: indicar a Central de Ajuda da plataforma. |
 | Contato fora da plataforma ou dados pessoais | todas | Contato externo, pagamento por fora ou dados pessoais, sem outro assunto. | Explicar com educação que o atendimento e os pagamentos acontecem só por aqui e que não é preciso mandar dados pessoais; pedir a dúvida. Vídeo que não sobe: pedir trecho curto ou fotos. |
-| Pede atendente ou cobra resposta | todas | Pede atendente ou cobra resposta, sem pergunta pendente. | Sugestão: 'Olá! Desculpe a demora. Nossa equipe já está com a sua conversa; se puder, conte aqui a sua dúvida.' Não prometer tempo de resposta. |
+| Pede atendente ou cobra resposta | todas | Pede atendente ou cobra resposta, sem pergunta pendente. | Responder como o atendimento da loja: veio uma dúvida junto, responder a dúvida; sem dúvida, pedir que conte aqui. Modelo, quando cobra resposta: 'Olá! Desculpe a demora. Estamos com a sua conversa; conte aqui a sua dúvida que ajudamos você.' Nunca dizer que é uma pessoa nem inventar nome de atendente. Perguntou se é robô: dizer que é o atendimento automático da loja e que a nossa equipe acompanha a conversa. Insistiu em falar com uma pessoa depois dessa resposta, ou há insulto ou ameaça: precisa_humano=true. Não prometer tempo de resposta. |
 | Saudação, card sem texto ou mensagem vaga | todas | Cumprimento, card sem texto, número solto ou texto incompreensível. | Com card de produto ou pedido: perguntar em que podemos ajudar sobre aquele produto ou pedido. Sem card: pedir com educação que conte o que precisa. Não adivinhar o assunto, nunca reenviar o menu. |
 | Agradecimento, elogio ou confirmação | todas | Agradecimento ou elogio sem pergunta. | Responder uma vez, curto e cordial, à disposição. Nada de avaliação nem convite para seguir a loja. Cliente que desiste da reclamação ou devolução: agradecer e precisa_humano=true (motivo 'fechar o caso'). |
 | Outro assunto | todas | Nenhum assunto serve. | precisa_humano=true com acolhimento neutro: 'Olá! Recebemos sua mensagem. Nossa equipe vai verificar e responde por aqui.' |
