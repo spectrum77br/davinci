@@ -44,6 +44,7 @@ from app.services.conciliacao_extrato import (
     bling_store_ids_da_loja,
     resolver_pedidos_bling,
 )
+from app.services.conciliacao_fatura import tipo_do_detalhe
 
 logger = structlog.get_logger()
 BRT = ZoneInfo("America/Sao_Paulo")
@@ -489,9 +490,6 @@ async def recalcular_loja(
         contagem[f"etapa:{atual.etapa}"] += 1
 
     # 4. Movimento de pedido anterior ao início: classifica, não cobra.
-    soltos = [
-        m for m in movs if m.origem == ORIGEM_EXTRATO and not m.pedido_bling and not m.classificacao
-    ]
     antigos = (
         (
             await session.execute(
@@ -521,8 +519,23 @@ async def recalcular_loja(
             if d is not None and d < inicio_dt:
                 m.classificacao = "anterior_ao_inicio"
                 contagem["anterior_ao_inicio"] += 1
-    # Pedido do ML ainda sem pedido do Bling: tenta resolver de novo (o Bling pode ter
-    # importado depois).
+    # Pedido do ML ainda sem pedido do Bling (extrato OU fatura, de qualquer data):
+    # tenta resolver de novo — o Bling pode ter importado depois.
+    soltos = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento)
+                .where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.pedido_bling.is_(None),
+                    ConciliacaoMovimento.pedido_marketplace.isnot(None),
+                )
+                .limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
     if soltos:
         ids = {m.pedido_marketplace for m in soltos if m.pedido_marketplace} | {
             m.pack_id for m in soltos if m.pack_id
@@ -533,6 +546,33 @@ async def recalcular_loja(
             if achado:
                 m.pedido_bling, m.bling_id = achado
                 contagem["resolvido_agora"] += 1
+    # Nome do tipo da cobrança: se o mapa de sub-tipos mudou, renomeia o que já está gravado.
+    fatura_gravada = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento)
+                .where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_FATURA,
+                )
+                .limit(20000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in fatura_gravada:
+        esperado = tipo_do_detalhe(
+            "BONUS" if m.credito and m.credito > ZERO else "CHARGE", m.sub_tipo
+        )
+        if esperado != m.tipo:
+            m.tipo = esperado
+            if (
+                esperado in ("fatura_parcelamento", "fatura_parcelamento_comprador")
+                and not m.parcelamento
+            ):
+                m.parcelamento = m.debito or m.credito
+            contagem["tipo_renomeado"] += 1
 
     loja.ultimo_recalculo_em = agora
     await session.flush()
