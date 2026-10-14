@@ -369,6 +369,31 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
+    # Vinicius, 14/10/2026: o prazo segue o Horário Etiqueta da tela Lojas
+    # (horário + 1h30; sem horário = 1h30 depois que o pedido caiu).
+    "vigia_etiquetas": RoboDef(
+        chave="vigia_etiquetas",
+        nome="Vigia de Etiquetas",
+        descricao=(
+            "Pedido que caiu e continua Em aberto sem etiqueta depois do prazo: "
+            "conta com Horário Etiqueta na tela Lojas tem até o horário + 1h30 "
+            "(sábado, o horário de sábado nos estoques marcados); conta sem "
+            "horário (contínua, Amazon inclusive) tem 1h30 depois que o pedido "
+            "caiu. Diz onde o pedido parou e fecha sozinho quando a etiqueta chega."
+        ),
+        area="pedidos",
+        cadencia_texto="a cada 10 min (:01/:11/:21/:31/:41/:51)",
+        plataformas=("ml", "shopee", "tiktok", "amazon", "magalu", "shein", "temu", "aliexpress"),
+        config_padrao={"cadencia_min": 10, "prazo_min": 90, "janela_dias": 7},
+        env_threema_recipients=None,
+        contexto="estoque",
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "prazo_min": Parametro("Prazo depois do horário (ou de cair)", 15, 24 * 60, "min"),
+            "janela_dias": Parametro("Olhar pedidos dos últimos", 1, 30, "dias"),
+        },
+        modo_padrao="silencioso",
+    ),
 }
 
 # Threema ID: 8 caracteres (A-Z, 0-9); ID de gateway começa com "*".

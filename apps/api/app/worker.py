@@ -3889,6 +3889,27 @@ async def vigia_robo_leitura_tick(ctx: dict) -> None:
         logger.exception("vigia_robo_leitura_unhandled")
 
 
+async def vigia_etiquetas_tick(ctx: dict) -> None:
+    """Vigia de Etiquetas (robô da Ouvidoria): pedido Em aberto sem etiqueta
+    depois do Horário Etiqueta da loja + 1h30 (contínuo: 1h30 depois que
+    caiu)."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_etiquetas")
+        if modo == "desligado":
+            logger.debug("vigia_etiquetas_desligado")
+            return
+        from app.services.vigia_etiquetas import vigia_etiquetas_sweep
+
+        summary = await vigia_etiquetas_sweep() or {}
+        if any(summary.get(k) for k in ("novas", "sumiram", "avisadas")):
+            logger.info("vigia_etiquetas_done", **summary)
+        else:
+            logger.debug("vigia_etiquetas_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_etiquetas_unhandled")
+
+
 async def vigia_margem_tick(ctx: dict) -> None:
     """Robô da Margem (Ouvidoria), :15/:45 — desde 25/09/2026 o robô que age
     e o fiscal são um só: `vigia_margem_sweep` reconstrói o snapshot, o robô
@@ -4726,6 +4747,7 @@ class WorkerSettings:
         vigia_margem_tick,
         vigia_robo_melhorenvio_tick,
         vigia_robo_leitura_tick,
+        vigia_etiquetas_tick,
         # Atendimento unificado (25/09/2026). Em `functions` também para o
         # botão "Sincronizar" da tela poder enfileirar a leitura.
         func(atendimento_sincronizar, timeout=300),
@@ -5305,6 +5327,12 @@ class WorkerSettings:
         cron(
             vigia_robo_leitura_tick,
             minute={3, 13, 23, 33, 43, 53},
+            run_at_startup=False,
+        ),
+        # Vigia de Etiquetas: a cada 10 min em :01… (só banco).
+        cron(
+            vigia_etiquetas_tick,
+            minute={1, 11, 21, 31, 41, 51},
             run_at_startup=False,
         ),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As

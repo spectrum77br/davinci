@@ -208,6 +208,11 @@ SEIS_ROBOS = {
     # 24/09/2026: o executor de leitura de chamados (Mac Santiago).
     "vigia_robo_leitura": ("chamados", ["shopee"],
                            {"cadencia_min": 10, "sem_sinal_min": 30, "atraso_horas": 3}),
+    # 14/10/2026: pedido Em aberto sem etiqueta depois do Horário Etiqueta + 1h30.
+    "vigia_etiquetas": ("pedidos",
+                        ["ml", "shopee", "tiktok", "amazon", "magalu", "shein", "temu",
+                         "aliexpress"],
+                        {"cadencia_min": 10, "prazo_min": 90, "janela_dias": 7}),
 }
 
 
