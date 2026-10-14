@@ -1255,8 +1255,10 @@ class MercadoLivreClient:
     # LEITURA (GET). O comprador e o endereço vêm nas respostas do ML, mas o
     # enriquecimento não os guarda. Formato medido em produção em 28/09/2026.
 
+    # `attributes` (14/10/2026): a ficha do anúncio para a IA do atendimento
+    # (services/atendimento/ficha.py) — na MESMA ida do cartão, sem chamada nova.
     _CAMPOS_ITEM_ATENDIMENTO = (
-        "id,title,price,original_price,thumbnail,secure_thumbnail,permalink,variations"
+        "id,title,price,original_price,thumbnail,secure_thumbnail,permalink,variations,attributes"
     )
 
     async def _get_com_cabecalhos(
@@ -1305,7 +1307,8 @@ class MercadoLivreClient:
 
     async def itens(self, ids: list[str]) -> list[dict]:
         """Os anúncios pedidos (GET /items?ids=a,b&attributes=...), de 20 em 20:
-        título, preço, preço original, miniatura (`secure_thumbnail`) e link.
+        título, preço, preço original, miniatura (`secure_thumbnail`), link e
+        a ficha (`attributes`).
 
         Devolve o `body` de cada anúncio que o ML achou (`code` 200); os outros
         ficam de fora. Levanta em não-2xx da chamada inteira."""

@@ -53,6 +53,7 @@ from app.models import (
 from app.security.cipher import encrypt_json
 from app.services import atendimento as pacote_atendimento
 from app.services.atendimento import enriquecer
+from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import ml as ml_atd
 from app.services.atendimento import shopee as shopee_atd
 from app.services.marketplaces.ml import MercadoLivreClient
@@ -837,7 +838,8 @@ CHAVES_RETRATO = {
     "nf",
     "atualizado_em",
 }
-CHAVES_ITEM = {"titulo", "imagem", "variacao", "sku", "quantidade", "preco"}
+# `item_id` (14/10/2026): o anúncio do item — a IA busca a ficha dele (`ficha.py`).
+CHAVES_ITEM = {"item_id", "titulo", "imagem", "variacao", "sku", "quantidade", "preco"}
 CHAVES_LOGISTICA = {
     "transportadora",
     "rastreio",
@@ -934,6 +936,7 @@ async def test_retrato_shopee_valores_fotos_e_textos(db, make_user, relogio):
     (item,) = r["itens"]
     assert set(item) == CHAVES_ITEM
     assert item == {
+        "item_id": "22334455",  # item_list[].item_id (int na Shopee) → texto
         "titulo": "Mala de Bordo ABS Rodinhas 360 Cadeado TSA",
         "imagem": FOTO_SHOPEE,  # item_list[].image_info.image_url
         "variacao": "Preta,P",
@@ -1087,6 +1090,7 @@ async def test_retrato_ml_valores_envio_e_foto(db, make_user, relogio):
     assert r["pago_em"] == "2026-09-27T16:00:30+00:00"
     (item,) = r["itens"]
     assert item == {
+        "item_id": ITEM_ML,  # order_items[].item.id
         "titulo": "Fone Bluetooth Sem Fio Cancelamento de Ruído",
         "imagem": FOTO_ML_GRANDE,  # secure_thumbnail com -I → -O
         "variacao": "Cor: Preto, Voltagem: Bivolt",
@@ -1172,6 +1176,68 @@ async def test_cartao_shopee_com_variacao_busca_preco_e_fica_24h_no_cache(
     antes = list(f.chamadas)
     assert await enriquecer.cartao_produto(db, integ, f, "shopee", "4112503530") == c
     assert f.chamadas == antes
+
+
+async def test_cartao_guarda_a_ficha_fresca_da_mesma_resposta(db, make_user, redis_falso):
+    """A ficha do anúncio da IA (14/10/2026, `ficha.py`) sai da MESMA resposta
+    da loja ao cartão — nenhuma ida nova — e fica no Redis À PARTE: o cartão
+    (que vai para a tela e para o anexo) continua igual."""
+    user = await make_user()
+    integ = await _integ(db, user, IntegrationPlatform.SHOPEE, "Loja")
+    f = ShopeeFalso()
+    f.produtos["77"] = {
+        **item_shopee(77, com_variacao=False),
+        "attribute_list": [
+            {
+                "attribute_id": 1,
+                "original_attribute_name": "Material",
+                "attribute_value_list": [{"value_id": 9, "original_value_name": "Poliéster"}],
+            }
+        ],
+    }
+
+    c = await enriquecer.cartao_produto(db, integ, f, "shopee", "77")
+
+    assert set(c) == CHAVES_CARTAO_PRODUTO
+    assert f.contagem("produto") == 1  # a mesma ida do cartão
+    chave = f"atd:ficha:shopee:{integ.id}:77"
+    assert redis_falso.ttl[chave] == ficha_svc.CACHE_FICHA_S
+    assert json.loads(redis_falso.dados[chave]) == {
+        "titulo": "Mochila Executiva Notebook 77",
+        "descricao": "descrição longa do anúncio",
+        "raw": {
+            "attribute_list": [
+                {
+                    "original_attribute_name": "Material",
+                    "attribute_value_list": [{"original_value_name": "Poliéster"}],
+                }
+            ],
+            "brand": {"original_brand_name": "NoBrand"},
+        },
+    }
+
+    # ML: os `attributes` do `/items` (agora pedidos na mesma ida).
+    ml = await _integ(db, user, IntegrationPlatform.ML, "ML")
+    fm = MLFalso()
+    fm.anuncios[ITEM_ML] = {
+        **anuncio_ml(),
+        "attributes": [
+            {"id": "WITH_NFC", "name": "Com NFC", "value_name": "Sim",
+             "values": [{"id": "242085", "name": "Sim", "struct": None}]},
+            {"id": "ESIMS", "name": "Quantidade de eSIMs", "value_name": None, "values": []},
+        ],
+    }
+    await enriquecer.cartao_produto(db, ml, fm, "ml", ITEM_ML)
+    bruta = json.loads(redis_falso.dados[f"atd:ficha:ml:{ml.id}:{ITEM_ML}"])
+    assert bruta["raw"] == {
+        "attributes": [
+            {"id": "WITH_NFC", "name": "Com NFC", "value_name": "Sim", "values": [{"name": "Sim"}]}
+        ]
+    }
+    # Do cache do cartão (sem ida à loja): nada novo é gravado.
+    antes = dict(redis_falso.dados)
+    await enriquecer.cartao_produto(db, integ, f, "shopee", "77")
+    assert redis_falso.dados == antes and f.contagem("produto") == 1
 
 
 async def test_cartao_shopee_sem_variacao_usa_price_info(db, make_user):
@@ -2077,9 +2143,10 @@ async def test_ml_de_verdade_so_le_com_formato_novo_do_envio(db, make_user, monk
     assert envio.headers.get("x-format-new") == "true"
     itens = next(p for p in feitos if p.url.path == "/items")
     assert itens.url.params["ids"] == ITEM_ML
+    # `attributes` (14/10/2026): a ficha do anúncio da IA, na mesma ida.
     assert set(itens.url.params["attributes"].split(",")) == {
         "id", "title", "price", "original_price", "thumbnail", "secure_thumbnail",
-        "permalink", "variations",
+        "permalink", "variations", "attributes",
     }
     assert await cliente.itens([]) == []
     _sem_pessoais(r)

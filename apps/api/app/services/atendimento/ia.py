@@ -161,6 +161,18 @@ Parte 2 (28/09/2026):
   de garantia (bloco não consultado), a promessa não bloqueia a sugestão:
   só vai para pessoa.
 
+  FICHA DO ANÚNCIO (14/10/2026, o dono: "busca a ficha caso seja linkado
+  com algum produto"). Com anúncio ligado à conversa (o cartão de produto
+  que o cliente mandou, o anúncio da pergunta/da conversa, os itens do
+  pedido), os FATOS levam o bloco "ficha_do_anuncio" (`ficha.py`): título
+  ATUAL, atributos e a descrição LIMPA — a ficha fresca que a loja devolveu
+  ao enriquecimento do cartão (Redis); senão o nosso catálogo (`listings`)
+  importado há até 30 dias e com o mesmo título; senão o mesmo produto em
+  outro anúncio (`product_links`) —, até 2 anúncios e 2.500 caracteres. Vai
+  na MENSAGEM, fora do orçamento do prompt de sistema (não tira correção nem
+  regra) e fora da classificação. No automático, a resposta de dado do
+  produto com a ficha vai para pessoa (`MOTIVO_FICHA_NO_AUTOMATICO`).
+
   PROVEDOR (28/09). Dois caminhos, escolhidos só pelo `.env`
   (`escolher_provedor`): o Groq — ou qualquer API compatível com a da
   OpenAI —, exatamente como era; e a Claude, pela API NATIVA da Anthropic
@@ -223,6 +235,7 @@ from app.models import (
 from app.redis_client import redis
 from app.services import dm_ia
 from app.services.atendimento import contexto as contexto_svc
+from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import gravar, separa_email, validador
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.ag_cancelamento import TEXTOS_IA
@@ -394,6 +407,11 @@ _CHAVE_TETO = "atendimento:ia:chamadas:{}:{}"
 _TETO_TTL_S = 2 * 24 * 3600
 
 MOTIVO_NUMERO_INVENTADO = "número que não veio do sistema"
+# A resposta de dado do produto com a ficha do anúncio nos FATOS não sai
+# sozinha no automático (14/10/2026): a ficha pode ser de antes da última
+# mudança do anúncio, ou de outro anúncio do mesmo produto, e o que acompanha
+# muda por variação. Vai para pessoa (pendente). Liberar é decisão do dono.
+MOTIVO_FICHA_NO_AUTOMATICO = "resposta pela ficha do anúncio — no automático, pessoa confere"
 
 # Item 4 (02/10/2026): o pedido em "Aguardando Cancelamento" (83955) sempre
 # vai para pessoa; e o que o modelo vê quando o motivo não deixa falar em
@@ -3822,6 +3840,22 @@ async def _gerar(
         else (garantia["garantias"] if garantia is not None else [])
     )
 
+    # A ficha do anúncio (14/10/2026, o dono: "busca a ficha caso seja
+    # linkado com algum produto"): título, atributos e descrição LIMPA do
+    # catálogo, dos anúncios ligados à conversa (`ficha.py`). Na mensagem
+    # (FATOS), com teto próprio — fora do orçamento do prompt de sistema, não
+    # tira correção nem regra; e fora da classificação, que não precisa dela.
+    # Os números dela passam a valer na conferência (`permitidos`, abaixo).
+    fichas = await contexto_svc._seguro(
+        session,
+        "ficha_do_anuncio",
+        lambda: ficha_svc.fichas_da_conversa(session, conversa, recentes, textos_rajada),
+        [],
+        conversa.id,
+    )
+    if fichas:
+        fatos["ficha_do_anuncio"] = fatos_gravados["ficha_do_anuncio"] = fichas
+
     referencia = classificada or categoria_provavel(" ".join(textos_rajada), conversa.canal)
     # Canal no automático: só o 👍/👎 de admin molda o prompt (ver
     # `_avaliacao_vale_aqui`) — o mesmo corte das regras do manual.
@@ -3893,9 +3927,11 @@ async def _gerar(
     if categoria in so_humano:
         motivos.append(f"assunto só para pessoa ({categoria})")
     motivos += motivos_da_categoria(categoria, textos_cliente, textos_rajada, ids_categorias)
-    # O que o modelo pode repetir: os FATOS (anúncio, itens, data da compra),
-    # o MANUAL que a equipe escreveu (as regras que entraram no prompt) e a
-    # descrição dos assuntos. Número fora
+    if fichas and so_admin and categoria in ficha_svc.CATEGORIAS_DA_FICHA:
+        motivos.append(MOTIVO_FICHA_NO_AUTOMATICO)
+    # O que o modelo pode repetir: os FATOS (anúncio e a ficha dele, itens,
+    # data da compra), o MANUAL que a equipe escreveu (as regras que entraram
+    # no prompt) e a descrição dos assuntos. Número fora
     # disso (e fora das lacunas) foi inventado — ou copiado do exemplo de
     # OUTRO cliente — e bloqueia a sugestão.
     permitidos = "\n".join(

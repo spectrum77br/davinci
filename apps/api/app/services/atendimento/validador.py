@@ -474,7 +474,25 @@ _NUMERO_POR_EXTENSO = (
 # Sem "um/uma": "tenha um ótimo dia" não é prazo (a regra com "um" exige
 # palavra de prazo antes: "leva uma semana", "é de um dia").
 _NUMERO_POR_EXTENSO_2 = _NUMERO_POR_EXTENSO.replace("(?:um|uma|", "(?:")
-_UNIDADE_MEDIDA = r"(?!\s*(?:m|cm|mm|km|kg|g|l|ml|pol)\b)"
+# Número com unidade não é preço: "1,50 m", "6,75 polegadas", "1.26 GHz",
+# "2,40 kg". A ficha do anúncio (14/10/2026) leva a IA a responder dado
+# técnico — sem estas unidades, "a tela tem 6,75 polegadas" virava "valor em
+# R$" e a sugestão certa ficava bloqueada. Letra solta (V, W) e MB/KB não
+# contam ("Fica 129,90 V à vista", "Sai por 49,90 w" são preço): volts e
+# watts só por extenso.
+_UNIDADE_MEDIDA = (
+    r"(?!\s*(?:m|cm|mm|km|kg|g|l|ml|pol|polegadas?|gb|tb|mah|ah|mp|mpx|ghz|mhz|hz"
+    r"|kw|volts?|watts?|ppi|nits?|litros?)\b)"
+)
+# Aspas como polegada ("6.75\"", "6,56''", "15.6\"") só com a TELA junto e
+# no formato de tela (até 9,99 ou 10,0 a 99,9): sem ela, ou com '"59,90"',
+# é preço entre aspas. Sai do texto antes de procurar valor.
+_ASPAS_POLEGADA = r"(?:\"|''|\u201d|\u2033|\u2032\u2032)"
+_TAMANHO_DE_TELA = r"(?<![\d.,])(?:\d[.,]\d{1,2}|\d{2}[.,]\d)\s*" + _ASPAS_POLEGADA
+_MEDIDA_DE_TELA = re.compile(
+    r"\b(?:tela|display|visor)\b[^\d\n.!?]{0,30}" + _TAMANHO_DE_TELA
+    + r"|" + _TAMANHO_DE_TELA + r"\s*(?:de\s+)?(?:tela|display)\b"
+)
 _DIA_DA_SEMANA = r"(?:segunda|terca|quarta|quinta|sexta|sabado|domingo)"
 
 _VALOR = (
@@ -705,7 +723,7 @@ def validar(texto: str, *, plataforma: str, canal: str, origem: str) -> list[str
 
     # Só IA: prazo e valor vinculam — só por lacuna preenchida pelo código.
     if origem == ORIGEM_IA:
-        if _algum(_VALOR, plano):
+        if _algum(_VALOR, _MEDIDA_DE_TELA.sub(" ", plano)):
             motivos.append(_MOTIVO_VALOR)
         if _PERCENTUAL.search(plano):
             motivos.append(_MOTIVO_PERCENTUAL)
@@ -721,6 +739,32 @@ def validar(texto: str, *, plataforma: str, canal: str, origem: str) -> list[str
             motivos.append(_MOTIVO_PROMESSA)
 
     return list(dict.fromkeys(motivos))
+
+
+def contato_fora_da_loja(texto: str) -> bool:
+    """O texto tem contato ou pagamento fora da loja? PURA.
+
+    As MESMAS regras duras de `validar` (e-mail, WhatsApp, link, telefone,
+    @perfil, rede social, PIX, conta bancária, "por fora"), sem limite nem
+    regra de plataforma. Serve para limpar o texto que vai PARA o modelo — a
+    descrição do anúncio na ficha (`ficha.py`) —, não o que sai para o
+    cliente (esse passa pelo `validar` inteiro).
+    """
+    plano = plano_de(normalizar(texto or "", plataforma="", canal=""))
+    if not plano:
+        return False
+    return bool(
+        _algum(_EMAIL, plano)
+        or _algum(_WHATSAPP, plano)
+        or _algum(_LINK, plano)
+        or _algum(_TELEFONE, plano)
+        or _PERFIL.search(plano)
+        or _algum(_REDE_SOCIAL, plano)
+        or _PIX.search(plano)
+        or _algum(_BANCO, plano)
+        or _FORA_DA_PLATAFORMA.search(plano)
+        or _algum(_POR_FORA, plano)
+    )
 
 
 def so_da_ia(motivos: list[str]) -> bool:
