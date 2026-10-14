@@ -1,0 +1,781 @@
+"""O "Falta responder" da Caixa IGUAL AO DUOKE (14/10/2026).
+
+O dono: "tem que arrumar pro atendimento ter literalmente o comportamento do
+Duoke, pra estar marcado literalmente as mesmas" — a Caixa mostrava Shopee 99+
+e o "Pendente" do Duoke, 15. O que não pode falhar
+(`services/atendimento/pendente.py`):
+
+  • a régua: não resolvida E (a última mensagem que não é do sistema é do
+    comprador — qualquer mensagem da loja responde, até a automática do
+    robô/campanha — OU não lida no chat da Shopee/TikTok, com fala do
+    comprador); a de `sistema`/`mediador` não conta para nenhum lado, a que
+    falhou não saiu, a nota não é mensagem;
+    fechada e "não precisa de resposta" saem; a bloqueada fica; o não lido do
+    ML não conta (ele não zera quando a loja responde); onde a plataforma diz
+    de quem é a vez (reclamação…) e no e-mail da ponte, vale a fila;
+  • Python (a linha) e SQL (os números e o filtro) são a MESMA régua;
+  • a `ultima_loja_qualquer_em` que a régua lê: o `gravar.recalcular` e o
+    `recalcular_conversa` mantêm, e a migration 0396 preenche igual;
+  • o /resumo (por plataforma e por loja) e o filtro "Falta responder" da
+    Caixa contam por ela — a FILA (`aguardando_resposta`, o prazo, vencendo/
+    vencidas) não muda; a lista "Falta responder" traz quem não tem prazo no
+    fim, a mais recente primeiro, sem pular nem repetir no "carregar mais";
+  • o NÃO LIDO fresco: Shopee (total + lista `type=unread`), TikTok (a lista
+    relida em passadas que continuam na rodada seguinte, só pelas não lidas
+    que contam) e ML pós-venda (a lista de não lidos acerta todo pack
+    gravado) — falha não zera nada, lista cortada não zera ninguém, e nenhum
+    "marcar como lido" sai.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
+
+import httpx
+import pytest
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
+from app.models import AtendimentoConversa, AtendimentoMensagem
+from app.services.atendimento import gravar, pendente, shopee, tiktok
+from app.services.atendimento import ml as ml_atd
+from app.services.atendimento.constantes import CHAVE_VEZ_DA_LOJA
+from app.services.marketplaces.shopee import ShopeeClient
+from tests import test_atendimento_ml as tml
+from tests import test_atendimento_shopee as tsh
+from tests import test_atendimento_tiktok as ttk
+from tests.test_atendimento_router import (  # noqa: F401 — as autouse da API valem aqui
+    PODE_TUDO,
+    _cerebro_falso,
+    _chaves,
+    _loja,
+    _permissao_fina,
+)
+
+_ALEMBIC = Path(__file__).resolve().parents[1] / "alembic"
+_spec = importlib.util.spec_from_file_location(
+    "m0396", _ALEMBIC / "versions" / "0396_ultima_loja_qualquer.py"
+)
+m0396 = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(m0396)
+
+URL = "/api/atendimento"
+AGORA = datetime.now(UTC).replace(microsecond=0)
+MENU_DUOKE = "Olá, por favor selecione sua dúvida e logo te atenderemos: 1 - Entrega"
+JA_SEGUE = "fulano já segue nossa loja aqui na Shopee? Ganhe um cupom"
+
+
+# ─────────────── fábrica ───────────────
+
+
+async def _cena(db: AsyncSession, integ, canal, externo: str, *falas, **campos):
+    """Uma conversa com as falas `(autor, minutos atrás[, texto])`, na ordem dada.
+
+    `campos` vão direto na conversa (situação, não lidas, "não precisa",
+    `dados`) e a fila é refeita (`recalcular_conversa`); `plataforma` e
+    `canal_nome` (padrão: o chat da Shopee) vão na criação.
+    """
+    conversa, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma=campos.pop("plataforma", "shopee"),
+        canal_nome=campos.pop("canal_nome", "chat"),
+        externo_id=externo,
+        comprador_nome="Comprador",
+    )
+    for i, fala in enumerate(falas):
+        autor, minutos, *resto = fala
+        await gravar.gravar_mensagem(
+            db,
+            conversa,
+            externo_id=f"{externo}-{i}",
+            autor=autor,
+            texto=resto[0] if resto else f"{autor} {i}",
+            enviada_em=AGORA - timedelta(minutes=minutos),
+        )
+    if campos:
+        for nome, valor in campos.items():
+            setattr(conversa, nome, valor)
+        await gravar.recalcular_conversa(db, conversa)
+    await db.commit()
+    return conversa
+
+
+async def _nossa(db, conversa, minutos: int, **campos) -> AtendimentoMensagem:
+    """Uma linha NOSSA gravada direto (a que falhou, a nota, o e-mail da ponte)."""
+    m = AtendimentoMensagem(
+        conversa_id=conversa.id,
+        externo_id=campos.pop("externo_id", f"nossa:{uuid4()}"),
+        autor=campos.pop("autor", "loja"),
+        origem=campos.pop("origem", "davinci_humano"),
+        tipo=campos.pop("tipo", "texto"),
+        texto=campos.pop("texto", "resposta"),
+        enviada_em=AGORA - timedelta(minutes=minutos),
+        **campos,
+    )
+    db.add(m)
+    await db.flush()
+    await gravar.recalcular_conversa(db, conversa)
+    await db.commit()
+    return m
+
+
+async def _mundo(db, make_user) -> dict[str, tuple[AtendimentoConversa, bool]]:
+    """Cada caso da régua → (conversa, falta responder?)."""
+    integ, canal = await _loja(db, await make_user(), "kfa")
+    c = {}
+
+    async def caso(nome, esperado, *falas, **campos):
+        c[nome] = (await _cena(db, integ, canal, nome, *falas, **campos), esperado)
+
+    await caso("cliente_por_ultimo", True, ("loja", 90), ("cliente", 60))
+    # O menu do robô do Duoke depois do comprador: para o Duoke, respondeu.
+    await caso("menu_do_duoke", False, ("cliente", 60), ("loja", 59, MENU_DUOKE))
+    # ...mas não lida na plataforma: pendente.
+    await caso("menu_e_nao_lida", True, ("cliente", 60), ("loja", 59, MENU_DUOKE), nao_lidas=2)
+    # O aviso do sistema depois da resposta não reabre; depois do comprador não fecha.
+    aviso = ("sistema", 40, JA_SEGUE)
+    await caso("sistema_depois_da_loja", False, ("cliente", 60), ("loja", 50), aviso)
+    await caso("sistema_depois_do_cliente", True, ("loja", 60), ("cliente", 50), aviso)
+    await caso("mediador_depois", True, ("cliente", 60), ("mediador", 30))
+    await caso("loja_por_ultimo", False, ("cliente", 60), ("loja", 30))
+    await caso("so_loja", False, ("loja", 30))
+    await caso("sem_mensagem", False)
+    # A Shopee lista com não lida, mas não devolve mensagem nenhuma (Inova,
+    # 14/10/2026): o Duoke não mostra.
+    await caso("nao_lida_sem_mensagem", False, nao_lidas=1)
+    # A conversa SÓ de aviso do sistema fica não lida na Shopee/TikTok e o
+    # Duoke não mostra (medido 14/10/2026); o aviso DEPOIS da fala do
+    # comprador não tira (duas das 15 do Duoke: comprador › menu › aviso).
+    await caso("nao_lida_so_sistema", False, ("sistema", 30, JA_SEGUE), nao_lidas=1)
+    await caso(
+        "nao_lida_aviso_por_ultimo",
+        True,
+        ("cliente", 60),
+        ("loja", 59, MENU_DUOKE),
+        ("sistema", 30, JA_SEGUE),
+        nao_lidas=2,
+    )
+    # TikTok: igual à Shopee (o não lido zera quando alguém abre).
+    await caso(
+        "tiktok_menu_e_nao_lida",
+        True,
+        ("cliente", 60),
+        ("loja", 59, MENU_DUOKE),
+        nao_lidas=1,
+        plataforma="tiktok",
+    )
+    # ML pós-venda: o não lido do ML não zera quando a loja responde — a loja
+    # respondeu depois do comprador, então não falta responder.
+    await caso(
+        "ml_respondida_e_nao_lida",
+        False,
+        ("cliente", 3 * 24 * 60),
+        ("loja", 2 * 24 * 60),
+        nao_lidas=2,
+        plataforma="ml",
+        canal_nome="pos_venda",
+    )
+    await caso(
+        "ml_cliente_por_ultimo",
+        True,
+        ("loja", 90),
+        ("cliente", 60),
+        plataforma="ml",
+        canal_nome="pos_venda",
+    )
+    # Onde a PLATAFORMA diz de quem é a vez (a reclamação), vale a fila: a
+    # vez da loja só com o aviso do mediador está no "Falta responder"...
+    await caso(
+        "reclamacao_vez_da_loja",
+        True,
+        ("sistema", 60),
+        dados={CHAVE_VEZ_DA_LOJA: (AGORA - timedelta(minutes=60)).isoformat()},
+        canal_nome="reclamacao",
+    )
+    # ...e o comprador por último quando a plataforma diz que não é a vez da loja, não.
+    await caso(
+        "reclamacao_vez_do_comprador",
+        False,
+        ("loja", 90),
+        ("cliente", 60),
+        dados={CHAVE_VEZ_DA_LOJA: None},
+        canal_nome="reclamacao",
+    )
+    # O e-mail da ponte: a régua da aba E-mail é a fila (a automática não responde).
+    await caso(
+        "email_da_ponte",
+        True,
+        ("cliente", 60),
+        ("loja", 59, MENU_DUOKE),
+        dados={"fonte": "tuta"},
+        canal_nome="email",
+    )
+    await caso("fechada", False, ("cliente", 60), situacao="fechada")
+    await caso("fechada_nao_lida", False, ("cliente", 60), situacao="fechada", nao_lidas=1)
+    await caso("nao_precisa", False, ("cliente", 60), sem_resposta_necessaria=True)
+    await caso("bloqueada", True, ("cliente", 60), situacao="bloqueada")
+    # A resposta que falhou não saiu; a nota interna não é mensagem.
+    falhou = await _cena(db, integ, canal, "falhou", ("cliente", 60))
+    await _nossa(db, falhou, 30, status="falhou")
+    c["falhou"] = (falhou, True)
+    nota = await _cena(db, integ, canal, "nota", ("cliente", 60))
+    await _nossa(db, nota, 30, origem="davinci_nota", tipo="nota", texto="nota interna")
+    c["nota"] = (nota, True)
+    # O e-mail da ponte gravado DENTRO do chat (antes de 13/10/2026) não aparece nele.
+    email = await _cena(db, integ, canal, "email_no_chat", ("cliente", 60))
+    await _nossa(db, email, 30, payload={"mail": {"message_id": "x"}})
+    c["email_no_chat"] = (email, True)
+    return c
+
+
+# ─────────────── a régua ───────────────
+
+
+async def test_a_regua_python_e_sql_sao_gemeas(db, make_user):
+    mundo = await _mundo(db, make_user)
+    for nome, (conversa, esperado) in mundo.items():
+        await db.refresh(conversa)
+        assert pendente.falta_responder(conversa) is esperado, nome
+    no_sql = set(
+        (
+            await db.execute(
+                select(AtendimentoConversa.externo_id).where(pendente.falta_responder_sql())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert no_sql == {nome for nome, (_, esperado) in mundo.items() if esperado}
+
+
+async def test_a_fila_de_verdade_nao_muda(db, make_user):
+    """O menu do robô continua NÃO fechando a vez do comprador na fila (a IA, o
+    prazo, a Caixa Humano) — só o "Falta responder" da Caixa conta ele."""
+    mundo = await _mundo(db, make_user)
+    menu = mundo["menu_do_duoke"][0]
+    await db.refresh(menu)
+    assert menu.aguardando_resposta is True and menu.prazo_resposta_em is not None
+    assert menu.ultima_da_loja_em is None, "a automática não é resposta na fila"
+    assert gravar._utc(menu.ultima_loja_qualquer_em) == AGORA - timedelta(minutes=59)
+    loja = mundo["loja_por_ultimo"][0]
+    await db.refresh(loja)
+    assert loja.ultima_da_loja_em == loja.ultima_loja_qualquer_em
+
+
+async def test_recalcular_do_zero_da_o_mesmo_carimbo(db, make_user):
+    """`recalcular_conversa` (a pessoa fechou, o envio falhou) refaz a
+    `ultima_loja_qualquer_em` igual à gravação mensagem a mensagem."""
+    mundo = await _mundo(db, make_user)
+    for nome, (conversa, _) in mundo.items():
+        await db.refresh(conversa)
+        antes = gravar._utc(conversa.ultima_loja_qualquer_em)
+        await gravar.recalcular_conversa(db, conversa)
+        assert gravar._utc(conversa.ultima_loja_qualquer_em) == antes, nome
+    await db.rollback()
+
+
+async def test_migration_0396_preenche_igual_ao_recalculo(db, make_user):
+    mundo = await _mundo(db, make_user)
+    esperado = {}
+    for conversa, _ in mundo.values():
+        await db.refresh(conversa)
+        esperado[conversa.id] = gravar._utc(conversa.ultima_loja_qualquer_em)
+    assert esperado[mundo["menu_do_duoke"][0].id] is not None
+    assert esperado[mundo["falhou"][0].id] is None, "só a resposta que falhou"
+    assert esperado[mundo["nota"][0].id] is None and esperado[mundo["email_no_chat"][0].id] is None
+    await db.execute(update(AtendimentoConversa).values(ultima_loja_qualquer_em=None))
+    await db.commit()
+    conexao = await db.connection()
+    schema = get_settings().database_schema
+    mudaram = await conexao.run_sync(lambda c: m0396.preencher(c, schema))
+    await db.commit()
+    assert mudaram == sum(1 for v in esperado.values() if v is not None)
+    db.expire_all()
+    for cid, valor in esperado.items():
+        c = await db.get(AtendimentoConversa, cid)
+        assert gravar._utc(c.ultima_loja_qualquer_em) == valor
+    # Rodar de novo não muda nada.
+    conexao = await db.connection()
+    assert await conexao.run_sync(lambda c: m0396.preencher(c, schema)) == 0
+    await db.rollback()
+
+
+# ─────────────── a tela: /resumo e a lista ───────────────
+
+
+async def test_resumo_e_lista_contam_pela_regua_do_duoke(
+    client, db, make_user, auth_as, monkeypatch
+):
+    mundo = await _mundo(db, make_user)
+    auth_as(await make_user(permissions=PODE_TUDO))
+    # O e-mail da ponte mora na aba E-mail: não conta na Caixa.
+    na_caixa = {n: (c, e) for n, (c, e) in mundo.items() if n != "email_da_ponte"}
+    esperados = {nome for nome, (_, e) in na_caixa.items() if e}
+    r = (await client.get(f"{URL}/resumo")).json()
+    for plat in ("shopee", "ml", "tiktok"):
+        da_plat = sum(1 for c, e in na_caixa.values() if e and c.plataforma == plat)
+        p = next(p for p in r["plataformas"] if p["plataforma"] == plat)
+        assert p["aguardando"] == da_plat, plat
+        (loja,) = [lj for lj in r["lojas"] if lj["conta"] == "kfa" and lj["plataforma"] == plat]
+        assert loja["aguardando"] == da_plat, plat
+        # Vencendo/vencidas seguem o PRAZO da fila (nada perto de vencer aqui).
+        assert (p["vencendo"], p["vencidas"]) == (0, 0), plat
+
+    r = await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 100})
+    assert r.status_code == 200, r.text
+    itens = r.json()["itens"]
+    nomes = {str(c.id): n for n, (c, _) in mundo.items()}
+    assert {nomes[i["id"]] for i in itens} == esperados
+    assert all(i["falta_responder"] for i in itens)
+    # Em "Todas", a linha diz se está no "Falta responder" (a tela relê os números).
+    todas = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
+    marcadas = {nomes[i["id"]] for i in todas if i["falta_responder"]}
+    assert marcadas == esperados
+    menu = next(i for i in todas if nomes[i["id"]] == "menu_do_duoke")
+    assert menu["aguardando_resposta"] is True and menu["falta_responder"] is False
+
+
+async def test_vencidas_cabe_no_falta_responder_da_reclamacao(client, db, make_user, auth_as):
+    """A reclamação em que a plataforma diz que é a vez da loja (só o aviso do
+    mediador), com o prazo vencido: está em "Vencidas" E em "Falta responder"."""
+    integ, canal = await _loja(db, await make_user(), "kfa")
+    await _cena(
+        db,
+        integ,
+        canal,
+        "rec",
+        ("sistema", 3 * 24 * 60),
+        dados={CHAVE_VEZ_DA_LOJA: (AGORA - timedelta(days=3)).isoformat()},
+        canal_nome="reclamacao",
+    )
+    auth_as(await make_user(permissions=PODE_TUDO))
+    r = (await client.get(f"{URL}/resumo")).json()
+    sh = next(p for p in r["plataformas"] if p["plataforma"] == "shopee")
+    assert (sh["aguardando"], sh["vencidas"]) == (1, 1)
+    itens = (
+        await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 100})
+    ).json()["itens"]
+    assert [i["falta_responder"] for i in itens] == [True]
+
+
+# ─────────────── a ordem da lista "Falta responder" ───────────────
+
+
+async def test_lista_falta_responder_sem_prazo_pela_recencia(client, db, make_user, auth_as):
+    """Quem tem prazo (a fila) vem primeiro, pelo prazo; quem entra só pela régua
+    do Duoke (não lida, sem prazo) vem depois, a mais recente primeiro — e o
+    "carregar mais" não pula nem repete, inclusive na virada de um grupo para o
+    outro e com o cursor de antes (sem a recência)."""
+    integ, canal = await _loja(db, await make_user(), "kfa")
+    nomes: dict[str, str] = {}
+    for nome, minutos in (("p_velha", 120), ("p_nova", 30)):
+        c = await _cena(db, integ, canal, nome, ("loja", minutos + 10), ("cliente", minutos))
+        nomes[str(c.id)] = nome
+    for i in range(6):
+        c = await _cena(
+            db,
+            integ,
+            canal,
+            f"nl{i}",
+            ("cliente", 600 - i * 60),
+            ("loja", 590 - i * 60),
+            nao_lidas=1,
+        )
+        nomes[str(c.id)] = f"nl{i}"
+    # Duas no MESMO segundo: o id desempata, sem sumir no corte da página.
+    for nome in ("empate_a", "empate_b"):
+        c = await _cena(db, integ, canal, nome, ("cliente", 1000), ("loja", 999), nao_lidas=1)
+        nomes[str(c.id)] = nome
+    auth_as(await make_user(permissions=PODE_TUDO))
+    esperado_inicio = ["p_velha", "p_nova", "nl5", "nl4", "nl3", "nl2", "nl1", "nl0"]
+
+    tudo = (
+        await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 100})
+    ).json()
+    lista = [nomes[i["id"]] for i in tudo["itens"]]
+    assert lista[:8] == esperado_inicio, lista
+    assert sorted(lista[8:]) == ["empate_a", "empate_b"]
+    assert tudo["proximo"] is None
+
+    for limite in (1, 2, 3):
+        vistos: list[str] = []
+        cursor = None
+        for _ in range(20):
+            params = {"filtro": "aguardando", "limite": limite}
+            if cursor:
+                params["antes_de"] = cursor
+            r = await client.get(f"{URL}/conversas", params=params)
+            assert r.status_code == 200, r.text
+            vistos += [nomes[i["id"]] for i in r.json()["itens"]]
+            cursor = r.json()["proximo"]
+            if cursor is None:
+                break
+        assert vistos == lista, (limite, vistos)
+
+    # O cursor de antes (`prazo:|<id>`, sem a recência): o grupo sem prazo do começo.
+    r = await client.get(
+        f"{URL}/conversas",
+        params={"filtro": "aguardando", "antes_de": f"prazo:|{uuid4()}", "limite": 100},
+    )
+    assert r.status_code == 200, r.text
+    assert [nomes[i["id"]] for i in r.json()["itens"]] == lista[2:]
+    for ruim in ("prazo:|lixo|abc", "prazo:||", "prazo:|2026-10-14T10:00:00+00:00|"):
+        r = await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "antes_de": ruim})
+        assert (r.status_code, r.json()["detail"]) == (422, {"code": "cursor_invalido"}), ruim
+
+
+def test_ordem_do_prazo_em_python_e_a_mesma_do_cursor():
+    """A ordem em Python (o Direct do Instagram entra nela) e o corte pelo cursor
+    batem: depois do cursor de cada item vêm exatamente os seguintes."""
+    from app.routers import atendimento as rota
+
+    base = datetime(2026, 10, 14, 12, tzinfo=UTC)
+    itens = [
+        {"id": "a", "prazo_resposta_em": base + timedelta(hours=2), "ultima_mensagem_em": base},
+        {"id": "b", "prazo_resposta_em": base + timedelta(hours=1), "ultima_mensagem_em": base},
+        {"id": "c", "prazo_resposta_em": None, "ultima_mensagem_em": base - timedelta(hours=1)},
+        {"id": "d", "prazo_resposta_em": None, "ultima_mensagem_em": base},
+        {"id": "e", "prazo_resposta_em": None, "ultima_mensagem_em": base},
+        {"id": "f", "prazo_resposta_em": None, "ultima_mensagem_em": None},
+        {
+            "id": "g",
+            "prazo_resposta_em": None,
+            "ultima_mensagem_em": base + timedelta(microseconds=1),
+        },
+        {
+            "id": "h",
+            "canal": "comentario",
+            "prazo_resposta_em": None,
+            "ultima_mensagem_em": base + timedelta(hours=3),
+        },
+    ]
+    ordem = [i["id"] for i in sorted(itens, key=rota._chave_do_prazo)]
+    assert ordem == ["b", "a", "g", "d", "e", "c", "f", "h"]
+    por_id = {i["id"]: i for i in itens}
+    for k, ident in enumerate(ordem):
+        momento, cid, sem_prazo, grupo = rota._cursor(
+            rota._cursor_do_prazo(por_id[ident]), pelo_prazo=True
+        )
+        depois = [
+            i for i in ordem if rota._depois_do_cursor(por_id[i], momento, cid, sem_prazo, grupo)
+        ]
+        assert depois == ordem[k + 1 :], ident
+
+
+# ─────────────── não lido fresco: a gravação ───────────────
+
+
+async def test_aplicar_nao_lidas_marca_zera_e_nao_cria(db, make_user):
+    integ, canal = await _loja(db, await make_user(), "kfa")
+    a = await _cena(db, integ, canal, "A", ("cliente", 60), nao_lidas=3)
+    b = await _cena(db, integ, canal, "B", ("cliente", 60))
+    c = await _cena(db, integ, canal, "C", ("cliente", 60), nao_lidas=1)
+    # Lista cortada: marca o que viu, não zera ninguém.
+    n = await gravar.aplicar_nao_lidas(
+        db,
+        integration_id=integ.id,
+        canal_nome="chat",
+        contagens={"B": 2, "nao-existe": 5},
+        completa=False,
+    )
+    await db.commit()
+    assert n == 1
+    assert [x.nao_lidas for x in (a, b, c)] == [3, 2, 1], "a sessão já vê o valor novo"
+    # Lista completa: quem não veio zera; quem já está certo não conta.
+    n = await gravar.aplicar_nao_lidas(
+        db, integration_id=integ.id, canal_nome="chat", contagens={"B": 2}, completa=True
+    )
+    await db.commit()
+    assert n == 2
+    ids = [x.id for x in (a, b, c)]
+    db.expire_all()
+    assert [(await db.get(AtendimentoConversa, i)).nao_lidas for i in ids] == [0, 2, 0]
+    criada = await db.scalar(
+        select(AtendimentoConversa.id).where(AtendimentoConversa.externo_id == "nao-existe")
+    )
+    assert criada is None, "não cria conversa"
+
+
+# ─────────────── não lido fresco: Shopee ───────────────
+
+
+async def _shopee_lida(db, make_user, teto):
+    """Rodada 1: X (2 não lidas) e Y (1 não lida) gravadas."""
+    integ, canal = await tsh._canal(db, await make_user())
+    f = tsh.ShopeeFalso()
+    f.conversa("X", tsh.msg("X", AGORA - timedelta(hours=1)), nao_lidas=2)
+    f.conversa("Y", tsh.msg("Y", AGORA - timedelta(hours=2)), nao_lidas=1)
+    f.nao_lidas = 2
+    await tsh._rodar(db, canal, integ, f)
+    cs = await tsh._conversas(db)
+    assert (cs["X"].nao_lidas, cs["Y"].nao_lidas) == (2, 1)
+    f.chamadas_lista.clear()
+    return integ, canal, f
+
+
+async def test_shopee_lida_no_duoke_volta_a_zero_sem_mensagem_nova(db, make_user, teto):
+    integ, canal, f = await _shopee_lida(db, make_user, teto)
+    # A equipe abriu as duas no Duoke: a Shopee zera; nenhuma mensagem nova.
+    f.conversas["X"]["unread_count"] = 0
+    f.conversas["Y"]["unread_count"] = 0
+    f.nao_lidas = 0
+    r = await tsh._rodar(db, canal, integ, f)
+    assert r.status == shopee.STATUS_OK
+    cs = await tsh._conversas(db)
+    assert (cs["X"].nao_lidas, cs["Y"].nao_lidas) == (0, 0)
+    # Total zero: nem pede a lista das não lidas. E nada de "marcar como lido":
+    # o cliente de verdade nem tem o método.
+    assert not any(c["tipo"] == shopee.TIPO_NAO_LIDAS for c in f.chamadas_lista)
+    assert not hasattr(ShopeeClient, "read_conversation")
+
+
+async def test_shopee_lista_so_das_nao_lidas_acerta_cada_conversa(db, make_user, teto):
+    integ, canal, f = await _shopee_lida(db, make_user, teto)
+    f.conversas["X"]["unread_count"] = 0  # lida no Duoke
+    f.conversas["Y"]["unread_count"] = 4  # continua não lida (o número mudou)
+    f.nao_lidas = 1
+    await tsh._rodar(db, canal, integ, f)
+    cs = await tsh._conversas(db)
+    assert (cs["X"].nao_lidas, cs["Y"].nao_lidas) == (0, 4)
+    pedidas = [c for c in f.chamadas_lista if c["tipo"] == shopee.TIPO_NAO_LIDAS]
+    assert pedidas and all(
+        c["direction"] == shopee.DIRECAO_MAIS_ANTIGAS and c["page_size"] <= 25 for c in pedidas
+    )
+
+
+async def test_shopee_lista_das_nao_lidas_falhando_nao_zera_nada(db, make_user, teto):
+    integ, canal, f = await _shopee_lida(db, make_user, teto)
+    original = f.chat_conversation_list
+
+    async def lista(**kw):
+        if kw.get("tipo") == shopee.TIPO_NAO_LIDAS:
+            raise httpx.ConnectTimeout("lento")
+        return await original(**kw)
+
+    f.chat_conversation_list = lista
+    f.conversas["X"]["unread_count"] = 0
+    f.nao_lidas = 1
+    r = await tsh._rodar(db, canal, integ, f)
+    assert r.status == shopee.STATUS_OK, "a leitura segue"
+    cs = await tsh._conversas(db)
+    assert (cs["X"].nao_lidas, cs["Y"].nao_lidas) == (2, 1), "fica o valor de antes"
+
+
+async def test_shopee_total_falhando_nao_mexe_no_nao_lido(db, make_user, teto):
+    integ, canal, f = await _shopee_lida(db, make_user, teto)
+    f.conversas["X"]["unread_count"] = 0
+    f.erro_nao_lidas = httpx.ConnectTimeout("lento")
+    await tsh._rodar(db, canal, integ, f)
+    cs = await tsh._conversas(db)
+    assert (cs["X"].nao_lidas, cs["Y"].nao_lidas) == (2, 1)
+
+
+async def test_shopee_lista_cortada_marca_e_nao_zera(db, make_user, teto, monkeypatch):
+    integ, canal, f = await _shopee_lida(db, make_user, teto)
+    f.conversa("Z", tsh.msg("Z", AGORA - timedelta(minutes=30)), nao_lidas=0)
+    await tsh._rodar(db, canal, integ, f)
+    assert (await tsh._conversas(db))["Z"].nao_lidas == 0
+    monkeypatch.setattr(shopee, "MAX_PAGINAS_NAO_LIDAS", 1)
+    monkeypatch.setattr(shopee, "PAGINA_CONVERSAS", 1)
+    # X lida no Duoke; Y e Z não lidas: a 1ª (e única) página traz só a Z
+    # (a lista vem da mais nova para trás).
+    f.conversas["X"]["unread_count"] = 0
+    f.conversas["Y"]["unread_count"] = 5
+    f.conversas["Z"]["unread_count"] = 7
+    f.nao_lidas = 2
+    await tsh._rodar(db, canal, integ, f)
+    cs = await tsh._conversas(db)
+    assert cs["Z"].nao_lidas == 7, "a que veio ganha o número dela"
+    # Lista cortada: quem não veio fica como estava — nem a X (lida no Duoke)
+    # zera, nem a Y muda.
+    assert (cs["X"].nao_lidas, cs["Y"].nao_lidas) == (2, 1)
+
+
+# ─────────────── não lido fresco: TikTok ───────────────
+
+
+async def _tiktok_lida(db, make_user):
+    integ, canal = await ttk._canal(db, await make_user())
+    f = ttk.TikTokFalso()
+    f.conversa("A", ttk.tmsg(AGORA - timedelta(hours=1)), nao_lidas=2)
+    f.conversa("B", ttk.tmsg(AGORA - timedelta(hours=2)), nao_lidas=0)
+    await ttk._rodar(db, canal, integ, f)
+    cs = await ttk._conversas(db)
+    assert (cs["A"].nao_lidas, cs["B"].nao_lidas) == (2, 0)
+    f.chamadas_lista.clear()
+    return integ, canal, f
+
+
+async def test_tiktok_lida_no_duoke_volta_a_zero(db, make_user, teto):
+    integ, canal, f = await _tiktok_lida(db, make_user)
+    f.conversas["A"]["unread_count"] = 0  # lida; nenhuma mensagem nova
+    await ttk._rodar(db, canal, integ, f)
+    cs = await ttk._conversas(db)
+    assert cs["A"].nao_lidas == 0
+    # Sem não lida gravada, a rodada seguinte não relê a lista para isso.
+    f.chamadas_lista.clear()
+    await ttk._rodar(db, canal, integ, f)
+    assert len(f.chamadas_lista) == 1, "só o topo da caminhada"
+
+
+async def test_tiktok_falha_nao_zera_e_lista_cortada_so_marca(db, make_user, teto, monkeypatch):
+    integ, canal, f = await _tiktok_lida(db, make_user)
+    f.conversas["A"]["unread_count"] = 0
+    f.resposta_lista = {"code": 36009003, "message": "Internal error"}
+    await ttk._rodar(db, canal, integ, f)
+    assert (await ttk._conversas(db))["A"].nao_lidas == 2, "falhou: fica o de antes"
+    # Lista cortada (1 conversa por página, 1 página): a vista ganha o número
+    # dela; a não lida que não foi vista não zera.
+    f.resposta_lista = None
+    f.conversas["A"]["unread_count"] = 2  # ainda não lida na TikTok
+    f.conversa("C", ttk.tmsg(AGORA - timedelta(minutes=10)), nao_lidas=1)
+    await ttk._rodar(db, canal, integ, f)  # C entra pela caminhada
+    cs = await ttk._conversas(db)
+    assert (cs["A"].nao_lidas, cs["C"].nao_lidas) == (2, 1)
+    monkeypatch.setattr(tiktok, "PAGINA_CONVERSAS", 1)
+    monkeypatch.setattr(tiktok, "MAX_PAGINAS_NAO_LIDAS", 1)
+    f.conversas["A"]["unread_count"] = 0  # lida no Duoke, mas fica fora da página
+    f.conversas["C"]["unread_count"] = 3
+    await ttk._rodar(db, canal, integ, f)
+    cs = await ttk._conversas(db)
+    assert cs["C"].nao_lidas == 3
+    assert cs["A"].nao_lidas == 2
+
+
+def _passada(canal) -> dict | None:
+    return (canal.cursor or {}).get(tiktok.CHAVE_PASSADA_NAO_LIDAS)
+
+
+async def test_tiktok_passada_continua_na_rodada_seguinte_e_zera_no_fim(
+    db, make_user, teto, monkeypatch
+):
+    """A não lida lida no Duoke além das páginas de uma rodada: a passada guarda
+    onde parou e continua na seguinte; vista lida, zera; a que não aparece na
+    lista inteira zera no fim. Depois, sem candidata, nenhuma chamada a mais."""
+    integ, canal = await ttk._canal(db, await make_user())
+    f = ttk.TikTokFalso()
+    f.conversa("A", ttk.tmsg(AGORA - timedelta(hours=5)), nao_lidas=1)
+    f.conversa("B", ttk.tmsg(AGORA - timedelta(hours=6)), nao_lidas=2)
+    for i in range(4):
+        f.conversa(f"N{i}", ttk.tmsg(AGORA - timedelta(hours=1, minutes=i)), nao_lidas=0)
+    await ttk._rodar(db, canal, integ, f)
+    cs = await ttk._conversas(db)
+    assert (cs["A"].nao_lidas, cs["B"].nao_lidas) == (1, 2)
+
+    monkeypatch.setattr(tiktok, "PAGINA_CONVERSAS", 1)
+    monkeypatch.setattr(tiktok, "MAX_PAGINAS_NAO_LIDAS", 2)
+    f.conversas["A"]["unread_count"] = 0  # lida no Duoke, sem mensagem nova
+    del f.conversas["B"]  # some da lista (a TikTok não mostra mais)
+    # Ordem da lista: N0, N1, N2, N3, A.
+    f.chamadas_lista.clear()
+    await ttk._rodar(db, canal, integ, f)
+    tokens = [c["page_token"] for c in f.chamadas_lista]
+    assert tokens[:2] == [None, "1"], "a passada começa do topo, 2 páginas"
+    estado = _passada(canal)
+    assert estado and estado["retomar"] == "2", "guarda onde parou (a caminhada não apaga)"
+    assert (await ttk._conversas(db))["A"].nao_lidas == 1, "ainda não vista"
+
+    f.chamadas_lista.clear()
+    await ttk._rodar(db, canal, integ, f)
+    assert [c["page_token"] for c in f.chamadas_lista][:2] == ["2", "3"]
+    f.chamadas_lista.clear()
+    await ttk._rodar(db, canal, integ, f)
+    assert [c["page_token"] for c in f.chamadas_lista][0] == "4"
+    cs = await ttk._conversas(db)
+    assert cs["A"].nao_lidas == 0, "vista lida: zera"
+    assert cs["B"].nao_lidas == 0, "a lista acabou sem ela: zera"
+    assert _passada(canal) is None, "a passada acabou"
+
+    # Sem candidata: só a caminhada (uma página do topo).
+    f.chamadas_lista.clear()
+    await ttk._rodar(db, canal, integ, f)
+    assert [c["page_token"] for c in f.chamadas_lista] == [None]
+
+
+async def test_tiktok_aviso_do_sistema_nao_lido_nao_custa_chamada(db, make_user, teto):
+    """A conversa só com o aviso do sistema (o cartão de status do pedido) fica
+    não lida na TikTok para sempre e não conta no "Falta responder": não é
+    candidata — nenhuma chamada a mais por rodada por causa dela."""
+    integ, canal = await ttk._canal(db, await make_user())
+    f = ttk.TikTokFalso()
+    f.conversa("S", ttk.tmsg(AGORA - timedelta(days=5), papel="SYSTEM"), nao_lidas=1)
+    await ttk._rodar(db, canal, integ, f)
+    s = (await ttk._conversas(db))["S"]
+    assert s.nao_lidas == 1 and s.ultima_autor == "sistema"
+    assert pendente.falta_responder(s) is False
+    f.chamadas_lista.clear()
+    await ttk._rodar(db, canal, integ, f)
+    assert [c["page_token"] for c in f.chamadas_lista] == [None], "só a caminhada"
+
+
+async def test_tiktok_falha_na_passada_recomeca_do_topo(db, make_user, teto, monkeypatch):
+    integ, canal = await ttk._canal(db, await make_user())
+    f = ttk.TikTokFalso()
+    f.conversa("A", ttk.tmsg(AGORA - timedelta(hours=5)), nao_lidas=1)
+    for i in range(3):
+        f.conversa(f"N{i}", ttk.tmsg(AGORA - timedelta(hours=1, minutes=i)), nao_lidas=0)
+    await ttk._rodar(db, canal, integ, f)
+    monkeypatch.setattr(tiktok, "PAGINA_CONVERSAS", 1)
+    monkeypatch.setattr(tiktok, "MAX_PAGINAS_NAO_LIDAS", 1)
+    f.conversas["A"]["unread_count"] = 0
+    await ttk._rodar(db, canal, integ, f)
+    assert _passada(canal)["retomar"] == "1"
+    # O token guardado venceu: a TikTok recusa. Nada muda e a passada recomeça.
+    f.resposta_lista = {"code": 36009003, "message": "Internal error"}
+    await ttk._rodar(db, canal, integ, f)
+    assert _passada(canal) is None
+    assert (await ttk._conversas(db))["A"].nao_lidas == 1, "falhou: fica o de antes"
+    f.resposta_lista = None
+    f.chamadas_lista.clear()
+    await ttk._rodar(db, canal, integ, f)
+    assert f.chamadas_lista[0]["page_token"] is None, "do topo"
+
+
+# ─────────────── não lido fresco: ML pós-venda ───────────────
+
+
+async def test_ml_pos_venda_acerta_o_nao_lido_alem_do_teto(db, make_user, tml_relogio, teto):
+    canal, integ = await tml._canal(db, make_user, "pos_venda")
+    cli = tml.ClienteFalso()
+    outro = "2000009876543211"
+    cli.nao_lidos = {tml.PACK: 1, outro: 1}
+    cli.packs[tml.PACK] = {"messages": [tml._do_cliente("c1", "Oi", tml.T0)]}
+    cli.packs[outro] = {"messages": [tml._do_cliente("o1", "Oi", tml.T0)]}
+    await tml._rodar(db, canal, integ, cli)
+    assert (await tml._conversa(db, outro)).nao_lidas == 1
+    # Só 1 pack relido por rodada: o que muda de contagem vai primeiro; o outro
+    # também fica com o número da lista (antes ficava com o velho).
+    teto(1)
+    tml_relogio["agora"] += timedelta(minutes=10)
+    cli.nao_lidos = {tml.PACK: 4, outro: 3}
+    await tml._rodar(db, canal, integ, cli)
+    assert (await tml._conversa(db, tml.PACK)).nao_lidas == 4
+    assert (await tml._conversa(db, outro)).nao_lidas == 3
+    # Lido no Duoke: sai da lista e zera.
+    tml_relogio["agora"] += timedelta(minutes=10)
+    cli.nao_lidos = {outro: 3}
+    await tml._rodar(db, canal, integ, cli)
+    assert (await tml._conversa(db, tml.PACK)).nao_lidas == 0
+    assert (await tml._conversa(db, outro)).nao_lidas == 3
+
+
+@pytest.fixture
+def tml_relogio(monkeypatch):
+    atual = {"agora": tml.T0 + timedelta(minutes=30)}
+    monkeypatch.setattr(ml_atd, "_agora", lambda: atual["agora"])
+    return atual
+
+
+@pytest.fixture
+def teto(monkeypatch):
+    def _f(n: int) -> None:
+        monkeypatch.setattr(get_settings(), "atendimento_sync_max_conversas", n)
+
+    _f(40)
+    return _f

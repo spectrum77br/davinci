@@ -282,6 +282,14 @@ class AtendimentoConversa(Base, TimestampMixin):
     ultima_da_loja_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # A última mensagem da LOJA de qualquer tipo — até a automática (o robô e
+    # as campanhas do Duoke, o cartão da Shopee), menos a que falhou e a nota
+    # interna (migration 0396, 14/10/2026). É o lado da loja do "Falta
+    # responder" igual ao Duoke (`services/atendimento/pendente.py`); a fila
+    # de verdade (`aguardando_resposta`) continua pela `ultima_da_loja_em`.
+    ultima_loja_qualquer_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # O cliente falou por último e ninguém respondeu (nem por fora).
     aguardando_resposta: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false"), index=True

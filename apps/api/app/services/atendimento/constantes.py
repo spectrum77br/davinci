@@ -1244,8 +1244,10 @@ def e_mensagem_automatica(texto: str | None, payload: object = None) -> bool:
     que o DaVinci manda sozinho fora do /atendimento (`MENSAGENS_DAVINCI_FORA`)
     e, com o `payload`, a figurinha da campanha e os cartões da Shopee
     (`e_automatica_pelo_payload`). Não é resposta ao comprador: não fecha a
-    vez dele na fila "Falta responder" (`gravar.recalcular` — menos no turno
-    em que ele só mandou cartão, `e_cartao_do_comprador`), não aposenta a
+    vez dele na FILA (`aguardando_resposta`, `gravar.recalcular` — menos no
+    turno em que ele só mandou cartão, `e_cartao_do_comprador`; o número
+    "Falta responder" da Caixa é o do Duoke desde 14/10/2026 e conta ela como
+    resposta, `pendente.py`), não aposenta a
     sugestão da IA (`gravar._aposentar_rascunho`) e a métrica de tempo de
     resposta não conta. Nem exemplo de como a equipe responde (a IA não
     aprende com ela). O SQL é `gravar.mensagem_automatica_sql`.

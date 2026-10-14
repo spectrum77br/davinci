@@ -157,6 +157,10 @@ export type ConversaResumo = {
   prazo_resposta_em: string | null
   situacao: string
   nao_lidas: number
+  // No "Falta responder" da Caixa, igual ao Duoke (14/10/2026): o comprador
+  // por último (até a automática responde) ou não lida na plataforma. A API
+  // antiga não manda.
+  falta_responder?: boolean
   // Mensagens do comprador desde a última resposta de verdade (a bolinha);
   // a API antiga não manda — cai no `nao_lidas` da plataforma.
   pendentes?: number

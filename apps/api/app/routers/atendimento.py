@@ -172,6 +172,7 @@ from app.services.atendimento import (
     enviar,
     gravar,
     instagram,
+    pendente,
     robo,
     separa_email,
 )
@@ -378,7 +379,10 @@ VENCENDO = timedelta(hours=2)
 # A aba "Falta responder" vem pelo PRAZO mais curto (sem prazo no fim), não
 # pela recência (decisão de 01/10/2026): a conversa que vence primeiro é a
 # primeira da fila. A página seguinte vem por este cursor (`prazo:` + o
-# prazo e o id do último item), em vez da `ultima_mensagem_em`.
+# prazo e o id do último item), em vez da `ultima_mensagem_em`. As SEM prazo
+# (14/10/2026: as que entram só pela régua do Duoke — a não lida, a do menu
+# do robô fora da fila) vêm no fim pela recência, a mais nova primeiro; o
+# cursor delas leva a recência: `prazo:|<ultima_mensagem_em>|<id>`.
 FILTROS_PELO_PRAZO = ("aguardando",)
 _CURSOR_PRAZO = "prazo:"
 # "Pergunta vai para o topo" (RF7, 02/10/2026) — só ordena, não tira nada da
@@ -832,8 +836,11 @@ def _cursor(
 
     Ordem por recência: ISO da `ultima_mensagem_em` → (momento, None, False,
     1); `pergunta:<ISO>` (Mídia, ainda nas perguntas) → grupo 0.
-    Ordem pelo prazo: `prazo:<ISO ou vazio>|<id>` → (prazo, id, prazo vazio,
-    0); `prazo:comum:…` (já nos comentários comuns) → grupo 1.
+    Ordem pelo prazo: `prazo:<ISO>|<id>` → (prazo, id, False, 0); sem prazo,
+    `prazo:|<ISO da recência ou vazio>|<id>` → (recência, id, True, 0) — o de
+    antes de 14/10/2026 (`prazo:|<id>`, sem a recência) vira (None, "", True,
+    0): o grupo sem prazo do começo (a tela não repete o que já tem);
+    `prazo:comum:…` (já nos comentários comuns) → grupo 1.
     Ordem pelo turno (a Caixa Humano): `turno:<ISO>|<id>` → (turno, id, False, 0).
     Sem cursor: o começo (grupo 0).
     """
@@ -859,7 +866,14 @@ def _cursor(
         if not sep or not ident.strip():
             raise invalido
         if not prazo_txt.strip():
-            return None, ident.strip(), True, grupo
+            recencia_txt, sep, ident = ident.partition("|")
+            if not sep:
+                # O cursor de antes (sem a recência): o grupo sem prazo do começo.
+                return None, "", True, grupo
+            if not ident.strip():
+                raise invalido
+            recencia = _momento_do_cursor(recencia_txt, invalido) if recencia_txt.strip() else None
+            return recencia, ident.strip(), True, grupo
         bruto = prazo_txt
     else:
         ident = None
@@ -903,32 +917,60 @@ def _grupo_do_prazo(item: dict[str, Any]) -> int:
 def _cursor_do_prazo(item: dict[str, Any]) -> str:
     prazo = item.get("prazo_resposta_em")
     grupo = _CURSOR_COMUM if _grupo_do_prazo(item) else ""
-    return f"{_CURSOR_PRAZO}{grupo}{prazo.isoformat() if prazo else ''}|{item['id']}"
+    if prazo is None:
+        # Sem prazo: a recência vai junto (a ordem desse grupo é por ela).
+        ultima = item.get("ultima_mensagem_em")
+        return f"{_CURSOR_PRAZO}{grupo}|{ultima.isoformat() if ultima else ''}|{item['id']}"
+    return f"{_CURSOR_PRAZO}{grupo}{prazo.isoformat()}|{item['id']}"
+
+
+# Os momentos como distâncias exatas (o `timestamp()` em float arredonda o
+# microssegundo): o prazo desde o começo dos tempos (o mais curto primeiro) e a
+# recência até o fim deles (a mais nova primeiro).
+_COMECO_DOS_TEMPOS = datetime.min.replace(tzinfo=UTC)
+_FIM_DOS_TEMPOS = datetime.max.replace(tzinfo=UTC)
+
+
+def _posicao_no_prazo(prazo: datetime | None, ultima: datetime | None) -> tuple:
+    """(sem prazo?, prazo, sem recência?, recência ao contrário): o prazo mais curto
+    primeiro; sem prazo no fim, a mais recente primeiro e a sem mensagem no fim."""
+    zero = timedelta(0)
+    if prazo is not None:
+        return (False, _utc(prazo) - _COMECO_DOS_TEMPOS, False, zero)
+    if ultima is None:
+        return (True, zero, True, zero)
+    return (True, zero, False, _FIM_DOS_TEMPOS - _utc(ultima))
 
 
 def _chave_do_prazo(item: dict[str, Any]) -> tuple:
     """Ordem da aba "Falta responder": o comentário comum das redes no fim; dentro de
-    cada grupo, prazo mais curto primeiro, sem prazo no fim, id no empate."""
-    prazo = item.get("prazo_resposta_em")
+    cada grupo, prazo mais curto primeiro e, sem prazo (no fim), a mais recente
+    primeiro; id no empate."""
     return (
         _grupo_do_prazo(item),
-        prazo is None,
-        prazo.timestamp() if prazo else 0.0,
+        *_posicao_no_prazo(item.get("prazo_resposta_em"), item.get("ultima_mensagem_em")),
         str(item["id"]),
     )
 
 
 def _depois_do_cursor(
     item: dict[str, Any],
-    prazo: datetime | None,
+    momento: datetime | None,
     ident: str | None,
     sem_prazo: bool,
     grupo: int = 0,
 ) -> bool:
-    """O item vem DEPOIS do cursor na ordem pelo prazo? (o mesmo corte do SQL)."""
+    """O item vem DEPOIS do cursor na ordem pelo prazo? (o mesmo corte do SQL).
+
+    `momento` = o prazo do cursor ou, sem prazo, a recência (`_cursor`).
+    """
     if ident is None:
         return True
-    return _chave_do_prazo(item) > (grupo, sem_prazo, prazo.timestamp() if prazo else 0.0, ident)
+    if sem_prazo and not ident:
+        # O cursor de antes (sem a recência): o grupo sem prazo do começo.
+        return (_grupo_do_prazo(item), item.get("prazo_resposta_em") is None) >= (grupo, True)
+    posicao = _posicao_no_prazo(None, momento) if sem_prazo else _posicao_no_prazo(momento, None)
+    return _chave_do_prazo(item) > (grupo, *posicao, ident)
 
 
 def _pergunta_pendente():
@@ -1100,6 +1142,10 @@ def _resumo_dict(
         "prazo_resposta_em": _utc(c.prazo_resposta_em),
         "situacao": c.situacao,
         "nao_lidas": c.nao_lidas or 0,
+        # No "Falta responder" da Caixa (igual ao Duoke, `pendente.py`): a
+        # marca da linha (negrito, bolinha) e a tela relê os números quando
+        # ele muda.
+        "falta_responder": pendente.falta_responder(c),
         "pendentes": int(pendentes or 0) if c.aguardando_resposta else 0,
         "tem_rascunho": bool(tem_rascunho),
         "atribuido_a": c.atribuido_a,
@@ -1576,6 +1622,14 @@ async def resumo(
     scope = await resolve_team_scope(session, user)
     agora = datetime.now(UTC)
     aguardando = AtendimentoConversa.aguardando_resposta.is_(True)
+    # O "Falta responder" (o `aguardando` da resposta: total do topo, menu de
+    # plataformas, barra de lojas) é IGUAL AO DUOKE desde 14/10/2026: o
+    # comprador por último (qualquer mensagem da loja responde, até a
+    # automática) ou não lida no chat da Shopee/TikTok; onde a plataforma diz
+    # de quem é a vez (reclamação, avaliação, SAC, carrinho), a fila
+    # (`pendente.py`). Vencendo/vencidas seguem o PRAZO da fila
+    # (`aguardando_resposta`).
+    falta = pendente.falta_responder_sql()
     prazo = AtendimentoConversa.prazo_resposta_em
     vencendo = and_(aguardando, prazo >= agora, prazo < agora + VENCENDO)
     vencidas = and_(aguardando, prazo < agora)
@@ -1608,7 +1662,7 @@ async def resumo(
 
     q_plat = select(
         AtendimentoConversa.plataforma,
-        func.count().filter(aguardando),
+        func.count().filter(falta),
         func.count().filter(vencendo),
         func.count().filter(vencidas),
         func.count().filter(_a_conferir_existe()),
@@ -1688,7 +1742,7 @@ async def resumo(
         AtendimentoConversa.plataforma,
         canal_sem_integracao,
         func.max(AtendimentoConversa.conta),
-        func.count().filter(aguardando),
+        func.count().filter(falta),
         func.count().filter(vencidas),
         nao_lidas,
         na_caixa_humano,
@@ -1900,7 +1954,11 @@ async def _listar_marketplace(
         # Fechada = resolvida: sai da frente (volta sozinha se o cliente escrever).
         consulta = consulta.where(AtendimentoConversa.situacao != CONVERSA_FECHADA)
     elif filtro == "aguardando":
-        consulta = consulta.where(aguardando)
+        # "Falta responder" da Caixa = IGUAL AO DUOKE (14/10/2026, `pendente.py`).
+        # A Caixa Humano e a aba E-mail continuam na régua delas (a fila).
+        consulta = consulta.where(
+            aguardando if caixa_humano or caixa_email else pendente.falta_responder_sql()
+        )
     elif filtro == "vencendo":
         consulta = consulta.where(aguardando, prazo >= agora, prazo < agora + VENCENDO)
     elif filtro == "vencidas":
@@ -1988,15 +2046,31 @@ async def _listar_marketplace(
         consulta = consulta.order_by(turno.desc(), id_txt.desc())
     elif filtro in FILTROS_PELO_PRAZO:
         # O comentário comum das redes no fim (RF7: a pergunta passa à
-        # frente); dentro de cada grupo, prazo mais curto primeiro, sem prazo
-        # no fim; o id (como texto, a mesma ordem das DMs do Instagram)
-        # desempata e é o cursor.
+        # frente); dentro de cada grupo, prazo mais curto primeiro e, sem
+        # prazo (no fim), a mais recente primeiro (14/10/2026: a que entra só
+        # pela régua do Duoke não tem prazo); o id (como texto, a mesma ordem
+        # das DMs do Instagram) desempata e é o cursor.
         momento, ident, sem_prazo, grupo = _cursor(antes_de, pelo_prazo=True)
         id_txt = cast(AtendimentoConversa.id, String)
         comum = _comentario_comum()
+        ultima = AtendimentoConversa.ultima_mensagem_em
+        # A recência só ordena quem não tem prazo (com prazo: NULL, empate).
+        recencia = case((prazo.is_(None), ultima), else_=None)
         if ident is not None:
-            if sem_prazo:
-                depois = and_(prazo.is_(None), id_txt > ident)
+            if sem_prazo and not ident:
+                # O cursor de antes (sem a recência): o grupo sem prazo do começo.
+                depois = prazo.is_(None)
+            elif sem_prazo and momento is None:
+                depois = and_(prazo.is_(None), ultima.is_(None), id_txt > ident)
+            elif sem_prazo:
+                depois = and_(
+                    prazo.is_(None),
+                    or_(
+                        ultima < momento,
+                        and_(ultima == momento, id_txt > ident),
+                        ultima.is_(None),
+                    ),
+                )
             else:
                 depois = or_(
                     prazo > momento,
@@ -2008,7 +2082,10 @@ async def _listar_marketplace(
             else:
                 consulta = consulta.where(comum, depois)
         consulta = consulta.order_by(
-            case((comum, 1), else_=0), prazo.asc().nulls_last(), id_txt.asc()
+            case((comum, 1), else_=0),
+            prazo.asc().nulls_last(),
+            recencia.desc().nulls_last(),
+            id_txt.asc(),
         )
     else:
         momento, _ident, _sem, grupo = _cursor(antes_de, pelo_prazo=False)
@@ -2101,7 +2178,9 @@ async def listar_conversas(
     `ag_cancelamento`/`avaliacao` são a mesma coisa vinda do menu Filtrar.
     Na etiqueta Avaliação, `avaliacao_estrelas` traz a pior nota pendente. A aba
     "Falta responder" (`aguardando`) vem pelo PRAZO mais curto, sem prazo no
-    fim — e o cursor (`proximo`) é o do prazo.
+    fim (a mais recente primeiro) — e o cursor (`proximo`) é o do prazo. Na
+    Caixa, o "Falta responder" é a régua do Duoke (`services/atendimento/
+    pendente.py`); na Caixa Humano e na aba E-mail, a fila.
     `tipo_chamado` (sac | atacado | duvidas) filtra os chamados dos sites pelo
     tipo (os chips do grupo Site, RF6); `filtro=email_sem_vinculo` traz as
     conversas de e-mail das lojas ainda sem pedido (RF5).
