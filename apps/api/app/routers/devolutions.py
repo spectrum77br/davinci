@@ -2318,6 +2318,39 @@ async def patch_devolution(
     return await _completar_out(session, row, out)
 
 
+@router.post("/{devolution_id}/senha/pedir-de-novo", response_model=DevolutionOut)
+async def pedir_senha_de_novo(
+    devolution_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> DevolutionOut:
+    """↻ na linha "Senha: não saiu" (14/10/2026, 294738): o pedido de senha ao
+    comprador desistiu (3 tentativas) e a pessoa já resolveu a causa (loja
+    logada no AdsPower, perfil trocado). Volta a linha pra fila; na TikTok a
+    tarefa do robô nasce na hora, na Shopee vai pelo job de envio."""
+    row = (
+        await session.execute(select(Devolution).where(Devolution.id == devolution_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "devolution_not_found"})
+    try:
+        linha = await devolucao_mensagem_comprador.pedir_de_novo(
+            session, row, quem=(user.name or user.email or "").strip()
+        )
+    except devolucao_mensagem_comprador.NaoDaPraPedirDeNovo as e:
+        raise HTTPException(409, detail={"code": e.codigo}) from e
+    await session.commit()
+    if linha.plataforma == devolucao_mensagem_comprador.PLAT_TIKTOK:
+        # Só põe a tarefa na fila do robô (nada de rede): inline, sem esperar o
+        # job — o executor pergunta a cada 15 s.
+        await devolucao_mensagem_comprador.enviar(session, linha)
+        await session.commit()
+    else:
+        await devolucao_mensagem_comprador.agendar(session, linha)
+    await session.refresh(row)
+    return await _completar_out(session, row, DevolutionOut.model_validate(row))
+
+
 async def _exigir_video_fraude(session: AsyncSession, row: Devolution) -> None:
     """Trava (Vinicius 18/09): pedido na aba **Fraude** (caso de só reembolso — o
     lançamento é o que responde a TikTok, com o vídeo) só lança com o vídeo da

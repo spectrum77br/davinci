@@ -318,6 +318,56 @@ async def agendar(session: AsyncSession, linha: DevolucaoMensagemComprador | Non
     await session.commit()
 
 
+class NaoDaPraPedirDeNovo(Exception):  # noqa: N818 — nome em português, como o resto
+    """A linha não está num estado em que repetir o pedido resolve. `codigo`
+    vai pra tela como o motivo."""
+
+    def __init__(self, codigo: str) -> None:
+        super().__init__(codigo)
+        self.codigo = codigo
+
+
+async def pedir_de_novo(
+    session: AsyncSession, dev: Devolution, *, quem: str = ""
+) -> DevolucaoMensagemComprador:
+    """Botão ↻ da aba Devoluções (14/10/2026, 294738): o robô da TikTok desistiu
+    depois de 3 "precisa de login" no perfil da loja e não havia como tentar de
+    novo — `garantir` nunca recria linha `falhou`. A pessoa resolve a causa
+    (loga a loja, troca o perfil) e manda de novo: zera as tentativas e a linha
+    volta pra `pendente`. Só pra `falhou`, e não pra janela fechada da Shopee
+    (regra dela: repetir não muda nada). Quem chama commita e manda pra fila.
+    NÃO commita."""
+    linha = await linha_do_pedido(session, dev)
+    if linha is None or linha.status != STATUS_FALHOU:
+        raise NaoDaPraPedirDeNovo("senha_nao_falhou")
+    if linha.erro == ERRO_FORA_DA_JANELA:
+        raise NaoDaPraPedirDeNovo(ERRO_FORA_DA_JANELA)
+    if not motivo_pede_senha(dev):
+        raise NaoDaPraPedirDeNovo("motivo_nao_pede_senha")
+    anterior = (linha.erro or "erro").strip()
+    linha.status = STATUS_PENDENTE
+    linha.tentativas = 0
+    linha.erro = None
+    if linha.chamado_id:
+        ch = await session.get(Chamado, linha.chamado_id)
+        if ch is not None:
+            session.add(
+                chamados_svc.registrar_sistema(
+                    ch,
+                    f"{quem or 'Alguém'} mandou pedir de novo a senha ao comprador "
+                    f"(a tentativa anterior não saiu: {anterior[:200]}).",
+                )
+            )
+    logger.info(
+        "devolucao_mensagem_comprador_pedir_de_novo",
+        linha_id=str(linha.id),
+        pedido=linha.pedido_bling,
+        plataforma=linha.plataforma,
+        anterior=anterior[:200],
+    )
+    return linha
+
+
 async def _cliente_shopee(
     session: AsyncSession, linha: DevolucaoMensagemComprador, dev: Devolution | None
 ) -> ShopeeClient:

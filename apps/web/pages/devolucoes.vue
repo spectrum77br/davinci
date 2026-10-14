@@ -266,7 +266,7 @@ function mlStatusLabel(row: DevolutionRow): string {
   return ''
 }
 // Mensagem ao comprador pedindo a senha (Vinicius 22/09). Shopee pela API e,
-// desde 29/09, TikTok pelo robô do Mac Santiago (escreve no chat pela tela).
+// desde 29/09, TikTok pelo robô do Mac dos robôs (escreve no chat pela tela).
 // No ML a devolução cancela o pedido e o chat fecha; a Amazon só tem e-mail.
 // Por isso `sem_canal` é um estado legítimo, e não erro. Pendente com `erro` =
 // o último recado do robô (loja sem login, perfil em uso…) — segue na fila.
@@ -291,6 +291,35 @@ function senhaLabel(row: DevolutionRow): string {
     return `Senha: ${plat} não deixa falar com o comprador — pedir na mão`
   }
   return ''
+}
+// ↻ "pedir de novo" (14/10, 294738): o pedido de senha desistiu depois de 3
+// tentativas (loja deslogada no AdsPower, perfil com problema) e não havia como
+// mandar de novo. Só pra `falhou` — a janela fechada da Shopee é regra dela.
+function podePedirSenhaDeNovo(row: DevolutionRow): boolean {
+  return canEdit.value && row.senha_status === 'falhou' && row.senha_erro !== 'fora_da_janela_shopee'
+}
+const pedindoSenha = ref<Set<string>>(new Set())
+async function pedirSenhaDeNovo(row: DevolutionRow) {
+  if (!podePedirSenhaDeNovo(row) || pedindoSenha.value.has(row.id)) return
+  const plat = platNome(row)
+  if (!confirm(`Pedir de novo a senha ao comprador do pedido ${row.pedido_bling || ''} no chat da ${plat}?\n\nResolva antes o que impediu (ex.: loja deslogada no AdsPower).`)) return
+  pedindoSenha.value = new Set([...pedindoSenha.value, row.id])
+  try {
+    const updated = await api<DevolutionRow>(
+      `/api/devolutions/${encodeURIComponent(row.id)}/senha/pedir-de-novo`,
+      { method: 'POST' },
+    )
+    row.senha_status = updated.senha_status
+    row.senha_erro = updated.senha_erro
+    row.senha_enviada_at = updated.senha_enviada_at
+    pushToast({ kind: 'success', title: 'Senha', lines: ['Pedido de senha de volta na fila do robô.'] })
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: 'Não deu pra pedir de novo', lines: [apiError(e)] })
+  } finally {
+    const s = new Set(pedindoSenha.value)
+    s.delete(row.id)
+    pedindoSenha.value = s
+  }
 }
 function senhaClass(row: DevolutionRow): string {
   const st = row.senha_status
@@ -3097,7 +3126,14 @@ async function backfillAddresses() {
                 class="mt-0.5 max-w-[140px] whitespace-normal text-[10px] leading-tight"
                 :class="senhaClass(row)"
                 :title="senhaLabel(row)"
-              >{{ senhaLabel(row) }}</div>
+              >{{ senhaLabel(row) }}<button
+                  v-if="podePedirSenhaDeNovo(row)"
+                  type="button"
+                  class="ml-1 inline-flex items-center rounded border border-current px-1 align-middle text-[10px] font-medium hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-900/20"
+                  :disabled="pedindoSenha.has(row.id)"
+                  title="Pedir de novo a senha ao comprador (resolva antes o que impediu, ex.: loja deslogada)"
+                  @click.stop="pedirSenhaDeNovo(row)"
+                >{{ pedindoSenha.has(row.id) ? '…' : '↻ pedir de novo' }}</button></div>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input

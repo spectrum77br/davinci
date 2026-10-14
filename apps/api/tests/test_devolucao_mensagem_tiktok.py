@@ -307,3 +307,85 @@ async def test_lancamento_antigo_da_tiktok_entra_pela_varredura(
     linha = await _linha(db, "296309")
     assert (linha.status, linha.erro) == ("pendente", None)
     assert len(await _tarefas(db)) == 1
+
+
+# ---------------------------------------------------------------- ↻ pedir de novo
+
+
+async def _desistir(db, pedido: str) -> None:
+    """3 "precisa de login" seguidos: o cron desiste (linha `falhou`)."""
+    for _ in range(3):
+        await svc.processar_pendentes(db)
+        tarefas = await _tarefas(db)
+        if tarefas and tarefas[-1].status == "pending":
+            await _devolver(db, tarefas[-1], ok=False, motivo="precisa_login",
+                            detalhe='precisa entrar na loja pelo perfil "Mini - TikTok" do AdsPower')
+    assert (await _linha(db, pedido)).status == "falhou"
+
+
+async def test_pedir_de_novo_volta_a_linha_pra_fila_e_o_robo_recebe_a_tarefa(
+    client, make_user, auth_as, db, shopee
+):
+    """294738 (14/10): o robô desistiu depois de 3 "precisa de login" no 129; a
+    loja foi trocada pro 47 e não havia como mandar de novo pela tela."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    body = await _lancar(client, db, user, pedido="294738", order_sn="585915378936677380", **TIKTOK)
+    await _desistir(db, "294738")
+    antes = len(await _tarefas(db))
+    await db.refresh(user)  # o _linha expira a sessão; o login do teste lê o usuário
+
+    r = await client.post(f"/api/devolutions/{body['id']}/senha/pedir-de-novo")
+    assert r.status_code == 200, r.text
+    assert (r.json()["senha_status"], r.json()["senha_erro"]) == ("pendente", None)
+    linha = await _linha(db, "294738")
+    assert (linha.status, linha.tentativas, linha.erro) == ("pendente", 0, None)
+    tarefas = await _tarefas(db)
+    assert len(tarefas) == antes + 1 and tarefas[-1].status == "pending"
+    assert tarefas[-1].payload["linha_id"] == str(linha.id)
+
+    ch = await _chamado(db, "294738")
+    if ch is not None:
+        eventos = await _eventos_comprador(db, ch.id)
+        assert any("pedir de novo" in e.texto and "não saiu" in e.texto for e in eventos)
+    await db.refresh(user)
+
+    # na fila de novo: o botão não vale até falhar outra vez (nem duplica tarefa)
+    r = await client.post(f"/api/devolutions/{body['id']}/senha/pedir-de-novo")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "senha_nao_falhou"
+    await svc.processar_pendentes(db)
+    assert len(await _tarefas(db)) == antes + 1
+
+
+async def test_pedir_de_novo_nao_vale_pra_janela_fechada_da_shopee_nem_sem_pedido_de_senha(
+    client, make_user, auth_as, db, shopee
+):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    body = await _lancar(client, db, user, pedido="296311", order_sn="586006309818100010", **TIKTOK)
+    linha = await _linha(db, "296311")
+    linha.status, linha.erro = "falhou", svc.ERRO_FORA_DA_JANELA
+    await db.commit()
+    await db.refresh(user)
+    r = await client.post(f"/api/devolutions/{body['id']}/senha/pedir-de-novo")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == svc.ERRO_FORA_DA_JANELA
+
+    # lançamento sem motivo de senha não tem linha nenhuma
+    outro = await _lancar(client, db, user, pedido="296312", order_sn="586006309818100011",
+                          motivo="Danificado (Outros)",
+                          link_envio="https://mega.nz/file/expedicao#K3yDoVideoNaMega0123456789abcdefghij",
+                          **TIKTOK)
+    r = await client.post(f"/api/devolutions/{outro['id']}/senha/pedir-de-novo")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "senha_nao_falhou"
+
+
+async def test_pedir_de_novo_exige_poder_editar_devolucoes(
+    client, make_user, auth_as, db, shopee
+):
+    dono = await make_user(permissions=_perms())
+    auth_as(dono)
+    body = await _lancar(client, db, dono, pedido="296313", order_sn="586006309818100012", **TIKTOK)
+    so_ve = await make_user(permissions={"devolucoes": {"view": True}})
+    auth_as(so_ve)
+    r = await client.post(f"/api/devolutions/{body['id']}/senha/pedir-de-novo")
+    assert r.status_code == 403
