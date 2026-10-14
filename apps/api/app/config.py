@@ -460,8 +460,11 @@ class Settings(BaseSettings):
     # desligado: deploy não liga nada, cada interruptor é decisão do Eduardo.
     # Mesmo ligado, cada canal nasce em modo `observar` (só lê) na tela Lojas.
     #
-    # Cron que lê as conversas de cada loja (consulta periódica). Enquanto o
-    # Duoke estiver ligado, o DaVinci NUNCA marca nada como lido.
+    # Cron que lê as conversas de cada loja (consulta periódica). A leitura
+    # NUNCA marca nada como lido (o Duoke usa o "não lido" da plataforma).
+    # 14/10/2026 (Eduardo: "ao passar também tem que marcar como visto, igual
+    # lá no Duoke"): só a PESSOA que mexe marca, ao abrir a conversa de uma
+    # loja em que o DaVinci responde (services/atendimento/lida.py).
     atendimento_leitura_ativa: bool = False
     # Comunicador (01/10/2026): os dois crons novos têm interruptor PRÓPRIO,
     # além da leitura (os dois precisam estar ligados). Com a leitura já

@@ -18,7 +18,9 @@ O que se mede aqui é o que faria a caixa perder ou duplicar mensagem:
   que prova que o falso pega esse erro), a página nunca passa de 25, e a
   ordem da lista não é presumida (página fora de ordem não encerra cedo);
 - a nossa resposta barrada DEPOIS de aceita é vista (reconferência);
-- NENHUM pedido de "marcar como lido" sai do cliente de verdade;
+- NENHUM pedido de "marcar como lido" sai do cliente de verdade na leitura
+  nem no envio (14/10/2026: o `chat_read_conversation` existe, mas só a
+  pessoa que abre a conversa marca — tests/test_atendimento_lida.py);
 - a primeira leitura só pega os últimos 7 dias;
 - quem é loja e quem é cliente sai de `from_shop_id == shop_id`;
 - tipos (texto, imagem, produto, pedido, figurinha, notificação) e o elo com
@@ -1172,10 +1174,17 @@ async def test_cliente_nao_lidas_uma_conversa_e_pagina_de_mensagens(cliente_grav
     }
 
 
-def test_cliente_nao_tem_como_marcar_como_lido():
-    """Enquanto o Duoke estiver ligado, o "não lido" da Shopee é da equipe."""
+def test_cliente_tem_um_so_jeito_de_marcar_como_lido():
+    """Enquanto o Duoke estiver ligado, o "não lido" da Shopee é da equipe.
+
+    14/10/2026 (Eduardo: "ao passar também tem que marcar como visto, igual lá
+    no Duoke"): o ÚNICO método que marca é o `chat_read_conversation`, e só o
+    `services/atendimento/lida.py` o chama (a pessoa que abre a conversa numa
+    loja em que o DaVinci responde) — conferido em test_atendimento_lida.py.
+    Nada do adaptador (leitura, envio) o chama: o teste abaixo roda os dois."""
     nomes = [n.lower() for n in dir(ShopeeClient)]
-    assert not [n for n in nomes if "read_conversation" in n or "marcar_lid" in n]
+    marcam = [n for n in nomes if "read_conversation" in n or "marcar_lid" in n]
+    assert marcam == ["chat_read_conversation"]
 
 
 _AsyncClientReal = httpx.AsyncClient

@@ -20,6 +20,7 @@ from app.routers import atendimento_automacoes as atendimento_automacoes_router
 from app.routers import atendimento_avaliacoes as atendimento_avaliacoes_router
 from app.routers import atendimento_carrinhos as atendimento_carrinhos_router
 from app.routers import atendimento_email as atendimento_email_router
+from app.routers import atendimento_lida as atendimento_lida_router
 from app.routers import atendimento_painel as atendimento_painel_router
 from app.routers import atendimento_reclamacoes as atendimento_reclamacoes_router
 from app.routers import atendimento_redes as atendimento_redes_router
@@ -308,6 +309,10 @@ app.include_router(atendimento_redes_router.router)
 # Reclamação · Mediador · E-mail · Zap · Avaliação do mesmo comprador e
 # pedido, na mesma loja (só leitura; a caixa responde pela conversa de origem).
 app.include_router(atendimento_abas_router.router)
+# Marcar como LIDA ao abrir (14/10/2026, Eduardo: "ao passar também tem que
+# marcar como visto, igual lá no Duoke"): só a pessoa que mexe, só nas lojas
+# em que o DaVinci responde (services/atendimento/lida.py).
+app.include_router(atendimento_lida_router.router)
 # Mensagens automáticas (05/10/2026): a aba "Automáticas" — as regras por
 # loja (modo seco até a troca), o registro sem texto e a conta com o Duoke.
 app.include_router(atendimento_automacoes_router.router)

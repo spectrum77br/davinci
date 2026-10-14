@@ -299,7 +299,10 @@ class AtendimentoConversa(Base, TimestampMixin):
     prazo_resposta_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
-    # Não lidas segundo a PLATAFORMA (o DaVinci nunca marca como lido).
+    # Não lidas segundo a PLATAFORMA. O DaVinci só marca como lido quando a
+    # pessoa que mexe ABRE a conversa de uma loja em que ele responde
+    # (14/10/2026, services/atendimento/lida.py) — e só zera isto depois que
+    # a plataforma aceitou.
     nao_lidas: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )

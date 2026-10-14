@@ -791,7 +791,9 @@ class ShopeeClient:
         """Mensagens de UMA conversa (GET /api/v2/sellerchat/get_message), das
         mais novas pras mais antigas. NUNCA chamar `read_conversation` junto: a
         conversa ficaria marcada como lida e a equipe perderia o sinal no
-        Duoke/Seller Center. Quem mandou se decide por
+        Duoke/Seller Center (14/10/2026: marcar é só da pessoa que ABRE a
+        conversa, pelo `chat_read_conversation` — `atendimento/lida.py`).
+        Quem mandou se decide por
         `from_shop_id == shop_id` — `from_shop_id != 0` NÃO serve, o comprador
         também vem com um (medido 22/09)."""
         resp = await self._call(
@@ -807,9 +809,11 @@ class ShopeeClient:
     #
     # A caixa `/atendimento` (services/atendimento/shopee.py) lê por CONSULTA
     # periódica. Formato medido em produção em 25/09 (só leitura). Nenhum
-    # método daqui marca nada como lido — e `read_conversation` NÃO existe
-    # neste cliente de propósito: enquanto o Duoke estiver ligado, é o "não
-    # lido" da Shopee que avisa a equipe, e ler pelo DaVinci apagaria o aviso.
+    # método de LEITURA daqui marca nada como lido: enquanto o Duoke estiver
+    # ligado, é o "não lido" da Shopee que avisa a equipe, e ler pelo DaVinci
+    # apagaria o aviso. 14/10/2026 (decisão do dono): o `chat_read_conversation`
+    # existe, mas só a PESSOA que mexe na caixa marca, ao ABRIR a conversa de
+    # uma loja em que o DaVinci responde (`services/atendimento/lida.py`).
 
     async def chat_conversation_list(
         self,
@@ -905,6 +909,30 @@ class ShopeeClient:
             "/api/v2/sellerchat/get_message",
             params=params,
             what="shopee_chat_mensagens",
+        )
+
+    async def chat_read_conversation(
+        self, conversation_id: int | str, last_read_message_id: int | str
+    ) -> dict:
+        """Marca a conversa como LIDA até `last_read_message_id`
+        (POST /api/v2/sellerchat/read_conversation, corpo `{conversation_id`
+        (int64), `last_read_message_id` (texto)}`; o `response` volta vazio).
+        Levanta com o código da Shopee, como todo `_call`.
+
+        14/10/2026 (Eduardo: "ao passar também tem que marcar como visto,
+        igual lá no Duoke quando clicar na conversa"): SÓ o
+        `services/atendimento/lida.py` chama isto — a PESSOA que mexe na caixa
+        abriu a conversa de uma loja em que o DaVinci responde. A leitura
+        (lista, `get_message`, reconferência, importação) continua sem
+        marcar nada."""
+        return await self._call(
+            "POST",
+            "/api/v2/sellerchat/read_conversation",
+            json={
+                "conversation_id": int(conversation_id),
+                "last_read_message_id": str(last_read_message_id),
+            },
+            what="shopee_chat_lida",
         )
 
     async def dispute(

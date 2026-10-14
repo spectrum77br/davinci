@@ -523,6 +523,10 @@ export type Detalhe = {
   // O "atualizar" do painel Pedido passaria nos portões do POST agora?
   // (plataforma com retrato, loja conectada, leitura ligada, canal ligado)
   pedido_atualizavel?: boolean
+  // Marcar como lida ao abrir (14/10/2026): quem vê mexe, a loja num modo em
+  // que o DaVinci responde (nunca Observar), plataforma com "lida" e há não
+  // lidas — as travas do POST /lida (lib/atendimentoLida.ts).
+  marcar_lida?: boolean
   // As mudanças de etiqueta, da mais antiga para a mais nova.
   etiqueta_historico?: EtiquetaHistorico[]
 }
