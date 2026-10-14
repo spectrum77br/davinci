@@ -25,13 +25,14 @@ from __future__ import annotations
 import csv
 import io
 import time
+from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -45,6 +46,7 @@ router = APIRouter(prefix="/api/conciliacao", tags=["conciliacao"])
 
 MP_API_BASE = "https://api.mercadopago.com"
 _PERM = require_permission_any(("margem", "logistica"), "view")
+_PERM_EDIT = require_permission_any(("margem", "logistica"), "edit")
 _AMOSTRA = 5
 _LINHAS_CSV = 12
 _MAX_TEXTO = 1500
@@ -299,5 +301,323 @@ async def sonda(
         "periodos": {"atual": k_atual, "anterior": k_ant},
         "quando": datetime.now(UTC).isoformat(),
         "conclusao": conclusao,
+        "chamadas": chamadas,
+    }
+
+
+# --- Extrato do Mercado Pago (Relatório de liberações) ----------------------
+# 14/10/2026, com OK do Vinicius: a conta da jlas2 nunca gerou o relatório, nem
+# pelo painel nem por API. Pra ver as linhas de verdade são duas escritas de
+# configuração na conta da loja (nunca em dinheiro ou pedido): criar a
+# configuração (colunas, fuso) e pedir um relatório de um período. Depois o
+# arquivo é lido e resumido aqui, sem gravar nada no DaVinci.
+
+_COLUNAS_EXTRATO = [
+    "DATE",
+    "SOURCE_ID",
+    "EXTERNAL_REFERENCE",
+    "RECORD_TYPE",
+    "DESCRIPTION",
+    "NET_CREDIT_AMOUNT",
+    "NET_DEBIT_AMOUNT",
+    "GROSS_AMOUNT",
+    "MP_FEE_AMOUNT",
+    "FINANCING_FEE_AMOUNT",
+    "SHIPPING_FEE_AMOUNT",
+    "TAXES_AMOUNT",
+    "COUPON_AMOUNT",
+    "EFFECTIVE_COUPON_AMOUNT",
+    "INSTALLMENTS",
+    "PAYMENT_METHOD",
+    "PAYMENT_METHOD_TYPE",
+    "TRANSACTION_APPROVAL_DATE",
+    "TRANSACTION_DATE",
+    "ORDER_ID",
+    "SHIPPING_ID",
+    "SHIPMENT_MODE",
+    "PACK_ID",
+    "ITEM_ID",
+    "PRODUCT_SKU",
+    "SALE_DETAIL",
+    "BALANCE_AMOUNT",
+    "METADATA",
+    "OPERATION_TAGS",
+    "SELLER_AMOUNT",
+    "TAX_DETAIL",
+    "PAYOUT_BANK_ACCOUNT_NUMBER",
+    "CURRENCY",
+    "PURCHASE_ID",
+    "ORDER_MP",
+    "SHIPPING_ORDER_ID",
+]
+# Conjunto mínimo (todos documentados) pra quando a conta recusar alguma coluna.
+_COLUNAS_EXTRATO_MINIMO = _COLUNAS_EXTRATO[:13] + [
+    "INSTALLMENTS",
+    "PAYMENT_METHOD",
+    "ORDER_ID",
+    "SHIPPING_ID",
+    "PACK_ID",
+    "BALANCE_AMOUNT",
+    "METADATA",
+]
+
+
+def _config_extrato(colunas: list[str]) -> dict[str, Any]:
+    return {
+        "file_name_prefix": "davinci-liberacoes",
+        "include_withdrawal_at_end": False,
+        "execute_after_withdrawal": False,
+        "display_timezone": "GMT-03",
+        "frequency": {"hour": 0, "type": "monthly", "value": 1},
+        "columns": [{"key": c} for c in colunas],
+    }
+
+
+async def _mp_post(cliente: Any, path: str, body: dict) -> httpx.Response:
+    if cliente._expired():
+        await cliente.refresh()
+    headers = {"Authorization": f"Bearer {cliente.access_token}", "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=60.0) as c:
+        return await c.post(f"{MP_API_BASE}{path}", headers=headers, json=body)
+
+
+def _num(v: Any) -> float:
+    if v is None:
+        return 0.0
+    t = str(v).strip()
+    if not t:
+        return 0.0
+    if "," in t and "." not in t:
+        t = t.replace(".", "").replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return 0.0
+
+
+def _coluna(cabecalho: list[str], *candidatas: str) -> str | None:
+    baixo = {c.strip().lower(): c for c in cabecalho}
+    for cand in candidatas:
+        if cand.lower() in baixo:
+            return baixo[cand.lower()]
+    return None
+
+
+def resumir_extrato(texto: str) -> dict[str, Any]:
+    """Resumo de um CSV do Relatório de liberações: tipos de movimento, somas,
+    quantas linhas têm número de pedido, e uma amostra por tipo. Não grava."""
+    linhas = texto.splitlines()
+    if not linhas:
+        return {"total_linhas": 0}
+    sep = ";" if linhas[0].count(";") >= linhas[0].count(",") else ","
+    rows = list(csv.DictReader(io.StringIO("\n".join(linhas)), delimiter=sep))
+    cab = list(rows[0].keys()) if rows else linhas[0].split(sep)
+    c_tipo = _coluna(cab, "DESCRIPTION", "Descrição", "DESCRICAO")
+    c_reg = _coluna(cab, "RECORD_TYPE", "Tipo de registro")
+    c_cred = _coluna(cab, "NET_CREDIT_AMOUNT")
+    c_deb = _coluna(cab, "NET_DEBIT_AMOUNT")
+    c_pedido = _coluna(cab, "ORDER_ID")
+    c_pack = _coluna(cab, "PACK_ID")
+    c_ref = _coluna(cab, "EXTERNAL_REFERENCE")
+    c_saldo = _coluna(cab, "BALANCE_AMOUNT")
+    por_tipo: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"linhas": 0, "credito": 0.0, "debito": 0.0, "com_pedido": 0, "sem_pedido": 0}
+    )
+    registros: Counter[str] = Counter()
+    amostra: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    com_pedido = sem_pedido = 0
+    campos_amostra = [
+        c
+        for c in (
+            _coluna(cab, "DATE"),
+            _coluna(cab, "SOURCE_ID"),
+            c_ref,
+            c_reg,
+            c_tipo,
+            _coluna(cab, "GROSS_AMOUNT"),
+            _coluna(cab, "MP_FEE_AMOUNT"),
+            _coluna(cab, "FINANCING_FEE_AMOUNT"),
+            _coluna(cab, "SHIPPING_FEE_AMOUNT"),
+            _coluna(cab, "COUPON_AMOUNT"),
+            c_cred,
+            c_deb,
+            c_saldo,
+            c_pedido,
+            c_pack,
+            _coluna(cab, "SHIPPING_ID"),
+            _coluna(cab, "INSTALLMENTS"),
+            _coluna(cab, "PAYMENT_METHOD"),
+            _coluna(cab, "METADATA"),
+        )
+        if c
+    ]
+    for r in rows:
+        tipo = (r.get(c_tipo) or "").strip() if c_tipo else "?"
+        reg = (r.get(c_reg) or "").strip() if c_reg else "?"
+        registros[reg] += 1
+        t = por_tipo[tipo]
+        t["linhas"] += 1
+        t["credito"] = round(t["credito"] + _num(r.get(c_cred)), 2) if c_cred else 0.0
+        t["debito"] = round(t["debito"] + _num(r.get(c_deb)), 2) if c_deb else 0.0
+        tem_pedido = bool((r.get(c_pedido) or "").strip() if c_pedido else "") or bool(
+            (r.get(c_pack) or "").strip() if c_pack else ""
+        )
+        if tem_pedido:
+            t["com_pedido"] += 1
+            com_pedido += 1
+        else:
+            t["sem_pedido"] += 1
+            sem_pedido += 1
+        if len(amostra[tipo]) < 3:
+            amostra[tipo].append({c: (r.get(c) or "")[:120] for c in campos_amostra})
+    return {
+        "total_linhas": len(rows),
+        "separador": sep,
+        "colunas": cab,
+        "registros": dict(registros),
+        "por_tipo": dict(por_tipo),
+        "com_pedido": com_pedido,
+        "sem_pedido": sem_pedido,
+        "credito_total": round(sum(t["credito"] for t in por_tipo.values()), 2),
+        "debito_total": round(sum(t["debito"] for t in por_tipo.values()), 2),
+        "saldo_primeira_linha": (rows[0].get(c_saldo) if rows and c_saldo else None),
+        "saldo_ultima_linha": (rows[-1].get(c_saldo) if rows and c_saldo else None),
+        "amostra_por_tipo": dict(amostra),
+    }
+
+
+@router.post("/sonda/extrato/pedir")
+async def sonda_extrato_pedir(
+    conta: Annotated[str, Query(min_length=1)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_EDIT)],
+    de: Annotated[date, Query(description="primeiro dia (BRT)")],
+    ate: Annotated[date, Query(description="último dia (BRT), inclusive")],
+    _body: Annotated[dict | None, Body()] = None,
+) -> dict[str, Any]:
+    """Duas escritas de configuração na conta Mercado Pago da loja: cria a
+    configuração do Relatório de liberações se não existir e pede o relatório
+    do período. Nada de dinheiro, nada de pedido, nada gravado no DaVinci."""
+    integ = await lm._ml_integration_for_conta(session, conta)
+    if integ is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"code": "conta_ml_nao_encontrada", "conta": conta}
+        )
+    cliente = await cliente_da_integracao(integ)
+    chamadas: list[dict[str, Any]] = []
+
+    cfg = await _chamada(
+        "mp_extrato_config_antes",
+        f"{MP_API_BASE}/v1/account/release_report/config",
+        lambda: _mp_get(cliente, "/v1/account/release_report/config"),
+    )
+    chamadas.append(cfg)
+    if cfg.get("status") == 404:
+        criada = await _chamada(
+            "mp_extrato_config_criar",
+            f"{MP_API_BASE}/v1/account/release_report/config",
+            lambda: _mp_post(
+                cliente, "/v1/account/release_report/config", _config_extrato(_COLUNAS_EXTRATO)
+            ),
+        )
+        chamadas.append(criada)
+        if criada.get("status") not in (200, 201):
+            minima = await _chamada(
+                "mp_extrato_config_criar_minima",
+                f"{MP_API_BASE}/v1/account/release_report/config",
+                lambda: _mp_post(
+                    cliente,
+                    "/v1/account/release_report/config",
+                    _config_extrato(_COLUNAS_EXTRATO_MINIMO),
+                ),
+            )
+            chamadas.append(minima)
+
+    inicio = datetime(de.year, de.month, de.day, 3, 0, 0, tzinfo=UTC)  # 00:00 BRT
+    fim = datetime(ate.year, ate.month, ate.day, 3, 0, 0, tzinfo=UTC).replace(
+        hour=2, minute=59, second=59
+    )
+    fim = fim + (
+        datetime(1, 1, 2) - datetime(1, 1, 1)
+    )  # 23:59:59 BRT do último dia = 02:59:59Z do dia seguinte
+    corpo = {
+        "begin_date": inicio.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end_date": fim.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    pedido = await _chamada(
+        "mp_extrato_pedir",
+        f"{MP_API_BASE}/v1/account/release_report",
+        lambda: _mp_post(cliente, "/v1/account/release_report", corpo),
+    )
+    pedido["corpo_enviado"] = corpo
+    chamadas.append(pedido)
+    logger.info(
+        "conciliacao_sonda_extrato_pedido",
+        conta=conta,
+        integration_id=str(integ.id),
+        chamadas={c["nome"]: c.get("status") or c.get("erro") for c in chamadas},
+    )
+    return {"conta": conta, "periodo": corpo, "chamadas": chamadas}
+
+
+@router.get("/sonda/extrato")
+async def sonda_extrato_ler(
+    conta: Annotated[str, Query(min_length=1)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+) -> dict[str, Any]:
+    """Lista os relatórios da conta e, se o mais novo estiver pronto, baixa o
+    CSV e devolve um resumo (tipos de movimento, somas, com/sem pedido, amostra).
+    Só leitura."""
+    integ = await lm._ml_integration_for_conta(session, conta)
+    if integ is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"code": "conta_ml_nao_encontrada", "conta": conta}
+        )
+    cliente = await cliente_da_integracao(integ)
+    chamadas: list[dict[str, Any]] = []
+    lista = await _chamada(
+        "mp_extrato_lista",
+        f"{MP_API_BASE}/v1/account/release_report/list",
+        lambda: _mp_get(cliente, "/v1/account/release_report/list"),
+    )
+    chamadas.append(lista)
+    amostra = lista.get("amostra")
+    itens = (
+        amostra.get("primeiros")
+        if isinstance(amostra, dict)
+        else (amostra if isinstance(amostra, list) else [])
+    )
+    relatorios = [x for x in (itens or []) if isinstance(x, dict)]
+    pronto = next((x for x in relatorios if x.get("file_name")), None)
+    resumo: dict[str, Any] | None = None
+    if pronto:
+        nome = str(pronto["file_name"])
+        r_arq = await _chamada(
+            "mp_extrato_arquivo",
+            f"{MP_API_BASE}/v1/account/release_report/{nome}",
+            lambda: _mp_get(cliente, f"/v1/account/release_report/{nome}"),
+            csv_texto=True,
+        )
+        chamadas.append(r_arq)
+        if r_arq.get("ok"):
+            # relê o arquivo inteiro pro resumo (a amostra acima é só o começo)
+            r2 = await _mp_get(cliente, f"/v1/account/release_report/{nome}")
+            if r2.status_code == 200:
+                resumo = resumir_extrato(r2.text)
+    logger.info(
+        "conciliacao_sonda_extrato_lido",
+        conta=conta,
+        integration_id=str(integ.id),
+        relatorios=len(relatorios),
+        pronto=bool(pronto),
+        total_linhas=(resumo or {}).get("total_linhas"),
+        tipos=list(((resumo or {}).get("por_tipo") or {}).keys()),
+    )
+    return {
+        "conta": conta,
+        "relatorios": relatorios,
+        "pronto": pronto,
+        "resumo": resumo,
         "chamadas": chamadas,
     }

@@ -175,3 +175,115 @@ async def test_sonda_em_partes_respeita_o_limite_de_chamadas(db, make_user, auth
     nomes1 = [c["nome"] for c in r1.json()["chamadas"]]
     assert nomes1 == ["ml_quem_sou", "ml_periodos", "ml_resumo_mes_atual", "ml_detalhes_mes_atual"]
     assert r1.json()["conclusao"]["extrato_mp_abre_com_a_chave_do_ml"] is False
+
+
+CSV_LIBERACOES = (
+    "DATE,SOURCE_ID,EXTERNAL_REFERENCE,RECORD_TYPE,DESCRIPTION,NET_CREDIT_AMOUNT,NET_DEBIT_AMOUNT,"
+    "GROSS_AMOUNT,MP_FEE_AMOUNT,SHIPPING_FEE_AMOUNT,ORDER_ID,PACK_ID,BALANCE_AMOUNT\n"
+    "2026-10-02T06:12:00.000-03:00,93612200451,2000015210334100,release,payment,147.48,0,189.90,25.07,17.35,2000015210334100,,12493.15\n"
+    "2026-10-02T09:02:00.000-03:00,11742200,,release,payment,0,1843.20,1843.20,0,0,,,10649.95\n"
+    "2026-10-03T16:00:00.000-03:00,payout-1,,release,payout,0,4000.00,4000.00,0,0,,,6649.95\n"
+    "2026-10-04T10:31:00.000-03:00,93611877002,2000014989416509,release,refund,0,2107.98,2107.98,0,0,2000014989416509,,4541.97\n"
+)
+
+
+def _fontes_extrato(router: respx.MockRouter, *, config_existe: bool, pronto: bool) -> None:
+    router.get(f"{MP}/v1/account/release_report/config").mock(
+        return_value=Response(200, json={"columns": [{"key": "DATE"}]})
+        if config_existe
+        else Response(404, json={"error": "config_not_found_for_user"})
+    )
+    router.post(f"{MP}/v1/account/release_report/config").mock(
+        return_value=Response(201, json={"file_name_prefix": "davinci-liberacoes"})
+    )
+    router.post(f"{MP}/v1/account/release_report").mock(return_value=Response(202, json={}))
+    router.get(f"{MP}/v1/account/release_report/list").mock(
+        return_value=Response(
+            200,
+            json=[{"id": 1, "file_name": "davinci-liberacoes-1.csv", "status": "processed"}]
+            if pronto
+            else [{"id": 1, "status": "pending"}],
+        )
+    )
+    router.get(f"{MP}/v1/account/release_report/davinci-liberacoes-1.csv").mock(
+        return_value=Response(200, headers={"content-type": "text/csv"}, text=CSV_LIBERACOES)
+    )
+
+
+async def test_pedir_extrato_cria_config_se_nao_existe_e_pede_o_periodo(
+    db, make_user, auth_as, client
+):
+    await _loja_ml(db, make_user)
+    auth_as(await make_user(permissions={"margem": {"view": True, "edit": True}}))
+    with respx.mock(assert_all_called=False) as router:
+        _fontes_extrato(router, config_existe=False, pronto=False)
+        r = await client.post(
+            "/api/conciliacao/sonda/extrato/pedir",
+            params={"conta": "jlas2", "de": "2026-10-01", "ate": "2026-10-14"},
+        )
+        pedido = [
+            c
+            for c in router.calls
+            if c.request.method == "POST" and c.request.url.path == "/v1/account/release_report"
+        ]
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert [c["nome"] for c in corpo["chamadas"]] == [
+        "mp_extrato_config_antes",
+        "mp_extrato_config_criar",
+        "mp_extrato_pedir",
+    ]
+    # 01/10 00:00 BRT → 03:00Z; 14/10 23:59:59 BRT → 15/10 02:59:59Z
+    assert corpo["periodo"] == {
+        "begin_date": "2026-10-01T03:00:00Z",
+        "end_date": "2026-10-15T02:59:59Z",
+    }
+    import json
+
+    assert json.loads(pedido[0].request.content) == corpo["periodo"]
+    assert CHAVE not in r.text
+
+
+async def test_pedir_extrato_exige_edicao(db, make_user, auth_as, client):
+    await _loja_ml(db, make_user)
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    r = await client.post(
+        "/api/conciliacao/sonda/extrato/pedir",
+        params={"conta": "jlas2", "de": "2026-10-01", "ate": "2026-10-14"},
+    )
+    assert r.status_code == 403
+
+
+async def test_ler_extrato_resume_o_arquivo_pronto(db, make_user, auth_as, client):
+    await _loja_ml(db, make_user)
+    auth_as(await make_user(permissions={"logistica": {"view": True}}))
+    with respx.mock(assert_all_called=False) as router:
+        _fontes_extrato(router, config_existe=True, pronto=True)
+        r = await client.get("/api/conciliacao/sonda/extrato", params={"conta": "jlas2"})
+    assert r.status_code == 200, r.text
+    resumo = r.json()["resumo"]
+    assert resumo["total_linhas"] == 4
+    assert resumo["por_tipo"]["payment"] == {
+        "linhas": 2,
+        "credito": 147.48,
+        "debito": 1843.2,
+        "com_pedido": 1,
+        "sem_pedido": 1,
+    }
+    assert resumo["por_tipo"]["payout"]["sem_pedido"] == 1
+    assert resumo["por_tipo"]["refund"]["com_pedido"] == 1
+    assert resumo["com_pedido"] == 2 and resumo["sem_pedido"] == 2
+    assert resumo["credito_total"] == 147.48 and resumo["debito_total"] == 7951.18
+    assert resumo["saldo_ultima_linha"] == "4541.97"
+    assert resumo["amostra_por_tipo"]["payout"][0]["DESCRIPTION"] == "payout"
+
+
+async def test_ler_extrato_sem_arquivo_pronto(db, make_user, auth_as, client):
+    await _loja_ml(db, make_user)
+    auth_as(await make_user(permissions={"logistica": {"view": True}}))
+    with respx.mock(assert_all_called=False) as router:
+        _fontes_extrato(router, config_existe=True, pronto=False)
+        r = await client.get("/api/conciliacao/sonda/extrato", params={"conta": "jlas2"})
+    assert r.status_code == 200
+    assert r.json()["pronto"] is None and r.json()["resumo"] is None
+    assert r.json()["relatorios"] == [{"id": 1, "status": "pending"}]
