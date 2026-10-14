@@ -21,8 +21,21 @@
 //   identificada, que não tem linha na barra).
 import { GRUPOS_CAIXA, aguardandoDe, corteDaBarra, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
-import { nomeDoGrupo } from '~/components/AtendimentoPlataforma.vue'
+import { lojaNosModos, nomeDoGrupo } from '~/components/AtendimentoPlataforma.vue'
 
+// Na CAIXA HUMANO a barra só lista as lojas nos modos dela (14/10/2026, o
+// dono: "mostre também só as que estão ativadas … por cada lugar, separado
+// Shopee, ML"): a loja fora do Automático some da barra, cada plataforma no
+// seu grupo. Fica a que ainda tem conversa contada lá (nenhum número some da
+// tela). `modos` null = toda loja (a Caixa Humano de todas, ou a API antiga).
+export function lojasDaCaixaHumano<L extends { integration_id?: string | null; externo_ref?: string | null; rede_social_id?: string | null; humano?: number }>(
+  lojas: L[],
+  canais: Parameters<typeof lojaNosModos>[0],
+  modos: string[] | null,
+): L[] {
+  if (!modos) return lojas
+  return lojas.filter((l) => (Number(l.humano) || 0) > 0 || lojaNosModos(canais, l, modos) === true)
+}
 // As plataformas que a barra mostra ([] = todas) — a régua mora no menu do topo.
 export { corteDaBarra }
 export function gruposVisiveis<G extends { plataforma: string }>(grupos: G[], corte: string[]): G[] {
@@ -119,7 +132,6 @@ import { ChevronsLeft, ChevronsRight, Inbox, Lock, TriangleAlert, Unplug } from 
 import type { NumeroDaCaixa } from '~/components/AtendimentoFiltroPlataforma.vue'
 import {
   leituraParada,
-  lojaNosModos,
   modosDaCaixaHumano,
   plataformaInfo,
   sellerCenterDe,
@@ -278,7 +290,8 @@ const lojas = computed<LojaBarra[]>(() => {
 type Grupo = { plataforma: string; nome: string; lojas: LojaBarra[]; nao_lidas: number }
 const grupos = computed<Grupo[]>(() => {
   const porPlat = new Map<string, LojaBarra[]>()
-  for (const l of lojas.value) porPlat.set(l.plataforma, [...(porPlat.get(l.plataforma) || []), l])
+  const base = props.numero === 'humano' ? lojasDaCaixaHumano(lojas.value, props.resumo?.canais, modosHumano.value) : lojas.value
+  for (const l of base) porPlat.set(l.plataforma, [...(porPlat.get(l.plataforma) || []), l])
   const ordem = [...ORDEM, ...[...porPlat.keys()].filter((p) => !ORDEM.includes(p)).sort()]
   return ordem
     .filter((p) => porPlat.has(p))
@@ -310,7 +323,9 @@ const plataformaInstagram = computed(() => props.resumo?.plataformas?.find((p) =
 const temContasInstagram = computed(() => grupos.value.some((g) => g.plataforma === 'instagram'))
 const instagram = computed(() => (props.numero === 'humano' ? Number(plataformaInstagram.value?.humano) || 0 : plataformaInstagram.value?.aguardando ?? 0))
 const mostrarInstagram = computed(() => !!props.resumo && !temContasInstagram.value && (!!plataformaInstagram.value || filtros.value.plataforma === 'instagram')
-  && (!corte.value.length || corte.value.includes('instagram')))
+  && (!corte.value.length || corte.value.includes('instagram'))
+  // Na Caixa Humano, só com conversa contada lá (rede não fica no Automático).
+  && (props.numero !== 'humano' || !modosHumano.value || instagram.value > 0))
 
 // A Caixa Humano só das lojas nos modos dela (14/10/2026): a loja fora (a do
 // robô sem integração: não dá para saber — fica como sempre).
