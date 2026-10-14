@@ -589,7 +589,7 @@
       "canal": null,
       "prioridade": 5,
       "quando": "A resposta precisa de dado do produto, da loja ou de política.",
-      "faca": "Usar só: título do anúncio e itens nos FATOS, lacunas do sistema e os fatos aprovados nas regras do assunto. O que a equipe disse em outras conversas não é fato. Sem o dado: não afirmar, dizer que a equipe confirma e precisa_humano=true."
+      "faca": "Usar só: o anúncio e os itens nos FATOS, lacunas do sistema e os fatos aprovados nas regras do assunto. O que a equipe disse em outras conversas não é fato. Sem o dado: não afirmar, dizer que a equipe confirma e precisa_humano=true."
     },
     {
       "tipo": "seguranca",
@@ -913,7 +913,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Dúvida se o anúncio é do aparelho, da capa ou do kit.",
-      "faca": "Afirmar o que o anúncio vende só se o título nos FATOS deixar claro; senão precisa_humano=true. Palavra ou prefixo estranho no título: não explicar nem defender; responder o que o anúncio vende e precisa_humano=true com motivo 'revisar título'."
+      "faca": "Afirmar o que o anúncio vende só se o título ou a ficha do próprio anúncio nos FATOS deixarem claro; senão precisa_humano=true. Palavra ou prefixo estranho no título: não explicar nem defender; responder o que o anúncio vende e precisa_humano=true com motivo 'revisar título'."
     },
     {
       "tipo": "categoria",
@@ -940,7 +940,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Ficha técnica de celular ou do kit.",
-      "faca": "Responder com o dado do título do anúncio ou com estes fatos aprovados; sem dado, precisa_humano=true. Fatos aprovados: o celular é desbloqueado, não vem preso a operadora; quando o anúncio soma RAM física e virtual, separar as duas (a virtual usa parte do armazenamento); Wi-Fi de 5 GHz não é rede móvel 5G; o Uranyx S5 tem NFC. Recurso que o modelo não tem: dizer só que este modelo não tem; indicar outro anúncio: precisa_humano=true."
+      "faca": "Responder com o dado do título ou da ficha do anúncio nos FATOS (atributos e descrição) ou com estes fatos aprovados; sem dado, ou com título e ficha divergindo, precisa_humano=true. Fatos aprovados: o celular é desbloqueado, não vem preso a operadora; quando o anúncio soma RAM física e virtual, separar as duas (a virtual usa parte do armazenamento); Wi-Fi de 5 GHz não é rede móvel 5G; o Uranyx S5 tem NFC. Recurso que o modelo não tem: dizer só que este modelo não tem; indicar outro anúncio: precisa_humano=true."
     },
     {
       "tipo": "categoria",
@@ -949,7 +949,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Medidas ou características de mala.",
-      "faca": "Responder com o dado do título do anúncio ou com o fato aprovado: os códigos de modelo com letra M e número são nomes de design (formato e cor), não de tamanho. Medidas, quilos, bordo, material, rodas, TSA e expansão sem dado no título: precisa_humano=true. Sobre bordo, lembrar que a regra final é da companhia aérea."
+      "faca": "Responder com o dado do título ou da ficha do anúncio nos FATOS ou com o fato aprovado: os códigos de modelo com letra M e número são nomes de design (formato e cor), não de tamanho. Medidas, quilos, bordo, material, rodas, TSA e expansão sem dado no título nem na ficha, ou com os dois divergindo: precisa_humano=true. Sobre bordo, lembrar que a regra final é da companhia aérea."
     },
     {
       "tipo": "categoria",
@@ -958,7 +958,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Air fryer ou eletroportátil.",
-      "faca": "Fato aprovado: a air fryer Uranyx não é bivolt; há versões 110 V e 220 V separadas, escolhidas na variação antes de finalizar. Outros eletroportáteis e demais dados (potência, temperatura, material, papel ou silicone, Inmetro): só com o título; senão precisa_humano=true. Não comparar com outra marca."
+      "faca": "Fato aprovado: a air fryer Uranyx não é bivolt; há versões 110 V e 220 V separadas, escolhidas na variação antes de finalizar. Outros eletroportáteis e demais dados (potência, temperatura, material, papel ou silicone): só com o título ou a ficha do anúncio nos FATOS; Inmetro só com o título; sem dado ou divergindo, precisa_humano=true. Não comparar com outra marca."
     },
     {
       "tipo": "categoria",
@@ -967,7 +967,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Apple ou outro produto.",
-      "faca": "Só com o dado do título do anúncio; senão precisa_humano=true. Apple: condição, garantia e versão só com o título."
+      "faca": "Só com o dado do título ou da ficha do anúncio nos FATOS; sem dado ou divergindo, precisa_humano=true. Apple: condição, garantia e versão só com o título."
     },
     {
       "tipo": "categoria",
@@ -976,7 +976,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "O que acompanha o produto.",
-      "faca": "Listar o que acompanha só se o título ou os itens nos FATOS disserem. Carregador (fonte ou só cabo), capinha, película, fone e relógio variam por anúncio: sem dado, precisa_humano=true."
+      "faca": "Listar o que acompanha só se o título, os itens ou a ficha do próprio anúncio nos FATOS disserem (ficha com fonte 'outro anúncio do mesmo produto' não vale aqui). Carregador (fonte ou só cabo), capinha, película, fone e relógio variam por anúncio e por variação: sem dado, divergindo ou com kit/variação que mude o que acompanha, precisa_humano=true."
     },
     {
       "tipo": "categoria",

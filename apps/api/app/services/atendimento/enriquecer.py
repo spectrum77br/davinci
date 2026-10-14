@@ -36,6 +36,12 @@ Hora de envio e tempo concluído (28/09/2026, "como no Duoke"): o retrato
 leva `enviado_em` (a coleta/postagem) e `concluido_em` (o pedido concluído /
 entregue), em ISO UTC ou None — sem inventar: sem o evento, fica None.
 
+Ficha do anúncio (14/10/2026): a resposta da loja ao cartão de produto (o
+`get_item_base_info` da Shopee, o `/items` do ML) já traz a descrição e os
+atributos do anúncio — a ficha FRESCA que a IA usa (`ficha.py`). Sai daqui
+enxuta para o Redis (`ficha.chave_ficha`, `ficha.CACHE_FICHA_S`), à parte do
+cartão (que vai para a tela): nenhuma ida nova à loja.
+
 Índice de pedidos do comprador: a Shopee não filtra pedido por comprador, e o
 cartão "Cliente" precisa do histórico de compra. Cada retrato que dá certo
 grava a linha do pedido (`indice.registrar_pedido`) com o id do comprador na
@@ -69,6 +75,7 @@ from app.models import (
     Listing,
 )
 from app.redis_client import redis
+from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import gravar
 from app.services.atendimento.constantes import CANAL_PERGUNTA
 
@@ -534,9 +541,9 @@ async def _cache_ler(chave: str) -> dict | None:
     return cartao if isinstance(cartao, dict) and cartao.get("tipo") == "produto" else None
 
 
-async def _cache_gravar(chave: str, cartao: dict) -> None:
+async def _cache_gravar(chave: str, cartao: dict, validade: int = CACHE_PRODUTO_S) -> None:
     try:
-        await redis.set(chave, json.dumps(cartao, ensure_ascii=False), ex=CACHE_PRODUTO_S)
+        await redis.set(chave, json.dumps(cartao, ensure_ascii=False), ex=validade)
     except Exception as exc:  # noqa: BLE001 — cache é economia, não correção
         logger.info("atendimento_enriquecer_cache_indisponivel", erro=type(exc).__name__)
 
@@ -559,12 +566,14 @@ def _precos(infos: list[dict]) -> tuple[float | None, float | None]:
     return preco, original
 
 
-async def _produtos_shopee(cliente: Any, ids: list[str]) -> dict[str, dict]:
-    """Cartões da Shopee: `get_item_base_info` (foto, título) e, no anúncio
-    com variação, `get_model_list` (o preço). Levanta se a 1ª chamada falhar."""
+async def _produtos_shopee(cliente: Any, ids: list[str]) -> tuple[dict[str, dict], dict[str, dict]]:
+    """(cartões, fichas cruas) da Shopee: `get_item_base_info` (foto, título;
+    descrição e atributos para a ficha da IA) e, no anúncio com variação,
+    `get_model_list` (o preço). Levanta se a 1ª chamada falhar."""
     itens = await cliente.get_item_base_info([int(i) for i in ids])
     shop_id = _inteiro(getattr(cliente, "shop_id", None))
     saida: dict[str, dict] = {}
+    fichas: dict[str, dict] = {}
     for it in _lista(itens):
         item_id = _texto(it.get("item_id"))
         if item_id is None or item_id not in ids:
@@ -595,7 +604,10 @@ async def _produtos_shopee(cliente: Any, ids: list[str]) -> dict[str, dict]:
             "preco_original": original,
             "link": f"https://shopee.com.br/product/{shop_id}/{item_id}" if shop_id else None,
         }
-    return saida
+        bruta = ficha_svc.ficha_bruta_shopee(it)
+        if bruta is not None:
+            fichas[item_id] = bruta
+    return saida, fichas
 
 
 def _cartao_ml(body: dict) -> dict | None:
@@ -616,14 +628,19 @@ def _cartao_ml(body: dict) -> dict | None:
     }
 
 
-async def _produtos_ml(cliente: Any, ids: list[str]) -> dict[str, dict]:
-    """Cartões do ML numa ida só ao `/items?ids=` (o cliente divide de 20 em 20)."""
+async def _produtos_ml(cliente: Any, ids: list[str]) -> tuple[dict[str, dict], dict[str, dict]]:
+    """(cartões, fichas cruas) do ML numa ida só ao `/items?ids=` (o cliente
+    divide de 20 em 20); a ficha = os `attributes` do anúncio."""
     saida: dict[str, dict] = {}
+    fichas: dict[str, dict] = {}
     for body in _lista(await cliente.itens(ids)):
         cartao = _cartao_ml(body)
         if cartao is not None and cartao["item_id"] in ids:
             saida[cartao["item_id"]] = cartao
-    return saida
+            bruta = ficha_svc.ficha_bruta_ml(body)
+            if bruta is not None:
+                fichas[cartao["item_id"]] = bruta
+    return saida, fichas
 
 
 def _titulo_base(titulos: list[str]) -> str | None:
@@ -719,6 +736,7 @@ async def _cartoes(
             faltam.append(item_id)
 
     da_loja: dict[str, dict] = {}
+    fichas: dict[str, dict] = {}
     pode = (
         faltam
         and cliente is not None
@@ -729,9 +747,9 @@ async def _cartoes(
         resolvidos.update(faltam)
         try:
             if plataforma == "shopee":
-                da_loja = await _produtos_shopee(cliente, faltam)
+                da_loja, fichas = await _produtos_shopee(cliente, faltam)
             else:
-                da_loja = await _produtos_ml(cliente, faltam)
+                da_loja, fichas = await _produtos_ml(cliente, faltam)
         except Exception as exc:  # noqa: BLE001 — falha da loja nunca derruba o sync
             logger.info(
                 "atendimento_enriquecer_produto_falhou",
@@ -739,7 +757,7 @@ async def _cartoes(
                 itens=faltam[:5],
                 erro=_erro_curto(exc),
             )
-            da_loja = {}
+            da_loja, fichas = {}, {}
             falha = _tipo_falha(exc)
 
     for item_id in faltam:
@@ -754,6 +772,11 @@ async def _cartoes(
         cartoes[item_id] = cartao
         if loja is not None:
             await _cache_gravar(chave_produto(plataforma, integ_id, item_id), cartao)
+    # A ficha fresca da IA (`ficha.py`): da MESMA resposta da loja, à parte.
+    for item_id, bruta in fichas.items():
+        await _cache_gravar(
+            ficha_svc.chave_ficha(plataforma, integ_id, item_id), bruta, ficha_svc.CACHE_FICHA_S
+        )
     return cartoes, resolvidos, falha
 
 
@@ -889,6 +912,8 @@ async def _retrato_shopee(cliente: Any, pedido: str) -> tuple[dict | None, list[
 
     itens = [
         {
+            # O anúncio do item: a IA busca a ficha dele (`ficha.py`).
+            "item_id": _texto(it.get("item_id")),
             "titulo": _texto(it.get("item_name")),
             "imagem": _texto(_dict(it.get("image_info")).get("image_url")),
             "variacao": _texto(it.get("model_name")),
@@ -1105,6 +1130,7 @@ async def _retrato_ml(
         item = _dict(ln.get("item"))
         cartao = cartoes.get(_texto(item.get("id")) or "") or {}
         linha_item = {
+            "item_id": _texto(item.get("id")),
             "titulo": _texto(item.get("title")) or cartao.get("titulo"),
             "imagem": cartao.get("imagem"),
             "variacao": _variacao_ml(item),

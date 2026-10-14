@@ -18,7 +18,16 @@
   lista e dos números (mas é triada e leva o chip), a conversa sem canal
   entra pela integração, "todos" volta o de antes. As lojas de teste nascem
   em `auto` (`_loja_db`) — é onde a Caixa Humano mostra;
-- o cron (interruptores, registro no worker) e o script (seco não grava).
+- o cron (interruptores, registro no worker) e o script (seco não grava);
+- "OU RESPONDE OU VAI PARA PESSOA" (14/10/2026): a espera da IA
+  (`ia_sem_resposta`, 10 min) só nas lojas da Caixa em que a IA responde (o
+  Automático — com "todos" ou o Copiloto junto, a do Observar/Copiloto não
+  leva), na hora, sem rodada;
+  a lista da Caixa Humano com a mais recente em cima e o "carregar mais"
+  pelo cursor do turno; o selo da sugestão só no turno atual. Os testes de
+  antes da espera usam conversas de 1 h atrás: o `_espera_da_ia` deixa a
+  espera longa neles (eles medem os motivos gravados) e o
+  `espera_de_verdade` volta os 10 minutos nos novos.
 
 O contexto do pedido entra falso (pelo contrato de `contexto.contexto_da_conversa`),
 menos no teste do "pedido não achado", que usa o de verdade.
@@ -539,6 +548,19 @@ def _chaves(monkeypatch):
     # Os modos da Caixa Humano: o padrão (só `auto`), qualquer que seja o .env.
     monkeypatch.setattr(s, "atendimento_humano_modos", "")
     return s
+
+
+@pytest.fixture(autouse=True)
+def _espera_da_ia(monkeypatch):
+    """A espera da IA longa (ver o topo): os testes dos motivos gravados não a medem."""
+    monkeypatch.setattr(humano, "ESPERA_IA", timedelta(days=3650))
+
+
+@pytest.fixture
+def espera_de_verdade(monkeypatch):
+    """Os 10 minutos de verdade ("ou responde ou vai para pessoa", 14/10/2026)."""
+    monkeypatch.setattr(humano, "ESPERA_IA", timedelta(minutes=humano.ESPERA_IA_MIN))
+    assert humano.ESPERA_IA_MIN == 10
 
 
 @pytest.fixture
@@ -1348,7 +1370,425 @@ async def test_so_as_lojas_no_automatico(client, db, make_user, pessoa, ctx_fals
 
     # As duas réguas do escopo continuam iguais; a do modo é só da Caixa.
     async with _db.SessionLocal() as s:
-        assert await s.scalar(select(func.count()).where(humano.para_pessoa_sql())) == 9
+        sem_loja = humano.LojasDaCaixa()
+        assert await s.scalar(select(func.count()).where(humano.para_pessoa_sql(sem_loja))) == 9
+
+
+# ─────────────── ou responde ou vai para pessoa (14/10/2026) ───────────────
+
+
+def test_ia_sem_resposta_pura(espera_de_verdade):
+    """A espera da IA: 10 min do turno (a última mensagem do cliente, ou a criação)."""
+    agora = datetime.now(UTC)
+
+    def conv(**campos):
+        return _conv(created_at=agora - timedelta(days=1), **campos)
+
+    assert humano.ia_sem_resposta(conv(ultima_do_cliente_em=agora - timedelta(minutes=11)), agora)
+    assert humano.ia_sem_resposta(conv(ultima_do_cliente_em=agora - timedelta(minutes=10)), agora)
+    assert not humano.ia_sem_resposta(
+        conv(ultima_do_cliente_em=agora - timedelta(minutes=9)), agora
+    )
+    # Fora da janela de 7 dias da IA: ela nem pega — vai para pessoa.
+    assert humano.ia_sem_resposta(conv(ultima_do_cliente_em=agora - timedelta(days=8)), agora)
+    # Sem mensagem do cliente (a reclamação só do sistema): o turno é a criação.
+    assert humano.ia_sem_resposta(conv(ultima_do_cliente_em=None), agora)
+    assert not humano.ia_sem_resposta(_conv(ultima_do_cliente_em=None, created_at=agora), agora)
+    # A bloqueada só entra pelo estado.
+    velha = agora - timedelta(hours=1)
+    assert not humano.ia_sem_resposta(conv(situacao="bloqueada", ultima_do_cliente_em=velha), agora)
+    # Hora sem fuso (não devia vir) vale como UTC.
+    sem_fuso = (agora - timedelta(minutes=30)).replace(tzinfo=None)
+    assert humano.ia_sem_resposta(conv(ultima_do_cliente_em=sem_fuso), agora)
+
+    # O chip: "A IA não respondeu" só como motivo único.
+    tela = humano.para_tela({}, ia_pausada=False, ia_sem_resposta=True)
+    assert (tela["motivos"], tela["rotulos"]) == (["ia_sem_resposta"], ["A IA não respondeu"])
+    gravado = {"motivos": ["assunto"], "assuntos": ["garantia"]}
+    assert humano.para_tela(gravado, ia_pausada=False, ia_sem_resposta=True)["motivos"] == [
+        "assunto"
+    ]
+    assert humano.para_tela({}, ia_pausada=True, ia_sem_resposta=True)["motivos"] == ["ia_pausada"]
+    # O código da consulta nunca vem do cache (nem repetido).
+    lixo = {"motivos": ["ia_sem_resposta", "ia_pausada"]}
+    assert humano.para_tela(lixo, ia_pausada=False, ia_sem_resposta=True)["motivos"] == [
+        "ia_sem_resposta"
+    ]
+    assert humano.para_tela(lixo, ia_pausada=False)["motivos"] == []
+    assert ROTULO_HUMANO["ia_sem_resposta"] == "A IA não respondeu"
+    assert (
+        ORDEM_HUMANO.index("ia")
+        < ORDEM_HUMANO.index("ia_sem_resposta")
+        < ORDEM_HUMANO.index("ia_pausada")
+    )
+    # A régua do turno da sugestão (o selo e o motivo `ia`).
+    assert humano.sugestao_do_turno(agora, agora)
+    assert humano.sugestao_do_turno(agora + timedelta(seconds=1), agora)
+    assert not humano.sugestao_do_turno(agora - timedelta(seconds=1), agora)
+    assert not humano.sugestao_do_turno(agora, None)
+    assert not humano.sugestao_do_turno(None, agora)
+
+
+async def test_ia_sem_resposta_vai_para_a_caixa_humano(
+    client, db, make_user, pessoa, ctx_falso, espera_de_verdade
+):
+    """O dono (14/10/2026, piloto da Kia): "a caixa tem que responder mesmo; se não
+    puder, manda pra Caixa Humano". Na loja no Automático, a conversa esperando há
+    mais de 10 min entra NA HORA (sem rodada), com "A IA não respondeu"; sai
+    quando alguém (a IA ou pessoa) responde; a mensagem automática não conta."""
+    dono = await make_user()
+    kia, canal_kia = await _loja_db(db, dono, "kia")
+    outra, canal_outra = await _loja_db(db, dono, "outra", modo="observar")
+    pergunta = "Esse carregador serve no Moto G?"  # a IA consegue: nenhum motivo gravado
+    atrasada = await _conversa(db, kia, canal_kia, "atrasada", pergunta, ha=timedelta(minutes=11))
+    na_hora = await _conversa(db, kia, canal_kia, "na_hora", pergunta, ha=timedelta(minutes=5))
+    # Fora da janela de 7 dias da IA (7 das 9 da Kia em 14/10/2026).
+    velha = await _conversa(db, kia, canal_kia, "velha", "obrigado!", ha=timedelta(days=8))
+    observar = await _conversa(db, outra, canal_outra, "observar", pergunta, ha=timedelta(hours=1))
+    assunto = await _conversa(db, kia, canal_kia, "assunto", "quero trocar", ha=timedelta(hours=1))
+    # O menu do Duoke depois do cliente não é resposta: continua esperando.
+    menu = await _conversa(db, kia, canal_kia, "menu", pergunta, ha=timedelta(minutes=30))
+    await gravar.gravar_mensagem(
+        db,
+        menu,
+        externo_id="menu-robo",
+        autor="loja",
+        texto="Olá, por favor selecione sua dúvida: 1 - Rastreio",
+        enviada_em=AGORA - timedelta(minutes=29),
+    )
+    # A bloqueada sem motivo de estado fica só na Caixa (a IA também não responde).
+    bloq = await _conversa(db, kia, canal_kia, "bloq", pergunta, ha=timedelta(hours=1))
+    bloq.situacao = "bloqueada"
+    await gravar.recalcular_conversa(db, bloq)
+    await db.commit()
+
+    async def caixa() -> dict[str, list[str]]:
+        r = await client.get(f"{URL}/conversas", params={"caixa": "humano"})
+        assert r.status_code == 200, r.text
+        return {i["id"]: i["humano"]["motivos"] for i in r.json()["itens"]}
+
+    # Sem rodada nenhuma (a triagem ainda nem passou): só a espera.
+    esperadas = {
+        str(atrasada.id): ["ia_sem_resposta"],
+        str(velha.id): ["ia_sem_resposta"],
+        str(menu.id): ["ia_sem_resposta"],
+        str(assunto.id): ["ia_sem_resposta"],
+    }
+    assert await caixa() == esperadas
+    # Triada: o motivo gravado diz por quê (a espera some do chip).
+    await _recalcular()
+    esperadas[str(assunto.id)] = ["assunto"]
+    assert await caixa() == esperadas
+    r = await client.get(f"{URL}/conversas", params={"caixa": "humano"})
+    linha = next(i for i in r.json()["itens"] if i["id"] == str(atrasada.id))
+    assert linha["humano"]["rotulos"] == ["A IA não respondeu"]
+    assert linha["humano"]["na_caixa"] is True
+    res = (await client.get(f"{URL}/resumo")).json()
+    assert res["humano"] == 4
+    por_loja = {lj["conta"]: lj["humano"] for lj in res["lojas"] if lj["integration_id"]}
+    assert por_loja == {"kia": 4, "outra": 0}
+    # Na Caixa: o chip só nas lojas dos modos (a do Observar, o Duoke responde).
+    itens = {i["id"]: i for i in (await client.get(f"{URL}/conversas")).json()["itens"]}
+    assert itens[str(observar.id)]["humano"] is None
+    assert itens[str(na_hora.id)]["humano"] is None
+    assert itens[str(atrasada.id)]["humano"]["motivos"] == ["ia_sem_resposta"]
+    d = (await client.get(f"{URL}/conversas/{atrasada.id}")).json()
+    assert d["conversa"]["humano"]["motivos"] == ["ia_sem_resposta"]
+    d = (await client.get(f"{URL}/conversas/{observar.id}")).json()
+    assert d["conversa"]["humano"] is None
+
+    # As duas réguas da espera (Python e SQL) dizem o mesmo para cada uma.
+    agora = datetime.now(UTC)
+    async with _db.SessionLocal() as s:
+        linhas = (
+            await s.execute(
+                select(AtendimentoConversa, humano.ia_sem_resposta_sql(agora).label("sql"))
+            )
+        ).all()
+        contagem = await humano.contar(s)
+    assert len(linhas) == 7
+    assert [(c.externo_id, humano.ia_sem_resposta(c, agora)) for c, _ in linhas] == [
+        (c.externo_id, sql) for c, sql in linhas
+    ]
+    assert contagem["na_caixa"] == 4
+    assert contagem["motivo_principal"] == {"shopee": {"ia_sem_resposta": 3, "assunto": 1}}
+    seco = await humano.simular()
+    assert (seco["na_caixa"], seco["motivo_principal"]) == (
+        4,
+        {"shopee": {"ia_sem_resposta": 3, "assunto": 1}},
+    )
+
+    # A IA respondeu: sai na hora. Pessoa (por fora) também.
+    await db.refresh(atrasada)
+    await gravar.gravar_mensagem(
+        db,
+        atrasada,
+        externo_id="atrasada-ia",
+        autor="loja",
+        texto="Serve sim!",
+        enviada_em=AGORA - timedelta(minutes=1),
+        origem="davinci_ia",
+    )
+    await db.refresh(velha)
+    await gravar.gravar_mensagem(
+        db,
+        velha,
+        externo_id="velha-pessoa",
+        autor="loja",
+        texto="Por nada! Qualquer coisa, estamos aqui.",
+        enviada_em=AGORA - timedelta(minutes=1),
+    )
+    await db.commit()
+    del esperadas[str(atrasada.id)], esperadas[str(velha.id)]
+    assert await caixa() == esperadas
+    # O cliente escreveu de novo: espera de novo os 10 minutos.
+    await gravar.gravar_mensagem(
+        db,
+        atrasada,
+        externo_id="atrasada-c2",
+        autor="cliente",
+        texto="e no Moto E?",
+        enviada_em=AGORA - timedelta(minutes=2),
+    )
+    await db.commit()
+    assert await caixa() == esperadas
+
+    # A loja posta no Automático: as dela entram na hora.
+    await db.execute(
+        update(AtendimentoCanal).where(AtendimentoCanal.id == canal_outra.id).values(modo="auto")
+    )
+    await db.commit()
+    assert await caixa() == {**esperadas, str(observar.id): ["ia_sem_resposta"]}
+
+
+def test_lojas_da_espera_da_ia_puras():
+    """A espera da IA só nas lojas da Caixa em que ela RESPONDE (o Automático): com
+    "todos" ou o Copiloto junto, a loja em Observar/Copiloto não leva "A IA não
+    respondeu" (revisão de 14/10/2026). No padrão, o SQL não repete a lista."""
+    from sqlalchemy.dialects import postgresql
+
+    def sql(expr) -> str:
+        return str(expr.compile(dialect=postgresql.dialect())).lower()
+
+    auto, copiloto, observar, integ = uuid4(), uuid4(), uuid4(), uuid4()
+    so_auto = humano.LojasDaCaixa(canais=frozenset({auto}), integracoes=frozenset({integ}))
+    # O padrão (só o Automático): as lojas da espera são as mesmas.
+    assert so_auto.da_ia is so_auto
+    assert humano.na_espera_da_ia(so_auto, auto, integ)
+    assert humano.na_espera_da_ia(so_auto, None, integ)
+    assert not humano.na_espera_da_ia(so_auto, observar, integ)
+    # "todos": toda loja na Caixa, a espera só no Automático.
+    todas = humano.LojasDaCaixa(todas=True, ia=so_auto)
+    assert todas.tem(observar, None) and todas.tem(None, None)
+    assert humano.na_caixa_da_loja(todas, observar, None)
+    assert humano.na_espera_da_ia(todas, auto, None)
+    assert not humano.na_espera_da_ia(todas, observar, None)
+    assert sql(humano.loja_no_modo_sql(todas)) == "true"
+    # Sem as lojas da IA lidas: nenhuma — na dúvida, a espera não acusa a IA.
+    assert humano.LojasDaCaixa(todas=True).da_ia == humano.LojasDaCaixa()
+    assert not humano.na_espera_da_ia(None, auto, integ)
+    assert sql(humano.loja_da_ia_sql(None)) == "false"
+    # O Copiloto junto: a Caixa com as duas, a espera só com a do Automático.
+    misto = humano.LojasDaCaixa(canais=frozenset({auto, copiloto}), ia=so_auto)
+    assert misto.tem(copiloto, None) and not humano.na_espera_da_ia(misto, copiloto, None)
+    # O SQL da Caixa: a lista das lojas UMA vez no padrão (a espera usa a de
+    # fora), a da IA a mais só quando ela é outra.
+    agora = datetime.now(UTC)
+    assert sql(humano.caixa_humano_sql(so_auto, agora)).count("canal_id in") == 1
+    assert sql(humano.caixa_humano_sql(misto, agora)).count("canal_id in") == 2
+    assert sql(humano.caixa_humano_sql(todas, agora)).count("canal_id in") == 1
+
+
+async def test_espera_da_ia_so_onde_a_ia_responde(
+    client, db, make_user, pessoa, ctx_falso, _chaves, espera_de_verdade
+):
+    """Revisão (14/10/2026): com "todos" (ou o Copiloto junto do Automático), a loja
+    em Observar/Copiloto continua entrando pelos motivos gravados, mas NÃO pela
+    espera da IA — lá quem responde é pessoa: "A IA não respondeu" seria mentira e
+    a Caixa Humano viraria cópia do "Falta responder"."""
+    dono = await make_user()
+    kia, canal_kia = await _loja_db(db, dono, "kia")
+    obs, canal_obs = await _loja_db(db, dono, "obs", modo="observar")
+    cop, canal_cop = await _loja_db(db, dono, "cop", modo="copiloto")
+    pergunta = "Esse carregador serve no Moto G?"  # a IA consegue: nenhum motivo gravado
+    auto = await _conversa(db, kia, canal_kia, "auto", pergunta)
+    observar = await _conversa(db, obs, canal_obs, "observar", pergunta)
+    copiloto = await _conversa(db, cop, canal_cop, "copiloto", pergunta)
+    assunto = await _conversa(db, obs, canal_obs, "assunto", "quero trocar")
+    await _recalcular()
+
+    async def caixa() -> dict[str, list[str]]:
+        r = await client.get(f"{URL}/conversas", params={"caixa": "humano"})
+        assert r.status_code == 200, r.text
+        return {i["id"]: i["humano"]["motivos"] for i in r.json()["itens"]}
+
+    _chaves.atendimento_humano_modos = "todos"
+    assert await caixa() == {str(auto.id): ["ia_sem_resposta"], str(assunto.id): ["assunto"]}
+    assert (await client.get(f"{URL}/resumo")).json()["humano"] == 2
+    itens = {i["id"]: i for i in (await client.get(f"{URL}/conversas")).json()["itens"]}
+    assert itens[str(observar.id)]["humano"] is None
+    assert itens[str(copiloto.id)]["humano"] is None
+    d = (await client.get(f"{URL}/conversas/{observar.id}")).json()
+    assert d["conversa"]["humano"] is None
+    async with _db.SessionLocal() as s:
+        contagem = await humano.contar(s)
+    assert (contagem["na_caixa"], contagem["para_pessoa"]) == (2, 2)
+    assert contagem["motivo_principal"] == {"shopee": {"ia_sem_resposta": 1, "assunto": 1}}
+    seco = await humano.simular()
+    assert (seco["na_caixa"], seco["motivo_principal"]) == (
+        2,
+        {"shopee": {"ia_sem_resposta": 1, "assunto": 1}},
+    )
+
+    # O Copiloto junto do Automático: a do Copiloto também não entra pela espera.
+    _chaves.atendimento_humano_modos = "auto,copiloto"
+    assert await caixa() == {str(auto.id): ["ia_sem_resposta"]}
+    assert (await client.get(f"{URL}/resumo")).json()["humano"] == 1
+    # Só o Copiloto: a IA não responde em loja nenhuma da Caixa.
+    _chaves.atendimento_humano_modos = "copiloto"
+    assert await caixa() == {}
+
+
+async def test_caixa_humano_mais_recente_em_cima(client, db, make_user, pessoa, ctx_falso):
+    """O dono (14/10/2026): a Caixa Humano "tem que estar com a mais recente lá em cima
+    e não embaixo" — pelo turno (a última mensagem do cliente), com qualquer filtro,
+    e o "carregar mais" sem pular nem repetir (o empate no mesmo segundo pelo id).
+    A Caixa continua como era."""
+    dono = await make_user()
+    integ, canal = await _loja_db(db, dono)
+    texto = "quero trocar"  # assunto só de pessoa: todas na Caixa Humano
+    convs = [
+        await _conversa(db, integ, canal, k, texto, ha=timedelta(hours=h))
+        for k, h in (("A", 5), ("B", 1), ("C", 3), ("D", 2), ("E", 1), ("F", 1))
+    ]
+    a = convs[0]
+    # O menu do Duoke há 10 min na mais velha: a "última mensagem" mais nova é a
+    # dela, mas o turno (o do cliente) não muda.
+    await db.refresh(a)
+    await gravar.gravar_mensagem(
+        db,
+        a,
+        externo_id="A-robo",
+        autor="loja",
+        texto="Olá, por favor selecione sua dúvida: 1 - Rastreio",
+        enviada_em=AGORA - timedelta(minutes=10),
+    )
+    await db.commit()
+    await _recalcular()
+    linhas = (
+        await db.execute(
+            select(AtendimentoConversa.id, AtendimentoConversa.ultima_do_cliente_em).where(
+                AtendimentoConversa.id.in_([c.id for c in convs])
+            )
+        )
+    ).all()
+    esperado = [str(i) for i, _ in sorted(linhas, key=lambda x: (x[1], str(x[0])), reverse=True)]
+    assert esperado[-1] == str(a.id)
+
+    async def paginas(**params) -> list[str]:
+        ids: list[str] = []
+        cursor = None
+        for _ in range(10):
+            pedido = {"caixa": "humano", "limite": 2, **params}
+            if cursor:
+                pedido["antes_de"] = cursor
+            r = await client.get(f"{URL}/conversas", params=pedido)
+            assert r.status_code == 200, r.text
+            ids += _ids(r)
+            cursor = r.json()["proximo"]
+            if cursor is None:
+                return ids
+            assert cursor.startswith("turno:")
+        raise AssertionError("paginação sem fim")
+
+    for filtro in ("aguardando", "todas", "pos_venda"):
+        assert await paginas(filtro=filtro) == esperado, filtro
+    r = await client.get(f"{URL}/conversas", params={"caixa": "humano"})
+    assert _ids(r) == esperado
+    turnos = {i["id"]: i["turno_em"] for i in r.json()["itens"]}
+    assert turnos[str(a.id)].startswith((AGORA - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M"))
+
+    # A Caixa não muda: "Falta responder" pelo prazo (a mais velha primeiro) e
+    # "Todas" pela última mensagem (a do menu, há 10 min).
+    assert _ids(await client.get(f"{URL}/conversas", params={"filtro": "aguardando"}))[0] == str(
+        a.id
+    )
+    assert _ids(await client.get(f"{URL}/conversas"))[0] == str(a.id)
+
+    # Cursor da outra ordem: 422.
+    prazo = await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 1})
+    r = await client.get(
+        f"{URL}/conversas", params={"caixa": "humano", "antes_de": prazo.json()["proximo"]}
+    )
+    assert (r.status_code, r.json()["detail"]) == (422, {"code": "cursor_invalido"})
+    turno = await client.get(f"{URL}/conversas", params={"caixa": "humano", "limite": 1})
+    for params in ({"antes_de": turno.json()["proximo"]}, {"filtro": "aguardando"}):
+        r = await client.get(
+            f"{URL}/conversas", params={"antes_de": turno.json()["proximo"], **params}
+        )
+        assert (r.status_code, r.json()["detail"]) == (422, {"code": "cursor_invalido"})
+    for ruim in ("turno:", "turno:|abc", "turno:2026-10-14T10:00:00+00:00", "turno:lixo|abc"):
+        r = await client.get(f"{URL}/conversas", params={"caixa": "humano", "antes_de": ruim})
+        assert (r.status_code, r.json()["detail"]) == (422, {"code": "cursor_invalido"}), ruim
+
+
+async def test_selo_da_sugestao_so_no_turno_atual(client, db, make_user, pessoa, ctx_falso):
+    """O selo "precisa de pessoa" e o "IA sugeriu" só na sugestão do turno ATUAL (a
+    régua do motivo `ia`): a pendente de antes da última mensagem do cliente não
+    acende nada — a conversa mostrava o selo sem estar na Caixa Humano."""
+    dono = await make_user()
+    integ, canal = await _loja_db(db, dono)
+    conv = await _conversa(db, integ, canal, "A", "Esse carregador serve no Moto G?")
+    m1 = await ia._ultima_do_cliente(db, conv)
+    db.add(
+        AtendimentoRascunho(
+            conversa_id=conv.id,
+            mensagem_gatilho_id=m1.id,
+            texto="Serve sim!",
+            categoria="duvida_produto",
+            confianca=0.4,
+            precisa_humano=True,
+            status="pendente",
+        )
+    )
+    await db.commit()
+    await _recalcular()
+
+    async def linha() -> dict:
+        itens = (await client.get(f"{URL}/conversas")).json()["itens"]
+        return next(i for i in itens if i["id"] == str(conv.id))
+
+    async def com_sugestao() -> list[str]:
+        return _ids(await client.get(f"{URL}/conversas", params={"filtro": "com_rascunho"}))
+
+    assert (await linha())["tem_rascunho"] is True
+    assert (await linha())["humano"]["motivos"] == ["ia"]
+    assert await com_sugestao() == [str(conv.id)]
+    d = (await client.get(f"{URL}/conversas/{conv.id}")).json()
+    assert d["conversa"]["tem_rascunho"] is True
+    assert (d["rascunho"]["precisa_humano"], d["rascunho"]["do_turno_atual"]) == (True, True)
+    assert [x["do_turno_atual"] for x in d["sugestoes"]] == [True]
+
+    # O cliente escreveu de novo e a IA ainda não refez.
+    await db.refresh(conv)
+    await gravar.gravar_mensagem(
+        db,
+        conv,
+        externo_id="A-c2",
+        autor="cliente",
+        texto="e no Moto E?",
+        enviada_em=AGORA - timedelta(minutes=5),
+    )
+    await db.commit()
+    await _recalcular()
+    assert (await linha())["tem_rascunho"] is False
+    assert (await linha())["humano"] is None
+    assert await com_sugestao() == []
+    d = (await client.get(f"{URL}/conversas/{conv.id}")).json()
+    assert d["conversa"]["tem_rascunho"] is False and d["conversa"]["humano"] is None
+    # A sugestão continua lá (a pessoa pode aproveitar), sem o selo do turno.
+    assert (d["rascunho"]["status"], d["rascunho"]["do_turno_atual"]) == ("pendente", False)
+    assert [x["do_turno_atual"] for x in d["sugestoes"]] == [False]
 
 
 # ─────────────── o cron e o script ───────────────

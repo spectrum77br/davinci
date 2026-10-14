@@ -149,6 +149,10 @@ export type ConversaResumo = {
   ultima_mensagem_em: string | null
   ultima_mensagem_resumo: string | null
   ultima_autor: string | null
+  // O turno (14/10/2026): a última mensagem do cliente (ou a criação, sem
+  // ela) — a ordem da Caixa Humano, a mais nova em cima, e a hora que a
+  // linha mostra lá. null no Direct; a API antiga não manda.
+  turno_em?: string | null
   aguardando_resposta: boolean
   prazo_resposta_em: string | null
   situacao: string
@@ -286,6 +290,10 @@ export type Rascunho = {
   // pendente (esperando a pessoa) ou bloqueado (a IA não produziu texto que possa sair)
   status?: string
   created_at: string | null
+  // Responde o turno ATUAL (14/10/2026)? false = o cliente escreveu de novo
+  // depois: sem o selo "precisa de pessoa" (`seloPrecisaDePessoa`). A API
+  // antiga não manda (vale como do turno).
+  do_turno_atual?: boolean | null
 }
 // `enviado_em`, `data_envio` e `nota_fiscal` vão além do mínimo da spec: o
 // contexto.py manda para as lacunas {data_envio} e {nf_numero} (as mesmas da IA).
@@ -474,6 +482,20 @@ export type SugestaoIa = {
   avaliacao?: AvaliacaoIa | null
   // `mensagem_id` põe a comparação logo abaixo da resposta real na conversa.
   resposta_real?: { mensagem_id?: string | null; texto: string | null; enviada_em: string | null; origem: string | null } | null
+  // Responde o turno ATUAL (como no `Rascunho`, 14/10/2026).
+  do_turno_atual?: boolean | null
+}
+// O selo "precisa de pessoa" da sugestão (o painel da conversa e o da
+// observação): só na do turno ATUAL (14/10/2026) — a régua do motivo da
+// Caixa Humano (`humano.sugestao_do_turno`). A de uma mensagem anterior (o
+// cliente escreveu de novo e a IA ainda não refez) não diz mais nada sobre a
+// conversa: com ele, ela parecia "na Caixa Humano" sem estar.
+export function seloPrecisaDePessoa(s: { precisa_humano?: boolean; do_turno_atual?: boolean | null } | null | undefined): boolean {
+  return !!s?.precisa_humano && s.do_turno_atual !== false
+}
+// A sugestão é de uma mensagem anterior do cliente (o selo discreto no lugar).
+export function sugestaoDeAntes(s: { do_turno_atual?: boolean | null } | null | undefined): boolean {
+  return s?.do_turno_atual === false
 }
 // Correção do 👎 que a pessoa está escrevendo, por id de sugestão. Fica na
 // conversa (AtendimentoConversa faz o `provide`), não no botão: a mesma
@@ -754,19 +776,35 @@ export function canalLabel(canal: string | null | undefined): string {
 // que o "carregar mais" trouxe: fica o que vem DEPOIS do último item da 1ª
 // página nova, NA ORDEM DA ABA (comparar pela hora da mensagem na aba do
 // prazo jogava fora itens das páginas extras).
+// A CAIXA HUMANO (14/10/2026, o dono: "a mais recente lá em cima e não
+// embaixo") vai pelo TURNO com qualquer filtro — a última mensagem do cliente
+// (`turno_em`), a mais nova primeiro, o id (como texto) desempata — como o
+// servidor (`caixa=humano`, o cursor `turno:`).
 export const FILTROS_PELO_PRAZO = ['aguardando']
-type ItemDaLista = Pick<ConversaResumo, 'id' | 'ultima_mensagem_em' | 'prazo_resposta_em'>
+type ItemDaLista = Pick<ConversaResumo, 'id' | 'ultima_mensagem_em' | 'prazo_resposta_em' | 'turno_em'>
 function chaveDoPrazo(c: ItemDaLista): [number, number, string] {
   const t = c.prazo_resposta_em ? new Date(c.prazo_resposta_em).getTime() : Number.NaN
   return Number.isNaN(t) ? [1, 0, String(c.id)] : [0, t, String(c.id)]
 }
+function horaDoTurno(c: ItemDaLista): number {
+  const t = c.turno_em ? new Date(c.turno_em).getTime() : Number.NaN
+  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t
+}
 // Dá para costurar a partir deste último item? (na ordem por recência, o
-// último sem hora não tem corte — a lista recomeça da 1ª página).
-export function podeCosturar(ultimo: ItemDaLista | null | undefined, filtro: string | null | undefined): boolean {
+// último sem hora não tem corte — a lista recomeça da 1ª página; na Caixa
+// Humano, o mesmo sem o turno: a API antiga).
+export function podeCosturar(ultimo: ItemDaLista | null | undefined, filtro: string | null | undefined, caixa?: string | null): boolean {
   if (!ultimo) return false
+  if (caixa === 'humano') return !!ultimo.turno_em
   return FILTROS_PELO_PRAZO.includes(filtro || '') || !!ultimo.ultima_mensagem_em
 }
-export function vemDepoisNaLista(c: ItemDaLista, ultimo: ItemDaLista, filtro: string | null | undefined): boolean {
+export function vemDepoisNaLista(c: ItemDaLista, ultimo: ItemDaLista, filtro: string | null | undefined, caixa?: string | null): boolean {
+  if (caixa === 'humano') {
+    const a = horaDoTurno(c)
+    const b = horaDoTurno(ultimo)
+    if (a !== b) return a < b
+    return String(c.id) < String(ultimo.id)
+  }
   if (FILTROS_PELO_PRAZO.includes(filtro || '')) {
     const a = chaveDoPrazo(c)
     const b = chaveDoPrazo(ultimo)
@@ -1050,6 +1088,7 @@ export const ROTULO_HUMANO: Record<string, string> = {
   assunto: 'Assunto só de pessoa',
   so_anexo: 'Só foto/vídeo/arquivo',
   ia: 'A IA marcou: precisa de pessoa',
+  ia_sem_resposta: 'A IA não respondeu',
   falha: 'Não deu para triar: confira',
   ia_pausada: 'IA pausada',
 }
@@ -1074,6 +1113,24 @@ export function faixaHumano(h: HumanoConversa | null | undefined): { nome: strin
   return h?.na_caixa === false
     ? { nome: 'Precisa de pessoa', frase: 'a IA não responderia esta' }
     : { nome: 'Caixa Humano', frase: 'a IA não responde esta' }
+}
+// A espera da IA ("ou responde ou vai para pessoa", 14/10/2026): a mesma do
+// servidor (`humano.ESPERA_IA_MIN` — o atendimento-caixa-humano.cjs confere).
+export const ESPERA_IA_MIN = 10
+// A cor do chip da lista e da faixa da conversa: âmbar (a Caixa Humano); laranja
+// quando o motivo é a espera da IA ("A IA não respondeu", 14/10/2026: a
+// conversa que ninguém pegou — a IA ficou sem responder e foi para pessoa).
+export const COR_HUMANO = {
+  chip: 'bg-amber-500/20 text-amber-900 ring-1 ring-inset ring-amber-500/40 dark:text-amber-200',
+  faixa: 'border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-200',
+}
+export const COR_IA_SEM_RESPOSTA = {
+  chip: 'bg-orange-500/20 text-orange-900 ring-1 ring-inset ring-orange-500/50 dark:text-orange-200',
+  faixa: 'border-orange-500/50 bg-orange-500/10 text-orange-900 dark:text-orange-200',
+}
+export function corHumano(h: HumanoConversa | null | undefined): { chip: string; faixa: string } {
+  const motivos = Array.isArray(h?.motivos) ? h!.motivos : []
+  return motivos[0] === 'ia_sem_resposta' ? COR_IA_SEM_RESPOSTA : COR_HUMANO
 }
 // O chip da linha da lista: o primeiro motivo, "+N" os outros e todos no title.
 export function chipHumano(h: HumanoConversa | null | undefined): { texto: string; mais: number; titulo: string } | null {

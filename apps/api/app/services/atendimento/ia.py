@@ -76,7 +76,10 @@ Uma rodada por vez (`gerar_pendentes`, trava no Redis): o cron roda a cada
 minuto e uma rodada com a fila cheia passa disso; duas rodadas juntas
 escreveriam duas vezes para a mesma pergunta. A IA só gera para os canais
 nos modos de `atendimento_ia_modos` e respeita o teto diário de chamadas
-(`atendimento_ia_teto_diario`).
+(`atendimento_ia_teto_diario`). Na mesma rodada, a sugestão pendente que
+podia sair e não saiu ganha UMA nova tentativa de envio, sem o modelo
+(`reenviar_pendentes`, 14/10/2026); a que nem assim sai, a Caixa Humano pega
+pela espera (`humano.ia_sem_resposta`).
 
 Parte 2 (28/09/2026):
 
@@ -161,6 +164,18 @@ Parte 2 (28/09/2026):
   de garantia (bloco não consultado), a promessa não bloqueia a sugestão:
   só vai para pessoa.
 
+  FICHA DO ANÚNCIO (14/10/2026, o dono: "busca a ficha caso seja linkado
+  com algum produto"). Com anúncio ligado à conversa (o cartão de produto
+  que o cliente mandou, o anúncio da pergunta/da conversa, os itens do
+  pedido), os FATOS levam o bloco "ficha_do_anuncio" (`ficha.py`): título
+  ATUAL, atributos e a descrição LIMPA — a ficha fresca que a loja devolveu
+  ao enriquecimento do cartão (Redis); senão o nosso catálogo (`listings`)
+  importado há até 30 dias e com o mesmo título; senão o mesmo produto em
+  outro anúncio (`product_links`) —, até 2 anúncios e 2.500 caracteres. Vai
+  na MENSAGEM, fora do orçamento do prompt de sistema (não tira correção nem
+  regra) e fora da classificação. No automático, a resposta de dado do
+  produto com a ficha vai para pessoa (`MOTIVO_FICHA_NO_AUTOMATICO`).
+
   PROVEDOR (28/09). Dois caminhos, escolhidos só pelo `.env`
   (`escolher_provedor`): o Groq — ou qualquer API compatível com a da
   OpenAI —, exatamente como era; e a Claude, pela API NATIVA da Anthropic
@@ -223,6 +238,7 @@ from app.models import (
 from app.redis_client import redis
 from app.services import dm_ia
 from app.services.atendimento import contexto as contexto_svc
+from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import gravar, separa_email, validador
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.ag_cancelamento import TEXTOS_IA
@@ -385,6 +401,26 @@ JANELA_HUMANO = timedelta(hours=24)
 # atendente: o pedido de atendente deixa de ir para pessoa (14/10/2026).
 CATEGORIA_PEDE_ATENDENTE = "pede_atendente"
 
+# A NOVA TENTATIVA de envio (14/10/2026, piloto da Kia: "a caixa tem que
+# responder mesmo"): a sugestão pendente que podia sair e não saiu — o envio
+# recusado por um defeito já corrigido (o menu do Duoke contava como "loja já
+# respondeu"), um erro no meio, a loja posta no Automático ou o assunto
+# liberado depois — fica parada: o cron só GERA para a conversa sem sugestão
+# do gatilho atual. A rodada da IA chama de novo a decisão de envio
+# (`_talvez_enviar`, com todas as travas) para até `MAX_REENVIOS` delas,
+# UMA vez por sugestão (a marca no Redis), sem chamar o modelo. Só a que
+# nunca chegou à plataforma (nenhuma mensagem ligada a ela) e nasceu há mais
+# de `REENVIO_DEPOIS` (a rodada que a gerou já tentou) e menos de
+# `JANELA_REENVIO`. A pedida pela TELA ("Sugerir") é para a pessoa conferir
+# e nunca sai sozinha: ela nasce com `fatos[FATO_PEDIDA_PELA_TELA]` (no
+# BANCO, na mesma linha — não depende do Redis estar no ar).
+MAX_REENVIOS = 5
+REENVIO_DEPOIS = timedelta(minutes=2)
+JANELA_REENVIO = timedelta(hours=24)
+FATO_PEDIDA_PELA_TELA = "pedida_pela_tela"
+_CHAVE_REENVIO = "atendimento:ia:reenvio:{}:{}"
+_REENVIO_TTL_S = 2 * 24 * 3600
+
 # Uma rodada de `gerar_pendentes` por vez. O TTL passa do timeout do job
 # (300 s): processo morto solta sozinho, rodada viva nunca perde a trava.
 RODADA_TTL_S = 360
@@ -394,6 +430,11 @@ _CHAVE_TETO = "atendimento:ia:chamadas:{}:{}"
 _TETO_TTL_S = 2 * 24 * 3600
 
 MOTIVO_NUMERO_INVENTADO = "número que não veio do sistema"
+# A resposta de dado do produto com a ficha do anúncio nos FATOS não sai
+# sozinha no automático (14/10/2026): a ficha pode ser de antes da última
+# mudança do anúncio, ou de outro anúncio do mesmo produto, e o que acompanha
+# muda por variação. Vai para pessoa (pendente). Liberar é decisão do dono.
+MOTIVO_FICHA_NO_AUTOMATICO = "resposta pela ficha do anúncio — no automático, pessoa confere"
 
 # Item 4 (02/10/2026): o pedido em "Aguardando Cancelamento" (83955) sempre
 # vai para pessoa; e o que o modelo vê quando o motivo não deixa falar em
@@ -3651,6 +3692,10 @@ async def _gerar(
     # O que fica gravado para auditoria: o que o modelo viu + os valores das
     # lacunas (dado do pedido, não da pessoa).
     fatos_gravados = {**fatos, "lacunas": valores}
+    if forcar:
+        # Pedida pela TELA: a marca no BANCO, na mesma linha — a nova
+        # tentativa do cron (`reenviar_pendentes`) nunca a envia.
+        fatos_gravados[FATO_PEDIDA_PELA_TELA] = True
 
     # A rajada que pede resposta: o que o cliente escreveu depois da última
     # fala da loja.
@@ -3822,6 +3867,22 @@ async def _gerar(
         else (garantia["garantias"] if garantia is not None else [])
     )
 
+    # A ficha do anúncio (14/10/2026, o dono: "busca a ficha caso seja
+    # linkado com algum produto"): título, atributos e descrição LIMPA do
+    # catálogo, dos anúncios ligados à conversa (`ficha.py`). Na mensagem
+    # (FATOS), com teto próprio — fora do orçamento do prompt de sistema, não
+    # tira correção nem regra; e fora da classificação, que não precisa dela.
+    # Os números dela passam a valer na conferência (`permitidos`, abaixo).
+    fichas = await contexto_svc._seguro(
+        session,
+        "ficha_do_anuncio",
+        lambda: ficha_svc.fichas_da_conversa(session, conversa, recentes, textos_rajada),
+        [],
+        conversa.id,
+    )
+    if fichas:
+        fatos["ficha_do_anuncio"] = fatos_gravados["ficha_do_anuncio"] = fichas
+
     referencia = classificada or categoria_provavel(" ".join(textos_rajada), conversa.canal)
     # Canal no automático: só o 👍/👎 de admin molda o prompt (ver
     # `_avaliacao_vale_aqui`) — o mesmo corte das regras do manual.
@@ -3893,9 +3954,11 @@ async def _gerar(
     if categoria in so_humano:
         motivos.append(f"assunto só para pessoa ({categoria})")
     motivos += motivos_da_categoria(categoria, textos_cliente, textos_rajada, ids_categorias)
-    # O que o modelo pode repetir: os FATOS (anúncio, itens, data da compra),
-    # o MANUAL que a equipe escreveu (as regras que entraram no prompt) e a
-    # descrição dos assuntos. Número fora
+    if fichas and so_admin and categoria in ficha_svc.CATEGORIAS_DA_FICHA:
+        motivos.append(MOTIVO_FICHA_NO_AUTOMATICO)
+    # O que o modelo pode repetir: os FATOS (anúncio e a ficha dele, itens,
+    # data da compra), o MANUAL que a equipe escreveu (as regras que entraram
+    # no prompt) e a descrição dos assuntos. Número fora
     # disso (e fora das lacunas) foi inventado — ou copiado do exemplo de
     # OUTRO cliente — e bloqueia a sugestão.
     permitidos = "\n".join(
@@ -4157,9 +4220,134 @@ async def gerar_rascunho(
         logger.warning("atendimento_ia_falhou", conversa_id=str(conversa_id), err=type(e).__name__)
         await _desfazer(session, conversa)
         return None
+    # A pedida pela tela nunca sai sozinha — nem na nova tentativa do cron
+    # (`_gerar` grava `FATO_PEDIDA_PELA_TELA` nela).
     if rascunho is not None and not forcar:
         await _talvez_enviar(session, conversa, rascunho)
     return rascunho
+
+
+async def _marcar_reenvio(rascunho_id: UUID) -> bool:
+    """A marca "já teve a nova tentativa" da sugestão, no Redis → True = marcou agora.
+
+    SET NX: a sugestão já tentada devolve False (UMA tentativa por
+    sugestão). Redis fora do ar: False — sem a marca, a nova tentativa não
+    acontece (na dúvida, não envia). Quem segura a pedida pela tela é o
+    banco (`FATO_PEDIDA_PELA_TELA`), não esta marca.
+    """
+    chave = _CHAVE_REENVIO.format(get_settings().database_schema, rascunho_id)
+    try:
+        return bool(await redis.set(chave, "1", nx=True, ex=_REENVIO_TTL_S))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("atendimento_ia_reenvio_marca_indisponivel", err=type(e).__name__)
+        return False
+
+
+async def reenviar_pendentes(
+    session: AsyncSession, *, limite: int = MAX_REENVIOS, agora: datetime | None = None
+) -> int:
+    """A nova tentativa de envio da sugestão pendente que podia sair (ver o topo). Nunca levanta.
+
+    Candidata: canal em `auto`, conversa esperando resposta (sem IA pausada,
+    sem atribuição, não fechada nem bloqueada, canal com envio, janela da
+    plataforma aberta), sugestão PENDENTE do gatilho ATUAL (a última
+    mensagem do cliente) e a mais nova da conversa, validador ok, sem
+    precisar de pessoa, confiança ≥ `CONFIANCA_AUTO`, com texto, no assunto
+    liberado no canal (e fora dos só de pessoa), gerada pelo cron (não pela
+    tela: `FATO_PEDIDA_PELA_TELA`), nascida há mais de
+    `REENVIO_DEPOIS` e menos de `JANELA_REENVIO`, e que nunca chegou à
+    plataforma. Quem decide é o `_talvez_enviar` (relê a conversa e o canal,
+    a pessoa de fora nas 24 h, o manual...) e o `enviar` (trava a conversa,
+    confere o gatilho já respondido). Devolve quantas foram tentadas.
+    """
+    s = get_settings()
+    if not s.atendimento_auto_ativo:
+        return 0
+    agora = agora or datetime.now(UTC)
+    r, c, k = AtendimentoRascunho, AtendimentoConversa, AtendimentoCanal
+    gatilho = aliased(AtendimentoMensagem)
+    mais_nova = aliased(AtendimentoRascunho)
+    ligada = aliased(AtendimentoMensagem)
+    try:
+        linhas = (
+            await session.execute(
+                select(r.id, c.id)
+                .join(c, c.id == r.conversa_id)
+                .join(k, k.id == c.canal_id)
+                .join(gatilho, gatilho.id == r.mensagem_gatilho_id)
+                .where(
+                    k.modo == MODO_AUTO,
+                    k.auto_categorias.has_key(r.categoria),
+                    c.plataforma.in_(PLATAFORMAS_CAIXA),
+                    c.plataforma.not_in(PLATAFORMAS_SEM_AUTO),
+                    c.aguardando_resposta.is_(True),
+                    c.ia_pausada.is_(False),
+                    c.atribuido_a.is_(None),
+                    c.sem_resposta_necessaria.is_not(True),
+                    c.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
+                    or_(c.pode_enviar_ate.is_(None), c.pode_enviar_ate > agora),
+                    ~_sql_canal_sem_envio(),
+                    r.status == RASCUNHO_PENDENTE,
+                    r.validador_ok.is_(True),
+                    r.precisa_humano.is_(False),
+                    r.confianca >= CONFIANCA_AUTO,
+                    func.btrim(func.coalesce(r.texto, "")) != "",
+                    r.categoria.not_in(CATEGORIAS_SO_HUMANO),
+                    # A pedida pela tela é para a pessoa conferir (`_gerar`).
+                    ~r.fatos.has_key(FATO_PEDIDA_PELA_TELA),
+                    r.created_at >= agora - JANELA_REENVIO,
+                    r.created_at <= agora - REENVIO_DEPOIS,
+                    # O gatilho é a última mensagem do cliente (a do turno atual).
+                    func.coalesce(gatilho.enviada_em, gatilho.created_at) >= c.ultima_do_cliente_em,
+                    ~select(mais_nova.id)
+                    .where(
+                        mais_nova.conversa_id == r.conversa_id,
+                        mais_nova.created_at > r.created_at,
+                    )
+                    .exists(),
+                    ~select(ligada.id).where(ligada.rascunho_id == r.id).exists(),
+                )
+                .order_by(r.created_at.desc())
+                # As já tentadas continuam candidatas no banco (a marca é no
+                # Redis): a busca traz folga para elas não tomarem a vez.
+                .limit(max(1, limite) * 10)
+            )
+        ).all()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("atendimento_ia_reenvio_falhou", err=type(e).__name__)
+        await _desfazer(session)
+        return 0
+    tentadas = 0
+    for rascunho_id, conversa_id in linhas:
+        if tentadas >= limite:
+            break
+        if not await _marcar_reenvio(rascunho_id):
+            continue
+        tentadas += 1
+        try:
+            conversa = await session.get(AtendimentoConversa, conversa_id, populate_existing=True)
+            rascunho = await session.get(AtendimentoRascunho, rascunho_id, populate_existing=True)
+            if conversa is None or rascunho is None:
+                continue
+            # Relido agora: o cliente escreveu de novo no meio → não é mais a vez dela.
+            ultima = await _ultima_do_cliente(session, conversa)
+            if ultima is None or not _cobre(rascunho, ultima):
+                continue
+            await _talvez_enviar(session, conversa, rascunho)
+            logger.info(
+                "atendimento_ia_reenvio",
+                conversa_id=str(conversa_id),
+                rascunho_id=str(rascunho_id),
+                categoria=rascunho.categoria,
+            )
+        except Exception as e:  # noqa: BLE001 — uma conversa ruim não para a rodada
+            logger.warning(
+                "atendimento_ia_reenvio_conversa_falhou",
+                conversa_id=str(conversa_id),
+                err=type(e).__name__,
+            )
+            await _desfazer(session)
+    return tentadas
 
 
 async def motivo_sem_rascunho(session: AsyncSession, conversa: AtendimentoConversa) -> str:
@@ -4261,6 +4449,10 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
     quando o cron do minuto seguinte dispara faz a nova sair na hora. E a
     rodada para na primeira recusa do provedor por limite (413/429 depois
     da nova tentativa): o resto da fila espera a próxima.
+
+    Depois de gerar, na mesma trava (14/10/2026): a NOVA TENTATIVA de envio
+    das sugestões pendentes que podiam sair (`reenviar_pendentes`, sem o
+    modelo) — com o Automático entre os modos da IA.
     """
     s = get_settings()
     if not s.atendimento_ia_ativa or not provedor().chave:
@@ -4273,7 +4465,10 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
         logger.info("atendimento_ia_rodada_ocupada")
         return 0
     try:
-        return await _gerar_pendentes(session, limite=limite, modos=modos)
+        geradas = await _gerar_pendentes(session, limite=limite, modos=modos)
+        if MODO_AUTO in modos:
+            await reenviar_pendentes(session)
+        return geradas
     finally:
         await _soltar_rodada(token)
 

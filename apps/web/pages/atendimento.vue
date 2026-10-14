@@ -62,11 +62,15 @@ definePageMeta({ middleware: ['atendimento'] })
 //   lista filtrada pelo servidor (`?caixa=humano`: a régua da IA, sem chamar
 //   o modelo — services/atendimento/humano.py), os números da Caixa Humano na
 //   barra, no menu do topo e na aba, o motivo em cada linha e a faixa na
-//   conversa. Plataforma, loja e busca valem nas duas; a lista abre pelo
-//   prazo (a mais urgente primeiro). Respondeu, sai. Desde 14/10/2026 só as
-//   lojas no Automático (o dono: "a Caixa Humano só para as lojas que estão
-//   automáticas" — o servidor filtra lista e números; sem loja no modo, o
-//   vazio da lista aponta "Lojas e modo").
+//   conversa. Plataforma, loja e busca valem nas duas. Respondeu, sai. Desde
+//   14/10/2026 só as lojas no Automático (o dono: "a Caixa Humano só para as
+//   lojas que estão automáticas" — o servidor filtra lista e números; sem
+//   loja no modo, o vazio da lista aponta "Lojas e modo"); e, no mesmo dia,
+//   "a caixa tem que responder mesmo; se não puder, manda pra Caixa Humano,
+//   que tem que estar com a mais recente lá em cima e não embaixo": a lista
+//   vem pelo turno (a última mensagem do cliente, a mais nova primeiro) com
+//   qualquer filtro, e a conversa em que a IA não respondeu em 10 min entra
+//   sozinha ("A IA não respondeu").
 // - E-MAIL SÓ NA ABA E-MAIL (13/10/2026) — o Eduardo: "vamos deixar o e-mail
 //   aparecer só na aba de e-mail; a do chat de atendimento aparece só no chat
 //   mesmo". A conversa de e-mail da ponte saiu da Caixa e da Caixa Humano
@@ -131,8 +135,8 @@ let linkDoChat: { de: string; aba: Aba; para: string } | null = null
 const naCaixa = computed(() => aba.value === 'caixa' || aba.value === 'humano')
 const emHumano = computed(() => aba.value === 'humano')
 // A lista de cada uma abre num filtro: a Caixa em "Todas" (como o Duoke); a
-// Caixa Humano em "Falta responder" — tudo nela espera resposta, e assim vem
-// pelo prazo, a mais urgente primeiro.
+// Caixa Humano em "Falta responder" — tudo nela espera resposta (a ordem dela
+// é sempre a do turno, a mais recente em cima: o servidor e `vemDepoisNaLista`).
 function filtroPadraoDa(a: Aba): string {
   return a === 'humano' ? 'aguardando' : 'todas'
 }
@@ -284,12 +288,14 @@ async function atualizarLista() {
     const ids = new Set(novos.map((c) => c.id))
     const ultimo = novos[novos.length - 1] ?? null
     const filtro = filtros.value.filtro || 'todas'
+    const caixa = caixaDaLista
     // Sem `proximo` na 1ª página nova, ela já tem tudo: as páginas extras
     // viraram velhas e saem. O corte é na ORDEM DA ABA ("Falta responder"
-    // vai pelo prazo, as outras pela mensagem mais recente).
-    const manter = temPaginasExtras && !!ultimo && podeCosturar(ultimo, filtro) && !!r.proximo
+    // vai pelo prazo, as outras pela mensagem mais recente; a Caixa Humano,
+    // pelo turno, a mais recente em cima).
+    const manter = temPaginasExtras && !!ultimo && podeCosturar(ultimo, filtro, caixa) && !!r.proximo
     const resto = manter && ultimo
-      ? itens.value.filter((c) => !ids.has(c.id) && vemDepoisNaLista(c, ultimo, filtro))
+      ? itens.value.filter((c) => !ids.has(c.id) && vemDepoisNaLista(c, ultimo, filtro, caixa))
       : []
     itens.value = [...novos, ...resto]
     if (!manter) {
