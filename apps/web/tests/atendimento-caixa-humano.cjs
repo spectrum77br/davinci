@@ -13,7 +13,13 @@
 //  - a lista renderizada (Vue SSR, setup de verdade): o título no lugar das
 //    abas, o chip do motivo (também na Caixa), o vazio;
 //  - a barra de lojas e o menu do topo com os números da Caixa Humano;
-//  - a faixa na conversa.
+//  - a faixa na conversa;
+//  - SÓ AS LOJAS NO AUTOMÁTICO (14/10/2026, o dono: "a Caixa Humano só para
+//    as lojas que estão automáticas"): o contrato `flags.humano_modos`, o
+//    texto do topo, o vazio sem loja no modo — nenhuma, a loja ou a
+//    plataforma escolhida — (com "ver em Lojas e modo"), a loja fora do modo
+//    na barra (sem bolinha, o title diz por quê) e o chip/faixa "Precisa de
+//    pessoa" na conversa de loja fora (`humano.na_caixa` false).
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -91,11 +97,15 @@ const HUM = (motivos, extra = {}) => ({
   const campos = [...bloco('HumanoOut').matchAll(/^ {4}([a-z_]+): /gm)].map((m) => m[1])
   const tipo = (plataformaSfc.descriptor.script.content.match(/export type HumanoConversa = \{([\s\S]*?)\n\}/) || [])[1] || ''
   const chavesTs = [...tipo.matchAll(/^ {2}([a-z_]+)\??: /gm)].map((m) => m[1])
-  assert.deepEqual(campos, ['motivos', 'rotulos', 'assuntos', 'assuntos_rotulos'])
+  // `na_caixa` (14/10/2026): a loja nos modos da Caixa Humano; True por padrão (a API antiga).
+  assert.deepEqual(campos, ['motivos', 'rotulos', 'assuntos', 'assuntos_rotulos', 'na_caixa'])
+  assert.match(bloco('HumanoOut'), /^ {4}na_caixa: bool = True$/m)
   assert.deepEqual(chavesTs, campos, 'o tipo da tela = o HumanoOut')
   assert.match(bloco('ConversaResumoOut'), /^ {4}humano: HumanoOut \| None = None$/m)
   for (const c of ['PlataformaResumoOut', 'LojaResumoOut', 'ResumoOut']) assert.match(bloco(c), /^ {4}humano: int = 0$/m, c)
   assert.match(bloco('FlagsOut'), /^ {4}humano_ativa: bool = False$/m)
+  // Os modos da Caixa Humano (14/10/2026): a lista, ou None = toda loja.
+  assert.match(bloco('FlagsOut'), /^ {4}humano_modos: list\[str\] \| None = None$/m)
   const tipos = plataformaSfc.descriptor.script.content
   for (const t of ['ResumoPlataforma', 'ResumoLoja', 'Resumo']) {
     const corpo = (tipos.match(new RegExp(`export type ${t} = \\{([\\s\\S]*?)\\n\\}`)) || [])[1] || ''
@@ -103,6 +113,13 @@ const HUM = (motivos, extra = {}) => ({
   }
   assert.match(tipos, /^ {2}humano\?: HumanoConversa \| null$/m)
   assert.match(tipos, /^ {2}humano_ativa\?: boolean$/m)
+  assert.match(tipos, /^ {2}humano_modos\?: string\[\] \| null$/m)
+  // O /resumo manda os modos que o servidor usa no filtro.
+  assert.match(api('routers/atendimento.py'), /humano_modos=list\(modos_humano\) if modos_humano is not None else None,/)
+  assert.match(api('routers/atendimento.py'), /modos_humano = humano_svc\.modos_da_caixa\(\)\n\s+lojas_humano = await humano_svc\.lojas_da_caixa\(session, modos_humano\)\n\s+na_caixa_humano = func\.count\(\)\.filter\(humano_svc\.caixa_humano_sql\(lojas_humano\)\)/)
+  // O padrão do servidor é o Automático, sem precisar do .env.
+  assert.match(api('services/atendimento/humano.py'), /^MODOS_PADRAO: tuple\[str, \.\.\.\] = \(MODO_AUTO,\)$/m)
+  assert.match(api('config.py'), /^ {4}atendimento_humano_modos: str = ""$/m)
 
   // Os rótulos de reserva da tela = os da API (constantes.ROTULO_HUMANO).
   const constantes = api('services/atendimento/constantes.py')
@@ -117,7 +134,7 @@ const HUM = (motivos, extra = {}) => ({
   assert.match(rota, /^CAIXA_HUMANO = "humano"$/m)
   assert.match(rota, /caixa: Annotated\[str \| None, Query\(max_length=16\)\] = None,/)
   assert.match(rota, /raise HTTPException\(422, detail=\{"code": "caixa_invalida"\}\)/)
-  assert.match(rota, /if caixa_humano:\n\s+# [^\n]*\n\s+consulta = consulta\.where\(humano_svc\.caixa_humano_sql\(\)\)/)
+  assert.match(rota, /if caixa_humano:\n\s+# [^\n]*\n\s+consulta = consulta\.where\(humano_svc\.caixa_humano_sql\(lojas_humano\)\)/)
   const filtrosApi = [...((rota.match(/^FILTROS = \(([\s\S]*?)^\)/m) || [])[1] || '').matchAll(/"([a-z_]+)"/g)].map((m) => m[1])
   for (const f of [...L.FILTROS_FORA_DA_HUMANO, L.filtroPadrao('humano')]) assert.ok(filtrosApi.includes(f), f)
   assert.ok(P.FILTROS_PELO_PRAZO.includes(L.filtroPadrao('humano')), 'a Caixa Humano abre pelo prazo')
@@ -144,6 +161,43 @@ const HUM = (motivos, extra = {}) => ({
     titulo: 'Caixa Humano — a IA não responde esta:\n• Pedido com devolução\n• Assunto só de pessoa: Troca / devolução\n• A IA marcou: precisa de pessoa',
   })
   assert.equal(P.chipHumano(null), null)
+  // A loja fora dos modos (14/10/2026, `na_caixa: false`): ela não está na
+  // Caixa Humano — o chip e a faixa dizem "Precisa de pessoa".
+  assert.deepEqual(P.faixaHumano(HUM(['atendente'])), { nome: 'Caixa Humano', frase: 'a IA não responde esta' })
+  assert.deepEqual(P.faixaHumano(HUM(['atendente'], { na_caixa: true })), { nome: 'Caixa Humano', frase: 'a IA não responde esta' })
+  assert.deepEqual(P.faixaHumano(HUM(['atendente'], { na_caixa: false })), { nome: 'Precisa de pessoa', frase: 'a IA não responderia esta' })
+  assert.equal(P.chipHumano(HUM(['atendente'], { na_caixa: false })).titulo, 'Precisa de pessoa — a IA não responderia esta:\n• Pediu atendente')
+
+  // Só as lojas nos modos (14/10/2026): os modos do /resumo, o texto e a loja.
+  assert.deepEqual(P.modosDaCaixaHumano({ humano_modos: ['auto'] }), ['auto'])
+  assert.equal(P.modosDaCaixaHumano({ humano_modos: null }), null, '"todos": toda loja')
+  assert.equal(P.modosDaCaixaHumano({}), null, 'API antiga: toda loja')
+  assert.equal(P.modosDaCaixaHumano({ humano_modos: [] }), null)
+  assert.equal(P.modosDaCaixaHumano(null), null)
+  assert.equal(P.textoModosHumano(['auto']), 'no Automático')
+  assert.equal(P.textoModosHumano(['auto', 'copiloto']), 'no Automático ou no Copiloto')
+  const canais = [
+    { id: 'k1', integration_id: 'i-kia', plataforma: 'shopee', canal: 'chat', modo: 'auto' },
+    { id: 'k2', integration_id: 'i-ml', plataforma: 'ml', canal: 'pergunta', modo: 'observar' },
+    { id: 'k3', integration_id: 'i-ml', plataforma: 'ml', canal: 'pos_venda', modo: 'auto' },
+    { id: 'k4', integration_id: 'i-obs', plataforma: 'shopee', canal: 'chat', modo: 'observar' },
+    { id: 'k5', integration_id: null, externo_ref: 'site:charlots', plataforma: 'site', canal: 'carrinho', modo: 'observar' },
+  ]
+  assert.equal(P.lojaNosModos(canais, { integration_id: 'i-kia' }, ['auto']), true)
+  assert.equal(P.lojaNosModos(canais, { integration_id: 'i-ml' }, ['auto']), true, 'algum canal da loja no modo')
+  assert.equal(P.lojaNosModos(canais, { integration_id: 'i-obs' }, ['auto']), false)
+  assert.equal(P.lojaNosModos(canais, { integration_id: '', externo_ref: 'site:charlots' }, ['auto']), false)
+  assert.equal(P.lojaNosModos(canais, { integration_id: '' }, ['auto']), null, 'sem loja (ou a do robô): não dá para saber')
+  assert.equal(P.canaisNosModos(canais, ['auto']), 2)
+  assert.equal(P.canaisNosModos(canais, ['copiloto']), 0)
+  assert.equal(P.canaisNosModos(undefined, ['auto']), 0)
+  // A plataforma escolhida: alguma loja dela no modo?
+  assert.equal(P.plataformaNosModos(canais, ['shopee'], ['auto']), true)
+  assert.equal(P.plataformaNosModos(canais, ['ml'], ['auto']), true)
+  assert.equal(P.plataformaNosModos(canais, ['site'], ['auto']), false)
+  assert.equal(P.plataformaNosModos(canais, ['tiktok'], ['auto']), false, 'sem loja nenhuma')
+  assert.equal(P.plataformaNosModos(canais, ['instagram', 'facebook'], ['auto']), false)
+  assert.equal(P.plataformaNosModos(canais, [], ['auto']), null, 'sem plataforma: não se aplica')
 
   // O menu Filtrar na Caixa Humano: sem o que nunca entra nela.
   assert.deepEqual(L.opcoesDoFiltrar('').map((f) => f.value), L.FILTROS_MENU.map((f) => f.value))
@@ -192,6 +246,8 @@ const paginaTpl = paginaSfc.descriptor.template.content
   assert.match(paginaTpl, /<!-- Caixa: lojas \| fila \| conversa \+ pedido -->[\s\S]*?<div\s+v-show="naCaixa"\s+ref="caixaEl"/)
   assert.match(paginaTpl, /<AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano \? 'humano' : 'aguardando'" \/>/)
   assert.match(paginaTpl, /<AtendimentoLista\s+v-model:filtros="filtros"[\s\S]*?:caixa="emHumano \? 'humano' : ''"/)
+  // O vazio sem loja no modo abre "Lojas e modo" (14/10/2026).
+  assert.match(paginaTpl, /<AtendimentoLista\s+v-model:filtros="filtros"[^/]*?@abrir-aba="abrirAba"\s*\/>/)
   assert.match(paginaTpl, /:ativa="naCaixa"/)
   // A conversa aberta fica no link nas duas (e, desde 13/10/2026, a de e-mail na aba E-mail).
   assert.match(pagina, /const aberta = naCaixa\.value \? selecionada\.value : aba\.value === 'mail' \? emailConversa\.value : null\n  if \(aberta\) query\.conversa = aberta/)
@@ -360,6 +416,68 @@ async function lista() {
   html = await renderizarLista({ itens: [conversa('c1')], resumo: { ...RESUMO_LISTA, humano: undefined }, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
   assert.match(html, /Caixa Humano<\/span><\/div>/, 'sem número')
 
+  // SÓ AS LOJAS NO AUTOMÁTICO (14/10/2026): com os modos no /resumo, o topo diz quais.
+  const canaisAuto = [
+    { id: 'k-sh', integration_id: 'i-sh', plataforma: 'shopee', canal: 'chat', modo: 'auto' },
+    { id: 'k-ml', integration_id: 'i-ml', plataforma: 'ml', canal: 'pos_venda', modo: 'observar' },
+  ]
+  const resumoAuto = { ...RESUMO_LISTA, canais: canaisAuto, flags: { humano_ativa: true, humano_modos: ['auto'] } }
+  html = await renderizarLista({ itens, resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
+  assert.match(html, /data-dica-humano[^>]*>\s*Só as lojas no Automático: o que a IA não pode responder e falta responder — respondeu, sai daqui\./)
+  assert.match(html, /title="Só o que falta responder e a IA não pode responder \([^"]*\), nas lojas no Automático — respondeu, sai daqui"/)
+  // "todos" no servidor (null): o texto de sempre.
+  html = await renderizarLista({ itens, resumo: { ...resumoAuto, flags: { humano_ativa: true, humano_modos: null } }, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
+  assert.match(html, /data-dica-humano[^>]*>\s*Só o que a IA não pode responder e falta responder — respondeu, sai daqui\./)
+  // Vazia com loja no Automático: a boa notícia de sempre, sem o link.
+  html = await renderizarLista({ itens: [], resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
+  assert.match(html, /Nada esperando uma pessoa agora — o que a IA não puder responder aparece aqui\./)
+  assert.doesNotMatch(html, /data-abrir-lojas/)
+  // Vazia porque NENHUMA loja está no Automático: diz isso e aponta "Lojas e modo".
+  const semAuto = { ...resumoAuto, humano: 0, canais: canaisAuto.map((c) => ({ ...c, modo: 'observar' })) }
+  html = await renderizarLista({ itens: [], resumo: semAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
+  assert.match(html, /Nenhuma loja está no Automático — a Caixa Humano só mostra as lojas no Automático\./)
+  assert.match(html, /<button[^>]*data-abrir-lojas[^>]*>ver em Lojas e modo<\/button>/)
+  // … e manda a página abrir a aba (o mesmo `abrirAba` da conversa).
+  assert.match(listaSfc.descriptor.template.content, /data-abrir-lojas @click="emit\('abrirAba', 'lojas'\)"/)
+  // Nem com um filtro do menu o motivo some (o "tirar o filtro" fica junto).
+  html = await renderizarLista({ itens: [], resumo: semAuto, caixa: 'humano', filtros: filtros({ filtro: 'vencidas' }) })
+  assert.match(html, /Nenhuma loja está no Automático/)
+  assert.match(html, />ver em Lojas e modo</)
+  assert.match(html, />tirar o filtro</)
+  // A loja escolhida na barra fora do Automático: diz que é ela.
+  html = await renderizarLista({ itens: [], resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando', plataforma: 'ml', integration_id: 'i-ml' }) })
+  assert.match(html, /Esta loja não está no Automático — a Caixa Humano só mostra as lojas no Automático\./)
+  assert.match(html, />ver em Lojas e modo</)
+  // A PLATAFORMA escolhida (no topo) sem loja no Automático: diz que é ela —
+  // não "Nada esperando uma pessoa" (o revisor, 14/10/2026: ML, TikTok,
+  // Magalu e Amazon em Observar).
+  html = await renderizarLista({ itens: [], resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando', plataforma: 'ml', plataforma_topo: 'ml' }) })
+  assert.match(html, /Nenhuma loja do Mercado Livre está no Automático — a Caixa Humano só mostra as lojas no Automático\./)
+  assert.doesNotMatch(html, /Nada esperando uma pessoa/)
+  assert.match(html, /<button[^>]*data-abrir-lojas[^>]*>ver em Lojas e modo<\/button>/)
+  // … sem loja nenhuma dela (TikTok) e no grupo Redes também.
+  html = await renderizarLista({ itens: [], resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando', plataforma: 'tiktok', plataforma_topo: 'tiktok' }) })
+  assert.match(html, /Nenhuma loja do TikTok está no Automático/)
+  html = await renderizarLista({ itens: [], resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando', plataforma: 'instagram,facebook', plataforma_topo: 'instagram,facebook' }) })
+  assert.match(html, /Nenhuma loja do Instagram ou do Facebook está no Automático/)
+  // A plataforma COM loja no Automático, vazia: a boa notícia, sem o link.
+  html = await renderizarLista({ itens: [], resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando', plataforma: 'shopee', plataforma_topo: 'shopee' }) })
+  assert.match(html, /Nada esperando uma pessoa agora/)
+  assert.doesNotMatch(html, /data-abrir-lojas/)
+  // Com os modos "todos" (null), nada disso.
+  html = await renderizarLista({ itens: [], resumo: { ...resumoAuto, flags: { humano_ativa: true, humano_modos: null } }, caixa: 'humano', filtros: filtros({ filtro: 'aguardando', plataforma: 'ml' }) })
+  assert.match(html, /Nada esperando uma pessoa agora/)
+  assert.doesNotMatch(html, /data-abrir-lojas/)
+  // Na Caixa, o chip da loja fora dos modos diz "Precisa de pessoa" no title.
+  html = await renderizarLista({ itens: [conversa('c-obs', { humano: HUM(['atendente'], { na_caixa: false }) }), conversa('c-auto', { humano: HUM(['reclamacao'], { na_caixa: true }) })], resumo: resumoAuto, filtros: filtros() })
+  assert.match(html, /title="Precisa de pessoa — a IA não responderia esta:\n• Pediu atendente" data-selo-humano/)
+  assert.match(html, /title="Caixa Humano — a IA não responde esta:\n• Reclamação aberta" data-selo-humano/)
+  // A API antiga (sem os modos): nada disso — e na Caixa, nunca.
+  html = await renderizarLista({ itens: [], resumo: { ...semAuto, flags: { humano_ativa: true } }, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
+  assert.doesNotMatch(html, /Nenhuma loja está|data-abrir-lojas/)
+  html = await renderizarLista({ itens: [], resumo: semAuto, filtros: filtros() })
+  assert.doesNotMatch(html, /Nenhuma loja está|data-abrir-lojas|data-dica-humano/)
+
   // O menu e a volta do filtro (o código de verdade).
   const setup = listaSfc.descriptor.scriptSetup.content
   assert.match(setup, /mudar\('filtro', filtros\.value\.filtro === value \? padrao\.value : value\)/)
@@ -393,6 +511,30 @@ async function numeros() {
   assert.match(html, /Todas · Shopee<\/span><span[^>]*>4<\/span>/)
   assert.doesNotMatch(html, />poofy</)
 
+  // Só as lojas no Automático (14/10/2026): a loja fora fica sem bolinha (o
+  // servidor manda zero) e o title diz por quê; a do modo, como sempre.
+  const resumoModos = {
+    ...RESUMO_LISTA,
+    humano: 4,
+    lojas: [
+      { integration_id: 'i-sh', plataforma: 'shopee', conta: 'atv', aguardando: 9, vencidas: 0, humano: 4 },
+      { integration_id: 'i-ml', plataforma: 'ml', conta: 'poofy', aguardando: 2, vencidas: 0, humano: 0 },
+    ],
+    canais: [
+      { id: 'k-sh', integration_id: 'i-sh', plataforma: 'shopee', canal: 'chat', modo: 'auto', status: 'ok' },
+      { id: 'k-ml', integration_id: 'i-ml', plataforma: 'ml', canal: 'pos_venda', modo: 'observar', status: 'ok' },
+    ],
+    flags: { humano_ativa: true, humano_modos: ['auto'] },
+  }
+  html = await renderizar(lojasSfc, { resumo: resumoModos, filtros: filtros(), numero: 'humano' })
+  assert.deepEqual(bolinhas(html).filter(([n]) => n !== 'Todas'), [['atv', '4']], 'a poofy (Observar) sem bolinha')
+  assert.match(html, /Fora da Caixa Humano: a loja não está no Automático \(mude em Lojas e modo\)/)
+  assert.equal((html.match(/Fora da Caixa Humano/g) || []).length, 1, 'só a poofy')
+  assert.match(html, /4 na Caixa Humano \(a IA não pode responder\)/)
+  // Na Caixa (o "falta responder"), nada muda.
+  html = await renderizar(lojasSfc, { resumo: resumoModos, filtros: filtros() })
+  assert.doesNotMatch(html, /Fora da Caixa Humano/)
+
   // O menu do topo: o total e cada plataforma com o número da Caixa Humano.
   html = await renderizar(filtroSfc, { resumo: RESUMO_LISTA, filtros: filtros(), numero: 'humano' })
   const itens = [...html.matchAll(/data-chip="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)].map((m) => [m[1], m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()])
@@ -408,13 +550,18 @@ async function numeros() {
   const faixa = (tpl.match(/<div\s+v-if="conversa\.humano"[\s\S]*?<\/div>/) || [])[0] || ''
   assert.ok(faixa, 'a faixa existe')
   assert.match(faixa, /data-faixa-humano/)
-  assert.match(faixa, /<span class="font-semibold">Caixa Humano<\/span> — a IA não responde esta: \{\{ rotulosHumano\(conversa\.humano\)\.join\(' · '\) \}\}/)
+  // O nome e a frase pela `faixaHumano` (14/10/2026: "Precisa de pessoa" na
+  // loja fora dos modos da Caixa Humano, com o title dizendo por quê).
+  assert.match(faixa, /<span class="font-semibold">\{\{ faixaHumano\(conversa\.humano\)\.nome \}\}<\/span> — \{\{ faixaHumano\(conversa\.humano\)\.frase \}\}: \{\{ rotulosHumano\(conversa\.humano\)\.join\(' · '\) \}\}/)
+  assert.match(faixa, /:title="conversa\.humano\.na_caixa === false \? tituloForaDaCaixaHumano : undefined"/)
+  assert.match(conversaSfc.descriptor.scriptSetup.content, /A loja desta conversa não está \$\{modos \? textoModosHumano\(modos\) : 'nos modos da Caixa Humano'\}: ela não aparece na Caixa Humano \(mude em Lojas e modo\)\./)
   // Logo abaixo do cabeçalho, antes das outras faixas.
   assert.ok(tpl.indexOf('data-faixa-humano') < tpl.indexOf('<!-- faixas: bloqueio, janela, fechada'))
   assert.match(conversaSfc.descriptor.scriptSetup.content, /^ {2}rotulosHumano,$/m)
+  assert.match(conversaSfc.descriptor.scriptSetup.content, /^ {2}faixaHumano,$/m)
   // A conversa avisa a página (o `mudou` leva o `humano` do detalhe): é por ele
   // que a linha sai da Caixa Humano.
-  assert.match(api('routers/atendimento.py'), /humano=humano_svc\.para_tela\(na_caixa_humano, ia_pausada=c\.ia_pausada\),/)
+  assert.match(api('routers/atendimento.py'), /humano=humano_svc\.para_tela\(para_pessoa, ia_pausada=c\.ia_pausada, na_caixa=na_caixa\),/)
 }
 
 lista().then(numeros).then(

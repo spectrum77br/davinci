@@ -1074,8 +1074,11 @@ def _resumo_dict(
             e for e in (c.etiquetas_secundarias or []) if isinstance(e, str)
         ],
         "etiqueta_manual": bool(c.etiqueta_manual),
-        # Caixa Humano (09/10/2026): os motivos, só se ela está lá AGORA
-        # (`humano.para_tela` sobre o `humano.triagem_da_linha_sql`).
+        # Caixa Humano (09/10/2026): os motivos, só se a régua manda para
+        # pessoa AGORA (`humano.para_tela` sobre o `humano.triagem_da_linha_sql`)
+        # — em toda loja, também fora dos modos da Caixa Humano (14/10/2026:
+        # o chip informa quem responde pelo Duoke; só a lista filtra). O
+        # `humano.na_caixa` diz se ela está na Caixa Humano (a loja no modo).
         "humano": humano,
         # Só na conversa de e-mail (a lista da aba E-mail, 13/10/2026).
         "email": _email_resumo(c),
@@ -1133,8 +1136,15 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
     pendentes = await session.scalar(select(_pendentes()).where(AtendimentoConversa.id == c.id))
     from app.services.atendimento import humano as humano_svc
 
-    na_caixa_humano = await session.scalar(
+    para_pessoa = await session.scalar(
         select(humano_svc.triagem_da_linha_sql()).where(AtendimentoConversa.id == c.id)
+    )
+    # A loja nos modos da Caixa Humano (14/10/2026): a faixa diz "Caixa
+    # Humano" ou só "Precisa de pessoa". Só pergunta quando há o que mostrar.
+    na_caixa = para_pessoa is None or humano_svc.na_caixa_da_loja(
+        await humano_svc.lojas_da_caixa(session, humano_svc.modos_da_caixa()),
+        c.canal_id,
+        c.integration_id,
     )
     base = _resumo_dict(
         c,
@@ -1143,7 +1153,7 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
         a_conferir=a_conferir,
         ultimo_tipo=ultimo_tipo,
         pendentes=pendentes or 0,
-        humano=humano_svc.para_tela(na_caixa_humano, ia_pausada=c.ia_pausada),
+        humano=humano_svc.para_tela(para_pessoa, ia_pausada=c.ia_pausada, na_caixa=na_caixa),
     )
     base.update(
         comprador_id=c.comprador_id,
@@ -1536,8 +1546,15 @@ async def resumo(
     aberta = AtendimentoConversa.situacao != CONVERSA_FECHADA
     efetiva = _etiqueta_efetiva()
     por_etiqueta = [func.count().filter(aberta, efetiva == e) for e in ETIQUETAS]
-    # A Caixa Humano (09/10/2026): falta responder e a IA não pode.
-    na_caixa_humano = func.count().filter(humano_svc.caixa_humano_sql())
+    # A Caixa Humano (09/10/2026): falta responder e a IA não pode — desde
+    # 14/10/2026 só nas lojas dos modos dela (padrão: no Automático), no
+    # total, por plataforma e por loja (a loja fora dos modos fica com zero).
+    # Os canais no modo vão como VALORES (`lojas_da_caixa`, uma consulta
+    # pequena): com subconsulta, o JIT do Postgres compilava mais que o
+    # triplo de funções nesta consulta (+180 ms ou mais em produção).
+    modos_humano = humano_svc.modos_da_caixa()
+    lojas_humano = await humano_svc.lojas_da_caixa(session, modos_humano)
+    na_caixa_humano = func.count().filter(humano_svc.caixa_humano_sql(lojas_humano))
 
     def _etiquetas(contagens) -> dict[str, int]:
         return {e: int(n or 0) for e, n in zip(ETIQUETAS, contagens, strict=True)}
@@ -1553,6 +1570,12 @@ async def resumo(
         *por_etiqueta,
     ).group_by(AtendimentoConversa.plataforma)
     q_plat = q_plat.where(cond)
+    # Sem JIT no /resumo (14/10/2026): o custo estimado da `q_plat` passa de
+    # 500 mil e o Postgres compilava a consulta com LLVM a cada chamada — 1 a
+    # 3 s de CPU para uma consulta que roda em ~0,4 s sem ele (medido em
+    # produção, EXPLAIN ANALYZE). Ela roda a cada 30 s em cada aba aberta.
+    # SET LOCAL: só nesta transação (volta ao padrão no fim do pedido).
+    await session.execute(text("SET LOCAL jit = off"))
     por_plataforma = {
         p: PlataformaResumoOut(
             plataforma=p,
@@ -1704,6 +1727,7 @@ async def resumo(
             simulador_exceto=enviar.fora_do_simulador(),
             alerta_telegram=s.atendimento_alerta_telegram,
             humano_ativa=s.atendimento_leitura_ativa and s.atendimento_humano_ativa,
+            humano_modos=list(modos_humano) if modos_humano is not None else None,
         ),
         leitura_parada=leitura_parada,
     )
@@ -1767,13 +1791,17 @@ async def _listar_marketplace(
     agora = datetime.now(UTC)
     tem = _pendente_existe()
     a_conferir = _a_conferir_existe()
+    # As lojas nos modos da Caixa Humano (14/10/2026): o filtro de
+    # `?caixa=humano` e o `humano.na_caixa` de cada linha (o chip).
+    lojas_humano = await humano_svc.lojas_da_caixa(session, humano_svc.modos_da_caixa())
     consulta = select(
         AtendimentoConversa,
         tem.label("tem_rascunho"),
         a_conferir.label("a_conferir"),
         _ultimo_tipo().label("ultimo_tipo"),
         _pendentes().label("pendentes"),
-        # Caixa Humano (09/10/2026): o motivo de quem está nela (None fora).
+        # Caixa Humano (09/10/2026): o motivo de quem precisa de pessoa
+        # (None fora) — o chip, em toda loja (`triagem_da_linha_sql`).
         humano_svc.triagem_da_linha_sql().label("humano"),
         User,
     ).outerjoin(User, User.id == AtendimentoConversa.atribuido_a)
@@ -1787,8 +1815,8 @@ async def _listar_marketplace(
     else:
         consulta = consulta.where(separa_email.na_caixa_sql())
     if caixa_humano:
-        # Só o que falta responder e a IA não pode (junto de qualquer filtro).
-        consulta = consulta.where(humano_svc.caixa_humano_sql())
+        # Falta responder e a IA não pode, nas lojas dos modos (com qualquer filtro).
+        consulta = consulta.where(humano_svc.caixa_humano_sql(lojas_humano))
     if len(plataforma) == 1:
         consulta = consulta.where(AtendimentoConversa.plataforma == plataforma[0])
     elif plataforma:
@@ -1953,7 +1981,11 @@ async def _listar_marketplace(
             a_conferir=bool(r),
             ultimo_tipo=tipo,
             pendentes=pend,
-            humano=humano_svc.para_tela(hum, ia_pausada=c.ia_pausada),
+            humano=humano_svc.para_tela(
+                hum,
+                ia_pausada=c.ia_pausada,
+                na_caixa=humano_svc.na_caixa_da_loja(lojas_humano, c.canal_id, c.integration_id),
+            ),
         )
         for c, tem_r, r, tipo, pend, hum, u in (
             await session.execute(consulta.limit(limite))

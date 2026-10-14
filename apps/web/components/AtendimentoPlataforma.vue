@@ -23,6 +23,10 @@ export type Flags = {
   // A triagem da Caixa Humano está rodando (09/10/2026). false = desligada no
   // servidor: a Caixa Humano só mostra as de IA pausada. A API antiga não manda.
   humano_ativa?: boolean
+  // Os modos de loja que a Caixa Humano mostra (14/10/2026, decisão do dono:
+  // só as lojas no Automático — `['auto']`); null = toda loja ("todos" no
+  // servidor). A API antiga não manda (toda loja, como antes).
+  humano_modos?: string[] | null
 }
 export type Canal = {
   id: string
@@ -183,10 +187,11 @@ export type ConversaResumo = {
   avaliacao_estrelas?: number | null
   // A conta do cadastro Redes Sociais no Direct do Instagram (02/10/2026).
   rede_social_id?: string | null
-  // Caixa Humano (09/10/2026): a conversa está nela AGORA (falta responder e
-  // a IA não pode responder), com os motivos. null = não está. Vem também na
-  // Caixa (o chip da linha) e no detalhe (a faixa da conversa). A API antiga
-  // não manda.
+  // Caixa Humano (09/10/2026): a conversa precisa de pessoa AGORA (falta
+  // responder e a IA não pode responder), com os motivos. null = não precisa.
+  // Vem também na Caixa (o chip da linha) e no detalhe (a faixa da conversa),
+  // em toda loja; `na_caixa` diz se ela está na Caixa Humano (14/10/2026: só
+  // as lojas no Automático). A API antiga não manda.
   humano?: HumanoConversa | null
   // Só na conversa de E-MAIL da ponte (a lista da aba E-mail, `?caixa=email`,
   // 13/10/2026): o chamado do site e a caixa da loja. null nas outras.
@@ -211,6 +216,10 @@ export type HumanoConversa = {
   rotulos: string[]
   assuntos: string[]
   assuntos_rotulos: string[]
+  // Está na Caixa Humano (a loja num dos modos dela, 14/10/2026). false =
+  // precisa de pessoa, mas a loja está fora (em Observar, o Duoke responde):
+  // o chip e a faixa só informam. A API antiga não manda (= está).
+  na_caixa?: boolean
 }
 // Uma mudança de etiqueta (a linha do tempo): `por_nome` null = o sistema.
 export type EtiquetaHistorico = {
@@ -1054,15 +1063,67 @@ export function rotulosHumano(h: HumanoConversa | null | undefined): string[] {
   })
   return saida.length ? saida : ['Precisa de uma pessoa']
 }
+// O nome do chip e da faixa (14/10/2026): "Caixa Humano" só quando a
+// conversa está nela; da loja fora dos modos (em Observar — ela não aparece
+// na Caixa Humano), "Precisa de pessoa": a IA não responderia ali.
+export function faixaHumano(h: HumanoConversa | null | undefined): { nome: string; frase: string } {
+  return h?.na_caixa === false
+    ? { nome: 'Precisa de pessoa', frase: 'a IA não responderia esta' }
+    : { nome: 'Caixa Humano', frase: 'a IA não responde esta' }
+}
 // O chip da linha da lista: o primeiro motivo, "+N" os outros e todos no title.
 export function chipHumano(h: HumanoConversa | null | undefined): { texto: string; mais: number; titulo: string } | null {
   if (!h) return null
   const rs = rotulosHumano(h)
+  const f = faixaHumano(h)
   return {
     texto: rs[0],
     mais: rs.length - 1,
-    titulo: ['Caixa Humano — a IA não responde esta:', ...rs.map((r) => `• ${r}`)].join('\n'),
+    titulo: [`${f.nome} — ${f.frase}:`, ...rs.map((r) => `• ${r}`)].join('\n'),
   }
+}
+// SÓ AS LOJAS NO AUTOMÁTICO (14/10/2026, o dono: "a Caixa Humano só para as
+// lojas que estão automáticas"): o servidor já filtra a lista e os números
+// (`humano.caixa_humano_sql`); a tela só explica. Os modos que a Caixa
+// Humano mostra, ou null (toda loja: "todos" no servidor ou a API antiga).
+export function modosDaCaixaHumano(flags: Partial<Flags> | null | undefined): string[] | null {
+  const m = flags?.humano_modos
+  return Array.isArray(m) && m.length ? m : null
+}
+// "no Automático" · "no Automático ou no Copiloto".
+export function textoModosHumano(modos: string[]): string {
+  return modos.map((m) => `no ${modoInfo(m).label}`).join(' ou ')
+}
+// A loja (da barra ou do filtro) está num dos modos? Pelos canais do /resumo
+// (os do escopo da pessoa): a integração, o site ou a conta de rede com ALGUM
+// canal no modo — como a conversa sem canal no servidor. null = não dá para
+// saber (a loja do robô sem integração): a tela não afirma nada.
+export function lojaNosModos(
+  canais: Canal[] | null | undefined,
+  loja: { integration_id?: string | null; externo_ref?: string | null; rede_social_id?: string | null },
+  modos: string[],
+): boolean | null {
+  const da = (c: Canal) => (loja.integration_id
+    ? c.integration_id === loja.integration_id
+    : loja.externo_ref
+      ? !c.integration_id && c.externo_ref === loja.externo_ref
+      : loja.rede_social_id
+        ? !c.integration_id && c.rede_social_id === loja.rede_social_id
+        : false)
+  if (!loja.integration_id && !loja.externo_ref && !loja.rede_social_id) return null
+  return (canais || []).some((c) => da(c) && modos.includes(c.modo))
+}
+// Quantos canais (das lojas da pessoa) estão nos modos: zero = a Caixa
+// Humano não tem de onde vir — o vazio diz isso e aponta "Lojas e modo".
+export function canaisNosModos(canais: Canal[] | null | undefined, modos: string[]): number {
+  return (canais || []).filter((c) => modos.includes(c.modo)).length
+}
+// Alguma loja destas plataformas (o filtro da lista: "ml", "instagram,facebook")
+// tem canal nos modos? false = a Caixa Humano delas fica sempre vazia (o
+// vazio diz isso). Sem plataforma: null (não se aplica).
+export function plataformaNosModos(canais: Canal[] | null | undefined, plataformas: string[], modos: string[]): boolean | null {
+  if (!plataformas.length) return null
+  return (canais || []).some((c) => plataformas.includes(c.plataforma) && modos.includes(c.modo))
 }
 
 // ─── quem escreveu ──────────────────────────────────────────────────────────

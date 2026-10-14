@@ -244,6 +244,7 @@ import {
   envioSimulado,
   erroDaApi,
   erroEnvioLegivel,
+  faixaHumano,
   fmtData,
   fmtDataHora,
   fmtDiaHora,
@@ -251,6 +252,7 @@ import {
   limiteDe,
   linksAmazon,
   modoInfo,
+  modosDaCaixaHumano,
   motivoLegivel,
   normalizarTexto,
   origemLabel,
@@ -269,6 +271,7 @@ import {
   sellerCenterDe,
   statusDoErro,
   tamanhoDoEnvio,
+  textoModosHumano,
   usePollingVisivel,
   useRelogio,
   variasCaixas,
@@ -332,6 +335,12 @@ let geracao = 0
 
 const conversa = computed(() => detalhe.value?.conversa ?? null)
 const rascunho = computed(() => detalhe.value?.rascunho ?? null)
+// A faixa "Precisa de pessoa" (14/10/2026): a loja está fora dos modos da
+// Caixa Humano, e a conversa não aparece lá — o title diz por quê.
+const tituloForaDaCaixaHumano = computed(() => {
+  const modos = modosDaCaixaHumano(props.flags)
+  return `A loja desta conversa não está ${modos ? textoModosHumano(modos) : 'nos modos da Caixa Humano'}: ela não aparece na Caixa Humano (mude em Lojas e modo).`
+})
 
 // ─── caixa de resposta ──────────────────────────────────────────────────────
 const texto = ref('')
@@ -2548,16 +2557,19 @@ watch(() => props.conversaId, (novo, velho) => {
           </div>
         </div>
 
-        <!-- Caixa Humano (09/10/2026): a conversa está nela — por que a IA não
-             responde esta (os motivos da triagem; o motivo inteiro da IA, quando
-             ela sugeriu, fica no painel da sugestão). Some quando alguém responde. -->
+        <!-- Caixa Humano (09/10/2026): a conversa precisa de pessoa — por que a
+             IA não responde esta (os motivos da triagem; o motivo inteiro da IA,
+             quando ela sugeriu, fica no painel da sugestão). Some quando alguém
+             responde. Da loja fora dos modos da Caixa Humano (14/10/2026: em
+             Observar, o Duoke responde) ela não está lá: "Precisa de pessoa". -->
         <div
           v-if="conversa.humano"
           class="shrink-0 border-b border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs text-amber-900 dark:text-amber-200"
           role="note"
+          :title="conversa.humano.na_caixa === false ? tituloForaDaCaixaHumano : undefined"
           data-faixa-humano
         >
-          <UserRound class="mr-1 inline size-3.5 align-[-2px]" aria-hidden="true" /><span class="font-semibold">Caixa Humano</span> — a IA não responde esta: {{ rotulosHumano(conversa.humano).join(' · ') }}
+          <UserRound class="mr-1 inline size-3.5 align-[-2px]" aria-hidden="true" /><span class="font-semibold">{{ faixaHumano(conversa.humano).nome }}</span> — {{ faixaHumano(conversa.humano).frase }}: {{ rotulosHumano(conversa.humano).join(' · ') }}
         </div>
         <!-- faixas: bloqueio, janela, fechada, não precisa, Ag. cancelamento -->
         <!-- Conversa da reclamação/mediação (canal 'reclamacao'): só leitura POR
