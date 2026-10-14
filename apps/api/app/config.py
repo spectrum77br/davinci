@@ -525,6 +525,13 @@ class Settings(BaseSettings):
     # Caixa Humano só mostra as de IA pausada. Também precisa da leitura
     # (`atendimento_leitura_ativa`).
     atendimento_humano_ativa: bool = True
+    # Os MODOS de loja que a Caixa Humano mostra (14/10/2026, decisão do dono:
+    # "a Caixa Humano só para as lojas que estão automáticas"): códigos de
+    # `constantes.MODOS` separados por vírgula ("auto,copiloto"). Vazia (o
+    # padrão) = só `auto` — não precisa do .env. "todos" = toda loja, como
+    # antes. A TRIAGEM continua para todas as lojas: pôr outra loja no modo faz
+    # as conversas dela aparecerem na hora (`humano.modos_da_caixa`).
+    atendimento_humano_modos: str = ""
     # Envio AUTOMÁTICO. Só vale para canal em modo `auto` e categoria liberada
     # nele — os três precisam concordar.
     atendimento_auto_ativo: bool = False

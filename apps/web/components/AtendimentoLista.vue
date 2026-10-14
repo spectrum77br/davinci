@@ -99,16 +99,29 @@ export function filtroPadrao(caixa: string | null | undefined): string {
 // plataforma ou o total); o menu Filtrar continua (sem os números, que são
 // da Caixa). Toda linha que está na Caixa Humano — também na Caixa — leva o
 // chip âmbar com o motivo (o primeiro; todos no title).
+// SÓ AS LOJAS NO AUTOMÁTICO (14/10/2026, decisão do dono): o servidor filtra a
+// Caixa Humano pelos modos de `flags.humano_modos`; aqui, a explicação no
+// topo e o vazio que diz quando nenhuma loja (ou a loja, ou a plataforma
+// escolhida) está no modo, com o link para "Lojas e modo". O chip na Caixa
+// continua em toda loja (a quem responde pelo Duoke, diz por que a IA não
+// responderia); fora dos modos (`humano.na_caixa` false) ele diz "Precisa de
+// pessoa", não "Caixa Humano" (`faixaHumano`).
 import { onClickOutside } from '@vueuse/core'
 import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PackageX, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
 import { ETIQUETAS_INFO, faixaDaEtiqueta, secundariasDe } from '~/components/AtendimentoEtiqueta.vue'
+import { plataformasDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 import {
   canaisDa,
+  canaisNosModos,
   canalLabel,
   chipHumano,
   horaLista,
+  lojaNosModos,
+  modosDaCaixaHumano,
   plataformaInfo,
+  plataformaNosModos,
   prazoDe,
+  textoModosHumano,
   variasCaixas,
   type ConversaResumo,
   type Resumo,
@@ -134,6 +147,8 @@ const emit = defineEmits<{
   (e: 'selecionar', id: string): void
   (e: 'carregarMais'): void
   (e: 'recarregar'): void
+  // O vazio da Caixa Humano sem loja no modo: abre a aba "Lojas e modo".
+  (e: 'abrirAba', aba: string): void
 }>()
 
 // A lista Ag. cancelamento (item 4, fase 4b): pelo pedido, não pela conversa.
@@ -377,9 +392,39 @@ function selo(sel: boolean, cls: string) {
   return sel ? 'bg-white/20 text-current' : cls
 }
 
-// A Caixa Humano vazia: sem filtro nenhum, a boa notícia; com filtro, o de
-// sempre (com a busca, "nada encontrado").
+// Os modos da Caixa Humano (null = toda loja: "todos" ou a API antiga).
+const modosHumano = computed(() => modosDaCaixaHumano(props.resumo?.flags))
+const dicaHumano = computed(() => (modosHumano.value
+  ? `Só as lojas ${textoModosHumano(modosHumano.value)}: o que a IA não pode responder e falta responder — respondeu, sai daqui.`
+  : 'Só o que a IA não pode responder e falta responder — respondeu, sai daqui.'))
+// Nenhum canal das lojas da pessoa no modo: a Caixa Humano não tem de onde vir.
+const semLojaNosModos = computed(() => !!props.resumo && !!modosHumano.value && canaisNosModos(props.resumo.canais, modosHumano.value) === 0)
+// A loja escolhida na barra está fora dos modos (a do robô: não dá para saber).
+const lojaForaDosModos = computed(() => {
+  const f = filtros.value
+  if (!props.resumo || !modosHumano.value) return false
+  return lojaNosModos(props.resumo.canais, f, modosHumano.value) === false
+})
+// A plataforma escolhida (no topo ou pela barra: `filtros.plataforma`, que
+// vai para a API) sem loja nos modos: a Caixa Humano dela fica sempre vazia
+// — hoje ML, TikTok, Magalu e Amazon, que o Duoke responde. '' = não é o caso;
+// senão "do Mercado Livre" (para a frase do vazio).
+const plataformaForaDosModos = computed(() => {
+  const modos = modosHumano.value
+  const ps = plataformasDoValor(filtros.value.plataforma)
+  if (!props.resumo || !modos || plataformaNosModos(props.resumo.canais, ps, modos) !== false) return ''
+  return ps.map((p) => plataformaInfo(p).de).join(' ou ')
+})
+// A Caixa Humano vazia: sem loja no modo (nenhuma, a loja escolhida ou a
+// plataforma escolhida), isso (e o link para "Lojas e modo"); sem filtro
+// nenhum, a boa notícia; com filtro, o de sempre (com a busca, "nada
+// encontrado").
+const foraDosModos = computed(() => semLojaNosModos.value || lojaForaDosModos.value || !!plataformaForaDosModos.value)
 const textoVazioHumano = computed(() => {
+  const modos = modosHumano.value
+  if (modos && semLojaNosModos.value) return `Nenhuma loja está ${textoModosHumano(modos)} — a Caixa Humano só mostra as lojas ${textoModosHumano(modos)}.`
+  if (modos && lojaForaDosModos.value) return `Esta loja não está ${textoModosHumano(modos)} — a Caixa Humano só mostra as lojas ${textoModosHumano(modos)}.`
+  if (modos && plataformaForaDosModos.value) return `Nenhuma loja ${plataformaForaDosModos.value} está ${textoModosHumano(modos)} — a Caixa Humano só mostra as lojas ${textoModosHumano(modos)}.`
   if (filtros.value.q) return 'Nada encontrado para essa busca na Caixa Humano.'
   if (filtros.value.filtro === padrao.value) return 'Nada esperando uma pessoa agora — o que a IA não puder responder aparece aqui.'
   return 'Nenhuma conversa na Caixa Humano com esses filtros.'
@@ -478,7 +523,7 @@ function mover(delta: number) {
         <div
           v-if="emHumano"
           class="flex min-w-0 flex-1 items-center gap-1 pb-1.5 text-xs font-medium text-primary"
-          title="Só o que falta responder e a IA não pode responder (reclamação, devolução, pediu atendente, assunto de dinheiro ou direito…) — respondeu, sai daqui"
+          :title="`Só o que falta responder e a IA não pode responder (reclamação, devolução, pediu atendente, assunto de dinheiro ou direito…)${modosHumano ? `, nas lojas ${textoModosHumano(modosHumano)}` : ''} — respondeu, sai daqui`"
           data-titulo-humano
         >
           <UserRound class="size-3.5 shrink-0" aria-hidden="true" />
@@ -562,7 +607,7 @@ function mover(delta: number) {
       </div>
       <!-- Caixa Humano: o que é, numa linha; e o aviso quando a triagem está desligada no servidor -->
       <p v-if="emHumano" class="text-[11px] leading-snug text-muted-foreground" data-dica-humano>
-        Só o que a IA não pode responder e falta responder — respondeu, sai daqui.
+        {{ dicaHumano }}
         <span v-if="resumo?.flags?.humano_ativa === false" class="block text-amber-700 dark:text-amber-300" data-humano-desligada>
           A triagem está desligada no servidor: aqui só aparecem as conversas com a IA pausada.
         </span>
@@ -596,6 +641,9 @@ function mover(delta: number) {
       <div v-else-if="!itens.length && !erro" class="px-4 py-10 text-center text-sm text-muted-foreground">
         <component :is="emHumano ? UserRound : Inbox" class="mx-auto mb-2 size-6 opacity-60" />
         {{ emHumano ? textoVazioHumano : textoVazio }}
+        <div v-if="emHumano && foraDosModos" class="mt-2">
+          <button type="button" class="text-xs underline" data-abrir-lojas @click="emit('abrirAba', 'lojas')">ver em Lojas e modo</button>
+        </div>
         <div v-if="filtros.filtro !== padrao" class="mt-2">
           <button type="button" class="text-xs underline" @click="mudar('filtro', padrao)">{{ emHumano ? 'tirar o filtro' : 'ver todas' }}</button>
         </div>

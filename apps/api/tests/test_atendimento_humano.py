@@ -14,6 +14,10 @@
   perdida que conserta sozinha;
 - a API: `?caixa=humano`, o `humano` da linha e do detalhe, a contagem do
   /resumo, sair da caixa quando a pessoa responde, o escopo por equipe;
+- só as lojas no Automático (14/10/2026): a loja em Observar fica fora da
+  lista e dos números (mas é triada e leva o chip), a conversa sem canal
+  entra pela integração, "todos" volta o de antes. As lojas de teste nascem
+  em `auto` (`_loja_db`) — é onde a Caixa Humano mostra;
 - o cron (interruptores, registro no worker) e o script (seco não grava).
 
 O contexto do pedido entra falso (pelo contrato de `contexto.contexto_da_conversa`),
@@ -29,7 +33,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, text, update
+from sqlalchemy import event, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.db as _db
@@ -428,7 +432,11 @@ def test_para_tela():
         "rotulos": ["IA pausada"],
         "assuntos": [],
         "assuntos_rotulos": [],
+        "na_caixa": True,
     }
+    # A loja fora dos modos da Caixa Humano (14/10/2026): o chip só informa.
+    assert humano.para_tela({}, ia_pausada=True, na_caixa=False)["na_caixa"] is False
+    assert humano.para_tela(None, ia_pausada=True, na_caixa=False) is None
     cache = {"motivos": ["reclamacao", "assunto"], "assuntos": ["garantia"], "turno": 1}
     tela = humano.para_tela(cache, ia_pausada=False)
     assert tela["rotulos"] == ["Reclamação aberta", "Assunto só de pessoa"]
@@ -436,6 +444,75 @@ def test_para_tela():
     # Lixo no cache não derruba a linha.
     assert humano.para_tela({"motivos": "x"}, ia_pausada=False)["motivos"] == []
     assert humano.para_tela({"motivos": ["novo"]}, ia_pausada=False)["rotulos"] == ["novo"]
+
+
+@pytest.mark.parametrize(
+    ("valor", "modos"),
+    [
+        # Vazia = a decisão do dono (14/10/2026): só as lojas no Automático.
+        ("", ("auto",)),
+        ("  ", ("auto",)),
+        ("auto", ("auto",)),
+        (" Auto , COPILOTO,auto ", ("auto", "copiloto")),
+        ("humano,copiloto", ("humano", "copiloto")),
+        # "todos" = toda loja, como antes de 14/10/2026.
+        ("todos", None),
+        ("auto, Todos", None),
+        # Erro de digitação não esvazia a Caixa Humano: volta ao padrão.
+        ("automatico", ("auto",)),
+        ("automatico,copiloto", ("copiloto",)),
+        (",,", ("auto",)),
+    ],
+)
+def test_modos_da_caixa(valor, modos):
+    assert humano.modos_da_caixa(valor) == modos
+
+
+def test_modos_da_caixa_le_a_chave_e_nasce_so_auto(monkeypatch):
+    from app.config import Settings
+
+    # Sem a chave no .env, o deploy já entrega a decisão do dono.
+    assert Settings.model_fields["atendimento_humano_modos"].default == ""
+    assert humano.MODOS_PADRAO == ("auto",)
+    s = get_settings()
+    monkeypatch.setattr(s, "atendimento_humano_modos", "")
+    assert humano.modos_da_caixa() == ("auto",)
+    monkeypatch.setattr(s, "atendimento_humano_modos", "copiloto")
+    assert humano.modos_da_caixa() == ("copiloto",)
+    monkeypatch.setattr(s, "atendimento_humano_modos", "todos")
+    assert humano.modos_da_caixa() is None
+
+
+def test_lojas_da_caixa_puras_e_sem_subconsulta():
+    """A loja da conversa (`LojasDaCaixa.tem`) e o SQL dela: os ids como VALORES —
+    a subconsulta de canais mais que triplicava as funções que o JIT do /resumo compila."""
+    from sqlalchemy.dialects import postgresql
+
+    canal, integ, outra = uuid4(), uuid4(), uuid4()
+    lojas = humano.LojasDaCaixa(canais=frozenset({canal}), integracoes=frozenset({integ}))
+    assert lojas.tem(canal, integ) is True
+    # Com canal vale o modo DELE, mesmo com a integração no modo (o ML: dois canais).
+    assert lojas.tem(uuid4(), integ) is False
+    # Sem canal: a integração com algum canal no modo.
+    assert lojas.tem(None, integ) is True
+    assert lojas.tem(None, outra) is False
+    assert lojas.tem(None, None) is False
+    # "todos" (None) = sempre.
+    assert humano.na_caixa_da_loja(None, None, None) is True
+    assert humano.na_caixa_da_loja(lojas, None, outra) is False
+
+    def sql(expr) -> str:
+        return str(expr.compile(dialect=postgresql.dialect())).lower()
+
+    texto = sql(humano.loja_no_modo_sql(lojas))
+    assert "select" not in texto and "atendimento_canais" not in texto, texto
+    assert "canal_id in" in texto and "integration_id in" in texto
+    # Nenhuma loja no modo: falso (a Caixa Humano vazia), sem `IN ()`.
+    assert sql(humano.loja_no_modo_sql(humano.LojasDaCaixa())) == "false"
+    assert sql(humano.loja_no_modo_sql(None)) == "true"
+    # O canal do robô (sem integração) no modo: só o ramo do canal.
+    so_canal = sql(humano.loja_no_modo_sql(humano.LojasDaCaixa(canais=frozenset({canal}))))
+    assert "canal_id in" in so_canal and "integration_id" not in so_canal
 
 
 # ─────────────── banco: fábrica ───────────────
@@ -459,6 +536,8 @@ def _chaves(monkeypatch):
         "atendimento_simulador",
     ):
         monkeypatch.setattr(s, nome, False)
+    # Os modos da Caixa Humano: o padrão (só `auto`), qualquer que seja o .env.
+    monkeypatch.setattr(s, "atendimento_humano_modos", "")
     return s
 
 
@@ -482,8 +561,9 @@ async def pessoa(make_user, auth_as) -> User:
 
 
 async def _loja_db(
-    db: AsyncSession, dono: User, nome: str = "kfa"
+    db: AsyncSession, dono: User, nome: str = "kfa", *, modo: str = "auto"
 ) -> tuple[Integration, AtendimentoCanal]:
+    """A loja Shopee com o canal de chat — no Automático: a Caixa Humano só mostra essas."""
     integ = Integration(
         user_id=dono.id,
         platform=IntegrationPlatform.SHOPEE,
@@ -493,7 +573,7 @@ async def _loja_db(
     db.add(integ)
     await db.flush()
     canal = AtendimentoCanal(
-        integration_id=integ.id, plataforma="shopee", canal="chat", modo="observar", status="ok"
+        integration_id=integ.id, plataforma="shopee", canal="chat", modo=modo, status="ok"
     )
     db.add(canal)
     await db.commit()
@@ -618,6 +698,7 @@ async def test_rodada_grava_so_a_chave_e_a_api_mostra(client, db, make_user, pes
         "rotulos": ["Assunto só de pessoa"],
         "assuntos": ["cancelamento"],
         "assuntos_rotulos": ["Cancelamento"],
+        "na_caixa": True,
     }
     # Junto com o filtro do prazo ("Falta responder") e com a busca.
     r = await client.get(f"{URL}/conversas", params={"caixa": "humano", "filtro": "aguardando"})
@@ -1030,8 +1111,9 @@ async def test_rodada_pula_a_que_mudou_e_segue_depois_de_falha(db, make_user, mo
     assert (await _cache(db, b))["motivos"] == ["assunto"]
     async with _db.SessionLocal() as s:
         assert await humano.desatualizadas(s) == []
+        lojas = await humano.lojas_da_caixa(s, humano.modos_da_caixa())
         na_caixa = (
-            (await s.execute(select(AtendimentoConversa.id).where(humano.caixa_humano_sql())))
+            (await s.execute(select(AtendimentoConversa.id).where(humano.caixa_humano_sql(lojas))))
             .scalars()
             .all()
         )
@@ -1122,6 +1204,153 @@ async def test_direct_do_instagram_fica_fora_da_caixa_humano(client, db, make_us
     assert _ids(await client.get(f"{URL}/conversas", params={"caixa": "humano"})) == []
 
 
+# ─────────────── só as lojas no Automático (14/10/2026) ───────────────
+
+
+async def test_so_as_lojas_no_automatico(client, db, make_user, pessoa, ctx_falso, _chaves):
+    """O dono: "a Caixa Humano só para as lojas que estão automáticas" — a loja em
+    Observar (o Duoke responde) fica fora da lista e dos números, mas continua
+    triada (e com o chip na Caixa); pôr a loja no modo a traz na hora."""
+    dono = await make_user()
+    kia, canal_kia = await _loja_db(db, dono, "kia")
+    outra, canal_outra = await _loja_db(db, dono, "outra", modo="observar")
+    # O ML: dois canais na mesma conta, cada um no seu modo.
+    ml = Integration(
+        user_id=dono.id,
+        platform=IntegrationPlatform.ML,
+        name="poofy",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
+    db.add(ml)
+    await db.flush()
+    pergunta = AtendimentoCanal(
+        integration_id=ml.id, plataforma="ml", canal="pergunta", modo="auto", status="ok"
+    )
+    pos_venda = AtendimentoCanal(
+        integration_id=ml.id, plataforma="ml", canal="pos_venda", modo="observar", status="ok"
+    )
+    db.add_all([pergunta, pos_venda])
+    await db.commit()
+
+    texto = "quero falar com um atendente"
+    no_auto = await _conversa(db, kia, canal_kia, "A", texto)
+    no_observar = await _conversa(db, outra, canal_outra, "O", texto)
+    # Sem canal (a reclamação não tem caixa na plataforma): vale a integração.
+    recl_auto = await _conversa(db, kia, None, "RA", texto, canal_nome="reclamacao")
+    recl_observar = await _conversa(db, outra, None, "RO", texto, canal_nome="reclamacao")
+    # Sem canal e sem integração (loja apagada, Amazon sem conta): loja nenhuma.
+    orfa = await _conversa(db, None, None, "X", texto)
+    ml_pergunta = await _conversa(
+        db, ml, pergunta, "MP", texto, canal_nome="pergunta", plataforma="ml", pedido=None
+    )
+    ml_pos = await _conversa(
+        db, ml, pos_venda, "MV", texto, canal_nome="pos_venda", plataforma="ml"
+    )
+    # O canal do ML no Automático basta para a reclamação sem canal da conta.
+    ml_recl = await _conversa(db, ml, None, "MR", texto, canal_nome="reclamacao", plataforma="ml")
+    assert (recl_auto.canal_id, recl_auto.integration_id) == (None, kia.id)
+    assert (orfa.canal_id, orfa.integration_id) == (None, None)
+    todas = [no_auto, no_observar, recl_auto, recl_observar, orfa, ml_pergunta, ml_pos, ml_recl]
+
+    # A TRIAGEM continua para todas as lojas — também as em Observar.
+    resumo = await _recalcular()
+    assert (resumo["gravadas"], resumo["na_caixa"]) == (8, 8)
+    for c in todas:
+        assert "atendente" in (await _cache(db, c))["motivos"], c.externo_id
+
+    na_caixa = {str(c.id) for c in (no_auto, recl_auto, ml_pergunta, ml_recl)}
+
+    async def caixa_humano() -> set[str]:
+        return set(_ids(await client.get(f"{URL}/conversas", params={"caixa": "humano"})))
+
+    assert await caixa_humano() == na_caixa
+    # O /resumo: sem JIT e com os canais do modo como VALORES na consulta
+    # grande — a subconsulta fazia o JIT do Postgres custar +180 ms (14/10/2026).
+    comandos: list[str] = []
+
+    def _antes(_conn, _cursor, comando, *_a, **_kw) -> None:
+        comandos.append(comando)
+
+    motor = _db.engine.sync_engine
+    event.listen(motor, "before_cursor_execute", _antes)
+    try:
+        res = (await client.get(f"{URL}/resumo")).json()
+    finally:
+        event.remove(motor, "before_cursor_execute", _antes)
+    contagens = [i for i, q in enumerate(comandos) if "FILTER (WHERE" in q]
+    assert contagens, comandos
+    assert all("atendimento_canais" not in comandos[i] for i in contagens)
+    jit = [i for i, q in enumerate(comandos) if q.strip().upper() == "SET LOCAL JIT = OFF"]
+    assert jit and jit[0] < contagens[0], comandos
+    assert res["humano"] == 4
+    assert res["flags"]["humano_modos"] == ["auto"]
+    por_plat = {p["plataforma"]: p["humano"] for p in res["plataformas"]}
+    assert (por_plat["shopee"], por_plat["ml"]) == (2, 2)
+    # A barra de lojas: a loja em Observar fica com zero (sem bolinha na tela).
+    por_loja = {lj["conta"]: lj["humano"] for lj in res["lojas"] if lj["integration_id"]}
+    assert por_loja == {"kia": 2, "outra": 0, "poofy": 2}
+    # A loja escolhida na barra: a em Observar, vazia.
+    r = await client.get(
+        f"{URL}/conversas", params={"caixa": "humano", "integration_id": str(outra.id)}
+    )
+    assert _ids(r) == []
+
+    # O chip na Caixa e a faixa na conversa continuam em TODA loja (informação);
+    # o `na_caixa` diz se ela está na Caixa Humano (a tela: "Caixa Humano" ou
+    # só "Precisa de pessoa").
+    itens = {i["id"]: i for i in (await client.get(f"{URL}/conversas")).json()["itens"]}
+    assert itens[str(no_observar.id)]["humano"]["motivos"] == ["atendente"]
+    assert itens[str(orfa.id)]["humano"]["motivos"] == ["atendente"]
+    assert {i for i, linha in itens.items() if (linha["humano"] or {}).get("na_caixa")} == na_caixa
+    assert not itens[str(ml_pos.id)]["humano"]["na_caixa"]  # o canal em Observar do ML
+    r = await client.get(f"{URL}/conversas", params={"caixa": "humano"})
+    assert all(linha["humano"]["na_caixa"] for linha in r.json()["itens"])
+    d = (await client.get(f"{URL}/conversas/{no_observar.id}")).json()
+    assert d["conversa"]["humano"]["motivos"] == ["atendente"]
+    assert d["conversa"]["humano"]["na_caixa"] is False
+    d = (await client.get(f"{URL}/conversas/{recl_auto.id}")).json()
+    assert d["conversa"]["humano"]["na_caixa"] is True
+
+    # A IA pausada na loja em Observar também não entra.
+    pausada = await _conversa(db, outra, canal_outra, "P", "Esse carregador serve no Moto G?")
+    r = await client.patch(f"{URL}/conversas/{pausada.id}", json={"ia_pausada": True})
+    assert r.status_code == 200, r.text
+    assert await caixa_humano() == na_caixa
+
+    # "todos" na chave: o comportamento de antes (toda loja, até a sem loja).
+    _chaves.atendimento_humano_modos = "todos"
+    assert await caixa_humano() == {str(c.id) for c in todas} | {str(pausada.id)}
+    res = (await client.get(f"{URL}/resumo")).json()
+    assert (res["humano"], res["flags"]["humano_modos"]) == (9, None)
+    d = (await client.get(f"{URL}/conversas/{no_observar.id}")).json()
+    assert d["conversa"]["humano"]["na_caixa"] is True
+
+    # Pôr a loja no Automático a traz NA HORA (a triagem já estava gravada).
+    _chaves.atendimento_humano_modos = ""
+    await db.execute(
+        update(AtendimentoCanal).where(AtendimentoCanal.id == canal_outra.id).values(modo="auto")
+    )
+    await db.commit()
+    assert await caixa_humano() == na_caixa | {
+        str(no_observar.id),
+        str(recl_observar.id),
+        str(pausada.id),
+    }
+    assert (await client.get(f"{URL}/resumo")).json()["humano"] == 7
+
+    # A lista de modos da chave: o Copiloto entra, o Automático sai.
+    _chaves.atendimento_humano_modos = "copiloto"
+    assert await caixa_humano() == set()
+    res = (await client.get(f"{URL}/resumo")).json()
+    assert (res["humano"], res["flags"]["humano_modos"]) == (0, ["copiloto"])
+    itens = (await client.get(f"{URL}/conversas")).json()["itens"]
+    assert not any(linha["humano"]["na_caixa"] for linha in itens if linha["humano"])
+
+    # As duas réguas do escopo continuam iguais; a do modo é só da Caixa.
+    async with _db.SessionLocal() as s:
+        assert await s.scalar(select(func.count()).where(humano.para_pessoa_sql())) == 9
+
+
 # ─────────────── o cron e o script ───────────────
 
 
@@ -1188,7 +1417,8 @@ async def test_script_seco_nao_grava_e_gravar_preenche(db, make_user, ctx_falso,
     assert await script._rodar(script._argumentos([])) == 0
     seco = json.loads(capsys.readouterr().out)
     assert seco["seco"] is True
-    assert (seco["no_escopo"], seco["na_caixa"]) == (2, 1)
+    assert seco["modos"] == ["auto"]
+    assert (seco["no_escopo"], seco["para_pessoa"], seco["na_caixa"]) == (2, 1, 1)
     assert seco["motivo_principal"] == {"shopee": {"assunto": 1}}
     assert seco["assuntos"] == {"shopee": {"troca_devolucao": 1}}
     assert await _cache(db, a) is None and await _cache(db, b) is None  # nada gravado
@@ -1198,7 +1428,9 @@ async def test_script_seco_nao_grava_e_gravar_preenche(db, make_user, ctx_falso,
     assert gravou["seco"] is False
     assert (gravou["gravadas"], gravou["rodadas"]) == (2, 3)
     assert gravou["agora"] == {
+        "modos": ["auto"],
         "no_escopo": 2,
+        "para_pessoa": 1,
         "na_caixa": 1,
         "por_plataforma": {"shopee": 1},
         "motivo_principal": {"shopee": {"assunto": 1}},

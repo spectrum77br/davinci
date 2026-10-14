@@ -80,8 +80,10 @@ OS MOTIVOS (`triar`, PURA — só códigos, `constantes.ORDEM_HUMANO`):
 O QUE NÃO É MOTIVO (fica só na Caixa): o turno só com o cartão do produto ou
 do pedido (o cliente ainda não perguntou nada), a figurinha, o MODO da loja
 (observar/humano é configuração da loja, não da pergunta — senão a Caixa
-Humano viraria cópia do "Falta responder"), ser Amazon, ou ter tido resposta
-de pessoa nas últimas 24 h (essas são travas do envio automático).
+Humano viraria cópia do "Falta responder"; o modo escolhe as LOJAS que a
+Caixa Humano mostra — "SÓ AS LOJAS NO AUTOMÁTICO", abaixo —, não os
+motivos), ser Amazon, ou ter tido resposta de pessoa nas últimas 24 h (essas
+são travas do envio automático).
 DE PROPÓSITO FORA (a diferença para o `ia._gerar`): os sinais do cartão
 "Cliente" (`cliente.cartao_cliente` — avaliou mal, reclamação aberta em
 OUTRA conversa do mesmo comprador). Ele consulta o ML ao vivo, e a régua de
@@ -89,6 +91,30 @@ desatualizada não acompanha as outras conversas do comprador; a reclamação
 DESTA conversa e a avaliação ruim DESTE pedido já entram pelo estado.
 Também não entra o assunto que só o MODELO escolheria: as pistas de texto
 (`ia.pistas_de_categoria`) são a régua — e são largas de propósito.
+
+SÓ AS LOJAS NO AUTOMÁTICO (14/10/2026, decisão do dono: "a Caixa Humano só
+para as lojas que estão automáticas"): a Caixa Humano — a lista
+`?caixa=humano`, o número da aba e os do /resumo (total, por plataforma, por
+loja) — só conta a conversa de loja num modo de `modos_da_caixa()` (padrão
+`auto`; a chave `atendimento_humano_modos` muda, "todos" = como antes). As
+lojas em `observar` o Duoke responde: a Caixa Humano delas era cópia do
+trabalho de lá (115 conversas, a aba em 99+). QUAL LOJA (`LojasDaCaixa.tem`
+e `loja_no_modo_sql`): a conversa com canal vale pelo modo DELE; a sem canal
+(reclamação, avaliação — a plataforma não tem caixa para elas) vale se ALGUM
+canal da mesma integração está no modo; sem canal e sem integração (Amazon
+sem conta, loja apagada), não entra. Os canais e as integrações no modo são
+lidos UMA vez por pedido (`lojas_da_caixa`, ~85 canais) e vão como lista na
+consulta — não como subconsulta: o /resumo já passava do custo em que o
+Postgres liga o JIT, e os dois `IN (SELECT …)` mais que triplicavam as
+funções que o JIT compila (+180 ms ou mais em produção, a cada 30 s em cada
+aba aberta). O /resumo também roda sem JIT (`SET LOCAL jit = off`, no router).
+A TRIAGEM não muda (o cron tria todas as lojas): pôr a loja no Automático
+faz as conversas dela aparecerem na hora, sem esperar rodada. E o CHIP do
+motivo na Caixa (`triagem_da_linha_sql`) e a faixa na conversa continuam em
+TODA loja: dizem a quem responde pelo Duoke por que a IA não responderia ali
+— informação, não fila; só a Caixa Humano filtra. O `humano.na_caixa` da
+linha diz se ela está na Caixa Humano: fora (loja fora dos modos), a tela
+escreve "Precisa de pessoa", não "Caixa Humano".
 
 ONDE FICA: `atendimento_conversas.dados.humano` =
     {"v": VERSAO, "turno": <epoch de ultima_do_cliente_em (ou da criação)>,
@@ -150,6 +176,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    true,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -158,7 +185,12 @@ from sqlalchemy.orm import aliased
 
 import app.db as _db
 from app.config import get_settings
-from app.models import AtendimentoConversa, AtendimentoMensagem, AtendimentoRascunho
+from app.models import (
+    AtendimentoCanal,
+    AtendimentoConversa,
+    AtendimentoMensagem,
+    AtendimentoRascunho,
+)
 from app.redis_client import redis
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ia, separa_email
@@ -190,6 +222,8 @@ from app.services.atendimento.constantes import (
     HUMANO_RECLAMACAO,
     HUMANO_SEM_DADO,
     HUMANO_SO_ANEXO,
+    MODO_AUTO,
+    MODOS,
     MOTIVO_EMAIL_SO_PESSOA,
     NOTA_BAIXA_AVALIACAO,
     ORDEM_HUMANO,
@@ -220,6 +254,11 @@ ORCAMENTO_S = 90.0
 # Trava da rodada (por schema). Folga sobre o `timeout` do cron.
 RODADA_TTL_S = 150
 _CHAVE_RODADA = "atendimento:humano:rodada:{}"
+# Os modos de loja que a Caixa Humano mostra quando a chave
+# `atendimento_humano_modos` está vazia (14/10/2026, decisão do dono: só as
+# lojas no Automático). "todos" na chave = toda loja (como antes).
+MODOS_PADRAO: tuple[str, ...] = (MODO_AUTO,)
+MODOS_TODOS = "todos"
 
 # O anexo "de verdade" (não o cartão do produto/pedido, não a figurinha — que
 # a leitura grava com o rótulo como texto).
@@ -430,12 +469,14 @@ def triar(
     return Triagem(motivos=tuple(m for m in ORDEM_HUMANO if m in motivos), assuntos=tuple(assuntos))
 
 
-def para_tela(cache: Any, *, ia_pausada: bool) -> dict[str, list[str]] | None:
+def para_tela(cache: Any, *, ia_pausada: bool, na_caixa: bool = True) -> dict[str, Any] | None:
     """O `humano` da linha da lista/detalhe a partir do que a consulta trouxe. PURA.
 
-    `cache` = `triagem_da_linha_sql()`: None = fora da Caixa Humano; `{}` =
-    dentro só pela IA pausada (o cálculo gravado é de outro turno); senão o
-    `dados.humano` do turno atual.
+    `cache` = `triagem_da_linha_sql()`: None = não precisa de pessoa; `{}` =
+    precisa só pela IA pausada (o cálculo gravado é de outro turno); senão o
+    `dados.humano` do turno atual. `na_caixa` = a loja da conversa está nos
+    modos da Caixa Humano (`LojasDaCaixa.tem`): False = o chip informa, mas a
+    conversa não está na Caixa Humano (a loja em Observar, que o Duoke responde).
     """
     if cache is None:
         return None
@@ -449,6 +490,7 @@ def para_tela(cache: Any, *, ia_pausada: bool) -> dict[str, list[str]] | None:
         "rotulos": [rotulo_humano(m) for m in motivos],
         "assuntos": assuntos,
         "assuntos_rotulos": [CATEGORIAS_INFO.get(a, (a, ""))[0] for a in assuntos],
+        "na_caixa": bool(na_caixa),
     }
 
 
@@ -456,6 +498,24 @@ def _lista(valor: Any) -> list[str]:
     if not isinstance(valor, list):
         return []
     return list(dict.fromkeys(v for v in valor if isinstance(v, str) and v))
+
+
+def modos_da_caixa(valor: str | None = None) -> tuple[str, ...] | None:
+    """Os modos de loja que a Caixa Humano mostra; None = toda loja ("todos"). PURA.
+
+    `valor` = a chave `atendimento_humano_modos` (None = lê a de agora): códigos
+    de `constantes.MODOS` separados por vírgula, sem diferença de maiúscula.
+    Vazia, ou só com código que não existe (erro de digitação), = o padrão
+    (`MODOS_PADRAO`, a decisão do dono) — nunca uma Caixa Humano vazia por
+    engano. "todos" em qualquer posição = sem filtro.
+    """
+    if valor is None:
+        valor = get_settings().atendimento_humano_modos
+    partes = [p.strip().lower() for p in (valor or "").split(",") if p.strip()]
+    if MODOS_TODOS in partes:
+        return None
+    validos = tuple(dict.fromkeys(p for p in partes if p in MODOS))
+    return validos or MODOS_PADRAO
 
 
 # ── SQL (lista, /resumo, detalhe e o cron) ────────────────────────────────
@@ -501,12 +561,13 @@ def triada_sql():
     return func.coalesce(_campo("turno") == turno_sql(), false())
 
 
-def caixa_humano_sql():
-    """A conversa está na Caixa Humano AGORA? Nunca NULL — lista, /resumo e detalhe.
+def para_pessoa_sql():
+    """A conversa precisa de PESSOA agora, em qualquer loja? Nunca NULL — o chip e a faixa.
 
     No escopo E (o cálculo do turno atual tem motivo OU a IA está pausada —
     menos na bloqueada, que só entra pelo estado). Sem conversão de tipo que
-    possa dar erro: chave ausente vira NULL = não.
+    possa dar erro: chave ausente vira NULL = não. É a Caixa Humano SEM o
+    filtro das lojas (`caixa_humano_sql`).
     """
     c = AtendimentoConversa
     com_motivo = and_(triada_sql(), func.coalesce(_campo("motivos") != _JSON_LISTA_VAZIA, false()))
@@ -514,11 +575,106 @@ def caixa_humano_sql():
     return and_(escopo_sql(), or_(com_motivo, pausada))
 
 
+@dataclass(frozen=True)
+class LojasDaCaixa:
+    """As lojas nos modos da Caixa Humano, lidas UMA vez por pedido (`lojas_da_caixa`).
+
+    `canais` = os canais num dos modos; `integracoes` = as integrações com
+    ALGUM canal num dos modos (a conversa sem canal vale por elas). Ver "SÓ
+    AS LOJAS NO AUTOMÁTICO" no topo.
+    """
+
+    canais: frozenset[UUID] = frozenset()
+    integracoes: frozenset[UUID] = frozenset()
+
+    def tem(self, canal_id: UUID | None, integration_id: UUID | None) -> bool:
+        """A loja desta conversa está num dos modos? PURA — a gêmea de `loja_no_modo_sql`.
+
+        Com canal: o modo DELE (o ML tem dois canais por conta, cada um no seu
+        modo). Sem canal (a reclamação e a avaliação não têm caixa na
+        plataforma): algum canal da MESMA integração no modo. Sem os dois, não.
+        """
+        if canal_id is not None:
+            return canal_id in self.canais
+        return integration_id is not None and integration_id in self.integracoes
+
+
+async def lojas_da_caixa(
+    session: AsyncSession, modos: Collection[str] | None
+) -> LojasDaCaixa | None:
+    """Os canais e as integrações nos `modos` (`modos_da_caixa()`); None = toda loja ("todos").
+
+    Uma consulta pequena (os ~85 canais, pelo `modo`) antes da consulta
+    grande: a lista vai como valores para `loja_no_modo_sql` — com
+    subconsulta, o /resumo pagava o JIT a mais (ver o topo).
+    """
+    if modos is None:
+        return None
+    k = AtendimentoCanal
+    consulta = select(k.id, k.integration_id).where(k.modo.in_(tuple(modos)))
+    linhas = (await session.execute(consulta)).all()
+    return LojasDaCaixa(
+        canais=frozenset(i for i, _ in linhas),
+        # O canal do robô (Temu/AliExpress) não tem integração: nada a juntar.
+        integracoes=frozenset(integ for _, integ in linhas if integ is not None),
+    )
+
+
+def na_caixa_da_loja(
+    lojas: LojasDaCaixa | None, canal_id: UUID | None, integration_id: UUID | None
+) -> bool:
+    """`LojasDaCaixa.tem`, com None ("todos") = sempre. PURA — o `humano.na_caixa` da linha."""
+    return True if lojas is None else lojas.tem(canal_id, integration_id)
+
+
+def loja_no_modo_sql(lojas: LojasDaCaixa | None):
+    """A LOJA da conversa está nos modos (`LojasDaCaixa.tem`, em SQL)? Nunca NULL.
+
+    `lojas=None` ("todos") = sempre. Os ids vão como VALORES (`IN ($1, …)`),
+    lidos antes por `lojas_da_caixa` — nada de subconsulta aqui: o /resumo
+    já passa do custo em que o Postgres liga o JIT, e cada `IN (SELECT …)`
+    era um SubPlan a mais para compilar (+180 ms medidos em produção). Fica
+    no FIM do AND de `caixa_humano_sql`: só a conversa que já passou pelo
+    escopo e pelos motivos chega aqui.
+    """
+    if lojas is None:
+        return true()
+    c = AtendimentoConversa
+    partes = []
+    # Ordenados: o mesmo texto de SQL a cada pedido (o cache de comandos).
+    if lojas.canais:
+        partes.append(c.canal_id.in_(sorted(lojas.canais)))
+    if lojas.integracoes:
+        partes.append(and_(c.canal_id.is_(None), c.integration_id.in_(sorted(lojas.integracoes))))
+    if not partes:
+        # Nenhuma loja no modo: a Caixa Humano fica vazia (a tela explica).
+        return false()
+    # `NULL IN (…)` é NULL: o coalesce garante o "nunca NULL" (o `count FILTER`).
+    return func.coalesce(or_(*partes), false())
+
+
+def caixa_humano_sql(lojas: LojasDaCaixa | None):
+    """A conversa está na Caixa Humano AGORA? Nunca NULL — lista, /resumo e `contar`.
+
+    Precisa de pessoa (`para_pessoa_sql`) E a loja está num modo da Caixa
+    Humano (`loja_no_modo_sql`). `lojas` = `await lojas_da_caixa(session,
+    modos_da_caixa())` — obrigatório de propósito: esquecer não pode virar
+    "toda loja" sem ninguém ver.
+    """
+    return and_(para_pessoa_sql(), loja_no_modo_sql(lojas))
+
+
 def triagem_da_linha_sql():
-    """O que a linha leva para `para_tela`: NULL fora; `{}` só pela IA pausada; o cache."""
+    """O que a linha leva para `para_tela`: NULL fora; `{}` só pela IA pausada; o cache.
+
+    Pela régua SEM o filtro das lojas (`para_pessoa_sql`): o chip na Caixa e
+    a faixa na conversa valem em TODA loja — na loja em Observar, quem
+    responde pelo Duoke vê por que a IA não responderia. Na lista
+    `?caixa=humano` toda linha já passou por `caixa_humano_sql`.
+    """
     return case(
         (
-            caixa_humano_sql(),
+            para_pessoa_sql(),
             case((triada_sql(), AtendimentoConversa.dados[CHAVE]), else_=_JSON_OBJETO_VAZIO),
         ),
         else_=null(),
@@ -826,16 +982,28 @@ async def simular(*, limite: int | None = None) -> dict[str, Any]:
     É o "seco" do `scripts/atendimento_humano_recalcular.py`: mostra quantas
     entrariam na Caixa Humano, por plataforma e por motivo, antes de gravar.
     Nada de comprador (nem nome, nem nº de pedido, nem texto).
+    `na_caixa` = as que a Caixa Humano mostraria (só as lojas dos `modos`);
+    `para_pessoa` = as que a régua manda para pessoa em TODA loja (a triagem
+    vale para todas). Os motivos e assuntos são da régua: todas as lojas.
     """
     c = AtendimentoConversa
+    modos = modos_da_caixa()
     contagem: dict[str, Counter[str]] = defaultdict(Counter)
     principal: dict[str, Counter[str]] = defaultdict(Counter)
     assuntos: dict[str, Counter[str]] = defaultdict(Counter)
     quantos: Counter[int] = Counter()
-    resumo: dict[str, Any] = {"seco": True, "no_escopo": 0, "na_caixa": 0, "falhas": 0}
+    resumo: dict[str, Any] = {
+        "seco": True,
+        "modos": list(modos) if modos is not None else MODOS_TODOS,
+        "no_escopo": 0,
+        "para_pessoa": 0,
+        "na_caixa": 0,
+        "falhas": 0,
+    }
     async with _db.SessionLocal() as session:
         await session.execute(text("SET TRANSACTION READ ONLY"))
         so_humano = await assuntos_so_humano(session)
+        lojas = await lojas_da_caixa(session, modos)
         consulta = (
             select(c).where(escopo_sql()).order_by(c.prazo_resposta_em.asc().nulls_last(), c.id)
         )
@@ -863,8 +1031,11 @@ async def simular(*, limite: int | None = None) -> dict[str, Any]:
             quantos[len(motivos)] += 1
             if not motivos:
                 continue
-            resumo["na_caixa"] += 1
-            contagem[p]["na_caixa"] += 1
+            resumo["para_pessoa"] += 1
+            contagem[p]["para_pessoa"] += 1
+            if na_caixa_da_loja(lojas, conversa.canal_id, conversa.integration_id):
+                resumo["na_caixa"] += 1
+                contagem[p]["na_caixa"] += 1
             principal[p][motivos[0]] += 1
             for m in motivos:
                 contagem[p][f"motivo:{m}"] += 1
@@ -909,8 +1080,14 @@ async def preencher(*, lote: int = MAX_POR_RODADA, max_rodadas: int = 50) -> dic
 
 
 async def contar(session: AsyncSession) -> dict[str, Any]:
-    """Quantas estão na Caixa Humano agora, por plataforma e pelo motivo principal. Só contagens."""
+    """Quantas estão na Caixa Humano agora, por plataforma e pelo motivo principal. Só contagens.
+
+    `na_caixa` (e os detalhes) = o número da tela: só as lojas dos `modos`;
+    `para_pessoa` = a régua em TODA loja (o que a Caixa Humano mostraria com
+    "todos").
+    """
     c = AtendimentoConversa
+    modos = modos_da_caixa()
     # Rótulo: o GROUP BY vai pelo nome (a expressão repetida teria outros
     # parâmetros e o Postgres não a reconheceria como a mesma).
     motivo = case((triada_sql(), c.dados[(CHAVE, "motivos", "0")].astext), else_=None).label(
@@ -919,7 +1096,7 @@ async def contar(session: AsyncSession) -> dict[str, Any]:
     linhas = (
         await session.execute(
             select(c.plataforma, motivo, func.count())
-            .where(caixa_humano_sql())
+            .where(caixa_humano_sql(await lojas_da_caixa(session, modos)))
             .group_by(c.plataforma, motivo)
         )
     ).all()
@@ -928,11 +1105,17 @@ async def contar(session: AsyncSession) -> dict[str, Any]:
     for plataforma, motivo, n in linhas:
         por_plataforma[plataforma] += int(n)
         principal[plataforma][motivo or HUMANO_IA_PAUSADA] += int(n)
-    no_escopo = int(
-        await session.scalar(select(func.count()).select_from(c).where(escopo_sql())) or 0
-    )
+    no_escopo, para_pessoa = (
+        await session.execute(
+            select(func.count(), func.count().filter(para_pessoa_sql()))
+            .select_from(c)
+            .where(escopo_sql())
+        )
+    ).one()
     return {
-        "no_escopo": no_escopo,
+        "modos": list(modos) if modos is not None else MODOS_TODOS,
+        "no_escopo": int(no_escopo or 0),
+        "para_pessoa": int(para_pessoa or 0),
         "na_caixa": sum(por_plataforma.values()),
         "por_plataforma": dict(sorted(por_plataforma.items())),
         "motivo_principal": {p: dict(v) for p, v in sorted(principal.items())},

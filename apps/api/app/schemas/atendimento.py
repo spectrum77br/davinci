@@ -110,6 +110,10 @@ class HumanoOut(BaseModel):
     rotulos: list[str] = Field(default_factory=list)
     assuntos: list[str] = Field(default_factory=list)
     assuntos_rotulos: list[str] = Field(default_factory=list)
+    # A conversa está na Caixa Humano (a loja num dos modos dela — 14/10/2026,
+    # `humano.LojasDaCaixa.tem`). False = precisa de pessoa, mas a loja está
+    # fora dos modos (em Observar, o Duoke responde): o chip só informa.
+    na_caixa: bool = True
 
 
 class EmailResumoOut(BaseModel):
@@ -836,6 +840,9 @@ class FlagsOut(BaseModel):
     # A triagem da Caixa Humano está rodando (`atendimento_humano_ativa` E a
     # leitura). Desligada, a Caixa Humano só mostra as de IA pausada.
     humano_ativa: bool = False
+    # Os modos de loja que a Caixa Humano mostra (14/10/2026: só `auto`, a
+    # decisão do dono — `humano.modos_da_caixa`); None = toda loja ("todos").
+    humano_modos: list[str] | None = None
 
 
 class LeituraParadaOut(BaseModel):

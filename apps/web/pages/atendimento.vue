@@ -63,7 +63,10 @@ definePageMeta({ middleware: ['atendimento'] })
 //   o modelo — services/atendimento/humano.py), os números da Caixa Humano na
 //   barra, no menu do topo e na aba, o motivo em cada linha e a faixa na
 //   conversa. Plataforma, loja e busca valem nas duas; a lista abre pelo
-//   prazo (a mais urgente primeiro). Respondeu, sai.
+//   prazo (a mais urgente primeiro). Respondeu, sai. Desde 14/10/2026 só as
+//   lojas no Automático (o dono: "a Caixa Humano só para as lojas que estão
+//   automáticas" — o servidor filtra lista e números; sem loja no modo, o
+//   vazio da lista aponta "Lojas e modo").
 // - E-MAIL SÓ NA ABA E-MAIL (13/10/2026) — o Eduardo: "vamos deixar o e-mail
 //   aparecer só na aba de e-mail; a do chat de atendimento aparece só no chat
 //   mesmo". A conversa de e-mail da ponte saiu da Caixa e da Caixa Humano
@@ -739,6 +742,7 @@ watch(selecionada, (id) => {
           @selecionar="selecionar"
           @carregar-mais="carregarMais"
           @recarregar="carregarLista"
+          @abrir-aba="abrirAba"
         />
       </aside>
       <section class="min-h-0 min-w-0 flex-1 lg:flex" :class="selecionada ? 'flex' : 'hidden'">

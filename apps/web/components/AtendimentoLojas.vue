@@ -113,16 +113,20 @@ export function filtrosTodasDoCorte(f: FiltrosLista, corte: string[]): FiltrosLi
 // Shopee"). Para ver todas as plataformas de novo: "Todas" no menu do topo.
 // Na CAIXA HUMANO (`numero="humano"`, 09/10/2026) as bolinhas contam as
 // conversas que esperam uma pessoa (a IA não pode responder), não o "falta
-// responder".
+// responder". Desde 14/10/2026 ela é só das lojas no Automático (o servidor
+// manda zero para as outras: sem bolinha); o title da loja fora diz por quê.
 import { ChevronsLeft, ChevronsRight, Inbox, Lock, TriangleAlert, Unplug } from 'lucide-vue-next'
 import type { NumeroDaCaixa } from '~/components/AtendimentoFiltroPlataforma.vue'
 import {
   leituraParada,
+  lojaNosModos,
+  modosDaCaixaHumano,
   plataformaInfo,
   sellerCenterDe,
   semLeitura,
   statusCanalCodigo,
   statusCanalInfo,
+  textoModosHumano,
   viaRobo,
   type Resumo,
 } from '~/components/AtendimentoPlataforma.vue'
@@ -308,6 +312,13 @@ const instagram = computed(() => (props.numero === 'humano' ? Number(plataformaI
 const mostrarInstagram = computed(() => !!props.resumo && !temContasInstagram.value && (!!plataformaInstagram.value || filtros.value.plataforma === 'instagram')
   && (!corte.value.length || corte.value.includes('instagram')))
 
+// A Caixa Humano só das lojas nos modos dela (14/10/2026): a loja fora (a do
+// robô sem integração: não dá para saber — fica como sempre).
+const modosHumano = computed(() => modosDaCaixaHumano(props.resumo?.flags))
+function foraDaCaixaHumano(l: LojaBarra): boolean {
+  const modos = modosHumano.value
+  return !!modos && !l.humano && lojaNosModos(props.resumo?.canais, l, modos) === false
+}
 function contador(n: number) {
   return n > 99 ? '99+' : String(n)
 }
@@ -319,7 +330,8 @@ function motivo(l: LojaBarra): string {
     if (l.motivo) partes.push(l.motivo)
   } else {
     partes.push(`${l.aguardando} conversa(s) esperando resposta`)
-    if (l.humano || props.numero === 'humano') partes.push(`${l.humano} na Caixa Humano (a IA não pode responder)`)
+    if (props.numero === 'humano' && foraDaCaixaHumano(l)) partes.push(`Fora da Caixa Humano: a loja não está ${textoModosHumano(modosHumano.value || [])} (mude em Lojas e modo)`)
+    else if (l.humano || props.numero === 'humano') partes.push(`${l.humano} na Caixa Humano (a IA não pode responder)`)
     if (typeof l.nao_lidas_plataforma === 'number') partes.push(`${l.nao_lidas_plataforma} não lida(s) segundo a plataforma`)
     if (l.vencidas) partes.push(`${l.vencidas} vencida(s)`)
     if (l.parcial) partes.push(l.motivo ? `Atenção — ${l.motivo}` : 'Atenção: um dos canais desta loja não está sendo lido')
