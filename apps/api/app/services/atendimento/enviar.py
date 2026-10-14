@@ -292,6 +292,11 @@ LIMIAR_ENVIOU_IGUAL = 0.97
 
 # Teto de espera pela plataforma. Os clientes têm timeout próprio; este é o
 # cinto de segurança para um adaptador que pendure. Estourou = ambíguo.
+# O teto cancela o ENVIO, nunca a renovação do token que o cliente esteja
+# fazendo nessa hora: ela segue blindada até gravar o token novo
+# (`clientes.blindar_renovacao`; o refresh token da Shopee e do ML é de uso
+# único). O adaptador não vai para segundo plano inteiro, como no `lida`,
+# porque ele recebe a sessão do request — só a renovação, que não a toca.
 TEMPO_MAXIMO_ENVIO_S = 90
 
 # Linha `enviando` mais velha que isto é de um processo que morreu no meio
@@ -1449,6 +1454,8 @@ async def _gravar_resultado(
 # Upload para a plataforma SÓ aqui — com o envio desligado, a trava
 # `envio_desligado` recusa antes de qualquer byte sair do DaVinci.
 
+# Como o `TEMPO_MAXIMO_ENVIO_S`: estourou = ambíguo, e a renovação do token
+# que estiver no meio segue blindada (`clientes.blindar_renovacao`).
 TEMPO_MAXIMO_FOTO_S = 150
 
 

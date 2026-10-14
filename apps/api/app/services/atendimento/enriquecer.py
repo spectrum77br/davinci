@@ -40,7 +40,9 @@ Ficha do anúncio (14/10/2026): a resposta da loja ao cartão de produto (o
 `get_item_base_info` da Shopee, o `/items` do ML) já traz a descrição e os
 atributos do anúncio — a ficha FRESCA que a IA usa (`ficha.py`). Sai daqui
 enxuta para o Redis (`ficha.chave_ficha`, `ficha.CACHE_FICHA_S`), à parte do
-cartão (que vai para a tela): nenhuma ida nova à loja.
+cartão (que vai para a tela), com `buscada_em`: nenhuma ida nova à loja. A
+busca SOB DEMANDA da ficha (`ficha_loja.py`, na hora da sugestão) grava na
+mesma chave — um aproveita a ida do outro.
 
 Índice de pedidos do comprador: a Shopee não filtra pedido por comprador, e o
 cartão "Cliente" precisa do histórico de compra. Cada retrato que dá certo
@@ -772,10 +774,14 @@ async def _cartoes(
         cartoes[item_id] = cartao
         if loja is not None:
             await _cache_gravar(chave_produto(plataforma, integ_id, item_id), cartao)
-    # A ficha fresca da IA (`ficha.py`): da MESMA resposta da loja, à parte.
+    # A ficha fresca da IA (`ficha.py`): da MESMA resposta da loja, à parte,
+    # com a hora da ida (a `fonte` da ficha diz a idade).
+    buscada_em = _agora().isoformat(timespec="seconds")
     for item_id, bruta in fichas.items():
         await _cache_gravar(
-            ficha_svc.chave_ficha(plataforma, integ_id, item_id), bruta, ficha_svc.CACHE_FICHA_S
+            ficha_svc.chave_ficha(plataforma, integ_id, item_id),
+            {**bruta, "buscada_em": buscada_em},
+            ficha_svc.CACHE_FICHA_S,
         )
     return cartoes, resolvidos, falha
 

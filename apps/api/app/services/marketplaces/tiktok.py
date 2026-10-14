@@ -1390,6 +1390,17 @@ class TikTokClient:
             return None
         return resp.get("data") or {}
 
+    async def produto_bruto(self, product_id: str) -> dict:
+        """A resposta INTEIRA do GET /product/202309/products/{id} (`code`,
+        `message`, `data` com `title`, `description` em HTML,
+        `product_attributes`, `brand`) — sem engolir o erro, para quem chama
+        separar "a loja diz que não existe/sem acesso" de "falhou agora".
+        Shop-scoped como o `get_product` (o `_get` assina com o shop_cipher
+        DESTA loja). Levanta só em erro de rede. SÓ LEITURA.
+
+        A ficha do anúncio da IA (services/atendimento/ficha_loja.py)."""
+        return await self._get(f"/product/202309/products/{str(product_id).strip()}")
+
     async def activate_product(self, product_id: str) -> bool:
         """Activate a deactivated product.
 

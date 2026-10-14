@@ -22,9 +22,11 @@ DE ONDE (`ficha_do_anuncio`), nesta ordem:
   1. a ficha FRESCA: o que a própria loja devolveu na ida que o
      enriquecimento JÁ faz para montar o cartão de produto (`get_item_base_info`
      da Shopee: descrição + `attribute_list`; `/items` do ML: `attributes`),
-     guardada no Redis por `CACHE_FICHA_S` (`chave_ficha`), à parte do
-     cartão (o cartão vai para a tela; a ficha, só para a IA). Nenhuma ida
-     nova à loja: nem aqui, nem no enriquecimento.
+     ou na busca sob demanda (item 3), guardada no Redis por `CACHE_FICHA_S`
+     (`chave_ficha`), à parte do cartão (o cartão vai para a tela; a ficha,
+     só para a IA). Marcada com a `fonte` ("loja (Shopee), agora" — sem
+     número: a conferência de número inventado lê os FATOS). A do ML sem a
+     descrição ganha a descrição pela busca sob demanda (`ficha_loja.py`).
   2. o NOSSO catálogo (`listings`, pela plataforma e pelo id do anúncio, a
      da própria loja primeiro) — só a linha importada há até
      `MAX_DIAS_CATALOGO_FICHA` dias e, com o título atual conhecido, com o
@@ -32,7 +34,13 @@ DE ONDE (`ficha_do_anuncio`), nesta ordem:
      em 14/10/2026 a última era de maio, e na Kia o anúncio do cartão já se
      chamava "… S5 Premium NFC" enquanto a descrição de maio dizia "NFC -
      Não Tem": a ficha velha respondia errado, com cara de certa.
-  3. o mesmo PRODUTO em outro anúncio: `product_links` (anúncio → produtos
+  3. a LOJA, sob demanda (14/10/2026, o dono: "se necessário acessa o
+     produto na loja pra pegar os dados" — `ficha_loja.py`): sem ficha
+     fresca nem catálogo válido, a sugestão (cron e "Sugerir") busca o
+     anúncio na loja da conversa — Shopee, ML e TikTok —, com tempo curto,
+     cota e cache (positivo na chave da fresca; negativo curto). Falhou ou
+     demorou: segue para o item 4 (ou sem ficha), como antes.
+  4. o mesmo PRODUTO em outro anúncio: `product_links` (anúncio → produtos
      do Bling → os anúncios desses produtos) → `listings` (com o mesmo
      corte de data). Vínculo morto não conta, nem na origem nem no destino,
      e o outro anúncio só vale se TODOS os produtos vivos dele forem
@@ -44,22 +52,27 @@ DE ONDE (`ficha_do_anuncio`), nesta ordem:
 
 COBERTURA POR PLATAFORMA (produção, 14/10/2026):
   - Shopee: ficha fresca de todo cartão de produto que o cliente manda (o
-    enriquecimento já lê o `get_item_base_info`: descrição + atributos).
-    Catálogo (737 anúncios, descrição + `attribute_list`, 43 dentro de
-    `raw_data.item`): só depois de importar de novo (o de maio não passa no
-    corte). O id do anúncio = `item_id`.
+    enriquecimento já lê o `get_item_base_info`: descrição + atributos); o
+    anúncio da conversa e os itens do pedido sem cartão, pela busca sob
+    demanda (o mesmo `get_item_base_info`). Catálogo (737 anúncios,
+    descrição + `attribute_list`, 43 dentro de `raw_data.item`): só depois
+    de importar de novo (o de maio não passa no corte). O id = `item_id`.
   - Mercado Livre: ficha fresca na pergunta (o cartão do anúncio perguntado)
     e nos itens do pedido (o retrato do pós-venda já lê o `/items`, agora
-    com `attributes`). SEM descrição (o `/items` não traz o texto).
-    Catálogo (3.723, `raw_data.attributes`): idem, só reimportado. O id = MLB….
-  - TikTok: sem API de produto no atendimento e sem `listings`; a ficha vem
-    do mesmo produto em outro anúncio (`product_links` tiktok → Shopee/ML),
-    com catálogo reimportado. O id = `product_id`.
-  - Magalu: idem TikTok (o `anuncio_id` da conversa é o SKU do anúncio, o
-    mesmo `external_id` do `product_links` magalu).
+    com `attributes`), SEM descrição (o `/items` não traz o texto): a
+    descrição vem da busca sob demanda (`/items/{id}/description`), e o
+    anúncio sem fresca, inteiro (`/items/{id}` + descrição). Catálogo
+    (3.723, `raw_data.attributes`): idem, só reimportado. O id = MLB….
+  - TikTok: sem `listings`; a busca sob demanda lê o produto
+    (`/product/202309/products/{id}`, com o shop_cipher da loja da
+    conversa); sem ela, o mesmo produto em outro anúncio (`product_links`
+    tiktok → Shopee/ML), com catálogo reimportado. O id = `product_id`.
+  - Magalu: o mesmo produto em outro anúncio (o `anuncio_id` da conversa é
+    o SKU, o mesmo `external_id` do `product_links` magalu); a API da
+    Magalu não tem a ficha (o portfólio é SKU, título e status).
   - Amazon: `listings` só com título/SKU/ASIN — sem ficha (e o e-mail da
     Amazon não liga anúncio).
-  - Temu, AliExpress, redes e site: sem catálogo — sem ficha.
+  - Temu, AliExpress, redes e site: sem catálogo nem API — sem ficha.
 
 O QUE ENTRA (compacto, `montar_ficha`): título; os atributos PREENCHIDOS
 ("nome: valor", até `MAX_ATRIBUTOS_FICHA`, os que batem com a pergunta do
@@ -98,7 +111,7 @@ import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
@@ -111,6 +124,9 @@ from app.models.enums import IntegrationPlatform, ListingStatus
 from app.redis_client import redis
 from app.services.atendimento import validador
 from app.services.atendimento.constantes import AUTOR_CLIENTE, CANAL_PERGUNTA
+
+if TYPE_CHECKING:
+    from app.services.atendimento.ficha_loja import Busca
 
 logger = structlog.get_logger()
 
@@ -166,6 +182,12 @@ DE_ONDE_PERGUNTA = "anúncio da pergunta"
 DE_ONDE_ANUNCIO = "anúncio ligado à conversa"
 DE_ONDE_PEDIDO = "item do pedido da conversa"
 FONTE_OUTRO_ANUNCIO = "outro anúncio do mesmo produto"
+# A ficha que a própria loja devolveu (`fonte_da_loja`): "loja (Shopee), agora".
+FONTE_LOJA = "loja"
+# A idade da ficha da loja, SEM número (`fonte_da_loja`).
+QUANDO_AGORA = "agora"
+QUANDO_HOJE = "há menos de um dia"
+QUANDO_DIAS = "há até três dias"
 
 _TIPO_PRODUTO = "produto"  # o anexo do cartão de produto (shopee.py, tiktok.py)
 
@@ -784,8 +806,12 @@ def ficha_bruta_shopee(item: Any) -> dict | None:
     return _bruta(it.get("item_name"), _descricao_do_raw(it), raw)
 
 
-def ficha_bruta_ml(body: Any) -> dict | None:
-    """A ficha crua de um anúncio do `/items` do ML (`attributes`), enxuta. PURA."""
+def ficha_bruta_ml(body: Any, descricao: Any = None) -> dict | None:
+    """A ficha crua de um anúncio do `/items` do ML (`attributes`), enxuta. PURA.
+
+    `descricao` = o `/items/{id}/description` (a busca sob demanda,
+    `ficha_loja.py`): o `/items` não traz o texto.
+    """
     b = _dict(body)
     lista: list[dict] = []
     for a in _lista(b.get("attributes")):
@@ -796,7 +822,75 @@ def ficha_bruta_ml(body: Any) -> dict | None:
             lista.append(
                 {"id": _texto(a.get("id")), "name": nome, "value_name": valor, "values": valores}
             )
-    return _bruta(b.get("title"), None, {"attributes": lista} if lista else {})
+    return _bruta(b.get("title"), descricao, {"attributes": lista} if lista else {})
+
+
+def ficha_bruta_tiktok(data: Any) -> dict | None:
+    """A ficha crua de um produto da TikTok (Get Product 202309, `data`), enxuta. PURA.
+
+    Título, a descrição (HTML: a limpeza é a da `montar_ficha`), os
+    atributos (`product_attributes`: `name` + `values[].name`) e a marca
+    (`brand.name`). None sem descrição nem atributo.
+    """
+    d = _dict(data)
+    lista: list[dict] = []
+    for a in _lista(d.get("product_attributes")):
+        nome = _texto(a.get("name"))
+        valores = [{"name": t} for v in _lista(a.get("values")) if (t := _texto(v.get("name")))]
+        if nome and valores:
+            lista.append({"name": nome, "values": valores})
+    raw: dict[str, Any] = {}
+    if lista:
+        raw["product_attributes"] = lista
+    marca = _texto(_dict(d.get("brand")).get("name"))
+    if marca:
+        raw["brand"] = {"original_brand_name": marca}
+    return _bruta(d.get("title"), d.get("description"), raw)
+
+
+def _de_iso(bruto: Any) -> datetime | None:
+    if not isinstance(bruto, str):
+        return None
+    try:
+        quando = datetime.fromisoformat(bruto)
+    except ValueError:
+        return None
+    return quando if quando.tzinfo else quando.replace(tzinfo=UTC)
+
+
+def fonte_da_loja(
+    plataforma: IntegrationPlatform, buscada_em: Any, agora: datetime | None = None
+) -> str:
+    """A `fonte` da ficha que a loja devolveu: "loja (Shopee), agora". PURA.
+
+    A idade pela `buscada_em` (ISO), SEM número — os FATOS valem na
+    conferência de número inventado. Sem a data (gravada antes dela): só a loja.
+    """
+    loja = _NOME_PLATAFORMA.get(plataforma, str(getattr(plataforma, "value", plataforma)))
+    quando = _de_iso(buscada_em)
+    if quando is None:
+        return f"{FONTE_LOJA} ({loja})"
+    idade = (agora or _agora()) - quando
+    rotulo = (
+        QUANDO_AGORA
+        if idade < timedelta(hours=1)
+        else QUANDO_HOJE
+        if idade < timedelta(days=1)
+        else QUANDO_DIAS
+    )
+    return f"{FONTE_LOJA} ({loja}), {rotulo}"
+
+
+def _ficha_da_loja(
+    bruta: dict, plataforma: IntegrationPlatform, titulo: str | None, palavras: frozenset[str]
+) -> dict | None:
+    """A ficha montada do que a loja devolveu (fresca ou buscada agora), com a fonte."""
+    ficha = montar_ficha(
+        bruta.get("titulo") or titulo, bruta.get("descricao"), bruta.get("raw"), palavras=palavras
+    )
+    if ficha is None:
+        return None
+    return {"fonte": fonte_da_loja(plataforma, bruta.get("buscada_em")), **ficha}
 
 
 async def _ficha_fresca(
@@ -949,21 +1043,26 @@ async def ficha_do_anuncio(
     *,
     titulo: str | None = None,
     palavras: frozenset[str] = frozenset(),
+    loja: Busca | None = None,
 ) -> dict | None:
-    """A ficha de UM anúncio: a fresca; o catálogo; o mesmo produto em outro anúncio.
+    """A ficha de UM anúncio: a fresca; o catálogo; a loja; o mesmo produto em outro anúncio.
 
     `titulo` = o título ATUAL do anúncio, quando a conversa o tem: a linha do
     catálogo com outro título é de antes da mudança e não vale; a ficha sai
-    com ele (o modelo vê de que anúncio é).
+    com ele (o modelo vê de que anúncio é). `loja` (a sugestão,
+    `fichas_da_conversa`): pode ir à loja buscar o anúncio (`ficha_loja.py`);
+    None = não vai.
     """
+    # Import tardio: `ficha_loja` importa este módulo.
+    from app.services.atendimento import ficha_loja
+
     fresca = await _ficha_fresca(plataforma, integration_id, item_id)
+    if fresca is not None and loja is not None and ficha_loja.falta_descricao(plataforma, fresca):
+        # A fresca do ML (enriquecimento) não tem a descrição: só ela, da loja.
+        completa = await ficha_loja.ficha_da_loja(session, loja, plataforma, item_id, fresca=fresca)
+        fresca = completa or fresca
     if fresca is not None:
-        ficha = montar_ficha(
-            fresca.get("titulo") or titulo,
-            fresca.get("descricao"),
-            fresca.get("raw"),
-            palavras=palavras,
-        )
+        ficha = _ficha_da_loja(fresca, plataforma, titulo, palavras)
         if ficha is not None:
             return ficha
     for nome, descricao, raw, _plat in await _do_catalogo(
@@ -974,12 +1073,18 @@ async def ficha_do_anuncio(
         ficha = montar_ficha(titulo or nome, descricao, raw, palavras=palavras)
         if ficha is not None:
             return ficha
+    if fresca is None and loja is not None:
+        # Sem fresca nem catálogo válido: o anúncio direto da loja da conversa.
+        bruta = await ficha_loja.ficha_da_loja(session, loja, plataforma, item_id)
+        ficha = _ficha_da_loja(bruta, plataforma, titulo, palavras) if bruta else None
+        if ficha is not None:
+            return ficha
     for nome, descricao, raw, plat in await _do_mesmo_produto(session, plataforma, item_id):
         ficha = montar_ficha(nome, descricao, raw, palavras=palavras)
         if ficha is None:
             continue
-        loja = _NOME_PLATAFORMA.get(plat, str(getattr(plat, "value", plat)))
-        saida: dict[str, Any] = {"fonte": f"{FONTE_OUTRO_ANUNCIO} ({loja})"}
+        nome_loja = _NOME_PLATAFORMA.get(plat, str(getattr(plat, "value", plat)))
+        saida: dict[str, Any] = {"fonte": f"{FONTE_OUTRO_ANUNCIO} ({nome_loja})"}
         if titulo:
             saida["titulo"] = _cortar(titulo, MAX_CHARS_TITULO_FICHA)
         if ficha.get("titulo"):
@@ -997,12 +1102,17 @@ async def fichas_da_conversa(
     """O bloco "ficha_do_anuncio" dos FATOS: até 2 anúncios, já no teto. [] = sem ficha.
 
     Para no PRIMEIRO anúncio sem ficha (ver o topo). `textos_cliente` (a
-    última rajada do cliente) só ordena os atributos.
+    última rajada do cliente) só ordena os atributos. Sem ficha fresca nem
+    catálogo válido, vai à loja da conversa (`ficha_loja.py`): no máximo
+    `ficha_loja.MAX_BUSCAS_POR_SUGESTAO` idas.
     """
+    from app.services.atendimento import ficha_loja
+
     plataforma = plataforma_do_catalogo(conversa.plataforma)
     if plataforma is None:
         return []
     palavras = palavras_da_pergunta(textos_cliente)
+    loja = ficha_loja.Busca(conversa.integration_id, conversa.canal_id)
     fichas: list[dict] = []
     for anuncio in anuncios_da_conversa(conversa, mensagens):
         ficha = await ficha_do_anuncio(
@@ -1012,6 +1122,7 @@ async def fichas_da_conversa(
             conversa.integration_id,
             titulo=anuncio.titulo,
             palavras=palavras,
+            loja=loja,
         )
         if ficha is None:
             break

@@ -17,8 +17,11 @@ contrato da seção 5 da spec.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +38,8 @@ from app.models import (
     IntegrationPlatform,
     User,
 )
-from app.security.cipher import encrypt_json
+from app.redis_client import redis
+from app.security.cipher import decrypt_json, encrypt_json
 from app.services.atendimento import clientes, enviar, gravar, validador
 from app.services.atendimento import shopee as adaptador_shopee
 from app.services.atendimento.constantes import (
@@ -465,6 +469,303 @@ async def test_envio_preso_de_processo_morto_nao_trava_a_conversa(
     assert m.status == "enviada"
     await db.refresh(preso)
     assert (preso.status, preso.erro) == ("revisar", "envio_interrompido")
+
+
+# ─────────────── o teto do envio e a renovação do token (14/10/2026) ───────────────
+
+_AsyncClientReal = httpx.AsyncClient
+_ROTA_RENOVACAO_SHOPEE = "/api/v2/auth/access_token/get"
+_ENVIO_SHOPEE = "/api/v2/sellerchat/send_message"
+
+
+class _ShopeeDeMentira:
+    """A API da Shopee num transporte falso (sem rede) para o ShopeeClient DE VERDADE.
+
+    O refresh token é aceito na hora em que chega (o velho morre ali) e a
+    resposta só sai quando o teste soltar `libera` — o teto do envio estoura
+    com a renovação no meio, sempre.
+    """
+
+    def __init__(self, monkeypatch) -> None:
+        self.gastos: list[str] = []
+        self.enviadas: list[tuple[str, str | None]] = []
+        self.libera = asyncio.Event()
+
+        async def api(request: httpx.Request) -> httpx.Response:
+            if request.url.path == _ROTA_RENOVACAO_SHOPEE:
+                self.gastos.append(json.loads(request.content)["refresh_token"])
+                await self.libera.wait()
+                return httpx.Response(
+                    200,
+                    json={"access_token": "novo", "refresh_token": "rt-novo", "expire_in": 14400},
+                )
+            self.enviadas.append((request.url.path, request.url.params.get("access_token")))
+            n = len(self.enviadas)
+            return httpx.Response(200, json={"error": "", "response": {"message_id": f"m-{n}"}})
+
+        def fabrica(*a, **k):
+            k["transport"] = httpx.MockTransport(api)
+            return _AsyncClientReal(*a, **k)
+
+        monkeypatch.setattr(httpx, "AsyncClient", fabrica)
+
+
+async def _loja_shopee(
+    db: AsyncSession, conversa: AtendimentoConversa, *, vencido: bool = True
+) -> None:
+    """Credenciais no formato do ShopeeClient (vencidas: ele renova antes de enviar)."""
+    await db.execute(
+        update(Integration)
+        .where(Integration.id == conversa.integration_id)
+        .values(
+            credentials=encrypt_json(
+                {
+                    "shop_id": 123,
+                    "partner_id": 1,
+                    "partner_key": "k",
+                    "access_token": "velho",
+                    "refresh_token": "rt-velho",
+                    "expires_at": int(time.time()) + (-60 if vencido else 3600),
+                }
+            )
+        )
+    )
+    await db.execute(
+        update(AtendimentoConversa)
+        .where(AtendimentoConversa.id == conversa.id)
+        .values(comprador_id="555")
+    )
+    await db.commit()
+    await db.refresh(conversa)
+
+
+async def _creds_da_loja(integration_id) -> dict:
+    async with _db.SessionLocal() as s:
+        return decrypt_json(
+            await s.scalar(select(Integration.credentials).where(Integration.id == integration_id))
+        )
+
+
+async def _esperar_renovacoes(segundos: float = 20.0) -> None:
+    fim = asyncio.get_running_loop().time() + segundos
+    while clientes._RENOVACOES_EM_SEGUNDO_PLANO and asyncio.get_running_loop().time() < fim:
+        await asyncio.gather(*list(clientes._RENOVACOES_EM_SEGUNDO_PLANO), return_exceptions=True)
+    assert not clientes._RENOVACOES_EM_SEGUNDO_PLANO
+
+
+async def test_teto_do_envio_no_meio_da_renovacao_nao_perde_o_token_nem_duplica(
+    db, make_user, ligado, monkeypatch
+):
+    """A Shopee Kia no automático (14/10): token vencido, o ShopeeClient DE
+    VERDADE renova antes do send_message, e o refresh token é de USO ÚNICO.
+    O teto do envio estourou no meio da renovação:
+
+      - o envio respeita o teto: volta na hora como `revisar` (ambíguo,
+        nunca se retenta), sem esperar a renovação;
+      - a renovação NÃO é cortada: segue sozinha e o token novo chega ao
+        banco (a loja não fica sem acesso);
+      - nada sai depois (o envio cortado não "acorda" quando o token chega),
+        e a mesma resposta de novo é `envio_repetido`;
+      - a próxima resposta sai com o token novo, sem renovar de novo.
+    """
+    conversa, user = await _cenario(db, make_user)
+    await _loja_shopee(db, conversa, vencido=True)
+    shopee = _ShopeeDeMentira(monkeypatch)
+    monkeypatch.setattr(enviar, "TEMPO_MAXIMO_ENVIO_S", 0.5)
+    try:
+        inicio = time.monotonic()
+        m = await enviar.enviar_resposta(db, conversa, "Seu pedido saiu.", user=user)
+        assert time.monotonic() - inicio < 5
+        assert (m.status, m.erro) == ("revisar", "timeout")
+        assert shopee.gastos == ["rt-velho"]  # a Shopee já aceitou: o velho morreu
+        assert shopee.enviadas == []
+        # Ainda renovando, em segundo plano e com a trava da loja.
+        assert clientes._RENOVACOES_EM_SEGUNDO_PLANO
+        assert (await _creds_da_loja(conversa.integration_id))["refresh_token"] == "rt-velho"  # noqa: S105
+    finally:
+        shopee.libera.set()
+    await _esperar_renovacoes()
+
+    creds = await _creds_da_loja(conversa.integration_id)
+    assert (creds["access_token"], creds["refresh_token"]) == ("novo", "rt-novo")
+    assert not await redis.exists(f"token_refresh_lock:{conversa.integration_id}")
+    assert shopee.enviadas == []  # o envio cortado nunca sai sozinho depois
+
+    # Clique de novo na mesma resposta: `revisar` conta como "pode ter saído".
+    e = await _recusa(enviar.enviar_resposta(db, conversa, "Seu pedido saiu.", user=user))
+    assert e.code == "envio_repetido"
+    assert shopee.enviadas == []
+
+    # A resposta seguinte sai com o token novo — e o refresh token não gira de novo.
+    m2 = await enviar.enviar_resposta(db, conversa, "Qualquer dúvida, estamos aqui.", user=user)
+    assert (m2.status, m2.externo_id) == ("enviada", "m-1")
+    assert shopee.enviadas == [(_ENVIO_SHOPEE, "novo")]
+    assert shopee.gastos == ["rt-velho"]
+    textos = [(x.texto, x.status) for x in await _mensagens_da_loja(db, conversa.id)]
+    assert textos == [
+        ("Seu pedido saiu.", "revisar"),
+        ("Qualquer dúvida, estamos aqui.", "enviada"),
+    ]
+
+
+async def test_teto_do_envio_com_a_shopee_pendurada_e_revisar_sem_reenvio(
+    db, make_user, ligado, monkeypatch
+):
+    """Token válido e a Shopee pendurada no send_message: o teto corta o envio
+    (ambíguo → `revisar`), nada fica em segundo plano e nada é reenviado."""
+    conversa, user = await _cenario(db, make_user)
+    await _loja_shopee(db, conversa, vencido=False)
+    pendurada = asyncio.Event()
+    chamadas: list[str] = []
+
+    async def api(request: httpx.Request) -> httpx.Response:
+        chamadas.append(request.url.path)
+        await pendurada.wait()
+        return httpx.Response(200, json={"error": "", "response": {"message_id": "x"}})
+
+    def fabrica(*a, **k):
+        k["transport"] = httpx.MockTransport(api)
+        return _AsyncClientReal(*a, **k)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fabrica)
+    monkeypatch.setattr(enviar, "TEMPO_MAXIMO_ENVIO_S", 0.3)
+    try:
+        m = await enviar.enviar_resposta(db, conversa, "Seu pedido saiu.", user=user)
+    finally:
+        pendurada.set()
+    assert (m.status, m.erro) == ("revisar", "timeout")
+    assert chamadas == [_ENVIO_SHOPEE]
+    assert not clientes._RENOVACOES_EM_SEGUNDO_PLANO
+    assert (await _creds_da_loja(conversa.integration_id))["refresh_token"] == "rt-velho"  # noqa: S105
+
+
+async def test_teto_do_envio_no_commit_do_token_novo_nao_perde_o_token(
+    db, make_user, ligado, monkeypatch
+):
+    """A Shopee JÁ respondeu (o refresh token velho morreu) e o teto do envio
+    estoura no commit do token novo — o pior ponto: o novo só existe na
+    memória. O envio volta `revisar` na hora; o commit termina sozinho."""
+    conversa, user = await _cenario(db, make_user)
+    await _loja_shopee(db, conversa, vencido=True)
+    shopee = _ShopeeDeMentira(monkeypatch)
+    shopee.libera.set()  # a Shopee responde na hora: o corte cai no commit
+    no_commit = asyncio.Event()
+    solta_commit = asyncio.Event()
+    gravar_de_verdade = clientes.gravar_credenciais
+
+    async def gravar_lento(integration_id, creds):
+        no_commit.set()
+        await solta_commit.wait()
+        return await gravar_de_verdade(integration_id, creds)
+
+    monkeypatch.setattr(clientes, "gravar_credenciais", gravar_lento)
+    monkeypatch.setattr(enviar, "TEMPO_MAXIMO_ENVIO_S", 0.5)
+    try:
+        inicio = time.monotonic()
+        m = await enviar.enviar_resposta(db, conversa, "Seu pedido saiu.", user=user)
+        assert time.monotonic() - inicio < 5
+        assert no_commit.is_set()
+        assert (m.status, m.erro) == ("revisar", "timeout")
+        assert shopee.gastos == ["rt-velho"]
+        assert clientes._RENOVACOES_EM_SEGUNDO_PLANO
+    finally:
+        solta_commit.set()
+    await _esperar_renovacoes()
+    creds = await _creds_da_loja(conversa.integration_id)
+    assert (creds["access_token"], creds["refresh_token"]) == ("novo", "rt-novo")
+    assert shopee.enviadas == []  # o envio cortado nunca sai sozinho depois
+    assert not await redis.exists(f"token_refresh_lock:{conversa.integration_id}")
+
+
+async def test_job_cancelado_como_o_arq_faz_nao_corta_a_renovacao(db, make_user, monkeypatch):
+    """O sync, as automações, as reclamações e as avaliações rodam em job do
+    arq, que corta no `timeout` com `task.cancel()` (não `wait_for`): com a
+    renovação no meio, o job morre na hora e o token novo chega ao banco."""
+    conversa, _user = await _cenario(db, make_user)
+    await _loja_shopee(db, conversa, vencido=True)
+    shopee = _ShopeeDeMentira(monkeypatch)
+    integ = await db.get(Integration, conversa.integration_id)
+    cliente = await clientes.cliente_da_integracao(integ)
+    job = asyncio.ensure_future(cliente.chat_send_message(555, text="x"))
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if shopee.gastos:
+                break
+        assert shopee.gastos == ["rt-velho"]
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+        assert clientes._RENOVACOES_EM_SEGUNDO_PLANO
+    finally:
+        shopee.libera.set()
+    await _esperar_renovacoes()
+    creds = await _creds_da_loja(conversa.integration_id)
+    assert (creds["access_token"], creds["refresh_token"]) == ("novo", "rt-novo")
+    assert shopee.enviadas == []
+    assert not await redis.exists(f"token_refresh_lock:{conversa.integration_id}")
+
+
+async def test_ml_401_com_a_renovacao_cortada_nunca_repete_o_post(db, make_user, monkeypatch):
+    """ML: o POST da mensagem volta 401 (não processado), o cliente renova e o
+    teto corta no meio da renovação. O POST NUNCA é repetido depois (nada de
+    resposta duplicada para o comprador) e o token novo chega ao banco."""
+    user = await make_user()
+    integ = Integration(
+        user_id=user.id,
+        platform=IntegrationPlatform.ML,
+        name="ml-teto",
+        credentials=encrypt_json(
+            {
+                "access_token": "velho",
+                "refresh_token": "rt-velho",
+                "expires_at": int(time.time()) + 3600,
+                "client_id": "cid",
+                "client_secret": "csec",
+                "user_id": 42,
+            }
+        ),
+    )
+    db.add(integ)
+    await db.commit()
+    posts: list[str | None] = []
+    gastos: list[str] = []
+    libera = asyncio.Event()
+
+    async def api(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            gastos.append(dict(httpx.QueryParams(request.content.decode()))["refresh_token"])
+            await libera.wait()
+            return httpx.Response(
+                200,
+                json={"access_token": "novo", "refresh_token": "rt-novo", "expires_in": 21600},
+            )
+        posts.append(request.headers.get("Authorization"))
+        if request.headers.get("Authorization") == "Bearer velho":
+            return httpx.Response(401, json={"message": "invalid token"})
+        return httpx.Response(201, json={"id": "msg-1"})
+
+    def fabrica(*a, **k):
+        k["transport"] = httpx.MockTransport(api)
+        return _AsyncClientReal(*a, **k)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fabrica)
+    cliente = await clientes.cliente_da_integracao(integ)
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(cliente.enviar_mensagem_pack("p1", 42, 7, "oi"), timeout=0.5)
+        assert posts == ["Bearer velho"]
+        assert gastos == ["rt-velho"]
+    finally:
+        libera.set()
+    await _esperar_renovacoes()
+    await asyncio.sleep(0.2)
+    assert posts == ["Bearer velho"]  # o envio cortado não volta sozinho
+    assert gastos == ["rt-velho"]
+    creds = await _creds_da_loja(integ.id)
+    assert (creds["access_token"], creds["refresh_token"]) == ("novo", "rt-novo")
+    assert creds["user_id"] == 42
+    assert not await redis.exists(f"token_refresh_lock:{integ.id}")
 
 
 # ─────────────── rascunho e avaliação ───────────────

@@ -617,7 +617,10 @@ async def test_cliente_da_magalu_usa_a_renovacao_do_proprio_cliente(db: AsyncSes
     cliente = await clientes.cliente_da_integracao(integ)
     assert isinstance(cliente, MagaluClient)
     assert cliente._integration_id == integ.id
-    assert cliente.refresh.__func__ is MagaluClient.refresh
+    # Só a blindagem por fora (nunca cortada no meio, 14/10/2026) — sem a
+    # trava do Redis: por dentro, direto o `refresh` do próprio cliente.
+    assert cliente.refresh._blindado is True
+    assert cliente.refresh.__wrapped__.__func__ is MagaluClient.refresh
 
 
 # ─────────────── perguntas ───────────────

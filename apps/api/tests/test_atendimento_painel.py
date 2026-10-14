@@ -31,6 +31,8 @@ O que estes testes seguram:
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
@@ -43,6 +45,8 @@ from fastapi.routing import APIRoute
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.db as _db
+from app import redis_client
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user, require_admin, require_user
@@ -70,6 +74,11 @@ from app.services.atendimento.constantes import e_nota
 
 URL = "/api/atendimento"
 AGORA = datetime.now(UTC)
+
+# Os de verdade, guardados antes de qualquer teste trocá-los (o `_sem_cache`
+# troca o Redis por um que sempre falha; o teste da renovação troca o httpx).
+_REDIS_DE_VERDADE = redis_client.redis
+_ASYNC_CLIENT_REAL = httpx.AsyncClient
 
 
 # As rotas novas vêm do `app.main` (o router `atendimento_painel` registrado
@@ -611,6 +620,100 @@ async def test_observacoes_falha_nao_levanta(db, bling):
 async def test_observacoes_sem_integracao_do_bling(db):
     r = await painel.observacoes_bling(5, session=db)
     assert r["codigo"] == "sem_integracao_bling"
+
+
+async def test_cliente_do_bling_com_a_renovacao_blindada(db, make_user):
+    """O teto das Observações (`OBSERVACOES_TEMPO_MAXIMO_S`) corta o GET, nunca a
+    renovação do token no meio: o Bling invalida o refresh token velho."""
+    from app.services.marketplaces.bling import BlingClient
+
+    dono = await make_user()
+    db.add(
+        Integration(
+            user_id=dono.id,
+            platform=IntegrationPlatform.BLING,
+            name="bling",
+            credentials=encrypt_json({"access_token": "t", "refresh_token": "rt"}),
+        )
+    )
+    await db.commit()
+    cliente = await painel._cliente_bling(db)
+    assert isinstance(cliente, BlingClient)
+    assert cliente.refresh._blindado is True
+    assert cliente.refresh.__wrapped__.__func__ is BlingClient.refresh
+
+
+async def test_teto_das_observacoes_corta_o_get_e_nao_a_renovacao_do_bling(
+    db, make_user, monkeypatch
+):
+    """Token do Bling vencido: o cliente DE VERDADE renova antes do GET, o Bling
+    já aceitou o refresh token (o velho morreu) e o teto das Observações estoura
+    no meio. O painel volta com erro na hora, o GET nunca sai, e a renovação
+    termina sozinha: o token novo chega ao banco. Transporte falso, sem rede."""
+    import app.redis_client as rc
+    from app.security.cipher import decrypt_json
+    from app.services.atendimento import clientes
+
+    # O Bling usa o Redis na renovação (cooldown do Cloudflare, vaga por segundo):
+    # aqui o de verdade, no lugar do falso do `_sem_cache`.
+    monkeypatch.setattr(rc, "redis", _REDIS_DE_VERDADE)
+    await _REDIS_DE_VERDADE.delete("bling:cf_cooldown_until")
+    dono = await make_user()
+    integ = Integration(
+        user_id=dono.id,
+        platform=IntegrationPlatform.BLING,
+        name="bling",
+        status="active",
+        credentials=encrypt_json(
+            {"access_token": "velho", "refresh_token": "rt-velho", "expires_at": 1}
+        ),
+    )
+    db.add(integ)
+    await db.commit()
+    gastos: list[str] = []
+    gets: list[str] = []
+    libera = asyncio.Event()
+
+    async def api(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth/token"):
+            gastos.append(dict(httpx.QueryParams(request.content.decode()))["refresh_token"])
+            await libera.wait()
+            return httpx.Response(
+                200,
+                json={"access_token": "novo", "refresh_token": "rt-novo", "expires_in": 21600},
+            )
+        gets.append(request.url.path)
+        return httpx.Response(200, json={"data": {"observacoes": "x"}})
+
+    def fabrica(*a, **k):
+        k["transport"] = httpx.MockTransport(api)
+        return _ASYNC_CLIENT_REAL(*a, **k)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fabrica)
+    monkeypatch.setattr(painel, "OBSERVACOES_TEMPO_MAXIMO_S", 0.5)
+    bling_id = 900_000_000 + uuid4().int % 1_000_000
+    try:
+        inicio = time.monotonic()
+        r = await painel.observacoes_bling(bling_id, session=db, forcar=True)
+        assert time.monotonic() - inicio < 5
+        assert r["erro"] and r["observacoes"] is None, r
+        assert gastos == ["rt-velho"]
+        assert gets == []
+        assert clientes._RENOVACOES_EM_SEGUNDO_PLANO
+    finally:
+        libera.set()
+    fim = asyncio.get_running_loop().time() + 20
+    while clientes._RENOVACOES_EM_SEGUNDO_PLANO and asyncio.get_running_loop().time() < fim:
+        await asyncio.gather(*list(clientes._RENOVACOES_EM_SEGUNDO_PLANO), return_exceptions=True)
+    assert not clientes._RENOVACOES_EM_SEGUNDO_PLANO
+    await painel.invalidar_observacoes(bling_id)
+    async with _db.SessionLocal() as s:
+        creds = decrypt_json(
+            await s.scalar(select(Integration.credentials).where(Integration.id == integ.id))
+        )
+    assert (creds["access_token"], creds["refresh_token"]) == ("novo", "rt-novo")
+    assert gastos == ["rt-velho"]  # gasto UMA vez
+    assert gets == []  # o GET cortado não sai sozinho depois
 
 
 # ─────────────── links ───────────────

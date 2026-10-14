@@ -23,9 +23,22 @@ acesso até alguém reautorizar na mão. Por isso, aqui:
   Redis, o cron renova como sempre renovou. O sync do atendimento continua
   nos minutos ÍMPARES, longe do :00/:30 deles.
 
+  3. a renovação NUNCA é cancelada no meio (`blindar_renovacao`, 14/10/2026):
+     ela roda numa tarefa própria e blindada (`asyncio.shield`). Quem chama
+     o cliente costuma pôr um teto de tempo — o `asyncio.wait_for` do envio
+     (90 s), o timeout do job do arq (sync, automações, reclamações,
+     avaliações) — e o cancelamento caía em qualquer `await` lá dentro:
+     inclusive entre a plataforma aceitar o refresh token (o velho morreu
+     ali) e o commit do novo, e a loja ficava sem acesso até reautorizar.
+     Agora o teto corta só quem esperava (o envio vira `revisar`, a rodada
+     acaba) e a renovação termina sozinha: trava, releitura, troca e o
+     commit do token novo. A chamada de API em si (o envio, a leitura)
+     continua cancelável — só a renovação segue.
+
 Os quatro clientes (Shopee, ML, TikTok, Amazon) renovam SEMPRE por
 `self.refresh()` — inclusive o `_ensure_fresh_token` da TikTok e o 401 do
-ML —, então embrulhar o `refresh` da instância cobre todos os caminhos.
+ML —, então embrulhar o `refresh` da instância cobre todos os caminhos. A
+Magalu também (o `refresh` dela, com a trava da linha, só ganha a blindagem).
 
 Cuidado de quem chama: a sessão do chamador não pode estar com a linha da
 integração travada (UPDATE sem commit) quando o cliente renovar — o UPDATE
@@ -35,6 +48,8 @@ chamador como alterada.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -52,7 +67,8 @@ from app.services.token_refresh_lock import token_refresh_lock, wait_for_refresh
 
 logger = structlog.get_logger()
 
-# A Magalu NÃO passa pelo embrulho abaixo: o `MagaluClient` montado com
+# A Magalu NÃO passa pela trava do Redis abaixo (`_travar_renovacao`); só pela
+# blindagem (`blindar_renovacao`, como todos): o `MagaluClient` montado com
 # `integration_id` já renova sob a trava da LINHA da integração (SELECT ... FOR
 # NO KEY UPDATE), relê o token do banco antes de renovar e só usa o novo depois
 # do commit — o mesmo caminho do estoque, do preço e da importação de anúncios.
@@ -147,6 +163,61 @@ def _travar_renovacao(cliente: Any, integration_id: UUID) -> None:
     cliente.refresh = refresh_com_trava
 
 
+# Renovações que seguem sozinhas depois que quem esperava por elas foi
+# cancelado (referência forte: senão o coletor de lixo pode matar a tarefa no
+# meio — justamente o que a blindagem existe para evitar).
+_RENOVACOES_EM_SEGUNDO_PLANO: set[asyncio.Future] = set()
+
+
+def _renovacao_terminou(integration_id: Any, tarefa: asyncio.Future) -> None:
+    """A renovação que passou do teto de quem chamou acabou: registra como foi.
+
+    Só a classe do erro (a mensagem do refresh pode trazer o corpo da
+    resposta). O token novo, se veio, já foi gravado pela própria tarefa.
+    """
+    if tarefa.cancelled():
+        erro: str | None = "cancelada"
+    else:
+        exc = tarefa.exception()
+        erro = type(exc).__name__ if exc is not None else None
+    logger.info(
+        "atendimento_token_renovacao_terminou_sozinha",
+        integration_id=str(integration_id),
+        erro=erro,
+    )
+
+
+def blindar_renovacao(cliente: Any, integration_id: Any) -> None:
+    """Troca o `refresh` da instância por um que NUNCA é cancelado no meio.
+
+    A renovação inteira (a trava, a releitura, a troca na plataforma e o
+    commit do token novo) roda numa tarefa própria, blindada: cancelado quem
+    esperava (o `wait_for` do envio, o timeout do job), ele recebe o
+    `CancelledError` na hora e a tarefa segue até gravar o token. Idempotente.
+    """
+    original = getattr(cliente, "refresh", None)
+    if original is None or getattr(original, "_blindado", False):
+        return
+
+    @functools.wraps(original)
+    async def refresh_blindado(*args: Any, **kwargs: Any) -> Any:
+        tarefa = asyncio.ensure_future(original(*args, **kwargs))
+        _RENOVACOES_EM_SEGUNDO_PLANO.add(tarefa)
+        tarefa.add_done_callback(_RENOVACOES_EM_SEGUNDO_PLANO.discard)
+        try:
+            return await asyncio.shield(tarefa)
+        except asyncio.CancelledError:
+            if not tarefa.done():
+                logger.warning(
+                    "atendimento_token_renovacao_segue", integration_id=str(integration_id)
+                )
+                tarefa.add_done_callback(functools.partial(_renovacao_terminou, integration_id))
+            raise
+
+    refresh_blindado._blindado = True  # type: ignore[attr-defined]
+    cliente.refresh = refresh_blindado
+
+
 async def cliente_da_integracao(integration: Integration) -> Any:
     """Cliente pronto para a API da loja, com renovação de token segura.
 
@@ -181,4 +252,7 @@ async def cliente_da_integracao(integration: Integration) -> Any:
     plataforma = getattr(integration.platform, "value", integration.platform)
     if plataforma in PLATAFORMAS and plataforma not in PLATAFORMAS_COM_TRAVA_PROPRIA:
         _travar_renovacao(cliente, integration_id)
+    # Por ÚLTIMO (por fora da trava): a blindagem cobre a trava, a releitura
+    # e o commit — todos os clientes, a Magalu inclusive.
+    blindar_renovacao(cliente, integration_id)
     return cliente

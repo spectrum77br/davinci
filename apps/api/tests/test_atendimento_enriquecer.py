@@ -1202,7 +1202,10 @@ async def test_cartao_guarda_a_ficha_fresca_da_mesma_resposta(db, make_user, red
     assert f.contagem("produto") == 1  # a mesma ida do cartão
     chave = f"atd:ficha:shopee:{integ.id}:77"
     assert redis_falso.ttl[chave] == ficha_svc.CACHE_FICHA_S
-    assert json.loads(redis_falso.dados[chave]) == {
+    guardada = json.loads(redis_falso.dados[chave])
+    # A hora da ida (a `fonte` da ficha diz a idade: "loja (Shopee), agora").
+    assert datetime.fromisoformat(guardada.pop("buscada_em")).tzinfo is not None
+    assert guardada == {
         "titulo": "Mochila Executiva Notebook 77",
         "descricao": "descrição longa do anúncio",
         "raw": {
