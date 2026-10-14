@@ -1083,8 +1083,11 @@ class MercadoLivreClient:
     # ── Atendimento: perguntas pré-venda e mensagens pós-venda (25/09/2026) ──
     #
     # Usados pela caixa de atendimento (services/atendimento/ml.py). Enquanto
-    # o Duoke estiver ligado, NADA aqui pode marcar mensagem como lida: a
-    # equipe se guia pelo "não lido" de lá.
+    # o Duoke estiver ligado, nenhuma LEITURA aqui pode marcar mensagem como
+    # lida: a equipe se guia pelo "não lido" de lá. 14/10/2026 (decisão do
+    # dono): o `marcar_pack_como_lido` existe, mas só a PESSOA que mexe na
+    # caixa marca, ao ABRIR a conversa de uma loja em que o DaVinci responde
+    # (`services/atendimento/lida.py`).
 
     async def _request_uma_vez(
         self,
@@ -1198,7 +1201,8 @@ class MercadoLivreClient:
 
         `mark_as_read=false` é FIXO e não é parâmetro de propósito: sem ele o
         ML marca a conversa como lida ao ler, e a equipe perde o "não lido"
-        no Duoke — que é por onde ela sabe o que falta responder. Devolve
+        no Duoke — que é por onde ela sabe o que falta responder (marcar, desde
+        14/10/2026, é só o `marcar_pack_como_lido`, pela pessoa). Devolve
         `{paging, conversation_status, messages, seller_max_message_length,
         buyer_max_message_length}`; levanta em não-2xx.
 
@@ -1247,6 +1251,58 @@ class MercadoLivreClient:
                 "text": texto,
             },
         )
+
+    async def marcar_pack_como_lido(
+        self,
+        pack_id: str | int,
+        seller_id: str | int,
+        *,
+        limite: int = 20,
+        max_paginas: int = 5,
+    ) -> int:
+        """Marca as mensagens pós-venda do pack como LIDAS — e é a única coisa
+        que faz. Devolve quantas mensagens o ML mostrou; levanta em não-2xx.
+
+        O ML não tem "marcar como lida" à parte: SÓ o GET do pack do vendedor
+        muda o estado, e muda quando vem SEM `mark_as_read=false` (a doc: os
+        outros recursos nunca marcam). Então esta é uma leitura DEDICADA com
+        `mark_as_read=true`, que pagina como a leitura (`limite` × no máximo
+        `max_paginas`): não se sabe se o ML marca o pack inteiro ou só as
+        mensagens que devolveu, e assim as duas coisas dão no mesmo. O que vem
+        não é gravado — a leitura do pack continua sendo a do sync.
+
+        14/10/2026 (Eduardo: "ao passar também tem que marcar como visto,
+        igual lá no Duoke quando clicar na conversa"): SÓ o
+        `services/atendimento/lida.py` chama isto — a PESSOA que mexe na caixa
+        abriu a conversa de uma loja em que o DaVinci responde. O
+        `mensagens_do_pack` continua com `mark_as_read=false` fixo."""
+        vistas = 0
+        offset = 0
+        for _ in range(max(1, int(max_paginas))):
+            r = await self._request(
+                "GET",
+                f"/messages/packs/{pack_id}/sellers/{seller_id}",
+                params={
+                    "tag": "post_sale",
+                    "mark_as_read": "true",
+                    "offset": offset,
+                    "limit": limite,
+                },
+            )
+            r.raise_for_status()
+            corpo = r.json() or {}
+            lote = corpo.get("messages") if isinstance(corpo, dict) else None
+            lote = lote if isinstance(lote, list) else []
+            vistas += len(lote)
+            offset += len(lote)
+            paginas = corpo.get("paging") if isinstance(corpo, dict) else None
+            try:
+                total = int((paginas or {}).get("total") or 0)
+            except (TypeError, ValueError, AttributeError):
+                total = 0
+            if not lote or offset >= total:
+                break
+        return vistas
 
     # ── Atendimento: pedido, envio e anúncio no painel da caixa (28/09/2026) ──
     #

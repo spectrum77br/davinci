@@ -5,7 +5,10 @@ conversas vem da mais recente para a mais antiga, e cada rodada desce por ela
 até encontrar o ponto em que a rodada anterior parou. Formato das respostas
 medido em produção em 25/09/2026 e o sentido da lista em 28/09 (só leitura).
 
-NUNCA marcar como lido. O cliente não tem `read_conversation` de propósito:
+NUNCA marcar como lido AQUI (leitura e envio). Desde 14/10/2026 (Eduardo: "ao
+passar também tem que marcar como visto, igual lá no Duoke") o cliente tem o
+`chat_read_conversation`, e só o `lida.py` o chama — quando a PESSOA que mexe
+abre a conversa de uma loja em que o DaVinci responde. Fora disso,
 enquanto o Duoke estiver ligado, o "não lido" da Shopee é o aviso da equipe.
 
 O cursor do canal (`atendimento_canais.cursor`):

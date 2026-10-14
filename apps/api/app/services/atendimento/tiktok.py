@@ -6,6 +6,12 @@ de vídeo da tela funcionando). Então o adaptador existe para o dia da
 aprovação e, até lá, devolve `sem_escopo` SEM gravar nada e sem levantar —
 o canal fica marcado e a rodada seguinte não vira alarme.
 
+Marcar como lida (14/10/2026, Eduardo: "ao passar também tem que marcar como
+visto, igual lá no Duoke"): ESTE módulo continua sem marcar nada — o `Read
+Message` (`cs_read_message`) só é chamado pelo `lida.py`, quando a PESSOA que
+mexe abre a conversa de uma loja em que o DaVinci responde (e, enquanto faltar
+o escopo, a TikTok recusa e a conversa continua não lida).
+
 O formato é o da documentação oficial (nunca medido, sem escopo não dá);
 por isso a leitura é DEFENSIVA: campo que falta vira None, `content` que não
 é JSON vira mensagem `outro`, e nada disso derruba a rodada.

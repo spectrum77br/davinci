@@ -190,8 +190,24 @@ Buyer Communication ausente); nexus e poofy sem pedido nos últimos 6 dias.
 
 - **Entrada por consulta periódica** (1–2 min por loja): é a fonte confiável. O aviso
   automático de cada loja entra depois, só para acelerar.
-- **Enquanto o Duoke estiver ligado, o DaVinci nunca marca nada como lido**
-  (Shopee: nunca `read_conversation`; ML: sempre `mark_as_read=false`).
+- **A leitura nunca marca nada como lido** (Shopee: a leitura nunca chama
+  `read_conversation`; ML: sempre `mark_as_read=false`; TikTok: nunca o `Read
+  Message`) — o Duoke usa o "não lido" da plataforma e a equipe trabalha nele.
+- **Marcar como lida ao abrir (14/10/2026).** O Eduardo: "ao passar também tem que
+  marcar como visto, igual lá no Duoke quando clicar na conversa". Só quando uma
+  **pessoa que mexe** na caixa abre a conversa (1,5 s com ela aberta e a aba
+  visível, uma vez por abertura) de uma loja em que **o DaVinci responde** (`auto`,
+  `copiloto` ou `humano`, com o envio ligado — **nunca** em `observar`): a tela
+  chama `POST /api/atendimento/conversas/{id}/lida` e o DaVinci marca na plataforma
+  — Shopee `read_conversation` (até a mais recente que não é resposta da loja:
+  a do comprador ou a de sistema, inclusive a resposta automática da própria
+  loja, que a Shopee conta no não lido), TikTok `Read Message`, ML pós-venda com
+  uma leitura dedicada do pack com `mark_as_read=true` — e só então zera as não
+  lidas. Não marcou lá (erro, sem permissão, passou do tempo), não zera aqui; a
+  chamada que passa do tempo não é cancelada (termina em segundo plano: o
+  refresh token é de uso único). Amazon, e-mail, Zap, Temu/AliExpress (robô), Magalu,
+  site, redes, Direct e pergunta do ML: não se aplica. A IA, os crons e os robôs
+  nunca marcam (`services/atendimento/lida.py`).
 - **Uma tela só — `/atendimento`** (menu Pós-venda): conversas de todas as lojas à
   esquerda, a conversa no meio com o rascunho da IA pronto na caixa de resposta,
   e o pedido à direita (Bling, rastreio, NF, chamado aberto).
@@ -363,7 +379,8 @@ O que MUDA no deploy mesmo com todos os interruptores desligados (fora do
 O primeiro passo em produção é **só observar**: o DaVinci lê todas as lojas,
 mostra a conversa com o pedido e o cliente, e a IA escreve o que TERIA
 respondido — mas **nada sai pelo DaVinci**. Quem responde continua sendo o
-Duoke. Nenhuma conversa é marcada como lida (a bolinha do Duoke não muda).
+Duoke. Nenhuma conversa é marcada como lida (a bolinha do Duoke não muda) —
+loja em `observar` nunca marca, nem quando alguém abre a conversa no DaVinci.
 
 **Antes** (tudo com o ok do Eduardo, pelo processo do `CLAUDE.local.md`):
 

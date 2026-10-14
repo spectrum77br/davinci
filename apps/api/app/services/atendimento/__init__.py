@@ -14,6 +14,10 @@ dividido por RESPONSABILIDADE, para que cada peça seja testada sozinha:
   shopee, ml, tiktok, amazon_email
                 — adaptadores: `sincronizar` lê o que mudou desde o cursor do
                   canal; `enviar_texto` responde. Nunca marcam como lido.
+  lida          — marcar como lida NA PLATAFORMA (14/10/2026): só a pessoa que
+                  mexe, ao abrir a conversa de uma loja em que o DaVinci
+                  responde (chat da Shopee e da TikTok, pós-venda do ML); a
+                  IA, os crons e os robôs nunca.
   validador     — o que não pode sair (contato fora da loja, limite, ISO-8859-1
                   do ML...). Vale para pessoa e para IA; a IA tem regras a mais.
   contexto      — o pedido por trás da conversa (Bling, rastreio, chamados).

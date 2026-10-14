@@ -587,9 +587,13 @@ async def test_cliente_cs_send_text_manda_content_serializado(cliente_gravando):
     assert json.loads(c["body"]["content"]) == {"content": 'Olá, "já" saiu ✅'}
 
 
-def test_cliente_nao_tem_como_marcar_como_lido():
+def test_cliente_tem_um_so_jeito_de_marcar_como_lido():
+    """14/10/2026: o ÚNICO método que marca é o `cs_read_message` (`Read
+    Message`), e só o `services/atendimento/lida.py` o chama — a pessoa que
+    abre a conversa numa loja em que o DaVinci responde (test_atendimento_lida.py).
+    A leitura e o envio nunca: o teste abaixo roda os dois."""
     nomes = [n.lower() for n in dir(TikTokClient)]
-    assert not [n for n in nomes if n.startswith("cs_") and "read" in n]
+    assert [n for n in nomes if n.startswith("cs_") and "read" in n] == ["cs_read_message"]
 
 
 _AsyncClientReal = httpx.AsyncClient
@@ -601,7 +605,8 @@ async def test_nenhum_pedido_de_marcar_como_lido_sai_do_cliente_de_verdade(
     """COMPL-7: o teste acima só olha NOMES de método. Aqui a rodada e o envio
     rodam com o `TikTokClient` de VERDADE sobre um transporte falso, e cada
     pedido é conferido contra a lista FECHADA do que pode sair — o `Read
-    Message` (…/messages/read) ou qualquer outro endpoint reprova."""
+    Message` (…/messages/read) ou qualquer outro endpoint reprova (marcar é
+    só da pessoa que abre a conversa, desde 14/10/2026: `lida.py`)."""
     feitos: list[httpx.Request] = []
     t = AGORA - timedelta(minutes=5)
     falso = TikTokFalso()

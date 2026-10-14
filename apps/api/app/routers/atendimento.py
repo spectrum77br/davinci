@@ -176,6 +176,7 @@ from app.services.atendimento import (
     separa_email,
 )
 from app.services.atendimento import etiqueta as etiqueta_svc
+from app.services.atendimento import lida as lida_svc
 from app.services.atendimento.constantes import (
     ACAO_OBSERVOU,
     AUTOR_CLIENTE,
@@ -2507,6 +2508,9 @@ async def detalhe_conversa(
         "produto": _do_dados(c, "produto"),
         "sugestoes": await _sugestoes(session, c.id, user_id=user.id),
         "pedido_atualizavel": await _pedido_atualizavel(session, c),
+        # Marcar como lida ao abrir (14/10/2026): só quem mexe, só loja em que o
+        # DaVinci responde — as mesmas travas do POST /lida.
+        "marcar_lida": await lida_svc.marcar_ao_abrir(session, c, user),
         "etiqueta_historico": await _historico_etiqueta(session, c.id),
     }
     # Por ÚLTIMO: o cartão pode ir à loja (ML ao vivo, com cache) e, se

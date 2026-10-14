@@ -22,7 +22,9 @@ O que estes testes garantem:
 - um pack com 403 não tira a conta da leitura (`erro`, não `sem_escopo`);
 - rodar duas vezes não duplica nada; a nossa resposta voltando é adotada;
 - envio de pergunta e de pós-venda: ok, recusa, bloqueio, ambíguo;
-- NENHUM GET de pack sai sem `mark_as_read=false` (o Duoke continua ligado).
+- NENHUM GET de pack da leitura ou do envio sai sem `mark_as_read=false` (o
+  Duoke continua ligado; desde 14/10/2026 só a pessoa que abre a conversa
+  marca, pela leitura dedicada `marcar_pack_como_lido` — test_atendimento_lida.py).
 """
 
 from __future__ import annotations
@@ -1685,7 +1687,9 @@ async def test_nenhum_get_de_pack_sai_sem_mark_as_read_false(
             assert pedido.url.params.get("mark_as_read") == "false" or (
                 pedido.url.path == "/messages/unread"
             ), f"GET sem mark_as_read=false: {pedido.url}"
-        # Nenhum caminho de "marcar como lido" é chamado, em hipótese alguma.
+        # Nenhum caminho de "marcar como lido" é chamado pela leitura nem pelo
+        # envio (desde 14/10/2026 só a pessoa que abre a conversa marca, pelo
+        # `marcar_pack_como_lido` — tests/test_atendimento_lida.py).
         assert "mark_as_read=true" not in str(pedido.url)
         assert "/read" not in pedido.url.path
     for pedido in gets_de_pack:
