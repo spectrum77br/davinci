@@ -769,7 +769,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Dúvida ou cobrança de estorno ou reembolso.",
-      "faca": "Sugestão: acolher e dizer que a equipe confere a situação do reembolso do pedido {numero_pedido} na plataforma e responde por aqui. Não prometer valor nem prazo, não propor reembolso parcial."
+      "faca": "Sugestão: acolher e explicar que o reembolso é feito pela própria plataforma da compra (dizer qual: Shopee, Mercado Livre, TikTok Shop ou Amazon), não pela loja: é a plataforma que analisa, define o prazo e devolve o valor pela mesma forma de pagamento da compra, e a loja não tem acesso ao pagamento. Orientar a acompanhar o andamento no pedido {numero_pedido} dentro do app da plataforma e, se o valor não aparecer, falar com o suporte da própria plataforma, que é quem consegue verificar o pagamento. Dizer que seguimos à disposição por aqui. Não prometer valor nem prazo, não dizer que o reembolso será feito ou aprovado, não propor reembolso parcial, não pedir dados bancários."
     },
     {
       "tipo": "categoria",
@@ -1266,7 +1266,7 @@
     },
     {
       "titulo": "Reembolso (sugestão para pessoa)",
-      "texto": "Olá! Entendemos a sua preocupação. Nossa equipe vai conferir a situação do reembolso do pedido {numero_pedido} na plataforma e responde por aqui.",
+      "texto": "Olá! O reembolso é feito pela própria plataforma da compra: é ela que analisa, define o prazo e devolve o valor pela forma de pagamento usada; a loja não tem acesso ao pagamento. Acompanhe no pedido {numero_pedido}, no app da plataforma. Se o valor não aparecer, o suporte dela consegue verificar. Seguimos à disposição!",
       "plataforma": null,
       "canal": null,
       "categoria": "reembolso"
