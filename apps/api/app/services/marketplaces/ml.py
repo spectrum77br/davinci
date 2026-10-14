@@ -1331,6 +1331,26 @@ class MercadoLivreClient:
                     saida.append(body)
         return saida
 
+    async def descricao_do_item(self, item_id: str) -> str | None:
+        """A descrição de UM anúncio (GET /items/{id}/description): o
+        `plain_text` (o `text`, em HTML, se ele vier vazio). None = o anúncio
+        não tem descrição (404 nesta rota). Levanta nos outros não-2xx.
+
+        A ficha do anúncio da IA (services/atendimento/ficha_loja.py): o
+        `/items` não traz o texto. SÓ LEITURA."""
+        r = await self._request("GET", f"/items/{item_id}/description")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        corpo = r.json()
+        if not isinstance(corpo, dict):
+            return None
+        for chave in ("plain_text", "text"):
+            texto = corpo.get(chave)
+            if isinstance(texto, str) and texto.strip():
+                return texto
+        return None
+
     # ── Atendimento: o cartão "Cliente" da caixa (28/09/2026) ──
     #
     # Quem escreve já comprou? Quanto? Avaliou mal? O ML filtra pedido por
