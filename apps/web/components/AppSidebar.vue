@@ -6,7 +6,7 @@ import {
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, ShieldCheck, X,
+  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, ShieldCheck, X, Scale,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -181,6 +181,7 @@ const sections = computed<Section[]>(() => [
       { to: '/marketing', label: 'Marketing', icon: BarChart3, featureFlag: 'marketing' },
       { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
       { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
+      { to: '/conciliacao', label: 'Conciliação', icon: Scale, resource: 'conciliacao', soComPermissao: true },
       { to: '/faturamento', label: 'Faturamento', icon: Coins, resource: 'faturamento' },
       { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },
     ],

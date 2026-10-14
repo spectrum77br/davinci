@@ -20,6 +20,7 @@ Resource = Literal[
     # cercadas por sales_teams.
     "tabela_precos_todas_contas",
     "margem",
+    "conciliacao",
     "faturamento",
     "controle_estoque",
     "devolucoes",

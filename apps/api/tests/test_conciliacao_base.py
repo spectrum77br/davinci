@@ -747,3 +747,232 @@ async def test_ler_pagina_espera_um_minuto_no_429_e_tenta_de_novo():
     pagina = await fat.ler_pagina(cliente, "2026-10-01", "CHARGE", 0, dormir=dormir)
     assert pagina == {"results": [], "last_id": 0}
     assert esperas == [fat.ESPERA_429, fat.ESPERA_429] and cliente.vezes == 3
+
+
+# --- painel (2b): lista, Raio-X, marcações e Excel ---------------------------
+
+
+async def _pedido_conciliado(loja, **kw) -> ConciliacaoPedido:
+    base: dict = {}
+    base.update(
+        integration_id=loja.integration_id,
+        platform=loja.platform,
+        pedido_bling="301102",
+        numeroloja="2000018405611066",
+        conta="jlas2",
+        data_pedido=datetime(2026, 10, 1, 12, tzinfo=UTC),
+        bling_total=Decimal("880.98"),
+        bling_valorbase=Decimal("880.98"),
+        bling_custofrete=Decimal("62.33"),
+        bling_taxacomissao=Decimal("92.36"),
+        venda_valor=Decimal("880.98"),
+        venda_tarifa=Decimal("92.36"),
+        venda_frete=Decimal("62.33"),
+        venda_liquido=Decimal("610.65"),
+        venda_status="posted",
+        liberado_em=datetime(2026, 10, 10, 9, tzinfo=UTC),
+        liberado_valor=Decimal("610.65"),
+        recebido=Decimal("610.65"),
+        custo=Decimal("500.00"),
+        reembolso=Decimal("0.00"),
+        sobrou=Decimal("110.65"),
+        margem=Decimal("0.2213"),
+        dif_previsto_recebido=Decimal("0.00"),
+        situacao="bateu",
+        etapa="conciliado",
+        bateu_em=datetime(2026, 10, 10, 9, tzinfo=UTC),
+    )
+    base.update(kw)
+    return ConciliacaoPedido(**base)
+
+
+async def test_painel_lista_pedidos_com_totais_e_filtros(db, make_user, auth_as, client):
+    loja, _integ = await _loja(db, make_user)
+    db.add_all(
+        [
+            await _pedido_conciliado(loja),
+            await _pedido_conciliado(
+                loja,
+                pedido_bling="300991",
+                numeroloja="2000018600988674",
+                data_pedido=datetime(2026, 10, 2, 12, tzinfo=UTC),
+                venda_liquido=Decimal("268.12"),
+                recebido=Decimal("240.37"),
+                liberado_valor=Decimal("240.37"),
+                custo=Decimal("150.00"),
+                sobrou=Decimal("90.37"),
+                dif_previsto_recebido=Decimal("-27.75"),
+                situacao="recebido_a_menos",
+                etapa="pendencia",
+                motivo="frete cobrado 63.40 × previsto 35.65",
+            ),
+            await _pedido_conciliado(
+                loja,
+                pedido_bling="299012",
+                numeroloja="2000018999",
+                data_pedido=datetime(2026, 10, 3, 12, tzinfo=UTC),
+                liberado_em=None,
+                liberado_valor=None,
+                recebido=None,
+                sobrou=Decimal("39.22"),
+                custo=Decimal("62.00"),
+                dif_previsto_recebido=None,
+                situacao="aguardando",
+                etapa="aguardando",
+                bateu_em=None,
+            ),
+        ]
+    )
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+
+    r = await client.get("/api/conciliacao/pedidos", params={"loja": "jlas2"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["total"] == 3 and [i["pedido_bling"] for i in corpo["itens"]] == [
+        "299012",
+        "300991",
+        "301102",
+    ]
+    assert (
+        corpo["itens"][2]["situacao_label"] == "Bateu"
+        and corpo["itens"][2]["etapa_label"] == "conciliado"
+    )
+    resumo = corpo["resumo"]
+    assert resumo["pedidos"] == 3 and resumo["liberados"] == 2
+    assert resumo["recebido"] == 851.02 and resumo["sobrou"] == 240.24
+    assert resumo["por_situacao"] == {"bateu": 1, "recebido_a_menos": 1, "aguardando": 1}
+
+    r2 = await client.get(
+        "/api/conciliacao/pedidos", params={"loja": "jlas2", "situacao": "recebido_a_menos,bateu"}
+    )
+    assert r2.json()["total"] == 2
+    r3 = await client.get("/api/conciliacao/pedidos", params={"loja": "jlas2", "q": "2000018999"})
+    assert [i["pedido_bling"] for i in r3.json()["itens"]] == ["299012"]
+    r4 = await client.get(
+        "/api/conciliacao/pedidos",
+        params={"loja": "jlas2", "data": "liberacao", "de": "2026-10-10", "ate": "2026-10-10"},
+    )
+    assert r4.json()["total"] == 2
+    r5 = await client.get("/api/conciliacao/lojas")
+    assert r5.json()["lojas"][0]["conta"] == "jlas2"
+
+
+async def test_painel_raio_x_junta_as_quatro_versoes_e_os_movimentos(
+    db, make_user, auth_as, client
+):
+    loja, _integ = await _loja(db, make_user)
+    db.add(await _pedido_conciliado(loja))
+    db.add_all(
+        [
+            _mov(
+                loja,
+                "venda_liberada",
+                datetime(2026, 10, 10, 9, tzinfo=UTC),
+                credito="610.65",
+                pedido_mkt="2000018405611066",
+                pedido_bling="301102",
+                frete="-62.33",
+                tarifa="-92.36",
+                parcelamento="-115.64",
+            ),
+            _mov(
+                loja,
+                "fatura_tarifa_venda",
+                datetime(2026, 10, 2, 1, tzinfo=UTC),
+                debito="82.77",
+                pedido_mkt="2000018405611066",
+                origem="ml_fatura",
+                sub="CVVML",
+            ),
+        ]
+    )
+    await db.commit()
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    r = await client.get("/api/conciliacao/pedidos/301102", params={"loja": "jlas2"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["pedido"]["pedido_bling"] == "301102"
+    assert corpo["versoes"]["extrato"] == {
+        "valor": None,
+        "tarifa": 92.36,
+        "parcelamento": 115.64,
+        "frete": 62.33,
+        "cupom": None,
+        "liquido": 610.65,
+        "saidas_depois": None,
+        "recebido": 610.65,
+    }
+    assert corpo["versoes"]["bling"]["liquido"] == 726.29
+    assert [m["origem"] for m in corpo["movimentos"]] == ["ml_fatura", "mp_extrato"]
+    assert (
+        client
+        and (await client.get("/api/conciliacao/pedidos/999", params={"loja": "jlas2"})).status_code
+        == 404
+    )
+
+
+async def test_painel_marca_conferido_finaliza_e_exige_motivo_na_pendencia(
+    db, make_user, auth_as, client
+):
+    loja, _integ = await _loja(db, make_user)
+    db.add(await _pedido_conciliado(loja))
+    db.add(
+        await _pedido_conciliado(
+            loja,
+            pedido_bling="300991",
+            numeroloja="2000018600988674",
+            situacao="recebido_a_menos",
+            etapa="pendencia",
+        )
+    )
+    await db.commit()
+    quem = await make_user(permissions={"conciliacao": {"view": True, "edit": True}})
+    auth_as(quem)
+    r = await client.patch(
+        "/api/conciliacao/pedidos/301102",
+        json={"loja": "jlas2", "conferido": True, "observacao": " ok "},
+    )
+    assert r.status_code == 200, r.text
+    p = r.json()["pedido"]
+    assert p["conferido"] is True and p["conferido_por"] == quem.email and p["observacao"] == "ok"
+    # pendência sem motivo não finaliza
+    r2 = await client.patch(
+        "/api/conciliacao/pedidos/300991", json={"loja": "jlas2", "etapa": "finalizado"}
+    )
+    assert r2.status_code == 422 and r2.json()["detail"]["code"] == "motivo_obrigatorio"
+    r3 = await client.patch(
+        "/api/conciliacao/pedidos/300991",
+        json={"loja": "jlas2", "etapa": "finalizado", "etapa_motivo": "frete a mais, chamado 4471"},
+    )
+    assert (
+        r3.json()["pedido"]["etapa"] == "finalizado"
+        and r3.json()["pedido"]["etapa_por"] == quem.email
+    )
+    # quem só vê não marca
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r4 = await client.patch(
+        "/api/conciliacao/pedidos/301102", json={"loja": "jlas2", "conferido": False}
+    )
+    assert r4.status_code == 403
+
+
+async def test_painel_exporta_excel(db, make_user, auth_as, client):
+    loja, _integ = await _loja(db, make_user)
+    db.add(await _pedido_conciliado(loja))
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.post("/api/conciliacao/export.xlsx", params={"loja": "jlas2"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/vnd.openxmlformats")
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    ws = load_workbook(BytesIO(r.content)).active
+    linhas = list(ws.iter_rows(values_only=True))
+    assert (
+        linhas[0][1] == "Pedido Bling"
+        and linhas[1][1] == "301102"
+        and linhas[1][16] == "10/10/2026 06:00"
+    )

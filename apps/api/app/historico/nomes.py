@@ -21,6 +21,7 @@ PAGINAS: dict[str, str] = {
     "/marketing": "Marketing",
     "/margem-audit": "Auditoria de pedidos",
     "/margem": "Margem",
+    "/conciliacao": "Conciliação",
     "/faturamento": "Faturamento",
     "/controle-estoque": "Controle de Estoque",
     "/devolucoes": "Devoluções",
@@ -78,6 +79,7 @@ API: dict[str, str] = {
     "/api/devolutions": "Devoluções",
     "/api/refunds": "Reembolso",
     "/api/logistica": "Logística",
+    "/api/conciliacao": "Conciliação",
     "/api/notas-fiscais": "Notas fiscais",
     "/api/chamados": "Chamados",
     "/api/informar": "Informar (Threema)",
@@ -162,7 +164,10 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/logistica/status/{status_id}/enviar-threema"): "enviou mensagem no Threema",
     ("POST", "/api/logistica/mensagens-cliente/{evento}/teste"): "enviou e-mail de teste",
     ("POST", "/api/logistica/recarregar"): "mandou recarregar a Logística",
-    ("POST", "/api/logistica/{logistica_id}/mensagem-bling"): "escreveu nas observações do pedido no Bling",
+    (
+        "POST",
+        "/api/logistica/{logistica_id}/mensagem-bling",
+    ): "escreveu nas observações do pedido no Bling",
     ("POST", "/api/notas-fiscais/export-job"): "exportou notas fiscais",
     ("POST", "/api/ouvidoria/robos/{chave}/rodar"): "mandou rodar um robô",
     ("POST", "/api/informar/{contexto}/enviar"): "enviou relatório no Threema",
@@ -170,7 +175,10 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/metrics/reset"): "zerou as métricas",
     ("POST", "/api/product-links/remover-mortos"): "mandou remover os vínculos mortos",
     # Desde 25/09 baixar o certificado é POST com a senha dele no corpo.
-    ("POST", "/api/companies/{company_id}/certificates/{cert_id}/download"): "baixou o certificado digital",
+    (
+        "POST",
+        "/api/companies/{company_id}/certificates/{cert_id}/download",
+    ): "baixou o certificado digital",
     # NFS-e (desde 29/09 pela NFE.io): o que vai e volta da NFE.io.
     ("POST", "/api/nfse/emitir"): "emitiu nota fiscal de serviço (NFS-e)",
     ("POST", "/api/nfse/emissoes/{emissao_id}/reenviar"): "reenviou nota fiscal de serviço (NFS-e)",

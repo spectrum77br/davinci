@@ -350,3 +350,15 @@ Com o OK do Vinicius ("Ok" ao passo 2), entrou a base do painel, sem tela ainda:
 - Extrato 01→13/10: 410 movimentos — 90 vendas liberadas (65.126,09), 76 mediações (45.795,77), 46 estornos de tarifa, 160 linhas de reserva por disputa, 7 saques (36.991,00). Toda linha de venda achou o pedido do Bling.
 - **Limite do ML é dividido com a Margem**: a primeira rodada tomou 429 na 3ª chamada (a Margem lê a fatura pedido a pedido com a mesma chave). O robô agora espera um minuto e tenta de novo; a segunda rodada levou 3m45 e leu tudo.
 - **Efeito da data de início 01/10**: o ML libera ~20 dias depois da venda, então as liberações de 01→13/10 são de vendas de setembro — ficam classificadas "anterior ao início". Os 156 pedidos de outubro estão "aguardando" (110) ou "cancelado" (46); os primeiros "bateu" aparecem quando as vendas de outubro liberarem, por volta de 20/10.
+
+---
+
+## 15. Passo 2b (14/10, noite) — a tela: aba Pedidos + Raio-X
+
+- **Página `/conciliacao`** (menu Operação, ao lado da Margem), permissão `conciliacao` (ver/editar). Migration 0398 dá ver+editar a quem já edita a Margem (admin vê tudo).
+- **Abas** por marketplace (só Mercado Livre ligada; Shopee, Amazon e TikTok aparecem desligadas "entra depois") e visões Pedidos · Extrato do dia · Resumo (as duas últimas vêm no 2c/2d).
+- **Filtros**: loja, período (de/até) por data do pedido ou da liberação, situação, etapa, busca por pedido/venda. Linha de status com a barra "fechados de N" e os contadores por situação e etapa (clicáveis = filtram). No canto, quando foi a última leitura do extrato, da fatura e o último recálculo, e o erro se houver.
+- **Grade** no padrão da maquete: Identificação · Bling · Venda ML · Extrato (entrou de fato) · Dif. · Resultado de verdade (custo, reembolso, sobrou, margem; em cinza "prev." enquanto não libera) · Situação / motivo / etapa (✓ quando conferido). Rodapé com os totais do filtro e paginação de 100.
+- **Raio-X** à direita, ao clicar: as quatro versões lado a lado (Bling · Venda · Fatura · Extrato: valor, tarifa, frete, parcelamento, cupom, estorno/bonificação, líquido; a linha do frete fica vermelha quando o cobrado difere do previsto), os movimentos do pedido em ordem (extrato e fatura, com "cobrada à parte" quando a fatura não descontou da venda) e o resultado. Quem edita: observação, marcar/desmarcar conferido, Finalizar (motivo obrigatório quando há pendência) e Reabrir.
+- **Botões**: Recarregar, Excel (mesmo filtro, até 20 mil linhas) e, pra quem edita, "Sincronizar agora" (enfileira fatura + extrato + recálculo da loja).
+- **API**: `GET /api/conciliacao/lojas`, `GET /api/conciliacao/pedidos` (paginado, totais e contagens do filtro), `GET /api/conciliacao/pedidos/{pedido}` (Raio-X), `PATCH /api/conciliacao/pedidos/{pedido}` (observação, conferido, etapa finalizado/reaberto com motivo), `POST /api/conciliacao/export.xlsx`.
