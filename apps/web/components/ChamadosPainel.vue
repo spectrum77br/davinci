@@ -2063,7 +2063,7 @@ async function confirmarExcluir() {
         </div>
       </div>
     </div>
-    <InformarThreemaModal :open="avisoIaCfgOpen" contexto="chamados_ia" somente-cadastro descricao="Quem está marcado recebe no Threema o aviso de quando a IA de Chamado para na tela da loja num 'não sou robô' (captcha/quebra-cabeça) ou num login: qual pedido, onde parou e o link do chamado. A loja fica aberta nessa tela no Mac Santiago — resolva lá e mande a instrução 'continua' no chamado. A seleção fica salva." @close="avisoIaCfgOpen = false" />
+    <InformarThreemaModal :open="avisoIaCfgOpen" contexto="chamados_ia" somente-cadastro descricao="Quem está marcado recebe no Threema o aviso de quando a IA de Chamado para na tela da loja num 'não sou robô' (captcha/quebra-cabeça) ou num login: qual pedido, onde parou e o link do chamado. A loja fica aberta nessa tela no Mac mini da Makisa — resolva lá e mande a instrução 'continua' no chamado. A seleção fica salva." @close="avisoIaCfgOpen = false" />
     <InformarThreemaModal :open="juridicoCfgOpen" contexto="juridico" somente-cadastro descricao="Quem está marcado recebe no Threema o aviso do botão 'encaminhar ao jurídico' (dados do chamado + link do dossiê com o histórico e as fotos). A seleção fica salva." @close="juridicoCfgOpen = false; if (juridico.open && juridico.row) openJuridico(juridico.row)" />
 
     <!-- modal: histórico + réplica -->

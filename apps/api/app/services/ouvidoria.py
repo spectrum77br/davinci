@@ -328,7 +328,7 @@ ROBOS: dict[str, RoboDef] = {
         chave="vigia_robo_melhorenvio",
         nome="Vigia Robô Melhor Envio",
         descricao=(
-            "O robô do Mac Santiago que faz o \"Suspender entrega\" no Melhor "
+            "O robô do Mac mini da Makisa que faz o \"Suspender entrega\" no Melhor "
             "Envio: robô sem sinal (Mac desligado ou dormindo, AdsPower fechado), "
             "pedido de suspensão parado na fila e suspensão que falhou com o "
             "pacote ainda a caminho."
@@ -350,7 +350,7 @@ ROBOS: dict[str, RoboDef] = {
         chave="vigia_robo_leitura",
         nome="Vigia Robô Leitura de Chamados",
         descricao=(
-            "O robô do Mac Santiago que lê no Seller Center o que a Shopee "
+            "O robô do Mac mini da Makisa que lê no Seller Center o que a Shopee "
             "escreveu nas devoluções (\"Histórico da Solicitação\") e traz pro "
             "chamado: robô sem sinal (Mac desligado ou dormindo) e devolução que "
             "ficou sem leitura (login caído, perfil em uso, loja sem perfil no "

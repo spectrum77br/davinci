@@ -162,11 +162,11 @@ async def test_sem_sinal_abre_e_fecha_quando_volta(db):
     hb = await _heartbeat(db, visto_min=25)
     r = await vigia.vigia_robo_melhorenvio_run(db)
     o = await _por_chave(db, "executor:offline")
-    assert o.titulo == "Robô do Melhor Envio (Mac Santiago) sem sinal há 25 min"
+    assert o.titulo == "Robô do Melhor Envio (Mac mini da Makisa) sem sinal há 25 min"
     # Nada esperando: avisa, mas não é urgência.
     assert o.severidade == "pessoa" and o.plataforma == "amazon"
     assert o.dados["agent_name"] == "santiago" and o.dados["calibrado"] is True
-    assert "tampa aberta" in o.acao and o.link == vigia.LINK_PAINEL
+    assert "Mac mini da Makisa está ligado" in o.acao and o.link == vigia.LINK_PAINEL
     assert r["executor_ok"] == 0 and r["resumo"] == "robô sem sinal há 25 min"
 
     row = await _linha(db)

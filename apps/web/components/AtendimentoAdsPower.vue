@@ -74,7 +74,7 @@ export const MENSAGENS_ADSPOWER: Record<string, { titulo: string; detalhe: strin
   },
   perfil_em_uso: {
     titulo: 'Perfil em uso em outro computador',
-    detalhe: 'Este perfil está aberto em outro lugar — pode ser um robô (Temu e AliExpress no Mac mini; ML e Shopee no Mac do Santiago). Feche lá antes, ou combine com quem está usando.',
+    detalhe: 'Este perfil está aberto em outro lugar — pode ser um robô (Temu, AliExpress, ML e Shopee no Mac mini da Makisa). Feche lá antes, ou combine com quem está usando.',
   },
   limite: {
     titulo: 'O AdsPower pediu para esperar',

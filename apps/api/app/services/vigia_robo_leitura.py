@@ -1,5 +1,5 @@
 """Vigia Robô Leitura de Chamados — o robô da Ouvidoria que olha o executor de
-leitura (Mac Santiago).
+leitura (Mac mini da Makisa).
 
 Vinicius, 24/09/2026: o executor de leitura abre as devoluções da Shopee no
 Seller Center e traz pro chamado o que a Shopee escreveu ("Histórico da
@@ -53,20 +53,20 @@ _ATRASO_HORAS = 3
 _TZ_BR = ZoneInfo("America/Sao_Paulo")
 
 LINK_PAINEL = "/chamados"
-QUEM = "Robô de leitura de chamados (Mac Santiago)"
+QUEM = "Robô de leitura de chamados (Mac mini da Makisa)"
 
 ACAO_SEM_SINAL = (
-    "Ver se o Mac Santiago está ligado, acordado e com internet — o robô de "
+    "Ver se o Mac mini da Makisa está ligado, acordado e com internet — o robô de "
     "leitura liga sozinho quando o Mac liga"
 )
 ACAO_CASO = (
-    "Ver o registro do robô no Mac Santiago (DaVinci › executor-leitura-chamado "
+    "Ver o registro do robô no Mac mini da Makisa (DaVinci › executor-leitura-chamado "
     "› logs): login do Seller Center caído, perfil da loja aberto por alguém, "
     "loja sem perfil no AdsPower ou página da Shopee mudada. Enquanto isso, "
     "conferir a devolução direto no Seller Center"
 )
 ACAO_CASO_ML = (
-    "Ver o registro do robô no Mac Santiago (DaVinci › executor-leitura-chamado "
+    "Ver o registro do robô no Mac mini da Makisa (DaVinci › executor-leitura-chamado "
     "› logs): login do Mercado Livre caído, perfil \"<Loja> - Mercado Livre\" aberto "
     "por alguém ou faltando no AdsPower, ou página da consulta mudada. Enquanto "
     "isso, conferir a consulta direto no Mercado Livre (Ajuda › Consultas recentes)"

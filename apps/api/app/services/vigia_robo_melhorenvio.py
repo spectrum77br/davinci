@@ -1,7 +1,7 @@
 """Vigia Robô Melhor Envio — o robô da Ouvidoria que olha o "Suspender entrega".
 
 Vinicius, 24/09/2026: o "Suspender entrega" da Amazon (Envio próprio) é feito
-por um executor no Mac Santiago, que abre o perfil 70 do AdsPower e clica no
+por um executor no Mac mini da Makisa, que abre o perfil 70 do AdsPower e clica no
 painel do Melhor Envio (ver services/logistica_robo.py). Quem aperta o botão
 só vê "na fila do robô" — se o Mac dormiu, o AdsPower fechou ou o Melhor
 Envio pediu login de novo, ninguém fica sabendo, e suspensão é corrida contra
@@ -63,28 +63,28 @@ _JANELA_FALHAS = timedelta(days=7)
 _TZ_BR = ZoneInfo("America/Sao_Paulo")
 
 LINK_PAINEL = "/logistica?tab=amazon&sub=proprio"
-QUEM = "Robô do Melhor Envio (Mac Santiago)"
+QUEM = "Robô do Melhor Envio (Mac mini da Makisa)"
 
 ACAO_OFFLINE = (
-    "Ver se o Mac Santiago está ligado, acordado, com a tampa aberta e com "
+    "Ver se o Mac mini da Makisa está ligado, acordado e com "
     "internet — o robô liga sozinho quando o Mac liga"
 )
 ACAO_ADSPOWER = (
-    "Abrir o AdsPower no Mac Santiago (logado, com a API liberada) — o robô usa "
+    "Abrir o AdsPower no Mac mini da Makisa (logado, com a API liberada) — o robô usa "
     "a API dele pra abrir o perfil do Melhor Envio"
 )
 ACAO_FILA = (
-    "Ver se o Mac Santiago está ligado e com o AdsPower aberto; se a entrega não "
+    "Ver se o Mac mini da Makisa está ligado e com o AdsPower aberto; se a entrega não "
     "pode esperar, suspender à mão no Melhor Envio (Liberados e postados)"
 )
-ACAO_PERFIL = "Pôr MELHORENVIO_ADSPOWER_USER_ID no .env do executor (Mac Santiago)"
-ACAO_TRAVA = "Virar MELHORENVIO_CALIBRATED pra true no .env do executor (Mac Santiago)"
+ACAO_PERFIL = "Pôr MELHORENVIO_ADSPOWER_USER_ID no .env do executor (Mac mini da Makisa)"
+ACAO_TRAVA = "Virar MELHORENVIO_CALIBRATED pra true no .env do executor (Mac mini da Makisa)"
 ACAO_FALHOU = (
     "Ler o motivo e pedir de novo no botão da linha (Logística › Amazon › Envio "
     "próprio) — ou suspender à mão no Melhor Envio"
 )
 ACAO_LOGIN = (
-    "Entrar no Melhor Envio no perfil 70 do AdsPower (Mac Santiago) e pedir de "
+    "Entrar no Melhor Envio no perfil 70 do AdsPower (Mac mini da Makisa) e pedir de "
     "novo no botão da linha"
 )
 ACAO_SEM_CONFIRMACAO = (
