@@ -43,6 +43,7 @@ from app.routers import discrepancies as discrepancies_router
 from app.routers import email_padroes as email_padroes_router
 from app.routers import estoque as estoque_router
 from app.routers import faturamento as faturamento_router
+from app.routers import conciliacao as conciliacao_router
 from app.routers import faturas as faturas_router
 from app.routers import historico as historico_router
 from app.routers import financeiro as financeiro_router
@@ -162,6 +163,7 @@ _OPENAPI_TAGS = [
     {"name": "financeiro", "description": "Consórcio, suprimentos (certificações) e simulação de cotações de importação."},
     {"name": "importacao", "description": "Controle de pedidos de importação de malas — SKUs, lotes, resumo financeiro."},
     {"name": "notas_fiscais", "description": "NF-e — upload de XML → ML e consulta/export (XML/XLSX) das contas bling_notas."},
+    {"name": "conciliacao", "description": "Conciliação pedido × financeiro das lojas (14/10/2026: só a sondagem só-leitura do ML/Mercado Pago)."},
 ]
 
 app = FastAPI(
@@ -329,6 +331,8 @@ app.include_router(importacao_router.router)
 app.include_router(nf_router.router)
 app.include_router(nf_upload_router.router)
 app.include_router(notas_fiscais_router.router)
+# Conciliação (14/10/2026): passo 1, sondagem só-leitura das fontes do ML/MP.
+app.include_router(conciliacao_router.router)
 # Ouvidoria › Robôs (21/09/2026): catálogo dos robôs + ocorrências.
 app.include_router(ouvidoria_router.router)
 # Denúncia (30/09/2026): cópia do sistema de Fiscalização que o Mac mini da

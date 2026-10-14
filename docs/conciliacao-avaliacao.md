@@ -1,0 +1,267 @@
+# Painel de Conciliação — avaliação e desenho
+
+*14/10/2026. Nada foi implementado nem alterado no sistema. O que vem da documentação oficial do Mercado Livre / Mercado Pago está marcado como **documentado**; o que depende de testar com as contas reais está marcado como **a confirmar**.*
+
+---
+
+## 1. Resumo em 6 linhas
+
+1. **Dá pra fazer, e o DaVinci já tem metade.** A Margem já lê, pedido a pedido, o valor da venda, a tarifa, o frete, o cupom e o estorno do Mercado Livre (e de Shopee, TikTok e Amazon). O que falta é o outro lado: **o que de fato entrou na conta** (extrato) e **a fatura do ML por período** (tudo que foi cobrado no mês, inclusive o que não é de pedido nenhum).
+2. **No ML o dinheiro de uma venda tem quatro "versões":** o pedido no Bling, a venda no ML, a fatura do ML e o extrato do Mercado Pago. Conciliar é colocar as quatro lado a lado por pedido e marcar onde não bate.
+3. **O extrato existe por API** (documentado): é o "Relatório de liberações" do Mercado Pago. Cada linha diz o tipo do movimento (pagamento liberado, estorno, chargeback, mediação, frete, saque, reserva…), o valor bruto, a tarifa, o frete, o líquido e **o número do pedido/pack**. **A confirmar:** se o token que o DaVinci já tem é aceito nessa API. Plano B pronto: importar o CSV que o próprio Mercado Pago gera.
+4. **A fatura do ML também tem API por período** (documentado), com todas as cobranças e bonificações do mês. Cada cobrança diz de qual pedido/envio é e se foi "descontada da venda" ou cobrada à parte — é exatamente a resposta pra "esse desconto veio de onde".
+5. **Painel novo "Conciliação"**, com abas por marketplace como na Logística, começando pelo Mercado Livre, com três visões: **Pedidos** (uma linha por pedido do Bling), **Extrato** (cada movimento da conta, com ou sem pedido) e **Fechamento do mês** (totais e a conferência "fatura × detalhes" que o próprio ML recomenda).
+6. **Entrega em passos curtos:** sondagem só-leitura (1 dia) → painel v1 com o que já temos + fatura (≈1 semana) → extrato (≈1 semana) → vigia com aviso no Threema → Shopee, TikTok, Amazon, um por vez.
+
+---
+
+## 2. O que é "conciliar" aqui: as quatro versões do dinheiro de uma venda
+
+| Versão | O que ela diz | De onde vem | Já temos? |
+|---|---|---|---|
+| **Bling** | total do pedido, valor dos produtos e o bloco "taxas" que o Bling anota da plataforma (valor base, custo do frete, comissão); comissão por item | pedidos importados do Bling (`bling_orders`: total, totalprodutos, valorbase, custofrete, taxacomissao, comissão por item). **Não gravamos hoje** o desconto do pedido nem o frete pago pelo cliente (`transporte.frete`) — se a coluna for necessária, a importação do Bling passa a guardar | sim (com essa lacuna) |
+| **Venda (ML)** | valor da venda, tarifa de venda por item, custo do frete pro vendedor, cupom que a loja banca, estorno/cancelamento → **líquido previsto** | API de pedidos, envios e descontos do ML | sim (é o que a Margem mostra em "Saldo › Plataforma") |
+| **Fatura do ML** | o que o ML cobrou de fato no período: "Cobrança por vender", "Cobrança por Mercado Envios", taxa de parcelamento, Product Ads, e as bonificações (devolução de tarifa quando a venda cai) | API de faturamento por período | em parte: hoje só por pedido, e só pra calcular margem |
+| **Extrato (Mercado Pago)** | o que entrou e saiu da conta e **quando**: pagamento liberado (bruto, tarifa, frete, líquido), estorno, chargeback, mediação, reserva por disputa, frete cobrado à parte, saque pro banco | "Relatório de liberações" do Mercado Pago | não |
+
+Com as quatro versões na mesa, conciliar vira responder perguntas simples:
+
+- **Por pedido:** (1) o Bling bate com a venda? (2) o líquido previsto bate com o que foi liberado? (3) já liberou? quando? (4) depois de liberar, saiu dinheiro (estorno, chargeback, mediação)?
+- **Pela conta:** toda linha do extrato tem dono (um pedido) ou é classificada como "sem pedido" (saque, fatura do ML, publicidade, reserva, ajuste).
+- **Pelo mês:** a fatura do ML (resumo) bate com a soma dos detalhes, e os totais do mês fecham (vendido, tarifas, frete, estornos, liberado, saques, saldo).
+
+---
+
+## 3. O que o DaVinci já tem e dá pra aproveitar
+
+- **Financeiro por pedido** (`marketplace_order_financials` + eventos + conciliação de frete): uma linha por pedido do Bling × plataforma. Pro ML guarda bruto, comissão, frete real (custo do envio), cupom do vendedor, estorno e líquido previsto, com status `posted` (fatura já existe) ou `estimated`. O JSON bruto guarda o pedido do ML, o detalhe da fatura **daquele pedido** (que já inclui a data e a situação da liberação do pagamento) e os pedidos irmãos do pack. É alimentado pelo webhook do Bling, pelo botão "atualizar este pedido" e por varreduras (tentativas, esteira lenta, cancelados às :27).
+- **Casamento Bling ↔ ML já resolvido:** `numeroloja` pode ser a venda ou o pack; pack juntado num pedido só ou dividido em vários — a Margem já trata (casa os irmãos por SKU).
+- **Raio-X da Margem** (`saldo-detalhe`): já é uma mini-conciliação por pedido, Bling × plataforma (bruto, taxas, frete, desconto, reembolso, líquido e a diferença). A Conciliação estende esse Raio-X com a fatura e o extrato, em vez de inventar outro.
+- **Saldo diário das contas** (`valuation_marketplace_saldo_diario`: disponível e a receber por loja × marketplace, preenchido por uma rotina externa que lê o painel): serve de prova dos nove no Fechamento do mês.
+- **Campos já reservados e nunca usados** em `marketplace_financial_events`: `posted_at` e `settlement_id` — exatamente "quando entrou" e "em qual repasse".
+- **Leitura do pagamento já usada** nos chamados (`/collections/{id}`): data de aprovação, data de liberação, estornos e o caso `bpp_covered` (o ML pagou do próprio bolso, não saiu da conta).
+- **Logística** é o modelo de painel por marketplace (abas, filtros, Excel, atualização a cada 30 s).
+- **Ouvidoria › Robôs** é o modelo de robô (modos ligado/silencioso/desligado, lista do Threema, ocorrências).
+- **Lojas** (`store_info`, `integrations`, `stores`) já ligam pedido do Bling → conta do ML; a Margem usa esse caminho.
+
+O que **não** existe: nenhuma chamada ao Mercado Pago (extrato), nenhuma leitura da fatura por período (só por pedido), nenhum registro do que entrou de fato na conta e nenhum "fechamento do mês".
+
+Duas pegadinhas do que existe, que o desenho precisa respeitar:
+
+- **`posted` não quer dizer "liberado".** Quer dizer "a plataforma publicou o detalhe do pedido". Uma linha `posted` nunca é relida pelo robô; só o webhook do Bling, a varredura de cancelados e alguns gatilhos pontuais a tocam. Bonificação que chega semanas depois (tarifa devolvida numa devolução) não entra. A leitura **diária da fatura por período** corrige isso sem reler pedido a pedido.
+- **O botão "atualizar este pedido" da Margem não relê a plataforma**, só reconstrói o snapshot. Na Conciliação o botão equivalente precisa reler de verdade (fatura por pedido + extrato daquele pedido).
+
+---
+
+## 4. De onde vem cada número no Mercado Livre
+
+| Informação | Caminho | Situação |
+|---|---|---|
+| Venda: valor, tarifa por item, pagamentos, pack | `GET /orders/{id}`, `GET /packs/{id}` | já usamos (Margem) |
+| Custo do frete pro vendedor | `GET /shipments/{id}/costs` | já usamos |
+| Cupom: quem bancou (loja × ML) | `GET /orders/{id}/discounts` | já usamos |
+| Fatura **por pedido/pack**: cobranças + situação da liberação | `GET /billing/integration/group/ML/order/details?order_ids=…` (até 60 por chamada) | já usamos; o ML pede pra **não reler pedido já lido** (é o endpoint que mais toma 429) |
+| Fatura **por período**: todas as cobranças e bonificações do mês | `GET /billing/integration/periods/key/AAAA-MM-01/group/ML/details?document_type=BILL` (1.000 por página, paginação por `from_id`) | **documentado**, não usamos |
+| Resumo da fatura do mês (total por tipo: venda, envios, publicidade, bonificações, o que foi pago) | `…/periods/key/AAAA-MM-01/summary/details` | documentado, não usamos |
+| Períodos e faturas (PDF/XML) | `…/monthly/periods`, `…/periods/key/…/documents` | documentado, não usamos |
+| Pagamentos **da fatura** (débito automático na conta) e quais cobranças cada pagamento quitou | `…/group/ML/payment/details`, `/billing/integration/payment/{id}/charges` | documentado, não usamos |
+| Movimentações da conta Mercado Pago, por período de fatura | `…/periods/key/…/group/MP/details` | documentado, não usamos |
+| Pagamento: aprovado em, liberado em, estornos | `GET /collections/{id}` | já usamos (chamados) |
+| **Extrato da conta: Relatório de liberações** | `api.mercadopago.com/v1/account/release_report` (criar por período → listar → baixar CSV); `…/config` (colunas, fuso, frequência); `…/schedule` (geração automática diária) | documentado. **A confirmar:** o token do app do ML serve nesse host? (o `/collections` já traz dado do Mercado Pago com ele, mas é outro domínio e pode exigir permissão de "relatórios") |
+
+Cada linha do Relatório de liberações traz (documentado): data da liberação, id do pagamento, tipo do movimento (`payment`, `refund`, `chargeback`, `dispute`, `mediation`, `shipping`, `shipping_cancel`, `payout` = saque, `reserve_for_dispute`, `reserve_for_refund`…), valor bruto, tarifa (`MP_FEE_AMOUNT` = comissão do Mercado Pago e/ou Mercado Livre), parcelamento, frete, cupom (e a parte do cupom que o vendedor banca), crédito líquido, débito líquido, saldo após o movimento, **ORDER_ID, PACK_ID, SHIPPING_ID**, item e SKU. Aviso da própria documentação: o total do relatório pode não bater com o saldo nem com a fatura (prazos de liberação, banco, intermediação) — por isso o painel precisa mostrar a diferença, não escondê-la.
+
+Regras de uso que o ML impõe (documentado): guardar em cache local; período aberto consultar no máximo 2× por dia, fechado 1×; uma chamada por conta e paginar por `from_id`; nada de lote paralelo; a chave do período é sempre o primeiro dia do mês, mas **o período de faturamento não é o mês calendário** (ex.: 19/09 → 18/10).
+
+---
+
+## 5. O painel
+
+### 5.1 Onde fica e como se organiza
+
+- Menu **Operação**, ao lado de Margem. Permissão nova `conciliacao` (ver / editar), como as outras páginas.
+- Abas no topo, como na Logística: **Mercado Livre · Shopee · Amazon · TikTok**. Só a do ML nasce ligada; as outras ficam "em breve" até cada integração entrar.
+- Dentro da aba, três visões: **Pedidos** (padrão), **Extrato** e **Fechamento do mês**.
+- Filtro de **loja** e de **período** valem pras três visões. O período tem um seletor de "qual data": data do pedido (Bling) ou data da liberação (extrato) — sem isso os números não batem com o que a pessoa vê no Mercado Pago.
+
+### 5.2 Visão "Pedidos" — uma linha por pedido do Bling
+
+Grupos de colunas (no estilo da Margem, com a barra separando cada grupo):
+
+| Grupo | Colunas |
+|---|---|
+| Identificação | Data · Pedido Bling · Venda ML (ou pack, com os irmãos) · Loja |
+| Bling | Total · Produtos · Valor base · Custo frete (Bling) · Comissão (Bling) |
+| Venda ML | Valor da venda · Tarifa · Frete · Parcelamento · Cupom (loja) · Estorno · **Líquido previsto** |
+| Extrato | Liberado em · Liberado R$ · Saídas depois (estorno/chargeback/mediação) · **Recebido** |
+| Conciliação | Diferença Bling × ML · Diferença previsto × recebido · **Situação** · Conferido ✓ · Observação |
+
+Situações (uma por pedido, em linguagem de operação):
+
+- **Bateu** — liberado e a diferença fica dentro da tolerância (centavos).
+- **Aguardando liberação** — o ML ainda não liberou; mostra a previsão ("prev. 23/10").
+- **Não liberado (vencido)** — a previsão passou (ou enviado há mais de N dias) e nada entrou.
+- **Recebido a menos / a mais** — entrou, mas diferente do previsto; quando dá, o painel diz o motivo (frete cobrado maior que o previsto, tarifa maior, parcelamento, cupom).
+- **Bling ≠ ML** — o valor do pedido no Bling não bate com a venda (pedido editado, pack, cancelamento parcial).
+- **Cancelado** — venda desfeita: previsto 0 e nada a receber (ou devolvido).
+- **Estornado depois** — liberou e depois saiu dinheiro (estorno, chargeback, mediação, reserva).
+- **Conferido à mão** — alguém marcou como ok e deixou observação.
+
+Em cima, cartões de resumo (como em Devoluções): pedidos, vendido, tarifas + frete, líquido previsto, liberado, diferença, sem liberação, divergentes. Botão Excel. Clicando na linha abre o **Raio-X**: as quatro versões lado a lado e, embaixo, as linhas do extrato e da fatura daquele pedido.
+
+### 5.3 Visão "Extrato" — cada movimento da conta
+
+Colunas: Data · Loja · Tipo (traduzido: Pagamento liberado, Estorno, Chargeback, Mediação, Frete, Frete devolvido, Saque, Reserva por disputa, Fatura do ML, Publicidade, Ajuste…) · Pedido (link pro Bling) ou **"Sem pedido"** · Descrição original · Bruto · Tarifa · Frete · Parcelamento · Cupom · Crédito · Débito · Saldo após · Origem (extrato MP / fatura ML).
+
+Filtros: tipo, com/sem pedido, loja, período. Ações: **Vincular a pedido** (quando o robô não achou) e **Classificar** (sem pedido: saque, fatura do ML, publicidade, ajuste, outro). Excel.
+
+É nessa visão que aparece o "tem um valor descontado e não sei de onde veio": o movimento fica em "Sem pedido" até alguém (ou o robô, cruzando com a fatura do ML) dizer o que é.
+
+### 5.4 Visão "Fechamento do mês" — por loja × mês
+
+Vendas (bruto) · Tarifa de venda · Frete (Mercado Envios) · Parcelamento · Publicidade · Bonificações · Estornos e chargebacks · **Líquido liberado** · Saques · Saldo inicial / final · **Fatura do ML × soma dos detalhes** (✔ / ✖, a conferência que o próprio ML recomenda) · período de faturamento do ML (ex.: 19/09 → 18/10) ao lado do mês calendário · aberto / fechado · Excel.
+
+---
+
+## 6. Como o robô alimenta
+
+- **Fatura do ML por período** (1× por dia por loja, mais uma passada à tarde no período aberto): baixa todas as cobranças e bonificações do período, pagina por `from_id`, grava cada uma com o pedido/envio/pack a que pertence e se foi "descontada da venda". Relê o período anterior até ele fechar e até as faturas (PDF) existirem.
+- **Extrato do Mercado Pago** (1× por dia por loja): pede o relatório do dia anterior (ou liga a geração automática diária uma vez e só baixa os arquivos novos), grava linha a linha, sem duplicar (loja + id do pagamento + tipo + data).
+- **Recalcular a conciliação** (a cada hora e logo depois de cada sync): só pros pedidos tocados. Reaproveita o financeiro da Margem; quando o pedido ainda não tem financeiro, dispara o sync existente.
+- **Vigia de Conciliação** (Ouvidoria › Robôs, nasce silencioso): venda enviada há mais de N dias sem liberação; recebido a menos acima de R$ X; movimento sem pedido acima de R$ X; estorno / chargeback / mediação novo; fatura ≠ detalhes; extrato não baixado há mais de 2 dias. Aviso no Threema como os outros vigias.
+
+Cuidados: o ML pede cache e proíbe lote paralelo (nunca reler pedido já lido; uma chamada por loja por dia); o token do ML troca a cada renovação e é de uso único — o job usa o caminho já blindado do Atendimento, não renova "na mão".
+
+---
+
+## 7. Casos difíceis que o desenho precisa tratar desde o começo
+
+- **Pack / carrinho:** o pagamento é do pack inteiro; o Bling pode ter juntado tudo num pedido ou dividido em vários. Conciliar no nível do pack e ratear nos pedidos do Bling (a Margem já casa os irmãos por SKU).
+- **Pagamento com dois cartões:** duas liberações pro mesmo pedido.
+- **Liberação em parcelas:** o relatório separa parcelas liquidadas de pendentes; somar.
+- **Taxa de parcelamento:** o comprador paga a mais e o ML cobra o acréscimo; efeito ≈ 0 pro vendedor. Não pode virar "recebido a menos".
+- **Cancelamento / estorno:** venda desfeita → líquido 0, bonificação de tarifa e frete na fatura, `refund` no extrato. `bpp_covered` (o ML pagou do próprio bolso) não sai da conta.
+- **Mediação, chargeback, reserva por disputa:** saída depois da liberação ou saldo bloqueado → "Estornado depois" / "Reserva".
+- **Frete:** pode vir descontado na própria liberação ou como linha "shipping" separada; a diferença frete do anúncio × frete real a Margem já mede.
+- **Cupom:** do ML (reembolsado, não é custo) × da loja (`EFFECTIVE_COUPON_AMOUNT`); a Margem já separa.
+- **Flex:** bonificação de envio entra como crédito sem venda nova.
+- **Publicidade, assinaturas, fatura do ML paga por débito automático:** "sem pedido". Dá pra casar com os pagamentos da fatura (`payment/details`) e dizer "isso é a fatura do ML de setembro".
+- **Período de faturamento ≠ mês calendário.**
+- **Três datas diferentes:** liberação (quando ficou disponível), aprovação (quando o cliente pagou) e data do pedido no Bling.
+- **Retenções fiscais** (`TAXES_AMOUNT`) no Brasil normalmente 0; manter a coluna.
+
+---
+
+## 8. Depois do Mercado Livre (mesmo modelo, fontes diferentes)
+
+- **Shopee:** o "escrow" por pedido já é lido pela Margem; o extrato vem do `get_wallet_transaction_list` (tipo, pedido, valor) e os repasses ao banco do `get_payout_detail`.
+- **TikTok:** extratos por período (`statements`) e por pedido (já lido), repasses (`payments`) e saques (`withdrawals`).
+- **Amazon:** eventos financeiros por pedido (já lidos; a KFA segue com 403 pendente) e os grupos de repasse quinzenal (settlement).
+- **Magalu / Shein / Temu / AliExpress:** sem API de extrato conhecida → importar o relatório do portal (o mesmo importador do plano B).
+
+---
+
+## 9. Passos (cada um termina esperando o seu OK)
+
+**Passo 1 — Sondagem só-leitura (1 dia)**
+- *Você:* de **uma** loja do ML, baixa e me manda: Mercado Pago › Relatórios › **Liberações** (CSV, setembro) e Mercado Livre › Faturamento › **Detalhes de faturamento** (Excel, mesmo período). E me diz quem vai usar o painel.
+- *Eu:* um endpoint de admin só-leitura (`/api/conciliacao/sonda`) que, com o token de uma loja, lista os relatórios e a configuração do Mercado Pago e lê períodos, resumo e cinco detalhes da fatura do ML. Deploy, rodo numa loja, mostro o retorno aqui. Nada é gravado. No fim sabemos se o token serve pro extrato e como são os dados reais.
+
+**Passo 2 — Painel v1, Mercado Livre (≈1 semana)**
+Página, permissão, aba ML, visão Pedidos com Bling × Venda × Fatura, "liberado em" vindo da fatura por pedido, sync diário da fatura por período, Raio-X (estendendo o da Margem), Excel. Já aparecem aqui as situações Bling ≠ ML, Aguardando liberação, Cancelado e Conferido à mão; as que dependem do extrato ficam pro passo 3.
+
+**Passo 3 — Extrato (≈1 semana)**
+Job do Relatório de liberações (ou importação do CSV, se o token não servir), visão Extrato, situações "recebido a menos / a mais" e "sem pedido", Fechamento do mês.
+
+**Passo 4 — Vigia de Conciliação + ajustes do uso real (alguns dias)**
+
+**Passo 5 — Shopee, depois TikTok, depois Amazon (≈1 semana cada)**
+
+---
+
+## 10. Perguntas que só você responde
+
+1. **Quem vai usar** e o que essa pessoa faz hoje pra conferir (baixa o Relatório de liberações? confere em planilha? com que frequência?).
+2. **Uma linha por pedido do Bling** (recomendo: é como a Logística e a Margem pensam) ou por venda do ML?
+3. **Extrato pela API** (robô diário) ou começar pela **importação do CSV**? Recomendo API se o token servir, CSV como plano B — e o importador é útil de qualquer jeito pra meses antigos.
+4. Posso **mexer na configuração do Relatório de liberações** das contas pela API (colunas e geração automática)? Isso muda também o relatório que vocês baixam à mão no painel do Mercado Pago.
+5. **Desde quando** conciliar (últimos 3 meses? desde setembro?).
+
+---
+
+## 11. Apêndice técnico (pra quem for implementar)
+
+### Tabelas novas (proposta)
+
+- `conciliacao_movimentos` — cada movimento da conta: plataforma, loja (`integration_id`), origem (`mp_release_report` | `ml_billing` | `shopee_wallet` | `tiktok_statement` | `amazon_finances` | `importado`), id externo (único por loja + origem), data, tipo normalizado, descrição original, `pedido_marketplace`, `pack_id`, `shipping_id`, `pedido_bling` (resolvido), bruto, tarifa, frete, parcelamento, cupom, crédito, débito, saldo após, `raw` JSONB, classificação manual, vínculo manual.
+- `conciliacao_pedidos` — uma linha por `pedido_bling` × plataforma: os quatro blocos de valores, diferenças, situação, liberado em, conferido por / em, observação, `recalculado_em`. Reconstruída por job (como o snapshot da Margem).
+- `conciliacao_periodos` — loja × período de faturamento: resumo da fatura por tipo, soma dos detalhes, totais do extrato, fechado/aberto, última leitura.
+- `conciliacao_sync` — controle por loja / origem / período / arquivo (último `from_id`, último arquivo baixado, erro).
+- Reaproveitar, não duplicar: `marketplace_order_financials` continua sendo a "Venda" (líquido previsto); a Conciliação lê dela pelo mesmo caminho da view (`bling_id` + `numeroloja`). `marketplace_financial_events.posted_at`/`settlement_id` podem receber a data da liberação e o id do pagamento quando o extrato casar.
+
+### Endpoints DaVinci
+
+`GET /api/conciliacao?plataforma=ml&visao=pedidos|extrato|fechamento&loja=&de=&ate=&data=pedido|liberacao&situacao=` (paginado no servidor, como a Margem) · `GET /api/conciliacao/pedidos/{pedido}/raio-x` · `PATCH /api/conciliacao/pedidos/{pedido}` (conferido, observação) · `PATCH /api/conciliacao/movimentos/{id}` (vínculo, classificação) · `POST /api/conciliacao/export.xlsx` · `POST /api/conciliacao/importar` (CSV do Mercado Pago / Excel da fatura) · `GET /api/conciliacao/sonda` (admin, passo 1).
+
+### Jobs (worker, arq)
+
+`conciliacao_ml_fatura_sync` (06:10 e 18:10 UTC-3) · `conciliacao_ml_extrato_sync` (07:10) · `conciliacao_rebuild` (:40) · `vigia_conciliacao_tick` (Ouvidoria, modos ligado/silencioso/desligado).
+
+### Regras de casamento (ML)
+
+1. `bling_orders.numeroloja` → venda ou pack (404 em `/orders` ⇒ pack). Pack: usar `raw.pack_matched_order_ids` da Margem.
+2. Extrato → pedido: `ORDER_ID`, senão `PACK_ID`, senão `EXTERNAL_REFERENCE`; linha de `refund`/`chargeback`/`mediation` herda o pedido pelo `SOURCE_ID` (mesmo pagamento) ou pelo `METADATA`.
+3. Fatura → pedido: `sales_info[].order_id`; frete: `shipping_info.shipping_id`/`pack_id`; sem pedido (Product Ads etc.): classificar pelo `detail_sub_type`.
+4. Recebido = Σ créditos de `payment` do(s) pagamento(s) do pedido − Σ débitos posteriores ligados ao mesmo pagamento.
+5. Tolerância padrão R$ 0,05 (parametrizável no robô).
+
+### O que a documentação confirma (links)
+
+- Faturamento ML: relatórios de faturamento, boas práticas, provisões (detalhes por período), relatórios de pagamentos — developers.mercadolivre.com.br (seção "Relatórios de Faturamento").
+- Relatório de liberações: `mercadopago.com.br/developers/pt/docs/reports/released-money/introduction` e `…/api`; colunas em `…/reports/released-money/report-fields`.
+- Referência dos endpoints de relatório: `mercadopago.com/developers/en/reference/releases-report/…` (create-report, consult-report, consult-configurations, enable-automatic-generation).
+
+### Sub-tipos da fatura do ML vistos na documentação
+
+`CV` cobrança por venda · `CXD` cobrança por Mercado Envios · `BXD` bonificação de Mercado Envios · `PADS` Product Ads · `CFONPN` taxa de parcelamento (acréscimo pago pelo comprador). A lista completa não está na documentação pública; o passo 1 lê os sub-tipos reais das contas.
+
+---
+
+## 12. Conversa de 14/10 à tarde — o que mudou no desenho
+
+Maquetes: `docs/img/conciliacao-maquete.png` (Pedidos × valores soltos) e `docs/img/conciliacao-extrato-do-dia.png` (Extrato do dia + histórico do pedido).
+
+**Decisões do Vinicius**
+- A rotina principal é **conciliar o dia anterior, linha a linha**: todo movimento do extrato precisa achar um pedido ou receber uma classificação. A visão "Extrato do dia" passa a ser a tela de trabalho; "Pedidos" é a segunda lente.
+- O dia tem **"Fechar o dia"**: só fecha com 100% das linhas resolvidas (vinculada, classificada ou divergência justificada). Ao fechar, as linhas travam e o fechamento do mês soma os dias. Prova dos nove: saldo inicial + entradas − saídas = saldo final = saldo informado pelo Mercado Pago.
+- Ao clicar num pedido abre o **histórico completo em ordem**: venda aprovada (ML), importado no Bling, etiqueta/NF, entregue, cobranças da fatura do ML, liberação na conta, estornos/reservas/mediações, divergências e chamados. Cada linha com data, valor e de onde veio (cor por origem).
+- Colunas novas na visão Pedidos: **Custo do produto · Reembolso · Sobrou · Margem final**. Sobrou = Recebido − custo − reembolso; margem = sobrou ÷ custo (mesma conta da Margem). Reembolso vem do painel Reembolso (`refunds`), que a Margem já desconta — a "planilha de reembolso" precisa ser esse painel, ou ser importada nele, pra não lançar duas vezes.
+- Visual mais analítico, no espírito da conciliação bancária do Protheus: grade densa, débito/crédito/saldo acumulado, legenda de cores, totais no rodapé, botões Conciliar/Classificar/Desfazer/Fechar o dia.
+- Uso duplo: conferir pedido a pedido **e** saber o resultado da empresa. O Fechamento do mês vira um "Resultado" por loja → marketplace → empresa, com previsto × realizado.
+
+**Ideias novas levantadas (não decididas)**
+1. **Resultado da empresa**: Vendas − tarifas − frete − cupons − estornos − publicidade − custo dos produtos − reembolsos = resultado das vendas (tudo com dinheiro recebido de fato). Pra chegar no resultado da empresa, um bloco mensal de despesas fora dos marketplaces (fixas, embalagem, imposto por CNPJ), lançado à mão ou puxado do contas a pagar do Bling.
+2. **Previsão de caixa**: o extrato diz quando cada venda libera; somando, "quanto vai liberar nos próximos 7/15/30 dias" por loja. Junto com o saldo diário das contas (já lido) e os saques, "quanto dinheiro temos e onde está".
+3. **Diferença de frete vira chamado**: a divergência "frete cobrado maior que o do anúncio" abre o pedido de revisão de peso/custo no ML direto da linha (via Chamados / IA de Chamado).
+4. **Tarifa fora da tabela**: comparar a tarifa cobrada com a esperada pelo tipo de anúncio/categoria (a Tabela de preços já tem comissões) e marcar cobrança errada.
+5. **Resultado real por produto / anúncio / conta**: a mesma base, agrupada por SKU — quais produtos dão prejuízo depois de frete, devolução e reembolso.
+6. **Saque conciliado com o banco**: cada payout casado com o extrato bancário (OFX) — fecha o circuito até a conta da empresa.
+7. **Trava e auditoria**: dia/mês fechado não se mexe; tudo que foi vinculado ou classificado à mão fica no histórico com quem e quando.
+
+**Etapas do pedido (pergunta "como sei o que está finalizado, e se o marketplace desconta um mês depois?")** — maquete `docs/img/conciliacao-etapas.png`
+- Coluna **Etapa** por pedido: 1 Aguardando liberação → 2 Conciliado (bateu) ou 2b Com pendência → 3 Finalizado → 4 Reaberto → 3 de novo.
+- **Finalizar:** o que bateu finaliza sozinho 7 dias depois, sem novidade (prazo parametrizável). O que teve pendência finaliza à mão, com motivo (chamado aberto, ajuste no Bling, prejuízo aceito). Botão "Finalizar selecionados" pra lote. Fica registrado quem/quando/motivo.
+- **Reabrir:** "finalizado" nunca tranca o pedido pro robô. Qualquer linha nova do extrato com o número do pedido (chargeback, estorno, mediação, reserva, bonificação) reabre na hora, com motivo e valor; o pedido entra na fila "Reabertos"; o vigia avisa no Threema; o extrato do dia marca a linha como "reabre o pedido X (finalizado em Y por Z)".
+- **Mês fechado não muda:** o movimento tardio entra no fechamento do mês em que aconteceu, numa linha "Ajustes de meses anteriores" com a lista dos pedidos. Na aba Pedidos o pedido mostra o resultado da vida inteira; no Fechamento cada mês mostra o dinheiro que se mexeu nele; as duas contas batem no acumulado.
+- Visual aprovado: o padrão "grade à esquerda + detalhe à direita" (Extrato do dia) vale pro painel inteiro; a aba Pedidos foi refeita nesse padrão (`docs/img/conciliacao-maquete.png`).
+
+**Decidido 14/10 (fim do dia):** o que bateu finaliza sozinho 7 dias depois, sem novidade.
+
+**Tela de entrada "Resumo"** — maquete `docs/img/conciliacao-resumo.png`
+- Uma linha por loja, agrupada por marketplace: dia de ontem (fechado sozinho / fechado por alguém / não fechou / extrato não lido), movimentos, pendentes, pedidos com pendência, reabertos, não liberados vencidos, saldo bate?, último extrato lido, fatura do ML, situação em uma frase ("agir: 5 linhas sem dono, saldo não bate").
+- Cartões no topo: dias fechados, movimentos pendentes, reabertos, não liberados, extrato atrasado, saldo bate.
+- Lado direito "Onde agir hoje": lista ordenada do que mais dói, cada item com botão pra tela certa (extrato da loja, reabertos, pedidos, integração). É a mesma lista que o vigia manda no Threema às 07:00.
+- Rodapé: mês atual por marketplace e Empresa (vendido, tarifas+frete, recebido, ajustes de meses anteriores, custo, reembolsos, sobrou, margem, % finalizados).
+- "Fechado sozinho" = 100% das linhas casaram, saldo bateu, ninguém mexeu; loja sem pendência some da lista de ação.
+
+**Respostas do Vinicius (14/10, fim do dia):** reembolso vem do painel Reembolso do DaVinci; começar hoje mesmo com uma loja do Mercado Livre, depois uma da Shopee, depois uma da Amazon, e replicar pras outras lojas do mesmo marketplace; despesas fora dos marketplaces ficam pra fase seguinte, primeiro o resultado pedido a pedido.
