@@ -565,6 +565,10 @@ async def sonda_extrato_ler(
     conta: Annotated[str, Query(min_length=1)],
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(_PERM)],
+    bruto: Annotated[
+        int,
+        Query(ge=0, le=20, description="devolve também as N primeiras linhas cruas do CSV"),
+    ] = 0,
 ) -> dict[str, Any]:
     """Lista os relatórios da conta e, se o mais novo estiver pronto, baixa o
     CSV e devolve um resumo (tipos de movimento, somas, com/sem pedido, amostra).
@@ -605,6 +609,14 @@ async def sonda_extrato_ler(
             r2 = await _mp_get(cliente, f"/v1/account/release_report/{nome}")
             if r2.status_code == 200:
                 resumo = resumir_extrato(r2.text)
+                if bruto:
+                    linhas = r2.text.splitlines()
+                    # cabeçalho + primeiras linhas + a primeira linha com METADATA "cheio"
+                    # (tem vírgula dentro: é ela que quebra o parser se não vier entre aspas)
+                    cheia = next(
+                        (x for x in linhas[1:] if '"payments_group_uuid' in x or '{"' in x), None
+                    )
+                    resumo["linhas_cruas"] = linhas[: bruto + 1] + ([cheia] if cheia else [])
     logger.info(
         "conciliacao_sonda_extrato_lido",
         conta=conta,
