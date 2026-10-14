@@ -142,6 +142,16 @@ async def sonda(
     mes: Annotated[
         str | None, Query(description="AAAA-MM do período a ler; padrão = mês atual")
     ] = None,
+    parte: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            le=3,
+            description="1 = chave + fatura do mês atual; 2 = mês anterior, bonificações, "
+            "grupo MP, pagamentos da fatura; 3 = extrato do Mercado Pago. Sem valor = tudo. "
+            "A API de faturamento do ML aceita 5 chamadas por minuto (14/10), daí as partes.",
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     integ = await lm._ml_integration_for_conta(session, conta)
     if integ is None:
@@ -174,79 +184,80 @@ async def sonda(
         chamadas.append(item)
         return item
 
-    # 1. A chave funciona? (quem é a loja)
-    eu = await ml("ml_quem_sou", "/users/me")
-
-    # 2. Fatura do ML por período (documentado; nunca usado no DaVinci)
-    await ml(
-        "ml_periodos",
-        "/billing/integration/monthly/periods",
-        {"group": "ML", "document_type": "BILL", "limit": 3},
-    )
-    await ml(
-        "ml_resumo_mes_atual",
-        f"/billing/integration/periods/key/{k_atual}/summary/details",
-        {"group": "ML"},
-    )
-    det_atual = await ml(
-        "ml_detalhes_mes_atual",
-        f"/billing/integration/periods/key/{k_atual}/group/ML/details",
-        {
-            "document_type": "BILL",
-            "limit": _AMOSTRA,
-            "from_id": 0,
-            "sort_by": "ID",
-            "order_by": "ASC",
-        },
-    )
-    det_ant = await ml(
-        "ml_detalhes_mes_anterior",
-        f"/billing/integration/periods/key/{k_ant}/group/ML/details",
-        {
-            "document_type": "BILL",
-            "limit": _AMOSTRA,
-            "from_id": 0,
-            "sort_by": "ID",
-            "order_by": "ASC",
-        },
-    )
-    await ml(
-        "ml_bonificacoes_mes_anterior",
-        f"/billing/integration/periods/key/{k_ant}/group/ML/details",
-        {"document_type": "BILL", "limit": _AMOSTRA, "from_id": 0, "detail_type": "bonus"},
-    )
-    await ml(
-        "mp_grupo_detalhes_mes_atual",
-        f"/billing/integration/periods/key/{k_atual}/group/MP/details",
-        {"document_type": "BILL", "limit": _AMOSTRA, "from_id": 0},
-    )
-    await ml(
-        "ml_pagamentos_da_fatura_mes_anterior",
-        f"/billing/integration/periods/key/{k_ant}/group/ML/payment/details",
-        {"limit": 3},
-    )
-
-    # 3. Porta do extrato no Mercado Pago (a dúvida que define o desenho)
-    cfg = await mp("mp_extrato_config", "/v1/account/release_report/config")
-    lista = await mp("mp_extrato_lista", "/v1/account/release_report/list")
+    vazio: dict[str, Any] = {}
+    eu = det_atual = det_ant = cfg = lista = vazio
     arquivo: str | None = None
-    amostra = lista.get("amostra")
-    itens = (
-        amostra.get("primeiros")
-        if isinstance(amostra, dict)
-        else (amostra if isinstance(amostra, list) else None)
-    )
-    if lista.get("ok") and isinstance(itens, list):
-        prontos = [x for x in itens if isinstance(x, dict) and x.get("file_name")]
-        if prontos:
-            arquivo = str(prontos[0]["file_name"])
-    if arquivo:
-        await mp(
-            "mp_extrato_arquivo_mais_recente",
-            f"/v1/account/release_report/{arquivo}",
-            csv_texto=True,
+    pagina = {
+        "document_type": "BILL",
+        "limit": _AMOSTRA,
+        "from_id": 0,
+        "sort_by": "ID",
+        "order_by": "ASC",
+    }
+
+    if parte in (None, 1):
+        # 1. A chave funciona? (quem é a loja) + fatura do ML do mês atual
+        eu = await ml("ml_quem_sou", "/users/me")
+        await ml(
+            "ml_periodos",
+            "/billing/integration/monthly/periods",
+            {"group": "ML", "document_type": "BILL", "limit": 3},
         )
-    await mp("mp_todas_transacoes_lista", "/v1/account/settlement_report/list")
+        await ml(
+            "ml_resumo_mes_atual",
+            f"/billing/integration/periods/key/{k_atual}/summary/details",
+            {"group": "ML", "document_type": "BILL"},
+        )
+        det_atual = await ml(
+            "ml_detalhes_mes_atual",
+            f"/billing/integration/periods/key/{k_atual}/group/ML/details",
+            pagina,
+        )
+
+    if parte in (None, 2):
+        # 2. Mês anterior (fechado), bonificações, grupo MP e pagamentos da fatura
+        det_ant = await ml(
+            "ml_detalhes_mes_anterior",
+            f"/billing/integration/periods/key/{k_ant}/group/ML/details",
+            pagina,
+        )
+        await ml(
+            "ml_bonificacoes_mes_anterior",
+            f"/billing/integration/periods/key/{k_ant}/group/ML/details",
+            {**pagina, "detail_type": "BONUS"},
+        )
+        await ml(
+            "mp_grupo_detalhes_mes_atual",
+            f"/billing/integration/periods/key/{k_atual}/group/MP/details",
+            pagina,
+        )
+        await ml(
+            "ml_pagamentos_da_fatura_mes_anterior",
+            f"/billing/integration/periods/key/{k_ant}/group/ML/payment/details",
+            {"limit": 3},
+        )
+
+    if parte in (None, 3):
+        # 3. Porta do extrato no Mercado Pago (a dúvida que define o desenho)
+        cfg = await mp("mp_extrato_config", "/v1/account/release_report/config")
+        lista = await mp("mp_extrato_lista", "/v1/account/release_report/list")
+        amostra = lista.get("amostra")
+        itens = (
+            amostra.get("primeiros")
+            if isinstance(amostra, dict)
+            else (amostra if isinstance(amostra, list) else None)
+        )
+        if lista.get("ok") and isinstance(itens, list):
+            prontos = [x for x in itens if isinstance(x, dict) and x.get("file_name")]
+            if prontos:
+                arquivo = str(prontos[0]["file_name"])
+        if arquivo:
+            await mp(
+                "mp_extrato_arquivo_mais_recente",
+                f"/v1/account/release_report/{arquivo}",
+                csv_texto=True,
+            )
+        await mp("mp_todas_transacoes_lista", "/v1/account/settlement_report/list")
 
     def _tem_resultados(item: dict[str, Any]) -> bool:
         a = item.get("amostra")

@@ -149,3 +149,29 @@ async def test_sonda_conta_desconhecida_da_404(db, make_user, auth_as, client):
     r = await client.get("/api/conciliacao/sonda", params={"conta": "nao-existe"})
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "conta_ml_nao_encontrada"
+
+
+async def test_sonda_em_partes_respeita_o_limite_de_chamadas(db, make_user, auth_as, client):
+    """A API de faturamento do ML aceita 5 chamadas por minuto (14/10/2026): a
+    parte 3 só bate no Mercado Pago e a parte 1 faz no máximo 4 chamadas no ML."""
+    await _loja_ml(db, make_user)
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+
+    with respx.mock(assert_all_called=False) as router:
+        _fontes(router)
+        r3 = await client.get("/api/conciliacao/sonda", params={"conta": "jlas2", "parte": 3})
+        r1 = await client.get(
+            "/api/conciliacao/sonda", params={"conta": "jlas2", "parte": 1, "mes": "2026-10"}
+        )
+
+    nomes3 = [c["nome"] for c in r3.json()["chamadas"]]
+    assert nomes3 == [
+        "mp_extrato_config",
+        "mp_extrato_lista",
+        "mp_extrato_arquivo_mais_recente",
+        "mp_todas_transacoes_lista",
+    ]
+    assert r3.json()["conclusao"]["chave_da_loja_funciona"] is False  # não testada nesta parte
+    nomes1 = [c["nome"] for c in r1.json()["chamadas"]]
+    assert nomes1 == ["ml_quem_sou", "ml_periodos", "ml_resumo_mes_atual", "ml_detalhes_mes_atual"]
+    assert r1.json()["conclusao"]["extrato_mp_abre_com_a_chave_do_ml"] is False

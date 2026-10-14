@@ -265,3 +265,25 @@ Maquetes: `docs/img/conciliacao-maquete.png` (Pedidos × valores soltos) e `docs
 - "Fechado sozinho" = 100% das linhas casaram, saldo bateu, ninguém mexeu; loja sem pendência some da lista de ação.
 
 **Respostas do Vinicius (14/10, fim do dia):** reembolso vem do painel Reembolso do DaVinci; começar hoje mesmo com uma loja do Mercado Livre, depois uma da Shopee, depois uma da Amazon, e replicar pras outras lojas do mesmo marketplace; despesas fora dos marketplaces ficam pra fase seguinte, primeiro o resultado pedido a pedido.
+
+---
+
+## 13. Sondagem de 14/10/2026 (jlas2) — o que a API respondeu de verdade
+
+Rodada às 18:19 (BRT) com a chave que o DaVinci já tem da loja jlas2 (seller 2363933120, JLAS COMERCIO, reputação verde/prata, 328 vendas em 60 dias). Só leitura.
+
+**A porta do extrato abre com a chave do ML.** `api.mercadopago.com/v1/account/release_report/list` → 200 (lista vazia: nunca gerado por API) e `…/config` → 404 "config_not_found_for_user" (a conta ainda não tem configuração de relatório). `settlement_report/list` → 200 (vazio). Ou seja: não precisa conectar o Mercado Pago à parte; falta só **criar a configuração** (colunas) e **pedir o relatório** do período — as duas são escritas na conta (só de configuração), a decidir com o Vinicius.
+
+**A fatura do ML por período funciona e tem histórico.** `monthly/periods` → 13 períodos disponíveis. O período de faturamento da jlas2 vai do **dia 23 ao dia 22** (ex.: 23/09→22/10 = chave 2026-10-01, aberto, R$ 27.866,81, R$ 1.283,06 em aberto; 23/08→22/09 fechado, R$ 39.278,50; 23/07→22/08 fechado, R$ 16.771,75). Detalhes: **1.049 cobranças no período aberto** e **1.141 no anterior**, paginadas por `from_id`.
+
+**Como a tarifa aparece de verdade (MLB):** a "tarifa de venda" de um pedido vem quebrada em três cobranças, todas "descontadas da venda" (`debited_from_operation = YES`):
+- `CVVML` "Custo por vender no Mercado Livre" (ex.: 82,77)
+- `CVVPRC` "Custo por cobrar no Mercado Pago" (ex.: 27,59)
+- `CVVFN` "Taxa de parcelamento" (ex.: 72,69; sem NF-e)
+Soma = `sales_info.sale_fee.net` (183,05; `gross` 186,91 e `rebate` 3,86 = desconto de campanha). O **frete** vem como `CDSB` "Tarifa do Mercado Envios" (marketplace SHIPPING) e, nesse pedido, **não descontado da venda** (`NO`, 27,90 com "Desconto geral" sobre 46,50) — cobrado na fatura. **Product Ads** vem como `PADS` (marketplace MCLICS), sem pedido (`sales_info = null`), não descontado da venda. Também apareceu uma cobrança com `status = BONUS_ON_BILL` ("Cancelado neste mês"), `debited_from_operation = INAPPLICABLE`: cobrança anulada no mesmo mês.
+
+**Limite de uso:** a API de faturamento devolveu 429 "Rate limit exceeded: **5 requests per minute**" depois da 5ª chamada seguida. O job diário precisa espaçar as chamadas (uma página de 1.000 detalhes por chamada é suficiente: um período inteiro cabe em 2 chamadas).
+
+**Dois parâmetros que a documentação não deixa claro:** `summary/details` exige `document_type=BILL` (sem ele, 422); o filtro de bonificações é `detail_type=BONUS` em maiúsculas (`bonus` dá 422). Corrigidos na sondagem, que ganhou `parte=1|2|3` pra caber no limite de 5/min.
+
+**Pendente da sondagem (parte 2, a rodar):** amostra das bonificações do mês fechado, do grupo MP e dos pagamentos da fatura.
