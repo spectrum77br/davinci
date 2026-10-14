@@ -14,7 +14,13 @@ nada sai para provedor nenhum. O que se mede:
   o "é robô?") não manda para pessoa — só a INSISTÊNCIA depois da resposta,
   o xingamento e a ameaça; nas outras lojas, nada muda;
 - "você é um robô?" é pedido de atendente, não "cara de instrução";
-- as frases-modelo passam no validador em todas as plataformas e canais.
+- as frases-modelo passam no validador em todas as plataformas e canais;
+- a NOVA TENTATIVA de envio (14/10/2026, "a caixa tem que responder
+  mesmo"): a sugestão pendente que podia sair e ficou parada (o
+  'agradecimento' da Kia, recusado antes da correção do menu do Duoke) sai
+  na rodada seguinte, UMA vez, sem chamar o modelo; a de gatilho antigo, a
+  que precisa de pessoa, a da loja em Observar e a pedida pela tela (marcada
+  no BANCO, mesmo com o Redis fora no "Sugerir"), não.
 """
 
 from __future__ import annotations
@@ -24,9 +30,10 @@ import json
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AtendimentoMensagem, UserRole
+from app.models import AtendimentoMensagem, AtendimentoRascunho, UserRole
 from app.services.atendimento import ia, validador
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
@@ -543,3 +550,179 @@ async def test_sem_o_assunto_liberado_no_automatico_o_pedido_de_atendente_vai_pa
 
     assert r.precisa_humano is True and "cliente pediu atendente" in r.motivo
     assert envios == []
+
+
+# ═══════════════ a nova tentativa de envio (14/10/2026) ═══════════════
+
+AGRADECIMENTO = "Que bom que chegou certinho! Qualquer coisa, estamos por aqui."
+
+
+async def _presa(
+    db: AsyncSession,
+    make_user,
+    ia_ligada,
+    *,
+    modo: str = "auto",
+    categoria: str = "agradecimento",
+    precisa_humano: bool = False,
+    criada_ha: timedelta = timedelta(minutes=10),
+):
+    """A sugestão 'agradecimento' da Kia (14/10/2026): pendente, enviável (validador
+    ok, confiança 0,99, gatilho = a última mensagem do cliente) — e parada: o envio
+    foi recusado antes da correção do menu do Duoke."""
+    ia_ligada.atendimento_auto_ativo = True
+    conversa = await _conversa(db, make_user, modo=modo, auto_categorias=["agradecimento"])
+    gatilho = await _msg(db, conversa, "obrigado, chegou certinho!", ha=timedelta(hours=1))
+    r = AtendimentoRascunho(
+        conversa_id=conversa.id,
+        mensagem_gatilho_id=gatilho.id,
+        texto=AGRADECIMENTO,
+        categoria=categoria,
+        confianca=0.99,
+        precisa_humano=precisa_humano,
+        validador_ok=True,
+        status=RASCUNHO_PENDENTE,
+    )
+    db.add(r)
+    await db.commit()
+    await db.execute(
+        update(AtendimentoRascunho)
+        .where(AtendimentoRascunho.id == r.id)
+        .values(created_at=func.now() - criada_ha)
+    )
+    await db.commit()
+    await db.refresh(r)
+    await db.refresh(conversa)
+    return conversa, r
+
+
+async def test_sugestao_presa_sai_na_nova_tentativa_sem_gastar_o_modelo(
+    db: AsyncSession, make_user, ia_ligada, modelo, envios
+):
+    conversa, r = await _presa(db, make_user, ia_ligada)
+
+    assert await ia.reenviar_pendentes(db) == 1
+
+    assert [(e["origem"], e["rascunho_id"], e["texto"]) for e in envios] == [
+        (ORIGEM_IA, r.id, AGRADECIMENTO)
+    ]
+    assert modelo.chamadas == []
+    # UMA vez por sugestão: a rodada seguinte não insiste.
+    assert await ia.reenviar_pendentes(db) == 0
+    assert len(envios) == 1
+
+
+async def test_a_rodada_da_ia_faz_a_nova_tentativa(
+    db: AsyncSession, make_user, ia_ligada, modelo, envios
+):
+    """O cron (`gerar_pendentes`): a conversa já tem sugestão do gatilho atual —
+    não gera de novo (o modelo não é chamado) —, e a nova tentativa a envia."""
+    _conversa_presa, r = await _presa(db, make_user, ia_ligada)
+
+    assert await ia.gerar_pendentes(db) == 0
+
+    assert [e["rascunho_id"] for e in envios] == [r.id]
+    assert modelo.chamadas == []
+
+
+@pytest.mark.parametrize(
+    "caso",
+    [
+        "gatilho_antigo",
+        "precisa_humano",
+        "observar",
+        "assunto_nao_liberado",
+        "acabou_de_nascer",
+        "mais_de_24_horas",
+        "ja_foi_a_plataforma",
+        "pessoa_por_fora",
+        "atribuida",
+        "auto_desligado",
+    ],
+)
+async def test_nova_tentativa_nao_envia(
+    db: AsyncSession, make_user, ia_ligada, modelo, envios, caso
+):
+    kw: dict = {}
+    if caso == "precisa_humano":
+        kw["precisa_humano"] = True
+    elif caso == "observar":
+        kw["modo"] = "observar"
+    elif caso == "assunto_nao_liberado":
+        kw["categoria"] = "rastreio"
+    elif caso == "acabou_de_nascer":
+        kw["criada_ha"] = timedelta(seconds=30)  # a rodada que a gerou acabou de tentar
+    elif caso == "mais_de_24_horas":
+        kw["criada_ha"] = timedelta(hours=25)
+    conversa, r = await _presa(db, make_user, ia_ligada, **kw)
+    if caso == "gatilho_antigo":
+        # O cliente escreveu de novo: a sugestão responde a mensagem de antes.
+        await _msg(db, conversa, "e o carregador, vem junto?", ha=timedelta(minutes=5))
+    elif caso == "ja_foi_a_plataforma":
+        # A tentativa chegou à plataforma (falhou): não se insiste sozinho.
+        db.add(
+            AtendimentoMensagem(
+                conversa_id=conversa.id,
+                autor=AUTOR_LOJA,
+                origem=ORIGEM_IA,
+                tipo="texto",
+                texto=AGRADECIMENTO,
+                status="falhou",
+                rascunho_id=r.id,
+                anexos=[],
+                payload={},
+            )
+        )
+        await db.commit()
+    elif caso == "pessoa_por_fora":
+        # Uma pessoa respondeu POR FORA nas últimas 24 h (antes do gatilho): a
+        # janela de pessoa do `_talvez_enviar` segura.
+        await _msg(db, conversa, "Oi! Sou a Ana.", autor="loja", ha=timedelta(hours=3))
+        await db.refresh(r)
+        assert r.status == RASCUNHO_PENDENTE and conversa.aguardando_resposta
+    elif caso == "atribuida":
+        conversa.atribuido_a = (await make_user()).id
+        await db.commit()
+    elif caso == "auto_desligado":
+        ia_ligada.atendimento_auto_ativo = False
+
+    await ia.reenviar_pendentes(db)
+
+    assert envios == []
+    assert modelo.chamadas == []
+
+
+async def test_pedida_pela_tela_nunca_sai_na_nova_tentativa(
+    db: AsyncSession, make_user, ia_ligada, modelo, envios, monkeypatch
+):
+    """ "Sugerir" na tela é para a pessoa conferir: não sai na hora (como sempre)
+    nem depois, pela nova tentativa. A marca é no BANCO (revisão de 14/10/2026):
+    com o Redis fora no "Sugerir" e de volta depois, ela continua não saindo."""
+    ia_ligada.atendimento_auto_ativo = True
+    await _pedido_completo(db)
+    conversa = await _conversa(db, make_user, modo="auto", auto_categorias=["agradecimento"])
+    await _msg(db, conversa, "obrigado, chegou certinho!", ha=timedelta(hours=1))
+    modelo.saida = _saida(AGRADECIMENTO, categoria="agradecimento", confianca=0.99)
+
+    async def redis_fora(*_a, **_k):
+        raise ConnectionError("redis fora")
+
+    with monkeypatch.context() as m:
+        m.setattr(ia.redis, "set", redis_fora)
+        r = await ia.gerar_rascunho(db, conversa, forcar=True)
+
+    assert r.status == RASCUNHO_PENDENTE and r.validador_ok and not r.precisa_humano, r.motivo
+    assert r.fatos[ia.FATO_PEDIDA_PELA_TELA] is True
+    await db.execute(
+        update(AtendimentoRascunho)
+        .where(AtendimentoRascunho.id == r.id)
+        .values(created_at=func.now() - timedelta(minutes=10))
+    )
+    await db.commit()
+    assert await ia.reenviar_pendentes(db) == 0
+    # A rodada inteira do cron também não (não gera de novo, não envia).
+    assert await ia.gerar_pendentes(db) == 0
+    assert envios == []
+    # O que o modelo vê não leva a marca (só o gravado).
+    assert modelo.chamadas
+    assert all(ia.FATO_PEDIDA_PELA_TELA not in sis + usu for sis, usu in modelo.chamadas)

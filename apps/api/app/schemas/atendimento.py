@@ -153,6 +153,10 @@ class ConversaResumoOut(BaseModel):
     # "[Produto]", "[Imagem]" da lista, como no Duoke. None = sem mensagem.
     ultima_mensagem_tipo: str | None = None
     ultima_autor: str | None = None
+    # O turno (14/10/2026): a última mensagem do cliente — ou a criação, sem
+    # ela. A ordem da Caixa Humano (a mais nova em cima) e o cursor dela.
+    # None no Direct do Instagram.
+    turno_em: datetime | None = None
     aguardando_resposta: bool = False
     prazo_resposta_em: datetime | None = None
     situacao: str
@@ -259,7 +263,8 @@ class ListaConversasOut(BaseModel):
     # Cursor da página seguinte (volta em `antes_de`); None = fim. Opaco para
     # a tela: na ordem por recência é a `ultima_mensagem_em` (ISO) do último
     # item; na aba "Falta responder" (ordem pelo prazo mais curto,
-    # 01/10/2026) é `prazo:<prazo ISO ou vazio>|<id>`.
+    # 01/10/2026) é `prazo:<prazo ISO ou vazio>|<id>`; na Caixa Humano (pelo
+    # turno, o mais novo em cima — 14/10/2026), `turno:<turno ISO>|<id>`.
     proximo: str | None = None
 
 
@@ -296,6 +301,12 @@ class RascunhoOut(BaseModel):
     validador_erros: list[Any] = Field(default_factory=list)
     status: str
     created_at: datetime | None = None
+    # Ela responde o turno ATUAL (o gatilho na última mensagem do cliente ou
+    # depois — `humano.sugestao_do_turno`, 14/10/2026)? False = o cliente
+    # escreveu de novo depois: a tela não põe o selo "precisa de pessoa"
+    # (a Caixa Humano não conta com ela). None = não calculado (a tela trata
+    # como do turno).
+    do_turno_atual: bool | None = None
 
 
 class EnvioOut(BaseModel):
@@ -357,6 +368,9 @@ class SugestaoOut(BaseModel):
     mensagem_gatilho_id: str | None = None
     avaliacao: AvaliacaoResumoOut | None = None
     resposta_real: RespostaRealOut | None = None
+    # Responde o turno ATUAL da conversa (como no `RascunhoOut`, 14/10/2026)?
+    # O selo "precisa de pessoa" do painel só vale para ela.
+    do_turno_atual: bool | None = None
 
 
 class EtiquetaHistoricoOut(BaseModel):

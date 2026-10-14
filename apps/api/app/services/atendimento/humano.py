@@ -72,6 +72,25 @@ OS MOTIVOS (`triar`, PURA — só códigos, `constantes.ORDEM_HUMANO`):
   E a IA PAUSADA na conversa: não é gravada — entra na hora, pela consulta
   (`caixa_humano_sql`), com o motivo `ia_pausada` (menos a bloqueada: ela só
   entra pelo estado).
+  E A IA NÃO RESPONDEU (14/10/2026, o dono no piloto da Kia: "a caixa tem
+  que responder mesmo; se não puder, manda pra Caixa Humano"): na loja da
+  Caixa Humano em que a IA RESPONDE (o Automático — `LojasDaCaixa.da_ia`;
+  com "todos" ou outro modo junto, a loja em Observar ou no Copiloto não
+  leva: lá quem responde é pessoa), a conversa esperando resposta cujo
+  turno (`turno_em_sql`: a última mensagem do cliente, ou a criação)
+  passou de `ESPERA_IA_MIN` minutos entra com o motivo `ia_sem_resposta`
+  ("A IA não respondeu"). Cobre o que nenhuma regra acima pega: a mensagem
+  fora da janela de 7 dias da IA, o limite ou o erro do provedor, a
+  sugestão barrada ou pendente que não saiu, a conversa que a IA nem
+  pegou. Também não é gravado: é uma comparação de coluna na própria
+  consulta (`ia_sem_resposta_sql`, a gêmea pura `ia_sem_resposta`), sem
+  esperar rodada e sem consulta por linha — e acompanha a troca de modo da
+  loja na hora. "Esperando" é o `aguardando_resposta` de sempre: a
+  mensagem automática (o menu do Duoke, o cartão da Shopee) depois do
+  cliente não é resposta; a da IA ou de pessoa é, e a conversa sai na
+  hora. A bloqueada não (só pelo estado). O chip escreve "A IA não
+  respondeu" só quando é o ÚNICO motivo (os outros já dizem por que ela
+  não respondeu; a IA pausada também).
   E a FALHA: a triagem da conversa deu erro — grava o motivo `falha` ("não
   deu para triar: confira"). Na dúvida, mostra; e, com o `em` de agora, a
   rodada só tenta de novo na revisão de 30 min (quem falha sempre não fica
@@ -83,7 +102,8 @@ do pedido (o cliente ainda não perguntou nada), a figurinha, o MODO da loja
 Humano viraria cópia do "Falta responder"; o modo escolhe as LOJAS que a
 Caixa Humano mostra — "SÓ AS LOJAS NO AUTOMÁTICO", abaixo —, não os
 motivos), ser Amazon, ou ter tido resposta de pessoa nas últimas 24 h (essas
-são travas do envio automático).
+são travas do envio automático — na loja no Automático, o que elas seguram
+entra pela espera: `ia_sem_resposta`).
 DE PROPÓSITO FORA (a diferença para o `ia._gerar`): os sinais do cartão
 "Cliente" (`cliente.cartao_cliente` — avaliou mal, reclamação aberta em
 OUTRA conversa do mesmo comprador). Ele consulta o ML ao vivo, e a régua de
@@ -115,6 +135,12 @@ TODA loja: dizem a quem responde pelo Duoke por que a IA não responderia ali
 — informação, não fila; só a Caixa Humano filtra. O `humano.na_caixa` da
 linha diz se ela está na Caixa Humano: fora (loja fora dos modos), a tela
 escreve "Precisa de pessoa", não "Caixa Humano".
+
+A ORDEM DA LISTA (14/10/2026, o dono: "tem que estar com a mais recente lá
+em cima e não embaixo"): a lista `?caixa=humano` vem pelo TURNO, o mais
+novo primeiro (`turno_em_sql` desc, o id desempata), com qualquer filtro —
+o cursor do "carregar mais" é `turno:<ISO>|<id>` (routers/atendimento). A
+Caixa e os filtros dela continuam como eram.
 
 ONDE FICA: `atendimento_conversas.dados.humano` =
     {"v": VERSAO, "turno": <epoch de ultima_do_cliente_em (ou da criação)>,
@@ -218,6 +244,7 @@ from app.services.atendimento.constantes import (
     HUMANO_FALHA,
     HUMANO_IA,
     HUMANO_IA_PAUSADA,
+    HUMANO_IA_SEM_RESPOSTA,
     HUMANO_PEDIDO_NAO_ACHADO,
     HUMANO_RECLAMACAO,
     HUMANO_SEM_DADO,
@@ -259,6 +286,14 @@ _CHAVE_RODADA = "atendimento:humano:rodada:{}"
 # lojas no Automático). "todos" na chave = toda loja (como antes).
 MODOS_PADRAO: tuple[str, ...] = (MODO_AUTO,)
 MODOS_TODOS = "todos"
+# "Ou responde ou vai para pessoa" (14/10/2026): quanto a IA tem, depois da
+# última mensagem do cliente, para responder na loja nos modos da Caixa
+# Humano. A rajada espera 90 s de silêncio, o modelo leva segundos e o cron
+# roda a cada minuto: com folga, ela respondeu antes disso.
+ESPERA_IA_MIN = 10
+ESPERA_IA = timedelta(minutes=ESPERA_IA_MIN)
+# Os motivos que a CONSULTA põe (não são gravados): a tela os junta no fim.
+_MOTIVOS_DA_CONSULTA = frozenset({HUMANO_IA_SEM_RESPOSTA, HUMANO_IA_PAUSADA})
 
 # O anexo "de verdade" (não o cartão do produto/pedido, não a figurinha — que
 # a leitura grava com o rótulo como texto).
@@ -377,6 +412,36 @@ def _so_anexo(rajada: Sequence[Any]) -> bool:
     )
 
 
+def _utc(valor: datetime | None) -> datetime | None:
+    if valor is None:
+        return None
+    return valor if valor.tzinfo else valor.replace(tzinfo=UTC)
+
+
+def ia_sem_resposta(conversa: Any, agora: datetime) -> bool:
+    """A IA passou da espera (`ESPERA_IA`) nesta conversa? PURA — a gêmea de `ia_sem_resposta_sql`.
+
+    Só o tempo e a bloqueada (que só entra pelo estado): o escopo (esperando
+    resposta, canal com resposta) e a loja nos modos ficam com quem chama,
+    como na consulta (`caixa_humano_sql`, `para_tela`).
+    """
+    if conversa.situacao == CONVERSA_BLOQUEADA:
+        return False
+    turno = _utc(conversa.ultima_do_cliente_em or getattr(conversa, "created_at", None))
+    return turno is not None and turno <= agora - ESPERA_IA
+
+
+def sugestao_do_turno(momento: datetime | None, ultima_do_cliente_em: datetime | None) -> bool:
+    """A sugestão responde o turno ATUAL? PURA — a régua de `_sugestao_do_turno` (o motivo `ia`).
+
+    `momento` = a hora do gatilho (a mensagem do cliente que ela responde;
+    sem ele, a hora em que ela nasceu — `momento_da_sugestao_sql`). Sem
+    mensagem do cliente na conversa, não há turno para responder.
+    """
+    momento, ultima = _utc(momento), _utc(ultima_do_cliente_em)
+    return momento is not None and ultima is not None and momento >= ultima
+
+
 def sugestao_pede_pessoa(sugestao: Any | None) -> bool:
     """A sugestão da IA (do turno) mandou para pessoa? PURA."""
     if sugestao is None or sugestao.status not in (RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO):
@@ -469,19 +534,28 @@ def triar(
     return Triagem(motivos=tuple(m for m in ORDEM_HUMANO if m in motivos), assuntos=tuple(assuntos))
 
 
-def para_tela(cache: Any, *, ia_pausada: bool, na_caixa: bool = True) -> dict[str, Any] | None:
+def para_tela(
+    cache: Any, *, ia_pausada: bool, na_caixa: bool = True, ia_sem_resposta: bool = False
+) -> dict[str, Any] | None:
     """O `humano` da linha da lista/detalhe a partir do que a consulta trouxe. PURA.
 
     `cache` = `triagem_da_linha_sql()`: None = não precisa de pessoa; `{}` =
-    precisa só pela IA pausada (o cálculo gravado é de outro turno); senão o
-    `dados.humano` do turno atual. `na_caixa` = a loja da conversa está nos
-    modos da Caixa Humano (`LojasDaCaixa.tem`): False = o chip informa, mas a
-    conversa não está na Caixa Humano (a loja em Observar, que o Duoke responde).
+    precisa só pelo que a consulta põe — a IA pausada ou a espera da IA (o
+    cálculo gravado é de outro turno, ou não há); senão o `dados.humano` do
+    turno atual. `na_caixa` = a loja da conversa está nos modos da Caixa
+    Humano (`LojasDaCaixa.tem`): False = o chip informa, mas a conversa não
+    está na Caixa Humano (a loja em Observar, que o Duoke responde).
+    `ia_sem_resposta` = a loja da espera (`na_espera_da_ia`) E
+    `ia_sem_resposta(conversa, agora)` com o MESMO `agora` da consulta: "A
+    IA não respondeu" entra só como motivo único (com outro motivo, ou a IA
+    pausada, eles já dizem por quê).
     """
     if cache is None:
         return None
     dados = cache if isinstance(cache, dict) else {}
-    motivos = [m for m in _lista(dados.get("motivos")) if m != HUMANO_IA_PAUSADA]
+    motivos = [m for m in _lista(dados.get("motivos")) if m not in _MOTIVOS_DA_CONSULTA]
+    if ia_sem_resposta and not motivos and not ia_pausada:
+        motivos.append(HUMANO_IA_SEM_RESPOSTA)
     if ia_pausada:
         motivos.append(HUMANO_IA_PAUSADA)
     assuntos = _lista(dados.get("assuntos"))
@@ -531,16 +605,46 @@ def _epoch(expr):
     return func.to_jsonb(extract("epoch", expr), type_=JSONB)
 
 
-def turno_sql():
-    """O turno da conversa: a última mensagem do cliente, como o cache guarda.
+def turno_em_sql():
+    """A HORA do turno da conversa: a última mensagem do cliente, ou a criação.
 
     Sem mensagem do cliente (a reclamação/devolução só com mensagem do sistema
     ou do mediador): a criação da conversa — o turno muda quando o cliente
     escrever; o estado (etiqueta, devolução) é revisto pela régua de
-    desatualizada.
+    desatualizada. É também a ORDEM da Caixa Humano (a mais nova em cima) e
+    o relógio da espera da IA (`ia_sem_resposta_sql`).
     """
     c = AtendimentoConversa
-    return _epoch(func.coalesce(c.ultima_do_cliente_em, c.created_at))
+    return func.coalesce(c.ultima_do_cliente_em, c.created_at)
+
+
+def turno_sql():
+    """O turno da conversa como o cache guarda (o epoch de `turno_em_sql`)."""
+    return _epoch(turno_em_sql())
+
+
+def ia_sem_resposta_sql(agora: datetime):
+    """A IA passou da espera? Nunca NULL — a gêmea de `ia_sem_resposta` (sem escopo nem loja).
+
+    O limite vai como VALOR (o `agora` de quem chama): a lista e o `para_tela`
+    da linha usam o mesmo, e o chip não discorda da consulta.
+    """
+    c = AtendimentoConversa
+    limite = cast(literal(agora - ESPERA_IA), DateTime(timezone=True))
+    return and_(
+        c.situacao != CONVERSA_BLOQUEADA,
+        func.coalesce(turno_em_sql() <= limite, false()),
+    )
+
+
+def momento_da_sugestao_sql(rascunho: Any, gatilho: Any):
+    """A hora que a sugestão responde: o gatilho (a mensagem do cliente) ou, sem ele, a criação.
+
+    `rascunho` = `AtendimentoRascunho` (ou um alias); `gatilho` = o alias de
+    `AtendimentoMensagem` ligado por `mensagem_gatilho_id` (outer join). A
+    régua do turno (`sugestao_do_turno`): ≥ a última mensagem do cliente.
+    """
+    return func.coalesce(gatilho.enviada_em, gatilho.created_at, rascunho.created_at)
 
 
 def escopo_sql():
@@ -561,18 +665,38 @@ def triada_sql():
     return func.coalesce(_campo("turno") == turno_sql(), false())
 
 
-def para_pessoa_sql():
+def _com_motivo_sql():
+    """O cálculo gravado é do turno atual e tem motivo. Nunca NULL."""
+    return and_(triada_sql(), func.coalesce(_campo("motivos") != _JSON_LISTA_VAZIA, false()))
+
+
+def _pausada_sql():
+    """A IA pausada na conversa (menos a bloqueada, que só entra pelo estado)."""
+    c = AtendimentoConversa
+    return and_(c.ia_pausada.is_(True), c.situacao != CONVERSA_BLOQUEADA)
+
+
+def para_pessoa_sql(lojas: LojasDaCaixa | None, agora: datetime | None = None):
     """A conversa precisa de PESSOA agora, em qualquer loja? Nunca NULL — o chip e a faixa.
 
     No escopo E (o cálculo do turno atual tem motivo OU a IA está pausada —
-    menos na bloqueada, que só entra pelo estado). Sem conversão de tipo que
-    possa dar erro: chave ausente vira NULL = não. É a Caixa Humano SEM o
-    filtro das lojas (`caixa_humano_sql`).
+    menos na bloqueada, que só entra pelo estado — OU, na loja nos modos da
+    Caixa Humano, a IA passou da espera: `ia_sem_resposta_sql`). Sem
+    conversão de tipo que possa dar erro: chave ausente vira NULL = não. É a
+    Caixa Humano SEM o filtro das lojas para os motivos gravados
+    (`caixa_humano_sql`): a espera da IA só vale nas lojas da Caixa em que a
+    IA responde (`LojasDaCaixa.da_ia`, o Automático — a do Observar, o Duoke
+    responde; a do Copiloto, pessoa).
     """
-    c = AtendimentoConversa
-    com_motivo = and_(triada_sql(), func.coalesce(_campo("motivos") != _JSON_LISTA_VAZIA, false()))
-    pausada = and_(c.ia_pausada.is_(True), c.situacao != CONVERSA_BLOQUEADA)
-    return and_(escopo_sql(), or_(com_motivo, pausada))
+    agora = agora or datetime.now(UTC)
+    return and_(
+        escopo_sql(),
+        or_(
+            _com_motivo_sql(),
+            _pausada_sql(),
+            and_(ia_sem_resposta_sql(agora), loja_da_ia_sql(lojas)),
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -581,11 +705,20 @@ class LojasDaCaixa:
 
     `canais` = os canais num dos modos; `integracoes` = as integrações com
     ALGUM canal num dos modos (a conversa sem canal vale por elas). Ver "SÓ
-    AS LOJAS NO AUTOMÁTICO" no topo.
+    AS LOJAS NO AUTOMÁTICO" no topo. `todas` = "todos" (toda loja; `canais`
+    e `integracoes` não contam).
+
+    `ia` = as lojas da Caixa em que a IA RESPONDE (o Automático): só nelas
+    vale a espera da IA ("A IA não respondeu" — na loja em Observar ou no
+    Copiloto quem responde é pessoa, e o chip mentiria). None = as mesmas
+    lojas (os modos são só o Automático, o padrão) — ou nenhuma, com
+    `todas`. Ver `da_ia`.
     """
 
     canais: frozenset[UUID] = frozenset()
     integracoes: frozenset[UUID] = frozenset()
+    todas: bool = False
+    ia: LojasDaCaixa | None = None
 
     def tem(self, canal_id: UUID | None, integration_id: UUID | None) -> bool:
         """A loja desta conversa está num dos modos? PURA — a gêmea de `loja_no_modo_sql`.
@@ -594,30 +727,51 @@ class LojasDaCaixa:
         modo). Sem canal (a reclamação e a avaliação não têm caixa na
         plataforma): algum canal da MESMA integração no modo. Sem os dois, não.
         """
+        if self.todas:
+            return True
         if canal_id is not None:
             return canal_id in self.canais
         return integration_id is not None and integration_id in self.integracoes
 
+    @property
+    def da_ia(self) -> LojasDaCaixa:
+        """As lojas da espera da IA (`ia`; None = estas mesmas, ou nenhuma com `todas`)."""
+        if self.ia is not None:
+            return self.ia
+        return LojasDaCaixa() if self.todas else self
 
-async def lojas_da_caixa(
-    session: AsyncSession, modos: Collection[str] | None
-) -> LojasDaCaixa | None:
-    """Os canais e as integrações nos `modos` (`modos_da_caixa()`); None = toda loja ("todos").
+
+def _lojas(linhas: Sequence[Any]) -> LojasDaCaixa:
+    return LojasDaCaixa(
+        canais=frozenset(linha[0] for linha in linhas),
+        # O canal do robô (Temu/AliExpress) não tem integração: nada a juntar.
+        integracoes=frozenset(linha[1] for linha in linhas if linha[1] is not None),
+    )
+
+
+async def lojas_da_caixa(session: AsyncSession, modos: Collection[str] | None) -> LojasDaCaixa:
+    """Os canais e as integrações nos `modos` (`modos_da_caixa()`; None = "todos": toda loja).
 
     Uma consulta pequena (os ~85 canais, pelo `modo`) antes da consulta
     grande: a lista vai como valores para `loja_no_modo_sql` — com
-    subconsulta, o /resumo pagava o JIT a mais (ver o topo).
+    subconsulta, o /resumo pagava o JIT a mais (ver o topo). Com o
+    Automático junto de outro modo (ou "todos"), o `ia` leva só os canais
+    dele: a espera da IA não vale onde ela não responde.
     """
-    if modos is None:
-        return None
     k = AtendimentoCanal
-    consulta = select(k.id, k.integration_id).where(k.modo.in_(tuple(modos)))
+    consulta = select(k.id, k.integration_id, k.modo)
+    if modos is None:
+        consulta = consulta.where(k.modo == MODO_AUTO)
+    else:
+        consulta = consulta.where(k.modo.in_(tuple(modos)))
     linhas = (await session.execute(consulta)).all()
-    return LojasDaCaixa(
-        canais=frozenset(i for i, _ in linhas),
-        # O canal do robô (Temu/AliExpress) não tem integração: nada a juntar.
-        integracoes=frozenset(integ for _, integ in linhas if integ is not None),
-    )
+    auto = _lojas([linha for linha in linhas if linha[2] == MODO_AUTO])
+    if modos is None:
+        return LojasDaCaixa(todas=True, ia=auto)
+    caixa = _lojas(linhas)
+    if set(modos) == {MODO_AUTO}:
+        return caixa  # `ia` None: as mesmas (o padrão; o SQL não repete a lista)
+    return LojasDaCaixa(canais=caixa.canais, integracoes=caixa.integracoes, ia=auto)
 
 
 def na_caixa_da_loja(
@@ -627,17 +781,30 @@ def na_caixa_da_loja(
     return True if lojas is None else lojas.tem(canal_id, integration_id)
 
 
+def na_espera_da_ia(
+    lojas: LojasDaCaixa | None, canal_id: UUID | None, integration_id: UUID | None
+) -> bool:
+    """A loja da conversa é uma da espera da IA (`LojasDaCaixa.da_ia`)? PURA — a gêmea de
+    `loja_da_ia_sql`. None (sem as lojas lidas): não — na dúvida, a espera não acusa a IA."""
+    return lojas is not None and lojas.da_ia.tem(canal_id, integration_id)
+
+
+def loja_da_ia_sql(lojas: LojasDaCaixa | None):
+    """`na_espera_da_ia` em SQL (`loja_no_modo_sql` das lojas da IA). Nunca NULL."""
+    return false() if lojas is None else loja_no_modo_sql(lojas.da_ia)
+
+
 def loja_no_modo_sql(lojas: LojasDaCaixa | None):
     """A LOJA da conversa está nos modos (`LojasDaCaixa.tem`, em SQL)? Nunca NULL.
 
-    `lojas=None` ("todos") = sempre. Os ids vão como VALORES (`IN ($1, …)`),
+    `lojas=None` ou `todas` ("todos") = sempre. Os ids vão como VALORES (`IN ($1, …)`),
     lidos antes por `lojas_da_caixa` — nada de subconsulta aqui: o /resumo
     já passa do custo em que o Postgres liga o JIT, e cada `IN (SELECT …)`
     era um SubPlan a mais para compilar (+180 ms medidos em produção). Fica
     no FIM do AND de `caixa_humano_sql`: só a conversa que já passou pelo
     escopo e pelos motivos chega aqui.
     """
-    if lojas is None:
+    if lojas is None or lojas.todas:
         return true()
     c = AtendimentoConversa
     partes = []
@@ -653,28 +820,42 @@ def loja_no_modo_sql(lojas: LojasDaCaixa | None):
     return func.coalesce(or_(*partes), false())
 
 
-def caixa_humano_sql(lojas: LojasDaCaixa | None):
+def caixa_humano_sql(lojas: LojasDaCaixa | None, agora: datetime | None = None):
     """A conversa está na Caixa Humano AGORA? Nunca NULL — lista, /resumo e `contar`.
 
     Precisa de pessoa (`para_pessoa_sql`) E a loja está num modo da Caixa
-    Humano (`loja_no_modo_sql`). `lojas` = `await lojas_da_caixa(session,
+    Humano (`loja_no_modo_sql`) — no padrão (só o Automático), escrito sem
+    repetir a lista das lojas na espera da IA (as lojas dela são as mesmas);
+    com outro modo junto, ou "todos", a espera leva as do Automático
+    (`loja_da_ia_sql`). `lojas` = `await lojas_da_caixa(session,
     modos_da_caixa())` — obrigatório de propósito: esquecer não pode virar
-    "toda loja" sem ninguém ver.
+    "toda loja" sem ninguém ver. `agora` = o relógio da espera da IA (o da
+    lista, para o chip dizer o mesmo).
     """
-    return and_(para_pessoa_sql(), loja_no_modo_sql(lojas))
+    agora = agora or datetime.now(UTC)
+    espera = ia_sem_resposta_sql(agora)
+    if lojas is None or lojas.da_ia is not lojas:
+        espera = and_(espera, loja_da_ia_sql(lojas))
+    return and_(
+        escopo_sql(),
+        or_(_com_motivo_sql(), _pausada_sql(), espera),
+        loja_no_modo_sql(lojas),
+    )
 
 
-def triagem_da_linha_sql():
-    """O que a linha leva para `para_tela`: NULL fora; `{}` só pela IA pausada; o cache.
+def triagem_da_linha_sql(lojas: LojasDaCaixa | None, agora: datetime | None = None):
+    """O que a linha leva para `para_tela`: NULL fora; `{}` só pela consulta; o cache.
 
-    Pela régua SEM o filtro das lojas (`para_pessoa_sql`): o chip na Caixa e
-    a faixa na conversa valem em TODA loja — na loja em Observar, quem
-    responde pelo Duoke vê por que a IA não responderia. Na lista
-    `?caixa=humano` toda linha já passou por `caixa_humano_sql`.
+    Pela régua SEM o filtro das lojas para os motivos gravados
+    (`para_pessoa_sql`): o chip na Caixa e a faixa na conversa valem em TODA
+    loja — na loja em Observar, quem responde pelo Duoke vê por que a IA não
+    responderia. `{}` = só a IA pausada ou a espera da IA (essa, só nas
+    lojas da Caixa em que a IA responde). Na lista `?caixa=humano` toda linha já passou por
+    `caixa_humano_sql`.
     """
     return case(
         (
-            para_pessoa_sql(),
+            para_pessoa_sql(lojas, agora),
             case((triada_sql(), AtendimentoConversa.dados[CHAVE]), else_=_JSON_OBJETO_VAZIO),
         ),
         else_=null(),
@@ -791,12 +972,13 @@ async def _sugestao_do_turno(
     """A sugestão da IA (pendente ou bloqueada) que responde o turno atual, ou None.
 
     Pelo GATILHO (a mensagem do cliente que ela responde) na última mensagem
-    do cliente ou depois; sem gatilho, pela hora em que ela nasceu.
+    do cliente ou depois; sem gatilho, pela hora em que ela nasceu
+    (`sugestao_do_turno`: a mesma régua do selo da sugestão na tela).
     """
     if conversa.ultima_do_cliente_em is None:
         return None
     gatilho = aliased(AtendimentoMensagem)
-    momento = func.coalesce(gatilho.enviada_em, gatilho.created_at, AtendimentoRascunho.created_at)
+    momento = momento_da_sugestao_sql(AtendimentoRascunho, gatilho)
     return (
         await session.execute(
             select(AtendimentoRascunho)
@@ -984,9 +1166,12 @@ async def simular(*, limite: int | None = None) -> dict[str, Any]:
     Nada de comprador (nem nome, nem nº de pedido, nem texto).
     `na_caixa` = as que a Caixa Humano mostraria (só as lojas dos `modos`);
     `para_pessoa` = as que a régua manda para pessoa em TODA loja (a triagem
-    vale para todas). Os motivos e assuntos são da régua: todas as lojas.
+    vale para todas). Os motivos e assuntos são da régua: todas as lojas — a
+    espera da IA (`ia_sem_resposta`), como na consulta, só nas lojas em que a IA
+    responde (`na_espera_da_ia`).
     """
     c = AtendimentoConversa
+    agora = datetime.now(UTC)
     modos = modos_da_caixa()
     contagem: dict[str, Counter[str]] = defaultdict(Counter)
     principal: dict[str, Counter[str]] = defaultdict(Counter)
@@ -1026,14 +1211,21 @@ async def simular(*, limite: int | None = None) -> dict[str, Any]:
                 )
                 continue
             motivos = list(triagem.motivos)
+            na_loja = na_caixa_da_loja(lojas, conversa.canal_id, conversa.integration_id)
             if conversa.ia_pausada and (motivos or conversa.situacao != CONVERSA_BLOQUEADA):
                 motivos.append(HUMANO_IA_PAUSADA)
+            elif (
+                not motivos
+                and na_espera_da_ia(lojas, conversa.canal_id, conversa.integration_id)
+                and ia_sem_resposta(conversa, agora)
+            ):
+                motivos.append(HUMANO_IA_SEM_RESPOSTA)
             quantos[len(motivos)] += 1
             if not motivos:
                 continue
             resumo["para_pessoa"] += 1
             contagem[p]["para_pessoa"] += 1
-            if na_caixa_da_loja(lojas, conversa.canal_id, conversa.integration_id):
+            if na_loja:
                 resumo["na_caixa"] += 1
                 contagem[p]["na_caixa"] += 1
             principal[p][motivos[0]] += 1
@@ -1084,19 +1276,25 @@ async def contar(session: AsyncSession) -> dict[str, Any]:
 
     `na_caixa` (e os detalhes) = o número da tela: só as lojas dos `modos`;
     `para_pessoa` = a régua em TODA loja (o que a Caixa Humano mostraria com
-    "todos").
+    "todos"; a espera da IA, só nas lojas em que a IA responde).
     """
     c = AtendimentoConversa
+    agora = datetime.now(UTC)
     modos = modos_da_caixa()
+    lojas = await lojas_da_caixa(session, modos)
     # Rótulo: o GROUP BY vai pelo nome (a expressão repetida teria outros
-    # parâmetros e o Postgres não a reconheceria como a mesma).
-    motivo = case((triada_sql(), c.dados[(CHAVE, "motivos", "0")].astext), else_=None).label(
-        "motivo_principal"
-    )
+    # parâmetros e o Postgres não a reconheceria como a mesma). Sem motivo
+    # gravado do turno: a IA pausada ou, senão, a espera da IA (a consulta).
+    primeiro = c.dados[(CHAVE, "motivos", "0")].astext
+    motivo = case(
+        (and_(triada_sql(), primeiro.is_not(None)), primeiro),
+        (_pausada_sql(), literal(HUMANO_IA_PAUSADA)),
+        else_=literal(HUMANO_IA_SEM_RESPOSTA),
+    ).label("motivo_principal")
     linhas = (
         await session.execute(
             select(c.plataforma, motivo, func.count())
-            .where(caixa_humano_sql(await lojas_da_caixa(session, modos)))
+            .where(caixa_humano_sql(lojas, agora))
             .group_by(c.plataforma, motivo)
         )
     ).all()
@@ -1104,10 +1302,10 @@ async def contar(session: AsyncSession) -> dict[str, Any]:
     principal: dict[str, Counter[str]] = defaultdict(Counter)
     for plataforma, motivo, n in linhas:
         por_plataforma[plataforma] += int(n)
-        principal[plataforma][motivo or HUMANO_IA_PAUSADA] += int(n)
+        principal[plataforma][motivo] += int(n)
     no_escopo, para_pessoa = (
         await session.execute(
-            select(func.count(), func.count().filter(para_pessoa_sql()))
+            select(func.count(), func.count().filter(para_pessoa_sql(lojas, agora)))
             .select_from(c)
             .where(escopo_sql())
         )

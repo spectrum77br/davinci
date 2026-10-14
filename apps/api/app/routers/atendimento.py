@@ -390,6 +390,11 @@ _CURSOR_PRAZO = "prazo:"
 _CURSOR_COMUM = "comum:"
 _CURSOR_PERGUNTA = "pergunta:"
 FILTROS_PERGUNTA_PRIMEIRO = ("midia",)
+# A Caixa Humano (14/10/2026, o dono: "tem que estar com a mais recente lá
+# em cima e não embaixo"): com QUALQUER filtro, pelo turno — a última
+# mensagem do cliente (ou a criação, `humano.turno_em_sql`), a mais nova
+# primeiro; o id (como texto) desempata. O cursor: `turno:<ISO>|<id>`.
+_CURSOR_TURNO = "turno:"
 # As DMs do Instagram esperando entram na mesma ordem pelo prazo: o
 # Instagram não pagina por prazo, então vêm todas (até este teto) e o
 # cursor é aplicado aqui.
@@ -677,13 +682,29 @@ async def _conversa_ou_404(
 
 
 def _pendente_existe():
+    """Há sugestão da IA PENDENTE para o turno ATUAL? — o selo "IA sugeriu" e o filtro.
+
+    Desde 14/10/2026 só a do turno atual (o gatilho na última mensagem do
+    cliente ou depois — `humano.sugestao_do_turno`, a régua do motivo `ia`
+    da Caixa Humano): a pendente de uma mensagem anterior (o cliente
+    escreveu de novo e a IA ainda não refez) dizia "IA sugeriu" numa
+    conversa que, sem resposta, vai para a Caixa Humano.
+    """
+    from app.services.atendimento import humano as humano_svc
+
+    r = aliased(AtendimentoRascunho)
+    gatilho = aliased(AtendimentoMensagem)
     return (
-        exists()
+        select(r.id)
+        .outerjoin(gatilho, gatilho.id == r.mensagem_gatilho_id)
         .where(
-            AtendimentoRascunho.conversa_id == AtendimentoConversa.id,
-            AtendimentoRascunho.status == RASCUNHO_PENDENTE,
+            r.conversa_id == AtendimentoConversa.id,
+            r.status == RASCUNHO_PENDENTE,
+            humano_svc.momento_da_sugestao_sql(r, gatilho)
+            >= AtendimentoConversa.ultima_do_cliente_em,
         )
         .correlate(AtendimentoConversa)
+        .exists()
     )
 
 
@@ -805,7 +826,7 @@ def _tipo_do_chamado():
 
 
 def _cursor(
-    antes_de: str | None, *, pelo_prazo: bool
+    antes_de: str | None, *, pelo_prazo: bool, pelo_turno: bool = False
 ) -> tuple[datetime | None, str | None, bool, int]:
     """O cursor da página (`antes_de`) → (momento, id, sem_prazo, grupo). Inválido → 422.
 
@@ -813,12 +834,20 @@ def _cursor(
     1); `pergunta:<ISO>` (Mídia, ainda nas perguntas) → grupo 0.
     Ordem pelo prazo: `prazo:<ISO ou vazio>|<id>` → (prazo, id, prazo vazio,
     0); `prazo:comum:…` (já nos comentários comuns) → grupo 1.
+    Ordem pelo turno (a Caixa Humano): `turno:<ISO>|<id>` → (turno, id, False, 0).
     Sem cursor: o começo (grupo 0).
     """
     bruto = (antes_de or "").strip()
     if not bruto:
         return None, None, False, 0
     invalido = HTTPException(422, detail={"code": "cursor_invalido"})
+    if pelo_turno != bruto.startswith(_CURSOR_TURNO):
+        raise invalido
+    if pelo_turno:
+        turno_txt, sep, ident = bruto[len(_CURSOR_TURNO) :].partition("|")
+        if not sep or not ident.strip() or not turno_txt.strip():
+            raise invalido
+        return _momento_do_cursor(turno_txt, invalido), ident.strip(), False, 0
     if pelo_prazo != bruto.startswith(_CURSOR_PRAZO):
         raise invalido
     grupo = 0
@@ -838,6 +867,12 @@ def _cursor(
             bruto = bruto[len(_CURSOR_PERGUNTA) :]
         else:
             grupo = 1
+    momento = _momento_do_cursor(bruto, invalido)
+    return momento, (ident.strip() if ident else None), False, grupo
+
+
+def _momento_do_cursor(bruto: str, invalido: HTTPException) -> datetime | None:
+    """O ISO do cursor → datetime UTC (o "+" do fuso que chegou sem escape vira espaço)."""
     texto = bruto.strip().replace("Z", "+00:00")
     if "T" in texto:
         # O "+" do fuso que chegou sem escape na URL vira espaço.
@@ -846,7 +881,18 @@ def _cursor(
         momento = datetime.fromisoformat(texto)
     except ValueError as e:
         raise invalido from e
-    return _utc(momento), (ident.strip() if ident else None), False, grupo
+    return _utc(momento)
+
+
+def _cursor_do_turno(item: dict[str, Any]) -> str | None:
+    """O cursor da Caixa Humano a partir do último item da página (None sem o turno)."""
+    turno = item.get("turno_em")
+    return f"{_CURSOR_TURNO}{turno.isoformat()}|{item['id']}" if turno else None
+
+
+def _chave_do_turno(item: dict[str, Any]) -> tuple:
+    """Ordem da Caixa Humano (com `reverse=True`): o turno mais novo primeiro, o id desempata."""
+    return (item.get("turno_em") or datetime.min.replace(tzinfo=UTC), str(item["id"]))
 
 
 def _grupo_do_prazo(item: dict[str, Any]) -> int:
@@ -1047,6 +1093,9 @@ def _resumo_dict(
         "ultima_mensagem_resumo": c.ultima_mensagem_resumo,
         "ultima_mensagem_tipo": gravar.tipo_previa(ultimo_tipo),
         "ultima_autor": c.ultima_autor,
+        # O turno (14/10/2026): a última mensagem do cliente, ou a criação —
+        # a ordem e o cursor da Caixa Humano (`humano.turno_em_sql`).
+        "turno_em": _utc(c.ultima_do_cliente_em or c.created_at),
         "aguardando_resposta": c.aguardando_resposta,
         "prazo_resposta_em": _utc(c.prazo_resposta_em),
         "situacao": c.situacao,
@@ -1108,15 +1157,9 @@ def _email_resumo(c: AtendimentoConversa) -> dict[str, Any] | None:
 
 
 async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> ConversaOut:
+    # A sugestão pendente do turno ATUAL (a mesma régua da lista, 14/10/2026).
     tem = bool(
-        await session.scalar(
-            select(AtendimentoRascunho.id)
-            .where(
-                AtendimentoRascunho.conversa_id == c.id,
-                AtendimentoRascunho.status == RASCUNHO_PENDENTE,
-            )
-            .limit(1)
-        )
+        await session.scalar(select(_pendente_existe()).where(AtendimentoConversa.id == c.id))
     )
     a_conferir = bool(
         await session.scalar(
@@ -1136,15 +1179,14 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
     pendentes = await session.scalar(select(_pendentes()).where(AtendimentoConversa.id == c.id))
     from app.services.atendimento import humano as humano_svc
 
-    para_pessoa = await session.scalar(
-        select(humano_svc.triagem_da_linha_sql()).where(AtendimentoConversa.id == c.id)
-    )
     # A loja nos modos da Caixa Humano (14/10/2026): a faixa diz "Caixa
-    # Humano" ou só "Precisa de pessoa". Só pergunta quando há o que mostrar.
-    na_caixa = para_pessoa is None or humano_svc.na_caixa_da_loja(
-        await humano_svc.lojas_da_caixa(session, humano_svc.modos_da_caixa()),
-        c.canal_id,
-        c.integration_id,
+    # Humano" ou só "Precisa de pessoa" — e a espera da IA ("A IA não
+    # respondeu") só vale nas em que ela responde (o Automático), já na
+    # consulta (`triagem_da_linha_sql`).
+    agora = datetime.now(UTC)
+    lojas = await humano_svc.lojas_da_caixa(session, humano_svc.modos_da_caixa())
+    para_pessoa = await session.scalar(
+        select(humano_svc.triagem_da_linha_sql(lojas, agora)).where(AtendimentoConversa.id == c.id)
     )
     base = _resumo_dict(
         c,
@@ -1153,7 +1195,7 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
         a_conferir=a_conferir,
         ultimo_tipo=ultimo_tipo,
         pendentes=pendentes or 0,
-        humano=humano_svc.para_tela(para_pessoa, ia_pausada=c.ia_pausada, na_caixa=na_caixa),
+        humano=_humano_da_linha(para_pessoa, c, lojas, agora),
     )
     base.update(
         comprador_id=c.comprador_id,
@@ -1267,7 +1309,9 @@ def _email_da_mensagem(m: AtendimentoMensagem) -> dict[str, Any] | None:
     return None
 
 
-def _rascunho_out(r: AtendimentoRascunho | None) -> RascunhoOut | None:
+def _rascunho_out(
+    r: AtendimentoRascunho | None, *, do_turno_atual: bool | None = None
+) -> RascunhoOut | None:
     if r is None:
         return None
     return RascunhoOut(
@@ -1280,6 +1324,7 @@ def _rascunho_out(r: AtendimentoRascunho | None) -> RascunhoOut | None:
         validador_erros=list(r.validador_erros or []),
         status=r.status,
         created_at=_utc(r.created_at),
+        do_turno_atual=do_turno_atual,
     )
 
 
@@ -1551,10 +1596,12 @@ async def resumo(
     # total, por plataforma e por loja (a loja fora dos modos fica com zero).
     # Os canais no modo vão como VALORES (`lojas_da_caixa`, uma consulta
     # pequena): com subconsulta, o JIT do Postgres compilava mais que o
-    # triplo de funções nesta consulta (+180 ms ou mais em produção).
+    # triplo de funções nesta consulta (+180 ms ou mais em produção). A
+    # espera da IA (14/10/2026, "A IA não respondeu") é uma comparação de
+    # coluna com o `agora`: nada por linha.
     modos_humano = humano_svc.modos_da_caixa()
     lojas_humano = await humano_svc.lojas_da_caixa(session, modos_humano)
-    na_caixa_humano = func.count().filter(humano_svc.caixa_humano_sql(lojas_humano))
+    na_caixa_humano = func.count().filter(humano_svc.caixa_humano_sql(lojas_humano, agora))
 
     def _etiquetas(contagens) -> dict[str, int]:
         return {e: int(n or 0) for e, n in zip(ETIQUETAS, contagens, strict=True)}
@@ -1801,8 +1848,9 @@ async def _listar_marketplace(
         _ultimo_tipo().label("ultimo_tipo"),
         _pendentes().label("pendentes"),
         # Caixa Humano (09/10/2026): o motivo de quem precisa de pessoa
-        # (None fora) — o chip, em toda loja (`triagem_da_linha_sql`).
-        humano_svc.triagem_da_linha_sql().label("humano"),
+        # (None fora) — o chip, em toda loja (`triagem_da_linha_sql`); a
+        # espera da IA, só nas lojas em que ela responde, com o MESMO `agora`.
+        humano_svc.triagem_da_linha_sql(lojas_humano, agora).label("humano"),
         User,
     ).outerjoin(User, User.id == AtendimentoConversa.atribuido_a)
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
@@ -1816,7 +1864,7 @@ async def _listar_marketplace(
         consulta = consulta.where(separa_email.na_caixa_sql())
     if caixa_humano:
         # Falta responder e a IA não pode, nas lojas dos modos (com qualquer filtro).
-        consulta = consulta.where(humano_svc.caixa_humano_sql(lojas_humano))
+        consulta = consulta.where(humano_svc.caixa_humano_sql(lojas_humano, agora))
     if len(plataforma) == 1:
         consulta = consulta.where(AtendimentoConversa.plataforma == plataforma[0])
     elif plataforma:
@@ -1927,7 +1975,18 @@ async def _listar_marketplace(
                 ),
             )
         )
-    if filtro in FILTROS_PELO_PRAZO:
+    if caixa_humano:
+        # A Caixa Humano (14/10/2026, o dono: "a mais recente lá em cima e
+        # não embaixo"), com qualquer filtro: o turno mais novo primeiro (a
+        # última mensagem do cliente, ou a criação); o id (como texto)
+        # desempata e vai no cursor — nada some nem repete no "carregar mais".
+        momento, ident, _sem, _grupo = _cursor(antes_de, pelo_prazo=False, pelo_turno=True)
+        turno = humano_svc.turno_em_sql()
+        id_txt = cast(AtendimentoConversa.id, String)
+        if momento is not None:
+            consulta = consulta.where(or_(turno < momento, and_(turno == momento, id_txt < ident)))
+        consulta = consulta.order_by(turno.desc(), id_txt.desc())
+    elif filtro in FILTROS_PELO_PRAZO:
         # O comentário comum das redes no fim (RF7: a pergunta passa à
         # frente); dentro de cada grupo, prazo mais curto primeiro, sem prazo
         # no fim; o id (como texto, a mesma ordem das DMs do Instagram)
@@ -1981,16 +2040,32 @@ async def _listar_marketplace(
             a_conferir=bool(r),
             ultimo_tipo=tipo,
             pendentes=pend,
-            humano=humano_svc.para_tela(
-                hum,
-                ia_pausada=c.ia_pausada,
-                na_caixa=humano_svc.na_caixa_da_loja(lojas_humano, c.canal_id, c.integration_id),
-            ),
+            humano=_humano_da_linha(hum, c, lojas_humano, agora),
         )
         for c, tem_r, r, tipo, pend, hum, u in (
             await session.execute(consulta.limit(limite))
         ).all()
     ]
+
+
+def _humano_da_linha(
+    cache: Any, c: AtendimentoConversa, lojas: Any, agora: datetime
+) -> dict[str, Any] | None:
+    """O `humano` da linha (lista e detalhe): `humano.para_tela` com a loja e a espera da IA.
+
+    `cache` = o `triagem_da_linha_sql(lojas, agora)` da linha; `lojas` e
+    `agora` = os MESMOS da consulta — o chip não discorda dela.
+    """
+    from app.services.atendimento import humano as humano_svc
+
+    na_caixa = humano_svc.na_caixa_da_loja(lojas, c.canal_id, c.integration_id)
+    return humano_svc.para_tela(
+        cache,
+        ia_pausada=c.ia_pausada,
+        na_caixa=na_caixa,
+        ia_sem_resposta=humano_svc.na_espera_da_ia(lojas, c.canal_id, c.integration_id)
+        and humano_svc.ia_sem_resposta(c, agora),
+    )
 
 
 @router.get("/conversas", response_model=ListaConversasOut)
@@ -2032,7 +2107,9 @@ async def listar_conversas(
     conversas de e-mail das lojas ainda sem pedido (RF5).
     `caixa=humano` (09/10/2026) = a Caixa Humano: só o que falta responder e a
     IA não pode (`services/atendimento/humano.py`), junto de qualquer outro
-    filtro; o Direct do Instagram não entra.
+    filtro; o Direct do Instagram não entra. Desde 14/10/2026 ela vem pelo
+    TURNO, o mais novo em cima (a última mensagem do cliente — `turno_em` da
+    linha), com qualquer filtro, e o cursor é `turno:<ISO>|<id>`.
     A conversa de e-mail da ponte NUNCA vem na Caixa nem na Caixa Humano
     (13/10/2026, `separa_email`): `caixa=email` traz SÓ elas (a aba E-mail),
     com os mesmos filtros e o mesmo escopo; sem o Direct do Instagram.
@@ -2058,10 +2135,14 @@ async def listar_conversas(
         raise HTTPException(422, detail={"code": "caixa_invalida"})
     caixa_humano = caixa == CAIXA_HUMANO
     caixa_email = caixa == CAIXA_EMAIL
-    pelo_prazo = filtro in FILTROS_PELO_PRAZO
-    perguntas_primeiro = filtro in FILTROS_PERGUNTA_PRIMEIRO
+    # A Caixa Humano vai pelo turno com qualquer filtro (14/10/2026); a Caixa
+    # e a aba E-mail, pela ordem do filtro, como sempre.
+    pelo_prazo = filtro in FILTROS_PELO_PRAZO and not caixa_humano
+    perguntas_primeiro = filtro in FILTROS_PERGUNTA_PRIMEIRO and not caixa_humano
     # Cursor inválido (ou da outra ordem) → 422 antes de ir ao banco.
-    momento, ident, sem_prazo, grupo = _cursor(antes_de, pelo_prazo=pelo_prazo)
+    momento, ident, sem_prazo, grupo = _cursor(
+        antes_de, pelo_prazo=pelo_prazo, pelo_turno=caixa_humano
+    )
     scope = await resolve_team_scope(session, user)
 
     itens: list[dict[str, Any]] = []
@@ -2134,7 +2215,12 @@ async def listar_conversas(
             user_id=user.id,
             rede_social_id=rede_social_id,
         )
-    if pelo_prazo:
+    if caixa_humano:
+        # Só a caixa (o Direct não entra): a ordem e o corte do SQL.
+        itens.sort(key=_chave_do_turno, reverse=True)
+        pagina = itens[:limite]
+        proximo = _cursor_do_turno(pagina[-1]) if len(itens) > limite and pagina else None
+    elif pelo_prazo:
         itens.sort(key=_chave_do_prazo)
         pagina = itens[:limite]
         proximo = _cursor_do_prazo(pagina[-1]) if len(itens) > limite and pagina else None
@@ -2356,6 +2442,14 @@ async def _sugestoes(
         gatilho.enviada_em, gatilho.created_at, AtendimentoRascunho.created_at
     )
     momento = func.coalesce(resposta.enviada_em, resposta.created_at)
+    # Responde o turno ATUAL (14/10/2026, `humano.sugestao_do_turno`): a hora
+    # que ela responde ≥ a última mensagem do cliente da conversa.
+    ultima_do_cliente = (
+        select(AtendimentoConversa.ultima_do_cliente_em)
+        .where(AtendimentoConversa.id == AtendimentoRascunho.conversa_id)
+        .scalar_subquery()
+    )
+    do_turno = func.coalesce(referencia >= ultima_do_cliente, false())
     real = (
         select(
             resposta.id.label("id"),
@@ -2384,6 +2478,7 @@ async def _sugestoes(
             real.c.texto,
             real.c.em,
             real.c.origem,
+            do_turno,
         )
         .outerjoin(
             AtendimentoAvaliacao, AtendimentoAvaliacao.rascunho_id == AtendimentoRascunho.id
@@ -2407,7 +2502,17 @@ async def _sugestoes(
     saida: list[SugestaoOut] = []
     # As mais novas na consulta (limite), da mais velha para a mais nova na
     # tela — a mesma ordem das mensagens.
-    for r, nota, correcao, autor_id, real_id, real_texto, real_em, real_origem in reversed(linhas):
+    for (
+        r,
+        nota,
+        correcao,
+        autor_id,
+        real_id,
+        real_texto,
+        real_em,
+        real_origem,
+        da_vez,
+    ) in reversed(linhas):
         saida.append(
             SugestaoOut(
                 id=r.id,
@@ -2440,6 +2545,7 @@ async def _sugestoes(
                     if real_id is not None
                     else None
                 ),
+                do_turno_atual=bool(da_vez),
             )
         )
     return saida
@@ -2486,9 +2592,18 @@ async def detalhe_conversa(
         )
     )
     nomes = await _nomes(session, {m.autor_user_id for m in mensagens})
-    rascunho = (
+    from app.services.atendimento import humano as humano_svc
+
+    # A sugestão pendente e a hora que ela responde: a do turno ATUAL leva o
+    # selo "precisa de pessoa" na tela (14/10/2026, `humano.sugestao_do_turno`).
+    gatilho_r = aliased(AtendimentoMensagem)
+    linha_r = (
         await session.execute(
-            select(AtendimentoRascunho)
+            select(
+                AtendimentoRascunho,
+                humano_svc.momento_da_sugestao_sql(AtendimentoRascunho, gatilho_r),
+            )
+            .outerjoin(gatilho_r, gatilho_r.id == AtendimentoRascunho.mensagem_gatilho_id)
             .where(
                 AtendimentoRascunho.conversa_id == c.id,
                 AtendimentoRascunho.status == RASCUNHO_PENDENTE,
@@ -2496,11 +2611,19 @@ async def detalhe_conversa(
             .order_by(AtendimentoRascunho.created_at.desc())
             .limit(1)
         )
-    ).scalar_one_or_none()
+    ).first()
+    rascunho, momento_r = linha_r if linha_r is not None else (None, None)
     detalhe = {
         "conversa": await _conversa_out(session, c),
         "mensagens": [_mensagem_out(m, conversa=c, nomes=nomes) for m in mensagens],
-        "rascunho": _rascunho_out(rascunho),
+        "rascunho": _rascunho_out(
+            rascunho,
+            do_turno_atual=(
+                humano_svc.sugestao_do_turno(momento_r, c.ultima_do_cliente_em)
+                if rascunho is not None
+                else None
+            ),
+        ),
         "contexto": await _contexto(session, c),
         "envio": await _envio(session, c),
         "pedido_mkt": _do_dados(c, "pedido_mkt"),

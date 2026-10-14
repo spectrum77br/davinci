@@ -119,11 +119,19 @@ export function textoDoNumero(numero: NumeroDaCaixa = 'aguardando'): string {
 export function chipsDoResumo(resumo: Resumo | null | undefined, atual = '', numero: NumeroDaCaixa = 'aguardando'): ChipPlataforma[] {
   if (!resumo) return []
   const escolhidas = plataformasDoValor(atual)
+  const escolhida = (g: GrupoCaixa) => escolhidas.length > 0 && escolhidas.every((p) => g.plataformas.includes(p))
   const comLoja = new Set((resumo.lojas || []).map((l) => l.plataforma))
+  // Na Caixa Humano só das lojas no Automático (14/10/2026): a plataforma sem
+  // nenhum canal nos modos dela sai do menu — a menos que ainda tenha conversa
+  // contada lá ou seja a escolhida (a pessoa vê o que está filtrando).
+  const m = numero === 'humano' ? resumo.flags?.humano_modos : null
+  const modos = Array.isArray(m) && m.length ? m : null
+  const noModo = (g: GrupoCaixa) => !modos || (resumo.canais || []).some((c) => g.plataformas.includes(c.plataforma) && modos.includes(c.modo))
   return GRUPOS_CAIXA
     .map((g) => ({ ...g, aguardando: aguardandoDe(resumo, g.plataformas) }))
-    .filter((g) => g.plataformas.some((p) => comLoja.has(p)) || g.aguardando > 0 || (escolhidas.length > 0 && escolhidas.every((p) => g.plataformas.includes(p))))
+    .filter((g) => g.plataformas.some((p) => comLoja.has(p)) || g.aguardando > 0 || escolhida(g))
     .map((g) => (numero === 'aguardando' ? g : { ...g, aguardando: aguardandoDe(resumo, g.plataformas, numero) }))
+    .filter((g) => noModo(g) || g.aguardando > 0 || escolhida(g))
 }
 
 // O filtro da lista está DENTRO do chip (a plataforma inteira, ou uma loja
