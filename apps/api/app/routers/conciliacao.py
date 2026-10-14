@@ -22,8 +22,6 @@ porque o refresh token do ML é de uso único.
 
 from __future__ import annotations
 
-import csv
-import io
 import time
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
@@ -81,17 +79,87 @@ def _recorta(obj: Any) -> Any:
     return obj
 
 
+def dividir_linha_mp(linha: str, sep: str = ",") -> list[str]:
+    """Divide uma linha do CSV do Mercado Pago tolerando o formato deles.
+
+    Visto em 14/10/2026 no Relatório de liberações da jlas2: as colunas de
+    JSON (`METADATA` = `"{"fee_discount": "2.85", ...}"`, `OPERATION_TAGS` =
+    `"[{"logistic_type":"drop_off"}]"`) vêm entre aspas SEM escapar as aspas
+    de dentro, o que não é CSV válido e desloca as colunas seguintes
+    (`BALANCE_AMOUNT`, `ITEM_ID`, `PRODUCT_SKU`…) em qualquer parser padrão.
+    Já `SALE_DETAIL` vem no padrão (aspas internas duplicadas). Aqui: campo que começa
+    com `"{` ou `"[` é lido até fechar o colchete/chave; o resto segue a
+    regra normal de aspas duplicadas.
+    """
+    campos: list[str] = []
+    atual: list[str] = []
+    i, n = 0, len(linha)
+    while i < n:
+        ch = linha[i]
+        if ch == sep:
+            campos.append("".join(atual))
+            atual = []
+            i += 1
+            continue
+        if ch == '"' and not atual:
+            if i + 1 < n and linha[i + 1] in "{[":
+                profundidade = 0
+                j = i + 1
+                while j < n:
+                    if linha[j] in "{[":
+                        profundidade += 1
+                    elif linha[j] in "}]":
+                        profundidade -= 1
+                        if profundidade == 0:
+                            break
+                    j += 1
+                atual.append(linha[i + 1 : j + 1])
+                i = j + 1
+                if i < n and linha[i] == '"':
+                    i += 1
+                continue
+            j = i + 1
+            buf: list[str] = []
+            while j < n:
+                if linha[j] == '"':
+                    if j + 1 < n and linha[j + 1] == '"':
+                        buf.append('"')
+                        j += 2
+                        continue
+                    break
+                buf.append(linha[j])
+                j += 1
+            atual.append("".join(buf))
+            i = j + 1
+            continue
+        atual.append(ch)
+        i += 1
+    campos.append("".join(atual))
+    return campos
+
+
+def ler_csv_mp(texto: str) -> tuple[list[str], list[dict[str, str]], str]:
+    """Cabeçalho, linhas (dict por coluna) e separador de um CSV do Mercado Pago."""
+    linhas = [x for x in texto.splitlines() if x.strip()]
+    if not linhas:
+        return [], [], ","
+    sep = ";" if linhas[0].count(";") >= linhas[0].count(",") else ","
+    cab = [c.strip() for c in linhas[0].split(sep)]
+    rows: list[dict[str, str]] = []
+    for linha in linhas[1:]:
+        campos = dividir_linha_mp(linha, sep)
+        rows.append({cab[k]: (campos[k] if k < len(campos) else "") for k in range(len(cab))})
+    return cab, rows, sep
+
+
 def _amostra_csv(texto: str) -> dict[str, Any]:
     """Cabeçalho + primeiras linhas de um CSV do Mercado Pago (separador ; ou ,)."""
-    linhas = texto.splitlines()
-    sep = ";" if linhas and linhas[0].count(";") >= linhas[0].count(",") else ","
-    leitor = csv.reader(io.StringIO("\n".join(linhas[: _LINHAS_CSV + 1])), delimiter=sep)
-    rows = list(leitor)
+    cab, rows, sep = ler_csv_mp(texto)
     return {
-        "total_linhas": max(len(linhas) - 1, 0),
+        "total_linhas": len(rows),
         "separador": sep,
-        "colunas": rows[0] if rows else [],
-        "primeiras": [dict(zip(rows[0], r, strict=False)) for r in rows[1:]] if rows else [],
+        "colunas": cab,
+        "primeiras": rows[:_LINHAS_CSV],
     }
 
 
@@ -406,12 +474,9 @@ def _coluna(cabecalho: list[str], *candidatas: str) -> str | None:
 def resumir_extrato(texto: str) -> dict[str, Any]:
     """Resumo de um CSV do Relatório de liberações: tipos de movimento, somas,
     quantas linhas têm número de pedido, e uma amostra por tipo. Não grava."""
-    linhas = texto.splitlines()
-    if not linhas:
+    cab, rows, sep = ler_csv_mp(texto)
+    if not cab:
         return {"total_linhas": 0}
-    sep = ";" if linhas[0].count(";") >= linhas[0].count(",") else ","
-    rows = list(csv.DictReader(io.StringIO("\n".join(linhas)), delimiter=sep))
-    cab = list(rows[0].keys()) if rows else linhas[0].split(sep)
     c_tipo = _coluna(cab, "DESCRIPTION", "Descrição", "DESCRICAO")
     c_reg = _coluna(cab, "RECORD_TYPE", "Tipo de registro")
     c_cred = _coluna(cab, "NET_CREDIT_AMOUNT")

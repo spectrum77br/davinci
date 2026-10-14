@@ -287,3 +287,48 @@ async def test_ler_extrato_sem_arquivo_pronto(db, make_user, auth_as, client):
     assert r.status_code == 200
     assert r.json()["pronto"] is None and r.json()["resumo"] is None
     assert r.json()["relatorios"] == [{"id": 1, "status": "pending"}]
+
+
+def test_dividir_linha_mp_tolera_json_sem_escape():
+    from app.routers.conciliacao import dividir_linha_mp, ler_csv_mp
+
+    cab = "A,B,METADATA,TAGS,BALANCE_AMOUNT,SALE_DETAIL,Z"
+    linha = (
+        '1,x,"{"fee_discount": "2.85", "ids": [1, 2]}","[{"logistic_type":"drop_off"}]",611.46,'
+        '"""Caap, com vírgula""",fim'
+    )
+    campos = dividir_linha_mp(linha)
+    assert campos == [
+        "1",
+        "x",
+        '{"fee_discount": "2.85", "ids": [1, 2]}',
+        '[{"logistic_type":"drop_off"}]',
+        "611.46",
+        '"Caap, com vírgula"',
+        "fim",
+    ]
+    cabecalho, rows, sep = ler_csv_mp(cab + "\n" + linha + "\n")
+    assert sep == "," and cabecalho[-1] == "Z"
+    assert rows[0]["BALANCE_AMOUNT"] == "611.46" and rows[0]["Z"] == "fim"
+
+
+async def test_ler_extrato_nao_desloca_colunas_com_metadata(db, make_user, auth_as, client):
+    await _loja_ml(db, make_user)
+    auth_as(await make_user(permissions={"logistica": {"view": True}}))
+    csv_mp = (
+        "DATE,SOURCE_ID,EXTERNAL_REFERENCE,RECORD_TYPE,DESCRIPTION,NET_CREDIT_AMOUNT,NET_DEBIT_AMOUNT,"
+        "GROSS_AMOUNT,ORDER_ID,PACK_ID,METADATA,BALANCE_AMOUNT,PRODUCT_SKU\n"
+        "2026-10-01T08:11:09.000-03:00,177489533941,2000018405611066,release,payment,610.65,0.00,880.98,"
+        '2000018405611066,,"{"fee_discount": "2.85", "payments_group_uuid": "d76a"}",'
+        "611.46,dg057.ci+a001.ci\n"
+    )
+    with respx.mock(assert_all_called=False) as router:
+        _fontes_extrato(router, config_existe=True, pronto=True)
+        router.get(f"{MP}/v1/account/release_report/davinci-liberacoes-1.csv").mock(
+            return_value=Response(200, headers={"content-type": "text/csv"}, text=csv_mp)
+        )
+        r = await client.get("/api/conciliacao/sonda/extrato", params={"conta": "jlas2"})
+    resumo = r.json()["resumo"]
+    assert resumo["saldo_ultima_linha"] == "611.46"
+    assert resumo["amostra_por_tipo"]["payment"][0]["BALANCE_AMOUNT"] == "611.46"
+    assert resumo["amostra_por_tipo"]["payment"][0]["METADATA"].startswith('{"fee_discount"')
