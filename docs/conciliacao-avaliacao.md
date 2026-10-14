@@ -286,4 +286,9 @@ Soma = `sales_info.sale_fee.net` (183,05; `gross` 186,91 e `rebate` 3,86 = desco
 
 **Dois parâmetros que a documentação não deixa claro:** `summary/details` exige `document_type=BILL` (sem ele, 422); o filtro de bonificações é `detail_type=BONUS` em maiúsculas (`bonus` dá 422). Corrigidos na sondagem, que ganhou `parte=1|2|3` pra caber no limite de 5/min.
 
-**Pendente da sondagem (parte 2, a rodar):** amostra das bonificações do mês fechado, do grupo MP e dos pagamentos da fatura.
+**Parte 2 (18:24, as quatro chamadas 200):**
+- **Bonificações** do mês fechado: **189 linhas**, cada uma com o pedido e com `charge_bonified_id` apontando pra cobrança original. Sub-tipos: `BVVML` "Cancelamento do Custo por vender no Mercado Livre" (158,41), `BVVPRC` "Cancelamento do Custo por cobrar no Mercado Pago" (0,89), `BDSB` "Cancelamento da tarifa por envios" (24,45, SHIPPING), `BVVFN` "Cancelamento da taxa de parcelamento" (52,08). É a devolução da tarifa quando a venda cai — a parte que a Margem hoje não vê.
+- **Grupo MP** (`group/MP/details`): 200 com **zero** linhas no período — esse grupo é dos serviços do próprio Mercado Pago (maquininha, QR); não entra no desenho.
+- **Pagamentos da fatura** do mês fechado: 6 pagamentos. A fatura do ML é paga por **débito automático na conta Mercado Pago** (`payment_type = collections_forced` "Débito automático por fatura vencida", `payment_method = account_money`, ex.: R$ 2.268,55 em 29/09 07:56, id `000g6i7t62`) e tem **nota de crédito** (`CREDIT_NOTE` "Estorno", R$ 702,63, "em processo de faturamento"). Esse é o débito "sem pedido" que vai aparecer no extrato e que o painel casa pela fatura.
+
+**Conclusão da sondagem:** tudo que o desenho precisa do lado do ML já responde com a chave atual. Do lado do Mercado Pago, a porta abre; pra ver as linhas do extrato faltam duas escritas de configuração na conta da loja: criar a configuração do Relatório de liberações (colunas, fuso, separador) e pedir um relatório de um período (ex.: 01/10→14/10). A loja nunca gerou relatório por API nem pelo painel (lista vazia), então não há rotina manual pra atrapalhar.
