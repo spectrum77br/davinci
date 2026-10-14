@@ -698,3 +698,26 @@ async def test_status_lista_a_loja_ligada(db, make_user, auth_as, client):
     assert lojas[0]["movimentos"] == [
         {"origem": "mp_extrato", "tipo": "saque", "linhas": 1, "credito": "0", "debito": "9147.00"}
     ]
+
+
+async def test_ler_pagina_espera_um_minuto_no_429_e_tenta_de_novo():
+    class _Cliente429(_ClienteFalso):
+        def __init__(self):
+            super().__init__({("2026-10-01", "CHARGE", 0): {"results": [], "last_id": 0}})
+            self.vezes = 0
+
+        async def _request(self, method, path, *, params=None, json=None):
+            self.vezes += 1
+            if self.vezes <= 2:
+                return Response(429, json={"message": "Rate limit exceeded: 5 requests per minute"})
+            return await super()._request(method, path, params=params, json=json)
+
+    esperas: list[float] = []
+
+    async def dormir(s: float) -> None:
+        esperas.append(s)
+
+    cliente = _Cliente429()
+    pagina = await fat.ler_pagina(cliente, "2026-10-01", "CHARGE", 0, dormir=dormir)
+    assert pagina == {"results": [], "last_id": 0}
+    assert esperas == [fat.ESPERA_429, fat.ESPERA_429] and cliente.vezes == 3

@@ -48,7 +48,7 @@ SUBTIPOS = {
     "BDSB": "fatura_bonificacao",
     "BXD": "fatura_bonificacao",
 }
-PAUSA_PADRAO = 13.0  # s entre chamadas: 5 por minuto é o limite
+PAUSA_PADRAO = 15.0  # s entre chamadas: 5/min é o limite (e a Margem divide o balde)
 LIMITE_PAGINA = 1000
 
 
@@ -138,26 +138,51 @@ def detalhe_para_movimento(det: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+ESPERA_429 = 65.0  # s: o balde de 5/min do ML enche de novo em um minuto
+TENTATIVAS_429 = 4
+
+
 async def ler_pagina(
-    cliente: Any, chave: str, detail_type: str, from_id: int, limite: int = LIMITE_PAGINA
+    cliente: Any,
+    chave: str,
+    detail_type: str,
+    from_id: int,
+    limite: int = LIMITE_PAGINA,
+    *,
+    dormir: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> dict:
-    r = await cliente._request(
-        "GET",
-        f"/billing/integration/periods/key/{chave}/group/ML/details",
-        params={
-            "document_type": "BILL",
-            "detail_type": detail_type,
-            "limit": limite,
-            "from_id": from_id,
-            "sort_by": "ID",
-            "order_by": "ASC",
-        },
-    )
-    if r.status_code != 200:
-        raise RuntimeError(
-            f"fatura {chave} {detail_type} from_id={from_id}: HTTP {r.status_code} {r.text[:200]}"
+    """Uma página de detalhes. Em 429 (o balde de 5/min é compartilhado com a
+    Margem, que lê a fatura pedido a pedido) espera um minuto e tenta de novo,
+    até `TENTATIVAS_429` vezes — a rodada é diária, pode demorar."""
+    for tentativa in range(TENTATIVAS_429):
+        r = await cliente._request(
+            "GET",
+            f"/billing/integration/periods/key/{chave}/group/ML/details",
+            params={
+                "document_type": "BILL",
+                "detail_type": detail_type,
+                "limit": limite,
+                "from_id": from_id,
+                "sort_by": "ID",
+                "order_by": "ASC",
+            },
         )
-    return r.json() or {}
+        if r.status_code == 429 and tentativa < TENTATIVAS_429 - 1:
+            logger.info(
+                "conciliacao_fatura_429_espera",
+                periodo=chave,
+                tipo=detail_type,
+                tentativa=tentativa + 1,
+            )
+            await dormir(ESPERA_429)
+            continue
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"fatura {chave} {detail_type} from_id={from_id}: "
+                f"HTTP {r.status_code} {r.text[:200]}"
+            )
+        return r.json() or {}
+    raise RuntimeError(f"fatura {chave} {detail_type}: 429 depois de {TENTATIVAS_429} tentativas")
 
 
 async def ler_resumo(cliente: Any, chave: str) -> dict:
@@ -256,7 +281,9 @@ async def run_fatura_sync(
             try:
                 while paginas < max_paginas:
                     await _espera()
-                    pagina = await ler_pagina(cliente, chave, detail_type, from_id, limite)
+                    pagina = await ler_pagina(
+                        cliente, chave, detail_type, from_id, limite, dormir=dormir
+                    )
                     resumo["chamadas"] += 1
                     paginas += 1
                     results = [x for x in (pagina.get("results") or []) if isinstance(x, dict)]

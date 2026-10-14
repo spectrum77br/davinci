@@ -508,6 +508,34 @@ async def status_lojas(
             .scalars()
             .all()
         )
+        sub_tipos = (
+            await session.execute(
+                select(
+                    ConciliacaoMovimento.sub_tipo,
+                    ConciliacaoMovimento.tipo,
+                    func.count(),
+                    func.sum(ConciliacaoMovimento.debito),
+                    func.sum(ConciliacaoMovimento.credito),
+                )
+                .where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == "ml_fatura",
+                )
+                .group_by(ConciliacaoMovimento.sub_tipo, ConciliacaoMovimento.tipo)
+                .order_by(func.count().desc())
+            )
+        ).all()
+        sem_dono_tipos = (
+            await session.execute(
+                select(ConciliacaoMovimento.origem, ConciliacaoMovimento.tipo, func.count())
+                .where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.pedido_bling.is_(None),
+                    ConciliacaoMovimento.classificacao.is_(None),
+                )
+                .group_by(ConciliacaoMovimento.origem, ConciliacaoMovimento.tipo)
+            )
+        ).all()
         sem_pedido = (
             await session.execute(
                 select(func.count()).where(
@@ -537,6 +565,19 @@ async def status_lojas(
                     for o, t, n, c, d in por_tipo
                 ],
                 "movimentos_sem_dono": sem_pedido,
+                "sem_dono_por_tipo": [
+                    {"origem": o, "tipo": t, "linhas": n} for o, t, n in sem_dono_tipos
+                ],
+                "fatura_por_sub_tipo": [
+                    {
+                        "sub_tipo": st,
+                        "tipo": t,
+                        "linhas": n,
+                        "debito": str(d or 0),
+                        "credito": str(c or 0),
+                    }
+                    for st, t, n, d, c in sub_tipos
+                ],
                 "pedidos_por_situacao": dict(por_situacao),
                 "pedidos_por_etapa": dict(por_etapa),
                 "leituras": [
