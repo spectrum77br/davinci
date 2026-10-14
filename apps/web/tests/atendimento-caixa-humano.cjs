@@ -19,7 +19,13 @@
 //    texto do topo, o vazio sem loja no modo — nenhuma, a loja ou a
 //    plataforma escolhida — (com "ver em Lojas e modo"), a loja fora do modo
 //    na barra (sem bolinha, o title diz por quê) e o chip/faixa "Precisa de
-//    pessoa" na conversa de loja fora (`humano.na_caixa` false).
+//    pessoa" na conversa de loja fora (`humano.na_caixa` false);
+//  - OU RESPONDE OU VAI PARA PESSOA (14/10/2026, o dono: "a caixa tem que
+//    responder mesmo; se não puder, manda pra Caixa Humano, que tem que estar
+//    com a mais recente lá em cima e não embaixo"): o motivo "A IA não
+//    respondeu" (chip e faixa laranja, a espera igual à do servidor), a ordem
+//    pelo turno (a hora da linha é a da última mensagem do cliente) e o selo
+//    "precisa de pessoa" só na sugestão do turno atual.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -116,7 +122,7 @@ const HUM = (motivos, extra = {}) => ({
   assert.match(tipos, /^ {2}humano_modos\?: string\[\] \| null$/m)
   // O /resumo manda os modos que o servidor usa no filtro.
   assert.match(api('routers/atendimento.py'), /humano_modos=list\(modos_humano\) if modos_humano is not None else None,/)
-  assert.match(api('routers/atendimento.py'), /modos_humano = humano_svc\.modos_da_caixa\(\)\n\s+lojas_humano = await humano_svc\.lojas_da_caixa\(session, modos_humano\)\n\s+na_caixa_humano = func\.count\(\)\.filter\(humano_svc\.caixa_humano_sql\(lojas_humano\)\)/)
+  assert.match(api('routers/atendimento.py'), /modos_humano = humano_svc\.modos_da_caixa\(\)\n\s+lojas_humano = await humano_svc\.lojas_da_caixa\(session, modos_humano\)\n\s+na_caixa_humano = func\.count\(\)\.filter\(humano_svc\.caixa_humano_sql\(lojas_humano, agora\)\)/)
   // O padrão do servidor é o Automático, sem precisar do .env.
   assert.match(api('services/atendimento/humano.py'), /^MODOS_PADRAO: tuple\[str, \.\.\.\] = \(MODO_AUTO,\)$/m)
   assert.match(api('config.py'), /^ {4}atendimento_humano_modos: str = ""$/m)
@@ -134,10 +140,32 @@ const HUM = (motivos, extra = {}) => ({
   assert.match(rota, /^CAIXA_HUMANO = "humano"$/m)
   assert.match(rota, /caixa: Annotated\[str \| None, Query\(max_length=16\)\] = None,/)
   assert.match(rota, /raise HTTPException\(422, detail=\{"code": "caixa_invalida"\}\)/)
-  assert.match(rota, /if caixa_humano:\n\s+# [^\n]*\n\s+consulta = consulta\.where\(humano_svc\.caixa_humano_sql\(lojas_humano\)\)/)
+  assert.match(rota, /if caixa_humano:\n\s+# [^\n]*\n\s+consulta = consulta\.where\(humano_svc\.caixa_humano_sql\(lojas_humano, agora\)\)/)
   const filtrosApi = [...((rota.match(/^FILTROS = \(([\s\S]*?)^\)/m) || [])[1] || '').matchAll(/"([a-z_]+)"/g)].map((m) => m[1])
   for (const f of [...L.FILTROS_FORA_DA_HUMANO, L.filtroPadrao('humano')]) assert.ok(filtrosApi.includes(f), f)
-  assert.ok(P.FILTROS_PELO_PRAZO.includes(L.filtroPadrao('humano')), 'a Caixa Humano abre pelo prazo')
+  // A ORDEM (14/10/2026): a Caixa Humano vai pelo turno com qualquer filtro
+  // (o cursor `turno:`), a mais recente em cima — a tela costura igual.
+  assert.match(rota, /^_CURSOR_TURNO = "turno:"$/m)
+  assert.match(rota, /pelo_prazo = filtro in FILTROS_PELO_PRAZO and not caixa_humano/)
+  assert.match(rota, /antes_de, pelo_prazo=pelo_prazo, pelo_turno=caixa_humano/)
+  assert.match(rota, /consulta = consulta\.order_by\(turno\.desc\(\), id_txt\.desc\(\)\)/)
+  const novo = { id: 'b', turno_em: '2026-10-14T11:00:00Z', prazo_resposta_em: '2026-10-14T23:00:00Z', ultima_mensagem_em: null }
+  const velho = { id: 'a', turno_em: '2026-10-14T09:00:00Z', prazo_resposta_em: '2026-10-14T21:00:00Z', ultima_mensagem_em: null }
+  assert.equal(P.vemDepoisNaLista(velho, novo, L.filtroPadrao('humano'), 'humano'), true, 'a mais recente em cima')
+  assert.equal(P.vemDepoisNaLista(velho, novo, L.filtroPadrao('humano')), false, 'na Caixa, o prazo (o velho vence antes)')
+  // O turno da linha: o tipo da tela = o ConversaResumoOut.
+  assert.match(bloco('ConversaResumoOut'), /^ {4}turno_em: datetime \| None = None$/m)
+  assert.match(tipos, /^ {2}turno_em\?: string \| null$/m)
+  // A espera da IA: a mesma nos dois lados.
+  assert.match(api('services/atendimento/humano.py'), new RegExp(`^ESPERA_IA_MIN = ${P.ESPERA_IA_MIN}$`, 'm'))
+  assert.equal(P.ESPERA_IA_MIN, 10)
+  // O selo da sugestão do turno (o RascunhoOut e o SugestaoOut).
+  assert.match(bloco('RascunhoOut'), /^ {4}do_turno_atual: bool \| None = None$/m)
+  assert.match(bloco('SugestaoOut'), /^ {4}do_turno_atual: bool \| None = None$/m)
+  for (const t of ['Rascunho', 'SugestaoIa']) {
+    const corpo = (tipos.match(new RegExp(`export type ${t} = \\{([\\s\\S]*?)\\n\\}`)) || [])[1] || ''
+    assert.match(corpo, /^ {2}do_turno_atual\?: boolean \| null$/m, t)
+  }
 }
 
 // ------------------------------------------------ funções puras
@@ -161,6 +189,25 @@ const HUM = (motivos, extra = {}) => ({
     titulo: 'Caixa Humano — a IA não responde esta:\n• Pedido com devolução\n• Assunto só de pessoa: Troca / devolução\n• A IA marcou: precisa de pessoa',
   })
   assert.equal(P.chipHumano(null), null)
+  // "A IA não respondeu" (14/10/2026): o chip e a faixa em laranja quando é o motivo.
+  assert.deepEqual(P.chipHumano(HUM(['ia_sem_resposta'])), {
+    texto: 'A IA não respondeu',
+    mais: 0,
+    titulo: 'Caixa Humano — a IA não responde esta:\n• A IA não respondeu',
+  })
+  assert.equal(P.corHumano(HUM(['ia_sem_resposta'])), P.COR_IA_SEM_RESPOSTA)
+  assert.equal(P.corHumano(HUM(['assunto', 'ia'])), P.COR_HUMANO)
+  assert.equal(P.corHumano(null), P.COR_HUMANO)
+  assert.match(P.COR_IA_SEM_RESPOSTA.chip, /orange/)
+  assert.match(P.COR_HUMANO.chip, /amber/)
+  // O selo "precisa de pessoa" só na sugestão do turno atual (a API antiga: vale).
+  assert.equal(P.seloPrecisaDePessoa({ precisa_humano: true, do_turno_atual: true }), true)
+  assert.equal(P.seloPrecisaDePessoa({ precisa_humano: true }), true)
+  assert.equal(P.seloPrecisaDePessoa({ precisa_humano: true, do_turno_atual: false }), false)
+  assert.equal(P.seloPrecisaDePessoa({ precisa_humano: false, do_turno_atual: true }), false)
+  assert.equal(P.seloPrecisaDePessoa(null), false)
+  assert.equal(P.sugestaoDeAntes({ do_turno_atual: false }), true)
+  assert.equal(P.sugestaoDeAntes({ do_turno_atual: null }), false)
   // A loja fora dos modos (14/10/2026, `na_caixa: false`): ela não está na
   // Caixa Humano — o chip e a faixa dizem "Precisa de pessoa".
   assert.deepEqual(P.faixaHumano(HUM(['atendente'])), { nome: 'Caixa Humano', frase: 'a IA não responde esta' })
@@ -382,7 +429,7 @@ async function lista() {
   let html = await renderizarLista({ itens, resumo: RESUMO_LISTA, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
   assert.match(html, /data-titulo-humano[^>]*>[\s\S]*?Caixa Humano<\/span><span[^>]*>5<\/span>/)
   assert.doesNotMatch(html, /role="tablist"/, 'sem as abas Todas/Falta responder')
-  assert.match(html, /data-dica-humano[^>]*>\s*Só o que a IA não pode responder e falta responder — respondeu, sai daqui\./)
+  assert.match(html, /data-dica-humano[^>]*>\s*Só o que a IA não pode responder \(ou não respondeu em 10 min\) e falta responder, a mais recente em cima — respondeu, sai daqui\./)
   assert.doesNotMatch(html, /data-humano-desligada/)
   const chips = [...html.matchAll(/data-selo-humano[^>]*>([\s\S]*?)<\/span>\s*(?:<span data-etiqueta-stub|<\/span>)/g)]
   assert.equal(chips.length, 2)
@@ -396,7 +443,7 @@ async function lista() {
   assert.match(html, /Caixa Humano<\/span><span[^>]*>4<\/span>/)
   // A triagem desligada no servidor: o aviso.
   html = await renderizarLista({ itens, resumo: { ...RESUMO_LISTA, flags: { humano_ativa: false } }, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
-  assert.match(html, /data-humano-desligada[^>]*>\s*A triagem está desligada no servidor: aqui só aparecem as conversas com a IA pausada\./)
+  assert.match(html, /data-humano-desligada[^>]*>\s*A triagem está desligada no servidor: aqui só aparecem as conversas com a IA pausada ou sem resposta da IA\./)
   // Vazia, sem filtro: a boa notícia (sem "ver todas").
   html = await renderizarLista({ itens: [], resumo: RESUMO_LISTA, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
   assert.match(html, /Nada esperando uma pessoa agora — o que a IA não puder responder aparece aqui\./)
@@ -412,6 +459,14 @@ async function lista() {
   assert.match(html, /role="tablist"/)
   assert.doesNotMatch(html, /data-titulo-humano|data-dica-humano/)
   assert.equal((html.match(/data-selo-humano/g) || []).length, 1, 'só a que está na Caixa Humano')
+  // "A IA não respondeu" (14/10/2026): o chip laranja; na Caixa Humano, a hora
+  // da linha é a do turno (a última mensagem do cliente — a ordem dela).
+  const atrasada = conversa('h3', { turno_em: '2026-10-09T09:30:00Z', humano: HUM(['ia_sem_resposta']) })
+  html = await renderizarLista({ itens: [atrasada], resumo: RESUMO_LISTA, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
+  assert.match(html, /class="[^"]*bg-orange-500\/20[^"]*"[^>]*title="Caixa Humano — a IA não responde esta:\n• A IA não respondeu" data-selo-humano><i data-lucide="UserRound"[^>]*><\/i><span class="truncate">A IA não respondeu<\/span>/)
+  assert.match(html, /title="última mensagem do cliente: [^"]+"/)
+  html = await renderizarLista({ itens: [atrasada], resumo: RESUMO_LISTA, filtros: filtros() })
+  assert.doesNotMatch(html, /última mensagem do cliente/, 'na Caixa, a hora da última mensagem')
   // API antiga (sem `humano`): nada quebra, sem chip.
   html = await renderizarLista({ itens: [conversa('c1')], resumo: { ...RESUMO_LISTA, humano: undefined }, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
   assert.match(html, /Caixa Humano<\/span><\/div>/, 'sem número')
@@ -423,11 +478,11 @@ async function lista() {
   ]
   const resumoAuto = { ...RESUMO_LISTA, canais: canaisAuto, flags: { humano_ativa: true, humano_modos: ['auto'] } }
   html = await renderizarLista({ itens, resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
-  assert.match(html, /data-dica-humano[^>]*>\s*Só as lojas no Automático: o que a IA não pode responder e falta responder — respondeu, sai daqui\./)
+  assert.match(html, /data-dica-humano[^>]*>\s*Só as lojas no Automático: o que a IA não pode responder \(ou não respondeu em 10 min\) e falta responder, a mais recente em cima — respondeu, sai daqui\./)
   assert.match(html, /title="Só o que falta responder e a IA não pode responder \([^"]*\), nas lojas no Automático — respondeu, sai daqui"/)
   // "todos" no servidor (null): o texto de sempre.
   html = await renderizarLista({ itens, resumo: { ...resumoAuto, flags: { humano_ativa: true, humano_modos: null } }, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
-  assert.match(html, /data-dica-humano[^>]*>\s*Só o que a IA não pode responder e falta responder — respondeu, sai daqui\./)
+  assert.match(html, /data-dica-humano[^>]*>\s*Só o que a IA não pode responder \(ou não respondeu em 10 min\) e falta responder, a mais recente em cima — respondeu, sai daqui\./)
   // Vazia com loja no Automático: a boa notícia de sempre, sem o link.
   html = await renderizarLista({ itens: [], resumo: resumoAuto, caixa: 'humano', filtros: filtros({ filtro: 'aguardando' }) })
   assert.match(html, /Nada esperando uma pessoa agora — o que a IA não puder responder aparece aqui\./)
@@ -561,7 +616,17 @@ async function numeros() {
   assert.match(conversaSfc.descriptor.scriptSetup.content, /^ {2}faixaHumano,$/m)
   // A conversa avisa a página (o `mudou` leva o `humano` do detalhe): é por ele
   // que a linha sai da Caixa Humano.
-  assert.match(api('routers/atendimento.py'), /humano=humano_svc\.para_tela\(para_pessoa, ia_pausada=c\.ia_pausada, na_caixa=na_caixa\),/)
+  assert.match(api('routers/atendimento.py'), /humano=_humano_da_linha\(para_pessoa, c, lojas, agora\),/)
+  // A cor pela `corHumano` (laranja na espera da IA, 14/10/2026).
+  assert.match(faixa, /:class="corHumano\(conversa\.humano\)\.faixa"/)
+  // O selo "precisa de pessoa" só na sugestão do turno atual — o painel da
+  // conversa e o da observação; a de antes leva o aviso discreto.
+  assert.match(tpl, /v-if="seloPrecisaDePessoa\(rascunho\)"/)
+  assert.match(tpl, /v-else-if="sugestaoDeAntes\(rascunho\)"[\s\S]{0,300}>de antes da última mensagem<\/span>/)
+  assert.doesNotMatch(tpl, /v-if="rascunho\.precisa_humano"/)
+  const obs = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoObservacao.vue'), 'utf8')
+  assert.match(obs, /v-if="seloPrecisaDePessoa\(sugestao\)"/)
+  assert.doesNotMatch(obs, /v-if="sugestao\.precisa_humano"/)
 }
 
 lista().then(numeros).then(

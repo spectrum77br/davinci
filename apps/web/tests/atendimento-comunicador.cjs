@@ -170,9 +170,28 @@ const setup = conversaSfc.scriptSetup.content
   assert.equal(P.podeCosturar(it('x', null, null), 'todas'), false, 'sem hora não há corte')
   assert.equal(P.podeCosturar(it('x', null, null), 'aguardando'), true)
   assert.equal(P.podeCosturar(null, 'aguardando'), false)
+  // A Caixa Humano (14/10/2026): pelo TURNO, com qualquer filtro — a última
+  // mensagem do cliente, a mais nova primeiro; o id desempata (a ordem do servidor).
+  const t = (id, turno, prazo = null) => ({ id, turno_em: turno, prazo_resposta_em: prazo, ultima_mensagem_em: '2026-10-14T12:00:00Z' })
+  const novo = t('n', '2026-10-14T11:00:00Z', '2026-10-14T23:00:00Z')
+  const velho = t('v', '2026-10-14T09:00:00Z', '2026-10-14T21:00:00Z')
+  for (const filtro of ['aguardando', 'todas', 'vencidas']) {
+    assert.equal(P.vemDepoisNaLista(velho, novo, filtro, 'humano'), true, filtro)
+    assert.equal(P.vemDepoisNaLista(novo, velho, filtro, 'humano'), false, filtro)
+  }
+  // O prazo não manda mais nela (pelo prazo, o velho viria antes).
+  assert.equal(P.vemDepoisNaLista(velho, novo, 'aguardando'), false)
+  assert.equal(P.vemDepoisNaLista(t('a', '2026-10-14T11:00:00Z'), novo, 'aguardando', 'humano'), true, 'mesmo turno: o id menor vem depois')
+  assert.equal(P.vemDepoisNaLista(t('z', '2026-10-14T11:00:00Z'), novo, 'aguardando', 'humano'), false)
+  assert.equal(P.vemDepoisNaLista(t('x', null), novo, 'todas', 'humano'), true, 'sem turno (API antiga): no fim')
+  assert.equal(P.podeCosturar(novo, 'aguardando', 'humano'), true)
+  assert.equal(P.podeCosturar(t('x', null), 'aguardando', 'humano'), false, 'sem turno não há corte')
+  assert.equal(P.podeCosturar(t('x', null), 'aguardando', 'caixa'), true, 'a Caixa continua pelo prazo')
 
   const pagina = fs.readFileSync(path.resolve(__dirname, '../pages/atendimento.vue'), 'utf8')
-  assert.match(pagina, /vemDepoisNaLista\(c, ultimo, filtro\)/, 'a costura usa a ordem da aba')
+  assert.match(pagina, /vemDepoisNaLista\(c, ultimo, filtro, caixa\)/, 'a costura usa a ordem da aba')
+  assert.match(pagina, /podeCosturar\(ultimo, filtro, caixa\)/)
+  assert.match(pagina, /const caixa = caixaDaLista\n/)
   assert.doesNotMatch(pagina, /ultima_mensagem_em \|\| ''\) < \(ultimo/, 'nada de cortar pela hora em toda aba')
   assert.match(pagina, /antes\.etiqueta \?\? null\) !== \(c\.etiqueta \?\? null\)/, 'troca de etiqueta relê as contagens')
 }

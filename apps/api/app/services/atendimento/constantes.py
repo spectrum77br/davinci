@@ -752,6 +752,13 @@ HUMANO_SEM_DADO = "sem_dado"
 HUMANO_ASSUNTO = "assunto"
 HUMANO_SO_ANEXO = "so_anexo"
 HUMANO_IA = "ia"
+# "Ou responde ou vai para pessoa" (14/10/2026, o dono no piloto da Kia): na
+# loja num modo da Caixa Humano (hoje o Automático), a IA não respondeu em
+# `humano.ESPERA_IA_MIN` minutos depois da última mensagem do cliente (fora
+# da janela de 7 dias dela, limite do provedor, sugestão barrada ou que não
+# saiu, conversa que ela nem pegou). Não é gravado: entra na hora, pela
+# consulta (`humano.ia_sem_resposta_sql`), como a IA pausada.
+HUMANO_IA_SEM_RESPOSTA = "ia_sem_resposta"
 # A conversa BLOQUEADA (a plataforma não deixa responder pelo DaVinci: a
 # reclamação só leitura, a avaliação do ML, a janela do TikTok) entra só com
 # um motivo de ESTADO (`HUMANO_DE_ESTADO`), e com este junto: quem resolve
@@ -789,6 +796,7 @@ ORDEM_HUMANO: tuple[str, ...] = (
     HUMANO_ASSUNTO,
     HUMANO_SO_ANEXO,
     HUMANO_IA,
+    HUMANO_IA_SEM_RESPOSTA,
     HUMANO_FALHA,
     HUMANO_IA_PAUSADA,
 )
@@ -810,6 +818,7 @@ ROTULO_HUMANO: dict[str, str] = {
     HUMANO_ASSUNTO: "Assunto só de pessoa",
     HUMANO_SO_ANEXO: "Só foto/vídeo/arquivo",
     HUMANO_IA: "A IA marcou: precisa de pessoa",
+    HUMANO_IA_SEM_RESPOSTA: "A IA não respondeu",
     HUMANO_FALHA: "Não deu para triar: confira",
     HUMANO_IA_PAUSADA: "IA pausada",
 }

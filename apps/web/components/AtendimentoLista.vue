@@ -32,7 +32,7 @@ export const FILTROS_MENU: OpcaoFiltro[] = [
   { value: 'vencendo', label: 'Vencendo', hint: 'o prazo de resposta acaba em menos de 2 h' },
   { value: 'vencidas', label: 'Vencidas', hint: 'passou do prazo sem resposta' },
   { value: 'automatica', label: 'Só resposta automática', hint: 'o robô do Duoke (ou uma campanha) respondeu e nenhuma pessoa ainda' },
-  { value: 'com_rascunho', label: 'Com sugestão da IA', hint: 'a IA deixou uma resposta pronta para conferir' },
+  { value: 'com_rascunho', label: 'Com sugestão da IA', hint: 'a IA deixou uma resposta pronta para conferir (para a última mensagem do cliente)' },
   // Resposta nossa que a plataforma não confirmou: pode ter chegado ou não.
   // Alguém precisa olhar na plataforma e marcar — o DaVinci não reenvia.
   { value: 'a_conferir', label: 'A conferir', hint: 'resposta enviada pelo DaVinci que a plataforma não confirmou — confira se chegou ao comprador' },
@@ -69,7 +69,9 @@ export function opcoesDoFiltrar(caixa: string | null | undefined): OpcaoFiltro[]
   return caixa === 'humano' ? FILTROS_MENU.filter((f) => !FILTROS_FORA_DA_HUMANO.has(f.value)) : FILTROS_MENU
 }
 // O filtro em que a lista abre (e para onde volta ao tirar o do menu): na
-// Caixa, "Todas"; na Caixa Humano, "Falta responder" (pelo prazo).
+// Caixa, "Todas"; na Caixa Humano, "Falta responder" (tudo nela espera
+// resposta; desde 14/10/2026 ela vem pelo turno, a mais recente em cima, com
+// qualquer filtro — `vemDepoisNaLista`).
 export function filtroPadrao(caixa: string | null | undefined): string {
   return caixa === 'humano' ? 'aguardando' : 'todas'
 }
@@ -106,6 +108,13 @@ export function filtroPadrao(caixa: string | null | undefined): string {
 // continua em toda loja (a quem responde pelo Duoke, diz por que a IA não
 // responderia); fora dos modos (`humano.na_caixa` false) ele diz "Precisa de
 // pessoa", não "Caixa Humano" (`faixaHumano`).
+// OU RESPONDE OU VAI PARA PESSOA (14/10/2026, o dono: "a caixa tem que
+// responder mesmo; se não puder, manda pra Caixa Humano, que tem que estar
+// com a mais recente lá em cima"): a lista da Caixa Humano vem do servidor
+// pelo turno — a última mensagem do cliente, a mais nova em cima — e a hora
+// da linha, lá, é a dela (`horaDaLinha`); a conversa em que a IA não
+// respondeu em 10 min entra com o chip laranja "A IA não respondeu"
+// (`corHumano`).
 import { onClickOutside } from '@vueuse/core'
 import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PackageX, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
 import { ETIQUETAS_INFO, faixaDaEtiqueta, secundariasDe } from '~/components/AtendimentoEtiqueta.vue'
@@ -115,6 +124,8 @@ import {
   canaisNosModos,
   canalLabel,
   chipHumano,
+  corHumano,
+  ESPERA_IA_MIN,
   horaLista,
   lojaNosModos,
   modosDaCaixaHumano,
@@ -394,9 +405,18 @@ function selo(sel: boolean, cls: string) {
 
 // Os modos da Caixa Humano (null = toda loja: "todos" ou a API antiga).
 const modosHumano = computed(() => modosDaCaixaHumano(props.resumo?.flags))
-const dicaHumano = computed(() => (modosHumano.value
-  ? `Só as lojas ${textoModosHumano(modosHumano.value)}: o que a IA não pode responder e falta responder — respondeu, sai daqui.`
-  : 'Só o que a IA não pode responder e falta responder — respondeu, sai daqui.'))
+const dicaHumano = computed(() => {
+  const oQue = `o que a IA não pode responder (ou não respondeu em ${ESPERA_IA_MIN} min) e falta responder, a mais recente em cima — respondeu, sai daqui.`
+  return modosHumano.value ? `Só as lojas ${textoModosHumano(modosHumano.value)}: ${oQue}` : `Só ${oQue}`
+})
+// A hora da linha: na Caixa Humano, a do turno (a última mensagem do cliente
+// — a ordem dela, 14/10/2026); na Caixa, a da última mensagem, como no Duoke.
+function horaDaLinha(c: ConversaResumo): { em: string | null; titulo: string } {
+  const doTurno = emHumano.value && !!c.turno_em
+  const em = doTurno ? c.turno_em! : c.ultima_mensagem_em
+  const quando = em ? new Date(em).toLocaleString('pt-BR') : ''
+  return { em, titulo: doTurno && quando ? `última mensagem do cliente: ${quando}` : quando }
+}
 // Nenhum canal das lojas da pessoa no modo: a Caixa Humano não tem de onde vir.
 const semLojaNosModos = computed(() => !!props.resumo && !!modosHumano.value && canaisNosModos(props.resumo.canais, modosHumano.value) === 0)
 // A loja escolhida na barra está fora dos modos (a do robô: não dá para saber).
@@ -609,7 +629,7 @@ function mover(delta: number) {
       <p v-if="emHumano" class="text-[11px] leading-snug text-muted-foreground" data-dica-humano>
         {{ dicaHumano }}
         <span v-if="resumo?.flags?.humano_ativa === false" class="block text-amber-700 dark:text-amber-300" data-humano-desligada>
-          A triagem está desligada no servidor: aqui só aparecem as conversas com a IA pausada.
+          A triagem está desligada no servidor: aqui só aparecem as conversas com a IA pausada ou sem resposta da IA.
         </span>
       </p>
       <div v-if="filtroDoMenu" class="flex items-center gap-1 text-[11px]">
@@ -701,8 +721,8 @@ function mover(delta: number) {
                 <span
                   class="ml-auto shrink-0 pl-1 text-[11px] tabular-nums"
                   :class="c.id === selecionada ? 'text-primary-foreground/80' : 'text-muted-foreground'"
-                  :title="c.ultima_mensagem_em ? new Date(c.ultima_mensagem_em).toLocaleString('pt-BR') : ''"
-                >{{ horaLista(c.ultima_mensagem_em, agora) }}</span>
+                  :title="horaDaLinha(c).titulo"
+                >{{ horaLista(horaDaLinha(c).em, agora) }}</span>
               </span>
               <span class="mt-0.5 flex items-center gap-1.5">
                 <span
@@ -729,7 +749,7 @@ function mover(delta: number) {
                 <span
                   v-if="c.humano"
                   class="inline-flex min-w-0 max-w-full items-center gap-0.5 rounded px-1.5 py-px font-medium"
-                  :class="selo(c.id === selecionada, 'bg-amber-500/20 text-amber-900 ring-1 ring-inset ring-amber-500/40 dark:text-amber-200')"
+                  :class="selo(c.id === selecionada, corHumano(c.humano).chip)"
                   :title="chipHumano(c.humano)?.titulo"
                   data-selo-humano
                 >

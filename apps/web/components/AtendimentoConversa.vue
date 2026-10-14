@@ -240,6 +240,7 @@ import {
   clienteDe,
   comoObjeto,
   copiar,
+  corHumano,
   duracao,
   envioSimulado,
   erroDaApi,
@@ -268,8 +269,10 @@ import {
   respondidaNoSellerCentral,
   rotuloDia,
   rotulosHumano,
+  seloPrecisaDePessoa,
   sellerCenterDe,
   statusDoErro,
+  sugestaoDeAntes,
   tamanhoDoEnvio,
   textoModosHumano,
   usePollingVisivel,
@@ -960,6 +963,7 @@ const sugestaoDaVez = computed<SugestaoIa | null>(() => {
     validador_erros: r.validador_erros,
     avaliacao: null,
     resposta_real: null,
+    do_turno_atual: r.do_turno_atual,
   }
 })
 // A que está no painel. Com a correção do 👎 ABERTA, ela fica no painel até a
@@ -2562,10 +2566,12 @@ watch(() => props.conversaId, (novo, velho) => {
              IA não responde esta (os motivos da triagem; o motivo inteiro da IA,
              quando ela sugeriu, fica no painel da sugestão). Some quando alguém
              responde. Da loja fora dos modos da Caixa Humano (14/10/2026: em
-             Observar, o Duoke responde) ela não está lá: "Precisa de pessoa". -->
+             Observar, o Duoke responde) ela não está lá: "Precisa de pessoa".
+             Laranja quando é a espera da IA ("A IA não respondeu", 14/10/2026). -->
         <div
           v-if="conversa.humano"
-          class="shrink-0 border-b border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs text-amber-900 dark:text-amber-200"
+          class="shrink-0 border-b px-3 py-1 text-xs"
+          :class="corHumano(conversa.humano).faixa"
           role="note"
           :title="conversa.humano.na_caixa === false ? tituloForaDaCaixaHumano : undefined"
           data-faixa-humano
@@ -3053,11 +3059,20 @@ watch(() => props.conversaId, (novo, velho) => {
               <span class="inline-flex items-center gap-1 font-medium text-violet-700 dark:text-violet-300"><Sparkles class="size-3.5" /> Sugestão da IA</span>
               <span v-if="rascunho.categoria" class="text-muted-foreground">· {{ categoriaLabel(rascunho.categoria) }}</span>
               <span v-if="rascunho.confianca !== null && rascunho.confianca !== undefined" class="text-muted-foreground">· {{ Math.round(rascunho.confianca * 100) }}% de confiança</span>
+              <!-- O selo só na sugestão do turno ATUAL (14/10/2026, a régua da
+                   Caixa Humano): a de antes da última mensagem do cliente ganha
+                   o aviso discreto no lugar. -->
               <span
-                v-if="rascunho.precisa_humano"
+                v-if="seloPrecisaDePessoa(rascunho)"
                 class="rounded bg-amber-500/20 px-1.5 text-amber-800 dark:text-amber-300"
                 title="a IA marcou que este assunto precisa de uma pessoa (dinheiro, troca, reclamação, pedido sem dado…) — confira com cuidado"
               >precisa de pessoa</span>
+              <span
+                v-else-if="sugestaoDeAntes(rascunho)"
+                class="rounded bg-muted px-1.5 text-muted-foreground"
+                title="o cliente escreveu de novo depois da mensagem que esta sugestão responde — confira se ela ainda serve"
+                data-sugestao-de-antes
+              >de antes da última mensagem</span>
               <span class="ml-auto flex flex-wrap items-center gap-1">
                 <button v-if="rascunho.texto && !usandoSugestao" type="button" class="rounded border border-violet-300/70 bg-background px-1.5 py-0.5 hover:bg-muted" @click="usarSugestao">usar sugestão</button>
                 <button v-if="rascunho.texto" type="button" class="rounded p-1 hover:bg-muted" title="copiar o texto da sugestão (para colar no Duoke, por exemplo)" @click="copiarTexto(rascunho.texto, 'Texto da sugestão')"><Copy class="size-3.5" /></button>

@@ -21,7 +21,9 @@ import {
   copiar,
   haQuanto,
   portalMagaluDe,
+  seloPrecisaDePessoa,
   sellerCenterDe,
+  sugestaoDeAntes,
   type AvaliacaoIa,
   type SugestaoIa,
 } from '~/components/AtendimentoPlataforma.vue'
@@ -135,11 +137,19 @@ async function copiarTexto() {
         <template v-if="sugestao">
           <span v-if="sugestao.categoria" class="text-muted-foreground">· {{ categoriaLabel(sugestao.categoria) }}</span>
           <span v-if="sugestao.confianca !== null && sugestao.confianca !== undefined" class="text-muted-foreground">· {{ Math.round(sugestao.confianca * 100) }}% de confiança</span>
+          <!-- O selo só na sugestão do turno ATUAL (14/10/2026: a de antes da
+               última mensagem do cliente não diz mais nada sobre a conversa). -->
           <span
-            v-if="sugestao.precisa_humano"
+            v-if="seloPrecisaDePessoa(sugestao)"
             class="rounded bg-amber-500/20 px-1.5 text-amber-800 dark:text-amber-300"
             title="a IA marcou que este assunto precisa de uma pessoa (dinheiro, troca, reclamação, pedido sem dado…)"
           >precisa de pessoa</span>
+          <span
+            v-else-if="sugestaoDeAntes(sugestao)"
+            class="rounded bg-muted px-1.5 text-muted-foreground"
+            title="o cliente escreveu de novo depois da mensagem que esta sugestão responde"
+            data-sugestao-de-antes
+          >de antes da última mensagem</span>
           <span v-if="sugestao.created_at" class="text-muted-foreground" :title="new Date(sugestao.created_at).toLocaleString('pt-BR')">· {{ haQuanto(sugestao.created_at, agora) }}</span>
         </template>
         <span class="ml-auto flex items-center gap-1">
