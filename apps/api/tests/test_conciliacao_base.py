@@ -250,7 +250,8 @@ async def test_run_extrato_sync_pede_janela_e_depois_le_o_arquivo(db, make_user)
         router.get(f"{MP}/v1/account/release_report/list").mock(return_value=Response(200, json=[]))
         router.post(f"{MP}/v1/account/release_report").mock(return_value=Response(202, json={}))
         r3 = await ext.run_extrato_sync(db, loja, cliente, hoje=date(2026, 10, 16))
-    assert r3["pedido"]["janela"] == "2026-10-15..2026-10-15"
+    # folga de um dia: pede de novo o último dia lido (14) junto com o 15; repetido é ignorado
+    assert r3["pedido"]["janela"] == "2026-10-14..2026-10-15"
 
 
 # --- fatura ------------------------------------------------------------------

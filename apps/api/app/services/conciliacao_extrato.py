@@ -475,7 +475,12 @@ async def run_extrato_sync(
     ainda_pendente = any(r.status == "pedido" for r in rows)
     if not ainda_pendente:
         fins = [_janela_da_chave(r.chave)[1] for r in rows if r.status in ("pedido", "lido")]
-        proximo = (max(fins) + timedelta(days=1)) if fins else loja.inicio
+        # Folga de um dia (Vinicius, 14/10: "o ML pode mudar algo de ontem?"): a
+        # janela nova começa no ÚLTIMO dia já lido, não no seguinte. Linha repetida é
+        # ignorada (identidade = hash), linha atrasada do Mercado Pago entra.
+        proximo = max(fins) if fins else loja.inicio
+        if fins and proximo >= ontem and max(fins) >= ontem:
+            proximo = ontem + timedelta(days=1)  # ontem já lido: nada a pedir
         if proximo <= ontem:
             ate = min(ontem, proximo + timedelta(days=max_dias - 1))
             if not loja.extrato_config_em:
