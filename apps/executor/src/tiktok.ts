@@ -23,6 +23,14 @@
  *
  * Só manda com commit=true E TIKTOK_CALIBRATED=true; sem isso é modo seco:
  * abre, confere a conversa e devolve o que faria.
+ *
+ * 14/10/2026 (294738, TikTok Mini): o perfil 129 "Mini - TikTok" deu problema e o
+ * Vinicius pediu pra ir pelo 47 "Mini - ml sh tk" (TIKTOK_PERFIS_EXTRA). O 47 é
+ * FlowerBrowser (Firefox): não fala CDP, fala WebDriver BiDi — igual ao
+ * `tela.mjs` da IA de Chamado. No Firefox o `uploadFile` morre
+ * ("input.setFiles … InvalidStateError"), então a foto entra em pedaços pela
+ * página (DataTransfer + evento change), e a resposta de rede não tem corpo no
+ * BiDi — o link do chat é buscado de novo de dentro da página.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -34,6 +42,56 @@ import * as davinci from "./davinci";
 import { log } from "./log";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Perfil Chrome (SunBrowser) fala CDP; perfil Firefox (FlowerBrowser) devolve
+ *  `ws://…/session` e só fala WebDriver BiDi. Devolve o navegador e qual é. */
+async function conectar(ws: string): Promise<{ browser: Browser; bidi: boolean }> {
+  if (!/\/session\/?$/.test(ws)) {
+    try {
+      return { browser: await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null }), bidi: false };
+    } catch {
+      /* não é Chrome: tenta o BiDi */
+    }
+  }
+  return {
+    browser: await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null, protocol: "webDriverBiDi" }),
+    bidi: true,
+  };
+}
+
+/** Foto no Firefox: manda os bytes em pedaços pra dentro da página, monta o
+ *  File lá e põe na caixa por DataTransfer + change (o que a página recebe
+ *  quando a pessoa escolhe o arquivo). Sem função com nome no evaluate. */
+async function anexarPorDentro(page: Page, seletor: string, nome: string, tipo: string, dados: Buffer): Promise<number> {
+  const PEDACO = 2 * 1024 * 1024;
+  await page.evaluate(() => {
+    (window as any).__davinciPartes = [];
+  });
+  for (let pos = 0; pos < dados.length; pos += PEDACO) {
+    await page.evaluate((b64) => {
+      const s = atob(b64);
+      const u = new Uint8Array(s.length);
+      for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+      (window as any).__davinciPartes.push(u);
+    }, dados.subarray(pos, Math.min(pos + PEDACO, dados.length)).toString("base64"));
+  }
+  return page.evaluate(
+    (sel, n, t) => {
+      const e = document.querySelector<HTMLInputElement>(sel);
+      if (!e) return 0;
+      const dt = new DataTransfer();
+      dt.items.add(new File((window as any).__davinciPartes, n, { type: t }));
+      delete (window as any).__davinciPartes;
+      e.files = dt.files;
+      e.dispatchEvent(new Event("input", { bubbles: true }));
+      e.dispatchEvent(new Event("change", { bubbles: true }));
+      return e.files?.length || 0;
+    },
+    seletor,
+    nome,
+    tipo
+  );
+}
 
 export interface PedidoSenha {
   linha_id?: string;
@@ -214,7 +272,8 @@ async function conversar(
   cmdId: string,
   p: PedidoSenha,
   perfilNome: string,
-  fotoTmp: { caminho: string | null }
+  fotoTmp: { caminho: string | null },
+  bidi = false
 ): Promise<Resultado> {
   const pedido = String(p.pedido_tiktok || "").trim();
   const base = cfg.tiktokSellerUrl;
@@ -239,6 +298,21 @@ async function conversar(
     info = ((await r.json()) as any)?.data?.orderIdToContactLinkInfo?.[pedido];
   } catch {
     info = null;
+  }
+  if (!info?.urlPc) {
+    // Firefox/BiDi não entrega o corpo da resposta: pede o mesmo endereço de
+    // dentro da página (mesmos cookies) e lê o JSON de lá.
+    info = await page
+      .evaluate(
+        (u, ped) =>
+          fetch(u, { credentials: "include" })
+            .then((x) => x.json())
+            .then((j: any) => j?.data?.orderIdToContactLinkInfo?.[ped] || null)
+            .catch(() => null),
+        r.url(),
+        pedido
+      )
+      .catch(() => null);
   }
   if (!info?.urlPc) throw new Falha("sem_chat", "a TikTok não liberou chat com o comprador desse pedido");
   const usuario = await esperar(
@@ -341,7 +415,18 @@ async function conversar(
         fs.writeFileSync(fotoTmp.caminho, foto.dados);
         const input = await page.$('input[type=file][accept*="image"]');
         if (!input) throw new Error("sem campo de foto no chat");
-        await (input as any).uploadFile(fotoTmp.caminho);
+        if (bidi) {
+          const n = await anexarPorDentro(
+            page,
+            'input[type=file][accept*="image"]',
+            `davinci-${cmdId}.${ext}`,
+            ext === "png" ? "image/png" : "image/jpeg",
+            foto.dados
+          );
+          if (!n) throw new Error("a caixa de foto não aceitou o arquivo (Firefox)");
+        } else {
+          await (input as any).uploadFile(fotoTmp.caminho);
+        }
         const janela = await esperar(
           () => page.evaluate(() => document.body.innerText.includes("Enviar fotos")),
           Boolean,
@@ -383,7 +468,7 @@ export async function pedirSenha(cmdId: string, p: PedidoSenha): Promise<Resulta
     return { ok: false, motivo: "sem_pedido", detalhe: "tarefa sem o nº do pedido da TikTok" };
   }
   if (!(await adspower.garantirAberto())) {
-    return { ok: false, motivo: "adspower", detalhe: "AdsPower fechado no Mac Santiago — tento de novo depois" };
+    return { ok: false, motivo: "adspower", detalhe: "AdsPower fechado no Mac dos robôs — tento de novo depois" };
   }
   // Erro do AdsPower aqui (limite de ~1 req/s, API fora) não diz nada do
   // pedido: volta como "adspower" (não gasta tentativa). E sem saber se o
@@ -393,7 +478,7 @@ export async function pedirSenha(cmdId: string, p: PedidoSenha): Promise<Resulta
   try {
     perfil = await acharPerfil(conta);
     if (!perfil) {
-      return { ok: false, motivo: "sem_perfil", detalhe: `a loja "${conta}" não tem perfil TikTok no AdsPower do Mac Santiago` };
+      return { ok: false, motivo: "sem_perfil", detalhe: `a loja "${conta}" não tem perfil TikTok no AdsPower do Mac dos robôs` };
     }
     // O AdsPower segue dizendo "Active" por alguns segundos depois do stop
     // (29/09: a tarefa seguinte da MESMA loja voltou "perfil em uso" 6 s
@@ -417,9 +502,11 @@ export async function pedirSenha(cmdId: string, p: PedidoSenha): Promise<Resulta
   const fotoTmp: { caminho: string | null } = { caminho: null };
   try {
     const ws = await adspower.start(perfil.userId);
-    browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null });
+    const c = await conectar(ws);
+    browser = c.browser;
+    if (c.bidi) log.info(`TikTok senha ${p.pedido_tiktok}: perfil ${perfil.nome} é Firefox — falando BiDi`);
     const page = await browser.newPage();
-    return await conversar(page, cmdId, p, perfil.nome, fotoTmp);
+    return await conversar(page, cmdId, p, perfil.nome, fotoTmp, c.bidi);
   } catch (e: any) {
     if (e instanceof Falha) return { ok: false, motivo: e.motivo, detalhe: e.message, perfil: perfil.nome };
     return { ok: false, motivo: "erro", detalhe: String(e?.message || e).slice(0, 300), perfil: perfil.nome };
