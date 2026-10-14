@@ -71,6 +71,10 @@ PERFIL_FIXO = {
     # 02/10 (296985): "fica o 110" = "JLAS 2 - ml" (Contabilidade), não o 32
     # "JLAS 2 - Mercado Livre" (Lojas) que o nome escolheria.
     ("jlas 2", "ml"): "110",
+    # 14/10 (294738): o 129 "Mini - TikTok" está com problema — "aponta a IA pro
+    # 47 também" = "Mini - ml sh tk" (Contabilidade, Firefox). Mesmo perfil do
+    # executor (TIKTOK_PERFIS_EXTRA no .env do mini). Tirar quando o 129 voltar.
+    ("mini", "tiktok"): "47",
 }
 PALAVRAS_PLATAFORMA = {p for s in APELIDOS.values() for p in s} | {
     "mercadolivre", "loja", "tiktok shop",
