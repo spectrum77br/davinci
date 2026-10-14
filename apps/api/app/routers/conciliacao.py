@@ -610,10 +610,13 @@ async def sincronizar_agora(
             status.HTTP_404_NOT_FOUND, detail={"code": "loja_nao_ligada", "conta": conta}
         )
     pool = await get_arq_pool()
+    # O arq recusa um job com o MESMO id enquanto o resultado do anterior ainda
+    # está guardado (1 h): o id leva o minuto, e a trava por loja em
+    # `sincronizar_loja` é quem evita duas rodadas ao mesmo tempo.
     job = await pool.enqueue_job(
         "conciliacao_sincronizar_loja",
         str(loja.integration_id),
-        _job_id=f"conciliacao_sincronizar_loja:{loja.integration_id}",
+        _job_id=f"conciliacao_sincronizar_loja:{loja.integration_id}:{int(time.time() // 60)}",
     )
     return {
         "conta": loja.conta,
