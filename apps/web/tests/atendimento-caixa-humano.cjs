@@ -76,7 +76,7 @@ const P = carregar('AtendimentoPlataforma', plataformaSfc)
 const F = carregar('AtendimentoFiltroPlataforma', filtroSfc)
 const L = carregar('AtendimentoLista', listaSfc)
 carregar('AtendimentoEtiqueta', etiquetaSfc)
-carregar('AtendimentoLojas', lojasSfc)
+const Lj = carregar('AtendimentoLojas', lojasSfc)
 
 function filtros(o = {}) {
   return { plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '', tipo_chamado: '', plataforma_topo: '', ...o }
@@ -227,6 +227,34 @@ const HUM = (motivos, extra = {}) => ({
   assert.deepEqual(humano.map((c) => c.valor), caixa.map((c) => c.valor), 'as mesmas plataformas nas duas')
   assert.deepEqual(humano.map((c) => [c.valor, c.aguardando]), [['ml', 0], ['shopee', 4], ['instagram,facebook', 0]])
   assert.match(F.textoDoNumero('humano'), /esperando uma pessoa/)
+
+  // Só as lojas ATIVADAS (14/10/2026, o dono: "mostre também só as que estão
+  // ativadas … por cada lugar, separado Shopee, ML"): com `humano_modos`, o
+  // menu do topo da Caixa Humano só tem plataforma com canal no Automático
+  // (ou com conversa contada lá, ou a escolhida), e a barra só a loja no modo.
+  const ativado = {
+    ...resumo,
+    canais: [
+      { id: 'k1', integration_id: 'i-kia', plataforma: 'shopee', canal: 'chat', modo: 'auto' },
+      { id: 'k2', integration_id: 'i-sh', plataforma: 'shopee', canal: 'chat', modo: 'observar' },
+      { id: 'k3', integration_id: 'i-ml', plataforma: 'ml', canal: 'pos_venda', modo: 'observar' },
+    ],
+    flags: { humano_modos: ['auto'] },
+  }
+  assert.deepEqual(F.chipsDoResumo(ativado, '', 'humano').map((c) => c.valor), ['shopee'], 'só a plataforma com loja no Automático')
+  assert.deepEqual(F.chipsDoResumo(ativado, 'ml', 'humano').map((c) => c.valor), ['ml', 'shopee'], 'a escolhida fica')
+  assert.deepEqual(F.chipsDoResumo(ativado, '').map((c) => c.valor), caixa.map((c) => c.valor), 'a Caixa não muda')
+  const comConversa = { ...ativado, plataformas: ativado.plataformas.map((p) => (p.plataforma === 'ml' ? { ...p, humano: 2 } : p)) }
+  assert.ok(F.chipsDoResumo(comConversa, '', 'humano').some((c) => c.valor === 'ml'), 'com conversa contada lá, fica')
+  const barra = [
+    { integration_id: 'i-kia', plataforma: 'shopee', conta: 'Kia', humano: 3 },
+    { integration_id: 'i-sh', plataforma: 'shopee', conta: 'ATV', humano: 0 },
+    { integration_id: 'i-ml', plataforma: 'ml', conta: 'jlas2', humano: 0 },
+    { integration_id: 'i-ml2', plataforma: 'ml', conta: 'velha', humano: 1 },
+    { integration_id: '', plataforma: 'temu', conta: 'robô', humano: 0 },
+  ]
+  assert.deepEqual(Lj.lojasDaCaixaHumano(barra, ativado.canais, ['auto']).map((l) => l.conta), ['Kia', 'velha'])
+  assert.equal(Lj.lojasDaCaixaHumano(barra, ativado.canais, null).length, barra.length, 'sem modos: toda loja')
   assert.equal(F.textoDoNumero(), 'conversa(s) falta responder')
 }
 
@@ -511,8 +539,9 @@ async function numeros() {
   assert.match(html, /Todas · Shopee<\/span><span[^>]*>4<\/span>/)
   assert.doesNotMatch(html, />poofy</)
 
-  // Só as lojas no Automático (14/10/2026): a loja fora fica sem bolinha (o
-  // servidor manda zero) e o title diz por quê; a do modo, como sempre.
+  // Só as lojas no Automático (14/10/2026): a loja fora SOME da barra da
+  // Caixa Humano (o dono: "mostre também só as que estão ativadas"); a do
+  // modo, como sempre.
   const resumoModos = {
     ...RESUMO_LISTA,
     humano: 4,
@@ -527,9 +556,8 @@ async function numeros() {
     flags: { humano_ativa: true, humano_modos: ['auto'] },
   }
   html = await renderizar(lojasSfc, { resumo: resumoModos, filtros: filtros(), numero: 'humano' })
-  assert.deepEqual(bolinhas(html).filter(([n]) => n !== 'Todas'), [['atv', '4']], 'a poofy (Observar) sem bolinha')
-  assert.match(html, /Fora da Caixa Humano: a loja não está no Automático \(mude em Lojas e modo\)/)
-  assert.equal((html.match(/Fora da Caixa Humano/g) || []).length, 1, 'só a poofy')
+  assert.deepEqual(bolinhas(html).filter(([n]) => n !== 'Todas'), [['atv', '4']], 'a poofy (Observar) fora da barra')
+  assert.doesNotMatch(html, />poofy</, 'a loja em Observar não aparece na barra da Caixa Humano')
   assert.match(html, /4 na Caixa Humano \(a IA não pode responder\)/)
   // Na Caixa (o "falta responder"), nada muda.
   html = await renderizar(lojasSfc, { resumo: resumoModos, filtros: filtros() })
