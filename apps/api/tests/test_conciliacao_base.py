@@ -329,6 +329,13 @@ def test_detalhe_para_movimento_mapeia_subtipos():
         fat.chave_periodo(date(2026, 10, 14)) == "2026-10-01"
         and fat.periodo_anterior("2026-01-01") == "2025-12-01"
     )
+    # sub-tipos vistos na jlas2 em 14/10 (18 diferentes): os desconhecidos vão pelo prefixo
+    assert fat.tipo_do_detalhe("CHARGE", "CFONPN") == "fatura_parcelamento_comprador"
+    assert fat.tipo_do_detalhe("CHARGE", "CVVFNU") == "fatura_parcelamento"
+    assert fat.tipo_do_detalhe("CHARGE", "CDSDB") == "fatura_frete"
+    assert fat.tipo_do_detalhe("CHARGE", "CXDED") == "fatura_frete"
+    assert fat.tipo_do_detalhe("BONUS", "BFONPN") == "fatura_bonificacao"
+    assert fat.tipo_do_detalhe("CHARGE", "ZZZ") == "fatura_outro"
 
 
 async def test_run_fatura_sync_le_incremental_e_respeita_a_pausa(db, make_user):
@@ -354,10 +361,29 @@ async def test_run_fatura_sync_le_incremental_e_respeita_a_pausa(db, make_user):
     async def dormir(s: float) -> None:
         pausas.append(s)
 
+    db.add(
+        _pedido_bling(
+            "301500", "2000018600988674", datetime(2026, 9, 23, 3, tzinfo=UTC), "1054.39", 600.0
+        )
+    )
+    await db.commit()
     r = await fat.run_fatura_sync(
         db, loja, cliente, hoje=date(2026, 10, 14), pausa=13.0, dormir=dormir
     )
     assert r["inseridos"] == 4 and r["chamadas"] == 5 and not r["erros"]
+    # a cobrança já nasce com o pedido do Bling resolvido pelo nº da venda
+    com_pedido = (
+        (
+            await db.execute(
+                __import__("sqlalchemy")
+                .select(ConciliacaoMovimento.pedido_bling)
+                .where(ConciliacaoMovimento.origem == "ml_fatura")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert com_pedido == ["301500"] * 4
     assert pausas == [13.0] * 4  # dorme entre as chamadas, nunca antes da primeira
     assert r["periodos"]["2026-10-01|CHARGE"] == {"lidos": 2, "inseridos": 2, "last_id": 11}
     # segunda rodada: começa do last_id (nada novo) e não insere de novo

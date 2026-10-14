@@ -497,7 +497,6 @@ async def recalcular_loja(
             await session.execute(
                 select(ConciliacaoMovimento).where(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
-                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
                     ConciliacaoMovimento.pedido_bling.isnot(None),
                     ConciliacaoMovimento.classificacao.is_(None),
                     ConciliacaoMovimento.pedido_bling.notin_(numeros or {"-"}),

@@ -26,27 +26,27 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoSync
+from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoSync, Integration
 from app.models.conciliacao import ORIGEM_FATURA
+from app.services.conciliacao_extrato import bling_store_ids_da_loja, resolver_pedidos_bling
 from app.services.conciliacao_mp_csv import dinheiro
 
 logger = structlog.get_logger()
 BRT = ZoneInfo("America/Sao_Paulo")
 
 SUBTIPOS = {
-    "CVVML": "fatura_tarifa_venda",
+    "CVVML": "fatura_tarifa_venda",  # custo por vender no Mercado Livre
     "CV": "fatura_tarifa_venda",
-    "CVVPRC": "fatura_tarifa_cobranca",
-    "CVVFN": "fatura_parcelamento",
-    "CDSB": "fatura_frete",
+    "CVVPRC": "fatura_tarifa_cobranca",  # custo por cobrar no Mercado Pago
+    "CVVFN": "fatura_parcelamento",  # taxa de parcelamento (a loja paga)
+    "CVVFNU": "fatura_parcelamento",
+    "CFONPN": "fatura_parcelamento_comprador",  # acréscimo pago pelo comprador: entra e sai
+    "CDSB": "fatura_frete",  # tarifa do Mercado Envios
     "CXD": "fatura_frete",
-    "PADS": "fatura_publicidade",
-    "BVVML": "fatura_bonificacao",
-    "BV": "fatura_bonificacao",
-    "BVVPRC": "fatura_bonificacao",
-    "BVVFN": "fatura_bonificacao",
-    "BDSB": "fatura_bonificacao",
-    "BXD": "fatura_bonificacao",
+    "CDSDB": "fatura_frete",  # envio de devolução
+    "CXDED": "fatura_frete",
+    "CXDID": "fatura_frete",
+    "PADS": "fatura_publicidade",  # Product Ads (sem pedido)
 }
 PAUSA_PADRAO = 15.0  # s entre chamadas: 5/min é o limite (e a Margem divide o balde)
 LIMITE_PAGINA = 1000
@@ -64,11 +64,21 @@ def periodo_anterior(chave: str) -> str:
 
 
 def tipo_do_detalhe(detail_type: str | None, sub_type: str | None) -> str:
+    """Sub-tipo da cobrança → tipo normalizado. Os conhecidos estão em SUBTIPOS; o
+    resto vai pelo prefixo (visto na jlas2 em 14/10: 18 sub-tipos diferentes)."""
     st = (sub_type or "").upper()
     if st in SUBTIPOS:
         return SUBTIPOS[st]
     if (detail_type or "").upper() == "BONUS" or st.startswith("B"):
         return "fatura_bonificacao"
+    if st.startswith(("CD", "CX")):
+        return "fatura_frete"
+    if st.startswith("CFON"):
+        return "fatura_parcelamento_comprador"
+    if st.startswith("CVVFN"):
+        return "fatura_parcelamento"
+    if st.startswith("CVV"):
+        return "fatura_tarifa_venda"
     return "fatura_outro"
 
 
@@ -123,7 +133,9 @@ def detalhe_para_movimento(det: dict[str, Any]) -> dict[str, Any] | None:
         "bling_id": None,
         "bruto": dinheiro(venda.get("transaction_amount")) if venda else None,
         "tarifa": valor if tipo in ("fatura_tarifa_venda", "fatura_tarifa_cobranca") else None,
-        "parcelamento": valor if tipo == "fatura_parcelamento" else None,
+        "parcelamento": valor
+        if tipo in ("fatura_parcelamento", "fatura_parcelamento_comprador")
+        else None,
         "frete": valor if tipo == "fatura_frete" else None,
         "cupom": None,
         "credito": valor if bonus else dinheiro(0),
@@ -224,9 +236,18 @@ async def _inserir(
 ) -> int:
     if not movimentos:
         return 0
+    integration = await session.get(Integration, loja.integration_id)
+    lojas = await bling_store_ids_da_loja(session, integration) if integration else set()
+    ids = {m["pedido_marketplace"] for m in movimentos if m["pedido_marketplace"]} | {
+        m["pack_id"] for m in movimentos if m["pack_id"]
+    }
+    mapa = await resolver_pedidos_bling(session, ids, lojas)
     for m in movimentos:
         m["integration_id"] = loja.integration_id
         m["platform"] = loja.platform
+        achado = mapa.get(m["pedido_marketplace"] or "") or mapa.get(m["pack_id"] or "")
+        if achado:
+            m["pedido_bling"], m["bling_id"] = achado
     inseridos = 0
     for k in range(0, len(movimentos), 200):
         stmt = (

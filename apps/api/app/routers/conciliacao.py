@@ -530,6 +530,7 @@ async def status_lojas(
                 select(ConciliacaoMovimento.origem, ConciliacaoMovimento.tipo, func.count())
                 .where(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == "mp_extrato",
                     ConciliacaoMovimento.pedido_bling.is_(None),
                     ConciliacaoMovimento.classificacao.is_(None),
                 )
@@ -540,6 +541,7 @@ async def status_lojas(
             await session.execute(
                 select(func.count()).where(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == "mp_extrato",
                     ConciliacaoMovimento.pedido_bling.is_(None),
                     ConciliacaoMovimento.classificacao.is_(None),
                 )
