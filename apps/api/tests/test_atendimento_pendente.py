@@ -529,8 +529,9 @@ async def test_shopee_lida_no_duoke_volta_a_zero_sem_mensagem_nova(db, make_user
     assert r.status == shopee.STATUS_OK
     cs = await tsh._conversas(db)
     assert (cs["X"].nao_lidas, cs["Y"].nao_lidas) == (0, 0)
-    # Total zero: nem pede a lista das não lidas. E nada de "marcar como lido":
-    # o cliente de verdade nem tem o método.
+    # Total zero: nem pede a lista das não lidas. E o sync nunca marca como
+    # lida: desde 14/10/2026 só a pessoa que abre a conversa (lida.py, com o
+    # chat_read_conversation) marca — o read_conversation genérico não existe.
     assert not any(c["tipo"] == shopee.TIPO_NAO_LIDAS for c in f.chamadas_lista)
     assert not hasattr(ShopeeClient, "read_conversation")
 
