@@ -5,7 +5,9 @@
 import { ChevronLeft, ChevronRight, Loader2, Lock, LockOpen, Search } from 'lucide-vue-next'
 import { STATUS_MOV, fmtDia, fmtDiaHora, fmtHora, fmtMoney, ontemISO, sitCls, somaDias, tipoMov } from '~/lib/conciliacao'
 
-const props = defineProps<{ loja: string; canEdit: boolean; dia?: string }>()
+const props = defineProps<{ loja: string; canEdit: boolean; dia?: string; plataforma?: string }>()
+const fonte = computed(() => (props.plataforma === 'shopee' ? 'carteira da Shopee' : 'extrato do Mercado Pago'))
+const quemInforma = computed(() => (props.plataforma === 'shopee' ? 'Shopee' : 'Mercado Pago'))
 const emit = defineEmits<{ (e: 'ver-pedido', pedido: string): void }>()
 
 type Mov = {
@@ -247,7 +249,7 @@ onMounted(() => {
     <div class="grid gap-3 xl:grid-cols-[1fr_420px]">
       <div class="flex min-h-0 min-w-0 flex-col rounded-md border bg-card">
         <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-          <span>Movimentos do dia — extrato do Mercado Pago</span>
+          <span>Movimentos do dia — {{ fonte }}</span>
           <span class="text-[11px] font-normal text-slate-300">cada linha precisa de um destino: um pedido ou uma classificação</span>
         </div>
         <div class="max-h-[62vh] overflow-auto">
@@ -312,7 +314,7 @@ onMounted(() => {
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Entradas (créditos)</div><b class="text-xs tabular-nums text-emerald-700">+ {{ fmtMoney(dados.totais.creditos) }}</b></div>
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saídas (débitos)</div><b class="text-xs tabular-nums text-red-600">− {{ fmtMoney(dados.totais.debitos) }}</b></div>
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo final calculado</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_final) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo informado pelo Mercado Pago</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_informado) }}</b></div>
+          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo informado pelo {{ quemInforma }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_informado) }}</b></div>
           <div class="px-2 py-1.5"><div class="text-muted-foreground">Diferença</div><b class="text-xs tabular-nums" :class="dados.totais.diferenca === null ? '' : Math.abs(dados.totais.diferenca) <= 0.05 ? 'text-emerald-700' : 'text-red-600'">{{ fmtMoney(dados.totais.diferenca) }}<span v-if="dados.totais.diferenca !== null && Math.abs(dados.totais.diferenca) <= 0.05"> ✔ bate</span></b></div>
         </div>
         <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.</div>

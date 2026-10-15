@@ -445,3 +445,16 @@ Autorização do Vinicius: "pega qualquer conta Shopee que tiver aberta e pode f
 
 - **Extrato do dia, dois consertos (15/10, pronto, sem subir):** (1) **Desvincular não fazia nada**: a linha ficava sem pedido por um segundo e o recálculo religava pelo nº da venda, só trocando o rótulo pra "vinculado à mão". Agora o robô respeita a decisão da pessoa: linha desvinculada (ou classificada sem pedido) não é religada nem contada no pedido; ela fica "pendente · desvinculada à mão por X" até alguém vincular ou classificar. (2) **Dia fechado continuava editável**: a API passa a recusar vincular/classificar/desvincular em linha de dia fechado (409 `dia_fechado`, com quem fechou) e a tela esconde os botões e explica que é preciso Reabrir.
 - **Extrato × fatura, em uma frase (pergunta dele):** o extrato é o dinheiro (toda entrada e saída da conta do Mercado Pago, com saldo); a fatura é a conta de tarifas que o Mercado Livre apresenta por período (23→22), e quase toda cobrança dela o ML já desconta dentro da liberação da venda, por isso os números se repetem. A visão "Extrato do dia" mostra SÓ o extrato; a fatura aparece no Raio-X do pedido ("Movimentos deste pedido", origem fatura) e no Fechamento. O que ele vê na tela é, linha a linha, o **Relatório de liberações** do Mercado Pago (Seu negócio › Relatórios › Liberações); a tela "Atividade" do MP agrupa diferente e não mostra as reservas.
+
+
+---
+
+## 20. Passo 3 (15/10, manhã) — Shopee entra: a carteira é o extrato
+
+OK do Vinicius: "tem meu ok vamos fazer ... pegamos do dia 01". Loja **Jlas** (Shopee), início 01/10/2026 (migration 0400).
+
+- **Leitor** `conciliacao_shopee.run_carteira_sync`: lê `get_wallet_transaction_list` um dia por vez (fuso de Brasília, do último dia lido até ontem, com sobreposição de um dia; `transaction_id` é a chave única), paginando por `page_no` até `more=false`. Cada lançamento vira um movimento de origem `shopee_carteira`: renda do pedido (`ESCROW_VERIFIED_ADD`) = venda liberada, com o `order_sn` casando com o `numeroloja` do Bling; saques (`WITHDRAWAL_CREATED`/`COMPLETED`) já classificados como Saque; penalidades e ajustes (`ADJUSTMENT_CENTER_*`) como Ajuste; Ads (`SPM_*`) como Publicidade. `current_balance` vira o saldo após a linha → prova dos nove igual ao Mercado Pago.
+- **Rodada**: o mesmo `sincronizar_loja` escolhe pela plataforma: ML = fatura + relatório do MP; Shopee = carteira (não tem fatura). Mesmos crons de madrugada e o mesmo "Sincronizar agora".
+- **Recálculo e telas**: iguais. "Venda" da Shopee = o `escrow_detail` que a Margem já lê (valor, tarifa, frete, cupom, líquido); a carteira só traz o líquido, então no Raio-X a coluna "Real (carteira da Shopee)" só preenche o líquido e o comparativo compara líquido previsto × líquido real. A aba Shopee mostra só as lojas Shopee; Extrato do dia diz "carteira da Shopee" e "saldo informado pela Shopee".
+- **Testes**: `tests/test_conciliacao_shopee.py` (mapeamento dos tipos, leitura dia a dia sem duplicar, Extrato do dia fechando a conta).
+- **A conferir com dados reais**: devoluções (nos 14 dias da sondagem não apareceu `refund_sn`), o rótulo exato dos tipos que ainda não vimos (`ESCROW_VERIFIED_DEDUCT`?), e se o `order_sn` da carteira bate com o `numeroloja` do Bling em 100% dos casos.

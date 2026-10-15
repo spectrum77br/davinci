@@ -644,7 +644,7 @@ from sqlalchemy import case as sa_case  # noqa: E402
 from sqlalchemy import func, or_  # noqa: E402
 
 from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoPedido  # noqa: E402
-from app.models.conciliacao import ORIGEM_EXTRATO  # noqa: E402
+from app.models.conciliacao import ORIGENS_EXTRATO  # noqa: E402
 
 _BRT = ZoneInfo("America/Sao_Paulo")
 _PERM_PAINEL = require_permission_any(("conciliacao", "margem"), "view")
@@ -745,7 +745,7 @@ def _extras_da_venda(p: ConciliacaoPedido) -> float | None:
     parcelamento, outros): valor − tarifa − frete − líquido previsto. Com isso a linha
     da grade fecha sozinha (15/10, Vinicius: "Extras")."""
     if p.situacao == "cancelado":
-        return None  # venda desfeita: tarifa, frete e líquido vêm zerados; "extras" seria o valor cheio
+        return None  # venda desfeita: tarifa/frete/líquido zerados → "extras" seria o valor cheio
     if None in (p.venda_valor, p.venda_tarifa, p.venda_frete, p.venda_liquido):
         return None
     extras = p.venda_valor - p.venda_tarifa - p.venda_frete - p.venda_liquido
@@ -784,7 +784,7 @@ def _movimento_out(m: ConciliacaoMovimento) -> dict[str, Any]:
 
 def _original_do_movimento(m: ConciliacaoMovimento) -> dict[str, Any]:
     raw = m.raw if isinstance(m.raw, dict) else {}
-    if m.origem == ORIGEM_EXTRATO:
+    if m.origem in ORIGENS_EXTRATO:
         # só as colunas preenchidas, na ordem do relatório
         return {k: v for k, v in raw.items() if v not in (None, "", "0.00", "0", "{}", "[]")}
     ci = raw.get("charge_info") or {}
@@ -1025,7 +1025,7 @@ async def raio_x(
         .scalars()
         .all()
     )
-    liberacoes = [m for m in movs if m.origem == ORIGEM_EXTRATO and m.tipo == "venda_liberada"]
+    liberacoes = [m for m in movs if m.origem in ORIGENS_EXTRATO and m.tipo == "venda_liberada"]
 
     def _soma(attr: str, lista: list[ConciliacaoMovimento]) -> float | None:
         vals = [getattr(m, attr) for m in lista if getattr(m, attr) is not None]
@@ -1202,8 +1202,12 @@ def _comparativo(
     ]
     if fc <= 0.005:
         linhas = [x for x in linhas if x["chave"] not in ("frete_comprador", "total")]
+    plataforma = getattr(p.platform, "value", str(p.platform))
+    if plataforma != "ml":
+        linhas = [x for x in linhas if x["chave"] != "a_parte"]
     return {
         "linhas": linhas,
+        "real_rotulo": "carteira da Shopee" if plataforma == "shopee" else "extrato + fatura",
         "comparar": p.situacao != "cancelado",
         "nota": (
             "venda desfeita: as colunas mostram o que entrou e o que saiu, não há previsto a cobrar"
@@ -1392,6 +1396,10 @@ TIPO_LABELS = {
     "frete_cancelado": "Frete cancelado",
     "frete_devolucao": "Frete de devolução",
     "antecipacao": "Antecipação",
+    "saque_confirmado": "Saque confirmado",
+    "saque_cancelado": "Saque cancelado",
+    "ajuste_shopee": "Ajuste da Shopee",
+    "publicidade": "Publicidade (Ads)",
     "credito": "Crédito",
     "imposto": "Imposto",
     "outro": "Outro",
@@ -1506,7 +1514,7 @@ async def _movimentos_do_dia(
             await session.execute(
                 select(ConciliacaoMovimento).where(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
-                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.origem.in_(ORIGENS_EXTRATO),
                     ConciliacaoMovimento.data >= ini,
                     ConciliacaoMovimento.data < ini + timedelta(days=1),
                 )
@@ -1657,7 +1665,7 @@ async def listar_dias(
             )
             .where(
                 ConciliacaoMovimento.integration_id == alvo.integration_id,
-                ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                ConciliacaoMovimento.origem.in_(ORIGENS_EXTRATO),
                 ConciliacaoMovimento.data >= ini,
                 ConciliacaoMovimento.data < fim,
             )
@@ -2067,7 +2075,7 @@ async def _ajustes_anteriores(
             )
             .where(
                 mov.integration_id == loja.integration_id,
-                mov.origem == ORIGEM_EXTRATO,
+                mov.origem.in_(ORIGENS_EXTRATO),
                 mov.data >= ini_dt,
                 mov.data < fim_dt,
                 mov.tipo != "saque",
@@ -2412,7 +2420,7 @@ async def fechamento_do_mes(
             )
             .where(
                 mov.integration_id == alvo.integration_id,
-                mov.origem == ORIGEM_EXTRATO,
+                mov.origem.in_(ORIGENS_EXTRATO),
                 mov.data >= ini_dt,
                 mov.data < fim_dt,
             )

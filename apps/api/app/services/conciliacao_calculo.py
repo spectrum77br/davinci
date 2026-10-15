@@ -39,7 +39,7 @@ from app.models import (
     Refund,
     SituacaoBling,
 )
-from app.models.conciliacao import ETAPA_PELO_ROBO, ORIGEM_EXTRATO, ORIGEM_FATURA
+from app.models.conciliacao import ETAPA_PELO_ROBO, ORIGEM_EXTRATO, ORIGEM_FATURA, ORIGENS_EXTRATO
 from app.services.conciliacao_extrato import (
     TIPOS_RESERVA,
     bling_store_ids_da_loja,
@@ -420,7 +420,7 @@ async def recalcular_loja(
         numeroloja = str(cab.numeroloja) if cab.numeroloja else None
         venda = fin_por_numeroloja.get(numeroloja) if numeroloja else None
         meus = movs_por_numero.get(numero, [])
-        extrato = [m for m in meus if m.origem == ORIGEM_EXTRATO]
+        extrato = [m for m in meus if m.origem in ORIGENS_EXTRATO]
         fatura_movs = [m for m in meus if m.origem == ORIGEM_FATURA]
         fatura = {
             "tarifa": _soma(
