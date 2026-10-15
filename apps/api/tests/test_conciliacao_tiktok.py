@@ -193,7 +193,7 @@ def test_transacao_e_repasse_viram_movimentos():
     assert m["credito"] == Decimal("344.45") and m["debito"] == Decimal("0")
     assert m["bruto"] == Decimal("1300.65") and m["tarifa"] == Decimal("67.85")
     assert m["cupom"] == Decimal("888.35") and m["frete"] is None
-    assert m["data"] == datetime(2026, 10, 14, tzinfo=UTC)  # 21:00 BRT de 13/10
+    assert m["data"] == datetime(2026, 10, 14, 3, tzinfo=UTC)  # 00:00 BRT de 14/10 (dia do banco)
     assert m["origem"] == "tiktok_extrato" and m["classificacao"] is None
     assert m["pagamento_id"] == "900" and m["raw"]["_statement_id"] == "1"
     est = transacao_para_movimento(
@@ -203,13 +203,13 @@ def test_transacao_e_repasse_viram_movimentos():
         saldo_apos=Decimal("244.45"),
     )
     assert est["tipo"] == "estorno" and est["debito"] == Decimal("100.00")
-    assert est["data"] == datetime(2026, 10, 14, 0, 0, 1, tzinfo=UTC)
+    assert est["data"] == datetime(2026, 10, 14, 3, 0, 1, tzinfo=UTC)
     rep = repasse_para_movimento(st, _repasse(900, "344.45", date(2026, 10, 14)), ordem=2)
     assert rep["tipo"] == "saque" and rep["debito"] == Decimal("344.45")
     assert rep["saldo_apos"] == Decimal("0") and rep["classificacao"] == "saque"
     assert rep["id_externo"] == "repasse:900" and rep["pagamento_id"] == "900"
     assert "***1234" in rep["descricao"] and "pago 14/10 00:23" in rep["descricao"]
-    assert rep["data"] == datetime(2026, 10, 14, 0, 0, 2, tzinfo=UTC)
+    assert rep["data"] == datetime(2026, 10, 14, 3, 0, 2, tzinfo=UTC)
     assert transacao_para_movimento({"type": "ORDER"}, st, ordem=0, saldo_apos=Decimal(0)) is None
 
 
@@ -270,7 +270,7 @@ async def test_run_tiktok_sync_le_extratos_pagos_e_casa_o_pedido(db, make_user):
         "saque",
     ]
     assert movs[0].pedido_bling == "320001" and movs[0].bling_id == 6000  # casou pelo order_id
-    assert movs[0].data == datetime(2026, 10, 13, tzinfo=UTC)
+    assert movs[0].data == datetime(2026, 10, 13, 3, tzinfo=UTC)
     assert [m.saldo_apos for m in movs[2:]] == [Decimal("344.45"), Decimal("544.45"), Decimal("0")]
     assert movs[3].pedido_bling is None  # pedido que o Bling ainda não importou
     assert movs[4].debito == Decimal("544.45") and "pago 14/10 00:23" in movs[4].descricao
@@ -313,8 +313,8 @@ async def test_extrato_do_dia_tiktok_fecha_a_conta(db, make_user, auth_as, clien
     await run_tiktok_sync(db, loja, cliente, agora=AGORA)
     await db.commit()
     auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
-    # meia-noite UTC de 14/10 = 21h BRT de 13/10: o extrato é do dia 13 no painel
-    r = await client.get("/api/conciliacao/extrato", params={"loja": "Mini", "dia": "2026-10-13"})
+    # extrato de 14/10 00:00 UTC = o repasse que cai no banco em 14/10: dia 14 no painel
+    r = await client.get("/api/conciliacao/extrato", params={"loja": "Mini", "dia": "2026-10-14"})
     assert r.status_code == 200, r.text
     corpo = r.json()
     assert [m["tipo"] for m in corpo["movimentos"]] == ["venda_liberada", "venda_liberada", "saque"]
@@ -483,3 +483,37 @@ async def test_loja_do_bling_pelo_nome_so_na_mesma_plataforma_e_pedido_fora_some
         .all()
     )
     assert numeros == ["320001"]
+
+
+async def test_liquidacao_zerada_sem_pedido_no_bling_nao_trava_o_dia(
+    db, make_user, auth_as, client
+):
+    """08/10 na Mini: pedido desfeito antes de faturar aparece no extrato com 0,00 e o
+    Bling não tem o pedido — vira "outro" sozinho (não é dinheiro) e o dia fecha."""
+    loja = await _loja_tiktok(db, make_user)
+    d14 = date(2026, 10, 14)
+    zerada = _tx(
+        21,
+        "586482278473107237",
+        settlement="0",
+        revenue="0",
+        apos="412.3",
+        fee="0",
+        commission="0",
+        tx_fee="0",
+        affiliate="0",
+    )
+    cliente = _TikTokFalsa(
+        [_extrato(2, d14, "344.45", 902)],
+        {"2": [_tx(20, PEDIDO), zerada]},
+        [_repasse(902, "344.45", d14)],
+    )
+    await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/extrato", params={"loja": "Mini", "dia": "2026-10-14"})
+    corpo = r.json()
+    linha = next(m for m in corpo["movimentos"] if m["pedido_marketplace"] == "586482278473107237")
+    assert linha["status"] == "classificado" and linha["classificacao"] == "outro"
+    assert "zerada" in linha["descricao"] and linha["credito"] == 0 and linha["debito"] == 0
+    assert corpo["contagem"]["pendente"] == 0 and corpo["totais"]["diferenca"] == 0

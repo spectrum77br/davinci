@@ -537,7 +537,7 @@ await carregar()
                 <th colspan="2" class="border-b border-l-2 px-1.5 py-1">Extrato (entrou de fato)</th>
                 <th class="border-b border-l-2 px-1.5 py-1">Conc.</th>
                 <th colspan="4" class="border-b border-l-2 px-1.5 py-1">Resultado de verdade</th>
-                <th colspan="3" class="border-b border-l-2 px-1.5 py-1">Situação</th>
+                <th colspan="4" class="border-b border-l-2 px-1.5 py-1">Situação</th>
               </tr>
               <tr>
                 <th class="border-b px-1.5 py-1 text-left">Data</th>
@@ -558,6 +558,7 @@ await carregar()
                 <th class="border-b px-1.5 py-1 text-right">Margem</th>
                 <th class="border-b border-l-2 px-1.5 py-1 text-left">Conciliação</th>
                 <th class="border-b px-1.5 py-1 text-left">Motivo</th>
+                <th class="border-b px-1.5 py-1 text-left" title="situação do pedido no Bling">Status Bling</th>
                 <th class="border-b px-1.5 py-1 text-left">Etapa</th>
               </tr>
             </thead>
@@ -613,6 +614,7 @@ await carregar()
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" >{{ fmtPct(p.margem) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1"><span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="sitCls(p.situacao)">● {{ p.situacao_label }}</span></td>
                 <td class="max-w-[220px] truncate px-1.5 py-1 text-muted-foreground" :title="p.motivo || ''">{{ p.motivo }}</td>
+                <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ p.situacao_bling || '—' }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1">
                   <span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="etapaCls(p.etapa)">{{ p.etapa === 'finalizado' ? '■' : p.etapa === 'reaberto' ? '↺' : '●' }} {{ p.etapa_label }}</span>
                   <span v-if="p.conferido" class="ml-1 text-emerald-700" :title="`conferido por ${p.conferido_por} em ${fmtDiaHora(p.conferido_em)}`">✓</span>

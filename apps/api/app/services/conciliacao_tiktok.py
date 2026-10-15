@@ -50,12 +50,26 @@ def _epoch(v: Any) -> datetime | None:
         return None
 
 
+def dia_do_extrato(statement: dict[str, Any]) -> date | None:
+    """O dia do extrato no painel = a data UTC do `statement_time` (a TikTok fecha o
+    extrato à meia-noite UTC = 21:00 BRT da véspera e paga ~00:20 BRT). Assim o
+    "extrato de ontem" é o repasse que caiu no banco ontem de madrugada — e não
+    fica vazio até a TikTok publicar o próximo (15/10, Vinicius)."""
+    quando = _epoch(statement.get("statement_time"))
+    return quando.date() if quando else None
+
+
+def _ancora(statement: dict[str, Any]) -> datetime | None:
+    dia = dia_do_extrato(statement)
+    return datetime.combine(dia, datetime.min.time(), tzinfo=BRT) if dia else None
+
+
 def transacao_para_movimento(
     tx: dict[str, Any], statement: dict[str, Any], *, ordem: int, saldo_apos: Decimal
 ) -> dict[str, Any] | None:
     """Uma transação do extrato → colunas de `conciliacao_movimentos` (sem a loja)."""
     tid = tx.get("id")
-    quando = _epoch(statement.get("statement_time"))
+    quando = _ancora(statement)
     if tid is None or quando is None:
         return None
     tipo_tt = str(tx.get("type") or "ORDER").upper()
@@ -73,7 +87,7 @@ def transacao_para_movimento(
     return {
         "origem": ORIGEM_TIKTOK,
         "id_externo": str(tid),
-        # todas as linhas do extrato no dia do extrato, em ordem, pro saldo encadear
+        # todas as linhas no começo do dia do extrato, em ordem, pro saldo encadear
         "data": quando + timedelta(seconds=ordem),
         "tipo": tipo,
         "descricao": descricao,
@@ -107,10 +121,20 @@ def transacao_para_movimento(
     }
 
 
+def _zerada_sem_pedido(m: dict[str, Any]) -> bool:
+    return (
+        m["tipo"] == "venda_liberada"
+        and not m["pedido_bling"]
+        and not m["classificacao"]
+        and not (m["credito"] or ZERO)
+        and not (m["debito"] or ZERO)
+    )
+
+
 def repasse_para_movimento(
     statement: dict[str, Any], pagamento: dict[str, Any] | None, *, ordem: int
 ) -> dict[str, Any] | None:
-    quando = _epoch(statement.get("statement_time"))
+    quando = _ancora(statement)
     if quando is None:
         return None
     sid = str(statement.get("id") or "")
@@ -267,7 +291,8 @@ async def run_tiktok_sync(
         ).scalars()
     }
     de = max(loja.inicio, hoje - timedelta(days=max_dias))
-    t_de = int(datetime.combine(de, datetime.min.time(), tzinfo=BRT).timestamp())
+    # extrato cujo dia (data UTC do statement_time) é >= início
+    t_de = int(datetime.combine(de, datetime.min.time(), tzinfo=UTC).timestamp())
     t_ate = int(agora.timestamp()) + 1
     resumo: dict[str, Any] = {"extratos": [], "inseridos": 0, "pulados_processando": 0, "erros": []}
     integration = await session.get(Integration, loja.integration_id)
@@ -310,6 +335,11 @@ async def run_tiktok_sync(
                 achado = mapa.get(m["pedido_marketplace"] or "")
                 if achado:
                     m["pedido_bling"], m["bling_id"] = achado
+                elif _zerada_sem_pedido(m):
+                    # liquidação 0 de pedido que o Bling não tem (desfeito antes de
+                    # faturar): não é dinheiro, não pode travar o dia (08/10, Mini)
+                    m["classificacao"] = "outro"
+                    m["descricao"] = f"{m['descricao']} (zerada: nada entrou, nada saiu)"
             inseridos = await inserir_movimentos(session, loja, movs)
         except Exception as e:  # noqa: BLE001
             row.status = "erro"
@@ -334,8 +364,37 @@ async def run_tiktok_sync(
         resumo["extratos"].append({"extrato": sid, "linhas": row.linhas, "inseridos": inseridos})
     if extratos:
         loja.ultimo_extrato_em = agora
+    await _classificar_zeradas_antigas(session, loja)
     await session.flush()
     return resumo
+
+
+async def _classificar_zeradas_antigas(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Liquidação zerada sem pedido no Bling gravada antes da regra: classifica igual."""
+    mov = ConciliacaoMovimento
+    rows = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_TIKTOK,
+                    mov.tipo == "venda_liberada",
+                    mov.pedido_bling.is_(None),
+                    mov.classificacao.is_(None),
+                    mov.vinculado_por.is_(None),
+                    mov.credito == 0,
+                    mov.debito == 0,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in rows:
+        m.classificacao = "outro"
+        if "(zerada" not in (m.descricao or ""):
+            m.descricao = f"{m.descricao or ''} (zerada: nada entrou, nada saiu)".strip()
+    return len(rows)
 
 
 async def reler_financeiro_liquidados(
