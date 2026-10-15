@@ -735,12 +735,15 @@ function pontoDaEtiqueta(h: EtiquetaHistorico) {
   return etiquetaInfo(h.para)?.ponto || 'bg-muted-foreground/50'
 }
 
-function lado(m: Mensagem): 'cliente' | 'loja' | 'sistema' | 'nota' | 'mediador' {
+function lado(m: Mensagem): 'cliente' | 'loja' | 'sistema' | 'nota' | 'mediador' | 'afiliado' {
   // Nota interna primeiro: o autor dela é `equipe`, que cairia em "loja".
   if (eNota(m)) return 'nota'
   // O mediador da plataforma na reclamação (o "Com Meli"; autor `mediador`):
   // à esquerda, com o rótulo — não é o comprador nem a loja.
   if (m.autor === 'mediador') return 'mediador'
+  // O afiliado da Shopee (15/10/2026): `sistema` no servidor (fora da fila),
+  // mas é gente falando — à esquerda, como o cliente, com o rótulo.
+  if (m.do_afiliado) return 'afiliado'
   if (m.autor === 'sistema' || m.origem === 'sistema') return 'sistema'
   return m.autor === 'cliente' ? 'cliente' : 'loja'
 }
@@ -749,7 +752,7 @@ function lado(m: Mensagem): 'cliente' | 'loja' | 'sistema' | 'nota' | 'mediador'
 // sozinho do cliente ganha fundo cinza para o cartão branco aparecer.
 function balaoCls(m: Mensagem) {
   const falhou = m.status === 'falhou' ? ' ring-1 ring-red-400/80' : ''
-  if (lado(m) === 'cliente') {
+  if (lado(m) === 'cliente' || lado(m) === 'afiliado') {
     return (soCartao(m) ? 'rounded-tl-sm bg-muted/80' : 'rounded-tl-sm border border-border/70 bg-background') + falhou
   }
   if (lado(m) === 'mediador') return 'rounded-tl-sm border border-violet-300/70 bg-violet-50 dark:border-violet-800/60 dark:bg-violet-900/25'
@@ -2853,8 +2856,10 @@ watch(() => props.conversaId, (novo, velho) => {
               </div>
               <div v-else class="max-w-[85%] whitespace-pre-wrap break-words px-3 py-1 text-center text-xs text-muted-foreground" :title="fmtDataHora(l.m.enviada_em)">{{ l.m.texto || TIPO_LABEL[l.m.tipo] || '' }}</div>
             </div>
-            <div v-else class="flex flex-col" :class="lado(l.m) === 'cliente' || lado(l.m) === 'mediador' ? 'items-start' : 'items-end'" :data-msg-id="l.m.id">
+            <div v-else class="flex flex-col" :class="lado(l.m) === 'cliente' || lado(l.m) === 'mediador' || lado(l.m) === 'afiliado' ? 'items-start' : 'items-end'" :data-msg-id="l.m.id">
               <div v-if="lado(l.m) === 'mediador'" class="mb-0.5 px-1 text-[11px] font-medium text-violet-700 dark:text-violet-300" title="a plataforma falando na reclamação (mediação)">Mediador · {{ plataformaInfo(conversa.plataforma).nome }}</div>
+              <!-- o afiliado da Shopee: conta no número, a resposta é pelo Duoke/Seller Center -->
+              <div v-else-if="lado(l.m) === 'afiliado'" class="mb-0.5 px-1 text-[11px] font-medium text-amber-800 dark:text-amber-300" title="afiliado da Shopee (criador de conteúdo) — conta no número da Caixa; a resposta é pelo Duoke ou pelo Seller Center" data-msg-afiliado>{{ origemLabel(l.m, conversa.plataforma) }}</div>
               <!-- por onde a resposta da loja saiu (o Duoke mostra o atendente aqui) -->
               <div v-else-if="lado(l.m) === 'loja'" class="mb-0.5 flex max-w-[85%] items-center gap-1 px-1 text-[11px] md:max-w-[75%]" :class="autorCls(l.m)" :title="origemHint(l.m)">
                 <Bot v-if="l.m.origem === 'davinci_ia'" class="size-3 shrink-0" />

@@ -191,6 +191,9 @@ class ConversaResumoOut(BaseModel):
     # Comentário das redes com pergunta ainda sem resposta da marca (RF7,
     # 02/10/2026): selo "pergunta" e frente da fila no Mídia/"Falta responder".
     eh_pergunta: bool = False
+    # Chat de AFILIADO da Shopee (15/10/2026, `dados.afiliado`): o selo
+    # "afiliado" na lista — conta no número da Caixa, mas não sai pelo DaVinci.
+    afiliado: bool = False
     somente_leitura: bool = False
     # Há resposta NOSSA em `revisar` (timeout, envio interrompido): pode ter
     # saído ou não. Continua contando como resposta (não se responde por
@@ -309,6 +312,10 @@ class MensagemOut(BaseModel):
     # o cartão pede o resto a GET /api/atendimento/email/conversas/{id}/emails.
     # Na nossa resposta pela fila da Central: de, para, assunto e o status do job.
     email: dict[str, Any] | None = None
+    # A fala do AFILIADO no chat de afiliado da Shopee (15/10/2026): gravada
+    # como `sistema` (não abre a vez na fila), mas é gente — a tela desenha o
+    # balão dele à esquerda, com "Afiliado · <nome>" (`autor_nome`).
+    do_afiliado: bool = False
 
 
 class RascunhoOut(BaseModel):

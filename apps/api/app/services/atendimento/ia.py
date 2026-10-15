@@ -4480,7 +4480,8 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
 
 
 def _sql_canal_sem_envio():
-    """`constantes.motivo_canal_sem_envio` em SQL: o Zap, e o e-mail fora da Amazon ou do Tuta.
+    """`constantes.motivo_canal_sem_envio` em SQL: o Zap, o chat de afiliado da
+    Shopee (15/10/2026) e o e-mail fora da Amazon ou do Tuta.
 
     O e-mail da Amazon SEM a marca do Tuta (o canal da plataforma) fica de fora.
     A marca é comparada aparada, como na régua pura.
@@ -4488,6 +4489,7 @@ def _sql_canal_sem_envio():
     fonte = func.btrim(AtendimentoConversa.dados["fonte"].astext)
     return or_(
         AtendimentoConversa.canal == CANAL_ZAP,
+        gravar.chat_de_afiliado_sql(AtendimentoConversa),
         and_(
             AtendimentoConversa.canal == CANAL_EMAIL,
             or_(

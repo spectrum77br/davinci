@@ -182,6 +182,7 @@ from app.services.atendimento.constantes import (
     ACAO_OBSERVOU,
     AUTOR_CLIENTE,
     AUTOR_LOJA,
+    AUTOR_SISTEMA,
     CANAIS_POR_PLATAFORMA,
     CANAIS_SEMPRE_POS_VENDA,
     CANAL_COMENTARIO,
@@ -225,6 +226,7 @@ from app.services.atendimento.constantes import (
     STATUS_CANAL_SESSAO_CAIU,
     TIPO_NOTA,
     TIPO_REGRA_CATEGORIA,
+    e_chat_de_afiliado,
     limite_caracteres,
     motivo_canal_sem_envio,
     rotulo_etiqueta,
@@ -1175,6 +1177,8 @@ def _resumo_dict(
             and isinstance(c.dados, dict)
             and c.dados.get("eh_pergunta") is True
         ),
+        # Chat de afiliado da Shopee (15/10/2026): o selo "afiliado" na lista.
+        "afiliado": e_chat_de_afiliado(c.plataforma, c.dados),
         "somente_leitura": False,
         "envio_a_conferir": bool(a_conferir),
         # Etiqueta = status atual: quem grava é `services/atendimento/etiqueta`.
@@ -1333,7 +1337,14 @@ def _simulado(m: AtendimentoMensagem) -> bool:
 def _mensagem_out(
     m: AtendimentoMensagem, *, conversa: AtendimentoConversa, nomes: dict[UUID, str | None]
 ) -> MensagemOut:
-    if m.autor == AUTOR_CLIENTE:
+    # A fala do AFILIADO (15/10/2026): `sistema` com o `from_id` dele = o
+    # `comprador_id` do chat de afiliado — a mesma régua que a conta no número.
+    do_afiliado = (
+        m.autor == AUTOR_SISTEMA
+        and e_chat_de_afiliado(conversa.plataforma, conversa.dados)
+        and pendente.do_comprador_no_numero(m, conversa.comprador_id)
+    )
+    if m.autor == AUTOR_CLIENTE or do_afiliado:
         autor_nome = conversa.comprador_nome
     elif m.origem in (ORIGEM_HUMANO, ORIGEM_NOTA):
         # Quem da equipe enviou — ou escreveu a nota interna.
@@ -1355,6 +1366,7 @@ def _mensagem_out(
         erro=m.erro,
         simulado=_simulado(m),
         email=_email_da_mensagem(m),
+        do_afiliado=do_afiliado,
     )
 
 

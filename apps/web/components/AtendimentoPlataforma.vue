@@ -190,6 +190,9 @@ export type ConversaResumo = {
   // Comentário das redes com pergunta ainda sem resposta da marca (RF7): o
   // selo "pergunta" e a frente da fila no Mídia e em "Falta responder".
   eh_pergunta?: boolean
+  // Chat de AFILIADO da Shopee (15/10/2026): o selo "afiliado" — conta no
+  // número da Caixa, mas a resposta é pelo Duoke/Seller Center.
+  afiliado?: boolean
   somente_leitura: boolean
   // Tem resposta nossa em `revisar`: não se sabe se chegou ao comprador.
   envio_a_conferir?: boolean
@@ -300,6 +303,10 @@ export type Mensagem = {
   // ou a nossa resposta na fila da Central (de, para, assunto, status do job).
   // O cartão é o AtendimentoEmailCartao.
   email?: (Record<string, any> & { tipo: 'recebido' | 'resposta' }) | null
+  // A fala do AFILIADO no chat de afiliado da Shopee (15/10/2026): o servidor
+  // grava como `sistema` (fora da fila), mas é gente — balão à esquerda,
+  // com "Afiliado · <nome>" em cima (o `autor_nome`).
+  do_afiliado?: boolean
 }
 export type Rascunho = {
   id: string
@@ -1215,7 +1222,9 @@ export function plataformaNosModos(canais: Canal[] | null | undefined, plataform
 // ─── quem escreveu ──────────────────────────────────────────────────────────
 // autor = quem escreveu na plataforma; origem = por onde saiu. A resposta da
 // loja pode ter saído pelo DaVinci (pessoa ou IA) ou por fora (Duoke, central).
-export function origemLabel(m: Pick<Mensagem, 'autor' | 'origem' | 'autor_nome'>, plataforma?: string | null): string {
+export function origemLabel(m: Pick<Mensagem, 'autor' | 'origem' | 'autor_nome' | 'do_afiliado'>, plataforma?: string | null): string {
+  // O afiliado da Shopee (15/10/2026): `sistema` no servidor, gente na tela.
+  if (m.do_afiliado) return m.autor_nome ? `Afiliado · ${m.autor_nome}` : 'Afiliado'
   if (m.autor === 'sistema' || m.origem === 'sistema') return 'Sistema'
   if (m.autor === 'cliente') return m.autor_nome || 'Cliente'
   if (m.origem === 'davinci_ia') return 'IA'

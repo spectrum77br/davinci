@@ -49,11 +49,13 @@ from app.models import (
     User,
 )
 from app.security.cipher import encrypt_json
-from app.services.atendimento import enriquecer, gravar, shopee
+from app.services.atendimento import enriquecer, gravar, ia, lida, pendente, shopee
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
     AUTOR_SISTEMA,
+    CHAVE_AFILIADO,
+    MOTIVO_AFILIADO_SEM_ENVIO,
     MSG_ENVIADA,
     MSG_FALHOU,
     ORIGEM_CLIENTE,
@@ -61,11 +63,16 @@ from app.services.atendimento.constantes import (
     ORIGEM_HUMANO,
     PLATAFORMAS,
     STATUS_CANAL,
+    motivo_canal_sem_envio,
 )
-from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.shopee import NEGOCIO_AFILIADO, ShopeeClient
 
 SHOP = 111
 COMPRADOR = 555
+# O chat de AFILIADO (15/10/2026): o `to_id` da conversa é o afiliado, e ele
+# também tem loja (o `from_shop_id` dele não é o nosso — medido).
+AFILIADO = 777
+LOJA_DO_AFILIADO = 888
 AGORA = datetime.now(UTC).replace(microsecond=0)
 # Acima disso, a Shopee devolveu lista VAZIA em várias lojas (60, em 28/09).
 PAGINA_MAXIMA_REAL = 25
@@ -94,6 +101,13 @@ class ShopeeFalso:
         self.erro_mensagens: dict[str, Exception] = {}
         self.chamadas_lista: list[dict] = []
         self.chamadas_mensagens: list[tuple[str, str | None]] = []
+        # O chat de AFILIADO (`business_type=11`): conversas à parte, com o
+        # não lido e as chamadas da lista delas (as de cima ficam como eram).
+        self.afiliados: set[str] = set()
+        self.nao_lidas_afiliado = 0
+        self.erro_afiliado: Exception | None = None
+        self.chamadas_lista_afiliado: list[dict] = []
+        self.chamadas_negocio: list[tuple[str, int]] = []
         self.resposta_envio: Any = {"message_id": "9000000000000000001"}
         self.enviados: list[tuple[str, str]] = []
 
@@ -107,8 +121,14 @@ class ShopeeFalso:
         pinned: bool = False,
         nao_lidas: int = 1,
         unidade_ts: str = "ns",
+        afiliado: bool = False,
     ) -> dict:
-        """Conversa com as mensagens dadas; `last_message_timestamp` sai da mais nova."""
+        """Conversa com as mensagens dadas; `last_message_timestamp` sai da mais nova.
+
+        `afiliado` = do chat de afiliado: só aparece com `business_type=11`, e o
+        `to_id` é o do afiliado."""
+        if afiliado:
+            self.afiliados.add(cid)
         existentes = self.mensagens.setdefault(cid, [])
         existentes.extend(msgs)
         ultima = max(existentes, key=lambda m: m["created_timestamp"])
@@ -116,7 +136,7 @@ class ShopeeFalso:
         ts = {"s": s, "ms": s * 1000, "us": s * 10**6, "ns": s * 10**9}[unidade_ts]
         conv = {
             "conversation_id": cid,
-            "to_id": COMPRADOR,
+            "to_id": AFILIADO if cid in self.afiliados else COMPRADOR,
             "to_name": nome,
             "to_avatar": "",
             "shop_id": SHOP,
@@ -139,9 +159,20 @@ class ShopeeFalso:
 
     # — API —
 
-    async def chat_unread_count(self) -> int:
+    def _negocio(self, nome: str, business_type: int) -> bool:
+        """Registra a chamada; True = é a lista dos afiliados."""
+        self.chamadas_negocio.append((nome, business_type))
+        if business_type not in (0, 11):
+            raise RuntimeError("shopee_chat error_param: business_type")
+        if business_type == 11 and self.erro_afiliado is not None:
+            raise self.erro_afiliado
+        return business_type == 11
+
+    async def chat_unread_count(self, *, business_type: int = 0) -> int:
         if self.erro_nao_lidas is not None:
             raise self.erro_nao_lidas
+        if self._negocio("nao_lidas", business_type):
+            return self.nao_lidas_afiliado
         return self.nao_lidas
 
     async def chat_conversation_list(
@@ -151,6 +182,7 @@ class ShopeeFalso:
         tipo: str = "all",
         page_size: int = 25,
         next_timestamp_nano: int | str | None = None,
+        business_type: int = 0,
     ) -> dict:
         """A lista como a Shopee de VERDADE a devolve (medido em 28/09/2026, loja kfa).
 
@@ -158,9 +190,12 @@ class ShopeeFalso:
         - `older` + horário X: as de antes de X, decrescente;
         - `latest` SEM horário: as MAIS ANTIGAS da loja, CRESCENTE — a armadilha;
         - `latest` + horário X: as de depois de X, crescente;
-        - `type=unread` só as não lidas; `page_size` > 25: lista vazia.
+        - `type=unread` só as não lidas; `page_size` > 25: lista vazia;
+        - `business_type=11` SÓ as de afiliado; sem ele, NENHUMA delas
+          (medido em 15/10/2026).
         """
-        self.chamadas_lista.append(
+        afiliado = self._negocio("lista", business_type)
+        (self.chamadas_lista_afiliado if afiliado else self.chamadas_lista).append(
             {
                 "direction": direction,
                 "tipo": tipo,
@@ -174,7 +209,11 @@ class ShopeeFalso:
         def ts(c: dict) -> int:
             return shopee._ns(c["last_message_timestamp"])
 
-        todas = list(self.conversas.values())
+        todas = [
+            c
+            for c in self.conversas.values()
+            if (c["conversation_id"] in self.afiliados) == afiliado
+        ]
         if tipo == "unread":
             todas = [c for c in todas if c["unread_count"]]
         elif tipo == "pinned":
@@ -209,9 +248,21 @@ class ShopeeFalso:
         }
 
     async def chat_mensagens_pagina(
-        self, conversation_id: str, *, offset: str | None = None, page_size: int = 25
+        self,
+        conversation_id: str,
+        *,
+        offset: str | None = None,
+        page_size: int = 25,
+        business_type: int = 0,
     ) -> dict:
         self.chamadas_mensagens.append((conversation_id, offset))
+        afiliado = self._negocio("mensagens", business_type)
+        if (conversation_id in self.afiliados) != afiliado:
+            # Como a Shopee de verdade (15/10/2026): a conversa de afiliado sem
+            # `business_type=11` (ou a do comprador com ele) não existe.
+            raise RuntimeError(
+                "shopee_chat_mensagens param_error: Error or loss in request parameter."
+            )
         if conversation_id in self.erro_mensagens:
             raise self.erro_mensagens[conversation_id]
         msgs = sorted(
@@ -251,14 +302,19 @@ def msg(
     status: str = "normal",
     business_type: int | None = None,
     mid: str | None = None,
+    afiliado: bool = False,
 ) -> dict:
-    """Mensagem no formato do `get_message`. O comprador TAMBÉM tem from_shop_id."""
+    """Mensagem no formato do `get_message`. O comprador TAMBÉM tem from_shop_id.
+
+    `afiliado` = do chat de afiliado (o outro lado é o `AFILIADO`, com a loja
+    dele) — o item NÃO traz `business_type` (medido em 15/10/2026)."""
+    outro, loja_do_outro = (AFILIADO, LOJA_DO_AFILIADO) if afiliado else (COMPRADOR, 987654)
     m = {
         "message_id": mid or f"70{next(_seq):017d}",
-        "from_id": 222 if da_loja else COMPRADOR,
-        "to_id": COMPRADOR if da_loja else 222,
-        "from_shop_id": SHOP if da_loja else 987654,
-        "to_shop_id": 987654 if da_loja else SHOP,
+        "from_id": 222 if da_loja else outro,
+        "to_id": outro if da_loja else 222,
+        "from_shop_id": SHOP if da_loja else loja_do_outro,
+        "to_shop_id": loja_do_outro if da_loja else SHOP,
         "message_type": tipo,
         "content": content if content is not None else {"text": texto},
         "conversation_id": cid,
@@ -1027,6 +1083,399 @@ async def test_conversa_que_sempre_falha_e_pulada_na_terceira(db, make_user, tet
     assert "C" in await _conversas(db)
     assert canal.cursor["falhas"] == {}
     assert canal.cursor["ultimo_ts"] == _ns(AGORA - timedelta(hours=1))
+
+
+# ─────────────── chat de AFILIADO (15/10/2026) ───────────────
+#
+# Medido em produção (só leitura): a conversa de afiliado (business_type 11)
+# não vem na lista padrão nem no total de não lidas, e o get_message dela
+# responde param_error sem `business_type=11`. O Duoke conta a fala do
+# afiliado no número da loja (Barbosa 379920374879551489, 1 não lida).
+
+
+def _afiliada(f: ShopeeFalso, cid: str = "AF1", *, ha: timedelta = timedelta(hours=1)) -> dict:
+    """O cenário de produção: a loja escreveu ao afiliado semanas antes (pelo
+    Seller Center) e ele respondeu agora."""
+    return f.conversa(
+        cid,
+        msg(cid, AGORA - timedelta(days=40), da_loja=True, afiliado=True, texto="parceria?"),
+        msg(cid, AGORA - ha, afiliado=True, texto="quero divulgar"),
+        nome="criador_teste",
+        afiliado=True,
+    )
+
+
+async def _numero(db: AsyncSession, conversa: AtendimentoConversa) -> tuple[int, int]:
+    """O número da conversa na Caixa: (régua em Python, gêmea em SQL)."""
+    await db.refresh(conversa)
+    msgs = await _mensagens(db, conversa.id)
+    sql = (
+        await db.execute(
+            select(pendente.nao_lidas_duoke_sql()).where(AtendimentoConversa.id == conversa.id)
+        )
+    ).scalar_one()
+    return pendente.nao_lidas_duoke(conversa, msgs), int(sql)
+
+
+def test_fala_do_afiliado_e_sistema_e_a_da_loja_e_loja():
+    do_afiliado = msg("AF", AGORA, afiliado=True)
+    da_loja = msg("AF", AGORA, da_loja=True, afiliado=True)
+    assert "business_type" not in do_afiliado  # o get_message não traz o campo
+    # Sem a marca da LISTA, a fala dele pareceria de comprador (abriria a vez).
+    assert shopee.interpretar(do_afiliado, SHOP).autor == AUTOR_CLIENTE
+    lida_af = shopee.interpretar(do_afiliado, SHOP, afiliado=True)
+    assert (lida_af.autor, lida_af.afiliado) == (AUTOR_SISTEMA, True)
+    # A resposta da loja ao afiliado é resposta: zera o número, como no Duoke.
+    assert shopee.interpretar(da_loja, SHOP, afiliado=True).autor == AUTOR_LOJA
+    # O push (business_type na mensagem) continua valendo.
+    assert shopee.interpretar(msg("AF", AGORA, business_type=11), SHOP).autor == AUTOR_SISTEMA
+
+
+async def test_afiliado_so_vem_com_business_type_e_entra_como_chat_marcado(db, make_user, teto):
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    f.nao_lidas, f.nao_lidas_afiliado = 1, 1
+    f.conversa("A", msg("A", AGORA - timedelta(hours=2), texto="cadê meu pedido?"))
+    _afiliada(f)
+
+    r = await _rodar(db, canal, integ, f)
+
+    assert r.status == shopee.STATUS_OK and r.erro is None
+    assert r.conversas_novas == 2
+    # O termômetro soma as duas listas (a Shopee conta cada uma à parte).
+    assert r.nao_lidas == 2
+    convs = await _conversas(db)
+    a, af = convs["A"], convs["AF1"]
+    assert CHAVE_AFILIADO not in a.dados
+    assert af.dados[CHAVE_AFILIADO] is True and af.canal == "chat"
+    # O `to_id` é o afiliado: vira o `comprador_id` — o `from_id` da fala dele.
+    assert (af.comprador_id, af.comprador_nome) == (str(AFILIADO), "criador_teste")
+    msgs = await _mensagens(db, af.id)
+    assert [m.autor for m in msgs] == [AUTOR_LOJA, AUTOR_SISTEMA]
+    assert msgs[-1].payload["from_id"] == AFILIADO and msgs[-1].texto == "quero divulgar"
+    # Fora da fila: a fala dele não abre a vez (a IA e o prazo não o pegam).
+    assert af.aguardando_resposta is False and af.prazo_resposta_em is None
+    assert a.aguardando_resposta is True
+    # A lista padrão nunca leva o parâmetro; a de afiliado e as mensagens
+    # dele, sempre (o falso responde param_error como a Shopee, se faltar).
+    assert all(c["tipo"] in ("all", "unread") for c in f.chamadas_lista_afiliado)
+    assert {bt for nome, bt in f.chamadas_negocio if nome == "lista"} == {0, NEGOCIO_AFILIADO}
+    assert ("mensagens", NEGOCIO_AFILIADO) in f.chamadas_negocio
+    # O cursor da lista de afiliados mora dentro do cursor do canal.
+    assert canal.cursor["afiliado"]["ultimo_ts"] == _ns(AGORA - timedelta(hours=1))
+    assert canal.cursor["ultimo_ts"] == _ns(AGORA - timedelta(hours=2))
+
+    # A rodada seguinte não relê nada: a última mensagem já está gravada.
+    antes = len(f.chamadas_mensagens)
+    r = await _rodar(db, canal, integ, f)
+    assert (r.conversas_novas, r.mensagens_novas) == (0, 0)
+    assert len(f.chamadas_mensagens) == antes
+
+
+async def test_afiliado_conta_no_numero_da_caixa_como_no_duoke(db, make_user, teto):
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    _afiliada(f)
+    await _rodar(db, canal, integ, f)
+    af = (await _conversas(db))["AF1"]
+    # A fala do afiliado conta (1, como no Duoke); a da loja de 40 dias atrás
+    # é a última resposta de pessoa.
+    assert await _numero(db, af) == (1, 1)
+    # O que conta para o número NÃO entra no "Falta responder" da fila.
+    assert not pendente.falta_responder(af)
+
+    # Respondeu pelo Seller Center/Duoke: zera.
+    f.conversa("AF1", msg("AF1", AGORA - timedelta(minutes=30), da_loja=True, afiliado=True))
+    await _rodar(db, canal, integ, f)
+    assert await _numero(db, af) == (0, 0)
+
+    # Ele escreveu de novo (duas vezes): 2.
+    f.conversa(
+        "AF1",
+        msg("AF1", AGORA - timedelta(minutes=10), afiliado=True, texto="e aí?"),
+        msg("AF1", AGORA - timedelta(minutes=9), afiliado=True, texto="?"),
+    )
+    await _rodar(db, canal, integ, f)
+    assert await _numero(db, af) == (2, 2)
+
+
+async def test_afiliado_marcado_volta_a_contar_quando_ele_escreve(db, make_user, teto):
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    _afiliada(f)
+    await _rodar(db, canal, integ, f)
+    af = (await _conversas(db))["AF1"]
+    # A pessoa abriu (o "visto no DaVinci") e marcou "não precisa de resposta"
+    # (o "marcar como processado" do Duoke): zera...
+    af.visto_em = datetime.now(UTC)
+    af.sem_resposta_necessaria = True
+    await db.commit()
+    assert await _numero(db, af) == (0, 0)
+
+    # ...e a fala NOVA do afiliado volta a contar (a de antes, já vista, não).
+    f.conversa("AF1", msg("AF1", AGORA - timedelta(minutes=5), afiliado=True, texto="oi?"))
+    await _rodar(db, canal, integ, f)
+    await db.refresh(af)
+    assert af.sem_resposta_necessaria is False
+    assert af.aguardando_resposta is False, "continua fora da fila"
+    assert await _numero(db, af) == (1, 1)
+
+
+async def test_afiliado_fica_fora_da_ia_do_envio_e_do_marcar_lida(db, make_user, teto):
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    f.conversa("A", msg("A", AGORA - timedelta(hours=2)))
+    _afiliada(f)
+    await _rodar(db, canal, integ, f)
+    convs = await _conversas(db)
+    a, af = convs["A"], convs["AF1"]
+
+    assert motivo_canal_sem_envio(af.canal, af.plataforma, af.dados) == MOTIVO_AFILIADO_SEM_ENVIO
+    assert motivo_canal_sem_envio(a.canal, a.plataforma, a.dados) is None
+    # O cron da IA corta pelo mesmo SQL (`ia._sql_canal_sem_envio`).
+    cortadas = set(
+        (
+            await db.execute(select(AtendimentoConversa.id).where(ia._sql_canal_sem_envio()))
+        ).scalars()
+    )
+    assert af.id in cortadas and a.id not in cortadas
+    # Marcar como lida na Shopee: o `read_conversation` sem `business_type`
+    # não acha a conversa de afiliado — a tela nem tenta.
+    assert lida.se_aplica(a) and not lida.se_aplica(af)
+
+
+async def test_nao_lido_do_afiliado_tem_lista_propria(db, make_user, teto):
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    f.conversa("A", msg("A", AGORA - timedelta(hours=2)), nao_lidas=1)
+    _afiliada(f)["unread_count"] = 2
+    f.nao_lidas, f.nao_lidas_afiliado = 1, 1
+    await _rodar(db, canal, integ, f)
+    cs = await _conversas(db)
+    assert (cs["A"].nao_lidas, cs["AF1"].nao_lidas) == (1, 2)
+
+    # A lista dos compradores (completa) NÃO zera o afiliado, que não vem nela.
+    await _rodar(db, canal, integ, f)
+    cs = await _conversas(db)
+    assert (cs["A"].nao_lidas, cs["AF1"].nao_lidas) == (1, 2)
+    assert any(c["tipo"] == shopee.TIPO_NAO_LIDAS for c in f.chamadas_lista_afiliado)
+
+    # Leram o do afiliado na Shopee: a lista dele zera só ele.
+    f.conversas["AF1"]["unread_count"] = 0
+    f.nao_lidas_afiliado = 0
+    await _rodar(db, canal, integ, f)
+    cs = await _conversas(db)
+    assert (cs["A"].nao_lidas, cs["AF1"].nao_lidas) == (1, 0)
+
+    # E a dos compradores zera o comprador sem tocar no afiliado.
+    f.conversas["AF1"]["unread_count"] = 3
+    f.nao_lidas_afiliado = 1
+    f.conversas["A"]["unread_count"] = 0
+    f.nao_lidas = 0
+    await _rodar(db, canal, integ, f)
+    cs = await _conversas(db)
+    assert (cs["A"].nao_lidas, cs["AF1"].nao_lidas) == (0, 3)
+
+
+async def test_lista_de_afiliados_falhando_nao_derruba_a_rodada(db, make_user, teto):
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    f.conversa("A", msg("A", AGORA - timedelta(hours=2)))
+    _afiliada(f)
+    f.erro_afiliado = RuntimeError("shopee_chat_conversas error_server: busy")
+
+    r = await _rodar(db, canal, integ, f)
+
+    # Os compradores entram; o canal segue `ok`, com o aviso (visível em Lojas).
+    assert r.status == shopee.STATUS_OK
+    assert "chat de afiliado" in (r.erro or "") and "error_server" in r.erro
+    assert set(await _conversas(db)) == {"A"}
+    assert canal.cursor["afiliado"]["ultimo_ts"] is None, "o cursor dela espera"
+
+    # Voltou: a próxima rodada traz o afiliado (a janela da primeira leitura).
+    f.erro_afiliado = None
+    r = await _rodar(db, canal, integ, f)
+    assert r.erro is None
+    assert set(await _conversas(db)) == {"A", "AF1"}
+
+
+async def test_afiliado_que_falhou_nas_mensagens_entra_na_rodada_seguinte(db, make_user, teto):
+    """A conversa nasce MARCADA (antes das mensagens): se o `get_message` dela
+    cair, a rodada seguinte a reconhece como afiliado — e não como a conversa
+    de comprador que o cinto acima protege."""
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    _afiliada(f)
+    f.erro_mensagens["AF1"] = RuntimeError("shopee_chat_mensagens error_server: busy")
+
+    r = await _rodar(db, canal, integ, f)
+
+    assert r.status == shopee.STATUS_OK and "chat de afiliado" in (r.erro or "")
+    af = (await _conversas(db))["AF1"]
+    assert af.dados[CHAVE_AFILIADO] is True and await _mensagens(db, af.id) == []
+
+    del f.erro_mensagens["AF1"]
+    r = await _rodar(db, canal, integ, f)
+    assert r.erro is None and r.mensagens_novas == 2
+    assert await _numero(db, af) == (1, 1)
+
+
+async def test_lista_de_afiliados_nunca_marca_conversa_de_comprador(db, make_user, teto):
+    """O cinto: se a Shopee ignorar o `business_type=11` e devolver a lista
+    padrão, NENHUMA conversa de comprador vira afiliado (a IA e o envio
+    parariam nela para sempre) — nem a já gravada, nem a que chegou ENTRE as
+    duas listas (a revisão de 15/10/2026: o cinto por conversa só pegava a
+    gravada). A página inteira é conferida antes de gravar qualquer uma."""
+
+    class ShopeeSemNegocio(ShopeeFalso):
+        nova_entre_as_listas = True
+
+        async def chat_conversation_list(self, **kw) -> dict:
+            if kw.pop("business_type", 0) == NEGOCIO_AFILIADO and self.nova_entre_as_listas:
+                # O comprador B escreve depois da lista dos compradores e
+                # antes da dos afiliados: ninguém o gravou ainda.
+                self.nova_entre_as_listas = False
+                self.conversa("B", msg("B", AGORA - timedelta(minutes=1)))
+            return await super().chat_conversation_list(**kw)
+
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeSemNegocio()
+    f.conversa("A", msg("A", AGORA - timedelta(hours=2)))
+
+    r = await _rodar(db, canal, integ, f)
+
+    # A rodada segue `ok`, com o aviso em Lojas; a lista suspeita não grava nada.
+    assert r.status == shopee.STATUS_OK
+    assert "chat de afiliado" in (r.erro or "") and "comprador" in r.erro
+    assert set(await _conversas(db)) == {"A"}, "B não nasce como afiliado"
+    assert canal.cursor["afiliado"]["ultimo_ts"] is None, "o cursor dela espera"
+
+    # Na rodada seguinte, B entra pela lista dos compradores — como comprador.
+    r = await _rodar(db, canal, integ, f)
+    convs = await _conversas(db)
+    assert set(convs) == {"A", "B"}
+    for c in convs.values():
+        assert CHAVE_AFILIADO not in c.dados
+        assert motivo_canal_sem_envio(c.canal, c.plataforma, c.dados) is None
+    assert convs["B"].aguardando_resposta is True
+    assert "chat de afiliado" in (r.erro or ""), "continua suspeita, à vista"
+
+
+async def test_canal_nao_fica_travado_durante_a_lista_de_afiliados(db, make_user, teto):
+    """A revisão de 15/10/2026: o cursor dos compradores escrito no `canal`
+    ANTES da lista de afiliados ia no autoflush do primeiro SELECT dela, e a
+    linha de `atendimento_canais` ficava travada durante as chamadas à
+    Shopee (a troca de modo pela tela esperaria). Agora o cursor é escrito
+    uma vez só, depois das duas listas."""
+    from sqlalchemy import text
+
+    import app.db as _db
+
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    f.conversa("A", msg("A", AGORA - timedelta(hours=2)))
+    _afiliada(f)
+    vistos: list[str] = []
+    original = f.chat_conversation_list
+
+    async def lista(**kw) -> dict:
+        if kw.get("business_type") == NEGOCIO_AFILIADO:
+            async with _db.SessionLocal() as outra:
+                try:
+                    achou = (
+                        await outra.execute(
+                            text(
+                                "select 1 from atendimento_canais where id = :i for update nowait"
+                            ),
+                            {"i": canal.id},
+                        )
+                    ).scalar()
+                    vistos.append("livre" if achou == 1 else "sem_linha")
+                except Exception as exc:  # noqa: BLE001 — a trava é o que se mede
+                    vistos.append(f"travado: {type(exc).__name__}")
+                await outra.rollback()
+        return await original(**kw)
+
+    f.chat_conversation_list = lista  # type: ignore[method-assign]
+    await _rodar(db, canal, integ, f)
+
+    assert vistos and set(vistos) == {"livre"}, vistos
+    # E o cursor das duas listas foi gravado no fim.
+    assert canal.cursor["ultimo_ts"] == _ns(AGORA - timedelta(hours=2))
+    assert canal.cursor["afiliado"]["ultimo_ts"] == _ns(AGORA - timedelta(hours=1))
+
+
+async def test_pedido_do_afiliado_nunca_cai_no_chat_de_afiliado(db, make_user, teto):
+    """A revisão de 15/10/2026: o afiliado também compra (a amostra, a compra
+    para o vídeo), e o chat de afiliado grava o id dele em `comprador_id`. O
+    motor das automáticas acha a conversa do pedido pelo comprador, pelo
+    pedido e pelo usuário do escrow — nunca pode ser o chat de afiliado
+    (em `enviar`, a automática seria recusada e o comprador ficaria sem ela)."""
+    from app.services.atendimento import automacoes
+
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    _afiliada(f)
+    await _rodar(db, canal, integ, f)
+    af = (await _conversas(db))["AF1"]
+    af.pedido_marketplace = "PED-DO-AFILIADO"  # o cartão de um pedido no chat dele
+    await db.commit()
+    par = (integ.id, str(AFILIADO))
+    pedido = (integ.id, "PED-DO-AFILIADO")
+
+    # Sem o chat de COMPRADOR dele: nenhuma conversa (a automática vai pelo
+    # `to_id`, `sem_conversa`, como antes do chat de afiliado existir).
+    assert await automacoes._conversas_do_comprador(db, [par]) == {}
+    assert await automacoes._conversas_do_pedido(db, [pedido]) == {}
+    assert await automacoes._conversas_pelo_nome(db, {pedido: "criador_teste"}) == {}
+
+    # Com o chat de compra dele (mais antigo que o de afiliado): é esse.
+    compra = AtendimentoConversa(
+        canal_id=canal.id,
+        integration_id=integ.id,
+        plataforma="shopee",
+        canal="chat",
+        externo_id="CHAT-DE-COMPRA",
+        comprador_id=str(AFILIADO),
+        comprador_nome="criador_teste",
+        pedido_marketplace="PED-DO-AFILIADO",
+        ultima_mensagem_em=AGORA - timedelta(days=3),
+    )
+    db.add(compra)
+    await db.commit()
+    assert await automacoes._conversas_do_comprador(db, [par]) == {par: compra.id}
+    assert await automacoes._conversas_do_pedido(db, [pedido]) == {pedido: compra.id}
+    assert await automacoes._conversas_pelo_nome(db, {pedido: "criador_teste"}) == {
+        pedido: compra.id
+    }
+
+
+async def test_cliente_manda_business_type_so_no_chat_de_afiliado(cliente_gravando):
+    cliente, chamadas, respostas = cliente_gravando
+    respostas["/api/v2/sellerchat/get_unread_conversation_count"] = {"total_unread_count": 1}
+    await cliente.chat_conversation_list(business_type=NEGOCIO_AFILIADO)
+    assert chamadas[-1]["params"] == {
+        "direction": "older",
+        "type": "all",
+        "page_size": 25,
+        "business_type": 11,
+    }
+    assert await cliente.chat_unread_count(business_type=NEGOCIO_AFILIADO) == 1
+    assert chamadas[-1]["params"] == {"business_type": 11}
+    await cliente.chat_one_conversation("379920374879551489", business_type=NEGOCIO_AFILIADO)
+    assert chamadas[-1]["params"] == {
+        "conversation_id": "379920374879551489",
+        "business_type": 11,
+    }
+    await cliente.chat_mensagens_pagina("379920374879551489", business_type=NEGOCIO_AFILIADO)
+    assert chamadas[-1]["params"] == {
+        "conversation_id": "379920374879551489",
+        "page_size": 25,
+        "business_type": 11,
+    }
+    # O chat do comprador sai como sempre saiu: sem o parâmetro.
+    await cliente.chat_unread_count()
+    assert chamadas[-1]["params"] is None
 
 
 # ─────────────── envio ───────────────

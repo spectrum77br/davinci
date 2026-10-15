@@ -867,6 +867,60 @@ async def test_shopee_comprador_com_duas_compras_corta_na_primeira(db, client, a
     assert not _ids(corpo) & set(n.outro_msgs + n.outro_devol_msgs)
 
 
+async def test_shopee_chat_de_afiliado_nunca_entra_na_familia(db, client, admin):
+    """15/10/2026: o chat de AFILIADO da Shopee (`dados.afiliado`) grava o id
+    do afiliado em `comprador_id` — e o 777 também é o comprador do pedido.
+    A conversa de parceria nunca aparece nas abas do chat de compra (nem a
+    compra nas abas dela): aberta, ela fica sozinha, com a fala do afiliado
+    marcada para o balão (`do_afiliado`)."""
+    n = await _cenario_shopee(db, admin)
+    af = await _conversa(
+        db, n.loja, "shopee", "chat", "379920374879551489", comprador_id="777",
+        comprador_nome="criador_777", dados={"afiliado": True},
+    )  # fmt: skip
+    falas = []
+    for autor, quando, texto, de in (
+        ("loja", T0 - timedelta(days=40), "parceria?", 222),
+        ("sistema", T0 - timedelta(hours=3), "quero divulgar", 777),
+    ):
+        m = AtendimentoMensagem(
+            conversa_id=af.id, externo_id=uuid4().hex, autor=autor,
+            origem="externo" if autor == "loja" else "sistema", tipo="texto", texto=texto,
+            enviada_em=quando, status="enviada" if autor == "loja" else "recebida",
+            payload={"from_id": de},
+        )  # fmt: skip
+        db.add(m)
+        await db.flush()
+        falas.append(str(m.id))
+    af.ultima_mensagem_em = T0 - timedelta(hours=3)
+    await db.commit()
+
+    # O chat de compra do 777: a família de sempre, sem o chat de afiliado.
+    corpo = await _abas(client, n.chat.id)
+    assert str(af.id) not in _conversas(corpo)
+    assert not _ids(corpo) & set(falas)
+    assert {a["chave"]: a["total"] for a in corpo["abas"]}["pos_venda"] == 2
+    # Pela devolução do pedido também não.
+    assert str(af.id) not in _conversas(await _abas(client, n.devol.id))
+
+    # O chat de afiliado aberto: sozinho — nem o chat de compra, nem a devolução.
+    corpo = await _abas(client, af.id)
+    assert _conversas(corpo) == {str(af.id)}
+    assert not _ids(corpo) & set(n.pre + n.pos + n.devol_msgs + n.aval_msgs)
+
+    # A fala do afiliado é `sistema` (fora da fila), mas a tela desenha o
+    # balão dele com o nome; a resposta da loja continua da loja.
+    r = await client.get(f"/api/atendimento/conversas/{af.id}")
+    assert r.status_code == 200, r.text
+    por_id = {m["id"]: m for m in r.json()["mensagens"]}
+    assert (por_id[falas[1]]["do_afiliado"], por_id[falas[1]]["autor_nome"]) == (
+        True,
+        "criador_777",
+    )
+    assert por_id[falas[0]]["do_afiliado"] is False
+    assert r.json()["conversa"]["afiliado"] is True
+
+
 # ─────────────── página, erros e trava ───────────────
 
 

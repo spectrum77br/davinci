@@ -130,6 +130,7 @@ from app.services.atendimento.constantes import (
     CANAL_CHAT,
     CANAL_POS_VENDA,
     MODOS_QUE_ENVIAM,
+    e_chat_de_afiliado,
 )
 
 logger = structlog.get_logger()
@@ -206,7 +207,15 @@ class ResultadoLida:
 
 
 def se_aplica(conversa: AtendimentoConversa) -> bool:
-    """A plataforma desta conversa tem "marcar como lida" pela API?"""
+    """A plataforma desta conversa tem "marcar como lida" pela API?
+
+    O chat de AFILIADO da Shopee não (15/10/2026): o `read_conversation` sem
+    `business_type=11` não acha a conversa (o `get_message` e o
+    `get_one_conversation` respondem `param_error` — medido), e com ele nunca
+    foi medido. O "visto no DaVinci" (`gravar_visto`) continua valendo.
+    """
+    if e_chat_de_afiliado(conversa.plataforma, conversa.dados):
+        return False
     return conversa.canal in PLATAFORMAS_QUE_MARCAM.get(conversa.plataforma, frozenset())
 
 

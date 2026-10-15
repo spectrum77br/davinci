@@ -135,16 +135,41 @@ MOTIVO_EMAIL_SO_PESSOA = (
     "Quem responde é uma pessoa, pela caixa de resposta desta conversa."
 )
 
+# Chat de AFILIADO da Shopee (15/10/2026): o criador de conteúdo que divulga a
+# loja conversa com ela num chat à parte (`business_type` 11), que a lista
+# padrão da API não traz — o Duoke mostra (com o selo "parceiro") e conta no
+# número da loja. O DaVinci lê (`shopee.py`, com `dados.afiliado = true`) e
+# conta no número (`pendente.do_comprador_no_numero`: a fala do afiliado é
+# `sistema` com o `from_id` dele = o `comprador_id` da conversa), mas NÃO
+# responde: o envio em chat de afiliado pede `business_type` +
+# `conversation_id` no `send_message`, nunca medido — sem eles a mensagem
+# iria para um chat de COMPRADOR com a mesma pessoa. A IA (cron, "Sugerir",
+# automático), a mensagem automática e a Caixa Humano ficam de fora pela
+# mesma trava dos canais sem envio.
+CHAVE_AFILIADO = "afiliado"
+MOTIVO_AFILIADO_SEM_ENVIO = (
+    "Chat de afiliado da Shopee: o envio por este chat ainda não existe no DaVinci "
+    "(nem a IA). Responda pelo Duoke ou pelo Seller Center."
+)
+
+
+def e_chat_de_afiliado(plataforma: str | None, dados: object) -> bool:
+    """A conversa é o chat de AFILIADO da Shopee (`dados.afiliado = true`)? PURA."""
+    return plataforma == "shopee" and isinstance(dados, dict) and dados.get(CHAVE_AFILIADO) is True
+
 
 def motivo_canal_sem_envio(canal: str | None, plataforma: str | None, dados: object) -> str | None:
     """A frase de por que esta conversa não sai pelo DaVinci (None = o canal tem envio). PURA.
 
     A régua é a de `abas.e_contato`: o Zap sempre; o e-mail fora da Amazon
-    (só o Tuta grava e-mail fora dela) ou com a marca `dados.fonte = 'tuta'`.
+    (só o Tuta grava e-mail fora dela) ou com a marca `dados.fonte = 'tuta'`;
+    e o chat de afiliado da Shopee (15/10/2026, `e_chat_de_afiliado`).
     O cron da IA filtra o mesmo no SQL (`ia._sql_canal_sem_envio`).
     """
     if canal == CANAL_ZAP:
         return MOTIVO_ZAP_SEM_ENVIO
+    if e_chat_de_afiliado(plataforma, dados):
+        return MOTIVO_AFILIADO_SEM_ENVIO
     if canal != CANAL_EMAIL:
         return None
     fonte = dados.get("fonte") if isinstance(dados, dict) else None

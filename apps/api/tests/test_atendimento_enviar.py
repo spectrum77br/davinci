@@ -43,6 +43,7 @@ from app.security.cipher import decrypt_json, encrypt_json
 from app.services.atendimento import clientes, enviar, gravar, validador
 from app.services.atendimento import shopee as adaptador_shopee
 from app.services.atendimento.constantes import (
+    MOTIVO_AFILIADO_SEM_ENVIO,
     MOTIVO_TUTA_SEM_ENVIO,
     MOTIVO_ZAP_SEM_ENVIO,
     ResultadoEnvio,
@@ -1696,6 +1697,49 @@ async def test_email_do_tuta_e_zap_nunca_caem_no_adaptador_do_marketplace(
     m = await enviar.enviar_resposta(db, da_loja, "Seu pedido saiu.", user=user)
     assert m.status == "enviada"
     assert plataforma.chamadas == ["Seu pedido saiu."]
+
+
+def test_regua_do_chat_de_afiliado():
+    """15/10/2026: o chat de afiliado da Shopee (`dados.afiliado = true`) não
+    sai pelo DaVinci — só o booleano do JSON e só na Shopee."""
+    assert motivo_canal_sem_envio("chat", "shopee", {"afiliado": True}) == (
+        MOTIVO_AFILIADO_SEM_ENVIO
+    )
+    for canal, plat, dados in (
+        ("chat", "shopee", {"afiliado": False}),
+        ("chat", "shopee", {"afiliado": "true"}),
+        ("chat", "tiktok", {"afiliado": True}),
+        ("chat", "shopee", {}),
+    ):
+        assert motivo_canal_sem_envio(canal, plat, dados) is None, (canal, plat, dados)
+
+
+async def test_chat_de_afiliado_nunca_sai_pelo_davinci(
+    db, make_user, ligado, plataforma, monkeypatch
+):
+    """O envio em chat de afiliado pede `business_type` + `conversation_id`
+    (nunca medido): pelo `to_id`, a resposta cairia num chat de COMPRADOR com
+    a mesma pessoa. Pessoa, IA, automático e foto: todos recusados antes do
+    adaptador — mesmo com uma fala de "cliente" esperando."""
+    da_loja, user = await _cenario(db, make_user)
+    afiliado = await _contato(
+        db, da_loja, canal_nome="chat", dados={"afiliado": True}, contato="777"
+    )
+    monkeypatch.setattr(get_settings(), "atendimento_auto_ativo", True)
+    await db.execute(update(AtendimentoCanal).values(modo="auto"))
+    await db.commit()
+
+    recusa = await enviar.motivo_para_nao_enviar(db, afiliado)
+    assert recusa is not None
+    assert (recusa.code, recusa.detail) == ("canal_sem_envio", MOTIVO_AFILIADO_SEM_ENVIO)
+    e = await _recusa(enviar.enviar_resposta(db, afiliado, "Oi!", user=user))
+    assert (e.code, e.detail) == ("canal_sem_envio", MOTIVO_AFILIADO_SEM_ENVIO)
+    e = await _recusa(enviar.enviar_resposta(db, afiliado, "Oi!", user=None, origem="davinci_ia"))
+    assert e.code == "canal_sem_envio"
+    e = await _recusa(enviar.enviar_foto(db, afiliado, object(), user=user))
+    assert e.code == "canal_sem_envio"
+    assert await _mensagens_da_loja(db, afiliado.id) == []
+    assert plataforma.chamadas == []
 
 
 async def test_trava_do_tuta_e_zap_vem_antes_do_envio_desligado(db, make_user, plataforma):

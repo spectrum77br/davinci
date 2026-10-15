@@ -79,7 +79,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -111,6 +111,7 @@ from app.services.atendimento.constantes import (
     ORIGEM_NOTA,
     reclamacao_aberta,
 )
+from app.services.atendimento.gravar import chat_de_afiliado_sql
 
 logger = structlog.get_logger()
 
@@ -123,6 +124,23 @@ _B = BlingOrder
 _L = Logistica
 _A = AtendimentoAvaliacaoLoja
 _Rc = AtendimentoReclamacao
+
+
+def _fora_do_chat_de_afiliado() -> Any:
+    """Só conversa que NÃO é o chat de AFILIADO da Shopee (15/10/2026).
+
+    O chat de afiliado (`shopee.py`, `dados.afiliado`) grava o id do
+    afiliado em `comprador_id` — e o afiliado também compra (a amostra, a
+    compra para o vídeo). Sem este corte, o pedido dele como COMPRADOR cairia
+    no chat de afiliado (a conversa de chat mais recente do mesmo
+    comprador): em `simular`, a linha ficaria na conversa errada (e a
+    comparação com o Duoke torta); em `enviar`, `_destino_automatica` a
+    recusaria (`canal_sem_envio`) e o comprador ficaria sem a mensagem. Sem
+    o chat de afiliado, o pedido acha o chat de comprador ou vai pelo `to_id`
+    (`sem_conversa`), como antes.
+    """
+    return not_(chat_de_afiliado_sql(_C))
+
 
 # Quanto para trás cada descoberta olha (a chave única segura o repetido).
 LOOKBACK_MENSAGENS = timedelta(minutes=40)
@@ -484,6 +502,7 @@ async def descobrir_mensagens(
         await session.execute(
             select(_C.id, _C.integration_id, _C.plataforma, _C.canal, _C.comprador_id).where(
                 _C.integration_id.in_(list(por_loja)),
+                _fora_do_chat_de_afiliado(),
                 _C.id.in_(
                     select(_M.conversa_id).where(
                         or_(
@@ -570,7 +589,11 @@ async def _conversas_do_pedido(
     linhas = (
         await session.execute(
             select(_C.id, _C.integration_id, _C.pedido_marketplace)
-            .where(_C.pedido_marketplace.in_(pedidos), _C.canal == "chat")
+            .where(
+                _C.pedido_marketplace.in_(pedidos),
+                _C.canal == "chat",
+                _fora_do_chat_de_afiliado(),
+            )
             .order_by(_C.ultima_mensagem_em.desc().nulls_last())
         )
     ).all()
@@ -587,6 +610,7 @@ async def _conversas_do_pedido(
                 .where(
                     _C.integration_id.in_(integs),
                     _C.canal == "chat",
+                    _fora_do_chat_de_afiliado(),
                     _M.payload["message_type"].astext == "order",
                     sn.in_(sorted({p for _, p in faltam})),
                     _M.enviada_em >= (agora or _agora()) - timedelta(days=45),
@@ -611,7 +635,11 @@ async def _conversas_do_comprador(
         await session.execute(
             select(_C.id, _C.integration_id, _C.comprador_id)
             .where(
-                _C.comprador_id.in_(compradores), _C.integration_id.in_(integs), _C.canal == "chat"
+                _C.comprador_id.in_(compradores),
+                _C.integration_id.in_(integs),
+                _C.canal == "chat",
+                # O afiliado também compra: o pedido dele é do chat de comprador.
+                _fora_do_chat_de_afiliado(),
             )
             .order_by(_C.ultima_mensagem_em.desc().nulls_last())
         )
@@ -703,6 +731,7 @@ async def _conversas_pelo_nome(
                 _C.integration_id.in_(integs),
                 _C.plataforma == "shopee",
                 _C.canal == "chat",
+                _fora_do_chat_de_afiliado(),
                 _C.comprador_nome.in_(sorted(set(nomes.values()))),
             )
             .order_by(_C.ultima_mensagem_em.desc().nulls_last())

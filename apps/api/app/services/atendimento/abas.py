@@ -47,6 +47,14 @@ QUEM ENTRA NA FAMÍLIA (`familia`):
      deste pedido) só entra o e-mail/Zap SEM pedido próprio — o de outro
      pedido é de outra compra, mesmo sendo do mesmo comprador.
 
+CHAT DE AFILIADO (15/10/2026, `shopee.py`, `dados.afiliado`): o chat à
+parte que o criador de conteúdo tem com a loja grava o id dele em
+`comprador_id` — e ele também compra. Seria o SEGUNDO chat Shopee do mesmo
+"comprador" (o item 4 acima presume um só): a conversa de parceria
+apareceria nas abas Pré/Pós-venda do chat de compra dele, e o pedido dele
+nas abas do chat de afiliado. Nunca entra em família nenhuma
+(`_candidatas`), e aberto fica sozinho, como o e-mail.
+
 E-MAIL × CHAT (13/10/2026, `separa_email`): o e-mail da ponte mora na aba
 E-mail da tela, nunca na família de uma conversa de chat — a conversa de
 e-mail não entra nas candidatas, e a conversa de e-mail aberta (pela aba
@@ -104,7 +112,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, false, func, or_, select
+from sqlalchemy import and_, case, false, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -128,6 +136,7 @@ from app.services.atendimento.constantes import (
     CANAL_SAC,
     CANAL_ZAP,
     PLATAFORMAS_EXTERNAS,
+    e_chat_de_afiliado,
     e_nota,
 )
 from app.services.atendimento.etiqueta_fatos import (
@@ -136,6 +145,7 @@ from app.services.atendimento.etiqueta_fatos import (
     condicao_do_pedido,
     e_pos_venda,
 )
+from app.services.atendimento.gravar import chat_de_afiliado_sql
 
 # ── As abas (o vocabulário que a tela lê) ─────────────────────────────────
 ABA_PRE_VENDA = "pre_venda"
@@ -658,6 +668,8 @@ async def _candidatas(
             c.canal.not_in(sorted(CANAIS_SEM_ABAS)),
             # O e-mail da ponte mora na aba E-mail da tela (13/10/2026).
             separa_email.na_caixa_sql(c),
+            # O chat de AFILIADO da Shopee nunca entra na família (15/10/2026).
+            not_(chat_de_afiliado_sql(c)),
         )
         .order_by(*ordem, c.ultima_mensagem_em.desc().nulls_last(), c.created_at.desc())
         .limit(MAX_CONVERSAS)
@@ -819,9 +831,14 @@ async def familia(session: AsyncSession, aberta: AtendimentoConversa) -> Familia
         return Familia(aberta=aberta, conversas=[aberta])
     pedido = chaves(aberta)
     loja = _clausula_loja(aberta)
-    if loja is None or separa_email.e_conversa_de_email(aberta):
+    if (
+        loja is None
+        or separa_email.e_conversa_de_email(aberta)
+        or e_chat_de_afiliado(aberta.plataforma, aberta.dados)
+    ):
         # Sem loja conhecida — ou a conversa de E-MAIL (13/10/2026): ela vive
-        # na aba E-mail, sozinha; o chat do pedido fica na Caixa.
+        # na aba E-mail, sozinha; o chat do pedido fica na Caixa. O chat de
+        # AFILIADO da Shopee (15/10/2026) também fica sozinho.
         return Familia(
             aberta=aberta,
             conversas=[aberta],

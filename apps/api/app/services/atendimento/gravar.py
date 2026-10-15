@@ -77,6 +77,7 @@ from app.services.atendimento.constantes import (
     AVALIACAO_OBSERVOU,
     CARTOES_DO_COMPRADOR_SHOPEE,
     CARTOES_DO_COMPRADOR_TIKTOK,
+    CHAVE_AFILIADO,
     CHAVE_AUTOMACAO,
     CHAVE_PRAZO_LIDO_EM,
     CHAVE_PRAZO_PLATAFORMA,
@@ -209,6 +210,14 @@ def normalizar_para_comparar(texto: str | None) -> str:
     sem_acento = "".join(ch for ch in decomposto if not unicodedata.combining(ch))
     so_palavras = re.sub(r"[\W_]+", " ", sem_acento.casefold())
     return " ".join(so_palavras.split())
+
+
+def chat_de_afiliado_sql(c: Any = AtendimentoConversa) -> Any:
+    """`constantes.e_chat_de_afiliado` em SQL — nunca NULL (`dados` é NOT NULL).
+
+    O `@>` casa só o booleano `true` do JSON, como o `is True` da régua pura.
+    """
+    return and_(c.plataforma == "shopee", c.dados.contains({CHAVE_AFILIADO: True}))
 
 
 def mensagem_automatica_sql(texto: Any, payload: Any = None) -> Any:
@@ -660,6 +669,7 @@ async def aplicar_nao_lidas(
     canal_nome: str,
     contagens: dict[str, int],
     completa: bool,
+    restrito_a: Any = None,
 ) -> int:
     """O NÃO LIDO fresco da plataforma (14/10/2026) → quantas conversas mudaram.
 
@@ -674,6 +684,10 @@ async def aplicar_nao_lidas(
       `completa`  — a plataforma mostrou TUDO o que está não lido: a conversa
                     deste canal com não lida que não veio zera. Lista cortada
                     (teto de páginas) não zera ninguém.
+      `restrito_a` — condição SQL a mais sobre `AtendimentoConversa`: só as
+                    conversas do canal que passam nela são tocadas (15/10/2026:
+                    a Shopee lê o não lido do chat de AFILIADO numa lista à
+                    parte — cada lista acerta e zera só as suas).
 
     Só mexe em `nao_lidas` (a fila, a etiqueta e a IA não dependem dele); um
     UPDATE só por valor, que pula quem já está certo — e acerta a conversa
@@ -684,6 +698,8 @@ async def aplicar_nao_lidas(
         return 0
     c = AtendimentoConversa
     do_canal = and_(c.integration_id == integration_id, c.canal == canal_nome)
+    if restrito_a is not None:
+        do_canal = and_(do_canal, restrito_a)
     mudaram = 0
     por_valor: dict[int, list[str]] = {}
     for externo, n in contagens.items():
@@ -882,6 +898,20 @@ def _reabrir_se_nova(conversa: AtendimentoConversa, mensagem: AtendimentoMensage
     if conversa.situacao == CONVERSA_FECHADA:
         conversa.situacao = CONVERSA_ABERTA
     conversa.sem_resposta_necessaria = False
+
+
+def reabrir_pela_fala_de_fora(conversa: AtendimentoConversa, mensagem: AtendimentoMensagem) -> None:
+    """A fala NOVA de quem está do outro lado, gravada como `sistema`, reabre
+    como a do cliente (`_reabrir_se_nova`) e rededuz a fila. Sem banco.
+
+    15/10/2026, o chat de AFILIADO da Shopee (`shopee.py`): a fala do
+    afiliado é `sistema` (não abre a vez na fila), mas conta no número da
+    Caixa como no Duoke — e o "fechar"/"não precisa de resposta" (o
+    "marcar como processado" do Duoke) vale para o que já estava lá: sem
+    isto, a conversa de afiliado marcada uma vez nunca mais contaria.
+    """
+    _reabrir_se_nova(conversa, mensagem)
+    _derivar(conversa)
 
 
 async def gravar_mensagem(

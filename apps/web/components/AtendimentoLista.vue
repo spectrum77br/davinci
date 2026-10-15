@@ -440,7 +440,7 @@ function temEtiqueta(c: ConversaResumo) {
   return !!(faixaDaEtiqueta(c.etiqueta) || secundariasDe(c.etiqueta, c.etiquetas_secundarias).length)
 }
 function temSelos(c: ConversaResumo) {
-  return !!(c.humano || temEtiqueta(c) || c.eh_pergunta || c.envio_a_conferir || c.tem_rascunho || c.atribuido_a || c.ia_pausada || c.somente_leitura || c.sem_resposta_necessaria || c.situacao === 'bloqueada' || c.situacao === 'fechada')
+  return !!(c.humano || temEtiqueta(c) || c.eh_pergunta || c.afiliado || c.envio_a_conferir || c.tem_rascunho || c.atribuido_a || c.ia_pausada || c.somente_leitura || c.sem_resposta_necessaria || c.situacao === 'bloqueada' || c.situacao === 'fechada')
 }
 // Na linha escolhida (fundo azul) os selos coloridos viram translúcidos —
 // âmbar/violeta em cima do azul não se lê.
@@ -831,6 +831,15 @@ function mover(delta: number) {
                 >
                   <span class="font-bold" aria-hidden="true">?</span> pergunta
                 </span>
+                <!-- Chat de afiliado da Shopee (15/10/2026): o criador de conteúdo que
+                     divulga a loja — conta no número, responde-se pelo Duoke. -->
+                <span
+                  v-if="c.afiliado"
+                  class="rounded px-1.5 py-px font-medium"
+                  :class="selo(c.id === selecionada, 'bg-amber-500/15 text-amber-800 dark:text-amber-300')"
+                  title="chat de afiliado da Shopee (criador de conteúdo): conta no número da Caixa; a resposta é pelo Duoke ou pelo Seller Center"
+                  data-selo-afiliado
+                >afiliado</span>
                 <span
                   v-if="c.envio_a_conferir"
                   class="inline-flex items-center gap-0.5 rounded px-1.5 py-px font-medium"

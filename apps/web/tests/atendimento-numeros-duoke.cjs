@@ -355,6 +355,33 @@ async function renderizados() {
   assert.match(web('components/AtendimentoLista.vue'), /:nao-lidas="bolinhaDaLinha\(c, emHumano\)"/)
 }
 
+// O CHAT DE AFILIADO da Shopee (15/10/2026): entra na Caixa e no número (a
+// régua do servidor), com o selo "afiliado" na linha — a resposta é pelo
+// Duoke/Seller Center (o envio recusa com a frase do `canal_sem_envio`).
+{
+  const lista = web('components/AtendimentoLista.vue')
+  assert.ok(lista.includes('v-if="c.afiliado"') && lista.includes('data-selo-afiliado'), 'o selo afiliado na linha')
+  assert.match(lista, /function temSelos[\s\S]{0,160}c\.afiliado/, 'a linha com o selo abre a faixa de selos')
+  assert.match(web('components/AtendimentoPlataforma.vue'), /afiliado\?: boolean/)
+  assert.match(api('schemas/atendimento.py'), /class ConversaResumoOut\(BaseModel\):[\s\S]*?afiliado: bool = False/)
+  assert.match(api('routers/atendimento.py'), /"afiliado": e_chat_de_afiliado\(c\.plataforma, c\.dados\)/)
+  // A FALA do afiliado (a revisão de 15/10/2026): o servidor grava `sistema`
+  // (fora da fila), e a tela a desenhava como aviso cinza no meio — sem
+  // balão, sem foto, sem cartão. Agora `do_afiliado` vira balão à esquerda,
+  // com "Afiliado · <nome>" em cima.
+  assert.equal(P.origemLabel({ autor: 'sistema', origem: 'sistema', autor_nome: 'gi_lauermann', do_afiliado: true }, 'shopee'), 'Afiliado · gi_lauermann')
+  assert.equal(P.origemLabel({ autor: 'sistema', origem: 'sistema', autor_nome: null, do_afiliado: true }, 'shopee'), 'Afiliado')
+  assert.equal(P.origemLabel({ autor: 'sistema', origem: 'sistema', autor_nome: null }, 'shopee'), 'Sistema')
+  assert.match(web('components/AtendimentoPlataforma.vue'), /do_afiliado\?: boolean/)
+  const conversaVue = web('components/AtendimentoConversa.vue')
+  assert.match(conversaVue, /function lado\([\s\S]{0,700}if \(m\.do_afiliado\) return 'afiliado'[\s\S]{0,200}if \(m\.autor === 'sistema'/, 'o afiliado antes do aviso do sistema')
+  assert.match(conversaVue, /lado\(l\.m\) === 'afiliado' \? 'items-start' : 'items-end'/, 'o balão do afiliado à esquerda')
+  assert.ok(conversaVue.includes('data-msg-afiliado'), 'o rótulo do afiliado em cima do balão')
+  sfc('../components/AtendimentoConversa.vue')
+  assert.match(api('schemas/atendimento.py'), /class MensagemOut\(BaseModel\):[\s\S]*?do_afiliado: bool = False/)
+  assert.match(api('routers/atendimento.py'), /do_afiliado=do_afiliado/)
+}
+
 renderizados().then(
   () => console.log('ok — atendimento-numeros-duoke'),
   (e) => { console.error(e); process.exit(1) },

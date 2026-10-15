@@ -3772,6 +3772,10 @@ async def test_corte_do_cron_bate_com_a_regua_pura(db: AsyncSession, make_user):
         ("zap", "amazon", {}),
         ("chat", "shopee", {"fonte": "tuta"}),
         ("pos_venda", "ml", {}),
+        # O chat de afiliado da Shopee (15/10/2026): só o booleano, só na Shopee.
+        ("chat", "shopee", {"afiliado": True}),
+        ("chat", "shopee", {"afiliado": "true"}),
+        ("chat", "tiktok", {"afiliado": True}),
     ]
     esperado: dict = {da_loja.id: False}
     for i, (canal_nome, plataforma, dados) in enumerate(casos):
@@ -3792,7 +3796,7 @@ async def test_corte_do_cron_bate_com_a_regua_pura(db: AsyncSession, make_user):
         ).scalars()
     )
     assert {i for i, sim in esperado.items() if sim} == no_sql
-    assert sum(esperado.values()) == 5
+    assert sum(esperado.values()) == 6
 
 
 # ─────────────── Aguardando Cancelamento (item 4) ───────────────

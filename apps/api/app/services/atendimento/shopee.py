@@ -64,9 +64,32 @@ cada rodada (`_reconferir_enviadas`).
 
 Quem é quem: `from_shop_id == shop_id` da loja → loja; senão, cliente. NUNCA
 `from_shop_id != 0`: o comprador também vem com um (medido em 22/09).
-Resposta automática, chatbot, notificação e chat de afiliado entram como
+Resposta automática, chatbot, notificação e a fala do afiliado entram como
 `sistema` — ficam na conversa, mas não contam como pergunta nem como resposta
 (a Shopee não conta resposta automática na taxa de resposta do chat).
+
+CHAT DE AFILIADO (15/10/2026, o dono: "os números da Caixa têm que bater com
+o Duoke"). O criador de conteúdo que divulga a loja conversa com ela num chat
+à parte (`business_type` 11), que a lista padrão NÃO traz: medido em produção
+(só leitura) — a conversa 379920374879551489 da Barbosa (1 não lida no Duoke)
+não estava em nenhuma página da lista, nem no `get_unread_conversation_count`
+(10 = as 10 da lista `unread`), e o `get_one_conversation`/`get_message`
+dela respondiam `param_error`; com `business_type=11` as quatro chamadas a
+trazem (Barbosa 1 não lida, Marquezini 3). Então cada rodada lê também a
+LISTA DE AFILIADOS (`_ler_afiliados`, depois dos compradores, com teto
+próprio e cursor próprio em `cursor["afiliado"]`, no mesmo formato), e o
+não lido dela. A conversa ganha `dados.afiliado = true` e o `comprador_id` é
+o do afiliado (`to_id`); a fala dele vira `sistema` com `from_id` = esse id
+— conta no número da Caixa como no Duoke (`pendente.do_comprador_no_numero`)
+sem abrir a vez na fila: a IA, a automática e a Caixa Humano não pegam (e o
+DaVinci não envia nesse chat — `constantes.motivo_canal_sem_envio`). A
+resposta da loja no chat de afiliado (pelo Seller Center/Duoke) é `loja`:
+zera o número, como a resposta de pessoa no Duoke. Falha na lista de
+afiliados não derruba a rodada (fica no log e o cursor dela espera). A
+página da lista de afiliados que trouxer UMA conversa já gravada como de
+comprador para a lista inteira na rodada, antes de gravar qualquer uma
+(`_conferir_pagina_de_afiliados`: se a Shopee um dia ignorar o parâmetro,
+nenhum comprador vira afiliado).
 
 Cartões e painel (28/09/2026, "a cara do Duoke"): a mensagem de produto e a
 de pedido viram cartões com foto, título, preço e status, e a conversa com
@@ -87,7 +110,7 @@ from typing import Any
 
 import httpx
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -98,13 +121,16 @@ from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AUTOR_SISTEMA,
     CANAL_CHAT,
+    CHAVE_AFILIADO,
     MSG_ENVIADA,
     MSG_FALHOU,
     ORIGENS_DAVINCI,
     ResultadoEnvio,
     ResultadoSync,
+    e_chat_de_afiliado,
     rotulo_tipo_plataforma,
 )
+from app.services.marketplaces.shopee import NEGOCIO_AFILIADO, NEGOCIO_COMPRADOR
 
 logger = structlog.get_logger()
 
@@ -169,8 +195,14 @@ _TIPOS_SISTEMA = frozenset({"notification", "bundle_message", "system"})
 _STATUS_AUTOMATICOS = frozenset({"auto_reply", "offwork_autoreply"})
 # A Shopee barrou a mensagem (contato externo etc.): não chegou ao comprador.
 _STATUS_BARRADOS = frozenset({"blocked", "censored_blacklist"})
-# `business_type` 11 = chat de afiliado, não é comprador (push de 05/11/2024).
-_NEGOCIO_AFILIADO = 11
+# `business_type` 11 = chat de afiliado, não é comprador (push de 05/11/2024;
+# na leitura é o parâmetro das chamadas, `NEGOCIO_AFILIADO` do cliente — o
+# item do `get_message` não traz o campo, medido em 15/10/2026).
+# A lista de afiliados por rodada: uma página (medido em 15/10/2026: 25
+# conversas cobrem 5 semanas da Barbosa e 2 da Marquezini).
+MAX_CONVERSAS_AFILIADO = 25
+# Onde mora o cursor da lista de afiliados dentro de `atendimento_canais.cursor`.
+CHAVE_CURSOR_AFILIADO = "afiliado"
 
 # Código da Shopee no erro que o `ShopeeClient._call` levanta:
 # "shopee_chat_send error_param: <mensagem>". Erro sem código ("HTTP 502",
@@ -352,24 +384,34 @@ def _texto_ou_none(valor: Any) -> str | None:
 
 def _autor(msg: dict, shop_id: int, tipo_shopee: str, status: str, afiliado: bool) -> str:
     if (
-        afiliado
-        or tipo_shopee in _TIPOS_SISTEMA
+        tipo_shopee in _TIPOS_SISTEMA
         or "notification" in tipo_shopee
         or status in _STATUS_AUTOMATICOS
     ):
         return AUTOR_SISTEMA
     if shop_id and _int(msg.get("from_shop_id")) == shop_id:
+        # Também no chat de afiliado (15/10/2026): a resposta da loja é
+        # resposta — zera o número da Caixa, como a de pessoa no Duoke.
         return AUTOR_LOJA
+    if afiliado:
+        # A fala do AFILIADO: `sistema` (não abre a vez na fila, a IA não
+        # pega), e conta no número pelo `from_id` = o `comprador_id` da
+        # conversa (`pendente.do_comprador_no_numero`).
+        return AUTOR_SISTEMA
     return AUTOR_CLIENTE
 
 
-def interpretar(msg: dict, shop_id: int) -> _Lida:
-    """Mensagem crua do `get_message` → autor, tipo, texto, anexos e o que liga ao pedido."""
+def interpretar(msg: dict, shop_id: int, *, afiliado: bool = False) -> _Lida:
+    """Mensagem crua do `get_message` → autor, tipo, texto, anexos e o que liga ao pedido.
+
+    `afiliado` = a mensagem é do chat de AFILIADO (lida da lista de afiliados:
+    o item do `get_message` não diz — só o push traz `business_type`).
+    """
     tipo_shopee = str(msg.get("message_type") or "").strip().lower()
     status = str(msg.get("status") or "").strip().lower()
     conteudo = msg.get("content") if isinstance(msg.get("content"), dict) else {}
     origem = msg.get("source_content") if isinstance(msg.get("source_content"), dict) else {}
-    afiliado = _int(msg.get("business_type")) == _NEGOCIO_AFILIADO
+    afiliado = afiliado or _int(msg.get("business_type")) == NEGOCIO_AFILIADO
 
     # `source_content` = de onde o comprador veio (página do pedido/produto).
     pedido = str(origem.get("order_sn") or "").strip() or None
@@ -425,6 +467,67 @@ def interpretar(msg: dict, shop_id: int) -> _Lida:
 # ── Leitura ───────────────────────────────────────────────────────────────
 
 
+def _negocio_kw(negocio: int) -> dict[str, int]:
+    """O `business_type` das chamadas de leitura — só no chat de afiliado: a do
+    comprador sai como sempre saiu, sem o parâmetro."""
+    return {} if negocio == NEGOCIO_COMPRADOR else {"business_type": negocio}
+
+
+def _negocio_da_conversa(conversa: AtendimentoConversa) -> int:
+    """De que lista a conversa gravada é (`dados.afiliado`)."""
+    if e_chat_de_afiliado(conversa.plataforma, conversa.dados):
+        return NEGOCIO_AFILIADO
+    return NEGOCIO_COMPRADOR
+
+
+def _afiliado_sql() -> Any:
+    """As conversas do chat de afiliado (a lista à parte do não lido)."""
+    return gravar.chat_de_afiliado_sql(AtendimentoConversa)
+
+
+class _ListaDeAfiliadosSuspeita(RuntimeError):  # noqa: N818 — português, como `_Interrompida`
+    """A página da lista de afiliados trouxe conversa já gravada como de COMPRADOR."""
+
+
+async def _conferir_pagina_de_afiliados(
+    session: AsyncSession, integration: Integration, conversas: list[dict]
+) -> None:
+    """O cinto da lista de afiliados (15/10/2026): a PÁGINA inteira, antes de
+    gravar qualquer conversa dela. Levanta `_ListaDeAfiliadosSuspeita`.
+
+    Se um dia a Shopee ignorar o `business_type=11` e devolver a lista
+    padrão, a conversa do comprador nasceria "afiliado" (e a IA e o envio
+    parariam nela para sempre: o upsert mescla `dados`). Conferir conversa
+    por conversa só pegaria a que JÁ estava gravada — a que chegou entre as
+    duas listas, ou a que ficou numa lacuna da lista dos compradores,
+    passaria. A página toda pega: a lista padrão sempre traz, junto, as que
+    a lista dos compradores (que roda antes) já gravou. Uma só conversa de
+    comprador na página = a lista inteira é suspeita: a rodada pula o resto
+    dela (vira o aviso "chat de afiliado: …" em Lojas, como uma falha) e
+    nada é marcado. Medido em produção em 15/10/2026: a Shopee respeita o
+    parâmetro (a lista 11 traz só afiliado).
+    """
+    ids = sorted({str(c.get("conversation_id") or "").strip() for c in conversas} - {""})
+    if not ids:
+        return
+    de_comprador = await session.scalar(
+        select(func.count())
+        .select_from(AtendimentoConversa)
+        .where(
+            AtendimentoConversa.integration_id == integration.id,
+            AtendimentoConversa.plataforma == PLATAFORMA,
+            AtendimentoConversa.canal == CANAL_CHAT,
+            AtendimentoConversa.externo_id.in_(ids),
+            not_(_afiliado_sql()),
+        )
+    )
+    if de_comprador:
+        raise _ListaDeAfiliadosSuspeita(
+            f"a lista de afiliados trouxe {de_comprador} conversa(s) de comprador "
+            "(business_type ignorado?) — nada foi marcado"
+        )
+
+
 async def _gravadas(session: AsyncSession, conversa_id, externo_ids: list[str]) -> set[str]:
     """Quais destes ids da Shopee já estão gravados nesta conversa."""
     if not externo_ids:
@@ -439,18 +542,22 @@ async def _gravadas(session: AsyncSession, conversa_id, externo_ids: list[str]) 
 
 
 async def _mensagens_novas(
-    session: AsyncSession, cliente: Any, conversa: AtendimentoConversa
+    session: AsyncSession,
+    cliente: Any,
+    conversa: AtendimentoConversa,
+    negocio: int = NEGOCIO_COMPRADOR,
 ) -> list[dict]:
     """Desce pelas mensagens (mais novas primeiro) até achar uma já gravada.
 
     A página em que a gravada aparece é lida inteira (as já gravadas não mudam
-    nada); no máximo `PAGINAS_MENSAGENS` páginas.
+    nada); no máximo `PAGINAS_MENSAGENS` páginas. `negocio` = de que lista
+    (o chat de afiliado só responde com `business_type=11`).
     """
     coletadas: dict[str, dict] = {}
     offset: str | None = None
     for _ in range(PAGINAS_MENSAGENS):
         resp = await cliente.chat_mensagens_pagina(
-            conversa.externo_id, offset=offset, page_size=PAGINA_MENSAGENS
+            conversa.externo_id, offset=offset, page_size=PAGINA_MENSAGENS, **_negocio_kw(negocio)
         )
         pagina = [
             m
@@ -513,6 +620,8 @@ async def _gravar_brutas(
     shop_id: int,
     cliente: Any = None,
     cota: enriquecer.Cota | None = None,
+    *,
+    afiliado: bool = False,
 ) -> int:
     """Mensagens cruas do `get_message` → gravadas, da mais antiga para a mais nova.
 
@@ -521,6 +630,7 @@ async def _gravar_brutas(
     gravada como enviada (a nossa, barrada depois de aceita). A mensagem de
     produto/pedido ganha o cartão com foto e status (`_preencher_cartao`) —
     também a já gravada cujo cartão ficou incompleto numa rodada anterior.
+    `afiliado` = são do chat de afiliado (`interpretar`).
     """
     # Da mais antiga para a mais nova: a fila anda na ordem em que a conversa
     # aconteceu (e "cliente escreveu de novo" reabre na hora certa).
@@ -530,10 +640,11 @@ async def _gravar_brutas(
     novas = 0
     pedido: str | None = None
     anuncio: str | None = None
-    afiliado = False
+    # A marca vem da lista (o chat de afiliado) ou, no push, da mensagem.
+    marcar_afiliado = afiliado
     barrou = False
     for bruta in brutas:
-        lida = interpretar(bruta, shop_id)
+        lida = interpretar(bruta, shop_id, afiliado=afiliado)
         mensagem, criada_msg = await gravar.gravar_mensagem(
             session,
             conversa,
@@ -547,6 +658,16 @@ async def _gravar_brutas(
         )
         novas += int(criada_msg)
         if (
+            afiliado
+            and criada_msg
+            and lida.autor == AUTOR_SISTEMA
+            and conversa.comprador_id
+            and str(bruta.get("from_id")) == str(conversa.comprador_id)
+        ):
+            # O afiliado escreveu de novo: o "fechar"/"não precisa de
+            # resposta" de antes não esconde a fala nova do número da Caixa.
+            gravar.reabrir_pela_fala_de_fora(conversa, mensagem)
+        if (
             cliente is not None
             and lida.tipo in (TIPO_PRODUTO, TIPO_PEDIDO)
             and enriquecer.cartao_incompleto(mensagem.anexos or lida.anexos)
@@ -558,7 +679,7 @@ async def _gravar_brutas(
                 mensagem.anexos = cartao
         pedido = lida.pedido or pedido
         anuncio = lida.anuncio or anuncio
-        afiliado = afiliado or lida.afiliado
+        marcar_afiliado = marcar_afiliado or lida.afiliado
         if lida.barrada and mensagem.autor == AUTOR_LOJA and mensagem.status != MSG_FALHOU:
             # A Shopee barrou a resposta: o comprador não recebeu. Não pode
             # contar como respondida.
@@ -566,7 +687,7 @@ async def _gravar_brutas(
             mensagem.erro = f"shopee {lida.barrada}"
             barrou = True
 
-    if pedido or anuncio or afiliado:
+    if pedido or anuncio or marcar_afiliado:
         # O elo com o pedido (Bling, rastreio, chamados) sai das mensagens.
         await gravar.upsert_conversa(
             session,
@@ -577,7 +698,7 @@ async def _gravar_brutas(
             externo_id=conversa.externo_id,
             pedido_marketplace=pedido,
             anuncio_id=anuncio,
-            dados={"afiliado": True} if afiliado else None,
+            dados={CHAVE_AFILIADO: True} if marcar_afiliado else None,
         )
     if barrou:
         await gravar.recalcular_conversa(session, conversa)
@@ -593,15 +714,22 @@ async def _sincronizar_conversa(
     shop_id: int,
     lidas: set[str],
     cota: enriquecer.Cota | None = None,
+    negocio: int = NEGOCIO_COMPRADOR,
 ) -> tuple[bool, int]:
     """Uma conversa da lista → (conversa criada?, mensagens novas).
 
     `lidas` recebe o id da conversa cujas mensagens foram lidas nesta rodada.
     Conversa com mensagem nova e pedido ligado ganha o retrato do pedido.
+    `negocio` = de que lista ela veio: a de afiliado grava `dados.afiliado`
+    (o `to_id` é o do afiliado — vira o `comprador_id`, o `from_id` da fala
+    dele) e lê as mensagens com `business_type=11`.
     """
     externo_id = str(conv.get("conversation_id") or "").strip()
     if not externo_id:
         return False, 0
+    # A página da lista de afiliados já passou pelo cinto
+    # (`_conferir_pagina_de_afiliados`, em `_caminhar`).
+    afiliado = negocio == NEGOCIO_AFILIADO
     to_id = conv.get("to_id")
     conversa, criada = await gravar.upsert_conversa(
         session,
@@ -619,6 +747,7 @@ async def _sincronizar_conversa(
         # medido em 25/09) ou que não sirva para `<img>` vira None no `gravar`
         # — e None não apaga a foto que já estava gravada.
         comprador_avatar=_texto_ou_none(conv.get("to_avatar")),
+        dados={CHAVE_AFILIADO: True} if afiliado else None,
     )
     # A lista já diz qual é a última mensagem: se ela está gravada, só mudou
     # o contador de não lidas — sem ida ao get_message. (A nossa resposta
@@ -627,10 +756,10 @@ async def _sincronizar_conversa(
     if not criada and ultima and await _gravadas(session, conversa.id, [ultima]):
         return criada, 0
 
-    brutas = await _mensagens_novas(session, cliente, conversa)
+    brutas = await _mensagens_novas(session, cliente, conversa, negocio)
     lidas.add(externo_id)
     novas = await _gravar_brutas(
-        session, canal, integration, conversa, brutas, shop_id, cliente, cota
+        session, canal, integration, conversa, brutas, shop_id, cliente, cota, afiliado=afiliado
     )
     # Retrato do pedido para o painel (no máximo a cada 30 min; nunca levanta).
     # O pedido que o cartão da mensagem acabou de buscar sai da memória da cota.
@@ -675,13 +804,15 @@ async def _caminhar(
     resultado: ResultadoSync,
     lidas: set[str],
     cota: enriquecer.Cota | None = None,
+    negocio: int = NEGOCIO_COMPRADOR,
 ) -> _Passo:
     """Desce pela lista de `inicio` (None = o topo, do agora para trás) até o `piso`.
 
     Lê no máximo `limite` conversas. A página pedida nunca passa do que falta
     — a passada nunca para no MEIO de uma página, então o `next_cursor` da
     última é o ponto exato de retomada, sem pular e sem reler conversa.
-    Levanta `_Interrompida` com o começo da página que falhou.
+    Levanta `_Interrompida` com o começo da página que falhou. `negocio` = a
+    lista (a dos compradores ou a dos afiliados, `business_type=11`).
     """
     pagina = inicio
     visto: int | None = None
@@ -696,8 +827,11 @@ async def _caminhar(
                 tipo=TIPO_LISTA,
                 page_size=min(PAGINA_CONVERSAS, limite - processadas),
                 next_timestamp_nano=(pagina or {}).get("next_message_time_nano"),
+                **_negocio_kw(negocio),
             )
             conversas = [c for c in (resp.get("conversations") or []) if isinstance(c, dict)]
+            if negocio == NEGOCIO_AFILIADO:
+                await _conferir_pagina_de_afiliados(session, integration, conversas)
             horarios = [
                 ts
                 for c in conversas
@@ -711,6 +845,7 @@ async def _caminhar(
                 logger.warning(
                     "atendimento_shopee_lista_fora_de_ordem",
                     canal_id=str(canal.id),
+                    negocio=negocio,
                     conversas=len(conversas),
                 )
             if horarios:
@@ -739,6 +874,7 @@ async def _caminhar(
                         _shop_id(cliente, conv),
                         lidas,
                         cota,
+                        negocio,
                     )
                 except (httpx.HTTPError, RuntimeError) as exc:
                     if _sem_escopo(exc):
@@ -752,6 +888,7 @@ async def _caminhar(
                         "atendimento_shopee_conversa_pulada",
                         canal_id=str(canal.id),
                         conversa_externo_id=externo_id,
+                        negocio=negocio,
                         vezes=vezes,
                         erro=_erro_operacao(exc),
                     )
@@ -840,9 +977,10 @@ async def _reconferir_enviadas(
     for conversa in conversas:
         if conversa.externo_id in lidas:
             continue  # já leu as mensagens nesta rodada
+        negocio = _negocio_da_conversa(conversa)
         try:
             resp = await cliente.chat_mensagens_pagina(
-                conversa.externo_id, page_size=PAGINA_MENSAGENS
+                conversa.externo_id, page_size=PAGINA_MENSAGENS, **_negocio_kw(negocio)
             )
         except (httpx.HTTPError, RuntimeError) as exc:
             logger.warning(
@@ -859,14 +997,26 @@ async def _reconferir_enviadas(
         ]
         lidas.add(conversa.externo_id)
         novas += await _gravar_brutas(
-            session, canal, integration, conversa, brutas, _shop_id(cliente), cliente, cota
+            session,
+            canal,
+            integration,
+            conversa,
+            brutas,
+            _shop_id(cliente),
+            cliente,
+            cota,
+            afiliado=negocio == NEGOCIO_AFILIADO,
         )
         await gravar.fim_do_item(session)
     return novas
 
 
 async def _atualizar_nao_lidas(
-    session: AsyncSession, canal: AtendimentoCanal, cliente: Any, total: int
+    session: AsyncSession,
+    canal: AtendimentoCanal,
+    cliente: Any,
+    total: int,
+    negocio: int = NEGOCIO_COMPRADOR,
 ) -> None:
     """O NÃO LIDO de agora em todas as conversas do canal (14/10/2026). SÓ LEITURA.
 
@@ -883,13 +1033,20 @@ async def _atualizar_nao_lidas(
     se a lista acabou. Falhou: não mexe em nada (fica o valor de antes) e a
     rodada segue. Roda ANTES da caminhada: a conversa que ela relê fica com o
     número da lista dela, que é mais novo.
+
+    Cada LISTA acerta só as conversas dela (15/10/2026, `negocio`): o total e
+    a lista padrão não trazem o chat de AFILIADO, que tem os seus
+    (`business_type=11`) — sem a separação, a lista dos compradores zeraria
+    toda conversa de afiliado a cada rodada.
     """
+    da_lista = _afiliado_sql() if negocio == NEGOCIO_AFILIADO else not_(_afiliado_sql())
     candidatas = await session.scalar(
         select(func.count())
         .select_from(AtendimentoConversa)
         .where(
             AtendimentoConversa.integration_id == canal.integration_id,
             AtendimentoConversa.canal == CANAL_CHAT,
+            da_lista,
             *([AtendimentoConversa.nao_lidas > 0] if total <= 0 else []),
         )
     )
@@ -907,6 +1064,7 @@ async def _atualizar_nao_lidas(
                     tipo=TIPO_NAO_LIDAS,
                     page_size=PAGINA_CONVERSAS,
                     next_timestamp_nano=(pagina or {}).get("next_message_time_nano"),
+                    **_negocio_kw(negocio),
                 )
                 conversas = [c for c in (resp.get("conversations") or []) if isinstance(c, dict)]
                 for conv in conversas:
@@ -932,6 +1090,7 @@ async def _atualizar_nao_lidas(
             logger.warning(
                 "atendimento_shopee_lista_nao_lidas_falhou",
                 canal_id=str(canal.id),
+                negocio=negocio,
                 erro=_erro_operacao(exc),
             )
             return
@@ -941,12 +1100,14 @@ async def _atualizar_nao_lidas(
         canal_nome=CANAL_CHAT,
         contagens=contagens,
         completa=completa,
+        restrito_a=da_lista,
     )
     await gravar.fim_do_item(session)
     if mudaram or not completa:
         logger.info(
             "atendimento_shopee_nao_lidas",
             canal_id=str(canal.id),
+            negocio=negocio,
             total=total,
             vistas=len(contagens),
             completa=completa,
@@ -954,63 +1115,45 @@ async def _atualizar_nao_lidas(
         )
 
 
-async def sincronizar(
+@dataclass
+class _Leitura:
+    """Uma lista lida na rodada: o cursor novo dela e, se uma passada caiu, o erro."""
+
+    cursor: _Cursor
+    processadas: int
+    falha: BaseException | None = None
+
+
+async def _ler_lista(
     session: AsyncSession,
     canal: AtendimentoCanal,
     integration: Integration,
     cliente: Any,
-) -> ResultadoSync:
-    """Lê o que mudou desde `canal.cursor`, grava e anda o cursor.
+    *,
+    cursor: _Cursor,
+    janela: int,
+    maximo: int,
+    resultado: ResultadoSync,
+    lidas: set[str],
+    cota: enriquecer.Cota,
+    negocio: int = NEGOCIO_COMPRADOR,
+) -> _Leitura:
+    """Uma lista de conversas na rodada: o TOPO primeiro (do agora até o
+    `ultimo_ts`), depois as lacunas com o que sobrar de `maximo`.
 
-    Commita a cada conversa (`gravar.fim_do_item`: a trava da conversa não
-    dura a rodada inteira); o canal (cursor, não lidas) o sync grava no fim.
-
-    Erro da Shopee ou de rede não levanta: volta como `ResultadoSync` com
-    status `erro` (ou `sem_escopo`, quando é permissão do app), e o cursor
-    fica apontando para o começo da página que falhou — nada é pulado.
+    Não levanta: a passada que cai devolve o cursor apontando para o começo
+    da página que falhou (as conversas dela que já passaram são relidas sem
+    duplicar nada) e o erro em `falha`. A mesma regra para a lista dos
+    compradores e a dos afiliados (15/10/2026, `negocio`), cada uma com o
+    seu cursor.
     """
-    resultado = ResultadoSync(status=STATUS_OK)
-
-    # 1) Termômetro da caixa — e a sonda de permissão: sem o módulo Chat,
-    #    volta `sem_escopo` sem gravar nada.
-    try:
-        nao_lidas = await cliente.chat_unread_count()
-    except (httpx.HTTPError, RuntimeError) as exc:
-        if _sem_escopo(exc):
-            logger.warning(
-                "atendimento_shopee_sem_escopo",
-                canal_id=str(canal.id),
-                erro=_erro_operacao(exc),
-            )
-            return ResultadoSync(status=STATUS_SEM_ESCOPO, erro=_erro_operacao(exc))
-        logger.warning(
-            "atendimento_shopee_nao_lidas_falhou",
-            canal_id=str(canal.id),
-            erro=_erro_operacao(exc),
-        )
-    else:
-        # O canal só é gravado no fim da rodada (`sync._registrar`): mexer nele
-        # aqui o deixaria travado durante todas as chamadas à Shopee, e a troca
-        # de modo pela tela esperaria.
-        resultado.nao_lidas = nao_lidas
-        # 1b) O não lido de agora em cada conversa (o "Falta responder" igual
-        #     ao Duoke). Sem o total (a chamada acima falhou), nada muda.
-        await _atualizar_nao_lidas(session, canal, cliente, nao_lidas)
-
-    # 2) O TOPO primeiro (do agora até o `ultimo_ts`), depois as lacunas com o
-    #    que sobrar do teto de conversas por rodada.
-    maximo = max(1, int(get_settings().atendimento_sync_max_conversas or 1))
-    janela = _ns_de(datetime.now(UTC) - JANELA_PRIMEIRA_LEITURA)
-    cursor = _Cursor.ler(canal.cursor, piso_inicial=janela)
     piso_topo = cursor.ultimo_ts if cursor.ultimo_ts is not None else janela
     ultimo_ts = cursor.ultimo_ts
     novas_lacunas: list[_Lacuna] = []
     pendentes = list(cursor.lacunas)
-    lidas: set[str] = set()
     restante = maximo
     processadas = 0
-    # Teto de idas à loja para cartões e retratos de pedido nesta rodada.
-    cota = enriquecer.Cota()
+    erro: BaseException | None = None
     try:
         try:
             topo = await _caminhar(
@@ -1025,6 +1168,7 @@ async def sincronizar(
                 resultado=resultado,
                 lidas=lidas,
                 cota=cota,
+                negocio=negocio,
             )
         except _Interrompida as falha:
             if falha.pagina is not None:
@@ -1054,6 +1198,7 @@ async def sincronizar(
                     resultado=resultado,
                     lidas=lidas,
                     cota=cota,
+                    negocio=negocio,
                 )
             except _Interrompida as falha:
                 pendentes[0] = _Lacuna(falha.pagina or lacuna.retomar, lacuna.piso)
@@ -1066,28 +1211,190 @@ async def sincronizar(
             if passo.processadas == 0 and not passo.terminou:
                 break  # nada andou: não gira em falso
     except _Interrompida as falha:
-        # Recomeça, na próxima rodada, do começo da página que falhou: as
-        # conversas dela que já passaram são relidas sem duplicar nada.
-        exc = falha.exc
-        canal.cursor = _Cursor(
-            ultimo_ts=ultimo_ts,
-            lacunas=_juntar_lacunas(novas_lacunas + pendentes),
-            falhas=cursor.falhas,
-        ).json()
-        resultado.status = STATUS_SEM_ESCOPO if _sem_escopo(exc) else STATUS_ERRO
-        resultado.erro = _erro_operacao(exc)
+        # Recomeça, na próxima rodada, do começo da página que falhou.
+        erro = falha.exc
+    novo = _Cursor(
+        ultimo_ts=ultimo_ts,
+        lacunas=_juntar_lacunas(novas_lacunas + pendentes),
+        falhas=cursor.falhas,
+    )
+    return _Leitura(cursor=novo, processadas=processadas, falha=erro)
+
+
+def _cursor_do_canal(compradores: _Cursor, afiliados: Any) -> dict:
+    """O `atendimento_canais.cursor` inteiro: o dos compradores no formato de
+    sempre e, dentro, o da lista de afiliados (`CHAVE_CURSOR_AFILIADO`)."""
+    saida = compradores.json()
+    if isinstance(afiliados, dict):
+        saida[CHAVE_CURSOR_AFILIADO] = dict(afiliados)
+    return saida
+
+
+async def _ler_afiliados(
+    session: AsyncSession,
+    canal: AtendimentoCanal,
+    integration: Integration,
+    cliente: Any,
+    *,
+    bruto: Any,
+    janela: int,
+    maximo: int,
+    resultado: ResultadoSync,
+    lidas: set[str],
+    cota: enriquecer.Cota,
+) -> _Leitura:
+    """O chat de AFILIADO (15/10/2026): o não lido e a lista dele. SÓ LEITURA.
+
+    Depois dos compradores (a mensagem do comprador não espera), com teto
+    próprio (`MAX_CONVERSAS_AFILIADO`) e o cursor dele (`bruto`, o
+    `cursor["afiliado"]` do canal; vazio = a primeira leitura, os últimos 7
+    dias). Nunca levanta: o total que falha fica no log (o não lido do
+    afiliado fica como estava); a lista que falha vira o aviso da rodada
+    (`resultado.erro`, com o canal `ok` — visível em Lojas) e o cursor dela
+    aponta para a página que falhou. Devolve a leitura da lista (o cursor
+    novo dela).
+    """
+    try:
+        total = await cliente.chat_unread_count(**_negocio_kw(NEGOCIO_AFILIADO))
+    except (httpx.HTTPError, RuntimeError) as exc:
+        logger.warning(
+            "atendimento_shopee_afiliados_nao_lidas_falhou",
+            canal_id=str(canal.id),
+            erro=_erro_operacao(exc),
+        )
+    else:
+        if resultado.nao_lidas is not None:
+            # O termômetro da loja: a Shopee conta as duas listas à parte.
+            resultado.nao_lidas += total
+        await _atualizar_nao_lidas(session, canal, cliente, total, NEGOCIO_AFILIADO)
+
+    leitura = await _ler_lista(
+        session,
+        canal,
+        integration,
+        cliente,
+        cursor=_Cursor.ler(bruto, piso_inicial=janela),
+        janela=janela,
+        maximo=min(maximo, MAX_CONVERSAS_AFILIADO),
+        resultado=resultado,
+        lidas=lidas,
+        cota=cota,
+        negocio=NEGOCIO_AFILIADO,
+    )
+    if leitura.falha is not None:
+        aviso = f"chat de afiliado: {_erro_operacao(leitura.falha)}"
+        resultado.erro = f"{resultado.erro} · {aviso}" if resultado.erro else aviso
+        logger.warning(
+            "atendimento_shopee_afiliados_falhou",
+            canal_id=str(canal.id),
+            erro=_erro_operacao(leitura.falha),
+            conversas=leitura.processadas,
+        )
+    return leitura
+
+
+async def sincronizar(
+    session: AsyncSession,
+    canal: AtendimentoCanal,
+    integration: Integration,
+    cliente: Any,
+) -> ResultadoSync:
+    """Lê o que mudou desde `canal.cursor`, grava e anda o cursor.
+
+    Commita a cada conversa (`gravar.fim_do_item`: a trava da conversa não
+    dura a rodada inteira); o canal (cursor, não lidas) o sync grava no fim.
+
+    Erro da Shopee ou de rede não levanta: volta como `ResultadoSync` com
+    status `erro` (ou `sem_escopo`, quando é permissão do app), e o cursor
+    fica apontando para o começo da página que falhou — nada é pulado. O
+    chat de afiliado (15/10/2026) é lido depois, só com a lista dos
+    compradores em dia, e a falha dele não derruba a rodada (`_ler_afiliados`).
+    """
+    resultado = ResultadoSync(status=STATUS_OK)
+
+    # 1) Termômetro da caixa — e a sonda de permissão: sem o módulo Chat,
+    #    volta `sem_escopo` sem gravar nada.
+    try:
+        nao_lidas = await cliente.chat_unread_count()
+    except (httpx.HTTPError, RuntimeError) as exc:
+        if _sem_escopo(exc):
+            logger.warning(
+                "atendimento_shopee_sem_escopo",
+                canal_id=str(canal.id),
+                erro=_erro_operacao(exc),
+            )
+            return ResultadoSync(status=STATUS_SEM_ESCOPO, erro=_erro_operacao(exc))
+        logger.warning(
+            "atendimento_shopee_nao_lidas_falhou",
+            canal_id=str(canal.id),
+            erro=_erro_operacao(exc),
+        )
+    else:
+        # O canal só é gravado no fim da rodada (`sync._registrar`): mexer nele
+        # aqui o deixaria travado durante todas as chamadas à Shopee, e a troca
+        # de modo pela tela esperaria.
+        resultado.nao_lidas = nao_lidas
+        # 1b) O não lido de agora em cada conversa (o "Falta responder" igual
+        #     ao Duoke). Sem o total (a chamada acima falhou), nada muda.
+        await _atualizar_nao_lidas(session, canal, cliente, nao_lidas)
+
+    # 2) Os COMPRADORES: o TOPO primeiro (do agora até o `ultimo_ts`), depois
+    #    as lacunas com o que sobrar do teto de conversas por rodada.
+    maximo = max(1, int(get_settings().atendimento_sync_max_conversas or 1))
+    janela = _ns_de(datetime.now(UTC) - JANELA_PRIMEIRA_LEITURA)
+    cursor = _Cursor.ler(canal.cursor, piso_inicial=janela)
+    bruto_afiliados = (
+        canal.cursor.get(CHAVE_CURSOR_AFILIADO) if isinstance(canal.cursor, dict) else None
+    )
+    lidas: set[str] = set()
+    # Teto de idas à loja para cartões e retratos de pedido nesta rodada.
+    cota = enriquecer.Cota()
+    leitura = await _ler_lista(
+        session,
+        canal,
+        integration,
+        cliente,
+        cursor=cursor,
+        janela=janela,
+        maximo=maximo,
+        resultado=resultado,
+        lidas=lidas,
+        cota=cota,
+    )
+    if leitura.falha is not None:
+        caiu = leitura.falha
+        canal.cursor = _cursor_do_canal(leitura.cursor, bruto_afiliados)
+        resultado.status = STATUS_SEM_ESCOPO if _sem_escopo(caiu) else STATUS_ERRO
+        resultado.erro = _erro_operacao(caiu)
         logger.warning(
             "atendimento_shopee_sync_falhou",
             canal_id=str(canal.id),
             status=resultado.status,
             erro=resultado.erro,
-            conversas=processadas,
+            conversas=leitura.processadas,
             mensagens=resultado.mensagens_novas,
         )
         return resultado
 
-    lacunas = _juntar_lacunas(novas_lacunas + pendentes)
-    canal.cursor = _Cursor(ultimo_ts=ultimo_ts, lacunas=lacunas, falhas=cursor.falhas).json()
+    # 2b) O chat de AFILIADO (15/10/2026): a lista à parte que a padrão não traz.
+    #     O cursor do canal só é escrito DEPOIS dela, numa atribuição só: o
+    #     `canal` sujo antes iria no autoflush do primeiro SELECT da lista de
+    #     afiliados e a linha de `atendimento_canais` ficaria travada durante
+    #     as chamadas à Shopee (medido na revisão de 15/10: `FOR UPDATE
+    #     NOWAIT` de outra sessão caía em `LockNotAvailable`).
+    afiliados = await _ler_afiliados(
+        session,
+        canal,
+        integration,
+        cliente,
+        bruto=bruto_afiliados,
+        janela=janela,
+        maximo=maximo,
+        resultado=resultado,
+        lidas=lidas,
+        cota=cota,
+    )
+    canal.cursor = _cursor_do_canal(leitura.cursor, afiliados.cursor.json())
 
     # 3) A nossa resposta recente que a Shopee pode ter barrado depois.
     resultado.mensagens_novas += await _reconferir_enviadas(
@@ -1098,10 +1405,11 @@ async def sincronizar(
     logger.info(
         "atendimento_shopee_sync",
         canal_id=str(canal.id),
-        conversas=processadas,
+        conversas=leitura.processadas,
+        afiliados=afiliados.processadas,
         conversas_novas=resultado.conversas_novas,
         mensagens_novas=resultado.mensagens_novas,
-        lacunas=len(lacunas),
+        lacunas=len(leitura.cursor.lacunas),
         enriquecidas=enriquecidas,
     )
     return resultado

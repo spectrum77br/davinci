@@ -50,6 +50,29 @@ logger = structlog.get_logger()
 SHOPEE_LIVE_BASE = "https://partner.shopeemobile.com"
 SHOPEE_TEST_BASE = "https://partner.test-stable.shopeemobile.com"
 
+# `business_type` do chat (sellerchat): 0 = chat com COMPRADOR (o padrão da
+# Shopee, quando o parâmetro não vai); 11 = chat de AFILIADO (o criador de
+# conteúdo que divulga a loja). Medido em produção em 15/10/2026 (só
+# leitura, Barbosa e Marquezini): SEM o parâmetro a conversa de afiliado não
+# existe para a API — fora da `get_conversation_list` (all e unread), fora
+# do `get_unread_conversation_count`, e `get_one_conversation`/`get_message`
+# respondem `param_error` ("Error or loss in request parameter"); COM
+# `business_type=11` as quatro respondem, no mesmo formato (o item não traz
+# o campo — quem pediu sabe de que lista é). O envio
+# (`send_message`) pede `business_type` + `conversation_id` (EcomPHP/
+# shopee-php, PR 7 e 9, nov/2024) — NÃO medido, e o DaVinci não envia em
+# chat de afiliado (`constantes.motivo_canal_sem_envio`).
+NEGOCIO_COMPRADOR = 0
+NEGOCIO_AFILIADO = 11
+
+
+def _com_negocio(params: dict[str, Any], business_type: int) -> dict[str, Any]:
+    """`business_type` só quando não é o padrão: o pedido do chat do comprador
+    continua byte a byte o de antes."""
+    if business_type:
+        params["business_type"] = int(business_type)
+    return params
+
 
 # Error codes that mean the listing has been removed/banned/suspended by
 # Shopee (operational state) — not a transient or auth problem. These map to
@@ -285,7 +308,9 @@ class ShopeeClient:
             if r.status_code == 200:
                 body = r.json() or {}
                 if not body.get("error"):
-                    return TestResult(ok=True, info={"shop_id": self.shop_id, "name": body.get("shop_name")})
+                    return TestResult(
+                        ok=True, info={"shop_id": self.shop_id, "name": body.get("shop_name")}
+                    )
                 return TestResult(ok=False, detail=f"{body.get('error')}: {body.get('message')}")
             return TestResult(ok=False, detail=f"status={r.status_code} body={r.text[:200]}")
         except httpx.HTTPError as e:
@@ -822,6 +847,7 @@ class ShopeeClient:
         tipo: str = "all",
         page_size: int = 25,
         next_timestamp_nano: int | str | None = None,
+        business_type: int = NEGOCIO_COMPRADOR,
     ) -> dict:
         """Uma página da lista de conversas da loja
         (GET /api/v2/sellerchat/get_conversation_list). Devolve o `response`
@@ -843,7 +869,10 @@ class ShopeeClient:
         19 dígitos) — quem pagina manda de volta em `next_timestamp_nano`.
         `tipo` vai no parâmetro `type` (all | pinned | unread). `page_size`
         acima de 25 é cortado: 60 devolveu lista VAZIA em algumas lojas
-        (medido em 28/09) — o que pareceria "sem conversa nova"."""
+        (medido em 28/09) — o que pareceria "sem conversa nova".
+
+        `business_type=NEGOCIO_AFILIADO` (15/10/2026) lista SÓ os chats de
+        afiliado — que a lista padrão não traz (ver `NEGOCIO_AFILIADO`)."""
         params: dict[str, Any] = {
             "direction": direction,
             "type": tipo,
@@ -854,29 +883,36 @@ class ShopeeClient:
         return await self._call(
             "GET",
             "/api/v2/sellerchat/get_conversation_list",
-            params=params,
+            params=_com_negocio(params, business_type),
             what="shopee_chat_conversas",
         )
 
-    async def chat_one_conversation(self, conversation_id: str) -> dict:
+    async def chat_one_conversation(
+        self, conversation_id: str, *, business_type: int = NEGOCIO_COMPRADOR
+    ) -> dict:
         """UMA conversa (GET /api/v2/sellerchat/get_one_conversation), no
         mesmo formato de cada item da `chat_conversation_list`. Não marca como
-        lida."""
+        lida. A de afiliado só com `business_type=NEGOCIO_AFILIADO` (sem ele,
+        `param_error` — medido em 15/10/2026)."""
         return await self._call(
             "GET",
             "/api/v2/sellerchat/get_one_conversation",
-            params={"conversation_id": str(conversation_id)},
+            params=_com_negocio({"conversation_id": str(conversation_id)}, business_type),
             what="shopee_chat_conversa",
         )
 
-    async def chat_unread_count(self) -> int:
+    async def chat_unread_count(self, *, business_type: int = NEGOCIO_COMPRADOR) -> int:
         """Quantas conversas a Shopee diz estarem não lidas na loja
         (GET /api/v2/sellerchat/get_unread_conversation_count →
         `total_unread_count`). É o termômetro da caixa: se aqui diz 5 e a
-        leitura do DaVinci não mostra nada, a leitura está incompleta."""
+        leitura do DaVinci não mostra nada, a leitura está incompleta. O
+        padrão NÃO conta o chat de afiliado: esse é o mesmo pedido com
+        `business_type=NEGOCIO_AFILIADO` (medido em 15/10/2026: Barbosa 10 + 1,
+        Marquezini 4 + 3)."""
         resp = await self._call(
             "GET",
             "/api/v2/sellerchat/get_unread_conversation_count",
+            params=_com_negocio({}, business_type) or None,
             what="shopee_chat_nao_lidas",
         )
         try:
@@ -890,6 +926,7 @@ class ShopeeClient:
         *,
         offset: str | None = None,
         page_size: int = 25,
+        business_type: int = NEGOCIO_COMPRADOR,
     ) -> dict:
         """Uma página das mensagens de UMA conversa
         (GET /api/v2/sellerchat/get_message), das mais novas para as mais
@@ -897,7 +934,10 @@ class ShopeeClient:
         `response` como veio: `{messages: [...], page_result: {next_offset,
         page_size}}` — a página seguinte (mais antiga) sai de `offset=
         next_offset`. Não marca como lida (ver `chat_messages` para quem
-        mandou: `from_shop_id == shop_id`)."""
+        mandou: `from_shop_id == shop_id`). A conversa de afiliado só com
+        `business_type=NEGOCIO_AFILIADO` (sem ele, `param_error` — medido em
+        15/10/2026); a mensagem vem no formato de sempre, SEM o campo
+        `business_type`."""
         params: dict[str, Any] = {
             "conversation_id": str(conversation_id),
             "page_size": min(max(1, int(page_size)), 50),
@@ -907,7 +947,7 @@ class ShopeeClient:
         return await self._call(
             "GET",
             "/api/v2/sellerchat/get_message",
-            params=params,
+            params=_com_negocio(params, business_type),
             what="shopee_chat_mensagens",
         )
 
@@ -1341,7 +1381,7 @@ class ShopeeClient:
 
     async def update_stock(
         self,
-        link: "ProductLink",
+        link: ProductLink,
         qty: int,
         *,
         bling_store_id: int | None = None,  # ignored for Shopee
@@ -1730,7 +1770,7 @@ class ShopeeClient:
                 page_idx += 1
                 await asyncio.sleep(1.0)
 
-    async def get_listing_snapshot(self, link: "ProductLink") -> dict | None:
+    async def get_listing_snapshot(self, link: ProductLink) -> dict | None:
         """Current SKU + title for the item/model this link points to
         (item_id=external_id, model_id=variation_id). Returns ``{"sku",
         "title"}`` or None when it can't be read. For a variation link we read
@@ -1777,7 +1817,7 @@ class ShopeeClient:
             return None
         return {"sku": (it.get("item_sku") or "").strip() or None, "title": title}
 
-    async def get_listing_price(self, link: "ProductLink") -> float | None:
+    async def get_listing_price(self, link: ProductLink) -> float | None:
         """Read the current price from /api/v2/product/get_item_base_info.
 
         Shopee quotes one current_price entry per model under price_info.

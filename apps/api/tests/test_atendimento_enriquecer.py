@@ -348,15 +348,24 @@ class ShopeeFalso:
         return sum(1 for n, _ in self.chamadas if n == nome)
 
     # — chat —
-    async def chat_unread_count(self) -> int:
-        return len(self.conversas)
+    async def chat_unread_count(self, *, business_type=0) -> int:
+        # Sem chat de afiliado aqui (`business_type=11`, 15/10/2026): zero.
+        return 0 if business_type else len(self.conversas)
 
     async def chat_conversation_list(
-        self, *, direction="older", tipo="all", page_size=25, next_timestamp_nano=None
+        self,
+        *,
+        direction="older",
+        tipo="all",
+        page_size=25,
+        next_timestamp_nano=None,
+        business_type=0,
     ) -> dict:
         lista = sorted(
             self.conversas.values(), key=lambda c: c["last_message_timestamp"], reverse=True
         )
+        if business_type:
+            lista = []  # sem chat de afiliado aqui
         if next_timestamp_nano is not None:
             lista = [c for c in lista if c["last_message_timestamp"] < int(next_timestamp_nano)]
         pagina = lista[:page_size]
@@ -375,7 +384,9 @@ class ShopeeFalso:
             "conversations": pagina,
         }
 
-    async def chat_mensagens_pagina(self, cid, *, offset=None, page_size=25) -> dict:
+    async def chat_mensagens_pagina(
+        self, cid, *, offset=None, page_size=25, business_type=0
+    ) -> dict:
         msgs = sorted(self.mensagens.get(cid, []), key=lambda m: -m["created_timestamp"])
         return {"messages": msgs, "page_result": {"next_offset": "", "page_size": page_size}}
 
