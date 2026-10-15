@@ -625,7 +625,7 @@ async def test_recalcular_loja_classifica_as_situacoes(db, make_user):
     esperando = pedidos["299012"]
     assert esperando.situacao == "aguardando" and esperando.etapa == "aguardando"
     assert esperando.previsao_liberacao is not None and "libera em 25/10" in esperando.motivo
-    assert esperando.sobrou == Decimal("39.22")  # previsto − custo, enquanto não libera
+    assert esperando.sobrou is None and esperando.margem is None  # só com dinheiro que entrou
 
     estornado = pedidos["299520"]
     assert estornado.situacao == "estornado_depois" and estornado.etapa == "pendencia"

@@ -350,7 +350,7 @@ onMounted(() => {
             </tbody>
           </table>
         </div>
-        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Pedidos pela data da venda, do dia 1º até o dia escolhido. "Recebido" é o que já entrou na conta; "Sobrou" = o que entrou (ou o previsto, enquanto a venda não libera) − custo − reembolsos; cancelado não carrega custo. O fechamento completo, com a fatura do ML e a prova dos nove do caixa, está em "Fechamento do mês".</div>
+        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Pedidos pela data da venda, do dia 1º até o dia escolhido. "Recebido" é o que já entrou na conta; "Sobrou" e "Margem" só com dinheiro que entrou: sobrou = recebido − custo − reembolsos; cancelado não carrega custo. O fechamento completo, com a fatura do ML e a prova dos nove do caixa, está em "Fechamento do mês".</div>
       </div>
     </template>
   </div>
