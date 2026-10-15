@@ -160,6 +160,9 @@ def situacao_do_pedido(
         if cancelada and abs(recebido) <= TOLERANCIA:
             situacao = "cancelado"
             motivo = "venda desfeita: liberou e devolveu"
+            # Tudo voltou: não existe "saiu depois" (a mediação pode cair segundos
+            # depois da última liberação e parecer saída tardia — 15/10, 301418).
+            saidas_depois = None
         elif (
             saidas_depois and saidas_depois > TOLERANCIA and recebido < liberado_valor - TOLERANCIA
         ):

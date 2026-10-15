@@ -97,6 +97,7 @@ type Movimento = {
   frete: number | null
   descontado_da_venda: boolean | null
   original: Record<string, unknown> | null
+  pagamento_id: string | null
 }
 type Versao = Record<string, number | string | null | undefined>
 type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; movimentos: Movimento[] }
@@ -146,6 +147,15 @@ const exportando = ref(false)
 const salvando = ref(false)
 const obsDraft = ref('')
 const originalAberto = ref<string | null>(null) // movimento com a linha original do relatório aberta
+// Reservas por reclamação vêm em pares (reserva −X, devolução +X) e somam zero:
+// ficam escondidas por padrão no Raio-X, com um clique pra ver (15/10).
+const mostrarReservas = ref(false)
+const movimentosVisiveis = computed(() => {
+  const todos = raiox.value?.movimentos || []
+  return mostrarReservas.value ? todos : todos.filter((m) => !m.tipo.startsWith('reserva_'))
+})
+const reservasEscondidas = computed(() => (raiox.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_')).length)
+const pagamentosDoPedido = computed(() => new Set((raiox.value?.movimentos || []).map((m) => m.pagamento_id).filter(Boolean)).size)
 const motivoDraft = ref('')
 
 const lojaAtual = computed(() => lojas.value.find((l) => l.conta === loja.value) || null)
@@ -601,10 +611,17 @@ await carregar()
               <thead class="bg-muted text-[10px] uppercase text-muted-foreground"><tr><th class="px-1.5 py-1 text-left">Data</th><th class="px-1.5 py-1 text-left">Origem</th><th class="px-1.5 py-1 text-left">O que foi</th><th class="px-1.5 py-1 text-right">Valor</th><th class="px-1 py-1"></th></tr></thead>
               <tbody class="tabular-nums">
                 <tr v-if="!raiox.movimentos.length"><td colspan="5" class="px-1.5 py-2 text-center text-muted-foreground">nenhum movimento ainda</td></tr>
-                <template v-for="m in raiox.movimentos" :key="m.id">
-                  <tr class="border-b">
+                <tr v-if="reservasEscondidas" class="border-b bg-muted/30">
+                  <td colspan="5" class="px-1.5 py-1 text-muted-foreground">
+                    {{ reservasEscondidas }} linha(s) de reserva por reclamação {{ mostrarReservas ? 'à mostra' : 'escondida(s)' }} (vão e voltam, somam zero)
+                    <button type="button" class="ml-1 underline" @click="mostrarReservas = !mostrarReservas">{{ mostrarReservas ? 'esconder' : 'mostrar' }}</button>
+                    <span v-if="pagamentosDoPedido > 1" class="ml-2">· {{ pagamentosDoPedido }} pagamentos nesta venda</span>
+                  </td>
+                </tr>
+                <template v-for="m in movimentosVisiveis" :key="m.id">
+                  <tr class="border-b" :class="m.tipo.startsWith('reserva_') && 'text-muted-foreground'">
                     <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ fmtDiaHora(m.data) }}</td>
-                    <td class="whitespace-nowrap px-1.5 py-1">{{ m.origem === 'mp_extrato' ? 'extrato' : 'fatura' }}</td>
+                    <td class="whitespace-nowrap px-1.5 py-1">{{ m.origem === 'mp_extrato' ? 'extrato' : 'fatura' }}<span v-if="pagamentosDoPedido > 1 && m.pagamento_id" class="ml-1 text-[10px] text-muted-foreground" :title="'pagamento ' + m.pagamento_id">pag. …{{ String(m.pagamento_id).slice(-4) }}</span></td>
                     <td class="px-1.5 py-1">{{ tipoMov(m.tipo) }}<span v-if="m.descontado_da_venda === false" class="ml-1 text-muted-foreground">(cobrada à parte)</span></td>
                     <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold" :class="(m.credito || 0) > 0 ? 'text-emerald-700' : 'text-red-600'">{{ (m.credito || 0) > 0 ? '+ ' + fmtMoney(m.credito) : '− ' + fmtMoney(m.debito) }}</td>
                     <td class="px-1 py-1 text-right">
