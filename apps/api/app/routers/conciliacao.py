@@ -3839,7 +3839,8 @@ async def sonda_tiktok(
         "/finance/202309/statements",
         {
             "statement_time_ge": str(t_de),
-            "statement_time_lt": str(agora),
+            # a API filtra por dia e exclui o dia do `lt`: amanhã pra ver o de hoje
+            "statement_time_lt": str(agora + 86400),
             "page_size": "50",
             "sort_field": "statement_time",
             "sort_order": "DESC",
@@ -3900,7 +3901,7 @@ async def sonda_tiktok(
         "/finance/202309/payments",
         {
             "create_time_ge": str(t_de),
-            "create_time_lt": str(agora),
+            "create_time_lt": str(agora + 86400),
             "page_size": "50",
             "sort_field": "create_time",
             "sort_order": "DESC",

@@ -297,7 +297,9 @@ async def run_tiktok_sync(
     de = max(loja.inicio, hoje - timedelta(days=max_dias))
     # extrato cujo dia (data UTC do statement_time) é >= início
     t_de = int(datetime.combine(de, datetime.min.time(), tzinfo=UTC).timestamp())
-    t_ate = int(agora.timestamp()) + 1
+    # a API filtra por DIA e o `lt` exclui o dia inteiro: com lt = agora, o extrato de
+    # hoje (pago de madrugada) só aparecia amanhã (15/10, repasse 3.819,28) → lt = amanhã
+    t_ate = int((agora + timedelta(days=1)).timestamp())
     resumo: dict[str, Any] = {"extratos": [], "inseridos": 0, "pulados_processando": 0, "erros": []}
     integration = await session.get(Integration, loja.integration_id)
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
