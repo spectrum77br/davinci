@@ -964,11 +964,18 @@ def _carregar_0393():
 def test_0393_uma_ponta_so_e_depois_da_0392():
     """Era a 0392 até a `0392_marketing_conta_conferencia` entrar no main (e em
     produção) com a mesma base: duas pontas e o `alembic upgrade head` do
-    deploy falharia."""
+    deploy falharia.
+
+    Não exige mais que a 0393 SEJA a ponta: o main seguiu (0401 em
+    15/10/2026) e o teste ficava vermelho sem nada de errado. O que importa é
+    haver uma ponta só e a 0393 estar na corrente dela, logo depois da 0392."""
     config = Config()
     config.set_main_option("script_location", str(_ALEMBIC))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0393_criativos_duracao_ia"]
+    pontas = scripts.get_heads()
+    assert len(pontas) == 1, pontas
+    corrente = {r.revision for r in scripts.walk_revisions("base", pontas[0])}
+    assert "0393_criativos_duracao_ia" in corrente
     nossa = scripts.get_revision("0393_criativos_duracao_ia")
     assert nossa.down_revision == "0392_marketing_conta_conferencia"
 
