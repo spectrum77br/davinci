@@ -548,7 +548,7 @@ await carregar()
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_valor) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_tarifa) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_frete) }}</td>
-                <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :class="(p.venda_extras || 0) > 0.005 && 'text-red-600'" :title="extrasTitulo(p)">{{ fmtMoney(p.venda_extras) }}</td>
+                <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :title="extrasTitulo(p)">{{ fmtMoney(p.venda_extras) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums">{{ fmtMoney(p.venda_liquido) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1" :class="!p.liberado_em && 'text-muted-foreground'">
                   <template v-if="p.liberado_em">{{ fmtDia(p.liberado_em) }}</template>
