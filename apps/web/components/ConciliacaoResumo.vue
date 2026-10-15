@@ -55,7 +55,7 @@ type Mes = {
   ajustes_meses_anteriores: number
   ajustes_qtd: number
 }
-type Dinheiro = { na_conta: number | null; saldo_em: string | null; a_liberar: number; a_liberar_pedidos: number; reservado: number | null }
+type Dinheiro = { na_conta: number | null; saldo_em: string | null; a_liberar: number; a_liberar_pedidos: number; reservado: number | null; preso?: number | null }
 type LojaResumo = {
   conta: string
   platform: string
@@ -341,7 +341,7 @@ onMounted(() => {
                 <tr v-for="l in g.lojas" v-show="abertos[g.key]" :key="'d' + l.conta" class="cursor-pointer border-b hover:bg-muted/40" title="abre os pedidos desta loja aguardando liberação" @click="emit('ver-pedidos', l.conta, { situacao: 'aguardando' })">
                   <td class="px-2 py-1 pl-4">
                     <div class="font-bold">{{ l.conta }}</div>
-                    <div class="text-[10px] text-muted-foreground"><template v-if="l.platform === 'tiktok'">repassa pro banco todo dia</template><template v-else>saldo de {{ fmtDiaHora(l.dinheiro.saldo_em) }}</template> · {{ l.dinheiro.a_liberar_pedidos }} pedidos a liberar<template v-if="l.dinheiro.reservado != null"> · reservado {{ fmtMoney(l.dinheiro.reservado) }}</template></div>
+                    <div class="text-[10px] text-muted-foreground"><template v-if="l.platform === 'tiktok'">repassa pro banco todo dia</template><template v-else>saldo de {{ fmtDiaHora(l.dinheiro.saldo_em) }}</template> · {{ l.dinheiro.a_liberar_pedidos }} pedidos a liberar<template v-if="l.dinheiro.reservado != null"> · reservado {{ fmtMoney(l.dinheiro.reservado) }}</template><template v-if="l.dinheiro.preso != null"> · preso na reserva por entrega {{ fmtMoney(l.dinheiro.preso) }}</template></div>
                   </td>
                   <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(l.dinheiro.na_conta) }}</td>
                   <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(l.dinheiro.a_liberar) }}</td>
@@ -355,7 +355,7 @@ onMounted(() => {
               </tr>
             </tbody>
           </table>
-          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Na conta = último saldo do extrato, como a plataforma informou (a TikTok não guarda saldo: repassa pro banco todo dia). A liberar = líquido previsto das vendas ainda não liberadas. Clique na loja abre os pedidos dela.</div>
+          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Na conta = último saldo do extrato, como a plataforma informou (a TikTok não guarda saldo: repassa pro banco todo dia; na Amazon é o que já está liberado). A liberar = líquido previsto das vendas ainda não liberadas (na Amazon inclui o que está preso na reserva por entrega). Clique na loja abre os pedidos dela.</div>
         </div>
         </div>
       </div>

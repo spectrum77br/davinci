@@ -6,19 +6,23 @@ import { ChevronLeft, ChevronRight, Loader2, Lock, LockOpen, Search } from 'luci
 import { STATUS_MOV, fmtDia, fmtDiaHora, fmtHora, fmtMoney, ontemISO, sitCls, somaDias, tipoMov } from '~/lib/conciliacao'
 
 const props = defineProps<{ loja: string; canEdit: boolean; dia?: string; plataforma?: string }>()
-const fonte = computed(() => (props.plataforma === 'shopee' ? 'carteira da Shopee' : props.plataforma === 'tiktok' ? 'extrato diário da TikTok' : 'extrato do Mercado Pago'))
-const quemInforma = computed(() => (props.plataforma === 'shopee' ? 'Shopee' : props.plataforma === 'tiktok' ? 'TikTok' : 'Mercado Pago'))
+const fonte = computed(() => (props.plataforma === 'shopee' ? 'carteira da Shopee' : props.plataforma === 'tiktok' ? 'extrato diário da TikTok' : props.plataforma === 'amazon' ? 'transações da Amazon' : 'extrato do Mercado Pago'))
+const quemInforma = computed(() => (props.plataforma === 'shopee' ? 'Shopee' : props.plataforma === 'tiktok' ? 'TikTok' : props.plataforma === 'amazon' ? 'Amazon' : 'Mercado Pago'))
 // TikTok não tem saldo: o extrato do dia começa em 0, cada pedido liquidado sobe e o
 // repasse pro banco zera — a prova dos nove é "pedidos = extrato = repasse".
 const rodape = computed(() =>
   props.plataforma === 'tiktok'
     ? { inicial: 'Início do extrato', creditos: 'Pedidos liquidados', debitos: 'Repasse pro banco', final: 'Pedidos − repasse', informado: 'Tem que dar', diferenca: 'Diferença' }
-    : { inicial: 'Saldo inicial', creditos: 'Entradas (créditos)', debitos: 'Saídas (débitos)', final: 'Saldo final calculado', informado: `Saldo informado pelo ${quemInforma.value}`, diferenca: 'Diferença' },
+    : props.plataforma === 'amazon'
+      ? { inicial: 'Saldo na Amazon (início do dia)', creditos: 'Lançamentos e ajustes', debitos: 'Estornos, tarifas e repasses', final: 'Saldo na Amazon (fim do dia)', informado: 'Saldo encadeado', diferenca: 'Diferença' }
+      : { inicial: 'Saldo inicial', creditos: 'Entradas (créditos)', debitos: 'Saídas (débitos)', final: 'Saldo final calculado', informado: `Saldo informado pelo ${quemInforma.value}`, diferenca: 'Diferença' },
 )
 const notaRodape = computed(() =>
   props.plataforma === 'tiktok'
     ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). A TikTok não guarda saldo: o extrato do dia soma os pedidos liquidados e o repasse leva tudo pro banco — a conta tem que dar zero.'
-    : 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.',
+    : props.plataforma === 'amazon'
+      ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Cada pedido entra 3 a 4 dias depois do envio e fica "preso na reserva" até ~7 dias depois da entrega; o saldo aqui é reserva + disponível, e a cada 14 dias o repasse pro banco sai dele.'
+      : 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.',
 )
 const emit = defineEmits<{ (e: 'ver-pedido', pedido: string): void }>()
 
@@ -287,7 +291,7 @@ onMounted(() => {
             <tbody>
               <tr v-if="loading && !dados"><td colspan="14" class="py-8 text-center text-muted-foreground"><Loader2 class="mr-1 inline size-4 animate-spin" /> carregando…</td></tr>
               <tr v-else-if="erro"><td colspan="14" class="py-8 text-center text-red-600">{{ erro }}</td></tr>
-              <tr v-else-if="dados && !movimentosVisiveis.length"><td colspan="14" class="py-8 text-center text-muted-foreground">{{ dados.totais.linhas ? (dados.movimentos.length ? 'só reservas neste dia (escondidas)' : 'nada com esse filtro') : (props.plataforma === 'tiktok' ? 'nenhum extrato da TikTok neste dia (ela fecha um extrato por dia e repassa pro banco de madrugada; o robô lê às 06:00 — "Sincronizar agora" busca o que já saiu)' : 'nenhum movimento lido neste dia (o extrato é lido de madrugada; "Sincronizar agora" pede o de ontem)') }}</td></tr>
+              <tr v-else-if="dados && !movimentosVisiveis.length"><td colspan="14" class="py-8 text-center text-muted-foreground">{{ dados.totais.linhas ? (dados.movimentos.length ? 'só reservas neste dia (escondidas)' : 'nada com esse filtro') : (props.plataforma === 'tiktok' ? 'nenhum extrato da TikTok neste dia (ela fecha um extrato por dia e repassa pro banco de madrugada; o robô lê às 06:00 — "Sincronizar agora" busca o que já saiu)' : props.plataforma === 'amazon' ? 'nenhum lançamento da Amazon neste dia (os pedidos entram 3 a 4 dias depois do envio; "Sincronizar agora" relê os últimos dias)' : 'nenhum movimento lido neste dia (o extrato é lido de madrugada; "Sincronizar agora" pede o de ontem)') }}</td></tr>
               <tr
                 v-for="m in movimentosVisiveis"
                 :key="m.id"

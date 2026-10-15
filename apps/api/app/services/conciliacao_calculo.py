@@ -234,6 +234,50 @@ def conta_tiktok(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] 
     return conta_tiktok_de_transacoes(txs if isinstance(txs, list) else [])
 
 
+def conta_amazon_de_transacoes(txs: list[Any]) -> dict[str, Decimal] | None:
+    """A conta de um pedido na Amazon somando as quebras de todas as transações dele
+    (Shipment + ServiceFee + Refund…), como a tela Transações (15/10, seção 24)."""
+    from collections import defaultdict
+
+    from app.services.conciliacao_amazon import conta_amazon_de_quebras, somar_quebras
+
+    txs = [t for t in txs if isinstance(t, dict)]
+    if not txs:
+        return None
+    acc: dict[str, Decimal] = defaultdict(Decimal)
+    total = ZERO
+    for t in txs:
+        somar_quebras(t.get("breakdowns"), acc)
+        for it in t.get("items") or []:
+            if isinstance(it, dict):
+                somar_quebras(it.get("breakdowns"), acc)
+        amt = (t.get("totalAmount") or {}).get("currencyAmount")
+        try:
+            total += Decimal(str(amt)) if amt not in (None, "") else ZERO
+        except InvalidOperation:
+            pass
+    conta = conta_amazon_de_quebras(dict(acc))
+    conta["liquido"] = total.quantize(Decimal("0.01"))
+    conta["outros"] = conta["liquido"] - (
+        conta["produto"] + conta["frete_cliente"] + conta["promocao"] + conta["tarifas"]
+    )
+    return conta
+
+
+def conta_amazon(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] | None:
+    """A partir do que a Margem guardou (`raw.transactions` = resposta da Finances API
+    por pedido). Pedido ainda não lançado (pending) → None."""
+    raw = venda.raw if (venda is not None and isinstance(venda.raw, dict)) else None
+    body = raw.get("transactions") if raw else None
+    payload = (
+        body.get("payload")
+        if isinstance(body, dict) and isinstance(body.get("payload"), dict)
+        else body
+    )
+    txs = payload.get("transactions") if isinstance(payload, dict) else None
+    return conta_amazon_de_transacoes(txs if isinstance(txs, list) else [])
+
+
 def _previsao_do_unsettled(raw: Any) -> datetime | None:
     """TikTok: a varredura do unsettled da Margem guarda `raw.unsettled_estimate`
     (est_settlement_amount + estimated_settlement). Quando vier uma data/epoch,
@@ -659,6 +703,21 @@ async def recalcular_loja(
         # TikTok: a conta do extrato por pedido (valor = após desconto da loja,
         # tarifa = todas as taxas, frete = parte da loja)
         tiktok = conta_tiktok(venda_ok) if plataforma_loja == "tiktok" else None
+        # Amazon: tarifa = comissão + Amazon for All + retenção sobre o frete (porcentagens);
+        # frete = etiqueta Easy Ship (DBA) menos o frete cobrado do cliente (próprio);
+        # extras = promoção da loja + outras tarifas
+        amazon = conta_amazon(venda_ok) if plataforma_loja == "amazon" else None
+        if amazon is not None:
+            shopee = {
+                "preco": amazon["produto"],
+                "taxas": -(
+                    amazon["comissao"] + amazon["amazon_for_all"] + amazon["retencao_frete"]
+                ),
+                "afiliados": ZERO,
+                "frete_loja": -amazon["etiqueta"] - amazon["frete_cliente"],
+                "subsidio": ZERO,
+                "cupons": -(amazon["promocao"] + amazon["outras_tarifas"] + amazon["outros"]),
+            }
         if tiktok is not None:
             # valor = produtos após o desconto da loja; tarifa = todas as taxas; frete =
             # parte da loja; extras = o que a TikTok acrescentou (subsídio) entra negativo

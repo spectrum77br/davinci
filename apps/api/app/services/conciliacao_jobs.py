@@ -24,6 +24,7 @@ from app.db import session_scope
 from app.models import ConciliacaoDia, ConciliacaoLoja, Integration
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.atendimento.clientes import cliente_da_integracao
+from app.services.conciliacao_amazon import run_amazon_sync
 from app.services.conciliacao_calculo import recalcular_loja
 from app.services.conciliacao_extrato import run_extrato_sync
 from app.services.conciliacao_fatura import run_fatura_sync
@@ -105,7 +106,9 @@ async def sincronizar_loja(
                 await session.commit()
             if extrato:
                 try:
-                    if plataforma == "tiktok":
+                    if plataforma == "amazon":
+                        resultado["extrato"] = await run_amazon_sync(session, loja, cliente)
+                    elif plataforma == "tiktok":
                         resultado["extrato"] = await run_tiktok_sync(session, loja, cliente)
                         resultado["financeiro"] = await reler_financeiro_liquidados(session, loja)
                     elif plataforma == "shopee":

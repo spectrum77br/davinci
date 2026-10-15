@@ -1110,6 +1110,7 @@ async def raio_x(
             movs,
             shopee=await _conta_shopee_do_pedido(session, p),
             tiktok=await _conta_tiktok_do_pedido(session, p, movs),
+            amazon=await _conta_amazon_do_pedido(session, p, movs),
         ),
         "movimentos": [_movimento_out(m) for m in movs],
     }
@@ -1169,6 +1170,40 @@ async def _conta_tiktok_do_pedido(
     return {"previsto": previsto, "real": real}
 
 
+async def _conta_amazon_do_pedido(
+    session: AsyncSession, p: ConciliacaoPedido, movs: list[ConciliacaoMovimento]
+) -> dict[str, Any] | None:
+    """Amazon: previsto = transações do pedido que a Margem guardou; real = as linhas
+    das Transações que o painel leu (a mesma API, lida em horas diferentes)."""
+    from app.models import MarketplaceOrderFinancial
+    from app.models.conciliacao import ORIGEM_AMAZON
+    from app.services.conciliacao_calculo import conta_amazon, conta_amazon_de_transacoes
+
+    if getattr(p.platform, "value", str(p.platform)) != "amazon":
+        return None
+    fin = None
+    if p.numeroloja:
+        fin = (
+            await session.execute(
+                select(MarketplaceOrderFinancial).where(
+                    MarketplaceOrderFinancial.integration_id == p.integration_id,
+                    MarketplaceOrderFinancial.external_order_id == p.numeroloja,
+                )
+            )
+        ).scalar_one_or_none()
+    previsto = conta_amazon(fin)
+    real = conta_amazon_de_transacoes(
+        [
+            m.raw
+            for m in movs
+            if m.origem == ORIGEM_AMAZON and m.tipo == "venda_liberada" and isinstance(m.raw, dict)
+        ]
+    )
+    if previsto is None and real is None:
+        return None
+    return {"previsto": previsto, "real": real}
+
+
 def _comparativo(
     p: ConciliacaoPedido,
     versoes: dict[str, Any],
@@ -1176,6 +1211,7 @@ def _comparativo(
     *,
     shopee: dict[str, Decimal] | None = None,
     tiktok: dict[str, Any] | None = None,
+    amazon: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Previsto (venda) × Real (extrato + fatura à parte) × Diferença — a leitura de
     conciliação que o Vinicius aprovou em 15/10 no lugar das três colunas."""
@@ -1223,6 +1259,111 @@ def _comparativo(
         }
 
     plataforma = getattr(p.platform, "value", str(p.platform))
+    if plataforma == "amazon":
+        # As linhas da tela Pagamentos › Transações da Amazon (15/10, seção 24):
+        # produto, frete cobrado do cliente, tarifas (comissão, Amazon for All, retenção,
+        # etiqueta Easy Ship), promoção. Previsto = Margem; real = linhas lidas.
+        liberou_am = recebido is not None
+        prev = (amazon or {}).get("previsto")
+        real_am = (amazon or {}).get("real") if liberou_am else None
+
+        def par_am(
+            chave: str,
+            rotulo: str,
+            campo: str,
+            *,
+            sinal: int = 1,
+            estilo: str = "",
+            so_se_tem: bool = False,
+        ) -> dict[str, Any] | None:
+            pv = round(float(prev[campo]) * sinal, 2) if prev is not None else None
+            rl = round(float(real_am[campo]) * sinal, 2) if real_am is not None else None
+            if so_se_tem and not pv and not rl:
+                return None
+            return linha(chave, rotulo, pv, rl, estilo=estilo)
+
+        if prev is not None or real_am is not None:
+            candidatas = [
+                par_am("produtos", "Produto (custo total do produto)", "produto", estilo="bold"),
+                par_am(
+                    "frete_cliente", "+ Frete cobrado do cliente", "frete_cliente", so_se_tem=True
+                ),
+                par_am(
+                    "promocao",
+                    "− Desconto promocional da loja",
+                    "promocao",
+                    sinal=-1,
+                    so_se_tem=True,
+                ),
+                par_am("comissao", "− Comissão da Amazon", "comissao", sinal=-1),
+                par_am("amazon_for_all", "− Amazon for All (1,5%)", "amazon_for_all", sinal=-1),
+                par_am(
+                    "retencao",
+                    "− Retenção sobre o frete",
+                    "retencao_frete",
+                    sinal=-1,
+                    so_se_tem=True,
+                ),
+                par_am(
+                    "etiqueta", "− Etiqueta Easy Ship (DBA)", "etiqueta", sinal=-1, so_se_tem=True
+                ),
+                par_am(
+                    "outras_tarifas", "− Outras tarifas", "outras_tarifas", sinal=-1, so_se_tem=True
+                ),
+                par_am("outros", "± Outros", "outros", so_se_tem=True),
+                linha(
+                    "depois",
+                    "± Depois do lançamento (estornos, ajustes)",
+                    0.0 if tem_extrato else None,
+                    depois,
+                    compara=False,
+                    estilo="muted",
+                ),
+                linha(
+                    "liquido",
+                    "= Total do pedido (o que a Amazon paga)",
+                    round(float(prev["liquido"]), 2) if prev is not None else n(v.get("liquido")),
+                    real_liquido,
+                    estilo="bold",
+                ),
+            ]
+            linhas = [x for x in candidatas if x is not None]
+        else:
+            linhas = [
+                linha("produtos", "Produto", n(v.get("valor")), None),
+                linha("tarifa", "− Tarifas da Amazon", n(v.get("tarifa")), None),
+                linha("frete", "± Frete (etiqueta / frete cobrado)", n(v.get("frete")), None),
+                linha(
+                    "depois",
+                    "± Depois do lançamento (estornos, ajustes)",
+                    0.0 if tem_extrato else None,
+                    depois,
+                    compara=False,
+                    estilo="muted",
+                ),
+                linha(
+                    "liquido", "= Total do pedido", n(v.get("liquido")), real_liquido, estilo="bold"
+                ),
+            ]
+        return {
+            "linhas": linhas,
+            "real_rotulo": "transações da Amazon",
+            "comparar": p.situacao != "cancelado",
+            "nota": (
+                "venda desfeita: as colunas mostram o que entrou e o que saiu"
+                if p.situacao == "cancelado"
+                else (
+                    None
+                    if liberou_am
+                    else "a Amazon lança o pedido 3 a 4 dias depois do envio; até lá não há valor"
+                )
+            ),
+            "rodape": (
+                "as mesmas colunas de Pagamentos › Transações da Amazon · o valor fica preso na "
+                "reserva até ~7 dias depois da entrega e sai no repasse de 14 dias"
+            ),
+            "frete_liquido_loja": None,
+        }
     if plataforma == "tiktok":
         # A TikTok fecha a conta do pedido no extrato diário em que liquida, campo a
         # campo (15/10, Mini). Previsto = as transações que a Margem guardou; real = as
@@ -1696,6 +1837,7 @@ TIPO_LABELS = {
     "saque_cancelado": "Saque cancelado",
     "ajuste_shopee": "Ajuste da Shopee",
     "ajuste_tiktok": "Ajuste da TikTok",
+    "ajuste_amazon": "Ajuste da Amazon",
     "publicidade": "Publicidade (Ads)",
     "credito": "Crédito",
     "imposto": "Imposto",
@@ -2430,11 +2572,31 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
     if plataforma == "tiktok":
         # a TikTok não guarda saldo: todo extrato vai pro banco no mesmo dia
         na_conta = saldo_em = None
+    preso = None
+    if plataforma == "amazon":
+        # reserva por data de entrega: lançamentos ainda DEFERRED. Na conta = liberado
+        # (saldo total − preso); a liberar = o que está preso + o que ainda não lançou
+        preso_v, n_preso = (
+            await session.execute(
+                select(func.sum(mov.credito - mov.debito), func.count()).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem.in_(ORIGENS_EXTRATO),
+                    mov.tipo.in_(("venda_liberada", "estorno")),
+                    mov.sub_tipo == "DEFERRED",
+                )
+            )
+        ).one()
+        preso = max(_num(preso_v or 0) or 0.0, 0.0)
+        if na_conta is not None:
+            na_conta = round(na_conta - preso, 2)
+        a_liberar = (a_liberar or 0) + Decimal(str(preso))
+        n_liberar = (n_liberar or 0) + int(n_preso or 0)
     return {
         "na_conta": na_conta,
         "saldo_em": saldo_em,
         "a_liberar": _num(a_liberar or 0),
         "a_liberar_pedidos": int(n_liberar or 0),
+        "preso": preso,
         # reserva aberta antes do início e solta depois deixaria negativo: zero é o piso
         "reservado": max(_num(reservado or 0) or 0.0, 0.0) if plataforma == "ml" else None,
     }
