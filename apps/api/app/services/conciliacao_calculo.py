@@ -324,8 +324,16 @@ def situacao_do_pedido(
         if dinheiro
         else None
     )
+    # frete cobrado depois do lançamento (etiqueta Easy Ship da Amazon, Mercado Envios à
+    # parte) é custo da venda, não "saiu depois"
     saidas_depois = (
-        _soma([m.debito for m in dinheiro if liberado_em and m.data > liberado_em])
+        _soma(
+            [
+                m.debito
+                for m in dinheiro
+                if liberado_em and m.data > liberado_em and m.tipo != "frete"
+            ]
+        )
         if liberado_em
         else None
     )

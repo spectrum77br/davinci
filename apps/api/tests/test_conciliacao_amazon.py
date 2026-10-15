@@ -359,3 +359,82 @@ async def test_raiox_amazon_previsto_x_real_e_grade(db, make_user, auth_as, clie
         and por["liquido"]["real"] == 2356.21
         and por["liquido"]["dif"] == 0
     )
+
+
+def _dba_em_duas(posted: str = "2026-10-10T14:00:00Z") -> list[dict]:
+    """Como vem de verdade no DBA: o lançamento (2.176 − 108,80 − 31,01 = 2.036,19) e a
+    etiqueta Easy Ship como ServiceFee separado (−41,90) dois dias depois."""
+    venda = _tx(
+        "tx-dba-venda",
+        "Shipment",
+        "RELEASED",
+        posted,
+        "2036.19",
+        pedido=DBA,
+        quebras=[
+            _b("ProductCharges", "2176", [_b("OurPricePrincipal", "2176")]),
+            _b("PromoRebates", "-108.80", [_b("OurPriceDiscount", "-108.80")]),
+            _b(
+                "AmazonFees",
+                "-31.01",
+                [_b("AmazonForAllFee", "-31.01", [_b("Base", "-27.52"), _b("Tax", "-3.49")])],
+            ),
+        ],
+    )
+    etiqueta = _tx(
+        "tx-dba-etiqueta",
+        "ServiceFee",
+        "RELEASED",
+        "2026-10-12T09:00:00Z",
+        "-41.90",
+        pedido=DBA,
+        quebras=[
+            _b(
+                "AmazonFees",
+                "-41.90",
+                [_b("MFNPostageFee", "-41.90", [_b("Base", "-37.19"), _b("Tax", "-4.71")])],
+            )
+        ],
+    )
+    return [venda, etiqueta]
+
+
+async def test_etiqueta_easy_ship_separada_nao_e_estorno(db, make_user, auth_as, client):
+    from app.models import MarketplaceOrderFinancial
+
+    loja = await _loja_amazon(db, make_user)
+    txs = _dba_em_duas()
+    m = transacao_para_movimento(txs[1])
+    assert m["tipo"] == "frete" and m["debito"] == Decimal("41.90")
+    assert m["descricao"] == f"Etiqueta Easy Ship do pedido {DBA}"
+    await run_amazon_sync(db, loja, _AmazonFalsa(txs), agora=AGORA)
+    db.add(
+        MarketplaceOrderFinancial(
+            integration_id=loja.integration_id,
+            platform="amazon",
+            external_order_id=DBA,
+            status="posted",
+            fetched_at=datetime(2026, 10, 13, 12, tzinfo=UTC),
+            net_amount=Decimal("1994.29"),
+            raw={"transactions": {"transactions": txs}},
+        )
+    )
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/pedidos/301943", params={"loja": "kia"})
+    assert r.status_code == 200, r.text
+    ped = r.json()["pedido"]
+    assert (
+        ped["situacao"] == "bateu"
+        and ped["recebido"] == 1994.29
+        and ped["liberado_valor"] == 2036.19
+    )
+    assert ped["saidas_depois"] in (None, 0)
+    assert (
+        ped["venda_frete"] == 41.9 and ped["venda_extras"] == 108.8 and ped["venda_tarifa"] == 31.01
+    )
+    por = {x["chave"]: x for x in r.json()["comparativo"]["linhas"]}
+    assert por["etiqueta"]["previsto"] == 41.9 and por["etiqueta"]["real"] == 41.9
+    assert por["liquido"]["real"] == 1994.29 and por["liquido"]["dif"] == 0

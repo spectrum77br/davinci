@@ -167,6 +167,10 @@ def transacao_para_movimento(tx: dict[str, Any]) -> dict[str, Any] | None:
     q = quebras_da_transacao(tx)
     conta = conta_amazon_de_quebras(q)
     descricao = str(tx.get("description") or "").strip()
+    # DBA: a etiqueta Easy Ship chega como ServiceFee separado, depois do lançamento —
+    # é frete do pedido, não estorno (15/10, 32 pedidos da Kia marcados errado)
+    if tipo_amz == "ServiceFee" and pedido and conta["etiqueta"]:
+        tipo = "frete"
     if tipo == "venda_liberada":
         descricao = f"Lançamento do pedido {pedido}" if pedido else (descricao or "Lançamento")
         if status_amz == "DEFERRED":
@@ -181,6 +185,8 @@ def transacao_para_movimento(tx: dict[str, Any]) -> dict[str, Any] | None:
         descricao = "Cobrança do saldo negativo (cartão/conta)"
     elif tipo_amz == "ProductAdsPayment":
         descricao = "Publicidade (Ads)"
+    elif tipo == "frete":
+        descricao = f"Etiqueta Easy Ship do pedido {pedido}"
     elif tipo_amz == "ServiceFee":
         descricao = f"Tarifa da Amazon{(' · ' + descricao) if descricao else ''}"
         if pedido:
@@ -376,8 +382,14 @@ async def run_amazon_sync(
         if atual is None:
             novos.append(m)
             continue
-        if atual.sub_tipo != m["sub_tipo"]:
+        mudou = (
+            atual.sub_tipo != m["sub_tipo"]
+            or atual.tipo != m["tipo"]
+            or atual.descricao != m["descricao"]
+        )
+        if mudou:
             atual.sub_tipo = m["sub_tipo"]
+            atual.tipo = m["tipo"]
             atual.descricao = m["descricao"]
             atual.raw = m["raw"]
             resumo["atualizados"] += 1

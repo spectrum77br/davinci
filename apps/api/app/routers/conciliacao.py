@@ -1196,7 +1196,9 @@ async def _conta_amazon_do_pedido(
         [
             m.raw
             for m in movs
-            if m.origem == ORIGEM_AMAZON and m.tipo == "venda_liberada" and isinstance(m.raw, dict)
+            if m.origem == ORIGEM_AMAZON
+            and m.tipo in ("venda_liberada", "frete")
+            and isinstance(m.raw, dict)
         ]
     )
     if previsto is None and real is None:
