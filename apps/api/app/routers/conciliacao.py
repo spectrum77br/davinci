@@ -3599,3 +3599,197 @@ async def sonda_shopee_escrow(
         )
     logger.info("conciliacao_sonda_shopee_escrow", conta=conta, pedidos=len(saida))
     return {"conta": conta, "pedidos": saida}
+
+
+def _epoch_para_iso(v: Any) -> str | None:
+    try:
+        return datetime.fromtimestamp(int(v), tz=_BRT).isoformat() if v else None
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+@router.get("/sonda/tiktok")
+async def sonda_tiktok(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+    conta: Annotated[
+        str | None, Query(description="nome da loja TikTok; sem valor = a que mais vende")
+    ] = None,
+    dias: Annotated[int, Query(ge=1, le=90)] = 30,
+) -> dict[str, Any]:
+    """O que a API financeira da TikTok dá: extratos (statements), repasses (payments)
+    e as transações de um extrato (pedido a pedido). Só leitura. Sem `conta`, pega a
+    loja TikTok com mais vendas lidas pela Margem nos últimos 30 dias (15/10, Vinicius:
+    "pode pegar a que mais vende e sondar")."""
+    from app.models import MarketplaceOrderFinancial
+    from app.models.integration import IntegrationPlatform
+
+    agora_dt = datetime.now(UTC)
+    base_q = select(Integration).where(
+        Integration.platform == IntegrationPlatform.TIKTOK,
+        Integration.archived_at.is_(None),
+        Integration.status == "active",
+    )
+    integ = None
+    if conta:
+        integ = (
+            await session.execute(
+                base_q.where(func.lower(func.trim(Integration.name)) == conta.strip().lower())
+            )
+        ).scalar_one_or_none()
+    else:
+        fin = MarketplaceOrderFinancial
+        ranking = (
+            await session.execute(
+                select(fin.integration_id, func.count())
+                .where(
+                    fin.platform == IntegrationPlatform.TIKTOK,
+                    fin.created_at >= agora_dt - timedelta(days=30),
+                )
+                .group_by(fin.integration_id)
+                .order_by(func.count().desc())
+            )
+        ).all()
+        ativas = {i.id: i for i in (await session.execute(base_q)).scalars()}
+        for iid, _n in ranking:
+            if iid in ativas:
+                integ = ativas[iid]
+                break
+        if integ is None and ativas:
+            integ = sorted(ativas.values(), key=lambda i: i.created_at or agora_dt)[0]
+    if integ is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"code": "conta_tiktok_nao_encontrada", "conta": conta},
+        )
+    cliente = await cliente_da_integracao(integ)
+    agora = int(time.time())
+    t_de = agora - dias * 86400
+    chamadas: list[dict[str, Any]] = []
+
+    async def chama(nome: str, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+        t0 = time.monotonic()
+        item: dict[str, Any] = {"nome": nome, "url": path, "params": params}
+        try:
+            body = await cliente._get(path, params)
+        except Exception as e:  # noqa: BLE001 — a sondagem registra e segue
+            item.update(ok=False, erro=f"{type(e).__name__}: {str(e)[:300]}")
+            item["ms"] = int((time.monotonic() - t0) * 1000)
+            chamadas.append(item)
+            return {}
+        item["ms"] = int((time.monotonic() - t0) * 1000)
+        body = body if isinstance(body, dict) else {"corpo": body}
+        item["code"] = body.get("code")
+        item["ok"] = body.get("code") == 0
+        if not item["ok"]:
+            item["mensagem"] = str(body.get("message") or "")[:300]
+        item["amostra"] = _recorta(body.get("data") if "data" in body else body)
+        chamadas.append(item)
+        return body.get("data") if isinstance(body.get("data"), dict) else {}
+
+    # 1) extratos (statements) do período
+    dados = await chama(
+        "extratos",
+        "/finance/202309/statements",
+        {
+            "statement_time_ge": str(t_de),
+            "statement_time_lt": str(agora),
+            "page_size": "50",
+            "sort_field": "statement_time",
+            "sort_order": "DESC",
+        },
+    )
+    statements = [x for x in (dados.get("statements") or []) if isinstance(x, dict)]
+    resumo_ext: dict[str, Any] = {}
+    if statements:
+        status_c: Counter = Counter(str(x.get("payment_status") or "?") for x in statements)
+        resumo_ext = {
+            "linhas": len(statements),
+            "mais_paginas": bool(dados.get("next_page_token")),
+            "por_status": dict(status_c),
+            "liquidado_total": round(
+                sum(float(x.get("settlement_amount") or 0) for x in statements), 2
+            ),
+            "de": _epoch_para_iso(min(int(x.get("statement_time") or 0) for x in statements)),
+            "ate": _epoch_para_iso(max(int(x.get("statement_time") or 0) for x in statements)),
+            "campos": sorted({k for x in statements for k in x}),
+        }
+
+    # 2) transações do extrato mais recente (pedido a pedido)
+    transacoes_resumo: dict[str, Any] = {}
+    if statements:
+        sid = statements[0].get("id")
+        dados_t = await chama(
+            "transacoes_do_extrato",
+            f"/finance/202309/statements/{sid}/statement_transactions",
+            {"page_size": "100", "sort_field": "order_create_time", "sort_order": "DESC"},
+        )
+        txs = [x for x in (dados_t.get("statement_transactions") or []) if isinstance(x, dict)]
+        if txs:
+            tipos: Counter = Counter(str(x.get("type") or "?") for x in txs)
+            transacoes_resumo = {
+                "extrato": sid,
+                "linhas": len(txs),
+                "mais_paginas": bool(dados_t.get("next_page_token")),
+                "por_tipo": dict(tipos),
+                "com_pedido": sum(1 for x in txs if x.get("order_id")),
+                "liquidado_total": round(
+                    sum(float(x.get("settlement_amount") or 0) for x in txs), 2
+                ),
+                "campos": sorted({k for x in txs for k in x}),
+                "cabecalho_do_extrato": {
+                    k: v for k, v in dados_t.items() if k != "statement_transactions"
+                },
+            }
+            pedido = next((x.get("order_id") for x in txs if x.get("order_id")), None)
+            if pedido:
+                await chama(
+                    "transacoes_do_pedido",
+                    f"/finance/202309/orders/{pedido}/statement_transactions",
+                )
+
+    # 3) repasses pro banco (payments)
+    dados_p = await chama(
+        "repasses",
+        "/finance/202309/payments",
+        {
+            "create_time_ge": str(t_de),
+            "create_time_lt": str(agora),
+            "page_size": "50",
+            "sort_field": "create_time",
+            "sort_order": "DESC",
+        },
+    )
+    payments = [x for x in (dados_p.get("payments") or []) if isinstance(x, dict)]
+    resumo_rep: dict[str, Any] = {}
+    if payments:
+        st: Counter = Counter(str(x.get("status") or "?") for x in payments)
+
+        def _valor(x: dict[str, Any]) -> float:
+            a = x.get("amount")
+            if isinstance(a, dict):
+                return float(a.get("value") or 0)
+            return float(a or 0)
+
+        resumo_rep = {
+            "linhas": len(payments),
+            "mais_paginas": bool(dados_p.get("next_page_token")),
+            "por_status": dict(st),
+            "total": round(sum(_valor(x) for x in payments), 2),
+            "campos": sorted({k for x in payments for k in x}),
+        }
+
+    logger.info(
+        "conciliacao_sonda_tiktok",
+        conta=integ.name,
+        chamadas=[(c["nome"], c.get("code"), c.get("erro") or c.get("mensagem")) for c in chamadas],
+    )
+    return {
+        "conta": integ.name,
+        "integration_id": str(integ.id),
+        "janela": {"de": _epoch_para_iso(t_de), "ate": _epoch_para_iso(agora)},
+        "extratos": resumo_ext,
+        "transacoes": transacoes_resumo,
+        "repasses": resumo_rep,
+        "chamadas": chamadas,
+    }
