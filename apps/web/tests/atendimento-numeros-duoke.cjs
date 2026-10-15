@@ -308,17 +308,21 @@ async function renderizados() {
   const regua = api('services/atendimento/pendente.py')
   assert.match(regua, /CANAIS_FORA_DO_CHAT: frozenset\[str\] = frozenset\(\n {4}\{CANAL_AVALIACAO, CANAL_RECLAMACAO, CANAL_COMENTARIO, CANAL_CARRINHO\}\n\)/)
   assert.match(regua, /def nao_lidas_duoke_sql\(/)
-  assert.match(regua, /c\.aguardando_resposta\.is_\(True\)/, 'a vez do comprador na FILA (a automática não fecha)')
-  // A régua de 15/10/2026: o não lido do Duoke — a mensagem do cliente depois
-  // da última resposta de PESSOA ou da abertura no DaVinci, na janela de 24 h.
-  assert.match(regua, /^JANELA_DO_NUMERO = timedelta\(hours=24\)$/m)
+  // A régua de 15/10/2026: o não lido do Duoke — a mensagem do comprador depois
+  // da última resposta de PESSOA, da abertura no DaVinci e de quando o Duoke
+  // foi zerado inteiro (14/10 12:35), no máximo 7 dias — sem depender da FILA.
+  assert.match(regua, /^ZERADO_NO_DUOKE_EM = datetime\(2026, 10, 14, 15, 35, tzinfo=UTC\)$/m)
+  assert.match(regua, /^JANELA_DO_NUMERO = timedelta\(days=7\)$/m)
   const sql = regua.slice(regua.indexOf('def nao_lidas_duoke_sql('))
   // Dois relógios: a resposta de pessoa no da plataforma; o visto na CHEGADA (`created_at`).
   assert.match(sql, /or_\(c\.ultima_da_loja_em\.is_\(None\), momento > c\.ultima_da_loja_em\)/)
   assert.match(sql, /or_\(c\.visto_em\.is_\(None\), m\.created_at > c\.visto_em\)/)
   assert.doesNotMatch(sql, /greatest/, 'o visto não se compara com o horário da plataforma')
   assert.match(sql, /m\.autor == AUTOR_CLIENTE/)
-  assert.match(sql, /c\.ultima_do_cliente_em > limite/)
+  // A `sistema` que o próprio comprador mandou (o FAQ, a resposta automática da conta dele).
+  assert.match(sql, /and_\(m\.autor == AUTOR_SISTEMA, m\.payload\["from_id"\]\.astext == c\.comprador_id\)/)
+  assert.match(sql, /momento > desde/)
+  assert.doesNotMatch(sql, /aguardando_resposta/, 'o número não depende da fila')
   assert.doesNotMatch(sql, /c\.nao_lidas\b/, 'o não lido da plataforma não entra no número')
 }
 

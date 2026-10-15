@@ -1336,9 +1336,9 @@ async def test_metricas_nao_contam_mensagem_automatica_como_resposta(
         {"source": "server", "message_type": "voucher", "content": {"voucher_id": 1}},
     )
     await _loja_fala(c1, "e", "Oi! Já conferi: a mala tem 2 rodinhas.", timedelta(minutes=54))
-    # A figurinha de PESSOA (0028) é resposta: 10 min.
+    # A figurinha de PESSOA (0012) é resposta: 10 min.
     c3 = await _conversa(db, integ, canal, "figurinha", cliente_ha=timedelta(minutes=30))
-    await _loja_fala(c3, "f", "[Figurinha]", timedelta(minutes=20), _figurinha("0028"))
+    await _loja_fala(c3, "f", "[Figurinha]", timedelta(minutes=20), _figurinha("0012"))
     # Só a senha da devolução depois do cliente, há 13 h: turno VENCIDO sem resposta.
     c2 = await _conversa(db, integ, canal, "senha", cliente_ha=timedelta(hours=13))
     await _loja_fala(

@@ -489,10 +489,33 @@ async def _mundo_duoke(
         ("cliente", 60),
         visto_em=visto(100),
     )
-    # A janela de 24 h: a última fala do comprador há mais de 24 h, nada; a
-    # última dentro, contam todas as dele desde a resposta (mesmo as de antes).
-    await caso("fora_das_24h", 0, ("cliente", 26 * HORA), ("cliente", 24 * HORA + 30))
-    await caso("dentro_das_24h", 2, ("cliente", 30 * HORA), ("cliente", 23 * HORA))
+    # Sem janela de 24 h (como no Duoke, que acumula até alguém abrir,
+    # responder ou zerar): a de 2 dias atrás conta; a de mais de 7 dias
+    # (`JANELA_DO_NUMERO`), não — mesmo que a conversa tenha mensagem nova.
+    await caso("dois_dias", 2, ("cliente", 50 * HORA), ("cliente", 48 * HORA))
+    await caso(
+        "fora_dos_7_dias", 1, ("cliente", 8 * 24 * HORA), ("cliente", 7 * 24 * HORA + 30),
+        ("sistema", 60, JA_SEGUE), ("cliente", 30),
+    )
+    # A mensagem `sistema` que o PRÓPRIO comprador mandou conta (15/10/2026):
+    # a pergunta do FAQ e a resposta automática da conta dele (`from_id` = o
+    # `comprador_id`). Ela não abre a vez dele na fila — o número não depende
+    # da fila. A do sistema da loja (o "já segue") continua fora.
+    faq = await _cena(
+        db, integ, canal, f"{nome_loja}:faq_do_comprador", ("cliente", 90), ("loja", 80)
+    )
+    await _nossa(
+        db, faq, 60, autor="sistema", origem="sistema", tipo="outro",
+        texto="[Resposta automática (FAQ)]",
+        payload={"message_type": "bundle_message", "from_id": 555, "source": "server"},
+    )
+    await _nossa(
+        db, faq, 59, autor="sistema", origem="sistema", texto=JA_SEGUE,
+        payload={"message_type": "text", "from_id": 777, "status": "auto_reply"},
+    )
+    faq.comprador_id = "555"
+    await db.commit()
+    c["faq_do_comprador"] = (faq, 1)
     # O não lido da PLATAFORMA não entra mais: lida lá (zero), conta igual.
     await caso("lida_na_plataforma", 1, ("cliente", 60), nao_lidas=0)
     await caso("muitas_na_plataforma", 1, ("cliente", 60), nao_lidas=9)
@@ -518,7 +541,7 @@ async def _mundo_duoke(
     ml = {"plataforma": "ml", "canal_nome": "pos_venda"}
     await caso("ml_pos_venda", 1, ("loja", 90), ("cliente", 60), nao_lidas=2, **ml)
     # A automática do ML 1 min depois do comprador não é resposta de pessoa:
-    # conta, como no Duoke (na janela de 24 h — as de 8 a 25 dias atrás, não).
+    # conta, como no Duoke (na janela de 7 dias — as de 8 a 25 dias atrás, não).
     await caso("ml_automatica", 1, ("cliente", 60), ("loja", 59, MENU_DUOKE), nao_lidas=3, **ml)
     await caso(
         "ml_automatica_velha",
@@ -603,7 +626,7 @@ async def test_numero_do_duoke_python_e_sql_sao_gemeos(db, make_user):
     robo = mundo["robo_por_ultimo"][0]
     assert robo.aguardando_resposta and robo.ultima_da_loja_em is None
     assert not pendente.falta_responder(robo), "para o Duoke, o robô respondeu: sem a marca"
-    # A janela anda com o relógio: daqui a 24 h, o que hoje conta sai.
+    # A janela anda com o relógio: daqui a 7 dias, o que hoje conta sai.
     depois = AGORA + pendente.JANELA_DO_NUMERO
     quatro = mundo["quatro"][0]
     assert pendente.nao_lidas_duoke(quatro, await _mensagens_de(db, quatro), agora=depois) == 0
@@ -673,7 +696,29 @@ def test_mensagem_no_numero_dois_relogios():
     # Os dois juntos: tem de passar dos dois.
     assert pendente.mensagem_no_numero(msg(t + m, t + 2 * m), pessoa=t, visto=t + m)
     assert not pendente.mensagem_no_numero(msg(t - m, t + 2 * m), pessoa=t, visto=t + m)
-    assert pendente.JANELA_DO_NUMERO == timedelta(hours=24)
+    assert pendente.JANELA_DO_NUMERO == timedelta(days=7)
+    # Desde quando: a de antes do `desde` (o Duoke zerado / 7 dias) não conta.
+    assert not pendente.mensagem_no_numero(msg(t - m, t + m), desde=t)
+    assert pendente.mensagem_no_numero(msg(t + m, t + 2 * m), desde=t)
+    # A `sistema` do próprio comprador (`from_id` = `comprador_id`) conta; a da loja, não.
+    do_comprador = ns(autor="sistema", enviada_em=t, created_at=t + m, payload={"from_id": 555})
+    assert pendente.mensagem_no_numero(do_comprador, comprador="555")
+    assert not pendente.mensagem_no_numero(do_comprador, comprador="777")
+    assert not pendente.mensagem_no_numero(do_comprador)
+    sem_from = ns(autor="sistema", enviada_em=t, created_at=t + m, payload={})
+    assert not pendente.mensagem_no_numero(sem_from, comprador="555")
+
+
+def test_o_numero_conta_desde_que_o_duoke_foi_zerado(monkeypatch):
+    """O Duoke foi zerado inteiro em 14/10/2026 às 12:35 (15:35 UTC): o número
+    conta dali, e no máximo 7 dias para trás (`desde_do_numero`)."""
+    zerado = datetime(2026, 10, 14, 15, 35, tzinfo=UTC)
+    monkeypatch.setattr(pendente, "ZERADO_NO_DUOKE_EM", zerado)
+    assert pendente.desde_do_numero(datetime(2026, 10, 15, 11, 55, tzinfo=UTC)) == zerado
+    depois = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
+    assert pendente.desde_do_numero(depois) == depois - timedelta(days=7)
+    # Sem fuso (o teste de mesa): UTC.
+    assert pendente.desde_do_numero(depois.replace(tzinfo=None)) == depois - timedelta(days=7)
 
 
 async def test_falta_responder_no_chat_python_e_sql_sao_gemeas(db, make_user):
@@ -719,10 +764,10 @@ async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, 
         falta[c.plataforma] = falta.get(c.plataforma, 0) + pendente.falta_responder_no_chat(c)
     assert soma == {
         # quatro 4 + robô 3 + robô por último 2 + pessoa 2 + visto 1 + chegou
-        # depois de abrir 1 + pessoa depois do visto 1 + dentro das 24 h 2 +
-        # lida 1 + muitas 1 + bloqueada 2 + aviso 1 + falhou/nota 1 + e-mail
-        # no chat 1 — e o Aguiar, 1.
-        "shopee": 4 + 3 + 2 + 2 + 1 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 1 + 1 + 1,
+        # depois de abrir 1 + pessoa depois do visto 1 + dois dias 2 + fora
+        # dos 7 dias 1 + FAQ do comprador 1 + lida 1 + muitas 1 + bloqueada 2 +
+        # aviso 1 + falhou/nota 1 + e-mail no chat 1 — e o Aguiar, 1.
+        "shopee": 4 + 3 + 2 + 2 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1,
         "tiktok": 3,
         # O pós-venda com o comprador por último, a automática de agora e a pergunta.
         "ml": 1 + 1 + 1,
@@ -734,9 +779,9 @@ async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, 
     for plat, n in soma.items():
         assert plats[plat]["nao_lidas_duoke"] == n, plat
         assert plats[plat]["aguardando"] == falta[plat], plat
-    assert r["nao_lidas_duoke"] == sum(soma.values()) == 32
+    assert r["nao_lidas_duoke"] == sum(soma.values()) == 34
     lojas = {(lj["plataforma"], lj["conta"]): lj for lj in r["lojas"]}
-    assert lojas[("shopee", "atv")]["nao_lidas_duoke"] == soma["shopee"] - 1 == 23
+    assert lojas[("shopee", "atv")]["nao_lidas_duoke"] == soma["shopee"] - 1 == 25
     assert lojas[("shopee", "aguiar")]["nao_lidas_duoke"] == 1
     assert lojas[("tiktok", "atv")]["nao_lidas_duoke"] == 3
     assert lojas[("ml", "atv")]["nao_lidas_duoke"] == 3

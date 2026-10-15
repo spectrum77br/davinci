@@ -110,7 +110,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -327,6 +327,62 @@ async def gravar_visto(
     await session.commit()
     await session.refresh(conversa)
     return conversa.visto_em
+
+
+async def zerar_nao_lidas(
+    session: AsyncSession,
+    user: User | None,
+    *,
+    plataformas: Iterable[str] = (),
+    integration_id: Any = None,
+    escopo: Any = None,
+) -> int:
+    """O "Zerar não lidas" — o "Limpar não lidas" do Duoke (15/10/2026). Devolve
+    quantas conversas foram marcadas como vistas.
+
+    O Duoke tem o botão para zerar o não lido de tudo de uma vez (foi o que
+    zerou o Duoke inteiro em 14/10/2026 às 12:35 — `pendente.ZERADO_NO_DUOKE_EM`).
+    Aqui é o "visto no DaVinci" em lote: `visto_em` = agora (o relógio do
+    banco, nunca para trás) nas conversas de chat com mensagem dentro do
+    número (`pendente.desde_do_numero`), da loja (`integration_id`), das
+    plataformas (`plataformas`) ou de todas — dentro do escopo da equipe (`escopo`, o WHERE do
+    router). Nunca vai à plataforma, não muda o `updated_at`. Só quem mexe na
+    caixa (`acesso.pode_mexer`); senão `LidaRecusada(RECUSA_SO_LEITURA)`.
+    """
+    if user is None or not acesso.pode_mexer(user):
+        raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem mexe no Atendimento zera as não lidas.")
+    from app.services.atendimento import pendente
+
+    filtros = [
+        pendente.do_chat_sql(AtendimentoConversa),
+        AtendimentoConversa.ultima_mensagem_em > pendente.desde_do_numero(),
+    ]
+    plataformas = sorted({p for p in plataformas if p})
+    if plataformas:
+        filtros.append(AtendimentoConversa.plataforma.in_(plataformas))
+    if integration_id is not None:
+        filtros.append(AtendimentoConversa.integration_id == integration_id)
+    if escopo is not None:
+        filtros.append(escopo)
+    r = await session.execute(
+        update(AtendimentoConversa)
+        .where(*filtros)
+        .values(
+            visto_em=func.greatest(AtendimentoConversa.visto_em, func.clock_timestamp()),
+            updated_at=AtendimentoConversa.updated_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    total = int(r.rowcount or 0)
+    logger.info(
+        "atendimento_nao_lidas_zeradas",
+        user_id=str(getattr(user, "id", "")),
+        plataformas=plataformas,
+        integration_id=str(integration_id) if integration_id else None,
+        conversas=total,
+    )
+    return total
 
 
 def _chave_trava(conversa_id: Any) -> str:

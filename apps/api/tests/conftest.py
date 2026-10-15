@@ -725,3 +725,16 @@ def _flex_local_de_fabrica():
     flex_local.limpar_cache()
     yield
     flex_local.limpar_cache()
+
+
+@pytest.fixture(autouse=True)
+def _numero_da_caixa_sem_o_corte_do_duoke(monkeypatch):
+    """O número da Caixa conta desde que o Duoke foi zerado inteiro
+    (`pendente.ZERADO_NO_DUOKE_EM`, 14/10/2026 12:35): nos testes, que usam
+    o relógio de agora, o corte fica no passado — vale só a janela de 7 dias
+    (o teste do corte põe o dele)."""
+    from datetime import UTC, datetime
+
+    from app.services.atendimento import pendente
+
+    monkeypatch.setattr(pendente, "ZERADO_NO_DUOKE_EM", datetime(2000, 1, 1, tzinfo=UTC))

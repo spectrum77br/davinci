@@ -1043,3 +1043,56 @@ async def test_ml_marcar_pack_le_todas_as_paginas_com_mark_as_read_true(monkeypa
     )
     with pytest.raises(httpx.HTTPStatusError):
         await cliente.marcar_pack_como_lido("1", "999")
+
+
+# ─────────────── "Zerar não lidas" (15/10/2026, o "Limpar não lidas" do Duoke) ───────────────
+
+
+async def test_zerar_nao_lidas_da_loja_da_plataforma_e_de_tudo(db, dono, client, plataforma):
+    """Quem mexe zera: o "visto no DaVinci" de uma vez nas conversas de chat da
+    loja, das plataformas ou de tudo — sem ir à plataforma (o não lido dela
+    fica), sem mexer no `updated_at` e fora do chat (avaliação) nada."""
+    shopee_a, canal_a = await _loja(db, dono, "shopee", "chat", "observar")
+    shopee_b, canal_b = await _loja(db, dono, "shopee", "chat", "auto")
+    tiktok, canal_t = await _loja(db, dono, "tiktok", "chat", "observar")
+    _, canal_av = await _loja(db, dono, "shopee", "avaliacao", "observar")
+    a = await _conversa(db, shopee_a, canal_a, "a1")
+    b = await _conversa(db, shopee_b, canal_b, "b1")
+    t = await _conversa(db, tiktok, canal_t, "t1")
+    av = await _conversa(db, shopee_a, canal_av, "av1")
+    updated = await db.scalar(
+        select(AtendimentoConversa.updated_at).where(AtendimentoConversa.id == a.id)
+    )
+
+    r = await client.post(f"{URL}/zerar-nao-lidas", json={"integration_id": str(shopee_a.id)})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"conversas": 1}
+    assert await _visto_em(db, a) is not None
+    assert await _visto_em(db, b) is None and await _visto_em(db, t) is None
+    assert await _visto_em(db, av) is None, "fora do chat: nada"
+    depois = await db.scalar(
+        select(AtendimentoConversa.updated_at).where(AtendimentoConversa.id == a.id)
+    )
+    assert depois == updated
+
+    r = await client.post(f"{URL}/zerar-nao-lidas", json={"plataformas": ["shopee"]})
+    assert r.json() == {"conversas": 2}
+    assert await _visto_em(db, b) is not None and await _visto_em(db, t) is None
+
+    r = await client.post(f"{URL}/zerar-nao-lidas")
+    assert r.status_code == 200 and r.json()["conversas"] == 3
+    assert await _visto_em(db, t) is not None
+    # Nada foi à plataforma: o não lido dela (e do Duoke) fica.
+    assert plataforma.chamadas == [] and plataforma.montados == []
+    assert await _nao_lidas(db, a) == 3
+
+
+async def test_quem_so_le_nao_zera(db, make_user, auth_as, client, plataforma):
+    dono_loja = await make_user(email=DONO, role=UserRole.ADMIN)
+    integ, canal = await _loja(db, dono_loja, "shopee", "chat", "observar")
+    conversa = await _conversa(db, integ, canal)
+    for leitor in (await make_user(), await make_user(role=UserRole.ADMIN)):
+        auth_as(leitor)
+        r = await client.post(f"{URL}/zerar-nao-lidas", json={})
+        assert r.status_code == 403, r.text
+    assert await _visto_em(db, conversa) is None

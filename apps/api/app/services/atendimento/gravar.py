@@ -86,7 +86,7 @@ from app.services.atendimento.constantes import (
     CONVERSA_FECHADA,
     CONVERSA_RESPONDIDA,
     ESPACOS,
-    FIGURINHA_CAMPANHA_DUOKE,
+    FIGURINHAS_CAMPANHA_DUOKE,
     FONTE_SHOPEE_API,
     FONTES_SHOPEE_DA_PLATAFORMA,
     INICIO_AUTOMATICA,
@@ -260,7 +260,7 @@ def automatica_pelo_payload_sql(payload: Any) -> Any:
                 payload["message_type"].astext == TIPO_SHOPEE_FIGURINHA,
                 # Caminho (`#>>`), não `["content"]["sticker_id"]`: o subscrito
                 # do JSONB vira sintaxe errada sobre um valor com cast (o teste).
-                payload[("content", "sticker_id")].astext == FIGURINHA_CAMPANHA_DUOKE,
+                payload[("content", "sticker_id")].astext.in_(FIGURINHAS_CAMPANHA_DUOKE),
             ),
         ),
         false(),

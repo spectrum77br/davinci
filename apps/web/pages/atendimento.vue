@@ -19,7 +19,7 @@ import {
   type Resumo,
 } from '~/components/AtendimentoPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
-import { topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
+import { plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
 // mesma trava do menu (AppSidebar) e da API. Desde 07/10/2026 ("pode liberar
@@ -167,6 +167,31 @@ async function carregarResumo() {
 // lidas das conversas de chat esperando resposta, de todas as plataformas
 // (o "Todas" do menu Plataforma). A API antiga não manda: sem número.
 const naoLidasDuoke = computed(() => Number(resumo.value?.nao_lidas_duoke) || 0)
+
+// "Zerar não lidas" (15/10/2026) — o "Limpar não lidas" do Duoke: as conversas
+// de chat da loja escolhida, da plataforma do filtro ou de todas ficam como
+// vistas no DaVinci (POST /zerar-nao-lidas) e os números voltam a contar só o
+// que chegar depois. Nada vai à plataforma. Só quem mexe na caixa.
+const zerando = ref(false)
+const zerarErro = ref<string | null>(null)
+async function zerarNaoLidas() {
+  if (zerando.value) return
+  const loja = filtros.value.integration_id || ''
+  const plataformas = loja ? [] : plataformasDoValor(filtros.value.plataforma || filtros.value.plataforma_topo)
+  const nome = loja ? (resumo.value?.lojas || []).find((l) => l.integration_id === loja)?.integracao || 'escolhida' : ''
+  const alvo = loja ? `da loja ${nome}` : plataformas.length ? `de ${plataformas.join(', ')}` : 'de todas as lojas'
+  if (!confirm(`Zerar as não lidas ${alvo}?\n\nComo o "Limpar não lidas" do Duoke: as conversas ficam como vistas no DaVinci e os números contam só o que chegar depois. Nada muda na Shopee, no Mercado Livre nem no TikTok.`)) return
+  zerando.value = true
+  zerarErro.value = null
+  try {
+    await api('/api/atendimento/zerar-nao-lidas', { method: 'POST', body: { plataformas, integration_id: loja || null } })
+    await Promise.all([carregarResumo(), carregarLista()])
+  } catch (e: any) {
+    zerarErro.value = erroDaApi(e, 'Não consegui zerar as não lidas').texto
+  } finally {
+    zerando.value = false
+  }
+}
 
 // O número da aba E-mail (13/10/2026): o e-mail saiu da Caixa e da Caixa
 // Humano, e o que falta responder nele acende AQUI (e em E-mail › Filas) —
@@ -732,7 +757,22 @@ watch(selecionada, (id) => {
       @abrir-lojas="aba = 'lojas'"
     />
     <!-- A plataforma (08/10/2026: "ver só Mercado Livre, só Shopee"): um botão que abre o menu com a logo e o número de cada uma (14/10/2026: o do Duoke, mensagens não lidas esperando resposta), acima da Caixa; escolher corta a barra de lojas (09/10/2026). Na Caixa Humano, os números dela. -->
+    <div v-if="naCaixa" class="flex flex-wrap items-center gap-2">
     <AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? 'humano' : 'nao_lidas_duoke'" />
+    <!-- "Zerar não lidas" (15/10/2026): o "Limpar não lidas" do Duoke, na loja/plataforma do filtro -->
+    <button
+      v-if="!emHumano && canEdit"
+      type="button"
+      class="inline-flex h-8 items-center gap-1 rounded-md border px-2 text-xs text-muted-foreground hover:bg-muted disabled:opacity-50"
+      :disabled="zerando"
+      title="Como o &quot;Limpar não lidas&quot; do Duoke: marca como vistas as conversas da loja ou plataforma escolhida (ou de todas) e zera os números. Nada muda na plataforma."
+      data-zerar-nao-lidas
+      @click="zerarNaoLidas"
+    >
+      <Eye class="h-3.5 w-3.5" />{{ zerando ? 'Zerando…' : 'Zerar não lidas' }}
+    </button>
+    <span v-if="zerarErro" class="text-xs text-destructive">{{ zerarErro }}</span>
+    </div>
     </div>
 
     <!-- Caixa: lojas | fila | conversa + pedido -->

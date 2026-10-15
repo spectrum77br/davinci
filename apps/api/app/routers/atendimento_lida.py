@@ -2,6 +2,7 @@
 
   POST /api/atendimento/conversas/{id}/lida
   POST /api/atendimento/conversas/{id}/visto
+  POST /api/atendimento/zerar-nao-lidas
 
 Decisão do dono (Eduardo, 14/10/2026): "ao passar também tem que marcar como
 visto, igual lá no Duoke quando clicar na conversa". A tela chama esta rota
@@ -50,6 +51,11 @@ do banco (`lida.gravar_visto`). Com a conversa aberta, a tela chama o /visto
 de novo quando a releitura traz mensagem nova (o /lida, uma vez por
 abertura).
 
+O /zerar-nao-lidas (15/10/2026) é o "Limpar não lidas" do Duoke: o "visto no
+DaVinci" de uma vez em todas as conversas de chat da loja
+(`integration_id`), das plataformas (`plataformas`) ou de tudo — dentro do escopo da equipe.
+Responde `{conversas}` (quantas foram marcadas); 403 para quem só lê.
+
 A MESMA TRAVA de acesso do router do atendimento (`_so_admin`), a permissão de
 escrita (`_edit`) e o escopo por equipe (`_conversa_ou_404`). Router à parte;
 o `main.py` o inclui.
@@ -59,6 +65,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -67,9 +74,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.team_scope import resolve_team_scope
-from app.models import User
+from app.models import AtendimentoConversa, User
 from app.routers.atendimento import (
     SO_LEITURA,
+    _clausula_escopo,
     _conversa_ou_404,
     _conversa_out,
     _edit,
@@ -174,3 +182,36 @@ async def marcar_visto(
     except lida_svc.LidaRecusada as e:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA) from e
     return VistoOut(visto_em=visto, conversa=await _conversa_out(session, c))
+
+
+class ZerarIn(BaseModel):
+    """O que zerar: a loja, as plataformas ou (os dois vazios) a Caixa inteira."""
+
+    plataformas: list[str] = []
+    integration_id: UUID | None = None
+
+
+class ZerarOut(BaseModel):
+    conversas: int = 0
+
+
+@router.post("/zerar-nao-lidas", response_model=ZerarOut)
+async def zerar_nao_lidas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+    body: ZerarIn | None = None,
+) -> ZerarOut:
+    """O "Zerar não lidas" do Duoke: marca como vistas no DaVinci, sem ir à plataforma."""
+    body = body or ZerarIn()
+    scope = await resolve_team_scope(session, user)
+    try:
+        total = await lida_svc.zerar_nao_lidas(
+            session,
+            user,
+            plataformas=[p.strip() for p in body.plataformas],
+            integration_id=body.integration_id,
+            escopo=_clausula_escopo(scope, AtendimentoConversa.integration_id),
+        )
+    except lida_svc.LidaRecusada as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA) from e
+    return ZerarOut(conversas=total)

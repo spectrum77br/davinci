@@ -252,6 +252,7 @@ def _figurinha(sticker_id, fonte="openapi") -> dict:
 # O item cru da Shopee (`payload`). O texto é só o rótulo: o que separa a
 # figurinha da campanha da figurinha que a pessoa mandou é o payload.
 PAYLOADS_AUTOMATICOS = [
+    _figurinha("0028"),  # a campanha "Só passando para saber…" (15/10/2026)
     _figurinha("0007"),
     # O cartão do pedido que a LOJA manda pela API — o do "pedido recebido" e
     # do "entregue" da campanha (05/10/2026: 1.934 de 1.935 na Shopee e 157 de
@@ -272,7 +273,7 @@ PAYLOADS_DE_PESSOA = [
     {},
     [],
     "texto",
-    _figurinha("0028"),
+    _figurinha("0013"),
     _figurinha("0012"),
     _figurinha(7),
     _figurinha("0007", fonte="android"),  # a figurinha 0007 do COMPRADOR
@@ -302,7 +303,7 @@ def test_payload_da_shopee_separa_a_campanha_e_o_cartao():
     # Sem payload, a régua é só a do texto (quem não tem a coluna à mão).
     assert not e_mensagem_automatica("[Figurinha]")
     # Texto automático continua automático com qualquer payload.
-    assert e_mensagem_automatica("Olá, a sua mensagem foi recebida", _figurinha("0028"))
+    assert e_mensagem_automatica("Olá, a sua mensagem foi recebida", _figurinha("0012"))
 
 
 async def test_payload_sql_diz_o_mesmo_que_o_python(db):
@@ -360,7 +361,7 @@ def test_fila_campanha_figurinha_cartao_e_senha_nao_fecham_a_vez():
 
 def test_fila_figurinha_de_pessoa_e_resposta_comum_continuam_fechando():
     for texto, payload in (
-        ("[Figurinha]", _figurinha("0028")),
+        ("[Figurinha]", _figurinha("0012")),
         ("[Figurinha]", _figurinha("0007", fonte="android")),
         ("Oi! Você já segue nossa loja aqui?", {}),
         ("Olá! Seu pedido já foi enviado", {}),

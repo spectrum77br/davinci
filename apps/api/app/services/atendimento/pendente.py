@@ -94,10 +94,11 @@ Duoke com 9 numa conversa só). A régua nova, por conversa:
 
   • de CHAT (`do_chat`: fora a avaliação, a reclamação/devolução/mediação, o
     comentário das redes, o carrinho do site e o e-mail da ponte), não
-    fechada, esperando resposta na FILA (`aguardando_resposta`: o menu do
-    robô e as automações não fecham a vez do comprador) e com a última
-    mensagem do comprador nas últimas 24 h (`JANELA_DO_NUMERO`);
-  • soma as mensagens DO COMPRADOR que vieram depois
+    fechada — sem depender da FILA (`entra_no_numero`);
+  • soma as mensagens DO COMPRADOR (`do_comprador_no_numero`: também a
+    `sistema` que ele mesmo mandou — a pergunta do FAQ, a resposta automática
+    da conta dele) mandadas depois de `desde_do_numero` (o Duoke foi zerado
+    inteiro em 14/10/2026 às 12:35; no máximo 7 dias) e depois
       – da última resposta de PESSOA da loja (`ultima_da_loja_em`, a da fila:
         a automática — o robô e as campanhas do Duoke, as automações do
         DaVinci, o cartão da Shopee — não conta e NÃO zera o número), no
@@ -118,7 +119,16 @@ Duoke com 9 numa conversa só). A régua nova, por conversa:
   • o e-mail da ponte gravado dentro de um chat (antes de 13/10/2026) não
     aparece na conversa e não conta.
 
-Medido em 15/10/2026 07:32 (antes de a equipe começar, sem `visto_em`), na
+2ª medição (15/10/2026 08:55, conversa a conversa contra a lista do Duoke,
+211 conversas da Shopee): 175 batiam com a régua da 1ª; a diferença era (1)
+a mensagem `sistema` do próprio comprador (9 conversas — agora conta), (2) a
+figurinha 0028 da campanha "Só passando para saber…" fechando a vez como se
+fosse pessoa (`constantes.FIGURINHAS_CAMPANHA_DUOKE`) e (3) o Duoke zerado
+inteiro às 12:35 de 14/10 (12 conversas de antes, todas 0 lá). Com as três,
+ATV 61=61, Jlas 50=50, KIA 28=28, Minas 17=17, Victor, Aguiar e Vortan
+iguais; o que sobra (±1–3) é conversa aberta no Duoke sem resposta.
+
+1ª medição, em 15/10/2026 07:32 (antes de a equipe começar, sem `visto_em`), na
 Shopee, régua × Duoke: Aguiar 11=11, Victor 14=14, KIA 23=23, Poofy 0=0,
 ATV 58×55, Jlas 50×48, Barbosa 36×39, Marquezini 71×67, KFA 15×17, Mini
 9×10, Inova 9×11, Minas 10×8, Vita 7×10 — as janelas de 12 h, 48 h e 7 dias
@@ -166,6 +176,7 @@ from app.models import AtendimentoConversa, AtendimentoMensagem
 from app.services.atendimento import separa_email
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
+    AUTOR_SISTEMA,
     CANAL_AVALIACAO,
     CANAL_CARRINHO,
     CANAL_CHAT,
@@ -185,16 +196,31 @@ CANAIS_FORA_DO_CHAT: frozenset[str] = frozenset(
     {CANAL_AVALIACAO, CANAL_RECLAMACAO, CANAL_COMENTARIO, CANAL_CARRINHO}
 )
 
-# A janela do número (15/10/2026): só a conversa em que o comprador escreveu
-# nas últimas 24 h entra — a que bateu com o Duoke às 07:32 de 15/10/2026 (12
-# h, 48 h e 7 dias ficaram piores).
-JANELA_DO_NUMERO = timedelta(hours=24)
+# Desde quando o número conta (15/10/2026, a 2ª medição, conversa a conversa
+# às 08:55 contra a lista do próprio Duoke): o Duoke NÃO tem janela — o não
+# lido acumula até alguém abrir a conversa, responder ou "Limpar não lidas".
+# O Duoke INTEIRO foi zerado em 14/10/2026 entre 12:34:24 e 12:35:55 (todas
+# as lojas e plataformas: nenhuma conversa com não lida antes disso — a
+# gssicacris das 12:34:24 com 0 —, todas as de depois contam — as da
+# g3orgeribeiro das 12:35:55 em diante); a "janela de 24 h" da 1ª medição era
+# esse corte. O DaVinci conta
+# dali (`ZERADO_NO_DUOKE_EM`, no relógio da plataforma) e, para o número não
+# crescer sem fim nas conversas que ninguém abre, olha no máximo 7 dias para
+# trás (`JANELA_DO_NUMERO`). Zerar de novo é o "Zerar não lidas" da Caixa
+# (`lida.zerar_nao_lidas`, o mesmo do Duoke).
+ZERADO_NO_DUOKE_EM = datetime(2026, 10, 14, 15, 35, tzinfo=UTC)
+JANELA_DO_NUMERO = timedelta(days=7)
 
 
 def _utc(quando: datetime | None) -> datetime | None:
     if quando is None:
         return None
     return quando.replace(tzinfo=UTC) if quando.tzinfo is None else quando.astimezone(UTC)
+
+
+def desde_do_numero(agora: datetime | None = None) -> datetime:
+    """A mensagem do comprador mandada antes disto não conta no número. PURA."""
+    return max(ZERADO_NO_DUOKE_EM, _utc(agora or datetime.now(UTC)) - JANELA_DO_NUMERO)
 
 
 def pela_fila(conversa: Any) -> bool:
@@ -311,42 +337,81 @@ def marcos_do_numero(conversa: Any) -> tuple[datetime | None, datetime | None]:
 
 
 def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
-    """A conversa entra no número da Caixa? PURA.
+    """A conversa pode somar no número da Caixa? PURA — o pré-filtro.
 
-    Chat, não fechada, esperando resposta na FILA (`aguardando_resposta`: a
-    automática não fecha a vez) e com a última mensagem do comprador dentro
-    da `JANELA_DO_NUMERO`.
+    Chat, não fechada, sem o "não precisa de resposta", com mensagem depois
+    de `desde_do_numero` e depois da última
+    resposta de pessoa (se a resposta foi a última, não há o que contar). NÃO
+    depende da FILA (`aguardando_resposta`): a mensagem do comprador que o
+    DaVinci grava como `sistema` (a pergunta do FAQ, a resposta automática da
+    conta dele) não abre a vez dele, e no Duoke conta (15/10/2026).
     """
-    if not do_chat(conversa) or getattr(conversa, "situacao", None) == CONVERSA_FECHADA:
+    if not do_chat(conversa):
         return False
-    if not getattr(conversa, "aguardando_resposta", False):
+    if getattr(conversa, "situacao", None) == CONVERSA_FECHADA:
         return False
-    do_cliente = _utc(getattr(conversa, "ultima_do_cliente_em", None))
-    limite = _utc(agora or datetime.now(UTC)) - JANELA_DO_NUMERO
-    return do_cliente is not None and do_cliente > limite
+    # "Não precisa de resposta" = o "marcar como processado" do Duoke, que
+    # zera o não lido (a fala nova do comprador desmarca, `gravar`).
+    if getattr(conversa, "sem_resposta_necessaria", False):
+        return False
+    ultima = _utc(getattr(conversa, "ultima_mensagem_em", None))
+    if ultima is None or ultima <= desde_do_numero(agora):
+        return False
+    pessoa = _utc(getattr(conversa, "ultima_da_loja_em", None))
+    return pessoa is None or ultima > pessoa
+
+
+def do_comprador_no_numero(mensagem: Any, comprador: Any = None) -> bool:
+    """A mensagem é do COMPRADOR para o número? PURA.
+
+    O autor `cliente` e, desde 15/10/2026, a mensagem `sistema` que o próprio
+    comprador mandou (`payload.from_id` = o `comprador_id` da conversa): na
+    Shopee, a pergunta que ele escolheu no FAQ (`bundle_message`) e a
+    resposta automática da conta dele (o comprador que também vende: "Olá.
+    Bem-vindo! Como posso ajudá-lo?", "Prezado comprador, a sua mensagem foi
+    recebida…"). O DaVinci grava as duas como `sistema` (não abrem a vez dele
+    na fila), mas o Duoke conta como não lida — medido em 15/10/2026: 9
+    conversas a menos no DaVinci, todas com uma delas. A do sistema da loja
+    (as campanhas, o "já segue") tem o `from_id` da loja e não conta.
+    """
+    autor = getattr(mensagem, "autor", None)
+    if autor == AUTOR_CLIENTE:
+        return True
+    if autor != AUTOR_SISTEMA or comprador in (None, ""):
+        return False
+    payload = getattr(mensagem, "payload", None)
+    remetente = payload.get("from_id") if isinstance(payload, dict) else None
+    return remetente is not None and str(remetente) == str(comprador)
 
 
 def mensagem_no_numero(
-    mensagem: Any, pessoa: datetime | None = None, visto: datetime | None = None
+    mensagem: Any,
+    pessoa: datetime | None = None,
+    visto: datetime | None = None,
+    *,
+    comprador: Any = None,
+    desde: datetime | None = None,
 ) -> bool:
     """A mensagem soma no número? PURA — a gêmea do WHERE de `nao_lidas_duoke_sql`.
 
-    Do COMPRADOR, que aparece na conversa (o e-mail da ponte gravado dentro
-    de um chat não), mandada depois da última resposta de pessoa (`pessoa`,
-    no relógio da plataforma: `enviada_em`, sem ele a chegada) e CHEGADA ao
+    Do COMPRADOR (`do_comprador_no_numero`), que aparece na conversa (o
+    e-mail da ponte gravado dentro de um chat não), mandada depois da última
+    resposta de pessoa (`pessoa`) e de `desde` (`desde_do_numero`), no
+    relógio da plataforma (`enviada_em`, sem ele a chegada), e CHEGADA ao
     DaVinci depois do que a pessoa já viu (`visto`, no relógio do DaVinci:
     `created_at` — o sync traz a mensagem ~1 min depois; a que chegou depois
     de abrir, ela não viu). Os marcos: `marcos_do_numero`.
     """
-    if getattr(mensagem, "autor", None) != AUTOR_CLIENTE:
+    if not do_comprador_no_numero(mensagem, comprador):
         return False
     if separa_email.e_mensagem_de_email(mensagem):
         return False
     chegou = _utc(getattr(mensagem, "created_at", None))
-    if pessoa is not None:
-        quando = _utc(getattr(mensagem, "enviada_em", None)) or chegou
-        if quando is None or quando <= pessoa:
-            return False
+    quando = _utc(getattr(mensagem, "enviada_em", None)) or chegou
+    if pessoa is not None and (quando is None or quando <= pessoa):
+        return False
+    if desde is not None and (quando is None or quando <= desde):
+        return False
     if visto is not None and (chegou is None or chegou <= visto):
         return False
     return True
@@ -366,11 +431,14 @@ def nao_lidas_duoke(
     if not entra_no_numero(conversa, agora):
         return 0
     pessoa, visto = marcos_do_numero(conversa)
+    comprador = getattr(conversa, "comprador_id", None)
+    desde = desde_do_numero(agora)
     cid = getattr(conversa, "id", None)
     return sum(
         1
         for m in mensagens
-        if getattr(m, "conversa_id", cid) == cid and mensagem_no_numero(m, pessoa, visto)
+        if getattr(m, "conversa_id", cid) == cid
+        and mensagem_no_numero(m, pessoa, visto, comprador=comprador, desde=desde)
     )
 
 
@@ -389,24 +457,30 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
 
     A contagem é uma subconsulta CORRELATA pelo índice de
     `atendimento_mensagens.conversa_id`, dentro do CASE: o Postgres só a roda
-    para a conversa que entra no número (as de chat esperando resposta com o
-    comprador nas últimas 24 h — umas 200 em produção em 15/10/2026), não
-    para a Caixa inteira — e por linha na lista (`numero_duoke`, 50 por vez).
-    Dois relógios: a resposta de pessoa contra o da PLATAFORMA
+    para a conversa que passa no pré-filtro (`entra_no_numero`: chat com
+    mensagem depois de `desde_do_numero` e da última resposta de pessoa —
+    umas 950 em produção em 15/10/2026, ~0,1 ms cada), não para a Caixa
+    inteira — e por linha na lista (`numero_duoke`, 50 por vez). Dois
+    relógios: a resposta de pessoa e o `desde` contra o da PLATAFORMA
     (`coalesce(enviada_em, created_at)`, como a fila) e o "visto no DaVinci"
     contra a CHEGADA da mensagem (`created_at`, `mensagem_no_numero`). Sem
     marco (NULL), aquele lado não corta nada.
     """
     m = aliased(AtendimentoMensagem)
     momento = func.coalesce(m.enviada_em, m.created_at)
-    limite = _utc(agora or datetime.now(UTC)) - JANELA_DO_NUMERO
+    desde = desde_do_numero(agora)
+    do_comprador = or_(
+        m.autor == AUTOR_CLIENTE,
+        and_(m.autor == AUTOR_SISTEMA, m.payload["from_id"].astext == c.comprador_id),
+    )
     mensagens = (
         select(func.count())
         .select_from(m)
         .where(
             m.conversa_id == c.id,
-            m.autor == AUTOR_CLIENTE,
+            do_comprador,
             not_(separa_email.mensagem_de_email_sql(m)),
+            momento > desde,
             or_(c.ultima_da_loja_em.is_(None), momento > c.ultima_da_loja_em),
             or_(c.visto_em.is_(None), m.created_at > c.visto_em),
         )
@@ -416,7 +490,8 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
     entra = and_(
         do_chat_sql(c),
         c.situacao != CONVERSA_FECHADA,
-        c.aguardando_resposta.is_(True),
-        c.ultima_do_cliente_em > limite,
+        c.sem_resposta_necessaria.is_(False),
+        c.ultima_mensagem_em > desde,
+        or_(c.ultima_da_loja_em.is_(None), c.ultima_mensagem_em > c.ultima_da_loja_em),
     )
     return case((entra, mensagens), else_=0)

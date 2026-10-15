@@ -1154,8 +1154,9 @@ TRECHOS_CAMPANHA_COM_USUARIO = tuple(_trecho_like(f) for f in CAMPANHAS_COM_USUA
 #   - a figurinha 0007 mandada pela API (`source` "openapi") é a campanha do
 #     Duoke: 1.009 das 1.318 saíram entre 1555 e 1565 min depois da última
 #     fala do comprador (26 h), e fechavam 393 turnos da Shopee com o p90
-#     cravado em 1560 min. As outras figurinhas (0028, 0012, 0013, 0014) não
-#     têm esse relógio e continuam contando;
+#     cravado em 1560 min. As outras figurinhas (0012, 0013, 0014) não
+#     têm esse relógio e continuam contando (a 0028 virou campanha depois:
+#     `FIGURINHAS_CAMPANHA_DUOKE`);
 #   - o que a PRÓPRIA Shopee põe na conversa em nome da loja: `source`
 #     "server" (cupom, cartão de logística, devolução) e "crm" (pedido de
 #     avaliação, vitrine, disparo) — o "crm" sai 0,3 min depois do comprador.
@@ -1164,6 +1165,13 @@ FONTES_SHOPEE_DA_PLATAFORMA: tuple[str, ...] = ("server", "crm")
 FONTE_SHOPEE_API = "openapi"
 TIPO_SHOPEE_FIGURINHA = "sticker"
 FIGURINHA_CAMPANHA_DUOKE = "0007"
+# A figurinha 0028 virou campanha depois daquela medição (15/10/2026, 7 dias,
+# loja, `source` "openapi"): 223 das 229 saíram no mesmo minuto do texto de
+# campanha "Oi! Só passando para saber se está tudo certo com o seu
+# produto…" (o "já segue"/usuário antes dele). Contando como pessoa, fechava
+# a vez do comprador e zerava o número da Caixa da conversa — no Duoke ela
+# não zera (58xmtuepq2, Jlas: 4 lá, 0 aqui).
+FIGURINHAS_CAMPANHA_DUOKE: tuple[str, ...] = (FIGURINHA_CAMPANHA_DUOKE, "0028")
 # O CARTÃO DO PEDIDO que a LOJA manda pela API (05/10/2026): é o "pedido
 # recebido" e o "entregue" das campanhas do Duoke — o cartão vai 1 s antes do
 # texto. Medido em produção (7 dias): na Shopee (`message_type` "order",
@@ -1232,7 +1240,7 @@ def e_automatica_pelo_payload(payload: object) -> bool:
         fonte == FONTE_SHOPEE_API
         and tipo == TIPO_SHOPEE_FIGURINHA
         and isinstance(conteudo, dict)
-        and conteudo.get("sticker_id") == FIGURINHA_CAMPANHA_DUOKE
+        and conteudo.get("sticker_id") in FIGURINHAS_CAMPANHA_DUOKE
     )
 
 
