@@ -304,11 +304,9 @@ onMounted(() => {
           </div>
         </div>
 
+        <div class="flex min-w-0 flex-col gap-3">
         <div class="flex min-w-0 flex-col rounded-md border bg-card">
-          <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-            <span>Onde agir hoje</span>
-            <span class="text-[11px] font-normal text-slate-300">em ordem do que mais dói</span>
-          </div>
+          <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Onde agir hoje</div>
           <div class="space-y-2 p-2">
             <div v-for="(a, i) in dados.agir" :key="i" class="flex items-start justify-between gap-2 rounded-md border px-2.5 py-2 text-xs" :class="agirCls(a.gravidade)">
               <div class="min-w-0">
@@ -321,56 +319,45 @@ onMounted(() => {
           </div>
           <div class="mt-auto border-t px-3 py-1.5 text-[11px] text-muted-foreground">Essa lista é a mesma que o vigia vai mandar no Threema de manhã — quem abre o painel vê o detalhe; quem está no celular vê o resumo.</div>
         </div>
-      </div>
 
-      <div class="rounded-md border bg-card">
-        <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-          <span>Dinheiro nas plataformas</span>
-          <span class="text-[11px] font-normal text-slate-300">onde o dinheiro está agora: na conta e preso esperando liberação</span>
-        </div>
-        <div class="overflow-auto">
+        <!-- Dinheiro nas plataformas (opção B de 15/10): estreito, embaixo do "Onde agir" -->
+        <div class="flex min-w-0 flex-col rounded-md border bg-card">
+          <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Dinheiro nas plataformas</div>
           <table class="w-full border-collapse text-[11px]">
             <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
               <tr>
                 <th class="border-b px-2 py-1 text-left">Marketplace / loja</th>
-                <th class="border-b px-2 py-1 text-right">Na conta (disponível)</th>
-                <th class="whitespace-nowrap border-b px-2 py-1 text-left">Saldo de quando</th>
+                <th class="border-b px-2 py-1 text-right">Na conta</th>
                 <th class="border-b px-2 py-1 text-right">A liberar</th>
-                <th class="whitespace-nowrap border-b px-2 py-1 text-right">Reservado (em disputa)</th>
               </tr>
             </thead>
             <tbody>
               <template v-for="g in grupos" :key="'d' + g.key">
                 <tr class="border-b bg-muted/60 font-bold">
-                  <td class="px-2 py-1">
-                    {{ g.label }} <span class="font-normal text-muted-foreground">({{ g.lojas.length }} loja{{ g.lojas.length === 1 ? '' : 's' }})</span>
-                    <button type="button" class="ml-2 font-semibold text-primary underline" @click="alternar(g.key)">{{ abertos[g.key] ? 'esconder' : 'mostrar' }}</button>
-                  </td>
-                  <td class="px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.na_conta) }}</td>
-                  <td class="px-2 py-1"></td>
-                  <td class="px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.a_liberar) }} <span class="font-normal text-muted-foreground">({{ dados.por_plataforma[g.key]?.dinheiro?.a_liberar_pedidos || 0 }} pedidos)</span></td>
-                  <td class="px-2 py-1 text-right tabular-nums">{{ g.key === 'ml' ? fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.reservado) : '—' }}</td>
+                  <td class="px-2 py-1">{{ g.label }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternar(g.key)">{{ abertos[g.key] ? 'esconder' : 'mostrar' }}</button></td>
+                  <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.na_conta) }}</td>
+                  <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.a_liberar) }}</td>
                 </tr>
                 <tr v-for="l in g.lojas" v-show="abertos[g.key]" :key="'d' + l.conta" class="cursor-pointer border-b hover:bg-muted/40" title="abre os pedidos desta loja aguardando liberação" @click="emit('ver-pedidos', l.conta, { situacao: 'aguardando' })">
-                  <td class="px-2 py-1 pl-6 font-bold">{{ l.conta }}</td>
-                  <td class="px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(l.dinheiro.na_conta) }}</td>
-                  <td class="whitespace-nowrap px-2 py-1 text-muted-foreground">{{ fmtDiaHora(l.dinheiro.saldo_em) }}</td>
-                  <td class="px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(l.dinheiro.a_liberar) }} <span class="font-normal text-muted-foreground">({{ l.dinheiro.a_liberar_pedidos }} pedidos)</span></td>
-                  <td class="px-2 py-1 text-right tabular-nums">{{ l.dinheiro.reservado == null ? '—' : fmtMoney(l.dinheiro.reservado) }}</td>
+                  <td class="px-2 py-1 pl-4">
+                    <div class="font-bold">{{ l.conta }}</div>
+                    <div class="text-[10px] text-muted-foreground">saldo de {{ fmtDiaHora(l.dinheiro.saldo_em) }} · {{ l.dinheiro.a_liberar_pedidos }} pedidos a liberar<template v-if="l.dinheiro.reservado != null"> · reservado {{ fmtMoney(l.dinheiro.reservado) }}</template></div>
+                  </td>
+                  <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(l.dinheiro.na_conta) }}</td>
+                  <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(l.dinheiro.a_liberar) }}</td>
                 </tr>
               </template>
-              <tr v-if="faseSeguinte.length" class="border-b bg-muted/60 font-bold"><td class="px-2 py-1">{{ faseSeguinte.join(' · ') }}</td><td colspan="4" class="px-2 py-1 font-normal text-muted-foreground">fase seguinte</td></tr>
+              <tr v-if="faseSeguinte.length" class="border-b bg-muted/60 font-bold"><td class="px-2 py-1">{{ faseSeguinte.join(' · ') }}</td><td colspan="2" class="px-2 py-1 text-right font-normal text-muted-foreground">fase seguinte</td></tr>
               <tr class="bg-muted/40 font-bold">
                 <td class="px-2 py-1">Empresa <span class="font-normal text-muted-foreground">({{ dados.lojas.length }} loja{{ dados.lojas.length === 1 ? '' : 's' }})</span></td>
-                <td class="px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.empresa.dinheiro?.na_conta) }}</td>
-                <td class="px-2 py-1"></td>
-                <td class="px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.empresa.dinheiro?.a_liberar) }} <span class="font-normal text-muted-foreground">({{ dados.empresa.dinheiro?.a_liberar_pedidos || 0 }} pedidos)</span></td>
-                <td class="px-2 py-1 text-right tabular-nums">{{ fmtMoney(dados.empresa.dinheiro?.reservado) }}</td>
+                <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.empresa.dinheiro?.na_conta) }}</td>
+                <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.empresa.dinheiro?.a_liberar) }}</td>
               </tr>
             </tbody>
           </table>
+          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Na conta = último saldo do extrato, como a plataforma informou. A liberar = líquido previsto das vendas ainda não liberadas. Clique na loja abre os pedidos dela.</div>
         </div>
-        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">"Na conta" = o último saldo do extrato, como a plataforma informou. "A liberar" = soma do líquido previsto das vendas ainda não liberadas (a coluna Líq. previsto da aba Pedidos). "Reservado" = dinheiro travado em reclamação aberta no Mercado Pago. Clique na loja abre os pedidos dela aguardando liberação.</div>
+        </div>
       </div>
 
       <!-- 15/10: o rodapé do mês fica guardado (Vinicius: "por enquanto não preciso"). -->
