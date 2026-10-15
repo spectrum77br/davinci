@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // Conciliação — pedido × financeiro das lojas (passo 2b, 14/10/2026).
 // Desenho e decisões em docs/conciliacao-avaliacao.md; maquetes em docs/img/.
-// Esta é a aba Pedidos: uma linha por pedido do Bling com as quatro versões do
-// dinheiro (Bling, venda, fatura, extrato), o resultado e a situação; o Raio-X
+// Esta é a aba Pedidos: uma linha por pedido do Bling com as três versões do
+// dinheiro (venda, fatura, extrato — o Bling saiu em 15/10: "nunca bate"), o
+// resultado e a situação; o Raio-X
 // do pedido selecionado fica à direita. Extrato do dia e Resumo vêm depois.
 import { Download, Loader2, RefreshCw, Search, Wand2 } from 'lucide-vue-next'
 import { ETAPAS, SITUACOES, etapaCls, fmtDia, fmtDiaHora, fmtMoney, fmtPct, sinal, sitCls, tipoMov } from '~/lib/conciliacao'
@@ -114,7 +115,7 @@ const VISOES: Array<{ key: Visao; label: string; ativo: boolean }> = [
   { key: 'resumo', label: 'Resumo', ativo: true },
   { key: 'pedidos', label: 'Pedidos', ativo: true },
   { key: 'extrato', label: 'Extrato do dia', ativo: true },
-  { key: 'fechamento', label: 'Fechamento do mês', ativo: true },
+  // 15/10: Fechamento do mês escondido por enquanto (pedido do Vinicius); o componente fica.
 ]
 const tab = ref('ml')
 // A tela de entrada é o Resumo (passo 2d): de lá se vai pro extrato do dia de uma
@@ -467,7 +468,6 @@ await carregar()
             <thead class="sticky top-0 z-10 bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
               <tr class="text-center normal-case">
                 <th colspan="4" class="border-b px-1.5 py-1 text-left">Identificação</th>
-                <th class="border-b border-l-2 px-1.5 py-1">Bling</th>
                 <th colspan="4" class="border-b border-l-2 px-1.5 py-1">Venda ML</th>
                 <th colspan="2" class="border-b border-l-2 px-1.5 py-1">Extrato (entrou de fato)</th>
                 <th class="border-b border-l-2 px-1.5 py-1">Conc.</th>
@@ -479,7 +479,6 @@ await carregar()
                 <th class="border-b px-1.5 py-1 text-left">Pedido</th>
                 <th class="border-b px-1.5 py-1 text-left">Venda ML</th>
                 <th class="border-b px-1.5 py-1 text-left">Loja</th>
-                <th class="border-b border-l-2 px-1.5 py-1 text-right">Total</th>
                 <th class="border-b border-l-2 px-1.5 py-1 text-right">Valor</th>
                 <th class="border-b px-1.5 py-1 text-right">Tarifa</th>
                 <th class="border-b px-1.5 py-1 text-right">Frete</th>
@@ -498,13 +497,13 @@ await carregar()
             </thead>
             <tbody>
               <tr v-if="loading && !itens.length">
-                <td colspan="19" class="py-8 text-center text-muted-foreground"><Loader2 class="mr-1 inline size-4 animate-spin" /> carregando…</td>
+                <td colspan="18" class="py-8 text-center text-muted-foreground"><Loader2 class="mr-1 inline size-4 animate-spin" /> carregando…</td>
               </tr>
               <tr v-else-if="erro">
-                <td colspan="19" class="py-8 text-center text-red-600">{{ erro }}</td>
+                <td colspan="18" class="py-8 text-center text-red-600">{{ erro }}</td>
               </tr>
               <tr v-else-if="!itens.length">
-                <td colspan="19" class="py-8 text-center text-muted-foreground">nenhum pedido com esse filtro</td>
+                <td colspan="18" class="py-8 text-center text-muted-foreground">nenhum pedido com esse filtro</td>
               </tr>
               <tr
                 v-for="p in itens"
@@ -513,7 +512,7 @@ await carregar()
                 :class="[
                   selecionado?.pedido_bling === p.pedido_bling && 'outline outline-2 -outline-offset-2 outline-primary',
                   ['recebido_a_menos', 'vencido', 'estornado_depois'].includes(p.situacao) && 'bg-red-50 dark:bg-red-950/20',
-                  ['aguardando', 'recebido_a_mais', 'bling_diferente'].includes(p.situacao) && 'bg-amber-50/60 dark:bg-amber-950/10',
+                  ['aguardando', 'recebido_a_mais'].includes(p.situacao) && 'bg-amber-50/60 dark:bg-amber-950/10',
                 ]"
                 @click="abrir(p)"
               >
@@ -521,7 +520,6 @@ await carregar()
                 <td class="whitespace-nowrap px-1.5 py-1 font-bold">{{ p.pedido_bling }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1">{{ p.numeroloja }}<span v-if="p.pack_id" class="ml-1 text-muted-foreground">pack</span></td>
                 <td class="whitespace-nowrap px-1.5 py-1">{{ p.conta }}</td>
-                <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums" :class="p.dif_bling_venda && Math.abs(p.dif_bling_venda) > 0.05 ? 'font-bold text-red-600' : ''">{{ fmtMoney(p.bling_total) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_valor) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_tarifa) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_frete) }}</td>
@@ -537,7 +535,6 @@ await carregar()
                 </td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right font-bold tabular-nums" :class="sinal(p.dif_previsto_recebido, { pos: 'text-emerald-700', neg: 'text-red-600' })">
                   <template v-if="p.dif_previsto_recebido !== null">{{ p.dif_previsto_recebido > 0 ? '+ ' : '' }}{{ fmtMoney(p.dif_previsto_recebido) }}</template>
-                  <template v-else-if="p.dif_bling_venda && Math.abs(p.dif_bling_venda) > 0.05"><span class="text-red-600">Bling {{ p.dif_bling_venda > 0 ? '+' : '' }}{{ fmtMoney(p.dif_bling_venda) }}</span></template>
                   <template v-else>—</template>
                 </td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.custo) }}</td>
@@ -555,18 +552,6 @@ await carregar()
               </tr>
             </tbody>
           </table>
-        </div>
-        <div v-if="resumo" class="grid grid-cols-5 border-t text-[11px] xl:grid-cols-10">
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Pedidos</div><b class="text-xs tabular-nums">{{ resumo.pedidos }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Vendido (ML)</div><b class="text-xs tabular-nums">{{ fmtMoney(resumo.vendido) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Tarifas + frete</div><b class="text-xs tabular-nums text-red-600">− {{ fmtMoney(resumo.tarifas_frete) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Líquido previsto</div><b class="text-xs tabular-nums">{{ fmtMoney(resumo.previsto) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Recebido ({{ resumo.liberados }} liberados)</div><b class="text-xs tabular-nums text-emerald-700">{{ fmtMoney(resumo.recebido) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Diferença</div><b class="text-xs tabular-nums" :class="sinal(resumo.diferenca, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(resumo.diferenca) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Custo dos produtos</div><b class="text-xs tabular-nums text-red-600">− {{ fmtMoney(resumo.custo) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Reembolsos</div><b class="text-xs tabular-nums text-red-600">− {{ fmtMoney(resumo.reembolso) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Sobrou</div><b class="text-xs tabular-nums" :class="sinal(resumo.sobrou, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(resumo.sobrou) }}</b></div>
-          <div class="px-2 py-1.5"><div class="text-muted-foreground">Margem</div><b class="text-xs tabular-nums">{{ fmtPct(resumo.margem) }}</b></div>
         </div>
         <div class="flex items-center justify-between border-t px-3 py-1.5 text-[11px] text-muted-foreground">
           <span>Sobrou = Recebido (ou previsto, em cinza, enquanto não libera) − custo dos produtos − reembolsos do painel Reembolso. Margem = Sobrou ÷ custo.</span>
@@ -596,16 +581,16 @@ await carregar()
           </div>
           <table class="w-full border-collapse">
             <thead class="bg-muted text-[10px] uppercase text-muted-foreground">
-              <tr><th class="px-1.5 py-1 text-left"></th><th class="px-1.5 py-1 text-right">Bling</th><th class="px-1.5 py-1 text-right">Venda ML</th><th class="px-1.5 py-1 text-right">Fatura ML</th><th class="px-1.5 py-1 text-right">Extrato</th></tr>
+              <tr><th class="px-1.5 py-1 text-left"></th><th class="px-1.5 py-1 text-right">Venda ML</th><th class="px-1.5 py-1 text-right">Fatura ML</th><th class="px-1.5 py-1 text-right">Extrato</th></tr>
             </thead>
             <tbody class="tabular-nums">
-              <tr class="border-b"><td class="px-1.5 py-1">Valor da venda</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.bling.valor as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.valor as number) }}</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.valor as number) }}</td></tr>
-              <tr class="border-b"><td class="px-1.5 py-1">Tarifa de venda</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.bling.tarifa as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.tarifa as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.fatura.tarifa as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.tarifa as number) }}</td></tr>
-              <tr class="border-b" :class="raiox.versoes.extrato.frete != null && raiox.versoes.venda.frete != null && Math.abs((raiox.versoes.extrato.frete as number) - (raiox.versoes.venda.frete as number)) > 0.05 && 'bg-red-50 dark:bg-red-950/20'"><td class="px-1.5 py-1">Frete (custo do envio)</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.bling.frete as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.frete as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.fatura.frete as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.frete as number) }}</td></tr>
-              <tr class="border-b"><td class="px-1.5 py-1">Parcelamento</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.fatura.parcelamento as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.parcelamento as number) }}</td></tr>
-              <tr class="border-b"><td class="px-1.5 py-1">Cupom da loja</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.cupom as number) }}</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.cupom as number) }}</td></tr>
-              <tr class="border-b"><td class="px-1.5 py-1">Estorno / bonificação</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.estorno as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.fatura.bonificacao as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.saidas_depois as number) }}</td></tr>
-              <tr class="font-bold"><td class="px-1.5 py-1">Líquido</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.bling.liquido as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.liquido as number) }}</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.recebido as number) }}</td></tr>
+              <tr class="border-b"><td class="px-1.5 py-1">Valor da venda</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.valor as number) }}</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.valor as number) }}</td></tr>
+              <tr class="border-b"><td class="px-1.5 py-1">Tarifa de venda</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.tarifa as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.fatura.tarifa as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.tarifa as number) }}</td></tr>
+              <tr class="border-b" :class="raiox.versoes.extrato.frete != null && raiox.versoes.venda.frete != null && Math.abs((raiox.versoes.extrato.frete as number) - (raiox.versoes.venda.frete as number)) > 0.05 && 'bg-red-50 dark:bg-red-950/20'"><td class="px-1.5 py-1">Frete (custo do envio)</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.frete as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.fatura.frete as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.frete as number) }}</td></tr>
+              <tr class="border-b"><td class="px-1.5 py-1">Parcelamento</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.fatura.parcelamento as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.parcelamento as number) }}</td></tr>
+              <tr class="border-b"><td class="px-1.5 py-1">Cupom da loja</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.cupom as number) }}</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.cupom as number) }}</td></tr>
+              <tr class="border-b"><td class="px-1.5 py-1">Estorno / bonificação</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.estorno as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.fatura.bonificacao as number) }}</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.saidas_depois as number) }}</td></tr>
+              <tr class="font-bold"><td class="px-1.5 py-1">Líquido</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.venda.liquido as number) }}</td><td class="px-1.5 py-1 text-right text-muted-foreground">—</td><td class="px-1.5 py-1 text-right">{{ fmtMoney(raiox.versoes.extrato.recebido as number) }}</td></tr>
             </tbody>
           </table>
           <div class="pt-1 font-bold text-[#1f3a5f] dark:text-slate-200">Movimentos deste pedido</div>

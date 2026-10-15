@@ -183,9 +183,8 @@ def situacao_do_pedido(
                     situacao = "recebido_a_mais"
                 if situacao != "bateu":
                     motivo = _motivo_da_diferenca(venda, fatura, liberacoes)
-            if situacao == "bateu" and dif_bling is not None and abs(dif_bling) > TOLERANCIA:
-                situacao = "bling_diferente"
-                motivo = f"Bling {bling_total} × venda {venda_valor}"
+            # 15/10: o Bling "nunca bate" (Vinicius) — a diferença Bling × venda continua
+            # gravada (dif_bling_venda), mas não vira situação nem aparece na tela.
     return {
         "liberado_valor": liberado_valor,
         "liberado_em": liberado_em,
@@ -441,7 +440,8 @@ async def recalcular_loja(
             else (_d(venda.net_amount) if venda else None)
         )
         if calc["situacao"] == "cancelado":
-            # Venda desfeita: o produto não saiu (ou voltou) — o custo não é perda.
+            # Venda desfeita: o produto não saiu (ou voltou) — custo zero (15/10, Vinicius).
+            custo = ZERO
             sobrou = (base_resultado or ZERO) - reembolso
             margem = None
         else:

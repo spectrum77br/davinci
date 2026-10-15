@@ -426,3 +426,13 @@ Autorização do Vinicius: "pega qualquer conta Shopee que tiver aberta e pode f
 - O que gravamos é **exatamente** o que o ML devolve agora: 228 bonificações, 13.760,93, nenhuma a mais nem a menos (por `detail_id`). A leitura está certa.
 - A diferença é **dentro do ML**: o resumo da fatura (`summary/details`) lista 11.131,25 de bonificações, os detalhes do mesmo período somam 13.760,93 (2.629,68 a mais nos detalhes, em todos os sub-tipos: BVVML +1.373,42, BFONPN +637,43, BDSB +407,80, BVVPRC +145,83, BVVFN +65,20). Todas as 228 têm `charge_bonified_id` (a cobrança que estão devolvendo) e `debited_from_operation = INAPPLICABLE`; 59 foram criadas em setembro (23→30/09) e 169 em outubro.
 - **Confirmado** (`sonda/bonus?so_banco=true`, cruzando cada bonificação com a cobrança que ela devolve): as 193 bonificações cuja cobrança original é **desta fatura** somam **11.131,25 = o resumo do ML**, sub-tipo por sub-tipo, ao centavo (BDSB 1.959,52, BVVML 5.914,88, BFONPN 1.983,69, BVVPRC 753,92, BVVFN 413,42, BVVFNU 8,02, BDSDB 48,90, BXDED 48,90). As outras 35 (2.629,68) devolvem cobranças de **faturas anteriores**: 32 de cobranças de 13→22/09 (a fatura 2026-09) e 3 de cobranças mais antigas que nem temos gravadas. **Regra do ML:** o resumo da fatura só abate a bonificação que anula cobrança da própria fatura; a que devolve cobrança de fatura já fechada é crédito real pra loja, mas aparece fora do resumo. O Fechamento passou a conferir "resumo × bonificações desta fatura" (✔) e a mostrar à parte "bonificações devolvendo cobrança de fatura anterior".
+
+
+---
+
+## 19. Ajustes de 15/10 de manhã (pedidos do Vinicius ao ver a tela)
+
+- **Bling fora da tela.** "Nunca bate, o Bling sempre errado": a coluna Bling saiu da grade da aba Pedidos e a versão Bling saiu do Raio-X (ficam venda · fatura · extrato). A diferença Bling × venda continua gravada (`dif_bling_venda`) mas não vira mais situação ("Bling ≠ venda" deixou de existir no filtro e no recálculo). A situação do pedido no Bling (Em aberto, Atendido…) continua no cabeçalho do Raio-X.
+- **Cancelado = custo zero.** Venda desfeita não leva custo de produto (o produto não saiu ou voltou): custo 0, sobrou = o que entrou − reembolso, margem em branco. Vale no próximo recálculo (madrugada, ou "Sincronizar agora").
+- **Rodapé de somas da aba Pedidos saiu** (Pedidos / Vendido / Tarifas + frete / Líquido / Recebido / Custo / Sobrou / Margem): total é coisa do Resumo. A aba Pedidos é pra trabalhar linha a linha.
+- **Fechamento do mês escondido por enquanto** (o botão saiu da barra de visões; o componente e a API ficam prontos pra voltar).

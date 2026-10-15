@@ -633,7 +633,8 @@ async def test_recalcular_loja_classifica_as_situacoes(db, make_user):
     assert estornado.sobrou == Decimal("-210.00")
 
     bling = pedidos["299377"]
-    assert bling.situacao == "bling_diferente" and bling.dif_bling_venda == Decimal("100.00")
+    # Bling diferente da venda não é mais situação (15/10): fica só gravado
+    assert bling.situacao == "bateu" and bling.dif_bling_venda == Decimal("100.00")
     assert bling.reembolso == Decimal("20.00") and bling.sobrou == Decimal("330.73")
 
     antigo = (
