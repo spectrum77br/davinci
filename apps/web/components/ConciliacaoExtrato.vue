@@ -173,7 +173,7 @@ function rowCls(m: Mov) {
 watch(() => props.loja, () => carregar())
 watch(() => props.dia, (v) => { if (v && v !== dia.value) dia.value = v })
 watch([dia, mostrar], () => carregar())
-await carregar()
+onMounted(() => carregar())
 </script>
 
 <template>

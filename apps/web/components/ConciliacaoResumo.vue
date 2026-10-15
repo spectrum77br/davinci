@@ -183,7 +183,10 @@ function pctFinal(m: Mes) {
 
 defineExpose({ carregar })
 watch(dia, () => carregar())
-await carregar()
+// Sem `await` no setup: componente síncrono. Com top-level await, trocar de uma
+// visão assíncrona pra outra (Resumo → Fechamento) quebrava o patch do DOM
+// (NotFoundError insertBefore) por não ter <Suspense> próprio.
+onMounted(() => carregar())
 </script>
 
 <template>
@@ -244,15 +247,15 @@ await carregar()
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
                   <th class="border-b px-2 py-1 text-left">Loja</th>
-                  <th class="border-b px-2 py-1 text-left">Dia</th>
+                  <th class="whitespace-nowrap border-b px-2 py-1 text-left">Dia</th>
                   <th class="border-b px-2 py-1 text-right">Movimentos</th>
                   <th class="border-b px-2 py-1 text-right">Sem dono</th>
                   <th class="border-b px-2 py-1 text-right">Pedidos c/ pendência</th>
                   <th class="border-b px-2 py-1 text-right">Reabertos</th>
                   <th class="border-b px-2 py-1 text-right">Não liberados</th>
                   <th class="border-b px-2 py-1 text-left">Saldo</th>
-                  <th class="border-b px-2 py-1 text-left">Extrato lido</th>
-                  <th class="border-b px-2 py-1 text-left">Fatura ML</th>
+                  <th class="whitespace-nowrap border-b px-2 py-1 text-left">Extrato lido</th>
+                  <th class="whitespace-nowrap border-b px-2 py-1 text-left">Fatura ML</th>
                   <th class="border-b px-2 py-1 text-left">Situação</th>
                 </tr>
               </thead>
@@ -261,7 +264,7 @@ await carregar()
                   <tr class="bg-muted/60"><td colspan="11" class="border-b px-2 py-1 font-bold">{{ g.label }}</td></tr>
                   <tr v-for="l in g.lojas" :key="l.conta" class="cursor-pointer border-b hover:bg-muted/40" @click="emit('abrir-extrato', l.conta, dados.dia)">
                     <td class="px-2 py-1 font-bold">{{ l.conta }}</td>
-                    <td class="px-2 py-1"><span class="rounded px-1.5 py-0.5 font-semibold" :class="diaCls(l.dia)">{{ diaTexto(l.dia) }}</span></td>
+                    <td class="whitespace-nowrap px-2 py-1"><span class="rounded px-1.5 py-0.5 font-semibold" :class="diaCls(l.dia)">{{ diaTexto(l.dia) }}</span></td>
                     <td class="px-2 py-1 text-right tabular-nums">{{ l.dia.linhas || '—' }}</td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.dia.pendentes ? 'text-red-600' : ''">{{ l.dia.linhas ? l.dia.pendentes : '—' }}</td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.pedidos.pendencia ? 'text-red-600' : ''" @click.stop="emit('ver-pedidos', l.conta, { etapa: 'pendencia' })">{{ l.pedidos.pendencia }}</td>
@@ -272,9 +275,9 @@ await carregar()
                       <span v-else-if="l.dia.saldo_bate === false" class="rounded bg-red-100 px-1.5 py-0.5 font-bold text-red-800 dark:bg-red-900/40 dark:text-red-300">✖ {{ fmtMoney(l.dia.diferenca) }}</span>
                       <span v-else class="text-muted-foreground">—</span>
                     </td>
-                    <td class="px-2 py-1 tabular-nums" :class="l.leituras.extrato_atrasado ? 'font-bold text-red-600' : ''" :title="l.leituras.erro || ''">{{ fmtDiaHora(l.leituras.extrato_em) }}<span v-if="l.leituras.extrato_atrasado"> (atrasado)</span></td>
-                    <td class="px-2 py-1 tabular-nums">{{ l.platform === 'ml' ? fmtDiaHora(l.leituras.fatura_em) : 'n/a' }}</td>
-                    <td class="px-2 py-1"><span class="rounded px-1.5 py-0.5 font-semibold" :class="gravCls(l.gravidade)">{{ l.situacao }}</span></td>
+                    <td class="whitespace-nowrap px-2 py-1 tabular-nums" :class="l.leituras.extrato_atrasado ? 'font-bold text-red-600' : ''" :title="l.leituras.erro || ''">{{ fmtDiaHora(l.leituras.extrato_em) }}<span v-if="l.leituras.extrato_atrasado"> (atrasado)</span></td>
+                    <td class="whitespace-nowrap px-2 py-1 tabular-nums">{{ l.platform === 'ml' ? fmtDiaHora(l.leituras.fatura_em) : 'n/a' }}</td>
+                    <td class="px-2 py-1"><span class="inline-block rounded px-1.5 py-0.5 font-semibold" :class="gravCls(l.gravidade)">{{ l.situacao }}</span></td>
                   </tr>
                 </template>
                 <tr v-if="faseSeguinte.length" class="bg-muted/60"><td colspan="11" class="border-b px-2 py-1 font-bold">{{ faseSeguinte.join(' · ') }}</td></tr>

@@ -133,7 +133,7 @@ function bateTexto(b: boolean | null, ok = 'bate', ruim = 'não bate', nada = 's
 
 defineExpose({ carregar })
 watch([() => props.loja, mes], () => carregar())
-await carregar()
+onMounted(() => carregar())
 </script>
 
 <template>
