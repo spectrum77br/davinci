@@ -79,11 +79,14 @@ def transacao_para_movimento(
         tipo = "venda_liberada" if liquido >= ZERO else "estorno"
     else:
         tipo = "ajuste_tiktok"
-    descricao = (
-        f"Liquidação do pedido {order_id}"
-        if tipo == "venda_liberada" and order_id
-        else f"{tipo_tt.title()} {order_id or ''}".strip()
-    )
+    if tipo == "venda_liberada":
+        descricao = f"Liquidação do pedido {order_id}" if order_id else "Liquidação sem pedido"
+    elif tipo == "estorno":
+        descricao = f"Estorno do pedido {order_id}" if order_id else "Estorno sem pedido"
+    else:
+        descricao = f"Ajuste da TikTok ({tipo_tt.lower()})" + (
+            f" · pedido {order_id}" if order_id else ""
+        )
     return {
         "origem": ORIGEM_TIKTOK,
         "id_externo": str(tid),
@@ -394,7 +397,24 @@ async def _classificar_zeradas_antigas(session: AsyncSession, loja: ConciliacaoL
         m.classificacao = "outro"
         if "(zerada" not in (m.descricao or ""):
             m.descricao = f"{m.descricao or ''} (zerada: nada entrou, nada saiu)".strip()
-    return len(rows)
+    # 1ª versão escrevia "Order X" nos estornos
+    velhos = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_TIKTOK,
+                    mov.tipo == "estorno",
+                    mov.descricao.like("Order %"),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in velhos:
+        m.descricao = m.descricao.replace("Order ", "Estorno do pedido ", 1)
+    return len(rows) + len(velhos)
 
 
 async def reler_financeiro_liquidados(
