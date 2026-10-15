@@ -438,3 +438,48 @@ async def test_etiqueta_easy_ship_separada_nao_e_estorno(db, make_user, auth_as,
     por = {x["chave"]: x for x in r.json()["comparativo"]["linhas"]}
     assert por["etiqueta"]["previsto"] == 41.9 and por["etiqueta"]["real"] == 41.9
     assert por["liquido"]["real"] == 1994.29 and por["liquido"]["dif"] == 0
+
+
+async def test_liberacao_da_reserva_nao_conta_duas_vezes(db, make_user):
+    """Kia 301678 (15/10): lançamento de 06/10 vira DEFERRED_RELEASED e a Amazon manda
+    outro registro RELEASED em 14/10 com o mesmo valor — fica um só, com "liberado em"."""
+    loja = await _loja_amazon(db, make_user)
+    original = _venda_proprio(status="DEFERRED", posted="2026-10-06T14:00:00Z")
+    cliente = _AmazonFalsa([original])
+    r = await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    assert r["inseridos"] == 1
+    # dias depois: o original liberou e veio a repetição
+    liberado = _venda_proprio(status="DEFERRED_RELEASED", posted="2026-10-06T14:00:00Z")
+    repeticao = _venda_proprio(status="RELEASED", posted="2026-10-14T03:00:00Z")
+    repeticao["transactionId"] = "tx-proprio-liberado"
+    cliente.transacoes = [liberado, repeticao]
+    r2 = await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    assert r2["duplicatas"] == 1 and r2["inseridos"] == 0 and r2["atualizados"] == 1
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert len(movs) == 1 and movs[0].sub_tipo == "DEFERRED_RELEASED"
+    assert movs[0].descricao.endswith("· liberado em 14/10") and movs[0].saldo_apos == Decimal(
+        "2356.21"
+    )
+    assert movs[0].raw["_liberado_em"].startswith("2026-10-14")
+    # repetição que já tinha entrado (rodada antiga) sai na rodada seguinte
+    db.add(
+        ConciliacaoMovimento(
+            integration_id=loja.integration_id,
+            platform=IntegrationPlatform.AMAZON,
+            origem="amazon_transacoes",
+            id_externo="tx-proprio-liberado",
+            data=datetime(2026, 10, 14, 3, tzinfo=UTC),
+            tipo="venda_liberada",
+            descricao="Lançamento do pedido",
+            sub_tipo="RELEASED",
+            pedido_marketplace=PROPRIO,
+            credito=Decimal("2356.21"),
+            debito=Decimal("0"),
+            raw={},
+        )
+    )
+    await db.flush()
+    r3 = await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    assert r3["removidas"] == 1
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert len(movs) == 1 and movs[0].saldo_apos == Decimal("2356.21")

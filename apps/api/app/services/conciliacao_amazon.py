@@ -230,6 +230,46 @@ def transacao_para_movimento(tx: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _tirar_duplicatas_de_liberacao(
+    movs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """A Amazon representa a saída da reserva com um registro NOVO: o lançamento
+    original vira DEFERRED_RELEASED e aparece outro, RELEASED, do mesmo pedido e valor,
+    na data em que liberou (15/10, Kia 301678: 446,20 em 06/10 e de novo em 14/10 —
+    contava duas vezes). Fica o original (na data do lançamento, com "liberado em") e
+    a repetição sai. Lançamento que nunca ficou preso vem só como RELEASED e fica."""
+    from collections import Counter, defaultdict
+
+    chave = lambda m: (m["pedido_marketplace"], m["tipo"], m["credito"], m["debito"])  # noqa: E731
+    originais: Counter = Counter(
+        chave(m)
+        for m in movs
+        if m["sub_tipo"] == "DEFERRED_RELEASED"
+        and m["pedido_marketplace"]
+        and m["tipo"] in ("venda_liberada", "estorno")
+    )
+    liberado_em: dict[tuple, list[datetime]] = defaultdict(list)
+    duplicadas: set[str] = set()
+    for m in sorted(movs, key=lambda x: x["data"]):
+        if (
+            m["sub_tipo"] != "RELEASED"
+            or not m["pedido_marketplace"]
+            or m["tipo"] not in ("venda_liberada", "estorno")
+        ):
+            continue
+        k = chave(m)
+        if originais[k] > 0:
+            originais[k] -= 1
+            duplicadas.add(m["id_externo"])
+            liberado_em[k].append(m["data"])
+    for m in movs:
+        if m["sub_tipo"] == "DEFERRED_RELEASED" and liberado_em.get(chave(m)):
+            quando = liberado_em[chave(m)].pop(0)
+            m["descricao"] = f"{m['descricao']} · liberado em {quando.astimezone(BRT):%d/%m}"
+            m["raw"] = {**m["raw"], "_liberado_em": quando.isoformat()}
+    return [m for m in movs if m["id_externo"] not in duplicadas], duplicadas
+
+
 async def ler_transacoes(
     cliente: Any, de: datetime, *, ate: datetime | None = None, max_paginas: int = 30
 ) -> list[dict[str, Any]]:
@@ -356,7 +396,9 @@ async def run_amazon_sync(
         logger.warning("conciliacao_amazon_falhou", loja=loja.conta, erro=row.erro)
         return resumo
     movs = [m for m in (transacao_para_movimento(t) for t in txs) if m]
+    movs, duplicadas = _tirar_duplicatas_de_liberacao(movs)
     resumo["lidas"] = len(movs)
+    resumo["duplicatas"] = len(duplicadas)
     ids = {m["pedido_marketplace"] for m in movs if m["pedido_marketplace"]}
     mapa = await resolver_pedidos_bling(session, ids, lojas_bling)
     for m in movs:
@@ -376,6 +418,26 @@ async def run_amazon_sync(
             )
         ).scalars()
     }
+    # duplicata que já tinha entrado (gravada pelo robô, sem mexida humana): sai
+    if duplicadas:
+        velhas = (
+            (
+                await session.execute(
+                    select(ConciliacaoMovimento).where(
+                        ConciliacaoMovimento.integration_id == loja.integration_id,
+                        ConciliacaoMovimento.origem == ORIGEM_AMAZON,
+                        ConciliacaoMovimento.id_externo.in_(sorted(duplicadas)),
+                        ConciliacaoMovimento.vinculado_por.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for v in velhas:
+            await session.delete(v)
+        resumo["removidas"] = len(velhas)
+        await session.flush()
     novos: list[dict[str, Any]] = []
     for m in movs:
         atual = existentes.get(m["id_externo"])
