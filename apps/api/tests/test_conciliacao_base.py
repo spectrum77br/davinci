@@ -976,3 +976,184 @@ async def test_painel_exporta_excel(db, make_user, auth_as, client):
         and linhas[1][1] == "301102"
         and linhas[1][16] == "10/10/2026 06:00"
     )
+
+
+# --- Extrato do dia (2c) ---------------------------------------------------------
+
+
+def _d13(h: int, mi: int = 0) -> datetime:
+    # 13/10/2026 em BRT (UTC-3) = +3h em UTC
+    return datetime(2026, 10, 13, h + 3, mi, tzinfo=UTC)
+
+
+async def _dia_de_exemplo(db, loja) -> dict[str, ConciliacaoMovimento]:
+    movs = {
+        "reserva": _mov(loja, "reserva_saque", _d13(6, 57), debito="9147.00"),
+        "saque": _mov(loja, "saque", _d13(6, 57) + timedelta(seconds=2), debito="9147.00"),
+        "venda": _mov(
+            loja,
+            "venda_liberada",
+            _d13(8, 11),
+            credito="610.65",
+            pedido_mkt="2000018405611066",
+            pedido_bling="301102",
+            frete="-62.33",
+            tarifa="-92.36",
+        ),
+        "pendente": _mov(loja, "credito", _d13(9, 2), credito="48.00"),
+        "mediacao": _mov(
+            loja,
+            "mediacao",
+            _d13(14, 10),
+            debito="459.00",
+            pedido_mkt="2000018737867860",
+            pedido_bling="299520",
+        ),
+    }
+    # saldos encadeados (BALANCE_AMOUNT): 9147.81 → 0.81 → 611.46 → 659.46 → 200.46
+    movs["reserva"].saldo_apos = Decimal("0.81")
+    movs["saque"].saldo_apos = Decimal(
+        "0.81"
+    )  # reserva + saque: 9147.81 − 9147 (reserva) ... o saque devolve a reserva
+    movs["reserva"].credito = Decimal("9147.00")
+    movs["reserva"].debito = Decimal("0.00")
+    movs["reserva"].saldo_apos = Decimal("9147.81")
+    movs["saque"].saldo_apos = Decimal("0.81")
+    movs["venda"].saldo_apos = Decimal("611.46")
+    movs["pendente"].saldo_apos = Decimal("659.46")
+    movs["mediacao"].saldo_apos = Decimal("200.46")
+    movs["saque"].classificacao = "saque"
+    movs["reserva"].classificacao = "saque"
+    db.add_all(movs.values())
+    db.add(await _pedido_conciliado(loja))  # 301102 bateu
+    db.add(
+        await _pedido_conciliado(
+            loja,
+            pedido_bling="299520",
+            numeroloja="2000018737867860",
+            situacao="estornado_depois",
+            etapa="pendencia",
+            recebido=Decimal("0.00"),
+            saidas_depois=Decimal("459.00"),
+        )
+    )
+    await db.commit()
+    return movs
+
+
+async def test_extrato_do_dia_lista_ordena_e_fecha_a_conta(db, make_user, auth_as, client):
+    loja, _integ = await _loja(db, make_user)
+    await _dia_de_exemplo(db, loja)
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/extrato", params={"loja": "jlas2", "dia": "2026-10-13"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["dia"] == "2026-10-13" and corpo["fechado"] is None
+    tipos = [m["tipo"] for m in corpo["movimentos"]]
+    # empate de horário (reserva e saque às 06:57): a ordem é a que encadeia o saldo
+    assert tipos == ["reserva_saque", "saque", "venda_liberada", "credito", "mediacao"]
+    assert [m["status"] for m in corpo["movimentos"]] == [
+        "classificado",
+        "classificado",
+        "automatico",
+        "pendente",
+        "automatico",
+    ]
+    assert corpo["contagem"] == {
+        "automatico": 2,
+        "manual": 0,
+        "classificado": 2,
+        "anterior": 0,
+        "pendente": 1,
+        "divergente": 0,
+    }
+    assert corpo["resolvidos"] == 4
+    t = corpo["totais"]
+    assert t["linhas"] == 5 and t["saldo_inicial"] == 0.81 and t["saldo_informado"] == 200.46
+    assert (
+        t["creditos"] == 9805.65
+        and t["debitos"] == 9606.0
+        and t["saldo_final"] == 200.46
+        and t["diferenca"] == 0.0
+    )
+    r2 = await client.get(
+        "/api/conciliacao/extrato",
+        params={"loja": "jlas2", "dia": "2026-10-13", "mostrar": "pendentes"},
+    )
+    assert [m["tipo"] for m in r2.json()["movimentos"]] == ["credito"]
+    r3 = await client.get(
+        "/api/conciliacao/dias", params={"loja": "jlas2", "de": "2026-10-13", "ate": "2026-10-13"}
+    )
+    assert r3.json()["dias"] == [
+        {
+            "dia": "2026-10-13",
+            "linhas": 5,
+            "pendentes": 1,
+            "creditos": 9805.65,
+            "debitos": 9606.0,
+            "fechado_em": None,
+            "fechado_por": None,
+        }
+    ]
+
+
+async def test_extrato_vincular_classificar_e_fechar_o_dia(db, make_user, auth_as, client):
+    loja, _integ = await _loja(db, make_user)
+    movs = await _dia_de_exemplo(db, loja)
+    db.add(
+        _pedido_bling(
+            "301500", "2000018600988674", datetime(2026, 10, 2, 12, tzinfo=UTC), "48.00", 20.0
+        )
+    )
+    await db.commit()
+    quem = await make_user(permissions={"conciliacao": {"view": True, "edit": True}})
+    auth_as(quem)
+    pend = movs["pendente"]
+    # o dia não fecha com pendência
+    r = await client.post("/api/conciliacao/dias/2026-10-13/fechar", params={"loja": "jlas2"})
+    assert r.status_code == 409 and r.json()["detail"]["pendentes"] == 1
+    # sugestões: mesmo valor (48,00) acha o 301500
+    r = await client.get(f"/api/conciliacao/movimentos/{pend.id}/sugestoes")
+    assert r.status_code == 200, r.text
+    assert [s["pedido_bling"] for s in r.json()["sugestoes"]] == ["301500"]
+    assert r.json()["sugestoes"][0]["motivo"] == "mesmo valor"
+    # vincula a um pedido que não é da loja → 404
+    r = await client.patch(
+        f"/api/conciliacao/movimentos/{pend.id}", json={"pedido_bling": "999999"}
+    )
+    assert r.status_code == 404
+    # vincula
+    r = await client.patch(
+        f"/api/conciliacao/movimentos/{pend.id}", json={"pedido_bling": "301500"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["movimento"]["pedido_bling"] == "301500" and r.json()["status"] == "manual"
+    # agora fecha
+    r = await client.post("/api/conciliacao/dias/2026-10-13/fechar", params={"loja": "jlas2"})
+    assert r.status_code == 200, r.text
+    assert r.json()["fechado"]["por"] == quem.email and r.json()["totais"]["diferenca"] == 0.0
+    r = await client.get("/api/conciliacao/extrato", params={"loja": "jlas2", "dia": "2026-10-13"})
+    assert r.json()["fechado"]["por"] == quem.email
+    # classifica (vira sem pedido) e desvincula
+    r = await client.patch(
+        f"/api/conciliacao/movimentos/{pend.id}", json={"classificacao": "ajuste"}
+    )
+    assert (
+        r.json()["movimento"]["pedido_bling"] is None
+        and r.json()["movimento"]["classificacao"] == "ajuste"
+    )
+    r = await client.patch(
+        f"/api/conciliacao/movimentos/{pend.id}", json={"classificacao": "nao_existe"}
+    )
+    assert r.status_code == 422
+    r = await client.patch(f"/api/conciliacao/movimentos/{pend.id}", json={"desvincular": True})
+    assert r.json()["status"] == "pendente"
+    # reabre o dia
+    r = await client.post("/api/conciliacao/dias/2026-10-13/reabrir", params={"loja": "jlas2"})
+    assert r.status_code == 200 and r.json()["fechado"] is None
+    # quem só vê não mexe
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.patch(
+        f"/api/conciliacao/movimentos/{pend.id}", json={"classificacao": "ajuste"}
+    )
+    assert r.status_code == 403

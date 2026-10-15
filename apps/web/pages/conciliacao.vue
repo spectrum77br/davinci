@@ -5,6 +5,7 @@
 // dinheiro (Bling, venda, fatura, extrato), o resultado e a situação; o Raio-X
 // do pedido selecionado fica à direita. Extrato do dia e Resumo vêm depois.
 import { Download, Loader2, RefreshCw, Search, Wand2 } from 'lucide-vue-next'
+import { ETAPAS, SITUACOES, etapaCls, fmtDia, fmtDiaHora, fmtMoney, fmtPct, sinal, sitCls, tipoMov } from '~/lib/conciliacao'
 
 definePageMeta({
   middleware: ['permission'],
@@ -108,56 +109,13 @@ const MARKETPLACES = [
   { key: 'amazon', label: 'Amazon', ativo: false },
   { key: 'tiktok', label: 'TikTok', ativo: false },
 ]
-const VISOES = [
+const VISOES: Array<{ key: 'pedidos' | 'extrato' | 'resumo'; label: string; ativo: boolean }> = [
   { key: 'pedidos', label: 'Pedidos', ativo: true },
-  { key: 'extrato', label: 'Extrato do dia', ativo: false },
+  { key: 'extrato', label: 'Extrato do dia', ativo: true },
   { key: 'resumo', label: 'Resumo', ativo: false },
 ]
-const SITUACOES: Array<{ key: string; label: string; cls: string }> = [
-  { key: 'bateu', label: 'Bateu', cls: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300' },
-  { key: 'aguardando', label: 'Aguardando liberação', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
-  { key: 'vencido', label: 'Não liberado (vencido)', cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' },
-  { key: 'recebido_a_menos', label: 'Recebido a menos', cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' },
-  { key: 'recebido_a_mais', label: 'Recebido a mais', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
-  { key: 'bling_diferente', label: 'Bling ≠ venda', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
-  { key: 'estornado_depois', label: 'Estornado depois', cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' },
-  { key: 'cancelado', label: 'Cancelado', cls: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200' },
-  { key: 'sem_venda', label: 'Sem venda do ML', cls: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200' },
-]
-const ETAPAS: Array<{ key: string; label: string; cls: string }> = [
-  { key: 'aguardando', label: 'aguardando', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
-  { key: 'conciliado', label: 'conciliado', cls: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300' },
-  { key: 'pendencia', label: 'pendência', cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' },
-  { key: 'finalizado', label: 'finalizado', cls: 'bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-100' },
-  { key: 'reaberto', label: 'reaberto', cls: 'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300' },
-]
-const TIPOS_MOV: Record<string, string> = {
-  venda_liberada: 'Venda liberada',
-  mediacao: 'Mediação (reclamação perdida)',
-  mediacao_cancelada: 'Mediação cancelada',
-  estorno: 'Estorno',
-  chargeback: 'Chargeback',
-  disputa: 'Disputa',
-  reserva_disputa: 'Reserva por reclamação',
-  reserva_estorno: 'Reserva pra estorno',
-  reserva_frete_devolucao: 'Reserva do frete de devolução',
-  reserva_saque: 'Reserva pro saque',
-  saque: 'Saque',
-  frete: 'Frete',
-  frete_cancelado: 'Frete cancelado',
-  frete_devolucao: 'Frete de devolução',
-  fatura_tarifa_venda: 'Fatura: custo por vender',
-  fatura_tarifa_cobranca: 'Fatura: custo por cobrar',
-  fatura_parcelamento: 'Fatura: taxa de parcelamento',
-  fatura_parcelamento_comprador: 'Fatura: parcelamento pago pelo comprador',
-  fatura_frete: 'Fatura: Mercado Envios',
-  fatura_publicidade: 'Fatura: publicidade',
-  fatura_bonificacao: 'Fatura: bonificação (devolução de tarifa)',
-  fatura_outro: 'Fatura: outra cobrança',
-}
-
 const tab = ref('ml')
-const visao = ref('pedidos')
+const visao = ref<'pedidos' | 'extrato' | 'resumo'>('pedidos')
 const lojas = ref<Loja[]>([])
 const loja = ref('')
 const de = ref('')
@@ -308,39 +266,17 @@ async function exportar() {
   }
 }
 
-function fmtMoney(v: number | null | undefined, vazio = '—') {
-  if (v === null || v === undefined) return vazio
-  return v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+function verPedido(pedido: string) {
+  visao.value = 'pedidos'
+  q.value = pedido
+  situacao.value = ''
+  etapa.value = ''
+  de.value = lojaAtual.value?.inicio || ''
+  ate.value = ''
+  page.value = 1
+  carregar()
 }
-function fmtPct(v: number | null | undefined) {
-  if (v === null || v === undefined) return '—'
-  return `${(v * 100).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`
-}
-function fmtDia(v: string | null | undefined) {
-  if (!v) return '—'
-  const d = new Date(v)
-  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
-}
-function fmtDiaHora(v: string | null | undefined) {
-  if (!v) return '—'
-  const d = new Date(v)
-  return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-}
-function sitCls(key: string) {
-  return SITUACOES.find((s) => s.key === key)?.cls || 'bg-slate-200 text-slate-700'
-}
-function etapaCls(key: string) {
-  return ETAPAS.find((s) => s.key === key)?.cls || 'bg-slate-200 text-slate-700'
-}
-function tipoMov(t: string) {
-  return TIPOS_MOV[t] || t
-}
-function sinal(v: number | null | undefined, cls: { pos: string; neg: string }) {
-  if (v === null || v === undefined) return ''
-  if (v > 0.005) return cls.pos
-  if (v < -0.005) return cls.neg
-  return ''
-}
+
 function limpar() {
   situacao.value = ''
   etapa.value = ''
@@ -419,6 +355,9 @@ await carregar()
       </div>
     </div>
 
+    <ConciliacaoExtrato v-if="visao === 'extrato'" :loja="loja" :can-edit="canEdit" @ver-pedido="verPedido" />
+
+    <template v-if="visao === 'pedidos'">
     <div class="flex flex-wrap items-center gap-2 text-xs">
       <label class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
         <span class="font-semibold text-muted-foreground">Loja</span>
@@ -669,5 +608,6 @@ await carregar()
         </div>
       </div>
     </div>
+    </template>
   </div>
 </template>

@@ -37,6 +37,7 @@ from app.models import (
     Integration,
     MarketplaceOrderFinancial,
     Refund,
+    SituacaoBling,
 )
 from app.models.conciliacao import ETAPA_PELO_ROBO, ORIGEM_EXTRATO, ORIGEM_FATURA
 from app.services.conciliacao_extrato import (
@@ -364,6 +365,11 @@ async def recalcular_loja(
     for numero, valor in reembolsos:
         if numero and valor:
             reembolso_por_numero[str(numero)] += _d(valor) or ZERO
+    nomes_situacao = {
+        str(i): n
+        for i, n in (await session.execute(select(SituacaoBling.id, SituacaoBling.nome))).all()
+        if n
+    }
     existentes = {
         p.pedido_bling: p
         for p in (
@@ -452,7 +458,7 @@ async def recalcular_loja(
             "pack_id": next((m.pack_id for m in extrato if m.pack_id), None),
             "conta": loja.conta,
             "data_pedido": cab.data,
-            "situacao_bling": cab.situacao,
+            "situacao_bling": nomes_situacao.get(str(cab.situacao or ""), cab.situacao),
             "bling_total": bling_total,
             "bling_produtos": _d(cab.totalprodutos),
             "bling_valorbase": _d(cab.valorbase),

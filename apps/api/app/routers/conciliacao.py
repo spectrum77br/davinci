@@ -28,6 +28,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Any
+from uuid import UUID
 
 import httpx
 import structlog
@@ -37,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission_any
-from app.models import User
+from app.models import Integration, User
 from app.services import logistica_meli as lm
 from app.services.atendimento.clientes import cliente_da_integracao
 from app.services.conciliacao_extrato import (
@@ -638,6 +639,7 @@ from zoneinfo import ZoneInfo  # noqa: E402
 
 from fastapi.responses import StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
+from sqlalchemy import case as sa_case  # noqa: E402
 from sqlalchemy import func, or_  # noqa: E402
 
 from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoPedido  # noqa: E402
@@ -1170,3 +1172,577 @@ async def exportar_xlsx(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{nome}"'},
     )
+
+
+# --- Extrato do dia: movimentos, vincular/classificar, sugestões, fechar o dia -----
+# Passo 2c (14/10/2026, "Ok" do Vinicius): a tela de trabalho da manhã. Cada
+# linha do extrato de ontem precisa de um destino — um pedido ou uma
+# classificação — e o dia só fecha com 100%. Prova dos nove no rodapé: saldo
+# inicial + créditos − débitos = saldo final = saldo informado pelo Mercado Pago.
+
+from app.models import BlingOrder, ConciliacaoDia  # noqa: E402
+from app.services.conciliacao_calculo import recalcular_loja  # noqa: E402
+from app.services.conciliacao_extrato import bling_store_ids_da_loja  # noqa: E402
+
+CLASSIFICACOES = ("saque", "fatura_ml", "publicidade", "anterior_ao_inicio", "ajuste", "outro")
+CLASSIFICACAO_LABELS = {
+    "saque": "Saque",
+    "fatura_ml": "Fatura do ML",
+    "publicidade": "Publicidade",
+    "anterior_ao_inicio": "Pedido anterior ao início",
+    "ajuste": "Ajuste",
+    "outro": "Outro",
+}
+TIPO_LABELS = {
+    "venda_liberada": "Venda liberada",
+    "mediacao": "Mediação (reclamação perdida)",
+    "mediacao_cancelada": "Mediação cancelada",
+    "estorno": "Estorno",
+    "chargeback": "Chargeback",
+    "disputa": "Disputa",
+    "reserva_disputa": "Reserva por reclamação",
+    "reserva_estorno": "Reserva pra estorno",
+    "reserva_frete_devolucao": "Reserva do frete de devolução",
+    "reserva_saque": "Reserva pro saque",
+    "reserva_pagamento": "Reserva de pagamento",
+    "saque": "Saque",
+    "frete": "Frete",
+    "frete_cancelado": "Frete cancelado",
+    "frete_devolucao": "Frete de devolução",
+    "antecipacao": "Antecipação",
+    "credito": "Crédito",
+    "imposto": "Imposto",
+    "outro": "Outro",
+}
+_SITUACOES_DIVERGENTES = {
+    "recebido_a_menos",
+    "recebido_a_mais",
+    "bling_diferente",
+    "estornado_depois",
+    "vencido",
+}
+
+
+def _status_movimento(m: ConciliacaoMovimento, pedido: ConciliacaoPedido | None) -> str:
+    if m.classificacao == "anterior_ao_inicio":
+        return "anterior"
+    if m.classificacao:
+        return "classificado"
+    if not m.pedido_bling:
+        return "pendente"
+    if m.vinculado_por:
+        return "manual"
+    if (
+        pedido is not None
+        and m.tipo == "venda_liberada"
+        and pedido.situacao in _SITUACOES_DIVERGENTES
+    ):
+        return "divergente"
+    return "automatico"
+
+
+def _ordena_dia(movs: list[ConciliacaoMovimento]) -> list[ConciliacaoMovimento]:
+    """Ordem do dia. O relatório não traz nº de linha; em empate de horário, a
+    ordem certa é a que encadeia o saldo (saldo da linha = saldo da anterior +
+    crédito − débito)."""
+    movs = sorted(movs, key=lambda m: (m.data, m.id))
+    out: list[ConciliacaoMovimento] = []
+    i = 0
+    while i < len(movs):
+        grupo = [movs[i]]
+        j = i + 1
+        while j < len(movs) and movs[j].data == movs[i].data:
+            grupo.append(movs[j])
+            j += 1
+        if len(grupo) > 1 and all(m.saldo_apos is not None for m in grupo):
+            resto = list(grupo)
+            ordenado: list[ConciliacaoMovimento] = []
+            anterior = out[-1].saldo_apos if out and out[-1].saldo_apos is not None else None
+            while resto:
+                prox = None
+                if anterior is not None:
+                    prox = next(
+                        (
+                            m
+                            for m in resto
+                            if abs((anterior + m.credito - m.debito) - m.saldo_apos)
+                            <= Decimal("0.01")
+                        ),
+                        None,
+                    )
+                if prox is None:
+                    # sem âncora: o primeiro é o que não é "seguinte" de nenhum outro
+                    prox = next(
+                        (
+                            m
+                            for m in resto
+                            if not any(
+                                abs((o.saldo_apos + m.credito - m.debito) - m.saldo_apos)
+                                <= Decimal("0.01")
+                                for o in resto
+                                if o is not m
+                            )
+                        ),
+                        resto[0],
+                    )
+                ordenado.append(prox)
+                resto.remove(prox)
+                anterior = prox.saldo_apos
+            grupo = ordenado
+        out.extend(grupo)
+        i = j
+    return out
+
+
+def _totais_do_dia(movs: list[ConciliacaoMovimento]) -> dict[str, Any]:
+    creditos = sum((m.credito or Decimal("0") for m in movs), Decimal("0"))
+    debitos = sum((m.debito or Decimal("0") for m in movs), Decimal("0"))
+    primeiro = next((m for m in movs if m.saldo_apos is not None), None)
+    ultimo = next((m for m in reversed(movs) if m.saldo_apos is not None), None)
+    saldo_inicial = (primeiro.saldo_apos - primeiro.credito + primeiro.debito) if primeiro else None
+    saldo_final = (saldo_inicial + creditos - debitos) if saldo_inicial is not None else None
+    saldo_informado = ultimo.saldo_apos if ultimo else None
+    return {
+        "linhas": len(movs),
+        "saldo_inicial": _num(saldo_inicial),
+        "creditos": _num(creditos),
+        "debitos": _num(debitos),
+        "saldo_final": _num(saldo_final),
+        "saldo_informado": _num(saldo_informado),
+        "diferenca": _num(saldo_informado - saldo_final)
+        if (saldo_informado is not None and saldo_final is not None)
+        else None,
+    }
+
+
+async def _movimentos_do_dia(
+    session: AsyncSession, loja: ConciliacaoLoja, dia: date
+) -> list[ConciliacaoMovimento]:
+    ini = datetime.combine(dia, datetime.min.time(), tzinfo=_BRT)
+    movs = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.data >= ini,
+                    ConciliacaoMovimento.data < ini + timedelta(days=1),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return _ordena_dia(list(movs))
+
+
+def _ontem() -> date:
+    return (datetime.now(_BRT) - timedelta(days=1)).date()
+
+
+@router.get("/extrato")
+async def extrato_do_dia(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+    loja: str | None = None,
+    dia: date | None = None,
+    mostrar: Annotated[str, Query(pattern="^(todos|pendentes|divergentes|sem_pedido)$")] = "todos",
+    q: str | None = None,
+) -> dict[str, Any]:
+    alvo = await _loja_ou_404(session, loja)
+    dia = dia or _ontem()
+    movs = await _movimentos_do_dia(session, alvo, dia)
+    pedidos = {
+        p.pedido_bling: p
+        for p in (
+            await session.execute(
+                select(ConciliacaoPedido).where(
+                    ConciliacaoPedido.integration_id == alvo.integration_id,
+                    ConciliacaoPedido.pedido_bling.in_(
+                        {m.pedido_bling for m in movs if m.pedido_bling} or {"-"}
+                    ),
+                )
+            )
+        ).scalars()
+    }
+    linhas: list[dict[str, Any]] = []
+    contagem: dict[str, int] = {
+        "automatico": 0,
+        "manual": 0,
+        "classificado": 0,
+        "anterior": 0,
+        "pendente": 0,
+        "divergente": 0,
+    }
+    for m in movs:
+        st = _status_movimento(m, pedidos.get(m.pedido_bling or ""))
+        contagem[st] += 1
+        if mostrar == "pendentes" and st != "pendente":
+            continue
+        if mostrar == "divergentes" and st != "divergente":
+            continue
+        if mostrar == "sem_pedido" and m.pedido_bling:
+            continue
+        if q:
+            termo = q.strip().lower()
+            if (
+                termo
+                not in " ".join(
+                    str(x or "")
+                    for x in (
+                        m.pedido_bling,
+                        m.pedido_marketplace,
+                        m.pack_id,
+                        m.pagamento_id,
+                        m.descricao,
+                        m.sku,
+                    )
+                ).lower()
+            ):
+                continue
+        ped = pedidos.get(m.pedido_bling or "")
+        linhas.append(
+            {
+                **_movimento_out(m),
+                "tipo_label": TIPO_LABELS.get(m.tipo, m.tipo),
+                "status": st,
+                "vinculado_por": m.vinculado_por,
+                "vinculado_em": m.vinculado_em.isoformat() if m.vinculado_em else None,
+                "classificacao_label": CLASSIFICACAO_LABELS.get(
+                    m.classificacao or "", m.classificacao
+                ),
+                "pedido_situacao": ped.situacao if ped else None,
+                "pedido_situacao_label": SITUACAO_LABELS.get(ped.situacao, ped.situacao)
+                if ped
+                else None,
+                "pedido_etapa": ped.etapa if ped else None,
+            }
+        )
+    fechado = (
+        await session.execute(
+            select(ConciliacaoDia).where(
+                ConciliacaoDia.integration_id == alvo.integration_id, ConciliacaoDia.dia == dia
+            )
+        )
+    ).scalar_one_or_none()
+    return {
+        "loja": alvo.conta,
+        "dia": dia.isoformat(),
+        "movimentos": linhas,
+        "totais": _totais_do_dia(movs),
+        "contagem": contagem,
+        "resolvidos": len(movs) - contagem["pendente"],
+        "fechado": {"em": fechado.fechado_em.isoformat(), "por": fechado.fechado_por}
+        if fechado and fechado.fechado_em
+        else None,
+        "classificacoes": [{"key": k, "label": v} for k, v in CLASSIFICACAO_LABELS.items()],
+    }
+
+
+@router.get("/dias")
+async def listar_dias(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+    loja: str | None = None,
+    de: date | None = None,
+    ate: date | None = None,
+) -> dict[str, Any]:
+    """Um resumo por dia (linhas, pendentes, fechado?) pra navegar e pro Resumo."""
+    alvo = await _loja_ou_404(session, loja)
+    ate = ate or _ontem()
+    de = de or max(alvo.inicio, ate - timedelta(days=30))
+    ini = datetime.combine(de, datetime.min.time(), tzinfo=_BRT)
+    fim = datetime.combine(ate, datetime.min.time(), tzinfo=_BRT) + timedelta(days=1)
+    dia_col = func.date(func.timezone("America/Sao_Paulo", ConciliacaoMovimento.data))
+    pend = func.sum(
+        sa_case(
+            (
+                ConciliacaoMovimento.pedido_bling.is_(None)
+                & ConciliacaoMovimento.classificacao.is_(None),
+                1,
+            ),
+            else_=0,
+        )
+    )
+    rows = (
+        await session.execute(
+            select(
+                dia_col,
+                func.count(),
+                pend,
+                func.sum(ConciliacaoMovimento.credito),
+                func.sum(ConciliacaoMovimento.debito),
+            )
+            .where(
+                ConciliacaoMovimento.integration_id == alvo.integration_id,
+                ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                ConciliacaoMovimento.data >= ini,
+                ConciliacaoMovimento.data < fim,
+            )
+            .group_by(dia_col)
+            .order_by(dia_col)
+        )
+    ).all()
+    fechados = {
+        d.dia: d
+        for d in (
+            await session.execute(
+                select(ConciliacaoDia).where(
+                    ConciliacaoDia.integration_id == alvo.integration_id,
+                    ConciliacaoDia.dia >= de,
+                    ConciliacaoDia.dia <= ate,
+                )
+            )
+        ).scalars()
+    }
+    saida = []
+    for d, n, p, c, deb in rows:
+        f = fechados.get(d)
+        saida.append(
+            {
+                "dia": d.isoformat(),
+                "linhas": n,
+                "pendentes": int(p or 0),
+                "creditos": _num(c or 0),
+                "debitos": _num(deb or 0),
+                "fechado_em": f.fechado_em.isoformat() if f and f.fechado_em else None,
+                "fechado_por": f.fechado_por if f else None,
+            }
+        )
+    return {"loja": alvo.conta, "de": de.isoformat(), "ate": ate.isoformat(), "dias": saida}
+
+
+class MovimentoPatch(BaseModel):
+    loja: str | None = None
+    # Vincular a um pedido do Bling (número), classificar sem pedido, ou desvincular.
+    pedido_bling: str | None = Field(default=None, max_length=20)
+    classificacao: str | None = Field(default=None, max_length=40)
+    desvincular: bool = False
+
+
+@router.get("/movimentos/{mov_id}/sugestoes")
+async def sugestoes_de_vinculo(
+    mov_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+) -> dict[str, Any]:
+    """Pedidos candidatos pra uma linha sem dono: mesmo pagamento, mesmo nº de
+    venda/pack, ou mesmo valor por perto da data."""
+    m = await session.get(ConciliacaoMovimento, mov_id)
+    if m is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "movimento_nao_encontrado"})
+    loja = (
+        await session.execute(
+            select(ConciliacaoLoja).where(ConciliacaoLoja.integration_id == m.integration_id)
+        )
+    ).scalar_one_or_none()
+    lojas_bling = (
+        await bling_store_ids_da_loja(session, await session.get(Integration, m.integration_id))
+        if loja
+        else set()
+    )
+    sugestoes: list[dict[str, Any]] = []
+    vistos: set[str] = set()
+
+    def _add(
+        numero: str, numeroloja: str | None, data_pedido: Any, total: Any, motivo: str
+    ) -> None:
+        if numero in vistos:
+            return
+        vistos.add(numero)
+        sugestoes.append(
+            {
+                "pedido_bling": numero,
+                "numeroloja": numeroloja,
+                "data_pedido": data_pedido.isoformat() if data_pedido else None,
+                "total": _num(total),
+                "motivo": motivo,
+            }
+        )
+
+    if m.pagamento_id:
+        irmaos = (
+            await session.execute(
+                select(ConciliacaoMovimento.pedido_bling, ConciliacaoMovimento.pedido_marketplace)
+                .where(
+                    ConciliacaoMovimento.integration_id == m.integration_id,
+                    ConciliacaoMovimento.pagamento_id == m.pagamento_id,
+                    ConciliacaoMovimento.pedido_bling.isnot(None),
+                )
+                .distinct()
+            )
+        ).all()
+        for numero, numeroloja in irmaos:
+            _add(str(numero), numeroloja, None, None, "mesmo pagamento")
+    chaves = {x for x in (m.pedido_marketplace, m.pack_id) if x}
+    if chaves:
+        rows = (
+            await session.execute(
+                select(BlingOrder.numero, BlingOrder.numeroloja, BlingOrder.data, BlingOrder.total)
+                .where(BlingOrder.numeroloja.in_(chaves), BlingOrder.loja.in_(lojas_bling or {"-"}))
+                .distinct()
+            )
+        ).all()
+        for numero, numeroloja, data_pedido, total in rows:
+            _add(str(numero), numeroloja, data_pedido, total, "mesmo nº de venda")
+    valor = (
+        m.bruto.copy_abs()
+        if m.bruto
+        else ((m.credito or Decimal("0")) - (m.debito or Decimal("0"))).copy_abs()
+    )
+    if valor and valor > 0 and lojas_bling:
+        rows = (
+            await session.execute(
+                select(BlingOrder.numero, BlingOrder.numeroloja, BlingOrder.data, BlingOrder.total)
+                .where(
+                    BlingOrder.loja.in_(lojas_bling),
+                    BlingOrder.total.between(valor - Decimal("0.05"), valor + Decimal("0.05")),
+                    BlingOrder.data >= m.data - timedelta(days=45),
+                    BlingOrder.data <= m.data + timedelta(days=2),
+                )
+                .distinct()
+                .limit(8)
+            )
+        ).all()
+        for numero, numeroloja, data_pedido, total in rows:
+            _add(str(numero), numeroloja, data_pedido, total, "mesmo valor")
+    return {"movimento": _movimento_out(m), "sugestoes": sugestoes[:10]}
+
+
+@router.patch("/movimentos/{mov_id}")
+async def marcar_movimento(
+    mov_id: UUID,
+    body: MovimentoPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+) -> dict[str, Any]:
+    m = await session.get(ConciliacaoMovimento, mov_id)
+    if m is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "movimento_nao_encontrado"})
+    loja = (
+        await session.execute(
+            select(ConciliacaoLoja).where(ConciliacaoLoja.integration_id == m.integration_id)
+        )
+    ).scalar_one_or_none()
+    if loja is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "loja_nao_ligada"})
+    agora = datetime.now(UTC)
+    quem = (getattr(user, "name", None) or user.email or "?")[:120]
+    if body.desvincular:
+        m.pedido_bling = None
+        m.bling_id = None
+        m.classificacao = None
+        m.vinculado_por = quem
+        m.vinculado_em = agora
+    elif body.pedido_bling:
+        lojas_bling = await bling_store_ids_da_loja(
+            session, await session.get(Integration, m.integration_id)
+        )
+        alvo = (
+            await session.execute(
+                select(BlingOrder.numero, BlingOrder.bling_id)
+                .where(
+                    BlingOrder.numero == body.pedido_bling.strip(),
+                    BlingOrder.loja.in_(lojas_bling or {"-"}),
+                )
+                .limit(1)
+            )
+        ).first()
+        if alvo is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "pedido_bling_nao_encontrado",
+                    "pedido": body.pedido_bling,
+                    "loja": loja.conta,
+                },
+            )
+        m.pedido_bling, m.bling_id = str(alvo[0]), alvo[1]
+        m.classificacao = None
+        m.vinculado_por = quem
+        m.vinculado_em = agora
+    elif body.classificacao:
+        if body.classificacao not in CLASSIFICACOES:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "classificacao_invalida"}
+            )
+        m.classificacao = body.classificacao
+        m.pedido_bling = None
+        m.bling_id = None
+        m.vinculado_por = quem
+        m.vinculado_em = agora
+    else:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "nada_a_fazer"})
+    await session.flush()
+    await recalcular_loja(session, loja)
+    await session.commit()
+    await session.refresh(m)
+    return {"movimento": _movimento_out(m), "status": _status_movimento(m, None)}
+
+
+@router.post("/dias/{dia}/fechar")
+async def fechar_dia(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+    loja: str | None = None,
+) -> dict[str, Any]:
+    alvo = await _loja_ou_404(session, loja)
+    movs = await _movimentos_do_dia(session, alvo, dia)
+    pendentes = [m for m in movs if not m.pedido_bling and not m.classificacao]
+    if pendentes:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "dia_com_pendencias",
+                "pendentes": len(pendentes),
+                "mensagem": "toda linha precisa de um destino",
+            },
+        )
+    totais = _totais_do_dia(movs)
+    agora = datetime.now(UTC)
+    quem = (getattr(user, "name", None) or user.email or "?")[:120]
+    row = (
+        await session.execute(
+            select(ConciliacaoDia).where(
+                ConciliacaoDia.integration_id == alvo.integration_id, ConciliacaoDia.dia == dia
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = ConciliacaoDia(integration_id=alvo.integration_id, dia=dia)
+        session.add(row)
+    for k in ("saldo_inicial", "creditos", "debitos", "saldo_final", "saldo_informado"):
+        setattr(row, k, Decimal(str(totais[k])) if totais[k] is not None else None)
+    row.linhas = totais["linhas"]
+    row.pendentes = 0
+    row.fechado_em = agora
+    row.fechado_por = quem
+    await session.commit()
+    return {
+        "dia": dia.isoformat(),
+        "fechado": {"em": agora.isoformat(), "por": quem},
+        "totais": totais,
+    }
+
+
+@router.post("/dias/{dia}/reabrir")
+async def reabrir_dia(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+    loja: str | None = None,
+) -> dict[str, Any]:
+    alvo = await _loja_ou_404(session, loja)
+    row = (
+        await session.execute(
+            select(ConciliacaoDia).where(
+                ConciliacaoDia.integration_id == alvo.integration_id, ConciliacaoDia.dia == dia
+            )
+        )
+    ).scalar_one_or_none()
+    if row is not None:
+        row.fechado_em = None
+        row.fechado_por = None
+        await session.commit()
+    return {"dia": dia.isoformat(), "fechado": None}

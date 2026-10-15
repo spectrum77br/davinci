@@ -362,3 +362,14 @@ Com o OK do Vinicius ("Ok" ao passo 2), entrou a base do painel, sem tela ainda:
 - **Raio-X** à direita, ao clicar: as quatro versões lado a lado (Bling · Venda · Fatura · Extrato: valor, tarifa, frete, parcelamento, cupom, estorno/bonificação, líquido; a linha do frete fica vermelha quando o cobrado difere do previsto), os movimentos do pedido em ordem (extrato e fatura, com "cobrada à parte" quando a fatura não descontou da venda) e o resultado. Quem edita: observação, marcar/desmarcar conferido, Finalizar (motivo obrigatório quando há pendência) e Reabrir.
 - **Botões**: Recarregar, Excel (mesmo filtro, até 20 mil linhas) e, pra quem edita, "Sincronizar agora" (enfileira fatura + extrato + recálculo da loja).
 - **API**: `GET /api/conciliacao/lojas`, `GET /api/conciliacao/pedidos` (paginado, totais e contagens do filtro), `GET /api/conciliacao/pedidos/{pedido}` (Raio-X), `PATCH /api/conciliacao/pedidos/{pedido}` (observação, conferido, etapa finalizado/reaberto com motivo), `POST /api/conciliacao/export.xlsx`.
+
+---
+
+## 16. Passo 2c (14/10, noite) — Extrato do dia: vincular, classificar, fechar o dia
+
+- **Visão "Extrato do dia"** na página Conciliação: navega por dia (◀ ▶, "ontem"), mostra cada movimento do extrato do Mercado Pago daquele dia na ordem certa (em empate de horário, a ordem é a que encadeia o saldo), com hora, nº do pagamento, tipo, pedido do Bling (clicável: leva à aba Pedidos), venda ML, bruto, tarifa, frete, parcelamento, débito, crédito, saldo após, o status da conciliação (casou sozinho · vinculado à mão · sem pedido classificado · pedido anterior ao início · pendente · divergente) e quem/quando.
+- **Rodapé = prova dos nove**: saldo inicial (o saldo da primeira linha menos o movimento dela) + créditos − débitos = saldo final calculado, comparado com o saldo informado pelo Mercado Pago (última linha). Diferença 0,00 ✔.
+- **Painel da direita**: detalhe do movimento; pra linha sem dono, campo "nº do pedido Bling" + **sugestões do robô** (mesmo pagamento, mesmo nº de venda/pack, mesmo valor até 45 dias antes) e os botões de classificação (Saque, Fatura do ML, Publicidade, Pedido anterior ao início, Ajuste, Outro); pra linha vinculada, o pedido com a situação e "Desvincular". Vincular/classificar recalcula a loja na hora.
+- **Fechar o dia** só com 100% das linhas resolvidas (409 com a contagem de pendentes); grava `conciliacao_dias` com os totais e quem fechou; "Reabrir" desfaz. Filtro "Mostrar": todos · só pendentes · só divergentes · só sem pedido.
+- **API**: `GET /api/conciliacao/extrato?loja=&dia=&mostrar=&q=`, `GET /api/conciliacao/dias?loja=&de=&ate=` (linhas, pendentes, fechado por dia — base do Resumo), `GET /api/conciliacao/movimentos/{id}/sugestoes`, `PATCH /api/conciliacao/movimentos/{id}` (pedido_bling | classificacao | desvincular), `POST /api/conciliacao/dias/{dia}/fechar` e `/reabrir`.
+- Raio-X: a situação do Bling agora aparece pelo nome (era o id).
