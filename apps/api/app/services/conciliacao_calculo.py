@@ -279,6 +279,16 @@ def etapa_do_pedido(
         nova = "pendencia"
     if etapa_anterior == "reaberto" and nova != "conciliado":
         nova = "reaberto"
+    if nova == "conciliado" and situacao == "cancelado":
+        # Venda desfeita é zero a zero: finaliza de cara (15/10, Vinicius). Se cair
+        # algo depois, o "movimento novo reabre" cuida.
+        out.update(
+            etapa="finalizado",
+            etapa_em=agora,
+            etapa_por=ETAPA_PELO_ROBO,
+            etapa_motivo="venda desfeita, zero a zero",
+        )
+        return out
     if nova == "conciliado":
         base = out["bateu_em"] or agora
         sem_novidade = ultimo_movimento_em is None or ultimo_movimento_em <= base + timedelta(

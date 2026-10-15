@@ -1471,3 +1471,17 @@ async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_
     assert r.json()["caixa"]["bate"] is None and r.json()["fatura"]["bate"] is None
     r = await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-13"})
     assert r.status_code == 422
+
+
+def test_cancelado_finaliza_de_cara():
+    """Venda desfeita é zero a zero: nem espera os 7 dias (15/10)."""
+    from app.services.conciliacao_calculo import etapa_do_pedido
+
+    out = etapa_do_pedido(
+        agora=datetime(2026, 10, 15, 12, tzinfo=UTC),
+        atual=None,
+        situacao="cancelado",
+        ultimo_movimento_em=datetime(2026, 10, 15, 11, tzinfo=UTC),
+    )
+    assert out["etapa"] == "finalizado" and out["etapa_por"] == "robô"
+    assert out["etapa_motivo"] == "venda desfeita, zero a zero"
