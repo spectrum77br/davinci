@@ -251,3 +251,58 @@ async def run_carteira_sync(
         )
     await session.flush()
     return resumo
+
+
+async def reler_escrow_liberados(
+    session: AsyncSession, loja: ConciliacaoLoja, *, maximo: int = 60
+) -> dict[str, Any]:
+    """Venda liberada cujo escrow a Margem leu ANTES da liberação: relê agora.
+
+    15/10, os 5 "recebido a menos" da Jlas: a Shopee só põe a comissão de
+    Afiliados (`order_ams_commission_fee`) e a taxa de serviço final no escrow na
+    hora de liberar; a Margem tinha lido dias antes e guardava 16–73 a mais. A
+    carteira estava certa. Então: pra cada renda de pedido cuja leitura da Margem
+    é mais velha que a liberação, pede à Margem pra reler (uma chamada por pedido).
+    """
+    from app.models import MarketplaceOrderFinancial
+    from app.services.marketplace_financials import run_sync_marketplace_financials_for_bling_order
+
+    mov = ConciliacaoMovimento
+    fin = MarketplaceOrderFinancial
+    rows = (
+        await session.execute(
+            select(mov.bling_id, mov.pedido_marketplace, mov.data, fin.fetched_at)
+            .select_from(mov)
+            .join(
+                fin,
+                (fin.integration_id == mov.integration_id)
+                & (fin.external_order_id == mov.pedido_marketplace),
+            )
+            .where(
+                mov.integration_id == loja.integration_id,
+                mov.origem == ORIGEM_CARTEIRA,
+                mov.tipo == "venda_liberada",
+                mov.bling_id.isnot(None),
+                fin.fetched_at < mov.data,
+            )
+            .order_by(mov.data.desc())
+            .limit(maximo)
+        )
+    ).all()
+    vistos: set[int] = set()
+    relidos = 0
+    erros: list[dict[str, Any]] = []
+    for bling_id, order_sn, _data, _lido in rows:
+        if bling_id in vistos:
+            continue
+        vistos.add(bling_id)
+        try:
+            await run_sync_marketplace_financials_for_bling_order(
+                session, bling_order_id=int(bling_id), trigger="conciliacao_liberacao"
+            )
+            relidos += 1
+        except Exception as e:  # noqa: BLE001
+            erros.append({"pedido": order_sn, "erro": f"{type(e).__name__}: {str(e)[:200]}"})
+            logger.warning("conciliacao_escrow_releitura_falhou", loja=loja.conta, pedido=order_sn)
+    await session.flush()
+    return {"candidatos": len(rows), "relidos": relidos, "erros": erros}

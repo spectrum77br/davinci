@@ -102,7 +102,7 @@ type Movimento = {
 }
 type Versao = Record<string, number | string | null | undefined>
 type LinhaComparativo = { chave: string; rotulo: string; previsto: number | null; real: number | null; dif: number | null; estilo: string }
-type Comparativo = { linhas: LinhaComparativo[]; real_rotulo: string; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
+type Comparativo = { linhas: LinhaComparativo[]; real_rotulo: string; rodape: string | null; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
 type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[] }
 
 const { api } = useApi()
@@ -347,6 +347,7 @@ function extrasTitulo(p: Pedido) {
   if (p.venda_extras == null) return ''
   const cupom = p.venda_cupom || 0
   const outros = Math.round((p.venda_extras - cupom) * 100) / 100
+  if (p.venda_extras < -0.005) return `a plataforma acrescentou ${fmtMoney(-p.venda_extras)} (subsídio de frete, cashback)`
   const partes = [`cupom da loja ${fmtMoney(cupom)}`]
   if (Math.abs(outros) > 0.005) partes.push(`parcelamento / outros ${fmtMoney(outros)}`)
   return partes.join(' · ')
@@ -472,7 +473,7 @@ await carregar()
       </label>
       <label class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
         <Search class="size-3.5 text-muted-foreground" />
-        <input v-model="q" placeholder="pedido Bling ou venda ML" class="w-44 bg-transparent outline-none" @keyup.enter="page = 1; carregar()" />
+        <input v-model="q" placeholder="pedido Bling ou nº na plataforma" class="w-44 bg-transparent outline-none" @keyup.enter="page = 1; carregar()" />
       </label>
       <button type="button" class="text-muted-foreground underline" @click="limpar()">limpar</button>
       <span class="text-muted-foreground">{{ itens.length }} de {{ total }} pedidos</span>
@@ -588,9 +589,9 @@ await carregar()
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.custo) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :class="p.reembolso && p.reembolso > 0 ? 'text-red-600' : ''">{{ fmtMoney(p.reembolso) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" :class="[sinal(p.sobrou, { pos: 'text-emerald-700', neg: 'text-red-600' }), !p.liberado_em && 'font-normal text-muted-foreground']">
-                  <span v-if="!p.liberado_em && p.sobrou !== null && p.situacao !== 'cancelado'" class="mr-1 text-[10px]">prev.</span>{{ fmtMoney(p.sobrou) }}
+{{ fmtMoney(p.sobrou) }}
                 </td>
-                <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" :class="!p.liberado_em && 'font-normal text-muted-foreground'">{{ fmtPct(p.margem) }}</td>
+                <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" >{{ fmtPct(p.margem) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1"><span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="sitCls(p.situacao)">● {{ p.situacao_label }}</span></td>
                 <td class="max-w-[220px] truncate px-1.5 py-1 text-muted-foreground" :title="p.motivo || ''">{{ p.motivo }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1">
@@ -645,7 +646,7 @@ await carregar()
           </table>
           <div class="pt-0.5 text-[10px] text-muted-foreground">
             <span v-if="raiox.comparativo.nota">{{ raiox.comparativo.nota }}</span>
-            <span v-else-if="raiox.comparativo.frete_liquido_loja != null">frete líquido pra loja {{ fmtMoney(raiox.comparativo.frete_liquido_loja) }} (frete inteiro − o que o comprador pagou) · "Real" é o extrato do Mercado Pago mais o que a fatura cobra à parte</span>
+            <span v-else-if="raiox.comparativo.rodape">{{ raiox.comparativo.rodape }}</span>
           </div>
           <div class="pt-1 font-bold text-[#1f3a5f] dark:text-slate-200">Movimentos deste pedido</div>
           <div class="max-h-56 overflow-auto rounded border">
@@ -688,7 +689,7 @@ await carregar()
           <div class="rounded border px-2 py-1.5" :class="['recebido_a_menos', 'vencido', 'estornado_depois'].includes(raiox.pedido.situacao) ? 'border-red-300 bg-red-50 dark:bg-red-950/20' : 'border-emerald-300 bg-emerald-50 dark:bg-emerald-950/20'">
             <b>Previsto {{ fmtMoney(raiox.pedido.venda_liquido) }} · Recebido {{ fmtMoney(raiox.pedido.recebido) }} · Diferença {{ fmtMoney(raiox.pedido.dif_previsto_recebido) }}</b>
             <span v-if="raiox.pedido.motivo"> — {{ raiox.pedido.motivo }}</span><br />
-            <b>Sobrou: {{ fmtMoney(raiox.pedido.recebido ?? raiox.pedido.venda_liquido) }} − custo {{ fmtMoney(raiox.pedido.custo) }} − reembolso {{ fmtMoney(raiox.pedido.reembolso) }} = {{ fmtMoney(raiox.pedido.sobrou) }} · margem {{ fmtPct(raiox.pedido.margem) }}</b>
+            <b v-if="raiox.pedido.recebido != null">Sobrou: {{ fmtMoney(raiox.pedido.recebido) }} − custo {{ fmtMoney(raiox.pedido.custo) }} − reembolso {{ fmtMoney(raiox.pedido.reembolso) }} = {{ fmtMoney(raiox.pedido.sobrou) }} · margem {{ fmtPct(raiox.pedido.margem) }}</b><b v-else class="font-normal text-muted-foreground">Resultado de verdade: só depois que o dinheiro entrar</b>
             <div v-if="raiox.pedido.etapa_por" class="mt-1 text-muted-foreground">etapa {{ raiox.pedido.etapa_label }} por {{ raiox.pedido.etapa_por }} em {{ fmtDiaHora(raiox.pedido.etapa_em) }}<span v-if="raiox.pedido.etapa_motivo">: {{ raiox.pedido.etapa_motivo }}</span></div>
           </div>
           <div v-if="canEdit" class="space-y-1.5">

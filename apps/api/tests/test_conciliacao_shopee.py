@@ -234,3 +234,97 @@ async def test_extrato_do_dia_shopee_fecha_a_conta(db, make_user, auth_as, clien
     assert corpo["totais"]["diferenca"] == 0.0 and corpo["contagem"]["pendente"] == 0
     r = await client.get("/api/conciliacao/lojas")
     assert [x["platform"] for x in r.json()["lojas"]] == ["shopee"]
+
+
+async def test_reler_escrow_liberados_so_relê_leitura_mais_velha_que_a_liberacao(
+    db, make_user, monkeypatch
+):
+    from app.models import MarketplaceOrderFinancial
+    from app.services import conciliacao_shopee as mod
+
+    loja = await _loja_shopee(db, make_user)
+    d10 = date(2026, 10, 10)
+    cliente = _ShopeeFalsa(
+        [_tx(10, "ESCROW_VERIFIED_ADD", 4151.0, 4151.0, _epoch(d10, 9), "261006VX383P9J")]
+    )
+    await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 11))
+    # a Margem leu o escrow em 07/10 (antes da liberação de 10/10): tem que reler
+    db.add(
+        MarketplaceOrderFinancial(
+            integration_id=loja.integration_id,
+            platform="shopee",
+            external_order_id="261006VX383P9J",
+            status="posted",
+            fetched_at=datetime(2026, 10, 7, 12, tzinfo=UTC),
+            net_amount=Decimal("4206.01"),
+            raw={},
+        )
+    )
+    await db.commit()
+    chamados: list[tuple[int, str]] = []
+
+    async def falso(session, *, bling_order_id, trigger="manual"):
+        chamados.append((bling_order_id, trigger))
+        return {"ok": True}
+
+    import app.services.marketplace_financials as mf
+
+    monkeypatch.setattr(mf, "run_sync_marketplace_financials_for_bling_order", falso)
+    r = await mod.reler_escrow_liberados(db, loja)
+    assert r == {"candidatos": 1, "relidos": 1, "erros": []}
+    assert chamados == [(5000, "conciliacao_liberacao")]
+    # leitura mais nova que a liberação: não relê
+    fin = (await db.execute(select(MarketplaceOrderFinancial))).scalar_one()
+    fin.fetched_at = datetime(2026, 10, 12, 12, tzinfo=UTC)
+    await db.commit()
+    chamados.clear()
+    r = await mod.reler_escrow_liberados(db, loja)
+    assert r["candidatos"] == 0 and chamados == []
+
+
+def test_comparativo_shopee_preenche_o_real_com_o_escrow_da_liberacao():
+    from app.models import ConciliacaoPedido
+    from app.routers.conciliacao import _comparativo
+
+    base = {
+        "platform": IntegrationPlatform.SHOPEE,
+        "pedido_bling": "302371",
+        "situacao": "bateu",
+        "venda_valor": Decimal("1969.56"),
+        "venda_tarifa": Decimal("314.40"),
+        "venda_frete": Decimal("9.62"),
+        "venda_cupom": Decimal("933.00"),
+        "venda_liquido": Decimal("1742.11"),
+    }
+    versoes = {
+        "venda": {
+            "valor": 1969.56,
+            "tarifa": 314.40,
+            "frete": 9.62,
+            "cupom": 933.0,
+            "liquido": 1742.11,
+        },
+        "extrato": {"valor": None, "frete": None, "tarifa": None},
+    }
+    liberado = ConciliacaoPedido(
+        **base, recebido=Decimal("1742.11"), liberado_valor=Decimal("1742.11")
+    )
+    c = _comparativo(liberado, versoes, [])
+    por = {x["chave"]: x for x in c["linhas"]}
+    assert por["tarifa"]["real"] == 314.4 and por["tarifa"]["dif"] == 0.0
+    assert por["liquido"] == {
+        "chave": "liquido",
+        "rotulo": "= Líquido",
+        "previsto": 1742.11,
+        "real": 1742.11,
+        "dif": 0.0,
+        "estilo": "bold",
+    }
+    assert c["real_rotulo"] == "escrow na liberação + carteira" and c["nota"] is None
+    assert "a_parte" not in por and "frete_comprador" not in por
+    # antes de liberar: só o previsto
+    aguardando = ConciliacaoPedido(**{**base, "situacao": "aguardando"}, recebido=None)
+    c2 = _comparativo(aguardando, versoes, [])
+    por2 = {x["chave"]: x for x in c2["linhas"]}
+    assert por2["tarifa"]["real"] is None and por2["liquido"]["real"] is None
+    assert "até lá só existe o previsto" in c2["nota"]

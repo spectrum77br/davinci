@@ -139,9 +139,20 @@ def situacao_do_pedido(
     motivo: str | None = None
     dif: Decimal | None = None
 
-    if venda is None and not dinheiro:
+    venda_vazia = (
+        venda is not None
+        and not cancelada
+        and (venda_liquido is None or venda_liquido == ZERO)
+        and not (_d(venda.fee_amount) or ZERO)
+        and (venda_valor or ZERO) > ZERO
+    )
+    if (venda is None or venda_vazia) and not dinheiro:
         situacao = "sem_venda"
-        motivo = "venda do ML ainda não lida"
+        motivo = (
+            "a plataforma ainda não calculou a venda (pedido novo ou cancelado)"
+            if venda_vazia
+            else "venda ainda não lida pela Margem"
+        )
     elif not liberacoes:
         if cancelada:
             situacao = "cancelado"
@@ -219,6 +230,10 @@ def _motivo_da_diferenca(
     liberacoes: list[ConciliacaoMovimento],
 ) -> str | None:
     partes: list[str] = []
+    # A carteira da Shopee só traz o líquido (sem tarifa/frete na linha): não dá pra
+    # dizer "cobrado 0,00". Fica só a diferença, e a abertura está no detalhe da venda.
+    if liberacoes and all(m.tarifa is None and m.frete is None for m in liberacoes):
+        return "a carteira só traz o líquido: abertura no detalhe da venda"
     frete_previsto = _d(venda.freight_amount) if venda else None
     frete_cobrado = _soma([m.frete for m in liberacoes]).copy_abs() if liberacoes else None
     # O extrato cobra o frete INTEIRO (SHIPPING_FEE) e o bruto traz o que o comprador
@@ -467,11 +482,11 @@ async def recalcular_loja(
             ultimo_movimento_em=calc["ultimo_movimento_em"],
         )
         reembolso = reembolso_por_numero.get(numero, ZERO)
-        base_resultado = (
-            calc["recebido"]
-            if calc["recebido"] is not None
-            else (_d(venda.net_amount) if venda else None)
-        )
+        # Venda sem valor ainda (Shopee antes de calcular o escrow): não grava tarifa/líquido 0,00
+        venda_ok = venda if calc["situacao"] != "sem_venda" else None
+        # Resultado de VERDADE: só com o dinheiro que entrou. Enquanto não libera, sobrou
+        # e margem ficam vazios (15/10, Vinicius: "não precisa aparecer previsto nem margem").
+        base_resultado = calc["recebido"]
         if calc["situacao"] == "cancelado":
             # Venda desfeita: o produto não saiu (ou voltou) — custo zero (15/10, Vinicius).
             custo = ZERO
@@ -498,12 +513,12 @@ async def recalcular_loja(
             "bling_custofrete": _d(cab.custofrete),
             "bling_taxacomissao": _d(cab.taxacomissao),
             "venda_valor": _d(venda.gross_amount) if venda else None,
-            "venda_tarifa": _d(venda.fee_amount) if venda else None,
-            "venda_frete": _d(venda.freight_amount) if venda else None,
-            "venda_cupom": _d(venda.discount_amount) if venda else None,
-            "venda_estorno": _d(venda.refund_amount) if venda else None,
-            "venda_liquido": _d(venda.net_amount) if venda else None,
-            "venda_status": venda.status if venda else None,
+            "venda_tarifa": _d(venda.fee_amount) if venda_ok else None,
+            "venda_frete": _d(venda.freight_amount) if venda_ok else None,
+            "venda_cupom": _d(venda.discount_amount) if venda_ok else None,
+            "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
+            "venda_liquido": _d(venda.net_amount) if venda_ok else None,
+            "venda_status": venda.status if venda_ok else None,
             "previsao_liberacao": previsao,
             "fatura_tarifa": fatura["tarifa"] if fatura_movs else None,
             "fatura_parcelamento": fatura["parcelamento"] if fatura_movs else None,

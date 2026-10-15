@@ -25,7 +25,7 @@ from app.services.atendimento.clientes import cliente_da_integracao
 from app.services.conciliacao_calculo import recalcular_loja
 from app.services.conciliacao_extrato import run_extrato_sync
 from app.services.conciliacao_fatura import run_fatura_sync
-from app.services.conciliacao_shopee import run_carteira_sync
+from app.services.conciliacao_shopee import reler_escrow_liberados, run_carteira_sync
 
 logger = structlog.get_logger()
 
@@ -104,6 +104,8 @@ async def sincronizar_loja(
                 try:
                     if plataforma == "shopee":
                         resultado["extrato"] = await run_carteira_sync(session, loja, cliente)
+                        # a Shopee fecha a conta da venda só na liberação (Afiliados etc.)
+                        resultado["escrow"] = await reler_escrow_liberados(session, loja)
                     else:
                         resultado["extrato"] = await run_extrato_sync(session, loja, cliente)
                 except Exception as e:  # noqa: BLE001
