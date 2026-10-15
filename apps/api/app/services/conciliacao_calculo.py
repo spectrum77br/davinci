@@ -129,10 +129,12 @@ def conta_shopee(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] 
     rebate = inc.get("seller_product_rebate")
     subsidio = Decimal(str(rebate.get("amount") or 0)) if isinstance(rebate, dict) else ZERO
     preco = d("order_selling_price") or d("cost_of_goods_sold")
+    # 15/10, Vinicius: afiliados não é "a porcentagem sempre igual" — sai da tarifa
+    # e vai pra Extras; a tarifa fica com comissão, serviço, transação e encargos
+    afiliados = d("order_ams_commission_fee")
     taxas = (
         d("net_commission_fee")
         + d("net_service_fee")
-        + d("order_ams_commission_fee")
         + d("shipping_seller_protection_fee_amount")
         + d("seller_transaction_fee")
         + d("campaign_fee")
@@ -148,6 +150,7 @@ def conta_shopee(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] 
         "frete_loja": frete_loja,
         "cupons": cupons,
         "taxas": taxas,
+        "afiliados": afiliados,
         "renda": d("escrow_amount"),
     }
 
@@ -661,7 +664,9 @@ async def recalcular_loja(
             # parte da loja; extras = o que a TikTok acrescentou (subsídio) entra negativo
             shopee = {
                 "preco": tiktok["apos_desconto"] or tiktok["vendas_brutas"],
-                "taxas": -tiktok["taxas"],
+                # tarifa = comissão + taxa de transação; afiliados vai pra Extras (15/10)
+                "taxas": -(tiktok["taxas"] - tiktok["afiliados"]),
+                "afiliados": -tiktok["afiliados"],
                 "frete_loja": -tiktok["frete"],
                 "subsidio": ZERO,
                 "cupons": -tiktok["outros_receita"],
@@ -709,6 +714,7 @@ async def recalcular_loja(
                 if shopee
                 else (_d(venda.discount_amount) if venda_ok else None)
             ),
+            "venda_afiliados": shopee.get("afiliados") if shopee else None,
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
             "venda_liquido": _d(venda.net_amount) if venda_ok else None,
             "venda_status": venda.status if venda_ok else None,

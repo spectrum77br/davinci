@@ -370,9 +370,10 @@ async def test_raiox_tiktok_previsto_x_real(db, make_user, auth_as, client):
     (ped,) = r.json()["itens"]
     assert ped["situacao"] == "bateu" and ped["recebido"] == 344.45
     # a grade: valor = produtos após o desconto da loja; tarifa = todas as taxas
-    assert ped["venda_valor"] == 412.3 and ped["venda_tarifa"] == 67.85
+    # tarifa = comissão + taxa de transação; afiliados vai pra Extras (15/10, Vinicius)
+    assert ped["venda_valor"] == 412.3 and ped["venda_tarifa"] == 30.74
     assert ped["venda_frete"] == 0 and ped["venda_liquido"] == 344.45
-    assert ped["venda_extras"] == 0
+    assert ped["venda_extras"] == 37.11 and ped["venda_afiliados"] == 37.11
     r = await client.get(f"/api/conciliacao/pedidos/{ped['pedido_bling']}", params={"loja": "Mini"})
     assert r.status_code == 200, r.text
     comp = r.json()["comparativo"]

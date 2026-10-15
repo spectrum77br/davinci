@@ -36,6 +36,7 @@ type Pedido = {
   venda_tarifa: number | null
   venda_frete: number | null
   venda_cupom: number | null
+  venda_afiliados: number | null
   venda_estorno: number | null
   venda_liquido: number | null
   venda_extras: number | null
@@ -346,9 +347,12 @@ function sincronizarLoja(conta: string) {
 function extrasTitulo(p: Pedido) {
   if (p.venda_extras == null) return ''
   const cupom = p.venda_cupom || 0
-  const outros = Math.round((p.venda_extras - cupom) * 100) / 100
+  const afiliados = p.venda_afiliados || 0
+  const outros = Math.round((p.venda_extras - cupom - afiliados) * 100) / 100
   if (p.venda_extras < -0.005) return `a plataforma acrescentou ${fmtMoney(-p.venda_extras)} (${tab.value === 'tiktok' ? 'subsídio da TikTok no produto' : 'subsídio de frete, cashback'})`
-  const partes = [`cupom da loja ${fmtMoney(cupom)}`]
+  const partes: string[] = []
+  if (Math.abs(cupom) > 0.005 || !afiliados) partes.push(`cupom da loja ${fmtMoney(cupom)}`)
+  if (Math.abs(afiliados) > 0.005) partes.push(`afiliados ${fmtMoney(afiliados)}`)
   if (Math.abs(outros) > 0.005) partes.push(`parcelamento / outros ${fmtMoney(outros)}`)
   return partes.join(' · ')
 }

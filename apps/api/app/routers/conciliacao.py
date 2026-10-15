@@ -684,6 +684,7 @@ _CAMPOS_PEDIDO = (
     "venda_tarifa",
     "venda_frete",
     "venda_cupom",
+    "venda_afiliados",
     "venda_estorno",
     "venda_liquido",
     "venda_status",
@@ -741,9 +742,9 @@ def _pedido_out(p: ConciliacaoPedido) -> dict[str, Any]:
 
 
 def _extras_da_venda(p: ConciliacaoPedido) -> float | None:
-    """Tudo que o ML tira antes de liberar além da tarifa e do frete (cupom da loja,
-    parcelamento, outros): valor − tarifa − frete − líquido previsto. Com isso a linha
-    da grade fecha sozinha (15/10, Vinicius: "Extras")."""
+    """Tudo que a plataforma tira antes de liberar além da tarifa e do frete (cupom da
+    loja, afiliados, parcelamento, outros): valor − tarifa − frete − líquido previsto.
+    Com isso a linha da grade fecha sozinha (15/10, Vinicius: "Extras")."""
     if p.situacao in ("cancelado", "sem_venda"):
         return None  # sem venda com valor, "extras" seria o valor cheio
     if None in (p.venda_valor, p.venda_tarifa, p.venda_frete, p.venda_liquido):
@@ -1361,10 +1362,11 @@ def _comparativo(
                 linha("cupom", "− Cupons e descontos da loja", sh["cupons"], real(sh["cupons"])),
                 linha(
                     "tarifa",
-                    "− Taxas e encargos (comissão, serviço, afiliados)",
+                    "− Taxas e encargos (comissão, serviço, transação)",
                     sh["taxas"],
                     real(sh["taxas"]),
                 ),
+                linha("afiliados", "− Afiliados", sh["afiliados"], real(sh["afiliados"])),
                 linha(
                     "depois",
                     "± Depois da liberação (estornos, ajustes)",
@@ -1402,7 +1404,7 @@ def _comparativo(
             linha("produtos", "Produtos (preço da venda)", n(v.get("valor")), real(v.get("valor"))),
             linha(
                 "tarifa",
-                "− Tarifas da Shopee (comissão, serviço, afiliados)",
+                "− Tarifas da Shopee (comissão, serviço, transação)",
                 n(v.get("tarifa")),
                 real(v.get("tarifa")),
             ),
@@ -1569,6 +1571,7 @@ _COLUNAS_XLSX = [
     ("Frete", "venda_frete"),
     ("Extras (cupom, parcelamento, outros)", "venda_extras"),
     ("Cupom", "venda_cupom"),
+    ("Afiliados", "venda_afiliados"),
     ("Estorno", "venda_estorno"),
     ("Líquido previsto", "venda_liquido"),
     ("Fatura tarifa", "fatura_tarifa"),

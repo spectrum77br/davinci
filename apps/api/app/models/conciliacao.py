@@ -198,6 +198,8 @@ class ConciliacaoPedido(Base, TimestampMixin):
     venda_tarifa: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_frete: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_cupom: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # comissão de afiliados (Shopee AMS / TikTok): sai da tarifa e vai pra Extras (15/10)
+    venda_afiliados: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_estorno: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_liquido: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_status: Mapped[str | None] = mapped_column(String(20), nullable=True)

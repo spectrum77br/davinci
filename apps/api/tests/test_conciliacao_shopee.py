@@ -375,8 +375,12 @@ def test_conta_shopee_e_a_tela_de_detalhes_de_renda():
     assert c["preco"] == Decimal("4925") and c["subsidio"] == Decimal("417")
     assert c["subtotal_produtos"] == Decimal("4508")
     assert c["frete_loja"] == Decimal("0.00") and c["cupons"] == Decimal("3")
-    assert c["taxas"] == Decimal("354.85") and c["renda"] == Decimal("4150.15")
-    assert c["subtotal_produtos"] + c["frete_loja"] - c["cupons"] - c["taxas"] == c["renda"]
+    assert c["taxas"] == Decimal("305.85") and c["afiliados"] == Decimal("49")
+    assert c["renda"] == Decimal("4150.15")
+    assert (
+        c["subtotal_produtos"] + c["frete_loja"] - c["cupons"] - c["taxas"] - c["afiliados"]
+        == c["renda"]
+    )
     assert conta_shopee(None) is None
     assert (
         conta_shopee(MarketplaceOrderFinancial(platform="shopee", external_order_id="x", raw={}))
@@ -413,10 +417,12 @@ def test_comparativo_shopee_com_as_linhas_da_tela():
         "frete",
         "cupom",
         "tarifa",
+        "afiliados",
         "depois",
         "liquido",
     ]
-    assert por["produtos"]["previsto"] == 4508.0 and por["tarifa"]["previsto"] == 354.85
+    assert por["produtos"]["previsto"] == 4508.0 and por["tarifa"]["previsto"] == 305.85
+    assert por["afiliados"]["previsto"] == 49.0 and por["afiliados"]["real"] == 49.0
     assert por["liquido"] == {
         "chave": "liquido",
         "rotulo": "= Renda do pedido",

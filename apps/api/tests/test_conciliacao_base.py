@@ -993,7 +993,7 @@ async def test_painel_exporta_excel(db, make_user, auth_as, client):
     assert (
         linhas[0][1] == "Pedido Bling"
         and linhas[1][1] == "301102"
-        and linhas[1][17] == "10/10/2026 06:00"  # +1: coluna "Extras" entrou antes
+        and linhas[1][linhas[0].index("Liberado em")] == "10/10/2026 06:00"
     )
     assert (
         linhas[0][linhas[0].index("Extras (cupom, parcelamento, outros)")]
