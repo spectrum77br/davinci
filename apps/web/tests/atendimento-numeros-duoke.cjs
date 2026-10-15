@@ -293,7 +293,7 @@ async function renderizados() {
   // A linha (lista e detalhe) leva o número dela pela mesma régua.
   assert.match(rota, /pendente\.nao_lidas_duoke_sql\(agora=agora\)\.label\("numero_duoke"\)/)
   assert.match(rota, /numero_duoke=numero or 0,/, 'o detalhe (e as ações) também')
-  assert.match(rota, /if numero_duoke is not None and pendente\.do_chat\(c\)/, 'fora do chat: None')
+  assert.match(rota, /if numero_duoke is not None and pendente\.do_numero\(c\)/, 'fora do número (o chat e a reclamação do ML): None')
   assert.match(api('schemas/atendimento.py'), /^ {4}numero_duoke: int \| None = None$/m)
   assert.match(api('services/atendimento/instagram.py'), /"numero_duoke": int\(/, 'o Direct: o mesmo 1 na linha')
   assert.match(web('components/AtendimentoPlataforma.vue'), /^ {2}numero_duoke\?: number \| null$/m)
