@@ -126,7 +126,13 @@ async function marcar(body: Record<string, unknown>) {
     await carregar()
   } catch (e: any) {
     const d = e?.data?.detail
-    toasts.error?.(d?.code === 'pedido_bling_nao_encontrado' ? `pedido ${d.pedido} não é desta loja` : d?.mensagem || d?.code || 'não consegui salvar')
+    toasts.error?.(
+      d?.code === 'pedido_bling_nao_encontrado'
+        ? `pedido ${d.pedido} não é desta loja`
+        : d?.code === 'dia_fechado'
+          ? `dia ${fmtDia(d.dia + 'T12:00:00')} fechado por ${d.por}: reabra pra mexer`
+          : d?.mensagem || d?.code || 'não consegui salvar',
+    )
   } finally {
     salvando.value = false
   }
@@ -329,10 +335,16 @@ onMounted(() => {
             Vinculado ao pedido <button type="button" class="font-bold underline decoration-dotted" @click="emit('ver-pedido', selecionado.pedido_bling!)">{{ selecionado.pedido_bling }}</button>
             <span v-if="selecionado.pedido_situacao" class="ml-1 rounded px-1.5 py-0.5 font-bold" :class="sitCls(selecionado.pedido_situacao)">{{ selecionado.pedido_situacao_label }}</span>
             <div v-if="selecionado.vinculado_por" class="text-muted-foreground">por {{ selecionado.vinculado_por }} em {{ fmtDiaHora(selecionado.vinculado_em) }}</div>
-            <button v-if="canEdit" type="button" class="mt-1 rounded border px-2 py-0.5 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ desvincular: true })">Desvincular</button>
+            <button v-if="canEdit && !dados?.fechado" type="button" class="mt-1 rounded border px-2 py-0.5 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ desvincular: true })">Desvincular</button>
+          </div>
+          <div v-if="!selecionado.pedido_bling && !selecionado.classificacao && selecionado.vinculado_por" class="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
+            desvinculada à mão por {{ selecionado.vinculado_por }} em {{ fmtDiaHora(selecionado.vinculado_em) }} — o robô não religa; vincule a outro pedido ou classifique
           </div>
 
-          <template v-if="canEdit && !selecionado.pedido_bling">
+          <div v-if="dados?.fechado" class="rounded border bg-muted/60 px-2 py-1.5 text-muted-foreground">
+            <Lock class="mr-1 inline size-3.5" /> dia fechado por {{ dados.fechado.por }} em {{ fmtDiaHora(dados.fechado.em) }}: pra vincular, classificar ou desvincular, clique em Reabrir lá em cima.
+          </div>
+          <template v-if="canEdit && !dados?.fechado && !selecionado.pedido_bling">
             <div class="font-bold text-[#1f3a5f] dark:text-slate-200">Vincular a um pedido</div>
             <div class="flex gap-1.5">
               <input v-model="pedidoInput" placeholder="nº do pedido Bling" class="w-full rounded border bg-background px-2 py-1" @keyup.enter="pedidoInput.trim() && marcar({ pedido_bling: pedidoInput.trim() })" />
@@ -360,7 +372,7 @@ onMounted(() => {
               <button v-for="c in dados?.classificacoes || []" :key="c.key" type="button" class="rounded border px-2 py-0.5 font-semibold hover:bg-muted" :class="selecionado.classificacao === c.key && 'bg-muted'" :disabled="salvando" @click="marcar({ classificacao: c.key })">{{ c.label }}</button>
             </div>
           </template>
-          <div v-else-if="!canEdit" class="text-muted-foreground">você só pode ver; vincular e classificar pede permissão de edição</div>
+          <div v-else-if="!canEdit && !dados?.fechado" class="text-muted-foreground">você só pode ver; vincular e classificar pede permissão de edição</div>
         </div>
       </div>
     </div>

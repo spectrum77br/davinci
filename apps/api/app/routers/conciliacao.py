@@ -1808,6 +1808,27 @@ async def marcar_movimento(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "loja_nao_ligada"})
     agora = datetime.now(UTC)
     quem = (getattr(user, "name", None) or user.email or "?")[:120]
+    # Dia fechado não se mexe: reabre primeiro (15/10, Vinicius).
+    dia_mov = m.data.astimezone(_BRT).date()
+    fechado = (
+        await session.execute(
+            select(ConciliacaoDia).where(
+                ConciliacaoDia.integration_id == m.integration_id,
+                ConciliacaoDia.dia == dia_mov,
+                ConciliacaoDia.fechado_em.isnot(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if fechado is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "dia_fechado",
+                "dia": dia_mov.isoformat(),
+                "por": fechado.fechado_por,
+                "em": fechado.fechado_em.isoformat() if fechado.fechado_em else None,
+            },
+        )
     if body.desvincular:
         m.pedido_bling = None
         m.bling_id = None

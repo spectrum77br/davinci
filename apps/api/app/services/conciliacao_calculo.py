@@ -363,6 +363,10 @@ async def recalcular_loja(
     }
     movs_por_numero: dict[str, list[ConciliacaoMovimento]] = defaultdict(list)
     for m in movs:
+        if not m.pedido_bling and (m.vinculado_por or m.classificacao):
+            # Uma pessoa desvinculou ou classificou sem pedido: não é deste pedido,
+            # mesmo que o nº da venda aponte pra ele (15/10).
+            continue
         numero = (
             m.pedido_bling
             or numero_por_numeroloja.get(m.pedido_marketplace or "")
@@ -563,6 +567,9 @@ async def recalcular_loja(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
                     ConciliacaoMovimento.pedido_bling.is_(None),
                     ConciliacaoMovimento.pedido_marketplace.isnot(None),
+                    # linha que uma PESSOA desvinculou fica como ela deixou (15/10:
+                    # o "Desvincular" era desfeito pelo recálculo no segundo seguinte)
+                    ConciliacaoMovimento.vinculado_por.is_(None),
                 )
                 .limit(5000)
             )
