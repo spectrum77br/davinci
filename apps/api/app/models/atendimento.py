@@ -306,6 +306,17 @@ class AtendimentoConversa(Base, TimestampMixin):
     nao_lidas: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # "VISTO NO DAVINCI" (migration 0399, 15/10/2026): até onde uma PESSOA
+    # que mexe na caixa VIU a conversa na tela do DaVinci — gravado quando
+    # ela abre (1,5 s aberta com a aba visível, em qualquer modo de loja) e,
+    # com ela aberta, a cada mensagem nova (POST /visto ou /lida,
+    # `services/atendimento/lida.py`). No relógio do DaVinci: a CHEGADA
+    # (`created_at`) da mensagem mais nova que a tela mostrava. Como no
+    # Duoke, abrir zera o número da conversa: o número da Caixa conta só a
+    # mensagem do cliente que chegou depois dele
+    # (`services/atendimento/pendente.py`). Nunca vai à plataforma; NULL =
+    # ninguém abriu ainda.
+    visto_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # aberta | respondida | fechada | bloqueada
     situacao: Mapped[str] = mapped_column(
         String(16), nullable=False, default="aberta", server_default=text("'aberta'")

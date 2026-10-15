@@ -1121,6 +1121,7 @@ def _resumo_dict(
     ultimo_tipo: str | None = None,
     pendentes: int = 0,
     humano: dict[str, Any] | None = None,
+    numero_duoke: int | None = None,
 ) -> dict[str, Any]:
     return {
         "id": str(c.id),
@@ -1143,12 +1144,24 @@ def _resumo_dict(
         "prazo_resposta_em": _utc(c.prazo_resposta_em),
         "situacao": c.situacao,
         "nao_lidas": c.nao_lidas or 0,
+        # "Visto no DaVinci" (15/10/2026): a tela relê os números da Caixa
+        # quando ele muda (a pessoa abriu a conversa e o número dela zerou).
+        "visto_em": _utc(c.visto_em),
         # No "Falta responder" da Caixa (igual ao Duoke, `pendente.py`): a
         # marca da linha (negrito, bolinha) e a tela relê os números quando
         # ele muda. Em todo canal: a avaliação esperando resposta continua
         # marcada em "Todas", mesmo fora do filtro (14/10/2026, só o chat).
         "falta_responder": pendente.falta_responder(c),
         "pendentes": int(pendentes or 0) if c.aguardando_resposta else 0,
+        # O número DESTA conversa na Caixa (15/10/2026, o Eduardo: "1 mensagem
+        # na kia e nem mostra dessa conversa"): a mesma régua do número da
+        # loja (`pendente.nao_lidas_duoke_sql`, com o "visto no DaVinci") — a
+        # bolinha da linha na Caixa, com ou sem a marca do "Falta responder".
+        # None fora do chat (avaliação, reclamação…: a bolinha de antes) e
+        # quando quem chama não calculou.
+        "numero_duoke": (
+            int(numero_duoke or 0) if numero_duoke is not None and pendente.do_chat(c) else None
+        ),
         "tem_rascunho": bool(tem_rascunho),
         "atribuido_a": c.atribuido_a,
         "atribuido_a_nome": atribuido_nome,
@@ -1236,6 +1249,10 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
     para_pessoa = await session.scalar(
         select(humano_svc.triagem_da_linha_sql(lojas, agora)).where(AtendimentoConversa.id == c.id)
     )
+    # O número dela na Caixa (a bolinha da linha), com o mesmo `agora`.
+    numero = await session.scalar(
+        select(pendente.nao_lidas_duoke_sql(agora=agora)).where(AtendimentoConversa.id == c.id)
+    )
     base = _resumo_dict(
         c,
         tem_rascunho=tem,
@@ -1244,6 +1261,7 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
         ultimo_tipo=ultimo_tipo,
         pendentes=pendentes or 0,
         humano=_humano_da_linha(para_pessoa, c, lojas, agora),
+        numero_duoke=numero or 0,
     )
     base.update(
         comprador_id=c.comprador_id,
@@ -1637,10 +1655,16 @@ async def resumo(
     # comentários têm os filtros próprios (`pendente.py`). Vencendo/vencidas
     # seguem o PRAZO da fila (`aguardando_resposta`), em todo canal.
     falta = pendente.falta_responder_no_chat_sql()
-    # O número do DUOKE (14/10/2026: o menu de plataformas, a barra de lojas,
-    # "Todas · Shopee" e a aba Caixa): a soma das mensagens não lidas das
-    # conversas de chat esperando resposta (`pendente.nao_lidas_duoke`).
-    duoke = func.coalesce(func.sum(pendente.nao_lidas_duoke_sql()), 0)
+    # O número do DUOKE (o menu de plataformas, a barra de lojas, "Todas ·
+    # Shopee" e a aba Caixa) = o "não lida" do Duoke (15/10/2026,
+    # `pendente.nao_lidas_duoke`): nas conversas de chat esperando resposta
+    # com o comprador nas últimas 24 h, as mensagens dele depois da última
+    # resposta de pessoa da loja e do que alguém já viu no DaVinci (`visto_em`).
+    # Calculado SÓ por loja (a `q_loja`, abaixo): a plataforma é a soma das
+    # lojas dela — o mesmo WHERE (`cond`) e o GROUP BY da loja é mais fino
+    # que o da plataforma. Na `q_plat` também, ele custava +33 a +72 ms por
+    # chamada (EXPLAIN ANALYZE em produção, 15/10/2026), a cada 30 s por aba.
+    duoke = func.coalesce(func.sum(pendente.nao_lidas_duoke_sql(agora=agora)), 0)
     prazo = AtendimentoConversa.prazo_resposta_em
     vencendo = and_(aguardando, prazo >= agora, prazo < agora + VENCENDO)
     vencidas = and_(aguardando, prazo < agora)
@@ -1679,7 +1703,6 @@ async def resumo(
         func.count().filter(_a_conferir_existe()),
         nao_lidas,
         na_caixa_humano,
-        duoke,
         *por_etiqueta,
     ).group_by(AtendimentoConversa.plataforma)
     q_plat = q_plat.where(cond)
@@ -1699,9 +1722,8 @@ async def resumo(
             nao_lidas=int(n or 0),
             etiquetas=_etiquetas(etq),
             humano=int(h or 0),
-            nao_lidas_duoke=int(d or 0),
         )
-        for p, a, v, x, r, n, h, d, *etq in (await session.execute(q_plat)).all()
+        for p, a, v, x, r, n, h, *etq in (await session.execute(q_plat)).all()
     }
     canais = await _canais(session, scope)
     # As do robô (Temu/AliExpress) e as externas (sites, redes — 02/10/2026)
@@ -1783,6 +1805,15 @@ async def resumo(
         )
         for i, p, rc, conta, a, x, n, h, d, *etq in (await session.execute(q_loja)).all()
     }
+    # O número do Duoke da plataforma = a soma das lojas dela (a `q_plat` não
+    # o calcula, acima); o Direct já somou o dele (`+=`).
+    duoke_da_plataforma: dict[str, int] = {}
+    for lj in lojas.values():
+        duoke_da_plataforma[lj.plataforma] = (
+            duoke_da_plataforma.get(lj.plataforma, 0) + lj.nao_lidas_duoke
+        )
+    for p in plataformas:
+        p.nao_lidas_duoke += duoke_da_plataforma.get(p.plataforma, 0)
     canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]] = {}
     for c in canais:
         chave_canal = c.id if c.integration_id is None else None
@@ -1920,6 +1951,10 @@ async def _listar_marketplace(
         a_conferir.label("a_conferir"),
         _ultimo_tipo().label("ultimo_tipo"),
         _pendentes().label("pendentes"),
+        # O número da conversa na Caixa (15/10/2026, a bolinha da linha): a
+        # régua do número da loja — a subconsulta só roda nas de chat
+        # esperando resposta com o comprador nas últimas 24 h.
+        pendente.nao_lidas_duoke_sql(agora=agora).label("numero_duoke"),
         # Caixa Humano (09/10/2026): o motivo de quem precisa de pessoa
         # (None fora) — o chip, em toda loja (`triagem_da_linha_sql`); a
         # espera da IA, só nas lojas em que ela responde, com o MESMO `agora`.
@@ -2139,8 +2174,9 @@ async def _listar_marketplace(
             ultimo_tipo=tipo,
             pendentes=pend,
             humano=_humano_da_linha(hum, c, lojas_humano, agora),
+            numero_duoke=numero,
         )
-        for c, tem_r, r, tipo, pend, hum, u in (
+        for c, tem_r, r, tipo, pend, numero, hum, u in (
             await session.execute(consulta.limit(limite))
         ).all()
     ]
@@ -2734,6 +2770,9 @@ async def detalhe_conversa(
         # Marcar como lida ao abrir (14/10/2026): só quem mexe, só loja em que o
         # DaVinci responde — as mesmas travas do POST /lida.
         "marcar_lida": await lida_svc.marcar_ao_abrir(session, c, user),
+        # Até onde esta tela mostra a conversa (15/10/2026): a chegada da
+        # mensagem mais nova daqui — volta no POST /visto ou /lida.
+        "visto_ate": lida_svc.visto_ate(mensagens),
         "etiqueta_historico": await _historico_etiqueta(session, c.id),
     }
     # Por ÚLTIMO: o cartão pode ir à loja (ML ao vivo, com cache) e, se

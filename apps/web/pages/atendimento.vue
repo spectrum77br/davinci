@@ -334,8 +334,10 @@ async function carregarMais() {
 // dela na lista acompanha sem esperar o próximo tique. Se mudou o que os
 // contadores contam (aguardando, o "Falta responder" igual ao Duoke — o
 // `falta_responder` da linha —, "a conferir", as não lidas do número do
-// Duoke — marcou como lida ao abrir), o resumo também é relido — senão o
-// "A conferir (1)" ficava lá até 30 s depois de a pessoa marcar.
+// Duoke — marcou como lida ao abrir —, o "visto no DaVinci" — abriu a
+// conversa, o número dela zera, 15/10/2026 — ou o número da conversa — a
+// bolinha da linha; o da loja acompanha), o resumo também é relido —
+// senão o "A conferir (1)" ficava lá até 30 s depois de a pessoa marcar.
 function aoMudarConversa(c: ConversaResumo) {
   // A conversa de e-mail que chegou à Caixa pelo id (um link antigo, o alerta,
   // o "abrir na aba E-mail" do painel do chat): ela mora na aba E-mail
@@ -361,6 +363,8 @@ function aoMudarConversa(c: ConversaResumo) {
   if (antes && (antes.aguardando_resposta !== c.aguardando_resposta || !!antes.envio_a_conferir !== !!c.envio_a_conferir
     || (c.falta_responder !== undefined && !!antes.falta_responder !== !!c.falta_responder)
     || (c.nao_lidas !== undefined && (Number(antes.nao_lidas) || 0) !== (Number(c.nao_lidas) || 0))
+    || (c.visto_em !== undefined && (antes.visto_em ?? null) !== (c.visto_em ?? null))
+    || (c.numero_duoke !== undefined && (antes.numero_duoke ?? null) !== (c.numero_duoke ?? null))
     || (c.etiqueta !== undefined && (antes.etiqueta ?? null) !== (c.etiqueta ?? null))
     || (c.humano !== undefined && !!antes.humano !== !!c.humano))) {
     void carregarResumo()

@@ -222,7 +222,7 @@ import { sinalDeEmails } from '~/components/AtendimentoEmailVenda.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
-import { criarMarcadorDeLida, querMarcarLida } from '~/lib/atendimentoLida'
+import { criarMarcadorDeLida, rotaAoAbrir } from '~/lib/atendimentoLida'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
@@ -506,28 +506,46 @@ usePollingVisivel(async () => {
 
 // ─── marcar como lida ao abrir (14/10/2026) ─────────────────────────────────
 // O Eduardo: "ao passar também tem que marcar como visto, igual lá no Duoke
-// quando clicar na conversa". Quem MEXE abriu a conversa de uma loja em que o
-// DaVinci responde (o detalhe diz `marcar_lida`; em Observar, nunca) e ela
-// ficou 1,5 s aberta com a aba visível: POST /lida, uma vez por abertura — a
-// plataforma marca e o número de não lidas zera. Quem passou rápido pela lista
-// com as setas não marca nada. Falhou, segue: a conversa continua não lida (a
-// regra inteira em lib/atendimentoLida.ts e services/atendimento/lida.py).
-type LidaResposta = { marcada: boolean; motivo?: string | null; aviso?: string | null; conversa?: ConversaResumo | null }
+// quando clicar na conversa". Quem MEXE abriu a conversa e ela ficou 1,5 s
+// aberta com a aba visível: UMA chamada por abertura — o POST /lida numa loja
+// em que o DaVinci responde (o detalhe diz `marcar_lida`; em Observar, nunca:
+// a plataforma marca e o número de não lidas zera) e, senão, o POST /visto
+// (15/10/2026: só o "visto no DaVinci", em qualquer modo, sem ir à
+// plataforma). Os dois gravam o visto, que zera o número da conversa na
+// Caixa, como abrir no Duoke — a linha recebe o `visto_em` e a página relê os
+// números. Quem passou rápido pela lista com as setas não marca nada. Falhou,
+// segue (a regra inteira em lib/atendimentoLida.ts e
+// services/atendimento/lida.py).
+// O POST leva até onde a tela mostrava (`ate` = o `visto_ate` do detalhe: a
+// chegada da mensagem mais nova) e, com a conversa aberta, a releitura que
+// traz mensagem nova grava o visto de novo (`rever`, só o /visto) — como no
+// Duoke, a conversa aberta fica lida (15/10/2026).
+type LidaResposta = { marcada?: boolean; motivo?: string | null; aviso?: string | null; visto_em?: string | null; conversa?: ConversaResumo | null }
+async function gravarVisto(id: string, rota: 'lida' | 'visto') {
+  const aberto = detalhe.value
+  const ate = aberto && aberto.conversa.id === id ? aberto.visto_ate ?? null : null
+  const r = await api<LidaResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/${rota}`, { method: 'POST', body: { ate } })
+  const d = detalhe.value
+  if (!r?.conversa || id !== props.conversaId || !d || d.conversa.id !== id) return
+  // O /lida que não marcou na plataforma deixa as não lidas como estão; o visto vale sempre.
+  const c = { ...d.conversa, ...r.conversa, nao_lidas: r.conversa.nao_lidas ?? (r.marcada ? 0 : d.conversa.nao_lidas) }
+  detalhe.value = { ...d, conversa: c }
+  emit('mudou', c)
+}
 const marcadorLida = criarMarcadorDeLida({
   atual: () => props.conversaId || null,
   visivel: () => props.ativa !== false && (typeof document === 'undefined' || document.visibilityState === 'visible'),
   marcar: async (id) => {
-    const r = await api<LidaResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/lida`, { method: 'POST' })
-    const d = detalhe.value
-    if (!r?.marcada || id !== props.conversaId || !d || d.conversa.id !== id) return
-    const c = { ...d.conversa, ...(r.conversa || {}), nao_lidas: r.conversa?.nao_lidas ?? 0 }
-    detalhe.value = { ...d, conversa: c }
-    emit('mudou', c)
+    const aberto = detalhe.value
+    const rota = aberto && aberto.conversa.id === id ? rotaAoAbrir(aberto, props.canEdit) : null
+    if (rota) await gravarVisto(id, rota)
   },
+  rever: (id) => gravarVisto(id, 'visto'),
 })
-// Cada detalhe que chega (ao abrir e no polling) diz se é para marcar.
+// Cada detalhe que chega (ao abrir e no polling) diz se é para chamar, qual
+// rota e até onde a tela mostra.
 watch(() => detalhe.value, (d) => {
-  if (d) marcadorLida.abrir(d.conversa.id, querMarcarLida(d, props.canEdit))
+  if (d) marcadorLida.abrir(d.conversa.id, rotaAoAbrir(d, props.canEdit) !== null, d.visto_ate ?? null)
 })
 watch(() => props.conversaId, () => marcadorLida.fechar())
 watch(() => props.ativa, (a) => {

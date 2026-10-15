@@ -161,6 +161,12 @@ class ConversaResumoOut(BaseModel):
     prazo_resposta_em: datetime | None = None
     situacao: str
     nao_lidas: int = 0
+    # "Visto no DaVinci" (15/10/2026, migration 0399): até onde uma pessoa
+    # que mexe viu a conversa na tela (POST /visto ou /lida — a chegada da
+    # mensagem mais nova que a tela mostrava). O número da Caixa só conta a
+    # mensagem do comprador que chegou depois dele; a tela relê o /resumo
+    # quando ele muda. None = ninguém abriu (e no Direct).
+    visto_em: datetime | None = None
     # No "Falta responder" da Caixa, IGUAL AO DUOKE (14/10/2026,
     # `services/atendimento/pendente.py`): o comprador por último (qualquer
     # mensagem da loja responde, até a automática) ou não lida no chat da
@@ -168,8 +174,15 @@ class ConversaResumoOut(BaseModel):
     # marca a linha (negrito, bolinha) por ele. A fila de verdade (a IA, o
     # prazo) continua `aguardando_resposta`.
     falta_responder: bool = False
-    # Mensagens do comprador desde a última resposta de verdade (a bolinha).
+    # Mensagens do comprador desde a última resposta de verdade (a bolinha
+    # da Caixa Humano).
     pendentes: int = 0
+    # O número DESTA conversa na Caixa (15/10/2026, `pendente.nao_lidas_duoke`
+    # por linha — a mesma régua do número da loja, com o "visto no DaVinci"):
+    # a bolinha da linha na Caixa, com ou sem a marca do "Falta responder";
+    # a soma das linhas de uma loja é o número dela. None fora do chat
+    # (avaliação, reclamação… — a bolinha de antes).
+    numero_duoke: int | None = None
     tem_rascunho: bool = False
     atribuido_a: UUID | None = None
     atribuido_a_nome: str | None = None
@@ -433,8 +446,16 @@ class ConversaDetalheOut(BaseModel):
     # 14/10/2026)? Quem vê mexe na caixa, a loja está num modo em que o
     # DaVinci responde (nunca `observar`), o envio está ligado, a plataforma
     # tem "lida" (chat da Shopee e da TikTok, pós-venda do ML) e há não lidas
-    # — as mesmas travas da rota (`services/atendimento/lida.py`).
+    # — as mesmas travas da rota (`services/atendimento/lida.py`). Sem ele, a
+    # tela chama o POST /conversas/{id}/visto (15/10/2026: só o "visto no
+    # DaVinci", em qualquer modo, sem ir à plataforma); o /lida grava o visto
+    # também.
     marcar_lida: bool = False
+    # Até onde esta tela mostra a conversa (15/10/2026, `lida.visto_ate`): a
+    # chegada (`created_at`) da mensagem mais nova de `mensagens`. A tela
+    # devolve no POST /visto ou /lida (`{"ate": ...}`) — o "visto no DaVinci"
+    # fica nele, e a mensagem que chegou depois (a tela não mostrou) conta.
+    visto_ate: datetime | None = None
     # As mudanças de etiqueta da conversa, da mais antiga para a mais nova
     # (`etiqueta.historico_da_conversa`) — a linha do tempo da etiqueta.
     etiqueta_historico: list[EtiquetaHistoricoOut] = Field(default_factory=list)
@@ -797,11 +818,13 @@ class PlataformaResumoOut(BaseModel):
     aguardando: int
     vencendo: int
     vencidas: int
-    # O número do DUOKE (14/10/2026, `pendente.nao_lidas_duoke`): a soma das
-    # mensagens não lidas das conversas de chat esperando resposta — só as
-    # que estão no "Falta responder" (a linha marcada); 1 por conversa onde a
-    # plataforma não dá o não lido; o Direct, na janela de 24 h — o menu de
-    # plataformas, a barra de lojas e a aba Caixa.
+    # O número do DUOKE — o "não lida" do Duoke (15/10/2026,
+    # `pendente.nao_lidas_duoke`; o nome do campo ficou): nas conversas de
+    # chat esperando resposta com o comprador nas últimas 24 h, as mensagens
+    # dele depois da última resposta de PESSOA da loja ou da última vez que
+    # alguém abriu a conversa no DaVinci (`visto_em`); o Direct, 1 por
+    # conversa esperando na janela de 24 h da Meta — o menu de plataformas, a
+    # barra de lojas e a aba Caixa.
     nao_lidas_duoke: int = 0
     # Conversas com resposta nossa em `revisar` (ver `envio_a_conferir`).
     a_conferir: int = 0

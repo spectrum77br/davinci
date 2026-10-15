@@ -1,6 +1,7 @@
-"""Pós-venda › Atendimento: marcar a conversa como LIDA ao abrir (14/10/2026).
+"""Pós-venda › Atendimento: marcar a conversa como LIDA / VISTA ao abrir (14 e 15/10/2026).
 
   POST /api/atendimento/conversas/{id}/lida
+  POST /api/atendimento/conversas/{id}/visto
 
 Decisão do dono (Eduardo, 14/10/2026): "ao passar também tem que marcar como
 visto, igual lá no Duoke quando clicar na conversa". A tela chama esta rota
@@ -25,6 +26,30 @@ Respostas:
     continua não lida lá, no Duoke e aqui. Falha da plataforma NÃO é erro HTTP:
     a tela segue.
 
+O /lida grava também o "visto no DaVinci" (`visto_em`), ANTES de tentar a
+plataforma — a pessoa abriu, com ou sem a plataforma aceitar (e no 409 de
+corrida também).
+
+O /visto (15/10/2026, decisão do dono: "os números da Caixa têm que bater com
+o Duoke", e lá abrir a conversa zera o número dela) é a rota LEVE que a tela
+chama quando o detalhe NÃO diz `marcar_lida` — a loja em `observar`, o envio
+desligado, a plataforma sem "lida", nada não lido: só grava `visto_em`, em
+qualquer modo de loja, e NUNCA vai à plataforma. Uma rota à parte, e não um
+modo do /lida, para o /lida continuar recusando (409) o que não marca na
+plataforma. Respostas:
+  - 403 `atendimento_so_leitura` — quem só lê (a trava e o serviço);
+  - 409 `nao_se_aplica` — o Direct do Instagram (não é conversa da Caixa);
+  - 404 — fora do escopo da equipe ou não existe;
+  - 200 `{visto_em, conversa}` — idempotente (abrir de novo só anda o
+    carimbo para a frente). O número da Caixa (`pendente.nao_lidas_duoke`)
+    só conta a mensagem do comprador que CHEGOU depois dele.
+O corpo, nos dois (opcional, 15/10/2026): `{"ate": <visto_ate do detalhe>}`
+— até onde a tela mostrava a conversa (a chegada da mensagem mais nova); o
+`visto_em` fica nele, nunca depois do relógio do banco. Sem corpo, o relógio
+do banco (`lida.gravar_visto`). Com a conversa aberta, a tela chama o /visto
+de novo quando a releitura traz mensagem nova (o /lida, uma vez por
+abertura).
+
 A MESMA TRAVA de acesso do router do atendimento (`_so_admin`), a permissão de
 escrita (`_edit`) e o escopo por equipe (`_conversa_ou_404`). Router à parte;
 o `main.py` o inclui.
@@ -32,6 +57,7 @@ o `main.py` o inclui.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 
 import structlog
@@ -60,6 +86,16 @@ router = APIRouter(
 )
 
 
+class VistoIn(BaseModel):
+    """O corpo (opcional) do /lida e do /visto: até onde a tela mostrava.
+
+    `ate` = o `visto_ate` do detalhe aberto (a chegada da mensagem mais nova,
+    `lida_svc.visto_ate`). Sem corpo (a tela antiga), o relógio do banco.
+    """
+
+    ate: datetime | None = None
+
+
 class LidaOut(BaseModel):
     """O que aconteceu ao marcar como lida (a tela só atualiza o número)."""
 
@@ -77,6 +113,7 @@ async def marcar_lida(
     conversa_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_edit)],
+    body: VistoIn | None = None,
 ) -> LidaOut:
     """Marca a conversa como lida NA PLATAFORMA (e zera `nao_lidas` se ela aceitou)."""
     if instagram.e_instagram(conversa_id):
@@ -87,6 +124,8 @@ async def marcar_lida(
     scope = await resolve_team_scope(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
+        # A pessoa abriu: o "visto no DaVinci" vale com ou sem a plataforma.
+        await lida_svc.gravar_visto(session, c, user, body.ate if body else None)
         r = await lida_svc.marcar_como_lida(session, c, user=user)
     except lida_svc.LidaRecusada as e:
         logger.info(
@@ -103,3 +142,35 @@ async def marcar_lida(
         aviso=r.aviso,
         conversa=await _conversa_out(session, c),
     )
+
+
+class VistoOut(BaseModel):
+    """O "visto no DaVinci" gravado (a tela só atualiza a linha e relê os números)."""
+
+    visto_em: datetime | None = None
+    conversa: ConversaOut | None = None
+
+
+@router.post("/conversas/{conversa_id}/visto", response_model=VistoOut)
+async def marcar_visto(
+    conversa_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+    body: VistoIn | None = None,
+) -> VistoOut:
+    """Grava o "visto no DaVinci" (`visto_em`) — em qualquer modo, sem ir à plataforma.
+
+    Ao abrir e, com a conversa aberta, a cada mensagem nova que a tela mostra.
+    """
+    if instagram.e_instagram(conversa_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": lida_svc.RECUSA_NAO_SE_APLICA, "detail": lida_svc.MOTIVO_NAO_SE_APLICA},
+        )
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    try:
+        visto = await lida_svc.gravar_visto(session, c, user, body.ate if body else None)
+    except lida_svc.LidaRecusada as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA) from e
+    return VistoOut(visto_em=visto, conversa=await _conversa_out(session, c))

@@ -140,14 +140,16 @@ export function filtrosTodasDoCorte(f: FiltrosLista, corte: string[]): FiltrosLi
 // manda zero para as outras: sem bolinha); o title da loja fora diz por quê.
 // NA CAIXA, O NÚMERO DO DUOKE (`numero="nao_lidas_duoke"`, 14/10/2026, o
 // dono: "o nosso ATV mostra 9, o deles 5 … tá pegando uns antigos de
-// avaliação"): a bolinha é a soma das MENSAGENS não lidas das conversas de
-// chat esperando resposta — medido no Duoke, ATV 5 = uma conversa com 4 não
-// lidas + outra com 1. Avaliação, reclamação/devolução, carrinho e
-// comentários não entram (têm os filtros próprios); onde a plataforma não dá
-// o não lido (e-mail da Amazon, Direct na janela de 24 h…), 1 por conversa
-// esperando. Só conta conversa que está no "Falta responder" (a linha
-// marcada): a pessoa acha o que está contado. O "falta responder"
-// (conversas) fica no title.
+// avaliação"): a bolinha é a soma das MENSAGENS do comprador nas conversas de
+// chat esperando resposta. Avaliação, reclamação/devolução, carrinho e
+// comentários não entram (têm os filtros próprios); o Direct, 1 por conversa
+// esperando na janela de 24 h. O "falta responder" (conversas) fica no title.
+// Desde 15/10/2026 (o dono: os números têm que bater com o Duoke) a régua é a
+// do NÃO LIDO DO PRÓPRIO DUOKE: nas conversas de chat esperando resposta com
+// o comprador nas últimas 24 h, as mensagens dele desde a última resposta de
+// pessoa da loja ou desde que alguém abriu a conversa no DaVinci — o robô não
+// zera, abrir zera (services/atendimento/pendente.py). O title da loja
+// explica (`TEXTO_NUMERO_DA_LOJA`).
 import { ChevronsLeft, ChevronsRight, Inbox, Lock, TriangleAlert, Unplug } from 'lucide-vue-next'
 import type { NumeroDaCaixa } from '~/components/AtendimentoFiltroPlataforma.vue'
 import {
@@ -358,6 +360,8 @@ function foraDaCaixaHumano(l: LojaBarra): boolean {
 function contador(n: number) {
   return n > 99 ? '99+' : String(n)
 }
+// A régua do número da loja na Caixa (15/10/2026), no title.
+const TEXTO_NUMERO_DA_LOJA = 'mensagem(ns) do cliente desde a última resposta ou desde que alguém abriu a conversa — como no Duoke'
 function motivo(l: LojaBarra): string {
   const partes = [`${plataformaInfo(l.plataforma).nome} · ${l.conta}`]
   if (l.apagada) {
@@ -368,7 +372,7 @@ function motivo(l: LojaBarra): string {
     // Na Caixa, o número do Duoke e, ao lado, o "Falta responder" (conversas,
     // só o chat). Na Caixa Humano (e sem `numero`), o texto de sempre.
     if (props.numero === 'nao_lidas_duoke') {
-      partes.push(`${l.nao_lidas} mensagem(ns) não lida(s) esperando resposta (como no Duoke)`)
+      partes.push(`${l.nao_lidas} ${TEXTO_NUMERO_DA_LOJA}`)
       partes.push(`${l.aguardando} conversa(s) no Falta responder (só o chat)`)
     } else partes.push(`${l.aguardando} conversa(s) esperando resposta`)
     if (props.numero === 'humano' && foraDaCaixaHumano(l)) partes.push(`Fora da Caixa Humano: a loja não está ${textoModosHumano(modosHumano.value || [])} (mude em Lojas e modo)`)

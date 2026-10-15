@@ -88,17 +88,26 @@ export function filtroPadrao(caixa: string | null | undefined): string {
   return caixa === 'humano' ? 'aguardando' : 'todas'
 }
 // A MARCA da linha (14/10/2026, o dono: "pra estar marcado literalmente as
-// mesmas" que o Duoke): na Caixa, negrito e bolinha só em quem está no "Falta
-// responder" (`falta_responder`, a régua do Duoke); a bolinha mostra o maior
-// entre as mensagens do comprador sem resposta e as não lidas na plataforma.
-// Na Caixa Humano (a régua dela é a fila) e com a API antiga (sem o campo),
-// pela fila, como antes.
-type LinhaMarcavel = { aguardando_resposta?: boolean; falta_responder?: boolean; pendentes?: number; nao_lidas?: number }
+// mesmas" que o Duoke): na Caixa, o negrito só em quem está no "Falta
+// responder" (`falta_responder`, a régua do Duoke). Na Caixa Humano (a régua
+// dela é a fila) e com a API antiga (sem o campo), pela fila, como antes.
+// A BOLINHA da linha na Caixa (15/10/2026, o Eduardo: "1 mensagem na kia e
+// nem mostra dessa conversa … no duoke 9") é o NÚMERO DA CONVERSA
+// (`numero_duoke`, a mesma régua do número da loja — o "não lida" do Duoke:
+// as mensagens do comprador desde a última resposta de pessoa ou desde que
+// alguém abriu a conversa), com ou sem o negrito: a conversa em que o robô
+// respondeu por último não está no "Falta responder" e mostra o número; a
+// que alguém abriu fica em negrito sem bolinha. A soma das bolinhas de uma
+// loja é o número dela. Fora do chat (`numero_duoke` null: avaliação,
+// reclamação…) e com a API antiga, a bolinha de antes: só na linha marcada, o
+// maior entre as mensagens do comprador sem resposta e as não lidas.
+type LinhaMarcavel = { aguardando_resposta?: boolean; falta_responder?: boolean; pendentes?: number; nao_lidas?: number; numero_duoke?: number | null }
 export function linhaMarcada(c: LinhaMarcavel, pelaFila = false): boolean {
   return pelaFila || c.falta_responder === undefined ? !!c.aguardando_resposta : !!c.falta_responder
 }
 export function bolinhaDaLinha(c: LinhaMarcavel, pelaFila = false): number {
   if (pelaFila || c.falta_responder === undefined) return c.pendentes ?? c.nao_lidas ?? 0
+  if (typeof c.numero_duoke === 'number') return Math.max(c.numero_duoke, 0)
   return c.falta_responder ? Math.max(c.pendentes ?? 0, c.nao_lidas ?? 0) : 0
 }
 // O selo de prazo é o da FILA: na linha que o Duoke já dá por respondida (só a

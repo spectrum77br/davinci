@@ -19,7 +19,8 @@ trabalha pelo Duoke:
   - SÓ NOS CANAIS EM QUE O DAVINCI RESPONDE: modo `auto`, `copiloto` ou
     `humano`, com o envio ligado (`atendimento_envio_ativo`). Em `observar`
     (ou com o envio desligado) quem responde é o Duoke: nada muda lá — o
-    detalhe diz `marcar_lida = false`, a tela não chama e a rota recusa
+    detalhe diz `marcar_lida = false`, a tela não chama o /lida (chama o
+    /visto, que só grava o "visto no DaVinci", abaixo) e a rota recusa
     (`canal_em_observacao` / `envio_desligado`).
   - A IA, os crons (leitura, importação, reclamações, automações, Caixa
     Humano) e os robôs NUNCA marcam: nenhum deles chama este módulo, e os
@@ -63,6 +64,45 @@ marcaria), Magalu (o cliente recusa o `read_by` de propósito — liberar é out
 decisão), o carrinho do site, os comentários das redes, o Direct do Instagram
 e as conversas de avaliação e de reclamação (não são chat da plataforma).
 
+VISTO NO DAVINCI (decisão do dono, 15/10/2026: os números da Caixa batem com
+o Duoke, e no Duoke abrir a conversa zera o número dela). Separado do "lida
+na plataforma" acima:
+
+  - `gravar_visto` grava `conversa.visto_em` quando a PESSOA que mexe
+    (`acesso.pode_mexer`) abre a conversa na tela — o mesmo gatilho (1,5 s
+    aberta com a aba visível, uma vez por abertura) — em QUALQUER modo de
+    loja (inclusive `observar`), com o envio ligado ou não, em qualquer
+    canal. NUNCA vai à plataforma: é a marca do DaVinci que o número da Caixa
+    lê (`pendente.nao_lidas_duoke`: só a mensagem do comprador que CHEGOU
+    depois dela conta). Quem só lê nunca grava (a rota dá 403 antes; aqui é
+    o cinto); a IA, os crons e os robôs não chamam.
+  - O QUE grava (15/10/2026, a revisão): ATÉ ONDE A PESSOA VIU, no relógio do
+    DaVinci — a CHEGADA (`created_at`) da mensagem mais nova que a tela
+    mostrava (`visto_ate`: o detalhe manda, a tela devolve no POST). O sync
+    traz a mensagem ~1 min depois de o comprador mandar (mediana de 70 s na
+    Shopee), então o horário da plataforma não serve; e o "agora" do pedido
+    também não: a transação do sync que gravou a mensagem pode ter começado
+    antes da abertura (o `created_at` é o `now()` dela) e terminado depois —
+    a mensagem que a tela não mostrou ficaria para trás. Sem o `visto_ate`
+    (a conversa sem mensagem, a tela antiga), o relógio do banco
+    (`clock_timestamp()`); o `visto_ate` nunca passa dele.
+  - COM A CONVERSA ABERTA (15/10/2026, a revisão: no Duoke, a conversa aberta
+    fica lida): a releitura do detalhe (15 s) que traz mensagem nova — o
+    `visto_ate` andou — com a aba visível faz a tela chamar o /visto de novo
+    (só o /visto, barato; o /lida continua uma vez por abertura).
+  - A tela chama UMA rota por abertura: o POST /conversas/{id}/lida quando o
+    detalhe diz `marcar_lida` (ele grava o visto e marca na plataforma como
+    sempre) e, senão, o POST /conversas/{id}/visto (rota leve: só o visto —
+    a loja em `observar`, o envio desligado, a plataforma sem "lida", nada
+    não lido). A decisão (15/10/2026): uma rota à parte em vez de um "modo"
+    no /lida, para o /lida continuar dizendo 409 quando não marca na
+    plataforma e nada mudar no Duoke por engano.
+  - O /lida grava o visto ANTES de tentar a plataforma: a pessoa abriu, com
+    ou sem a plataforma aceitar (falha, 409 de corrida com a troca de modo).
+  - Idempotente: abrir de novo só anda o carimbo para a frente (nunca para
+    trás, `GREATEST`). O `updated_at` da conversa não muda: é marca de
+    leitura, não mudança da conversa (como a triagem da Caixa Humano).
+
 Texto de comprador nunca vai para o log — só ids, plataforma e o código do erro.
 """
 
@@ -72,11 +112,12 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select, update
+from sqlalchemy import DateTime, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -226,6 +267,66 @@ async def marcar_ao_abrir(
         logger.warning("atendimento_lida_conferir_falhou", erro=type(e).__name__)
         return False
     return True
+
+
+def visto_ate(mensagens: Any) -> datetime | None:
+    """Até onde a tela mostra a conversa: a CHEGADA (`created_at`) da mensagem
+    mais nova entre as do detalhe. PURA. None = sem mensagem.
+
+    Vai no detalhe (`visto_ate`) e volta no POST /visto ou /lida — o
+    `visto_em` que o número da Caixa compara com a chegada da mensagem.
+    """
+    chegadas = [_utc_ou_none(getattr(m, "created_at", None)) for m in mensagens or ()]
+    validas = [c for c in chegadas if c is not None]
+    return max(validas) if validas else None
+
+
+def _utc_ou_none(quando: Any) -> datetime | None:
+    if not isinstance(quando, datetime):
+        return None
+    return quando.replace(tzinfo=UTC) if quando.tzinfo is None else quando.astimezone(UTC)
+
+
+async def gravar_visto(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    user: User | None,
+    ate: datetime | None = None,
+) -> datetime | None:
+    """Grava o "visto no DaVinci" (`visto_em`) e devolve o carimbo.
+
+    A PESSOA que mexe abriu a conversa na tela: em qualquer modo de loja e em
+    qualquer canal, sem ir à plataforma. `ate` = o `visto_ate` do detalhe que
+    a tela mostrava (a chegada da mensagem mais nova); sem ele, o relógio do
+    banco — e nunca depois dele (`LEAST`). Quem só lê (ou ninguém — IA,
+    crons) → `LidaRecusada(RECUSA_SO_LEITURA)`, nada gravado. Idempotente:
+    nunca anda para trás. Commita e relê a conversa.
+    """
+    if user is None or not acesso.pode_mexer(user):
+        raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem mexe no Atendimento marca como vista.")
+    # O relógio do BANCO (o mesmo do `created_at` da mensagem), na hora do
+    # UPDATE — o `now()` seria o começo desta transação.
+    relogio = func.clock_timestamp()
+    ate_utc = _utc_ou_none(ate)
+    marco = (
+        relogio
+        if ate_utc is None
+        else func.least(literal(ate_utc, DateTime(timezone=True)), relogio)
+    )
+    await session.execute(
+        update(AtendimentoConversa)
+        .where(AtendimentoConversa.id == conversa.id)
+        .values(
+            # GREATEST ignora o NULL: a primeira abertura grava o marco.
+            visto_em=func.greatest(AtendimentoConversa.visto_em, marco),
+            # Marca de leitura, não mudança da conversa.
+            updated_at=AtendimentoConversa.updated_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    await session.refresh(conversa)
+    return conversa.visto_em
 
 
 def _chave_trava(conversa_id: Any) -> str:

@@ -30,12 +30,20 @@ e o "Pendente" do Duoke, 15. O que não pode falhar
     número da aba "Falta responder" deixam de fora a avaliação, a
     reclamação, o carrinho e os comentários (a marca da linha fica em
     todas); os números da Caixa (`nao_lidas_duoke`: menu de plataformas,
-    barra de lojas, aba Caixa) são a soma das mensagens não lidas das
+    barra de lojas, aba Caixa) eram, até 15/10, a soma das mensagens não lidas das
     conversas de chat esperando resposta na fila, não fechadas — 1 por
     conversa onde a plataforma não dá o não lido —, Python e SQL gêmeos;
     só conta a conversa que está no "Falta responder" (o não lido do ML não
     zera quando a automática responde: o número não acende sem linha
-    marcada); a Caixa Humano não muda.
+    marcada); a Caixa Humano não muda;
+  • O NÚMERO = O "NÃO LIDA" DO DUOKE (15/10/2026, o dono: "os números da
+    Caixa têm que bater com o Duoke"): nas conversas de chat esperando
+    resposta na fila, com o comprador nas últimas 24 h, as mensagens DELE
+    depois da última resposta de PESSOA da loja ou da última abertura no
+    DaVinci (`visto_em`) — o robô não zera, a pessoa e o "visto" zeram, o
+    não lido da plataforma não entra, fechada/sem fila/fora do chat não
+    contam; Python e SQL gêmeos; o /resumo soma por loja e plataforma, e
+    abrir a conversa (POST /visto) zera o número dela.
 """
 
 from __future__ import annotations
@@ -51,7 +59,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import AtendimentoConversa, AtendimentoMensagem
+from app.models import AtendimentoConversa, AtendimentoMensagem, UserRole
 from app.services.atendimento import gravar, pendente, shopee, tiktok
 from app.services.atendimento import ml as ml_atd
 from app.services.atendimento.constantes import CHAVE_VEZ_DA_LOJA
@@ -389,7 +397,15 @@ async def test_reclamacao_vencida_fica_em_vencidas_e_fora_do_falta_responder(
     assert [i["falta_responder"] for i in itens] == [True]
 
 
-# ─────────────── só o chat e o número do Duoke (14/10/2026) ───────────────
+# ─────────────── só o chat e o número do Duoke (14 e 15/10/2026) ───────────────
+#
+# O número da Caixa = o "não lida" do PRÓPRIO Duoke (15/10/2026): nas
+# conversas de chat esperando resposta com o comprador nas últimas 24 h, as
+# mensagens dele depois da última resposta de PESSOA da loja ou da última vez
+# que alguém abriu a conversa no DaVinci (`visto_em`).
+
+HORA = 60  # minutos
+ATRASO_DO_SYNC = timedelta(minutes=1)
 
 
 async def _mundo_duoke(
@@ -403,74 +419,124 @@ async def _mundo_duoke(
         c[nome] = (await _cena(db, integ, canal, f"{nome_loja}:{nome}", *falas, **campos), esperado)
 
     vez = {CHAVE_VEZ_DA_LOJA: (AGORA - timedelta(minutes=60)).isoformat()}
-    # A ATV no Duoke (14/10 13:47): uma conversa com 4 não lidas + outra com 1.
-    await caso("quatro_nao_lidas", 4, ("cliente", 60), nao_lidas=4)
-    # O menu do robô do Duoke NÃO fecha a vez na fila: as não lidas contam.
-    await caso("uma_e_o_menu", 1, ("cliente", 60), ("loja", 59, MENU_DUOKE), nao_lidas=1)
-    # A equipe leu no Duoke (o não lido zerou): esperando, mas sem número.
-    await caso("lida", 0, ("cliente", 60))
-    # A loja respondeu (a plataforma ainda diz não lida): não espera.
+
+    def visto(minutos: float) -> datetime:
+        """O `visto_em` de quem abriu a conversa no DaVinci há `minutos` (a
+        chegada da mensagem mais nova que a tela mostrava — no fim, todas as
+        mensagens daqui CHEGAM 1 min depois de mandadas: `ATRASO_DO_SYNC`)."""
+        return AGORA - timedelta(minutes=minutos)
+
+    # O comprador escreveu 4 vezes e ninguém respondeu: 4.
+    await caso("quatro", 4, ("cliente", 60), ("cliente", 50), ("cliente", 40), ("cliente", 30))
+    # O ROBÔ NÃO ZERA: o menu do Duoke depois do comprador não é resposta de
+    # pessoa (a Shopee zera o não lido dela; o Duoke continua contando).
+    await caso(
+        "robo_nao_zera",
+        3,
+        ("cliente", 60),
+        ("loja", 59, MENU_DUOKE),
+        ("cliente", 50),
+        ("cliente", 40),
+    )
+    # O robô por ÚLTIMO: para o "Falta responder" (e para o Duoke na lista
+    # "Pendente") respondeu — sai da marca —, mas o número dele continua.
+    await caso(
+        "robo_por_ultimo",
+        2,
+        ("cliente", 60),
+        ("cliente", 55),
+        ("loja", 54, MENU_DUOKE),
+    )
+    # A resposta de PESSOA zera: só o que o comprador mandou depois dela.
+    await caso(
+        "pessoa_zera",
+        2,
+        ("cliente", 90),
+        ("cliente", 80),
+        ("loja", 70),
+        ("cliente", 60),
+        ("cliente", 50),
+    )
+    # A pessoa respondeu por último: não espera resposta.
     await caso("respondida", 0, ("cliente", 60), ("loja", 30), nao_lidas=2)
+    # ABRIR NO DAVINCI ZERA (`visto_em`): só o que chegou depois de abrir.
+    await caso(
+        "visto_zera",
+        1,
+        ("cliente", 90),
+        ("cliente", 80),
+        ("cliente", 30),
+        visto_em=visto(60),
+    )
+    await caso("visto_depois_de_tudo", 0, ("cliente", 60), ("cliente", 50), visto_em=visto(10))
+    # O visto é no relógio do DAVINCI (a CHEGADA): a mensagem mandada ANTES
+    # de abrir (3 min atrás) que o sync trouxe DEPOIS (2 min atrás) a pessoa
+    # não viu — conta (a revisão de 15/10/2026: comparando com o `enviada_em`,
+    # ela sumia do número para sempre). A de 5 min (chegou 4 min atrás), não.
+    await caso(
+        "chegou_depois_de_abrir",
+        1,
+        ("cliente", 5),
+        ("cliente", 3),
+        visto_em=visto(2.5),
+    )
+    # O mais recente entre a resposta de pessoa e a abertura vale.
+    await caso(
+        "pessoa_depois_do_visto",
+        1,
+        ("cliente", 120),
+        ("loja", 80),
+        ("cliente", 60),
+        visto_em=visto(100),
+    )
+    # A janela de 24 h: a última fala do comprador há mais de 24 h, nada; a
+    # última dentro, contam todas as dele desde a resposta (mesmo as de antes).
+    await caso("fora_das_24h", 0, ("cliente", 26 * HORA), ("cliente", 24 * HORA + 30))
+    await caso("dentro_das_24h", 2, ("cliente", 30 * HORA), ("cliente", 23 * HORA))
+    # O não lido da PLATAFORMA não entra mais: lida lá (zero), conta igual.
+    await caso("lida_na_plataforma", 1, ("cliente", 60), nao_lidas=0)
+    await caso("muitas_na_plataforma", 1, ("cliente", 60), nao_lidas=9)
+    # Fechada e "não precisa de resposta": fora. A bloqueada espera alguém.
     await caso("fechada", 0, ("cliente", 60), situacao="fechada", nao_lidas=3)
     await caso("nao_precisa", 0, ("cliente", 60), sem_resposta_necessaria=True, nao_lidas=2)
-    await caso("bloqueada", 2, ("cliente", 60), situacao="bloqueada", nao_lidas=2)
-    # Fora do chat (não está no Duoke): nada, mesmo esperando e não lida.
+    await caso("bloqueada", 2, ("cliente", 60), ("cliente", 50), situacao="bloqueada")
+    # O aviso do sistema não é do comprador (nem resposta).
+    await caso("aviso_do_sistema", 1, ("cliente", 60), ("sistema", 50, JA_SEGUE))
+    # Sem mensagem nenhuma (a Shopee lista com não lida): nada.
+    await caso("sem_mensagem", 0, nao_lidas=5)
+    # Fora do chat (não está no Duoke): nada, mesmo esperando.
     await caso(
-        "avaliacao", 0, ("cliente", 3 * 24 * 60), dados=vez, canal_nome="avaliacao", nao_lidas=1
+        "avaliacao", 0, ("cliente", 3 * 24 * HORA), dados=vez, canal_nome="avaliacao", nao_lidas=1
     )
-    await caso("reclamacao", 0, ("sistema", 60), dados=vez, canal_nome="reclamacao", nao_lidas=1)
+    await caso("reclamacao", 0, ("cliente", 60), dados=vez, canal_nome="reclamacao", nao_lidas=1)
     await caso("carrinho", 0, ("cliente", 60), dados=vez, plataforma="site", canal_nome="carrinho")
     await caso("comentario", 0, ("cliente", 60), plataforma="instagram", canal_nome="comentario")
     # O e-mail da ponte mora na aba E-mail.
     await caso("email_da_ponte", 0, ("cliente", 60), dados={"fonte": "tuta"}, canal_nome="email")
-    # O não lido da plataforma, conversa a conversa: TikTok e ML pós-venda.
-    await caso("tiktok", 3, ("cliente", 60), nao_lidas=3, plataforma="tiktok")
+    # A mesma régua nas outras plataformas do chat.
+    await caso("tiktok", 3, ("cliente", 60), ("cliente", 50), ("cliente", 40), plataforma="tiktok")
+    ml = {"plataforma": "ml", "canal_nome": "pos_venda"}
+    await caso("ml_pos_venda", 1, ("loja", 90), ("cliente", 60), nao_lidas=2, **ml)
+    # A automática do ML 1 min depois do comprador não é resposta de pessoa:
+    # conta, como no Duoke (na janela de 24 h — as de 8 a 25 dias atrás, não).
+    await caso("ml_automatica", 1, ("cliente", 60), ("loja", 59, MENU_DUOKE), nao_lidas=3, **ml)
     await caso(
-        "ml_pos_venda",
-        2,
-        ("loja", 90),
-        ("cliente", 60),
-        nao_lidas=2,
-        plataforma="ml",
-        canal_nome="pos_venda",
-    )
-    await caso(
-        "ml_pos_venda_lida",
+        "ml_automatica_velha",
         0,
-        ("loja", 90),
-        ("cliente", 60),
-        plataforma="ml",
-        canal_nome="pos_venda",
+        ("cliente", 8 * 24 * HORA),
+        ("loja", 8 * 24 * HORA - 1, MENU_DUOKE),
+        nao_lidas=3,
+        **ml,
     )
-    # O não lido do ML NÃO zera quando a loja responde, e a automática não
-    # fecha a fila: a conversa respondida pela automática 1 min depois do
-    # comprador ficava no número sem linha marcada (Marquezini ML 14, medido
-    # 14/10/2026 17:21). O número só conta o que está no "Falta responder".
-    ml_auto = {"plataforma": "ml", "canal_nome": "pos_venda", "nao_lidas": 3}
-    await caso("ml_automatica", 0, ("cliente", 60), ("loja", 59, MENU_DUOKE), **ml_auto)
-    await caso(
-        "ml_bloqueada_automatica",
-        0,
-        ("cliente", 60),
-        ("loja", 59, MENU_DUOKE),
-        situacao="bloqueada",
-        **ml_auto,
-    )
-    # A bloqueada com o comprador por último está no "Falta responder" (a
-    # conversa espera alguém): conta, como a linha marcada.
-    await caso(
-        "ml_bloqueada",
-        2,
-        ("loja", 90),
-        ("cliente", 60),
-        situacao="bloqueada",
-        nao_lidas=2,
-        plataforma="ml",
-        canal_nome="pos_venda",
-    )
-    # Onde a plataforma não dá o não lido: 1 por conversa esperando resposta.
     await caso("ml_pergunta", 1, ("cliente", 60), plataforma="ml", canal_nome="pergunta")
-    await caso("amazon_email", 1, ("cliente", 60), plataforma="amazon", canal_nome="email")
+    await caso(
+        "amazon_email",
+        2,
+        ("cliente", 60),
+        ("cliente", 50),
+        plataforma="amazon",
+        canal_nome="email",
+    )
     await caso(
         "amazon_respondida",
         0,
@@ -479,26 +545,52 @@ async def _mundo_duoke(
         plataforma="amazon",
         canal_nome="email",
     )
-    await caso("magalu_sac", 1, ("sistema", 60), dados=vez, plataforma="magalu", canal_nome="sac")
+    # O SAC da Magalu: a vez é da plataforma (o aviso do mediador) — só a
+    # mensagem do comprador soma.
+    await caso("magalu_sac", 0, ("sistema", 60), dados=vez, plataforma="magalu", canal_nome="sac")
+    # A que falhou não saiu (não zera) e a nota interna não é mensagem.
+    falhou = await _cena(db, integ, canal, f"{nome_loja}:falhou_e_nota", ("cliente", 60))
+    await _nossa(db, falhou, 40, status="falhou")
+    await _nossa(db, falhou, 30, origem="davinci_nota", tipo="nota", texto="nota", autor="equipe")
+    c["falhou_e_nota"] = (falhou, 1)
+    # O e-mail da ponte gravado DENTRO do chat (antes de 13/10/2026) não aparece nele: não conta.
+    email = await _cena(db, integ, canal, f"{nome_loja}:email_no_chat", ("cliente", 60))
+    await _nossa(db, email, 30, autor="cliente", origem="cliente", payload={"mail": {"id": "x"}})
+    c["email_no_chat"] = (email, 1)
+    # O sync traz a mensagem ~1 min depois de mandada (mediana medida em
+    # produção, 15/10/2026): a CHEGADA (`created_at`) de cada mensagem daqui.
+    await db.execute(
+        update(AtendimentoMensagem)
+        .where(AtendimentoMensagem.conversa_id.in_([conversa.id for conversa, _ in c.values()]))
+        .values(created_at=AtendimentoMensagem.enviada_em + ATRASO_DO_SYNC)
+    )
+    await db.commit()
     return c
+
+
+async def _mensagens_de(db, conversa) -> list[AtendimentoMensagem]:
+    return list(
+        (
+            await db.execute(
+                select(AtendimentoMensagem)
+                .where(AtendimentoMensagem.conversa_id == conversa.id)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 async def test_numero_do_duoke_python_e_sql_sao_gemeos(db, make_user):
     mundo = await _mundo_duoke(db, make_user)
     for nome, (conversa, esperado) in mundo.items():
         await db.refresh(conversa)
-        assert pendente.nao_lidas_duoke(conversa) == esperado, nome
-        # O que conta no número está no "Falta responder" (a linha marcada).
-        if esperado:
-            assert pendente.falta_responder_no_chat(conversa), nome
-    # A automática do ML não fecha a FILA — é o "Falta responder" que tira.
-    for nome in ("ml_automatica", "ml_bloqueada_automatica"):
-        c = mundo[nome][0]
-        assert c.aguardando_resposta and c.nao_lidas == 3, nome
-        assert not pendente.falta_responder(c), nome
+        msgs = await _mensagens_de(db, conversa)
+        assert pendente.nao_lidas_duoke(conversa, msgs, agora=AGORA) == esperado, nome
     linhas = (
         await db.execute(
-            select(AtendimentoConversa.externo_id, pendente.nao_lidas_duoke_sql()).where(
+            select(AtendimentoConversa.externo_id, pendente.nao_lidas_duoke_sql(agora=AGORA)).where(
                 AtendimentoConversa.externo_id.like("atv:%")
             )
         )
@@ -506,25 +598,82 @@ async def test_numero_do_duoke_python_e_sql_sao_gemeos(db, make_user):
     assert {e.removeprefix("atv:"): n for e, n in linhas} == {
         nome: esperado for nome, (_, esperado) in mundo.items()
     }
-    # O "não lido" de quem não espera resposta não vale nada — nem a fechada
-    # com o carimbo da fila de antes de fechar (o `gravar` zera; aqui, direto
-    # no banco), nem a do SAC, em que o "Falta responder" é a própria fila.
-    for nome in ("fechada", "magalu_sac"):
-        c = mundo[nome][0]
+    # O robô NÃO zera e a fila continua igual (o menu não fecha a vez); com
+    # ele por último, a linha sai do "Falta responder" e o número fica.
+    robo = mundo["robo_por_ultimo"][0]
+    assert robo.aguardando_resposta and robo.ultima_da_loja_em is None
+    assert not pendente.falta_responder(robo), "para o Duoke, o robô respondeu: sem a marca"
+    # A janela anda com o relógio: daqui a 24 h, o que hoje conta sai.
+    depois = AGORA + pendente.JANELA_DO_NUMERO
+    quatro = mundo["quatro"][0]
+    assert pendente.nao_lidas_duoke(quatro, await _mensagens_de(db, quatro), agora=depois) == 0
+    n = (
         await db.execute(
-            update(AtendimentoConversa)
-            .where(AtendimentoConversa.id == c.id)
-            .values(situacao="fechada", aguardando_resposta=True, nao_lidas=3)
-        )
-        await db.refresh(c)
-        assert pendente.nao_lidas_duoke(c) == 0, nome
-        n = (
-            await db.execute(
-                select(pendente.nao_lidas_duoke_sql()).where(AtendimentoConversa.id == c.id)
+            select(pendente.nao_lidas_duoke_sql(agora=depois)).where(
+                AtendimentoConversa.id == quatro.id
             )
-        ).scalar_one()
-        assert n == 0, nome
+        )
+    ).scalar_one()
+    assert n == 0
+    # Só as mensagens DA conversa contam (a lista de outra não soma).
+    outra = mundo["tiktok"][0]
+    assert pendente.nao_lidas_duoke(quatro, await _mensagens_de(db, outra), agora=AGORA) == 0
+    # O "esperando" que não vale: a fechada com o carimbo da fila de antes de
+    # fechar (o `gravar` zera; aqui, direto no banco).
+    fechada = mundo["fechada"][0]
+    await db.execute(
+        update(AtendimentoConversa)
+        .where(AtendimentoConversa.id == fechada.id)
+        .values(situacao="fechada", aguardando_resposta=True)
+    )
+    await db.refresh(fechada)
+    assert pendente.nao_lidas_duoke(fechada, await _mensagens_de(db, fechada), agora=AGORA) == 0
+    n = (
+        await db.execute(
+            select(pendente.nao_lidas_duoke_sql(agora=AGORA)).where(
+                AtendimentoConversa.id == fechada.id
+            )
+        )
+    ).scalar_one()
+    assert n == 0
     await db.rollback()
+
+
+def test_mensagem_no_numero_dois_relogios():
+    """Os dois marcos: a resposta de PESSOA no relógio da plataforma
+    (`enviada_em`) e o "visto no DaVinci" no relógio do DaVinci (a CHEGADA,
+    `created_at` — o sync traz a mensagem ~1 min depois)."""
+    from types import SimpleNamespace
+
+    ns = SimpleNamespace
+    t = datetime(2026, 10, 15, 7, 32, tzinfo=UTC)
+    m = timedelta(minutes=1)
+
+    def msg(enviada, chegou, autor="cliente", **extra):
+        return ns(autor=autor, enviada_em=enviada, created_at=chegou, payload={}, **extra)
+
+    assert pendente.marcos_do_numero(ns(ultima_da_loja_em=None, visto_em=None)) == (None, None)
+    sem_fuso = pendente.marcos_do_numero(ns(ultima_da_loja_em=t.replace(tzinfo=None), visto_em=t))
+    assert sem_fuso == (t, t), "sem fuso (o teste de mesa): UTC"
+    # Sem marco: toda mensagem do comprador conta; a da loja e a do sistema, não.
+    assert pendente.mensagem_no_numero(msg(t, t + m))
+    assert not pendente.mensagem_no_numero(msg(t, t + m, autor="loja"))
+    assert not pendente.mensagem_no_numero(msg(t, t + m, autor="sistema"))
+    # A resposta de pessoa às 07:32: a mandada depois conta, mesmo chegando tarde.
+    assert pendente.mensagem_no_numero(msg(t + m, t + 3 * m), pessoa=t)
+    assert not pendente.mensagem_no_numero(msg(t - m, t + 3 * m), pessoa=t)
+    # Sem `enviada_em`, a chegada vale para o lado da pessoa (como a fila).
+    assert pendente.mensagem_no_numero(msg(None, t + m), pessoa=t)
+    # O visto às 07:32: a que CHEGOU depois conta, mesmo mandada antes (a
+    # pessoa não a viu); a que chegou antes, não — mesmo mandada "depois".
+    assert pendente.mensagem_no_numero(msg(t - m, t + m), visto=t)
+    assert not pendente.mensagem_no_numero(msg(t + m, t - m), visto=t)
+    # A chegada igual ao visto: a tela mostrou (a mesma transação do sync).
+    assert not pendente.mensagem_no_numero(msg(t - m, t), visto=t)
+    # Os dois juntos: tem de passar dos dois.
+    assert pendente.mensagem_no_numero(msg(t + m, t + 2 * m), pessoa=t, visto=t + m)
+    assert not pendente.mensagem_no_numero(msg(t - m, t + 2 * m), pessoa=t, visto=t + m)
+    assert pendente.JANELA_DO_NUMERO == timedelta(hours=24)
 
 
 async def test_falta_responder_no_chat_python_e_sql_sao_gemeas(db, make_user):
@@ -553,10 +702,10 @@ async def test_falta_responder_no_chat_python_e_sql_sao_gemeas(db, make_user):
 
 async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, auth_as):
     """O /resumo: o número do Duoke por plataforma, por loja e o total (a aba
-    Caixa); o "Falta responder" (`aguardando`) só no chat; a Caixa Humano e o
-    não lido da plataforma (`nao_lidas`) como antes."""
+    Caixa); o "Falta responder" (`aguardando`) só no chat e pela régua dele;
+    a Caixa Humano e o não lido da plataforma (`nao_lidas`) como antes."""
     mundo = await _mundo_duoke(db, make_user, "atv")
-    # Outra loja Shopee: a do Aguiar, 1 = 1 no Duoke.
+    # Outra loja Shopee: o Aguiar, 1 mensagem do comprador.
     aguiar, canal_ag = await _loja(db, await make_user(), "aguiar")
     await _cena(db, aguiar, canal_ag, "aguiar:um", ("cliente", 30), nao_lidas=1)
     auth_as(await make_user(permissions=PODE_TUDO))
@@ -569,51 +718,169 @@ async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, 
         soma[c.plataforma] = soma.get(c.plataforma, 0) + n
         falta[c.plataforma] = falta.get(c.plataforma, 0) + pendente.falta_responder_no_chat(c)
     assert soma == {
-        "shopee": 4 + 1 + 2 + 1,
+        # quatro 4 + robô 3 + robô por último 2 + pessoa 2 + visto 1 + chegou
+        # depois de abrir 1 + pessoa depois do visto 1 + dentro das 24 h 2 +
+        # lida 1 + muitas 1 + bloqueada 2 + aviso 1 + falhou/nota 1 + e-mail
+        # no chat 1 — e o Aguiar, 1.
+        "shopee": 4 + 3 + 2 + 2 + 1 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 1 + 1 + 1,
         "tiktok": 3,
-        # O pós-venda com o comprador por último e a bloqueada; a pergunta.
-        # As respondidas pela automática (3 não lidas cada) ficam de fora.
-        "ml": 2 + 2 + 1,
-        "amazon": 1,
-        "magalu": 1,
+        # O pós-venda com o comprador por último, a automática de agora e a pergunta.
+        "ml": 1 + 1 + 1,
+        "amazon": 2,
+        "magalu": 0,
         "site": 0,
         "instagram": 0,
     }
     for plat, n in soma.items():
         assert plats[plat]["nao_lidas_duoke"] == n, plat
         assert plats[plat]["aguardando"] == falta[plat], plat
-    assert r["nao_lidas_duoke"] == sum(soma.values()) == 18
-    # Por loja: a ATV soma 4 + 1 + 2 (a bloqueada) na Shopee; o Aguiar, 1.
+    assert r["nao_lidas_duoke"] == sum(soma.values()) == 32
     lojas = {(lj["plataforma"], lj["conta"]): lj for lj in r["lojas"]}
-    assert lojas[("shopee", "atv")]["nao_lidas_duoke"] == 7
+    assert lojas[("shopee", "atv")]["nao_lidas_duoke"] == soma["shopee"] - 1 == 23
     assert lojas[("shopee", "aguiar")]["nao_lidas_duoke"] == 1
     assert lojas[("tiktok", "atv")]["nao_lidas_duoke"] == 3
-    assert lojas[("ml", "atv")]["nao_lidas_duoke"] == 5
-    # A avaliação e a reclamação esperando (e marcadas) NÃO entram no
-    # "Falta responder" da ATV: o chat que falta são 5 conversas.
-    for nome in ("avaliacao", "reclamacao"):
-        c = mundo[nome][0]
-        assert c.aguardando_resposta and pendente.falta_responder(c), nome
-    atv = lojas[("shopee", "atv")]
-    assert atv["aguardando"] == falta["shopee"] - 1 == 5
-    # O não lido da plataforma (`nao_lidas`) continua a soma de tudo da loja na Caixa.
-    assert atv["nao_lidas"] == sum(
-        c.nao_lidas for n, (c, _) in mundo.items() if c.plataforma == "shopee"
-    )
+    assert lojas[("ml", "atv")]["nao_lidas_duoke"] == 3
+    # O número NÃO depende da marca do "Falta responder": a conversa em que o
+    # robô respondeu depois do comprador está no número e fora do filtro.
     itens = (
         await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 100})
     ).json()["itens"]
     nomes = {str(c.id): n for n, (c, _) in mundo.items()}
     vistos = {nomes.get(i["id"], "outra") for i in itens}
+    assert "robo_por_ultimo" not in vistos and "ml_automatica" not in vistos
+    assert "robo_nao_zera" in vistos, "o comprador escreveu depois do robô"
     assert not vistos & {"avaliacao", "reclamacao", "carrinho", "comentario", "email_da_ponte"}
-    assert {"quatro_nao_lidas", "ml_pergunta", "amazon_email", "magalu_sac"} <= vistos
-    # Todo ponto do número está numa linha do "Falta responder", marcada.
-    contadas = {n for n, (_, e) in mundo.items() if e}
-    assert contadas <= vistos
-    assert all(i["falta_responder"] for i in itens if nomes.get(i["id"]) in contadas)
-    assert not {"ml_automatica", "ml_bloqueada_automatica"} & vistos
+    # O "Falta responder" segue a régua dele (a)/(b): o visto não tira ninguém.
+    assert {"visto_depois_de_tudo", "quatro", "ml_pergunta", "amazon_email"} <= vistos
+    # O não lido da plataforma (`nao_lidas`) continua a soma de tudo da loja na Caixa.
+    atv = lojas[("shopee", "atv")]
+    assert atv["nao_lidas"] == sum(
+        c.nao_lidas for n, (c, _) in mundo.items() if c.plataforma == "shopee"
+    )
     # A Caixa Humano não muda (as lojas daqui estão em Observar: nada nela).
     assert r["humano"] == sum(p["humano"] for p in r["plataformas"]) == 0
+
+
+async def test_abrir_no_davinci_zera_o_numero_da_conversa(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """Como no Duoke: a pessoa que mexe abre a conversa (POST /visto, a loja em
+    Observar, com o `visto_ate` do detalhe) e o número dela zera no /resumo e
+    na linha; o que CHEGOU depois conta — a mensagem que o comprador mandou
+    antes de abrir e o sync trouxe depois (a revisão de 15/10/2026: sumia), e a
+    que chegou entre a leitura do detalhe e o POST (a tela não mostrou). O robô
+    depois disso não zera nada."""
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "quem.mexe@davinci-test.com")
+    integ, canal = await _loja(db, await make_user(), "kia")
+    conversa = await _cena(db, integ, canal, "kia:9", *[("cliente", 90 - i) for i in range(9)])
+    pessoa = await make_user(email="quem.mexe@davinci-test.com", role=UserRole.ADMIN)
+    auth_as(pessoa)
+    cid = str(conversa.id)
+
+    async def numero() -> int:
+        r = (await client.get(f"{URL}/resumo")).json()
+        (kia,) = [lj for lj in r["lojas"] if lj["conta"] == "kia"]
+        return kia["nao_lidas_duoke"]
+
+    async def linha() -> int:
+        itens = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
+        (item,) = [i for i in itens if i["id"] == cid]
+        return item["numero_duoke"]
+
+    async def chega(externo: str, autor: str = "cliente", segundos: int = 0) -> None:
+        """O sync grava uma mensagem mandada há `segundos` (a transação começa agora)."""
+        await db.commit()
+        await gravar.gravar_mensagem(
+            db,
+            conversa,
+            externo_id=externo,
+            autor=autor,
+            texto=MENU_DUOKE if autor == "loja" else "oi?",
+            enviada_em=datetime.now(UTC) - timedelta(seconds=segundos),
+        )
+        await db.commit()
+
+    assert await numero() == 9, "a Kia com 9 numa conversa, como no Duoke"
+    assert await linha() == 9, "e a linha mostra os 9"
+    d = (await client.get(f"{URL}/conversas/{cid}")).json()
+    assert d["conversa"]["numero_duoke"] == 9 and d["visto_ate"]
+    r = await client.post(f"{URL}/conversas/{cid}/visto", json={"ate": d["visto_ate"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["visto_em"] and r.json()["conversa"]["numero_duoke"] == 0
+    assert await numero() == 0 and await linha() == 0
+    # Mandada 60 s ANTES de abrir, trazida pelo sync DEPOIS: a pessoa não viu.
+    await chega("kia:9:atrasada", segundos=60)
+    assert await numero() == 1 and await linha() == 1
+    # A releitura do detalhe mostra a atrasada (`visto_ate` andou); antes do
+    # POST, chega mais uma: a tela não a mostrou — continua contando.
+    d2 = (await client.get(f"{URL}/conversas/{cid}")).json()
+    assert datetime.fromisoformat(d2["visto_ate"]) > datetime.fromisoformat(d["visto_ate"])
+    await chega("kia:9:corrida")
+    r = await client.post(f"{URL}/conversas/{cid}/visto", json={"ate": d2["visto_ate"]})
+    assert r.status_code == 200
+    assert await numero() == 1 and await linha() == 1
+    # O robô respondeu: não zera.
+    await chega("kia:9:menu", autor="loja")
+    assert await numero() == 1
+
+
+async def test_a_linha_mostra_o_numero_da_conversa(client, db, make_user, auth_as, monkeypatch):
+    """A bolinha da linha na Caixa (`numero_duoke`, 15/10/2026, o Eduardo: "1
+    mensagem na kia e nem mostra dessa conversa"): a mesma régua do número da
+    loja, com ou sem a marca do "Falta responder" — a soma das linhas de uma
+    loja é o número dela. A conversa com o robô por último (fora do "Falta
+    responder") mostra o número; a aberta no DaVinci fica marcada, sem número.
+    Fora do chat, a linha não tem número (None: a bolinha de antes)."""
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "quem.mexe@davinci-test.com")
+    integ, canal = await _loja(db, await make_user(), "kia")
+    robo = await _cena(
+        db,
+        integ,
+        canal,
+        "kia:robo",
+        ("cliente", 30),
+        ("cliente", 20),
+        ("cliente", 10),
+        ("loja", 9, MENU_DUOKE),
+    )
+    aberta = await _cena(
+        db, integ, canal, "kia:aberta", ("cliente", 30), ("cliente", 20), ("cliente", 10)
+    )
+    vez = {CHAVE_VEZ_DA_LOJA: (AGORA - timedelta(minutes=60)).isoformat()}
+    avaliacao = await _cena(
+        db, integ, canal, "kia:avaliacao", ("cliente", 60), dados=vez, canal_nome="avaliacao"
+    )
+    auth_as(await make_user(email="quem.mexe@davinci-test.com", role=UserRole.ADMIN))
+
+    async def ver() -> tuple[int, dict[str, dict]]:
+        r = (await client.get(f"{URL}/resumo")).json()
+        (kia,) = [lj for lj in r["lojas"] if lj["conta"] == "kia"]
+        itens = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
+        return kia["nao_lidas_duoke"], {i["id"]: i for i in itens}
+
+    n, itens = await ver()
+    linha_robo, linha_aberta = itens[str(robo.id)], itens[str(aberta.id)]
+    assert n == 6
+    # O robô por último: fora do "Falta responder" (sem negrito), com o número.
+    assert linha_robo["falta_responder"] is False and linha_robo["numero_duoke"] == 3
+    assert linha_aberta["falta_responder"] is True and linha_aberta["numero_duoke"] == 3
+    # Fora do chat: sem número (a tela usa a bolinha de antes); a marca fica.
+    linha_avaliacao = itens[str(avaliacao.id)]
+    assert linha_avaliacao["numero_duoke"] is None and linha_avaliacao["falta_responder"] is True
+    assert n == sum(i["numero_duoke"] or 0 for i in itens.values())
+    # Abriu a conversa: o número dela zera na loja e na linha; a marca fica.
+    r = await client.post(f"{URL}/conversas/{aberta.id}/visto")
+    assert r.status_code == 200
+    n, itens = await ver()
+    assert n == 3
+    assert itens[str(aberta.id)]["numero_duoke"] == 0
+    assert itens[str(aberta.id)]["falta_responder"] is True, "o negrito é do Falta responder"
+    assert n == sum(i["numero_duoke"] or 0 for i in itens.values())
+    # O detalhe e a resposta das ações levam o mesmo número.
+    d = (await client.get(f"{URL}/conversas/{robo.id}")).json()
+    assert d["conversa"]["numero_duoke"] == 3
+    d = (await client.get(f"{URL}/conversas/{avaliacao.id}")).json()
+    assert d["conversa"]["numero_duoke"] is None
 
 
 # ─────────────── a ordem da lista "Falta responder" ───────────────

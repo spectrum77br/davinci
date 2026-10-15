@@ -192,6 +192,7 @@ def _resumo(
     da_loja: datetime | None,
     ultima: DmMensagem | None,
     atribuido_nome: str | None,
+    agora: datetime | None = None,
 ) -> dict:
     do_cliente, da_loja = _utc(do_cliente), _utc(da_loja)
     silenciada = conversa.status == CONVERSA_SILENCIADA
@@ -231,6 +232,14 @@ def _resumo(
         "nao_lidas": 0,
         # O Direct tem a régua dele (só leitura): o "Falta responder" é a fila.
         "falta_responder": aguardando,
+        # O número da linha na Caixa (15/10/2026, a bolinha): o mesmo 1 que
+        # ela soma no número da conta (`no_numero_do_duoke`: esperando DENTRO
+        # da janela de 24 h da Meta).
+        "numero_duoke": int(
+            aguardando
+            and do_cliente is not None
+            and do_cliente >= (_utc(agora) or datetime.now(UTC)) - JANELA
+        ),
         "tem_rascunho": False,
         "atribuido_a": conversa.assumido_por,
         "atribuido_a_nome": atribuido_nome,
@@ -326,6 +335,7 @@ async def listar_conversas(
             da_loja=da_loja,
             ultima=ultimas.get(c.id),
             atribuido_nome=nomes.get(c.assumido_por),
+            agora=agora,
         )
         for c, em, do_cliente, da_loja in linhas
     ]

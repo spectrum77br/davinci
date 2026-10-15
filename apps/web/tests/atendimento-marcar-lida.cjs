@@ -8,6 +8,14 @@
 //  - uma vez por abertura (o polling de 15 s e uma falha não fazem chamar de novo).
 // A regra do servidor está em apps/api/app/services/atendimento/lida.py, testada em
 // apps/api/tests/test_atendimento_lida.py.
+// VISTO NO DAVINCI (15/10/2026, o dono: os números da Caixa batem com o Duoke, e lá abrir a
+// conversa zera o número dela): o MESMO gatilho chama, para quem mexe, o POST /visto quando o
+// detalhe NÃO diz `marcar_lida` — inclusive com a loja em Observar —, uma chamada por abertura
+// (`rotaAoAbrir`: /lida ou /visto). O /visto só grava `visto_em` (nunca vai à plataforma); a
+// linha recebe o `visto_em` e a página relê os números. O POST leva `{ ate }` = o `visto_ate`
+// do detalhe (até onde a tela mostrou) e, COM A CONVERSA ABERTA, cada releitura que traz
+// mensagem nova (o `visto_ate` andou) chama o /visto de novo (`rever`, a revisão de 15/10/2026:
+// no Duoke a conversa aberta fica lida) — o /lida continua uma vez por abertura.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -89,27 +97,43 @@ function det(id, extra = {}) {
   assert.equal(L.querMarcarLida({ conversa: { id: 'a', nao_lidas: 0 }, marcar_lida: true }, true), false)
   assert.equal(L.querMarcarLida({ conversa: { id: 'a' }, marcar_lida: true }, true), true)
   assert.equal(L.querMarcarLida(null, true), false)
+  // O visto (15/10/2026): quem mexe, em qualquer modo — só não o Direct (`ig:`) e quem só lê.
+  assert.equal(L.querMarcarVisto(det('a', { marcar_lida: false }), true), true)
+  assert.equal(L.querMarcarVisto(det('a'), false), false)
+  assert.equal(L.querMarcarVisto(det('ig:1', { marcar_lida: false }), true), false)
+  assert.equal(L.querMarcarVisto(null, true), false)
+  // Uma rota por abertura: o /lida (que grava o visto também) ou o /visto.
+  assert.equal(L.rotaAoAbrir(det('a'), true), 'lida')
+  assert.equal(L.rotaAoAbrir(det('a', { marcar_lida: false }), true), 'visto', 'Observar: só o visto')
+  assert.equal(L.rotaAoAbrir({ conversa: { id: 'a', nao_lidas: 0 }, marcar_lida: true }, true), 'visto', 'já lida: só o visto')
+  assert.equal(L.rotaAoAbrir(det('a'), false), null, 'quem só lê: nada')
+  assert.equal(L.rotaAoAbrir(det('ig:1', { marcar_lida: false }), true), null)
 }
 
 function marcador(extra = {}) {
   const rel = relogioFalso()
   const chamadas = []
-  const estado = { atual: null, visivel: true, falhar: false }
+  const revistas = []
+  const estado = { atual: null, visivel: true, falhar: false, falharRever: false }
   const m = L.criarMarcadorDeLida({
     marcar: async (id) => {
       chamadas.push(id)
       if (estado.falhar) throw new Error('409')
+    },
+    rever: async (id) => {
+      revistas.push(id)
+      if (estado.falharRever) throw new Error('500')
     },
     atual: () => estado.atual,
     visivel: () => estado.visivel,
     relogio: rel,
     ...extra,
   })
-  const abrir = (id, quer = true) => {
+  const abrir = (id, quer = true, ate) => {
     estado.atual = id
-    m.abrir(id, quer)
+    m.abrir(id, quer, ate)
   }
-  return { m, rel, chamadas, estado, abrir }
+  return { m, rel, chamadas, revistas, estado, abrir }
 }
 
 // ───────────────────────── chama ao abrir, DEPOIS do atraso
@@ -226,19 +250,107 @@ function marcador(extra = {}) {
     assert.deepEqual(chamadas, ['c1'])
   }
 
+  // COM A CONVERSA ABERTA (15/10/2026, a revisão): a releitura que traz mensagem nova (o
+  // `visto_ate` andou) grava o visto de novo — só o `rever` (o /visto), nunca outro `marcar`.
+  {
+    const { m, rel, chamadas, revistas, estado, abrir } = marcador()
+    abrir('c1', true, 'A')
+    // Antes da abertura contar (1,5 s), a mensagem nova vai junto no primeiro POST.
+    rel.avancar(700)
+    abrir('c1', true, 'B')
+    assert.deepEqual(revistas, [])
+    rel.avancar(800)
+    await tique()
+    assert.deepEqual(chamadas, ['c1'])
+    assert.equal(m.estado().ateGravado, 'B')
+    // A releitura sem nada novo: nada.
+    abrir('c1', true, 'B')
+    await tique()
+    assert.deepEqual(revistas, [])
+    // Mensagem nova na tela: o /visto de novo, na hora (a pessoa está vendo).
+    abrir('c1', true, 'C')
+    await tique()
+    assert.deepEqual(revistas, ['c1'])
+    abrir('c1', true, 'C')
+    abrir('c1', true, 'D')
+    await tique()
+    assert.deepEqual(revistas, ['c1', 'c1'])
+    assert.deepEqual(chamadas, ['c1'], 'o /lida continua uma vez por abertura')
+    // Aba escondida: a mensagem nova espera a volta da aba.
+    estado.visivel = false
+    abrir('c1', true, 'E')
+    await tique()
+    assert.equal(revistas.length, 2)
+    estado.visivel = true
+    m.retomar()
+    await tique()
+    assert.equal(revistas.length, 3)
+    // Falhou: a próxima releitura tenta de novo (com o mesmo `visto_ate`).
+    estado.falharRever = true
+    abrir('c1', true, 'F')
+    await tique()
+    await tique()
+    assert.equal(revistas.length, 4)
+    estado.falharRever = false
+    abrir('c1', true, 'F')
+    await tique()
+    assert.equal(revistas.length, 5)
+    abrir('c1', true, 'F')
+    await tique()
+    assert.equal(revistas.length, 5)
+    // Outra conversa: começa do zero (a abertura dela, depois do atraso).
+    abrir('c2', true, 'G')
+    await tique()
+    assert.equal(revistas.length, 5)
+    rel.avancar(1500)
+    await tique()
+    assert.deepEqual(chamadas, ['c1', 'c2'])
+  }
+
+  // A demonstração da revisão (rev-visto-aberta.cjs): aberta, 2 releituras com mensagem nova
+  // → 1 POST da abertura + 2 do `rever` (antes: 1 só, e as 2 mensagens vistas contavam).
+  {
+    const { rel, chamadas, revistas, abrir } = marcador()
+    const det2 = (n, ate) => ({ conversa: { id: 'c1', nao_lidas: n }, marcar_lida: false, visto_ate: ate })
+    const quer = (d) => L.rotaAoAbrir(d, true) !== null
+    abrir('c1', quer(det2(0, 't0')), 't0')
+    rel.avancar(1500)
+    await tique()
+    rel.avancar(15_000)
+    abrir('c1', quer(det2(2, 't1')), 't1')
+    rel.avancar(30_000)
+    abrir('c1', quer(det2(3, 't2')), 't2')
+    await tique()
+    assert.equal(chamadas.length + revistas.length, 3)
+  }
+
+  // Quem só lê (`quer` falso): nem a abertura, nem o `rever`.
+  {
+    const { rel, chamadas, revistas, abrir } = marcador()
+    abrir('c1', false, 'A')
+    rel.avancar(5000)
+    abrir('c1', false, 'B')
+    await tique()
+    assert.deepEqual([chamadas, revistas], [[], []])
+  }
+
   // ───────────────────────── a tela: o bloco do AtendimentoConversa rodando de verdade
   const conversaSfc = sfc('../components/AtendimentoConversa.vue')
   const setup = conversaSfc.descriptor.scriptSetup.content
-  assert.match(setup, /^import \{ criarMarcadorDeLida, querMarcarLida \} from '~\/lib\/atendimentoLida'$/m)
+  assert.match(setup, /^import \{ criarMarcadorDeLida, rotaAoAbrir \} from '~\/lib\/atendimentoLida'$/m)
   const ini = setup.indexOf('// ─── marcar como lida ao abrir (14/10/2026)')
   const fim = setup.indexOf('// ─── abas (RF2)', ini)
   assert.ok(ini > 0 && fim > ini, 'o bloco da tela existe')
   const bloco = setup.slice(ini, fim)
   // Quem só lê: o `canEdit` (mexe + edit), o mesmo das outras ações de mexer.
-  assert.match(bloco, /querMarcarLida\(d, props\.canEdit\)/)
-  assert.match(bloco, /`\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/lida`, \{ method: 'POST' \}/)
+  assert.match(bloco, /rotaAoAbrir\(d, props\.canEdit\) !== null/)
+  assert.match(bloco, /rotaAoAbrir\(aberto, props\.canEdit\)/)
+  assert.match(bloco, /`\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/\$\{rota\}`, \{ method: 'POST', body: \{ ate \} \}/)
+  // A releitura com mensagem nova: só o /visto.
+  assert.match(bloco, /rever: \(id\) => gravarVisto\(id, 'visto'\)/)
+  assert.match(bloco, /marcadorLida\.abrir\(d\.conversa\.id, rotaAoAbrir\(d, props\.canEdit\) !== null, d\.visto_ate \?\? null\)/)
 
-  async function tela({ canEdit = true, marcar_lida = true, respostaFalha = false } = {}) {
+  async function tela({ canEdit = true, marcar_lida = true, respostaFalha = false, naoMarcou = false } = {}) {
     const rel = relogioFalso()
     const Lt = loadLib('../lib/atendimentoLida.ts', {
       setTimeout: (fn, ms) => rel.agendar(fn, ms),
@@ -251,24 +363,31 @@ function marcador(extra = {}) {
     const doc = { visibilityState: 'visible', ouvintes: [], addEventListener(_e, f) { this.ouvintes.push(f) }, removeEventListener(_e, f) { this.ouvintes = this.ouvintes.filter((x) => x !== f) } }
     const props = Vue.reactive({ conversaId: 'c1', canEdit, ativa: true })
     const detalhe = Vue.ref(null)
+    const VISTO = '2026-10-15T10:00:00+00:00'
+    const corpos = []
     const apiFalsa = async (url, opts) => {
       posts.push([url, opts && opts.method])
+      corpos.push(opts && opts.body)
       if (respostaFalha) throw new Error('500')
-      return { marcada: true, motivo: null, aviso: null, conversa: { id: 'c1', nao_lidas: 0, plataforma: 'shopee' } }
+      const id = url.split('/')[4]
+      if (url.endsWith('/visto')) return { visto_em: VISTO, conversa: { id, nao_lidas: 2, plataforma: 'shopee', visto_em: VISTO } }
+      // A plataforma recusou: o /lida responde 200 sem marcar, com o visto gravado.
+      if (naoMarcou) return { marcada: false, motivo: 'plataforma_falhou', aviso: 'x', conversa: { id, nao_lidas: 2, plataforma: 'shopee', visto_em: VISTO } }
+      return { marcada: true, motivo: null, aviso: null, conversa: { id, nao_lidas: 0, plataforma: 'shopee', visto_em: VISTO } }
     }
     const js = transpile(bloco.replace(/^type LidaResposta = .*$/m, ''))
     const rodar = new Function(
-      'criarMarcadorDeLida', 'querMarcarLida', 'props', 'detalhe', 'api', 'emit', 'watch', 'onMounted', 'onBeforeUnmount', 'document',
+      'criarMarcadorDeLida', 'rotaAoAbrir', 'props', 'detalhe', 'api', 'emit', 'watch', 'onMounted', 'onBeforeUnmount', 'document',
       js,
     )
-    rodar(Lt.criarMarcadorDeLida, Lt.querMarcarLida, props, detalhe, apiFalsa, (e, c) => emitidos.push([e, c]), Vue.watch,
+    rodar(Lt.criarMarcadorDeLida, Lt.rotaAoAbrir, props, detalhe, apiFalsa, (e, c) => emitidos.push([e, c]), Vue.watch,
       (f) => montar.push(f), (f) => desmontar.push(f), doc)
     montar.forEach((f) => f())
-    const chegar = async (id, nao = 2) => {
-      detalhe.value = { conversa: { id, nao_lidas: nao, plataforma: 'shopee' }, mensagens: [], marcar_lida }
+    const chegar = async (id, nao = 2, visto_ate = null) => {
+      detalhe.value = { conversa: { id, nao_lidas: nao, plataforma: 'shopee' }, mensagens: [], marcar_lida, visto_ate }
       await Vue.nextTick()
     }
-    return { rel, posts, emitidos, props, detalhe, doc, chegar, desmontar }
+    return { rel, posts, corpos, emitidos, props, detalhe, doc, chegar, desmontar }
   }
 
   // Quem mexe, loja em que o DaVinci responde: marca depois de 1,5 s e zera o número na tela.
@@ -283,7 +402,7 @@ function marcador(extra = {}) {
     await tique()
     assert.deepEqual(t.posts, [['/api/atendimento/conversas/c1/lida', 'POST']])
     assert.equal(t.detalhe.value.conversa.nao_lidas, 0)
-    assert.deepEqual(t.emitidos.map(([e, c]) => [e, c.id, c.nao_lidas]), [['mudou', 'c1', 0]])
+    assert.deepEqual(t.emitidos.map(([e, c]) => [e, c.id, c.nao_lidas, c.visto_em]), [['mudou', 'c1', 0, '2026-10-15T10:00:00+00:00']])
     // O polling relê o detalhe (até com não lidas de novo): não chama outra vez.
     await t.chegar('c1', 1)
     t.rel.avancar(60_000)
@@ -291,13 +410,74 @@ function marcador(extra = {}) {
     assert.equal(t.posts.length, 1)
   }
 
-  // Loja em Observar (o servidor diz `marcar_lida: false`): nunca chama.
+  // Loja em Observar (o servidor diz `marcar_lida: false`): nunca o /lida — o /visto
+  // (15/10/2026), depois do mesmo atraso, uma vez por abertura; a linha recebe o visto
+  // (a página relê os números) e as não lidas da plataforma ficam como estão.
   {
     const t = await tela({ marcar_lida: false })
     await t.chegar('c1')
-    t.rel.avancar(60_000)
+    t.rel.avancar(1499)
     await tique()
     assert.deepEqual(t.posts, [])
+    t.rel.avancar(1)
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts, [['/api/atendimento/conversas/c1/visto', 'POST']])
+    assert.equal(t.detalhe.value.conversa.nao_lidas, 2)
+    assert.deepEqual(t.emitidos.map(([e, c]) => [e, c.id, c.nao_lidas, c.visto_em]), [['mudou', 'c1', 2, '2026-10-15T10:00:00+00:00']])
+    await t.chegar('c1')
+    t.rel.avancar(60_000)
+    await tique()
+    assert.equal(t.posts.length, 1, 'uma vez por abertura')
+  }
+
+  // Até onde a tela mostrou vai no POST (`{ ate }`) e, com a conversa aberta, a releitura que
+  // traz mensagem nova chama o /visto de novo — em Observar e na loja em que o DaVinci responde
+  // (aí a abertura foi o /lida; a releitura, só o /visto).
+  for (const marcar_lida of [false, true]) {
+    const t = await tela({ marcar_lida })
+    const A = '2026-10-15T10:00:00.100000Z'
+    const B = '2026-10-15T10:01:10.200000Z'
+    await t.chegar('c1', 2, A)
+    t.rel.avancar(1500)
+    await tique()
+    await tique()
+    const primeira = marcar_lida ? '/api/atendimento/conversas/c1/lida' : '/api/atendimento/conversas/c1/visto'
+    assert.deepEqual(t.posts.map(([u]) => u), [primeira])
+    assert.deepEqual(t.corpos, [{ ate: A }])
+    // O polling (15 s) relê: nada novo — nada.
+    await t.chegar('c1', 2, A)
+    await tique()
+    assert.equal(t.posts.length, 1)
+    // Mensagem nova na tela: o /visto com o novo `ate`, sem esperar.
+    await t.chegar('c1', 3, B)
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts.map(([u]) => u), [primeira, '/api/atendimento/conversas/c1/visto'])
+    assert.deepEqual(t.corpos, [{ ate: A }, { ate: B }])
+    assert.equal(t.emitidos.length, 2, 'a linha recebe o visto (a página relê os números)')
+  }
+
+  // Quem só lê, com mensagem nova na conversa aberta: nada.
+  {
+    const t = await tela({ canEdit: false })
+    await t.chegar('c1', 2, 'A')
+    t.rel.avancar(5000)
+    await t.chegar('c1', 3, 'B')
+    await tique()
+    assert.deepEqual(t.posts, [])
+  }
+
+  // O /lida que não marcou na plataforma (falhou): o visto chega à linha, as não lidas ficam.
+  {
+    const t = await tela({ naoMarcou: true })
+    await t.chegar('c1')
+    t.rel.avancar(1500)
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts.map(([u]) => u), ['/api/atendimento/conversas/c1/lida'])
+    assert.equal(t.detalhe.value.conversa.nao_lidas, 2)
+    assert.deepEqual(t.emitidos.map(([e, c]) => [e, c.nao_lidas, c.visto_em]), [['mudou', 2, '2026-10-15T10:00:00+00:00']])
   }
 
   // Quem só lê: nunca chama.
@@ -395,11 +575,22 @@ function marcador(extra = {}) {
     assert.match(rotaDetalhe, /"marcar_lida": await lida_svc\.marcar_ao_abrir\(session, c, user\)/)
     const rota = api('routers/atendimento_lida.py')
     assert.match(rota, /@router\.post\("\/conversas\/\{conversa_id\}\/lida", response_model=LidaOut\)/)
+    // O /visto (15/10/2026): a rota leve, a mesma trava; o /lida grava o visto antes da plataforma.
+    assert.match(rota, /@router\.post\("\/conversas\/\{conversa_id\}\/visto", response_model=VistoOut\)/)
+    assert.match(rota, /await lida_svc\.gravar_visto\(session, c, user, body\.ate if body else None\)\n {8}r = await lida_svc\.marcar_como_lida\(session, c, user=user\)/)
+    // O `{ ate }` (opcional) nos dois; o detalhe manda o `visto_ate`.
+    assert.equal((rota.match(/^ {4}body: VistoIn \| None = None,$/gm) || []).length, 2)
+    assert.match(rotaDetalhe, /"visto_ate": lida_svc\.visto_ate\(mensagens\)/)
+    assert.match(schemas, /^ {4}visto_ate: datetime \| None = None$/m)
+    assert.match(P, /^ {2}visto_ate\?: string \| null$/m, 'o tipo do detalhe tem o `visto_ate`')
+    assert.match(schemas, /^ {4}visto_em: datetime \| None = None$/m)
+    assert.match(P, /^ {2}visto_em\?: string \| null$/m, 'o tipo da linha tem o `visto_em`')
     assert.match(rota, /dependencies=\[Depends\(_so_admin\)\]/)
     // Quem só lê NÃO tem esta escrita (fica fora do ROTAS_DE_QUEM_LE → 403).
     const lista = rotaDetalhe.slice(rotaDetalhe.indexOf('ROTAS_DE_QUEM_LE = frozenset('), rotaDetalhe.indexOf('SO_LEITURA = {'))
     assert.ok(lista.length > 0)
     assert.doesNotMatch(lista, /\/lida/)
+    assert.doesNotMatch(lista, /\/visto/, 'quem só lê não grava o visto (403)')
     assert.match(api('main.py'), /app\.include_router\(atendimento_lida_router\.router\)/)
     const servico = api('services/atendimento/lida.py')
     for (const p of ['"shopee": frozenset({CANAL_CHAT})', '"tiktok": frozenset({CANAL_CHAT})', '"ml": frozenset({CANAL_POS_VENDA})']) {

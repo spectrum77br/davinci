@@ -55,6 +55,11 @@ A 0396 (14/10/2026, o "Falta responder" igual ao Duoke) põe na conversa a
 `ultima_loja_qualquer_em` (anulável, sem índice) e a preenche pelas
 mensagens; roda em cima de todas (as 0384–0395 do meio não tocam no catálogo
 de `atendimento_*`) e o downgrade dela volta o catálogo ao de depois da 0383.
+
+A 0399 (15/10/2026, o número da Caixa = o "não lida" do Duoke) põe na conversa
+o `visto_em` ("visto no DaVinci": anulável, sem índice e sem preenchimento);
+roda em cima de todas (as 0397–0398 do meio são da conciliação) e o downgrade
+dela volta o catálogo ao de depois da 0396.
 """
 
 # ruff: noqa: S608
@@ -83,6 +88,7 @@ _MIGRATION_AUTOMACOES = _VERSOES / "0366_atendimento_automacoes.py"
 _MIGRATION_SIMULACAO = _VERSOES / "0371_atendimento_automacoes_simulacao.py"
 _MIGRATION_TROCAS = _VERSOES / "0383_atendimento_trocas.py"
 _MIGRATION_FALTA = _VERSOES / "0396_ultima_loja_qualquer.py"
+_MIGRATION_VISTO = _VERSOES / "0399_atendimento_visto_em.py"
 # A regra de palavras das pastas de e-mail (0387, a camada do atendimento sobre
 # a Central de e-mail) é conferida em `test_mail_atendimento_migration.py`,
 # junto das tabelas `mail_*` da mesma migration.
@@ -204,6 +210,9 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     falta = _carregar_migration(_MIGRATION_FALTA)
     assert falta.revision == "0396_ultima_loja_qualquer"
     assert falta.down_revision == "0395_cairo_tabela_precos_contas"
+    visto = _carregar_migration(_MIGRATION_VISTO)
+    assert visto.revision == "0399_atendimento_visto_em"
+    assert visto.down_revision == "0398_conciliacao_permissao"
     # 7 da primeira parte + 3 da parte 2 (categorias e os índices do cartão
     # "Cliente") + 2 da 0353 (histórico da etiqueta e reclamações) + 3 da
     # 0362 (carrinhos, publicações e comentários) + 2 da 0366 (regras e
@@ -259,6 +268,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     simulacao.SCHEMA = rascunho
     trocas.SCHEMA = rascunho
     falta.SCHEMA = rascunho
+    visto.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -480,6 +490,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await conn.run_sync(_rodar, "upgrade", (falta,))
         await db.commit()
 
+        # 0399: o "visto no DaVinci" (o número da Caixa igual ao Duoke).
+        antes_da_0399 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (visto,))
+        await db.commit()
+
         da_migration = await _catalogo(db, rascunho, rascunho)
         do_model = await _catalogo(db, schema_model, schema_model)
         assert da_migration["tabelas"] == TABELAS
@@ -678,6 +694,16 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         # 0396: anulável, sem default e sem índice.
         assert cols[("atendimento_conversas", "ultima_loja_qualquer_em")][2] == "timestamptz"
         assert cols[("atendimento_conversas", "ultima_loja_qualquer_em")][4:] == ("YES", None)
+
+        # 0399: anulável, sem default e sem índice.
+        assert cols[("atendimento_conversas", "visto_em")][2] == "timestamptz"
+        assert cols[("atendimento_conversas", "visto_em")][4:] == ("YES", None)
+
+        # O downgrade da 0399 volta EXATAMENTE ao catálogo de depois da 0396.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (visto,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0399
 
         # O downgrade da 0396 volta EXATAMENTE ao catálogo de depois da 0383.
         conn = await db.connection()

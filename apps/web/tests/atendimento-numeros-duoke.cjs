@@ -18,6 +18,17 @@
 //  - dizer no title da aba "Falta responder" que ela é só o chat;
 //  - reler o /resumo quando o não lido da conversa aberta muda (marcou como lida);
 //  - e o contrato com a API.
+// Desde 15/10/2026 (o dono: "os números da Caixa têm que bater com o Duoke";
+// o Eduardo: "1 mensagem na kia … a kia tá mostrando 9 naquela conversa no
+// duoke") a régua do servidor é o NÃO LIDO DO PRÓPRIO DUOKE: as mensagens do
+// cliente desde a última resposta de pessoa da loja ou desde que alguém abriu a
+// conversa no DaVinci (`visto_em`), nas conversas de chat esperando resposta
+// com o comprador nas últimas 24 h. A tela: o title da loja explica isso, e a
+// página relê o /resumo quando o `visto_em` da conversa aberta muda.
+// A BOLINHA DA LINHA (15/10/2026, a revisão — a conversa dos 9 da Kia ficava
+// sem número na linha): na Caixa, o `numero_duoke` da conversa (a mesma
+// régua), com ou sem o negrito; fora do chat (null), na Caixa Humano e com a
+// API antiga, a bolinha de antes.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -173,7 +184,7 @@ async function renderizados() {
   ])
   // O title da loja explica o número e mantém o "Falta responder" (conversas, só o chat).
   const tituloAtv = (html.match(/title="(Shopee · ATV[^"]*)"/) || [])[1] || ''
-  assert.match(tituloAtv, /\n5 mensagem\(ns\) não lida\(s\) esperando resposta \(como no Duoke\)\n3 conversa\(s\) no Falta responder \(só o chat\)\n/)
+  assert.match(tituloAtv, /\n5 mensagem\(ns\) do cliente desde a última resposta ou desde que alguém abriu a conversa — como no Duoke\n3 conversa\(s\) no Falta responder \(só o chat\)\n/)
   assert.match(tituloAtv, /\n7 não lida\(s\) segundo a plataforma/)
   // O cabeçalho do grupo soma as lojas dele.
   assert.match(html, /data-grupo="shopee"[^>]*>[\s\S]*?>6<\/span>/)
@@ -227,6 +238,26 @@ async function renderizados() {
   // Marcou como lida ao abrir (o não lido mudou): relê o /resumo na hora.
   const aoMudar = (pagina.match(/function aoMudarConversa\([\s\S]*?\n}\n/) || [])[0] || ''
   assert.match(aoMudar, /c\.nao_lidas !== undefined && \(Number\(antes\.nao_lidas\) \|\| 0\) !== \(Number\(c\.nao_lidas\) \|\| 0\)/)
+  // O número da linha mudou (chegou mensagem, abriu): relê também.
+  assert.match(aoMudar, /c\.numero_duoke !== undefined && \(antes\.numero_duoke \?\? null\) !== \(c\.numero_duoke \?\? null\)/)
+  // Abriu a conversa (o "visto no DaVinci" mudou, o número dela zera): idem.
+  assert.match(aoMudar, /c\.visto_em !== undefined && \(antes\.visto_em \?\? null\) !== \(c\.visto_em \?\? null\)/)
+  // E roda de verdade: a linha recebe o visto → relê; o mesmo visto → não relê.
+  {
+    const corpo = aoMudar.replace(/^function aoMudarConversa\(c: ConversaResumo\) \{/, '').replace(/\n}\n$/, '')
+    const rodar = (antes, c) => {
+      let releu = 0
+      const itens = { value: [antes] }
+      new Function('c', 'itens', 'selecionada', 'emHumano', 'carregarResumo', 'linkDoChat', 'abrirConversaDoEmail', transpile(corpo))(
+        c, itens, { value: antes.id }, { value: false }, () => { releu++ }, null, () => {},
+      )
+      return releu
+    }
+    const linha = { id: 'k1', aguardando_resposta: true, nao_lidas: 0, visto_em: null }
+    assert.equal(rodar(linha, { ...linha, visto_em: '2026-10-15T10:00:00+00:00' }), 1)
+    assert.equal(rodar({ ...linha, visto_em: '2026-10-15T10:00:00+00:00' }, { ...linha, visto_em: '2026-10-15T10:00:00+00:00' }), 0)
+    assert.equal(rodar(linha, { id: 'k1', aguardando_resposta: true }), 0, 'a API antiga (sem o campo): nada')
+  }
 
   // A lista: a aba "Falta responder" é só o chat (o title diz), com o número
   // do /resumo (`aguardando`); o seletor de loja da tela estreita mostra o
@@ -255,8 +286,17 @@ async function renderizados() {
   const rota = api('routers/atendimento.py')
   const resumo = (rota.match(/async def resumo\([\s\S]*?\n\nasync def _leitura_parada/) || [])[0]
   assert.ok(resumo, 'o /resumo existe')
-  assert.match(resumo, /duoke = func\.coalesce\(func\.sum\(pendente\.nao_lidas_duoke_sql\(\)\), 0\)/)
-  assert.equal((resumo.match(/\n {8}duoke,\n/g) || []).length, 2, 'por plataforma e por loja')
+  assert.match(resumo, /duoke = func\.coalesce\(func\.sum\(pendente\.nao_lidas_duoke_sql\(agora=agora\)\), 0\)/)
+  // Calculado só por loja (a revisão: +33 a +72 ms por SUM); a plataforma é a soma das lojas.
+  assert.equal((resumo.match(/\n {8}duoke,\n/g) || []).length, 1, 'só na q_loja')
+  assert.match(resumo, /for p in plataformas:\n {8}p\.nao_lidas_duoke \+= duoke_da_plataforma\.get\(p\.plataforma, 0\)/)
+  // A linha (lista e detalhe) leva o número dela pela mesma régua.
+  assert.match(rota, /pendente\.nao_lidas_duoke_sql\(agora=agora\)\.label\("numero_duoke"\)/)
+  assert.match(rota, /numero_duoke=numero or 0,/, 'o detalhe (e as ações) também')
+  assert.match(rota, /if numero_duoke is not None and pendente\.do_chat\(c\)/, 'fora do chat: None')
+  assert.match(api('schemas/atendimento.py'), /^ {4}numero_duoke: int \| None = None$/m)
+  assert.match(api('services/atendimento/instagram.py'), /"numero_duoke": int\(/, 'o Direct: o mesmo 1 na linha')
+  assert.match(web('components/AtendimentoPlataforma.vue'), /^ {2}numero_duoke\?: number \| null$/m)
   assert.match(resumo, /nao_lidas_duoke=sum\(p\.nao_lidas_duoke for p in plataformas\)/, 'o total (a aba Caixa)')
   assert.match(resumo, /p_ig\.nao_lidas_duoke \+= instagram\.no_numero_do_duoke\(ig\)/, 'o Direct: 1 por conversa esperando, na janela')
   assert.match(rota, /alvo\.nao_lidas_duoke \+= instagram\.no_numero_do_duoke\(d\)/, 'e na linha da conta')
@@ -269,9 +309,43 @@ async function renderizados() {
   assert.match(regua, /CANAIS_FORA_DO_CHAT: frozenset\[str\] = frozenset\(\n {4}\{CANAL_AVALIACAO, CANAL_RECLAMACAO, CANAL_COMENTARIO, CANAL_CARRINHO\}\n\)/)
   assert.match(regua, /def nao_lidas_duoke_sql\(/)
   assert.match(regua, /c\.aguardando_resposta\.is_\(True\)/, 'a vez do comprador na FILA (a automática não fecha)')
-  // E só o que está no "Falta responder" (a linha marcada): o não lido do ML não acende sozinho.
-  assert.match(regua, /def nao_lidas_duoke_sql\([\s\S]*?esperando = and_\([\s\S]*?falta_responder_sql\(c\),\n {4}\)/)
-  assert.match(regua, /if not getattr\(conversa, "aguardando_resposta", False\) or not falta_responder\(conversa\):/)
+  // A régua de 15/10/2026: o não lido do Duoke — a mensagem do cliente depois
+  // da última resposta de PESSOA ou da abertura no DaVinci, na janela de 24 h.
+  assert.match(regua, /^JANELA_DO_NUMERO = timedelta\(hours=24\)$/m)
+  const sql = regua.slice(regua.indexOf('def nao_lidas_duoke_sql('))
+  // Dois relógios: a resposta de pessoa no da plataforma; o visto na CHEGADA (`created_at`).
+  assert.match(sql, /or_\(c\.ultima_da_loja_em\.is_\(None\), momento > c\.ultima_da_loja_em\)/)
+  assert.match(sql, /or_\(c\.visto_em\.is_\(None\), m\.created_at > c\.visto_em\)/)
+  assert.doesNotMatch(sql, /greatest/, 'o visto não se compara com o horário da plataforma')
+  assert.match(sql, /m\.autor == AUTOR_CLIENTE/)
+  assert.match(sql, /c\.ultima_do_cliente_em > limite/)
+  assert.doesNotMatch(sql, /c\.nao_lidas\b/, 'o não lido da plataforma não entra no número')
+}
+
+// A bolinha da linha (15/10/2026): o número da conversa na Caixa.
+{
+  const L = exportsDe(listaSfc, requerer)
+  const linha = (x) => ({ aguardando_resposta: true, nao_lidas: 0, pendentes: 0, ...x })
+  // A conversa dos 9 da Kia: a automática por último (fora do "Falta responder",
+  // sem negrito, a Shopee zerou o não lido) — mostra o 9.
+  const kia = linha({ falta_responder: false, pendentes: 9, numero_duoke: 9 })
+  assert.equal(L.linhaMarcada(kia), false, 'sem negrito (para o Duoke, respondeu)')
+  assert.equal(L.bolinhaDaLinha(kia), 9, 'e o número na bolinha, como no Duoke')
+  // Aberta no DaVinci: em negrito (ninguém respondeu), sem bolinha.
+  const aberta = linha({ falta_responder: true, pendentes: 3, nao_lidas: 3, numero_duoke: 0 })
+  assert.equal(L.linhaMarcada(aberta), true)
+  assert.equal(L.bolinhaDaLinha(aberta), 0)
+  // Fora do chat (null) e a API antiga (sem o campo): a bolinha de antes.
+  const avaliacao = linha({ falta_responder: true, pendentes: 1, numero_duoke: null })
+  assert.equal(L.bolinhaDaLinha(avaliacao), 1)
+  assert.equal(L.bolinhaDaLinha(linha({ falta_responder: false, pendentes: 2, numero_duoke: null })), 0)
+  assert.equal(L.bolinhaDaLinha(linha({ falta_responder: true, pendentes: 4, nao_lidas: 1 })), 4)
+  // A Caixa Humano: pela fila, como sempre (o número não entra).
+  assert.equal(L.bolinhaDaLinha(kia, true), 9)
+  assert.equal(L.bolinhaDaLinha(aberta, true), 3)
+  // A soma das bolinhas das linhas de uma loja é o número dela (o servidor manda a mesma régua).
+  assert.equal([kia, aberta, linha({ falta_responder: true, numero_duoke: 2 })].reduce((n, c) => n + L.bolinhaDaLinha(c), 0), 11)
+  assert.match(web('components/AtendimentoLista.vue'), /:nao-lidas="bolinhaDaLinha\(c, emHumano\)"/)
 }
 
 renderizados().then(

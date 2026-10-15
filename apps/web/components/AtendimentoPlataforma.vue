@@ -166,6 +166,15 @@ export type ConversaResumo = {
   prazo_resposta_em: string | null
   situacao: string
   nao_lidas: number
+  // "Visto no DaVinci" (15/10/2026): até onde alguém que mexe viu a conversa
+  // (POST /visto ou /lida). O número da Caixa só conta a mensagem do
+  // comprador que chegou depois dele; a página relê o /resumo quando ele
+  // muda. A API antiga não manda.
+  visto_em?: string | null
+  // O número DESTA conversa na Caixa (15/10/2026): a mesma régua do número da
+  // loja — a bolinha da linha (`bolinhaDaLinha`), com ou sem a marca. null
+  // fora do chat (a bolinha de antes); a API antiga não manda.
+  numero_duoke?: number | null
   // No "Falta responder" da Caixa, igual ao Duoke (14/10/2026): o comprador
   // por último (até a automática responde) ou não lida na plataforma. A API
   // antiga não manda.
@@ -536,6 +545,9 @@ export type Detalhe = {
   // que o DaVinci responde (nunca Observar), plataforma com "lida" e há não
   // lidas — as travas do POST /lida (lib/atendimentoLida.ts).
   marcar_lida?: boolean
+  // Até onde esta tela mostra a conversa (15/10/2026): a chegada da mensagem
+  // mais nova do detalhe — volta no POST /visto ou /lida (`{ ate }`).
+  visto_ate?: string | null
   // As mudanças de etiqueta, da mais antiga para a mais nova.
   etiqueta_historico?: EtiquetaHistorico[]
 }

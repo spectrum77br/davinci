@@ -19,12 +19,31 @@
 // Falha (rede, 409, a plataforma recusou) não quebra a tela: a conversa
 // continua não lida, e a próxima abertura tenta de novo. A IA, os crons e os
 // robôs nunca marcam — só esta tela, pela pessoa.
+//
+// VISTO NO DAVINCI (15/10/2026, o dono: os números da Caixa batem com o
+// Duoke — e lá abrir a conversa zera o número dela): o MESMO gatilho (1,5 s
+// aberta, aba visível, uma vez por abertura) grava `visto_em` para quem mexe,
+// em QUALQUER modo de loja (inclusive Observar) e sem ir à plataforma. UMA
+// chamada por abertura (`rotaAoAbrir`): o /lida quando o detalhe diz
+// `marcar_lida` (ele grava o visto e marca na plataforma) e, senão, o
+// POST /api/atendimento/conversas/{id}/visto (só o visto). Quem só lê nunca
+// chama nenhum; o Direct do Instagram (`ig:`) não é conversa da Caixa.
+// O POST leva `{ ate }` = o `visto_ate` do detalhe que a tela mostrava (a
+// chegada da mensagem mais nova): o servidor compara o visto com a CHEGADA da
+// mensagem — a que o sync trouxe depois (a pessoa não viu) continua contando.
+// COM A CONVERSA ABERTA (15/10/2026, a revisão — no Duoke, a conversa aberta
+// fica lida): depois da abertura, cada releitura que traz mensagem nova (o
+// `visto_ate` andou), com a aba visível, chama o /visto de novo (`rever`; só
+// o /visto, barato — o /lida continua uma vez por abertura). Falhou, a
+// próxima releitura tenta de novo.
 
 export const ATRASO_MARCAR_LIDA_MS = 1500
 
 export type DetalheParaLida = {
   conversa: { id: string; nao_lidas?: number | null }
   marcar_lida?: boolean
+  // Até onde a tela mostra (15/10/2026): vai no POST como `ate`.
+  visto_ate?: string | null
 }
 
 /** A tela deve marcar esta conversa como lida (depois do atraso)? */
@@ -33,6 +52,19 @@ export function querMarcarLida(d: DetalheParaLida | null | undefined, podeMexer:
   const n = d.conversa?.nao_lidas
   // Sem o número (API antiga): o servidor decide — a rota é idempotente.
   return n === null || n === undefined || n > 0
+}
+
+/** A tela grava o "visto no DaVinci" ao abrir esta conversa (15/10/2026)? */
+export function querMarcarVisto(d: DetalheParaLida | null | undefined, podeMexer: boolean): boolean {
+  const id = d?.conversa?.id
+  return !!id && podeMexer && !id.startsWith('ig:')
+}
+
+/** Qual rota a abertura chama: o /lida (visto + plataforma), o /visto (só o visto) ou nenhuma. */
+export function rotaAoAbrir(d: DetalheParaLida | null | undefined, podeMexer: boolean): 'lida' | 'visto' | null {
+  if (querMarcarLida(d, podeMexer)) return 'lida'
+  if (querMarcarVisto(d, podeMexer)) return 'visto'
+  return null
 }
 
 export type RelogioLida = {
@@ -46,8 +78,11 @@ const RELOGIO_PADRAO: RelogioLida = {
 }
 
 export type OpcoesMarcadorLida = {
-  // O POST /lida (quem chama trata a resposta: zera o número na tela).
+  // O POST /lida ou /visto (quem chama escolhe a rota e trata a resposta).
   marcar: (id: string) => Promise<unknown>
+  // Com a conversa aberta, a releitura trouxe mensagem nova: o POST /visto de
+  // novo (15/10/2026). Sem ele, só a abertura grava.
+  rever?: (id: string) => Promise<unknown>
   // A conversa aberta AGORA (a prop): a de quando o relógio dispara tem de ser a mesma.
   atual: () => string | null
   // Aba do navegador visível e a Caixa na frente.
@@ -65,6 +100,9 @@ export function criarMarcadorDeLida(o: OpcoesMarcadorLida) {
   let quer = false
   let feita = false
   let timer: unknown = null
+  // O `visto_ate` do detalhe de agora e o do último POST (abertura ou `rever`).
+  let ate: string | null = null
+  let ateGravado: string | null = null
 
   function parar() {
     if (timer !== null) relogio.cancelar(timer)
@@ -83,24 +121,47 @@ export function criarMarcadorDeLida(o: OpcoesMarcadorLida) {
     // Escondida: espera o `retomar` (aba visível de novo) e conta o atraso de novo.
     if (!visivel()) return
     feita = true
+    ateGravado = ate
     void Promise.resolve()
       .then(() => o.marcar(id))
       .catch(() => {
         // a conversa continua não lida; a próxima abertura tenta de novo
       })
   }
+  // Com a conversa aberta (a abertura já gravou), a releitura trouxe mensagem nova.
+  function rever() {
+    const rev = o.rever
+    if (!rev || !feita || !quer || !aberta || o.atual() !== aberta || !visivel()) return
+    if (ate === null || ate === ateGravado) return
+    const id = aberta
+    const antes = ateGravado
+    const agora = ate
+    ateGravado = agora
+    void Promise.resolve()
+      .then(() => rev(id))
+      .catch(() => {
+        // falhou: a próxima releitura (ou a volta da aba) tenta de novo
+        if (aberta === id && ateGravado === agora) ateGravado = antes
+      })
+  }
 
   return {
-    /** O detalhe da conversa `id` chegou (ao abrir e a cada releitura). */
-    abrir(id: string, querMarcar: boolean) {
+    /** O detalhe da conversa `id` chegou (ao abrir e a cada releitura); `vistoAte` = o `visto_ate` dele. */
+    abrir(id: string, querMarcar: boolean, vistoAte?: string | null) {
       if (id !== aberta) {
         parar()
         aberta = id
         feita = false
+        ate = null
+        ateGravado = null
       }
       quer = querMarcar
+      if (vistoAte !== undefined) ate = vistoAte ?? null
       if (!quer) parar()
-      else agendar()
+      else {
+        agendar()
+        rever()
+      }
     },
     /** Trocou de conversa, fechou ou desmontou: nada pendente marca. */
     fechar() {
@@ -108,14 +169,18 @@ export function criarMarcadorDeLida(o: OpcoesMarcadorLida) {
       aberta = null
       quer = false
       feita = false
+      ate = null
+      ateGravado = null
     },
-    /** A aba (ou a Caixa) voltou a ficar visível: conta o atraso de novo. */
+    /** A aba (ou a Caixa) voltou a ficar visível: conta o atraso de novo (e revê o que chegou). */
     retomar() {
-      if (visivel()) agendar()
+      if (!visivel()) return
+      agendar()
+      rever()
     },
     /** Para os testes e para quem quer saber. */
     estado() {
-      return { aberta, quer, feita, pendente: timer !== null }
+      return { aberta, quer, feita, pendente: timer !== null, ate, ateGravado }
     },
   }
 }
