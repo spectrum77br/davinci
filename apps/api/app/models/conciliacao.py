@@ -51,6 +51,9 @@ from app.models.integration import _enum
 
 # Origem de um movimento.
 ORIGEM_EXTRATO = "mp_extrato"  # Relatório de liberações do Mercado Pago
+ORIGEM_CARTEIRA = "shopee_carteira"  # carteira da Shopee (get_wallet_transaction_list)
+# As origens que são "o dinheiro" (uma por plataforma); a fatura do ML é a conta de tarifas.
+ORIGENS_EXTRATO = (ORIGEM_EXTRATO, ORIGEM_CARTEIRA)
 ORIGEM_FATURA = "ml_fatura"  # detalhes de faturamento do ML por período
 
 # Situação do pedido na conciliação (o que a coluna mostra).

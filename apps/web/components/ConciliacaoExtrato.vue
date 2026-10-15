@@ -5,7 +5,9 @@
 import { ChevronLeft, ChevronRight, Loader2, Lock, LockOpen, Search } from 'lucide-vue-next'
 import { STATUS_MOV, fmtDia, fmtDiaHora, fmtHora, fmtMoney, ontemISO, sitCls, somaDias, tipoMov } from '~/lib/conciliacao'
 
-const props = defineProps<{ loja: string; canEdit: boolean; dia?: string }>()
+const props = defineProps<{ loja: string; canEdit: boolean; dia?: string; plataforma?: string }>()
+const fonte = computed(() => (props.plataforma === 'shopee' ? 'carteira da Shopee' : 'extrato do Mercado Pago'))
+const quemInforma = computed(() => (props.plataforma === 'shopee' ? 'Shopee' : 'Mercado Pago'))
 const emit = defineEmits<{ (e: 'ver-pedido', pedido: string): void }>()
 
 type Mov = {
@@ -75,6 +77,14 @@ const salvando = ref(false)
 const fechando = ref(false)
 
 const pendentes = computed(() => dados.value?.contagem.pendente || 0)
+// Reservas (pro saque, por reclamação) vêm em pares que somam zero e a tela do
+// Mercado Pago nem mostra: ficam escondidas por padrão, com um clique pra ver (15/10).
+const mostrarReservas = ref(false)
+const reservas = computed(() => (dados.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_')).length)
+const movimentosVisiveis = computed(() => {
+  const todos = dados.value?.movimentos || []
+  return mostrarReservas.value ? todos : todos.filter((m) => !m.tipo.startsWith('reserva_'))
+})
 const pct = computed(() => {
   const t = dados.value?.totais.linhas || 0
   return t ? Math.round(((dados.value?.resolvidos || 0) / t) * 100) : 0
@@ -126,7 +136,13 @@ async function marcar(body: Record<string, unknown>) {
     await carregar()
   } catch (e: any) {
     const d = e?.data?.detail
-    toasts.error?.(d?.code === 'pedido_bling_nao_encontrado' ? `pedido ${d.pedido} não é desta loja` : d?.mensagem || d?.code || 'não consegui salvar')
+    toasts.error?.(
+      d?.code === 'pedido_bling_nao_encontrado'
+        ? `pedido ${d.pedido} não é desta loja`
+        : d?.code === 'dia_fechado'
+          ? `dia ${fmtDia(d.dia + 'T12:00:00')} fechado por ${d.por}: reabra pra mexer`
+          : d?.mensagem || d?.code || 'não consegui salvar',
+    )
   } finally {
     salvando.value = false
   }
@@ -200,7 +216,7 @@ onMounted(() => {
         <Search class="size-3.5 text-muted-foreground" />
         <input v-model="q" placeholder="pedido, venda, pagamento, SKU" class="w-48 bg-transparent outline-none" @keyup.enter="carregar()" />
       </label>
-      <span v-if="dados" class="text-muted-foreground">{{ dados.movimentos.length }} de {{ dados.totais.linhas }} movimentos</span>
+      <span v-if="dados" class="text-muted-foreground">{{ movimentosVisiveis.length }} de {{ dados.totais.linhas }} movimentos<template v-if="reservas"> · {{ reservas }} reservas {{ mostrarReservas ? 'à mostra' : 'escondidas' }} (vão e voltam, somam zero) <button type="button" class="underline" @click="mostrarReservas = !mostrarReservas">{{ mostrarReservas ? 'esconder' : 'mostrar' }}</button></template></span>
       <span class="ml-auto inline-flex items-center gap-1.5">
         <template v-if="dados?.fechado">
           <span class="inline-flex items-center gap-1 rounded bg-slate-200 px-2 py-1 font-bold text-slate-800 dark:bg-slate-700 dark:text-slate-100"><Lock class="size-3.5" /> dia fechado por {{ dados.fechado.por }} em {{ fmtDiaHora(dados.fechado.em) }}</span>
@@ -233,7 +249,7 @@ onMounted(() => {
     <div class="grid gap-3 xl:grid-cols-[1fr_420px]">
       <div class="flex min-h-0 min-w-0 flex-col rounded-md border bg-card">
         <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-          <span>Movimentos do dia — extrato do Mercado Pago</span>
+          <span>Movimentos do dia — {{ fonte }}</span>
           <span class="text-[11px] font-normal text-slate-300">cada linha precisa de um destino: um pedido ou uma classificação</span>
         </div>
         <div class="max-h-[62vh] overflow-auto">
@@ -259,9 +275,9 @@ onMounted(() => {
             <tbody>
               <tr v-if="loading && !dados"><td colspan="14" class="py-8 text-center text-muted-foreground"><Loader2 class="mr-1 inline size-4 animate-spin" /> carregando…</td></tr>
               <tr v-else-if="erro"><td colspan="14" class="py-8 text-center text-red-600">{{ erro }}</td></tr>
-              <tr v-else-if="dados && !dados.movimentos.length"><td colspan="14" class="py-8 text-center text-muted-foreground">{{ dados.totais.linhas ? 'nada com esse filtro' : 'nenhum movimento lido neste dia (o extrato é lido de madrugada; "Sincronizar agora" pede o de ontem)' }}</td></tr>
+              <tr v-else-if="dados && !movimentosVisiveis.length"><td colspan="14" class="py-8 text-center text-muted-foreground">{{ dados.totais.linhas ? (dados.movimentos.length ? 'só reservas neste dia (escondidas)' : 'nada com esse filtro') : 'nenhum movimento lido neste dia (o extrato é lido de madrugada; "Sincronizar agora" pede o de ontem)' }}</td></tr>
               <tr
-                v-for="m in dados?.movimentos || []"
+                v-for="m in movimentosVisiveis"
                 :key="m.id"
                 class="cursor-pointer border-b hover:bg-muted/60"
                 :class="[rowCls(m), selecionado?.id === m.id && 'outline outline-2 -outline-offset-2 outline-primary']"
@@ -298,7 +314,7 @@ onMounted(() => {
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Entradas (créditos)</div><b class="text-xs tabular-nums text-emerald-700">+ {{ fmtMoney(dados.totais.creditos) }}</b></div>
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saídas (débitos)</div><b class="text-xs tabular-nums text-red-600">− {{ fmtMoney(dados.totais.debitos) }}</b></div>
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo final calculado</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_final) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo informado pelo Mercado Pago</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_informado) }}</b></div>
+          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo informado pelo {{ quemInforma }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_informado) }}</b></div>
           <div class="px-2 py-1.5"><div class="text-muted-foreground">Diferença</div><b class="text-xs tabular-nums" :class="dados.totais.diferenca === null ? '' : Math.abs(dados.totais.diferenca) <= 0.05 ? 'text-emerald-700' : 'text-red-600'">{{ fmtMoney(dados.totais.diferenca) }}<span v-if="dados.totais.diferenca !== null && Math.abs(dados.totais.diferenca) <= 0.05"> ✔ bate</span></b></div>
         </div>
         <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.</div>
@@ -329,10 +345,16 @@ onMounted(() => {
             Vinculado ao pedido <button type="button" class="font-bold underline decoration-dotted" @click="emit('ver-pedido', selecionado.pedido_bling!)">{{ selecionado.pedido_bling }}</button>
             <span v-if="selecionado.pedido_situacao" class="ml-1 rounded px-1.5 py-0.5 font-bold" :class="sitCls(selecionado.pedido_situacao)">{{ selecionado.pedido_situacao_label }}</span>
             <div v-if="selecionado.vinculado_por" class="text-muted-foreground">por {{ selecionado.vinculado_por }} em {{ fmtDiaHora(selecionado.vinculado_em) }}</div>
-            <button v-if="canEdit" type="button" class="mt-1 rounded border px-2 py-0.5 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ desvincular: true })">Desvincular</button>
+            <button v-if="canEdit && !dados?.fechado" type="button" class="mt-1 rounded border px-2 py-0.5 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ desvincular: true })">Desvincular</button>
+          </div>
+          <div v-if="!selecionado.pedido_bling && !selecionado.classificacao && selecionado.vinculado_por" class="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
+            desvinculada à mão por {{ selecionado.vinculado_por }} em {{ fmtDiaHora(selecionado.vinculado_em) }} — o robô não religa; vincule a outro pedido ou classifique
           </div>
 
-          <template v-if="canEdit && !selecionado.pedido_bling">
+          <div v-if="dados?.fechado" class="rounded border bg-muted/60 px-2 py-1.5 text-muted-foreground">
+            <Lock class="mr-1 inline size-3.5" /> dia fechado por {{ dados.fechado.por }} em {{ fmtDiaHora(dados.fechado.em) }}: pra vincular, classificar ou desvincular, clique em Reabrir lá em cima.
+          </div>
+          <template v-if="canEdit && !dados?.fechado && !selecionado.pedido_bling">
             <div class="font-bold text-[#1f3a5f] dark:text-slate-200">Vincular a um pedido</div>
             <div class="flex gap-1.5">
               <input v-model="pedidoInput" placeholder="nº do pedido Bling" class="w-full rounded border bg-background px-2 py-1" @keyup.enter="pedidoInput.trim() && marcar({ pedido_bling: pedidoInput.trim() })" />
@@ -360,7 +382,7 @@ onMounted(() => {
               <button v-for="c in dados?.classificacoes || []" :key="c.key" type="button" class="rounded border px-2 py-0.5 font-semibold hover:bg-muted" :class="selecionado.classificacao === c.key && 'bg-muted'" :disabled="salvando" @click="marcar({ classificacao: c.key })">{{ c.label }}</button>
             </div>
           </template>
-          <div v-else-if="!canEdit" class="text-muted-foreground">você só pode ver; vincular e classificar pede permissão de edição</div>
+          <div v-else-if="!canEdit && !dados?.fechado" class="text-muted-foreground">você só pode ver; vincular e classificar pede permissão de edição</div>
         </div>
       </div>
     </div>

@@ -102,7 +102,7 @@ type Movimento = {
 }
 type Versao = Record<string, number | string | null | undefined>
 type LinhaComparativo = { chave: string; rotulo: string; previsto: number | null; real: number | null; dif: number | null; estilo: string }
-type Comparativo = { linhas: LinhaComparativo[]; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
+type Comparativo = { linhas: LinhaComparativo[]; real_rotulo: string; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
 type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[] }
 
 const { api } = useApi()
@@ -111,7 +111,7 @@ const toasts = useToasts()
 
 const MARKETPLACES = [
   { key: 'ml', label: 'Mercado Livre', ativo: true },
-  { key: 'shopee', label: 'Shopee', ativo: false },
+  { key: 'shopee', label: 'Shopee', ativo: true },
   { key: 'amazon', label: 'Amazon', ativo: false },
   { key: 'tiktok', label: 'TikTok', ativo: false },
 ]
@@ -162,6 +162,22 @@ const pagamentosDoPedido = computed(() => new Set((raiox.value?.movimentos || []
 const motivoDraft = ref('')
 
 const lojaAtual = computed(() => lojas.value.find((l) => l.conta === loja.value) || null)
+// Cada aba mostra só as lojas da plataforma dela (15/10: Shopee entrou).
+const lojasDaAba = computed(() => lojas.value.filter((l) => l.platform === tab.value))
+const nomeVenda = computed(() => (tab.value === 'shopee' ? 'Venda Shopee' : 'Venda ML'))
+function escolherLojaDaAba() {
+  const primeira = lojasDaAba.value[0]
+  if (!primeira) {
+    loja.value = ''
+    return
+  }
+  if (!lojasDaAba.value.some((l) => l.conta === loja.value)) {
+    loja.value = primeira.conta
+    de.value = primeira.inicio
+    ate.value = ''
+    page.value = 1
+  }
+}
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / SIZE)))
 const pctBateu = computed(() => {
   const r = resumo.value
@@ -183,11 +199,16 @@ function params() {
 async function carregarLojas() {
   const r = await api<{ lojas: Loja[] }>('/api/conciliacao/lojas')
   lojas.value = r.lojas
-  if (!loja.value && lojas.value.length) {
-    loja.value = lojas.value[0].conta
-    if (!de.value) de.value = lojas.value[0].inicio
+  if (!loja.value && lojasDaAba.value.length) {
+    loja.value = lojasDaAba.value[0].conta
+    if (!de.value) de.value = lojasDaAba.value[0].inicio
   }
 }
+
+watch(tab, () => {
+  escolherLojaDaAba()
+  if (visao.value === 'fechamento') visao.value = 'pedidos'
+})
 
 async function carregar() {
   if (!loja.value) return
@@ -412,7 +433,7 @@ await carregar()
 
     <ConciliacaoResumo v-if="visao === 'resumo'" :can-edit="canEdit" @abrir-extrato="abrirExtrato" @ver-pedidos="verPedidos" @sincronizar="sincronizarLoja" />
 
-    <ConciliacaoExtrato v-if="visao === 'extrato'" :loja="loja" :dia="extratoDia" :can-edit="canEdit" @ver-pedido="verPedido" />
+    <ConciliacaoExtrato v-if="visao === 'extrato'" :loja="loja" :plataforma="tab" :dia="extratoDia" :can-edit="canEdit" @ver-pedido="verPedido" />
 
     <ConciliacaoFechamento v-if="visao === 'fechamento'" v-model:loja="loja" :lojas="lojas" @abrir-extrato="abrirExtrato" />
 
@@ -421,7 +442,7 @@ await carregar()
       <label class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
         <span class="font-semibold text-muted-foreground">Loja</span>
         <select v-model="loja" class="bg-transparent outline-none">
-          <option v-for="l in lojas" :key="l.conta" :value="l.conta">{{ l.conta }}</option>
+          <option v-for="l in lojasDaAba" :key="l.conta" :value="l.conta">{{ l.conta }}</option>
         </select>
       </label>
       <label class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
@@ -492,7 +513,7 @@ await carregar()
             <thead class="sticky top-0 z-10 bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
               <tr class="text-center normal-case">
                 <th colspan="4" class="border-b px-1.5 py-1 text-left">Identificação</th>
-                <th colspan="5" class="border-b border-l-2 px-1.5 py-1">Venda ML</th>
+                <th colspan="5" class="border-b border-l-2 px-1.5 py-1">{{ nomeVenda }}</th>
                 <th colspan="2" class="border-b border-l-2 px-1.5 py-1">Extrato (entrou de fato)</th>
                 <th class="border-b border-l-2 px-1.5 py-1">Conc.</th>
                 <th colspan="4" class="border-b border-l-2 px-1.5 py-1">Resultado de verdade</th>
@@ -501,7 +522,7 @@ await carregar()
               <tr>
                 <th class="border-b px-1.5 py-1 text-left">Data</th>
                 <th class="border-b px-1.5 py-1 text-left">Pedido</th>
-                <th class="border-b px-1.5 py-1 text-left">Venda ML</th>
+                <th class="border-b px-1.5 py-1 text-left">Nº na plataforma</th>
                 <th class="border-b px-1.5 py-1 text-left">Loja</th>
                 <th class="border-b border-l-2 px-1.5 py-1 text-right">Valor</th>
                 <th class="border-b px-1.5 py-1 text-right">Tarifa</th>
@@ -548,11 +569,12 @@ await carregar()
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_valor) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_tarifa) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_frete) }}</td>
-                <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :class="(p.venda_extras || 0) > 0.005 && 'text-red-600'" :title="extrasTitulo(p)">{{ fmtMoney(p.venda_extras) }}</td>
+                <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :title="extrasTitulo(p)">{{ fmtMoney(p.venda_extras) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums">{{ fmtMoney(p.venda_liquido) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1" :class="!p.liberado_em && 'text-muted-foreground'">
                   <template v-if="p.liberado_em">{{ fmtDia(p.liberado_em) }}</template>
                   <template v-else-if="p.situacao === 'vencido'"><span class="text-red-600">venceu {{ fmtDia(p.previsao_liberacao) }}</span></template>
+                  <template v-else-if="p.situacao === 'cancelado'">—</template>
                   <template v-else-if="p.previsao_liberacao">prev. {{ fmtDia(p.previsao_liberacao) }}</template>
                   <template v-else>—</template>
                 </td>
@@ -566,7 +588,7 @@ await carregar()
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.custo) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :class="p.reembolso && p.reembolso > 0 ? 'text-red-600' : ''">{{ fmtMoney(p.reembolso) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" :class="[sinal(p.sobrou, { pos: 'text-emerald-700', neg: 'text-red-600' }), !p.liberado_em && 'font-normal text-muted-foreground']">
-                  <span v-if="!p.liberado_em && p.sobrou !== null" class="mr-1 text-[10px]">prev.</span>{{ fmtMoney(p.sobrou) }}
+                  <span v-if="!p.liberado_em && p.sobrou !== null && p.situacao !== 'cancelado'" class="mr-1 text-[10px]">prev.</span>{{ fmtMoney(p.sobrou) }}
                 </td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" :class="!p.liberado_em && 'font-normal text-muted-foreground'">{{ fmtPct(p.margem) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1"><span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="sitCls(p.situacao)">● {{ p.situacao_label }}</span></td>
@@ -599,15 +621,15 @@ await carregar()
         <div v-else-if="raiox" class="space-y-2 p-2.5 text-[11px]">
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 rounded border bg-muted/40 px-2 py-1.5">
             <span>Pedido Bling <b>{{ raiox.pedido.pedido_bling }}</b></span>
-            <span>Venda ML <b>{{ raiox.pedido.numeroloja }}</b><span v-if="raiox.pedido.pack_id"> · pack {{ raiox.pedido.pack_id }}</span></span>
+            <span>{{ nomeVenda }} <b>{{ raiox.pedido.numeroloja }}</b><span v-if="raiox.pedido.pack_id"> · pack {{ raiox.pedido.pack_id }}</span></span>
             <span>Loja <b>{{ raiox.pedido.conta }}</b> · vendido {{ fmtDia(raiox.pedido.data_pedido) }}</span>
-            <span>Liberado {{ fmtDia(raiox.pedido.liberado_em) }}<span v-if="raiox.pedido.previsao_liberacao && !raiox.pedido.liberado_em"> (prev. {{ fmtDia(raiox.pedido.previsao_liberacao) }})</span></span>
+            <span>Liberado {{ fmtDia(raiox.pedido.liberado_em) }}<span v-if="raiox.pedido.previsao_liberacao && !raiox.pedido.liberado_em && raiox.pedido.situacao !== 'cancelado'"> (prev. {{ fmtDia(raiox.pedido.previsao_liberacao) }})</span></span>
             <span>Bling: {{ raiox.pedido.situacao_bling || '—' }}</span>
             <span><span class="rounded px-1.5 py-0.5 font-bold" :class="sitCls(raiox.pedido.situacao)">● {{ raiox.pedido.situacao_label }}</span> <span class="rounded px-1.5 py-0.5 font-bold" :class="etapaCls(raiox.pedido.etapa)">{{ raiox.pedido.etapa_label }}</span></span>
           </div>
           <table class="w-full border-collapse">
             <thead class="bg-muted text-[10px] uppercase text-muted-foreground">
-              <tr><th class="px-1.5 py-1 text-left"></th><th class="px-1.5 py-1 text-right">Previsto<br><span class="normal-case font-normal">(venda ML)</span></th><th class="px-1.5 py-1 text-right">Real<br><span class="normal-case font-normal">(extrato + fatura)</span></th><th class="px-1.5 py-1 text-right">Dif.</th></tr>
+              <tr><th class="px-1.5 py-1 text-left"></th><th class="px-1.5 py-1 text-right">Previsto<br><span class="normal-case font-normal">({{ nomeVenda.toLowerCase() }})</span></th><th class="px-1.5 py-1 text-right">Real<br><span class="normal-case font-normal">({{ raiox.comparativo.real_rotulo }})</span></th><th class="px-1.5 py-1 text-right">Dif.</th></tr>
             </thead>
             <tbody class="tabular-nums">
               <tr v-for="l in raiox.comparativo.linhas" :key="l.chave" class="border-b" :class="[l.estilo === 'bold' && 'bg-muted/40 font-bold', l.estilo === 'muted' && 'text-muted-foreground', raiox.comparativo.comparar && l.dif != null && Math.abs(l.dif) > 0.05 && 'bg-red-50 dark:bg-red-950/20']">
@@ -641,16 +663,16 @@ await carregar()
                 <template v-for="m in movimentosVisiveis" :key="m.id">
                   <tr class="border-b" :class="m.tipo.startsWith('reserva_') && 'text-muted-foreground'">
                     <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ fmtDiaHora(m.data) }}</td>
-                    <td class="whitespace-nowrap px-1.5 py-1">{{ m.origem === 'mp_extrato' ? 'extrato' : 'fatura' }}<span v-if="pagamentosDoPedido > 1 && m.pagamento_id" class="ml-1 text-[10px] text-muted-foreground" :title="'pagamento ' + m.pagamento_id">pag. …{{ String(m.pagamento_id).slice(-4) }}</span></td>
+                    <td class="whitespace-nowrap px-1.5 py-1">{{ m.origem === 'ml_fatura' ? 'fatura' : m.origem === 'shopee_carteira' ? 'carteira' : 'extrato' }}<span v-if="pagamentosDoPedido > 1 && m.pagamento_id" class="ml-1 text-[10px] text-muted-foreground" :title="'pagamento ' + m.pagamento_id">pag. …{{ String(m.pagamento_id).slice(-4) }}</span></td>
                     <td class="px-1.5 py-1">{{ tipoMov(m.tipo) }}<span v-if="m.descontado_da_venda === false && !(m.tipo === 'fatura_frete' && ((raiox.versoes.extrato.frete as number) || 0) > 0)" class="ml-1 text-muted-foreground">(cobrada à parte)</span></td>
                     <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold" :class="(m.credito || 0) > 0 ? 'text-emerald-700' : 'text-red-600'">{{ (m.credito || 0) > 0 ? '+ ' + fmtMoney(m.credito) : '− ' + fmtMoney(m.debito) }}</td>
                     <td class="px-1 py-1 text-right">
-                      <button type="button" class="rounded border px-1 text-[10px] text-muted-foreground hover:bg-muted" :title="m.origem === 'mp_extrato' ? 'a linha original do relatório do Mercado Pago' : 'o detalhe original da fatura do ML'" @click="originalAberto = originalAberto === m.id ? null : m.id">{{ originalAberto === m.id ? 'fechar' : 'original' }}</button>
+                      <button type="button" class="rounded border px-1 text-[10px] text-muted-foreground hover:bg-muted" :title="m.origem === 'ml_fatura' ? 'o detalhe original da fatura do ML' : 'a linha original como veio da plataforma'" @click="originalAberto = originalAberto === m.id ? null : m.id">{{ originalAberto === m.id ? 'fechar' : 'original' }}</button>
                     </td>
                   </tr>
                   <tr v-if="originalAberto === m.id" class="border-b bg-muted/40">
                     <td colspan="5" class="px-2 py-1.5">
-                      <div class="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">{{ m.origem === 'mp_extrato' ? 'Linha original do relatório de liberações (Mercado Pago)' : 'Detalhe original da fatura (Mercado Livre)' }}</div>
+                      <div class="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">{{ m.origem === 'ml_fatura' ? 'Detalhe original da fatura (Mercado Livre)' : m.origem === 'shopee_carteira' ? 'Lançamento original da carteira (Shopee)' : 'Linha original do relatório de liberações (Mercado Pago)' }}</div>
                       <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
                         <template v-for="(v, k) in m.original || {}" :key="String(k)">
                           <span class="font-mono text-muted-foreground">{{ k }}</span><span class="break-all">{{ typeof v === 'object' ? JSON.stringify(v) : String(v) }}</span>

@@ -39,7 +39,7 @@ from app.models import (
     Refund,
     SituacaoBling,
 )
-from app.models.conciliacao import ETAPA_PELO_ROBO, ORIGEM_EXTRATO, ORIGEM_FATURA
+from app.models.conciliacao import ETAPA_PELO_ROBO, ORIGEM_EXTRATO, ORIGEM_FATURA, ORIGENS_EXTRATO
 from app.services.conciliacao_extrato import (
     TIPOS_RESERVA,
     bling_store_ids_da_loja,
@@ -279,6 +279,16 @@ def etapa_do_pedido(
         nova = "pendencia"
     if etapa_anterior == "reaberto" and nova != "conciliado":
         nova = "reaberto"
+    if nova == "conciliado" and situacao == "cancelado":
+        # Venda desfeita é zero a zero: finaliza de cara (15/10, Vinicius). Se cair
+        # algo depois, o "movimento novo reabre" cuida.
+        out.update(
+            etapa="finalizado",
+            etapa_em=agora,
+            etapa_por=ETAPA_PELO_ROBO,
+            etapa_motivo="venda desfeita, zero a zero",
+        )
+        return out
     if nova == "conciliado":
         base = out["bateu_em"] or agora
         sem_novidade = ultimo_movimento_em is None or ultimo_movimento_em <= base + timedelta(
@@ -363,6 +373,10 @@ async def recalcular_loja(
     }
     movs_por_numero: dict[str, list[ConciliacaoMovimento]] = defaultdict(list)
     for m in movs:
+        if not m.pedido_bling and (m.vinculado_por or m.classificacao):
+            # Uma pessoa desvinculou ou classificou sem pedido: não é deste pedido,
+            # mesmo que o nº da venda aponte pra ele (15/10).
+            continue
         numero = (
             m.pedido_bling
             or numero_por_numeroloja.get(m.pedido_marketplace or "")
@@ -406,7 +420,7 @@ async def recalcular_loja(
         numeroloja = str(cab.numeroloja) if cab.numeroloja else None
         venda = fin_por_numeroloja.get(numeroloja) if numeroloja else None
         meus = movs_por_numero.get(numero, [])
-        extrato = [m for m in meus if m.origem == ORIGEM_EXTRATO]
+        extrato = [m for m in meus if m.origem in ORIGENS_EXTRATO]
         fatura_movs = [m for m in meus if m.origem == ORIGEM_FATURA]
         fatura = {
             "tarifa": _soma(
@@ -563,6 +577,9 @@ async def recalcular_loja(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
                     ConciliacaoMovimento.pedido_bling.is_(None),
                     ConciliacaoMovimento.pedido_marketplace.isnot(None),
+                    # linha que uma PESSOA desvinculou fica como ela deixou (15/10:
+                    # o "Desvincular" era desfeito pelo recálculo no segundo seguinte)
+                    ConciliacaoMovimento.vinculado_por.is_(None),
                 )
                 .limit(5000)
             )

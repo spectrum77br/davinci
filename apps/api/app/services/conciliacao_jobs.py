@@ -25,6 +25,7 @@ from app.services.atendimento.clientes import cliente_da_integracao
 from app.services.conciliacao_calculo import recalcular_loja
 from app.services.conciliacao_extrato import run_extrato_sync
 from app.services.conciliacao_fatura import run_fatura_sync
+from app.services.conciliacao_shopee import run_carteira_sync
 
 logger = structlog.get_logger()
 
@@ -87,7 +88,10 @@ async def sincronizar_loja(
             if loja is None:
                 return {"skipped": "loja_nao_ligada", "integration_id": str(integration_id)}
             resultado["loja"] = loja.conta
+            plataforma = getattr(loja.platform, "value", str(loja.platform))
             cliente = await _cliente(session, loja) if (fatura or extrato) else None
+            if fatura and plataforma != "ml":
+                fatura = False  # só o ML tem fatura; na Shopee as tarifas já vêm na renda
             if fatura:
                 try:
                     resultado["fatura"] = await run_fatura_sync(session, loja, cliente)
@@ -98,7 +102,10 @@ async def sincronizar_loja(
                 await session.commit()
             if extrato:
                 try:
-                    resultado["extrato"] = await run_extrato_sync(session, loja, cliente)
+                    if plataforma == "shopee":
+                        resultado["extrato"] = await run_carteira_sync(session, loja, cliente)
+                    else:
+                        resultado["extrato"] = await run_extrato_sync(session, loja, cliente)
                 except Exception as e:  # noqa: BLE001
                     loja.ultimo_erro = f"extrato: {type(e).__name__}: {str(e)[:300]}"
                     resultado["extrato"] = {"erro": loja.ultimo_erro}

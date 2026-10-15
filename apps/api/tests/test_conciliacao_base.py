@@ -1157,6 +1157,37 @@ async def test_extrato_vincular_classificar_e_fechar_o_dia(db, make_user, auth_a
     assert r.json()["fechado"]["por"] == quem.email and r.json()["totais"]["diferenca"] == 0.0
     r = await client.get("/api/conciliacao/extrato", params={"loja": "jlas2", "dia": "2026-10-13"})
     assert r.json()["fechado"]["por"] == quem.email
+    # dia fechado não se mexe (15/10): vincular, classificar e desvincular dão 409
+    for body in ({"classificacao": "ajuste"}, {"desvincular": True}, {"pedido_bling": "301500"}):
+        r = await client.patch(f"/api/conciliacao/movimentos/{pend.id}", json=body)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "dia_fechado", body
+        assert r.json()["detail"]["por"] == quem.email
+    r = await client.post("/api/conciliacao/dias/2026-10-13/reabrir", params={"loja": "jlas2"})
+    assert r.status_code == 200
+    # desvincular uma linha que o robô casou pelo nº da venda: fica desvinculada (o
+    # recálculo não religa o que uma pessoa desfez) até alguém vincular ou classificar
+    db.add(
+        _pedido_bling(
+            "301102", "2000018405611066", datetime(2026, 10, 1, 12, tzinfo=UTC), "880.98", 500.0
+        )
+    )
+    await db.commit()
+    venda = movs["venda"]
+    r = await client.patch(f"/api/conciliacao/movimentos/{venda.id}", json={"desvincular": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "pendente" and r.json()["movimento"]["pedido_bling"] is None
+    r = await client.get("/api/conciliacao/extrato", params={"loja": "jlas2", "dia": "2026-10-13"})
+    linha = next(x for x in r.json()["movimentos"] if x["id"] == str(venda.id))
+    assert linha["status"] == "pendente" and linha["vinculado_por"] == quem.email
+    r = await client.patch(
+        f"/api/conciliacao/movimentos/{venda.id}", json={"pedido_bling": "301102"}
+    )
+    assert r.json()["status"] == "manual" and r.json()["movimento"]["pedido_bling"] == "301102"
+    # fecha de novo pra seguir o teste como antes
+    r = await client.post("/api/conciliacao/dias/2026-10-13/fechar", params={"loja": "jlas2"})
+    assert r.status_code == 200, r.text
+    r = await client.post("/api/conciliacao/dias/2026-10-13/reabrir", params={"loja": "jlas2"})
+    assert r.status_code == 200
     # classifica (vira sem pedido) e desvincula
     r = await client.patch(
         f"/api/conciliacao/movimentos/{pend.id}", json={"classificacao": "ajuste"}
@@ -1171,7 +1202,7 @@ async def test_extrato_vincular_classificar_e_fechar_o_dia(db, make_user, auth_a
     assert r.status_code == 422
     r = await client.patch(f"/api/conciliacao/movimentos/{pend.id}", json={"desvincular": True})
     assert r.json()["status"] == "pendente"
-    # reabre o dia
+    # reabrir um dia já aberto não quebra
     r = await client.post("/api/conciliacao/dias/2026-10-13/reabrir", params={"loja": "jlas2"})
     assert r.status_code == 200 and r.json()["fechado"] is None
     # quem só vê não mexe
@@ -1440,3 +1471,17 @@ async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_
     assert r.json()["caixa"]["bate"] is None and r.json()["fatura"]["bate"] is None
     r = await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-13"})
     assert r.status_code == 422
+
+
+def test_cancelado_finaliza_de_cara():
+    """Venda desfeita é zero a zero: nem espera os 7 dias (15/10)."""
+    from app.services.conciliacao_calculo import etapa_do_pedido
+
+    out = etapa_do_pedido(
+        agora=datetime(2026, 10, 15, 12, tzinfo=UTC),
+        atual=None,
+        situacao="cancelado",
+        ultimo_movimento_em=datetime(2026, 10, 15, 11, tzinfo=UTC),
+    )
+    assert out["etapa"] == "finalizado" and out["etapa_por"] == "robô"
+    assert out["etapa_motivo"] == "venda desfeita, zero a zero"
