@@ -426,3 +426,60 @@ async def test_reler_financeiro_liquidados_so_relê_estimado_ou_velho(db, make_u
     await db.flush()
     r = await mod.reler_financeiro_liquidados(db, loja)
     assert r["relidos"] == 0 and r["candidatos"] == 0
+
+
+async def test_loja_do_bling_pelo_nome_so_na_mesma_plataforma_e_pedido_fora_some(db, make_user):
+    """15/10: a Shopee também tem uma loja "Mini"; os pedidos dela entravam no painel
+    da TikTok Mini. Pelo nome só vale a mesma plataforma, e pedido que saiu do escopo
+    some no recálculo."""
+    from app.models import ConciliacaoPedido
+
+    loja = await _loja_tiktok(db, make_user)
+    dono = (await db.execute(select(Integration))).scalar_one().user_id
+    db.add(
+        StoreInfo(user_id=dono, platform="shopee", account_name="Mini", bling_store_id="204000009")
+    )
+    db.add(
+        BlingOrder(
+            bling_id=7000,
+            numero="330001",
+            numeroloja="261015N1BY9U6Q",
+            data=datetime(2026, 10, 15, 12, tzinfo=UTC),
+            total=Decimal("100"),
+            totalprodutos=Decimal("100"),
+            situacao="Atendido",
+            loja="204000009",
+            item_index=0,
+            preco_custo=50.0,
+            item_quantidade=1,
+            item_codigo="x.sa",
+        )
+    )
+    # um pedido que entrou errado antes do conserto
+    db.add(
+        ConciliacaoPedido(
+            integration_id=loja.integration_id,
+            pedido_bling="330001",
+            platform=IntegrationPlatform.TIKTOK,
+            numeroloja="261015N1BY9U6Q",
+            conta="Mini",
+            situacao="sem_venda",
+            etapa="aguardando",
+        )
+    )
+    await db.commit()
+    r = await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    assert r["pedidos"] == 1 and r.get("removidos") == 1
+    numeros = (
+        (
+            await db.execute(
+                select(ConciliacaoPedido.pedido_bling).where(
+                    ConciliacaoPedido.integration_id == loja.integration_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert numeros == ["320001"]

@@ -494,3 +494,25 @@ OK do Vinicius: "1 pode fazer · 2 pode criar na lista do robô e deixa somente 
 **Como a TikTok funciona (diferente do MP e da Shopee):** não há carteira com saldo. Todo dia a TikTok fecha um **extrato** com as vendas liquidadas naquele dia (uma transação por pedido, com a conta aberta campo a campo) e manda o total pro banco como **um repasse**. Então a prova dos nove do dia é: soma das transações = `settlement_amount` do extrato = valor do repasse pago.
 
 **Proposta pro painel TikTok (passo seguinte, com OK):** ler de madrugada os extratos de ontem e as transações deles (uma linha por pedido, casando `order_id` com o `numeroloja` do Bling) + os repasses; Extrato do dia com a prova "transações = extrato = repasse" no lugar do saldo; a venda (previsto) é o financeiro que a Margem já lê (o mesmo endpoint por pedido) — e pra pedido ainda não liquidado existe `GET /finance/202507/orders/unsettled` (a Margem já usa) pra prever. Telas iguais, aba TikTok.
+
+## 23. TikTok no painel (15/10, tarde) — loja Mini desde 01/10 (commit 25cfbeed)
+
+OK do Vinicius: "faz sentido, pode fazer o tiktok desde 01/10". Entrou no mesmo molde do ML e da Shopee, com a diferença que a sondagem (seção 22) mostrou: **a TikTok não tem carteira com saldo**.
+
+**Como o robô lê (todo dia às 06:00, junto com as outras lojas):**
+
+| O quê | De onde | Vira no painel |
+|---|---|---|
+| Extrato do dia (`statement`, só `PAID`) | `GET /finance/202309/statements` | a chave de leitura (`conciliacao_sync`, um por extrato; lido não relê) |
+| Transações do extrato (uma por pedido) | `GET /finance/202309/statements/{id}/statement_transactions` | uma linha por pedido: crédito = liquidação (`settlement_amount`); negativa = **estorno**; tipo ≠ ORDER = **ajuste da TikTok**. `order_id` casa com o `numeroloja` do Bling |
+| Repasse pro banco | `GET /finance/202309/payments` (mesmo `payment_id` do extrato) | uma linha **Saque** "Repasse pro banco ***conta · pago dd/mm hh:mm", classificada sozinha |
+
+- **Saldo sintético**: o extrato começa em 0, cada pedido sobe, o repasse zera. O rodapé do Extrato do dia vira *Início do extrato · Pedidos liquidados · Repasse pro banco · Pedidos − repasse · Tem que dar · Diferença* — a prova dos nove é **pedidos = extrato = repasse**. Dia com diferença não fecha sozinho e aparece no "Onde agir".
+- **Dia do extrato**: a TikTok fecha o extrato à meia-noite UTC = **21:00 BRT da véspera** e paga ~00:20. O extrato com `statement_time` 14/10 00:00 UTC aparece no painel como dia **13/10** (21:00); o dinheiro cai no banco em 14/10. Se for melhor pelo dia do banco, é uma linha pra mudar.
+- **Venda (previsto)**: a Margem já guarda as transações do pedido (`raw.settlements`). Enquanto não liquida, a Margem tem a **estimativa do unsettled** (o mesmo número da Central do Vendedor) — é o que aparece em "A liberar". Na hora que o extrato liquida um pedido que na Margem ainda era estimativa, o robô **relê o financeiro** daquele pedido (`reler_financeiro_liquidados`, até 60 por rodada) — senão a estimativa (centavos diferente) viraria "recebido a menos" falso.
+- **Grade (aba Pedidos)**: Valor = produtos **após o desconto da loja** (`after_seller_discounts_subtotal_amount`), Tarifa = todas as taxas (`fee_amount`: comissão + taxa de transação + afiliados), Frete = parte da loja (`shipping_cost_amount`), Extras = o que a TikTok acrescentou na receita (subsídio no produto) — entra **negativo**. Valor − tarifa − frete − extras = liquidação.
+- **Raio-X**: Previsto (transações que a Margem guardou) × Real (linhas do extrato diário) com as linhas da TikTok: *Vendas brutas (preço de tabela) · − Desconto da loja · = Produtos após desconto · ± Subsídio da TikTok e outros na receita · = Receita · − Comissão · − Taxa de transação · − Afiliados · (− Outras taxas) · ± Frete (parte da loja) · (± Ajustes) · (± Outros) · ± Depois da liquidação · = Liquidação do pedido*. A identidade que a Margem conferiu em pedidos reais: **liquidação = receita + taxas + frete (+ ajustes)**; o que sobrar cai em "Outros" pra tabela sempre fechar. Com os números da sondagem (pedido 586488303325120242): 1.300,65 de tabela − 888,35 de desconto da loja = 412,30; taxas 67,85 (24,74 comissão + 6,00 transação + 37,11 afiliados); frete 0 (a loja cobrou 23,90 e pagou 23,90) → **344,45**.
+- **Resumo / Dinheiro nas plataformas**: Na conta = — (a TikTok não guarda saldo: "repassa pro banco todo dia"); A liberar = soma das estimativas dos pedidos aguardando.
+- Vigia de Conciliação e fechamento automático do dia valem igual (a loja entra na rodada das 07:00).
+
+Testes: `tests/test_conciliacao_tiktok.py` (mapeamento, leitura por extrato + segunda rodada sem duplicar, Extrato do dia fechando em zero, Raio-X previsto × real linha a linha, releitura do financeiro só pra estimado/velho).

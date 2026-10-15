@@ -26,7 +26,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -744,6 +744,19 @@ async def recalcular_loja(
                 setattr(atual, k, v)
         contagem[calc["situacao"]] += 1
         contagem[f"etapa:{atual.etapa}"] += 1
+
+    # 3b. Pedido que saiu do escopo da loja (loja do Bling desligada desta conta,
+    # pedido apagado no Bling) some do painel — 15/10: os pedidos da Shopee "Mini"
+    # que tinham entrado na TikTok Mini pelo nome igual.
+    fora = [n for n in existentes if n not in por_numero]
+    if por_numero and fora:
+        await session.execute(
+            delete(ConciliacaoPedido).where(
+                ConciliacaoPedido.integration_id == loja.integration_id,
+                ConciliacaoPedido.pedido_bling.in_(fora),
+            )
+        )
+        contagem["removidos"] = len(fora)
 
     # 4. Movimento de pedido anterior ao início: classifica, não cobra.
     antigos = (
