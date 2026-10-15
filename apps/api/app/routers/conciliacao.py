@@ -22,6 +22,7 @@ porque o refresh token do ML é de uso único.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
@@ -2545,7 +2546,17 @@ async def sonda_bonus(
 
     cliente = await _cliente_da_conta(session, conta)
     chave = periodo or datetime.now(_BRT).date().strftime("%Y-%m-01")
-    resumo = await ler_resumo(cliente, chave)
+    # O balde de 5/min do ML é dividido com o robô da Margem (:15/:45): no 429,
+    # espera um minuto e tenta de novo, como a leitura da fatura faz.
+    resumo: dict[str, Any] = {}
+    for tentativa in range(4):
+        try:
+            resumo = await ler_resumo(cliente, chave)
+            break
+        except RuntimeError as e:
+            if "429" not in str(e) or tentativa == 3:
+                raise
+            await asyncio.sleep(65)
     bill = resumo.get("bill_includes") or {}
     per = resumo.get("period") or {}
     detalhes: list[dict[str, Any]] = []
@@ -2805,8 +2816,14 @@ async def sonda_shopee(
         )
 
     # 3) repasses pro banco (as duas rotas que a Shopee documenta)
+    # get_payout_info pede `cursor` ("" na primeira página; depois o next_cursor da resposta)
     rep = {"page_size": 100, "page_no": 0, "payout_time_from": t_de, "payout_time_to": agora}
-    await chama("repasses_info", "POST", "/api/v2/payment/get_payout_info", json=rep)
+    await chama(
+        "repasses_info",
+        "POST",
+        "/api/v2/payment/get_payout_info",
+        json={"page_size": 100, "cursor": "", "payout_time_from": t_de, "payout_time_to": agora},
+    )
     await chama(
         "repasses_detalhe",
         "GET",
