@@ -1587,6 +1587,7 @@ _COLUNAS_XLSX = [
     ("Margem", "margem"),
     ("Situação", "situacao_label"),
     ("Motivo", "motivo"),
+    ("Status Bling", "situacao_bling"),
     ("Etapa", "etapa_label"),
     ("Etapa em", "etapa_em"),
     ("Etapa por", "etapa_por"),

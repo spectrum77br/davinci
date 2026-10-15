@@ -287,7 +287,7 @@ onMounted(() => {
             <tbody>
               <tr v-if="loading && !dados"><td colspan="14" class="py-8 text-center text-muted-foreground"><Loader2 class="mr-1 inline size-4 animate-spin" /> carregando…</td></tr>
               <tr v-else-if="erro"><td colspan="14" class="py-8 text-center text-red-600">{{ erro }}</td></tr>
-              <tr v-else-if="dados && !movimentosVisiveis.length"><td colspan="14" class="py-8 text-center text-muted-foreground">{{ dados.totais.linhas ? (dados.movimentos.length ? 'só reservas neste dia (escondidas)' : 'nada com esse filtro') : 'nenhum movimento lido neste dia (o extrato é lido de madrugada; "Sincronizar agora" pede o de ontem)' }}</td></tr>
+              <tr v-else-if="dados && !movimentosVisiveis.length"><td colspan="14" class="py-8 text-center text-muted-foreground">{{ dados.totais.linhas ? (dados.movimentos.length ? 'só reservas neste dia (escondidas)' : 'nada com esse filtro') : (props.plataforma === 'tiktok' ? 'nenhum extrato da TikTok neste dia (ela fecha um extrato por dia e repassa pro banco de madrugada; o robô lê às 06:00 — "Sincronizar agora" busca o que já saiu)' : 'nenhum movimento lido neste dia (o extrato é lido de madrugada; "Sincronizar agora" pede o de ontem)') }}</td></tr>
               <tr
                 v-for="m in movimentosVisiveis"
                 :key="m.id"
