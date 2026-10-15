@@ -671,7 +671,7 @@ await carregar()
                   <template v-else>—</template>
                 </td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" :class="!p.liberado_em && 'font-normal text-muted-foreground'">
-                  {{ fmtMoney(p.recebido) }}<span v-if="p.saidas_depois" class="ml-1 font-bold text-red-600">− {{ fmtMoney(p.saidas_depois) }}</span>
+                  {{ fmtMoney(p.recebido) }}<span v-if="p.saidas_depois" class="ml-1 cursor-help font-bold text-red-600" :title="`entrou ${fmtMoney(p.liberado_valor)} · saiu depois ${fmtMoney(p.saidas_depois)} (estorno) · ficou ${fmtMoney(p.recebido)}`">↩</span>
                 </td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right font-bold tabular-nums" :class="sinal(p.dif_previsto_recebido, { pos: 'text-emerald-700', neg: 'text-red-600' })">
                   <template v-if="p.dif_previsto_recebido !== null">{{ p.dif_previsto_recebido > 0 ? '+ ' : '' }}{{ fmtMoney(p.dif_previsto_recebido) }}</template>
@@ -729,7 +729,7 @@ await carregar()
                 <td class="px-1.5 py-1">{{ l.rotulo }}</td>
                 <td class="px-1.5 py-1 text-right" :class="l.previsto == null && 'text-muted-foreground'">{{ fmtMoney(l.previsto) }}</td>
                 <td class="px-1.5 py-1 text-right" :class="l.real == null && 'text-muted-foreground'">{{ fmtMoney(l.real) }}</td>
-                <td class="px-1.5 py-1 text-right" :class="[l.dif == null && 'text-muted-foreground', raiox.comparativo.comparar && l.dif != null && (Math.abs(l.dif) > 0.05 ? 'font-bold text-red-600' : 'text-emerald-700')]">
+                <td class="whitespace-nowrap px-1.5 py-1 text-right" :class="[l.dif == null && 'text-muted-foreground', raiox.comparativo.comparar && l.dif != null && (Math.abs(l.dif) > 0.05 ? 'font-bold text-red-600' : 'text-emerald-700')]">
                   <template v-if="l.dif == null || !raiox.comparativo.comparar">—</template>
                   <template v-else>{{ fmtMoney(l.dif) }} {{ Math.abs(l.dif) > 0.05 ? '✖' : '✔' }}</template>
                 </td>

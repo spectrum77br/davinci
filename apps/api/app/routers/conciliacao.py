@@ -1281,10 +1281,29 @@ def _comparativo(
     a_parte = round(a_parte, 2)
     liberado = n(p.liberado_valor)
     recebido = n(p.recebido)
-    depois = (
-        round(recebido - liberado, 2) if (recebido is not None and liberado is not None) else None
-    )
-    real_liquido = round(recebido - a_parte, 2) if recebido is not None else None
+    # "depois" = só estornos/ajustes depois do lançamento (frete cobrado depois, como a
+    # etiqueta Easy Ship, faz parte da liquidação — ver saidas_depois no cálculo)
+    saidas = n(p.saidas_depois) or 0.0
+    depois = round(-saidas, 2) if (recebido is not None and liberado is not None) else None
+    # A linha final compara o que a plataforma LANÇOU com o previsto; o que ficou com a
+    # loja depois de estornos vai numa linha própria (15/10, Vinicius: "759,53 em cima
+    # de um x tá estranho" — comparar o previsto com o líquido pós-estorno não diz nada).
+    real_liquido = round(recebido - a_parte + saidas, 2) if recebido is not None else None
+    ficou = round(recebido - a_parte, 2) if recebido is not None else None
+
+    def _fechar(linhas_: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if depois is not None and abs(depois) > 0.005:
+            linhas_.append(
+                {
+                    "chave": "ficou",
+                    "rotulo": "= Ficou com a loja (depois de estornos e ajustes)",
+                    "previsto": None,
+                    "real": ficou,
+                    "dif": None,
+                    "estilo": "bold",
+                }
+            )
+        return linhas_
 
     def linha(chave, rotulo, previsto, real, *, compara=True, estilo="") -> dict[str, Any]:
         dif = (
@@ -1390,7 +1409,7 @@ def _comparativo(
                 ),
             ]
         return {
-            "linhas": linhas,
+            "linhas": _fechar(linhas),
             "real_rotulo": "transações da Amazon",
             "comparar": p.situacao != "cancelado",
             "nota": (
@@ -1489,7 +1508,7 @@ def _comparativo(
                 ),
             ]
         return {
-            "linhas": linhas,
+            "linhas": _fechar(linhas),
             "real_rotulo": "extrato diário da TikTok",
             "comparar": p.situacao != "cancelado",
             "nota": (
@@ -1564,7 +1583,7 @@ def _comparativo(
                 linha("liquido", "= Renda do pedido", sh["renda"], real_liquido, estilo="bold"),
             ]
             return {
-                "linhas": linhas,
+                "linhas": _fechar(linhas),
                 "real_rotulo": "escrow na liberação + carteira",
                 "comparar": p.situacao != "cancelado",
                 "nota": (
@@ -1607,7 +1626,7 @@ def _comparativo(
             linha("liquido", "= Líquido", n(v.get("liquido")), real_liquido, estilo="bold"),
         ]
         return {
-            "linhas": linhas,
+            "linhas": _fechar(linhas),
             "real_rotulo": "escrow na liberação + carteira",
             "comparar": p.situacao != "cancelado",
             "nota": (
@@ -1677,7 +1696,7 @@ def _comparativo(
         linhas = [x for x in linhas if x["chave"] != "a_parte"]
     fl = n(v.get("frete"))
     return {
-        "linhas": linhas,
+        "linhas": _fechar(linhas),
         "real_rotulo": "extrato + fatura",
         "rodape": (
             (
