@@ -1155,6 +1155,56 @@ def _comparativo(
             "estilo": estilo,
         }
 
+    plataforma = getattr(p.platform, "value", str(p.platform))
+    if plataforma == "shopee":
+        # A carteira só traz o líquido. A abertura REAL (tarifa, frete, cupom) é o
+        # escrow que a Shopee fecha na liberação — o robô relê na hora de liberar, e
+        # é isso que a Margem guarda. Até liberar, só existe o previsto.
+        liberou = recebido is not None
+
+        def real(x: Any) -> float | None:
+            return n(x) if liberou else None
+
+        linhas = [
+            linha("produtos", "Produtos (preço da venda)", n(v.get("valor")), real(v.get("valor"))),
+            linha(
+                "tarifa",
+                "− Tarifas da Shopee (comissão, serviço, afiliados)",
+                n(v.get("tarifa")),
+                real(v.get("tarifa")),
+            ),
+            linha("frete", "− Frete (parte da loja)", n(v.get("frete")), real(v.get("frete"))),
+            linha("cupom", "− Cupom / desconto da loja", n(v.get("cupom")), real(v.get("cupom"))),
+            linha(
+                "depois",
+                "± Depois da liberação (estornos, ajustes)",
+                0.0 if tem_extrato else None,
+                depois,
+                compara=False,
+                estilo="muted",
+            ),
+            linha("liquido", "= Líquido", n(v.get("liquido")), real_liquido, estilo="bold"),
+        ]
+        return {
+            "linhas": linhas,
+            "real_rotulo": "escrow na liberação + carteira",
+            "comparar": p.situacao != "cancelado",
+            "nota": (
+                "venda desfeita: as colunas mostram o que entrou e o que saiu"
+                if p.situacao == "cancelado"
+                else (
+                    None
+                    if liberou
+                    else "a Shopee fecha a conta da venda na liberação; até lá só existe o previsto"
+                )
+            ),
+            "rodape": (
+                "a carteira da Shopee só traz o líquido; a abertura real é o escrow que a "
+                "Shopee fecha na liberação (o robô relê na hora) · o líquido real é o que a "
+                "carteira pagou"
+            ),
+            "frete_liquido_loja": None,
+        }
     fc = n(v.get("frete_comprador")) or 0.0
     linhas = [
         linha("produtos", "Produtos (preço da venda)", n(v.get("valor")), n(e.get("produtos"))),
@@ -1202,12 +1252,20 @@ def _comparativo(
     ]
     if fc <= 0.005:
         linhas = [x for x in linhas if x["chave"] not in ("frete_comprador", "total")]
-    plataforma = getattr(p.platform, "value", str(p.platform))
     if plataforma != "ml":
         linhas = [x for x in linhas if x["chave"] != "a_parte"]
+    fl = n(v.get("frete"))
     return {
         "linhas": linhas,
-        "real_rotulo": "carteira da Shopee" if plataforma == "shopee" else "extrato + fatura",
+        "real_rotulo": "extrato + fatura",
+        "rodape": (
+            (
+                f"frete líquido pra loja {fl:.2f} (frete inteiro − o que o comprador pagou) · "
+                if fl is not None
+                else ""
+            )
+            + '"Real" é o extrato do Mercado Pago mais o que a fatura cobra à parte'
+        ),
         "comparar": p.situacao != "cancelado",
         "nota": (
             "venda desfeita: as colunas mostram o que entrou e o que saiu, não há previsto a cobrar"

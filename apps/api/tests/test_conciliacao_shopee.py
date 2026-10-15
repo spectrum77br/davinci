@@ -280,3 +280,51 @@ async def test_reler_escrow_liberados_so_relê_leitura_mais_velha_que_a_liberaca
     chamados.clear()
     r = await mod.reler_escrow_liberados(db, loja)
     assert r["candidatos"] == 0 and chamados == []
+
+
+def test_comparativo_shopee_preenche_o_real_com_o_escrow_da_liberacao():
+    from app.models import ConciliacaoPedido
+    from app.routers.conciliacao import _comparativo
+
+    base = {
+        "platform": IntegrationPlatform.SHOPEE,
+        "pedido_bling": "302371",
+        "situacao": "bateu",
+        "venda_valor": Decimal("1969.56"),
+        "venda_tarifa": Decimal("314.40"),
+        "venda_frete": Decimal("9.62"),
+        "venda_cupom": Decimal("933.00"),
+        "venda_liquido": Decimal("1742.11"),
+    }
+    versoes = {
+        "venda": {
+            "valor": 1969.56,
+            "tarifa": 314.40,
+            "frete": 9.62,
+            "cupom": 933.0,
+            "liquido": 1742.11,
+        },
+        "extrato": {"valor": None, "frete": None, "tarifa": None},
+    }
+    liberado = ConciliacaoPedido(
+        **base, recebido=Decimal("1742.11"), liberado_valor=Decimal("1742.11")
+    )
+    c = _comparativo(liberado, versoes, [])
+    por = {x["chave"]: x for x in c["linhas"]}
+    assert por["tarifa"]["real"] == 314.4 and por["tarifa"]["dif"] == 0.0
+    assert por["liquido"] == {
+        "chave": "liquido",
+        "rotulo": "= Líquido",
+        "previsto": 1742.11,
+        "real": 1742.11,
+        "dif": 0.0,
+        "estilo": "bold",
+    }
+    assert c["real_rotulo"] == "escrow na liberação + carteira" and c["nota"] is None
+    assert "a_parte" not in por and "frete_comprador" not in por
+    # antes de liberar: só o previsto
+    aguardando = ConciliacaoPedido(**{**base, "situacao": "aguardando"}, recebido=None)
+    c2 = _comparativo(aguardando, versoes, [])
+    por2 = {x["chave"]: x for x in c2["linhas"]}
+    assert por2["tarifa"]["real"] is None and por2["liquido"]["real"] is None
+    assert "até lá só existe o previsto" in c2["nota"]

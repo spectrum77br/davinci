@@ -102,7 +102,7 @@ type Movimento = {
 }
 type Versao = Record<string, number | string | null | undefined>
 type LinhaComparativo = { chave: string; rotulo: string; previsto: number | null; real: number | null; dif: number | null; estilo: string }
-type Comparativo = { linhas: LinhaComparativo[]; real_rotulo: string; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
+type Comparativo = { linhas: LinhaComparativo[]; real_rotulo: string; rodape: string | null; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
 type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[] }
 
 const { api } = useApi()
@@ -646,7 +646,7 @@ await carregar()
           </table>
           <div class="pt-0.5 text-[10px] text-muted-foreground">
             <span v-if="raiox.comparativo.nota">{{ raiox.comparativo.nota }}</span>
-            <span v-else-if="raiox.comparativo.frete_liquido_loja != null">frete líquido pra loja {{ fmtMoney(raiox.comparativo.frete_liquido_loja) }} (frete inteiro − o que o comprador pagou) · "Real" é o extrato do Mercado Pago mais o que a fatura cobra à parte</span>
+            <span v-else-if="raiox.comparativo.rodape">{{ raiox.comparativo.rodape }}</span>
           </div>
           <div class="pt-1 font-bold text-[#1f3a5f] dark:text-slate-200">Movimentos deste pedido</div>
           <div class="max-h-56 overflow-auto rounded border">
