@@ -476,3 +476,21 @@ OK do Vinicius: "1 pode fazer · 2 pode criar na lista do robô e deixa somente 
 - **Cancelado pelo Bling**: pedido com situação "Cancelado" no Bling, sem venda com valor na plataforma e sem nenhum dinheiro, vira "Cancelado" (custo 0, finaliza de cara). Resolve os cancelados da Shopee, que nunca ganham escrow (15 dos 27 "venda não lida" da Jlas).
 
 - **Raio-X da Shopee = tela "Detalhes de Renda" da Shopee (15/10, pedido 301438):** a Margem guarda as taxas BRUTAS (722,36) e o desconto de tabela (5.078), e a tela da Shopee mostra Preço de venda 4.925 → − subsídio da Shopee no produto 417 = Subtotal dos produtos 4.508 → ± frete da loja 0 → − cupons da loja 3 → − taxas e encargos 354,85 (comissão 220,32 + serviço 85,04 + afiliados 49 + proteção 0,49, já líquidas do subsídio) = Renda 4.150,15. Agora `conta_shopee` (a partir do escrow guardado) alimenta a aba Pedidos (Valor = preço de venda, Tarifa = taxas líquidas, Frete = parte da loja, Extras = subsídio + cupons) e o Raio-X traz exatamente essas linhas.
+
+
+---
+
+## 22. Sondagem TikTok (15/10, 12:20 BRT) — a loja que mais vende: " Mini"
+
+`GET /api/conciliacao/sonda/tiktok?dias=30` (só leitura; sem `conta` escolhe a loja TikTok com mais vendas lidas pela Margem em 30 dias). Tudo com a chave que o DaVinci já tem (a Margem já lê o financeiro por pedido na mesma API).
+
+| Fonte | Rota (Finance API v202309) | Resultado em 30 dias |
+|---|---|---|
+| Extratos (statements) | `GET /finance/202309/statements` (statement_time_ge/lt, page 50) | **200**. 30 extratos, um por dia, todos `PAID`, 456.429,82 liquidados. Campos: id, statement_time, revenue_amount, fee_amount, shipping_cost_amount, adjustment_amount, net_sales_amount, settlement_amount, payment_id, payment_status, payment_time. |
+| Transações de um extrato | `GET /finance/202309/statements/{id}/statement_transactions` (page 100) | **200**. 14 linhas (tipo `ORDER`, todas com `order_id`), soma = o `settlement_amount` do extrato (9.835,09). ~60 campos por linha: gross_sales, seller_discount, platform_discount, customer_payment, platform_commission, affiliate_commission, transaction_fee, shipping (cobrado, pago pelo cliente, subsídio), refunds, adjustment, settlement_amount. |
+| Transações de um pedido | `GET /finance/202309/orders/{order_id}/statement_transactions` | **200** (é o que a Margem já lê). |
+| Repasses pro banco (payments) | `GET /finance/202309/payments` (create_time_ge/lt) | **200**. 22 repasses, todos `PAID`, 447.875,99; cada um é a liquidação de UM extrato (`payment_id` do extrato = `id` do repasse; ex. 9.835,09), com `bank_account` e `paid_time`. |
+
+**Como a TikTok funciona (diferente do MP e da Shopee):** não há carteira com saldo. Todo dia a TikTok fecha um **extrato** com as vendas liquidadas naquele dia (uma transação por pedido, com a conta aberta campo a campo) e manda o total pro banco como **um repasse**. Então a prova dos nove do dia é: soma das transações = `settlement_amount` do extrato = valor do repasse pago.
+
+**Proposta pro painel TikTok (passo seguinte, com OK):** ler de madrugada os extratos de ontem e as transações deles (uma linha por pedido, casando `order_id` com o `numeroloja` do Bling) + os repasses; Extrato do dia com a prova "transações = extrato = repasse" no lugar do saldo; a venda (previsto) é o financeiro que a Margem já lê (o mesmo endpoint por pedido) — e pra pedido ainda não liquidado existe `GET /finance/202507/orders/unsettled` (a Margem já usa) pra prever. Telas iguais, aba TikTok.
