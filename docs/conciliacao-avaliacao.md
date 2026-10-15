@@ -527,3 +527,28 @@ OK do Vinicius: "faz sentido, pode fazer o tiktok desde 01/10". Entrou no mesmo 
 **Regra das colunas Tarifa × Extras (15/10, 14:00 BRT — decisão dele depois de ver as opções):** "tarifa é tarifa, aquela porcentagem sempre igual; afiliado, cupom, tudo que for assim entra em Extras". Valor fica como está em cada plataforma (Shopee = preço de venda com o subsídio da loja em Extras; TikTok = preço após o desconto da loja). **Shopee:** Tarifa = comissão + taxa de serviço + taxa de transação + encargos; **Afiliados** (`order_ams_commission_fee`) vai pra Extras (301438: tarifa 354,85 → 305,85; Extras 420 → 469). **TikTok:** Tarifa = comissão + taxa de transação; Afiliados pra Extras (302381: tarifa 67,85 → 30,74; Extras 0 → 37,11). **ML fica como está** (custo por vender + custo por cobrar na tarifa; cupom/parcelamento em Extras). Coluna nova `venda_afiliados` (mig 0404), linha "− Afiliados" no Raio-X da Shopee, coluna "Afiliados" no Excel, balão de Extras com "afiliados X". Líquido não muda. Rejeitado por ele: igualar o Valor ao preço efetivo nas duas plataformas.
 
 Testes: `tests/test_conciliacao_tiktok.py` (mapeamento, leitura por extrato + segunda rodada sem duplicar, Extrato do dia fechando em zero, Raio-X previsto × real linha a linha, releitura do financeiro só pra estimado/velho).
+
+## 24. Sondagem Amazon (15/10, 14:00–14:35 BRT) — kfa, kia, poofy, nexus (só leitura)
+
+`GET /api/conciliacao/sonda/amazon?conta=&dias=60[&baixar=false]` (3 rodadas; commits aa42666f, a2e367fa, e435ab45). OK do Vinicius: "pode rodar"; regra dele: **um processo só pra todas as contas**.
+
+| Conta | Finances (transações, grupos de repasse) | Relatório de repasse (Reports API) | Margem (financeiro por pedido) | Pedidos desde 01/10 |
+|---|---|---|---|---|
+| **kfa** | 403 | **403** ("Access to the resource is forbidden") | 1.736 em `error` (nunca leu) | 21 (20 DBA) |
+| **kia** | 200 | 200 — 9 relatórios em 60 dias, todos baixados | 72 posted / 11 pending; líquido posted 73.507,20 | 83 (36 DBA, 35 próprio/SEDEX) |
+| **poofy** | 200 | 200 — 10 relatórios | 50 posted / 6 pending | 46 (45 DBA) |
+| **nexus** | 200 | nenhum relatório | nada | 0 (conta parada) |
+
+**Como a Amazon paga (dados reais da Kia, 60 dias):** 256 transações: Shipment +140.043,81 · Refund −4.536,64 · ServiceFee −1.958,50 · ProductAdsPayment −2.701,40 · Transfer (repasse pro banco) 7.723,29 · DebtRecovery 449,89. **Situação: DEFERRED 89 (87 vendas + 2 estornos) = 95.269,33 presos pela "reserva por data de entrega" (a Amazon segura até ~7 dias depois da entrega); RELEASED 126 = 23.858,70; DEFERRED_RELEASED 41.** Repasses pro banco: 08/09 743,50 · 10/09 445,22 + 815,25 · 24/09 2.230,02 + 834,41 · 08/10 1.316,29 + 1.338,60 (vários grupos de repasse correm em paralelo: pedidos, Easy Ship, um grupo "antigo" desde 12/2024). Grupos abertos em 07/10: 2.317,39 + 2.744,28 + 3.324,50. Poofy: Shipment 15.851,85; DEFERRED 41 = 12.135,02; Transfers 2.185,50; DebtRecovery 853,88 em 13/10 = o acerto negativo de Easy Ship (DBA) cobrado à parte.
+
+**Relatório de repasse (settlement V2, TSV):** um por repasse (~14 dias), cabeçalho com settlement-id, período, **deposit-date** e total; linhas com transaction-type (Order, Refund, other-transaction, ServiceFee…), order-id, amount-type/description (ItemPrice Principal, ItemFees Commission, Promotion, Amazon Easy Ship Charges, Tax on fee COFINS/PIS…), **fulfillment-id = MFN tanto no DBA quanto no próprio** (não separa), posted-date. Prova dos nove dentro do arquivo: soma das linhas = total (conferido: Kia 1.316,29; Poofy −853,88). A Amazon gera sozinha; só listar e baixar. **É a única fonte que pode valer pra todas as contas** (KFA por upload do mesmo arquivo do Seller Central até a Amazon aprovar o perfil — caso 21731531021 sem resposta desde 24/08).
+
+**A conta de um pedido (quebras da Finances, que a Margem já guarda em raw):**
+- Envio próprio (Kia 301635): ProductCharges 2.598,00 + Shipping (frete cobrado do cliente) 94,81 − Commission 285,78 (base + imposto) − AmazonForAllFee 40,39 (1,5%, base + imposto) − ShippingHB 10,43 (retenção de 11% sobre o frete) = 2.356,21. O frete pago de verdade está fora (Melhor Envio).
+- DBA (Kia 301943): ProductCharges 2.176,00 − OurPriceDiscount (promoção) 108,80 − MFNPostageFee (etiqueta Easy Ship) 41,90 − AmazonForAllFee 31,01 = 1.994,29 (**sem comissão** nesta conta neste pedido); Poofy DBA 303300 tem Commission 9% + 1,5% + etiqueta 65,85.
+- Regra Tarifa × Extras (seção 23): Tarifa = Commission + AmazonForAll (porcentagens fixas); Frete = DBA: etiqueta + cobranças Easy Ship; próprio: +frete cobrado − ShippingHB; Extras = promoções da loja, Ads, impostos sobre taxas quando vierem separados.
+
+**Melhor Envio:** o token do DaVinci responde **401 Unauthenticated** (`/api/v2/me` e `/api/v2/me/orders`) — vencido. Sem token novo não dá pra trazer o frete pago do envio próprio.
+
+**Proposta (aba Amazon, mesmo padrão):** 1) Extrato = relatório de repasse: linha por transação na `posted-date`, "Repasse pro banco" na `deposit-date` com o total, saldo sintético que zera no repasse (modelo TikTok, cadência de 14 dias; vários repasses no mesmo dia ficam separados por settlement-id); API na Kia/Poofy, upload na KFA. 2) Venda = Margem (Kia/Poofy); KFA "venda não lida" até aprovar. 3) Resumo › Dinheiro: **Preso (reserva por entrega)** = DEFERRED, **Liberado aguardando repasse** = grupos abertos, repasses do mês. 4) Frete por canal como acima; frete pago no Melhor Envio como "frete pago fora" no resultado quando o token for renovado.
+
