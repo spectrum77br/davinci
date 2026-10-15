@@ -4235,7 +4235,23 @@ async def sonda_amazon(
     )
     transacoes: dict[str, Any] = {}
     if isinstance(tx_body, dict):
-        txs = [t for t in (tx_body.get("transactions") or []) if isinstance(t, dict)]
+        payload = tx_body.get("payload") if isinstance(tx_body.get("payload"), dict) else tx_body
+        txs = [t for t in (payload.get("transactions") or []) if isinstance(t, dict)]
+        token = payload.get("nextToken")
+        for _ in range(4):
+            if not token:
+                break
+            mais = await chama(
+                "transacoes_pagina",
+                "/finances/2024-06-19/transactions",
+                {"postedAfter": de.isoformat(), "nextToken": token},
+            )
+            if not isinstance(mais, dict):
+                break
+            pl = mais.get("payload") if isinstance(mais.get("payload"), dict) else mais
+            txs.extend(t for t in (pl.get("transactions") or []) if isinstance(t, dict))
+            token = pl.get("nextToken")
+        tx_body = {"transactions": txs, "nextToken": token}
         tipos: Counter = Counter(str(t.get("transactionType") or "?") for t in txs)
         quebras: Counter = Counter()
         total = Decimal("0")
@@ -4312,30 +4328,49 @@ async def sonda_amazon(
                     }
                 )
     relatorio_baixado: dict[str, Any] = {}
+    relatorios_baixados: list[dict[str, Any]] = []
     prontos = [x for x in relatorios if x["status"] == "DONE" and x["documento"]]
     if baixar and prontos:
-        alvo = sorted(prontos, key=lambda x: str(x["criado"]))[-1]
-        d_body = await chama(
-            "documento_repasse", f"/reports/2021-06-30/documents/{alvo['documento']}"
-        )
-        if isinstance(d_body, dict) and d_body.get("url"):
+        ordem = sorted(prontos, key=lambda x: str(x["criado"]), reverse=True)[:12]
+        for i, alvo in enumerate(ordem):
+            d_body = await chama(
+                "documento_repasse", f"/reports/2021-06-30/documents/{alvo['documento']}"
+            )
+            if not (isinstance(d_body, dict) and d_body.get("url")):
+                continue
             try:
                 async with httpx.AsyncClient(timeout=60.0) as c:
                     dl = await c.get(d_body["url"])
                 bruto = dl.content
                 if d_body.get("compressionAlgorithm") == "GZIP":
                     bruto = gzip.decompress(bruto)
-                relatorio_baixado = {
-                    "relatorio": alvo["id"],
-                    "http": dl.status_code,
-                    "bytes": len(bruto),
-                    **_resumo_relatorio_repasse(_decode_amazon_report(bruto)),
-                }
+                resumo = _resumo_relatorio_repasse(_decode_amazon_report(bruto))
             except Exception as e:  # noqa: BLE001
-                relatorio_baixado = {
+                relatorios_baixados.append(
+                    {"relatorio": alvo["id"], "erro": f"{type(e).__name__}: {str(e)[:200]}"}
+                )
+                continue
+            if i == 0:
+                relatorio_baixado = {"relatorio": alvo["id"], "http": dl.status_code, **resumo}
+            liq = resumo.get("liquidacao") or {}
+            relatorios_baixados.append(
+                {
                     "relatorio": alvo["id"],
-                    "erro": f"{type(e).__name__}: {str(e)[:200]}",
+                    "criado": alvo["criado"],
+                    "settlement_id": liq.get("settlement_id"),
+                    "periodo": [liq.get("inicio"), liq.get("fim")],
+                    "deposito": liq.get("deposito"),
+                    "total": liq.get("total"),
+                    "soma_das_linhas": resumo.get("soma_das_linhas"),
+                    "linhas": resumo.get("linhas"),
+                    "pedidos": resumo.get("pedidos_distintos"),
+                    "por_tipo": resumo.get("por_tipo"),
+                    "canais": resumo.get("canais"),
+                    "chaves": [
+                        f"{x['chave']} = {x['total']}" for x in (resumo.get("somas") or [])[:8]
+                    ],
                 }
+            )
     # 4) o que a Margem já leu desta conta
     fin = MarketplaceOrderFinancial
     margem = {
@@ -4362,16 +4397,99 @@ async def sonda_amazon(
     )
     canais: Counter = Counter()
     servicos: Counter = Counter()
+    canal_por_numero: dict[str, str] = {}
     if numeros:
-        for canal, servico in (
+        for numero, canal, servico in (
             await session.execute(
-                select(Logistica.amazon_canal, Logistica.servico_envio).where(
-                    Logistica.pedido_bling.in_(numeros)
-                )
+                select(
+                    Logistica.pedido_bling, Logistica.amazon_canal, Logistica.servico_envio
+                ).where(Logistica.pedido_bling.in_(numeros))
             )
         ).all():
             canais[str(canal or "sem_canal")] += 1
             servicos[str(servico or "?")] += 1
+            canal_por_numero[str(numero)] = str(canal or "sem_canal")
+    # o que a Margem tem desses pedidos: status, líquido e os nomes das quebras por canal
+    numero_por_externo = {
+        str(nl): str(n)
+        for n, nl in (
+            await session.execute(
+                select(BlingOrder.numero, BlingOrder.numeroloja).where(
+                    BlingOrder.loja.in_(lojas_bling or {"-"}), BlingOrder.data >= inicio
+                )
+            )
+        ).all()
+        if nl
+    }
+    margem_out: dict[str, Any] = {
+        "status": Counter(),
+        "liquido_posted": Decimal("0"),
+        "amostras": {},
+    }
+
+    def _quebras(no: Any, acc: dict[str, Decimal], prefixo: str = "") -> None:
+        if isinstance(no, dict):
+            tipo = no.get("breakdownType")
+            amt = (no.get("breakdownAmount") or {}).get("currencyAmount")
+            if tipo and amt is not None:
+                try:
+                    acc[f"{prefixo}{tipo}"] += Decimal(str(amt))
+                except (InvalidOperation, ValueError):
+                    pass
+            for b in no.get("breakdowns") or []:
+                _quebras(b, acc, f"{prefixo}{tipo} › " if tipo else prefixo)
+        elif isinstance(no, list):
+            for x in no:
+                _quebras(x, acc, prefixo)
+
+    if numero_por_externo:
+        rows = (
+            (
+                await session.execute(
+                    select(fin).where(
+                        fin.integration_id == integ.id,
+                        fin.external_order_id.in_(set(numero_por_externo)),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for f in rows:
+            margem_out["status"][str(f.status)] += 1
+            if f.status == "posted" and f.net_amount is not None:
+                margem_out["liquido_posted"] += Decimal(str(f.net_amount))
+            canal = canal_por_numero.get(numero_por_externo.get(str(f.external_order_id), ""), "?")
+            if (
+                f.status == "posted"
+                and canal not in margem_out["amostras"]
+                and isinstance(f.raw, dict)
+            ):
+                acc: dict[str, Decimal] = defaultdict(Decimal)
+                corpo = f.raw.get("transactions")
+                pl = (
+                    corpo.get("payload")
+                    if isinstance(corpo, dict) and isinstance(corpo.get("payload"), dict)
+                    else corpo
+                )
+                txl = (pl or {}).get("transactions") if isinstance(pl, dict) else None
+                tipos_tx: Counter = Counter()
+                for t in txl or []:
+                    if isinstance(t, dict):
+                        tipos_tx[str(t.get("transactionType"))] += 1
+                        for it in t.get("items") or []:
+                            if isinstance(it, dict):
+                                _quebras(it.get("breakdowns"), acc)
+                margem_out["amostras"][canal] = {
+                    "pedido": numero_por_externo.get(str(f.external_order_id)),
+                    "liquido": _num(Decimal(str(f.net_amount)))
+                    if f.net_amount is not None
+                    else None,
+                    "transacoes": dict(tipos_tx),
+                    "quebras": {k: _num(v) for k, v in acc.items()},
+                }
+    margem_out["status"] = dict(margem_out["status"])
+    margem_out["liquido_posted"] = _num(margem_out["liquido_posted"])
     # 6) Melhor Envio pelo token do DaVinci: dá pra ler os envios e o valor pago?
     me: dict[str, Any] = {}
     try:
@@ -4432,7 +4550,9 @@ async def sonda_amazon(
         "grupos_repasse": grupos[:20],
         "relatorios_repasse": relatorios[:20],
         "relatorio_baixado": relatorio_baixado,
+        "relatorios_baixados": relatorios_baixados,
         "margem_financeiro": margem,
+        "margem_desde_01_10": margem_out,
         "pedidos_desde_01_10": {
             "pedidos": len(numeros),
             "canais": dict(canais),
