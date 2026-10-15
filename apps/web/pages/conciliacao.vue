@@ -553,6 +553,7 @@ await carregar()
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1" :class="!p.liberado_em && 'text-muted-foreground'">
                   <template v-if="p.liberado_em">{{ fmtDia(p.liberado_em) }}</template>
                   <template v-else-if="p.situacao === 'vencido'"><span class="text-red-600">venceu {{ fmtDia(p.previsao_liberacao) }}</span></template>
+                  <template v-else-if="p.situacao === 'cancelado'">—</template>
                   <template v-else-if="p.previsao_liberacao">prev. {{ fmtDia(p.previsao_liberacao) }}</template>
                   <template v-else>—</template>
                 </td>
@@ -566,7 +567,7 @@ await carregar()
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.custo) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :class="p.reembolso && p.reembolso > 0 ? 'text-red-600' : ''">{{ fmtMoney(p.reembolso) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" :class="[sinal(p.sobrou, { pos: 'text-emerald-700', neg: 'text-red-600' }), !p.liberado_em && 'font-normal text-muted-foreground']">
-                  <span v-if="!p.liberado_em && p.sobrou !== null" class="mr-1 text-[10px]">prev.</span>{{ fmtMoney(p.sobrou) }}
+                  <span v-if="!p.liberado_em && p.sobrou !== null && p.situacao !== 'cancelado'" class="mr-1 text-[10px]">prev.</span>{{ fmtMoney(p.sobrou) }}
                 </td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" :class="!p.liberado_em && 'font-normal text-muted-foreground'">{{ fmtPct(p.margem) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1"><span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="sitCls(p.situacao)">● {{ p.situacao_label }}</span></td>
@@ -601,7 +602,7 @@ await carregar()
             <span>Pedido Bling <b>{{ raiox.pedido.pedido_bling }}</b></span>
             <span>Venda ML <b>{{ raiox.pedido.numeroloja }}</b><span v-if="raiox.pedido.pack_id"> · pack {{ raiox.pedido.pack_id }}</span></span>
             <span>Loja <b>{{ raiox.pedido.conta }}</b> · vendido {{ fmtDia(raiox.pedido.data_pedido) }}</span>
-            <span>Liberado {{ fmtDia(raiox.pedido.liberado_em) }}<span v-if="raiox.pedido.previsao_liberacao && !raiox.pedido.liberado_em"> (prev. {{ fmtDia(raiox.pedido.previsao_liberacao) }})</span></span>
+            <span>Liberado {{ fmtDia(raiox.pedido.liberado_em) }}<span v-if="raiox.pedido.previsao_liberacao && !raiox.pedido.liberado_em && raiox.pedido.situacao !== 'cancelado'"> (prev. {{ fmtDia(raiox.pedido.previsao_liberacao) }})</span></span>
             <span>Bling: {{ raiox.pedido.situacao_bling || '—' }}</span>
             <span><span class="rounded px-1.5 py-0.5 font-bold" :class="sitCls(raiox.pedido.situacao)">● {{ raiox.pedido.situacao_label }}</span> <span class="rounded px-1.5 py-0.5 font-bold" :class="etapaCls(raiox.pedido.etapa)">{{ raiox.pedido.etapa_label }}</span></span>
           </div>

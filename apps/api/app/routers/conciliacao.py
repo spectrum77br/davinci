@@ -744,6 +744,8 @@ def _extras_da_venda(p: ConciliacaoPedido) -> float | None:
     """Tudo que o ML tira antes de liberar além da tarifa e do frete (cupom da loja,
     parcelamento, outros): valor − tarifa − frete − líquido previsto. Com isso a linha
     da grade fecha sozinha (15/10, Vinicius: "Extras")."""
+    if p.situacao == "cancelado":
+        return None  # venda desfeita: tarifa, frete e líquido vêm zerados; "extras" seria o valor cheio
     if None in (p.venda_valor, p.venda_tarifa, p.venda_frete, p.venda_liquido):
         return None
     extras = p.venda_valor - p.venda_tarifa - p.venda_frete - p.venda_liquido
