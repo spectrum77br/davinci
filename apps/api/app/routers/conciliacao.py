@@ -1283,7 +1283,24 @@ def _comparativo(
     recebido = n(p.recebido)
     # "depois" = só estornos/ajustes depois do lançamento (frete cobrado depois, como a
     # etiqueta Easy Ship, faz parte da liquidação — ver saidas_depois no cálculo)
-    saidas = n(p.saidas_depois) or 0.0
+    # calculado das linhas (não de p.saidas_depois, que fica None no cancelado): débitos
+    # depois do lançamento que não são frete nem reserva
+    saidas = (
+        round(
+            sum(
+                float(m.debito or 0)
+                for m in movs
+                if m.origem in ORIGENS_EXTRATO
+                and p.liberado_em is not None
+                and m.data > p.liberado_em
+                and m.tipo != "frete"
+                and m.tipo not in TIPOS_RESERVA_SET
+            ),
+            2,
+        )
+        if liberado is not None
+        else 0.0
+    )
     depois = round(-saidas, 2) if (recebido is not None and liberado is not None) else None
     # A linha final compara o que a plataforma LANÇOU com o previsto; o que ficou com a
     # loja depois de estornos vai numa linha própria (15/10, Vinicius: "759,53 em cima

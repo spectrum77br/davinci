@@ -241,7 +241,14 @@ def conta_amazon_de_transacoes(txs: list[Any]) -> dict[str, Decimal] | None:
 
     from app.services.conciliacao_amazon import conta_amazon_de_quebras, somar_quebras
 
-    txs = [t for t in txs if isinstance(t, dict)]
+    # só a venda e as tarifas dela (Shipment + ServiceFee): estorno é "depois", não
+    # faz parte do que a venda prometeu (15/10, Amazon 302142)
+    txs = [
+        t
+        for t in txs
+        if isinstance(t, dict)
+        and str(t.get("transactionType") or "Shipment") in ("Shipment", "ServiceFee")
+    ]
     if not txs:
         return None
     acc: dict[str, Decimal] = defaultdict(Decimal)
@@ -857,7 +864,10 @@ async def recalcular_loja(
             "venda_afiliados": shopee.get("afiliados") if shopee else None,
             "venda_frete_pago": frete_pago,
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
-            "venda_liquido": _d(venda.net_amount) if venda_ok else None,
+            # Amazon: o líquido previsto é o da venda (Shipment + tarifas), sem estornos
+            "venda_liquido": (
+                amazon["liquido"] if amazon else (_d(venda.net_amount) if venda_ok else None)
+            ),
             "venda_status": venda.status if venda_ok else None,
             "previsao_liberacao": previsao,
             "fatura_tarifa": fatura["tarifa"] if fatura_movs else None,

@@ -693,4 +693,7 @@ async def test_cancelado_no_bling_com_estorno_integral_e_cancelado(db, make_user
     ped = r.json()["pedido"]
     assert ped["situacao"] == "cancelado" and ped["etapa"] == "finalizado"
     assert ped["custo"] == 0 and ped["recebido"] == -10 and ped["sobrou"] == -10
-    assert "ficou com 10.00" in ped["motivo"]
+    assert "ficou com 10.00" in ped["motivo"] and ped["venda_liquido"] == 749.53
+    por = {x["chave"]: x for x in r.json()["comparativo"]["linhas"]}
+    assert por["liquido"]["previsto"] == 749.53 and por["liquido"]["real"] == 749.53
+    assert por["depois"]["real"] == -759.53 and por["ficou"]["real"] == -10
