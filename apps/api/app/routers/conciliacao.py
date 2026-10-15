@@ -23,6 +23,7 @@ porque o refresh token do ML é de uso único.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import time
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
@@ -4103,4 +4104,339 @@ async def sonda_tiktok_espera(
                 for i in sorted(so_nosso)[:15]
             ],
         },
+    }
+
+
+def _resumo_relatorio_repasse(texto: str) -> dict[str, Any]:
+    """Resume o settlement report (TSV V2) sem dados pessoais: cabeçalho da
+    liquidação, linhas por tipo e as somas por tipo de valor."""
+    linhas = [ln for ln in texto.splitlines() if ln.strip()]
+    if not linhas:
+        return {"linhas": 0}
+    cab = linhas[0].split("\t")
+    idx = {c.strip(): i for i, c in enumerate(cab)}
+
+    def col(partes: list[str], nome: str) -> str:
+        i = idx.get(nome)
+        return partes[i].strip() if (i is not None and i < len(partes)) else ""
+
+    def dec(v: str) -> Decimal:
+        try:
+            return Decimal(v.replace(",", "."))
+        except (InvalidOperation, ValueError, AttributeError):
+            return Decimal("0")
+
+    corpo = [ln.split("\t") for ln in linhas[1:]]
+    liquidacao = corpo[0] if corpo else []
+    tipos: Counter = Counter()
+    por_valor: Counter = Counter()
+    somas: dict[str, Decimal] = defaultdict(Decimal)
+    canais: Counter = Counter()
+    pedidos: set[str] = set()
+    total_linhas = Decimal("0")
+    for partes in corpo[1:]:
+        tipo = col(partes, "transaction-type") or "?"
+        tipos[tipo] += 1
+        chave = f"{tipo} · {col(partes, 'amount-type')} · {col(partes, 'amount-description')}"
+        por_valor[chave] += 1
+        valor = dec(col(partes, "amount"))
+        somas[chave] += valor
+        total_linhas += valor
+        if col(partes, "fulfillment-id"):
+            canais[col(partes, "fulfillment-id")] += 1
+        if col(partes, "order-id"):
+            pedidos.add(col(partes, "order-id"))
+    top = sorted(somas.items(), key=lambda kv: abs(kv[1]), reverse=True)[:25]
+    return {
+        "colunas": cab,
+        "linhas": len(corpo),
+        "liquidacao": {
+            "settlement_id": col(liquidacao, "settlement-id"),
+            "inicio": col(liquidacao, "settlement-start-date"),
+            "fim": col(liquidacao, "settlement-end-date"),
+            "deposito": col(liquidacao, "deposit-date"),
+            "total": col(liquidacao, "total-amount"),
+            "moeda": col(liquidacao, "currency"),
+        },
+        "soma_das_linhas": _num(total_linhas),
+        "por_tipo": dict(tipos),
+        "canais": dict(canais),
+        "pedidos_distintos": len(pedidos),
+        "somas": [{"chave": k, "linhas": por_valor[k], "total": _num(v)} for k, v in top],
+    }
+
+
+@router.get("/sonda/amazon")
+async def sonda_amazon(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+    conta: Annotated[str, Query(description="nome da conta Amazon (kfa, kia, poofy…)")],
+    dias: Annotated[int, Query(ge=1, le=120)] = 60,
+    baixar: bool = True,
+) -> dict[str, Any]:
+    """O que a Amazon dá pra conciliação, por conta — só leitura (15/10, Vinicius:
+    "pode rodar"): transações do período e grupos de repasse (Finances), relatórios
+    de repasse (settlement, Reports API) com o mais recente baixado e resumido, o que
+    a Margem já leu, pedidos por tipo de envio desde 01/10 e o Melhor Envio pelo token."""
+    from app.models import Logistica, MarketplaceOrderFinancial
+    from app.models.integration import IntegrationPlatform
+    from app.services.marketplaces.amazon import _decode_amazon_report
+    from app.services.melhor_envio import MelhorEnvioClient
+
+    integ = (
+        (
+            await session.execute(
+                select(Integration).where(
+                    Integration.platform == IntegrationPlatform.AMAZON,
+                    Integration.archived_at.is_(None),
+                    func.lower(func.trim(Integration.name)) == conta.strip().lower(),
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if integ is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"code": "conta_amazon_nao_encontrada", "conta": conta},
+        )
+    cliente = await cliente_da_integracao(integ)
+    agora = datetime.now(UTC)
+    de = agora - timedelta(days=dias)
+    chamadas: list[dict[str, Any]] = []
+
+    async def chama(nome: str, path: str, params: dict[str, Any] | None = None) -> Any:
+        t0 = time.monotonic()
+        item: dict[str, Any] = {"nome": nome, "url": path, "params": params}
+        try:
+            r = await cliente._request("GET", path, params=params)
+        except Exception as e:  # noqa: BLE001 — a sondagem registra e segue
+            item.update(ok=False, erro=f"{type(e).__name__}: {str(e)[:300]}")
+            chamadas.append(item)
+            return None
+        item["ms"] = int((time.monotonic() - t0) * 1000)
+        item["status"] = r.status_code
+        try:
+            body = r.json()
+        except ValueError:
+            body = {"texto": r.text[:300]}
+        item["ok"] = r.status_code == 200
+        if not item["ok"]:
+            item["mensagem"] = str(body)[:300]
+        chamadas.append(item)
+        return body if item["ok"] else None
+
+    # 1) transações do período (Finances 2024-06-19) — o que a Margem lê por pedido
+    tx_body = await chama(
+        "transacoes",
+        "/finances/2024-06-19/transactions",
+        {"postedAfter": de.isoformat(), "marketplaceId": cliente.marketplace_id},
+    )
+    transacoes: dict[str, Any] = {}
+    if isinstance(tx_body, dict):
+        txs = [t for t in (tx_body.get("transactions") or []) if isinstance(t, dict)]
+        tipos: Counter = Counter(str(t.get("transactionType") or "?") for t in txs)
+        quebras: Counter = Counter()
+        total = Decimal("0")
+        for t in txs:
+            amt = t.get("totalAmount") or {}
+            try:
+                total += Decimal(str(amt.get("currencyAmount") or 0))
+            except (InvalidOperation, ValueError):
+                pass
+            for it in t.get("items") or []:
+                for b in (it.get("breakdowns") or []) if isinstance(it, dict) else []:
+                    if isinstance(b, dict):
+                        quebras[str(b.get("breakdownType") or "?")] += 1
+                        for b2 in b.get("breakdowns") or []:
+                            if isinstance(b2, dict):
+                                quebras[
+                                    f"{b.get('breakdownType')} › {b2.get('breakdownType')}"
+                                ] += 1
+        transacoes = {
+            "linhas": len(txs),
+            "mais_paginas": bool(tx_body.get("nextToken")),
+            "por_tipo": dict(tipos),
+            "total": _num(total),
+            "campos": sorted({k for t in txs for k in t}),
+            "quebras": dict(quebras.most_common(30)),
+            "datas": sorted({str(t.get("postedDate") or "")[:10] for t in txs})[-5:],
+        }
+    # 2) grupos de repasse (Finances v0): um grupo = um período de repasse pro banco
+    g_body = await chama(
+        "grupos_repasse",
+        "/finances/v0/financialEventGroups",
+        {"FinancialEventGroupStartedAfter": de.isoformat(), "MaxResultsPerPage": 100},
+    )
+    grupos: list[dict[str, Any]] = []
+    if isinstance(g_body, dict):
+        lista = ((g_body.get("payload") or {}).get("FinancialEventGroupList")) or []
+        for g in lista:
+            if not isinstance(g, dict):
+                continue
+            grupos.append(
+                {
+                    "id": g.get("FinancialEventGroupId"),
+                    "status": g.get("ProcessingStatus"),
+                    "repasse": g.get("FundTransferStatus"),
+                    "inicio": g.get("FinancialEventGroupStart"),
+                    "fim": g.get("FinancialEventGroupEnd"),
+                    "repassado_em": g.get("FundTransferDate"),
+                    "total": (g.get("OriginalTotal") or {}).get("CurrencyAmount"),
+                    "saldo_inicial": (g.get("BeginningBalance") or {}).get("CurrencyAmount"),
+                }
+            )
+    # 3) relatórios de repasse (settlement) — a Amazon gera sozinha; só listar/baixar
+    r_body = await chama(
+        "relatorios_repasse",
+        "/reports/2021-06-30/reports",
+        {
+            "reportTypes": "GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2",
+            "createdSince": de.isoformat(),
+            "pageSize": 100,
+        },
+    )
+    relatorios: list[dict[str, Any]] = []
+    if isinstance(r_body, dict):
+        for rep in r_body.get("reports") or []:
+            if isinstance(rep, dict):
+                relatorios.append(
+                    {
+                        "id": rep.get("reportId"),
+                        "criado": rep.get("createdTime"),
+                        "inicio": rep.get("dataStartTime"),
+                        "fim": rep.get("dataEndTime"),
+                        "status": rep.get("processingStatus"),
+                        "documento": rep.get("reportDocumentId"),
+                    }
+                )
+    relatorio_baixado: dict[str, Any] = {}
+    prontos = [x for x in relatorios if x["status"] == "DONE" and x["documento"]]
+    if baixar and prontos:
+        alvo = sorted(prontos, key=lambda x: str(x["criado"]))[-1]
+        d_body = await chama(
+            "documento_repasse", f"/reports/2021-06-30/documents/{alvo['documento']}"
+        )
+        if isinstance(d_body, dict) and d_body.get("url"):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as c:
+                    dl = await c.get(d_body["url"])
+                bruto = dl.content
+                if d_body.get("compressionAlgorithm") == "GZIP":
+                    bruto = gzip.decompress(bruto)
+                relatorio_baixado = {
+                    "relatorio": alvo["id"],
+                    "http": dl.status_code,
+                    "bytes": len(bruto),
+                    **_resumo_relatorio_repasse(_decode_amazon_report(bruto)),
+                }
+            except Exception as e:  # noqa: BLE001
+                relatorio_baixado = {
+                    "relatorio": alvo["id"],
+                    "erro": f"{type(e).__name__}: {str(e)[:200]}",
+                }
+    # 4) o que a Margem já leu desta conta
+    fin = MarketplaceOrderFinancial
+    margem = {
+        str(st): int(n)
+        for st, n in (
+            await session.execute(
+                select(fin.status, func.count())
+                .where(fin.integration_id == integ.id)
+                .group_by(fin.status)
+            )
+        ).all()
+    }
+    # 5) pedidos desde 01/10 por tipo de envio (DBA × próprio), pela Logística
+    lojas_bling = await bling_store_ids_da_loja(session, integ)
+    inicio = datetime(2026, 10, 1, tzinfo=_BRT)
+    numeros = set(
+        (
+            await session.execute(
+                select(BlingOrder.numero).where(
+                    BlingOrder.loja.in_(lojas_bling or {"-"}), BlingOrder.data >= inicio
+                )
+            )
+        ).scalars()
+    )
+    canais: Counter = Counter()
+    servicos: Counter = Counter()
+    if numeros:
+        for canal, servico in (
+            await session.execute(
+                select(Logistica.amazon_canal, Logistica.servico_envio).where(
+                    Logistica.pedido_bling.in_(numeros)
+                )
+            )
+        ).all():
+            canais[str(canal or "sem_canal")] += 1
+            servicos[str(servico or "?")] += 1
+    # 6) Melhor Envio pelo token do DaVinci: dá pra ler os envios e o valor pago?
+    me: dict[str, Any] = {}
+    try:
+        cli_me = MelhorEnvioClient()
+        if not cli_me.token:
+            me = {"ok": False, "erro": "sem token"}
+        else:
+            headers = {
+                "Authorization": f"Bearer {cli_me.token}",
+                "Accept": "application/json",
+                "User-Agent": "DaVinci Conciliacao (contato@davinci)",
+            }
+            async with httpx.AsyncClient(timeout=30) as c:
+                r1 = await c.get(f"{cli_me.base_url}/api/v2/me", headers=headers)
+                r2 = await c.get(
+                    f"{cli_me.base_url}/api/v2/me/orders", headers=headers, params={"page": 1}
+                )
+            me = {"conta_http": r1.status_code, "envios_http": r2.status_code}
+            if r1.status_code == 200:
+                j1 = r1.json() or {}
+                me["conta"] = {k: j1.get(k) for k in ("firstname", "company") if k in j1}
+            if r2.status_code == 200:
+                j2 = r2.json() or {}
+                dados = j2.get("data") if isinstance(j2, dict) else j2
+                dados = dados if isinstance(dados, list) else []
+                me["envios_na_pagina"] = len(dados)
+                me["total"] = j2.get("total") if isinstance(j2, dict) else None
+                if dados and isinstance(dados[0], dict):
+                    e0 = dados[0]
+                    me["campos"] = sorted(e0.keys())
+                    me["exemplo"] = {
+                        "price": e0.get("price"),
+                        "discount": e0.get("discount"),
+                        "status": e0.get("status"),
+                        "tags": [
+                            t.get("tag") for t in (e0.get("tags") or []) if isinstance(t, dict)
+                        ],
+                        "conciliation": e0.get("conciliation"),
+                        "tem_payment": "payment" in e0,
+                    }
+            else:
+                me["mensagem"] = r2.text[:200]
+    except Exception as e:  # noqa: BLE001
+        me = {"ok": False, "erro": f"{type(e).__name__}: {str(e)[:200]}"}
+    logger.info(
+        "conciliacao_sonda_amazon",
+        conta=integ.name,
+        chamadas=[
+            (c["nome"], c.get("status"), c.get("erro") or c.get("mensagem")) for c in chamadas
+        ],
+    )
+    return {
+        "conta": integ.name,
+        "integration_id": str(integ.id),
+        "janela": {"de": de.isoformat(), "ate": agora.isoformat()},
+        "chamadas": chamadas,
+        "transacoes": transacoes,
+        "grupos_repasse": grupos[:20],
+        "relatorios_repasse": relatorios[:20],
+        "relatorio_baixado": relatorio_baixado,
+        "margem_financeiro": margem,
+        "pedidos_desde_01_10": {
+            "pedidos": len(numeros),
+            "canais": dict(canais),
+            "servicos": dict(servicos.most_common(8)),
+        },
+        "melhor_envio": me,
     }
