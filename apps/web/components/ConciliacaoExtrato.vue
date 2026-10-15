@@ -280,7 +280,7 @@ await carregar()
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums text-red-600">{{ m.debito ? fmtMoney(m.debito) : '' }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums text-emerald-700">{{ m.credito ? fmtMoney(m.credito) : '' }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(m.saldo_apos, '') }}</td>
-                <td class="whitespace-nowrap px-1.5 py-1"><span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="statusCls(m.status)">{{ STATUS_MOV[m.status]?.dot || '●' }} {{ statusLabel(m.status) }}<template v-if="m.classificacao"> · {{ m.classificacao_label }}</template></span></td>
+                <td class="whitespace-nowrap px-1.5 py-1"><span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="statusCls(m.status)">{{ STATUS_MOV[m.status]?.dot || '●' }} {{ statusLabel(m.status) }}<template v-if="m.classificacao && m.status !== 'anterior'"> · {{ m.classificacao_label }}</template></span></td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">
                   <template v-if="m.vinculado_por">{{ m.vinculado_por }} {{ fmtDiaHora(m.vinculado_em) }}</template>
                   <template v-else-if="m.status === 'divergente'">pedido {{ m.pedido_situacao_label }}</template>
@@ -319,7 +319,7 @@ await carregar()
               <span>crédito <b class="text-emerald-700">{{ fmtMoney(selecionado.credito) }}</b></span>
               <span>débito <b class="text-red-600">{{ fmtMoney(selecionado.debito) }}</b></span>
             </div>
-            <div class="mt-1"><span class="rounded px-1.5 py-0.5 font-bold" :class="statusCls(selecionado.status)">{{ statusLabel(selecionado.status) }}<template v-if="selecionado.classificacao"> · {{ selecionado.classificacao_label }}</template></span></div>
+            <div class="mt-1"><span class="rounded px-1.5 py-0.5 font-bold" :class="statusCls(selecionado.status)">{{ statusLabel(selecionado.status) }}<template v-if="selecionado.classificacao && selecionado.status !== 'anterior'"> · {{ selecionado.classificacao_label }}</template></span></div>
           </div>
 
           <div v-if="selecionado.pedido_bling" class="rounded border px-2 py-1.5">
