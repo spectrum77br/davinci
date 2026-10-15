@@ -332,11 +332,12 @@ async def test_raiox_amazon_previsto_x_real_e_grade(db, make_user, auth_as, clie
     auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
     r = await client.get("/api/conciliacao/pedidos", params={"loja": "kia", "q": "301635"})
     (ped,) = [p for p in r.json()["itens"] if p["pedido_bling"] == "301635"]
-    assert ped["situacao"] == "bateu" and ped["recebido"] == 2356.21
+    # envio próprio sem o frete do Melhor Envio não é "bateu" (15/10, Vinicius)
+    assert ped["situacao"] == "falta_frete" and ped["recebido"] == 2356.21
     # Valor = produto + frete cobrado do cliente; Tarifa = comissão + 1,5% + retenção;
     # Frete = só o da Amazon (etiqueta; no envio próprio fica 0) — 15/10, Vinicius
     assert ped["venda_valor"] == 2692.81 and ped["venda_tarifa"] == 336.6
-    assert ped["motivo"] == "preso na reserva"
+    assert ped["motivo"] == "sem o frete do Melhor Envio"
     assert ped["venda_frete"] == 0 and ped["venda_extras"] == 0 and ped["venda_liquido"] == 2356.21
     r = await client.get("/api/conciliacao/pedidos/301635", params={"loja": "kia"})
     comp = r.json()["comparativo"]
@@ -517,3 +518,179 @@ async def test_token_do_melhor_envio_salva_cifrado_e_recusa_invalido(
     assert cli.token == bom
     r = await client.delete("/api/conciliacao/melhor-envio/token")
     assert r.status_code == 200 and r.json()["origem"] is None
+
+
+def _envio_me(
+    eid: str,
+    pedido: str,
+    amazon_id: str,
+    *,
+    price="48.90",
+    status="posted",
+    conciliation=None,
+    canceled_at=None,
+) -> dict:
+    return {
+        "id": eid,
+        "protocol": "ORD-2026",
+        "status": status,
+        "price": float(price),
+        "discount": 0,
+        "insurance_value": 1000,
+        "billed_weight": 0.5,
+        "paid_at": "2026-10-15 11:21:44",
+        "posted_at": "2026-10-15 16:00:00" if status != "released" else None,
+        "delivered_at": None,
+        "canceled_at": canceled_at,
+        "created_at": "2026-10-15 11:20:00",
+        "tracking": "AE029696432BR",
+        "self_tracking": None,
+        "conciliation": conciliation,
+        "service": {"id": 2, "name": "SEDEX"},
+        "tags": [
+            {"tag": "mi:reference_code", "url": pedido},
+            {"tag": "mi:reference_link", "url": "https://www.bling.com.br/vendas.php#edit/1"},
+            {"tag": "mi:marketplace_code", "url": amazon_id},
+        ],
+        "to": {"name": "cliente", "address": "rua x"},
+    }
+
+
+def test_envio_para_frete_le_etiquetas_e_conferencia():
+    from app.services.conciliacao_melhor_envio import envio_para_frete
+
+    f = envio_para_frete(
+        _envio_me("e1", "301635", PROPRIO, conciliation={"type": "debit", "value": 3.2})
+    )
+    assert f["pedido_bling"] == "301635" and f["pedido_marketplace"] == PROPRIO
+    assert f["preco"] == Decimal("48.90") and f["conferencia"] == Decimal("3.20")
+    assert f["frete_pago"] == Decimal("52.10") and f["servico"] == "SEDEX"
+    assert "to" not in f["raw"]  # nada do cliente
+    c = envio_para_frete(
+        _envio_me("e2", "301635", PROPRIO, status="canceled", canceled_at="2026-10-15 12:00:00")
+    )
+    assert c["frete_pago"] == Decimal("0") and c["cancelado_em"] is not None
+    credito = envio_para_frete(
+        _envio_me("e3", "301635", PROPRIO, conciliation=[{"type": "credit", "value": 0}])
+    )
+    assert credito["frete_pago"] == Decimal("48.90")
+
+
+async def test_frete_do_melhor_envio_entra_no_sobrou_e_sem_ele_falta_frete(
+    db, make_user, auth_as, client
+):
+    from app.models import MarketplaceOrderFinancial
+    from app.services import melhor_envio as me
+    from app.services.conciliacao_melhor_envio import run_me_sync
+
+    loja = await _loja_amazon(db, make_user)
+    tx = _venda_proprio()
+    await run_amazon_sync(db, loja, _AmazonFalsa([tx]), agora=AGORA)
+    db.add(
+        MarketplaceOrderFinancial(
+            integration_id=loja.integration_id,
+            platform="amazon",
+            external_order_id=PROPRIO,
+            status="posted",
+            fetched_at=datetime(2026, 10, 12, 12, tzinfo=UTC),
+            net_amount=Decimal("2356.21"),
+            raw={"transactions": {"transactions": [tx]}},
+        )
+    )
+    await db.commit()
+    # 1) sem frete do Melhor Envio: envio próprio não pode ser "bateu"
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    r = await client.get("/api/conciliacao/pedidos/301635", params={"loja": "kia"})
+    ped = r.json()["pedido"]
+    assert ped["situacao"] == "falta_frete" and ped["etapa"] == "pendencia"
+    assert ped["motivo"] == "sem o frete do Melhor Envio" and ped["venda_frete_pago"] is None
+    assert ped["sobrou"] == 1356.21  # 2356,21 − custo 1000
+    res = await client.get("/api/conciliacao/resumo")
+    assert any("sem o frete do Melhor Envio" in a["titulo"] for a in res.json()["agir"])
+    # 2) token no painel + envio casado pela etiqueta → frete pago entra no Sobrou
+    await me.guardar_token_do_painel(db, "eyJ" + "t" * 40, por="teste", detalhe={})
+    await db.commit()
+
+    async def _ler(token: str, *, page: int = 1, q=None):
+        assert token == "eyJ" + "t" * 40
+        if page > 1:
+            return 200, {"data": []}
+        return 200, {
+            "data": [
+                _envio_me("e1", "301635", PROPRIO, conciliation={"type": "debit", "value": 3.2}),
+                _envio_me("e9", "999999", "000-0000000-0000000"),  # de outra loja: ignora
+            ],
+            "total": 2,
+        }
+
+    r = await run_me_sync(db, loja, agora=AGORA, ler=_ler)
+    assert r["casados"] == 1 and r["novos"] == 1 and r["vistos"] == 2
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    r = await client.get("/api/conciliacao/pedidos/301635", params={"loja": "kia"})
+    corpo = r.json()
+    ped = corpo["pedido"]
+    assert ped["situacao"] == "bateu" and ped["venda_frete_pago"] == 52.1
+    assert ped["venda_liquido"] == 2356.21  # o Melhor Envio NÃO entra no Líquido
+    assert ped["sobrou"] == 1304.11  # 2356,21 − 1000 − 52,10
+    assert ped["motivo"] == "preso na reserva"
+    assert (
+        corpo["frete_pago"][0]["servico"] == "SEDEX"
+        and corpo["frete_pago"][0]["frete_pago"] == 52.1
+    )
+    # segunda leitura: nada novo, nada duplicado
+    r2 = await run_me_sync(db, loja, agora=AGORA, ler=_ler)
+    assert r2["novos"] == 0 and r2["atualizados"] == 0
+
+
+async def test_cancelado_no_bling_com_estorno_integral_e_cancelado(db, make_user, auth_as, client):
+    """Amazon 302142 (15/10): lançou 749,53, devolveu 759,53 (a Amazon ficou com 10,00 de
+    tarifa) e o Bling está Cancelado → "cancelado", custo 0, sobrou −10,00."""
+    from app.models import MarketplaceOrderFinancial
+
+    loja = await _loja_amazon(db, make_user)
+    venda = _tx(
+        "tx-c-venda",
+        "Shipment",
+        "RELEASED",
+        "2026-10-07T12:00:00Z",
+        "749.53",
+        pedido=DBA,
+        quebras=[
+            _b("ProductCharges", "729", [_b("OurPricePrincipal", "729")]),
+            _b("Shipping", "164.06", [_b("ShippingPrincipal", "164.06")]),
+            _b("PromoRebates", "-36.45", [_b("OurPriceDiscount", "-36.45")]),
+            _b("AmazonFees", "-107.08", [_b("Commission", "-107.08")]),
+        ],
+    )
+    estorno = _tx(
+        "tx-c-estorno", "Refund", "RELEASED", "2026-10-08T12:00:00Z", "-759.53", pedido=DBA
+    )
+    await run_amazon_sync(db, loja, _AmazonFalsa([venda, estorno]), agora=AGORA)
+    db.add(
+        MarketplaceOrderFinancial(
+            integration_id=loja.integration_id,
+            platform="amazon",
+            external_order_id=DBA,
+            status="posted",
+            fetched_at=datetime(2026, 10, 9, 12, tzinfo=UTC),
+            net_amount=Decimal("-10.00"),
+            raw={"transactions": {"transactions": [venda, estorno]}},
+        )
+    )
+    pedido = (
+        await db.execute(select(BlingOrder).where(BlingOrder.numero == "301943"))
+    ).scalar_one()
+    pedido.situacao = "Cancelado"
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/pedidos/301943", params={"loja": "kia"})
+    ped = r.json()["pedido"]
+    assert ped["situacao"] == "cancelado" and ped["etapa"] == "finalizado"
+    assert ped["custo"] == 0 and ped["recebido"] == -10 and ped["sobrou"] == -10
+    assert "ficou com 10.00" in ped["motivo"]

@@ -201,6 +201,9 @@ class ConciliacaoPedido(Base, TimestampMixin):
     venda_cupom: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     # comissão de afiliados (Shopee AMS / TikTok): sai da tarifa e vai pra Extras (15/10)
     venda_afiliados: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # frete pago FORA da plataforma (Melhor Envio, envio próprio da Amazon): entra no
+    # Sobrou, não no Líquido (15/10, Vinicius)
+    venda_frete_pago: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_estorno: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_liquido: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -283,3 +286,39 @@ class ConciliacaoDia(Base, TimestampMixin):
     pendentes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fechado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fechado_por: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+
+class ConciliacaoFretePago(Base, TimestampMixin):
+    """Um envio pago fora da plataforma (Melhor Envio), casado com o pedido do Bling
+    pela etiqueta `mi:reference_code` (15/10/2026). `frete_pago` = preço − desconto +
+    conferência de peso cobrada a mais."""
+
+    __tablename__ = "conciliacao_fretes_pagos"
+    __table_args__ = (UniqueConstraint("fonte", "envio_id", name="uq_conciliacao_frete_envio"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    integration_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    fonte: Mapped[str] = mapped_column(String(20), nullable=False, server_default="melhor_envio")
+    envio_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    pedido_bling: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    pedido_marketplace: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    protocolo: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    servico: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    rastreio: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    preco: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    desconto: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    conferencia: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    frete_pago: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    pago_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    postado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    entregue_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )

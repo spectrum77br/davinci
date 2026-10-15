@@ -661,6 +661,7 @@ SITUACAO_LABELS = {
     "cancelado": "Cancelado",
     "estornado_depois": "Estornado depois",
     "sem_venda": "Venda não lida",
+    "falta_frete": "Falta frete (Melhor Envio)",
 }
 ETAPA_LABELS = {
     "aguardando": "aguardando",
@@ -686,6 +687,7 @@ _CAMPOS_PEDIDO = (
     "venda_frete",
     "venda_cupom",
     "venda_afiliados",
+    "venda_frete_pago",
     "venda_estorno",
     "venda_liquido",
     "venda_status",
@@ -1113,7 +1115,46 @@ async def raio_x(
             amazon=await _conta_amazon_do_pedido(session, p, movs),
         ),
         "movimentos": [_movimento_out(m) for m in movs],
+        "frete_pago": await _fretes_pagos_do_pedido(session, p),
     }
+
+
+async def _fretes_pagos_do_pedido(
+    session: AsyncSession, p: ConciliacaoPedido
+) -> list[dict[str, Any]]:
+    """Envios do Melhor Envio casados com o pedido (bloco "Frete pago fora" do Raio-X)."""
+    from app.models import ConciliacaoFretePago
+
+    rows = (
+        (
+            await session.execute(
+                select(ConciliacaoFretePago)
+                .where(
+                    ConciliacaoFretePago.integration_id == p.integration_id,
+                    ConciliacaoFretePago.pedido_bling == p.pedido_bling,
+                )
+                .order_by(ConciliacaoFretePago.pago_em)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "fonte": f.fonte,
+            "servico": f.servico,
+            "status": f.status,
+            "rastreio": f.rastreio,
+            "preco": _num(f.preco),
+            "desconto": _num(f.desconto),
+            "conferencia": _num(f.conferencia),
+            "frete_pago": _num(f.frete_pago),
+            "pago_em": f.pago_em.isoformat() if f.pago_em else None,
+            "postado_em": f.postado_em.isoformat() if f.postado_em else None,
+            "cancelado_em": f.cancelado_em.isoformat() if f.cancelado_em else None,
+        }
+        for f in rows
+    ]
 
 
 async def _conta_shopee_do_pedido(
@@ -1714,6 +1755,7 @@ _COLUNAS_XLSX = [
     ("Venda valor", "venda_valor"),
     ("Tarifa", "venda_tarifa"),
     ("Frete", "venda_frete"),
+    ("Frete pago (Melhor Envio)", "venda_frete_pago"),
     ("Extras (cupom, parcelamento, outros)", "venda_extras"),
     ("Cupom", "venda_cupom"),
     ("Afiliados", "venda_afiliados"),
@@ -2703,6 +2745,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         pendencias = por_etapa.get("pendencia", 0)
         vencidos = por_situacao.get("vencido", 0)
         a_menos = por_situacao.get("recebido_a_menos", 0)
+        sem_frete = por_situacao.get("falta_frete", 0)
         estornados = por_situacao.get("estornado_depois", 0)
         problemas: list[str] = []
         if contagem["pendente"]:
@@ -2826,6 +2869,20 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "detalhe": "abrir chamado de repasse",
                     "acao": "pedidos",
                     "filtro": {"situacao": "vencido"},
+                }
+            )
+        if sem_frete:
+            agir.append(
+                {
+                    "gravidade": "warn",
+                    "loja": loja.conta,
+                    "titulo": (
+                        f"{loja.conta} · {sem_frete} envio(s) próprio(s) "
+                        "sem o frete do Melhor Envio"
+                    ),
+                    "detalhe": "o Melhor Envio ainda não trouxe o envio (ou o token está fora)",
+                    "acao": "pedidos",
+                    "filtro": {"situacao": "falta_frete"},
                 }
             )
         if a_menos:

@@ -28,6 +28,7 @@ from app.services.conciliacao_amazon import run_amazon_sync
 from app.services.conciliacao_calculo import recalcular_loja
 from app.services.conciliacao_extrato import run_extrato_sync
 from app.services.conciliacao_fatura import run_fatura_sync
+from app.services.conciliacao_melhor_envio import run_me_sync
 from app.services.conciliacao_shopee import reler_escrow_liberados, run_carteira_sync
 from app.services.conciliacao_tiktok import reler_financeiro_liquidados, run_tiktok_sync
 
@@ -108,6 +109,17 @@ async def sincronizar_loja(
                 try:
                     if plataforma == "amazon":
                         resultado["extrato"] = await run_amazon_sync(session, loja, cliente)
+                        try:
+                            resultado["melhor_envio"] = await run_me_sync(session, loja)
+                        except Exception as e:  # noqa: BLE001 — frete pago não derruba a rodada
+                            resultado["melhor_envio"] = {
+                                "erro": f"{type(e).__name__}: {str(e)[:200]}"
+                            }
+                            logger.warning(
+                                "conciliacao_melhor_envio_falhou",
+                                loja=loja.conta,
+                                erro=str(e)[:200],
+                            )
                     elif plataforma == "tiktok":
                         resultado["extrato"] = await run_tiktok_sync(session, loja, cliente)
                         resultado["financeiro"] = await reler_financeiro_liquidados(session, loja)

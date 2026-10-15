@@ -241,6 +241,7 @@ from app.models.nf import (
 from app.models.configuracao_segura import ConfiguracaoSegura
 from app.models.conciliacao import (
     ConciliacaoDia,
+    ConciliacaoFretePago,
     ConciliacaoLoja,
     ConciliacaoMovimento,
     ConciliacaoPedido,
@@ -467,6 +468,7 @@ __all__ = [
     "MODOS",
     "SEVERIDADES",
     "ConciliacaoDia",
+    "ConciliacaoFretePago",
     "ConciliacaoLoja",
     "ConciliacaoMovimento",
     "ConciliacaoPedido",

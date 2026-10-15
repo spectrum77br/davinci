@@ -37,6 +37,7 @@ type Pedido = {
   venda_frete: number | null
   venda_cupom: number | null
   venda_afiliados: number | null
+  venda_frete_pago: number | null
   venda_estorno: number | null
   venda_liquido: number | null
   venda_extras: number | null
@@ -104,7 +105,8 @@ type Movimento = {
 type Versao = Record<string, number | string | null | undefined>
 type LinhaComparativo = { chave: string; rotulo: string; previsto: number | null; real: number | null; dif: number | null; estilo: string }
 type Comparativo = { linhas: LinhaComparativo[]; real_rotulo: string; rodape: string | null; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
-type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[] }
+type FretePago = { fonte: string; servico: string | null; status: string | null; rastreio: string | null; preco: number | null; desconto: number | null; conferencia: number | null; frete_pago: number | null; pago_em: string | null; postado_em: string | null; cancelado_em: string | null }
+type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[]; frete_pago?: FretePago[] }
 
 const { api } = useApi()
 const canEdit = useCan('conciliacao', 'edit')
@@ -655,7 +657,10 @@ await carregar()
                 <td class="whitespace-nowrap px-1.5 py-1">{{ p.conta }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_valor) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_tarifa) }}</td>
-                <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.venda_frete) }}</td>
+                <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums">
+                  <template v-if="(p.venda_frete || 0) > 0 || p.venda_frete_pago == null">{{ fmtMoney(p.venda_frete) }}</template>
+                  <span v-else title="frete pago no Melhor Envio (fora da plataforma): entra no Sobrou, não no Líquido">{{ fmtMoney(p.venda_frete_pago) }} <span class="text-[9px] font-semibold text-muted-foreground">ME</span></span>
+                </td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :title="extrasTitulo(p)">{{ fmtMoney(p.venda_extras) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums">{{ fmtMoney(p.venda_liquido) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1" :class="!p.liberado_em && 'text-muted-foreground'">
@@ -690,7 +695,7 @@ await carregar()
           </table>
         </div>
         <div class="flex items-center justify-between border-t px-3 py-1.5 text-[11px] text-muted-foreground">
-          <span>Sobrou = Recebido (ou previsto, em cinza, enquanto não libera) − custo dos produtos − reembolsos do painel Reembolso. Margem = Sobrou ÷ custo.</span>
+          <span>Sobrou = Recebido (ou previsto, em cinza, enquanto não libera) − custo dos produtos − reembolsos do painel Reembolso − frete pago fora da plataforma (Melhor Envio, marcado ME). Margem = Sobrou ÷ custo.</span>
           <span class="inline-flex items-center gap-2">
             <button type="button" class="rounded border px-2 py-0.5 disabled:opacity-40" :disabled="page <= 1" @click="page--">‹</button>
             página {{ page }} de {{ totalPages }}
@@ -735,6 +740,21 @@ await carregar()
             <span v-if="raiox.comparativo.nota">{{ raiox.comparativo.nota }}</span>
             <span v-else-if="raiox.comparativo.rodape">{{ raiox.comparativo.rodape }}</span>
           </div>
+          <template v-if="raiox.frete_pago?.length || raiox.pedido.situacao === 'falta_frete'">
+            <div class="pt-1 font-bold text-[#1f3a5f] dark:text-slate-200">Frete pago fora da Amazon · Melhor Envio</div>
+            <div class="rounded border border-indigo-200 bg-indigo-50/60 px-2 py-1.5 text-[11px] dark:border-indigo-900 dark:bg-indigo-950/30">
+              <template v-if="raiox.frete_pago?.length">
+                <div v-for="f in raiox.frete_pago" :key="f.rastreio || f.servico || ''" class="grid grid-cols-[1fr_auto] gap-x-3 tabular-nums">
+                  <span>Etiqueta {{ f.servico || '—' }}<span v-if="f.rastreio" class="text-muted-foreground"> · {{ f.rastreio }}</span><span v-if="f.cancelado_em" class="text-red-600"> · cancelada</span></span><span>{{ fmtMoney(f.preco) }}</span>
+                  <template v-if="(f.desconto || 0) > 0"><span class="text-muted-foreground">− desconto</span><span>{{ fmtMoney(f.desconto) }}</span></template>
+                  <template v-if="(f.conferencia || 0) > 0"><span class="text-muted-foreground">+ conferência de peso (cobrado a mais)</span><span>{{ fmtMoney(f.conferencia) }}</span></template>
+                </div>
+                <div class="mt-1 grid grid-cols-[1fr_auto] gap-x-3 border-t border-indigo-200 pt-1 font-bold tabular-nums"><span>= Frete pago</span><span>{{ fmtMoney(raiox.pedido.venda_frete_pago) }}</span></div>
+                <div class="text-[10px] text-muted-foreground">não entra no Líquido (a Amazon não desconta): entra no Sobrou</div>
+              </template>
+              <div v-else class="text-amber-700">o Melhor Envio ainda não trouxe o envio deste pedido — por isso ele não está "bateu"</div>
+            </div>
+          </template>
           <div class="pt-1 font-bold text-[#1f3a5f] dark:text-slate-200">Movimentos deste pedido</div>
           <div class="max-h-56 overflow-auto rounded border">
             <table class="w-full border-collapse">
@@ -776,7 +796,7 @@ await carregar()
           <div class="rounded border px-2 py-1.5" :class="['recebido_a_menos', 'vencido', 'estornado_depois'].includes(raiox.pedido.situacao) ? 'border-red-300 bg-red-50 dark:bg-red-950/20' : 'border-emerald-300 bg-emerald-50 dark:bg-emerald-950/20'">
             <b>Previsto {{ fmtMoney(raiox.pedido.venda_liquido) }} · Recebido {{ fmtMoney(raiox.pedido.recebido) }} · Diferença {{ fmtMoney(raiox.pedido.dif_previsto_recebido) }}</b>
             <span v-if="raiox.pedido.motivo"> — {{ raiox.pedido.motivo }}</span><br />
-            <b v-if="raiox.pedido.recebido != null">Sobrou: {{ fmtMoney(raiox.pedido.recebido) }} − custo {{ fmtMoney(raiox.pedido.custo) }} − reembolso {{ fmtMoney(raiox.pedido.reembolso) }} = {{ fmtMoney(raiox.pedido.sobrou) }} · margem {{ fmtPct(raiox.pedido.margem) }}</b><b v-else class="font-normal text-muted-foreground">Resultado de verdade: só depois que o dinheiro entrar</b>
+            <b v-if="raiox.pedido.recebido != null">Sobrou: {{ fmtMoney(raiox.pedido.recebido) }} − custo {{ fmtMoney(raiox.pedido.custo) }} − reembolso {{ fmtMoney(raiox.pedido.reembolso) }}<template v-if="raiox.pedido.venda_frete_pago != null"> − frete pago (Melhor Envio) {{ fmtMoney(raiox.pedido.venda_frete_pago) }}</template> = {{ fmtMoney(raiox.pedido.sobrou) }} · margem {{ fmtPct(raiox.pedido.margem) }}</b><b v-else class="font-normal text-muted-foreground">Resultado de verdade: só depois que o dinheiro entrar</b>
             <div v-if="raiox.pedido.etapa_por" class="mt-1 text-muted-foreground">etapa {{ raiox.pedido.etapa_label }} por {{ raiox.pedido.etapa_por }} em {{ fmtDiaHora(raiox.pedido.etapa_em) }}<span v-if="raiox.pedido.etapa_motivo">: {{ raiox.pedido.etapa_motivo }}</span></div>
           </div>
           <div v-if="canEdit" class="space-y-1.5">

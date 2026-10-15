@@ -264,6 +264,13 @@ def conta_amazon_de_transacoes(txs: list[Any]) -> dict[str, Decimal] | None:
     return conta
 
 
+def _am_proprio(venda: MarketplaceOrderFinancial | None) -> bool:
+    """Envio próprio da Amazon pela conta do pedido: frete cobrado do cliente e nenhuma
+    etiqueta Easy Ship (quando a Logística ainda não classificou o canal)."""
+    c = conta_amazon(venda)
+    return bool(c and c["frete_cliente"] > ZERO and not c["etiqueta"])
+
+
 def motivo_amazon(movs: list[ConciliacaoMovimento]) -> str | None:
     """Em que momento o dinheiro do pedido está na Amazon (15/10, Vinicius): "preso na
     reserva" enquanto algum lançamento é DEFERRED; senão "liberado em dd/mm"."""
@@ -408,6 +415,15 @@ def situacao_do_pedido(
             motivo = "venda desfeita: liberou e devolveu"
             # Tudo voltou: não existe "saiu depois" (a mediação pode cair segundos
             # depois da última liberação e parecer saída tardia — 15/10, 301418).
+            saidas_depois = None
+        elif bling_cancelado and recebido <= TOLERANCIA:
+            # Amazon 302142 (15/10): pedido cancelado no Bling, a Amazon devolveu tudo ao
+            # cliente e ficou com 10,00 de tarifa — é cancelado, não "estornado depois"
+            situacao = "cancelado"
+            ficou = -recebido
+            motivo = "cancelado no Bling: devolveu tudo" + (
+                f", a plataforma ficou com {ficou:.2f}" if ficou > TOLERANCIA else ""
+            )
             saidas_depois = None
         elif (
             saidas_depois and saidas_depois > TOLERANCIA and recebido < liberado_valor - TOLERANCIA
@@ -663,6 +679,24 @@ async def recalcular_loja(
             )
         ).scalars()
     }
+    # Amazon (15/10): frete pago fora (Melhor Envio) e o canal de envio de cada pedido
+    fretes_pagos: dict[str, Decimal] = {}
+    canal_por_numero: dict[str, str] = {}
+    if plataforma_loja == "amazon":
+        from app.models import Logistica
+        from app.services.conciliacao_melhor_envio import fretes_por_pedido
+
+        fretes_pagos = await fretes_por_pedido(session, loja)
+        if numeros:
+            for num, canal in (
+                await session.execute(
+                    select(Logistica.pedido_bling, Logistica.amazon_canal).where(
+                        Logistica.pedido_bling.in_(numeros)
+                    )
+                )
+            ).all():
+                if canal:
+                    canal_por_numero[str(num)] = str(canal)
 
     # 3. Uma linha por pedido.
     contagem: dict[str, int] = defaultdict(int)
@@ -718,6 +752,14 @@ async def recalcular_loja(
         )
         if plataforma_loja == "amazon" and calc["situacao"] == "bateu":
             calc["motivo"] = motivo_amazon(extrato)
+            # envio próprio sem o frete do Melhor Envio: "falta frete" (etapa = pendência)
+            if fretes_pagos.get(numero) is None:
+                canal_am = canal_por_numero.get(numero) or (
+                    "proprio" if (_am_proprio(venda)) else None
+                )
+                if canal_am == "proprio":
+                    calc["situacao"] = "falta_frete"
+                    calc["motivo"] = "sem o frete do Melhor Envio"
         atual = existentes.get(numero)
         etapa = etapa_do_pedido(
             agora=agora,
@@ -765,13 +807,20 @@ async def recalcular_loja(
         # Resultado de VERDADE: só com o dinheiro que entrou. Enquanto não libera, sobrou
         # e margem ficam vazios (15/10, Vinicius: "não precisa aparecer previsto nem margem").
         base_resultado = calc["recebido"]
+        # Amazon: frete pago fora da plataforma (Melhor Envio) — entra no Sobrou, não
+        # no Líquido; envio próprio sem ele não pode ser "bateu" (15/10, Vinicius)
+        frete_pago = fretes_pagos.get(numero) if plataforma_loja == "amazon" else None
         if calc["situacao"] == "cancelado":
             # Venda desfeita: o produto não saiu (ou voltou) — custo zero (15/10, Vinicius).
             custo = ZERO
-            sobrou = (base_resultado or ZERO) - reembolso
+            sobrou = (base_resultado or ZERO) - reembolso - (frete_pago or ZERO)
             margem = None
         else:
-            sobrou = (base_resultado - custo - reembolso) if base_resultado is not None else None
+            sobrou = (
+                (base_resultado - custo - reembolso - (frete_pago or ZERO))
+                if base_resultado is not None
+                else None
+            )
             margem = (
                 (sobrou / custo).quantize(Decimal("0.0001"))
                 if (sobrou is not None and custo > ZERO)
@@ -806,6 +855,7 @@ async def recalcular_loja(
                 else (_d(venda.discount_amount) if venda_ok else None)
             ),
             "venda_afiliados": shopee.get("afiliados") if shopee else None,
+            "venda_frete_pago": frete_pago,
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
             "venda_liquido": _d(venda.net_amount) if venda_ok else None,
             "venda_status": venda.status if venda_ok else None,
