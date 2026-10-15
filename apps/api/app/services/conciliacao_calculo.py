@@ -160,6 +160,9 @@ def situacao_do_pedido(
         if cancelada and abs(recebido) <= TOLERANCIA:
             situacao = "cancelado"
             motivo = "venda desfeita: liberou e devolveu"
+            # Tudo voltou: não existe "saiu depois" (a mediação pode cair segundos
+            # depois da última liberação e parecer saída tardia — 15/10, 301418).
+            saidas_depois = None
         elif (
             saidas_depois and saidas_depois > TOLERANCIA and recebido < liberado_valor - TOLERANCIA
         ):
@@ -183,9 +186,8 @@ def situacao_do_pedido(
                     situacao = "recebido_a_mais"
                 if situacao != "bateu":
                     motivo = _motivo_da_diferenca(venda, fatura, liberacoes)
-            if situacao == "bateu" and dif_bling is not None and abs(dif_bling) > TOLERANCIA:
-                situacao = "bling_diferente"
-                motivo = f"Bling {bling_total} × venda {venda_valor}"
+            # 15/10: o Bling "nunca bate" (Vinicius) — a diferença Bling × venda continua
+            # gravada (dif_bling_venda), mas não vira situação nem aparece na tela.
     return {
         "liberado_valor": liberado_valor,
         "liberado_em": liberado_em,
@@ -199,6 +201,18 @@ def situacao_do_pedido(
     }
 
 
+def frete_do_comprador(
+    venda: MarketplaceOrderFinancial | None, liberacoes: list[ConciliacaoMovimento]
+) -> Decimal:
+    """Quanto o comprador pagou de frete = bruto do extrato − valor da venda (ML põe o
+    frete do comprador dentro do GROSS_AMOUNT do pagamento). Zero quando não dá pra saber."""
+    if venda is None or venda.gross_amount is None or not liberacoes:
+        return ZERO
+    bruto = _soma([m.bruto for m in liberacoes if m.bruto is not None])
+    dif = bruto - _d(venda.gross_amount)
+    return dif if dif > TOLERANCIA else ZERO
+
+
 def _motivo_da_diferenca(
     venda: MarketplaceOrderFinancial | None,
     fatura: dict[str, Decimal],
@@ -207,12 +221,16 @@ def _motivo_da_diferenca(
     partes: list[str] = []
     frete_previsto = _d(venda.freight_amount) if venda else None
     frete_cobrado = _soma([m.frete for m in liberacoes]).copy_abs() if liberacoes else None
+    # O extrato cobra o frete INTEIRO (SHIPPING_FEE) e o bruto traz o que o comprador
+    # pagou de frete; a venda guarda só a parte da loja. Compara líquido com líquido.
+    frete_comprador = frete_do_comprador(venda, liberacoes)
     if (
         frete_previsto is not None
         and frete_cobrado is not None
-        and abs(frete_cobrado - frete_previsto) > TOLERANCIA
+        and abs((frete_cobrado - frete_comprador) - frete_previsto) > TOLERANCIA
     ):
-        partes.append(f"frete cobrado {frete_cobrado} × previsto {frete_previsto}")
+        detalhe = f" ({frete_comprador} pago pelo comprador)" if frete_comprador else ""
+        partes.append(f"frete cobrado {frete_cobrado}{detalhe} × previsto {frete_previsto}")
     parcelamento = _soma([m.parcelamento for m in liberacoes]).copy_abs() if liberacoes else ZERO
     if parcelamento > TOLERANCIA:
         partes.append(f"taxa de parcelamento {parcelamento}")
@@ -441,7 +459,8 @@ async def recalcular_loja(
             else (_d(venda.net_amount) if venda else None)
         )
         if calc["situacao"] == "cancelado":
-            # Venda desfeita: o produto não saiu (ou voltou) — o custo não é perda.
+            # Venda desfeita: o produto não saiu (ou voltou) — custo zero (15/10, Vinicius).
+            custo = ZERO
             sobrou = (base_resultado or ZERO) - reembolso
             margem = None
         else:
@@ -561,6 +580,33 @@ async def recalcular_loja(
             if achado:
                 m.pedido_bling, m.bling_id = achado
                 contagem["resolvido_agora"] += 1
+    # Cupom do extrato: só o que sai do bolso da loja (EFFECTIVE_COUPON_AMOUNT); as linhas
+    # gravadas antes de 15/10 tinham o COUPON_AMOUNT (que soma o cupom bancado pelo ML).
+    from app.services.conciliacao_extrato import cupom_da_linha
+
+    extrato_gravado = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.tipo == "venda_liberada",
+                    ConciliacaoMovimento.cupom.isnot(None),
+                    ConciliacaoMovimento.cupom != ZERO,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in extrato_gravado:
+        raw = m.raw if isinstance(m.raw, dict) else {}
+        if "EFFECTIVE_COUPON_AMOUNT" not in raw:
+            continue
+        certo = cupom_da_linha(raw)
+        if certo != m.cupom:
+            m.cupom = certo
+            contagem["cupom_corrigido"] += 1
     # Nome do tipo da cobrança: se o mapa de sub-tipos mudou, renomeia o que já está gravado.
     fatura_gravada = (
         (

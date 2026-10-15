@@ -8,7 +8,6 @@ export const SITUACOES: Array<{ key: string; label: string; cls: string }> = [
   { key: 'vencido', label: 'Não liberado (vencido)', cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' },
   { key: 'recebido_a_menos', label: 'Recebido a menos', cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' },
   { key: 'recebido_a_mais', label: 'Recebido a mais', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
-  { key: 'bling_diferente', label: 'Bling ≠ venda', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
   { key: 'estornado_depois', label: 'Estornado depois', cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' },
   { key: 'cancelado', label: 'Cancelado', cls: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200' },
   { key: 'sem_venda', label: 'Sem venda do ML', cls: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200' },

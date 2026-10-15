@@ -736,7 +736,18 @@ def _pedido_out(p: ConciliacaoPedido) -> dict[str, Any]:
     out["situacao_label"] = SITUACAO_LABELS.get(p.situacao, p.situacao)
     out["etapa_label"] = ETAPA_LABELS.get(p.etapa, p.etapa)
     out["conferido"] = bool(p.conferido_em)
+    out["venda_extras"] = _extras_da_venda(p)
     return out
+
+
+def _extras_da_venda(p: ConciliacaoPedido) -> float | None:
+    """Tudo que o ML tira antes de liberar além da tarifa e do frete (cupom da loja,
+    parcelamento, outros): valor − tarifa − frete − líquido previsto. Com isso a linha
+    da grade fecha sozinha (15/10, Vinicius: "Extras")."""
+    if None in (p.venda_valor, p.venda_tarifa, p.venda_frete, p.venda_liquido):
+        return None
+    extras = p.venda_valor - p.venda_tarifa - p.venda_frete - p.venda_liquido
+    return float(extras.quantize(Decimal("0.01")))
 
 
 def _movimento_out(m: ConciliacaoMovimento) -> dict[str, Any]:
@@ -763,6 +774,32 @@ def _movimento_out(m: ConciliacaoMovimento) -> dict[str, Any]:
         "sku": m.sku,
         "classificacao": m.classificacao,
         "data_aprovacao": m.data_aprovacao.isoformat() if m.data_aprovacao else None,
+        # A linha ORIGINAL (a linha do relatório do Mercado Pago ou o detalhe da fatura
+        # do ML), pra quem quiser conferir na fonte — 15/10, pedido do Vinicius.
+        "original": _original_do_movimento(m),
+    }
+
+
+def _original_do_movimento(m: ConciliacaoMovimento) -> dict[str, Any]:
+    raw = m.raw if isinstance(m.raw, dict) else {}
+    if m.origem == ORIGEM_EXTRATO:
+        # só as colunas preenchidas, na ordem do relatório
+        return {k: v for k, v in raw.items() if v not in (None, "", "0.00", "0", "{}", "[]")}
+    ci = raw.get("charge_info") or {}
+    vendas = raw.get("sales_info") or []
+    venda = vendas[0] if isinstance(vendas, list) and vendas else {}
+    return {
+        "detail_id": ci.get("detail_id"),
+        "creation_date_time": ci.get("creation_date_time"),
+        "detail_type": ci.get("detail_type"),
+        "detail_sub_type": ci.get("detail_sub_type"),
+        "detail_amount": ci.get("detail_amount"),
+        "transaction_detail": ci.get("transaction_detail"),
+        "debited_from_operation": ci.get("debited_from_operation"),
+        "charge_bonified_id": ci.get("charge_bonified_id"),
+        "order_id": venda.get("order_id") if isinstance(venda, dict) else None,
+        "operation_id": venda.get("operation_id") if isinstance(venda, dict) else None,
+        "_periodo": raw.get("_periodo"),
     }
 
 
@@ -992,6 +1029,22 @@ async def raio_x(
         vals = [getattr(m, attr) for m in lista if getattr(m, attr) is not None]
         return float(abs(sum(vals, Decimal("0")))) if vals else None
 
+    # Frete do comprador: o ML põe dentro do GROSS do pagamento o que o comprador pagou
+    # de frete, e desconta o frete INTEIRO (SHIPPING_FEE); a venda guarda só a parte da
+    # loja. Sem isso o Raio-X mostrava 24,45 × 55,44 e parecia erro (300415, 15/10).
+    bruto_extrato = _soma("bruto", liberacoes)
+    venda_valor = _num(p.venda_valor)
+    frete_comprador = (
+        round(bruto_extrato - venda_valor, 2)
+        if (
+            bruto_extrato is not None
+            and venda_valor is not None
+            and bruto_extrato - venda_valor > 0.005
+        )
+        else 0.0
+    )
+    frete_extrato = _soma("frete", liberacoes)
+    venda_frete = _num(p.venda_frete)
     versoes = {
         "bling": {
             "valor": _num(p.bling_total),
@@ -1006,9 +1059,14 @@ async def raio_x(
             else None,
         },
         "venda": {
-            "valor": _num(p.venda_valor),
+            "valor": venda_valor,
+            "frete_comprador": frete_comprador,
+            "bruto": round(venda_valor + frete_comprador, 2) if venda_valor is not None else None,
             "tarifa": _num(p.venda_tarifa),
-            "frete": _num(p.venda_frete),
+            "frete": venda_frete,
+            "frete_cobrado": round(venda_frete + frete_comprador, 2)
+            if venda_frete is not None
+            else None,
             "cupom": _num(p.venda_cupom),
             "estorno": _num(p.venda_estorno),
             "liquido": _num(p.venda_liquido),
@@ -1022,10 +1080,17 @@ async def raio_x(
             "outros": _num(p.fatura_outros),
         },
         "extrato": {
-            "valor": _soma("bruto", liberacoes),
+            "valor": bruto_extrato,
+            "frete_comprador": frete_comprador if bruto_extrato is not None else None,
+            "produtos": round(bruto_extrato - frete_comprador, 2)
+            if bruto_extrato is not None
+            else None,
             "tarifa": _soma("tarifa", liberacoes),
             "parcelamento": _soma("parcelamento", liberacoes),
-            "frete": _soma("frete", liberacoes),
+            "frete": frete_extrato,
+            "frete_liquido": round(frete_extrato - frete_comprador, 2)
+            if frete_extrato is not None
+            else None,
             "cupom": _soma("cupom", liberacoes),
             "liquido": _num(p.liberado_valor),
             "saidas_depois": _num(p.saidas_depois),
@@ -1035,7 +1100,115 @@ async def raio_x(
     return {
         "pedido": _pedido_out(p),
         "versoes": versoes,
+        "comparativo": _comparativo(p, versoes, movs),
         "movimentos": [_movimento_out(m) for m in movs],
+    }
+
+
+def _comparativo(
+    p: ConciliacaoPedido, versoes: dict[str, Any], movs: list[ConciliacaoMovimento]
+) -> dict[str, Any]:
+    """Previsto (venda) × Real (extrato + fatura à parte) × Diferença — a leitura de
+    conciliação que o Vinicius aprovou em 15/10 no lugar das três colunas."""
+    v, e = versoes["venda"], versoes["extrato"]
+    tem_extrato = e.get("valor") is not None
+
+    def n(x: Any) -> float | None:
+        return float(x) if x is not None else None
+
+    # Cobranças da fatura que NÃO foram descontadas na liberação (de verdade: a fatura
+    # marca o Mercado Envios como "não descontado" mesmo quando o extrato descontou).
+    a_parte = 0.0
+    for m in movs:
+        if m.origem != "ml_fatura" or not m.debito or m.descontado_da_venda is not False:
+            continue
+        if m.tipo == "fatura_frete" and (e.get("frete") or 0) > 0:
+            continue
+        if (
+            m.tipo in ("fatura_tarifa_venda", "fatura_tarifa_cobranca")
+            and (e.get("tarifa") or 0) > 0
+        ):
+            continue
+        a_parte += float(m.debito)
+    a_parte = round(a_parte, 2)
+    liberado = n(p.liberado_valor)
+    recebido = n(p.recebido)
+    depois = (
+        round(recebido - liberado, 2) if (recebido is not None and liberado is not None) else None
+    )
+    real_liquido = round(recebido - a_parte, 2) if recebido is not None else None
+
+    def linha(chave, rotulo, previsto, real, *, compara=True, estilo="") -> dict[str, Any]:
+        dif = (
+            round(previsto - real, 2)
+            if (compara and previsto is not None and real is not None)
+            else None
+        )
+        return {
+            "chave": chave,
+            "rotulo": rotulo,
+            "previsto": previsto,
+            "real": real,
+            "dif": dif,
+            "estilo": estilo,
+        }
+
+    fc = n(v.get("frete_comprador")) or 0.0
+    linhas = [
+        linha("produtos", "Produtos (preço da venda)", n(v.get("valor")), n(e.get("produtos"))),
+        linha(
+            "frete_comprador",
+            "+ Frete pago pelo comprador",
+            fc,
+            n(e.get("frete_comprador")),
+            compara=False,
+            estilo="muted",
+        ),
+        linha(
+            "total",
+            "= Total pago pelo comprador",
+            n(v.get("bruto")),
+            n(e.get("valor")),
+            estilo="bold",
+        ),
+        linha("tarifa", "− Tarifa de venda", n(v.get("tarifa")), n(e.get("tarifa"))),
+        linha(
+            "frete",
+            "− Frete Mercado Envios (inteiro)",
+            n(v.get("frete_cobrado")),
+            n(e.get("frete")),
+        ),
+        linha("parcelamento", "− Parcelamento", None, n(e.get("parcelamento")), compara=False),
+        linha("cupom", "− Cupom da loja", n(v.get("cupom")), n(e.get("cupom"))),
+        linha(
+            "depois",
+            "± Depois da liberação (estornos, mediações)",
+            0.0 if tem_extrato else None,
+            depois,
+            compara=False,
+            estilo="muted",
+        ),
+        linha(
+            "a_parte",
+            "− Cobranças à parte na fatura",
+            None,
+            a_parte if tem_extrato else None,
+            compara=False,
+            estilo="muted",
+        ),
+        linha("liquido", "= Líquido", n(v.get("liquido")), real_liquido, estilo="bold"),
+    ]
+    if fc <= 0.005:
+        linhas = [x for x in linhas if x["chave"] not in ("frete_comprador", "total")]
+    return {
+        "linhas": linhas,
+        "comparar": p.situacao != "cancelado",
+        "nota": (
+            "venda desfeita: as colunas mostram o que entrou e o que saiu, não há previsto a cobrar"
+            if p.situacao == "cancelado"
+            else None
+        ),
+        "frete_liquido_loja": n(v.get("frete")),
     }
 
 
@@ -1097,6 +1270,7 @@ _COLUNAS_XLSX = [
     ("Venda valor", "venda_valor"),
     ("Tarifa", "venda_tarifa"),
     ("Frete", "venda_frete"),
+    ("Extras (cupom, parcelamento, outros)", "venda_extras"),
     ("Cupom", "venda_cupom"),
     ("Estorno", "venda_estorno"),
     ("Líquido previsto", "venda_liquido"),
