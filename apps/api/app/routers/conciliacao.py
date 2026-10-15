@@ -4107,6 +4107,23 @@ async def sonda_tiktok_espera(
     }
 
 
+def _soma_quebras(no: Any, acc: dict[str, Decimal], prefixo: str = "") -> None:
+    """Soma `breakdownAmount` por `breakdownType` (recursivo) das transações da Amazon."""
+    if isinstance(no, dict):
+        tipo = no.get("breakdownType")
+        amt = (no.get("breakdownAmount") or {}).get("currencyAmount")
+        if tipo and amt is not None:
+            try:
+                acc[f"{prefixo}{tipo}"] += Decimal(str(amt))
+            except (InvalidOperation, ValueError):
+                pass
+        for b in no.get("breakdowns") or []:
+            _soma_quebras(b, acc, f"{prefixo}{tipo} › " if tipo else prefixo)
+    elif isinstance(no, list):
+        for x in no:
+            _soma_quebras(x, acc, prefixo)
+
+
 def _resumo_relatorio_repasse(texto: str) -> dict[str, Any]:
     """Resume o settlement report (TSV V2) sem dados pessoais: cabeçalho da
     liquidação, linhas por tipo e as somas por tipo de valor."""
@@ -4270,15 +4287,79 @@ async def sonda_amazon(
                                 quebras[
                                     f"{b.get('breakdownType')} › {b2.get('breakdownType')}"
                                 ] += 1
+        somas_tipo: dict[str, Decimal] = defaultdict(Decimal)
+        somas_quebra: dict[str, Decimal] = defaultdict(Decimal)
+        repasses_banco: list[dict[str, Any]] = []
+        por_status: Counter = Counter()
+        for t in txs:
+            amt = t.get("totalAmount") or {}
+            try:
+                v = Decimal(str(amt.get("currencyAmount") or 0))
+            except (InvalidOperation, ValueError):
+                v = Decimal("0")
+            tipo_t = str(t.get("transactionType") or "?")
+            somas_tipo[tipo_t] += v
+            por_status[str(t.get("transactionStatus") or "?")] += 1
+            if tipo_t in ("Transfer", "DebtRecovery"):
+                repasses_banco.append(
+                    {
+                        "tipo": tipo_t,
+                        "data": str(t.get("postedDate") or "")[:10],
+                        "valor": _num(v),
+                        "descricao": str(t.get("description") or "")[:60],
+                        "status": t.get("transactionStatus"),
+                    }
+                )
+            for it in t.get("items") or []:
+                if isinstance(it, dict):
+                    _soma_quebras(it.get("breakdowns"), somas_quebra)
         transacoes = {
             "linhas": len(txs),
             "mais_paginas": bool(tx_body.get("nextToken")),
             "por_tipo": dict(tipos),
+            "por_status": dict(por_status),
+            "soma_por_tipo": {k: _num(v) for k, v in somas_tipo.items()},
+            "soma_por_quebra": {
+                k: _num(v)
+                for k, v in sorted(somas_quebra.items(), key=lambda kv: abs(kv[1]), reverse=True)[
+                    :25
+                ]
+            },
+            "repasses_banco": sorted(repasses_banco, key=lambda x: x["data"])[-12:],
             "total": _num(total),
             "campos": sorted({k for t in txs for k in t}),
             "quebras": dict(quebras.most_common(30)),
             "datas": sorted({str(t.get("postedDate") or "")[:10] for t in txs})[-5:],
         }
+    # 1b) o que ainda está preso (DEFERRED) × liberado (RELEASED) — reserva por data de entrega
+    por_situacao: dict[str, Any] = {}
+    for situ in ("DEFERRED", "RELEASED"):
+        b = await chama(
+            f"transacoes_{situ.lower()}",
+            "/finances/2024-06-19/transactions",
+            {
+                "postedAfter": de.isoformat(),
+                "marketplaceId": cliente.marketplace_id,
+                "transactionStatus": situ,
+            },
+        )
+        if isinstance(b, dict):
+            pl = b.get("payload") if isinstance(b.get("payload"), dict) else b
+            lst = [t for t in (pl.get("transactions") or []) if isinstance(t, dict)]
+            soma = Decimal("0")
+            tipos_s: Counter = Counter()
+            for t in lst:
+                tipos_s[str(t.get("transactionType") or "?")] += 1
+                try:
+                    soma += Decimal(str((t.get("totalAmount") or {}).get("currencyAmount") or 0))
+                except (InvalidOperation, ValueError):
+                    pass
+            por_situacao[situ] = {
+                "linhas": len(lst),
+                "mais_paginas": bool(pl.get("nextToken")),
+                "por_tipo": dict(tipos_s),
+                "soma": _num(soma),
+            }
     # 2) grupos de repasse (Finances v0): um grupo = um período de repasse pro banco
     g_body = await chama(
         "grupos_repasse",
@@ -4547,6 +4628,7 @@ async def sonda_amazon(
         "janela": {"de": de.isoformat(), "ate": agora.isoformat()},
         "chamadas": chamadas,
         "transacoes": transacoes,
+        "transacoes_por_situacao": por_situacao,
         "grupos_repasse": grupos[:20],
         "relatorios_repasse": relatorios[:20],
         "relatorio_baixado": relatorio_baixado,
