@@ -95,6 +95,7 @@ const PLATAFORMAS: Array<{ key: string; label: string }> = [
   { key: 'temu', label: 'Temu' },
 ]
 const FASE_SEGUINTE = ['Shopee', 'Amazon', 'TikTok']
+const MOSTRAR_MES = false // rodapé do mês desligado em 15/10 (volta quando ele pedir)
 
 const { api } = useApi()
 // O dia é definido no cliente (onMounted): no servidor o relógio é UTC e perto da
@@ -315,7 +316,9 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="rounded-md border bg-card">
+      <!-- 15/10: o rodapé do mês fica guardado (Vinicius: "por enquanto não preciso");
+           no lugar vai entrar o bloco "Dinheiro nas plataformas". -->
+      <div v-if="MOSTRAR_MES" class="rounded-md border bg-card">
         <div class="overflow-auto">
           <table class="w-full border-collapse text-[11px]">
             <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
