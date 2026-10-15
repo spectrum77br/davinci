@@ -533,6 +533,20 @@ def etapa_do_pedido(
     if fechou and not bateu_em:
         out["bateu_em"] = agora
     if etapa_anterior == "finalizado":
+        # o robô finalizou como "venda desfeita" e o pedido deixou de ser cancelado
+        # (mudou o status no Bling — 302142, 15/10): volta pra fila como reaberto
+        if (
+            atual.etapa_por == ETAPA_PELO_ROBO
+            and "venda desfeita" in (atual.etapa_motivo or "")
+            and situacao != "cancelado"
+        ):
+            out.update(
+                etapa="reaberto",
+                etapa_em=agora,
+                etapa_por=ETAPA_PELO_ROBO,
+                etapa_motivo=f"deixou de ser cancelado ({situacao})",
+            )
+            return out
         if ultimo_movimento_em and atual.etapa_em and ultimo_movimento_em > atual.etapa_em:
             quando = ultimo_movimento_em.astimezone(BRT)
             out.update(

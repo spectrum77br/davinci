@@ -697,3 +697,13 @@ async def test_cancelado_no_bling_com_estorno_integral_e_cancelado(db, make_user
     por = {x["chave"]: x for x in r.json()["comparativo"]["linhas"]}
     assert por["liquido"]["previsto"] == 749.53 and por["liquido"]["real"] == 749.53
     assert por["depois"]["real"] == -759.53 and por["ficou"]["real"] == -10
+    # o Bling deixou de ser Cancelado (Aguardando Devolução): sai de cancelado e o robô
+    # reabre o que ele mesmo tinha finalizado
+    pedido.situacao = "Aguardando Devolução"
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    r = await client.get("/api/conciliacao/pedidos/301943", params={"loja": "kia"})
+    ped = r.json()["pedido"]
+    assert ped["situacao"] == "estornado_depois" and ped["etapa"] == "reaberto"
+    assert ped["etapa_motivo"] == "deixou de ser cancelado (estornado_depois)"
