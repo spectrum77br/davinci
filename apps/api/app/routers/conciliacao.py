@@ -2333,6 +2333,9 @@ async def fechamento_do_mes(
         "detalhes_por_sub_tipo": [],
         "detalhes_cobrancas": 0.0,
         "detalhes_bonificacoes": 0.0,
+        "bonificacoes_mesma_fatura": 0.0,
+        "bonificacoes_de_faturas_anteriores": 0.0,
+        "bonificacoes_anteriores_linhas": 0,
         "lido_em": sync.lido_em.isoformat() if sync and sync.lido_em else None,
     }
     if periodo.get("date_from") and periodo.get("date_to"):
@@ -2373,7 +2376,51 @@ async def fechamento_do_mes(
         ]
         fatura["detalhes_cobrancas"] = round(sum(float(d or 0) for _, _, _, d, _ in det), 2)
         fatura["detalhes_bonificacoes"] = round(sum(float(c or 0) for _, _, _, _, c in det), 2)
+        # Bonificação: o resumo do ML só conta a que devolve cobrança da MESMA fatura
+        # (confirmado 15/10 na jlas2: 193 linhas = 11.131,25 = resumo). A que devolve
+        # cobrança de fatura anterior é crédito real, mas fica fora do resumo.
+        datas_cobranca = dict(
+            (
+                await session.execute(
+                    select(mov.id_externo, mov.data).where(
+                        mov.integration_id == alvo.integration_id,
+                        mov.origem == "ml_fatura",
+                        mov.debito > 0,
+                    )
+                )
+            ).all()
+        )
+        bonus = (
+            await session.execute(
+                select(mov.credito, mov.raw).where(
+                    mov.integration_id == alvo.integration_id,
+                    mov.origem == "ml_fatura",
+                    mov.credito > 0,
+                    mov.data >= p_ini,
+                    mov.data < p_fim,
+                )
+            )
+        ).all()
+        mesma = anteriores = 0.0
+        n_ant = 0
+        for cred, raw in bonus:
+            orig = str(((raw or {}).get("charge_info") or {}).get("charge_bonified_id") or "")
+            dt_orig = datas_cobranca.get(orig)
+            if dt_orig is not None and p_ini <= dt_orig < p_fim:
+                mesma += float(cred or 0)
+            else:
+                anteriores += float(cred or 0)
+                n_ant += 1
+        fatura["bonificacoes_mesma_fatura"] = round(mesma, 2)
+        fatura["bonificacoes_de_faturas_anteriores"] = round(anteriores, 2)
+        fatura["bonificacoes_anteriores_linhas"] = n_ant
     soma_resumo = round(sum(x["valor"] or 0 for x in fatura["resumo_cobrancas"]), 2)
+    soma_resumo_bonus = round(sum(abs(x["valor"] or 0) for x in fatura["resumo_bonificacoes"]), 2)
+    fatura["bate_bonificacoes"] = (
+        (abs(soma_resumo_bonus - fatura.get("bonificacoes_mesma_fatura", 0.0)) <= 1.0)
+        if fatura["resumo_bonificacoes"]
+        else None
+    )
     fatura["bate"] = (
         (abs(soma_resumo - fatura["detalhes_cobrancas"]) <= 1.0)
         if fatura["resumo_cobrancas"]
@@ -2489,7 +2536,20 @@ async def fechamento_xlsx(
         ws.append([d["tipo"], d["sub_tipo"], d["linhas"], d["cobrado"], d["bonificado"]])
     ws.append(["Cobranças: detalhes", "", "", fa["detalhes_cobrancas"], ""])
     ws.append(["Bonificações: detalhes", "", "", "", fa["detalhes_bonificacoes"]])
+    ws.append(
+        ["  das quais devolvem cobrança desta fatura", "", "", "", fa["bonificacoes_mesma_fatura"]]
+    )
+    ws.append(
+        [
+            "  das quais devolvem cobrança de fatura anterior",
+            "",
+            fa["bonificacoes_anteriores_linhas"],
+            "",
+            fa["bonificacoes_de_faturas_anteriores"],
+        ]
+    )
     ws.append(["Resumo = detalhes (cobranças)?", "", fa["bate"]])
+    ws.append(["Resumo = detalhes (bonificações da mesma fatura)?", "", fa["bate_bonificacoes"]])
 
     ws = wb.create_sheet("Dias")
     ws.append(["Dia", "Linhas", "Sem dono", "Créditos", "Débitos", "Fechado em", "Fechado por"])

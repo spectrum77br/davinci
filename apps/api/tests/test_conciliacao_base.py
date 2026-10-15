@@ -1283,7 +1283,7 @@ async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_
                             {"type": "CV", "label": "Cargo por venda", "amount": 92.36},
                             {"type": "CXD", "label": "Cargo por Mercado Envios", "amount": 62.33},
                         ],
-                        "bonuses": [],
+                        "bonuses": [{"type": "BVVML", "label": "BVVML", "amount": -10.0}],
                     },
                     "payment_collected": {"total_collected": 154.69, "total_debt": 0.0},
                 }
@@ -1323,18 +1323,29 @@ async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_
             pedido_bling="303700",
         )
     )
+    cobrancas = {}
     for sub, tipo, valor in (("CVVML", "fatura_tarifa", "92.36"), ("CXD", "fatura_frete", "62.33")):
-        db.add(
-            _mov(
-                loja,
-                tipo,
-                _d13(10, 0),
-                debito=valor,
-                pedido_bling="301102",
-                origem="ml_fatura",
-                sub=sub,
-            )
+        cobrancas[sub] = _mov(
+            loja,
+            tipo,
+            _d13(10, 0),
+            debito=valor,
+            pedido_bling="301102",
+            origem="ml_fatura",
+            sub=sub,
         )
+        db.add(cobrancas[sub])
+    # duas bonificações: uma devolve a cobrança CVVML desta fatura (entra no resumo do
+    # ML), outra devolve uma cobrança de fatura anterior (crédito real, fora do resumo)
+    b1 = _mov(
+        loja, "fatura_bonificacao", _d13(11, 0), credito="10.00", origem="ml_fatura", sub="BVVML"
+    )
+    b1.raw = {"charge_info": {"charge_bonified_id": cobrancas["CVVML"].id_externo}}
+    b2 = _mov(
+        loja, "fatura_bonificacao", _d13(11, 5), credito="5.00", origem="ml_fatura", sub="BDSB"
+    )
+    b2.raw = {"charge_info": {"charge_bonified_id": 999999}}
+    db.add_all([b1, b2])
     await db.commit()
     auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
     r = await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-10"})
@@ -1373,9 +1384,18 @@ async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_
     }
     assert [c["tipo"] for c in fat["resumo_cobrancas"]] == ["CV", "CXD"]
     assert fat["resumo_total"] == 154.69
-    assert fat["detalhes_cobrancas"] == 154.69 and fat["detalhes_bonificacoes"] == 0.0
-    assert {d["sub_tipo"] for d in fat["detalhes_por_sub_tipo"]} == {"CVVML", "CXD"}
+    assert fat["detalhes_cobrancas"] == 154.69 and fat["detalhes_bonificacoes"] == 15.0
+    assert {d["sub_tipo"] for d in fat["detalhes_por_sub_tipo"]} == {
+        "CVVML",
+        "CXD",
+        "BVVML",
+        "BDSB",
+    }
     assert fat["bate"] is True and fat["pago"]["total_collected"] == 154.69
+    # resumo do ML (10,00) = bonificações desta fatura (10,00); a de fatura anterior à parte
+    assert fat["bonificacoes_mesma_fatura"] == 10.0
+    assert fat["bonificacoes_de_faturas_anteriores"] == 5.0
+    assert fat["bonificacoes_anteriores_linhas"] == 1 and fat["bate_bonificacoes"] is True
     # o Excel traz as quatro abas
     r = await client.post(
         "/api/conciliacao/fechamento.xlsx", params={"loja": "jlas2", "mes": "2026-10"}

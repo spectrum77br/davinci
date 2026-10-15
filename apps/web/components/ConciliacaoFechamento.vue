@@ -67,8 +67,12 @@ type Fatura = {
   detalhes_por_sub_tipo: Array<{ sub_tipo: string | null; tipo: string; linhas: number; cobrado: number | null; bonificado: number | null }>
   detalhes_cobrancas: number
   detalhes_bonificacoes: number
+  bonificacoes_mesma_fatura: number
+  bonificacoes_de_faturas_anteriores: number
+  bonificacoes_anteriores_linhas: number
   lido_em: string | null
   bate: boolean | null
+  bate_bonificacoes: boolean | null
 }
 type Fechamento = {
   loja: string
@@ -274,10 +278,11 @@ onMounted(() => {
               <tr v-for="d in dados.fatura.detalhes_por_sub_tipo" :key="String(d.sub_tipo) + d.tipo" class="border-b"><td class="px-3 py-1 text-muted-foreground">{{ tipoMov(d.tipo) }} <span class="text-[10px]">{{ d.sub_tipo }} · {{ d.linhas }} linhas</span></td><td class="px-3 py-1 text-right tabular-nums" :class="(d.bonificado || 0) > 0 ? 'text-emerald-700' : 'text-red-600'">{{ (d.bonificado || 0) > 0 ? fmtMoney(d.bonificado) : '− ' + fmtMoney(d.cobrado) }}</td></tr>
               <tr v-if="!dados.fatura.detalhes_por_sub_tipo.length"><td class="px-3 py-2 text-muted-foreground" colspan="2">nenhum detalhe lido neste período</td></tr>
               <tr class="border-t"><td class="px-3 py-1 font-bold">Cobranças: resumo × detalhes</td><td class="px-3 py-1 text-right tabular-nums font-bold">{{ fmtMoney(somaResumo) }} × {{ fmtMoney(dados.fatura.detalhes_cobrancas) }}</td></tr>
-              <tr><td class="px-3 py-1 font-bold">Bonificações: resumo × detalhes</td><td class="px-3 py-1 text-right tabular-nums font-bold">{{ fmtMoney(somaBonus) }} × {{ fmtMoney(dados.fatura.detalhes_bonificacoes) }}</td></tr>
+              <tr class="border-b"><td class="px-3 py-1 font-bold">Bonificações: resumo × detalhes desta fatura <span class="rounded px-1 text-[10px] font-semibold" :class="bateCls(dados.fatura.bate_bonificacoes)">{{ bateTexto(dados.fatura.bate_bonificacoes, 'bate', 'não bate', '—') }}</span></td><td class="px-3 py-1 text-right tabular-nums font-bold">{{ fmtMoney(somaBonus) }} × {{ fmtMoney(dados.fatura.bonificacoes_mesma_fatura) }}</td></tr>
+              <tr><td class="px-3 py-1 text-muted-foreground">+ bonificações devolvendo cobrança de fatura anterior ({{ dados.fatura.bonificacoes_anteriores_linhas }} linhas): crédito real, fora do resumo do ML</td><td class="px-3 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.fatura.bonificacoes_de_faturas_anteriores) }}</td></tr>
             </tbody>
           </table>
-          <div class="mt-auto border-t px-3 py-1.5 text-[11px] text-muted-foreground">O período da fatura do ML não é o mês do calendário (nesta loja vai do dia 23 ao dia 22). Aqui aparece o período cuja chave é este mês.</div>
+          <div class="mt-auto border-t px-3 py-1.5 text-[11px] text-muted-foreground">O período da fatura do ML não é o mês do calendário (nesta loja vai do dia 23 ao dia 22). Aqui aparece o período cuja chave é este mês. O resumo do ML só conta a bonificação que devolve cobrança da própria fatura; a que devolve cobrança de fatura anterior aparece à parte.</div>
         </div>
       </div>
 
