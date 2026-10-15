@@ -364,11 +364,23 @@ async def zerar_nao_lidas(
         filtros.append(AtendimentoConversa.integration_id == integration_id)
     if escopo is not None:
         filtros.append(escopo)
+    # Até a mensagem mais nova que JÁ ESTAVA gravada (o snapshot do comando),
+    # nunca depois do relógio: a que o sync está gravando no meio do clique
+    # (o `created_at` é o começo da transação dele) continua contando — como o
+    # `visto_ate` do /visto.
+    ultima = (
+        select(func.max(AtendimentoMensagem.created_at))
+        .where(AtendimentoMensagem.conversa_id == AtendimentoConversa.id)
+        .correlate(AtendimentoConversa)
+        .scalar_subquery()
+    )
     r = await session.execute(
         update(AtendimentoConversa)
         .where(*filtros)
         .values(
-            visto_em=func.greatest(AtendimentoConversa.visto_em, func.clock_timestamp()),
+            visto_em=func.greatest(
+                AtendimentoConversa.visto_em, func.least(func.clock_timestamp(), ultima)
+            ),
             updated_at=AtendimentoConversa.updated_at,
         )
         .execution_options(synchronize_session=False)

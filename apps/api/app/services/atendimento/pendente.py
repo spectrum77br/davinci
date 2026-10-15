@@ -99,11 +99,12 @@ Duoke com 9 numa conversa só). A régua nova, por conversa:
     `sistema` que ele mesmo mandou — a pergunta do FAQ, a resposta automática
     da conta dele) mandadas depois de `desde_do_numero` (o Duoke foi zerado
     inteiro em 14/10/2026 às 12:35; no máximo 7 dias) e depois
-      – da última resposta de PESSOA da loja (`ultima_da_loja_em`, a da fila:
-        a automática — o robô e as campanhas do Duoke, as automações do
-        DaVinci, o cartão da Shopee — não conta e NÃO zera o número), no
-        relógio da PLATAFORMA (`coalesce(enviada_em, created_at)`, como a
-        fila), e
+      – da última resposta de PESSOA da loja, achada nas mensagens
+        (`resposta_de_pessoa` — não o `ultima_da_loja_em` da fila: a
+        automática — o robô e as campanhas do Duoke, as automações do
+        DaVinci, o cartão da Shopee — não conta e NÃO zera o número, nem no
+        turno só de cartão), no relógio da PLATAFORMA
+        (`coalesce(enviada_em, created_at)`, como a fila), e
       – do que a pessoa já VIU da conversa no DaVinci (`visto_em`, migration
         0399 — "visto no DaVinci", como abrir no Duoke: a tela grava pela
         pessoa que mexe na caixa, em qualquer modo de loja,
@@ -173,9 +174,10 @@ from sqlalchemy import and_, case, func, not_, or_, select
 from sqlalchemy.orm import aliased
 
 from app.models import AtendimentoConversa, AtendimentoMensagem
-from app.services.atendimento import separa_email
+from app.services.atendimento import gravar, separa_email
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
+    AUTOR_LOJA,
     AUTOR_SISTEMA,
     CANAL_AVALIACAO,
     CANAL_CARRINHO,
@@ -184,6 +186,11 @@ from app.services.atendimento.constantes import (
     CANAL_RECLAMACAO,
     CHAVE_VEZ_DA_LOJA,
     CONVERSA_FECHADA,
+    MSG_FALHOU,
+    ORIGEM_NOTA,
+    TIPO_NOTA,
+    e_mensagem_automatica,
+    e_nota,
 )
 
 # Onde o NÃO LIDO da plataforma entra na régua (b): (plataforma, canal).
@@ -321,19 +328,59 @@ def falta_responder_no_chat(conversa: Any) -> bool:
 # ── O número da Caixa = o "não lida" do Duoke (15/10/2026) ───────────────
 
 
-def marcos_do_numero(conversa: Any) -> tuple[datetime | None, datetime | None]:
+def resposta_de_pessoa(mensagem: Any) -> bool:
+    """A mensagem é RESPOSTA DE PESSOA da loja para o número? PURA — a gêmea do
+    `pessoa` de `nao_lidas_duoke_sql`.
+
+    Da loja, que não falhou, que não é nota interna e que não é automática
+    (`constantes.e_mensagem_automatica`: o robô e as campanhas do Duoke — a
+    figurinha 0007/0028, o cartão do pedido, o "já segue" —, as automações do
+    DaVinci, o que a Shopee põe em nome da loja). A resposta da IA que saiu
+    sozinha é resposta (15/10/2026: para o comprador, respondeu).
+
+    NÃO é o `ultima_da_loja_em` da FILA (15/10/2026, a 3ª medição): no turno
+    em que o comprador só mandou cartão, a fila deixa a campanha fechar a vez
+    (`gravar.recalcular_conversa`), e no Duoke o cartão continua não lido — 9
+    conversas zeradas aqui e com número lá (o cartão do produto, a figurinha da
+    campanha 26 h depois, o cartão do pedido no mesmo minuto).
+    """
+    if getattr(mensagem, "autor", None) != AUTOR_LOJA:
+        return False
+    if getattr(mensagem, "status", None) == MSG_FALHOU:
+        return False
+    if e_nota(getattr(mensagem, "origem", None), getattr(mensagem, "tipo", None)):
+        return False
+    return not e_mensagem_automatica(
+        getattr(mensagem, "texto", None), getattr(mensagem, "payload", None)
+    )
+
+
+def _quando(mensagem: Any) -> datetime | None:
+    """O relógio da PLATAFORMA da mensagem (`enviada_em`, sem ele a chegada)."""
+    return _utc(getattr(mensagem, "enviada_em", None)) or _utc(
+        getattr(mensagem, "created_at", None)
+    )
+
+
+def marcos_do_numero(
+    conversa: Any, mensagens: Iterable[Any] | None = None
+) -> tuple[datetime | None, datetime | None]:
     """Os dois marcos do número da conversa: (pessoa, visto). PURA.
 
-    `pessoa` = a última resposta de PESSOA da loja (`ultima_da_loja_em`: o
-    robô e a automação não contam), comparada com o relógio da PLATAFORMA da
-    mensagem; `visto` = até onde alguém já viu a conversa no DaVinci
+    `pessoa` = a última resposta de PESSOA da loja entre as `mensagens`
+    (`resposta_de_pessoa`), no relógio da PLATAFORMA; sem a lista, o
+    `ultima_da_loja_em` da conversa (a fila — só para quem não tem as
+    mensagens à mão). `visto` = até onde alguém já viu a conversa no DaVinci
     (`visto_em`), comparado com a CHEGADA da mensagem (`created_at`). None =
     sem esse marco.
     """
-    return (
-        _utc(getattr(conversa, "ultima_da_loja_em", None)),
-        _utc(getattr(conversa, "visto_em", None)),
-    )
+    if mensagens is None:
+        pessoa = _utc(getattr(conversa, "ultima_da_loja_em", None))
+    else:
+        quandos = [_quando(m) for m in mensagens if resposta_de_pessoa(m)]
+        validos = [q for q in quandos if q is not None]
+        pessoa = max(validos) if validos else None
+    return pessoa, _utc(getattr(conversa, "visto_em", None))
 
 
 def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
@@ -355,10 +402,7 @@ def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
     if getattr(conversa, "sem_resposta_necessaria", False):
         return False
     ultima = _utc(getattr(conversa, "ultima_mensagem_em", None))
-    if ultima is None or ultima <= desde_do_numero(agora):
-        return False
-    pessoa = _utc(getattr(conversa, "ultima_da_loja_em", None))
-    return pessoa is None or ultima > pessoa
+    return ultima is not None and ultima > desde_do_numero(agora)
 
 
 def do_comprador_no_numero(mensagem: Any, comprador: Any = None) -> bool:
@@ -430,15 +474,13 @@ def nao_lidas_duoke(
     """
     if not entra_no_numero(conversa, agora):
         return 0
-    pessoa, visto = marcos_do_numero(conversa)
+    cid = getattr(conversa, "id", None)
+    dela = [m for m in mensagens if getattr(m, "conversa_id", cid) == cid]
+    pessoa, visto = marcos_do_numero(conversa, dela)
     comprador = getattr(conversa, "comprador_id", None)
     desde = desde_do_numero(agora)
-    cid = getattr(conversa, "id", None)
     return sum(
-        1
-        for m in mensagens
-        if getattr(m, "conversa_id", cid) == cid
-        and mensagem_no_numero(m, pessoa, visto, comprador=comprador, desde=desde)
+        1 for m in dela if mensagem_no_numero(m, pessoa, visto, comprador=comprador, desde=desde)
     )
 
 
@@ -458,8 +500,7 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
     A contagem é uma subconsulta CORRELATA pelo índice de
     `atendimento_mensagens.conversa_id`, dentro do CASE: o Postgres só a roda
     para a conversa que passa no pré-filtro (`entra_no_numero`: chat com
-    mensagem depois de `desde_do_numero` e da última resposta de pessoa —
-    umas 950 em produção em 15/10/2026, ~0,1 ms cada), não para a Caixa
+    mensagem depois de `desde_do_numero`), não para a Caixa
     inteira — e por linha na lista (`numero_duoke`, 50 por vez). Dois
     relógios: a resposta de pessoa e o `desde` contra o da PLATAFORMA
     (`coalesce(enviada_em, created_at)`, como a fila) e o "visto no DaVinci"
@@ -469,6 +510,22 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
     m = aliased(AtendimentoMensagem)
     momento = func.coalesce(m.enviada_em, m.created_at)
     desde = desde_do_numero(agora)
+    # A última resposta de PESSOA, pelas mensagens (`resposta_de_pessoa`) — não
+    # o `ultima_da_loja_em` da fila. Uma vez por conversa (correlata só a `c`).
+    h = aliased(AtendimentoMensagem)
+    pessoa = (
+        select(func.max(func.coalesce(h.enviada_em, h.created_at)))
+        .where(
+            h.conversa_id == c.id,
+            h.autor == AUTOR_LOJA,
+            func.coalesce(h.status, "") != MSG_FALHOU,
+            func.coalesce(h.origem, "") != ORIGEM_NOTA,
+            func.coalesce(h.tipo, "") != TIPO_NOTA,
+            not_(gravar.mensagem_automatica_sql(h.texto, h.payload)),
+        )
+        .correlate(c)
+        .scalar_subquery()
+    )
     do_comprador = or_(
         m.autor == AUTOR_CLIENTE,
         and_(m.autor == AUTOR_SISTEMA, m.payload["from_id"].astext == c.comprador_id),
@@ -481,7 +538,7 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
             do_comprador,
             not_(separa_email.mensagem_de_email_sql(m)),
             momento > desde,
-            or_(c.ultima_da_loja_em.is_(None), momento > c.ultima_da_loja_em),
+            momento > func.coalesce(pessoa, desde),
             or_(c.visto_em.is_(None), m.created_at > c.visto_em),
         )
         .correlate(c)
@@ -492,6 +549,5 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
         c.situacao != CONVERSA_FECHADA,
         c.sem_resposta_necessaria.is_(False),
         c.ultima_mensagem_em > desde,
-        or_(c.ultima_da_loja_em.is_(None), c.ultima_mensagem_em > c.ultima_da_loja_em),
     )
     return case((entra, mensagens), else_=0)

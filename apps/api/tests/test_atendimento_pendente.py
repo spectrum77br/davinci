@@ -516,6 +516,30 @@ async def _mundo_duoke(
     faq.comprador_id = "555"
     await db.commit()
     c["faq_do_comprador"] = (faq, 1)
+    # O TURNO SÓ DE CARTÃO (15/10/2026, a 3ª medição): o comprador só mandou
+    # o cartão do produto e a campanha do Duoke (a figurinha 0007, 26 h
+    # depois) fecha a vez dele na FILA (`ultima_da_loja_em`) — mas no Duoke o
+    # cartão continua não lido: o número acha a resposta de PESSOA nas
+    # mensagens (`resposta_de_pessoa`) e conta 1.
+    figurinha = {"source": "openapi", "message_type": "sticker"}
+    cartao = await _cena(db, integ, canal, f"{nome_loja}:so_cartao_e_campanha")
+    await _nossa(
+        db, cartao, 120, autor="cliente", origem="cliente", tipo="produto", texto="",
+        payload={"message_type": "item", "content": {"item_id": 1}},
+    )
+    await _nossa(
+        db, cartao, 60, autor="loja", origem="externo", tipo="outro", texto="[Figurinha]",
+        payload={**figurinha, "content": {"sticker_id": "0007"}},
+    )
+    c["so_cartao_e_campanha"] = (cartao, 1)
+    # A figurinha 0028 da campanha "Só passando para saber…" não é pessoa:
+    # nem fecha a vez, nem zera o número.
+    campanha = await _cena(db, integ, canal, f"{nome_loja}:figurinha_0028", ("cliente", 90))
+    await _nossa(
+        db, campanha, 60, autor="loja", origem="externo", tipo="outro", texto="[Figurinha]",
+        payload={**figurinha, "content": {"sticker_id": "0028"}},
+    )
+    c["figurinha_0028"] = (campanha, 1)
     # O não lido da PLATAFORMA não entra mais: lida lá (zero), conta igual.
     await caso("lida_na_plataforma", 1, ("cliente", 60), nao_lidas=0)
     await caso("muitas_na_plataforma", 1, ("cliente", 60), nao_lidas=9)
@@ -621,6 +645,11 @@ async def test_numero_do_duoke_python_e_sql_sao_gemeos(db, make_user):
     assert {e.removeprefix("atv:"): n for e, n in linhas} == {
         nome: esperado for nome, (_, esperado) in mundo.items()
     }
+    # A fila fecha a vez no turno só de cartão; o número, não.
+    cartao = mundo["so_cartao_e_campanha"][0]
+    assert not cartao.aguardando_resposta and cartao.ultima_da_loja_em is not None
+    # A 0028 não fecha a vez.
+    assert mundo["figurinha_0028"][0].aguardando_resposta
     # O robô NÃO zera e a fila continua igual (o menu não fecha a vez); com
     # ele por último, a linha sai do "Falta responder" e o número fica.
     robo = mundo["robo_por_ultimo"][0]
@@ -765,9 +794,10 @@ async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, 
     assert soma == {
         # quatro 4 + robô 3 + robô por último 2 + pessoa 2 + visto 1 + chegou
         # depois de abrir 1 + pessoa depois do visto 1 + dois dias 2 + fora
-        # dos 7 dias 1 + FAQ do comprador 1 + lida 1 + muitas 1 + bloqueada 2 +
-        # aviso 1 + falhou/nota 1 + e-mail no chat 1 — e o Aguiar, 1.
-        "shopee": 4 + 3 + 2 + 2 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1,
+        # dos 7 dias 1 + FAQ do comprador 1 + só cartão 1 + figurinha 0028 1 +
+        # lida 1 + muitas 1 + bloqueada 2 + aviso 1 + falhou/nota 1 + e-mail no
+        # chat 1 — e o Aguiar, 1.
+        "shopee": 4 + 3 + 2 + 2 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1,
         "tiktok": 3,
         # O pós-venda com o comprador por último, a automática de agora e a pergunta.
         "ml": 1 + 1 + 1,
@@ -779,9 +809,9 @@ async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, 
     for plat, n in soma.items():
         assert plats[plat]["nao_lidas_duoke"] == n, plat
         assert plats[plat]["aguardando"] == falta[plat], plat
-    assert r["nao_lidas_duoke"] == sum(soma.values()) == 34
+    assert r["nao_lidas_duoke"] == sum(soma.values()) == 36
     lojas = {(lj["plataforma"], lj["conta"]): lj for lj in r["lojas"]}
-    assert lojas[("shopee", "atv")]["nao_lidas_duoke"] == soma["shopee"] - 1 == 25
+    assert lojas[("shopee", "atv")]["nao_lidas_duoke"] == soma["shopee"] - 1 == 27
     assert lojas[("shopee", "aguiar")]["nao_lidas_duoke"] == 1
     assert lojas[("tiktok", "atv")]["nao_lidas_duoke"] == 3
     assert lojas[("ml", "atv")]["nao_lidas_duoke"] == 3

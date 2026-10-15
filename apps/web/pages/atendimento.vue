@@ -19,7 +19,7 @@ import {
   type Resumo,
 } from '~/components/AtendimentoPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
-import { plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
+import { GRUPOS_CAIXA, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
 // mesma trava do menu (AppSidebar) e da API. Desde 07/10/2026 ("pode liberar
@@ -174,12 +174,19 @@ const naoLidasDuoke = computed(() => Number(resumo.value?.nao_lidas_duoke) || 0)
 // que chegar depois. Nada vai à plataforma. Só quem mexe na caixa.
 const zerando = ref(false)
 const zerarErro = ref<string | null>(null)
+// O erro do "Zerar" é daquele clique: trocar o filtro ou a aba apaga.
+watch(
+  () => [filtros.value.integration_id, filtros.value.plataforma, filtros.value.plataforma_topo, aba.value],
+  () => (zerarErro.value = null),
+)
 async function zerarNaoLidas() {
   if (zerando.value) return
   const loja = filtros.value.integration_id || ''
   const plataformas = loja ? [] : plataformasDoValor(filtros.value.plataforma || filtros.value.plataforma_topo)
-  const nome = loja ? (resumo.value?.lojas || []).find((l) => l.integration_id === loja)?.integracao || 'escolhida' : ''
-  const alvo = loja ? `da loja ${nome}` : plataformas.length ? `de ${plataformas.join(', ')}` : 'de todas as lojas'
+  const achada = loja ? (resumo.value?.lojas || []).find((l) => l.integration_id === loja) : null
+  const nome = achada?.conta || achada?.integracao || 'escolhida'
+  const grupo = GRUPOS_CAIXA.find((g) => plataformas.length && plataformas.every((p) => g.plataformas.includes(p)))
+  const alvo = loja ? `da loja ${nome}` : plataformas.length ? `de ${grupo?.nome || plataformas.join(', ')}` : 'de todas as lojas'
   if (!confirm(`Zerar as não lidas ${alvo}?\n\nComo o "Limpar não lidas" do Duoke: as conversas ficam como vistas no DaVinci e os números contam só o que chegar depois. Nada muda na Shopee, no Mercado Livre nem no TikTok.`)) return
   zerando.value = true
   zerarErro.value = null
@@ -771,7 +778,7 @@ watch(selecionada, (id) => {
     >
       <Eye class="h-3.5 w-3.5" />{{ zerando ? 'Zerando…' : 'Zerar não lidas' }}
     </button>
-    <span v-if="zerarErro" class="text-xs text-destructive">{{ zerarErro }}</span>
+    <span v-if="zerarErro && !emHumano" class="text-xs text-destructive">{{ zerarErro }}</span>
     </div>
     </div>
 

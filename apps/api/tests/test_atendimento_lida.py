@@ -49,7 +49,7 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 import app.db as _db
 from app.config import get_settings
@@ -1067,7 +1067,14 @@ async def test_zerar_nao_lidas_da_loja_da_plataforma_e_de_tudo(db, dono, client,
     r = await client.post(f"{URL}/zerar-nao-lidas", json={"integration_id": str(shopee_a.id)})
     assert r.status_code == 200, r.text
     assert r.json() == {"conversas": 1}
-    assert await _visto_em(db, a) is not None
+    # Até a mensagem mais nova que já estava gravada (a do sync no meio do
+    # clique continua contando), nunca depois.
+    mais_nova = await db.scalar(
+        select(func.max(AtendimentoMensagem.created_at)).where(
+            AtendimentoMensagem.conversa_id == a.id
+        )
+    )
+    assert await _visto_em(db, a) == mais_nova
     assert await _visto_em(db, b) is None and await _visto_em(db, t) is None
     assert await _visto_em(db, av) is None, "fora do chat: nada"
     depois = await db.scalar(

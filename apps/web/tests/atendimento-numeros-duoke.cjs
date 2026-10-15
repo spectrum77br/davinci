@@ -315,7 +315,10 @@ async function renderizados() {
   assert.match(regua, /^JANELA_DO_NUMERO = timedelta\(days=7\)$/m)
   const sql = regua.slice(regua.indexOf('def nao_lidas_duoke_sql('))
   // Dois relógios: a resposta de pessoa no da plataforma; o visto na CHEGADA (`created_at`).
-  assert.match(sql, /or_\(c\.ultima_da_loja_em\.is_\(None\), momento > c\.ultima_da_loja_em\)/)
+  // A resposta de pessoa achada nas MENSAGENS (a automática não zera, nem no turno só de cartão).
+  assert.match(sql, /not_\(gravar\.mensagem_automatica_sql\(h\.texto, h\.payload\)\)/)
+  assert.match(sql, /momento > func\.coalesce\(pessoa, desde\)/)
+  assert.doesNotMatch(sql, /c\.ultima_da_loja_em/, 'não o ultima_da_loja_em da fila')
   assert.match(sql, /or_\(c\.visto_em\.is_\(None\), m\.created_at > c\.visto_em\)/)
   assert.doesNotMatch(sql, /greatest/, 'o visto não se compara com o horário da plataforma')
   assert.match(sql, /m\.autor == AUTOR_CLIENTE/)

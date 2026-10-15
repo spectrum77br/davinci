@@ -449,7 +449,7 @@ async function barraRenderizada() {
 {
   const pagina = web('pages/atendimento.vue')
   assert.match(pagina, /if \(typeof salvo\.plataforma_topo === 'string'\) f\.plataforma_topo = salvo\.plataforma_topo/)
-  assert.match(pagina, /import \{ plataformasDoValor, topoDoValor \} from '~\/components\/AtendimentoFiltroPlataforma\.vue'/)
+  assert.match(pagina, /import \{ GRUPOS_CAIXA, plataformasDoValor, topoDoValor \} from '~\/components\/AtendimentoFiltroPlataforma\.vue'/)
   // O restaurar DE VERDADE (o trecho do onMounted), com o localStorage falso.
   const ini = pagina.indexOf("const raw = localStorage.getItem(FILTROS_KEY)")
   const fim = pagina.indexOf('} catch {', ini)
