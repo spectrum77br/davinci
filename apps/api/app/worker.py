@@ -3908,42 +3908,68 @@ async def vigia_etiquetas_tick(ctx: dict) -> None:
 # extrato de ontem do Mercado Pago (pede 06:00, lê quando fica pronto, até
 # 08:50) e cobranças novas da fatura do ML (06:12). Cada leitura recalcula os
 # pedidos ao terminar. Trava por loja em `conciliacao_jobs.sincronizar_loja`.
-async def conciliacao_fatura_tick(ctx: dict) -> None:
-    try:
-        from app.services.conciliacao_jobs import rodar_todas
+async def _pool_conciliacao(ctx: dict):
+    pool = ctx.get("redis") if isinstance(ctx, dict) else None
+    if pool is None:
+        from app.worker_pool import get_arq_pool
 
-        for r in await rodar_todas(fatura=True, extrato=False, recalculo=True):
-            logger.info(
-                "conciliacao_fatura_tick_done", loja=r.get("loja"), skipped=r.get("skipped")
-            )
+        pool = await get_arq_pool()
+    return pool
+
+
+async def conciliacao_fatura_tick(ctx: dict) -> None:
+    """06:12 BRT: um job por loja do ML, em fila de 4 min (limite da fatura)."""
+    try:
+        from app.services.conciliacao_jobs import enfileirar_rodadas
+
+        await enfileirar_rodadas(
+            await _pool_conciliacao(ctx),
+            fatura=True,
+            extrato=False,
+            recalculo=True,
+            tag="fatura",
+            intervalo_ml_min=4.0,
+            so_plataformas=("ml",),
+        )
     except Exception:
         logger.exception("conciliacao_fatura_tick_unhandled")
 
 
 async def conciliacao_extrato_tick(ctx: dict) -> None:
+    """06:00–08:50 BRT a cada 10 min: um job por loja. ML repete (o relatório do
+    Mercado Pago pode ainda não estar pronto); as outras só uma vez por dia."""
     try:
-        from app.services.conciliacao_jobs import rodar_todas
+        from app.services.conciliacao_jobs import enfileirar_rodadas
 
-        for r in await rodar_todas(fatura=False, extrato=True, recalculo=True):
-            ext = r.get("extrato") or {}
-            logger.info(
-                "conciliacao_extrato_tick_done",
-                loja=r.get("loja"),
-                skipped=r.get("skipped"),
-                pedido=ext.get("pedido"),
-                lidos=len(ext.get("lidos") or []),
-            )
+        await enfileirar_rodadas(
+            await _pool_conciliacao(ctx),
+            fatura=False,
+            extrato=True,
+            recalculo=True,
+            tag="extrato",
+            intervalo_ml_min=1.0,
+            so_nao_lidas_hoje=True,
+        )
     except Exception:
         logger.exception("conciliacao_extrato_tick_unhandled")
 
 
-async def conciliacao_sincronizar_loja(ctx: dict, integration_id: str) -> dict:
-    """Botão "sincronizar agora" da loja: fatura + extrato + recálculo."""
+async def conciliacao_sincronizar_loja(
+    ctx: dict,
+    integration_id: str,
+    fatura: bool = True,
+    extrato: bool = True,
+    recalculo: bool = True,
+) -> dict:
+    """Uma rodada da loja (botão "sincronizar agora", ticks da madrugada e carga
+    inicial): fatura e/ou extrato + recálculo, com trava por loja."""
     from uuid import UUID as _UUID
 
     from app.services.conciliacao_jobs import sincronizar_loja
 
-    r = await sincronizar_loja(_UUID(integration_id))
+    r = await sincronizar_loja(
+        _UUID(integration_id), fatura=fatura, extrato=extrato, recalculo=recalculo
+    )
     logger.info("conciliacao_sincronizar_loja_done", loja=r.get("loja"), skipped=r.get("skipped"))
     return {k: v for k, v in r.items() if k != "fatura"}
 
@@ -4866,7 +4892,7 @@ class WorkerSettings:
         vigia_conciliacao_tick,
         conciliacao_fatura_tick,
         conciliacao_extrato_tick,
-        func(conciliacao_sincronizar_loja, timeout=1500),
+        func(conciliacao_sincronizar_loja, timeout=3600),
         # Atendimento unificado (25/09/2026). Em `functions` também para o
         # botão "Sincronizar" da tela poder enfileirar a leitura.
         func(atendimento_sincronizar, timeout=300),

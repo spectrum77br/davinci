@@ -163,6 +163,81 @@ async def sincronizar_loja(
         return resultado
 
 
+async def enfileirar_rodadas(
+    pool: Any,
+    *,
+    fatura: bool,
+    extrato: bool,
+    recalculo: bool,
+    tag: str,
+    intervalo_ml_min: float = 4.0,
+    intervalo_outras_seg: float = 20.0,
+    so_plataformas: tuple[str, ...] | None = None,
+    so_nao_lidas_hoje: bool = False,
+    contas: set[str] | None = None,
+    so_sem_carga: bool = False,
+) -> list[dict[str, Any]]:
+    """Um job por loja (15/10): loja lenta não segura as outras. ML entra em fila com
+    `intervalo_ml_min` entre uma e outra (limite de 5 chamadas/min da fatura, dividido
+    com a Margem); as demais entram quase juntas. `so_nao_lidas_hoje` pula a loja
+    que já leu o extrato hoje (Shopee/TikTok/Amazon leem uma vez por dia; o ML repete
+    porque o relatório do Mercado Pago pode ainda não estar pronto)."""
+    hoje0 = datetime.now(_BRT).replace(hour=0, minute=0, second=0, microsecond=0)
+    async with session_scope() as session:
+        lojas = await lojas_ativas(session)
+        alvo: list[ConciliacaoLoja] = []
+        for loja in lojas:
+            plataforma = getattr(loja.platform, "value", str(loja.platform))
+            if so_plataformas and plataforma not in so_plataformas:
+                continue
+            if contas is not None and loja.conta.strip().lower() not in contas:
+                continue
+            if so_sem_carga and loja.ultimo_recalculo_em is not None:
+                continue
+            if (
+                so_nao_lidas_hoje
+                and plataforma != "ml"
+                and loja.ultimo_extrato_em is not None
+                and loja.ultimo_extrato_em >= hoje0
+            ):
+                continue
+            alvo.append(loja)
+        plano = [
+            (loja.integration_id, loja.conta, getattr(loja.platform, "value", str(loja.platform)))
+            for loja in alvo
+        ]
+    saida: list[dict[str, Any]] = []
+    n_ml = 0
+    n_outras = 0
+    carimbo = datetime.now(UTC).strftime("%Y%m%d%H%M")
+    for integration_id, conta, plataforma in plano:
+        if plataforma == "ml":
+            atraso = timedelta(minutes=intervalo_ml_min * n_ml)
+            n_ml += 1
+        else:
+            atraso = timedelta(seconds=intervalo_outras_seg * n_outras)
+            n_outras += 1
+        job = await pool.enqueue_job(
+            "conciliacao_sincronizar_loja",
+            str(integration_id),
+            fatura,
+            extrato,
+            recalculo,
+            _job_id=f"conciliacao_sincronizar_loja:{integration_id}:{tag}:{carimbo}",
+            _defer_by=atraso,
+        )
+        saida.append(
+            {
+                "conta": conta,
+                "plataforma": plataforma,
+                "em_minutos": round(atraso.total_seconds() / 60, 1),
+                "enfileirado": job is not None,
+            }
+        )
+    logger.info("conciliacao_rodadas_enfileiradas", tag=tag, lojas=len(saida), ml=n_ml)
+    return saida
+
+
 async def rodar_todas(*, fatura: bool, extrato: bool, recalculo: bool) -> list[dict[str, Any]]:
     async with session_scope() as session:
         lojas = await lojas_ativas(session)

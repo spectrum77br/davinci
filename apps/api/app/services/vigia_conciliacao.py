@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import structlog
 from sqlalchemy import text
@@ -35,13 +36,13 @@ _PLATAFORMA = {"ml": "Mercado Livre", "shopee": "Shopee", "amazon": "Amazon", "t
 
 def _link(item: dict[str, Any]) -> str:
     partes = [
-        f"loja={item['loja']}",
+        f"loja={quote(str(item['loja']))}",
         f"visao={'extrato' if item['acao'] == 'extrato' else 'pedidos'}",
     ]
     if item.get("dia"):
         partes.append(f"dia={item['dia']}")
     for k, v in sorted((item.get("filtro") or {}).items()):
-        partes.append(f"{k}={v}")
+        partes.append(f"{k}={quote(str(v))}")
     return "/conciliacao?" + "&".join(partes)
 
 

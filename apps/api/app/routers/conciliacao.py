@@ -5090,3 +5090,31 @@ async def sonda_melhor_envio(
         "pagina": page,
         "envios": [compacto(e) for e in dados[:5] if isinstance(e, dict)],
     }
+
+
+@router.post("/carga-inicial")
+async def carga_inicial(
+    body: Annotated[dict[str, Any], Body()],
+    _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+) -> dict[str, Any]:
+    """Primeira carga das lojas recém-ligadas, em fila (15/10): um job por loja; as
+    do ML espaçadas (`intervalo_min`, padrão 12) por causa do limite da fatura; as
+    outras quase juntas. `contas` e `plataformas` filtram; `so_sem_carga` (padrão
+    true) pega só loja que nunca recalculou."""
+    from app.services.conciliacao_jobs import enfileirar_rodadas
+
+    contas = {str(c).strip().lower() for c in (body.get("contas") or []) if str(c).strip()}
+    plataformas = tuple(str(p) for p in (body.get("plataformas") or []) if p)
+    plano = await enfileirar_rodadas(
+        await get_arq_pool(),
+        fatura=True,
+        extrato=True,
+        recalculo=True,
+        tag="carga",
+        intervalo_ml_min=float(body.get("intervalo_min") or 12),
+        intervalo_outras_seg=float(body.get("intervalo_outras_seg") or 30),
+        so_plataformas=plataformas or None,
+        contas=contas or None,
+        so_sem_carga=bool(body.get("so_sem_carga", True)),
+    )
+    return {"lojas": len(plano), "plano": plano}
