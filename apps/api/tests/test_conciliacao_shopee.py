@@ -274,7 +274,13 @@ async def test_reler_escrow_liberados_so_relê_leitura_mais_velha_que_a_liberaca
     assert r == {"candidatos": 1, "relidos": 1, "erros": []}
     assert chamados == [(5000, "conciliacao_liberacao")]
     # leitura mais nova que a liberação: não relê
-    fin = (await db.execute(select(MarketplaceOrderFinancial))).scalar_one()
+    fin = (
+        await db.execute(
+            select(MarketplaceOrderFinancial).where(
+                MarketplaceOrderFinancial.integration_id == loja.integration_id
+            )
+        )
+    ).scalar_one()
     fin.fetched_at = datetime(2026, 10, 12, 12, tzinfo=UTC)
     await db.commit()
     chamados.clear()

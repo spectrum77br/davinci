@@ -55,10 +55,12 @@ type Mes = {
   ajustes_meses_anteriores: number
   ajustes_qtd: number
 }
+type Dinheiro = { na_conta: number | null; saldo_em: string | null; a_liberar: number; a_liberar_pedidos: number; reservado: number | null }
 type LojaResumo = {
   conta: string
   platform: string
   inicio: string
+  dinheiro: Dinheiro
   dia: DiaLoja
   pedidos: PedidosLoja
   leituras: Leituras
@@ -80,8 +82,8 @@ type Resumo = {
   mes: string
   lojas: LojaResumo[]
   agir: Agir[]
-  por_plataforma: Record<string, Mes>
-  empresa: Mes
+  por_plataforma: Record<string, Mes & { dinheiro?: Dinheiro }>
+  empresa: Mes & { dinheiro?: Dinheiro }
   cartoes: Record<string, number>
 }
 
@@ -96,6 +98,11 @@ const PLATAFORMAS: Array<{ key: string; label: string }> = [
 ]
 const FASE_SEGUINTE = ['Shopee', 'Amazon', 'TikTok']
 const MOSTRAR_MES = false // rodapé do mês desligado em 15/10 (volta quando ele pedir)
+// Bloco "Dinheiro nas plataformas": cada marketplace começa fechado (só o total); "mostrar" abre as lojas.
+const abertos = ref<Record<string, boolean>>({})
+function alternar(key: string) {
+  abertos.value = { ...abertos.value, [key]: !abertos.value[key] }
+}
 
 const { api } = useApi()
 // O dia é definido no cliente (onMounted): no servidor o relógio é UTC e perto da
@@ -316,8 +323,57 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 15/10: o rodapé do mês fica guardado (Vinicius: "por enquanto não preciso");
-           no lugar vai entrar o bloco "Dinheiro nas plataformas". -->
+      <div class="rounded-md border bg-card">
+        <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+          <span>Dinheiro nas plataformas</span>
+          <span class="text-[11px] font-normal text-slate-300">onde o dinheiro está agora: na conta e preso esperando liberação</span>
+        </div>
+        <div class="overflow-auto">
+          <table class="w-full border-collapse text-[11px]">
+            <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th class="border-b px-2 py-1 text-left">Marketplace / loja</th>
+                <th class="border-b px-2 py-1 text-right">Na conta (disponível)</th>
+                <th class="whitespace-nowrap border-b px-2 py-1 text-left">Saldo de quando</th>
+                <th class="border-b px-2 py-1 text-right">A liberar</th>
+                <th class="whitespace-nowrap border-b px-2 py-1 text-right">Reservado (em disputa)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template v-for="g in grupos" :key="'d' + g.key">
+                <tr class="border-b bg-muted/60 font-bold">
+                  <td class="px-2 py-1">
+                    {{ g.label }} <span class="font-normal text-muted-foreground">({{ g.lojas.length }} loja{{ g.lojas.length === 1 ? '' : 's' }})</span>
+                    <button type="button" class="ml-2 font-semibold text-primary underline" @click="alternar(g.key)">{{ abertos[g.key] ? 'esconder' : 'mostrar' }}</button>
+                  </td>
+                  <td class="px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.na_conta) }}</td>
+                  <td class="px-2 py-1"></td>
+                  <td class="px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.a_liberar) }} <span class="font-normal text-muted-foreground">({{ dados.por_plataforma[g.key]?.dinheiro?.a_liberar_pedidos || 0 }} pedidos)</span></td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ g.key === 'ml' ? fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.reservado) : '—' }}</td>
+                </tr>
+                <tr v-for="l in g.lojas" v-show="abertos[g.key]" :key="'d' + l.conta" class="cursor-pointer border-b hover:bg-muted/40" title="abre os pedidos desta loja aguardando liberação" @click="emit('ver-pedidos', l.conta, { situacao: 'aguardando' })">
+                  <td class="px-2 py-1 pl-6 font-bold">{{ l.conta }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(l.dinheiro.na_conta) }}</td>
+                  <td class="whitespace-nowrap px-2 py-1 text-muted-foreground">{{ fmtDiaHora(l.dinheiro.saldo_em) }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(l.dinheiro.a_liberar) }} <span class="font-normal text-muted-foreground">({{ l.dinheiro.a_liberar_pedidos }} pedidos)</span></td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ l.dinheiro.reservado == null ? '—' : fmtMoney(l.dinheiro.reservado) }}</td>
+                </tr>
+              </template>
+              <tr v-if="faseSeguinte.length" class="border-b bg-muted/60 font-bold"><td class="px-2 py-1">{{ faseSeguinte.join(' · ') }}</td><td colspan="4" class="px-2 py-1 font-normal text-muted-foreground">fase seguinte</td></tr>
+              <tr class="bg-muted/40 font-bold">
+                <td class="px-2 py-1">Empresa <span class="font-normal text-muted-foreground">({{ dados.lojas.length }} loja{{ dados.lojas.length === 1 ? '' : 's' }})</span></td>
+                <td class="px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.empresa.dinheiro?.na_conta) }}</td>
+                <td class="px-2 py-1"></td>
+                <td class="px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.empresa.dinheiro?.a_liberar) }} <span class="font-normal text-muted-foreground">({{ dados.empresa.dinheiro?.a_liberar_pedidos || 0 }} pedidos)</span></td>
+                <td class="px-2 py-1 text-right tabular-nums">{{ fmtMoney(dados.empresa.dinheiro?.reservado) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">"Na conta" = o último saldo do extrato, como a plataforma informou. "A liberar" = soma do líquido previsto das vendas ainda não liberadas (a coluna Líq. previsto da aba Pedidos). "Reservado" = dinheiro travado em reclamação aberta no Mercado Pago. Clique na loja abre os pedidos dela aguardando liberação.</div>
+      </div>
+
+      <!-- 15/10: o rodapé do mês fica guardado (Vinicius: "por enquanto não preciso"). -->
       <div v-if="MOSTRAR_MES" class="rounded-md border bg-card">
         <div class="overflow-auto">
           <table class="w-full border-collapse text-[11px]">

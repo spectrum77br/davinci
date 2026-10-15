@@ -1249,6 +1249,11 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(db, make_user, auth_as
     assert corpo["cartoes"]["pendentes"] == 1 and corpo["cartoes"]["dias_fechados"] == 0
     assert corpo["cartoes"]["saldo_bate"] == 1 and corpo["cartoes"]["extrato_atrasado"] == 0
     assert corpo["por_plataforma"]["ml"]["pedidos"] == 2 and corpo["empresa"]["lojas"] == 1
+    # dinheiro nas plataformas: saldo da última linha do extrato, nada a liberar no exemplo
+    assert linha["dinheiro"]["na_conta"] == 200.46 and linha["dinheiro"]["saldo_em"]
+    assert linha["dinheiro"]["a_liberar"] == 0.0 and linha["dinheiro"]["a_liberar_pedidos"] == 0
+    assert linha["dinheiro"]["reservado"] == 0.0
+    assert corpo["empresa"]["dinheiro"]["na_conta"] == 200.46
 
     # extrato parado há mais de 36 h: vira "extrato não lido" e pede pra sincronizar
     loja.ultimo_extrato_em = datetime.now(UTC) - timedelta(days=3)

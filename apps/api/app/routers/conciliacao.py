@@ -2145,6 +2145,58 @@ async def _ajustes_anteriores(
     return float(valor or 0), int(n or 0)
 
 
+async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dict[str, Any]:
+    """Onde o dinheiro está agora (bloco "Dinheiro nas plataformas", 15/10): na conta
+    (último saldo informado pela plataforma), preso a liberar (líquido previsto das
+    vendas ainda não liberadas) e reservado em disputa (só ML: reservas abertas)."""
+    mov = ConciliacaoMovimento
+    ultima = (
+        await session.execute(
+            select(mov.data)
+            .where(
+                mov.integration_id == loja.integration_id,
+                mov.origem.in_(ORIGENS_EXTRATO),
+                mov.saldo_apos.isnot(None),
+            )
+            .order_by(mov.data.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    na_conta = None
+    saldo_em = None
+    if ultima is not None:
+        movs = await _movimentos_do_dia(session, loja, ultima.astimezone(_BRT).date())
+        na_conta = _totais_do_dia(movs)["saldo_informado"]
+        saldo_em = ultima.isoformat()
+    ped = ConciliacaoPedido
+    a_liberar, n_liberar = (
+        await session.execute(
+            select(func.sum(ped.venda_liquido), func.count()).where(
+                ped.integration_id == loja.integration_id,
+                ped.situacao.in_(("aguardando", "vencido")),
+                ped.venda_liquido.isnot(None),
+            )
+        )
+    ).one()
+    reservado = (
+        await session.execute(
+            select(func.sum(mov.debito - mov.credito)).where(
+                mov.integration_id == loja.integration_id,
+                mov.origem.in_(ORIGENS_EXTRATO),
+                mov.tipo == "reserva_disputa",
+            )
+        )
+    ).scalar_one()
+    plataforma = getattr(loja.platform, "value", str(loja.platform))
+    return {
+        "na_conta": na_conta,
+        "saldo_em": saldo_em,
+        "a_liberar": _num(a_liberar or 0),
+        "a_liberar_pedidos": int(n_liberar or 0),
+        "reservado": _num(reservado or 0) if plataforma == "ml" else None,
+    }
+
+
 def _soma_dict(destino: dict[str, Any], origem: dict[str, Any]) -> None:
     for k, v in origem.items():
         if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -2255,10 +2307,12 @@ async def resumo_geral(
             problemas.append(f"{estornados} estornado(s) depois")
         if loja.ultimo_erro:
             problemas.append(f"erro: {loja.ultimo_erro[:80]}")
+        dinheiro = await _dinheiro_da_loja(session, loja)
         linha = {
             "conta": loja.conta,
             "platform": plataforma,
             "inicio": loja.inicio.isoformat(),
+            "dinheiro": dinheiro,
             "dia": {
                 "status": dia_status,
                 "texto": dia_texto,
@@ -2395,6 +2449,15 @@ async def resumo_geral(
             )
         plat = por_plataforma.setdefault(plataforma, {"lojas": 0})
         plat["lojas"] += 1
+        for bloco_d in (plat, empresa):
+            d = bloco_d.setdefault(
+                "dinheiro",
+                {"na_conta": 0.0, "a_liberar": 0.0, "a_liberar_pedidos": 0, "reservado": 0.0},
+            )
+            d["na_conta"] = round(d["na_conta"] + (dinheiro["na_conta"] or 0), 2)
+            d["a_liberar"] = round(d["a_liberar"] + (dinheiro["a_liberar"] or 0), 2)
+            d["a_liberar_pedidos"] += dinheiro["a_liberar_pedidos"]
+            d["reservado"] = round(d["reservado"] + (dinheiro["reservado"] or 0), 2)
         _soma_dict(
             plat, {k: v for k, v in mes.items() if k not in ("margem", "por_situacao", "por_etapa")}
         )
