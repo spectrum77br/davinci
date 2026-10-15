@@ -309,6 +309,8 @@ async def run_fatura_sync(
                     paginas += 1
                     results = [x for x in (pagina.get("results") or []) if isinstance(x, dict)]
                     movimentos = [m for m in (detalhe_para_movimento(d) for d in results) if m]
+                    for m in movimentos:  # de que período da fatura a linha veio
+                        m["raw"] = {**m["raw"], "_periodo": chave}
                     inseridos += await _inserir(session, loja, movimentos)
                     lidos += len(results)
                     ids = [int(m["id_externo"]) for m in movimentos]

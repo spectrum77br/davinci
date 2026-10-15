@@ -5,7 +5,7 @@
 // meses anteriores e a prova dos nove saldo inicial + movimento = saldo final)
 // e a FATURA do ML (o resumo que o ML dá pro período × a soma dos detalhes que
 // lemos linha a linha). Embaixo, os dias do mês: quais fecharam.
-import { ChevronLeft, ChevronRight, Loader2, RefreshCw } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, Download, Loader2, RefreshCw } from 'lucide-vue-next'
 import { SITUACOES, fmtDia, fmtDiaHora, fmtMoney, fmtPct, sinal, tipoMov } from '~/lib/conciliacao'
 
 const props = defineProps<{ loja: string; lojas: Array<{ conta: string; inicio: string }> }>()
@@ -29,6 +29,7 @@ type Vendas = {
   sobrou: number
   margem: number | null
   liberados: number
+  liberados_cancelados: number
   finalizados: number
   por_situacao: Record<string, number>
   por_etapa: Record<string, number>
@@ -44,6 +45,10 @@ type Caixa = {
   outros: number
   ajustes_meses_anteriores: number
   ajustes_qtd: number
+  cancelados_entrou: number
+  cancelados_saiu: number
+  cancelados_liquido: number
+  cancelados_linhas: number
   resultado_caixa: number
   reservas_liquido: number
   saques: number
@@ -78,6 +83,8 @@ type Fechamento = {
 }
 
 const { api } = useApi()
+const toasts = useToasts()
+const exportando = ref(false)
 
 function mesLocal(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
@@ -123,6 +130,24 @@ async function carregar() {
   }
 }
 
+async function exportar() {
+  if (!props.loja || !mes.value) return
+  exportando.value = true
+  try {
+    const blob = await api<Blob>('/api/conciliacao/fechamento.xlsx', { method: 'POST', query: { loja: props.loja, mes: mes.value }, responseType: 'blob' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `fechamento_${props.loja}_${mes.value}.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch {
+    toasts.error?.('não consegui gerar o Excel')
+  } finally {
+    exportando.value = false
+  }
+}
+
 function bateCls(b: boolean | null) {
   if (b === true) return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300'
   if (b === false) return 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'
@@ -159,6 +184,9 @@ onMounted(() => {
       <button type="button" class="ml-auto inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" :disabled="loading" @click="carregar()">
         <RefreshCw class="size-3.5" :class="loading && 'animate-spin'" /> Recarregar
       </button>
+      <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" :disabled="exportando || !dados" @click="exportar()">
+        <Download class="size-3.5" /> Excel
+      </button>
     </div>
 
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700">{{ erro }}</div>
@@ -181,6 +209,7 @@ onMounted(() => {
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Cupons</td><td class="px-3 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(dados.vendas.cupom) }}</td></tr>
               <tr class="border-b bg-muted/40"><td class="px-3 py-1 font-bold">Líquido previsto</td><td class="px-3 py-1 text-right tabular-nums font-bold">{{ fmtMoney(dados.vendas.previsto) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Recebido ({{ dados.vendas.liberados }} liberados)</td><td class="px-3 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.vendas.recebido) }}</td></tr>
+              <tr v-if="dados.vendas.liberados_cancelados" class="border-b"><td class="px-3 py-1 text-muted-foreground" colspan="2">{{ dados.vendas.liberados_cancelados }} cancelado(s) por reclamação: o ML liberou e tirou no mesmo dia, não contam como liberados</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Saiu depois (mediação, estorno)</td><td class="px-3 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(dados.vendas.estornos) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Custo dos produtos</td><td class="px-3 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(dados.vendas.custo) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Reembolsos</td><td class="px-3 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(dados.vendas.reembolso) }}</td></tr>
@@ -210,6 +239,7 @@ onMounted(() => {
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Estornos</td><td class="px-3 py-1 text-right tabular-nums" :class="sinal(dados.caixa.estornos, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.estornos) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Chargebacks</td><td class="px-3 py-1 text-right tabular-nums" :class="sinal(dados.caixa.chargebacks, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.chargebacks) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Frete (cobrado / devolvido)</td><td class="px-3 py-1 text-right tabular-nums" :class="sinal(dados.caixa.frete, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.frete) }}</td></tr>
+              <tr v-if="dados.caixa.cancelados_linhas" class="border-b"><td class="px-3 py-1 text-muted-foreground">Cancelados por reclamação ({{ dados.caixa.cancelados_linhas }} linhas): entrou {{ fmtMoney(dados.caixa.cancelados_entrou) }}, saiu {{ fmtMoney(dados.caixa.cancelados_saiu) }}</td><td class="px-3 py-1 text-right tabular-nums" :class="sinal(dados.caixa.cancelados_liquido, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.cancelados_liquido) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Outros (crédito, antecipação…)</td><td class="px-3 py-1 text-right tabular-nums" :class="sinal(dados.caixa.outros, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.outros) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Ajustes de meses anteriores ({{ dados.caixa.ajustes_qtd }} linhas)</td><td class="px-3 py-1 text-right tabular-nums" :class="sinal(dados.caixa.ajustes_meses_anteriores, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.ajustes_meses_anteriores) }}</td></tr>
               <tr class="border-b bg-muted/40"><td class="px-3 py-1 font-bold">= Resultado de caixa do mês</td><td class="px-3 py-1 text-right tabular-nums font-bold" :class="sinal(dados.caixa.resultado_caixa, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.resultado_caixa) }}</td></tr>

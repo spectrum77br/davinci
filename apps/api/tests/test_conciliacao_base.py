@@ -1290,6 +1290,39 @@ async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_
             },
         )
     )
+    # um cancelado por reclamação: o ML liberou (+500) e tirou (−500) no mesmo dia
+    db.add(
+        await _pedido_conciliado(
+            loja,
+            pedido_bling="303700",
+            numeroloja="2000018000000002",
+            situacao="cancelado",
+            etapa="conciliado",
+            recebido=Decimal("0.00"),
+            sobrou=Decimal("0.00"),
+            custo=Decimal("0.00"),
+        )
+    )
+    db.add(
+        _mov(
+            loja,
+            "venda_liberada",
+            _d13(16, 0),
+            credito="500.00",
+            pedido_mkt="2000018000000002",
+            pedido_bling="303700",
+        )
+    )
+    db.add(
+        _mov(
+            loja,
+            "mediacao",
+            _d13(16, 5),
+            debito="500.00",
+            pedido_mkt="2000018000000002",
+            pedido_bling="303700",
+        )
+    )
     for sub, tipo, valor in (("CVVML", "fatura_tarifa", "92.36"), ("CXD", "fatura_frete", "62.33")):
         db.add(
             _mov(
@@ -1310,12 +1343,16 @@ async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_
     assert (
         corpo["mes"] == "2026-10" and corpo["de"] == "2026-10-01" and corpo["ate"] == "2026-10-31"
     )
-    # vendas pela data do pedido: só os dois de outubro
-    assert corpo["vendas"]["pedidos"] == 2 and corpo["vendas"]["vendido"] == 1761.96
-    assert corpo["vendas"]["tarifa"] == 184.72 and corpo["vendas"]["liberados"] == 2
+    # vendas pela data do pedido: os dois de outubro + o cancelado
+    assert corpo["vendas"]["pedidos"] == 3 and corpo["vendas"]["vendido"] == 2642.94
+    assert corpo["vendas"]["tarifa"] == 277.08
+    # "liberado" = liberou e ficou; o cancelado por reclamação fica à parte
+    assert corpo["vendas"]["liberados"] == 2 and corpo["vendas"]["liberados_cancelados"] == 1
     # caixa pela data do movimento
     caixa = corpo["caixa"]
-    assert caixa["linhas"] == 6
+    assert caixa["linhas"] == 8
+    assert caixa["cancelados_entrou"] == 500.0 and caixa["cancelados_saiu"] == 500.0
+    assert caixa["cancelados_liquido"] == 0.0 and caixa["cancelados_linhas"] == 2
     assert caixa["liberado"] == 610.65 and caixa["mediacoes"] == -459.0
     assert caixa["outros"] == 48.0 and caixa["saques"] == -9147.0
     assert caixa["reservas_liquido"] == 9147.0
@@ -1339,6 +1376,20 @@ async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_
     assert fat["detalhes_cobrancas"] == 154.69 and fat["detalhes_bonificacoes"] == 0.0
     assert {d["sub_tipo"] for d in fat["detalhes_por_sub_tipo"]} == {"CVVML", "CXD"}
     assert fat["bate"] is True and fat["pago"]["total_collected"] == 154.69
+    # o Excel traz as quatro abas
+    r = await client.post(
+        "/api/conciliacao/fechamento.xlsx", params={"loja": "jlas2", "mes": "2026-10"}
+    )
+    assert r.status_code == 200, r.text
+    assert "spreadsheetml" in r.headers["content-type"]
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(BytesIO(r.content))
+    assert wb.sheetnames == ["Vendas", "Caixa", "Fatura ML", "Dias"]
+    assert wb["Vendas"]["A2"].value == "Pedidos" and wb["Vendas"]["B2"].value == 3
+    assert wb["Dias"]["A2"].value == "2026-10-13"
     # mês sem nada: tudo zerado, fatura sem resumo
     r = await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-08"})
     assert r.status_code == 200

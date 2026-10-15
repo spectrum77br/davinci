@@ -892,7 +892,11 @@ async def listar_pedidos(
                 func.sum(ped.custo),
                 func.sum(ped.reembolso),
                 func.sum(ped.sobrou),
-                func.count(ped.liberado_em),
+                # "liberado" = o dinheiro saiu do ML e FICOU. No cancelado por
+                # reclamação o ML libera e tira no mesmo dia: não conta aqui.
+                func.count(
+                    sa_case((ped.liberado_em.isnot(None) & (ped.situacao != "cancelado"), 1))
+                ),
             ).where(*conds)
         )
     ).one()
@@ -1801,7 +1805,12 @@ async def _somas_pedidos(
                 func.sum(ped.custo),
                 func.sum(ped.reembolso),
                 func.sum(ped.sobrou),
-                func.count(ped.liberado_em),
+                func.count(
+                    sa_case((ped.liberado_em.isnot(None) & (ped.situacao != "cancelado"), 1))
+                ),
+                func.count(
+                    sa_case((ped.liberado_em.isnot(None) & (ped.situacao == "cancelado"), 1))
+                ),
             ).where(*conds)
         )
     ).one()
@@ -1834,6 +1843,7 @@ async def _somas_pedidos(
         "sobrou": _num(sobrou),
         "margem": _num((sobrou / custo).quantize(Decimal("0.0001"))) if custo > 0 else None,
         "liberados": s[12],
+        "liberados_cancelados": s[13],
         "finalizados": por_etapa.get("finalizado", 0),
         "por_situacao": por_situacao,
         "por_etapa": por_etapa,
@@ -2191,6 +2201,7 @@ async def fechamento_do_mes(
                 mov.tipo,
                 mov.classificacao,
                 pedd.data_pedido,
+                pedd.situacao,
                 func.count(),
                 func.sum(mov.credito),
                 func.sum(mov.debito),
@@ -2207,7 +2218,7 @@ async def fechamento_do_mes(
                 mov.data >= ini_dt,
                 mov.data < fim_dt,
             )
-            .group_by(mov.tipo, mov.classificacao, pedd.data_pedido)
+            .group_by(mov.tipo, mov.classificacao, pedd.data_pedido, pedd.situacao)
         )
     ).all()
     caixa: dict[str, Any] = {
@@ -2222,9 +2233,16 @@ async def fechamento_do_mes(
         "reservas_liquido": 0.0,
         "ajustes_meses_anteriores": 0.0,
         "ajustes_qtd": 0,
+        # Cancelado por reclamação: o ML libera a venda e tira no mesmo dia
+        # (liberação + mediação + estorno da tarifa = zero). Fica à parte pra
+        # não parecer dinheiro que entrou.
+        "cancelados_entrou": 0.0,
+        "cancelados_saiu": 0.0,
+        "cancelados_liquido": 0.0,
+        "cancelados_linhas": 0,
         "linhas": 0,
     }
-    for tipo, classificacao, data_pedido, n, c, d in rows:
+    for tipo, classificacao, data_pedido, situacao_ped, n, c, d in rows:
         c = float(c or 0)
         d = float(d or 0)
         caixa["linhas"] += n
@@ -2237,6 +2255,12 @@ async def fechamento_do_mes(
         if anterior and tipo != "saque":
             caixa["ajustes_meses_anteriores"] += c - d
             caixa["ajustes_qtd"] += n
+            continue
+        if situacao_ped == "cancelado" and tipo != "saque":
+            caixa["cancelados_entrou"] += c
+            caixa["cancelados_saiu"] += d
+            caixa["cancelados_liquido"] += c - d
+            caixa["cancelados_linhas"] += n
             continue
         chave = _TIPOS_CAIXA.get(tipo, "outros")
         caixa[chave] += c - d
@@ -2251,6 +2275,7 @@ async def fechamento_do_mes(
         + caixa["chargebacks"]
         + caixa["frete"]
         + caixa["outros"]
+        + caixa["cancelados_liquido"]
         + caixa["ajustes_meses_anteriores"],
         2,
     )
@@ -2374,4 +2399,434 @@ async def fechamento_do_mes(
         "dias": dias,
         "dias_fechados": sum(1 for d in dias if d["fechado_em"]),
         "fatura": fatura,
+    }
+
+
+@router.post("/fechamento.xlsx")
+async def fechamento_xlsx(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+    loja: str | None = None,
+    mes: Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}$")] = None,
+) -> StreamingResponse:
+    """O Fechamento do mês em Excel: Vendas, Caixa, Fatura e Dias (mesmos números da tela)."""
+    from openpyxl import Workbook
+
+    f = await fechamento_do_mes(session, _user, loja=loja, mes=mes)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Vendas"
+    ws.append([f"Vendas de {f['mes']} · {f['loja']} · pela data do pedido", ""])
+    v = f["vendas"]
+    for rotulo, chave in (
+        ("Pedidos", "pedidos"),
+        ("Vendido (preço da venda)", "vendido"),
+        ("Tarifa de venda", "tarifa"),
+        ("Frete (parte nossa)", "frete"),
+        ("Parcelamento (fatura)", "parcelamento"),
+        ("Cupons", "cupom"),
+        ("Líquido previsto", "previsto"),
+        ("Recebido", "recebido"),
+        ("Liberados (e ficou)", "liberados"),
+        ("Liberados e devolvidos (cancelados)", "liberados_cancelados"),
+        ("Saiu depois (mediação, estorno)", "estornos"),
+        ("Custo dos produtos", "custo"),
+        ("Reembolsos", "reembolso"),
+        ("Sobrou (pedido sem liberação entra pelo previsto)", "sobrou"),
+        ("Margem sobre o custo", "margem"),
+        ("Finalizados", "finalizados"),
+    ):
+        ws.append([rotulo, v.get(chave)])
+    ws.append([])
+    ws.append(["Por situação", "pedidos"])
+    for k, n in sorted(v["por_situacao"].items()):
+        ws.append([k, n])
+    ws.append([])
+    ws.append(["Por etapa", "pedidos"])
+    for k, n in sorted(v["por_etapa"].items()):
+        ws.append([k, n])
+
+    ws = wb.create_sheet("Caixa")
+    c = f["caixa"]
+    ws.append([f"Caixa de {f['mes']} · pela data do movimento ({c['linhas']} linhas)", ""])
+    for rotulo, chave in (
+        ("Saldo inicial", "saldo_inicial"),
+        ("Vendas liberadas", "liberado"),
+        ("Mediações (reclamação perdida)", "mediacoes"),
+        ("Mediações canceladas", "mediacoes_canceladas"),
+        ("Estornos", "estornos"),
+        ("Chargebacks", "chargebacks"),
+        ("Frete (cobrado / devolvido)", "frete"),
+        ("Outros", "outros"),
+        ("Cancelados por reclamação: entrou", "cancelados_entrou"),
+        ("Cancelados por reclamação: saiu", "cancelados_saiu"),
+        ("Cancelados por reclamação: líquido", "cancelados_liquido"),
+        ("Ajustes de meses anteriores", "ajustes_meses_anteriores"),
+        ("Ajustes de meses anteriores (linhas)", "ajustes_qtd"),
+        ("= Resultado de caixa do mês", "resultado_caixa"),
+        ("Reservas (líquido)", "reservas_liquido"),
+        ("Saques", "saques"),
+        ("= Movimento líquido", "movimento_liquido"),
+        ("Saldo final informado", "saldo_final"),
+        ("Prova dos nove bate?", "bate"),
+    ):
+        ws.append([rotulo, c.get(chave)])
+
+    ws = wb.create_sheet("Fatura ML")
+    fa = f["fatura"]
+    per = fa["periodo"]
+    ws.append([f"Fatura do ML · período {per['chave']} ({per['de']} a {per['ate']})", "", ""])
+    ws.append(["O que o ML diz (resumo)", "tipo", "valor"])
+    for x in fa["resumo_cobrancas"]:
+        ws.append([x["label"], x["tipo"], -(x["valor"] or 0)])
+    for x in fa["resumo_bonificacoes"]:
+        ws.append([x["label"], x["tipo"], abs(x["valor"] or 0)])
+    ws.append(["Total da fatura (resumo)", "", fa["resumo_total"]])
+    ws.append([])
+    ws.append(["O que lemos linha a linha", "sub-tipo", "linhas", "cobrado", "bonificado"])
+    for d in fa["detalhes_por_sub_tipo"]:
+        ws.append([d["tipo"], d["sub_tipo"], d["linhas"], d["cobrado"], d["bonificado"]])
+    ws.append(["Cobranças: detalhes", "", "", fa["detalhes_cobrancas"], ""])
+    ws.append(["Bonificações: detalhes", "", "", "", fa["detalhes_bonificacoes"]])
+    ws.append(["Resumo = detalhes (cobranças)?", "", fa["bate"]])
+
+    ws = wb.create_sheet("Dias")
+    ws.append(["Dia", "Linhas", "Sem dono", "Créditos", "Débitos", "Fechado em", "Fechado por"])
+    for d in f["dias"]:
+        ws.append(
+            [
+                d["dia"],
+                d["linhas"],
+                d["pendentes"],
+                d["creditos"],
+                d["debitos"],
+                d["fechado_em"],
+                d["fechado_por"],
+            ]
+        )
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nome = f"fechamento_{f['loja']}_{f['mes']}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+    )
+
+
+# --- Sondagens (só leitura) ---------------------------------------------------------
+# 15/10/2026, madrugada ("Faz o 6 ... pode fazer a leitura começar a sondar"):
+# (a) por que as bonificações do resumo do ML não batem com a soma dos detalhes;
+# (b) o que a API da Shopee dá de extrato/repasse, numa conta ativa qualquer.
+
+
+def _soma_por_sub(detalhes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for det in detalhes:
+        ci = det.get("charge_info") or {}
+        sub = str(ci.get("detail_sub_type") or "?")
+        x = out.setdefault(sub, {"linhas": 0, "valor": 0.0})
+        x["linhas"] += 1
+        x["valor"] = round(x["valor"] + float(ci.get("detail_amount") or 0), 2)
+    return out
+
+
+@router.get("/sonda/bonus")
+async def sonda_bonus(
+    conta: Annotated[str, Query(min_length=1)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+    periodo: Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}-01$")] = None,
+) -> dict[str, Any]:
+    """Bonificações do período: o resumo do ML × os detalhes do ML (lidos agora) × o que
+    está gravado. Duas chamadas ao ML (summary/details e a página de BONUS). Só leitura."""
+    from app.services.conciliacao_fatura import ler_pagina, ler_resumo
+
+    cliente = await _cliente_da_conta(session, conta)
+    chave = periodo or datetime.now(_BRT).date().strftime("%Y-%m-01")
+    resumo = await ler_resumo(cliente, chave)
+    bill = resumo.get("bill_includes") or {}
+    per = resumo.get("period") or {}
+    detalhes: list[dict[str, Any]] = []
+    from_id = 0
+    for _ in range(3):
+        pagina = await ler_pagina(cliente, chave, "BONUS", from_id, 1000)
+        results = [x for x in (pagina.get("results") or []) if isinstance(x, dict)]
+        detalhes.extend(results)
+        from_id = int(pagina.get("last_id") or 0)
+        if len(results) < 1000 or not from_id:
+            break
+    ml_por_sub = _soma_por_sub(detalhes)
+    resumo_por_tipo = {
+        str(b.get("type")): round(abs(float(b.get("amount") or 0)), 2)
+        for b in (bill.get("bonuses") or [])
+        if isinstance(b, dict)
+    }
+    # campos que podem explicar a diferença
+    campos: dict[str, Counter] = defaultdict(Counter)
+    meses: Counter = Counter()
+    for det in detalhes:
+        ci = det.get("charge_info") or {}
+        for k in ("document_type", "status", "debited_from_operation", "charge_bonified_id"):
+            v = ci.get(k)
+            campos[k][
+                ("tem" if v not in (None, "") else "vazio") if k == "charge_bonified_id" else str(v)
+            ] += 1
+        meses[str(ci.get("creation_date_time") or "")[:7]] += 1
+    # o que está gravado no mesmo período (por data)
+    gravado: dict[str, dict[str, Any]] = {}
+    ids_gravados: set[str] = set()
+    if per.get("date_from") and per.get("date_to"):
+        p_ini = datetime.combine(
+            date.fromisoformat(per["date_from"]), datetime.min.time(), tzinfo=_BRT
+        )
+        p_fim = datetime.combine(
+            date.fromisoformat(per["date_to"]), datetime.min.time(), tzinfo=_BRT
+        ) + timedelta(days=1)
+        loja = await _loja_ou_404(session, conta)
+        mov = ConciliacaoMovimento
+        linhas = (
+            await session.execute(
+                select(mov.id_externo, mov.sub_tipo, mov.credito, mov.raw).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == "ml_fatura",
+                    mov.credito > 0,
+                    mov.data >= p_ini,
+                    mov.data < p_fim,
+                )
+            )
+        ).all()
+        for id_ext, sub, cred, raw in linhas:
+            ids_gravados.add(str(id_ext))
+            x = gravado.setdefault(
+                str(sub or "?"), {"linhas": 0, "valor": 0.0, "periodos": Counter()}
+            )
+            x["linhas"] += 1
+            x["valor"] = round(x["valor"] + float(cred or 0), 2)
+            x["periodos"][str((raw or {}).get("_periodo") or "?")] += 1
+        for x in gravado.values():
+            x["periodos"] = dict(x["periodos"])
+    ids_ml = {str((d.get("charge_info") or {}).get("detail_id")) for d in detalhes}
+    so_no_ml = [
+        d
+        for d in detalhes
+        if str((d.get("charge_info") or {}).get("detail_id")) not in ids_gravados
+    ]
+    so_gravado = sorted(ids_gravados - ids_ml)
+    # amostras do sub-tipo com maior diferença resumo × detalhes do ML
+    difs = {
+        sub: round(ml_por_sub.get(sub, {}).get("valor", 0.0) - resumo_por_tipo.get(sub, 0.0), 2)
+        for sub in set(ml_por_sub) | set(resumo_por_tipo)
+    }
+    pior = max(difs, key=lambda k: abs(difs[k])) if difs else None
+    amostras = [
+        _recorta(d)
+        for d in detalhes
+        if str((d.get("charge_info") or {}).get("detail_sub_type")) == pior
+    ][:3]
+    saida = {
+        "conta": conta,
+        "periodo": {"chave": chave, **per},
+        "resumo_ml": {
+            "bonificacoes": resumo_por_tipo,
+            "total_bonificacoes": round(sum(resumo_por_tipo.values()), 2),
+            "total_fatura": bill.get("total_amount"),
+        },
+        "detalhes_ml_agora": {
+            "linhas": len(detalhes),
+            "por_sub_tipo": ml_por_sub,
+            "total": round(sum(x["valor"] for x in ml_por_sub.values()), 2),
+            "campos": {k: dict(v) for k, v in campos.items()},
+            "por_mes_de_criacao": dict(meses),
+        },
+        "gravado_no_periodo_por_data": {
+            "linhas": sum(x["linhas"] for x in gravado.values()),
+            "por_sub_tipo": gravado,
+            "total": round(sum(x["valor"] for x in gravado.values()), 2),
+        },
+        "diferenca_por_sub_tipo (detalhes ML − resumo ML)": difs,
+        "so_no_ml_agora": {
+            "linhas": len(so_no_ml),
+            "valor": round(
+                sum(
+                    float((d.get("charge_info") or {}).get("detail_amount") or 0) for d in so_no_ml
+                ),
+                2,
+            ),
+            "por_sub_tipo": _soma_por_sub(so_no_ml),
+        },
+        "so_gravado": {"linhas": len(so_gravado), "ids": so_gravado[:20]},
+        "amostras_do_pior_sub_tipo": {"sub_tipo": pior, "itens": amostras},
+    }
+    logger.info("conciliacao_sonda_bonus", conta=conta, periodo=chave, linhas_ml=len(detalhes))
+    return saida
+
+
+def _resumo_carteira(lista: list[dict[str, Any]]) -> dict[str, Any]:
+    """Resumo das transações da carteira Shopee: por tipo, fluxo, com/sem pedido."""
+    por_tipo: dict[str, dict[str, Any]] = {}
+    fluxo: Counter = Counter()
+    com_pedido = 0
+    datas: list[int] = []
+    for t in lista:
+        tipo = str(t.get("transaction_type") or "?")
+        x = por_tipo.setdefault(tipo, {"linhas": 0, "valor": 0.0})
+        x["linhas"] += 1
+        x["valor"] = round(x["valor"] + float(t.get("amount") or 0), 2)
+        fluxo[str(t.get("money_flow") or "?")] += 1
+        if t.get("order_sn"):
+            com_pedido += 1
+        if isinstance(t.get("create_time"), int):
+            datas.append(t["create_time"])
+    return {
+        "linhas": len(lista),
+        "por_tipo": por_tipo,
+        "por_fluxo": dict(fluxo),
+        "com_pedido": com_pedido,
+        "de": datetime.fromtimestamp(min(datas), tz=_BRT).isoformat() if datas else None,
+        "ate": datetime.fromtimestamp(max(datas), tz=_BRT).isoformat() if datas else None,
+        "campos": sorted({k for t in lista for k in t}) if lista else [],
+    }
+
+
+@router.get("/sonda/shopee")
+async def sonda_shopee(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+    conta: Annotated[
+        str | None, Query(description="nome da loja Shopee; sem valor = a primeira ativa")
+    ] = None,
+    dias: Annotated[int, Query(ge=1, le=31)] = 7,
+) -> dict[str, Any]:
+    """O que a API da Shopee dá de dinheiro: carteira (extrato), liberações (escrow),
+    detalhe de uma liberação e repasses (payout). Só leitura, numa conta ativa."""
+    from app.models.integration import IntegrationPlatform
+
+    q = select(Integration).where(
+        Integration.platform == IntegrationPlatform.SHOPEE,
+        Integration.archived_at.is_(None),
+        Integration.status == "active",
+    )
+    if conta:
+        q = q.where(func.lower(func.trim(Integration.name)) == conta.strip().lower())
+    integ = (
+        await session.execute(q.order_by(Integration.created_at).limit(1))
+    ).scalar_one_or_none()
+    if integ is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"code": "conta_shopee_nao_encontrada", "conta": conta},
+        )
+    cliente = await cliente_da_integracao(integ)
+    agora = int(time.time())
+    t_de = agora - dias * 86400
+    chamadas: list[dict[str, Any]] = []
+
+    async def chama(
+        nome: str, metodo: str, path: str, *, params=None, json=None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Uma chamada registrada: status, tempo, erro da Shopee e uma amostra do corpo.
+        Devolve também o corpo inteiro, pra resumir listas sem cortar."""
+        t0 = time.monotonic()
+        item: dict[str, Any] = {"nome": f"{nome} ({metodo})", "url": path}
+        try:
+            r = await cliente._request(metodo, path, params=params, json=json)
+        except Exception as e:  # noqa: BLE001 — a sondagem registra e segue
+            item.update(ok=False, erro=f"{type(e).__name__}: {str(e)[:300]}")
+            item["ms"] = int((time.monotonic() - t0) * 1000)
+            chamadas.append(item)
+            return item, {}
+        item.update(status=r.status_code, ms=int((time.monotonic() - t0) * 1000))
+        try:
+            body = r.json() or {}
+        except ValueError:
+            body = {"texto": (r.text or "")[:_MAX_TEXTO]}
+        if not isinstance(body, dict):
+            body = {"corpo": body}
+        item["ok"] = r.status_code == 200 and not body.get("error")
+        if body.get("error"):
+            item["erro_shopee"] = f"{body.get('error')}: {body.get('message')}"
+        item["amostra"] = _recorta(body)
+        chamadas.append(item)
+        return item, body
+
+    def resposta(body: dict[str, Any]) -> dict[str, Any]:
+        r = body.get("response")
+        return r if isinstance(r, dict) else {}
+
+    await chama("loja", "GET", "/api/v2/shop/get_shop_info")
+
+    # 1) carteira = o extrato (POST; se a Shopee reclamar do método, GET)
+    janela = {"page_no": 0, "page_size": 100, "create_time_from": t_de, "create_time_to": agora}
+    item, body = await chama(
+        "carteira", "POST", "/api/v2/payment/get_wallet_transaction_list", json=janela
+    )
+    if item.get("status") in (404, 405) or "method" in str(item.get("erro_shopee", "")).lower():
+        item, body = await chama(
+            "carteira", "GET", "/api/v2/payment/get_wallet_transaction_list", params=janela
+        )
+    carteira: dict[str, Any] = {}
+    lista = resposta(body).get("transaction_list")
+    if isinstance(lista, list):
+        carteira = _resumo_carteira([t for t in lista if isinstance(t, dict)])
+        carteira["mais_paginas"] = resposta(body).get("more")
+
+    # 2) liberações (escrow) no período e o detalhe de uma
+    item, body = await chama(
+        "liberacoes",
+        "GET",
+        "/api/v2/payment/get_escrow_list",
+        params={
+            "release_time_from": t_de,
+            "release_time_to": agora,
+            "page_size": 100,
+            "page_no": 1,
+        },
+    )
+    esc = resposta(body).get("escrow_list")
+    liberacoes: dict[str, Any] = {}
+    primeiro_sn = None
+    if isinstance(esc, list):
+        itens = [e for e in esc if isinstance(e, dict)]
+        liberacoes = {
+            "linhas": len(itens),
+            "valor": round(sum(float(e.get("payout_amount") or 0) for e in itens), 2),
+            "mais_paginas": resposta(body).get("more"),
+            "campos": sorted({k for e in itens for k in e}),
+        }
+        primeiro_sn = itens[0].get("order_sn") if itens else None
+    if primeiro_sn:
+        await chama(
+            "liberacao_detalhe",
+            "GET",
+            "/api/v2/payment/get_escrow_detail",
+            params={"order_sn": primeiro_sn},
+        )
+
+    # 3) repasses pro banco (as duas rotas que a Shopee documenta)
+    rep = {"page_size": 100, "page_no": 0, "payout_time_from": t_de, "payout_time_to": agora}
+    await chama("repasses_info", "POST", "/api/v2/payment/get_payout_info", json=rep)
+    await chama(
+        "repasses_detalhe",
+        "GET",
+        "/api/v2/payment/get_payout_detail",
+        params={**rep, "page_no": 1},
+    )
+
+    logger.info(
+        "conciliacao_sonda_shopee",
+        conta=integ.name,
+        chamadas=[(c["nome"], c.get("status"), c.get("erro")) for c in chamadas],
+    )
+    return {
+        "conta": integ.name,
+        "integration_id": str(integ.id),
+        "janela": {
+            "de": datetime.fromtimestamp(t_de, tz=_BRT).isoformat(),
+            "ate": datetime.fromtimestamp(agora, tz=_BRT).isoformat(),
+        },
+        "carteira": carteira,
+        "liberacoes": liberacoes,
+        "chamadas": chamadas,
     }
