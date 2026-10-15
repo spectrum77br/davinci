@@ -5,7 +5,7 @@
 // dinheiro (venda, fatura, extrato — o Bling saiu em 15/10: "nunca bate"), o
 // resultado e a situação; o Raio-X
 // do pedido selecionado fica à direita. Extrato do dia e Resumo vêm depois.
-import { Download, Loader2, RefreshCw, Search, Wand2 } from 'lucide-vue-next'
+import { Download, KeyRound, Loader2, RefreshCw, Search, Wand2 } from 'lucide-vue-next'
 import { ETAPAS, SITUACOES, etapaCls, fmtDia, fmtDiaHora, fmtMoney, fmtPct, sinal, sitCls, tipoMov } from '~/lib/conciliacao'
 
 definePageMeta({
@@ -161,6 +161,65 @@ const movimentosVisiveis = computed(() => {
 const reservasEscondidas = computed(() => (raiox.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_')).length)
 const pagamentosDoPedido = computed(() => new Set((raiox.value?.movimentos || []).map((m) => m.pagamento_id).filter(Boolean)).size)
 const motivoDraft = ref('')
+
+// Token do Melhor Envio (15/10): a operação cola aqui; fica cifrado no servidor e nunca volta pra tela.
+type TokenMe = { tem_token: boolean; origem: 'painel' | 'servidor' | null; atualizado_em: string | null; atualizado_por: string | null; conta: string | null; testado_em: string | null; aviso: string | null }
+const tokenMe = ref<{ aberto: boolean; status: TokenMe | null; draft: string; msg: string; erro: boolean; ocupado: boolean }>({ aberto: false, status: null, draft: '', msg: '', erro: false, ocupado: false })
+async function abrirTokenMe() {
+  tokenMe.value = { aberto: true, status: null, draft: '', msg: '', erro: false, ocupado: true }
+  try {
+    tokenMe.value.status = await api<TokenMe>('/api/conciliacao/melhor-envio/token')
+  } catch (e: any) {
+    tokenMe.value.msg = e?.data?.detail?.code || 'não consegui ler a situação do token'
+    tokenMe.value.erro = true
+  } finally {
+    tokenMe.value.ocupado = false
+  }
+}
+async function salvarTokenMe() {
+  if (!tokenMe.value.draft.trim()) return
+  tokenMe.value.ocupado = true
+  tokenMe.value.msg = ''
+  try {
+    tokenMe.value.status = await api<TokenMe>('/api/conciliacao/melhor-envio/token', { method: 'PUT', body: { token: tokenMe.value.draft.trim() } })
+    tokenMe.value.draft = ''
+    tokenMe.value.msg = `token aceito pelo Melhor Envio · conta ${tokenMe.value.status?.conta || '—'}`
+    tokenMe.value.erro = false
+  } catch (e: any) {
+    tokenMe.value.msg = e?.data?.detail?.mensagem || e?.data?.detail?.code || 'não consegui salvar'
+    tokenMe.value.erro = true
+  } finally {
+    tokenMe.value.ocupado = false
+  }
+}
+async function testarTokenMe() {
+  tokenMe.value.ocupado = true
+  tokenMe.value.msg = ''
+  try {
+    const r = await api<{ ok: boolean; conta?: string; envios_total?: number | null; envios_na_pagina?: number; mensagem?: string; http?: number }>('/api/conciliacao/melhor-envio/token/testar', { method: 'POST' })
+    tokenMe.value.msg = r.ok ? `ok · conta ${r.conta || '—'} · ${r.envios_total ?? r.envios_na_pagina ?? '?'} envios na lista` : `falhou: ${r.mensagem || r.http || '?'}`
+    tokenMe.value.erro = !r.ok
+  } catch (e: any) {
+    tokenMe.value.msg = e?.data?.detail?.code || 'não consegui testar'
+    tokenMe.value.erro = true
+  } finally {
+    tokenMe.value.ocupado = false
+  }
+}
+async function removerTokenMe() {
+  if (!confirm('Remover o token do Melhor Envio do painel?')) return
+  tokenMe.value.ocupado = true
+  try {
+    tokenMe.value.status = await api<TokenMe>('/api/conciliacao/melhor-envio/token', { method: 'DELETE' })
+    tokenMe.value.msg = 'token removido'
+    tokenMe.value.erro = false
+  } catch (e: any) {
+    tokenMe.value.msg = e?.data?.detail?.code || 'não consegui remover'
+    tokenMe.value.erro = true
+  } finally {
+    tokenMe.value.ocupado = false
+  }
+}
 
 const lojaAtual = computed(() => lojas.value.find((l) => l.conta === loja.value) || null)
 // Cada aba mostra só as lojas da plataforma dela (15/10: Shopee entrou).
@@ -442,6 +501,9 @@ await carregar()
           <Download class="size-3.5" /> Excel
         </button>
         <span v-if="visao !== 'resumo' && lojaAtual" class="text-muted-foreground">loja <b>{{ loja }}</b></span>
+        <button v-if="canEdit && tab === 'amazon'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" title="Token do Melhor Envio (frete pago nos envios próprios)" @click="abrirTokenMe()">
+          <KeyRound class="size-3.5" /> Melhor Envio
+        </button>
         <button
           v-if="canEdit && visao !== 'resumo'"
           type="button"
@@ -731,5 +793,34 @@ await carregar()
       </div>
     </div>
     </template>
+
+    <div v-if="tokenMe.aberto" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="tokenMe.aberto = false">
+      <div class="w-full max-w-lg rounded-md border bg-card shadow-lg">
+        <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-2 text-xs font-semibold text-white">
+          <span>Token do Melhor Envio</span>
+          <button type="button" class="text-white/80 hover:text-white" @click="tokenMe.aberto = false">fechar</button>
+        </div>
+        <div class="space-y-3 p-3 text-xs">
+          <div class="rounded border bg-muted/40 px-2.5 py-2">
+            <template v-if="tokenMe.status">
+              <div v-if="tokenMe.status.origem === 'painel'">Token guardado no painel · conta <b>{{ tokenMe.status.conta || '—' }}</b> · colado em {{ tokenMe.status.atualizado_em ? new Date(tokenMe.status.atualizado_em).toLocaleString('pt-BR') : '—' }} por {{ tokenMe.status.atualizado_por || '—' }}</div>
+              <div v-else class="text-amber-700">{{ tokenMe.status.aviso }}</div>
+            </template>
+            <div v-else class="text-muted-foreground">lendo…</div>
+          </div>
+          <div class="space-y-1">
+            <div class="text-[11px] text-muted-foreground">Cole o token gerado em Melhor Envio › Configurações › Tokens (só leitura: envios, compras, rastreio, transações, cotação). Ele é conferido no Melhor Envio e guardado criptografado; não aparece de novo nesta tela.</div>
+            <input v-model="tokenMe.draft" type="password" autocomplete="off" spellcheck="false" placeholder="cole o token aqui (começa com eyJ)" class="w-full rounded border bg-background px-2 py-1.5 font-mono text-[11px]" />
+          </div>
+          <div v-if="tokenMe.msg" class="rounded px-2.5 py-1.5" :class="tokenMe.erro ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'">{{ tokenMe.msg }}</div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" class="rounded-md bg-primary px-2.5 py-1.5 font-semibold text-primary-foreground disabled:opacity-50" :disabled="tokenMe.ocupado || !tokenMe.draft.trim()" @click="salvarTokenMe()">Salvar token</button>
+            <button type="button" class="rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted disabled:opacity-50" :disabled="tokenMe.ocupado || !tokenMe.status?.tem_token" @click="testarTokenMe()">Testar</button>
+            <button v-if="tokenMe.status?.origem === 'painel'" type="button" class="rounded-md border px-2.5 py-1.5 font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50" :disabled="tokenMe.ocupado" @click="removerTokenMe()">Remover</button>
+            <Loader2 v-if="tokenMe.ocupado" class="size-3.5 animate-spin text-muted-foreground" />
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

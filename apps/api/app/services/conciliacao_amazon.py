@@ -122,6 +122,7 @@ def conta_amazon_de_quebras(q: dict[str, Decimal]) -> dict[str, Decimal]:
     return {
         "produto": produto,
         "frete_cliente": frete_cliente,
+        "valor": produto + frete_cliente,  # o que o cliente pagou à loja
         "promocao": promocao,
         "comissao": comissao,
         "amazon_for_all": amazon_for_all,

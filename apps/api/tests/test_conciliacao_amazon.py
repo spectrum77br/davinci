@@ -333,13 +333,11 @@ async def test_raiox_amazon_previsto_x_real_e_grade(db, make_user, auth_as, clie
     r = await client.get("/api/conciliacao/pedidos", params={"loja": "kia", "q": "301635"})
     (ped,) = [p for p in r.json()["itens"] if p["pedido_bling"] == "301635"]
     assert ped["situacao"] == "bateu" and ped["recebido"] == 2356.21
-    # Valor = produto; Tarifa = comissão + 1,5% + retenção; Frete = −frete cobrado do cliente
-    assert ped["venda_valor"] == 2598 and ped["venda_tarifa"] == 336.6
-    assert (
-        ped["venda_frete"] == -94.81
-        and ped["venda_extras"] == 0
-        and ped["venda_liquido"] == 2356.21
-    )
+    # Valor = produto + frete cobrado do cliente; Tarifa = comissão + 1,5% + retenção;
+    # Frete = só o da Amazon (etiqueta; no envio próprio fica 0) — 15/10, Vinicius
+    assert ped["venda_valor"] == 2692.81 and ped["venda_tarifa"] == 336.6
+    assert ped["motivo"] == "preso na reserva"
+    assert ped["venda_frete"] == 0 and ped["venda_extras"] == 0 and ped["venda_liquido"] == 2356.21
     r = await client.get("/api/conciliacao/pedidos/301635", params={"loja": "kia"})
     comp = r.json()["comparativo"]
     por = {x["chave"]: x for x in comp["linhas"]}
@@ -347,6 +345,7 @@ async def test_raiox_amazon_previsto_x_real_e_grade(db, make_user, auth_as, clie
     assert list(por) == [
         "produtos",
         "frete_cliente",
+        "valor",
         "comissao",
         "amazon_for_all",
         "retencao",
@@ -354,6 +353,7 @@ async def test_raiox_amazon_previsto_x_real_e_grade(db, make_user, auth_as, clie
         "liquido",
     ]
     assert por["frete_cliente"]["previsto"] == 94.81 and por["comissao"]["real"] == 285.78
+    assert por["valor"]["previsto"] == 2692.81 and por["valor"]["real"] == 2692.81
     assert (
         por["liquido"]["previsto"] == 2356.21
         and por["liquido"]["real"] == 2356.21
@@ -483,3 +483,37 @@ async def test_liberacao_da_reserva_nao_conta_duas_vezes(db, make_user):
     assert r3["removidas"] == 1
     movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
     assert len(movs) == 1 and movs[0].saldo_apos == Decimal("2356.21")
+
+
+async def test_token_do_melhor_envio_salva_cifrado_e_recusa_invalido(
+    db, make_user, auth_as, client, monkeypatch
+):
+    from app.services import melhor_envio as me
+
+    bom = "eyJ" + "x" * 40
+
+    async def _conta_ok(token: str):
+        assert token == bom
+        return 200, {"firstname": "Casa", "lastname": "Decoração", "email": "x@y"}
+
+    async def _conta_ruim(token: str):
+        return 401, {"message": "Unauthenticated."}
+
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    r = await client.get("/api/conciliacao/melhor-envio/token")
+    assert r.status_code == 200 and r.json()["origem"] is None and r.json()["tem_token"] is False
+    monkeypatch.setattr(me, "ler_conta", _conta_ruim)
+    r = await client.put("/api/conciliacao/melhor-envio/token", json={"token": "eyJ" + "y" * 40})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "token_recusado"
+    monkeypatch.setattr(me, "ler_conta", _conta_ok)
+    r = await client.put("/api/conciliacao/melhor-envio/token", json={"token": bom})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["tem_token"] and corpo["origem"] == "painel" and corpo["conta"] == "Casa Decoração"
+    assert bom not in r.text  # o token nunca volta
+    token, detalhe = await me.token_do_painel(db)
+    assert token == bom and detalhe["conta"] == "Casa Decoração"
+    cli = await me.cliente_me(db)
+    assert cli.token == bom
+    r = await client.delete("/api/conciliacao/melhor-envio/token")
+    assert r.status_code == 200 and r.json()["origem"] is None

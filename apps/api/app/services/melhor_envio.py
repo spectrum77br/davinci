@@ -22,11 +22,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING
 
 import httpx
 import structlog
 
 from app.config import get_settings
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
 
@@ -148,15 +152,25 @@ def conferir_frete(
     menor = escolher_menor(cotacoes)
     if menor is None:
         return ResultadoConferencia(
-            libera=False, motivo="sem_cotacao", menor_frete=None,
-            servico_escolhido=None, empresa_escolhida=None, prazo_dias=None,
-            frete_projetado=frete_projetado, diferenca=None,
+            libera=False,
+            motivo="sem_cotacao",
+            menor_frete=None,
+            servico_escolhido=None,
+            empresa_escolhida=None,
+            prazo_dias=None,
+            frete_projetado=frete_projetado,
+            diferenca=None,
         )
     if frete_projetado is None:
         return ResultadoConferencia(
-            libera=False, motivo="sem_frete_projetado", menor_frete=menor.preco,
-            servico_escolhido=menor.servico_nome, empresa_escolhida=menor.empresa,
-            prazo_dias=menor.prazo_dias, frete_projetado=None, diferenca=None,
+            libera=False,
+            motivo="sem_frete_projetado",
+            menor_frete=menor.preco,
+            servico_escolhido=menor.servico_nome,
+            empresa_escolhida=menor.empresa,
+            prazo_dias=menor.prazo_dias,
+            frete_projetado=None,
+            diferenca=None,
         )
     diferenca = frete_projetado - menor.preco  # type: ignore[operator]
     dentro = menor.preco <= frete_projetado  # type: ignore[operator]
@@ -228,3 +242,105 @@ class MelhorEnvioClient:
 
 def _so_digitos(cep: str | None) -> str:
     return "".join(ch for ch in (cep or "") if ch.isdigit())
+
+
+# ---------------------------------------------------------------------------
+# Token guardado no painel (15/10/2026) + leituras só-leitura da conta e dos envios
+# ---------------------------------------------------------------------------
+CHAVE_CONFIG_ME = "melhor_envio_token"
+_UA = "DaVinci Conciliacao (contato@davinci)"
+
+
+async def token_do_painel(session: AsyncSession) -> tuple[str | None, dict]:
+    """Token colado em Conciliação › Amazon › Melhor Envio (cifrado), com o detalhe
+    (quando, quem, conta testada). Sem linha → (None, {})."""
+    from app.models import ConfiguracaoSegura
+    from app.security.cipher import decrypt_json
+
+    row = await session.get(ConfiguracaoSegura, CHAVE_CONFIG_ME)
+    if row is None:
+        return None, {}
+    try:
+        dados = decrypt_json(row.valor)
+    except Exception:  # noqa: BLE001
+        return None, {"erro": "token guardado ilegível"}
+    detalhe = {
+        **(row.detalhe or {}),
+        "atualizado_em": row.updated_at.isoformat() if row.updated_at else None,
+        "atualizado_por": row.atualizado_por,
+    }
+    return (str(dados.get("token") or "").strip() or None), detalhe
+
+
+async def guardar_token_do_painel(
+    session: AsyncSession, token: str, *, por: str | None, detalhe: dict | None = None
+) -> None:
+    from app.models import ConfiguracaoSegura
+    from app.security.cipher import encrypt_json
+
+    row = await session.get(ConfiguracaoSegura, CHAVE_CONFIG_ME)
+    if row is None:
+        row = ConfiguracaoSegura(chave=CHAVE_CONFIG_ME, valor=b"", detalhe={})
+        session.add(row)
+    row.valor = encrypt_json({"token": token.strip()})
+    row.detalhe = dict(detalhe or {})
+    row.atualizado_por = por
+    await session.flush()
+
+
+async def apagar_token_do_painel(session: AsyncSession) -> bool:
+    from app.models import ConfiguracaoSegura
+
+    row = await session.get(ConfiguracaoSegura, CHAVE_CONFIG_ME)
+    if row is None:
+        return False
+    await session.delete(row)
+    await session.flush()
+    return True
+
+
+async def cliente_me(session: AsyncSession) -> MelhorEnvioClient:
+    """Cliente com o token do painel; sem ele, o do `.env` (pode estar vencido)."""
+    token, _ = await token_do_painel(session)
+    return MelhorEnvioClient(token=token) if token else MelhorEnvioClient()
+
+
+def _headers_leitura(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": _UA}
+
+
+async def ler_conta(token: str) -> tuple[int, dict]:
+    """GET /api/v2/me — quem é o dono do token (só nome/empresa são usados)."""
+    async with httpx.AsyncClient(timeout=20) as cli:
+        r = await cli.get(f"{ME_BASE_PROD}/api/v2/me", headers=_headers_leitura(token))
+    try:
+        corpo = r.json() if r.content else {}
+    except ValueError:
+        corpo = {"texto": r.text[:200]}
+    return r.status_code, corpo if isinstance(corpo, dict) else {"corpo": corpo}
+
+
+async def ler_envios(token: str, *, page: int = 1, q: str | None = None) -> tuple[int, dict]:
+    """GET /api/v2/me/orders — os envios da conta (preço pago, etiquetas, tags com o
+    nº do pedido). Só leitura."""
+    params: dict[str, str | int] = {"page": page}
+    if q:
+        params["q"] = q
+    async with httpx.AsyncClient(timeout=30) as cli:
+        r = await cli.get(
+            f"{ME_BASE_PROD}/api/v2/me/orders", headers=_headers_leitura(token), params=params
+        )
+    try:
+        corpo = r.json() if r.content else {}
+    except ValueError:
+        corpo = {"texto": r.text[:200]}
+    return r.status_code, corpo if isinstance(corpo, dict) else {"data": corpo}
+
+
+def nome_da_conta(corpo: dict) -> str | None:
+    """Nome curto da conta pra mostrar na tela (sem e-mail/documento)."""
+    empresa = corpo.get("company") if isinstance(corpo.get("company"), dict) else None
+    if empresa and empresa.get("name"):
+        return str(empresa["name"])[:80]
+    nome = " ".join(str(corpo.get(k) or "") for k in ("firstname", "lastname")).strip()
+    return nome[:80] or None

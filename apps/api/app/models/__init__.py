@@ -238,6 +238,7 @@ from app.models.nf import (
     NfImpressao,
     NfNota,
 )
+from app.models.configuracao_segura import ConfiguracaoSegura
 from app.models.conciliacao import (
     ConciliacaoDia,
     ConciliacaoLoja,
@@ -470,6 +471,7 @@ __all__ = [
     "ConciliacaoMovimento",
     "ConciliacaoPedido",
     "ConciliacaoSync",
+    "ConfiguracaoSegura",
     "OuvidoriaOcorrencia",
     "OuvidoriaRobo",
     "OuvidoriaRodada",

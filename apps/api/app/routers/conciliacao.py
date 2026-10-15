@@ -1290,6 +1290,7 @@ def _comparativo(
                 par_am(
                     "frete_cliente", "+ Frete cobrado do cliente", "frete_cliente", so_se_tem=True
                 ),
+                par_am("valor", "= Valor (o que o cliente pagou)", "valor", estilo="bold"),
                 par_am(
                     "promocao",
                     "− Desconto promocional da loja",
@@ -4806,3 +4807,131 @@ async def sonda_amazon(
         },
         "melhor_envio": me,
     }
+
+
+# ---------------------------------------------------------------------------
+# Token do Melhor Envio colado pela operação (15/10, Vinicius: "me mostra onde eu colo")
+# ---------------------------------------------------------------------------
+def _resumo_token_me(token: str | None, detalhe: dict[str, Any]) -> dict[str, Any]:
+    from app.config import get_settings
+
+    tem_painel = bool(token)
+    tem_servidor = bool((get_settings().melhor_envio_token or "").strip())
+    return {
+        "tem_token": tem_painel or tem_servidor,
+        "origem": "painel" if tem_painel else ("servidor" if tem_servidor else None),
+        "atualizado_em": detalhe.get("atualizado_em"),
+        "atualizado_por": detalhe.get("atualizado_por"),
+        "conta": detalhe.get("conta"),
+        "testado_em": detalhe.get("testado_em"),
+        "aviso": (
+            None
+            if tem_painel
+            else (
+                "o token do servidor está vencido (401): cole um novo aqui"
+                if tem_servidor
+                else "sem token: cole o token gerado no Melhor Envio"
+            )
+        ),
+    }
+
+
+@router.get("/melhor-envio/token")
+async def melhor_envio_token_status(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+) -> dict[str, Any]:
+    from app.services.melhor_envio import token_do_painel
+
+    token, detalhe = await token_do_painel(session)
+    return _resumo_token_me(token, detalhe)
+
+
+@router.put("/melhor-envio/token")
+async def melhor_envio_token_salvar(
+    body: Annotated[dict[str, Any], Body()],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+) -> dict[str, Any]:
+    """Confere o token no Melhor Envio (GET /me) e guarda cifrado. O token nunca
+    volta na resposta nem vai pro log."""
+    from app.services.melhor_envio import (
+        guardar_token_do_painel,
+        ler_conta,
+        nome_da_conta,
+        token_do_painel,
+    )
+
+    token = str(body.get("token") or "").strip()
+    if len(token) < 20:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"code": "token_vazio", "mensagem": "cole o token inteiro"},
+        )
+    http, corpo = await ler_conta(token)
+    if http != 200:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "token_recusado",
+                "mensagem": (
+                    f"o Melhor Envio recusou o token (HTTP {http}): "
+                    f"{str(corpo.get('message') or corpo)[:120]}"
+                ),
+            },
+        )
+    agora = datetime.now(UTC).isoformat()
+    await guardar_token_do_painel(
+        session,
+        token,
+        por=(user.name or user.email),
+        detalhe={"conta": nome_da_conta(corpo), "testado_em": agora},
+    )
+    await session.commit()
+    logger.info("conciliacao_melhor_envio_token_salvo", por=user.email, conta=nome_da_conta(corpo))
+    novo, detalhe = await token_do_painel(session)
+    return _resumo_token_me(novo, detalhe)
+
+
+@router.post("/melhor-envio/token/testar")
+async def melhor_envio_token_testar(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+) -> dict[str, Any]:
+    """Com o token guardado: quem é a conta e quantos envios a lista devolve."""
+    from app.services.melhor_envio import ler_conta, ler_envios, nome_da_conta, token_do_painel
+
+    token, _ = await token_do_painel(session)
+    if not token:
+        from app.config import get_settings
+
+        token = (get_settings().melhor_envio_token or "").strip()
+    if not token:
+        return {"ok": False, "mensagem": "sem token"}
+    http, corpo = await ler_conta(token)
+    if http != 200:
+        return {"ok": False, "http": http, "mensagem": str(corpo.get("message") or corpo)[:160]}
+    http2, envios = await ler_envios(token)
+    dados = envios.get("data") if isinstance(envios.get("data"), list) else []
+    return {
+        "ok": True,
+        "conta": nome_da_conta(corpo),
+        "envios_http": http2,
+        "envios_total": envios.get("total") if http2 == 200 else None,
+        "envios_na_pagina": len(dados),
+        "campos": sorted(dados[0].keys()) if dados and isinstance(dados[0], dict) else [],
+    }
+
+
+@router.delete("/melhor-envio/token")
+async def melhor_envio_token_apagar(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+) -> dict[str, Any]:
+    from app.services.melhor_envio import apagar_token_do_painel, token_do_painel
+
+    apagou = await apagar_token_do_painel(session)
+    await session.commit()
+    logger.info("conciliacao_melhor_envio_token_apagado", por=user.email, apagou=apagou)
+    token, detalhe = await token_do_painel(session)
+    return _resumo_token_me(token, detalhe)

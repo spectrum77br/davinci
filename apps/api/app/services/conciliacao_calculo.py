@@ -264,6 +264,26 @@ def conta_amazon_de_transacoes(txs: list[Any]) -> dict[str, Decimal] | None:
     return conta
 
 
+def motivo_amazon(movs: list[ConciliacaoMovimento]) -> str | None:
+    """Em que momento o dinheiro do pedido está na Amazon (15/10, Vinicius): "preso na
+    reserva" enquanto algum lançamento é DEFERRED; senão "liberado em dd/mm"."""
+    lancamentos = [m for m in movs if m.tipo == "venda_liberada"]
+    if not lancamentos:
+        return None
+    if any(m.sub_tipo == "DEFERRED" for m in lancamentos):
+        return "preso na reserva"
+    datas = []
+    for m in lancamentos:
+        raw = m.raw if isinstance(m.raw, dict) else {}
+        quando = raw.get("_liberado_em")
+        try:
+            datas.append(datetime.fromisoformat(str(quando)) if quando else m.data)
+        except ValueError:
+            datas.append(m.data)
+    ultima = max(datas)
+    return f"liberado em {ultima.astimezone(BRT):%d/%m}"
+
+
 def conta_amazon(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] | None:
     """A partir do que a Margem guardou (`raw.transactions` = resposta da Finances API
     por pedido). Pedido ainda não lançado (pending) → None."""
@@ -696,6 +716,8 @@ async def recalcular_loja(
             movs_extrato=extrato,
             fatura=fatura,
         )
+        if plataforma_loja == "amazon" and calc["situacao"] == "bateu":
+            calc["motivo"] = motivo_amazon(extrato)
         atual = existentes.get(numero)
         etapa = etapa_do_pedido(
             agora=agora,
@@ -716,13 +738,15 @@ async def recalcular_loja(
         # extras = promoção da loja + outras tarifas
         amazon = conta_amazon(venda_ok) if plataforma_loja == "amazon" else None
         if amazon is not None:
+            # 15/10, Vinicius: Valor = o que o cliente pagou à loja (produto + frete
+            # cobrado no envio próprio); Frete = só o que a Amazon cobra (etiqueta DBA)
             shopee = {
-                "preco": amazon["produto"],
+                "preco": amazon["produto"] + amazon["frete_cliente"],
                 "taxas": -(
                     amazon["comissao"] + amazon["amazon_for_all"] + amazon["retencao_frete"]
                 ),
                 "afiliados": ZERO,
-                "frete_loja": -amazon["etiqueta"] - amazon["frete_cliente"],
+                "frete_loja": -amazon["etiqueta"],
                 "subsidio": ZERO,
                 "cupons": -(amazon["promocao"] + amazon["outras_tarifas"] + amazon["outros"]),
             }
