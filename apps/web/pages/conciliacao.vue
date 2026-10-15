@@ -109,13 +109,18 @@ const MARKETPLACES = [
   { key: 'amazon', label: 'Amazon', ativo: false },
   { key: 'tiktok', label: 'TikTok', ativo: false },
 ]
-const VISOES: Array<{ key: 'pedidos' | 'extrato' | 'resumo'; label: string; ativo: boolean }> = [
+type Visao = 'resumo' | 'pedidos' | 'extrato' | 'fechamento'
+const VISOES: Array<{ key: Visao; label: string; ativo: boolean }> = [
+  { key: 'resumo', label: 'Resumo', ativo: true },
   { key: 'pedidos', label: 'Pedidos', ativo: true },
   { key: 'extrato', label: 'Extrato do dia', ativo: true },
-  { key: 'resumo', label: 'Resumo', ativo: false },
+  { key: 'fechamento', label: 'Fechamento do mês', ativo: true },
 ]
 const tab = ref('ml')
-const visao = ref<'pedidos' | 'extrato' | 'resumo'>('pedidos')
+// A tela de entrada é o Resumo (passo 2d): de lá se vai pro extrato do dia de uma
+// loja ou pros pedidos dela já filtrados.
+const visao = ref<Visao>('resumo')
+const extratoDia = ref('')
 const lojas = ref<Loja[]>([])
 const loja = ref('')
 const de = ref('')
@@ -277,6 +282,30 @@ function verPedido(pedido: string) {
   carregar()
 }
 
+function abrirExtrato(conta: string, dia: string) {
+  loja.value = conta
+  extratoDia.value = dia
+  visao.value = 'extrato'
+}
+
+function verPedidos(conta: string, filtro: Record<string, string>) {
+  loja.value = conta
+  situacao.value = filtro.situacao || ''
+  etapa.value = filtro.etapa || ''
+  q.value = ''
+  dataFiltro.value = 'pedido'
+  de.value = lojaAtual.value?.inicio || ''
+  ate.value = ''
+  page.value = 1
+  visao.value = 'pedidos'
+  carregar()
+}
+
+function sincronizarLoja(conta: string) {
+  loja.value = conta
+  sincronizar()
+}
+
 function limpar() {
   situacao.value = ''
   etapa.value = ''
@@ -336,14 +365,15 @@ await carregar()
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-1.5 text-xs">
-        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" :disabled="loading" @click="carregar()">
+        <button v-if="visao === 'pedidos'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" :disabled="loading" @click="carregar()">
           <RefreshCw class="size-3.5" :class="loading && 'animate-spin'" /> Recarregar
         </button>
-        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" :disabled="exportando" @click="exportar()">
+        <button v-if="visao === 'pedidos'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" :disabled="exportando" @click="exportar()">
           <Download class="size-3.5" /> Excel
         </button>
+        <span v-if="visao !== 'resumo' && lojaAtual" class="text-muted-foreground">loja <b>{{ loja }}</b></span>
         <button
-          v-if="canEdit"
+          v-if="canEdit && visao !== 'resumo'"
           type="button"
           class="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 font-semibold text-primary-foreground"
           :disabled="sincronizando"
@@ -355,7 +385,11 @@ await carregar()
       </div>
     </div>
 
-    <ConciliacaoExtrato v-if="visao === 'extrato'" :loja="loja" :can-edit="canEdit" @ver-pedido="verPedido" />
+    <ConciliacaoResumo v-if="visao === 'resumo'" :can-edit="canEdit" @abrir-extrato="abrirExtrato" @ver-pedidos="verPedidos" @sincronizar="sincronizarLoja" />
+
+    <ConciliacaoExtrato v-if="visao === 'extrato'" :loja="loja" :dia="extratoDia" :can-edit="canEdit" @ver-pedido="verPedido" />
+
+    <ConciliacaoFechamento v-if="visao === 'fechamento'" v-model:loja="loja" :lojas="lojas" @abrir-extrato="abrirExtrato" />
 
     <template v-if="visao === 'pedidos'">
     <div class="flex flex-wrap items-center gap-2 text-xs">

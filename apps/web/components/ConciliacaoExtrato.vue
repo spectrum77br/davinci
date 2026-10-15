@@ -5,7 +5,7 @@
 import { ChevronLeft, ChevronRight, Loader2, Lock, LockOpen, Search } from 'lucide-vue-next'
 import { STATUS_MOV, fmtDia, fmtDiaHora, fmtHora, fmtMoney, ontemISO, sitCls, somaDias, tipoMov } from '~/lib/conciliacao'
 
-const props = defineProps<{ loja: string; canEdit: boolean }>()
+const props = defineProps<{ loja: string; canEdit: boolean; dia?: string }>()
 const emit = defineEmits<{ (e: 'ver-pedido', pedido: string): void }>()
 
 type Mov = {
@@ -61,7 +61,7 @@ type Sugestao = { pedido_bling: string; numeroloja: string | null; data_pedido: 
 const { api } = useApi()
 const toasts = useToasts()
 
-const dia = ref(ontemISO())
+const dia = ref(props.dia || ontemISO())
 const mostrar = ref<'todos' | 'pendentes' | 'divergentes' | 'sem_pedido'>('todos')
 const q = ref('')
 const dados = ref<Extrato | null>(null)
@@ -171,6 +171,7 @@ function rowCls(m: Mov) {
 }
 
 watch(() => props.loja, () => carregar())
+watch(() => props.dia, (v) => { if (v && v !== dia.value) dia.value = v })
 watch([dia, mostrar], () => carregar())
 await carregar()
 </script>

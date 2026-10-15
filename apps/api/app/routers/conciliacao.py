@@ -1180,8 +1180,9 @@ async def exportar_xlsx(
 # classificação — e o dia só fecha com 100%. Prova dos nove no rodapé: saldo
 # inicial + créditos − débitos = saldo final = saldo informado pelo Mercado Pago.
 
-from app.models import BlingOrder, ConciliacaoDia  # noqa: E402
+from app.models import BlingOrder, ConciliacaoDia, ConciliacaoSync  # noqa: E402
 from app.services.conciliacao_calculo import recalcular_loja  # noqa: E402
+from app.services.conciliacao_extrato import TIPOS_RESERVA as TIPOS_RESERVA_SET  # noqa: E402
 from app.services.conciliacao_extrato import bling_store_ids_da_loja  # noqa: E402
 
 CLASSIFICACOES = ("saque", "fatura_ml", "publicidade", "anterior_ao_inicio", "ajuste", "outro")
@@ -1746,3 +1747,631 @@ async def reabrir_dia(
         row.fechado_por = None
         await session.commit()
     return {"dia": dia.isoformat(), "fechado": None}
+
+
+# --- Resumo (tela de entrada) e Fechamento do mês ----------------------------------
+# Passo 2d (14/10/2026, "Ok" do Vinicius). Resumo: uma linha por loja ligada com o
+# dia de ontem (fechou? pendentes? saldo bate?), as pendências dos pedidos e o mês
+# até ontem; "Onde agir hoje" é a mesma lista que o vigia vai mandar no Threema.
+# Fechamento: o mês por loja — vendas (pela data do pedido), caixa (pela data do
+# movimento, com "ajustes de meses anteriores"), a fatura do ML (resumo × detalhes)
+# e os dias fechados.
+
+_ETAPAS_PENDENTES = ("pendencia", "reaberto")
+_ATRASO_EXTRATO = timedelta(hours=36)
+
+
+def _mes_range(mes: str | None) -> tuple[date, date]:
+    """'AAAA-MM' → (primeiro dia, primeiro dia do mês seguinte)."""
+    hoje = datetime.now(_BRT).date()
+    try:
+        ini = date.fromisoformat(f"{mes}-01") if mes else hoje.replace(day=1)
+    except ValueError as exc:
+        raise HTTPException(422, "mês inválido") from exc
+    fim = (
+        ini.replace(year=ini.year + 1, month=1)
+        if ini.month == 12
+        else ini.replace(month=ini.month + 1)
+    )
+    return ini, fim
+
+
+async def _somas_pedidos(
+    session: AsyncSession, loja: ConciliacaoLoja, ini: date, fim: date
+) -> dict[str, Any]:
+    """Totais dos pedidos da loja vendidos em [ini, fim) — os mesmos cartões da aba Pedidos."""
+    ped = ConciliacaoPedido
+    conds = [
+        ped.integration_id == loja.integration_id,
+        ped.data_pedido >= datetime.combine(ini, datetime.min.time(), tzinfo=_BRT),
+        ped.data_pedido < datetime.combine(fim, datetime.min.time(), tzinfo=_BRT),
+    ]
+    s = (
+        await session.execute(
+            select(
+                func.count(),
+                func.sum(ped.venda_valor),
+                func.sum(ped.venda_tarifa),
+                func.sum(ped.venda_frete),
+                func.sum(ped.fatura_parcelamento),
+                func.sum(ped.venda_cupom),
+                func.sum(ped.venda_liquido),
+                func.sum(ped.recebido),
+                func.sum(ped.saidas_depois),
+                func.sum(ped.custo),
+                func.sum(ped.reembolso),
+                func.sum(ped.sobrou),
+                func.count(ped.liberado_em),
+            ).where(*conds)
+        )
+    ).one()
+    por_situacao = dict(
+        (
+            await session.execute(
+                select(ped.situacao, func.count()).where(*conds).group_by(ped.situacao)
+            )
+        ).all()
+    )
+    por_etapa = dict(
+        (
+            await session.execute(select(ped.etapa, func.count()).where(*conds).group_by(ped.etapa))
+        ).all()
+    )
+    custo = s[9] or Decimal("0")
+    sobrou = s[11] or Decimal("0")
+    return {
+        "pedidos": s[0],
+        "vendido": _num(s[1] or 0),
+        "tarifa": _num(s[2] or 0),
+        "frete": _num(s[3] or 0),
+        "parcelamento": _num(s[4] or 0),
+        "cupom": _num(s[5] or 0),
+        "previsto": _num(s[6] or 0),
+        "recebido": _num(s[7] or 0),
+        "estornos": _num(s[8] or 0),
+        "custo": _num(custo),
+        "reembolso": _num(s[10] or 0),
+        "sobrou": _num(sobrou),
+        "margem": _num((sobrou / custo).quantize(Decimal("0.0001"))) if custo > 0 else None,
+        "liberados": s[12],
+        "finalizados": por_etapa.get("finalizado", 0),
+        "por_situacao": por_situacao,
+        "por_etapa": por_etapa,
+    }
+
+
+async def _ajustes_anteriores(
+    session: AsyncSession, loja: ConciliacaoLoja, ini: date, fim: date
+) -> tuple[float, int]:
+    """Dinheiro do extrato em [ini, fim) que é de pedido de ANTES de `ini` (ou
+    "anterior ao início"): o que o mês carrega de meses passados. (valor, linhas)"""
+    mov = ConciliacaoMovimento
+    ped = ConciliacaoPedido
+    ini_dt = datetime.combine(ini, datetime.min.time(), tzinfo=_BRT)
+    fim_dt = datetime.combine(fim, datetime.min.time(), tzinfo=_BRT)
+    valor, n = (
+        await session.execute(
+            select(func.sum(mov.credito - mov.debito), func.count())
+            .select_from(mov)
+            .outerjoin(
+                ped,
+                (ped.integration_id == mov.integration_id) & (ped.pedido_bling == mov.pedido_bling),
+            )
+            .where(
+                mov.integration_id == loja.integration_id,
+                mov.origem == ORIGEM_EXTRATO,
+                mov.data >= ini_dt,
+                mov.data < fim_dt,
+                mov.tipo != "saque",
+                mov.tipo.not_in(tuple(TIPOS_RESERVA_SET)),
+                or_(mov.classificacao == "anterior_ao_inicio", ped.data_pedido < ini_dt),
+            )
+        )
+    ).one()
+    return float(valor or 0), int(n or 0)
+
+
+def _soma_dict(destino: dict[str, Any], origem: dict[str, Any]) -> None:
+    for k, v in origem.items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            destino[k] = (destino.get(k) or 0) + v
+
+
+@router.get("/resumo")
+async def resumo_geral(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+    dia: date | None = None,
+) -> dict[str, Any]:
+    dia = dia or _ontem()
+    agora = datetime.now(UTC)
+    mes_ini = dia.replace(day=1)
+    lojas_out: list[dict[str, Any]] = []
+    agir: list[dict[str, Any]] = []
+    por_plataforma: dict[str, dict[str, Any]] = {}
+    empresa: dict[str, Any] = {"lojas": 0}
+    for loja in await lojas_ativas(session):
+        plataforma = getattr(loja.platform, "value", str(loja.platform))
+        movs = await _movimentos_do_dia(session, loja, dia)
+        pedidos_do_dia = {
+            p.pedido_bling: p
+            for p in (
+                await session.execute(
+                    select(ConciliacaoPedido).where(
+                        ConciliacaoPedido.integration_id == loja.integration_id,
+                        ConciliacaoPedido.pedido_bling.in_(
+                            {m.pedido_bling for m in movs if m.pedido_bling} or {"-"}
+                        ),
+                    )
+                )
+            ).scalars()
+        }
+        contagem: dict[str, int] = {
+            "automatico": 0,
+            "manual": 0,
+            "classificado": 0,
+            "anterior": 0,
+            "pendente": 0,
+            "divergente": 0,
+        }
+        for m in movs:
+            contagem[_status_movimento(m, pedidos_do_dia.get(m.pedido_bling or ""))] += 1
+        totais = _totais_do_dia(movs)
+        fechado = (
+            await session.execute(
+                select(ConciliacaoDia).where(
+                    ConciliacaoDia.integration_id == loja.integration_id, ConciliacaoDia.dia == dia
+                )
+            )
+        ).scalar_one_or_none()
+        ped = ConciliacaoPedido
+        base = [ped.integration_id == loja.integration_id]
+        por_etapa = dict(
+            (
+                await session.execute(
+                    select(ped.etapa, func.count()).where(*base).group_by(ped.etapa)
+                )
+            ).all()
+        )
+        por_situacao = dict(
+            (
+                await session.execute(
+                    select(ped.situacao, func.count()).where(*base).group_by(ped.situacao)
+                )
+            ).all()
+        )
+        mes = await _somas_pedidos(session, loja, mes_ini, dia + timedelta(days=1))
+        mes["ajustes_meses_anteriores"], mes["ajustes_qtd"] = await _ajustes_anteriores(
+            session, loja, mes_ini, dia + timedelta(days=1)
+        )
+        extrato_atrasado = dia >= loja.inicio and (
+            loja.ultimo_extrato_em is None or agora - loja.ultimo_extrato_em > _ATRASO_EXTRATO
+        )
+        saldo_bate = totais["diferenca"] is not None and abs(totais["diferenca"]) <= 0.05
+        sem_movimento = totais["linhas"] == 0
+        if fechado and fechado.fechado_em:
+            dia_status, dia_texto = "fechado", f"fechado por {fechado.fechado_por}"
+        elif sem_movimento and extrato_atrasado:
+            dia_status, dia_texto = "extrato_nao_lido", "extrato não lido"
+        elif sem_movimento:
+            dia_status, dia_texto = "sem_movimento", "sem movimento"
+        elif contagem["pendente"] == 0 and saldo_bate:
+            dia_status, dia_texto = "pronto", "100% casado, saldo bate — pode fechar"
+        else:
+            dia_status, dia_texto = "aberto", "não fechou"
+        reabertos = por_etapa.get("reaberto", 0)
+        pendencias = por_etapa.get("pendencia", 0)
+        vencidos = por_situacao.get("vencido", 0)
+        a_menos = por_situacao.get("recebido_a_menos", 0)
+        estornados = por_situacao.get("estornado_depois", 0)
+        problemas: list[str] = []
+        if contagem["pendente"]:
+            problemas.append(f"{contagem['pendente']} linha(s) sem dono")
+        if totais["diferenca"] is not None and not saldo_bate:
+            problemas.append(f"saldo não bate ({totais['diferenca']:+.2f})")
+        if extrato_atrasado:
+            problemas.append("extrato não lido")
+        if reabertos:
+            problemas.append(f"{reabertos} reaberto(s)")
+        if vencidos:
+            problemas.append(f"{vencidos} sem liberação vencido(s)")
+        if a_menos:
+            problemas.append(f"{a_menos} recebido(s) a menos")
+        if estornados:
+            problemas.append(f"{estornados} estornado(s) depois")
+        if loja.ultimo_erro:
+            problemas.append(f"erro: {loja.ultimo_erro[:80]}")
+        linha = {
+            "conta": loja.conta,
+            "platform": plataforma,
+            "inicio": loja.inicio.isoformat(),
+            "dia": {
+                "status": dia_status,
+                "texto": dia_texto,
+                "linhas": totais["linhas"],
+                "pendentes": contagem["pendente"],
+                "divergentes": contagem["divergente"],
+                "saldo_bate": saldo_bate if totais["linhas"] else None,
+                "diferenca": totais["diferenca"],
+                "fechado_em": fechado.fechado_em.isoformat()
+                if fechado and fechado.fechado_em
+                else None,
+                "fechado_por": fechado.fechado_por if fechado else None,
+            },
+            "pedidos": {
+                "pendencia": pendencias,
+                "reabertos": reabertos,
+                "aguardando": por_etapa.get("aguardando", 0),
+                "finalizados": por_etapa.get("finalizado", 0),
+                "conciliados": por_etapa.get("conciliado", 0),
+                "vencidos": vencidos,
+                "recebido_a_menos": a_menos,
+                "estornados": estornados,
+            },
+            "leituras": {
+                "extrato_em": loja.ultimo_extrato_em.isoformat()
+                if loja.ultimo_extrato_em
+                else None,
+                "fatura_em": loja.ultimo_fatura_em.isoformat() if loja.ultimo_fatura_em else None,
+                "recalculo_em": loja.ultimo_recalculo_em.isoformat()
+                if loja.ultimo_recalculo_em
+                else None,
+                "extrato_atrasado": extrato_atrasado,
+                "erro": loja.ultimo_erro,
+            },
+            "mes": mes,
+            "situacao": " · ".join(problemas)
+            if problemas
+            else ("dia fechado" if dia_status == "fechado" else "tudo certo"),
+            "gravidade": "bad"
+            if (contagem["pendente"] or extrato_atrasado or (totais["linhas"] and not saldo_bate))
+            else ("warn" if problemas else "ok"),
+        }
+        lojas_out.append(linha)
+        # Onde agir hoje
+        if contagem["pendente"] or (totais["linhas"] and not saldo_bate):
+            agir.append(
+                {
+                    "gravidade": "bad",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · {contagem['pendente']} linha(s) sem dono"
+                    + (
+                        ""
+                        if saldo_bate or totais["diferenca"] is None
+                        else f" · saldo não bate ({totais['diferenca']:+.2f})"
+                    ),
+                    "detalhe": (
+                        f"extrato de {dia:%d/%m}: {totais['linhas']} movimentos, "
+                        f"{contagem['pendente']} pendentes"
+                    ),
+                    "acao": "extrato",
+                    "dia": dia.isoformat(),
+                }
+            )
+        if extrato_atrasado:
+            agir.append(
+                {
+                    "gravidade": "bad",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · extrato não lido",
+                    "detalhe": (
+                        f"última leitura {loja.ultimo_extrato_em.astimezone(_BRT):%d/%m %H:%M}"
+                        if loja.ultimo_extrato_em
+                        else "nunca lido"
+                    )
+                    + (f" · {loja.ultimo_erro[:80]}" if loja.ultimo_erro else ""),
+                    "acao": "sincronizar",
+                    "dia": dia.isoformat(),
+                }
+            )
+        if reabertos:
+            agir.append(
+                {
+                    "gravidade": "warn",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · {reabertos} pedido(s) reaberto(s)",
+                    "detalhe": "chegou movimento novo depois de finalizado",
+                    "acao": "pedidos",
+                    "filtro": {"etapa": "reaberto"},
+                }
+            )
+        if vencidos:
+            agir.append(
+                {
+                    "gravidade": "warn",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · {vencidos} venda(s) sem liberação, prazo vencido",
+                    "detalhe": "abrir chamado de repasse",
+                    "acao": "pedidos",
+                    "filtro": {"situacao": "vencido"},
+                }
+            )
+        if a_menos:
+            agir.append(
+                {
+                    "gravidade": "warn",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · {a_menos} recebido(s) a menos",
+                    "detalhe": "conferir o motivo e finalizar com motivo, ou abrir chamado",
+                    "acao": "pedidos",
+                    "filtro": {"situacao": "recebido_a_menos"},
+                }
+            )
+        if estornados:
+            agir.append(
+                {
+                    "gravidade": "warn",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · {estornados} estornado(s) depois de liberar",
+                    "detalhe": "mediação, estorno ou chargeback depois do dinheiro entrar",
+                    "acao": "pedidos",
+                    "filtro": {"situacao": "estornado_depois"},
+                }
+            )
+        if dia_status == "pronto":
+            agir.append(
+                {
+                    "gravidade": "ok",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · dia {dia:%d/%m} pronto pra fechar",
+                    "detalhe": "100% das linhas com destino e saldo batendo",
+                    "acao": "extrato",
+                    "dia": dia.isoformat(),
+                }
+            )
+        plat = por_plataforma.setdefault(plataforma, {"lojas": 0})
+        plat["lojas"] += 1
+        _soma_dict(
+            plat, {k: v for k, v in mes.items() if k not in ("margem", "por_situacao", "por_etapa")}
+        )
+        empresa["lojas"] += 1
+        _soma_dict(
+            empresa,
+            {k: v for k, v in mes.items() if k not in ("margem", "por_situacao", "por_etapa")},
+        )
+    for bloco in (*por_plataforma.values(), empresa):
+        custo = bloco.get("custo") or 0
+        bloco["margem"] = round((bloco.get("sobrou") or 0) / custo, 4) if custo else None
+    ordem = {"bad": 0, "warn": 1, "ok": 2}
+    agir.sort(key=lambda x: (ordem.get(x["gravidade"], 9), x["loja"]))
+    return {
+        "dia": dia.isoformat(),
+        "mes": mes_ini.isoformat()[:7],
+        "lojas": lojas_out,
+        "agir": agir,
+        "por_plataforma": por_plataforma,
+        "empresa": empresa,
+        "cartoes": {
+            "lojas": len(lojas_out),
+            "dias_fechados": sum(1 for x in lojas_out if x["dia"]["status"] == "fechado"),
+            "dias_prontos": sum(1 for x in lojas_out if x["dia"]["status"] == "pronto"),
+            "pendentes": sum(x["dia"]["pendentes"] for x in lojas_out),
+            "reabertos": sum(x["pedidos"]["reabertos"] for x in lojas_out),
+            "vencidos": sum(x["pedidos"]["vencidos"] for x in lojas_out),
+            "extrato_atrasado": sum(1 for x in lojas_out if x["leituras"]["extrato_atrasado"]),
+            "saldo_bate": sum(1 for x in lojas_out if x["dia"]["saldo_bate"]),
+            "com_movimento": sum(1 for x in lojas_out if x["dia"]["linhas"]),
+        },
+    }
+
+
+_TIPOS_CAIXA = {
+    "venda_liberada": "liberado",
+    "mediacao": "mediacoes",
+    "mediacao_cancelada": "mediacoes_canceladas",
+    "estorno": "estornos",
+    "chargeback": "chargebacks",
+    "frete": "frete",
+    "frete_cancelado": "frete",
+    "frete_devolucao": "frete",
+    "saque": "saques",
+}
+
+
+@router.get("/fechamento")
+async def fechamento_do_mes(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+    loja: str | None = None,
+    mes: Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}$")] = None,
+) -> dict[str, Any]:
+    alvo = await _loja_ou_404(session, loja)
+    ini, fim = _mes_range(mes)
+    ini_dt = datetime.combine(ini, datetime.min.time(), tzinfo=_BRT)
+    fim_dt = datetime.combine(fim, datetime.min.time(), tzinfo=_BRT)
+
+    vendas = await _somas_pedidos(session, alvo, ini, fim)
+
+    # Caixa: pela data do movimento, reservas de fora, com "ajustes de meses anteriores".
+    mov = ConciliacaoMovimento
+    pedd = ConciliacaoPedido
+    rows = (
+        await session.execute(
+            select(
+                mov.tipo,
+                mov.classificacao,
+                pedd.data_pedido,
+                func.count(),
+                func.sum(mov.credito),
+                func.sum(mov.debito),
+            )
+            .select_from(mov)
+            .outerjoin(
+                pedd,
+                (pedd.integration_id == mov.integration_id)
+                & (pedd.pedido_bling == mov.pedido_bling),
+            )
+            .where(
+                mov.integration_id == alvo.integration_id,
+                mov.origem == ORIGEM_EXTRATO,
+                mov.data >= ini_dt,
+                mov.data < fim_dt,
+            )
+            .group_by(mov.tipo, mov.classificacao, pedd.data_pedido)
+        )
+    ).all()
+    caixa: dict[str, Any] = {
+        "liberado": 0.0,
+        "mediacoes": 0.0,
+        "mediacoes_canceladas": 0.0,
+        "estornos": 0.0,
+        "chargebacks": 0.0,
+        "frete": 0.0,
+        "saques": 0.0,
+        "outros": 0.0,
+        "reservas_liquido": 0.0,
+        "ajustes_meses_anteriores": 0.0,
+        "ajustes_qtd": 0,
+        "linhas": 0,
+    }
+    for tipo, classificacao, data_pedido, n, c, d in rows:
+        c = float(c or 0)
+        d = float(d or 0)
+        caixa["linhas"] += n
+        if tipo in TIPOS_RESERVA_SET:
+            caixa["reservas_liquido"] += c - d
+            continue
+        anterior = classificacao == "anterior_ao_inicio" or (
+            data_pedido is not None and data_pedido < ini_dt
+        )
+        if anterior and tipo != "saque":
+            caixa["ajustes_meses_anteriores"] += c - d
+            caixa["ajustes_qtd"] += n
+            continue
+        chave = _TIPOS_CAIXA.get(tipo, "outros")
+        caixa[chave] += c - d
+    caixa = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in caixa.items()}
+    # O que entrou de verdade no mês (antes de tirar): vendas liberadas, menos o que
+    # saiu por mediação/estorno/chargeback/frete, mais ajustes de meses anteriores.
+    caixa["resultado_caixa"] = round(
+        caixa["liberado"]
+        + caixa["mediacoes"]
+        + caixa["mediacoes_canceladas"]
+        + caixa["estornos"]
+        + caixa["chargebacks"]
+        + caixa["frete"]
+        + caixa["outros"]
+        + caixa["ajustes_meses_anteriores"],
+        2,
+    )
+    # Tudo somado (com reservas e saques) tem que ser saldo final − saldo inicial.
+    caixa["movimento_liquido"] = round(
+        caixa["resultado_caixa"] + caixa["reservas_liquido"] + caixa["saques"], 2
+    )
+
+    # Dias do mês: linhas, pendentes, fechado — e o saldo do primeiro e do último dia.
+    dias_resp = await listar_dias(
+        session, _user, loja=alvo.conta, de=ini, ate=min(fim - timedelta(days=1), _ontem())
+    )
+    dias = dias_resp["dias"]
+    saldo_inicial = saldo_final = None
+    if dias:
+        primeiro = await _movimentos_do_dia(session, alvo, date.fromisoformat(dias[0]["dia"]))
+        ultimo = await _movimentos_do_dia(session, alvo, date.fromisoformat(dias[-1]["dia"]))
+        saldo_inicial = _totais_do_dia(primeiro)["saldo_inicial"]
+        saldo_final = _totais_do_dia(ultimo)["saldo_informado"]
+
+    # Fatura do ML: resumo do período (chave AAAA-MM-01) × soma dos detalhes lidos.
+    chave = ini.strftime("%Y-%m-01")
+    sync = (
+        await session.execute(
+            select(ConciliacaoSync).where(
+                ConciliacaoSync.integration_id == alvo.integration_id,
+                ConciliacaoSync.origem == "ml_fatura",
+                ConciliacaoSync.chave == f"{chave}|resumo",
+            )
+        )
+    ).scalar_one_or_none()
+    resumo_ml = ((sync.detalhe or {}).get("resumo") if sync else None) or {}
+    periodo = resumo_ml.get("period") or {}
+    bill = resumo_ml.get("bill_includes") or {}
+    fatura: dict[str, Any] = {
+        "periodo": {
+            "chave": chave,
+            "de": periodo.get("date_from"),
+            "ate": periodo.get("date_to"),
+            "expira": periodo.get("expiration_date"),
+        },
+        "resumo_cobrancas": [
+            {"tipo": c.get("type"), "label": c.get("label"), "valor": _num(c.get("amount"))}
+            for c in (bill.get("charges") or [])
+            if isinstance(c, dict)
+        ],
+        "resumo_bonificacoes": [
+            {"tipo": c.get("type"), "label": c.get("label"), "valor": _num(c.get("amount"))}
+            for c in (bill.get("bonuses") or [])
+            if isinstance(c, dict)
+        ],
+        "resumo_total": _num(bill.get("total_amount")),
+        "pago": resumo_ml.get("payment_collected") or {},
+        "detalhes_por_sub_tipo": [],
+        "detalhes_cobrancas": 0.0,
+        "detalhes_bonificacoes": 0.0,
+        "lido_em": sync.lido_em.isoformat() if sync and sync.lido_em else None,
+    }
+    if periodo.get("date_from") and periodo.get("date_to"):
+        p_ini = datetime.combine(
+            date.fromisoformat(periodo["date_from"]), datetime.min.time(), tzinfo=_BRT
+        )
+        p_fim = datetime.combine(
+            date.fromisoformat(periodo["date_to"]), datetime.min.time(), tzinfo=_BRT
+        ) + timedelta(days=1)
+        det = (
+            await session.execute(
+                select(
+                    mov.sub_tipo,
+                    mov.tipo,
+                    func.count(),
+                    func.sum(mov.debito),
+                    func.sum(mov.credito),
+                )
+                .where(
+                    mov.integration_id == alvo.integration_id,
+                    mov.origem == "ml_fatura",
+                    mov.data >= p_ini,
+                    mov.data < p_fim,
+                )
+                .group_by(mov.sub_tipo, mov.tipo)
+                .order_by(func.sum(mov.debito).desc())
+            )
+        ).all()
+        fatura["detalhes_por_sub_tipo"] = [
+            {
+                "sub_tipo": st,
+                "tipo": t,
+                "linhas": n,
+                "cobrado": _num(d or 0),
+                "bonificado": _num(c or 0),
+            }
+            for st, t, n, d, c in det
+        ]
+        fatura["detalhes_cobrancas"] = round(sum(float(d or 0) for _, _, _, d, _ in det), 2)
+        fatura["detalhes_bonificacoes"] = round(sum(float(c or 0) for _, _, _, _, c in det), 2)
+    soma_resumo = round(sum(x["valor"] or 0 for x in fatura["resumo_cobrancas"]), 2)
+    fatura["bate"] = (
+        (abs(soma_resumo - fatura["detalhes_cobrancas"]) <= 1.0)
+        if fatura["resumo_cobrancas"]
+        else None
+    )
+
+    bate = (
+        abs(saldo_inicial + caixa["movimento_liquido"] - saldo_final) <= 0.05
+        if (saldo_inicial is not None and saldo_final is not None)
+        else None
+    )
+    return {
+        "loja": alvo.conta,
+        "mes": ini.isoformat()[:7],
+        "de": ini.isoformat(),
+        "ate": (fim - timedelta(days=1)).isoformat(),
+        "vendas": vendas,
+        "caixa": {
+            **caixa,
+            "saldo_inicial": saldo_inicial,
+            "saldo_final": saldo_final,
+            "bate": bate,
+        },
+        "dias": dias,
+        "dias_fechados": sum(1 for d in dias if d["fechado_em"]),
+        "fatura": fatura,
+    }

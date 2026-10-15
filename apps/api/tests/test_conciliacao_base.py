@@ -1157,3 +1157,192 @@ async def test_extrato_vincular_classificar_e_fechar_o_dia(db, make_user, auth_a
         f"/api/conciliacao/movimentos/{pend.id}", json={"classificacao": "ajuste"}
     )
     assert r.status_code == 403
+
+
+# --- resumo (tela de entrada) e fechamento do mês (passo 2d) -----------------
+
+
+async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(db, make_user, auth_as, client):
+    loja, _integ = await _loja(db, make_user)
+    await _dia_de_exemplo(db, loja)
+    loja.ultimo_extrato_em = datetime.now(UTC)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["dia"] == "2026-10-13" and corpo["mes"] == "2026-10"
+    (linha,) = corpo["lojas"]
+    assert linha["conta"] == "jlas2" and linha["platform"] == "ml"
+    # o dia: 5 linhas, 1 sem dono, saldo bate — mas não fechou
+    assert linha["dia"]["status"] == "aberto"
+    assert linha["dia"]["linhas"] == 5 and linha["dia"]["pendentes"] == 1
+    assert linha["dia"]["saldo_bate"] is True and linha["dia"]["diferenca"] == 0.0
+    # os pedidos: um conciliado, um com pendência (estornado depois)
+    assert linha["pedidos"]["pendencia"] == 1 and linha["pedidos"]["conciliados"] == 1
+    assert linha["pedidos"]["estornados"] == 1 and linha["pedidos"]["reabertos"] == 0
+    assert linha["leituras"]["extrato_atrasado"] is False
+    assert linha["gravidade"] == "bad"
+    assert "1 linha(s) sem dono" in linha["situacao"] and "estornado" in linha["situacao"]
+    # o mês até ontem (os dois pedidos são de 01/10)
+    assert linha["mes"]["pedidos"] == 2 and linha["mes"]["vendido"] == 1761.96
+    assert linha["mes"]["por_etapa"] == {"conciliado": 1, "pendencia": 1}
+    assert linha["mes"]["ajustes_meses_anteriores"] == 0.0 and linha["mes"]["ajustes_qtd"] == 0
+    # onde agir: a linha sem dono (bad) vem antes do estornado (warn)
+    assert [a["acao"] for a in corpo["agir"]] == ["extrato", "pedidos"]
+    assert corpo["agir"][0]["gravidade"] == "bad" and corpo["agir"][0]["dia"] == "2026-10-13"
+    assert corpo["agir"][1]["filtro"] == {"situacao": "estornado_depois"}
+    assert corpo["cartoes"]["pendentes"] == 1 and corpo["cartoes"]["dias_fechados"] == 0
+    assert corpo["cartoes"]["saldo_bate"] == 1 and corpo["cartoes"]["extrato_atrasado"] == 0
+    assert corpo["por_plataforma"]["ml"]["pedidos"] == 2 and corpo["empresa"]["lojas"] == 1
+
+    # extrato parado há mais de 36 h: vira "extrato não lido" e pede pra sincronizar
+    loja.ultimo_extrato_em = datetime.now(UTC) - timedelta(days=3)
+    await db.commit()
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
+    linha = r.json()["lojas"][0]
+    assert linha["leituras"]["extrato_atrasado"] is True
+    assert "extrato não lido" in linha["situacao"]
+    assert [a["acao"] for a in r.json()["agir"]] == ["extrato", "sincronizar", "pedidos"]
+
+    # um dia sem movimento e sem leitura: "extrato não lido"; com leitura: "sem movimento"
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-12"})
+    assert r.json()["lojas"][0]["dia"]["status"] == "extrato_nao_lido"
+    loja.ultimo_extrato_em = datetime.now(UTC)
+    await db.commit()
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-12"})
+    assert r.json()["lojas"][0]["dia"]["status"] == "sem_movimento"
+    assert r.json()["lojas"][0]["dia"]["saldo_bate"] is None
+
+
+async def test_resumo_dia_pronto_e_dia_fechado(db, make_user, auth_as, client):
+    loja, _integ = await _loja(db, make_user)
+    movs = await _dia_de_exemplo(db, loja)
+    movs["pendente"].classificacao = "ajuste"
+    loja.ultimo_extrato_em = datetime.now(UTC)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
+    linha = r.json()["lojas"][0]
+    assert linha["dia"]["status"] == "pronto" and linha["dia"]["pendentes"] == 0
+    assert [a["acao"] for a in r.json()["agir"]] == ["pedidos", "extrato"]
+    assert r.json()["agir"][-1]["gravidade"] == "ok"
+    assert r.json()["cartoes"]["dias_prontos"] == 1
+    r = await client.post("/api/conciliacao/dias/2026-10-13/fechar", params={"loja": "jlas2"})
+    assert r.status_code == 200, r.text
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
+    linha = r.json()["lojas"][0]
+    assert linha["dia"]["status"] == "fechado" and linha["dia"]["fechado_por"]
+    assert linha["gravidade"] == "warn"  # ainda tem o estornado depois
+    assert r.json()["cartoes"]["dias_fechados"] == 1
+
+
+async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_as, client):
+    loja, _integ = await _loja(db, make_user)
+    await _dia_de_exemplo(db, loja)
+    # uma mediação de setembro caindo em outubro: "ajuste de mês anterior"
+    db.add(
+        await _pedido_conciliado(
+            loja,
+            pedido_bling="298000",
+            numeroloja="2000018000000001",
+            data_pedido=datetime(2026, 9, 20, 12, tzinfo=UTC),
+            situacao="estornado_depois",
+            etapa="pendencia",
+        )
+    )
+    antiga = _mov(
+        loja,
+        "mediacao",
+        _d13(15, 0),
+        debito="100.00",
+        pedido_mkt="2000018000000001",
+        pedido_bling="298000",
+    )
+    antiga.saldo_apos = Decimal("100.46")
+    db.add(antiga)
+    # a fatura do ML: resumo do período + dois detalhes lidos (CV 92,36 e CXD 62,33)
+    db.add(
+        ConciliacaoSync(
+            integration_id=loja.integration_id,
+            origem="ml_fatura",
+            chave="2026-10-01|resumo",
+            status="lido",
+            lido_em=datetime(2026, 10, 14, 9, tzinfo=UTC),
+            detalhe={
+                "resumo": {
+                    "period": {
+                        "key": "2026-10-01",
+                        "date_from": "2026-09-23",
+                        "date_to": "2026-10-22",
+                        "expiration_date": "2026-10-28",
+                    },
+                    "bill_includes": {
+                        "total_amount": 154.69,
+                        "charges": [
+                            {"type": "CV", "label": "Cargo por venda", "amount": 92.36},
+                            {"type": "CXD", "label": "Cargo por Mercado Envios", "amount": 62.33},
+                        ],
+                        "bonuses": [],
+                    },
+                    "payment_collected": {"total_collected": 154.69, "total_debt": 0.0},
+                }
+            },
+        )
+    )
+    for sub, tipo, valor in (("CVVML", "fatura_tarifa", "92.36"), ("CXD", "fatura_frete", "62.33")):
+        db.add(
+            _mov(
+                loja,
+                tipo,
+                _d13(10, 0),
+                debito=valor,
+                pedido_bling="301102",
+                origem="ml_fatura",
+                sub=sub,
+            )
+        )
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-10"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert (
+        corpo["mes"] == "2026-10" and corpo["de"] == "2026-10-01" and corpo["ate"] == "2026-10-31"
+    )
+    # vendas pela data do pedido: só os dois de outubro
+    assert corpo["vendas"]["pedidos"] == 2 and corpo["vendas"]["vendido"] == 1761.96
+    assert corpo["vendas"]["tarifa"] == 184.72 and corpo["vendas"]["liberados"] == 2
+    # caixa pela data do movimento
+    caixa = corpo["caixa"]
+    assert caixa["linhas"] == 6
+    assert caixa["liberado"] == 610.65 and caixa["mediacoes"] == -459.0
+    assert caixa["outros"] == 48.0 and caixa["saques"] == -9147.0
+    assert caixa["reservas_liquido"] == 9147.0
+    assert caixa["ajustes_meses_anteriores"] == -100.0 and caixa["ajustes_qtd"] == 1
+    assert caixa["resultado_caixa"] == 99.65
+    assert caixa["movimento_liquido"] == 99.65
+    assert caixa["saldo_inicial"] == 0.81 and caixa["saldo_final"] == 100.46
+    assert caixa["bate"] is True
+    # dias: um dia com movimento, não fechado
+    assert len(corpo["dias"]) == 1 and corpo["dias_fechados"] == 0
+    # fatura do ML: resumo × detalhes
+    fat = corpo["fatura"]
+    assert fat["periodo"] == {
+        "chave": "2026-10-01",
+        "de": "2026-09-23",
+        "ate": "2026-10-22",
+        "expira": "2026-10-28",
+    }
+    assert [c["tipo"] for c in fat["resumo_cobrancas"]] == ["CV", "CXD"]
+    assert fat["resumo_total"] == 154.69
+    assert fat["detalhes_cobrancas"] == 154.69 and fat["detalhes_bonificacoes"] == 0.0
+    assert {d["sub_tipo"] for d in fat["detalhes_por_sub_tipo"]} == {"CVVML", "CXD"}
+    assert fat["bate"] is True and fat["pago"]["total_collected"] == 154.69
+    # mês sem nada: tudo zerado, fatura sem resumo
+    r = await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-08"})
+    assert r.status_code == 200
+    assert r.json()["vendas"]["pedidos"] == 0 and r.json()["caixa"]["linhas"] == 0
+    assert r.json()["caixa"]["bate"] is None and r.json()["fatura"]["bate"] is None
+    r = await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-13"})
+    assert r.status_code == 422
