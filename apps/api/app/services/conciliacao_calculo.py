@@ -21,12 +21,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -100,6 +100,160 @@ def _venda_cancelada(fin: MarketplaceOrderFinancial | None) -> bool:
     raw = fin.raw if isinstance(fin.raw, dict) else {}
     order = raw.get("order") if isinstance(raw.get("order"), dict) else {}
     return str(order.get("status") or "").lower() == "cancelled"
+
+
+def _escrow_income(venda: MarketplaceOrderFinancial | None) -> dict[str, Any] | None:
+    raw = venda.raw if (venda is not None and isinstance(venda.raw, dict)) else None
+    escrow = raw.get("escrow") if raw else None
+    income = escrow.get("order_income") if isinstance(escrow, dict) else None
+    return income if isinstance(income, dict) and income.get("escrow_amount") is not None else None
+
+
+def conta_shopee(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] | None:
+    """A conta da venda do jeito que a tela da Shopee mostra em "Detalhes de Renda"
+    (15/10, pedido 301438): preço de venda − subsídio da Shopee no produto = subtotal
+    dos produtos; ± frete da loja; − cupons da loja; − taxas e encargos (líquidas do
+    subsídio) = renda do pedido. A Margem guarda as taxas BRUTAS (722,36) e o desconto
+    de tabela (5.078); aqui é o líquido (354,85) e só o que sai do bolso da loja."""
+    inc = _escrow_income(venda)
+    if inc is None:
+        return None
+
+    def d(k: str) -> Decimal:
+        v = inc.get(k)
+        try:
+            return Decimal(str(v)) if v not in (None, "") else ZERO
+        except Exception:  # noqa: BLE001
+            return ZERO
+
+    rebate = inc.get("seller_product_rebate")
+    subsidio = Decimal(str(rebate.get("amount") or 0)) if isinstance(rebate, dict) else ZERO
+    preco = d("order_selling_price") or d("cost_of_goods_sold")
+    taxas = (
+        d("net_commission_fee")
+        + d("net_service_fee")
+        + d("order_ams_commission_fee")
+        + d("shipping_seller_protection_fee_amount")
+        + d("seller_transaction_fee")
+        + d("campaign_fee")
+    )
+    frete_loja = (
+        d("actual_shipping_fee") - d("buyer_paid_shipping_fee") - d("shopee_shipping_rebate")
+    )
+    cupons = d("voucher_from_seller") + d("seller_coin_cash_back")
+    return {
+        "preco": preco,
+        "subsidio": subsidio,
+        "subtotal_produtos": preco - subsidio,
+        "frete_loja": frete_loja,
+        "cupons": cupons,
+        "taxas": taxas,
+        "renda": d("escrow_amount"),
+    }
+
+
+_TAXAS_TIKTOK_CONHECIDAS = (
+    "platform_commission_amount",
+    "transaction_fee_amount",
+    "referral_fee_amount",
+    "affiliate_commission_amount",
+    "affiliate_ads_commission_amount",
+    "affiliate_partner_commission_amount",
+)
+
+
+def conta_tiktok_de_transacoes(txs: list[Any]) -> dict[str, Decimal] | None:
+    """A conta de um pedido como a TikTok fecha no extrato diário (15/10, Mini):
+    soma as transações do pedido (estorno liquidado depois vem como outra transação).
+    Os campos vêm COM sinal (taxa, frete e reembolso negativos; receita positiva), e
+    a identidade que a Margem conferiu em pedidos reais é
+    liquidação = receita + taxas + frete (+ ajustes). O que sobrar vai pra "outros",
+    pra tabela sempre fechar."""
+    txs = [t for t in txs if isinstance(t, dict)]
+    if not txs:
+        return None
+
+    def soma(*chaves: str) -> Decimal:
+        total = ZERO
+        for t in txs:
+            for k in chaves:
+                v = t.get(k)
+                if v in (None, ""):
+                    continue
+                try:
+                    total += Decimal(str(v))
+                except (InvalidOperation, ValueError):
+                    continue
+        return total.quantize(Decimal("0.01"))
+
+    apos = soma("after_seller_discounts_subtotal_amount")
+    receita = soma("revenue_amount")
+    comissao = soma("platform_commission_amount")
+    taxa_transacao = soma("transaction_fee_amount", "referral_fee_amount")
+    afiliados = soma(
+        "affiliate_commission_amount",
+        "affiliate_ads_commission_amount",
+        "affiliate_partner_commission_amount",
+    )
+    taxas = soma("fee_amount")
+    frete = soma("shipping_cost_amount")
+    ajustes = soma("adjustment_amount")
+    liquido = soma("settlement_amount")
+    return {
+        "vendas_brutas": soma("gross_sales_amount"),
+        "desconto_loja": soma("seller_discount_amount"),  # negativo
+        "apos_desconto": apos,
+        # subsídio da TikTok no produto, reembolsos ao cliente e o mais que entra na receita
+        "outros_receita": receita - apos,
+        "receita": receita,
+        "comissao": comissao,
+        "taxa_transacao": taxa_transacao,
+        "afiliados": afiliados,
+        "outras_taxas": taxas - (comissao + taxa_transacao + afiliados),
+        "taxas": taxas,  # negativo
+        "frete": frete,  # negativo = a loja pagou; positivo = sobrou do que o cliente pagou
+        "frete_real": soma("actual_shipping_fee_amount"),
+        "frete_cliente": soma("customer_paid_shipping_fee_amount"),
+        "ajustes": ajustes,
+        "outros": liquido - (receita + taxas + frete + ajustes),
+        "liquido": liquido,
+    }
+
+
+def conta_tiktok(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] | None:
+    """A conta do pedido a partir do que a Margem guardou (`raw.settlements` = a
+    resposta de `orders/{id}/statement_transactions`). Pedido só estimado (unsettled)
+    não tem transação ainda → None."""
+    raw = venda.raw if (venda is not None and isinstance(venda.raw, dict)) else None
+    body = raw.get("settlements") if raw else None
+    data = body.get("data") if isinstance(body, dict) else None
+    txs = data.get("statement_transactions") if isinstance(data, dict) else None
+    return conta_tiktok_de_transacoes(txs if isinstance(txs, list) else [])
+
+
+def _previsao_do_unsettled(raw: Any) -> datetime | None:
+    """TikTok: a varredura do unsettled da Margem guarda `raw.unsettled_estimate`
+    (est_settlement_amount + estimated_settlement). Quando vier uma data/epoch,
+    vira a previsão de liquidação; forma desconhecida → sem previsão."""
+    est = raw.get("unsettled_estimate") if isinstance(raw, dict) else None
+    if not isinstance(est, dict):
+        return None
+    v: Any = est.get("estimated_settlement") or est.get("estimated_settlement_time")
+    if isinstance(v, dict):
+        v = next((x for k, x in v.items() if "time" in str(k).lower()), None)
+    if v in (None, ""):
+        return None
+    try:
+        n = int(str(v))
+    except (TypeError, ValueError):
+        try:
+            d = datetime.fromisoformat(str(v))
+        except ValueError:
+            return None
+        return d if d.tzinfo else d.replace(tzinfo=BRT)
+    if n > 10**12:
+        n //= 1000
+    return datetime.fromtimestamp(n, tz=UTC) if n > 10**9 else None
 
 
 def situacao_do_pedido(
@@ -337,6 +491,7 @@ async def recalcular_loja(
     integration = await session.get(Integration, loja.integration_id)
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
     inicio_dt = datetime.combine(loja.inicio, datetime.min.time(), tzinfo=BRT)
+    plataforma_loja = getattr(loja.platform, "value", str(loja.platform))
     if not lojas_bling:
         return {"loja": loja.conta, "erro": "sem loja do Bling ligada a esta conta", "pedidos": 0}
 
@@ -470,7 +625,11 @@ async def recalcular_loja(
         custo = _soma(
             [(_d(i.preco_custo) or ZERO) * Decimal(int(i.item_quantidade or 1)) for i in itens]
         )
-        previsao = _previsao_do_billing(venda.raw) if venda else None
+        previsao = (
+            (_previsao_do_billing(venda.raw) or _previsao_do_unsettled(venda.raw))
+            if venda
+            else None
+        )
         nome_bling = str(nomes_situacao.get(str(cab.situacao or ""), cab.situacao) or "")
         calc = situacao_do_pedido(
             agora=agora,
@@ -492,6 +651,21 @@ async def recalcular_loja(
         reembolso = reembolso_por_numero.get(numero, ZERO)
         # Venda sem valor ainda (Shopee antes de calcular o escrow): não grava tarifa/líquido 0,00
         venda_ok = venda if calc["situacao"] != "sem_venda" else None
+        # Shopee: a conta como a tela deles (preço de venda, subsídio, taxas líquidas)
+        shopee = conta_shopee(venda_ok) if plataforma_loja == "shopee" else None
+        # TikTok: a conta do extrato por pedido (valor = após desconto da loja,
+        # tarifa = todas as taxas, frete = parte da loja)
+        tiktok = conta_tiktok(venda_ok) if plataforma_loja == "tiktok" else None
+        if tiktok is not None:
+            # valor = produtos após o desconto da loja; tarifa = todas as taxas; frete =
+            # parte da loja; extras = o que a TikTok acrescentou (subsídio) entra negativo
+            shopee = {
+                "preco": tiktok["apos_desconto"] or tiktok["vendas_brutas"],
+                "taxas": -tiktok["taxas"],
+                "frete_loja": -tiktok["frete"],
+                "subsidio": ZERO,
+                "cupons": -tiktok["outros_receita"],
+            }
         # Resultado de VERDADE: só com o dinheiro que entrou. Enquanto não libera, sobrou
         # e margem ficam vazios (15/10, Vinicius: "não precisa aparecer previsto nem margem").
         base_resultado = calc["recebido"]
@@ -520,10 +694,21 @@ async def recalcular_loja(
             "bling_valorbase": _d(cab.valorbase),
             "bling_custofrete": _d(cab.custofrete),
             "bling_taxacomissao": _d(cab.taxacomissao),
-            "venda_valor": _d(venda.gross_amount) if venda else None,
-            "venda_tarifa": _d(venda.fee_amount) if venda_ok else None,
-            "venda_frete": _d(venda.freight_amount) if venda_ok else None,
-            "venda_cupom": _d(venda.discount_amount) if venda_ok else None,
+            "venda_valor": (
+                shopee["preco"] if shopee else (_d(venda.gross_amount) if venda else None)
+            ),
+            "venda_tarifa": (
+                shopee["taxas"] if shopee else (_d(venda.fee_amount) if venda_ok else None)
+            ),
+            "venda_frete": (
+                shopee["frete_loja"] if shopee else (_d(venda.freight_amount) if venda_ok else None)
+            ),
+            # Shopee: "extras" = subsídio no produto + cupons da loja (a tela deles)
+            "venda_cupom": (
+                shopee["subsidio"] + shopee["cupons"]
+                if shopee
+                else (_d(venda.discount_amount) if venda_ok else None)
+            ),
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
             "venda_liquido": _d(venda.net_amount) if venda_ok else None,
             "venda_status": venda.status if venda_ok else None,
@@ -559,6 +744,19 @@ async def recalcular_loja(
                 setattr(atual, k, v)
         contagem[calc["situacao"]] += 1
         contagem[f"etapa:{atual.etapa}"] += 1
+
+    # 3b. Pedido que saiu do escopo da loja (loja do Bling desligada desta conta,
+    # pedido apagado no Bling) some do painel — 15/10: os pedidos da Shopee "Mini"
+    # que tinham entrado na TikTok Mini pelo nome igual.
+    fora = [n for n in existentes if n not in por_numero]
+    if por_numero and fora:
+        await session.execute(
+            delete(ConciliacaoPedido).where(
+                ConciliacaoPedido.integration_id == loja.integration_id,
+                ConciliacaoPedido.pedido_bling.in_(fora),
+            )
+        )
+        contagem["removidos"] = len(fora)
 
     # 4. Movimento de pedido anterior ao início: classifica, não cobra.
     antigos = (

@@ -1102,13 +1102,78 @@ async def raio_x(
     return {
         "pedido": _pedido_out(p),
         "versoes": versoes,
-        "comparativo": _comparativo(p, versoes, movs),
+        "comparativo": _comparativo(
+            p,
+            versoes,
+            movs,
+            shopee=await _conta_shopee_do_pedido(session, p),
+            tiktok=await _conta_tiktok_do_pedido(session, p, movs),
+        ),
         "movimentos": [_movimento_out(m) for m in movs],
     }
 
 
+async def _conta_shopee_do_pedido(
+    session: AsyncSession, p: ConciliacaoPedido
+) -> dict[str, Decimal] | None:
+    """A conta da Shopee (como a tela deles) a partir do escrow guardado pela Margem."""
+    from app.models import MarketplaceOrderFinancial
+    from app.services.conciliacao_calculo import conta_shopee
+
+    if getattr(p.platform, "value", str(p.platform)) != "shopee" or not p.numeroloja:
+        return None
+    fin = (
+        await session.execute(
+            select(MarketplaceOrderFinancial).where(
+                MarketplaceOrderFinancial.integration_id == p.integration_id,
+                MarketplaceOrderFinancial.external_order_id == p.numeroloja,
+            )
+        )
+    ).scalar_one_or_none()
+    return conta_shopee(fin)
+
+
+async def _conta_tiktok_do_pedido(
+    session: AsyncSession, p: ConciliacaoPedido, movs: list[ConciliacaoMovimento]
+) -> dict[str, Any] | None:
+    """TikTok: previsto = as transações do pedido que a Margem guardou; real = as
+    linhas do extrato diário que o painel leu (a mesma API, lida em horas diferentes)."""
+    from app.models import MarketplaceOrderFinancial
+    from app.models.conciliacao import ORIGEM_TIKTOK
+    from app.services.conciliacao_calculo import conta_tiktok, conta_tiktok_de_transacoes
+
+    if getattr(p.platform, "value", str(p.platform)) != "tiktok":
+        return None
+    fin = None
+    if p.numeroloja:
+        fin = (
+            await session.execute(
+                select(MarketplaceOrderFinancial).where(
+                    MarketplaceOrderFinancial.integration_id == p.integration_id,
+                    MarketplaceOrderFinancial.external_order_id == p.numeroloja,
+                )
+            )
+        ).scalar_one_or_none()
+    previsto = conta_tiktok(fin)
+    real = conta_tiktok_de_transacoes(
+        [
+            m.raw
+            for m in movs
+            if m.origem == ORIGEM_TIKTOK and m.tipo == "venda_liberada" and isinstance(m.raw, dict)
+        ]
+    )
+    if previsto is None and real is None:
+        return None
+    return {"previsto": previsto, "real": real}
+
+
 def _comparativo(
-    p: ConciliacaoPedido, versoes: dict[str, Any], movs: list[ConciliacaoMovimento]
+    p: ConciliacaoPedido,
+    versoes: dict[str, Any],
+    movs: list[ConciliacaoMovimento],
+    *,
+    shopee: dict[str, Decimal] | None = None,
+    tiktok: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Previsto (venda) × Real (extrato + fatura à parte) × Diferença — a leitura de
     conciliação que o Vinicius aprovou em 15/10 no lugar das três colunas."""
@@ -1156,6 +1221,108 @@ def _comparativo(
         }
 
     plataforma = getattr(p.platform, "value", str(p.platform))
+    if plataforma == "tiktok":
+        # A TikTok fecha a conta do pedido no extrato diário em que liquida, campo a
+        # campo (15/10, Mini). Previsto = as transações que a Margem guardou; real = as
+        # linhas do extrato que o painel leu. Até liquidar, só a estimativa da Central.
+        liberou_tt = recebido is not None
+        prev = (tiktok or {}).get("previsto")
+        real_tt = (tiktok or {}).get("real") if liberou_tt else None
+
+        def par(
+            chave: str,
+            rotulo: str,
+            campo: str,
+            *,
+            sinal: int = 1,
+            estilo: str = "",
+            so_se_tem: bool = False,
+        ) -> dict[str, Any] | None:
+            pv = round(float(prev[campo]) * sinal, 2) if prev is not None else None
+            rl = round(float(real_tt[campo]) * sinal, 2) if real_tt is not None else None
+            if so_se_tem and not pv and not rl:
+                return None
+            return linha(chave, rotulo, pv, rl, estilo=estilo)
+
+        if prev is not None or real_tt is not None:
+            candidatas = [
+                par("vendas", "Vendas brutas (preço de tabela)", "vendas_brutas", estilo="muted"),
+                par("desconto", "− Desconto da loja", "desconto_loja", sinal=-1, estilo="muted"),
+                par("produtos", "= Produtos após desconto da loja", "apos_desconto", estilo="bold"),
+                par(
+                    "subsidio",
+                    "± Subsídio da TikTok e outros na receita",
+                    "outros_receita",
+                    estilo="muted",
+                ),
+                par("receita", "= Receita", "receita", estilo="bold"),
+                par("comissao", "− Comissão da TikTok", "comissao", sinal=-1),
+                par("taxa", "− Taxa de transação", "taxa_transacao", sinal=-1),
+                par("afiliados", "− Afiliados", "afiliados", sinal=-1),
+                par("outras_taxas", "− Outras taxas", "outras_taxas", sinal=-1, so_se_tem=True),
+                par("frete", "± Frete (parte da loja)", "frete", sinal=-1),
+                par("ajustes", "± Ajustes da TikTok", "ajustes", so_se_tem=True),
+                par("outros", "± Outros", "outros", so_se_tem=True),
+                linha(
+                    "depois",
+                    "± Depois da liquidação (estornos, ajustes)",
+                    0.0 if tem_extrato else None,
+                    depois,
+                    compara=False,
+                    estilo="muted",
+                ),
+                linha(
+                    "liquido",
+                    "= Liquidação do pedido",
+                    round(float(prev["liquido"]), 2) if prev is not None else n(v.get("liquido")),
+                    real_liquido,
+                    estilo="bold",
+                ),
+            ]
+            linhas = [x for x in candidatas if x is not None]
+        else:
+            linhas = [
+                linha("produtos", "Produtos (após desconto da loja)", n(v.get("valor")), None),
+                linha("tarifa", "− Taxas da TikTok", n(v.get("tarifa")), None),
+                linha("frete", "± Frete (parte da loja)", n(v.get("frete")), None),
+                linha(
+                    "depois",
+                    "± Depois da liquidação (estornos, ajustes)",
+                    0.0 if tem_extrato else None,
+                    depois,
+                    compara=False,
+                    estilo="muted",
+                ),
+                linha(
+                    "liquido",
+                    "= Liquidação do pedido",
+                    n(v.get("liquido")),
+                    real_liquido,
+                    estilo="bold",
+                ),
+            ]
+        return {
+            "linhas": linhas,
+            "real_rotulo": "extrato diário da TikTok",
+            "comparar": p.situacao != "cancelado",
+            "nota": (
+                "venda desfeita: as colunas mostram o que entrou e o que saiu"
+                if p.situacao == "cancelado"
+                else (
+                    None
+                    if liberou_tt
+                    else (
+                        "a TikTok fecha a conta do pedido no extrato do dia em que liquida; "
+                        "até lá só a estimativa da Central do Vendedor"
+                    )
+                )
+            ),
+            "rodape": (
+                "as linhas do extrato da TikTok por pedido (Finanças › Extratos) · "
+                '"Liquidação" real é o que entrou no extrato diário e foi repassado pro banco'
+            ),
+            "frete_liquido_loja": None,
+        }
     if plataforma == "shopee":
         # A carteira só traz o líquido. A abertura REAL (tarifa, frete, cupom) é o
         # escrow que a Shopee fecha na liberação — o robô relê na hora de liberar, e
@@ -1165,6 +1332,72 @@ def _comparativo(
         def real(x: Any) -> float | None:
             return n(x) if liberou else None
 
+        if shopee is not None:
+            # As mesmas linhas de "Informações de Pagamento › Exibir Detalhes de Renda"
+            # da Shopee, pra comparar linha a linha (15/10, pedido 301438).
+            sh = {k: float(x) for k, x in shopee.items()}
+            linhas = [
+                linha("preco", "Preço de venda", sh["preco"], real(sh["preco"])),
+                linha(
+                    "subsidio",
+                    "− Subsídio da Shopee no produto",
+                    sh["subsidio"],
+                    real(sh["subsidio"]),
+                    estilo="muted",
+                ),
+                linha(
+                    "produtos",
+                    "= Subtotal dos produtos",
+                    sh["subtotal_produtos"],
+                    real(sh["subtotal_produtos"]),
+                    estilo="bold",
+                ),
+                linha(
+                    "frete",
+                    "± Subtotal de frete (parte da loja)",
+                    sh["frete_loja"],
+                    real(sh["frete_loja"]),
+                ),
+                linha("cupom", "− Cupons e descontos da loja", sh["cupons"], real(sh["cupons"])),
+                linha(
+                    "tarifa",
+                    "− Taxas e encargos (comissão, serviço, afiliados)",
+                    sh["taxas"],
+                    real(sh["taxas"]),
+                ),
+                linha(
+                    "depois",
+                    "± Depois da liberação (estornos, ajustes)",
+                    0.0 if tem_extrato else None,
+                    depois,
+                    compara=False,
+                    estilo="muted",
+                ),
+                linha("liquido", "= Renda do pedido", sh["renda"], real_liquido, estilo="bold"),
+            ]
+            return {
+                "linhas": linhas,
+                "real_rotulo": "escrow na liberação + carteira",
+                "comparar": p.situacao != "cancelado",
+                "nota": (
+                    "venda desfeita: as colunas mostram o que entrou e o que saiu"
+                    if p.situacao == "cancelado"
+                    else (
+                        None
+                        if liberou
+                        else (
+                            "a Shopee fecha a conta da venda na liberação; "
+                            "até lá só existe o previsto"
+                        )
+                    )
+                ),
+                "rodape": (
+                    'as mesmas linhas de "Informações de Pagamento › Detalhes de Renda" '
+                    "da Shopee · "
+                    '"Renda do pedido" real é o que a carteira pagou'
+                ),
+                "frete_liquido_loja": None,
+            }
         linhas = [
             linha("produtos", "Produtos (preço da venda)", n(v.get("valor")), real(v.get("valor"))),
             linha(
@@ -1457,6 +1690,7 @@ TIPO_LABELS = {
     "saque_confirmado": "Saque confirmado",
     "saque_cancelado": "Saque cancelado",
     "ajuste_shopee": "Ajuste da Shopee",
+    "ajuste_tiktok": "Ajuste da TikTok",
     "publicidade": "Publicidade (Ads)",
     "credito": "Crédito",
     "imposto": "Imposto",
@@ -2188,6 +2422,9 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
         )
     ).scalar_one()
     plataforma = getattr(loja.platform, "value", str(loja.platform))
+    if plataforma == "tiktok":
+        # a TikTok não guarda saldo: todo extrato vai pro banco no mesmo dia
+        na_conta = saldo_em = None
     return {
         "na_conta": na_conta,
         "saldo_em": saldo_em,
@@ -3507,3 +3744,197 @@ async def sonda_shopee_escrow(
         )
     logger.info("conciliacao_sonda_shopee_escrow", conta=conta, pedidos=len(saida))
     return {"conta": conta, "pedidos": saida}
+
+
+def _epoch_para_iso(v: Any) -> str | None:
+    try:
+        return datetime.fromtimestamp(int(v), tz=_BRT).isoformat() if v else None
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+@router.get("/sonda/tiktok")
+async def sonda_tiktok(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+    conta: Annotated[
+        str | None, Query(description="nome da loja TikTok; sem valor = a que mais vende")
+    ] = None,
+    dias: Annotated[int, Query(ge=1, le=90)] = 30,
+) -> dict[str, Any]:
+    """O que a API financeira da TikTok dá: extratos (statements), repasses (payments)
+    e as transações de um extrato (pedido a pedido). Só leitura. Sem `conta`, pega a
+    loja TikTok com mais vendas lidas pela Margem nos últimos 30 dias (15/10, Vinicius:
+    "pode pegar a que mais vende e sondar")."""
+    from app.models import MarketplaceOrderFinancial
+    from app.models.integration import IntegrationPlatform
+
+    agora_dt = datetime.now(UTC)
+    base_q = select(Integration).where(
+        Integration.platform == IntegrationPlatform.TIKTOK,
+        Integration.archived_at.is_(None),
+        Integration.status == "active",
+    )
+    integ = None
+    if conta:
+        integ = (
+            await session.execute(
+                base_q.where(func.lower(func.trim(Integration.name)) == conta.strip().lower())
+            )
+        ).scalar_one_or_none()
+    else:
+        fin = MarketplaceOrderFinancial
+        ranking = (
+            await session.execute(
+                select(fin.integration_id, func.count())
+                .where(
+                    fin.platform == IntegrationPlatform.TIKTOK,
+                    fin.created_at >= agora_dt - timedelta(days=30),
+                )
+                .group_by(fin.integration_id)
+                .order_by(func.count().desc())
+            )
+        ).all()
+        ativas = {i.id: i for i in (await session.execute(base_q)).scalars()}
+        for iid, _n in ranking:
+            if iid in ativas:
+                integ = ativas[iid]
+                break
+        if integ is None and ativas:
+            integ = sorted(ativas.values(), key=lambda i: i.created_at or agora_dt)[0]
+    if integ is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"code": "conta_tiktok_nao_encontrada", "conta": conta},
+        )
+    cliente = await cliente_da_integracao(integ)
+    agora = int(time.time())
+    t_de = agora - dias * 86400
+    chamadas: list[dict[str, Any]] = []
+
+    async def chama(nome: str, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+        t0 = time.monotonic()
+        item: dict[str, Any] = {"nome": nome, "url": path, "params": params}
+        try:
+            body = await cliente._get(path, params)
+        except Exception as e:  # noqa: BLE001 — a sondagem registra e segue
+            item.update(ok=False, erro=f"{type(e).__name__}: {str(e)[:300]}")
+            item["ms"] = int((time.monotonic() - t0) * 1000)
+            chamadas.append(item)
+            return {}
+        item["ms"] = int((time.monotonic() - t0) * 1000)
+        body = body if isinstance(body, dict) else {"corpo": body}
+        item["code"] = body.get("code")
+        item["ok"] = body.get("code") == 0
+        if not item["ok"]:
+            item["mensagem"] = str(body.get("message") or "")[:300]
+        item["amostra"] = _recorta(body.get("data") if "data" in body else body)
+        chamadas.append(item)
+        return body.get("data") if isinstance(body.get("data"), dict) else {}
+
+    # 1) extratos (statements) do período
+    dados = await chama(
+        "extratos",
+        "/finance/202309/statements",
+        {
+            "statement_time_ge": str(t_de),
+            "statement_time_lt": str(agora),
+            "page_size": "50",
+            "sort_field": "statement_time",
+            "sort_order": "DESC",
+        },
+    )
+    statements = [x for x in (dados.get("statements") or []) if isinstance(x, dict)]
+    resumo_ext: dict[str, Any] = {}
+    if statements:
+        status_c: Counter = Counter(str(x.get("payment_status") or "?") for x in statements)
+        resumo_ext = {
+            "linhas": len(statements),
+            "mais_paginas": bool(dados.get("next_page_token")),
+            "por_status": dict(status_c),
+            "liquidado_total": round(
+                sum(float(x.get("settlement_amount") or 0) for x in statements), 2
+            ),
+            "de": _epoch_para_iso(min(int(x.get("statement_time") or 0) for x in statements)),
+            "ate": _epoch_para_iso(max(int(x.get("statement_time") or 0) for x in statements)),
+            "campos": sorted({k for x in statements for k in x}),
+        }
+
+    # 2) transações do extrato mais recente (pedido a pedido)
+    transacoes_resumo: dict[str, Any] = {}
+    if statements:
+        sid = statements[0].get("id")
+        dados_t = await chama(
+            "transacoes_do_extrato",
+            f"/finance/202309/statements/{sid}/statement_transactions",
+            {"page_size": "100", "sort_field": "order_create_time", "sort_order": "DESC"},
+        )
+        txs = [x for x in (dados_t.get("statement_transactions") or []) if isinstance(x, dict)]
+        if txs:
+            tipos: Counter = Counter(str(x.get("type") or "?") for x in txs)
+            transacoes_resumo = {
+                "extrato": sid,
+                "linhas": len(txs),
+                "mais_paginas": bool(dados_t.get("next_page_token")),
+                "por_tipo": dict(tipos),
+                "com_pedido": sum(1 for x in txs if x.get("order_id")),
+                "liquidado_total": round(
+                    sum(float(x.get("settlement_amount") or 0) for x in txs), 2
+                ),
+                "campos": sorted({k for x in txs for k in x}),
+                "cabecalho_do_extrato": {
+                    k: v for k, v in dados_t.items() if k != "statement_transactions"
+                },
+            }
+            pedido = next((x.get("order_id") for x in txs if x.get("order_id")), None)
+            if pedido:
+                await chama(
+                    "transacoes_do_pedido",
+                    f"/finance/202309/orders/{pedido}/statement_transactions",
+                )
+
+    # 3) repasses pro banco (payments)
+    dados_p = await chama(
+        "repasses",
+        "/finance/202309/payments",
+        {
+            "create_time_ge": str(t_de),
+            "create_time_lt": str(agora),
+            "page_size": "50",
+            "sort_field": "create_time",
+            "sort_order": "DESC",
+        },
+    )
+    payments = [x for x in (dados_p.get("payments") or []) if isinstance(x, dict)]
+    resumo_rep: dict[str, Any] = {}
+    if payments:
+        st: Counter = Counter(str(x.get("status") or "?") for x in payments)
+
+        def _valor(x: dict[str, Any]) -> float:
+            a = x.get("amount")
+            if isinstance(a, dict):
+                return float(a.get("value") or 0)
+            return float(a or 0)
+
+        resumo_rep = {
+            "linhas": len(payments),
+            "mais_paginas": bool(dados_p.get("next_page_token")),
+            "por_status": dict(st),
+            "total": round(sum(_valor(x) for x in payments), 2),
+            "campos": sorted({k for x in payments for k in x}),
+        }
+
+    logger.info(
+        "conciliacao_sonda_tiktok",
+        conta=integ.name,
+        chamadas=[(c["nome"], c.get("code"), c.get("erro") or c.get("mensagem")) for c in chamadas],
+    )
+    return {
+        "conta": integ.name,
+        "integration_id": str(integ.id),
+        "janela": {"de": _epoch_para_iso(t_de), "ate": _epoch_para_iso(agora)},
+        "extratos": resumo_ext,
+        "transacoes": transacoes_resumo,
+        "repasses": resumo_rep,
+        "chamadas": chamadas,
+    }

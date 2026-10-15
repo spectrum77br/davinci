@@ -6,8 +6,20 @@ import { ChevronLeft, ChevronRight, Loader2, Lock, LockOpen, Search } from 'luci
 import { STATUS_MOV, fmtDia, fmtDiaHora, fmtHora, fmtMoney, ontemISO, sitCls, somaDias, tipoMov } from '~/lib/conciliacao'
 
 const props = defineProps<{ loja: string; canEdit: boolean; dia?: string; plataforma?: string }>()
-const fonte = computed(() => (props.plataforma === 'shopee' ? 'carteira da Shopee' : 'extrato do Mercado Pago'))
-const quemInforma = computed(() => (props.plataforma === 'shopee' ? 'Shopee' : 'Mercado Pago'))
+const fonte = computed(() => (props.plataforma === 'shopee' ? 'carteira da Shopee' : props.plataforma === 'tiktok' ? 'extrato diário da TikTok' : 'extrato do Mercado Pago'))
+const quemInforma = computed(() => (props.plataforma === 'shopee' ? 'Shopee' : props.plataforma === 'tiktok' ? 'TikTok' : 'Mercado Pago'))
+// TikTok não tem saldo: o extrato do dia começa em 0, cada pedido liquidado sobe e o
+// repasse pro banco zera — a prova dos nove é "pedidos = extrato = repasse".
+const rodape = computed(() =>
+  props.plataforma === 'tiktok'
+    ? { inicial: 'Início do extrato', creditos: 'Pedidos liquidados', debitos: 'Repasse pro banco', final: 'Pedidos − repasse', informado: 'Tem que dar', diferenca: 'Diferença' }
+    : { inicial: 'Saldo inicial', creditos: 'Entradas (créditos)', debitos: 'Saídas (débitos)', final: 'Saldo final calculado', informado: `Saldo informado pelo ${quemInforma.value}`, diferenca: 'Diferença' },
+)
+const notaRodape = computed(() =>
+  props.plataforma === 'tiktok'
+    ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). A TikTok não guarda saldo: o extrato do dia soma os pedidos liquidados e o repasse leva tudo pro banco — a conta tem que dar zero.'
+    : 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.',
+)
 const emit = defineEmits<{ (e: 'ver-pedido', pedido: string): void }>()
 
 type Mov = {
@@ -310,14 +322,14 @@ onMounted(() => {
           </table>
         </div>
         <div v-if="dados" class="grid grid-cols-3 border-t text-[11px] md:grid-cols-6">
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo inicial</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_inicial) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Entradas (créditos)</div><b class="text-xs tabular-nums text-emerald-700">+ {{ fmtMoney(dados.totais.creditos) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saídas (débitos)</div><b class="text-xs tabular-nums text-red-600">− {{ fmtMoney(dados.totais.debitos) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo final calculado</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_final) }}</b></div>
-          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">Saldo informado pelo {{ quemInforma }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_informado) }}</b></div>
+          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.inicial }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_inicial) }}</b></div>
+          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.creditos }}</div><b class="text-xs tabular-nums text-emerald-700">+ {{ fmtMoney(dados.totais.creditos) }}</b></div>
+          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.debitos }}</div><b class="text-xs tabular-nums text-red-600">− {{ fmtMoney(dados.totais.debitos) }}</b></div>
+          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.final }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_final) }}</b></div>
+          <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.informado }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_informado) }}</b></div>
           <div class="px-2 py-1.5"><div class="text-muted-foreground">Diferença</div><b class="text-xs tabular-nums" :class="dados.totais.diferenca === null ? '' : Math.abs(dados.totais.diferenca) <= 0.05 ? 'text-emerald-700' : 'text-red-600'">{{ fmtMoney(dados.totais.diferenca) }}<span v-if="dados.totais.diferenca !== null && Math.abs(dados.totais.diferenca) <= 0.05"> ✔ bate</span></b></div>
         </div>
-        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.</div>
+        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">{{ notaRodape }}</div>
       </div>
 
       <div class="flex min-h-0 min-w-0 flex-col rounded-md border bg-card">

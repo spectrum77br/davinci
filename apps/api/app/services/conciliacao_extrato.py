@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -300,6 +300,11 @@ async def bling_store_ids_da_loja(session: AsyncSession, integration: Integratio
     pela tela Lojas (`store_info.account_name`) e pela `stores.integration_id`."""
     ids: set[str] = set()
     nome = (integration.name or "").strip().lower()
+    # Pelo nome só na MESMA plataforma: a Shopee também tem uma loja "Mini" e os
+    # pedidos dela entravam no painel da TikTok Mini (15/10). Apelidos do ML como na
+    # tela Lojas (`routers/stores._plataformas`).
+    plataforma = getattr(integration.platform, "value", str(integration.platform or "")).lower()
+    apelidos = ("ml", "mercadolivre", "mercado livre") if plataforma == "ml" else (plataforma,)
     if nome:
         rows = (
             await session.execute(
@@ -308,7 +313,10 @@ async def bling_store_ids_da_loja(session: AsyncSession, integration: Integratio
                     StoreInfo.archived_at.is_(None),
                     or_(
                         StoreInfo.integration_id == integration.id,
-                        StoreInfo.account_name.ilike(nome),
+                        and_(
+                            StoreInfo.account_name.ilike(nome),
+                            func.lower(func.trim(StoreInfo.platform)).in_(apelidos),
+                        ),
                     ),
                 )
             )
