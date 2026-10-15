@@ -4935,3 +4935,65 @@ async def melhor_envio_token_apagar(
     logger.info("conciliacao_melhor_envio_token_apagado", por=user.email, apagou=apagou)
     token, detalhe = await token_do_painel(session)
     return _resumo_token_me(token, detalhe)
+
+
+@router.get("/sonda/melhor-envio")
+async def sonda_melhor_envio(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+    q: Annotated[
+        str | None, Query(description="busca do Melhor Envio (nº do pedido, rastreio…)")
+    ] = None,
+    page: Annotated[int, Query(ge=1, le=50)] = 1,
+) -> dict[str, Any]:
+    """Como o Melhor Envio devolve um envio (só o que interessa pra conciliação; sem
+    nome/endereço do cliente): preço pago, desconto, conferência de peso, etiquetas
+    (tags) e campos de referência. Só leitura (15/10)."""
+    from app.services.melhor_envio import ler_envios, token_do_painel
+
+    token, _ = await token_do_painel(session)
+    if not token:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail={"code": "sem_token_melhor_envio"})
+    http, corpo = await ler_envios(token, page=page, q=q)
+    dados = corpo.get("data") if isinstance(corpo.get("data"), list) else []
+
+    def compacto(e: dict[str, Any]) -> dict[str, Any]:
+        servico = e.get("service") if isinstance(e.get("service"), dict) else {}
+        tags = e.get("tags") if isinstance(e.get("tags"), list) else []
+        conc = e.get("conciliation")
+        return {
+            "id": e.get("id"),
+            "protocol": e.get("protocol"),
+            "status": e.get("status"),
+            "servico": servico.get("name"),
+            "price": e.get("price"),
+            "discount": e.get("discount"),
+            "insurance_value": e.get("insurance_value"),
+            "billed_weight": e.get("billed_weight"),
+            "paid_at": e.get("paid_at"),
+            "posted_at": e.get("posted_at"),
+            "delivered_at": e.get("delivered_at"),
+            "canceled_at": e.get("canceled_at"),
+            "tracking": e.get("tracking"),
+            "self_tracking": e.get("self_tracking"),
+            "tags": tags[:8],
+            "additional_info_chaves": sorted(e["additional_info"].keys())
+            if isinstance(e.get("additional_info"), dict)
+            else e.get("additional_info"),
+            "conciliation": conc if not isinstance(conc, list) else conc[:3],
+            "freight_arrangements": e.get("freight_arrangements"),
+            "products": [
+                {k: p.get(k) for k in ("name", "quantity", "unitary_value") if k in p}
+                for p in (e.get("products") or [])[:3]
+                if isinstance(p, dict)
+            ],
+            "campos": sorted(e.keys()),
+        }
+
+    return {
+        "http": http,
+        "q": q,
+        "total": corpo.get("total"),
+        "pagina": page,
+        "envios": [compacto(e) for e in dados[:5] if isinstance(e, dict)],
+    }
