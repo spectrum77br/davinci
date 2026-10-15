@@ -15,6 +15,7 @@ entra quando for pago — a TikTok paga minutos depois de fechar).
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -418,12 +419,20 @@ async def _classificar_zeradas_antigas(session: AsyncSession, loja: ConciliacaoL
 
 
 async def reler_financeiro_liquidados(
-    session: AsyncSession, loja: ConciliacaoLoja, *, maximo: int = 60
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    *,
+    maximo: int = 12,
+    orcamento_s: float = 300.0,
 ) -> dict[str, Any]:
     """Pedido que liquidou no extrato mas cuja venda na Margem ainda é a estimativa do
     unsettled (ou foi lida antes da liquidação): pede à Margem pra reler agora — uma
     chamada por pedido, só os que mudaram. Sem isso a estimativa (centavos diferente)
-    viraria "recebido a menos/a mais" falso até a esteira lenta da Margem passar."""
+    viraria "recebido a menos/a mais" falso até a esteira lenta da Margem passar.
+
+    Medido 15/10: a API financeira da TikTok leva ~40 s por pedido quando limita
+    chamadas; por isso poucos por rodada e um teto de tempo — o resto fica pra
+    próxima rodada (ou pra esteira da própria Margem)."""
     from app.models import MarketplaceOrderFinancial
     from app.services.marketplace_financials import run_sync_marketplace_financials_for_bling_order
 
@@ -452,9 +461,13 @@ async def reler_financeiro_liquidados(
     vistos: set[int] = set()
     relidos = 0
     erros: list[dict[str, Any]] = []
+    t0 = time.monotonic()
     for bling_id, order_id, _data, _status, _lido in rows:
         if bling_id in vistos:
             continue
+        if time.monotonic() - t0 > orcamento_s:
+            logger.info("conciliacao_tiktok_releitura_teto", loja=loja.conta, relidos=relidos)
+            break
         vistos.add(bling_id)
         try:
             await run_sync_marketplace_financials_for_bling_order(
