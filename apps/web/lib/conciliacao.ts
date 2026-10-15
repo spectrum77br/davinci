@@ -64,6 +64,7 @@ export const TIPOS_MOV: Record<string, string> = {
 
 export function fmtMoney(v: number | null | undefined, vazio = '—') {
   if (v === null || v === undefined) return vazio
+  if (Math.abs(v) < 0.005) v = 0 // nada de "-0,00"
   return v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 export function fmtPct(v: number | null | undefined) {
