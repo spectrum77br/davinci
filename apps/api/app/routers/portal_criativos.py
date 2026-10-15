@@ -68,6 +68,7 @@ from __future__ import annotations
 import re
 import secrets
 import statistics
+import unicodedata
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -91,7 +92,8 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import Text, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -112,6 +114,7 @@ from app.models.marketing_roteiro import (
     MarketingRoteiroRef,
 )
 from app.models.pricing import PricingProduct
+from app.models.product import Product
 from app.models.segment import Segment
 from app.routers.marketing_creatives import (
     MAX_BYTES_ARQUIVO,
@@ -1903,59 +1906,217 @@ def _marca_da_pasta(caminho: str) -> str:
     return "charlots-park" if limpo.startswith("/Malas") else "uranyx"
 
 
+# ── busca e variantes por cor (15/10/2026) ──
+#
+# O Claude conectado ao portal criava ideia com o NOME do produto no campo
+# `sku` ("Uranyx A18 Pro Max S5 Edition laranja", "Uranyx_C68 Plus_Preto"):
+# ele não tinha onde achar o código. A listagem só mandava produto com foto, e
+# o A18 (dg088/dg089) e os três C68 Plus estão com a pasta vazia; e mesmo com
+# o produto na mão, a linha "dg088,dg089" não diz qual código é a laranja.
+
+# Quem busca quer achar UM produto: 20 cobre as memórias e tamanhos de uma
+# linha sem devolver o catálogo inteiro a cada palavra curta ("uranyx").
+LIMITE_BUSCA_PRODUTOS = 20
+BUSCA_PRODUTO_MAX = 80
+
+# Os lotes de VENDA, na ordem em que o nome da variante é procurado. `.cd`
+# (Centro de Distribuição) e `.us` (usado) ficam de fora de propósito: o nome
+# do usado é "... - USADO - AVULSO", e é exatamente a palavra que não pode ir
+# parar num vídeo.
+_LOTES_DE_VENDA = ("pi", "ci", "sa", "sp", "ra")
+
+# A mala termina o nome com o código do fornecedor entre parênteses ("Mala
+# Losangulo M4 tamanho 24 - Cinza Escuro (DT - XS5426 - DT14)"). Sem tirá-lo,
+# o último " - " daria "DT14)" como cor.
+_PARENTESE_FINAL = re.compile(r"\s*\([^()]*\)\s*$")
+
+
+def _dobra(texto: str) -> str:
+    """Minúscula, sem acento e com "_" e "-" virando espaço — a forma em que a
+    busca e o catálogo se comparam. "Relógio" e "relogio" são a mesma palavra,
+    e "Uranyx_C68" (o jeito em que o Claude escreveu o SKU) vira "uranyx c68"."""
+    s = unicodedata.normalize("NFKD", texto or "")
+    s = "".join(c for c in s if not unicodedata.combining(c)).casefold()
+    return " ".join(s.replace("_", " ").replace("-", " ").split())
+
+
+def _cor_do_nome(nome: str | None) -> str | None:
+    """O pedaço depois do último " - " — é onde o cadastro do Bling põe a cor
+    ("Uranyx C68 Plus 16.128 - cinza"). Nome sem " - " não tem cor a dizer."""
+    limpo = _PARENTESE_FINAL.sub("", nome or "").strip()
+    _, separador, cor = limpo.rpartition(" - ")
+    return (cor.strip() or None) if separador else None
+
+
+async def _variantes(session: AsyncSession, codigos: set[str]) -> dict[str, tuple[str, str]]:
+    """Código base (minúsculo) → (SKU do cadastro, nome), numa consulta só.
+
+    O nome por cor mora em `products` (o cadastro do Bling), não na tabela de
+    preços: lá está "dg088.ci" = "Uranyx A18 Pro Max - S5 Edition 16.128 -
+    Laranja". Só o ATIVO (`situacao='A'`; há milhares de excluídos na tabela)
+    e nunca kit — o kit tem "+" no SKU e o nome dele fala do fone e do relógio.
+
+    Lote de venda primeiro, na ordem de `_LOTES_DE_VENDA`; sem nenhum, o SKU
+    igual ao código. Esse degrau não é enfeite: as malas são cadastradas sem
+    lote ("b039.24" é a mala), e em 15/10/2026 eram 986 dos 1.169 códigos das
+    famílias do portal.
+
+    Junta com `unnest` em vez de `= ANY`: são milhares de chaves (as malas têm
+    53 códigos por linha, vezes seis formas cada), e o ANY com parâmetro faria
+    a comparação elemento a elemento em cada linha de `products`. Com o join o
+    Postgres faz um hash: ~11 ms em produção com as 7.014 chaves de todas as
+    famílias (15/10/2026).
+    """
+    if not codigos:
+        return {}
+    formas = {c: [f"{c}.{lote}" for lote in _LOTES_DE_VENDA] + [c] for c in codigos}
+    chaves = (
+        func.unnest(literal(sorted({f for fs in formas.values() for f in fs}), ARRAY(Text)))
+        .table_valued("chave")
+        .render_derived(name="chaves")
+    )
+    achados: dict[str, tuple[str, str]] = {}
+    for sku, nome in (
+        await session.execute(
+            select(Product.sku, Product.name)
+            .join(chaves, func.lower(Product.sku) == chaves.c.chave)
+            .where(Product.situacao == "A", Product.sku.not_like("%+%"))
+            # Ordem estável: o mesmo SKU ativo em duas contas dá sempre o
+            # mesmo nome, e não um sorteio entre duas chamadas.
+            .order_by(Product.sku, Product.name)
+        )
+    ).tuples():
+        achados.setdefault(sku.lower(), (sku, nome))
+    saida: dict[str, tuple[str, str]] = {}
+    for codigo, fs in formas.items():
+        escolhida = next((f for f in fs if f in achados), None)
+        if escolhida is not None:
+            saida[codigo] = achados[escolhida]
+    return saida
+
+
 @router.get("/produtos")
 async def listar_produtos(
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     equipe: Annotated[str, Depends(equipe_do_token)],
+    busca: Annotated[str | None, Query(max_length=BUSCA_PRODUTO_MAX)] = None,
+    todos: bool = False,
 ) -> dict[str, Any]:
     """Os produtos com pasta de fotos, para a agência saber como a peça É.
 
     `sku` da tabela de preços guarda a LINHA inteira separada por vírgula (uma
     pasta serve todas as cores), então sai a lista — é assim que a agência acha
-    o código que está escrito na ideia.
+    o código que está escrito na ideia. `variantes` diz o que cada código É:
+    `{"codigo", "nome", "cor"}`, com `nome`/`cor` NULL quando o cadastro não
+    tem variante ativa daquele código.
+
+    Sem parâmetro, a lista é a MESMA de antes de 15/10/2026 (o portal no ar
+    depende dela), só com `variantes` a mais em cada produto. Os dois
+    parâmetros, opcionais, existem para o Claude achar o código pelo nome:
+
+    - `busca` (até 80 caracteres): palavras, sem diferenciar maiúscula nem
+      acento, com "_" e "-" valendo espaço. Cada palavra tem de aparecer no
+      nome do produto, no nome de uma das variantes ou no começo de um dos
+      códigos ("dg08" acha o dg088). No máximo 20 produtos; o total casado vai
+      no cabeçalho `X-Total-Count`.
+    - `todos=1`: inclui os produtos das famílias do portal com a pasta vazia
+      (`fotos` 0) — a situação `sem_foto` da rota `/produtos/por-codigo`.
     """
     # Duas travas, e as duas vieram de olhar o dado real em 23/09/2026:
     #
     # 1. `fotos_count > 0`. Dos 86 produtos com pasta, 39 têm a pasta VAZIA —
     #    conferi por amostragem e estão vazias mesmo. Card sem foto é card que
     #    a agência abre à toa, e ainda dispara uma ida ao MEGA pra descobrir
-    #    que não tem nada.
+    #    que não tem nada. `todos=1` tira só esta trava: quem pede quer o
+    #    CÓDIGO do produto, não a foto (15/10/2026).
     #
     # 2. Fora o segmento Apple. `/Celular` mistura os robustos da Uranyx
     #    (Fossibot, Oukitel, Oscal) com revenda de iPhone, MacBook e Watch —
     #    11 produtos que não são marca da casa e não interessam a quem produz
     #    vídeo. O segmento é o separador certo porque é campo curado; o nome da
-    #    pasta seria adivinhação.
+    #    pasta seria adivinhação. Vale com `todos` também.
+    #
+    # A família continua saindo da RAIZ da pasta (`_raiz_permitida`), igual à
+    # `/produtos/por-codigo`: produto sem pasta nenhuma não tem família a
+    # provar e não sai, nem com `todos`.
     apple = select(Segment.id).where(func.lower(Segment.name) == "apple").scalar_subquery()
-    linhas = (
-        (
+    filtros: list[Any] = [
+        PricingProduct.fotos_path.is_not(None),
+        PricingProduct.fotos_path != "",
+        PricingProduct.segment_id.not_in(apple),
+    ]
+    if not todos:
+        filtros.append(PricingProduct.fotos_count > 0)
+    linhas = [
+        p
+        for p in (
             await session.execute(
-                select(PricingProduct)
-                .where(
-                    PricingProduct.fotos_path.is_not(None),
-                    PricingProduct.fotos_path != "",
-                    PricingProduct.fotos_count > 0,
-                    PricingProduct.segment_id.not_in(apple),
-                )
-                .order_by(PricingProduct.name)
+                select(PricingProduct).where(*filtros).order_by(PricingProduct.name)
             )
-        )
-        .scalars()
-        .all()
-    )
-    saida = [
-        {
-            "id": str(p.id),
-            "nome": p.name,
-            "skus": [s.strip() for s in (p.sku or "").split(",") if s.strip()],
-            "pasta": p.fotos_path,
-            "marca": _marca_da_pasta(p.fotos_path or ""),
-            "fotos": p.fotos_count or 0,
-        }
-        for p in linhas
+        ).scalars()
         if _raiz_permitida(p.fotos_path or "")
     ]
-    return {"equipe": equipe, "produtos": saida}
+    skus_de = {p.id: [s.strip() for s in (p.sku or "").split(",") if s.strip()] for p in linhas}
+    variantes = await _variantes(
+        session, {c.lower() for codigos in skus_de.values() for c in codigos}
+    )
+
+    # Controle sai da busca em vez de recusar, como no `q` das ideias: o resto
+    # do que foi digitado ainda é uma busca. Busca que não sobra palavra
+    # nenhuma ("__", "  ") é a listagem de sempre.
+    palavras = _dobra(_CONTROLE.sub("", busca or "")).split()
+    if palavras:
+
+        def casa(p: PricingProduct) -> bool:
+            # O nome da variante entra junto com o do produto: o C68 Plus da
+            # tabela de preços não diz cor nenhuma, e "c68 dourado" só acha
+            # alguma coisa pelo cadastro. A quebra de linha separa os nomes
+            # para uma palavra não nascer da emenda de dois — e palavra nunca
+            # tem quebra de linha, então o separador nunca casa sozinho.
+            achado = [variantes.get(c.lower()) for c in skus_de[p.id]]
+            nomes = "\n".join([_dobra(p.name)] + [_dobra(v[1]) for v in achado if v])
+            # O código vale pelo COMEÇO ("dg08" acha o dg088, "08" não acha
+            # nada), e o SKU do cadastro conta também ("dg088.ci").
+            codigos = [_dobra(c) for c in skus_de[p.id]] + [_dobra(v[0]) for v in achado if v]
+            return all(
+                w in nomes or any(c.startswith(w) for c in codigos) for w in palavras
+            )
+
+        linhas = [p for p in linhas if casa(p)]
+        response.headers["X-Total-Count"] = str(len(linhas))
+        logger.info(
+            "portal_produtos_busca",
+            equipe=equipe,
+            busca=" ".join(palavras),
+            todos=todos,
+            achados=len(linhas),
+        )
+        linhas = linhas[:LIMITE_BUSCA_PRODUTOS]
+
+    def variantes_de(p: PricingProduct) -> list[dict[str, Any]]:
+        saida = []
+        for codigo in skus_de[p.id]:
+            achada = variantes.get(codigo.lower())
+            nome = achada[1] if achada else None
+            saida.append({"codigo": codigo, "nome": nome, "cor": _cor_do_nome(nome)})
+        return saida
+
+    return {
+        "equipe": equipe,
+        "produtos": [
+            {
+                "id": str(p.id),
+                "nome": p.name,
+                "skus": skus_de[p.id],
+                "pasta": p.fotos_path,
+                "marca": _marca_da_pasta(p.fotos_path or ""),
+                "fotos": p.fotos_count or 0,
+                "variantes": variantes_de(p),
+            }
+            for p in linhas
+        ],
+    }
 
 
 # Teto de códigos por consulta. Um produto da casa chega a 53 códigos numa
