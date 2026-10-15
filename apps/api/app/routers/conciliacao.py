@@ -27,7 +27,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -3939,4 +3939,165 @@ async def sonda_tiktok(
         "transacoes": transacoes_resumo,
         "repasses": resumo_rep,
         "chamadas": chamadas,
+    }
+
+
+@router.get("/sonda/tiktok/espera")
+async def sonda_tiktok_espera(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+    conta: Annotated[str, Query(description="loja TikTok ligada no painel")],
+    dias: Annotated[int, Query(ge=1, le=180)] = 90,
+) -> dict[str, Any]:
+    """TikTok "Em espera" (pedidos ainda não liquidados, `orders/unsettled`) × nosso
+    "A liberar" (estimativa dos pedidos aguardando desde o início da loja). Só leitura.
+    15/10, Vinicius: "aqui mostra em espera 47.634,93, o nosso 48.928 — por que?"."""
+    loja = await _loja_ou_404(session, conta)
+    integ = await session.get(Integration, loja.integration_id)
+    if integ is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "integracao_nao_encontrada"})
+    cliente = await cliente_da_integracao(integ)
+    agora = int(time.time())
+
+    def _d(v: Any) -> Decimal | None:
+        if v in (None, ""):
+            return None
+        try:
+            return Decimal(str(v))
+        except (InvalidOperation, ValueError):
+            return None
+
+    inicio_dt = datetime.combine(loja.inicio, datetime.min.time(), tzinfo=_BRT)
+
+    # 1) o que a TikTok diz que está em espera, pedido a pedido
+    tiktok: dict[str, dict[str, Any]] = {}
+    ajustes = Decimal("0")
+    ajustes_qtd = 0
+    paginas = 0
+    token: str | None = None
+    for _ in range(20):
+        body = await cliente.get_unsettled_orders(
+            search_time_ge=agora - dias * 86400, search_time_lt=agora + 86400, page_token=token
+        )
+        paginas += 1
+        if not isinstance(body, dict) or body.get("code") not in (0, "0", None):
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": "tiktok_unsettled",
+                    "mensagem": str((body or {}).get("message"))[:300],
+                },
+            )
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        for t in data.get("transactions") or []:
+            if not isinstance(t, dict):
+                continue
+            est = _d(t.get("est_settlement_amount"))
+            if t.get("adjustment_id") or not t.get("order_id"):
+                ajustes += est or Decimal("0")
+                ajustes_qtd += 1
+                continue
+            oid = str(t.get("order_id")).strip()
+            slot = tiktok.setdefault(
+                oid,
+                {
+                    "est": Decimal("0"),
+                    "criado": _epoch_para_iso(int(t.get("order_create_time") or 0))
+                    if t.get("order_create_time")
+                    else None,
+                    "criado_epoch": int(t.get("order_create_time") or 0),
+                    "motivo": t.get("unsettled_reason"),
+                },
+            )
+            slot["est"] += est or Decimal("0")
+        token = data.get("next_page_token") or None
+        if not token:
+            break
+
+    # 2) o que o painel conta como "a liberar" (aguardando/vencido) e o resto dos pedidos
+    ped = ConciliacaoPedido
+    nossos = {
+        p.numeroloja: p
+        for p in (
+            await session.execute(select(ped).where(ped.integration_id == loja.integration_id))
+        ).scalars()
+        if p.numeroloja
+    }
+    a_liberar = {n: p for n, p in nossos.items() if p.situacao in ("aguardando", "vencido")}
+
+    def soma(ids: set[str], de: dict[str, Any], chave: str) -> float:
+        total = Decimal("0")
+        for i in ids:
+            v = de[i][chave] if isinstance(de[i], dict) else getattr(de[i], chave, None)
+            total += _d(v) or Decimal("0")
+        return _num(total) or 0.0
+
+    ambos = set(tiktok) & set(a_liberar)
+    so_tiktok = set(tiktok) - set(a_liberar)
+    so_nosso = set(a_liberar) - set(tiktok)
+    antes_inicio = {
+        i
+        for i in so_tiktok
+        if tiktok[i]["criado_epoch"] and tiktok[i]["criado_epoch"] < inicio_dt.timestamp()
+    }
+    so_tiktok_outros = so_tiktok - antes_inicio
+    por_situacao: Counter = Counter(
+        nossos[i].situacao if i in nossos else "fora_do_painel" for i in so_tiktok_outros
+    )
+    return {
+        "conta": loja.conta,
+        "inicio": loja.inicio.isoformat(),
+        "paginas": paginas,
+        "tiktok_em_espera": {
+            "pedidos": len(tiktok),
+            "total": soma(set(tiktok), tiktok, "est"),
+            "ajustes": _num(ajustes),
+            "ajustes_qtd": ajustes_qtd,
+        },
+        "nosso_a_liberar": {
+            "pedidos": len(a_liberar),
+            "total": soma(set(a_liberar), a_liberar, "venda_liquido"),
+        },
+        "nos_dois": {
+            "pedidos": len(ambos),
+            "tiktok": soma(ambos, tiktok, "est"),
+            "nosso": soma(ambos, a_liberar, "venda_liquido"),
+        },
+        "so_na_tiktok": {
+            "antes_do_inicio": {
+                "pedidos": len(antes_inicio),
+                "total": soma(antes_inicio, tiktok, "est"),
+                "exemplos": sorted(antes_inicio)[:10],
+            },
+            "desde_o_inicio": {
+                "pedidos": len(so_tiktok_outros),
+                "total": soma(so_tiktok_outros, tiktok, "est"),
+                "por_situacao_no_painel": dict(por_situacao),
+                "exemplos": [
+                    {
+                        "pedido": i,
+                        "est": _num(tiktok[i]["est"]),
+                        "criado": tiktok[i]["criado"],
+                        "motivo": tiktok[i]["motivo"],
+                        "no_painel": nossos[i].situacao if i in nossos else None,
+                        "pedido_bling": nossos[i].pedido_bling if i in nossos else None,
+                    }
+                    for i in sorted(so_tiktok_outros)[:15]
+                ],
+            },
+        },
+        "so_no_painel": {
+            "pedidos": len(so_nosso),
+            "total": soma(so_nosso, a_liberar, "venda_liquido"),
+            "exemplos": [
+                {
+                    "pedido": i,
+                    "pedido_bling": a_liberar[i].pedido_bling,
+                    "nosso": _num(a_liberar[i].venda_liquido),
+                    "status_bling": a_liberar[i].situacao_bling,
+                    "venda_status": a_liberar[i].venda_status,
+                }
+                for i in sorted(so_nosso)[:15]
+            ],
+        },
     }
