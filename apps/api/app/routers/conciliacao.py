@@ -3200,3 +3200,182 @@ async def sonda_shopee(
         "liberacoes": liberacoes,
         "chamadas": chamadas,
     }
+
+
+_CAMPOS_ESCROW = (
+    "escrow_amount",
+    "escrow_amount_after_adjustment",
+    "total_adjustment_amount",
+    "buyer_total_amount",
+    "cost_of_goods_sold",
+    "order_selling_price",
+    "commission_fee",
+    "net_commission_fee",
+    "service_fee",
+    "net_service_fee",
+    "seller_transaction_fee",
+    "campaign_fee",
+    "ams_commission_fee",
+    "order_ams_commission_fee",
+    "actual_shipping_fee",
+    "buyer_paid_shipping_fee",
+    "final_shipping_fee",
+    "estimated_shipping_fee",
+    "shopee_shipping_rebate",
+    "seller_shipping_discount",
+    "shipping_seller_protection_fee_amount",
+    "delivery_seller_protection_fee_premium_amount",
+    "voucher_from_seller",
+    "voucher_from_shopee",
+    "seller_coin_cash_back",
+    "seller_discount",
+    "seller_return_refund",
+    "drc_adjustable_refund",
+    "reverse_shipping_fee",
+    "return_handling_fee",
+    "seller_lost_compensation",
+    "pix_discount",
+    "seller_product_rebate",
+)
+
+
+@router.get("/sonda/shopee-escrow")
+async def sonda_shopee_escrow(
+    conta: Annotated[str, Query(min_length=1)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+    pedidos: Annotated[str | None, Query(description="nºs do Bling separados por vírgula")] = None,
+    situacao: str | None = "recebido_a_menos",
+    vivo: bool = True,
+) -> dict[str, Any]:
+    """Por que a carteira pagou diferente do líquido da Margem? Lado a lado: o escrow
+    gravado pela Margem, o escrow como a Shopee diz AGORA (1 chamada por pedido) e a
+    carteira; e os campos do escrow que valem exatamente a diferença. Só leitura."""
+    from app.models import MarketplaceOrderFinancial
+
+    loja = await _loja_ou_404(session, conta)
+    q = select(ConciliacaoPedido).where(ConciliacaoPedido.integration_id == loja.integration_id)
+    if pedidos:
+        q = q.where(ConciliacaoPedido.pedido_bling.in_([x.strip() for x in pedidos.split(",")]))
+    elif situacao:
+        q = q.where(ConciliacaoPedido.situacao.in_(situacao.split(",")))
+    rows = (
+        (await session.execute(q.order_by(ConciliacaoPedido.data_pedido.desc()).limit(10)))
+        .scalars()
+        .all()
+    )
+    cliente = None
+    if vivo:
+        integ = await session.get(Integration, loja.integration_id)
+        cliente = await cliente_da_integracao(integ) if integ else None
+
+    def recorte(income: dict[str, Any]) -> dict[str, Any]:
+        return {k: income.get(k) for k in _CAMPOS_ESCROW if income.get(k) not in (None, 0, 0.0, "")}
+
+    saida = []
+    for p in rows:
+        fin = (
+            await session.execute(
+                select(MarketplaceOrderFinancial).where(
+                    MarketplaceOrderFinancial.integration_id == loja.integration_id,
+                    MarketplaceOrderFinancial.external_order_id == p.numeroloja,
+                )
+            )
+        ).scalar_one_or_none()
+        raw = fin.raw if (fin and isinstance(fin.raw, dict)) else {}
+        gravado = (
+            ((raw.get("escrow") or {}).get("order_income") or {})
+            if isinstance(raw.get("escrow"), dict)
+            else {}
+        )
+        agora: dict[str, Any] = {}
+        erro_vivo = None
+        if cliente and p.numeroloja:
+            try:
+                r = await cliente._request(
+                    "GET", "/api/v2/payment/get_escrow_detail", params={"order_sn": p.numeroloja}
+                )
+                body = r.json() or {}
+                if body.get("error"):
+                    erro_vivo = f"{body.get('error')}: {body.get('message')}"
+                agora = (
+                    ((body.get("response") or {}).get("order_income") or {})
+                    if isinstance(body.get("response"), dict)
+                    else {}
+                )
+            except Exception as e:  # noqa: BLE001
+                erro_vivo = f"{type(e).__name__}: {str(e)[:200]}"
+        carteira = (
+            (
+                await session.execute(
+                    select(ConciliacaoMovimento)
+                    .where(
+                        ConciliacaoMovimento.integration_id == loja.integration_id,
+                        ConciliacaoMovimento.origem == "shopee_carteira",
+                        ConciliacaoMovimento.pedido_marketplace == p.numeroloja,
+                    )
+                    .order_by(ConciliacaoMovimento.data)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        liquido = _num(p.venda_liquido)
+        recebido = _num(p.recebido)
+        dif = (
+            round(liquido - recebido, 2) if (liquido is not None and recebido is not None) else None
+        )
+        pistas = []
+        for origem_nome, income in (("agora", agora), ("gravado", gravado)):
+            for k, v in income.items():
+                if (
+                    isinstance(v, int | float)
+                    and dif is not None
+                    and abs(abs(v) - abs(dif)) < 0.011
+                    and v
+                ):
+                    pistas.append(f"{origem_nome}.{k} = {v}")
+        mudou = (
+            {
+                k: {"gravado": gravado.get(k), "agora": agora.get(k)}
+                for k in _CAMPOS_ESCROW
+                if gravado.get(k) != agora.get(k) and (gravado.get(k) or agora.get(k))
+            }
+            if agora
+            else {}
+        )
+        saida.append(
+            {
+                "pedido_bling": p.pedido_bling,
+                "order_sn": p.numeroloja,
+                "situacao": p.situacao,
+                "margem": {
+                    "valor": _num(p.venda_valor),
+                    "tarifa": _num(p.venda_tarifa),
+                    "frete": _num(p.venda_frete),
+                    "cupom": _num(p.venda_cupom),
+                    "liquido": liquido,
+                    "lido_em": fin.updated_at.isoformat()
+                    if fin and getattr(fin, "updated_at", None)
+                    else None,
+                },
+                "carteira": [
+                    {
+                        "data": m.data.isoformat(),
+                        "tipo": m.tipo,
+                        "credito": _num(m.credito),
+                        "debito": _num(m.debito),
+                    }
+                    for m in carteira
+                ],
+                "recebido": recebido,
+                "diferenca": dif,
+                "pistas": pistas,
+                "escrow_gravado": recorte(gravado),
+                "escrow_agora": recorte(agora),
+                "o_que_mudou": mudou,
+                "erro_vivo": erro_vivo,
+            }
+        )
+    logger.info("conciliacao_sonda_shopee_escrow", conta=conta, pedidos=len(saida))
+    return {"conta": conta, "pedidos": saida}
