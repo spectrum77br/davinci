@@ -2193,7 +2193,8 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
         "saldo_em": saldo_em,
         "a_liberar": _num(a_liberar or 0),
         "a_liberar_pedidos": int(n_liberar or 0),
-        "reservado": _num(reservado or 0) if plataforma == "ml" else None,
+        # reserva aberta antes do início e solta depois deixaria negativo: zero é o piso
+        "reservado": max(_num(reservado or 0) or 0.0, 0.0) if plataforma == "ml" else None,
     }
 
 
