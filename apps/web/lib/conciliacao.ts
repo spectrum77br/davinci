@@ -97,14 +97,18 @@ export function sinal(v: number | null | undefined, cls: { pos: string; neg: str
   if (v < -0.005) return cls.neg
   return ''
 }
-// Dia de ontem no formato do <input type="date">, no fuso do navegador.
+// Datas no fuso do navegador (toISOString() é UTC: às 21h de Brasília já seria "amanhã").
+function isoLocal(d: Date) {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
 export function ontemISO() {
   const d = new Date()
   d.setDate(d.getDate() - 1)
-  return d.toISOString().slice(0, 10)
+  return isoLocal(d)
 }
 export function somaDias(iso: string, n: number) {
   const d = new Date(iso + 'T12:00:00')
   d.setDate(d.getDate() + n)
-  return d.toISOString().slice(0, 10)
+  return isoLocal(d)
 }
