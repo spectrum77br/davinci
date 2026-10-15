@@ -97,7 +97,9 @@ const PLATAFORMAS: Array<{ key: string; label: string }> = [
 const FASE_SEGUINTE = ['Shopee', 'Amazon', 'TikTok']
 
 const { api } = useApi()
-const dia = ref(ontemISO())
+// O dia é definido no cliente (onMounted): no servidor o relógio é UTC e perto da
+// meia-noite "ontem" seria outro dia — e o HTML do servidor não bateria com o do navegador.
+const dia = ref('')
 const dados = ref<Resumo | null>(null)
 const loading = ref(false)
 const erro = ref('')
@@ -128,6 +130,7 @@ function nomeMes(mes: string) {
 }
 
 async function carregar() {
+  if (!dia.value) return
   loading.value = true
   erro.value = ''
   try {
@@ -186,7 +189,9 @@ watch(dia, () => carregar())
 // Sem `await` no setup: componente síncrono. Com top-level await, trocar de uma
 // visão assíncrona pra outra (Resumo → Fechamento) quebrava o patch do DOM
 // (NotFoundError insertBefore) por não ter <Suspense> próprio.
-onMounted(() => carregar())
+onMounted(() => {
+  dia.value = ontemISO() // dispara o watch → carregar()
+})
 </script>
 
 <template>
@@ -345,7 +350,7 @@ onMounted(() => carregar())
             </tbody>
           </table>
         </div>
-        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Pedidos pela data da venda, do dia 1º até o dia escolhido. "Recebido" é o que já entrou na conta; "Sobrou" = recebido − custo − reembolsos (cancelado não carrega custo). O fechamento completo, com a fatura do ML e a prova dos nove do caixa, está em "Fechamento do mês".</div>
+        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Pedidos pela data da venda, do dia 1º até o dia escolhido. "Recebido" é o que já entrou na conta; "Sobrou" = o que entrou (ou o previsto, enquanto a venda não libera) − custo − reembolsos; cancelado não carrega custo. O fechamento completo, com a fatura do ML e a prova dos nove do caixa, está em "Fechamento do mês".</div>
       </div>
     </template>
   </div>

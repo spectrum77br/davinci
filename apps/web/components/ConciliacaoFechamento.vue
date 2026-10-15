@@ -91,7 +91,7 @@ function nomeMes(mes: string) {
   return new Date(mes + '-15T12:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
 }
 
-const mes = ref(mesLocal(new Date()))
+const mes = ref('') // definido no cliente (onMounted), no fuso do navegador
 const dados = ref<Fechamento | null>(null)
 const loading = ref(false)
 const erro = ref('')
@@ -102,7 +102,8 @@ const lojaSel = computed({
 })
 const sitLabel = (k: string) => SITUACOES.find((s) => s.key === k)?.label || k
 const somaResumo = computed(() => (dados.value?.fatura.resumo_cobrancas || []).reduce((s, c) => s + (c.valor || 0), 0))
-const somaBonus = computed(() => (dados.value?.fatura.resumo_bonificacoes || []).reduce((s, c) => s + (c.valor || 0), 0))
+// O ML manda as bonificações como valor negativo (abatem a fatura); aqui vão em módulo.
+const somaBonus = computed(() => (dados.value?.fatura.resumo_bonificacoes || []).reduce((s, c) => s + Math.abs(c.valor || 0), 0))
 const provaCaixa = computed(() => {
   const c = dados.value?.caixa
   if (!c || c.saldo_inicial === null) return null
@@ -110,7 +111,7 @@ const provaCaixa = computed(() => {
 })
 
 async function carregar() {
-  if (!props.loja) return
+  if (!props.loja || !mes.value) return
   loading.value = true
   erro.value = ''
   try {
@@ -133,7 +134,9 @@ function bateTexto(b: boolean | null, ok = 'bate', ruim = 'não bate', nada = 's
 
 defineExpose({ carregar })
 watch([() => props.loja, mes], () => carregar())
-onMounted(() => carregar())
+onMounted(() => {
+  mes.value = mesLocal(new Date()) // dispara o watch → carregar()
+})
 </script>
 
 <template>
@@ -181,7 +184,7 @@ onMounted(() => carregar())
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Saiu depois (mediação, estorno)</td><td class="px-3 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(dados.vendas.estornos) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Custo dos produtos</td><td class="px-3 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(dados.vendas.custo) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Reembolsos</td><td class="px-3 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(dados.vendas.reembolso) }}</td></tr>
-              <tr class="border-b bg-muted/40"><td class="px-3 py-1 font-bold">Sobrou</td><td class="px-3 py-1 text-right tabular-nums font-bold" :class="sinal(dados.vendas.sobrou, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.vendas.sobrou) }}</td></tr>
+              <tr class="border-b bg-muted/40"><td class="px-3 py-1 font-bold">Sobrou <span class="font-normal text-muted-foreground">(pedido sem liberação entra pelo previsto)</span></td><td class="px-3 py-1 text-right tabular-nums font-bold" :class="sinal(dados.vendas.sobrou, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.vendas.sobrou) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Margem sobre o custo</td><td class="px-3 py-1 text-right tabular-nums font-bold">{{ fmtPct(dados.vendas.margem) }}</td></tr>
               <tr><td class="px-3 py-1 text-muted-foreground">Finalizados</td><td class="px-3 py-1 text-right tabular-nums">{{ dados.vendas.finalizados }} de {{ dados.vendas.pedidos }}</td></tr>
             </tbody>
@@ -234,9 +237,9 @@ onMounted(() => carregar())
             <tbody>
               <tr class="bg-muted/40"><td class="px-3 py-1 font-bold" colspan="2">O que o ML diz (resumo)</td></tr>
               <tr v-for="c in dados.fatura.resumo_cobrancas" :key="'c' + c.tipo" class="border-b"><td class="px-3 py-1 text-muted-foreground">{{ c.label || c.tipo }} <span class="text-[10px]">{{ c.tipo }}</span></td><td class="px-3 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(c.valor) }}</td></tr>
-              <tr v-for="c in dados.fatura.resumo_bonificacoes" :key="'b' + c.tipo" class="border-b"><td class="px-3 py-1 text-muted-foreground">{{ c.label || c.tipo }} <span class="text-[10px]">{{ c.tipo }}</span></td><td class="px-3 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(c.valor) }}</td></tr>
-              <tr class="border-b"><td class="px-3 py-1 font-bold">Total da fatura (resumo)</td><td class="px-3 py-1 text-right tabular-nums font-bold">{{ fmtMoney(dados.fatura.resumo_total) }}</td></tr>
-              <tr v-if="dados.fatura.pago && dados.fatura.pago.total_collected !== undefined" class="border-b"><td class="px-3 py-1 text-muted-foreground">Já cobrado (descontado das vendas + pago) / em aberto</td><td class="px-3 py-1 text-right tabular-nums">{{ fmtMoney(dados.fatura.pago.total_collected) }} / {{ fmtMoney(dados.fatura.pago.total_debt) }}</td></tr>
+              <tr v-for="c in dados.fatura.resumo_bonificacoes" :key="'b' + c.tipo" class="border-b"><td class="px-3 py-1 text-muted-foreground">{{ c.label || c.tipo }} <span class="text-[10px]">{{ c.tipo }}</span></td><td class="px-3 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(Math.abs(c.valor || 0)) }}</td></tr>
+              <tr class="border-b"><td class="px-3 py-1 font-bold">Total da fatura (resumo, já com as bonificações)</td><td class="px-3 py-1 text-right tabular-nums font-bold">{{ fmtMoney(dados.fatura.resumo_total) }}</td></tr>
+              <tr v-if="dados.fatura.pago && dados.fatura.pago.total_collected !== undefined" class="border-b"><td class="px-3 py-1 text-muted-foreground">Já cobrado (descontado das vendas + pago) / em aberto</td><td class="px-3 py-1 text-right tabular-nums">{{ fmtMoney(Math.abs(dados.fatura.pago.total_collected || 0)) }} / {{ fmtMoney(Math.abs(dados.fatura.pago.total_debt || 0)) }}</td></tr>
               <tr class="bg-muted/40"><td class="px-3 py-1 font-bold" colspan="2">O que lemos linha a linha (detalhes)</td></tr>
               <tr v-for="d in dados.fatura.detalhes_por_sub_tipo" :key="String(d.sub_tipo) + d.tipo" class="border-b"><td class="px-3 py-1 text-muted-foreground">{{ tipoMov(d.tipo) }} <span class="text-[10px]">{{ d.sub_tipo }} · {{ d.linhas }} linhas</span></td><td class="px-3 py-1 text-right tabular-nums" :class="(d.bonificado || 0) > 0 ? 'text-emerald-700' : 'text-red-600'">{{ (d.bonificado || 0) > 0 ? fmtMoney(d.bonificado) : '− ' + fmtMoney(d.cobrado) }}</td></tr>
               <tr v-if="!dados.fatura.detalhes_por_sub_tipo.length"><td class="px-3 py-2 text-muted-foreground" colspan="2">nenhum detalhe lido neste período</td></tr>

@@ -61,7 +61,7 @@ type Sugestao = { pedido_bling: string; numeroloja: string | null; data_pedido: 
 const { api } = useApi()
 const toasts = useToasts()
 
-const dia = ref(props.dia || ontemISO())
+const dia = ref('') // definido no cliente (onMounted), no fuso do navegador
 const mostrar = ref<'todos' | 'pendentes' | 'divergentes' | 'sem_pedido'>('todos')
 const q = ref('')
 const dados = ref<Extrato | null>(null)
@@ -81,7 +81,7 @@ const pct = computed(() => {
 })
 
 async function carregar() {
-  if (!props.loja) return
+  if (!props.loja || !dia.value) return
   loading.value = true
   erro.value = ''
   try {
@@ -173,7 +173,9 @@ function rowCls(m: Mov) {
 watch(() => props.loja, () => carregar())
 watch(() => props.dia, (v) => { if (v && v !== dia.value) dia.value = v })
 watch([dia, mostrar], () => carregar())
-onMounted(() => carregar())
+onMounted(() => {
+  dia.value = props.dia || ontemISO() // dispara o watch → carregar()
+})
 </script>
 
 <template>
