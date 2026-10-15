@@ -113,7 +113,7 @@ const MARKETPLACES = [
   { key: 'ml', label: 'Mercado Livre', ativo: true },
   { key: 'shopee', label: 'Shopee', ativo: true },
   { key: 'amazon', label: 'Amazon', ativo: false },
-  { key: 'tiktok', label: 'TikTok', ativo: false },
+  { key: 'tiktok', label: 'TikTok', ativo: true },
 ]
 type Visao = 'resumo' | 'pedidos' | 'extrato' | 'fechamento'
 const VISOES: Array<{ key: Visao; label: string; ativo: boolean }> = [
@@ -164,7 +164,7 @@ const motivoDraft = ref('')
 const lojaAtual = computed(() => lojas.value.find((l) => l.conta === loja.value) || null)
 // Cada aba mostra só as lojas da plataforma dela (15/10: Shopee entrou).
 const lojasDaAba = computed(() => lojas.value.filter((l) => l.platform === tab.value))
-const nomeVenda = computed(() => (tab.value === 'shopee' ? 'Venda Shopee' : 'Venda ML'))
+const nomeVenda = computed(() => (tab.value === 'shopee' ? 'Venda Shopee' : tab.value === 'tiktok' ? 'Venda TikTok' : 'Venda ML'))
 function escolherLojaDaAba() {
   const primeira = lojasDaAba.value[0]
   if (!primeira) {
@@ -347,7 +347,7 @@ function extrasTitulo(p: Pedido) {
   if (p.venda_extras == null) return ''
   const cupom = p.venda_cupom || 0
   const outros = Math.round((p.venda_extras - cupom) * 100) / 100
-  if (p.venda_extras < -0.005) return `a plataforma acrescentou ${fmtMoney(-p.venda_extras)} (subsídio de frete, cashback)`
+  if (p.venda_extras < -0.005) return `a plataforma acrescentou ${fmtMoney(-p.venda_extras)} (${tab.value === 'tiktok' ? 'subsídio da TikTok no produto' : 'subsídio de frete, cashback'})`
   const partes = [`cupom da loja ${fmtMoney(cupom)}`]
   if (Math.abs(outros) > 0.005) partes.push(`parcelamento / outros ${fmtMoney(outros)}`)
   return partes.join(' · ')
@@ -692,7 +692,7 @@ await carregar()
                   </tr>
                   <tr v-if="originalAberto === m.id" class="border-b bg-muted/40">
                     <td colspan="5" class="px-2 py-1.5">
-                      <div class="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">{{ m.origem === 'ml_fatura' ? 'Detalhe original da fatura (Mercado Livre)' : m.origem === 'shopee_carteira' ? 'Lançamento original da carteira (Shopee)' : 'Linha original do relatório de liberações (Mercado Pago)' }}</div>
+                      <div class="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">{{ m.origem === 'ml_fatura' ? 'Detalhe original da fatura (Mercado Livre)' : m.origem === 'shopee_carteira' ? 'Lançamento original da carteira (Shopee)' : m.origem === 'tiktok_extrato' ? 'Transação original do extrato diário (TikTok)' : 'Linha original do relatório de liberações (Mercado Pago)' }}</div>
                       <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
                         <template v-for="(v, k) in m.original || {}" :key="String(k)">
                           <span class="font-mono text-muted-foreground">{{ k }}</span><span class="break-all">{{ typeof v === 'object' ? JSON.stringify(v) : String(v) }}</span>

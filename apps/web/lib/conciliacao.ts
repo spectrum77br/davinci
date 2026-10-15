@@ -51,6 +51,7 @@ export const TIPOS_MOV: Record<string, string> = {
   saque_confirmado: 'Saque confirmado',
   saque_cancelado: 'Saque cancelado',
   ajuste_shopee: 'Ajuste da Shopee',
+  ajuste_tiktok: 'Ajuste da TikTok',
   publicidade: 'Publicidade (Ads)',
   credito: 'Crédito',
   imposto: 'Imposto',
