@@ -93,6 +93,7 @@ _ROBOS_COM_SWEEP = (
     "vigia_robo_leitura",
     "vigia_etiquetas",
     "vigia_nota_cheia",
+    "vigia_conciliacao",
 )
 # chave do robô → fábrica que devolve a coroutine da varredura (import tardio).
 RUNNERS: dict[str, Callable[[], Callable[[], Awaitable[dict]]]] = {
@@ -120,9 +121,7 @@ async def _nomes_threema(session: AsyncSession) -> dict[str, str]:
     return {d["id"]: d["nome"] for d in await threema.diretorio(session)}
 
 
-def _robo_out(
-    robo: OuvidoriaRobo, contagens: dict, agora: datetime, nomes: dict[str, str]
-) -> dict:
+def _robo_out(robo: OuvidoriaRobo, contagens: dict, agora: datetime, nomes: dict[str, str]) -> dict:
     ids, origem = svc.destinatarios(robo, robo.chave)
     c = contagens.get(robo.chave) or {}
     return {
@@ -138,9 +137,7 @@ def _robo_out(
         "arquivado_em": robo.arquivado_em,
         "arquivado_por": robo.arquivado_por,
         "threema_recipients": robo.threema_recipients,
-        "threema_destinatarios": [
-            DestinatarioOut(id=i, nome=nomes.get(i, i)) for i in ids
-        ],
+        "threema_destinatarios": [DestinatarioOut(id=i, nome=nomes.get(i, i)) for i in ids],
         "threema_origem": origem,
         "reaviso_horas": robo.reaviso_horas,
         "config": svc.config_do_robo(robo, robo.chave),
@@ -182,9 +179,7 @@ async def listar_robos(
     await session.commit()
     agora = datetime.now(UTC)
     robos = (
-        (await session.execute(select(OuvidoriaRobo).order_by(OuvidoriaRobo.nome)))
-        .scalars()
-        .all()
+        (await session.execute(select(OuvidoriaRobo).order_by(OuvidoriaRobo.nome))).scalars().all()
     )
     contagens = await svc.contagens_por_robo(session, agora)
     nomes = await _nomes_threema(session)
@@ -293,9 +288,7 @@ async def criar_contato_threema(
             detail={"code": "contato_invalido", "message": str(e)},
         ) from e
     await session.commit()
-    logger.info(
-        "ouvidoria_threema_contato", contato=body.id.strip().upper(), por=_autor(user)
-    )
+    logger.info("ouvidoria_threema_contato", contato=body.id.strip().upper(), por=_autor(user))
     return [DestinatarioOut(**d) for d in await threema.diretorio(session)]
 
 
@@ -335,9 +328,7 @@ async def editar_robo(
         config = svc.validar_config(chave, body.config) if body.config is not None else None
         # A tela manda pessoas (nome ou ID); nome vira ID pelo diretório.
         destinatarios = (
-            svc.resolver_destinatarios(
-                body.threema_recipients, await threema.diretorio(session)
-            )
+            svc.resolver_destinatarios(body.threema_recipients, await threema.diretorio(session))
             if body.threema_recipients is not None
             else None
         )
@@ -355,9 +346,7 @@ async def editar_robo(
         agora = datetime.now(UTC)
         robo.arquivado_em = agora if body.arquivado else None
         robo.arquivado_por = _autor(user) if body.arquivado else None
-        logger.info(
-            "ouvidoria_arquivado", robo=chave, arquivado=body.arquivado, por=_autor(user)
-        )
+        logger.info("ouvidoria_arquivado", robo=chave, arquivado=body.arquivado, por=_autor(user))
     if body.threema_recipients is not None:
         robo.threema_recipients = destinatarios
     if body.reaviso_horas is not None:
@@ -406,7 +395,7 @@ async def rodar_robo(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("ouvidoria", "edit"))],
 ) -> RodarOut:
-    """"Rodar agora": agenda uma varredura em background e responde na hora.
+    """ "Rodar agora": agenda uma varredura em background e responde na hora.
     Robô desligado também roda (a pessoa pediu explicitamente) — o modo só
     governa o tick automático. Sem runner cadastrado → 409 `robo_sem_runner`.
 
@@ -420,9 +409,7 @@ async def rodar_robo(
     if fabrica is None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"code": "robo_sem_runner"})
     if chave in _EM_EXECUCAO or await _rodada_em_andamento(session, chave):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, detail={"code": "rodada_em_andamento"}
-        )
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"code": "rodada_em_andamento"})
     agora = datetime.now(UTC)
     if robo.ultima_rodada_em and agora - robo.ultima_rodada_em < timedelta(seconds=COOLDOWN_S):
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"code": "rodada_recente"})
@@ -432,9 +419,7 @@ async def rodar_robo(
         # Robô no catálogo cujo serviço não veio neste deploy: a tela diz o
         # mesmo que diria pra um robô sem runner, em vez de 500.
         logger.warning("ouvidoria_runner_sem_servico", robo=chave, error=str(e)[:200])
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, detail={"code": "robo_sem_runner"}
-        ) from e
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"code": "robo_sem_runner"}) from e
     _EM_EXECUCAO.add(chave)
 
     async def _rodar() -> None:
@@ -513,8 +498,7 @@ async def listar_ocorrencias(
         conds.append(or_(Oc.fechada_em.is_(None), Oc.fechada_em >= corte))
 
     total = int(
-        (await session.execute(select(func.count()).select_from(Oc).where(*conds))).scalar()
-        or 0
+        (await session.execute(select(func.count()).select_from(Oc).where(*conds))).scalar() or 0
     )
     # Abertas primeiro (as que precisam de pessoa no topo), depois as mais
     # recentes — é a ordem em que alguém olha a tela.
@@ -535,8 +519,7 @@ async def listar_ocorrencias(
         .all()
     )
     robos = {
-        r.chave: r.nome
-        for r in (await session.execute(select(OuvidoriaRobo))).scalars().all()
+        r.chave: r.nome for r in (await session.execute(select(OuvidoriaRobo))).scalars().all()
     }
     contagens = await svc.contagens_por_robo(session, agora)
     return OcorrenciasPage(

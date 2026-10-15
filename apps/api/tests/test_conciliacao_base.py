@@ -1490,3 +1490,98 @@ def test_cancelado_finaliza_de_cara():
     )
     assert out["etapa"] == "finalizado" and out["etapa_por"] == "robô"
     assert out["etapa_motivo"] == "venda desfeita, zero a zero"
+
+
+# --- 15/10: fechar o dia sozinho, vigia de conciliação, cancelado pelo Bling -------
+
+
+async def test_fechar_dias_prontos_so_fecha_dia_100_por_cento(db, make_user):
+    from sqlalchemy import select
+
+    from app.models import ConciliacaoDia
+    from app.services.conciliacao_jobs import fechar_dias_prontos
+
+    loja, _integ = await _loja(db, make_user)
+    movs = await _dia_de_exemplo(db, loja)
+    # 13/10 tem uma linha sem dono: fica aberto
+    r = await fechar_dias_prontos(db, loja)
+    assert r["fechados"] == [] and "2026-10-13" in r["abertos"]
+    # deu destino à linha: o robô fecha
+    movs["pendente"].classificacao = "ajuste"
+    await db.commit()
+    r = await fechar_dias_prontos(db, loja)
+    assert r["fechados"] == ["2026-10-13"]
+    dia = (await db.execute(select(ConciliacaoDia))).scalar_one()
+    assert dia.fechado_por == "robô" and dia.pendentes == 0 and dia.linhas == 5
+    assert dia.saldo_informado == Decimal("200.46")
+    # já fechado: não mexe de novo
+    r = await fechar_dias_prontos(db, loja)
+    assert r["fechados"] == [] and "2026-10-13" not in r["abertos"]
+
+
+async def test_vigia_conciliacao_registra_o_onde_agir(db, make_user):
+    from sqlalchemy import select
+
+    from app.models import OuvidoriaOcorrencia
+    from app.services.vigia_conciliacao import ROBO, vigia_conciliacao_run
+
+    loja, _integ = await _loja(db, make_user)
+    await _dia_de_exemplo(db, loja)  # 13/10: 1 linha sem dono + 1 estornado depois
+    loja.ultimo_extrato_em = datetime.now(UTC)
+    await db.commit()
+    # o vigia olha "ontem": no teste o dia de exemplo é 13/10, então olha com esse dia
+    import app.routers.conciliacao as rc
+
+    original = rc.montar_resumo
+
+    async def ontem_13(session, dia=None):
+        return await original(session, date(2026, 10, 13))
+
+    rc.montar_resumo = ontem_13
+    try:
+        r = await vigia_conciliacao_run(db)
+    finally:
+        rc.montar_resumo = original
+    assert r["lojas"] == 1 and r["itens"] == 2 and r["novas"] == 2
+    ocorrencias = (
+        (
+            await db.execute(
+                select(OuvidoriaOcorrencia).where(OuvidoriaOcorrencia.robo_chave == ROBO)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    chaves = {o.chave for o in ocorrencias}
+    assert chaves == {"jlas2:extrato:", "jlas2:pedidos:situacao=estornado_depois"}
+    extrato = next(o for o in ocorrencias if o.chave == "jlas2:extrato:")
+    assert extrato.link == "/conciliacao?loja=jlas2&visao=extrato&dia=2026-10-13"
+    assert extrato.conta == "jlas2" and extrato.plataforma == "Mercado Livre"
+    assert "pra agir" in r["resumo"]
+
+
+def test_cancelado_no_bling_sem_dinheiro_e_cancelado():
+    from app.services.conciliacao_calculo import situacao_do_pedido
+
+    agora = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    out = situacao_do_pedido(
+        agora=agora,
+        data_pedido=datetime(2026, 10, 13, 12, tzinfo=UTC),
+        bling_total=Decimal("1803.20"),
+        venda=None,
+        previsao=None,
+        movs_extrato=[],
+        fatura={},
+        bling_cancelado=True,
+    )
+    assert out["situacao"] == "cancelado" and "Bling" in out["motivo"]
+    out = situacao_do_pedido(
+        agora=agora,
+        data_pedido=datetime(2026, 10, 13, 12, tzinfo=UTC),
+        bling_total=Decimal("1803.20"),
+        venda=None,
+        previsao=None,
+        movs_extrato=[],
+        fatura={},
+    )
+    assert out["situacao"] == "sem_venda"

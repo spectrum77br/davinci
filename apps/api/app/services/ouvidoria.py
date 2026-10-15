@@ -328,7 +328,7 @@ ROBOS: dict[str, RoboDef] = {
         chave="vigia_robo_melhorenvio",
         nome="Vigia Robô Melhor Envio",
         descricao=(
-            "O robô do Mac mini da Makisa que faz o \"Suspender entrega\" no Melhor "
+            'O robô do Mac mini da Makisa que faz o "Suspender entrega" no Melhor '
             "Envio: robô sem sinal (Mac desligado ou dormindo, AdsPower fechado), "
             "pedido de suspensão parado na fila e suspensão que falhou com o "
             "pacote ainda a caminho."
@@ -351,7 +351,7 @@ ROBOS: dict[str, RoboDef] = {
         nome="Vigia Robô Leitura de Chamados",
         descricao=(
             "O robô do Mac mini da Makisa que lê no Seller Center o que a Shopee "
-            "escreveu nas devoluções (\"Histórico da Solicitação\") e traz pro "
+            'escreveu nas devoluções ("Histórico da Solicitação") e traz pro '
             "chamado: robô sem sinal (Mac desligado ou dormindo) e devolução que "
             "ficou sem leitura (login caído, perfil em uso, loja sem perfil no "
             "AdsPower, página mudada)."
@@ -426,6 +426,25 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
+    "vigia_conciliacao": RoboDef(
+        chave="vigia_conciliacao",
+        nome="Vigia de Conciliação",
+        descricao=(
+            'O "Onde agir hoje" do painel Conciliação, uma vez por dia depois da '
+            "rodada de madrugada: linha do extrato sem dono, saldo que não bate, "
+            "extrato não lido, pedido reaberto, venda sem liberação vencida, recebido "
+            "a menos, estornado depois. Dia 100% casado o robô da rodada fecha sozinho."
+        ),
+        area="margem",
+        cadencia_texto="1× por dia (07:00)",
+        plataformas=("ml", "shopee"),
+        config_padrao={"cadencia_min": 24 * 60},
+        env_threema_recipients=None,
+        contexto="margem",
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 60, 48 * 60, "min"),
+        },
+    ),
 }
 
 # Threema ID: 8 caracteres (A-Z, 0-9); ID de gateway começa com "*".
@@ -462,9 +481,7 @@ def validar_config(chave: str, config: dict) -> dict:
     return out
 
 
-def resolver_destinatarios(
-    raw: str | None, diretorio: list[dict[str, str]]
-) -> str | None:
+def resolver_destinatarios(raw: str | None, diretorio: list[dict[str, str]]) -> str | None:
     """Campo Threema da tela → texto limpo de IDs, aceitando NOME ou ID.
 
     A tela mostra pessoas pelo nome (Admin › Usuários / `.env`), então quem
@@ -494,7 +511,7 @@ def resolver_destinatarios(
                 continue
             raise OuvidoriaError(
                 "destinatarios_invalidos",
-                f"Não conheço \"{parte}\" — cadastre o Threema dessa pessoa em "
+                f'Não conheço "{parte}" — cadastre o Threema dessa pessoa em '
                 "Admin › Usuários (ou informe o ID de 8 letras/números)",
             )
         ids.append(rid)
@@ -541,8 +558,7 @@ async def sincronizar_catalogo(session: AsyncSession) -> None:
     só no INSERT: robô novo nasce silencioso, e quem a pessoa já ligou (ou
     desligou) na tela fica como está. Commit fica com o caller."""
     existentes = {
-        r.chave: r
-        for r in (await session.execute(select(OuvidoriaRobo))).scalars().all()
+        r.chave: r for r in (await session.execute(select(OuvidoriaRobo))).scalars().all()
     }
     for d in ROBOS.values():
         row = existentes.get(d.chave)
@@ -626,9 +642,7 @@ def rotulos_config(chave: str) -> dict[str, str]:
 # ─── ocorrências ───────────────────────────────────────────────────────────
 
 
-async def _aberta(
-    session: AsyncSession, robo_chave: str, chave: str
-) -> OuvidoriaOcorrencia | None:
+async def _aberta(session: AsyncSession, robo_chave: str, chave: str) -> OuvidoriaOcorrencia | None:
     return (
         await session.execute(
             select(OuvidoriaOcorrencia).where(
@@ -922,9 +936,7 @@ class Rodada:
             # A transação pode estar quebrada (erro de banco): limpa antes
             # de gravar a rodada, senão o INSERT abaixo também falha.
             await self.session.rollback()
-            logger.warning(
-                "ouvidoria_rodada_falhou", robo=self.robo_chave, erro=erro
-            )
+            logger.warning("ouvidoria_rodada_falhou", robo=self.robo_chave, erro=erro)
         duracao_ms = int((self.terminada_em - self.iniciada_em).total_seconds() * 1000)
         self.session.add(
             OuvidoriaRodada(
@@ -1010,7 +1022,7 @@ def link_painel(robo_chave: str) -> str:
 def texto_aviso(
     nome_robo: str, pendentes: list[OuvidoriaOcorrencia], *, link: str | None = None
 ) -> str:
-    """"<robô> — N ocorrência(s):" + uma linha por ocorrência
+    """ "<robô> — N ocorrência(s):" + uma linha por ocorrência
     (conta · pedido · título) e "→ ação" quando a ação muda em relação à
     linha anterior (as linhas vêm agrupadas por ação, então cada ação sai
     uma vez), e o `link` do painel por último. Corta em MAX_LINHAS_AVISO
@@ -1230,9 +1242,7 @@ async def resumo_ocorrencias(session: AsyncSession, agora: datetime | None = Non
 async def gc_rodadas(session: AsyncSession, dias: int = 30) -> int:
     """Apaga rodadas mais velhas que `dias`. Devolve quantas."""
     corte = datetime.now(UTC) - timedelta(days=dias)
-    res = await session.execute(
-        delete(OuvidoriaRodada).where(OuvidoriaRodada.iniciada_em < corte)
-    )
+    res = await session.execute(delete(OuvidoriaRodada).where(OuvidoriaRodada.iniciada_em < corte))
     await session.flush()
     return int(res.rowcount or 0)
 

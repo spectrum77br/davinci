@@ -2210,6 +2210,12 @@ async def resumo_geral(
     _user: Annotated[User, Depends(_PERM_PAINEL)],
     dia: date | None = None,
 ) -> dict[str, Any]:
+    return await montar_resumo(session, dia)
+
+
+async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[str, Any]:
+    """O Resumo (tela de entrada) e a lista "Onde agir hoje" — a mesma lista que o
+    Vigia de Conciliação registra na Ouvidoria e manda no Threema (15/10)."""
     dia = dia or _ontem()
     agora = datetime.now(UTC)
     mes_ini = dia.replace(day=1)

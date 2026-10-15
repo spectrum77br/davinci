@@ -111,6 +111,7 @@ def situacao_do_pedido(
     previsao: datetime | None,
     movs_extrato: list[ConciliacaoMovimento],
     fatura: dict[str, Decimal],
+    bling_cancelado: bool = False,
 ) -> dict[str, Any]:
     """A parte pura do recálculo: devolve os números do extrato, a situação e o motivo."""
     dinheiro = [m for m in movs_extrato if m.tipo not in TIPOS_RESERVA]
@@ -146,7 +147,12 @@ def situacao_do_pedido(
         and not (_d(venda.fee_amount) or ZERO)
         and (venda_valor or ZERO) > ZERO
     )
-    if (venda is None or venda_vazia) and not dinheiro:
+    if bling_cancelado and not dinheiro and not liberacoes and (venda is None or venda_vazia):
+        # Shopee (15/10): venda cancelada não ganha escrow, então a plataforma nunca
+        # "lê" a venda — o sinal é o Bling, e nada entrou. Zero a zero.
+        situacao = "cancelado"
+        motivo = "cancelado no Bling, nada entrou"
+    elif (venda is None or venda_vazia) and not dinheiro:
         situacao = "sem_venda"
         motivo = (
             "a plataforma ainda não calculou a venda (pedido novo ou cancelado)"
@@ -465,12 +471,14 @@ async def recalcular_loja(
             [(_d(i.preco_custo) or ZERO) * Decimal(int(i.item_quantidade or 1)) for i in itens]
         )
         previsao = _previsao_do_billing(venda.raw) if venda else None
+        nome_bling = str(nomes_situacao.get(str(cab.situacao or ""), cab.situacao) or "")
         calc = situacao_do_pedido(
             agora=agora,
             data_pedido=cab.data,
             bling_total=bling_produtos,
             venda=venda,
             previsao=previsao,
+            bling_cancelado=nome_bling.strip().lower() == "cancelado",
             movs_extrato=extrato,
             fatura=fatura,
         )

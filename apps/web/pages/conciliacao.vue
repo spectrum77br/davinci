@@ -371,6 +371,25 @@ watch([loja, dataFiltro, situacao, etapa], () => {
 watch(page, () => carregar())
 
 await carregarLojas()
+// Link do Vigia de Conciliação (Threema/Ouvidoria): /conciliacao?loja=&visao=extrato&dia= ou
+// ?loja=&visao=pedidos&situacao=|etapa= — abre direto no lugar certo (15/10).
+const q0 = useRoute().query
+if (typeof q0.loja === 'string') {
+  const alvo = lojas.value.find((l) => l.conta === q0.loja)
+  if (alvo) {
+    tab.value = alvo.platform
+    loja.value = alvo.conta
+    de.value = alvo.inicio
+  }
+}
+if (typeof q0.situacao === 'string') situacao.value = q0.situacao
+if (typeof q0.etapa === 'string') etapa.value = q0.etapa
+if (q0.visao === 'extrato') {
+  extratoDia.value = typeof q0.dia === 'string' ? q0.dia : ''
+  visao.value = 'extrato'
+} else if (q0.visao === 'pedidos') {
+  visao.value = 'pedidos'
+}
 await carregar()
 </script>
 

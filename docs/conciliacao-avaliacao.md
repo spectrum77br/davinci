@@ -463,3 +463,14 @@ OK do Vinicius: "tem meu ok vamos fazer ... pegamos do dia 01". Loja **Jlas** (S
 
 **Os 5 "recebido a menos" da Jlas, resolvidos (15/10 ~10:00 BRT):** a Shopee só põe a comissão de **Afiliados** (`order_ams_commission_fee`) e a taxa de serviço final no escrow na hora de liberar; a Margem tinha lido dias antes. Diferenças fechavam ao centavo: 301267 e 301248 16,51 (14,48 + 2,03), 301039 20,52 (18,00 + 2,52), 300823 20,58 (18,05 + 2,53), 300858 73,04 (64,07 + 8,97). A carteira estava certa. Conserto: a cada rodada da Shopee, toda renda de pedido cuja leitura da Margem é mais velha que a liberação faz a Margem reler o escrow (`reler_escrow_liberados`, uma chamada por pedido, ~12 s cada pelo caminho da Margem). Depois da releitura: os 5 viraram "bateu" com a tarifa nova (717,53 / 294,52 / 271,00); Jlas = 35 bateu, 77 aguardando, 27 venda não lida. Sondagem que mostrou isso: `GET /sonda/shopee-escrow?conta=Jlas` (escrow gravado × agora × carteira). Efeito colateral bom: a Margem passa a mostrar o lucro certo nesses pedidos.
 - Pedidos dele na sequência (prontos, sem subir): rodapé do mês do Resumo escondido; Raio-X da Shopee com o "Real" preenchido pelo escrow da liberação e rótulos da Shopee; proposta do bloco "Dinheiro nas plataformas" (maquete `docs/img/conciliacao-dinheiro.png`) aguardando OK.
+
+
+---
+
+## 21. 15/10, fim da manhã — vigia no Threema, dia fecha sozinho, cancelado da Shopee
+
+OK do Vinicius: "1 pode fazer · 2 pode criar na lista do robô e deixa somente para enviar ao cairo · 3 ok pode fechar · Amazon por último, TikTok antes".
+
+- **Vigia de Conciliação** (`vigia_conciliacao`, Ouvidoria › Robôs, área Margem, 07:00 BRT = 10:00 UTC, depois da rodada de madrugada): pega a lista "Onde agir hoje" do Resumo (a mesma função `montar_resumo`) e registra cada item como ocorrência (linha sem dono / saldo não bate / extrato não lido / reaberto / vencido / recebido a menos / estornado depois); a Ouvidoria manda UMA mensagem no Threema com o pendente e fecha sozinha o que sumiu. Item "dia pronto pra fechar" não vira ocorrência. Destinatário: migration 0401 cadastra o robô já com o Threema do usuário "cairo…" (Admin › Usuários); se não achar, nasce `silencioso` (registra, não avisa) — nunca cai na lista geral. O link da ocorrência abre o painel no lugar certo (`/conciliacao?loja=&visao=extrato&dia=` ou `visao=pedidos&situacao=|etapa=`).
+- **Dia fecha sozinho** (`fechar_dias_prontos`, no fim de cada rodada): dia com todas as linhas com destino e saldo batendo é fechado "pelo robô" (mesma regra do botão). Reabrir continua à mão. Dia com linha sem dono ou saldo diferente fica aberto e aparece no Resumo e no vigia.
+- **Cancelado pelo Bling**: pedido com situação "Cancelado" no Bling, sem venda com valor na plataforma e sem nenhum dinheiro, vira "Cancelado" (custo 0, finaliza de cara). Resolve os cancelados da Shopee, que nunca ganham escrow (15 dos 27 "venda não lida" da Jlas).

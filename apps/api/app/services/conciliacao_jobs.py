@@ -10,16 +10,18 @@ grava em sessão própria, porque o refresh token do ML é de uso único.
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
-from app.models import ConciliacaoLoja, Integration
+from app.models import ConciliacaoDia, ConciliacaoLoja, Integration
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.atendimento.clientes import cliente_da_integracao
 from app.services.conciliacao_calculo import recalcular_loja
@@ -121,6 +123,15 @@ async def sincronizar_loja(
                     resultado["recalculo"] = {"erro": loja.ultimo_erro}
                     logger.exception("conciliacao_recalculo_unhandled", loja=loja.conta)
                 await session.commit()
+            if recalculo:
+                # 15/10 (Vinicius: "ok pode fechar"): dia 100% casado e saldo batendo
+                # fecha sozinho, "fechado pelo robô". Reabrir continua à mão.
+                try:
+                    resultado["dias"] = await fechar_dias_prontos(session, loja)
+                except Exception as e:  # noqa: BLE001
+                    resultado["dias"] = {"erro": f"{type(e).__name__}: {str(e)[:200]}"}
+                    logger.exception("conciliacao_fechar_dias_unhandled", loja=loja.conta)
+                await session.commit()
             if all(
                 "erro" not in (resultado.get(k) or {}) for k in ("fatura", "extrato", "recalculo")
             ):
@@ -144,4 +155,62 @@ async def rodar_todas(*, fatura: bool, extrato: bool, recalculo: bool) -> list[d
                 integration_id, fatura=fatura, extrato=extrato, recalculo=recalculo
             )
         )
+    return saida
+
+
+FECHADO_PELO_ROBO = "robô"
+_BRT = ZoneInfo("America/Sao_Paulo")
+
+
+async def fechar_dias_prontos(
+    session: AsyncSession, loja: ConciliacaoLoja, *, maximo_dias: int = 31
+) -> dict[str, Any]:
+    """Fecha sozinho todo dia (até ontem) em que toda linha tem destino e o saldo
+    bate — a mesma regra do botão "Fechar o dia", só que sem ninguém clicar.
+    Dia com linha sem dono ou saldo diferente fica aberto e aparece no Resumo."""
+    from app.routers.conciliacao import _movimentos_do_dia, _totais_do_dia
+
+    agora = datetime.now(UTC)
+    ontem = datetime.now(_BRT).date() - timedelta(days=1)
+    inicio = max(loja.inicio, ontem - timedelta(days=maximo_dias))
+    rows = (
+        await session.execute(
+            select(ConciliacaoDia).where(
+                ConciliacaoDia.integration_id == loja.integration_id,
+                ConciliacaoDia.dia >= inicio,
+            )
+        )
+    ).scalars()
+    por_dia: dict[date, ConciliacaoDia] = {r.dia: r for r in rows}
+    saida: dict[str, Any] = {"fechados": [], "abertos": []}
+    d = inicio
+    while d <= ontem:
+        existente = por_dia.get(d)
+        if existente is not None and existente.fechado_em is not None:
+            d += timedelta(days=1)
+            continue
+        movs = await _movimentos_do_dia(session, loja, d)
+        if movs:
+            pendentes = [m for m in movs if not m.pedido_bling and not m.classificacao]
+            totais = _totais_do_dia(movs)
+            dif = totais["diferenca"]
+            if not pendentes and dif is not None and abs(dif) <= 0.05:
+                row = existente
+                if row is None:
+                    row = ConciliacaoDia(integration_id=loja.integration_id, dia=d)
+                    session.add(row)
+                for k in ("saldo_inicial", "creditos", "debitos", "saldo_final", "saldo_informado"):
+                    v = totais[k]
+                    setattr(row, k, Decimal(str(v)) if v is not None else None)
+                row.linhas = totais["linhas"]
+                row.pendentes = 0
+                row.fechado_em = agora
+                row.fechado_por = FECHADO_PELO_ROBO
+                saida["fechados"].append(d.isoformat())
+            else:
+                saida["abertos"].append(d.isoformat())
+        d += timedelta(days=1)
+    await session.flush()
+    if saida["fechados"]:
+        logger.info("conciliacao_dias_fechados_pelo_robo", loja=loja.conta, dias=saida["fechados"])
     return saida

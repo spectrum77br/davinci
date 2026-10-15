@@ -153,9 +153,7 @@ async def _produtos_de_familia_com_irmao(session) -> list:
     publicado."""
     linhas = (
         await session.execute(
-            select(Product.id, Product.sku).where(
-                Product.situacao == "A", Product.sku.is_not(None)
-            )
+            select(Product.id, Product.sku).where(Product.situacao == "A", Product.sku.is_not(None))
         )
     ).all()
     por_familia: dict[str, list] = {}
@@ -166,7 +164,9 @@ async def _produtos_de_familia_com_irmao(session) -> list:
     return [pid for ids in por_familia.values() if len(ids) >= 2 for pid in ids]
 
 
-async def send_otp_email(ctx: dict, *, email: str, prefix: str, code: str, ttl_minutes: int) -> None:
+async def send_otp_email(
+    ctx: dict, *, email: str, prefix: str, code: str, ttl_minutes: int
+) -> None:
     sender = get_email_sender()
     html = render_otp_html(prefix=prefix, code=code, ttl_minutes=ttl_minutes)
     text_body = (
@@ -319,7 +319,9 @@ async def sync_all_run(
                             )
                             .distinct()
                         )
-                    ).scalars().all()
+                    )
+                    .scalars()
+                    .all()
                     if pids
                     else []
                 )
@@ -332,13 +334,14 @@ async def sync_all_run(
                                     ProductLink.product_id.in_(pids),
                                     or_(
                                         ProductLink.integration_id.in_(iids),
-                                        ProductLink.platform
-                                        == IntegrationPlatform.BLING,
+                                        ProductLink.platform == IntegrationPlatform.BLING,
                                     ),
                                 )
                             )
                         )
-                    ).scalars().all()
+                    )
+                    .scalars()
+                    .all()
                     if pids
                     else []
                 )
@@ -369,9 +372,7 @@ async def sync_all_run(
             # before pushing to marketplaces. (TTL is now 0 anyway, but the
             # flag stays explicit so the intent is clear if the constant
             # changes later.)
-            orch = SyncOrchestrator(
-                s, user_id=uid, job=job, force=force, force_bling_refresh=True
-            )
+            orch = SyncOrchestrator(s, user_id=uid, job=job, force=force, force_bling_refresh=True)
             # SSH delta #1 — run_with_retry wraps run_parallel with up to
             # MAX_RESYNC_ROUNDS-1 retry passes for products whose links
             # came back RETRYABLE. The verify-before-send shortcut (delta
@@ -416,6 +417,7 @@ async def _notify_daily_sync_completed(s, user_id: UUID, job, report) -> None:
     )
     if us.notify_telegram:
         from app.services.telegram import TelegramClient
+
         tg = TelegramClient()
         await tg.safe_send(
             f"<b>DaVinci — Sync diário</b>\n{msg}",
@@ -439,24 +441,18 @@ async def sync_product_run(
 
     lock_key = f"sync_product:{pid}"
     async with session_scope() as s:
-        await s.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key}
-        )
+        await s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
         job = await s.get(BackgroundJob, jid)
         product = await s.get(Product, pid)
         if job is None or product is None:
-            logger.warning(
-                "sync_product_run_missing", job_id=job_id, product_id=product_id
-            )
+            logger.warning("sync_product_run_missing", job_id=job_id, product_id=product_id)
             return
         link_uuids = [UUID(i) for i in (link_ids or [])] or None
         # Webhook-triggered single-product sync: the payload carries the
         # current Bling stock (often 0 on sellout), so we trust it and
         # bypass both the ML B1 zero-guard and the 24h Bling refresh cache
         # — the webhook itself is the "fresh stock" signal.
-        orch = SyncOrchestrator(
-            s, user_id=uid, job=job, force=True, force_bling_refresh=True
-        )
+        orch = SyncOrchestrator(s, user_id=uid, job=job, force=True, force_bling_refresh=True)
         await orch.run([product], only_link_ids=link_uuids)
 
         # A soma por família publica o TOTAL de todos os lotes. Se a venda mexeu
@@ -553,14 +549,10 @@ async def _mark_ingest_job(job_id: UUID, **values: Any) -> None:
     try:
         async with session_scope() as s:
             await s.execute(
-                update(BackgroundJob)
-                .where(BackgroundJob.id == job_id)
-                .values(**values)
+                update(BackgroundJob).where(BackgroundJob.id == job_id).values(**values)
             )
     except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "ingest_job_mark_failed", job_id=str(job_id), err=str(e)[:200]
-        )
+        logger.warning("ingest_job_mark_failed", job_id=str(job_id), err=str(e)[:200])
 
 
 async def ingest_bling_order_run(
@@ -598,9 +590,7 @@ async def ingest_bling_order_run(
     lock_key = f"ingest_bling_order:{bling_order_id}"
     try:
         async with session_scope() as s:
-            await s.execute(
-                text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key}
-            )
+            await s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
             await run_ingest_bling_order(
                 s,
                 bling_order_id=int(bling_order_id),
@@ -648,9 +638,7 @@ async def sync_marketplace_financials_for_order_run(
     """Fetch marketplace financials for one Bling order after ingestion."""
     lock_key = f"marketplace_financials:{bling_order_id}"
     async with session_scope() as s:
-        await s.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key}
-        )
+        await s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
         await run_sync_marketplace_financials_for_bling_order(
             s,
             bling_order_id=int(bling_order_id),
@@ -683,13 +671,17 @@ async def marketing_agent_cycle(ctx: dict) -> None:
 
     async with session_scope() as s:
         rows = (
-            await s.execute(
-                select(MarketingAccount).where(
-                    MarketingAccount.agent_enabled.is_(True),
-                    MarketingAccount.arquivada_em.is_(None),
+            (
+                await s.execute(
+                    select(MarketingAccount).where(
+                        MarketingAccount.agent_enabled.is_(True),
+                        MarketingAccount.arquivada_em.is_(None),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         ids = [a.id for a in rows]
     for aid in ids:
         try:
@@ -727,12 +719,11 @@ async def marketing_full_sync(ctx: dict) -> None:
             except Exception as e:  # noqa: BLE001
                 logger.error(
                     "marketing_full_sync_platform_failed",
-                    platform=name, err=str(e)[:300],
+                    platform=name,
+                    err=str(e)[:300],
                 )
                 results[name] = f"error: {str(e)[:200]}"
-    summary = {
-        k: (len(v) if isinstance(v, list) else 0) for k, v in results.items()
-    }
+    summary = {k: (len(v) if isinstance(v, list) else 0) for k, v in results.items()}
     # Por status, para o log mostrar falha em vez de só "mercadolivre=18"
     # (até 07/10/2026 o 404 do ML aparecia como sucesso aqui).
     ml = results.get("mercadolivre")
@@ -1445,11 +1436,7 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                 restantes = alvos[indice:]
                 await _postagens.devolver_para_fila(
                     s,
-                    [
-                        a["id"]
-                        for a in restantes
-                        if a["plataforma"] != _postagens.PLATAFORMA_SHOPEE
-                    ],
+                    [a["id"] for a in restantes if a["plataforma"] != _postagens.PLATAFORMA_SHOPEE],
                     motivo="a fila do minuto encheu — volta no próximo ciclo",
                 )
                 # A linha da Shopee retomada tem `container_id` (o upload em
@@ -1504,9 +1491,7 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                     continue
 
                 arquivo = await s.get(MarketingCreativeFile, alvo["file_id"])
-                caminho = (
-                    Path(_settings.uploads_dir) / arquivo.file_rel if arquivo else None
-                )
+                caminho = Path(_settings.uploads_dir) / arquivo.file_rel if arquivo else None
                 # Conferir o arquivo ANTES do modo seco: um "DRY ok" com o
                 # vídeo sumido do disco seria um teste que mente.
                 if caminho is None or not caminho.is_file():
@@ -1550,9 +1535,7 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                         s,
                         alvo["id"],
                         caminho,
-                        orcamento_s=max(
-                            0.0, min(shopee_video_publicador.ORCAMENTO_TICK_S, sobra)
-                        ),
+                        orcamento_s=max(0.0, min(shopee_video_publicador.ORCAMENTO_TICK_S, sobra)),
                     )
                     if acao == shopee_video_publicador.PUBLICADO:
                         publicadas += 1
@@ -1563,12 +1546,16 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                     continue
 
                 tok = (
-                    await s.execute(
-                        select(RedeSocialToken).where(
-                            RedeSocialToken.rede_social_id == alvo["rede_social_id"]
+                    (
+                        await s.execute(
+                            select(RedeSocialToken).where(
+                                RedeSocialToken.rede_social_id == alvo["rede_social_id"]
+                            )
                         )
                     )
-                ).scalars().first()
+                    .scalars()
+                    .first()
+                )
                 if tok is None or not tok.token_enc or not tok.external_user_id:
                     await _postagens.registrar_resultado(
                         s,
@@ -1896,43 +1883,47 @@ async def marketing_postagens_reconciliar(ctx: dict) -> None:
     idade_max = datetime.now(UTC) - timedelta(hours=48)
     async with session_scope() as s:
         presas = (
-            await s.execute(
-                select(MarketingPostagem)
-                .where(
-                    or_(
-                        and_(
-                            MarketingPostagem.status.in_(
-                                (STATUS_CONTAINERING, STATUS_PUBLICANDO)
-                            ),
-                            # `claimed_at` é o carimbo de quando o publicador
-                            # pegou a linha; sem ele (estado escrito por outro
-                            # caminho) vale o `updated_at`.
-                            or_(
-                                MarketingPostagem.claimed_at <= limite,
-                                and_(
-                                    MarketingPostagem.claimed_at.is_(None),
-                                    MarketingPostagem.updated_at <= limite,
+            (
+                await s.execute(
+                    select(MarketingPostagem)
+                    .where(
+                        or_(
+                            and_(
+                                MarketingPostagem.status.in_(
+                                    (STATUS_CONTAINERING, STATUS_PUBLICANDO)
+                                ),
+                                # `claimed_at` é o carimbo de quando o publicador
+                                # pegou a linha; sem ele (estado escrito por outro
+                                # caminho) vale o `updated_at`.
+                                or_(
+                                    MarketingPostagem.claimed_at <= limite,
+                                    and_(
+                                        MarketingPostagem.claimed_at.is_(None),
+                                        MarketingPostagem.updated_at <= limite,
+                                    ),
                                 ),
                             ),
-                        ),
-                        # A DÚVIDA também volta aqui: o publicador manda pra
-                        # `revisar` quando a chamada que publica não respondeu.
-                        # Essa linha tem container e não tem link — é
-                        # exatamente a pergunta que este cron sabe fazer, e
-                        # deixá-la parada seria empurrar pro operador uma
-                        # resposta que a Meta dá de graça.
-                        and_(
-                            MarketingPostagem.status == STATUS_REVISAR,
-                            MarketingPostagem.container_id.isnot(None),
-                            MarketingPostagem.post_url.is_(None),
-                            MarketingPostagem.created_at >= idade_max,
-                        ),
+                            # A DÚVIDA também volta aqui: o publicador manda pra
+                            # `revisar` quando a chamada que publica não respondeu.
+                            # Essa linha tem container e não tem link — é
+                            # exatamente a pergunta que este cron sabe fazer, e
+                            # deixá-la parada seria empurrar pro operador uma
+                            # resposta que a Meta dá de graça.
+                            and_(
+                                MarketingPostagem.status == STATUS_REVISAR,
+                                MarketingPostagem.container_id.isnot(None),
+                                MarketingPostagem.post_url.is_(None),
+                                MarketingPostagem.created_at >= idade_max,
+                            ),
+                        )
                     )
+                    .order_by(MarketingPostagem.claimed_at.asc())
+                    .limit(50)
                 )
-                .order_by(MarketingPostagem.claimed_at.asc())
-                .limit(50)
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if not presas:
             return
         # Mesmo retrato em valores simples do publicador: o rollback de uma
@@ -1974,18 +1965,20 @@ async def marketing_postagens_reconciliar(ctx: dict) -> None:
                 provedor = meta_client.PROVEDOR_FACEBOOK
                 if _settings.marketing_postagem_commit and ident:
                     tok = (
-                        await s.execute(
-                            select(RedeSocialToken).where(
-                                RedeSocialToken.rede_social_id == alvo["rede_social_id"]
+                        (
+                            await s.execute(
+                                select(RedeSocialToken).where(
+                                    RedeSocialToken.rede_social_id == alvo["rede_social_id"]
+                                )
                             )
                         )
-                    ).scalars().first()
+                        .scalars()
+                        .first()
+                    )
                     if tok is not None and tok.token_enc:
                         provedor = tok.provedor
                         try:
-                            token = (
-                                decrypt_json(tok.token_enc).get("access_token") or ""
-                            ).strip()
+                            token = (decrypt_json(tok.token_enc).get("access_token") or "").strip()
                         except Exception:  # noqa: BLE001
                             token = ""
                 if not token:
@@ -2011,9 +2004,9 @@ async def marketing_postagens_reconciliar(ctx: dict) -> None:
                     s,
                     alvo["id"],
                     status=STATUS_PUBLICADO if res.ok else STATUS_REVISAR,
-                    result=(
-                        res.erro or f"reconciliado: a Meta confirmou a publicação ({ident})"
-                    )[:2000],
+                    result=(res.erro or f"reconciliado: a Meta confirmou a publicação ({ident})")[
+                        :2000
+                    ],
                     post_external_id=res.post_external_id or alvo["post_external_id"],
                     post_url=res.post_url or alvo["post_url"],
                     container_id=res.container_id or alvo["container_id"],
@@ -2085,14 +2078,10 @@ async def daily_sync_scheduler(ctx: dict) -> None:
             s.add(job)
             await s.flush()
             pool = await get_arq_sync_pool()
-            arq = await pool.enqueue_job(
-                "sync_all_run", str(job.id), str(us.user_id), None
-            )
+            arq = await pool.enqueue_job("sync_all_run", str(job.id), str(us.user_id), None)
             if arq is not None:
                 job.arq_job_id = arq.job_id
-            logger.info(
-                "daily_sync_enqueued", user_id=str(us.user_id), job_id=str(job.id)
-            )
+            logger.info("daily_sync_enqueued", user_id=str(us.user_id), job_id=str(job.id))
 
 
 async def produtos_novos_bling_tick(ctx: dict) -> None:
@@ -2640,9 +2629,7 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
             # vigia viu o job (carência), não desde agora.
             visto = await redis.hget(_LOGISTICA_VISTO_KEY, job)
             if visto is None:
-                await redis.hset(
-                    _LOGISTICA_VISTO_KEY, job, str(int(agora.timestamp()))
-                )
+                await redis.hset(_LOGISTICA_VISTO_KEY, job, str(int(agora.timestamp())))
                 continue
             ts = datetime.fromtimestamp(int(visto), tz=UTC)
             atraso_min = int((agora - ts).total_seconds() // 60)
@@ -2669,8 +2656,8 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
         # Sino pros admins, com dedupe por HORA: um aviso por hora, não a cada
         # tick (o vigia roda 2×/hora).
         admin_ids = (
-            await s.execute(select(User.id).where(User.role == UserRole.ADMIN))
-        ).scalars().all()
+            (await s.execute(select(User.id).where(User.role == UserRole.ADMIN))).scalars().all()
+        )
         for uid in admin_ids:
             await emit_alert(
                 s,
@@ -2727,14 +2714,18 @@ async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_
     cutoff = datetime.now(UTC) + timedelta(seconds=expiring_within_s)
     async with session_scope() as s:
         ints = (
-            await s.execute(
-                select(Integration).where(
-                    Integration.platform == platform,
-                    Integration.token_expires_at.is_not(None),
-                    Integration.token_expires_at <= cutoff,
+            (
+                await s.execute(
+                    select(Integration).where(
+                        Integration.platform == platform,
+                        Integration.token_expires_at.is_not(None),
+                        Integration.token_expires_at <= cutoff,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for it in ints:
             if platform in _REFRESH_COM_TRAVA:
                 async with _trava_de_token(it.id) as pegou:
@@ -2791,6 +2782,7 @@ async def _refresh_um(platform: IntegrationPlatform, it: Integration, s) -> None
             client = MercadoLivreClient(creds, on_token_refresh=_persist)
         elif platform == IntegrationPlatform.TIKTOK:
             from app.services.marketplaces.tiktok import TikTokClient
+
             client = TikTokClient(creds, on_token_refresh=_persist)
         else:
             return
@@ -2878,8 +2870,8 @@ async def meta_token_refresh(ctx: dict) -> None:
         if not linhas:
             return
         admin_ids = (
-            await s.execute(select(User.id).where(User.role == UserRole.ADMIN))
-        ).scalars().all()
+            (await s.execute(select(User.id).where(User.role == UserRole.ADMIN))).scalars().all()
+        )
         avisados = 0
         for tok, rede in linhas:
             vencido = tok.token_expires_at <= agora
@@ -3201,9 +3193,7 @@ async def tiktok_unsettled_fast_lane(ctx: dict) -> None:
 
     async with session_scope() as s:
         try:
-            result = await run_tiktok_unsettled_sweep(
-                s, recent_hours=3, window_days=3, max_pages=1
-            )
+            result = await run_tiktok_unsettled_sweep(s, recent_hours=3, window_days=3, max_pages=1)
         except Exception as e:  # noqa: BLE001
             logger.warning("tiktok_unsettled_fast_lane_failed", error=str(e)[:300])
             return
@@ -3222,6 +3212,7 @@ async def shopee_discrepancy_check(ctx: dict) -> None:
     """Compare Shopee stock vs local DB and fix discrepancies.
     Runs every 4h to catch phantom stock issues."""
     from app.services.shopee_discrepancy_check import run_shopee_discrepancy_check
+
     try:
         result = await run_shopee_discrepancy_check()
         logger.info("shopee_discrepancy_check_done", **result)
@@ -3233,6 +3224,7 @@ async def ml_discrepancy_check(ctx: dict) -> None:
     """Compare Mercado Livre stock vs local DB and fix discrepancies.
     Runs every 4h to catch phantom stock issues."""
     from app.services.ml_discrepancy_check import run_ml_discrepancy_check
+
     try:
         result = await run_ml_discrepancy_check()
         logger.info("ml_discrepancy_check_done", **result)
@@ -3334,7 +3326,9 @@ async def historico_manutencao(ctx: dict) -> None:
     async with session_scope() as s:
         eventos, alteracoes = await historico_banco.limpar_antigos(s)
     logger.info(
-        "historico_manutencao", gatilhos_novos=cobertas, eventos_apagados=eventos,
+        "historico_manutencao",
+        gatilhos_novos=cobertas,
+        eventos_apagados=eventos,
         alteracoes_apagadas=alteracoes,
     )
 
@@ -3536,11 +3530,7 @@ async def nf_auto_enfileirar_tick(ctx: dict) -> None:
         return
     try:
         summary = await run_auto_enfileirar_nf()
-        if (
-            summary.get("enfileirados")
-            or summary.get("sem_estoque")
-            or summary.get("pulados")
-        ):
+        if summary.get("enfileirados") or summary.get("sem_estoque") or summary.get("pulados"):
             logger.info("nf_auto_enfileirar_done", **summary)
         else:
             logger.debug("nf_auto_enfileirar_noop", **summary)
@@ -3694,9 +3684,12 @@ async def vigia_importacao_tick(ctx: dict) -> None:
             logger.debug("vigia_importacao_desligado")
             return
         summary = await vigia_importacao_sweep()
-        if summary.get("novas") or summary.get("avisadas") or summary.get(
-            "contas_falha"
-        ) or summary.get("sumiram"):
+        if (
+            summary.get("novas")
+            or summary.get("avisadas")
+            or summary.get("contas_falha")
+            or summary.get("sumiram")
+        ):
             logger.info("vigia_importacao_done", **summary)
         else:
             logger.debug("vigia_importacao_noop", **summary)
@@ -3734,10 +3727,7 @@ async def vigia_credenciais_tick(ctx: dict) -> None:
             logger.warning("vigia_credenciais_sem_servico")
             return
         summary = await vigia_credenciais_sweep() or {}
-        if any(
-            summary.get(k)
-            for k in ("novas", "sumiram", "sem_acesso", "vencendo", "avisadas")
-        ):
+        if any(summary.get(k) for k in ("novas", "sumiram", "sem_acesso", "vencendo", "avisadas")):
             logger.info("vigia_credenciais_done", **summary)
         else:
             logger.debug("vigia_credenciais_noop", **summary)
@@ -3763,9 +3753,7 @@ async def vigia_ingest_bling_tick(ctx: dict) -> None:
             logger.warning("vigia_ingest_bling_sem_servico")
             return
         summary = await vigia_ingest_bling_sweep() or {}
-        if any(
-            summary.get(k) for k in ("novas", "sumiram", "esgotados", "avisadas")
-        ):
+        if any(summary.get(k) for k in ("novas", "sumiram", "esgotados", "avisadas")):
             logger.info("vigia_ingest_bling_done", **summary)
         else:
             logger.debug("vigia_ingest_bling_noop", **summary)
@@ -3791,10 +3779,7 @@ async def vigia_correios_tick(ctx: dict) -> None:
             logger.warning("vigia_correios_sem_servico")
             return
         summary = await vigia_correios_sweep() or {}
-        if any(
-            summary.get(k)
-            for k in ("novas", "sumiram", "sem_saldo", "quarentena", "avisadas")
-        ):
+        if any(summary.get(k) for k in ("novas", "sumiram", "sem_saldo", "quarentena", "avisadas")):
             logger.info("vigia_correios_done", **summary)
         else:
             logger.debug("vigia_correios_noop", **summary)
@@ -3825,8 +3810,12 @@ async def vigia_marketing_comandos_tick(ctx: dict) -> None:
         if any(
             summary.get(k)
             for k in (
-                "novas", "sumiram", "comandos_falhos", "agendas_falhas",
-                "comandos_presos", "avisadas",
+                "novas",
+                "sumiram",
+                "comandos_falhos",
+                "agendas_falhas",
+                "comandos_presos",
+                "avisadas",
             )
         ):
             logger.info("vigia_marketing_comandos_done", **summary)
@@ -3857,8 +3846,12 @@ async def vigia_robo_melhorenvio_tick(ctx: dict) -> None:
         if any(
             summary.get(k)
             for k in (
-                "novas", "sumiram", "suspensoes_pendentes", "suspensoes_presas",
-                "suspensoes_falhas", "avisadas",
+                "novas",
+                "sumiram",
+                "suspensoes_pendentes",
+                "suspensoes_presas",
+                "suspensoes_falhas",
+                "avisadas",
             )
         ):
             logger.info("vigia_robo_melhorenvio_done", **summary)
@@ -3955,6 +3948,23 @@ async def conciliacao_sincronizar_loja(ctx: dict, integration_id: str) -> dict:
     return {k: v for k, v in r.items() if k != "fatura"}
 
 
+async def vigia_conciliacao_tick(ctx: dict) -> None:
+    """Vigia de Conciliação (Ouvidoria): 07:00 BRT, a lista "Onde agir hoje" do
+    painel vira ocorrências + um Threema. `desligado` no painel: não roda."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_conciliacao")
+        if modo == "desligado":
+            logger.debug("vigia_conciliacao_desligado")
+            return
+        from app.services.vigia_conciliacao import vigia_conciliacao_sweep
+
+        summary = await vigia_conciliacao_sweep() or {}
+        logger.info("vigia_conciliacao_done", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_conciliacao_unhandled")
+
+
 async def vigia_nota_cheia_tick(ctx: dict) -> None:
     """Vigia de Nota Cheia (robô da Ouvidoria): pedido enviado sem a NF
     produto (nota cheia) no painel Notas fiscais — uma ocorrência por dia de
@@ -4001,8 +4011,15 @@ async def vigia_margem_tick(ctx: dict) -> None:
         if any(
             summary.get(k)
             for k in (
-                "novas", "sumiram", "segurados_novos", "margem_alta_novas",
-                "falhas_abertas", "avisadas", "reprovou", "segurou", "liberou",
+                "novas",
+                "sumiram",
+                "segurados_novos",
+                "margem_alta_novas",
+                "falhas_abertas",
+                "avisadas",
+                "reprovou",
+                "segurou",
+                "liberou",
                 "robo_falhou",
             )
         ):
@@ -4024,10 +4041,16 @@ async def nf_recuperar_tick(ctx: dict) -> None:
         return
     try:
         summary = await run_recuperar_nf()
-        if any(summary.get(k) for k in (
-            "retry", "esgotados", "destravados",
-            "orfaos_faturamento", "orfaos_etiqueta",
-        )):
+        if any(
+            summary.get(k)
+            for k in (
+                "retry",
+                "esgotados",
+                "destravados",
+                "orfaos_faturamento",
+                "orfaos_etiqueta",
+            )
+        ):
             logger.info("nf_recuperar_done", **summary)
         else:
             logger.debug("nf_recuperar_noop", **summary)
@@ -4042,14 +4065,18 @@ async def failed_jobs_alert_scan(ctx: dict) -> None:
     cutoff = datetime.now(UTC) - timedelta(minutes=10)
     async with session_scope() as s:
         rows = (
-            await s.execute(
-                select(BackgroundJob).where(
-                    BackgroundJob.status == BackgroundJobStatus.FAILED,
-                    BackgroundJob.finished_at.is_not(None),
-                    BackgroundJob.finished_at >= cutoff,
+            (
+                await s.execute(
+                    select(BackgroundJob).where(
+                        BackgroundJob.status == BackgroundJobStatus.FAILED,
+                        BackgroundJob.finished_at.is_not(None),
+                        BackgroundJob.finished_at >= cutoff,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         emitted = 0
         for job in rows:
             dedupe = f"sync_failure:job:{job.id}"
@@ -4085,14 +4112,13 @@ async def failed_jobs_alert_scan(ctx: dict) -> None:
             us = await s.get(UserSettings, job.created_by)
             if us is not None and us.notify_telegram:
                 from app.services.telegram import TelegramClient
+
                 tg = TelegramClient()
                 await tg.safe_send(
                     f"<b>DaVinci — Sync failure</b>\n{msg}",
                     chat_id=us.telegram_chat_id,
                 )
-        logger.info(
-            "failed_jobs_alert_scan_done", scanned=len(rows), emitted=emitted
-        )
+        logger.info("failed_jobs_alert_scan_done", scanned=len(rows), emitted=emitted)
 
 
 WEBHOOK_SIG_FAIL_ALERT_THRESHOLD = 10
@@ -4104,6 +4130,7 @@ async def webhook_signature_alert_scan(ctx: dict) -> None:
     rolling 1h Redis counter populated by the webhook router; alert+telegram
     once per hour while the counter stays elevated."""
     import json as _json
+
     try:
         raw = await redis.get("webhook:bling:sig_fail_count")
         snap_raw = await redis.get("webhook:bling:sig_fail_last")
@@ -4123,11 +4150,10 @@ async def webhook_signature_alert_scan(ctx: dict) -> None:
 
     async with session_scope() as s:
         from app.models import Integration as _Integ
+
         owner = (
             await s.execute(
-                select(_Integ.user_id).where(
-                    _Integ.platform == IntegrationPlatform.BLING
-                ).limit(1)
+                select(_Integ.user_id).where(_Integ.platform == IntegrationPlatform.BLING).limit(1)
             )
         ).scalar_one_or_none()
         if owner is None:
@@ -4168,6 +4194,7 @@ async def webhook_signature_alert_scan(ctx: dict) -> None:
         us = await s.get(UserSettings, owner)
         if us is not None and us.notify_telegram:
             from app.services.telegram import TelegramClient
+
             tg = TelegramClient()
             tg_msg = f"<b>DaVinci — Webhook Bling</b>\n{msg}"
             if diag_lines:
@@ -4181,13 +4208,17 @@ async def low_stock_polling(ctx: dict) -> None:
     today = datetime.now(UTC).date().isoformat()
     async with session_scope() as s:
         rows = (
-            await s.execute(
-                select(Product).where(
-                    Product.min_stock > 0,
-                    Product.stock < Product.min_stock,
+            (
+                await s.execute(
+                    select(Product).where(
+                        Product.min_stock > 0,
+                        Product.stock < Product.min_stock,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         emitted = 0
         for p in rows:
             a = await emit_alert(
@@ -4196,9 +4227,7 @@ async def low_stock_polling(ctx: dict) -> None:
                 type=AlertType.LOW_STOCK,
                 severity=AlertSeverity.WARNING,
                 title=f"Estoque baixo: {p.sku}",
-                message=(
-                    f"{p.name} — estoque {p.stock} abaixo do mínimo {p.min_stock}."
-                ),
+                message=(f"{p.name} — estoque {p.stock} abaixo do mínimo {p.min_stock}."),
                 payload={
                     "product_id": str(p.id),
                     "sku": p.sku,
@@ -4224,19 +4253,23 @@ async def faturas_vencimento_scan(ctx: dict) -> None:
     tomorrow = today + timedelta(days=1)
     async with session_scope() as s:
         faturas = (
-            await s.execute(
-                select(Fatura).where(
-                    Fatura.data_vencimento >= today,
-                    Fatura.data_vencimento <= tomorrow,
+            (
+                await s.execute(
+                    select(Fatura).where(
+                        Fatura.data_vencimento >= today,
+                        Fatura.data_vencimento <= tomorrow,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if not faturas:
             logger.debug("faturas_vencimento_scan_noop")
             return
         admin_ids = (
-            await s.execute(select(User.id).where(User.role == UserRole.ADMIN))
-        ).scalars().all()
+            (await s.execute(select(User.id).where(User.role == UserRole.ADMIN))).scalars().all()
+        )
         emitted = 0
         for f in faturas:
             venc = f.data_vencimento
@@ -4282,8 +4315,10 @@ async def varredura_vinculos(ctx: dict) -> None:
     async with session_scope() as s:
         dono = (
             await s.execute(
-                select(Product.user_id).group_by(Product.user_id)
-                .order_by(sa_func.count().desc()).limit(1)
+                select(Product.user_id)
+                .group_by(Product.user_id)
+                .order_by(sa_func.count().desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
         ids = [
@@ -4429,9 +4464,7 @@ async def sync_bling_costs_run(
 ) -> None:
     """Fase 9d: pulls precoCusto from Bling /produtos/{id} into pricing_products."""
     async with session_scope() as s:
-        await run_sync_bling_costs(
-            s, job_id=UUID(job_id), user_id=UUID(user_id)
-        )
+        await run_sync_bling_costs(s, job_id=UUID(job_id), user_id=UUID(user_id))
 
 
 async def audit_run(
@@ -4482,12 +4515,14 @@ async def bling_orders_safety_net_tick(ctx: dict) -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "bling_safety_net_enqueue_failed",
-                bling_id=bling_id, err=str(e)[:200],
+                bling_id=bling_id,
+                err=str(e)[:200],
             )
 
     logger.info(
         "bling_orders_safety_net_tick_done",
-        candidates=len(candidates), enqueued=enqueued,
+        candidates=len(candidates),
+        enqueued=enqueued,
     )
 
 
@@ -4525,12 +4560,14 @@ async def bling_orders_period_sync_tick(ctx: dict) -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "bling_period_sync_enqueue_failed",
-                bling_id=bling_id, err=str(e)[:200],
+                bling_id=bling_id,
+                err=str(e)[:200],
             )
 
     logger.info(
         "bling_orders_period_sync_tick_done",
-        candidates=len(bling_ids), enqueued=enqueued,
+        candidates=len(bling_ids),
+        enqueued=enqueued,
     )
 
 
@@ -4569,12 +4606,14 @@ async def bling_orders_daily_backfill_tick(ctx: dict) -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "bling_daily_backfill_enqueue_failed",
-                bling_id=bling_id, err=str(e)[:200],
+                bling_id=bling_id,
+                err=str(e)[:200],
             )
 
     logger.info(
         "bling_orders_daily_backfill_tick_done",
-        candidates=len(bling_ids), enqueued=enqueued,
+        candidates=len(bling_ids),
+        enqueued=enqueued,
     )
 
 
@@ -4610,19 +4649,23 @@ async def ingest_orders_retry_sweep(ctx: dict) -> None:
     exhausted = 0
     async with session_scope() as s:
         rows = (
-            await s.execute(
-                select(BackgroundJob)
-                .where(
-                    BackgroundJob.type == BackgroundJobType.INGEST_BLING_ORDER,
-                    BackgroundJob.status == BackgroundJobStatus.FAILED,
-                    BackgroundJob.finished_at.is_not(None),
-                    BackgroundJob.finished_at < ready_before,
-                    BackgroundJob.created_at >= floor,
+            (
+                await s.execute(
+                    select(BackgroundJob)
+                    .where(
+                        BackgroundJob.type == BackgroundJobType.INGEST_BLING_ORDER,
+                        BackgroundJob.status == BackgroundJobStatus.FAILED,
+                        BackgroundJob.finished_at.is_not(None),
+                        BackgroundJob.finished_at < ready_before,
+                        BackgroundJob.created_at >= floor,
+                    )
+                    .order_by(BackgroundJob.finished_at)
+                    .limit(INGEST_SWEEP_BATCH)
                 )
-                .order_by(BackgroundJob.finished_at)
-                .limit(INGEST_SWEEP_BATCH)
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         pool = await get_arq_pool()
         for job in rows:
@@ -4647,7 +4690,8 @@ async def ingest_orders_retry_sweep(ctx: dict) -> None:
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "ingest_orders_retry_sweep_enqueue_failed",
-                    job_id=str(job.id), err=str(e)[:200],
+                    job_id=str(job.id),
+                    err=str(e)[:200],
                 )
                 continue
             # Só muta o job depois do enqueue OK — senão um PENDING órfão (sem
@@ -4664,11 +4708,14 @@ async def ingest_orders_retry_sweep(ctx: dict) -> None:
     if exhausted:
         logger.warning(
             "ingest_orders_retry_sweep_exhausted",
-            count=exhausted, cap=INGEST_SWEEP_MAX_ATTEMPTS,
+            count=exhausted,
+            cap=INGEST_SWEEP_MAX_ATTEMPTS,
         )
     logger.info(
         "ingest_orders_retry_sweep_done",
-        candidates=len(rows), re_enqueued=re_enqueued, exhausted=exhausted,
+        candidates=len(rows),
+        re_enqueued=re_enqueued,
+        exhausted=exhausted,
     )
 
 
@@ -4697,6 +4744,7 @@ async def certificacoes_inmetro_sync(ctx: dict) -> dict:
 
 async def startup(ctx: dict) -> None:
     from app.services.sentry import init_sentry
+
     init_sentry(component="worker")
     # Catálogo da Ouvidoria (ouvidoria_robos): robô novo no código ganha a
     # linha antes do 1º tick — rodada e ocorrência têm FK pro robô. Dois
@@ -4815,6 +4863,7 @@ class WorkerSettings:
         vigia_robo_leitura_tick,
         vigia_etiquetas_tick,
         vigia_nota_cheia_tick,
+        vigia_conciliacao_tick,
         conciliacao_fatura_tick,
         conciliacao_extrato_tick,
         func(conciliacao_sincronizar_loja, timeout=1500),
@@ -5101,10 +5150,8 @@ class WorkerSettings:
         cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),
         cron(faturas_vencimento_scan, hour=11, minute=5, run_at_startup=False),  # 08:05 BRT
-
         # SSH parity: 30-min safety timeout for stuck sync advisory locks.
         # Runs every 5 minutes so the worst-case stuck duration is 35min.
-
         cron(sync_lock_safety_release, minute=_FIVE_MIN, run_at_startup=False),
         # Safety-net only — hooks via app.services.relink_hook handle the
         # day-to-day work. Runs at 02:00 and 14:00 UTC.
@@ -5116,8 +5163,7 @@ class WorkerSettings:
         # 15 min os mais novos (fora dos :00/:10/:20 de pico do Bling) e 1x por
         # dia a lista inteira (15:35 UTC = 12:35 BRT).
         cron(produtos_novos_bling_tick, minute={7, 22, 37, 52}, run_at_startup=False),
-        cron(produtos_novos_bling_completo, hour=15, minute=35, run_at_startup=False,
-             timeout=3600),
+        cron(produtos_novos_bling_completo, hour=15, minute=35, run_at_startup=False, timeout=3600),
         # Vigia da soma por família: 9h20 e 16h20 BRT. Estava só na lista de
         # funções, sem cron — nunca tinha rodado (auditoria de 28/09/2026).
         cron(vigia_estoque_familia_tick, hour={12, 19}, minute=20, run_at_startup=False),
@@ -5408,6 +5454,8 @@ class WorkerSettings:
         # Vigia de Nota Cheia: 1×/h em :08, 4 min depois do espelho das NF-e
         # (pos_vendas_notas_sync em :04…) — a das 07:08 é a que cobra o dia.
         cron(vigia_nota_cheia_tick, minute=8, run_at_startup=False, timeout=600),
+        # Vigia de Conciliação: 07:00 BRT (10:00 UTC), depois da rodada de madrugada.
+        cron(vigia_conciliacao_tick, hour=10, minute=0, run_at_startup=False, timeout=600),
         # Conciliação (14/10/2026, Vinicius: "é tudo do dia anterior; uma vez só de
         # madrugada"): UMA rodada por dia. 06:00 BRT pede o extrato de ontem ao
         # Mercado Pago e, a cada 10 min até 08:50, lê o arquivo quando fica pronto
