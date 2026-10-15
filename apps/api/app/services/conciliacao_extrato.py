@@ -17,6 +17,7 @@ primeira rodada pede desde `conciliacao_lojas.inicio`.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -242,6 +243,15 @@ def _texto(v: str | None) -> str | None:
     return t or None
 
 
+def cupom_da_linha(row: dict[str, Any]) -> Decimal:
+    """O cupom que sai do bolso da LOJA: EFFECTIVE_COUPON_AMOUNT. O COUPON_AMOUNT
+    soma também o cupom bancado pelo ML, que não mexe no líquido da loja
+    (300415, 15/10: COUPON 174,46 × EFFECTIVE −16,00; o líquido só desconta os 16)."""
+    efetivo = _texto(row.get("EFFECTIVE_COUPON_AMOUNT"))
+    v = dinheiro(efetivo) if efetivo else dinheiro(row.get("COUPON_AMOUNT"))
+    return v.copy_abs()
+
+
 def linha_para_movimento(row: dict[str, str]) -> dict[str, Any] | None:
     """Uma linha do CSV → colunas de `conciliacao_movimentos` (sem a loja).
     Devolve None pras linhas de saldo inicial/total (não são movimento)."""
@@ -271,7 +281,7 @@ def linha_para_movimento(row: dict[str, str]) -> dict[str, Any] | None:
         "tarifa": dinheiro(row.get("MP_FEE_AMOUNT")),
         "parcelamento": dinheiro(row.get("FINANCING_FEE_AMOUNT")),
         "frete": dinheiro(row.get("SHIPPING_FEE_AMOUNT")),
-        "cupom": dinheiro(row.get("COUPON_AMOUNT")),
+        "cupom": cupom_da_linha(row),
         "credito": credito,
         "debito": debito,
         "saldo_apos": dinheiro(row.get("BALANCE_AMOUNT"))

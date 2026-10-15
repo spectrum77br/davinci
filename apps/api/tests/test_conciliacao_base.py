@@ -903,6 +903,10 @@ async def test_painel_raio_x_junta_as_quatro_versoes_e_os_movimentos(
         "liquido": 610.65,
         "saidas_depois": None,
         "recebido": 610.65,
+        # 15/10: frete do comprador (bruto − valor da venda; sem bruto no teste = None)
+        "frete_comprador": None,
+        "produtos": None,
+        "frete_liquido": 62.33,
     }
     assert corpo["versoes"]["bling"]["liquido"] == 726.29
     assert [m["origem"] for m in corpo["movimentos"]] == ["ml_fatura", "mp_extrato"]

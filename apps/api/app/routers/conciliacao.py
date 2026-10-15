@@ -1018,6 +1018,22 @@ async def raio_x(
         vals = [getattr(m, attr) for m in lista if getattr(m, attr) is not None]
         return float(abs(sum(vals, Decimal("0")))) if vals else None
 
+    # Frete do comprador: o ML põe dentro do GROSS do pagamento o que o comprador pagou
+    # de frete, e desconta o frete INTEIRO (SHIPPING_FEE); a venda guarda só a parte da
+    # loja. Sem isso o Raio-X mostrava 24,45 × 55,44 e parecia erro (300415, 15/10).
+    bruto_extrato = _soma("bruto", liberacoes)
+    venda_valor = _num(p.venda_valor)
+    frete_comprador = (
+        round(bruto_extrato - venda_valor, 2)
+        if (
+            bruto_extrato is not None
+            and venda_valor is not None
+            and bruto_extrato - venda_valor > 0.005
+        )
+        else 0.0
+    )
+    frete_extrato = _soma("frete", liberacoes)
+    venda_frete = _num(p.venda_frete)
     versoes = {
         "bling": {
             "valor": _num(p.bling_total),
@@ -1032,9 +1048,14 @@ async def raio_x(
             else None,
         },
         "venda": {
-            "valor": _num(p.venda_valor),
+            "valor": venda_valor,
+            "frete_comprador": frete_comprador,
+            "bruto": round(venda_valor + frete_comprador, 2) if venda_valor is not None else None,
             "tarifa": _num(p.venda_tarifa),
-            "frete": _num(p.venda_frete),
+            "frete": venda_frete,
+            "frete_cobrado": round(venda_frete + frete_comprador, 2)
+            if venda_frete is not None
+            else None,
             "cupom": _num(p.venda_cupom),
             "estorno": _num(p.venda_estorno),
             "liquido": _num(p.venda_liquido),
@@ -1048,10 +1069,17 @@ async def raio_x(
             "outros": _num(p.fatura_outros),
         },
         "extrato": {
-            "valor": _soma("bruto", liberacoes),
+            "valor": bruto_extrato,
+            "frete_comprador": frete_comprador if bruto_extrato is not None else None,
+            "produtos": round(bruto_extrato - frete_comprador, 2)
+            if bruto_extrato is not None
+            else None,
             "tarifa": _soma("tarifa", liberacoes),
             "parcelamento": _soma("parcelamento", liberacoes),
-            "frete": _soma("frete", liberacoes),
+            "frete": frete_extrato,
+            "frete_liquido": round(frete_extrato - frete_comprador, 2)
+            if frete_extrato is not None
+            else None,
             "cupom": _soma("cupom", liberacoes),
             "liquido": _num(p.liberado_valor),
             "saidas_depois": _num(p.saidas_depois),
