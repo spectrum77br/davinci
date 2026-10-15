@@ -2539,13 +2539,17 @@ async def sonda_bonus(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(_PERM)],
     periodo: Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}-01$")] = None,
+    so_banco: bool = False,
 ) -> dict[str, Any]:
     """Bonificações do período: o resumo do ML × os detalhes do ML (lidos agora) × o que
-    está gravado. Duas chamadas ao ML (summary/details e a página de BONUS). Só leitura."""
+    está gravado. Duas chamadas ao ML (summary/details e a página de BONUS). Só leitura.
+    `so_banco=true` não chama o ML: só cruza o gravado (bonificação × cobrança original)."""
     from app.services.conciliacao_fatura import ler_pagina, ler_resumo
 
-    cliente = await _cliente_da_conta(session, conta)
     chave = periodo or datetime.now(_BRT).date().strftime("%Y-%m-01")
+    if so_banco:
+        return await _bonus_so_banco(session, conta, chave)
+    cliente = await _cliente_da_conta(session, conta)
     # O balde de 5/min do ML é dividido com o robô da Margem (:15/:45): no 429,
     # espera um minuto e tenta de novo, como a leitura da fatura faz.
     resumo: dict[str, Any] = {}
@@ -2672,6 +2676,90 @@ async def sonda_bonus(
     }
     logger.info("conciliacao_sonda_bonus", conta=conta, periodo=chave, linhas_ml=len(detalhes))
     return saida
+
+
+async def _bonus_so_banco(session: AsyncSession, conta: str, chave: str) -> dict[str, Any]:
+    """Hipótese: o resumo do ML só conta a bonificação cuja cobrança original está no
+    MESMO período da fatura. Cruza cada bonificação gravada (charge_bonified_id) com a
+    cobrança gravada e soma por 'cobrança no período' / 'de período anterior' / 'não achada'."""
+    loja = await _loja_ou_404(session, conta)
+    sync = (
+        await session.execute(
+            select(ConciliacaoSync).where(
+                ConciliacaoSync.integration_id == loja.integration_id,
+                ConciliacaoSync.origem == "ml_fatura",
+                ConciliacaoSync.chave == f"{chave}|resumo",
+            )
+        )
+    ).scalar_one_or_none()
+    resumo_ml = ((sync.detalhe or {}).get("resumo") if sync else None) or {}
+    per = resumo_ml.get("period") or {}
+    if not (per.get("date_from") and per.get("date_to")):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "resumo_nao_lido"})
+    p_ini = datetime.combine(date.fromisoformat(per["date_from"]), datetime.min.time(), tzinfo=_BRT)
+    p_fim = datetime.combine(
+        date.fromisoformat(per["date_to"]), datetime.min.time(), tzinfo=_BRT
+    ) + timedelta(days=1)
+    mov = ConciliacaoMovimento
+    linhas = (
+        await session.execute(
+            select(mov.id_externo, mov.sub_tipo, mov.credito, mov.debito, mov.data, mov.raw).where(
+                mov.integration_id == loja.integration_id, mov.origem == "ml_fatura"
+            )
+        )
+    ).all()
+    por_id = {str(i): (sub, float(c or 0), float(d or 0), dt) for i, sub, c, d, dt, _ in linhas}
+    classes: dict[str, dict[str, Any]] = {}
+    por_sub: dict[str, dict[str, float]] = {}
+    exemplos: dict[str, list[dict[str, Any]]] = {}
+    for id_ext, sub, cred, _deb, dt, raw in linhas:
+        if float(cred or 0) <= 0 or not (p_ini <= dt < p_fim):
+            continue
+        ci = (raw or {}).get("charge_info") or {}
+        orig = str(ci.get("charge_bonified_id") or "")
+        o = por_id.get(orig)
+        if o is None:
+            classe = "cobranca_nao_gravada"
+        elif p_ini <= o[3] < p_fim:
+            classe = "cobranca_no_mesmo_periodo"
+        elif o[3] < p_ini:
+            classe = "cobranca_de_periodo_anterior"
+        else:
+            classe = "cobranca_de_periodo_posterior"
+        x = classes.setdefault(classe, {"linhas": 0, "valor": 0.0})
+        x["linhas"] += 1
+        x["valor"] = round(x["valor"] + float(cred), 2)
+        ps = por_sub.setdefault(str(sub), {})
+        ps[classe] = round(ps.get(classe, 0.0) + float(cred), 2)
+        if len(exemplos.setdefault(classe, [])) < 3:
+            exemplos[classe].append(
+                {
+                    "bonificacao": id_ext,
+                    "sub_tipo": sub,
+                    "valor": float(cred),
+                    "data": dt.isoformat(),
+                    "cobranca": orig,
+                    "cobranca_data": o[3].isoformat() if o else None,
+                    "cobranca_valor": o[2] if o else None,
+                }
+            )
+    bill = resumo_ml.get("bill_includes") or {}
+    resumo_por_tipo = {
+        str(b.get("type")): round(abs(float(b.get("amount") or 0)), 2)
+        for b in (bill.get("bonuses") or [])
+        if isinstance(b, dict)
+    }
+    return {
+        "conta": conta,
+        "periodo": {"chave": chave, **per},
+        "resumo_ml": {
+            "bonificacoes": resumo_por_tipo,
+            "total": round(sum(resumo_por_tipo.values()), 2),
+        },
+        "gravado_por_classe": classes,
+        "gravado_por_sub_tipo_e_classe": por_sub,
+        "exemplos": exemplos,
+    }
 
 
 def _resumo_carteira(lista: list[dict[str, Any]]) -> dict[str, Any]:
