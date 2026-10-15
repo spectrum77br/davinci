@@ -75,6 +75,14 @@ const salvando = ref(false)
 const fechando = ref(false)
 
 const pendentes = computed(() => dados.value?.contagem.pendente || 0)
+// Reservas (pro saque, por reclamação) vêm em pares que somam zero e a tela do
+// Mercado Pago nem mostra: ficam escondidas por padrão, com um clique pra ver (15/10).
+const mostrarReservas = ref(false)
+const reservas = computed(() => (dados.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_')).length)
+const movimentosVisiveis = computed(() => {
+  const todos = dados.value?.movimentos || []
+  return mostrarReservas.value ? todos : todos.filter((m) => !m.tipo.startsWith('reserva_'))
+})
 const pct = computed(() => {
   const t = dados.value?.totais.linhas || 0
   return t ? Math.round(((dados.value?.resolvidos || 0) / t) * 100) : 0
@@ -206,7 +214,7 @@ onMounted(() => {
         <Search class="size-3.5 text-muted-foreground" />
         <input v-model="q" placeholder="pedido, venda, pagamento, SKU" class="w-48 bg-transparent outline-none" @keyup.enter="carregar()" />
       </label>
-      <span v-if="dados" class="text-muted-foreground">{{ dados.movimentos.length }} de {{ dados.totais.linhas }} movimentos</span>
+      <span v-if="dados" class="text-muted-foreground">{{ movimentosVisiveis.length }} de {{ dados.totais.linhas }} movimentos<template v-if="reservas"> · {{ reservas }} reservas {{ mostrarReservas ? 'à mostra' : 'escondidas' }} (vão e voltam, somam zero) <button type="button" class="underline" @click="mostrarReservas = !mostrarReservas">{{ mostrarReservas ? 'esconder' : 'mostrar' }}</button></template></span>
       <span class="ml-auto inline-flex items-center gap-1.5">
         <template v-if="dados?.fechado">
           <span class="inline-flex items-center gap-1 rounded bg-slate-200 px-2 py-1 font-bold text-slate-800 dark:bg-slate-700 dark:text-slate-100"><Lock class="size-3.5" /> dia fechado por {{ dados.fechado.por }} em {{ fmtDiaHora(dados.fechado.em) }}</span>
@@ -265,9 +273,9 @@ onMounted(() => {
             <tbody>
               <tr v-if="loading && !dados"><td colspan="14" class="py-8 text-center text-muted-foreground"><Loader2 class="mr-1 inline size-4 animate-spin" /> carregando…</td></tr>
               <tr v-else-if="erro"><td colspan="14" class="py-8 text-center text-red-600">{{ erro }}</td></tr>
-              <tr v-else-if="dados && !dados.movimentos.length"><td colspan="14" class="py-8 text-center text-muted-foreground">{{ dados.totais.linhas ? 'nada com esse filtro' : 'nenhum movimento lido neste dia (o extrato é lido de madrugada; "Sincronizar agora" pede o de ontem)' }}</td></tr>
+              <tr v-else-if="dados && !movimentosVisiveis.length"><td colspan="14" class="py-8 text-center text-muted-foreground">{{ dados.totais.linhas ? (dados.movimentos.length ? 'só reservas neste dia (escondidas)' : 'nada com esse filtro') : 'nenhum movimento lido neste dia (o extrato é lido de madrugada; "Sincronizar agora" pede o de ontem)' }}</td></tr>
               <tr
-                v-for="m in dados?.movimentos || []"
+                v-for="m in movimentosVisiveis"
                 :key="m.id"
                 class="cursor-pointer border-b hover:bg-muted/60"
                 :class="[rowCls(m), selecionado?.id === m.id && 'outline outline-2 -outline-offset-2 outline-primary']"
