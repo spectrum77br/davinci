@@ -334,3 +334,95 @@ def test_comparativo_shopee_preenche_o_real_com_o_escrow_da_liberacao():
     por2 = {x["chave"]: x for x in c2["linhas"]}
     assert por2["tarifa"]["real"] is None and por2["liquido"]["real"] is None
     assert "até lá só existe o previsto" in c2["nota"]
+
+
+_INCOME_301438 = {
+    "order_selling_price": 4925,
+    "cost_of_goods_sold": 4925,
+    "buyer_total_amount": 4524.91,
+    "seller_product_rebate": {
+        "amount": 417,
+        "commission_fee_offset": 400.23,
+        "service_fee_offset": 16.77,
+    },
+    "commission_fee": 620.55,
+    "service_fee": 101.81,
+    "net_commission_fee": 220.32,
+    "net_service_fee": 85.04,
+    "order_ams_commission_fee": 49,
+    "shipping_seller_protection_fee_amount": 0.49,
+    "actual_shipping_fee": 16.91,
+    "buyer_paid_shipping_fee": 16.91,
+    "seller_coin_cash_back": 3,
+    "seller_discount": 5075,
+    "pix_discount": 392,
+    "voucher_from_shopee": 25,
+    "escrow_amount": 4150.15,
+}
+
+
+def test_conta_shopee_e_a_tela_de_detalhes_de_renda():
+    """301438 (15/10): a tela da Shopee mostra 4.508,00 · 0,00 · −3,00 · −354,85 = 4.150,15."""
+    from app.models import MarketplaceOrderFinancial
+    from app.services.conciliacao_calculo import conta_shopee
+
+    fin = MarketplaceOrderFinancial(
+        platform="shopee",
+        external_order_id="261005TKS8KUQ3",
+        raw={"escrow": {"order_income": _INCOME_301438}},
+    )
+    c = conta_shopee(fin)
+    assert c["preco"] == Decimal("4925") and c["subsidio"] == Decimal("417")
+    assert c["subtotal_produtos"] == Decimal("4508")
+    assert c["frete_loja"] == Decimal("0.00") and c["cupons"] == Decimal("3")
+    assert c["taxas"] == Decimal("354.85") and c["renda"] == Decimal("4150.15")
+    assert c["subtotal_produtos"] + c["frete_loja"] - c["cupons"] - c["taxas"] == c["renda"]
+    assert conta_shopee(None) is None
+    assert (
+        conta_shopee(MarketplaceOrderFinancial(platform="shopee", external_order_id="x", raw={}))
+        is None
+    )
+
+
+def test_comparativo_shopee_com_as_linhas_da_tela():
+    from app.models import ConciliacaoPedido, MarketplaceOrderFinancial
+    from app.routers.conciliacao import _comparativo
+    from app.services.conciliacao_calculo import conta_shopee
+
+    conta = conta_shopee(
+        MarketplaceOrderFinancial(
+            platform="shopee",
+            external_order_id="x",
+            raw={"escrow": {"order_income": _INCOME_301438}},
+        )
+    )
+    p = ConciliacaoPedido(
+        platform=IntegrationPlatform.SHOPEE,
+        pedido_bling="301438",
+        situacao="bateu",
+        venda_liquido=Decimal("4150.15"),
+        recebido=Decimal("4150.15"),
+        liberado_valor=Decimal("4150.15"),
+    )
+    c = _comparativo(p, {"venda": {}, "extrato": {"valor": 4150.15}}, [], shopee=conta)
+    por = {x["chave"]: x for x in c["linhas"]}
+    assert [x["chave"] for x in c["linhas"]] == [
+        "preco",
+        "subsidio",
+        "produtos",
+        "frete",
+        "cupom",
+        "tarifa",
+        "depois",
+        "liquido",
+    ]
+    assert por["produtos"]["previsto"] == 4508.0 and por["tarifa"]["previsto"] == 354.85
+    assert por["liquido"] == {
+        "chave": "liquido",
+        "rotulo": "= Renda do pedido",
+        "previsto": 4150.15,
+        "real": 4150.15,
+        "dif": 0.0,
+        "estilo": "bold",
+    }
+    assert "Detalhes de Renda" in c["rodape"]

@@ -1102,13 +1102,39 @@ async def raio_x(
     return {
         "pedido": _pedido_out(p),
         "versoes": versoes,
-        "comparativo": _comparativo(p, versoes, movs),
+        "comparativo": _comparativo(
+            p, versoes, movs, shopee=await _conta_shopee_do_pedido(session, p)
+        ),
         "movimentos": [_movimento_out(m) for m in movs],
     }
 
 
+async def _conta_shopee_do_pedido(
+    session: AsyncSession, p: ConciliacaoPedido
+) -> dict[str, Decimal] | None:
+    """A conta da Shopee (como a tela deles) a partir do escrow guardado pela Margem."""
+    from app.models import MarketplaceOrderFinancial
+    from app.services.conciliacao_calculo import conta_shopee
+
+    if getattr(p.platform, "value", str(p.platform)) != "shopee" or not p.numeroloja:
+        return None
+    fin = (
+        await session.execute(
+            select(MarketplaceOrderFinancial).where(
+                MarketplaceOrderFinancial.integration_id == p.integration_id,
+                MarketplaceOrderFinancial.external_order_id == p.numeroloja,
+            )
+        )
+    ).scalar_one_or_none()
+    return conta_shopee(fin)
+
+
 def _comparativo(
-    p: ConciliacaoPedido, versoes: dict[str, Any], movs: list[ConciliacaoMovimento]
+    p: ConciliacaoPedido,
+    versoes: dict[str, Any],
+    movs: list[ConciliacaoMovimento],
+    *,
+    shopee: dict[str, Decimal] | None = None,
 ) -> dict[str, Any]:
     """Previsto (venda) × Real (extrato + fatura à parte) × Diferença — a leitura de
     conciliação que o Vinicius aprovou em 15/10 no lugar das três colunas."""
@@ -1165,6 +1191,72 @@ def _comparativo(
         def real(x: Any) -> float | None:
             return n(x) if liberou else None
 
+        if shopee is not None:
+            # As mesmas linhas de "Informações de Pagamento › Exibir Detalhes de Renda"
+            # da Shopee, pra comparar linha a linha (15/10, pedido 301438).
+            sh = {k: float(x) for k, x in shopee.items()}
+            linhas = [
+                linha("preco", "Preço de venda", sh["preco"], real(sh["preco"])),
+                linha(
+                    "subsidio",
+                    "− Subsídio da Shopee no produto",
+                    sh["subsidio"],
+                    real(sh["subsidio"]),
+                    estilo="muted",
+                ),
+                linha(
+                    "produtos",
+                    "= Subtotal dos produtos",
+                    sh["subtotal_produtos"],
+                    real(sh["subtotal_produtos"]),
+                    estilo="bold",
+                ),
+                linha(
+                    "frete",
+                    "± Subtotal de frete (parte da loja)",
+                    sh["frete_loja"],
+                    real(sh["frete_loja"]),
+                ),
+                linha("cupom", "− Cupons e descontos da loja", sh["cupons"], real(sh["cupons"])),
+                linha(
+                    "tarifa",
+                    "− Taxas e encargos (comissão, serviço, afiliados)",
+                    sh["taxas"],
+                    real(sh["taxas"]),
+                ),
+                linha(
+                    "depois",
+                    "± Depois da liberação (estornos, ajustes)",
+                    0.0 if tem_extrato else None,
+                    depois,
+                    compara=False,
+                    estilo="muted",
+                ),
+                linha("liquido", "= Renda do pedido", sh["renda"], real_liquido, estilo="bold"),
+            ]
+            return {
+                "linhas": linhas,
+                "real_rotulo": "escrow na liberação + carteira",
+                "comparar": p.situacao != "cancelado",
+                "nota": (
+                    "venda desfeita: as colunas mostram o que entrou e o que saiu"
+                    if p.situacao == "cancelado"
+                    else (
+                        None
+                        if liberou
+                        else (
+                            "a Shopee fecha a conta da venda na liberação; "
+                            "até lá só existe o previsto"
+                        )
+                    )
+                ),
+                "rodape": (
+                    'as mesmas linhas de "Informações de Pagamento › Detalhes de Renda" '
+                    "da Shopee · "
+                    '"Renda do pedido" real é o que a carteira pagou'
+                ),
+                "frete_liquido_loja": None,
+            }
         linhas = [
             linha("produtos", "Produtos (preço da venda)", n(v.get("valor")), real(v.get("valor"))),
             linha(

@@ -102,6 +102,56 @@ def _venda_cancelada(fin: MarketplaceOrderFinancial | None) -> bool:
     return str(order.get("status") or "").lower() == "cancelled"
 
 
+def _escrow_income(venda: MarketplaceOrderFinancial | None) -> dict[str, Any] | None:
+    raw = venda.raw if (venda is not None and isinstance(venda.raw, dict)) else None
+    escrow = raw.get("escrow") if raw else None
+    income = escrow.get("order_income") if isinstance(escrow, dict) else None
+    return income if isinstance(income, dict) and income.get("escrow_amount") is not None else None
+
+
+def conta_shopee(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] | None:
+    """A conta da venda do jeito que a tela da Shopee mostra em "Detalhes de Renda"
+    (15/10, pedido 301438): preço de venda − subsídio da Shopee no produto = subtotal
+    dos produtos; ± frete da loja; − cupons da loja; − taxas e encargos (líquidas do
+    subsídio) = renda do pedido. A Margem guarda as taxas BRUTAS (722,36) e o desconto
+    de tabela (5.078); aqui é o líquido (354,85) e só o que sai do bolso da loja."""
+    inc = _escrow_income(venda)
+    if inc is None:
+        return None
+
+    def d(k: str) -> Decimal:
+        v = inc.get(k)
+        try:
+            return Decimal(str(v)) if v not in (None, "") else ZERO
+        except Exception:  # noqa: BLE001
+            return ZERO
+
+    rebate = inc.get("seller_product_rebate")
+    subsidio = Decimal(str(rebate.get("amount") or 0)) if isinstance(rebate, dict) else ZERO
+    preco = d("order_selling_price") or d("cost_of_goods_sold")
+    taxas = (
+        d("net_commission_fee")
+        + d("net_service_fee")
+        + d("order_ams_commission_fee")
+        + d("shipping_seller_protection_fee_amount")
+        + d("seller_transaction_fee")
+        + d("campaign_fee")
+    )
+    frete_loja = (
+        d("actual_shipping_fee") - d("buyer_paid_shipping_fee") - d("shopee_shipping_rebate")
+    )
+    cupons = d("voucher_from_seller") + d("seller_coin_cash_back")
+    return {
+        "preco": preco,
+        "subsidio": subsidio,
+        "subtotal_produtos": preco - subsidio,
+        "frete_loja": frete_loja,
+        "cupons": cupons,
+        "taxas": taxas,
+        "renda": d("escrow_amount"),
+    }
+
+
 def situacao_do_pedido(
     *,
     agora: datetime,
@@ -337,6 +387,7 @@ async def recalcular_loja(
     integration = await session.get(Integration, loja.integration_id)
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
     inicio_dt = datetime.combine(loja.inicio, datetime.min.time(), tzinfo=BRT)
+    plataforma_loja = getattr(loja.platform, "value", str(loja.platform))
     if not lojas_bling:
         return {"loja": loja.conta, "erro": "sem loja do Bling ligada a esta conta", "pedidos": 0}
 
@@ -492,6 +543,8 @@ async def recalcular_loja(
         reembolso = reembolso_por_numero.get(numero, ZERO)
         # Venda sem valor ainda (Shopee antes de calcular o escrow): não grava tarifa/líquido 0,00
         venda_ok = venda if calc["situacao"] != "sem_venda" else None
+        # Shopee: a conta como a tela deles (preço de venda, subsídio, taxas líquidas)
+        shopee = conta_shopee(venda_ok) if plataforma_loja == "shopee" else None
         # Resultado de VERDADE: só com o dinheiro que entrou. Enquanto não libera, sobrou
         # e margem ficam vazios (15/10, Vinicius: "não precisa aparecer previsto nem margem").
         base_resultado = calc["recebido"]
@@ -520,10 +573,21 @@ async def recalcular_loja(
             "bling_valorbase": _d(cab.valorbase),
             "bling_custofrete": _d(cab.custofrete),
             "bling_taxacomissao": _d(cab.taxacomissao),
-            "venda_valor": _d(venda.gross_amount) if venda else None,
-            "venda_tarifa": _d(venda.fee_amount) if venda_ok else None,
-            "venda_frete": _d(venda.freight_amount) if venda_ok else None,
-            "venda_cupom": _d(venda.discount_amount) if venda_ok else None,
+            "venda_valor": (
+                shopee["preco"] if shopee else (_d(venda.gross_amount) if venda else None)
+            ),
+            "venda_tarifa": (
+                shopee["taxas"] if shopee else (_d(venda.fee_amount) if venda_ok else None)
+            ),
+            "venda_frete": (
+                shopee["frete_loja"] if shopee else (_d(venda.freight_amount) if venda_ok else None)
+            ),
+            # Shopee: "extras" = subsídio no produto + cupons da loja (a tela deles)
+            "venda_cupom": (
+                shopee["subsidio"] + shopee["cupons"]
+                if shopee
+                else (_d(venda.discount_amount) if venda_ok else None)
+            ),
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
             "venda_liquido": _d(venda.net_amount) if venda_ok else None,
             "venda_status": venda.status if venda_ok else None,
