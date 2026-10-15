@@ -52,8 +52,9 @@ de novo quando a releitura traz mensagem nova (o /lida, uma vez por
 abertura).
 
 O /zerar-nao-lidas (15/10/2026) é o "Limpar não lidas" do Duoke: o "visto no
-DaVinci" de uma vez em todas as conversas de chat da loja
-(`integration_id`), das plataformas (`plataformas`) ou de tudo — dentro do escopo da equipe.
+DaVinci" de uma vez em todas as conversas do número (o chat e a reclamação do
+ML, `pendente.do_numero`) da loja (`integration_id`), das plataformas
+(`plataformas`) ou de tudo — dentro do escopo da equipe.
 Responde `{conversas}` (quantas foram marcadas); 403 para quem só lê.
 
 A MESMA TRAVA de acesso do router do atendimento (`_so_admin`), a permissão de

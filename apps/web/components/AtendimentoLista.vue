@@ -98,9 +98,11 @@ export function filtroPadrao(caixa: string | null | undefined): string {
 // alguém abriu a conversa), com ou sem o negrito: a conversa em que o robô
 // respondeu por último não está no "Falta responder" e mostra o número; a
 // que alguém abriu fica em negrito sem bolinha. A soma das bolinhas de uma
-// loja é o número dela. Fora do chat (`numero_duoke` null: avaliação,
-// reclamação…) e com a API antiga, a bolinha de antes: só na linha marcada, o
-// maior entre as mensagens do comprador sem resposta e as não lidas.
+// loja é o número dela. Fora do número (`numero_duoke` null: avaliação,
+// reclamação da Shopee/TikTok…) e com a API antiga, a bolinha de antes: só na
+// linha marcada, o maior entre as mensagens do comprador sem resposta e as não
+// lidas. A reclamação do ML tem número desde 15/10/2026 (o Duoke a junta ao
+// pack e conta a mensagem do mediador): a bolinha dela é esse número.
 type LinhaMarcavel = { aguardando_resposta?: boolean; falta_responder?: boolean; pendentes?: number; nao_lidas?: number; numero_duoke?: number | null }
 export function linhaMarcada(c: LinhaMarcavel, pelaFila = false): boolean {
   return pelaFila || c.falta_responder === undefined ? !!c.aguardando_resposta : !!c.falta_responder

@@ -1157,10 +1157,11 @@ def _resumo_dict(
         # na kia e nem mostra dessa conversa"): a mesma régua do número da
         # loja (`pendente.nao_lidas_duoke_sql`, com o "visto no DaVinci") — a
         # bolinha da linha na Caixa, com ou sem a marca do "Falta responder".
-        # None fora do chat (avaliação, reclamação…: a bolinha de antes) e
-        # quando quem chama não calculou.
+        # None fora do número (avaliação, reclamação da Shopee…: a bolinha de
+        # antes) e quando quem chama não calculou. A reclamação do ML está no
+        # número (15/10/2026, `pendente.do_numero`: o Duoke a junta ao pack).
         "numero_duoke": (
-            int(numero_duoke or 0) if numero_duoke is not None and pendente.do_chat(c) else None
+            int(numero_duoke or 0) if numero_duoke is not None and pendente.do_numero(c) else None
         ),
         "tem_rascunho": bool(tem_rascunho),
         "atribuido_a": c.atribuido_a,

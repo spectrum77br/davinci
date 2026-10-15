@@ -141,6 +141,29 @@ RETENTAR_FALHA = timedelta(hours=1)
 # nunca toma a vez da primeira leitura de uma reclamação nova.
 RELER_ABERTA = timedelta(minutes=9)
 MAX_RELEITURAS_RODADA = 20
+# A ENCERRADA também é relida pelo tempo (15/10/2026), a cada RELER_ABERTA e na
+# mesma cota, até uma leitura cair pelo menos RELER_ENCERRADA_ATE depois do
+# encerramento: o mediador do ML escreve a DECISÃO depois de fechar, sem
+# mexer o `last_updated`. Medido na 5586731754 (aguiar, pack
+# 2000018464125672): o ML fechou às 06:23:31 (`resolution.date_created`), o
+# `last_updated` ficou em 06:23:33, o DaVinci leu às 06:26:00 e a mensagem do
+# mediador saiu às 06:27:47 — o ML tinha 5 mensagens, o DaVinci 4, e o Duoke
+# contava a que faltava como não lida. Das 18 abertas ou encerradas nos 4
+# dias anteriores (todas as contas), só essa ficou para trás. No máximo
+# ~13 releituras por encerrada; a lida bem depois do encerramento não volta.
+RELER_ENCERRADA_ATE = timedelta(hours=2)
+# E desiste RELER_ENCERRADA_DESISTE depois do encerramento, dê certo ou não: o
+# `lido_em` só anda com a leitura que deu certo, e a releitura que falha
+# sempre (um 404 numa reclamação antiga) seria tentada de hora em hora
+# (RETENTAR_FALHA) até a encerrada sair de JANELA_ENCERRADAS — ~360 chamadas;
+# com o teto, ~70. Três dias e não um: a encerrada lida na hora ANTES desta
+# regra (a 5586731754, fechada em 15/10 09:23 UTC) ainda é relida se o deploy
+# atrasar um fim de semana, e o worker parado algumas horas não perde a
+# releitura. A encerrada de mais de 3 dias só teria mensagem de antes do
+# zerado do Duoke (14/10 15:35 UTC), que não conta no número. Medido em
+# 15/10 15:50 UTC: sem o teto, o deploy relia 32 encerradas (15 lidas antes
+# de 05/10, sem `lido_em`, de até 43 dias atrás); com ele, 5 (aguiar 4, kfa2 1).
+RELER_ENCERRADA_DESISTE = timedelta(days=3)
 
 # ── A rodada ──────────────────────────────────────────────────────────────
 # Menor que o intervalo do cron (10 min): se o processo morrer, a próxima roda.
@@ -723,6 +746,21 @@ def _reler_aberta(claim: dict, anteriores: dict, agora: datetime) -> bool:
     return lido_em is None or agora - lido_em >= RELER_ABERTA
 
 
+def _reler_encerrada(claim: dict, anteriores: dict, agora: datetime) -> bool:
+    """A encerrada já lida volta a ser lida (a cada RELER_ABERTA) enquanto a
+    última leitura for de antes de RELER_ENCERRADA_ATE depois do encerramento:
+    a decisão do mediador chega depois de fechar, sem mexer o `last_updated`.
+    Nunca depois de RELER_ENCERRADA_DESISTE do encerramento (a que falha sempre
+    não fica sendo tentada até sair da janela)."""
+    fim = encerrada_em(claim)
+    if fim is None or agora >= fim + RELER_ENCERRADA_DESISTE:
+        return False
+    lido_em = data_ml(anteriores.get("lido_em"))
+    if lido_em is None:
+        return True
+    return lido_em < fim + RELER_ENCERRADA_ATE and agora - lido_em >= RELER_ABERTA
+
+
 def _falhou_ha_pouco(
     linha: AtendimentoReclamacao | None, last_updated: str, agora: datetime
 ) -> bool:
@@ -924,9 +962,14 @@ async def processar_reclamacao(
     anteriores = dict((linha.dados if linha is not None else None) or {})
     mexeu = linha is None or anteriores.get("last_updated") != last_updated
     lida = anteriores.get("lido_ate") == last_updated and linha is not None and linha.conversa_id
-    releitura = bool(lida) and not mexeu and _reler_aberta(claim, anteriores, agora)
+    releitura = (
+        bool(lida)
+        and not mexeu
+        and (_reler_aberta(claim, anteriores, agora) or _reler_encerrada(claim, anteriores, agora))
+    )
     if releitura:
-        lida = False  # aberta e lida há mais que RELER_ABERTA: relê as mensagens
+        # Aberta lida há mais que RELER_ABERTA, ou encerrada há pouco: relê as mensagens.
+        lida = False
     if not mexeu and lida:
         return  # nada mudou desde a última leitura: nem escrita, nem chamada
 

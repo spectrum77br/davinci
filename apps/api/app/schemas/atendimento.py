@@ -180,8 +180,10 @@ class ConversaResumoOut(BaseModel):
     # O número DESTA conversa na Caixa (15/10/2026, `pendente.nao_lidas_duoke`
     # por linha — a mesma régua do número da loja, com o "visto no DaVinci"):
     # a bolinha da linha na Caixa, com ou sem a marca do "Falta responder";
-    # a soma das linhas de uma loja é o número dela. None fora do chat
-    # (avaliação, reclamação… — a bolinha de antes).
+    # a soma das linhas de uma loja é o número dela. None fora do número
+    # (avaliação, reclamação da Shopee/TikTok… — a bolinha de antes). A
+    # reclamação do ML tem número desde 15/10/2026 (`pendente.do_numero`: o
+    # Duoke a junta ao pack e conta o mediador).
     numero_duoke: int | None = None
     tem_rascunho: bool = False
     atribuido_a: UUID | None = None
