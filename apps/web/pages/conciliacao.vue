@@ -96,6 +96,7 @@ type Movimento = {
   parcelamento: number | null
   frete: number | null
   descontado_da_venda: boolean | null
+  original: Record<string, unknown> | null
 }
 type Versao = Record<string, number | string | null | undefined>
 type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; movimentos: Movimento[] }
@@ -144,6 +145,7 @@ const sincronizando = ref(false)
 const exportando = ref(false)
 const salvando = ref(false)
 const obsDraft = ref('')
+const originalAberto = ref<string | null>(null) // movimento com a linha original do relatório aberta
 const motivoDraft = ref('')
 
 const lojaAtual = computed(() => lojas.value.find((l) => l.conta === loja.value) || null)
@@ -596,15 +598,31 @@ await carregar()
           <div class="pt-1 font-bold text-[#1f3a5f] dark:text-slate-200">Movimentos deste pedido</div>
           <div class="max-h-56 overflow-auto rounded border">
             <table class="w-full border-collapse">
-              <thead class="bg-muted text-[10px] uppercase text-muted-foreground"><tr><th class="px-1.5 py-1 text-left">Data</th><th class="px-1.5 py-1 text-left">Origem</th><th class="px-1.5 py-1 text-left">O que foi</th><th class="px-1.5 py-1 text-right">Valor</th></tr></thead>
+              <thead class="bg-muted text-[10px] uppercase text-muted-foreground"><tr><th class="px-1.5 py-1 text-left">Data</th><th class="px-1.5 py-1 text-left">Origem</th><th class="px-1.5 py-1 text-left">O que foi</th><th class="px-1.5 py-1 text-right">Valor</th><th class="px-1 py-1"></th></tr></thead>
               <tbody class="tabular-nums">
-                <tr v-if="!raiox.movimentos.length"><td colspan="4" class="px-1.5 py-2 text-center text-muted-foreground">nenhum movimento ainda</td></tr>
-                <tr v-for="m in raiox.movimentos" :key="m.id" class="border-b">
-                  <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ fmtDiaHora(m.data) }}</td>
-                  <td class="whitespace-nowrap px-1.5 py-1">{{ m.origem === 'mp_extrato' ? 'extrato' : 'fatura' }}</td>
-                  <td class="px-1.5 py-1">{{ tipoMov(m.tipo) }}<span v-if="m.descontado_da_venda === false" class="ml-1 text-muted-foreground">(cobrada à parte)</span></td>
-                  <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold" :class="(m.credito || 0) > 0 ? 'text-emerald-700' : 'text-red-600'">{{ (m.credito || 0) > 0 ? '+ ' + fmtMoney(m.credito) : '− ' + fmtMoney(m.debito) }}</td>
-                </tr>
+                <tr v-if="!raiox.movimentos.length"><td colspan="5" class="px-1.5 py-2 text-center text-muted-foreground">nenhum movimento ainda</td></tr>
+                <template v-for="m in raiox.movimentos" :key="m.id">
+                  <tr class="border-b">
+                    <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ fmtDiaHora(m.data) }}</td>
+                    <td class="whitespace-nowrap px-1.5 py-1">{{ m.origem === 'mp_extrato' ? 'extrato' : 'fatura' }}</td>
+                    <td class="px-1.5 py-1">{{ tipoMov(m.tipo) }}<span v-if="m.descontado_da_venda === false" class="ml-1 text-muted-foreground">(cobrada à parte)</span></td>
+                    <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold" :class="(m.credito || 0) > 0 ? 'text-emerald-700' : 'text-red-600'">{{ (m.credito || 0) > 0 ? '+ ' + fmtMoney(m.credito) : '− ' + fmtMoney(m.debito) }}</td>
+                    <td class="px-1 py-1 text-right">
+                      <button type="button" class="rounded border px-1 text-[10px] text-muted-foreground hover:bg-muted" :title="m.origem === 'mp_extrato' ? 'a linha original do relatório do Mercado Pago' : 'o detalhe original da fatura do ML'" @click="originalAberto = originalAberto === m.id ? null : m.id">{{ originalAberto === m.id ? 'fechar' : 'original' }}</button>
+                    </td>
+                  </tr>
+                  <tr v-if="originalAberto === m.id" class="border-b bg-muted/40">
+                    <td colspan="5" class="px-2 py-1.5">
+                      <div class="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">{{ m.origem === 'mp_extrato' ? 'Linha original do relatório de liberações (Mercado Pago)' : 'Detalhe original da fatura (Mercado Livre)' }}</div>
+                      <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+                        <template v-for="(v, k) in m.original || {}" :key="String(k)">
+                          <span class="font-mono text-muted-foreground">{{ k }}</span><span class="break-all">{{ typeof v === 'object' ? JSON.stringify(v) : String(v) }}</span>
+                        </template>
+                        <span v-if="!m.original || !Object.keys(m.original).length" class="col-span-2 text-muted-foreground">sem linha original guardada</span>
+                      </div>
+                    </td>
+                  </tr>
+                </template>
               </tbody>
             </table>
           </div>

@@ -763,6 +763,32 @@ def _movimento_out(m: ConciliacaoMovimento) -> dict[str, Any]:
         "sku": m.sku,
         "classificacao": m.classificacao,
         "data_aprovacao": m.data_aprovacao.isoformat() if m.data_aprovacao else None,
+        # A linha ORIGINAL (a linha do relatório do Mercado Pago ou o detalhe da fatura
+        # do ML), pra quem quiser conferir na fonte — 15/10, pedido do Vinicius.
+        "original": _original_do_movimento(m),
+    }
+
+
+def _original_do_movimento(m: ConciliacaoMovimento) -> dict[str, Any]:
+    raw = m.raw if isinstance(m.raw, dict) else {}
+    if m.origem == ORIGEM_EXTRATO:
+        # só as colunas preenchidas, na ordem do relatório
+        return {k: v for k, v in raw.items() if v not in (None, "", "0.00", "0", "{}", "[]")}
+    ci = raw.get("charge_info") or {}
+    vendas = raw.get("sales_info") or []
+    venda = vendas[0] if isinstance(vendas, list) and vendas else {}
+    return {
+        "detail_id": ci.get("detail_id"),
+        "creation_date_time": ci.get("creation_date_time"),
+        "detail_type": ci.get("detail_type"),
+        "detail_sub_type": ci.get("detail_sub_type"),
+        "detail_amount": ci.get("detail_amount"),
+        "transaction_detail": ci.get("transaction_detail"),
+        "debited_from_operation": ci.get("debited_from_operation"),
+        "charge_bonified_id": ci.get("charge_bonified_id"),
+        "order_id": venda.get("order_id") if isinstance(venda, dict) else None,
+        "operation_id": venda.get("operation_id") if isinstance(venda, dict) else None,
+        "_periodo": raw.get("_periodo"),
     }
 
 
