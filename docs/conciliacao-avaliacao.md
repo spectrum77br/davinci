@@ -518,4 +518,6 @@ OK do Vinicius: "faz sentido, pode fazer o tiktok desde 01/10". Entrou no mesmo 
 - **Resumo / Dinheiro nas plataformas**: Na conta = — (a TikTok não guarda saldo: "repassa pro banco todo dia"); A liberar = soma das estimativas dos pedidos aguardando.
 - Vigia de Conciliação e fechamento automático do dia valem igual (a loja entra na rodada das 07:00).
 
+**Conferido em produção (15/10 13:36 BRT, commits 25cfbeed → b4562c74):** Mini desde 01/10 = 117 pedidos (52 bateu, 63 aguardando com 48.928,25 a liberar, 2 cancelados no Bling), 0 recebido a menos; 15 extratos lidos (01→14/10), todos com pedidos = extrato = repasse (ex. 14/10: 15 linhas, 9.835,09; 01/10: 21 linhas, 11.238,10), robô fechou 01→14/10; pedido 302381: 412,30 − 67,85 = 344,45 liquidado em 14/10, Status Bling "Entregue". Lições do dia: a subida reinicia o worker e mata a rodada em andamento (o arq reexecuta depois); a releitura do financeiro na TikTok leva ~40 s por pedido quando a API limita — por isso 12 por rodada com teto de 5 min.
+
 Testes: `tests/test_conciliacao_tiktok.py` (mapeamento, leitura por extrato + segunda rodada sem duplicar, Extrato do dia fechando em zero, Raio-X previsto × real linha a linha, releitura do financeiro só pra estimado/velho).
