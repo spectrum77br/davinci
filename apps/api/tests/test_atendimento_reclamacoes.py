@@ -25,7 +25,7 @@ do cartão com a mesma trava do atendimento.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -47,7 +47,7 @@ from app.models import (
 )
 from app.routers import atendimento as rota_atendimento
 from app.security.cipher import encrypt_json
-from app.services.atendimento import etiqueta, etiqueta_fatos, reclamacoes
+from app.services.atendimento import etiqueta, etiqueta_fatos, pendente, reclamacoes
 from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AUTOR_MEDIADOR,
@@ -647,6 +647,161 @@ async def test_encerrada_sem_mudar_nao_e_relida(db, make_user, ml):
     resumo = await _sync(integ, T0 + timedelta(hours=1))
     assert resumo["lidas"] == 0
     assert not ml.chamadas_de("/messages")
+
+
+async def test_encerrada_ha_pouco_e_relida_ate_a_decisao_do_mediador(db, make_user, ml):
+    """15/10/2026, a 5586731754 (aguiar): o ML fechou às 06:23:31, o DaVinci leu
+    às 06:26:00 e a decisão do mediador saiu às 06:27:47 — sem mexer o
+    `last_updated` (06:23:33). O ML ficou com 5 mensagens, o DaVinci com 4, e o
+    Duoke contava a que faltava como não lida. A encerrada é relida (só as
+    mensagens, a cada RELER_ABERTA) até uma leitura cair RELER_ENCERRADA_ATE
+    depois do encerramento; depois disso, não volta."""
+    integ = await _conta(db, await make_user())
+    fechou = T0 - timedelta(seconds=149)  # 06:23:31 com a leitura às 06:26:00 (T0)
+    menos4 = timezone(timedelta(hours=-4))
+
+    def ml_data(quando: datetime) -> str:
+        return quando.astimezone(menos4).isoformat(timespec="milliseconds")
+
+    c = ml.conta()
+    c["encerradas"] = [
+        _claim(
+            status="closed",
+            stage="dispute",
+            last_updated=ml_data(fechou + timedelta(seconds=2)),
+            resolution={
+                "reason": "no_bpp",
+                "date_created": ml_data(fechou),
+                "benefited": ["respondent"],
+                "closed_by": "mediator",
+            },
+        )
+    ]
+    c["mensagens"][RECLAMACAO_ML] = [
+        _msg(1, "mediator", "respondent", "abrimos a mediação", ml_data(T0 - timedelta(days=13))),
+        _msg(2, "respondent", "mediator", "ok", ml_data(T0 - timedelta(days=12))),
+    ]
+    await _sync(integ)
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert [m.autor for m in await _mensagens(db, conversa)].count(AUTOR_MEDIADOR) == 1
+    # A decisão do mediador 1 min 47 s depois da leitura; o last_updated não mexe.
+    c["mensagens"][RECLAMACAO_ML].append(
+        _msg(3, "mediator", "respondent", "decisão", ml_data(T0 + timedelta(seconds=107)))
+    )
+    ml.chamadas.clear()
+
+    # Antes de RELER_ABERTA: nada.
+    resumo = await _sync(integ, T0 + timedelta(minutes=5))
+    assert resumo["lidas"] == 0 and not ml.chamadas_de("/messages")
+
+    # Depois: relê SÓ as mensagens e a decisão entra.
+    resumo = await _sync(integ, T0 + reclamacoes.RELER_ABERTA)
+    assert resumo["lidas"] == 1 and resumo["mensagens"] == 1
+    assert [p for _, p, _ in ml.chamadas if "/claims/search" not in p] == [
+        f"/post-purchase/v1/claims/{RECLAMACAO_ML}/messages"
+    ]
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    msgs = await _mensagens(db, conversa)
+    assert [m.autor for m in msgs].count(AUTOR_MEDIADOR) == 2
+    # No número da loja (a reclamação do ML entra, como no Duoke): a decisão,
+    # depois da última resposta da loja.
+    agora = T0 + reclamacoes.RELER_ABERTA
+    assert pendente.nao_lidas_duoke(conversa, msgs, agora=agora) == 1
+
+    # Enquanto a última leitura for de menos de RELER_ENCERRADA_ATE depois do
+    # encerramento, relê a cada RELER_ABERTA (sem duplicar)...
+    ml.chamadas.clear()
+    depois = fechou + reclamacoes.RELER_ENCERRADA_ATE + timedelta(minutes=1)
+    resumo = await _sync(integ, depois)
+    assert resumo["lidas"] == 1 and resumo["mensagens"] == 0
+    # ... e a leitura que caiu depois disso encerra: não volta mais.
+    ml.chamadas.clear()
+    resumo = await _sync(integ, depois + timedelta(hours=1))
+    assert resumo["lidas"] == 0 and not ml.chamadas_de("/messages")
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert [m.autor for m in await _mensagens(db, conversa)].count(AUTOR_MEDIADOR) == 2
+
+
+async def test_encerrada_lida_na_hora_e_relida_uma_vez(db, make_user, ml):
+    """A encerrada lida no minuto do encerramento (a do aguiar, a de qualquer
+    conta antes desta regra) é relida UMA vez na rodada seguinte a RELER_ABERTA
+    — a releitura que cai bem depois do encerramento é a última."""
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    # Encerrada às 15:20:25 UTC; lida às 15:21 (logo depois).
+    lida = datetime(2026, 10, 1, 15, 21, tzinfo=UTC)
+    c["encerradas"] = [_encerrada_297840()]
+    c["mensagens"][RECLAMACAO_ML] = _mensagens_297840()
+    await _sync(integ, lida)
+    ml.chamadas.clear()
+    # Um dia depois (o deploy que chega depois do encerramento, dentro de
+    # RELER_ENCERRADA_DESISTE): relê uma vez.
+    resumo = await _sync(integ, lida + timedelta(days=1))
+    assert resumo["lidas"] == 1 and resumo["mensagens"] == 0
+    assert ml.chamadas_de(f"/claims/{RECLAMACAO_ML}/messages")
+    assert not ml.chamadas_de("/returns") and not ml.chamadas_de("/affects-reputation")
+    ml.chamadas.clear()
+    resumo = await _sync(integ, lida + timedelta(days=1, minutes=30))
+    assert resumo["lidas"] == 0 and not ml.chamadas_de("/messages")
+
+
+async def test_releitura_da_encerrada_desiste_no_teto(db, make_user, ml):
+    """Revisão de 15/10/2026: o `lido_em` só anda com a leitura que deu certo, e
+    a releitura da encerrada que falha SEMPRE (um 404 no /messages) seria
+    tentada de hora em hora até a encerrada sair de JANELA_ENCERRADAS (~360
+    chamadas). Ela segue a RETENTAR_FALHA e desiste RELER_ENCERRADA_DESISTE
+    depois do encerramento; a encerrada lida na hora e achada só depois do
+    teto (o deploy que atrasou) também não é relida."""
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    fechou = datetime(2026, 10, 1, 15, 20, 25, tzinfo=UTC)  # a resolução da 297840
+    lida = fechou + timedelta(seconds=35)
+    c["encerradas"] = [_encerrada_297840()]
+    c["mensagens"][RECLAMACAO_ML] = _mensagens_297840()
+    await _sync(integ, lida)
+    c["falhas"]["/messages"] = 404
+    ml.chamadas.clear()
+
+    resumo = await _sync(integ, lida + reclamacoes.RELER_ABERTA)
+    assert resumo["erros"] == 1 and len(ml.chamadas_de("/messages")) == 1
+    # Antes de RETENTAR_FALHA não insiste; depois, tenta de novo.
+    await _sync(integ, lida + reclamacoes.RELER_ABERTA + timedelta(minutes=30))
+    assert len(ml.chamadas_de("/messages")) == 1
+    await _sync(integ, lida + reclamacoes.RELER_ABERTA + reclamacoes.RETENTAR_FALHA)
+    assert len(ml.chamadas_de("/messages")) == 2
+    # Um minuto antes do teto ainda tenta; no teto, desiste de vez.
+    teto = fechou + reclamacoes.RELER_ENCERRADA_DESISTE
+    await _sync(integ, teto - timedelta(minutes=1))
+    assert len(ml.chamadas_de("/messages")) == 3
+    ml.chamadas.clear()
+    for depois in (timedelta(hours=2), timedelta(days=1), timedelta(days=5)):
+        resumo = await _sync(integ, teto + depois)
+        assert resumo["erros"] == 0 and resumo["lidas"] == 0
+    assert not ml.chamadas_de("/messages")
+    # A conversa e as mensagens da primeira leitura continuam lá.
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert conversa is not None and await _mensagens(db, conversa)
+
+
+async def test_encerrada_lida_na_hora_e_achada_depois_do_teto_nao_e_relida(db, make_user, ml):
+    """A encerrada lida no minuto do encerramento (antes desta regra) que a
+    rodada só vê depois de RELER_ENCERRADA_DESISTE não é relida: a mensagem que
+    tivesse ficado para trás seria de antes do zerado do Duoke e fora do
+    número (medido em 15/10/2026: sem o teto, o deploy relia 32 encerradas de
+    até 43 dias; com ele, 5)."""
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    fechou = datetime(2026, 10, 1, 15, 20, 25, tzinfo=UTC)
+    c["encerradas"] = [_encerrada_297840()]
+    c["mensagens"][RECLAMACAO_ML] = _mensagens_297840()
+    await _sync(integ, fechou + timedelta(minutes=1))
+    ml.chamadas.clear()
+    resumo = await _sync(integ, fechou + reclamacoes.RELER_ENCERRADA_DESISTE)
+    assert resumo["lidas"] == 0 and not ml.chamadas_de("/messages")
 
 
 async def test_cota_por_conta_espalha_a_leitura(db, make_user, ml, monkeypatch):

@@ -152,6 +152,38 @@ respondeu segue em negrito, sem bolinha, como no Duoke). Fora do chat (a
 avaliação, a reclamação…) a linha não tem número (`None`) e a bolinha segue
 a de antes; a Caixa Humano também.
 
+A RECLAMAÇÃO DO ML ENTRA NO NÚMERO (15/10/2026, as duas conversas do ML que
+faltavam na medição das 10:13). O Duoke junta as mensagens da reclamação/
+mediação do ML à conversa do pack (a conversa "/claim/…" dele some quando acha
+o pack, `mergeToConversationId`; as abas "com o comprador" e "com a
+plataforma") e conta a do MEDIADOR como não lida: o pack 2000018538895678
+(injox, bloqueado pela mediação, sem mensagem de pós-venda desde 13/10) com 1
+no Duoke = a mensagem do mediador de 14/10 14:26, a única da reclamação
+5593269721 depois do zerado de 14/10 12:35; o pack 2000018464125672 (aguiar,
+pós-venda SEM mensagem nenhuma) com 1 = a decisão do mediador da
+5586731754 (15/10 06:27). Nas 18 reclamações do ML abertas ou encerradas nos
+4 dias, essas eram as únicas com mensagem do mediador nessa janela. Aqui a
+reclamação continua a conversa dela (`canal = 'reclamacao'`, só leitura):
+ela soma no número da loja (`RECLAMACAO_NO_NUMERO`, `do_numero`) com a mesma
+régua do chat e, além do comprador, a mensagem do MEDIADOR conta
+(`do_comprador_no_numero(mediador=True)`); a resposta de pessoa da loja e o
+"visto no DaVinci" zeram, as linhas que o DaVinci escreve ("aberta",
+"encerrada") não contam. O número fica na linha da reclamação, não na do
+pack — a soma da loja é a mesma. O filtro "Falta responder" e a marca da
+linha não mudam (a reclamação segue fora do chat, com o filtro dela), e a
+reclamação/devolução da Shopee e da TikTok continua fora do número.
+O que ainda NÃO é igual (revisão de 15/10/2026): (1) no Duoke pack e
+reclamação são UMA conversa com um contador — abrir ou responder um zera
+tudo; aqui cada uma tem os seus marcos (a resposta de pessoa e o "visto" do
+pack não zeram a reclamação, e o contrário também não). Sem caso hoje: o pack
+da injox está bloqueado pela mediação desde 13/10 e a 5593207874 (Zorvex) não
+tem conversa de pack. (2) A regra do mediador foi conferida em DUAS conversas;
+o mediador que escreve segundos depois da resposta da loja (a 5593269721,
+injox: 14:13:26 e 14:13:35 UTC, depois da resposta às 14:13:21) aqui dá 2, e
+no Duoke pode ter ficado lida se quem respondeu estava com a conversa aberta.
+A conferir na próxima medição; para tirar a reclamação do número sem mexer em
+mais nada, `RECLAMACAO_NO_NUMERO = ()`.
+
 O canal sem mensagem para contar fica com a regra que já tinha: o Direct do
 Instagram (adaptador só leitura — as mensagens ficam em `dm_mensagens`, não
 em `atendimento_mensagens`) soma 1 por conversa esperando DENTRO da janela de
@@ -170,7 +202,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, not_, or_, select
+from sqlalchemy import and_, case, false, func, not_, or_, select
 from sqlalchemy.orm import aliased
 
 from app.models import AtendimentoConversa, AtendimentoMensagem
@@ -178,6 +210,7 @@ from app.services.atendimento import gravar, separa_email
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
+    AUTOR_MEDIADOR,
     AUTOR_SISTEMA,
     CANAL_AVALIACAO,
     CANAL_CARRINHO,
@@ -223,6 +256,10 @@ JANELA_DO_NUMERO = timedelta(days=7)
 # a pergunta do anúncio fica no módulo de perguntas, fora do número). Seguem
 # no "Falta responder" e no filtro delas.
 FORA_DO_NUMERO: tuple[tuple[str, str], ...] = (("ml", CANAL_PERGUNTA),)
+# O que está FORA do chat e ENTRA no número (15/10/2026): a reclamação/mediação
+# do ML, que o Duoke junta ao pack — e nela a mensagem do mediador conta
+# (ver o topo, "A RECLAMAÇÃO DO ML ENTRA NO NÚMERO").
+RECLAMACAO_NO_NUMERO: tuple[tuple[str, str], ...] = (("ml", CANAL_RECLAMACAO),)
 
 
 def _utc(quando: datetime | None) -> datetime | None:
@@ -334,6 +371,20 @@ def falta_responder_no_chat(conversa: Any) -> bool:
 # ── O número da Caixa = o "não lida" do Duoke (15/10/2026) ───────────────
 
 
+def reclamacao_no_numero(conversa: Any) -> bool:
+    """A reclamação/mediação do ML, que o Duoke junta ao pack? PURA."""
+    onde = (getattr(conversa, "plataforma", None), getattr(conversa, "canal", None))
+    return onde in RECLAMACAO_NO_NUMERO
+
+
+def do_numero(conversa: Any) -> bool:
+    """A conversa é do NÚMERO da Caixa? PURA — o chat (`do_chat`) e a
+    reclamação do ML (`reclamacao_no_numero`). Sem olhar tempo nem situação
+    (isso é o `entra_no_numero`): é o que a linha mostra (`numero_duoke`) e o
+    que o "Zerar não lidas" zera."""
+    return do_chat(conversa) or reclamacao_no_numero(conversa)
+
+
 def resposta_de_pessoa(mensagem: Any) -> bool:
     """A mensagem é RESPOSTA DE PESSOA da loja para o número? PURA — a gêmea do
     `pessoa` de `nao_lidas_duoke_sql`.
@@ -397,9 +448,10 @@ def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
     resposta de pessoa (se a resposta foi a última, não há o que contar). NÃO
     depende da FILA (`aguardando_resposta`): a mensagem do comprador que o
     DaVinci grava como `sistema` (a pergunta do FAQ, a resposta automática da
-    conta dele) não abre a vez dele, e no Duoke conta (15/10/2026).
+    conta dele) não abre a vez dele, e no Duoke conta (15/10/2026). Além do
+    chat, a reclamação do ML (`do_numero`, 15/10/2026).
     """
-    if not do_chat(conversa):
+    if not do_numero(conversa):
         return False
     onde = (getattr(conversa, "plataforma", None), getattr(conversa, "canal", None))
     if onde in FORA_DO_NUMERO:
@@ -414,8 +466,12 @@ def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
     return ultima is not None and ultima > desde_do_numero(agora)
 
 
-def do_comprador_no_numero(mensagem: Any, comprador: Any = None) -> bool:
+def do_comprador_no_numero(mensagem: Any, comprador: Any = None, *, mediador: bool = False) -> bool:
     """A mensagem é do COMPRADOR para o número? PURA.
+
+    `mediador=True` (só na reclamação do ML, `reclamacao_no_numero`): a do
+    MEDIADOR também conta — no Duoke ela é não lida na conversa do pack
+    (15/10/2026). No SAC da Magalu, não (a vez é da plataforma; só o comprador).
 
     O autor `cliente` e, desde 15/10/2026, a mensagem `sistema` que o próprio
     comprador mandou (`payload.from_id` = o `comprador_id` da conversa): na
@@ -428,7 +484,7 @@ def do_comprador_no_numero(mensagem: Any, comprador: Any = None) -> bool:
     (as campanhas, o "já segue") tem o `from_id` da loja e não conta.
     """
     autor = getattr(mensagem, "autor", None)
-    if autor == AUTOR_CLIENTE:
+    if autor == AUTOR_CLIENTE or (mediador and autor == AUTOR_MEDIADOR):
         return True
     if autor != AUTOR_SISTEMA or comprador in (None, ""):
         return False
@@ -444,6 +500,7 @@ def mensagem_no_numero(
     *,
     comprador: Any = None,
     desde: datetime | None = None,
+    mediador: bool = False,
 ) -> bool:
     """A mensagem soma no número? PURA — a gêmea do WHERE de `nao_lidas_duoke_sql`.
 
@@ -455,7 +512,7 @@ def mensagem_no_numero(
     `created_at` — o sync traz a mensagem ~1 min depois; a que chegou depois
     de abrir, ela não viu). Os marcos: `marcos_do_numero`.
     """
-    if not do_comprador_no_numero(mensagem, comprador):
+    if not do_comprador_no_numero(mensagem, comprador, mediador=mediador):
         return False
     if separa_email.e_mensagem_de_email(mensagem):
         return False
@@ -479,7 +536,8 @@ def nao_lidas_duoke(
 
     Fora do número (`entra_no_numero`), zero; dentro, as mensagens do
     comprador depois da última resposta de pessoa da loja e do que alguém já
-    viu no DaVinci (`mensagem_no_numero`, `marcos_do_numero`).
+    viu no DaVinci (`mensagem_no_numero`, `marcos_do_numero`) — na reclamação
+    do ML, também as do mediador.
     """
     if not entra_no_numero(conversa, agora):
         return 0
@@ -488,14 +546,30 @@ def nao_lidas_duoke(
     pessoa, visto = marcos_do_numero(conversa, dela)
     comprador = getattr(conversa, "comprador_id", None)
     desde = desde_do_numero(agora)
+    mediador = reclamacao_no_numero(conversa)
     return sum(
-        1 for m in dela if mensagem_no_numero(m, pessoa, visto, comprador=comprador, desde=desde)
+        1
+        for m in dela
+        if mensagem_no_numero(m, pessoa, visto, comprador=comprador, desde=desde, mediador=mediador)
     )
 
 
 def do_chat_sql(c: Any = AtendimentoConversa):
     """SQL de `do_chat` (nunca NULL: `canal` e `dados` são NOT NULL)."""
     return and_(c.canal.not_in(sorted(CANAIS_FORA_DO_CHAT)), separa_email.na_caixa_sql(c))
+
+
+def reclamacao_no_numero_sql(c: Any = AtendimentoConversa):
+    """SQL de `reclamacao_no_numero` (nunca NULL: `plataforma` e `canal` são NOT NULL).
+
+    Com `RECLAMACAO_NO_NUMERO = ()` (a chave para desligar), FALSE — o `or_()`
+    vazio sumiria do `and_` e o mediador contaria em qualquer conversa."""
+    return or_(false(), *(and_(c.plataforma == p, c.canal == k) for p, k in RECLAMACAO_NO_NUMERO))
+
+
+def do_numero_sql(c: Any = AtendimentoConversa):
+    """SQL de `do_numero` — o chat e a reclamação do ML."""
+    return or_(do_chat_sql(c), reclamacao_no_numero_sql(c))
 
 
 def falta_responder_no_chat_sql(c: Any = AtendimentoConversa):
@@ -538,6 +612,8 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
     do_comprador = or_(
         m.autor == AUTOR_CLIENTE,
         and_(m.autor == AUTOR_SISTEMA, m.payload["from_id"].astext == c.comprador_id),
+        # O mediador, só na reclamação do ML (`do_comprador_no_numero(mediador=True)`).
+        and_(m.autor == AUTOR_MEDIADOR, reclamacao_no_numero_sql(c)),
     )
     mensagens = (
         select(func.count())
@@ -554,7 +630,7 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
         .scalar_subquery()
     )
     entra = and_(
-        do_chat_sql(c),
+        do_numero_sql(c),
         *(not_(and_(c.plataforma == p, c.canal == k)) for p, k in FORA_DO_NUMERO),
         c.situacao != CONVERSA_FECHADA,
         c.sem_resposta_necessaria.is_(False),

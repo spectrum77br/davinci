@@ -352,7 +352,8 @@ async def zerar_nao_lidas(
     O Duoke tem o botão para zerar o não lido de tudo de uma vez (foi o que
     zerou o Duoke inteiro em 14/10/2026 às 12:35 — `pendente.ZERADO_NO_DUOKE_EM`).
     Aqui é o "visto no DaVinci" em lote: `visto_em` = agora (o relógio do
-    banco, nunca para trás) nas conversas de chat com mensagem dentro do
+    banco, nunca para trás) nas conversas do número (o chat e a reclamação do
+    ML, `pendente.do_numero`) com mensagem dentro do
     número (`pendente.desde_do_numero`), da loja (`integration_id`), das
     plataformas (`plataformas`) ou de todas — dentro do escopo da equipe (`escopo`, o WHERE do
     router). Nunca vai à plataforma, não muda o `updated_at`. Só quem mexe na
@@ -363,7 +364,7 @@ async def zerar_nao_lidas(
     from app.services.atendimento import pendente
 
     filtros = [
-        pendente.do_chat_sql(AtendimentoConversa),
+        pendente.do_numero_sql(AtendimentoConversa),
         AtendimentoConversa.ultima_mensagem_em > pendente.desde_do_numero(),
     ]
     plataformas = sorted({p for p in plataformas if p})

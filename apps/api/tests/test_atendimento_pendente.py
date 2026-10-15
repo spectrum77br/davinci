@@ -961,6 +961,188 @@ async def test_a_linha_mostra_o_numero_da_conversa(client, db, make_user, auth_a
     assert d["conversa"]["numero_duoke"] is None
 
 
+# ─────────────── a reclamação do ML no número (15/10/2026) ───────────────
+#
+# O Duoke junta a reclamação/mediação do ML à conversa do pack e conta a
+# mensagem do MEDIADOR como não lida: os dois packs do ML que faltavam na
+# medição das 10:13 (injox 2000018538895678 e aguiar 2000018464125672) eram
+# isso. A reclamação do DaVinci (`canal = 'reclamacao'`, só leitura) soma no
+# número da loja pela mesma régua, com o mediador contando.
+
+
+async def _mundo_reclamacao_ml(db, make_user) -> dict[str, tuple[AtendimentoConversa, int]]:
+    """Cada caso da reclamação no número → (conversa, quanto ela soma)."""
+    integ, canal = await _loja(db, await make_user(), "injox")
+    c: dict[str, tuple[AtendimentoConversa, int]] = {}
+    # A conversa da reclamação do ML: sem canal, bloqueada (só leitura), a
+    # vez pela plataforma (sem ação pendente da loja).
+    reclamacao = {
+        "plataforma": "ml",
+        "canal_nome": "reclamacao",
+        "situacao": "bloqueada",
+        "dados": {CHAVE_VEZ_DA_LOJA: None, "claim_id": "1"},
+    }
+
+    async def caso(nome, esperado, *falas, **campos):
+        campos = {**reclamacao, **campos}
+        c[nome] = (await _cena(db, integ, None, f"rml:{nome}", *falas, **campos), esperado)
+
+    # O injox: a loja respondeu ao mediador; depois, o mediador escreveu (1).
+    await caso("mediador_depois_da_loja", 1, ("mediador", 300), ("loja", 200), ("mediador", 60))
+    # O aguiar: a decisão do mediador numa reclamação sem resposta da loja.
+    await caso("decisao_do_mediador", 2, ("mediador", 600), ("mediador", 60))
+    # O comprador (na etapa com ele) também conta.
+    await caso("comprador_e_mediador", 3, ("cliente", 90), ("mediador", 60), ("mediador", 50))
+    # A resposta de pessoa da loja zera.
+    await caso("loja_respondeu", 0, ("mediador", 90), ("loja", 30))
+    # As linhas que o DaVinci escreve ("aberta", "encerrada") não contam.
+    await caso(
+        "so_sistema",
+        0,
+        ("sistema", 90, "Mediação 1 aberta no Mercado Livre."),
+        ("sistema", 30, "Mediação encerrada no Mercado Livre — decisão a favor da loja."),
+    )
+    # Visto no DaVinci: só o que chegou depois (a chegada = 1 min depois).
+    await caso(
+        "visto", 1, ("mediador", 90), ("mediador", 30), visto_em=AGORA - timedelta(minutes=60)
+    )
+    # Fechada pela pessoa e "não precisa de resposta": fora, como no chat.
+    await caso("fechada", 0, ("mediador", 60), situacao="fechada")
+    await caso("nao_precisa", 0, ("mediador", 60), sem_resposta_necessaria=True)
+    # Fora da janela do número (mais de 7 dias): nada.
+    await caso("velha", 0, ("mediador", 8 * 24 * HORA))
+    # A reclamação/devolução da Shopee continua fora do número.
+    await caso("shopee", 0, ("cliente", 60), ("mediador", 50), plataforma="shopee")
+    # O mediador só conta na reclamação do ML: no SAC da Magalu, não.
+    await caso(
+        "magalu_sac",
+        0,
+        ("cliente", 90),
+        ("loja", 80),
+        ("mediador", 60),
+        plataforma="magalu",
+        canal_nome="sac",
+        situacao="aberta",
+    )
+    await db.execute(
+        update(AtendimentoMensagem)
+        .where(AtendimentoMensagem.conversa_id.in_([conversa.id for conversa, _ in c.values()]))
+        .values(created_at=AtendimentoMensagem.enviada_em + ATRASO_DO_SYNC)
+    )
+    await db.commit()
+    return c
+
+
+async def test_reclamacao_do_ml_no_numero_python_e_sql_sao_gemeos(db, make_user):
+    mundo = await _mundo_reclamacao_ml(db, make_user)
+    for nome, (conversa, esperado) in mundo.items():
+        await db.refresh(conversa)
+        msgs = await _mensagens_de(db, conversa)
+        assert pendente.nao_lidas_duoke(conversa, msgs, agora=AGORA) == esperado, nome
+    linhas = (
+        await db.execute(
+            select(AtendimentoConversa.externo_id, pendente.nao_lidas_duoke_sql(agora=AGORA)).where(
+                AtendimentoConversa.externo_id.like("rml:%")
+            )
+        )
+    ).all()
+    assert {e.removeprefix("rml:"): n for e, n in linhas} == {
+        nome: esperado for nome, (_, esperado) in mundo.items()
+    }
+    # A reclamação do ML é do número; a da Shopee e a avaliação, não — e o
+    # filtro "Falta responder" continua só o chat.
+    rml = mundo["mediador_depois_da_loja"][0]
+    assert pendente.do_numero(rml) and not pendente.do_chat(rml)
+    assert not pendente.falta_responder_no_chat(rml)
+    assert not pendente.do_numero(mundo["shopee"][0])
+    no_numero = set(
+        (
+            await db.execute(
+                select(AtendimentoConversa.externo_id).where(
+                    AtendimentoConversa.externo_id.like("rml:%"), pendente.do_numero_sql()
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert no_numero == {f"rml:{n}" for n in mundo if n != "shopee"}
+
+
+async def test_reclamacao_do_ml_desligada_tira_do_numero_sem_soltar_o_mediador(
+    db, make_user, monkeypatch
+):
+    """A chave para desligar (revisão de 15/10/2026, se o Duoke mostrar menos
+    no mediador): `RECLAMACAO_NO_NUMERO = ()` tira a reclamação do ML do
+    número no Python e no SQL — e o `or_()` vazio não pode virar "o mediador
+    conta em toda conversa" (o SAC da Magalu continua 0)."""
+    mundo = await _mundo_reclamacao_ml(db, make_user)
+    monkeypatch.setattr(pendente, "RECLAMACAO_NO_NUMERO", ())
+    for nome, (conversa, _) in mundo.items():
+        await db.refresh(conversa)
+        msgs = await _mensagens_de(db, conversa)
+        assert pendente.nao_lidas_duoke(conversa, msgs, agora=AGORA) == 0, nome
+        assert not pendente.reclamacao_no_numero(conversa), nome
+    linhas = (
+        await db.execute(
+            select(AtendimentoConversa.externo_id, pendente.nao_lidas_duoke_sql(agora=AGORA)).where(
+                AtendimentoConversa.externo_id.like("rml:%")
+            )
+        )
+    ).all()
+    assert {e.removeprefix("rml:"): n for e, n in linhas} == dict.fromkeys(mundo, 0)
+    no_numero = (
+        (
+            await db.execute(
+                select(AtendimentoConversa.externo_id).where(
+                    AtendimentoConversa.externo_id.like("rml:%"), pendente.do_numero_sql()
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Só o SAC da Magalu, que é do chat (e lá o mediador não conta).
+    assert set(no_numero) == {"rml:magalu_sac"}
+
+
+async def test_reclamacao_do_ml_soma_na_loja_e_na_linha_e_zera(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """O /resumo soma a reclamação do ML no número da loja, a linha dela mostra
+    o número (a da Shopee, None) e o "Zerar não lidas" da loja a zera."""
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "quem.mexe@davinci-test.com")
+    integ, canal = await _loja(db, await make_user(), "injox")
+    reclamacao = {"plataforma": "ml", "canal_nome": "reclamacao", "situacao": "bloqueada"}
+    rml = await _cena(db, integ, None, "rml:injox", ("loja", 200), ("mediador", 60), **reclamacao)
+    pack = await _cena(
+        db, integ, canal, "pack:injox", ("cliente", 90), plataforma="ml", canal_nome="pos_venda"
+    )
+    shopee = await _cena(
+        db, integ, None, "rsh:injox", ("cliente", 60), plataforma="shopee", canal_nome="reclamacao"
+    )
+    auth_as(await make_user(email="quem.mexe@davinci-test.com", role=UserRole.ADMIN))
+
+    async def ver() -> tuple[int, dict[str, dict]]:
+        r = (await client.get(f"{URL}/resumo")).json()
+        (loja,) = [lj for lj in r["lojas"] if (lj["plataforma"], lj["conta"]) == ("ml", "injox")]
+        itens = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
+        return loja["nao_lidas_duoke"], {i["id"]: i for i in itens}
+
+    n, itens = await ver()
+    assert n == 2, "o pack com 1 do comprador + a reclamação com 1 do mediador"
+    assert itens[str(rml.id)]["numero_duoke"] == 1
+    assert itens[str(pack.id)]["numero_duoke"] == 1
+    assert itens[str(shopee.id)]["numero_duoke"] is None
+    d = (await client.get(f"{URL}/conversas/{rml.id}")).json()
+    assert d["conversa"]["numero_duoke"] == 1
+
+    r = await client.post(f"{URL}/zerar-nao-lidas", json={"integration_id": str(integ.id)})
+    assert r.status_code == 200, r.text
+    n, itens = await ver()
+    assert n == 0 and itens[str(rml.id)]["numero_duoke"] == 0
+
+
 # ─────────────── a ordem da lista "Falta responder" ───────────────
 
 
