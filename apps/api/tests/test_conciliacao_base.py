@@ -909,6 +909,20 @@ async def test_painel_raio_x_junta_as_quatro_versoes_e_os_movimentos(
         "frete_liquido": 62.33,
     }
     assert corpo["versoes"]["bling"]["liquido"] == 726.29
+    # Previsto × Real × Dif.: o líquido bate (610,65 dos dois lados) e a linha de
+    # frete compara o frete inteiro (sem frete do comprador no teste = o próprio frete)
+    comp = {x["chave"]: x for x in corpo["comparativo"]["linhas"]}
+    assert comp["liquido"] == {
+        "chave": "liquido",
+        "rotulo": "= Líquido",
+        "previsto": 610.65,
+        "real": 610.65,
+        "dif": 0.0,
+        "estilo": "bold",
+    }
+    assert comp["frete"]["previsto"] == 62.33 and comp["frete"]["real"] == 62.33
+    assert "frete_comprador" not in comp and corpo["comparativo"]["comparar"] is True
+    assert corpo["pedido"]["venda_extras"] == 115.64
     assert [m["origem"] for m in corpo["movimentos"]] == ["ml_fatura", "mp_extrato"]
     assert (
         client
@@ -979,7 +993,11 @@ async def test_painel_exporta_excel(db, make_user, auth_as, client):
     assert (
         linhas[0][1] == "Pedido Bling"
         and linhas[1][1] == "301102"
-        and linhas[1][16] == "10/10/2026 06:00"
+        and linhas[1][17] == "10/10/2026 06:00"  # +1: coluna "Extras" entrou antes
+    )
+    assert (
+        linhas[0][linhas[0].index("Extras (cupom, parcelamento, outros)")]
+        and linhas[1][linhas[0].index("Extras (cupom, parcelamento, outros)")] == 115.64
     )
 
 
