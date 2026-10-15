@@ -219,6 +219,10 @@ def _motivo_da_diferenca(
     liberacoes: list[ConciliacaoMovimento],
 ) -> str | None:
     partes: list[str] = []
+    # A carteira da Shopee só traz o líquido (sem tarifa/frete na linha): não dá pra
+    # dizer "cobrado 0,00". Fica só a diferença, e a abertura está no detalhe da venda.
+    if liberacoes and all(m.tarifa is None and m.frete is None for m in liberacoes):
+        return "a carteira só traz o líquido: abertura no detalhe da venda"
     frete_previsto = _d(venda.freight_amount) if venda else None
     frete_cobrado = _soma([m.frete for m in liberacoes]).copy_abs() if liberacoes else None
     # O extrato cobra o frete INTEIRO (SHIPPING_FEE) e o bruto traz o que o comprador
