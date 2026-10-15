@@ -174,11 +174,6 @@ const naoLidasDuoke = computed(() => Number(resumo.value?.nao_lidas_duoke) || 0)
 // que chegar depois. Nada vai à plataforma. Só quem mexe na caixa.
 const zerando = ref(false)
 const zerarErro = ref<string | null>(null)
-// O erro do "Zerar" é daquele clique: trocar o filtro ou a aba apaga.
-watch(
-  () => [filtros.value.integration_id, filtros.value.plataforma, filtros.value.plataforma_topo, aba.value],
-  () => (zerarErro.value = null),
-)
 async function zerarNaoLidas() {
   if (zerando.value) return
   const loja = filtros.value.integration_id || ''
@@ -252,6 +247,12 @@ const semLer = computed(() => leiturasParadas(resumo.value))
 const FILTROS_KEY = 'davinci.atendimento.filtros'
 // Abre em "Todas", como o All do Duoke (01/10/2026); "Falta responder" é a aba ao lado.
 const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: filtroPadraoDa(aba.value), q: '', externo_ref: '', rede_social_id: '', plataforma_topo: '' })
+// O erro do "Zerar não lidas" é daquele clique: trocar o filtro ou a aba
+// apaga. (Aqui, depois do `filtros`: o watch lê o getter na hora.)
+watch(
+  () => [filtros.value.integration_id, filtros.value.plataforma, filtros.value.plataforma_topo, aba.value],
+  () => (zerarErro.value = null),
+)
 const itens = ref<ConversaResumo[]>([])
 const proximo = ref<string | null>(null)
 const carregando = ref(false)
