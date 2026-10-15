@@ -575,7 +575,9 @@ async def _mundo_duoke(
         nao_lidas=3,
         **ml,
     )
-    await caso("ml_pergunta", 1, ("cliente", 60), plataforma="ml", canal_nome="pergunta")
+    # A pergunta do anúncio do ML não está no número da loja no Duoke (só os
+    # "packs" do pós-venda) — segue no "Falta responder".
+    await caso("ml_pergunta", 0, ("cliente", 60), plataforma="ml", canal_nome="pergunta")
     await caso(
         "amazon_email",
         2,
@@ -799,8 +801,9 @@ async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, 
         # chat 1 — e o Aguiar, 1.
         "shopee": 4 + 3 + 2 + 2 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1,
         "tiktok": 3,
-        # O pós-venda com o comprador por último, a automática de agora e a pergunta.
-        "ml": 1 + 1 + 1,
+        # O pós-venda com o comprador por último e a automática de agora (a
+        # pergunta do anúncio fica fora, como no Duoke).
+        "ml": 1 + 1,
         "amazon": 2,
         "magalu": 0,
         "site": 0,
@@ -809,12 +812,12 @@ async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, 
     for plat, n in soma.items():
         assert plats[plat]["nao_lidas_duoke"] == n, plat
         assert plats[plat]["aguardando"] == falta[plat], plat
-    assert r["nao_lidas_duoke"] == sum(soma.values()) == 36
+    assert r["nao_lidas_duoke"] == sum(soma.values()) == 35
     lojas = {(lj["plataforma"], lj["conta"]): lj for lj in r["lojas"]}
     assert lojas[("shopee", "atv")]["nao_lidas_duoke"] == soma["shopee"] - 1 == 27
     assert lojas[("shopee", "aguiar")]["nao_lidas_duoke"] == 1
     assert lojas[("tiktok", "atv")]["nao_lidas_duoke"] == 3
-    assert lojas[("ml", "atv")]["nao_lidas_duoke"] == 3
+    assert lojas[("ml", "atv")]["nao_lidas_duoke"] == 2
     # O número NÃO depende da marca do "Falta responder": a conversa em que o
     # robô respondeu depois do comprador está no número e fora do filtro.
     itens = (

@@ -183,6 +183,7 @@ from app.services.atendimento.constantes import (
     CANAL_CARRINHO,
     CANAL_CHAT,
     CANAL_COMENTARIO,
+    CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
     CHAVE_VEZ_DA_LOJA,
     CONVERSA_FECHADA,
@@ -217,6 +218,11 @@ CANAIS_FORA_DO_CHAT: frozenset[str] = frozenset(
 # (`lida.zerar_nao_lidas`, o mesmo do Duoke).
 ZERADO_NO_DUOKE_EM = datetime(2026, 10, 14, 15, 35, tzinfo=UTC)
 JANELA_DO_NUMERO = timedelta(days=7)
+# O que o Duoke não põe no número da loja (15/10/2026, conferido na memória
+# da tela dele: no Mercado Livre só as conversas de pós-venda — os "packs" —,
+# a pergunta do anúncio fica no módulo de perguntas, fora do número). Seguem
+# no "Falta responder" e no filtro delas.
+FORA_DO_NUMERO: tuple[tuple[str, str], ...] = (("ml", CANAL_PERGUNTA),)
 
 
 def _utc(quando: datetime | None) -> datetime | None:
@@ -395,6 +401,9 @@ def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
     """
     if not do_chat(conversa):
         return False
+    onde = (getattr(conversa, "plataforma", None), getattr(conversa, "canal", None))
+    if onde in FORA_DO_NUMERO:
+        return False
     if getattr(conversa, "situacao", None) == CONVERSA_FECHADA:
         return False
     # "Não precisa de resposta" = o "marcar como processado" do Duoke, que
@@ -546,6 +555,7 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
     )
     entra = and_(
         do_chat_sql(c),
+        *(not_(and_(c.plataforma == p, c.canal == k)) for p, k in FORA_DO_NUMERO),
         c.situacao != CONVERSA_FECHADA,
         c.sem_resposta_necessaria.is_(False),
         c.ultima_mensagem_em > desde,
