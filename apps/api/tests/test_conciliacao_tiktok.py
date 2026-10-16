@@ -562,3 +562,182 @@ async def test_liquidacao_zerada_sem_pedido_no_bling_nao_trava_o_dia(
     assert linha["status"] == "classificado" and linha["classificacao"] == "outro"
     assert "zerada" in linha["descricao"] and linha["credito"] == 0 and linha["debito"] == 0
     assert corpo["contagem"]["pendente"] == 0 and corpo["totais"]["diferenca"] == 0
+
+
+_OUTRO = "586400000000000001"
+
+
+def _tx_outro(tid: int = 21, order_id: str = _OUTRO, settlement: str = "200") -> dict:
+    return _tx(
+        tid,
+        order_id,
+        gross=settlement,
+        apos=settlement,
+        revenue=settlement,
+        settlement=settlement,
+        seller_disc="0",
+        commission="0",
+        tx_fee="0",
+        affiliate="0",
+        fee="0",
+    )
+
+
+async def test_extrato_com_transacoes_incompletas_fica_em_erro_e_e_relido(db, make_user):
+    """16/10, revisão: página perdida nas transações era gravada como "lido" e nunca mais
+    relida. Soma das transações ≠ total do extrato → nada entra, o extrato fica "erro"
+    (com o motivo) e a rodada seguinte relê; a "última leitura" da loja não avança."""
+    loja = await _loja_tiktok(db, make_user)
+    d14 = date(2026, 10, 14)
+    cliente = _TikTokFalsa(
+        [_extrato(2, d14, "544.45", 902)],
+        {"2": [_tx(20, PEDIDO)]},  # faltou a transação de 200,00
+        [_repasse(902, "544.45", d14)],
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r["inseridos"] == 0 and r["extratos"] == []
+    (erro,) = r["erros"]
+    assert erro["extrato"] == "2" and "transações incompletas" in erro["erro"]
+    assert "344.45" in erro["erro"] and "544.45" in erro["erro"]
+    sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
+    assert sync.status == "erro" and "incompletas" in sync.erro
+    assert (await db.execute(select(ConciliacaoMovimento))).scalars().all() == []
+    assert loja.ultimo_extrato_em is None
+    # próxima rodada: a API devolve tudo → entra inteiro, de uma vez
+    cliente.transacoes["2"] = [_tx(20, PEDIDO), _tx_outro()]
+    r2 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert not r2["erros"] and r2["inseridos"] == 3
+    sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
+    assert (sync.status, sync.erro, sync.linhas) == ("lido", None, 3)
+    assert loja.ultimo_extrato_em == AGORA
+
+
+class _TikTokRepassesQuebrada(_TikTokFalsa):
+    """A API de repasses falha enquanto `quebrada` for True; o resto funciona."""
+
+    quebrada = True
+
+    async def _get(self, path: str, params: dict | None = None) -> dict:
+        if path == ROTA_REPASSES and self.quebrada:
+            self.chamadas.append((path, params))
+            return {"code": 36004000, "message": "rate limit"}
+        return await super()._get(path, params)
+
+
+async def test_erro_so_na_api_de_repasses_nao_derruba_os_extratos(db, make_user):
+    """16/10, revisão: a falha nos repasses dava `return` antes de ler os extratos (loja
+    parada). Agora as linhas entram marcadas "repasse ainda não lido" (o dia não fecha)
+    e o repasse entra na rodada seguinte, sem reler o extrato."""
+    loja = await _loja_tiktok(db, make_user)
+    d14 = date(2026, 10, 14)
+    cliente = _TikTokRepassesQuebrada(
+        [_extrato(2, d14, "344.45", 902)], {"2": [_tx(20, PEDIDO)]}, [_repasse(902, "344.45", d14)]
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r["inseridos"] == 1 and r["sem_repasse"] == 1 and r["pagos_agora"] == 0
+    (erro,) = r["erros"]
+    assert erro["erro"].startswith("repasses: RuntimeError")
+    (m,) = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert m.tipo == "venda_liberada" and m.pedido_bling == "320001"
+    assert m.descricao.endswith(" · repasse ainda não lido (a API de repasses falhou)")
+    assert m.raw["_payment_status"] == "SEM_REPASSE" and aguardando_repasse(m)
+    sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
+    assert (sync.status, sync.linhas) == ("sem_repasse", 1)
+    assert loja.ultimo_extrato_em is None  # rodada com erro: a "última leitura" não avança
+    fechados = await fechar_dias_prontos(db, loja)
+    assert "2026-10-14" in fechados["abertos"]
+    # a API voltou: só o repasse entra; o extrato não é relido
+    cliente.quebrada = False
+    cliente.chamadas.clear()
+    r2 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r2["inseridos"] == 1 and r2["pagos_agora"] == 1 and not r2["erros"]
+    assert not any("/statements/" in p for p, _ in cliente.chamadas)
+    movs = (
+        (await db.execute(select(ConciliacaoMovimento).order_by(ConciliacaoMovimento.data)))
+        .scalars()
+        .all()
+    )
+    assert [x.tipo for x in movs] == ["venda_liberada", "saque"]
+    assert movs[0].descricao == f"Liquidação do pedido {PEDIDO}"
+    assert movs[0].raw["_payment_status"] == "PAID" and not aguardando_repasse(movs[0])
+    assert movs[1].saldo_apos == Decimal("0") and "***1234" in movs[1].descricao
+    sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
+    assert (sync.status, sync.linhas) == ("lido", 2)
+    assert loja.ultimo_extrato_em == AGORA
+    fechados = await fechar_dias_prontos(db, loja)
+    assert "2026-10-14" in fechados["fechados"]
+
+
+async def test_reler_financeiro_liquidados_anda_do_mais_antigo_e_estimado_primeiro(
+    db, make_user, monkeypatch
+):
+    """16/10, revisão: a fila era do mais novo pro mais velho e, com o teto (12 por rodada,
+    300 s), os antigos nunca chegavam a ser relidos. Estimado e mais antigo vão na frente."""
+    from app.models import MarketplaceOrderFinancial
+    from app.services import conciliacao_tiktok as mod
+
+    loja = await _loja_tiktok(db, make_user)
+    db.add(
+        BlingOrder(
+            bling_id=6001,
+            numero="320002",
+            numeroloja=_OUTRO,
+            data=datetime(2026, 10, 10, 3, tzinfo=UTC),
+            total=Decimal("200"),
+            totalprodutos=Decimal("200"),
+            situacao="Atendido",
+            loja="204000003",
+            item_index=0,
+            preco_custo=100.0,
+            item_quantidade=1,
+            item_codigo="a18.pr",
+        )
+    )
+    await db.commit()
+    d13, d14 = date(2026, 10, 13), date(2026, 10, 14)
+    cliente = _TikTokFalsa(
+        [_extrato(1, d13, "344.45", 901), _extrato(2, d14, "200", 902)],
+        {"1": [_tx(10, PEDIDO)], "2": [_tx_outro()]},
+        [_repasse(901, "344.45", d13), _repasse(902, "200", d14)],
+    )
+    await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    # o mais antigo (13/10) ainda é estimativa; o mais novo (14/10) é liquidação lida
+    # antes do extrato — os dois são candidatos
+    db.add(
+        MarketplaceOrderFinancial(
+            integration_id=loja.integration_id,
+            platform="tiktok",
+            external_order_id=PEDIDO,
+            status="estimated",
+            fetched_at=datetime(2026, 10, 15, 12, tzinfo=UTC),
+            net_amount=Decimal("340"),
+            raw={},
+        )
+    )
+    db.add(
+        MarketplaceOrderFinancial(
+            integration_id=loja.integration_id,
+            platform="tiktok",
+            external_order_id=_OUTRO,
+            status="posted",
+            fetched_at=datetime(2026, 10, 13, 12, tzinfo=UTC),
+            net_amount=Decimal("200"),
+            raw={},
+        )
+    )
+    await db.flush()
+    chamados: list[tuple[int, str]] = []
+
+    async def _fake(session, *, bling_order_id, trigger):
+        chamados.append((bling_order_id, trigger))
+
+    monkeypatch.setattr(
+        "app.services.marketplace_financials.run_sync_marketplace_financials_for_bling_order",
+        _fake,
+    )
+    # só cabe um: é o antigo/estimado (antes era o mais novo)
+    r = await mod.reler_financeiro_liquidados(db, loja, maximo=1)
+    assert r["candidatos"] == 1 and chamados == [(6000, "conciliacao_liquidacao")]
+    chamados.clear()
+    r = await mod.reler_financeiro_liquidados(db, loja)
+    assert r["candidatos"] == 2 and [c[0] for c in chamados] == [6000, 6001]

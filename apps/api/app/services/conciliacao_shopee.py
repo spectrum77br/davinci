@@ -193,27 +193,61 @@ AJUSTE_SALDO_MAX_PULOS = 20
 PREFIXO_AJUSTE_SALDO = "ajuste-saldo-"
 
 
+async def _dia_fechado(session: AsyncSession, loja: ConciliacaoLoja, dia: date) -> bool:
+    return (
+        await session.execute(
+            select(ConciliacaoDia.id).where(
+                ConciliacaoDia.integration_id == loja.integration_id,
+                ConciliacaoDia.dia == dia,
+                ConciliacaoDia.fechado_em.isnot(None),
+            )
+        )
+    ).scalar_one_or_none() is not None
+
+
 async def ajustar_saldo_do_dia(
-    session: AsyncSession, loja: ConciliacaoLoja, dia: date
+    session: AsyncSession, loja: ConciliacaoLoja, dia: date, *, fechado: bool | None = None
 ) -> list[Decimal]:
     """A carteira da Shopee às vezes muda o saldo sem listar o lançamento (16/10,
     Barbosa 15/10: renda de 292,39 e o saldo subiu 291,41 — nada na API, nem relendo).
     Pra diferença pequena (até R$ 10 no dia) o robô grava uma linha "Ajuste da
     Shopee" classificada como ajuste, no ponto em que o saldo pulou, e o dia fecha.
     Diferença maior fica como está ("saldo não bate" pra uma pessoa olhar). Recalcula
-    do zero a cada leitura do dia; ajuste que uma pessoa mexeu fica."""
+    do zero a cada leitura do dia; ajuste que uma pessoa mexeu fica.
+
+    16/10, revisão: (1) dia fechado não é mexido — nem apaga nem recria (quem muda dia
+    fechado é linha nova, que reabre o dia; outro lote); (2) a numeração pula os
+    números dos ajustes que ficaram — recomeçava em 1 e colidia com o ajuste mexido
+    (IntegrityError → PendingRollbackError e a rodada da loja inteira caía toda vez)."""
     from app.routers.conciliacao import _ordena_dia, _saldo_anterior
 
+    if fechado is None:
+        fechado = await _dia_fechado(session, loja, dia)
+    if fechado:
+        return []
     mov = ConciliacaoMovimento
     inicio = datetime.combine(dia, datetime.min.time(), tzinfo=BRT)
     fim = inicio + timedelta(days=1)
+    prefixo = f"{PREFIXO_AJUSTE_SALDO}{dia.isoformat()}-"
     await session.execute(
         delete(mov).where(
             mov.integration_id == loja.integration_id,
             mov.origem == ORIGEM_CARTEIRA,
-            mov.id_externo.like(f"{PREFIXO_AJUSTE_SALDO}{dia.isoformat()}%"),
+            mov.id_externo.like(f"{prefixo}%"),
             mov.vinculado_por.is_(None),
         )
+    )
+    # os que ficaram (mexidos por alguém): a numeração nova não pode pisar neles
+    usados = set(
+        (
+            await session.execute(
+                select(mov.id_externo).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_CARTEIRA,
+                    mov.id_externo.like(f"{prefixo}%"),
+                )
+            )
+        ).scalars()
     )
     # saldo antes do dia pela mesma regra da tela (resolve empate no mesmo segundo,
     # inclusive ajuste + linha real na mesma hora)
@@ -252,13 +286,18 @@ async def ajustar_saldo_do_dia(
             pulos=[str(d) for _m, d in pulos],
         )
         return [d for _m, d in pulos]
-    for i, (m, d) in enumerate(pulos, start=1):
+    n = 0
+    for m, d in pulos:
+        n += 1
+        while f"{prefixo}{n}" in usados:
+            n += 1
+        usados.add(f"{prefixo}{n}")
         session.add(
             ConciliacaoMovimento(
                 integration_id=loja.integration_id,
                 platform=loja.platform,
                 origem=ORIGEM_CARTEIRA,
-                id_externo=f"{PREFIXO_AJUSTE_SALDO}{dia.isoformat()}-{i}",
+                id_externo=f"{prefixo}{n}",
                 data=m.data,
                 tipo="ajuste_shopee",
                 # 16/10: quase sempre −0,49 na "Renda do pedido" (tarifa que a carteira
@@ -317,6 +356,19 @@ async def run_carteira_sync(
         return resumo
     integration = await session.get(Integration, loja.integration_id)
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
+    # 16/10, revisão: dia fechado (ConciliacaoDia.fechado_em) não tem ajuste apagado nem
+    # recriado — nem na releitura do último dia lido (sobreposição) nem na varredura
+    # abaixo. Linha nova ainda entra (quem reabre o dia por ela é outro lote).
+    fechados = set(
+        (
+            await session.execute(
+                select(ConciliacaoDia.dia).where(
+                    ConciliacaoDia.integration_id == loja.integration_id,
+                    ConciliacaoDia.fechado_em.isnot(None),
+                )
+            )
+        ).scalars()
+    )
     for dia in dias:
         t_de = int(datetime.combine(dia, datetime.min.time(), tzinfo=BRT).timestamp())
         t_ate = t_de + 86400 - 1
@@ -341,7 +393,7 @@ async def run_carteira_sync(
                 "conciliacao_carteira_falhou", loja=loja.conta, dia=dia.isoformat(), erro=row.erro
             )
             break  # mantém a ordem dos dias; tenta de novo na próxima rodada
-        pulos = await ajustar_saldo_do_dia(session, loja, dia)
+        pulos = await ajustar_saldo_do_dia(session, loja, dia, fechado=dia in fechados)
         row.status = "lido"
         row.lido_em = agora
         row.erro = None
@@ -359,27 +411,18 @@ async def run_carteira_sync(
                 "linhas": len(lista),
                 "inseridos": inseridos,
                 "ajustes_de_saldo": [str(d) for d in pulos],
+                **({"fechado": True} if dia in fechados else {}),
             }
         )
     # Dias abertos desde o início que foram lidos ANTES da regra do ajuste (16/10:
     # ATV −1,47 em 05/10, Inova −0,49 em cinco dias…): a varredura refaz o ajuste
     # de cada um. Dia fechado não é mexido.
-    fechados = set(
-        (
-            await session.execute(
-                select(ConciliacaoDia.dia).where(
-                    ConciliacaoDia.integration_id == loja.integration_id,
-                    ConciliacaoDia.fechado_em.isnot(None),
-                )
-            )
-        ).scalars()
-    )
     lidos_agora = {date.fromisoformat(x["dia"]) for x in resumo["dias"]}
     antigos: dict[str, list[str]] = {}
     d = loja.inicio
     while d <= ontem:
         if d not in fechados and d not in lidos_agora:
-            pulos = await ajustar_saldo_do_dia(session, loja, d)
+            pulos = await ajustar_saldo_do_dia(session, loja, d, fechado=False)
             if pulos:
                 antigos[d.isoformat()] = [str(x) for x in pulos]
         d += timedelta(days=1)

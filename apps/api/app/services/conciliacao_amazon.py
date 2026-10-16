@@ -271,10 +271,19 @@ def _tirar_duplicatas_de_liberacao(
     return [m for m in movs if m["id_externo"] not in duplicadas], duplicadas
 
 
+MAX_PAGINAS_TRANSACOES = 30
+
+
 async def ler_transacoes(
-    cliente: Any, de: datetime, *, ate: datetime | None = None, max_paginas: int = 30
-) -> list[dict[str, Any]]:
-    """Todas as transações lançadas desde `de` (Finances 2024-06-19), paginando."""
+    cliente: Any,
+    de: datetime,
+    *,
+    ate: datetime | None = None,
+    max_paginas: int = MAX_PAGINAS_TRANSACOES,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Todas as transações lançadas desde `de` (Finances 2024-06-19), paginando.
+    Devolve (transações, cortado): `cortado` = bateu em `max_paginas` com `nextToken`
+    ainda na mão (16/10, revisão: antes cortava em silêncio)."""
     out: list[dict[str, Any]] = []
     token: str | None = None
     for _ in range(max_paginas):
@@ -292,8 +301,8 @@ async def ler_transacoes(
         out.extend(lista)
         token = payload.get("nextToken") or None
         if not token or not lista:
-            break
-    return out
+            return out, False
+    return out, token is not None
 
 
 async def recalcular_saldo(session: AsyncSession, loja: ConciliacaoLoja) -> Decimal:
@@ -352,10 +361,12 @@ async def run_amazon_sync(
     agora: datetime | None = None,
     sobreposicao_dias: int = 21,
     max_dias: int = 60,
+    max_paginas: int = MAX_PAGINAS_TRANSACOES,
 ) -> dict[str, Any]:
     """Relê as transações desde o início da loja (ou os últimos `max_dias`), com
     sobreposição: linha nova entra, linha que mudou de situação (DEFERRED → RELEASED)
-    é atualizada, e o saldo é recalculado do zero."""
+    é atualizada, e o saldo é recalculado do zero. Leitura cortada em `max_paginas`
+    avisa (`cortado`/`aviso` no resumo, `loja.ultimo_erro`) em vez de calar (16/10)."""
     agora = agora or datetime.now(UTC)
     hoje = agora.astimezone(BRT).date()
     ultimo = (
@@ -389,13 +400,23 @@ async def run_amazon_sync(
     integration = await session.get(Integration, loja.integration_id)
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
     try:
-        txs = await ler_transacoes(cliente, de)
+        txs, cortado = await ler_transacoes(cliente, de, max_paginas=max_paginas)
     except Exception as e:  # noqa: BLE001
         row.status = "erro"
         row.erro = f"{type(e).__name__}: {str(e)[:300]}"
         resumo["erros"].append({"erro": row.erro})
         logger.warning("conciliacao_amazon_falhou", loja=loja.conta, erro=row.erro)
         return resumo
+    aviso: str | None = None
+    if cortado:
+        aviso = (
+            f"amazon: leitura cortada em {max_paginas} páginas de transações "
+            f"(desde {de_dia.isoformat()}; o que veio depois não entrou)"
+        )
+        resumo["cortado"] = True
+        resumo["aviso"] = aviso
+        loja.ultimo_erro = aviso
+        logger.warning("conciliacao_amazon_cortado", loja=loja.conta, paginas=max_paginas)
     movs = [m for m in (transacao_para_movimento(t) for t in txs) if m]
     movs, duplicadas = _tirar_duplicatas_de_liberacao(movs)
     resumo["lidas"] = len(movs)
@@ -464,7 +485,7 @@ async def run_amazon_sync(
     saldo = await recalcular_saldo(session, loja)
     row.status = "lido"
     row.lido_em = agora
-    row.erro = None
+    row.erro = aviso  # None quando a leitura veio inteira
     row.linhas = len(movs)
     row.detalhe = {**resumo, "saldo": str(saldo)}
     loja.ultimo_extrato_em = agora

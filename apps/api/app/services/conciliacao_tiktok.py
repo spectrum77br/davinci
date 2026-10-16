@@ -69,12 +69,17 @@ def _ancora(statement: dict[str, Any]) -> datetime | None:
 # lotes, dias depois). As linhas entram no dia do extrato marcadas "aguardando o
 # repasse"; a linha de repasse só entra quando o status vira PAID. O extrato é fixo
 # (pedidos e valores); só a transferência pode falhar e ser refeita.
-AGUARDANDO = ("PROCESSING", "FAILED")
+#
+# 16/10, revisão: "SEM_REPASSE" é marca nossa, não da TikTok — extrato PAID lido numa
+# rodada em que a API de repasses falhou: as linhas entram, o repasse fica pra próxima
+# rodada (antes o erro nos repasses derrubava a leitura dos extratos inteira).
+AGUARDANDO = ("PROCESSING", "FAILED", "SEM_REPASSE")
 SUFIXOS = {
     "PROCESSING": " · aguardando o repasse",
     "FAILED": " · repasse falhou, a TikTok tenta de novo",
+    "SEM_REPASSE": " · repasse ainda não lido (a API de repasses falhou)",
 }
-STATUS_SYNC = {"PROCESSING": "processando", "FAILED": "falhou"}
+STATUS_SYNC = {"PROCESSING": "processando", "FAILED": "falhou", "SEM_REPASSE": "sem_repasse"}
 
 
 def aguardando_repasse(m: ConciliacaoMovimento) -> bool:
@@ -334,7 +339,11 @@ async def run_tiktok_sync(
     max_dias: int = 45,
 ) -> dict[str, Any]:
     """Lê os extratos pagos desde o início da loja (ou os últimos `max_dias`) até agora,
-    com as transações de cada um e o repasse; extrato já lido não é relido."""
+    com as transações de cada um e o repasse; extrato já lido não é relido.
+
+    16/10, revisão: extrato cujas transações não somam o total vira "erro" (relido na
+    próxima rodada; nada entra); erro só na API de repasses não derruba os extratos
+    (marca SEM_REPASSE); `loja.ultimo_extrato_em` só avança em rodada sem erro."""
     agora = agora or datetime.now(UTC)
     hoje = hoje or agora.astimezone(BRT).date()
     rows_sync = {
@@ -359,6 +368,7 @@ async def run_tiktok_sync(
         "inseridos": 0,
         "aguardando_repasse": 0,
         "repasse_falhou": 0,
+        "sem_repasse": 0,
         "pagos_agora": 0,
         "erros": [],
     }
@@ -366,11 +376,22 @@ async def run_tiktok_sync(
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
     try:
         extratos = await ler_extratos(cliente, t_de, t_ate)
-        repasses = await ler_repasses(cliente, t_de - 7 * 86400, t_ate)
     except Exception as e:  # noqa: BLE001
         resumo["erros"].append({"erro": f"{type(e).__name__}: {str(e)[:300]}"})
         logger.warning("conciliacao_tiktok_falhou", loja=loja.conta, erro=str(e)[:300])
         return resumo
+    repasses: dict[str, dict[str, Any]] | None
+    try:
+        repasses = await ler_repasses(cliente, t_de - 7 * 86400, t_ate)
+    except Exception as e:  # noqa: BLE001
+        repasses = None  # extratos entram; repasse fica pra próxima rodada
+        resumo["erros"].append({"erro": f"repasses: {type(e).__name__}: {str(e)[:300]}"})
+        logger.warning("conciliacao_tiktok_repasses_falhou", loja=loja.conta, erro=str(e)[:300])
+    contadores = {
+        "PROCESSING": "aguardando_repasse",
+        "FAILED": "repasse_falhou",
+        "SEM_REPASSE": "sem_repasse",
+    }
     for st in extratos:
         sid = str(st.get("id") or "")
         if not sid:
@@ -383,6 +404,9 @@ async def run_tiktok_sync(
         if existente is not None and existente.status in STATUS_SYNC.values():
             # linhas já gravadas; falta só o repasse (ou mudou PROCESSING ↔ FAILED)
             if status == "PAID":
+                if repasses is None:
+                    resumo["sem_repasse"] += 1  # a API de repasses falhou: próxima rodada
+                    continue
                 rep = repasse_para_movimento(
                     st, repasses.get(pid), ordem=int(existente.linhas or 0)
                 )
@@ -393,7 +417,6 @@ async def run_tiktok_sync(
                 existente.erro = None
                 existente.linhas = int(existente.linhas or 0) + (1 if rep else 0)
                 existente.detalhe = {**(existente.detalhe or {}), "pago": True, "payment_id": pid}
-                loja.ultimo_extrato_em = agora
                 resumo["pagos_agora"] += 1
                 resumo["inseridos"] += novos
                 resumo["extratos"].append({"extrato": sid, "linhas": 1, "inseridos": novos})
@@ -401,14 +424,26 @@ async def run_tiktok_sync(
                 if existente.status != STATUS_SYNC[status]:
                     await _marcar_status_do_extrato(session, loja, sid, status)
                     existente.status = STATUS_SYNC[status]
-                resumo["aguardando_repasse" if status == "PROCESSING" else "repasse_falhou"] += 1
+                resumo[contadores[status]] += 1
             continue
         if status != "PAID" and status not in AGUARDANDO:
             continue
+        # a marca das linhas: a da TikTok, ou SEM_REPASSE se o repasse não pôde ser lido
+        marca = "SEM_REPASSE" if (status == "PAID" and repasses is None) else status
         row = await _sync_row(session, loja, sid)
         row.pedido_em = agora
         try:
             txs = await ler_transacoes(cliente, sid)
+            # 16/10, revisão: página perdida/transação faltando era gravada como "lido" e
+            # nunca relida. Prova dos nove antes de gravar: soma das transações = total do
+            # extrato; se não bate, nada entra e o extrato fica "erro" (relido na próxima)
+            soma = sum((_d(tx.get("settlement_amount")) for tx in txs), ZERO)
+            total = _d(st.get("settlement_amount"))
+            if st.get("settlement_amount") not in (None, "") and soma != total:
+                raise RuntimeError(
+                    f"transações incompletas: {len(txs)} linha(s) somam {soma}, "
+                    f"o extrato diz {total}"
+                )
             txs.sort(key=lambda x: (int(x.get("order_create_time") or 0), str(x.get("id"))))
             movs: list[dict[str, Any]] = []
             saldo = ZERO
@@ -420,7 +455,7 @@ async def run_tiktok_sync(
                     movs.append(m)
             rep = (
                 repasse_para_movimento(st, repasses.get(pid), ordem=len(txs))
-                if status == "PAID"
+                if marca == "PAID" and repasses is not None
                 else None
             )
             if rep:
@@ -436,9 +471,10 @@ async def run_tiktok_sync(
                     # faturar): não é dinheiro, não pode travar o dia (08/10, Mini)
                     m["classificacao"] = "outro"
                     m["descricao"] = f"{m['descricao']} (zerada: nada entrou, nada saiu)"
-            if status != "PAID":
+            if marca != "PAID":
                 for m in movs:
-                    m["descricao"] = f"{m['descricao']}{SUFIXOS[status]}"
+                    m["descricao"] = f"{m['descricao']}{SUFIXOS[marca]}"
+                    m["raw"] = {**m["raw"], "_payment_status": marca}
             inseridos = await inserir_movimentos(session, loja, movs)
         except Exception as e:  # noqa: BLE001
             row.status = "erro"
@@ -448,7 +484,7 @@ async def run_tiktok_sync(
                 "conciliacao_tiktok_extrato_falhou", loja=loja.conta, extrato=sid, erro=row.erro
             )
             continue
-        row.status = "lido" if status == "PAID" else STATUS_SYNC[status]
+        row.status = "lido" if marca == "PAID" else STATUS_SYNC[marca]
         row.lido_em = agora
         row.erro = None
         row.linhas = len(txs) + (1 if rep else 0)
@@ -459,12 +495,13 @@ async def run_tiktok_sync(
             "payment_status": status,
             "inseridos": inseridos,
         }
-        loja.ultimo_extrato_em = agora
         resumo["inseridos"] += inseridos
-        if status != "PAID":
-            resumo["aguardando_repasse" if status == "PROCESSING" else "repasse_falhou"] += 1
+        if marca != "PAID":
+            resumo[contadores[marca]] += 1
         resumo["extratos"].append({"extrato": sid, "linhas": row.linhas, "inseridos": inseridos})
-    if extratos:
+    # 16/10, revisão: "última leitura" só avança quando a rodada inteira funcionou —
+    # antes avançava mesmo com as transações falhando, e o atraso ficava escondido
+    if not resumo["erros"]:
         loja.ultimo_extrato_em = agora
     await _classificar_zeradas_antigas(session, loja)
     await session.flush()
@@ -530,7 +567,10 @@ async def reler_financeiro_liquidados(
 
     Medido 15/10: a API financeira da TikTok leva ~40 s por pedido quando limita
     chamadas; por isso poucos por rodada e um teto de tempo — o resto fica pra
-    próxima rodada (ou pra esteira da própria Margem)."""
+    próxima rodada (ou pra esteira da própria Margem).
+
+    16/10, revisão: a fila anda do mais antigo pro mais novo, estimados na frente —
+    ordenava do mais novo, e com o teto os antigos nunca chegavam a ser relidos."""
     from app.models import MarketplaceOrderFinancial
     from app.services.marketplace_financials import run_sync_marketplace_financials_for_bling_order
 
@@ -552,7 +592,8 @@ async def reler_financeiro_liquidados(
                 mov.bling_id.isnot(None),
                 or_(fin.status != "posted", fin.fetched_at < mov.data),
             )
-            .order_by(mov.data.desc())
+            # estimado (status ≠ posted) primeiro, depois do mais antigo pro mais novo
+            .order_by((fin.status == "posted").asc(), mov.data.asc())
             .limit(maximo)
         )
     ).all()
