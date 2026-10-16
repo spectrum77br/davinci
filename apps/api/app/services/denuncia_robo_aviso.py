@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import (
     DenunciaRoboAgenda,
+    DenunciaRoboConfig,
     DenunciaRoboStatus,
     DenunciaRoboTratada,
     ThreemaInformarConfig,
@@ -175,9 +176,10 @@ async def _painel(session: AsyncSession, agora: datetime) -> dict:
         for r in (await session.execute(select(DenunciaRoboAgenda))).scalars().all()
         if r.acao in PASSOS
     }
+    cfg = await session.get(DenunciaRoboConfig, "janela_noite")   # 16/10: fora da janela não é "não começou"
     return montar_painel(
         st.dados if st else None, st.recebido_em if st else None, agora,
-        tratadas=tratadas, agenda=agenda,
+        tratadas=tratadas, agenda=agenda, janela=cfg.valor if cfg else None,
     )
 
 

@@ -299,6 +299,33 @@ def normalizar_horarios(valor: Any) -> list[str] | None:
     return sorted(out)
 
 
+# 16/10/2026 (Vinicius: "precisamos criar alguma regra horario inicio e fim. agora ele ja devia estar parado para o
+# robo de chamado funcionar"): JANELA DA NOITE. A agenda só tinha hora de começar e o Ativos/inativos (≈12 h) entrava
+# pela manhã no perfil 50, que de dia é do robô de chamado. Fora da janela o robô não começa passo da agenda, o que
+# estiver rodando no fim para no ponto seguro e continua na noite seguinte; "Rodar" de uma pessoa roda a qualquer hora.
+JANELA_PADRAO = {"ligado": True, "inicio": "18:00", "fim": "07:00"}
+
+
+def normalizar_janela(valor: Any) -> dict | None:
+    """{"ligado": bool, "inicio": "HH:MM", "fim": "HH:MM"}; None se faltar algo ou início = fim."""
+    if not isinstance(valor, dict) or not isinstance(valor.get("ligado"), bool):
+        return None
+    ini, fim = (str(valor.get(k) or "").strip() for k in ("inicio", "fim"))
+    if not HORARIO.match(ini) or not HORARIO.match(fim) or ini == fim:
+        return None
+    return {"ligado": valor["ligado"], "inicio": ini, "fim": fim}
+
+
+def dentro_da_janela(hhmm: str, janela: dict | None) -> bool:
+    """O horário "HH:MM" cai dentro da janela [início, fim)? Janela que passa da meia-noite
+    (18:00 → 07:00) vale das 18:00 às 23:59 e das 00:00 às 06:59. Sem janela (ou desligada): sempre."""
+    j = normalizar_janela(janela)
+    if j is None or not j["ligado"]:
+        return True
+    ini, fim = j["inicio"], j["fim"]
+    return ini <= hhmm < fim if ini < fim else (hhmm >= ini or hhmm < fim)
+
+
 def _atendido(tarefas: list[dict], acao: str, desde: datetime, ate: datetime | None) -> bool:
     """O horário [desde, ate) da agenda foi atendido: o robô pediu ou começou o passo nesse
     intervalo, ou ele já estava rodando/na fila (o despertador não duplica)."""
@@ -381,8 +408,10 @@ def _chave_problema(p: dict) -> tuple[str, str | None]:
 def montar_painel(
     resumo: dict | None, recebido_em: datetime | None, agora: datetime,
     tratadas: set[str] | None = None, agenda: dict[str, dict] | None = None,
+    janela: dict | None = None,
 ) -> dict:
-    """`agenda`: acao → {"ligado", "horarios"} da tabela denuncia_robo_agenda."""
+    """`agenda`: acao → {"ligado", "horarios"} da tabela denuncia_robo_agenda. `janela`: a janela
+    da noite (denuncia_robo_config) — horário da agenda fora dela não é pedido pelo robô."""
     agora = agora.astimezone(FUSO)
     resumo = resumo or {}
     tratadas = tratadas or set()
@@ -489,8 +518,8 @@ def montar_painel(
             for i, hora in enumerate(horas):
                 h = hora.strftime("%H:%M")
                 ate = horas[i + 1] - timedelta(minutes=5) if i + 1 < len(horas) else None
-                if agora < hora + TOLERANCIA_INICIO:
-                    continue
+                if agora < hora + TOLERANCIA_INICIO or not dentro_da_janela(h, janela):
+                    continue   # 16/10: fora da janela da noite o robô não pede — não é falha
                 if _atendido(tarefas, acao, hora - timedelta(minutes=5), ate):
                     continue
                 ocorre(f"agora:agenda_{acao}_{h.replace(':', '')}",
@@ -511,6 +540,7 @@ def montar_painel(
         igual = (bool(r.get("ligado")) == ag["ligado"]
                  and sorted(r.get("horarios") or []) == ag["horarios"])
         ag["no_robo"] = None if agenda_no_robo is None else igual
+        ag["fora_da_janela"] = [h for h in ag["horarios"] if not dentro_da_janela(h, janela)]
         return ag
 
     passos = [
@@ -551,4 +581,13 @@ def montar_painel(
         "passos": passos,
         "ocorrencias": ocorrencias,
         "denuncias_hoje": denuncias_hoje,
+        "janela": _janela_out(janela, desp),
     }
+
+
+def _janela_out(janela: dict | None, desp: dict) -> dict:
+    """A janela da noite pra tela + se o robô já a aplicou (`no_robo`: None = agente que ainda não
+    manda a dele no despertador.json)."""
+    j = normalizar_janela(janela) or dict(JANELA_PADRAO)
+    no_robo = normalizar_janela(desp.get("janela_noite")) == j if "janela_noite" in desp else None
+    return {**j, "no_robo": no_robo}

@@ -293,6 +293,22 @@ class DenunciaRoboAgenda(Base):
     )
 
 
+class DenunciaRoboConfig(Base):
+    """Configurações do robô que valem pra rodada inteira, uma linha por chave (16/10/2026).
+    `janela_noite` = {"ligado", "inicio": "HH:MM", "fim": "HH:MM"}: fora dela o robô não começa
+    passo da agenda e o que estiver rodando no fim para no ponto seguro (vai pro mini junto com a
+    agenda)."""
+
+    __tablename__ = "denuncia_robo_config"
+
+    chave: Mapped[str] = mapped_column(Text, primary_key=True)
+    valor: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    atualizado_por: Mapped[str | None] = mapped_column(Text)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class DenunciaRoboTratada(Base):
     """Ocorrência da aba Robô marcada como tratada (sai da lista)."""
 

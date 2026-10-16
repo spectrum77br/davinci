@@ -19,6 +19,9 @@
 // "Quem recebe o aviso" nas Ocorrências escolhe quem (cadastro Informar `denuncia_robo`).
 // 06/10 (Vinicius): o relatório do dia também vai pelo Threema, às 7h (services/denuncia_relatorio_threema);
 // "Quem recebe o relatório" = cadastro `denuncia_relatorio` (nasce com Cairo, harry potter e Roma).
+// 16/10 (Vinicius: "precisamos criar alguma regra horario inicio e fim… agora ele ja devia estar parado para o robo de
+// chamado funcionar"): JANELA DA NOITE em cima da tabela de Passos (início e fim, ligada ou não). Fora dela o robô não
+// começa passo da agenda e o que estiver rodando no fim para no ponto seguro; horário da agenda fora dela fica amarelo.
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { AlertCircle, Bell, Bot, ChevronDown, ChevronRight, FileText, Flag, Loader2, Play, Plus, Power, Check, X } from 'lucide-vue-next'
 import { haQuanto, numero } from '~/lib/denuncia'
@@ -32,7 +35,8 @@ type Ultima = {
   log: string
   vezes: number
 }
-type Agenda = { ligado: boolean; horarios: string[]; no_robo: boolean | null }
+type Agenda = { ligado: boolean; horarios: string[]; no_robo: boolean | null; fora_da_janela?: string[] }
+type Janela = { ligado: boolean; inicio: string; fim: string; no_robo: boolean | null }
 // 07/10/2026 (Vinicius: "até agora não entendo o que cada passo faz"): ao abrir o passo, o passo a passo, quem faz (cada
 // perfil pelo nome), quem confere depois e o que está sendo consertado — o log técnico fica num link pequeno
 type Explicacao = { passos: string[]; quem: string[]; confere: string[]; consertando: string[] }
@@ -54,7 +58,7 @@ type Ocorrencia = {
 type Comando = {
   id: number
   tipo: 'automatico' | 'passo' | 'resolver' | 'agenda' | string
-  dados: { ligado?: boolean; acao?: string; chave?: string; loja?: string; shop_id?: string; codigo?: string; horarios?: string[] }
+  dados: { ligado?: boolean; acao?: string; chave?: string; loja?: string; shop_id?: string; codigo?: string; horarios?: string[]; janela_noite?: Omit<Janela, 'no_robo'> }
   pedido_por: string | null
   pedido_em: string
   entregue_em: string | null
@@ -75,6 +79,7 @@ type Painel = {
   denuncias_hoje: { canal: string; enviadas: number; refeitas: number }[]
   comandos: Comando[]
   relatorios?: RelPendente[]
+  janela?: Janela
 }
 type Aba = 'passos' | 'ocorrencias' | 'pedidos'
 
@@ -256,6 +261,56 @@ function tirarHorario(p: PassoLinha, h: string) {
   void salvarAgenda(p, { horarios: p.agenda.horarios.filter((x) => x !== h) })
 }
 
+// ── janela da noite (16/10) ──────────────────────────────────────────────────
+const janelaEdit = ref<{ inicio: string; fim: string } | null>(null)
+const salvandoJanela = ref(false)
+const janelaMudou = computed(() => {
+  const j = painel.value?.janela
+  return !!(j && janelaEdit.value && (janelaEdit.value.inicio !== j.inicio || janelaEdit.value.fim !== j.fim))
+})
+
+function editarJanela() {
+  const j = painel.value?.janela
+  if (j) janelaEdit.value = { inicio: j.inicio, fim: j.fim }
+}
+
+async function salvarJanela(corpo: Omit<Janela, 'no_robo'>) {
+  salvandoJanela.value = true
+  try {
+    const r = await api<Omit<Janela, 'no_robo'>>('/api/denuncia/robo/janela', { method: 'PUT', body: corpo })
+    if (painel.value) painel.value.janela = { ...r, no_robo: false }   // até o mini confirmar
+    janelaEdit.value = null
+    setTimeout(carregar, 7000)
+    setTimeout(carregar, 70000)
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    useToasts().push({ kind: 'error', title: 'Não deu para salvar a janela', lines: code === 'denuncia_robo_janela_invalida' ? 'início e fim em HH:MM, diferentes' : code || e?.message || 'erro' })
+  } finally {
+    salvandoJanela.value = false
+  }
+}
+
+function alternarJanela() {
+  const j = painel.value?.janela
+  if (!j) return
+  const msg = j.ligado
+    ? `Desligar a janela da noite?\n\nO robô volta a rodar os passos nos horários da agenda a qualquer hora, inclusive de dia.`
+    : `Ligar a janela da noite (${j.inicio} às ${j.fim})?\n\nFora dela o robô não começa passo da agenda, e o que estiver rodando às ${j.fim} para no ponto seguro.`
+  if (!window.confirm(msg)) return
+  void salvarJanela({ ligado: !j.ligado, inicio: j.inicio, fim: j.fim })
+}
+
+function gravarJanelaEditada() {
+  const j = painel.value?.janela
+  const e = janelaEdit.value
+  if (!j || !e) return
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(e.inicio) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(e.fim) || e.inicio === e.fim) {
+    useToasts().push({ kind: 'error', title: 'Janela inválida', lines: 'início e fim em HH:MM, diferentes' })
+    return
+  }
+  void salvarJanela({ ligado: j.ligado, inicio: e.inicio, fim: e.fim })
+}
+
 function tratar(o: Ocorrencia) {
   void mandar(o.chave, '/api/denuncia/robo/ocorrencias/tratar', { chave: o.chave, titulo: o.titulo, robo_chave: o.robo_chave })
 }
@@ -265,6 +320,10 @@ function nomeComando(c: Comando): string {
   if (c.tipo === 'resolver') return `Tratado: ${c.dados.chave}`
   if (c.tipo === 'criar_caso') return `Criar o caso da loja ${c.dados.loja || c.dados.shop_id}`
   if (c.tipo === 'excluir_caso') return `Excluir o ${c.dados.codigo || 'caso'}`
+  if (c.tipo === 'agenda' && c.dados.janela_noite) {
+    const j = c.dados.janela_noite
+    return `Janela da noite: ${j.inicio} às ${j.fim} — ${j.ligado ? 'ligada' : 'desligada'}`
+  }
   const p = painel.value?.passos.find((x) => x.acao === c.dados.acao)
   if (c.tipo === 'agenda') {
     const nome = p ? `${p.ordem} · ${p.nome}` : c.dados.acao
@@ -417,6 +476,52 @@ function relLido() {
       </div>
 
       <!-- ══ Passos ══ -->
+      <!-- 16/10: janela da noite — fora dela o robô não começa passo da agenda; no fim, o que roda para no ponto seguro -->
+      <div v-if="aba === 'passos' && painel.janela" class="flex w-fit max-w-full flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border bg-card px-3 py-2 text-sm">
+        <span class="font-medium">Janela da noite</span>
+        <button
+          type="button"
+          role="switch"
+          :aria-checked="painel.janela.ligado"
+          :aria-label="`${painel.janela.ligado ? 'Desligar' : 'Ligar'} a janela da noite`"
+          :title="painel.janela.ligado ? 'Ligada: o robô só roda a agenda dentro da janela' : 'Desligada: o robô roda a agenda a qualquer hora'"
+          class="relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:cursor-default"
+          :class="[painel.janela.ligado ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-gray-600', salvandoJanela ? 'animate-pulse' : '', podeMandar ? 'cursor-pointer' : 'opacity-60']"
+          :disabled="!podeMandar || salvandoJanela"
+          @click="alternarJanela"
+        >
+          <span
+            class="pointer-events-none absolute top-0.5 left-0 inline-block size-4 rounded-full bg-white shadow transition-transform"
+            :class="painel.janela.ligado ? 'translate-x-[18px]' : 'translate-x-0.5'"
+          />
+        </button>
+        <template v-if="janelaEdit">
+          <label class="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            início
+            <input v-model="janelaEdit.inicio" type="time" class="h-7 w-[84px] rounded-md border bg-background px-2 text-xs tabular-nums text-foreground" @keydown.enter="gravarJanelaEditada" @keydown.esc="janelaEdit = null">
+          </label>
+          <label class="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            fim
+            <input v-model="janelaEdit.fim" type="time" class="h-7 w-[84px] rounded-md border bg-background px-2 text-xs tabular-nums text-foreground" @keydown.enter="gravarJanelaEditada" @keydown.esc="janelaEdit = null">
+          </label>
+          <Button size="sm" class="h-7 px-2 text-xs" :disabled="!janelaMudou || salvandoJanela" @click="gravarJanelaEditada">
+            <Loader2 v-if="salvandoJanela" class="mr-1 size-3 animate-spin" />salvar
+          </Button>
+          <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" :disabled="salvandoJanela" @click="janelaEdit = null">cancelar</Button>
+        </template>
+        <template v-else>
+          <span class="tabular-nums" :class="painel.janela.ligado ? 'pill-success' : 'pill-muted'">{{ painel.janela.inicio }} às {{ painel.janela.fim }}</span>
+          <Button v-if="podeMandar" size="sm" variant="outline" class="h-6 px-2 text-xs" :disabled="salvandoJanela" @click="editarJanela">mudar</Button>
+        </template>
+        <span class="text-xs text-muted-foreground">
+          {{ painel.janela.ligado
+            ? `fora dela o robô não começa passo da agenda; às ${painel.janela.fim} o que estiver rodando para no ponto seguro e segue na noite seguinte · o Rodar funciona a qualquer hora`
+            : 'desligada: o robô roda a agenda a qualquer hora' }}
+        </span>
+        <span v-if="painel.janela.no_robo === false" class="inline-flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400">
+          <Loader2 class="size-3 animate-spin" /> esperando o robô aplicar
+        </span>
+      </div>
       <div v-if="aba === 'passos'" class="table-card w-fit max-w-full overflow-x-auto">
         <!-- table-fixed: um erro comprido fica cortado (inteiro ao abrir a linha) e o "Rodar" não sai da tela -->
         <!-- 02/10 (Vinicius): sem buracos — cada coluna com a sua largura e a tabela (e o quadro)
@@ -491,7 +596,8 @@ function relLido() {
                       v-for="h in p.agenda.horarios"
                       :key="h"
                       class="tabular-nums"
-                      :class="p.agenda.ligado ? 'pill-success' : 'pill-muted'"
+                      :class="!p.agenda.ligado ? 'pill-muted' : (p.agenda.fora_da_janela || []).includes(h) ? 'pill-warning' : 'pill-success'"
+                      :title="(p.agenda.fora_da_janela || []).includes(h) ? 'fora da janela da noite — o robô não roda sozinho neste horário' : undefined"
                     >
                       {{ h }}
                       <button

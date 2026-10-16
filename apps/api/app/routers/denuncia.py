@@ -65,6 +65,7 @@ from app.models.denuncia import (
     DenunciaRelatorio,
     DenunciaRemetente,
     DenunciaRoboAgenda,
+    DenunciaRoboConfig,
     DenunciaRoboComando,
     DenunciaRoboStatus,
     DenunciaRoboTratada,
@@ -73,7 +74,14 @@ from app.models.denuncia import (
 from app.models.user import User
 from app.services import denuncia_painel as painel
 from app.services import denuncia_relatorio as relatorio_dia
-from app.services.denuncia_robo import EM_CRIACAO, PASSOS, montar_painel, normalizar_horarios
+from app.services.denuncia_robo import (
+    EM_CRIACAO,
+    JANELA_PADRAO,
+    PASSOS,
+    montar_painel,
+    normalizar_horarios,
+    normalizar_janela,
+)
 
 logger = structlog.get_logger()
 
@@ -282,7 +290,8 @@ async def sync_robo(
     )
     await session.commit()
     try:
-        await relatorio_dia.anotar_resumo(session, corpo, agora, await _agenda(session))
+        await relatorio_dia.anotar_resumo(session, corpo, agora, await _agenda(session),
+                                          await _janela(session))
         await session.commit()
     except Exception:   # o relatório nunca derruba o estado do robô
         await session.rollback()
@@ -326,14 +335,20 @@ async def _agenda(session: AsyncSession) -> dict[str, dict]:
             for r in rows if r.acao in PASSOS}
 
 
+async def _janela(session: AsyncSession) -> dict:
+    """16/10: a janela da noite (denuncia_robo_config, chave janela_noite); sem linha = a padrão."""
+    row = await session.get(DenunciaRoboConfig, "janela_noite")
+    return normalizar_janela(row.valor if row else None) or dict(JANELA_PADRAO)
+
+
 @sync_router.get("/robo/agenda")
 async def sync_robo_agenda(
     session: Annotated[AsyncSession, Depends(get_session)],
     _r: Annotated[DenunciaRemetente, Depends(_remetente)],
 ) -> dict:
     """02/10: o mini puxa a agenda a cada minuto e grava no despertador.json do agente (o comando
-    "agenda" só adianta o puxão). Passo fora da tabela = desligado."""
-    return {"agenda": await _agenda(session)}
+    "agenda" só adianta o puxão). Passo fora da tabela = desligado. 16/10: + a janela da noite."""
+    return {"agenda": await _agenda(session), "janela_noite": await _janela(session)}
 
 
 @sync_router.post("/robo/comandos/{comando_id}")
@@ -826,7 +841,8 @@ async def robo(
         ).scalars().all()
     )
     painel = montar_painel(st.dados if st else None, st.recebido_em if st else None,
-                           datetime.now(UTC), tratadas=tratadas, agenda=await _agenda(session))
+                           datetime.now(UTC), tratadas=tratadas, agenda=await _agenda(session),
+                           janela=await _janela(session))
     comandos = (
         await session.execute(
             select(DenunciaRoboComando).order_by(DenunciaRoboComando.id.desc()).limit(30)
@@ -946,6 +962,29 @@ async def robo_agenda(
     dados = {"acao": acao, "ligado": row.ligado, "horarios": list(row.horarios or [])}
     await _comando(session, u, "agenda", dados)   # commita a linha junto
     return dados
+
+
+@router.put("/robo/janela")
+async def robo_janela(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """16/10 (Vinicius): a janela da noite do robô — início e fim, ligada ou não. Fora dela o robô
+    não começa passo da agenda e o que estiver rodando no fim para no ponto seguro. Vai pro mini
+    junto com a agenda (comando "agenda" na hora; o mini também relê a cada minuto)."""
+    janela = normalizar_janela(corpo)
+    if janela is None:
+        raise HTTPException(422, detail={"code": "denuncia_robo_janela_invalida"})
+    row = await session.get(DenunciaRoboConfig, "janela_noite")
+    if row is None:
+        row = DenunciaRoboConfig(chave="janela_noite", valor={})
+        session.add(row)
+    row.valor = janela
+    row.atualizado_por = u.name or u.email
+    await session.flush()
+    await _comando(session, u, "agenda", {"janela_noite": janela})   # commita a linha junto
+    return janela
 
 
 # ───────────────────── relatório do dia (05/10/2026) — regras em services/denuncia_relatorio.py

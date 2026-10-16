@@ -62,6 +62,7 @@ from app.models.denuncia import (
     DenunciaRoboComando,
     DenunciaRoboStatus,
     DenunciaRoboAgenda,
+    DenunciaRoboConfig,
     DenunciaRoboTratada,
     DenunciaVerificacao,
 )
@@ -379,6 +380,7 @@ __all__ = [
     "DenunciaCasoExtra",
     "DenunciaJuridicoPasta",
     "DenunciaRoboAgenda",
+    "DenunciaRoboConfig",
     "DenunciaRoboTratada",
     "DenunciaVerificacao",
     "DevolucaoAnexo",

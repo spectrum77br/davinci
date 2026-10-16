@@ -17,7 +17,7 @@ _TABELAS = (
     "denuncia_anuncios", "denuncia_lojas", "denuncia_denuncias", "denuncia_casos",
     "denuncia_compras", "denuncia_provas", "denuncia_verificacoes", "denuncia_remetentes",
     "denuncia_robo_status", "denuncia_robo_comandos", "denuncia_robo_tratadas", "denuncia_anexos",
-    "denuncia_casos_extra", "denuncia_robo_agenda", "denuncia_relatorios",
+    "denuncia_casos_extra", "denuncia_robo_agenda", "denuncia_relatorios", "denuncia_robo_config",
 )
 
 
@@ -352,8 +352,10 @@ def test_painel_frentes_agenda_e_alarme():
     assert passos["procura"]["ultima"]["status"] == "rodando"
     assert passos["denuncias"]["ultima"]["vezes"] == 2
     assert "compras" not in passos and passos["ativos_inativos"]["ultima"] is None
-    assert passos["procura"]["agenda"] == {"ligado": True, "horarios": ["06:00", "12:00"], "no_robo": None}
-    assert passos["denuncias"]["agenda"] == {"ligado": False, "horarios": [], "no_robo": None}
+    assert passos["procura"]["agenda"] == {"ligado": True, "horarios": ["06:00", "12:00"], "no_robo": None,
+                                           "fora_da_janela": []}
+    assert passos["denuncias"]["agenda"] == {"ligado": False, "horarios": [], "no_robo": None,
+                                             "fora_da_janela": []}
 
     pessoa = [x["titulo"] for x in p["ocorrencias"] if x["tipo"] == "pessoa"]
     assert "SEI esperando a assinatura da titular" in pessoa
@@ -604,6 +606,77 @@ async def test_robo_agenda_salva_e_mini_puxa(client, make_user, auth_as):
     assert passos["ativos_inativos"]["agenda"]["ligado"] is True
     assert passos["procura"]["agenda"]["horarios"] == ["05:30", "06:00"]
 
+
+
+def test_janela_noite_regras_e_painel():
+    """16/10 (Vinicius: "regra horario inicio e fim"): janela da noite 18:00 → 07:00. Horário da agenda
+    fora dela não é pedido pelo robô — não vira "não começou" e a tela marca."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services.denuncia_robo import dentro_da_janela, montar_painel, normalizar_janela
+
+    j = {"ligado": True, "inicio": "18:00", "fim": "07:00"}
+    assert normalizar_janela(j) == j
+    for ruim in (None, {}, {"ligado": "sim", "inicio": "18:00", "fim": "07:00"},
+                 {"ligado": True, "inicio": "18:00", "fim": "18:00"},
+                 {"ligado": True, "inicio": "25:00", "fim": "07:00"}, {"ligado": True, "inicio": "18:00"}):
+        assert normalizar_janela(ruim) is None
+    # passa da meia-noite: 18:00–23:59 e 00:00–06:59
+    assert [h for h in ("17:59", "18:00", "23:30", "00:00", "06:59", "07:00", "12:00")
+            if dentro_da_janela(h, j)] == ["18:00", "23:30", "00:00", "06:59"]
+    # janela no mesmo dia (08:00 → 12:00)
+    assert dentro_da_janela("08:00", {"ligado": True, "inicio": "08:00", "fim": "12:00"})
+    assert not dentro_da_janela("12:00", {"ligado": True, "inicio": "08:00", "fim": "12:00"})
+    # desligada ou sem janela = sempre dentro
+    assert dentro_da_janela("12:00", {**j, "ligado": False}) and dentro_da_janela("12:00", None)
+
+    br = ZoneInfo("America/Sao_Paulo")
+    agora = datetime(2026, 10, 16, 13, 0, tzinfo=br)
+    agenda = {"procura": {"ligado": True, "horarios": ["12:00", "18:00"]},
+              "anatel": {"ligado": True, "horarios": ["12:00"]}}
+    resumo = dict(_resumo(), despertador={"ligado": True, "agenda": agenda, "janela_noite": j})
+    p = montar_painel(resumo, agora, agora, agenda=agenda, janela=j)
+    titulos = [o["titulo"] for o in p["ocorrencias"]]
+    assert not any("não começou" in t for t in titulos)   # 12:00 está fora da janela: o robô não pede
+    passos = {x["acao"]: x for x in p["passos"]}
+    assert passos["procura"]["agenda"]["fora_da_janela"] == ["12:00"]
+    assert passos["anatel"]["agenda"]["fora_da_janela"] == ["12:00"]
+    assert p["janela"] == {**j, "no_robo": True}
+
+    # sem janela, o mesmo 12:00 é alarme (como antes)
+    p = montar_painel(resumo, agora, agora, agenda=agenda, janela={**j, "ligado": False})
+    assert any("não começou" in o["titulo"] for o in p["ocorrencias"])
+    assert p["janela"]["no_robo"] is False          # o robô ainda segue a ligada
+    # agente antigo (não manda janela_noite) = não sabemos
+    resumo["despertador"] = {"ligado": True, "agenda": agenda}
+    assert montar_painel(resumo, agora, agora, agenda=agenda, janela=j)["janela"]["no_robo"] is None
+
+
+async def test_robo_janela_salva_e_mini_puxa(client, make_user, auth_as):
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    # sem linha na tabela vale a padrão (18:00 → 07:00, ligada)
+    assert (await client.get("/api/denuncia/robo")).json()["janela"] == {
+        "ligado": True, "inicio": "18:00", "fim": "07:00", "no_robo": None}
+    r = await client.put("/api/denuncia/robo/janela", json={"ligado": True, "inicio": "19:00", "fim": "06:30"})
+    assert r.status_code == 403
+
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    r = await client.put("/api/denuncia/robo/janela", json={"ligado": True, "inicio": "19:00", "fim": "06:30"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ligado": True, "inicio": "19:00", "fim": "06:30"}
+    for corpo in ({"ligado": True, "inicio": "19:00", "fim": "19:00"}, {"ligado": True, "inicio": "7h", "fim": "18:00"},
+                  {"inicio": "19:00", "fim": "06:30"}, {}):
+        assert (await client.put("/api/denuncia/robo/janela", json=corpo)).status_code == 422
+    r = await client.put("/api/denuncia/robo/janela", json={"ligado": False, "inicio": "19:00", "fim": "06:30"})
+    assert r.json()["ligado"] is False
+
+    # o mini puxa junto com a agenda e recebe o comando "agenda" pra puxar na hora
+    sync = (await client.get("/api/denuncia/sync/robo/agenda", headers=H)).json()
+    assert sync["janela_noite"] == {"ligado": False, "inicio": "19:00", "fim": "06:30"}
+    cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [(c["tipo"], c["dados"]["janela_noite"]["ligado"]) for c in cmds] == [("agenda", True), ("agenda", False)]
+    assert (await client.get("/api/denuncia/robo")).json()["janela"]["inicio"] == "19:00"
 
 
 async def test_robo_tratado_some_e_resolve_no_mini(client, make_user, auth_as):

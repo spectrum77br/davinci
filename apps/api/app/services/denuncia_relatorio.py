@@ -492,10 +492,11 @@ async def _linha(session: AsyncSession, dia: date) -> DenunciaRelatorio:
 
 
 async def anotar_resumo(
-    session: AsyncSession, resumo: dict, agora: datetime, agenda: dict[str, dict] | None = None
+    session: AsyncSession, resumo: dict, agora: datetime, agenda: dict[str, dict] | None = None,
+    janela: dict | None = None,
 ) -> None:
     """Chamado a cada resumo do mini (sync/robo). Não commita."""
-    painel = montar_painel(resumo, agora, agora, agenda=agenda)
+    painel = montar_painel(resumo, agora, agora, agenda=agenda, janela=janela)
     hoje = agora.astimezone(FUSO).date()
     ontem = hoje - timedelta(days=1)
     tem_ontem = any(

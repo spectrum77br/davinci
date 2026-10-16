@@ -28,6 +28,10 @@ Uma janela faz quatro coisas:
 8. (01/10) o "Anexar prova" da ficha do caso no DaVinci: a cada 30 s busca os
    anexos, baixa o arquivo (ou pega o link do vídeo no MEGA) e entrega ao
    sistema daqui (POST /api/v1/provas, que guarda e sobe pro MEGA).
+9. (13/10) os botões "Montar pasta jurídico" e "Enviar ao jurídico" da ficha do caso:
+   comandos juridico_montar / juridico_enviar → `Fiscalizacao/pasta_juridico.py`
+   numa linha à parte (demora: leitura do print + PDF; anexos no Tuta); o andamento
+   vai pras rotas /api/denuncia/sync/juridico/pastas/<id>.
 Mais o backup diário local do banco em `data/backups` (guarda 30), como fazia
 o `run.py` no servidor.
 
@@ -150,7 +154,9 @@ def robo():
             d = json.load(f)
         # 02/10: + a agenda que o despertador está seguindo (a aba Robô mostra "esperando o robô aplicar")
         corpo["despertador"] = {"ligado": d.get("ligado", True), "rodadas": d.get("rodadas"),
-                                "agenda": d.get("agenda")}
+                                "agenda": d.get("agenda"),
+                                # 16/10: + a janela da noite que o robô segue (a aba Robô mostra se já aplicou)
+                                "janela_noite": d.get("janela_noite")}
     except (OSError, ValueError):
         pass
     req = urllib.request.Request(
@@ -228,7 +234,11 @@ ORDEM_PASSO = {"checagem": 0, "ciclo_emails": 1, "procura": 2, "denuncias": 3,
                "varredura_mercadolivre": 2, "varredura_shopee": 2, "varredura_tiktok": 2,
                "varredura_amazon": 2, "conferencia": 3, "anatel": 4,
                "compras": 5, "juridico": 6, "relatorio": 7, "diversos": 7, "capa_perguntas": 8,
-               "ativos_inativos": 20}   # 01/10: o "saiu do ar?" virou passo próprio (agente v23)
+               "ativos_inativos": 20,   # 01/10: o "saiu do ar?" virou passo próprio (agente v23)
+               # 06/10: o "Rodar" da aba Robô respondia "passo desconhecido" pros passos 6 e 8 (ações extras do
+               # agente, ordem do acoes_extras.json)
+               "replica_diversos": 6, "aproveitar_parado": 15,
+               "prints": 7}   # 07/10: passo 5 próprio (agente v36)
 
 
 def _gravar(caminho, texto):
@@ -268,14 +278,23 @@ def agenda(por=None):
         return False, "não consegui ler a agenda do DaVinci"
     nova = {a: {"ligado": bool(v.get("ligado")), "horarios": sorted(v.get("horarios") or [])}
             for a, v in r["agenda"].items() if isinstance(v, dict)}
+    # 16/10 (Vinicius: "regra horario inicio e fim"): a janela da noite vem junto; o agente (v37) relê a cada volta.
+    # DaVinci sem a janela (versão antiga) = mantém a que está no despertador.
+    jn = r.get("janela_noite")
     p = os.path.join(ROBO, "despertador.json")
     with open(p, encoding="utf-8") as f:
         d = json.load(f)
+    janela = ({"ligado": bool(jn.get("ligado")), "inicio": str(jn.get("inicio") or ""), "fim": str(jn.get("fim") or "")}
+              if isinstance(jn, dict) else d.get("janela_noite"))
     ligados = ", ".join("%s %s" % (a, "/".join(v["horarios"]) or "sem horário")
                         for a, v in sorted(nova.items()) if v["ligado"]) or "nenhum passo ligado"
-    if d.get("agenda") == nova:
+    if janela:
+        ligados += " · janela da noite %s às %s%s" % (janela["inicio"], janela["fim"], "" if janela["ligado"] else " (desligada)")
+    if d.get("agenda") == nova and d.get("janela_noite") == janela:
         return True, "agenda já estava aplicada (%s)" % ligados
     d["agenda"] = nova
+    if janela:
+        d["janela_noite"] = janela
     d["_agenda"] = ("02/10/2026: agenda dos passos vinda do DaVinci (aba Robô) — o despertador segue isto "
                     "em vez das rodadas fixas; mudar lá, não aqui. Atualizada em %s%s."
                     % (time.strftime("%d/%m %H:%M"), " por %s" % por if por else ""))
@@ -349,6 +368,116 @@ def _excluir_caso(dados, por):
     return True, "%s excluído (estornado)" % r.get("caso")
 
 
+def _trocar_principal(dados, por):
+    """Lista de compra da aba Casos (13/10): o anúncio escolhido vira o principal do caso."""
+    r = _sistema("POST", "/api/v1/casos/%d/principal" % int(dados.get("caso_id")),
+                 {"anuncio_id": dados.get("anuncio_id"), "por": "DaVinci (%s)" % por})
+    if r.get("ja_era"):
+        return True, "%s já tinha o anúncio %s como principal" % (r.get("caso"), r.get("anuncio_id"))
+    return True, "%s: anúncio principal %s → %s" % (r.get("caso"), r.get("de"), r.get("anuncio_id"))
+
+
+# 13/10/2026 (Vinicius: "eu acionar esses botão dentro dos casos e enviar quando eu quiser"): o passo 9 (Jurídico) saiu da
+# lista; a pasta do advogado é montada e enviada pelos botões da ficha do caso. O comando é respondido na hora ("recebido") e o
+# trabalho roda numa linha à parte — o laço dos comandos (5 s) não fica parado esperando o PDF ou o Tuta.
+PY_ROBO = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"   # tem Pillow, Quartz e Vision (leitura do print)
+PASTAS_JURIDICO = os.path.join(ROBO, "Juridico", "DaVinci")
+_juridico_estado = {"andamento": set()}   # (comando, pasta) rodando agora — não pega o mesmo duas vezes
+
+
+def _juridico_rodar(args, timeout):
+    p = subprocess.run([PY_ROBO, os.path.join(ROBO, "pasta_juridico.py")] + args, cwd=ROBO,
+                       capture_output=True, text=True, timeout=timeout)
+    linhas = [x for x in (p.stdout or "").strip().splitlines() if x.startswith("{")]
+    if p.returncode != 0 or not linhas:
+        erro = ((p.stderr or "") + (p.stdout or "")).strip().splitlines()
+        raise RuntimeError((erro[-1] if erro else "saiu com %s" % p.returncode)[:400])
+    return json.loads(linhas[-1])
+
+
+def _juridico_montar(dados):
+    env = _env()
+    cfg = env.ler_config()
+    pid = int(dados["pasta_id"])
+    rota = "/api/denuncia/sync/juridico/pastas/%d" % pid
+    try:
+        env.pedir(cfg, "POST", rota, corpo={"status": "montando", "resultado": "montando a pasta no mini"}, timeout=30)
+        r = _juridico_rodar(["montar", "--caso-id", str(int(dados["caso_id"])), "--pasta-id", str(pid),
+                             "--selo", "sim" if dados.get("selo_anatel") == "sim" else "nao"], timeout=1800)
+        with open(r["zip"], "rb") as f:
+            env.pedir(cfg, "PUT", rota + "/arquivo", dados=f.read(), timeout=600)
+        info = {k: r.get(k) for k in ("arquivos", "avisos", "nome_zip", "para", "cc", "de", "assunto", "tamanho",
+                                       "captura", "codigo_exibido", "certificado", "certificado_makisa")}
+        res = "pasta montada: %d arquivos, %.1f MB" % (len(r.get("arquivos") or []), (r.get("tamanho") or 0) / 1048576.0)
+        env.pedir(cfg, "POST", rota, corpo={"status": "pronta", "resultado": res, "info": info}, timeout=30)
+        log("jurídico: pasta %s do caso %s — %s" % (pid, dados.get("caso_id"), res))
+    except Exception as e:  # noqa: BLE001
+        log("jurídico: pasta %s do caso %s falhou — %s" % (pid, dados.get("caso_id"), e))
+        try:
+            env.pedir(cfg, "POST", rota, corpo={"status": "erro", "resultado": str(e)[:500]}, timeout=30)
+        except (OSError, RuntimeError):
+            pass
+    finally:
+        _juridico_estado["andamento"].discard(("juridico_montar", pid))
+
+
+def _juridico_pasta(pid):
+    """O resultado.json da montagem mais nova desta pasta (Juridico/DaVinci/<pasta>_<quando>/)."""
+    achados = sorted(glob.glob(os.path.join(PASTAS_JURIDICO, "%d_*" % pid, "resultado.json")))
+    if not achados:
+        raise RuntimeError("a pasta %d não está neste Mac — monte de novo" % pid)
+    with open(achados[-1], encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _juridico_enviar(dados):
+    env = _env()
+    cfg = env.ler_config()
+    pid = int(dados["pasta_id"])
+    rota = "/api/denuncia/sync/juridico/pastas/%d/envio" % pid
+    try:
+        env.pedir(cfg, "POST", rota, corpo={"status": "enviando", "resultado": "enviando pelo Tuta do mini"}, timeout=30)
+        res = _juridico_pasta(pid)
+        corpo_arq = os.path.join(os.path.dirname(res["zip"]), "corpo_email.txt")
+        with open(corpo_arq, "w", encoding="utf-8") as f:
+            f.write(res.get("corpo") or "")
+        cc = dados.get("cc") or ""
+        cc = ", ".join(cc) if isinstance(cc, list) else str(cc)
+        r = _juridico_rodar(["enviar", "--pasta-dir", res["pasta"], "--para", str(dados["para"]), "--cc", cc,
+                             "--assunto", res.get("assunto") or "", "--corpo-arquivo", corpo_arq], timeout=4500)   # fila: 1 envio por vez
+        env.pedir(cfg, "POST", rota, corpo={"status": "enviado", "resultado": r.get("resultado"),
+                                            "enviado_em": r.get("enviado_em")}, timeout=30)
+        log("jurídico: pasta %s enviada — %s" % (pid, r.get("resultado")))
+        if not dados.get("teste"):
+            # o sistema daqui também registra: caso "Com jurídico", data, e-mail e anexos (dossiê como prova)
+            try:
+                _sistema("POST", "/api/v1/juridico/%s/enviado" % res["anuncio_id"], {
+                    "advogado": (res.get("para") or {}).get("nome"), "data": (r.get("enviado_em") or "")[:16],
+                    "assunto": res.get("assunto"), "corpo": res.get("corpo"), "para": dados["para"], "cc": cc,
+                    "anexos": [{"nome": a["nome"], "bytes": a["bytes"]} for a in res.get("arquivos") or []]})
+            except Exception as e:  # noqa: BLE001 — o e-mail já saiu; o DaVinci já marcou pela data
+                log("jurídico: e-mail saiu, mas o registro no sistema daqui falhou — %s" % e)
+            davinci()
+    except Exception as e:  # noqa: BLE001
+        log("jurídico: envio da pasta %s falhou — %s" % (pid, e))
+        try:
+            env.pedir(cfg, "POST", rota, corpo={"status": "erro", "resultado": str(e)[:500]}, timeout=30)
+        except (OSError, RuntimeError):
+            pass
+    finally:
+        _juridico_estado["andamento"].discard(("juridico_enviar", pid))
+
+
+def _juridico(tipo, dados):
+    chave = (tipo, int(dados.get("pasta_id") or 0))
+    if chave in _juridico_estado["andamento"]:
+        return True, "já está em andamento"
+    _juridico_estado["andamento"].add(chave)
+    alvo = _juridico_montar if tipo == "juridico_montar" else _juridico_enviar
+    threading.Thread(target=alvo, args=(dados,), name=tipo, daemon=True).start()
+    return True, "recebido — %s" % ("montando a pasta" if tipo == "juridico_montar" else "enviando pelo Tuta")
+
+
 def comandos():
     """Botões da aba Robô do DaVinci (e o criar/excluir caso das abas Anúncios e Casos)."""
     env = _env()
@@ -369,6 +498,10 @@ def comandos():
                 ok, res = _criar_caso(dados, por)
             elif c.get("tipo") == "excluir_caso":
                 ok, res = _excluir_caso(dados, por)
+            elif c.get("tipo") == "trocar_principal":
+                ok, res = _trocar_principal(dados, por)
+            elif c.get("tipo") in ("juridico_montar", "juridico_enviar"):
+                ok, res = _juridico(c["tipo"], dados)
             else:
                 ok, res = False, "comando desconhecido: %s" % c.get("tipo")
         except Exception as e:  # noqa: BLE001
@@ -378,7 +511,7 @@ def comandos():
                   corpo={"ok": ok, "resultado": res}, timeout=30)
         if c.get("tipo") in ("automatico", "agenda"):
             robo()   # a aba Robô já mostra ligada/desligada (e a agenda aplicada), sem esperar o minuto
-        elif c.get("tipo") in ("criar_caso", "excluir_caso") and ok:
+        elif c.get("tipo") in ("criar_caso", "excluir_caso", "trocar_principal") and ok:
             davinci()   # o caso novo (ou a exclusão) aparece no DaVinci já, sem esperar os 5 min da cópia
 
 
