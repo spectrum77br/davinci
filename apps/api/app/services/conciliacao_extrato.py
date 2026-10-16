@@ -664,8 +664,8 @@ async def run_extrato_sync(
         # Confere a config do relatório 1×/dia (16/10: a aguiar tinha uma config antiga
         # de 11 colunas, sem ORDER_ID): se faltava coluna e foi completada, os
         # relatórios já lidos vieram capengas — esquece as janelas e relê desde o início.
-        confere = loja.extrato_config_em is None or (agora - loja.extrato_config_em) >= timedelta(
-            hours=20
+        confere = (
+            loja.extrato_config_em is None or loja.extrato_config_em.astimezone(BRT).date() < hoje
         )
         if confere:
             cfg = await garantir_config(cliente)
