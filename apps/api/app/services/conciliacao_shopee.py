@@ -20,7 +20,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -201,8 +201,6 @@ async def inserir_movimentos(
     return inseridos
 
 
-AJUSTE_SALDO_MAXIMO = Decimal("10")
-AJUSTE_SALDO_MAX_PULOS = 20
 PREFIXO_AJUSTE_SALDO = "ajuste-saldo-"
 
 
@@ -218,122 +216,35 @@ async def _dia_fechado(session: AsyncSession, loja: ConciliacaoLoja, dia: date) 
     ).scalar_one_or_none() is not None
 
 
-async def ajustar_saldo_do_dia(
-    session: AsyncSession, loja: ConciliacaoLoja, dia: date, *, fechado: bool | None = None
-) -> list[Decimal]:
-    """A carteira da Shopee às vezes muda o saldo sem listar o lançamento (16/10,
-    Barbosa 15/10: renda de 292,39 e o saldo subiu 291,41 — nada na API, nem relendo).
-    Pra diferença pequena (até R$ 10 no dia) o robô grava uma linha "Ajuste da
-    Shopee" classificada como ajuste, no ponto em que o saldo pulou, e o dia fecha.
-    Diferença maior fica como está ("saldo não bate" pra uma pessoa olhar). Recalcula
-    do zero a cada leitura do dia; ajuste que uma pessoa mexeu fica.
-
-    16/10, revisão: (1) dia fechado não é mexido — nem apaga nem recria (quem muda dia
-    fechado é linha nova, que reabre o dia; outro lote); (2) a numeração pula os
-    números dos ajustes que ficaram — recomeçava em 1 e colidia com o ajuste mexido
-    (IntegrityError → PendingRollbackError e a rodada da loja inteira caía toda vez)."""
-    from app.routers.conciliacao import _ordena_dia, _saldo_anterior
-
-    if fechado is None:
-        fechado = await _dia_fechado(session, loja, dia)
-    if fechado:
-        return []
-    mov = ConciliacaoMovimento
-    inicio = datetime.combine(dia, datetime.min.time(), tzinfo=BRT)
-    fim = inicio + timedelta(days=1)
-    prefixo = f"{PREFIXO_AJUSTE_SALDO}{dia.isoformat()}-"
-    await session.execute(
-        delete(mov).where(
-            mov.integration_id == loja.integration_id,
-            mov.origem == ORIGEM_CARTEIRA,
-            mov.id_externo.like(f"{prefixo}%"),
-            mov.vinculado_por.is_(None),
-        )
-    )
-    # os que ficaram (mexidos por alguém): a numeração nova não pode pisar neles
-    usados = set(
-        (
-            await session.execute(
-                select(mov.id_externo).where(
-                    mov.integration_id == loja.integration_id,
-                    mov.origem == ORIGEM_CARTEIRA,
-                    mov.id_externo.like(f"{prefixo}%"),
-                )
-            )
-        ).scalars()
-    )
-    # saldo antes do dia pela mesma regra da tela (resolve empate no mesmo segundo,
-    # inclusive ajuste + linha real na mesma hora)
-    anterior = await _saldo_anterior(session, loja, dia)
+async def remover_ajustes_do_robo(session: AsyncSession, loja: ConciliacaoLoja) -> list[str]:
+    """16/10 à noite (Vinicius, essência do painel): quando a carteira da Shopee muda de
+    saldo sem listar o lançamento, o robô NÃO inventa mais a linha "diferença de saldo
+    não detalhada" (até R$ 10) pra fechar o dia — a diferença aparece e eles decidem.
+    As linhas que o robô tinha criado (e ninguém mexeu) saem, e o dia delas reabre."""
     linhas = (
         (
             await session.execute(
-                select(mov).where(
-                    mov.integration_id == loja.integration_id,
-                    mov.origem == ORIGEM_CARTEIRA,
-                    mov.data >= inicio,
-                    mov.data < fim,
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_CARTEIRA,
+                    ConciliacaoMovimento.id_externo.like(f"{PREFIXO_AJUSTE_SALDO}%"),
+                    ConciliacaoMovimento.vinculado_por.is_(None),
                 )
             )
         )
         .scalars()
         .all()
     )
-    if anterior is None or not linhas:
+    if not linhas:
         return []
-    saldo = Decimal(anterior)
-    pulos: list[tuple[ConciliacaoMovimento, Decimal]] = []
-    for m in _ordena_dia(list(linhas), saldo):
-        saldo += (m.credito or Decimal("0")) - (m.debito or Decimal("0"))
-        if m.saldo_apos is not None and m.saldo_apos != saldo:
-            pulos.append((m, Decimal(m.saldo_apos) - saldo))
-            saldo = Decimal(m.saldo_apos)
-    if not pulos:
-        return []
-    total = sum((abs(d) for _m, d in pulos), Decimal("0"))
-    if total > AJUSTE_SALDO_MAXIMO or len(pulos) > AJUSTE_SALDO_MAX_PULOS:
-        logger.warning(
-            "conciliacao_carteira_saldo_pulou",
-            loja=loja.conta,
-            dia=dia.isoformat(),
-            pulos=[str(d) for _m, d in pulos],
-        )
-        return [d for _m, d in pulos]
-    n = 0
-    for m, d in pulos:
-        n += 1
-        while f"{prefixo}{n}" in usados:
-            n += 1
-        usados.add(f"{prefixo}{n}")
-        session.add(
-            ConciliacaoMovimento(
-                integration_id=loja.integration_id,
-                platform=loja.platform,
-                origem=ORIGEM_CARTEIRA,
-                id_externo=f"{prefixo}{n}",
-                data=m.data,
-                tipo="ajuste_shopee",
-                # 16/10: quase sempre −0,49 na "Renda do pedido" (tarifa que a carteira
-                # não lista); o texto diz em que linha o saldo pulou
-                descricao=(
-                    f"Diferença de saldo não detalhada pela Shopee ({(m.descricao or '')[:60]})"
-                ),
-                sub_tipo="AJUSTE_SALDO",
-                credito=d if d > 0 else Decimal("0"),
-                debito=-d if d < 0 else Decimal("0"),
-                saldo_apos=Decimal(m.saldo_apos)
-                - (m.credito or Decimal("0"))
-                + (m.debito or Decimal("0")),
-                classificacao="ajuste",
-                raw={
-                    "motivo": "saldo informado pela Shopee pulou sem lançamento na carteira",
-                    "antes_da_linha": m.id_externo,
-                    "diferenca": str(d),
-                },
-            )
-        )
+    dias = {m.data.astimezone(BRT).date() for m in linhas if m.data}
+    ids = [m.id_externo for m in linhas]
+    for m in linhas:
+        await session.delete(m)
     await session.flush()
-    return [d for _m, d in pulos]
+    await reabrir_dias(session, loja, dias, motivo="ajuste automático de saldo da Shopee removido")
+    logger.info("conciliacao_shopee_ajustes_removidos", loja=loja.conta, linhas=ids)
+    return ids
 
 
 async def run_carteira_sync(
@@ -406,7 +317,7 @@ async def run_carteira_sync(
                 "conciliacao_carteira_falhou", loja=loja.conta, dia=dia.isoformat(), erro=row.erro
             )
             break  # mantém a ordem dos dias; tenta de novo na próxima rodada
-        pulos = await ajustar_saldo_do_dia(session, loja, dia, fechado=dia in fechados)
+        pulos: list[Decimal] = []  # sem ajuste automático (16/10 à noite)
         row.status = "lido"
         row.lido_em = agora
         row.erro = None
@@ -427,20 +338,9 @@ async def run_carteira_sync(
                 **({"fechado": True} if dia in fechados else {}),
             }
         )
-    # Dias abertos desde o início que foram lidos ANTES da regra do ajuste (16/10:
-    # ATV −1,47 em 05/10, Inova −0,49 em cinco dias…): a varredura refaz o ajuste
-    # de cada um. Dia fechado não é mexido.
-    lidos_agora = {date.fromisoformat(x["dia"]) for x in resumo["dias"]}
-    antigos: dict[str, list[str]] = {}
-    d = loja.inicio
-    while d <= ontem:
-        if d not in fechados and d not in lidos_agora:
-            pulos = await ajustar_saldo_do_dia(session, loja, d, fechado=False)
-            if pulos:
-                antigos[d.isoformat()] = [str(x) for x in pulos]
-        d += timedelta(days=1)
-    if antigos:
-        resumo["ajustes_antigos"] = antigos
+    removidos = await remover_ajustes_do_robo(session, loja)
+    if removidos:
+        resumo["ajustes_removidos"] = removidos
     await session.flush()
     return resumo
 

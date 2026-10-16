@@ -2913,10 +2913,10 @@ async def test_dinheiro_na_conta_usa_a_ancora_do_dia_anterior(db, make_user):
     assert dinheiro["na_conta"] == 100.0
 
 
-def test_centavos_sem_liberacao_e_frete_cancelado_e_custo_zero_quando_nada_liberou():
-    """2ª rodada (16/10): Shopee cobra −0,49 em pedido devolvido com Bling "Resolvido" (não
-    cancelado) → venda desfeita; frete + frete cancelado (líquido 0) não é "entrou X";
-    nada liberou e saiu 23,39 → custo zero no Sobrou (o produto voltou)."""
+def test_centavos_sem_liberacao_sao_pendencia_e_frete_cancelado_nao_e_alarme():
+    """16/10 à noite (Vinicius: "se a Shopee cobrou não pode finalizar"): −0,49 sem nada
+    liberado é diferença — pendência, não "venda desfeita"; frete + frete cancelado
+    (líquido 0) não é "entrou X"; "nada liberou e saiu X" marca nada_liberou (sem zerar custo)."""
     loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
     loja.integration_id = None
     base = {
@@ -2930,12 +2930,9 @@ def test_centavos_sem_liberacao_e_frete_cancelado_e_custo_zero_quando_nada_liber
     d = datetime(2026, 10, 12, 12, tzinfo=UTC)
     centavos = _mov(loja, "estorno", d, debito="0.49")
     out = calc.situacao_do_pedido(movs_extrato=[centavos], **base)
-    assert out["situacao"] == "cancelado" and "centavos" in out["motivo"]
-    assert out["nada_liberou"] is True
+    assert out["situacao"] == "estornado_depois" and out["motivo"] == "nada liberou e saiu 0.49"
+    assert out["zero_a_zero"] is False and out["nada_liberou"] is True
     frete = _mov(loja, "frete", d, debito="10.00")
     frete_volta = _mov(loja, "frete_cancelado", d, credito="10.00")
     out = calc.situacao_do_pedido(movs_extrato=[frete, frete_volta], **base)
     assert out["situacao"] == "aguardando"  # só frete mexeu: nem alarme, nem "desfeita"
-    manutencao = _mov(loja, "estorno", d, debito="23.39")
-    out = calc.situacao_do_pedido(movs_extrato=[manutencao], **base)
-    assert out["situacao"] == "estornado_depois" and out["nada_liberou"] is True

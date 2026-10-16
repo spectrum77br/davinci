@@ -201,95 +201,6 @@ async def test_run_carteira_sync_le_dia_a_dia_e_resolve_o_pedido(db, make_user):
     assert all(s.status == "lido" for s in syncs)
 
 
-async def test_run_carteira_sync_grava_ajuste_quando_o_saldo_pula_pouco(db, make_user):
-    """16/10, Barbosa 15/10: renda de 292,39 e o saldo subiu 291,41 — a Shopee não lista
-    o lançamento de −0,98. Diferença pequena vira linha de ajuste do robô; grande não."""
-    loja = await _loja_shopee(db, make_user)
-    d10, d11, d12 = date(2026, 10, 10), date(2026, 10, 11), date(2026, 10, 12)
-    cliente = _ShopeeFalsa(
-        [
-            _tx(10, "ESCROW_VERIFIED_ADD", 100.0, 100.0, _epoch(d10, 9), "261006VX383P9J"),
-            # dia 11: entra 292,39 mas o saldo só sobe 291,41
-            _tx(11, "ESCROW_VERIFIED_ADD", 292.39, 391.41, _epoch(d11, 10), "2610095P6JURXJ"),
-            _tx(12, "ESCROW_VERIFIED_ADD", 50.0, 441.41, _epoch(d11, 12), "2610095P6JURXK"),
-            # dia 12: pulo grande (R$ 80): fica como está
-            _tx(13, "ESCROW_VERIFIED_ADD", 10.0, 371.41, _epoch(d12, 10), "2610095P6JURXL"),
-        ]
-    )
-    r = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 13))
-    por_dia = {x["dia"]: x["ajustes_de_saldo"] for x in r["dias"]}
-    assert por_dia["2026-10-10"] == [] and por_dia["2026-10-11"] == ["-0.98"]
-    assert por_dia["2026-10-12"] == ["-80.00"]
-    movs = (
-        (await db.execute(select(ConciliacaoMovimento).order_by(ConciliacaoMovimento.data)))
-        .scalars()
-        .all()
-    )
-    ajustes = [m for m in movs if m.tipo == "ajuste_shopee"]
-    assert len(ajustes) == 1
-    a = ajustes[0]
-    assert a.debito == Decimal("0.98") and a.classificacao == "ajuste"
-    assert a.id_externo == "ajuste-saldo-2026-10-11-1" and a.saldo_apos == Decimal("99.02")
-    assert a.data == datetime.fromtimestamp(_epoch(d11, 10), tz=UTC)
-    # relendo o dia, o ajuste é refeito, não duplicado
-    r2 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 13))
-    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
-    assert len([m for m in movs if m.tipo == "ajuste_shopee"]) == 1 and r2["inseridos"] == 0
-
-
-async def test_run_carteira_sync_varre_os_dias_antigos_abertos(db, make_user):
-    """Dia lido antes da regra do ajuste (pulo de −0,49 que ficou): a rodada seguinte
-    refaz o ajuste; dia fechado não é mexido; ajuste + linha real na mesma hora não
-    confundem o saldo do dia seguinte."""
-    from app.models import ConciliacaoDia
-
-    loja = await _loja_shopee(db, make_user)
-    d10, d11, d12, d13 = (
-        date(2026, 10, 10),
-        date(2026, 10, 11),
-        date(2026, 10, 12),
-        date(2026, 10, 13),
-    )
-    cliente = _ShopeeFalsa(
-        [
-            _tx(10, "ESCROW_VERIFIED_ADD", 100.0, 100.0, _epoch(d10, 9), "261006VX383P9J"),
-            _tx(11, "ESCROW_VERIFIED_ADD", 50.0, 149.51, _epoch(d11, 10), "2610095P6JURXJ"),
-            _tx(12, "ESCROW_VERIFIED_ADD", 10.0, 159.02, _epoch(d12, 10), "2610095P6JURXK"),
-            _tx(13, "ESCROW_VERIFIED_ADD", 5.0, 164.02, _epoch(d13, 10), "2610095P6JURXL"),
-        ]
-    )
-    r1 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 14))
-    assert {x["dia"]: x["ajustes_de_saldo"] for x in r1["dias"]} == {
-        "2026-10-10": [],
-        "2026-10-11": ["-0.49"],
-        "2026-10-12": ["-0.49"],
-        "2026-10-13": [],
-    }
-    # como se a regra não existisse: apaga os ajustes; e alguém fechou o dia 12
-    for m in (await db.execute(select(ConciliacaoMovimento))).scalars().all():
-        if m.tipo == "ajuste_shopee":
-            await db.delete(m)
-    db.add(
-        ConciliacaoDia(
-            integration_id=loja.integration_id,
-            dia=d12,
-            fechado_em=datetime(2026, 10, 14, 9, tzinfo=UTC),
-            fechado_por="cairo",
-        )
-    )
-    await db.commit()
-    # rodada seguinte: relê só o 13; a varredura refaz o ajuste do 11 e deixa o 12 fechado
-    r2 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 14))
-    assert [x["dia"] for x in r2["dias"]] == ["2026-10-13"]
-    assert r2["ajustes_antigos"] == {"2026-10-11": ["-0.49"]}
-    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
-    ajustes = sorted(m.id_externo for m in movs if m.tipo == "ajuste_shopee")
-    assert ajustes == ["ajuste-saldo-2026-10-11-1"]
-    a = next(m for m in movs if m.tipo == "ajuste_shopee")
-    assert a.descricao.startswith("Diferença de saldo não detalhada pela Shopee (")
-    assert a.saldo_apos == Decimal("99.51")
-
-
 async def test_extrato_do_dia_shopee_fecha_a_conta(db, make_user, auth_as, client):
     loja = await _loja_shopee(db, make_user)
     d10 = date(2026, 10, 10)
@@ -523,63 +434,68 @@ def test_comparativo_shopee_com_as_linhas_da_tela():
     assert "Detalhes de Renda" in c["rodape"]
 
 
-async def test_ajuste_mexido_por_alguem_nao_colide_na_releitura(db, make_user):
-    """16/10, revisão: o delete só tirava ajuste sem dono e a numeração recomeçava em 1 —
-    com o "-1" mexido por alguém, o recriado colidia (IntegrityError → PendingRollback)
-    e a rodada da loja inteira caía toda vez. A numeração pula o que ficou."""
-    loja = await _loja_shopee(db, make_user)
-    d10, d11 = date(2026, 10, 10), date(2026, 10, 11)
-    cliente = _ShopeeFalsa(
-        [
-            _tx(10, "ESCROW_VERIFIED_ADD", 100.0, 100.0, _epoch(d10, 9), "261006VX383P9J"),
-            # dia 11: dois pulos de −0,49 (renda de 50 → saldo sobe 49,51; de 10 → 9,51)
-            _tx(11, "ESCROW_VERIFIED_ADD", 50.0, 149.51, _epoch(d11, 10), "2610095P6JURXJ"),
-            _tx(12, "ESCROW_VERIFIED_ADD", 10.0, 159.02, _epoch(d11, 12), "2610095P6JURXK"),
-        ]
-    )
-    r1 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 12))
-    por_dia = {x["dia"]: x["ajustes_de_saldo"] for x in r1["dias"]}
-    assert por_dia["2026-10-11"] == ["-0.49", "-0.49"]
-    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
-    ajustes = {m.id_externo: m for m in movs if m.tipo == "ajuste_shopee"}
-    assert set(ajustes) == {"ajuste-saldo-2026-10-11-1", "ajuste-saldo-2026-10-11-2"}
-    # alguém mexeu no primeiro (vinculou/classificou): ele fica
-    primeiro = ajustes["ajuste-saldo-2026-10-11-1"]
-    primeiro.vinculado_por = "cairo"
-    primeiro.vinculado_em = datetime(2026, 10, 12, 9, tzinfo=UTC)
-    await db.commit()
-    # rodada seguinte relê o 11 (sobreposição): sem IntegrityError, o mexido fica e o
-    # outro pulo é refeito com o primeiro número livre
-    r2 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 12))
-    assert not r2["erros"]
-    assert {x["dia"]: x["ajustes_de_saldo"] for x in r2["dias"]} == {"2026-10-11": ["-0.49"]}
-    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
-    ajustes = {m.id_externo: m for m in movs if m.tipo == "ajuste_shopee"}
-    assert set(ajustes) == {"ajuste-saldo-2026-10-11-1", "ajuste-saldo-2026-10-11-2"}
-    assert ajustes["ajuste-saldo-2026-10-11-1"].vinculado_por == "cairo"
-    assert ajustes["ajuste-saldo-2026-10-11-2"].vinculado_por is None
-    assert ajustes["ajuste-saldo-2026-10-11-2"].debito == Decimal("0.49")
-
-
-async def test_releitura_do_dia_fechado_nao_apaga_nem_recria_ajuste(db, make_user):
-    """16/10, revisão: a releitura do último dia lido (sobreposição) apagava e recriava o
-    ajuste mesmo com o dia fechado. Dia fechado fica como está (linha nova ainda entra;
-    reabrir o dia por ela é outro lote)."""
+async def test_saldo_que_pula_nao_ganha_ajuste_e_os_do_robo_saem(db, make_user):
+    """16/10 à noite (Vinicius, essência do painel): a carteira muda de saldo sem listar o
+    lançamento (renda 292,39, saldo sobe 291,41) → NÃO se inventa linha de ajuste pra
+    fechar o dia: a diferença de −0,98 aparece e eles decidem. Ajuste que o robô tinha
+    criado sai e o dia reabre; ajuste que uma pessoa mexeu fica."""
     from app.models import ConciliacaoDia
+    from app.services.conciliacao_jobs import fechar_dias_prontos
 
     loja = await _loja_shopee(db, make_user)
     d10, d11 = date(2026, 10, 10), date(2026, 10, 11)
     cliente = _ShopeeFalsa(
         [
             _tx(10, "ESCROW_VERIFIED_ADD", 100.0, 100.0, _epoch(d10, 9), "261006VX383P9J"),
-            _tx(11, "ESCROW_VERIFIED_ADD", 50.0, 149.51, _epoch(d11, 10), "2610095P6JURXJ"),
+            _tx(11, "ESCROW_VERIFIED_ADD", 292.39, 391.41, _epoch(d11, 10), "2610095P6JURXJ"),
         ]
     )
-    r1 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 12))
-    assert {x["dia"]: x["ajustes_de_saldo"] for x in r1["dias"]}["2026-10-11"] == ["-0.49"]
+    r = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 12))
+    assert {x["dia"]: x["ajustes_de_saldo"] for x in r["dias"]} == {
+        "2026-10-10": [],
+        "2026-10-11": [],
+    }
     movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
-    (ajuste,) = [m for m in movs if m.tipo == "ajuste_shopee"]
-    id_antes = ajuste.id
+    assert not [m for m in movs if m.tipo == "ajuste_shopee"]
+    # o dia 11 não fecha sozinho: diferença de −0,98 fica à vista
+    fechados = await fechar_dias_prontos(db, loja)
+    assert "2026-10-11" in fechados["abertos"]
+    # linhas que o robô tinha criado antes da regra (uma sem dono, outra mexida por alguém)
+    from app.services.conciliacao_shopee import inserir_movimentos
+
+    def ajuste(n: int, por: str | None) -> dict:
+        return {
+            "origem": "shopee_carteira",
+            "id_externo": f"ajuste-saldo-2026-10-11-{n}",
+            "data": datetime.fromtimestamp(_epoch(d11, 10), tz=UTC),
+            "tipo": "ajuste_shopee",
+            "descricao": "Diferença de saldo não detalhada pela Shopee (teste)",
+            "sub_tipo": "AJUSTE_SALDO",
+            "pagamento_id": None,
+            "pedido_marketplace": None,
+            "pack_id": None,
+            "shipping_id": None,
+            "pedido_bling": None,
+            "bling_id": None,
+            "bruto": None,
+            "tarifa": None,
+            "parcelamento": None,
+            "frete": None,
+            "cupom": None,
+            "credito": Decimal("0"),
+            "debito": Decimal("0.98"),
+            "saldo_apos": None,
+            "descontado_da_venda": None,
+            "sku": None,
+            "item_id": None,
+            "data_aprovacao": None,
+            "classificacao": "ajuste",
+            "vinculado_por": por,
+            "vinculado_em": datetime(2026, 10, 12, 9, tzinfo=UTC) if por else None,
+            "raw": {},
+        }
+
+    assert await inserir_movimentos(db, loja, [ajuste(1, None), ajuste(2, "cairo")]) == 2
     db.add(
         ConciliacaoDia(
             integration_id=loja.integration_id,
@@ -589,11 +505,10 @@ async def test_releitura_do_dia_fechado_nao_apaga_nem_recria_ajuste(db, make_use
         )
     )
     await db.commit()
-    # relê o 11 (sobreposição), mas o dia está fechado: a mesma linha de ajuste continua
     r2 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 12))
-    (dia11,) = r2["dias"]
-    assert dia11["dia"] == "2026-10-11" and dia11["fechado"] is True
-    assert dia11["ajustes_de_saldo"] == [] and not r2["erros"]
+    assert r2["ajustes_removidos"] == ["ajuste-saldo-2026-10-11-1"]
     movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
     ajustes = [m for m in movs if m.tipo == "ajuste_shopee"]
-    assert len(ajustes) == 1 and ajustes[0].id == id_antes
+    assert [m.id_externo for m in ajustes] == ["ajuste-saldo-2026-10-11-2"]  # o mexido fica
+    dia = (await db.execute(select(ConciliacaoDia).where(ConciliacaoDia.dia == d11))).scalar_one()
+    assert dia.fechado_em is None and "ajuste automático" in (dia.reaberto_motivo or "")

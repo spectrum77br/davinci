@@ -66,7 +66,6 @@ PRAZO_LIBERACAO: dict[str, tuple[int, int]] = {"shopee": (9, 22), "tiktok": (9, 
 # Situação do Bling que quer dizer "não vai receber": cancelado ou excluído (16/10,
 # revisão: 13 pedidos excluídos no Bling ficavam "aguardando" pra sempre)
 BLING_DESFEITO = ("cancelado", "excluido", "excluído")
-RUIDO_SEM_LIBERACAO = Decimal("1.00")  # abaixo disso, pedido desfeito não vira alarme
 MARGEM_MAXIMA = Decimal("999999")  # Numeric(10,4) da coluna margem
 ZERO = Decimal("0.00")
 
@@ -459,15 +458,6 @@ def situacao_do_pedido(
             situacao = "aguardando"
             preso = _soma([m.credito for m in presas]) - _soma([m.debito for m in presas])
             motivo = f"preso na reserva da Amazon: {preso:.2f}"
-        elif (
-            any(not m.tipo.startswith("frete") for m in dinheiro)
-            and abs(mexeu_sem_liberar) < RUIDO_SEM_LIBERACAO
-        ):
-            # 16/10 (revisão): Shopee cobra centavos ("Renda do pedido −0,49") em pedido
-            # devolvido/resolvido (Bling "Resolvido"/"Aguardando devolução", não
-            # cancelado) — nada liberou: venda desfeita, não "estornado depois"
-            situacao = "cancelado"
-            motivo = f"venda desfeita; ficou {mexeu_sem_liberar:.2f} (centavos), nada liberou"
         elif dinheiro and abs(mexeu_sem_liberar) > TOLERANCIA:
             # 16/10 (revisão, aprovado): nada liberou e mesmo assim saiu (ou entrou)
             # dinheiro — devolvido antes de liquidar na TikTok, frete de devolução… Não é
@@ -1062,11 +1052,10 @@ async def recalcular_loja(
         # Amazon: frete pago fora da plataforma (Melhor Envio) — entra no Sobrou, não
         # no Líquido; envio próprio sem ele não pode ser "bateu" (15/10, Vinicius)
         frete_pago = fretes_pagos.get(numero) if plataforma_loja == "amazon" else None
-        if calc["situacao"] == "cancelado" or (
-            calc["nada_liberou"] and calc["situacao"] in ("estornado_depois", "recebido_a_mais")
-        ):
+        if calc["situacao"] == "cancelado":
             # Venda desfeita: o produto não saiu (ou voltou) — custo zero (15/10, Vinicius).
-            # Vale também pra "nada liberou e saiu X" (vortan 300486: só a manutenção).
+            # 16/10 à noite (essência do painel): "nada liberou e saiu X" NÃO zera o custo —
+            # é diferença pra alguém olhar, não suposição de que o produto voltou.
             custo = ZERO
             sobrou = (base_resultado or ZERO) - reembolso - (frete_pago or ZERO)
             margem = None
