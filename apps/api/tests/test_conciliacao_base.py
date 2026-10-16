@@ -245,7 +245,8 @@ async def test_run_extrato_sync_pede_janela_e_depois_le_o_arquivo(db, make_user)
     assert r2["pedido"] is None  # ontem (14/10) já está coberto: nada novo a pedir
     syncs = (await db.execute(__import__("sqlalchemy").select(ConciliacaoSync))).scalars().all()
     assert [(s.chave, s.status, s.linhas) for s in syncs] == [("2026-10-01..2026-10-14", "lido", 8)]
-    # dia seguinte: pede só o dia 15 (e confere a config de novo: completa, nada a mudar)
+    # dia seguinte: pede só o dia 15 (e confere a config de novo, 1×/dia: completa, nada a mudar)
+    loja.extrato_config_em = datetime.now(UTC) - timedelta(days=1)
     with respx.mock(assert_all_called=False) as router:
         router.get(f"{MP}/v1/account/release_report/config").mock(
             return_value=Response(200, json=CONFIG_COMPLETA)

@@ -661,16 +661,13 @@ async def run_extrato_sync(
 
     ainda_pendente = any(r.status == "pedido" for r in rows)
     if not ainda_pendente:
-        fins = [_janela_da_chave(r.chave)[1] for r in rows if r.status in ("pedido", "lido")]
-        # Folga de um dia (Vinicius, 14/10: "o ML pode mudar algo de ontem?"): a
-        # janela nova começa no ÚLTIMO dia já lido, não no seguinte. Linha repetida é
-        # ignorada (identidade = hash), linha atrasada do Mercado Pago entra.
-        proximo = max(fins) if fins else loja.inicio
-        if fins and proximo >= ontem and max(fins) >= ontem:
-            proximo = ontem + timedelta(days=1)  # ontem já lido: nada a pedir
-        if proximo <= ontem:
-            # Confere a config a cada pedido (≈ 1×/dia): se faltava coluna e foi
-            # completada, os relatórios já lidos vieram capengas — relê desde o início.
+        # Confere a config do relatório 1×/dia (16/10: a aguiar tinha uma config antiga
+        # de 11 colunas, sem ORDER_ID): se faltava coluna e foi completada, os
+        # relatórios já lidos vieram capengas — esquece as janelas e relê desde o início.
+        confere = loja.extrato_config_em is None or (agora - loja.extrato_config_em) >= timedelta(
+            hours=20
+        )
+        if confere:
             cfg = await garantir_config(cliente)
             resumo["config"] = cfg
             if cfg["status"] in CONFIG_OK:
@@ -680,8 +677,15 @@ async def run_extrato_sync(
                     await session.delete(r)
                 rows = []
                 await session.flush()
-                proximo = loja.inicio
-                resumo["reler_desde"] = proximo.isoformat()
+                resumo["reler_desde"] = loja.inicio.isoformat()
+        fins = [_janela_da_chave(r.chave)[1] for r in rows if r.status in ("pedido", "lido")]
+        # Folga de um dia (Vinicius, 14/10: "o ML pode mudar algo de ontem?"): a
+        # janela nova começa no ÚLTIMO dia já lido, não no seguinte. Linha repetida é
+        # ignorada (identidade = hash), linha atrasada do Mercado Pago entra.
+        proximo = max(fins) if fins else loja.inicio
+        if fins and proximo >= ontem and max(fins) >= ontem:
+            proximo = ontem + timedelta(days=1)  # ontem já lido: nada a pedir
+        if proximo <= ontem:
             ate = min(ontem, proximo + timedelta(days=max_dias - 1))
             res = await pedir_relatorio(cliente, proximo, ate)
             chave = _chave_janela(proximo, ate)
