@@ -645,7 +645,7 @@ function margemCls(m: number | null | undefined, minima: number | null | undefin
 const temLucro = computed(() => margemPedido.value?.lucro !== undefined && margemPedido.value?.lucro !== null)
 const linkMargem = computed(() => {
   const n = pnl.value?.pedido?.numero_bling
-  return n ? `/margem?pedido=${encodeURIComponent(n)}` : '/margem'
+  return n ? `/conciliacao?visao=margem&pedido=${encodeURIComponent(n)}` : '/conciliacao?visao=margem'
 })
 
 // ─── avaliação de venda (RF8) ───────────────────────────────────────────────

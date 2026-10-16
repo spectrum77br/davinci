@@ -180,7 +180,7 @@ const sections = computed<Section[]>(() => [
       { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
       { to: '/marketing', label: 'Marketing', icon: BarChart3, featureFlag: 'marketing' },
       { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
-      { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
+      { to: '/conciliacao?visao=margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
       { to: '/conciliacao', label: 'Conciliação', icon: Scale, resource: 'conciliacao', soComPermissao: true },
       { to: '/faturamento', label: 'Faturamento', icon: Coins, resource: 'faturamento' },
       { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },

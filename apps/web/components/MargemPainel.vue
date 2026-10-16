@@ -9,13 +9,18 @@ const embutido = computed(() => !!props.embutido)
 // Linha de resumo da aba embutida (padrão da Conciliação): contagens da página carregada
 const resumoEmbutido = computed(() => {
   const rows = items.value
-  const aprovados = rows.filter((r) => r.status === 'Aprovado').length
-  const reprovados = rows.filter((r) => r.status === 'Reprovado').length
-  const pendentes = rows.length - aprovados - reprovados
-  const saldo = rows.filter((r) => r.attention_saldo).length
-  const pct = rows.length ? Math.round((aprovados / rows.length) * 100) : 0
-  return { aprovados, reprovados, pendentes, saldo, pct }
+  const pedidos = new Set(rows.map((r) => r.pedido_bling).filter(Boolean))
+  const aprovados = new Set(rows.filter((r) => r.status === 'Aprovado').map((r) => r.pedido_bling)).size
+  const reprovados = new Set(rows.filter((r) => r.status === 'Reprovado').map((r) => r.pedido_bling)).size
+  const pendentes = Math.max(0, pedidos.size - aprovados - reprovados)
+  const saldo = new Set(rows.filter((r) => r.attention_saldo && !r.attention_margem).map((r) => r.pedido_bling)).size
+  const margemBaixa = new Set(rows.filter((r) => r.attention_margem).map((r) => r.pedido_bling)).size
+  const pct = pedidos.size ? Math.round((aprovados / pedidos.size) * 100) : 0
+  return { pedidos: pedidos.size, aprovados, reprovados, pendentes, saldo, margemBaixa, pct }
 })
+const rotuloFiltro = computed(() =>
+  statusFilter.value === 'all' ? 'todos os status' : statusFilter.value === 'Pendente' ? 'em triagem' : statusFilter.value.toLowerCase() + 's',
+)
 
 type MarketplaceRow = {
   bling_order_item_id: string
@@ -198,17 +203,19 @@ async function exportRentabilidade() {
   }
 }
 
-const search = ref('')
-const platform = ref<'all' | string>('all')
-const conta = ref<'all' | string>('all')
-const statusFilter = ref<StatusFilter>('Pendente')
-const attentionType = ref<AttentionType>('all')
+// 16/10 à noite: filtros em useState — dentro da Conciliação o componente é desmontado ao
+// trocar de aba, e os filtros voltavam ao padrão
+const search = useState<string>('margem.search', () => '')
+const platform = useState<'all' | string>('margem.platform', () => 'all')
+const conta = useState<'all' | string>('margem.conta', () => 'all')
+const statusFilter = useState<StatusFilter>('margem.status', () => 'Pendente')
+const attentionType = useState<AttentionType>('margem.motivo', () => 'all')
 // Situação do pedido (03/09, Eduardo: "em margem é para aparecer somente os
 // com situação em aberto e enviado etiqueta"). Default = em triagem
 // (Em aberto + Em digitação [21 = etiqueta enviada; 83965 "Enviado Etiqueta"
 // é o legado] + segurados pelo robô); "all" mostra tudo.
 type SituacaoFilter = 'triagem' | 'all'
-const situacaoFilter = ref<SituacaoFilter>('triagem')
+const situacaoFilter = useState<SituacaoFilter>('margem.situacao', () => 'triagem')
 const page = ref(1)
 
 type Tab = 'list' | 'lookup'
@@ -341,7 +348,9 @@ function switchTab(next: Tab) {
   }
 }
 
-await load()
+onMounted(() => {
+  void load() // 16/10 à noite: sem await no setup — a aba mostra "carregando…" em vez de branco
+})
 
 async function reloadCurrent() {
   if (tab.value === 'lookup') {
@@ -998,6 +1007,17 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       <Button v-if="canInformar" size="sm" variant="outline" title="Quem recebe os avisos automáticos da Margem no Threema" @click="informarMargemOpen = true">
         <Megaphone class="size-4 mr-1.5" /> Informar
       </Button>
+      <div v-if="isAdmin" class="margem-export flex min-w-0 flex-wrap sm:flex-nowrap items-center gap-1.5">
+        <input v-model="rentInicio" type="date" class="text-sm rounded-md border bg-background px-2 py-1.5" title="data inicial" />
+        <span class="text-muted-foreground text-sm">→</span>
+        <input v-model="rentFim" type="date" class="text-sm rounded-md border bg-background px-2 py-1.5" title="data final" />
+        <Button size="sm" variant="outline" :disabled="rentExporting || !rentInicio || !rentFim" title="Baixar planilha de rentabilidade por pedido no período" @click="exportRentabilidade">
+          <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': rentExporting }" /> planilha
+        </Button>
+      </div>
+      <Button v-if="canEdit" size="sm" variant="outline" :disabled="buscandoSaldo" title="Pede de novo à Shopee / Mercado Livre / TikTok o saldo dos pedidos que estão 'aguardando saldo da plataforma'" @click="buscarSaldo">
+        <Banknote class="size-4 mr-1.5" :class="{ 'animate-pulse': buscandoSaldo }" /> buscar saldo
+      </Button>
       <Button size="sm" variant="outline" :disabled="loading" @click="refreshAndLoad">
         <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" /> atualizar
       </Button>
@@ -1063,16 +1083,19 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     </div>
 
     <div v-if="embutido && tab === 'list'" class="flex flex-wrap items-center gap-3 rounded-md border bg-muted/40 px-3 py-1.5 text-xs">
-      <b>{{ conta === 'all' ? 'todas as lojas' : conta }} · {{ total }} pedido(s)</b>
-      <span class="inline-block h-1.5 w-40 overflow-hidden rounded bg-muted"><i class="block h-full bg-emerald-600" :style="{ width: resumoEmbutido.pct + '%' }" /></span>
-      <span><b>{{ resumoEmbutido.aprovados }} de {{ items.length }}</b> aprovados nesta página</span>
-      <span class="rounded px-1.5 py-0.5 font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ resumoEmbutido.pendentes }} pendentes</span>
-      <span class="rounded px-1.5 py-0.5 font-semibold bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">{{ resumoEmbutido.reprovados }} reprovados</span>
-      <span class="rounded px-1.5 py-0.5 font-semibold bg-muted">{{ resumoEmbutido.saldo }} aguardando saldo da plataforma</span>
+      <b>{{ conta === 'all' ? 'todas as lojas' : conta }} · {{ total }} pedido(s) {{ rotuloFiltro }}</b>
+      <template v-if="statusFilter === 'all'">
+        <span class="inline-block h-1.5 w-40 overflow-hidden rounded bg-muted"><i class="block h-full bg-emerald-600" :style="{ width: resumoEmbutido.pct + '%' }" /></span>
+        <span><b>{{ resumoEmbutido.aprovados }} de {{ resumoEmbutido.pedidos }}</b> aprovados nesta página</span>
+        <span class="rounded px-1.5 py-0.5 font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ resumoEmbutido.pendentes }} pendentes</span>
+        <span class="rounded px-1.5 py-0.5 font-semibold bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">{{ resumoEmbutido.reprovados }} reprovados</span>
+      </template>
+      <span v-if="resumoEmbutido.margemBaixa" class="rounded px-1.5 py-0.5 font-semibold bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">{{ resumoEmbutido.margemBaixa }} margem abaixo da mínima</span>
+      <span v-if="resumoEmbutido.saldo" class="rounded px-1.5 py-0.5 font-semibold bg-muted">{{ resumoEmbutido.saldo }} aguardando saldo da plataforma</span>
       <span class="ml-auto text-muted-foreground">a Margem não relê pedido já decidido</span>
     </div>
 
-    <div v-if="tab === 'list'" class="flex flex-wrap items-center gap-2">
+    <div v-if="tab === 'list'" class="margem-filtros flex flex-wrap items-center gap-2">
       <div class="relative min-w-0 w-full sm:w-auto">
         <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
         <input
@@ -1229,12 +1252,13 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       </div>
     </div>
 
+    <div>
     <div v-if="embutido" class="flex items-center rounded-t-md bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white">
       Margem — uma linha por pedido do Bling, antes de enviar
       <span class="ml-auto font-normal text-slate-300">aprovar, reprovar ou inverter; o que entrou de fato está em Pedidos</span>
     </div>
-    <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" :class="embutido && 'rounded-t-none border-t-0 -mt-5'" tabindex="0">
-      <table class="text-xs border-collapse">
+    <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" :class="embutido && 'rounded-t-none border-t-0'" tabindex="0">
+      <table class="margem-tabela text-xs border-collapse">
         <thead class="bg-background sticky top-0 z-20">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="3">Identificação</th>
@@ -1485,6 +1509,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
         </tbody>
       </table>
     </div>
+    </div>
 
     <!-- Pagination -->
     <div v-if="tab === 'list' && total > PAGE_SIZE" class="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">
@@ -1561,34 +1586,35 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
   .margem-export input { min-width: 0; flex: 1 1 8rem; }
 }
 /* Aba Margem dentro da Conciliação (16/10): visual sóbrio da Conciliação — sem os fundos
-   coloridos por grupo e com separadores finos; o resto da tela é o mesmo. */
-.margem-embutida :deep(th.bg-amber-50),
-.margem-embutida :deep(th.bg-emerald-50),
-.margem-embutida :deep(th.bg-orange-50),
-.margem-embutida :deep(th.bg-blue-50),
-.margem-embutida :deep(td.bg-amber-50\/40),
-.margem-embutida :deep(td.bg-emerald-50\/40),
-.margem-embutida :deep(td.bg-orange-50\/40),
-.margem-embutida :deep(td.bg-blue-50\/40) {
+   coloridos por grupo e com separadores finos; só na tabela e nos filtros (as janelas
+   abertas de dentro dela não herdam). */
+.margem-embutida :deep(.margem-tabela th.bg-amber-50),
+.margem-embutida :deep(.margem-tabela th.bg-emerald-50),
+.margem-embutida :deep(.margem-tabela th.bg-orange-50),
+.margem-embutida :deep(.margem-tabela th.bg-blue-50),
+.margem-embutida :deep(.margem-tabela td.bg-amber-50\/40),
+.margem-embutida :deep(.margem-tabela td.bg-emerald-50\/40),
+.margem-embutida :deep(.margem-tabela td.bg-orange-50\/40),
+.margem-embutida :deep(.margem-tabela td.bg-blue-50\/40) {
   background-color: transparent !important;
 }
-.margem-embutida :deep(.border-l-\[3px\]) {
+.margem-embutida :deep(.margem-tabela .border-l-\[3px\]) {
   border-left-width: 1px !important;
   border-color: hsl(var(--border)) !important;
 }
-.margem-embutida :deep(thead tr:first-child th) {
+.margem-embutida :deep(.margem-tabela thead tr:first-child th) {
   background-color: hsl(var(--muted) / 0.5) !important;
 }
-.margem-embutida :deep(thead tr:last-child th) {
+.margem-embutida :deep(.margem-tabela thead tr:last-child th) {
   text-transform: uppercase;
   letter-spacing: 0.03em;
   font-size: 9.5px;
 }
-.margem-embutida :deep(table) { font-size: 11px; }
-.margem-embutida :deep(th), .margem-embutida :deep(td) { padding-top: 4px !important; padding-bottom: 4px !important; }
-.margem-embutida :deep(th[class*="min-w-"]), .margem-embutida :deep(td[class*="min-w-"]) { min-width: 0 !important; }
+.margem-embutida :deep(.margem-tabela) { font-size: 11px; }
+.margem-embutida :deep(.margem-tabela th), .margem-embutida :deep(.margem-tabela td) { padding-top: 4px !important; padding-bottom: 4px !important; }
+.margem-embutida :deep(.margem-tabela th[class*="min-w-"]), .margem-embutida :deep(.margem-tabela td[class*="min-w-"]) { min-width: 0 !important; }
 /* sem a tinta por plataforma nas linhas (a Conciliação só pinta por situação) */
-.margem-embutida :deep(tbody tr[class*="bg-"]) { background-color: transparent !important; }
+.margem-embutida :deep(.margem-tabela tbody tr[class*="bg-"]) { background-color: transparent !important; }
 /* filtros no tamanho da barra da Conciliação */
-.margem-embutida :deep(select), .margem-embutida :deep(input) { font-size: 12px !important; padding-top: 4px !important; padding-bottom: 4px !important; }
+.margem-embutida :deep(.margem-filtros select), .margem-embutida :deep(.margem-filtros input) { font-size: 12px !important; padding-top: 4px !important; padding-bottom: 4px !important; }
 </style>

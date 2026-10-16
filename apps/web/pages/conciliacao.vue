@@ -10,7 +10,11 @@ import { ETAPAS, SITUACOES, diaValido, etapaCls, fmtDia, fmtDiaHora, fmtMoney, f
 
 definePageMeta({
   middleware: ['permission'],
-  permission: { resource: 'conciliacao', action: 'view' },
+  // 16/10: quem só tem Margem também entra (a Margem virou aba daqui)
+  permissionAny: [
+    { resource: 'conciliacao', action: 'view' },
+    { resource: 'margem', action: 'view' },
+  ],
 })
 
 type Loja = {
@@ -583,6 +587,20 @@ watch(page, () => carregar())
 // voltar pra ela relê (antes mostrava o pedido como estava antes do vínculo).
 watch(visao, (v) => {
   if (v === 'pedidos') carregar()
+})
+// 16/10 à noite: a URL acompanha a visão/aba/loja — o F5 volta pro mesmo lugar (antes
+// caía sempre no Resumo)
+const router = useRouter()
+watch([visao, tab, loja, extratoDia], ([v, t, l, d]) => {
+  const query: Record<string, string> = { visao: v }
+  if (v !== 'resumo' && v !== 'margem') {
+    query.tab = t
+    if (l) query.loja = l
+  }
+  if (v === 'extrato' && d) query.dia = d
+  const atual = useRoute().query
+  if (v === 'margem' && typeof atual.pedido === 'string') query.pedido = atual.pedido
+  void router.replace({ query })
 })
 
 await carregarLojas()
