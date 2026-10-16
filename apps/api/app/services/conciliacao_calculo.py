@@ -350,8 +350,11 @@ def situacao_do_pedido(
     movs_extrato: list[ConciliacaoMovimento],
     fatura: dict[str, Decimal],
     bling_cancelado: bool = False,
+    liquido_previsto: Decimal | None = None,
 ) -> dict[str, Any]:
-    """A parte pura do recálculo: devolve os números do extrato, a situação e o motivo."""
+    """A parte pura do recálculo: devolve os números do extrato, a situação e o motivo.
+    `liquido_previsto` substitui o líquido da venda da Margem (Amazon por arquivo, 16/10:
+    a venda vem das próprias transações do CSV)."""
     dinheiro = [m for m in movs_extrato if m.tipo not in TIPOS_RESERVA]
     liberacoes = [m for m in dinheiro if m.tipo == "venda_liberada"]
     liberado_valor = _soma([m.credito for m in liberacoes]) if liberacoes else None
@@ -378,6 +381,8 @@ def situacao_do_pedido(
     cancelada = _venda_cancelada(venda)
     venda_valor = _d(venda.gross_amount) if venda else None
     venda_liquido = _d(venda.net_amount) if venda else None
+    if liquido_previsto is not None:
+        venda_liquido = liquido_previsto
     dif_bling = (
         (bling_total - venda_valor)
         if (bling_total is not None and venda_valor is not None)
@@ -446,8 +451,10 @@ def situacao_do_pedido(
             motivo = f"{ultimo_debito.tipo} de {ultimo_debito.debito} em {quando:%d/%m}"
         else:
             if venda_liquido is None:
-                situacao = "bateu"
-                motivo = "sem líquido previsto pra comparar"
+                # 16/10 (Vinicius: "como pode estar bateu se nem valor tem?"): entrou
+                # dinheiro mas ninguém leu a venda — não dá pra dizer que bateu
+                situacao = "sem_venda"
+                motivo = "entrou dinheiro, mas a venda ainda não foi lida pela Margem"
             else:
                 dif = recebido - venda_liquido
                 if abs(dif) <= TOLERANCIA:
@@ -769,6 +776,13 @@ async def recalcular_loja(
             else None
         )
         nome_bling = str(nomes_situacao.get(str(cab.situacao or ""), cab.situacao) or "")
+        # Amazon sem venda da Margem (KFA por arquivo, 16/10): a venda é a soma das
+        # próprias transações do pedido (lançamento + tarifas), como a tela da Amazon
+        amazon_linhas = (
+            conta_amazon_de_transacoes([m.raw for m in extrato if isinstance(m.raw, dict)])
+            if plataforma_loja == "amazon" and conta_amazon(venda) is None
+            else None
+        )
         calc = situacao_do_pedido(
             agora=agora,
             data_pedido=cab.data,
@@ -778,13 +792,19 @@ async def recalcular_loja(
             bling_cancelado=nome_bling.strip().lower() == "cancelado",
             movs_extrato=extrato,
             fatura=fatura,
+            liquido_previsto=amazon_linhas["liquido"] if amazon_linhas else None,
         )
         if plataforma_loja == "amazon" and calc["situacao"] == "bateu":
             calc["motivo"] = motivo_amazon(extrato)
             # envio próprio sem o frete do Melhor Envio: "falta frete" (etapa = pendência)
             if fretes_pagos.get(numero) is None:
+                proprio_linhas = bool(
+                    amazon_linhas
+                    and amazon_linhas["frete_cliente"] > ZERO
+                    and not amazon_linhas["etiqueta"]
+                )
                 canal_am = canal_por_numero.get(numero) or (
-                    "proprio" if (_am_proprio(venda)) else None
+                    "proprio" if (_am_proprio(venda) or proprio_linhas) else None
                 )
                 if canal_am == "proprio":
                     calc["situacao"] = "falta_frete"
@@ -808,6 +828,8 @@ async def recalcular_loja(
         # frete = etiqueta Easy Ship (DBA) menos o frete cobrado do cliente (próprio);
         # extras = promoção da loja + outras tarifas
         amazon = conta_amazon(venda_ok) if plataforma_loja == "amazon" else None
+        if amazon is None and amazon_linhas and calc["situacao"] != "sem_venda":
+            amazon = amazon_linhas
         if amazon is not None:
             # 15/10, Vinicius: Valor = o que o cliente pagou à loja (produto + frete
             # cobrado no envio próprio); Frete = só o que a Amazon cobra (etiqueta DBA)

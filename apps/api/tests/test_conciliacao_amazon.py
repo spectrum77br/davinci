@@ -953,3 +953,43 @@ async def test_botao_buscar_transacoes_enfileira_o_robo_e_o_resultado_volta_na_l
         assert r.json()["inseridos"] == 9
     finally:
         get_settings().marketing_agent_token = ""
+
+
+async def test_loja_por_arquivo_tem_a_venda_das_proprias_transacoes(db, make_user):
+    """16/10 (Vinicius: "como pode estar bateu se nem valor tem?"): a KFA não tem a venda
+    da Margem (API negada); a venda vem das transações do CSV e o previsto compara."""
+    from app.models import BlingOrder, ConciliacaoPedido
+
+    loja = await _loja_amazon(db, make_user)
+    loja.modo_extrato = "upload"
+    db.add(
+        BlingOrder(
+            bling_id=8010,
+            numero="304001",
+            numeroloja="701-4878844-1794663",
+            data=datetime(2026, 10, 14, 12, tzinfo=UTC),
+            total=Decimal("387"),
+            totalprodutos=Decimal("387"),
+            situacao="Atendido",
+            loja="204000004",
+            item_index=0,
+            preco_custo=200.0,
+            item_quantidade=1,
+            item_codigo="mala24",
+        )
+    )
+    await db.commit()
+    await ingerir_csv_amazon(db, loja, CSV_KFA, agora=datetime(2026, 10, 16, 13, tzinfo=UTC))
+    await recalcular_loja(db, loja, agora=datetime(2026, 10, 16, 14, tzinfo=UTC))
+    p = (
+        await db.execute(
+            select(ConciliacaoPedido).where(ConciliacaoPedido.pedido_bling == "304001")
+        )
+    ).scalar_one()
+    # lançamento 294,32 menos as duas etiquetas Easy Ship de 21,95 (Cobranças do DBA)
+    assert p.situacao == "bateu" and p.recebido == Decimal("250.42")
+    assert p.venda_valor == Decimal("387") and p.venda_liquido == Decimal("250.42")
+    # na grade, tarifa, extras e frete ficam positivos (o que saiu)
+    assert p.venda_tarifa == Decimal("53.98") and p.venda_cupom == Decimal("38.70")
+    assert p.venda_frete == Decimal("43.90")
+    assert p.dif_previsto_recebido == Decimal("0.00")

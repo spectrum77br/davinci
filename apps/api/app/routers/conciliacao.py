@@ -1344,6 +1344,10 @@ async def _conta_tiktok_do_pedido(
     )
     if previsto is None and real is None:
         return None
+    if previsto is None:
+        # loja por arquivo (KFA, 16/10): a Margem não lê a Amazon; a venda é o que o
+        # próprio arquivo diz do pedido
+        previsto = real
     return {"previsto": previsto, "real": real}
 
 
