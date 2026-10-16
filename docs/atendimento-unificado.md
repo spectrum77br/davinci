@@ -245,17 +245,27 @@ pedir/repetir CPF, telefone, e-mail, endereço; qualquer contato para fora da lo
 (WhatsApp, link, @, PIX); pedir avaliação ou desestimular reclamação; Procon,
 Reclame Aqui, advogado, xingamento; conversa com reclamação/mediação/chamado
 aberto; mensagem só com foto/áudio; pedido não encontrado; comprador pedindo
-atendente ou texto com cara de instrução para a IA; conversa em que alguém
-respondeu por fora (Duoke/Seller Center) nas últimas 24 h; conversa com a IA
+atendente ou texto com cara de instrução para a IA; conversa em que uma pessoa
+respondeu pelo DaVinci ou por fora (Duoke/Seller Center) nos últimos 30 minutos; conversa com a IA
 pausada ou atribuída a uma pessoa ("Atribuir a mim").
 
-Mudou em 14/10/2026 (o dono, no piloto da Shopee Kia: "ela pode ser o
-atendente"): a resposta de pessoa **pelo DaVinci** não cala mais a IA — o
-comprador escreveu de novo, a IA segue; quem quer assumir a conversa pausa a
-IA ou atribui a si. E na loja em `auto` com o assunto "Pede atendente"
+Mudou em 16/10/2026: a resposta humana pausa o automático por 30 minutos,
+e menus e campanhas do robô não iniciam essa pausa. Depois dela, o automático
+retoma a sugestão pendente, conferindo novamente as travas e a triagem da Caixa
+Humano. Os motivos reais dessa triagem impedem envio; o alerta de atraso da
+própria IA (`ia_sem_resposta`) permite retomar. Cada decisão fica registrada
+em `fatos.auto_envio` do rascunho e nos logs. Quem quer assumir a conversa pausa
+a IA ou atribui a si. Na loja em `auto` com o assunto "Pede atendente"
 liberado, a IA responde o pedido de atendente (e o "é robô?") como o
 atendimento da loja; vai para pessoa quando o comprador insiste depois dessa
 resposta (por texto ou pela opção 6 do menu), xinga ou ameaça.
+
+Quando o próprio anúncio nos fatos informa que não entrega no estado ou cidade
+perguntado, a IA pode responder sozinha citando o anúncio. Nos demais casos,
+sugere consultar a entrega pelo CEP no anúncio e encaminha para pessoa. A loja
+continua precisando estar em `auto` com o assunto liberado. Na leitura de foto
+com texto, o menu do Duoke não separa a sequência do comprador; uma resposta
+real da loja separa. Mensagem apenas com anexo continua indo para pessoa.
 
 Limites por loja no validador: ML 350 caracteres e só ISO-8859-1; TikTok 2.000 sem
 link; Shopee sem contato externo; Amazon sem link/e-mail/telefone/emoji e com ID do

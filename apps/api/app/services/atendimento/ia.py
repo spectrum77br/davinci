@@ -29,7 +29,9 @@ categoria de dinheiro/direito/dado pessoal (troca, cancelamento, defeito,
 reembolso...), Procon/Justiça/golpe/xingamento, pedido de atendente, texto
 com cara de instrução para a IA, chamado ou devolução aberta, pedido não
 encontrado, pedido em "Aguardando Cancelamento", lacuna sem dado, mensagem
-só com foto, e o que o validador reprovar.
+só com foto, e o que o validador reprovar. O turno do cliente começa após
+a última resposta real da loja: menu e campanha automáticos não separam
+foto + texto em dois turnos (`rajada_do_cliente`, 16/10/2026).
 
 A IA É O ATENDENTE (14/10/2026, o dono no piloto da Shopee Kia: "ela pode
 ser o atendente"). Na loja em `auto` com o assunto `pede_atendente`
@@ -61,16 +63,15 @@ ele não recebeu número nenhum, então inventou.
 Envio AUTOMÁTICO só com todas as travas juntas: `atendimento_auto_ativo`,
 canal em modo `auto`, categoria liberada no canal, validador ok, sem
 precisar de humano, confiança ≥ 0,85, conversa sem IA pausada e sem
-ninguém atribuído ("Atribuir a mim"), e ninguém respondeu POR FORA
-(Duoke/Seller Center, sem ser mensagem automática) nas últimas 24 h. A
-resposta de pessoa PELO DAVINCI não cala mais a IA (14/10/2026): o
-comprador escreveu de novo, a IA segue — quem quer assumir a conversa
-pausa a IA ou atribui a si. A de fora continua calando: não dá para saber
-se a pessoa ainda está conversando lá. Aí sai pelo caminho único de envio
-(`enviar.enviar_resposta`, origem `davinci_ia`), com as travas dele — que
-travam e RELEEM a conversa: o modelo leva segundos, e nesse meio a tela
-pode ter pausado a IA, atribuído ou fechado a conversa, ou a loja pode ter
-respondido.
+ninguém atribuído ("Atribuir a mim"), triagem real da Caixa Humano liberada
+(e não seu alerta de atraso) e sem resposta de PESSOA nos últimos 30 min.
+Vale para pessoa pelo DaVinci e pelo Duoke/Seller Center; mensagens
+automáticas e notas internas não iniciam a pausa. A sugestão aguarda e a
+rodada retoma depois da janela sem gastar outra chamada ao modelo.
+O caminho único (`enviar.enviar_resposta`, origem `davinci_ia`) trava e
+relê a conversa e revalida a pausa humana e a triagem antes de enviar.
+A última decisão do automático fica em `fatos.auto_envio` no rascunho,
+com código, horário e, durante a pausa, o horário para retomar.
 
 Uma rodada por vez (`gerar_pendentes`, trava no Redis): o cron roda a cada
 minuto e uma rodada com a fila cheia passa disso; duas rodadas juntas
@@ -286,12 +287,12 @@ from app.services.atendimento.constantes import (
     TIPO_REGRA_ESTILO,
     TIPO_REGRA_SEGURANCA,
     TIPOS_REGRA,
-    e_mensagem_automatica,
     limite_caracteres,
     motivo_canal_sem_envio,
     normalizar_inicio,
     reclamacao_aberta,
 )
+from app.services.atendimento.pendente import resposta_de_pessoa
 from app.services.bling_situacoes import (
     NOME_AGUARDANDO_CANCELAMENTO,
     SITUACAO_AGUARDANDO_CANCELAMENTO_STR,
@@ -406,10 +407,10 @@ SINAIS_PARA_PESSOA = {
 _MODULO_CLIENTE = "app.services.atendimento.cliente"
 
 CONFIANCA_AUTO = 0.85
-# Pessoa respondeu POR FORA (Duoke/Seller Center) há pouco: a conversa é dela.
-# A resposta de pessoa pelo DaVinci não entra (14/10/2026: quem assume pausa
-# a IA ou atribui a conversa a si).
-JANELA_HUMANO = timedelta(hours=24)
+# Pessoa respondeu, pelo DaVinci ou Duoke/Seller Center: dê tempo à conversa
+# humana. Mensagens automáticas não iniciam nem renovam esta pausa.
+JANELA_HUMANO = timedelta(minutes=30)
+FATO_AUTO_ENVIO = "auto_envio"
 # O assunto do manual base que, liberado numa loja em `auto`, faz da IA o
 # atendente: o pedido de atendente deixa de ir para pessoa (14/10/2026).
 CATEGORIA_PEDE_ATENDENTE = "pede_atendente"
@@ -1163,9 +1164,7 @@ _RG = (
 # telefone com DDD ou CPF digitados do jeito da pessoa. As bordas impedem
 # casar PEDAÇO de um número maior (pedido da Amazon 702-1234567-1234567,
 # pedido do ML de 16 dígitos) ou de uma data.
-_DIGITOS_SOLTOS = re.compile(
-    r"(?<![\w/])(?<!\d-)\(?\d(?:[\s.()-]{0,2}\d){9,10}(?![\w/])(?!-\d)"
-)
+_DIGITOS_SOLTOS = re.compile(r"(?<![\w/])(?<!\d-)\(?\d(?:[\s.()-]{0,2}\d){9,10}(?![\w/])(?!-\d)")
 # "Sou a Maria Souza", "meu nome é João": o nome que o comprador DIGITA não
 # é o do cadastro da plataforma (usuário "maria_souza22") — sem isto passaria.
 _APRESENTACAO = re.compile(
@@ -1311,6 +1310,28 @@ MOTIVO_INSISTIU_EM_PESSOA = "cliente insistiu em falar com uma pessoa"
 _OPCAO_ATENDENTE = re.compile(r"^\W*(?:6|seis)\W*$")
 
 
+def resposta_da_loja(mensagem: Any) -> bool:
+    """Resposta real ao comprador; menu, campanha, falha e nota não fecham o turno.
+
+    A resposta da IA enviada também fecha a vez do comprador. A mesma
+    régua do número do Duoke, excluindo as automações do DaVinci (16/10/2026).
+    """
+    return resposta_de_pessoa(mensagem) and getattr(mensagem, "origem", None) != ORIGEM_AUTO
+
+
+def rajada_do_cliente(
+    mensagens: Sequence[AtendimentoMensagem], gatilho: AtendimentoMensagem | None
+) -> list[AtendimentoMensagem]:
+    """O trecho do cliente após a última resposta real da loja (16/10/2026).
+
+    O menu do Duoke não corta foto + texto em dois turnos. Sem mensagem
+    depois da resposta, conserva o gatilho, inclusive na sugestão pela tela.
+    """
+    ultima = max((i for i, m in enumerate(mensagens) if resposta_da_loja(m)), default=-1)
+    rajada = [m for m in mensagens[ultima + 1 :] if m.autor == AUTOR_CLIENTE]
+    return rajada or ([gatilho] if gatilho is not None else [])
+
+
 def insistiu_em_pessoa(mensagens: Sequence[AtendimentoMensagem]) -> bool:
     """O cliente pede atendente DE NOVO depois de a loja responder um pedido de atendente? PURA.
 
@@ -1330,14 +1351,7 @@ def insistiu_em_pessoa(mensagens: Sequence[AtendimentoMensagem]) -> bool:
         plano = validador.plano_de(m.texto)
         return bool(_ATENDENTE.search(plano) or _OPCAO_ATENDENTE.match(plano))
 
-    def respondeu(m: AtendimentoMensagem) -> bool:
-        return (
-            m.autor == AUTOR_LOJA
-            and m.origem != ORIGEM_AUTO
-            and not e_mensagem_automatica(m.texto, m.payload)
-        )
-
-    ultima_loja = max((i for i, m in enumerate(mensagens) if respondeu(m)), default=-1)
+    ultima_loja = max((i for i, m in enumerate(mensagens) if resposta_da_loja(m)), default=-1)
     if ultima_loja < 0:
         return False
     return any(pede(m) for m in mensagens[ultima_loja + 1 :]) and any(
@@ -1697,12 +1711,8 @@ _EX_COM_TRATAMENTO = re.compile(rf"\b{_TRATAMENTO}{_NOME_PROPRIO}")
 # vírgula no fim da frase ("Obrigado pela compra, Maria!"). A conversa sem
 # pedido ligado (a pergunta da página do anúncio) não tem nome do Bling
 # para mascarar — é aqui que o nome de OUTRO cliente escaparia.
-_EX_VOCATIVO_INICIO = re.compile(
-    rf"(^|[.!?]\s+)(?!(?:{_NAO_E_NOME})\b)({_NOME_PROPRIO})(?=\s*,)"
-)
-_EX_VOCATIVO_FIM = re.compile(
-    rf",\s*(?!(?:{_NAO_E_NOME})\b)({_NOME_PROPRIO})\s*(?=[,.!?;:]|$)"
-)
+_EX_VOCATIVO_INICIO = re.compile(rf"(^|[.!?]\s+)(?!(?:{_NAO_E_NOME})\b)({_NOME_PROPRIO})(?=\s*,)")
+_EX_VOCATIVO_FIM = re.compile(rf",\s*(?!(?:{_NAO_E_NOME})\b)({_NOME_PROPRIO})\s*(?=[,.!?;:]|$)")
 
 
 def _generalizar(texto: str, nomes: tuple[str | None, ...]) -> str:
@@ -2488,38 +2498,50 @@ async def _sinais_do_cliente(session: AsyncSession, conversa: AtendimentoConvers
     return list(dict.fromkeys(str(x) for x in sinais if isinstance(x, str) and x))[:10]
 
 
-async def _humano_respondeu_recente(session: AsyncSession, conversa: AtendimentoConversa) -> bool:
-    """Alguém da equipe falou POR FORA (Duoke/Seller Center) nas últimas 24 h?
+async def _pausa_humana_ate(
+    session: AsyncSession, conversa: AtendimentoConversa, *, agora: datetime | None = None
+) -> datetime | None:
+    """Fim da pausa de 30 min desde a última resposta real de pessoa.
 
-    Só a resposta de fora (`externo`) cala a IA (14/10/2026, "ela pode ser o
-    atendente"): a de pessoa PELO DAVINCI (`davinci_humano`) não — quem quer
-    assumir pausa a IA ou atribui a conversa a si ("Atribuir a mim", que o
-    `_talvez_enviar` e o `enviar` respeitam). Por fora não há como saber se
-    a pessoa ainda está conversando lá, então a janela fica.
-
-    Mensagem automática não é pessoa (05/10/2026, `gravar.mensagem_automatica_sql`):
-    o robô e as campanhas do Duoke (o menu, o "aguarde", o "já segue", o
-    cartão do pedido da campanha), a figurinha 0007, os cartões da Shopee, a
-    senha da devolução e o que o próprio motor de automações manda
-    (`davinci_auto`, que já fica de fora pela origem). Antes, qualquer
-    mensagem `externo` contava: medido em produção, 89 das 104 conversas
-    esperando resposta tinham a IA calada só por mensagem automática. Nem
-    a resposta que FALHOU (o comprador não recebeu).
+    DaVinci e respostas de fora seguem a mesma regra. O menu, as campanhas,
+    os cartões automáticos e respostas que falharam não iniciam a pausa.
+    Só consulta o banco: pode ser conferida novamente sob a trava do envio.
     """
-    desde = datetime.now(UTC) - JANELA_HUMANO
-    n = await session.scalar(
-        select(func.count())
-        .select_from(AtendimentoMensagem)
-        .where(
+    agora = agora or datetime.now(UTC)
+    ultima = await session.scalar(
+        select(func.max(_momento_col())).where(
             AtendimentoMensagem.conversa_id == conversa.id,
             AtendimentoMensagem.autor == AUTOR_LOJA,
             AtendimentoMensagem.status != MSG_FALHOU,
-            AtendimentoMensagem.origem == ORIGEM_EXTERNO,
+            AtendimentoMensagem.tipo != "nota",
+            AtendimentoMensagem.origem.in_((ORIGEM_EXTERNO, ORIGEM_HUMANO)),
             ~gravar.mensagem_automatica_sql(AtendimentoMensagem.texto, AtendimentoMensagem.payload),
-            _momento_col() >= desde,
+            _momento_col() > agora - JANELA_HUMANO,
         )
     )
-    return bool(n)
+    return ultima + JANELA_HUMANO if ultima is not None else None
+
+
+async def _humano_respondeu_recente(session: AsyncSession, conversa: AtendimentoConversa) -> bool:
+    """Compatibilidade para quem só precisa saber se a pausa humana está ativa."""
+    return await _pausa_humana_ate(session, conversa) is not None
+
+
+async def _motivos_humano_para_auto(
+    session: AsyncSession, conversa: AtendimentoConversa
+) -> tuple[str, ...]:
+    """A mesma triagem real da Caixa Humano, relida agora, sem o alerta de atraso.
+
+    `ia_sem_resposta` é um aviso de fila após 10 min, não um veto: usá-lo
+    aqui impediria para sempre a retomada após a pausa humana de 30 min.
+    A pausa explícita e a atribuição continuam sendo travas do envio.
+    """
+    from app.services.atendimento import humano
+
+    triagem = await humano.triar_conversa(
+        session, conversa, so_humano=await humano.assuntos_so_humano(session)
+    )
+    return triagem.motivos
 
 
 # ── Fatos e lacunas ───────────────────────────────────────────────────────
@@ -2875,6 +2897,7 @@ precisa_humano=true.
 
 Nunca fale de margem, custo interno, lucro ou análise interna. Pedido "em processamento"
 não está cancelado: não fale em cancelamento."""
+
 
 def _formato_saida(ids_categorias: Collection[str]) -> str:
     return (
@@ -3717,9 +3740,9 @@ async def _gerar(
         fatos_gravados[FATO_PEDIDA_PELA_TELA] = True
 
     # A rajada que pede resposta: o que o cliente escreveu depois da última
-    # fala da loja.
-    ultima_loja = max((i for i, m in enumerate(recentes) if m.autor == AUTOR_LOJA), default=-1)
-    rajada = [m for m in recentes[ultima_loja + 1 :] if m.autor == AUTOR_CLIENTE] or [gatilho]
+    # resposta real da loja: o menu do Duoke não corta foto + texto
+    # (16/10/2026). O gatilho continua sendo o mesmo.
+    rajada = rajada_do_cliente(recentes, gatilho)
     if not any((m.texto or "").strip() for m in rajada):
         # Foto, vídeo, áudio, figurinha: o modelo não vê anexo e não adivinha.
         return await _salvar(
@@ -4100,78 +4123,131 @@ async def _gerar(
     return await _salvar(session, conversa, rascunho)
 
 
-async def _talvez_enviar(
-    session: AsyncSession, conversa: AtendimentoConversa, rascunho: AtendimentoRascunho
+async def _registrar_auto_envio(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    rascunho: AtendimentoRascunho,
+    motivo: str,
+    *,
+    retomar_em: datetime | None = None,
+    motivos_humano: tuple[str, ...] = (),
 ) -> None:
-    """Envio automático — só com TODAS as travas. Nunca levanta.
+    """Última decisão estruturada do automático, sem texto nem dados de comprador."""
+    decisao = {"motivo": motivo}
+    if retomar_em is not None:
+        decisao["retomar_em"] = retomar_em.isoformat()
+    if motivos_humano:
+        decisao["motivos_humano"] = list(motivos_humano)
+    fatos = dict(rascunho.fatos or {})
+    anterior = fatos.get(FATO_AUTO_ENVIO)
+    if isinstance(anterior, dict) and {k: v for k, v in anterior.items() if k != "em"} == decisao:
+        return
+    fatos[FATO_AUTO_ENVIO] = {**decisao, "em": datetime.now(UTC).isoformat()}
+    rascunho.fatos = fatos
+    await session.commit()
+    logger.info(
+        "atendimento_ia_auto_decisao",
+        conversa_id=str(conversa.id),
+        rascunho_id=str(rascunho.id),
+        **decisao,
+    )
 
-    Relê a conversa e o canal do BANCO antes de decidir: eles foram lidos
-    antes da chamada ao modelo, e nesse meio a tela pode ter pausado a IA,
-    atribuído ou fechado a conversa ou posto a loja em `observar`. O
-    `enviar` confere tudo de novo sob a trava da conversa — este é o
-    primeiro filtro.
 
-    Conversa ATRIBUÍDA a alguém ("Atribuir a mim") não sai sozinha
-    (14/10/2026): a pessoa assumiu — a IA continua sugerindo, quem envia é
-    ela. Resposta de pessoa pelo DaVinci não cala mais a IA; só a de fora
-    (`_humano_respondeu_recente`).
+async def _talvez_enviar(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    rascunho: AtendimentoRascunho,
+    *,
+    reenvio: bool = False,
+) -> bool:
+    """Confere todas as travas e registra a decisão. True = tentou o envio.
+
+    A triagem é a da Caixa Humano; seu alerta de atraso não veta a retomada.
+    As guardas temporárias são conferidas ANTES da marca única de reenvio:
+    esperar pela pessoa não pode gastar a tentativa que deve sair após 30 min.
+    O envio relê a conversa e confere pessoa/triagem novamente sob sua trava.
     """
-    s = get_settings()
-    if not s.atendimento_auto_ativo:
-        return
-    if (
-        rascunho.status != RASCUNHO_PENDENTE
-        or not rascunho.validador_ok
-        or rascunho.precisa_humano
-        or rascunho.categoria in CATEGORIAS_SO_HUMANO
-        or (rascunho.confianca or 0.0) < CONFIANCA_AUTO
-        or not rascunho.texto
-    ):
-        return
+    tentou = False
     try:
+        motivo = None
+        if not get_settings().atendimento_auto_ativo:
+            motivo = "auto_desligado"
+        elif rascunho.status != RASCUNHO_PENDENTE:
+            motivo = "rascunho_nao_pendente"
+        elif (rascunho.fatos or {}).get(FATO_PEDIDA_PELA_TELA):
+            motivo = "pedida_pela_tela"
+        elif not rascunho.validador_ok:
+            motivo = "validador_reprovou"
+        elif rascunho.precisa_humano:
+            motivo = "precisa_humano"
+        elif rascunho.categoria in CATEGORIAS_SO_HUMANO:
+            motivo = "assunto_so_humano"
+        elif (rascunho.confianca or 0.0) < CONFIANCA_AUTO:
+            motivo = "confianca_baixa"
+        elif not (rascunho.texto or "").strip():
+            motivo = "sem_texto"
+        if motivo is not None:
+            await _registrar_auto_envio(session, conversa, rascunho, motivo)
+            return False
+
         await session.refresh(conversa)
-        if (
-            not conversa.aguardando_resposta
-            or conversa.ia_pausada
-            or conversa.atribuido_a is not None
-            or conversa.sem_resposta_necessaria
-            or conversa.situacao in (CONVERSA_FECHADA, CONVERSA_BLOQUEADA)
-            # Reclamação/mediação aberta no ML: o que se diz entra na
-            # mediação — pessoa responde. Amazon: a resposta dada no Seller
-            # Central não chega à caixa, então "aguardando" pode ser mentira.
-            or reclamacao_aberta(conversa.dados)
-            or conversa.plataforma in PLATAFORMAS_SEM_AUTO
-            # E-mail do Tuta e Zap: sem envio no DaVinci (o `enviar` recusa).
-            or motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
-        ):
-            # Ninguém está esperando a IA (a loja — inclusive a própria IA —
-            # já respondeu, ou a pessoa tirou a conversa da IA: pausou ou
-            # atribuiu a si): mandar seria o comprador receber duas
-            # respostas, ou a IA passar por cima.
-            return
+        if not conversa.aguardando_resposta:
+            motivo = "ja_respondida"
+        elif conversa.ia_pausada:
+            motivo = "ia_pausada"
+        elif conversa.atribuido_a is not None:
+            motivo = "atribuida"
+        elif conversa.sem_resposta_necessaria:
+            motivo = "sem_resposta_necessaria"
+        elif conversa.situacao in (CONVERSA_FECHADA, CONVERSA_BLOQUEADA):
+            motivo = "conversa_fechada_ou_bloqueada"
+        elif reclamacao_aberta(conversa.dados):
+            motivo = "reclamacao_aberta"
+        elif conversa.plataforma in PLATAFORMAS_SEM_AUTO:
+            motivo = "plataforma_sem_auto"
+        elif motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados):
+            motivo = "canal_sem_envio"
+        if motivo is not None:
+            await _registrar_auto_envio(session, conversa, rascunho, motivo)
+            return False
+
         canal = (
             await session.get(AtendimentoCanal, conversa.canal_id, populate_existing=True)
             if conversa.canal_id is not None
             else None
         )
         if canal is None or canal.modo != MODO_AUTO:
-            return
-        if rascunho.categoria not in (canal.auto_categorias or []):
-            return
-        # O manual base pode marcar mais assuntos como só-humano do que as
-        # constantes (o canal pode ter sido liberado antes disso).
-        if rascunho.categoria in manual_svc.ids_so_humano(
+            motivo = "canal_fora_do_auto"
+        elif rascunho.categoria not in (canal.auto_categorias or []):
+            motivo = "assunto_nao_liberado"
+        elif rascunho.categoria in manual_svc.ids_so_humano(
             await manual_svc.categorias_ativas(session)
         ):
-            return
-        if await _humano_respondeu_recente(session, conversa):
-            return
-        # Import TARDIO: o envio puxa clientes e adaptadores, que a geração
-        # não precisa — e o teste troca `enviar_resposta` por monkeypatch.
+            motivo = "assunto_so_humano"
+        if motivo is not None:
+            await _registrar_auto_envio(session, conversa, rascunho, motivo)
+            return False
+
+        motivos_humano = await _motivos_humano_para_auto(session, conversa)
+        if motivos_humano:
+            await _registrar_auto_envio(
+                session, conversa, rascunho, "caixa_humano", motivos_humano=motivos_humano
+            )
+            return False
+        retomar = await _pausa_humana_ate(session, conversa)
+        if retomar is not None:
+            await _registrar_auto_envio(
+                session, conversa, rascunho, "pausa_humana", retomar_em=retomar
+            )
+            return False
+        if reenvio and not await _marcar_reenvio(rascunho.id):
+            return False
+
         from app.services.atendimento import enviar
 
+        tentou = True
         try:
-            await enviar.enviar_resposta(
+            mensagem = await enviar.enviar_resposta(
                 session,
                 conversa,
                 rascunho.texto,
@@ -4180,24 +4256,42 @@ async def _talvez_enviar(
                 origem=ORIGEM_IA,
             )
         except enviar.EnvioRecusado as e:
-            # A recusa pode ter deixado a conversa travada nesta transação:
-            # commit (não há nada pendente) solta a trava já, e não quando a
-            # rodada acabar.
-            await session.commit()
+            # Uma pessoa pode responder entre os filtros e a trava do envio.
+            # A recusa não chegou à plataforma; a pausa ainda deve retomar.
+            retomar = await _pausa_humana_ate(session, conversa)
+            if reenvio and e.code == "nao_aguarda" and retomar is not None:
+                chave = _CHAVE_REENVIO.format(get_settings().database_schema, rascunho.id)
+                await redis.delete(chave)
+                await _registrar_auto_envio(
+                    session, conversa, rascunho, "pausa_humana", retomar_em=retomar
+                )
+                return False
+            await _registrar_auto_envio(session, conversa, rascunho, "recusado:" + e.code)
             logger.info(
                 "atendimento_ia_auto_recusado",
                 conversa_id=str(conversa.id),
                 rascunho_id=str(rascunho.id),
                 code=e.code,
             )
-            return
+            return True
+        resultado = mensagem.status
+        await _registrar_auto_envio(
+            session,
+            conversa,
+            rascunho,
+            "enviado" if resultado == "enviada" else "resultado:" + str(resultado),
+        )
         logger.info(
-            "atendimento_ia_auto_enviado",
+            "atendimento_ia_auto_enviado"
+            if resultado == "enviada"
+            else "atendimento_ia_auto_resultado",
             conversa_id=str(conversa.id),
             rascunho_id=str(rascunho.id),
             categoria=rascunho.categoria,
+            status=resultado,
         )
-    except Exception as e:  # noqa: BLE001 — o rascunho já está salvo; o envio fica para pessoa
+        return True
+    except Exception as e:  # noqa: BLE001 — a sugestão já está salva; fica para pessoa
         logger.warning(
             "atendimento_ia_auto_falhou",
             conversa_id=str(conversa.id),
@@ -4205,6 +4299,11 @@ async def _talvez_enviar(
             err=type(e).__name__,
         )
         await _desfazer(session, conversa, rascunho)
+        try:
+            await _registrar_auto_envio(session, conversa, rascunho, "falha_interna")
+        except Exception:  # noqa: BLE001 — o banco pode estar indisponível
+            await _desfazer(session, conversa, rascunho)
+        return tentou
 
 
 async def _desfazer(session: AsyncSession, *objetos: object) -> None:
@@ -4269,6 +4368,16 @@ async def _marcar_reenvio(rascunho_id: UUID) -> bool:
         return False
 
 
+async def _reenvio_ja_marcado(rascunho_id: UUID) -> bool:
+    """Evita reler o contexto das sugestões já tentadas. Redis indisponível = pula."""
+    chave = _CHAVE_REENVIO.format(get_settings().database_schema, rascunho_id)
+    try:
+        return bool(await redis.exists(chave))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("atendimento_ia_reenvio_marca_indisponivel", err=type(e).__name__)
+        return True
+
+
 async def reenviar_pendentes(
     session: AsyncSession, *, limite: int = MAX_REENVIOS, agora: datetime | None = None
 ) -> int:
@@ -4283,7 +4392,7 @@ async def reenviar_pendentes(
     tela: `FATO_PEDIDA_PELA_TELA`), nascida há mais de
     `REENVIO_DEPOIS` e menos de `JANELA_REENVIO`, e que nunca chegou à
     plataforma. Quem decide é o `_talvez_enviar` (relê a conversa e o canal,
-    a pessoa de fora nas 24 h, o manual...) e o `enviar` (trava a conversa,
+    a pausa humana de 30 min, o manual...) e o `enviar` (trava a conversa,
     confere o gatilho já respondido). Devolve quantas foram tentadas.
     """
     s = get_settings()
@@ -4347,9 +4456,8 @@ async def reenviar_pendentes(
     for rascunho_id, conversa_id in linhas:
         if tentadas >= limite:
             break
-        if not await _marcar_reenvio(rascunho_id):
+        if await _reenvio_ja_marcado(rascunho_id):
             continue
-        tentadas += 1
         try:
             conversa = await session.get(AtendimentoConversa, conversa_id, populate_existing=True)
             rascunho = await session.get(AtendimentoRascunho, rascunho_id, populate_existing=True)
@@ -4359,7 +4467,9 @@ async def reenviar_pendentes(
             ultima = await _ultima_do_cliente(session, conversa)
             if ultima is None or not _cobre(rascunho, ultima):
                 continue
-            await _talvez_enviar(session, conversa, rascunho)
+            if not await _talvez_enviar(session, conversa, rascunho, reenvio=True):
+                continue
+            tentadas += 1
             logger.info(
                 "atendimento_ia_reenvio",
                 conversa_id=str(conversa_id),

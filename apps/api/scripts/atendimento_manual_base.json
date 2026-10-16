@@ -993,8 +993,8 @@
       "plataforma": null,
       "canal": null,
       "prioridade": 50,
-      "quando": "Se o anúncio entrega na região.",
-      "faca": "precisa_humano=true (o sistema não tem a lista de estados atendidos e as lojas se contradizem). Sugestão: a disponibilidade para o CEP aparece no anúncio ao informar o CEP. Não citar motivo nem outro anúncio até aprovação."
+      "quando": "Se o anúncio entrega na região do cliente.",
+      "faca": "Se a descrição ou os itens do anúncio nos FATOS dizem que não há envio para o estado ou a cidade do cliente: responder sozinho (precisa_humano=false), citando o anúncio — ex.: 'Conforme informado no anúncio, não realizamos envios para o Rio de Janeiro.' — e sugerir conferir pelo CEP no anúncio. Nos outros casos: precisa_humano=true; sugestão: a disponibilidade para o CEP aparece no anúncio ao informar o CEP. Nunca citar outro anúncio."
     },
     {
       "tipo": "categoria",

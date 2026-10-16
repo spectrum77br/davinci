@@ -34,8 +34,10 @@ from app.models import (
     AtendimentoConversa,
     AtendimentoMensagem,
     AtendimentoRascunho,
+    BlingOrder,
     Integration,
     IntegrationPlatform,
+    Logistica,
     User,
 )
 from app.redis_client import redis
@@ -125,6 +127,12 @@ async def _cenario(
     texto_cliente: str = "cadê meu pedido?",
 ) -> tuple[AtendimentoConversa, User]:
     user = await make_user()
+    # O automático também revalida a triagem sob a trava: a dúvida de
+    # rastreio deste cenário precisa de pedido e rastreio conhecidos.
+    db.add(BlingOrder(numero="912345", numeroloja="250925ABC", item_index=0, situacao="9"))
+    db.add(
+        Logistica(pedido_bling="912345", pedido_marketplace="250925ABC", rastreio="AA123456789BR")
+    )
     integ = Integration(
         user_id=user.id,
         platform=IntegrationPlatform.SHOPEE,
@@ -162,7 +170,12 @@ async def _cenario(
 
 async def _rascunho(db: AsyncSession, conversa: AtendimentoConversa, texto: str):
     r = AtendimentoRascunho(
-        conversa_id=conversa.id, texto=texto, categoria="rastreio", status="pendente"
+        conversa_id=conversa.id,
+        texto=texto,
+        categoria="rastreio",
+        status="pendente",
+        precisa_humano=False,
+        validador_ok=True,
     )
     db.add(r)
     await db.commit()
@@ -1099,8 +1112,12 @@ async def test_ia_nao_responde_de_novo_a_pergunta_ja_respondida(
         select(AtendimentoMensagem).where(AtendimentoMensagem.conversa_id == conversa.id)
     )
     r1 = AtendimentoRascunho(
-        conversa_id=conversa.id, mensagem_gatilho_id=gatilho.id, texto="Já saiu!",
+        conversa_id=conversa.id,
+        mensagem_gatilho_id=gatilho.id,
+        texto="Já saiu!",
         status="pendente",
+        precisa_humano=False,
+        validador_ok=True,
     )
     db.add(r1)
     await db.commit()
@@ -1112,8 +1129,12 @@ async def test_ia_nao_responde_de_novo_a_pergunta_ja_respondida(
     # A rodada B salvou a SUA sugestão para o mesmo gatilho (a de A já não
     # estava pendente) e tenta enviar com o objeto velho.
     r2 = AtendimentoRascunho(
-        conversa_id=conversa.id, mensagem_gatilho_id=gatilho.id, texto="Seu pedido saiu hoje.",
+        conversa_id=conversa.id,
+        mensagem_gatilho_id=gatilho.id,
+        texto="Seu pedido saiu hoje.",
         status="pendente",
+        precisa_humano=False,
+        validador_ok=True,
     )
     db.add(r2)
     await db.commit()
@@ -1161,8 +1182,12 @@ async def test_ia_so_para_se_a_loja_respondeu_de_verdade_depois_da_pergunta(
         enviada_em=T_CLIENTE + timedelta(seconds=20),
     )
     rascunho = AtendimentoRascunho(
-        conversa_id=conversa.id, mensagem_gatilho_id=gatilho.id, texto="Seu pedido saiu hoje.",
+        conversa_id=conversa.id,
+        mensagem_gatilho_id=gatilho.id,
+        texto="Seu pedido saiu hoje.",
         status="pendente",
+        precisa_humano=False,
+        validador_ok=True,
     )
     db.add(rascunho)
     await db.commit()

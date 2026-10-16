@@ -347,10 +347,10 @@ def test_motivo_so_anexo_e_o_que_nao_e():
     assert (
         _triar([_cli("Figurinha", tipo="outro", payload={"message_type": "sticker"})]).motivos == ()
     )
-    # A foto sozinha DEPOIS do robô do Duoke: a IA olha desde a última fala
-    # da loja (o robô conta) — "oi" + robô + foto vira pessoa nas duas.
+    # O menu não é resposta real: texto + menu + foto continuam na mesma
+    # rajada (16/10/2026), como foto + texto + menu. O texto decide.
     robo = _loja("Olá, por favor selecione sua dúvida: 1 - ...")
-    assert _triar([_cli("oi"), robo, _cli(None, tipo="imagem")]).motivos == ("so_anexo",)
+    assert _triar([_cli("oi"), robo, _cli(None, tipo="imagem")]).motivos == ()
     # Foto depois da resposta de PESSOA, idem; depois do robô com texto junto, não.
     assert _triar([_cli("oi"), _loja("Oi! Como posso ajudar?"), foto]).motivos == ("so_anexo",)
     assert _triar([_cli("oi"), robo, foto, _cli("veja")]).motivos == ()

@@ -4,9 +4,8 @@
 O dono: "ela pode ser o atendente". O modelo é FALSO em todos os testes —
 nada sai para provedor nenhum. O que se mede:
 
-- a resposta de pessoa PELO DAVINCI não cala mais a IA: o comprador escreve
-  de novo e a IA gera e, na loja em `auto` com o assunto liberado, envia;
-- a resposta de pessoa POR FORA (Duoke/Seller Center) cala a IA por 24 h;
+- resposta de pessoa pelo DaVinci ou por fora pausa a IA por 30 min;
+- passado esse tempo, ela segue nas lojas em auto com o assunto liberado;
 - conversa atribuída ("Atribuir a mim") ou com a IA pausada não sai sozinha;
 - `pede_atendente` deixou de ser só pessoa no manual base, e a regra do
   assunto faz a IA responder como o atendimento da loja;
@@ -30,7 +29,7 @@ import json
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AtendimentoMensagem, AtendimentoRascunho, UserRole
@@ -78,9 +77,7 @@ ROBO = (
 async def test_pessoa_respondeu_pelo_davinci_e_o_comprador_escreveu_de_novo_a_ia_segue(
     db: AsyncSession, make_user, ia_ligada, modelo, envios
 ):
-    """Comprador perguntou, uma pessoa respondeu PELO DAVINCI, o comprador
-    escreveu de novo: antes a IA ficava calada 24 h; agora ela gera e, com a
-    loja em `auto` e o assunto liberado, envia."""
+    """A pessoa respondeu há 3h e o comprador escreveu de novo: a IA segue."""
     ia_ligada.atendimento_auto_ativo = True
     await _pedido_completo(db)
     conversa = await _conversa(db, make_user, modo="auto", auto_categorias=["rastreio"])
@@ -99,15 +96,14 @@ async def test_pessoa_respondeu_pelo_davinci_e_o_comprador_escreveu_de_novo_a_ia
     assert [(e["origem"], e["rascunho_id"]) for e in envios] == [(ORIGEM_IA, r.id)]
 
 
-async def test_pessoa_por_fora_cala_a_ia_por_24_horas(db: AsyncSession, make_user):
-    """A resposta POR FORA (Duoke/Seller Center, sem ser automática) ainda cala:
-    não dá para saber se a pessoa continua conversando lá."""
+async def test_pessoa_por_fora_cala_a_ia_por_30_minutos(db: AsyncSession, make_user):
+    """A resposta real por fora inicia a mesma pausa de 30 min."""
     conversa = await _conversa(db, make_user, modo="auto", auto_categorias=["rastreio"])
     await _msg(db, conversa, "cadê meu pedido?", ha=timedelta(hours=30))
     await _msg(db, conversa, "Respondido no Seller Center.", autor="loja", ha=timedelta(hours=25))
     await _msg(db, conversa, "e agora?", ha=timedelta(hours=3))
     assert await ia._humano_respondeu_recente(db, conversa) is False  # 25 h: passou
-    await _msg(db, conversa, "Já confiro.", autor="loja", ha=timedelta(hours=2))
+    await _msg(db, conversa, "Já confiro.", autor="loja", ha=timedelta(minutes=15))
     assert await ia._humano_respondeu_recente(db, conversa) is True
 
 
@@ -571,7 +567,9 @@ async def _presa(
     ok, confiança 0,99, gatilho = a última mensagem do cliente) — e parada: o envio
     foi recusado antes da correção do menu do Duoke."""
     ia_ligada.atendimento_auto_ativo = True
-    conversa = await _conversa(db, make_user, modo=modo, auto_categorias=["agradecimento"])
+    conversa = await _conversa(
+        db, make_user, modo=modo, auto_categorias=["agradecimento"], pedido=None
+    )
     gatilho = await _msg(db, conversa, "obrigado, chegou certinho!", ha=timedelta(hours=1))
     r = AtendimentoRascunho(
         conversa_id=conversa.id,
@@ -675,9 +673,22 @@ async def test_nova_tentativa_nao_envia(
         )
         await db.commit()
     elif caso == "pessoa_por_fora":
-        # Uma pessoa respondeu POR FORA nas últimas 24 h (antes do gatilho): a
+        # Uma pessoa respondeu POR FORA nos últimos 30 min (antes do gatilho): a
         # janela de pessoa do `_talvez_enviar` segura.
-        await _msg(db, conversa, "Oi! Sou a Ana.", autor="loja", ha=timedelta(hours=3))
+        await _msg(db, conversa, "Oi! Sou a Ana.", autor="loja", ha=timedelta(minutes=20))
+        await db.execute(
+            update(AtendimentoMensagem)
+            .where(AtendimentoMensagem.id == r.mensagem_gatilho_id)
+            .values(enviada_em=func.now() - timedelta(minutes=10))
+        )
+        conversa.aguardando_resposta = True
+        conversa.ultima_do_cliente_em = await db.scalar(
+            select(AtendimentoMensagem.enviada_em).where(
+                AtendimentoMensagem.id == r.mensagem_gatilho_id
+            )
+        )
+        r.status = RASCUNHO_PENDENTE
+        await db.commit()
         await db.refresh(r)
         assert r.status == RASCUNHO_PENDENTE and conversa.aguardando_resposta
     elif caso == "atribuida":

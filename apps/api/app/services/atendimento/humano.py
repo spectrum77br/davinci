@@ -60,9 +60,10 @@ OS MOTIVOS (`triar`, PURA — só códigos, `constantes.ORDEM_HUMANO`):
                      pergunta rastreio/prazo de envio/NF e falta o dado (sem
                      pedido, sem código de rastreio, sem NF) — "lacuna sem
                      dado vira pessoa";
-    so_anexo         esse trecho — ou o que ele mandou depois da última fala
-                     da loja, o robô incluído (a rajada do `ia._gerar`) — não
-                     tem texto e traz foto/vídeo/arquivo/áudio de verdade;
+    so_anexo         esse trecho (a mesma rajada do `ia._gerar`, desde a
+                     última resposta real da loja) não tem texto e traz
+                     foto/vídeo/arquivo/áudio de verdade; menu e campanha
+                     automáticos não separam foto + texto (16/10/2026);
   a IA —
     ia               a sugestão do turno atual (gatilho na última mensagem
                      do cliente ou depois), pendente ou bloqueada, marcou
@@ -101,7 +102,7 @@ do pedido (o cliente ainda não perguntou nada), a figurinha, o MODO da loja
 (observar/humano é configuração da loja, não da pergunta — senão a Caixa
 Humano viraria cópia do "Falta responder"; o modo escolhe as LOJAS que a
 Caixa Humano mostra — "SÓ AS LOJAS NO AUTOMÁTICO", abaixo —, não os
-motivos), ser Amazon, ou ter tido resposta de pessoa nas últimas 24 h (essas
+motivos), ser Amazon, ou ter tido resposta de pessoa nos últimos 30 min (essas
 são travas do envio automático — na loja no Automático, o que elas seguram
 entra pela espera: `ia_sem_resposta`).
 DE PROPÓSITO FORA (a diferença para o `ia._gerar`): os sinais do cartão
@@ -223,7 +224,6 @@ from app.services.atendimento import ia, separa_email
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
-    AUTOR_LOJA,
     CANAL_AVALIACAO,
     CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
@@ -235,6 +235,7 @@ from app.services.atendimento.constantes import (
     ETIQUETA_RECLAMACAO,
     HUMANO_AG_CANCELAMENTO,
     HUMANO_ASSUNTO,
+    HUMANO_ATENDENTE,
     HUMANO_AVALIACAO,
     HUMANO_BLOQUEADA,
     HUMANO_CHAMADO,
@@ -258,7 +259,6 @@ from app.services.atendimento.constantes import (
     RASCUNHO_BLOQUEADO,
     RASCUNHO_PENDENTE,
     e_cartao_do_comprador,
-    e_mensagem_automatica,
     motivo_canal_sem_envio,
     reclamacao_aberta,
     rotulo_humano,
@@ -269,7 +269,8 @@ logger = structlog.get_logger()
 # Muda quando a RÉGUA muda: a rodada recalcula tudo o que foi gravado com outra.
 # 2 (09/10/2026, revisão): pistas de assunto mais largas, a avaliação de nota
 # alta fora, a bloqueada pelo estado, a foto depois do robô, o motivo `falha`.
-VERSAO = 2
+# 3 (16/10/2026): menu não corta texto/foto; IA atendente segue a régua da geração.
+VERSAO = 3
 # A chave em `atendimento_conversas.dados`.
 CHAVE = "humano"
 # Conversas por rodada do cron (o recálculo inicial, ~500, leva umas 3).
@@ -343,39 +344,13 @@ def _etiquetas(conversa: Any) -> set[str]:
 
 
 def _rajada(recentes: Sequence[Any], gatilho: Any | None) -> list[Any]:
-    """O que o cliente escreveu desde a última resposta de PESSOA da loja.
-
-    A mensagem automática (o robô do Duoke, a figurinha da campanha, o cartão
-    da Shopee — `e_mensagem_automatica`) não é resposta: a mesma régua do
-    "Falta responder". Sem nada depois dela, a última do cliente.
-    """
-    ultima_pessoa = max(
-        (
-            i
-            for i, m in enumerate(recentes)
-            if m.autor == AUTOR_LOJA
-            and not e_mensagem_automatica(m.texto, getattr(m, "payload", None))
-        ),
-        default=-1,
-    )
-    rajada = [m for m in recentes[ultima_pessoa + 1 :] if m.autor == AUTOR_CLIENTE]
-    if rajada:
-        return rajada
-    return [gatilho] if gatilho is not None else []
+    """O mesmo turno de resposta real da IA, ignorando menu e campanhas."""
+    return ia.rajada_do_cliente(recentes, gatilho)
 
 
 def _depois_da_loja(recentes: Sequence[Any], gatilho: Any | None) -> list[Any]:
-    """O que o cliente mandou depois da última fala da LOJA, o robô incluído.
-
-    É a rajada do `ia._gerar` (o "só foto" dela): cliente "oi", robô, cliente
-    manda só a foto — a IA manda para pessoa; a `_rajada` (desde a última
-    resposta de PESSOA) veria "oi" + foto e acharia texto.
-    """
-    ultima_loja = max((i for i, m in enumerate(recentes) if m.autor == AUTOR_LOJA), default=-1)
-    rajada = [m for m in recentes[ultima_loja + 1 :] if m.autor == AUTOR_CLIENTE]
-    if rajada:
-        return rajada
-    return [gatilho] if gatilho is not None else []
+    """O mesmo turno que a IA usa para identificar só anexo (16/10/2026)."""
+    return ia.rajada_do_cliente(recentes, gatilho)
 
 
 def _avaliacao_ruim(conversa: Any) -> bool:
@@ -461,6 +436,7 @@ def triar(
     so_humano: Collection[str],
     sugestao: Any | None = None,
     gatilho: Any | None = None,
+    ia_e_o_atendente: bool = False,
 ) -> Triagem:
     """Os motivos para PESSOA desta conversa (ver o topo). PURA: sem banco, sem modelo, sem rede.
 
@@ -506,7 +482,12 @@ def triar(
 
     # ── O que o cliente escreveu ──
     textos_cliente = [m.texto for m in recentes if m.autor == AUTOR_CLIENTE and m.texto]
-    motivos.update(codigo for codigo, _frase in ia.sinais_com_codigo(textos_cliente))
+    sinais = {codigo for codigo, _frase in ia.sinais_com_codigo(textos_cliente)}
+    if ia_e_o_atendente:
+        sinais.discard(HUMANO_ATENDENTE)
+        if ia.insistiu_em_pessoa(recentes):
+            sinais.add(HUMANO_ATENDENTE)
+    motivos.update(sinais)
     assuntos = list(
         dict.fromkeys(
             p for t in textos_cliente for p in ia.pistas_de_categoria(t) if p in so_humano
@@ -1006,7 +987,15 @@ async def triar_conversa(
         recentes = [gatilho, *recentes[-(ia.MAX_TROCAS - 1) :]]
     ctx = await contexto_svc.contexto_da_conversa(session, conversa)
     sugestao = await _sugestao_do_turno(session, conversa)
-    return triar(conversa, recentes, ctx, so_humano=so_humano, sugestao=sugestao, gatilho=gatilho)
+    return triar(
+        conversa,
+        recentes,
+        ctx,
+        so_humano=so_humano,
+        sugestao=sugestao,
+        gatilho=gatilho,
+        ia_e_o_atendente=await ia._ia_e_o_atendente(session, conversa),
+    )
 
 
 # ── A rodada ──────────────────────────────────────────────────────────────

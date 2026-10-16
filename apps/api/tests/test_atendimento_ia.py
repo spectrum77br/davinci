@@ -186,7 +186,7 @@ def envios(monkeypatch):
                 "origem": origem,
             }
         )
-        return None
+        return SimpleNamespace(status="enviada")
 
     monkeypatch.setattr(enviar, "enviar_resposta", _falso)
     return chamadas
@@ -1035,7 +1035,7 @@ async def _cenario_auto(db, make_user, ia_ligada, modelo, **kw):
             db, conversa, "vou verificar", autor="loja", origem=ORIGEM_HUMANO, ha=timedelta(hours=3)
         )
     if kw.pop("externo_recente", False):
-        await _msg(db, conversa, "respondido pelo Duoke", autor="loja", ha=timedelta(hours=2))
+        await _msg(db, conversa, "respondido pelo Duoke", autor="loja", ha=timedelta(minutes=15))
     if kw.pop("externo_antigo", False):
         await _msg(db, conversa, "respondido pelo Duoke", autor="loja", ha=timedelta(hours=25))
     if kw.pop("atribuida", False):
@@ -1098,11 +1098,10 @@ async def test_auto_nao_envia_sem_alguma_condicao(
 
 
 @pytest.mark.parametrize("antes", [{"humano_recente": True}, {"externo_antigo": True}])
-async def test_auto_envia_depois_de_pessoa_pelo_davinci_ou_de_fora_ha_mais_de_24h(
+async def test_auto_envia_depois_de_pessoa_pelo_davinci_ou_de_fora_ha_mais_de_30min(
     db: AsyncSession, make_user, ia_ligada, modelo, envios, antes
 ):
-    """14/10/2026 ("ela pode ser o atendente"): a resposta de pessoa PELO
-    DAVINCI não cala mais a IA; a de fora cala só nas últimas 24 h."""
+    """Passados os 30 min, a resposta humana de qualquer origem deixa a IA seguir."""
     conversa = await _cenario_auto(db, make_user, ia_ligada, modelo, **antes)
 
     r = await ia.gerar_rascunho(db, conversa)

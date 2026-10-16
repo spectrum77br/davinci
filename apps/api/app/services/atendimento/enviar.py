@@ -446,8 +446,7 @@ async def _destino(
     if conversa.situacao == CONVERSA_BLOQUEADA:
         raise EnvioRecusado(
             RECUSA_CONVERSA_BLOQUEADA,
-            conversa.bloqueio_motivo
-            or "A plataforma não deixa mais responder nesta conversa.",
+            conversa.bloqueio_motivo or "A plataforma não deixa mais responder nesta conversa.",
         )
     limite = conversa.pode_enviar_ate
     if limite is not None and limite.tzinfo is None:
@@ -492,6 +491,20 @@ async def _destino(
         motivo = _motivo_ia_sem_vez(conversa)
         if motivo:
             raise EnvioRecusado(RECUSA_NAO_AGUARDA, motivo)
+        # A pessoa pode ter respondido ou o estado do pedido mudado depois
+        # do primeiro filtro da IA. Aqui a conversa já está relida/travada.
+        from app.services.atendimento import ia
+
+        if await ia._pausa_humana_ate(session, conversa) is not None:
+            raise EnvioRecusado(
+                RECUSA_NAO_AGUARDA,
+                "Uma pessoa respondeu há menos de 30 minutos; a IA aguarda.",
+            )
+        if await ia._motivos_humano_para_auto(session, conversa):
+            raise EnvioRecusado(
+                RECUSA_NAO_AGUARDA,
+                "A triagem da Caixa Humano exige uma pessoa nesta conversa.",
+            )
     return _Destino(canal=canal, integration=integration)
 
 
