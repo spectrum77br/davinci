@@ -1021,10 +1021,22 @@ async def test_leitura_da_kfa_grava_a_venda_na_margem(db, make_user):
     por pedido; presa continua sendo atualizada, liberada congela."""
     loja = await _loja_amazon(db, make_user)
     loja.modo_extrato = "upload"
+    # a Margem antiga deixou a venda vazia (403 da Finances API): é lugar vago
+    db.add(
+        MarketplaceOrderFinancial(
+            integration_id=loja.integration_id,
+            platform="amazon",
+            external_order_id="701-4878844-1794663",
+            status="error",
+            last_error="403",
+            fetched_at=datetime(2026, 10, 1, tzinfo=UTC),
+            raw={},
+        )
+    )
     await db.commit()
     agora = datetime(2026, 10, 16, 13, tzinfo=UTC)
     r1 = await ingerir_csv_amazon(db, loja, CSV_KFA, agora=agora)
-    assert r1["vendas_margem"] == {"criadas": 2, "atualizadas": 0}
+    assert r1["vendas_margem"] == {"criadas": 1, "atualizadas": 1}
     vendas = {
         v.external_order_id: v
         for v in (await db.execute(select(MarketplaceOrderFinancial))).scalars()
@@ -1032,17 +1044,22 @@ async def test_leitura_da_kfa_grava_a_venda_na_margem(db, make_user):
     liberada = vendas["701-4878844-1794663"]
     # lançamento 294,32 menos as duas etiquetas Easy Ship (21,95 cada)
     assert liberada.net_amount == Decimal("250.42") and liberada.gross_amount == Decimal("387")
+    assert liberada.status == "posted" and liberada.last_error is None
     assert liberada.raw["fonte"] == "csv_kfa" and liberada.raw["congelada"]
     assert len(liberada.raw["transactions"]["transactions"]) == 3
     presa = vendas["702-7077353-9607430"]
     # lançamento preso 59,84 menos a etiqueta de 13,00
     assert presa.net_amount == Decimal("46.84") and not presa.raw.get("congelada")
-    # arquivo novo: a presa liberou → atualiza e congela; a já congelada não mexe
-    depois = CSV_KFA.replace('"15/10/2026","Diferido"', '"18/10/2026","Liberado"')
+    # arquivo novo: a presa liberou com OUTRO valor (55,84) → a venda congela com o
+    # lançamento como foi lançado (59,84): a diferença é do painel, não da venda
+    depois = CSV_KFA.replace('"15/10/2026","Diferido"', '"18/10/2026","Liberado"').replace(
+        '"-8.16","0","59.84"', '"-12.16","0","55.84"'
+    )
     r2 = await ingerir_csv_amazon(db, loja, depois, agora=agora + timedelta(days=2))
     assert r2["vendas_margem"] == {"criadas": 0, "atualizadas": 1}
     await db.refresh(presa)
     assert presa.raw["congelada"].startswith("2026-10-18")
+    assert presa.net_amount == Decimal("46.84") and presa.gross_amount == Decimal("68")
     r3 = await ingerir_csv_amazon(db, loja, depois, agora=agora + timedelta(days=3))
     assert r3["vendas_margem"] == {"criadas": 0, "atualizadas": 0}
 

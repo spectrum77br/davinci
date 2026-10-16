@@ -273,17 +273,36 @@ async def _gravar_vendas_da_margem(
                 )
             )
         ).scalar_one_or_none()
-        if mof is not None and (mof.raw or {}).get("fonte") != "csv_kfa":
+        guardado = (mof.raw if isinstance(mof.raw, dict) else {}) if mof is not None else {}
+        do_arquivo = guardado.get("fonte") == "csv_kfa"
+        # venda que a Margem antiga deixou vazia (403 da Finances API: status "error",
+        # sem valor) conta como lugar vago — revisão 16/10 à noite: 22 pedidos da KFA
+        # ficaram "venda não lida" porque a vazia era tratada como venda de verdade
+        vazia = mof is not None and (
+            mof.status in ("error", "unsupported", "pending") or mof.net_amount is None
+        )
+        if mof is not None and not do_arquivo and not vazia:
             continue  # venda lida pela Margem de verdade: não mexe
-        if mof is not None and (mof.raw or {}).get("congelada"):
+        if do_arquivo and guardado.get("congelada"):
             continue
-        txs = [m["raw"] for m in linhas]
+        # o esperado é o lançamento como a Amazon o lançou da 1ª vez (preso); a linha
+        # liberada não reescreve o lançamento — se o valor mudou, a diferença aparece
+        # no painel (essência: comparar, não copiar)
+        guardadas = (guardado.get("transactions") or {}).get("transactions") if do_arquivo else None
+        lancamentos = [
+            t
+            for t in (guardadas if isinstance(guardadas, list) else [])
+            if isinstance(t, dict) and t.get("transactionType") == "Shipment"
+        ] or [m["raw"] for m in vendas]
+        tarifas = [m["raw"] for m in linhas if m["tipo"] != "venda_liberada"]
+        txs = lancamentos + tarifas
         conta = conta_amazon_de_transacoes(txs) or {}
         raw = {"transactions": {"transactions": txs}, "fonte": "csv_kfa"}
         if liberada:
             raw["congelada"] = agora.isoformat()
         campos = {
             "status": "posted",
+            "last_error": None,
             "gross_amount": conta.get("produto"),
             "fee_amount": abs(conta.get("tarifas") or ZERO),
             "freight_amount": abs(conta.get("etiqueta") or ZERO),

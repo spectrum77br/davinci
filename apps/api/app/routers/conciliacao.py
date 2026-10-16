@@ -3586,11 +3586,18 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                 {
                     "gravidade": "bad",
                     "loja": loja.conta,
-                    "titulo": f"{loja.conta} · {contagem['pendente']} linha(s) sem dono"
-                    + (
-                        ""
-                        if saldo_bate or totais["diferenca"] is None
-                        else f" · saldo não bate ({totais['diferenca']:+.2f})"
+                    "titulo": " · ".join(
+                        [loja.conta]
+                        + (
+                            [f"{contagem['pendente']} linha(s) sem dono"]
+                            if contagem["pendente"]
+                            else []
+                        )
+                        + (
+                            []
+                            if saldo_bate or totais["diferenca"] is None
+                            else [f"saldo não bate ({totais['diferenca']:+.2f})"]
+                        )
                     ),
                     "detalhe": (
                         f"extrato de {dia:%d/%m}: {totais['linhas']} movimentos, "
