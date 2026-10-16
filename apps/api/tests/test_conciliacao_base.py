@@ -2407,17 +2407,17 @@ def test_situacao_nada_liberou_mas_mexeu_dinheiro_e_bling_excluido_e_previsao_es
     out = calc.situacao_do_pedido(
         movs_extrato=[], plataforma="shopee", entregue_em=entregue, **com_venda
     )
-    assert out["situacao"] == "aguardando" and out["motivo"] == "libera em 18/10 (estimativa)"
+    assert out["situacao"] == "aguardando" and out["motivo"] == "libera em 20/10 (estimativa)"
     out = calc.situacao_do_pedido(
         movs_extrato=[],
         plataforma="shopee",
         entregue_em=entregue,
-        **{**com_venda, "agora": datetime(2026, 10, 21, 12, tzinfo=UTC)},
+        **{**com_venda, "agora": datetime(2026, 10, 24, 12, tzinfo=UTC)},
     )
-    assert out["situacao"] == "vencido" and "18/10 (estimada)" in out["motivo"]
+    assert out["situacao"] == "vencido" and "20/10 (estimada)" in out["motivo"]
     # sem entrega lida: pedido + 20 dias
     out = calc.situacao_do_pedido(movs_extrato=[], plataforma="tiktok", **com_venda)
-    assert out["motivo"] == "libera em 30/10 (estimativa)"
+    assert out["motivo"] == "libera em 01/11 (estimativa)"
     # ML não ganha estimativa (a plataforma diz a data)
     out = calc.situacao_do_pedido(movs_extrato=[], plataforma="ml", **com_venda)
     assert out["situacao"] == "aguardando" and out["motivo"] is None

@@ -317,7 +317,7 @@ async def test_raiox_amazon_previsto_x_real_e_grade(db, make_user, auth_as, clie
     from app.models import MarketplaceOrderFinancial
 
     loja = await _loja_amazon(db, make_user)
-    tx = _venda_proprio()
+    tx = _venda_proprio(status="RELEASED")  # liberado (16/10: preso na reserva = aguardando)
     cliente = _AmazonFalsa([tx])
     await run_amazon_sync(db, loja, cliente, agora=AGORA)
     db.add(
@@ -591,7 +591,7 @@ async def test_frete_do_melhor_envio_entra_no_sobrou_e_sem_ele_falta_frete(
     from app.services.conciliacao_melhor_envio import run_me_sync
 
     loja = await _loja_amazon(db, make_user)
-    tx = _venda_proprio()
+    tx = _venda_proprio(status="RELEASED")  # liberado (16/10: preso na reserva = aguardando)
     await run_amazon_sync(db, loja, _AmazonFalsa([tx]), agora=AGORA)
     db.add(
         MarketplaceOrderFinancial(
@@ -643,7 +643,7 @@ async def test_frete_do_melhor_envio_entra_no_sobrou_e_sem_ele_falta_frete(
     assert ped["situacao"] == "bateu" and ped["venda_frete_pago"] == 52.1
     assert ped["venda_liquido"] == 2356.21  # o Melhor Envio NÃO entra no Líquido
     assert ped["sobrou"] == 1304.11  # 2356,21 − 1000 − 52,10
-    assert ped["motivo"] == "preso na reserva"
+    assert ped["motivo"] == "liberado em 09/10"
     assert (
         corpo["frete_pago"][0]["servico"] == "SEDEX"
         and corpo["frete_pago"][0]["frete_pago"] == 52.1
@@ -1301,3 +1301,35 @@ async def test_upload_da_kfa_entra_na_trava_da_loja(db, make_user, auth_as, clie
         "/api/conciliacao/amazon/upload", data={"loja": " "}, files={"arquivo": arquivo}
     )
     assert r.status_code == 422 and r.json()["detail"]["code"] == "informe_a_loja"
+
+
+async def test_amazon_preso_na_reserva_e_aguardando_ate_liberar(db, make_user):
+    """16/10 (Vinicius: "a Amazon quando cai o pedido já está marcando como bateu?"):
+    lançamento DEFERRED é dinheiro preso — "aguardando"; "bateu" só quando liberar, e a
+    data da liberação é a de verdade (raw._liberado_em), não a do lançamento."""
+    loja = await _loja_amazon(db, make_user)
+    original = _venda_proprio(status="DEFERRED", posted="2026-10-06T14:00:00Z")
+    cliente = _AmazonFalsa([original])
+    await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    ped = (
+        await db.execute(
+            select(ConciliacaoPedido).where(ConciliacaoPedido.pedido_bling == "301635")
+        )
+    ).scalar_one()
+    assert ped.situacao == "aguardando" and ped.etapa == "aguardando"
+    assert ped.motivo == "preso na reserva da Amazon: 2356.21"
+    assert ped.recebido is None and ped.liberado_em is None
+    # a Amazon liberou (original vira DEFERRED_RELEASED + repetição RELEASED em 14/10)
+    liberado = _venda_proprio(status="DEFERRED_RELEASED", posted="2026-10-06T14:00:00Z")
+    repeticao = _venda_proprio(status="RELEASED", posted="2026-10-14T03:00:00Z")
+    repeticao["transactionId"] = "tx-proprio-liberado"
+    cliente.transacoes = [liberado, repeticao]
+    await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    await db.refresh(ped)
+    # envio próprio sem o frete do Melhor Envio: "falta frete" (seria "bateu" com ele)
+    assert ped.situacao == "falta_frete" and ped.recebido == Decimal("2356.21")
+    assert ped.liberado_em == datetime(2026, 10, 14, 3, tzinfo=UTC)

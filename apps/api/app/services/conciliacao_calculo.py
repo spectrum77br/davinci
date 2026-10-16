@@ -61,7 +61,7 @@ FOLGA_PREVISAO = timedelta(days=2)
 # Shopee e TikTok não dizem quando liberam (16/10, revisão): 2.230 pedidos "aguardando"
 # sem data e o "vencido" nunca disparava. Previsão = entrega confirmada (Logística) +
 # N dias; sem entrega lida, data do pedido + M dias. (plataforma: (N, M) — ajustar aqui.)
-PRAZO_LIBERACAO: dict[str, tuple[int, int]] = {"shopee": (7, 20), "tiktok": (7, 20)}
+PRAZO_LIBERACAO: dict[str, tuple[int, int]] = {"shopee": (9, 22), "tiktok": (9, 22)}
 # Situação do Bling que quer dizer "não vai receber": cancelado ou excluído (16/10,
 # revisão: 13 pedidos excluídos no Bling ficavam "aguardando" pra sempre)
 BLING_DESFEITO = ("cancelado", "excluido", "excluído")
@@ -379,10 +379,13 @@ def situacao_do_pedido(
     if previsao is None and plataforma in PRAZO_LIBERACAO:
         previsao = _previsao_por_prazo(plataforma, data_pedido, entregue_em)
         previsao_estimada = previsao is not None
-    dinheiro = [m for m in movs_extrato if m.tipo not in TIPOS_RESERVA]
+    # Amazon: lançamento ainda DEFERRED é dinheiro PRESO na reserva — não liberou
+    # (16/10, Vinicius: "bateu" só quando a Amazon liberar, igual ML/Shopee/TikTok)
+    presas = [m for m in movs_extrato if _presa_na_reserva(m)]
+    dinheiro = [m for m in movs_extrato if m.tipo not in TIPOS_RESERVA and not _presa_na_reserva(m)]
     liberacoes = [m for m in dinheiro if m.tipo == "venda_liberada"]
     liberado_valor = _soma([m.credito for m in liberacoes]) if liberacoes else None
-    liberado_em = max((m.data for m in liberacoes), default=None)
+    liberado_em = max((_quando_liberou(m) for m in liberacoes), default=None)
     recebido = (
         (_soma([m.credito for m in dinheiro]) - _soma([m.debito for m in dinheiro]))
         if dinheiro
@@ -429,7 +432,7 @@ def situacao_do_pedido(
         # "aguardando" porque a venda da Margem não estava "vazia".
         situacao = "cancelado"
         motivo = f"{bling_situacao or 'cancelado'} no Bling, nada entrou"
-    elif (venda is None or venda_vazia) and not dinheiro:
+    elif (venda is None or venda_vazia) and not dinheiro and not presas:
         situacao = "sem_venda"
         motivo = (
             "a plataforma ainda não calculou a venda (pedido novo ou cancelado)"
@@ -437,7 +440,11 @@ def situacao_do_pedido(
             else "venda ainda não lida pela Margem"
         )
     elif not liberacoes:
-        if dinheiro and recebido is not None and abs(recebido) > TOLERANCIA:
+        if presas and not dinheiro:
+            situacao = "aguardando"
+            preso = _soma([m.credito for m in presas]) - _soma([m.debito for m in presas])
+            motivo = f"preso na reserva da Amazon: {preso:.2f}"
+        elif dinheiro and recebido is not None and abs(recebido) > TOLERANCIA:
             # 16/10 (revisão, aprovado): nada liberou e mesmo assim saiu (ou entrou)
             # dinheiro — devolvido antes de liquidar na TikTok, frete de devolução… Não é
             # "aguardando" (ia pro A liberar negativo) nem "zero a zero".
@@ -518,6 +525,23 @@ def situacao_do_pedido(
         "zero_a_zero": situacao == "cancelado"
         and (recebido is None or abs(recebido) <= TOLERANCIA),
     }
+
+
+def _presa_na_reserva(m: ConciliacaoMovimento) -> bool:
+    return m.tipo == "venda_liberada" and (m.sub_tipo or "") == "DEFERRED"
+
+
+def _quando_liberou(m: ConciliacaoMovimento) -> datetime:
+    """Data da liberação de verdade: a Amazon mantém a linha na data do lançamento e
+    guarda a liberação em raw._liberado_em; o resto libera na data da linha."""
+    raw = m.raw if isinstance(m.raw, dict) else {}
+    quando = raw.get("_liberado_em")
+    if quando:
+        try:
+            return datetime.fromisoformat(str(quando))
+        except ValueError:
+            pass
+    return m.data
 
 
 def _previsao_por_prazo(

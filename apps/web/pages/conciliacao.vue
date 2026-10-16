@@ -131,6 +131,13 @@ const tab = ref('ml')
 // A tela de entrada é o Resumo (passo 2d): de lá se vai pro extrato do dia de uma
 // loja ou pros pedidos dela já filtrados.
 const visao = ref<Visao>('resumo')
+
+// 16/10 (Vinicius): no Resumo (todos os marketplaces) nenhuma aba de marketplace fica
+// marcada — "Mercado Livre em azul confunde"; clicar numa aba ali abre os Pedidos dela
+function escolherMarketplace(key: string) {
+  tab.value = key
+  if (visao.value === 'resumo') visao.value = 'pedidos'
+}
 const extratoDia = ref('')
 const lojas = ref<Loja[]>([])
 const loja = ref('')
@@ -605,12 +612,12 @@ await carregar()
             type="button"
             class="px-3 py-1.5 text-xs font-semibold border-b-2 -mb-px"
             :class="[
-              tab === m.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground',
+              visao !== 'resumo' && tab === m.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground',
               !m.ativo && 'opacity-50 cursor-not-allowed',
             ]"
             :disabled="!m.ativo"
-            :title="m.ativo ? '' : 'entra depois do Mercado Livre'"
-            @click="tab = m.key"
+            :title="m.ativo ? (visao === 'resumo' ? 'abre os pedidos deste marketplace' : '') : 'entra depois do Mercado Livre'"
+            @click="escolherMarketplace(m.key)"
           >
             {{ m.label }}
           </button>

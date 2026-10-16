@@ -198,12 +198,16 @@ async def run_sync_marketplace_financials_for_bling_order(
     trigger: str = "manual",
 ) -> dict[str, Any]:
     rows = (
-        await session.execute(
-            select(BlingOrder)
-            .where(BlingOrder.bling_id == bling_order_id)
-            .order_by(BlingOrder.item_index.asc().nullsfirst(), BlingOrder.created_at.asc())
+        (
+            await session.execute(
+                select(BlingOrder)
+                .where(BlingOrder.bling_id == bling_order_id)
+                .order_by(BlingOrder.item_index.asc().nullsfirst(), BlingOrder.created_at.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not rows:
         logger.info("marketplace_financials_no_bling_order", bling_order_id=bling_order_id)
         return {"ok": False, "skipped": "bling_order_not_found"}
@@ -223,6 +227,11 @@ async def run_sync_marketplace_financials_for_bling_order(
             "skipped": "marketplace_integration_not_found",
             "store_id": str(store.id) if store else None,
         }
+    if await _financeiro_por_arquivo(session, integration):
+        # 16/10 (Vinicius): a KFA entra na Conciliação por arquivo porque a API da
+        # Amazon nega tudo — não adianta a Margem tentar a cada rodada (403 sempre)
+        await _tirar_da_fila(session, integration, external_order_id)
+        return {"ok": True, "skipped": "financeiro_por_arquivo"}
 
     # SKUs of every line of this Bling order — used to match ML pack
     # sub-orders so a consolidated (whole-pack) Bling order aggregates all
@@ -232,9 +241,7 @@ async def run_sync_marketplace_financials_for_bling_order(
         for r in rows
         if r.item_codigo and str(r.item_codigo).strip()
     } or None
-    snapshot = await _fetch_snapshot(
-        session, integration, external_order_id, bling_skus=bling_skus
-    )
+    snapshot = await _fetch_snapshot(session, integration, external_order_id, bling_skus=bling_skus)
     financial = await _persist_snapshot(
         session,
         snapshot,
@@ -289,6 +296,38 @@ async def run_sync_marketplace_financials_for_bling_order(
     }
 
 
+async def _financeiro_por_arquivo(session: AsyncSession, integration: Integration) -> bool:
+    """Loja da Conciliação em modo "upload" (extrato por arquivo): a API financeira
+    da plataforma está negada pra ela."""
+    from app.models import ConciliacaoLoja
+
+    modo = (
+        await session.execute(
+            select(ConciliacaoLoja.modo_extrato).where(
+                ConciliacaoLoja.integration_id == integration.id
+            )
+        )
+    ).scalar_one_or_none()
+    return modo == "upload"
+
+
+async def _tirar_da_fila(
+    session: AsyncSession, integration: Integration, external_order_id: str
+) -> None:
+    row = (
+        await session.execute(
+            select(MarketplaceOrderFinancial).where(
+                MarketplaceOrderFinancial.integration_id == integration.id,
+                MarketplaceOrderFinancial.external_order_id == external_order_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is not None and row.next_retry_at is not None:
+        row.next_retry_at = None
+        row.last_error = "financeiro por arquivo (Conciliação): sem leitura pela API"
+        await session.flush()
+
+
 async def run_due_marketplace_financial_retries(
     session: AsyncSession,
     *,
@@ -297,21 +336,25 @@ async def run_due_marketplace_financial_retries(
 ) -> dict[str, int]:
     now = datetime.now(UTC)
     rows = (
-        await session.execute(
-            select(MarketplaceOrderFinancial.bling_id)
-            .where(MarketplaceOrderFinancial.bling_id.is_not(None))
-            .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
-            .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
-            .where(MarketplaceOrderFinancial.next_retry_at <= now)
-            # Fila RÁPIDA: só pedido recém-falhado. O backlog de falha de API
-            # tem esteira própria (run_esteira_lenta_financials) pra nunca
-            # roubar a vez dos pedidos de hoje.
-            .where(MarketplaceOrderFinancial.espera_lenta.is_(False))
-            .where(MarketplaceOrderFinancial.attempts < max_attempts)
-            .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
-            .limit(limit)
+        (
+            await session.execute(
+                select(MarketplaceOrderFinancial.bling_id)
+                .where(MarketplaceOrderFinancial.bling_id.is_not(None))
+                .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
+                .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
+                .where(MarketplaceOrderFinancial.next_retry_at <= now)
+                # Fila RÁPIDA: só pedido recém-falhado. O backlog de falha de API
+                # tem esteira própria (run_esteira_lenta_financials) pra nunca
+                # roubar a vez dos pedidos de hoje.
+                .where(MarketplaceOrderFinancial.espera_lenta.is_(False))
+                .where(MarketplaceOrderFinancial.attempts < max_attempts)
+                .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
+                .limit(limit)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     return await _rodar_lote(session, list(rows), trigger="retry")
 
@@ -405,18 +448,22 @@ async def run_esteira_lenta_financials(
     filas: list[list[int]] = []
     for plataforma in plataformas:
         rows = (
-            await session.execute(
-                select(MarketplaceOrderFinancial.bling_id)
-                .where(MarketplaceOrderFinancial.bling_id.is_not(None))
-                .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
-                .where(MarketplaceOrderFinancial.espera_lenta.is_(True))
-                .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
-                .where(MarketplaceOrderFinancial.next_retry_at <= now)
-                .where(MarketplaceOrderFinancial.platform == plataforma)
-                .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
-                .limit(por_plataforma)
+            (
+                await session.execute(
+                    select(MarketplaceOrderFinancial.bling_id)
+                    .where(MarketplaceOrderFinancial.bling_id.is_not(None))
+                    .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
+                    .where(MarketplaceOrderFinancial.espera_lenta.is_(True))
+                    .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
+                    .where(MarketplaceOrderFinancial.next_retry_at <= now)
+                    .where(MarketplaceOrderFinancial.platform == plataforma)
+                    .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
+                    .limit(por_plataforma)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if rows:
             filas.append(list(rows))
 
@@ -456,16 +503,20 @@ async def run_ressuscitar_financials(
     now = datetime.now(UTC)
     corte = now - timedelta(days=ESPERA_MAX_DIAS)
     rows = (
-        await session.execute(
-            select(MarketplaceOrderFinancial)
-            .where(MarketplaceOrderFinancial.bling_id.is_not(None))
-            .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
-            .where(MarketplaceOrderFinancial.next_retry_at.is_(None))
-            .where(MarketplaceOrderFinancial.created_at >= corte)
-            .order_by(MarketplaceOrderFinancial.created_at.desc())
-            .limit(limit)
+        (
+            await session.execute(
+                select(MarketplaceOrderFinancial)
+                .where(MarketplaceOrderFinancial.bling_id.is_not(None))
+                .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
+                .where(MarketplaceOrderFinancial.next_retry_at.is_(None))
+                .where(MarketplaceOrderFinancial.created_at >= corte)
+                .order_by(MarketplaceOrderFinancial.created_at.desc())
+                .limit(limit)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     revividos = 0
     ignorados = 0
@@ -531,14 +582,10 @@ async def run_ml_cancelados_resync(
             or_(
                 ~mof.raw.has_key("ml_cancelamento"),
                 and_(
-                    func.coalesce(
-                        func.jsonb_array_length(ml_cancelamento["desfeitas"]), 0
-                    )
-                    == 0,
+                    func.coalesce(func.jsonb_array_length(ml_cancelamento["desfeitas"]), 0) == 0,
                     or_(
                         mof.fetched_at.is_(None),
-                        mof.fetched_at
-                        < now - timedelta(hours=ML_CANCELADOS_RELEITURA_HORAS),
+                        mof.fetched_at < now - timedelta(hours=ML_CANCELADOS_RELEITURA_HORAS),
                     ),
                 ),
             )
@@ -565,9 +612,7 @@ async def run_ml_cancelados_resync(
     if not bling_ids:
         logger.info("marketplace_financials_ml_cancelados", vistos=0)
         return {"vistos": 0, "ok": 0, "error": 0}
-    return await _rodar_lote(
-        session, bling_ids, trigger=ML_CANCELADOS_TRIGGER, limite_s=limite_s
-    )
+    return await _rodar_lote(session, bling_ids, trigger=ML_CANCELADOS_TRIGGER, limite_s=limite_s)
 
 
 def _tiktok_unsettled_order_map(pages: list[dict]) -> dict[str, dict]:
@@ -681,9 +726,7 @@ async def run_tiktok_unsettled_sweep(
                 )
                 code = body.get("code")
                 if code not in (0, "0", None):
-                    raise RuntimeError(
-                        f"TikTok unsettled error: {body.get('message') or code}"
-                    )
+                    raise RuntimeError(f"TikTok unsettled error: {body.get('message') or code}")
                 pages.append(body)
                 page_token = (body.get("data") or {}).get("next_page_token") or None
                 if not page_token:
@@ -735,9 +778,7 @@ async def _resolve_store_and_integration(
         loja_id = _int(order.loja)
         if loja_id is not None:
             store = (
-                await session.execute(
-                    select(Store).where(Store.bling_store_id == loja_id).limit(1)
-                )
+                await session.execute(select(Store).where(Store.bling_store_id == loja_id).limit(1))
             ).scalar_one_or_none()
 
     integration: Integration | None = None
@@ -1053,13 +1094,9 @@ async def _fetch_shopee(client: ShopeeClient, order_sn: str) -> FinancialSnapsho
             "seller_coin_cash_back",
         )
     )
-    refund = _sum_money(
-        income.get(k)
-        for k in ("seller_return_refund", "refund_amount_to_buyer")
-    )
+    refund = _sum_money(income.get(k) for k in ("seller_return_refund", "refund_amount_to_buyer"))
     tax = _sum_money(
-        income.get(k)
-        for k in ("escrow_tax", "final_product_vat_tax", "final_shipping_vat_tax")
+        income.get(k) for k in ("escrow_tax", "final_product_vat_tax", "final_shipping_vat_tax")
     )
     adjustment = _money(income.get("drc_adjustable_refund"))
     gross = (
@@ -1174,9 +1211,8 @@ def _shopee_freight_drafts(
     actual = _money(income.get("actual_shipping_fee"))
     if actual is None:
         return []
-    buyer_paid = (
-        _money(income.get("buyer_paid_shipping_fee"))
-        or _money(income.get("final_shipping_fee"))
+    buyer_paid = _money(income.get("buyer_paid_shipping_fee")) or _money(
+        income.get("final_shipping_fee")
     )
     forced = _money(income.get("forced_shipping_fee"))
     rebate = _money(income.get("shopee_shipping_rebate"))
@@ -1475,9 +1511,7 @@ async def _fetch_ml(
             else:
                 sibling_discounts[matched_id] = breakdown
         except Exception as e:  # noqa: BLE001 — fall back to billing on any failure
-            logger.warning(
-                "ml_order_discounts_failed", order_id=matched_id, error=str(e)[:300]
-            )
+            logger.warning("ml_order_discounts_failed", order_id=matched_id, error=str(e)[:300])
             # O billing detail consultado é só o do pedido primário; um irmão
             # que falhou fica sem desconto (contribui 0), como já acontecia —
             # mas deixa o motivo no raw pra quem for comparar com a tela do ML.
@@ -1513,12 +1547,7 @@ async def _fetch_ml(
     freight = freight_actual_total or payment_shipping_cost
     net = None
     if gross is not None:
-        net = (
-            gross
-            - commission
-            - (freight or Decimal("0"))
-            - (discount or Decimal("0"))
-        )
+        net = gross - commission - (freight or Decimal("0")) - (discount or Decimal("0"))
 
     has_billing = bool(
         isinstance(billing, dict)
@@ -1630,9 +1659,7 @@ async def _fetch_ml(
             else None,
             "pack_id": pack_id,
             "pack_order_ids": pack_order_ids or None,
-            "pack_matched_order_ids": [
-                _text_value(o.get("id")) for o in matched_orders
-            ]
+            "pack_matched_order_ids": [_text_value(o.get("id")) for o in matched_orders]
             if pack_id
             else None,
             "pack_error": pack_error,
@@ -1756,9 +1783,7 @@ async def _fetch_ml_freight_reconciliations(
             item_payload.get("item") if isinstance(item_payload.get("item"), dict) else {}
         )
         item_id = _text_value(
-            marketplace_item.get("id")
-            or item_payload.get("item_id")
-            or item_payload.get("item")
+            marketplace_item.get("id") or item_payload.get("item_id") or item_payload.get("item")
         )
         variation_id = _text_value(
             marketplace_item.get("variation_id") or item_payload.get("variation_id")
@@ -1788,20 +1813,18 @@ async def _fetch_ml_freight_reconciliations(
             quote_error = "missing_marketplace_item_id"
 
         dimensions = _ml_dimensions_for_item(dimensions_by_item, item_id, item_index)
-        diff = _money_from_decimal(freight_actual - promised) if (
-            freight_actual is not None and promised is not None
-        ) else None
+        diff = (
+            _money_from_decimal(freight_actual - promised)
+            if (freight_actual is not None and promised is not None)
+            else None
+        )
         diff_pct = (
             _quantize_decimal((diff / promised) * Decimal("100"), "0.0001")
             if diff is not None and promised not in (None, Decimal("0"))
             else None
         )
         status_errors = [error for error in (costs_error, quote_error) if error]
-        all_errors = [
-            error
-            for error in (costs_error, shipment_items_error, quote_error)
-            if error
-        ]
+        all_errors = [error for error in (costs_error, shipment_items_error, quote_error) if error]
         rows.append(
             FreightReconciliationDraft(
                 item_index=item_index,
@@ -1913,9 +1936,7 @@ def _ml_free_shipping_quote(
         rate = _rate_value(discount.get("rate") or discount.get("value"))
     else:
         rate = _rate_value(
-            all_country.get("discount_rate")
-            or all_country.get("discountRate")
-            or discount
+            all_country.get("discount_rate") or all_country.get("discountRate") or discount
         )
     if list_cost is None:
         return None, rate, None
@@ -1929,9 +1950,7 @@ def _ml_free_shipping_quote(
     return list_cost, rate, promised
 
 
-def _ml_promised_line_total(
-    promised: Decimal | None, quantity: Decimal | None
-) -> Decimal | None:
+def _ml_promised_line_total(promised: Decimal | None, quantity: Decimal | None) -> Decimal | None:
     """Frete prometido TOTAL da linha = cotação unitária x quantidade.
 
     A cotação de /shipping_options/free é por unidade, mas o ML cobra o
@@ -2044,9 +2063,7 @@ def _ml_dimensions_from(raw: Any) -> dict[str, Decimal | str | None]:
     )
     length = _quantize_decimal(
         _decimal_value(
-            dimensions.get("length")
-            or dimensions.get("depth")
-            or dimensions.get("length_cm")
+            dimensions.get("length") or dimensions.get("depth") or dimensions.get("length_cm")
         ),
         "0.0001",
     )
@@ -2056,16 +2073,12 @@ def _ml_dimensions_from(raw: Any) -> dict[str, Decimal | str | None]:
     )
     weight = _quantize_decimal(
         _decimal_value(
-            dimensions.get("weight")
-            or dimensions.get("gross_weight")
-            or dimensions.get("weight_g")
+            dimensions.get("weight") or dimensions.get("gross_weight") or dimensions.get("weight_g")
         ),
         "0.0001",
     )
     text = _text_value(
-        dimensions.get("dimensions")
-        or dimensions.get("dimensions_text")
-        or dimensions.get("size")
+        dimensions.get("dimensions") or dimensions.get("dimensions_text") or dimensions.get("size")
     )
     if not text and width is not None and length is not None and height is not None:
         text = f"{width} x {length} x {height}"
@@ -2143,9 +2156,7 @@ async def _fetch_amazon(client: AmazonClient, order_id: str) -> FinancialSnapsho
         (e.amount for e in events if e.event_type == "MFNPostageFee"),
         Decimal("0"),
     )
-    freight_event = _event(
-        "freight", postage, currency=currency, raw={"source": "MFNPostageFee"}
-    )
+    freight_event = _event("freight", postage, currency=currency, raw={"source": "MFNPostageFee"})
     if freight_event is not None:
         events.append(freight_event)
 
@@ -2179,10 +2190,7 @@ def _tiktok_finance_blocked(code: Any, message: str | None) -> bool:
     except (TypeError, ValueError):
         pass
     msg = (message or "").lower()
-    return any(
-        kw in msg
-        for kw in ("access denied", "not authorized", "access scope", "deprecat")
-    )
+    return any(kw in msg for kw in ("access denied", "not authorized", "access scope", "deprecat"))
 
 
 async def _fetch_tiktok(client: TikTokClient, order_id: str) -> FinancialSnapshot:
@@ -2252,9 +2260,7 @@ async def _fetch_tiktok(client: TikTokClient, order_id: str) -> FinancialSnapsho
     )  # shipping subsidy (positive)
     discount = _agg("platform_discount_amount", "seller_discount_amount")
     refund = _agg("customer_refund_amount")
-    tax = _agg(
-        "iva_vat_amount", "sales_tax_amount", "isr_income_tax_amount", "pit_amount"
-    )
+    tax = _agg("iva_vat_amount", "sales_tax_amount", "isr_income_tax_amount", "pit_amount")
 
     events = _compact_events(
         [
@@ -2296,7 +2302,7 @@ async def _fetch_tiktok(client: TikTokClient, order_id: str) -> FinancialSnapsho
 
 def _external_order_id(order: BlingOrder) -> str | None:
     for raw in (order.numeroloja, order.numero_documento):
-        value = (str(raw).strip() if raw is not None else "")
+        value = str(raw).strip() if raw is not None else ""
         if value:
             return value
     return None
