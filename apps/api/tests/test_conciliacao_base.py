@@ -1585,3 +1585,43 @@ def test_cancelado_no_bling_sem_dinheiro_e_cancelado():
         fatura={},
     )
     assert out["situacao"] == "sem_venda"
+
+
+def test_ordem_do_dia_com_ancora_resolve_ciclo_no_mesmo_segundo():
+    """injox 15/10 (16/10): pagamento (+362,15 → 362,15) e reserva (−362,15 → 0) no mesmo
+    segundo formam um ciclo; sem âncora a ordem saía trocada e o saldo inicial do dia
+    virava 362,15. Com o fechamento do dia anterior (0) a ordem e a prova dos nove fecham."""
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from app.models import ConciliacaoMovimento
+    from app.routers.conciliacao import _ordena_dia, _totais_do_dia
+
+    quando = datetime(2026, 10, 15, 17, 21, 6, tzinfo=UTC)
+    reserva = ConciliacaoMovimento(
+        id=uuid4(),
+        origem="mp_extrato",
+        id_externo="r",
+        data=quando,
+        tipo="reserva_disputa",
+        credito=Decimal("0"),
+        debito=Decimal("362.15"),
+        saldo_apos=Decimal("0"),
+    )
+    pagamento = ConciliacaoMovimento(
+        id=uuid4(),
+        origem="mp_extrato",
+        id_externo="p",
+        data=quando,
+        tipo="venda_liberada",
+        credito=Decimal("362.15"),
+        debito=Decimal("0"),
+        saldo_apos=Decimal("362.15"),
+    )
+    ordem = _ordena_dia([reserva, pagamento], saldo_anterior=Decimal("0"))
+    assert [m.tipo for m in ordem] == ["venda_liberada", "reserva_disputa"]
+    t = _totais_do_dia(ordem, saldo_anterior=Decimal("0"))
+    assert t["saldo_inicial"] == 0.0 and t["saldo_final"] == 0.0 and t["diferenca"] == 0.0
+    # sem âncora a prova dos nove parte da primeira linha (comportamento antigo)
+    t2 = _totais_do_dia(_ordena_dia([reserva, pagamento]))
+    assert t2["diferenca"] in (0.0, -362.15)

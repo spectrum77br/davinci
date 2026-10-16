@@ -262,7 +262,7 @@ async def fechar_dias_prontos(
     """Fecha sozinho todo dia (até ontem) em que toda linha tem destino e o saldo
     bate — a mesma regra do botão "Fechar o dia", só que sem ninguém clicar.
     Dia com linha sem dono ou saldo diferente fica aberto e aparece no Resumo."""
-    from app.routers.conciliacao import _movimentos_do_dia, _totais_do_dia
+    from app.routers.conciliacao import _movimentos_do_dia, _saldo_anterior, _totais_do_dia
 
     agora = datetime.now(UTC)
     ontem = datetime.now(_BRT).date() - timedelta(days=1)
@@ -283,10 +283,11 @@ async def fechar_dias_prontos(
         if existente is not None and existente.fechado_em is not None:
             d += timedelta(days=1)
             continue
-        movs = await _movimentos_do_dia(session, loja, d)
+        saldo_ant = await _saldo_anterior(session, loja, d)
+        movs = await _movimentos_do_dia(session, loja, d, saldo_ant)
         if movs:
             pendentes = [m for m in movs if not m.pedido_bling and not m.classificacao]
-            totais = _totais_do_dia(movs)
+            totais = _totais_do_dia(movs, saldo_ant)
             dif = totais["diferenca"]
             if not pendentes and dif is not None and abs(dif) <= 0.05:
                 row = existente

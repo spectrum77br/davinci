@@ -1951,10 +1951,14 @@ def _status_movimento(m: ConciliacaoMovimento, pedido: ConciliacaoPedido | None)
     return "automatico"
 
 
-def _ordena_dia(movs: list[ConciliacaoMovimento]) -> list[ConciliacaoMovimento]:
+def _ordena_dia(
+    movs: list[ConciliacaoMovimento], saldo_anterior: Decimal | None = None
+) -> list[ConciliacaoMovimento]:
     """Ordem do dia. O relatório não traz nº de linha; em empate de horário, a
     ordem certa é a que encadeia o saldo (saldo da linha = saldo da anterior +
-    crédito − débito)."""
+    crédito − débito). `saldo_anterior` (fechamento do dia anterior) ancora o
+    primeiro empate do dia — sem ele, pagamento + reserva no mesmo segundo formam
+    um ciclo (0 → 362,15 → 0) e a ordem saía trocada (injox 15/10)."""
     movs = sorted(movs, key=lambda m: (m.data, m.id))
     out: list[ConciliacaoMovimento] = []
     i = 0
@@ -1967,7 +1971,11 @@ def _ordena_dia(movs: list[ConciliacaoMovimento]) -> list[ConciliacaoMovimento]:
         if len(grupo) > 1 and all(m.saldo_apos is not None for m in grupo):
             resto = list(grupo)
             ordenado: list[ConciliacaoMovimento] = []
-            anterior = out[-1].saldo_apos if out and out[-1].saldo_apos is not None else None
+            anterior = (
+                out[-1].saldo_apos
+                if out and out[-1].saldo_apos is not None
+                else (saldo_anterior if not out else None)
+            )
             while resto:
                 prox = None
                 if anterior is not None:
@@ -2004,12 +2012,21 @@ def _ordena_dia(movs: list[ConciliacaoMovimento]) -> list[ConciliacaoMovimento]:
     return out
 
 
-def _totais_do_dia(movs: list[ConciliacaoMovimento]) -> dict[str, Any]:
+def _totais_do_dia(
+    movs: list[ConciliacaoMovimento], saldo_anterior: Decimal | None = None
+) -> dict[str, Any]:
     creditos = sum((m.credito or Decimal("0") for m in movs), Decimal("0"))
     debitos = sum((m.debito or Decimal("0") for m in movs), Decimal("0"))
     primeiro = next((m for m in movs if m.saldo_apos is not None), None)
     ultimo = next((m for m in reversed(movs) if m.saldo_apos is not None), None)
-    saldo_inicial = (primeiro.saldo_apos - primeiro.credito + primeiro.debito) if primeiro else None
+    # saldo inicial = fechamento do dia anterior quando existe (16/10); senão, o que a
+    # primeira linha do dia diz
+    if saldo_anterior is not None and movs:
+        saldo_inicial: Decimal | None = saldo_anterior
+    else:
+        saldo_inicial = (
+            (primeiro.saldo_apos - primeiro.credito + primeiro.debito) if primeiro else None
+        )
     saldo_final = (saldo_inicial + creditos - debitos) if saldo_inicial is not None else None
     saldo_informado = ultimo.saldo_apos if ultimo else None
     return {
@@ -2025,8 +2042,44 @@ def _totais_do_dia(movs: list[ConciliacaoMovimento]) -> dict[str, Any]:
     }
 
 
-async def _movimentos_do_dia(
+async def _saldo_anterior(
     session: AsyncSession, loja: ConciliacaoLoja, dia: date
+) -> Decimal | None:
+    """Saldo informado da última linha ANTES do dia = saldo inicial de verdade do
+    dia (prova dos nove independente da ordem das linhas do dia)."""
+    ini = datetime.combine(dia, datetime.min.time(), tzinfo=_BRT)
+    mov = ConciliacaoMovimento
+    ultimo = (
+        (
+            await session.execute(
+                select(mov)
+                .where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem.in_(ORIGENS_EXTRATO),
+                    mov.data < ini,
+                    mov.saldo_apos.isnot(None),
+                )
+                .order_by(mov.data.desc())
+                .limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not ultimo:
+        return None
+    # as últimas linhas podem cair no mesmo segundo: ordena esse grupo pelo encadeamento
+    ultimo_dia = ultimo[0].data.astimezone(_BRT).date()
+    do_dia = [m for m in ultimo if m.data.astimezone(_BRT).date() == ultimo_dia]
+    ordenado = _ordena_dia(do_dia)
+    return ordenado[-1].saldo_apos if ordenado else None
+
+
+async def _movimentos_do_dia(
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    dia: date,
+    saldo_anterior: Decimal | None = None,
 ) -> list[ConciliacaoMovimento]:
     ini = datetime.combine(dia, datetime.min.time(), tzinfo=_BRT)
     movs = (
@@ -2043,7 +2096,7 @@ async def _movimentos_do_dia(
         .scalars()
         .all()
     )
-    return _ordena_dia(list(movs))
+    return _ordena_dia(list(movs), saldo_anterior)
 
 
 def _ontem() -> date:
@@ -2061,7 +2114,8 @@ async def extrato_do_dia(
 ) -> dict[str, Any]:
     alvo = await _loja_ou_404(session, loja)
     dia = dia or _ontem()
-    movs = await _movimentos_do_dia(session, alvo, dia)
+    saldo_ant = await _saldo_anterior(session, alvo, dia)
+    movs = await _movimentos_do_dia(session, alvo, dia, saldo_ant)
     pedidos = {
         p.pedido_bling: p
         for p in (
@@ -2139,7 +2193,7 @@ async def extrato_do_dia(
         "loja": alvo.conta,
         "dia": dia.isoformat(),
         "movimentos": linhas,
-        "totais": _totais_do_dia(movs),
+        "totais": _totais_do_dia(movs, saldo_ant),
         "contagem": contagem,
         "resolvidos": len(movs) - contagem["pendente"],
         "fechado": {"em": fechado.fechado_em.isoformat(), "por": fechado.fechado_por}
@@ -2419,7 +2473,8 @@ async def fechar_dia(
     loja: str | None = None,
 ) -> dict[str, Any]:
     alvo = await _loja_ou_404(session, loja)
-    movs = await _movimentos_do_dia(session, alvo, dia)
+    saldo_ant = await _saldo_anterior(session, alvo, dia)
+    movs = await _movimentos_do_dia(session, alvo, dia, saldo_ant)
     pendentes = [m for m in movs if not m.pedido_bling and not m.classificacao]
     if pendentes:
         raise HTTPException(
@@ -2430,7 +2485,7 @@ async def fechar_dia(
                 "mensagem": "toda linha precisa de um destino",
             },
         )
-    totais = _totais_do_dia(movs)
+    totais = _totais_do_dia(movs, saldo_ant)
     agora = datetime.now(UTC)
     quem = (getattr(user, "name", None) or user.email or "?")[:120]
     row = (
@@ -2710,7 +2765,8 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
     empresa: dict[str, Any] = {"lojas": 0}
     for loja in await lojas_ativas(session):
         plataforma = getattr(loja.platform, "value", str(loja.platform))
-        movs = await _movimentos_do_dia(session, loja, dia)
+        saldo_ant = await _saldo_anterior(session, loja, dia)
+        movs = await _movimentos_do_dia(session, loja, dia, saldo_ant)
         pedidos_do_dia = {
             p.pedido_bling: p
             for p in (
@@ -2734,7 +2790,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         }
         for m in movs:
             contagem[_status_movimento(m, pedidos_do_dia.get(m.pedido_bling or ""))] += 1
-        totais = _totais_do_dia(movs)
+        totais = _totais_do_dia(movs, saldo_ant)
         fechado = (
             await session.execute(
                 select(ConciliacaoDia).where(
