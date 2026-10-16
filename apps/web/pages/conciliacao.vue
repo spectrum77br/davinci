@@ -112,6 +112,9 @@ type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'e
 
 const { api } = useApi()
 const canEdit = useCan('conciliacao', 'edit')
+// aba Margem só pra quem vê a Margem (a API dela exige margem:view)
+const podeMargem = useCan('margem', 'view')
+const visoesVisiveis = computed(() => VISOES.filter((v) => v.key !== 'margem' || podeMargem.value))
 const toasts = useToasts()
 
 const MARKETPLACES = [
@@ -120,11 +123,13 @@ const MARKETPLACES = [
   { key: 'amazon', label: 'Amazon', ativo: true },
   { key: 'tiktok', label: 'TikTok', ativo: true },
 ]
-type Visao = 'resumo' | 'pedidos' | 'extrato' | 'fechamento'
+type Visao = 'resumo' | 'pedidos' | 'extrato' | 'margem' | 'fechamento'
 const VISOES: Array<{ key: Visao; label: string; ativo: boolean }> = [
   { key: 'resumo', label: 'Resumo', ativo: true },
   { key: 'pedidos', label: 'Pedidos', ativo: true },
   { key: 'extrato', label: 'Extrato do dia', ativo: true },
+  // 16/10 (Vinicius): a Margem (antes de enviar) vira aba da Conciliação, depois do Extrato
+  { key: 'margem', label: 'Margem', ativo: true },
   // 15/10: Fechamento do mês escondido por enquanto (pedido do Vinicius); o componente fica.
 ]
 const tab = ref('ml')
@@ -136,8 +141,11 @@ const visao = ref<Visao>('resumo')
 // marcada — "Mercado Livre em azul confunde"; clicar numa aba ali abre os Pedidos dela
 function escolherMarketplace(key: string) {
   tab.value = key
-  if (visao.value === 'resumo') visao.value = 'pedidos'
+  if (semMarketplace.value) visao.value = 'pedidos'
 }
+// Resumo (todos os marketplaces) e Margem (filtro próprio de plataforma): nenhuma aba de
+// marketplace fica marcada em cima
+const semMarketplace = computed(() => visao.value === 'resumo' || visao.value === 'margem')
 const extratoDia = ref('')
 const lojas = ref<Loja[]>([])
 const loja = ref('')
@@ -596,6 +604,8 @@ if (q0.visao === 'extrato') {
   visao.value = 'extrato'
 } else if (q0.visao === 'pedidos') {
   visao.value = 'pedidos'
+} else if (q0.visao === 'margem' && podeMargem.value) {
+  visao.value = 'margem'
 }
 await carregar()
 </script>
@@ -612,11 +622,11 @@ await carregar()
             type="button"
             class="px-3 py-1.5 text-xs font-semibold border-b-2 -mb-px"
             :class="[
-              visao !== 'resumo' && tab === m.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground',
+              !semMarketplace && tab === m.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground',
               !m.ativo && 'opacity-50 cursor-not-allowed',
             ]"
             :disabled="!m.ativo"
-            :title="m.ativo ? (visao === 'resumo' ? 'abre os pedidos deste marketplace' : '') : 'entra depois do Mercado Livre'"
+            :title="m.ativo ? (semMarketplace ? 'abre os pedidos deste marketplace' : '') : 'entra depois do Mercado Livre'"
             @click="escolherMarketplace(m.key)"
           >
             {{ m.label }}
@@ -624,7 +634,7 @@ await carregar()
         </div>
         <div class="inline-flex overflow-hidden rounded-md border text-xs">
           <button
-            v-for="v in VISOES"
+            v-for="v in visoesVisiveis"
             :key="v.key"
             type="button"
             class="px-3 py-1 font-semibold"
@@ -644,7 +654,7 @@ await carregar()
         <button v-if="visao === 'pedidos'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" :disabled="exportando" @click="exportar()">
           <Download class="size-3.5" /> Excel
         </button>
-        <span v-if="visao !== 'resumo' && lojaAtual" class="text-muted-foreground">loja <b>{{ loja }}</b></span>
+        <span v-if="!semMarketplace && lojaAtual" class="text-muted-foreground">loja <b>{{ loja }}</b></span>
         <button v-if="canEdit && tab === 'amazon'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" title="Token do Melhor Envio (frete pago nos envios próprios)" @click="abrirTokenMe()">
           <KeyRound class="size-3.5" /> Melhor Envio
         </button>
@@ -652,7 +662,7 @@ await carregar()
           <Upload class="size-3.5" /> Enviar transações
         </button>
         <button
-          v-if="canEdit && visao !== 'resumo'"
+          v-if="canEdit && !semMarketplace"
           type="button"
           class="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 font-semibold text-primary-foreground"
           :disabled="sincronizando"
@@ -669,6 +679,8 @@ await carregar()
     <ConciliacaoExtrato v-if="visao === 'extrato'" v-model:dia="extratoDia" :loja="loja" :plataforma="tab" :can-edit="canEdit" @ver-pedido="verPedido" />
 
     <ConciliacaoFechamento v-if="visao === 'fechamento'" v-model:loja="loja" :lojas="lojas" @abrir-extrato="abrirExtrato" />
+
+    <MargemPainel v-if="visao === 'margem'" embutido />
 
     <template v-if="visao === 'pedidos'">
     <div class="flex flex-wrap items-center gap-2 text-xs">
