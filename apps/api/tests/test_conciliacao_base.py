@@ -11,7 +11,9 @@ from __future__ import annotations
 import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
+import pytest
 import respx
 from httpx import Response
 
@@ -121,10 +123,18 @@ class _ClienteFalso:
     access_token = "tok"  # noqa: S105 — chave de mentira do teste
 
     def __init__(
-        self, paginas: dict[tuple[str, str, int], dict] | None = None, resumo: dict | None = None
+        self,
+        paginas: dict[tuple[str, str, int], dict] | None = None,
+        resumo: dict | None = None,
+        *,
+        periodos: list[dict] | None = None,
+        periodos_http: int = 200,
     ):
         self.paginas = paginas or {}
         self.resumo = resumo or {"bill_includes": {"total_amount": 1}}
+        # `monthly/periods` (16/10): sem lista, a leitura cai no mês do calendário
+        self.periodos = periodos or []
+        self.periodos_http = periodos_http
         self.chamadas: list[tuple[str, dict | None]] = []
 
     def _expired(self) -> bool:
@@ -135,6 +145,8 @@ class _ClienteFalso:
 
     async def _request(self, method: str, path: str, *, params=None, json=None):
         self.chamadas.append((path, params))
+        if path.endswith("/monthly/periods"):
+            return Response(self.periodos_http, json={"results": self.periodos})
         if path.endswith("/summary/details"):
             return Response(200, json=self.resumo)
         chave = path.split("/key/")[1].split("/")[0]
@@ -260,6 +272,96 @@ async def test_run_extrato_sync_pede_janela_e_depois_le_o_arquivo(db, make_user)
     assert r3["config"]["status"] == "existia"
 
 
+def test_acha_relatorio_ignora_o_relatorio_criado_antes_do_pedido():
+    """16/10 (revisão): na releitura da mesma janela a lista traz o relatório velho (o
+    pobre); só vale o criado depois do pedido. Item sem data de criação passa."""
+    janela = ext.janela_utc(date(2026, 10, 1), date(2026, 10, 14))
+    velho = {**janela, "id": 1, "file_name": "velho.csv", "date_created": "2026-10-15T08:00:00Z"}
+    novo = {**janela, "id": 2, "file_name": "novo.csv", "date_created": "2026-10-16T09:01:00Z"}
+    sem_data = {**janela, "id": 3, "file_name": "sem-data.csv"}
+    pedido_em = datetime(2026, 10, 16, 9, 0, tzinfo=UTC)
+    assert ext._acha_relatorio([velho, novo], janela)["file_name"] == "novo.csv"
+    assert ext._acha_relatorio([velho, novo], janela, desde=pedido_em)["file_name"] == "novo.csv"
+    assert ext._acha_relatorio([velho], janela, desde=pedido_em) is None
+    assert ext._acha_relatorio([velho, sem_data], janela, desde=pedido_em)["id"] == 3
+    # 5 min de folga pro relógio
+    quase = {**velho, "id": 4, "date_created": "2026-10-16T08:56:00Z"}
+    assert ext._acha_relatorio([quase], janela, desde=pedido_em)["id"] == 4
+
+
+async def test_run_extrato_sync_repede_a_janela_vencida_e_ignora_o_relatorio_velho(db, make_user):
+    """16/10 (revisão): janela "pedido" não tinha prazo — se o Mercado Pago nunca gera o
+    arquivo, a loja ficava parada pra sempre. Passadas 6 h: erro na janela e na loja, e
+    a mesma janela é pedida de novo."""
+    loja, _integ = await _loja(db, make_user)
+    loja.extrato_config_em = datetime.now(UTC)
+    pedido_em = datetime.now(UTC) - timedelta(hours=7)
+    janela = ext.janela_utc(date(2026, 10, 1), date(2026, 10, 14))
+    db.add(
+        ConciliacaoSync(
+            integration_id=loja.integration_id,
+            origem="mp_extrato",
+            chave="2026-10-01..2026-10-14",
+            status="pedido",
+            pedido_em=pedido_em,
+            detalhe={"janela": janela},
+        )
+    )
+    await db.commit()
+    cliente = _ClienteFalso()
+    velho = {
+        **janela,
+        "id": 1,
+        "file_name": "velho.csv",
+        "date_created": (pedido_em - timedelta(days=1)).isoformat(),
+    }
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{MP}/v1/account/release_report/list").mock(
+            return_value=Response(200, json=[velho])
+        )
+        baixa = router.get(f"{MP}/v1/account/release_report/velho.csv").mock(
+            return_value=Response(200, headers={"content-type": "text/csv"}, text=CSV_JLAS2)
+        )
+        pede = router.post(f"{MP}/v1/account/release_report").mock(
+            return_value=Response(202, json={"status": "pending"})
+        )
+        r = await ext.run_extrato_sync(db, loja, cliente, hoje=date(2026, 10, 15))
+    assert baixa.call_count == 0  # o relatório velho (de antes do pedido) não vale
+    assert pede.call_count == 1 and r["pedido"] is None  # pediu a MESMA janela de novo
+    assert r["repedidos"] == [{"janela": "2026-10-01..2026-10-14", "http": 202, "pedidos": 2}]
+    assert r["erros"] == [
+        {
+            "janela": "2026-10-01..2026-10-14",
+            "erro": "relatório não veio em 6 h; pedido de novo (2º pedido)",
+        }
+    ]
+    sync = (await db.execute(__import__("sqlalchemy").select(ConciliacaoSync))).scalar_one()
+    assert sync.status == "pedido" and sync.pedido_em > pedido_em
+    assert sync.erro == "relatório não veio em 6 h; pedido de novo (2º pedido)"
+    assert sync.detalhe["pedidos"] == 2 and sync.detalhe["repedido_em"]
+    assert loja.ultimo_erro == (
+        "extrato 2026-10-01..2026-10-14: relatório não veio em 6 h; pedido de novo (2º pedido)"
+    )
+    # dentro do prazo: nada acontece; o relatório novo (depois do pedido) é lido
+    novo = {
+        **janela,
+        "id": 2,
+        "file_name": "novo.csv",
+        "date_created": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+    }
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{MP}/v1/account/release_report/list").mock(
+            return_value=Response(200, json=[velho, novo])
+        )
+        router.get(f"{MP}/v1/account/release_report/novo.csv").mock(
+            return_value=Response(200, headers={"content-type": "text/csv"}, text=CSV_JLAS2)
+        )
+        router.post(f"{MP}/v1/account/release_report").mock(return_value=Response(202, json={}))
+        r2 = await ext.run_extrato_sync(db, loja, cliente, hoje=date(2026, 10, 15))
+    assert len(r2["lidos"]) == 1 and r2["repedidos"] == [] and r2["erros"] == []
+    assert sync.status == "lido" and sync.arquivo == "novo.csv" and sync.erro is None
+
+
 CONFIG_COMPLETA = {"columns": [{"key": c} for c in ext.COLUNAS]}
 # 16/10: a aguiar tinha uma config antiga de 11 colunas (sem ORDER_ID) — 14 pagamentos
 # "sem dono" porque o relatório não dizia de que venda eram.
@@ -377,6 +479,86 @@ async def test_ingerir_csv_completa_as_linhas_de_um_relatorio_pobre(db, make_use
     assert saque.classificacao == "saque"
 
 
+_LINHAS_JLAS2 = CSV_JLAS2.split("\n")
+# a linha da venda (payment) duas vezes, idêntica, como o Mercado Pago faz
+CSV_COM_REPETIDA = "\n".join(_LINHAS_JLAS2[:5] + [_LINHAS_JLAS2[4]] + _LINHAS_JLAS2[5:])
+
+
+def test_numerar_repetidas_da_sufixo_pela_ordem_do_arquivo():
+    movs = [{"id_externo": "a"}, {"id_externo": "b"}, {"id_externo": "a"}, {"id_externo": "a"}]
+    assert ext.numerar_repetidas(movs) == 2
+    assert [m["id_externo"] for m in movs] == ["a", "b", "a#2", "a#3"]
+
+
+async def test_ingerir_csv_aceita_duas_linhas_identicas_no_mesmo_arquivo(db, make_user):
+    """16/10 (revisão): duas linhas idênticas tinham a mesma identidade e o upsert em lote
+    caía ("cannot affect row a second time") — a janela nunca era lida. A 2ª ganha #2,
+    estável entre releituras."""
+    loja, _integ = await _loja(db, make_user)
+    db.add(
+        _pedido_bling(
+            "301102", "2000018405611066", datetime(2026, 9, 11, 13, tzinfo=UTC), "880.98", 500.0
+        )
+    )
+    await db.commit()
+    stats = await ext.ingerir_csv(db, loja, CSV_COM_REPETIDA)
+    assert stats["movimentos"] == 7 and stats["inseridos"] == 7
+    assert stats["repetidas_no_arquivo"] == 1 and stats["pedido_bling_resolvido"] == 2
+    de_novo = await ext.ingerir_csv(db, loja, CSV_COM_REPETIDA)
+    assert de_novo["inseridos"] == 0 and de_novo["ja_existiam"] == 7
+    vendas = (
+        (
+            await db.execute(
+                __import__("sqlalchemy")
+                .select(ConciliacaoMovimento)
+                .where(ConciliacaoMovimento.tipo == "venda_liberada")
+                .order_by(ConciliacaoMovimento.id_externo)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(vendas) == 2 and vendas[1].id_externo == f"{vendas[0].id_externo}#2"
+    assert {v.pedido_bling for v in vendas} == {"301102"}
+
+
+async def test_reidentificar_nao_colide_quando_a_gemea_completa_ja_existe(db, make_user):
+    """16/10 (revisão): a pobre casava pela chave natural e trocava de identidade sem
+    olhar se a identidade nova já estava gravada → UniqueViolation e a leitura inteira
+    caía. Agora a pobre fica e some como duplicata."""
+    loja, _integ = await _loja(db, make_user)
+    await ext.ingerir_csv(db, loja, CSV_JLAS2)
+    venda = (
+        await db.execute(
+            __import__("sqlalchemy")
+            .select(ConciliacaoMovimento)
+            .where(ConciliacaoMovimento.tipo == "venda_liberada")
+        )
+    ).scalar_one()
+    pobre = ConciliacaoMovimento(
+        integration_id=loja.integration_id,
+        platform=loja.platform,
+        origem="mp_extrato",
+        id_externo="pobre-antiga",
+        data=venda.data,
+        tipo=venda.tipo,
+        descricao=venda.descricao,
+        pagamento_id=venda.pagamento_id,
+        credito=venda.credito,
+        debito=venda.debito,
+        raw={},
+    )
+    db.add(pobre)
+    await db.commit()
+    stats = await ext.ingerir_csv(db, loja, CSV_JLAS2)  # antes: UniqueViolation aqui
+    assert stats["reidentificados"] == 0 and stats["colisoes_de_identidade"] == 1
+    assert stats["duplicatas_apagadas"] == 1 and stats["inseridos"] == 0
+    todas = (
+        (await db.execute(__import__("sqlalchemy").select(ConciliacaoMovimento))).scalars().all()
+    )
+    assert len(todas) == 6 and all(m.id_externo != "pobre-antiga" for m in todas)
+
+
 def test_linha_para_movimento_reconhece_a_cobranca_da_fatura_e_a_divida():
     base = {
         "DATE": "2026-10-15T01:29:31.000-03:00",
@@ -474,6 +656,51 @@ async def test_recalcular_loja_apaga_a_gemea_pobre_que_sobrou(db, make_user):
     assert {m.id for m in movs} == {cheia.id, manual.id, saque_cheio.id}
     pedido = (await db.execute(__import__("sqlalchemy").select(ConciliacaoPedido))).scalar_one()
     assert pedido.recebido == Decimal("80")
+
+
+async def test_apagar_duplicatas_pobres_passa_o_vinculo_manual_pra_gemea(db, make_user):
+    """16/10 (revisão): a pobre vinculada à mão ficava junto com a gêmea completa →
+    recebido em dobro. A pobre some e o vínculo vai pra completa quando ela não tem."""
+    loja, _integ = await _loja(db, make_user)
+    d = lambda dia, h=10: datetime(2026, 10, dia, h, tzinfo=UTC)  # noqa: E731
+    quando = datetime(2026, 10, 16, 15, tzinfo=UTC)
+    pobre1 = _mov(loja, "venda_liberada", d(5), credito="80", pagamento="P2")
+    pobre1.vinculado_por, pobre1.vinculado_em = "cairo", quando
+    pobre1.pedido_bling, pobre1.bling_id = "301300", 3013000
+    cheia1 = _mov(
+        loja,
+        "venda_liberada",
+        d(5),
+        credito="80",
+        pedido_mkt="2000018400000002",
+        pagamento="P2",
+        sub="release",
+    )
+    # a completa já tem pedido (resolvido pelo nº da venda): fica o dela, sem "vinculado por"
+    pobre2 = _mov(loja, "venda_liberada", d(6), credito="90", pagamento="P3")
+    pobre2.vinculado_por, pobre2.vinculado_em = "cairo", quando
+    pobre2.pedido_bling, pobre2.bling_id = "301301", 3013010
+    cheia2 = _mov(
+        loja,
+        "venda_liberada",
+        d(6),
+        credito="90",
+        pedido_mkt="2000018400000003",
+        pedido_bling="301999",
+        pagamento="P3",
+        sub="release",
+    )
+    cheia2.bling_id = 3019990
+    db.add_all([pobre1, cheia1, pobre2, cheia2])
+    await db.commit()
+    assert await ext.apagar_duplicatas_pobres(db, loja) == 2
+    await db.commit()
+    movs = (await db.execute(__import__("sqlalchemy").select(ConciliacaoMovimento))).scalars().all()
+    assert {m.id for m in movs} == {cheia1.id, cheia2.id}
+    assert (cheia1.pedido_bling, cheia1.bling_id) == ("301300", 3013000)
+    assert (cheia1.vinculado_por, cheia1.vinculado_em) == ("cairo", quando)
+    assert (cheia2.pedido_bling, cheia2.bling_id) == ("301999", 3019990)
+    assert cheia2.vinculado_por is None and cheia2.vinculado_em is None
 
 
 # --- fatura ------------------------------------------------------------------
@@ -592,7 +819,9 @@ async def test_run_fatura_sync_le_incremental_e_respeita_a_pausa(db, make_user):
     r = await fat.run_fatura_sync(
         db, loja, cliente, hoje=date(2026, 10, 14), pausa=13.0, dormir=dormir
     )
-    assert r["inseridos"] == 4 and r["chamadas"] == 5 and not r["erros"]
+    # 6 chamadas: períodos (lista vazia → mês do calendário) + 4 páginas + resumo
+    assert r["inseridos"] == 4 and r["chamadas"] == 6 and not r["erros"]
+    assert r["periodo_aberto"] == {"chave": "2026-10-01", "pela_api": False}
     # a cobrança já nasce com o pedido do Bling resolvido pelo nº da venda
     com_pedido = (
         (
@@ -606,7 +835,7 @@ async def test_run_fatura_sync_le_incremental_e_respeita_a_pausa(db, make_user):
         .all()
     )
     assert com_pedido == ["301500"] * 4
-    assert pausas == [13.0] * 4  # dorme entre as chamadas, nunca antes da primeira
+    assert pausas == [13.0] * 5  # dorme entre as chamadas, nunca antes da primeira
     assert r["periodos"]["2026-10-01|CHARGE"] == {"lidos": 2, "inseridos": 2, "last_id": 11}
     # segunda rodada: começa do last_id (nada novo) e não insere de novo
     cliente2 = _ClienteFalso(paginas)
@@ -622,6 +851,99 @@ async def test_run_fatura_sync_le_incremental_e_respeita_a_pausa(db, make_user):
             if c[1] and "detail_type" in c[1]
         ]
     )
+
+
+# Como a jlas2 (sondagem de 14/10): o período de cobrança vai do dia 23 ao 22 e a chave
+# é o mês em que ele termina.
+PERIODOS_JLAS2 = [
+    {
+        "key": "2026-11-01",
+        "period": {
+            "date_from": "2026-10-23T00:00:00.000-03:00",
+            "date_to": "2026-11-22",
+            "expiration_date": "2026-11-30",
+        },
+        "period_status": "OPEN",
+    },
+    {"key": "2026-10-01", "period": {"date_from": "2026-09-23", "date_to": "2026-10-22"}},
+    {"key": "2026-09-01", "period": {"date_from": "2026-08-23", "date_to": "2026-09-22"}},
+    {"key": "quebrado", "period": {"date_from": None, "date_to": "x"}},
+]
+
+
+def test_periodo_que_contem_usa_as_datas_reais_da_api():
+    assert fat.periodo_que_contem(PERIODOS_JLAS2, date(2026, 10, 25)) == (
+        "2026-11-01",
+        "2026-10-01",
+    )
+    assert fat.periodo_que_contem(PERIODOS_JLAS2, date(2026, 10, 10)) == (
+        "2026-10-01",
+        "2026-09-01",
+    )
+    # só o mais antigo da lista: o anterior vai pelo calendário
+    assert fat.periodo_que_contem(PERIODOS_JLAS2, date(2026, 9, 1)) == ("2026-09-01", "2026-08-01")
+    assert fat.periodo_que_contem(PERIODOS_JLAS2, date(2026, 8, 1)) is None
+    assert fat.periodo_que_contem([], date(2026, 10, 25)) is None
+
+
+async def test_run_fatura_sync_le_o_periodo_real_e_cai_no_calendario_sem_a_lista(db, make_user):
+    """16/10 (revisão): do dia 23 ao 31 o período aberto da jlas2 é o do mês seguinte;
+    pelo calendário as cobranças desses dias só entravam no dia 1º."""
+    loja, _integ = await _loja(db, make_user)
+    paginas = {
+        ("2026-11-01", "CHARGE", 0): {"results": [_det(20, "CVVML", 10.0)], "last_id": 20},
+        ("2026-10-01", "CHARGE", 0): {"results": [_det(21, "CVVML", 11.0)], "last_id": 21},
+    }
+
+    async def dormir(_s: float) -> None:
+        return None
+
+    cliente = _ClienteFalso(paginas, periodos=PERIODOS_JLAS2)
+    r = await fat.run_fatura_sync(db, loja, cliente, hoje=date(2026, 10, 25), dormir=dormir)
+    assert r["periodo_aberto"] == {"chave": "2026-11-01", "pela_api": True}
+    assert {k.split("|")[0] for k in r["periodos"]} == {"2026-11-01", "2026-10-01"}
+    assert r["inseridos"] == 2 and not r["erros"]
+    chaves = {
+        s.chave
+        for s in (await db.execute(__import__("sqlalchemy").select(ConciliacaoSync))).scalars()
+    }
+    assert "2026-11-01|resumo" in chaves and "2026-10-01|CHARGE" in chaves
+    # a lista de períodos falhou: calendário (e não é erro da fatura)
+    cliente2 = _ClienteFalso(paginas, periodos_http=500)
+    r2 = await fat.run_fatura_sync(db, loja, cliente2, hoje=date(2026, 10, 25), dormir=dormir)
+    assert r2["periodo_aberto"] == {"chave": "2026-10-01", "pela_api": False}
+    assert "HTTP 500" in r2["periodos_api"]["erro"] and not r2["erros"]
+    assert {k.split("|")[0] for k in r2["periodos"]} == {"2026-10-01", "2026-09-01"}
+
+
+async def test_job_da_fatura_tenta_de_novo_quando_a_trava_da_loja_esta_ocupada(monkeypatch):
+    """16/10 (revisão): fatura e extrato usam a mesma trava por loja; no mesmo minuto a
+    fatura era pulada e só voltava no dia seguinte. Agora o job retenta em 3 min."""
+    from arq import Retry
+
+    from app import worker
+    from app.services import conciliacao_jobs as jobs
+
+    chamadas: list[tuple[bool, bool]] = []
+
+    async def _travada(integration_id, *, fatura, extrato, recalculo):
+        chamadas.append((fatura, extrato))
+        return {"skipped": "rodada_em_andamento", "integration_id": str(integration_id)}
+
+    monkeypatch.setattr(jobs, "sincronizar_loja", _travada)
+    uid = str(uuid4())
+    with pytest.raises(Retry) as exc:
+        await worker.conciliacao_sincronizar_loja({"job_try": 1}, uid, True, False, True)
+    assert exc.value.defer_score == 3 * 60 * 1000
+    with pytest.raises(Retry):
+        await worker.conciliacao_sincronizar_loja({"job_try": 2}, uid, True, False, True)
+    # 3ª tentativa: desiste sem estourar
+    r = await worker.conciliacao_sincronizar_loja({"job_try": 3}, uid, True, False, True)
+    assert r["skipped"] == "rodada_em_andamento"
+    # só extrato: o tick repete a cada 10 min, não retenta
+    r = await worker.conciliacao_sincronizar_loja({"job_try": 1}, uid, False, True, True)
+    assert r["skipped"] == "rodada_em_andamento"
+    assert chamadas == [(True, False)] * 3 + [(False, True)]
 
 
 # --- recálculo ---------------------------------------------------------------
