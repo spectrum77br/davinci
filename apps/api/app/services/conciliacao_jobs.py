@@ -100,6 +100,14 @@ async def sincronizar_loja(
             if fatura:
                 try:
                     resultado["fatura"] = await run_fatura_sync(session, loja, cliente)
+                    erros_fatura = resultado["fatura"].get("erros") or []
+                    if erros_fatura:
+                        # 16/10 (lucas mei, 403 PolicyAgent): período com erro não pode
+                        # sumir — fica na loja e o Resumo mostra "fatura não lida"
+                        primeiro = erros_fatura[0]
+                        texto = primeiro.get("erro") if isinstance(primeiro, dict) else primeiro
+                        loja.ultimo_erro = f"fatura: {str(texto)[:280]}"
+                        resultado["fatura"]["erro"] = loja.ultimo_erro
                 except Exception as e:  # noqa: BLE001
                     loja.ultimo_erro = f"fatura: {type(e).__name__}: {str(e)[:300]}"
                     resultado["fatura"] = {"erro": loja.ultimo_erro}

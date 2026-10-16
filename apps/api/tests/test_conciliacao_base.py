@@ -1594,6 +1594,18 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     assert "extrato não lido" in linha["situacao"]
     assert [a["acao"] for a in r.json()["agir"]] == ["extrato", "sincronizar", "pedidos"]
 
+    # fatura do ML com erro (16/10, lucas mei 403): não fica verde — "fatura não lida"
+    loja.ultimo_extrato_em = datetime.now(UTC)
+    loja.ultimo_erro = "fatura: HTTP 403 PolicyAgent"
+    await db.commit()
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-12"})
+    linha = r.json()["lojas"][0]
+    assert linha["dia"]["status"] == "fatura_nao_lida"
+    assert linha["problemas_dia"] == ["fatura não lida · HTTP 403 PolicyAgent"]
+    assert any("fatura do ML não lida" in a["titulo"] for a in r.json()["agir"])
+    assert r.json()["dias"][3]["pendentes"] == [{"conta": "jlas2", "motivo": "fatura não lida"}]
+    loja.ultimo_erro = None
+    await db.commit()
     # um dia sem movimento e sem leitura: "extrato não lido"; com leitura: "sem movimento"
     r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-12"})
     assert r.json()["lojas"][0]["dia"]["status"] == "extrato_nao_lido"

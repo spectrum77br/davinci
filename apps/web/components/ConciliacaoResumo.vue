@@ -15,7 +15,7 @@ const emit = defineEmits<{
 }>()
 
 type DiaLoja = {
-  status: 'fechado' | 'pronto' | 'aberto' | 'extrato_nao_lido' | 'sem_movimento' | 'aguardando_repasse' | 'repasse_falhou'
+  status: 'fechado' | 'pronto' | 'aberto' | 'extrato_nao_lido' | 'sem_movimento' | 'aguardando_repasse' | 'repasse_falhou' | 'fatura_nao_lida'
   texto: string
   linhas: number
   pendentes: number
@@ -132,7 +132,7 @@ function resumoGrupo(lojas: LojaResumo[]) {
   const semMov = n((l) => l.dia.status === 'sem_movimento')
   const repasse = n((l) => l.dia.status === 'aguardando_repasse')
   const fechados = n((l) => l.dia.status === 'fechado') + semMov + repasse
-  const naoLido = n((l) => l.dia.status === 'extrato_nao_lido')
+  const naoLido = n((l) => l.dia.status === 'extrato_nao_lido' || l.dia.status === 'fatura_nao_lida')
   const falhou = n((l) => l.dia.status === 'repasse_falhou')
   const pend = n((l) => l.dia.status === 'aberto' || l.dia.status === 'pronto')
   const obs = n((l) => l.dia.status === 'fechado' && l.obs_dia.length > 0)
@@ -141,13 +141,13 @@ function resumoGrupo(lojas: LojaResumo[]) {
     partes.push(`${fechados} dia(s) fechado(s)${detalhe ? ` (${detalhe})` : ''}`)
   }
   if (falhou) partes.push(`${falhou} repasse falhou`)
-  if (naoLido) partes.push(`${naoLido} extrato não lido`)
+  if (naoLido) partes.push(`${naoLido} leitura com erro`)
   if (pend) partes.push(`${pend} com pendência`)
   if (obs) partes.push(`${obs} com observação`)
   return partes.join(' · ')
 }
 function grupoTemPendencia(lojas: LojaResumo[]) {
-  return lojas.some((l) => ['aberto', 'pronto', 'extrato_nao_lido', 'repasse_falhou'].includes(l.dia.status))
+  return lojas.some((l) => ['aberto', 'pronto', 'extrato_nao_lido', 'fatura_nao_lida', 'repasse_falhou'].includes(l.dia.status))
 }
 function problemasCls(l: LojaResumo) {
   const grave = l.problemas_dia.some((p) => p.includes('sem dono') || p.includes('saldo não bate') || p.startsWith('erro'))
@@ -227,7 +227,7 @@ function diaCls(d: DiaLoja) {
   if (d.status === 'fechado' || COMO_FECHADO[d.status]) return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300'
   if (d.status === 'pronto') return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-300 dark:bg-emerald-950/30 dark:text-emerald-300'
   if (d.status === 'aberto') return 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'
-  if (d.status === 'extrato_nao_lido') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+  if (d.status === 'extrato_nao_lido' || d.status === 'fatura_nao_lida') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
   if (d.status === 'aguardando_repasse') return 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300'
   if (d.status === 'repasse_falhou') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
   return 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'
@@ -238,6 +238,7 @@ function diaTexto(d: DiaLoja) {
   if (d.status === 'pronto') return 'pronto pra fechar'
   if (d.status === 'aberto') return 'não fechou'
   if (d.status === 'extrato_nao_lido') return 'extrato não lido'
+  if (d.status === 'fatura_nao_lida') return 'fatura não lida'
   if (d.status === 'aguardando_repasse') return 'liquidado, aguardando o repasse'
   if (d.status === 'repasse_falhou') return 'repasse falhou, TikTok tenta de novo'
   return 'sem movimento'

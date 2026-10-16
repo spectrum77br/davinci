@@ -3000,6 +3000,17 @@ async def resumo_geral(
     return await montar_resumo(session, dia)
 
 
+def _fatura_problema(loja: ConciliacaoLoja, plataforma: str, agora: datetime) -> str | None:
+    """ML: a última rodada da fatura falhou (erro guardado na loja) ou a fatura nunca
+    foi lida. Texto pronto pra tela; None quando está tudo certo."""
+    if plataforma != "ml":
+        return None
+    erro = loja.ultimo_erro or ""
+    if erro.startswith("fatura:"):
+        return f"fatura não lida · {erro[len('fatura:') :].strip()[:90]}"
+    return None
+
+
 def _janela_dia(dia: date) -> tuple[datetime, datetime]:
     ini = datetime.combine(dia, datetime.min.time(), tzinfo=_BRT)
     return ini, ini + timedelta(days=1)
@@ -3126,8 +3137,11 @@ async def _resumo_dos_dias(
             if not linhas:
                 limite = _ATRASO_UPLOAD if loja.modo_extrato == "upload" else _ATRASO_EXTRATO
                 atrasado = loja.ultimo_extrato_em is None or agora - loja.ultimo_extrato_em > limite
+                plat = getattr(loja.platform, "value", str(loja.platform))
                 if atrasado:
                     pendentes.append({"conta": loja.conta, "motivo": "extrato não lido"})
+                elif _fatura_problema(loja, plat, agora):
+                    pendentes.append({"conta": loja.conta, "motivo": "fatura não lida"})
                 else:
                     sem_mov += 1
                 continue
@@ -3247,7 +3261,12 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         repasse_falhou = any(
             str((m.raw or {}).get("_payment_status") or "").upper() == "FAILED" for m in nao_pagos
         )
-        if fechado and fechado.fechado_em:
+        # 16/10 (Vinicius): fatura do ML com erro não pode ficar escondida atrás de um
+        # "fechado" verde — a loja aparece "fatura não lida" até a leitura passar
+        fatura_problema = _fatura_problema(loja, plataforma, agora)
+        if fatura_problema:
+            dia_status, dia_texto = "fatura_nao_lida", "fatura não lida"
+        elif fechado and fechado.fechado_em:
             dia_status, dia_texto = "fechado", f"fechado por {fechado.fechado_por}"
         elif sem_movimento and extrato_atrasado:
             dia_status, dia_texto = "extrato_nao_lido", "extrato não lido"
@@ -3277,6 +3296,8 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             problemas.append(f"saldo não bate ({totais['diferenca']:+.2f})")
         if extrato_atrasado:
             problemas.append("extrato não lido")
+        if fatura_problema:
+            problemas.append(fatura_problema)
         if reabertos:
             problemas.append(f"{reabertos} reaberto(s)")
         if vencidos:
@@ -3295,7 +3316,9 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             problemas_dia.append(f"saldo não bate ({totais['diferenca']:+.2f})")
         if extrato_atrasado:
             problemas_dia.append("extrato não lido")
-        if loja.ultimo_erro:
+        if fatura_problema:
+            problemas_dia.append(fatura_problema)
+        if loja.ultimo_erro and not (loja.ultimo_erro.startswith("fatura:") and fatura_problema):
             problemas_dia.append(f"erro: {loja.ultimo_erro[:80]}")
         eventos_dia = await _eventos_do_dia(session, loja, dia)
         obs_dia = _obs_de_eventos(eventos_dia)
@@ -3369,6 +3392,17 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                         f"{contagem['pendente']} pendentes"
                     ),
                     "acao": "extrato",
+                    "dia": dia.isoformat(),
+                }
+            )
+        if fatura_problema:
+            agir.append(
+                {
+                    "gravidade": "bad",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · fatura do ML não lida",
+                    "detalhe": fatura_problema,
+                    "acao": "sincronizar",
                     "dia": dia.isoformat(),
                 }
             )
@@ -3504,7 +3538,11 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             "pendentes": sum(x["dia"]["pendentes"] for x in lojas_out),
             "reabertos": sum(x["pedidos"]["reabertos"] for x in lojas_out),
             "vencidos": sum(x["pedidos"]["vencidos"] for x in lojas_out),
-            "extrato_atrasado": sum(1 for x in lojas_out if x["leituras"]["extrato_atrasado"]),
+            "extrato_atrasado": sum(
+                1
+                for x in lojas_out
+                if x["leituras"]["extrato_atrasado"] or x["dia"]["status"] == "fatura_nao_lida"
+            ),
             "saldo_bate": sum(1 for x in lojas_out if x["dia"]["saldo_bate"]),
             "com_movimento": sum(1 for x in lojas_out if x["dia"]["linhas"]),
         },
