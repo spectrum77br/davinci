@@ -6,6 +6,16 @@ import { AlertCircle, Banknote, BookOpen, Check, ChevronLeft, ChevronRight, Down
 // sem a coluna Reembolsos e no visual sóbrio da Conciliação (ver <style>).
 const props = defineProps<{ embutido?: boolean }>()
 const embutido = computed(() => !!props.embutido)
+// Linha de resumo da aba embutida (padrão da Conciliação): contagens da página carregada
+const resumoEmbutido = computed(() => {
+  const rows = items.value
+  const aprovados = rows.filter((r) => r.status === 'Aprovado').length
+  const reprovados = rows.filter((r) => r.status === 'Reprovado').length
+  const pendentes = rows.length - aprovados - reprovados
+  const saldo = rows.filter((r) => r.attention_saldo).length
+  const pct = rows.length ? Math.round((aprovados / rows.length) * 100) : 0
+  return { aprovados, reprovados, pendentes, saldo, pct }
+})
 
 type MarketplaceRow = {
   bling_order_item_id: string
@@ -1052,6 +1062,16 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       </button>
     </div>
 
+    <div v-if="embutido && tab === 'list'" class="flex flex-wrap items-center gap-3 rounded-md border bg-muted/40 px-3 py-1.5 text-xs">
+      <b>{{ conta === 'all' ? 'todas as lojas' : conta }} · {{ total }} pedido(s)</b>
+      <span class="inline-block h-1.5 w-40 overflow-hidden rounded bg-muted"><i class="block h-full bg-emerald-600" :style="{ width: resumoEmbutido.pct + '%' }" /></span>
+      <span><b>{{ resumoEmbutido.aprovados }} de {{ items.length }}</b> aprovados nesta página</span>
+      <span class="rounded px-1.5 py-0.5 font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ resumoEmbutido.pendentes }} pendentes</span>
+      <span class="rounded px-1.5 py-0.5 font-semibold bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">{{ resumoEmbutido.reprovados }} reprovados</span>
+      <span class="rounded px-1.5 py-0.5 font-semibold bg-muted">{{ resumoEmbutido.saldo }} aguardando saldo da plataforma</span>
+      <span class="ml-auto text-muted-foreground">a Margem não relê pedido já decidido</span>
+    </div>
+
     <div v-if="tab === 'list'" class="flex flex-wrap items-center gap-2">
       <div class="relative min-w-0 w-full sm:w-auto">
         <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
@@ -1209,7 +1229,11 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       </div>
     </div>
 
-    <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+    <div v-if="embutido" class="flex items-center rounded-t-md bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white">
+      Margem — uma linha por pedido do Bling, antes de enviar
+      <span class="ml-auto font-normal text-slate-300">aprovar, reprovar ou inverter; o que entrou de fato está em Pedidos</span>
+    </div>
+    <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" :class="embutido && 'rounded-t-none border-t-0 -mt-5'" tabindex="0">
       <table class="text-xs border-collapse">
         <thead class="bg-background sticky top-0 z-20">
           <tr>
@@ -1558,6 +1582,13 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
 .margem-embutida :deep(thead tr:last-child th) {
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  font-size: 10px;
+  font-size: 9.5px;
 }
+.margem-embutida :deep(table) { font-size: 11px; }
+.margem-embutida :deep(th), .margem-embutida :deep(td) { padding-top: 4px !important; padding-bottom: 4px !important; }
+.margem-embutida :deep(th[class*="min-w-"]), .margem-embutida :deep(td[class*="min-w-"]) { min-width: 0 !important; }
+/* sem a tinta por plataforma nas linhas (a Conciliação só pinta por situação) */
+.margem-embutida :deep(tbody tr[class*="bg-"]) { background-color: transparent !important; }
+/* filtros no tamanho da barra da Conciliação */
+.margem-embutida :deep(select), .margem-embutida :deep(input) { font-size: 12px !important; padding-top: 4px !important; padding-bottom: 4px !important; }
 </style>
