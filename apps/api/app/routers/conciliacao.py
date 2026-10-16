@@ -641,8 +641,9 @@ from zoneinfo import ZoneInfo  # noqa: E402
 
 from fastapi.responses import StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
+from sqlalchemy import and_ as sa_and  # noqa: E402
 from sqlalchemy import case as sa_case  # noqa: E402
-from sqlalchemy import func, or_  # noqa: E402
+from sqlalchemy import func, literal_column, or_  # noqa: E402
 
 from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoPedido  # noqa: E402
 from app.models.conciliacao import ORIGEM_TIKTOK, ORIGENS_EXTRATO  # noqa: E402
@@ -2293,7 +2294,7 @@ async def listar_dias(
     de = de or max(alvo.inicio, ate - timedelta(days=30))
     ini = datetime.combine(de, datetime.min.time(), tzinfo=_BRT)
     fim = datetime.combine(ate, datetime.min.time(), tzinfo=_BRT) + timedelta(days=1)
-    dia_col = func.date(func.timezone("America/Sao_Paulo", ConciliacaoMovimento.data))
+    dia_col = func.date(func.timezone(_FUSO_SQL, ConciliacaoMovimento.data))
     pend = func.sum(
         sa_case(
             (
@@ -2630,6 +2631,8 @@ async def reabrir_dia(
 
 _ETAPAS_PENDENTES = ("pendencia", "reaberto")
 _ATRASO_EXTRATO = timedelta(hours=36)
+# fuso como literal: com parâmetro ligado o Postgres não acha timezone(varchar, timestamptz)
+_FUSO_SQL = literal_column("'America/Sao_Paulo'")
 _ATRASO_UPLOAD = timedelta(days=7)  # loja por arquivo: alguém envia o CSV de vez em quando
 
 
@@ -2860,6 +2863,175 @@ async def resumo_geral(
     return await montar_resumo(session, dia)
 
 
+def _janela_dia(dia: date) -> tuple[datetime, datetime]:
+    ini = datetime.combine(dia, datetime.min.time(), tzinfo=_BRT)
+    return ini, ini + timedelta(days=1)
+
+
+_EVENTOS_DIA = (
+    # chave, coluna da data, condição
+    ("estornados", "ultimo_movimento_em", ("situacao", "estornado_depois")),
+    ("a_menos", "liberado_em", ("situacao", "recebido_a_menos")),
+    ("falta_frete", "liberado_em", ("situacao", "falta_frete")),
+    ("reabertos", "etapa_em", ("etapa", "reaberto")),
+    ("pendencia", "etapa_em", ("etapa", "pendencia")),
+    ("vencidos", "previsao_liberacao", ("situacao", "vencido")),
+)
+_ROTULO_EVENTO = {
+    "estornados": "estornado(s) depois",
+    "a_menos": "recebido(s) a menos",
+    "falta_frete": "sem frete do Melhor Envio",
+    "reabertos": "reaberto(s)",
+    "pendencia": "pendência(s) aberta(s)",
+    "vencidos": "vencido(s)",
+}
+
+
+async def _eventos_do_dia(
+    session: AsyncSession, loja: ConciliacaoLoja, dia: date
+) -> dict[str, int]:
+    """O que aconteceu com os pedidos da loja NAQUELE dia (16/10, Vinicius: a obs do
+    dia é só do dia): estorno lançado, liberado a menos, reaberto, pendência aberta,
+    vencido. Pendência de outro dia não aparece no dia errado."""
+    ini, fim = _janela_dia(dia)
+    ped = ConciliacaoPedido
+    colunas = []
+    for _chave, col, (campo, valor) in _EVENTOS_DIA:
+        c = getattr(ped, col)
+        colunas.append(
+            func.sum(sa_case((sa_and(getattr(ped, campo) == valor, c >= ini, c < fim), 1), else_=0))
+        )
+    row = (
+        await session.execute(select(*colunas).where(ped.integration_id == loja.integration_id))
+    ).one()
+    return {chave: int(v or 0) for (chave, _c, _cond), v in zip(_EVENTOS_DIA, row, strict=True)}
+
+
+def _obs_de_eventos(ev: dict[str, int]) -> list[str]:
+    return [f"{ev[k]} {_ROTULO_EVENTO[k]}" for k, _c, _cond in _EVENTOS_DIA if ev.get(k)]
+
+
+async def _resumo_dos_dias(
+    session: AsyncSession, lojas: list[ConciliacaoLoja], ate: date, *, n: int = 15
+) -> list[dict[str, Any]]:
+    """Bloco "Dias" do Resumo (16/10): um dia por linha, com quantas lojas fecharam,
+    quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda
+    têm pendência (com o nome e o motivo), mais a obs do que aconteceu no dia."""
+    de = ate - timedelta(days=n - 1)
+    ini_dt, _ = _janela_dia(de)
+    _, fim_dt = _janela_dia(ate)
+    agora = datetime.now(UTC)
+    mov = ConciliacaoMovimento
+    dia_local = func.date(func.timezone(_FUSO_SQL, mov.data))
+    linhas_por: dict[tuple[Any, date], tuple[int, int, int]] = {}
+    for iid, d, total, pend, aguard in (
+        await session.execute(
+            select(
+                mov.integration_id,
+                dia_local,
+                func.count(),
+                func.sum(
+                    sa_case(
+                        (sa_and(mov.pedido_bling.is_(None), mov.classificacao.is_(None)), 1),
+                        else_=0,
+                    )
+                ),
+                func.sum(sa_case((mov.raw["_payment_status"].astext.in_(AGUARDANDO), 1), else_=0)),
+            )
+            .where(mov.origem.in_(ORIGENS_EXTRATO), mov.data >= ini_dt, mov.data < fim_dt)
+            .group_by(mov.integration_id, dia_local)
+        )
+    ).all():
+        linhas_por[(iid, d)] = (int(total or 0), int(pend or 0), int(aguard or 0))
+    fechados = {
+        (iid, d)
+        for iid, d in (
+            await session.execute(
+                select(ConciliacaoDia.integration_id, ConciliacaoDia.dia).where(
+                    ConciliacaoDia.dia >= de,
+                    ConciliacaoDia.dia <= ate,
+                    ConciliacaoDia.fechado_em.isnot(None),
+                )
+            )
+        ).all()
+    }
+    conta_por_id = {loja.integration_id: loja.conta for loja in lojas}
+    ped = ConciliacaoPedido
+    eventos: dict[date, dict[str, list[tuple[str, int]]]] = {}
+    for chave, col, (campo, valor) in _EVENTOS_DIA:
+        c = getattr(ped, col)
+        for iid, d, qtd in (
+            await session.execute(
+                select(
+                    ped.integration_id,
+                    func.date(func.timezone(_FUSO_SQL, c)),
+                    func.count(),
+                )
+                .where(getattr(ped, campo) == valor, c >= ini_dt, c < fim_dt)
+                .group_by(ped.integration_id, func.date(func.timezone(_FUSO_SQL, c)))
+            )
+        ).all():
+            nome = conta_por_id.get(iid)
+            if nome:
+                eventos.setdefault(d, {}).setdefault(chave, []).append((nome, int(qtd or 0)))
+    saida: list[dict[str, Any]] = []
+    d = ate
+    while d >= de:
+        fech = sem_mov = aguardando = 0
+        pendentes: list[dict[str, str]] = []
+        for loja in lojas:
+            if d < loja.inicio:
+                continue
+            if (loja.integration_id, d) in fechados:
+                fech += 1
+                continue
+            linhas = linhas_por.get((loja.integration_id, d))
+            if not linhas:
+                limite = _ATRASO_UPLOAD if loja.modo_extrato == "upload" else _ATRASO_EXTRATO
+                atrasado = loja.ultimo_extrato_em is None or agora - loja.ultimo_extrato_em > limite
+                if atrasado:
+                    pendentes.append({"conta": loja.conta, "motivo": "extrato não lido"})
+                else:
+                    sem_mov += 1
+                continue
+            total, pend, aguard = linhas
+            if pend:
+                pendentes.append({"conta": loja.conta, "motivo": f"{pend} linha(s) sem dono"})
+                continue
+            saldo_ant = await _saldo_anterior(session, loja, d)
+            movs = await _movimentos_do_dia(session, loja, d, saldo_ant)
+            totais = _totais_do_dia(movs, saldo_ant)
+            dif = totais["diferenca"]
+            if dif is not None and abs(dif) > 0.05:
+                pendentes.append({"conta": loja.conta, "motivo": f"saldo não bate ({dif:+.2f})"})
+                continue
+            if aguard:
+                aguardando += 1
+                continue
+            pendentes.append({"conta": loja.conta, "motivo": "pronto pra fechar"})
+        obs: list[str] = []
+        for chave, _c, _cond in _EVENTOS_DIA:
+            lista = eventos.get(d, {}).get(chave) or []
+            if lista:
+                qtd = sum(q for _n, q in lista)
+                nomes = [nm for nm, _q in lista]
+                extra = f" (+{len(nomes) - 3})" if len(nomes) > 3 else ""
+                obs.append(f"{qtd} {_ROTULO_EVENTO[chave]} ({', '.join(nomes[:3])}{extra})")
+        saida.append(
+            {
+                "dia": d.isoformat(),
+                "fechados": fech,
+                "sem_movimento": sem_mov,
+                "aguardando_repasse": aguardando,
+                "com_pendencia": len(pendentes),
+                "pendentes": pendentes,
+                "obs": obs,
+            }
+        )
+        d -= timedelta(days=1)
+    return saida
+
+
 async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[str, Any]:
     """O Resumo (tela de entrada) e a lista "Onde agir hoje" — a mesma lista que o
     Vigia de Conciliação registra na Ouvidoria e manda no Threema (15/10)."""
@@ -2870,7 +3042,8 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
     agir: list[dict[str, Any]] = []
     por_plataforma: dict[str, dict[str, Any]] = {}
     empresa: dict[str, Any] = {"lojas": 0}
-    for loja in await lojas_ativas(session):
+    lojas = await lojas_ativas(session)
+    for loja in lojas:
         plataforma = getattr(loja.platform, "value", str(loja.platform))
         saldo_ant = await _saldo_anterior(session, loja, dia)
         movs = await _movimentos_do_dia(session, loja, dia, saldo_ant)
@@ -2975,6 +3148,18 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             problemas.append(f"{estornados} estornado(s) depois")
         if loja.ultimo_erro:
             problemas.append(f"erro: {loja.ultimo_erro[:80]}")
+        # Só o dia (16/10, Vinicius): o que trava o dia e o que aconteceu nele
+        problemas_dia: list[str] = []
+        if contagem["pendente"]:
+            problemas_dia.append(f"{contagem['pendente']} linha(s) sem dono")
+        if totais["diferenca"] is not None and not saldo_bate:
+            problemas_dia.append(f"saldo não bate ({totais['diferenca']:+.2f})")
+        if extrato_atrasado:
+            problemas_dia.append("extrato não lido")
+        if loja.ultimo_erro:
+            problemas_dia.append(f"erro: {loja.ultimo_erro[:80]}")
+        eventos_dia = await _eventos_do_dia(session, loja, dia)
+        obs_dia = _obs_de_eventos(eventos_dia)
         dinheiro = await _dinheiro_da_loja(session, loja)
         linha = {
             "conta": loja.conta,
@@ -3016,6 +3201,9 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                 "erro": loja.ultimo_erro,
             },
             "mes": mes,
+            "eventos_dia": eventos_dia,
+            "obs_dia": obs_dia,
+            "problemas_dia": problemas_dia,
             "situacao": " · ".join(problemas)
             if problemas
             else ("dia fechado" if dia_status == "fechado" else "tudo certo"),
@@ -3157,6 +3345,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         "dia": dia.isoformat(),
         "mes": mes_ini.isoformat()[:7],
         "lojas": lojas_out,
+        "dias": await _resumo_dos_dias(session, lojas, dia),
         "agir": agir,
         "por_plataforma": por_plataforma,
         "empresa": empresa,

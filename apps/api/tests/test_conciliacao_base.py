@@ -1551,6 +1551,17 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(db, make_user, auth_as
     assert linha["leituras"]["extrato_atrasado"] is False
     assert linha["gravidade"] == "bad"
     assert "1 linha(s) sem dono" in linha["situacao"] and "estornado" in linha["situacao"]
+    # só o dia (16/10): o que trava o dia e o que aconteceu nele (o estornado não tem
+    # data de movimento no exemplo → não é "do dia")
+    assert linha["problemas_dia"] == ["1 linha(s) sem dono"] and linha["obs_dia"] == []
+    assert linha["eventos_dia"]["estornados"] == 0
+    # bloco Dias: 15 dias terminando no dia pedido; 13/10 com a jlas2 pendente
+    dias = corpo["dias"]
+    assert len(dias) == 15 and dias[0]["dia"] == "2026-10-13" and dias[-1]["dia"] == "2026-09-29"
+    assert dias[0]["com_pendencia"] == 1 and dias[0]["fechados"] == 0
+    assert dias[0]["pendentes"] == [{"conta": "jlas2", "motivo": "1 linha(s) sem dono"}]
+    assert dias[1]["dia"] == "2026-10-12" and dias[1]["sem_movimento"] == 1
+    assert all(d["fechados"] == 0 for d in dias)
     # o mês até ontem (os dois pedidos são de 01/10)
     assert linha["mes"]["pedidos"] == 2 and linha["mes"]["vendido"] == 1761.96
     assert linha["mes"]["por_etapa"] == {"conciliado": 1, "pendencia": 1}
@@ -1602,11 +1613,25 @@ async def test_resumo_dia_pronto_e_dia_fechado(db, make_user, auth_as, client):
     assert r.json()["cartoes"]["dias_prontos"] == 1
     r = await client.post("/api/conciliacao/dias/2026-10-13/fechar", params={"loja": "jlas2"})
     assert r.status_code == 200, r.text
+    # o estornado aconteceu nesse dia (data do último movimento): vira obs do dia
+    estornado = (
+        await db.execute(
+            __import__("sqlalchemy")
+            .select(ConciliacaoPedido)
+            .where(ConciliacaoPedido.pedido_bling == "299520")
+        )
+    ).scalar_one()
+    estornado.ultimo_movimento_em = datetime(2026, 10, 13, 15, tzinfo=UTC)
+    await db.commit()
     r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
     linha = r.json()["lojas"][0]
     assert linha["dia"]["status"] == "fechado" and linha["dia"]["fechado_por"]
     assert linha["gravidade"] == "warn"  # ainda tem o estornado depois
+    assert linha["problemas_dia"] == [] and linha["obs_dia"] == ["1 estornado(s) depois"]
     assert r.json()["cartoes"]["dias_fechados"] == 1
+    dia13 = r.json()["dias"][0]
+    assert dia13["fechados"] == 1 and dia13["com_pendencia"] == 0 and dia13["pendentes"] == []
+    assert dia13["obs"] == ["1 estornado(s) depois (jlas2)"]
 
 
 async def test_fechamento_do_mes_soma_vendas_caixa_e_fatura(db, make_user, auth_as, client):

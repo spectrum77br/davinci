@@ -56,6 +56,15 @@ type Mes = {
   ajustes_qtd: number
 }
 type Dinheiro = { na_conta: number | null; saldo_em: string | null; a_liberar: number; a_liberar_pedidos: number; reservado: number | null; preso?: number | null; a_receber?: number | null; nota?: string | null }
+type DiaResumo = {
+  dia: string
+  fechados: number
+  sem_movimento: number
+  aguardando_repasse: number
+  com_pendencia: number
+  pendentes: { conta: string; motivo: string }[]
+  obs: string[]
+}
 type LojaResumo = {
   conta: string
   platform: string
@@ -67,6 +76,9 @@ type LojaResumo = {
   mes: Mes
   situacao: string
   gravidade: 'ok' | 'warn' | 'bad'
+
+  obs_dia: string[]
+  problemas_dia: string[]
 }
 type Agir = {
   gravidade: 'ok' | 'warn' | 'bad'
@@ -85,6 +97,8 @@ type Resumo = {
   por_plataforma: Record<string, Mes & { dinheiro?: Dinheiro }>
   empresa: Mes & { dinheiro?: Dinheiro }
   cartoes: Record<string, number>
+
+  dias: DiaResumo[]
 }
 
 const PLATAFORMAS: Array<{ key: string; label: string }> = [
@@ -102,6 +116,39 @@ const MOSTRAR_MES = false // rodapé do mês desligado em 15/10 (volta quando el
 const abertos = ref<Record<string, boolean>>({})
 function alternar(key: string) {
   abertos.value = { ...abertos.value, [key]: !abertos.value[key] }
+}
+// Tabela de lojas (16/10, Vinicius): cada marketplace começa escondido, com o resumo
+// na linha; "mostrar" abre as lojas.
+const abertosLojas = ref<Record<string, boolean>>({})
+function alternarLojas(key: string) {
+  abertosLojas.value = { ...abertosLojas.value, [key]: !abertosLojas.value[key] }
+}
+function resumoGrupo(lojas: LojaResumo[]) {
+  const n = (f: (l: LojaResumo) => boolean) => lojas.filter(f).length
+  const partes: string[] = [`${lojas.length} loja(s)`]
+  const fechados = n((l) => l.dia.status === 'fechado')
+  const semMov = n((l) => l.dia.status === 'sem_movimento')
+  const naoLido = n((l) => l.dia.status === 'extrato_nao_lido')
+  const repasse = n((l) => l.dia.status === 'aguardando_repasse' || l.dia.status === 'repasse_falhou')
+  const pend = n((l) => l.dia.status === 'aberto' || l.dia.status === 'pronto')
+  const obs = n((l) => l.dia.status === 'fechado' && l.obs_dia.length > 0)
+  if (fechados) partes.push(`${fechados} dia(s) fechado(s)`)
+  if (semMov) partes.push(`${semMov} sem movimento`)
+  if (repasse) partes.push(`${repasse} aguardando repasse`)
+  if (naoLido) partes.push(`${naoLido} extrato não lido`)
+  if (pend) partes.push(`${pend} com pendência`)
+  if (obs) partes.push(`${obs} com observação`)
+  return partes.join(' · ')
+}
+function grupoTemPendencia(lojas: LojaResumo[]) {
+  return lojas.some((l) => ['aberto', 'pronto', 'extrato_nao_lido', 'repasse_falhou'].includes(l.dia.status))
+}
+function problemasCls(l: LojaResumo) {
+  const grave = l.problemas_dia.some((p) => p.includes('sem dono') || p.includes('saldo não bate') || p.startsWith('erro'))
+  return grave ? 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' : 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+}
+function escolherDia(d: string) {
+  dia.value = d
 }
 
 const { api } = useApi()
@@ -264,7 +311,6 @@ onMounted(() => {
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
                   <th class="border-b px-2 py-1 text-left">Loja</th>
-                  <th class="whitespace-nowrap border-b px-2 py-1 text-left">Dia</th>
                   <th class="border-b px-2 py-1 text-right">Movimentos</th>
                   <th class="border-b px-2 py-1 text-right">Sem dono</th>
                   <th class="border-b px-2 py-1 text-right">Pedidos c/ pendência</th>
@@ -278,10 +324,15 @@ onMounted(() => {
               </thead>
               <tbody>
                 <template v-for="g in grupos" :key="g.key">
-                  <tr class="bg-muted/60"><td colspan="11" class="border-b px-2 py-1 font-bold">{{ g.label }}</td></tr>
-                  <tr v-for="l in g.lojas" :key="l.conta" class="cursor-pointer border-b hover:bg-muted/40" @click="emit('abrir-extrato', l.conta, dados.dia)">
+                  <tr class="bg-muted/60">
+                    <td colspan="10" class="border-b px-2 py-1">
+                      <span class="font-bold">{{ g.label }}</span>
+                      <span class="ml-2 text-muted-foreground" :class="grupoTemPendencia(g.lojas) && 'text-amber-700'">{{ resumoGrupo(g.lojas) }}</span>
+                      <button type="button" class="ml-2 font-semibold text-primary underline" @click="alternarLojas(g.key)">{{ abertosLojas[g.key] ? 'esconder' : 'mostrar' }}</button>
+                    </td>
+                  </tr>
+                  <tr v-for="l in g.lojas" v-show="abertosLojas[g.key]" :key="l.conta" class="cursor-pointer border-b hover:bg-muted/40" @click="emit('abrir-extrato', l.conta, dados.dia)">
                     <td class="px-2 py-1 font-bold">{{ l.conta }}</td>
-                    <td class="whitespace-nowrap px-2 py-1"><span class="rounded px-1.5 py-0.5 font-semibold" :class="diaCls(l.dia)">{{ diaTexto(l.dia) }}</span></td>
                     <td class="px-2 py-1 text-right tabular-nums">{{ l.dia.linhas || '—' }}</td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.dia.pendentes ? 'text-red-600' : ''">{{ l.dia.linhas ? l.dia.pendentes : '—' }}</td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.pedidos.pendencia ? 'text-red-600' : ''" @click.stop="emit('ver-pedidos', l.conta, { etapa: 'pendencia' })">{{ l.pedidos.pendencia }}</td>
@@ -294,18 +345,62 @@ onMounted(() => {
                     </td>
                     <td class="whitespace-nowrap px-2 py-1 tabular-nums" :class="l.leituras.extrato_atrasado ? 'font-bold text-red-600' : ''" :title="l.leituras.erro || ''">{{ fmtDiaHora(l.leituras.extrato_em) }}<span v-if="l.leituras.extrato_atrasado"> (atrasado)</span></td>
                     <td class="whitespace-nowrap px-2 py-1 tabular-nums">{{ l.platform === 'ml' ? fmtDiaHora(l.leituras.fatura_em) : 'n/a' }}</td>
-                    <td class="px-2 py-1"><span class="inline-block rounded px-1.5 py-0.5 font-semibold" :class="gravCls(l.gravidade)">{{ l.situacao }}</span></td>
+                    <td class="px-2 py-1">
+                      <span class="inline-block rounded px-1.5 py-0.5 font-semibold" :class="diaCls(l.dia)">{{ diaTexto(l.dia) }}</span>
+                      <span v-if="l.problemas_dia.length" class="ml-1 inline-block rounded px-1.5 py-0.5 font-semibold" :class="problemasCls(l)">{{ l.problemas_dia.join(' · ') }}</span>
+                      <template v-if="l.obs_dia.length">
+                        <span v-if="l.dia.status === 'fechado'" class="ml-1 text-muted-foreground">· <b>obs:</b> {{ l.obs_dia.join(', ') }}</span>
+                        <span v-else class="ml-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ l.obs_dia.join(' · ') }}</span>
+                      </template>
+                    </td>
                   </tr>
                 </template>
-                <tr v-if="faseSeguinte.length" class="bg-muted/60"><td colspan="11" class="border-b px-2 py-1 font-bold">{{ faseSeguinte.join(' · ') }}</td></tr>
-                <tr v-if="faseSeguinte.length" class="text-muted-foreground"><td class="px-2 py-1" colspan="11">fase seguinte — entra depois do Mercado Livre</td></tr>
-                <tr v-if="!dados.lojas.length"><td colspan="11" class="py-8 text-center text-muted-foreground">nenhuma loja ligada na conciliação</td></tr>
+                <tr v-if="faseSeguinte.length" class="bg-muted/60"><td colspan="10" class="border-b px-2 py-1 font-bold">{{ faseSeguinte.join(' · ') }}</td></tr>
+                <tr v-if="faseSeguinte.length" class="text-muted-foreground"><td class="px-2 py-1" colspan="10">fase seguinte — entra depois do Mercado Livre</td></tr>
+                <tr v-if="!dados.lojas.length"><td colspan="10" class="py-8 text-center text-muted-foreground">nenhuma loja ligada na conciliação</td></tr>
               </tbody>
             </table>
           </div>
           <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
-            "Dia": <b>fechado</b> = alguém fechou (100% das linhas com destino e saldo batendo) · <b>pronto pra fechar</b> = tudo casou, falta só fechar · <b>não fechou</b> = tem linha sem dono ou saldo diferente · <b>aguardando o repasse</b> = a TikTok fechou o extrato mas ainda não pagou (o robô fecha o dia quando pagar). Loja sem pendência some da lista "Onde agir".
+            "Situação": <b>dia fechado</b> = alguém fechou (100% das linhas com destino e saldo batendo) · <b>pronto pra fechar</b> = tudo casou, falta só fechar · <b>não fechou</b> = tem linha sem dono ou saldo diferente · <b>aguardando o repasse</b> = a TikTok fechou o extrato mas ainda não pagou (o robô fecha o dia quando pagar). Depois do dia fechado, o que aconteceu nele (estornado, reaberto, recebido a menos, vencido) vira <b>obs</b> em cinza; os números continuam nas colunas. Cada marketplace começa escondido; "mostrar" abre as lojas.
           </div>
+        </div>
+
+        <div class="flex min-w-0 flex-col rounded-md border bg-card">
+          <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+            <span>Dias — como ficou cada dia das {{ dados.lojas.length }} lojas (últimos {{ dados.dias.length }})</span>
+            <span class="text-[10px] font-normal text-white/80">clique no dia muda a tabela de cima</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th class="border-b px-2 py-1 text-left">Dia</th>
+                  <th class="border-b px-2 py-1 text-right">Fechados</th>
+                  <th class="border-b px-2 py-1 text-right">Sem movimento</th>
+                  <th class="border-b px-2 py-1 text-right">Aguard. repasse</th>
+                  <th class="border-b px-2 py-1 text-right">Com pendência</th>
+                  <th class="border-b px-2 py-1 text-left">Como ficou</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="d in dados.dias" :key="d.dia" class="cursor-pointer border-b hover:bg-muted/40" :class="d.dia === dados.dia && 'bg-amber-50 dark:bg-amber-950/20'" @click="escolherDia(d.dia)">
+                  <td class="whitespace-nowrap px-2 py-1 font-bold">{{ fmtDia(d.dia + 'T12:00:00') }}<span v-if="d.dia === ontemISO()" class="font-normal text-muted-foreground"> (ontem)</span></td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ d.fechados }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ d.sem_movimento }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ d.aguardando_repasse }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums font-bold" :class="d.com_pendencia ? 'text-amber-700' : ''">{{ d.com_pendencia }}</td>
+                  <td class="px-2 py-1">
+                    <span v-if="d.com_pendencia" class="mr-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ d.com_pendencia }} com pendência</span>
+                    <span v-else class="mr-1 inline-block rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">todos fechados</span>
+                    <span v-if="d.pendentes.length" class="text-muted-foreground"><template v-for="(p, i) in d.pendentes.slice(0, 6)" :key="p.conta"><template v-if="i"> · </template><b class="text-foreground">{{ p.conta }}</b> {{ p.motivo }}</template><template v-if="d.pendentes.length > 6"> · +{{ d.pendentes.length - 6 }}</template></span>
+                    <span v-if="d.obs.length" class="text-muted-foreground"><span v-if="d.pendentes.length"> · </span>obs: {{ d.obs.join(' · ') }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Cada linha é um dia: quantas lojas fecharam, quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda têm pendência (linha sem dono, saldo diferente, extrato não lido ou pronto pra fechar). "Como ficou" diz o nome das lojas com pendência e a obs do que aconteceu no dia.</div>
         </div>
 
         <div class="flex min-w-0 flex-col gap-3">
