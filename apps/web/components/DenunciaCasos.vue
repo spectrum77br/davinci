@@ -70,6 +70,15 @@ type CasoExtra = {
   juridico_data?: string | null
   // 13/10 (Vinicius, checklist do jurídico): "Selo Anatel aparece nas fotos?" — 'sim' | 'nao'; salva na hora
   selo_anatel?: string | null
+  // 16/10 (Vinicius: "ele pega no pedido a ultima localizacao e status"): o que o robô leu no pedido da compra
+  // (passo 1, conta compradora do perfil 50) — só leitura aqui; a previsão lida sobrescreve a digitada
+  compra_situacao?: string | null
+  compra_localizacao?: string | null
+  compra_evento_em?: string | null
+  compra_rastreio?: string | null
+  compra_previsao_texto?: string | null
+  compra_entregue_em?: string | null
+  compra_lido_em?: string | null
 }
 // 13/10 (Vinicius: "eu acionar esses botão dentro dos casos e enviar quando eu quiser"): a pasta do jurídico que o
 // Mac mini monta (dossiê + anexos + vídeo, zipados) e manda por e-mail pelo Tuta de lá. A API manda só a última.
@@ -442,6 +451,30 @@ async function salvarExtra() {
 const celula = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-center text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
 // 02/10 (Vinicius: "coloca balãozinho igual fez nos outros painéis"): os campos de texto abrem um
 // balão; o que se digita fica no rascunho da célula até o balão fechar (aí salva, se mudou)
+// 16/10: hora de Brasília de um ISO com fuso ("2026-10-16T21:20:00+00:00" → "16/10 18:20")
+function horaBr(v: string | null | undefined): string {
+  if (!v) return ''
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return String(v)
+  return d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(',', '')
+}
+
+/** Coluna Localização (16/10): status · último evento do rastreio, como o robô leu no pedido. */
+function localizacaoCompra(c: Caso): string {
+  const x = c.extra
+  return [x.compra_situacao, x.compra_localizacao].filter(Boolean).join(' · ')
+}
+
+function localizacaoDica(c: Caso): string {
+  const x = c.extra
+  return [
+    x.compra_evento_em ? `evento ${horaBr(x.compra_evento_em)}` : '',
+    x.compra_previsao_texto ? `previsão: ${x.compra_previsao_texto}` : '',
+    x.compra_rastreio ? `rastreio ${x.compra_rastreio}` : '',
+    x.compra_lido_em ? `lido pelo robô ${horaBr(x.compra_lido_em)}` : '',
+  ].filter(Boolean).join(' · ')
+}
+
 type CampoTexto = 'compra_loja' | 'compra_pedido' | 'processo_numero' | 'mov_status' | 'processo_link'
 const rascunhos = ref<Record<string, string>>({})
 function valorCampo(c: Caso, campo: CampoTexto): string {
@@ -704,7 +737,7 @@ defineExpose({ carregar })
          apertado"): largura fixa por coluna (rola para o lado), Compra e Jurídico centralizados e
          os campos de texto no balão (ObservacaoPopover) — a linha não muda de altura. -->
     <div class="table-card overflow-x-auto">
-      <table class="w-full min-w-[2070px] table-fixed text-xs">
+      <table class="w-full min-w-[2290px] table-fixed text-xs">
         <!-- larguras fixas; só a coluna Caso (o produto) estica quando a tela é maior -->
         <colgroup>
           <col class="w-[40px]">
@@ -719,6 +752,7 @@ defineExpose({ carregar })
           <col class="w-[150px]">
           <col class="w-[132px]">
           <col class="w-[96px]">
+          <col class="w-[220px]">
           <col class="w-[200px]">
           <col class="w-[132px]">
           <col class="w-[160px]">
@@ -727,7 +761,7 @@ defineExpose({ carregar })
         <thead>
           <tr>
             <th class="!py-1.5 text-[11px] font-semibold" colspan="7">Caso</th>
-            <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-amber-50 dark:!bg-amber-900/20" colspan="4">Compra</th>
+            <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-amber-50 dark:!bg-amber-900/20" colspan="5">Compra</th>
             <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-emerald-50 dark:!bg-emerald-900/20" colspan="5">Jurídico</th>
           </tr>
           <tr class="[&>th]:whitespace-nowrap">
@@ -742,6 +776,7 @@ defineExpose({ carregar })
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Loja</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Pedido</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Previsão entrega</th>
+            <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20" title="Status e último evento do rastreio, lidos pelo robô no pedido (passo 1)">Localização</th>
             <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20 border-l-[3px] border-l-gray-400 dark:border-l-gray-600" title="Quando o caso foi enviado ao advogado">Data</th>
             <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20" title="Nº do processo">Protocolo</th>
             <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20">Últ. movimentação</th>
@@ -751,10 +786,10 @@ defineExpose({ carregar })
         </thead>
         <tbody>
           <tr v-if="carregando && itens.length === 0">
-            <td colspan="16" class="text-center text-muted-foreground py-6">carregando…</td>
+            <td colspan="17" class="text-center text-muted-foreground py-6">carregando…</td>
           </tr>
           <tr v-else-if="visiveis.length === 0">
-            <td colspan="16" class="text-center text-muted-foreground py-6">nenhum caso</td>
+            <td colspan="17" class="text-center text-muted-foreground py-6">nenhum caso</td>
           </tr>
           <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer [&>td]:align-middle [&>td]:!py-1.5" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
             <td class="!px-0 text-center" @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
@@ -830,8 +865,20 @@ defineExpose({ carregar })
               />
             </td>
             <td class="!px-2 bg-amber-50/40 dark:bg-amber-900/10 text-center" @click.stop>
-              <span v-if="c.compra?.entregue_em" class="text-emerald-700 dark:text-emerald-400 whitespace-nowrap">entregue {{ dataBr(c.compra.entregue_em, false) }}</span>
-              <input v-else type="date" :value="c.extra.compra_previsao || ''" :disabled="!podeAnexar" :class="celula" @change="(e) => salvarCampo(c, 'compra_previsao', (e.target as HTMLInputElement).value)">
+              <span v-if="c.compra?.entregue_em || c.extra.compra_entregue_em" class="text-emerald-700 dark:text-emerald-400 whitespace-nowrap">entregue {{ dataBr(c.compra?.entregue_em || c.extra.compra_entregue_em, false) }}</span>
+              <input v-else type="date" :value="c.extra.compra_previsao || ''" :disabled="!podeAnexar" :class="celula" :title="c.extra.compra_previsao_texto ? `a loja diz: ${c.extra.compra_previsao_texto}` : undefined" @change="(e) => salvarCampo(c, 'compra_previsao', (e.target as HTMLInputElement).value)">
+            </td>
+            <!-- 16/10: o que o robô leu no pedido (status · último evento); balão com evento, previsão, rastreio e leitura -->
+            <td class="!px-2 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
+              <ObservacaoPopover
+                v-if="localizacaoCompra(c)"
+                :model-value="localizacaoCompra(c)"
+                disabled
+                :titulo="`Localização do pedido · ${c.codigo}`"
+                :dica="localizacaoDica(c)"
+                centro
+              />
+              <div v-else class="text-center text-muted-foreground">—</div>
             </td>
             <!-- Jurídico -->
             <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-l-gray-400 dark:border-l-gray-600 text-center whitespace-nowrap tabular-nums" @click.stop>

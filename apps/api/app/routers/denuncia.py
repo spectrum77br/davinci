@@ -1939,13 +1939,20 @@ def _extra_dict(x: DenunciaCasoExtra | None) -> dict:
     campos = ("compra_data", "compra_loja", "compra_pedido", "compra_previsao", "processo_numero",
               "processo_link", "mov_data", "mov_texto", "mov_status", "atualizado_por",
               "status_manual", "status_manual_por", "status_manual_em", "juridico_data",
-              "selo_anatel")
+              "selo_anatel", *_CAMPOS_ROBO_COMPRA)
     if x is None:
         return dict.fromkeys(campos)
     out = {k: getattr(x, k) for k in campos}
-    for k in ("compra_data", "compra_previsao", "mov_data", "status_manual_em", "juridico_data"):
+    for k in ("compra_data", "compra_previsao", "mov_data", "status_manual_em", "juridico_data",
+              "compra_evento_em", "compra_entregue_em", "compra_lido_em"):
         out[k] = out[k].isoformat() if out[k] else None
     return out
+
+
+# 16/10 (Vinicius: "ele pega no pedido a ultima localizacao e status"): o que o robô lê do pedido da
+# compra de prova — só ele grava (POST /sync/compras/rastreio); a tela só mostra
+_CAMPOS_ROBO_COMPRA = ("compra_situacao", "compra_localizacao", "compra_evento_em", "compra_rastreio",
+                       "compra_previsao_texto", "compra_entregue_em", "compra_lido_em")
 
 
 def _enviado_ao_juridico(dados: dict | None, x: DenunciaCasoExtra | None) -> str | None:
@@ -1960,6 +1967,11 @@ async def listar_casos(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(_ver)],
 ) -> dict:
+    return await _casos(session)
+
+
+async def _casos(session: AsyncSession) -> dict:
+    """A lista da aba Casos (também o que o robô usa para saber quem está aguardando produto)."""
     C, A = DenunciaCaso, DenunciaAnuncio
     pedidos = await _pedidos_de_caso(session)
     rows = (
@@ -2174,6 +2186,100 @@ async def trocar_principal(
     await session.commit()
     logger.info("denuncia_trocar_principal", caso=c.codigo, anuncio=anuncio_id, por=u.email)
     return {"ok": True}
+
+
+@sync_router.get("/compras/aguardando")
+async def sync_compras_aguardando(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+) -> dict:
+    """16/10: os casos com status "Aguardando produto" (o mesmo da aba Casos) — o passo 1 do robô
+    procura o pedido de cada um na conta compradora do perfil 50 (Shopee pela loja do caso, Mercado
+    Livre pelo nº do pedido) e devolve em POST /sync/compras/rastreio. Vai junto o que já foi lido."""
+    out = []
+    for i in (await _casos(session))["itens"]:
+        if i["status"] != "Aguardando produto":
+            continue
+        ex, cp = i["extra"] or {}, i["compra"] or {}
+        out.append({
+            "id": i["id"], "codigo": i["codigo"], "marketplace": i["marketplace"],
+            "shop_id": i["shop_id"], "loja": i["loja"],
+            "pedido": ex.get("compra_pedido") or cp.get("pedido"),
+            "compra_data": ex.get("compra_data") or cp.get("data"),
+            **{k: ex.get(k) for k in ("compra_previsao", *_CAMPOS_ROBO_COMPRA)},
+        })
+    return {"casos": out}
+
+
+def _data_robo(v: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(v)[:10]) if v else None
+    except ValueError:
+        return None
+
+
+def _txt_robo(li: dict, k: str) -> str | None:
+    return str(li.get(k) or "").strip()[:1000] or None
+
+
+def _momento_robo(v: Any) -> datetime | None:
+    try:
+        d = datetime.fromisoformat(str(v)) if v else None
+    except ValueError:
+        return None
+    return d.replace(tzinfo=relatorio_dia.FUSO) if d and d.tzinfo is None else d
+
+
+@sync_router.post("/compras/rastreio")
+async def sync_compras_rastreio(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """16/10: o que o robô leu no pedido de cada caso. Escolhas do Vinicius: a previsão lida
+    SOBRESCREVE a digitada; o nº do pedido é corrigido (os casos 008–012 tinham todos o pedido da
+    Nova.Era.); entregue → o caso vira "Produto recebido". Corpo: {leituras: [{caso_id, pedido,
+    situacao, localizacao, evento_em, rastreio, previsao, previsao_texto, entregue, entregue_em}]}."""
+    leituras = corpo.get("leituras")
+    if not isinstance(leituras, list) or len(leituras) > 200:
+        raise HTTPException(422, detail={"code": "denuncia_leituras_invalidas"})
+    agora = datetime.now(UTC)
+    feitos, recebidos = [], []
+    for li in leituras:
+        if not isinstance(li, dict) or not isinstance(li.get("caso_id"), int):
+            continue
+        c = (
+            await session.execute(select(DenunciaCaso).where(DenunciaCaso.id == li["caso_id"]))
+        ).scalar_one_or_none()
+        if c is None:
+            continue
+        x = await session.get(DenunciaCasoExtra, c.id)
+        if x is None:
+            x = DenunciaCasoExtra(caso_id=c.id)
+            session.add(x)
+        x.compra_situacao = _txt_robo(li, "situacao")
+        x.compra_localizacao = _txt_robo(li, "localizacao")
+        x.compra_evento_em = _momento_robo(li.get("evento_em"))
+        x.compra_rastreio = _txt_robo(li, "rastreio") or x.compra_rastreio
+        x.compra_previsao_texto = _txt_robo(li, "previsao_texto")
+        x.compra_lido_em = agora
+        if _data_robo(li.get("previsao")):
+            x.compra_previsao = _data_robo(li.get("previsao"))
+        pedido = _txt_robo(li, "pedido")
+        if pedido and pedido != x.compra_pedido:
+            x.compra_pedido = pedido
+        if li.get("entregue"):
+            x.compra_entregue_em = _data_robo(li.get("entregue_em")) or agora.astimezone(relatorio_dia.FUSO).date()
+            if x.status_manual in (None, "Aguardando produto"):
+                x.status_manual = "Produto recebido"
+                x.status_manual_por = "robô (pedido entregue)"
+                x.status_manual_em = agora
+                recebidos.append(c.codigo)
+        x.atualizado_por = "robô (pedido da compra)"
+        feitos.append(c.codigo)
+    await session.commit()
+    logger.info("denuncia_compras_rastreio", casos=feitos, recebidos=recebidos)
+    return {"atualizados": feitos, "produto_recebido": recebidos}
 
 
 _CAMPOS_EXTRA_TEXTO = ("compra_loja", "compra_pedido", "processo_numero", "processo_link",

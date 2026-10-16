@@ -51,7 +51,8 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     "checagem": (0, "Checagem antes da rodada", "perfil 50 + 148 + contas das lojas + Safari + Tuta",
                  "confere logins, perfis, captcha, Safari e Tuta antes da rodada — não muda nada"),
     "ciclo_emails": (1, "Conferência das respostas", "Tuta + Safari (SEI) + perfil 50",
-                     "lê as respostas das denúncias (e-mails no Tuta) e o andamento dos processos da Anatel no SEI"),
+                     "lê as respostas das denúncias (e-mails no Tuta), o andamento dos processos da Anatel no SEI "
+                     "e o pedido das compras de prova"),
     "procura": (2, "Procurar anúncios novos", "perfil 50 + 148 + celular + Safari",
                 "procura as marcas no Mercado Livre, Shopee, TikTok e Amazon e salva no sistema"),
     "denuncias": (3, "Denúncias Nossos", "perfil 50 + celular",
@@ -93,8 +94,12 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
             "No Safari lê o andamento de cada processo no SEI (60 por vez) e confere se os anexos que mandamos estão no processo.",
             "Lê os protocolos antigos do Anatel Consumidor (as duas páginas da lista, 15 protocolos).",
             "Não abre mais os avisos da Shopee no perfil 50: o aviso não diz qual anúncio foi recusado.",
+            "Compras de prova (16/10): nos casos \"Aguardando produto\", abre o pedido na conta compradora "
+            "(Shopee pela loja do caso, Mercado Livre pelo nº do pedido) e grava na aba Casos o status, a última "
+            "localização, a previsão e o nº certo do pedido; entregue → o caso vira \"Produto recebido\".",
         ],
-        "quem": ["Tuta (sac@makisa)", "Safari: SEI com a conta do advogado e gov.br"],
+        "quem": ["Tuta (sac@makisa)", "Safari: SEI com a conta do advogado e gov.br",
+                 "perfil 50: conta compradora da Shopee e do Mercado Livre (makisatrading)"],
         "confere": [
             "Denúncias do Mercado Livre (passo 4) e da Réplica no ML (passo 7) — pelo e-mail.",
             "Processos da Anatel (passo 6) — andamento e anexos no SEI.",
@@ -223,12 +228,14 @@ ANTIGOS: dict[str, tuple[int, str]] = {
     # ciclo_emails)
     "conferencia_perfil50": (1, "Conferência — resultados da Shopee"),
     "conferencia_safari": (1, "Conferência — Anatel e SEI"),
+    # 16/10: + o pedido das compras de prova (perfil 50)
+    "conferencia_compras": (1, "Conferência — pedidos das compras de prova"),
     # 13/10: o Jurídico saiu da lista (virou botão na ficha do caso)
     "juridico": (9, "Jurídico (virou botão na ficha do caso)"),
 }
 # 05/10: o passo 1 da tela junta as três partes (nome curto na coluna Resultado)
 PARTES_PASSO1 = (("ciclo_emails", "e-mails"), ("conferencia_perfil50", "Shopee"),
-                 ("conferencia_safari", "Anatel/SEI"))
+                 ("conferencia_safari", "Anatel/SEI"), ("conferencia_compras", "compras"))
 
 
 def _ordem_nome(acao: str, nome: str | None) -> tuple[int, str]:

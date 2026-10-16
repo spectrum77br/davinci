@@ -231,6 +231,16 @@ class DenunciaCasoExtra(Base):
     juridico_data: Mapped[date | None] = mapped_column(Date)
     # 13/10 (Vinicius, checklist do jurídico): "Selo Anatel aparece nas fotos?" — 'sim' | 'nao'
     selo_anatel: Mapped[str | None] = mapped_column(Text)
+    # 16/10 (Vinicius: "ele pega no pedido a ultima localizacao e status"): o que o robô leu no pedido
+    # da compra de prova (conta compradora do perfil 50, passo 1) — status, último evento do
+    # rastreio, código, previsão como a loja escreve e quando foi entregue
+    compra_situacao: Mapped[str | None] = mapped_column(Text)
+    compra_localizacao: Mapped[str | None] = mapped_column(Text)
+    compra_evento_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    compra_rastreio: Mapped[str | None] = mapped_column(Text)
+    compra_previsao_texto: Mapped[str | None] = mapped_column(Text)
+    compra_entregue_em: Mapped[date | None] = mapped_column(Date)
+    compra_lido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     atualizado_por: Mapped[str | None] = mapped_column(Text)
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

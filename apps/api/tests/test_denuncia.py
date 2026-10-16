@@ -988,6 +988,57 @@ async def test_caso_extra_compra_e_processo(client, make_user, auth_as):
     assert (await client.put("/api/denuncia/casos/99/extra", json={})).status_code == 404
 
 
+async def test_compras_aguardando_e_rastreio_do_robo(client, make_user, auth_as):
+    """16/10 (Vinicius: "ele precisaria ir nesses casos que ta aguardando produto… pega no pedido a
+    ultima localizacao e status"): o robô pede a lista dos casos "Aguardando produto", lê o pedido
+    no perfil 50 e devolve. Previsão lida sobrescreve; nº do pedido corrigido; entregue → Produto
+    recebido."""
+    await _carga(client)
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    assert (await client.get("/api/denuncia/sync/compras/aguardando")).status_code == 401
+    # o caso 7 tem compra "Recebido" do mini → Produto recebido: não está aguardando
+    assert (await client.get("/api/denuncia/sync/compras/aguardando", headers=H)).json()["casos"] == []
+    await client.put("/api/denuncia/casos/7/status", json={"status": "Aguardando produto"})
+    await client.put("/api/denuncia/casos/7/extra", json={
+        "compra_pedido": "261015M6W8F0TN", "compra_previsao": "2026-10-30", "compra_data": "2026-10-14"})
+    casos = (await client.get("/api/denuncia/sync/compras/aguardando", headers=H)).json()["casos"]
+    assert [(c["id"], c["marketplace"], c["shop_id"], c["pedido"], c["compra_data"]) for c in casos] == [
+        (7, "Shopee", "111", "261015M6W8F0TN", "2026-10-14")]
+
+    r = await client.post("/api/denuncia/sync/compras/rastreio", headers=H, json={"leituras": [
+        {"caso_id": 7, "pedido": "261015M6W8F0TM", "situacao": "A caminho",
+         "localizacao": "Seu pedido saiu do centro logístico: Maringá - PR",
+         "evento_em": "2026-10-16T08:20:00", "rastreio": "BR268604936933M",
+         "previsao": "2026-10-21", "previsao_texto": "entre 18/10 e 21/10", "entregue": False},
+        {"caso_id": 999, "situacao": "A caminho"}, "lixo"]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"atualizados": ["CASO-001"], "produto_recebido": []}
+    c = (await client.get("/api/denuncia/casos")).json()["itens"][0]
+    e = c["extra"]
+    assert c["status"] == "Aguardando produto"
+    assert (e["compra_pedido"], e["compra_previsao"], e["compra_situacao"]) == ("261015M6W8F0TM", "2026-10-21", "A caminho")
+    assert e["compra_localizacao"].endswith("Maringá - PR") and e["compra_rastreio"] == "BR268604936933M"
+    assert e["compra_evento_em"] == "2026-10-16T11:20:00+00:00" and e["compra_lido_em"]   # 08:20 de Brasília
+    assert e["compra_previsao_texto"] == "entre 18/10 e 21/10"
+
+    # entregue: vira Produto recebido (por cima do ✋ "Aguardando produto") e sai da lista do robô
+    r = await client.post("/api/denuncia/sync/compras/rastreio", headers=H, json={"leituras": [
+        {"caso_id": 7, "situacao": "Entregue", "localizacao": "Pedido entregue", "entregue": True,
+         "entregue_em": "2026-10-17"}]})
+    assert r.json()["produto_recebido"] == ["CASO-001"]
+    c = (await client.get("/api/denuncia/casos")).json()["itens"][0]
+    assert c["status"] == "Produto recebido" and c["extra"]["compra_entregue_em"] == "2026-10-17"
+    assert c["extra"]["status_manual_por"] == "robô (pedido entregue)"
+    assert c["extra"]["compra_rastreio"] == "BR268604936933M"   # leitura sem rastreio não apaga o que havia
+    assert (await client.get("/api/denuncia/sync/compras/aguardando", headers=H)).json()["casos"] == []
+    # status escolhido à mão diferente de "Aguardando produto" não é trocado pelo robô
+    await client.put("/api/denuncia/casos/7/status", json={"status": "Com jurídico", "juridico_data": "2026-10-17"})
+    r = await client.post("/api/denuncia/sync/compras/rastreio", headers=H, json={"leituras": [
+        {"caso_id": 7, "situacao": "Entregue", "entregue": True}]})
+    assert r.json()["produto_recebido"] == []
+    assert (await client.post("/api/denuncia/sync/compras/rastreio", headers=H, json={"leituras": "x"})).status_code == 422
+
+
 async def test_caso_status_trocado_a_mao(client, make_user, auth_as):
     """06/10 (Vinicius: "clicar no status e conseguir trocar… o caso 2 já foi enviado ao jurídico"):
     o escolhido à mão vale por cima do automático; "Com jurídico" pede a data do envio."""
