@@ -122,3 +122,11 @@ export function somaDias(iso: string, n: number) {
   d.setDate(d.getDate() + n)
   return isoLocal(d)
 }
+export function hojeISO() {
+  return isoLocal(new Date())
+}
+// 16/10, revisão: `?dia=` do link do vigia e datas digitadas chegam sem conferência.
+// Vale só AAAA-MM-DD que existe no calendário (2026-02-31 viraria 03/03 e não passa).
+export function diaValido(v: unknown): v is string {
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && somaDias(v, 0) === v
+}

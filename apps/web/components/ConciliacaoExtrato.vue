@@ -24,7 +24,9 @@ const notaRodape = computed(() =>
       ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Cada pedido entra 3 a 4 dias depois do envio e fica "preso na reserva" até ~7 dias depois da entrega; o saldo aqui é reserva + disponível, e a cada 14 dias o repasse pro banco sai dele.'
       : 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.',
 )
-const emit = defineEmits<{ (e: 'ver-pedido', pedido: string): void }>()
+// 16/10, revisão: `update:dia` deixa a página saber o dia que as setas escolheram
+// (sair e voltar pro Extrato caía no dia de antes).
+const emit = defineEmits<{ (e: 'ver-pedido', pedido: string): void; (e: 'update:dia', dia: string): void }>()
 
 type Mov = {
   id: string
@@ -106,50 +108,76 @@ const pct = computed(() => {
   return t ? Math.round(((dados.value?.resolvidos || 0) / t) * 100) : 0
 })
 
+// 16/10, revisão: cada leitura leva um número e resposta mais velha é descartada
+// (trocar loja/dia rápido deixava o extrato de uma loja com o cabeçalho de outra).
+let carregarSeq = 0
+let sugSeq = 0
 async function carregar() {
   if (!props.loja || !dia.value) return
+  const seq = ++carregarSeq
   loading.value = true
   erro.value = ''
   try {
     const query: Record<string, string> = { loja: props.loja, dia: dia.value, mostrar: mostrar.value }
     if (q.value.trim()) query.q = q.value.trim()
-    dados.value = await api<Extrato>('/api/conciliacao/extrato', { query })
+    const r = await api<Extrato>('/api/conciliacao/extrato', { query })
+    if (seq !== carregarSeq) return
+    dados.value = r
     if (selecionado.value) {
-      const atual = dados.value.movimentos.find((m) => m.id === selecionado.value?.id)
+      const atual = r.movimentos.find((m) => m.id === selecionado.value?.id)
       selecionado.value = atual || null
-      if (!atual) sugestoes.value = []
+      if (!atual) {
+        sugSeq++ // sugestões em voo de uma linha que sumiu não valem mais
+        sugestoes.value = []
+      }
     }
   } catch (e: any) {
+    if (seq !== carregarSeq) return
     erro.value = e?.data?.detail?.code || e?.message || 'erro ao carregar'
   } finally {
-    loading.value = false
+    if (seq === carregarSeq) loading.value = false
+  }
+}
+
+// 16/10, revisão: clique rápido em duas linhas mostrava as sugestões da primeira na
+// segunda (e vinculava a linha B ao pedido de A). Só a última busca vale.
+async function buscarSugestoes(m: Mov) {
+  const seq = ++sugSeq
+  sugestoes.value = []
+  if (!(m.status === 'pendente' || !m.pedido_bling)) {
+    sugLoading.value = false
+    return
+  }
+  sugLoading.value = true
+  try {
+    const r = await api<{ sugestoes: Sugestao[] }>(`/api/conciliacao/movimentos/${m.id}/sugestoes`)
+    if (seq !== sugSeq) return
+    sugestoes.value = r.sugestoes
+  } catch (e: any) {
+    if (seq !== sugSeq) return
+    sugestoes.value = []
+    toasts.error?.(e?.data?.detail?.code || 'não consegui buscar as sugestões do robô')
+  } finally {
+    if (seq === sugSeq) sugLoading.value = false
   }
 }
 
 async function abrir(m: Mov) {
   selecionado.value = m
   pedidoInput.value = ''
-  sugestoes.value = []
-  if (m.status === 'pendente' || !m.pedido_bling) {
-    sugLoading.value = true
-    try {
-      const r = await api<{ sugestoes: Sugestao[] }>(`/api/conciliacao/movimentos/${m.id}/sugestoes`)
-      sugestoes.value = r.sugestoes
-    } catch {
-      sugestoes.value = []
-    } finally {
-      sugLoading.value = false
-    }
-  }
+  await buscarSugestoes(m)
 }
 
 async function marcar(body: Record<string, unknown>) {
   if (!selecionado.value || !props.canEdit) return
+  if (body.desvincular && !confirm(`Desvincular esta linha do pedido ${selecionado.value.pedido_bling || ''}? O robô não religa sozinho.`)) return
   salvando.value = true
   try {
-    await api(`/api/conciliacao/movimentos/${selecionado.value.id}`, { method: 'PATCH', body: { loja: props.loja, ...body } })
+    await api(`/api/conciliacao/movimentos/${selecionado.value.id}`, { method: 'PATCH', body: { loja: dados.value?.loja || props.loja, ...body } })
     toasts.success?.('salvo')
     await carregar()
+    // 16/10, revisão: depois de desvincular/classificar a linha volta a precisar de sugestões
+    if (selecionado.value) await buscarSugestoes(selecionado.value)
   } catch (e: any) {
     const d = e?.data?.detail
     toasts.error?.(
@@ -164,16 +192,25 @@ async function marcar(body: Record<string, unknown>) {
   }
 }
 
+// 16/10, revisão: fechar/reabrir usam a loja e o dia da resposta que está na tela
+// (props.loja podia já ter trocado e fechava o dia da loja errada).
 async function fecharDia() {
   if (!dados.value || !props.canEdit) return
+  const { loja, dia: diaAlvo } = dados.value
   fechando.value = true
   try {
-    await api(`/api/conciliacao/dias/${dados.value.dia}/fechar`, { method: 'POST', query: { loja: props.loja } })
+    await api(`/api/conciliacao/dias/${diaAlvo}/fechar`, { method: 'POST', query: { loja } })
     toasts.success?.('dia fechado')
     await carregar()
   } catch (e: any) {
     const d = e?.data?.detail
-    toasts.error?.(d?.code === 'dia_com_pendencias' ? `${d.pendentes} linha(s) ainda sem destino` : d?.code || 'não consegui fechar')
+    toasts.error?.(
+      d?.code === 'dia_com_pendencias'
+        ? `${d.pendentes} linha(s) ainda sem destino`
+        : d?.code === 'aguardando_repasse'
+          ? 'o extrato da TikTok ainda não foi pago; o dia fecha quando o repasse entrar'
+          : d?.mensagem || d?.code || 'não consegui fechar',
+    )
   } finally {
     fechando.value = false
   }
@@ -181,10 +218,14 @@ async function fecharDia() {
 
 async function reabrirDia() {
   if (!dados.value || !props.canEdit) return
+  const { loja, dia: diaAlvo } = dados.value
   fechando.value = true
   try {
-    await api(`/api/conciliacao/dias/${dados.value.dia}/reabrir`, { method: 'POST', query: { loja: props.loja } })
+    await api(`/api/conciliacao/dias/${diaAlvo}/reabrir`, { method: 'POST', query: { loja } })
     await carregar()
+  } catch (e: any) {
+    const d = e?.data?.detail
+    toasts.error?.(d?.mensagem || d?.code || 'não consegui reabrir o dia')
   } finally {
     fechando.value = false
   }
@@ -205,6 +246,7 @@ function rowCls(m: Mov) {
 watch(() => props.loja, () => carregar())
 watch(() => props.dia, (v) => { if (v && v !== dia.value) dia.value = v })
 watch([dia, mostrar], () => carregar())
+watch(dia, (v) => { if (v && v !== props.dia) emit('update:dia', v) })
 onMounted(() => {
   dia.value = props.dia || ontemISO() // dispara o watch → carregar()
 })

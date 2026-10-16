@@ -6,7 +6,7 @@
 // resultado e a situação; o Raio-X
 // do pedido selecionado fica à direita. Extrato do dia e Resumo vêm depois.
 import { Download, KeyRound, Loader2, RefreshCw, Search, Upload, Wand2 } from 'lucide-vue-next'
-import { ETAPAS, SITUACOES, etapaCls, fmtDia, fmtDiaHora, fmtMoney, fmtPct, sinal, sitCls, tipoMov } from '~/lib/conciliacao'
+import { ETAPAS, SITUACOES, diaValido, etapaCls, fmtDia, fmtDiaHora, fmtMoney, fmtPct, hojeISO, sinal, sitCls, tipoMov } from '~/lib/conciliacao'
 
 definePageMeta({
   middleware: ['permission'],
@@ -245,16 +245,26 @@ function escolherArquivo(e: Event) {
 }
 // Chave do script do Mac ("KFA Conciliação.command"): gerada aqui, aparece uma vez.
 const chaveScript = ref<{ tem_chave: boolean; gerada_em?: string | null; por?: string | null; nova: string; ocupado: boolean; msg: string }>({ tem_chave: false, nova: '', ocupado: false, msg: '' })
-async function lerChaveScript() {
+async function lerChaveScript(): Promise<boolean> {
   try {
     const r = await api<{ tem_chave: boolean; gerada_em?: string | null; por?: string | null }>('/api/conciliacao/amazon/upload/chave')
     chaveScript.value = { ...chaveScript.value, ...r }
-  } catch {}
+    return true
+  } catch {
+    return false
+  }
 }
 async function gerarChaveScript() {
-  if (chaveScript.value.tem_chave && !confirm('Gerar uma chave nova? A anterior deixa de valer e o script precisa da nova.')) return
+  // 16/10, revisão: antes gerava sem confirmar se o clique vinha antes da leitura
+  // (tem_chave ainda falso) e invalidava a chave do Mac. Agora lê de novo e, se a
+  // leitura falhar, pede a confirmação do mesmo jeito.
   chaveScript.value.ocupado = true
   chaveScript.value.msg = ''
+  const lida = await lerChaveScript()
+  if ((chaveScript.value.tem_chave || !lida) && !confirm(lida ? 'Gerar uma chave nova? A anterior deixa de valer e o script precisa da nova.' : 'Não consegui conferir se já existe uma chave. Gerar mesmo assim? Se existir, a anterior deixa de valer e o script precisa da nova.')) {
+    chaveScript.value.ocupado = false
+    return
+  }
   try {
     const r = await api<{ chave: string }>('/api/conciliacao/amazon/upload/chave', { method: 'POST' })
     chaveScript.value.nova = r.chave
@@ -332,43 +342,67 @@ watch(tab, () => {
   if (visao.value === 'fechamento') visao.value = 'pedidos'
 })
 
+// 16/10, revisão: cada leitura leva um número; resposta de leitura mais velha é descartada
+// (troca rápida de loja/filtro mostrava a lista de uma e os totais de outra).
+let carregarSeq = 0
+let raioxSeq = 0
+// Filtro que a lista mostra de fato (o Excel usa este, não o que está digitado sem Enter).
+const filtroAplicado = ref<Record<string, string | number> | null>(null)
 async function carregar() {
   if (!loja.value) return
+  const seq = ++carregarSeq
+  const query = params()
   loading.value = true
   erro.value = ''
   try {
-    const r = await api<{ itens: Pedido[]; total: number; resumo: Resumo }>('/api/conciliacao/pedidos', { query: params() })
+    const r = await api<{ itens: Pedido[]; total: number; resumo: Resumo }>('/api/conciliacao/pedidos', { query })
+    if (seq !== carregarSeq) return
+    filtroAplicado.value = query
     itens.value = r.itens
     total.value = r.total
     resumo.value = r.resumo
     if (selecionado.value && !itens.value.some((i) => i.pedido_bling === selecionado.value?.pedido_bling)) {
+      raioxSeq++ // Raio-X em voo de um pedido que saiu da lista não vale mais
       selecionado.value = null
       raiox.value = null
     }
   } catch (e: any) {
+    if (seq !== carregarSeq) return
     erro.value = e?.data?.detail?.code || e?.message || 'erro ao carregar'
   } finally {
-    loading.value = false
+    if (seq === carregarSeq) loading.value = false
   }
 }
 
 async function abrir(p: Pedido) {
+  // 16/10, revisão: clique rápido em A e depois B mostrava o Raio-X de A com B
+  // selecionado (e "Salvar observação"/"Finalizar" gravavam no B). A resposta
+  // de um pedido que já não é o selecionado é descartada.
+  const seq = ++raioxSeq
   selecionado.value = p
+  raiox.value = null
+  obsDraft.value = ''
+  motivoDraft.value = ''
   raioxLoading.value = true
   try {
-    raiox.value = await api<RaioX>(`/api/conciliacao/pedidos/${encodeURIComponent(p.pedido_bling)}`, { query: { loja: loja.value } })
-    obsDraft.value = raiox.value.pedido.observacao || ''
+    const r = await api<RaioX>(`/api/conciliacao/pedidos/${encodeURIComponent(p.pedido_bling)}`, { query: { loja: loja.value } })
+    if (seq !== raioxSeq) return
+    raiox.value = r
+    obsDraft.value = r.pedido.observacao || ''
     motivoDraft.value = ''
   } catch (e: any) {
+    if (seq !== raioxSeq) return
     toasts.error?.(e?.data?.detail?.code || 'não consegui abrir o pedido')
     raiox.value = null
   } finally {
-    raioxLoading.value = false
+    if (seq === raioxSeq) raioxLoading.value = false
   }
 }
 
 async function marcar(patch: Record<string, unknown>) {
   if (!selecionado.value || !canEdit.value) return
+  // só grava no pedido cujo Raio-X está na tela
+  if (raiox.value && raiox.value.pedido.pedido_bling !== selecionado.value.pedido_bling) return
   salvando.value = true
   try {
     const r = await api<{ pedido: Pedido }>(`/api/conciliacao/pedidos/${encodeURIComponent(selecionado.value.pedido_bling)}`, {
@@ -380,6 +414,8 @@ async function marcar(patch: Record<string, unknown>) {
     selecionado.value = r.pedido
     if (raiox.value) raiox.value.pedido = r.pedido
     toasts.success?.('salvo')
+    // 16/10, revisão: os cartões (por situação/etapa) e o filtro só acompanhavam no Recarregar
+    await carregar()
   } catch (e: any) {
     const d = e?.data?.detail
     toasts.error?.(d?.mensagem || d?.code || 'não consegui salvar')
@@ -401,6 +437,18 @@ async function finalizar() {
 
 async function sincronizar() {
   if (!loja.value) return
+  // 16/10, revisão: loja lida por arquivo (KFA) não tem o que sincronizar pela API —
+  // o /sincronizar pulava o extrato e a mensagem dizia que tinha sincronizado.
+  // Pra ela, "Sincronizar" é o mesmo que o ⟳: pedir o arquivo ao robô do Mac.
+  if (lojaAtual.value?.modo_extrato === 'upload') {
+    sincronizando.value = true
+    try {
+      await buscarTransacoes(loja.value)
+    } finally {
+      sincronizando.value = false
+    }
+    return
+  }
   sincronizando.value = true
   try {
     const r = await api<{ enfileirado: boolean }>(`/api/conciliacao/lojas/${encodeURIComponent(loja.value)}/sincronizar`, { method: 'POST' })
@@ -415,12 +463,14 @@ async function sincronizar() {
 async function exportar() {
   exportando.value = true
   try {
-    const { page: _p, size: _s, ...rest } = params()
+    // 16/10, revisão: o Excel sai com o filtro que a lista mostra (busca digitada sem
+    // Enter não entra) e com a data local no nome (toISOString é UTC: "amanhã" depois das 21h)
+    const { page: _p, size: _s, ...rest } = filtroAplicado.value || params()
     const blob = await api<Blob>('/api/conciliacao/export.xlsx', { method: 'POST', query: rest, responseType: 'blob' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `conciliacao_${loja.value}_${new Date().toISOString().slice(0, 10)}.xlsx`
+    a.download = `conciliacao_${String(rest.loja || loja.value)}_${hojeISO()}.xlsx`
     a.click()
     URL.revokeObjectURL(url)
   } catch {
@@ -438,30 +488,38 @@ function verPedido(pedido: string) {
   de.value = lojaAtual.value?.inicio || ''
   ate.value = ''
   page.value = 1
-  carregar()
+  // a leitura vem do watch(visao → 'pedidos')
+}
+
+// 16/10, revisão: abrir uma loja pelo Resumo (ou pelo Fechamento) trocava a loja sem
+// trocar a aba do marketplace — TikTok/Amazon com o rodapé do Mercado Pago, KFA sem
+// "Enviar transações", coluna "Venda ML" — e `de` ficava da loja anterior.
+function irParaLoja(conta: string) {
+  const alvo = lojas.value.find((l) => l.conta === conta)
+  if (alvo && alvo.platform !== tab.value) tab.value = alvo.platform
+  loja.value = conta
+  de.value = alvo?.inicio || ''
+  ate.value = ''
+  page.value = 1
 }
 
 function abrirExtrato(conta: string, dia: string) {
-  loja.value = conta
+  irParaLoja(conta)
   extratoDia.value = dia
   visao.value = 'extrato'
 }
 
 function verPedidos(conta: string, filtro: Record<string, string>) {
-  loja.value = conta
+  irParaLoja(conta)
   situacao.value = filtro.situacao || ''
   etapa.value = filtro.etapa || ''
   q.value = ''
   dataFiltro.value = 'pedido'
-  de.value = lojaAtual.value?.inicio || ''
-  ate.value = ''
-  page.value = 1
-  visao.value = 'pedidos'
-  carregar()
+  visao.value = 'pedidos' // a leitura vem do watch(visao → 'pedidos')
 }
 
 function sincronizarLoja(conta: string) {
-  loja.value = conta
+  irParaLoja(conta)
   sincronizar()
 }
 async function buscarTransacoes(conta: string) {
@@ -469,9 +527,9 @@ async function buscarTransacoes(conta: string) {
     const r = await api<{ enfileirado: boolean; robo_visto_em: string | null }>(`/api/conciliacao/lojas/${encodeURIComponent(conta)}/buscar-transacoes`, { method: 'POST' })
     const visto = r.robo_visto_em ? new Date(r.robo_visto_em) : null
     const online = visto ? Date.now() - visto.getTime() < 5 * 60 * 1000 : false
-    if (!r.enfileirado) toasts.info?.('o robô já tem essa busca na fila')
-    else if (online) toasts.success?.('pedido feito: o robô do Mac mini vai abrir a Amazon, baixar e enviar (1 a 2 min)')
-    else toasts.success?.(`pedido na fila; o robô do Mac mini não dá sinal${visto ? ` desde ${visto.toLocaleString('pt-BR')}` : ''}. Se demorar, rode o "KFA Conciliação" no Mac.`)
+    if (!r.enfileirado) toasts.info?.('pedi ao robô o arquivo da Amazon: ele já tinha essa busca na fila')
+    else if (online) toasts.success?.('pedi ao robô o arquivo da Amazon: o Mac mini vai abrir a Amazon, baixar e enviar (1 a 2 min)')
+    else toasts.success?.(`pedi ao robô o arquivo da Amazon, mas o Mac mini não dá sinal${visto ? ` desde ${visto.toLocaleString('pt-BR')}` : ''}. Se demorar, rode o "KFA Conciliação" no Mac.`)
   } catch (e: any) {
     toasts.error?.(e?.data?.detail?.mensagem || e?.data?.detail?.code || 'não consegui pedir ao robô')
   }
@@ -506,6 +564,11 @@ watch([loja, dataFiltro, situacao, etapa], () => {
   carregar()
 })
 watch(page, () => carregar())
+// 16/10, revisão: a lista de Pedidos fica montada enquanto se vincula no Extrato;
+// voltar pra ela relê (antes mostrava o pedido como estava antes do vínculo).
+watch(visao, (v) => {
+  if (v === 'pedidos') carregar()
+})
 
 await carregarLojas()
 // Link do Vigia de Conciliação (Threema/Ouvidoria): /conciliacao?loja=&visao=extrato&dia= ou
@@ -522,7 +585,7 @@ if (typeof q0.loja === 'string') {
 if (typeof q0.situacao === 'string') situacao.value = q0.situacao
 if (typeof q0.etapa === 'string') etapa.value = q0.etapa
 if (q0.visao === 'extrato') {
-  extratoDia.value = typeof q0.dia === 'string' ? q0.dia : ''
+  extratoDia.value = diaValido(q0.dia) ? q0.dia : '' // 16/10, revisão: valor inválido é ignorado (cai em ontem)
   visao.value = 'extrato'
 } else if (q0.visao === 'pedidos') {
   visao.value = 'pedidos'
@@ -596,7 +659,7 @@ await carregar()
 
     <ConciliacaoResumo v-if="visao === 'resumo'" :can-edit="canEdit" @abrir-extrato="abrirExtrato" @ver-pedidos="verPedidos" @sincronizar="sincronizarLoja" @buscar-transacoes="buscarTransacoes" />
 
-    <ConciliacaoExtrato v-if="visao === 'extrato'" :loja="loja" :plataforma="tab" :dia="extratoDia" :can-edit="canEdit" @ver-pedido="verPedido" />
+    <ConciliacaoExtrato v-if="visao === 'extrato'" v-model:dia="extratoDia" :loja="loja" :plataforma="tab" :can-edit="canEdit" @ver-pedido="verPedido" />
 
     <ConciliacaoFechamento v-if="visao === 'fechamento'" v-model:loja="loja" :lojas="lojas" @abrir-extrato="abrirExtrato" />
 
