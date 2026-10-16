@@ -47,8 +47,8 @@ TIPOS = {
 CLASSIFICACAO_AUTOMATICA = {
     "saque": "saque",
     "publicidade": "publicidade",
-    "ajuste_amazon": "ajuste",
-    "outro": "outro",
+    # ajuste_amazon (tarifa avulsa, cobrança do saldo, ajuste) e "outro": sem dono até
+    # uma pessoa classificar (16/10 à noite, Vinicius)
 }
 
 

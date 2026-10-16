@@ -57,7 +57,7 @@ CLASSIFICACAO_AUTOMATICA = {
     "saque_confirmado": "saque",
     "saque_cancelado": "saque",
     "publicidade": "publicidade",
-    "ajuste_shopee": "ajuste",
+    # ajuste_shopee (penalidade etc.): sem dono até uma pessoa classificar (16/10 à noite)
 }
 
 

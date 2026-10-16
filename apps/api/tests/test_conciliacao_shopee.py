@@ -81,7 +81,8 @@ def test_transacao_para_movimento_mapeia_tipos():
             reason="Faixa 2 de Penalização",
         )
     )
-    assert pena["tipo"] == "ajuste_shopee" and pena["classificacao"] == "ajuste"
+    # cobrança da plataforma sem pedido fica SEM DONO (16/10 à noite, Vinicius)
+    assert pena["tipo"] == "ajuste_shopee" and pena["classificacao"] is None
     assert pena["descricao"] == "Faixa 2 de Penalização"
     ads = transacao_para_movimento(_tx(4, "SPM_DEDUCT", -100.0, 14727.64, _epoch(d, 12)))
     assert ads["tipo"] == "publicidade" and ads["classificacao"] == "publicidade"
@@ -225,13 +226,10 @@ async def test_extrato_do_dia_shopee_fecha_a_conta(db, make_user, auth_as, clien
     assert r.status_code == 200, r.text
     corpo = r.json()
     assert [m["tipo"] for m in corpo["movimentos"]] == ["venda_liberada", "ajuste_shopee", "saque"]
-    assert [m["status"] for m in corpo["movimentos"]] == [
-        "automatico",
-        "classificado",
-        "classificado",
-    ]
+    # a penalização (cobrança da plataforma) fica sem dono até alguém olhar (16/10 à noite)
+    assert [m["status"] for m in corpo["movimentos"]] == ["automatico", "pendente", "classificado"]
     assert corpo["totais"]["saldo_inicial"] == 0.81 and corpo["totais"]["saldo_informado"] == 901.81
-    assert corpo["totais"]["diferenca"] == 0.0 and corpo["contagem"]["pendente"] == 0
+    assert corpo["totais"]["diferenca"] == 0.0 and corpo["contagem"]["pendente"] == 1
     r = await client.get("/api/conciliacao/lojas")
     assert [x["platform"] for x in r.json()["lojas"]] == ["shopee"]
 

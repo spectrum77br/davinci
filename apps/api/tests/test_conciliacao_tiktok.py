@@ -213,7 +213,7 @@ def test_transacao_e_repasse_viram_movimentos():
         ordem=2,
         saldo_apos=Decimal("239.45"),
     )
-    assert aj["tipo"] == "ajuste_tiktok" and aj["classificacao"] == "ajuste"
+    assert aj["tipo"] == "ajuste_tiktok" and aj["classificacao"] is None  # sem dono (16/10)
     assert aj["descricao"] == "Ajuste da TikTok (adjustment)" and aj["debito"] == Decimal("5.00")
     assert est["data"] == datetime(2026, 10, 14, 3, 0, 1, tzinfo=UTC)
     rep = repasse_para_movimento(st, _repasse(900, "344.45", date(2026, 10, 14)), ordem=2)

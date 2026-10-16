@@ -20,7 +20,7 @@ Regras (decididas com o Vinicius em 14/10/2026, `docs/conciliacao-avaliacao.md`)
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -575,31 +575,6 @@ def _previsao_por_prazo(
     return None
 
 
-def conta_ml_do_pack(extrato: list[ConciliacaoMovimento]) -> dict[str, Any] | None:
-    """Carrinho do ML com vários pedidos (16/10, revisão: Poofy 301748, 12 pagamentos de
-    49,00 e a venda da Margem com um item só → "recebido a mais" falso). O previsto vem
-    das próprias linhas da conta (Vinicius: "o que manda é a conta, o Bling nunca bate"):
-    bruto, tarifa, frete, parcelamento, cupom e líquido somados. None quando o pack tem
-    um pedido só (aí a venda da Margem serve)."""
-    libs = [m for m in extrato if m.tipo == "venda_liberada" and m.pack_id]
-    pedidos = {m.pedido_marketplace for m in libs if m.pedido_marketplace}
-    if len(pedidos) < 2:
-        return None
-
-    def soma(campo: str) -> Decimal:
-        return _soma([getattr(m, campo) for m in libs if getattr(m, campo) is not None])
-
-    return {
-        "pedidos": len(pedidos),
-        "valor": soma("bruto"),
-        "tarifa": soma("tarifa").copy_abs(),
-        "frete": soma("frete").copy_abs(),
-        "parcelamento": soma("parcelamento").copy_abs(),
-        "cupom": soma("cupom").copy_abs(),
-        "liquido": _soma([m.credito for m in libs]) - _soma([m.debito for m in libs]),
-    }
-
-
 def frete_do_comprador(
     venda: MarketplaceOrderFinancial | None, liberacoes: list[ConciliacaoMovimento]
 ) -> Decimal:
@@ -746,6 +721,86 @@ def etapa_do_pedido(
     else:
         out["etapa"] = nova
     return out
+
+
+async def _reservas_vai_e_volta(session: AsyncSession, loja: ConciliacaoLoja) -> tuple[int, int]:
+    """Reserva sem pedido no Bling: o par −X/+X do mesmo pagamento (soma zero) vira
+    "reserva"; reserva sozinha (dinheiro retido) fica sem dono — e a que o robô tinha
+    classificado antes volta a sem dono, reabrindo o dia."""
+    linhas = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento)
+                .where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.tipo.in_(tuple(TIPOS_RESERVA)),
+                    ConciliacaoMovimento.pedido_bling.is_(None),
+                    ConciliacaoMovimento.vinculado_por.is_(None),
+                    or_(
+                        ConciliacaoMovimento.classificacao.is_(None),
+                        ConciliacaoMovimento.classificacao == "reserva",
+                    ),
+                )
+                .limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    grupos: dict[str, list[ConciliacaoMovimento]] = defaultdict(list)
+    for m in linhas:
+        grupos[m.pagamento_id or f"sem-pagamento:{m.id}"].append(m)
+    classificadas = retidas = 0
+    dias: set[date] = set()
+    for grupo in grupos.values():
+        saldo = _soma([m.credito for m in grupo]) - _soma([m.debito for m in grupo])
+        fechou = len(grupo) >= 2 and abs(saldo) <= TOLERANCIA
+        for m in grupo:
+            if fechou and m.classificacao is None:
+                m.classificacao = "reserva"
+                classificadas += 1
+            elif not fechou and m.classificacao == "reserva":
+                m.classificacao = None
+                retidas += 1
+                dias.add(m.data.astimezone(BRT).date())
+    if dias:
+        await reabrir_dias(session, loja, dias, motivo="reserva retida sem dono")
+    return classificadas, retidas
+
+
+_TIPOS_COBRANCA_PLATAFORMA = ("ajuste_shopee", "ajuste_amazon", "ajuste_tiktok")
+
+
+async def _soltar_cobrancas_da_plataforma(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Linha de cobrança/ajuste da plataforma sem pedido que o robô classificou sozinho
+    ("ajuste"/"outro") e tem dinheiro: volta a sem dono e o dia reabre."""
+    linhas = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.tipo.in_(_TIPOS_COBRANCA_PLATAFORMA),
+                    ConciliacaoMovimento.pedido_bling.is_(None),
+                    ConciliacaoMovimento.vinculado_por.is_(None),
+                    ConciliacaoMovimento.classificacao.in_(("ajuste", "outro")),
+                    or_(ConciliacaoMovimento.credito != 0, ConciliacaoMovimento.debito != 0),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in linhas:
+        m.classificacao = None
+    if linhas:
+        await reabrir_dias(
+            session,
+            loja,
+            {m.data.astimezone(BRT).date() for m in linhas},
+            motivo="cobrança da plataforma sem dono",
+        )
+    return len(linhas)
 
 
 async def recalcular_loja(
@@ -941,20 +996,18 @@ async def recalcular_loja(
         nome_bling = str(nomes_situacao.get(str(cab.situacao or ""), cab.situacao) or "")
         # Amazon sem venda da Margem (KFA por arquivo, 16/10): a venda é a soma das
         # próprias transações do pedido (lançamento + tarifas), como a tela da Amazon
+        # 16/10 à noite: só quando a Margem não tem a venda (KFA antes do arquivo entrar);
+        # com venda da Margem, o esperado é dela — não as próprias linhas da conta
         amazon_linhas = (
             conta_amazon_de_transacoes([m.raw for m in extrato if isinstance(m.raw, dict)])
-            if plataforma_loja == "amazon" and conta_amazon(venda) is None
+            if plataforma_loja == "amazon" and venda is None
             else None
         )
-        # ML: carrinho com vários pedidos — a venda da Margem tem um item só; o previsto
-        # vem das linhas da conta (16/10, revisão)
-        ml_pack = conta_ml_do_pack(extrato) if plataforma_loja == "ml" else None
-        if amazon_linhas:
-            liquido_previsto = amazon_linhas["liquido"]
-        elif ml_pack:
-            liquido_previsto = ml_pack["liquido"]
-        else:
-            liquido_previsto = None
+        # 16/10 à noite (Vinicius): o valor esperado do pedido é o da PLATAFORMA lido pela
+        # MARGEM — pack do ML com vários pedidos compara com a venda da Margem; se ela só
+        # leu um pedido do carrinho, aparece "recebido a mais" (sinal pra consertar a
+        # leitura, não pra esconder)
+        liquido_previsto = amazon_linhas["liquido"] if amazon_linhas else None
         estado_bling = nome_bling.strip().lower()
         calc = situacao_do_pedido(
             agora=agora,
@@ -1036,16 +1089,6 @@ async def recalcular_loja(
                 "subsidio": ZERO,
                 "cupons": -tiktok["outros_receita"],
             }
-        if ml_pack is not None and calc["situacao"] != "sem_venda":
-            # pack com vários pedidos: a conta inteira do carrinho, como no extrato
-            shopee = {
-                "preco": ml_pack["valor"],
-                "taxas": ml_pack["tarifa"] + ml_pack["parcelamento"],
-                "afiliados": None,
-                "frete_loja": ml_pack["frete"],
-                "subsidio": ZERO,
-                "cupons": ml_pack["cupom"],
-            }
         # Resultado de VERDADE: só com o dinheiro que entrou. Enquanto não libera, sobrou
         # e margem ficam vazios (15/10, Vinicius: "não precisa aparecer previsto nem margem").
         base_resultado = calc["recebido"]
@@ -1107,13 +1150,7 @@ async def recalcular_loja(
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
             # Amazon: o líquido previsto é o da venda (Shipment + tarifas), sem estornos
             "venda_liquido": (
-                amazon["liquido"]
-                if amazon
-                else (
-                    ml_pack["liquido"]
-                    if (ml_pack and venda_ok)
-                    else (_d(venda.net_amount) if venda_ok else None)
-                )
+                amazon["liquido"] if amazon else (_d(venda.net_amount) if venda_ok else None)
             ),
             "venda_status": venda.status if venda_ok else None,
             "previsao_liberacao": calc["previsao"],
@@ -1307,30 +1344,19 @@ async def recalcular_loja(
             if achado:
                 m.pedido_bling, m.bling_id = achado
                 contagem["irma_do_pagamento"] += 1
-    # Reserva (vai e volta, soma zero) de venda que não existe no Bling: não é
-    # dinheiro que entrou nem saiu — o robô classifica como "reserva" pra não ficar
-    # "sem dono" (16/10, injox). Se o pedido aparecer depois, a ligação acima desfaz.
-    reservas_soltas = (
-        (
-            await session.execute(
-                select(ConciliacaoMovimento)
-                .where(
-                    ConciliacaoMovimento.integration_id == loja.integration_id,
-                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
-                    ConciliacaoMovimento.tipo.in_(tuple(TIPOS_RESERVA)),
-                    ConciliacaoMovimento.pedido_bling.is_(None),
-                    ConciliacaoMovimento.vinculado_por.is_(None),
-                    ConciliacaoMovimento.classificacao.is_(None),
-                )
-                .limit(5000)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for m in reservas_soltas:
-        m.classificacao = "reserva"
-        contagem["reserva_sem_pedido"] += 1
+    # Reserva (vai e volta) de venda que não existe no Bling: só vira "reserva" quando o
+    # PAR existe e soma zero (−X e +X do mesmo pagamento) — 16/10 à noite (Vinicius):
+    # reserva que só saiu é dinheiro retido, fica sem dono até alguém ver.
+    reservas, retidas = await _reservas_vai_e_volta(session, loja)
+    contagem["reserva_sem_pedido"] += reservas
+    if retidas:
+        contagem["reserva_retida"] = retidas
+    # Cobrança da plataforma sem pedido (penalidade da Shopee, ajuste da Amazon/TikTok):
+    # fica SEM DONO até uma pessoa classificar — 16/10 à noite (Vinicius): "é dinheiro
+    # que saiu, alguém tem que ver"; o robô não classifica mais sozinho.
+    soltas = await _soltar_cobrancas_da_plataforma(session, loja)
+    if soltas:
+        contagem["cobrancas_soltas"] = soltas
     # Venda sem pedido no Bling cujo dinheiro entrou e saiu inteiro: venda desfeita.
     desfeitas = await classificar_vendas_desfeitas(session, loja)
     if desfeitas:

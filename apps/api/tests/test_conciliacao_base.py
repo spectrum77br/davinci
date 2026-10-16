@@ -2474,41 +2474,84 @@ def test_etapa_reaberto_pela_pessoa_fica_e_bateu_em_zera():
     assert e["etapa"] == "pendencia" and e["bateu_em"] is None
 
 
-def test_conta_do_pack_do_ml_soma_as_linhas_do_carrinho():
-    """Poofy 301748 (16/10): 12 pagamentos de 49,00 no mesmo pack e a venda da Margem
-    com um item só — o previsto vem das linhas da conta."""
-    loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
-    loja.integration_id = None
-    libs = []
-    for i in range(3):
-        m = _mov(
-            loja,
-            "venda_liberada",
-            datetime(2026, 10, 12, 12, i, tzinfo=UTC),
-            credito="33.88",
-            pedido_mkt=f"20000{i}",
-            tarifa="-15.12",
-            frete="0",
-        )
-        m.pack_id = "2000015384524949"
-        m.bruto = Decimal("49.00")
-        libs.append(m)
-    conta = calc.conta_ml_do_pack(libs)
-    assert conta["pedidos"] == 3 and conta["valor"] == Decimal("147.00")
-    assert conta["tarifa"] == Decimal("45.36") and conta["liquido"] == Decimal("101.64")
-    # um pedido só no pack: a venda da Margem serve
-    assert calc.conta_ml_do_pack(libs[:1]) is None
-    out = calc.situacao_do_pedido(
-        agora=datetime(2026, 10, 15, 12, tzinfo=UTC),
-        data_pedido=datetime(2026, 10, 10, 12, tzinfo=UTC),
-        bling_total=Decimal("147.00"),
-        venda=None,
-        previsao=None,
-        movs_extrato=libs,
-        fatura={},
-        liquido_previsto=conta["liquido"],
+async def test_reserva_sem_pedido_so_e_vai_e_volta_com_o_par_inteiro(db, make_user):
+    """16/10 à noite (Vinicius): reserva do Mercado Pago sem pedido no Bling só é "vai e
+    volta" quando a saída e a volta (mesmo pagamento) somam zero; a que só saiu é
+    dinheiro retido — fica sem dono, e a que o robô tinha classificado volta a sem dono
+    reabrindo o dia."""
+    from sqlalchemy import select
+
+    from app.models import ConciliacaoDia
+
+    loja, _integ = await _loja(db, make_user)
+    d13 = datetime(2026, 10, 13, 12, tzinfo=UTC)
+    saiu = _mov(loja, "reserva_disputa", d13, debito="100.00", pagamento="P1")
+    voltou = _mov(
+        loja, "reserva_disputa", d13 + timedelta(hours=1), credito="100.00", pagamento="P1"
     )
-    assert out["situacao"] == "bateu" and out["recebido"] == Decimal("101.64")
+    so_saiu = _mov(loja, "reserva_disputa", d13, debito="50.00", pagamento="P2")
+    so_saiu.classificacao = "reserva"  # o robô de antes classificou sozinho
+    db.add_all([saiu, voltou, so_saiu])
+    db.add(
+        ConciliacaoDia(
+            integration_id=loja.integration_id,
+            dia=date(2026, 10, 13),
+            fechado_em=datetime(2026, 10, 14, 9, tzinfo=UTC),
+            fechado_por="robô",
+        )
+    )
+    await db.commit()
+    out = await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 15, 12, tzinfo=UTC))
+    await db.commit()
+    assert out["reserva_sem_pedido"] == 2 and out["reserva_retida"] == 1
+    for m in (saiu, voltou, so_saiu):
+        await db.refresh(m)
+    assert saiu.classificacao == "reserva" and voltou.classificacao == "reserva"
+    assert so_saiu.classificacao is None  # sem dono: alguém precisa olhar
+    dia = (await db.execute(select(ConciliacaoDia))).scalar_one()
+    assert dia.fechado_em is None and dia.reaberto_por == "robô"
+    assert dia.reaberto_motivo == "reserva retida sem dono"
+
+
+async def test_cobranca_da_plataforma_classificada_pelo_robo_volta_a_sem_dono(db, make_user):
+    """16/10 à noite (Vinicius: "isso mesmo, fica sem dono"): penalidade/ajuste da
+    plataforma sem pedido que o robô marcou "ajuste" sozinho volta a sem dono e o dia
+    reabre; a que uma pessoa classificou fica."""
+    from sqlalchemy import select
+
+    from app.models import ConciliacaoDia
+
+    loja, _integ = await _loja(db, make_user)
+    d13 = datetime(2026, 10, 13, 12, tzinfo=UTC)
+    robo = _mov(loja, "ajuste_shopee", d13, debito="250.00")
+    robo.classificacao = "ajuste"
+    pessoa = _mov(loja, "ajuste_shopee", d13 + timedelta(hours=1), debito="30.00")
+    pessoa.classificacao = "ajuste"
+    pessoa.vinculado_por = "cairo"
+    zerada = _mov(loja, "ajuste_tiktok", d13 + timedelta(hours=2))
+    zerada.classificacao = "outro"  # 0,00: não é dinheiro, pode ficar
+    db.add_all([robo, pessoa, zerada])
+    db.add(
+        ConciliacaoDia(
+            integration_id=loja.integration_id,
+            dia=date(2026, 10, 13),
+            fechado_em=datetime(2026, 10, 14, 9, tzinfo=UTC),
+            fechado_por="robô",
+        )
+    )
+    await db.commit()
+    out = await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 15, 12, tzinfo=UTC))
+    await db.commit()
+    assert out["cobrancas_soltas"] == 1
+    for m in (robo, pessoa, zerada):
+        await db.refresh(m)
+    assert robo.classificacao is None
+    assert pessoa.classificacao == "ajuste" and zerada.classificacao == "outro"
+    dia = (await db.execute(select(ConciliacaoDia))).scalar_one()
+    assert dia.fechado_em is None and dia.reaberto_motivo == "cobrança da plataforma sem dono"
+    # rodada seguinte: nada a soltar, nada a reabrir
+    out2 = await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 15, 13, tzinfo=UTC))
+    assert "cobrancas_soltas" not in out2
 
 
 async def test_fechar_dia_so_ate_ontem_saldo_diferente_exige_motivo_e_reaberto_a_mao_fica(

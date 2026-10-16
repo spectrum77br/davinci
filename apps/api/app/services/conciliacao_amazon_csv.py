@@ -37,6 +37,7 @@ from app.models import (
     ConciliacaoSync,
     Integration,
     LogisticaRoboComando,
+    MarketplaceOrderFinancial,
 )
 from app.models.conciliacao import ORIGEM_AMAZON
 from app.services.conciliacao_amazon import recalcular_saldo, transacao_para_movimento
@@ -244,6 +245,74 @@ def _marcar_liberada(ex: ConciliacaoMovimento, m: dict[str, Any]) -> None:
         ex.pedido_bling, ex.bling_id = m["pedido_bling"], m["bling_id"]
 
 
+async def _gravar_vendas_da_margem(
+    session: AsyncSession, loja: ConciliacaoLoja, movs: list[dict[str, Any]], agora: datetime
+) -> dict[str, int]:
+    """16/10 à noite (Vinicius: "o valor esperado é o da plataforma, lido pela Margem"):
+    a Margem não lê a KFA pela API (negada), então a própria leitura do arquivo grava a
+    venda na Margem (MarketplaceOrderFinancial) com o que a Amazon diz do pedido —
+    lançamento + tarifas — enquanto a venda está presa; quando libera, a venda congela e
+    a Conciliação compara o que entrou com ela."""
+    from app.services.conciliacao_calculo import conta_amazon_de_transacoes
+
+    por_pedido: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for m in movs:
+        if m["pedido_marketplace"]:
+            por_pedido[m["pedido_marketplace"]].append(m)
+    criadas = atualizadas = 0
+    for pedido, linhas in por_pedido.items():
+        vendas = [m for m in linhas if m["tipo"] == "venda_liberada"]
+        if not vendas:
+            continue
+        liberada = any(m["sub_tipo"] != "DEFERRED" for m in vendas)
+        mof = (
+            await session.execute(
+                select(MarketplaceOrderFinancial).where(
+                    MarketplaceOrderFinancial.integration_id == loja.integration_id,
+                    MarketplaceOrderFinancial.external_order_id == pedido,
+                )
+            )
+        ).scalar_one_or_none()
+        if mof is not None and (mof.raw or {}).get("fonte") != "csv_kfa":
+            continue  # venda lida pela Margem de verdade: não mexe
+        if mof is not None and (mof.raw or {}).get("congelada"):
+            continue
+        txs = [m["raw"] for m in linhas]
+        conta = conta_amazon_de_transacoes(txs) or {}
+        raw = {"transactions": {"transactions": txs}, "fonte": "csv_kfa"}
+        if liberada:
+            raw["congelada"] = agora.isoformat()
+        campos = {
+            "status": "posted",
+            "gross_amount": conta.get("produto"),
+            "fee_amount": abs(conta.get("tarifas") or ZERO),
+            "freight_amount": abs(conta.get("etiqueta") or ZERO),
+            "discount_amount": abs(conta.get("promocao") or ZERO),
+            "net_amount": conta.get("liquido"),
+            "raw": raw,
+            "fetched_at": agora,
+            "bling_id": vendas[0].get("bling_id"),
+            "pedido_bling": vendas[0].get("pedido_bling"),
+        }
+        if mof is None:
+            session.add(
+                MarketplaceOrderFinancial(
+                    integration_id=loja.integration_id,
+                    platform=loja.platform,
+                    external_order_id=pedido,
+                    **campos,
+                )
+            )
+            criadas += 1
+        else:
+            for k, v in campos.items():
+                setattr(mof, k, v)
+            atualizadas += 1
+    if criadas or atualizadas:
+        await session.flush()
+    return {"criadas": criadas, "atualizadas": atualizadas}
+
+
 async def ingerir_csv_amazon(
     session: AsyncSession, loja: ConciliacaoLoja, texto: str, *, agora: datetime | None = None
 ) -> dict[str, Any]:
@@ -263,6 +332,7 @@ async def ingerir_csv_amazon(
         achado = mapa.get(m["pedido_marketplace"] or "")
         if achado:
             m["pedido_bling"], m["bling_id"] = achado
+    vendas_margem = await _gravar_vendas_da_margem(session, loja, movs, agora)
     ids_arquivo = [m["id_externo"] for m in movs] + [v for v in legados.values() if v]
     existentes = {
         m.id_externo: m
@@ -395,6 +465,7 @@ async def ingerir_csv_amazon(
         "migrados": migrados,
         "liberadas": liberadas,
         "duplicatas_apagadas": duplicatas_apagadas,
+        "vendas_margem": vendas_margem,
         "ja_existiam": len(movs) - inseridos - atualizados - liberadas,
         "de": min(datas) if datas else None,
         "ate": max(datas) if datas else None,

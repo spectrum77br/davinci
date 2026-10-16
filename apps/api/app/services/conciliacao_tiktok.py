@@ -174,7 +174,7 @@ def transacao_para_movimento(
         "sku": None,
         "item_id": None,
         "data_aprovacao": _epoch(tx.get("order_create_time")),
-        "classificacao": None if order_id else "ajuste",
+        "classificacao": None,  # ajuste da TikTok sem pedido: sem dono (16/10 à noite)
         "vinculado_por": None,
         "vinculado_em": None,
         "raw": {
