@@ -190,17 +190,43 @@ function nomeMes(mes: string) {
   return d.toLocaleDateString('pt-BR', { month: 'long' })
 }
 
+// 16/10, revisão: cada leitura leva um número; resposta mais velha é descartada
+// (trocar o dia rápido podia deixar o Resumo de um dia com o cabeçalho de outro).
+let carregarSeq = 0
 async function carregar() {
   if (!dia.value) return
+  const seq = ++carregarSeq
   loading.value = true
   erro.value = ''
   try {
-    dados.value = await api<Resumo>('/api/conciliacao/resumo', { query: { dia: dia.value } })
+    const r = await api<Resumo>('/api/conciliacao/resumo', { query: { dia: dia.value } })
+    if (seq !== carregarSeq) return
+    dados.value = r
   } catch (e: any) {
+    if (seq !== carregarSeq) return
     erro.value = e?.data?.detail?.code || e?.message || 'erro ao carregar'
   } finally {
-    loading.value = false
+    if (seq === carregarSeq) loading.value = false
   }
+}
+
+// 16/10, revisão: o Resumo é de ontem pra trás; › e a data digitada passavam pra hoje
+// e pintavam tudo de verde ("sem movimento"). Trava em ontem.
+function avancarDia() {
+  const prox = somaDias(dia.value, 1)
+  if (prox <= ontemISO()) dia.value = prox
+}
+
+// 16/10, revisão: o clique em "A liberar" listava só `aguardando`, menos que o número
+// (a API soma aguardando + vencido em a_liberar; na Amazon entra ainda o preso na
+// reserva, que é lançamento do extrato e não pedido).
+const FILTRO_A_LIBERAR: Record<string, string> = { situacao: 'aguardando,vencido' }
+
+// 16/10, revisão: "Na conta" nulo (TikTok, KFA por arquivo) entrava como 0 na soma;
+// aqui só entram as lojas que têm saldo e, sem nenhuma, fica "—".
+function naContaDe(lojas: LojaResumo[]) {
+  const com = lojas.map((l) => l.dinheiro.na_conta).filter((v): v is number => v != null)
+  return com.length ? Math.round(com.reduce((s, v) => s + v, 0) * 100) / 100 : null
 }
 
 function agir(a: Agir) {
@@ -258,7 +284,14 @@ function pctFinal(m: Mes) {
 }
 
 defineExpose({ carregar })
-watch(dia, () => carregar())
+watch(dia, (v) => {
+  const ontem = ontemISO()
+  if (v > ontem) {
+    dia.value = ontem // o watch dispara de novo com o dia travado
+    return
+  }
+  carregar()
+})
 // Sem `await` no setup: componente síncrono. Com top-level await, trocar de uma
 // visão assíncrona pra outra (Resumo → Fechamento) quebrava o patch do DOM
 // (NotFoundError insertBefore) por não ter <Suspense> próprio.
@@ -274,7 +307,7 @@ onMounted(() => {
         <span class="px-1 font-semibold text-muted-foreground">Dia</span>
         <button type="button" class="rounded px-1 py-0.5 hover:bg-muted" title="dia anterior" @click="dia = somaDias(dia, -1)"><ChevronLeft class="size-3.5" /></button>
         <input v-model="dia" type="date" class="bg-transparent outline-none" />
-        <button type="button" class="rounded px-1 py-0.5 hover:bg-muted" title="dia seguinte" @click="dia = somaDias(dia, 1)"><ChevronRight class="size-3.5" /></button>
+        <button type="button" class="rounded px-1 py-0.5 hover:bg-muted" title="dia seguinte" @click="avancarDia()"><ChevronRight class="size-3.5" /></button>
         <button type="button" class="rounded px-1.5 py-0.5 text-muted-foreground underline" @click="dia = ontemISO()">ontem</button>
       </div>
       <span v-if="dados" class="text-muted-foreground">{{ dados.lojas.length }} loja(s) na conciliação</span>
@@ -451,10 +484,10 @@ onMounted(() => {
               <template v-for="g in grupos" :key="'d' + g.key">
                 <tr class="border-b bg-muted/60 font-bold">
                   <td class="px-2 py-1">{{ g.label }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternar(g.key)">{{ abertos[g.key] ? 'esconder' : 'mostrar' }}</button></td>
-                  <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.na_conta) }}</td>
+                  <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(naContaDe(g.lojas)) }}</td>
                   <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.por_plataforma[g.key]?.dinheiro?.a_liberar) }}</td>
                 </tr>
-                <tr v-for="l in g.lojas" v-show="abertos[g.key]" :key="'d' + l.conta" class="cursor-pointer border-b hover:bg-muted/40" title="abre os pedidos desta loja aguardando liberação" @click="emit('ver-pedidos', l.conta, { situacao: 'aguardando' })">
+                <tr v-for="l in g.lojas" v-show="abertos[g.key]" :key="'d' + l.conta" class="cursor-pointer border-b hover:bg-muted/40" title="abre os pedidos desta loja aguardando liberação" @click="emit('ver-pedidos', l.conta, FILTRO_A_LIBERAR)">
                   <td class="px-2 py-1 pl-4">
                     <div class="font-bold">{{ l.conta }}</div>
                     <div class="text-[10px] text-muted-foreground"><template v-if="l.platform === 'tiktok'">repassa pro banco em lotes<template v-if="l.dinheiro.a_receber"> · aguardando repasse {{ fmtMoney(l.dinheiro.a_receber) }}</template></template><template v-else-if="l.dinheiro.nota">{{ l.dinheiro.nota }}</template><template v-else>saldo de {{ fmtDiaHora(l.dinheiro.saldo_em) }}</template> · {{ l.dinheiro.a_liberar_pedidos }} pedidos a liberar<template v-if="l.dinheiro.reservado != null"> · reservado {{ fmtMoney(l.dinheiro.reservado) }}</template><template v-if="l.dinheiro.preso != null"> · preso na reserva por entrega {{ fmtMoney(l.dinheiro.preso) }}</template></div>
@@ -466,7 +499,7 @@ onMounted(() => {
               <tr v-if="faseSeguinte.length" class="border-b bg-muted/60 font-bold"><td class="px-2 py-1">{{ faseSeguinte.join(' · ') }}</td><td colspan="2" class="px-2 py-1 text-right font-normal text-muted-foreground">fase seguinte</td></tr>
               <tr class="bg-muted/40 font-bold">
                 <td class="px-2 py-1">Empresa <span class="font-normal text-muted-foreground">({{ dados.lojas.length }} loja{{ dados.lojas.length === 1 ? '' : 's' }})</span></td>
-                <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(dados.empresa.dinheiro?.na_conta) }}</td>
+                <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(naContaDe(dados.lojas)) }}</td>
                 <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.empresa.dinheiro?.a_liberar) }}</td>
               </tr>
             </tbody>
