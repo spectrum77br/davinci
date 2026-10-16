@@ -1291,7 +1291,8 @@ async def test_painel_marca_conferido_finaliza_e_exige_motivo_na_pendencia(
 
 async def test_painel_exporta_excel(db, make_user, auth_as, client):
     loja, _integ = await _loja(db, make_user)
-    db.add(await _pedido_conciliado(loja))
+    # 16/10, revisão: observação que parece fórmula e com caractere de controle
+    db.add(await _pedido_conciliado(loja, observacao='=HYPERLINK("http://x")\x07 conferir'))
     await db.commit()
     auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
     r = await client.post("/api/conciliacao/export.xlsx", params={"loja": "jlas2"})
@@ -1312,6 +1313,9 @@ async def test_painel_exporta_excel(db, make_user, auth_as, client):
         linhas[0][linhas[0].index("Extras (cupom, parcelamento, outros)")]
         and linhas[1][linhas[0].index("Extras (cupom, parcelamento, outros)")] == 115.64
     )
+    # texto vai como texto (nunca fórmula) e sem o caractere de controle
+    obs = ws.cell(row=2, column=linhas[0].index("Observação") + 1)
+    assert obs.value == '=HYPERLINK("http://x") conferir' and obs.data_type == "s"
 
 
 # --- Extrato do dia (2c) ---------------------------------------------------------
@@ -1876,12 +1880,34 @@ async def test_fechar_dias_prontos_so_fecha_dia_100_por_cento(db, make_user):
     assert r["fechados"] == [] and "2026-10-13" not in r["abertos"]
 
 
-async def test_vigia_conciliacao_registra_o_onde_agir(db, make_user):
+async def _limpar_ouvidoria(db) -> None:
+    # as tabelas da Ouvidoria não estão no `_CLEANUP_TABLES` do conftest: a ocorrência
+    # do teste anterior (mesma chave) faria o vigia contar "persistem" em vez de "novas"
+    from sqlalchemy import text
+
+    for tbl in ("ouvidoria_ocorrencias", "ouvidoria_rodadas"):
+        await db.execute(text(f"DELETE FROM {tbl}"))  # noqa: S608
+    await db.commit()
+
+
+async def test_vigia_conciliacao_registra_o_onde_agir(db, make_user, monkeypatch):
     from sqlalchemy import select
 
     from app.models import OuvidoriaOcorrencia
+    from app.services import ouvidoria as ouv
     from app.services.vigia_conciliacao import ROBO, vigia_conciliacao_run
 
+    # 16/10, revisão: o aviso é carimbado com a hora do COMEÇO da rodada
+    visto: dict = {}
+    original_avisar = ouv.avisar_pendentes
+
+    async def espiao(session, robo, *, agora=None):
+        visto["agora"] = agora
+        return await original_avisar(session, robo, agora=agora)
+
+    monkeypatch.setattr(ouv, "avisar_pendentes", espiao)
+    quando = datetime(2026, 10, 14, 10, 0, tzinfo=UTC)
+    await _limpar_ouvidoria(db)
     loja, _integ = await _loja(db, make_user)
     await _dia_de_exemplo(db, loja)  # 13/10: 1 linha sem dono + 1 estornado depois
     loja.ultimo_extrato_em = datetime.now(UTC)
@@ -1896,9 +1922,10 @@ async def test_vigia_conciliacao_registra_o_onde_agir(db, make_user):
 
     rc.montar_resumo = ontem_13
     try:
-        r = await vigia_conciliacao_run(db)
+        r = await vigia_conciliacao_run(db, agora=quando)
     finally:
         rc.montar_resumo = original
+    assert visto["agora"] == quando
     assert r["lojas"] == 1 and r["itens"] == 2 and r["novas"] == 2
     ocorrencias = (
         (
@@ -1910,8 +1937,9 @@ async def test_vigia_conciliacao_registra_o_onde_agir(db, make_user):
         .all()
     )
     chaves = {o.chave for o in ocorrencias}
-    assert chaves == {"jlas2:extrato:", "jlas2:pedidos:situacao=estornado_depois"}
-    extrato = next(o for o in ocorrencias if o.chave == "jlas2:extrato:")
+    # a chave do extrato leva o dia (16/10): cada dia aberto é uma ocorrência
+    assert chaves == {"jlas2:extrato:dia=2026-10-13", "jlas2:pedidos:situacao=estornado_depois"}
+    extrato = next(o for o in ocorrencias if o.chave == "jlas2:extrato:dia=2026-10-13")
     assert extrato.link == "/conciliacao?loja=jlas2&visao=extrato&dia=2026-10-13"
     assert extrato.conta == "jlas2" and extrato.plataforma == "Mercado Livre"
     assert "pra agir" in r["resumo"]
@@ -1982,3 +2010,242 @@ def test_ordem_do_dia_com_ancora_resolve_ciclo_no_mesmo_segundo():
     # sem âncora a prova dos nove parte da primeira linha (comportamento antigo)
     t2 = _totais_do_dia(_ordena_dia([reserva, pagamento]))
     assert t2["diferenca"] in (0.0, -362.15)
+
+
+# --- 16/10, revisão de cabo a rabo: endpoints e vigia -----------------------------
+
+
+async def test_vigia_conciliacao_segura_dia_antigo_aberto(db, make_user, monkeypatch):
+    """O vigia olhava só "ontem": dia mais antigo ainda aberto fechava como "sumiu".
+    Agora os dias antigos pendentes do bloco "Dias" viram ocorrência e só fecham quando
+    o dia deixa de estar pendente."""
+    from sqlalchemy import select
+
+    from app.models import OuvidoriaOcorrencia
+    from app.services.vigia_conciliacao import ROBO, vigia_conciliacao_run
+
+    monkeypatch.setattr("app.routers.conciliacao._ontem", lambda: date(2026, 10, 15))
+    await _limpar_ouvidoria(db)
+    loja, _integ = await _loja(db, make_user)
+    movs = await _dia_de_exemplo(db, loja)  # 13/10 com 1 linha sem dono; 15/10 sem movimento
+    loja.ultimo_extrato_em = datetime.now(UTC)
+    await db.commit()
+    r = await vigia_conciliacao_run(db)
+    assert r["itens"] == 2 and r["novas"] == 2 and r["sumiram"] == 0
+
+    async def abertas() -> dict[str, OuvidoriaOcorrencia]:
+        rows = (
+            (
+                await db.execute(
+                    select(OuvidoriaOcorrencia).where(
+                        OuvidoriaOcorrencia.robo_chave == ROBO,
+                        OuvidoriaOcorrencia.fechada_em.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {o.chave: o for o in rows}
+
+    ab = await abertas()
+    assert set(ab) == {"jlas2:extrato:dia=2026-10-13", "jlas2:pedidos:situacao=estornado_depois"}
+    antigo = ab["jlas2:extrato:dia=2026-10-13"]
+    assert "dia 13/10 ainda aberto" in antigo.titulo and "1 linha(s) sem dono" in antigo.titulo
+    assert antigo.link == "/conciliacao?loja=jlas2&visao=extrato&dia=2026-10-13"
+    # rodada seguinte: o dia continua aberto → persiste, não "sumiu"
+    r = await vigia_conciliacao_run(db)
+    assert r["persistem"] == 2 and r["sumiram"] == 0
+    # deu destino à linha: o dia some do bloco e a ocorrência fecha como "sumiu"
+    movs["pendente"].classificacao = "ajuste"
+    await db.commit()
+    r = await vigia_conciliacao_run(db)
+    assert r["sumiram"] == 1 and set(await abertas()) == {"jlas2:pedidos:situacao=estornado_depois"}
+    fechada = (
+        await db.execute(
+            select(OuvidoriaOcorrencia).where(
+                OuvidoriaOcorrencia.chave == "jlas2:extrato:dia=2026-10-13"
+            )
+        )
+    ).scalar_one()
+    assert fechada.fechamento == "sumiu"
+
+
+async def test_rotas_de_escrita_exigem_a_loja(db, make_user, auth_as, client):
+    """Sem `loja`, a leitura cai na primeira loja (padrão da tela); a escrita responde 422
+    em vez de mexer na primeira loja da lista (16/10, revisão)."""
+    loja, _integ = await _loja(db, make_user)
+    await _dia_de_exemplo(db, loja)
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    r = await client.get("/api/conciliacao/extrato", params={"dia": "2026-10-13"})
+    assert r.status_code == 200 and r.json()["loja"] == "jlas2"
+    for metodo, rota, kw in (
+        ("POST", "/api/conciliacao/dias/2026-10-13/fechar", {}),
+        ("POST", "/api/conciliacao/dias/2026-10-13/reabrir", {}),
+        ("POST", "/api/conciliacao/dias/2026-10-13/reabrir", {"params": {"loja": " "}}),
+        ("PATCH", "/api/conciliacao/pedidos/301102", {"json": {"conferido": True}}),
+    ):
+        r = await client.request(metodo, rota, **kw)
+        assert r.status_code == 422, (rota, r.text)
+        assert r.json()["detail"]["code"] == "informe_a_loja"
+    r = await client.patch(
+        "/api/conciliacao/pedidos/301102", json={"loja": "jlas2", "conferido": True}
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_sincronizar_e_permissao_de_conciliacao(db, make_user, auth_as, client, monkeypatch):
+    """ "Sincronizar" exigia Margem ou Logística em editar: quem só tem Conciliação tomava
+    403 e quem só tem Logística enfileirava a rodada (16/10, revisão)."""
+    import app.routers.conciliacao as rc
+
+    class _Job:
+        job_id = "j1"
+
+    class _Pool:
+        async def enqueue_job(self, *_a, **_k):
+            return _Job()
+
+    async def pool_falso():
+        return _Pool()
+
+    monkeypatch.setattr(rc, "get_arq_pool", pool_falso)
+    await _loja(db, make_user)
+    auth_as(await make_user(permissions={"logistica": {"view": True, "edit": True}}))
+    r = await client.post("/api/conciliacao/lojas/jlas2/sincronizar")
+    assert r.status_code == 403
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.post("/api/conciliacao/lojas/jlas2/sincronizar")
+    assert r.status_code == 403
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    r = await client.post("/api/conciliacao/lojas/jlas2/sincronizar")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"conta": "jlas2", "job_id": "j1", "enfileirado": True}
+
+
+async def test_carga_inicial_intervalo_invalido_da_422(db, make_user, auth_as, client):
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    for corpo in ({"intervalo_min": "abc"}, {"intervalo_outras_seg": -5}, {"intervalo_min": "nan"}):
+        r = await client.post("/api/conciliacao/carga-inicial", json=corpo)
+        assert r.status_code == 422, (corpo, r.text)
+        assert r.json()["detail"]["code"] == "parametro_invalido"
+
+
+async def test_recalculo_do_clique_entra_na_trava_da_loja(
+    db, make_user, auth_as, client, monkeypatch
+):
+    """Vincular/classificar recalculava fora da trava da rodada (16/10, revisão): com a
+    rodada no meio do caminho o clique responde 409; e enquanto o clique segura a trava,
+    o `pg_try_advisory_xact_lock` da rodada falha (ela pula a loja)."""
+    from sqlalchemy import text
+
+    import app.db as _db
+    from app.services import conciliacao_jobs as jobs
+    from app.services.advisory_lock import SYNC_NAMESPACE
+
+    monkeypatch.setattr(jobs, "ESPERA_TRAVA_CLIQUE", "300ms")
+    loja, _integ = await _loja(db, make_user)
+    movs = await _dia_de_exemplo(db, loja)
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    pend = movs["pendente"]
+    chave = {"ns": SYNC_NAMESPACE, "key": jobs._lock_key(loja.integration_id)}
+    async with _db.SessionLocal() as rodada:
+        got = (
+            await rodada.execute(text("SELECT pg_try_advisory_xact_lock(:ns, :key)"), chave)
+        ).scalar()
+        assert got is True
+        r = await client.patch(
+            f"/api/conciliacao/movimentos/{pend.id}", json={"classificacao": "ajuste"}
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "rodada_em_andamento"
+        await rodada.rollback()
+    r = await client.patch(
+        f"/api/conciliacao/movimentos/{pend.id}", json={"classificacao": "ajuste"}
+    )
+    assert r.status_code == 200, r.text
+    # o helper direto: com a trava do clique aberta, a rodada não entra
+    await jobs.trava_da_loja(db, loja.integration_id)
+    async with _db.SessionLocal() as rodada:
+        got = (
+            await rodada.execute(text("SELECT pg_try_advisory_xact_lock(:ns, :key)"), chave)
+        ).scalar()
+        assert got is False
+    await db.commit()
+
+
+async def test_fechamento_do_mes_corrente_corta_em_ontem(
+    db, make_user, auth_as, client, monkeypatch
+):
+    """O mês corrente somava até hoje contra o saldo final de ontem (16/10, revisão):
+    agora vendas, caixa e dias param no mesmo dia (ontem)."""
+    monkeypatch.setattr("app.routers.conciliacao._ontem", lambda: date(2026, 10, 13))
+    loja, _integ = await _loja(db, make_user)
+    await _dia_de_exemplo(db, loja)  # 13/10 fecha em 200,46
+    hoje = _mov(loja, "credito", datetime(2026, 10, 14, 12, tzinfo=UTC), credito="50.00")
+    hoje.saldo_apos = Decimal("250.46")
+    hoje.classificacao = "ajuste"
+    db.add(hoje)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-10"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["ate"] == "2026-10-31" and corpo["ate_corte"] == "2026-10-13"
+    assert corpo["caixa"]["linhas"] == 5 and [d["dia"] for d in corpo["dias"]] == ["2026-10-13"]
+    assert corpo["caixa"]["saldo_inicial"] == 0.81 and corpo["caixa"]["saldo_final"] == 200.46
+    assert corpo["caixa"]["movimento_liquido"] == 199.65 and corpo["caixa"]["bate"] is True
+
+
+async def test_fechamento_excel_texto_nao_vira_formula(db, make_user, auth_as, client):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from app.models import ConciliacaoDia
+
+    loja, _integ = await _loja(db, make_user)
+    await _dia_de_exemplo(db, loja)
+    db.add(
+        ConciliacaoDia(
+            integration_id=loja.integration_id,
+            dia=date(2026, 10, 13),
+            fechado_em=datetime.now(UTC),
+            fechado_por="=cmd|' /C calc'!A0\x01",
+        )
+    )
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.post(
+        "/api/conciliacao/fechamento.xlsx", params={"loja": "jlas2", "mes": "2026-10"}
+    )
+    assert r.status_code == 200, r.text
+    por = load_workbook(BytesIO(r.content))["Dias"]["G2"]
+    assert por.value == "=cmd|' /C calc'!A0" and por.data_type == "s"
+
+
+async def test_dinheiro_na_conta_usa_a_ancora_do_dia_anterior(db, make_user):
+    """kia (ml) 10/10: reserva e pagamento no mesmo segundo; sem a âncora do fechamento da
+    véspera a última linha saía trocada e "na conta" mostrava 0 em vez de 100 (16/10)."""
+    from uuid import UUID
+
+    from app.routers.conciliacao import _dinheiro_da_loja
+
+    loja, _integ = await _loja(db, make_user)
+    vespera = _mov(loja, "credito", datetime(2026, 10, 12, 15, tzinfo=UTC), credito="100.00")
+    vespera.saldo_apos = Decimal("100.00")
+    vespera.classificacao = "ajuste"
+    quando = datetime(2026, 10, 13, 17, 21, 6, tzinfo=UTC)
+    reserva = _mov(loja, "reserva_disputa", quando, debito="100.00")
+    reserva.saldo_apos = Decimal("0.00")
+    reserva.classificacao = "ajuste"
+    reserva.id = UUID("00000000-0000-0000-0000-000000000002")
+    pagamento = _mov(loja, "venda_liberada", quando, credito="100.00")
+    pagamento.saldo_apos = Decimal("100.00")
+    pagamento.classificacao = "ajuste"
+    pagamento.id = UUID("00000000-0000-0000-0000-000000000001")
+    db.add_all([vespera, reserva, pagamento])
+    await db.commit()
+    dinheiro = await _dinheiro_da_loja(db, loja)
+    # âncora 100 → reserva (100 − 100 = 0) e depois o pagamento (0 + 100 = 100): na conta 100
+    assert dinheiro["na_conta"] == 100.0

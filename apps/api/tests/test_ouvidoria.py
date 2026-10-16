@@ -1289,3 +1289,17 @@ async def test_router_ocorrencias_resumo_por_robo_e_botoes(client, make_user, au
     r = await client.post(f"/api/ouvidoria/ocorrencias/{s.id}/ignorar")
     assert r.status_code == 409  # já fechada (sumiu)
     assert (await client.get("/api/ouvidoria/ocorrencias")).json()["resumo"]["abertas"] == 2
+
+
+async def test_pendentes_de_aviso_tem_folga_pro_reaviso_diario(db):
+    """16/10, revisão: robô diário "no mesmo horário" — o cron oscila e a rodada demora;
+    sem folga o re-aviso de 24 h ficava uns segundos dentro das 24 h e pulava dia sim,
+    dia não. Com `FOLGA_REAVISO` (15 min) o carimbo de ontem já conta."""
+    robo = await _robo(db, reaviso_horas=24)
+    a = await _reg(db, "tiktok:1")
+    a.avisada_em = _t(hours=24) + timedelta(minutes=5)  # 23 h 55 min atrás
+    await db.commit()
+    assert [o.chave for o in await svc.pendentes_de_aviso(db, robo)] == ["tiktok:1"]
+    a.avisada_em = _t(hours=24) + timedelta(minutes=30)  # 23 h 30 min atrás: ainda não
+    await db.commit()
+    assert await svc.pendentes_de_aviso(db, robo) == []

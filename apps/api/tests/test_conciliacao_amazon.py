@@ -837,7 +837,9 @@ async def test_endpoint_upload_amazon_so_para_loja_por_arquivo(db, make_user, au
     assert r.json()["lojas"][0]["modo_extrato"] == "upload"
 
 
-async def test_chave_do_script_gera_valida_e_envia_sem_login(db, make_user, auth_as, client):
+async def test_chave_do_script_gera_valida_e_envia_sem_login(
+    db, make_user, auth_as, client, monkeypatch
+):
     loja = await _loja_amazon(db, make_user)
     loja.modo_extrato = "upload"
     await db.commit()
@@ -853,6 +855,13 @@ async def test_chave_do_script_gera_valida_e_envia_sem_login(db, make_user, auth
     # o script envia sem sessão, só com a chave
     auth_as(None)
     arquivo = ("transacoes.csv", CSV_KFA.encode("utf-8-sig"), "text/csv")
+    # 16/10, revisão: chave errada → 401 SEM ler o corpo (o formulário nem é aberto)
+    from starlette.requests import Request
+
+    async def nao_le(self):
+        raise AssertionError("corpo lido antes de conferir a chave")
+
+    monkeypatch.setattr(Request, "form", nao_le)
     r = await client.post(
         "/api/conciliacao/amazon/upload/script",
         data={"loja": "kia"},
@@ -860,6 +869,30 @@ async def test_chave_do_script_gera_valida_e_envia_sem_login(db, make_user, auth
         headers={"X-Upload-Chave": "kfa_errada"},
     )
     assert r.status_code == 401 and r.json()["detail"]["code"] == "chave_invalida"
+    # corpo acima do teto: 413 antes de abrir o formulário
+    r = await client.post(
+        "/api/conciliacao/amazon/upload/script",
+        data={"loja": "kia"},
+        files={"arquivo": arquivo},
+        headers={"X-Upload-Chave": chave, "Content-Length": str(30 * 1024 * 1024)},
+    )
+    assert r.status_code == 413 and r.json()["detail"]["code"] == "arquivo_grande"
+    monkeypatch.undo()
+    # formulário sem o arquivo: 422, não 500
+    r = await client.post(
+        "/api/conciliacao/amazon/upload/script",
+        data={"loja": "kia"},
+        headers={"X-Upload-Chave": chave},
+    )
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "formulario_invalido"
+    # arquivo maior que o teto: 413 (lido em pedaços, desiste no teto)
+    r = await client.post(
+        "/api/conciliacao/amazon/upload/script",
+        data={"loja": "kia"},
+        files={"arquivo": ("grande.csv", b"a" * 5_100_000, "text/csv")},
+        headers={"X-Upload-Chave": chave},
+    )
+    assert r.status_code == 413 and r.json()["detail"]["code"] == "arquivo_grande"
     r = await client.post(
         "/api/conciliacao/amazon/upload/script",
         data={"loja": "kia"},
@@ -993,3 +1026,42 @@ async def test_loja_por_arquivo_tem_a_venda_das_proprias_transacoes(db, make_use
     assert p.venda_tarifa == Decimal("53.98") and p.venda_cupom == Decimal("38.70")
     assert p.venda_frete == Decimal("43.90")
     assert p.dif_previsto_recebido == Decimal("0.00")
+
+
+async def test_upload_da_kfa_entra_na_trava_da_loja(db, make_user, auth_as, client, monkeypatch):
+    """16/10, revisão: o CSV da KFA recalculava fora da trava da rodada; com a rodada no
+    meio do caminho o envio responde 409 em vez de 500 (uq_conciliacao_pedido_loja)."""
+    from sqlalchemy import text
+
+    import app.db as _db
+    from app.services import conciliacao_jobs as jobs
+    from app.services.advisory_lock import SYNC_NAMESPACE
+
+    monkeypatch.setattr(jobs, "ESPERA_TRAVA_CLIQUE", "300ms")
+    loja = await _loja_amazon(db, make_user)
+    loja.modo_extrato = "upload"
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    arquivo = ("transacoes.csv", CSV_KFA.encode("utf-8-sig"), "text/csv")
+    async with _db.SessionLocal() as rodada:
+        got = (
+            await rodada.execute(
+                text("SELECT pg_try_advisory_xact_lock(:ns, :key)"),
+                {"ns": SYNC_NAMESPACE, "key": jobs._lock_key(loja.integration_id)},
+            )
+        ).scalar()
+        assert got is True
+        r = await client.post(
+            "/api/conciliacao/amazon/upload", data={"loja": "kia"}, files={"arquivo": arquivo}
+        )
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "rodada_em_andamento"
+        await rodada.rollback()
+    r = await client.post(
+        "/api/conciliacao/amazon/upload", data={"loja": "kia"}, files={"arquivo": arquivo}
+    )
+    assert r.status_code == 200, r.text
+    # sem a loja no formulário: 422, não a primeira loja da lista
+    r = await client.post(
+        "/api/conciliacao/amazon/upload", data={"loja": " "}, files={"arquivo": arquivo}
+    )
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "informe_a_loja"

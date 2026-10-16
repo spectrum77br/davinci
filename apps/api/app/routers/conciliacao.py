@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import math
+import re
 import time
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
@@ -43,11 +45,13 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import UploadFile as UploadFileBruto
 
 from app.db import get_session
 from app.deps.auth import require_permission_any
@@ -62,7 +66,12 @@ from app.services.conciliacao_extrato import (
     mp_get,
     pedir_relatorio,
 )
-from app.services.conciliacao_jobs import loja_por_conta, lojas_ativas
+from app.services.conciliacao_jobs import (
+    RodadaEmAndamentoError,
+    loja_por_conta,
+    lojas_ativas,
+    trava_da_loja,
+)
 from app.services.conciliacao_mp_csv import ler_csv_mp
 from app.worker_pool import get_arq_pool
 
@@ -70,7 +79,11 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/conciliacao", tags=["conciliacao"])
 
 _PERM = require_permission_any(("margem", "logistica"), "view")
-_PERM_EDIT = require_permission_any(("margem", "logistica"), "edit")
+# 16/10, revisão: toda escrita da Conciliação é permissão de Conciliação (ou Margem) em
+# editar — quem só tem Logística não mexe na config do relatório do MP pela sonda, e
+# quem só tem Conciliação não toma 403 no "Sincronizar"
+_PERM_PAINEL = require_permission_any(("conciliacao", "margem"), "view")
+_PERM_PAINEL_EDIT = require_permission_any(("conciliacao", "margem"), "edit")
 _AMOSTRA = 5
 _LINHAS_CSV = 12
 _MAX_TEXTO = 1500
@@ -172,8 +185,8 @@ async def sonda(
         )
     cliente = await cliente_da_integracao(integ)
 
-    hoje = datetime.now(UTC).date()
-    atual = date.fromisoformat(f"{mes}-01") if mes else hoje.replace(day=1)
+    # 16/10, revisão: mês inválido (2026-13) é 422, não 500; o padrão é o mês em BRT
+    atual, _fim = _mes_range(mes)
     anterior = _mes_anterior(atual)
     k_atual, k_ant = _chave(atual), _chave(anterior)
 
@@ -455,7 +468,7 @@ async def sonda_ml_conta(
 async def sonda_extrato_pedir(
     conta: Annotated[str, Query(min_length=1)],
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(_PERM_EDIT)],
+    _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
     de: Annotated[date, Query(description="primeiro dia (BRT)")],
     ate: Annotated[date, Query(description="último dia (BRT), inclusive")],
     _body: Annotated[dict | None, Body()] = None,
@@ -657,7 +670,7 @@ async def status_lojas(
 async def sincronizar_agora(
     conta: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(_PERM_EDIT)],
+    _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
 ) -> dict[str, Any]:
     """Enfileira uma rodada completa da loja (fatura + extrato + recálculo) no worker."""
     loja = await loja_por_conta(session, conta)
@@ -701,8 +714,6 @@ from app.models.conciliacao import ORIGEM_TIKTOK, ORIGENS_EXTRATO  # noqa: E402
 from app.services.conciliacao_tiktok import AGUARDANDO, aguardando_repasse  # noqa: E402
 
 _BRT = ZoneInfo("America/Sao_Paulo")
-_PERM_PAINEL = require_permission_any(("conciliacao", "margem"), "view")
-_PERM_PAINEL_EDIT = require_permission_any(("conciliacao", "margem"), "edit")
 
 SITUACAO_LABELS = {
     "bateu": "Bateu",
@@ -862,11 +873,20 @@ def _original_do_movimento(m: ConciliacaoMovimento) -> dict[str, Any]:
     }
 
 
-async def _loja_ou_404(session: AsyncSession, conta: str | None) -> ConciliacaoLoja:
+async def _loja_ou_404(
+    session: AsyncSession, conta: str | None, *, escrita: bool = False
+) -> ConciliacaoLoja:
+    """Loja ligada pelo nome. Leitura sem `conta` cai na primeira loja (padrão da tela);
+    rota de ESCRITA exige a loja (16/10, revisão: fechar/reabrir dia, marcar pedido e o
+    CSV da KFA sem `loja` iam parar na primeira loja da lista)."""
     lojas = await lojas_ativas(session)
     if not lojas:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "nenhuma_loja_ligada"})
-    if not conta:
+    if not (conta or "").strip():
+        if escrita:
+            raise HTTPException(
+                422, detail={"code": "informe_a_loja", "mensagem": "informe a loja"}
+            )
         return lojas[0]
     loja = next((x for x in lojas if x.conta.strip().lower() == conta.strip().lower()), None)
     if loja is None:
@@ -943,27 +963,63 @@ async def listar_lojas(
     }
 
 
+# 16/10, revisão: tetos do envio de arquivo (bytes) — o corpo inteiro do script e o
+# arquivo em si, lido em pedaços
+_UPLOAD_TETO_CORPO = 20 * 1024 * 1024
+_UPLOAD_TETO_ARQUIVO = 5_000_000
+_UPLOAD_PEDACO = 1 << 20
+
+
+async def _ler_arquivo_com_teto(arquivo: UploadFileBruto) -> bytes:
+    """Lê em pedaços e desiste no teto (413) em vez de carregar tudo na memória."""
+    partes: list[bytes] = []
+    lido = 0
+    while True:
+        pedaco = await arquivo.read(_UPLOAD_PEDACO)
+        if not pedaco:
+            break
+        lido += len(pedaco)
+        if lido > _UPLOAD_TETO_ARQUIVO:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail={"code": "arquivo_grande"}
+            )
+        partes.append(pedaco)
+    return b"".join(partes)
+
+
+async def _travar_loja(session: AsyncSession, integration_id: UUID) -> None:
+    """Clique que recalcula entra na trava da loja (16/10, revisão): a rodada no meio do
+    caminho responde 409 em vez de 500 ou de sobrescrever o vínculo da pessoa."""
+    try:
+        await trava_da_loja(session, integration_id)
+    except RodadaEmAndamentoError as e:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "rodada_em_andamento",
+                "mensagem": "rodada em andamento, tente em instantes",
+            },
+        ) from e
+
+
 async def _amazon_upload_corpo(
-    session: AsyncSession, loja: str, arquivo: UploadFile
+    session: AsyncSession, loja: str, arquivo: UploadFileBruto
 ) -> dict[str, Any]:
     from app.services.conciliacao_amazon_csv import ingerir_csv_amazon
 
-    alvo = await _loja_ou_404(session, loja)
+    alvo = await _loja_ou_404(session, loja, escrita=True)
     plataforma = getattr(alvo.platform, "value", str(alvo.platform))
     if plataforma != "amazon" or alvo.modo_extrato != "upload":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={"code": "loja_nao_e_upload", "mensagem": "esta loja é lida pela API"},
         )
-    dados = await arquivo.read()
-    if len(dados) > 5_000_000:
-        raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail={"code": "arquivo_grande"}
-        )
+    dados = await _ler_arquivo_com_teto(arquivo)
     try:
         texto = dados.decode("utf-8-sig")
     except UnicodeDecodeError:
         texto = dados.decode("latin-1")
+    await _travar_loja(session, alvo.integration_id)
     try:
         stats = await ingerir_csv_amazon(session, alvo, texto)
     except ValueError as e:
@@ -991,15 +1047,18 @@ async def amazon_upload(
 
 @router.post("/amazon/upload/script")
 async def amazon_upload_pelo_script(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
-    loja: Annotated[str, Form()],
-    arquivo: Annotated[UploadFile, File()],
     x_upload_chave: Annotated[str | None, Header()] = None,
     x_agent_token: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """O mesmo envio, feito pelo script do Mac (sem ninguém logado): a chave gerada em
     "Gerar chave pro script" vai no header X-Upload-Chave. O executor do Mac mini usa o
-    X-Agent-Token dele (o mesmo da Logística)."""
+    X-Agent-Token dele (o mesmo da Logística).
+
+    16/10, revisão: a chave é conferida ANTES de ler o corpo (rota sem login não lê o
+    arquivo de quem não tem a chave) e o corpo tem teto (`_UPLOAD_TETO_CORPO` → 413).
+    Por isso o formulário é lido à mão (`request.form()`) depois da chave."""
     import secrets as _secrets
 
     from app.config import get_settings
@@ -1011,6 +1070,21 @@ async def amazon_upload_pelo_script(
     )
     if not pelo_agente and not await chave_upload_valida(session, x_upload_chave):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"code": "chave_invalida"})
+    try:
+        tamanho = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        tamanho = 0
+    if tamanho > _UPLOAD_TETO_CORPO:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail={"code": "arquivo_grande"}
+        )
+    form = await request.form()
+    loja = form.get("loja")
+    arquivo = form.get("arquivo")
+    if not isinstance(loja, str) or not isinstance(arquivo, UploadFileBruto):
+        raise HTTPException(
+            422, detail={"code": "formulario_invalido", "mensagem": "informe a loja e o arquivo"}
+        )
     return await _amazon_upload_corpo(session, loja, arquivo)
 
 
@@ -1025,7 +1099,7 @@ async def amazon_buscar_transacoes(
     from app.services import logistica_robo
     from app.services.conciliacao_amazon_csv import enfileirar_busca_csv
 
-    alvo = await _loja_ou_404(session, conta)
+    alvo = await _loja_ou_404(session, conta, escrita=True)
     if alvo.modo_extrato != "upload":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -1929,7 +2003,7 @@ async def marcar_pedido(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
 ) -> dict[str, Any]:
-    alvo = await _loja_ou_404(session, body.loja)
+    alvo = await _loja_ou_404(session, body.loja, escrita=True)
     p = await _pedido_ou_404(session, alvo, pedido)
     agora = datetime.now(UTC)
     quem = (getattr(user, "name", None) or user.email or "?")[:120]
@@ -2002,6 +2076,28 @@ _COLUNAS_XLSX = [
 ]
 
 
+# 16/10, revisão: célula de texto do Excel nunca vira fórmula (texto começando com =, +,
+# -, @ ia como fórmula) e caractere de controle (a openpyxl recusa com
+# IllegalCharacterError → 500) sai antes de gravar. As duas exportações passam por aqui.
+_PREFIXOS_FORMULA = ("=", "+", "-", "@", "\t", "\r")
+_CONTROLE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")  # o mesmo conjunto da openpyxl
+
+
+def _celula_excel(v: Any) -> Any:
+    return _CONTROLE_RE.sub("", v) if isinstance(v, str) else v
+
+
+def _linha_excel(ws: Any, valores: list[Any]) -> None:
+    valores = [_celula_excel(v) for v in valores]
+    ws.append(valores)
+    if not any(isinstance(v, str) and v.startswith(_PREFIXOS_FORMULA) for v in valores):
+        return
+    for cell in ws[ws.max_row]:
+        if isinstance(cell.value, str) and cell.value.startswith(_PREFIXOS_FORMULA):
+            cell.data_type = "s"  # texto, não fórmula
+            cell.quotePrefix = True  # o Excel mostra o texto como está, sem interpretar
+
+
 @router.post("/export.xlsx")
 async def exportar_xlsx(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -2033,7 +2129,7 @@ async def exportar_xlsx(
     wb = Workbook()
     ws = wb.active
     ws.title = "Conciliação"
-    ws.append([c for c, _ in _COLUNAS_XLSX])
+    _linha_excel(ws, [c for c, _ in _COLUNAS_XLSX])
     for p in rows:
         out = _pedido_out(p)
         linha = []
@@ -2045,7 +2141,7 @@ async def exportar_xlsx(
                 except ValueError:
                     pass
             linha.append(v)
-        ws.append(linha)
+        _linha_excel(ws, linha)
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -2604,6 +2700,7 @@ async def marcar_movimento(
     ).scalar_one_or_none()
     if loja is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "loja_nao_ligada"})
+    await _travar_loja(session, m.integration_id)
     agora = datetime.now(UTC)
     quem = (getattr(user, "name", None) or user.email or "?")[:120]
     # Dia fechado não se mexe: reabre primeiro (15/10, Vinicius).
@@ -2686,7 +2783,7 @@ async def fechar_dia(
     user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
     loja: str | None = None,
 ) -> dict[str, Any]:
-    alvo = await _loja_ou_404(session, loja)
+    alvo = await _loja_ou_404(session, loja, escrita=True)
     saldo_ant = await _saldo_anterior(session, alvo, dia)
     movs = await _movimentos_do_dia(session, alvo, dia, saldo_ant)
     pendentes = [m for m in movs if not m.pedido_bling and not m.classificacao]
@@ -2743,7 +2840,7 @@ async def reabrir_dia(
     _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
     loja: str | None = None,
 ) -> dict[str, Any]:
-    alvo = await _loja_ou_404(session, loja)
+    alvo = await _loja_ou_404(session, loja, escrita=True)
     row = (
         await session.execute(
             select(ConciliacaoDia).where(
@@ -2909,8 +3006,12 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
     na_conta = None
     saldo_em = None
     if ultima is not None:
-        movs = await _movimentos_do_dia(session, loja, ultima.astimezone(_BRT).date())
-        na_conta = _totais_do_dia(movs)["saldo_informado"]
+        # 16/10, revisão: com a âncora do dia anterior a ordem das linhas do mesmo
+        # segundo é a certa — e a última linha (o saldo de agora) também
+        dia_ultimo = ultima.astimezone(_BRT).date()
+        saldo_ant = await _saldo_anterior(session, loja, dia_ultimo)
+        movs = await _movimentos_do_dia(session, loja, dia_ultimo, saldo_ant)
+        na_conta = _totais_do_dia(movs, saldo_ant)["saldo_informado"]
         saldo_em = ultima.isoformat()
     ped = ConciliacaoPedido
     a_liberar, n_liberar = (
@@ -3071,8 +3172,8 @@ async def _resumo_dos_dias(
     agora = datetime.now(UTC)
     mov = ConciliacaoMovimento
     dia_local = func.date(func.timezone(_FUSO_SQL, mov.data))
-    linhas_por: dict[tuple[Any, date], tuple[int, int, int]] = {}
-    for iid, d, total, pend, aguard in (
+    linhas_por: dict[tuple[Any, date], tuple[int, int, int, int]] = {}
+    for iid, d, total, pend, aguard, falhou in (
         await session.execute(
             select(
                 mov.integration_id,
@@ -3085,12 +3186,18 @@ async def _resumo_dos_dias(
                     )
                 ),
                 func.sum(sa_case((mov.raw["_payment_status"].astext.in_(AGUARDANDO), 1), else_=0)),
+                func.sum(sa_case((mov.raw["_payment_status"].astext == "FAILED", 1), else_=0)),
             )
             .where(mov.origem.in_(ORIGENS_EXTRATO), mov.data >= ini_dt, mov.data < fim_dt)
             .group_by(mov.integration_id, dia_local)
         )
     ).all():
-        linhas_por[(iid, d)] = (int(total or 0), int(pend or 0), int(aguard or 0))
+        linhas_por[(iid, d)] = (
+            int(total or 0),
+            int(pend or 0),
+            int(aguard or 0),
+            int(falhou or 0),
+        )
     fechados = {
         (iid, d)
         for iid, d in (
@@ -3145,7 +3252,7 @@ async def _resumo_dos_dias(
                 else:
                     sem_mov += 1
                 continue
-            total, pend, aguard = linhas
+            total, pend, aguard, falhou = linhas
             if pend:
                 pendentes.append({"conta": loja.conta, "motivo": f"{pend} linha(s) sem dono"})
                 continue
@@ -3155,6 +3262,12 @@ async def _resumo_dos_dias(
             dif = totais["diferenca"]
             if dif is not None and abs(dif) > 0.05:
                 pendentes.append({"conta": loja.conta, "motivo": f"saldo não bate ({dif:+.2f})"})
+                continue
+            if falhou:
+                # 16/10, revisão: repasse FAILED da TikTok não é dia fechado — é pendência
+                pendentes.append(
+                    {"conta": loja.conta, "motivo": "repasse falhou, a TikTok tenta de novo"}
+                )
                 continue
             if aguard:
                 aguardando += 1
@@ -3570,7 +3683,10 @@ async def fechamento_do_mes(
     mes: Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}$")] = None,
 ) -> dict[str, Any]:
     alvo = await _loja_ou_404(session, loja)
-    ini, fim = _mes_range(mes)
+    ini, fim_mes = _mes_range(mes)
+    # 16/10, revisão: o mês corrente para em ontem (hoje ainda está mudando) — vendas,
+    # caixa e dias no MESMO corte; antes o caixa ia até hoje contra o saldo de ontem
+    fim = max(ini, min(fim_mes, _ontem() + timedelta(days=1)))
     ini_dt = datetime.combine(ini, datetime.min.time(), tzinfo=_BRT)
     fim_dt = datetime.combine(fim, datetime.min.time(), tzinfo=_BRT)
 
@@ -3670,15 +3786,21 @@ async def fechamento_do_mes(
 
     # Dias do mês: linhas, pendentes, fechado — e o saldo do primeiro e do último dia.
     dias_resp = await listar_dias(
-        session, _user, loja=alvo.conta, de=ini, ate=min(fim - timedelta(days=1), _ontem())
+        session, _user, loja=alvo.conta, de=ini, ate=fim - timedelta(days=1)
     )
     dias = dias_resp["dias"]
     saldo_inicial = saldo_final = None
     if dias:
-        primeiro = await _movimentos_do_dia(session, alvo, date.fromisoformat(dias[0]["dia"]))
-        ultimo = await _movimentos_do_dia(session, alvo, date.fromisoformat(dias[-1]["dia"]))
-        saldo_inicial = _totais_do_dia(primeiro)["saldo_inicial"]
-        saldo_final = _totais_do_dia(ultimo)["saldo_informado"]
+        # 16/10, revisão: a mesma âncora do Extrato (`_saldo_anterior`) — o saldo inicial
+        # é o fechamento da véspera e a ordem das linhas do mesmo segundo é a certa
+        d_ini = date.fromisoformat(dias[0]["dia"])
+        d_fim = date.fromisoformat(dias[-1]["dia"])
+        anc_ini = await _saldo_anterior(session, alvo, d_ini)
+        anc_fim = await _saldo_anterior(session, alvo, d_fim)
+        primeiro = await _movimentos_do_dia(session, alvo, d_ini, anc_ini)
+        ultimo = await _movimentos_do_dia(session, alvo, d_fim, anc_fim)
+        saldo_inicial = _totais_do_dia(primeiro, anc_ini)["saldo_inicial"]
+        saldo_final = _totais_do_dia(ultimo, anc_fim)["saldo_informado"]
 
     # Fatura do ML: resumo do período (chave AAAA-MM-01) × soma dos detalhes lidos.
     chave = ini.strftime("%Y-%m-01")
@@ -3819,7 +3941,9 @@ async def fechamento_do_mes(
         "loja": alvo.conta,
         "mes": ini.isoformat()[:7],
         "de": ini.isoformat(),
-        "ate": (fim - timedelta(days=1)).isoformat(),
+        "ate": (fim_mes - timedelta(days=1)).isoformat(),
+        # até onde as contas foram (mês corrente: ontem)
+        "ate_corte": (fim - timedelta(days=1)).isoformat(),
         "vendas": vendas,
         "caixa": {
             **caixa,
@@ -3847,7 +3971,7 @@ async def fechamento_xlsx(
     wb = Workbook()
     ws = wb.active
     ws.title = "Vendas"
-    ws.append([f"Vendas de {f['mes']} · {f['loja']} · pela data do pedido", ""])
+    _linha_excel(ws, [f"Vendas de {f['mes']} · {f['loja']} · pela data do pedido", ""])
     v = f["vendas"]
     for rotulo, chave in (
         ("Pedidos", "pedidos"),
@@ -3867,19 +3991,19 @@ async def fechamento_xlsx(
         ("Margem sobre o custo", "margem"),
         ("Finalizados", "finalizados"),
     ):
-        ws.append([rotulo, v.get(chave)])
-    ws.append([])
-    ws.append(["Por situação", "pedidos"])
+        _linha_excel(ws, [rotulo, v.get(chave)])
+    _linha_excel(ws, [])
+    _linha_excel(ws, ["Por situação", "pedidos"])
     for k, n in sorted(v["por_situacao"].items()):
-        ws.append([k, n])
-    ws.append([])
-    ws.append(["Por etapa", "pedidos"])
+        _linha_excel(ws, [k, n])
+    _linha_excel(ws, [])
+    _linha_excel(ws, ["Por etapa", "pedidos"])
     for k, n in sorted(v["por_etapa"].items()):
-        ws.append([k, n])
+        _linha_excel(ws, [k, n])
 
     ws = wb.create_sheet("Caixa")
     c = f["caixa"]
-    ws.append([f"Caixa de {f['mes']} · pela data do movimento ({c['linhas']} linhas)", ""])
+    _linha_excel(ws, [f"Caixa de {f['mes']} · pela data do movimento ({c['linhas']} linhas)", ""])
     for rotulo, chave in (
         ("Saldo inicial", "saldo_inicial"),
         ("Vendas liberadas", "liberado"),
@@ -3901,43 +4025,52 @@ async def fechamento_xlsx(
         ("Saldo final informado", "saldo_final"),
         ("Prova dos nove bate?", "bate"),
     ):
-        ws.append([rotulo, c.get(chave)])
+        _linha_excel(ws, [rotulo, c.get(chave)])
 
     ws = wb.create_sheet("Fatura ML")
     fa = f["fatura"]
     per = fa["periodo"]
-    ws.append([f"Fatura do ML · período {per['chave']} ({per['de']} a {per['ate']})", "", ""])
-    ws.append(["O que o ML diz (resumo)", "tipo", "valor"])
-    for x in fa["resumo_cobrancas"]:
-        ws.append([x["label"], x["tipo"], -(x["valor"] or 0)])
-    for x in fa["resumo_bonificacoes"]:
-        ws.append([x["label"], x["tipo"], abs(x["valor"] or 0)])
-    ws.append(["Total da fatura (resumo)", "", fa["resumo_total"]])
-    ws.append([])
-    ws.append(["O que lemos linha a linha", "sub-tipo", "linhas", "cobrado", "bonificado"])
-    for d in fa["detalhes_por_sub_tipo"]:
-        ws.append([d["tipo"], d["sub_tipo"], d["linhas"], d["cobrado"], d["bonificado"]])
-    ws.append(["Cobranças: detalhes", "", "", fa["detalhes_cobrancas"], ""])
-    ws.append(["Bonificações: detalhes", "", "", "", fa["detalhes_bonificacoes"]])
-    ws.append(
-        ["  das quais devolvem cobrança desta fatura", "", "", "", fa["bonificacoes_mesma_fatura"]]
+    _linha_excel(
+        ws, [f"Fatura do ML · período {per['chave']} ({per['de']} a {per['ate']})", "", ""]
     )
-    ws.append(
+    _linha_excel(ws, ["O que o ML diz (resumo)", "tipo", "valor"])
+    for x in fa["resumo_cobrancas"]:
+        _linha_excel(ws, [x["label"], x["tipo"], -(x["valor"] or 0)])
+    for x in fa["resumo_bonificacoes"]:
+        _linha_excel(ws, [x["label"], x["tipo"], abs(x["valor"] or 0)])
+    _linha_excel(ws, ["Total da fatura (resumo)", "", fa["resumo_total"]])
+    _linha_excel(ws, [])
+    _linha_excel(ws, ["O que lemos linha a linha", "sub-tipo", "linhas", "cobrado", "bonificado"])
+    for d in fa["detalhes_por_sub_tipo"]:
+        _linha_excel(ws, [d["tipo"], d["sub_tipo"], d["linhas"], d["cobrado"], d["bonificado"]])
+    _linha_excel(ws, ["Cobranças: detalhes", "", "", fa["detalhes_cobrancas"], ""])
+    _linha_excel(ws, ["Bonificações: detalhes", "", "", "", fa["detalhes_bonificacoes"]])
+    _linha_excel(
+        ws,
+        ["  das quais devolvem cobrança desta fatura", "", "", "", fa["bonificacoes_mesma_fatura"]],
+    )
+    _linha_excel(
+        ws,
         [
             "  das quais devolvem cobrança de fatura anterior",
             "",
             fa["bonificacoes_anteriores_linhas"],
             "",
             fa["bonificacoes_de_faturas_anteriores"],
-        ]
+        ],
     )
-    ws.append(["Resumo = detalhes (cobranças)?", "", fa["bate"]])
-    ws.append(["Resumo = detalhes (bonificações da mesma fatura)?", "", fa["bate_bonificacoes"]])
+    _linha_excel(ws, ["Resumo = detalhes (cobranças)?", "", fa["bate"]])
+    _linha_excel(
+        ws, ["Resumo = detalhes (bonificações da mesma fatura)?", "", fa["bate_bonificacoes"]]
+    )
 
     ws = wb.create_sheet("Dias")
-    ws.append(["Dia", "Linhas", "Sem dono", "Créditos", "Débitos", "Fechado em", "Fechado por"])
+    _linha_excel(
+        ws, ["Dia", "Linhas", "Sem dono", "Créditos", "Débitos", "Fechado em", "Fechado por"]
+    )
     for d in f["dias"]:
-        ws.append(
+        _linha_excel(
+            ws,
             [
                 d["dia"],
                 d["linhas"],
@@ -3946,7 +4079,7 @@ async def fechamento_xlsx(
                 d["debitos"],
                 d["fechado_em"],
                 d["fechado_por"],
-            ]
+            ],
         )
     buf = BytesIO()
     wb.save(buf)
@@ -4590,11 +4723,25 @@ async def sonda_tiktok(
     )
     integ = None
     if conta:
-        integ = (
-            await session.execute(
-                base_q.where(func.lower(func.trim(Integration.name)) == conta.strip().lower())
+        candidatas = list(
+            (
+                await session.execute(
+                    base_q.where(func.lower(func.trim(Integration.name)) == conta.strip().lower())
+                )
+            ).scalars()
+        )
+        if len(candidatas) > 1:
+            # 16/10, revisão: duas integrações ativas com o mesmo nome davam 500
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "conta_tiktok_duplicada",
+                    "conta": conta,
+                    "integration_ids": [str(i.id) for i in candidatas],
+                    "mensagem": "há mais de uma integração TikTok ativa com esse nome",
+                },
             )
-        ).scalar_one_or_none()
+        integ = candidatas[0] if candidatas else None
     else:
         fin = MarketplaceOrderFinancial
         ranking = (
@@ -5642,6 +5789,28 @@ async def sonda_melhor_envio(
     }
 
 
+def _numero_ou_422(body: dict[str, Any], campo: str, padrao: float) -> float:
+    """Número ≥ 0 do corpo (vazio ou 0 = padrão, como antes); texto que não é número
+    responde 422 em vez de 500 (16/10, revisão)."""
+    bruto = body.get(campo)
+    if not bruto:
+        return padrao
+    try:
+        valor = float(bruto)
+    except (TypeError, ValueError):
+        valor = math.nan
+    if not math.isfinite(valor) or valor < 0:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "parametro_invalido",
+                "campo": campo,
+                "mensagem": f"{campo} precisa ser um número maior ou igual a zero",
+            },
+        )
+    return valor
+
+
 @router.post("/carga-inicial")
 async def carga_inicial(
     body: Annotated[dict[str, Any], Body()],
@@ -5655,14 +5824,16 @@ async def carga_inicial(
 
     contas = {str(c).strip().lower() for c in (body.get("contas") or []) if str(c).strip()}
     plataformas = tuple(str(p) for p in (body.get("plataformas") or []) if p)
+    intervalo_ml = _numero_ou_422(body, "intervalo_min", 12.0)
+    intervalo_outras = _numero_ou_422(body, "intervalo_outras_seg", 30.0)
     plano = await enfileirar_rodadas(
         await get_arq_pool(),
         fatura=True,
         extrato=True,
         recalculo=True,
         tag="carga",
-        intervalo_ml_min=float(body.get("intervalo_min") or 12),
-        intervalo_outras_seg=float(body.get("intervalo_outras_seg") or 30),
+        intervalo_ml_min=intervalo_ml,
+        intervalo_outras_seg=intervalo_outras,
         so_plataformas=plataformas or None,
         contas=contas or None,
         so_sem_carga=bool(body.get("so_sem_carga", True)),
