@@ -130,11 +130,11 @@ class ConciliacaoMovimento(Base, TimestampMixin):
     data: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     tipo: Mapped[str] = mapped_column(String(40), nullable=False)
     descricao: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sub_tipo: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    pagamento_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    pedido_marketplace: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    pack_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    shipping_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    sub_tipo: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    pagamento_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    pedido_marketplace: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    pack_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    shipping_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     pedido_bling: Mapped[str | None] = mapped_column(String(20), nullable=True)
     bling_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     bruto: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
@@ -151,8 +151,8 @@ class ConciliacaoMovimento(Base, TimestampMixin):
     saldo_apos: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     # Fatura: a cobrança foi descontada da própria venda (YES) ou cobrada à parte?
     descontado_da_venda: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    sku: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    item_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    sku: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    item_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     data_aprovacao: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Classificação dada por regra ou à mão quando não há pedido (saque,
     # fatura do ML, publicidade, anterior ao início, ajuste, outro).

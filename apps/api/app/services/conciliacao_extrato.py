@@ -238,8 +238,13 @@ def _dt(v: str | None) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=BRT)
 
 
-def _texto(v: str | None) -> str | None:
+def _texto(v: str | None, maximo: int | None = None) -> str | None:
+    """Texto limpo; `maximo` corta no tamanho da coluna (16/10: EXTERNAL_REFERENCE e
+    PRODUCT_SKU de algumas contas passavam de 40/120 e a ingestão inteira falhava —
+    o valor completo continua no `raw`)."""
     t = (v or "").strip()
+    if maximo and len(t) > maximo:
+        t = t[:maximo]
     return t or None
 
 
@@ -270,11 +275,12 @@ def linha_para_movimento(row: dict[str, str]) -> dict[str, Any] | None:
         "data": data,
         "tipo": tipo_do_movimento(descricao, record_type),
         "descricao": descricao or None,
-        "sub_tipo": record_type or None,
-        "pagamento_id": _texto(row.get("SOURCE_ID")),
-        "pedido_marketplace": _texto(row.get("ORDER_ID")) or _texto(row.get("EXTERNAL_REFERENCE")),
-        "pack_id": _texto(row.get("PACK_ID")),
-        "shipping_id": _texto(row.get("SHIPPING_ID")),
+        "sub_tipo": _texto(record_type, 120),
+        "pagamento_id": _texto(row.get("SOURCE_ID"), 120),
+        "pedido_marketplace": _texto(row.get("ORDER_ID"), 120)
+        or _texto(row.get("EXTERNAL_REFERENCE"), 120),
+        "pack_id": _texto(row.get("PACK_ID"), 120),
+        "shipping_id": _texto(row.get("SHIPPING_ID"), 120),
         "pedido_bling": None,
         "bling_id": None,
         "bruto": dinheiro(row.get("GROSS_AMOUNT")),
@@ -287,8 +293,8 @@ def linha_para_movimento(row: dict[str, str]) -> dict[str, Any] | None:
         "saldo_apos": dinheiro(row.get("BALANCE_AMOUNT"))
         if _texto(row.get("BALANCE_AMOUNT"))
         else None,
-        "sku": _texto(row.get("PRODUCT_SKU")),
-        "item_id": _texto(row.get("ITEM_ID")),
+        "sku": _texto(row.get("PRODUCT_SKU"), 500),
+        "item_id": _texto(row.get("ITEM_ID"), 120),
         "data_aprovacao": _dt(row.get("TRANSACTION_APPROVAL_DATE")),
         "classificacao": "saque" if descricao in ("payout", "reserve_for_payout") else None,
         "raw": {k: v for k, v in row.items() if v},
