@@ -129,12 +129,14 @@ class _ClienteFalso:
         *,
         periodos: list[dict] | None = None,
         periodos_http: int = 200,
+        resumo_http: int = 200,
     ):
         self.paginas = paginas or {}
         self.resumo = resumo or {"bill_includes": {"total_amount": 1}}
         # `monthly/periods` (16/10): sem lista, a leitura cai no mês do calendário
         self.periodos = periodos or []
         self.periodos_http = periodos_http
+        self.resumo_http = resumo_http  # 400 = período aberto ainda sem resumo (forpaper)
         self.chamadas: list[tuple[str, dict | None]] = []
 
     def _expired(self) -> bool:
@@ -148,6 +150,8 @@ class _ClienteFalso:
         if path.endswith("/monthly/periods"):
             return Response(self.periodos_http, json={"results": self.periodos})
         if path.endswith("/summary/details"):
+            if self.resumo_http != 200:
+                return Response(self.resumo_http, json={"status": self.resumo_http})
             return Response(200, json=self.resumo)
         chave = path.split("/key/")[1].split("/")[0]
         pagina = self.paginas.get(
@@ -914,6 +918,17 @@ async def test_run_fatura_sync_le_o_periodo_real_e_cai_no_calendario_sem_a_lista
     assert r2["periodo_aberto"] == {"chave": "2026-10-01", "pela_api": False}
     assert "HTTP 500" in r2["periodos_api"]["erro"] and not r2["erros"]
     assert {k.split("|")[0] for k in r2["periodos"]} == {"2026-10-01", "2026-09-01"}
+    # 16/10 (forpaper): o período aberto recém começado ainda não tem resumo (HTTP 400)
+    # — as cobranças leem; o resumo fica "ainda sem" e NÃO é erro (não pinta a loja)
+    cliente3 = _ClienteFalso(paginas, periodos=PERIODOS_JLAS2, resumo_http=400)
+    r3 = await fat.run_fatura_sync(db, loja, cliente3, hoje=date(2026, 10, 25), dormir=dormir)
+    assert not r3["erros"]
+    assert r3["periodos"]["2026-11-01|resumo"]["ok"] is False
+    assert "HTTP 400" in r3["periodos"]["2026-11-01|resumo"]["motivo"]
+    # qualquer outro status continua sendo erro
+    cliente4 = _ClienteFalso(paginas, periodos=PERIODOS_JLAS2, resumo_http=500)
+    r4 = await fat.run_fatura_sync(db, loja, cliente4, hoje=date(2026, 10, 25), dormir=dormir)
+    assert r4["erros"] and r4["erros"][0]["tipo"] == "resumo"
 
 
 async def test_job_da_fatura_tenta_de_novo_quando_a_trava_da_loja_esta_ocupada(monkeypatch):

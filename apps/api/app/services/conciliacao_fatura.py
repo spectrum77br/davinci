@@ -244,12 +244,20 @@ async def ler_pagina(
     raise RuntimeError(f"fatura {chave} {detail_type}: 429 depois de {TENTATIVAS_429} tentativas")
 
 
+class ResumoIndisponivelError(RuntimeError):
+    """O ML ainda não tem o resumo desse período (400/404): período aberto recém
+    começado — forpaper 16/10, cujo ciclo começa no meio do mês e caiu no período
+    2026-11-01. Não é falha de leitura; as cobranças do período leem normalmente."""
+
+
 async def ler_resumo(cliente: Any, chave: str) -> dict:
     r = await cliente._request(
         "GET",
         f"/billing/integration/periods/key/{chave}/summary/details",
         params={"group": "ML", "document_type": "BILL"},
     )
+    if r.status_code in (400, 404):
+        raise ResumoIndisponivelError(f"resumo {chave}: HTTP {r.status_code} {r.text[:200]}")
     if r.status_code != 200:
         raise RuntimeError(f"resumo {chave}: HTTP {r.status_code} {r.text[:200]}")
     return r.json() or {}
@@ -412,6 +420,9 @@ async def run_fatura_sync(
                 row.detalhe = {"resumo": r}
                 row.erro = None
                 resumo["periodos"][f"{chave}|resumo"] = {"ok": True}
+            except ResumoIndisponivelError as e:
+                # período aberto sem resumo ainda: não é erro, não pinta "fatura não lida"
+                resumo["periodos"][f"{chave}|resumo"] = {"ok": False, "motivo": str(e)[:160]}
             except Exception as e:  # noqa: BLE001
                 resumo["erros"].append(
                     {
