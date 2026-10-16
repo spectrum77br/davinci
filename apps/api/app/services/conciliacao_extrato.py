@@ -113,7 +113,13 @@ TIPOS = {
     "shipping_refund": "frete_devolucao",
     "fee_release_in_advance": "antecipacao",
     "credit_payment": "credito",
+    # saldo negativo depois da cobrança da fatura: o MP segura o que entra até cobrir
+    "reserve_for_debt_payment": "cobranca_divida",
 }
+# "payment" com essa referência é o Mercado Livre cobrando a FATURA do saldo do MP
+# (16/10, mega: débito 377,27 em 15/10 = `pago.total_payment` da fatura 17/09→09/10,
+# que vence 15/10). Não é venda.
+PREFIXO_COBRANCA_FATURA = "MELIPAYMENTS-COLLECTIONATTEMPT"
 TIPOS_RESERVA = {
     "reserva_disputa",
     "reserva_estorno",
@@ -318,16 +324,25 @@ def linha_para_movimento(row: dict[str, str]) -> dict[str, Any] | None:
         return None
     credito = dinheiro(row.get("NET_CREDIT_AMOUNT"))
     debito = dinheiro(row.get("NET_DEBIT_AMOUNT"))
+    cobranca = _cobranca_da_fatura(descricao, row.get("EXTERNAL_REFERENCE"))
+    tipo = "fatura_cobrada" if cobranca else tipo_do_movimento(descricao, record_type)
+    if descricao in ("payout", "reserve_for_payout"):
+        classificacao = "saque"
+    elif cobranca or tipo == "cobranca_divida":
+        classificacao = "fatura_ml"
+    else:
+        classificacao = None
     return {
         "origem": ORIGEM_EXTRATO,
         "id_externo": id_externo_da_linha(row),
         "data": data,
-        "tipo": tipo_do_movimento(descricao, record_type),
+        "tipo": tipo,
         "descricao": descricao or None,
         "sub_tipo": _texto(record_type, 120),
         "pagamento_id": _texto(row.get("SOURCE_ID"), 120),
-        "pedido_marketplace": _texto(row.get("ORDER_ID"), 120)
-        or _texto(row.get("EXTERNAL_REFERENCE"), 120),
+        "pedido_marketplace": None
+        if cobranca
+        else (_texto(row.get("ORDER_ID"), 120) or _texto(row.get("EXTERNAL_REFERENCE"), 120)),
         "pack_id": _texto(row.get("PACK_ID"), 120),
         "shipping_id": _texto(row.get("SHIPPING_ID"), 120),
         "pedido_bling": None,
@@ -345,9 +360,106 @@ def linha_para_movimento(row: dict[str, str]) -> dict[str, Any] | None:
         "sku": _texto(row.get("PRODUCT_SKU"), 500),
         "item_id": _texto(row.get("ITEM_ID"), 120),
         "data_aprovacao": _dt(row.get("TRANSACTION_APPROVAL_DATE")),
-        "classificacao": "saque" if descricao in ("payout", "reserve_for_payout") else None,
+        "classificacao": classificacao,
         "raw": {k: v for k, v in row.items() if v},
     }
+
+
+def _cobranca_da_fatura(descricao: str, referencia: Any) -> bool:
+    return (descricao or "").strip().lower() == "payment" and str(
+        referencia or ""
+    ).upper().startswith(PREFIXO_COBRANCA_FATURA)
+
+
+async def classificar_cobrancas_da_fatura(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Linhas já gravadas antes da regra (16/10): cobrança da fatura (referência
+    MELIPAYMENTS) vira `fatura_cobrada` sem nº de venda; `reserve_for_debt_payment`
+    vira `cobranca_divida`. As duas ganham a classificação "Fatura do ML" quando
+    ninguém mexeu nelas."""
+    mov = ConciliacaoMovimento
+    rows = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_EXTRATO,
+                    or_(
+                        mov.pedido_marketplace.like(f"{PREFIXO_COBRANCA_FATURA}%"),
+                        and_(
+                            mov.tipo == "reserva_outra", mov.descricao == "reserve_for_debt_payment"
+                        ),
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    n = 0
+    for m in rows:
+        if (m.pedido_marketplace or "").upper().startswith(PREFIXO_COBRANCA_FATURA):
+            m.pedido_marketplace = None
+            m.tipo = "fatura_cobrada"
+        else:
+            m.tipo = "cobranca_divida"
+        if not m.pedido_bling and not m.vinculado_por and not m.classificacao:
+            m.classificacao = "fatura_ml"
+            n += 1
+    return n
+
+
+TIPOS_VENDA_DESFEITA = {
+    "venda_liberada",
+    "mediacao",
+    "mediacao_cancelada",
+    "estorno",
+    "chargeback",
+    "disputa",
+}
+TIPOS_QUE_DESFAZEM = {"mediacao", "estorno", "chargeback", "disputa"}
+
+
+async def classificar_vendas_desfeitas(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Venda do ML que não existe no Bling e cujo dinheiro entrou e saiu inteiro no
+    mesmo pagamento (liberação + mediação/estorno somam zero): nada ficou com a loja,
+    nada a conferir. Ganha a classificação "venda_desfeita" (16/10, aguiar 02/10:
+    +320,69 −396,17 +75,48). Se o pedido aparecer no Bling, a ligação desfaz."""
+    mov = ConciliacaoMovimento
+    rows = (
+        (
+            await session.execute(
+                select(mov)
+                .where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_EXTRATO,
+                    mov.pedido_bling.is_(None),
+                    mov.pagamento_id.isnot(None),
+                    mov.vinculado_por.is_(None),
+                    mov.classificacao.is_(None),
+                    mov.tipo.in_(tuple(TIPOS_VENDA_DESFEITA)),
+                )
+                .limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    grupos: dict[str, list[ConciliacaoMovimento]] = {}
+    for m in rows:
+        grupos.setdefault(str(m.pagamento_id), []).append(m)
+    n = 0
+    for linhas in grupos.values():
+        tipos = {m.tipo for m in linhas}
+        if "venda_liberada" not in tipos or not (tipos & TIPOS_QUE_DESFAZEM):
+            continue
+        entrou = sum((m.credito or Decimal("0")) for m in linhas)
+        saiu = sum((m.debito or Decimal("0")) for m in linhas)
+        if entrou == 0 or entrou != saiu:
+            continue
+        for m in linhas:
+            m.classificacao = "venda_desfeita"
+            n += 1
+    return n
 
 
 async def bling_store_ids_da_loja(session: AsyncSession, integration: Integration) -> set[str]:

@@ -201,6 +201,42 @@ async def test_run_carteira_sync_le_dia_a_dia_e_resolve_o_pedido(db, make_user):
     assert all(s.status == "lido" for s in syncs)
 
 
+async def test_run_carteira_sync_grava_ajuste_quando_o_saldo_pula_pouco(db, make_user):
+    """16/10, Barbosa 15/10: renda de 292,39 e o saldo subiu 291,41 — a Shopee não lista
+    o lançamento de −0,98. Diferença pequena vira linha de ajuste do robô; grande não."""
+    loja = await _loja_shopee(db, make_user)
+    d10, d11, d12 = date(2026, 10, 10), date(2026, 10, 11), date(2026, 10, 12)
+    cliente = _ShopeeFalsa(
+        [
+            _tx(10, "ESCROW_VERIFIED_ADD", 100.0, 100.0, _epoch(d10, 9), "261006VX383P9J"),
+            # dia 11: entra 292,39 mas o saldo só sobe 291,41
+            _tx(11, "ESCROW_VERIFIED_ADD", 292.39, 391.41, _epoch(d11, 10), "2610095P6JURXJ"),
+            _tx(12, "ESCROW_VERIFIED_ADD", 50.0, 441.41, _epoch(d11, 12), "2610095P6JURXK"),
+            # dia 12: pulo grande (R$ 80): fica como está
+            _tx(13, "ESCROW_VERIFIED_ADD", 10.0, 371.41, _epoch(d12, 10), "2610095P6JURXL"),
+        ]
+    )
+    r = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 13))
+    por_dia = {x["dia"]: x["ajustes_de_saldo"] for x in r["dias"]}
+    assert por_dia["2026-10-10"] == [] and por_dia["2026-10-11"] == ["-0.98"]
+    assert por_dia["2026-10-12"] == ["-80.00"]
+    movs = (
+        (await db.execute(select(ConciliacaoMovimento).order_by(ConciliacaoMovimento.data)))
+        .scalars()
+        .all()
+    )
+    ajustes = [m for m in movs if m.tipo == "ajuste_shopee"]
+    assert len(ajustes) == 1
+    a = ajustes[0]
+    assert a.debito == Decimal("0.98") and a.classificacao == "ajuste"
+    assert a.id_externo == "ajuste-saldo-2026-10-11-1" and a.saldo_apos == Decimal("99.02")
+    assert a.data == datetime.fromtimestamp(_epoch(d11, 10), tz=UTC)
+    # relendo o dia, o ajuste é refeito, não duplicado
+    r2 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 13))
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert len([m for m in movs if m.tipo == "ajuste_shopee"]) == 1 and r2["inseridos"] == 0
+
+
 async def test_extrato_do_dia_shopee_fecha_a_conta(db, make_user, auth_as, client):
     loja = await _loja_shopee(db, make_user)
     d10 = date(2026, 10, 10)

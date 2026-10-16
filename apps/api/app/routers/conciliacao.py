@@ -1894,6 +1894,7 @@ CLASSIFICACOES = (
     "publicidade",
     "anterior_ao_inicio",
     "reserva",
+    "venda_desfeita",
     "ajuste",
     "outro",
 )
@@ -1903,6 +1904,7 @@ CLASSIFICACAO_LABELS = {
     "publicidade": "Publicidade",
     "anterior_ao_inicio": "Pedido anterior ao início",
     "reserva": "Reserva (vai e volta)",
+    "venda_desfeita": "Venda desfeita (sem pedido no Bling)",
     "ajuste": "Ajuste",
     "outro": "Outro",
 }
@@ -1918,6 +1920,9 @@ TIPO_LABELS = {
     "reserva_frete_devolucao": "Reserva do frete de devolução",
     "reserva_saque": "Reserva pro saque",
     "reserva_pagamento": "Reserva de pagamento",
+    "reserva_outra": "Reserva (outra)",
+    "fatura_cobrada": "Fatura do ML cobrada do saldo",
+    "cobranca_divida": "Segurado pra pagar a fatura (dívida)",
     "saque": "Saque",
     "frete": "Frete",
     "frete_cancelado": "Frete cancelado",

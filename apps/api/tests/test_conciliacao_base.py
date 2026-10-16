@@ -34,6 +34,7 @@ from app.services import conciliacao_fatura as fat
 
 MP = "https://api.mercadopago.com"
 ML = "https://api.mercadolibre.com"
+SEM_BLING = "2000018499999999"  # venda do ML que não existe no Bling
 
 CSV_JLAS2 = "\n".join(
     [
@@ -374,6 +375,78 @@ async def test_ingerir_csv_completa_as_linhas_de_um_relatorio_pobre(db, make_use
     assert venda.sub_tipo == "release"  # o pobre não tinha RECORD_TYPE; o completo preenche
     saque = next(m for m in todas if m.tipo == "saque")
     assert saque.classificacao == "saque"
+
+
+def test_linha_para_movimento_reconhece_a_cobranca_da_fatura_e_a_divida():
+    base = {
+        "DATE": "2026-10-15T01:29:31.000-03:00",
+        "SOURCE_ID": "000gs6qwm7",
+        "RECORD_TYPE": "release",
+        "NET_CREDIT_AMOUNT": "0.00",
+        "NET_DEBIT_AMOUNT": "377.27",
+        "GROSS_AMOUNT": "-377.27",
+        "PAYMENT_METHOD": "available_money",
+    }
+    cobranca = ext.linha_para_movimento(
+        {
+            **base,
+            "DESCRIPTION": "payment",
+            "EXTERNAL_REFERENCE": "MELIPAYMENTS-COLLECTIONATTEMPT-3392363225-20261010T011705466",
+        }
+    )
+    assert cobranca["tipo"] == "fatura_cobrada" and cobranca["classificacao"] == "fatura_ml"
+    assert cobranca["pedido_marketplace"] is None and cobranca["debito"] == Decimal("377.27")
+    divida = ext.linha_para_movimento({**base, "DESCRIPTION": "reserve_for_debt_payment"})
+    assert divida["tipo"] == "cobranca_divida" and divida["classificacao"] == "fatura_ml"
+    venda = ext.linha_para_movimento(
+        {**base, "DESCRIPTION": "payment", "ORDER_ID": "2000018405611066"}
+    )
+    assert venda["tipo"] == "venda_liberada" and venda["classificacao"] is None
+
+
+async def test_recalcular_loja_classifica_cobranca_da_fatura_antiga_e_venda_desfeita(db, make_user):
+    loja, _integ = await _loja(db, make_user)
+    agora = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    d = lambda dia, h=10: datetime(2026, 10, dia, h, tzinfo=UTC)  # noqa: E731
+    # gravadas antes da regra: cobrança da fatura como "venda" com a referência no nº
+    # da venda, e a reserva pra dívida como reserva_outra
+    cobranca = _mov(
+        loja, "venda_liberada", d(12), debito="1676.57", pagamento="000gpgtumv", sub="release"
+    )
+    cobranca.descricao = "payment"
+    cobranca.pedido_marketplace = "MELIPAYMENTS-COLLECTIONATTEMPT-1423186352-20261005T001908682"
+    divida = _mov(loja, "reserva_outra", d(12, 11), debito="354.31", pagamento="98664089")
+    divida.descricao = "reserve_for_debt_payment"
+    # venda sem pedido no Bling que entrou e saiu inteira (reclamação): venda desfeita
+    grupo = [
+        _mov(loja, "venda_liberada", d(2), credito="320.69", pedido_mkt=SEM_BLING, pagamento="P7"),
+        _mov(loja, "mediacao", d(2, 11), debito="396.17", pedido_mkt=SEM_BLING, pagamento="P7"),
+        _mov(loja, "estorno", d(2, 12), credito="75.48", pedido_mkt=SEM_BLING, pagamento="P7"),
+    ]
+    # venda sem pedido que só entrou: continua sem dono
+    solta = _mov(loja, "venda_liberada", d(13), credito="232.10", pedido_mkt="2000018499999998")
+    solta.pagamento_id = "P8"
+    db.add_all([cobranca, divida, *grupo, solta])
+    await db.commit()
+    r = await calc.recalcular_loja(db, loja, agora=agora)
+    assert r["cobranca_fatura"] == 2 and r["venda_desfeita"] == 3
+    await db.refresh(cobranca)
+    await db.refresh(divida)
+    await db.refresh(solta)
+    assert cobranca.tipo == "fatura_cobrada" and cobranca.pedido_marketplace is None
+    assert cobranca.classificacao == "fatura_ml"
+    assert divida.tipo == "cobranca_divida" and divida.classificacao == "fatura_ml"
+    for m in grupo:
+        await db.refresh(m)
+        assert m.classificacao == "venda_desfeita" and m.pedido_bling is None
+    assert solta.classificacao is None
+    # o pedido aparece no Bling depois: a ligação desfaz a classificação do robô
+    db.add(_pedido_bling("301202", SEM_BLING, d(1), "396.17", 100.0))
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=agora)
+    for m in grupo:
+        await db.refresh(m)
+        assert m.pedido_bling == "301202" and m.classificacao is None
 
 
 async def test_recalcular_loja_apaga_a_gemea_pobre_que_sobrou(db, make_user):

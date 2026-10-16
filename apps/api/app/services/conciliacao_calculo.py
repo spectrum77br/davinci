@@ -44,6 +44,8 @@ from app.services.conciliacao_extrato import (
     TIPOS_RESERVA,
     apagar_duplicatas_pobres,
     bling_store_ids_da_loja,
+    classificar_cobrancas_da_fatura,
+    classificar_vendas_desfeitas,
     resolver_pedidos_bling,
 )
 from app.services.conciliacao_fatura import tipo_do_detalhe
@@ -995,9 +997,14 @@ async def recalcular_loja(
             if achado:
                 m.pedido_bling, m.bling_id = achado
                 contagem["resolvido_agora"] += 1
-                if m.classificacao == "reserva":
+                if m.classificacao in ("reserva", "venda_desfeita"):
                     # classificação dada pelo robô (abaixo) enquanto não tinha dono
                     m.classificacao = None
+    # Cobrança da fatura do ML no saldo do MP e dinheiro segurado pra pagar a dívida
+    # (16/10, mega 377,27 e aguiar 12/10): não é venda, é "Fatura do ML".
+    cobradas = await classificar_cobrancas_da_fatura(session, loja)
+    if cobradas:
+        contagem["cobranca_fatura"] = cobradas
     # Linha sem nº de venda mas do MESMO pagamento de uma linha já ligada a um pedido
     # (16/10: relatório antigo da aguiar sem ORDER_ID; reservas/estornos sem o nº):
     # herda o pedido da irmã.
@@ -1070,6 +1077,10 @@ async def recalcular_loja(
     for m in reservas_soltas:
         m.classificacao = "reserva"
         contagem["reserva_sem_pedido"] += 1
+    # Venda sem pedido no Bling cujo dinheiro entrou e saiu inteiro: venda desfeita.
+    desfeitas = await classificar_vendas_desfeitas(session, loja)
+    if desfeitas:
+        contagem["venda_desfeita"] = desfeitas
     # Cupom do extrato: só o que sai do bolso da loja (EFFECTIVE_COUPON_AMOUNT); as linhas
     # gravadas antes de 15/10 tinham o COUPON_AMOUNT (que soma o cupom bancado pelo ML).
     from app.services.conciliacao_extrato import cupom_da_linha

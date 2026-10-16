@@ -20,7 +20,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -182,6 +182,107 @@ async def inserir_movimentos(
     return inseridos
 
 
+AJUSTE_SALDO_MAXIMO = Decimal("10")
+PREFIXO_AJUSTE_SALDO = "ajuste-saldo-"
+
+
+async def ajustar_saldo_do_dia(
+    session: AsyncSession, loja: ConciliacaoLoja, dia: date
+) -> list[Decimal]:
+    """A carteira da Shopee às vezes muda o saldo sem listar o lançamento (16/10,
+    Barbosa 15/10: renda de 292,39 e o saldo subiu 291,41 — nada na API, nem relendo).
+    Pra diferença pequena (até R$ 10 no dia) o robô grava uma linha "Ajuste da
+    Shopee" classificada como ajuste, no ponto em que o saldo pulou, e o dia fecha.
+    Diferença maior fica como está ("saldo não bate" pra uma pessoa olhar). Recalcula
+    do zero a cada leitura do dia; ajuste que uma pessoa mexeu fica."""
+    from app.routers.conciliacao import _ordena_dia
+
+    mov = ConciliacaoMovimento
+    inicio = datetime.combine(dia, datetime.min.time(), tzinfo=BRT)
+    fim = inicio + timedelta(days=1)
+    await session.execute(
+        delete(mov).where(
+            mov.integration_id == loja.integration_id,
+            mov.origem == ORIGEM_CARTEIRA,
+            mov.id_externo.like(f"{PREFIXO_AJUSTE_SALDO}{dia.isoformat()}%"),
+            mov.vinculado_por.is_(None),
+        )
+    )
+    anterior = (
+        await session.execute(
+            select(mov.saldo_apos)
+            .where(
+                mov.integration_id == loja.integration_id,
+                mov.origem == ORIGEM_CARTEIRA,
+                mov.data < inicio,
+                mov.saldo_apos.isnot(None),
+            )
+            .order_by(mov.data.desc(), func.length(mov.id_externo).desc(), mov.id_externo.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    linhas = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_CARTEIRA,
+                    mov.data >= inicio,
+                    mov.data < fim,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if anterior is None or not linhas:
+        return []
+    saldo = Decimal(anterior)
+    pulos: list[tuple[ConciliacaoMovimento, Decimal]] = []
+    for m in _ordena_dia(list(linhas), saldo):
+        saldo += (m.credito or Decimal("0")) - (m.debito or Decimal("0"))
+        if m.saldo_apos is not None and m.saldo_apos != saldo:
+            pulos.append((m, Decimal(m.saldo_apos) - saldo))
+            saldo = Decimal(m.saldo_apos)
+    if not pulos:
+        return []
+    total = sum((abs(d) for _m, d in pulos), Decimal("0"))
+    if total > AJUSTE_SALDO_MAXIMO or len(pulos) > 3:
+        logger.warning(
+            "conciliacao_carteira_saldo_pulou",
+            loja=loja.conta,
+            dia=dia.isoformat(),
+            pulos=[str(d) for _m, d in pulos],
+        )
+        return [d for _m, d in pulos]
+    for i, (m, d) in enumerate(pulos, start=1):
+        session.add(
+            ConciliacaoMovimento(
+                integration_id=loja.integration_id,
+                platform=loja.platform,
+                origem=ORIGEM_CARTEIRA,
+                id_externo=f"{PREFIXO_AJUSTE_SALDO}{dia.isoformat()}-{i}",
+                data=m.data,
+                tipo="ajuste_shopee",
+                descricao="Diferença de saldo não detalhada pela Shopee",
+                sub_tipo="AJUSTE_SALDO",
+                credito=d if d > 0 else Decimal("0"),
+                debito=-d if d < 0 else Decimal("0"),
+                saldo_apos=Decimal(m.saldo_apos)
+                - (m.credito or Decimal("0"))
+                + (m.debito or Decimal("0")),
+                classificacao="ajuste",
+                raw={
+                    "motivo": "saldo informado pela Shopee pulou sem lançamento na carteira",
+                    "antes_da_linha": m.id_externo,
+                    "diferenca": str(d),
+                },
+            )
+        )
+    await session.flush()
+    return [d for _m, d in pulos]
+
+
 async def run_carteira_sync(
     session: AsyncSession,
     loja: ConciliacaoLoja,
@@ -239,15 +340,25 @@ async def run_carteira_sync(
                 "conciliacao_carteira_falhou", loja=loja.conta, dia=dia.isoformat(), erro=row.erro
             )
             break  # mantém a ordem dos dias; tenta de novo na próxima rodada
+        pulos = await ajustar_saldo_do_dia(session, loja, dia)
         row.status = "lido"
         row.lido_em = agora
         row.erro = None
         row.linhas = len(lista)
-        row.detalhe = {**(row.detalhe or {}), "inseridos": inseridos}
+        row.detalhe = {
+            **(row.detalhe or {}),
+            "inseridos": inseridos,
+            "ajustes_de_saldo": [str(d) for d in pulos],
+        }
         loja.ultimo_extrato_em = agora
         resumo["inseridos"] += inseridos
         resumo["dias"].append(
-            {"dia": dia.isoformat(), "linhas": len(lista), "inseridos": inseridos}
+            {
+                "dia": dia.isoformat(),
+                "linhas": len(lista),
+                "inseridos": inseridos,
+                "ajustes_de_saldo": [str(d) for d in pulos],
+            }
         )
     await session.flush()
     return resumo
