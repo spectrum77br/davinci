@@ -401,8 +401,8 @@ def situacao_do_pedido(
     # o que mexeu sem nenhuma liberação, fora o frete (a etiqueta faz parte da
     # liquidação, não é dinheiro que saiu)
     mexeu_sem_liberar = (
-        _soma([m.credito for m in dinheiro if m.tipo != "frete"])
-        - _soma([m.debito for m in dinheiro if m.tipo != "frete"])
+        _soma([m.credito for m in dinheiro if not m.tipo.startswith("frete")])
+        - _soma([m.debito for m in dinheiro if not m.tipo.startswith("frete")])
         if dinheiro
         else ZERO
     )
@@ -459,11 +459,15 @@ def situacao_do_pedido(
             situacao = "aguardando"
             preso = _soma([m.credito for m in presas]) - _soma([m.debito for m in presas])
             motivo = f"preso na reserva da Amazon: {preso:.2f}"
-        elif (cancelada or bling_cancelado) and abs(mexeu_sem_liberar) < RUIDO_SEM_LIBERACAO:
+        elif (
+            any(not m.tipo.startswith("frete") for m in dinheiro)
+            and abs(mexeu_sem_liberar) < RUIDO_SEM_LIBERACAO
+        ):
             # 16/10 (revisão): Shopee cobra centavos ("Renda do pedido −0,49") em pedido
-            # devolvido/resolvido — venda desfeita, não "estornado depois"
+            # devolvido/resolvido (Bling "Resolvido"/"Aguardando devolução", não
+            # cancelado) — nada liberou: venda desfeita, não "estornado depois"
             situacao = "cancelado"
-            motivo = f"venda desfeita; ficou {mexeu_sem_liberar:.2f} (centavos)"
+            motivo = f"venda desfeita; ficou {mexeu_sem_liberar:.2f} (centavos), nada liberou"
         elif dinheiro and abs(mexeu_sem_liberar) > TOLERANCIA:
             # 16/10 (revisão, aprovado): nada liberou e mesmo assim saiu (ou entrou)
             # dinheiro — devolvido antes de liquidar na TikTok, frete de devolução… Não é
@@ -546,6 +550,8 @@ def situacao_do_pedido(
         # cancelado de verdade (nada ficou na conta): só esse finaliza sozinho
         "zero_a_zero": situacao == "cancelado"
         and (recebido is None or abs(recebido) <= TOLERANCIA),
+        # nada liberou: o produto não saiu (ou voltou) — custo zero no Sobrou
+        "nada_liberou": not liberacoes,
         # previsão usada (a da plataforma ou a estimada) — vai pra previsao_liberacao
         "previsao": previsao,
     }
@@ -1056,8 +1062,11 @@ async def recalcular_loja(
         # Amazon: frete pago fora da plataforma (Melhor Envio) — entra no Sobrou, não
         # no Líquido; envio próprio sem ele não pode ser "bateu" (15/10, Vinicius)
         frete_pago = fretes_pagos.get(numero) if plataforma_loja == "amazon" else None
-        if calc["situacao"] == "cancelado":
+        if calc["situacao"] == "cancelado" or (
+            calc["nada_liberou"] and calc["situacao"] in ("estornado_depois", "recebido_a_mais")
+        ):
             # Venda desfeita: o produto não saiu (ou voltou) — custo zero (15/10, Vinicius).
+            # Vale também pra "nada liberou e saiu X" (vortan 300486: só a manutenção).
             custo = ZERO
             sobrou = (base_resultado or ZERO) - reembolso - (frete_pago or ZERO)
             margem = None

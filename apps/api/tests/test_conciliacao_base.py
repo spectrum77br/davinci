@@ -2911,3 +2911,31 @@ async def test_dinheiro_na_conta_usa_a_ancora_do_dia_anterior(db, make_user):
     dinheiro = await _dinheiro_da_loja(db, loja)
     # âncora 100 → reserva (100 − 100 = 0) e depois o pagamento (0 + 100 = 100): na conta 100
     assert dinheiro["na_conta"] == 100.0
+
+
+def test_centavos_sem_liberacao_e_frete_cancelado_e_custo_zero_quando_nada_liberou():
+    """2ª rodada (16/10): Shopee cobra −0,49 em pedido devolvido com Bling "Resolvido" (não
+    cancelado) → venda desfeita; frete + frete cancelado (líquido 0) não é "entrou X";
+    nada liberou e saiu 23,39 → custo zero no Sobrou (o produto voltou)."""
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    base = {
+        "agora": datetime(2026, 10, 15, 12, tzinfo=UTC),
+        "data_pedido": datetime(2026, 10, 10, 12, tzinfo=UTC),
+        "bling_total": Decimal("100.00"),
+        "venda": None,
+        "previsao": None,
+        "fatura": {},
+    }
+    d = datetime(2026, 10, 12, 12, tzinfo=UTC)
+    centavos = _mov(loja, "estorno", d, debito="0.49")
+    out = calc.situacao_do_pedido(movs_extrato=[centavos], **base)
+    assert out["situacao"] == "cancelado" and "centavos" in out["motivo"]
+    assert out["nada_liberou"] is True
+    frete = _mov(loja, "frete", d, debito="10.00")
+    frete_volta = _mov(loja, "frete_cancelado", d, credito="10.00")
+    out = calc.situacao_do_pedido(movs_extrato=[frete, frete_volta], **base)
+    assert out["situacao"] == "aguardando"  # só frete mexeu: nem alarme, nem "desfeita"
+    manutencao = _mov(loja, "estorno", d, debito="23.39")
+    out = calc.situacao_do_pedido(movs_extrato=[manutencao], **base)
+    assert out["situacao"] == "estornado_depois" and out["nada_liberou"] is True

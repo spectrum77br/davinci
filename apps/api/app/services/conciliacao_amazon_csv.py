@@ -166,9 +166,13 @@ def linha_para_transacao(row: dict[str, str], *, ordem: int) -> dict[str, Any] |
     # linha sem pedido (taxa de assinatura, publicidade…) repete todo mês com os mesmos
     # valores: a data fica na identidade dela (2ª rodada: a numeração #2/#3 escorregava
     # quando a mais velha saía da janela de 35 dias)
-    tid = _hash_upload("|".join(partes if pedido else [row.get(COLUNAS["data"], ""), *partes]))
-    # a chave antiga (com a data) só pra reconhecer o que já estava gravado
-    legado = _hash_upload("|".join([row.get(COLUNAS["data"], ""), *partes]))
+    data_csv = row.get(COLUNAS["data"], "")
+    if pedido:
+        tid = _hash_upload("|".join(partes))
+        legado = _hash_upload("|".join([data_csv, *partes]))  # identidade original (com data)
+    else:
+        tid = _hash_upload("|".join([data_csv, *partes]))
+        legado = _hash_upload("|".join(partes))  # identidade do 215f0494 (sem data), 16/10 à noite
     return {
         "transactionId": tid,
         "_idLegado": legado,
@@ -199,6 +203,7 @@ def transacoes_do_csv(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     (segundos a partir de 00:00). Linha repetida ganha #2, #3…"""
     por_dia: dict[str, int] = {}
     vistos: dict[str, int] = {}
+    vistos_legado: dict[str, int] = {}  # numeração própria (id e legado podem coincidir)
     txs: list[dict[str, Any]] = []
     for row in reversed(rows):
         dia = row.get(COLUNAS["data"], "")
@@ -211,8 +216,8 @@ def transacoes_do_csv(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
         vistos[tx["transactionId"]] = n
         if n > 1:
             tx["transactionId"] = f"{tx['transactionId']}#{n}"
-        nl = vistos.get(tx["_idLegado"], 0) + 1
-        vistos[tx["_idLegado"]] = nl
+        nl = vistos_legado.get(tx["_idLegado"], 0) + 1
+        vistos_legado[tx["_idLegado"]] = nl
         if nl > 1:
             tx["_idLegado"] = f"{tx['_idLegado']}#{nl}"
         txs.append(tx)
@@ -286,12 +291,23 @@ async def ingerir_csv_amazon(
     ).scalars():
         presas[_chave_gemea(p)].append(p)
     novos: list[dict[str, Any]] = []
-    atualizados = migrados = liberadas = 0
+    atualizados = migrados = liberadas = duplicatas_apagadas = 0
+    dias_mexidos: set[date] = set()
     por_tipo: dict[str, int] = {}
     usados: set = set()
     for m in movs:
         por_tipo[m["tipo"]] = por_tipo.get(m["tipo"], 0) + 1
         ex = existentes.get(m["id_externo"])
+        leg = legados.get(m["id_externo"])
+        if ex is not None and leg and leg != m["id_externo"]:
+            velha = existentes.get(leg)
+            if velha is not None and velha is not ex and not velha.vinculado_por:
+                # a mesma linha gravada pelas duas identidades (16/10 à noite: publicidade,
+                # cobrança do saldo e assinatura em dobro): a antiga sai
+                existentes.pop(leg)
+                dias_mexidos.add(velha.data.astimezone(BRT).date())
+                await session.delete(velha)
+                duplicatas_apagadas += 1
         if ex is None:
             leg = legados.get(m["id_externo"])
             ex = existentes.get(leg) if leg else None
@@ -336,8 +352,6 @@ async def ingerir_csv_amazon(
             atualizados += 1
     # linha presa que o arquivo não traz mais e cuja liberada já está gravada (entrou em
     # dobro pela identidade antiga — 300772): a presa sai; vínculo manual passa pra liberada
-    duplicatas_apagadas = 0
-    dias_mexidos: set[date] = set()
     no_arquivo = {m["id_externo"] for m in movs}
     liberadas_gravadas: dict[tuple, list[ConciliacaoMovimento]] = defaultdict(list)
     for ex in existentes.values():

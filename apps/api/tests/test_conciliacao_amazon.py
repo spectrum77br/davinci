@@ -1321,6 +1321,11 @@ async def test_amazon_preso_na_reserva_e_aguardando_ate_liberar(db, make_user):
     assert ped.situacao == "aguardando" and ped.etapa == "aguardando"
     assert ped.motivo == "preso na reserva da Amazon: 2356.21"
     assert ped.recebido is None and ped.liberado_em is None
+    # "A liberar" do Resumo: o preso entra uma vez só (não soma de novo pela venda)
+    from app.routers.conciliacao import _dinheiro_da_loja
+
+    dinheiro = await _dinheiro_da_loja(db, loja)
+    assert dinheiro["a_liberar"] == 2356.21 and dinheiro["a_liberar_pedidos"] == 1
     # a Amazon liberou (original vira DEFERRED_RELEASED + repetição RELEASED em 14/10)
     liberado = _venda_proprio(status="DEFERRED_RELEASED", posted="2026-10-06T14:00:00Z")
     repeticao = _venda_proprio(status="RELEASED", posted="2026-10-14T03:00:00Z")
@@ -1333,3 +1338,46 @@ async def test_amazon_preso_na_reserva_e_aguardando_ate_liberar(db, make_user):
     # envio próprio sem o frete do Melhor Envio: "falta frete" (seria "bateu" com ele)
     assert ped.situacao == "falta_frete" and ped.recebido == Decimal("2356.21")
     assert ped.liberado_em == datetime(2026, 10, 14, 3, tzinfo=UTC)
+
+
+async def test_linha_sem_pedido_da_kfa_reconhece_a_identidade_do_215f0494_e_tira_a_duplicata(
+    db, make_user
+):
+    """16/10 à noite: a linha sem pedido (assinatura, publicidade) ganhou a data na
+    identidade, mas as gravadas pelo 215f0494 (sem data) não eram reconhecidas e a
+    mesma taxa entrou em dobro. Agora a antiga casa pelo legado e, se as duas existem,
+    a antiga sai."""
+    from app.services.conciliacao_shopee import inserir_movimentos
+
+    loja = await _loja_amazon(db, make_user)
+    loja.modo_extrato = "upload"
+    await db.commit()
+    assinatura = (
+        '"07/10/2026","Liberado","Visa Crédito","Tarifas de serviço","---","Taxa de assinatura:",'
+        '"0","0","-19","0","-19"'
+    )
+    csv = "\n".join([_CAB_KFA, assinatura])
+    _cab, rows = ler_csv_amazon(csv)
+    (tx,) = transacoes_do_csv(rows)
+    novo_id, legado = tx["transactionId"], tx.pop("_idLegado")
+    assert novo_id != legado
+    m_novo = transacao_para_movimento(tx)
+    m_velho = {**transacao_para_movimento(tx), "id_externo": legado}
+    assert await inserir_movimentos(db, loja, [m_novo, m_velho]) == 2  # em dobro, como em prod
+    await db.commit()
+    r = await ingerir_csv_amazon(db, loja, csv, agora=datetime(2026, 10, 17, 9, tzinfo=UTC))
+    assert r["duplicatas_apagadas"] == 1 and r["inseridos"] == 0
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert [m.id_externo for m in movs] == [novo_id]
+    # só a antiga gravada: migra pro id novo, sem duplicar
+    await db.delete(movs[0])
+    await db.commit()
+    assert (
+        await inserir_movimentos(db, loja, [{**transacao_para_movimento(tx), "id_externo": legado}])
+        == 1
+    )
+    await db.commit()
+    r2 = await ingerir_csv_amazon(db, loja, csv, agora=datetime(2026, 10, 17, 10, tzinfo=UTC))
+    assert r2["migrados"] == 1 and r2["inseridos"] == 0 and r2["duplicatas_apagadas"] == 0
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert [m.id_externo for m in movs] == [novo_id]

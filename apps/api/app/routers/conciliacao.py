@@ -3115,6 +3115,23 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
         preso = max(_num(preso_v or 0) or 0.0, 0.0)
         if na_conta is not None:
             na_conta = round(na_conta - preso, 2)
+        # pedido cujo dinheiro está preso já entra pelo "preso": não soma de novo pela
+        # venda (16/10 à noite: kia mostrava 151 mil, o certo ~75 mil)
+        presos_sq = select(mov.pedido_bling).where(
+            mov.integration_id == loja.integration_id,
+            mov.sub_tipo == "DEFERRED",
+            mov.pedido_bling.isnot(None),
+        )
+        a_liberar, n_liberar = (
+            await session.execute(
+                select(func.sum(ped.venda_liquido), func.count()).where(
+                    ped.integration_id == loja.integration_id,
+                    ped.situacao.in_(("aguardando", "vencido")),
+                    ped.venda_liquido.isnot(None),
+                    ped.pedido_bling.notin_(presos_sq),
+                )
+            )
+        ).one()
         a_liberar = (a_liberar or 0) + Decimal(str(preso))
         n_liberar = (n_liberar or 0) + int(n_preso or 0)
         if loja.modo_extrato == "upload":
