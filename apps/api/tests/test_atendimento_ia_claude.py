@@ -712,7 +712,9 @@ async def test_caminho_do_groq_segue_igual(claude, api, monkeypatch):
         "model": "openai/gpt-oss-120b",
         "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}],
         "temperature": 0.2,
-        "max_tokens": 300,
+        # O gpt-oss é de raciocínio: esforço baixo (16/10/2026).
+        "reasoning_effort": "low",
+        "max_tokens": ia.MAX_TOKENS_CLASSIFICACAO,
     }
     assert rota.calls[0].request.headers["Authorization"] == f"Bearer {CHAVE_GROQ}"
     assert api.pedidos == []

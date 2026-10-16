@@ -33,3 +33,21 @@ def test_corpo_do_groq_como_sempre():
     assert corpo["max_tokens"] == 900
     assert corpo["temperature"] == 0.2
     assert "max_completion_tokens" not in corpo
+
+
+def test_gpt_oss_no_groq_raciocina_pouco():
+    """16/10/2026: o gpt-oss é modelo de raciocínio — no esforço padrão a
+    classificação estourava o teto e voltava vazia. No Groq vai `low`; os
+    outros modelos seguem sem o campo (o Groq recusa em modelo sem raciocínio)."""
+    corpo = ia.corpo_compativel(
+        _p("https://api.groq.com/openai/v1", "openai/gpt-oss-120b"), "sis", "usu", max_tokens=500
+    )
+    assert corpo["reasoning_effort"] == "low"
+    assert corpo["max_tokens"] == 500
+    outro = ia.corpo_compativel(
+        _p("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+        "sis",
+        "usu",
+        max_tokens=900,
+    )
+    assert "reasoning_effort" not in outro

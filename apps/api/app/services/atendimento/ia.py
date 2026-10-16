@@ -365,8 +365,18 @@ MAX_CHARS_RESPOSTA = 12_000
 # `max_tokens` também conta no limite por minuto do provedor. Classificação:
 # um JSON de duas chaves. Resposta: até 2.000 caracteres (o maior limite de
 # canal, ~600 tokens) mais as chaves e o motivo.
-MAX_TOKENS_CLASSIFICACAO = 300
+MAX_TOKENS_CLASSIFICACAO = 500
 MAX_TOKENS_RESPOSTA = 900
+# O gpt-oss no Groq (16/10/2026) é modelo de RACIOCÍNIO: o raciocínio gasta do
+# mesmo `max_tokens` que o texto. No esforço padrão (medium) a classificação
+# de conversa de verdade (fatos + histórico) estourava os 300 e voltava vazia —
+# 11 de 36 rascunhos em 5 dias foram para pessoa por "a IA não classificou o
+# assunto", e a resposta às vezes saía cortada ("fora do formato", "texto
+# vazio"). Medido no Groq em 16/10: no esforço `low` o raciocínio cai de 3 a 5
+# vezes (77→14 e 156→47 tokens) com a mesma classificação — e gasta menos do
+# limite por minuto da conta (8.000 tokens).
+ESFORCO_RACIOCINIO = "low"
+_MODELOS_DE_RACIOCINIO = ("gpt-oss",)
 # Na Claude o raciocínio (adaptativo, ligado por padrão) conta no mesmo
 # `max_tokens` que o texto: com os 300/900 do Groq a resposta sairia cortada
 # no meio. Folga para o raciocínio curto do esforço `low` + o JSON.
@@ -788,6 +798,8 @@ def corpo_compativel(p: Provedor, sistema: str, usuario: str, *, max_tokens: int
         return corpo
     corpo["temperature"] = 0.2
     corpo["max_tokens"] = max_tokens
+    if any(m in (p.modelo or "").lower() for m in _MODELOS_DE_RACIOCINIO):
+        corpo["reasoning_effort"] = ESFORCO_RACIOCINIO
     return corpo
 
 
@@ -837,11 +849,15 @@ async def _chamar_modelo(
         )
     try:
         dados = resp.json()
-        texto = dados["choices"][0]["message"]["content"] or ""
+        escolha = dados["choices"][0]
+        texto = escolha["message"]["content"] or ""
     except (ValueError, KeyError, IndexError, TypeError) as e:
         raise ErroProvedor("resposta do provedor sem texto") from e
     uso = dict(dados.get("usage") or {})
     uso.setdefault("model", dados.get("model") or p.modelo)
+    # "length" = o teto acabou (no modelo de raciocínio, às vezes antes do texto).
+    if isinstance(escolha, dict) and escolha.get("finish_reason"):
+        uso["finish_reason"] = escolha["finish_reason"]
     return str(texto), uso
 
 
@@ -3837,7 +3853,13 @@ async def _gerar(
         if classificada is None:
             # Segue com as regras gerais; a pessoa confere o que ficou de fora.
             motivos.append("a IA não classificou o assunto — as regras do assunto ficaram de fora")
-            logger.warning("atendimento_ia_classificacao_invalida", conversa_id=str(conversa.id))
+            logger.warning(
+                "atendimento_ia_classificacao_invalida",
+                conversa_id=str(conversa.id),
+                fim=uso_classificacao.get("finish_reason"),
+                tokens_saida=uso_classificacao.get("completion_tokens"),
+                vazia=not (bruto_c or "").strip(),
+            )
         fatos_gravados["categoria_classificada"] = classificada
 
     # A garantia (Painel de Garantia): pelo pedido da conversa, pelo CPF do

@@ -1311,7 +1311,7 @@ async def test_chamar_modelo_manda_max_tokens_e_le_o_retry_after(ia_ligada):
         )
         with pytest.raises(ia.ErroProvedor) as exc:
             await ia._chamar_modelo("s", "u", max_tokens=ia.MAX_TOKENS_CLASSIFICACAO)
-    assert json.loads(rota.calls[0].request.content)["max_tokens"] == 300
+    assert json.loads(rota.calls[0].request.content)["max_tokens"] == ia.MAX_TOKENS_CLASSIFICACAO
     assert exc.value.limite is True and exc.value.espera == 7.0
 
 
@@ -3323,7 +3323,7 @@ async def test_manual_base_classificacao_e_resposta_nos_tetos_e_max_tokens(
     (sis_c, _), (sis_r, usu_r) = falso.chamadas
     assert len(sis_c) <= ia.MAX_CHARS_CLASSIFICACAO
     assert len(sis_r) <= ia.MAX_CHARS_RESPOSTA
-    assert falso.max_tokens == [300, 900]
+    assert falso.max_tokens == [500, 900]
     assert "Pedido postado: onde está, quando chega ou atraso." in sis_r  # regra do assunto
     assert "REGRAS DE SEGURANÇA DA LOJA" in sis_r
     assert r.categoria == "rastreio" and r.prompt_versao == "v7"
