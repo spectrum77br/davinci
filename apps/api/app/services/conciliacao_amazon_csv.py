@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import io
 import re
+import secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -264,7 +266,8 @@ async def ingerir_csv_amazon(
         ConciliacaoSync(
             integration_id=loja.integration_id,
             origem=ORIGEM_AMAZON,
-            chave=f"upload:{agora:%Y-%m-%dT%H:%M:%S}",
+            # com microssegundos: dois envios no mesmo segundo não colidem
+            chave=f"upload:{agora:%Y-%m-%dT%H:%M:%S.%f}",
             status="lido",
             pedido_em=agora,
             lido_em=agora,
@@ -281,3 +284,51 @@ async def ingerir_csv_amazon(
         **{k: v for k, v in stats.items() if k != "por_tipo"},
     )
     return stats
+
+
+# ---------- chave do script (16/10) ----------
+# O script no Mac ("KFA Conciliação.command") baixa o CSV pelo AdsPower e envia sem
+# ninguém logado: identifica-se por uma chave gerada em Conciliação › Amazon › Enviar
+# transações › "Gerar chave pro script". Guardamos só o hash; a chave aparece uma vez.
+CHAVE_CONFIG_UPLOAD = "conciliacao_upload_chave"
+
+
+async def gerar_chave_upload(session: AsyncSession, *, por: str | None) -> str:
+    from app.models import ConfiguracaoSegura
+    from app.security.cipher import encrypt_json
+
+    chave = "kfa_" + secrets.token_urlsafe(30)
+    row = await session.get(ConfiguracaoSegura, CHAVE_CONFIG_UPLOAD)
+    if row is None:
+        row = ConfiguracaoSegura(chave=CHAVE_CONFIG_UPLOAD, valor=b"", detalhe={})
+        session.add(row)
+    row.valor = encrypt_json({"hash": hashlib.sha256(chave.encode()).hexdigest()})
+    row.detalhe = {"gerada_em": datetime.now(UTC).isoformat(), "por": por}
+    row.atualizado_por = por
+    await session.flush()
+    return chave
+
+
+async def situacao_chave_upload(session: AsyncSession) -> dict[str, Any]:
+    from app.models import ConfiguracaoSegura
+
+    row = await session.get(ConfiguracaoSegura, CHAVE_CONFIG_UPLOAD)
+    if row is None:
+        return {"tem_chave": False}
+    return {"tem_chave": True, **(row.detalhe or {})}
+
+
+async def chave_upload_valida(session: AsyncSession, chave: str | None) -> bool:
+    from app.models import ConfiguracaoSegura
+    from app.security.cipher import decrypt_json
+
+    if not chave:
+        return False
+    row = await session.get(ConfiguracaoSegura, CHAVE_CONFIG_UPLOAD)
+    if row is None:
+        return False
+    try:
+        guardado = str(decrypt_json(row.valor).get("hash") or "")
+    except Exception:  # noqa: BLE001
+        return False
+    return hmac.compare_digest(guardado, hashlib.sha256(chave.strip().encode()).hexdigest())

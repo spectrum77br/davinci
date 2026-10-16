@@ -805,8 +805,8 @@ async def test_ingerir_csv_amazon_grava_atualiza_e_nao_duplica(db, make_user):
     assert liberada.raw["_liberado_em"].startswith("2026-10-18")
     syncs = (await db.execute(select(ConciliacaoSync))).scalars().all()
     assert sorted(s.chave for s in syncs) == [
-        "upload:2026-10-16T13:00:00",
-        "upload:2026-10-18T13:00:00",
+        "upload:2026-10-16T13:00:00.000000",
+        "upload:2026-10-18T13:00:00.000000",
     ]
 
 
@@ -835,3 +835,54 @@ async def test_endpoint_upload_amazon_so_para_loja_por_arquivo(db, make_user, au
     assert r.status_code == 422 and r.json()["detail"]["code"] == "csv_invalido"
     r = await client.get("/api/conciliacao/lojas")
     assert r.json()["lojas"][0]["modo_extrato"] == "upload"
+
+
+async def test_chave_do_script_gera_valida_e_envia_sem_login(db, make_user, auth_as, client):
+    loja = await _loja_amazon(db, make_user)
+    loja.modo_extrato = "upload"
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    r = await client.get("/api/conciliacao/amazon/upload/chave")
+    assert r.status_code == 200 and r.json() == {"tem_chave": False}
+    r = await client.post("/api/conciliacao/amazon/upload/chave")
+    assert r.status_code == 200
+    chave = r.json()["chave"]
+    assert chave.startswith("kfa_") and len(chave) > 30
+    r = await client.get("/api/conciliacao/amazon/upload/chave")
+    assert r.json()["tem_chave"] is True and r.json()["gerada_em"]
+    # o script envia sem sessão, só com a chave
+    auth_as(None)
+    arquivo = ("transacoes.csv", CSV_KFA.encode("utf-8-sig"), "text/csv")
+    r = await client.post(
+        "/api/conciliacao/amazon/upload/script",
+        data={"loja": "kia"},
+        files={"arquivo": arquivo},
+        headers={"X-Upload-Chave": "kfa_errada"},
+    )
+    assert r.status_code == 401 and r.json()["detail"]["code"] == "chave_invalida"
+    r = await client.post(
+        "/api/conciliacao/amazon/upload/script",
+        data={"loja": "kia"},
+        files={"arquivo": arquivo},
+        headers={"X-Upload-Chave": chave},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["inseridos"] == 9
+    # chave nova invalida a anterior
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    nova = (await client.post("/api/conciliacao/amazon/upload/chave")).json()["chave"]
+    auth_as(None)
+    r = await client.post(
+        "/api/conciliacao/amazon/upload/script",
+        data={"loja": "kia"},
+        files={"arquivo": arquivo},
+        headers={"X-Upload-Chave": chave},
+    )
+    assert r.status_code == 401
+    r = await client.post(
+        "/api/conciliacao/amazon/upload/script",
+        data={"loja": "kia"},
+        files={"arquivo": arquivo},
+        headers={"X-Upload-Chave": nova},
+    )
+    assert r.status_code == 200 and r.json()["ja_existiam"] == 9

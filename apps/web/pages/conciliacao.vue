@@ -235,11 +235,35 @@ type ResultadoUpload = { loja: string; arquivo?: string; linhas: number; movimen
 const upload = ref<{ aberto: boolean; loja: string; arquivo: File | null; msg: string; erro: boolean; ocupado: boolean; resultado: ResultadoUpload | null }>({ aberto: false, loja: '', arquivo: null, msg: '', erro: false, ocupado: false, resultado: null })
 function abrirUpload() {
   upload.value = { aberto: true, loja: lojasUpload.value[0]?.conta || '', arquivo: null, msg: '', erro: false, ocupado: false, resultado: null }
+  chaveScript.value.nova = ''
+  lerChaveScript()
 }
 function escolherArquivo(e: Event) {
   const f = (e.target as HTMLInputElement).files?.[0] || null
   upload.value.arquivo = f
   upload.value.msg = ''
+}
+// Chave do script do Mac ("KFA Conciliação.command"): gerada aqui, aparece uma vez.
+const chaveScript = ref<{ tem_chave: boolean; gerada_em?: string | null; por?: string | null; nova: string; ocupado: boolean; msg: string }>({ tem_chave: false, nova: '', ocupado: false, msg: '' })
+async function lerChaveScript() {
+  try {
+    const r = await api<{ tem_chave: boolean; gerada_em?: string | null; por?: string | null }>('/api/conciliacao/amazon/upload/chave')
+    chaveScript.value = { ...chaveScript.value, ...r }
+  } catch {}
+}
+async function gerarChaveScript() {
+  if (chaveScript.value.tem_chave && !confirm('Gerar uma chave nova? A anterior deixa de valer e o script precisa da nova.')) return
+  chaveScript.value.ocupado = true
+  chaveScript.value.msg = ''
+  try {
+    const r = await api<{ chave: string }>('/api/conciliacao/amazon/upload/chave', { method: 'POST' })
+    chaveScript.value.nova = r.chave
+    await lerChaveScript()
+  } catch (e: any) {
+    chaveScript.value.msg = e?.data?.detail?.code || 'não consegui gerar'
+  } finally {
+    chaveScript.value.ocupado = false
+  }
 }
 async function enviarUpload() {
   if (!upload.value.arquivo || !upload.value.loja) return
@@ -878,6 +902,16 @@ await carregar()
           <div class="flex flex-wrap items-center gap-2">
             <button type="button" class="rounded-md bg-primary px-2.5 py-1.5 font-semibold text-primary-foreground disabled:opacity-50" :disabled="upload.ocupado || !upload.arquivo || !upload.loja" @click="enviarUpload()">Enviar</button>
             <Loader2 v-if="upload.ocupado" class="size-3.5 animate-spin text-muted-foreground" />
+          </div>
+          <div class="rounded border px-2.5 py-2">
+            <div class="text-[11px] font-semibold">Script no Mac (baixa e envia sozinho)</div>
+            <div class="text-[11px] text-muted-foreground">O "KFA Conciliação.command" abre o perfil da Amazon no AdsPower, baixa o CSV dos últimos dias e envia aqui. Ele se identifica por uma chave: gere, copie e cole no arquivo <span class="font-mono">~/.davinci/kfa.env</span> do Mac (linha <span class="font-mono">DAVINCI_UPLOAD_CHAVE=…</span>). A chave aparece uma vez só.</div>
+            <div class="mt-1 flex flex-wrap items-center gap-2">
+              <span v-if="chaveScript.tem_chave && !chaveScript.nova" class="text-[11px] text-muted-foreground">chave gerada em {{ chaveScript.gerada_em ? new Date(chaveScript.gerada_em).toLocaleString('pt-BR') : '—' }} por {{ chaveScript.por || '—' }}</span>
+              <button type="button" class="rounded-md border px-2.5 py-1 font-semibold hover:bg-muted disabled:opacity-50" :disabled="chaveScript.ocupado" @click="gerarChaveScript()">{{ chaveScript.tem_chave ? 'Gerar chave nova' : 'Gerar chave pro script' }}</button>
+              <span v-if="chaveScript.msg" class="text-[11px] text-red-700">{{ chaveScript.msg }}</span>
+            </div>
+            <div v-if="chaveScript.nova" class="mt-1 rounded bg-emerald-50 px-2 py-1.5 font-mono text-[11px] text-emerald-900 break-all">DAVINCI_UPLOAD_CHAVE={{ chaveScript.nova }}</div>
           </div>
         </div>
       </div>

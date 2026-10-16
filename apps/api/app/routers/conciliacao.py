@@ -34,7 +34,18 @@ from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -892,16 +903,9 @@ async def listar_lojas(
     }
 
 
-@router.post("/amazon/upload")
-async def amazon_upload(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
-    loja: Annotated[str, Form()],
-    arquivo: Annotated[UploadFile, File()],
+async def _amazon_upload_corpo(
+    session: AsyncSession, loja: str, arquivo: UploadFile
 ) -> dict[str, Any]:
-    """Transações da Amazon por arquivo (loja com `modo_extrato = upload`, 16/10: KFA).
-    O CSV é o de Pagamentos › Visualizar transações › Fazer download, com "Todos os
-    tipos de conta" e o período escolhido (no máximo 600 transações por arquivo)."""
     from app.services.conciliacao_amazon_csv import ingerir_csv_amazon
 
     alvo = await _loja_ou_404(session, loja)
@@ -930,6 +934,58 @@ async def amazon_upload(
     recalculo = await recalcular_loja(session, alvo)
     await session.commit()
     return {"loja": alvo.conta, "arquivo": arquivo.filename, **stats, "recalculo": recalculo}
+
+
+@router.post("/amazon/upload")
+async def amazon_upload(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+    loja: Annotated[str, Form()],
+    arquivo: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
+    """Transações da Amazon por arquivo (loja com `modo_extrato = upload`, 16/10: KFA).
+    O CSV é o de Pagamentos › Visualizar transações › Fazer download, com "Todos os
+    tipos de conta" e o período escolhido (no máximo 600 transações por arquivo)."""
+    return await _amazon_upload_corpo(session, loja, arquivo)
+
+
+@router.post("/amazon/upload/script")
+async def amazon_upload_pelo_script(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    loja: Annotated[str, Form()],
+    arquivo: Annotated[UploadFile, File()],
+    x_upload_chave: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """O mesmo envio, feito pelo script do Mac (sem ninguém logado): a chave gerada em
+    "Gerar chave pro script" vai no header X-Upload-Chave."""
+    from app.services.conciliacao_amazon_csv import chave_upload_valida
+
+    if not await chave_upload_valida(session, x_upload_chave):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"code": "chave_invalida"})
+    return await _amazon_upload_corpo(session, loja, arquivo)
+
+
+@router.get("/amazon/upload/chave")
+async def amazon_upload_chave_situacao(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+) -> dict[str, Any]:
+    from app.services.conciliacao_amazon_csv import situacao_chave_upload
+
+    return await situacao_chave_upload(session)
+
+
+@router.post("/amazon/upload/chave")
+async def amazon_upload_chave_gerar(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+) -> dict[str, Any]:
+    """Gera (ou troca) a chave do script. Aparece UMA vez; a anterior deixa de valer."""
+    from app.services.conciliacao_amazon_csv import gerar_chave_upload
+
+    chave = await gerar_chave_upload(session, por=getattr(user, "name", None) or str(user.id))
+    await session.commit()
+    return {"chave": chave}
 
 
 @router.get("/pedidos")
