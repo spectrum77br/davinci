@@ -141,7 +141,9 @@ async def sincronizar_loja(
                 fatura = False  # só o ML tem fatura; na Shopee as tarifas já vêm na renda
             if fatura:
                 try:
-                    resultado["fatura"] = await run_fatura_sync(session, loja, cliente)
+                    resultado["fatura"] = await _salvo(
+                        session, run_fatura_sync(session, loja, cliente)
+                    )
                     erros_fatura = resultado["fatura"].get("erros") or []
                     if erros_fatura:
                         # 16/10 (lucas mei, 403 PolicyAgent): período com erro não pode
@@ -162,9 +164,13 @@ async def sincronizar_loja(
                             # KFA: a API nega; as transações entram pelo arquivo (16/10)
                             resultado["extrato"] = {"modo": "upload", "pulado": True}
                         else:
-                            resultado["extrato"] = await run_amazon_sync(session, loja, cliente)
+                            resultado["extrato"] = await _salvo(
+                                session, run_amazon_sync(session, loja, cliente)
+                            )
                         try:
-                            resultado["melhor_envio"] = await run_me_sync(session, loja)
+                            resultado["melhor_envio"] = await _salvo(
+                                session, run_me_sync(session, loja)
+                            )
                         except Exception as e:  # noqa: BLE001 — frete pago não derruba a rodada
                             resultado["melhor_envio"] = {
                                 "erro": f"{type(e).__name__}: {str(e)[:200]}"
@@ -175,14 +181,22 @@ async def sincronizar_loja(
                                 erro=str(e)[:200],
                             )
                     elif plataforma == "tiktok":
-                        resultado["extrato"] = await run_tiktok_sync(session, loja, cliente)
+                        resultado["extrato"] = await _salvo(
+                            session, run_tiktok_sync(session, loja, cliente)
+                        )
                         resultado["financeiro"] = await reler_financeiro_liquidados(session, loja)
                     elif plataforma == "shopee":
-                        resultado["extrato"] = await run_carteira_sync(session, loja, cliente)
+                        resultado["extrato"] = await _salvo(
+                            session, run_carteira_sync(session, loja, cliente)
+                        )
                         # a Shopee fecha a conta da venda só na liberação (Afiliados etc.)
-                        resultado["escrow"] = await reler_escrow_liberados(session, loja)
+                        resultado["escrow"] = await _salvo(
+                            session, reler_escrow_liberados(session, loja)
+                        )
                     else:
-                        resultado["extrato"] = await run_extrato_sync(session, loja, cliente)
+                        resultado["extrato"] = await _salvo(
+                            session, run_extrato_sync(session, loja, cliente)
+                        )
                 except Exception as e:  # noqa: BLE001
                     loja.ultimo_erro = f"extrato: {type(e).__name__}: {str(e)[:300]}"
                     resultado["extrato"] = {"erro": loja.ultimo_erro}
@@ -206,16 +220,23 @@ async def sincronizar_loja(
                     logger.exception("conciliacao_fechar_dias_unhandled", loja=loja.conta)
                 await session.commit()
             # 16/10 (revisão): os leitores devolvem "erros" (lista) e o fim da rodada só
-            # olhava "erro" — a falha sumia e o dia ficava "sem movimento" (verde)
-            for k in ("extrato", "melhor_envio", "recalculo"):
-                texto = _erro_da_leitura(resultado.get(k))
-                if texto and not loja.ultimo_erro:
-                    loja.ultimo_erro = f"{k}: {texto[:280]}"
-            if not any(
-                _erro_da_leitura(resultado.get(k))
-                for k in ("fatura", "extrato", "melhor_envio", "recalculo")
-            ):
-                loja.ultimo_erro = None
+            # olhava "erro" — a falha sumia e o dia ficava "sem movimento" (verde).
+            # 2ª rodada: cada leitura só limpa o PRÓPRIO aviso — a rodada só de fatura
+            # (06:12) zerava o erro do extrato, a só de extrato zerava "fatura:", e a
+            # KFA (extrato pulado) apagava o "robô: …" antes do vigia das 07:00.
+            lidos = {
+                k
+                for k, feito in (
+                    ("fatura", fatura),
+                    ("extrato", extrato),
+                    ("melhor_envio", extrato and plataforma == "amazon"),
+                    ("recalculo", recalculo),
+                )
+                if feito
+            }
+            loja.ultimo_erro = _ultimo_erro_da_rodada(
+                loja.ultimo_erro, lidos, {k: _erro_da_leitura(resultado.get(k)) for k in lidos}
+            )
             await session.commit()
         resultado["quando"] = datetime.now(UTC).isoformat()
         logger.info(
@@ -315,6 +336,37 @@ async def rodar_todas(*, fatura: bool, extrato: bool, recalculo: bool) -> list[d
 
 FECHADO_PELO_ROBO = "robô"
 _BRT = ZoneInfo("America/Sao_Paulo")
+
+
+_PREFIXOS_LEITURA = {
+    "fatura": ("fatura",),
+    "extrato": ("extrato",),
+    "melhor_envio": ("melhor_envio", "melhor envio"),
+    "recalculo": ("recalculo", "recálculo"),
+}
+
+
+def _ultimo_erro_da_rodada(
+    atual: str | None, lidos: set[str], erros: dict[str, str | None]
+) -> str | None:
+    """Aviso da loja depois da rodada: leitura que falhou agora grava o seu; leitura
+    que deu certo limpa só o aviso dela; aviso de leitura que NÃO rodou (fatura numa
+    rodada só de extrato, "robô: …" da KFA) fica como está."""
+    for k in ("fatura", "extrato", "melhor_envio", "recalculo"):
+        if k in lidos and erros.get(k):
+            return f"{k}: {erros[k][:280]}"
+    prefixo = (atual or "").split(":", 1)[0].strip().lower()
+    for k in lidos:
+        if any(prefixo.startswith(p) for p in _PREFIXOS_LEITURA[k]):
+            return None
+    return atual
+
+
+async def _salvo(session: AsyncSession, coro: Any) -> Any:
+    """Roda uma leitura num SAVEPOINT (16/10, 2ª rodada): um erro de banco dentro dela
+    não deixa a transação abortada — o `except` grava o erro e o commit funciona."""
+    async with session.begin_nested():
+        return await coro
 
 
 def _erro_da_leitura(res: Any) -> str | None:

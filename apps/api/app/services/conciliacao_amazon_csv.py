@@ -22,7 +22,7 @@ import io
 import re
 import secrets
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -40,6 +40,7 @@ from app.models import (
 )
 from app.models.conciliacao import ORIGEM_AMAZON
 from app.services.conciliacao_amazon import recalcular_saldo, transacao_para_movimento
+from app.services.conciliacao_dias import reabrir_dias
 from app.services.conciliacao_extrato import bling_store_ids_da_loja, resolver_pedidos_bling
 from app.services.conciliacao_mp_csv import dinheiro
 from app.services.conciliacao_shopee import inserir_movimentos
@@ -162,7 +163,10 @@ def linha_para_transacao(row: dict[str, str], *, ordem: int) -> dict[str, Any] |
         str(outros),
         str(total),
     ]
-    tid = _hash_upload("|".join(partes))
+    # linha sem pedido (taxa de assinatura, publicidade…) repete todo mês com os mesmos
+    # valores: a data fica na identidade dela (2ª rodada: a numeração #2/#3 escorregava
+    # quando a mais velha saía da janela de 35 dias)
+    tid = _hash_upload("|".join(partes if pedido else [row.get(COLUNAS["data"], ""), *partes]))
     # a chave antiga (com a data) só pra reconhecer o que já estava gravado
     legado = _hash_upload("|".join([row.get(COLUNAS["data"], ""), *partes]))
     return {
@@ -333,6 +337,7 @@ async def ingerir_csv_amazon(
     # linha presa que o arquivo não traz mais e cuja liberada já está gravada (entrou em
     # dobro pela identidade antiga — 300772): a presa sai; vínculo manual passa pra liberada
     duplicatas_apagadas = 0
+    dias_mexidos: set[date] = set()
     no_arquivo = {m["id_externo"] for m in movs}
     liberadas_gravadas: dict[tuple, list[ConciliacaoMovimento]] = defaultdict(list)
     for ex in existentes.values():
@@ -355,10 +360,16 @@ async def ingerir_csv_amazon(
             if "liberado em" not in (g.descricao or ""):
                 lib = g.raw["_liberado_em"]
                 g.descricao = f"{g.descricao} · liberado em {lib[8:10]}/{lib[5:7]}"
+            dias_mexidos.add(p.data.astimezone(BRT).date())
+            dias_mexidos.add(g.data.astimezone(BRT).date())
             await session.delete(p)
             duplicatas_apagadas += 1
     if duplicatas_apagadas:
         await session.flush()
+        # a presa saiu e a liberada mudou de dia: dias fechados reabrem (2ª rodada)
+        await reabrir_dias(
+            session, loja, dias_mexidos, motivo="lançamento preso da Amazon em dobro removido"
+        )
     inseridos = await inserir_movimentos(session, loja, novos) if novos else 0
     saldo = await recalcular_saldo(session, loja)
     datas = [t["postedDate"][:10] for t in txs]

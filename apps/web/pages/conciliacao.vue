@@ -400,7 +400,7 @@ async function abrir(p: Pedido) {
   motivoDraft.value = ''
   raioxLoading.value = true
   try {
-    const r = await api<RaioX>(`/api/conciliacao/pedidos/${encodeURIComponent(p.pedido_bling)}`, { query: { loja: loja.value } })
+    const r = await api<RaioX>(`/api/conciliacao/pedidos/${encodeURIComponent(p.pedido_bling)}`, { query: { loja: p.conta || loja.value } })
     if (seq !== raioxSeq) return
     raiox.value = r
     obsDraft.value = r.pedido.observacao || ''
@@ -422,7 +422,7 @@ async function marcar(patch: Record<string, unknown>) {
   try {
     const r = await api<{ pedido: Pedido }>(`/api/conciliacao/pedidos/${encodeURIComponent(selecionado.value.pedido_bling)}`, {
       method: 'PATCH',
-      body: { loja: loja.value, ...patch },
+      body: { loja: selecionado.value?.conta || loja.value, ...patch },
     })
     const i = itens.value.findIndex((x) => x.pedido_bling === r.pedido.pedido_bling)
     if (i >= 0) itens.value[i] = r.pedido

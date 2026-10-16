@@ -693,7 +693,7 @@ async def test_extrato_com_transacoes_incompletas_fica_em_erro_e_e_relido(db, ma
     sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
     assert sync.status == "erro" and "incompletas" in sync.erro
     assert (await db.execute(select(ConciliacaoMovimento))).scalars().all() == []
-    assert loja.ultimo_extrato_em is None
+    assert loja.ultimo_extrato_em == AGORA  # a lista leu; o erro fica em `erros` (2ª rodada)
     # próxima rodada: a API devolve tudo → entra inteiro, de uma vez
     cliente.transacoes["2"] = [_tx(20, PEDIDO), _tx_outro()]
     r2 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
@@ -734,7 +734,7 @@ async def test_erro_so_na_api_de_repasses_nao_derruba_os_extratos(db, make_user)
     assert m.raw["_payment_status"] == "SEM_REPASSE" and aguardando_repasse(m)
     sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
     assert (sync.status, sync.linhas) == ("sem_repasse", 1)
-    assert loja.ultimo_extrato_em is None  # rodada com erro: a "última leitura" não avança
+    assert loja.ultimo_extrato_em == AGORA  # 2ª rodada: a lista leu, a "última leitura" avança
     fechados = await fechar_dias_prontos(db, loja)
     assert "2026-10-14" in fechados["abertos"]
     # a API voltou: só o repasse entra; o extrato não é relido

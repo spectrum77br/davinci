@@ -1068,7 +1068,10 @@ async def pendentes_de_aviso(
     """Abertas que precisam de pessoa e nunca foram avisadas, ou cujo último
     aviso/re-aviso já passou de `reaviso_horas` (com a folga `FOLGA_REAVISO`)."""
     agora = _agora(agora)
-    corte = agora - timedelta(hours=max(1, int(robo.reaviso_horas or 24))) + FOLGA_REAVISO
+    horas = max(1, int(robo.reaviso_horas or 24))
+    # 16/10 (2ª rodada): a folga é pro cron diário oscilar uns minutos; robô de 1 h
+    # com folga de 15 min re-avisava a cada 45 min
+    corte = agora - timedelta(hours=horas) + (FOLGA_REAVISO if horas >= 24 else timedelta(0))
     abertas = (
         (
             await session.execute(

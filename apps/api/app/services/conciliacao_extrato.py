@@ -717,12 +717,18 @@ async def apagar_duplicatas_pobres(session: AsyncSession, loja: ConciliacaoLoja)
         if p.data is not None:
             dias_mexidos.add(p.data.astimezone(BRT).date())
         if p.vinculado_por and not c.vinculado_por:
-            if c.pedido_bling is None:
-                c.pedido_bling, c.bling_id = p.pedido_bling, p.bling_id
-            if c.pedido_bling == p.pedido_bling:
+            if p.pedido_bling is None and p.classificacao is None:
+                # a pessoa DESVINCULOU a pobre: a gêmea fica sem dono também (2ª rodada)
+                c.pedido_bling, c.bling_id = None, None
                 c.vinculado_por, c.vinculado_em = p.vinculado_por, p.vinculado_em
-            if c.classificacao is None and p.classificacao:
-                c.classificacao = p.classificacao
+            else:
+                if c.pedido_bling is None:
+                    c.pedido_bling, c.bling_id = p.pedido_bling, p.bling_id
+                if c.pedido_bling == p.pedido_bling:
+                    c.vinculado_por, c.vinculado_em = p.vinculado_por, p.vinculado_em
+                # classificação só quando a gêmea não tem pedido (não pode ter os dois)
+                if c.classificacao is None and p.classificacao and c.pedido_bling is None:
+                    c.classificacao = p.classificacao
         await session.delete(p)
         apagadas.add(p.id)
     if apagadas:

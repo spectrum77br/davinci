@@ -1923,7 +1923,10 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     # onde agir: a linha sem dono (bad) vem antes do estornado (warn)
     assert [a["acao"] for a in corpo["agir"]] == ["extrato", "pedidos"]
     assert corpo["agir"][0]["gravidade"] == "bad" and corpo["agir"][0]["dia"] == "2026-10-13"
-    assert corpo["agir"][1]["filtro"] == {"situacao": "estornado_depois"}
+    assert corpo["agir"][1]["filtro"] == {
+        "situacao": "estornado_depois",
+        "etapa": "pendencia,reaberto",
+    }
     assert corpo["cartoes"]["pendentes"] == 1 and corpo["cartoes"]["dias_fechados"] == 0
     assert corpo["cartoes"]["saldo_bate"] == 1 and corpo["cartoes"]["extrato_atrasado"] == 0
     assert corpo["por_plataforma"]["ml"]["pedidos"] == 2 and corpo["empresa"]["lojas"] == 1
@@ -2283,7 +2286,10 @@ async def test_vigia_conciliacao_registra_o_onde_agir(db, make_user, monkeypatch
     )
     chaves = {o.chave for o in ocorrencias}
     # a chave do extrato leva o dia (16/10): cada dia aberto é uma ocorrência
-    assert chaves == {"jlas2:extrato:dia=2026-10-13", "jlas2:pedidos:situacao=estornado_depois"}
+    assert chaves == {
+        "jlas2:extrato:dia=2026-10-13",
+        "jlas2:pedidos:etapa=pendencia,reaberto,situacao=estornado_depois",
+    }
     extrato = next(o for o in ocorrencias if o.chave == "jlas2:extrato:dia=2026-10-13")
     assert extrato.link == "/conciliacao?loja=jlas2&visao=extrato&dia=2026-10-13"
     assert extrato.conta == "jlas2" and extrato.plataforma == "Mercado Livre"
@@ -2666,16 +2672,6 @@ async def test_onde_agir_ignora_finalizado_e_lista_recebido_a_mais_e_fora_da_loj
     assert ped["estornados"] == 0 and ped["recebido_a_mais"] == 1 and ped["fora_da_loja"] == 1
 
 
-async def _limpar_ouvidoria(db) -> None:
-    # as tabelas da Ouvidoria não estão no `_CLEANUP_TABLES` do conftest: a ocorrência
-    # do teste anterior (mesma chave) faria o vigia contar "persistem" em vez de "novas"
-    from sqlalchemy import text
-
-    for tbl in ("ouvidoria_ocorrencias", "ouvidoria_rodadas"):
-        await db.execute(text(f"DELETE FROM {tbl}"))  # noqa: S608
-    await db.commit()
-
-
 async def test_vigia_conciliacao_segura_dia_antigo_aberto(db, make_user, monkeypatch):
     """O vigia olhava só "ontem": dia mais antigo ainda aberto fechava como "sumiu".
     Agora os dias antigos pendentes do bloco "Dias" viram ocorrência e só fecham quando
@@ -2710,7 +2706,10 @@ async def test_vigia_conciliacao_segura_dia_antigo_aberto(db, make_user, monkeyp
         return {o.chave: o for o in rows}
 
     ab = await abertas()
-    assert set(ab) == {"jlas2:extrato:dia=2026-10-13", "jlas2:pedidos:situacao=estornado_depois"}
+    assert set(ab) == {
+        "jlas2:extrato:dia=2026-10-13",
+        "jlas2:pedidos:etapa=pendencia,reaberto,situacao=estornado_depois",
+    }
     antigo = ab["jlas2:extrato:dia=2026-10-13"]
     assert "dia 13/10 ainda aberto" in antigo.titulo and "1 linha(s) sem dono" in antigo.titulo
     assert antigo.link == "/conciliacao?loja=jlas2&visao=extrato&dia=2026-10-13"
@@ -2721,7 +2720,9 @@ async def test_vigia_conciliacao_segura_dia_antigo_aberto(db, make_user, monkeyp
     movs["pendente"].classificacao = "ajuste"
     await db.commit()
     r = await vigia_conciliacao_run(db)
-    assert r["sumiram"] == 1 and set(await abertas()) == {"jlas2:pedidos:situacao=estornado_depois"}
+    assert r["sumiram"] == 1 and set(await abertas()) == {
+        "jlas2:pedidos:etapa=pendencia,reaberto,situacao=estornado_depois"
+    }
     fechada = (
         await db.execute(
             select(OuvidoriaOcorrencia).where(

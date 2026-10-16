@@ -73,7 +73,7 @@ type Extrato = {
   totais: Totais
   contagem: Record<string, number>
   resolvidos: number
-  fechado: { em: string; por: string } | null
+  fechado: { em: string; por: string; motivo?: string | null } | null
   classificacoes: Array<{ key: string; label: string }>
 }
 type Sugestao = { pedido_bling: string; numeroloja: string | null; data_pedido: string | null; total: number | null; motivo: string }
@@ -271,7 +271,7 @@ onMounted(() => {
       <div class="inline-flex items-center gap-1 rounded-md border bg-card px-1 py-0.5">
         <button type="button" class="rounded px-1 py-0.5 hover:bg-muted" title="dia anterior" @click="dia = somaDias(dia, -1)"><ChevronLeft class="size-3.5" /></button>
         <input v-model="dia" type="date" class="bg-transparent outline-none" />
-        <button type="button" class="rounded px-1 py-0.5 hover:bg-muted" title="dia seguinte" @click="dia = somaDias(dia, 1)"><ChevronRight class="size-3.5" /></button>
+        <button type="button" class="rounded px-1 py-0.5 hover:bg-muted disabled:opacity-40" title="dia seguinte" :disabled="dia >= ontemISO()" @click="dia = somaDias(dia, 1)"><ChevronRight class="size-3.5" /></button>
         <button type="button" class="rounded px-1.5 py-0.5 text-muted-foreground underline" @click="dia = ontemISO()">ontem</button>
       </div>
       <label class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
@@ -290,7 +290,7 @@ onMounted(() => {
       <span v-if="dados" class="text-muted-foreground">{{ movimentosVisiveis.length }} de {{ dados.totais.linhas }} movimentos<template v-if="reservas"> · {{ reservas }} reservas {{ mostrarReservas ? 'à mostra' : 'escondidas' }} (vão e voltam, somam zero) <button type="button" class="underline" @click="mostrarReservas = !mostrarReservas">{{ mostrarReservas ? 'esconder' : 'mostrar' }}</button></template></span>
       <span class="ml-auto inline-flex items-center gap-1.5">
         <template v-if="dados?.fechado">
-          <span class="inline-flex items-center gap-1 rounded bg-slate-200 px-2 py-1 font-bold text-slate-800 dark:bg-slate-700 dark:text-slate-100"><Lock class="size-3.5" /> dia fechado por {{ dados.fechado.por }} em {{ fmtDiaHora(dados.fechado.em) }}</span>
+          <span class="inline-flex items-center gap-1 rounded bg-slate-200 px-2 py-1 font-bold text-slate-800 dark:bg-slate-700 dark:text-slate-100"><Lock class="size-3.5" /> dia fechado por {{ dados.fechado.por }} em {{ fmtDiaHora(dados.fechado.em) }}<template v-if="dados.fechado.motivo"> · motivo: {{ dados.fechado.motivo }}</template></span>
           <button v-if="canEdit" type="button" class="rounded-md border px-2 py-1 font-semibold hover:bg-muted" :disabled="fechando" @click="reabrirDia()"><LockOpen class="mr-1 inline size-3.5" />Reabrir</button>
         </template>
         <button

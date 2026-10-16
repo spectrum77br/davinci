@@ -150,6 +150,7 @@ async def run_me_sync(
     *,
     agora: datetime | None = None,
     max_paginas: int = 40,
+    janela_dias: int = 60,
     ler: Any = None,
 ) -> dict[str, Any]:
     """Lê os envios do Melhor Envio (do mais novo pro mais velho) até passar do início
@@ -187,7 +188,12 @@ async def run_me_sync(
         ).scalars()
     }
     por_marketplace = {p.numeroloja: p for p in pedidos.values() if p.numeroloja}
-    limite = datetime.combine(loja.inicio - timedelta(days=7), datetime.min.time(), tzinfo=BRT)
+    # janela móvel (2ª rodada): ler sempre até inicio − 7 estourava as 40 páginas com o
+    # tempo e o aviso de "cortada" virava permanente; 60 dias cobrem qualquer etiqueta viva
+    piso = max(
+        loja.inicio - timedelta(days=7), datetime.now(BRT).date() - timedelta(days=janela_dias)
+    )
+    limite = datetime.combine(piso, datetime.min.time(), tzinfo=BRT)
     existentes = {
         f.envio_id: f
         for f in (

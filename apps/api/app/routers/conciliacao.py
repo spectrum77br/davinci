@@ -2507,7 +2507,11 @@ async def extrato_do_dia(
         "totais": _totais_do_dia(movs, saldo_ant),
         "contagem": contagem,
         "resolvidos": len(movs) - contagem["pendente"],
-        "fechado": {"em": fechado.fechado_em.isoformat(), "por": fechado.fechado_por}
+        "fechado": {
+            "em": fechado.fechado_em.isoformat(),
+            "por": fechado.fechado_por,
+            "motivo": fechado.fechado_motivo,
+        }
         if fechado and fechado.fechado_em
         else None,
         "classificacoes": [{"key": k, "label": v} for k, v in CLASSIFICACAO_LABELS.items()],
@@ -2702,6 +2706,13 @@ async def marcar_movimento(
     if loja is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "loja_nao_ligada"})
     await _travar_loja(session, m.integration_id)
+    # a linha foi lida antes da trava: a rodada pode ter apagado/trocado (2ª rodada)
+    try:
+        await session.refresh(m)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"code": "movimento_nao_encontrado"}
+        ) from exc
     agora = datetime.now(UTC)
     quem = (getattr(user, "name", None) or user.email or "?")[:120]
     # Dia fechado não se mexe: reabre primeiro (15/10, Vinicius).
@@ -2788,8 +2799,11 @@ async def fechar_dia(
     if dia >= datetime.now(_BRT).date():
         # 16/10 (revisão, aprovado): hoje ainda recebe lançamentos; o botão fechava
         # hoje e até dias futuros
-        raise HTTPException(422, "só dá pra fechar até ontem")
+        raise HTTPException(
+            422, detail={"code": "so_ate_ontem", "mensagem": "só dá pra fechar até ontem"}
+        )
     alvo = await _loja_ou_404(session, loja, escrita=True)
+    await _travar_loja(session, alvo.integration_id)  # fechar × vincular × robô (2ª rodada)
     saldo_ant = await _saldo_anterior(session, alvo, dia)
     movs = await _movimentos_do_dia(session, alvo, dia, saldo_ant)
     pendentes = [m for m in movs if not m.pedido_bling and not m.classificacao]
@@ -2865,6 +2879,7 @@ async def reabrir_dia(
     motivo: str | None = None,
 ) -> dict[str, Any]:
     alvo = await _loja_ou_404(session, loja, escrita=True)
+    await _travar_loja(session, alvo.integration_id)
     row = (
         await session.execute(
             select(ConciliacaoDia).where(
@@ -3219,7 +3234,12 @@ async def _resumo_dos_dias(
                     )
                 ),
                 func.sum(sa_case((mov.raw["_payment_status"].astext.in_(AGUARDANDO), 1), else_=0)),
-                func.sum(sa_case((mov.raw["_payment_status"].astext == "FAILED", 1), else_=0)),
+                func.sum(
+                    sa_case(
+                        (mov.raw["_payment_status"].astext.in_(["FAILED", "SEM_REPASSE"]), 1),
+                        else_=0,
+                    )
+                ),
             )
             .where(mov.origem.in_(ORIGENS_EXTRATO), mov.data >= ini_dt, mov.data < fim_dt)
             .group_by(mov.integration_id, dia_local)
@@ -3409,12 +3429,14 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         sem_movimento = totais["linhas"] == 0
         nao_pagos = [m for m in movs if aguardando_repasse(m)]
         repasse_falhou = any(
-            str((m.raw or {}).get("_payment_status") or "").upper() == "FAILED" for m in nao_pagos
+            str((m.raw or {}).get("_payment_status") or "").upper() in ("FAILED", "SEM_REPASSE")
+            for m in nao_pagos
         )
         # 16/10 (Vinicius): fatura do ML com erro não pode ficar escondida atrás de um
         # "fechado" verde — a loja aparece "fatura não lida" até a leitura passar
         fatura_problema = _fatura_problema(loja, plataforma, agora)
-        if fatura_problema:
+        if fatura_problema and not (fechado and fechado.fechado_em):
+            # dia já fechado continua "fechado" (2ª rodada); o aviso fica em problemas
             dia_status, dia_texto = "fatura_nao_lida", "fatura não lida"
         elif fechado and fechado.fechado_em:
             dia_status, dia_texto = "fechado", f"fechado por {fechado.fechado_por}"
@@ -3607,7 +3629,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "titulo": f"{loja.conta} · {vencidos} venda(s) sem liberação, prazo vencido",
                     "detalhe": "abrir chamado de repasse",
                     "acao": "pedidos",
-                    "filtro": {"situacao": "vencido"},
+                    "filtro": {"situacao": "vencido", "etapa": "pendencia,reaberto"},
                 }
             )
         if sem_frete:
@@ -3621,7 +3643,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     ),
                     "detalhe": "o Melhor Envio ainda não trouxe o envio (ou o token está fora)",
                     "acao": "pedidos",
-                    "filtro": {"situacao": "falta_frete"},
+                    "filtro": {"situacao": "falta_frete", "etapa": "pendencia,reaberto"},
                 }
             )
         if a_menos:
@@ -3632,7 +3654,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "titulo": f"{loja.conta} · {a_menos} recebido(s) a menos",
                     "detalhe": "conferir o motivo e finalizar com motivo, ou abrir chamado",
                     "acao": "pedidos",
-                    "filtro": {"situacao": "recebido_a_menos"},
+                    "filtro": {"situacao": "recebido_a_menos", "etapa": "pendencia,reaberto"},
                 }
             )
         if estornados:
@@ -3643,7 +3665,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "titulo": f"{loja.conta} · {estornados} estornado(s) depois de liberar",
                     "detalhe": "mediação, estorno ou chargeback depois do dinheiro entrar",
                     "acao": "pedidos",
-                    "filtro": {"situacao": "estornado_depois"},
+                    "filtro": {"situacao": "estornado_depois", "etapa": "pendencia,reaberto"},
                 }
             )
         # 16/10 (revisão): "recebido a mais", "venda não lida com dinheiro" e "saiu da
@@ -3656,7 +3678,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "titulo": f"{loja.conta} · {a_mais} recebido(s) a mais",
                     "detalhe": "entrou mais que o previsto: conferir a venda, finalizar com motivo",
                     "acao": "pedidos",
-                    "filtro": {"situacao": "recebido_a_mais"},
+                    "filtro": {"situacao": "recebido_a_mais", "etapa": "pendencia,reaberto"},
                 }
             )
         if sem_venda:
@@ -3667,7 +3689,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "titulo": f"{loja.conta} · {sem_venda} venda(s) não lida(s) com dinheiro",
                     "detalhe": "entrou dinheiro, mas a Margem ainda não leu a venda",
                     "acao": "pedidos",
-                    "filtro": {"situacao": "sem_venda"},
+                    "filtro": {"situacao": "sem_venda", "etapa": "pendencia,reaberto"},
                 }
             )
         if fora_da_loja:
@@ -3678,7 +3700,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "titulo": f"{loja.conta} · {fora_da_loja} pedido(s) que saíram da loja",
                     "detalhe": "apagado ou mudou de loja no Bling: finalizar ou religar as linhas",
                     "acao": "pedidos",
-                    "filtro": {"situacao": "fora_da_loja"},
+                    "filtro": {"situacao": "fora_da_loja", "etapa": "pendencia,reaberto"},
                 }
             )
         if dia_status == "pronto":

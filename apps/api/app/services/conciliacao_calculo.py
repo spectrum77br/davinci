@@ -41,6 +41,7 @@ from app.models import (
     SituacaoBling,
 )
 from app.models.conciliacao import ETAPA_PELO_ROBO, ORIGEM_EXTRATO, ORIGEM_FATURA, ORIGENS_EXTRATO
+from app.services.conciliacao_dias import reabrir_dias
 from app.services.conciliacao_extrato import (
     TIPOS_RESERVA,
     apagar_duplicatas_pobres,
@@ -372,6 +373,7 @@ def situacao_do_pedido(
     plataforma: str | None = None,
     entregue_em: datetime | None = None,
     bling_situacao: str | None = None,
+    sem_margem: bool = False,
 ) -> dict[str, Any]:
     """A parte pura do recálculo: devolve os números do extrato, a situação e o motivo.
     `liquido_previsto` substitui o líquido da venda da Margem (Amazon por arquivo, 16/10:
@@ -445,7 +447,7 @@ def situacao_do_pedido(
         # "aguardando" porque a venda da Margem não estava "vazia".
         situacao = "cancelado"
         motivo = f"{bling_situacao or 'cancelado'} no Bling, nada entrou"
-    elif (venda is None or venda_vazia) and not dinheiro and not presas:
+    elif (venda is None or venda_vazia) and not dinheiro and not presas and not sem_margem:
         situacao = "sem_venda"
         motivo = (
             "a plataforma ainda não calculou a venda (pedido novo ou cancelado)"
@@ -485,6 +487,8 @@ def situacao_do_pedido(
             situacao = "aguardando"
             estimada = " (estimativa)" if previsao_estimada else ""
             motivo = f"libera em {previsao.astimezone(BRT):%d/%m}{estimada}" if previsao else None
+            if sem_margem and venda is None and not dinheiro and not presas:
+                motivo = "sem lançamento no arquivo da Amazon ainda"
     else:
         assert recebido is not None and liberado_valor is not None
         if cancelada and abs(recebido) <= TOLERANCIA:
@@ -655,6 +659,7 @@ def etapa_do_pedido(
     situacao: str,
     ultimo_movimento_em: datetime | None,
     zero_a_zero: bool = True,
+    com_dinheiro: bool = False,
 ) -> dict[str, Any]:
     """Transições da etapa. Respeita o que a pessoa marcou (finalizado à mão, reaberto
     à mão). `zero_a_zero`: cancelado em que nada ficou na conta (16/10, revisão,
@@ -707,8 +712,10 @@ def etapa_do_pedido(
         # não refinaliza nem apaga o motivo dela
         out["etapa"] = "reaberto"
         return out
-    if situacao in ("aguardando", "sem_venda"):
+    if situacao == "aguardando" or (situacao == "sem_venda" and not com_dinheiro):
         nova = "aguardando"
+    elif situacao == "sem_venda":
+        nova = "pendencia"  # entrou dinheiro sem venda lida: alguém olha (2ª rodada)
     elif fechou:
         nova = "conciliado"
     else:
@@ -966,6 +973,9 @@ async def recalcular_loja(
             liquido_previsto=liquido_previsto,
             plataforma=plataforma_loja,
             entregue_em=entregue_por_numero.get(numero),
+            # loja por arquivo (KFA): a Margem não lê a venda — sem linha no CSV é
+            # "aguardando" (e vence pelo prazo), não "venda não lida" pra sempre
+            sem_margem=loja.modo_extrato == "upload",
         )
         if plataforma_loja == "amazon" and calc["situacao"] == "bateu":
             calc["motivo"] = motivo_amazon(extrato)
@@ -989,6 +999,7 @@ async def recalcular_loja(
             situacao=calc["situacao"],
             ultimo_movimento_em=calc["ultimo_movimento_em"],
             zero_a_zero=calc["zero_a_zero"],
+            com_dinheiro=calc["recebido"] is not None,
         )
         reembolso = reembolso_por_numero.get(numero, ZERO)
         # Venda sem valor ainda (Shopee antes de calcular o escrow): não grava tarifa/líquido 0,00
@@ -1159,6 +1170,16 @@ async def recalcular_loja(
                 p.etapa_em = agora
                 p.etapa_por = ETAPA_PELO_ROBO
                 p.etapa_motivo = "saiu da loja"
+        soltas = (
+            await session.execute(
+                select(ConciliacaoMovimento.data).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.pedido_bling.in_(fora),
+                    ConciliacaoMovimento.vinculado_por.is_(None),
+                )
+            )
+        ).scalars()
+        dias_soltas = {d.astimezone(BRT).date() for d in soltas if d}
         await session.execute(
             update(ConciliacaoMovimento)
             .where(
@@ -1168,6 +1189,8 @@ async def recalcular_loja(
             )
             .values(pedido_bling=None, bling_id=None)
         )
+        # linha que perdeu o dono num dia fechado: o dia reabre (2ª rodada)
+        await reabrir_dias(session, loja, dias_soltas, motivo="pedido saiu da loja: linha sem dono")
         contagem["fora_da_loja"] = len(fora)
 
     # 4. Movimento de pedido anterior ao início: classifica, não cobra.

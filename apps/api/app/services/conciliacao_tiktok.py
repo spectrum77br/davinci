@@ -623,10 +623,10 @@ async def run_tiktok_sync(
         if marca != "PAID":
             resumo[contadores[marca]] += 1
         resumo["extratos"].append({"extrato": sid, "linhas": row.linhas, "inseridos": inseridos})
-    # 16/10, revisão: "última leitura" só avança quando a rodada inteira funcionou —
-    # antes avançava mesmo com as transações falhando, e o atraso ficava escondido
-    if not resumo["erros"]:
-        loja.ultimo_extrato_em = agora
+    # 16/10 (2ª rodada): a lista de extratos foi lida — "última leitura" avança; erro de
+    # um extrato (soma que não bate, repasses fora) fica em `erros` → ultimo_erro, e não
+    # congela a loja em "extrato não lido" nem a reenfileira a cada 10 min
+    loja.ultimo_extrato_em = agora
     await _classificar_zeradas_antigas(session, loja)
     await session.flush()
     return resumo
@@ -717,7 +717,11 @@ async def reler_financeiro_liquidados(
                 or_(fin.status != "posted", fin.fetched_at < mov.data),
             )
             # estimado (status ≠ posted) primeiro, depois do mais antigo pro mais novo
-            .order_by((fin.status == "posted").asc(), mov.data.asc())
+            # 16/10 (2ª rodada): o que foi relido há mais tempo vai primeiro — senão um
+            # pedido sempre em error/estimated ocupava a frente da fila pra sempre
+            .order_by(
+                (fin.status == "posted").asc(), fin.fetched_at.asc().nullsfirst(), mov.data.asc()
+            )
             .limit(maximo)
         )
     ).all()
