@@ -20,11 +20,17 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoSync, Integration
+from app.models import (
+    ConciliacaoDia,
+    ConciliacaoLoja,
+    ConciliacaoMovimento,
+    ConciliacaoSync,
+    Integration,
+)
 from app.models.conciliacao import ORIGEM_CARTEIRA
 from app.services.conciliacao_extrato import bling_store_ids_da_loja, resolver_pedidos_bling
 
@@ -183,6 +189,7 @@ async def inserir_movimentos(
 
 
 AJUSTE_SALDO_MAXIMO = Decimal("10")
+AJUSTE_SALDO_MAX_PULOS = 20
 PREFIXO_AJUSTE_SALDO = "ajuste-saldo-"
 
 
@@ -195,7 +202,7 @@ async def ajustar_saldo_do_dia(
     Shopee" classificada como ajuste, no ponto em que o saldo pulou, e o dia fecha.
     Diferença maior fica como está ("saldo não bate" pra uma pessoa olhar). Recalcula
     do zero a cada leitura do dia; ajuste que uma pessoa mexeu fica."""
-    from app.routers.conciliacao import _ordena_dia
+    from app.routers.conciliacao import _ordena_dia, _saldo_anterior
 
     mov = ConciliacaoMovimento
     inicio = datetime.combine(dia, datetime.min.time(), tzinfo=BRT)
@@ -208,19 +215,9 @@ async def ajustar_saldo_do_dia(
             mov.vinculado_por.is_(None),
         )
     )
-    anterior = (
-        await session.execute(
-            select(mov.saldo_apos)
-            .where(
-                mov.integration_id == loja.integration_id,
-                mov.origem == ORIGEM_CARTEIRA,
-                mov.data < inicio,
-                mov.saldo_apos.isnot(None),
-            )
-            .order_by(mov.data.desc(), func.length(mov.id_externo).desc(), mov.id_externo.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
+    # saldo antes do dia pela mesma regra da tela (resolve empate no mesmo segundo,
+    # inclusive ajuste + linha real na mesma hora)
+    anterior = await _saldo_anterior(session, loja, dia)
     linhas = (
         (
             await session.execute(
@@ -247,7 +244,7 @@ async def ajustar_saldo_do_dia(
     if not pulos:
         return []
     total = sum((abs(d) for _m, d in pulos), Decimal("0"))
-    if total > AJUSTE_SALDO_MAXIMO or len(pulos) > 3:
+    if total > AJUSTE_SALDO_MAXIMO or len(pulos) > AJUSTE_SALDO_MAX_PULOS:
         logger.warning(
             "conciliacao_carteira_saldo_pulou",
             loja=loja.conta,
@@ -264,7 +261,11 @@ async def ajustar_saldo_do_dia(
                 id_externo=f"{PREFIXO_AJUSTE_SALDO}{dia.isoformat()}-{i}",
                 data=m.data,
                 tipo="ajuste_shopee",
-                descricao="Diferença de saldo não detalhada pela Shopee",
+                # 16/10: quase sempre −0,49 na "Renda do pedido" (tarifa que a carteira
+                # não lista); o texto diz em que linha o saldo pulou
+                descricao=(
+                    f"Diferença de saldo não detalhada pela Shopee ({(m.descricao or '')[:60]})"
+                ),
                 sub_tipo="AJUSTE_SALDO",
                 credito=d if d > 0 else Decimal("0"),
                 debito=-d if d < 0 else Decimal("0"),
@@ -360,6 +361,30 @@ async def run_carteira_sync(
                 "ajustes_de_saldo": [str(d) for d in pulos],
             }
         )
+    # Dias abertos desde o início que foram lidos ANTES da regra do ajuste (16/10:
+    # ATV −1,47 em 05/10, Inova −0,49 em cinco dias…): a varredura refaz o ajuste
+    # de cada um. Dia fechado não é mexido.
+    fechados = set(
+        (
+            await session.execute(
+                select(ConciliacaoDia.dia).where(
+                    ConciliacaoDia.integration_id == loja.integration_id,
+                    ConciliacaoDia.fechado_em.isnot(None),
+                )
+            )
+        ).scalars()
+    )
+    lidos_agora = {date.fromisoformat(x["dia"]) for x in resumo["dias"]}
+    antigos: dict[str, list[str]] = {}
+    d = loja.inicio
+    while d <= ontem:
+        if d not in fechados and d not in lidos_agora:
+            pulos = await ajustar_saldo_do_dia(session, loja, d)
+            if pulos:
+                antigos[d.isoformat()] = [str(x) for x in pulos]
+        d += timedelta(days=1)
+    if antigos:
+        resumo["ajustes_antigos"] = antigos
     await session.flush()
     return resumo
 

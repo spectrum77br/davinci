@@ -617,3 +617,13 @@ OK dele ("Ok que pode fazer"), depois de conferir que o extrato é fixo e só a 
 - Prova dos nove da TikTok: cada extrato é um caixa próprio (`_saldo_anterior` = 0 na TikTok). Extrato não pago termina o dia no total liquidado; o repasse zera quando entrar.
 - Resumo: estado novo do dia "liquidado, aguardando o repasse" (azul) e "repasse falhou" (âmbar); não entram no Onde agir; "Dinheiro nas plataformas" mostra "aguardando repasse R$ X" (`a_receber`). O robô não fecha dia com extrato não pago (`fechar_dias_prontos`) e o "Fechar o dia" à mão recusa com 409 `aguardando_repasse`.
 - Se a TikTok algum dia alterar um extrato já gerado, o dia acusa "saldo não bate" — é o sinal certo.
+
+## 30. Conferência minuciosa do painel (16/10, ~09:40 BRT) — pedido do Vinicius
+
+Varredura de todas as lojas × dias 01→15/10 pelo `/resumo?dia=` (dia aberto, saldo diferente ou extrato não lido):
+
+- **"Sem movimento" no ML em 15/10** (barbosa, counhago, dream2, eron, jlas, kfa, kia (ml)…): as janelas 14→15/10 foram lidas (2 a 15 linhas = cabeçalho + poucas linhas, todas de 14/10). Lojas de pouco volume têm dias sem liberação (12/10 foi feriado; kia (ml) libera em lotes: 80 linhas em 09/10, 0 em 11–13/10). Não é falha de leitura; a folga de um dia relê o 15/10 amanhã.
+- **Shopee −0,49 repetido** (ATV −1,47 em 05/10 = 3 rendas; Inova em 5 dias; mega, Poofy, Minas, Barbosa, Victor Mei): o saldo sobe 0,49 a menos que o `amount` em algumas "Renda do pedido" — tarifa que a carteira não lista. A regra do ajuste (seção 28) só valia pro dia relido; agora `run_carteira_sync` varre todos os dias abertos desde o início e refaz o ajuste (dia fechado não é mexido); o texto do ajuste diz em que linha o saldo pulou; limites: R$ 10 e 20 pulos por dia.
+- **kia (ml) 14/10 "saldo não bate +7,04"**: em 10/10, +7,04 / −7,04 / +7,04 no mesmo segundo (13:45:48); `_saldo_anterior` ordenava o grupo pela cadeia e podia terminar em −7,04. Agora o saldo depois de um segundo empatado = saldo antes dele + soma do grupo (a mesma regra vale pro ajuste da Shopee, que agora usa `_saldo_anterior`).
+- **mini (ml) 14/10, 1 linha sem dono**: crédito "cashback" de 427,00 do Mercado Livre (referência 1410135313). Não há regra: alguém precisa saber o que é e classificar.
+- **lucas mei**: segue "extrato não lido" todos os dias até reconectar o Mercado Livre.

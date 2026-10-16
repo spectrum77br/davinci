@@ -2087,10 +2087,25 @@ async def _saldo_anterior(
     )
     if not ultimo:
         return None
-    # as últimas linhas podem cair no mesmo segundo: ordena esse grupo pelo encadeamento
-    ultimo_dia = ultimo[0].data.astimezone(_BRT).date()
-    do_dia = [m for m in ultimo if m.data.astimezone(_BRT).date() == ultimo_dia]
-    ordenado = _ordena_dia(do_dia)
+    # As últimas linhas podem cair no mesmo segundo e aí a ordem é ambígua (kia (ml)
+    # 10/10: +7,04 / −7,04 / +7,04 às 13:45:48 — a cadeia escolhia a que terminava em
+    # −7,04 e o dia 14/10 ficava "saldo não bate +7,04"). O saldo depois desse segundo
+    # é o saldo ANTES dele + a soma do grupo, não importa a ordem interna.
+    ts = ultimo[0].data
+    grupo = [m for m in ultimo if m.data == ts]
+    if len(grupo) == 1:
+        return grupo[0].saldo_apos
+    antes = [m for m in ultimo if m.data < ts]
+    if antes:
+        ts2 = antes[0].data
+        g2 = [m for m in antes if m.data == ts2]
+        base = g2[0].saldo_apos if len(g2) == 1 else (_ordena_dia(g2) or [g2[0]])[-1].saldo_apos
+        if base is not None:
+            return Decimal(base) + sum(
+                ((m.credito or Decimal("0")) - (m.debito or Decimal("0")) for m in grupo),
+                Decimal("0"),
+            )
+    ordenado = _ordena_dia(grupo)
     return ordenado[-1].saldo_apos if ordenado else None
 
 

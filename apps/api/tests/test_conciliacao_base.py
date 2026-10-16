@@ -1006,6 +1006,26 @@ async def test_recalcular_loja_herda_o_pedido_da_irma_e_classifica_reserva_solta
             assert m.pedido_bling == "301201" and m.classificacao is None
 
 
+async def test_saldo_anterior_resolve_o_empate_do_ultimo_segundo(db, make_user):
+    """kia (ml) 10/10: +7,04 / −7,04 / +7,04 no mesmo segundo; o saldo depois do grupo é o
+    de antes + a soma, não o da linha que a cadeia escolher por último."""
+    from app.routers.conciliacao import _saldo_anterior
+
+    loja, _integ = await _loja(db, make_user)
+    d = lambda dia, h, mi=0, s=0: datetime(2026, 10, dia, h, mi, s, tzinfo=UTC)  # noqa: E731
+    antes = _mov(loja, "venda_liberada", d(10, 12), credito="100")
+    antes.saldo_apos = Decimal("-7.04")
+    a = _mov(loja, "venda_liberada", d(10, 13, 45, 48), credito="7.04")
+    a.saldo_apos = Decimal("0")
+    b = _mov(loja, "reserva_disputa", d(10, 13, 45, 48), debito="7.04")
+    b.saldo_apos = Decimal("-7.04")
+    c = _mov(loja, "reserva_disputa", d(10, 13, 45, 48), credito="7.04")
+    c.saldo_apos = Decimal("0")
+    db.add_all([antes, a, b, c])
+    await db.commit()
+    assert await _saldo_anterior(db, loja, date(2026, 10, 11)) == Decimal("0")
+
+
 async def test_status_lista_a_loja_ligada(db, make_user, auth_as, client):
     loja, _integ = await _loja(db, make_user)
     db.add(_mov(loja, "saque", datetime(2026, 10, 1, tzinfo=UTC), debito="9147.00"))

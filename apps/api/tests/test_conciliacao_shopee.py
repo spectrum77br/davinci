@@ -237,6 +237,59 @@ async def test_run_carteira_sync_grava_ajuste_quando_o_saldo_pula_pouco(db, make
     assert len([m for m in movs if m.tipo == "ajuste_shopee"]) == 1 and r2["inseridos"] == 0
 
 
+async def test_run_carteira_sync_varre_os_dias_antigos_abertos(db, make_user):
+    """Dia lido antes da regra do ajuste (pulo de −0,49 que ficou): a rodada seguinte
+    refaz o ajuste; dia fechado não é mexido; ajuste + linha real na mesma hora não
+    confundem o saldo do dia seguinte."""
+    from app.models import ConciliacaoDia
+
+    loja = await _loja_shopee(db, make_user)
+    d10, d11, d12, d13 = (
+        date(2026, 10, 10),
+        date(2026, 10, 11),
+        date(2026, 10, 12),
+        date(2026, 10, 13),
+    )
+    cliente = _ShopeeFalsa(
+        [
+            _tx(10, "ESCROW_VERIFIED_ADD", 100.0, 100.0, _epoch(d10, 9), "261006VX383P9J"),
+            _tx(11, "ESCROW_VERIFIED_ADD", 50.0, 149.51, _epoch(d11, 10), "2610095P6JURXJ"),
+            _tx(12, "ESCROW_VERIFIED_ADD", 10.0, 159.02, _epoch(d12, 10), "2610095P6JURXK"),
+            _tx(13, "ESCROW_VERIFIED_ADD", 5.0, 164.02, _epoch(d13, 10), "2610095P6JURXL"),
+        ]
+    )
+    r1 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 14))
+    assert {x["dia"]: x["ajustes_de_saldo"] for x in r1["dias"]} == {
+        "2026-10-10": [],
+        "2026-10-11": ["-0.49"],
+        "2026-10-12": ["-0.49"],
+        "2026-10-13": [],
+    }
+    # como se a regra não existisse: apaga os ajustes; e alguém fechou o dia 12
+    for m in (await db.execute(select(ConciliacaoMovimento))).scalars().all():
+        if m.tipo == "ajuste_shopee":
+            await db.delete(m)
+    db.add(
+        ConciliacaoDia(
+            integration_id=loja.integration_id,
+            dia=d12,
+            fechado_em=datetime(2026, 10, 14, 9, tzinfo=UTC),
+            fechado_por="cairo",
+        )
+    )
+    await db.commit()
+    # rodada seguinte: relê só o 13; a varredura refaz o ajuste do 11 e deixa o 12 fechado
+    r2 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 14))
+    assert [x["dia"] for x in r2["dias"]] == ["2026-10-13"]
+    assert r2["ajustes_antigos"] == {"2026-10-11": ["-0.49"]}
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    ajustes = sorted(m.id_externo for m in movs if m.tipo == "ajuste_shopee")
+    assert ajustes == ["ajuste-saldo-2026-10-11-1"]
+    a = next(m for m in movs if m.tipo == "ajuste_shopee")
+    assert a.descricao.startswith("Diferença de saldo não detalhada pela Shopee (")
+    assert a.saldo_apos == Decimal("99.51")
+
+
 async def test_extrato_do_dia_shopee_fecha_a_conta(db, make_user, auth_as, client):
     loja = await _loja_shopee(db, make_user)
     d10 = date(2026, 10, 10)
