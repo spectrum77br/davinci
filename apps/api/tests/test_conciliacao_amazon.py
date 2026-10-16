@@ -12,6 +12,7 @@ from app.models import (
     BlingOrder,
     ConciliacaoLoja,
     ConciliacaoMovimento,
+    ConciliacaoPedido,
     ConciliacaoSync,
     Integration,
     StoreInfo,
@@ -697,21 +698,41 @@ async def test_cancelado_no_bling_com_estorno_integral_e_cancelado(db, make_user
     auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
     r = await client.get("/api/conciliacao/pedidos/301943", params={"loja": "kia"})
     ped = r.json()["pedido"]
-    assert ped["situacao"] == "cancelado" and ped["etapa"] == "finalizado"
+    # 16/10 (revisão, aprovado): cancelado com dinheiro ≠ 0 (a Amazon ficou com 10,00)
+    # não é "zero a zero" — fica pendência pra alguém olhar, em vez de finalizar sozinho
+    assert ped["situacao"] == "cancelado" and ped["etapa"] == "pendencia"
     assert ped["custo"] == 0 and ped["recebido"] == -10 and ped["sobrou"] == -10
     assert "ficou com 10.00" in ped["motivo"] and ped["venda_liquido"] == 749.53
     por = {x["chave"]: x for x in r.json()["comparativo"]["linhas"]}
     assert por["liquido"]["previsto"] == 749.53 and por["liquido"]["real"] == 749.53
     assert por["depois"]["real"] == -759.53 and por["ficou"]["real"] == -10
-    # o Bling deixou de ser Cancelado (Aguardando Devolução): sai de cancelado e o robô
-    # reabre o que ele mesmo tinha finalizado
+    # o Bling deixou de ser Cancelado (Aguardando Devolução): sai de cancelado e continua
+    # pendência (nunca foi finalizado, porque sobrou −10,00)
     pedido.situacao = "Aguardando Devolução"
     await db.commit()
     await recalcular_loja(db, loja, agora=AGORA)
     await db.commit()
     r = await client.get("/api/conciliacao/pedidos/301943", params={"loja": "kia"})
     ped = r.json()["pedido"]
-    assert ped["situacao"] == "estornado_depois" and ped["etapa"] == "reaberto"
+    assert ped["situacao"] == "estornado_depois" and ped["etapa"] == "pendencia"
+    # quando o robô tinha finalizado como "venda desfeita" (zero a zero) e o pedido
+    # deixa de ser cancelado, aí sim volta como reaberto
+    atual = (
+        await db.execute(
+            select(ConciliacaoPedido).where(ConciliacaoPedido.pedido_bling == "301943")
+        )
+    ).scalar_one()
+    atual.etapa, atual.etapa_por, atual.etapa_motivo = (
+        "finalizado",
+        "robô",
+        "venda desfeita, zero a zero",
+    )
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    r = await client.get("/api/conciliacao/pedidos/301943", params={"loja": "kia"})
+    ped = r.json()["pedido"]
+    assert ped["etapa"] == "reaberto"
     assert ped["etapa_motivo"] == "deixou de ser cancelado (estornado_depois)"
 
 

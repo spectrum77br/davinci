@@ -26,7 +26,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import delete, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -35,6 +35,7 @@ from app.models import (
     ConciliacaoMovimento,
     ConciliacaoPedido,
     Integration,
+    Logistica,
     MarketplaceOrderFinancial,
     Refund,
     SituacaoBling,
@@ -57,6 +58,14 @@ TOLERANCIA = Decimal("0.05")
 DIAS_FINALIZAR = 7
 DIAS_VENCIDO_SEM_PREVISAO = 45
 FOLGA_PREVISAO = timedelta(days=2)
+# Shopee e TikTok não dizem quando liberam (16/10, revisão): 2.230 pedidos "aguardando"
+# sem data e o "vencido" nunca disparava. Previsão = entrega confirmada (Logística) +
+# N dias; sem entrega lida, data do pedido + M dias. (plataforma: (N, M) — ajustar aqui.)
+PRAZO_LIBERACAO: dict[str, tuple[int, int]] = {"shopee": (7, 20), "tiktok": (7, 20)}
+# Situação do Bling que quer dizer "não vai receber": cancelado ou excluído (16/10,
+# revisão: 13 pedidos excluídos no Bling ficavam "aguardando" pra sempre)
+BLING_DESFEITO = ("cancelado", "excluido", "excluído")
+MARGEM_MAXIMA = Decimal("999999")  # Numeric(10,4) da coluna margem
 ZERO = Decimal("0.00")
 
 
@@ -359,10 +368,17 @@ def situacao_do_pedido(
     fatura: dict[str, Decimal],
     bling_cancelado: bool = False,
     liquido_previsto: Decimal | None = None,
+    plataforma: str | None = None,
+    entregue_em: datetime | None = None,
+    bling_situacao: str | None = None,
 ) -> dict[str, Any]:
     """A parte pura do recálculo: devolve os números do extrato, a situação e o motivo.
     `liquido_previsto` substitui o líquido da venda da Margem (Amazon por arquivo, 16/10:
-    a venda vem das próprias transações do CSV)."""
+    a venda vem das próprias transações do CSV; pack do ML com vários pedidos idem)."""
+    previsao_estimada = False
+    if previsao is None and plataforma in PRAZO_LIBERACAO:
+        previsao = _previsao_por_prazo(plataforma, data_pedido, entregue_em)
+        previsao_estimada = previsao is not None
     dinheiro = [m for m in movs_extrato if m.tipo not in TIPOS_RESERVA]
     liberacoes = [m for m in dinheiro if m.tipo == "venda_liberada"]
     liberado_valor = _soma([m.credito for m in liberacoes]) if liberacoes else None
@@ -406,11 +422,13 @@ def situacao_do_pedido(
         and not (_d(venda.fee_amount) or ZERO)
         and (venda_valor or ZERO) > ZERO
     )
-    if bling_cancelado and not dinheiro and not liberacoes and (venda is None or venda_vazia):
+    if bling_cancelado and not dinheiro and not liberacoes:
         # Shopee (15/10): venda cancelada não ganha escrow, então a plataforma nunca
-        # "lê" a venda — o sinal é o Bling, e nada entrou. Zero a zero.
+        # "lê" a venda — o sinal é o Bling, e nada entrou. Zero a zero. 16/10 (revisão):
+        # vale pra toda plataforma e pra "excluído" — kia/poofy (Amazon) ficavam
+        # "aguardando" porque a venda da Margem não estava "vazia".
         situacao = "cancelado"
-        motivo = "cancelado no Bling, nada entrou"
+        motivo = f"{bling_situacao or 'cancelado'} no Bling, nada entrou"
     elif (venda is None or venda_vazia) and not dinheiro:
         situacao = "sem_venda"
         motivo = (
@@ -419,18 +437,29 @@ def situacao_do_pedido(
             else "venda ainda não lida pela Margem"
         )
     elif not liberacoes:
-        if cancelada:
+        if dinheiro and recebido is not None and abs(recebido) > TOLERANCIA:
+            # 16/10 (revisão, aprovado): nada liberou e mesmo assim saiu (ou entrou)
+            # dinheiro — devolvido antes de liquidar na TikTok, frete de devolução… Não é
+            # "aguardando" (ia pro A liberar negativo) nem "zero a zero".
+            situacao = "estornado_depois" if recebido < ZERO else "recebido_a_mais"
+            verbo = "saiu" if recebido < ZERO else "entrou"
+            motivo = f"nada liberou e {verbo} {abs(recebido):.2f}" + (
+                " (venda desfeita)" if cancelada or bling_cancelado else ""
+            )
+        elif cancelada:
             situacao = "cancelado"
             motivo = "venda desfeita no ML"
         elif previsao and agora > previsao + FOLGA_PREVISAO:
             situacao = "vencido"
-            motivo = f"previsão de liberação era {previsao.astimezone(BRT):%d/%m}"
+            estimada = " (estimada)" if previsao_estimada else ""
+            motivo = f"previsão de liberação era {previsao.astimezone(BRT):%d/%m}{estimada}"
         elif data_pedido and agora - data_pedido > timedelta(days=DIAS_VENCIDO_SEM_PREVISAO):
             situacao = "vencido"
             motivo = f"vendido há mais de {DIAS_VENCIDO_SEM_PREVISAO} dias sem liberação"
         else:
             situacao = "aguardando"
-            motivo = f"libera em {previsao.astimezone(BRT):%d/%m}" if previsao else None
+            estimada = " (estimativa)" if previsao_estimada else ""
+            motivo = f"libera em {previsao.astimezone(BRT):%d/%m}{estimada}" if previsao else None
     else:
         assert recebido is not None and liberado_valor is not None
         if cancelada and abs(recebido) <= TOLERANCIA:
@@ -485,6 +514,45 @@ def situacao_do_pedido(
         "dif_previsto_recebido": dif,
         "situacao": situacao,
         "motivo": motivo,
+        # cancelado de verdade (nada ficou na conta): só esse finaliza sozinho
+        "zero_a_zero": situacao == "cancelado"
+        and (recebido is None or abs(recebido) <= TOLERANCIA),
+    }
+
+
+def _previsao_por_prazo(
+    plataforma: str, data_pedido: datetime | None, entregue_em: datetime | None
+) -> datetime | None:
+    apos_entrega, apos_pedido = PRAZO_LIBERACAO[plataforma]
+    if entregue_em is not None:
+        return entregue_em + timedelta(days=apos_entrega)
+    if data_pedido is not None:
+        return data_pedido + timedelta(days=apos_pedido)
+    return None
+
+
+def conta_ml_do_pack(extrato: list[ConciliacaoMovimento]) -> dict[str, Any] | None:
+    """Carrinho do ML com vários pedidos (16/10, revisão: Poofy 301748, 12 pagamentos de
+    49,00 e a venda da Margem com um item só → "recebido a mais" falso). O previsto vem
+    das próprias linhas da conta (Vinicius: "o que manda é a conta, o Bling nunca bate"):
+    bruto, tarifa, frete, parcelamento, cupom e líquido somados. None quando o pack tem
+    um pedido só (aí a venda da Margem serve)."""
+    libs = [m for m in extrato if m.tipo == "venda_liberada" and m.pack_id]
+    pedidos = {m.pedido_marketplace for m in libs if m.pedido_marketplace}
+    if len(pedidos) < 2:
+        return None
+
+    def soma(campo: str) -> Decimal:
+        return _soma([getattr(m, campo) for m in libs if getattr(m, campo) is not None])
+
+    return {
+        "pedidos": len(pedidos),
+        "valor": soma("bruto"),
+        "tarifa": soma("tarifa").copy_abs(),
+        "frete": soma("frete").copy_abs(),
+        "parcelamento": soma("parcelamento").copy_abs(),
+        "cupom": soma("cupom").copy_abs(),
+        "liquido": _soma([m.credito for m in libs]) - _soma([m.debito for m in libs]),
     }
 
 
@@ -542,14 +610,21 @@ def etapa_do_pedido(
     atual: ConciliacaoPedido | None,
     situacao: str,
     ultimo_movimento_em: datetime | None,
+    zero_a_zero: bool = True,
 ) -> dict[str, Any]:
-    """Transições da etapa. Respeita o que a pessoa marcou (finalizado à mão)."""
+    """Transições da etapa. Respeita o que a pessoa marcou (finalizado à mão, reaberto
+    à mão). `zero_a_zero`: cancelado em que nada ficou na conta (16/10, revisão,
+    aprovado: cancelado com dinheiro ≠ 0 é pendência, não "venda desfeita")."""
     etapa_anterior = atual.etapa if atual else None
     bateu_em = atual.bateu_em if atual else None
     out: dict[str, Any] = {"bateu_em": bateu_em}
-    fechou = situacao in ("bateu", "cancelado")
+    fechou = situacao == "bateu" or (situacao == "cancelado" and zero_a_zero)
     if fechou and not bateu_em:
         out["bateu_em"] = agora
+    if not fechou and bateu_em:
+        # 16/10 (revisão): deixou de bater (reserva, estorno) — a marca sai, senão a
+        # finalização sozinha contava os 7 dias de um "bateu" que não existe mais
+        out["bateu_em"] = None
     if etapa_anterior == "finalizado":
         # o robô finalizou como "venda desfeita" e o pedido deixou de ser cancelado
         # (mudou o status no Bling — 302142, 15/10): volta pra fila como reaberto
@@ -575,6 +650,11 @@ def etapa_do_pedido(
             )
         else:
             out["etapa"] = "finalizado"
+        return out
+    if etapa_anterior == "reaberto" and atual is not None and atual.etapa_por != ETAPA_PELO_ROBO:
+        # 16/10 (revisão, aprovado): o que a pessoa reabriu só a pessoa fecha — o robô
+        # não refinaliza nem apaga o motivo dela
+        out["etapa"] = "reaberto"
         return out
     if situacao in ("aguardando", "sem_venda"):
         nova = "aguardando"
@@ -680,6 +760,24 @@ async def recalcular_loja(
     numero_por_numeroloja = {
         str(r.numeroloja): str(r.numero) for r in rows if r.numeroloja and r.numero
     }
+    # Entrega confirmada pela Logística (17track/EasyShip): base da previsão de liberação
+    # da Shopee e da TikTok (16/10, revisão)
+    entregue_por_numero: dict[str, datetime] = {}
+    if plataforma_loja in PRAZO_LIBERACAO and numeros:
+        entregue_por_numero = {
+            str(n): e
+            for n, e in (
+                await session.execute(
+                    select(Logistica.pedido_bling, func.max(Logistica.entregue_em))
+                    .where(
+                        Logistica.pedido_bling.in_(numeros),
+                        Logistica.entregue_em.is_not(None),
+                    )
+                    .group_by(Logistica.pedido_bling)
+                )
+            ).all()
+            if n and e
+        }
     movs_por_numero: dict[str, list[ConciliacaoMovimento]] = defaultdict(list)
     for m in movs:
         if not m.pedido_bling and (m.vinculado_por or m.classificacao):
@@ -729,7 +827,6 @@ async def recalcular_loja(
     fretes_pagos: dict[str, Decimal] = {}
     canal_por_numero: dict[str, str] = {}
     if plataforma_loja == "amazon":
-        from app.models import Logistica
         from app.services.conciliacao_melhor_envio import fretes_por_pedido
 
         fretes_pagos = await fretes_por_pedido(session, loja)
@@ -795,16 +892,29 @@ async def recalcular_loja(
             if plataforma_loja == "amazon" and conta_amazon(venda) is None
             else None
         )
+        # ML: carrinho com vários pedidos — a venda da Margem tem um item só; o previsto
+        # vem das linhas da conta (16/10, revisão)
+        ml_pack = conta_ml_do_pack(extrato) if plataforma_loja == "ml" else None
+        if amazon_linhas:
+            liquido_previsto = amazon_linhas["liquido"]
+        elif ml_pack:
+            liquido_previsto = ml_pack["liquido"]
+        else:
+            liquido_previsto = None
+        estado_bling = nome_bling.strip().lower()
         calc = situacao_do_pedido(
             agora=agora,
             data_pedido=cab.data,
             bling_total=bling_produtos,
             venda=venda,
             previsao=previsao,
-            bling_cancelado=nome_bling.strip().lower() == "cancelado",
+            bling_cancelado=estado_bling in BLING_DESFEITO,
+            bling_situacao=estado_bling or None,
             movs_extrato=extrato,
             fatura=fatura,
-            liquido_previsto=amazon_linhas["liquido"] if amazon_linhas else None,
+            liquido_previsto=liquido_previsto,
+            plataforma=plataforma_loja,
+            entregue_em=entregue_por_numero.get(numero),
         )
         if plataforma_loja == "amazon" and calc["situacao"] == "bateu":
             calc["motivo"] = motivo_amazon(extrato)
@@ -827,6 +937,7 @@ async def recalcular_loja(
             atual=atual,
             situacao=calc["situacao"],
             ultimo_movimento_em=calc["ultimo_movimento_em"],
+            zero_a_zero=calc["zero_a_zero"],
         )
         reembolso = reembolso_por_numero.get(numero, ZERO)
         # Venda sem valor ainda (Shopee antes de calcular o escrow): não grava tarifa/líquido 0,00
@@ -867,6 +978,16 @@ async def recalcular_loja(
                 "subsidio": ZERO,
                 "cupons": -tiktok["outros_receita"],
             }
+        if ml_pack is not None and calc["situacao"] != "sem_venda":
+            # pack com vários pedidos: a conta inteira do carrinho, como no extrato
+            shopee = {
+                "preco": ml_pack["valor"],
+                "taxas": ml_pack["tarifa"] + ml_pack["parcelamento"],
+                "afiliados": None,
+                "frete_loja": ml_pack["frete"],
+                "subsidio": ZERO,
+                "cupons": ml_pack["cupom"],
+            }
         # Resultado de VERDADE: só com o dinheiro que entrou. Enquanto não libera, sobrou
         # e margem ficam vazios (15/10, Vinicius: "não precisa aparecer previsto nem margem").
         base_resultado = calc["recebido"]
@@ -889,6 +1010,10 @@ async def recalcular_loja(
                 if (sobrou is not None and custo > ZERO)
                 else None
             )
+            if margem is not None and abs(margem) >= MARGEM_MAXIMA:
+                # custo de 0,01 dava margem de 6 dígitos e estourava Numeric(10,4),
+                # derrubando o recálculo da loja inteira (16/10, revisão)
+                margem = None
         valores = {
             "platform": loja.platform,
             "bling_id": cab.bling_id,
@@ -922,7 +1047,13 @@ async def recalcular_loja(
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
             # Amazon: o líquido previsto é o da venda (Shipment + tarifas), sem estornos
             "venda_liquido": (
-                amazon["liquido"] if amazon else (_d(venda.net_amount) if venda_ok else None)
+                amazon["liquido"]
+                if amazon
+                else (
+                    ml_pack["liquido"]
+                    if (ml_pack and venda_ok)
+                    else (_d(venda.net_amount) if venda_ok else None)
+                )
             ),
             "venda_status": venda.status if venda_ok else None,
             "previsao_liberacao": previsao,
@@ -959,17 +1090,34 @@ async def recalcular_loja(
         contagem[f"etapa:{atual.etapa}"] += 1
 
     # 3b. Pedido que saiu do escopo da loja (loja do Bling desligada desta conta,
-    # pedido apagado no Bling) some do painel — 15/10: os pedidos da Shopee "Mini"
-    # que tinham entrado na TikTok Mini pelo nome igual.
-    fora = [n for n in existentes if n not in por_numero]
+    # pedido apagado no Bling) — 15/10: os pedidos da Shopee "Mini" que tinham entrado
+    # na TikTok Mini pelo nome igual. 16/10 (revisão, aprovado): não apaga mais (a
+    # observação e a finalização sumiam e as linhas ficavam com dono fantasma): marca
+    # "fora da loja", solta as linhas que o robô tinha casado e alguém decide.
+    fora = [
+        n for n in existentes if n not in por_numero and existentes[n].situacao != "fora_da_loja"
+    ]
     if por_numero and fora:
+        for n in fora:
+            p = existentes[n]
+            p.situacao = "fora_da_loja"
+            p.motivo = "pedido saiu desta loja no Bling (apagado ou mudou de loja)"
+            p.recalculado_em = agora
+            if p.etapa != "finalizado":
+                p.etapa = "pendencia"
+                p.etapa_em = agora
+                p.etapa_por = ETAPA_PELO_ROBO
+                p.etapa_motivo = "saiu da loja"
         await session.execute(
-            delete(ConciliacaoPedido).where(
-                ConciliacaoPedido.integration_id == loja.integration_id,
-                ConciliacaoPedido.pedido_bling.in_(fora),
+            update(ConciliacaoMovimento)
+            .where(
+                ConciliacaoMovimento.integration_id == loja.integration_id,
+                ConciliacaoMovimento.pedido_bling.in_(fora),
+                ConciliacaoMovimento.vinculado_por.is_(None),
             )
+            .values(pedido_bling=None, bling_id=None)
         )
-        contagem["removidos"] = len(fora)
+        contagem["fora_da_loja"] = len(fora)
 
     # 4. Movimento de pedido anterior ao início: classifica, não cobra.
     antigos = (

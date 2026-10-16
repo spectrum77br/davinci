@@ -69,6 +69,7 @@ SITUACOES = (
     "cancelado",  # venda desfeita: nada a receber
     "estornado_depois",  # liberou e depois saiu dinheiro (mediação, estorno, chargeback)
     "sem_venda",  # pedido do Bling sem venda do ML encontrada
+    "fora_da_loja",  # saiu desta loja no Bling (apagado ou mudou de loja) — 16/10, revisão
 )
 # Etapa do pedido (o ciclo): ver docs, seção 12.
 ETAPAS = ("aguardando", "conciliado", "pendencia", "finalizado", "reaberto")
@@ -291,6 +292,12 @@ class ConciliacaoDia(Base, TimestampMixin):
     pendentes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fechado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fechado_por: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # 16/10 (revisão): fechado à mão com o saldo diferente exige motivo; reaberto por
+    # quem (pessoa ou "robô") e por quê — o robô não refecha o que a pessoa reabriu
+    fechado_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reaberto_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reaberto_por: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reaberto_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ConciliacaoFretePago(Base, TimestampMixin):

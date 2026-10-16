@@ -376,7 +376,7 @@ async def _reparar_repasses(
         rep = repasse_para_movimento(st, repasses.get(pid), ordem=int(row.linhas or 0))
         if rep is None:
             continue
-        if await inserir_movimentos(session, loja, [rep]):
+        if await inserir_movimentos(session, loja, [rep], reabrir=False):
             row.linhas = int(row.linhas or 0) + 1
             row.detalhe = {**(row.detalhe or {}), "repasse_recuperado_em": agora.isoformat()}
             recuperados.append(sid)

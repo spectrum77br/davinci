@@ -312,11 +312,16 @@ async def fechar_dias_prontos(
         )
     ).scalars()
     por_dia: dict[date, ConciliacaoDia] = {r.dia: r for r in rows}
-    saida: dict[str, Any] = {"fechados": [], "abertos": []}
+    saida: dict[str, Any] = {"fechados": [], "abertos": [], "reabertos_a_mao": []}
     d = inicio
     while d <= ontem:
         existente = por_dia.get(d)
         if existente is not None and existente.fechado_em is not None:
+            d += timedelta(days=1)
+            continue
+        if existente is not None and existente.reaberto_por not in (None, FECHADO_PELO_ROBO):
+            # 16/10 (revisão, aprovado): o que a pessoa reabriu só a pessoa fecha
+            saida["reabertos_a_mao"].append(d.isoformat())
             d += timedelta(days=1)
             continue
         saldo_ant = await _saldo_anterior(session, loja, d)
@@ -339,6 +344,8 @@ async def fechar_dias_prontos(
                 row.pendentes = 0
                 row.fechado_em = agora
                 row.fechado_por = FECHADO_PELO_ROBO
+                row.fechado_motivo = None
+                row.reaberto_em = row.reaberto_por = row.reaberto_motivo = None
                 saida["fechados"].append(d.isoformat())
             else:
                 saida["abertos"].append(d.isoformat())

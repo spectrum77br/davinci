@@ -32,6 +32,7 @@ from app.models import (
     Integration,
 )
 from app.models.conciliacao import ORIGEM_CARTEIRA
+from app.services.conciliacao_dias import reabrir_dias
 from app.services.conciliacao_extrato import bling_store_ids_da_loja, resolver_pedidos_bling
 
 logger = structlog.get_logger()
@@ -170,21 +171,33 @@ async def _sync_row(session: AsyncSession, loja: ConciliacaoLoja, chave: str) ->
 
 
 async def inserir_movimentos(
-    session: AsyncSession, loja: ConciliacaoLoja, movimentos: list[dict[str, Any]]
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    movimentos: list[dict[str, Any]],
+    *,
+    reabrir: bool = True,
 ) -> int:
+    """Grava o que ainda não existe (identidade = id_externo). Linha nova num dia já
+    fechado reabre o dia (16/10, revisão, aprovado): quem fechou conferiu outra lista."""
     for m in movimentos:
         m["integration_id"] = loja.integration_id
         m["platform"] = loja.platform
     inseridos = 0
+    datas: set[date] = set()
     for k in range(0, len(movimentos), 200):
         stmt = (
             pg_insert(ConciliacaoMovimento)
             .values(movimentos[k : k + 200])
             .on_conflict_do_nothing(constraint="uq_conciliacao_mov_externo")
-            .returning(ConciliacaoMovimento.id)
+            .returning(ConciliacaoMovimento.id, ConciliacaoMovimento.data)
         )
-        inseridos += len((await session.execute(stmt)).all())
+        for _id, data in (await session.execute(stmt)).all():
+            inseridos += 1
+            if data is not None:
+                datas.add(data.astimezone(BRT).date())
     await session.flush()
+    if reabrir and datas:
+        await reabrir_dias(session, loja, datas, motivo="linha nova no extrato")
     return inseridos
 
 

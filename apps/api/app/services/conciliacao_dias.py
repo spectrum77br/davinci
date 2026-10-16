@@ -9,20 +9,25 @@ de novo sozinho se continuar 100% casado — senão ele aparece no Resumo pra al
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import date
+from datetime import UTC, date, datetime
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ConciliacaoLoja
-from app.models.conciliacao import ConciliacaoDia
+from app.models.conciliacao import ETAPA_PELO_ROBO, ConciliacaoDia
 
 logger = structlog.get_logger()
 
 
 async def reabrir_dias(
-    session: AsyncSession, loja: ConciliacaoLoja, dias: Iterable[date | None], *, motivo: str
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    dias: Iterable[date | None],
+    *,
+    motivo: str,
+    por: str = ETAPA_PELO_ROBO,
 ) -> list[str]:
     """Reabre os dias fechados da lista; devolve os que estavam fechados (ISO)."""
     alvo = sorted({d for d in dias if d})
@@ -42,9 +47,14 @@ async def reabrir_dias(
         .all()
     )
     reabertos: list[str] = []
+    agora = datetime.now(UTC)
     for r in rows:
         r.fechado_em = None
         r.fechado_por = None
+        r.fechado_motivo = None
+        r.reaberto_em = agora
+        r.reaberto_por = por[:120]
+        r.reaberto_motivo = motivo
         reabertos.append(r.dia.isoformat())
     if reabertos:
         await session.flush()

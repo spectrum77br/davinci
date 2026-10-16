@@ -1442,6 +1442,18 @@ async def test_extrato_vincular_classificar_e_fechar_o_dia(db, make_user, auth_a
             "301500", "2000018600988674", datetime(2026, 10, 2, 12, tzinfo=UTC), "48.00", 20.0
         )
     )
+    # os pedidos das linhas do dia existem no Bling da loja (16/10: pedido que saiu da
+    # loja vira "fora da loja" e solta as linhas — não é o caso aqui)
+    db.add(
+        _pedido_bling(
+            "301102", "2000018405611066", datetime(2026, 10, 1, 12, tzinfo=UTC), "880.98", 500.0
+        )
+    )
+    db.add(
+        _pedido_bling(
+            "299520", "2000018737867860", datetime(2026, 9, 28, 12, tzinfo=UTC), "459.00", 210.0
+        )
+    )
     await db.commit()
     quem = await make_user(permissions={"conciliacao": {"view": True, "edit": True}})
     auth_as(quem)
@@ -1480,12 +1492,6 @@ async def test_extrato_vincular_classificar_e_fechar_o_dia(db, make_user, auth_a
     assert r.status_code == 200
     # desvincular uma linha que o robô casou pelo nº da venda: fica desvinculada (o
     # recálculo não religa o que uma pessoa desfez) até alguém vincular ou classificar
-    db.add(
-        _pedido_bling(
-            "301102", "2000018405611066", datetime(2026, 10, 1, 12, tzinfo=UTC), "880.98", 500.0
-        )
-    )
-    await db.commit()
     venda = movs["venda"]
     r = await client.patch(f"/api/conciliacao/movimentos/{venda.id}", json={"desvincular": True})
     assert r.status_code == 200, r.text
@@ -2013,3 +2019,283 @@ def test_reabertura_olha_a_hora_em_que_a_linha_entrou_no_painel():
         SimpleNamespace(data=d, created_at=d + timedelta(days=1))
     ) == d + timedelta(days=1)
     assert calc._entrou_em(SimpleNamespace(data=d, created_at=d - timedelta(days=1))) == d
+
+
+# --- revisão de 16/10, lote 2 (regras aprovadas pelo Vinicius) ---------------------
+
+
+def test_situacao_nada_liberou_mas_mexeu_dinheiro_e_bling_excluido_e_previsao_estimada():
+    agora = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    base = {
+        "agora": agora,
+        "data_pedido": datetime(2026, 10, 10, 12, tzinfo=UTC),
+        "bling_total": Decimal("100.00"),
+        "venda": None,
+        "previsao": None,
+        "fatura": {},
+    }
+    # TikTok devolvido antes de liquidar / frete de devolução: saiu 30 sem nada liberar
+    saida = _mov(loja, "estorno", datetime(2026, 10, 12, 12, tzinfo=UTC), debito="30.00")
+    out = calc.situacao_do_pedido(movs_extrato=[saida], **base)
+    assert out["situacao"] == "estornado_depois" and out["zero_a_zero"] is False
+    assert out["motivo"] == "nada liberou e saiu 30.00"
+    # excluído no Bling, nada entrou: cancelado (zero a zero)
+    out = calc.situacao_do_pedido(
+        movs_extrato=[], bling_cancelado=True, bling_situacao="excluido", **base
+    )
+    assert out["situacao"] == "cancelado" and out["zero_a_zero"] is True
+    assert out["motivo"] == "excluido no Bling, nada entrou"
+    # Shopee sem previsão da plataforma (venda lida, nada liberado): entregue + 7 dias
+    # (estimativa); passou → vencido
+    venda = MarketplaceOrderFinancial(
+        gross_amount=Decimal("100"), net_amount=Decimal("90"), fee_amount=Decimal("10"), raw={}
+    )
+    com_venda = {**base, "venda": venda}
+    entregue = datetime(2026, 10, 11, 15, tzinfo=UTC)
+    out = calc.situacao_do_pedido(
+        movs_extrato=[], plataforma="shopee", entregue_em=entregue, **com_venda
+    )
+    assert out["situacao"] == "aguardando" and out["motivo"] == "libera em 18/10 (estimativa)"
+    out = calc.situacao_do_pedido(
+        movs_extrato=[],
+        plataforma="shopee",
+        entregue_em=entregue,
+        **{**com_venda, "agora": datetime(2026, 10, 21, 12, tzinfo=UTC)},
+    )
+    assert out["situacao"] == "vencido" and "18/10 (estimada)" in out["motivo"]
+    # sem entrega lida: pedido + 20 dias
+    out = calc.situacao_do_pedido(movs_extrato=[], plataforma="tiktok", **com_venda)
+    assert out["motivo"] == "libera em 30/10 (estimativa)"
+    # ML não ganha estimativa (a plataforma diz a data)
+    out = calc.situacao_do_pedido(movs_extrato=[], plataforma="ml", **com_venda)
+    assert out["situacao"] == "aguardando" and out["motivo"] is None
+
+
+def test_etapa_reaberto_pela_pessoa_fica_e_bateu_em_zera():
+    agora = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    # a pessoa reabriu e o pedido bateu: continua reaberto (só ela fecha), motivo intacto
+    atual = ConciliacaoPedido(
+        etapa="reaberto",
+        etapa_por="cairo@x",
+        etapa_motivo="conferir o frete",
+        bateu_em=agora - timedelta(days=9),
+        etapa_em=agora - timedelta(days=8),
+    )
+    e = calc.etapa_do_pedido(agora=agora, atual=atual, situacao="bateu", ultimo_movimento_em=None)
+    assert e == {"bateu_em": agora - timedelta(days=9), "etapa": "reaberto"}
+    # reaberto pelo robô (movimento novo) e bateu de novo: vira conciliado como antes
+    atual.etapa_por = "robô"
+    atual.bateu_em = agora - timedelta(days=2)
+    e = calc.etapa_do_pedido(agora=agora, atual=atual, situacao="bateu", ultimo_movimento_em=None)
+    assert e["etapa"] == "conciliado"
+    # deixou de bater: a marca do bateu sai
+    atual = ConciliacaoPedido(etapa="conciliado", bateu_em=agora - timedelta(days=2))
+    e = calc.etapa_do_pedido(
+        agora=agora, atual=atual, situacao="recebido_a_menos", ultimo_movimento_em=None
+    )
+    assert e["bateu_em"] is None and e["etapa"] == "pendencia"
+    # cancelado com dinheiro ≠ 0 não é zero a zero: pendência, não finaliza sozinho
+    e = calc.etapa_do_pedido(
+        agora=agora, atual=None, situacao="cancelado", ultimo_movimento_em=None, zero_a_zero=False
+    )
+    assert e["etapa"] == "pendencia" and e["bateu_em"] is None
+
+
+def test_conta_do_pack_do_ml_soma_as_linhas_do_carrinho():
+    """Poofy 301748 (16/10): 12 pagamentos de 49,00 no mesmo pack e a venda da Margem
+    com um item só — o previsto vem das linhas da conta."""
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    libs = []
+    for i in range(3):
+        m = _mov(
+            loja,
+            "venda_liberada",
+            datetime(2026, 10, 12, 12, i, tzinfo=UTC),
+            credito="33.88",
+            pedido_mkt=f"20000{i}",
+            tarifa="-15.12",
+            frete="0",
+        )
+        m.pack_id = "2000015384524949"
+        m.bruto = Decimal("49.00")
+        libs.append(m)
+    conta = calc.conta_ml_do_pack(libs)
+    assert conta["pedidos"] == 3 and conta["valor"] == Decimal("147.00")
+    assert conta["tarifa"] == Decimal("45.36") and conta["liquido"] == Decimal("101.64")
+    # um pedido só no pack: a venda da Margem serve
+    assert calc.conta_ml_do_pack(libs[:1]) is None
+    out = calc.situacao_do_pedido(
+        agora=datetime(2026, 10, 15, 12, tzinfo=UTC),
+        data_pedido=datetime(2026, 10, 10, 12, tzinfo=UTC),
+        bling_total=Decimal("147.00"),
+        venda=None,
+        previsao=None,
+        movs_extrato=libs,
+        fatura={},
+        liquido_previsto=conta["liquido"],
+    )
+    assert out["situacao"] == "bateu" and out["recebido"] == Decimal("101.64")
+
+
+async def test_fechar_dia_so_ate_ontem_saldo_diferente_exige_motivo_e_reaberto_a_mao_fica(
+    db, make_user, auth_as, client
+):
+    from zoneinfo import ZoneInfo
+
+    from app.models import ConciliacaoDia
+    from app.services.conciliacao_jobs import fechar_dias_prontos
+
+    loja, _integ = await _loja(db, make_user)
+    movs = await _dia_de_exemplo(db, loja)
+    for numero, numeroloja, total, custo in (
+        ("301500", "2000018600988674", "48.00", 20.0),
+        ("301102", "2000018405611066", "880.98", 500.0),
+        ("299520", "2000018737867860", "459.00", 210.0),
+    ):
+        db.add(
+            _pedido_bling(numero, numeroloja, datetime(2026, 10, 1, 12, tzinfo=UTC), total, custo)
+        )
+    await db.commit()
+    quem = await make_user(permissions={"conciliacao": {"view": True, "edit": True}})
+    auth_as(quem)
+    # hoje (e o futuro) não fecha
+    hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    r = await client.post(f"/api/conciliacao/dias/{hoje}/fechar", params={"loja": "jlas2"})
+    assert r.status_code == 422
+    # a pendência ganha dono
+    r = await client.patch(
+        f"/api/conciliacao/movimentos/{movs['pendente'].id}", json={"pedido_bling": "301500"}
+    )
+    assert r.status_code == 200, r.text
+    # saldo informado diferente do calculado (+1,00 na última linha): exige motivo
+    r = await client.get("/api/conciliacao/extrato", params={"loja": "jlas2", "dia": "2026-10-13"})
+    ultima_id = r.json()["movimentos"][-1]["id"]
+    saldo_final = Decimal(str(r.json()["totais"]["saldo_final"]))
+    ultima = next(m for m in movs.values() if str(m.id) == ultima_id)
+    ultima.saldo_apos = saldo_final + Decimal("1.00")
+    await db.commit()
+    r = await client.post("/api/conciliacao/dias/2026-10-13/fechar", params={"loja": "jlas2"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "saldo_nao_bate"
+    assert abs(r.json()["detail"]["diferenca"]) == 1.0
+    r = await client.post(
+        "/api/conciliacao/dias/2026-10-13/fechar",
+        params={"loja": "jlas2", "motivo": "ajuste da plataforma sem lançamento"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["fechado"]["motivo"] == "ajuste da plataforma sem lançamento"
+    # reabrir à mão fica gravado…
+    r = await client.post(
+        "/api/conciliacao/dias/2026-10-13/reabrir",
+        params={"loja": "jlas2", "motivo": "conferir de novo"},
+    )
+    assert r.status_code == 200 and r.json()["reaberto"]["por"] == quem.email
+    # …e o robô não refecha, mesmo com tudo casado e batendo
+    ultima.saldo_apos = saldo_final
+    await db.commit()
+    saida = await fechar_dias_prontos(db, loja)
+    assert "2026-10-13" in saida["reabertos_a_mao"] and "2026-10-13" not in saida["fechados"]
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
+    linha = r.json()["lojas"][0]
+    assert "dia reaberto por " + quem.email + ": conferir de novo" in linha["problemas_dia"]
+    # a pessoa fecha: o rastro sai e o robô volta a cuidar do dia
+    r = await client.post("/api/conciliacao/dias/2026-10-13/fechar", params={"loja": "jlas2"})
+    assert r.status_code == 200 and r.json()["fechado"]["motivo"] is None
+    dia = (await db.execute(__import__("sqlalchemy").select(ConciliacaoDia))).scalar_one()
+    await db.refresh(dia)
+    assert dia.reaberto_por is None and dia.fechado_motivo is None
+
+
+async def test_linha_nova_em_dia_fechado_reabre_o_dia_pelo_robo(db, make_user):
+    from app.models import ConciliacaoDia
+    from app.services.conciliacao_shopee import inserir_movimentos
+
+    loja, _integ = await _loja(db, make_user)
+    db.add(
+        ConciliacaoDia(
+            integration_id=loja.integration_id,
+            dia=date(2026, 10, 13),
+            fechado_em=datetime(2026, 10, 14, 9, tzinfo=UTC),
+            fechado_por="cairo@x",
+        )
+    )
+    await db.commit()
+    nova = {
+        "origem": "mp_extrato",
+        "id_externo": "atrasada-1",
+        "data": _d13(15),
+        "tipo": "credito",
+        "descricao": "linha que o relatório trouxe depois",
+        "sub_tipo": None,
+        "pagamento_id": None,
+        "pedido_marketplace": None,
+        "pack_id": None,
+        "shipping_id": None,
+        "pedido_bling": None,
+        "bling_id": None,
+        "bruto": None,
+        "tarifa": None,
+        "parcelamento": None,
+        "frete": None,
+        "cupom": None,
+        "credito": Decimal("10.00"),
+        "debito": Decimal("0"),
+        "saldo_apos": None,
+        "descontado_da_venda": None,
+        "sku": None,
+        "item_id": None,
+        "data_aprovacao": None,
+        "classificacao": None,
+        "vinculado_por": None,
+        "vinculado_em": None,
+        "raw": {},
+    }
+    assert await inserir_movimentos(db, loja, [nova]) == 1
+    dia = (await db.execute(__import__("sqlalchemy").select(ConciliacaoDia))).scalar_one()
+    assert dia.fechado_em is None and dia.reaberto_por == "robô"
+    assert dia.reaberto_motivo == "linha nova no extrato"
+    # a mesma linha de novo (identidade): nada muda
+    dia.reaberto_motivo = None
+    await db.commit()
+    assert await inserir_movimentos(db, loja, [dict(nova)]) == 0
+    assert dia.reaberto_motivo is None
+
+
+async def test_onde_agir_ignora_finalizado_e_lista_recebido_a_mais_e_fora_da_loja(
+    db, make_user, auth_as, client
+):
+    loja, _integ = await _loja(db, make_user)
+    agora = datetime.now(UTC)
+    for numero, situacao, etapa in (
+        ("1", "estornado_depois", "finalizado"),
+        ("2", "recebido_a_mais", "pendencia"),
+        ("3", "fora_da_loja", "pendencia"),
+        ("4", "sem_venda", "aguardando"),
+        ("5", "sem_venda", "pendencia"),
+    ):
+        db.add(
+            ConciliacaoPedido(
+                integration_id=loja.integration_id,
+                pedido_bling=numero,
+                platform=IntegrationPlatform.ML,
+                conta="jlas2",
+                situacao=situacao,
+                etapa=etapa,
+                etapa_em=agora,
+                ultimo_movimento_em=agora,
+                liberado_em=agora,
+            )
+        )
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
+    assert r.status_code == 200, r.text
+    titulos = [a["titulo"] for a in r.json()["agir"]]
+    assert "jlas2 · 1 recebido(s) a mais" in titulos
+    assert "jlas2 · 1 venda(s) não lida(s) com dinheiro" in titulos
+    assert "jlas2 · 1 pedido(s) que saíram da loja" in titulos
+    assert not any("estornado" in t for t in titulos)  # finalizado com motivo não cobra
+    ped = r.json()["lojas"][0]["pedidos"]
+    assert ped["estornados"] == 0 and ped["recebido_a_mais"] == 1 and ped["fora_da_loja"] == 1

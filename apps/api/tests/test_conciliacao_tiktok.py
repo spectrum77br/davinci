@@ -516,19 +516,22 @@ async def test_loja_do_bling_pelo_nome_so_na_mesma_plataforma_e_pedido_fora_some
     await db.commit()
     r = await recalcular_loja(db, loja, agora=AGORA)
     await db.commit()
-    assert r["pedidos"] == 1 and r.get("removidos") == 1
-    numeros = (
-        (
-            await db.execute(
-                select(ConciliacaoPedido.pedido_bling).where(
-                    ConciliacaoPedido.integration_id == loja.integration_id
-                )
+    # 16/10 (revisão, aprovado): o pedido que saiu da loja não some — fica marcado
+    # "fora da loja" (pendência) pra alguém decidir, e as linhas dele ficam sem dono
+    assert r["pedidos"] == 1 and r.get("fora_da_loja") == 1
+    fora = (
+        await db.execute(
+            select(ConciliacaoPedido).where(
+                ConciliacaoPedido.integration_id == loja.integration_id,
+                ConciliacaoPedido.pedido_bling == "330001",
             )
         )
-        .scalars()
-        .all()
-    )
-    assert numeros == ["320001"]
+    ).scalar_one()
+    assert fora.situacao == "fora_da_loja" and fora.etapa == "pendencia"
+    assert "saiu desta loja" in (fora.motivo or "")
+    # na rodada seguinte continua marcado, sem contar de novo
+    r2 = await recalcular_loja(db, loja, agora=AGORA)
+    assert r2.get("fora_da_loja") is None
 
 
 async def test_liquidacao_zerada_sem_pedido_no_bling_nao_trava_o_dia(

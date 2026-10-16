@@ -38,6 +38,7 @@ from app.models import (
     StoreInfo,
 )
 from app.models.conciliacao import ORIGEM_EXTRATO
+from app.services.conciliacao_dias import reabrir_dias
 from app.services.conciliacao_mp_csv import dinheiro, id_externo_da_linha, ler_csv_mp
 
 logger = structlog.get_logger()
@@ -703,18 +704,29 @@ async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) 
         m["platform"] = loja.platform
     reidentificados = await _reidentificar_linhas_pobres(session, loja, movimentos)
     inseridos = atualizados = 0
+    datas_novas: set[date] = set()
     for k in range(0, len(movimentos), 200):
         lote = movimentos[k : k + 200]
         stmt = pg_insert(ConciliacaoMovimento).values(lote)
         stmt = stmt.on_conflict_do_update(
             constraint="uq_conciliacao_mov_externo", set_=_campos_para_completar(stmt)
-        ).returning(ConciliacaoMovimento.id, literal_column("(xmax = 0)"))
-        for _id, novo in (await session.execute(stmt)).all():
+        ).returning(
+            ConciliacaoMovimento.id, literal_column("(xmax = 0)"), ConciliacaoMovimento.data
+        )
+        for _id, novo, data in (await session.execute(stmt)).all():
             if novo:
                 inseridos += 1
+                if data is not None:
+                    datas_novas.add(data.astimezone(BRT).date())
             else:
                 atualizados += 1
     await session.flush()
+    if datas_novas:
+        # 16/10 (revisão, aprovado): linha nova (folga de 1 dia, relatório atrasado) em dia
+        # fechado reabre o dia pra conferência
+        await reabrir_dias(
+            session, loja, datas_novas, motivo="linha nova no relatório do Mercado Pago"
+        )
     duplicatas = await apagar_duplicatas_pobres(session, loja) if reidentificados else 0
     return {
         "linhas": len(rows),
