@@ -23,9 +23,10 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import and_, case, func, literal_column, or_, select
+from sqlalchemy import and_, case, delete, func, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models import (
     BlingOrder,
@@ -453,18 +454,14 @@ def _campos_para_completar(stmt: Any) -> dict[str, Any]:
 
 
 def _chave_natural(
-    data: datetime,
-    pagamento_id: str | None,
-    sub_tipo: str | None,
-    descricao: str | None,
-    credito: Any,
-    debito: Any,
+    data: datetime, pagamento_id: str | None, descricao: str | None, credito: Any, debito: Any
 ) -> tuple:
+    """Hora, pagamento, descrição e valores. Sem o RECORD_TYPE: o relatório pobre da
+    aguiar não tinha essa coluna (sub_tipo vazio) e a gêmea completa não casava."""
     q = Decimal("0.01")
     return (
         data.astimezone(UTC),
         pagamento_id or "",
-        sub_tipo or "",
         descricao or "",
         str((Decimal(str(credito or 0))).quantize(q)),
         str((Decimal(str(debito or 0))).quantize(q)),
@@ -474,11 +471,13 @@ def _chave_natural(
 async def _reidentificar_linhas_pobres(
     session: AsyncSession, loja: ConciliacaoLoja, movimentos: list[dict[str, Any]]
 ) -> int:
-    """A identidade da linha inclui o ORDER_ID. Linha gravada por um relatório SEM essa
-    coluna (config antiga, 16/10 aguiar) tem outra identidade; quando o relatório
-    completo chega, casa pela chave natural (hora, pagamento, tipo, valores) e troca a
-    identidade da linha antiga — aí o upsert completa os campos em vez de duplicar."""
-    novos = [m for m in movimentos if m.get("pedido_marketplace")]
+    """A identidade da linha (hash) inclui ORDER_ID, RECORD_TYPE, GROSS e BALANCE. Linha
+    gravada por um relatório SEM alguma dessas colunas (config antiga, 16/10 aguiar) tem
+    outra identidade; quando o relatório completo chega, a linha antiga que o relatório
+    novo não traz com a mesma identidade é casada pela chave natural (hora, pagamento,
+    descrição, valores) e troca de identidade — aí o upsert completa os campos em vez
+    de duplicar."""
+    novos = movimentos
     if not novos:
         return 0
     ids_novos = {m["id_externo"] for m in movimentos}
@@ -489,7 +488,6 @@ async def _reidentificar_linhas_pobres(
                 select(ConciliacaoMovimento).where(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
                     ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
-                    ConciliacaoMovimento.pedido_marketplace.is_(None),
                     ConciliacaoMovimento.data >= min(datas),
                     ConciliacaoMovimento.data <= max(datas),
                     ConciliacaoMovimento.id_externo.notin_(ids_novos),
@@ -502,13 +500,12 @@ async def _reidentificar_linhas_pobres(
     if not antigas:
         return 0
     por_chave = {
-        _chave_natural(a.data, a.pagamento_id, a.sub_tipo, a.descricao, a.credito, a.debito): a
-        for a in antigas
+        _chave_natural(a.data, a.pagamento_id, a.descricao, a.credito, a.debito): a for a in antigas
     }
     trocadas = 0
     for m in novos:
         chave = _chave_natural(
-            m["data"], m["pagamento_id"], m["sub_tipo"], m["descricao"], m["credito"], m["debito"]
+            m["data"], m["pagamento_id"], m["descricao"], m["credito"], m["debito"]
         )
         antiga = por_chave.pop(chave, None)
         if antiga is None:
@@ -518,6 +515,46 @@ async def _reidentificar_linhas_pobres(
     if trocadas:
         await session.flush()
     return trocadas
+
+
+async def apagar_duplicatas_pobres(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Linha do relatório pobre que tem uma gêmea mais completa — mesma hora, pagamento,
+    descrição e valores, e a gêmea tem o nº da venda ou o RECORD_TYPE que a pobre não
+    tem — é a MESMA linha do Mercado Pago gravada duas vezes (16/10, aguiar: a gêmea
+    não casou na releitura e a regra da irmã do pagamento ligou as duas ao pedido →
+    recebido dobrado; os saques também dobraram). Apaga a pobre; linha que uma pessoa
+    vinculou fica."""
+    pobre = aliased(ConciliacaoMovimento)
+    cheia = aliased(ConciliacaoMovimento)
+    ids = (
+        select(pobre.id)
+        .join(
+            cheia,
+            and_(
+                cheia.id != pobre.id,
+                cheia.integration_id == pobre.integration_id,
+                cheia.origem == ORIGEM_EXTRATO,
+                cheia.pagamento_id == pobre.pagamento_id,
+                cheia.data == pobre.data,
+                func.coalesce(cheia.descricao, "") == func.coalesce(pobre.descricao, ""),
+                cheia.credito == pobre.credito,
+                cheia.debito == pobre.debito,
+                or_(
+                    and_(cheia.pedido_marketplace.isnot(None), pobre.pedido_marketplace.is_(None)),
+                    and_(cheia.sub_tipo.isnot(None), pobre.sub_tipo.is_(None)),
+                ),
+            ),
+        )
+        .where(
+            pobre.integration_id == loja.integration_id,
+            pobre.origem == ORIGEM_EXTRATO,
+            pobre.pagamento_id.isnot(None),
+            pobre.vinculado_por.is_(None),
+            or_(pobre.pedido_marketplace.is_(None), pobre.sub_tipo.is_(None)),
+        )
+    )
+    r = await session.execute(delete(ConciliacaoMovimento).where(ConciliacaoMovimento.id.in_(ids)))
+    return int(r.rowcount or 0)
 
 
 async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) -> dict[str, Any]:
@@ -566,6 +603,7 @@ async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) 
             else:
                 atualizados += 1
     await session.flush()
+    duplicatas = await apagar_duplicatas_pobres(session, loja) if reidentificados else 0
     return {
         "linhas": len(rows),
         "movimentos": len(movimentos),
@@ -573,6 +611,7 @@ async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) 
         "ja_existiam": len(movimentos) - inseridos,
         "atualizados": atualizados,
         "reidentificados": reidentificados,
+        "duplicatas_apagadas": duplicatas,
         "com_pedido": com_pedido,
         "sem_pedido": sem_pedido,
         "pedido_bling_resolvido": sum(1 for m in movimentos if m.get("pedido_bling")),

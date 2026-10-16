@@ -42,6 +42,7 @@ from app.models import (
 from app.models.conciliacao import ETAPA_PELO_ROBO, ORIGEM_EXTRATO, ORIGEM_FATURA, ORIGENS_EXTRATO
 from app.services.conciliacao_extrato import (
     TIPOS_RESERVA,
+    apagar_duplicatas_pobres,
     bling_store_ids_da_loja,
     resolver_pedidos_bling,
 )
@@ -606,6 +607,9 @@ async def recalcular_loja(
     plataforma_loja = getattr(loja.platform, "value", str(loja.platform))
     if not lojas_bling:
         return {"loja": loja.conta, "erro": "sem loja do Bling ligada a esta conta", "pedidos": 0}
+    # 0. Linha do relatório pobre que tem gêmea completa (16/10, aguiar): some antes de
+    # qualquer conta, senão o pedido recebe em dobro.
+    duplicatas_pobres = await apagar_duplicatas_pobres(session, loja)
 
     # 1. Pedidos do Bling da loja desde o início (uma linha por item → agrupa por número).
     rows = (
@@ -721,6 +725,8 @@ async def recalcular_loja(
 
     # 3. Uma linha por pedido.
     contagem: dict[str, int] = defaultdict(int)
+    if duplicatas_pobres:
+        contagem["duplicata_pobre_apagada"] = duplicatas_pobres
     for numero, itens in por_numero.items():
         cab = itens[0]
         numeroloja = str(cab.numeroloja) if cab.numeroloja else None

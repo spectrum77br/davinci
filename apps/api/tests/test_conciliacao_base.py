@@ -279,24 +279,23 @@ CONFIG_POBRE = {
         )
     ]
 }
+# Como o da aguiar: sem RECORD_TYPE, sem ORDER_ID, sem tarifas.
 CSV_POBRE = "\n".join(
     [
-        "DATE,SOURCE_ID,RECORD_TYPE,DESCRIPTION,NET_CREDIT_AMOUNT,NET_DEBIT_AMOUNT,GROSS_AMOUNT,"
+        "DATE,SOURCE_ID,DESCRIPTION,NET_CREDIT_AMOUNT,NET_DEBIT_AMOUNT,GROSS_AMOUNT,"
         "BALANCE_AMOUNT,PAYMENT_METHOD,BUSINESS_UNIT",
-        "2026-10-01T00:00:00.000-03:00,,initial_available_balance,,9147.81,0.00,9147.81,9147.81,,",
-        "2026-10-01T06:57:55.000-03:00,181760519746,release,reserve_for_payout,0.00,9147.00,-9147.00,"
+        "2026-10-01T06:57:55.000-03:00,181760519746,reserve_for_payout,0.00,9147.00,-9147.00,"
         "0.81,available_money,Mercado Libre",
-        "2026-10-01T06:57:57.000-03:00,181760519746,release,payout,0.00,9147.00,-9147.00,0.81,"
+        "2026-10-01T06:57:57.000-03:00,181760519746,payout,0.00,9147.00,-9147.00,0.81,"
         "available_money,Mercado Libre",
-        "2026-10-01T08:11:09.000-03:00,177489533941,release,payment,610.65,0.00,880.98,611.46,"
+        "2026-10-01T08:11:09.000-03:00,177489533941,payment,610.65,0.00,880.98,611.46,"
         "master,Mercado Libre",
-        "2026-10-01T23:00:44.000-03:00,180879957389,release,mediation,0.00,732.35,-732.35,0.00,"
+        "2026-10-01T23:00:44.000-03:00,180879957389,mediation,0.00,732.35,-732.35,0.00,"
         "pix,Mercado Libre",
-        "2026-10-01T23:00:49.000-03:00,180879957389,release,refund,116.81,0.00,0.00,116.81,"
+        "2026-10-01T23:00:49.000-03:00,180879957389,refund,116.81,0.00,0.00,116.81,"
         "pix,Mercado Libre",
-        "2026-10-02T11:16:33.000-03:00,176527200959,release,reserve_for_dispute,0.00,611.46,"
+        "2026-10-02T11:16:33.000-03:00,176527200959,reserve_for_dispute,0.00,611.46,"
         "-611.46,0.00,pix,Mercado Libre",
-        ",,total,,2591.22,0.00,11113.46,0.00,,",
     ]
 )
 
@@ -360,10 +359,10 @@ async def test_ingerir_csv_completa_as_linhas_de_um_relatorio_pobre(db, make_use
     pobre = await ext.ingerir_csv(db, loja, CSV_POBRE)
     assert pobre["inseridos"] == 6 and pobre["sem_pedido"] == 6
     completo = await ext.ingerir_csv(db, loja, CSV_JLAS2)
-    # nenhuma linha nova: as 6 já existiam e foram completadas (4 trocaram de identidade
-    # porque agora têm ORDER_ID; payout/reserva de saque não mudam)
+    # nenhuma linha nova: as 6 já existiam e foram completadas (todas trocaram de
+    # identidade: o hash inclui RECORD_TYPE e ORDER_ID, que o pobre não tinha)
     assert completo["inseridos"] == 0 and completo["atualizados"] == 6
-    assert completo["reidentificados"] == 4
+    assert completo["reidentificados"] == 6 and completo["duplicatas_apagadas"] == 0
     todas = (
         (await db.execute(__import__("sqlalchemy").select(ConciliacaoMovimento))).scalars().all()
     )
@@ -372,8 +371,36 @@ async def test_ingerir_csv_completa_as_linhas_de_um_relatorio_pobre(db, make_use
     assert venda.pedido_marketplace == "2000018405611066" and venda.pedido_bling == "301102"
     assert venda.tarifa == Decimal("-92.36") and venda.sku == "dg057.ci+a001.ci"
     assert venda.raw["BUSINESS_UNIT"] == "Mercado Libre" and venda.raw["ORDER_ID"]
+    assert venda.sub_tipo == "release"  # o pobre não tinha RECORD_TYPE; o completo preenche
     saque = next(m for m in todas if m.tipo == "saque")
     assert saque.classificacao == "saque"
+
+
+async def test_recalcular_loja_apaga_a_gemea_pobre_que_sobrou(db, make_user):
+    """A releitura de 16/10 na aguiar não casou a linha antiga (sub_tipo vazio) e a regra
+    da irmã do pagamento ligou as duas ao pedido: recebido em dobro. A gêmea pobre some."""
+    loja, _integ = await _loja(db, make_user)
+    agora = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    d = lambda dia, h=10: datetime(2026, 10, dia, h, tzinfo=UTC)  # noqa: E731
+    db.add(_pedido_bling("301300", "2000018400000002", d(2), "100.00", 40.0))
+    cheia = _mov(
+        loja, "venda_liberada", d(5), credito="80", pedido_mkt="2000018400000002", pagamento="P2"
+    )
+    pobre = _mov(loja, "venda_liberada", d(5), credito="80", pagamento="P2")
+    manual = _mov(loja, "venda_liberada", d(6), credito="80", pagamento="P2")
+    manual.vinculado_por = "cairo"  # uma pessoa vinculou: fica
+    # saque: nenhum dos dois tem nº da venda; o pobre não tem RECORD_TYPE (sub_tipo)
+    saque_cheio = _mov(loja, "saque", d(7), debito="500", pagamento="S1", sub="release")
+    saque_pobre = _mov(loja, "saque", d(7), debito="500", pagamento="S1")
+    saque_cheio.classificacao = saque_pobre.classificacao = "saque"
+    db.add_all([cheia, pobre, manual, saque_cheio, saque_pobre])
+    await db.commit()
+    r = await calc.recalcular_loja(db, loja, agora=agora)
+    assert r["duplicata_pobre_apagada"] == 2
+    movs = (await db.execute(__import__("sqlalchemy").select(ConciliacaoMovimento))).scalars().all()
+    assert {m.id for m in movs} == {cheia.id, manual.id, saque_cheio.id}
+    pedido = (await db.execute(__import__("sqlalchemy").select(ConciliacaoPedido))).scalar_one()
+    assert pedido.recebido == Decimal("80")
 
 
 # --- fatura ------------------------------------------------------------------
