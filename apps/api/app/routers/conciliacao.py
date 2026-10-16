@@ -2060,8 +2060,13 @@ def _totais_do_dia(
 async def _saldo_anterior(
     session: AsyncSession, loja: ConciliacaoLoja, dia: date
 ) -> Decimal | None:
-    """Saldo informado da última linha ANTES do dia = saldo inicial de verdade do
-    dia (prova dos nove independente da ordem das linhas do dia)."""
+    """Saldo informado logo antes do dia = saldo inicial de verdade do dia (prova dos
+    nove independente da ordem das linhas do dia).
+
+    Linhas no mesmo segundo têm ordem ambígua (kia (ml) 10/10: +7,04 / −7,04 / +7,04 às
+    13:45:48; rajadas de 60 linhas em poucos segundos). Regra exata: âncora na última
+    linha cujo horário é ÚNICO (saldo sem dúvida) + soma de tudo que veio depois dela.
+    """
     if getattr(loja.platform, "value", str(loja.platform)) == "tiktok":
         # cada extrato da TikTok é um caixa próprio: começa em 0 e o repasse zera.
         # Extrato ainda não pago termina o dia no total liquidado (16/10).
@@ -2076,10 +2081,9 @@ async def _saldo_anterior(
                     mov.integration_id == loja.integration_id,
                     mov.origem.in_(ORIGENS_EXTRATO),
                     mov.data < ini,
-                    mov.saldo_apos.isnot(None),
                 )
                 .order_by(mov.data.desc())
-                .limit(50)
+                .limit(400)
             )
         )
         .scalars()
@@ -2087,25 +2091,22 @@ async def _saldo_anterior(
     )
     if not ultimo:
         return None
-    # As últimas linhas podem cair no mesmo segundo e aí a ordem é ambígua (kia (ml)
-    # 10/10: +7,04 / −7,04 / +7,04 às 13:45:48 — a cadeia escolhia a que terminava em
-    # −7,04 e o dia 14/10 ficava "saldo não bate +7,04"). O saldo depois desse segundo
-    # é o saldo ANTES dele + a soma do grupo, não importa a ordem interna.
-    ts = ultimo[0].data
-    grupo = [m for m in ultimo if m.data == ts]
-    if len(grupo) == 1:
-        return grupo[0].saldo_apos
-    antes = [m for m in ultimo if m.data < ts]
-    if antes:
-        ts2 = antes[0].data
-        g2 = [m for m in antes if m.data == ts2]
-        base = g2[0].saldo_apos if len(g2) == 1 else (_ordena_dia(g2) or [g2[0]])[-1].saldo_apos
-        if base is not None:
-            return Decimal(base) + sum(
-                ((m.credito or Decimal("0")) - (m.debito or Decimal("0")) for m in grupo),
-                Decimal("0"),
-            )
-    ordenado = _ordena_dia(grupo)
+    por_instante: dict[datetime, int] = {}
+    for m in ultimo:
+        por_instante[m.data] = por_instante.get(m.data, 0) + 1
+    soma_depois = Decimal("0")
+    for i, m in enumerate(ultimo):
+        # a mais velha da janela pode ter gêmeas fora dela: não serve de âncora
+        if por_instante[m.data] == 1 and m.saldo_apos is not None and i < len(ultimo) - 1:
+            return Decimal(m.saldo_apos) + soma_depois
+        soma_depois += (m.credito or Decimal("0")) - (m.debito or Decimal("0"))
+    # tudo empatado: ordena o último dia pelo encadeamento (como antes)
+    com_saldo = [m for m in ultimo if m.saldo_apos is not None]
+    if not com_saldo:
+        return None
+    ultimo_dia = com_saldo[0].data.astimezone(_BRT).date()
+    do_dia = [m for m in com_saldo if m.data.astimezone(_BRT).date() == ultimo_dia]
+    ordenado = _ordena_dia(do_dia)
     return ordenado[-1].saldo_apos if ordenado else None
 
 
