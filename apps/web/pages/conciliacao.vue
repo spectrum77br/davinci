@@ -589,6 +589,10 @@ await carregarLojas()
 // Link do Vigia de Conciliação (Threema/Ouvidoria): /conciliacao?loja=&visao=extrato&dia= ou
 // ?loja=&visao=pedidos&situacao=|etapa= — abre direto no lugar certo (15/10).
 const q0 = useRoute().query
+if (typeof q0.tab === 'string' && MARKETPLACES.some((m) => m.key === q0.tab && m.ativo)) {
+  tab.value = q0.tab
+  escolherLojaDaAba()
+}
 if (typeof q0.loja === 'string') {
   const alvo = lojas.value.find((l) => l.conta === q0.loja)
   if (alvo) {
@@ -654,7 +658,15 @@ await carregar()
         <button v-if="visao === 'pedidos'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" :disabled="exportando" @click="exportar()">
           <Download class="size-3.5" /> Excel
         </button>
-        <span v-if="!semMarketplace && lojaAtual" class="text-muted-foreground">loja <b>{{ loja }}</b></span>
+        <!-- 16/10 (Vinicius, "no Extrato não consigo trocar a loja"): o seletor de loja fica
+             no cabeçalho quando a visão não tem o filtro próprio (Extrato) -->
+        <label v-if="visao === 'extrato' && lojasDaAba.length" class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
+          <span class="font-semibold text-muted-foreground">Loja</span>
+          <select v-model="loja" class="bg-transparent outline-none">
+            <option v-for="l in lojasDaAba" :key="l.conta" :value="l.conta">{{ l.conta }}</option>
+          </select>
+        </label>
+        <span v-else-if="!semMarketplace && lojaAtual" class="text-muted-foreground">loja <b>{{ loja }}</b></span>
         <button v-if="canEdit && tab === 'amazon'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" title="Token do Melhor Envio (frete pago nos envios próprios)" @click="abrirTokenMe()">
           <KeyRound class="size-3.5" /> Melhor Envio
         </button>
