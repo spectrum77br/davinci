@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from io import BytesIO
 from typing import Annotated
 from uuid import UUID
 
@@ -40,8 +39,8 @@ from app.services.bling_situacoes import (
     SITUACOES_ENVIADO_ETIQUETA_STR,
 )
 from app.services.margem_audit import record_margem_audit
-from app.services.rentabilidade_xlsx import build_rentabilidade_xlsx
 from app.services.marketplaces.bling import BlingClient
+from app.services.rentabilidade_xlsx import build_rentabilidade_xlsx
 from app.services.verificar_margem import (
     SNAPSHOT_TABLE as _VERIFICAR_MARGEM_TABLE,
 )
@@ -900,7 +899,7 @@ async def lookup_marketplace(
         # para o snapshot e re-consulta. Roda MESMO quando já existe linha no
         # snapshot, para atualizar pedidos antigos cujo cache ficou velho (ex.:
         # reembolso lançado depois, fora da janela de 30 dias).
-        await _refresh_verificar_margem_for_pedido(session, refresh_key)
+        await _refresh_verificar_margem_for_pedido(session, refresh_key, forcar=True)
         rows = await _read_snapshot()
 
     # "Dá pra forçar refresh deste pedido" — true sempre que o pedido existe no

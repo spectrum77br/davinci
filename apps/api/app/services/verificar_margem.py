@@ -53,6 +53,61 @@ _REFRESH_LOCK_KEY = 0x7665726D  # "verm"
 _ACQUIRE_REFRESH_LOCK = "SELECT pg_advisory_xact_lock(:k)"
 
 
+# 16/10 (Vinicius): "a Margem lê uma vez, decidimos, e não relê o pedido — se der
+# problema a gente vê na Conciliação". Linha DECIDIDA — Aprovado (pessoa ou robô) ou
+# Reprovado por pessoa — fica com os números do momento da decisão: o rebuild e os
+# refreshes do robô não a tocam; só situação e pino acompanham o Bling
+# (_espelhar_decididas). Reprovado pelo robô (hold) segue vivo até alguém decidir ou o
+# robô liberar (reavaliar_reprovados). Pessoa que pede "atualizar este pedido" força.
+def _decidida(alias: str) -> str:
+    return (
+        f"({alias}.bling_status_margem = 'Aprovado' "
+        f"OR ({alias}.bling_status_margem = 'Reprovado' AND {alias}.aprovado_por IS NOT NULL))"
+    )
+
+
+def _filtro_alvo(pedido_bling: str | None, bling_id: int | None) -> tuple[str, dict]:
+    if pedido_bling is not None:
+        return " AND s.pedido_bling = :p", {"p": pedido_bling}
+    if bling_id is not None:
+        return " AND s.bling_id = :b", {"b": bling_id}
+    return "", {}
+
+
+async def _tem_decidida(
+    session: AsyncSession, *, pedido_bling: str | None = None, bling_id: int | None = None
+) -> bool:
+    filtro, params = _filtro_alvo(pedido_bling, bling_id)
+    row = await session.execute(
+        text(f"SELECT 1 FROM {SNAPSHOT_TABLE} s WHERE {_decidida('s')}{filtro} LIMIT 1"),
+        params,
+    )
+    return row.first() is not None
+
+
+async def _espelhar_decididas(
+    session: AsyncSession, *, pedido_bling: str | None = None, bling_id: int | None = None
+) -> int:
+    """Linha decidida: situação, nome da situação, pino e quem decidiu acompanham
+    bling_orders; os números ficam como estavam."""
+    filtro, params = _filtro_alvo(pedido_bling, bling_id)
+    result = await session.execute(
+        text(
+            f"UPDATE {SNAPSHOT_TABLE} s "
+            "SET situacao = bo.situacao, "
+            "    situacao_nome = COALESCE("
+            f"       (SELECT sb.nome FROM {SITUACAO_BLING_TABLE} sb"
+            "         WHERE sb.id::text = bo.situacao::text), s.situacao_nome), "
+            "    bling_status_margem = bo.status, "
+            "    aprovado_por = bo.aprovado_por "
+            f"FROM {BLING_ORDERS_TABLE} bo "
+            f"WHERE bo.id = s.bling_order_item_id AND {_decidida('s')}{filtro}"
+        ),
+        params,
+    )
+    return result.rowcount or 0
+
+
 async def _delete_orphans(session: AsyncSession) -> int:
     """Apaga linhas do snapshot cujo bling_order_item_id (PK) não existe mais
     em bling_orders.
@@ -90,14 +145,15 @@ async def rebuild_all(session: AsyncSession) -> int:
     so the ~17s rebuild does not block the margens page.
     """
     await session.execute(text(_ACQUIRE_REFRESH_LOCK), {"k": _REFRESH_LOCK_KEY})
-    # Remove rows whose bling_order_item_id is about to be refreshed from the view.
+    # Remove rows whose bling_order_item_id is about to be refreshed from the view —
+    # menos as decididas (16/10): essas ficam com os números da decisão.
     await session.execute(
         text(
             f"DELETE FROM {SNAPSHOT_TABLE} v "
             "WHERE v.bling_order_item_id IN ("
             "  SELECT bling_order_item_id "
             f"  FROM {VIEW_TABLE}"
-            ")"
+            f") AND NOT {_decidida('v')}"
         )
     )
     # Remove orphan rows: snapshot entries whose UUID no longer exists in
@@ -106,9 +162,12 @@ async def rebuild_all(session: AsyncSession) -> int:
     result = await session.execute(
         text(
             f"INSERT INTO {SNAPSHOT_TABLE} "
-            f"SELECT * FROM {VIEW_TABLE}"
+            f"SELECT v.* FROM {VIEW_TABLE} v "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {SNAPSHOT_TABLE} s "
+            "  WHERE s.bling_order_item_id = v.bling_order_item_id)"
         )
     )
+    await _espelhar_decididas(session)
     await session.commit()
     return result.rowcount or 0
 
@@ -116,8 +175,11 @@ async def rebuild_all(session: AsyncSession) -> int:
 FN_FOR_BLING_ID = f"{_ident(SCHEMA)}.conciliacao_margens_for_bling_id"
 
 
-async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
-    """Targeted refresh of one order by its Bling `numero`.
+async def refresh_for_pedido(
+    session: AsyncSession, pedido_bling: str, *, forcar: bool = False
+) -> int:
+    """Targeted refresh of one order by its Bling `numero`. Pedido decidido não é
+    relido (16/10) — só com `forcar` (pessoa pediu "atualizar este pedido").
 
     Caminho rápido: em vez de varrer a view `_all` (que recalcula a
     `pricing_match` de todo o histórico — ~3 min, ver migration 0148), resolve
@@ -127,6 +189,10 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
     aparecem no snapshot e ficam disponiveis na pagina de margens.
     """
     await session.execute(text(_ACQUIRE_REFRESH_LOCK), {"k": _REFRESH_LOCK_KEY})
+    if not forcar and await _tem_decidida(session, pedido_bling=pedido_bling):
+        await _espelhar_decididas(session, pedido_bling=pedido_bling)
+        await session.commit()
+        return 0
     await session.execute(
         text(f"DELETE FROM {SNAPSHOT_TABLE} WHERE pedido_bling = :p"),
         {"p": pedido_bling},
@@ -146,22 +212,26 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
     return result.rowcount or 0
 
 
-async def refresh_for_bling_id(session: AsyncSession, bling_id: int) -> int:
-    """Targeted refresh of one order by its internal Bling id.
+async def refresh_for_bling_id(
+    session: AsyncSession, bling_id: int, *, forcar: bool = False
+) -> int:
+    """Targeted refresh of one order by its internal Bling id. Pedido decidido não é
+    relido (16/10) — só com `forcar`.
 
     Usa a função `conciliacao_margens_for_bling_id` (caminho rápido, ~2 s, sem
     janela de 20d) — mesmo motivo de refresh_for_pedido (migration 0148).
     """
     await session.execute(text(_ACQUIRE_REFRESH_LOCK), {"k": _REFRESH_LOCK_KEY})
+    if not forcar and await _tem_decidida(session, bling_id=bling_id):
+        await _espelhar_decididas(session, bling_id=bling_id)
+        await session.commit()
+        return 0
     await session.execute(
         text(f"DELETE FROM {SNAPSHOT_TABLE} WHERE bling_id = :b"),
         {"b": bling_id},
     )
     result = await session.execute(
-        text(
-            f"INSERT INTO {SNAPSHOT_TABLE} "
-            f"SELECT * FROM {FN_FOR_BLING_ID}(:b)"
-        ),
+        text(f"INSERT INTO {SNAPSHOT_TABLE} SELECT * FROM {FN_FOR_BLING_ID}(:b)"),
         {"b": bling_id},
     )
     await _delete_orphans(session)
@@ -201,9 +271,7 @@ async def refresh_silent(
         try:
             await session.rollback()
         except Exception as rb_err:  # noqa: BLE001
-            logger.debug(
-                "verificar_margem_rollback_failed", error=str(rb_err)[:200]
-            )
+            logger.debug("verificar_margem_rollback_failed", error=str(rb_err)[:200])
         logger.warning(
             "verificar_margem_refresh_failed",
             pedido_bling=pedido_bling,
