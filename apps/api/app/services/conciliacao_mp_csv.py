@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 
 def dividir_linha_mp(linha: str, sep: str = ",") -> list[str]:
@@ -112,3 +113,21 @@ def id_externo_da_linha(row: dict[str, str]) -> str:
     return hashlib.sha1(
         "|".join(p.strip() for p in partes).encode("utf-8"), usedforsecurity=False
     ).hexdigest()
+
+
+def numerar_repetidas(movimentos: list[dict[str, Any]]) -> int:
+    """Duas linhas IDÊNTICAS no mesmo arquivo (mesma hora, pagamento, valores…) têm o
+    mesmo hash: o upsert em lote caía com "ON CONFLICT DO UPDATE command cannot affect
+    row a second time" e a janela nunca era lida (16/10, revisão). A 2ª ganha "#2", a
+    3ª "#3"… pela ordem do arquivo, como a KFA faz — estável entre releituras, porque
+    o Mercado Pago gera o mesmo arquivo na mesma ordem. Devolve quantas ganharam sufixo."""
+    vistos: dict[str, int] = {}
+    sufixadas = 0
+    for m in movimentos:
+        base = m["id_externo"]
+        n = vistos.get(base, 0) + 1
+        vistos[base] = n
+        if n > 1:
+            m["id_externo"] = f"{base}#{n}"
+            sufixadas += 1
+    return sufixadas

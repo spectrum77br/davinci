@@ -53,6 +53,8 @@ LIMITE_PAGINA = 1000
 
 
 def chave_periodo(d: date) -> str:
+    """Chave pelo mês do calendário — só o plano B quando a API não diz o período
+    (ver `periodo_que_contem`)."""
     return d.strftime("%Y-%m-01")
 
 
@@ -61,6 +63,51 @@ def periodo_anterior(chave: str) -> str:
     if d.month == 1:
         return d.replace(year=d.year - 1, month=12).strftime("%Y-%m-01")
     return d.replace(month=d.month - 1).strftime("%Y-%m-01")
+
+
+def _data(v: Any) -> date | None:
+    """'2026-09-23' ou '2026-09-23T00:00:00.000-03:00' → date."""
+    t = str(v or "").strip()[:10]
+    if not t:
+        return None
+    try:
+        return date.fromisoformat(t)
+    except ValueError:
+        return None
+
+
+async def periodos_da_conta(cliente: Any, *, limite: int = 12) -> list[dict[str, Any]]:
+    """`monthly/periods`: os períodos de faturamento da conta, cada um com a chave
+    (sempre o dia 1º) e as datas reais em `period.date_from` / `period.date_to`."""
+    r = await cliente._request(
+        "GET",
+        "/billing/integration/monthly/periods",
+        params={"group": "ML", "document_type": "BILL", "limit": limite},
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"períodos: HTTP {r.status_code} {r.text[:200]}")
+    body = r.json() or {}
+    return _lista(body.get("results")) if isinstance(body, dict) else _lista(body)
+
+
+def periodo_que_contem(periodos: list[dict[str, Any]], hoje: date) -> tuple[str, str] | None:
+    """(chave do período que contém `hoje`, chave do anterior), pelas datas reais que a
+    API devolve. 16/10 (revisão): o período de cobrança da jlas2 vai do dia 23 ao 22 —
+    do dia 23 ao 31 o período aberto é o do MÊS SEGUINTE, e escolhendo pelo calendário
+    as cobranças desses dias só entravam no dia 1º. None quando a lista não diz."""
+    por_chave: dict[str, tuple[date, date]] = {}
+    for p in periodos:
+        chave = str(p.get("key") or "")
+        per = p.get("period") if isinstance(p.get("period"), dict) else p
+        de, ate = _data(per.get("date_from")), _data(per.get("date_to"))
+        if not chave or de is None or ate is None:
+            continue
+        por_chave[chave] = (de, ate)
+    atual = next((k for k, (de, ate) in por_chave.items() if de <= hoje <= ate), None)
+    if atual is None:
+        return None
+    anteriores = [k for k, (_de, ate) in por_chave.items() if ate < por_chave[atual][0]]
+    return atual, (max(anteriores) if anteriores else periodo_anterior(atual))
 
 
 def tipo_do_detalhe(detail_type: str | None, sub_type: str | None) -> str:
@@ -273,11 +320,10 @@ async def run_fatura_sync(
 ) -> dict[str, Any]:
     """Lê, de forma incremental, as cobranças e bonificações do período aberto e
     do anterior, mais o resumo do período aberto. Dorme `pausa` s entre as
-    chamadas (limite de 5/min do ML)."""
+    chamadas (limite de 5/min do ML). O período aberto é o que a API diz conter
+    hoje (`monthly/periods`); o mês do calendário só quando ela não disser."""
     agora = datetime.now(UTC)
     hoje = hoje or agora.astimezone(BRT).date()
-    atual = chave_periodo(hoje)
-    chaves = [atual, periodo_anterior(atual)]
     resumo: dict[str, Any] = {
         "loja": loja.conta,
         "periodos": {},
@@ -293,6 +339,22 @@ async def run_fatura_sync(
             primeira = False
             return
         await dormir(pausa)
+
+    achado = None
+    try:
+        await _espera()
+        achado = periodo_que_contem(await periodos_da_conta(cliente), hoje)
+        resumo["chamadas"] += 1
+    except Exception as e:  # noqa: BLE001 — sem a lista, vale o calendário
+        resumo["periodos_api"] = {"erro": f"{type(e).__name__}: {str(e)[:200]}"}
+        logger.warning("conciliacao_fatura_periodos_falhou", loja=loja.conta, erro=str(e)[:200])
+    if achado:
+        atual, anterior = achado
+    else:
+        atual = chave_periodo(hoje)
+        anterior = periodo_anterior(atual)
+    chaves = [atual, anterior]
+    resumo["periodo_aberto"] = {"chave": atual, "pela_api": achado is not None}
 
     for chave in chaves:
         for detail_type in ("CHARGE", "BONUS"):

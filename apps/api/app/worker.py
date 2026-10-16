@@ -3954,6 +3954,12 @@ async def conciliacao_extrato_tick(ctx: dict) -> None:
         logger.exception("conciliacao_extrato_tick_unhandled")
 
 
+# Fatura pulada pela trava da loja: tenta de novo em 3 min, no máximo 3 tentativas no
+# total (= `WorkerSettings.max_tries`; na 3ª, se ainda travada, desiste com aviso).
+_CONCILIACAO_FATURA_TENTATIVAS = 3
+_CONCILIACAO_FATURA_RETENTA_MIN = 3
+
+
 async def conciliacao_sincronizar_loja(
     ctx: dict,
     integration_id: str,
@@ -3970,6 +3976,27 @@ async def conciliacao_sincronizar_loja(
     r = await sincronizar_loja(
         _UUID(integration_id), fatura=fatura, extrato=extrato, recalculo=recalculo
     )
+    if fatura and r.get("skipped") == "rodada_em_andamento":
+        # 16/10 (revisão): a fatura (1×/dia, 06:12) usa a mesma trava por loja do extrato
+        # (06:00–08:50 a cada 10 min); quando as duas caíam no mesmo minuto (lojas ML de
+        # índice 6 e 16) a fatura era pulada e só voltava no dia seguinte. Tenta de novo
+        # em alguns minutos, até `_CONCILIACAO_FATURA_TENTATIVAS` vezes. Só extrato não
+        # retenta: o tick repete sozinho a cada 10 min.
+        tentativa = int(ctx.get("job_try") or 1) if isinstance(ctx, dict) else 1
+        if tentativa < _CONCILIACAO_FATURA_TENTATIVAS:
+            logger.info(
+                "conciliacao_fatura_retenta",
+                integration_id=integration_id,
+                tentativa=tentativa,
+                em_minutos=_CONCILIACAO_FATURA_RETENTA_MIN,
+            )
+            raise Retry(defer=timedelta(minutes=_CONCILIACAO_FATURA_RETENTA_MIN))
+        logger.warning(
+            "conciliacao_fatura_pulada",
+            integration_id=integration_id,
+            tentativas=tentativa,
+            motivo="rodada_em_andamento",
+        )
     logger.info("conciliacao_sincronizar_loja_done", loja=r.get("loja"), skipped=r.get("skipped"))
     return {k: v for k, v in r.items() if k != "fatura"}
 
