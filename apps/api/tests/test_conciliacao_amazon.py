@@ -19,6 +19,7 @@ from app.models import (
 from app.models.integration import IntegrationPlatform
 from app.security.cipher import encrypt_json
 from app.services.conciliacao_amazon import (
+    BRT,
     ROTA_TRANSACOES,
     conta_amazon_de_quebras,
     quebras_da_transacao,
@@ -790,10 +791,12 @@ async def test_ingerir_csv_amazon_grava_atualiza_e_nao_duplica(db, make_user):
     movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
     assert len(movs) == 9 and all(m.saldo_apos is not None for m in movs)
     assert loja.ultimo_extrato_em == agora
-    # o mesmo arquivo de novo, com a linha presa já liberada
-    depois = CSV_KFA.replace('"15/10/2026","Diferido"', '"15/10/2026","Liberado"')
+    # o mesmo arquivo de novo, com a linha presa já liberada (a Amazon põe a data da
+    # liberação na linha — 16/10, revisão)
+    depois = CSV_KFA.replace('"15/10/2026","Diferido"', '"18/10/2026","Liberado"')
     r2 = await ingerir_csv_amazon(db, loja, depois, agora=agora + timedelta(days=2))
-    assert r2["inseridos"] == 0 and r2["atualizados"] == 1 and r2["ja_existiam"] == 8
+    assert r2["inseridos"] == 0 and r2["liberadas"] == 1 and r2["ja_existiam"] == 8
+    assert r2["atualizados"] == 0
     movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
     assert len(movs) == 9
     liberada = next(
@@ -802,7 +805,9 @@ async def test_ingerir_csv_amazon_grava_atualiza_e_nao_duplica(db, make_user):
         if m.pedido_marketplace == "702-7077353-9607430" and m.tipo == "venda_liberada"
     )
     assert liberada.sub_tipo == "RELEASED" and "preso" not in liberada.descricao
+    assert liberada.descricao.endswith("· liberado em 18/10")
     assert liberada.raw["_liberado_em"].startswith("2026-10-18")
+    assert liberada.data.astimezone(BRT).date() == date(2026, 10, 15)  # fica na data do lançamento
     syncs = (await db.execute(select(ConciliacaoSync))).scalars().all()
     assert sorted(s.chave for s in syncs) == [
         "upload:2026-10-16T13:00:00.000000",
@@ -993,3 +998,102 @@ async def test_loja_por_arquivo_tem_a_venda_das_proprias_transacoes(db, make_use
     assert p.venda_tarifa == Decimal("53.98") and p.venda_cupom == Decimal("38.70")
     assert p.venda_frete == Decimal("43.90")
     assert p.dif_previsto_recebido == Decimal("0.00")
+
+
+_CAB_KFA = CSV_KFA.split("\n")[0]
+_PRESA_02 = (
+    '"02/10/2026","Diferido","Crédito Mastercard e outros","Pagamento do pedido",'
+    '"701-5141233-9704209","CHARLOT\'S PARK Mala de Bordo 20 Polegada...","267","0","-41.39",'
+    '"0","225.61"'
+)
+_LIBERADA_16 = _PRESA_02.replace('"02/10/2026","Diferido"', '"16/10/2026","Liberado"')
+_ETIQUETA_02 = (
+    '"02/10/2026","Liberado","Crédito Mastercard e outros","Cobranças do Delivery by Amazon",'
+    '"701-5141233-9704209","Faturamento","0","0","-21.95","0","-21.95"'
+)
+CSV_300772_A = "\n".join([_CAB_KFA, _ETIQUETA_02, _PRESA_02])  # arquivo das 14:30 de 16/10
+CSV_300772_B = "\n".join([_CAB_KFA, _LIBERADA_16, _ETIQUETA_02])  # arquivo das 16:41
+
+
+async def test_venda_presa_que_libera_vem_com_outra_data_e_nao_entra_em_dobro(db, make_user):
+    """16/10 (revisão, KFA 300772): a Amazon reemite a linha presa com a DATA da
+    liberação ("02/10 Diferido" vira "16/10 Liberado"); com a data na identidade ela
+    entrava de novo (534 em vez de 267). Agora casa com a presa e fica na data do
+    lançamento, marcada "liberado em"."""
+    loja = await _loja_amazon(db, make_user)
+    loja.modo_extrato = "upload"
+    await db.commit()
+    t0 = datetime(2026, 10, 16, 17, 30, tzinfo=UTC)
+    r1 = await ingerir_csv_amazon(db, loja, CSV_300772_A, agora=t0)
+    assert r1["inseridos"] == 2 and r1["liberadas"] == 0
+    r2 = await ingerir_csv_amazon(db, loja, CSV_300772_B, agora=t0 + timedelta(hours=2))
+    assert r2["inseridos"] == 0 and r2["liberadas"] == 1 and r2["ja_existiam"] == 1
+    assert r2["duplicatas_apagadas"] == 0
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert len(movs) == 2
+    venda = next(m for m in movs if m.tipo == "venda_liberada")
+    assert venda.sub_tipo == "RELEASED" and venda.credito == Decimal("225.61")
+    assert venda.data.astimezone(BRT).date() == date(2026, 10, 2)
+    assert venda.descricao.endswith("· liberado em 16/10")
+    assert venda.raw["_liberado_em"].startswith("2026-10-16")
+    # o mesmo arquivo de novo: nada muda
+    r3 = await ingerir_csv_amazon(db, loja, CSV_300772_B, agora=t0 + timedelta(hours=3))
+    assert r3["inseridos"] == 0 and r3["liberadas"] == 0 and r3["ja_existiam"] == 2
+
+
+async def test_identidade_antiga_do_csv_e_reconhecida_e_a_duplicata_some(db, make_user):
+    """Linhas gravadas antes (identidade com a data) ganham o id novo; a presa que já
+    tinha entrado em dobro (300772: 02/10 presa + 16/10 liberada) vira uma só."""
+    from app.services.conciliacao_shopee import inserir_movimentos
+
+    loja = await _loja_amazon(db, make_user)
+    loja.modo_extrato = "upload"
+    await db.commit()
+    velhos: list[dict] = []
+    for texto in (CSV_300772_A, CSV_300772_B):
+        _cab, rows = ler_csv_amazon(texto)
+        for t in transacoes_do_csv(rows):
+            legado = t.pop("_idLegado")
+            m = transacao_para_movimento(t)
+            m["id_externo"] = legado
+            if legado not in {v["id_externo"] for v in velhos}:
+                velhos.append(m)
+    assert len(velhos) == 3  # etiqueta, presa de 02/10 e liberada de 16/10 (em dobro)
+    assert await inserir_movimentos(db, loja, velhos) == 3
+    await db.commit()
+    r = await ingerir_csv_amazon(
+        db, loja, CSV_300772_B, agora=datetime(2026, 10, 17, 9, tzinfo=UTC)
+    )
+    assert r["migrados"] == 2 and r["inseridos"] == 0 and r["duplicatas_apagadas"] == 1
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert len(movs) == 2 and all(not m.id_externo.endswith("#2") for m in movs)
+    venda = next(m for m in movs if m.tipo == "venda_liberada")
+    assert venda.sub_tipo == "RELEASED" and venda.data.astimezone(BRT).date() == date(2026, 10, 2)
+    assert venda.descricao.endswith("· liberado em 16/10")
+    assert venda.raw["_liberado_em"].startswith("2026-10-16")
+
+
+async def test_repeticao_liberada_com_original_fora_da_janela_casa_com_o_banco(db, make_user):
+    """16/10 (revisão): a repetição RELEASED só era reconhecida se o lançamento original
+    viesse no mesmo lote; fora da janela de 21 dias entrava de novo (kia 301678)."""
+    loja = await _loja_amazon(db, make_user)
+    original = _venda_proprio(status="DEFERRED", posted="2026-10-06T14:00:00Z")
+    cliente = _AmazonFalsa([original])
+    assert (await run_amazon_sync(db, loja, cliente, agora=AGORA))["inseridos"] == 1
+    # 22 dias depois a janela não traz mais o original; só a repetição
+    repeticao = _venda_proprio(status="RELEASED", posted="2026-10-14T03:00:00Z")
+    repeticao["transactionId"] = "tx-proprio-liberado"
+    cliente.transacoes = [repeticao]
+    # (a leitura começa 21 dias antes da última; o original de 06/10 já ficou de fora)
+    depois = AGORA + timedelta(days=10)
+    r2 = await run_amazon_sync(db, loja, cliente, agora=depois)
+    assert r2["duplicatas_no_banco"] == 1 and r2["inseridos"] == 0
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert len(movs) == 1 and movs[0].sub_tipo == "DEFERRED_RELEASED"
+    assert movs[0].descricao.endswith("· liberado em 14/10")
+    assert movs[0].raw["_liberado_em"].startswith("2026-10-14")
+    assert movs[0].raw["_repeticao"] == "tx-proprio-liberado"
+    # a rodada seguinte traz a mesma repetição: continua uma só, sem reescrever
+    r3 = await run_amazon_sync(db, loja, cliente, agora=depois + timedelta(days=1))
+    assert r3["duplicatas_no_banco"] == 1 and r3["inseridos"] == 0 and r3["atualizados"] == 0
+    assert len((await db.execute(select(ConciliacaoMovimento))).scalars().all()) == 1

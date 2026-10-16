@@ -163,11 +163,17 @@ async def sincronizar_loja(
                     resultado["dias"] = {"erro": f"{type(e).__name__}: {str(e)[:200]}"}
                     logger.exception("conciliacao_fechar_dias_unhandled", loja=loja.conta)
                 await session.commit()
-            if all(
-                "erro" not in (resultado.get(k) or {}) for k in ("fatura", "extrato", "recalculo")
+            # 16/10 (revisão): os leitores devolvem "erros" (lista) e o fim da rodada só
+            # olhava "erro" — a falha sumia e o dia ficava "sem movimento" (verde)
+            for k in ("extrato", "recalculo"):
+                texto = _erro_da_leitura(resultado.get(k))
+                if texto and not loja.ultimo_erro:
+                    loja.ultimo_erro = f"{k}: {texto[:280]}"
+            if not any(
+                _erro_da_leitura(resultado.get(k)) for k in ("fatura", "extrato", "recalculo")
             ):
                 loja.ultimo_erro = None
-                await session.commit()
+            await session.commit()
         resultado["quando"] = datetime.now(UTC).isoformat()
         logger.info(
             "conciliacao_rodada", **{k: v for k, v in resultado.items() if k in ("loja", "quando")}
@@ -266,6 +272,23 @@ async def rodar_todas(*, fatura: bool, extrato: bool, recalculo: bool) -> list[d
 
 FECHADO_PELO_ROBO = "robô"
 _BRT = ZoneInfo("America/Sao_Paulo")
+
+
+def _erro_da_leitura(res: Any) -> str | None:
+    """Primeiro erro de um resultado de leitura: `erro` (texto) ou `erros` (lista)."""
+    if not isinstance(res, dict):
+        return None
+    if res.get("erro"):
+        return str(res["erro"])
+    erros = res.get("erros") or []
+    if not erros:
+        return None
+    e = erros[0]
+    if isinstance(e, dict):
+        texto = e.get("erro") or e.get("body") or e
+        prefixo = e.get("janela") or e.get("extrato") or e.get("periodo")
+        return f"{prefixo}: {texto}" if prefixo else str(texto)
+    return str(e)
 
 
 async def fechar_dias_prontos(

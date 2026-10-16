@@ -818,7 +818,8 @@ async def test_recalcular_loja_classifica_as_situacoes(db, make_user):
             ),
         ]
     )
-    db.add(Refund(pedido_bling="299377", conta="jlas2", reembolso=20.0))
+    # reembolso ao cliente é gravado negativo (sinal da Margem); aqui vira 20,00 que SAIU
+    db.add(Refund(pedido_bling="299377", conta="jlas2", tipo="Cliente", reembolso=-20.0))
     await db.commit()
 
     r = await calc.recalcular_loja(db, loja, agora=agora)
@@ -1605,6 +1606,7 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     assert any("fatura do ML não lida" in a["titulo"] for a in r.json()["agir"])
     assert r.json()["dias"][3]["pendentes"] == [{"conta": "jlas2", "motivo": "fatura não lida"}]
     loja.ultimo_erro = None
+    loja.ultimo_extrato_em = datetime.now(UTC) - timedelta(days=3)
     await db.commit()
     # um dia sem movimento e sem leitura: "extrato não lido"; com leitura: "sem movimento"
     r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-12"})
@@ -1982,3 +1984,32 @@ def test_ordem_do_dia_com_ancora_resolve_ciclo_no_mesmo_segundo():
     # sem âncora a prova dos nove parte da primeira linha (comportamento antigo)
     t2 = _totais_do_dia(_ordena_dia([reserva, pagamento]))
     assert t2["diferenca"] in (0.0, -362.15)
+
+
+def test_erro_da_leitura_le_erro_e_lista_de_erros():
+    """16/10 (revisão): os leitores devolvem `erros` (lista) e a rodada só olhava `erro`,
+    zerando o aviso da loja na mesma rodada."""
+    from app.services.conciliacao_jobs import _erro_da_leitura
+
+    assert _erro_da_leitura(None) is None
+    assert _erro_da_leitura({"inseridos": 2, "erros": []}) is None
+    assert _erro_da_leitura({"erro": "x"}) == "x"
+    assert (
+        _erro_da_leitura({"erros": [{"janela": "2026-10-01..2026-10-02", "erro": "HTTP 500"}]})
+        == "2026-10-01..2026-10-02: HTTP 500"
+    )
+    assert _erro_da_leitura({"erros": [{"extrato": "77", "erro": "timeout"}]}) == "77: timeout"
+    assert _erro_da_leitura({"erros": ["boom"]}) == "boom"
+
+
+def test_reabertura_olha_a_hora_em_que_a_linha_entrou_no_painel():
+    """16/10 (revisão): o relatório de ontem é lido hoje de madrugada — uma mediação de
+    ontem 10h não reabria o pedido finalizado ontem 15h (comparava a data da plataforma)."""
+    from types import SimpleNamespace
+
+    d = datetime(2026, 10, 15, 13, tzinfo=UTC)
+    assert calc._entrou_em(SimpleNamespace(data=d, created_at=None)) == d
+    assert calc._entrou_em(
+        SimpleNamespace(data=d, created_at=d + timedelta(days=1))
+    ) == d + timedelta(days=1)
+    assert calc._entrou_em(SimpleNamespace(data=d, created_at=d - timedelta(days=1))) == d

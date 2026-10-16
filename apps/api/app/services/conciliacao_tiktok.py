@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoSync, Integration
 from app.models.conciliacao import ORIGEM_TIKTOK
+from app.services.conciliacao_dias import reabrir_dias
 from app.services.conciliacao_extrato import bling_store_ids_da_loja, resolver_pedidos_bling
 from app.services.conciliacao_shopee import inserir_movimentos
 
@@ -208,7 +209,10 @@ def repasse_para_movimento(
         descricao += f" · pago {pago_em.astimezone(BRT):%d/%m %H:%M}"
     return {
         "origem": ORIGEM_TIKTOK,
-        "id_externo": f"repasse:{pid or sid}",
+        # identidade pelo EXTRATO (16/10, revisão): um pagamento pode cobrir vários
+        # extratos (fim de semana pago junto com segunda) — pelo nº do pagamento só o
+        # primeiro ganhava a linha e 33 extratos (R$ 95 mil) ficaram sem repasse
+        "id_externo": f"repasse:{sid or pid}",
         "data": quando + timedelta(seconds=ordem),
         "tipo": "saque",
         "descricao": descricao,
@@ -324,6 +328,71 @@ async def _sync_row(session: AsyncSession, loja: ConciliacaoLoja, chave: str) ->
     return row
 
 
+async def _reparar_repasses(
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    extratos: list[dict[str, Any]],
+    repasses: dict[str, dict[str, Any]],
+    rows_sync: dict[str, ConciliacaoSync],
+    agora: datetime,
+) -> dict[str, Any]:
+    """Repasse gravado com a identidade antiga (nº do pagamento) ganha a do extrato que
+    ele representa; extrato pago e já lido sem a sua linha de repasse ganha uma — e o
+    dia, se estava fechado, reabre pra conferência (fecha de novo sozinho se bater)."""
+    gravados = {
+        m.id_externo: m
+        for m in (
+            await session.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_TIKTOK,
+                    ConciliacaoMovimento.id_externo.like("repasse:%"),
+                )
+            )
+        ).scalars()
+    }
+    renomeados = 0
+    for m in list(gravados.values()):
+        sid = str(((m.raw or {}).get("statement") or {}).get("id") or "")
+        novo = f"repasse:{sid}"
+        if sid and m.id_externo != novo and novo not in gravados:
+            gravados.pop(m.id_externo)
+            m.id_externo = novo
+            gravados[novo] = m
+            renomeados += 1
+    if renomeados:
+        await session.flush()
+    recuperados: list[str] = []
+    dias: set[date] = set()
+    for st in extratos:
+        sid = str(st.get("id") or "")
+        status = str(st.get("payment_status") or "").upper()
+        row = rows_sync.get(sid)
+        if not sid or status != "PAID" or row is None or row.status != "lido":
+            continue
+        if f"repasse:{sid}" in gravados:
+            continue
+        pid = str(st.get("payment_id") or "")
+        rep = repasse_para_movimento(st, repasses.get(pid), ordem=int(row.linhas or 0))
+        if rep is None:
+            continue
+        if await inserir_movimentos(session, loja, [rep]):
+            row.linhas = int(row.linhas or 0) + 1
+            row.detalhe = {**(row.detalhe or {}), "repasse_recuperado_em": agora.isoformat()}
+            recuperados.append(sid)
+            dias.add(dia_do_extrato(st))
+    reabertos = await reabrir_dias(session, loja, dias, motivo="repasse da TikTok recuperado")
+    if renomeados or recuperados:
+        logger.info(
+            "conciliacao_tiktok_repasses_reparados",
+            loja=loja.conta,
+            renomeados=renomeados,
+            recuperados=recuperados,
+            dias_reabertos=reabertos,
+        )
+    return {"renomeados": renomeados, "recuperados": recuperados, "dias_reabertos": reabertos}
+
+
 async def run_tiktok_sync(
     session: AsyncSession,
     loja: ConciliacaoLoja,
@@ -371,6 +440,9 @@ async def run_tiktok_sync(
         resumo["erros"].append({"erro": f"{type(e).__name__}: {str(e)[:300]}"})
         logger.warning("conciliacao_tiktok_falhou", loja=loja.conta, erro=str(e)[:300])
         return resumo
+    resumo["repasses"] = await _reparar_repasses(
+        session, loja, extratos, repasses, rows_sync, agora
+    )
     for st in extratos:
         sid = str(st.get("id") or "")
         if not sid:
@@ -391,7 +463,7 @@ async def run_tiktok_sync(
                 existente.status = "lido"
                 existente.lido_em = agora
                 existente.erro = None
-                existente.linhas = int(existente.linhas or 0) + (1 if rep else 0)
+                existente.linhas = int(existente.linhas or 0) + novos
                 existente.detalhe = {**(existente.detalhe or {}), "pago": True, "payment_id": pid}
                 loja.ultimo_extrato_em = agora
                 resumo["pagos_agora"] += 1

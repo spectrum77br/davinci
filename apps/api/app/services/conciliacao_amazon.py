@@ -15,6 +15,7 @@ de venda ainda DEFERRED; o repasse pro banco é um Saque.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -249,7 +250,7 @@ def _tirar_duplicatas_de_liberacao(
         and m["pedido_marketplace"]
         and m["tipo"] in ("venda_liberada", "estorno")
     )
-    liberado_em: dict[tuple, list[datetime]] = defaultdict(list)
+    liberado_em: dict[tuple, list[tuple[datetime, str]]] = defaultdict(list)
     duplicadas: set[str] = set()
     for m in sorted(movs, key=lambda x: x["data"]):
         if (
@@ -262,13 +263,75 @@ def _tirar_duplicatas_de_liberacao(
         if originais[k] > 0:
             originais[k] -= 1
             duplicadas.add(m["id_externo"])
-            liberado_em[k].append(m["data"])
+            liberado_em[k].append((m["data"], m["id_externo"]))
     for m in movs:
         if m["sub_tipo"] == "DEFERRED_RELEASED" and liberado_em.get(chave(m)):
-            quando = liberado_em[chave(m)].pop(0)
+            quando, rep = liberado_em[chave(m)].pop(0)
             m["descricao"] = f"{m['descricao']} · liberado em {quando.astimezone(BRT):%d/%m}"
-            m["raw"] = {**m["raw"], "_liberado_em": quando.isoformat()}
+            m["raw"] = {**m["raw"], "_liberado_em": quando.isoformat(), "_repeticao": rep}
     return [m for m in movs if m["id_externo"] not in duplicadas], duplicadas
+
+
+async def _casar_repeticoes_no_banco(
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    movs: list[dict[str, Any]],
+    existentes: dict[str, ConciliacaoMovimento],
+) -> set[str]:
+    """RELEASED novo de pedido cujo lançamento original (DEFERRED/DEFERRED_RELEASED) já
+    está gravado e ainda não "consumiu" uma repetição: marca o original como liberado
+    e devolve os ids das repetições que não devem entrar."""
+    candidatos = [
+        m
+        for m in movs
+        if m["sub_tipo"] == "RELEASED"
+        and m["pedido_marketplace"]
+        and m["tipo"] in ("venda_liberada", "estorno")
+        and m["id_externo"] not in existentes
+    ]
+    if not candidatos:
+        return set()
+    originais = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_AMAZON,
+                    ConciliacaoMovimento.pedido_marketplace.in_(
+                        sorted({m["pedido_marketplace"] for m in candidatos})
+                    ),
+                    ConciliacaoMovimento.sub_tipo.in_(["DEFERRED", "DEFERRED_RELEASED"]),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    por_chave: dict[tuple, list[ConciliacaoMovimento]] = defaultdict(list)
+    for o in originais:
+        por_chave[(o.pedido_marketplace, o.tipo, o.credito, o.debito)].append(o)
+    casadas: set[str] = set()
+    for m in sorted(candidatos, key=lambda x: x["data"]):
+        k = (m["pedido_marketplace"], m["tipo"], m["credito"], m["debito"])
+        for o in por_chave.get(k, []):
+            rep = (o.raw or {}).get("_repeticao")
+            if rep and rep != m["id_externo"]:
+                continue  # esse original já tem a sua repetição; procura outro
+            if rep is None:
+                quando = m["data"]
+                o.sub_tipo = "DEFERRED_RELEASED"
+                base = (o.descricao or "").split(" · liberado em ")[0]
+                o.descricao = f"{base} · liberado em {quando.astimezone(BRT):%d/%m}"
+                o.raw = {
+                    **(o.raw or {}),
+                    "_liberado_em": quando.isoformat(),
+                    "_repeticao": m["id_externo"],
+                }
+            casadas.add(m["id_externo"])
+            break
+    if casadas:
+        await session.flush()
+    return casadas
 
 
 async def ler_transacoes(
@@ -419,6 +482,13 @@ async def run_amazon_sync(
             )
         ).scalars()
     }
+    # repetição cujo original já saiu da janela de leitura (16/10, revisão: a partir de
+    # ~22 dias a liberação voltava a entrar em dobro): casa com o que está no banco
+    casadas = await _casar_repeticoes_no_banco(session, loja, movs, existentes)
+    if casadas:
+        movs = [m for m in movs if m["id_externo"] not in casadas]
+        resumo["duplicatas_no_banco"] = len(casadas)
+        resumo["lidas"] = len(movs)
     # duplicata que já tinha entrado (gravada pelo robô, sem mexida humana): sai
     if duplicadas:
         velhas = (

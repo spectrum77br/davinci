@@ -15,6 +15,7 @@ from app.models import (
     Integration,
     StoreInfo,
 )
+from app.models.conciliacao import ConciliacaoDia
 from app.models.integration import IntegrationPlatform
 from app.security.cipher import encrypt_json
 from app.services.conciliacao_calculo import conta_tiktok_de_transacoes, recalcular_loja
@@ -218,7 +219,7 @@ def test_transacao_e_repasse_viram_movimentos():
     rep = repasse_para_movimento(st, _repasse(900, "344.45", date(2026, 10, 14)), ordem=2)
     assert rep["tipo"] == "saque" and rep["debito"] == Decimal("344.45")
     assert rep["saldo_apos"] == Decimal("0") and rep["classificacao"] == "saque"
-    assert rep["id_externo"] == "repasse:900" and rep["pagamento_id"] == "900"
+    assert rep["id_externo"] == "repasse:1" and rep["pagamento_id"] == "900"
     assert "***1234" in rep["descricao"] and "pago 14/10 00:23" in rep["descricao"]
     assert rep["data"] == datetime(2026, 10, 14, 3, 0, 2, tzinfo=UTC)
     assert transacao_para_movimento({"type": "ORDER"}, st, ordem=0, saldo_apos=Decimal(0)) is None
@@ -562,3 +563,79 @@ async def test_liquidacao_zerada_sem_pedido_no_bling_nao_trava_o_dia(
     assert linha["status"] == "classificado" and linha["classificacao"] == "outro"
     assert "zerada" in linha["descricao"] and linha["credito"] == 0 and linha["debito"] == 0
     assert corpo["contagem"]["pendente"] == 0 and corpo["totais"]["diferenca"] == 0
+
+
+async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_antigos(db, make_user):
+    """16/10 (revisão): um pagamento cobria sábado, domingo e segunda; com a identidade
+    pelo nº do pagamento só o 1º extrato ganhava "Repasse pro banco" (33 extratos, R$ 95
+    mil sem repasse) e os dias fechavam "batendo". Agora: um repasse por extrato, e a
+    rodada repara o que já estava gravado, reabrindo os dias pra conferência."""
+    loja = await _loja_tiktok(db, make_user)
+    d10, d11, d12 = date(2026, 10, 10), date(2026, 10, 11), date(2026, 10, 12)
+    e1 = _extrato(1, d10, "344.45", 905)
+    e2 = _extrato(2, d11, "200.00", 905)
+    e3 = _extrato(3, d12, "100.00", 905)
+    redondo = {"seller_disc": "0", "commission": "0", "tx_fee": "0", "affiliate": "0", "fee": "0"}
+    cliente = _TikTokFalsa(
+        [e1, e2, e3],
+        {
+            "1": [_tx(10, PEDIDO)],
+            "2": [
+                _tx(20, PEDIDO, gross="200", apos="200", revenue="200", settlement="200", **redondo)
+            ],
+            "3": [
+                _tx(30, PEDIDO, gross="100", apos="100", revenue="100", settlement="100", **redondo)
+            ],
+        },
+        [_repasse(905, "644.45", d12)],
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r["inseridos"] == 6 and not r["erros"]
+    assert r["repasses"] == {"renomeados": 0, "recuperados": [], "dias_reabertos": []}
+
+    async def saques():
+        return (
+            (
+                await db.execute(
+                    select(ConciliacaoMovimento)
+                    .where(ConciliacaoMovimento.tipo == "saque")
+                    .order_by(ConciliacaoMovimento.data)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    s = await saques()
+    assert [x.id_externo for x in s] == ["repasse:1", "repasse:2", "repasse:3"]
+    assert [x.debito for x in s] == [Decimal("344.45"), Decimal("200.00"), Decimal("100.00")]
+    assert {x.pagamento_id for x in s} == {"905"}
+    # estado antigo em produção: só o 1º extrato com repasse (id pelo pagamento)…
+    await db.delete(s[1])
+    await db.delete(s[2])
+    s[0].id_externo = "repasse:905"
+    await db.commit()
+    # …e os dias fechados pelo robô "batendo" (o saldo sintético não tinha com o que comparar)
+    fechados = await fechar_dias_prontos(db, loja)
+    assert {"2026-10-11", "2026-10-12"} <= set(fechados["fechados"])
+    await db.commit()
+    # rodada seguinte: a linha velha ganha o id do extrato, os repasses que faltavam
+    # entram e os dias reabrem
+    cliente.chamadas.clear()
+    r2 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r2["repasses"] == {
+        "renomeados": 1,
+        "recuperados": ["2", "3"],
+        "dias_reabertos": ["2026-10-11", "2026-10-12"],
+    }
+    assert not any("/statement_transactions" in p for p, _ in cliente.chamadas)
+    s = await saques()
+    assert [x.id_externo for x in s] == ["repasse:1", "repasse:2", "repasse:3"]
+    assert [x.debito for x in s] == [Decimal("344.45"), Decimal("200.00"), Decimal("100.00")]
+    dias = (await db.execute(select(ConciliacaoDia).order_by(ConciliacaoDia.dia))).scalars().all()
+    assert all(d.fechado_em is None for d in dias if d.dia in (d11, d12))
+    # terceira rodada: nada a reparar; e o robô fecha de novo, agora com o repasse
+    r3 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r3["repasses"] == {"renomeados": 0, "recuperados": [], "dias_reabertos": []}
+    fechados = await fechar_dias_prontos(db, loja)
+    assert {"2026-10-11", "2026-10-12"} <= set(fechados["fechados"])

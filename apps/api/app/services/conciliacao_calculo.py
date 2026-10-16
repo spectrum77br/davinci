@@ -340,6 +340,14 @@ def _previsao_do_unsettled(raw: Any) -> datetime | None:
     return datetime.fromtimestamp(n, tz=UTC) if n > 10**9 else None
 
 
+def _entrou_em(m: Any) -> datetime:
+    """Quando a linha chegou ao painel (16/10, revisão): o relatório do dia é lido de
+    madrugada, então um movimento de ontem às 10h só existe aqui hoje — comparando pela
+    data da plataforma, o pedido finalizado ontem às 15h não reabria."""
+    criado = getattr(m, "created_at", None)
+    return max(m.data, criado) if criado else m.data
+
+
 def situacao_do_pedido(
     *,
     agora: datetime,
@@ -377,7 +385,7 @@ def situacao_do_pedido(
         if liberado_em
         else None
     )
-    ultimo_mov = max((m.data for m in movs_extrato), default=None)
+    ultimo_mov = max((_entrou_em(m) for m in movs_extrato), default=None)
     cancelada = _venda_cancelada(venda)
     venda_valor = _d(venda.gross_amount) if venda else None
     venda_liquido = _d(venda.net_amount) if venda else None
@@ -694,10 +702,14 @@ async def recalcular_loja(
             )
         )
     ).all()
+    # O painel Reembolso grava com o sinal da Margem (ao cliente = negativo; "Saldo
+    # Final = Saldo Efetivo + reembolso"). Aqui "reembolso" é o que SAIU: inverte o
+    # sinal pra que Sobrou = recebido − custo − reembolso desconte de verdade
+    # (16/10, revisão: Inova 300489 mostrava −7,38 em vez de −43,60).
     reembolso_por_numero: dict[str, Decimal] = defaultdict(lambda: ZERO)
     for numero, valor in reembolsos:
         if numero and valor:
-            reembolso_por_numero[str(numero)] += _d(valor) or ZERO
+            reembolso_por_numero[str(numero)] -= _d(valor) or ZERO
     nomes_situacao = {
         str(i): n
         for i, n in (await session.execute(select(SituacaoBling.id, SituacaoBling.nome))).all()

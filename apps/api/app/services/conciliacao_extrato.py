@@ -793,10 +793,14 @@ async def run_extrato_sync(
             if texto is None:
                 continue
             try:
-                stats = await ingerir_csv(session, loja, texto)
+                # savepoint (16/10, revisão): um erro de banco na ingestão deixava a
+                # transação quebrada — nem o erro gravava e a loja travava sem rastro
+                async with session.begin_nested():
+                    stats = await ingerir_csv(session, loja, texto)
             except Exception as e:  # noqa: BLE001
                 r.erro = f"{type(e).__name__}: {str(e)[:300]}"
                 resumo["erros"].append({"janela": r.chave, "erro": r.erro})
+                loja.ultimo_erro = f"extrato {r.chave}: {r.erro[:200]}"
                 logger.exception(
                     "conciliacao_extrato_ingestao_falhou", loja=loja.conta, janela=r.chave
                 )

@@ -21,6 +21,7 @@ import hmac
 import io
 import re
 import secrets
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -147,23 +148,26 @@ def linha_para_transacao(row: dict[str, str], *, ordem: int) -> dict[str, Any] |
         quebras.append(_quebra("AmazonFees", tarifas, [_quebra(sub, tarifas)]))
     if outros:
         quebras.append(_quebra("Other", outros))
-    chave = "|".join(
-        [
-            row.get(COLUNAS["data"], ""),
-            row.get(COLUNAS["grupo"], ""),
-            tipo_csv,
-            pedido or "",
-            detalhes,
-            str(produto),
-            str(promocao),
-            str(tarifas),
-            str(outros),
-            str(total),
-        ]
-    )
-    tid = "upload:" + hashlib.sha1(chave.encode("utf-8"), usedforsecurity=False).hexdigest()[:24]
+    # Identidade SEM a data (16/10, revisão): quando a Amazon libera a venda presa, a
+    # mesma linha volta no arquivo seguinte com a data da liberação ("02/10 Diferido"
+    # vira "16/10 Liberado") — com a data na chave ela entrava de novo (300772 em dobro).
+    partes = [
+        row.get(COLUNAS["grupo"], ""),
+        tipo_csv,
+        pedido or "",
+        detalhes,
+        str(produto),
+        str(promocao),
+        str(tarifas),
+        str(outros),
+        str(total),
+    ]
+    tid = _hash_upload("|".join(partes))
+    # a chave antiga (com a data) só pra reconhecer o que já estava gravado
+    legado = _hash_upload("|".join([row.get(COLUNAS["data"], ""), *partes]))
     return {
         "transactionId": tid,
+        "_idLegado": legado,
         "transactionType": tipo_amz,
         "transactionStatus": STATUS_CSV.get(status_csv.lower(), status_csv.upper() or "RELEASED"),
         "postedDate": (quando + timedelta(seconds=ordem)).isoformat(),
@@ -180,6 +184,10 @@ def linha_para_transacao(row: dict[str, str], *, ordem: int) -> dict[str, Any] |
         "_tipo_csv": tipo_csv,
         "_status_csv": status_csv,
     }
+
+
+def _hash_upload(chave: str) -> str:
+    return "upload:" + hashlib.sha1(chave.encode("utf-8"), usedforsecurity=False).hexdigest()[:24]
 
 
 def transacoes_do_csv(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -199,8 +207,32 @@ def transacoes_do_csv(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
         vistos[tx["transactionId"]] = n
         if n > 1:
             tx["transactionId"] = f"{tx['transactionId']}#{n}"
+        nl = vistos.get(tx["_idLegado"], 0) + 1
+        vistos[tx["_idLegado"]] = nl
+        if nl > 1:
+            tx["_idLegado"] = f"{tx['_idLegado']}#{nl}"
         txs.append(tx)
     return txs
+
+
+def _chave_gemea(m: Any) -> tuple:
+    """Pedido + tipo + valor: a linha presa e a liberada do mesmo lançamento."""
+    pedido = m["pedido_marketplace"] if isinstance(m, dict) else m.pedido_marketplace
+    tipo = m["tipo"] if isinstance(m, dict) else m.tipo
+    credito = m["credito"] if isinstance(m, dict) else m.credito
+    debito = m["debito"] if isinstance(m, dict) else m.debito
+    return (pedido, tipo, Decimal(str(credito or 0)), Decimal(str(debito or 0)))
+
+
+def _marcar_liberada(ex: ConciliacaoMovimento, m: dict[str, Any]) -> None:
+    """Linha presa na reserva que o arquivo agora traz liberada (com a data da
+    liberação): fica na data do lançamento, marcada "liberado em" — como na API."""
+    quando = m["data"]
+    ex.sub_tipo = "RELEASED"
+    ex.descricao = f"{m['descricao']} · liberado em {quando.astimezone(BRT):%d/%m}"
+    ex.raw = {**m["raw"], "_liberado_em": quando.isoformat()}
+    if not ex.pedido_bling and m["pedido_bling"] and not ex.vinculado_por:
+        ex.pedido_bling, ex.bling_id = m["pedido_bling"], m["bling_id"]
 
 
 async def ingerir_csv_amazon(
@@ -209,6 +241,7 @@ async def ingerir_csv_amazon(
     agora = agora or datetime.now(UTC)
     _cab, rows = ler_csv_amazon(texto)
     txs = transacoes_do_csv(rows)
+    legados = {t["transactionId"]: t.pop("_idLegado", None) for t in txs}
     movs = [m for m in (transacao_para_movimento(t) for t in txs) if m]
     integration = await session.get(Integration, loja.integration_id)
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
@@ -218,6 +251,7 @@ async def ingerir_csv_amazon(
         achado = mapa.get(m["pedido_marketplace"] or "")
         if achado:
             m["pedido_bling"], m["bling_id"] = achado
+    ids_arquivo = [m["id_externo"] for m in movs] + [v for v in legados.values() if v]
     existentes = {
         m.id_externo: m
         for m in (
@@ -225,35 +259,103 @@ async def ingerir_csv_amazon(
                 select(ConciliacaoMovimento).where(
                     ConciliacaoMovimento.integration_id == loja.integration_id,
                     ConciliacaoMovimento.origem == ORIGEM_AMAZON,
-                    ConciliacaoMovimento.id_externo.in_([m["id_externo"] for m in movs] or ["-"]),
+                    ConciliacaoMovimento.id_externo.in_(ids_arquivo or ["-"]),
                 )
             )
         ).scalars()
     }
+    # linhas presas na reserva já gravadas (por qualquer identidade): a candidata a
+    # "gêmea" de uma linha liberada do mesmo pedido e valor
+    presas: dict[tuple, list[ConciliacaoMovimento]] = defaultdict(list)
+    for p in (
+        await session.execute(
+            select(ConciliacaoMovimento).where(
+                ConciliacaoMovimento.integration_id == loja.integration_id,
+                ConciliacaoMovimento.origem == ORIGEM_AMAZON,
+                ConciliacaoMovimento.id_externo.like("upload:%"),
+                ConciliacaoMovimento.sub_tipo == "DEFERRED",
+            )
+        )
+    ).scalars():
+        presas[_chave_gemea(p)].append(p)
     novos: list[dict[str, Any]] = []
-    atualizados = 0
+    atualizados = migrados = liberadas = 0
     por_tipo: dict[str, int] = {}
+    usados: set = set()
     for m in movs:
         por_tipo[m["tipo"]] = por_tipo.get(m["tipo"], 0) + 1
         ex = existentes.get(m["id_externo"])
         if ex is None:
+            leg = legados.get(m["id_externo"])
+            ex = existentes.get(leg) if leg else None
+            if ex is not None:
+                # gravada antes da identidade nova: só troca o id
+                existentes.pop(leg)
+                ex.id_externo = m["id_externo"]
+                existentes[m["id_externo"]] = ex
+                migrados += 1
+        if ex is None and m["sub_tipo"] == "RELEASED" and m["pedido_marketplace"]:
+            fila = [p for p in presas.get(_chave_gemea(m), []) if p.id not in usados]
+            if fila:
+                # a venda presa liberou: é a MESMA linha, com a data da liberação no
+                # arquivo — fica na data do lançamento, marcada "liberado em"
+                ex = fila[0]
+                usados.add(ex.id)
+                existentes[m["id_externo"]] = ex
+                ex.id_externo = m["id_externo"]
+                _marcar_liberada(ex, m)
+                liberadas += 1
+                continue
+        if ex is None:
             novos.append(m)
+            continue
+        usados.add(ex.id)
+        if m["sub_tipo"] == "RELEASED" and ex.sub_tipo == "DEFERRED":
+            # a presa liberou (a linha volta com a data da liberação): fica na data do
+            # lançamento, marcada "liberado em"
+            _marcar_liberada(ex, m)
+            liberadas += 1
             continue
         mudou = False
         if ex.sub_tipo != m["sub_tipo"]:
-            # preso na reserva → liberado: o arquivo não diz quando; fica a data do envio
-            raw = dict(m["raw"])
-            if m["sub_tipo"] == "RELEASED" and ex.sub_tipo == "DEFERRED":
-                raw["_liberado_em"] = agora.isoformat()
             ex.sub_tipo = m["sub_tipo"]
             ex.descricao = m["descricao"]
-            ex.raw = raw
+            ex.raw = dict(m["raw"])
             mudou = True
         if not ex.pedido_bling and m["pedido_bling"] and not ex.vinculado_por:
             ex.pedido_bling, ex.bling_id = m["pedido_bling"], m["bling_id"]
             mudou = True
         if mudou:
             atualizados += 1
+    # linha presa que o arquivo não traz mais e cuja liberada já está gravada (entrou em
+    # dobro pela identidade antiga — 300772): a presa sai; vínculo manual passa pra liberada
+    duplicatas_apagadas = 0
+    no_arquivo = {m["id_externo"] for m in movs}
+    liberadas_gravadas: dict[tuple, list[ConciliacaoMovimento]] = defaultdict(list)
+    for ex in existentes.values():
+        if ex.sub_tipo == "RELEASED" and ex.pedido_marketplace:
+            liberadas_gravadas[_chave_gemea(ex)].append(ex)
+    for chave, fila in presas.items():
+        for p in fila:
+            if p.id in usados or p.id_externo in no_arquivo:
+                continue
+            gemeas = [g for g in liberadas_gravadas.get(chave, []) if g.id != p.id]
+            if not gemeas:
+                continue
+            g = gemeas[0]
+            if p.vinculado_por and not g.vinculado_por:
+                g.vinculado_por, g.vinculado_em = p.vinculado_por, p.vinculado_em
+                g.pedido_bling, g.bling_id = p.pedido_bling, p.bling_id
+            if not g.raw.get("_liberado_em"):
+                g.raw = {**g.raw, "_liberado_em": g.data.isoformat()}
+            g.data = min(g.data, p.data)  # fica na data do lançamento, como a liberada normal
+            if "liberado em" not in (g.descricao or ""):
+                lib = g.raw["_liberado_em"]
+                g.descricao = f"{g.descricao} · liberado em {lib[8:10]}/{lib[5:7]}"
+            await session.delete(p)
+            duplicatas_apagadas += 1
+    if duplicatas_apagadas:
+        await session.flush()
     inseridos = await inserir_movimentos(session, loja, novos) if novos else 0
     saldo = await recalcular_saldo(session, loja)
     datas = [t["postedDate"][:10] for t in txs]
@@ -262,7 +364,10 @@ async def ingerir_csv_amazon(
         "movimentos": len(movs),
         "inseridos": inseridos,
         "atualizados": atualizados,
-        "ja_existiam": len(movs) - inseridos - atualizados,
+        "migrados": migrados,
+        "liberadas": liberadas,
+        "duplicatas_apagadas": duplicatas_apagadas,
+        "ja_existiam": len(movs) - inseridos - atualizados - liberadas,
         "de": min(datas) if datas else None,
         "ate": max(datas) if datas else None,
         "por_tipo": por_tipo,
