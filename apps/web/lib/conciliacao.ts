@@ -12,6 +12,8 @@ export const SITUACOES: Array<{ key: string; label: string; cls: string }> = [
   { key: 'cancelado', label: 'Cancelado', cls: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200' },
   { key: 'sem_venda', label: 'Venda não lida', cls: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200' },
   { key: 'falta_frete', label: 'Falta frete (Melhor Envio)', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
+  // 16/10 (revisão, aprovado): pedido que saiu da loja no Bling não some mais — fica marcado
+  { key: 'fora_da_loja', label: 'Saiu da loja', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
 ]
 
 export const ETAPAS: Array<{ key: string; label: string; cls: string }> = [

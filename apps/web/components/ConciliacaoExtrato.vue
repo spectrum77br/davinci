@@ -194,16 +194,29 @@ async function marcar(body: Record<string, unknown>) {
 
 // 16/10, revisão: fechar/reabrir usam a loja e o dia da resposta que está na tela
 // (props.loja podia já ter trocado e fechava o dia da loja errada).
-async function fecharDia() {
+async function fecharDia(motivo?: string) {
   if (!dados.value || !props.canEdit) return
   const { loja, dia: diaAlvo } = dados.value
   fechando.value = true
   try {
-    await api(`/api/conciliacao/dias/${diaAlvo}/fechar`, { method: 'POST', query: { loja } })
+    const query: Record<string, string> = { loja }
+    if (motivo) query.motivo = motivo
+    await api(`/api/conciliacao/dias/${diaAlvo}/fechar`, { method: 'POST', query })
     toasts.success?.('dia fechado')
     await carregar()
   } catch (e: any) {
     const d = e?.data?.detail
+    if (d?.code === 'saldo_nao_bate' && !motivo) {
+      // 16/10 (revisão, aprovado): com o saldo diferente só fecha com motivo, que fica
+      // gravado no dia
+      fechando.value = false
+      const texto = window.prompt(
+        `${d.mensagem || 'o saldo não bate'}\n\nMotivo pra fechar assim mesmo (fica gravado no dia):`,
+        '',
+      )
+      if (texto && texto.trim()) await fecharDia(texto.trim())
+      return
+    }
     toasts.error?.(
       d?.code === 'dia_com_pendencias'
         ? `${d.pendentes} linha(s) ainda sem destino`
