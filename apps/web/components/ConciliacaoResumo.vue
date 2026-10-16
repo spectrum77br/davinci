@@ -301,6 +301,7 @@ onMounted(() => {
       </div>
 
       <div class="grid gap-3 xl:grid-cols-[1fr_400px]">
+        <div class="flex min-w-0 flex-col gap-3">
         <div class="flex min-w-0 flex-col rounded-md border bg-card">
           <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
             <span>Lojas — situação de {{ fmtDia(dados.dia + 'T12:00:00') }} e pendências abertas</span>
@@ -363,6 +364,43 @@ onMounted(() => {
           </div>
           <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
             "Situação": <b>dia fechado</b> = alguém fechou (100% das linhas com destino e saldo batendo) · <b>pronto pra fechar</b> = tudo casou, falta só fechar · <b>não fechou</b> = tem linha sem dono ou saldo diferente · <b>aguardando o repasse</b> = a TikTok fechou o extrato mas ainda não pagou (o robô fecha o dia quando pagar). Depois do dia fechado, o que aconteceu nele (estornado, reaberto, recebido a menos, vencido) vira <b>obs</b> em cinza; os números continuam nas colunas. Cada marketplace começa escondido; "mostrar" abre as lojas.
+          </div>
+        </div>
+        <div class="flex min-w-0 flex-col rounded-md border bg-card">
+          <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+            <span>Dias — como ficou cada dia das {{ dados.lojas.length }} lojas (últimos {{ dados.dias.length }})</span>
+            <span class="text-[10px] font-normal text-white/80">clique no dia muda a tabela de cima</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th class="border-b px-2 py-1 text-left">Dia</th>
+                  <th class="border-b px-2 py-1 text-right">Fechados</th>
+                  <th class="border-b px-2 py-1 text-right">Sem movimento</th>
+                  <th class="border-b px-2 py-1 text-right">Aguard. repasse</th>
+                  <th class="border-b px-2 py-1 text-right">Com pendência</th>
+                  <th class="border-b px-2 py-1 text-left">Como ficou</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="d in dados.dias" :key="d.dia" class="cursor-pointer border-b hover:bg-muted/40" :class="d.dia === dados.dia && 'bg-amber-50 dark:bg-amber-950/20'" @click="escolherDia(d.dia)">
+                  <td class="whitespace-nowrap px-2 py-1 font-bold">{{ fmtDia(d.dia + 'T12:00:00') }}<span v-if="d.dia === ontemISO()" class="font-normal text-muted-foreground"> (ontem)</span></td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ d.fechados }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ d.sem_movimento }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ d.aguardando_repasse }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums font-bold" :class="d.com_pendencia ? 'text-amber-700' : ''">{{ d.com_pendencia }}</td>
+                  <td class="px-2 py-1">
+                    <span v-if="d.com_pendencia" class="mr-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ d.com_pendencia }} com pendência</span>
+                    <span v-else class="mr-1 inline-block rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">todos fechados</span>
+                    <span v-if="d.pendentes.length" class="text-muted-foreground"><template v-for="(p, i) in d.pendentes.slice(0, 6)" :key="p.conta"><template v-if="i"> · </template><b class="text-foreground">{{ p.conta }}</b> {{ p.motivo }}</template><template v-if="d.pendentes.length > 6"> · +{{ d.pendentes.length - 6 }}</template></span>
+                    <span v-if="d.obs.length" class="text-muted-foreground"><span v-if="d.pendentes.length"> · </span>obs: {{ d.obs.join(' · ') }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Cada linha é um dia: quantas lojas fecharam, quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda têm pendência (linha sem dono, saldo diferente, extrato não lido ou pronto pra fechar). "Como ficou" diz o nome das lojas com pendência e a obs do que aconteceu no dia.</div>
           </div>
         </div>
 
@@ -461,42 +499,6 @@ onMounted(() => {
         </div>
         <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Pedidos pela data da venda, do dia 1º até o dia escolhido. "Recebido" é o que já entrou na conta; "Sobrou" e "Margem" só com dinheiro que entrou: sobrou = recebido − custo − reembolsos; cancelado não carrega custo. O fechamento completo, com a fatura do ML e a prova dos nove do caixa, está em "Fechamento do mês".</div>
       </div>
-      <div class="flex min-w-0 flex-col rounded-md border bg-card">
-        <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-          <span>Dias — como ficou cada dia das {{ dados.lojas.length }} lojas (últimos {{ dados.dias.length }})</span>
-          <span class="text-[10px] font-normal text-white/80">clique no dia muda a tabela de cima</span>
-        </div>
-        <div class="overflow-x-auto">
-          <table class="w-full text-xs">
-            <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
-              <tr>
-                <th class="border-b px-2 py-1 text-left">Dia</th>
-                <th class="border-b px-2 py-1 text-right">Fechados</th>
-                <th class="border-b px-2 py-1 text-right">Sem movimento</th>
-                <th class="border-b px-2 py-1 text-right">Aguard. repasse</th>
-                <th class="border-b px-2 py-1 text-right">Com pendência</th>
-                <th class="border-b px-2 py-1 text-left">Como ficou</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="d in dados.dias" :key="d.dia" class="cursor-pointer border-b hover:bg-muted/40" :class="d.dia === dados.dia && 'bg-amber-50 dark:bg-amber-950/20'" @click="escolherDia(d.dia)">
-                <td class="whitespace-nowrap px-2 py-1 font-bold">{{ fmtDia(d.dia + 'T12:00:00') }}<span v-if="d.dia === ontemISO()" class="font-normal text-muted-foreground"> (ontem)</span></td>
-                <td class="px-2 py-1 text-right tabular-nums">{{ d.fechados }}</td>
-                <td class="px-2 py-1 text-right tabular-nums">{{ d.sem_movimento }}</td>
-                <td class="px-2 py-1 text-right tabular-nums">{{ d.aguardando_repasse }}</td>
-                <td class="px-2 py-1 text-right tabular-nums font-bold" :class="d.com_pendencia ? 'text-amber-700' : ''">{{ d.com_pendencia }}</td>
-                <td class="px-2 py-1">
-                  <span v-if="d.com_pendencia" class="mr-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ d.com_pendencia }} com pendência</span>
-                  <span v-else class="mr-1 inline-block rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">todos fechados</span>
-                  <span v-if="d.pendentes.length" class="text-muted-foreground"><template v-for="(p, i) in d.pendentes.slice(0, 6)" :key="p.conta"><template v-if="i"> · </template><b class="text-foreground">{{ p.conta }}</b> {{ p.motivo }}</template><template v-if="d.pendentes.length > 6"> · +{{ d.pendentes.length - 6 }}</template></span>
-                  <span v-if="d.obs.length" class="text-muted-foreground"><span v-if="d.pendentes.length"> · </span>obs: {{ d.obs.join(' · ') }}</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Cada linha é um dia: quantas lojas fecharam, quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda têm pendência (linha sem dono, saldo diferente, extrato não lido ou pronto pra fechar). "Como ficou" diz o nome das lojas com pendência e a obs do que aconteceu no dia.</div>
-        </div>
     </template>
   </div>
 </template>
