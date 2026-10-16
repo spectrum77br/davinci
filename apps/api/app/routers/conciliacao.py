@@ -34,7 +34,7 @@ from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -884,10 +884,51 @@ async def listar_lojas(
                 if loja.ultimo_recalculo_em
                 else None,
                 "ultimo_erro": loja.ultimo_erro,
+                "modo_extrato": loja.modo_extrato,
             }
             for loja in await lojas_ativas(session)
         ]
     }
+
+
+@router.post("/amazon/upload")
+async def amazon_upload(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+    loja: Annotated[str, Form()],
+    arquivo: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
+    """Transações da Amazon por arquivo (loja com `modo_extrato = upload`, 16/10: KFA).
+    O CSV é o de Pagamentos › Visualizar transações › Fazer download, com "Todos os
+    tipos de conta" e o período escolhido (no máximo 600 transações por arquivo)."""
+    from app.services.conciliacao_amazon_csv import ingerir_csv_amazon
+
+    alvo = await _loja_ou_404(session, loja)
+    plataforma = getattr(alvo.platform, "value", str(alvo.platform))
+    if plataforma != "amazon" or alvo.modo_extrato != "upload":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "loja_nao_e_upload", "mensagem": "esta loja é lida pela API"},
+        )
+    dados = await arquivo.read()
+    if len(dados) > 5_000_000:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail={"code": "arquivo_grande"}
+        )
+    try:
+        texto = dados.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        texto = dados.decode("latin-1")
+    try:
+        stats = await ingerir_csv_amazon(session, alvo, texto)
+    except ValueError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "csv_invalido", "mensagem": str(e)},
+        ) from e
+    recalculo = await recalcular_loja(session, alvo)
+    await session.commit()
+    return {"loja": alvo.conta, "arquivo": arquivo.filename, **stats, "recalculo": recalculo}
 
 
 @router.get("/pedidos")
@@ -2589,6 +2630,7 @@ async def reabrir_dia(
 
 _ETAPAS_PENDENTES = ("pendencia", "reaberto")
 _ATRASO_EXTRATO = timedelta(hours=36)
+_ATRASO_UPLOAD = timedelta(days=7)  # loja por arquivo: alguém envia o CSV de vez em quando
 
 
 def _mes_range(mes: str | None) -> tuple[date, date]:
@@ -2751,6 +2793,7 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
     ).scalar_one()
     plataforma = getattr(loja.platform, "value", str(loja.platform))
     a_receber = None
+    nota = None
     if plataforma == "tiktok":
         # a TikTok não guarda saldo: o extrato vai pro banco; o que ela ainda não pagou
         # (extrato PROCESSING/FAILED) é "a receber"
@@ -2785,9 +2828,14 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
             na_conta = round(na_conta - preso, 2)
         a_liberar = (a_liberar or 0) + Decimal(str(preso))
         n_liberar = (n_liberar or 0) + int(n_preso or 0)
+        if loja.modo_extrato == "upload":
+            # o arquivo de transações não traz os repasses pro banco: o saldo não fecha
+            na_conta = saldo_em = None
+            nota = "por arquivo: repasses pro banco não entram"
     return {
         "na_conta": na_conta,
         "saldo_em": saldo_em,
+        "nota": nota,
         "a_liberar": _num(a_liberar or 0),
         "a_liberar_pedidos": int(n_liberar or 0),
         "preso": preso,
@@ -2877,8 +2925,9 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         mes["ajustes_meses_anteriores"], mes["ajustes_qtd"] = await _ajustes_anteriores(
             session, loja, mes_ini, dia + timedelta(days=1)
         )
+        limite_atraso = _ATRASO_UPLOAD if loja.modo_extrato == "upload" else _ATRASO_EXTRATO
         extrato_atrasado = dia >= loja.inicio and (
-            loja.ultimo_extrato_em is None or agora - loja.ultimo_extrato_em > _ATRASO_EXTRATO
+            loja.ultimo_extrato_em is None or agora - loja.ultimo_extrato_em > limite_atraso
         )
         saldo_bate = totais["diferenca"] is not None and abs(totais["diferenca"]) <= 0.05
         sem_movimento = totais["linhas"] == 0

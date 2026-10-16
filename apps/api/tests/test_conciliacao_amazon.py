@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from httpx import Response
@@ -25,7 +25,12 @@ from app.services.conciliacao_amazon import (
     run_amazon_sync,
     transacao_para_movimento,
 )
-from app.services.conciliacao_calculo import recalcular_loja
+from app.services.conciliacao_amazon_csv import (
+    ingerir_csv_amazon,
+    ler_csv_amazon,
+    transacoes_do_csv,
+)
+from app.services.conciliacao_calculo import conta_amazon_de_transacoes, recalcular_loja
 
 AGORA = datetime(2026, 10, 16, 12, tzinfo=UTC)
 PROPRIO = "701-5936812-5103405"
@@ -707,3 +712,126 @@ async def test_cancelado_no_bling_com_estorno_integral_e_cancelado(db, make_user
     ped = r.json()["pedido"]
     assert ped["situacao"] == "estornado_depois" and ped["etapa"] == "reaberto"
     assert ped["etapa_motivo"] == "deixou de ser cancelado (estornado_depois)"
+
+
+# --- por arquivo (KFA, 16/10) ---------------------------------------------------
+
+CSV_KFA = "\n".join(
+    [
+        '"Data","Status da transação","Grupo de Pagamento","Tipo de transação","ID do pedido",'
+        '"Detalhes do produto","Custo total do produto","Total de descontos promocionais",'
+        '"Tarifas da Amazon","Outros","(total) (BRL)"',
+        '"16/10/2026","Liberado","Boleto","Pagamento do pedido","701-4878844-1794663",'
+        '"Kit Mala de Despacho 24 e...","387","-38.7","-53.98","0","294.32"',
+        '"15/10/2026","Diferido","Crédito Mastercard e outros","Pagamento do pedido",'
+        '"702-7077353-9607430","Silicone de Reposição...","68","0","-8.16","0","59.84"',
+        '"15/10/2026","Liberado","Crédito Mastercard e outros","Tarifas de serviço",'
+        '"702-7077353-9607430","Delivery by Amazon Charges, Estorno do f...",'
+        '"0","0","-13","0","-13"',
+        '"12/10/2026","Liberado","Visa Crédito","Reembolso","701-9242808-9886657",'
+        '"Mala de Viagem 24...","-288","28.8","32.14","0","-227.06"',
+        '"08/10/2026","Liberado","Boleto","Cobranças do Delivery by Amazon","701-4878844-1794663",'
+        '"Faturamento","0","0","-21.95","0","-21.95"',
+        '"08/10/2026","Liberado","Boleto","Cobranças do Delivery by Amazon","701-4878844-1794663",'
+        '"Faturamento","0","0","-21.95","0","-21.95"',
+        '"07/10/2026","Liberado","Visa Crédito","Tarifas de serviço","---","Taxa de assinatura:",'
+        '"0","0","-19","0","-19"',
+        '"04/10/2026","Liberado","Visa Crédito","Pago à Amazon | Repagamento do vendedor","---",'
+        '"---","0","0","0","622.33","622.33"',
+        '"02/10/2026","Liberado","Visa Crédito","Tarifas de serviço","---","Custo de Publicidade",'
+        '"0","0","-338.42","0","-338.42"',
+    ]
+)
+
+
+def test_csv_da_amazon_vira_transacoes_iguais_as_da_api():
+    _cab, rows = ler_csv_amazon("\ufeff" + CSV_KFA)
+    assert len(rows) == 9
+    txs = transacoes_do_csv(rows)
+    assert len(txs) == 9
+    por_tipo = {t["_tipo_csv"]: t["transactionType"] for t in txs}
+    assert por_tipo["Pagamento do pedido"] == "Shipment"
+    assert por_tipo["Reembolso"] == "Refund"
+    assert por_tipo["Cobranças do Delivery by Amazon"] == "ServiceFee"
+    assert por_tipo["Pago à Amazon | Repagamento do vendedor"] == "DebtRecovery"
+    # linha repetida (duas cobranças iguais do mesmo pedido no mesmo dia): #2
+    ids = [t["transactionId"] for t in txs]
+    assert len(set(ids)) == 9 and any(i.endswith("#2") for i in ids)
+    movs = {m["descricao"]: m for m in (transacao_para_movimento(t) for t in txs)}
+    venda = movs["Lançamento do pedido 701-4878844-1794663"]
+    assert venda["tipo"] == "venda_liberada" and venda["credito"] == Decimal("294.32")
+    assert venda["sub_tipo"] == "RELEASED" and venda["bruto"] == Decimal("387")
+    presa = movs["Lançamento do pedido 702-7077353-9607430 (preso na reserva)"]
+    assert presa["sub_tipo"] == "DEFERRED"
+    etiqueta = movs["Etiqueta Easy Ship do pedido 702-7077353-9607430"]
+    assert etiqueta["tipo"] == "frete" and etiqueta["debito"] == Decimal("13")
+    assert movs["Etiqueta Easy Ship do pedido 701-4878844-1794663"]["tipo"] == "frete"
+    assert movs["Estorno do pedido 701-9242808-9886657"]["debito"] == Decimal("227.06")
+    assert movs["Tarifa da Amazon · Taxa de assinatura:"]["classificacao"] == "ajuste"
+    assert movs["Publicidade (Ads)"]["tipo"] == "publicidade"
+    cobranca = movs["Cobrança do saldo negativo (cartão/conta)"]
+    assert cobranca["credito"] == Decimal("622.33") and cobranca["classificacao"] == "ajuste"
+    # a conta do pedido sai como na leitura pela API
+    conta = conta_amazon_de_transacoes([venda["raw"]])
+    assert conta["produto"] == Decimal("387") and conta["promocao"] == Decimal("-38.7")
+    assert conta["tarifas"] == Decimal("-53.98") and conta["liquido"] == Decimal("294.32")
+    # mesmo dia: ordem crescente a partir de 00:00 BRT (arquivo vem da mais nova pra mais velha)
+    assert etiqueta["data"] < presa["data"]
+
+
+async def test_ingerir_csv_amazon_grava_atualiza_e_nao_duplica(db, make_user):
+    loja = await _loja_amazon(db, make_user)
+    loja.modo_extrato = "upload"
+    await db.commit()
+    agora = datetime(2026, 10, 16, 13, tzinfo=UTC)
+    r1 = await ingerir_csv_amazon(db, loja, CSV_KFA, agora=agora)
+    assert r1["inseridos"] == 9 and r1["atualizados"] == 0
+    assert r1["de"] == "2026-10-02" and r1["ate"] == "2026-10-16"
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert len(movs) == 9 and all(m.saldo_apos is not None for m in movs)
+    assert loja.ultimo_extrato_em == agora
+    # o mesmo arquivo de novo, com a linha presa já liberada
+    depois = CSV_KFA.replace('"15/10/2026","Diferido"', '"15/10/2026","Liberado"')
+    r2 = await ingerir_csv_amazon(db, loja, depois, agora=agora + timedelta(days=2))
+    assert r2["inseridos"] == 0 and r2["atualizados"] == 1 and r2["ja_existiam"] == 8
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert len(movs) == 9
+    liberada = next(
+        m
+        for m in movs
+        if m.pedido_marketplace == "702-7077353-9607430" and m.tipo == "venda_liberada"
+    )
+    assert liberada.sub_tipo == "RELEASED" and "preso" not in liberada.descricao
+    assert liberada.raw["_liberado_em"].startswith("2026-10-18")
+    syncs = (await db.execute(select(ConciliacaoSync))).scalars().all()
+    assert sorted(s.chave for s in syncs) == [
+        "upload:2026-10-16T13:00:00",
+        "upload:2026-10-18T13:00:00",
+    ]
+
+
+async def test_endpoint_upload_amazon_so_para_loja_por_arquivo(db, make_user, auth_as, client):
+    loja = await _loja_amazon(db, make_user)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    arquivo = ("transacoes.csv", CSV_KFA.encode("utf-8-sig"), "text/csv")
+    r = await client.post(
+        "/api/conciliacao/amazon/upload", data={"loja": "kia"}, files={"arquivo": arquivo}
+    )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "loja_nao_e_upload"
+    loja.modo_extrato = "upload"
+    await db.commit()
+    r = await client.post(
+        "/api/conciliacao/amazon/upload", data={"loja": "kia"}, files={"arquivo": arquivo}
+    )
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["inseridos"] == 9 and corpo["loja"] == "kia" and "recalculo" in corpo
+    r = await client.post(
+        "/api/conciliacao/amazon/upload",
+        data={"loja": "kia"},
+        files={"arquivo": ("x.csv", b"a,b\n1,2\n", "text/csv")},
+    )
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "csv_invalido"
+    r = await client.get("/api/conciliacao/lojas")
+    assert r.json()["lojas"][0]["modo_extrato"] == "upload"

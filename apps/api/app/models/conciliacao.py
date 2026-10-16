@@ -91,6 +91,11 @@ class ConciliacaoLoja(Base, TimestampMixin):
     conta: Mapped[str] = mapped_column(String(128), nullable=False)
     ativa: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     inicio: Mapped[date] = mapped_column(Date, nullable=False)
+    # "api" = o robô lê a plataforma; "upload" = alguém envia o arquivo de transações
+    # (KFA: a Amazon nega a API, caso 21731531021 — 16/10)
+    modo_extrato: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'api'"), default="api"
+    )
     extrato_config_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

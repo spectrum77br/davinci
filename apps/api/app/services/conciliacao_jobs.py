@@ -108,7 +108,11 @@ async def sincronizar_loja(
             if extrato:
                 try:
                     if plataforma == "amazon":
-                        resultado["extrato"] = await run_amazon_sync(session, loja, cliente)
+                        if loja.modo_extrato == "upload":
+                            # KFA: a API nega; as transações entram pelo arquivo (16/10)
+                            resultado["extrato"] = {"modo": "upload", "pulado": True}
+                        else:
+                            resultado["extrato"] = await run_amazon_sync(session, loja, cliente)
                         try:
                             resultado["melhor_envio"] = await run_me_sync(session, loja)
                         except Exception as e:  # noqa: BLE001 — frete pago não derruba a rodada

@@ -5,7 +5,7 @@
 // dinheiro (venda, fatura, extrato — o Bling saiu em 15/10: "nunca bate"), o
 // resultado e a situação; o Raio-X
 // do pedido selecionado fica à direita. Extrato do dia e Resumo vêm depois.
-import { Download, KeyRound, Loader2, RefreshCw, Search, Wand2 } from 'lucide-vue-next'
+import { Download, KeyRound, Loader2, RefreshCw, Search, Upload, Wand2 } from 'lucide-vue-next'
 import { ETAPAS, SITUACOES, etapaCls, fmtDia, fmtDiaHora, fmtMoney, fmtPct, sinal, sitCls, tipoMov } from '~/lib/conciliacao'
 
 definePageMeta({
@@ -22,6 +22,8 @@ type Loja = {
   ultimo_fatura_em: string | null
   ultimo_recalculo_em: string | null
   ultimo_erro: string | null
+
+  modo_extrato?: string
 }
 type Pedido = {
   id: string
@@ -226,6 +228,40 @@ async function removerTokenMe() {
 const lojaAtual = computed(() => lojas.value.find((l) => l.conta === loja.value) || null)
 // Cada aba mostra só as lojas da plataforma dela (15/10: Shopee entrou).
 const lojasDaAba = computed(() => lojas.value.filter((l) => l.platform === tab.value))
+// Loja lida por arquivo (16/10, KFA: a Amazon nega a API): alguém envia o CSV de
+// Pagamentos › Visualizar transações › Fazer download.
+const lojasUpload = computed(() => lojasDaAba.value.filter((l) => l.modo_extrato === 'upload'))
+type ResultadoUpload = { loja: string; arquivo?: string; linhas: number; movimentos: number; inseridos: number; atualizados: number; ja_existiam: number; de: string | null; ate: string | null; por_tipo: Record<string, number> }
+const upload = ref<{ aberto: boolean; loja: string; arquivo: File | null; msg: string; erro: boolean; ocupado: boolean; resultado: ResultadoUpload | null }>({ aberto: false, loja: '', arquivo: null, msg: '', erro: false, ocupado: false, resultado: null })
+function abrirUpload() {
+  upload.value = { aberto: true, loja: lojasUpload.value[0]?.conta || '', arquivo: null, msg: '', erro: false, ocupado: false, resultado: null }
+}
+function escolherArquivo(e: Event) {
+  const f = (e.target as HTMLInputElement).files?.[0] || null
+  upload.value.arquivo = f
+  upload.value.msg = ''
+}
+async function enviarUpload() {
+  if (!upload.value.arquivo || !upload.value.loja) return
+  upload.value.ocupado = true
+  upload.value.msg = ''
+  try {
+    const fd = new FormData()
+    fd.append('loja', upload.value.loja)
+    fd.append('arquivo', upload.value.arquivo)
+    upload.value.resultado = await api<ResultadoUpload>('/api/conciliacao/amazon/upload', { method: 'POST', body: fd })
+    upload.value.msg = `arquivo lido: ${upload.value.resultado.inseridos} linha(s) nova(s), ${upload.value.resultado.atualizados} atualizada(s), ${upload.value.resultado.ja_existiam} já estavam`
+    upload.value.erro = false
+    upload.value.arquivo = null
+    await carregarLojas()
+    await carregar()
+  } catch (e: any) {
+    upload.value.msg = e?.data?.detail?.mensagem || e?.data?.detail?.code || 'não consegui ler o arquivo'
+    upload.value.erro = true
+  } finally {
+    upload.value.ocupado = false
+  }
+}
 const nomeVenda = computed(() => (tab.value === 'shopee' ? 'Venda Shopee' : tab.value === 'tiktok' ? 'Venda TikTok' : tab.value === 'amazon' ? 'Venda Amazon' : 'Venda ML'))
 function escolherLojaDaAba() {
   const primeira = lojasDaAba.value[0]
@@ -505,6 +541,9 @@ await carregar()
         <span v-if="visao !== 'resumo' && lojaAtual" class="text-muted-foreground">loja <b>{{ loja }}</b></span>
         <button v-if="canEdit && tab === 'amazon'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" title="Token do Melhor Envio (frete pago nos envios próprios)" @click="abrirTokenMe()">
           <KeyRound class="size-3.5" /> Melhor Envio
+        </button>
+        <button v-if="canEdit && tab === 'amazon' && lojasUpload.length" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" title="Enviar o CSV de transações da loja que a Amazon não deixa ler pela API" @click="abrirUpload()">
+          <Upload class="size-3.5" /> Enviar transações
         </button>
         <button
           v-if="canEdit && visao !== 'resumo'"
@@ -814,6 +853,35 @@ await carregar()
     </div>
     </template>
 
+    <div v-if="upload.aberto" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="upload.aberto = false">
+      <div class="w-full max-w-lg rounded-md border bg-card shadow-lg">
+        <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-2 text-xs font-semibold text-white">
+          <span>Enviar transações da Amazon (arquivo)</span>
+          <button type="button" class="text-white/80 hover:text-white" @click="upload.aberto = false">fechar</button>
+        </div>
+        <div class="space-y-3 p-3 text-xs">
+          <div class="rounded border bg-muted/40 px-2.5 py-2 text-[11px] text-muted-foreground">
+            No Seller Central da loja: <b>Pagamentos › Visualizar transações</b> › Grupo de Pagamento <b>Todos os tipos de conta</b> › período (até 600 transações por arquivo; se passar, divide por mês) › <b>Atualizar</b> › <b>Fazer download</b>. Pode enviar o mesmo período de novo: linha repetida não duplica e "Diferido" que virou "Liberado" é atualizado. O arquivo não traz os repasses pro banco.
+          </div>
+          <div class="grid gap-2 sm:grid-cols-2">
+            <label class="space-y-1"><span class="text-[11px] font-semibold">Loja</span>
+              <select v-model="upload.loja" class="w-full rounded border bg-background px-2 py-1.5"><option v-for="l in lojasUpload" :key="l.conta" :value="l.conta">{{ l.conta }}</option></select>
+            </label>
+            <label class="space-y-1"><span class="text-[11px] font-semibold">Arquivo CSV</span>
+              <input type="file" accept=".csv,text/csv" class="w-full rounded border bg-background px-2 py-1 text-[11px]" @change="escolherArquivo" />
+            </label>
+          </div>
+          <div v-if="upload.msg" class="rounded px-2.5 py-1.5" :class="upload.erro ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'">{{ upload.msg }}</div>
+          <div v-if="upload.resultado && !upload.erro" class="text-[11px] text-muted-foreground">
+            {{ upload.resultado.linhas }} linhas no arquivo · {{ upload.resultado.de }} a {{ upload.resultado.ate }} · <span v-for="(n, t) in upload.resultado.por_tipo" :key="t" class="mr-2">{{ t }}: {{ n }}</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" class="rounded-md bg-primary px-2.5 py-1.5 font-semibold text-primary-foreground disabled:opacity-50" :disabled="upload.ocupado || !upload.arquivo || !upload.loja" @click="enviarUpload()">Enviar</button>
+            <Loader2 v-if="upload.ocupado" class="size-3.5 animate-spin text-muted-foreground" />
+          </div>
+        </div>
+      </div>
+    </div>
     <div v-if="tokenMe.aberto" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="tokenMe.aberto = false">
       <div class="w-full max-w-lg rounded-md border bg-card shadow-lg">
         <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-2 text-xs font-semibold text-white">
