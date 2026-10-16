@@ -165,12 +165,13 @@ async def sincronizar_loja(
                 await session.commit()
             # 16/10 (revisão): os leitores devolvem "erros" (lista) e o fim da rodada só
             # olhava "erro" — a falha sumia e o dia ficava "sem movimento" (verde)
-            for k in ("extrato", "recalculo"):
+            for k in ("extrato", "melhor_envio", "recalculo"):
                 texto = _erro_da_leitura(resultado.get(k))
                 if texto and not loja.ultimo_erro:
                     loja.ultimo_erro = f"{k}: {texto[:280]}"
             if not any(
-                _erro_da_leitura(resultado.get(k)) for k in ("fatura", "extrato", "recalculo")
+                _erro_da_leitura(resultado.get(k))
+                for k in ("fatura", "extrato", "melhor_envio", "recalculo")
             ):
                 loja.ultimo_erro = None
             await session.commit()
@@ -280,6 +281,10 @@ def _erro_da_leitura(res: Any) -> str | None:
         return None
     if res.get("erro"):
         return str(res["erro"])
+    if res.get("aviso") or res.get("cortado"):
+        # leitura cortada no teto de páginas (Melhor Envio 40, Amazon 30): não é falha,
+        # mas o aviso tem que sobreviver à rodada
+        return str(res.get("aviso") or "leitura cortada")
     erros = res.get("erros") or []
     if not erros:
         return None
