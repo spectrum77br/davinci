@@ -411,6 +411,46 @@ async def _cliente_da_conta(session: AsyncSession, conta: str) -> Any:
     return await cliente_da_integracao(integ)
 
 
+@router.get("/sonda/ml-conta")
+async def sonda_ml_conta(
+    conta: Annotated[str, Query(min_length=1)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM_PAINEL)],
+) -> dict[str, Any]:
+    """Só leitura (16/10, lucas mei 403 PolicyAgent na fatura): com quem o token do ML
+    foi emitido (`/users/me`, sem dados pessoais) e o que a fatura responde."""
+    from app.services.conciliacao_fatura import ler_resumo
+
+    cliente = await _cliente_da_conta(session, conta)
+    saida: dict[str, Any] = {"conta": conta}
+    r = await cliente._request("GET", "/users/me")
+    try:
+        corpo = r.json()
+    except ValueError:
+        corpo = {"texto": (r.text or "")[:300]}
+    if isinstance(corpo, dict):
+        corpo = {
+            k: corpo.get(k)
+            for k in (
+                "id",
+                "nickname",
+                "user_type",
+                "tags",
+                "site_status",
+                "seller_experience",
+                "registration_date",
+                "points",
+            )
+        }
+    saida["usuario"] = {"http": r.status_code, **({"dados": corpo})}
+    try:
+        resumo = await ler_resumo(cliente, "2026-10-01")
+        saida["fatura_outubro"] = {"ok": True, "chaves": sorted(resumo)[:12]}
+    except Exception as e:  # noqa: BLE001
+        saida["fatura_outubro"] = {"ok": False, "erro": str(e)[:400]}
+    return saida
+
+
 @router.post("/sonda/extrato/pedir")
 async def sonda_extrato_pedir(
     conta: Annotated[str, Query(min_length=1)],
