@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
@@ -39,6 +40,47 @@ def _lock_key(integration_id: UUID) -> int:
     h = hashlib.blake2b(b"conciliacao:" + integration_id.bytes, digest_size=4).digest()
     val = int.from_bytes(h, "big", signed=False)
     return val - 2**32 if val >= 2**31 else val
+
+
+# 16/10, revisão: quanto um clique espera pela trava da loja antes de responder 409
+ESPERA_TRAVA_CLIQUE = "20s"
+
+
+class RodadaEmAndamentoError(Exception):
+    """A loja está travada (rodada ou outro clique) e a espera pela trava estourou."""
+
+
+def _trava_estourou(e: BaseException) -> bool:
+    """O Postgres desistiu de esperar a trava (`lock_timeout`, SQLSTATE 55P03)?"""
+    orig = getattr(e, "orig", None)
+    causa = getattr(orig, "__cause__", None) or orig
+    return getattr(causa, "sqlstate", None) == "55P03"
+
+
+async def trava_da_loja(
+    session: AsyncSession, integration_id: UUID, *, espera: str | None = None
+) -> None:
+    """Entra na trava da loja na transação de `session` — a MESMA trava da rodada
+    (16/10, revisão: vincular/classificar e o CSV da KFA recalculavam fora dela e
+    corriam junto com a rodada: 500 por uq_conciliacao_pedido_loja ou o vínculo da
+    pessoa sobrescrito). Bloqueante até `espera` (padrão `ESPERA_TRAVA_CLIQUE`);
+    estourou → `RodadaEmAndamentoError`. Enquanto a transação de quem chamou está aberta,
+    o `pg_try_advisory_xact_lock` da rodada falha e ela pula a loja. Vale até o
+    commit/rollback de quem chamou. `espera` é valor fixo do código (SET não aceita
+    parâmetro). O `lock_timeout` fica valendo na transação: um recálculo que espere
+    mais que isso por uma linha também desiste — melhor que a tela pendurada."""
+    espera = espera or ESPERA_TRAVA_CLIQUE
+    try:
+        async with session.begin_nested():
+            await session.execute(text(f"SET LOCAL lock_timeout = '{espera}'"))
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(:ns, :key)"),
+                {"ns": SYNC_NAMESPACE, "key": _lock_key(integration_id)},
+            )
+    except DBAPIError as e:
+        if _trava_estourou(e):
+            raise RodadaEmAndamentoError(str(integration_id)) from e
+        raise
 
 
 async def lojas_ativas(session: AsyncSession) -> list[ConciliacaoLoja]:

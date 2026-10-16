@@ -255,6 +255,22 @@ async def test_pedir_extrato_exige_edicao(db, make_user, auth_as, client):
         params={"conta": "jlas2", "de": "2026-10-01", "ate": "2026-10-14"},
     )
     assert r.status_code == 403
+    # 16/10, revisão: é escrita da Conciliação — Logística em editar não mexe na config
+    # do relatório do MP; Conciliação em editar pode
+    auth_as(await make_user(permissions={"logistica": {"view": True, "edit": True}}))
+    r = await client.post(
+        "/api/conciliacao/sonda/extrato/pedir",
+        params={"conta": "jlas2", "de": "2026-10-01", "ate": "2026-10-14"},
+    )
+    assert r.status_code == 403
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    with respx.mock(assert_all_called=False) as router:
+        _fontes_extrato(router, config_existe=False, pronto=False)
+        r = await client.post(
+            "/api/conciliacao/sonda/extrato/pedir",
+            params={"conta": "jlas2", "de": "2026-10-01", "ate": "2026-10-14"},
+        )
+    assert r.status_code == 200, r.text
 
 
 async def test_ler_extrato_resume_o_arquivo_pronto(db, make_user, auth_as, client):
@@ -335,3 +351,41 @@ async def test_ler_extrato_nao_desloca_colunas_com_metadata(db, make_user, auth_
     assert resumo["saldo_ultima_linha"] == "611.46"
     assert resumo["amostra_por_tipo"]["payment"][0]["BALANCE_AMOUNT"] == "611.46"
     assert resumo["amostra_por_tipo"]["payment"][0]["METADATA"].startswith('{"fee_discount"')
+
+
+async def test_sonda_mes_invalido_da_422(db, make_user, auth_as, client):
+    """16/10, revisão: `mes=2026-13` dava 500 (ValueError no fromisoformat)."""
+    await _loja_ml(db, make_user)
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    r = await client.get("/api/conciliacao/sonda", params={"conta": "jlas2", "mes": "2026-13"})
+    assert r.status_code == 422
+    r = await client.get("/api/conciliacao/sonda", params={"conta": "jlas2", "mes": "outubro"})
+    assert r.status_code == 422
+
+
+async def test_sonda_tiktok_duas_integracoes_com_o_mesmo_nome_da_409(
+    db, make_user, auth_as, client
+):
+    """16/10, revisão: duas integrações TikTok ativas com o mesmo nome davam 500
+    (`scalar_one_or_none` com dois resultados); agora 409 com os ids."""
+    dono = await make_user()
+    ids = []
+    for _ in range(2):
+        integ = Integration(
+            user_id=dono.id,
+            platform=IntegrationPlatform.TIKTOK,
+            name="Mini",
+            status="active",
+            credentials=encrypt_json({"access_token": "tok", "shop_cipher": "c"}),
+        )
+        db.add(integ)
+        await db.flush()
+        ids.append(str(integ.id))
+    await db.commit()
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    r = await client.get("/api/conciliacao/sonda/tiktok", params={"conta": "mini"})
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "conta_tiktok_duplicada" and sorted(
+        detail["integration_ids"]
+    ) == sorted(ids)

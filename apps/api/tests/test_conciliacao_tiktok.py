@@ -821,3 +821,38 @@ async def test_reler_financeiro_liquidados_anda_do_mais_antigo_e_estimado_primei
     chamados.clear()
     r = await mod.reler_financeiro_liquidados(db, loja)
     assert r["candidatos"] == 2 and [c[0] for c in chamados] == [6000, 6001]
+
+
+async def test_bloco_dias_repasse_falhou_e_pendencia(db, make_user, auth_as, client, monkeypatch):
+    """16/10, revisão: o extrato com repasse FAILED contava como dia fechado no bloco
+    "Dias" (ia junto com "aguardando o repasse"); é pendência, com o motivo."""
+    monkeypatch.setattr("app.routers.conciliacao._ontem", lambda: date(2026, 10, 15))
+    loja = await _loja_tiktok(db, make_user)
+    d13, d14 = date(2026, 10, 13), date(2026, 10, 14)
+    cliente = _TikTokFalsa(
+        [
+            _extrato(1, d13, "344.45", 901, status="PROCESSING"),
+            _extrato(2, d14, "344.45", 902, status="FAILED"),
+        ],
+        {"1": [_tx(10, PEDIDO)], "2": [_tx(20, PEDIDO)]},
+        [],
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r["aguardando_repasse"] == 1 and r["repasse_falhou"] == 1
+    loja.ultimo_extrato_em = datetime.now(UTC)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-14"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["lojas"][0]["dia"]["status"] == "repasse_falhou"
+    assert corpo["cartoes"]["dias_fechados"] == 0
+    por_dia = {d["dia"]: d for d in corpo["dias"]}
+    falhou, aguardando = por_dia["2026-10-14"], por_dia["2026-10-13"]
+    assert falhou["fechados"] == 0 and falhou["aguardando_repasse"] == 0
+    assert falhou["pendentes"] == [
+        {"conta": "Mini", "motivo": "repasse falhou, a TikTok tenta de novo"}
+    ]
+    # PROCESSING continua contando como fechado ("aguardando o repasse")
+    assert aguardando["fechados"] == 1 and aguardando["aguardando_repasse"] == 1
+    assert aguardando["pendentes"] == []

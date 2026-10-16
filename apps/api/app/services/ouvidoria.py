@@ -1056,13 +1056,19 @@ def texto_aviso(
     return texto
 
 
+# 16/10, revisão: o robô diário roda sempre "no mesmo horário", mas o cron oscila e a
+# rodada demora — sem folga o re-aviso de 24 h ficava uns segundos "dentro das 24 h"
+# e pulava dia sim, dia não (Vigia de Conciliação)
+FOLGA_REAVISO = timedelta(minutes=15)
+
+
 async def pendentes_de_aviso(
     session: AsyncSession, robo: OuvidoriaRobo, agora: datetime | None = None
 ) -> list[OuvidoriaOcorrencia]:
     """Abertas que precisam de pessoa e nunca foram avisadas, ou cujo último
-    aviso/re-aviso já passou de `reaviso_horas`."""
+    aviso/re-aviso já passou de `reaviso_horas` (com a folga `FOLGA_REAVISO`)."""
     agora = _agora(agora)
-    corte = agora - timedelta(hours=max(1, int(robo.reaviso_horas or 24)))
+    corte = agora - timedelta(hours=max(1, int(robo.reaviso_horas or 24))) + FOLGA_REAVISO
     abertas = (
         (
             await session.execute(
