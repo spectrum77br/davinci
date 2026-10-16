@@ -1566,7 +1566,8 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     assert d13["dia"] == "2026-10-13" and d13["com_pendencia"] == 1 and d13["fechados"] == 0
     assert d13["pendentes"] == [{"conta": "jlas2", "motivo": "1 linha(s) sem dono"}]
     assert dias[3]["dia"] == "2026-10-12" and dias[3]["sem_movimento"] == 1
-    assert all(d["fechados"] == 0 for d in dias)
+    # sem movimento (extrato lido) conta como fechado; só o 13 (pendente) fica fora
+    assert dias[3]["fechados"] == 1 and d13["fechados"] == 0
     # o mês até ontem (os dois pedidos são de 01/10)
     assert linha["mes"]["pedidos"] == 2 and linha["mes"]["vendido"] == 1761.96
     assert linha["mes"]["por_etapa"] == {"conciliado": 1, "pendencia": 1}

@@ -3113,7 +3113,9 @@ async def _resumo_dos_dias(
         saida.append(
             {
                 "dia": d.isoformat(),
-                "fechados": fech,
+                # sem movimento (lido) e aguardando repasse contam como fechados; os dois
+                # números ao lado são só o detalhe
+                "fechados": fech + sem_mov + aguardando,
                 "sem_movimento": sem_mov,
                 "aguardando_repasse": aguardando,
                 "com_pendencia": len(pendentes),
@@ -3447,7 +3449,13 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         "empresa": empresa,
         "cartoes": {
             "lojas": len(lojas_out),
-            "dias_fechados": sum(1 for x in lojas_out if x["dia"]["status"] == "fechado"),
+            # 16/10 (Vinicius): sem movimento com extrato lido e "aguardando o repasse"
+            # da TikTok contam como dia fechado (verde, com obs)
+            "dias_fechados": sum(
+                1
+                for x in lojas_out
+                if x["dia"]["status"] in ("fechado", "sem_movimento", "aguardando_repasse")
+            ),
             "dias_prontos": sum(1 for x in lojas_out if x["dia"]["status"] == "pronto"),
             "pendentes": sum(x["dia"]["pendentes"] for x in lojas_out),
             "reabertos": sum(x["pedidos"]["reabertos"] for x in lojas_out),

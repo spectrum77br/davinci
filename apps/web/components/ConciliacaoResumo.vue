@@ -129,15 +129,18 @@ function alternarLojas(key: string) {
 function resumoGrupo(lojas: LojaResumo[]) {
   const n = (f: (l: LojaResumo) => boolean) => lojas.filter(f).length
   const partes: string[] = [`${lojas.length} loja(s)`]
-  const fechados = n((l) => l.dia.status === 'fechado')
   const semMov = n((l) => l.dia.status === 'sem_movimento')
+  const repasse = n((l) => l.dia.status === 'aguardando_repasse')
+  const fechados = n((l) => l.dia.status === 'fechado') + semMov + repasse
   const naoLido = n((l) => l.dia.status === 'extrato_nao_lido')
-  const repasse = n((l) => l.dia.status === 'aguardando_repasse' || l.dia.status === 'repasse_falhou')
+  const falhou = n((l) => l.dia.status === 'repasse_falhou')
   const pend = n((l) => l.dia.status === 'aberto' || l.dia.status === 'pronto')
   const obs = n((l) => l.dia.status === 'fechado' && l.obs_dia.length > 0)
-  if (fechados) partes.push(`${fechados} dia(s) fechado(s)`)
-  if (semMov) partes.push(`${semMov} sem movimento`)
-  if (repasse) partes.push(`${repasse} aguardando repasse`)
+  if (fechados) {
+    const detalhe = [semMov ? `${semMov} sem movimento` : '', repasse ? `${repasse} aguardando repasse` : ''].filter(Boolean).join(', ')
+    partes.push(`${fechados} dia(s) fechado(s)${detalhe ? ` (${detalhe})` : ''}`)
+  }
+  if (falhou) partes.push(`${falhou} repasse falhou`)
   if (naoLido) partes.push(`${naoLido} extrato não lido`)
   if (pend) partes.push(`${pend} com pendência`)
   if (obs) partes.push(`${obs} com observação`)
@@ -214,8 +217,14 @@ function rotuloAcao(a: Agir) {
   return props.canEdit ? 'Sincronizar' : 'Abrir extrato'
 }
 
+// 16/10 (Vinicius): sem movimento com extrato lido e "aguardando o repasse" da TikTok
+// aparecem como "fechado" verde, com a explicação em obs
+const COMO_FECHADO: Record<string, string> = { sem_movimento: 'sem movimento', aguardando_repasse: 'aguardando o repasse da TikTok' }
+function obsDoStatus(d: DiaLoja) {
+  return COMO_FECHADO[d.status] || ''
+}
 function diaCls(d: DiaLoja) {
-  if (d.status === 'fechado') return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300'
+  if (d.status === 'fechado' || COMO_FECHADO[d.status]) return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300'
   if (d.status === 'pronto') return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-300 dark:bg-emerald-950/30 dark:text-emerald-300'
   if (d.status === 'aberto') return 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'
   if (d.status === 'extrato_nao_lido') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
@@ -225,6 +234,7 @@ function diaCls(d: DiaLoja) {
 }
 function diaTexto(d: DiaLoja) {
   if (d.status === 'fechado') return `fechado ${fmtHora(d.fechado_em)} · ${d.fechado_por || ''}`
+  if (COMO_FECHADO[d.status]) return 'fechado'
   if (d.status === 'pronto') return 'pronto pra fechar'
   if (d.status === 'aberto') return 'não fechou'
   if (d.status === 'extrato_nao_lido') return 'extrato não lido'
@@ -355,10 +365,8 @@ onMounted(() => {
                     <td class="px-2 py-1">
                       <span class="inline-block rounded px-1.5 py-0.5 font-semibold" :class="diaCls(l.dia)">{{ diaTexto(l.dia) }}</span>
                       <span v-if="l.problemas_dia.length" class="ml-1 inline-block rounded px-1.5 py-0.5 font-semibold" :class="problemasCls(l)">{{ l.problemas_dia.join(' · ') }}</span>
-                      <template v-if="l.obs_dia.length">
-                        <span v-if="l.dia.status === 'fechado'" class="ml-1 text-muted-foreground">· <b>obs:</b> {{ l.obs_dia.join(', ') }}</span>
-                        <span v-else class="ml-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ l.obs_dia.join(' · ') }}</span>
-                      </template>
+                      <span v-if="obsDoStatus(l.dia) || (l.obs_dia.length && (l.dia.status === 'fechado' || obsDoStatus(l.dia)))" class="ml-1 text-muted-foreground">· <b>obs:</b> {{ [obsDoStatus(l.dia), ...l.obs_dia].filter(Boolean).join(', ') }}</span>
+                      <span v-else-if="l.obs_dia.length" class="ml-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ l.obs_dia.join(' · ') }}</span>
                     </td>
                   </tr>
                 </template>
@@ -369,7 +377,7 @@ onMounted(() => {
             </table>
           </div>
           <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
-            "Situação": <b>dia fechado</b> = alguém fechou (100% das linhas com destino e saldo batendo) · <b>pronto pra fechar</b> = tudo casou, falta só fechar · <b>não fechou</b> = tem linha sem dono ou saldo diferente · <b>aguardando o repasse</b> = a TikTok fechou o extrato mas ainda não pagou (o robô fecha o dia quando pagar). Depois do dia fechado, o que aconteceu nele (estornado, reaberto, recebido a menos, vencido) vira <b>obs</b> em cinza; os números continuam nas colunas. Cada marketplace começa escondido; "mostrar" abre as lojas.
+            "Situação": <b>fechado</b> = alguém fechou (100% das linhas com destino e saldo batendo), ou o extrato foi lido e não teve movimento, ou a TikTok fechou o extrato e ainda não pagou (obs diz qual) · <b>pronto pra fechar</b> = tudo casou, falta só fechar · <b>não fechou</b> = tem linha sem dono ou saldo diferente. Depois do dia fechado, o que aconteceu nele (estornado, reaberto, recebido a menos, vencido) vira <b>obs</b> em cinza; os números continuam nas colunas. Cada marketplace começa escondido; "mostrar" abre as lojas.
           </div>
         </div>
         <div class="flex min-w-0 flex-col rounded-md border bg-card">
@@ -383,8 +391,8 @@ onMounted(() => {
                 <tr>
                   <th class="border-b px-2 py-1 text-left">Dia</th>
                   <th class="border-b px-2 py-1 text-right">Fechados</th>
-                  <th class="border-b px-2 py-1 text-right">Sem movimento</th>
-                  <th class="border-b px-2 py-1 text-right">Aguard. repasse</th>
+                  <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais sem movimento</th>
+                  <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais aguard. repasse</th>
                   <th class="border-b px-2 py-1 text-right">Com pendência</th>
                   <th class="border-b px-2 py-1 text-left">Como ficou</th>
                 </tr>
