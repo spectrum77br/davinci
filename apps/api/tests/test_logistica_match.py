@@ -677,7 +677,7 @@ def test_regra_com_condicao_passa_na_frente_da_normal():
     rows = [normal, apreendido]
 
     cands = _cands(rows, _APREENDIDO)
-    assert cands == [apreendido]
+    assert cands == [apreendido, normal]  # com condição na frente
     assert logistica_match.regra_ativa(cands, "Em andamento") is apreendido
     assert logistica_match.deve_monitorar(cands, "Em andamento") is True  # fica na tela
 
@@ -690,8 +690,12 @@ def test_regra_com_condicao_passa_na_frente_da_normal():
 def test_condicao_geral_vence_especifica_sem_condicao():
     especifica = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado")
     geral_cond = _rule(status_plataforma="Pago | Enviado", localizacao_contem="apreendido")
-    assert _cands([especifica, geral_cond], _APREENDIDO) == [geral_cond]
+    assert _cands([especifica, geral_cond], _APREENDIDO) == [geral_cond, especifica]
     assert _cands([especifica, geral_cond], "Em trânsito") == [especifica]
+    # No estado coberto pela geral com condição (curinga), ela decide sozinha.
+    assert logistica_match.regras_aplicaveis(
+        _cands([especifica, geral_cond], _APREENDIDO), "Em andamento"
+    ) == [geral_cond]
 
 
 def test_condicao_especifica_vence_condicao_geral():
@@ -712,19 +716,64 @@ def test_condicao_que_nao_casa_nao_conta():
     assert _cands([esp_cond], None) == []
 
 
-def test_estado_sem_regra_com_condicao_fica_vermelho():
-    # O pedido apreendido foi pra Problemas; só existe regra com condição pra
-    # "Em andamento". A normal da chave não decide em silêncio: sem regra pro
-    # estado, a linha fica visível (vermelha) pra cadastrar.
+def test_estado_sem_regra_com_condicao_cai_na_normal():
+    # Vinicius 16/10: a regra com condição só decide nos estados que ela lista.
+    # O apreendido foi pra Problemas; com condição só há regra pra "Em
+    # andamento" → em Problemas decide a normal da chave (aqui sem ação nem
+    # Monitorar: some do painel — pra segurar, cadastrar a condição também em
+    # Problemas, com Monitorar).
     normal_problemas = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
                              status_atual="Problemas")
     apreendido = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
                        status_atual="Em andamento", localizacao_contem="apreendido",
                        monitoramento=True)
     cands = _cands([normal_problemas, apreendido], _APREENDIDO)
-    assert cands == [apreendido]
+    assert cands == [apreendido, normal_problemas]
+    assert logistica_match.regra_ativa(cands, "Problemas") is normal_problemas
+    assert logistica_match.estado_resolvido(cands, "Problemas") is True
+    assert logistica_match.deve_monitorar(cands, "Problemas") is False
+
+    apreendido_problemas = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                                 status_atual="Problemas", localizacao_contem="apreendido",
+                                 monitoramento=True)
+    cands = _cands([normal_problemas, apreendido, apreendido_problemas], _APREENDIDO)
+    assert logistica_match.regra_ativa(cands, "Problemas") is apreendido_problemas
+    assert logistica_match.deve_monitorar(cands, "Problemas") is True
+
+
+def test_estado_sem_regra_nenhuma_segue_vermelho():
+    # Nem com condição nem normal pro estado: combinação sem cadastro, vermelha.
+    normal = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                   status_atual="Em aberto")
+    apreendido = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                       status_atual="Em andamento", localizacao_contem="apreendido")
+    cands = _cands([normal, apreendido], _APREENDIDO)
     assert logistica_match.regra_ativa(cands, "Problemas") is None
     assert logistica_match.estado_resolvido(cands, "Problemas") is False
+
+
+def test_amazon_302142_entregue_aguardando_devolucao_nao_fica_vermelho():
+    # Vinicius 16/10: Amazon "Enviado" com a Localização "Objeto entregue ao
+    # destinatário" e o Bling em "Aguardando Devolução". A regra com condição
+    # (Em andamento → Entregue) não cobre esse estado; a normal da chave cobre
+    # (sem ação) → resolve, não pinta.
+    def amz(**kw):
+        return _rule(plataforma="Amazon", status_plataforma="Enviado", **kw)
+
+    entregue = amz(status_atual="Em andamento",
+                   localizacao_contem="objeto entregue ao destinatário",
+                   alterar_status_bling="Entregue")
+    normal = amz(status_atual="Aguardando Devolução; Em andamento; Em digitação; Entregue")
+    loc = "Sao Luis/Sao Luis — Objeto entregue ao destinatário"
+    cands = _cands([entregue, normal], loc, plataforma="Amazon", assinatura="Enviado")
+
+    assert logistica_match.regra_ativa(cands, "Aguardando Devolução") is normal
+    assert logistica_match.estado_resolvido(cands, "Aguardando Devolução") is True
+    # Em andamento a condição segue mandando: troca pra Entregue pendente.
+    assert logistica_match.regra_ativa(cands, "Em andamento") is entregue
+    assert logistica_match.estado_resolvido(cands, "Em andamento") is False
+    # Já em Entregue: a normal cobre, nada a fazer.
+    assert logistica_match.estado_resolvido(cands, "Entregue") is True
 
 
 def test_juntar_localizacao_contem_normaliza():
@@ -797,3 +846,48 @@ async def test_list_condicao_localizacao_mostra_o_apreendido(
     )
     assert rp.status_code == 200, rp.text
     assert rp.json()["localizacao_contem"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_amazon_302142_condicao_nao_tira_a_normal_de_outro_estado(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    amz = {"order_status": "Shipped"}
+    chave = logistica_rules.assinatura_para("Amazon", amz)
+    assert chave == "Enviado"
+
+    rc = await client.post(
+        "/api/logistica/status",
+        json={"plataforma": "Amazon", "status_plataforma": chave,
+              "status_atual": ["Em andamento"],
+              "localizacao_contem": "objeto entregue ao destinatário",
+              "alterar_status_bling": "Entregue"},
+    )
+    assert rc.status_code == 201, rc.text
+    rn = await client.post(
+        "/api/logistica/status",
+        json={"plataforma": "Amazon", "status_plataforma": chave,
+              "status_atual": ["Aguardando Devolução", "Em andamento", "Em digitação",
+                               "Entregue"]},
+    )
+    assert rn.status_code == 201, rn.text
+
+    loc = "Sao Luis/Sao Luis — Objeto entregue ao destinatário"
+    for pedido, status_bling in (("302142", "Aguardando Devolução"), ("302143", "Em andamento")):
+        r = await client.post(
+            "/api/logistica",
+            json={"plataforma": "Amazon", "pedido_bling": pedido, "meli_status": amz,
+                  "localizacao": loc, "status_bling": status_bling},
+        )
+        assert r.status_code == 201, r.text
+
+    lista = (await client.get("/api/logistica?plataforma=amazon")).json()
+    linhas = {x["pedido_bling"]: x for x in lista}
+    # Aguardando Devolução: a normal cobre → casa e resolve (não pinta, some).
+    assert linhas["302142"]["acao_match"] is True
+    assert linhas["302142"]["acao_status_id"] == rn.json()["id"]
+    assert linhas["302142"]["acao_resolvido"] is True
+    # Em andamento: a com condição manda (troca pra Entregue pendente).
+    assert linhas["302143"]["acao_status_id"] == rc.json()["id"]
+    assert linhas["302143"]["acao_resolvido"] is False

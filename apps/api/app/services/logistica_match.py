@@ -12,7 +12,8 @@ pra saber o que executar, então o que a UI mostra bate com o que o sistema far�
 
 Regra pode ter condição na Localização (`localizacao_contem`, 06/10): quando a
 Localização do pedido tem a palavra, as regras com condição passam na frente
-das sem condição da mesma chave (ver `find_matching_rules`).
+das sem condição da mesma chave — só nos estados do Bling que elas cobrem; nos
+outros, a regra sem condição decide (ver `regras_do_estado`, 16/10).
 """
 
 from __future__ import annotations
@@ -138,8 +139,9 @@ def find_matching_rule(
     plataforma: str | None,
     localizacao: str | None,
 ) -> LogisticaStatus | None:
-    """A primeira de `find_matching_rules` (a que manda pra essa chave). None se
-    nenhuma casar ou a assinatura estiver vazia."""
+    """A primeira de `find_matching_rules` (com condição na frente). None se
+    nenhuma casar ou a assinatura estiver vazia. Não olha o estado do Bling —
+    quem precisa da regra que vale AGORA usa `regra_ativa`."""
     regras = find_matching_rules(
         rows, assinatura=assinatura, plataforma=plataforma, localizacao=localizacao
     )
@@ -160,17 +162,17 @@ def find_matching_rules(
     devolve o conjunto de candidatas pra quem precisa desambiguar pela situação
     atual do pedido (ex.: o executor de Alterar Status Bling).
 
-    Precedência, do mais forte pro mais fraco — vale o primeiro grupo que tiver
-    alguma regra, e só ele:
-      1. com condição na Localização que casa, da plataforma do pedido;
-      2. com condição na Localização que casa, gerais (plataforma vazia);
-      3. sem condição, da plataforma do pedido;
-      4. sem condição, gerais.
+    Devolve as COM condição na Localização que casa, seguidas das SEM condição.
+    Em cada metade vale a plataforma do pedido e, só se ela não tiver nenhuma,
+    as gerais (plataforma vazia):
+      com condição: 1. da plataforma do pedido; 2. gerais;
+      sem condição: 3. da plataforma do pedido; 4. gerais.
     Regra com condição que NÃO casa não conta pra nada (como se não existisse).
-    Quando um grupo com condição vale, as regras sem condição da chave ficam de
-    fora em TODOS os estados do Bling: estado sem regra com condição pinta a
-    linha de vermelho (combinação sem cadastro) — o operador cadastra, em vez
-    de a regra normal decidir em silêncio um pedido que ele marcou como especial.
+    Qual metade decide depende do estado do Bling (`regras_do_estado`): a com
+    condição só nos estados que ela cobre. Vinicius, 16/10: a Amazon 302142
+    ("Enviado", Localização "Objeto entregue ao destinatário") ficou vermelha
+    em "Aguardando Devolução" — a regra com a condição só cobria "Em andamento"
+    e, desde 06/10, tirava do jogo a normal da chave, que cobria o estado.
     Lista vazia se a assinatura estiver vazia ou nada casar."""
     chave = _norm(assinatura)
     if not chave:
@@ -189,7 +191,35 @@ def find_matching_rules(
                 grupos[1 if geral else 0].append(s)
         else:
             grupos[3 if geral else 2].append(s)
-    return next((g for g in grupos if g), [])
+    com_condicao = grupos[0] or grupos[1]
+    sem_condicao = grupos[2] or grupos[3]
+    return com_condicao + sem_condicao
+
+
+def _do_estado(rules: list[LogisticaStatus], status_bling: str | None) -> list[LogisticaStatus]:
+    """Exatas pro estado atual primeiro, depois as curingas (ver `regras_aplicaveis`)."""
+    atual = _norm_situacao(status_bling)
+    exatas = [
+        r for r in rules
+        if atual in {_norm_situacao(s) for s in status_atuais(r.status_atual)}
+    ]
+    curingas = [r for r in rules if not status_atuais(r.status_atual)]
+    return exatas + curingas
+
+
+def regras_do_estado(
+    rules: list[LogisticaStatus], status_bling: str | None
+) -> list[LogisticaStatus]:
+    """Das candidatas de `find_matching_rules`, a metade que decide no estado
+    atual do Bling: as com condição na Localização quando alguma delas cobre o
+    estado (exata ou curinga); senão as sem condição. A condição passa na
+    frente só nos estados que ela lista — nos outros a regra normal da chave
+    segue valendo, como se a condição não existisse (Vinicius, 16/10, Amazon
+    302142). Sem regra com condição, devolve todas."""
+    com = [r for r in rules if tem_condicao_localizacao(r)]
+    if com and _do_estado(com, status_bling):
+        return com
+    return [r for r in rules if not tem_condicao_localizacao(r)]
 
 
 def regras_aplicaveis(
@@ -201,14 +231,10 @@ def regras_aplicaveis(
     estados: regra de OUTRO estado fica de fora — ela só vale quando o pedido
     chegar lá. Lista vazia = a combinação (chave + estado) não tem regra.
     Nomes-apelido da mesma situação (ver `_norm_situacao`) casam entre si.
-    Regra com vários `status_atual` é exata pra qualquer um deles."""
-    atual = _norm_situacao(status_bling)
-    exatas = [
-        r for r in rules
-        if atual in {_norm_situacao(s) for s in status_atuais(r.status_atual)}
-    ]
-    curingas = [r for r in rules if not status_atuais(r.status_atual)]
-    return exatas + curingas
+    Regra com vários `status_atual` é exata pra qualquer um deles. Com regra de
+    condição na Localização entre as candidatas, só conta a metade que decide
+    nesse estado (`regras_do_estado`)."""
+    return _do_estado(regras_do_estado(rules, status_bling), status_bling)
 
 
 def devolucao_travada(

@@ -1387,7 +1387,8 @@ function palavrasLocalizacao(v: string | null | undefined): string[] {
 }
 const LOCALIZACAO_CONTEM_TITLE =
   'A regra só vale quando a Localização do pedido tem uma destas palavras (sem diferenciar maiúscula nem acento; separe por ";"). ' +
-  'Quando casa, ela passa na frente das regras sem condição do mesmo Status Plataforma. Vazio = sem condição.'
+  'Quando casa, ela passa na frente das regras sem condição do mesmo Status Plataforma, só nos Status Atual que ela lista; ' +
+  'nos outros, a regra sem condição continua valendo. Vazio = sem condição.'
 
 watch(tab, (t) => {
   if (t === 'status') {
@@ -2997,7 +2998,8 @@ async function aplicarStatusBling(c: Logistica) {
         Clique numa célula pra editar só aquele campo. Os campos ficam vazios pra o operador
         preencher à mão. Na "Mensagem do Chamado" dá pra anexar imagens no botão de foto (ou colar uma URL no texto).
         "Localização contém" é opcional: com palavras ali (ex.: apreendido), a regra só vale pros pedidos
-        cuja Localização tem a palavra, e passa na frente das regras sem condição do mesmo Status Plataforma.
+        cuja Localização tem a palavra, e passa na frente das regras sem condição do mesmo Status Plataforma
+        nos Status Atual que ela lista (nos outros, a regra sem condição continua valendo).
       </p>
 
       <div v-if="statusError" class="text-sm text-red-500">erro: {{ statusError }}</div>
@@ -3433,7 +3435,7 @@ async function aplicarStatusBling(c: Logistica) {
           <p class="mt-1 text-xs text-muted-foreground">
             Opcional. A regra só vale quando a Localização do pedido tem uma dessas palavras (separe por ";";
             maiúscula e acento não importam). Quando vale, ela passa na frente das regras sem condição deste
-            Status Plataforma.
+            Status Plataforma nos Status Atual que ela lista; nos outros, a regra sem condição continua valendo.
           </p>
         </div>
         <div>

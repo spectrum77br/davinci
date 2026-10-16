@@ -786,6 +786,86 @@ async def test_status_maquina_de_estados(
 
 
 @pytest.mark.asyncio
+async def test_status_condicao_localizacao_so_nos_estados_que_lista(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Vinicius 16/10: regra com "Localização contém" decide só nos estados do
+    Bling que ela lista; nos outros, a regra sem condição da chave vale. E no
+    estado que ela lista, mesmo "não faz nada", a troca da normal não vale."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "shipped"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=15, nome="Em andamento"),
+            SituacaoBling(id=83953, nome="Entregue"),
+            SituacaoBling(id=83954, nome="Problemas"),
+            SituacaoBling(id=12, nome="Cancelado"),
+        ]
+    )
+    regras = [
+        # Com condição: Em andamento → Problemas; em Problemas, só monitora.
+        {"status_atual": "Em andamento", "alterar_status_bling": "Problemas",
+         "localizacao_contem": "apreendido"},
+        {"status_atual": "Problemas", "localizacao_contem": "apreendido", "monitoramento": True},
+        # Normais: Em andamento → Entregue; Problemas → Cancelado.
+        {"status_atual": "Em andamento", "alterar_status_bling": "Entregue"},
+        {"status_atual": "Problemas", "alterar_status_bling": "Cancelado"},
+    ]
+    for regra in regras:
+        rs = await client.post(
+            "/api/logistica/status", json={"status_plataforma": chave, **regra}
+        )
+        assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=561, numero="99006", item_codigo="sku1", item_index=0, situacao="15")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99006", "meli_status": meli,
+              "localizacao": "Objeto apreendido por órgão de fiscalização"},
+    )
+    lid = rc.json()["id"]
+    fake = _FakeBling({"id": 561, "numero": 99006, "situacao": {"id": 15, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    # Em andamento: a com condição manda → Problemas (não Entregue).
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    assert rp.json()["situacao_alvo"] == "Problemas"
+    assert rp.json()["aplicavel"] is True
+
+    # Problemas: a com condição cobre (só monitora) → a troca pra Cancelado da
+    # normal não vale.
+    fake._order["situacao"]["id"] = 83954
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    assert rp.json()["aplicavel"] is False
+
+    # Sem a regra com condição pra Problemas, a normal volta a decidir → Cancelado.
+    rs = await client.get("/api/logistica/status")
+    so_monitora = next(
+        x for x in rs.json()
+        if x["status_atual"] == "Problemas" and x["localizacao_contem"]
+    )
+    rd = await client.delete(f"/api/logistica/status/{so_monitora['id']}")
+    assert rd.status_code in (200, 204), rd.text
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    assert rp.json()["situacao_alvo"] == "Cancelado"
+    assert rp.json()["aplicavel"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("nome_regra", "situacao_pedido"),
     [("Em digitação", 83965), ("Enviado Etiqueta", 21)],

@@ -451,16 +451,17 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
     Devolve tudo que preview/apply precisam (inclui o pedido já lido)."""
     rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
     assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
-    cands = logistica_match.find_matching_rules(
+    todas = logistica_match.find_matching_rules(
         rows, assinatura=assinatura, plataforma=row.plataforma, localizacao=row.localizacao
     )
-    cands = [c for c in cands if (c.alterar_status_bling or "").strip()]
+    cands = [c for c in todas if (c.alterar_status_bling or "").strip()]
     if not cands:
         raise BlingObsError("logistica_sem_status_bling")
 
     # Resolve nomes/ids das candidatas ANTES de falar com o Bling (valida o
     # catálogo → "desconhecido" sem custo de rede).
-    infos = [i for c in cands for i in await _cand_infos(session, c)]
+    infos_por_regra = [(c, await _cand_infos(session, c)) for c in cands]
+    infos = [i for _, lst in infos_por_regra for i in lst]
 
     bling_id = await _bling_order_id_for_row(session, row)
     client = await _bling_client(session)
@@ -478,8 +479,16 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
     # Compara pelo id CANÔNICO: pedido legado em 83965 casa regra "Em digitação"
     # (21) e vice-versa — mesmo estado lógico "etiqueta enviada".
     atual_canon = _situacao_canonica(atual_id)
-    exatas = [i for i in infos if i["de_id"] is not None and i["de_id"] == atual_canon]
-    curingas = [i for i in infos if i["de_id"] is None]
+    # Regra com condição na Localização só decide nos estados que ela cobre;
+    # nos outros, decide a sem condição (`regras_do_estado`). A escolha olha
+    # TODAS as candidatas, inclusive as que não trocam status: com condição
+    # "não faz nada" no estado atual, a troca da regra normal não vale.
+    decide = {
+        id(r) for r in logistica_match.regras_do_estado(todas, atual_nome or row.status_bling)
+    }
+    do_estado = [i for c, lst in infos_por_regra if id(c) in decide for i in lst]
+    exatas = [i for i in do_estado if i["de_id"] is not None and i["de_id"] == atual_canon]
+    curingas = [i for i in do_estado if i["de_id"] is None]
     chosen = exatas[0] if exatas else (curingas[0] if curingas else None)
     ja_alvo = next(
         (i for i in infos if i["alvo_id"] is not None and i["alvo_id"] == atual_canon), None

@@ -313,9 +313,10 @@ class LogisticaStatus(Base, TimestampMixin):
     # Condição na Localização do pedido: palavras separadas por ";" (basta UMA
     # aparecer, sem diferenciar maiúscula nem acento). Vazio = sem condição.
     # Quando casa, a regra passa na frente das regras sem condição da mesma
-    # chave (`logistica_match.find_matching_rules`). Vinicius 06/10: pacote
-    # "apreendido por órgão de fiscalização" seguia "Pago | Enviado" no ML e
-    # sumia do painel junto com os pedidos normais.
+    # chave nos estados do Bling que ela cobre; nos outros, a sem condição
+    # decide (`logistica_match.regras_do_estado`, 16/10). Vinicius 06/10:
+    # pacote "apreendido por órgão de fiscalização" seguia "Pago | Enviado" no
+    # ML e sumia do painel junto com os pedidos normais.
     localizacao_contem: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Novo status do Bling; se vazio "não faz nada" (obs "alterado logística").
     alterar_status_bling: Mapped[str | None] = mapped_column(Text, nullable=True)
