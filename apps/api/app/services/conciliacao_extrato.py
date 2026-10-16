@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -152,6 +152,12 @@ async def mp_post(cliente: Any, path: str, body: dict) -> httpx.Response:
         return await c.post(f"{MP_API_BASE}{path}", headers=headers, json=body)
 
 
+async def mp_put(cliente: Any, path: str, body: dict) -> httpx.Response:
+    headers = await _bearer(cliente)
+    async with httpx.AsyncClient(timeout=60.0) as c:
+        return await c.put(f"{MP_API_BASE}{path}", headers=headers, json=body)
+
+
 def janela_utc(de: date, ate: date) -> dict[str, str]:
     """00:00 do primeiro dia e 23:59:59 do último, em BRT, escritos em UTC."""
     inicio = datetime(de.year, de.month, de.day, 3, 0, 0, tzinfo=UTC)
@@ -169,11 +175,53 @@ def _json(r: httpx.Response) -> Any:
         return (r.text or "")[:500]
 
 
+CONFIG_OK = (
+    "existia",
+    "existia_minima",
+    "criada",
+    "criada_minima",
+    "atualizada",
+    "atualizada_minima",
+)
+CONFIG_RELER = ("atualizada", "atualizada_minima")
+
+
+def _colunas_da_config(body: Any) -> set[str]:
+    if not isinstance(body, dict):
+        return set()
+    colunas = body.get("columns") or []
+    return {str(c.get("key")) for c in colunas if isinstance(c, dict) and c.get("key")}
+
+
 async def garantir_config(cliente: Any) -> dict[str, Any]:
-    """Cria a configuração do relatório na conta se não existir (404)."""
+    """Cria a configuração do relatório na conta se não existir (404) e COMPLETA as
+    colunas quando a que existe tem menos que as nossas (16/10: a aguiar tinha uma
+    config antiga de 11 colunas, sem ORDER_ID — 14 pagamentos "sem dono"). Quem
+    chama relê os relatórios quando o status é um de `CONFIG_RELER`."""
     r = await mp_get(cliente, "/v1/account/release_report/config")
     if r.status_code == 200:
-        return {"status": "existia", "http": 200}
+        tem = _colunas_da_config(_json(r))
+        faltam = [c for c in COLUNAS if c not in tem]
+        if not faltam:
+            return {"status": "existia", "http": 200}
+        faltam_minimo = [c for c in COLUNAS_MINIMO if c not in tem]
+        u = await mp_put(cliente, "/v1/account/release_report/config", config_relatorio(COLUNAS))
+        if u.status_code in (200, 201):
+            return {"status": "atualizada", "http": u.status_code, "faltavam": faltam}
+        if not faltam_minimo:
+            # a conta recusa as colunas extras, mas o mínimo que lemos ela já tem
+            return {"status": "existia_minima", "http": 200, "recusou": _json(u)}
+        m = await mp_put(
+            cliente, "/v1/account/release_report/config", config_relatorio(COLUNAS_MINIMO)
+        )
+        if m.status_code in (200, 201):
+            return {
+                "status": "atualizada_minima",
+                "http": m.status_code,
+                "faltavam": faltam_minimo,
+                "recusou": _json(u),
+            }
+        return {"status": "falhou", "http": m.status_code, "body": _json(m), "recusou": _json(u)}
     if r.status_code != 404:
         return {"status": "falhou", "http": r.status_code, "body": _json(r)}
     c = await mp_post(cliente, "/v1/account/release_report/config", config_relatorio(COLUNAS))
@@ -362,6 +410,116 @@ async def resolver_pedidos_bling(
     return out
 
 
+def _campos_para_completar(stmt: Any) -> dict[str, Any]:
+    """Linha repetida (mesma identidade) COMPLETA a gravada em vez de ser ignorada:
+    o relatório novo pode trazer coluna que o antigo não tinha (16/10). O que uma
+    pessoa fez (classificação, vínculo à mão) fica como está."""
+    ex = stmt.excluded
+    mov = ConciliacaoMovimento
+    coalesce = {
+        c: func.coalesce(getattr(ex, c), getattr(mov, c))
+        for c in (
+            "descricao",
+            "sub_tipo",
+            "pagamento_id",
+            "pedido_marketplace",
+            "pack_id",
+            "shipping_id",
+            "sku",
+            "item_id",
+            "data_aprovacao",
+            "saldo_apos",
+        )
+    }
+    # valor novo manda quando não é zero; zero no novo não apaga o que já tinha
+    valores = {
+        c: func.coalesce(func.nullif(getattr(ex, c), 0), getattr(mov, c), getattr(ex, c))
+        for c in ("bruto", "tarifa", "parcelamento", "frete", "cupom")
+    }
+    pedido = {
+        c: case(
+            (mov.vinculado_por.is_(None), func.coalesce(getattr(ex, c), getattr(mov, c))),
+            else_=getattr(mov, c),
+        )
+        for c in ("pedido_bling", "bling_id")
+    }
+    return {
+        **coalesce,
+        **valores,
+        **pedido,
+        "raw": mov.raw.concat(ex.raw),
+        "updated_at": func.now(),
+    }
+
+
+def _chave_natural(
+    data: datetime,
+    pagamento_id: str | None,
+    sub_tipo: str | None,
+    descricao: str | None,
+    credito: Any,
+    debito: Any,
+) -> tuple:
+    q = Decimal("0.01")
+    return (
+        data.astimezone(UTC),
+        pagamento_id or "",
+        sub_tipo or "",
+        descricao or "",
+        str((Decimal(str(credito or 0))).quantize(q)),
+        str((Decimal(str(debito or 0))).quantize(q)),
+    )
+
+
+async def _reidentificar_linhas_pobres(
+    session: AsyncSession, loja: ConciliacaoLoja, movimentos: list[dict[str, Any]]
+) -> int:
+    """A identidade da linha inclui o ORDER_ID. Linha gravada por um relatório SEM essa
+    coluna (config antiga, 16/10 aguiar) tem outra identidade; quando o relatório
+    completo chega, casa pela chave natural (hora, pagamento, tipo, valores) e troca a
+    identidade da linha antiga — aí o upsert completa os campos em vez de duplicar."""
+    novos = [m for m in movimentos if m.get("pedido_marketplace")]
+    if not novos:
+        return 0
+    ids_novos = {m["id_externo"] for m in movimentos}
+    datas = [m["data"] for m in novos]
+    antigas = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.pedido_marketplace.is_(None),
+                    ConciliacaoMovimento.data >= min(datas),
+                    ConciliacaoMovimento.data <= max(datas),
+                    ConciliacaoMovimento.id_externo.notin_(ids_novos),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not antigas:
+        return 0
+    por_chave = {
+        _chave_natural(a.data, a.pagamento_id, a.sub_tipo, a.descricao, a.credito, a.debito): a
+        for a in antigas
+    }
+    trocadas = 0
+    for m in novos:
+        chave = _chave_natural(
+            m["data"], m["pagamento_id"], m["sub_tipo"], m["descricao"], m["credito"], m["debito"]
+        )
+        antiga = por_chave.pop(chave, None)
+        if antiga is None:
+            continue
+        antiga.id_externo = m["id_externo"]
+        trocadas += 1
+    if trocadas:
+        await session.flush()
+    return trocadas
+
+
 async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) -> dict[str, Any]:
     cab, rows, _sep = ler_csv_mp(texto)
     integration = await session.get(Integration, loja.integration_id)
@@ -394,22 +552,27 @@ async def ingerir_csv(session: AsyncSession, loja: ConciliacaoLoja, texto: str) 
             sem_pedido += 1
         m["integration_id"] = loja.integration_id
         m["platform"] = loja.platform
-    inseridos = 0
+    reidentificados = await _reidentificar_linhas_pobres(session, loja, movimentos)
+    inseridos = atualizados = 0
     for k in range(0, len(movimentos), 200):
         lote = movimentos[k : k + 200]
-        stmt = (
-            pg_insert(ConciliacaoMovimento)
-            .values(lote)
-            .on_conflict_do_nothing(constraint="uq_conciliacao_mov_externo")
-            .returning(ConciliacaoMovimento.id)
-        )
-        inseridos += len((await session.execute(stmt)).all())
+        stmt = pg_insert(ConciliacaoMovimento).values(lote)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_conciliacao_mov_externo", set_=_campos_para_completar(stmt)
+        ).returning(ConciliacaoMovimento.id, literal_column("(xmax = 0)"))
+        for _id, novo in (await session.execute(stmt)).all():
+            if novo:
+                inseridos += 1
+            else:
+                atualizados += 1
     await session.flush()
     return {
         "linhas": len(rows),
         "movimentos": len(movimentos),
         "inseridos": inseridos,
         "ja_existiam": len(movimentos) - inseridos,
+        "atualizados": atualizados,
+        "reidentificados": reidentificados,
         "com_pedido": com_pedido,
         "sem_pedido": sem_pedido,
         "pedido_bling_resolvido": sum(1 for m in movimentos if m.get("pedido_bling")),
@@ -506,12 +669,20 @@ async def run_extrato_sync(
         if fins and proximo >= ontem and max(fins) >= ontem:
             proximo = ontem + timedelta(days=1)  # ontem já lido: nada a pedir
         if proximo <= ontem:
+            # Confere a config a cada pedido (≈ 1×/dia): se faltava coluna e foi
+            # completada, os relatórios já lidos vieram capengas — relê desde o início.
+            cfg = await garantir_config(cliente)
+            resumo["config"] = cfg
+            if cfg["status"] in CONFIG_OK:
+                loja.extrato_config_em = agora
+            if cfg["status"] in CONFIG_RELER:
+                for r in rows:
+                    await session.delete(r)
+                rows = []
+                await session.flush()
+                proximo = loja.inicio
+                resumo["reler_desde"] = proximo.isoformat()
             ate = min(ontem, proximo + timedelta(days=max_dias - 1))
-            if not loja.extrato_config_em:
-                cfg = await garantir_config(cliente)
-                resumo["config"] = cfg
-                if cfg["status"] in ("existia", "criada", "criada_minima"):
-                    loja.extrato_config_em = agora
             res = await pedir_relatorio(cliente, proximo, ate)
             chave = _chave_janela(proximo, ate)
             if res["ok"]:

@@ -587,3 +587,14 @@ OK do Vinicius ("pode seguir, faz os ajustes e liga as lojas"), depois da lista 
 - **Carga inicial em fila** `POST /api/conciliacao/carga-inicial` {plataformas, contas, intervalo_min=12, so_sem_carga}: ML a cada 12 min (≈4,5 h pra 22 contas, feita à noite com a Margem parada — a Margem só atrasa leituras, não perde), Shopee/TikTok 30 s entre uma e outra.
 - Cada loja precisa do id de loja do Bling na tela Lojas; sem isso o recálculo grava "sem loja do Bling ligada" em `ultimo_erro` (conferir no Resumo no dia seguinte).
 
+
+## 28. Revisão da manhã de 16/10 — erros do leitor (commit desta seção)
+
+Primeira madrugada com todas as lojas: 47 contas carregadas; Shopee 14/14, TikTok 8/8, Amazon 2/2 lidas; 6 contas do ML falharam a ingestão (coluna estreita, mig 0409) e foram relidas às 07:00. O que sobrou no Onde agir e o que foi corrigido:
+
+- **injox "saldo não bate −362,15"**: pagamento e reserva no mesmo segundo invertiam a ordem; a prova dos nove do dia agora parte do fechamento do dia anterior (`_saldo_anterior`) — diferença 0.
+- **aguiar: 14 pagamentos "sem dono"**: a conta tinha uma config antiga do relatório do Mercado Pago com 11 colunas (sem ORDER_ID). `garantir_config` agora compara as colunas a cada pedido de relatório (≈ 1×/dia) e completa com PUT; quando completa, esquece as janelas já lidas e pede tudo desde o início. A ingestão virou upsert: linha repetida COMPLETA a gravada (nº da venda, SKU, tarifas, raw) sem mexer no que uma pessoa fez; linha gravada pelo relatório pobre (identidade sem ORDER_ID) é casada pela chave natural (hora, pagamento, tipo, valores) e troca de identidade em vez de duplicar.
+- **Linha sem nº de venda mas do mesmo pagamento de uma linha ligada**: herda o pedido da irmã (`irma_do_pagamento`).
+- **injox: 4 reservas de vendas que não existem no Bling**: vão e voltam (soma zero); o robô classifica como "reserva" (classificação nova "Reserva (vai e volta)") pra não ficar sem dono; se o pedido aparecer depois, a ligação desfaz a classificação. Estorno de verdade sem pedido continua sem dono.
+- **Barbosa (shopee) −0,98**: a carteira da Shopee trouxe uma linha cujo valor não bate com a variação do saldo (13:05:28, R$ 292,39). Não é erro nosso; fica pra pessoa classificar como ajuste (regra automática avaliada e deixada de lado por enquanto: esconderia erro real).
+- **lucas mei (ML)**: `invalid client` ao renovar o token — precisa reconectar em Integrações › Mercado Livre.

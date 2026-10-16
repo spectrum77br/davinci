@@ -245,13 +245,134 @@ async def test_run_extrato_sync_pede_janela_e_depois_le_o_arquivo(db, make_user)
     assert r2["pedido"] is None  # ontem (14/10) já está coberto: nada novo a pedir
     syncs = (await db.execute(__import__("sqlalchemy").select(ConciliacaoSync))).scalars().all()
     assert [(s.chave, s.status, s.linhas) for s in syncs] == [("2026-10-01..2026-10-14", "lido", 8)]
-    # dia seguinte: pede só o dia 15
+    # dia seguinte: pede só o dia 15 (e confere a config de novo: completa, nada a mudar)
     with respx.mock(assert_all_called=False) as router:
+        router.get(f"{MP}/v1/account/release_report/config").mock(
+            return_value=Response(200, json=CONFIG_COMPLETA)
+        )
         router.get(f"{MP}/v1/account/release_report/list").mock(return_value=Response(200, json=[]))
         router.post(f"{MP}/v1/account/release_report").mock(return_value=Response(202, json={}))
         r3 = await ext.run_extrato_sync(db, loja, cliente, hoje=date(2026, 10, 16))
     # folga de um dia: pede de novo o último dia lido (14) junto com o 15; repetido é ignorado
     assert r3["pedido"]["janela"] == "2026-10-14..2026-10-15"
+    assert r3["config"]["status"] == "existia"
+
+
+CONFIG_COMPLETA = {"columns": [{"key": c} for c in ext.COLUNAS]}
+# 16/10: a aguiar tinha uma config antiga de 11 colunas (sem ORDER_ID) — 14 pagamentos
+# "sem dono" porque o relatório não dizia de que venda eram.
+CONFIG_POBRE = {
+    "columns": [
+        {"key": c}
+        for c in (
+            "DATE",
+            "SOURCE_ID",
+            "RECORD_TYPE",
+            "DESCRIPTION",
+            "NET_CREDIT_AMOUNT",
+            "NET_DEBIT_AMOUNT",
+            "GROSS_AMOUNT",
+            "BALANCE_AMOUNT",
+            "PAYMENT_METHOD",
+            "BUSINESS_UNIT",
+        )
+    ]
+}
+CSV_POBRE = "\n".join(
+    [
+        "DATE,SOURCE_ID,RECORD_TYPE,DESCRIPTION,NET_CREDIT_AMOUNT,NET_DEBIT_AMOUNT,GROSS_AMOUNT,"
+        "BALANCE_AMOUNT,PAYMENT_METHOD,BUSINESS_UNIT",
+        "2026-10-01T00:00:00.000-03:00,,initial_available_balance,,9147.81,0.00,9147.81,9147.81,,",
+        "2026-10-01T06:57:55.000-03:00,181760519746,release,reserve_for_payout,0.00,9147.00,-9147.00,"
+        "0.81,available_money,Mercado Libre",
+        "2026-10-01T06:57:57.000-03:00,181760519746,release,payout,0.00,9147.00,-9147.00,0.81,"
+        "available_money,Mercado Libre",
+        "2026-10-01T08:11:09.000-03:00,177489533941,release,payment,610.65,0.00,880.98,611.46,"
+        "master,Mercado Libre",
+        "2026-10-01T23:00:44.000-03:00,180879957389,release,mediation,0.00,732.35,-732.35,0.00,"
+        "pix,Mercado Libre",
+        "2026-10-01T23:00:49.000-03:00,180879957389,release,refund,116.81,0.00,0.00,116.81,"
+        "pix,Mercado Libre",
+        "2026-10-02T11:16:33.000-03:00,176527200959,release,reserve_for_dispute,0.00,611.46,"
+        "-611.46,0.00,pix,Mercado Libre",
+        ",,total,,2591.22,0.00,11113.46,0.00,,",
+    ]
+)
+
+
+async def test_garantir_config_completa_as_colunas_e_rele_desde_o_inicio(db, make_user):
+    loja, _integ = await _loja(db, make_user)
+    loja.extrato_config_em = datetime(2026, 10, 2, tzinfo=UTC)
+    db.add(
+        ConciliacaoSync(
+            integration_id=loja.integration_id,
+            origem="mp_extrato",
+            chave="2026-10-01..2026-10-13",
+            status="lido",
+            linhas=10,
+        )
+    )
+    await db.flush()
+    cliente = _ClienteFalso()
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{MP}/v1/account/release_report/config").mock(
+            return_value=Response(200, json=CONFIG_POBRE)
+        )
+        put = router.put(f"{MP}/v1/account/release_report/config").mock(
+            return_value=Response(200, json={})
+        )
+        router.get(f"{MP}/v1/account/release_report/list").mock(return_value=Response(200, json=[]))
+        router.post(f"{MP}/v1/account/release_report").mock(return_value=Response(202, json={}))
+        r = await ext.run_extrato_sync(db, loja, cliente, hoje=date(2026, 10, 15))
+    assert r["config"]["status"] == "atualizada" and "ORDER_ID" in r["config"]["faltavam"]
+    enviado = __import__("json").loads(put.calls[0].request.content)
+    assert [c["key"] for c in enviado["columns"]] == ext.COLUNAS
+    # os relatórios lidos com a config capenga são esquecidos: pede tudo desde o início
+    assert r["reler_desde"] == "2026-10-01"
+    assert r["pedido"]["janela"] == "2026-10-01..2026-10-14"
+    syncs = (await db.execute(__import__("sqlalchemy").select(ConciliacaoSync))).scalars().all()
+    assert [(s.chave, s.status) for s in syncs] == [("2026-10-01..2026-10-14", "pedido")]
+
+
+async def test_garantir_config_nao_mexe_quando_a_conta_so_aceita_o_minimo(db, make_user):
+    cliente = _ClienteFalso()
+    minima = {"columns": [{"key": c} for c in ext.COLUNAS_MINIMO]}
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{MP}/v1/account/release_report/config").mock(
+            return_value=Response(200, json=minima)
+        )
+        router.put(f"{MP}/v1/account/release_report/config").mock(
+            return_value=Response(400, json={"message": "invalid columns"})
+        )
+        r = await ext.garantir_config(cliente)
+    assert r["status"] == "existia_minima"
+
+
+async def test_ingerir_csv_completa_as_linhas_de_um_relatorio_pobre(db, make_user):
+    loja, _integ = await _loja(db, make_user)
+    db.add(
+        _pedido_bling(
+            "301102", "2000018405611066", datetime(2026, 9, 11, 13, tzinfo=UTC), "880.98", 500.0
+        )
+    )
+    await db.commit()
+    pobre = await ext.ingerir_csv(db, loja, CSV_POBRE)
+    assert pobre["inseridos"] == 6 and pobre["sem_pedido"] == 6
+    completo = await ext.ingerir_csv(db, loja, CSV_JLAS2)
+    # nenhuma linha nova: as 6 já existiam e foram completadas (4 trocaram de identidade
+    # porque agora têm ORDER_ID; payout/reserva de saque não mudam)
+    assert completo["inseridos"] == 0 and completo["atualizados"] == 6
+    assert completo["reidentificados"] == 4
+    todas = (
+        (await db.execute(__import__("sqlalchemy").select(ConciliacaoMovimento))).scalars().all()
+    )
+    assert len(todas) == 6
+    venda = next(m for m in todas if m.tipo == "venda_liberada")
+    assert venda.pedido_marketplace == "2000018405611066" and venda.pedido_bling == "301102"
+    assert venda.tarifa == Decimal("-92.36") and venda.sku == "dg057.ci+a001.ci"
+    assert venda.raw["BUSINESS_UNIT"] == "Mercado Libre" and venda.raw["ORDER_ID"]
+    saque = next(m for m in todas if m.tipo == "saque")
+    assert saque.classificacao == "saque"
 
 
 # --- fatura ------------------------------------------------------------------
@@ -449,6 +570,7 @@ def _mov(
     parcelamento=None,
     tarifa=None,
     sub=None,
+    pagamento=None,
 ):
     _CONTADOR[0] += 1
     return ConciliacaoMovimento(
@@ -460,6 +582,7 @@ def _mov(
         tipo=tipo,
         descricao=tipo,
         sub_tipo=sub,
+        pagamento_id=pagamento,
         pedido_marketplace=pedido_mkt,
         pedido_bling=pedido_bling,
         credito=Decimal(credito),
@@ -711,6 +834,75 @@ def test_etapa_finaliza_sozinha_em_7_dias_e_reabre_com_movimento_novo():
 
 
 # --- status ------------------------------------------------------------------
+
+
+async def test_recalcular_loja_herda_o_pedido_da_irma_e_classifica_reserva_solta(db, make_user):
+    loja, _integ = await _loja(db, make_user)
+    agora = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    d = lambda dia, h=10: datetime(2026, 10, dia, h, tzinfo=UTC)  # noqa: E731
+    db.add(_pedido_bling("301200", "2000018400000001", d(2), "100.00", 40.0))
+    # a venda liberada veio com ORDER_ID; a reserva do mesmo pagamento veio sem (relatório
+    # antigo) — herda o pedido pela irmã
+    db.add_all(
+        [
+            _mov(
+                loja,
+                "venda_liberada",
+                d(5),
+                credito="80",
+                pedido_mkt="2000018400000001",
+                pagamento="P1",
+            ),
+            _mov(loja, "reserva_disputa", d(6), debito="80", pagamento="P1"),
+            _mov(loja, "reserva_disputa", d(6, 11), credito="80", pagamento="P1"),
+            # reserva de uma venda que não existe no Bling: vai e volta, soma zero → "reserva"
+            _mov(
+                loja,
+                "reserva_estorno",
+                d(7),
+                debito="50",
+                pedido_mkt="2000018499999999",
+                pagamento="P9",
+            ),
+            _mov(
+                loja,
+                "reserva_estorno",
+                d(7, 11),
+                credito="50",
+                pedido_mkt="2000018499999999",
+                pagamento="P9",
+            ),
+            # estorno de verdade sem pedido: continua sem dono (saiu dinheiro)
+            _mov(
+                loja,
+                "estorno",
+                d(7, 12),
+                debito="50",
+                pedido_mkt="2000018499999999",
+                pagamento="P9",
+            ),
+        ]
+    )
+    await db.commit()
+    r = await calc.recalcular_loja(db, loja, agora=agora)
+    assert r["irma_do_pagamento"] == 2 and r["reserva_sem_pedido"] == 2
+    movs = (await db.execute(__import__("sqlalchemy").select(ConciliacaoMovimento))).scalars().all()
+    por_pag = {}
+    for m in movs:
+        por_pag.setdefault(m.pagamento_id, []).append(m)
+    assert all(m.pedido_bling == "301200" for m in por_pag["P1"])
+    p9 = {m.tipo: m for m in por_pag["P9"] if m.tipo != "estorno"}
+    assert all(m.classificacao == "reserva" and m.pedido_bling is None for m in p9.values())
+    estorno = next(m for m in por_pag["P9"] if m.tipo == "estorno")
+    assert estorno.classificacao is None and estorno.pedido_bling is None
+    # o pedido do Bling aparece depois: a ligação desfaz a classificação do robô
+    db.add(_pedido_bling("301201", "2000018499999999", d(3), "50.00", 20.0))
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=agora)
+    movs = (await db.execute(__import__("sqlalchemy").select(ConciliacaoMovimento))).scalars().all()
+    for m in movs:
+        if m.pagamento_id == "P9":
+            assert m.pedido_bling == "301201" and m.classificacao is None
 
 
 async def test_status_lista_a_loja_ligada(db, make_user, auth_as, client):

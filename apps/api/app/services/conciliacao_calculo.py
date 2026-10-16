@@ -989,6 +989,81 @@ async def recalcular_loja(
             if achado:
                 m.pedido_bling, m.bling_id = achado
                 contagem["resolvido_agora"] += 1
+                if m.classificacao == "reserva":
+                    # classificação dada pelo robô (abaixo) enquanto não tinha dono
+                    m.classificacao = None
+    # Linha sem nº de venda mas do MESMO pagamento de uma linha já ligada a um pedido
+    # (16/10: relatório antigo da aguiar sem ORDER_ID; reservas/estornos sem o nº):
+    # herda o pedido da irmã.
+    orfas = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento)
+                .where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.pedido_bling.is_(None),
+                    ConciliacaoMovimento.pedido_marketplace.is_(None),
+                    ConciliacaoMovimento.pagamento_id.isnot(None),
+                    ConciliacaoMovimento.vinculado_por.is_(None),
+                    ConciliacaoMovimento.classificacao.is_(None),
+                )
+                .limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if orfas:
+        irmas = (
+            await session.execute(
+                select(
+                    ConciliacaoMovimento.pagamento_id,
+                    ConciliacaoMovimento.pedido_bling,
+                    ConciliacaoMovimento.bling_id,
+                )
+                .where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.pagamento_id.in_({m.pagamento_id for m in orfas}),
+                    ConciliacaoMovimento.pedido_bling.isnot(None),
+                )
+                .distinct()
+            )
+        ).all()
+        por_pagamento: dict[str, tuple[str, int | None]] = {}
+        for pid, pb, bid in irmas:
+            if pid and pb and pid not in por_pagamento:
+                por_pagamento[str(pid)] = (str(pb), bid)
+        for m in orfas:
+            achado = por_pagamento.get(m.pagamento_id or "")
+            if achado:
+                m.pedido_bling, m.bling_id = achado
+                contagem["irma_do_pagamento"] += 1
+    # Reserva (vai e volta, soma zero) de venda que não existe no Bling: não é
+    # dinheiro que entrou nem saiu — o robô classifica como "reserva" pra não ficar
+    # "sem dono" (16/10, injox). Se o pedido aparecer depois, a ligação acima desfaz.
+    reservas_soltas = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento)
+                .where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.tipo.in_(tuple(TIPOS_RESERVA)),
+                    ConciliacaoMovimento.pedido_bling.is_(None),
+                    ConciliacaoMovimento.vinculado_por.is_(None),
+                    ConciliacaoMovimento.classificacao.is_(None),
+                )
+                .limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in reservas_soltas:
+        m.classificacao = "reserva"
+        contagem["reserva_sem_pedido"] += 1
     # Cupom do extrato: só o que sai do bolso da loja (EFFECTIVE_COUPON_AMOUNT); as linhas
     # gravadas antes de 15/10 tinham o COUPON_AMOUNT (que soma o cupom bancado pelo ML).
     from app.services.conciliacao_extrato import cupom_da_linha

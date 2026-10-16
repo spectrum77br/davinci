@@ -1888,12 +1888,21 @@ from app.services.conciliacao_calculo import recalcular_loja  # noqa: E402
 from app.services.conciliacao_extrato import TIPOS_RESERVA as TIPOS_RESERVA_SET  # noqa: E402
 from app.services.conciliacao_extrato import bling_store_ids_da_loja  # noqa: E402
 
-CLASSIFICACOES = ("saque", "fatura_ml", "publicidade", "anterior_ao_inicio", "ajuste", "outro")
+CLASSIFICACOES = (
+    "saque",
+    "fatura_ml",
+    "publicidade",
+    "anterior_ao_inicio",
+    "reserva",
+    "ajuste",
+    "outro",
+)
 CLASSIFICACAO_LABELS = {
     "saque": "Saque",
     "fatura_ml": "Fatura do ML",
     "publicidade": "Publicidade",
     "anterior_ao_inicio": "Pedido anterior ao início",
+    "reserva": "Reserva (vai e volta)",
     "ajuste": "Ajuste",
     "outro": "Outro",
 }
