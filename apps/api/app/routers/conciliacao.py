@@ -955,14 +955,51 @@ async def amazon_upload_pelo_script(
     loja: Annotated[str, Form()],
     arquivo: Annotated[UploadFile, File()],
     x_upload_chave: Annotated[str | None, Header()] = None,
+    x_agent_token: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """O mesmo envio, feito pelo script do Mac (sem ninguém logado): a chave gerada em
-    "Gerar chave pro script" vai no header X-Upload-Chave."""
+    "Gerar chave pro script" vai no header X-Upload-Chave. O executor do Mac mini usa o
+    X-Agent-Token dele (o mesmo da Logística)."""
+    import secrets as _secrets
+
+    from app.config import get_settings
     from app.services.conciliacao_amazon_csv import chave_upload_valida
 
-    if not await chave_upload_valida(session, x_upload_chave):
+    esperado = get_settings().marketing_agent_token
+    pelo_agente = bool(
+        esperado and x_agent_token and _secrets.compare_digest(x_agent_token, esperado)
+    )
+    if not pelo_agente and not await chave_upload_valida(session, x_upload_chave):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"code": "chave_invalida"})
     return await _amazon_upload_corpo(session, loja, arquivo)
+
+
+@router.post("/lojas/{conta}/buscar-transacoes")
+async def amazon_buscar_transacoes(
+    conta: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
+) -> dict[str, Any]:
+    """Botão ⟳ da loja por arquivo (16/10): pede ao robô do Mac mini pra baixar o CSV
+    da Amazon e enviar. Fica na fila do robô da Logística (ação amazon_transacoes_csv)."""
+    from app.services import logistica_robo
+    from app.services.conciliacao_amazon_csv import enfileirar_busca_csv
+
+    alvo = await _loja_ou_404(session, conta)
+    if alvo.modo_extrato != "upload":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "loja_nao_e_upload", "mensagem": "esta loja é lida pela API"},
+        )
+    cmd, novo = await enfileirar_busca_csv(session, alvo, user_id=user.id)
+    await session.commit()
+    visto = await logistica_robo.ultimo_heartbeat(session)
+    return {
+        "conta": alvo.conta,
+        "comando_id": str(cmd.id),
+        "enfileirado": novo,
+        "robo_visto_em": visto.last_seen_at.isoformat() if visto and visto.last_seen_at else None,
+    }
 
 
 @router.get("/amazon/upload/chave")
@@ -3221,6 +3258,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             "conta": loja.conta,
             "platform": plataforma,
             "inicio": loja.inicio.isoformat(),
+            "modo_extrato": loja.modo_extrato,
             "dinheiro": dinheiro,
             "dia": {
                 "status": dia_status,

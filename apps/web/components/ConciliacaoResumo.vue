@@ -11,6 +11,7 @@ const emit = defineEmits<{
   (e: 'abrir-extrato', loja: string, dia: string): void
   (e: 'ver-pedidos', loja: string, filtro: Record<string, string>): void
   (e: 'sincronizar', loja: string): void
+  (e: 'buscar-transacoes', loja: string): void
 }>()
 
 type DiaLoja = {
@@ -79,6 +80,8 @@ type LojaResumo = {
 
   obs_dia: string[]
   problemas_dia: string[]
+
+  modo_extrato?: string
 }
 type Agir = {
   gravidade: 'ok' | 'warn' | 'bad'
@@ -333,7 +336,10 @@ onMounted(() => {
                     </td>
                   </tr>
                   <tr v-for="l in g.lojas" v-show="abertosLojas[g.key]" :key="l.conta" class="cursor-pointer border-b hover:bg-muted/40" @click="emit('abrir-extrato', l.conta, dados.dia)">
-                    <td class="px-2 py-1 font-bold">{{ l.conta }}</td>
+                    <td class="px-2 py-1 font-bold">
+                      {{ l.conta }}
+                      <button v-if="canEdit" type="button" class="ml-1 rounded px-1 text-muted-foreground hover:bg-muted hover:text-foreground" :title="l.modo_extrato === 'upload' ? 'pedir ao robô do Mac mini pra buscar as transações da Amazon e enviar' : 'rodar de novo: fatura, extrato e recálculo desta loja'" @click.stop="l.modo_extrato === 'upload' ? emit('buscar-transacoes', l.conta) : emit('sincronizar', l.conta)"><RefreshCw class="inline size-3" /></button>
+                    </td>
                     <td class="px-2 py-1 text-right tabular-nums">{{ l.dia.linhas || '—' }}</td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.dia.pendentes ? 'text-red-600' : ''">{{ l.dia.linhas ? l.dia.pendentes : '—' }}</td>
                     <td class="px-2 py-1 text-right tabular-nums font-bold" :class="l.pedidos.pendencia ? 'text-red-600' : ''" @click.stop="emit('ver-pedidos', l.conta, { etapa: 'pendencia' })">{{ l.pedidos.pendencia }}</td>

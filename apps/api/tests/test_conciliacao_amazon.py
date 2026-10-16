@@ -886,3 +886,70 @@ async def test_chave_do_script_gera_valida_e_envia_sem_login(db, make_user, auth
         headers={"X-Upload-Chave": nova},
     )
     assert r.status_code == 200 and r.json()["ja_existiam"] == 9
+
+
+async def test_botao_buscar_transacoes_enfileira_o_robo_e_o_resultado_volta_na_loja(
+    db, make_user, auth_as, client
+):
+    from app.models import LogisticaRoboComando
+    from app.services import logistica_robo
+    from app.services.conciliacao_amazon_csv import enfileirar_busca_csv_todas
+
+    loja = await _loja_amazon(db, make_user)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True, "edit": True}}))
+    # loja lida pela API não tem robô de arquivo
+    r = await client.post("/api/conciliacao/lojas/kia/buscar-transacoes")
+    assert r.status_code == 409
+    loja.modo_extrato = "upload"
+    await db.commit()
+    r = await client.post("/api/conciliacao/lojas/kia/buscar-transacoes")
+    assert r.status_code == 200, r.text
+    assert r.json()["enfileirado"] is True and r.json()["comando_id"]
+    cmd_id = r.json()["comando_id"]
+    # de novo: já tem na fila, não duplica
+    r = await client.post("/api/conciliacao/lojas/kia/buscar-transacoes")
+    assert r.json()["enfileirado"] is False and r.json()["comando_id"] == cmd_id
+    cmd = await db.get(LogisticaRoboComando, __import__("uuid").UUID(cmd_id))
+    assert cmd.acao == "amazon_transacoes_csv" and cmd.logistica_id is None
+    assert cmd.payload["loja"] == "kia" and cmd.payload["dias"] == 35
+    # o executor do mini pega pelo nome da ação
+    leased = await logistica_robo.lease(db, limit=5, acoes=["amazon_transacoes_csv"])
+    assert [x["id"] for x in leased] == [cmd_id] and leased[0]["logistica_id"] is None
+    # o cron das 06:00 não duplica enquanto a tarefa está aberta
+    assert await enfileirar_busca_csv_todas(db) == []
+    # falhou → aparece na loja; deu certo → limpa
+    await logistica_robo.registrar_resultado(
+        db, cmd.id, status="failed", result="needs_manual_login: a Amazon pediu login"
+    )
+    await db.refresh(loja)
+    assert loja.ultimo_erro.startswith("robô: needs_manual_login")
+    # com a tarefa fechada, o cron enfileira de novo
+    assert await enfileirar_busca_csv_todas(db) == ["kia"]
+    novo = (
+        await db.execute(
+            __import__("sqlalchemy")
+            .select(LogisticaRoboComando)
+            .where(LogisticaRoboComando.status == "pending")
+        )
+    ).scalar_one()
+    await logistica_robo.registrar_resultado(db, novo.id, status="done", result='{"ok": true}')
+    await db.refresh(loja)
+    assert loja.ultimo_erro is None
+    # o executor envia o CSV com o X-Agent-Token dele
+    from app.config import get_settings
+
+    get_settings().marketing_agent_token = "tok-agente-teste"  # noqa: S105 — token de mentira
+    try:
+        auth_as(None)
+        arquivo = ("transacoes.csv", CSV_KFA.encode("utf-8-sig"), "text/csv")
+        r = await client.post(
+            "/api/conciliacao/amazon/upload/script",
+            data={"loja": "kia"},
+            files={"arquivo": arquivo},
+            headers={"X-Agent-Token": "tok-agente-teste"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["inseridos"] == 9
+    finally:
+        get_settings().marketing_agent_token = ""

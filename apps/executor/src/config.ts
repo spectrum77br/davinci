@@ -20,10 +20,12 @@ function int(name: string, def: number): number {
  *  pede a senha ao comprador no chat da TikTok (`tiktok`). Desde 06/10 existe
  *  a `conferencia` (Conferência Shopee: lê afiliados/Ads/vendas/saldo de cada
  *  loja, uma por ciclo) — só liga quem pôr no EXECUTOR_FILAS. */
-export type Fila = "shopee" | "melhorenvio" | "tuta" | "tiktok" | "conferencia";
-export const FILAS: readonly Fila[] = ["shopee", "melhorenvio", "tuta", "tiktok", "conferencia"];
+export type Fila = "shopee" | "melhorenvio" | "tuta" | "tiktok" | "conferencia" | "conciliacao";
+export const FILAS: readonly Fila[] = ["shopee", "melhorenvio", "tuta", "tiktok", "conferencia", "conciliacao"];
 
 export interface Config {
+  /** Conciliação (16/10): loja por arquivo → perfil do AdsPower (CONCILIACAO_PERFIS). */
+  conciliacaoPerfis: Record<string, string>;
   filas: Set<Fila>;
   davinciApiUrl: string;
   agentToken: string;
@@ -103,6 +105,14 @@ export const cfg: Config = {
   defaultScope,
   calibrated: str("SELECTORS_CALIBRATED") === "true",
   melhorEnvioAdspowerUserId: str("MELHORENVIO_ADSPOWER_USER_ID"),
+  // Conciliação (16/10): loja por arquivo → perfil do AdsPower. Ex.:
+  // CONCILIACAO_PERFIS="kfa (amazon)=k1doch5a;outra (amazon)=k1xxxxxx"
+  conciliacaoPerfis: Object.fromEntries(
+    str("CONCILIACAO_PERFIS", "kfa (amazon)=k1doch5a")
+      .split(";")
+      .map((par) => par.split("=").map((x) => x.trim()))
+      .filter((par) => par.length === 2 && par[0] && par[1])
+  ) as Record<string, string>,
   // "Envios › Liberados e postados". Em 24/09/2026 o painel já morava em
   // melhorenvio.com.br/painel; o antigo app.melhorenvio.com.br/envios/postados
   // dá 404. Sem "#…" aqui: o robô abre a sub-aba Postados clicando.

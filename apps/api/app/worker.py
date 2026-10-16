@@ -3974,6 +3974,19 @@ async def conciliacao_sincronizar_loja(
     return {k: v for k, v in r.items() if k != "fatura"}
 
 
+async def conciliacao_amazon_csv_tick(ctx: dict) -> None:
+    """06:00 BRT (16/10): uma tarefa `amazon_transacoes_csv` por loja Amazon por
+    arquivo (KFA); o executor do Mac mini baixa o CSV pelo AdsPower e envia."""
+    try:
+        from app.services.conciliacao_amazon_csv import enfileirar_busca_csv_todas
+
+        async with session_scope() as s:
+            novas = await enfileirar_busca_csv_todas(s)
+        logger.info("conciliacao_amazon_csv_tick_done", lojas=novas)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("conciliacao_amazon_csv_tick_falhou", err=str(e)[:300])
+
+
 async def vigia_conciliacao_tick(ctx: dict) -> None:
     """Vigia de Conciliação (Ouvidoria): 07:00 BRT, a lista "Onde agir hoje" do
     painel vira ocorrências + um Threema. `desligado` no painel: não roda."""
@@ -5482,6 +5495,7 @@ class WorkerSettings:
         cron(vigia_nota_cheia_tick, minute=8, run_at_startup=False, timeout=600),
         # Vigia de Conciliação: 07:00 BRT (10:00 UTC), depois da rodada de madrugada.
         cron(vigia_conciliacao_tick, hour=10, minute=0, run_at_startup=False, timeout=600),
+        cron(conciliacao_amazon_csv_tick, hour=9, minute=0, run_at_startup=False, timeout=120),
         # Conciliação (14/10/2026, Vinicius: "é tudo do dia anterior; uma vez só de
         # madrugada"): UMA rodada por dia. 06:00 BRT pede o extrato de ontem ao
         # Mercado Pago e, a cada 10 min até 08:50, lê o arquivo quando fica pronto

@@ -33,6 +33,7 @@ import * as flashsale from "./flashsale";
 import * as melhorenvio from "./melhorenvio";
 import * as tuta from "./tuta";
 import * as tiktok from "./tiktok";
+import * as amazonCsv from "./amazon_csv";
 import * as davinci from "./davinci";
 import { coletarConferencia, type JobConferencia, type ResultadoConferencia } from "./conferencia";
 import { periodoConferencia, resumoConferencia } from "./conferencia_util";
@@ -209,6 +210,28 @@ async function processTiktokCommand(cmd: LeasedLogisticaCommand): Promise<void> 
   else log.warn(msg);
 }
 
+/** Conciliação › Amazon por arquivo (16/10): baixa o CSV da loja pelo AdsPower e
+ *  envia pro DaVinci. O perfil vem de CONCILIACAO_PERFIS (loja=user_id). */
+async function processAmazonCsvCommand(cmd: LeasedLogisticaCommand): Promise<void> {
+  const p = (cmd.payload || {}) as Record<string, unknown>;
+  const loja = String(p.loja || "").trim();
+  const dias = Math.max(1, Math.min(60, Number(p.dias) || 35));
+  const perfil = cfg.conciliacaoPerfis[loja] || cfg.conciliacaoPerfis[loja.toLowerCase()];
+  if (!loja || !perfil) {
+    await davinci.reportLogistica(cmd.id, "failed", `sem perfil do AdsPower pra loja "${loja}" (CONCILIACAO_PERFIS no executor)`);
+    return;
+  }
+  try {
+    const r = await amazonCsv.buscarTransacoes(perfil, { loja, dias });
+    await davinci.reportLogistica(cmd.id, r.ok ? "done" : "failed", JSON.stringify(r).slice(0, 1900));
+    log.info(`Amazon CSV ${loja} → ok=${r.ok}${r.reason ? ` (${r.reason})` : ""}`);
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    log.error(`Amazon CSV ${loja} falhou: ${msg}`);
+    await davinci.reportLogistica(cmd.id, "failed", msg.slice(0, 1900));
+  }
+}
+
 async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<void> {
   if (cmd.acao === "tuta_devolucoes") {
     await processTutaCommand(cmd);
@@ -216,6 +239,10 @@ async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<voi
   }
   if (cmd.acao === "tiktok_senha") {
     await processTiktokCommand(cmd);
+    return;
+  }
+  if (cmd.acao === "amazon_transacoes_csv") {
+    await processAmazonCsvCommand(cmd);
     return;
   }
   if (cmd.acao !== "melhorenvio_suspender") {
@@ -289,6 +316,7 @@ function acoesLogistica(): string[] {
   if (cfg.filas.has("melhorenvio")) acoes.push("melhorenvio_suspender");
   if (cfg.filas.has("tuta")) acoes.push("tuta_devolucoes");
   if (cfg.filas.has("tiktok")) acoes.push("tiktok_senha");
+  if (cfg.filas.has("conciliacao")) acoes.push("amazon_transacoes_csv");
   return acoes;
 }
 

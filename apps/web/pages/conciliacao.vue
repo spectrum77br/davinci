@@ -464,6 +464,18 @@ function sincronizarLoja(conta: string) {
   loja.value = conta
   sincronizar()
 }
+async function buscarTransacoes(conta: string) {
+  try {
+    const r = await api<{ enfileirado: boolean; robo_visto_em: string | null }>(`/api/conciliacao/lojas/${encodeURIComponent(conta)}/buscar-transacoes`, { method: 'POST' })
+    const visto = r.robo_visto_em ? new Date(r.robo_visto_em) : null
+    const online = visto ? Date.now() - visto.getTime() < 5 * 60 * 1000 : false
+    if (!r.enfileirado) toasts.info?.('o robô já tem essa busca na fila')
+    else if (online) toasts.success?.('pedido feito: o robô do Mac mini vai abrir a Amazon, baixar e enviar (1 a 2 min)')
+    else toasts.success?.(`pedido na fila; o robô do Mac mini não dá sinal${visto ? ` desde ${visto.toLocaleString('pt-BR')}` : ''}. Se demorar, rode o "KFA Conciliação" no Mac.`)
+  } catch (e: any) {
+    toasts.error?.(e?.data?.detail?.mensagem || e?.data?.detail?.code || 'não consegui pedir ao robô')
+  }
+}
 
 function extrasTitulo(p: Pedido) {
   if (p.venda_extras == null) return ''
@@ -582,7 +594,7 @@ await carregar()
       </div>
     </div>
 
-    <ConciliacaoResumo v-if="visao === 'resumo'" :can-edit="canEdit" @abrir-extrato="abrirExtrato" @ver-pedidos="verPedidos" @sincronizar="sincronizarLoja" />
+    <ConciliacaoResumo v-if="visao === 'resumo'" :can-edit="canEdit" @abrir-extrato="abrirExtrato" @ver-pedidos="verPedidos" @sincronizar="sincronizarLoja" @buscar-transacoes="buscarTransacoes" />
 
     <ConciliacaoExtrato v-if="visao === 'extrato'" :loja="loja" :plataforma="tab" :dia="extratoDia" :can-edit="canEdit" @ver-pedido="verPedido" />
 

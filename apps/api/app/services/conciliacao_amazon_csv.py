@@ -30,7 +30,13 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoSync, Integration
+from app.models import (
+    ConciliacaoLoja,
+    ConciliacaoMovimento,
+    ConciliacaoSync,
+    Integration,
+    LogisticaRoboComando,
+)
 from app.models.conciliacao import ORIGEM_AMAZON
 from app.services.conciliacao_amazon import recalcular_saldo, transacao_para_movimento
 from app.services.conciliacao_extrato import bling_store_ids_da_loja, resolver_pedidos_bling
@@ -332,3 +338,88 @@ async def chave_upload_valida(session: AsyncSession, chave: str | None) -> bool:
     except Exception:  # noqa: BLE001
         return False
     return hmac.compare_digest(guardado, hashlib.sha256(chave.strip().encode()).hexdigest())
+
+
+# ---------- robô do Mac mini (16/10) ----------
+# Botão "buscar transações" na loja por arquivo e o cron das 06:00 BRT criam um
+# comando `amazon_transacoes_csv` na fila do robô da Logística; o executor do mini
+# (fila `conciliacao`) abre o perfil no AdsPower, baixa o CSV e envia pelo endpoint
+# do script (X-Agent-Token). O desfecho volta por /agent/comandos/{id}/resultado.
+DIAS_PADRAO_ROBO = 35
+
+
+async def enfileirar_busca_csv(
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    *,
+    user_id: Any = None,
+    dias: int = DIAS_PADRAO_ROBO,
+) -> tuple[LogisticaRoboComando, bool]:
+    """Cria o comando pro robô; se já há um pendente/em execução desta loja, devolve ele
+    (novo=False). Só pra loja com `modo_extrato = upload`."""
+    from app.services.logistica_robo import ACAO_AMAZON_CSV
+
+    aberto = (
+        await session.execute(
+            select(LogisticaRoboComando)
+            .where(
+                LogisticaRoboComando.acao == ACAO_AMAZON_CSV,
+                LogisticaRoboComando.status.in_(("pending", "claimed")),
+                LogisticaRoboComando.payload["integration_id"].astext == str(loja.integration_id),
+            )
+            .order_by(LogisticaRoboComando.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if aberto is not None:
+        return aberto, False
+    cmd = LogisticaRoboComando(
+        logistica_id=None,
+        acao=ACAO_AMAZON_CSV,
+        payload={
+            "loja": loja.conta,
+            "integration_id": str(loja.integration_id),
+            "plataforma": getattr(loja.platform, "value", str(loja.platform)),
+            "dias": int(dias),
+        },
+        created_by=user_id,
+    )
+    session.add(cmd)
+    await session.flush()
+    logger.info("conciliacao_amazon_csv_enfileirado", loja=loja.conta, comando=str(cmd.id))
+    return cmd, True
+
+
+async def enfileirar_busca_csv_todas(session: AsyncSession) -> list[str]:
+    """Cron das 06:00 BRT: uma tarefa por loja por arquivo."""
+    from app.services.conciliacao_jobs import lojas_ativas
+
+    lojas = [x for x in await lojas_ativas(session) if x.modo_extrato == "upload"]
+    novas: list[str] = []
+    for loja in lojas:
+        _cmd, novo = await enfileirar_busca_csv(session, loja)
+        if novo:
+            novas.append(loja.conta)
+    await session.commit()
+    return novas
+
+
+async def registrar_resultado_robo(
+    session: AsyncSession, cmd: LogisticaRoboComando, *, ok: bool
+) -> None:
+    """Desfecho do robô na loja: falhou → `ultimo_erro` (aparece no Resumo); deu certo →
+    limpa (o envio em si já marcou `ultimo_extrato_em`)."""
+    iid = str((cmd.payload or {}).get("integration_id") or "")
+    if not iid:
+        return
+    loja = (
+        await session.execute(select(ConciliacaoLoja).where(ConciliacaoLoja.integration_id == iid))
+    ).scalar_one_or_none()
+    if loja is None:
+        return
+    if ok:
+        if (loja.ultimo_erro or "").startswith("robô:"):
+            loja.ultimo_erro = None
+    else:
+        loja.ultimo_erro = f"robô: {(cmd.result or 'falhou')[:200]}"
+    await session.flush()

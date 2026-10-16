@@ -52,6 +52,9 @@ ACAO_SUSPENDER = "melhorenvio_suspender"
 # Pedido de senha ao comprador no chat da TikTok (não é de um pedido da
 # Logística: `logistica_id` vazio, o vínculo é `payload.linha_id`).
 ACAO_TIKTOK_SENHA = "tiktok_senha"
+# Conciliação (16/10): baixar o CSV de transações da Amazon pelo AdsPower e enviar
+# (loja por arquivo, KFA). Sem `logistica_id`; o vínculo é `payload.integration_id`.
+ACAO_AMAZON_CSV = "amazon_transacoes_csv"
 
 STATUS_PENDENTE = "pendente"
 STATUS_SOLICITADA = "solicitada"
@@ -61,7 +64,7 @@ STATUS_FALHOU = "falhou"
 LEASE_STALE = timedelta(minutes=30)
 
 # Só vão pra executor que as pediu pelo nome no lease (ver docstring).
-ACOES_EXCLUSIVAS = frozenset({ACAO_SUSPENDER, ACAO_TIKTOK_SENHA})
+ACOES_EXCLUSIVAS = frozenset({ACAO_SUSPENDER, ACAO_TIKTOK_SENHA, ACAO_AMAZON_CSV})
 
 
 class RoboError(Exception):
@@ -129,21 +132,25 @@ async def lease(
         else LogisticaRoboComando.acao.not_in(ACOES_EXCLUSIVAS)
     )
     rows = (
-        await session.execute(
-            select(LogisticaRoboComando)
-            .where(
-                da_maquina,
-                or_(
-                    LogisticaRoboComando.status == "pending",
-                    (LogisticaRoboComando.status == "claimed")
-                    & (LogisticaRoboComando.claimed_at < limite_stale),
-                ),
+        (
+            await session.execute(
+                select(LogisticaRoboComando)
+                .where(
+                    da_maquina,
+                    or_(
+                        LogisticaRoboComando.status == "pending",
+                        (LogisticaRoboComando.status == "claimed")
+                        & (LogisticaRoboComando.claimed_at < limite_stale),
+                    ),
+                )
+                .order_by(LogisticaRoboComando.created_at.asc())
+                .limit(limit)
+                .with_for_update(skip_locked=True)
             )
-            .order_by(LogisticaRoboComando.created_at.asc())
-            .limit(limit)
-            .with_for_update(skip_locked=True)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     agora = datetime.now(UTC)
     out: list[dict[str, Any]] = []
     for cmd in rows:
@@ -229,6 +236,13 @@ async def registrar_resultado(
         from app.services import devolucao_mensagem_comprador
 
         await devolucao_mensagem_comprador.registrar_resultado_robo(session, cmd, ok=ok)
+        await session.commit()
+        logger.info("logistica_robo_resultado", comando=str(comando_id), status=cmd.status)
+        return cmd
+    if cmd.acao == ACAO_AMAZON_CSV:
+        from app.services.conciliacao_amazon_csv import registrar_resultado_robo
+
+        await registrar_resultado_robo(session, cmd, ok=ok)
         await session.commit()
         logger.info("logistica_robo_resultado", comando=str(comando_id), status=cmd.status)
         return cmd
