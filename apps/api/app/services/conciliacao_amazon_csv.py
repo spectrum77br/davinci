@@ -240,6 +240,9 @@ async def ingerir_csv_amazon(
 ) -> dict[str, Any]:
     agora = agora or datetime.now(UTC)
     _cab, rows = ler_csv_amazon(texto)
+    if not rows:
+        # 16/10 (revisão): arquivo vazio contava como "lido" e a loja parecia em dia
+        raise ValueError("arquivo sem transações: nada gravado (confira o período do download)")
     txs = transacoes_do_csv(rows)
     legados = {t["transactionId"]: t.pop("_idLegado", None) for t in txs}
     movs = [m for m in (transacao_para_movimento(t) for t in txs) if m]

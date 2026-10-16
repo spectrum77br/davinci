@@ -709,10 +709,13 @@ async def apagar_duplicatas_pobres(session: AsyncSession, loja: ConciliacaoLoja)
         )
     ).all()
     apagadas: set[Any] = set()
+    dias_mexidos: set[date] = set()
     for p, c in pares:
         # a gêmea pode ter sido apagada como pobre de outro par: não some com as duas
         if p.id in apagadas or c.id in apagadas:
             continue
+        if p.data is not None:
+            dias_mexidos.add(p.data.astimezone(BRT).date())
         if p.vinculado_por and not c.vinculado_por:
             if c.pedido_bling is None:
                 c.pedido_bling, c.bling_id = p.pedido_bling, p.bling_id
@@ -724,6 +727,10 @@ async def apagar_duplicatas_pobres(session: AsyncSession, loja: ConciliacaoLoja)
         apagadas.add(p.id)
     if apagadas:
         await session.flush()
+        # 16/10 (revisão, aprovado): o saldo do dia mudou — dia fechado reabre
+        await reabrir_dias(
+            session, loja, dias_mexidos, motivo="linha duplicada do relatório apagada"
+        )
     return len(apagadas)
 
 
