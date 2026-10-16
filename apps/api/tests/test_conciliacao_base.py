@@ -1529,7 +1529,10 @@ async def test_extrato_vincular_classificar_e_fechar_o_dia(db, make_user, auth_a
 # --- resumo (tela de entrada) e fechamento do mês (passo 2d) -----------------
 
 
-async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(db, make_user, auth_as, client):
+async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
+    db, make_user, auth_as, client, monkeypatch
+):
+    monkeypatch.setattr("app.routers.conciliacao._ontem", lambda: date(2026, 10, 15))
     loja, _integ = await _loja(db, make_user)
     await _dia_de_exemplo(db, loja)
     loja.ultimo_extrato_em = datetime.now(UTC)
@@ -1555,12 +1558,14 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(db, make_user, auth_as
     # data de movimento no exemplo → não é "do dia")
     assert linha["problemas_dia"] == ["1 linha(s) sem dono"] and linha["obs_dia"] == []
     assert linha["eventos_dia"]["estornados"] == 0
-    # bloco Dias: 15 dias terminando no dia pedido; 13/10 com a jlas2 pendente
+    # bloco Dias: fixo nos 15 dias até ontem (15/10), não no dia pedido; 13/10 com a
+    # jlas2 pendente
     dias = corpo["dias"]
-    assert len(dias) == 15 and dias[0]["dia"] == "2026-10-13" and dias[-1]["dia"] == "2026-09-29"
-    assert dias[0]["com_pendencia"] == 1 and dias[0]["fechados"] == 0
-    assert dias[0]["pendentes"] == [{"conta": "jlas2", "motivo": "1 linha(s) sem dono"}]
-    assert dias[1]["dia"] == "2026-10-12" and dias[1]["sem_movimento"] == 1
+    assert len(dias) == 15 and dias[0]["dia"] == "2026-10-15" and dias[-1]["dia"] == "2026-10-01"
+    d13 = dias[2]
+    assert d13["dia"] == "2026-10-13" and d13["com_pendencia"] == 1 and d13["fechados"] == 0
+    assert d13["pendentes"] == [{"conta": "jlas2", "motivo": "1 linha(s) sem dono"}]
+    assert dias[3]["dia"] == "2026-10-12" and dias[3]["sem_movimento"] == 1
     assert all(d["fechados"] == 0 for d in dias)
     # o mês até ontem (os dois pedidos são de 01/10)
     assert linha["mes"]["pedidos"] == 2 and linha["mes"]["vendido"] == 1761.96
@@ -1598,7 +1603,8 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(db, make_user, auth_as
     assert r.json()["lojas"][0]["dia"]["saldo_bate"] is None
 
 
-async def test_resumo_dia_pronto_e_dia_fechado(db, make_user, auth_as, client):
+async def test_resumo_dia_pronto_e_dia_fechado(db, make_user, auth_as, client, monkeypatch):
+    monkeypatch.setattr("app.routers.conciliacao._ontem", lambda: date(2026, 10, 15))
     loja, _integ = await _loja(db, make_user)
     movs = await _dia_de_exemplo(db, loja)
     movs["pendente"].classificacao = "ajuste"
@@ -1629,7 +1635,7 @@ async def test_resumo_dia_pronto_e_dia_fechado(db, make_user, auth_as, client):
     assert linha["gravidade"] == "warn"  # ainda tem o estornado depois
     assert linha["problemas_dia"] == [] and linha["obs_dia"] == ["1 estornado(s) depois"]
     assert r.json()["cartoes"]["dias_fechados"] == 1
-    dia13 = r.json()["dias"][0]
+    dia13 = r.json()["dias"][2]
     assert dia13["fechados"] == 1 and dia13["com_pendencia"] == 0 and dia13["pendentes"] == []
     assert dia13["obs"] == ["1 estornado(s) depois (jlas2)"]
 

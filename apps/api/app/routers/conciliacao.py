@@ -3345,7 +3345,9 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         "dia": dia.isoformat(),
         "mes": mes_ini.isoformat()[:7],
         "lojas": lojas_out,
-        "dias": await _resumo_dos_dias(session, lojas, dia),
+        # a lista fica fixa nos últimos 15 dias até ontem (clicar num dia só troca a
+        # tabela de cima; antes cada clique empurrava a lista pro passado — 16/10)
+        "dias": await _resumo_dos_dias(session, lojas, max(dia, _ontem())),
         "agir": agir,
         "por_plataforma": por_plataforma,
         "empresa": empresa,
