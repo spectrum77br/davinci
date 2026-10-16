@@ -1118,3 +1118,114 @@ async def test_repeticao_liberada_com_original_fora_da_janela_casa_com_o_banco(d
     r3 = await run_amazon_sync(db, loja, cliente, agora=depois + timedelta(days=1))
     assert r3["duplicatas_no_banco"] == 1 and r3["inseridos"] == 0 and r3["atualizados"] == 0
     assert len((await db.execute(select(ConciliacaoMovimento))).scalars().all()) == 1
+
+
+def test_etiqueta_no_carrinho_nao_e_frete_pago():
+    """Regra de 16/10 (Vinicius): só etiqueta paga é frete pago. "pending" = no carrinho."""
+    from app.services.conciliacao_melhor_envio import envio_para_frete, etiqueta_paga
+
+    no_carrinho = _envio_me("e4", "301635", PROPRIO, status="pending")
+    no_carrinho["paid_at"] = None
+    no_carrinho["posted_at"] = None
+    assert not etiqueta_paga(no_carrinho)
+    assert envio_para_frete(no_carrinho)["frete_pago"] == Decimal("0")
+    assert etiqueta_paga(_envio_me("e5", "301635", PROPRIO, status="released"))
+    assert etiqueta_paga(_envio_me("e6", "301635", PROPRIO, status="delivered"))
+    assert not etiqueta_paga(
+        _envio_me("e7", "301635", PROPRIO, status="canceled", canceled_at="2026-10-15 12:00:00")
+    )
+    sem_status = _envio_me("e8", "301635", PROPRIO, status="")
+    assert etiqueta_paga(sem_status)  # tem paid_at
+    sem_status["paid_at"] = None
+    assert not etiqueta_paga(sem_status)
+
+
+async def test_melhor_envio_so_etiqueta_paga_conta_e_a_que_some_sai(db, make_user):
+    """Regra de 16/10 (Vinicius): etiqueta no carrinho (pending) não é frete pago e, se
+    for tirada do carrinho, não pode ficar um frete fantasma. Só paga entra; a que voltou
+    a pending, foi cancelada ou sumiu da listagem sai; nº do Bling + id da Amazon
+    conferidos; leitura cortada no teto de páginas avisa e não apaga nada."""
+    from app.models import ConciliacaoFretePago
+    from app.services import melhor_envio as me
+    from app.services.conciliacao_melhor_envio import run_me_sync
+
+    loja = await _loja_amazon(db, make_user)
+    await run_amazon_sync(db, loja, _AmazonFalsa([_venda_proprio(), _venda_dba()]), agora=AGORA)
+    await recalcular_loja(db, loja, agora=AGORA)
+    await me.guardar_token_do_painel(db, "eyJ" + "t" * 40, por="teste", detalhe={})
+    await db.commit()
+    paginas: list[list[dict]] = [[]]
+
+    async def _ler(token: str, *, page: int = 1, q=None):
+        return 200, {"data": paginas[page - 1] if page <= len(paginas) else []}
+
+    async def _ids() -> list[str]:
+        rows = (await db.execute(select(ConciliacaoFretePago))).scalars().all()
+        return sorted(f.envio_id for f in rows)
+
+    no_carrinho = _envio_me("e2", "301943", DBA, status="pending")
+    no_carrinho["paid_at"] = None
+    no_carrinho["posted_at"] = None
+    paginas[0] = [_envio_me("e1", "301635", PROPRIO), no_carrinho]
+    r = await run_me_sync(db, loja, agora=AGORA, ler=_ler)
+    assert (r["casados"], r["novos"], r["nao_pagos"], r["removidos"]) == (1, 1, 1, 0)
+    assert "cortado" not in r and await _ids() == ["e1"]
+    # 2ª leitura: e2 foi paga (released) e e1 foi cancelada → troca
+    paginas[0] = [
+        _envio_me("e1", "301635", PROPRIO, status="canceled", canceled_at="2026-10-15 12:00:00"),
+        _envio_me("e2", "301943", DBA, status="released"),
+    ]
+    r = await run_me_sync(db, loja, agora=AGORA, ler=_ler)
+    assert (r["novos"], r["nao_pagos"], r["removidos"]) == (1, 1, 1)
+    assert await _ids() == ["e2"]
+    # 3ª leitura: e2 sumiu da listagem (tirada do carrinho) → sai, nada fica fantasma
+    paginas[0] = [_envio_me("e9", "999999", "000-0000000-0000000")]  # de outra loja
+    r = await run_me_sync(db, loja, agora=AGORA, ler=_ler)
+    assert r["removidos"] == 1 and await _ids() == []
+    # nº do Bling de um pedido com o id da Amazon de outro: vale o id da Amazon
+    paginas[0] = [_envio_me("e3", "301635", DBA)]
+    r = await run_me_sync(db, loja, agora=AGORA, ler=_ler)
+    assert r["novos"] == 1
+    (f,) = (await db.execute(select(ConciliacaoFretePago))).scalars().all()
+    assert f.envio_id == "e3" and f.pedido_bling == "301943" and f.pedido_marketplace == DBA
+    # leitura cortada no teto de páginas (e3 ficou fora): avisa, não apaga
+    paginas[:] = [
+        [_envio_me("e9", "999999", "000-0000000-0000000")],
+        [_envio_me("e9b", "999999", "000-0000000-0000000")],
+        [_envio_me("e9c", "999999", "000-0000000-0000000")],
+    ]
+    r = await run_me_sync(db, loja, agora=AGORA, ler=_ler, max_paginas=2)
+    assert r["cortado"] is True and r["paginas"] == 2 and r["removidos"] == 0
+    assert r["aviso"] == "melhor envio: leitura cortada em 2 páginas"
+    assert loja.ultimo_erro == "melhor envio: leitura cortada em 2 páginas"
+    assert await _ids() == ["e3"]
+    # erro HTTP no meio: também não apaga
+    paginas[:] = [[_envio_me("e9", "999999", "000-0000000-0000000")]]
+
+    async def _ler_quebrada(token: str, *, page: int = 1, q=None):
+        return (200, {"data": paginas[0]}) if page == 1 else (500, {})
+
+    r = await run_me_sync(db, loja, agora=AGORA, ler=_ler_quebrada)
+    assert r["erro"] == "HTTP 500 na página 2" and r["removidos"] == 0
+    assert await _ids() == ["e3"]
+
+
+async def test_leitura_da_amazon_cortada_no_teto_de_paginas_avisa(db, make_user):
+    """16/10, revisão: `ler_transacoes` parava em 30 páginas sem dizer nada. Agora o
+    resumo traz `cortado`/`aviso`, o sync guarda o motivo e a loja o `ultimo_erro`."""
+    loja = await _loja_amazon(db, make_user)
+    cliente = _AmazonFalsa([_venda_proprio(), _venda_dba(), _repasse()], por_pagina=1)
+    r = await run_amazon_sync(db, loja, cliente, agora=AGORA, max_paginas=2)
+    assert r["cortado"] is True and r["lidas"] == 2 and r["inseridos"] == 2 and not r["erros"]
+    assert r["aviso"] == (
+        "amazon: leitura cortada em 2 páginas de transações "
+        "(desde 2026-10-01; o que veio depois não entrou)"
+    )
+    assert loja.ultimo_erro == r["aviso"]
+    sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
+    assert sync.status == "lido" and sync.erro == r["aviso"] and sync.detalhe["cortado"] is True
+    # com páginas de sobra: leitura inteira, sem aviso, e o motivo some do sync
+    r2 = await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    assert "cortado" not in r2 and "aviso" not in r2 and r2["inseridos"] == 1
+    sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
+    assert sync.erro is None and sync.linhas == 3
