@@ -371,12 +371,31 @@ async def _reparar_repasses(
     if renomeados:
         await session.flush()
     recuperados: list[str] = []
+    desfeitos: list[str] = []
     dias: set[date] = set()
     for st in extratos:
         sid = str(st.get("id") or "")
         status = str(st.get("payment_status") or "").upper()
         row = rows_sync.get(sid)
         if not sid or status != "PAID" or row is None or row.status != "lido":
+            continue
+        if _reemitido(row):
+            # extrato reemitido (transações já estavam gravadas por outro): não tem
+            # repasse próprio; se o reparo de 16/10 criou um, sai e o dia reabre
+            linha = gravados.get(f"repasse:{sid}")
+            if (
+                linha is not None
+                and (row.detalhe or {}).get("repasse_recuperado_em")
+                and not linha.vinculado_por
+            ):
+                await session.delete(linha)
+                gravados.pop(f"repasse:{sid}", None)
+                row.linhas = max(0, int(row.linhas or 0) - 1)
+                row.detalhe = {
+                    k: v for k, v in (row.detalhe or {}).items() if k != "repasse_recuperado_em"
+                }
+                desfeitos.append(sid)
+                dias.add(dia_do_extrato(st))
             continue
         if f"repasse:{sid}" in gravados:
             continue
@@ -389,16 +408,34 @@ async def _reparar_repasses(
             row.detalhe = {**(row.detalhe or {}), "repasse_recuperado_em": agora.isoformat()}
             recuperados.append(sid)
             dias.add(dia_do_extrato(st))
+    if desfeitos:
+        await session.flush()
     reabertos = await reabrir_dias(session, loja, dias, motivo="repasse da TikTok recuperado")
-    if renomeados or recuperados:
+    if renomeados or recuperados or desfeitos:
         logger.info(
             "conciliacao_tiktok_repasses_reparados",
             loja=loja.conta,
             renomeados=renomeados,
             recuperados=recuperados,
+            desfeitos=desfeitos,
             dias_reabertos=reabertos,
         )
-    return {"renomeados": renomeados, "recuperados": recuperados, "dias_reabertos": reabertos}
+    return {
+        "renomeados": renomeados,
+        "recuperados": recuperados,
+        "desfeitos": desfeitos,
+        "dias_reabertos": reabertos,
+    }
+
+
+def _reemitido(row: ConciliacaoSync) -> bool:
+    """Extrato lido cujas transações já estavam todas gravadas (por outro extrato):
+    reemissão da TikTok — não tem repasse próprio."""
+    d = row.detalhe or {}
+    if d.get("reemitido"):
+        return True
+    linhas = int(row.linhas or 0)
+    return linhas > 0 and int(d.get("inseridos") or 0) == 0
 
 
 async def run_tiktok_sync(
@@ -482,8 +519,12 @@ async def run_tiktok_sync(
                 if repasses is None:
                     resumo["sem_repasse"] += 1  # a API de repasses falhou: próxima rodada
                     continue
-                rep = repasse_para_movimento(
-                    st, repasses.get(pid), ordem=int(existente.linhas or 0)
+                rep = (
+                    None
+                    if _reemitido(existente)
+                    else repasse_para_movimento(
+                        st, repasses.get(pid), ordem=int(existente.linhas or 0)
+                    )
                 )
                 await _marcar_status_do_extrato(session, loja, sid, "PAID")
                 novos = await inserir_movimentos(session, loja, [rep]) if rep else 0
@@ -533,8 +574,6 @@ async def run_tiktok_sync(
                 if marca == "PAID" and repasses is not None
                 else None
             )
-            if rep:
-                movs.append(rep)
             ids = {m["pedido_marketplace"] for m in movs if m["pedido_marketplace"]}
             mapa = await resolver_pedidos_bling(session, ids, lojas_bling)
             for m in movs:
@@ -551,6 +590,15 @@ async def run_tiktok_sync(
                     m["descricao"] = f"{m['descricao']}{SUFIXOS[marca]}"
                     m["raw"] = {**m["raw"], "_payment_status": marca}
             inseridos = await inserir_movimentos(session, loja, movs)
+            # 16/10 (revisão, Barbosa 08/10): a TikTok reemite um extrato com as MESMAS
+            # transações de outro (estorno levado pra outro pagamento). As transações
+            # não entram de novo (identidade) — e o repasse também não pode entrar,
+            # senão o dia ganha um crédito a mais. Extrato reemitido = sem transação nova.
+            reemitido = bool(txs) and inseridos == 0
+            if rep and not reemitido:
+                inseridos += await inserir_movimentos(session, loja, [rep])
+            elif rep:
+                rep = None
         except Exception as e:  # noqa: BLE001
             row.status = "erro"
             row.erro = f"{type(e).__name__}: {str(e)[:300]}"
@@ -569,6 +617,7 @@ async def run_tiktok_sync(
             "payment_id": st.get("payment_id"),
             "payment_status": status,
             "inseridos": inseridos,
+            "reemitido": reemitido,
         }
         resumo["inseridos"] += inseridos
         if marca != "PAID":

@@ -65,6 +65,7 @@ PRAZO_LIBERACAO: dict[str, tuple[int, int]] = {"shopee": (9, 22), "tiktok": (9, 
 # Situação do Bling que quer dizer "não vai receber": cancelado ou excluído (16/10,
 # revisão: 13 pedidos excluídos no Bling ficavam "aguardando" pra sempre)
 BLING_DESFEITO = ("cancelado", "excluido", "excluído")
+RUIDO_SEM_LIBERACAO = Decimal("1.00")  # abaixo disso, pedido desfeito não vira alarme
 MARGEM_MAXIMA = Decimal("999999")  # Numeric(10,4) da coluna margem
 ZERO = Decimal("0.00")
 
@@ -391,6 +392,18 @@ def situacao_do_pedido(
         if dinheiro
         else None
     )
+    if presas and not liberacoes:
+        # Amazon preso na reserva: a etiqueta Easy Ship já debitou, mas a venda não
+        # liberou — nada "entrou" ainda (16/10, revisão: 93 pedidos viravam "estornado")
+        recebido = None
+    # o que mexeu sem nenhuma liberação, fora o frete (a etiqueta faz parte da
+    # liquidação, não é dinheiro que saiu)
+    mexeu_sem_liberar = (
+        _soma([m.credito for m in dinheiro if m.tipo != "frete"])
+        - _soma([m.debito for m in dinheiro if m.tipo != "frete"])
+        if dinheiro
+        else ZERO
+    )
     # frete cobrado depois do lançamento (etiqueta Easy Ship da Amazon, Mercado Envios à
     # parte) é custo da venda, não "saiu depois"
     saidas_depois = (
@@ -440,17 +453,22 @@ def situacao_do_pedido(
             else "venda ainda não lida pela Margem"
         )
     elif not liberacoes:
-        if presas and not dinheiro:
+        if presas:
             situacao = "aguardando"
             preso = _soma([m.credito for m in presas]) - _soma([m.debito for m in presas])
             motivo = f"preso na reserva da Amazon: {preso:.2f}"
-        elif dinheiro and recebido is not None and abs(recebido) > TOLERANCIA:
+        elif (cancelada or bling_cancelado) and abs(mexeu_sem_liberar) < RUIDO_SEM_LIBERACAO:
+            # 16/10 (revisão): Shopee cobra centavos ("Renda do pedido −0,49") em pedido
+            # devolvido/resolvido — venda desfeita, não "estornado depois"
+            situacao = "cancelado"
+            motivo = f"venda desfeita; ficou {mexeu_sem_liberar:.2f} (centavos)"
+        elif dinheiro and abs(mexeu_sem_liberar) > TOLERANCIA:
             # 16/10 (revisão, aprovado): nada liberou e mesmo assim saiu (ou entrou)
             # dinheiro — devolvido antes de liquidar na TikTok, frete de devolução… Não é
             # "aguardando" (ia pro A liberar negativo) nem "zero a zero".
-            situacao = "estornado_depois" if recebido < ZERO else "recebido_a_mais"
-            verbo = "saiu" if recebido < ZERO else "entrou"
-            motivo = f"nada liberou e {verbo} {abs(recebido):.2f}" + (
+            situacao = "estornado_depois" if mexeu_sem_liberar < ZERO else "recebido_a_mais"
+            verbo = "saiu" if mexeu_sem_liberar < ZERO else "entrou"
+            motivo = f"nada liberou e {verbo} {abs(mexeu_sem_liberar):.2f}" + (
                 " (venda desfeita)" if cancelada or bling_cancelado else ""
             )
         elif cancelada:
@@ -524,6 +542,8 @@ def situacao_do_pedido(
         # cancelado de verdade (nada ficou na conta): só esse finaliza sozinho
         "zero_a_zero": situacao == "cancelado"
         and (recebido is None or abs(recebido) <= TOLERANCIA),
+        # previsão usada (a da plataforma ou a estimada) — vai pra previsao_liberacao
+        "previsao": previsao,
     }
 
 
@@ -664,7 +684,14 @@ def etapa_do_pedido(
                 etapa_motivo=f"deixou de ser cancelado ({situacao})",
             )
             return out
-        if ultimo_movimento_em and atual.etapa_em and ultimo_movimento_em > atual.etapa_em:
+        # 16/10 (revisão): movimento novo só reabre se o pedido DEIXOU de fechar — 47
+        # cancelados "zero a zero" reabriam por linha atrasada que não mudava nada
+        if (
+            ultimo_movimento_em
+            and atual.etapa_em
+            and ultimo_movimento_em > atual.etapa_em
+            and not fechou
+        ):
             quando = ultimo_movimento_em.astimezone(BRT)
             out.update(
                 etapa="reaberto",
@@ -1080,7 +1107,7 @@ async def recalcular_loja(
                 )
             ),
             "venda_status": venda.status if venda_ok else None,
-            "previsao_liberacao": previsao,
+            "previsao_liberacao": calc["previsao"],
             "fatura_tarifa": fatura["tarifa"] if fatura_movs else None,
             "fatura_parcelamento": fatura["parcelamento"] if fatura_movs else None,
             "fatura_frete": fatura["frete"] if fatura_movs else None,

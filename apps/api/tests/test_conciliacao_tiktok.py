@@ -594,7 +594,12 @@ async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_ant
     )
     r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
     assert r["inseridos"] == 6 and not r["erros"]
-    assert r["repasses"] == {"renomeados": 0, "recuperados": [], "dias_reabertos": []}
+    assert r["repasses"] == {
+        "renomeados": 0,
+        "recuperados": [],
+        "desfeitos": [],
+        "dias_reabertos": [],
+    }
 
     async def saques():
         return (
@@ -629,6 +634,7 @@ async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_ant
     assert r2["repasses"] == {
         "renomeados": 1,
         "recuperados": ["2", "3"],
+        "desfeitos": [],
         "dias_reabertos": ["2026-10-11", "2026-10-12"],
     }
     assert not any("/statement_transactions" in p for p, _ in cliente.chamadas)
@@ -639,7 +645,12 @@ async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_ant
     assert all(d.fechado_em is None for d in dias if d.dia in (d11, d12))
     # terceira rodada: nada a reparar; e o robô fecha de novo, agora com o repasse
     r3 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
-    assert r3["repasses"] == {"renomeados": 0, "recuperados": [], "dias_reabertos": []}
+    assert r3["repasses"] == {
+        "renomeados": 0,
+        "recuperados": [],
+        "desfeitos": [],
+        "dias_reabertos": [],
+    }
     fechados = await fechar_dias_prontos(db, loja)
     assert {"2026-10-11", "2026-10-12"} <= set(fechados["fechados"])
 
@@ -856,3 +867,52 @@ async def test_bloco_dias_repasse_falhou_e_pendencia(db, make_user, auth_as, cli
     # PROCESSING continua contando como fechado ("aguardando o repasse")
     assert aguardando["fechados"] == 1 and aguardando["aguardando_repasse"] == 1
     assert aguardando["pendentes"] == []
+
+
+async def test_extrato_reemitido_pela_tiktok_nao_ganha_repasse_e_o_reparo_desfaz(db, make_user):
+    """16/10 (revisão, Barbosa 08/10): a TikTok reemite um extrato com as MESMAS transações
+    de outro (estorno levado pra outro pagamento). As transações não entram de novo — e
+    o repasse também não pode, senão o dia ganha um crédito a mais."""
+    loja = await _loja_tiktok(db, make_user)
+    d8 = date(2026, 10, 8)
+    redondo = {"seller_disc": "0", "commission": "0", "tx_fee": "0", "affiliate": "0", "fee": "0"}
+    estorno = _tx(
+        10, PEDIDO, gross="0", apos="-84.29", revenue="-84.29", settlement="-84.29", **redondo
+    )
+    e1 = _extrato(1, d8, "-84.29", 901)
+    e2 = _extrato(2, d8, "-84.29", 902)  # reemissão: a mesma transação, outro pagamento
+    cliente = _TikTokFalsa(
+        [e1, e2],
+        {"1": [estorno], "2": [estorno]},
+        [_repasse(901, "-84.29", d8), _repasse(902, "-84.29", date(2026, 10, 12))],
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert not r["erros"]
+    saques = (
+        (await db.execute(select(ConciliacaoMovimento).where(ConciliacaoMovimento.tipo == "saque")))
+        .scalars()
+        .all()
+    )
+    assert [s.id_externo for s in saques] == ["repasse:1"]  # só o extrato original
+    syncs = {s.chave: s for s in (await db.execute(select(ConciliacaoSync))).scalars()}
+    assert (
+        syncs["2"].detalhe["reemitido"] is True and syncs["2"].linhas == 1
+    )  # 1 transação, 0 repasse
+    assert syncs["1"].detalhe["reemitido"] is False
+    # o reparo de 16/10 tinha criado um repasse pro reemitido: a rodada seguinte desfaz
+    from app.services.conciliacao_shopee import inserir_movimentos
+    from app.services.conciliacao_tiktok import repasse_para_movimento
+
+    rep2 = repasse_para_movimento(e2, cliente.repasses[1], ordem=1)
+    assert await inserir_movimentos(db, loja, [rep2]) == 1
+    syncs["2"].detalhe = {**syncs["2"].detalhe, "repasse_recuperado_em": AGORA.isoformat()}
+    syncs["2"].linhas = 2
+    await db.commit()
+    r2 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r2["repasses"]["desfeitos"] == ["2"]
+    saques = (
+        (await db.execute(select(ConciliacaoMovimento).where(ConciliacaoMovimento.tipo == "saque")))
+        .scalars()
+        .all()
+    )
+    assert [s.id_externo for s in saques] == ["repasse:1"]
