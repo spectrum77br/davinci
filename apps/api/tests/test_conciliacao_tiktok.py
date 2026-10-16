@@ -18,9 +18,11 @@ from app.models import (
 from app.models.integration import IntegrationPlatform
 from app.security.cipher import encrypt_json
 from app.services.conciliacao_calculo import conta_tiktok_de_transacoes, recalcular_loja
+from app.services.conciliacao_jobs import fechar_dias_prontos
 from app.services.conciliacao_tiktok import (
     ROTA_EXTRATOS,
     ROTA_REPASSES,
+    aguardando_repasse,
     repasse_para_movimento,
     run_tiktok_sync,
     transacao_para_movimento,
@@ -264,8 +266,10 @@ async def test_run_tiktok_sync_le_extratos_pagos_e_casa_o_pedido(db, make_user):
         [_repasse(901, "344.45", d13), _repasse(902, "544.45", d14)],
     )
     r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
-    assert r["inseridos"] == 5 and r["pulados_processando"] == 1 and not r["erros"]
-    assert [x["extrato"] for x in r["extratos"]] == ["1", "2"]
+    # o 3 ainda não foi pago (PROCESSING): entra marcado "aguardando o repasse", sem a
+    # linha de repasse (16/10: 7 das 8 lojas ficavam "sem movimento" por isso)
+    assert r["inseridos"] == 6 and r["aguardando_repasse"] == 1 and not r["erros"]
+    assert [x["extrato"] for x in r["extratos"]] == ["1", "2", "3"]
     movs = (
         (await db.execute(select(ConciliacaoMovimento).order_by(ConciliacaoMovimento.data)))
         .scalars()
@@ -277,25 +281,56 @@ async def test_run_tiktok_sync_le_extratos_pagos_e_casa_o_pedido(db, make_user):
         "venda_liberada",
         "venda_liberada",
         "saque",
+        "venda_liberada",
     ]
     assert movs[0].pedido_bling == "320001" and movs[0].bling_id == 6000  # casou pelo order_id
     assert movs[0].data == datetime(2026, 10, 13, 3, tzinfo=UTC)
-    assert [m.saldo_apos for m in movs[2:]] == [Decimal("344.45"), Decimal("544.45"), Decimal("0")]
+    assert [m.saldo_apos for m in movs[2:5]] == [
+        Decimal("344.45"),
+        Decimal("544.45"),
+        Decimal("0"),
+    ]
     assert movs[3].pedido_bling is None  # pedido que o Bling ainda não importou
     assert movs[4].debito == Decimal("544.45") and "pago 14/10 00:23" in movs[4].descricao
+    nao_pago = movs[5]
+    assert nao_pago.descricao.endswith(" · aguardando o repasse")
+    assert nao_pago.raw["_payment_status"] == "PROCESSING" and aguardando_repasse(nao_pago)
+    assert nao_pago.saldo_apos == Decimal("200")
     syncs = (
         (await db.execute(select(ConciliacaoSync).order_by(ConciliacaoSync.chave))).scalars().all()
     )
-    assert [(s.chave, s.status, s.linhas) for s in syncs] == [("1", "lido", 2), ("2", "lido", 3)]
+    assert [(s.chave, s.status, s.linhas) for s in syncs] == [
+        ("1", "lido", 2),
+        ("2", "lido", 3),
+        ("3", "processando", 1),
+    ]
     assert loja.ultimo_extrato_em is not None
-    # segunda rodada: o 3 foi pago; o 1 e o 2 não são relidos e nada duplica
+    # o robô não fecha o dia 15 enquanto a TikTok não pagar (o 14 tem linha sem dono)
+    fechados = await fechar_dias_prontos(db, loja)
+    assert "2026-10-15" in fechados["abertos"] and fechados["fechados"] == ["2026-10-13"]
+    # segunda rodada: o 3 foi pago; só o repasse entra; o 1, 2 e 3 não são relidos
     e3["payment_status"] = "PAID"
     cliente.repasses.append(_repasse(903, "200.00", d15))
     cliente.chamadas.clear()
     r2 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
-    assert r2["inseridos"] == 2 and [x["extrato"] for x in r2["extratos"]] == ["3"]
-    assert not any("/statements/1/" in p or "/statements/2/" in p for p, _ in cliente.chamadas)
-    assert (await db.execute(select(ConciliacaoMovimento))).scalars().all().__len__() == 7
+    assert r2["inseridos"] == 1 and r2["pagos_agora"] == 1
+    assert [x["extrato"] for x in r2["extratos"]] == ["3"]
+    assert not any("/statements/" in p for p, _ in cliente.chamadas)
+    movs = (
+        (await db.execute(select(ConciliacaoMovimento).order_by(ConciliacaoMovimento.data)))
+        .scalars()
+        .all()
+    )
+    assert len(movs) == 7 and movs[6].tipo == "saque" and movs[6].saldo_apos == Decimal("0")
+    await db.refresh(nao_pago)
+    assert nao_pago.descricao == f"Liquidação do pedido {PEDIDO}"
+    assert nao_pago.raw["_payment_status"] == "PAID" and not aguardando_repasse(nao_pago)
+    syncs = (
+        (await db.execute(select(ConciliacaoSync).order_by(ConciliacaoSync.chave))).scalars().all()
+    )
+    assert [(s.chave, s.status, s.linhas) for s in syncs][2] == ("3", "lido", 2)
+    fechados = await fechar_dias_prontos(db, loja)
+    assert "2026-10-15" in fechados["fechados"]
 
 
 async def test_extrato_do_dia_tiktok_fecha_a_conta(db, make_user, auth_as, client):

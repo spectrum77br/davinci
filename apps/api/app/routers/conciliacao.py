@@ -645,7 +645,8 @@ from sqlalchemy import case as sa_case  # noqa: E402
 from sqlalchemy import func, or_  # noqa: E402
 
 from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoPedido  # noqa: E402
-from app.models.conciliacao import ORIGENS_EXTRATO  # noqa: E402
+from app.models.conciliacao import ORIGEM_TIKTOK, ORIGENS_EXTRATO  # noqa: E402
+from app.services.conciliacao_tiktok import AGUARDANDO, aguardando_repasse  # noqa: E402
 
 _BRT = ZoneInfo("America/Sao_Paulo")
 _PERM_PAINEL = require_permission_any(("conciliacao", "margem"), "view")
@@ -2061,6 +2062,10 @@ async def _saldo_anterior(
 ) -> Decimal | None:
     """Saldo informado da última linha ANTES do dia = saldo inicial de verdade do
     dia (prova dos nove independente da ordem das linhas do dia)."""
+    if getattr(loja.platform, "value", str(loja.platform)) == "tiktok":
+        # cada extrato da TikTok é um caixa próprio: começa em 0 e o repasse zera.
+        # Extrato ainda não pago termina o dia no total liquidado (16/10).
+        return Decimal("0")
     ini = datetime.combine(dia, datetime.min.time(), tzinfo=_BRT)
     mov = ConciliacaoMovimento
     ultimo = (
@@ -2490,6 +2495,16 @@ async def fechar_dia(
     saldo_ant = await _saldo_anterior(session, alvo, dia)
     movs = await _movimentos_do_dia(session, alvo, dia, saldo_ant)
     pendentes = [m for m in movs if not m.pedido_bling and not m.classificacao]
+    if any(aguardando_repasse(m) for m in movs):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "aguardando_repasse",
+                "mensagem": (
+                    "a TikTok ainda não pagou este extrato; o robô fecha o dia quando pagar"
+                ),
+            },
+        )
     if pendentes:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -2719,9 +2734,22 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
         )
     ).scalar_one()
     plataforma = getattr(loja.platform, "value", str(loja.platform))
+    a_receber = None
     if plataforma == "tiktok":
-        # a TikTok não guarda saldo: todo extrato vai pro banco no mesmo dia
+        # a TikTok não guarda saldo: o extrato vai pro banco; o que ela ainda não pagou
+        # (extrato PROCESSING/FAILED) é "a receber"
         na_conta = saldo_em = None
+        mov_tt = ConciliacaoMovimento
+        v = (
+            await session.execute(
+                select(func.sum(mov_tt.credito - mov_tt.debito)).where(
+                    mov_tt.integration_id == loja.integration_id,
+                    mov_tt.origem == ORIGEM_TIKTOK,
+                    mov_tt.raw["_payment_status"].astext.in_(AGUARDANDO),
+                )
+            )
+        ).scalar()
+        a_receber = _num(v or 0)
     preso = None
     if plataforma == "amazon":
         # reserva por data de entrega: lançamentos ainda DEFERRED. Na conta = liberado
@@ -2747,6 +2775,7 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
         "a_liberar": _num(a_liberar or 0),
         "a_liberar_pedidos": int(n_liberar or 0),
         "preso": preso,
+        "a_receber": a_receber,
         # reserva aberta antes do início e solta depois deixaria negativo: zero é o piso
         "reservado": max(_num(reservado or 0) or 0.0, 0.0) if plataforma == "ml" else None,
     }
@@ -2837,12 +2866,23 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         )
         saldo_bate = totais["diferenca"] is not None and abs(totais["diferenca"]) <= 0.05
         sem_movimento = totais["linhas"] == 0
+        nao_pagos = [m for m in movs if aguardando_repasse(m)]
+        repasse_falhou = any(
+            str((m.raw or {}).get("_payment_status") or "").upper() == "FAILED" for m in nao_pagos
+        )
         if fechado and fechado.fechado_em:
             dia_status, dia_texto = "fechado", f"fechado por {fechado.fechado_por}"
         elif sem_movimento and extrato_atrasado:
             dia_status, dia_texto = "extrato_nao_lido", "extrato não lido"
         elif sem_movimento:
             dia_status, dia_texto = "sem_movimento", "sem movimento"
+        elif contagem["pendente"] == 0 and saldo_bate and repasse_falhou:
+            dia_status, dia_texto = "repasse_falhou", "repasse falhou, a TikTok tenta de novo"
+        elif contagem["pendente"] == 0 and saldo_bate and nao_pagos:
+            dia_status, dia_texto = (
+                "aguardando_repasse",
+                "liquidado, aguardando o repasse da TikTok",
+            )
         elif contagem["pendente"] == 0 and saldo_bate:
             dia_status, dia_texto = "pronto", "100% casado, saldo bate — pode fechar"
         else:

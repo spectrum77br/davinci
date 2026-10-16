@@ -606,3 +606,14 @@ Segunda rodada (Vinicius: "você não consegue fixar essas coisas que faltou?"),
 - **Venda desfeita sem pedido no Bling**: venda do ML que não existe no Bling e cujo dinheiro entrou e saiu inteiro no mesmo pagamento (aguiar 02/10: +320,69 −396,17 +75,48 = 0) ganha a classificação "Venda desfeita (sem pedido no Bling)"; se o pedido aparecer, a ligação desfaz. Venda que só entrou continua sem dono (precisa importar no Bling ou classificar).
 - **Pulo pequeno de saldo da Shopee**: a carteira muda o saldo sem listar o lançamento (Barbosa 15/10, −0,98; nada na API nem relendo). `ajustar_saldo_do_dia` grava uma linha "Ajuste da Shopee" classificada como ajuste no ponto do pulo, até R$ 10 por dia (e no máximo 3 pulos); acima disso fica "saldo não bate" pra uma pessoa. Refeito a cada leitura do dia; ajuste que uma pessoa mexeu fica.
 - **Só pessoa resolve**: lucas mei (reconectar o ML); vendas do ML que não existem no Bling (importar ou classificar); os itens de negócio (reaberto, estornado depois, recebido a menos) são o painel funcionando, não erro.
+
+## 29. TikTok: extrato gerado mas ainda não pago (16/10, manhã)
+
+Vinicius: "aqueles TikTok sem movimentação, realmente não teve movimentação ou ficou sem buscar?". Não era horário: a TikTok gera o extrato do dia à meia-noite UTC com `payment_status = PROCESSING` e só vira `PAID` quando o dinheiro cai; o robô lia só `PAID`. A Mini é paga no mesmo dia; nas outras 7 lojas a TikTok paga em lotes, dias depois (Barbosa 16/10: extratos de 13, 15 e 16/10 em PROCESSING, 7.135,76 só no de 15/10; atv 2 presos; uma transferência de 28.083,80 em 6 dias). O painel dizia "sem movimento".
+
+OK dele ("Ok que pode fazer"), depois de conferir que o extrato é fixo e só a transferência pode falhar e ser refeita (status FAILED, nova transferência pro mesmo extrato).
+
+- `run_tiktok_sync` lê também PROCESSING e FAILED: as linhas entram no dia do extrato com o sufixo " · aguardando o repasse" (ou " · repasse falhou, a TikTok tenta de novo") e `raw._payment_status`; a `conciliacao_sync` do extrato fica `processando`/`falhou`. Quando vira PAID: tira o sufixo, grava a linha "Repasse pro banco · pago dd/mm" e marca `lido`. Nada é relido nem duplicado (`pagos_agora` no resumo da rodada).
+- Prova dos nove da TikTok: cada extrato é um caixa próprio (`_saldo_anterior` = 0 na TikTok). Extrato não pago termina o dia no total liquidado; o repasse zera quando entrar.
+- Resumo: estado novo do dia "liquidado, aguardando o repasse" (azul) e "repasse falhou" (âmbar); não entram no Onde agir; "Dinheiro nas plataformas" mostra "aguardando repasse R$ X" (`a_receber`). O robô não fecha dia com extrato não pago (`fechar_dias_prontos`) e o "Fechar o dia" à mão recusa com 409 `aguardando_repasse`.
+- Se a TikTok algum dia alterar um extrato já gerado, o dia acusa "saldo não bate" — é o sinal certo.

@@ -263,6 +263,7 @@ async def fechar_dias_prontos(
     bate — a mesma regra do botão "Fechar o dia", só que sem ninguém clicar.
     Dia com linha sem dono ou saldo diferente fica aberto e aparece no Resumo."""
     from app.routers.conciliacao import _movimentos_do_dia, _saldo_anterior, _totais_do_dia
+    from app.services.conciliacao_tiktok import aguardando_repasse
 
     agora = datetime.now(UTC)
     ontem = datetime.now(_BRT).date() - timedelta(days=1)
@@ -289,7 +290,9 @@ async def fechar_dias_prontos(
             pendentes = [m for m in movs if not m.pedido_bling and not m.classificacao]
             totais = _totais_do_dia(movs, saldo_ant)
             dif = totais["diferenca"]
-            if not pendentes and dif is not None and abs(dif) <= 0.05:
+            # extrato da TikTok ainda não pago: o dia só fecha quando o repasse entrar
+            nao_pago = any(aguardando_repasse(m) for m in movs)
+            if not pendentes and not nao_pago and dif is not None and abs(dif) <= 0.05:
                 row = existente
                 if row is None:
                     row = ConciliacaoDia(integration_id=loja.integration_id, dia=d)

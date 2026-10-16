@@ -14,7 +14,7 @@ const emit = defineEmits<{
 }>()
 
 type DiaLoja = {
-  status: 'fechado' | 'pronto' | 'aberto' | 'extrato_nao_lido' | 'sem_movimento'
+  status: 'fechado' | 'pronto' | 'aberto' | 'extrato_nao_lido' | 'sem_movimento' | 'aguardando_repasse' | 'repasse_falhou'
   texto: string
   linhas: number
   pendentes: number
@@ -55,7 +55,7 @@ type Mes = {
   ajustes_meses_anteriores: number
   ajustes_qtd: number
 }
-type Dinheiro = { na_conta: number | null; saldo_em: string | null; a_liberar: number; a_liberar_pedidos: number; reservado: number | null; preso?: number | null }
+type Dinheiro = { na_conta: number | null; saldo_em: string | null; a_liberar: number; a_liberar_pedidos: number; reservado: number | null; preso?: number | null; a_receber?: number | null }
 type LojaResumo = {
   conta: string
   platform: string
@@ -169,6 +169,8 @@ function diaCls(d: DiaLoja) {
   if (d.status === 'pronto') return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-300 dark:bg-emerald-950/30 dark:text-emerald-300'
   if (d.status === 'aberto') return 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'
   if (d.status === 'extrato_nao_lido') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+  if (d.status === 'aguardando_repasse') return 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300'
+  if (d.status === 'repasse_falhou') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
   return 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'
 }
 function diaTexto(d: DiaLoja) {
@@ -176,6 +178,8 @@ function diaTexto(d: DiaLoja) {
   if (d.status === 'pronto') return 'pronto pra fechar'
   if (d.status === 'aberto') return 'não fechou'
   if (d.status === 'extrato_nao_lido') return 'extrato não lido'
+  if (d.status === 'aguardando_repasse') return 'liquidado, aguardando o repasse'
+  if (d.status === 'repasse_falhou') return 'repasse falhou, TikTok tenta de novo'
   return 'sem movimento'
 }
 function gravCls(g: string) {
@@ -300,7 +304,7 @@ onMounted(() => {
             </table>
           </div>
           <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
-            "Dia": <b>fechado</b> = alguém fechou (100% das linhas com destino e saldo batendo) · <b>pronto pra fechar</b> = tudo casou, falta só fechar · <b>não fechou</b> = tem linha sem dono ou saldo diferente. Loja sem pendência some da lista "Onde agir".
+            "Dia": <b>fechado</b> = alguém fechou (100% das linhas com destino e saldo batendo) · <b>pronto pra fechar</b> = tudo casou, falta só fechar · <b>não fechou</b> = tem linha sem dono ou saldo diferente · <b>aguardando o repasse</b> = a TikTok fechou o extrato mas ainda não pagou (o robô fecha o dia quando pagar). Loja sem pendência some da lista "Onde agir".
           </div>
         </div>
 
@@ -341,7 +345,7 @@ onMounted(() => {
                 <tr v-for="l in g.lojas" v-show="abertos[g.key]" :key="'d' + l.conta" class="cursor-pointer border-b hover:bg-muted/40" title="abre os pedidos desta loja aguardando liberação" @click="emit('ver-pedidos', l.conta, { situacao: 'aguardando' })">
                   <td class="px-2 py-1 pl-4">
                     <div class="font-bold">{{ l.conta }}</div>
-                    <div class="text-[10px] text-muted-foreground"><template v-if="l.platform === 'tiktok'">repassa pro banco todo dia</template><template v-else>saldo de {{ fmtDiaHora(l.dinheiro.saldo_em) }}</template> · {{ l.dinheiro.a_liberar_pedidos }} pedidos a liberar<template v-if="l.dinheiro.reservado != null"> · reservado {{ fmtMoney(l.dinheiro.reservado) }}</template><template v-if="l.dinheiro.preso != null"> · preso na reserva por entrega {{ fmtMoney(l.dinheiro.preso) }}</template></div>
+                    <div class="text-[10px] text-muted-foreground"><template v-if="l.platform === 'tiktok'">repassa pro banco em lotes<template v-if="l.dinheiro.a_receber"> · aguardando repasse {{ fmtMoney(l.dinheiro.a_receber) }}</template></template><template v-else>saldo de {{ fmtDiaHora(l.dinheiro.saldo_em) }}</template> · {{ l.dinheiro.a_liberar_pedidos }} pedidos a liberar<template v-if="l.dinheiro.reservado != null"> · reservado {{ fmtMoney(l.dinheiro.reservado) }}</template><template v-if="l.dinheiro.preso != null"> · preso na reserva por entrega {{ fmtMoney(l.dinheiro.preso) }}</template></div>
                   </td>
                   <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(l.dinheiro.na_conta) }}</td>
                   <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(l.dinheiro.a_liberar) }}</td>
@@ -355,7 +359,7 @@ onMounted(() => {
               </tr>
             </tbody>
           </table>
-          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Na conta = último saldo do extrato, como a plataforma informou (a TikTok não guarda saldo: repassa pro banco todo dia; na Amazon é o que já está liberado). A liberar = líquido previsto das vendas ainda não liberadas (na Amazon inclui o que está preso na reserva por entrega). Clique na loja abre os pedidos dela.</div>
+          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Na conta = último saldo do extrato, como a plataforma informou (a TikTok não guarda saldo: repassa pro banco em lotes, e o extrato que ela ainda não pagou aparece como "aguardando repasse"; na Amazon é o que já está liberado). A liberar = líquido previsto das vendas ainda não liberadas (na Amazon inclui o que está preso na reserva por entrega). Clique na loja abre os pedidos dela.</div>
         </div>
         </div>
       </div>

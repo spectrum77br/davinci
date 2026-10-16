@@ -65,6 +65,60 @@ def _ancora(statement: dict[str, Any]) -> datetime | None:
     return datetime.combine(dia, datetime.min.time(), tzinfo=BRT) if dia else None
 
 
+# Extrato gerado mas ainda não pago (16/10: 7 das 8 lojas; a TikTok paga essas em
+# lotes, dias depois). As linhas entram no dia do extrato marcadas "aguardando o
+# repasse"; a linha de repasse só entra quando o status vira PAID. O extrato é fixo
+# (pedidos e valores); só a transferência pode falhar e ser refeita.
+AGUARDANDO = ("PROCESSING", "FAILED")
+SUFIXOS = {
+    "PROCESSING": " · aguardando o repasse",
+    "FAILED": " · repasse falhou, a TikTok tenta de novo",
+}
+STATUS_SYNC = {"PROCESSING": "processando", "FAILED": "falhou"}
+
+
+def aguardando_repasse(m: ConciliacaoMovimento) -> bool:
+    raw = m.raw if isinstance(m.raw, dict) else {}
+    return m.origem == ORIGEM_TIKTOK and str(raw.get("_payment_status") or "").upper() in AGUARDANDO
+
+
+def _sem_sufixo(descricao: str | None) -> str:
+    d = descricao or ""
+    for suf in SUFIXOS.values():
+        d = d.replace(suf, "")
+    return d
+
+
+async def _linhas_do_extrato(
+    session: AsyncSession, loja: ConciliacaoLoja, sid: str
+) -> list[ConciliacaoMovimento]:
+    mov = ConciliacaoMovimento
+    return list(
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_TIKTOK,
+                    mov.raw["_statement_id"].astext == sid,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _marcar_status_do_extrato(
+    session: AsyncSession, loja: ConciliacaoLoja, sid: str, status: str
+) -> int:
+    """Troca a marca das linhas já gravadas de um extrato (PROCESSING ↔ FAILED → PAID)."""
+    linhas = await _linhas_do_extrato(session, loja, sid)
+    for m in linhas:
+        m.descricao = _sem_sufixo(m.descricao) + SUFIXOS.get(status, "")
+        m.raw = {**(m.raw if isinstance(m.raw, dict) else {}), "_payment_status": status}
+    return len(linhas)
+
+
 def transacao_para_movimento(
     tx: dict[str, Any], statement: dict[str, Any], *, ordem: int, saldo_apos: Decimal
 ) -> dict[str, Any] | None:
@@ -121,6 +175,7 @@ def transacao_para_movimento(
             **tx,
             "_statement_id": str(statement.get("id") or ""),
             "_statement_time": statement.get("statement_time"),
+            "_payment_status": str(statement.get("payment_status") or "").upper(),
         },
     }
 
@@ -282,14 +337,13 @@ async def run_tiktok_sync(
     com as transações de cada um e o repasse; extrato já lido não é relido."""
     agora = agora or datetime.now(UTC)
     hoje = hoje or agora.astimezone(BRT).date()
-    lidos = {
-        r.chave
+    rows_sync = {
+        r.chave: r
         for r in (
             await session.execute(
                 select(ConciliacaoSync).where(
                     ConciliacaoSync.integration_id == loja.integration_id,
                     ConciliacaoSync.origem == ORIGEM_TIKTOK,
-                    ConciliacaoSync.status == "lido",
                 )
             )
         ).scalars()
@@ -300,7 +354,14 @@ async def run_tiktok_sync(
     # a API filtra por DIA e o `lt` exclui o dia inteiro: com lt = agora, o extrato de
     # hoje (pago de madrugada) só aparecia amanhã (15/10, repasse 3.819,28) → lt = amanhã
     t_ate = int((agora + timedelta(days=1)).timestamp())
-    resumo: dict[str, Any] = {"extratos": [], "inseridos": 0, "pulados_processando": 0, "erros": []}
+    resumo: dict[str, Any] = {
+        "extratos": [],
+        "inseridos": 0,
+        "aguardando_repasse": 0,
+        "repasse_falhou": 0,
+        "pagos_agora": 0,
+        "erros": [],
+    }
     integration = await session.get(Integration, loja.integration_id)
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
     try:
@@ -312,10 +373,37 @@ async def run_tiktok_sync(
         return resumo
     for st in extratos:
         sid = str(st.get("id") or "")
-        if not sid or sid in lidos:
+        if not sid:
             continue
-        if str(st.get("payment_status") or "").upper() != "PAID":
-            resumo["pulados_processando"] += 1
+        status = str(st.get("payment_status") or "").upper()
+        pid = str(st.get("payment_id") or "")
+        existente = rows_sync.get(sid)
+        if existente is not None and existente.status == "lido":
+            continue
+        if existente is not None and existente.status in STATUS_SYNC.values():
+            # linhas já gravadas; falta só o repasse (ou mudou PROCESSING ↔ FAILED)
+            if status == "PAID":
+                rep = repasse_para_movimento(
+                    st, repasses.get(pid), ordem=int(existente.linhas or 0)
+                )
+                await _marcar_status_do_extrato(session, loja, sid, "PAID")
+                novos = await inserir_movimentos(session, loja, [rep]) if rep else 0
+                existente.status = "lido"
+                existente.lido_em = agora
+                existente.erro = None
+                existente.linhas = int(existente.linhas or 0) + (1 if rep else 0)
+                existente.detalhe = {**(existente.detalhe or {}), "pago": True, "payment_id": pid}
+                loja.ultimo_extrato_em = agora
+                resumo["pagos_agora"] += 1
+                resumo["inseridos"] += novos
+                resumo["extratos"].append({"extrato": sid, "linhas": 1, "inseridos": novos})
+            elif status in AGUARDANDO:
+                if existente.status != STATUS_SYNC[status]:
+                    await _marcar_status_do_extrato(session, loja, sid, status)
+                    existente.status = STATUS_SYNC[status]
+                resumo["aguardando_repasse" if status == "PROCESSING" else "repasse_falhou"] += 1
+            continue
+        if status != "PAID" and status not in AGUARDANDO:
             continue
         row = await _sync_row(session, loja, sid)
         row.pedido_em = agora
@@ -330,8 +418,10 @@ async def run_tiktok_sync(
                 m = transacao_para_movimento(tx, st, ordem=i, saldo_apos=saldo)
                 if m:
                     movs.append(m)
-            rep = repasse_para_movimento(
-                st, repasses.get(str(st.get("payment_id") or "")), ordem=len(txs)
+            rep = (
+                repasse_para_movimento(st, repasses.get(pid), ordem=len(txs))
+                if status == "PAID"
+                else None
             )
             if rep:
                 movs.append(rep)
@@ -346,6 +436,9 @@ async def run_tiktok_sync(
                     # faturar): não é dinheiro, não pode travar o dia (08/10, Mini)
                     m["classificacao"] = "outro"
                     m["descricao"] = f"{m['descricao']} (zerada: nada entrou, nada saiu)"
+            if status != "PAID":
+                for m in movs:
+                    m["descricao"] = f"{m['descricao']}{SUFIXOS[status]}"
             inseridos = await inserir_movimentos(session, loja, movs)
         except Exception as e:  # noqa: BLE001
             row.status = "erro"
@@ -355,7 +448,7 @@ async def run_tiktok_sync(
                 "conciliacao_tiktok_extrato_falhou", loja=loja.conta, extrato=sid, erro=row.erro
             )
             continue
-        row.status = "lido"
+        row.status = "lido" if status == "PAID" else STATUS_SYNC[status]
         row.lido_em = agora
         row.erro = None
         row.linhas = len(txs) + (1 if rep else 0)
@@ -363,10 +456,13 @@ async def run_tiktok_sync(
             "statement_time": st.get("statement_time"),
             "settlement_amount": st.get("settlement_amount"),
             "payment_id": st.get("payment_id"),
+            "payment_status": status,
             "inseridos": inseridos,
         }
         loja.ultimo_extrato_em = agora
         resumo["inseridos"] += inseridos
+        if status != "PAID":
+            resumo["aguardando_repasse" if status == "PROCESSING" else "repasse_falhou"] += 1
         resumo["extratos"].append({"extrato": sid, "linhas": row.linhas, "inseridos": inseridos})
     if extratos:
         loja.ultimo_extrato_em = agora
