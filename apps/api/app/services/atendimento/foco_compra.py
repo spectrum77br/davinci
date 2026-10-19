@@ -7,11 +7,16 @@ prioridade; dúvidas sobre produto, direitos e documentos continuam pendentes.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from app.services.atendimento.constantes import (
+    PAPEL_TIKTOK_ATENDIMENTO,
+    TIPO_TIKTOK_CARTAO_PEDIDO,
+)
 from app.services.atendimento.validador import plano_de
 
 _COMPRA = re.compile(
@@ -55,17 +60,36 @@ def _momento(m: Any) -> datetime | None:
 
 def _card_de_compra(m: Any, compra: Any, pedido_marketplace: str) -> bool:
     payload = getattr(m, "payload", None)
-    if not isinstance(payload, dict) or getattr(m, "autor", None) != "loja":
-        return False
-    conteudo = payload.get("content")
     if (
-        payload.get("source") != "openapi"
-        or payload.get("message_type") != "order"
-        or not isinstance(conteudo, dict)
-        or not re.fullmatch(r"\d{6}[A-Za-z0-9]{8}", str(conteudo.get("order_sn") or ""))
-        or str(conteudo.get("order_sn") or "") != pedido_marketplace
+        not isinstance(payload, dict)
+        or getattr(m, "autor", None) != "loja"
         or getattr(m, "status", None) == "falhou"
     ):
+        return False
+    conteudo = payload.get("content")
+    if payload.get("source") == "openapi" and payload.get("message_type") == "order":
+        pedido = conteudo.get("order_sn") if isinstance(conteudo, dict) else None
+        valido = re.fullmatch(r"\d{6}[A-Za-z0-9]{8}", str(pedido or ""))
+    elif (
+        payload.get("type") == TIPO_TIKTOK_CARTAO_PEDIDO
+        and isinstance(payload.get("sender"), dict)
+        and payload["sender"].get("role") == PAPEL_TIKTOK_ATENDIMENTO
+        and payload.get("is_visible") is not False
+    ):
+        # O adaptador TikTok persiste o payload cru: `content` pode ser um
+        # objeto ou JSON em texto. Só o ORDER_CARD enviado pelo atendimento
+        # da loja é o reconhecimento do pedido; card do comprador, entrada
+        # pela página, logística ou reembolso não confirmam essa compra.
+        if isinstance(conteudo, str):
+            try:
+                conteudo = json.loads(conteudo)
+            except ValueError:
+                return False
+        pedido = conteudo.get("order_id") if isinstance(conteudo, dict) else None
+        valido = re.fullmatch(r"[0-9]{6,32}", str(pedido or ""))
+    else:
+        return False
+    if not valido or str(pedido) != pedido_marketplace:
         return False
     card_em, compra_em = _momento(m), _momento(compra)
     return bool(card_em and compra_em and compra_em <= card_em <= compra_em + timedelta(days=1))

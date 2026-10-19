@@ -1,11 +1,12 @@
 """A compra confirmada supera estoque para planejamento, nunca direitos pendentes."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from app.services.atendimento import ia
+from app.services.atendimento import foco_compra, ia
 
 
 def mensagem(texto=None, *, minuto=0, autor="cliente", payload=None):
@@ -124,3 +125,95 @@ def test_menu_que_falhou_nao_interpreta_numero_como_assunto_sensivel():
     assert ia.assuntos_sensiveis_do_menu([menu, opcao], opcao) == ["garantia"]
     menu.status = "falhou"
     assert ia.assuntos_sensiveis_do_menu([menu, opcao], opcao) == []
+
+
+PEDIDO_TIKTOK = "578000111222333444"
+
+
+def _turno_tiktok():
+    mensagens = turno(["Quantos series 11 cinza vocês ainda tem em estoque?"])
+    mensagens.pedido_marketplace = PEDIDO_TIKTOK
+    mensagens[-2].payload = {
+        "type": "ORDER_CARD",
+        "sender": {"role": "CUSTOMER_SERVICE"},
+        "content": {"order_id": PEDIDO_TIKTOK},
+    }
+    return mensagens
+
+
+@pytest.mark.parametrize("json_em_texto", [True, False])
+def test_tiktok_card_do_atendimento_do_mesmo_pedido_supera_so_estoque(json_em_texto):
+    mensagens = _turno_tiktok()
+    if json_em_texto:
+        mensagens[-2].payload["content"] = json.dumps(mensagens[-2].payload["content"])
+
+    foco = ia.perguntas_pendentes(mensagens, mensagens[-1])
+
+    assert [m.texto for m in foco] == [
+        "Ja realizei o pedido, qual a previsão de entrega/envio?",
+        "De onde estão enviando?",
+    ]
+
+
+@pytest.mark.parametrize(
+    "alteracao",
+    [
+        {"sender": {"role": "BUYER"}},
+        {"sender": {"role": "ROBOT"}},
+        {"sender": {"role": "SYSTEM"}},
+        {"sender": {"role": "SHOP"}},
+        {"sender": {}},
+        {"sender": "CUSTOMER_SERVICE"},
+        {"type": "PRODUCT_CARD"},
+        {"type": "BUYER_ENTER_FROM_ORDER"},
+        {"type": "LOGISTICS_CARD"},
+        {"type": "RETURN_REFUND_CARD"},
+        {"content": {"order_id": "578000111222333445"}},
+        {"content": {"order_id": "2610191X0P2AWN"}},
+        {"content": {"order_id": ""}},
+        {"content": {}},
+        {"content": "não é JSON"},
+        {"content": json.dumps([{"order_id": PEDIDO_TIKTOK}])},
+        {"content": json.dumps(PEDIDO_TIKTOK)},
+        {"is_visible": False},
+    ],
+)
+def test_tiktok_so_o_formato_exato_do_pedido_da_loja_confirma_a_compra(alteracao):
+    mensagens = _turno_tiktok()
+    mensagens[-2].payload.update(alteracao)
+    perguntas = [m for m in mensagens if m.autor == "cliente" and m.texto != "1"]
+
+    assert foco_compra.depois_da_compra(perguntas, mensagens) == perguntas
+
+
+@pytest.mark.parametrize("falha", ["autor", "falhou", "antes", "depois", "sem_compra"])
+def test_tiktok_preserva_autoria_status_janela_e_confirmacao_do_comprador(falha):
+    mensagens = _turno_tiktok()
+    card = mensagens[-2]
+    if falha == "autor":
+        card.autor = "cliente"
+    elif falha == "falhou":
+        card.status = "falhou"
+    elif falha == "antes":
+        card.enviada_em = mensagens[1].enviada_em - timedelta(minutes=1)
+    elif falha == "depois":
+        card.enviada_em = mensagens[1].enviada_em + timedelta(days=1, seconds=1)
+    else:
+        mensagens[1].texto = "Ainda não realizei o pedido"
+    perguntas = [m for m in mensagens if m.autor == "cliente" and m.texto and m.texto != "1"]
+
+    assert foco_compra.depois_da_compra(perguntas, mensagens) == perguntas
+
+
+def test_pedido_ml_vinculado_em_mensagem_textual_nao_e_card_de_compra():
+    mensagens = _turno_tiktok()
+    mensagens.pedido_marketplace = "2000012345678901"
+    mensagens[-2].payload = {
+        "text": "Pedido recebido",
+        "from": {"user_id": "1234567"},
+        "message_resources": [{"name": "orders", "id": mensagens.pedido_marketplace}],
+        "data": {"order_id": mensagens.pedido_marketplace},
+    }
+    perguntas = [m for m in mensagens if m.autor == "cliente" and m.texto != "1"]
+
+    assert foco_compra.depois_da_compra(perguntas, mensagens) == perguntas

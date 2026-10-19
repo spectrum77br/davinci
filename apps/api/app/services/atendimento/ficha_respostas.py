@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from app.services.atendimento.politicas_atendimento import REGRA_PULSEIRA
 from app.services.atendimento.validador import plano_de
 
 REGRAS_APROVADAS = {
@@ -37,10 +38,7 @@ REGRAS_APROVADAS = {
         "anúncio nos FATOS; Inmetro só com o título; sem dado ou divergindo, precisa_humano=true. "
         "Não comparar com outra marca."
     ),
-    "espec_outros": (
-        "Só com o dado do título ou da ficha do anúncio nos FATOS; sem dado ou divergindo, "
-        "precisa_humano=true. Apple: condição, garantia e versão só com o título."
-    ),
+    "espec_outros": REGRA_PULSEIRA["faca"],
 }
 _ORIGENS = {
     "cartao de produto que o cliente mandou",

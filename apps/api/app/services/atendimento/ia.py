@@ -296,6 +296,7 @@ from app.services.atendimento.constantes import (
     reclamacao_aberta,
 )
 from app.services.atendimento.pendente import resposta_de_pessoa
+from app.services.atendimento.sem_demanda import REGRA_FACA as _REGRA_CARTAO_APROVADA
 from app.services.bling_situacoes import (
     NOME_AGUARDANDO_CANCELAMENTO,
     SITUACAO_AGUARDANDO_CANCELAMENTO_STR,
@@ -323,7 +324,8 @@ SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 # interna ("custo" sozinho faria o modelo fugir do custo do frete); pedido
 # "em processamento" não é cancelamento.
 # v9: aprovação específica da Kia e estoque pré-compra superado pela compra.
-PROMPT_VERSAO = "v9"
+# v10: políticas gerais por loja, plataforma e identidade do produto.
+PROMPT_VERSAO = "v10"
 
 # Cliente escreve em rajada ("oi" / "meu pedido" / "não chegou"). Esperar
 # 90 s de silêncio junta a rajada numa sugestão só, em vez de três.
@@ -1555,22 +1557,14 @@ _REGRA_NF_APROVADA = (
     "não veio: precisa_humano=true (motivo 'enviar NF' ou 'corrigir NF'). Nunca pedir CPF ou "
     "CNPJ: os dados vêm do cadastro do pedido."
 )
-_REGRA_CARTAO_APROVADA = (
-    "Com card de produto ou pedido: perguntar em que podemos ajudar sobre aquele produto ou "
-    "pedido. Sem card: pedir com educação que conte o que precisa. Não adivinhar o assunto, "
-    "nunca reenviar o menu."
-)
 
 
 def _regra_basica_igual(regras: Sequence[Any], categoria: str, aprovado: str) -> bool:
-    from app.services.atendimento import sem_demanda
-
     aplicaveis = [
         r
         for r in regras
         if r.tipo == TIPO_REGRA_CATEGORIA
         and r.categoria == categoria
-        and not sem_demanda.regra_aprovada(r)
     ]
     return (
         len(aplicaveis) == 1
@@ -1920,13 +1914,13 @@ async def _regras_aplicaveis(
         .scalars()
         .all()
     )
-    if str(conversa.integration_id) != politicas_kia.INTEGRATION_KIA:
-        regras = [
-            r
-            for r in regras
-            if not politicas_kia.regra_especifica_kia(r) and not sem_demanda.regra_especifica_kia(r)
-        ]
-    return regras
+    # Especializações antigas da Kia foram substituídas pelo Manual geral.
+    # Durante a atualização do banco, não deixe o legado disputar a categoria.
+    return [
+        r
+        for r in regras
+        if not politicas_kia.regra_especifica_kia(r) and not sem_demanda.regra_especifica_kia(r)
+    ]
 
 
 def organizar_manual(
@@ -4263,17 +4257,17 @@ async def _gerar(
     )
     if fichas:
         fatos["ficha_do_anuncio"] = fatos_gravados["ficha_do_anuncio"] = fichas
-    from app.services.atendimento import politicas_kia, sem_demanda
+    from app.services.atendimento import politicas_atendimento, sem_demanda
 
-    politica_kia = politicas_kia.resposta_aprovada(
+    politica_aprovada = politicas_atendimento.resposta_aprovada(
         conversa, textos_rajada, fatos, todas_regras
     ) or sem_demanda.resposta_de_menu(conversa, recentes, gatilho, todas_regras)
     if opcoes_sensiveis:
-        politica_kia = None
+        politica_aprovada = None
     if (
         contexto_reavaliado is not None
-        and contexto_reavaliado.get("tipo") == "politica_kia"
-        and politica_kia is None
+        and contexto_reavaliado.get("tipo") in {"politica_atendimento", "politica_kia"}
+        and politica_aprovada is None
     ):
         # Uma regra ou a ficha mudou entre seleção e geração: a recuperação
         # não pode cair no modelo nem reabrir uma decisão de pessoa.
@@ -4299,10 +4293,10 @@ async def _gerar(
     ):
         categoria_basica = "saudacao_ou_vaga"
         texto_basico = "Olá! Em que podemos ajudar sobre esse produto ou pedido?"
-    elif politica_kia is not None and politica_kia.categoria in ids_categorias:
-        categoria_basica = politica_kia.categoria
-        texto_basico = politica_kia.texto
-        fatos_gravados["politica_kia_aprovada"] = politica_kia.fato
+    elif politica_aprovada is not None and politica_aprovada.categoria in ids_categorias:
+        categoria_basica = politica_aprovada.categoria
+        texto_basico = politica_aprovada.texto
+        fatos_gravados["politica_atendimento_aprovada"] = politica_aprovada.fato
     nomes = (
         conversa.comprador_nome,
         conversa.comprador_id,
@@ -4470,7 +4464,7 @@ async def _gerar(
         classificada,
         textos_rajada,
         fatos,
-        [r for r in todas_regras if not politicas_kia.regra_aprovada(r)],
+        todas_regras,
     )
     texto_basico = (
         texto_basico
@@ -4546,7 +4540,7 @@ async def _gerar(
         and so_admin
         and categoria in ficha_svc.CATEGORIAS_DA_FICHA
         and texto_ficha is None
-        and politica_kia is None
+        and politica_aprovada is None
     ):
         motivos.append(MOTIVO_FICHA_NO_AUTOMATICO)
     # O que o modelo pode repetir: os FATOS (anúncio e a ficha dele, itens,
@@ -5323,11 +5317,11 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
         # A cota da rodada para buscar a ficha do anúncio na loja (`ficha_loja.py`).
         with ficha_loja.rodada():
             if MODO_AUTO in modos:
-                await manter_fila_kia(session)
+                await manter_fila(session)
             geradas = await _gerar_pendentes(session, limite=limite, modos=modos)
             if MODO_AUTO in modos:
                 geradas += await reavaliar_contextos(session)
-                geradas += await reavaliar_politicas_kia(session)
+                geradas += await reavaliar_politicas(session)
         if MODO_AUTO in modos:
             await reenviar_pendentes(session)
         return geradas
@@ -5335,9 +5329,9 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
         await _soltar_rodada(token)
 
 
-async def manter_fila_kia(session: AsyncSession, *, limite: int = 25) -> dict[str, int]:
+async def manter_fila(session: AsyncSession, *, limite: int = 25) -> dict[str, int]:
     """Repara pendência já respondida e processa cartões acolhidos, sem envio."""
-    from app.services.atendimento import politicas_kia, sem_demanda
+    from app.services.atendimento import sem_demanda
 
     s = get_settings()
     resumo = {"respondidas": 0, "sem_demanda": 0}
@@ -5348,9 +5342,9 @@ async def manter_fila_kia(session: AsyncSession, *, limite: int = 25) -> dict[st
         select(c.id, c.canal_id, c.ultima_do_cliente_em)
         .join(k, k.id == c.canal_id)
         .where(
-            c.integration_id == UUID(politicas_kia.INTEGRATION_KIA),
-            c.plataforma == "shopee",
-            c.canal == "chat",
+            c.plataforma.in_(PLATAFORMAS_CAIXA),
+            c.plataforma.not_in(PLATAFORMAS_SEM_AUTO),
+            ~_sql_canal_sem_envio(),
             k.modo == MODO_AUTO,
             c.aguardando_resposta.is_(True),
             c.sem_resposta_necessaria.is_not(True),
@@ -5397,7 +5391,7 @@ async def manter_fila_kia(session: AsyncSession, *, limite: int = 25) -> dict[st
         except Exception as e:  # noqa: BLE001 — uma conversa não para a fila
             await session.rollback()
             logger.warning(
-                "atendimento_ia_fila_kia_falhou",
+                "atendimento_ia_fila_falhou",
                 conversa_id=str(conversa_id),
                 etapa="reconciliar",
                 err=type(e).__name__,
@@ -5426,19 +5420,22 @@ async def manter_fila_kia(session: AsyncSession, *, limite: int = 25) -> dict[st
         except Exception as e:  # noqa: BLE001 — uma conversa não para a fila
             await session.rollback()
             logger.warning(
-                "atendimento_ia_fila_kia_falhou",
+                "atendimento_ia_fila_falhou",
                 conversa_id=str(conversa_id),
                 etapa="cartao",
                 err=type(e).__name__,
             )
     if any(resumo.values()):
-        logger.info("atendimento_ia_fila_kia", **resumo)
+        logger.info("atendimento_ia_fila", **resumo)
     return resumo
 
 
-async def reavaliar_politicas_kia(session: AsyncSession, *, limite: int = 3) -> int:
+_CURSOR_POLITICAS: dict[str, tuple[datetime, UUID]] = {}
+
+
+async def reavaliar_politicas(session: AsyncSession, *, limite: int = 3) -> int:
     """Recupera só respostas literais aprovadas; nunca sugestão pedida/avaliada por pessoa."""
-    from app.services.atendimento import politicas_kia, sem_demanda
+    from app.services.atendimento import politicas_atendimento, sem_demanda
 
     s = get_settings()
     if not s.atendimento_ia_ativa or not s.atendimento_auto_ativo:
@@ -5446,43 +5443,67 @@ async def reavaliar_politicas_kia(session: AsyncSession, *, limite: int = 3) -> 
     c, k, r = AtendimentoConversa, AtendimentoCanal, AtendimentoRascunho
     outra = aliased(r)
     agora = datetime.now(UTC)
+    consulta = (
+        select(c.id, r.id, r.created_at)
+        .join(k, k.id == c.canal_id)
+        .join(r, r.conversa_id == c.id)
+        .where(
+            c.plataforma.in_(PLATAFORMAS_CAIXA),
+            c.plataforma.not_in(PLATAFORMAS_SEM_AUTO),
+            ~_sql_canal_sem_envio(),
+            k.modo == MODO_AUTO,
+            c.aguardando_resposta.is_(True),
+            c.sem_resposta_necessaria.is_not(True),
+            c.ia_pausada.is_(False),
+            c.atribuido_a.is_(None),
+            c.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
+            c.ultima_do_cliente_em.between(
+                agora - JANELA_PENDENTES, agora - ESPERA_SILENCIO
+            ),
+            or_(c.pode_enviar_ate.is_(None), c.pode_enviar_ate > agora),
+            r.status.in_((RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO)),
+            func.coalesce(r.prompt_versao, "") != PROMPT_VERSAO,
+            ~r.fatos.has_key(FATO_PEDIDA_PELA_TELA),
+            ~select(AtendimentoAvaliacao.id)
+            .where(AtendimentoAvaliacao.rascunho_id == r.id)
+            .exists(),
+            ~select(outra.id)
+            .where(outra.conversa_id == c.id, outra.created_at > r.created_at)
+            .exists(),
+        )
+    )
+    # Avança pelas páginas entre rodadas: dez turnos fora da política não
+    # podem esconder para sempre os casos de outra loja recém-ativada.
+    # É só um cursor de varredura, sem alterar rascunhos ou decisões da equipe.
+    chave = s.database_schema
+    cursor = _CURSOR_POLITICAS.get(chave)
+    pagina = consulta
+    if cursor is not None:
+        momento, ultimo_id = cursor
+        pagina = pagina.where(
+            or_(r.created_at < momento, and_(r.created_at == momento, r.id < ultimo_id))
+        )
     ids = (
         await session.execute(
-            select(c.id, r.id)
-            .join(k, k.id == c.canal_id)
-            .join(r, r.conversa_id == c.id)
-            .where(
-                c.integration_id == UUID(politicas_kia.INTEGRATION_KIA),
-                c.plataforma == "shopee",
-                c.canal == "chat",
-                k.modo == MODO_AUTO,
-                c.aguardando_resposta.is_(True),
-                c.sem_resposta_necessaria.is_not(True),
-                c.ia_pausada.is_(False),
-                c.atribuido_a.is_(None),
-                c.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
-                c.ultima_do_cliente_em.between(agora - JANELA_PENDENTES, agora - ESPERA_SILENCIO),
-                or_(c.pode_enviar_ate.is_(None), c.pode_enviar_ate > agora),
-                r.status.in_((RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO)),
-                func.coalesce(r.prompt_versao, "") != PROMPT_VERSAO,
-                ~r.fatos.has_key(FATO_PEDIDA_PELA_TELA),
-                ~select(AtendimentoAvaliacao.id)
-                .where(AtendimentoAvaliacao.rascunho_id == r.id)
-                .exists(),
-                ~select(outra.id)
-                .where(outra.conversa_id == c.id, outra.created_at > r.created_at)
-                .exists(),
-            )
-            .order_by(r.created_at.desc())
-            .limit(10)
+            pagina.order_by(r.created_at.desc(), r.id.desc()).limit(10)
         )
     ).all()
+    if not ids and cursor is not None:
+        _CURSOR_POLITICAS.pop(chave, None)
+        ids = (
+            await session.execute(
+                consulta.order_by(r.created_at.desc(), r.id.desc()).limit(10)
+            )
+        ).all()
     geradas = 0
-    for conversa_id, rascunho_id in ids:
+    for conversa_id, rascunho_id, criado_em in ids:
         try:
             if geradas >= limite:
                 break
-            conversa = await session.get(AtendimentoConversa, conversa_id, populate_existing=True)
+            _CURSOR_POLITICAS[chave] = (criado_em, rascunho_id)
+            conversa = await session.get(
+                AtendimentoConversa, conversa_id, populate_existing=True
+            )
             if conversa is None:
                 continue
             gatilho = await _ultima_do_cliente(session, conversa)
@@ -5492,27 +5513,42 @@ async def reavaliar_politicas_kia(session: AsyncSession, *, limite: int = 3) -> 
             if turno_incompleto(recentes, gatilho):
                 continue
             ctx = await contexto_svc.contexto_da_conversa(session, conversa)
-            fatos = _fatos_para_o_modelo(conversa, ctx, valores_das_lacunas(conversa, ctx))
+            fatos = _fatos_para_o_modelo(
+                conversa, ctx, valores_das_lacunas(conversa, ctx)
+            )
             regras = await _regras_aplicaveis(session, conversa)
             textos = [m.texto or "" for m in perguntas_pendentes(recentes, gatilho)]
+            fichas = await contexto_svc._seguro(
+                session,
+                "ficha_do_anuncio",
+                lambda conversa=conversa, recentes=recentes, textos=textos: (
+                    ficha_svc.fichas_da_conversa(session, conversa, recentes, textos)
+                ),
+                [],
+                conversa.id,
+            )
+            if fichas:
+                fatos["ficha_do_anuncio"] = fichas
             if not (
-                politicas_kia.resposta_aprovada(conversa, textos, fatos, regras)
+                politicas_atendimento.resposta_aprovada(conversa, textos, fatos, regras)
                 or sem_demanda.resposta_de_menu(conversa, recentes, gatilho, regras)
             ):
                 continue
-            meta = {"tipo": "politica_kia", "rascunho_anterior_id": str(rascunho_id)}
+            meta = {
+                "tipo": "politica_atendimento",
+                "rascunho_anterior_id": str(rascunho_id),
+            }
             novo = await gerar_rascunho(session, conversa, contexto_reavaliado=meta)
             geradas += int(novo is not None)
         except Exception as e:  # noqa: BLE001 — uma conversa não para a fila
             await session.rollback()
             logger.warning(
-                "atendimento_ia_fila_kia_falhou",
+                "atendimento_ia_fila_falhou",
                 conversa_id=str(conversa_id),
                 etapa="politica",
                 err=type(e).__name__,
             )
     return geradas
-
 
 def _sql_canal_sem_envio():
     """`constantes.motivo_canal_sem_envio` em SQL: o Zap, o chat de afiliado da

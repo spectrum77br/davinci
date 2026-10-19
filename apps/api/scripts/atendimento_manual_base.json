@@ -832,7 +832,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Pedido pago sem postagem.",
-      "faca": "Com pedido pago nos FATOS e ainda sem postagem, decida pelo que o cliente solicita. CONSULTA COMUM, sem justificativa de urgência ou pedido explícito de prioridade: 'Tranquilo, vocês conseguem enviar hoje?', 'Vocês enviam amanhã?', 'envia amanhã?' e 'quando será postado?' -> precisa_humano=false; motivo 'consulta de postagem, sem urgência explícita'. Esses exemplos perguntam sobre o envio normal: hoje/amanhã, por si só, não são urgência nem antecipação. Não é necessário saber ou confirmar a data para responder apenas o STATUS conhecido. Para TODOS esses exemplos, se os FATOS indicam preparação, a resposta aprovada é: 'Olá! O pedido {numero_pedido} está em preparação e ainda não foi postado. Quando for enviado, o código de rastreio e a previsão de entrega aparecerão no próprio pedido.' A resposta não depende de ação humana. Não acrescentar promessa de acompanhar, avisar depois, verificar ou priorizar. PESSOA (precisa_humano=true): urgência EXPLÍCITA ('é urgente', 'preciso receber até amanhã', 'preciso que envie hoje'), pedido EXPLÍCITO de prioridade/antecipação ('passe meu pedido na frente', 'antecipe o envio'), prazo de postagem já vencido, região não atendida, ou os FATOS não mostram pedido pago. Pergunta junto de necessidade de receber até certa data continua sendo urgência, motivo 'pedido urgente'. Nunca confirmar nem negar postagem em dia específico sem dado, nem prometer prioridade, prazo ou embalagem especial."
+      "faca": "Com pedido pago nos FATOS e ainda sem postagem, decida pelo que o cliente solicita. CONSULTA COMUM, sem justificativa de urgência ou pedido explícito de prioridade: 'Tranquilo, vocês conseguem enviar hoje?', 'Vocês enviam amanhã?', 'envia amanhã?' e 'quando será postado?' -> precisa_humano=false; motivo 'consulta de postagem, sem urgência explícita'. Esses exemplos perguntam sobre o envio normal: hoje/amanhã, por si só, não são urgência nem antecipação. Não é necessário saber ou confirmar a data para responder apenas o STATUS conhecido. Para TODOS esses exemplos, se os FATOS indicam preparação, a resposta aprovada é: 'Olá! O pedido {numero_pedido} está em preparação e ainda não foi postado. Quando for enviado, o código de rastreio e a previsão de entrega aparecerão no próprio pedido.' A resposta não depende de ação humana. Não acrescentar promessa de acompanhar, avisar depois, verificar ou priorizar. Consulta simples de previsão de entrega ou envio com o pedido já identificado: orientar seguir o prazo informado pela própria plataforma no pedido, sem inventar data e sem pedir novamente o número já ligado. Origem do envio só pode ser afirmada quando comprovada para essa loja e esse pedido ou anúncio; não copiar a origem de outra loja ou de produto equivalente. Sem origem comprovada, informar que ela não consta nos dados disponíveis do pedido; só essa ausência não exige pessoa. Essas consultas simples: precisa_humano=false. Não confundir rastreio ou etiqueta com postagem. PESSOA (precisa_humano=true): urgência EXPLÍCITA ('é urgente', 'preciso receber até amanhã', 'preciso que envie hoje'), pedido EXPLÍCITO de prioridade/antecipação ('passe meu pedido na frente', 'antecipe o envio'), prazo de postagem já vencido, região não atendida, ou os FATOS não mostram pedido pago. Pergunta junto de necessidade de receber até certa data continua sendo urgência, motivo 'pedido urgente'. Nunca confirmar nem negar postagem em dia específico sem dado, nem prometer prioridade, prazo ou embalagem especial. Vale para qualquer loja ativada e respeita os recursos da plataforma e do canal."
     },
     {
       "tipo": "categoria",
@@ -922,7 +922,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Originalidade, condição, homologação ou confiança.",
-      "faca": "Responder só com o que está no título (original, novo, lacrado, marca) e dizer que a compra é protegida pela plataforma. Caixa com outra marca, importadora, fabricação, homologação, conferência antes do envio: precisa_humano=true até o texto ser aprovado."
+      "faca": "Responder só com o que está no título próprio e atualizado do anúncio (original, novo, lacrado, marca) e dizer que a compra é protegida pela plataforma. Pergunta simples antes da compra se o produto é novo ou recondicionado: confirmar a condição somente quando explícita no título próprio; sem confirmação, pedir que confirme o modelo ou envie o card do anúncio, respeitando os recursos do canal, sem afirmar a condição e sem encaminhar só por faltar esse dado. Não usar outro anúncio nem o texto do comprador como prova. Produto recebido, reclamação, caixa com outra marca, importadora, fabricação, homologação ou conferência antes do envio: precisa_humano=true até o texto ser aprovado. Vale para qualquer loja ativada."
     },
     {
       "tipo": "categoria",
@@ -967,7 +967,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Apple ou outro produto.",
-      "faca": "Só com o dado do título ou da ficha do anúncio nos FATOS; sem dado ou divergindo, precisa_humano=true. Apple: condição, garantia e versão só com o título."
+      "faca": "Responder com o dado do título ou da ficha própria do anúncio nos FATOS. Pergunta simples sobre o tamanho da pulseira: informar somente o tamanho explícito na ficha própria ou o fato aprovado para o mesmo produto, identificado por vínculo vivo do catálogo da própria loja. A pulseira dos produtos Apple Watch aprovados pela equipe tem tamanho padrão; isso não escolhe P/M ou M/G nem confirma ajuste no braço. Sem fato aprovado explicitamente nos FATOS, não presumir que todo Apple Watch tenha essa pulseira. Sem identificar o modelo ou a variação, pedir que o cliente confirme o modelo ou envie o card do anúncio, sem encaminhar só por faltar esse dado. Divergência, medida ausente, compatibilidade ou outra especificação sem prova: precisa_humano=true. Apple: condição, garantia e versão só com o título. Vale para qualquer loja ativada, usando os dados da própria conversa."
     },
     {
       "tipo": "categoria",
@@ -1021,7 +1021,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Pedido de link, foto ou vídeo.",
-      "faca": "Sem link: dizer que o anúncio aparece buscando o nome dele na nossa loja e oferecer explicar o detalhe que o cliente quer ver. Foto ou vídeo extra: precisa_humano=true. Não dizer que as fotos são reais."
+      "faca": "Pedido genérico para ver como é o modelo: orientar consultar as fotos do próprio anúncio e perguntar qual detalhe deseja ver; precisa_humano=false. Sem identificar o anúncio, pedir modelo ou card, respeitando os recursos do canal, sem encaminhar só por faltar esse dado. Não prometer enviar foto nova nem afirmar que as fotos são reais, originais ou comprovam a condição. Sem link: dizer que o anúncio aparece buscando o nome dele na nossa loja e oferecer explicar o detalhe que o cliente quer ver. Foto adicional, ângulo ou detalhe ausente, vídeo, número de série ou divergência entre produto e anúncio: precisa_humano=true quando precisar obter material novo. Vale para qualquer loja ativada, usando o anúncio da própria conversa."
     },
     {
       "tipo": "categoria",
@@ -1066,7 +1066,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Cumprimento, card sem texto, número solto ou texto incompreensível.",
-      "faca": "Com card de produto ou pedido: perguntar em que podemos ajudar sobre aquele produto ou pedido. Sem card: pedir com educação que conte o que precisa. Não adivinhar o assunto, nunca reenviar o menu."
+      "faca": "Com card de produto ou pedido: perguntar em que podemos ajudar sobre aquele produto ou pedido. Sem card: pedir com educação que conte o que precisa. Não adivinhar o assunto, nunca reenviar o menu. Em toda loja ativada, processar cartão estruturado sem dúvida já acolhido, sem nova saudação. No menu real, opção NF sem pedido documental: informar que acompanha NF. Preservar modos, categorias, pausa e pessoa."
     },
     {
       "tipo": "categoria",
@@ -1121,51 +1121,6 @@
       "prioridade": 83,
       "quando": "Sempre (voz da loja).",
       "faca": "Falar como 'nós' e 'nossa equipe', sem nome de atendente. Não mandar o cliente ler a descrição sem dar a resposta."
-    },
-    {
-      "tipo": "categoria",
-      "categoria": "espec_outros",
-      "plataforma": "shopee",
-      "canal": "chat",
-      "prioridade": 50,
-      "quando": "Somente Kia, anúncio Apple Watch Series onze, item 22299473628: tamanho da pulseira.",
-      "faca": "Fato aprovado pela equipe somente para essa loja e esse anúncio: a pulseira tem tamanho padrão. Pergunta simples se é P/M ou M/G ou qual o tamanho da pulseira: precisa_humano=false; responder 'Olá! A pulseira deste modelo tem tamanho padrão.' Não escolher P/M ou M/G, inventar medida, ajuste ou compatibilidade. A opção do menu para falar com atendente não muda a dúvida pendente para garantia. Outra loja, anúncio, variação conflitante ou outra dúvida: seguir as regras gerais."
-    },
-    {
-      "tipo": "categoria",
-      "categoria": "pedido_link_midia",
-      "plataforma": "shopee",
-      "canal": "chat",
-      "prioridade": 50,
-      "quando": "Somente Kia, anúncio Uranyx Óculos Inteligentes AI, item 58269229175: foto do modelo.",
-      "faca": "Fato aprovado pela equipe somente para essa loja e esse anúncio: as fotos do anúncio mostram o modelo vendido. Pedido genérico para ver como é o modelo, sem detalhe ausente: precisa_humano=false; responder 'Olá! As fotos do anúncio mostram o modelo que você receberá. Você pode conferir os detalhes nas imagens do próprio anúncio.' Isso não promete enviar uma foto nova. Não afirmar autenticidade, originalidade ou condição do produto. Foto de ângulo ou detalhe ausente, foto adicional, vídeo, divergência, outra loja ou anúncio: seguir a regra geral, com pessoa quando for necessário obter material novo."
-    },
-    {
-      "tipo": "categoria",
-      "categoria": "prazo_envio",
-      "plataforma": "shopee",
-      "canal": "chat",
-      "prioridade": 50,
-      "quando": "Somente Kia, pedido pago do anúncio Apple Watch Series onze, item 22299473628: prazo e origem.",
-      "faca": "Com pedido desta conversa identificado nos FATOS, pago e ainda em preparação, consulta comum de previsão: orientar seguir o prazo informado pela Shopee no próprio pedido, sem inventar data. Se perguntar também de onde será enviado, fato aprovado pela equipe para essa loja e esse anúncio: o envio será feito de São Paulo. Só essas consultas: precisa_humano=false. Não pedir novamente o número de pedido que já está ligado. Não confundir código de rastreio ou etiqueta com postagem realizada. Urgência, prazo vencido, reclamação, postagem já feita, outra loja ou anúncio ou outro assunto: seguir as regras gerais."
-    },
-    {
-      "tipo": "categoria",
-      "categoria": "saudacao_ou_vaga",
-      "plataforma": "shopee",
-      "canal": "chat",
-      "prioridade": 50,
-      "quando": "Kia: cartão de produto ou pedido sem dúvida, já acolhido pelo robô.",
-      "faca": "Somente na loja Kia: quando o cliente enviou apenas cartão de produto ou pedido, não escreveu dúvida e o robô da loja já enviou uma mensagem automática depois do cartão, marcar como processado no DaVinci, sem enviar nova mensagem. Não confundir cartão com foto, vídeo, áudio ou arquivo. Nunca encerrar pergunta pendente, solicitação de pessoa, reclamação ou conversa pausada/atribuída. Histórico incompleto exige pessoa. Figurinha estruturada muito antiga, anterior ao cartão por sete dias ou mais, não cria dúvida sobre o produto novo. Nova mensagem do cliente reabre a conversa. Opção dois do menu, sem pergunta nem pedido identificado: informar apenas a política aprovada de que o pedido acompanha nota fiscal. Seleção ambígua de dois e cinco: informar a mesma política e pedir que detalhe a dúvida, sem inventar pedido de arquivo nem afirmar cobertura ou prazo de garantia."
-    },
-    {
-      "tipo": "categoria",
-      "categoria": "originalidade_condicao",
-      "plataforma": "shopee",
-      "canal": "chat",
-      "prioridade": 50,
-      "quando": "Somente Kia, antes da compra: pergunta simples se o produto é novo ou recondicionado.",
-      "faca": "Pergunta genérica se o produto é novo ou recondicionado: se o título do anúncio próprio e atualizado confirma novo, responder isso citando o título. Sem essa confirmação, pedir que confirme o modelo ou envie o card do anúncio por aqui, sem afirmar a condição. Só essa coleta de identificação pode sair sozinha. Não usar a resposta de outro cliente nem o texto do comprador como prova de que é novo. Produto recebido, reclamação, originalidade, homologação ou outra dúvida junto seguem as regras gerais."
     }
   ],
   "respostas_prontas": [

@@ -1,12 +1,14 @@
-"""Processamento local de cartão sem pergunta já acolhido pelo robô da Kia.
+"""Tratamento aprovado de entradas sem dúvida concreta em qualquer loja.
 
-Nenhum texto é gerado ou enviado. A regra exige autorização literal do
-Manual e a conversa continua reabrindo quando chega nova fala do cliente.
+O processamento de cartões não gera nem envia texto. O menu retorna apenas
+a resposta literal aprovada; o chamador mantém as travas de envio. A regra
+exige o Manual vigente, e uma nova fala do cliente reabre a conversa.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -25,22 +27,25 @@ from app.models import (
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
+    CANAIS_POR_PLATAFORMA,
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
     MODO_AUTO,
     MSG_FALHOU,
     ORIGEM_AUTO,
     ORIGEM_NOTA,
+    PLATAFORMAS_SEM_AUTO,
     RASCUNHO_BLOQUEADO,
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
     e_cartao_do_comprador,
     e_mensagem_automatica,
+    motivo_canal_sem_envio,
 )
 from app.services.atendimento.pendente import resposta_de_pessoa
 
-REGRA_QUANDO = "Kia: cartão de produto ou pedido sem dúvida, já acolhido pelo robô."
-REGRA_FACA = (
+LEGADO_QUANDO = "Kia: cartão de produto ou pedido sem dúvida, já acolhido pelo robô."
+LEGADO_FACA = (
     "Somente na loja Kia: quando o cliente enviou apenas cartão de produto ou pedido, "
     "não escreveu dúvida e o robô da loja já enviou uma mensagem automática depois do "
     "cartão, marcar como processado no DaVinci, sem enviar nova mensagem. Não confundir "
@@ -53,22 +58,47 @@ REGRA_FACA = (
     "ambígua de dois e cinco: informar a mesma política e pedir que detalhe a dúvida, "
     "sem inventar pedido de arquivo nem afirmar cobertura ou prazo de garantia."
 )
+REGRA_QUANDO = "Cumprimento, card sem texto, número solto ou texto incompreensível."
+REGRA_FACA = (
+    "Com card de produto ou pedido: perguntar em que podemos ajudar sobre aquele produto ou "
+    "pedido. Sem card: pedir com educação que conte o que precisa. Não adivinhar o assunto, "
+    "nunca reenviar o menu. "
+    "Em toda loja ativada, processar cartão estruturado sem dúvida já acolhido, sem nova "
+    "saudação. No menu real, opção NF sem pedido documental: informar que acompanha NF. "
+    "Preservar modos, categorias, pausa e pessoa."
+)
 CHAVE_AUDITORIA = "processamento_sem_demanda"
 MOTIVO = "cartao_sem_pergunta_ja_acolhido"
 INTERVALO_FIGURINHA_ANTIGA = timedelta(days=7)
 MOTIVO_CARD_ANTIGO = "cliente mandou só foto/vídeo/arquivo — a IA não vê anexo"
 
 
-def resposta_de_menu(conversa: Any, mensagens: Sequence[Any], gatilho: Any, regras: list[Any]):
+@dataclass(frozen=True)
+class RespostaEntrada:
+    categoria: str
+    texto: str
+    fato: dict[str, Any]
+
+
+def _canal_compativel(conversa: Any) -> bool:
+    """Só os canais de atendimento existentes e habilitáveis para automático."""
+    plataforma, canal = conversa.plataforma, conversa.canal
+    return (
+        plataforma not in PLATAFORMAS_SEM_AUTO
+        and canal in CANAIS_POR_PLATAFORMA.get(plataforma, ())
+        and motivo_canal_sem_envio(canal, plataforma, getattr(conversa, "dados", None)) is None
+    )
+
+
+def resposta_de_menu(
+    conversa: Any, mensagens: Sequence[Any], gatilho: Any, regras: list[Any]
+) -> RespostaEntrada | None:
     """A seleção de assunto não é pedido de documento nem confirmação de garantia."""
-    from app.services.atendimento import ia, politicas_kia
-    from app.services.atendimento.politicas_kia import RespostaKia
+    from app.services.atendimento import ia
     from app.services.atendimento.validador import plano_de
 
     if (
-        str(conversa.integration_id) != politicas_kia.INTEGRATION_KIA
-        or conversa.plataforma != "shopee"
-        or conversa.canal != "chat"
+        not _canal_compativel(conversa)
         or conversa.pedido_marketplace
         or getattr(mensagens, "turno_incompleto", False)
     ):
@@ -97,6 +127,7 @@ def resposta_de_menu(conversa: Any, mensagens: Sequence[Any], gatilho: Any, regr
         for m in mensagens
         if m.autor == AUTOR_LOJA
         and m.status != MSG_FALHOU
+        and getattr(m, "origem", None) != ORIGEM_NOTA
         and _momento(m) is not None
         and _momento(gatilho) is not None
         and _momento(m) <= _momento(gatilho)
@@ -109,7 +140,7 @@ def resposta_de_menu(conversa: Any, mensagens: Sequence[Any], gatilho: Any, regr
     texto = "Olá! Os pedidos acompanham nota fiscal, que vai junto com o produto."
     if selecao not in {"2", "dois"}:
         texto += " Conte também qual é a sua dúvida sobre o produto para que possamos ajudar."
-    return RespostaKia(
+    return RespostaEntrada(
         categoria="saudacao_ou_vaga",
         texto=texto,
         fato={
@@ -120,23 +151,31 @@ def resposta_de_menu(conversa: Any, mensagens: Sequence[Any], gatilho: Any, regr
     )
 
 
+def _campo(obj: Any, nome: str, padrao: Any = None) -> Any:
+    return obj.get(nome, padrao) if isinstance(obj, Mapping) else getattr(obj, nome, padrao)
+
+
 def regra_especifica_kia(regra: Any) -> bool:
-    """Identifica o escopo mesmo após edição, sem vazar a regra para outra loja."""
+    """Identifica somente o opt-in legado para sua retirada e isolamento."""
     return (
-        getattr(regra, "tipo", None) == "categoria"
-        and getattr(regra, "categoria", None) == "saudacao_ou_vaga"
-        and getattr(regra, "plataforma", None) == "shopee"
-        and getattr(regra, "canal", None) == "chat"
-        and getattr(regra, "quando", None) == REGRA_QUANDO
+        _campo(regra, "tipo") == "categoria"
+        and _campo(regra, "categoria") == "saudacao_ou_vaga"
+        and _campo(regra, "plataforma") == "shopee"
+        and _campo(regra, "canal") == "chat"
+        and _campo(regra, "quando") == LEGADO_QUANDO
     )
 
 
 def regra_aprovada(regra: Any) -> bool:
     """A autorização é exata; edição no Manual desliga o processamento."""
     return (
-        regra_especifica_kia(regra)
-        and getattr(regra, "ativa", False)
-        and getattr(regra, "faca", None) == REGRA_FACA
+        _campo(regra, "tipo") == "categoria"
+        and _campo(regra, "categoria") == "saudacao_ou_vaga"
+        and _campo(regra, "plataforma") is None
+        and _campo(regra, "canal") is None
+        and _campo(regra, "quando") == REGRA_QUANDO
+        and _campo(regra, "ativa", False)
+        and _campo(regra, "faca") == REGRA_FACA
     )
 
 
@@ -256,13 +295,13 @@ async def processar(
     session: AsyncSession,
     conversa_id: UUID,
     *,
-    canal_autorizado_id: UUID,
+    canal_autorizado_id: UUID | None = None,
     agora: datetime | None = None,
     turno_esperado: datetime | None = None,
 ) -> bool:
     """Marca localmente e commita; em no-op libera as travas sem mudar a conversa.
 
-    Quem chama limita o canal explicitamente aprovado. A linha da conversa
+    O canal atual e sua categoria precisam estar em automático. A linha da conversa
     trava o sync/envio; a trava de sugestão e o FOR UPDATE do rascunho
     preservam avaliação humana e a geração concorrente. Não consulta rede.
     """
@@ -285,9 +324,8 @@ async def processar(
         )
         if (
             conversa is None
-            or conversa.canal_id != canal_autorizado_id
-            or conversa.plataforma != "shopee"
-            or conversa.canal != "chat"
+            or (canal_autorizado_id is not None and conversa.canal_id != canal_autorizado_id)
+            or not _canal_compativel(conversa)
             or conversa.ia_pausada
             or conversa.atribuido_a is not None
             or conversa.situacao in (CONVERSA_FECHADA, CONVERSA_BLOQUEADA)
@@ -300,18 +338,19 @@ async def processar(
         ):
             return False
         canal = await session.get(AtendimentoCanal, conversa.canal_id, populate_existing=True)
-        if canal is None or canal.modo != MODO_AUTO:
+        if (
+            canal is None
+            or canal.modo != MODO_AUTO
+            or "saudacao_ou_vaga" not in (canal.auto_categorias or [])
+            or canal.integration_id != conversa.integration_id
+            or canal.plataforma != conversa.plataforma
+            or canal.canal != conversa.canal
+        ):
             return False
         regras = await ia._regras_aplicaveis(session, conversa)
         autorizacoes = [r for r in regras if regra_aprovada(r)]
-        saudacoes = [
-            r for r in regras if r.tipo == "categoria" and r.categoria == "saudacao_ou_vaga"
-        ]
-        gerais = [r for r in saudacoes if r.plataforma is None and r.canal is None]
-        if (
-            len(autorizacoes) != 1
-            or len(saudacoes) != 2
-            or not ia._regra_basica_igual(gerais, "saudacao_ou_vaga", ia._REGRA_CARTAO_APROVADA)
+        if len(autorizacoes) != 1 or not ia._regra_basica_igual(
+            regras, "saudacao_ou_vaga", ia._REGRA_CARTAO_APROVADA
         ):
             return False
         if await ia._pausa_humana_ate(session, conversa, agora=agora) is not None:

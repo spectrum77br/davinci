@@ -10,12 +10,14 @@ from sqlalchemy import func, select
 
 from app.models import (
     AtendimentoAvaliacao,
+    AtendimentoCanal,
     AtendimentoMensagem,
     AtendimentoRascunho,
     AtendimentoRegra,
+    IntegrationPlatform,
 )
-from app.services.atendimento import gravar, ia, politicas_kia, sem_demanda
-from app.services.atendimento.constantes import ETIQUETA_AG_CANCELAMENTO
+from app.services.atendimento import gravar, ia, sem_demanda
+from app.services.atendimento.constantes import ETIQUETA_AG_CANCELAMENTO, ORIGEM_NOTA
 from tests.test_atendimento_ia import (
     PEDIDO_MKT,
     _conversa,
@@ -101,29 +103,44 @@ def test_pergunta_ja_respondida_nao_contamina_visita_nova_so_com_card():
     assert sem_demanda.cartao_ja_acolhido([pergunta, resposta, card, bot], card)
 
 
-async def _cenario(db, make_user, ia_ligada, monkeypatch):
+async def _cenario(
+    db,
+    make_user,
+    ia_ligada,
+    monkeypatch,
+    *,
+    plataforma="shopee",
+    canal="chat",
+    modo="auto",
+    categorias=("saudacao_ou_vaga",),
+    criar_regras=True,
+    externo_id="conv-1",
+):
     ia_ligada.atendimento_auto_ativo = True
     conversa = await _conversa(
-        db, make_user, pedido=None, modo="auto", auto_categorias=["saudacao_ou_vaga"]
+        db,
+        make_user,
+        plataforma=plataforma,
+        canal=canal,
+        platform=IntegrationPlatform(plataforma),
+        pedido=None,
+        modo=modo,
+        auto_categorias=list(categorias),
+        externo_id=externo_id,
     )
-    monkeypatch.setattr(politicas_kia, "INTEGRATION_KIA", str(conversa.integration_id))
-    geral = AtendimentoRegra(
+    aprovada = AtendimentoRegra(
         tipo="categoria",
         categoria="saudacao_ou_vaga",
-        quando="Saudação ou cartão",
-        faca=ia._REGRA_CARTAO_APROVADA,
-        ativa=True,
-    )
-    especifica = AtendimentoRegra(
-        tipo="categoria",
-        categoria="saudacao_ou_vaga",
-        plataforma="shopee",
-        canal="chat",
         quando=sem_demanda.REGRA_QUANDO,
         faca=sem_demanda.REGRA_FACA,
         ativa=True,
     )
-    db.add_all([geral, especifica])
+    if criar_regras:
+        db.add(aprovada)
+    else:
+        aprovada = await db.scalar(
+            select(AtendimentoRegra).where(AtendimentoRegra.quando == sem_demanda.REGRA_QUANDO)
+        )
     card, _ = await gravar.gravar_mensagem(
         db,
         conversa,
@@ -132,7 +149,11 @@ async def _cenario(db, make_user, ia_ligada, monkeypatch):
         texto=None,
         tipo="produto",
         enviada_em=datetime.now(UTC) - timedelta(minutes=5),
-        payload={"message_type": "item", "content": {"item_id": 123}},
+        payload=(
+            {"type": "PRODUCT_CARD", "content": {"product_id": "123"}}
+            if plataforma == "tiktok"
+            else {"message_type": "item", "content": {"item_id": 123}}
+        ),
     )
     await gravar.gravar_mensagem(
         db,
@@ -145,7 +166,7 @@ async def _cenario(db, make_user, ia_ligada, monkeypatch):
         enviada_em=datetime.now(UTC) - timedelta(minutes=4),
     )
     await db.commit()
-    return conversa, card, especifica
+    return conversa, card, aprovada
 
 
 async def test_processa_sem_modelo_sem_envio_e_nova_pergunta_reabre(
@@ -216,7 +237,10 @@ async def test_manual_alterado_ou_ambiguo_desliga_processamento(
         regra.quando += " Outro caso."
     elif alteracao == "geral_editada":
         geral = await db.scalar(
-            select(AtendimentoRegra).where(AtendimentoRegra.plataforma.is_(None))
+            select(AtendimentoRegra).where(
+                AtendimentoRegra.plataforma.is_(None),
+                AtendimentoRegra.categoria == "saudacao_ou_vaga",
+            )
         )
         geral.faca = "Sempre mandar para pessoa."
     else:
@@ -317,3 +341,162 @@ async def test_visita_nova_so_com_card_apos_figurinha_de_junho_e_pedido_antigo(
     assert await sem_demanda.processar(db, conversa.id, canal_autorizado_id=conversa.canal_id)
     assert not conversa.aguardando_resposta and conversa.sem_resposta_necessaria
     assert modelo.chamadas == [] and envios == []
+
+
+@pytest.mark.parametrize(
+    ("plataforma", "payload"),
+    [
+        ("shopee", {"message_type": "order", "content": {"order_sn": "123"}}),
+        ("tiktok", {"type": "PRODUCT_CARD", "content": {"product_id": "123"}}),
+        ("tiktok", {"type": "ORDER_CARD", "content": {"order_id": "123"}}),
+    ],
+)
+async def test_mesma_regra_global_processa_lojas_distintas_e_cartoes_reconhecidos(
+    db, make_user, ia_ligada, monkeypatch, modelo, envios, plataforma, payload
+):
+    primeira, _, regra = await _cenario(db, make_user, ia_ligada, monkeypatch)
+    segunda, card, mesma_regra = await _cenario(
+        db,
+        make_user,
+        ia_ligada,
+        monkeypatch,
+        plataforma=plataforma,
+        criar_regras=False,
+        externo_id="outra-loja",
+    )
+    card.payload = payload
+    await db.commit()
+    assert primeira.integration_id != segunda.integration_id
+    assert regra.id == mesma_regra.id
+    for conversa in (primeira, segunda):
+        assert await sem_demanda.processar(db, conversa.id)
+        assert conversa.sem_resposta_necessaria and not conversa.aguardando_resposta
+        assert conversa.dados[sem_demanda.CHAVE_AUDITORIA]["regra_id"] == str(regra.id)
+    assert modelo.chamadas == [] and envios == []
+
+
+@pytest.mark.parametrize(
+    ("modo", "categorias"),
+    [("observar", ["saudacao_ou_vaga"]), ("copiloto", ["saudacao_ou_vaga"]), ("auto", [])],
+)
+async def test_ativacao_e_allowlist_de_cada_canal_sao_obrigatorias(
+    db, make_user, ia_ligada, monkeypatch, modo, categorias, modelo, envios
+):
+    conversa, _, _ = await _cenario(db, make_user, ia_ligada, monkeypatch)
+    canal = await db.get(AtendimentoCanal, conversa.canal_id)
+    canal.modo = modo
+    canal.auto_categorias = categorias
+    await db.commit()
+    assert not await sem_demanda.processar(db, conversa.id)
+    assert not conversa.sem_resposta_necessaria
+    assert modelo.chamadas == [] and envios == []
+
+
+@pytest.mark.parametrize("protecao", ["afiliado", "canal_incompativel", "canal_desvinculado"])
+async def test_ativacao_nao_contorna_capacidade_do_canal(
+    db, make_user, ia_ligada, monkeypatch, protecao
+):
+    conversa, _, _ = await _cenario(db, make_user, ia_ligada, monkeypatch)
+    if protecao == "afiliado":
+        conversa.dados = {"afiliado": True}
+    elif protecao == "canal_incompativel":
+        conversa.canal = "pergunta"
+    else:
+        conversa.integration_id = None
+    await db.commit()
+    assert not await sem_demanda.processar(db, conversa.id)
+    assert not conversa.sem_resposta_necessaria
+
+
+def _regras_de_menu():
+    return [
+        SimpleNamespace(
+            id=uuid4(),
+            tipo="categoria",
+            categoria=categoria,
+            plataforma=None,
+            canal=None,
+            quando=quando,
+            faca=faca,
+            ativa=True,
+        )
+        for categoria, quando, faca in (
+            ("saudacao_ou_vaga", sem_demanda.REGRA_QUANDO, sem_demanda.REGRA_FACA),
+            ("nota_fiscal", "Nota fiscal", ia._REGRA_NF_APROVADA),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("plataforma", "canal"), [("shopee", "chat"), ("tiktok", "chat"), ("ml", "pos_venda")]
+)
+@pytest.mark.parametrize("selecao", ["2", "2i5"])
+def test_nota_fiscal_por_menu_reconhecido_nao_depende_da_loja(plataforma, canal, selecao):
+    regras = _regras_de_menu()
+    menu = _mensagem("loja", f"{MENU}\n2 - Nota Fiscal\n5 - Garantia", payload={}, minutos=6)
+    gatilho = _mensagem(texto=selecao, tipo="texto", payload={})
+    ids = [uuid4(), uuid4()]
+    for integration_id in ids:
+        conversa = SimpleNamespace(
+            integration_id=integration_id,
+            plataforma=plataforma,
+            canal=canal,
+            pedido_marketplace=None,
+        )
+        resposta = sem_demanda.resposta_de_menu(conversa, [menu, gatilho], gatilho, regras)
+        assert isinstance(resposta, sem_demanda.RespostaEntrada)
+        assert resposta.categoria == "saudacao_ou_vaga"
+        assert "Os pedidos acompanham nota fiscal" in resposta.texto
+        assert ("qual é a sua dúvida" in resposta.texto) is (selecao == "2i5")
+        assert resposta.fato["regra_id"] == str(regras[0].id)
+        assert resposta.fato["integration_id"] == str(integration_id)
+
+
+@pytest.mark.parametrize(
+    "protecao",
+    [
+        "pedido_identificado",
+        "pergunta_real",
+        "manual_editado",
+        "sem_menu",
+        "historico_incompleto",
+        "nota_interna",
+    ],
+)
+def test_nota_fiscal_generica_nao_substitui_demanda_nem_depende_de_menu_inferido(protecao):
+    conversa = SimpleNamespace(
+        integration_id=uuid4(), plataforma="tiktok", canal="chat", pedido_marketplace=None
+    )
+    regras = _regras_de_menu()
+    menu = _mensagem("loja", f"{MENU}\n2 - Nota Fiscal\n5 - Garantia", payload={}, minutos=6)
+    gatilho = _mensagem(texto="2", tipo="texto", payload={})
+    mensagens = [menu, gatilho]
+    if protecao == "pedido_identificado":
+        conversa.pedido_marketplace = "pedido-123"
+    elif protecao == "pergunta_real":
+        mensagens.insert(
+            0, _mensagem(texto="Pode mandar a segunda via da nota?", payload={}, minutos=7)
+        )
+    elif protecao == "manual_editado":
+        regras[0].faca += " Outra política."
+    elif protecao == "sem_menu":
+        menu.texto = "Olá!"
+    elif protecao == "historico_incompleto":
+        mensagens = ia.HistoricoMensagens(mensagens, turno_incompleto=True)
+    else:
+        menu.origem = ORIGEM_NOTA
+    assert sem_demanda.resposta_de_menu(conversa, mensagens, gatilho, regras) is None
+
+
+def test_opt_in_global_exige_regra_literal_e_legado_kia_nao_autoriza():
+    regra = _regras_de_menu()[0]
+    assert sem_demanda.regra_aprovada(regra)
+    assert sem_demanda.regra_aprovada(vars(regra))
+    regra.categoria = "saudacao_ou_vaga"
+    regra.plataforma = "shopee"
+    regra.canal = "chat"
+    regra.quando = sem_demanda.LEGADO_QUANDO
+    regra.faca = sem_demanda.LEGADO_FACA
+    assert sem_demanda.regra_especifica_kia(regra)
+    assert sem_demanda.regra_especifica_kia(vars(regra))
+    assert not sem_demanda.regra_aprovada(regra)

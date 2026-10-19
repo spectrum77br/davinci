@@ -14,9 +14,9 @@ from app.services.atendimento import politicas_kia as politica
 @pytest.fixture
 def regras():
     base = json.loads(
-        (Path(__file__).parents[1] / "scripts/atendimento_manual_base.json").read_text()
+        (Path(__file__).parent / "fixtures/politicas_kia_regras_historicas.json").read_text()
     )
-    return [dict(r, id=f"regra-{i}", ativa=True) for i, r in enumerate(base["regras"])]
+    return [dict(r, id=f"regra-{i}", ativa=True) for i, r in enumerate(base)]
 
 
 def _conversa(item=politica.ANUNCIO_WATCH, **campos):

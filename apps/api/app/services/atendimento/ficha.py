@@ -119,7 +119,7 @@ from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.models import AtendimentoConversa, AtendimentoMensagem, Listing, ProductLink
+from app.models import AtendimentoConversa, AtendimentoMensagem, Listing, Product, ProductLink
 from app.models.enums import IntegrationPlatform, ListingStatus
 from app.redis_client import redis
 from app.services.atendimento import validador
@@ -149,6 +149,9 @@ MAX_CHARS_SEGUNDA_FICHA = 1_000
 MIN_ATRIBUTOS_NO_CORTE = 5
 # Linhas do catálogo lidas por anúncio (a da loja, a ativa, a mais nova).
 MAX_LINHAS_CATALOGO = 3
+# Nunca cortar o conjunto de identidades: ocultar uma variação poderia
+# autorizar um fato que não vale para todos os produtos do anúncio.
+MAX_PRODUTOS_VINCULADOS = 12
 
 # ── Frescor ───────────────────────────────────────────────────────────────
 
@@ -271,6 +274,7 @@ class Anuncio:
     # conversa, o do item do pedido): mostra ao modelo de que anúncio é a
     # ficha e confere a linha do catálogo (`mesmo_titulo`).
     titulo: str | None = None
+    variation_id: str | None = None
 
 
 def plataforma_do_catalogo(plataforma: str | None) -> IntegrationPlatform | None:
@@ -296,7 +300,13 @@ def anuncios_da_conversa(
         return []
     saida: list[Anuncio] = []
 
-    def _por(item: Any, de_onde: str, titulo: Any = None) -> None:
+    def _variacao(item: dict) -> str | None:
+        for chave in ("variation_id", "model_id", "sku_id"):
+            if ident := _texto(item.get(chave)):
+                return ident
+        return None
+
+    def _por(item: Any, de_onde: str, titulo: Any = None, variation_id: str | None = None) -> None:
         item_id = _texto(item)
         if not item_id or len(item_id) > 64:
             return
@@ -304,25 +314,38 @@ def anuncios_da_conversa(
         for i, a in enumerate(saida):
             if a.item_id == item_id:
                 if a.titulo is None and titulo:
-                    saida[i] = Anuncio(item_id, a.de_onde, titulo)
+                    saida[i] = Anuncio(item_id, a.de_onde, titulo, a.variation_id)
                 return
-        saida.append(Anuncio(item_id, de_onde, titulo))
+        saida.append(Anuncio(item_id, de_onde, titulo, variation_id))
 
     for m in reversed(list(mensagens)):
         if m.autor != AUTOR_CLIENTE:
             continue
         for anexo in _lista(m.anexos):
             if anexo.get("tipo") == _TIPO_PRODUTO:
-                _por(anexo.get("item_id"), DE_ONDE_CARTAO, anexo.get("titulo"))
+                _por(anexo.get("item_id"), DE_ONDE_CARTAO, anexo.get("titulo"), _variacao(anexo))
     dados = _dict(conversa.dados)
     produto = _dict(dados.get("produto"))
     de_onde = DE_ONDE_PERGUNTA if conversa.canal == CANAL_PERGUNTA else DE_ONDE_ANUNCIO
     titulo = conversa.anuncio_titulo or produto.get("titulo")
-    _por(conversa.anuncio_id, de_onde, titulo)
-    _por(dados.get("item_id"), de_onde, titulo)
-    _por(produto.get("item_id"), de_onde, produto.get("titulo"))
+    variacao_produto = _variacao(produto)
+    _por(
+        conversa.anuncio_id,
+        de_onde,
+        titulo,
+        variacao_produto if _texto(produto.get("item_id")) == _texto(conversa.anuncio_id) else None,
+    )
+    _por(
+        dados.get("item_id"),
+        de_onde,
+        titulo,
+        variacao_produto
+        if _texto(produto.get("item_id")) == _texto(dados.get("item_id"))
+        else None,
+    )
+    _por(produto.get("item_id"), de_onde, produto.get("titulo"), _variacao(produto))
     for item in _lista(_dict(dados.get("pedido_mkt")).get("itens")):
-        _por(item.get("item_id"), DE_ONDE_PEDIDO, item.get("titulo"))
+        _por(item.get("item_id"), DE_ONDE_PEDIDO, item.get("titulo"), _variacao(item))
     return saida
 
 
@@ -947,7 +970,13 @@ async def _do_catalogo(
     return list(
         (
             await session.execute(
-                select(Listing.title, Listing.description, Listing.raw_data, Listing.platform)
+                select(
+                    Listing.title,
+                    Listing.description,
+                    Listing.raw_data,
+                    Listing.platform,
+                    Listing.integration_id,
+                )
                 .where(
                     Listing.platform == plataforma,
                     Listing.external_id == item_id,
@@ -963,6 +992,51 @@ async def _do_catalogo(
             )
         ).all()
     )
+
+
+async def _produtos_vinculados(
+    session: AsyncSession,
+    plataforma: IntegrationPlatform,
+    item_id: str,
+    integration_id: UUID | None,
+    variation_id: str | None,
+) -> list[dict]:
+    """Identidade do anúncio PRÓPRIO, nunca inferida do título ou do comprador.
+
+    Sem variação selecionada, o conjunto completo permite verificar se um
+    fato aprovado vale para todas as variações. Seleção desconhecida ou
+    ambígua não volta ao conjunto inteiro. Conjunto grande também não é
+    truncado: a ficha continua, mas sem identidade para um atalho literal.
+    """
+    if integration_id is None:
+        return []
+    consulta = (
+        select(ProductLink.product_id, Product.sku, ProductLink.variation_id)
+        .join(Product, Product.id == ProductLink.product_id)
+        .where(
+            ProductLink.integration_id == integration_id,
+            ProductLink.platform == plataforma,
+            ProductLink.external_id == item_id,
+            ProductLink.morto_desde.is_(None),
+        )
+    )
+    if variation_id is not None:
+        consulta = consulta.where(ProductLink.variation_id == variation_id)
+    linhas = (
+        await session.execute(
+            consulta.distinct()
+            .order_by(ProductLink.product_id, Product.sku, ProductLink.variation_id)
+            .limit(MAX_PRODUTOS_VINCULADOS + 1)
+        )
+    ).all()
+    if len(linhas) > MAX_PRODUTOS_VINCULADOS or (
+        variation_id is not None and len({r.product_id for r in linhas}) != 1
+    ):
+        return []
+    return [
+        {"product_id": str(r.product_id), "sku": r.sku, "variation_id": r.variation_id}
+        for r in linhas
+    ]
 
 
 async def _do_mesmo_produto(
@@ -1042,6 +1116,7 @@ async def ficha_do_anuncio(
     integration_id: UUID | None = None,
     *,
     titulo: str | None = None,
+    variation_id: str | None = None,
     palavras: frozenset[str] = frozenset(),
     loja: Busca | None = None,
 ) -> dict | None:
@@ -1056,6 +1131,12 @@ async def ficha_do_anuncio(
     # Import tardio: `ficha_loja` importa este módulo.
     from app.services.atendimento import ficha_loja
 
+    async def _propria(ficha: dict) -> dict:
+        produtos = await _produtos_vinculados(
+            session, plataforma, item_id, integration_id, variation_id
+        )
+        return {**ficha, "produtos_vinculados": produtos} if produtos else ficha
+
     fresca = await _ficha_fresca(plataforma, integration_id, item_id)
     if fresca is not None and loja is not None and ficha_loja.falta_descricao(plataforma, fresca):
         # A fresca do ML (enriquecimento) não tem a descrição: só ela, da loja.
@@ -1064,21 +1145,21 @@ async def ficha_do_anuncio(
     if fresca is not None:
         ficha = _ficha_da_loja(fresca, plataforma, titulo, palavras)
         if ficha is not None:
-            return ficha
-    for nome, descricao, raw, _plat in await _do_catalogo(
+            return await _propria(ficha)
+    for nome, descricao, raw, _plat, integracao in await _do_catalogo(
         session, plataforma, item_id, integration_id
     ):
         if titulo and not mesmo_titulo(nome, titulo):
             continue
         ficha = montar_ficha(titulo or nome, descricao, raw, palavras=palavras)
         if ficha is not None:
-            return ficha
+            return await _propria(ficha) if integracao == integration_id else ficha
     if fresca is None and loja is not None:
         # Sem fresca nem catálogo válido: o anúncio direto da loja da conversa.
         bruta = await ficha_loja.ficha_da_loja(session, loja, plataforma, item_id)
         ficha = _ficha_da_loja(bruta, plataforma, titulo, palavras) if bruta else None
         if ficha is not None:
-            return ficha
+            return await _propria(ficha)
     for nome, descricao, raw, plat in await _do_mesmo_produto(session, plataforma, item_id):
         ficha = montar_ficha(nome, descricao, raw, palavras=palavras)
         if ficha is None:
@@ -1121,6 +1202,7 @@ async def fichas_da_conversa(
             anuncio.item_id,
             conversa.integration_id,
             titulo=anuncio.titulo,
+            variation_id=anuncio.variation_id,
             palavras=palavras,
             loja=loja,
         )
