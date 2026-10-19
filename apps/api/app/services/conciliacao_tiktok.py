@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -196,15 +196,56 @@ def _zerada_sem_pedido(m: dict[str, Any]) -> bool:
     )
 
 
+def valor_do_repasse(
+    statement: dict[str, Any],
+    pagamento: dict[str, Any] | None,
+    grupo: list[dict[str, Any]] | None,
+) -> tuple[Decimal, dict[str, Any]]:
+    """19/10 (revisão): o repasse era gravado com o valor do EXTRATO, não com o que a
+    TikTok PAGOU — se ela pagasse menos, o dia fechava "saldo bate" (a conta era
+    comparada com ela mesma). O valor pago vem na API de pagamentos (`amount.value`).
+    Um pagamento cobre um ou mais extratos (fim de semana pago junto): cada extrato leva
+    o próprio total e o ÚLTIMO (pela hora do extrato) leva o que falta pra fechar o
+    valor pago — a diferença, se houver, aparece nesse dia como "saldo não bate".
+    Devolve (valor do repasse deste extrato, o que foi conferido)."""
+    proprio = _d(statement.get("settlement_amount"))
+    amount = (pagamento or {}).get("amount")
+    valor_pago: Decimal | None = None
+    if isinstance(amount, dict) and amount.get("value") not in (None, ""):
+        try:
+            valor_pago = Decimal(str(amount["value"])).quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError):
+            valor_pago = None
+    if valor_pago is None:
+        return proprio, {"_sem_valor_pago": True}
+    extratos = [s for s in (grupo or []) if isinstance(s, dict) and s.get("id")]
+    if not any(str(s.get("id")) == str(statement.get("id")) for s in extratos):
+        extratos.append(statement)
+    extratos.sort(key=lambda s: (int(s.get("statement_time") or 0), str(s.get("id") or "")))
+    soma = sum((_d(s.get("settlement_amount")) for s in extratos), ZERO)
+    info = {
+        "_valor_pago": str(valor_pago),
+        "_soma_extratos": str(soma),
+        "_diferenca_pagamento": str(valor_pago - soma),
+        "_extratos_do_pagamento": [str(s.get("id")) for s in extratos],
+    }
+    ultimo = str(extratos[-1].get("id") or "") == str(statement.get("id") or "")
+    return (proprio + (valor_pago - soma)) if ultimo else proprio, info
+
+
 def repasse_para_movimento(
-    statement: dict[str, Any], pagamento: dict[str, Any] | None, *, ordem: int
+    statement: dict[str, Any],
+    pagamento: dict[str, Any] | None,
+    *,
+    ordem: int,
+    grupo: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     quando = _ancora(statement)
     if quando is None:
         return None
     sid = str(statement.get("id") or "")
     pid = str(statement.get("payment_id") or (pagamento or {}).get("id") or "") or None
-    valor = _d(statement.get("settlement_amount"))
+    valor, conferido = valor_do_repasse(statement, pagamento, grupo)
     conta = (pagamento or {}).get("bank_account")
     pago_em = _epoch((pagamento or {}).get("paid_time") or statement.get("payment_time"))
     descricao = "Repasse pro banco"
@@ -212,6 +253,13 @@ def repasse_para_movimento(
         descricao += f" {conta}"
     if pago_em:
         descricao += f" · pago {pago_em.astimezone(BRT):%d/%m %H:%M}"
+    diferenca = Decimal(str(conferido.get("_diferenca_pagamento") or "0"))
+    if diferenca != ZERO and valor != _d(statement.get("settlement_amount")):
+        # a linha que carrega a diferença (o último extrato do pagamento) diz o porquê
+        descricao += (
+            f" · a TikTok pagou {conferido['_valor_pago']} e os extratos somam "
+            f"{conferido['_soma_extratos']} (diferença {diferenca:+.2f})"
+        )
     return {
         "origem": ORIGEM_TIKTOK,
         # identidade pelo EXTRATO (16/10, revisão): um pagamento pode cobrir vários
@@ -243,8 +291,18 @@ def repasse_para_movimento(
         "classificacao": "saque",
         "vinculado_por": None,
         "vinculado_em": None,
-        "raw": {"statement": statement, "payment": pagamento or {}},
+        "raw": {"statement": statement, "payment": pagamento or {}, **conferido},
     }
+
+
+def extratos_por_pagamento(extratos: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Os extratos PAGOS de cada pagamento (um pagamento pode cobrir vários extratos)."""
+    grupos: dict[str, list[dict[str, Any]]] = {}
+    for st in extratos:
+        pid = str(st.get("payment_id") or "")
+        if pid and str(st.get("payment_status") or "").upper() == "PAID":
+            grupos.setdefault(pid, []).append(st)
+    return grupos
 
 
 async def _paginado(
@@ -373,6 +431,7 @@ async def _reparar_repasses(
     recuperados: list[str] = []
     desfeitos: list[str] = []
     dias: set[date] = set()
+    grupos = extratos_por_pagamento(extratos)
     for st in extratos:
         sid = str(st.get("id") or "")
         status = str(st.get("payment_status") or "").upper()
@@ -400,7 +459,9 @@ async def _reparar_repasses(
         if f"repasse:{sid}" in gravados:
             continue
         pid = str(st.get("payment_id") or "")
-        rep = repasse_para_movimento(st, repasses.get(pid), ordem=int(row.linhas or 0))
+        rep = repasse_para_movimento(
+            st, repasses.get(pid), ordem=int(row.linhas or 0), grupo=grupos.get(pid)
+        )
         if rep is None:
             continue
         if await inserir_movimentos(session, loja, [rep], reabrir=False):
@@ -504,6 +565,7 @@ async def run_tiktok_sync(
     resumo["repasses"] = await _reparar_repasses(
         session, loja, extratos, repasses, rows_sync, agora
     )
+    grupos = extratos_por_pagamento(extratos)
     for st in extratos:
         sid = str(st.get("id") or "")
         if not sid:
@@ -523,7 +585,10 @@ async def run_tiktok_sync(
                     None
                     if _reemitido(existente)
                     else repasse_para_movimento(
-                        st, repasses.get(pid), ordem=int(existente.linhas or 0)
+                        st,
+                        repasses.get(pid),
+                        ordem=int(existente.linhas or 0),
+                        grupo=grupos.get(pid),
                     )
                 )
                 await _marcar_status_do_extrato(session, loja, sid, "PAID")
@@ -570,7 +635,9 @@ async def run_tiktok_sync(
                 if m:
                     movs.append(m)
             rep = (
-                repasse_para_movimento(st, repasses.get(pid), ordem=len(txs))
+                repasse_para_movimento(
+                    st, repasses.get(pid), ordem=len(txs), grupo=grupos.get(pid)
+                )
                 if marca == "PAID" and repasses is not None
                 else None
             )

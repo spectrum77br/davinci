@@ -27,6 +27,7 @@ from app.services.conciliacao_tiktok import (
     repasse_para_movimento,
     run_tiktok_sync,
     transacao_para_movimento,
+    valor_do_repasse,
 )
 
 AGORA = datetime(2026, 10, 16, 12, tzinfo=UTC)
@@ -653,6 +654,71 @@ async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_ant
     }
     fechados = await fechar_dias_prontos(db, loja)
     assert {"2026-10-11", "2026-10-12"} <= set(fechados["fechados"])
+
+
+async def test_repasse_leva_o_valor_pago_e_a_diferenca_fica_no_ultimo_extrato(db, make_user):
+    """19/10 (revisão): o repasse era gravado com o valor do EXTRATO — a TikTok podia
+    pagar menos e o dia fechava "saldo bate" (a conta comparada com ela mesma). Agora o
+    repasse leva o valor PAGO (`amount.value` da API de pagamentos): extratos de 344,45 e
+    200,00 pagos juntos com 444,45 → o último dia leva 100,00 e acusa "saldo não bate
+    −100,00"; o robô não fecha esse dia."""
+    from app.routers.conciliacao import _movimentos_do_dia, _totais_do_dia
+
+    loja = await _loja_tiktok(db, make_user)
+    d10, d11 = date(2026, 10, 10), date(2026, 10, 11)
+    e1 = _extrato(1, d10, "344.45", 905)
+    e2 = _extrato(2, d11, "200.00", 905)
+    redondo = {"seller_disc": "0", "commission": "0", "tx_fee": "0", "affiliate": "0", "fee": "0"}
+    cliente = _TikTokFalsa(
+        [e1, e2],
+        {
+            "1": [_tx(10, PEDIDO)],
+            "2": [
+                _tx(20, PEDIDO, gross="200", apos="200", revenue="200", settlement="200", **redondo)
+            ],
+        },
+        [_repasse(905, "444.45", d11)],  # pagou 100,00 a menos que os dois extratos
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r["inseridos"] == 4 and not r["erros"]
+    saques = (
+        (
+            await db.execute(
+                select(ConciliacaoMovimento)
+                .where(ConciliacaoMovimento.tipo == "saque")
+                .order_by(ConciliacaoMovimento.data)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [x.debito for x in saques] == [Decimal("344.45"), Decimal("100.00")]
+    assert saques[1].raw["_valor_pago"] == "444.45" and saques[1].raw["_soma_extratos"] == "544.45"
+    assert saques[1].raw["_diferenca_pagamento"] == "-100.00"
+    assert "a TikTok pagou 444.45 e os extratos somam 544.45 (diferença -100.00)" in saques[1].descricao
+    assert "diferença" not in saques[0].descricao  # o 1º extrato leva o próprio total
+    # dia 10 fecha; dia 11 fica aberto: pedidos 200,00 − repasse 100,00 ≠ 0
+    movs11 = await _movimentos_do_dia(db, loja, d11, Decimal("0"))
+    assert _totais_do_dia(movs11, Decimal("0"))["diferenca"] == -100.0
+    fechados = await fechar_dias_prontos(db, loja)
+    assert "2026-10-10" in fechados["fechados"] and "2026-10-11" in fechados["abertos"]
+    await db.commit()
+    # o reparo (repasse apagado por engano) recria com o mesmo valor pago
+    await db.delete(saques[1])
+    await db.commit()
+    r2 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r2["repasses"]["recuperados"] == ["2"]
+    novo = (
+        await db.execute(
+            select(ConciliacaoMovimento).where(ConciliacaoMovimento.id_externo == "repasse:2")
+        )
+    ).scalar_one()
+    assert novo.debito == Decimal("100.00") and novo.raw["_diferenca_pagamento"] == "-100.00"
+    # pagamento sem o valor (API antiga): cai no total do extrato, marcado
+    rep_sem_valor = {**_repasse(906, "0", d11)}
+    rep_sem_valor.pop("amount")
+    valor, info = valor_do_repasse(e2, rep_sem_valor, [e2])
+    assert valor == Decimal("200.00") and info == {"_sem_valor_pago": True}
 
 
 _OUTRO = "586400000000000001"
