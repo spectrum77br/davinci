@@ -114,6 +114,9 @@ async def test_rebuild_preserva_decididas_e_refaz_as_vivas(db, make_user):
     pessoa = await make_user()
     await _seed(db, pedido="400011", bling_id=111, status="Aprovado", aprovado_por=pessoa.id)
     await _seed(db, pedido="400012", bling_id=112, status="Pendente", margem=0.05)
+    # Ninguém decidiu (status NULL) — o caso de quase todo pedido novo. 19/10: o
+    # NULL fazia o rebuild pular a linha e ela congelava na 1ª leitura.
+    await _seed(db, pedido="400013", bling_id=113, status=None, margem=0.05)
     stub = vm.qualified_table("_vm_stub_view_src")
     await db.execute(text(f"CREATE TABLE {stub} (LIKE {vm.SNAPSHOT_TABLE} INCLUDING ALL)"))  # noqa: S608
     await db.execute(text(f"INSERT INTO {stub} SELECT * FROM {vm.SNAPSHOT_TABLE}"))  # noqa: S608
@@ -126,6 +129,7 @@ async def test_rebuild_preserva_decididas_e_refaz_as_vivas(db, make_user):
         viva = await _linha(db, "400012")
         decidida = await _linha(db, "400011")
         assert float(viva["marketplace_margem"]) == 0.9  # refeita a partir da view
+        assert float((await _linha(db, "400013"))["marketplace_margem"]) == 0.9  # sem status
         assert float(decidida["marketplace_margem"]) == 0.5  # ficou como na decisão
         assert decidida["bling_status_margem"] == "Aprovado"
         # pessoa voltou pra Pendente: a linha volta a ser viva no rebuild seguinte

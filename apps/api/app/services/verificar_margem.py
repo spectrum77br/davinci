@@ -59,10 +59,16 @@ _ACQUIRE_REFRESH_LOCK = "SELECT pg_advisory_xact_lock(:k)"
 # refreshes do robô não a tocam; só situação e pino acompanham o Bling
 # (_espelhar_decididas). Reprovado pelo robô (hold) segue vivo até alguém decidir ou o
 # robô liberar (reavaliar_reprovados). Pessoa que pede "atualizar este pedido" força.
+# COALESCE (19/10): pedido que ninguém decidiu tem bling_status_margem NULL, e
+# NULL = 'Aprovado' dá NULL, não falso — o `NOT _decidida` do rebuild virava NULL e a
+# linha nunca era apagada nem reinserida. De 16/10 ~17h a 19/10, 434 pedidos de
+# ML/Shopee/TikTok ficaram com os números da 1ª leitura (sem o líquido da plataforma,
+# "Em aberto" pra sempre) e o robô não via margem baixa neles.
 def _decidida(alias: str) -> str:
     return (
-        f"({alias}.bling_status_margem = 'Aprovado' "
-        f"OR ({alias}.bling_status_margem = 'Reprovado' AND {alias}.aprovado_por IS NOT NULL))"
+        f"COALESCE({alias}.bling_status_margem = 'Aprovado' "
+        f"OR ({alias}.bling_status_margem = 'Reprovado' AND {alias}.aprovado_por IS NOT NULL), "
+        "FALSE)"
     )
 
 
