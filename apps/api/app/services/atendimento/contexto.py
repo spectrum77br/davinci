@@ -326,6 +326,51 @@ async def _logistica(
     }
 
 
+def _ajustar_data_envio_shopee(conversa: AtendimentoConversa, ctx: dict) -> None:
+    """Preparação/coleta solicitada não transforma a data do Bling em postagem.
+
+    O espelho pode ter `em_andamento_data` mesmo em "Em digitação", quando
+    a etiqueta/NF já existe mas a Shopee ainda aguarda a coleta. A data de
+    postagem real prevalece; sem ela, o retrato do MESMO pedido da Shopee
+    pode confirmar o envio ou impedir esse fallback do Bling.
+    """
+    pedido = ctx.get("pedido")
+    if conversa.plataforma != "shopee" or not isinstance(pedido, dict):
+        return
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    retrato = dados.get("pedido_mkt")
+    numero = str(conversa.pedido_marketplace or "").strip()
+    if (
+        not numero
+        or not isinstance(retrato, dict)
+        or str(retrato.get("pedido") or "").strip() != numero
+    ):
+        return
+    logistica = ctx.get("logistica") or {}
+    if logistica.get("data_envio"):
+        return
+    enviado = retrato.get("enviado_em")
+    if isinstance(enviado, str) and enviado:
+        try:
+            datetime.fromisoformat(enviado)
+        except ValueError:
+            pass
+        else:
+            pedido["enviado_em"] = enviado
+            return
+    status = str(retrato.get("status") or "").strip().upper()
+    log_retrato = retrato.get("logistica")
+    status_logistico = (
+        str(log_retrato.get("status") or "").strip().upper()
+        if isinstance(log_retrato, dict)
+        else ""
+    )
+    if status in {"READY_TO_SHIP", "PROCESSED"} or (
+        not status and status_logistico == "LOGISTICS_REQUEST_CREATED"
+    ):
+        pedido["enviado_em"] = None
+
+
 # ── Chamados e devoluções ─────────────────────────────────────────────────
 
 
@@ -988,6 +1033,7 @@ async def contexto_da_conversa(session: AsyncSession, conversa: AtendimentoConve
     ctx["logistica"] = await _seguro(
         session, "logistica", lambda: _logistica(session, numero_bling, numero_mkt), None, cid
     )
+    _ajustar_data_envio_shopee(conversa, ctx)
     ctx["chamados"] = await _seguro(
         session, "chamados", lambda: _chamados(session, numero_bling, numero_mkt), [], cid
     )

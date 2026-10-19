@@ -1003,6 +1003,7 @@ async def triar_conversa(
         recentes = ia.HistoricoMensagens(
             [gatilho, *recentes],
             turno_incompleto=getattr(recentes, "turno_incompleto", False),
+            pedido_marketplace=conversa.pedido_marketplace,
         )
     ctx = await contexto_svc.contexto_da_conversa(session, conversa)
     sugestao = await _sugestao_do_turno(session, conversa)

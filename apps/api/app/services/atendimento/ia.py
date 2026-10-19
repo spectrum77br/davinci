@@ -322,7 +322,8 @@ SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 # v7 (item 4): nunca falar de margem, custo interno, lucro ou análise
 # interna ("custo" sozinho faria o modelo fugir do custo do frete); pedido
 # "em processamento" não é cancelamento.
-PROMPT_VERSAO = "v8"
+# v9: aprovação específica da Kia e estoque pré-compra superado pela compra.
+PROMPT_VERSAO = "v9"
 
 # Cliente escreve em rajada ("oi" / "meu pedido" / "não chegou"). Esperar
 # 90 s de silêncio junta a rajada numa sugestão só, em vez de três.
@@ -1354,7 +1355,9 @@ def perguntas_pendentes(
     mensagens: Sequence[AtendimentoMensagem], gatilho: AtendimentoMensagem | None
 ) -> list[AtendimentoMensagem]:
     """Texto concreto do turno ainda sem resposta real; nunca herda turno já encerrado."""
-    return [
+    from app.services.atendimento.foco_compra import depois_da_compra
+
+    perguntas = [
         m
         for m in rajada_do_cliente(mensagens, gatilho)
         if (m.texto or "").strip()
@@ -1362,6 +1365,7 @@ def perguntas_pendentes(
         and not mensagem_de_continuidade(m.texto)
         and demanda_concreta(m.texto or "")
     ]
+    return depois_da_compra(perguntas, mensagens)
 
 
 def demanda_concreta(texto: str) -> bool:
@@ -1532,7 +1536,15 @@ _REGRA_CARTAO_APROVADA = (
 
 
 def _regra_basica_igual(regras: Sequence[Any], categoria: str, aprovado: str) -> bool:
-    aplicaveis = [r for r in regras if r.tipo == TIPO_REGRA_CATEGORIA and r.categoria == categoria]
+    from app.services.atendimento import sem_demanda
+
+    aplicaveis = [
+        r
+        for r in regras
+        if r.tipo == TIPO_REGRA_CATEGORIA
+        and r.categoria == categoria
+        and not sem_demanda.regra_aprovada(r)
+    ]
     return (
         len(aplicaveis) == 1
         and aplicaveis[0].plataforma is None
@@ -1769,6 +1781,7 @@ async def _mensagens_recentes(
     todas = list(reversed(linhas[:MAX_TROCAS_LIDAS]))
     return HistoricoMensagens(
         todas,
+        pedido_marketplace=conversa.pedido_marketplace,
         turno_incompleto=(
             len(linhas) > MAX_TROCAS_LIDAS and not any(resposta_da_loja(m) for m in todas)
         ),
@@ -1778,9 +1791,16 @@ async def _mensagens_recentes(
 class HistoricoMensagens(list[AtendimentoMensagem]):
     """A leitura limitada informa se o início do turno ficou fora do histórico."""
 
-    def __init__(self, mensagens: Sequence[AtendimentoMensagem], *, turno_incompleto: bool):
+    def __init__(
+        self,
+        mensagens: Sequence[AtendimentoMensagem],
+        *,
+        turno_incompleto: bool,
+        pedido_marketplace: str | None = None,
+    ):
         super().__init__(mensagens)
         self.turno_incompleto = turno_incompleto
+        self.pedido_marketplace = pedido_marketplace
 
 
 MOTIVO_TURNO_INCOMPLETO = "turno sem resposta excede o contexto seguro — pessoa precisa conferir"
@@ -1852,7 +1872,9 @@ async def _regras_aplicaveis(
     session: AsyncSession, conversa: AtendimentoConversa
 ) -> list[AtendimentoRegra]:
     """Regras ativas desta plataforma/canal (e as gerais), de TODOS os tipos e assuntos."""
-    return list(
+    from app.services.atendimento import politicas_kia, sem_demanda
+
+    regras = list(
         (
             await session.execute(
                 select(AtendimentoRegra)
@@ -1871,6 +1893,13 @@ async def _regras_aplicaveis(
         .scalars()
         .all()
     )
+    if str(conversa.integration_id) != politicas_kia.INTEGRATION_KIA:
+        regras = [
+            r
+            for r in regras
+            if not politicas_kia.regra_especifica_kia(r) and not sem_demanda.regra_especifica_kia(r)
+        ]
+    return regras
 
 
 def organizar_manual(
@@ -3876,14 +3905,14 @@ async def _origem_reavaliacao_valida(
 
 
 async def _travar_gravacao_rascunho(
-    session: AsyncSession, conversa: AtendimentoConversa
+    session: AsyncSession, conversa: AtendimentoConversa | UUID
 ) -> None:
     """Serializa só a gravação de sugestões, sem segurar o sync nem o modelo."""
     await session.execute(
         select(
             func.pg_advisory_xact_lock(
                 func.hashtext(f"{get_settings().database_schema}:atendimento_rascunho"),
-                func.hashtext(str(conversa.id)),
+                func.hashtext(str(conversa if isinstance(conversa, UUID) else conversa.id)),
             )
         )
     )
@@ -4114,6 +4143,7 @@ async def _gerar(
         recentes = HistoricoMensagens(
             [gatilho, *recentes],
             turno_incompleto=getattr(recentes, "turno_incompleto", False),
+            pedido_marketplace=conversa.pedido_marketplace,
         )
     ctx = await contexto_svc.contexto_da_conversa(session, conversa)
     valores = valores_das_lacunas(conversa, ctx)
@@ -4190,6 +4220,30 @@ async def _gerar(
     so_humano = manual_svc.ids_so_humano(categorias)
     todas_regras = await _regras_aplicaveis(session, conversa)
     classificar = precisa_classificar(todas_regras)
+    # As políticas aprovadas também conferem a ficha atual, antes de escolher
+    # assunto. Assim o menu não decide no lugar da dúvida concreta.
+    fichas = await contexto_svc._seguro(
+        session,
+        "ficha_do_anuncio",
+        lambda: ficha_svc.fichas_da_conversa(session, conversa, recentes, textos_rajada),
+        [],
+        conversa.id,
+    )
+    if fichas:
+        fatos["ficha_do_anuncio"] = fatos_gravados["ficha_do_anuncio"] = fichas
+    from app.services.atendimento import politicas_kia, sem_demanda
+
+    politica_kia = politicas_kia.resposta_aprovada(
+        conversa, textos_rajada, fatos, todas_regras
+    ) or sem_demanda.resposta_de_menu(conversa, recentes, gatilho, todas_regras)
+    if (
+        contexto_reavaliado is not None
+        and contexto_reavaliado.get("tipo") == "politica_kia"
+        and politica_kia is None
+    ):
+        # Uma regra ou a ficha mudou entre seleção e geração: a recuperação
+        # não pode cair no modelo nem reabrir uma decisão de pessoa.
+        return None
     nf_politica_aprovada = nf_antes_da_compra(
         textos_rajada,
         pedido=ctx.get("pedido"),
@@ -4211,6 +4265,10 @@ async def _gerar(
     ):
         categoria_basica = "saudacao_ou_vaga"
         texto_basico = "Olá! Em que podemos ajudar sobre esse produto ou pedido?"
+    elif politica_kia is not None and politica_kia.categoria in ids_categorias:
+        categoria_basica = politica_kia.categoria
+        texto_basico = politica_kia.texto
+        fatos_gravados["politica_kia_aprovada"] = politica_kia.fato
     nomes = (
         conversa.comprador_nome,
         conversa.comprador_id,
@@ -4290,7 +4348,9 @@ async def _gerar(
         try:
             bruto_c, uso_classificacao = await _chamar(
                 sistema_c,
-                montar_usuario_classificacao(fatos, recentes, nomes),
+                montar_usuario_classificacao(
+                    {k: v for k, v in fatos.items() if k != "ficha_do_anuncio"}, recentes, nomes
+                ),
                 max_tokens=MAX_TOKENS_CLASSIFICACAO,
             )
         except ErroProvedor as e:
@@ -4338,23 +4398,6 @@ async def _gerar(
         else (garantia["garantias"] if garantia is not None else [])
     )
 
-    # A ficha do anúncio (14/10/2026, o dono: "busca a ficha caso seja
-    # linkado com algum produto"): título, atributos e descrição LIMPA da
-    # loja ou do catálogo, dos anúncios ligados à conversa (`ficha.py`; sem
-    # ficha guardada, vai à loja: `ficha_loja.py`, nunca derruba). Na mensagem
-    # (FATOS), com teto próprio — fora do orçamento do prompt de sistema, não
-    # tira correção nem regra; e fora da classificação, que não precisa dela.
-    # Os números dela passam a valer na conferência (`permitidos`, abaixo).
-    fichas = await contexto_svc._seguro(
-        session,
-        "ficha_do_anuncio",
-        lambda: ficha_svc.fichas_da_conversa(session, conversa, recentes, textos_rajada),
-        [],
-        conversa.id,
-    )
-    if fichas:
-        fatos["ficha_do_anuncio"] = fatos_gravados["ficha_do_anuncio"] = fichas
-
     referencia = classificada or categoria_provavel(" ".join(textos_rajada), conversa.canal)
     # Canal no automático: só o 👍/👎 de admin molda o prompt (ver
     # `_avaliacao_vale_aqui`) — o mesmo corte das regras do manual.
@@ -4389,7 +4432,12 @@ async def _gerar(
     # ── 2ª chamada (ou a única): a resposta ──
     from app.services.atendimento import ficha_respostas, politicas_basicas
 
-    texto_ficha = ficha_respostas.resposta_literal(classificada, textos_rajada, fatos, todas_regras)
+    texto_ficha = ficha_respostas.resposta_literal(
+        classificada,
+        textos_rajada,
+        fatos,
+        [r for r in todas_regras if not politicas_kia.regra_aprovada(r)],
+    )
     texto_basico = (
         texto_basico
         or politicas_basicas.resposta_aprovada(classificada, textos_rajada, fatos, todas_regras)
@@ -4459,7 +4507,13 @@ async def _gerar(
         )
     ):
         motivos.append("há pergunta concreta pendente — a resposta genérica não a resolve")
-    if fichas and so_admin and categoria in ficha_svc.CATEGORIAS_DA_FICHA and texto_ficha is None:
+    if (
+        fichas
+        and so_admin
+        and categoria in ficha_svc.CATEGORIAS_DA_FICHA
+        and texto_ficha is None
+        and politica_kia is None
+    ):
         motivos.append(MOTIVO_FICHA_NO_AUTOMATICO)
     # O que o modelo pode repetir: os FATOS (anúncio e a ficha dele, itens,
     # data da compra), o MANUAL que a equipe escreveu (as regras que entraram
@@ -5234,14 +5288,196 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
     try:
         # A cota da rodada para buscar a ficha do anúncio na loja (`ficha_loja.py`).
         with ficha_loja.rodada():
+            if MODO_AUTO in modos:
+                await manter_fila_kia(session)
             geradas = await _gerar_pendentes(session, limite=limite, modos=modos)
             if MODO_AUTO in modos:
                 geradas += await reavaliar_contextos(session)
+                geradas += await reavaliar_politicas_kia(session)
         if MODO_AUTO in modos:
             await reenviar_pendentes(session)
         return geradas
     finally:
         await _soltar_rodada(token)
+
+
+async def manter_fila_kia(session: AsyncSession, *, limite: int = 25) -> dict[str, int]:
+    """Repara pendência já respondida e processa cartões acolhidos, sem envio."""
+    from app.services.atendimento import politicas_kia, sem_demanda
+
+    s = get_settings()
+    resumo = {"respondidas": 0, "sem_demanda": 0}
+    if not s.atendimento_ia_ativa or not s.atendimento_auto_ativo:
+        return resumo
+    c, k, m = AtendimentoConversa, AtendimentoCanal, AtendimentoMensagem
+    base = (
+        select(c.id, c.canal_id, c.ultima_do_cliente_em)
+        .join(k, k.id == c.canal_id)
+        .where(
+            c.integration_id == UUID(politicas_kia.INTEGRATION_KIA),
+            c.plataforma == "shopee",
+            c.canal == "chat",
+            k.modo == MODO_AUTO,
+            c.aguardando_resposta.is_(True),
+            c.sem_resposta_necessaria.is_not(True),
+            c.ia_pausada.is_(False),
+            c.atribuido_a.is_(None),
+            c.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
+        )
+    )
+    respondida = (
+        select(m.id)
+        .where(
+            m.conversa_id == c.id,
+            m.autor == AUTOR_LOJA,
+            m.status != MSG_FALHOU,
+            m.origem != ORIGEM_NOTA,
+            func.coalesce(m.enviada_em, m.created_at) >= c.ultima_do_cliente_em,
+            ~gravar.mensagem_automatica_sql(m.texto, m.payload),
+        )
+        .exists()
+    )
+    ids = (
+        await session.execute(base.where(respondida).order_by(c.ultima_do_cliente_em).limit(limite))
+    ).all()
+    for conversa_id, _canal_id, turno in ids:
+        try:
+            await _travar_gravacao_rascunho(session, conversa_id)
+            conversa = await session.scalar(
+                select(c)
+                .where(c.id == conversa_id)
+                .with_for_update(skip_locked=True)
+                .execution_options(populate_existing=True)
+            )
+            if (
+                conversa is not None
+                and conversa.ultima_do_cliente_em == turno
+                and conversa.aguardando_resposta
+                and not conversa.ia_pausada
+                and conversa.atribuido_a is None
+                and conversa.situacao not in (CONVERSA_FECHADA, CONVERSA_BLOQUEADA)
+            ):
+                await gravar.recalcular_conversa(session, conversa)
+                resumo["respondidas"] += int(not conversa.aguardando_resposta)
+            await session.commit()
+        except Exception as e:  # noqa: BLE001 — uma conversa não para a fila
+            await session.rollback()
+            logger.warning(
+                "atendimento_ia_fila_kia_falhou",
+                conversa_id=str(conversa_id),
+                etapa="reconciliar",
+                err=type(e).__name__,
+            )
+    ultimo_cartao = (
+        select(m.id)
+        .where(
+            m.conversa_id == c.id,
+            m.autor == AUTOR_CLIENTE,
+            func.coalesce(m.enviada_em, m.created_at) == c.ultima_do_cliente_em,
+            gravar.cartao_do_comprador_sql(m.payload),
+        )
+        .exists()
+    )
+    ids = (
+        await session.execute(
+            base.where(ultimo_cartao).order_by(c.ultima_do_cliente_em).limit(limite)
+        )
+    ).all()
+    for conversa_id, canal_id, turno in ids:
+        try:
+            if await sem_demanda.processar(
+                session, conversa_id, canal_autorizado_id=canal_id, turno_esperado=turno
+            ):
+                resumo["sem_demanda"] += 1
+        except Exception as e:  # noqa: BLE001 — uma conversa não para a fila
+            await session.rollback()
+            logger.warning(
+                "atendimento_ia_fila_kia_falhou",
+                conversa_id=str(conversa_id),
+                etapa="cartao",
+                err=type(e).__name__,
+            )
+    if any(resumo.values()):
+        logger.info("atendimento_ia_fila_kia", **resumo)
+    return resumo
+
+
+async def reavaliar_politicas_kia(session: AsyncSession, *, limite: int = 3) -> int:
+    """Recupera só respostas literais aprovadas; nunca sugestão pedida/avaliada por pessoa."""
+    from app.services.atendimento import politicas_kia, sem_demanda
+
+    s = get_settings()
+    if not s.atendimento_ia_ativa or not s.atendimento_auto_ativo:
+        return 0
+    c, k, r = AtendimentoConversa, AtendimentoCanal, AtendimentoRascunho
+    outra = aliased(r)
+    agora = datetime.now(UTC)
+    ids = (
+        await session.execute(
+            select(c.id, r.id)
+            .join(k, k.id == c.canal_id)
+            .join(r, r.conversa_id == c.id)
+            .where(
+                c.integration_id == UUID(politicas_kia.INTEGRATION_KIA),
+                c.plataforma == "shopee",
+                c.canal == "chat",
+                k.modo == MODO_AUTO,
+                c.aguardando_resposta.is_(True),
+                c.sem_resposta_necessaria.is_not(True),
+                c.ia_pausada.is_(False),
+                c.atribuido_a.is_(None),
+                c.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
+                c.ultima_do_cliente_em.between(agora - JANELA_PENDENTES, agora - ESPERA_SILENCIO),
+                or_(c.pode_enviar_ate.is_(None), c.pode_enviar_ate > agora),
+                r.status.in_((RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO)),
+                func.coalesce(r.prompt_versao, "") != PROMPT_VERSAO,
+                ~r.fatos.has_key(FATO_PEDIDA_PELA_TELA),
+                ~select(AtendimentoAvaliacao.id)
+                .where(AtendimentoAvaliacao.rascunho_id == r.id)
+                .exists(),
+                ~select(outra.id)
+                .where(outra.conversa_id == c.id, outra.created_at > r.created_at)
+                .exists(),
+            )
+            .order_by(r.created_at.desc())
+            .limit(10)
+        )
+    ).all()
+    geradas = 0
+    for conversa_id, rascunho_id in ids:
+        try:
+            if geradas >= limite:
+                break
+            conversa = await session.get(AtendimentoConversa, conversa_id, populate_existing=True)
+            if conversa is None:
+                continue
+            gatilho = await _ultima_do_cliente(session, conversa)
+            if gatilho is None:
+                continue
+            recentes = await _mensagens_recentes(session, conversa)
+            if turno_incompleto(recentes, gatilho):
+                continue
+            ctx = await contexto_svc.contexto_da_conversa(session, conversa)
+            fatos = _fatos_para_o_modelo(conversa, ctx, valores_das_lacunas(conversa, ctx))
+            regras = await _regras_aplicaveis(session, conversa)
+            textos = [m.texto or "" for m in perguntas_pendentes(recentes, gatilho)]
+            if not (
+                politicas_kia.resposta_aprovada(conversa, textos, fatos, regras)
+                or sem_demanda.resposta_de_menu(conversa, recentes, gatilho, regras)
+            ):
+                continue
+            meta = {"tipo": "politica_kia", "rascunho_anterior_id": str(rascunho_id)}
+            novo = await gerar_rascunho(session, conversa, contexto_reavaliado=meta)
+            geradas += int(novo is not None)
+        except Exception as e:  # noqa: BLE001 — uma conversa não para a fila
+            await session.rollback()
+            logger.warning(
+                "atendimento_ia_fila_kia_falhou",
+                conversa_id=str(conversa_id),
+                etapa="politica",
+                err=type(e).__name__,
+            )
+    return geradas
 
 
 def _sql_canal_sem_envio():

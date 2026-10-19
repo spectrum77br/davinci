@@ -1121,6 +1121,51 @@
       "prioridade": 83,
       "quando": "Sempre (voz da loja).",
       "faca": "Falar como 'nós' e 'nossa equipe', sem nome de atendente. Não mandar o cliente ler a descrição sem dar a resposta."
+    },
+    {
+      "tipo": "categoria",
+      "categoria": "espec_outros",
+      "plataforma": "shopee",
+      "canal": "chat",
+      "prioridade": 50,
+      "quando": "Somente Kia, anúncio Apple Watch Series onze, item 22299473628: tamanho da pulseira.",
+      "faca": "Fato aprovado pela equipe somente para essa loja e esse anúncio: a pulseira tem tamanho padrão. Pergunta simples se é P/M ou M/G ou qual o tamanho da pulseira: precisa_humano=false; responder 'Olá! A pulseira deste modelo tem tamanho padrão.' Não escolher P/M ou M/G, inventar medida, ajuste ou compatibilidade. A opção do menu para falar com atendente não muda a dúvida pendente para garantia. Outra loja, anúncio, variação conflitante ou outra dúvida: seguir as regras gerais."
+    },
+    {
+      "tipo": "categoria",
+      "categoria": "pedido_link_midia",
+      "plataforma": "shopee",
+      "canal": "chat",
+      "prioridade": 50,
+      "quando": "Somente Kia, anúncio Uranyx Óculos Inteligentes AI, item 58269229175: foto do modelo.",
+      "faca": "Fato aprovado pela equipe somente para essa loja e esse anúncio: as fotos do anúncio mostram o modelo vendido. Pedido genérico para ver como é o modelo, sem detalhe ausente: precisa_humano=false; responder 'Olá! As fotos do anúncio mostram o modelo que você receberá. Você pode conferir os detalhes nas imagens do próprio anúncio.' Isso não promete enviar uma foto nova. Não afirmar autenticidade, originalidade ou condição do produto. Foto de ângulo ou detalhe ausente, foto adicional, vídeo, divergência, outra loja ou anúncio: seguir a regra geral, com pessoa quando for necessário obter material novo."
+    },
+    {
+      "tipo": "categoria",
+      "categoria": "prazo_envio",
+      "plataforma": "shopee",
+      "canal": "chat",
+      "prioridade": 50,
+      "quando": "Somente Kia, pedido pago do anúncio Apple Watch Series onze, item 22299473628: prazo e origem.",
+      "faca": "Com pedido desta conversa identificado nos FATOS, pago e ainda em preparação, consulta comum de previsão: orientar seguir o prazo informado pela Shopee no próprio pedido, sem inventar data. Se perguntar também de onde será enviado, fato aprovado pela equipe para essa loja e esse anúncio: o envio será feito de São Paulo. Só essas consultas: precisa_humano=false. Não pedir novamente o número de pedido que já está ligado. Não confundir código de rastreio ou etiqueta com postagem realizada. Urgência, prazo vencido, reclamação, postagem já feita, outra loja ou anúncio ou outro assunto: seguir as regras gerais."
+    },
+    {
+      "tipo": "categoria",
+      "categoria": "saudacao_ou_vaga",
+      "plataforma": "shopee",
+      "canal": "chat",
+      "prioridade": 50,
+      "quando": "Kia: cartão de produto ou pedido sem dúvida, já acolhido pelo robô.",
+      "faca": "Somente na loja Kia: quando o cliente enviou apenas cartão de produto ou pedido, não escreveu dúvida e o robô da loja já enviou uma mensagem automática depois do cartão, marcar como processado no DaVinci, sem enviar nova mensagem. Não confundir cartão com foto, vídeo, áudio ou arquivo. Nunca encerrar pergunta pendente, solicitação de pessoa, reclamação ou conversa pausada/atribuída. Histórico incompleto exige pessoa. Figurinha estruturada muito antiga, anterior ao cartão por sete dias ou mais, não cria dúvida sobre o produto novo. Nova mensagem do cliente reabre a conversa. Opção dois do menu, sem pergunta nem pedido identificado: informar apenas a política aprovada de que o pedido acompanha nota fiscal. Seleção ambígua de dois e cinco: informar a mesma política e pedir que detalhe a dúvida, sem inventar pedido de arquivo nem afirmar cobertura ou prazo de garantia."
+    },
+    {
+      "tipo": "categoria",
+      "categoria": "originalidade_condicao",
+      "plataforma": "shopee",
+      "canal": "chat",
+      "prioridade": 50,
+      "quando": "Somente Kia, antes da compra: pergunta simples se o produto é novo ou recondicionado.",
+      "faca": "Pergunta genérica se o produto é novo ou recondicionado: se o título do anúncio próprio e atualizado confirma novo, responder isso citando o título. Sem essa confirmação, pedir que confirme o modelo ou envie o card do anúncio por aqui, sem afirmar a condição. Só essa coleta de identificação pode sair sozinha. Não usar a resposta de outro cliente nem o texto do comprador como prova de que é novo. Produto recebido, reclamação, originalidade, homologação ou outra dúvida junto seguem as regras gerais."
     }
   ],
   "respostas_prontas": [

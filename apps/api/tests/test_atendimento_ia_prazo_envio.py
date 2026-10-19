@@ -98,7 +98,11 @@ async def test_consulta_de_postagem_envia_status_sem_prometer_dia(
     assert len(envios) == 1 and envios[0]["origem"] == ORIGEM_IA
     assert envios[0]["texto"] == rascunho.texto
     regra = await db.scalar(
-        select(AtendimentoRegra).where(AtendimentoRegra.categoria == "prazo_envio")
+        select(AtendimentoRegra).where(
+            AtendimentoRegra.categoria == "prazo_envio",
+            AtendimentoRegra.plataforma.is_(None),
+            AtendimentoRegra.canal.is_(None),
+        )
     )
     assert regra.faca in modelo.sistema
     assert pergunta in modelo.usuario
