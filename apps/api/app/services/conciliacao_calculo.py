@@ -658,18 +658,55 @@ def _motivo_da_diferenca(
     ):
         detalhe = f" ({frete_comprador} pago pelo comprador)" if frete_comprador else ""
         partes.append(f"frete cobrado {frete_cobrado}{detalhe} × previsto {frete_previsto}")
+    # 19/10 (Vinicius, marquezini 301744): a tarifa de venda do ML (156,56) é a SOMA de duas
+    # colunas do extrato — MP_FEE (98,88) e FINANCING_FEE (57,68, a taxa de parcelamento);
+    # comparar só a primeira dizia "cobrou a menos" num pedido recebido a menos
     parcelamento = _soma([m.parcelamento for m in liberacoes]).copy_abs() if liberacoes else ZERO
-    if parcelamento > TOLERANCIA:
-        partes.append(f"taxa de parcelamento {parcelamento}")
     tarifa_prevista = _d(venda.fee_amount) if venda else None
-    tarifa_cobrada = _soma([m.tarifa for m in liberacoes]).copy_abs() if liberacoes else None
+    tarifa_cobrada = (
+        (_soma([m.tarifa for m in liberacoes]).copy_abs() + parcelamento) if liberacoes else None
+    )
     if (
         tarifa_prevista is not None
         and tarifa_cobrada is not None
         and abs(tarifa_cobrada - tarifa_prevista) > TOLERANCIA
     ):
-        partes.append(f"tarifa cobrada {tarifa_cobrada} × prevista {tarifa_prevista}")
+        detalhe = f" (com {parcelamento} de parcelamento)" if parcelamento > TOLERANCIA else ""
+        partes.append(f"tarifa cobrada {tarifa_cobrada}{detalhe} × prevista {tarifa_prevista}")
+    cupom_previsto = _d(venda.discount_amount) if venda else None
+    cupom_cobrado = _soma([m.cupom for m in liberacoes]).copy_abs() if liberacoes else None
+    if (
+        cupom_previsto is not None
+        and cupom_cobrado is not None
+        and abs(cupom_cobrado - cupom_previsto) > TOLERANCIA
+    ):
+        partes.append(f"cupom cobrado {cupom_cobrado} × previsto {cupom_previsto}")
+    # o que a linha do MP tirou ALÉM de tarifa, parcelamento, frete e cupom (impostos,
+    # taxa por divergência de dimensões…): bruto + tarifa + parcelamento + frete − cupom
+    # tem que dar o crédito; o que sobra é "outros descontos"
+    outros = outros_descontos_do_extrato(liberacoes)
+    if abs(outros) > TOLERANCIA:
+        partes.append(f"outros descontos no extrato {outros:+.2f}")
     return " · ".join(partes) or None
+
+
+def outros_descontos_do_extrato(liberacoes: list[ConciliacaoMovimento]) -> Decimal:
+    """Soma, nas liberações do Mercado Pago, do que saiu além das colunas conhecidas
+    (negativo = a plataforma tirou mais; positivo = creditou mais). Linha sem bruto
+    (carteira da Shopee, testes) não entra."""
+    total = ZERO
+    for m in liberacoes:
+        if m.origem != ORIGEM_EXTRATO or m.bruto is None:
+            continue
+        esperado = (
+            (m.bruto or ZERO)
+            + (m.tarifa or ZERO)
+            + (m.parcelamento or ZERO)
+            + (m.frete or ZERO)
+            - (m.cupom or ZERO)
+        )
+        total += (m.credito or ZERO) - esperado
+    return total.quantize(Decimal("0.01"))
 
 
 def etapa_do_pedido(

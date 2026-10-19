@@ -1551,6 +1551,10 @@ async def test_painel_raio_x_junta_as_quatro_versoes_e_os_movimentos(
         "valor": None,
         "tarifa": 92.36,
         "parcelamento": 115.64,
+        # 19/10: a tarifa do ML inclui a taxa de parcelamento; sem bruto no teste não há
+        # como medir "outros descontos"
+        "tarifa_total": 208.0,
+        "outros_descontos": None,
         "frete": 62.33,
         "cupom": None,
         "liquido": 610.65,
@@ -1656,6 +1660,91 @@ async def test_painel_exporta_excel(db, make_user, auth_as, client):
     # texto vai como texto (nunca fórmula) e sem o caractere de controle
     obs = ws.cell(row=2, column=linhas[0].index("Observação") + 1)
     assert obs.value == '=HYPERLINK("http://x") conferir' and obs.data_type == "s"
+
+
+async def _loja_extra(db, make_user, conta: str, platform: IntegrationPlatform) -> ConciliacaoLoja:
+    dono = await make_user()
+    integ = Integration(
+        user_id=dono.id,
+        platform=platform,
+        name=conta,
+        status="active",
+        credentials=encrypt_json(
+            {"access_token": "tok", "refresh_token": "rt", "expires_at": int(time.time()) + 3600}
+        ),
+    )
+    db.add(integ)
+    await db.flush()
+    loja = ConciliacaoLoja(
+        integration_id=integ.id, platform=platform, conta=conta, inicio=date(2026, 10, 1)
+    )
+    db.add(loja)
+    await db.commit()
+    return loja
+
+
+async def test_painel_lista_todas_as_lojas_da_plataforma(db, make_user, auth_as, client):
+    """19/10 (Vinicius): "quero selecionar e verificar todas as lojas" — `loja=todas` +
+    `plataforma` lista os pedidos de todas as lojas da aba de uma vez (a loja de outra
+    plataforma fica fora); sem `plataforma` é todas mesmo; o Excel sai como "todas-ml"."""
+    loja, _integ = await _loja(db, make_user)
+    outra = await _loja_extra(db, make_user, "kia (ml)", IntegrationPlatform.ML)
+    shopee = await _loja_extra(db, make_user, "Jlas", IntegrationPlatform.SHOPEE)
+    db.add_all(
+        [
+            await _pedido_conciliado(loja),
+            await _pedido_conciliado(
+                outra,
+                pedido_bling="300500",
+                numeroloja="2000018600500",
+                conta="kia (ml)",
+                data_pedido=datetime(2026, 10, 5, 12, tzinfo=UTC),
+            ),
+            await _pedido_conciliado(
+                shopee,
+                pedido_bling="300600",
+                numeroloja="2510050ABC",
+                conta="Jlas",
+                data_pedido=datetime(2026, 10, 6, 12, tzinfo=UTC),
+            ),
+        ]
+    )
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+
+    r = await client.get("/api/conciliacao/pedidos", params={"loja": "todas", "plataforma": "ml"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert [(i["pedido_bling"], i["conta"]) for i in corpo["itens"]] == [
+        ("300500", "kia (ml)"),
+        ("301102", "jlas2"),
+    ]
+    assert corpo["lojas"] == ["jlas2", "kia (ml)"] and corpo["loja"] == "todas (ml, 2 lojas)"
+    assert corpo["resumo"]["pedidos"] == 2
+    # sem plataforma: todas mesmo (a Shopee entra)
+    r2 = await client.get("/api/conciliacao/pedidos", params={"loja": "todas"})
+    assert r2.json()["total"] == 3 and len(r2.json()["lojas"]) == 3
+    # plataforma sem loja ligada
+    r3 = await client.get(
+        "/api/conciliacao/pedidos", params={"loja": "todas", "plataforma": "amazon"}
+    )
+    assert r3.status_code == 404 and r3.json()["detail"]["code"] == "nenhuma_loja_ligada"
+    # uma loja só continua como era
+    r4 = await client.get("/api/conciliacao/pedidos", params={"loja": "jlas2"})
+    assert r4.json()["lojas"] == ["jlas2"] and r4.json()["loja"] == "jlas2"
+    # Excel de todas: uma linha por pedido, com a coluna Loja dizendo de quem é
+    r5 = await client.post(
+        "/api/conciliacao/export.xlsx", params={"loja": "todas", "plataforma": "ml"}
+    )
+    assert r5.status_code == 200 and "conciliacao_todas-ml_" in r5.headers["content-disposition"]
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    ws = load_workbook(BytesIO(r5.content)).active
+    linhas = list(ws.iter_rows(values_only=True))
+    col = linhas[0].index("Loja")
+    assert sorted(linha[col] for linha in linhas[1:]) == ["jlas2", "kia (ml)"]
 
 
 # --- Extrato do dia (2c) ---------------------------------------------------------
@@ -3024,11 +3113,15 @@ def test_liberacao_com_descricao_desconhecida_e_venda_liberada_e_dif_aparece():
         "previsao": None,
         "fatura": {},
     }
+    # a venda como a Margem guarda: tarifa 156,56 (= MP_FEE 98,88 + parcelamento 57,68),
+    # frete 67,88, cupom 6,00 → 599,56; o MP liberou 563,41: tirou 42,15 "a mais"
+    # (divergência de dimensões) e não cobrou o cupom de 6,00 → a menos 36,15
     venda = MarketplaceOrderFinancial(
         gross_amount=Decimal("830.00"),
         net_amount=Decimal("599.56"),
-        fee_amount=Decimal("98.88"),
+        fee_amount=Decimal("156.56"),
         freight_amount=Decimal("67.88"),
+        discount_amount=Decimal("6.00"),
         raw={},
     )
     lib = _mov(
@@ -3037,16 +3130,24 @@ def test_liberacao_com_descricao_desconhecida_e_venda_liberada_e_dif_aparece():
         datetime(2026, 10, 18, 13, 11, tzinfo=UTC),
         credito="563.41",
         tarifa="-98.88",
+        parcelamento="-57.68",
         frete="-67.88",
         pedido_mkt="2000018829258112",
     )
     lib.descricao = "fee_for_divergence_in_package_dimensions"
     lib.bruto = Decimal("830.00")
+    lib.cupom = Decimal("0.00")
     out = calc.situacao_do_pedido(movs_extrato=[lib], venda=venda, **base)
     assert out["situacao"] == "recebido_a_menos"
     assert out["dif_previsto_recebido"] == Decimal("-36.15")
     assert out["liberado_valor"] == Decimal("563.41")
-    assert out["motivo"] == "liberada pelo ML como «fee_for_divergence_in_package_dimensions»"
+    # 19/10 (Vinicius): tarifa 156,56 = 98,88 + 57,68 — não é "cobrou a menos"; o motivo
+    # diz de onde veio a diferença de verdade
+    assert out["motivo"] == (
+        "liberada pelo ML como «fee_for_divergence_in_package_dimensions» · "
+        "cupom cobrado 0.00 × previsto 6.00 · outros descontos no extrato -42.15"
+    )
+    assert calc.outros_descontos_do_extrato([lib]) == Decimal("-42.15")
 
     # Dif. em "estornado depois": liberou 100, mediação de 100 no dia seguinte → −100,00
     d = datetime(2026, 10, 12, 12, tzinfo=UTC)

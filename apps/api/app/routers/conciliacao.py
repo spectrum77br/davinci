@@ -710,7 +710,7 @@ from sqlalchemy import case as sa_case  # noqa: E402
 from sqlalchemy import func, literal_column, or_  # noqa: E402
 
 from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoPedido  # noqa: E402
-from app.models.conciliacao import ORIGEM_TIKTOK, ORIGENS_EXTRATO  # noqa: E402
+from app.models.conciliacao import ORIGEM_EXTRATO, ORIGEM_TIKTOK, ORIGENS_EXTRATO  # noqa: E402
 from app.services.conciliacao_tiktok import AGUARDANDO, aguardando_repasse  # noqa: E402
 
 _BRT = ZoneInfo("America/Sao_Paulo")
@@ -899,8 +899,35 @@ async def _loja_ou_404(
     return loja
 
 
+TODAS = "todas"
+
+
+async def _lojas_do_filtro(
+    session: AsyncSession, conta: str | None, plataforma: str | None
+) -> list[ConciliacaoLoja]:
+    """As lojas que a aba Pedidos lista: uma (pelo nome) ou, com `loja=todas`, todas as
+    lojas ligadas da plataforma da aba (19/10, Vinicius: "quero selecionar e verificar
+    todas as lojas"). Sem plataforma, "todas" é todas mesmo."""
+    if (conta or "").strip().lower() != TODAS:
+        return [await _loja_ou_404(session, conta)]
+    alvo = (plataforma or "").strip().lower()
+    lojas = [loja for loja in await lojas_ativas(session) if not alvo or str(loja.platform) == alvo]
+    if not lojas:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"code": "nenhuma_loja_ligada", "plataforma": alvo or None},
+        )
+    return lojas
+
+
+def _rotulo_das_lojas(lojas: list[ConciliacaoLoja], plataforma: str | None) -> str:
+    if len(lojas) == 1:
+        return lojas[0].conta
+    return f"{TODAS} ({plataforma or 'todas as plataformas'}, {len(lojas)} lojas)"
+
+
 def _filtros(
-    loja: ConciliacaoLoja,
+    lojas: list[ConciliacaoLoja],
     *,
     de: date | None,
     ate: date | None,
@@ -909,7 +936,9 @@ def _filtros(
     etapa: str | None,
     q: str | None,
 ) -> list[Any]:
-    conds: list[Any] = [ConciliacaoPedido.integration_id == loja.integration_id]
+    conds: list[Any] = [
+        ConciliacaoPedido.integration_id.in_([loja.integration_id for loja in lojas])
+    ]
     col = ConciliacaoPedido.liberado_em if data == "liberacao" else ConciliacaoPedido.data_pedido
     if de:
         conds.append(col >= datetime.combine(de, datetime.min.time(), tzinfo=_BRT))
@@ -1147,6 +1176,7 @@ async def listar_pedidos(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(_PERM_PAINEL)],
     loja: str | None = None,
+    plataforma: str | None = None,
     de: date | None = None,
     ate: date | None = None,
     data: Annotated[str, Query(pattern="^(pedido|liberacao)$")] = "pedido",
@@ -1156,9 +1186,10 @@ async def listar_pedidos(
     page: Annotated[int, Query(ge=1)] = 1,
     size: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> dict[str, Any]:
-    """Uma linha por pedido do Bling + os totais do filtro (os cartões e o rodapé)."""
-    alvo = await _loja_ou_404(session, loja)
-    conds = _filtros(alvo, de=de, ate=ate, data=data, situacao=situacao, etapa=etapa, q=q)
+    """Uma linha por pedido do Bling + os totais do filtro (os cartões e o rodapé).
+    `loja=todas` (+ `plataforma`) lista todas as lojas da aba de uma vez (19/10)."""
+    alvos = await _lojas_do_filtro(session, loja, plataforma)
+    conds = _filtros(alvos, de=de, ate=ate, data=data, situacao=situacao, etapa=etapa, q=q)
     base = select(ConciliacaoPedido).where(*conds)
     total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar() or 0
     rows = (
@@ -1217,7 +1248,8 @@ async def listar_pedidos(
     sobrou = somas[9] or Decimal("0")
     custo_liberados = somas[11] or Decimal("0")
     return {
-        "loja": alvo.conta,
+        "loja": _rotulo_das_lojas(alvos, plataforma),
+        "lojas": [loja.conta for loja in alvos],
         "total": total,
         "page": page,
         "size": size,
@@ -1354,6 +1386,26 @@ async def raio_x(
             else None,
             "tarifa": _soma("tarifa", liberacoes),
             "parcelamento": _soma("parcelamento", liberacoes),
+            # 19/10: a tarifa de venda do ML inclui a taxa de parcelamento (CVVFN) — é
+            # com isso que o `fee_amount` da venda se compara
+            "tarifa_total": (
+                round(
+                    (_soma("tarifa", liberacoes) or 0.0)
+                    + (_soma("parcelamento", liberacoes) or 0.0),
+                    2,
+                )
+                if (
+                    _soma("tarifa", liberacoes) is not None
+                    or _soma("parcelamento", liberacoes) is not None
+                )
+                else None
+            ),
+            # o que a linha tirou além de tarifa, parcelamento, frete e cupom (positivo = tirou)
+            "outros_descontos": (
+                round(-float(outros_descontos_do_extrato(liberacoes)), 2)
+                if any(m.bruto is not None and m.origem == ORIGEM_EXTRATO for m in liberacoes)
+                else None
+            ),
             "frete": frete_extrato,
             "frete_liquido": round(frete_extrato - frete_comprador, 2)
             if frete_extrato is not None
@@ -1965,15 +2017,36 @@ def _comparativo(
             n(e.get("valor")),
             estilo="bold",
         ),
-        linha("tarifa", "− Tarifa de venda", n(v.get("tarifa")), n(e.get("tarifa"))),
+        # 19/10 (marquezini 301744): a tarifa do ML inclui a taxa de parcelamento — comparar
+        # só o MP_FEE dizia "cobrou a menos" num pedido recebido a menos
+        linha(
+            "tarifa",
+            "− Tarifa de venda (com a taxa de parcelamento)",
+            n(v.get("tarifa")),
+            n(e.get("tarifa_total")),
+        ),
+        linha(
+            "parcelamento",
+            "dos quais taxa de parcelamento",
+            None,
+            n(e.get("parcelamento")),
+            compara=False,
+            estilo="muted",
+        ),
         linha(
             "frete",
             "− Frete Mercado Envios (inteiro)",
             n(v.get("frete_cobrado")),
             n(e.get("frete")),
         ),
-        linha("parcelamento", "− Parcelamento", None, n(e.get("parcelamento")), compara=False),
         linha("cupom", "− Cupom da loja", n(v.get("cupom")), n(e.get("cupom"))),
+        linha(
+            "outros_descontos",
+            "− Outros descontos no extrato (impostos, taxas avulsas — "
+            "ex.: divergência de dimensões)",
+            0.0 if e.get("outros_descontos") is not None else None,
+            n(e.get("outros_descontos")),
+        ),
         linha(
             "depois",
             "± Depois da liberação (estornos, mediações)",
@@ -1996,6 +2069,10 @@ def _comparativo(
         linhas = [x for x in linhas if x["chave"] not in ("frete_comprador", "total")]
     if plataforma != "ml":
         linhas = [x for x in linhas if x["chave"] != "a_parte"]
+    if not (e.get("outros_descontos") and abs(e["outros_descontos"]) > 0.005):
+        linhas = [x for x in linhas if x["chave"] != "outros_descontos"]
+    if not (e.get("parcelamento") and abs(e["parcelamento"]) > 0.005):
+        linhas = [x for x in linhas if x["chave"] != "parcelamento"]
     fl = n(v.get("frete"))
     return {
         "linhas": _fechar(linhas),
@@ -2135,6 +2212,7 @@ async def exportar_xlsx(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(_PERM_PAINEL)],
     loja: str | None = None,
+    plataforma: str | None = None,
     de: date | None = None,
     ate: date | None = None,
     data: Annotated[str, Query(pattern="^(pedido|liberacao)$")] = "pedido",
@@ -2144,8 +2222,8 @@ async def exportar_xlsx(
 ) -> StreamingResponse:
     from openpyxl import Workbook
 
-    alvo = await _loja_ou_404(session, loja)
-    conds = _filtros(alvo, de=de, ate=ate, data=data, situacao=situacao, etapa=etapa, q=q)
+    alvos = await _lojas_do_filtro(session, loja, plataforma)
+    conds = _filtros(alvos, de=de, ate=ate, data=data, situacao=situacao, etapa=etapa, q=q)
     rows = (
         (
             await session.execute(
@@ -2177,7 +2255,8 @@ async def exportar_xlsx(
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
-    nome = f"conciliacao_{alvo.conta}_{datetime.now(_BRT):%Y-%m-%d}.xlsx"
+    nome_loja = alvos[0].conta if len(alvos) == 1 else f"todas-{plataforma or 'lojas'}"
+    nome = f"conciliacao_{nome_loja}_{datetime.now(_BRT):%Y-%m-%d}.xlsx"
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2192,7 +2271,10 @@ async def exportar_xlsx(
 # inicial + créditos − débitos = saldo final = saldo informado pelo Mercado Pago.
 
 from app.models import BlingOrder, ConciliacaoDia, ConciliacaoSync  # noqa: E402
-from app.services.conciliacao_calculo import recalcular_loja  # noqa: E402
+from app.services.conciliacao_calculo import (  # noqa: E402
+    outros_descontos_do_extrato,
+    recalcular_loja,
+)
 from app.services.conciliacao_extrato import TIPOS_RESERVA as TIPOS_RESERVA_SET  # noqa: E402
 from app.services.conciliacao_extrato import bling_store_ids_da_loja  # noqa: E402
 

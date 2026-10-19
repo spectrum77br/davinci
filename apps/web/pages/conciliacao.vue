@@ -31,6 +31,7 @@ type Loja = {
 }
 type Pedido = {
   id: string
+  integration_id: string
   pedido_bling: string
   numeroloja: string | null
   pack_id: string | null
@@ -155,6 +156,10 @@ const semMarketplace = computed(() => visao.value === 'resumo' || visao.value ==
 const extratoDia = ref('')
 const lojas = ref<Loja[]>([])
 const loja = ref('')
+// 19/10 (Vinicius): "quero selecionar e verificar todas as lojas" — valor do filtro Loja
+// que lista todas as lojas da aba de uma vez (só na visão Pedidos; Extrato e Fechamento
+// são de uma loja)
+const TODAS = 'todas'
 const de = ref('')
 const ate = ref('')
 const dataFiltro = ref<'pedido' | 'liberacao'>('pedido')
@@ -253,6 +258,15 @@ async function removerTokenMe() {
 const lojaAtual = computed(() => lojas.value.find((l) => l.conta === loja.value) || null)
 // Cada aba mostra só as lojas da plataforma dela (15/10: Shopee entrou).
 const lojasDaAba = computed(() => lojas.value.filter((l) => l.platform === tab.value))
+// "De" padrão com todas as lojas: o início mais antigo entre elas
+const inicioDaAba = computed(() => lojasDaAba.value.map((l) => l.inicio).filter(Boolean).sort()[0] || '')
+const inicioPadrao = computed(() => (loja.value === TODAS ? inicioDaAba.value : lojaAtual.value?.inicio || ''))
+const lojaRotulo = computed(() => (loja.value === TODAS ? `todas as lojas (${lojasDaAba.value.length})` : loja.value))
+// A loja de uma linha da lista (com "todas as lojas" o filtro não diz qual é): a conta
+// gravada no pedido, senão a loja da integração, senão o filtro
+function contaDoPedido(p: Pedido): string {
+  return p.conta || lojas.value.find((l) => l.integration_id === p.integration_id)?.conta || loja.value
+}
 // Loja lida por arquivo (16/10, KFA: a Amazon nega a API): alguém envia o CSV de
 // Pagamentos › Visualizar transações › Fazer download.
 const lojasUpload = computed(() => lojasDaAba.value.filter((l) => l.modo_extrato === 'upload'))
@@ -328,6 +342,14 @@ function escolherLojaDaAba() {
     loja.value = ''
     return
   }
+  if (loja.value === TODAS) {
+    // "todas as lojas" vale na aba nova também; `loja` não muda, então a leitura é daqui
+    de.value = inicioDaAba.value
+    ate.value = ''
+    page.value = 1
+    carregar()
+    return
+  }
   if (!lojasDaAba.value.some((l) => l.conta === loja.value)) {
     loja.value = primeira.conta
     de.value = primeira.inicio
@@ -345,6 +367,7 @@ const pctBateu = computed(() => {
 
 function params() {
   const p: Record<string, string | number> = { loja: loja.value, data: dataFiltro.value, page: page.value, size: SIZE }
+  if (loja.value === TODAS) p.plataforma = tab.value // todas as lojas DESTA aba
   if (de.value) p.de = de.value
   if (ate.value) p.ate = ate.value
   if (situacao.value) p.situacao = situacao.value
@@ -410,7 +433,7 @@ async function abrir(p: Pedido) {
   motivoDraft.value = ''
   raioxLoading.value = true
   try {
-    const r = await api<RaioX>(`/api/conciliacao/pedidos/${encodeURIComponent(p.pedido_bling)}`, { query: { loja: p.conta || loja.value } })
+    const r = await api<RaioX>(`/api/conciliacao/pedidos/${encodeURIComponent(p.pedido_bling)}`, { query: { loja: contaDoPedido(p) } })
     if (seq !== raioxSeq) return
     raiox.value = r
     obsDraft.value = r.pedido.observacao || ''
@@ -432,7 +455,7 @@ async function marcar(patch: Record<string, unknown>) {
   try {
     const r = await api<{ pedido: Pedido }>(`/api/conciliacao/pedidos/${encodeURIComponent(selecionado.value.pedido_bling)}`, {
       method: 'PATCH',
-      body: { loja: selecionado.value?.conta || loja.value, ...patch },
+      body: { loja: contaDoPedido(selecionado.value), ...patch },
     })
     const i = itens.value.findIndex((x) => x.pedido_bling === r.pedido.pedido_bling)
     if (i >= 0) itens.value[i] = r.pedido
@@ -461,7 +484,7 @@ async function finalizar() {
 }
 
 async function sincronizar() {
-  if (!loja.value) return
+  if (!loja.value || loja.value === TODAS) return
   // 16/10, revisão: loja lida por arquivo (KFA) não tem o que sincronizar pela API —
   // o /sincronizar pulava o extrato e a mensagem dizia que tinha sincronizado.
   // Pra ela, "Sincronizar" é o mesmo que o ⟳: pedir o arquivo ao robô do Mac.
@@ -495,7 +518,8 @@ async function exportar() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `conciliacao_${String(rest.loja || loja.value)}_${hojeISO()}.xlsx`
+    const nomeLoja = rest.loja === TODAS ? `todas-${rest.plataforma || tab.value}` : String(rest.loja || loja.value)
+    a.download = `conciliacao_${nomeLoja}_${hojeISO()}.xlsx`
     a.click()
     URL.revokeObjectURL(url)
   } catch {
@@ -510,7 +534,7 @@ function verPedido(pedido: string) {
   q.value = pedido
   situacao.value = ''
   etapa.value = ''
-  de.value = lojaAtual.value?.inicio || ''
+  de.value = inicioPadrao.value
   ate.value = ''
   page.value = 1
   // a leitura vem do watch(visao → 'pedidos')
@@ -578,7 +602,7 @@ function limpar() {
   etapa.value = ''
   q.value = ''
   dataFiltro.value = 'pedido'
-  de.value = lojaAtual.value?.inicio || ''
+  de.value = inicioPadrao.value
   ate.value = ''
   page.value = 1
   carregar()
@@ -593,6 +617,8 @@ watch(page, () => carregar())
 // voltar pra ela relê (antes mostrava o pedido como estava antes do vínculo).
 watch(visao, (v) => {
   if (v === 'pedidos') carregar()
+  // Extrato e Fechamento são de uma loja só: "todas" vira a primeira da aba
+  if ((v === 'extrato' || v === 'fechamento') && loja.value === TODAS) loja.value = lojasDaAba.value[0]?.conta || ''
 })
 // 16/10 à noite: a URL acompanha a visão/aba/loja — o F5 volta pro mesmo lugar (antes
 // caía sempre no Resumo)
@@ -623,6 +649,9 @@ if (typeof q0.loja === 'string') {
     tab.value = alvo.platform
     loja.value = alvo.conta
     de.value = alvo.inicio
+  } else if (q0.loja === TODAS && q0.visao !== 'extrato' && q0.visao !== 'fechamento' && lojasDaAba.value.length) {
+    loja.value = TODAS
+    de.value = inicioDaAba.value
   }
 }
 if (typeof q0.situacao === 'string') situacao.value = q0.situacao
@@ -690,6 +719,7 @@ await carregar()
             <option v-for="l in lojasDaAba" :key="l.conta" :value="l.conta">{{ l.conta }}</option>
           </select>
         </label>
+        <span v-else-if="!semMarketplace && loja === TODAS" class="text-muted-foreground"><b>{{ lojaRotulo }}</b></span>
         <span v-else-if="!semMarketplace && lojaAtual" class="text-muted-foreground">loja <b>{{ loja }}</b></span>
         <button v-if="canEdit && tab === 'amazon'" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-semibold hover:bg-muted" title="Token do Melhor Envio (frete pago nos envios próprios)" @click="abrirTokenMe()">
           <KeyRound class="size-3.5" /> Melhor Envio
@@ -701,8 +731,8 @@ await carregar()
           v-if="canEdit && !semMarketplace"
           type="button"
           class="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 font-semibold text-primary-foreground"
-          :disabled="sincronizando"
-          title="Lê a fatura do ML e o extrato do Mercado Pago agora e recalcula os pedidos desta loja"
+          :disabled="sincronizando || loja === TODAS"
+          :title="loja === TODAS ? 'escolha uma loja no filtro pra sincronizar' : 'Lê a fatura do ML e o extrato do Mercado Pago agora e recalcula os pedidos desta loja'"
           @click="sincronizar()"
         >
           <Loader2 v-if="sincronizando" class="size-3.5 animate-spin" /><Wand2 v-else class="size-3.5" /> Sincronizar agora
@@ -723,6 +753,7 @@ await carregar()
       <label class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
         <span class="font-semibold text-muted-foreground">Loja</span>
         <select v-model="loja" class="bg-transparent outline-none">
+          <option :value="TODAS">Todas as lojas</option>
           <option v-for="l in lojasDaAba" :key="l.conta" :value="l.conta">{{ l.conta }}</option>
         </select>
       </label>
@@ -764,7 +795,7 @@ await carregar()
     </div>
 
     <div v-if="resumo" class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-2 text-xs">
-      <span class="text-sm font-bold">{{ loja }} · {{ resumo.pedidos }} pedidos</span>
+      <span class="text-sm font-bold">{{ lojaRotulo }} · {{ resumo.pedidos }} pedidos</span>
       <span class="inline-flex items-center gap-2">
         <span class="inline-block h-2.5 w-48 overflow-hidden rounded-full bg-muted"><span class="block h-full bg-emerald-600" :style="{ width: pctBateu + '%' }" /></span>
         <b>{{ (resumo.por_situacao.bateu || 0) + (resumo.por_situacao.cancelado || 0) }} de {{ resumo.pedidos }}</b> fechados
