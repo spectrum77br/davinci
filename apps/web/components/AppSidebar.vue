@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import {
   LayoutDashboard, Rocket, Plug, ContactRound, Users,
   Package, Megaphone, DollarSign, Undo2,
-  Receipt, TrendingUp, Settings, BarChart3,
+  Receipt, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
   ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, ShieldCheck, X, Scale,
@@ -137,6 +137,8 @@ type Item = {
   // itens antigos com `resource` aparecem para todos e a página manda para o
   // 403; o de Garantias (07/10/2026) já nasce escondido de quem não consulta.
   soComPermissao?: boolean
+  // Com soComPermissao: também aparece pra quem tem `view` num destes recursos.
+  tambemCom?: string[]
   featureFlag?: 'marketing'
   // Grupo unificado (lib/navGroups): o item destaca quando QUALQUER rota
   // do grupo está ativa, e some quando o usuário não pode ver nenhuma aba.
@@ -180,8 +182,9 @@ const sections = computed<Section[]>(() => [
       { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
       { to: '/marketing', label: 'Marketing', icon: BarChart3, featureFlag: 'marketing' },
       { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
-      { to: '/conciliacao?visao=margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
-      { to: '/conciliacao', label: 'Conciliação', icon: Scale, resource: 'conciliacao', soComPermissao: true },
+      // 19/10 (Vinicius): a Margem saiu do menu — já é aba da Conciliação. Quem só tem
+      // Margem continua chegando por aqui (a página aceita conciliacao OU margem).
+      { to: '/conciliacao', label: 'Conciliação', icon: Scale, resource: 'conciliacao', tambemCom: ['margem'], soComPermissao: true },
       { to: '/faturamento', label: 'Faturamento', icon: Coins, resource: 'faturamento' },
       { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },
     ],
@@ -316,7 +319,10 @@ const visibleSections = computed(() => {
         if (it.historicoOnly && auth.user?.historico !== true) return false
         if (it.atendimentoOnly && auth.user?.atendimento !== true) return false
         if (it.appUranyxOnly && auth.user?.app_uranyx !== true) return false
-        if (it.soComPermissao && it.resource && !auth.isAdmin && auth.user?.permissions?.[it.resource]?.view !== true) return false
+        if (
+          it.soComPermissao && it.resource && !auth.isAdmin
+          && ![it.resource, ...(it.tambemCom ?? [])].some((r) => auth.user?.permissions?.[r]?.view === true)
+        ) return false
         if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
         return true
       }),
