@@ -97,7 +97,7 @@ function montarCentral(props, respostas) {
     for (const [chave, valor] of Object.entries(respostas)) {
       if (url === chave || url.startsWith(`${chave}?`)) {
         if (url.includes('/lista?')) { await esperar(); await esperar() }
-        const v = typeof valor === 'function' ? valor(url, opts) : valor
+        const v = await (typeof valor === 'function' ? valor(url, opts) : valor)
         eventos.push(`respondeu ${url}`)
         if (v instanceof Error) throw v
         return structuredClone(v)
@@ -189,12 +189,14 @@ async function principal() {
     assert.equal((rotas.match(/mailbox = await readable_mailbox\(session, mailbox_id, user\)/g) || []).length, 2)
     // Os parâmetros que a tela manda, com os nomes que a rota lê.
     const lista = rotas.slice(rotas.indexOf('async def lista_da_caixa('))
-    for (const p of ['pasta', 'loja', 'antes', 'limite']) assert.match(lista, new RegExp(`\\n    ${p}: `), `lista: ${p}`)
+    for (const p of ['pasta', 'loja', 'antes', 'q', 'limite']) assert.match(lista, new RegExp(`\\n    ${p}: `), `lista: ${p}`)
     const pastas = rotas.slice(rotas.indexOf('async def pastas_da_caixa('), rotas.indexOf('async def lista_da_caixa('))
     for (const p of ['loja', 'pasta']) assert.match(pastas, new RegExp(`\\n    ${p}: `), `pastas: ${p}`)
+    // A lista monta os campos de resumo por helper comum, antes de filtrar a busca.
+    const resumos = rotas.slice(rotas.indexOf('async def _resumos_da_pagina('), rotas.indexOf('async def lista_da_caixa('))
     // Os campos que a tela lê são os que as rotas devolvem.
     for (const campo of ['itens', 'proximo', 'faltam', 'id', 'recebido_em', 'direcao', 'tem_anexos', 'ponte', 'selo', 'chave', 'provavel', 'de', 'de_nome', 'assunto', 'assunto_oculto', 'pasta', 'nome', 'tipo']) {
-      assert.ok(lista.includes(`"${campo}"`) || lista.includes(`${campo}=`), `lista: ${campo}`)
+      assert.ok((lista + resumos).includes(`"${campo}"`) || (lista + resumos).includes(`${campo}=`), `lista: ${campo}`)
     }
     for (const campo of ['pastas', 'lojas', 'faltam', 'id', 'nome', 'caminho', 'tipo', 'quantidade', 'total', 'chave']) assert.ok(pastas.includes(`"${campo}"`), `pastas: ${campo}`)
     for (const campo of ['tipo', 'rotulo', 'plataforma', 'loja']) assert.ok(rotas.includes(`"${campo}":`), `selo: ${campo}`)
@@ -431,6 +433,201 @@ async function principal() {
     assert.equal(m.estado.organizing, 0)
   }
 
+  // ------------------------------------------------ busca aplicada no servidor, combinada aos filtros
+  {
+    const m = montarCentral({ isAdmin: false }, {
+      '/api/mail/mailboxes': { items: [caixa] },
+      '/api/mail/mailboxes/box1/lista': (url) => {
+        const q = new URL(url, 'https://davinci.invalid').searchParams.get('q')
+        return q ? { itens: [item('encontrado', { assunto: 'Pedido antigo de João & Cia' })], proximo: null, faltam: 0 } : pagina1
+      },
+      '/api/mail/mailboxes/box1/pastas': pastasResp(),
+      '/api/mail/messages/e1': detalhe('e1'),
+    })
+    await m.montar()
+    let html = await m.html()
+    assert.match(html, /data-mail-search/, 'a busca existe também para quem só lê')
+    assert.match(html, /maxlength="120"/, 'o tamanho acompanha o limite do servidor')
+    await m.estado.openMessage('e1')
+    m.estado.draft = 'Não perder minha resposta em preparo'
+    m.estado.chooseFilter('folder', 's1'); await assentar()
+    m.estado.chooseFilter('store', LOJA_JLAS2); await assentar()
+    const antes = m.chamadas.length
+    m.estado.searchInput = '  João & Cia  '
+    await Vue.nextTick()
+    assert.equal(m.chamadas.length, antes, 'digitar não dispara uma varredura a cada letra')
+    await m.estado.submitSearch(); await assentar()
+    const chamadas = m.chamadas.slice(antes)
+    const q = new URL(chamadas.find((c) => c.url.includes('/lista?')).url, 'https://davinci.invalid').searchParams
+    assert.equal(q.get('q'), 'João & Cia')
+    assert.equal(q.get('pasta'), 's1')
+    assert.equal(q.get('loja'), LOJA_JLAS2)
+    assert.equal(q.get('antes'), null, 'uma busca nova começa na primeira página')
+    assert.equal(m.estado.searchTerm, 'João & Cia')
+    assert.deepEqual(m.estado.messages.map((i) => i.id), ['encontrado'])
+    assert.ok(chamadas.filter((c) => c.url.includes('/pastas')).every((c) => !new URL(c.url, 'https://davinci.invalid').searchParams.has('q')), 'contagens continuam sendo da pasta/loja, sem total fictício da busca')
+    assert.equal(m.estado.detail.id, 'e1')
+    assert.equal(m.estado.draft, 'Não perder minha resposta em preparo')
+    assert.equal(m.chamadas.filter((c) => c.metodo !== 'GET').length, 0, 'pesquisa nunca envia nem altera e-mail')
+    html = await m.html()
+    assert.match(html, /João &amp; Cia/, 'o termo é escapado no HTML')
+    await m.estado.clearSearch(); await assentar()
+    assert.equal(m.estado.searchTerm, '')
+    assert.equal(m.estado.searchInput, '')
+    assert.equal(m.estado.folderId, 's1')
+    assert.equal(m.estado.storeKey, LOJA_JLAS2)
+    assert.ok(!new URL(m.chamadas.filter((c) => c.url.includes('/lista?')).at(-1).url, 'https://davinci.invalid').searchParams.has('q'))
+    assert.equal(m.estado.draft, 'Não perder minha resposta em preparo')
+  }
+
+  // ------------------------------------------------ mudar acesso invalida pesquisa e fecha o corpo antigo
+  {
+    let versao = 'permissao-v1'
+    const m = montarCentral({ isAdmin: false }, {
+      '/api/mail/mailboxes': { items: [caixa] },
+      '/api/mail/mailboxes/box1/lista': (url) => {
+        if (!new URL(url, 'https://davinci.invalid').searchParams.has('q')) return pagina1
+        return versao === 'permissao-v1'
+          ? { itens: [item('e1'), item('venda-retirada')], proximo: 'cursor-do-acesso-antigo', faltam: 0 }
+          : { itens: [item('venda-permitida')], proximo: null, faltam: 0 }
+      },
+      '/api/mail/mailboxes/box1/pastas': () => ({ ...pastasResp(), acesso_versao: versao }),
+      '/api/mail/messages/e1': detalhe('e1'),
+    })
+    await m.montar()
+    await m.estado.openMessage('e1')
+    m.estado.draft = 'Rascunho que continua em memória'
+    m.estado.searchInput = 'pedido'
+    m.estado.submitSearch(); await assentar()
+    assert.deepEqual(m.estado.messages.map((i) => i.id), ['e1', 'venda-retirada'])
+    const antes = m.chamadas.filter((c) => c.url.includes('/lista?')).length
+    await m.estado.loadFolders(); await assentar()
+    assert.equal(m.chamadas.filter((c) => c.url.includes('/lista?')).length, antes, 'versão estável não reexecuta busca')
+    versao = 'permissao-v2'
+    await m.estado.loadFolders()
+    for (let i = 0; i < 3; i++) await assentar()
+    assert.equal(m.estado.detail, null, 'mudança de autorização fecha imediatamente o corpo anterior')
+    assert.equal(m.estado.openedSummary, null)
+    assert.equal(m.estado.draft, 'Rascunho que continua em memória')
+    assert.equal(m.estado.searchTerm, 'pedido')
+    assert.deepEqual(m.estado.messages.map((i) => i.id), ['venda-permitida'], 'mensagens de loja/venda revogada não ficam nos resultados')
+    assert.equal(m.estado.nextCursor, null, 'cursor do escopo antigo é descartado')
+    const nova = m.chamadas.filter((c) => c.url.includes('/lista?')).at(-1)
+    assert.ok(!new URL(nova.url, 'https://davinci.invalid').searchParams.has('antes'))
+    assert.equal(m.chamadas.filter((c) => c.metodo !== 'GET').length, 0)
+  }
+
+  // ------------------------------------------------ revogação da caixa durante uma pesquisa fecha o cache
+  for (const status of [403, 404]) {
+    let revogado = false
+    const m = montarCentral({ isAdmin: false }, {
+      '/api/mail/mailboxes': { items: [caixa] },
+      '/api/mail/mailboxes/box1/lista': pagina1,
+      '/api/mail/mailboxes/box1/pastas': () => revogado
+        ? Object.assign(new Error('Sem acesso'), { status }) : { ...pastasResp(), acesso_versao: 'v1' },
+      '/api/mail/messages/e1': detalhe('e1'),
+    })
+    await m.montar()
+    await m.estado.openMessage('e1')
+    m.estado.draft = 'Preservar a resposta em preparo'
+    m.estado.searchInput = 'pedido'
+    m.estado.submitSearch(); await assentar()
+    assert.equal(m.estado.messages.length, 3)
+    revogado = true
+    await m.estado.loadFolders(); await assentar()
+    assert.equal(m.estado.messages.length, 0, `acesso ${status} remove resultados em cache`)
+    assert.equal(m.estado.detail, null)
+    assert.equal(m.estado.openedSummary, null)
+    assert.equal(m.estado.more, false)
+    assert.equal(m.estado.draft, 'Preservar a resposta em preparo')
+  }
+
+  // ------------------------------------------------ a coincidência pode estar após páginas vazias
+  {
+    const chamadasBusca = []
+    const cursorDe = (n) => `176000760000000${n}_00000000-0000-4000-8000-0000000000e3`
+    const m = montarCentral({ isAdmin: true }, {
+      '/api/mail/mailboxes': { items: [caixa] },
+      '/api/mail/mailboxes/box1/lista': (url) => {
+        const params = new URL(url, 'https://davinci.invalid').searchParams
+        if (!params.has('q')) return pagina1
+        chamadasBusca.push(params.get('antes'))
+        const ponto = params.get('antes')
+        const n = ponto ? Number(ponto.split('_')[0].at(-1)) : 0
+        return n < 5
+          ? { itens: [], proximo: cursorDe(n + 1), faltam: 0 }
+          : { itens: [item('email-antigo')], proximo: null, faltam: 0 }
+      },
+      '/api/mail/mailboxes/box1/pastas': pastasResp(),
+    })
+    await m.montar()
+    m.estado.searchInput = 'email antigo'
+    await m.estado.submitSearch()
+    for (let i = 0; i < 5; i++) await assentar()
+    assert.deepEqual(chamadasBusca, [null, cursorDe(1), cursorDe(2), cursorDe(3), cursorDe(4)], 'avança com segurança, com teto de cinco páginas vazias por leitura')
+    assert.equal(m.estado.messages.length, 0)
+    assert.equal(m.estado.more, true)
+    let html = await m.html()
+    assert.match(html, /Continuar busca/)
+    assert.doesNotMatch(html, /Nenhuma mensagem recebida pelo conector|Nenhum e-mail encontrado/, 'não declara busca encerrada enquanto há cursor')
+    await m.estado.loadMessages(true); await assentar()
+    assert.deepEqual(m.estado.messages.map((i) => i.id), ['email-antigo'])
+    assert.equal(m.estado.more, false)
+    assert.equal(chamadasBusca.at(-1), cursorDe(5))
+    const antesDoPoll = chamadasBusca.length
+    await m.estado.refresh(true)
+    assert.equal(chamadasBusca.length, antesDoPoll, 'polling não reinicia a varredura nem apaga resultados antigos')
+    assert.deepEqual(m.estado.messages.map((i) => i.id), ['email-antigo'])
+    await m.estado.clearSearch(); await assentar()
+    assert.deepEqual(m.estado.messages.map((i) => i.id), ['e1', 'e2', 'e3'])
+  }
+
+  // ------------------------------------------------ busca antiga atrasada não substitui o termo atual
+  {
+    let liberar
+    const antiga = new Promise((resolve) => { liberar = resolve })
+    const m = montarCentral({ isAdmin: true }, {
+      '/api/mail/mailboxes': { items: [caixa] },
+      '/api/mail/mailboxes/box1/lista': (url) => {
+        const q = new URL(url, 'https://davinci.invalid').searchParams.get('q')
+        if (q === 'antiga') return antiga
+        return q === 'nova' ? { itens: [item('nova')], proximo: null, faltam: 0 } : pagina1
+      },
+      '/api/mail/mailboxes/box1/pastas': pastasResp(),
+    })
+    await m.montar()
+    m.estado.searchInput = 'antiga'
+    const primeira = m.estado.submitSearch()
+    await assentar()
+    m.estado.searchInput = 'nova'
+    const segunda = m.estado.submitSearch()
+    await assentar()
+    liberar({ itens: [item('resultado-obsoleto')], proximo: null, faltam: 0 })
+    await primeira; await segunda
+    for (let i = 0; i < 3; i++) await assentar()
+    assert.equal(m.estado.searchTerm, 'nova')
+    assert.deepEqual(m.estado.messages.map((i) => i.id), ['nova'])
+    assert.ok(!m.chamadas.some((c) => c.url.includes('/messages?')))
+  }
+
+  // ------------------------------------------------ rota ausente não pode ignorar o texto da pesquisa
+  for (const status of [404, 405, 500]) {
+    const m = montarCentral({ isAdmin: true }, {
+      '/api/mail/mailboxes': { items: [caixa] },
+      '/api/mail/mailboxes/box1/lista': (url) => new URL(url, 'https://davinci.invalid').searchParams.has('q')
+        ? Object.assign(new Error('Falha de busca'), { status }) : pagina1,
+      '/api/mail/mailboxes/box1/pastas': pastasResp(),
+      '/api/mail/mailboxes/box1/messages': { items: [{ ...detalhe('indevido'), subject: 'Assunto que não pode vazar pelo fallback' }], more: false },
+    })
+    await m.montar()
+    m.estado.searchInput = 'Pedido X'
+    await m.estado.submitSearch(); await assentar()
+    assert.ok(!m.chamadas.some((c) => c.url.includes('/messages?')), `busca com falha ${status} não abre lista legada sem filtro`)
+    assert.equal(m.estado.messages.length, 0)
+    assert.ok(m.estado.error)
+    assert.doesNotMatch(await m.html(), /Assunto que não pode vazar/)
+  }
+
   // ------------------------------------------------ a pasta escolhida sumiu: volta para "Todas"
   {
     let sumiu = false
@@ -522,7 +719,7 @@ async function principal() {
     assert.equal(m.estado.folderId, 's1')
   }
 
-  console.log('ok — atendimento-mail-caixa: contrato, selo, coluna de pastas, seletores, lista pelo índice, filtros combinados, paginação, cabeçalho, volta para a lista antiga só sem a rota, erro do servidor e com filtro')
+  console.log('ok — atendimento-mail-caixa: contrato, selo, pastas, filtros, paginação, busca no servidor, páginas vazias, resposta atrasada, polling e fallback seguro')
 }
 
 principal().catch((erro) => { console.error(erro); process.exitCode = 1 })

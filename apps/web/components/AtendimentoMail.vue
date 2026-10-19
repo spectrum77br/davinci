@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Download, Folder, Mail, MessageSquare, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-vue-next'
+import { Download, Folder, Mail, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import type { ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 
@@ -76,6 +76,9 @@ const folders = ref<FolderItem[]>([])
 const mailStores = ref<StoreItem[]>([])
 const folderId = ref<string | null>(null)
 const storeKey = ref<string | null>(null)
+const searchInput = ref('')
+const searchTerm = ref('')
+const accessVersion = ref<string | null>(null)
 const nextCursor = ref<string | null>(null)
 const listSource = ref<'index' | 'plain'>('plain')
 // Emails the index still has to sort (the worker job catches up in ~1 min).
@@ -208,17 +211,18 @@ function indexRouteMissing(reason: any) {
   return status === 404 || status === 405
 }
 
-async function loadIndexed(id: string, append: boolean) {
+async function loadIndexed(id: string, append: boolean, cursor = nextCursor.value) {
   const query = new URLSearchParams({ limite: '50' })
   if (folderId.value) query.set('pasta', folderId.value)
   if (storeKey.value) query.set('loja', storeKey.value)
-  if (append && nextCursor.value) query.set('antes', nextCursor.value)
+  if (searchTerm.value) query.set('q', searchTerm.value)
+  if (append && cursor) query.set('antes', cursor)
   const result = await api<{ itens: IndexItem[]; proximo: string | null; faltam: number }>(`/api/mail/mailboxes/${id}/lista?${query}`, READ_OPTIONS)
   return { items: result.itens.map(fromIndex), next: result.proximo, missing: result.faltam }
 }
 
 function listKey() {
-  return JSON.stringify([mailboxId.value, folderId.value, storeKey.value, selectionEpoch])
+  return JSON.stringify([mailboxId.value, folderId.value, storeKey.value, searchTerm.value, selectionEpoch])
 }
 
 async function loadFolders(): Promise<void> {
@@ -244,8 +248,10 @@ async function readFolders(key: string) {
   if (storeKey.value) query.set('loja', storeKey.value)
   const search = query.toString()
   try {
-    const result = await api<{ pastas: FolderItem[]; lojas: StoreItem[]; faltam: number }>(`/api/mail/mailboxes/${id}/pastas${search ? `?${search}` : ''}`, READ_OPTIONS)
+    const result = await api<{ pastas: FolderItem[]; lojas: StoreItem[]; faltam: number; acesso_versao?: string }>(`/api/mail/mailboxes/${id}/pastas${search ? `?${search}` : ''}`, READ_OPTIONS)
     if (disposed || section.value === 'admin' || generation !== foldersGeneration || key !== listKey()) return
+    const scopeChanged = accessVersion.value !== null && !!result.acesso_versao && accessVersion.value !== result.acesso_versao
+    if (result.acesso_versao) accessVersion.value = result.acesso_versao
     folders.value = result.pastas
     mailStores.value = result.lojas
     organizing.value = result.faltam
@@ -255,13 +261,26 @@ async function readFolders(key: string) {
     const lostStore = !!storeKey.value && !result.lojas.some((item) => item.chave === storeKey.value)
     if (lostFolder) folderId.value = null
     if (lostStore) storeKey.value = null
-    if (lostFolder || lostStore) {
+    if (scopeChanged) {
+      // Store/order access can change without removing the mailbox itself.
+      // Close cached content; the person's unsent draft stays in memory.
+      ++detailGeneration
+      detail.value = null; openedSummary.value = null
+      deleteTarget.value = null; deleteReason.value = ''
+      lastDetailAt = 0
+    }
+    if (lostFolder || lostStore || scopeChanged) {
       resetList()
       void loadList()
     }
   } catch (reason) {
     if (!disposed && generation === foldersGeneration && key === listKey() && accessLost(reason)) {
+      const legacyRouteMissing = listSource.value === 'plain' && !searchTerm.value && !folderId.value && !storeKey.value && indexRouteMissing(reason)
       folders.value = []; mailStores.value = []; organizing.value = 0
+      if (!legacyRouteMissing) {
+        resetList()
+        ++detailGeneration; detail.value = null; openedSummary.value = null
+      }
     }
     // Keeps the column it had; without the routes there is no column at all.
   }
@@ -293,6 +312,24 @@ function chooseFilter(kind: 'folder' | 'store', value: string | null) {
   else storeKey.value = value
   resetList()
   void loadList()
+}
+
+// Search runs on Enter/Buscar: encrypted mail is searched on the server,
+// beyond the loaded page. Changing the list never discards an open reply.
+function submitSearch() {
+  if (sending.value || deleting.value || disposed || !mailboxId.value || section.value !== 'mailboxes') return
+  const term = searchInput.value.trim().slice(0, 120)
+  searchInput.value = term
+  if (term === searchTerm.value) { void refresh(); return }
+  searchTerm.value = term
+  error.value = ''
+  resetList()
+  void loadList()
+}
+
+function clearSearch() {
+  searchInput.value = ''
+  submitSearch()
 }
 
 async function loadMailboxes() {
@@ -364,13 +401,19 @@ async function readMessages(append: boolean, preservePages: boolean, key: string
   const current = () => !disposed && !deleting.value && section.value !== 'admin' && generation === listGeneration && key === listKey()
   try {
     if (!append || listSource.value === 'index') {
-      const indexed = await loadIndexed(id, append).catch((reason) => {
+      let indexed = await loadIndexed(id, append).catch((reason) => {
         // Filters require the index; only a missing unfiltered route falls back.
-        if (append || folderId.value || storeKey.value || !indexRouteMissing(reason)) throw reason
+        if (append || folderId.value || storeKey.value || searchTerm.value || !indexRouteMissing(reason)) throw reason
         return null
       })
       if (!current()) return
       if (indexed) {
+        // A limited scan may return no matches yet, with older mail remaining.
+        // Continue a few pages automatically; keep a cursor for larger boxes.
+        for (let page = 1; searchTerm.value && !indexed.items.length && indexed.next && page < 5; page++) {
+          indexed = await loadIndexed(id, true, indexed.next)
+          if (!current()) return
+        }
         applyPage(indexed.items, append, preservePages, !!indexed.next, indexed.next, 'index')
         organizing.value = indexed.missing
         return
@@ -439,7 +482,10 @@ async function refresh(background = false): Promise<void> {
       if (full || Date.now() - lastMailboxesAt >= METADATA_MS) await loadMailboxes()
       if (disposed || deleting.value || section.value === 'admin' || (background && document.hidden)) return
       const key = listKey()
-      await loadMessages(false, !full)
+      // Keep the search and its older pages until an explicit refresh. A
+      // five-second poll must not repeatedly decrypt the same mailbox or
+      // replace progress with an empty first scan. Access/detail still refresh.
+      if (full || !searchTerm.value) await loadMessages(false, !full)
       if (disposed || deleting.value || section.value === 'admin' || key !== listKey() || (background && document.hidden)) return
       if (manualRefreshRequested && !full) continue
       if (full || organizing.value || Date.now() - lastFoldersAt >= METADATA_MS) await loadFolders()
@@ -490,6 +536,7 @@ watch(mailboxId, () => {
   deleteReason.value = ''
   lastFoldersAt = 0
   lastDetailAt = 0
+  accessVersion.value = null
   void loadList()
 })
 
@@ -746,6 +793,18 @@ onBeforeUnmount(() => {
           @fechar="configuring = false"
         />
 
+        <form class="space-y-2" role="search" aria-label="Pesquisar nesta caixa de e-mail" data-mail-search @submit.prevent="submitSearch">
+          <div class="flex gap-2">
+            <div class="flex min-w-0 flex-1 items-center gap-2 rounded-md border bg-background px-3 focus-within:ring-2 focus-within:ring-primary/40">
+              <Search class="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <input v-model="searchInput" type="search" maxlength="120" autocomplete="off" class="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none" placeholder="Pesquisar por assunto, remetente ou loja" aria-label="Assunto, nome ou e-mail do remetente, ou loja" :disabled="sending || deleting" data-mail-search-input />
+              <button v-if="searchInput || searchTerm" type="button" class="rounded p-1 text-muted-foreground hover:text-foreground" :disabled="sending || deleting" aria-label="Limpar pesquisa de e-mails" data-mail-search-clear @click="clearSearch"><X class="h-4 w-4" /></button>
+            </div>
+            <button type="submit" class="inline-flex shrink-0 items-center gap-2 rounded-md border px-3 py-2 text-sm" :disabled="sending || deleting" data-mail-search-submit>Buscar</button>
+          </div>
+          <p v-if="searchTerm" class="text-xs text-muted-foreground" role="status" data-mail-search-status>Resultados para “{{ searchTerm }}” nesta caixa{{ folderId || storeKey ? ', com os filtros de pasta e loja selecionados' : '' }}. Use Atualizar para incluir novos e-mails.</p>
+        </form>
+
         <!-- Like Tuta: folders (and stores) | list | reading. Below xl the folder and store selectors sit on top of the list. -->
         <div class="grid min-h-[520px] overflow-hidden rounded-lg border" :class="folders.length ? 'lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[230px_340px_minmax(0,1fr)]' : 'lg:grid-cols-[340px_1fr]'">
           <AtendimentoMailPastasDaCaixa
@@ -774,8 +833,8 @@ onBeforeUnmount(() => {
                 @loja="(value: string | null) => chooseFilter('store', value)"
               />
               <div class="flex min-w-0 items-center gap-2">
-                <h3 class="min-w-0 truncate text-sm font-semibold">{{ currentFolder?.nome || 'Todas' }}</h3>
-                <span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{ (currentFolder?.quantidade ?? 0).toLocaleString('pt-BR') }}</span>
+                <h3 class="min-w-0 truncate text-sm font-semibold">{{ searchTerm ? 'Resultados' : currentFolder?.nome || 'Todas' }}</h3>
+                <span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{ searchTerm ? `${messages.length.toLocaleString('pt-BR')}${more ? '+' : ''}` : (currentFolder?.quantidade ?? 0).toLocaleString('pt-BR') }}</span>
                 <button
                   v-if="currentStore"
                   type="button"
@@ -788,7 +847,9 @@ onBeforeUnmount(() => {
               </div>
               <p v-if="organizing" class="text-xs text-muted-foreground" data-mail-organizing>Organizando {{ organizing.toLocaleString('pt-BR') }} e-mail(s) por pasta e loja — as contagens se completam em instantes.</p>
             </div>
-            <p v-if="loading && !messages.length" class="p-5 text-sm text-muted-foreground">Carregando mensagens…</p>
+            <p v-if="loading && !messages.length" class="p-5 text-sm text-muted-foreground" role="status">{{ searchTerm ? 'Pesquisando e-mails…' : 'Carregando mensagens…' }}</p>
+            <p v-else-if="!messages.length && searchTerm && error" class="p-5 text-sm text-muted-foreground">Não foi possível concluir a pesquisa. Tente Buscar novamente.</p>
+            <p v-else-if="!messages.length && searchTerm" class="p-5 text-sm text-muted-foreground" role="status" data-mail-search-empty>{{ more ? 'Ainda há e-mails para pesquisar. Continue a busca para procurar nas mensagens mais antigas.' : 'Nenhum e-mail encontrado para esta pesquisa nos filtros selecionados.' }}</p>
             <p v-else-if="!messages.length && (folderId || storeKey)" class="p-5 text-sm text-muted-foreground">{{ folderId ? (storeKey ? 'Nenhum e-mail desta loja nesta pasta.' : 'Nenhum e-mail nesta pasta.') : 'Nenhum e-mail desta loja.' }}</p>
             <p v-else-if="!messages.length" class="p-5 text-sm text-muted-foreground">Nenhuma mensagem recebida pelo conector ainda. Os originais continuam no Tuta.</p>
             <button v-for="item in messages" :key="item.id" :disabled="sending || deleting" class="block w-full space-y-1 border-b p-4 text-left hover:bg-muted/40" :class="detail?.id === item.id ? 'bg-muted' : ''" :data-mail-item="item.id" @click="openMessage(item.id)">
@@ -814,7 +875,7 @@ onBeforeUnmount(() => {
                 <div class="flex justify-between gap-2 text-xs text-muted-foreground"><span>{{ date(item.received_at) }}</span><span>{{ item.direction === 'sent' ? 'Enviado' : item.has_attachments ? 'Com anexo' : '' }}</span></div>
               </template>
             </button>
-            <button v-if="more" class="w-full p-3 text-sm text-primary" :disabled="loading || deleting" @click="loadMessages(true)">Carregar mais</button>
+            <button v-if="more" class="w-full p-3 text-sm text-primary" :disabled="loading || deleting" data-mail-load-more @click="loadMessages(true)">{{ searchTerm ? (loading ? 'Pesquisando…' : 'Continuar busca') : 'Carregar mais' }}</button>
           </aside>
 
           <article v-if="detail" class="min-w-0 space-y-5 p-5">

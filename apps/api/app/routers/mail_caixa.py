@@ -11,11 +11,14 @@ visualmente igual ao Tuta".
       quantidade (+ sem loja, segurança, privado). Com `loja`, a quantidade
       das pastas é só a daquela loja; com `pasta`, a das lojas é só a daquela
       pasta (`total` = sem o filtro).
-  GET /api/mail/mailboxes/{id}/lista?pasta=&loja=&antes=&limite=
+  GET /api/mail/mailboxes/{id}/lista?pasta=&loja=&q=&antes=&limite=
       Uma página de resumos, o mais novo primeiro: data, direção, remetente,
       assunto, anexos, a pasta e o SELO da loja — nunca o texto. O de
       SEGURANÇA não traz o assunto ("e-mail de acesso/código"). `antes` = o
-      `proximo` da página anterior. `conversa_id` (13/10/2026) = a conversa
+      `proximo` da página anterior. `q` busca assunto visível, remetente e
+      loja sem acentos/maiúsculas, junto dos filtros; percorre lotes limitados
+      e devolve continuação mesmo em página sem coincidência.
+      `conversa_id` (13/10/2026) = a conversa
       de E-MAIL da ponte onde está o e-mail (`separa_email`), só para quem vê
       o /atendimento e no escopo da equipe — a aba E-mail abre a conversa por
       ela (vincular ao pedido, responder) sem passar pela Caixa do chat. O
@@ -33,7 +36,10 @@ disto muda a ponte nem a Central. Texto de e-mail nunca vai para o log.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
@@ -46,8 +52,9 @@ from app.db import get_session
 from app.deps.auth import require_active_user
 from app.deps.team_scope import resolve_team_scope
 from app.models import AtendimentoConversa, Integration, Marca, StoreInfo
-from app.models.mail import MailMessage
-from app.models.mail_atendimento import MailCaixaIndice
+from app.models.mail import MailMailbox, MailMessage
+from app.models.mail_admin import MailAcesso, MailLixeira
+from app.models.mail_atendimento import MailCaixaIndice, MailMailboxSettings
 from app.models.user import User
 from app.routers.atendimento import _nomes_das_lojas
 from app.routers.mail import readable_mailbox
@@ -61,6 +68,10 @@ Session = Annotated[AsyncSession, Depends(get_session)]
 ActiveUser = Annotated[User, Depends(require_active_user)]
 
 POR_PAGINA = 50
+# Conteúdo cifrado: a busca varre só resumos autorizados, em lotes limitados.
+# O cursor avança mesmo se o lote não contiver resultado; o cliente continua.
+BUSCA_LOTE = 200
+BUSCA_LOTES = 10
 _RE_PASTA = re.compile(r"^(s\d{1,2}|p[0-9a-f]{31}|x)$")
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _RE_LOJA = re.compile(rf"^([fim]:{_UUID}|sem_loja|seguranca|privado)$")
@@ -299,6 +310,60 @@ async def _nomes_das_pastas(
     return saida
 
 
+async def _acesso_versao(session: AsyncSession, mailbox: MailMailbox, user: User) -> str:
+    """Invalida pesquisa parada quando muda acesso, sem expor a política.
+
+    Não inclui heartbeat/sync nem a chegada de novos e-mails: a pessoa pode
+    percorrer os resultados sem a lista recomeçar a cada atualização do Mac.
+    """
+    politica = await session.get(MailAcesso, (mailbox.id, user.id), populate_existing=True)
+    settings = await session.get(MailMailboxSettings, mailbox.id, populate_existing=True)
+    scope = await resolve_team_scope(session, user)
+    lixeira = (
+        await session.execute(
+            select(func.max(MailLixeira.updated_at), func.count())
+            .join(MailMessage, MailMessage.id == MailLixeira.message_id)
+            .where(MailMessage.mailbox_id == mailbox.id)
+        )
+    ).one()
+    payload = {
+        "mailbox": str(mailbox.id),
+        "owner": str(mailbox.owner_user_id),
+        "config": hashlib.sha256(bytes(mailbox.config_enc)).hexdigest(),
+        "user": str(user.id),
+        "role": user.role,
+        "status": user.status,
+        "permissions": user.permissions,
+        "sales_teams": sorted(user.sales_teams or []),
+        "stock_tags": sorted(user.stock_tags or []),
+        "pode_ver": acesso.pode_ver(user),
+        "pode_mexer": acesso.pode_mexer(user),
+        "scope": [scope.unrestricted, sorted(str(x) for x in scope.integration_ids)],
+        "settings": {
+            "visibilidade": settings.visibilidade,
+            "leitor": str(user.id) in (settings.leitores or []),
+            "leitores_updated_at": settings.leitores_updated_at,
+        }
+        if settings
+        else None,
+        "politica": {
+            campo: getattr(politica, campo)
+            for campo in (
+                "modo",
+                "lojas_permitidas",
+                "lojas_bloqueadas",
+                "tipos_permitidos",
+                "pedidos_permitidos",
+                "updated_at",
+            )
+        }
+        if politica
+        else None,
+        "lixeira": list(lixeira),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
 @router.get("/mailboxes/{mailbox_id}/pastas")
 async def pastas_da_caixa(
     mailbox_id: UUID,
@@ -389,6 +454,7 @@ async def pastas_da_caixa(
         ],
         "lojas": lojas,
         "faltam": faltam,
+        "acesso_versao": await _acesso_versao(session, mailbox, user),
     }
 
 
@@ -416,49 +482,38 @@ async def _conversas_abriveis(session: AsyncSession, user: User, ids: set[UUID])
     }
 
 
-@router.get("/mailboxes/{mailbox_id}/lista")
-async def lista_da_caixa(
-    mailbox_id: UUID,
-    session: Session,
-    user: ActiveUser,
-    response: Response,
-    pasta: str | None = Query(default=None, max_length=40),
-    loja: str | None = Query(default=None, max_length=40),
-    antes: str | None = Query(default=None, max_length=64),
-    limite: int = Query(default=POR_PAGINA, ge=1, le=100),
-) -> dict[str, Any]:
-    mailbox = await readable_mailbox(session, mailbox_id, user)
-    pasta, loja, depois_de = _pasta(pasta), _loja(loja), _antes(antes)
-    base, faltam = await indice.preparar(session, mailbox)
-    await session.commit()
-    if faltam:
-        faltando = (
-            indice._faltando(base, so_urgente=True)
-            .where(mail_admin.filtro_mensagem(user))
-            .subquery()
-        )
-        faltam = int(await session.scalar(select(func.count()).select_from(faltando)) or 0)
+def normalizar_busca(texto: str) -> str:
+    """Busca sem acento/caixa, sem persistir conteúdo ou texto pesquisado."""
+    normal = unicodedata.normalize("NFKD", texto.casefold())
+    return " ".join("".join(c for c in normal if not unicodedata.combining(c)).split())
 
-    caixa = indice.linhas_da_caixa(mailbox.id)
-    q = (
-        select(caixa)
-        .where(mail_admin.filtro_mensagem(user, caixa.c.message_id))
-        .order_by(caixa.c.recebido_em.desc(), caixa.c.message_id.desc())
-    )
-    if pasta is not None:
-        q = q.where(caixa.c.pasta_chave == pasta)
-    if loja is not None:
-        q = q.where(caixa.c.chave.in_(indice.equivalentes(loja, base.cad)))
-    if depois_de is not None:
-        q = q.where(
-            tuple_(caixa.c.recebido_em, caixa.c.message_id)
-            < tuple_(
-                literal(depois_de[0], DateTime(timezone=True)),
-                literal(depois_de[1], Uuid()),
-            )
+
+def _coincide(item: dict[str, Any], busca: str) -> bool:
+    # A pesquisa nunca compara o assunto bruto: o que não aparece no resumo
+    # também não pode ser descoberto observando acertos ou páginas vazias.
+    selo = item["selo"]
+    visivel = " ".join(
+        str(v or "")
+        for v in (
+            item.get("assunto"),
+            item.get("de"),
+            item.get("de_nome"),
+            selo.get("rotulo"),
+            selo.get("loja"),
+            selo.get("plataforma"),
         )
-    linhas = (await session.execute(q.limit(limite + 1))).all()
-    pagina = linhas[:limite]
+    )
+    return busca in normalizar_busca(visivel)
+
+
+async def _resumos_da_pagina(
+    session: AsyncSession,
+    user: User,
+    pagina: list,
+    cad: rotear.Cadastro,
+    selos_cache: dict[str, dict] | None = None,
+) -> list[dict[str, Any]]:
+    """Decifra só as linhas que já passaram pela autorização SQL."""
     mensagens = (
         {
             m.id: m
@@ -471,8 +526,11 @@ async def lista_da_caixa(
         if pagina
         else {}
     )
-    chaves = {indice.canonica(r.chave, base.cad) for r in pagina}
-    selos = await rotulos(session, chaves, base.cad)
+    chaves = {indice.canonica(r.chave, cad) for r in pagina}
+    selos = selos_cache if selos_cache is not None else {}
+    novas = chaves - selos.keys()
+    if novas:
+        selos.update(await rotulos(session, novas, cad))
     abriveis = await _conversas_abriveis(
         session, user, {r.conversa_id for r in pagina if r.conversa_id is not None}
     )
@@ -483,7 +541,7 @@ async def lista_da_caixa(
         if message is None:  # apagado agora há pouco
             continue
         seguro = r.selo == indice.SELO_SEGURANCA
-        chave = indice.canonica(r.chave, base.cad)
+        chave = indice.canonica(r.chave, cad)
         item: dict[str, Any] = {
             "id": str(r.message_id),
             "recebido_em": message.received_at,
@@ -517,12 +575,84 @@ async def lista_da_caixa(
                 pasta={"id": r.pasta_chave, "nome": indice.NOME_ILEGIVEL, "tipo": "ilegivel"},
             )
         itens.append(item)
+    return itens
+
+
+@router.get("/mailboxes/{mailbox_id}/lista")
+async def lista_da_caixa(
+    mailbox_id: UUID,
+    session: Session,
+    user: ActiveUser,
+    response: Response,
+    pasta: str | None = Query(default=None, max_length=40),
+    loja: str | None = Query(default=None, max_length=40),
+    antes: str | None = Query(default=None, max_length=64),
+    q: str | None = Query(default=None, max_length=120),
+    limite: int = Query(default=POR_PAGINA, ge=1, le=100),
+) -> dict[str, Any]:
+    mailbox = await readable_mailbox(session, mailbox_id, user)
+    pasta, loja, depois_de = _pasta(pasta), _loja(loja), _antes(antes)
+    busca = normalizar_busca(q or "")
+    base, faltam = await indice.preparar(session, mailbox)
+    await session.commit()
+    if faltam:
+        faltando = (
+            indice._faltando(base, so_urgente=True)
+            .where(mail_admin.filtro_mensagem(user))
+            .subquery()
+        )
+        faltam = int(await session.scalar(select(func.count()).select_from(faltando)) or 0)
+
+    caixa = indice.linhas_da_caixa(mailbox.id)
+    consulta = select(caixa).where(mail_admin.filtro_mensagem(user, caixa.c.message_id))
+    if pasta is not None:
+        consulta = consulta.where(caixa.c.pasta_chave == pasta)
+    if loja is not None:
+        consulta = consulta.where(caixa.c.chave.in_(indice.equivalentes(loja, base.cad)))
+
+    itens: list[dict[str, Any]] = []
+    selos_cache: dict[str, dict] = {}
+    ultimo, tem_mais = None, False
+    tamanho = BUSCA_LOTE if busca else limite
+    # Sem busca, conserva a mesma página e o mesmo cursor de antes.
+    for _ in range(BUSCA_LOTES if busca else 1):
+        pagina_sql = consulta
+        if depois_de is not None:
+            pagina_sql = pagina_sql.where(
+                tuple_(caixa.c.recebido_em, caixa.c.message_id)
+                < tuple_(
+                    literal(depois_de[0], DateTime(timezone=True)), literal(depois_de[1], Uuid())
+                )
+            )
+        linhas = (
+            await session.execute(
+                pagina_sql.order_by(caixa.c.recebido_em.desc(), caixa.c.message_id.desc()).limit(
+                    tamanho + 1
+                )
+            )
+        ).all()
+        pagina = linhas[:tamanho]
+        resumos = {
+            item["id"]: item
+            for item in await _resumos_da_pagina(session, user, pagina, base.cad, selos_cache)
+        }
+        tem_mais = len(linhas) > tamanho
+        for pos, r in enumerate(pagina):
+            ultimo = r
+            item = resumos.get(str(r.message_id))
+            if item is not None and (not busca or _coincide(item, busca)):
+                itens.append(item)
+            if len(itens) >= limite:
+                tem_mais = pos + 1 < len(pagina) or tem_mais
+                break
+        if len(itens) >= limite or not tem_mais:
+            break
+        depois_de = (ultimo.recebido_em, ultimo.message_id) if ultimo else None
     response.headers["Cache-Control"] = "no-store"
-    ultimo = pagina[-1] if pagina else None
     return {
         "itens": itens,
         "proximo": cursor(ultimo.recebido_em, ultimo.message_id)
-        if ultimo is not None and len(linhas) > limite
+        if ultimo is not None and tem_mais
         else None,
         "faltam": faltam,
     }
