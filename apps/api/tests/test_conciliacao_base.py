@@ -3061,7 +3061,10 @@ def test_liberacao_com_descricao_desconhecida_e_venda_liberada_e_dif_aparece():
     # Dif. em "nada liberou e entrou X" (compensação da Shopee de 773,47 × previsto 769,98)
     comp = _mov(loja, "outro", d, credito="773.47")
     venda_sh = MarketplaceOrderFinancial(
-        gross_amount=Decimal("929.61"), net_amount=Decimal("769.98"), fee_amount=Decimal("59.74"), raw={}
+        gross_amount=Decimal("929.61"),
+        net_amount=Decimal("769.98"),
+        fee_amount=Decimal("59.74"),
+        raw={},
     )
     out = calc.situacao_do_pedido(movs_extrato=[comp], venda=venda_sh, **base)
     assert out["situacao"] == "recebido_a_mais"
@@ -3103,8 +3106,12 @@ def test_reserva_retida_no_pedido_e_em_disputa_e_o_par_fechado_e_bateu():
         raw={},
     )
     d = datetime(2026, 10, 16, 20, 22, tzinfo=UTC)
-    lib = _mov(loja, "venda_liberada", d, credito="182.15", pedido_mkt="2000018828084180", pagamento="181")
-    res = _mov(loja, "reserva_disputa", d, debito="182.15", pedido_mkt="2000018828084180", pagamento="181")
+    lib = _mov(
+        loja, "venda_liberada", d, credito="182.15", pedido_mkt="2000018828084180", pagamento="181"
+    )
+    res = _mov(
+        loja, "reserva_disputa", d, debito="182.15", pedido_mkt="2000018828084180", pagamento="181"
+    )
     out = calc.situacao_do_pedido(movs_extrato=[lib, res], venda=venda, **base)
     assert out["situacao"] == "em_disputa" and out["retido"] == Decimal("182.15")
     assert out["motivo"] == "182.15 retido em reserva por reclamação/estorno"
@@ -3128,7 +3135,9 @@ def test_reserva_retida_no_pedido_e_em_disputa_e_o_par_fechado_e_bateu():
     assert out["situacao"] == "estornado_depois" and out["retido"] == Decimal("0.00")
     assert out["dif_previsto_recebido"] == Decimal("-182.15")
     # recebido a menos COM reserva aberta: a situação pior fica, o retido vai pro motivo
-    menos = _mov(loja, "venda_liberada", d, credito="150.00", pedido_mkt="2000018828084180", pagamento="181")
+    menos = _mov(
+        loja, "venda_liberada", d, credito="150.00", pedido_mkt="2000018828084180", pagamento="181"
+    )
     out = calc.situacao_do_pedido(movs_extrato=[menos, res], venda=venda, **base)
     assert out["situacao"] == "recebido_a_menos" and out["retido"] == Decimal("182.15")
     assert out["motivo"].endswith("182.15 retido em reserva por reclamação/estorno")
@@ -3231,7 +3240,9 @@ def test_fatura_paga_com_o_segurado_nao_desconta_duas_vezes_e_linha_faltando_con
     loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
     loja.integration_id = None
     # kia (ml) 16/10 18:52:18 — três linhas no mesmo segundo
-    venda = _linha_mp(loja, "18:52:18", "venda_liberada", "362.32", "0", "362.32", pagamento="21519")
+    venda = _linha_mp(
+        loja, "18:52:18", "venda_liberada", "362.32", "0", "362.32", pagamento="21519"
+    )
     segurado = _linha_mp(loja, "18:52:18", "cobranca_divida", "0", "362.32", "0", pagamento="39498")
     fatura = _linha_mp(loja, "18:52:18", "fatura_cobrada", "0", "362.32", "0", pagamento="vp41w")
     ordem = _ordena_dia([fatura, segurado, venda], Decimal("0"))
@@ -3241,17 +3252,28 @@ def test_fatura_paga_com_o_segurado_nao_desconta_duas_vezes_e_linha_faltando_con
     assert t["debitos"] == 724.64 and t["fatura_paga_com_reserva"] == 362.32
     assert t["saldo_final"] == 0.0 and t["saldo_informado"] == 0.0 and t["diferenca"] == 0.0
     # aguiar2 16/10 12:51:04 — fatura 731,76: 360,54 com o segurado, 371,22 do disponível
-    venda2 = _linha_mp(loja, "12:51:04", "venda_liberada", "360.54", "0", "360.54", pagamento="93082")
-    segurado2 = _linha_mp(loja, "12:51:04", "cobranca_divida", "0", "360.54", "0", pagamento="94717")
-    fatura2 = _linha_mp(loja, "12:51:04", "fatura_cobrada", "0", "731.76", "-371.22", pagamento="0qak1")
+    venda2 = _linha_mp(
+        loja, "12:51:04", "venda_liberada", "360.54", "0", "360.54", pagamento="93082"
+    )
+    segurado2 = _linha_mp(
+        loja, "12:51:04", "cobranca_divida", "0", "360.54", "0", pagamento="94717"
+    )
+    fatura2 = _linha_mp(
+        loja, "12:51:04", "fatura_cobrada", "0", "731.76", "-371.22", pagamento="0qak1"
+    )
     # 14:42:53 — o débito é coberto pela venda; o segurado vai e volta
-    seg3 = _linha_mp(loja, "14:42:53", "cobranca_divida", "0", "371.22", "-371.22", pagamento="94717")
+    seg3 = _linha_mp(
+        loja, "14:42:53", "cobranca_divida", "0", "371.22", "-371.22", pagamento="94717"
+    )
     venda3 = _linha_mp(loja, "14:42:53", "venda_liberada", "371.22", "0", "0", pagamento="98419")
     seg4 = _linha_mp(loja, "14:42:55", "cobranca_divida", "371.22", "0", "0", pagamento="94717")
     ordem = _ordena_dia([fatura2, seg3, segurado2, venda3, venda2, seg4], Decimal("0"))
     assert [m.tipo for m in ordem[:3]] == ["venda_liberada", "cobranca_divida", "fatura_cobrada"]
     assert ordem[2].pago_com_reserva == Decimal("360.54")
-    assert [m.saldo_apos for m in ordem[3:5]] == [Decimal("0"), Decimal("-371.22")]  # venda antes do segurado
+    assert [m.saldo_apos for m in ordem[3:5]] == [
+        Decimal("0"),
+        Decimal("-371.22"),
+    ]  # venda antes do segurado
     t = _totais_do_dia(ordem, Decimal("0"))
     assert t["fatura_paga_com_reserva"] == 360.54 and t["diferenca"] == 0.0
     assert t["saldo_final"] == 0.0 and t["saldo_informado"] == 0.0
@@ -3277,8 +3299,14 @@ async def test_previsto_de_antes_da_liberacao_fica_guardado_e_a_mudanca_aparece(
     mudança aparece no motivo e no Raio-X; o pedido continua "bateu"."""
     loja, integ = await _loja(db, make_user)
     agora = datetime(2026, 10, 15, 12, tzinfo=UTC)
-    db.add(_pedido_bling("301039", "2000019000000001", datetime(2026, 10, 2, 12, tzinfo=UTC), "1900.00", 900.0))
-    fin = _fin(integ.id, "2000019000000001", gross="1900.00", fee="295.49", freight="0", net="1604.51")
+    db.add(
+        _pedido_bling(
+            "301039", "2000019000000001", datetime(2026, 10, 2, 12, tzinfo=UTC), "1900.00", 900.0
+        )
+    )
+    fin = _fin(
+        integ.id, "2000019000000001", gross="1900.00", fee="295.49", freight="0", net="1604.51"
+    )
     db.add(fin)
     await db.commit()
     await calc.recalcular_loja(db, loja, agora=agora)
@@ -3310,7 +3338,9 @@ async def test_previsto_de_antes_da_liberacao_fica_guardado_e_a_mudanca_aparece(
     await db.refresh(p)
     assert p.situacao == "bateu" and p.venda_liquido == Decimal("1583.99")
     assert p.previsto_na_venda == Decimal("1604.51")
-    assert p.motivo == "a plataforma mudou a conta em -20.52 na liberação (previsto na venda 1604.51)"
+    assert (
+        p.motivo == "a plataforma mudou a conta em -20.52 na liberação (previsto na venda 1604.51)"
+    )
     # rodada seguinte: o previsto de antes não é sobrescrito
     await calc.recalcular_loja(db, loja, agora=agora + timedelta(days=1))
     await db.commit()

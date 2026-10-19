@@ -635,9 +635,7 @@ async def run_tiktok_sync(
                 if m:
                     movs.append(m)
             rep = (
-                repasse_para_movimento(
-                    st, repasses.get(pid), ordem=len(txs), grupo=grupos.get(pid)
-                )
+                repasse_para_movimento(st, repasses.get(pid), ordem=len(txs), grupo=grupos.get(pid))
                 if marca == "PAID" and repasses is not None
                 else None
             )

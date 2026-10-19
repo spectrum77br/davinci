@@ -1409,7 +1409,13 @@ async def test_estorno_antes_de_liberar_nao_vira_bateu_e_a_margem_relida_nao_dob
         _b("AmazonFees", "-107.08", [_b("Commission", "-107.08")]),
     ]
     venda = _tx(
-        "tx-e-venda", "Shipment", "DEFERRED", "2026-10-07T12:00:00Z", "749.53", pedido=DBA, quebras=quebras
+        "tx-e-venda",
+        "Shipment",
+        "DEFERRED",
+        "2026-10-07T12:00:00Z",
+        "749.53",
+        pedido=DBA,
+        quebras=quebras,
     )
     estorno = _tx(
         "tx-e-estorno", "Refund", "RELEASED", "2026-10-08T12:00:00Z", "-759.53", pedido=DBA

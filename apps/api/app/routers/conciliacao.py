@@ -1194,6 +1194,10 @@ async def listar_pedidos(
                 func.count(
                     sa_case((ped.liberado_em.isnot(None) & (ped.situacao != "cancelado"), 1))
                 ),
+                # 19/10 (revisão): a margem dividia o "sobrou" dos pedidos LIBERADOS pelo
+                # custo de TODOS (6,27% na empresa, número sem sentido) — o custo que
+                # entra na margem é só o dos pedidos que já têm "sobrou"
+                func.sum(sa_case((ped.sobrou.isnot(None), ped.custo), else_=0)),
             ).where(*conds)
         )
     ).one()
@@ -1211,6 +1215,7 @@ async def listar_pedidos(
     )
     custo = somas[7] or Decimal("0")
     sobrou = somas[9] or Decimal("0")
+    custo_liberados = somas[11] or Decimal("0")
     return {
         "loja": alvo.conta,
         "total": total,
@@ -1225,9 +1230,12 @@ async def listar_pedidos(
             "recebido": _num(somas[5] or 0),
             "diferenca": _num(somas[6] or 0),
             "custo": _num(custo),
+            "custo_liberados": _num(custo_liberados),
             "reembolso": _num(somas[8] or 0),
             "sobrou": _num(sobrou),
-            "margem": _num((sobrou / custo).quantize(Decimal("0.0001"))) if custo > 0 else None,
+            "margem": _num((sobrou / custo_liberados).quantize(Decimal("0.0001")))
+            if custo_liberados > 0
+            else None,
             "liberados": somas[10],
             "por_situacao": por_situacao,
             "por_etapa": por_etapa,
@@ -2372,9 +2380,15 @@ def _ordem_do_empate(
     paga com o segurado pode encadear com o consumo), e entre as ordens válidas vale a
     que menos "explica" com o segurado. None quando nenhuma ordem fecha."""
     melhor: list | None = None
+    # teto de nós da busca: empate de 8 linhas iguais (mesmo valor e saldo) explode em
+    # permutações — acima disto a ordem volta pro encadeamento guloso
+    orcamento = [20_000]
 
     def dfs(ordem, consumos, saldo, reserva, restantes, total) -> None:
         nonlocal melhor
+        orcamento[0] -= 1
+        if orcamento[0] < 0:
+            return
         if melhor is not None and total >= melhor[2]:
             return
         if not restantes:
@@ -3178,6 +3192,9 @@ async def _somas_pedidos(
                 func.count(
                     sa_case((ped.liberado_em.isnot(None) & (ped.situacao == "cancelado"), 1))
                 ),
+                # 19/10 (revisão): custo só dos pedidos que já têm "sobrou" — a margem
+                # dividia o sobrou dos liberados pelo custo de todos (6,27% na empresa)
+                func.sum(sa_case((ped.sobrou.isnot(None), ped.custo), else_=0)),
             ).where(*conds)
         )
     ).one()
@@ -3195,6 +3212,7 @@ async def _somas_pedidos(
     )
     custo = s[9] or Decimal("0")
     sobrou = s[11] or Decimal("0")
+    custo_liberados = s[14] or Decimal("0")
     return {
         "pedidos": s[0],
         "vendido": _num(s[1] or 0),
@@ -3206,9 +3224,12 @@ async def _somas_pedidos(
         "recebido": _num(s[7] or 0),
         "estornos": _num(s[8] or 0),
         "custo": _num(custo),
+        "custo_liberados": _num(custo_liberados),
         "reembolso": _num(s[10] or 0),
         "sobrou": _num(sobrou),
-        "margem": _num((sobrou / custo).quantize(Decimal("0.0001"))) if custo > 0 else None,
+        "margem": _num((sobrou / custo_liberados).quantize(Decimal("0.0001")))
+        if custo_liberados > 0
+        else None,
         "liberados": s[12],
         "liberados_cancelados": s[13],
         "finalizados": por_etapa.get("finalizado", 0),
@@ -3994,7 +4015,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             {k: v for k, v in mes.items() if k not in ("margem", "por_situacao", "por_etapa")},
         )
     for bloco in (*por_plataforma.values(), empresa):
-        custo = bloco.get("custo") or 0
+        custo = bloco.get("custo_liberados") or 0
         bloco["margem"] = round((bloco.get("sobrou") or 0) / custo, 4) if custo else None
     ordem = {"bad": 0, "warn": 1, "ok": 2}
     agir.sort(key=lambda x: (ordem.get(x["gravidade"], 9), x["loja"]))
@@ -4069,6 +4090,7 @@ async def fechamento_do_mes(
         await session.execute(
             select(
                 mov.tipo,
+                mov.sub_tipo,
                 mov.classificacao,
                 pedd.data_pedido,
                 pedd.situacao,
@@ -4088,7 +4110,7 @@ async def fechamento_do_mes(
                 mov.data >= ini_dt,
                 mov.data < fim_dt,
             )
-            .group_by(mov.tipo, mov.classificacao, pedd.data_pedido, pedd.situacao)
+            .group_by(mov.tipo, mov.sub_tipo, mov.classificacao, pedd.data_pedido, pedd.situacao)
         )
     ).all()
     caixa: dict[str, Any] = {
@@ -4101,6 +4123,9 @@ async def fechamento_do_mes(
         "saques": 0.0,
         "outros": 0.0,
         "reservas_liquido": 0.0,
+        # 19/10 (revisão): lançamento da Amazon ainda preso na reserva (DEFERRED) não é
+        # dinheiro que entrou — kia mostrava "liberado 79.668,97" com 76.698,72 presos
+        "preso_na_reserva": 0.0,
         "ajustes_meses_anteriores": 0.0,
         "ajustes_qtd": 0,
         # Cancelado por reclamação: o ML libera a venda e tira no mesmo dia
@@ -4112,12 +4137,15 @@ async def fechamento_do_mes(
         "cancelados_linhas": 0,
         "linhas": 0,
     }
-    for tipo, classificacao, data_pedido, situacao_ped, n, c, d in rows:
+    for tipo, sub_tipo, classificacao, data_pedido, situacao_ped, n, c, d in rows:
         c = float(c or 0)
         d = float(d or 0)
         caixa["linhas"] += n
         if tipo in TIPOS_RESERVA_SET:
             caixa["reservas_liquido"] += c - d
+            continue
+        if tipo in ("venda_liberada", "estorno") and sub_tipo == "DEFERRED":
+            caixa["preso_na_reserva"] += c - d
             continue
         anterior = classificacao == "anterior_ao_inicio" or (
             data_pedido is not None and data_pedido < ini_dt
@@ -4149,9 +4177,13 @@ async def fechamento_do_mes(
         + caixa["ajustes_meses_anteriores"],
         2,
     )
-    # Tudo somado (com reservas e saques) tem que ser saldo final − saldo inicial.
+    # Tudo somado (com reservas, preso e saques) tem que ser saldo final − saldo inicial.
     caixa["movimento_liquido"] = round(
-        caixa["resultado_caixa"] + caixa["reservas_liquido"] + caixa["saques"], 2
+        caixa["resultado_caixa"]
+        + caixa["reservas_liquido"]
+        + caixa["preso_na_reserva"]
+        + caixa["saques"],
+        2,
     )
 
     # Dias do mês: linhas, pendentes, fechado — e o saldo do primeiro e do último dia.
@@ -4390,6 +4422,7 @@ async def fechamento_xlsx(
         ("Ajustes de meses anteriores (linhas)", "ajustes_qtd"),
         ("= Resultado de caixa do mês", "resultado_caixa"),
         ("Reservas (líquido)", "reservas_liquido"),
+        ("Preso na reserva da Amazon (lançado, não liberado)", "preso_na_reserva"),
         ("Saques", "saques"),
         ("= Movimento líquido", "movimento_liquido"),
         ("Saldo final informado", "saldo_final"),

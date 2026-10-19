@@ -695,7 +695,10 @@ async def test_repasse_leva_o_valor_pago_e_a_diferenca_fica_no_ultimo_extrato(db
     assert [x.debito for x in saques] == [Decimal("344.45"), Decimal("100.00")]
     assert saques[1].raw["_valor_pago"] == "444.45" and saques[1].raw["_soma_extratos"] == "544.45"
     assert saques[1].raw["_diferenca_pagamento"] == "-100.00"
-    assert "a TikTok pagou 444.45 e os extratos somam 544.45 (diferença -100.00)" in saques[1].descricao
+    assert (
+        "a TikTok pagou 444.45 e os extratos somam 544.45 (diferença -100.00)"
+        in saques[1].descricao
+    )
     assert "diferença" not in saques[0].descricao  # o 1º extrato leva o próprio total
     # dia 10 fecha; dia 11 fica aberto: pedidos 200,00 − repasse 100,00 ≠ 0
     movs11 = await _movimentos_do_dia(db, loja, d11, Decimal("0"))

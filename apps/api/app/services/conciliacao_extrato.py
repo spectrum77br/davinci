@@ -341,8 +341,10 @@ def liberacao_sem_nome(
     return (
         tipo == "outro"
         and (record_type or "").strip().lower() == "release"
-        and bool(credito) and credito > 0
-        and bool(bruto) and bruto > 0
+        and bool(credito)
+        and credito > 0
+        and bool(bruto)
+        and bruto > 0
         and bool(pedido_marketplace)
     )
 

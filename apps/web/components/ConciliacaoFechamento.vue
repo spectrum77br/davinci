@@ -51,6 +51,8 @@ type Caixa = {
   cancelados_linhas: number
   resultado_caixa: number
   reservas_liquido: number
+  // lançamento da Amazon ainda preso na reserva (DEFERRED): não entrou (19/10)
+  preso_na_reserva?: number
   saques: number
   movimento_liquido: number
   saldo_inicial: number | null
@@ -248,6 +250,7 @@ onMounted(() => {
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Ajustes de meses anteriores ({{ dados.caixa.ajustes_qtd }} linhas)</td><td class="px-3 py-1 text-right tabular-nums" :class="sinal(dados.caixa.ajustes_meses_anteriores, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.ajustes_meses_anteriores) }}</td></tr>
               <tr class="border-b bg-muted/40"><td class="px-3 py-1 font-bold">= Resultado de caixa do mês</td><td class="px-3 py-1 text-right tabular-nums font-bold" :class="sinal(dados.caixa.resultado_caixa, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(dados.caixa.resultado_caixa) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Reservas (líquido)</td><td class="px-3 py-1 text-right tabular-nums">{{ fmtMoney(dados.caixa.reservas_liquido) }}</td></tr>
+              <tr v-if="dados.caixa.preso_na_reserva" class="border-b"><td class="px-3 py-1 text-muted-foreground">Preso na reserva da Amazon (lançado, ainda não liberado)</td><td class="px-3 py-1 text-right tabular-nums text-amber-700">{{ fmtMoney(dados.caixa.preso_na_reserva) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Saques</td><td class="px-3 py-1 text-right tabular-nums text-red-600">{{ fmtMoney(dados.caixa.saques) }}</td></tr>
               <tr class="border-b bg-muted/40"><td class="px-3 py-1 font-bold">= Movimento líquido</td><td class="px-3 py-1 text-right tabular-nums font-bold">{{ fmtMoney(dados.caixa.movimento_liquido) }}</td></tr>
               <tr class="border-b"><td class="px-3 py-1 text-muted-foreground">Saldo inicial + movimento</td><td class="px-3 py-1 text-right tabular-nums">{{ fmtMoney(provaCaixa) }}</td></tr>

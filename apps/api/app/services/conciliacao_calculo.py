@@ -266,13 +266,16 @@ def conta_amazon_de_transacoes(txs: list[Any]) -> dict[str, Decimal] | None:
     # (o original vira DEFERRED_RELEASED e aparece outro RELEASED, mesmo valor) — a
     # Margem soma os dois no líquido (kia 301678: 446,20 → 892,40). Aqui a repetição sai.
     originais = Counter(
-        (str(t.get("transactionType")), str(((t.get("totalAmount") or {}).get("currencyAmount"))))
+        (str(t.get("transactionType")), str((t.get("totalAmount") or {}).get("currencyAmount")))
         for t in txs
         if str(t.get("transactionStatus") or "") == "DEFERRED_RELEASED"
     )
     sem_repeticao: list[dict[str, Any]] = []
     for t in sorted(txs, key=lambda x: str(x.get("postedDate") or "")):
-        k = (str(t.get("transactionType")), str(((t.get("totalAmount") or {}).get("currencyAmount"))))
+        k = (
+            str(t.get("transactionType")),
+            str((t.get("totalAmount") or {}).get("currencyAmount")),
+        )
         if str(t.get("transactionStatus") or "") == "RELEASED" and originais.get(k, 0) > 0:
             originais[k] -= 1
             continue
