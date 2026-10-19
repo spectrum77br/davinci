@@ -432,6 +432,77 @@ def test_comparativo_shopee_com_as_linhas_da_tela():
     assert "Detalhes de Renda" in c["rodape"]
 
 
+async def test_difal_da_shopee_e_imposto_classificado_pelo_robo(db, make_user):
+    """19/10 (Vinicius): "Débito por diferencial de alíquota do ICMS" vem sem nº do
+    pedido — 75 linhas de centavos sem dono em 6 lojas. Vira imposto, classificado
+    sozinho (a soma aparece no quadro do Resumo); penalidade continua sem dono."""
+    from app.models import ConciliacaoMovimento
+    from app.services.conciliacao_calculo import recalcular_loja
+
+    d = date(2026, 10, 10)
+    difal = transacao_para_movimento(
+        _tx(
+            91,
+            "ADJUSTMENT_CENTER_DEDUCT",
+            -2.57,
+            100.0,
+            _epoch(d, 10),
+            description="Débito por diferencial de alíquota do ICMS (DIFAL) - Pedido 2610...",
+        )
+    )
+    assert difal["tipo"] == "imposto" and difal["classificacao"] == "imposto"
+    assert difal["debito"] == Decimal("2.57")
+    penalidade = transacao_para_movimento(
+        _tx(
+            92,
+            "ADJUSTMENT_CENTER_DEDUCT",
+            -250.0,
+            100.0,
+            _epoch(d, 11),
+            description="Cobrança de taxa referente ao atingimento de meta de pedidos",
+        )
+    )
+    assert penalidade["tipo"] == "ajuste_shopee" and penalidade["classificacao"] is None
+    # DIFAL com nº do pedido vai pro pedido (não é "sem dono")
+    com_pedido = transacao_para_movimento(
+        _tx(
+            93,
+            "ADJUSTMENT_CENTER_DEDUCT",
+            -2.57,
+            100.0,
+            _epoch(d, 12),
+            order_sn="261006VX383P9J",
+            description="Débito por diferencial de alíquota do ICMS",
+        )
+    )
+    assert com_pedido["tipo"] == "ajuste_shopee" and com_pedido["classificacao"] is None
+    # linha gravada antes da regra, sem dono: o recálculo classifica
+    loja = await _loja_shopee(db, make_user)
+    antiga = ConciliacaoMovimento(
+        integration_id=loja.integration_id,
+        platform=loja.platform,
+        **{k: v for k, v in difal.items() if k not in ("tipo", "classificacao")},
+        tipo="ajuste_shopee",
+        classificacao=None,
+    )
+    mexida = ConciliacaoMovimento(
+        integration_id=loja.integration_id,
+        platform=loja.platform,
+        **{k: v for k, v in penalidade.items() if k not in ("classificacao",)},
+        classificacao="outro",
+    )
+    mexida.vinculado_por = "cairo"
+    db.add_all([antiga, mexida])
+    await db.commit()
+    res = await recalcular_loja(db, loja, agora=datetime(2026, 10, 19, 12, tzinfo=UTC))
+    await db.commit()
+    assert res["imposto_classificado"] == 1
+    await db.refresh(antiga)
+    await db.refresh(mexida)
+    assert antiga.tipo == "imposto" and antiga.classificacao == "imposto"
+    assert mexida.classificacao == "outro"  # o que a pessoa mexeu fica
+
+
 async def test_saldo_que_pula_nao_ganha_ajuste_e_os_do_robo_saem(db, make_user):
     """16/10 à noite (Vinicius, essência do painel): a carteira muda de saldo sem listar o
     lançamento (renda 292,39, saldo sobe 291,41) → NÃO se inventa linha de ajuste pra

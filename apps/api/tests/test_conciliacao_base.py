@@ -3385,6 +3385,111 @@ async def test_previsto_de_antes_da_liberacao_fica_guardado_e_a_mudanca_aparece(
     assert p.previsto_na_venda == Decimal("1604.51") and "-20.52" in p.motivo
 
 
+async def test_resumo_quadro_cobrancas_da_plataforma_sem_pedido(
+    db, make_user, auth_as, client, monkeypatch
+):
+    """19/10 (Vinicius): o que a plataforma tira SEM pedido (imposto, Ads, penalidade,
+    fatura do ML) não entra no resultado dos pedidos e tinha que aparecer em algum lugar
+    — quadro no Resumo, pela data do movimento, com o que ainda está sem dono à parte."""
+    monkeypatch.setattr("app.routers.conciliacao._ontem", lambda: date(2026, 10, 15))
+    loja, _integ = await _loja(db, make_user)
+    d = datetime(2026, 10, 10, 15, tzinfo=UTC)
+    imposto = _mov(loja, "imposto", d, debito="2.57")
+    imposto.classificacao = "imposto"
+    ads = _mov(loja, "publicidade", d, debito="2000.00")
+    ads.classificacao = "publicidade"
+    penalidade = _mov(loja, "ajuste_shopee", d, debito="250.00")  # sem dono
+    devolvido = _mov(loja, "ajuste_shopee", d, credito="100.00")  # pessoa classificou
+    devolvido.classificacao, devolvido.vinculado_por = "ajuste", "cairo"
+    fatura = _mov(loja, "fatura_cobrada", d, debito="362.32")
+    fatura.classificacao = "fatura_ml"
+    fatura.raw = {"_pago_com_reserva": "362.32"}
+    segurado = _mov(loja, "cobranca_divida", d, debito="362.32")
+    segurado.classificacao = "fatura_ml"
+    fatura_direta = _mov(loja, "fatura_cobrada", d + timedelta(days=1), debito="377.27")
+    fatura_direta.classificacao = "fatura_ml"
+    antes_entrou = _mov(loja, "venda_liberada", d, credito="500.00", pedido_bling="290000")
+    antes_entrou.classificacao = "anterior_ao_inicio"
+    antes_saiu = _mov(loja, "mediacao", d, debito="200.00", pedido_bling="290000")
+    antes_saiu.classificacao = "anterior_ao_inicio"
+    # fora do quadro: saque, reserva vai-e-volta, venda com pedido do painel
+    saque = _mov(loja, "saque", d, debito="5000.00")
+    saque.classificacao = "saque"
+    reserva = _mov(loja, "reserva_disputa", d, debito="80.00")
+    reserva.classificacao = "reserva"
+    venda = _mov(loja, "venda_liberada", d, credito="610.65", pedido_bling="301102")
+    db.add_all(
+        [
+            imposto,
+            ads,
+            penalidade,
+            devolvido,
+            fatura,
+            segurado,
+            fatura_direta,
+            antes_entrou,
+            antes_saiu,
+            saque,
+            reserva,
+            venda,
+        ]
+    )
+    db.add(await _pedido_conciliado(loja))
+    loja.ultimo_extrato_em = datetime.now(UTC)
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-15"})
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    esperado = {
+        "imposto": 2.57,
+        "publicidade": 2000.0,
+        "penalidades": 150.0,  # 250 tirados − 100 devolvidos
+        "penalidades_linhas": 2,
+        "sem_dono": 1,
+        "sem_dono_valor": 250.0,
+        "fatura_ml": 739.59,  # 362,32 (paga com o segurado: conta uma vez) + 377,27 direta
+        "anteriores_entrou": 500.0,
+        "anteriores_saiu": 200.0,
+        "anteriores_linhas": 2,
+    }
+    assert corpo["lojas"][0]["cobrancas"] == esperado
+    assert corpo["por_plataforma"]["ml"]["cobrancas"] == esperado
+    assert corpo["empresa"]["cobrancas"] == esperado
+
+
+async def test_recalculo_grava_quanto_da_fatura_foi_pago_com_o_segurado(db, make_user):
+    """A conta do Extrato do dia (kia (ml) 16/10 18:52) fica gravada na linha da fatura
+    (raw._pago_com_reserva) pra o quadro do Resumo não contar duas vezes."""
+    loja, _integ = await _loja(db, make_user)
+    venda = _linha_mp(
+        loja, "18:52:18", "venda_liberada", "362.32", "0", "362.32", pagamento="21519"
+    )
+    segurado = _linha_mp(loja, "18:52:18", "cobranca_divida", "0", "362.32", "0", pagamento="39498")
+    segurado.classificacao = "fatura_ml"
+    fatura = _linha_mp(loja, "18:52:18", "fatura_cobrada", "0", "362.32", "0", pagamento="vp41w")
+    fatura.classificacao = "fatura_ml"
+    direta = _linha_mp(loja, "04:29:31", "fatura_cobrada", "0", "377.27", "0")
+    direta.classificacao = "fatura_ml"
+    db.add_all([venda, segurado, fatura, direta])
+    db.add(
+        _pedido_bling(
+            "301102", "2000018405611066", datetime(2026, 10, 1, 12, tzinfo=UTC), "880.98", 500.0
+        )
+    )
+    await db.commit()
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 19, 12, tzinfo=UTC))
+    await db.commit()
+    assert res["pago_com_reserva_gravado"] == 2
+    await db.refresh(fatura)
+    await db.refresh(direta)
+    assert fatura.raw["_pago_com_reserva"] == "362.32"
+    assert direta.raw["_pago_com_reserva"] == "0.00"
+    # rodada seguinte: nada muda
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 19, 13, tzinfo=UTC))
+    assert "pago_com_reserva_gravado" not in res
+
+
 async def test_recalcular_loja_renomeia_liberacao_gravada_como_outro(db, make_user):
     """A linha da marquezini já estava no banco como "outro": o recálculo renomeia e o
     pedido passa de "recebido a mais" pra "recebido a menos 36,15"."""

@@ -2200,6 +2200,7 @@ CLASSIFICACOES = (
     "saque",
     "fatura_ml",
     "publicidade",
+    "imposto",
     "anterior_ao_inicio",
     "reserva",
     "venda_desfeita",
@@ -2210,6 +2211,7 @@ CLASSIFICACAO_LABELS = {
     "saque": "Saque",
     "fatura_ml": "Fatura do ML",
     "publicidade": "Publicidade",
+    "imposto": "Imposto (ICMS DIFAL)",
     "anterior_ao_inicio": "Pedido anterior ao início",
     "reserva": "Reserva (vai e volta)",
     "venda_desfeita": "Venda desfeita (sem pedido no Bling)",
@@ -3415,6 +3417,95 @@ def _soma_dict(destino: dict[str, Any], origem: dict[str, Any]) -> None:
             destino[k] = (destino.get(k) or 0) + v
 
 
+_CLASSIFICACOES_QUE_NAO_SAO_COBRANCA = ("saque", "reserva", "venda_desfeita")
+_TIPOS_SEM_PEDIDO_QUE_SAO_COBRANCA = (
+    "ajuste_shopee",
+    "ajuste_amazon",
+    "ajuste_tiktok",
+    "outro",
+    "credito",
+    "publicidade",
+    "imposto",
+)
+
+
+async def _cobrancas_da_plataforma(
+    session: AsyncSession, loja: ConciliacaoLoja, ini: date, fim: date
+) -> dict[str, Any]:
+    """Quadro "Cobranças da plataforma" (19/10, Vinicius): o que a plataforma tirou (ou
+    devolveu) SEM pedido no período, pela data do movimento — não entra no resultado dos
+    pedidos e por isso tinha que aparecer em algum lugar. Imposto (ICMS DIFAL da Shopee)
+    e publicidade são classificados pelo robô; penalidades e ajustes ficam sem dono até
+    alguém classificar (contados à parte); a fatura do ML soma a cobrança do saldo e o
+    segurado pra dívida sem contar duas vezes (raw._pago_com_reserva); e o que é de
+    pedido anterior ao início (01/10) aparece como entrou/saiu à parte."""
+    from sqlalchemy import Numeric, cast
+
+    mov = ConciliacaoMovimento
+    ini_dt = datetime.combine(ini, datetime.min.time(), tzinfo=_BRT)
+    fim_dt = datetime.combine(fim, datetime.min.time(), tzinfo=_BRT)
+    pago = cast(func.coalesce(mov.raw["_pago_com_reserva"].astext, "0"), Numeric(14, 2))
+    rows = (
+        await session.execute(
+            select(
+                mov.tipo,
+                mov.classificacao,
+                mov.pedido_bling.isnot(None),
+                func.count(),
+                func.sum(mov.credito),
+                func.sum(mov.debito),
+                func.sum(pago),
+            )
+            .where(
+                mov.integration_id == loja.integration_id,
+                mov.origem.in_(ORIGENS_EXTRATO),
+                mov.data >= ini_dt,
+                mov.data < fim_dt,
+            )
+            .group_by(mov.tipo, mov.classificacao, mov.pedido_bling.isnot(None))
+        )
+    ).all()
+    out: dict[str, Any] = {
+        "imposto": 0.0,
+        "publicidade": 0.0,
+        "penalidades": 0.0,
+        "penalidades_linhas": 0,
+        "sem_dono": 0,
+        "sem_dono_valor": 0.0,
+        "fatura_ml": 0.0,
+        "anteriores_entrou": 0.0,
+        "anteriores_saiu": 0.0,
+        "anteriores_linhas": 0,
+    }
+    for tipo, classificacao, com_pedido, n, c, d, pago_res in rows:
+        saiu = float(d or 0) - float(c or 0)
+        if classificacao == "anterior_ao_inicio":
+            out["anteriores_entrou"] += float(c or 0)
+            out["anteriores_saiu"] += float(d or 0)
+            out["anteriores_linhas"] += n
+            continue
+        if com_pedido or classificacao in _CLASSIFICACOES_QUE_NAO_SAO_COBRANCA:
+            continue
+        if tipo in TIPOS_RESERVA_SET or tipo == "saque":
+            continue
+        if classificacao == "imposto":
+            out["imposto"] += saiu
+        elif classificacao == "publicidade":
+            out["publicidade"] += saiu
+        elif classificacao == "fatura_ml":
+            if tipo == "fatura_cobrada":
+                out["fatura_ml"] += float(d or 0) - float(pago_res or 0)
+            else:
+                out["fatura_ml"] += saiu
+        elif tipo in _TIPOS_SEM_PEDIDO_QUE_SAO_COBRANCA or classificacao in ("ajuste", "outro"):
+            out["penalidades"] += saiu
+            out["penalidades_linhas"] += n
+            if classificacao is None:
+                out["sem_dono"] += n
+                out["sem_dono_valor"] += saiu
+    return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in out.items()}
+
+
 @router.get("/resumo")
 async def resumo_geral(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -3788,12 +3879,14 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         eventos_dia = await _eventos_do_dia(session, loja, dia)
         obs_dia = _obs_de_eventos(eventos_dia)
         dinheiro = await _dinheiro_da_loja(session, loja)
+        cobrancas = await _cobrancas_da_plataforma(session, loja, mes_ini, dia + timedelta(days=1))
         linha = {
             "conta": loja.conta,
             "platform": plataforma,
             "inicio": loja.inicio.isoformat(),
             "modo_extrato": loja.modo_extrato,
             "dinheiro": dinheiro,
+            "cobrancas": cobrancas,
             "dia": {
                 "status": dia_status,
                 "texto": dia_texto,
@@ -4027,6 +4120,11 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             d["a_liberar"] = round(d["a_liberar"] + (dinheiro["a_liberar"] or 0), 2)
             d["a_liberar_pedidos"] += dinheiro["a_liberar_pedidos"]
             d["reservado"] = round(d["reservado"] + (dinheiro["reservado"] or 0), 2)
+            cob = bloco_d.setdefault("cobrancas", {})
+            _soma_dict(cob, cobrancas)
+            for k, v in cob.items():
+                if isinstance(v, float):
+                    cob[k] = round(v, 2)
         _soma_dict(
             plat, {k: v for k, v in mes.items() if k not in ("margem", "por_situacao", "por_etapa")}
         )

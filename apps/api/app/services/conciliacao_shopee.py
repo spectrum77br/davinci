@@ -68,6 +68,15 @@ def _dinheiro(v: Any) -> Decimal:
         return Decimal("0")
 
 
+def e_imposto_difal(descricao: str | None) -> bool:
+    """ "Débito por diferencial de alíquota do ICMS (DIFAL)": a Shopee cobra por pedido,
+    mas a linha vem sem o nº do pedido. 19/10 (Vinicius): classificar "imposto" sozinho
+    — 75 linhas de centavos sem dono em 6 lojas — e mostrar a soma no quadro "Cobranças
+    da plataforma" do Resumo, pra ninguém deixar de ver."""
+    d = (descricao or "").lower()
+    return "diferencial de al" in d and "icms" in d
+
+
 def transacao_para_movimento(t: dict[str, Any]) -> dict[str, Any] | None:
     """Um lançamento da carteira → colunas de `conciliacao_movimentos` (sem a loja)."""
     tid = t.get("transaction_id")
@@ -85,6 +94,9 @@ def transacao_para_movimento(t: dict[str, Any]) -> dict[str, Any] | None:
         or tipo_shopee
     )
     saldo = t.get("current_balance")
+    classificacao = None if order_sn else CLASSIFICACAO_AUTOMATICA.get(tipo)
+    if tipo == "ajuste_shopee" and not order_sn and e_imposto_difal(descricao):
+        tipo, classificacao = "imposto", "imposto"
     return {
         "origem": ORIGEM_CARTEIRA,
         "id_externo": str(tid),
@@ -111,11 +123,43 @@ def transacao_para_movimento(t: dict[str, Any]) -> dict[str, Any] | None:
         "sku": None,
         "item_id": None,
         "data_aprovacao": None,
-        "classificacao": None if order_sn else CLASSIFICACAO_AUTOMATICA.get(tipo),
+        "classificacao": classificacao,
         "vinculado_por": None,
         "vinculado_em": None,
         "raw": t,
     }
+
+
+async def classificar_impostos(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Linha de DIFAL já gravada como "ajuste da Shopee" sem dono (antes da regra de
+    19/10): vira imposto, classificada. O que uma pessoa mexeu fica como está."""
+    mov = ConciliacaoMovimento
+    rows = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_CARTEIRA,
+                    mov.tipo == "ajuste_shopee",
+                    mov.pedido_bling.is_(None),
+                    mov.vinculado_por.is_(None),
+                    mov.classificacao.is_(None),
+                    mov.descricao.ilike("%diferencial de al%"),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    n = 0
+    for m in rows:
+        if e_imposto_difal(m.descricao):
+            m.tipo = "imposto"
+            m.classificacao = "imposto"
+            n += 1
+    if n:
+        await session.flush()
+    return n
 
 
 async def ler_carteira(

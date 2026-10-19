@@ -849,6 +849,41 @@ async def _renomear_liberacoes_sem_nome(session: AsyncSession, loja: Conciliacao
     return n
 
 
+async def _gravar_pago_com_reserva(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Grava em cada fatura cobrada do saldo (`fatura_cobrada`) quanto foi pago com o
+    segurado pra dívida (`raw._pago_com_reserva`, ver `_encadeia` no router): a conta é a
+    mesma do Extrato do dia, feita só nos dias que têm fatura. Devolve quantas mudaram."""
+    from app.routers.conciliacao import _movimentos_do_dia, _saldo_anterior
+
+    dias = {
+        m.astimezone(BRT).date()
+        for m in (
+            await session.execute(
+                select(ConciliacaoMovimento.data).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.tipo == "fatura_cobrada",
+                )
+            )
+        ).scalars()
+        if m is not None
+    }
+    n = 0
+    for dia in sorted(dias):
+        saldo_ant = await _saldo_anterior(session, loja, dia)
+        for m in await _movimentos_do_dia(session, loja, dia, saldo_ant):
+            if m.tipo != "fatura_cobrada":
+                continue
+            valor = str(getattr(m, "pago_com_reserva", None) or ZERO)
+            raw = m.raw if isinstance(m.raw, dict) else {}
+            if raw.get("_pago_com_reserva") != valor:
+                m.raw = {**raw, "_pago_com_reserva": valor}
+                n += 1
+    if n:
+        await session.flush()
+    return n
+
+
 _TIPOS_COBRANCA_PLATAFORMA = ("ajuste_shopee", "ajuste_amazon", "ajuste_tiktok")
 
 
@@ -1420,6 +1455,21 @@ async def recalcular_loja(
     cobradas = await classificar_cobrancas_da_fatura(session, loja)
     if cobradas:
         contagem["cobranca_fatura"] = cobradas
+    if plataforma_loja == "ml":
+        # 19/10: quanto de cada fatura foi pago com o segurado pra dívida fica gravado na
+        # linha (raw._pago_com_reserva) — o quadro "Cobranças da plataforma" do Resumo
+        # soma fatura + segurado sem contar duas vezes
+        gravadas = await _gravar_pago_com_reserva(session, loja)
+        if gravadas:
+            contagem["pago_com_reserva_gravado"] = gravadas
+    if plataforma_loja == "shopee":
+        # 19/10 (Vinicius): ICMS DIFAL da Shopee é imposto por pedido, sem nº do pedido
+        # na linha — classifica sozinho (a soma aparece no quadro do Resumo)
+        from app.services.conciliacao_shopee import classificar_impostos
+
+        impostos = await classificar_impostos(session, loja)
+        if impostos:
+            contagem["imposto_classificado"] = impostos
     # Linha sem nº de venda mas do MESMO pagamento de uma linha já ligada a um pedido
     # (16/10: relatório antigo da aguiar sem ORDER_ID; reservas/estornos sem o nº):
     # herda o pedido da irmã.

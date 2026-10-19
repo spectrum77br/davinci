@@ -57,6 +57,19 @@ type Mes = {
   ajustes_qtd: number
 }
 type Dinheiro = { na_conta: number | null; saldo_em: string | null; a_liberar: number; a_liberar_pedidos: number; reservado: number | null; preso?: number | null; a_receber?: number | null; nota?: string | null }
+// Quadro "Cobranças da plataforma sem pedido" (19/10): o que a plataforma tirou (positivo = saiu) sem pedido no mês
+type Cobrancas = {
+  imposto: number
+  publicidade: number
+  penalidades: number
+  penalidades_linhas: number
+  sem_dono: number
+  sem_dono_valor: number
+  fatura_ml: number
+  anteriores_entrou: number
+  anteriores_saiu: number
+  anteriores_linhas: number
+}
 type DiaResumo = {
   dia: string
   fechados: number
@@ -71,6 +84,7 @@ type LojaResumo = {
   platform: string
   inicio: string
   dinheiro: Dinheiro
+  cobrancas?: Cobrancas
   dia: DiaLoja
   pedidos: PedidosLoja
   leituras: Leituras
@@ -97,8 +111,8 @@ type Resumo = {
   mes: string
   lojas: LojaResumo[]
   agir: Agir[]
-  por_plataforma: Record<string, Mes & { dinheiro?: Dinheiro }>
-  empresa: Mes & { dinheiro?: Dinheiro }
+  por_plataforma: Record<string, Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas }>
+  empresa: Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas }
   cartoes: Record<string, number>
 
   dias: DiaResumo[]
@@ -115,6 +129,26 @@ const PLATAFORMAS: Array<{ key: string; label: string }> = [
 ]
 const FASE_SEGUINTE = ['Shopee', 'Amazon', 'TikTok']
 const MOSTRAR_MES = false // rodapé do mês desligado em 15/10 (volta quando ele pedir)
+// Quadro "Cobranças da plataforma": positivo = a plataforma tirou; negativo = devolveu.
+const abertosCob = ref<Record<string, boolean>>({})
+function alternarCob(k: string) {
+  abertosCob.value[k] = !abertosCob.value[k]
+}
+const COB_COLS = ['imposto', 'publicidade', 'penalidades', 'fatura_ml'] as const
+function fmtCob(v: number | null | undefined) {
+  if (v === null || v === undefined || Math.abs(v) < 0.005) return '—'
+  return v > 0 ? `− ${fmtMoney(v)}` : `+ ${fmtMoney(-v)}`
+}
+function cobCls(v: number | null | undefined) {
+  if (v === null || v === undefined || Math.abs(v) < 0.005) return 'text-muted-foreground'
+  return v > 0 ? 'text-red-600' : 'text-emerald-700'
+}
+const mesLabel = computed(() => {
+  const m = dados.value?.mes
+  if (!m) return ''
+  const [y, mm] = m.split('-')
+  return new Date(Number(y), Number(mm) - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
+})
 // Bloco "Dinheiro nas plataformas": cada marketplace começa fechado (só o total); "mostrar" abre as lojas.
 const abertos = ref<Record<string, boolean>>({})
 function alternar(key: string) {
@@ -449,6 +483,58 @@ onMounted(() => {
             </table>
           </div>
           <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Cada linha é um dia: quantas lojas fecharam, quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda têm pendência (linha sem dono, saldo diferente, extrato não lido ou pronto pra fechar). "Como ficou" diz o nome das lojas com pendência e a obs do que aconteceu no dia.</div>
+          </div>
+
+          <!-- 19/10 (Vinicius): o que a plataforma tira SEM pedido tem que aparecer em algum lugar -->
+          <div class="flex min-w-0 flex-col rounded-md border bg-card">
+            <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+              <span>Cobranças da plataforma sem pedido — {{ mesLabel }} até {{ fmtDia(dados.dia + 'T12:00:00') }}</span>
+              <span class="text-[10px] font-normal text-white/80">pela data do movimento · não entra no resultado dos pedidos</span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+                  <tr>
+                    <th class="border-b px-2 py-1 text-left">Marketplace / loja</th>
+                    <th class="border-b px-2 py-1 text-right">Impostos (ICMS DIFAL)</th>
+                    <th class="border-b px-2 py-1 text-right">Publicidade (Ads)</th>
+                    <th class="border-b px-2 py-1 text-right">Penalidades e ajustes</th>
+                    <th class="border-b px-2 py-1 text-right">Fatura do ML</th>
+                    <th class="border-b px-2 py-1 text-right" title="vendas de antes do início do painel (01/10): o que entrou e saiu delas, sem conferência pedido a pedido">Pedidos anteriores a 01/10: entrou</th>
+                    <th class="border-b px-2 py-1 text-right">saiu</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template v-for="g in grupos" :key="'c' + g.key">
+                    <tr class="border-b bg-muted/60 font-bold">
+                      <td class="px-2 py-1">{{ g.label }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarCob(g.key)">{{ abertosCob[g.key] ? 'esconder' : 'mostrar' }}</button></td>
+                      <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(dados.por_plataforma[g.key]?.cobrancas?.[k])">
+                        {{ fmtCob(dados.por_plataforma[g.key]?.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && dados.por_plataforma[g.key]?.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas que ainda ninguém classificou">{{ dados.por_plataforma[g.key]?.cobrancas?.sem_dono }} sem dono</span>
+                      </td>
+                      <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(dados.por_plataforma[g.key]?.cobrancas?.anteriores_entrou) }}</td>
+                      <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(dados.por_plataforma[g.key]?.cobrancas?.anteriores_saiu) }}</td>
+                    </tr>
+                    <tr v-for="l in g.lojas" v-show="abertosCob[g.key]" :key="'c' + l.conta" class="border-b">
+                      <td class="px-2 py-1 pl-4 font-bold">{{ l.conta }}</td>
+                      <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(l.cobrancas?.[k])">
+                        {{ fmtCob(l.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && l.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ l.cobrancas?.sem_dono }} sem dono</span>
+                      </td>
+                      <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(l.cobrancas?.anteriores_entrou) }}</td>
+                      <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(l.cobrancas?.anteriores_saiu) }}</td>
+                    </tr>
+                  </template>
+                  <tr class="bg-muted/40 font-bold">
+                    <td class="px-2 py-1">Empresa</td>
+                    <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(dados.empresa.cobrancas?.[k])">
+                      {{ fmtCob(dados.empresa.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && dados.empresa.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ dados.empresa.cobrancas?.sem_dono }} sem dono</span>
+                    </td>
+                    <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(dados.empresa.cobrancas?.anteriores_entrou) }}</td>
+                    <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(dados.empresa.cobrancas?.anteriores_saiu) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Vermelho = a plataforma tirou; verde = devolveu. Impostos (ICMS DIFAL da Shopee) e Publicidade (recarga de Ads) o robô classifica sozinho. Penalidades e ajustes ficam sem dono até alguém classificar no Extrato do dia — "N sem dono" é dinheiro que saiu e ninguém olhou. Fatura do ML = cobrada do saldo + segurada pra dívida, sem contar duas vezes. "Pedidos anteriores a 01/10" é o que entrou e saiu de vendas de antes do início do painel: não é conferido pedido a pedido.</div>
           </div>
         </div>
 
