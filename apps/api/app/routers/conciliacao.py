@@ -2308,6 +2308,92 @@ async def _reservas_abertas(
     return _flags_reserva(movs, saldo)
 
 
+_TOL_SALDO = Decimal("0.01")
+# tamanho máximo do empate de horário que a busca completa percorre (acima disso, o
+# encadeamento guloso de antes — as rajadas de 60 linhas da injox)
+_MAX_EMPATE_BUSCA = 8
+
+
+def _d0(v: Decimal | None) -> Decimal:
+    return v if v is not None else Decimal("0")
+
+
+def _encadeia(
+    anterior: Decimal, m: ConciliacaoMovimento, reserva_divida: Decimal
+) -> tuple[bool, Decimal]:
+    """A linha `m` cabe depois de um saldo `anterior`? Devolve (cabe, quanto do débito foi
+    pago com o "segurado pra dívida" e por isso NÃO saiu do saldo disponível).
+
+    19/10 (revisão): a fatura do ML cobrada do saldo (`fatura_cobrada`) vem com o valor
+    inteiro no NET_DEBIT mesmo quando parte (ou tudo) foi pago com o dinheiro que o
+    Mercado Pago já tinha segurado (`reserve_for_debt_payment`) — o BALANCE só cai pela
+    parte que saiu do disponível. kia (ml) 16/10 18:52: +362,32 · segurado −362,32
+    (saldo 0) · fatura −362,32 (saldo continua 0) — o painel somava os dois débitos e
+    acusava "saldo não bate +362,32" sem linha pra classificar. A parte paga com o
+    segurado só é aceita até o que foi segurado no dia (não "explica" linha faltando)."""
+    esperado = anterior + _d0(m.credito) - _d0(m.debito)
+    if abs(esperado - m.saldo_apos) <= _TOL_SALDO:
+        return True, Decimal("0")
+    if m.tipo == "fatura_cobrada" and _d0(m.debito) > 0:
+        consumo = m.saldo_apos - esperado
+        teto = min(_d0(m.debito), reserva_divida)
+        if consumo > _TOL_SALDO and consumo <= teto + _TOL_SALDO:
+            return True, min(consumo, teto)
+    return False, Decimal("0")
+
+
+def _reserva_apos(m: ConciliacaoMovimento, reserva_divida: Decimal, consumo: Decimal) -> Decimal:
+    if m.tipo == "cobranca_divida":
+        reserva_divida += _d0(m.debito) - _d0(m.credito)
+    return max(reserva_divida - consumo, Decimal("0"))
+
+
+def _ordem_do_empate(
+    grupo: list[ConciliacaoMovimento], anterior: Decimal | None, reserva_divida: Decimal
+) -> tuple[list[ConciliacaoMovimento], list[Decimal]] | None:
+    """Busca completa da ordem de um empate de horário: toda linha encadeia (a fatura
+    paga com o segurado pode encadear com o consumo), e entre as ordens válidas vale a
+    que menos "explica" com o segurado. None quando nenhuma ordem fecha."""
+    melhor: list | None = None
+
+    def dfs(ordem, consumos, saldo, reserva, restantes, total) -> None:
+        nonlocal melhor
+        if melhor is not None and total >= melhor[2]:
+            return
+        if not restantes:
+            melhor = [list(ordem), list(consumos), total]
+            return
+        for i, m in enumerate(restantes):
+            cabe, consumo = _encadeia(saldo, m, reserva)
+            if not cabe:
+                continue
+            dfs(
+                [*ordem, m],
+                [*consumos, consumo],
+                m.saldo_apos,
+                _reserva_apos(m, reserva, consumo),
+                restantes[:i] + restantes[i + 1 :],
+                total + consumo,
+            )
+
+    if anterior is not None:
+        dfs([], [], anterior, reserva_divida, list(grupo), Decimal("0"))
+    else:
+        # sem âncora: cada linha pode ser a primeira (o saldo de antes dela é o implícito)
+        for i, m in enumerate(grupo):
+            dfs(
+                [m],
+                [Decimal("0")],
+                m.saldo_apos,
+                _reserva_apos(m, reserva_divida, Decimal("0")),
+                grupo[:i] + grupo[i + 1 :],
+                Decimal("0"),
+            )
+    if melhor is None:
+        return None
+    return melhor[0], melhor[1]
+
+
 def _ordena_dia(
     movs: list[ConciliacaoMovimento], saldo_anterior: Decimal | None = None
 ) -> list[ConciliacaoMovimento]:
@@ -2315,9 +2401,15 @@ def _ordena_dia(
     ordem certa é a que encadeia o saldo (saldo da linha = saldo da anterior +
     crédito − débito). `saldo_anterior` (fechamento do dia anterior) ancora o
     primeiro empate do dia — sem ele, pagamento + reserva no mesmo segundo formam
-    um ciclo (0 → 362,15 → 0) e a ordem saía trocada (injox 15/10)."""
+    um ciclo (0 → 362,15 → 0) e a ordem saía trocada (injox 15/10).
+
+    Cada linha sai com `pago_com_reserva` (parte do débito da fatura do ML paga com o
+    segurado pra dívida, que não saiu do saldo disponível — ver `_encadeia`)."""
     movs = sorted(movs, key=lambda m: (m.data, m.id))
+    for m in movs:
+        m.pago_com_reserva = Decimal("0")  # type: ignore[attr-defined]
     out: list[ConciliacaoMovimento] = []
+    reserva_divida = Decimal("0")  # o que o MP segurou pra dívida hoje e ainda não devolveu
     i = 0
     while i < len(movs):
         grupo = [movs[i]]
@@ -2325,25 +2417,30 @@ def _ordena_dia(
         while j < len(movs) and movs[j].data == movs[i].data:
             grupo.append(movs[j])
             j += 1
-        if len(grupo) > 1 and all(m.saldo_apos is not None for m in grupo):
+        anterior = (
+            out[-1].saldo_apos
+            if out and out[-1].saldo_apos is not None
+            else (saldo_anterior if not out else None)
+        )
+        com_saldo = all(m.saldo_apos is not None for m in grupo)
+        resolvido = None
+        if com_saldo and len(grupo) <= _MAX_EMPATE_BUSCA:
+            resolvido = _ordem_do_empate(grupo, anterior, reserva_divida)
+        if resolvido is not None:
+            ordenado, consumos = resolvido
+            for m, consumo in zip(ordenado, consumos, strict=True):
+                m.pago_com_reserva = consumo  # type: ignore[attr-defined]
+                reserva_divida = _reserva_apos(m, reserva_divida, consumo)
+            grupo = ordenado
+        elif len(grupo) > 1 and com_saldo:
+            # empate grande ou sem ordem que feche: o encadeamento guloso de antes
             resto = list(grupo)
-            ordenado: list[ConciliacaoMovimento] = []
-            anterior = (
-                out[-1].saldo_apos
-                if out and out[-1].saldo_apos is not None
-                else (saldo_anterior if not out else None)
-            )
+            ordenado = []
             while resto:
                 prox = None
                 if anterior is not None:
                     prox = next(
-                        (
-                            m
-                            for m in resto
-                            if abs((anterior + m.credito - m.debito) - m.saldo_apos)
-                            <= Decimal("0.01")
-                        ),
-                        None,
+                        (m for m in resto if _encadeia(anterior, m, reserva_divida)[0]), None
                     )
                 if prox is None:
                     # sem âncora: o primeiro é o que não é "seguinte" de nenhum outro
@@ -2353,17 +2450,34 @@ def _ordena_dia(
                             for m in resto
                             if not any(
                                 abs((o.saldo_apos + m.credito - m.debito) - m.saldo_apos)
-                                <= Decimal("0.01")
+                                <= _TOL_SALDO
                                 for o in resto
                                 if o is not m
                             )
                         ),
                         resto[0],
                     )
+                consumo = (
+                    _encadeia(anterior, prox, reserva_divida)[1]
+                    if anterior is not None
+                    else Decimal("0")
+                )
+                prox.pago_com_reserva = consumo  # type: ignore[attr-defined]
+                reserva_divida = _reserva_apos(prox, reserva_divida, consumo)
                 ordenado.append(prox)
                 resto.remove(prox)
                 anterior = prox.saldo_apos
             grupo = ordenado
+        else:
+            for m in grupo:
+                if m.saldo_apos is not None and anterior is not None:
+                    _cabe, consumo = _encadeia(anterior, m, reserva_divida)
+                    m.pago_com_reserva = consumo  # type: ignore[attr-defined]
+                    reserva_divida = _reserva_apos(m, reserva_divida, consumo)
+                else:
+                    reserva_divida = _reserva_apos(m, reserva_divida, Decimal("0"))
+                if m.saldo_apos is not None:
+                    anterior = m.saldo_apos
         out.extend(grupo)
         i = j
     return out
@@ -2374,6 +2488,11 @@ def _totais_do_dia(
 ) -> dict[str, Any]:
     creditos = sum((m.credito or Decimal("0") for m in movs), Decimal("0"))
     debitos = sum((m.debito or Decimal("0") for m in movs), Decimal("0"))
+    # fatura do ML paga com o "segurado pra dívida": está nos débitos (é cobrança de
+    # verdade) mas não saiu do saldo disponível — entra como linha própria do rodapé
+    pago_com_reserva = sum(
+        (getattr(m, "pago_com_reserva", None) or Decimal("0") for m in movs), Decimal("0")
+    )
     primeiro = next((m for m in movs if m.saldo_apos is not None), None)
     ultimo = next((m for m in reversed(movs) if m.saldo_apos is not None), None)
     # saldo inicial = fechamento do dia anterior quando existe (16/10); senão, o que a
@@ -2384,13 +2503,18 @@ def _totais_do_dia(
         saldo_inicial = (
             (primeiro.saldo_apos - primeiro.credito + primeiro.debito) if primeiro else None
         )
-    saldo_final = (saldo_inicial + creditos - debitos) if saldo_inicial is not None else None
+    saldo_final = (
+        (saldo_inicial + creditos - debitos + pago_com_reserva)
+        if saldo_inicial is not None
+        else None
+    )
     saldo_informado = ultimo.saldo_apos if ultimo else None
     return {
         "linhas": len(movs),
         "saldo_inicial": _num(saldo_inicial),
         "creditos": _num(creditos),
         "debitos": _num(debitos),
+        "fatura_paga_com_reserva": _num(pago_com_reserva),
         "saldo_final": _num(saldo_final),
         "saldo_informado": _num(saldo_informado),
         "diferenca": _num(saldo_informado - saldo_final)
@@ -2560,6 +2684,10 @@ async def extrato_do_dia(
                 "pedido_etapa": ped.etapa if ped else None,
                 # reserva: True = retida (aparece sempre); False = par fechado (pode esconder)
                 "reserva_aberta": reserva_aberta.get(m.id),
+                # fatura do ML: parte do débito paga com o segurado pra dívida (19/10)
+                "pago_com_reserva": _num(getattr(m, "pago_com_reserva", None) or Decimal("0"))
+                if m.tipo == "fatura_cobrada"
+                else None,
             }
         )
     fechado = (

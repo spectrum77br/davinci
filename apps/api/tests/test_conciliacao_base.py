@@ -3207,6 +3207,69 @@ async def test_extrato_e_raio_x_mostram_a_reserva_retida_e_escondem_so_o_par(
     assert flags2[str(par_saida.id)] is False and flags2[str(par_volta.id)] is False
 
 
+def _linha_mp(loja, hora: str, tipo: str, credito: str, debito: str, saldo: str, **kw):
+    m = _mov(
+        loja,
+        tipo,
+        datetime.fromisoformat(f"2026-10-16T{hora}-03:00"),
+        credito=credito,
+        debito=debito,
+        **kw,
+    )
+    m.saldo_apos = Decimal(saldo)
+    return m
+
+
+def test_fatura_paga_com_o_segurado_nao_desconta_duas_vezes_e_linha_faltando_continua_aparecendo():
+    """19/10 (revisão): kia (ml) 16/10 e aguiar2 16/10 — a fatura do ML cobrada do saldo
+    vem com o valor inteiro mesmo quando foi paga com o "segurado pra dívida"; o saldo
+    só cai pela parte que saiu do disponível. O dia acusava "saldo não bate" sem
+    nenhuma linha pra classificar. A parte paga com o segurado é aceita só até o que
+    foi segurado no dia: linha faltando continua aparecendo como diferença."""
+    from app.routers.conciliacao import _ordena_dia, _totais_do_dia
+
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    # kia (ml) 16/10 18:52:18 — três linhas no mesmo segundo
+    venda = _linha_mp(loja, "18:52:18", "venda_liberada", "362.32", "0", "362.32", pagamento="21519")
+    segurado = _linha_mp(loja, "18:52:18", "cobranca_divida", "0", "362.32", "0", pagamento="39498")
+    fatura = _linha_mp(loja, "18:52:18", "fatura_cobrada", "0", "362.32", "0", pagamento="vp41w")
+    ordem = _ordena_dia([fatura, segurado, venda], Decimal("0"))
+    assert [m.tipo for m in ordem] == ["venda_liberada", "cobranca_divida", "fatura_cobrada"]
+    assert [m.pago_com_reserva for m in ordem] == [Decimal("0"), Decimal("0"), Decimal("362.32")]
+    t = _totais_do_dia(ordem, Decimal("0"))
+    assert t["debitos"] == 724.64 and t["fatura_paga_com_reserva"] == 362.32
+    assert t["saldo_final"] == 0.0 and t["saldo_informado"] == 0.0 and t["diferenca"] == 0.0
+    # aguiar2 16/10 12:51:04 — fatura 731,76: 360,54 com o segurado, 371,22 do disponível
+    venda2 = _linha_mp(loja, "12:51:04", "venda_liberada", "360.54", "0", "360.54", pagamento="93082")
+    segurado2 = _linha_mp(loja, "12:51:04", "cobranca_divida", "0", "360.54", "0", pagamento="94717")
+    fatura2 = _linha_mp(loja, "12:51:04", "fatura_cobrada", "0", "731.76", "-371.22", pagamento="0qak1")
+    # 14:42:53 — o débito é coberto pela venda; o segurado vai e volta
+    seg3 = _linha_mp(loja, "14:42:53", "cobranca_divida", "0", "371.22", "-371.22", pagamento="94717")
+    venda3 = _linha_mp(loja, "14:42:53", "venda_liberada", "371.22", "0", "0", pagamento="98419")
+    seg4 = _linha_mp(loja, "14:42:55", "cobranca_divida", "371.22", "0", "0", pagamento="94717")
+    ordem = _ordena_dia([fatura2, seg3, segurado2, venda3, venda2, seg4], Decimal("0"))
+    assert [m.tipo for m in ordem[:3]] == ["venda_liberada", "cobranca_divida", "fatura_cobrada"]
+    assert ordem[2].pago_com_reserva == Decimal("360.54")
+    assert [m.saldo_apos for m in ordem[3:5]] == [Decimal("0"), Decimal("-371.22")]  # venda antes do segurado
+    t = _totais_do_dia(ordem, Decimal("0"))
+    assert t["fatura_paga_com_reserva"] == 360.54 and t["diferenca"] == 0.0
+    assert t["saldo_final"] == 0.0 and t["saldo_informado"] == 0.0
+    # linha faltando (a venda de 362,32 não veio): a fatura NÃO "explica" o buraco — a
+    # diferença continua aparecendo
+    ordem = _ordena_dia([fatura, segurado], Decimal("0"))
+    t = _totais_do_dia(ordem, Decimal("0"))
+    assert t["fatura_paga_com_reserva"] == 0.0 and t["diferenca"] == 724.64
+    # fatura sem segurado no dia e saldo que não cai: diferença (nada a consumir)
+    so_fatura = _linha_mp(loja, "04:29:31", "fatura_cobrada", "0", "377.27", "377.27")
+    t = _totais_do_dia(_ordena_dia([so_fatura], Decimal("377.27")), Decimal("377.27"))
+    assert t["diferenca"] == 377.27 and t["fatura_paga_com_reserva"] == 0.0
+    # fatura cobrada direto (mega 15/10): saldo cai inteiro, nada com o segurado
+    direta = _linha_mp(loja, "04:29:31", "fatura_cobrada", "0", "377.27", "0")
+    t = _totais_do_dia(_ordena_dia([direta], Decimal("377.27")), Decimal("377.27"))
+    assert t["diferenca"] == 0.0 and t["fatura_paga_com_reserva"] == 0.0
+
+
 async def test_recalcular_loja_renomeia_liberacao_gravada_como_outro(db, make_user):
     """A linha da marquezini já estava no banco como "outro": o recálculo renomeia e o
     pedido passa de "recebido a mais" pra "recebido a menos 36,15"."""

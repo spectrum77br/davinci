@@ -58,12 +58,16 @@ type Mov = {
   pedido_etapa: string | null
   // reserva: true = retida (saiu e não voltou), false = par fechado; null nas outras linhas
   reserva_aberta?: boolean | null
+  // fatura do ML: parte do débito paga com o segurado pra dívida (não saiu do disponível)
+  pago_com_reserva?: number | null
 }
 type Totais = {
   linhas: number
   saldo_inicial: number | null
   creditos: number | null
   debitos: number | null
+  // fatura do ML paga com o "segurado pra dívida": está nos débitos, mas não saiu do saldo disponível (19/10)
+  fatura_paga_com_reserva?: number | null
   saldo_final: number | null
   saldo_informado: number | null
   diferenca: number | null
@@ -363,7 +367,7 @@ onMounted(() => {
               >
                 <td class="whitespace-nowrap px-1.5 py-1 tabular-nums">{{ fmtHora(m.data) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ m.pagamento_id }}</td>
-                <td class="whitespace-nowrap px-1.5 py-1"><b>{{ m.tipo_label }}</b><span v-if="m.descricao && m.descricao !== m.tipo" class="ml-1 text-muted-foreground">{{ m.descricao }}</span></td>
+                <td class="whitespace-nowrap px-1.5 py-1"><b>{{ m.tipo_label }}</b><span v-if="m.descricao && m.descricao !== m.tipo" class="ml-1 text-muted-foreground">{{ m.descricao }}</span><span v-if="(m.pago_com_reserva || 0) > 0.005" class="ml-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="essa parte da fatura foi paga com o dinheiro que o Mercado Pago já tinha segurado pra dívida: não saiu do saldo disponível">{{ fmtMoney(m.pago_com_reserva) }} pagos com o segurado</span></td>
                 <td class="whitespace-nowrap px-1.5 py-1">
                   <button v-if="m.pedido_bling" type="button" class="font-bold underline decoration-dotted" :title="m.pedido_situacao_label || ''" @click.stop="emit('ver-pedido', m.pedido_bling)">{{ m.pedido_bling }}</button>
                   <span v-else-if="m.classificacao" class="text-muted-foreground">sem pedido</span>
@@ -391,6 +395,7 @@ onMounted(() => {
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.inicial }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_inicial) }}</b></div>
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.creditos }}</div><b class="text-xs tabular-nums text-emerald-700">+ {{ fmtMoney(dados.totais.creditos) }}</b></div>
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.debitos }}</div><b class="text-xs tabular-nums text-red-600">− {{ fmtMoney(dados.totais.debitos) }}</b></div>
+          <div v-if="(dados.totais.fatura_paga_com_reserva || 0) > 0.005" class="border-r px-2 py-1.5" title="a fatura do ML foi cobrada (está nas saídas), mas essa parte foi paga com o dinheiro que o Mercado Pago já tinha segurado pra dívida — não saiu do saldo disponível"><div class="text-muted-foreground">Fatura paga com o segurado</div><b class="text-xs tabular-nums text-amber-700">+ {{ fmtMoney(dados.totais.fatura_paga_com_reserva) }}</b></div>
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.final }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_final) }}</b></div>
           <div class="border-r px-2 py-1.5"><div class="text-muted-foreground">{{ rodape.informado }}</div><b class="text-xs tabular-nums">{{ fmtMoney(dados.totais.saldo_informado) }}</b></div>
           <div class="px-2 py-1.5"><div class="text-muted-foreground">Diferença</div><b class="text-xs tabular-nums" :class="dados.totais.diferenca === null ? '' : Math.abs(dados.totais.diferenca) <= 0.05 ? 'text-emerald-700' : 'text-red-600'">{{ fmtMoney(dados.totais.diferenca) }}<span v-if="dados.totais.diferenca !== null && Math.abs(dados.totais.diferenca) <= 0.05"> ✔ bate</span></b></div>
