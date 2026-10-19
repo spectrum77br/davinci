@@ -2979,3 +2979,149 @@ def test_centavos_sem_liberacao_sao_pendencia_e_frete_cancelado_nao_e_alarme():
     frete_volta = _mov(loja, "frete_cancelado", d, credito="10.00")
     out = calc.situacao_do_pedido(movs_extrato=[frete, frete_volta], **base)
     assert out["situacao"] == "aguardando"  # só frete mexeu: nem alarme, nem "desfeita"
+
+
+_LINHA_SEM_NOME = {
+    # marquezini 301744 (19/10, revisão): o ML liberou a venda com essa descrição
+    "DATE": "2026-10-18T10:11:49.000-03:00",
+    "SOURCE_ID": "181990011223",
+    "RECORD_TYPE": "release",
+    "DESCRIPTION": "fee_for_divergence_in_package_dimensions",
+    "NET_CREDIT_AMOUNT": "563.41",
+    "NET_DEBIT_AMOUNT": "0.00",
+    "GROSS_AMOUNT": "830.00",
+    "MP_FEE_AMOUNT": "-98.88",
+    "FINANCING_FEE_AMOUNT": "0.00",
+    "SHIPPING_FEE_AMOUNT": "-67.88",
+    "ORDER_ID": "2000018829258112",
+    "BALANCE_AMOUNT": "11016.89",
+}
+
+
+def test_liberacao_com_descricao_desconhecida_e_venda_liberada_e_dif_aparece():
+    """19/10 (revisão): linha `release` com crédito, bruto e nº da venda é liberação mesmo
+    com descrição que o painel não conhece — o pedido compara o valor ("a menos 36,15",
+    com a descrição no motivo) em vez de "nada liberou e entrou 563,41 (a mais)". E a
+    coluna Dif. passa a existir também em estornado depois / nada liberou e mexeu."""
+    m = ext.linha_para_movimento(_LINHA_SEM_NOME)
+    assert m["tipo"] == "venda_liberada"
+    assert m["descricao"] == "fee_for_divergence_in_package_dimensions"
+    assert m["bruto"] == Decimal("830.00") and m["credito"] == Decimal("563.41")
+    # débito desconhecido, ou crédito sem nº da venda / sem bruto, continua "outro"
+    debito = {**_LINHA_SEM_NOME, "NET_CREDIT_AMOUNT": "0.00", "NET_DEBIT_AMOUNT": "5.00"}
+    assert ext.linha_para_movimento(debito)["tipo"] == "outro"
+    assert ext.linha_para_movimento({**_LINHA_SEM_NOME, "ORDER_ID": ""})["tipo"] == "outro"
+    assert ext.linha_para_movimento({**_LINHA_SEM_NOME, "GROSS_AMOUNT": "0.00"})["tipo"] == "outro"
+
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    base = {
+        "agora": datetime(2026, 10, 19, 12, tzinfo=UTC),
+        "data_pedido": datetime(2026, 10, 6, 12, tzinfo=UTC),
+        "bling_total": Decimal("830.00"),
+        "previsao": None,
+        "fatura": {},
+    }
+    venda = MarketplaceOrderFinancial(
+        gross_amount=Decimal("830.00"),
+        net_amount=Decimal("599.56"),
+        fee_amount=Decimal("98.88"),
+        freight_amount=Decimal("67.88"),
+        raw={},
+    )
+    lib = _mov(
+        loja,
+        "venda_liberada",
+        datetime(2026, 10, 18, 13, 11, tzinfo=UTC),
+        credito="563.41",
+        tarifa="-98.88",
+        frete="-67.88",
+        pedido_mkt="2000018829258112",
+    )
+    lib.descricao = "fee_for_divergence_in_package_dimensions"
+    lib.bruto = Decimal("830.00")
+    out = calc.situacao_do_pedido(movs_extrato=[lib], venda=venda, **base)
+    assert out["situacao"] == "recebido_a_menos"
+    assert out["dif_previsto_recebido"] == Decimal("-36.15")
+    assert out["liberado_valor"] == Decimal("563.41")
+    assert out["motivo"] == "liberada pelo ML como «fee_for_divergence_in_package_dimensions»"
+
+    # Dif. em "estornado depois": liberou 100, mediação de 100 no dia seguinte → −100,00
+    d = datetime(2026, 10, 12, 12, tzinfo=UTC)
+    venda100 = MarketplaceOrderFinancial(
+        gross_amount=Decimal("120"), net_amount=Decimal("100"), fee_amount=Decimal("20"), raw={}
+    )
+    lib2 = _mov(loja, "venda_liberada", d, credito="100.00", pedido_mkt="2000018")
+    med = _mov(loja, "mediacao", d + timedelta(days=1), debito="100.00", pedido_mkt="2000018")
+    out = calc.situacao_do_pedido(movs_extrato=[lib2, med], venda=venda100, **base)
+    assert out["situacao"] == "estornado_depois"
+    assert out["dif_previsto_recebido"] == Decimal("-100.00")
+    # Dif. em "nada liberou e entrou X" (compensação da Shopee de 773,47 × previsto 769,98)
+    comp = _mov(loja, "outro", d, credito="773.47")
+    venda_sh = MarketplaceOrderFinancial(
+        gross_amount=Decimal("929.61"), net_amount=Decimal("769.98"), fee_amount=Decimal("59.74"), raw={}
+    )
+    out = calc.situacao_do_pedido(movs_extrato=[comp], venda=venda_sh, **base)
+    assert out["situacao"] == "recebido_a_mais"
+    assert out["dif_previsto_recebido"] == Decimal("3.49")
+    # venda desfeita continua sem Dif. (não há previsto a cobrar)
+    out = calc.situacao_do_pedido(
+        movs_extrato=[lib2, med],
+        venda=MarketplaceOrderFinancial(
+            gross_amount=Decimal("120"),
+            net_amount=Decimal("0"),
+            fee_amount=Decimal("20"),
+            refund_amount=Decimal("120"),
+            raw={},
+        ),
+        **base,
+    )
+    assert out["situacao"] == "cancelado" and out["dif_previsto_recebido"] is None
+
+
+async def test_recalcular_loja_renomeia_liberacao_gravada_como_outro(db, make_user):
+    """A linha da marquezini já estava no banco como "outro": o recálculo renomeia e o
+    pedido passa de "recebido a mais" pra "recebido a menos 36,15"."""
+    loja, integ = await _loja(db, make_user)
+    d = datetime(2026, 10, 6, 12, tzinfo=UTC)
+    db.add(_pedido_bling("301744", "2000018829258112", d, "830.00", 400.0))
+    db.add(
+        _fin(
+            integ.id,
+            "2000018829258112",
+            gross="830.00",
+            fee="98.88",
+            freight="67.88",
+            net="599.56",
+        )
+    )
+    outro = _mov(
+        loja,
+        "outro",
+        datetime(2026, 10, 18, 13, 11, tzinfo=UTC),
+        credito="563.41",
+        pedido_mkt="2000018829258112",
+        sub="release",
+        tarifa="-98.88",
+        frete="-67.88",
+    )
+    outro.descricao = "fee_for_divergence_in_package_dimensions"
+    outro.bruto = Decimal("830.00")
+    db.add(outro)
+    await db.commit()
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 19, 12, tzinfo=UTC))
+    await db.commit()
+    assert res["liberacao_renomeada"] == 1
+    await db.refresh(outro)
+    assert outro.tipo == "venda_liberada" and outro.pedido_bling == "301744"
+    p = (
+        await db.execute(
+            __import__("sqlalchemy")
+            .select(ConciliacaoPedido)
+            .where(ConciliacaoPedido.pedido_bling == "301744")
+        )
+    ).scalar_one()
+    assert p.situacao == "recebido_a_menos"
+    assert p.dif_previsto_recebido == Decimal("-36.15")
+    assert p.liberado_valor == Decimal("563.41") and p.liberado_em is not None
+    assert "fee_for_divergence_in_package_dimensions" in (p.motivo or "")

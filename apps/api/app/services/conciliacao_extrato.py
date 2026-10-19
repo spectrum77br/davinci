@@ -325,6 +325,28 @@ def cupom_da_linha(row: dict[str, Any]) -> Decimal:
     return v.copy_abs()
 
 
+def liberacao_sem_nome(
+    tipo: str,
+    record_type: str | None,
+    credito: Decimal | None,
+    bruto: Decimal | None,
+    pedido_marketplace: str | None,
+) -> bool:
+    """A liberação de uma venda com uma DESCRIPTION que o painel não conhece (19/10,
+    marquezini 301744: o ML liberou 563,41 como `fee_for_divergence_in_package_dimensions`,
+    com bruto 830,00, tarifa e frete preenchidos). Caía em "outro" e o pedido ficava
+    "recebido a MAIS" (nada liberou e entrou 563,41) quando foi "a MENOS 36,15". Linha
+    `release`, com crédito, bruto e nº da venda é liberação — a descrição fica guardada
+    e aparece no motivo da diferença."""
+    return (
+        tipo == "outro"
+        and (record_type or "").strip().lower() == "release"
+        and bool(credito) and credito > 0
+        and bool(bruto) and bruto > 0
+        and bool(pedido_marketplace)
+    )
+
+
 def linha_para_movimento(row: dict[str, str]) -> dict[str, Any] | None:
     """Uma linha do CSV → colunas de `conciliacao_movimentos` (sem a loja).
     Devolve None pras linhas de saldo inicial/total (não são movimento)."""
@@ -339,6 +361,16 @@ def linha_para_movimento(row: dict[str, str]) -> dict[str, Any] | None:
     debito = dinheiro(row.get("NET_DEBIT_AMOUNT"))
     cobranca = _cobranca_da_fatura(descricao, row.get("EXTERNAL_REFERENCE"))
     tipo = "fatura_cobrada" if cobranca else tipo_do_movimento(descricao, record_type)
+    if liberacao_sem_nome(
+        tipo, record_type, credito, dinheiro(row.get("GROSS_AMOUNT")), _texto(row.get("ORDER_ID"))
+    ):
+        tipo = "venda_liberada"
+        logger.warning(
+            "conciliacao_extrato_liberacao_sem_nome",
+            descricao=descricao,
+            pedido=_texto(row.get("ORDER_ID")),
+            credito=str(credito),
+        )
     if descricao in ("payout", "reserve_for_payout"):
         classificacao = "saque"
     elif cobranca or tipo == "cobranca_divida":

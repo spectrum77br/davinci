@@ -527,6 +527,17 @@ def situacao_do_pedido(
                     motivo = _motivo_da_diferenca(venda, fatura, liberacoes)
             # 15/10: o Bling "nunca bate" (Vinicius) — a diferença Bling × venda continua
             # gravada (dif_bling_venda), mas não vira situação nem aparece na tela.
+    # 19/10 (revisão): a coluna "Dif." ficava vazia justo quando o dinheiro saiu depois
+    # (estornado depois, "nada liberou e saiu X", recebido a mais sem liberação) — quem
+    # ordena pela coluna ou soma no Excel não via a diferença. Venda desfeita (cancelado)
+    # continua sem Dif.: não há previsto a cobrar.
+    if (
+        dif is None
+        and recebido is not None
+        and venda_liquido is not None
+        and situacao not in ("cancelado", "sem_venda")
+    ):
+        dif = recebido - venda_liquido
     return {
         "liberado_valor": liberado_valor,
         "liberado_em": liberado_em,
@@ -593,10 +604,17 @@ def _motivo_da_diferenca(
     liberacoes: list[ConciliacaoMovimento],
 ) -> str | None:
     partes: list[str] = []
+    # Liberação com uma descrição fora do comum (19/10, marquezini 301744:
+    # `fee_for_divergence_in_package_dimensions`): a descrição do ML é parte do motivo
+    for m in liberacoes:
+        d = (m.descricao or "").strip().lower()
+        if d and d != "payment" and m.origem == ORIGEM_EXTRATO:
+            partes.append(f"liberada pelo ML como «{d}»")
+            break
     # A carteira da Shopee só traz o líquido (sem tarifa/frete na linha): não dá pra
     # dizer "cobrado 0,00". Fica só a diferença, e a abertura está no detalhe da venda.
     if liberacoes and all(m.tarifa is None and m.frete is None for m in liberacoes):
-        return "a carteira só traz o líquido: abertura no detalhe da venda"
+        return " · ".join([*partes, "a carteira só traz o líquido: abertura no detalhe da venda"])
     frete_previsto = _d(venda.freight_amount) if venda else None
     frete_cobrado = _soma([m.frete for m in liberacoes]).copy_abs() if liberacoes else None
     # O extrato cobra o frete INTEIRO (SHIPPING_FEE) e o bruto traz o que o comprador
@@ -769,6 +787,37 @@ async def _reservas_vai_e_volta(session: AsyncSession, loja: ConciliacaoLoja) ->
     return classificadas, retidas
 
 
+async def _renomear_liberacoes_sem_nome(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Linha do extrato do MP gravada como "outro" que é liberação de venda com descrição
+    desconhecida (ver `liberacao_sem_nome`): vira `venda_liberada`. A descrição original
+    continua na coluna `descricao` (e no motivo da diferença do pedido)."""
+    from app.services.conciliacao_extrato import liberacao_sem_nome
+
+    linhas = (
+        (
+            await session.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.integration_id == loja.integration_id,
+                    ConciliacaoMovimento.origem == ORIGEM_EXTRATO,
+                    ConciliacaoMovimento.tipo == "outro",
+                    ConciliacaoMovimento.credito > 0,
+                    ConciliacaoMovimento.pedido_marketplace.isnot(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    n = 0
+    for m in linhas:
+        if liberacao_sem_nome("outro", m.sub_tipo, m.credito, m.bruto, m.pedido_marketplace):
+            m.tipo = "venda_liberada"
+            n += 1
+    if n:
+        await session.flush()
+    return n
+
+
 _TIPOS_COBRANCA_PLATAFORMA = ("ajuste_shopee", "ajuste_amazon", "ajuste_tiktok")
 
 
@@ -816,6 +865,10 @@ async def recalcular_loja(
     # 0. Linha do relatório pobre que tem gêmea completa (16/10, aguiar): some antes de
     # qualquer conta, senão o pedido recebe em dobro.
     duplicatas_pobres = await apagar_duplicatas_pobres(session, loja)
+    # 0b. Liberação gravada como "outro" antes da regra (19/10, marquezini 301744):
+    # linha `release` com crédito, bruto e nº da venda é liberação — renomeia pra que
+    # o pedido compare o valor em vez de dizer "nada liberou e entrou X"
+    liberacoes_renomeadas = await _renomear_liberacoes_sem_nome(session, loja)
 
     # 1. Pedidos do Bling da loja desde o início (uma linha por item → agrupa por número).
     rows = (
@@ -954,6 +1007,8 @@ async def recalcular_loja(
     contagem: dict[str, int] = defaultdict(int)
     if duplicatas_pobres:
         contagem["duplicata_pobre_apagada"] = duplicatas_pobres
+    if liberacoes_renomeadas:
+        contagem["liberacao_renomeada"] = liberacoes_renomeadas
     for numero, itens in por_numero.items():
         cab = itens[0]
         numeroloja = str(cab.numeroloja) if cab.numeroloja else None
