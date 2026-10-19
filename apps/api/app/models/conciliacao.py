@@ -215,6 +215,10 @@ class ConciliacaoPedido(Base, TimestampMixin):
     venda_frete_pago: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_estorno: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_liquido: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # o líquido previsto como estava ANTES de liberar (19/10): a Shopee/TikTok fecham a
+    # conta na liberação e a Margem relê — sem isto a diferença que a plataforma
+    # acrescentou sumia atrás do "bateu"
+    previsto_na_venda: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     venda_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     previsao_liberacao: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

@@ -756,6 +756,7 @@ _CAMPOS_PEDIDO = (
     "venda_frete_pago",
     "venda_estorno",
     "venda_liquido",
+    "previsto_na_venda",
     "venda_status",
     "fatura_tarifa",
     "fatura_parcelamento",
@@ -1586,6 +1587,21 @@ def _comparativo(
                     "estilo": "bold",
                 }
             )
+        # 19/10 (revisão): a plataforma mudou a conta na liberação (afiliados, taxa de
+        # serviço) — o previsto de antes fica visível ao lado do de agora
+        antes = n(p.previsto_na_venda)
+        agora_ = n(p.venda_liquido)
+        if antes is not None and agora_ is not None and abs(antes - agora_) > 0.005:
+            linhas_.append(
+                {
+                    "chave": "previsto_na_venda",
+                    "rotulo": "Previsto na venda (antes de liberar) × previsto na liberação",
+                    "previsto": antes,
+                    "real": agora_,
+                    "dif": round(antes - agora_, 2),
+                    "estilo": "muted",
+                }
+            )
         return linhas_
 
     def linha(chave, rotulo, previsto, real, *, compara=True, estilo="") -> dict[str, Any]:
@@ -2063,6 +2079,7 @@ _COLUNAS_XLSX = [
     ("Afiliados", "venda_afiliados"),
     ("Estorno", "venda_estorno"),
     ("Líquido previsto", "venda_liquido"),
+    ("Previsto na venda (antes de liberar)", "previsto_na_venda"),
     ("Fatura tarifa", "fatura_tarifa"),
     ("Fatura parcelamento", "fatura_parcelamento"),
     ("Fatura frete", "fatura_frete"),

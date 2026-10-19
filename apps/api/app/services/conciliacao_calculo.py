@@ -1211,6 +1211,34 @@ async def recalcular_loja(
                 # custo de 0,01 dava margem de 6 dígitos e estourava Numeric(10,4),
                 # derrubando o recálculo da loja inteira (16/10, revisão)
                 margem = None
+        liquido_gravado = (
+            amazon["liquido"] if amazon else (_d(venda.net_amount) if venda_ok else None)
+        )
+        # 19/10 (revisão): o previsto de ANTES da liberação. A Shopee e a TikTok fecham a
+        # conta na hora de liberar (afiliados, taxa de serviço) e a Margem relê o pedido —
+        # o valor novo substituía o antigo e a diferença sumia atrás do "bateu" (Jlas
+        # 301039: 1.604,51 na venda → 1.583,99 na liberação). Na primeira rodada em que o
+        # pedido aparece liberado, guarda o que o painel tinha; depois compara e mostra.
+        previsto_na_venda = atual.previsto_na_venda if atual is not None else None
+        if (
+            previsto_na_venda is None
+            and atual is not None
+            and atual.liberado_em is None
+            and calc["liberado_em"] is not None
+            and atual.venda_liquido is not None
+        ):
+            previsto_na_venda = atual.venda_liquido
+        if (
+            previsto_na_venda is not None
+            and liquido_gravado is not None
+            and abs(liquido_gravado - previsto_na_venda) > TOLERANCIA
+            and calc["situacao"] not in ("cancelado", "sem_venda")
+        ):
+            aviso = (
+                f"a plataforma mudou a conta em {liquido_gravado - previsto_na_venda:+.2f} na "
+                f"liberação (previsto na venda {previsto_na_venda:.2f})"
+            )
+            calc["motivo"] = f"{calc['motivo']} · {aviso}" if calc["motivo"] else aviso
         valores = {
             "platform": loja.platform,
             "bling_id": cab.bling_id,
@@ -1243,9 +1271,8 @@ async def recalcular_loja(
             "venda_frete_pago": frete_pago,
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
             # Amazon: o líquido previsto é o da venda (Shipment + tarifas), sem estornos
-            "venda_liquido": (
-                amazon["liquido"] if amazon else (_d(venda.net_amount) if venda_ok else None)
-            ),
+            "venda_liquido": liquido_gravado,
+            "previsto_na_venda": previsto_na_venda,
             "venda_status": venda.status if venda_ok else None,
             "previsao_liberacao": calc["previsao"],
             "fatura_tarifa": fatura["tarifa"] if fatura_movs else None,

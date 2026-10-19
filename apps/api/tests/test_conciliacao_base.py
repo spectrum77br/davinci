@@ -3270,6 +3270,54 @@ def test_fatura_paga_com_o_segurado_nao_desconta_duas_vezes_e_linha_faltando_con
     assert t["diferenca"] == 0.0 and t["fatura_paga_com_reserva"] == 0.0
 
 
+async def test_previsto_de_antes_da_liberacao_fica_guardado_e_a_mudanca_aparece(db, make_user):
+    """19/10 (revisão): Jlas 301039 — a Margem dizia 1.604,51, a Shopee liberou 1.583,99
+    e releu a conta (afiliados 18,00 + serviço 2,52 só na liberação): o previsto virava
+    1.583,99, "bateu", e os 20,52 sumiam. Agora o previsto de antes fica guardado e a
+    mudança aparece no motivo e no Raio-X; o pedido continua "bateu"."""
+    loja, integ = await _loja(db, make_user)
+    agora = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    db.add(_pedido_bling("301039", "2000019000000001", datetime(2026, 10, 2, 12, tzinfo=UTC), "1900.00", 900.0))
+    fin = _fin(integ.id, "2000019000000001", gross="1900.00", fee="295.49", freight="0", net="1604.51")
+    db.add(fin)
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=agora)
+    await db.commit()
+    p = (
+        await db.execute(
+            __import__("sqlalchemy")
+            .select(ConciliacaoPedido)
+            .where(ConciliacaoPedido.pedido_bling == "301039")
+        )
+    ).scalar_one()
+    assert p.situacao == "aguardando" and p.venda_liquido == Decimal("1604.51")
+    assert p.previsto_na_venda is None
+    # liberou 1.583,99 e a Margem releu a conta: líquido 1.583,99
+    db.add(
+        _mov(
+            loja,
+            "venda_liberada",
+            datetime(2026, 10, 14, 12, tzinfo=UTC),
+            credito="1583.99",
+            pedido_mkt="2000019000000001",
+        )
+    )
+    fin.net_amount = Decimal("1583.99")
+    fin.fee_amount = Decimal("316.01")
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=agora)
+    await db.commit()
+    await db.refresh(p)
+    assert p.situacao == "bateu" and p.venda_liquido == Decimal("1583.99")
+    assert p.previsto_na_venda == Decimal("1604.51")
+    assert p.motivo == "a plataforma mudou a conta em -20.52 na liberação (previsto na venda 1604.51)"
+    # rodada seguinte: o previsto de antes não é sobrescrito
+    await calc.recalcular_loja(db, loja, agora=agora + timedelta(days=1))
+    await db.commit()
+    await db.refresh(p)
+    assert p.previsto_na_venda == Decimal("1604.51") and "-20.52" in p.motivo
+
+
 async def test_recalcular_loja_renomeia_liberacao_gravada_como_outro(db, make_user):
     """A linha da marquezini já estava no banco como "outro": o recálculo renomeia e o
     pedido passa de "recebido a mais" pra "recebido a menos 36,15"."""
