@@ -4,8 +4,8 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { JSDOM } = require('jsdom')
-const { window } = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://davinci.invalid/' })
-for (const nome of ['window', 'document', 'Element', 'HTMLElement', 'HTMLInputElement', 'SVGElement', 'Node', 'NodeFilter', 'Text', 'Comment', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent', 'FocusEvent', 'MutationObserver', 'getComputedStyle']) {
+const { window } = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://davinci.invalid/', pretendToBeVisual: true })
+for (const nome of ['window', 'document', 'Element', 'HTMLElement', 'HTMLInputElement', 'SVGElement', 'Node', 'NodeFilter', 'Text', 'Comment', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent', 'FocusEvent', 'MutationObserver', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
   globalThis[nome] = nome === 'window' ? window : window[nome]
 }
 const ts = require('typescript')
@@ -52,6 +52,13 @@ function requerer(nome) {
 }
 const esperar = async () => { await new Promise((r) => setTimeout(r, 0)); await Vue.nextTick() }
 const click = async (el) => { assert.ok(el, 'botão existe'); el.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await esperar() }
+const escolherCategoria = async (el, tipo) => {
+  const tab = el.querySelector(`[data-email-venda-categoria="${tipo}"]`)
+  assert.ok(tab, 'categoria existe')
+  tab.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  await esperar()
+  assert.equal(tab.getAttribute('aria-selected'), 'true')
+}
 function adiada() {
   let resolver, rejeitar
   const promessa = new Promise((a, b) => { resolver = a; rejeitar = b })
@@ -116,6 +123,63 @@ async function principal() {
     assert.equal(document.activeElement, m.el.querySelector('[data-emails-venda-botao]'), 'fechar devolve foco ao botão')
     assert.ok(!m.el.textContent.includes('CORPO PROTEGIDO'))
     assert.deepEqual(m.avisos, [])
+    m.fechar()
+  }
+  // As três categorias separam mensagens da mesma venda, sem consultar a
+  // conversa inteira do chamado ou misturar mensagens de outras categorias.
+  {
+    const info = item('info', 'X', { tipo_email: 'informativo', finalidade: 'vendas' })
+    const chamado1 = item('chamado1', 'X', { tipo_email: 'chamado', caso_id: 'ABC123', tipo_email_inferido: true })
+    const chamado2 = item('chamado2', 'X', { tipo_email: 'chamado', caso_id: 'ABC123' })
+    const venda = item('venda', 'X', { tipo_email: 'venda', finalidade: 'avisos' })
+    const m = await montar({ conversaId: 'X', pedido: 'X', sinal: 0, toolbar: true }, async () => lista('X', [venda, chamado1, info, chamado2]))
+    await click(m.el.querySelector('[data-emails-venda-botao]'))
+    assert.deepEqual([...m.el.querySelectorAll('[role=tab]')].map((e) => e.textContent.replace(/\s+/g, ' ').trim()), ['Informativos 1', 'Chamados 2', 'Vendas 1'])
+    assert.equal(m.el.querySelector('[role=tab][aria-selected=true]').dataset.emailVendaCategoria, 'informativo')
+    assert.deepEqual([...m.el.querySelectorAll('[data-email-venda-item]')].map((e) => e.dataset.emailVendaItem), ['info'])
+    await escolherCategoria(m.el, 'chamado')
+    assert.deepEqual([...m.el.querySelectorAll('[data-email-venda-item]')].map((e) => e.dataset.emailVendaItem), ['chamado1', 'chamado2'])
+    assert.match(m.el.querySelector('[data-email-venda-item="chamado1"] [title]').getAttribute('title'), /Tipo sugerido/)
+    await escolherCategoria(m.el, 'venda')
+    assert.deepEqual([...m.el.querySelectorAll('[data-email-venda-item]')].map((e) => e.dataset.emailVendaItem), ['venda'])
+    assert.equal(m.chamadas.length, 1, 'trocar categorias usa só os e-mails já autorizados para o pedido')
+    m.fechar()
+  }
+  {
+    const m = await montar({ conversaId: 'X', pedido: 'X', sinal: 0, toolbar: true }, async () => lista('X', [item('venda', 'X', { tipo_email: 'venda' })]))
+    await click(m.el.querySelector('[data-emails-venda-botao]'))
+    assert.equal(m.el.querySelector('[role=tab][aria-selected=true]').dataset.emailVendaCategoria, 'venda', 'abre a primeira categoria com e-mails')
+    await escolherCategoria(m.el, 'chamado')
+    assert.equal(m.el.querySelector('[data-email-venda-item]'), null)
+    assert.match(m.el.querySelector('[role=tabpanel]:not([hidden])').textContent, /Nenhum e-mail nesta categoria para este pedido/)
+    await click(m.el.querySelector('[data-emails-venda-fechar]'))
+    await click(m.el.querySelector('[data-emails-venda-botao]'))
+    assert.equal(m.el.querySelector('[role=tab][aria-selected=true]').dataset.emailVendaCategoria, 'venda', 'reabre com conteúdo')
+    m.fechar()
+  }
+  // Detalhe atrasado não reaparece ao trocar de categoria, nem ao voltar.
+  {
+    const detalhe = adiada()
+    const m = await montar({ conversaId: 'X', pedido: 'X', sinal: 0, toolbar: true }, (url) => {
+      if (url.includes('/emails/')) return detalhe.promessa
+      return Promise.resolve(lista('X', [item('info', 'X'), item('venda', 'X', { tipo_email: 'venda' })]))
+    })
+    await click(m.el.querySelector('[data-emails-venda-botao]'))
+    await click(m.el.querySelector('[data-email-venda-ver]'))
+    await escolherCategoria(m.el, 'venda')
+    detalhe.resolver(item('info', 'X', { texto: 'DETALHE DA CATEGORIA ANTERIOR' }))
+    await esperar()
+    await escolherCategoria(m.el, 'informativo')
+    assert.ok(!m.el.textContent.includes('DETALHE DA CATEGORIA ANTERIOR'))
+    assert.equal(m.el.querySelector('[data-email-venda-ver]').getAttribute('aria-expanded'), 'false')
+    m.fechar()
+  }
+  // Resposta inesperada não perde mensagens nem inventa um dos três tipos.
+  {
+    const m = await montar({ conversaId: 'X', pedido: 'X', sinal: 0, toolbar: true }, async () => lista('X', [item('legado', 'X', { tipo_email: null })]))
+    await click(m.el.querySelector('[data-emails-venda-botao]'))
+    assert.match(m.el.querySelector('[role=tab][aria-selected=true]').textContent, /Sem classificação 1/)
+    assert.ok(m.el.querySelector('[data-email-venda-item="legado"]'))
     m.fechar()
   }
   // Sem e-mail confirmado, sem pedido ou erro: botão escondido, sem atalho genérico.

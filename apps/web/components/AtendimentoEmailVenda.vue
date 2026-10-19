@@ -6,6 +6,7 @@
 // texto. A linha do tempo do chat não recebe corpos de e-mail.
 import type { Mensagem } from '~/components/AtendimentoPlataforma.vue'
 import type { CartaoEmail, EmailDaMensagem } from '~/components/AtendimentoEmailCartao.vue'
+import { TIPOS_EMAIL } from '~/components/AtendimentoEmailCartao.vue'
 
 export type PastaDaVenda = { pasta: string | null; finalidade: string | null; destaque: boolean; quantidade: number }
 export type CaixaDaVenda = {
@@ -43,6 +44,18 @@ export function emailDoCartao(c: CartaoEmail): EmailDaMensagem {
   }
 }
 
+// A categoria pertence ao e-mail, não à pasta nem ao chamado inteiro.
+// A API atual sempre informa um dos três tipos; uma resposta inesperada
+// continua visível sem receber uma classificação inventada pela interface.
+export function categoriasDaVenda(itens: CartaoEmail[]) {
+  const categorias = TIPOS_EMAIL.map((t) => ({ ...t, itens: itens.filter((e) => e.tipo_email === t.value) }))
+  const semTipo = itens.filter((e) => !TIPOS_EMAIL.some((t) => t.value === e.tipo_email))
+  return [
+    ...categorias,
+    ...(semTipo.length ? [{ value: 'sem_tipo', label: 'Sem classificação', itens: semTipo }] : []),
+  ]
+}
+
 // Sinal para reler quando chegar e-mail à conversa de E-mail. No chat a
 // consulta por pedido é independente deste sinal, inclusive quando ele é 0.
 export function sinalDeEmails(
@@ -63,7 +76,7 @@ export function rotuloDasPastas(pastas: PastaDaVenda[]): string {
 
 <script setup lang="ts">
 import { Loader2, Mail, X } from 'lucide-vue-next'
-import { DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle, DialogTrigger } from 'reka-ui'
+import { DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle, DialogTrigger, TabsContent, TabsList, TabsRoot, TabsTrigger } from 'reka-ui'
 import { fmtDataHora, plataformaInfo } from '~/components/AtendimentoPlataforma.vue'
 import { destinoDaLoja, rotuloTipoEmail, dicaTipoEmail } from '~/components/AtendimentoEmailCartao.vue'
 import AtendimentoEmailCartao from '~/components/AtendimentoEmailCartao.vue'
@@ -88,17 +101,27 @@ const selecionado = ref<string | null>(null)
 const cartao = ref<CartaoEmail | null>(null)
 const lendo = ref(false)
 const erroLeitura = ref(false)
+const categoria = ref('informativo')
 let geracao = 0
 let leitura = 0
 const temEmails = computed(() => venda.value?.estado === 'ok' && !!venda.value.pedido && venda.value.total > 0 && venda.value.itens.length > 0)
+const categorias = computed(() => categoriasDaVenda(venda.value?.itens || []))
 
-function fechar() {
-  aberto.value = false
+function limparLeitura() {
   selecionado.value = null
   cartao.value = null
   lendo.value = false
   erroLeitura.value = false
   ++leitura
+}
+function fechar() {
+  aberto.value = false
+  limparLeitura()
+}
+function abrir() {
+  categoria.value = categorias.value.find((c) => c.itens.length)?.value || 'informativo'
+  limparLeitura()
+  aberto.value = true
 }
 
 async function carregar() {
@@ -134,7 +157,7 @@ async function carregar() {
   }
 }
 async function verEmail(item: CartaoEmail) {
-  if (!aberto.value || !temEmails.value || !venda.value?.itens.some((e) => e.id === item.id)) return
+  if (!aberto.value || !temEmails.value || !categorias.value.find((c) => c.value === categoria.value)?.itens.some((e) => e.id === item.id)) return
   const g = geracao
   const l = ++leitura
   const id = props.conversaId
@@ -155,12 +178,13 @@ async function verEmail(item: CartaoEmail) {
   }
 }
 watch(() => [props.conversaId, props.pedido, props.sinal, props.toolbar], () => { void carregar() }, { immediate: true, flush: 'sync' })
+watch(categoria, limparLeitura, { flush: 'sync' })
 onBeforeUnmount(() => { ++geracao; ++leitura })
 defineExpose({ carregar })
 </script>
 
 <template>
-  <DialogRoot v-if="toolbar" :open="aberto" @update:open="(v) => v ? aberto = true : fechar()">
+  <DialogRoot v-if="toolbar" :open="aberto" @update:open="(v) => v ? abrir() : fechar()">
     <DialogTrigger v-if="temEmails" as-child>
       <button
       type="button"
@@ -182,23 +206,33 @@ defineExpose({ carregar })
           </div>
           <button type="button" class="rounded p-1.5 hover:bg-accent" aria-label="Fechar e-mails" data-emails-venda-fechar @click="fechar"><X class="size-4" /></button>
         </div>
-        <ul class="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-          <li v-for="item in venda!.itens" :key="item.id" class="space-y-2 rounded-md border p-3" :data-email-venda-item="item.id">
-            <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-              <span v-if="rotuloTipoEmail(item.tipo_email)" :title="dicaTipoEmail(item.tipo_email_inferido)">{{ rotuloTipoEmail(item.tipo_email) }}</span>
-              <span v-if="item.caso_id">Chamado {{ item.caso_id }}</span>
-              <span v-if="item.recebido_em">{{ fmtDataHora(item.recebido_em) }}</span>
-            </div>
-            <p class="break-words font-medium">{{ item.assunto || 'E-mail recebido' }}</p>
-            <p class="break-all text-xs text-muted-foreground">{{ destinoDaLoja(item.alias, item.loja) }}</p>
-            <button type="button" class="text-xs font-medium text-primary underline" :aria-expanded="selecionado === item.id" data-email-venda-ver @click="verEmail(item)">Ver e-mail</button>
-            <template v-if="selecionado === item.id">
-              <p v-if="lendo" class="flex items-center gap-1 text-xs text-muted-foreground"><Loader2 class="size-3 animate-spin" />Lendo e-mail…</p>
-              <p v-else-if="erroLeitura" class="text-xs text-muted-foreground" role="status">Não consegui ler este e-mail. Tente novamente.</p>
-              <AtendimentoEmailCartao v-else-if="cartao" :key="cartao.id" :email="emailDoCartao(cartao)" :cartao="cartao" :mostrar-texto="true" :texto="cartao.texto" :pode-responder="false" />
-            </template>
-          </li>
-        </ul>
+        <TabsRoot v-model="categoria" class="flex min-h-0 flex-1 flex-col">
+          <TabsList aria-label="Categorias dos e-mails desta venda" class="flex shrink-0 gap-1 overflow-x-auto border-b px-4 py-2">
+            <TabsTrigger v-for="grupo in categorias" :key="grupo.value" :value="grupo.value" class="inline-flex shrink-0 items-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-primary/10 data-[state=active]:text-primary" :data-email-venda-categoria="grupo.value">
+              {{ grupo.label }} <span class="rounded-full bg-muted px-1.5 tabular-nums">{{ grupo.itens.length }}</span>
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent v-for="grupo in categorias" :key="grupo.value" :value="grupo.value" class="min-h-0 flex-1 overflow-y-auto p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" :data-email-venda-painel="grupo.value">
+            <p v-if="!grupo.itens.length" class="py-4 text-center text-xs text-muted-foreground" role="status">Nenhum e-mail nesta categoria para este pedido.</p>
+            <ul v-else class="space-y-3">
+              <li v-for="item in grupo.itens" :key="item.id" class="space-y-2 rounded-md border p-3" :data-email-venda-item="item.id">
+                <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <span v-if="rotuloTipoEmail(item.tipo_email)" :title="dicaTipoEmail(item.tipo_email_inferido)">{{ rotuloTipoEmail(item.tipo_email) }}</span>
+                  <span v-if="item.caso_id">Chamado {{ item.caso_id }}</span>
+                  <span v-if="item.recebido_em">{{ fmtDataHora(item.recebido_em) }}</span>
+                </div>
+                <p class="break-words font-medium">{{ item.assunto || 'E-mail recebido' }}</p>
+                <p class="break-all text-xs text-muted-foreground">{{ destinoDaLoja(item.alias, item.loja) }}</p>
+                <button type="button" class="text-xs font-medium text-primary underline" :aria-expanded="selecionado === item.id" data-email-venda-ver @click="verEmail(item)">Ver e-mail</button>
+                <template v-if="selecionado === item.id">
+                  <p v-if="lendo" class="flex items-center gap-1 text-xs text-muted-foreground"><Loader2 class="size-3 animate-spin" />Lendo e-mail…</p>
+                  <p v-else-if="erroLeitura" class="text-xs text-muted-foreground" role="status">Não consegui ler este e-mail. Tente novamente.</p>
+                  <AtendimentoEmailCartao v-else-if="cartao" :key="cartao.id" :email="emailDoCartao(cartao)" :cartao="cartao" :mostrar-texto="true" :texto="cartao.texto" :pode-responder="false" />
+                </template>
+              </li>
+            </ul>
+          </TabsContent>
+        </TabsRoot>
         </DialogContent>
       </div>
     </DialogPortal>
