@@ -155,11 +155,16 @@ watch([aba, selecionada, emailConversa], sincronizarUrl)
 // ─── resumo (contadores, lojas, flags) ──────────────────────────────────────
 const resumo = ref<Resumo | null>(null)
 const resumoErro = ref<string | null>(null)
+let geracaoResumo = 0
 async function carregarResumo() {
+  const g = ++geracaoResumo
   try {
-    resumo.value = await api<Resumo>('/api/atendimento/resumo')
+    const recebido = await api<Resumo>('/api/atendimento/resumo')
+    if (g !== geracaoResumo) return
+    resumo.value = recebido
     resumoErro.value = null
   } catch (e: any) {
+    if (g !== geracaoResumo) return
     resumoErro.value = erroDaApi(e, 'Não consegui carregar o resumo do atendimento').texto
   }
 }
@@ -204,19 +209,25 @@ async function zerarNaoLidas() {
 // com essas mesmas conversas, do escopo dele. Relido junto com o /resumo
 // (o polling de 30 s, o "atualizar") e quando a conversa de e-mail muda.
 const emailContagens = ref<{ aguardando: number; chamados: number } | null>(null)
+const emailContagensProntas = ref(false)
 const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
 // Sobe a cada tique do polling: as Filas da aba E-mail se releem junto com o número.
 const emailTique = ref(0)
 // A seção da aba E-mail que a pessoa escolheu nesta visita (Caixas | Filas):
 // o AtendimentoMail monta de novo a cada vez que a aba abre e respeita a escolha.
 const emailSecao = ref<'' | 'mailboxes' | 'queues' | 'admin'>('')
+let geracaoContagensEmail = 0
 async function carregarContagensEmail() {
   // Sem o /atendimento, sem as conversas de e-mail (a rota recusaria): não pergunta.
   if (!canSugerir.value) return
+  const g = ++geracaoContagensEmail
   try {
-    emailContagens.value = await api<{ aguardando: number; chamados: number }>('/api/atendimento/email/contagens')
+    const recebidas = await api<{ aguardando: number; chamados: number }>('/api/atendimento/email/contagens')
+    if (g === geracaoContagensEmail) emailContagens.value = recebidas
   } catch {
     // só o número da aba
+  } finally {
+    if (g === geracaoContagensEmail) emailContagensProntas.value = true
   }
 }
 
@@ -255,7 +266,9 @@ watch(
 )
 const itens = ref<ConversaResumo[]>([])
 const proximo = ref<string | null>(null)
-const carregando = ref(false)
+// A página aparece antes da rede: a primeira lista já começa com o estado
+// de carregamento, sem mostrar um vazio entre o clique e o primeiro pedido.
+const carregando = ref(naCaixa.value)
 const carregandoMais = ref(false)
 const listaErro = ref<string | null>(null)
 const LIMITE = 50
@@ -265,11 +278,19 @@ let temPaginasExtras = false
 // Resposta que chega depois de o filtro ter mudado não pode sobrescrever a
 // lista nova — cada consulta leva o número da geração em que saiu.
 let geracao = 0
+let atualizandoLista = false
 // De qual caixa é a lista carregada (a Caixa ou a Caixa Humano): ao voltar
 // para a mesma, só atualiza; para a outra, recarrega do zero.
-let caixaDaLista: 'caixa' | 'humano' = 'caixa'
+let caixaDaLista: 'caixa' | 'humano' | null = null
+let iniciou = false
+let encerrou = false
+onBeforeUnmount(() => { encerrou = true })
 
 type Pagina = { itens: ConversaResumo[]; proximo: string | null }
+// Mudança real do detalhe invalida listas iniciadas antes dela. A resposta
+// é relida; a ordem dos callbacks não prova qual retrato tem a mensagem nova.
+let versaoDasLinhas = 0
+const linhasAtualizadas = new Map<string, { linha: ConversaResumo }>()
 
 function params(antesDe?: string | null) {
   const p = new URLSearchParams()
@@ -289,14 +310,22 @@ function params(antesDe?: string | null) {
   return p.toString()
 }
 
-async function carregarLista() {
+async function carregarLista(confirmando = false) {
   const g = ++geracao
+  const inicio = versaoDasLinhas
   caixaDaLista = emHumano.value ? 'humano' : 'caixa'
   carregando.value = true
   listaErro.value = null
   try {
     const r = await api<Pagina>(`/api/atendimento/conversas?${params()}`)
     if (g !== geracao) return
+    if (inicio !== versaoDasLinhas) {
+      // Com uma lista visível basta uma conferência por atualização. Na
+      // primeira abertura, continua carregando até obter um retrato estável,
+      // em vez de mostrar "nenhuma conversa" no meio de duas mudanças rápidas.
+      if (!confirmando || !itens.value.length) await carregarLista(true)
+      return
+    }
     itens.value = r.itens || []
     proximo.value = r.proximo || null
     temPaginasExtras = false
@@ -313,14 +342,21 @@ async function carregarLista() {
 // carregado pelo "carregar mais" — quem rolou até a 3ª página não é jogado
 // de volta para o topo a cada 30 s. O que ficou para trás da 1ª página nova
 // segue como estava até a próxima troca de filtro.
-async function atualizarLista() {
-  if (carregando.value || carregandoMais.value) return
+async function atualizarLista(confirmando = false) {
+  if (carregando.value || carregandoMais.value || atualizandoLista) return
   // A lista é da outra caixa (trocou de aba): quem recarrega é o watch da aba.
   if ((emHumano.value ? 'humano' : 'caixa') !== caixaDaLista) return
   const g = geracao
+  const inicio = versaoDasLinhas
+  let conferir = false
+  atualizandoLista = true
   try {
     const r = await api<Pagina>(`/api/atendimento/conversas?${params()}`)
     if (g !== geracao) return
+    if (inicio !== versaoDasLinhas) {
+      conferir = !confirmando
+      return
+    }
     const novos = r.itens || []
     const ids = new Set(novos.map((c) => c.id))
     const ultimo = novos[novos.length - 1] ?? null
@@ -342,16 +378,27 @@ async function atualizarLista() {
     listaErro.value = null
   } catch {
     // Falha no automático não apaga a lista: o próximo tique tenta de novo.
+  } finally {
+    atualizandoLista = false
+    if (conferir) await atualizarLista(true)
   }
 }
 
-async function carregarMais() {
+async function carregarMais(confirmando = false) {
   if (!proximo.value || carregandoMais.value) return
   const g = geracao
+  const inicio = versaoDasLinhas
   carregandoMais.value = true
   try {
     const r = await api<Pagina>(`/api/atendimento/conversas?${params(proximo.value)}`)
     if (g !== geracao) return
+    if (inicio !== versaoDasLinhas) {
+      if (!confirmando) {
+        carregandoMais.value = false
+        await carregarMais(true)
+      }
+      return
+    }
     const ids = new Set(itens.value.map((c) => c.id))
     itens.value = [...itens.value, ...(r.itens || []).filter((c) => !ids.has(c.id))]
     proximo.value = r.proximo || null
@@ -384,13 +431,32 @@ function aoMudarConversa(c: ConversaResumo) {
     return
   }
   const i = itens.value.findIndex((x) => x.id === c.id)
-  const antes = i >= 0 ? itens.value[i] : null
-  if (i >= 0) itens.value[i] = { ...itens.value[i], ...c }
-  // Caixa Humano: respondeu, "não precisa", fechou, a IA voltou — o servidor
-  // diz pelo `humano` (null = saiu) e a linha sai na hora, sem esperar o
-  // próximo tique. A conversa continua aberta à direita.
-  const saiuDaHumano = c.humano !== undefined && !c.humano
-  if (i >= 0 && emHumano.value && saiuDaHumano) itens.value.splice(i, 1)
+  const linha = i >= 0 ? itens.value[i] : null
+  const ultimoDetalhe = linhasAtualizadas.get(c.id)?.linha
+  // Só a projeção compartilhada com a lista. O detalhe também contém dados
+  // de pedido/anúncio que não tornam uma lista idêntica obsoleta.
+  const comparar = (x: ConversaResumo) => JSON.stringify([
+    x.id, x.plataforma, x.canal, x.conta, x.integration_id, x.comprador_nome,
+    x.pedido_marketplace, x.anuncio_titulo, x.ultima_mensagem_em, x.ultima_mensagem_resumo,
+    x.ultima_autor, x.ultima_mensagem_tipo, x.turno_em, x.aguardando_resposta,
+    x.prazo_resposta_em, x.situacao, x.nao_lidas, x.visto_em, x.notificacoes_migracao_id,
+    x.notificacoes_visto_em, x.numero_duoke, x.falta_responder, x.pendentes,
+    x.tem_rascunho, x.atribuido_a, x.atribuido_a_nome, x.ia_pausada,
+    x.sem_resposta_necessaria, x.eh_pergunta, x.afiliado, x.somente_leitura,
+    x.envio_a_conferir, x.comprador_avatar, x.etiqueta, x.etiqueta_desde,
+    x.etiquetas_secundarias, x.etiqueta_manual, x.avaliacao_estrelas, x.humano,
+  ])
+  const antes = ultimoDetalhe ?? linha
+  const mudou = !ultimoDetalhe || comparar(ultimoDetalhe) !== comparar(c)
+  if (!mudou) return
+  const divergente = !!antes && comparar(antes) !== comparar(c)
+  linhasAtualizadas.set(c.id, { linha: c })
+  if (divergente) {
+    versaoDasLinhas++
+    // O detalhe pode ter começado antes da lista: não mescla nem remove uma
+    // linha com base na chegada do callback. A consulta confere o estado atual.
+    if (naCaixa.value && !carregando.value && !carregandoMais.value && !atualizandoLista) void atualizarLista()
+  }
   // A etiqueta também (troca à mão): as contagens do menu Filtrar acompanham.
   // E a Caixa Humano (o número da aba e da barra).
   if (antes && (antes.aguardando_resposta !== c.aguardando_resposta || !!antes.envio_a_conferir !== !!c.envio_a_conferir
@@ -406,13 +472,26 @@ function aoMudarConversa(c: ConversaResumo) {
 
 // ─── respostas prontas (para o menu da conversa) ────────────────────────────
 const modelos = ref<Modelo[]>([])
-async function carregarModelos() {
-  try {
-    modelos.value = comoLista<Modelo>(await api<unknown>('/api/atendimento/modelos'), 'modelos')
-  } catch {
-    modelos.value = []
-  }
+let modelosCarregados = false
+let pedidoModelos: Promise<void> | null = null
+function carregarModelos(forcar = false): Promise<void> {
+  if (pedidoModelos) return pedidoModelos
+  if (modelosCarregados && !forcar) return Promise.resolve()
+  pedidoModelos = (async () => {
+    try {
+      modelos.value = comoLista<Modelo>(await api<unknown>('/api/atendimento/modelos'), 'modelos')
+      modelosCarregados = true
+    } catch {
+      // A conversa continua utilizável; outro clique ou atualização tenta de novo.
+    } finally {
+      pedidoModelos = null
+    }
+  })()
+  return pedidoModelos
 }
+watch([selecionada, emailConversa], ([chat, email]) => {
+  if (iniciou && (chat || email)) void carregarModelos()
+})
 
 // ─── nomes dos assuntos da IA ───────────────────────────────────────────────
 // A sugestão diz o assunto pelo código ("prazo_envio"); o nome vem do manual
@@ -460,7 +539,7 @@ watch(lojasRecolhidas, (v) => {
 // Filtros lembrados neste navegador (conveniência de quem usa a tela o dia
 // todo). Lido só no cliente e sempre com try: aba anônima/bloqueio de
 // armazenamento não pode quebrar a página.
-onMounted(() => {
+onMounted(async () => {
   try {
     const salvo = localStorage.getItem(LOJAS_KEY)
     lojasRecolhidas.value = salvo === null ? window.innerWidth < 1536 : salvo === '1'
@@ -492,21 +571,29 @@ onMounted(() => {
   } catch {
     // sem localStorage — começa no padrão
   }
+  // O watch dos filtros salvos precisa terminar ANTES da primeira busca.
+  // Sem isso, a abertura pedia uma lista sem filtro e em seguida outra da loja.
+  await nextTick()
+  if (encerrou) return
+  iniciou = true
+  void atualizarTudo()
 })
 watch(filtros, (f) => {
+  if (!iniciou) return
   try {
     const { q: _q, ...resto } = f
     localStorage.setItem(FILTROS_KEY, JSON.stringify(resto))
   } catch {
     // sem localStorage — só não lembra
   }
-  void carregarLista()
+  if (naCaixa.value) void carregarLista()
 }, { deep: true })
 
 // Entrou na Caixa ou na Caixa Humano: a mesma caixa de antes só atualiza; a
 // outra recarrega do zero (sem mostrar a lista da outra enquanto chega), no
 // filtro da aba — plataforma, loja e busca continuam.
 watch(aba, (a) => {
+  if (!iniciou) return
   if (a !== 'caixa' && a !== 'humano') return
   void carregarResumo()
   if (a === caixaDaLista) {
@@ -522,10 +609,11 @@ watch(aba, (a) => {
 })
 
 async function atualizarTudo() {
-  await Promise.all([carregarResumo(), carregarLista(), carregarModelos(), carregarContagensEmail()])
+  const pedidos: Promise<unknown>[] = [carregarResumo(), carregarContagensEmail()]
+  if (naCaixa.value) pedidos.push(carregarLista())
+  if (selecionada.value || emailConversa.value || aba.value === 'modelos') pedidos.push(carregarModelos(true))
+  await Promise.all(pedidos)
 }
-
-await Promise.all([carregarResumo(), carregarLista(), carregarModelos(), carregarContagensEmail()])
 
 function selecionar(id: string) {
   selecionada.value = id
@@ -841,7 +929,7 @@ watch(selecionada, (id) => {
       </section>
     </div>
 
-    <AtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
+    <LazyAtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
     <!-- E-mail: a Central (Caixas) e as Filas do e-mail das lojas (08/10/2026); a conversa de e-mail abre AQUI (13/10/2026) -->
     <template v-if="aba === 'mail'">
       <div v-if="emailConversa" class="space-y-2" data-conversa-de-email>
@@ -873,22 +961,23 @@ watch(selecionada, (id) => {
           </section>
         </div>
       </div>
-      <AtendimentoMail
+      <LazyAtendimentoMail
         v-show="!emailConversa"
         :is-admin="isAdmin"
         :can-operate="mexe"
         :can-view="canSugerir"
         :stores="resumo?.lojas || []"
         :waiting="emailEsperando"
+        :waiting-ready="emailContagensProntas"
         :paused="!!emailConversa"
         :refresh-tick="emailTique"
         v-model:remembered-section="emailSecao"
         @open-conversation="abrirConversaDoEmail"
       />
     </template>
-    <AtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" />
-    <AtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete" @mudou="(l: Modelo[]) => (modelos = l)" />
-    <AtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" />
-    <AtendimentoMetricas v-if="aba === 'metricas'" />
+    <LazyAtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" />
+    <LazyAtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete" @mudou="(l: Modelo[]) => (modelos = l)" />
+    <LazyAtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" />
+    <LazyAtendimentoMetricas v-if="aba === 'metricas'" />
   </div>
 </template>

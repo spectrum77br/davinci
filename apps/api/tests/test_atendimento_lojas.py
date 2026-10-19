@@ -354,6 +354,37 @@ async def test_ficha_que_nao_conta_deixa_o_nome_de_antes(db, make_user):
     assert await lojas.nome_da_loja(db, repetida) == "Vita Loja"
 
 
+async def test_nomes_em_lote_preservam_vinculos_fichas_e_cache(db, make_user, contar_consultas):
+    """Uma barra com várias lojas faz duas consultas, com as mesmas prioridades."""
+    user = await make_user()
+    integracoes = [await _integ(db, user, f"apelido-{n}") for n in range(6)]
+    await _loja(db, empresa="Antiga", marketplace=Marketplace.SHOPEE,
+                integration=integracoes[0], vinculo="integracao")
+    await _loja(db, empresa="Atual", marketplace=Marketplace.SHOPEE,
+                override="Shopee Atual", integration=integracoes[0])
+    await _ficha(db, user, "Shopee fiore", integration=integracoes[1])
+    await _ficha(db, user, "Uma", integration=integracoes[2])
+    await _ficha(db, user, "Outra", integration=integracoes[2])
+    await _ficha(db, user, "Ignorada", integration=integracoes[3], arquivada=True)
+    await _ficha(db, user, "Ignorada", integration=integracoes[4], plataforma="amazon")
+    await _ficha(db, user, "Loja Oficial", integration=integracoes[5])
+    await _ficha(db, user, " loja  oficial ", integration=integracoes[5])
+    esperado = {i.id: await lojas.nome_da_loja(db, i) for i in integracoes}
+    assert list(esperado.values()) == [
+        "Atual", "Fiore", "apelido-2", "apelido-3", "apelido-4", "Loja Oficial"
+    ]
+
+    lojas.esquecer(db)
+    antes = contar_consultas["n"]
+    assert await lojas.nomes_das_lojas(db, integracoes) == esperado
+    assert contar_consultas["n"] - antes == 2
+    # O mesmo pedido usa o cache, inclusive ao voltar para o leitor unitário.
+    assert await lojas.nomes_das_lojas(db, integracoes) == esperado
+    assert await lojas.nome_da_loja(db, integracoes[0]) == "Atual"
+    assert contar_consultas["n"] - antes == 2
+    assert await lojas.nomes_das_lojas(db, []) == {}
+
+
 async def test_ligada_a_caixa_e_o_adspower_acham_a_loja(db, make_user):
     """O cenário de produção: a conversa da integração "Jlas" ganha o nome "Atlas"
     e o botão do AdsPower acha o perfil da ficha "atlas" (antes: sem cadastro)."""

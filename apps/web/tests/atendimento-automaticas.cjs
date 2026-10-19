@@ -1419,7 +1419,7 @@ async function principal() {
   assert.match(pagina, /import \{[^}]*\bBot\b[^}]*\} from 'lucide-vue-next'/)
   // `?tab=automaticas` abre direto (a regra geral das abas).
   assert.match(pagina, /const aba = ref<Aba>\(ABAS\.some\(\(a\) => a\.value === abaQuery\) \? \(abaQuery as Aba\) : 'caixa'\)/)
-  assert.match(pagina, /<AtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" \/>/)
+  assert.match(pagina, /<LazyAtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" \/>/)
   assert.match(pagina, /function abrirConversaNaCaixa\(id: string\) \{\n {2}aba\.value = 'caixa'\n {2}selecionar\(id\)\n\}/)
   // A mesma trava da página (fase de observação, 07/10/2026: toda pessoa
   // ativa vê, só ATENDIMENTO_USUARIOS mexe — `canEdit`): a aba não abre nada novo.

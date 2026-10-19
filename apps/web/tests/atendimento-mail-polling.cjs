@@ -46,8 +46,9 @@ function mount(props = {}) {
   const requiring = (name) => name === 'lucide-vue-next' ? {} : require(name)
   new Function('require', 'module', 'exports', ...Object.keys(globals), script)(requiring, mod, mod.exports, ...Object.values(globals))
   const scope = Vue.effectScope()
-  const state = Vue.proxyRefs(scope.run(() => mod.exports.default.setup(Vue.reactive({ isAdmin: true, ...props }), { expose: () => {}, emit: () => {} })))
-  return { state, data, calls, timers, document, window,
+  const reactiveProps = Vue.reactive({ isAdmin: true, ...props })
+  const state = Vue.proxyRefs(scope.run(() => mod.exports.default.setup(reactiveProps, { expose: () => {}, emit: () => {} })))
+  return { state, props: reactiveProps, data, calls, timers, document, window,
     start: async () => { for (const fn of mounted) await fn(); await settle() },
     stop: () => { unmounted.forEach((fn) => fn()); scope.stop() },
     async advance(ms) {
@@ -59,6 +60,61 @@ function mount(props = {}) {
   }
 }
 async function run() {
+  {
+    const m = mount({ canOperate: true, waitingReady: false }); await m.start()
+    assert.equal(m.state.section, 'loading'); assert.equal(m.calls.length, 0)
+    m.props.waitingReady = true; m.props.waiting = 3; await settle()
+    assert.equal(m.state.section, 'queues', 'a contagem inicial atrasada mantém o destino Filas')
+    assert.equal(m.calls.length, 0, 'não busca caixas escondidas enquanto decide o destino')
+    m.stop()
+  }
+  for (const isAdmin of [true, false]) {
+    const m = mount({ isAdmin, canView: true, waitingReady: false }); await m.start()
+    m.props.waiting = 0; m.props.waitingReady = true; await settle()
+    assert.equal(m.state.section, 'mailboxes', 'sem filas pendentes, descobre as caixas ao receber a contagem')
+    assert.equal(m.count('/lista?'), 1)
+    m.stop()
+  }
+  {
+    const m = mount({ canOperate: true, waitingReady: false }); await m.start()
+    m.state.chooseSection('mailboxes'); await settle()
+    m.state.draft = 'Não mude a seção que escolhi'
+    m.props.waiting = 3; m.props.waitingReady = true; await settle()
+    assert.equal(m.state.section, 'mailboxes', 'a contagem atrasada não move quem já escolheu Caixas')
+    assert.equal(m.state.draft, 'Não mude a seção que escolhi')
+    m.stop()
+  }
+  {
+    const m = mount({ isAdmin: false, canView: true }); await m.start()
+    assert.equal(m.state.section, 'mailboxes', 'sem escolha anterior, a descoberta de caixas mantém o destino de quem tem acesso')
+    assert.equal(m.calls.filter((call) => call.url === '/api/mail/mailboxes').length, 1)
+    assert.equal(m.count('/lista?'), 1)
+    m.stop()
+  }
+  {
+    const m = mount({ canOperate: true, waiting: 3 }); await m.start()
+    assert.equal(m.state.section, 'queues')
+    assert.equal(m.calls.length, 0, 'Filas abre sem consultar caixas, resumos ou corpos que estão escondidos')
+    await m.advance(60_000); m.window.fire('focus'); await settle()
+    assert.equal(m.calls.length, 0); assert.equal(m.timers.size, 0)
+    m.state.chooseSection('mailboxes'); await settle()
+    assert.equal(m.calls.filter((call) => call.url === '/api/mail/mailboxes').length, 1)
+    assert.equal(m.count('/lista?'), 1, 'Caixas carrega ao abrir, sem duplicar o watcher e o refresh')
+    assert.equal(m.state.messages[0].id, 'm1')
+    const waiting = deferred()
+    m.data.intercept = (url) => url.includes('/lista?') ? waiting.promise : undefined
+    const pending = m.state.refresh(); await settle()
+    m.state.chooseSection('queues'); await settle()
+    waiting.resolve(page(['caixa-antiga'])); await pending; await settle()
+    assert.equal(m.state.messages.some((item) => item.id === 'caixa-antiga'), false, 'a leitura anterior não atualiza a caixa escondida')
+    const before = m.calls.length
+    await m.advance(60_000); m.window.fire('focus'); m.document.fire('visibilitychange'); await settle()
+    assert.equal(m.calls.length, before)
+    m.data.intercept = null; m.data.first = page(['voltou'])
+    m.state.chooseSection('mailboxes'); await settle()
+    assert.equal(m.state.messages[0].id, 'voltou')
+    m.stop()
+  }
   {
     const m = mount(); await m.start(); await m.state.openMessage('m1')
     m.state.draft = 'Keep my unsent answer'; m.state.fromAddress = 'alias@example.com'; m.state.draftRequestId = 'keep-request'

@@ -248,7 +248,9 @@ async function renderizados() {
     const rodar = (antes, c) => {
       let releu = 0
       const itens = { value: [antes] }
-      new Function('c', 'itens', 'selecionada', 'emHumano', 'carregarResumo', 'linkDoChat', 'abrirConversaDoEmail', transpile(corpo))(
+      // Esta fixture representa a lista que a API confirma após a mudança.
+      const ambiente = 'const linhasAtualizadas = new Map(); let versaoDasLinhas = 0; const naCaixa = {value:true}; const carregando = {value:false}; const carregandoMais = {value:false}; let atualizandoLista = false; const atualizarLista = () => { itens.value = itens.value.map(l => l.id === c.id ? {...l,...c} : l) };\n'
+      new Function('c', 'itens', 'selecionada', 'emHumano', 'carregarResumo', 'linkDoChat', 'abrirConversaDoEmail', ambiente + transpile(corpo))(
         c, itens, { value: antes.id }, { value: false }, () => { releu++ }, null, () => {},
       )
       return { releu, itens: itens.value }

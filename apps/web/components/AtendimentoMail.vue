@@ -42,7 +42,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
 type Section = 'mailboxes' | 'queues' | 'admin'
-const props = defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>()
+const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
@@ -118,7 +118,8 @@ const canAdminister = computed(() => props.isAdmin && !!props.canOperate)
 // with it): the number changing later never moves someone working in
 // "Caixas", and a section clicked earlier in this visit wins (the page keeps
 // it across tab switches) — whoever picked "Caixas" keeps landing there.
-const chosenSection = ref<'' | Section>(props.rememberedSection || (seesQueues.value && (props.waiting ?? 0) > 0 ? 'queues' : ''))
+const initialSectionResolved = ref(props.waitingReady !== false)
+const chosenSection = ref<'' | Section>(props.rememberedSection || (initialSectionResolved.value && seesQueues.value && (props.waiting ?? 0) > 0 ? 'queues' : ''))
 function chooseSection(value: Section) {
   if (sending.value || deleting.value || resolving.value || (value === 'admin' && !canAdminister.value)) return
   chosenSection.value = value
@@ -128,7 +129,16 @@ const section = computed(() => {
   if (chosenSection.value === 'admin' && canAdminister.value) return 'admin'
   if (chosenSection.value === 'queues' && seesQueues.value) return 'queues'
   if (chosenSection.value === 'mailboxes') return 'mailboxes'
+  if (!initialSectionResolved.value) return 'loading'
   return seesQueues.value && !props.isAdmin && !mailboxes.value.length ? 'queues' : 'mailboxes'
+})
+watch(() => props.waitingReady, (ready) => {
+  if (!ready || initialSectionResolved.value) return
+  // Só decide o destino inicial; uma seção escolhida pela pessoa ou lembrada
+  // da visita continua aberta quando a contagem chega mais tarde.
+  if (!chosenSection.value && seesQueues.value && (props.waiting ?? 0) > 0) chosenSection.value = 'queues'
+  initialSectionResolved.value = true
+  if (mounted && !disposed && !chosenSection.value) void loadMailboxes()
 })
 // "Configurar": aliases and the Atendimento settings of the selected mailbox
 // (AtendimentoMailConfigurar) — admins who operate Atendimento only.
@@ -226,12 +236,12 @@ function listKey() {
 }
 
 async function loadFolders(): Promise<void> {
-  if (disposed || deleting.value || section.value === 'admin') return
+  if (disposed || deleting.value || section.value !== 'mailboxes') return
   const key = listKey()
   if (folderRequest) {
     const previous = folderRequest
     await previous.promise
-    if (disposed || section.value === 'admin' || key !== listKey() || previous.key === key) return
+    if (disposed || section.value !== 'mailboxes' || key !== listKey() || previous.key === key) return
     return loadFolders()
   }
   const promise = readFolders(key)
@@ -249,7 +259,7 @@ async function readFolders(key: string) {
   const search = query.toString()
   try {
     const result = await api<{ pastas: FolderItem[]; lojas: StoreItem[]; faltam: number; acesso_versao?: string }>(`/api/mail/mailboxes/${id}/pastas${search ? `?${search}` : ''}`, READ_OPTIONS)
-    if (disposed || section.value === 'admin' || generation !== foldersGeneration || key !== listKey()) return
+    if (disposed || section.value !== 'mailboxes' || generation !== foldersGeneration || key !== listKey()) return
     const scopeChanged = accessVersion.value !== null && !!result.acesso_versao && accessVersion.value !== result.acesso_versao
     if (result.acesso_versao) accessVersion.value = result.acesso_versao
     folders.value = result.pastas
@@ -289,7 +299,7 @@ async function readFolders(key: string) {
 // The list first (its route indexes what just arrived), then the counts, so
 // both read the same index.
 async function loadList() {
-  if (disposed || deleting.value || section.value === 'admin') return
+  if (disposed || deleting.value || section.value !== 'mailboxes') return
   const key = listKey()
   await loadMessages()
   if (!disposed && key === listKey()) await loadFolders()
@@ -307,7 +317,7 @@ function resetList() {
 }
 
 function chooseFilter(kind: 'folder' | 'store', value: string | null) {
-  if (sending.value || deleting.value || disposed || section.value === 'admin') return
+  if (sending.value || deleting.value || disposed || section.value !== 'mailboxes') return
   if (kind === 'folder') folderId.value = value
   else storeKey.value = value
   resetList()
@@ -355,12 +365,12 @@ async function loadMailboxes() {
 // Share the current read instead of invalidating a page that is still loading.
 // A different box/filter waits for that read, then fetches its own selection.
 async function loadMessages(append = false, preservePages = false): Promise<void> {
-  if (disposed || deleting.value || section.value === 'admin') return
+  if (disposed || deleting.value || section.value !== 'mailboxes') return
   const key = listKey()
   if (listRequest) {
     const previous = listRequest
     await previous.promise
-    if (disposed || section.value === 'admin' || key !== listKey()) return
+    if (disposed || section.value !== 'mailboxes' || key !== listKey()) return
     if (previous.key === key && previous.append === append) return
     return loadMessages(append, preservePages)
   }
@@ -398,7 +408,7 @@ async function readMessages(append: boolean, preservePages: boolean, key: string
   const generation = ++listGeneration
   const id = mailboxId.value
   loading.value = true
-  const current = () => !disposed && !deleting.value && section.value !== 'admin' && generation === listGeneration && key === listKey()
+  const current = () => !disposed && !deleting.value && section.value === 'mailboxes' && generation === listGeneration && key === listKey()
   try {
     if (!append || listSource.value === 'index') {
       let indexed = await loadIndexed(id, append).catch((reason) => {
@@ -438,7 +448,7 @@ async function readMessages(append: boolean, preservePages: boolean, key: string
 }
 
 async function openMessage(id: string, preserveDraft = false) {
-  if (disposed || deleting.value || section.value === 'admin') return
+  if (disposed || deleting.value || section.value !== 'mailboxes') return
   if (!preserveDraft && draft.value.trim() && detail.value?.id !== id && !window.confirm('Descartar o rascunho desta resposta e abrir outra mensagem?')) return
   const listed = messages.value.find((item) => item.id === id)
   if (listed || !preserveDraft) openedSummary.value = listed?.store ? listed : null
@@ -456,7 +466,7 @@ async function openMessage(id: string, preserveDraft = false) {
   error.value = ''
   try {
     const result = await api<Detail>(`/api/mail/messages/${id}`, READ_OPTIONS)
-    if (disposed || section.value === 'admin' || generation !== detailGeneration || mailboxId.value !== selectedMailbox) return
+    if (disposed || section.value !== 'mailboxes' || generation !== detailGeneration || mailboxId.value !== selectedMailbox) return
     detail.value = result
     lastDetailAt = Date.now()
     if (!preserveDraft) fromAddress.value = result.reply.from_address
@@ -471,7 +481,7 @@ async function openMessage(id: string, preserveDraft = false) {
 // One refresh at a time, including manual clicks and the two resume events.
 // A manual request during polling is fulfilled as a full refresh afterwards.
 async function refresh(background = false): Promise<void> {
-  if (disposed || deleting.value || section.value === 'admin') return
+  if (disposed || deleting.value || section.value !== 'mailboxes') return
   if (!background) manualRefreshRequested = true
   if (refreshRequest) return refreshRequest
   const promise = (async () => {
@@ -480,18 +490,18 @@ async function refresh(background = false): Promise<void> {
       manualRefreshRequested = false
       if (full) error.value = ''
       if (full || Date.now() - lastMailboxesAt >= METADATA_MS) await loadMailboxes()
-      if (disposed || deleting.value || section.value === 'admin' || (background && document.hidden)) return
+      if (disposed || deleting.value || section.value !== 'mailboxes' || (background && document.hidden)) return
       const key = listKey()
       // Keep the search and its older pages until an explicit refresh. A
       // five-second poll must not repeatedly decrypt the same mailbox or
       // replace progress with an empty first scan. Access/detail still refresh.
       if (full || !searchTerm.value) await loadMessages(false, !full)
-      if (disposed || deleting.value || section.value === 'admin' || key !== listKey() || (background && document.hidden)) return
+      if (disposed || deleting.value || section.value !== 'mailboxes' || key !== listKey() || (background && document.hidden)) return
       if (manualRefreshRequested && !full) continue
       if (full || organizing.value || Date.now() - lastFoldersAt >= METADATA_MS) await loadFolders()
-      if (disposed || deleting.value || section.value === 'admin' || key !== listKey() || (background && document.hidden)) return
+      if (disposed || deleting.value || section.value !== 'mailboxes' || key !== listKey() || (background && document.hidden)) return
       if (detail.value && (full || pending.value || Date.now() - lastDetailAt >= METADATA_MS)) await openMessage(detail.value.id, true)
-    } while (manualRefreshRequested && !disposed && section.value !== 'admin')
+    } while (manualRefreshRequested && !disposed && section.value === 'mailboxes')
   })()
   refreshRequest = promise
   try { await promise } finally { if (refreshRequest === promise) refreshRequest = null }
@@ -500,12 +510,12 @@ async function refresh(background = false): Promise<void> {
 function schedulePoll() {
   clearTimeout(timer)
   timer = undefined
-  if (!mounted || disposed || document.hidden || props.paused || section.value === 'admin') return
+  if (!mounted || disposed || document.hidden || props.paused || section.value !== 'mailboxes') return
   timer = setTimeout(() => { timer = undefined; void poll() }, POLL_MS)
 }
 
 async function poll() {
-  if (!mounted || disposed || document.hidden || props.paused || section.value === 'admin') return
+  if (!mounted || disposed || document.hidden || props.paused || section.value !== 'mailboxes') return
   try {
     if (!sending.value && !deleting.value && !resolving.value) await refresh(true)
   } finally { schedulePoll() }
@@ -651,13 +661,13 @@ function configureFromAdministration(id: string) {
   chooseSection('mailboxes')
 }
 watch(section, (value, previous) => {
-  if (value === 'admin') {
+  if (value !== 'mailboxes') {
     clearTimeout(timer); timer = undefined
     ++detailGeneration; ++listGeneration; ++foldersGeneration; ++selectionEpoch
     loading.value = false
     manualRefreshRequested = false
     deleteTarget.value = null
-  } else if (previous === 'admin' && mounted) resumePolling()
+  } else if (previous !== 'mailboxes' && mounted) resumePolling()
 }, { flush: 'sync' })
 
 // Paused (an email conversation open over this tab): stop; back: refresh now.
@@ -675,9 +685,12 @@ onMounted(async () => {
   mounted = true
   document.addEventListener('visibilitychange', resumePolling)
   window.addEventListener('focus', resumePolling)
-  await loadMailboxes()
+  // Filas/Administração têm suas próprias consultas. Só descobre caixas
+  // aqui quando a seção ainda precisa decidir o destino inicial; abrir
+  // Caixas depois carrega seus dados pelo mesmo refresh, uma única vez.
+  if ((!chosenSection.value && initialSectionResolved.value) || section.value === 'mailboxes') await loadMailboxes()
   if (!disposed) {
-    await loadList()
+    if (section.value === 'mailboxes') await loadList()
     schedulePoll()
   }
 })
@@ -707,6 +720,8 @@ onBeforeUnmount(() => {
         <button class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" :disabled="loading || sending || deleting" @click="refresh()"><RefreshCw class="h-4 w-4" /> Atualizar</button>
       </div>
     </div>
+
+    <p v-if="section === 'loading'" role="status" class="rounded border p-4 text-sm text-muted-foreground">Carregando e-mails…</p>
 
     <!-- Sections: the mailboxes (this screen) and the Atendimento queues (who operates Atendimento) -->
     <div v-if="seesQueues || canAdminister" class="flex gap-1 overflow-x-auto border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>

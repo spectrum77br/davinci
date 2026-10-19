@@ -167,10 +167,10 @@ const pagina = sfc('../pages/atendimento.vue')
   const tela = pagina.descriptor.template.content
   assert.match(tela, /v-if="soLeitura"[\s\S]{0,400}data-aviso-so-leitura[\s\S]{0,200}\{\{ AVISO_SO_LEITURA \}\}/, 'o aviso discreto para quem só lê')
   assert.match(tela, /<AtendimentoConversa[\s\S]*?:can-edit="canEdit"\s+:can-sugerir="canSugerir"/)
-  assert.match(tela, /<AtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin"/)
-  assert.match(tela, /<AtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" \/>/)
-  assert.match(tela, /<AtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete"/)
-  assert.match(tela, /<AtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit"/)
+  assert.match(tela, /<LazyAtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin"/)
+  assert.match(tela, /<LazyAtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" \/>/)
+  assert.match(tela, /<LazyAtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete"/)
+  assert.match(tela, /<LazyAtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit"/)
 }
 
 // ------------------------------------------------ components/AppSidebar.vue (o menu)

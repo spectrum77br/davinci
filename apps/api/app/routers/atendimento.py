@@ -617,9 +617,9 @@ async def _nomes_das_lojas(session: AsyncSession, ids: set[UUID | None]) -> dict
     A integração "mega" é a loja "Shopee Marquezini", que o Duoke chama de
     "Marquezini": quem atende reconhece a loja, não o apelido da conexão.
     Achar a loja ligada e tirar o prefixo da plataforma é com
-    `lojas.nome_da_loja` (uma função só, a mesma que grava `conversa.conta`
-    no sync); aqui ela é chamada uma vez por integração da resposta — assim a
-    conversa antiga e a loja renomeada saem com o nome de hoje.
+    `lojas.nome_da_loja` (a mesma regra que grava `conversa.conta` no sync);
+    `nomes_das_lojas` resolve a resposta em lote. Assim a conversa antiga e
+    a loja renomeada saem com o nome de hoje sem consultas por integração.
 
     Sem o módulo, ou se ele falhar, fica o nome da integração: o nome nunca
     derruba a fila. O SAVEPOINT impede que uma consulta que falhe lá dentro
@@ -638,10 +638,17 @@ async def _nomes_das_lojas(session: AsyncSession, ids: set[UUID | None]) -> dict
         return nomes
     try:
         async with session.begin_nested():
-            for integ in integracoes:
-                nome = await lojas_svc.nome_da_loja(session, integ)
+            em_lote = getattr(lojas_svc, "nomes_das_lojas", None)
+            if callable(em_lote):
+                resolvidos = await em_lote(session, integracoes)
+            else:
+                resolvidos = {
+                    integ.id: await lojas_svc.nome_da_loja(session, integ)
+                    for integ in integracoes
+                }
+            for ident, nome in resolvidos.items():
                 if isinstance(nome, str) and nome.strip():
-                    nomes[integ.id] = nome.strip()
+                    nomes[ident] = nome.strip()
     except Exception as e:  # noqa: BLE001 — fica o nome da integração
         logger.warning("atendimento_nome_da_loja_falhou", err=type(e).__name__)
     return nomes
@@ -1724,10 +1731,9 @@ async def resumo(
     # `pendente.nao_lidas_duoke`): nas conversas de chat esperando resposta
     # com o comprador nas últimas 24 h, as mensagens dele depois da última
     # resposta de pessoa da loja e do que alguém já viu no DaVinci (`visto_em`).
-    # Calculado SÓ por loja (a `q_loja`, abaixo): a plataforma é a soma das
-    # lojas dela — o mesmo WHERE (`cond`) e o GROUP BY da loja é mais fino
-    # que o da plataforma. Na `q_plat` também, ele custava +33 a +72 ms por
-    # chamada (EXPLAIN ANALYZE em produção, 15/10/2026), a cada 30 s por aba.
+    # Todos os contadores são calculados por loja; os da plataforma são a
+    # soma dessas linhas. São métricas aditivas no mesmo WHERE, então não é
+    # necessário varrer as conversas e suas subconsultas duas vezes.
     duoke = func.coalesce(func.sum(pendente.nao_lidas_duoke_sql(agora=agora)), 0)
     prazo = AtendimentoConversa.prazo_resposta_em
     vencendo = and_(aguardando, prazo >= agora, prazo < agora + VENCENDO)
@@ -1759,36 +1765,58 @@ async def resumo(
     def _etiquetas(contagens) -> dict[str, int]:
         return {e: int(n or 0) for e, n in zip(ETIQUETAS, contagens, strict=True)}
 
-    q_plat = select(
+    # Sem integração, a loja é o canal (robô/site/rede). O agrupamento é o
+    # mesmo da barra e também conserva as conversas sem canal/integração.
+    canal_sem_integracao = case(
+        (
+            and_(
+                AtendimentoConversa.integration_id.is_(None),
+                AtendimentoConversa.canal_id.is_not(None),
+            ),
+            AtendimentoConversa.canal_id,
+        ),
+        else_=None,
+    ).label("canal_sem_integracao")
+    q_loja = select(
+        AtendimentoConversa.integration_id,
         AtendimentoConversa.plataforma,
+        canal_sem_integracao,
+        func.max(AtendimentoConversa.conta),
         func.count().filter(falta),
         func.count().filter(vencendo),
         func.count().filter(vencidas),
         func.count().filter(_a_conferir_existe()),
         nao_lidas,
         na_caixa_humano,
+        duoke,
         *por_etiqueta,
-    ).group_by(AtendimentoConversa.plataforma)
-    q_plat = q_plat.where(cond)
-    # Sem JIT no /resumo (14/10/2026): o custo estimado da `q_plat` passa de
+    ).where(cond).group_by(
+        AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_sem_integracao
+    )
+    # Sem JIT no /resumo (14/10/2026): o custo estimado da agregação passa de
     # 500 mil e o Postgres compilava a consulta com LLVM a cada chamada — 1 a
     # 3 s de CPU para uma consulta que roda em ~0,4 s sem ele (medido em
     # produção, EXPLAIN ANALYZE). Ela roda a cada 30 s em cada aba aberta.
     # SET LOCAL: só nesta transação (volta ao padrão no fim do pedido).
     await session.execute(text("SET LOCAL jit = off"))
-    por_plataforma = {
-        p: PlataformaResumoOut(
-            plataforma=p,
-            aguardando=a or 0,
-            vencendo=v or 0,
-            vencidas=x or 0,
-            a_conferir=r or 0,
-            nao_lidas=int(n or 0),
-            etiquetas=_etiquetas(etq),
-            humano=int(h or 0),
+    linhas_lojas = (await session.execute(q_loja)).all()
+    por_plataforma: dict[str, PlataformaResumoOut] = {}
+    for _i, p, _rc, _conta, a, v, x, r, n, h, _d, *etq in linhas_lojas:
+        total = por_plataforma.setdefault(
+            p,
+            PlataformaResumoOut(
+                plataforma=p, aguardando=0, vencendo=0, vencidas=0,
+                etiquetas=dict.fromkeys(ETIQUETAS, 0),
+            ),
         )
-        for p, a, v, x, r, n, h, *etq in (await session.execute(q_plat)).all()
-    }
+        total.aguardando += int(a or 0)
+        total.vencendo += int(v or 0)
+        total.vencidas += int(x or 0)
+        total.a_conferir += int(r or 0)
+        total.nao_lidas += int(n or 0)
+        total.humano += int(h or 0)
+        for etiqueta, quantidade in _etiquetas(etq).items():
+            total.etiquetas[etiqueta] += quantidade
     canais = await _canais(session, scope)
     # As do robô (Temu/AliExpress) e as externas (sites, redes — 02/10/2026)
     # só quando existem: loja com canal ou conversa. O Direct do Instagram
@@ -1823,37 +1851,6 @@ async def resumo(
             ETIQUETA_MIDIA: p_ig.etiquetas.get(ETIQUETA_MIDIA, 0) + ig["abertas"],
         }
 
-    # A loja SEM integração é o CANAL: a do robô (Temu/AliExpress) e a
-    # externa (site, conta de rede). Sem esta chave, as quatro lojas Temu
-    # virariam uma só linha na barra. A conversa sem integração e sem canal
-    # (Amazon sem conta) fica com a chave nula, como sempre.
-    # Rótulo: o GROUP BY vai pelo nome (a expressão repetida teria outros
-    # parâmetros e o Postgres não a reconheceria como a mesma).
-    canal_sem_integracao = case(
-        (
-            and_(
-                AtendimentoConversa.integration_id.is_(None),
-                AtendimentoConversa.canal_id.is_not(None),
-            ),
-            AtendimentoConversa.canal_id,
-        ),
-        else_=None,
-    ).label("canal_sem_integracao")
-    q_loja = select(
-        AtendimentoConversa.integration_id,
-        AtendimentoConversa.plataforma,
-        canal_sem_integracao,
-        func.max(AtendimentoConversa.conta),
-        func.count().filter(falta),
-        func.count().filter(vencidas),
-        nao_lidas,
-        na_caixa_humano,
-        duoke,
-        *por_etiqueta,
-    ).group_by(
-        AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_sem_integracao
-    )
-    q_loja = q_loja.where(cond)
     lojas: dict[tuple[UUID | None, str, UUID | None], LojaResumoOut] = {
         (i, p, rc): LojaResumoOut(
             integration_id=i,
@@ -1867,10 +1864,10 @@ async def resumo(
             humano=int(h or 0),
             nao_lidas_duoke=int(d or 0),
         )
-        for i, p, rc, conta, a, x, n, h, d, *etq in (await session.execute(q_loja)).all()
+        for i, p, rc, conta, a, _v, x, _r, n, h, d, *etq in linhas_lojas
     }
-    # O número do Duoke da plataforma = a soma das lojas dela (a `q_plat` não
-    # o calcula, acima); o Direct já somou o dele (`+=`).
+    # O número da plataforma = a soma das lojas dela; o Direct já somou o
+    # dele (`+=`) sem passar pela consulta de conversas.
     duoke_da_plataforma: dict[str, int] = {}
     for lj in lojas.values():
         duoke_da_plataforma[lj.plataforma] = (
@@ -2450,7 +2447,7 @@ async def listar_conversas(
             proximo = ultima["ultima_mensagem_em"].isoformat()
             if perguntas_primeiro and _grupo_da_pergunta(ultima) == 0:
                 proximo = f"{_CURSOR_PERGUNTA}{proximo}"
-    # Só as da página: no máximo uma consulta de nome por loja que aparece.
+    # Só as da página: os nomes são resolvidos em lote.
     await _com_nome_da_loja(session, pagina)
     await _com_estrelas_da_avaliacao(session, pagina)
     return ListaConversasOut(itens=pagina, proximo=proximo)

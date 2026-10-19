@@ -339,16 +339,22 @@ const paginaTpl = paginaSfc.descriptor.template.content
 }
 {
   // Respondeu (o servidor manda `humano: null`): na Caixa Humano a linha sai
-  // na hora; na Caixa, só perde o chip. As contagens são relidas.
+  // após conferir a lista; na Caixa, só perde o chip. As contagens são relidas.
   const fazer = (emHumano) => {
     const itens = Vue.ref([
       { id: 'a', aguardando_resposta: true, humano: HUM(['reclamacao']) },
       { id: 'b', aguardando_resposta: true, humano: HUM(['atendente']) },
     ])
     let relidas = 0
-    const fn = new Function('itens', 'emHumano', 'carregarResumo', `${trecho(pagina, 'function aoMudarConversa', '// ─── respostas prontas')}\nreturn aoMudarConversa`)(
-      itens, { value: emHumano }, () => { relidas++ },
+    let recebida
+    const interno = new Function('itens', 'emHumano', 'carregarResumo', 'atualizarLista', `const linhasAtualizadas = new Map(); let versaoDasLinhas = 0; const naCaixa = {value:true}; const carregando = {value:false}; const carregandoMais = {value:false}; let atualizandoLista = false;\n${trecho(pagina, 'function aoMudarConversa', '// ─── respostas prontas')}\nreturn aoMudarConversa`)(
+      itens, { value: emHumano }, () => { relidas++ }, () => {
+        // Retrato confirmado pela consulta da Caixa, não mesclado pelo callback.
+        itens.value = itens.value.map((l) => l.id === recebida.id ? { ...l, ...recebida } : l)
+          .filter((l) => !(emHumano && l.humano === null))
+      },
     )
+    const fn = (c) => { recebida = c; interno(c) }
     return { itens, fn, relidas: () => relidas }
   }
   let x = fazer(true)
@@ -379,7 +385,7 @@ const paginaTpl = paginaSfc.descriptor.template.content
       proximo: Vue.ref('cursor'),
       filtros: Vue.ref(filtros(f)),
     }
-    const corpo = `let caixaDaLista = ${JSON.stringify(caixaInicial)}\n${trecho(pagina, '// Entrou na Caixa ou na Caixa Humano', 'async function atualizarTudo')}`
+    const corpo = `let iniciou = true; let caixaDaLista = ${JSON.stringify(caixaInicial)}\n${trecho(pagina, '// Entrou na Caixa ou na Caixa Humano', 'async function atualizarTudo')}`
     new Function('watch', 'aba', 'itens', 'proximo', 'filtros', 'filtroPadraoDa', 'carregarResumo', 'atualizarLista', 'carregarLista', corpo)(
       (_, fn) => { cb = fn }, null, estado.itens, estado.proximo, estado.filtros,
       (a) => (a === 'humano' ? 'aguardando' : 'todas'),

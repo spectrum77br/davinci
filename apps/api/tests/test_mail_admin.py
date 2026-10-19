@@ -310,7 +310,8 @@ def test_migration_tem_uma_ponta_e_tres_tabelas_laterais():
     config = Config()
     config.set_main_option("script_location", str(Path(__file__).parents[1] / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0415_mail_admin"]
+    assert len(scripts.get_heads()) == 1
+    assert "0415_mail_admin" in {rev.revision for rev in scripts.walk_revisions()}
     assert (
         scripts.get_revision("0415_mail_admin").down_revision
         == "0414_vigia_conciliacao_chave_etapa"

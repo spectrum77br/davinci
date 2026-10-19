@@ -98,7 +98,7 @@ const router = ler('../../api/app/routers/atendimento.py')
 const resumo = (router.match(/async def resumo\([\s\S]*?\n\nasync def _leitura_parada/) || [])[0]
 assert.ok(resumo, 'o /resumo existe')
 assert.match(resumo, /falta = pendente\.falta_responder_no_chat_sql\(\)/, 'só o chat (14/10/2026)')
-assert.equal((resumo.match(/func\.count\(\)\.filter\(falta\)/g) || []).length, 2, 'por plataforma e por loja')
+assert.equal((resumo.match(/func\.count\(\)\.filter\(falta\)/g) || []).length, 1, 'uma agregação por loja alimenta loja e plataforma')
 assert.equal((resumo.match(/func\.count\(\)\.filter\(aguardando\)/g) || []).length, 0, 'o número não é mais a fila')
 assert.match(router, /aguardando if caixa_humano or caixa_email else pendente\.falta_responder_no_chat_sql\(\)/,
   'o filtro da Caixa é a régua nova, só no chat; a Caixa Humano e a aba E-mail ficam na fila')

@@ -300,7 +300,7 @@ async function principal() {
     // A página passa quem mexe, quem vê, as lojas e o "abrir a conversa" — que
     // abre a conversa de e-mail NA aba E-mail (13/10/2026), nunca na Caixa.
     const paginaTpl = sfc('../pages/atendimento.vue').descriptor.template.content
-    assert.match(paginaTpl, /<AtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
     // O número da aba E-mail (o e-mail saiu da Caixa Humano): o que falta responder nele.
     assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
     assert.match(paginaTpl, /<template v-if="aba === 'mail'">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
@@ -318,8 +318,9 @@ async function principal() {
     const novo = () => {
       const st = { aba: Vue.ref('mail'), selecionada: Vue.ref(null), emailConversa: Vue.ref(null), emailConversaLinha: Vue.ref(null), emailConversaVersao: Vue.ref(0), chatDeOrigem: Vue.ref(null), itens: Vue.ref([]), emHumano: Vue.ref(false) }
       st.contagensLidas = 0
-      const f = new Function('aba', 'selecionada', 'emailConversa', 'emailConversaLinha', 'emailConversaVersao', 'chatDeOrigem', 'itens', 'emHumano', 'selecionar', 'carregarResumo', 'carregarContagensEmail', `let linkDoChat = null\n${js}`)(
-        st.aba, st.selecionada, st.emailConversa, st.emailConversaLinha, st.emailConversaVersao, st.chatDeOrigem, st.itens, st.emHumano, (id) => { st.selecionada.value = id }, () => {}, () => { st.contagensLidas++ },
+      st.listasRelidas = 0
+      const f = new Function('aba', 'selecionada', 'emailConversa', 'emailConversaLinha', 'emailConversaVersao', 'chatDeOrigem', 'itens', 'emHumano', 'selecionar', 'carregarResumo', 'carregarContagensEmail', 'atualizarLista', `const linhasAtualizadas = new Map(); let versaoDasLinhas = 0; const naCaixa = {value:true}; const carregando = {value:false}; const carregandoMais = {value:false}; let atualizandoLista = false; let linkDoChat = null\n${js}`)(
+        st.aba, st.selecionada, st.emailConversa, st.emailConversaLinha, st.emailConversaVersao, st.chatDeOrigem, st.itens, st.emHumano, (id) => { st.selecionada.value = id }, () => {}, () => { st.contagensLidas++ }, () => { st.listasRelidas++ },
       )
       return { st, f }
     }
@@ -383,7 +384,8 @@ async function principal() {
     st.itens.value = [{ id: 'c1', aguardando_resposta: true }]
     st.selecionada.value = 'c1'
     f.aoMudarConversa({ id: 'c1', aguardando_resposta: false })
-    assert.equal(st.itens.value[0].aguardando_resposta, false)
+    assert.equal(st.itens.value[0].aguardando_resposta, true, 'aguarda a lista confirmar; callback não mescla retratos')
+    assert.equal(st.listasRelidas, 1)
     // Vinculou: na mesma conversa relê (a chave muda); na do pedido (outra), abre ela.
     ;({ st, f } = novo())
     f.abrirConversaDoEmail('c-email')
@@ -397,12 +399,13 @@ async function principal() {
     assert.equal(st.contagensLidas, lidas + 1, 'voltou aos e-mails: relê o número')
     // O número: GET /email/contagens no carregar e no polling (qualquer aba).
     assert.match(pagina, /const emailEsperando = computed\(\(\) => emailContagens\.value\?\.aguardando \|\| 0\)/)
-    assert.match(pagina, /emailContagens\.value = await api<[^>]+>\('\/api\/atendimento\/email\/contagens'\)/)
+    assert.match(pagina, /const recebidas = await api<[^>]+>\('\/api\/atendimento\/email\/contagens'\)/)
     // Quem não vê o /atendimento não pergunta (a rota recusaria); a seção escolhida na visita fica na página.
     assert.match(pagina, /async function carregarContagensEmail\(\) \{\n(?:\s*\/\/[^\n]*\n)*\s+if \(!canSugerir\.value\) return\n/)
     assert.match(pagina, /const emailSecao = ref<'' \| 'mailboxes' \| 'queues' \| 'admin'>\(''\)/)
     assert.match(pagina, /const polling = usePollingVisivel\(async \(\) => \{\s+\/\/[^\n]*\n\s+void carregarContagensEmail\(\)\n\s+\/\/[^\n]*\n\s+emailTique\.value\+\+\n/)
-    assert.match(pagina, /await Promise\.all\(\[carregarResumo\(\), carregarLista\(\), carregarModelos\(\), carregarContagensEmail\(\)\]\)\n/)
+    assert.match(pagina, /const pedidos: Promise<unknown>\[\] = \[carregarResumo\(\), carregarContagensEmail\(\)\]/)
+    assert.match(pagina, /if \(naCaixa\.value\) pedidos\.push\(carregarLista\(\)\)/)
     // O link: `?tab=mail&conversa=<id>` abre a conversa de e-mail.
     assert.match(pagina, /const selecionada = ref<string \| null>\(aba\.value === 'mail' \? null : conversaQuery\)/)
     assert.match(pagina, /const emailConversa = ref<string \| null>\(aba\.value === 'mail' \? conversaQuery : null\)/)
@@ -1471,8 +1474,8 @@ async function principal() {
     assert.match(rotasAtd, /and not caixa_email\n\s+\)/, 'o Direct nunca entra na lista do e-mail')
     // O /resumo (plataformas, barra de lojas, etiquetas, Caixa Humano): só a Caixa.
     assert.match(rotasAtd, /cond = and_\(separa_email\.na_caixa_sql\(\), \*\(\[escopo\] if escopo is not None else \[\]\)\)/)
-    assert.match(rotasAtd, /q_plat = q_plat\.where\(cond\)/)
-    assert.match(rotasAtd, /q_loja = q_loja\.where\(cond\)/)
+    assert.match(rotasAtd, /q_loja = select\([\s\S]*?\)\.where\(cond\)\.group_by\(/)
+    assert.doesNotMatch(rotasAtd, /q_plat\s*=/, 'plataformas usam a mesma agregação filtrada por e-mail e escopo')
     for (const classe of ['PlataformaResumoOut', 'LojaResumoOut', 'ResumoOut']) {
       const corpo = (schemasAtd.match(new RegExp(`class ${classe}\\(BaseModel\\):([\\s\\S]*?)\\n\\n\\nclass `)) || [])[1] || ''
       assert.ok(corpo && !/email_sem_vinculo:/.test(corpo) && !/^\s+chamados:/m.test(corpo), `${classe} sem o e-mail`)

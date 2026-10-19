@@ -47,7 +47,10 @@ para invalidar.
 from __future__ import annotations
 
 import re
+from collections import defaultdict
+from collections.abc import Iterable
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -168,6 +171,12 @@ async def _nome_da_ficha(
             .order_by(StoreInfo.created_at, StoreInfo.id)
         )
     ).all()
+    return _nome_da_ficha_das_linhas(integration, plataforma, linhas)
+
+
+def _nome_da_ficha_das_linhas(
+    integration: Integration, plataforma: str, linhas: Iterable[tuple[str | None, str | None]]
+) -> str | None:
     nomes: dict[str, str] = {}
     for conta, plataforma_ficha in linhas:
         plat = " ".join((plataforma_ficha or "").split()).lower()
@@ -184,6 +193,79 @@ async def _nome_da_ficha(
     return _com_inicial_maiuscula(nome)
 
 
+def _nome_resolvido(
+    integration: Integration, do_cadastro: str | None, da_ficha: str | None
+) -> str:
+    if do_cadastro is not None:
+        nome = sem_prefixo(do_cadastro, _plataforma(integration))
+    else:
+        nome = " ".join((integration.name or "").split())
+    if da_ficha is not None and _chave(da_ficha) != _chave(nome):
+        nome = da_ficha
+    return nome
+
+
+async def nomes_das_lojas(
+    session: AsyncSession, integracoes: Iterable[Integration]
+) -> dict[UUID, str]:
+    """Resolve os nomes de uma resposta em duas consultas, com o mesmo cache.
+
+    A barra pode conter dezenas de lojas. Consultar Empresas e o cadastro
+    uma vez por integração transformava a abertura em centenas de viagens
+    ao banco. Os vínculos, a prioridade e a grafia seguem `nome_da_loja`.
+    O cache continua limitado à sessão, respeitando alterações na próxima.
+    """
+    integracoes = list(integracoes)
+    cache = _cache(session)
+    pendentes = {i.id: i for i in integracoes if str(i.id) not in cache}
+    if not pendentes:
+        return {i.id: cache[str(i.id)] for i in integracoes}
+
+    cadastros: dict[UUID, str | None] = {}
+    linhas = (
+        await session.execute(
+            select(Integration.id, Store.apelido_override, Company.apelido)
+            .select_from(Integration)
+            .join(
+                Store,
+                or_(Store.integration_id == Integration.id, Store.id == Integration.store_id),
+            )
+            .join(Company, Company.id == Store.company_id)
+            .where(Integration.id.in_(pendentes))
+            .order_by(
+                Integration.id,
+                case((Store.integration_id == Integration.id, 0), else_=1),
+            )
+        )
+    ).all()
+    for ident, override, apelido in linhas:
+        if ident in cadastros:
+            continue
+        cadastros[ident] = next(
+            (n for n in (override, apelido) if isinstance(n, str) and n.strip()), None
+        )
+
+    fichas: dict[UUID, list[tuple[str | None, str | None]]] = defaultdict(list)
+    for ident, nome, plataforma in (
+        await session.execute(
+            select(StoreInfo.integration_id, StoreInfo.account_name, StoreInfo.platform)
+            .where(StoreInfo.integration_id.in_(pendentes), StoreInfo.archived_at.is_(None))
+            .order_by(StoreInfo.created_at, StoreInfo.id)
+        )
+    ).all():
+        fichas[ident].append((nome, plataforma))
+    novos = {
+        str(i.id): _nome_resolvido(
+            i,
+            cadastros.get(i.id),
+            _nome_da_ficha_das_linhas(i, _plataforma(i), fichas[i.id]),
+        )
+        for i in pendentes.values()
+    }
+    cache.update(novos)
+    return {i.id: cache[str(i.id)] for i in integracoes}
+
+
 async def nome_da_loja(session: AsyncSession, integration: Integration | None) -> str:
     """O nome da loja para a caixa (ver o docstring do módulo); "" sem integração.
 
@@ -198,14 +280,9 @@ async def nome_da_loja(session: AsyncSession, integration: Integration | None) -
         return cache[chave]
     plataforma = _plataforma(integration)
     do_cadastro = await _nome_do_cadastro(session, integration)
-    if do_cadastro is not None:
-        nome = sem_prefixo(do_cadastro, plataforma)
-    else:
-        nome = " ".join((integration.name or "").split())
     # O cadastro de Lojas ligado com OUTRO nome (Jlas → Atlas). Se a Empresas
     # já diz o mesmo nome, fica a grafia dela.
     da_ficha = await _nome_da_ficha(session, integration, plataforma)
-    if da_ficha is not None and _chave(da_ficha) != _chave(nome):
-        nome = da_ficha
+    nome = _nome_resolvido(integration, do_cadastro, da_ficha)
     cache[chave] = nome
     return nome

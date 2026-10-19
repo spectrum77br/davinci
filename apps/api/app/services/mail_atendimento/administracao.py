@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import String, and_, case, cast, false, func, literal, not_, or_, select
+from sqlalchemy import String, Uuid, and_, case, cast, false, func, literal, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -182,12 +182,28 @@ def filtro_conversa(user: User, c=AtendimentoConversa):
         .exists()
     )
     ref = a.payload["mail"]["message_id"].astext
+    # A referência vem de JSON legado: o CAST precisa ficar dentro do CASE
+    # para uma string malformada nunca interromper a autorização. Converter
+    # a referência (em vez da PK) permite buscar o original pelo índice UUID.
+    # O formato canônico minúsculo mantém a igualdade textual anterior.
+    ref_id = case(
+        (
+            and_(
+                func.length(ref) == 36,
+                ref.op("~")(
+                    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                ),
+            ),
+            cast(ref, Uuid()),
+        ),
+        else_=None,
+    )
     existe_original = (
-        select(literal(1)).where(cast(origem.id, String) == ref).correlate_except(origem).exists()
+        select(literal(1)).where(origem.id == ref_id).correlate_except(origem).exists()
     )
     original_permitido = (
         select(literal(1))
-        .where(cast(origem.id, String) == ref, filtro_mensagem(user, origem.id))
+        .where(origem.id == ref_id, filtro_mensagem(user, origem.id))
         .correlate_except(origem)
         .exists()
     )
