@@ -8,8 +8,8 @@ previsto como estava ANTES de liberar; o recálculo compara e mostra "a platafor
 mudou a conta em −20,52 na liberação". Preenchida daqui pra frente, na primeira
 rodada em que o pedido aparece liberado.
 
-Revision ID: 0416_conciliacao_previsto_na_venda
-Revises: 0415_mail_admin
+Revision ID: 0417_conciliacao_previsto_na_venda
+Revises: 0416_notificacoes_nativas
 """
 
 from collections.abc import Sequence
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0416_conciliacao_previsto_na_venda"
-down_revision: str | None = "0415_mail_admin"
+revision: str = "0417_conciliacao_previsto_na_venda"
+down_revision: str | None = "0416_notificacoes_nativas"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
