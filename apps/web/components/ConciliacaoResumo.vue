@@ -160,15 +160,6 @@ function cobCls(v: number | null | undefined) {
   if (v === null || v === undefined || Math.abs(v) < 0.005) return 'text-muted-foreground'
   return v > 0 ? 'text-red-600' : 'text-emerald-700'
 }
-function tituloExtras(e?: CobrancasExtras) {
-  if (!e) return ''
-  const partes: string[] = []
-  if (Math.abs(e.imposto) > 0.005) partes.push(`impostos ${fmtCob(e.imposto)}`)
-  if (Math.abs(e.publicidade) > 0.005) partes.push(`Ads ${fmtCob(e.publicidade)}`)
-  if (Math.abs(e.penalidades) > 0.005) partes.push(`penalidades e ajustes ${fmtCob(e.penalidades)}`)
-  if (Math.abs(e.fatura_ml) > 0.005) partes.push(`fatura do ML ${fmtCob(e.fatura_ml)}`)
-  return partes.join(' · ') || 'nenhuma cobrança sem pedido nesse dia'
-}
 // Bloco "Resultado do mês" (maquete de 19/10): uma coluna por marketplace + Empresa.
 const COLS_MES = computed(() => [...plataformasDoMes.value.map((p) => ({ key: p.key, label: p.label })), { key: 'empresa', label: 'Empresa' }])
 function blocoMes(key: string) {
@@ -523,7 +514,6 @@ onMounted(() => {
                   <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais sem movimento</th>
                   <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais aguard. repasse</th>
                   <th class="border-b px-2 py-1 text-right">Com pendência</th>
-                  <th class="border-b px-2 py-1 text-right" title="o que a plataforma tirou (ou devolveu) SEM pedido nesse dia, somando as lojas: impostos, Ads, penalidades e ajustes, fatura do ML">Cobranças extras</th>
                   <th class="border-b px-2 py-1 text-left">Como ficou</th>
                 </tr>
               </thead>
@@ -534,7 +524,6 @@ onMounted(() => {
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.sem_movimento }}</td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.aguardando_repasse }}</td>
                   <td class="px-2 py-1 text-right tabular-nums font-bold" :class="d.com_pendencia ? 'text-amber-700' : ''">{{ d.com_pendencia }}</td>
-                  <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(d.cobrancas_extras?.total)" :title="tituloExtras(d.cobrancas_extras)">{{ fmtCob(d.cobrancas_extras?.total) }}<span v-if="d.cobrancas_extras?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas desse dia que ninguém classificou ainda">{{ d.cobrancas_extras.sem_dono }} sem dono</span></td>
                   <td class="px-2 py-1">
                     <span v-if="d.com_pendencia" class="mr-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ d.com_pendencia }} com pendência</span>
                     <span v-else class="mr-1 inline-block rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">todos fechados</span>
@@ -563,8 +552,6 @@ onMounted(() => {
                     <th class="border-b px-2 py-1 text-right">Publicidade (Ads)</th>
                     <th class="border-b px-2 py-1 text-right">Penalidades e ajustes</th>
                     <th class="border-b px-2 py-1 text-right">Fatura do ML</th>
-                    <th class="border-b px-2 py-1 text-right" title="vendas de antes do início do painel (01/10): o que entrou e saiu delas, sem conferência pedido a pedido">Pedidos anteriores a 01/10: entrou</th>
-                    <th class="border-b px-2 py-1 text-right">saiu</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -574,16 +561,12 @@ onMounted(() => {
                       <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(dados.por_plataforma[g.key]?.cobrancas?.[k])">
                         {{ fmtCob(dados.por_plataforma[g.key]?.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && dados.por_plataforma[g.key]?.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas que ainda ninguém classificou">{{ dados.por_plataforma[g.key]?.cobrancas?.sem_dono }} sem dono</span>
                       </td>
-                      <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(dados.por_plataforma[g.key]?.cobrancas?.anteriores_entrou) }}</td>
-                      <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(dados.por_plataforma[g.key]?.cobrancas?.anteriores_saiu) }}</td>
                     </tr>
                     <tr v-for="l in g.lojas" v-show="abertosCob[g.key]" :key="'c' + l.conta" class="border-b">
                       <td class="px-2 py-1 pl-4 font-bold">{{ l.conta }}</td>
                       <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(l.cobrancas?.[k])">
                         {{ fmtCob(l.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && l.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ l.cobrancas?.sem_dono }} sem dono</span>
                       </td>
-                      <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(l.cobrancas?.anteriores_entrou) }}</td>
-                      <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(l.cobrancas?.anteriores_saiu) }}</td>
                     </tr>
                   </template>
                   <tr class="bg-muted/40 font-bold">
@@ -591,13 +574,11 @@ onMounted(() => {
                     <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(dados.empresa.cobrancas?.[k])">
                       {{ fmtCob(dados.empresa.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && dados.empresa.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ dados.empresa.cobrancas?.sem_dono }} sem dono</span>
                     </td>
-                    <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(dados.empresa.cobrancas?.anteriores_entrou) }}</td>
-                    <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums text-muted-foreground">{{ fmtMoney(dados.empresa.cobrancas?.anteriores_saiu) }}</td>
                   </tr>
                 </tbody>
               </table>
             </div>
-            <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Vermelho = a plataforma tirou; verde = devolveu. Impostos (ICMS DIFAL da Shopee) e Publicidade (recarga de Ads) o robô classifica sozinho. Penalidades e ajustes ficam sem dono até alguém classificar no Extrato do dia — "N sem dono" é dinheiro que saiu e ninguém olhou. Fatura do ML = cobrada do saldo + segurada pra dívida, sem contar duas vezes. "Pedidos anteriores a 01/10" é o que entrou e saiu de vendas de antes do início do painel: não é conferido pedido a pedido.</div>
+            <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Vermelho = a plataforma tirou; verde = devolveu. Impostos (ICMS DIFAL da Shopee) e Publicidade (recarga de Ads) o robô classifica sozinho. Penalidades e ajustes ficam sem dono até alguém classificar no Extrato do dia — "N sem dono" é dinheiro que saiu e ninguém olhou. Fatura do ML = cobrada do saldo + segurada pra dívida, sem contar duas vezes.</div>
           </div>
         </div>
 
