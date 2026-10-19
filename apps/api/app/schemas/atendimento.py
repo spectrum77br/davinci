@@ -131,6 +131,9 @@ class EmailResumoOut(BaseModel):
     marca: str | None = None
     alias: str | None = None
     destaque: bool = False
+    tipo_email: str | None = None
+    tipo_email_inferido: bool = False
+    caso_id: str | None = None
 
 
 class ConversaResumoOut(BaseModel):

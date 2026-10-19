@@ -235,6 +235,9 @@ export type EmailDaLinha = {
   marca: string | null
   alias: string | null
   destaque: boolean
+  tipo_email?: 'informativo' | 'chamado' | 'venda' | null
+  tipo_email_inferido?: boolean
+  caso_id?: string | null
 }
 // Por que a conversa está na Caixa Humano (HumanoOut do backend): os códigos
 // (`constantes.ORDEM_HUMANO`, do mais importante para o menos), como a tela

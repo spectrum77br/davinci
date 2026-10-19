@@ -137,8 +137,8 @@ def _conversa_de_email(integ, externo: str, *, pedido: str | None, aguardando: b
 async def test_chat_da_venda_so_numeros_e_ids(db, cena, client, admin):
     v = await _venda_com_email(db, cena)
     pack, email = v["pack"], v["email"]
-    # Outra conversa de e-mail do MESMO pedido (já respondida) e uma SEM pedido
-    # do mesmo comprador (pelo id dele na plataforma): as duas são da venda.
+    # Conversa sem e-mails não cria vínculo visível; comprador sem pedido
+    # também não prova qual das vendas dele originou o e-mail (19/10/2026).
     respondida = _conversa_de_email(cena.ml, "mail:resp", pedido=PEDIDO, aguardando=False)
     pela_pessoa = _conversa_de_email(
         cena.ml,
@@ -177,17 +177,10 @@ async def test_chat_da_venda_so_numeros_e_ids(db, cena, client, admin):
     assert corpo["total"] == 3 and corpo["aguardando"] == 1
     # A que espera resposta primeiro (é a que o link abre).
     assert corpo["conversas"][0] == {"id": str(email.id), "emails": 3, "aguardando": True}
-    assert {c["id"] for c in corpo["conversas"]} == {
-        str(email.id),
-        str(respondida.id),
-        str(pela_pessoa.id),
-    }
+    assert {c["id"] for c in corpo["conversas"]} == {str(email.id)}
     for c in corpo["conversas"]:
         assert set(c) == {"id", "emails", "aguardando"}
-    assert {c["id"]: c["emails"] for c in corpo["conversas"][1:]} == {
-        str(respondida.id): 0,
-        str(pela_pessoa.id): 0,
-    }
+    assert corpo["conversas"][1:] == []
     # Nada do e-mail em si.
     for proibido in CONTEUDO:
         assert proibido not in r.text, proibido

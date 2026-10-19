@@ -985,7 +985,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Variação disponível, reposição ou reserva.",
-      "faca": "As opções disponíveis são as que aparecem para seleção no anúncio; quando uma esgotada voltar, ela aparece de novo ali. Data de reposição, reserva ou limite por pedido: precisa_humano=true. Nunca 'últimas unidades' nem prometer avisar."
+      "faca": "Consulta simples de disponibilidade de cor, memória, tamanho ou voltagem: orientar conferir as opções disponíveis para seleção no próprio anúncio, sem afirmar que há ou que falta estoque de uma variação específica. Só essa consulta pode sair sozinha. Quantidade de unidades, reserva, limite por pedido, data de reposição ou quando volta: precisa_humano=true. Nunca prometer estoque, reserva, prazo de reposição, últimas unidades ou aviso de chegada."
     },
     {
       "tipo": "categoria",
@@ -1048,7 +1048,7 @@
       "canal": null,
       "prioridade": 50,
       "quando": "Contato externo, pagamento por fora ou dados pessoais, sem outro assunto.",
-      "faca": "Explicar com educação que o atendimento e os pagamentos acontecem só por aqui e que não é preciso mandar dados pessoais; pedir a dúvida. Vídeo que não sobe: pedir trecho curto ou fotos."
+      "faca": "Instagram, site da loja ou pedido de contato externo: informar apenas que atendimento e pagamentos devem permanecer na própria plataforma indicada nos FATOS. Não afirmar que a loja tem ou não tem perfil ou site, não fornecer links, nomes de usuário, telefone, e-mail, Pix ou qualquer contato externo. Pedido só de contato pode sair sozinho com essa orientação; qualquer outra dúvida deve seguir as demais regras do Manual. Não é preciso mandar dados pessoais; pedir a dúvida. Vídeo que não sobe: pedir trecho curto ou fotos."
     },
     {
       "tipo": "categoria",

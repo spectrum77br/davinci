@@ -50,7 +50,7 @@ OS MOTIVOS (`triar`, PURA — só códigos, `constantes.ORDEM_HUMANO`):
                      responde e-mail);
     pedido_nao_achado  fora da pergunta pré-venda, com nº de pedido que o
                      Bling não acha;
-  texto do cliente (as 8 últimas trocas, como no `_gerar`) —
+  texto do cliente (turno atual entre até 40 trocas, como no `_gerar`) —
     alerta / xingamento / atendente / instrucao  (`ia.sinais_com_codigo`);
     assunto          pista de assunto só de pessoa (troca, cancelamento,
                      defeito, reembolso, garantia, endereço, desconto — e os
@@ -59,7 +59,9 @@ OS MOTIVOS (`triar`, PURA — só códigos, `constantes.ORDEM_HUMANO`):
     sem_dado         o que ele escreveu desde a última resposta de PESSOA
                      pergunta rastreio/prazo de envio/NF e falta o dado (sem
                      pedido, sem código de rastreio, sem NF) — "lacuna sem
-                     dado vira pessoa";
+                     dado vira pessoa"; início do turno fora da leitura ou
+                     demandas que não cabem no prompt de 6.000 caracteres
+                     também exigem pessoa;
     so_anexo         esse trecho (a mesma rajada do `ia._gerar`, desde a
                      última resposta real da loja) não tem texto e traz
                      foto/vídeo/arquivo/áudio de verdade; menu e campanha
@@ -223,7 +225,6 @@ from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ia, separa_email
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
-    AUTOR_CLIENTE,
     CANAL_AVALIACAO,
     CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
@@ -270,7 +271,7 @@ logger = structlog.get_logger()
 # 2 (09/10/2026, revisão): pistas de assunto mais largas, a avaliação de nota
 # alta fora, a bloqueada pelo estado, a foto depois do robô, o motivo `falha`.
 # 3 (16/10/2026): menu não corta texto/foto; IA atendente segue a régua da geração.
-VERSAO = 3
+VERSAO = 4
 # A chave em `atendimento_conversas.dados`.
 CHAVE = "humano"
 # Conversas por rodada do cron (o recálculo inicial, ~500, leva umas 3).
@@ -481,7 +482,8 @@ def triar(
         motivos.add(HUMANO_PEDIDO_NAO_ACHADO)
 
     # ── O que o cliente escreveu ──
-    textos_cliente = [m.texto for m in recentes if m.autor == AUTOR_CLIENTE and m.texto]
+    rajada = _rajada(recentes, gatilho)
+    textos_cliente = [m.texto for m in rajada if m.texto]
     sinais = {codigo for codigo, _frase in ia.sinais_com_codigo(textos_cliente)}
     if ia_e_o_atendente:
         sinais.discard(HUMANO_ATENDENTE)
@@ -495,9 +497,23 @@ def triar(
     )
     if assuntos:
         motivos.add(HUMANO_ASSUNTO)
-    rajada = _rajada(recentes, gatilho)
+    if ia.turno_incompleto(recentes, gatilho):
+        motivos.add(HUMANO_SEM_DADO)
     pistas = ia.pistas_de_categoria(" ".join(m.texto or "" for m in rajada))
+    if ia.nf_antes_da_compra(
+        [m.texto or "" for m in rajada],
+        pedido=pedido,
+        pedido_informado=bool(conversa.pedido_marketplace),
+    ):
+        pistas = [p for p in pistas if p != "nota_fiscal"]
     if _falta_dado(pistas, ctx, nao_achado):
+        motivos.add(HUMANO_SEM_DADO)
+    if ia.nf_exige_pessoa([m.texto or "" for m in rajada]):
+        motivos.add(HUMANO_SEM_DADO)
+    if any(
+        ia.instrucao_de_recebimento(m.texto or "") or ia.duvida_de_remetente(m.texto or "")
+        for m in rajada
+    ):
         motivos.add(HUMANO_SEM_DADO)
     if _so_anexo(rajada) or _so_anexo(_depois_da_loja(recentes, gatilho)):
         motivos.add(HUMANO_SO_ANEXO)
@@ -982,9 +998,12 @@ async def triar_conversa(
     gatilho = await ia._ultima_do_cliente(session, conversa)
     recentes = await ia._mensagens_recentes(session, conversa)
     if gatilho is not None and gatilho.id not in {m.id for m in recentes}:
-        # A loja falou 8 vezes depois (o robô, as campanhas): a pergunta entra
+        # A loja falou além do limite de leitura: a pergunta entra
         # na frente, como no `_gerar`.
-        recentes = [gatilho, *recentes[-(ia.MAX_TROCAS - 1) :]]
+        recentes = ia.HistoricoMensagens(
+            [gatilho, *recentes],
+            turno_incompleto=getattr(recentes, "turno_incompleto", False),
+        )
     ctx = await contexto_svc.contexto_da_conversa(session, conversa)
     sugestao = await _sugestao_do_turno(session, conversa)
     return triar(

@@ -254,9 +254,11 @@ def test_motivo_assunto_so_de_pessoa():
     assert t.assuntos == ("troca_devolucao",)
     t = _triar([_cli("veio quebrado, quero o reembolso")])
     assert t.assuntos == ("reembolso", "defeito")
-    # A régua é a da IA: as 8 últimas trocas, mesmo o que já foi respondido.
+    # Assunto já respondido por pessoa não contamina um novo turno só de
+    # agradecimento. As pendências de estado continuam sendo triadas à parte.
     t = _triar([_cli("quero cancelar"), _loja("Pronto, cancelado."), _cli("obrigado")])
-    assert t.assuntos == ("cancelamento",)
+    assert t.assuntos == ()
+    assert not t.para_pessoa
     # Assunto que o MANUAL marcou só de pessoa (fora das constantes) também.
     t = _triar([_cli("cadê meu pedido?")], so_humano=SO_HUMANO | {"rastreio"})
     assert (t.motivos, t.assuntos) == (("assunto",), ("rastreio",))

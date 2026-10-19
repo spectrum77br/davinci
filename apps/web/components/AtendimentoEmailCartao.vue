@@ -29,6 +29,9 @@ export type EmailDaMensagem = {
   mailbox_id?: string | null
   pasta?: string | null
   finalidade?: string | null
+  tipo_email?: 'informativo' | 'chamado' | 'venda' | null
+  tipo_email_inferido?: boolean
+  caso_id?: string | null
   destaque?: boolean
   alias?: string | null
   assunto?: string | null
@@ -59,6 +62,9 @@ export type CartaoEmail = {
   pasta: string | null
   plataforma: string | null
   finalidade: string | null
+  tipo_email?: 'informativo' | 'chamado' | 'venda' | null
+  tipo_email_inferido?: boolean
+  caso_id?: string | null
   finalidade_rotulo: string | null
   destaque: boolean
   so_historico: boolean
@@ -128,6 +134,17 @@ export type Chamado = {
 // Os registros de quem fez (auditoria) que vêm junto dos alertas do cartão:
 // não são alerta, a tela mostra sem o triângulo.
 export const REGISTROS_DE_PESSOA = new Set(['loja_escolhida', 'vinculado_por_pessoa', 'ignorado_por_pessoa'])
+export const TIPOS_EMAIL = [
+  { value: 'informativo', label: 'Informativos' },
+  { value: 'chamado', label: 'Chamados' },
+  { value: 'venda', label: 'Vendas' },
+] as const
+export function rotuloTipoEmail(tipo: string | null | undefined): string {
+  return ({ informativo: 'Informativo', chamado: 'Chamado', venda: 'Venda' } as Record<string, string>)[tipo || ''] || ''
+}
+export function dicaTipoEmail(inferido: boolean | undefined): string {
+  return inferido ? 'Tipo sugerido pelos dados disponíveis; o conteúdo deste e-mail ainda precisa ser conferido.' : 'Tipo identificado no conteúdo do e-mail.'
+}
 export type CartoesDaConversa = { emails: CartaoEmail[]; chamado: Chamado | null; outros_chamados: Chamado[] }
 
 // A mensagem tem CARTÃO de e-mail? A nossa resposta, ou um e-mail recebido de
@@ -267,9 +284,11 @@ const respondivel = computed(() => !!props.podeResponder && !!props.email.messag
           :class="pasta.destaque ? 'bg-red-500/15 text-red-700 dark:text-red-300' : 'bg-muted text-muted-foreground'"
           :title="`pasta: ${pasta.texto}`"
         >{{ pasta.texto }}</span>
+        <span v-if="rotuloTipoEmail(email.tipo_email || cartao?.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] font-medium" :title="dicaTipoEmail(email.tipo_email_inferido || cartao?.tipo_email_inferido)" data-email-tipo>{{ rotuloTipoEmail(email.tipo_email || cartao?.tipo_email) }}</span>
+        <span v-if="email.caso_id || cartao?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300" data-email-caso>Chamado {{ email.caso_id || cartao?.caso_id }}</span>
         <span v-if="pasta.soHistorico" class="rounded bg-sky-500/15 px-1.5 py-px text-[11px] text-sky-800 dark:text-sky-300" title="e-mail de vendas da plataforma: fica como histórico, sem pendência — não é para responder" data-email-historico>só histórico</span>
         <span v-if="email.aviso_api" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" title="a plataforma tem API: o aviso por e-mail fica aqui, na conversa da API do pedido">aviso por e-mail</span>
-        <span v-if="email.protocolo || cartao?.protocolo" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] font-medium text-teal-800 dark:text-teal-300" title="protocolo do chamado do site">{{ email.protocolo || cartao?.protocolo }}</span>
+        <span v-if="(email.protocolo || cartao?.protocolo) && !email.caso_id && !cartao?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] font-medium text-teal-800 dark:text-teal-300" title="protocolo do chamado do site">{{ email.protocolo || cartao?.protocolo }}</span>
         <span class="min-w-0 truncate text-[11px] text-muted-foreground" :title="`recebido por ${email.alias || cartao?.alias || '?'}`">para {{ destinoDaLoja(cartao?.alias ?? email.alias, cartao?.loja) }}</span>
         <span v-if="cartao?.sem_integracao" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" title="a loja do cadastro não está ligada a uma integração: o pedido é procurado só no espelho do Bling (ligue em Cadastros › Lojas)" data-email-sem-integracao>loja sem integração</span>
         <span v-if="email.fora_do_davinci" class="rounded bg-amber-500/15 px-1.5 py-px text-[11px] text-amber-800 dark:text-amber-300" title="alguém respondeu direto no Tuta, fora do DaVinci">respondido no Tuta</span>

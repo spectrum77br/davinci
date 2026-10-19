@@ -27,7 +27,8 @@ decifrado). Um e-mail por vez, commit por e-mail:
  5. QUEM ESCREVEU, a LOJA (`rotear`), o FORMULÁRIO do site (RF6: DE sac@ PARA
     sac@, o cliente vem do corpo), o PEDIDO por plataforma (`pedido`) ou o
     PROTOCOLO (US-26-0001…), o GOLPE (`suspeito`).
- 6. A CONVERSA (só uma conversa DA PONTE): o fio do Tuta, o
+ 6. A CONVERSA (só uma conversa DA PONTE): caso explícito do marketplace
+    enviado por aviso oficial não suspeito, na mesma conta, antes do fio do Tuta, o
     In-Reply-To/References (de um e-mail já levado ou da NOSSA resposta), o
     protocolo, o pedido — senão uma conversa nova da loja (`canal='email'`,
     `dados.fonte='tuta'`, `dados.mail`). Na Amazon, o fio que aponta para a
@@ -36,8 +37,9 @@ decifrado). Um e-mail por vez, commit por e-mail:
     conversa de E-MAIL da loja, sem pendência — desde 13/10/2026 nunca mais
     dentro da conversa de CHAT (o dono: "o e-mail aparece só na aba de
     e-mail; a do chat aparece só no chat" — `atendimento/separa_email.py`).
-    Sem loja → fila "E-mail sem loja" (SEM conversa); sem pedido → "E-mail
-    sem vínculo"; mais de 3 pedidos → `resumo`; pasta vendas → só histórico.
+    Sem loja → fila "E-mail sem loja" (SEM conversa); atendimento sem pedido
+    nem caso → "E-mail sem vínculo"; mais de 3 pedidos → `resumo`.
+    Informativos e vendas ficam como histórico; tipo e pasta são separados.
  7. A MENSAGEM leva SÓ o texto NOVO (sem a citação), com os links de acesso
     removidos e o código mascarado, cortado. O corpo inteiro e os anexos
     continuam só cifrados na Central (o cartão decifra na hora).
@@ -61,6 +63,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import exists, or_, select
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -96,6 +99,7 @@ from app.services.atendimento.constantes import (
 )
 from app.services.mail_atendimento import caixa as config_caixa
 from app.services.mail_atendimento import (
+    classificacao,
     codigos,
     enderecos,
     pastas,
@@ -174,6 +178,7 @@ CHAVE = "mail"
 # O `externo_id` da conversa de e-mail (por fio, protocolo, ou o 1º e-mail).
 PREFIXO_FIO = "mail-fio:"
 PREFIXO_PROTOCOLO = "mail-protocolo:"
+PREFIXO_CASO = "mail-caso:"
 PREFIXO_EMAIL = "mail:"
 # A conversa da loja SEM integração (só a ficha): o id da ficha entra na chave
 # (sem integração, a chave da conversa é só canal + id + plataforma: duas
@@ -191,7 +196,7 @@ _SEM_LOJA_PELO_FIO = (
 )
 _TEXTO_CORTADO = "[…] (o texto inteiro está no cartão do e-mail)"
 # O que o e-mail novo nunca troca numa conversa de chamado que já tem (RF6).
-_FIXOS_DO_CHAMADO = ("protocolo", "caixa", "caixa_rotulo", "marca", "marca_nome")
+_FIXOS_DO_CHAMADO = ("protocolo", "caixa", "caixa_rotulo", "marca", "marca_nome", "caso_id")
 
 
 class _Esperar(Exception):  # noqa: N818 — controle de fluxo, não erro
@@ -687,6 +692,85 @@ def _esperar_o_gmail(
     )
 
 
+async def _conversa_do_caso(
+    session: AsyncSession, meta: MailMessageMeta, rota: rotear.Rota
+) -> AtendimentoConversa | None:
+    """Mesmo marketplace + mesma conta + caso explícito, nunca pelo pedido.
+
+    A trava de transação evita duas primeiras mensagens do mesmo caso
+    criarem conversas separadas. A busca usa o índice já existente de
+    `protocolo`, restrita à loja, sem ler corpo nem varrer JSON de e-mails.
+    """
+    conta = rota.integration_id or rota.store_info_id
+    chave = f"mail:caso:{rota.plataforma}:{conta}:{meta.protocolo}"
+    await session.execute(
+        sql_text("SELECT pg_advisory_xact_lock(hashtext(:chave))"), {"chave": chave}
+    )
+    da_loja = (
+        (MailMessageMeta.integration_id == rota.integration_id,)
+        if rota.integration_id is not None
+        else (
+            MailMessageMeta.integration_id.is_(None),
+            MailMessageMeta.store_info_id == rota.store_info_id,
+        )
+    )
+    ids = set(
+        (
+            await session.scalars(
+                select(MailMessageMeta.conversa_id)
+                .where(
+                    MailMessageMeta.protocolo == meta.protocolo,
+                    MailMessageMeta.plataforma == rota.plataforma,
+                    *da_loja,
+                    MailMessageMeta.conversa_id.is_not(None),
+                    MailMessageMeta.estado.in_(ESTADOS_DA_EQUIPE),
+                    MailMessageMeta.suspeito.is_(False),
+                    MailMessageMeta.remetente_tipo == REMETENTE_AVISO,
+                )
+                .distinct()
+            )
+        ).all()
+    )
+    for candidata in await _conversas(session, ids):
+        if (
+            e_conversa_da_ponte(candidata)
+            and _da_mesma_loja(candidata, rota)
+            and dados_mail(candidata).get("caso_id") == meta.protocolo
+        ):
+            return candidata
+    return None
+
+
+async def _referencias_de_caso(
+    session: AsyncSession, email: Email, rota: rotear.Rota
+) -> list[AtendimentoConversa]:
+    """References é mais específica que um fio Tuta reutilizado entre casos."""
+    if not email.refs:
+        return []
+    ids = set(
+        await session.scalars(
+            select(MailMessageMeta.conversa_id).where(
+                MailMessageMeta.mid_hash.in_(email.refs),
+                MailMessageMeta.conversa_id.is_not(None),
+                MailMessageMeta.estado.in_(ESTADOS_DA_EQUIPE),
+            )
+        )
+    )
+    ids.update(
+        await session.scalars(
+            select(MailOutboxMeta.conversa_id).where(
+                MailOutboxMeta.enviado_mid_hash.in_(email.refs),
+                MailOutboxMeta.conversa_id.is_not(None),
+            )
+        )
+    )
+    return [
+        c
+        for c in await _conversas(session, ids)
+        if _da_mesma_loja(c, rota) and e_conversa_da_ponte(c) and dados_mail(c).get("caso_id")
+    ]
+
+
 async def achar_conversa(
     session: AsyncSession,
     meta: MailMessageMeta,
@@ -699,7 +783,7 @@ async def achar_conversa(
     so_mesma_cliente: bool = False,
     campos: dict[str, str | None] | None = None,
 ) -> tuple[AtendimentoConversa | None, str | None]:
-    """A conversa onde o e-mail entra (e por quê): fio → referência → protocolo → pedido.
+    """A conversa: caso oficial → fio/referência → protocolo do site → pedido.
 
     Só conversa DA PONTE (`e_conversa_da_ponte`): o fio que aponta para outra
     conversa de e-mail (a da Amazon que veio pelo Gmail) nunca recebe a
@@ -719,6 +803,44 @@ async def achar_conversa(
     conversa do protocolo só se ela for a ÚNICA — com duas ou mais (o número
     repetido de duas clientes), abre conversa própria. Quem responde vê o
     alerta de outro endereço na faixa e confirma antes (`responder.previa`)."""
+    if meta.suspeito and not rota.site:
+        _alerta(
+            meta,
+            "suspeito_sem_agrupamento",
+            "remetente suspeito: e-mail mantido em conversa própria para conferir",
+        )
+        return None, "suspeito"
+    if any(
+        a.get("codigo") == "casos_ambiguos"
+        for a in (meta.alertas or [])
+        if isinstance(a, dict)
+    ):
+        return None, "caso_ambiguo"
+    # O caso explícito é mais forte que fio/References/pedido. Mesmo um fio
+    # reutilizado pelo marketplace não pode fundir casos diferentes.
+    if rota.plataforma in classificacao.PLATAFORMAS_CASO and meta.protocolo:
+        if meta.remetente_tipo != REMETENTE_AVISO:
+            _alerta(
+                meta, "caso_remetente_nao_oficial",
+                "caso citado por remetente não oficial: conferir antes de agrupar",
+            )
+            return None, "caso_nao_oficial"
+        return await _conversa_do_caso(session, meta, rota), "caso"
+    if rota.plataforma in classificacao.PLATAFORMAS_CASO:
+        referencias = await _referencias_de_caso(session, email, rota)
+        if referencias and meta.remetente_tipo != REMETENTE_AVISO and not all(
+            contato and contato in clientes_da_conversa(c) for c in referencias
+        ):
+            _alerta(
+                meta, "caso_remetente_nao_oficial",
+                "referência de caso sem cliente conhecido: conferir antes de agrupar",
+            )
+            return None, "caso_nao_oficial"
+        if len(referencias) == 1:
+            return referencias[0], "referencia"
+        if len(referencias) > 1:
+            _alerta(meta, "casos_ambiguos", "as referências apontam para casos diferentes")
+            return None, "caso_ambiguo"
     fora: list[AtendimentoConversa] = []
     amazon = rota.plataforma == "amazon"
     achada: tuple[AtendimentoConversa, str] | None = None
@@ -745,7 +867,28 @@ async def achar_conversa(
                 )
             ).scalars()
         )
-        for c in await _conversas(session, {i for i in ids if i is not None}):
+        candidatas = await _conversas(session, {i for i in ids if i is not None})
+        if rota.plataforma in classificacao.PLATAFORMAS_CASO:
+            da_loja = [
+                c for c in candidatas if _da_mesma_loja(c, rota) and e_conversa_da_ponte(c)
+            ]
+            casos = {dados_mail(c).get("caso_id") for c in da_loja} - {None, ""}
+            if len(casos) > 1:
+                _alerta(meta, "casos_ambiguos", "o fio do e-mail contém casos diferentes")
+                return None, "caso_ambiguo"
+            if casos:
+                if meta.remetente_tipo != REMETENTE_AVISO and not all(
+                    contato and contato in clientes_da_conversa(c)
+                    for c in da_loja
+                    if dados_mail(c).get("caso_id")
+                ):
+                    _alerta(
+                        meta, "caso_remetente_nao_oficial",
+                        "fio de caso sem cliente conhecido: conferir antes de agrupar",
+                    )
+                    return None, "caso_nao_oficial"
+                candidatas = [c for c in da_loja if dados_mail(c).get("caso_id") in casos]
+        for c in candidatas:
             if not _da_mesma_loja(c, rota):
                 continue
             if e_conversa_da_ponte(c):
@@ -821,6 +964,9 @@ async def achar_conversa(
                     AtendimentoConversa.canal == CANAL_EMAIL,
                     AtendimentoConversa.pedido_marketplace == pedido_marketplace,
                     AtendimentoConversa.dados["fonte"].astext == FONTE_TUTA,
+                    AtendimentoConversa.plataforma == rota.plataforma,
+                    # Uma venda/aviso do pedido não entra no caso que o cita.
+                    AtendimentoConversa.dados[CHAVE]["caso_id"].astext.is_(None),
                 )
                 .order_by(AtendimentoConversa.created_at)
                 .limit(1)
@@ -832,8 +978,21 @@ async def achar_conversa(
 
 
 def _externo_da_conversa(meta: MailMessageMeta, rota: rotear.Rota | None = None) -> str:
+    if meta.suspeito and meta.plataforma != PLATAFORMA_SITE:
+        return f"{PREFIXO_EMAIL}{meta.message_id}"
+    if any(
+        a.get("codigo") in {"casos_ambiguos", "caso_remetente_nao_oficial"}
+        for a in (meta.alertas or [])
+        if isinstance(a, dict)
+    ):
+        return f"{PREFIXO_EMAIL}{meta.message_id}"
     if meta.protocolo and meta.plataforma == PLATAFORMA_SITE:
         return f"{PREFIXO_PROTOCOLO}{meta.protocolo}"
+    if meta.protocolo and meta.plataforma in classificacao.PLATAFORMAS_CASO:
+        if meta.remetente_tipo != REMETENTE_AVISO:
+            return f"{PREFIXO_EMAIL}{meta.message_id}"
+        conta = meta.integration_id or meta.store_info_id
+        return f"{PREFIXO_CASO}{meta.plataforma}:{conta}:{meta.protocolo}"
     if meta.fio_tuta:
         base = f"{PREFIXO_FIO}{meta.fio_tuta}"
     else:
@@ -851,7 +1010,12 @@ def _comprador(contato: str | None) -> str | None:
 
 
 def payload_da_mensagem(
-    meta: MailMessageMeta, pasta: MailFolder | None, protegido: codigos.Protegido, anexos: int
+    meta: MailMessageMeta,
+    pasta: MailFolder | None,
+    protegido: codigos.Protegido,
+    anexos: int,
+    *,
+    classe_email: classificacao.Classificacao | None = None,
 ) -> dict:
     return {
         CHAVE: {
@@ -866,6 +1030,15 @@ def payload_da_mensagem(
             "codigo_mascarado": protegido.codigo_mascarado,
             "links_removidos": protegido.links_removidos,
             "protocolo": meta.protocolo,
+            **(
+                {
+                    "tipo_email": classe_email.tipo_email,
+                    "caso_id": classe_email.caso_id,
+                    "tipo_email_inferido": classe_email.tipo_inferido,
+                }
+                if classe_email is not None
+                else classificacao.tipos_de_meta(meta)
+            ),
         }
     }
 
@@ -888,6 +1061,7 @@ async def gravar_na_conversa(
     principal: str | None = None,
     formulario: dict[str, str | None] | None = None,
     externo: str | None = None,
+    classe_email: classificacao.Classificacao | None = None,
 ) -> tuple[AtendimentoConversa, AtendimentoMensagem]:
     """A mensagem do e-mail na conversa (achada ou nova). Não commita.
 
@@ -900,6 +1074,20 @@ async def gravar_na_conversa(
     veio fica). `externo`: a chave da conversa nova quando não é a de sempre
     (o protocolo repetido de outra cliente).
     """
+    classe_email = classe_email or classificacao.classificar(
+        plataforma=rota.plataforma,
+        finalidade=meta.finalidade,
+        assunto=protegido.assunto,
+        texto=protegido.texto,
+        remetente_tipo=meta.remetente_tipo,
+    )
+    if not rota.site:
+        caso = meta.protocolo or (
+            dados_mail(conversa).get("caso_id") if conversa is not None else None
+        )
+        if caso:
+            meta.protocolo = str(caso)
+            classe_email = classificacao.Classificacao(classificacao.TIPO_CHAMADO, str(caso))
     alias = rota.alias or meta.alias_recebido
     if principal and alias == principal:
         alias = None
@@ -911,6 +1099,9 @@ async def gravar_na_conversa(
         "mailbox_id": str(meta.mailbox_id),
         "pasta": pasta.nome if pasta is not None else None,
         "finalidade": meta.finalidade,
+        "tipo_email": classe_email.tipo_email,
+        "caso_id": classe_email.caso_id,
+        "tipo_email_inferido": classe_email.tipo_inferido,
         "destaque": meta.finalidade in FINALIDADES_DESTAQUE,
         "alias": alias,
         # A ficha do cadastro (a chave da loja SEM integração; nas outras, informação).
@@ -987,6 +1178,12 @@ async def gravar_na_conversa(
         await gravar.travar_linha(session, conversa)
         dados = dict(conversa.dados or {})
         atual = dict(dados.get(CHAVE) or {})
+        # O fio pode receber uma notificação depois do atendimento: o tipo
+        # da conversa conserva o conteúdo de maior responsabilidade.
+        ordem_tipo = {"informativo": 0, "venda": 1, "chamado": 2}
+        anterior = classificacao.tipo_da_conversa(atual, conversa.plataforma)
+        if ordem_tipo[anterior] > ordem_tipo[classe_email.tipo_email]:
+            mail["tipo_email"] = anterior
         # O destaque fica se algum e-mail da conversa veio de problema/reclamação.
         mail["destaque"] = bool(atual.get("destaque")) or mail["destaque"]
         # O CHAMADO não muda pelo e-mail novo (RF6): o protocolo principal, o
@@ -1033,7 +1230,13 @@ async def gravar_na_conversa(
         enviada_em=momento,
         tipo="texto",
         anexos=[],
-        payload=payload_da_mensagem(meta, pasta, protegido, email.message.attachment_count),
+        payload=payload_da_mensagem(
+            meta,
+            pasta,
+            protegido,
+            email.message.attachment_count,
+            classe_email=classe_email,
+        ),
         origem=origem,
     )
     meta.conversa_id = conversa.id
@@ -1523,6 +1726,23 @@ async def processar(
         return meta.estado
     meta.motivo = None
     meta.plataforma = rota.plataforma or meta.plataforma
+    classe_email = classificacao.classificar(
+        plataforma=meta.plataforma,
+        finalidade=meta.finalidade,
+        assunto=protegido.assunto,
+        texto=protegido.texto,
+        remetente_tipo=meta.remetente_tipo,
+    )
+    if not rota.site:
+        # O protocolo dos sites mantém formato e validação RF6. Nos
+        # marketplaces, o campo indexado guarda somente o caso rotulado.
+        meta.protocolo = classe_email.caso_id
+        if classe_email.casos_ambiguos:
+            _alerta(
+                meta,
+                "casos_ambiguos",
+                "o e-mail não identifica um único caso válido: confira antes de agrupar",
+            )
     if rota.so_ficha:
         # A loja é a ficha (sem integração): entra na conversa dela, com o aviso.
         _alerta(meta, "loja_sem_integracao", ALERTA_LOJA_SEM_INTEGRACAO)
@@ -1542,6 +1762,8 @@ async def processar(
     abre = abre_pendencia(plataforma=rota.plataforma, finalidade=meta.finalidade, autor=autor)
     if autor == AUTOR_SISTEMA and assunto_sem_pendencia(email.assunto):
         # Resumo/marketing da plataforma: só histórico.
+        abre = False
+    if classe_email.tipo_email in (classificacao.TIPO_INFORMATIVO, classificacao.TIPO_VENDA):
         abre = False
 
     # A devolução do servidor do cliente: aviso na conversa do fio (ou nada).
@@ -1652,11 +1874,19 @@ async def processar(
         principal=principal,
         formulario=campos_form if formulario else None,
         externo=externo,
+        classe_email=classe_email,
     )
     if rota.site:
         meta.estado = ESTADO_GRAVADO
     else:
-        meta.estado = ESTADO_GRAVADO if conversa.pedido_marketplace else ESTADO_SEM_VINCULO
+        # Um chamado pode existir sem compra; informativos e vendas não
+        # ficam em "sem vínculo" somente por não mencionarem pedido.
+        tem_vinculo = bool(conversa.pedido_marketplace or dados_mail(conversa).get("caso_id"))
+        meta.estado = (
+            ESTADO_GRAVADO
+            if tem_vinculo or classe_email.tipo_email != classificacao.TIPO_CHAMADO
+            else ESTADO_SEM_VINCULO
+        )
     return meta.estado
 
 

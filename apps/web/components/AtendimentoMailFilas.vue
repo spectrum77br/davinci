@@ -51,6 +51,7 @@
 // Funções puras aqui em cima (tests/atendimento-mail-atendimento.cjs).
 
 import type { ConversaResumo, ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
+import { TIPOS_EMAIL, dicaTipoEmail, rotuloTipoEmail } from '~/components/AtendimentoEmailCartao.vue'
 
 export type Fila = 'sem_loja' | 'sem_vinculo' | 'chamados' | 'aguardando' | 'todas' | 'suspeito' | 'resumo' | 'erro' | 'revisar_envio'
 // A ordem e os nomes da tela (as chaves = FILAS de mail_atendimento/constantes.py,
@@ -83,7 +84,7 @@ export const TIPOS_CHAMADO: { value: string; label: string; hint: string }[] = [
   { value: 'duvidas', label: 'Dúvidas e sugestões', hint: 'chamados de Dúvidas e sugestões dos sites (protocolo DS: UDS-26-0001…)' },
 ]
 // Os números das filas de conversa (GET /api/atendimento/email/contagens).
-export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number> }
+export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number> }
 export function juntarContagens(filas: Record<string, number> | null, conversas: ContagensDeConversa | null): Record<string, number> {
   return { ...(filas || {}), ...(conversas ? { chamados: conversas.chamados, aguardando: conversas.aguardando } : {}) }
 }
@@ -95,6 +96,9 @@ export type ItemFila = {
   pasta: string | null
   plataforma: string | null
   finalidade: string | null
+  tipo_email?: string | null
+  tipo_email_inferido?: boolean
+  caso_id?: string | null
   destaque: boolean
   alias: string | null
   loja: string | null
@@ -185,7 +189,7 @@ export function acoesDaFila(fila: Fila, isAdmin: boolean) {
 }
 
 // `fechadas` (só em "Todas as conversas"): as fechadas em vez das abertas.
-export function urlDaFila(fila: Fila, antesDe?: string | null, tipoChamado?: string | null, busca?: string | null, fechadas?: boolean): string {
+export function urlDaFila(fila: Fila, antesDe?: string | null, tipoChamado?: string | null, busca?: string | null, fechadas?: boolean, tipoEmail?: string | null): string {
   if (fila === 'revisar_envio') return '/api/atendimento/email/envios?estado=revisar'
   if (FILAS_DE_CONVERSA.has(fila)) {
     // A lista da Caixa, só com as conversas de e-mail (`caixa=email`), no escopo.
@@ -203,10 +207,12 @@ export function urlDaFila(fila: Fila, antesDe?: string | null, tipoChamado?: str
     const termo = (busca || '').trim()
     if (termo) q.set('q', termo.slice(0, 200))
     q.set('limite', '50')
+    if (TIPOS_EMAIL.some((t) => t.value === tipoEmail)) q.set('tipo_email', tipoEmail!)
     if (antesDe) q.set('antes_de', antesDe)
     return `/api/atendimento/conversas?${q.toString()}`
   }
   const q = new URLSearchParams({ fila })
+  if (TIPOS_EMAIL.some((t) => t.value === tipoEmail)) q.set('tipo_email', tipoEmail!)
   if (antesDe) q.set('antes_de', antesDe)
   return `/api/atendimento/email/emails?${q.toString()}`
 }
@@ -273,6 +279,7 @@ const conversas = ref<ConversaResumo[]>([])
 // O chip do tipo do chamado ('' = todos) e a busca das filas de conversa
 // (o que está na caixa de texto × o que filtra: só no Enter/buscar).
 const tipoChamado = ref('')
+const tipoEmail = ref('')
 // "Todas as conversas": as abertas (padrão) ou as fechadas (o chip).
 const fechadas = ref(false)
 const buscaTexto = ref('')
@@ -334,13 +341,13 @@ async function carregar(mais = false, automatico = false) {
       if (g !== geracao) return
       envios.value = r.itens || []
     } else if (FILAS_DE_CONVERSA.has(f)) {
-      const r = await api<{ itens: ConversaResumo[]; proximo: string | null }>(urlDaFila(f, mais ? proximo.value : null, f === 'chamados' ? tipoChamado.value : null, busca.value, f === 'todas' && fechadas.value))
+      const r = await api<{ itens: ConversaResumo[]; proximo: string | null }>(urlDaFila(f, mais ? proximo.value : null, f === 'chamados' ? tipoChamado.value : null, busca.value, f === 'todas' && fechadas.value, tipoEmail.value))
       if (g !== geracao) return
       conversas.value = mais ? [...conversas.value, ...(r.itens || []).filter((x) => !conversas.value.some((y) => y.id === x.id))] : r.itens || []
       proximo.value = r.proximo || null
       if (mais) paginasExtras = true
     } else {
-      const r = await api<{ itens: ItemFila[]; proximo: string | null }>(urlDaFila(f, mais ? proximo.value : null))
+      const r = await api<{ itens: ItemFila[]; proximo: string | null }>(urlDaFila(f, mais ? proximo.value : null, null, null, false, tipoEmail.value))
       if (g !== geracao) return
       itens.value = mais ? [...itens.value, ...(r.itens || []).filter((x) => !itens.value.some((y) => y.id === x.id))] : r.itens || []
       for (const i of itens.value) lojaEscolhida[i.id] ??= ''
@@ -371,6 +378,13 @@ watch(fila, () => {
 function escolherTipo(t: string) {
   tipoChamado.value = tipoChamado.value === t ? '' : t
   conversas.value = []
+  proximo.value = null
+  void carregar()
+}
+function escolherTipoEmail(t: string) {
+  tipoEmail.value = tipoEmail.value === t ? '' : t
+  conversas.value = []
+  itens.value = []
   proximo.value = null
   void carregar()
 }
@@ -554,6 +568,16 @@ const curto = (p: string) => plataformaInfo(p).curto
 
     <div v-if="erro && !pastasAbertas" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">{{ erro }}</div>
 
+    <div v-if="!pastasAbertas && fila !== 'revisar_envio'" class="space-y-1">
+      <div class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="tipo de e-mail" data-chips-tipo-email>
+        <button type="button" class="rounded-full border px-2 py-0.5" :class="!tipoEmail ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'" :aria-pressed="!tipoEmail" data-tipo-email="" @click="escolherTipoEmail('')">Todos</button>
+        <button v-for="t in TIPOS_EMAIL" :key="t.value" type="button" class="rounded-full border px-2 py-0.5" :class="tipoEmail === t.value ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'" :aria-pressed="tipoEmail === t.value" :data-tipo-email="t.value" @click="escolherTipoEmail(t.value)">
+          {{ t.label }}<span v-if="fila === 'todas' && !fechadas && contagensConversa?.por_tipo_email" class="ml-1 tabular-nums">{{ contagensConversa.por_tipo_email[t.value] || 0 }}</span>
+        </button>
+      </div>
+      <p class="text-[11px] text-muted-foreground">Os tipos incluem as pastas autorizadas a ler. Os avisos de pastas em “só contar” continuam na Central de e-mail.</p>
+    </div>
+
     <!-- revisar envio -->
     <template v-if="pastasAbertas" />
     <template v-else-if="fila === 'revisar_envio'">
@@ -632,7 +656,9 @@ const curto = (p: string) => plataformaInfo(p).curto
       <ul v-else class="space-y-2">
         <li v-for="c in conversas" :key="c.id" class="space-y-1 rounded-lg border p-2.5 text-xs" :data-conversa-email="c.id">
           <div class="flex flex-wrap items-center gap-1.5">
-            <span v-if="c.email?.protocolo" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">{{ c.email.protocolo }}</span>
+            <span v-if="rotuloTipoEmail(c.email?.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" :title="dicaTipoEmail(c.email?.tipo_email_inferido)" data-conversa-tipo-email>{{ rotuloTipoEmail(c.email?.tipo_email) }}</span>
+            <span v-if="c.email?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300" data-conversa-caso-email>Chamado {{ c.email.caso_id }}</span>
+            <span v-if="c.email?.protocolo && !c.email?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">{{ c.email.protocolo }}</span>
             <span v-if="c.email?.tipo_rotulo" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">{{ c.email.tipo_rotulo }}</span>
             <span class="text-muted-foreground">{{ [plataformaInfo(c.plataforma).curto, lojaDaConversa(c)].filter(Boolean).join(' ') }}</span>
             <span v-if="prazoDe(c)" class="rounded px-1.5 py-px text-[11px]" :class="prazoDe(c)!.cls" :title="prazoDe(c)!.titulo">{{ prazoDe(c)!.texto }}</span>
@@ -659,10 +685,12 @@ const curto = (p: string) => plataformaInfo(p).curto
       <ul v-else class="space-y-2">
         <li v-for="e in itens" :key="e.id" class="space-y-1 rounded-lg border p-2.5 text-xs" :data-email-fila="e.id">
           <div class="flex flex-wrap items-center gap-1.5">
+            <span v-if="rotuloTipoEmail(e.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" :title="dicaTipoEmail(e.tipo_email_inferido)" data-fila-tipo-email>{{ rotuloTipoEmail(e.tipo_email) }}</span>
+            <span v-if="e.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">Chamado {{ e.caso_id }}</span>
             <span class="rounded px-1.5 py-px text-[11px]" :class="e.destaque ? 'bg-red-500/15 text-red-700 dark:text-red-300' : 'bg-muted text-muted-foreground'">{{ e.pasta || 'sem pasta' }}</span>
             <span class="text-muted-foreground">{{ fmtDataHora(e.recebido_em) }}</span>
             <span v-if="e.loja" class="text-muted-foreground">· {{ plataformaInfo(e.plataforma).curto }} {{ e.loja }}</span>
-            <span v-if="e.protocolo" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">{{ e.protocolo }}</span>
+            <span v-if="e.protocolo && !e.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">{{ e.protocolo }}</span>
             <ShieldAlert v-if="e.suspeito" class="size-3.5 text-red-600" aria-label="remetente pode ser falso" />
             <a v-if="e.abrir_no_tuta" :href="e.abrir_no_tuta" target="_blank" rel="noopener noreferrer" class="ml-auto inline-flex items-center gap-0.5 underline" title="abre no Tuta (lá fica lido)"><ExternalLink class="size-3" />Abrir no Tuta</a>
           </div>

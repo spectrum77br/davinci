@@ -1,24 +1,11 @@
 <script lang="ts">
-// "E-MAILS DA VENDA" no painel ④ (RF1/RF5, 09/10/2026): o resumo dos e-mails
-// do Tuta que a ponte ligou à conversa aberta ou às conversas da mesma venda
-// (a família das abas: o mesmo comprador e pedido, na mesma loja). Uma linha
-// por CAIXA — o endereço que recebeu → a loja achada no cadastro —, com as
-// PASTAS de origem e quantos e-mails. Só o resumo: o e-mail em si (texto
-// protegido) fica no cartão da linha do tempo e na aba E-mail.
-// Rota: GET /api/atendimento/email/conversas/{id}/emails-da-venda
-// (routers/atendimento_email.py). Aparece só quando a conversa tem e-mail
-// (`sinalDeEmails`, que a conversa calcula e o painel passa). Funções puras
-// aqui em cima (tests/atendimento-mail-atendimento.cjs).
-//
-// NO CHAT (`chat`, 13/10/2026 — o dono: "o e-mail aparece só na aba de
-// e-mail; a do chat aparece só no chat"): nada do e-mail (caixa, pasta,
-// assunto, remetente, texto). A rota devolve só QUANTOS e-mails a venda tem
-// nas conversas de e-mail, quantas esperam resposta e o id delas; o bloco diz
-// "Esta venda tem N e-mails" e o "abrir na aba E-mail" emite `abrir` com o id
-// (o painel sobe como a linha do tempo sobe outra conversa; a página leva a
-// conversa de e-mail para a aba E-mail). Sem e-mail na venda, o bloco some.
-// Teste: tests/atendimento-email-venda-link.cjs.
+// Na conversa de e-mail: resumo de caixas/pastas no painel do pedido.
+// Nas demais conversas: botão no cabeçalho, com lista e leitura protegida em
+// modal. O servidor cruza plataforma + loja + pedido; nunca o comprador ou
+// a caixa inteira. O detalhe revalida cada e-mail na venda antes de ler o
+// texto. A linha do tempo do chat não recebe corpos de e-mail.
 import type { Mensagem } from '~/components/AtendimentoPlataforma.vue'
+import type { CartaoEmail, EmailDaMensagem } from '~/components/AtendimentoEmailCartao.vue'
 
 export type PastaDaVenda = { pasta: string | null; finalidade: string | null; destaque: boolean; quantidade: number }
 export type CaixaDaVenda = {
@@ -29,24 +16,35 @@ export type CaixaDaVenda = {
   ultimo_em: string | null
   pastas: PastaDaVenda[]
 }
-// Uma conversa de e-mail da venda, vista do CHAT: só o id e números.
-export type ConversaDeEmailDaVenda = { id: string; emails: number; aguardando: boolean }
-// `aguardando` e `conversas` só vêm no chat (e só quando a venda tem e-mail).
 export type EmailsDaVenda = {
   total: number
   caixas: CaixaDaVenda[]
-  aguardando?: number
-  conversas?: ConversaDeEmailDaVenda[]
 }
 
 export function urlEmailsDaVenda(conversaId: string): string {
   return `/api/atendimento/email/conversas/${encodeURIComponent(conversaId)}/emails-da-venda`
 }
 
-// A conversa tem e-mail? O número muda quando chega e-mail novo (a aba E-mail
-// das abas, ou o e-mail recebido na própria conversa). 0 = sem bloco. Desde
-// 13/10/2026 só a conversa de E-MAIL tem os dois — o chat mostra o bloco
-// `chat` (o painel decide pelo `conversa.email`).
+export type LeituraDaVenda = {
+  estado: 'ok' | 'sem_pedido' | 'sem_loja' | 'indisponivel'
+  pedido: string | null
+  total: number
+  itens: CartaoEmail[]
+}
+export function urlLeituraDaVenda(conversaId: string, messageId?: string): string {
+  const base = `/api/atendimento/email/venda/${encodeURIComponent(conversaId)}`
+  return messageId ? `${base}/emails/${encodeURIComponent(messageId)}` : base
+}
+export function emailDoCartao(c: CartaoEmail): EmailDaMensagem {
+  return {
+    tipo: 'recebido', message_id: c.id, pasta: c.pasta, finalidade: c.finalidade,
+    tipo_email: c.tipo_email, tipo_email_inferido: c.tipo_email_inferido, caso_id: c.caso_id,
+    alias: c.alias, assunto: c.assunto, suspeito: c.suspeito, protocolo: c.protocolo,
+  }
+}
+
+// Sinal para reler quando chegar e-mail à conversa de E-mail. No chat a
+// consulta por pedido é independente deste sinal, inclusive quando ele é 0.
 export function sinalDeEmails(
   abas: { abas?: { chave: string; total: number }[] } | null | undefined,
   mensagens: Pick<Mensagem, 'email'>[] | null | undefined,
@@ -61,111 +59,151 @@ export function rotuloDasPastas(pastas: PastaDaVenda[]): string {
   return pastas.map((p) => `${p.pasta || 'sem pasta'}${p.quantidade > 1 ? ` (${p.quantidade})` : ''}`).join(' · ')
 }
 
-// As conversas de e-mail que o chat pode abrir (a rota já manda a que espera
-// resposta primeiro). Resposta velha/sem a lista = nenhuma.
-export function conversasDoChat(d: EmailsDaVenda | null | undefined): ConversaDeEmailDaVenda[] {
-  return (d?.conversas || []).filter((c) => !!c?.id)
-}
-
-// "Esta venda tem 2 e-mails · 1 esperando resposta" — só números. null = a
-// venda não tem conversa de e-mail (o bloco do chat não aparece).
-export function fraseDoChat(d: EmailsDaVenda | null | undefined): string | null {
-  if (!conversasDoChat(d).length) return null
-  const total = d?.total || 0
-  const base = total > 0 ? `Esta venda tem ${total} e-mail${total === 1 ? '' : 's'}` : 'Esta venda tem conversa de e-mail'
-  const esperando = d?.aguardando || 0
-  return esperando > 0 ? `${base} · ${esperando} esperando resposta` : base
-}
-
-// O botão de cada conversa quando são várias ("conversa 2 · 3 e-mails · esperando resposta").
-export function rotuloDaConversa(c: ConversaDeEmailDaVenda, i: number): string {
-  const partes = [`conversa ${i + 1}`, `${c.emails} e-mail${c.emails === 1 ? '' : 's'}`]
-  if (c.aguardando) partes.push('esperando resposta')
-  return partes.join(' · ')
-}
 </script>
 
 <script setup lang="ts">
-import { ExternalLink, Loader2, Mail } from 'lucide-vue-next'
+import { Loader2, Mail, X } from 'lucide-vue-next'
+import { DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle, DialogTrigger } from 'reka-ui'
 import { fmtDataHora, plataformaInfo } from '~/components/AtendimentoPlataforma.vue'
-import { destinoDaLoja } from '~/components/AtendimentoEmailCartao.vue'
+import { destinoDaLoja, rotuloTipoEmail, dicaTipoEmail } from '~/components/AtendimentoEmailCartao.vue'
+import AtendimentoEmailCartao from '~/components/AtendimentoEmailCartao.vue'
 
 const props = defineProps<{
   conversaId: string
   // `sinalDeEmails` da conversa: muda → relê (chegou e-mail).
   sinal: number
-  // A conversa aberta é de CHAT: só os números e o link (nada do e-mail).
-  chat?: boolean
-}>()
-const emit = defineEmits<{
-  // Abrir a conversa de e-mail da venda (na aba E-mail) — só no chat.
-  (e: 'abrir', conversaId: string): void
+  // Botão do cabeçalho. O pedido é apenas chave de invalidação da seleção;
+  // o servidor resolve e valida o pedido pela conversa.
+  toolbar?: boolean
+  pedido?: string | null
 }>()
 
 const { api } = useApi()
 const dados = ref<EmailsDaVenda | null>(null)
+const venda = ref<LeituraDaVenda | null>(null)
 const carregando = ref(false)
 const erro = ref(false)
+const aberto = ref(false)
+const selecionado = ref<string | null>(null)
+const cartao = ref<CartaoEmail | null>(null)
+const lendo = ref(false)
+const erroLeitura = ref(false)
 let geracao = 0
+let leitura = 0
+const temEmails = computed(() => venda.value?.estado === 'ok' && !!venda.value.pedido && venda.value.total > 0 && venda.value.itens.length > 0)
 
-// No chat: a frase e as conversas que abrem (vazio = o bloco não aparece).
-const fraseChat = computed(() => (props.chat ? fraseDoChat(dados.value) : null))
-const conversasChat = computed(() => (props.chat ? conversasDoChat(dados.value) : []))
+function fechar() {
+  aberto.value = false
+  selecionado.value = null
+  cartao.value = null
+  lendo.value = false
+  erroLeitura.value = false
+  ++leitura
+}
 
 async function carregar() {
   const g = ++geracao
+  const id = props.conversaId
+  const toolbar = props.toolbar
+  fechar()
+  dados.value = null
+  venda.value = null
+  erro.value = false
+  if (!id) {
+    carregando.value = false
+    return
+  }
   carregando.value = true
   try {
-    const r = await api<EmailsDaVenda>(urlEmailsDaVenda(props.conversaId))
-    if (g !== geracao) return
-    dados.value = r
-    erro.value = false
+    if (toolbar) {
+      const r = await api<LeituraDaVenda>(urlLeituraDaVenda(id))
+      if (g !== geracao || id !== props.conversaId) return
+      // A conversa pode ter sido vinculada a outro pedido durante a leitura.
+      // Até o cabeçalho atualizar, não apresentar a venda nova sob o pedido antigo.
+      if (props.pedido?.trim() && r.pedido?.trim() !== props.pedido.trim()) return
+      venda.value = r
+    } else {
+      const r = await api<EmailsDaVenda>(urlEmailsDaVenda(id))
+      if (g !== geracao || id !== props.conversaId) return
+      dados.value = r
+    }
   } catch {
-    // O bloco é ajuda: falhou, fica o que já tinha (ou a frase curta).
     if (g === geracao) erro.value = true
   } finally {
     if (g === geracao) carregando.value = false
   }
 }
-onMounted(() => { void carregar() })
-watch(() => [props.conversaId, props.sinal], () => { void carregar() })
+async function verEmail(item: CartaoEmail) {
+  if (!aberto.value || !temEmails.value || !venda.value?.itens.some((e) => e.id === item.id)) return
+  const g = geracao
+  const l = ++leitura
+  const id = props.conversaId
+  selecionado.value = item.id
+  cartao.value = null
+  lendo.value = true
+  erroLeitura.value = false
+  try {
+    const r = await api<CartaoEmail>(urlLeituraDaVenda(id, item.id))
+    if (g !== geracao || l !== leitura || id !== props.conversaId || !aberto.value) return
+    // Não mostrar uma resposta de outro item, mesmo em uma API inconsistente.
+    if (r.id !== item.id) throw new Error('email_divergente')
+    cartao.value = r
+  } catch {
+    if (g === geracao && l === leitura) erroLeitura.value = true
+  } finally {
+    if (g === geracao && l === leitura) lendo.value = false
+  }
+}
+watch(() => [props.conversaId, props.pedido, props.sinal, props.toolbar], () => { void carregar() }, { immediate: true, flush: 'sync' })
+onBeforeUnmount(() => { ++geracao; ++leitura })
+defineExpose({ carregar })
 </script>
 
 <template>
-  <!-- NO CHAT: só quantos e o link para a aba E-mail (nada do e-mail); sem e-mail, nada -->
-  <section v-if="chat && fraseChat" class="space-y-1.5" data-painel-emails-venda data-emails-venda-chat>
-    <div class="flex items-center gap-1.5 text-[13px] font-semibold">
-      <Mail class="size-4 text-muted-foreground" /> E-mails da venda
-    </div>
-    <div class="rounded-md border px-2.5 py-1.5 text-xs">
-      <p data-email-venda-frase>{{ fraseChat }}</p>
+  <DialogRoot v-if="toolbar" :open="aberto" @update:open="(v) => v ? aberto = true : fechar()">
+    <DialogTrigger v-if="temEmails" as-child>
       <button
-        v-if="conversasChat.length === 1"
-        type="button"
-        class="mt-1 inline-flex items-center gap-1 font-medium text-primary hover:underline"
-        title="a conversa de e-mail abre na aba E-mail"
-        data-email-venda-abrir
-        @click="emit('abrir', conversasChat[0]!.id)"
-      >
-        abrir na aba E-mail <ExternalLink class="size-3" />
-      </button>
-      <ul v-else class="mt-1 space-y-0.5">
-        <li v-for="(c, i) in conversasChat" :key="c.id">
-          <button
-            type="button"
-            class="inline-flex items-center gap-1 text-left hover:underline"
-            :class="c.aguardando ? 'font-medium text-primary' : 'text-muted-foreground'"
-            title="a conversa de e-mail abre na aba E-mail"
-            data-email-venda-abrir
-            @click="emit('abrir', c.id)"
-          >
-            {{ rotuloDaConversa(c, i) }} — abrir na aba E-mail <ExternalLink class="size-3 shrink-0" />
-          </button>
-        </li>
-      </ul>
-    </div>
-  </section>
-  <section v-else-if="!chat" class="space-y-1.5" data-painel-emails-venda>
+      type="button"
+      class="inline-flex h-7 items-center gap-1 rounded-md border bg-background px-2 text-xs font-medium hover:bg-accent"
+      :title="`ver os ${venda!.total} e-mails do pedido ${venda!.pedido}`"
+      aria-label="E-mails desta venda"
+      :aria-expanded="aberto"
+      data-emails-venda-botao
+      ><Mail class="size-3.5" />E-mails <span class="tabular-nums">{{ venda!.total }}</span></button>
+    </DialogTrigger>
+    <DialogPortal v-if="temEmails">
+      <DialogOverlay class="fixed inset-0 z-[75] bg-black/60" data-emails-venda-fundo />
+      <div class="pointer-events-none fixed inset-0 z-[75] flex items-end justify-center sm:items-center sm:p-4">
+        <DialogContent aria-modal="true" class="pointer-events-auto flex max-h-[100dvh] w-full max-w-3xl flex-col overflow-hidden rounded-t-xl border bg-background text-sm shadow-xl sm:max-h-[92dvh] sm:rounded-xl" data-emails-venda-dialog>
+        <div class="flex shrink-0 items-start gap-2 border-b px-4 py-3">
+          <div class="min-w-0 flex-1">
+            <DialogTitle class="text-base font-semibold">E-mails desta venda</DialogTitle>
+            <DialogDescription class="break-all text-xs text-muted-foreground">Pedido {{ venda!.pedido }} · {{ venda!.total }} e-mail{{ venda!.total === 1 ? '' : 's' }}</DialogDescription>
+          </div>
+          <button type="button" class="rounded p-1.5 hover:bg-accent" aria-label="Fechar e-mails" data-emails-venda-fechar @click="fechar"><X class="size-4" /></button>
+        </div>
+        <ul class="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+          <li v-for="item in venda!.itens" :key="item.id" class="space-y-2 rounded-md border p-3" :data-email-venda-item="item.id">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+              <span v-if="rotuloTipoEmail(item.tipo_email)" :title="dicaTipoEmail(item.tipo_email_inferido)">{{ rotuloTipoEmail(item.tipo_email) }}</span>
+              <span v-if="item.caso_id">Chamado {{ item.caso_id }}</span>
+              <span v-if="item.recebido_em">{{ fmtDataHora(item.recebido_em) }}</span>
+            </div>
+            <p class="break-words font-medium">{{ item.assunto || 'E-mail recebido' }}</p>
+            <p class="break-all text-xs text-muted-foreground">{{ destinoDaLoja(item.alias, item.loja) }}</p>
+            <button type="button" class="text-xs font-medium text-primary underline" :aria-expanded="selecionado === item.id" data-email-venda-ver @click="verEmail(item)">Ver e-mail</button>
+            <template v-if="selecionado === item.id">
+              <p v-if="lendo" class="flex items-center gap-1 text-xs text-muted-foreground"><Loader2 class="size-3 animate-spin" />Lendo e-mail…</p>
+              <p v-else-if="erroLeitura" class="text-xs text-muted-foreground" role="status">Não consegui ler este e-mail. Tente novamente.</p>
+              <AtendimentoEmailCartao v-else-if="cartao" :key="cartao.id" :email="emailDoCartao(cartao)" :cartao="cartao" :mostrar-texto="true" :texto="cartao.texto" :pode-responder="false" />
+            </template>
+          </li>
+        </ul>
+        </DialogContent>
+      </div>
+    </DialogPortal>
+  </DialogRoot>
+  <section v-else class="space-y-1.5" data-painel-emails-venda>
     <div class="flex items-center gap-1.5 text-[13px] font-semibold">
       <Mail class="size-4 text-muted-foreground" /> E-mails da venda
       <span v-if="dados?.total" class="ml-auto rounded-full bg-muted px-1.5 text-[10px] font-semibold tabular-nums text-muted-foreground">{{ dados.total }}</span>

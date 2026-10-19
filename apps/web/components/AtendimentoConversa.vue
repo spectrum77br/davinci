@@ -1991,6 +1991,7 @@ usePollingVisivel(async () => {
   await carregarPainel(props.conversaId)
 }, 120_000)
 function atualizarTudo() {
+  void emailsVendaRef.value?.carregar()
   void carregar(props.conversaId)
   void carregarPainel(props.conversaId, true)
   void reclamacaoRef.value?.carregar()
@@ -2248,6 +2249,7 @@ const pedidoVisivel = computed(() => (telaLarga.value ? !recolhido.value : gavet
 // "E-mails da venda" no painel (RF5): a conversa (ou a venda dela) tem e-mail?
 // O número muda quando chega e-mail — o bloco relê.
 const emailsSinal = computed(() => sinalDeEmails(abasDados.value, detalhe.value?.mensagens))
+const emailsVendaRef = ref<{ carregar: () => Promise<void> } | null>(null)
 
 // Troca de conversa: guarda o que estava escrito na anterior, limpa o estado
 // da tela e abre a nova. Fica no fim do setup porque roda na hora (immediate)
@@ -2532,6 +2534,14 @@ watch(() => props.conversaId, (novo, velho) => {
                 <span class="ml-1 hidden 2xl:inline">Vincular à garantia</span>
                 <span v-if="garantiaSituacao?.alerta_cpf_sem_garantia" class="absolute -right-1 -top-1 size-2.5 rounded-full bg-amber-500 ring-2 ring-background" aria-hidden="true" />
               </Button>
+              <AtendimentoEmailVenda
+                ref="emailsVendaRef"
+                v-if="!conversa.email && conversa.plataforma !== 'site' && !canalExterno"
+                :conversa-id="conversa.id"
+                :pedido="conversa.pedido_marketplace"
+                :sinal="emailsSinal"
+                toolbar
+              />
               <!-- Só abre o caso na Amazon (outra aba): vale até para quem só lê. -->
               <Button
                 v-if="amazon.caso"

@@ -134,6 +134,49 @@ const H = requerer('~/components/AtendimentoEmailChamado.vue')
 const P = requerer('~/components/AtendimentoPlataforma.vue')
 
 async function principal() {
+  {
+    // Os três tipos vêm da API, filtram no servidor e preservam o caso.
+    const tipos = ['informativo', 'chamado', 'venda']
+    assert.deepEqual(C.TIPOS_EMAIL.map((t) => t.value), tipos)
+    assert.match(C.dicaTipoEmail(true), /sugerido/)
+    assert.match(C.dicaTipoEmail(false), /identificado no conteúdo/)
+    const linhas = tipos.map((tipo, i) => ({
+      id: `tipo-${i}`, plataforma: 'ml', canal: 'email', conta: 'Loja de teste',
+      comprador_nome: 'Comprador', pedido_marketplace: null, situacao: 'aberta',
+      ultima_mensagem_em: '2026-10-19T12:00:00Z', ultima_mensagem_resumo: 'E-mail de teste',
+      aguardando_resposta: false, prazo_resposta_em: null,
+      email: { tipo_email: tipo, caso_id: tipo === 'chamado' ? 'ML-123456' : null, alias: 'loja@example.com' },
+    }))
+    const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: false, lojas: [], podeMexer: false }, {
+      respostas: {
+        '/api/atendimento/email/contagens': { aguardando: 0, chamados: 0, chamados_por_tipo: {}, por_tipo_email: { informativo: 1, chamado: 1, venda: 1 } },
+        '/api/atendimento/conversas': (url) => {
+          const q = new URL(url, 'https://example.com').searchParams
+          return { itens: q.get('plataforma') === 'site' ? [] : linhas.filter((l) => !q.get('tipo_email') || l.email.tipo_email === q.get('tipo_email')), proximo: null }
+        },
+      },
+    })
+    await m.montar()
+    m.estado.verFila('todas')
+    await esperar()
+    let html = await m.html()
+    for (const tipo of tipos) assert.ok(html.includes(`data-tipo-email="${tipo}"`))
+    assert.match(html, /pastas autorizadas a ler/)
+    assert.match(html, /continuam na Central de e-mail/)
+    m.estado.escolherTipoEmail('chamado')
+    await esperar()
+    assert.ok(m.chamadas.at(-1).url.includes('tipo_email=chamado'))
+    html = await m.html()
+    assert.match(html, /data-conversa-caso-email[^>]*>Chamado ML-123456/)
+    assert.doesNotMatch(html, /data-conversa-email="tipo-0"|data-conversa-email="tipo-2"/)
+    m.estado.escolherTipoEmail('chamado')
+    await esperar()
+    assert.equal(new URL(m.chamadas.at(-1).url, 'https://example.com').searchParams.get('tipo_email'), null)
+    assert.equal(m.chamadas.some((c) => c.metodo !== 'GET'), false)
+    const B = requerer('~/components/AtendimentoEmailConversaBarra.vue')
+    for (const linha of linhas) assert.equal(B.podeVincular(linha, true), false, 'informativo/venda/caso identificado não exige pedido')
+    assert.equal(B.podeVincular({ ...linhas[1], email: { tipo_email: 'chamado', caso_id: null } }, true), true)
+  }
   // ------------------------------------------------ o contrato com o backend
   const rotas = api('routers/atendimento_email.py')
   const rotasConfig = api('routers/mail_atendimento.py')
@@ -1617,7 +1660,7 @@ async function principal() {
     assert.match(await falha.html(), /Não consegui ler os e-mails da venda agora\./)
     // O painel: o bloco só com e-mail, antes das Observações do Bling; a conversa passa o sinal.
     const pedidoTpl = sfc('../components/AtendimentoPedido.vue').descriptor.template.content
-    assert.match(pedidoTpl, /<AtendimentoEmailVenda v-if="emailsSinal" :conversa-id="conversa\.id" :sinal="emailsSinal" \/>/)
+    assert.match(pedidoTpl, /<AtendimentoEmailVenda v-if="conversa.email && emailsSinal" :conversa-id="conversa\.id" :sinal="emailsSinal" \/>/)
     assert.ok(pedidoTpl.indexOf('<AtendimentoEmailVenda') < pedidoTpl.indexOf('OBSERVAÇÕES DO BLING'))
     assert.match(sfc('../components/AtendimentoPedido.vue').descriptor.scriptSetup.content, /emailsSinal\?: number[\s\S]*?garantiaAcesso: null, emailsSinal: 0,/)
     const conversaSfc = sfc('../components/AtendimentoConversa.vue').descriptor

@@ -22,6 +22,10 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
                                       pastas e quantos (o bloco do painel ④);
                                       no chat, só os números e o id das
                                       conversas de e-mail da venda
+    GET   …/venda/{id}              — metadados dos e-mails da venda exata do
+                                      chat, por plataforma + loja + pedido
+    GET   …/venda/{id}/emails/{mid} — cartão protegido individual, revalidando
+                                      vínculo com a venda; também para Leitor
     GET   …/conversas/{id}/previa   — como a resposta vai sair e as travas de agora
     GET   …/saude                   — as caixas da EMPRESA (a privada só para o
                                       dono/admin) — e, para quem mexe, as lojas
@@ -52,9 +56,11 @@ E-MAIL × CHAT (13/10/2026, `services/atendimento/separa_email.py`): os
 cartões e o resumo "E-mails da venda" são só da conversa de E-MAIL — numa
 conversa de chat (o aviso que a ponte gravava lá até 13/10) os cartões
 voltam vazios, como a própria conversa, que não mostra mais o e-mail. O
-"E-mails da venda" do chat diz só QUANTOS e-mails a venda tem nas conversas
+resumo legado "E-mails da venda" do chat diz só QUANTOS e-mails a venda tem nas conversas
 de e-mail, quantas esperam resposta e o id delas (o link "abrir na aba
-E-mail"): nunca caixa, pasta, assunto, remetente nem texto.
+E-mail"): nunca caixa, pasta, assunto, remetente nem texto. O botão do
+cabeçalho abre uma lista restrita à venda e lê cada cartão no modal, sem
+incluir o corpo na linha do tempo do chat nem abrir casos de outras vendas.
 
 O e-mail de SEGURANÇA (código, senha, acesso), o PRIVADO (caixa só com
 aliases de loja) e o da pasta que só se conta NUNCA aparecem aqui: só na
@@ -106,6 +112,8 @@ from app.routers.atendimento import (
     _nomes_das_lojas,
     _so_admin,
     _tipo_do_chamado,
+    _tipo_do_email_sql,
+    _tipo_email_sql,
     _travar_ou_409,
     _view,
 )
@@ -118,10 +126,10 @@ from app.services.atendimento.constantes import (
     CONVERSA_FECHADA,
     FONTE_TUTA,
     PLATAFORMA_SITE,
-    PLATAFORMAS_EXTERNAS,
 )
 from app.services.mail_atendimento import (
     chamados,
+    classificacao,
     codigos,
     ponte,
     regras,
@@ -129,6 +137,7 @@ from app.services.mail_atendimento import (
     rotear,
     saude,
     texto,
+    venda,
 )
 from app.services.mail_atendimento.constantes import (
     ESTADO_ERRO,
@@ -233,6 +242,10 @@ async def _cartao(
         # A loja SEM integração (a ficha): o nome do cadastro de Lojas.
         ficha = await session.get(StoreInfo, meta.store_info_id)
         loja = (" ".join((ficha.account_name or "").split()) or None) if ficha else None
+    mensagem = (
+        await session.get(AtendimentoMensagem, meta.mensagem_id) if meta.mensagem_id else None
+    )
+    tipos = classificacao.tipos_de_meta(meta, mensagem.payload if mensagem else None)
     saida: dict[str, Any] = {
         "id": str(meta.message_id),
         "estado": meta.estado,
@@ -258,6 +271,7 @@ async def _cartao(
         "pedido": meta.pedido_marketplace,
         "pedidos_citados": meta.pedidos_citados or [],
         "protocolo": meta.protocolo,
+        **tipos,
         "tipo_caixa": meta.tipo_caixa,
         "tipo_caixa_rotulo": ROTULO_TIPO_CAIXA.get(meta.tipo_caixa or ""),
         "vinculado_por": meta.vinculado_por,
@@ -302,11 +316,27 @@ async def _cartao(
 # ── As filas (só quem mexe) ───────────────────────────────────────────────
 
 
+def _tipo_da_meta_sql():
+    m = MailMessageMeta
+    tipo = (
+        select(AtendimentoMensagem.payload[ponte.CHAVE]["tipo_email"].astext)
+        .where(AtendimentoMensagem.id == m.mensagem_id)
+        .scalar_subquery()
+    )
+    return _tipo_email_sql(tipo, m.plataforma, m.finalidade, func.nullif(m.protocolo, ""))
+
+
 def _filtro_da_fila(fila: str):
     if fila == FILA_SUSPEITO:
         return (
             MailMessageMeta.suspeito.is_(True),
             MailMessageMeta.estado.in_(ESTADOS_COM_TEXTO),
+        )
+    if fila == ESTADO_SEM_VINCULO:
+        return (
+            MailMessageMeta.estado == fila,
+            _tipo_da_meta_sql() == "chamado",
+            func.nullif(MailMessageMeta.protocolo, "").is_(None),
         )
     return (MailMessageMeta.estado == fila,)
 
@@ -353,16 +383,21 @@ async def listar(
     fila: Annotated[str, Query()] = ESTADO_SEM_LOJA,
     antes_de: Annotated[datetime | None, Query()] = None,
     limite: Annotated[int, Query(ge=1, le=200)] = POR_PAGINA,
+    tipo_email: Annotated[str | None, Query(max_length=16)] = None,
 ) -> dict[str, Any]:
     """Uma fila: sem loja, sem vínculo, suspeitos, resumos ou erro (sem o texto)."""
     _mexe(user)
     if fila not in FILAS:
         raise HTTPException(422, detail={"code": "fila_invalida"})
+    if tipo_email and tipo_email not in ("informativo", "chamado", "venda"):
+        raise HTTPException(422, detail={"code": "tipo_email_invalido"})
     q = (
         select(MailMessageMeta, MailMessage)
         .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
         .where(*_filtro_da_fila(fila))
     )
+    if tipo_email:
+        q = q.where(_tipo_da_meta_sql() == tipo_email)
     if antes_de is not None:
         q = q.where(MailMessage.received_at < antes_de)
     linhas = (
@@ -785,20 +820,30 @@ async def contagens(session: Session, user: Leitor, response: Response) -> dict[
     aberta = c.situacao != CONVERSA_FECHADA
     chamado = and_(c.plataforma == PLATAFORMA_SITE, aberta)
     tipo = _tipo_do_chamado()
+    tipo_email = _tipo_do_email_sql()
     q = select(
         func.count().filter(c.aguardando_resposta.is_(True)),
         func.count().filter(chamado),
         *[func.count().filter(chamado, tipo == t) for t in TIPOS_CHAMADO],
+        *[
+            func.count().filter(aberta, tipo_email == t)
+            for t in ("informativo", "chamado", "venda")
+        ],
     ).where(separa_email.conversa_de_email_sql())
     cond = _clausula_escopo(await resolve_team_scope(session, user), c.integration_id)
     if cond is not None:
         q = q.where(cond)
-    aguardando, chamados, *por_tipo = (await session.execute(q)).one()
+    aguardando, chamados, *resto = (await session.execute(q)).one()
+    por_tipo, por_tipo_email = resto[: len(TIPOS_CHAMADO)], resto[len(TIPOS_CHAMADO) :]
     response.headers["Cache-Control"] = "no-store"
     return {
         "aguardando": int(aguardando or 0),
         "chamados": int(chamados or 0),
         "chamados_por_tipo": {t: int(n or 0) for t, n in zip(TIPOS_CHAMADO, por_tipo, strict=True)},
+        "por_tipo_email": {
+            t: int(n or 0)
+            for t, n in zip(("informativo", "chamado", "venda"), por_tipo_email, strict=True)
+        },
     }
 
 
@@ -957,88 +1002,68 @@ async def _emails_da_venda_no_chat(
     familia: abas.Familia,
     scope: TeamScope,
 ) -> dict[str, Any]:
-    """O "E-mails da venda" de uma conversa de CHAT (13/10/2026): só números e ids.
+    """Resumo legado, com a mesma seleção estrita de e-mails individuais da venda.
 
-    O dono: "o e-mail aparece só na aba de e-mail; a do chat aparece só no
-    chat" — mas quem atende no chat precisa saber que a venda tem e-mail. Volta
-    QUANTOS e-mails (os estados dos cartões) as conversas de e-mail da ponte
-    da MESMA VENDA têm, quantas delas esperam resposta e o id de cada uma (o
-    link "abrir na aba E-mail"). Nada do e-mail: nem caixa, pasta, assunto,
-    remetente ou texto — `caixas` vem sempre vazia.
-
-    A MESMA VENDA = a régua da família de antes de 13/10 (`abas._membro`: a
-    mesma loja e um nº do pedido da família ou, no e-mail SEM pedido, o mesmo
-    comprador), sobre as conversas de e-mail que a família do chat não traz
-    mais. O escopo é o da lista `?caixa=email` (a rota já pede o `_view`; aqui
-    o `_clausula_escopo`): quem não abre a conversa de e-mail não recebe nem
-    o id nem o número. O e-mail que a ponte ligou à PRÓPRIA conversa de chat
-    (o aviso de antes de 13/10, a mensagem da Amazon pelo Gmail) não conta:
-    não há conversa de e-mail para abrir.
+    `familia` permanece no contrato do painel; comprador ou outras vendas da
+    família não autorizam um vínculo. Um caso X/Y conta só os e-mails X.
     """
-    vazio: dict[str, Any] = {"total": 0, "caixas": []}
-    loja = abas._clausula_loja(conversa)
-    if (
-        loja is None
-        or conversa.canal in abas.CANAIS_SEM_ABAS
-        or conversa.plataforma in PLATAFORMAS_EXTERNAS
-    ):
-        return vazio
-    c = AtendimentoConversa
-    ref = abas.pessoa(conversa)
-    pedido = set(familia.pedido)
-    conds = []
-    if pedido:
-        conds.append(abas._condicao_chaves(sorted(pedido)))
-    if ref.plataforma:
-        # O e-mail sem pedido entra pelo comprador (o id dele NA PLATAFORMA).
-        conds.append(c.dados[abas.CHAVE_COMPRADOR_PLATAFORMA].astext == ref.plataforma)
-    if not conds:
-        return vazio
-    consulta = (
-        select(c)
-        .where(loja, or_(*conds), separa_email.conversa_de_email_sql(c))
-        .order_by(c.ultima_mensagem_em.desc().nulls_last(), c.created_at.desc())
-        .limit(abas.MAX_CONVERSAS)
-    )
-    cond = _clausula_escopo(scope, c.integration_id)
-    if cond is not None:
-        consulta = consulta.where(cond)
-    # O anúncio só decide a PERGUNTA da família, nunca o e-mail.
-    sem_produtos = abas.Produtos()
-    emails = [
-        x
-        for x in (await session.execute(consulta)).scalars()
-        if abas._membro(x, conversa, ref, pedido, set(), sem_produtos, familia.compra_em)
-    ]
-    if not emails:
-        return vazio
-    m = MailMessageMeta
-    quantos: dict[UUID, int] = {
-        conversa_id: int(n)
-        for conversa_id, n in (
-            await session.execute(
-                select(m.conversa_id, func.count())
-                .where(m.conversa_id.in_([x.id for x in emails]), m.estado.in_(ESTADOS_COM_TEXTO))
-                .group_by(m.conversa_id)
-            )
-        ).all()
-    }
-    # A que espera resposta primeiro (o link abre a primeira); depois a mais recente.
-    emails.sort(key=lambda x: not x.aguardando_resposta)
-    conversas = [
-        {
-            "id": str(x.id),
-            "emails": quantos.get(x.id, 0),
-            "aguardando": bool(x.aguardando_resposta),
-        }
-        for x in emails
-    ]
+    resultado = await venda.listar(session, conversa, scope)
+    if not resultado.linhas:
+        return {"total": 0, "caixas": []}
+    grupos: dict[UUID, dict[str, Any]] = {}
+    for _meta, _message, grupo in resultado.linhas:
+        item = grupos.setdefault(grupo.id, {
+            "id": str(grupo.id), "emails": 0, "aguardando": bool(grupo.aguardando_resposta)
+        })
+        item["emails"] += 1
+    conversas = sorted(grupos.values(), key=lambda x: not x["aguardando"])
     return {
-        "total": sum(x["emails"] for x in conversas),
+        "total": len(resultado.linhas),
         "caixas": [],
         "aguardando": sum(1 for x in conversas if x["aguardando"]),
         "conversas": conversas,
     }
+
+
+@router.get("/venda/{conversa_id}")
+async def emails_desta_venda(
+    conversa_id: str, session: Session, user: Leitor, response: Response
+) -> dict[str, Any]:
+    """Cartões sem corpo, somente desta venda; total zero oculta o botão."""
+    scope = await resolve_team_scope(session, user)
+    conversa = await _conversa_ou_404(session, conversa_id, scope)
+    response.headers["Cache-Control"] = "no-store"
+    resultado = await venda.listar(session, conversa, scope)
+    nomes = await _nomes_das_lojas(
+        session, {meta.integration_id for meta, _message, _grupo in resultado.linhas}
+    )
+    return {
+        "estado": resultado.estado,
+        "pedido": resultado.pedido,
+        "total": len(resultado.linhas),
+        "itens": [
+            await _cartao(session, meta, message, nomes, com_texto=False)
+            for meta, message, _grupo in resultado.linhas
+        ],
+    }
+
+
+@router.get("/venda/{conversa_id}/emails/{message_id}")
+async def email_desta_venda(
+    conversa_id: str, message_id: UUID, session: Session, user: Leitor, response: Response
+) -> dict[str, Any]:
+    """Leitura protegida do e-mail selecionado; o caso inteiro não é liberado."""
+    scope = await resolve_team_scope(session, user)
+    conversa = await _conversa_ou_404(session, conversa_id, scope)
+    response.headers["Cache-Control"] = "no-store"
+    resultado = await venda.listar(session, conversa, scope)
+    for meta, message, _grupo in resultado.linhas:
+        if meta.message_id == message_id:
+            return await _cartao(
+                session, meta, message,
+                await _nomes_das_lojas(session, {meta.integration_id}), com_texto=True
+            )
+    raise HTTPException(404, detail={"code": "email_nao_encontrado"})
 
 
 @router.get("/anexos/{attachment_id}")

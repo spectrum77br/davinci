@@ -140,6 +140,7 @@ async def test_escolher_ficha_sem_integracao_e_a_marca_ambigua(db, cena, client,
     assert r.status_code == 200, r.text
     corpo = r.json()
     assert corpo["estado"] == "sem_vinculo" and corpo["sem_integracao"] is True
+    assert corpo["tipo_email"] == "chamado"  # pergunta direta: "Quando chega?"
     assert corpo["loja"] == "Barbosa Temu" and corpo["integration_id"] is None
     meta = await meta_de(db, mid)
     c = await db.get(AtendimentoConversa, meta.conversa_id)

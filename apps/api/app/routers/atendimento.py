@@ -821,6 +821,11 @@ def _email_sem_vinculo():
     return and_(
         AtendimentoConversa.canal == CANAL_EMAIL,
         AtendimentoConversa.dados["fonte"].astext == FONTE_TUTA,
+        _tipo_do_email_sql() == "chamado",
+        func.coalesce(
+            func.nullif(AtendimentoConversa.dados["mail"]["caso_id"].astext, ""),
+            func.nullif(AtendimentoConversa.dados["mail"]["protocolo"].astext, ""),
+        ).is_(None),
         AtendimentoConversa.dados.has_key("mail"),
         pedido == "",
         AtendimentoConversa.plataforma != PLATAFORMA_SITE,
@@ -1212,6 +1217,8 @@ def _email_resumo(c: AtendimentoConversa) -> dict[str, Any] | None:
         return str(valor)[:191] if isinstance(valor, str) and valor.strip() else None
 
     tipo = _txt("caixa")
+    from app.services.mail_atendimento.classificacao import tipo_da_conversa
+
     return {
         "protocolo": _txt("protocolo"),
         "tipo": tipo,
@@ -1219,7 +1226,34 @@ def _email_resumo(c: AtendimentoConversa) -> dict[str, Any] | None:
         "marca": _txt("marca_nome"),
         "alias": _txt("alias"),
         "destaque": mail.get("destaque") is True,
+        "tipo_email": tipo_da_conversa(mail, c.plataforma),
+        "tipo_email_inferido": mail.get("tipo_email_inferido") is True
+        or mail.get("tipo_email") not in ("informativo", "chamado", "venda"),
+        "caso_id": _txt("caso_id") or (_txt("protocolo") if c.plataforma != "site" else None),
     }
+
+
+def _tipo_email_sql(tipo, plataforma, finalidade, caso):
+    """Gêmea SQL do fallback de `classificacao.tipo_da_conversa`, sem regravar legado."""
+    return case(
+        (tipo.in_(("informativo", "chamado", "venda")), tipo),
+        (or_(plataforma == "site", caso.is_not(None)), "chamado"),
+        (finalidade == "vendas", "venda"),
+        (finalidade.in_(("mensagens", "problema", "reclamacao")), "chamado"),
+        else_="informativo",
+    )
+
+
+def _tipo_do_email_sql():
+    mail = AtendimentoConversa.dados[separa_email.CHAVE_MAIL]
+    return _tipo_email_sql(
+        mail["tipo_email"].astext,
+        AtendimentoConversa.plataforma,
+        mail["finalidade"].astext,
+        func.coalesce(
+            func.nullif(mail["caso_id"].astext, ""), func.nullif(mail["protocolo"].astext, "")
+        ),
+    )
 
 
 async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> ConversaOut:
@@ -1947,6 +1981,7 @@ async def _listar_marketplace(
     rede_social_id: UUID | None = None,
     perguntas_primeiro: bool = False,
     tipo_chamado: str | None = None,
+    tipo_email: str | None = None,
     caixa_humano: bool = False,
     caixa_email: bool = False,
 ) -> list[dict[str, Any]]:
@@ -1983,6 +2018,8 @@ async def _listar_marketplace(
         consulta = consulta.where(separa_email.conversa_de_email_sql())
     else:
         consulta = consulta.where(separa_email.na_caixa_sql())
+    if caixa_email and tipo_email:
+        consulta = consulta.where(_tipo_do_email_sql() == tipo_email)
     if caixa_humano:
         # Falta responder e a IA não pode, nas lojas dos modos (com qualquer filtro).
         consulta = consulta.where(humano_svc.caixa_humano_sql(lojas_humano, agora))
@@ -2100,6 +2137,7 @@ async def _listar_marketplace(
                 AtendimentoConversa.dados["mail"]["protocolos"].astext.ilike(
                     termo, escape="\\"
                 ),
+                AtendimentoConversa.dados["mail"]["caso_id"].astext.ilike(termo, escape="\\"),
             )
         )
     if caixa_humano:
@@ -2231,6 +2269,7 @@ async def listar_conversas(
     externo_ref: Annotated[str | None, Query(max_length=191)] = None,
     rede_social_id: Annotated[UUID | None, Query()] = None,
     tipo_chamado: Annotated[str | None, Query(max_length=16)] = None,
+    tipo_email: Annotated[str | None, Query(max_length=16)] = None,
     caixa: Annotated[str | None, Query(max_length=16)] = None,
 ) -> ListaConversasOut:
     """A fila, mais recente primeiro; página seguinte com `antes_de=<proximo>`.
@@ -2285,6 +2324,9 @@ async def listar_conversas(
         raise HTTPException(422, detail={"code": "caixa_invalida"})
     caixa_humano = caixa == CAIXA_HUMANO
     caixa_email = caixa == CAIXA_EMAIL
+    tipo_email = (tipo_email or "").strip().lower() or None
+    if tipo_email and (tipo_email not in ("informativo", "chamado", "venda") or not caixa_email):
+        raise HTTPException(422, detail={"code": "tipo_email_invalido"})
     # A Caixa Humano vai pelo turno com qualquer filtro (14/10/2026); a Caixa
     # e a aba E-mail, pela ordem do filtro, como sempre.
     pelo_prazo = filtro in FILTROS_PELO_PRAZO and not caixa_humano
@@ -2316,6 +2358,7 @@ async def listar_conversas(
             rede_social_id=rede_social_id,
             perguntas_primeiro=perguntas_primeiro,
             tipo_chamado=tipo_chamado,
+            tipo_email=tipo_email,
             caixa_humano=caixa_humano,
             caixa_email=caixa_email,
         )

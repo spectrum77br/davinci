@@ -232,6 +232,9 @@ async def test_caixa_so_chat_e_a_lista_do_email(db, cena, client, admin):
         "marca": "Uranyx",
         "alias": "sac@uranyx.com.br",
         "destaque": False,
+        "tipo_email": "chamado",
+        "tipo_email_inferido": False,
+        "caso_id": None,
     }
     r = await client.get(f"{URL}/conversas", params={"caixa": "email", "plataforma": "ml"})
     assert r.json()["itens"][0]["email"]["alias"] == "21max@tuta.com"
@@ -271,6 +274,7 @@ async def test_resumo_metricas_e_contagens(db, cena, client, admin):
         "aguardando": 2,
         "chamados": 1,
         "chamados_por_tipo": {"sac": 1, "atacado": 0, "duvidas": 0},
+        "por_tipo_email": {"chamado": 2, "informativo": 0, "venda": 0},
     }
     # Fechou o chamado: sai da contagem dos chamados (e do falta responder).
     site = await db.get(AtendimentoConversa, m["site"].id)

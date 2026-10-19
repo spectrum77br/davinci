@@ -19,6 +19,7 @@ type ConversaDaBarra = Pick<ConversaResumo, 'plataforma' | 'pedido_marketplace' 
 // ponte: `email`), sem pedido e fora do site (o chamado não tem pedido).
 export function podeVincular(c: ConversaDaBarra | null | undefined, podeMexer: boolean): boolean {
   return !!c && podeMexer && !!c.email && c.plataforma !== 'site' && !(c.pedido_marketplace || '').trim()
+    && !c.email.caso_id && !['informativo', 'venda'].includes(c.email.tipo_email || '')
 }
 
 export function urlVincularConversa(id: string): string {
