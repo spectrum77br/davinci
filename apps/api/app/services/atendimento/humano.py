@@ -271,7 +271,7 @@ logger = structlog.get_logger()
 # 2 (09/10/2026, revisão): pistas de assunto mais largas, a avaliação de nota
 # alta fora, a bloqueada pelo estado, a foto depois do robô, o motivo `falha`.
 # 3 (16/10/2026): menu não corta texto/foto; IA atendente segue a régua da geração.
-VERSAO = 4
+VERSAO = 5
 # A chave em `atendimento_conversas.dados`.
 CHAVE = "humano"
 # Conversas por rodada do cron (o recálculo inicial, ~500, leva umas 3).
@@ -495,6 +495,7 @@ def triar(
             p for t in textos_cliente for p in ia.pistas_de_categoria(t) if p in so_humano
         )
     )
+    assuntos = list(dict.fromkeys([*assuntos, *ia.assuntos_sensiveis_do_menu(recentes, gatilho)]))
     if assuntos:
         motivos.add(HUMANO_ASSUNTO)
     if ia.turno_incompleto(recentes, gatilho):

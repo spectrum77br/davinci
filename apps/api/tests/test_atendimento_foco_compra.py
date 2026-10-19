@@ -111,3 +111,16 @@ def test_card_de_outro_pedido_nao_supera_estoque():
     assert "Quantos tem em estoque?" in [
         m.texto for m in ia.perguntas_pendentes(mensagens, mensagens[-1])
     ]
+
+
+def test_menu_que_falhou_nao_interpreta_numero_como_assunto_sensivel():
+    menu = mensagem(
+        "Olá, por favor selecione sua dúvida e logo um dos nossos consultores irá atendê-lo!\n"
+        "3 - Encerramento da compra\n4 - Troca de endereço\n5 - Garantia",
+        autor="loja",
+        minuto=1,
+    )
+    opcao = mensagem("5", minuto=2)
+    assert ia.assuntos_sensiveis_do_menu([menu, opcao], opcao) == ["garantia"]
+    menu.status = "falhou"
+    assert ia.assuntos_sensiveis_do_menu([menu, opcao], opcao) == []

@@ -1351,6 +1351,33 @@ def mensagem_de_continuidade(texto: str | None) -> bool:
     return not plano.strip() or bool(_CORTESIA.fullmatch(" ".join(plano.split())))
 
 
+def assuntos_sensiveis_do_menu(
+    mensagens: Sequence[AtendimentoMensagem], gatilho: AtendimentoMensagem | None
+) -> list[str]:
+    """Seleção explícita de cancelamento/endereço/garantia conserva o veto humano."""
+    assuntos = []
+    for cliente in rajada_do_cliente(mensagens, gatilho):
+        opcao = validador.plano_de(cliente.texto or "").strip(" .!\n")
+        categoria = {"3": "cancelamento", "4": "endereco", "5": "garantia"}.get(opcao)
+        if categoria is None:
+            continue
+        if any(
+            m.autor == AUTOR_LOJA
+            and m.status != MSG_FALHOU
+            and _momento(m) <= _momento(cliente)
+            and not resposta_da_loja(m)
+            and "5 - garantia" in validador.plano_de(m.texto or "")
+            and "4 - troca de endereco" in validador.plano_de(m.texto or "")
+            and (
+                "3 - encerramento da compra" in validador.plano_de(m.texto or "")
+                or "3 - cancelamento da compra" in validador.plano_de(m.texto or "")
+            )
+            for m in mensagens
+        ):
+            assuntos.append(categoria)
+    return list(dict.fromkeys(assuntos))
+
+
 def perguntas_pendentes(
     mensagens: Sequence[AtendimentoMensagem], gatilho: AtendimentoMensagem | None
 ) -> list[AtendimentoMensagem]:
@@ -4191,6 +4218,11 @@ async def _gerar(
         if insistiu:
             sinais_texto.insert(0, (HUMANO_ATENDENTE, MOTIVO_INSISTIU_EM_PESSOA))
     motivos: list[str] = list(dict.fromkeys(f for _c, f in sinais_texto))
+    opcoes_sensiveis = assuntos_sensiveis_do_menu(recentes, gatilho)
+    if opcoes_sensiveis:
+        motivos.append(
+            "opção de menu de assunto só para pessoa (" + ", ".join(opcoes_sensiveis) + ")"
+        )
     if turno_incompleto(recentes, gatilho):
         motivos.append(MOTIVO_TURNO_INCOMPLETO)
     if nf_exige_pessoa(textos_rajada):
@@ -4236,6 +4268,8 @@ async def _gerar(
     politica_kia = politicas_kia.resposta_aprovada(
         conversa, textos_rajada, fatos, todas_regras
     ) or sem_demanda.resposta_de_menu(conversa, recentes, gatilho, todas_regras)
+    if opcoes_sensiveis:
+        politica_kia = None
     if (
         contexto_reavaliado is not None
         and contexto_reavaliado.get("tipo") == "politica_kia"

@@ -295,3 +295,16 @@ async def test_falha_em_um_cartao_nao_interrompe_fila(db, make_user, ia_ligada, 
 
     monkeypatch.setattr(sem_demanda, "processar", falhar)
     assert await ia.manter_fila_kia(db) == {"respondidas": 0, "sem_demanda": 0}
+
+
+@pytest.mark.parametrize("opcao", ["3", "4", "5"])
+async def test_opcao_sensivel_do_menu_nao_e_apagada_por_politica_de_produto(
+    db, make_user, ia_ligada, monkeypatch, envios, modelo, opcao
+):
+    c = await cenario(db, make_user, ia_ligada, monkeypatch, item="22299473628")
+    await _msg(db, c, "A pulseira é P/M ou M/G?", ha=timedelta(minutes=8))
+    await _msg(db, c, MENU, autor="loja", ha=timedelta(minutes=7))
+    await _msg(db, c, opcao)
+    r = await ia.gerar_rascunho(db, c)
+    assert r.precisa_humano and "opção de menu de assunto só para pessoa" in r.motivo
+    assert not r.fatos.get("politica_kia_aprovada") and envios == []
