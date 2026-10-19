@@ -1391,6 +1391,80 @@ async def test_amazon_preso_na_reserva_e_aguardando_ate_liberar(db, make_user):
     assert ped.liberado_em == datetime(2026, 10, 14, 3, tzinfo=UTC)
 
 
+async def test_estorno_antes_de_liberar_nao_vira_bateu_e_a_margem_relida_nao_dobra_o_previsto(
+    db, make_user
+):
+    """19/10 (revisão): a Margem soma TODAS as transações do pedido no líquido — o estorno
+    e, depois da liberação, o lançamento repetido. kia 302142: lançou 749,53 preso,
+    devolveu 759,53 ao cliente, liberou 749,53. Com o net da Margem o pedido ficaria
+    "bateu" (−10,00 × −10,00) ou "recebido a menos" pelo previsto em dobro. O previsto da
+    Conciliação é a conta da venda (Shipment + ServiceFee), e o estorno aparece."""
+    from app.models import MarketplaceOrderFinancial
+
+    loja = await _loja_amazon(db, make_user)
+    quebras = [
+        _b("ProductCharges", "729", [_b("OurPricePrincipal", "729")]),
+        _b("Shipping", "164.06", [_b("ShippingPrincipal", "164.06")]),
+        _b("PromoRebates", "-36.45", [_b("OurPriceDiscount", "-36.45")]),
+        _b("AmazonFees", "-107.08", [_b("Commission", "-107.08")]),
+    ]
+    venda = _tx(
+        "tx-e-venda", "Shipment", "DEFERRED", "2026-10-07T12:00:00Z", "749.53", pedido=DBA, quebras=quebras
+    )
+    estorno = _tx(
+        "tx-e-estorno", "Refund", "RELEASED", "2026-10-08T12:00:00Z", "-759.53", pedido=DBA
+    )
+    cliente = _AmazonFalsa([venda, estorno])
+    await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    # a Margem leu o pedido depois do estorno: net = 749,53 − 759,53 = −10,00
+    mof = MarketplaceOrderFinancial(
+        integration_id=loja.integration_id,
+        platform="amazon",
+        external_order_id=DBA,
+        status="posted",
+        fetched_at=datetime(2026, 10, 9, 12, tzinfo=UTC),
+        net_amount=Decimal("-10.00"),
+        raw={"transactions": {"transactions": [venda, estorno]}},
+    )
+    db.add(mof)
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    ped = (
+        await db.execute(
+            select(ConciliacaoPedido).where(ConciliacaoPedido.pedido_bling == "301943")
+        )
+    ).scalar_one()
+    # preso na reserva: aguardando, e o previsto é a venda (749,53), não o net da Margem
+    assert ped.situacao == "aguardando" and ped.venda_liquido == Decimal("749.53")
+    assert ped.recebido is None and "preso na reserva" in ped.motivo
+    # liberou: original vira DEFERRED_RELEASED + repetição RELEASED; a Margem relê e soma
+    # original + estorno + repetição (net 739,53) — o previsto continua 749,53
+    liberado = {**venda, "transactionStatus": "DEFERRED_RELEASED"}
+    repeticao = {
+        **venda,
+        "transactionId": "tx-e-venda-lib",
+        "transactionStatus": "RELEASED",
+        "postedDate": "2026-10-15T03:00:00Z",
+    }
+    cliente.transacoes = [liberado, estorno, repeticao]
+    await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    mof.net_amount = Decimal("739.53")
+    mof.raw = {"transactions": {"transactions": [liberado, estorno, repeticao]}}
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    await db.refresh(ped)
+    assert ped.venda_liquido == Decimal("749.53")
+    assert ped.situacao == "estornado_depois" and ped.etapa == "pendencia"
+    assert ped.recebido == Decimal("-10.00") and ped.saidas_depois == Decimal("759.53")
+    assert ped.dif_previsto_recebido == Decimal("-759.53")
+    assert ped.motivo.startswith("estorno de 759.53 em 08/10")
+    # a conta pura: Refund fora, repetição fora
+    conta = conta_amazon_de_transacoes([liberado, estorno, repeticao])
+    assert conta["liquido"] == Decimal("749.53") and conta["produto"] == Decimal("729")
+
+
 async def test_linha_sem_pedido_da_kfa_reconhece_a_identidade_do_215f0494_e_tira_a_duplicata(
     db, make_user
 ):

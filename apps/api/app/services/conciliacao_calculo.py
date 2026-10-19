@@ -19,7 +19,7 @@ Regras (decididas com o Vinicius em 14/10/2026, `docs/conciliacao-avaliacao.md`)
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -262,6 +262,22 @@ def conta_amazon_de_transacoes(txs: list[Any]) -> dict[str, Decimal] | None:
         if isinstance(t, dict)
         and str(t.get("transactionType") or "Shipment") in ("Shipment", "ServiceFee")
     ]
+    # 19/10 (revisão): depois que a reserva libera, a API devolve o lançamento DUAS vezes
+    # (o original vira DEFERRED_RELEASED e aparece outro RELEASED, mesmo valor) — a
+    # Margem soma os dois no líquido (kia 301678: 446,20 → 892,40). Aqui a repetição sai.
+    originais = Counter(
+        (str(t.get("transactionType")), str(((t.get("totalAmount") or {}).get("currencyAmount"))))
+        for t in txs
+        if str(t.get("transactionStatus") or "") == "DEFERRED_RELEASED"
+    )
+    sem_repeticao: list[dict[str, Any]] = []
+    for t in sorted(txs, key=lambda x: str(x.get("postedDate") or "")):
+        k = (str(t.get("transactionType")), str(((t.get("totalAmount") or {}).get("currencyAmount"))))
+        if str(t.get("transactionStatus") or "") == "RELEASED" and originais.get(k, 0) > 0:
+            originais[k] -= 1
+            continue
+        sem_repeticao.append(t)
+    txs = sem_repeticao
     if not txs:
         return None
     acc: dict[str, Decimal] = defaultdict(Decimal)
@@ -406,17 +422,12 @@ def situacao_do_pedido(
         else ZERO
     )
     # frete cobrado depois do lançamento (etiqueta Easy Ship da Amazon, Mercado Envios à
-    # parte) é custo da venda, não "saiu depois"
+    # parte) é custo da venda, não "saiu depois". 19/10 (revisão): estorno lançado
+    # ENQUANTO o dinheiro estava preso (Amazon devolve ao cliente antes de liberar — kia
+    # 302142: devolveu 759,53 em 08/10, liberou em 15/10) também é dinheiro que saiu —
+    # a data do débito não precisa ser depois da liberação
     saidas_depois = (
-        _soma(
-            [
-                m.debito
-                for m in dinheiro
-                if liberado_em and m.data > liberado_em and m.tipo != "frete"
-            ]
-        )
-        if liberado_em
-        else None
+        _soma([m.debito for m in dinheiro if m.tipo != "frete"]) if liberado_em else None
     )
     ultimo_mov = max((_entrou_em(m) for m in movs_extrato), default=None)
     cancelada = _venda_cancelada(venda)
@@ -1079,7 +1090,18 @@ async def recalcular_loja(
         # MARGEM — pack do ML com vários pedidos compara com a venda da Margem; se ela só
         # leu um pedido do carrinho, aparece "recebido a mais" (sinal pra consertar a
         # leitura, não pra esconder)
-        liquido_previsto = amazon_linhas["liquido"] if amazon_linhas else None
+        # 19/10 (revisão): na Amazon o `net_amount` da Margem soma TODAS as transações do
+        # pedido (estorno e o lançamento repetido depois da liberação) — kia 302142 ficaria
+        # "bateu" com −10,00 × −10,00 e 759,53 de estorno invisíveis. O previsto é a conta
+        # da venda (Shipment + ServiceFee), a mesma que a grade mostra.
+        amazon_venda = (
+            conta_amazon(venda) if (plataforma_loja == "amazon" and venda is not None) else None
+        )
+        liquido_previsto = (
+            amazon_linhas["liquido"]
+            if amazon_linhas
+            else (amazon_venda["liquido"] if amazon_venda else None)
+        )
         estado_bling = nome_bling.strip().lower()
         calc = situacao_do_pedido(
             agora=agora,
