@@ -126,7 +126,7 @@ const ANTIGO = { ...semCampo(RESUMO), plataformas: RESUMO.plataformas.map(semCam
   assert.equal(F.aguardandoDe(RESUMO, ['shopee', 'ml'], 'nao_lidas_duoke'), 10)
   assert.equal(F.aguardandoDe(RESUMO, ['shopee', 'ml']), 7)
   assert.equal(F.aguardandoDe(ANTIGO, ['shopee', 'ml'], 'nao_lidas_duoke'), 7)
-  assert.equal(F.textoDoNumero('nao_lidas_duoke'), 'mensagem(ns) não lida(s) esperando resposta (como no Duoke)')
+  assert.equal(F.textoDoNumero('nao_lidas_duoke'), 'mensagem(ns) não lida(s)')
   assert.equal(F.textoDoNumero(), 'conversa(s) falta responder', 'o texto antigo continua para quem não passa `numero`')
   assert.equal(F.textoCurtoDoNumero('humano'), 'esperando uma pessoa')
 
@@ -159,10 +159,10 @@ async function renderizados() {
   // O menu de plataformas na Caixa: "Todas 10" e o número do Duoke de cada uma.
   let html = await renderizar(menuSfc, { resumo: RESUMO, filtros: filtros(), numero: 'nao_lidas_duoke' })
   assert.match(html, /data-plataforma-botao[^>]*>[\s\S]*?Todas[\s\S]*?>10<[\s\S]*?<\/button>/)
-  assert.match(html, /title="Todas as plataformas: 10 mensagem\(ns\) não lida\(s\) esperando resposta \(como no Duoke\)"/)
+  assert.match(html, /title="Todas as plataformas: 10 mensagem\(ns\) não lida\(s\)"/)
   const chips = (h) => [...h.matchAll(/data-chip="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)].map((m) => [m[1], m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()])
   assert.deepEqual(chips(html), [['todas', 'Todas 10'], ['ml', 'Mercado Livre 4'], ['shopee', 'Shopee 6'], ['tiktok', 'TikTok'], ['site', 'Sites']])
-  assert.match(html, /aria-label="Só Shopee — 6 não lida\(s\) esperando resposta" title="Só Shopee: 6 mensagem\(ns\) não lida\(s\) esperando resposta \(como no Duoke\)"/)
+  assert.match(html, /aria-label="Só Shopee — 6 não lida\(s\)" title="Só Shopee: 6 mensagem\(ns\) não lida\(s\)"/)
   // A API antiga: o falta responder.
   html = await renderizar(menuSfc, { resumo: ANTIGO, filtros: filtros(), numero: 'nao_lidas_duoke' })
   assert.deepEqual(chips(html)[0], ['todas', 'Todas 8'])
@@ -175,7 +175,7 @@ async function renderizados() {
     .map((m) => [m[1].split('\n')[0], m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()])
   html = await renderizar(lojasSfc, { resumo: RESUMO, filtros: filtros(), numero: 'nao_lidas_duoke' })
   assert.deepEqual(linhas(html), [
-    ['Todas as lojas — 10 mensagem(ns) não lida(s) esperando resposta (como no Duoke)', 'Todas 10'],
+    ['Todas as lojas — 10 mensagem(ns) não lida(s)', 'Todas 10'],
     ['Shopee · Aguiar', 'Aguiar 1'],
     ['Shopee · ATV', 'ATV 5'],
     ['TikTok · Inova', 'Inova'],
@@ -184,17 +184,17 @@ async function renderizados() {
   ])
   // O title da loja explica o número e mantém o "Falta responder" (conversas, só o chat).
   const tituloAtv = (html.match(/title="(Shopee · ATV[^"]*)"/) || [])[1] || ''
-  assert.match(tituloAtv, /\n5 mensagem\(ns\) do cliente desde a última resposta ou desde que alguém abriu a conversa — como no Duoke\n3 conversa\(s\) no Falta responder \(só o chat\)\n/)
+  assert.match(tituloAtv, /\n5 mensagem\(ns\) não lida\(s\) do cliente\n3 conversa\(s\) no Falta responder \(só o chat\)\n/)
   assert.match(tituloAtv, /\n7 não lida\(s\) segundo a plataforma/)
   // O cabeçalho do grupo soma as lojas dele.
   assert.match(html, /data-grupo="shopee"[^>]*>[\s\S]*?>6<\/span>/)
   // Cortada na Shopee: "Todas · Shopee" com o número do Duoke da plataforma.
   html = await renderizar(lojasSfc, { resumo: RESUMO, filtros: filtros({ plataforma: 'shopee', plataforma_topo: 'shopee' }), numero: 'nao_lidas_duoke' })
-  assert.match(html, /title="Todas as lojas Shopee — 6 mensagem\(ns\) não lida\(s\) esperando resposta \(como no Duoke\)\n/)
+  assert.match(html, /title="Todas as lojas Shopee — 6 mensagem\(ns\) não lida\(s\)\n/)
   assert.match(html, /Todas · Shopee<\/span><span[^>]*>6<\/span>/)
   // Recolhida: o title do grupo (a etiqueta curta) diz o mesmo.
   html = await renderizar(lojasSfc, { resumo: RESUMO, filtros: filtros(), numero: 'nao_lidas_duoke', recolhida: true })
-  assert.match(html, /title="Só Shopee: todas as lojas Shopee — 6 mensagem\(ns\) não lida\(s\) esperando resposta \(como no Duoke\)"/)
+  assert.match(html, /title="Só Shopee: todas as lojas Shopee — 6 mensagem\(ns\) não lida\(s\)"/)
   // A API antiga: a bolinha cai no falta responder.
   html = await renderizar(lojasSfc, { resumo: ANTIGO, filtros: filtros(), numero: 'nao_lidas_duoke' })
   assert.deepEqual(linhas(html).slice(1, 3), [['Shopee · Aguiar', 'Aguiar 1'], ['Shopee · ATV', 'ATV 3']])
@@ -232,7 +232,7 @@ async function renderizados() {
   // A aba Caixa: o total do Duoke, vermelho (a API antiga não manda: sem número).
   assert.match(pagina, /const naoLidasDuoke = computed\(\(\) => Number\(resumo\.value\?\.nao_lidas_duoke\) \|\| 0\)/)
   assert.match(pagina, /v-if="a\.value === 'caixa' && naoLidasDuoke"[\s\S]{0,600}data-marca-caixa\s*>\{\{ naoLidasDuoke > 99 \? '99\+' : naoLidasDuoke \}\}<\/span>/)
-  assert.match(pagina, /:title="`\$\{naoLidasDuoke\} mensagem\(ns\) não lida\(s\) esperando resposta \(como no Duoke\)/)
+  assert.match(pagina, /:title="`\$\{naoLidasDuoke\} mensagem\(ns\) não lida\(s\)/)
   // A aba Caixa Humano continua com o número dela.
   assert.match(pagina, /v-if="a\.value === 'humano' && resumo\?\.humano"[\s\S]{0,500}data-marca-humano\s*>\{\{ resumo\.humano > 99 \? '99\+' : resumo\.humano \}\}<\/span>/)
   // Marcou como lida ao abrir (o não lido mudou): relê o /resumo na hora.
@@ -251,12 +251,36 @@ async function renderizados() {
       new Function('c', 'itens', 'selecionada', 'emHumano', 'carregarResumo', 'linkDoChat', 'abrirConversaDoEmail', transpile(corpo))(
         c, itens, { value: antes.id }, { value: false }, () => { releu++ }, null, () => {},
       )
-      return releu
+      return { releu, itens: itens.value }
     }
     const linha = { id: 'k1', aguardando_resposta: true, nao_lidas: 0, visto_em: null }
-    assert.equal(rodar(linha, { ...linha, visto_em: '2026-10-15T10:00:00+00:00' }), 1)
-    assert.equal(rodar({ ...linha, visto_em: '2026-10-15T10:00:00+00:00' }, { ...linha, visto_em: '2026-10-15T10:00:00+00:00' }), 0)
-    assert.equal(rodar(linha, { id: 'k1', aguardando_resposta: true }), 0, 'a API antiga (sem o campo): nada')
+    assert.equal(rodar(linha, { ...linha, visto_em: '2026-10-15T10:00:00+00:00' }).releu, 1)
+    assert.equal(rodar({ ...linha, visto_em: '2026-10-15T10:00:00+00:00' }, { ...linha, visto_em: '2026-10-15T10:00:00+00:00' }).releu, 0)
+    assert.equal(rodar(linha, { id: 'k1', aguardando_resposta: true }).releu, 0, 'a API antiga (sem o campo): nada')
+
+    // A notificação é local e independente da fila da IA: abrir a conversa
+    // atualiza a linha/resumo, mas não dá a pergunta como respondida. Uma
+    // mensagem que chega depois reativa o número sem exigir outro sistema.
+    const L = exportsDe(listaSfc, requerer)
+    const pendente = {
+      ...linha, numero_duoke: 2, falta_responder: true, pendentes: 2,
+      tem_rascunho: true, ia_pausada: false,
+      humano: { motivos: ['precisa_pessoa'], rotulos: ['Precisa de pessoa'], assuntos: [], assuntos_rotulos: [] },
+    }
+    const vista = rodar(pendente, {
+      ...pendente, numero_duoke: 0, visto_em: '2026-10-19T13:00:00+00:00',
+    })
+    assert.equal(vista.releu, 1, 'o resumo acompanha a abertura')
+    assert.equal(L.bolinhaDaLinha(vista.itens[0]), 0)
+    assert.equal(L.linhaMarcada(vista.itens[0]), true, 'continua no Falta responder')
+    for (const campo of ['aguardando_resposta', 'falta_responder', 'tem_rascunho', 'ia_pausada', 'humano']) {
+      assert.deepEqual(vista.itens[0][campo], pendente[campo], `abrir preserva ${campo}`)
+    }
+    const nova = rodar(vista.itens[0], { ...vista.itens[0], numero_duoke: 1, pendentes: 3 })
+    assert.equal(nova.releu, 1, 'mensagem posterior ao visto relê o resumo')
+    assert.equal(L.bolinhaDaLinha(nova.itens[0]), 1)
+    assert.equal(L.linhaMarcada(nova.itens[0]), true)
+    assert.deepEqual(nova.itens[0].humano, pendente.humano)
   }
 
   // A lista: a aba "Falta responder" é só o chat (o title diz), com o número

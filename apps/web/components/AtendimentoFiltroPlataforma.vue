@@ -124,13 +124,13 @@ export function aguardandoDe(resumo: Resumo | null | undefined, plataformas: str
 // Como o número se lê no title ("3 conversa(s) falta responder").
 export function textoDoNumero(numero: NumeroDaCaixa = 'aguardando'): string {
   if (numero === 'humano') return 'conversa(s) esperando uma pessoa (a IA não pode responder)'
-  if (numero === 'nao_lidas_duoke') return 'mensagem(ns) não lida(s) esperando resposta (como no Duoke)'
+  if (numero === 'nao_lidas_duoke') return 'mensagem(ns) não lida(s)'
   return 'conversa(s) falta responder'
 }
 // O mesmo, curto (o aria-label do item do menu).
 export function textoCurtoDoNumero(numero: NumeroDaCaixa = 'aguardando'): string {
   if (numero === 'humano') return 'esperando uma pessoa'
-  if (numero === 'nao_lidas_duoke') return 'não lida(s) esperando resposta'
+  if (numero === 'nao_lidas_duoke') return 'não lida(s)'
   return 'falta responder'
 }
 

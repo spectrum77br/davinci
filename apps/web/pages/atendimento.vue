@@ -726,8 +726,8 @@ watch(selecionada, (id) => {
         <span
           v-if="a.value === 'caixa' && naoLidasDuoke"
           class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
-          :title="`${naoLidasDuoke} mensagem(ns) não lida(s) esperando resposta (como no Duoke): o chat de todas as plataformas`"
-          :aria-label="`${naoLidasDuoke} mensagem(ns) não lida(s) esperando resposta`"
+          :title="`${naoLidasDuoke} mensagem(ns) não lida(s): o chat de todas as plataformas`"
+          :aria-label="`${naoLidasDuoke} mensagem(ns) não lida(s)`"
           data-marca-caixa
         >{{ naoLidasDuoke > 99 ? '99+' : naoLidasDuoke }}</span>
         <!-- Caixa Humano: quantas esperam uma pessoa (a IA não pode responder) -->

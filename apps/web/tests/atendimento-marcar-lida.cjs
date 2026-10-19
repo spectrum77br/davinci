@@ -350,7 +350,7 @@ function marcador(extra = {}) {
   assert.match(bloco, /rever: \(id\) => gravarVisto\(id, 'visto'\)/)
   assert.match(bloco, /marcadorLida\.abrir\(d\.conversa\.id, rotaAoAbrir\(d, props\.canEdit\) !== null, d\.visto_ate \?\? null\)/)
 
-  async function tela({ canEdit = true, marcar_lida = true, respostaFalha = false, naoMarcou = false } = {}) {
+  async function tela({ canEdit = true, marcar_lida = true, respostaFalha = false, naoMarcou = false, adiarRespostas = false } = {}) {
     const rel = relogioFalso()
     const Lt = loadLib('../lib/atendimentoLida.ts', {
       setTimeout: (fn, ms) => rel.agendar(fn, ms),
@@ -365,9 +365,11 @@ function marcador(extra = {}) {
     const detalhe = Vue.ref(null)
     const VISTO = '2026-10-15T10:00:00+00:00'
     const corpos = []
+    const responder = []
     const apiFalsa = async (url, opts) => {
       posts.push([url, opts && opts.method])
       corpos.push(opts && opts.body)
+      if (adiarRespostas) return new Promise((resolve) => responder.push(resolve))
       if (respostaFalha) throw new Error('500')
       const id = url.split('/')[4]
       if (url.endsWith('/visto')) return { visto_em: VISTO, conversa: { id, nao_lidas: 2, plataforma: 'shopee', visto_em: VISTO } }
@@ -383,11 +385,11 @@ function marcador(extra = {}) {
     rodar(Lt.criarMarcadorDeLida, Lt.rotaAoAbrir, props, detalhe, apiFalsa, (e, c) => emitidos.push([e, c]), Vue.watch,
       (f) => montar.push(f), (f) => desmontar.push(f), doc)
     montar.forEach((f) => f())
-    const chegar = async (id, nao = 2, visto_ate = null) => {
-      detalhe.value = { conversa: { id, nao_lidas: nao, plataforma: 'shopee' }, mensagens: [], marcar_lida, visto_ate }
+    const chegar = async (id, nao = 2, visto_ate = null, conversa = {}) => {
+      detalhe.value = { conversa: { id, nao_lidas: nao, plataforma: 'shopee', ...conversa }, mensagens: [], marcar_lida, visto_ate }
       await Vue.nextTick()
     }
-    return { rel, posts, corpos, emitidos, props, detalhe, doc, chegar, desmontar }
+    return { rel, posts, corpos, emitidos, props, detalhe, doc, chegar, desmontar, responder }
   }
 
   // Quem mexe, loja em que o DaVinci responde: marca depois de 1,5 s e zera o número na tela.
@@ -456,6 +458,81 @@ function marcador(extra = {}) {
     assert.deepEqual(t.posts.map(([u]) => u), [primeira, '/api/atendimento/conversas/c1/visto'])
     assert.deepEqual(t.corpos, [{ ate: A }, { ate: B }])
     assert.equal(t.emitidos.length, 2, 'a linha recebe o visto (a página relê os números)')
+  }
+
+  // O visto não responde pelo cliente nem interfere no atendimento. O mesmo
+  // fluxo funciona com a loja em Observar ou com envio habilitado: os campos
+  // da fila, do rascunho e da pausa da IA continuam como vieram do servidor.
+  for (const marcar_lida of [false, true]) {
+    const t = await tela({ marcar_lida })
+    const fila = {
+      aguardando_resposta: true, falta_responder: true, tem_rascunho: true,
+      ia_pausada: true, sem_resposta_necessaria: false,
+      humano: { motivos: ['ia_pausada'], rotulos: ['IA pausada'], assuntos: [], assuntos_rotulos: [] },
+    }
+    const A = '2026-10-19T13:00:00.100000Z'
+    const B = '2026-10-19T13:01:00.200000Z'
+    await t.chegar('c1', 2, A, fila)
+    t.rel.avancar(1500)
+    await tique()
+    await tique()
+    for (const campo of Object.keys(fila)) {
+      assert.deepEqual(t.detalhe.value.conversa[campo], fila[campo], `abrir preserva ${campo} (lida=${marcar_lida})`)
+    }
+
+    // A mensagem nova chegou enquanto outra aba estava à frente: a pessoa
+    // ainda não a viu, então o cursor de chegada não pode avançar sozinho.
+    t.doc.visibilityState = 'hidden'
+    await t.chegar('c1', 3, B, { ...fila, numero_duoke: 1 })
+    await tique()
+    assert.equal(t.posts.length, 1)
+    assert.equal(t.detalhe.value.conversa.numero_duoke, 1)
+    assert.deepEqual(t.corpos, [{ ate: A }])
+    t.doc.visibilityState = 'visible'
+    t.doc.ouvintes.forEach((f) => f())
+    await tique()
+    await tique()
+    assert.deepEqual(t.corpos, [{ ate: A }, { ate: B }], 'a volta visível marca só a chegada que a tela mostra')
+    for (const campo of Object.keys(fila)) {
+      assert.deepEqual(t.emitidos.at(-1)[1][campo], fila[campo], `rever preserva ${campo} (lida=${marcar_lida})`)
+    }
+  }
+
+  // Respostas fora de ordem: a abertura exibia A, o polling trouxe B e o
+  // /visto de B voltou primeiro. O retorno lento de A não pode recolocar
+  // não lidas antigas, regredir o visto ou apagar a fila/estado atual da IA.
+  for (const marcar_lida of [false, true]) {
+    const t = await tela({ marcar_lida, adiarRespostas: true })
+    const A = '2026-10-19T13:00:00.100000Z'
+    const B = '2026-10-19T13:01:00.200000Z'
+    await t.chegar('c1', 2, A)
+    t.rel.avancar(1500)
+    await tique()
+    const atual = {
+      numero_duoke: 0, visto_em: B, aguardando_resposta: true,
+      falta_responder: true, tem_rascunho: true, ia_pausada: true,
+      humano: { motivos: ['ia_pausada'], rotulos: ['IA pausada'], assuntos: [], assuntos_rotulos: [] },
+    }
+    await t.chegar('c1', 3, B, atual)
+    await tique()
+    assert.deepEqual(t.corpos, [{ ate: A }, { ate: B }])
+    t.responder[1]({ conversa: { id: 'c1', nao_lidas: 3, plataforma: 'shopee', ...atual } })
+    await tique()
+    await tique()
+    assert.equal(t.emitidos.length, 1)
+    const depoisDeB = { ...t.detalhe.value.conversa }
+    t.responder[0]({
+      marcada: marcar_lida,
+      conversa: {
+        id: 'c1', nao_lidas: 0, plataforma: 'shopee', visto_em: A,
+        numero_duoke: 2, aguardando_resposta: false, falta_responder: false,
+        tem_rascunho: false, ia_pausada: false, humano: null,
+      },
+    })
+    await tique()
+    await tique()
+    assert.deepEqual(t.detalhe.value.conversa, depoisDeB)
+    assert.equal(t.emitidos.length, 1, 'o retorno antigo não publica outro estado da conversa')
   }
 
   // Quem só lê, com mensagem nova na conversa aberta: nada.

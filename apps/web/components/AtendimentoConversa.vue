@@ -527,6 +527,9 @@ async function gravarVisto(id: string, rota: 'lida' | 'visto') {
   const r = await api<LidaResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/${rota}`, { method: 'POST', body: { ate } })
   const d = detalhe.value
   if (!r?.conversa || id !== props.conversaId || !d || d.conversa.id !== id) return
+  // Enquanto o POST viajava, o polling pode ter mostrado mensagens novas e
+  // gravado outro visto. A resposta do snapshot antigo não regride a linha.
+  if ((d.visto_ate ?? null) !== ate) return
   // O /lida que não marcou na plataforma deixa as não lidas como estão; o visto vale sempre.
   const c = { ...d.conversa, ...r.conversa, nao_lidas: r.conversa.nao_lidas ?? (r.marcada ? 0 : d.conversa.nao_lidas) }
   detalhe.value = { ...d, conversa: c }

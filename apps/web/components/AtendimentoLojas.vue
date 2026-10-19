@@ -361,7 +361,7 @@ function contador(n: number) {
   return n > 99 ? '99+' : String(n)
 }
 // A régua do número da loja na Caixa (15/10/2026), no title.
-const TEXTO_NUMERO_DA_LOJA = 'mensagem(ns) do cliente desde a última resposta ou desde que alguém abriu a conversa — como no Duoke'
+const TEXTO_NUMERO_DA_LOJA = 'mensagem(ns) não lida(s) do cliente'
 function motivo(l: LojaBarra): string {
   const partes = [`${plataformaInfo(l.plataforma).nome} · ${l.conta}`]
   if (l.apagada) {
@@ -458,7 +458,7 @@ const tituloTodas = computed(() => {
   const n = props.numero === 'humano'
     ? `${total.value} esperando uma pessoa (a IA não pode responder)`
     : props.numero === 'nao_lidas_duoke'
-      ? `${total.value} mensagem(ns) não lida(s) esperando resposta (como no Duoke)`
+      ? `${total.value} mensagem(ns) não lida(s)`
       : `${total.value} não lida(s)`
   return corte.value.length
     ? `Todas as lojas ${nomeCorte.value} — ${n}\nPara ver as outras plataformas: "Todas" no menu Plataforma, acima`
@@ -544,7 +544,7 @@ function ativaLoja(l: LojaBarra) {
             :class="ativaPlataforma(g.plataforma) ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
             :aria-pressed="ativaPlataforma(g.plataforma)"
             :aria-label="`Só ${g.nome}: todas as lojas ${g.nome}`"
-            :title="`Só ${g.nome}: todas as lojas ${g.nome}${g.nao_lidas ? ` — ${g.nao_lidas} ${numero === 'humano' ? 'esperando uma pessoa' : numero === 'nao_lidas_duoke' ? 'mensagem(ns) não lida(s) esperando resposta (como no Duoke)' : 'esperando resposta'}` : ''}`"
+            :title="`Só ${g.nome}: todas as lojas ${g.nome}${g.nao_lidas ? ` — ${g.nao_lidas} ${numero === 'humano' ? 'esperando uma pessoa' : numero === 'nao_lidas_duoke' ? 'mensagem(ns) não lida(s)' : 'esperando resposta'}` : ''}`"
             :data-grupo="g.plataforma"
             @click="escolherGrupo(g.plataforma)"
           >{{ plataformaInfo(g.plataforma).curto }}</button>
