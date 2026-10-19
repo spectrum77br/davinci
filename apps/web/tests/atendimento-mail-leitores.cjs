@@ -141,7 +141,7 @@ async function principal() {
     for (const chave of ['"leitores"', '"candidatos"', '"atualizado_por"', '"atualizado_em"', '"ativo"', '"nome"']) assert.ok(svc.includes(chave), chave)
     const central = api('routers/mail.py')
     // Ler: a regra de leitores; escrever: o allowed() dele (user_mailbox).
-    assert.match(central, /"so_leitura": True/)
+    assert.match(central, /item\["so_leitura"\] = True/)
     assert.match(central, /async def readable_mailbox[\s\S]*pode_ver_caixa/)
     assert.match(central, /def list_messages[\s\S]*?await readable_mailbox\(/)
     assert.match(central, /def get_message[\s\S]*?user_message\(session, message_id, user, read=True\)/)

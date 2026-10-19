@@ -27,8 +27,8 @@ from app.schemas.mail import (
 )
 from app.security.cipher import decrypt_bytes, decrypt_json, encrypt_json
 from app.services import mail_central as service
+from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento import caixa as mailbox_settings
-from app.services.mail_atendimento import leitores as mailbox_readers
 from app.services.mail_atendimento import responder as mail_responder
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
@@ -63,7 +63,11 @@ async def limited_body(request: Request, model: type[BaseModel], limit: int) -> 
 
 async def user_mailbox(session: AsyncSession, mailbox_id: UUID, user: User) -> MailMailbox:
     mailbox = await session.get(MailMailbox, mailbox_id)
-    if mailbox is None or not service.allowed(mailbox, user):
+    if (
+        mailbox is None
+        or not service.allowed(mailbox, user)
+        or not await mail_admin.pode_ver_caixa(session, mailbox, user)
+    ):
         raise fail("mailbox_not_found")
     return mailbox
 
@@ -73,7 +77,7 @@ async def readable_mailbox(session: AsyncSession, mailbox_id: UUID, user: User) 
     # "Quem mais vê" list (mailbox_readers.pode_ver_caixa). Writing stays on
     # `user_mailbox` (allowed()). Same 404 for whoever cannot see it.
     mailbox = await session.get(MailMailbox, mailbox_id)
-    if mailbox is None or not await mailbox_readers.pode_ver_caixa(session, mailbox, user):
+    if mailbox is None or not await mail_admin.pode_ver_caixa(session, mailbox, user):
         raise fail("mailbox_not_found")
     return mailbox
 
@@ -93,7 +97,9 @@ async def user_message(
     lock: bool = False,
     read: bool = False,
 ) -> tuple[MailMessage, MailMailbox]:
-    query = select(MailMessage).where(MailMessage.id == message_id)
+    query = select(MailMessage).where(
+        MailMessage.id == message_id, mail_admin.filtro_mensagem(user)
+    )
     if lock:
         query = query.with_for_update()
     message = await session.scalar(query)
@@ -128,16 +134,18 @@ async def list_mailboxes(session: Session, user: ActiveUser, response: Response)
     response.headers["Cache-Control"] = "no-store"
     query = select(MailMailbox).order_by(MailMailbox.label)
     if user.role != UserRole.ADMIN:
-        query = query.where(mailbox_readers.filtro_de_leitura(user))
+        query = query.where(mail_admin.filtro_caixas(user))
     mailboxes = (await session.scalars(query)).all()
-    return {
-        "items": [
-            service.mailbox_view(mailbox)
-            if service.allowed(mailbox, user)
-            else {**service.mailbox_view(mailbox), "so_leitura": True}
-            for mailbox in mailboxes
-        ]
-    }
+    items = []
+    for mailbox in mailboxes:
+        item = service.mailbox_view(mailbox)
+        if not service.allowed(mailbox, user):
+            item["so_leitura"] = True
+        if await mail_admin.tem_politica(session, mailbox.id, user):
+            # A concessão é de mensagens, não da lista de aliases das outras lojas.
+            item.update(address="", aliases=[], leitura_filtrada=True)
+        items.append(item)
+    return {"items": items}
 
 
 @router.post("/mailboxes", status_code=201)
@@ -212,6 +220,7 @@ async def list_messages(
             select(MailMessage)
             .where(
                 MailMessage.mailbox_id == mailbox_id,
+                mail_admin.filtro_mensagem(user),
             )
             .order_by(MailMessage.received_at.desc(), MailMessage.id.desc())
             .offset(offset)

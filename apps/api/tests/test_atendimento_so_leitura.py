@@ -240,7 +240,11 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
     assert chamadas
     for metodo, molde, caminho in chamadas:
         r = await client.request(metodo, caminho)
-        if (metodo, molde) in rota_email.LEITURAS_SO_DE_QUEM_MEXE:
+        if molde.startswith(URL + "/email/admin"):
+            # Administração de acesso/lixeira (19/10): nem leitura do painel
+            # fica disponível a leitores ou a admins fora da lista operacional.
+            assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
+        elif (metodo, molde) in rota_email.LEITURAS_SO_DE_QUEM_MEXE:
             # As filas de e-mail (08/10/2026): só quem mexe — podem ter e-mail
             # de qualquer loja e de endereço interno.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)

@@ -321,6 +321,12 @@ async def queue_reply(
     form_recipient: str | None = None,
     subject_tag: str | None = None,
 ) -> MailOutbox:
+    from app.services.mail_atendimento import administracao as mail_admin
+
+    if not await session.scalar(
+        select(MailMessage.id).where(MailMessage.id == message.id, mail_admin.filtro_mensagem(user))
+    ):
+        raise MailError("author_access_revoked", 404)
     # The route locks the original message. A repeated request never sends twice.
     #
     # `form_recipient` / `subject_tag` are internal-only (never from HTTP: the
@@ -485,6 +491,17 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
         # Recheck the author still has access before dispatching a queued reply.
         author = await session.get(User, job.author_user_id)
         if author is None or author.status.value != "active" or not allowed(mailbox, author):
+            job.status = "failed"
+            job.error_code = "author_access_revoked"
+            job.completed_at = now
+            continue
+        from app.services.mail_atendimento import administracao as mail_admin
+
+        if not await session.scalar(
+            select(MailMessage.id).where(
+                MailMessage.id == job.message_id, mail_admin.filtro_mensagem(author)
+            )
+        ):
             job.status = "failed"
             job.error_code = "author_access_revoked"
             job.completed_at = now

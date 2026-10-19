@@ -50,7 +50,7 @@ from app.services.atendimento.constantes import (
     FONTE_TUTA,
     MSG_ENVIANDO,
 )
-from app.services.mail_atendimento import enderecos, ponte
+from app.services.mail_atendimento import administracao, enderecos, ponte
 from app.services.mail_atendimento.constantes import (
     PLATAFORMA_SITE,
     ROTULO_ALERTA_DO_CHAMADO,
@@ -191,7 +191,9 @@ def mesma_cliente(a: AtendimentoConversa, b: AtendimentoConversa) -> str | None:
     return None
 
 
-async def outros_chamados(session: AsyncSession, conversa: AtendimentoConversa) -> list[dict]:
+async def outros_chamados(
+    session: AsyncSession, conversa: AtendimentoConversa, *, user: User | None = None
+) -> list[dict]:
     """Outros chamados ABERTOS da MESMA cliente na MESMA marca (sugestão de agrupar).
 
     A mesma cliente: o mesmo e-mail, o mesmo telefone ou o mesmo pedido
@@ -231,6 +233,7 @@ async def outros_chamados(session: AsyncSession, conversa: AtendimentoConversa) 
                 AtendimentoConversa.situacao != CONVERSA_FECHADA,
                 AtendimentoConversa.dados["fonte"].astext == FONTE_TUTA,
                 AtendimentoConversa.dados[ponte.CHAVE]["marca"].astext == marca,
+                *([administracao.filtro_conversa(user)] if user is not None else []),
             )
             .order_by(AtendimentoConversa.ultima_mensagem_em.desc().nulls_last())
             .limit(MAX_OUTROS + len(recusados))

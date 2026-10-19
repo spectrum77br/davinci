@@ -53,6 +53,7 @@ from app.routers.atendimento import _nomes_das_lojas
 from app.routers.mail import readable_mailbox
 from app.services.atendimento import acesso, separa_email
 from app.services.atendimento import lojas as lojas_svc
+from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento import indice, pastas, ponte, regras, rotear
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
@@ -226,10 +227,14 @@ def _ordem_da_loja(item: dict) -> tuple:
 
 
 async def _contar_lojas(
-    session: AsyncSession, mailbox_id: UUID, cad: rotear.Cadastro, *, pasta: str | None
+    session: AsyncSession, mailbox_id: UUID, cad: rotear.Cadastro, *, pasta: str | None, user: User
 ) -> dict[str, int]:
     caixa = indice.linhas_da_caixa(mailbox_id)
-    q = select(caixa.c.chave, func.count()).group_by(caixa.c.chave)
+    q = (
+        select(caixa.c.chave, func.count())
+        .where(mail_admin.filtro_mensagem(user, caixa.c.message_id))
+        .group_by(caixa.c.chave)
+    )
     if pasta is not None:
         q = q.where(caixa.c.pasta_chave == pasta)
     saida: dict[str, int] = {}
@@ -240,14 +245,14 @@ async def _contar_lojas(
 
 
 async def _contar_pastas(
-    session: AsyncSession, mailbox_id: UUID, cad: rotear.Cadastro, *, loja: str | None
+    session: AsyncSession, mailbox_id: UUID, cad: rotear.Cadastro, *, loja: str | None, user: User
 ) -> dict[tuple[str, str], int]:
     if loja is None:
         # Sem filtro de loja: só o índice (sem a meta) — o mais barato.
         i = MailCaixaIndice
         q = (
             select(i.pasta_chave, i.pasta_tipo, func.count())
-            .where(i.mailbox_id == mailbox_id)
+            .where(i.mailbox_id == mailbox_id, mail_admin.filtro_mensagem(user, i.message_id))
             .group_by(i.pasta_chave, i.pasta_tipo)
         )
     else:
@@ -255,13 +260,14 @@ async def _contar_pastas(
         q = (
             select(caixa.c.pasta_chave, caixa.c.pasta_tipo, func.count())
             .where(caixa.c.chave.in_(indice.equivalentes(loja, cad)))
+            .where(mail_admin.filtro_mensagem(user, caixa.c.message_id))
             .group_by(caixa.c.pasta_chave, caixa.c.pasta_tipo)
         )
     return {(c, t): int(n) for c, t, n in (await session.execute(q)).all()}
 
 
 async def _nomes_das_pastas(
-    session: AsyncSession, mailbox_id: UUID, chaves: set[str]
+    session: AsyncSession, mailbox_id: UUID, chaves: set[str], user: User
 ) -> dict[str, tuple[str, str | None]]:
     """O nome (e o caminho) de cada pasta PESSOAL: do e-mail mais novo dela, decifrado aqui."""
     pessoais = [c for c in chaves if c.startswith("p")]
@@ -272,7 +278,11 @@ async def _nomes_das_pastas(
         await session.execute(
             select(i.pasta_chave, i.message_id)
             .distinct(i.pasta_chave)
-            .where(i.mailbox_id == mailbox_id, i.pasta_chave.in_(pessoais))
+            .where(
+                i.mailbox_id == mailbox_id,
+                i.pasta_chave.in_(pessoais),
+                mail_admin.filtro_mensagem(user, i.message_id),
+            )
             .order_by(i.pasta_chave, i.recebido_em.desc(), i.message_id.desc())
         )
     ).all()
@@ -302,11 +312,22 @@ async def pastas_da_caixa(
     loja, pasta = _loja(loja), _pasta(pasta)
     base, faltam = await indice.preparar(session, mailbox)
     await session.commit()
+    if faltam:
+        faltando = (
+            indice._faltando(base, so_urgente=True)
+            .where(mail_admin.filtro_mensagem(user))
+            .subquery()
+        )
+        faltam = int(await session.scalar(select(func.count()).select_from(faltando)) or 0)
     cad = base.cad
 
-    todas = await _contar_pastas(session, mailbox.id, cad, loja=None)
-    filtradas = todas if loja is None else await _contar_pastas(session, mailbox.id, cad, loja=loja)
-    nomes = await _nomes_das_pastas(session, mailbox.id, {c for c, _t in todas})
+    todas = await _contar_pastas(session, mailbox.id, cad, loja=None, user=user)
+    filtradas = (
+        todas
+        if loja is None
+        else await _contar_pastas(session, mailbox.id, cad, loja=loja, user=user)
+    )
+    nomes = await _nomes_das_pastas(session, mailbox.id, {c for c, _t in todas}, user)
     itens = []
     for (chave, tipo_tuta), total in todas.items():
         tipo = indice.tipo_da_chave(chave)
@@ -336,9 +357,11 @@ async def pastas_da_caixa(
     for item in itens:
         item.pop("chave")
 
-    lojas_todas = await _contar_lojas(session, mailbox.id, cad, pasta=None)
+    lojas_todas = await _contar_lojas(session, mailbox.id, cad, pasta=None, user=user)
     lojas_filtradas = (
-        lojas_todas if pasta is None else await _contar_lojas(session, mailbox.id, cad, pasta=pasta)
+        lojas_todas
+        if pasta is None
+        else await _contar_lojas(session, mailbox.id, cad, pasta=pasta, user=user)
     )
     selos = await rotulos(session, set(lojas_todas), cad)
     lojas = [
@@ -379,7 +402,9 @@ async def _conversas_abriveis(session: AsyncSession, user: User, ids: set[UUID])
     linhas = (
         await session.execute(
             select(c.id, c.integration_id).where(
-                c.id.in_(ids), separa_email.conversa_de_email_sql(c)
+                c.id.in_(ids),
+                separa_email.conversa_de_email_sql(c),
+                mail_admin.filtro_conversa(user, c),
             )
         )
     ).all()
@@ -406,9 +431,20 @@ async def lista_da_caixa(
     pasta, loja, depois_de = _pasta(pasta), _loja(loja), _antes(antes)
     base, faltam = await indice.preparar(session, mailbox)
     await session.commit()
+    if faltam:
+        faltando = (
+            indice._faltando(base, so_urgente=True)
+            .where(mail_admin.filtro_mensagem(user))
+            .subquery()
+        )
+        faltam = int(await session.scalar(select(func.count()).select_from(faltando)) or 0)
 
     caixa = indice.linhas_da_caixa(mailbox.id)
-    q = select(caixa).order_by(caixa.c.recebido_em.desc(), caixa.c.message_id.desc())
+    q = (
+        select(caixa)
+        .where(mail_admin.filtro_mensagem(user, caixa.c.message_id))
+        .order_by(caixa.c.recebido_em.desc(), caixa.c.message_id.desc())
+    )
     if pasta is not None:
         q = q.where(caixa.c.pasta_chave == pasta)
     if loja is not None:

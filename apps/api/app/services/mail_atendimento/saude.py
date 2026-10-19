@@ -45,7 +45,8 @@ import structlog
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import MailMailbox, MailMessage, MailOutbox, User
+from app.models import MailMailbox, MailMessage, MailOutbox, User, UserRole
+from app.models.mail_admin import MailAcesso
 from app.models.mail_atendimento import (
     MailAgenteV2,
     MailFolder,
@@ -55,8 +56,8 @@ from app.models.mail_atendimento import (
 )
 from app.redis_client import redis
 from app.services import mail_central
+from app.services.mail_atendimento import administracao, ponte, rotear
 from app.services.mail_atendimento import caixa as config_caixa
-from app.services.mail_atendimento import ponte, rotear
 from app.services.mail_atendimento.constantes import ESTADO_NOVO
 
 logger = structlog.get_logger()
@@ -265,23 +266,41 @@ async def caixas_visiveis(session: AsyncSession, user: User) -> list[MailMailbox
     saida: list[MailMailbox] = []
     for mailbox in caixas:
         cfg = await config_caixa.config_da_caixa(session, mailbox.id)
-        if cfg.empresa or mail_central.allowed(mailbox, user):
+        if user.role != UserRole.ADMIN:
+            politica = await session.get(MailAcesso, (mailbox.id, user.id))
+            if politica is not None and politica.modo == "bloqueado":
+                continue
+        if (
+            cfg.empresa
+            or mail_central.allowed(mailbox, user)
+            or await administracao.pode_ver_caixa(session, mailbox, user)
+        ):
             saida.append(mailbox)
     return saida
 
 
-async def linha_da_caixa(session: AsyncSession, mailbox: MailMailbox) -> dict:
+async def linha_da_caixa(
+    session: AsyncSession, mailbox: MailMailbox, *, user: User | None = None
+) -> dict:
     """A linha da Saúde: estado, sinal, chaves e o que a ponte decidiu (contagens)."""
     cfg = await config_caixa.config_da_caixa(session, mailbox.id)
     agora = datetime.now(UTC)
     visto = _utc(mailbox.last_seen_at)
     online = visto is not None and visto > agora - timedelta(minutes=3)
+    filtrada = user is not None and await administracao.tem_politica(session, mailbox.id, user)
     contagens = {
         estado: int(n)
         for estado, n in (
             await session.execute(
                 select(MailMessageMeta.estado, func.count())
-                .where(MailMessageMeta.mailbox_id == mailbox.id)
+                .where(
+                    MailMessageMeta.mailbox_id == mailbox.id,
+                    *(
+                        [administracao.filtro_mensagem(user, MailMessageMeta.message_id)]
+                        if user is not None
+                        else []
+                    ),
+                )
                 .group_by(MailMessageMeta.estado)
             )
         ).all()
@@ -304,6 +323,11 @@ async def linha_da_caixa(session: AsyncSession, mailbox: MailMailbox) -> dict:
             .where(
                 MailOutbox.mailbox_id == mailbox.id,
                 MailOutboxMeta.origem == "conversa",
+                *(
+                    [administracao.filtro_mensagem(user, MailOutbox.message_id)]
+                    if user is not None
+                    else []
+                ),
                 or_(
                     MailOutbox.status == "uncertain",
                     and_(
@@ -338,7 +362,8 @@ async def linha_da_caixa(session: AsyncSession, mailbox: MailMailbox) -> dict:
             "pausado_ate": cfg.envio_pausado_ate,
         },
         "emails": contagens,
-        "pastas_sem_revisar": pastas_novas,
+        # Revisão de pasta é global, não uma contagem de mensagens permitidas.
+        "pastas_sem_revisar": None if filtrada else pastas_novas,
         "envios_a_conferir": a_conferir,
     }
 

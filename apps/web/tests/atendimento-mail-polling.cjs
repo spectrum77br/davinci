@@ -20,7 +20,7 @@ function events(extra = {}) {
   const listeners = new Map()
   return { ...extra, listeners, addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: (type, fn) => { if (listeners.get(type) === fn) listeners.delete(type) }, fire: (type) => listeners.get(type)?.() }
 }
-function mount() {
+function mount(props = {}) {
   let now = 1_000_000, sequence = 0
   const timers = new Map(), mounted = [], unmounted = [], calls = []
   const document = events({ hidden: false }), window = events({ confirm: () => true })
@@ -46,7 +46,7 @@ function mount() {
   const requiring = (name) => name === 'lucide-vue-next' ? {} : require(name)
   new Function('require', 'module', 'exports', ...Object.keys(globals), script)(requiring, mod, mod.exports, ...Object.values(globals))
   const scope = Vue.effectScope()
-  const state = Vue.proxyRefs(scope.run(() => mod.exports.default.setup(Vue.reactive({ isAdmin: true }), { expose: () => {}, emit: () => {} })))
+  const state = Vue.proxyRefs(scope.run(() => mod.exports.default.setup(Vue.reactive({ isAdmin: true, ...props }), { expose: () => {}, emit: () => {} })))
   return { state, data, calls, timers, document, window,
     start: async () => { for (const fn of mounted) await fn(); await settle() },
     stop: () => { unmounted.forEach((fn) => fn()); scope.stop() },
@@ -176,6 +176,68 @@ async function run() {
     m.data.first = page(['recovered']); await m.advance(5_000)
     assert.equal(m.state.messages[0].id, 'recovered', 'next poll resumes after a failed read')
     assert.ok(m.calls.every((x) => x.opts.timeout === 15_000 && x.opts.retry === 0), 'all reads are bounded and never retried in parallel')
+    m.stop()
+  }
+  {
+    const m = mount({ canOperate: true }); await m.start(); await m.state.openMessage('m1')
+    m.state.draft = 'Rascunho mantido'
+    const delayed = deferred(); let held = false
+    m.data.intercept = (url) => { if (url.includes('/lista?') && !held) { held = true; return delayed.promise } }
+    const pendingRead = m.state.refresh(true); await settle()
+    m.state.chooseSection('admin'); await settle()
+    delayed.resolve(page(['resultado-anterior'])); await pendingRead; await settle()
+    assert.equal(m.state.messages.some((item) => item.id === 'resultado-anterior'), false, 'entrar em Administração invalida resposta da lista já iniciada')
+    const before = m.calls.length
+    await m.advance(60_000); m.window.fire('focus'); m.document.fire('visibilitychange'); await settle()
+    await m.state.openMessage('forcado'); await m.state.refresh()
+    assert.equal(m.calls.length, before, 'Administração não consulta corpo/lista em segundo plano')
+    assert.equal(m.timers.size, 0)
+    m.data.intercept = null; m.data.first = page(['atual', 'm1'])
+    m.state.chooseSection('mailboxes'); await settle()
+    assert.equal(m.state.messages[0].id, 'atual', 'voltar à caixa relê os dados atuais')
+    assert.equal(m.state.draft, 'Rascunho mantido')
+    m.stop()
+  }
+  {
+    const m = mount({ canOperate: true }); await m.start()
+    const delayed = deferred()
+    m.data.intercept = (url) => url === '/api/mail/messages/antigo' ? delayed.promise : undefined
+    const opening = m.state.openMessage('antigo'); await settle()
+    m.state.chooseSection('admin'); delayed.resolve(body('antigo')); await opening; await settle()
+    assert.equal(m.state.detail, null, 'corpo atrasado não reaparece na Administração')
+    m.stop()
+  }
+  for (const status of [403, 404, 500]) {
+    const m = mount(); await m.start(); await m.state.openMessage('m1')
+    m.state.draft = 'Preservar rascunho em memória'
+    m.data.intercept = (url) => url === '/api/mail/messages/m1' ? Promise.reject(Object.assign(new Error('restrito'), { status })) : undefined
+    await m.advance(30_000)
+    assert.equal(m.state.detail === null, status !== 500, 'revogação/exclusão fecha corpo; erro temporário preserva o conteúdo anterior')
+    assert.equal(m.state.draft, 'Preservar rascunho em memória')
+    if (status !== 500) assert.match(m.state.error, /não está mais disponível/)
+    m.stop()
+  }
+  {
+    const m = mount(); await m.start(); await m.state.openMessage('m1')
+    m.data.intercept = (url) => url.includes('/lista?') ? Promise.reject(Object.assign(new Error('negado'), { status: 403 })) : undefined
+    await m.advance(5_000)
+    assert.deepEqual(m.state.messages, [])
+    assert.deepEqual(m.state.folders, []); assert.deepEqual(m.state.mailStores, [])
+    assert.equal(m.state.detail, null)
+    assert.equal(m.count('/messages?'), 0, 'revogação não tenta a lista legada')
+    m.stop()
+  }
+  {
+    const m = mount({ canOperate: true }); await m.start(); await m.state.openMessage('m1')
+    m.state.reviewDelete(); m.state.deleteReason = 'Motivo ainda em revisão'
+    const target = m.state.deleteTarget
+    m.data.detail.outbox = [{ status: 'queued' }]
+    await m.advance(30_000)
+    assert.equal(m.state.deleteTarget, target, 'atualização do mesmo e-mail preserva a revisão de exclusão')
+    assert.equal(m.state.deleteReason, 'Motivo ainda em revisão')
+    assert.equal(m.state.canDelete, false, 'envio pendente novo bloqueia a exclusão durante a revisão')
+    await m.state.deleteMessage()
+    assert.equal(m.calls.filter((c) => c.opts.method).length, 0)
     m.stop()
   }
   console.log('Mail polling tests passed: 5s arrivals, 30s detail, serialized reads, drafts, cursors, filters, visibility and stale responses.')

@@ -209,7 +209,7 @@ const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
 const emailTique = ref(0)
 // A seção da aba E-mail que a pessoa escolheu nesta visita (Caixas | Filas):
 // o AtendimentoMail monta de novo a cada vez que a aba abre e respeita a escolha.
-const emailSecao = ref<'' | 'mailboxes' | 'queues'>('')
+const emailSecao = ref<'' | 'mailboxes' | 'queues' | 'admin'>('')
 async function carregarContagensEmail() {
   // Sem o /atendimento, sem as conversas de e-mail (a rota recusaria): não pergunta.
   if (!canSugerir.value) return

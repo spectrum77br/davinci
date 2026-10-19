@@ -18,7 +18,7 @@ from app.models.mail_atendimento import MailMessageMeta
 from app.services.atendimento import separa_email
 from app.services.atendimento.constantes import PLATAFORMAS_EXTERNAS
 from app.services.atendimento.etiqueta_fatos import chaves_do_pedido
-from app.services.mail_atendimento import ponte
+from app.services.mail_atendimento import administracao, ponte
 from app.services.mail_atendimento.constantes import ESTADOS_COM_TEXTO
 
 _NUMERO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
@@ -117,4 +117,16 @@ async def listar(
             pertence = bool(provas) and provas <= numeros
         if pertence:
             selecionadas.append((meta, message, grupo))
+    # Conferir a política DEPOIS de reunir todas as provas do grupo: ocultar
+    # Y antes disso faria um retorno sem número parecer exclusivo de X.
+    if selecionadas and scope.email_user is not None:
+        permitidos = set(
+            await session.scalars(
+                select(MailMessage.id).where(
+                    MailMessage.id.in_([m.message_id for m, _, _ in selecionadas]),
+                    administracao.filtro_mensagem(scope.email_user),
+                )
+            )
+        )
+        selecionadas = [linha for linha in selecionadas if linha[0].message_id in permitidos]
     return EmailsDaVenda("ok", pedido, selecionadas)

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { Download, Folder, Mail, MessageSquare, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldAlert, ShieldCheck, X } from 'lucide-vue-next'
+import { Download, Folder, Mail, MessageSquare, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import type { ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 
-type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean }
+type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean; leitura_filtrada?: boolean }
 type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean; store?: StoreBadge; folder_id?: string; subject_hidden?: boolean; conversation_id?: string | null }
 // Folders and store badges ("Caixas", 09/10/2026 — the owner: "bring the store
 // name here too; keep it separate and looking like Tuta"). routers/mail_caixa.py:
@@ -41,7 +41,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // `rememberedSection` (v-model) = the section the person clicked earlier in
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
-type Section = 'mailboxes' | 'queues'
+type Section = 'mailboxes' | 'queues' | 'admin'
 const props = defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>()
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
@@ -55,6 +55,10 @@ const messages = ref<Summary[]>([])
 const detail = ref<Detail | null>(null)
 const loading = ref(false)
 const sending = ref(false)
+const deleting = ref(false)
+const deleteTarget = ref<{ id: string; mailbox: string; assunto: string } | null>(null)
+const deleteReason = ref('')
+const notice = ref('')
 const error = ref('')
 const more = ref(false)
 const draft = ref('')
@@ -104,6 +108,7 @@ const currentStore = computed(() => (storeKey.value ? mailStores.value.find((ite
 // Who sees "Filas": whoever operates Atendimento (every queue) and whoever only
 // reads it (the conversation queues only — AtendimentoMailFilas `podeMexer`).
 const seesQueues = computed(() => !!props.canOperate || !!props.canView)
+const canAdminister = computed(() => props.isAdmin && !!props.canOperate)
 // Email waiting for a reply when the tab opens (13/10/2026 — it no longer
 // counts in the Caixa Humano): the tab opens on "Filas", admins and mailbox
 // owners included. Decided ONCE, when the tab opens (this component mounts
@@ -112,10 +117,12 @@ const seesQueues = computed(() => !!props.canOperate || !!props.canView)
 // it across tab switches) — whoever picked "Caixas" keeps landing there.
 const chosenSection = ref<'' | Section>(props.rememberedSection || (seesQueues.value && (props.waiting ?? 0) > 0 ? 'queues' : ''))
 function chooseSection(value: Section) {
+  if (sending.value || deleting.value || resolving.value || (value === 'admin' && !canAdminister.value)) return
   chosenSection.value = value
   emit('update:rememberedSection', value)
 }
 const section = computed(() => {
+  if (chosenSection.value === 'admin' && canAdminister.value) return 'admin'
   if (chosenSection.value === 'queues' && seesQueues.value) return 'queues'
   if (chosenSection.value === 'mailboxes') return 'mailboxes'
   return seesQueues.value && !props.isAdmin && !mailboxes.value.length ? 'queues' : 'mailboxes'
@@ -126,7 +133,11 @@ const configuring = ref(false)
 const resolving = ref('')
 
 const pending = computed(() => detail.value?.outbox.some((job) => ['queued', 'leased', 'uncertain'].includes(job.status)) ?? false)
-const canReply = computed(() => !readOnly.value && detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value)
+const canReply = computed(() => !deleting.value && !readOnly.value && detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value)
+const canDelete = computed(() => canAdminister.value && !!detail.value && !readOnly.value && !sending.value && !deleting.value && !resolving.value && !pending.value)
+// Uma caixa filtrada não revela os aliases das outras lojas. Quem já podia
+// responder continua com o remetente deste e-mail autorizado no detalhe.
+const replyAddresses = computed(() => mailbox.value?.aliases.length ? mailbox.value.aliases : detail.value?.reply.from_address ? [detail.value.reply.from_address] : [])
 const states: Record<string, string> = { online: 'Conectada', offline: 'Mac desconectado', login_required: 'Faça login no Mac', error: 'Conexão precisa de atenção' }
 const statuses: Record<string, string> = { queued: 'Na fila do Mac', leased: 'Envio em andamento', sent: 'Aceita pelo serviço de e-mail', failed: 'Não enviada', uncertain: 'Precisa conferir no Tuta — não reenviada' }
 
@@ -152,11 +163,16 @@ const knownErrors: Record<string, string> = {
   job_not_found: 'Resposta não encontrada. Atualize.',
   queued_timeout: 'A resposta ficou mais de 2 h na fila sem sair: nada foi enviado. Responda de novo se ainda fizer sentido.',
   author_access_revoked: 'Quem respondeu perdeu o acesso à caixa antes do envio: nada foi enviado.',
+  email_envio_pendente: 'Há uma resposta pendente ou em conferência para este e-mail. Confira o envio antes de excluir.',
+  email_nao_encontrado: 'Este e-mail não está mais disponível. Atualize a lista.',
 }
 
 function errorText(reason: any) {
   const code = reason?.data?.detail?.code
   return knownErrors[code] || 'Não foi possível concluir. Atualize e tente novamente.'
+}
+function accessLost(reason: any) {
+  return [403, 404].includes(Number(reason?.status || reason?.statusCode || reason?.response?.status))
 }
 
 // Why a queued reply did not go out (the lease marked it failed): e.g. the
@@ -206,12 +222,12 @@ function listKey() {
 }
 
 async function loadFolders(): Promise<void> {
-  if (disposed) return
+  if (disposed || deleting.value || section.value === 'admin') return
   const key = listKey()
   if (folderRequest) {
     const previous = folderRequest
     await previous.promise
-    if (disposed || key !== listKey() || previous.key === key) return
+    if (disposed || section.value === 'admin' || key !== listKey() || previous.key === key) return
     return loadFolders()
   }
   const promise = readFolders(key)
@@ -229,7 +245,7 @@ async function readFolders(key: string) {
   const search = query.toString()
   try {
     const result = await api<{ pastas: FolderItem[]; lojas: StoreItem[]; faltam: number }>(`/api/mail/mailboxes/${id}/pastas${search ? `?${search}` : ''}`, READ_OPTIONS)
-    if (disposed || generation !== foldersGeneration || key !== listKey()) return
+    if (disposed || section.value === 'admin' || generation !== foldersGeneration || key !== listKey()) return
     folders.value = result.pastas
     mailStores.value = result.lojas
     organizing.value = result.faltam
@@ -243,7 +259,10 @@ async function readFolders(key: string) {
       resetList()
       void loadList()
     }
-  } catch {
+  } catch (reason) {
+    if (!disposed && generation === foldersGeneration && key === listKey() && accessLost(reason)) {
+      folders.value = []; mailStores.value = []; organizing.value = 0
+    }
     // Keeps the column it had; without the routes there is no column at all.
   }
 }
@@ -251,6 +270,7 @@ async function readFolders(key: string) {
 // The list first (its route indexes what just arrived), then the counts, so
 // both read the same index.
 async function loadList() {
+  if (disposed || deleting.value || section.value === 'admin') return
   const key = listKey()
   await loadMessages()
   if (!disposed && key === listKey()) await loadFolders()
@@ -268,7 +288,7 @@ function resetList() {
 }
 
 function chooseFilter(kind: 'folder' | 'store', value: string | null) {
-  if (sending.value || disposed) return
+  if (sending.value || deleting.value || disposed || section.value === 'admin') return
   if (kind === 'folder') folderId.value = value
   else storeKey.value = value
   resetList()
@@ -298,12 +318,12 @@ async function loadMailboxes() {
 // Share the current read instead of invalidating a page that is still loading.
 // A different box/filter waits for that read, then fetches its own selection.
 async function loadMessages(append = false, preservePages = false): Promise<void> {
-  if (disposed) return
+  if (disposed || deleting.value || section.value === 'admin') return
   const key = listKey()
   if (listRequest) {
     const previous = listRequest
     await previous.promise
-    if (disposed || key !== listKey()) return
+    if (disposed || section.value === 'admin' || key !== listKey()) return
     if (previous.key === key && previous.append === append) return
     return loadMessages(append, preservePages)
   }
@@ -341,7 +361,7 @@ async function readMessages(append: boolean, preservePages: boolean, key: string
   const generation = ++listGeneration
   const id = mailboxId.value
   loading.value = true
-  const current = () => !disposed && generation === listGeneration && key === listKey()
+  const current = () => !disposed && !deleting.value && section.value !== 'admin' && generation === listGeneration && key === listKey()
   try {
     if (!append || listSource.value === 'index') {
       const indexed = await loadIndexed(id, append).catch((reason) => {
@@ -361,16 +381,29 @@ async function readMessages(append: boolean, preservePages: boolean, key: string
     if (!current()) return
     applyPage(result.items, append, preservePages, result.more, null, 'plain')
     organizing.value = 0
-  } catch (reason) { if (current()) error.value = errorText(reason) }
+  } catch (reason) {
+    if (current()) {
+      error.value = errorText(reason)
+      if (accessLost(reason)) {
+        messages.value = []; more.value = false; nextCursor.value = null
+        folders.value = []; mailStores.value = []; organizing.value = 0
+        ++detailGeneration; detail.value = null; openedSummary.value = null
+      }
+    }
+  }
   finally { if (!disposed && generation === listGeneration) loading.value = false }
 }
 
 async function openMessage(id: string, preserveDraft = false) {
-  if (disposed) return
+  if (disposed || deleting.value || section.value === 'admin') return
   if (!preserveDraft && draft.value.trim() && detail.value?.id !== id && !window.confirm('Descartar o rascunho desta resposta e abrir outra mensagem?')) return
   const listed = messages.value.find((item) => item.id === id)
   if (listed || !preserveDraft) openedSummary.value = listed?.store ? listed : null
   const generation = ++detailGeneration
+  if (!preserveDraft || deleteTarget.value?.id !== id) {
+    deleteTarget.value = null
+    deleteReason.value = ''
+  }
   const selectedMailbox = mailboxId.value
   if (!preserveDraft) {
     detail.value = null
@@ -380,17 +413,22 @@ async function openMessage(id: string, preserveDraft = false) {
   error.value = ''
   try {
     const result = await api<Detail>(`/api/mail/messages/${id}`, READ_OPTIONS)
-    if (disposed || generation !== detailGeneration || mailboxId.value !== selectedMailbox) return
+    if (disposed || section.value === 'admin' || generation !== detailGeneration || mailboxId.value !== selectedMailbox) return
     detail.value = result
     lastDetailAt = Date.now()
     if (!preserveDraft) fromAddress.value = result.reply.from_address
-  } catch (reason) { if (!disposed && generation === detailGeneration) error.value = errorText(reason) }
+  } catch (reason) {
+    if (!disposed && generation === detailGeneration) {
+      error.value = accessLost(reason) ? 'Este e-mail não está mais disponível para seu usuário. O rascunho foi preservado, mas a mensagem foi fechada.' : errorText(reason)
+      if (accessLost(reason)) { detail.value = null; openedSummary.value = null }
+    }
+  }
 }
 
 // One refresh at a time, including manual clicks and the two resume events.
 // A manual request during polling is fulfilled as a full refresh afterwards.
 async function refresh(background = false): Promise<void> {
-  if (disposed) return
+  if (disposed || deleting.value || section.value === 'admin') return
   if (!background) manualRefreshRequested = true
   if (refreshRequest) return refreshRequest
   const promise = (async () => {
@@ -399,15 +437,15 @@ async function refresh(background = false): Promise<void> {
       manualRefreshRequested = false
       if (full) error.value = ''
       if (full || Date.now() - lastMailboxesAt >= METADATA_MS) await loadMailboxes()
-      if (disposed || (background && document.hidden)) return
+      if (disposed || deleting.value || section.value === 'admin' || (background && document.hidden)) return
       const key = listKey()
       await loadMessages(false, !full)
-      if (disposed || key !== listKey() || (background && document.hidden)) return
+      if (disposed || deleting.value || section.value === 'admin' || key !== listKey() || (background && document.hidden)) return
       if (manualRefreshRequested && !full) continue
       if (full || organizing.value || Date.now() - lastFoldersAt >= METADATA_MS) await loadFolders()
-      if (disposed || key !== listKey() || (background && document.hidden)) return
+      if (disposed || deleting.value || section.value === 'admin' || key !== listKey() || (background && document.hidden)) return
       if (detail.value && (full || pending.value || Date.now() - lastDetailAt >= METADATA_MS)) await openMessage(detail.value.id, true)
-    } while (manualRefreshRequested && !disposed)
+    } while (manualRefreshRequested && !disposed && section.value !== 'admin')
   })()
   refreshRequest = promise
   try { await promise } finally { if (refreshRequest === promise) refreshRequest = null }
@@ -416,14 +454,14 @@ async function refresh(background = false): Promise<void> {
 function schedulePoll() {
   clearTimeout(timer)
   timer = undefined
-  if (!mounted || disposed || document.hidden || props.paused) return
+  if (!mounted || disposed || document.hidden || props.paused || section.value === 'admin') return
   timer = setTimeout(() => { timer = undefined; void poll() }, POLL_MS)
 }
 
 async function poll() {
-  if (!mounted || disposed || document.hidden || props.paused) return
+  if (!mounted || disposed || document.hidden || props.paused || section.value === 'admin') return
   try {
-    if (!sending.value && !resolving.value) await refresh(true)
+    if (!sending.value && !deleting.value && !resolving.value) await refresh(true)
   } finally { schedulePoll() }
 }
 
@@ -448,6 +486,8 @@ watch(mailboxId, () => {
   nextCursor.value = null
   organizing.value = 0
   openedSummary.value = null
+  deleteTarget.value = null
+  deleteReason.value = ''
   lastFoldersAt = 0
   lastDetailAt = 0
   void loadList()
@@ -502,7 +542,7 @@ async function sendReply() {
 
 // A person checked Tuta: did the uncertain reply go out? Never resends.
 async function resolveJob(job: Outbox, sent: boolean) {
-  if (!detail.value || resolving.value) return
+  if (!detail.value || deleting.value || resolving.value) return
   const question = sent
     ? 'Confirmar que esta resposta aparece nos Enviados do Tuta?'
     : 'Marcar que esta resposta NÃO saiu?\n\nConfira nos Enviados do Tuta antes: se ela saiu e alguém responder de novo, o cliente recebe duas vezes.'
@@ -522,6 +562,56 @@ function openConversation() {
   const id = openedSummary.value?.conversation_id
   if (id) emit('openConversation', id)
 }
+
+function reviewDelete() {
+  if (!canDelete.value || !detail.value) return
+  deleteTarget.value = { id: detail.value.id, mailbox: mailboxId.value, assunto: detail.value.subject || '(Sem assunto)' }
+  deleteReason.value = ''
+}
+async function deleteMessage() {
+  const target = deleteTarget.value
+  if (!canDelete.value || !target || target.id !== detail.value?.id || target.mailbox !== mailboxId.value) return
+  deleting.value = true
+  error.value = ''
+  // A leitura iniciada antes da exclusão não pode recolocar o corpo ou a lista.
+  ++detailGeneration; ++listGeneration; ++foldersGeneration
+  loading.value = false
+  try {
+    await api(`/api/atendimento/email/admin/emails/${encodeURIComponent(target.id)}/excluir`, { method: 'POST', body: { motivo: deleteReason.value.trim() || null } })
+    if (disposed) return
+    ++detailGeneration
+    resetList()
+    detail.value = null; openedSummary.value = null
+    draft.value = ''; draftRequestId.value = ''
+    deleteTarget.value = null; deleteReason.value = ''
+    notice.value = 'E-mail excluído do DaVinci. Você pode restaurá-lo em Administração → Lixeira do DaVinci. O original continua no Tuta.'
+  } catch (reason) { if (!disposed) error.value = errorText(reason) }
+  finally {
+    deleting.value = false
+    if (!disposed) { if (!detail.value) await loadList(); schedulePoll() }
+  }
+}
+function changedAdministration() {
+  ++detailGeneration
+  resetList()
+  detail.value = null; openedSummary.value = null
+  folders.value = []; mailStores.value = []; organizing.value = 0
+}
+function configureFromAdministration(id: string) {
+  if (!canAdminister.value) return
+  mailboxId.value = id
+  configuring.value = true
+  chooseSection('mailboxes')
+}
+watch(section, (value, previous) => {
+  if (value === 'admin') {
+    clearTimeout(timer); timer = undefined
+    ++detailGeneration; ++listGeneration; ++foldersGeneration; ++selectionEpoch
+    loading.value = false
+    manualRefreshRequested = false
+    deleteTarget.value = null
+  } else if (previous === 'admin' && mounted) resumePolling()
+}, { flush: 'sync' })
 
 // Paused (an email conversation open over this tab): stop; back: refresh now.
 watch(() => props.paused, (paused) => {
@@ -562,28 +652,32 @@ onBeforeUnmount(() => {
       <div>
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
         <p v-if="section === 'queues'" class="text-sm text-muted-foreground">{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
+        <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Acessos por pessoa, loja e venda, regras de exibição e lixeira do DaVinci.</p>
         <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável, aos administradores e a quem um admin liberar (só leitura).</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
         <button v-if="isAdmin" class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" @click="showSetup = !showSetup"><Plus class="h-4 w-4" /> Cadastrar caixa</button>
-        <button class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" :disabled="loading || sending" @click="refresh()"><RefreshCw class="h-4 w-4" /> Atualizar</button>
+        <button class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" :disabled="loading || sending || deleting" @click="refresh()"><RefreshCw class="h-4 w-4" /> Atualizar</button>
       </div>
     </div>
 
     <!-- Sections: the mailboxes (this screen) and the Atendimento queues (who operates Atendimento) -->
-    <div v-if="seesQueues" class="flex gap-1 border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>
+    <div v-if="seesQueues || canAdminister" class="flex gap-1 overflow-x-auto border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>
       <button
         type="button"
         role="tab"
         :aria-selected="section === 'mailboxes'"
+        :disabled="sending || deleting || !!resolving"
         class="-mb-px border-b-2 px-3 py-1.5 text-sm"
         :class="section === 'mailboxes' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'"
         @click="chooseSection('mailboxes')"
       >Caixas</button>
       <button
+        v-if="seesQueues"
         type="button"
         role="tab"
         :aria-selected="section === 'queues'"
+        :disabled="sending || deleting || !!resolving"
         class="-mb-px border-b-2 px-3 py-1.5 text-sm"
         :class="section === 'queues' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'"
         @click="chooseSection('queues')"
@@ -597,7 +691,10 @@ onBeforeUnmount(() => {
           data-mail-waiting
         >{{ waiting > 99 ? '99+' : waiting }}</span>
       </button>
+      <button v-if="canAdminister" type="button" role="tab" :aria-selected="section === 'admin'" :disabled="sending || deleting || !!resolving" class="-mb-px shrink-0 border-b-2 px-3 py-1.5 text-sm" :class="section === 'admin' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" data-mail-admin-tab @click="chooseSection('admin')">Administração</button>
     </div>
+
+    <AtendimentoMailAdministracao v-if="canAdminister && section === 'admin'" :mailbox-id="mailboxId" @mudou="changedAdministration" @configurar="configureFromAdministration" />
 
     <AtendimentoMailFilas
       v-if="seesQueues && section === 'queues'"
@@ -611,6 +708,7 @@ onBeforeUnmount(() => {
 
     <template v-if="section === 'mailboxes'">
       <p v-if="error" role="alert" class="rounded border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{{ error }}</p>
+      <p v-if="notice" role="status" class="rounded border bg-muted/40 p-3 text-xs">{{ notice }}</p>
 
       <form v-if="showSetup && isAdmin" class="grid gap-3 rounded-lg border p-4 md:grid-cols-2" @submit.prevent="createMailbox">
         <label class="text-sm">Nome da caixa<input v-model="setup.label" required maxlength="120" class="mt-1 w-full rounded border bg-background p-2" placeholder="Ex.: Caixa principal" /></label>
@@ -632,10 +730,10 @@ onBeforeUnmount(() => {
 
       <template v-if="mailbox">
         <div class="flex flex-wrap items-center gap-3 rounded-lg border p-3">
-          <select v-model="mailboxId" aria-label="Caixa de e-mail" :disabled="sending" class="max-w-full rounded border bg-background p-2 text-sm"><option v-for="item in mailboxes" :key="item.id" :value="item.id">{{ item.label }} · {{ item.address }}</option></select>
+          <select v-model="mailboxId" aria-label="Caixa de e-mail" :disabled="sending || deleting" class="max-w-full rounded border bg-background p-2 text-sm"><option v-for="item in mailboxes" :key="item.id" :value="item.id">{{ item.label }}<template v-if="item.address"> · {{ item.address }}</template><template v-else-if="item.leitura_filtrada"> · acesso por lojas</template></option></select>
           <span class="text-sm">{{ states[mailbox.state] || 'Conexão precisa de atenção' }}</span>
           <span class="text-xs text-muted-foreground">Última leitura: {{ date(mailbox.last_sync_at) }}</span>
-          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>Você só vê esta caixa (sem responder nem configurar).</span>
+          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
           <button v-if="isAdmin && !readOnly" class="ml-auto rounded border px-3 py-2 text-xs" @click="changeSending">{{ mailbox.send_enabled ? 'Desativar respostas' : 'Permitir respostas humanas' }}</button>
           <button v-if="isAdmin && !readOnly" class="inline-flex items-center gap-1 rounded border px-3 py-2 text-xs" :aria-expanded="configuring" data-mail-configure @click="configuring = !configuring"><Settings2 class="h-3.5 w-3.5" /> Configurar</button>
         </div>
@@ -658,7 +756,7 @@ onBeforeUnmount(() => {
             :lojas="mailStores"
             :pasta="folderId"
             :loja="storeKey"
-            :desligado="sending"
+            :desligado="sending || deleting"
             @pasta="(value: string | null) => chooseFilter('folder', value)"
             @loja="(value: string | null) => chooseFilter('store', value)"
           />
@@ -671,7 +769,7 @@ onBeforeUnmount(() => {
                 :lojas="mailStores"
                 :pasta="folderId"
                 :loja="storeKey"
-                :desligado="sending"
+                :desligado="sending || deleting"
                 @pasta="(value: string | null) => chooseFilter('folder', value)"
                 @loja="(value: string | null) => chooseFilter('store', value)"
               />
@@ -682,7 +780,7 @@ onBeforeUnmount(() => {
                   v-if="currentStore"
                   type="button"
                   class="ml-auto inline-flex min-w-0 items-center gap-1 rounded text-xs text-muted-foreground hover:text-foreground"
-                  :disabled="sending"
+                  :disabled="sending || deleting"
                   :aria-label="`Mostrar todas as lojas (agora: ${currentStore.rotulo})`"
                   data-mail-store-filter
                   @click="chooseFilter('store', null)"
@@ -693,7 +791,7 @@ onBeforeUnmount(() => {
             <p v-if="loading && !messages.length" class="p-5 text-sm text-muted-foreground">Carregando mensagens…</p>
             <p v-else-if="!messages.length && (folderId || storeKey)" class="p-5 text-sm text-muted-foreground">{{ folderId ? (storeKey ? 'Nenhum e-mail desta loja nesta pasta.' : 'Nenhum e-mail nesta pasta.') : 'Nenhum e-mail desta loja.' }}</p>
             <p v-else-if="!messages.length" class="p-5 text-sm text-muted-foreground">Nenhuma mensagem recebida pelo conector ainda. Os originais continuam no Tuta.</p>
-            <button v-for="item in messages" :key="item.id" :disabled="sending" class="block w-full space-y-1 border-b p-4 text-left hover:bg-muted/40" :class="detail?.id === item.id ? 'bg-muted' : ''" :data-mail-item="item.id" @click="openMessage(item.id)">
+            <button v-for="item in messages" :key="item.id" :disabled="sending || deleting" class="block w-full space-y-1 border-b p-4 text-left hover:bg-muted/40" :class="detail?.id === item.id ? 'bg-muted' : ''" :data-mail-item="item.id" @click="openMessage(item.id)">
               <template v-if="item.store">
                 <div class="flex items-baseline gap-2">
                   <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ item.from_name || item.from_address || '(remetente ilegível)' }}</span>
@@ -716,7 +814,7 @@ onBeforeUnmount(() => {
                 <div class="flex justify-between gap-2 text-xs text-muted-foreground"><span>{{ date(item.received_at) }}</span><span>{{ item.direction === 'sent' ? 'Enviado' : item.has_attachments ? 'Com anexo' : '' }}</span></div>
               </template>
             </button>
-            <button v-if="more" class="w-full p-3 text-sm text-primary" :disabled="loading" @click="loadMessages(true)">Carregar mais</button>
+            <button v-if="more" class="w-full p-3 text-sm text-primary" :disabled="loading || deleting" @click="loadMessages(true)">Carregar mais</button>
           </aside>
 
           <article v-if="detail" class="min-w-0 space-y-5 p-5">
@@ -739,6 +837,18 @@ onBeforeUnmount(() => {
                 data-mail-open-conversation
                 @click="openConversation"
               ><MessageSquare class="h-3.5 w-3.5" /> Abrir a conversa deste e-mail</button>
+              <div v-if="canAdminister && !readOnly" class="space-y-2 pt-1">
+                <button v-if="!deleteTarget" type="button" class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs text-destructive disabled:opacity-40" :disabled="!canDelete" data-mail-delete-review @click="reviewDelete"><Trash2 class="size-3.5" /> Excluir do DaVinci</button>
+                <p v-if="pending && !deleteTarget" class="text-[11px] text-muted-foreground">Confira a resposta pendente ou em conferência antes de excluir este e-mail.</p>
+                <section v-if="deleteTarget" class="space-y-2 rounded border border-destructive/30 bg-destructive/5 p-3 text-xs" aria-label="Conferir exclusão do e-mail" data-mail-delete-confirm>
+                  <p class="break-words font-medium">Excluir do DaVinci: {{ deleteTarget.assunto }}</p>
+                  <p>Este e-mail sai das listas, das conversas e dos e-mails da venda no DaVinci. Você pode restaurá-lo em Administração → Lixeira do DaVinci. O original continua no Tuta.</p>
+                  <p v-if="draft.trim()" class="font-medium">O rascunho desta resposta será descartado ao confirmar.</p>
+                  <p v-if="pending" class="font-medium">Há uma resposta pendente ou em conferência. Confira o envio antes de excluir.</p>
+                  <label class="block">Motivo (opcional)<input v-model="deleteReason" maxlength="300" class="mt-1 block w-full rounded border bg-background p-2" :disabled="deleting" aria-label="Motivo da exclusão do e-mail" /></label>
+                  <div class="flex flex-wrap gap-2"><button type="button" class="inline-flex items-center gap-1 rounded bg-destructive px-3 py-2 text-destructive-foreground disabled:opacity-40" :disabled="!canDelete" data-mail-delete-confirmar @click="deleteMessage"><Trash2 class="size-3.5" /> {{ deleting ? 'Excluindo…' : 'Confirmar exclusão do DaVinci' }}</button><button type="button" class="rounded border px-3 py-2 disabled:opacity-40" :disabled="deleting" data-mail-delete-cancelar @click="deleteTarget = null">Cancelar</button></div>
+                </section>
+              </div>
             </header>
             <AtendimentoMailBody v-if="detail.html" :key="detail.id" :html="detail.html" :text="detail.text" :attachments="detail.attachments" />
             <pre v-else class="max-h-[480px] whitespace-pre-wrap break-words overflow-y-auto font-sans text-sm leading-relaxed">{{ detail.text || '(Mensagem sem texto)' }}</pre>
@@ -753,8 +863,8 @@ onBeforeUnmount(() => {
                 <p class="whitespace-pre-wrap break-words text-sm">{{ job.text }}</p>
                 <div v-if="job.status === 'uncertain' && !readOnly" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
                   <span class="text-xs text-muted-foreground">Conferiu nos Enviados do Tuta?</span>
-                  <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving" @click="resolveJob(job, true)">Saiu</button>
-                  <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving" @click="resolveJob(job, false)">Não saiu</button>
+                  <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, true)">Saiu</button>
+                  <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, false)">Não saiu</button>
                 </div>
               </div>
             </section>
@@ -762,8 +872,8 @@ onBeforeUnmount(() => {
               <h4 class="font-medium">Responder</h4>
               <p class="break-all text-sm">Para: <strong>{{ detail.reply.to }}</strong></p>
               <p v-if="detail.reply_to && detail.reply_to !== detail.from_address" class="text-xs text-amber-700">A mensagem indica este endereço de resposta, diferente do remetente. Confira antes de enviar.</p>
-              <label class="block text-sm">Remetente<select v-model="fromAddress" class="ml-2 max-w-full rounded border bg-background p-2" :disabled="sending"><option v-for="address in mailbox.aliases" :key="address" :value="address">{{ address }}</option></select></label>
-              <textarea v-model="draft" rows="5" maxlength="100000" class="w-full rounded border bg-background p-3 text-sm" placeholder="Escreva sua resposta…" :disabled="sending || pending" aria-label="Texto da resposta" />
+              <label class="block text-sm">Remetente<select v-model="fromAddress" class="ml-2 max-w-full rounded border bg-background p-2" :disabled="sending || deleting"><option v-for="address in replyAddresses" :key="address" :value="address">{{ address }}</option></select></label>
+              <textarea v-model="draft" rows="5" maxlength="100000" class="w-full rounded border bg-background p-3 text-sm" placeholder="Escreva sua resposta…" :disabled="sending || deleting || pending" aria-label="Texto da resposta" />
               <p v-if="!detail.reply.send_ready" class="text-xs text-muted-foreground">Envio indisponível. O Mac precisa estar conectado, com respostas habilitadas nesta caixa e no conector.</p>
               <p v-if="pending" class="text-xs text-muted-foreground">Confira a resposta pendente acima antes de preparar outra.</p>
               <button class="inline-flex items-center gap-2 rounded bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-40" :disabled="!canReply || !draft.trim() || sending"><Send class="h-4 w-4" />{{ sending ? 'Registrando…' : 'Conferir e enviar resposta' }}</button>

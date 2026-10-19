@@ -128,6 +128,7 @@ from app.services.atendimento.constantes import (
     PLATAFORMA_SITE,
 )
 from app.services.mail_atendimento import (
+    administracao,
     chamados,
     classificacao,
     codigos,
@@ -217,6 +218,7 @@ async def _meta_ou_404(
     scope = await resolve_team_scope(session, user)
     if not _no_escopo(scope, meta.integration_id):
         raise HTTPException(404, detail={"code": "email_nao_encontrado"})
+    await administracao.exigir_mensagem(session, user, message_id)
     return meta, message
 
 
@@ -347,7 +349,13 @@ async def filas(session: Session, user: Leitor) -> dict[str, int]:
     saida = {}
     for fila in FILAS:
         saida[fila] = int(
-            await session.scalar(select(func.count()).where(*_filtro_da_fila(fila))) or 0
+            await session.scalar(
+                select(func.count()).where(
+                    *_filtro_da_fila(fila),
+                    administracao.filtro_mensagem(user, MailMessageMeta.message_id),
+                )
+            )
+            or 0
         )
     saida["revisar_envio"] = int(
         await session.scalar(
@@ -356,7 +364,11 @@ async def filas(session: Session, user: Leitor) -> dict[str, int]:
             .join(MailOutbox, MailOutbox.id == MailOutboxMeta.outbox_id)
             # Só a resposta de conversa (a mesma lista de GET /envios): o job da
             # caixa crua da empresa também tem ligação (`caixa_empresa`).
-            .where(MailOutboxMeta.origem == "conversa", _a_conferir())
+            .where(
+                MailOutboxMeta.origem == "conversa",
+                _a_conferir(),
+                administracao.filtro_mensagem(user, MailOutbox.message_id),
+            )
         )
         or 0
     )
@@ -394,7 +406,10 @@ async def listar(
     q = (
         select(MailMessageMeta, MailMessage)
         .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
-        .where(*_filtro_da_fila(fila))
+        .where(
+            *_filtro_da_fila(fila),
+            administracao.filtro_mensagem(user, MailMessageMeta.message_id),
+        )
     )
     if tipo_email:
         q = q.where(_tipo_da_meta_sql() == tipo_email)
@@ -829,7 +844,7 @@ async def contagens(session: Session, user: Leitor, response: Response) -> dict[
             func.count().filter(aberta, tipo_email == t)
             for t in ("informativo", "chamado", "venda")
         ],
-    ).where(separa_email.conversa_de_email_sql())
+    ).where(separa_email.conversa_de_email_sql(), administracao.filtro_conversa(user))
     cond = _clausula_escopo(await resolve_team_scope(session, user), c.integration_id)
     if cond is not None:
         q = q.where(cond)
@@ -870,6 +885,7 @@ async def emails_da_conversa(
             .where(
                 MailMessageMeta.conversa_id == conversa.id,
                 MailMessageMeta.estado.in_(ESTADOS_COM_TEXTO),
+                administracao.filtro_mensagem(user, MailMessageMeta.message_id),
             )
             .order_by(MailMessage.received_at)
             .limit(200)
@@ -889,7 +905,7 @@ async def emails_da_conversa(
     return {
         "emails": [await _cartao(session, m, msg, nomes, com_texto=True) for m, msg in linhas],
         "chamado": chamado,
-        "outros_chamados": await chamados.outros_chamados(session, conversa),
+        "outros_chamados": await chamados.outros_chamados(session, conversa, user=user),
     }
 
 
@@ -935,6 +951,7 @@ async def emails_da_venda(
             .where(
                 MailMessageMeta.conversa_id.in_(ids),
                 MailMessageMeta.estado.in_(ESTADOS_COM_TEXTO),
+                administracao.filtro_mensagem(user, MailMessageMeta.message_id),
             )
             .group_by(
                 MailMessageMeta.alias_recebido,
@@ -1012,9 +1029,10 @@ async def _emails_da_venda_no_chat(
         return {"total": 0, "caixas": []}
     grupos: dict[UUID, dict[str, Any]] = {}
     for _meta, _message, grupo in resultado.linhas:
-        item = grupos.setdefault(grupo.id, {
-            "id": str(grupo.id), "emails": 0, "aguardando": bool(grupo.aguardando_resposta)
-        })
+        item = grupos.setdefault(
+            grupo.id,
+            {"id": str(grupo.id), "emails": 0, "aguardando": bool(grupo.aguardando_resposta)},
+        )
         item["emails"] += 1
     conversas = sorted(grupos.values(), key=lambda x: not x["aguardando"])
     return {
@@ -1060,8 +1078,11 @@ async def email_desta_venda(
     for meta, message, _grupo in resultado.linhas:
         if meta.message_id == message_id:
             return await _cartao(
-                session, meta, message,
-                await _nomes_das_lojas(session, {meta.integration_id}), com_texto=True
+                session,
+                meta,
+                message,
+                await _nomes_das_lojas(session, {meta.integration_id}),
+                com_texto=True,
             )
     raise HTTPException(404, detail={"code": "email_nao_encontrado"})
 
@@ -1073,6 +1094,7 @@ async def anexo(attachment_id: UUID, session: Session, user: Leitor) -> Response
     meta = await session.get(MailMessageMeta, attachment.message_id) if attachment else None
     if attachment is None or meta is None or meta.estado not in ESTADOS_COM_TEXTO:
         raise HTTPException(404, detail={"code": "anexo_nao_encontrado"})
+    await administracao.exigir_mensagem(session, user, attachment.message_id)
     scope = await resolve_team_scope(session, user)
     if meta.conversa_id is not None:
         conversa = await session.get(AtendimentoConversa, meta.conversa_id)
@@ -1196,7 +1218,7 @@ async def nao_agrupar(
     )
     return {
         "conversa_id": str(este.id),
-        "outros_chamados": await chamados.outros_chamados(session, este),
+        "outros_chamados": await chamados.outros_chamados(session, este, user=user),
     }
 
 
@@ -1216,7 +1238,10 @@ async def envios(
     q = (
         select(MailOutbox, MailOutboxMeta)
         .join(MailOutboxMeta, MailOutboxMeta.outbox_id == MailOutbox.id)
-        .where(MailOutboxMeta.origem == "conversa")
+        .where(
+            MailOutboxMeta.origem == "conversa",
+            administracao.filtro_mensagem(user, MailOutbox.message_id),
+        )
     )
     if estado == "revisar":
         q = q.where(_a_conferir())
@@ -1485,7 +1510,9 @@ async def salvar_regra(body: RegraIn, session: Session, user: Leitor) -> dict[st
 async def saude_das_caixas(session: Session, user: Leitor, response: Response) -> dict[str, Any]:
     """Uma linha por caixa: as da EMPRESA para todos; a privada só para o dono/admin."""
     caixas = await saude.caixas_visiveis(session, user)
-    saida: dict[str, Any] = {"caixas": [await saude.linha_da_caixa(session, c) for c in caixas]}
+    saida: dict[str, Any] = {
+        "caixas": [await saude.linha_da_caixa(session, c, user=user) for c in caixas]
+    }
     if acesso.pode_mexer(user):
         saida.update(await saude.lojas_sem_caixa_lida(session))
     response.headers["Cache-Control"] = "no-store"

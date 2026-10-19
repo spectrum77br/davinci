@@ -19,6 +19,7 @@ Semântica (igual à Fase 1 / `user_scope`):
 
 Assim o rollout é seguro: quem não tem equipe atribuída continua vendo tudo.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -41,6 +42,10 @@ class TeamScope:
     integration_ids: set[UUID] = field(default_factory=set)
     bling_store_ids: set[str] = field(default_factory=set)
     account_names: set[str] = field(default_factory=set)  # lower/trim
+    # A leitura das conversas de e-mail tem uma política adicional por pessoa.
+    # Mantém o usuário da requisição disponível aos detalhes compartilhados;
+    # não muda o escopo comercial nem a igualdade dos escopos existentes.
+    email_user: User | None = field(default=None, compare=False, repr=False)
 
 
 def _norm(s: str | None) -> str | None:
@@ -53,11 +58,11 @@ def _norm(s: str | None) -> str | None:
 async def resolve_team_scope(session: AsyncSession, user: User) -> TeamScope:
     """Monta o TeamScope do usuário a partir das lojas da(s) equipe(s) dele."""
     if user.role == UserRole.ADMIN:
-        return TeamScope(unrestricted=True)
+        return TeamScope(unrestricted=True, email_user=user)
 
     teams = user.sales_teams or []
     if not teams:
-        return TeamScope(unrestricted=True)
+        return TeamScope(unrestricted=True, email_user=user)
 
     rows = (
         await session.execute(
@@ -71,7 +76,7 @@ async def resolve_team_scope(session: AsyncSession, user: User) -> TeamScope:
         )
     ).all()
 
-    scope = TeamScope(unrestricted=False)
+    scope = TeamScope(unrestricted=False, email_user=user)
     # Lojas sem o FK `integration_id` preenchido (backfill preguiçoso) — caso
     # comum: só `marquezini` tinha o FK. Resolvemos a integração pelo par
     # (nome, plataforma), espelhando `_resolve_linked_integration`, pra que

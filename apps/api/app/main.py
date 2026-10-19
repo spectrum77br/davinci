@@ -57,6 +57,7 @@ from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
 from app.routers import logistica_track as logistica_track_router
 from app.routers import mail as mail_router
+from app.routers import mail_admin as mail_admin_router
 from app.routers import mail_agent_v2 as mail_agent_v2_router
 from app.routers import mail_atendimento as mail_atendimento_router
 from app.routers import mail_caixa as mail_caixa_router
@@ -277,6 +278,7 @@ app.include_router(devolutions_router.router)
 # Pós-venda › Atendimento (25/09/2026): caixa única das lojas + rascunho da IA.
 app.include_router(atendimento_router.router)
 app.include_router(mail_router.router)
+app.include_router(mail_admin_router.router)
 # 08/10/2026: a configuração NOSSA de cada caixa da Central (privada × empresa,
 # ponte para o /atendimento, remetente estrito, modo de envio e tetos).
 app.include_router(mail_atendimento_router.router)

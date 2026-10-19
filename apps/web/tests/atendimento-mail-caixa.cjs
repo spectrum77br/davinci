@@ -67,6 +67,7 @@ function registrar(app) {
   app.config.warnHandler = (msg) => { throw new Error(`aviso do Vue: ${msg}`) }
   for (const nome of FILHOS) app.component(nome, componente(`${nome}.vue`))
   app.component('AtendimentoMailFilas', { props: ['isAdmin', 'lojas'], setup: () => () => Vue.h('div', { 'data-filas-stub': '' }) })
+  app.component('AtendimentoMailAdministracao', { props: ['mailboxId'], setup: () => () => Vue.h('div', { 'data-admin-stub': '' }) })
   app.component('AtendimentoMailConfigurar', { props: ['mailbox'], setup: () => () => Vue.h('div', { 'data-configurar-stub': '' }) })
   // O corpo em HTML do e-mail aberto (componente dele, desde 98a73730): fora deste teste.
   app.component('AtendimentoMailBody', { props: ['html', 'text', 'attachments'], setup: () => () => Vue.h('div', { 'data-body-stub': '' }) })

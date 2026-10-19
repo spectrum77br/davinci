@@ -233,6 +233,7 @@ from app.services.atendimento.constantes import (
     sla_horas,
 )
 from app.services.atendimento.enviar import EnvioRecusado
+from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento.constantes import ROTULO_TIPO_CAIXA
 
 logger = structlog.get_logger()
@@ -685,6 +686,15 @@ async def _conversa_ou_404(
     c = await session.get(AtendimentoConversa, uid)
     if c is None or not _no_escopo(scope, c.integration_id):
         raise HTTPException(404, detail={"code": "conversa_nao_encontrada"})
+    if separa_email.e_conversa_de_email(c) and scope.email_user is not None:
+        visivel = await session.scalar(
+            select(AtendimentoConversa.id).where(
+                AtendimentoConversa.id == c.id,
+                mail_admin.filtro_conversa(scope.email_user),
+            )
+        )
+        if visivel is None:
+            raise HTTPException(404, detail={"code": "conversa_nao_encontrada"})
     return c
 
 
@@ -2015,7 +2025,9 @@ async def _listar_marketplace(
     # A Caixa (e a Caixa Humano) é só o CHAT; a conversa de e-mail da ponte
     # vem só na aba E-mail (`caixa=email`) — 13/10/2026, `separa_email`.
     if caixa_email:
-        consulta = consulta.where(separa_email.conversa_de_email_sql())
+        consulta = consulta.where(
+            separa_email.conversa_de_email_sql(), mail_admin.filtro_conversa(user)
+        )
     else:
         consulta = consulta.where(separa_email.na_caixa_sql())
     if caixa_email and tipo_email:
@@ -3408,6 +3420,8 @@ async def conferir_mensagem(
     c = await session.get(AtendimentoConversa, m.conversa_id) if m is not None else None
     if m is None or c is None or not _no_escopo(scope, c.integration_id):
         raise HTTPException(404, detail={"code": "mensagem_nao_encontrada"})
+    if separa_email.e_conversa_de_email(c):
+        await _conversa_ou_404(session, str(c.id), scope)
     await _travar_ou_409(session, c, "conversa_ocupada")
     await session.refresh(m)
     if m.status != MSG_REVISAR or m.origem not in ORIGENS_DAVINCI:
@@ -3465,6 +3479,8 @@ async def _rascunho_ou_404(
     conversa = await session.get(AtendimentoConversa, r.conversa_id) if r is not None else None
     if r is None or conversa is None or not _no_escopo(scope, conversa.integration_id):
         raise HTTPException(404, detail={"code": "rascunho_nao_encontrado"})
+    if separa_email.e_conversa_de_email(conversa):
+        await _conversa_ou_404(session, str(conversa.id), scope)
     return r
 
 

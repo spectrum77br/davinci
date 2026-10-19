@@ -168,6 +168,7 @@ from app.models.logistica import (
     LogisticaStatusAnexo,
 )
 from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
+from app.models.mail_admin import MailAcesso, MailAdminEvento, MailLixeira
 from app.models.mail_atendimento import (
     AtendimentoRegraPastaEmail,
     MailAgenteV2,
@@ -285,6 +286,9 @@ from app.models.user import User
 from app.models.user_settings import UserSettings
 
 __all__ = [
+    "MailAcesso",
+    "MailAdminEvento",
+    "MailLixeira",
     "MailMailbox",
     "MailMessage",
     "MailAttachment",

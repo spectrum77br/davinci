@@ -239,7 +239,7 @@ async function principal() {
     assert.deepEqual(F.juntarContagens(null, null), {})
     assert.ok(rotas.includes('@router.get("/contagens")'))
     const contagensPy = rotas.slice(rotas.indexOf('async def contagens('), rotas.indexOf('# ── Na conversa (quem vê)'))
-    assert.match(contagensPy, /\.where\(separa_email\.conversa_de_email_sql\(\)\)/)
+    assert.match(contagensPy, /\.where\(separa_email\.conversa_de_email_sql\(\), administracao\.filtro_conversa\(user\)\)/)
     for (const campo of ['aguardando', 'chamados', 'chamados_por_tipo']) assert.ok(contagensPy.includes(`"${campo}":`), `contagens: ${campo}`)
     assert.ok(!rotas.includes('(f"{_PREFIXO}/contagens")'), 'as contagens das conversas: quem vê (não é leitura só de quem mexe)')
     assert.match(rotas, /saida\["revisar_envio"\] = /)
@@ -248,7 +248,7 @@ async function principal() {
     assert.match(rotas, /if estado == "revisar":\s+q = q\.where\(_a_conferir\(\)\)/)
     // A contagem da fila "revisar envio" = a lista (só a resposta de CONVERSA: o
     // job da caixa crua da empresa também tem ligação, `caixa_empresa`).
-    assert.match(rotas, /\.where\(MailOutboxMeta\.origem == "conversa", _a_conferir\(\)\)\s+\)\s+or 0\s+\)\s+return saida/)
+    assert.match(rotas, /\.where\(\s*MailOutboxMeta\.origem == "conversa",\s*_a_conferir\(\),\s*administracao\.filtro_mensagem\(user, MailOutbox\.message_id\),\s*\)\s+\)\s+or 0\s+\)\s+return saida/)
     assert.equal(F.urlDaFila('sem_loja'), '/api/atendimento/email/emails?fila=sem_loja')
     assert.equal(F.urlDaFila('resumo', '2026-10-08T10:00:00+00:00'), '/api/atendimento/email/emails?fila=resumo&antes_de=2026-10-08T10%3A00%3A00%2B00%3A00')
 
@@ -400,7 +400,7 @@ async function principal() {
     assert.match(pagina, /emailContagens\.value = await api<[^>]+>\('\/api\/atendimento\/email\/contagens'\)/)
     // Quem não vê o /atendimento não pergunta (a rota recusaria); a seção escolhida na visita fica na página.
     assert.match(pagina, /async function carregarContagensEmail\(\) \{\n(?:\s*\/\/[^\n]*\n)*\s+if \(!canSugerir\.value\) return\n/)
-    assert.match(pagina, /const emailSecao = ref<'' \| 'mailboxes' \| 'queues'>\(''\)/)
+    assert.match(pagina, /const emailSecao = ref<'' \| 'mailboxes' \| 'queues' \| 'admin'>\(''\)/)
     assert.match(pagina, /const polling = usePollingVisivel\(async \(\) => \{\s+\/\/[^\n]*\n\s+void carregarContagensEmail\(\)\n\s+\/\/[^\n]*\n\s+emailTique\.value\+\+\n/)
     assert.match(pagina, /await Promise\.all\(\[carregarResumo\(\), carregarLista\(\), carregarModelos\(\), carregarContagensEmail\(\)\]\)\n/)
     // O link: `?tab=mail&conversa=<id>` abre a conversa de e-mail.
@@ -1467,7 +1467,7 @@ async function principal() {
     assert.match(separa, /def na_caixa_sql\(c: Any = AtendimentoConversa\):[\s\S]*?return not_\(conversa_de_email_sql\(c\)\)/)
     // A lista: a Caixa só com o chat; `caixa=email` só com o e-mail.
     assert.match(rotasAtd, /^CAIXAS = \("", CAIXA_HUMANO, CAIXA_EMAIL\)$/m)
-    assert.match(rotasAtd, /if caixa_email:\s+consulta = consulta\.where\(separa_email\.conversa_de_email_sql\(\)\)\s+else:\s+consulta = consulta\.where\(separa_email\.na_caixa_sql\(\)\)/)
+    assert.match(rotasAtd, /if caixa_email:\s+consulta = consulta\.where\(\s*separa_email\.conversa_de_email_sql\(\), mail_admin\.filtro_conversa\(user\)\s*\)\s+else:\s+consulta = consulta\.where\(separa_email\.na_caixa_sql\(\)\)/)
     assert.match(rotasAtd, /and not caixa_email\n\s+\)/, 'o Direct nunca entra na lista do e-mail')
     // O /resumo (plataformas, barra de lojas, etiquetas, Caixa Humano): só a Caixa.
     assert.match(rotasAtd, /cond = and_\(separa_email\.na_caixa_sql\(\), \*\(\[escopo\] if escopo is not None else \[\]\)\)/)
