@@ -5052,18 +5052,17 @@ class WorkerSettings:
         # pela Secretaria da Fazenda" às 10h10, o 17track leu às 10h40 e trouxe
         # informação velha — só a releitura forçada trouxe o evento. Eduardo:
         # "pode ser mais nessas forçadas, precisa sempre estar atualizado".
-        # 04/07/10/13/19/22 BRT (07/10/13/16/22/01 UTC) + o 16:31 BRT original.
-        # O intervalo de 3 h casa com FRESCO_HORAS=3 do próprio job: quem o
-        # 17track já leu nas últimas 3 h é pulado, então rodar mais vezes não
-        # multiplica gasto — e o teto diário de re-registros pagos continua.
+        # Em 19/10/2026 os 5.200 créditos (recarga de 04/09) acabaram em 45
+        # dias (~115/dia, quase todo dia no TETO_PAGOS_DIA) com 7 rodadas/dia;
+        # pedido do dono: só 3 — 07:01, 11:01 e 15:01 BRT (10/14/18 UTC).
+        # Quem o 17track já leu nas últimas FRESCO_HORAS=3 h continua pulado.
         cron(
             logistica_track_forcar,
-            hour={1, 7, 10, 13, 16, 22},
+            hour={10, 14, 18},
             minute=1,
             run_at_startup=False,
             timeout=900,
         ),
-        cron(logistica_track_forcar, hour=19, minute=31, run_at_startup=False, timeout=900),
         # Amazon Envio próprio: avisos Threema de prazo (08:06 e 16:06 BRT).
         cron(logistica_amazon_avisos, hour={11, 19}, minute=6, run_at_startup=False, timeout=600),
         # Mensagens ao comprador da Amazon a cada 15 min (:08/:23/:38/:53 —
