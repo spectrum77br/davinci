@@ -97,6 +97,8 @@ export function criarMarcadorDeLida(o: OpcoesMarcadorLida) {
   const visivel = o.visivel ?? (() => typeof document === 'undefined' || document.visibilityState === 'visible')
   // A abertura de agora: a conversa, se é para marcar e se já foi (ou está indo).
   let aberta: string | null = null
+  let geracaoAberta: string | null = null
+  let sequenciaAbertura = 0
   let quer = false
   let feita = false
   let timer: unknown = null
@@ -111,7 +113,9 @@ export function criarMarcadorDeLida(o: OpcoesMarcadorLida) {
   function agendar() {
     if (timer !== null || feita || !quer || !aberta) return
     const id = aberta
+    const sequencia = sequenciaAbertura
     timer = relogio.agendar(() => {
+      if (sequenciaAbertura !== sequencia) return
       timer = null
       disparar(id)
     }, atraso)
@@ -122,8 +126,18 @@ export function criarMarcadorDeLida(o: OpcoesMarcadorLida) {
     if (!visivel()) return
     feita = true
     ateGravado = ate
+    const geracao = geracaoAberta
+    const sequencia = sequenciaAbertura
     void Promise.resolve()
-      .then(() => o.marcar(id))
+      .then(() => {
+        if (sequenciaAbertura !== sequencia || aberta !== id || geracaoAberta !== geracao || o.atual() !== id || !quer) return
+        if (!visivel()) {
+          feita = false
+          ateGravado = null
+          return
+        }
+        return o.marcar(id)
+      })
       .catch(() => {
         // a conversa continua não lida; a próxima abertura tenta de novo
       })
@@ -136,21 +150,33 @@ export function criarMarcadorDeLida(o: OpcoesMarcadorLida) {
     const id = aberta
     const antes = ateGravado
     const agora = ate
+    const geracao = geracaoAberta
+    const sequencia = sequenciaAbertura
     ateGravado = agora
     void Promise.resolve()
-      .then(() => rev(id))
+      .then(() => {
+        if (sequenciaAbertura !== sequencia || aberta !== id || geracaoAberta !== geracao || o.atual() !== id || !quer) return
+        if (!visivel()) {
+          if (ateGravado === agora) ateGravado = antes
+          return
+        }
+        return rev(id)
+      })
       .catch(() => {
         // falhou: a próxima releitura (ou a volta da aba) tenta de novo
-        if (aberta === id && ateGravado === agora) ateGravado = antes
+        if (sequenciaAbertura === sequencia && aberta === id && geracaoAberta === geracao && ateGravado === agora) ateGravado = antes
       })
   }
 
   return {
     /** O detalhe da conversa `id` chegou (ao abrir e a cada releitura); `vistoAte` = o `visto_ate` dele. */
-    abrir(id: string, querMarcar: boolean, vistoAte?: string | null) {
-      if (id !== aberta) {
+    abrir(id: string, querMarcar: boolean, vistoAte?: string | null, geracao?: string | null) {
+      const novaGeracao = geracao ?? null
+      if (id !== aberta || novaGeracao !== geracaoAberta) {
         parar()
+        sequenciaAbertura++
         aberta = id
+        geracaoAberta = novaGeracao
         feita = false
         ate = null
         ateGravado = null
@@ -166,7 +192,9 @@ export function criarMarcadorDeLida(o: OpcoesMarcadorLida) {
     /** Trocou de conversa, fechou ou desmontou: nada pendente marca. */
     fechar() {
       parar()
+      sequenciaAbertura++
       aberta = null
+      geracaoAberta = null
       quer = false
       feita = false
       ate = null

@@ -103,6 +103,7 @@ class VistoIn(BaseModel):
     """
 
     ate: datetime | None = None
+    notificacoes_migracao_id: UUID | None = None
 
 
 class LidaOut(BaseModel):
@@ -134,7 +135,17 @@ async def marcar_lida(
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
         # A pessoa abriu: o "visto no DaVinci" vale com ou sem a plataforma.
-        await lida_svc.gravar_visto(session, c, user, body.ate if body else None)
+        await lida_svc.gravar_visto(
+            session,
+            c,
+            user,
+            body.ate if body else None,
+            notificacoes_migracao_id=(
+                str(body.notificacoes_migracao_id)
+                if body and body.notificacoes_migracao_id
+                else None
+            ),
+        )
         r = await lida_svc.marcar_como_lida(session, c, user=user)
     except lida_svc.LidaRecusada as e:
         logger.info(
@@ -179,7 +190,17 @@ async def marcar_visto(
     scope = await resolve_team_scope(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
-        visto = await lida_svc.gravar_visto(session, c, user, body.ate if body else None)
+        visto = await lida_svc.gravar_visto(
+            session,
+            c,
+            user,
+            body.ate if body else None,
+            notificacoes_migracao_id=(
+                str(body.notificacoes_migracao_id)
+                if body and body.notificacoes_migracao_id
+                else None
+            ),
+        )
     except lida_svc.LidaRecusada as e:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA) from e
     return VistoOut(visto_em=visto, conversa=await _conversa_out(session, c))

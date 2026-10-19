@@ -67,6 +67,7 @@ from app.models import (
 )
 from app.services.atendimento import etiqueta as etiqueta_svc
 from app.services.atendimento import lojas, separa_email
+from app.services.atendimento import notificacoes as notificacoes_svc
 from app.services.atendimento.constantes import (
     AUTOMACOES_QUE_FECHAM_A_VEZ,
     AUTOR_CLIENTE,
@@ -600,6 +601,11 @@ async def upsert_conversa(
     if conversa is None:
         iniciais = {"nao_lidas": 0, "situacao": CONVERSA_ABERTA}
         iniciais.update({k: v for k, v in campos.items() if v is not None})
+        iniciais.update(
+            await notificacoes_svc.estado_para_nova_conversa(
+                session, canal.id if canal is not None else None, plataforma, dados
+            )
+        )
         nova = AtendimentoConversa(
             canal_id=canal.id if canal is not None else None,
             integration_id=integration_id,

@@ -170,6 +170,10 @@ class ConversaResumoOut(BaseModel):
     # mensagem do comprador que chegou depois dele; a tela relê o /resumo
     # quando ele muda. None = ninguém abriu (e no Direct).
     visto_em: datetime | None = None
+    # Uma migração conferida inicia um controle próprio de leitura. O ID
+    # impede que um POST da tela anterior consuma mensagens da nova base.
+    notificacoes_migracao_id: str | None = None
+    notificacoes_visto_em: datetime | None = None
     # No "Falta responder" da Caixa, IGUAL AO DUOKE (14/10/2026,
     # `services/atendimento/pendente.py`): o comprador por último (qualquer
     # mensagem da loja responde, até a automática) ou não lida no chat da

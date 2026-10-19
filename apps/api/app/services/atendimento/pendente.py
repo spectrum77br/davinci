@@ -207,6 +207,7 @@ from sqlalchemy.orm import aliased
 
 from app.models import AtendimentoConversa, AtendimentoMensagem
 from app.services.atendimento import gravar, separa_email
+from app.services.atendimento import notificacoes as notificacoes_svc
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
@@ -431,13 +432,53 @@ def marcos_do_numero(
     (`visto_em`), comparado com a CHEGADA da mensagem (`created_at`). None =
     sem esse marco.
     """
+    corte = (
+        _utc(getattr(conversa, "notificacoes_corte_em", None))
+        if notificacoes_svc.estado_valido(conversa) else None
+    )
     if mensagens is None:
         pessoa = _utc(getattr(conversa, "ultima_da_loja_em", None))
+        if corte is not None and pessoa is not None and pessoa <= corte:
+            pessoa = None
     else:
-        quandos = [_quando(m) for m in mensagens if resposta_de_pessoa(m)]
+        quandos = [
+            _quando(m)
+            for m in mensagens
+            if resposta_de_pessoa(m)
+            and (corte is None or posterior_ao_corte(conversa, m))
+        ]
         validos = [q for q in quandos if q is not None]
         pessoa = max(validos) if validos else None
-    return pessoa, _utc(getattr(conversa, "visto_em", None))
+    nome_visto = "notificacoes_visto_em" if corte is not None else "visto_em"
+    return pessoa, _utc(getattr(conversa, nome_visto, None))
+
+
+def _ids_iniciais(conversa: Any, chave: str) -> frozenset[str]:
+    dados = getattr(conversa, "notificacoes_iniciais", None)
+    ids = dados.get(chave) if isinstance(dados, dict) else None
+    return frozenset(i for i in ids if isinstance(i, str)) if isinstance(ids, list) else frozenset()
+
+
+def posterior_ao_corte(conversa: Any, mensagem: Any) -> bool:
+    """Evento posterior ao snapshot, sem ordenar IDs opacos.
+
+    No segundo de precisão do limite, IDs que a fonte não observou ficam
+    contados conservadoramente. O importador só aceita limites completos.
+    """
+    corte = _utc(getattr(conversa, "notificacoes_corte_em", None))
+    momento = _quando(mensagem)
+    return bool(
+        corte is not None
+        and momento is not None
+        and (
+            momento > corte
+            or (
+                momento == corte
+                and getattr(mensagem, "externo_id", None)
+                not in _ids_iniciais(conversa, "observadas_limite_ids")
+            )
+        )
+    )
 
 
 def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
@@ -462,6 +503,10 @@ def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
     # zera o não lido (a fala nova do comprador desmarca, `gravar`).
     if getattr(conversa, "sem_resposta_necessaria", False):
         return False
+    if notificacoes_svc.estado_valido(conversa):
+        # A migração tem estado durável: uma não lida não expira após sete
+        # dias, e o corte histórico do Duoke não limita seus IDs explícitos.
+        return True
     ultima = _utc(getattr(conversa, "ultima_mensagem_em", None))
     return ultima is not None and ultima > desde_do_numero(agora)
 
@@ -501,6 +546,7 @@ def mensagem_no_numero(
     comprador: Any = None,
     desde: datetime | None = None,
     mediador: bool = False,
+    pessoa_inclusiva: bool = False,
 ) -> bool:
     """A mensagem soma no número? PURA — a gêmea do WHERE de `nao_lidas_duoke_sql`.
 
@@ -518,7 +564,9 @@ def mensagem_no_numero(
         return False
     chegou = _utc(getattr(mensagem, "created_at", None))
     quando = _utc(getattr(mensagem, "enviada_em", None)) or chegou
-    if pessoa is not None and (quando is None or quando <= pessoa):
+    if pessoa is not None and (
+        quando is None or quando < pessoa or (quando == pessoa and not pessoa_inclusiva)
+    ):
         return False
     if desde is not None and (quando is None or quando <= desde):
         return False
@@ -545,12 +593,22 @@ def nao_lidas_duoke(
     dela = [m for m in mensagens if getattr(m, "conversa_id", cid) == cid]
     pessoa, visto = marcos_do_numero(conversa, dela)
     comprador = getattr(conversa, "comprador_id", None)
-    desde = desde_do_numero(agora)
+    nativo = notificacoes_svc.estado_valido(conversa)
+    desde = None if nativo else desde_do_numero(agora)
+    ids_iniciais = _ids_iniciais(conversa, "nao_lidas_ids") if nativo else frozenset()
     mediador = reclamacao_no_numero(conversa)
     return sum(
         1
         for m in dela
-        if mensagem_no_numero(m, pessoa, visto, comprador=comprador, desde=desde, mediador=mediador)
+        if (
+            not nativo
+            or getattr(m, "externo_id", None) in ids_iniciais
+            or posterior_ao_corte(conversa, m)
+        )
+        and mensagem_no_numero(
+            m, pessoa, visto, comprador=comprador, desde=desde,
+            mediador=mediador, pessoa_inclusiva=nativo,
+        )
     )
 
 
@@ -593,6 +651,24 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
     m = aliased(AtendimentoMensagem)
     momento = func.coalesce(m.enviada_em, m.created_at)
     desde = desde_do_numero(agora)
+    nativo = notificacoes_svc.estado_valido_sql(c)
+
+    def contem_id(chave: str, mensagem: Any):
+        ids = c.notificacoes_iniciais[chave]
+        return func.coalesce(
+            and_(func.jsonb_typeof(ids) == "array", ids.op("?")(mensagem.externo_id)),
+            false(),
+        )
+
+    def posterior(mensagem: Any):
+        quando = func.coalesce(mensagem.enviada_em, mensagem.created_at)
+        return or_(
+            quando > c.notificacoes_corte_em,
+            and_(
+                quando == c.notificacoes_corte_em,
+                not_(contem_id("observadas_limite_ids", mensagem)),
+            ),
+        )
     # A última resposta de PESSOA, pelas mensagens (`resposta_de_pessoa`) — não
     # o `ultima_da_loja_em` da fila. Uma vez por conversa (correlata só a `c`).
     h = aliased(AtendimentoMensagem)
@@ -605,6 +681,7 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
             func.coalesce(h.origem, "") != ORIGEM_NOTA,
             func.coalesce(h.tipo, "") != TIPO_NOTA,
             not_(gravar.mensagem_automatica_sql(h.texto, h.payload)),
+            or_(not_(nativo), posterior(h)),
         )
         .correlate(c)
         .scalar_subquery()
@@ -622,9 +699,25 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
             m.conversa_id == c.id,
             do_comprador,
             not_(separa_email.mensagem_de_email_sql(m)),
-            momento > desde,
-            momento > func.coalesce(pessoa, desde),
-            or_(c.visto_em.is_(None), m.created_at > c.visto_em),
+            or_(
+                and_(
+                    not_(nativo),
+                    momento > desde,
+                    momento > func.coalesce(pessoa, desde),
+                    or_(c.visto_em.is_(None), m.created_at > c.visto_em),
+                ),
+                and_(
+                    nativo,
+                    or_(contem_id("nao_lidas_ids", m), posterior(m)),
+                    # Sem sequência comprovada, empate de segundo não pode
+                    # apagar a fala que pode ter chegado após a resposta.
+                    or_(pessoa.is_(None), momento >= pessoa),
+                    or_(
+                        c.notificacoes_visto_em.is_(None),
+                        m.created_at > c.notificacoes_visto_em,
+                    ),
+                ),
+            ),
         )
         .correlate(c)
         .scalar_subquery()
@@ -634,6 +727,6 @@ def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
         *(not_(and_(c.plataforma == p, c.canal == k)) for p, k in FORA_DO_NUMERO),
         c.situacao != CONVERSA_FECHADA,
         c.sem_resposta_necessaria.is_(False),
-        c.ultima_mensagem_em > desde,
+        or_(nativo, c.ultima_mensagem_em > desde),
     )
     return case((entra, mensagens), else_=0)

@@ -46,6 +46,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -878,6 +879,54 @@ async def test_visto_guarda_ate_onde_a_tela_mostrou(db, dono, client, plataforma
     r = await client.post(f"{URL}/conversas/{terceira.id}/visto", json={"ate": "ontem"})
     assert r.status_code == 422
     assert await _visto_em(db, terceira) is None
+
+
+@pytest.mark.parametrize("modo,rota_leitura", [("observar", "visto"), ("auto", "lida")])
+async def test_rota_confirma_geracao_nativa_sem_consumir_seed_por_cliente_antigo(
+    db, dono, client, plataforma, modo, rota_leitura
+):
+    integ, canal = await _loja(db, dono, "shopee", "chat", modo)
+    conversa = await _conversa(db, integ, canal)
+    cid = str(conversa.id)
+    # Já foi vista no controle legado. A importação preserva esse marco.
+    assert (await _visto(client, cid)).status_code == 200
+    legacy_visto = await _visto_em(db, cid)
+    snapshot_id = str(uuid4())
+    conversa.notificacoes_corte_em = AGORA - timedelta(minutes=1)
+    conversa.notificacoes_iniciais = {
+        "versao": 1,
+        "snapshot_id": snapshot_id,
+        "hash": "a" * 64,
+        "origem": "duoke_snapshot",
+        "nao_lidas_ids": ["7000000000000000001", "7000000000000000002"],
+        "observadas_limite_ids": [],
+    }
+    conversa.notificacoes_visto_em = None
+    await db.commit()
+    detalhe = (await client.get(f"{URL}/conversas/{cid}")).json()
+    assert detalhe["conversa"]["notificacoes_migracao_id"] == snapshot_id
+    assert detalhe["conversa"]["numero_duoke"] == 2
+    url = f"{URL}/conversas/{cid}/{rota_leitura}"
+    for body in (
+        {"ate": detalhe["visto_ate"]},
+        {"ate": detalhe["visto_ate"], "notificacoes_migracao_id": str(uuid4())},
+    ):
+        resposta = await client.post(url, json=body)
+        assert resposta.status_code == 200, resposta.text
+        assert resposta.json()["conversa"]["numero_duoke"] == 2
+        assert resposta.json()["conversa"]["notificacoes_visto_em"] is None
+    resposta = await client.post(
+        url,
+        json={"ate": detalhe["visto_ate"], "notificacoes_migracao_id": snapshot_id},
+    )
+    assert resposta.status_code == 200, resposta.text
+    atual = resposta.json()["conversa"]
+    assert atual["numero_duoke"] == 0
+    assert atual["aguardando_resposta"] is True
+    assert datetime.fromisoformat(atual["notificacoes_visto_em"]) == datetime.fromisoformat(
+        detalhe["visto_ate"]
+    )
+    assert await _visto_em(db, cid) >= legacy_visto
 
 
 def test_visto_ate_e_a_chegada_mais_nova():

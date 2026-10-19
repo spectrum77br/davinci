@@ -115,15 +115,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any
+from uuid import UUID
 
 import structlog
-from sqlalchemy import DateTime, func, literal, select, update
+from sqlalchemy import DateTime, case, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import AtendimentoCanal, AtendimentoConversa, AtendimentoMensagem, Integration, User
 from app.redis_client import redis
 from app.services.atendimento import acesso, clientes
+from app.services.atendimento import notificacoes as notificacoes_svc
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_SISTEMA,
@@ -301,6 +303,8 @@ async def gravar_visto(
     conversa: AtendimentoConversa,
     user: User | None,
     ate: datetime | None = None,
+    *,
+    notificacoes_migracao_id: str | None = None,
 ) -> datetime | None:
     """Grava o "visto no DaVinci" (`visto_em`) e devolve o carimbo.
 
@@ -310,6 +314,10 @@ async def gravar_visto(
     banco — e nunca depois dele (`LEAST`). Quem só lê (ou ninguém — IA,
     crons) → `LidaRecusada(RECUSA_SO_LEITURA)`, nada gravado. Idempotente:
     nunca anda para trás. Commita e relê a conversa.
+
+    O marco nativo só avança quando a tela confirma o snapshot_id da epoch
+    que realmente exibiu. Um POST antigo que atravessa a importação pode
+    atualizar o visto legado, mas nunca consumir o seed recém-importado.
     """
     if user is None or not acesso.pode_mexer(user):
         raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem mexe no Atendimento marca como vista.")
@@ -322,12 +330,29 @@ async def gravar_visto(
         if ate_utc is None
         else func.least(literal(ate_utc, DateTime(timezone=True)), relogio)
     )
+    try:
+        migracao_id = str(UUID(notificacoes_migracao_id)) if notificacoes_migracao_id else None
+    except (TypeError, ValueError, AttributeError):
+        migracao_id = None
+    mesma_migracao = (
+        notificacoes_svc.estado_valido_sql(AtendimentoConversa)
+        & (AtendimentoConversa.notificacoes_iniciais["snapshot_id"].astext == migracao_id)
+        if migracao_id is not None
+        else False
+    )
     await session.execute(
         update(AtendimentoConversa)
         .where(AtendimentoConversa.id == conversa.id)
         .values(
             # GREATEST ignora o NULL: a primeira abertura grava o marco.
             visto_em=func.greatest(AtendimentoConversa.visto_em, marco),
+            notificacoes_visto_em=case(
+                (
+                    mesma_migracao,
+                    func.greatest(AtendimentoConversa.notificacoes_visto_em, marco),
+                ),
+                else_=AtendimentoConversa.notificacoes_visto_em,
+            ),
             # Marca de leitura, não mudança da conversa.
             updated_at=AtendimentoConversa.updated_at,
         )
@@ -365,7 +390,10 @@ async def zerar_nao_lidas(
 
     filtros = [
         pendente.do_numero_sql(AtendimentoConversa),
-        AtendimentoConversa.ultima_mensagem_em > pendente.desde_do_numero(),
+        or_(
+            notificacoes_svc.estado_valido_sql(AtendimentoConversa),
+            AtendimentoConversa.ultima_mensagem_em > pendente.desde_do_numero(),
+        ),
     ]
     plataformas = sorted({p for p in plataformas if p})
     if plataformas:
@@ -390,6 +418,16 @@ async def zerar_nao_lidas(
         .values(
             visto_em=func.greatest(
                 AtendimentoConversa.visto_em, func.least(func.clock_timestamp(), ultima)
+            ),
+            notificacoes_visto_em=case(
+                (
+                    notificacoes_svc.estado_valido_sql(AtendimentoConversa),
+                    func.greatest(
+                        AtendimentoConversa.notificacoes_visto_em,
+                        func.least(func.clock_timestamp(), ultima),
+                    ),
+                ),
+                else_=AtendimentoConversa.notificacoes_visto_em,
             ),
             updated_at=AtendimentoConversa.updated_at,
         )

@@ -523,13 +523,21 @@ usePollingVisivel(async () => {
 type LidaResposta = { marcada?: boolean; motivo?: string | null; aviso?: string | null; visto_em?: string | null; conversa?: ConversaResumo | null }
 async function gravarVisto(id: string, rota: 'lida' | 'visto') {
   const aberto = detalhe.value
-  const ate = aberto && aberto.conversa.id === id ? aberto.visto_ate ?? null : null
-  const r = await api<LidaResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/${rota}`, { method: 'POST', body: { ate } })
+  if (id !== props.conversaId || !aberto || aberto.conversa.id !== id || props.ativa === false
+    || (typeof document !== 'undefined' && document.visibilityState !== 'visible')) return
+  const ate = aberto.visto_ate ?? null
+  const migracao = aberto.conversa.notificacoes_migracao_id ?? null
+  const body = migracao ? { ate, notificacoes_migracao_id: migracao } : { ate }
+  const r = await api<LidaResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/${rota}`, { method: 'POST', body })
   const d = detalhe.value
   if (!r?.conversa || id !== props.conversaId || !d || d.conversa.id !== id) return
   // Enquanto o POST viajava, o polling pode ter mostrado mensagens novas e
   // gravado outro visto. A resposta do snapshot antigo não regride a linha.
   if ((d.visto_ate ?? null) !== ate) return
+  // Uma base de leitura pode ter sido importada sem mudar o histórico.
+  // Um POST da base anterior não atualiza a nova geração da tela.
+  if ((d.conversa.notificacoes_migracao_id ?? null) !== migracao
+    || (r.conversa.notificacoes_migracao_id ?? null) !== migracao) return
   // O /lida que não marcou na plataforma deixa as não lidas como estão; o visto vale sempre.
   const c = { ...d.conversa, ...r.conversa, nao_lidas: r.conversa.nao_lidas ?? (r.marcada ? 0 : d.conversa.nao_lidas) }
   detalhe.value = { ...d, conversa: c }
@@ -548,7 +556,7 @@ const marcadorLida = criarMarcadorDeLida({
 // Cada detalhe que chega (ao abrir e no polling) diz se é para chamar, qual
 // rota e até onde a tela mostra.
 watch(() => detalhe.value, (d) => {
-  if (d) marcadorLida.abrir(d.conversa.id, rotaAoAbrir(d, props.canEdit) !== null, d.visto_ate ?? null)
+  if (d) marcadorLida.abrir(d.conversa.id, rotaAoAbrir(d, props.canEdit) !== null, d.visto_ate ?? null, d.conversa.notificacoes_migracao_id)
 })
 watch(() => props.conversaId, () => marcadorLida.fechar())
 watch(() => props.ativa, (a) => {

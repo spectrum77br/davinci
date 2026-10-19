@@ -178,6 +178,7 @@ from app.services.atendimento import (
 )
 from app.services.atendimento import etiqueta as etiqueta_svc
 from app.services.atendimento import lida as lida_svc
+from app.services.atendimento import notificacoes as notificacoes_svc
 from app.services.atendimento.constantes import (
     ACAO_OBSERVOU,
     AUTOR_CLIENTE,
@@ -1164,6 +1165,12 @@ def _resumo_dict(
         # "Visto no DaVinci" (15/10/2026): a tela relê os números da Caixa
         # quando ele muda (a pessoa abriu a conversa e o número dela zerou).
         "visto_em": _utc(c.visto_em),
+        "notificacoes_migracao_id": (
+            c.notificacoes_iniciais.get("snapshot_id")
+            if notificacoes_svc.estado_valido(c)
+            else None
+        ),
+        "notificacoes_visto_em": _utc(c.notificacoes_visto_em),
         # No "Falta responder" da Caixa (igual ao Duoke, `pendente.py`): a
         # marca da linha (negrito, bolinha) e a tela relê os números quando
         # ele muda. Em todo canal: a avaliação esperando resposta continua

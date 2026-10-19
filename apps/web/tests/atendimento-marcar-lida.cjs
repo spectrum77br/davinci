@@ -129,9 +129,9 @@ function marcador(extra = {}) {
     relogio: rel,
     ...extra,
   })
-  const abrir = (id, quer = true, ate) => {
+  const abrir = (id, quer = true, ate, geracao) => {
     estado.atual = id
-    m.abrir(id, quer, ate)
+    m.abrir(id, quer, ate, geracao)
   }
   return { m, rel, chamadas, revistas, estado, abrir }
 }
@@ -210,10 +210,71 @@ function marcador(extra = {}) {
     // Fechou e abriu de novo (outra abertura, chegou mensagem nova): marca de novo.
     abrir('c2')
     rel.avancar(1500)
+    await tique()
     abrir('c1')
     rel.avancar(1500)
     await tique()
     assert.deepEqual(chamadas, ['c1', 'c2', 'c1'])
+  }
+
+  // O timer venceu, mas antes de executar o POST a base de leitura mudou.
+  // Não se confirma uma geração nova usando o disparo da anterior.
+  {
+    const { rel, chamadas, abrir } = marcador()
+    abrir('c1', true, 'A', 'antes')
+    rel.avancar(1500)
+    abrir('c1', true, 'A', 'depois')
+    await tique()
+    assert.deepEqual(chamadas, [])
+    rel.avancar(1500)
+    await tique()
+    assert.deepEqual(chamadas, ['c1'])
+  }
+
+  // A revisão foi agendada, mas a pessoa já saiu da conversa quando sua
+  // microtask executa. Não pode usar o detalhe/token da próxima conversa.
+  {
+    const { m, rel, chamadas, revistas, estado, abrir } = marcador()
+    abrir('c1', true, 'A', 'base')
+    rel.avancar(1500)
+    await tique()
+    abrir('c1', true, 'B', 'base')
+    estado.atual = 'c2'
+    m.fechar()
+    await tique()
+    assert.deepEqual(chamadas, ['c1'])
+    assert.deepEqual(revistas, [])
+  }
+
+  // Sair e voltar para o mesmo ID/geração também é outra abertura. O
+  // disparo anterior não pode confirmar o detalhe que acabou de aparecer.
+  {
+    const { rel, chamadas, abrir } = marcador()
+    abrir('c1', true, 'A', 'base')
+    rel.avancar(1500)
+    abrir('c2', true, 'B', 'base')
+    abrir('c1', true, 'C', 'base')
+    await tique()
+    assert.deepEqual(chamadas, [])
+    rel.avancar(1500)
+    await tique()
+    assert.deepEqual(chamadas, ['c1'])
+  }
+
+  // Mesmo nessa janela curta, aba escondida não confirma leitura. Ao
+  // retornar, a abertura continua apta a tentar novamente.
+  {
+    const { m, rel, chamadas, estado, abrir } = marcador()
+    abrir('c1', true, 'A')
+    rel.avancar(1500)
+    estado.visivel = false
+    await tique()
+    assert.deepEqual(chamadas, [])
+    estado.visivel = true
+    m.retomar()
+    rel.avancar(1500)
+    await tique()
+    assert.deepEqual(chamadas, ['c1'])
   }
 
   // A falha não quebra nada e não repete na mesma abertura.
@@ -345,10 +406,10 @@ function marcador(extra = {}) {
   // Quem só lê: o `canEdit` (mexe + edit), o mesmo das outras ações de mexer.
   assert.match(bloco, /rotaAoAbrir\(d, props\.canEdit\) !== null/)
   assert.match(bloco, /rotaAoAbrir\(aberto, props\.canEdit\)/)
-  assert.match(bloco, /`\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/\$\{rota\}`, \{ method: 'POST', body: \{ ate \} \}/)
+  assert.match(bloco, /`\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/\$\{rota\}`, \{ method: 'POST', body \}/)
   // A releitura com mensagem nova: só o /visto.
   assert.match(bloco, /rever: \(id\) => gravarVisto\(id, 'visto'\)/)
-  assert.match(bloco, /marcadorLida\.abrir\(d\.conversa\.id, rotaAoAbrir\(d, props\.canEdit\) !== null, d\.visto_ate \?\? null\)/)
+  assert.match(bloco, /marcadorLida\.abrir\(d\.conversa\.id, rotaAoAbrir\(d, props\.canEdit\) !== null, d\.visto_ate \?\? null, d\.conversa\.notificacoes_migracao_id\)/)
 
   async function tela({ canEdit = true, marcar_lida = true, respostaFalha = false, naoMarcou = false, adiarRespostas = false } = {}) {
     const rel = relogioFalso()
@@ -372,10 +433,14 @@ function marcador(extra = {}) {
       if (adiarRespostas) return new Promise((resolve) => responder.push(resolve))
       if (respostaFalha) throw new Error('500')
       const id = url.split('/')[4]
-      if (url.endsWith('/visto')) return { visto_em: VISTO, conversa: { id, nao_lidas: 2, plataforma: 'shopee', visto_em: VISTO } }
+      const nativo = opts?.body?.notificacoes_migracao_id ? {
+        notificacoes_migracao_id: opts.body.notificacoes_migracao_id,
+        notificacoes_visto_em: VISTO, numero_duoke: 0,
+      } : {}
+      if (url.endsWith('/visto')) return { visto_em: VISTO, conversa: { id, nao_lidas: 2, plataforma: 'shopee', visto_em: VISTO, ...nativo } }
       // A plataforma recusou: o /lida responde 200 sem marcar, com o visto gravado.
       if (naoMarcou) return { marcada: false, motivo: 'plataforma_falhou', aviso: 'x', conversa: { id, nao_lidas: 2, plataforma: 'shopee', visto_em: VISTO } }
-      return { marcada: true, motivo: null, aviso: null, conversa: { id, nao_lidas: 0, plataforma: 'shopee', visto_em: VISTO } }
+      return { marcada: true, motivo: null, aviso: null, conversa: { id, nao_lidas: 0, plataforma: 'shopee', visto_em: VISTO, ...nativo } }
     }
     const js = transpile(bloco.replace(/^type LidaResposta = .*$/m, ''))
     const rodar = new Function(
@@ -535,6 +600,55 @@ function marcador(extra = {}) {
     assert.equal(t.emitidos.length, 1, 'o retorno antigo não publica outro estado da conversa')
   }
 
+  // Uma importação muda a geração mesmo sem chegar outra mensagem. O
+  // detalhe já aberto precisa confirmar a leitura dessa nova base.
+  for (const marcar_lida of [false, true]) {
+    const t = await tela({ marcar_lida })
+    const A = '2026-10-19T13:00:00.100000Z'
+    const migracao = '9269dc7b-6114-4fd9-9eca-e958b2e0afc4'
+    await t.chegar('c1', 2, A)
+    t.rel.avancar(1500)
+    await tique()
+    await tique()
+    await t.chegar('c1', 2, A, { notificacoes_migracao_id: migracao, numero_duoke: 5 })
+    assert.equal(t.posts.length, 1, 'a base nova respeita o tempo de abertura')
+    t.rel.avancar(1500)
+    await tique()
+    await tique()
+    assert.deepEqual(t.corpos, [{ ate: A }, { ate: A, notificacoes_migracao_id: migracao }])
+    assert.equal(t.detalhe.value.conversa.numero_duoke, 0)
+    assert.equal(t.detalhe.value.conversa.notificacoes_migracao_id, migracao)
+  }
+
+  // Um POST legado pendente quando a base é importada não pode apagar os
+  // avisos dela, ainda que visto_ate seja exatamente o mesmo.
+  {
+    const t = await tela({ marcar_lida: false, adiarRespostas: true })
+    const A = '2026-10-19T13:00:00.100000Z'
+    const migracao = '9269dc7b-6114-4fd9-9eca-e958b2e0afc4'
+    await t.chegar('c1', 2, A)
+    t.rel.avancar(1500)
+    await tique()
+    await t.chegar('c1', 2, A, { notificacoes_migracao_id: migracao, numero_duoke: 5 })
+    t.responder[0]({ conversa: { id: 'c1', nao_lidas: 0, numero_duoke: 0, visto_em: A } })
+    await tique()
+    await tique()
+    assert.equal(t.detalhe.value.conversa.numero_duoke, 5)
+    assert.equal(t.detalhe.value.conversa.notificacoes_migracao_id, migracao)
+    assert.equal(t.emitidos.length, 0)
+    t.rel.avancar(1500)
+    await tique()
+    assert.deepEqual(t.corpos[1], { ate: A, notificacoes_migracao_id: migracao })
+    t.responder[1]({ conversa: {
+      id: 'c1', nao_lidas: 2, numero_duoke: 0, visto_em: A,
+      notificacoes_migracao_id: migracao, notificacoes_visto_em: A,
+    } })
+    await tique()
+    await tique()
+    assert.equal(t.detalhe.value.conversa.numero_duoke, 0)
+    assert.equal(t.emitidos.length, 1)
+  }
+
   // Quem só lê, com mensagem nova na conversa aberta: nada.
   {
     const t = await tela({ canEdit: false })
@@ -654,7 +768,8 @@ function marcador(extra = {}) {
     assert.match(rota, /@router\.post\("\/conversas\/\{conversa_id\}\/lida", response_model=LidaOut\)/)
     // O /visto (15/10/2026): a rota leve, a mesma trava; o /lida grava o visto antes da plataforma.
     assert.match(rota, /@router\.post\("\/conversas\/\{conversa_id\}\/visto", response_model=VistoOut\)/)
-    assert.match(rota, /await lida_svc\.gravar_visto\(session, c, user, body\.ate if body else None\)\n {8}r = await lida_svc\.marcar_como_lida\(session, c, user=user\)/)
+    assert.match(rota, /await lida_svc\.gravar_visto\([\s\S]*?body\.ate if body else None,[\s\S]*?notificacoes_migracao_id=[\s\S]*?\n {8}\)\n {8}r = await lida_svc\.marcar_como_lida\(session, c, user=user\)/)
+    assert.match(rota, /notificacoes_migracao_id: UUID \| None = None/)
     // O `{ ate }` (opcional) nos dois; o detalhe manda o `visto_ate`.
     assert.equal((rota.match(/^ {4}body: VistoIn \| None = None,$/gm) || []).length, 2)
     assert.match(rotaDetalhe, /"visto_ate": lida_svc\.visto_ate\(mensagens\)/)

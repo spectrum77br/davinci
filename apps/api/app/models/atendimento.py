@@ -215,6 +215,11 @@ class AtendimentoCanal(Base, TimestampMixin):
     cursor: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
+    # Migração de leitura por escopo (comprador/afiliado). Separado do cursor:
+    # o sync pode substituí-lo, mas não pode apagar a autoridade de leitura.
+    notificacoes_migracao: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     # O número que a PLATAFORMA diz ter de não lidas — o termômetro de que a
     # leitura está completa, comparado com o que temos aqui.
     nao_lidas_plataforma: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -317,6 +322,19 @@ class AtendimentoConversa(Base, TimestampMixin):
     # (`services/atendimento/pendente.py`). Nunca vai à plataforma; NULL =
     # ninguém abriu ainda.
     visto_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Corte comprovado e exceções não lidas da migração. Colunas próprias:
+    # um sync com `dados` antigo não pode sobrescrever o snapshot importado.
+    notificacoes_corte_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    notificacoes_iniciais: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # Epoch própria: leituras anteriores à migração não apagam os IDs que
+    # a fonte comprova como não lidos. /visto avança este marco e o legado.
+    notificacoes_visto_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # aberta | respondida | fechada | bloqueada
     situacao: Mapped[str] = mapped_column(
         String(16), nullable=False, default="aberta", server_default=text("'aberta'")
