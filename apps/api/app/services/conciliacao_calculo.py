@@ -538,6 +538,21 @@ def situacao_do_pedido(
         and situacao not in ("cancelado", "sem_venda")
     ):
         dif = recebido - venda_liquido
+    # 19/10 (revisão): reserva por reclamação/estorno que saiu e não voltou é dinheiro
+    # RETIDO deste pedido — não pode ser "bateu" (Poofy (ml) 301722: liberou 182,15 e no
+    # mesmo segundo o MP reteve 182,15; vita (ml) 300522 idem, 354,05). A reserva pro
+    # saque fica de fora (é o saque em andamento, sem pedido).
+    reservas = [m for m in movs_extrato if m.tipo in TIPOS_RESERVA and m.tipo != "reserva_saque"]
+    retido = _soma([m.debito for m in reservas]) - _soma([m.credito for m in reservas])
+    if retido > TOLERANCIA:
+        texto_retido = f"{retido:.2f} retido em reserva por reclamação/estorno"
+        if situacao == "bateu":
+            situacao = "em_disputa"
+            motivo = texto_retido
+        else:
+            motivo = f"{motivo} · {texto_retido}" if motivo else texto_retido
+    else:
+        retido = ZERO
     return {
         "liberado_valor": liberado_valor,
         "liberado_em": liberado_em,
@@ -548,6 +563,8 @@ def situacao_do_pedido(
         "dif_previsto_recebido": dif,
         "situacao": situacao,
         "motivo": motivo,
+        # dinheiro deste pedido preso em reserva (reclamação/estorno) que ainda não voltou
+        "retido": retido,
         # cancelado de verdade (nada ficou na conta): só esse finaliza sozinho
         "zero_a_zero": situacao == "cancelado"
         and (recebido is None or abs(recebido) <= TOLERANCIA),

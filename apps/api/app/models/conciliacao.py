@@ -70,6 +70,9 @@ SITUACOES = (
     "estornado_depois",  # liberou e depois saiu dinheiro (mediação, estorno, chargeback)
     "sem_venda",  # pedido do Bling sem venda do ML encontrada
     "fora_da_loja",  # saiu desta loja no Bling (apagado ou mudou de loja) — 16/10, revisão
+    # 19/10, revisão: liberou, mas a plataforma reteve parte (reserva por reclamação/
+    # estorno que não voltou) — não é "bateu" enquanto o dinheiro estiver preso
+    "em_disputa",
 )
 # Etapa do pedido (o ciclo): ver docs, seção 12.
 ETAPAS = ("aguardando", "conciliado", "pendencia", "finalizado", "reaberto")

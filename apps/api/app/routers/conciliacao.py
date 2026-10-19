@@ -727,6 +727,7 @@ SITUACAO_LABELS = {
     "sem_venda": "Venda não lida",
     "falta_frete": "Falta frete (Melhor Envio)",
     "fora_da_loja": "Saiu da loja",
+    "em_disputa": "Em disputa (dinheiro retido)",
 }
 ETAPA_LABELS = {
     "aguardando": "aguardando",
@@ -1354,6 +1355,14 @@ async def raio_x(
             "recebido": _num(p.recebido),
         },
     }
+    # reserva retida do pedido (19/10): o par é conferido dentro dos movimentos do pedido
+    saldo_reservas: dict[str, Decimal] = defaultdict(Decimal)
+    for m in movs:
+        if m.tipo in TIPOS_RESERVA_SET and m.pagamento_id:
+            saldo_reservas[str(m.pagamento_id)] += (m.credito or Decimal("0")) - (
+                m.debito or Decimal("0")
+            )
+    reserva_aberta = _flags_reserva(movs, dict(saldo_reservas))
     return {
         "pedido": _pedido_out(p),
         "versoes": versoes,
@@ -1365,7 +1374,9 @@ async def raio_x(
             tiktok=await _conta_tiktok_do_pedido(session, p, movs),
             amazon=await _conta_amazon_do_pedido(session, p, movs),
         ),
-        "movimentos": [_movimento_out(m) for m in movs],
+        "movimentos": [
+            {**_movimento_out(m), "reserva_aberta": reserva_aberta.get(m.id)} for m in movs
+        ],
         "frete_pago": await _fretes_pagos_do_pedido(session, p),
     }
 
@@ -2221,6 +2232,7 @@ _SITUACOES_DIVERGENTES = {
     "bling_diferente",
     "estornado_depois",
     "vencido",
+    "em_disputa",
 }
 
 
@@ -2239,7 +2251,61 @@ def _status_movimento(m: ConciliacaoMovimento, pedido: ConciliacaoPedido | None)
         and pedido.situacao in _SITUACOES_DIVERGENTES
     ):
         return "divergente"
+    # 19/10 (revisão): a reserva que prende o dinheiro do pedido "em disputa" também é a
+    # linha divergente do dia
+    if pedido is not None and m.tipo in TIPOS_RESERVA_SET and pedido.situacao == "em_disputa":
+        return "divergente"
     return "automatico"
+
+
+# reserva pro saque é o saque em andamento (classificada "saque"): não é dinheiro retido
+_RESERVAS_RETIDAS = tuple(t for t in TIPOS_RESERVA_SET if t != "reserva_saque")
+
+
+def _flags_reserva(
+    movs: list[ConciliacaoMovimento], saldo_por_pagamento: dict[str, Decimal]
+) -> dict[Any, bool]:
+    """Por linha de reserva: True = aberta (saiu e não voltou, ou sem nº de pagamento pra
+    provar o par) → a tela mostra; False = par fechado (soma zero) → pode esconder."""
+    out: dict[Any, bool] = {}
+    for m in movs:
+        if m.tipo not in TIPOS_RESERVA_SET:
+            continue
+        if m.tipo == "reserva_saque":
+            out[m.id] = False
+            continue
+        pg = str(m.pagamento_id or "")
+        out[m.id] = (not pg) or abs(saldo_por_pagamento.get(pg, Decimal("0"))) > Decimal("0.05")
+    return out
+
+
+async def _reservas_abertas(
+    session: AsyncSession, loja: ConciliacaoLoja, movs: list[ConciliacaoMovimento]
+) -> dict[Any, bool]:
+    """19/10 (revisão): a tela escondia TODA reserva como "vão e voltam, somam zero" —
+    injox (ml) 15/10 tinha uma única linha pendente (reserva +367,48 sem dono) e ela
+    estava escondida. Por nº de pagamento, soma crédito − débito de todas as reservas da
+    loja (qualquer dia): par fechado pode ser escondido; sobra ≠ 0 é dinheiro retido."""
+    mov = ConciliacaoMovimento
+    pagamentos = {
+        str(m.pagamento_id) for m in movs if m.tipo in _RESERVAS_RETIDAS and m.pagamento_id
+    }
+    saldo: dict[str, Decimal] = {}
+    if pagamentos:
+        rows = (
+            await session.execute(
+                select(mov.pagamento_id, func.sum(mov.credito - mov.debito))
+                .where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem.in_(ORIGENS_EXTRATO),
+                    mov.tipo.in_(_RESERVAS_RETIDAS),
+                    mov.pagamento_id.in_(pagamentos),
+                )
+                .group_by(mov.pagamento_id)
+            )
+        ).all()
+        saldo = {str(pg): Decimal(str(v or 0)) for pg, v in rows}
+    return _flags_reserva(movs, saldo)
 
 
 def _ordena_dia(
@@ -2440,6 +2506,7 @@ async def extrato_do_dia(
             )
         ).scalars()
     }
+    reserva_aberta = await _reservas_abertas(session, alvo, movs)
     linhas: list[dict[str, Any]] = []
     contagem: dict[str, int] = {
         "automatico": 0,
@@ -2491,6 +2558,8 @@ async def extrato_do_dia(
                 if ped
                 else None,
                 "pedido_etapa": ped.etapa if ped else None,
+                # reserva: True = retida (aparece sempre); False = par fechado (pode esconder)
+                "reserva_aberta": reserva_aberta.get(m.id),
             }
         )
     fechado = (
@@ -3071,12 +3140,14 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
             )
         )
     ).one()
+    # 19/10 (revisão): toda reserva retida conta (reclamação, estorno, frete de
+    # devolução, pagamento) — só a reserva pro saque fica fora (é o saque em andamento)
     reservado = (
         await session.execute(
             select(func.sum(mov.debito - mov.credito)).where(
                 mov.integration_id == loja.integration_id,
                 mov.origem.in_(ORIGENS_EXTRATO),
-                mov.tipo == "reserva_disputa",
+                mov.tipo.in_(_RESERVAS_RETIDAS),
             )
         )
     ).scalar_one()
@@ -3190,6 +3261,7 @@ _EVENTOS_DIA = (
     ("reabertos", "etapa_em", ("etapa", "reaberto")),
     ("pendencia", "etapa_em", ("etapa", "pendencia")),
     ("vencidos", "previsao_liberacao", ("situacao", "vencido")),
+    ("em_disputa", "ultimo_movimento_em", ("situacao", "em_disputa")),
 )
 _ROTULO_EVENTO = {
     "estornados": "estornado(s) depois",
@@ -3198,6 +3270,7 @@ _ROTULO_EVENTO = {
     "reabertos": "reaberto(s)",
     "pendencia": "pendência(s) aberta(s)",
     "vencidos": "vencido(s)",
+    "em_disputa": "em disputa (dinheiro retido)",
 }
 
 
@@ -3481,6 +3554,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         fora_da_loja = por_situacao.get("fora_da_loja", 0)
         sem_frete = por_situacao.get("falta_frete", 0)
         estornados = por_situacao.get("estornado_depois", 0)
+        em_disputa = por_situacao.get("em_disputa", 0)
         problemas: list[str] = []
         if contagem["pendente"]:
             problemas.append(f"{contagem['pendente']} linha(s) sem dono")
@@ -3504,6 +3578,8 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             problemas.append(f"{fora_da_loja} pedido(s) que saíram da loja")
         if estornados:
             problemas.append(f"{estornados} estornado(s) depois")
+        if em_disputa:
+            problemas.append(f"{em_disputa} em disputa (dinheiro retido)")
         if loja.ultimo_erro:
             problemas.append(f"erro: {loja.ultimo_erro[:80]}")
         # Só o dia (16/10, Vinicius): o que trava o dia e o que aconteceu nele
@@ -3556,6 +3632,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                 "sem_venda": sem_venda,
                 "fora_da_loja": fora_da_loja,
                 "estornados": estornados,
+                "em_disputa": em_disputa,
             },
             "leituras": {
                 "extrato_em": loja.ultimo_extrato_em.isoformat()
@@ -3690,6 +3767,20 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "detalhe": "mediação, estorno ou chargeback depois do dinheiro entrar",
                     "acao": "pedidos",
                     "filtro": {"situacao": "estornado_depois", "etapa": "pendencia,reaberto"},
+                }
+            )
+        if em_disputa:
+            agir.append(
+                {
+                    "gravidade": "warn",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · {em_disputa} em disputa (dinheiro retido)",
+                    "detalhe": (
+                        "liberou, mas a plataforma reteve parte em reserva por reclamação/estorno; "
+                        "acompanhar o chamado até a reserva voltar (ou virar mediação)"
+                    ),
+                    "acao": "pedidos",
+                    "filtro": {"situacao": "em_disputa", "etapa": "pendencia,reaberto"},
                 }
             )
         # 16/10 (revisão): "recebido a mais", "venda não lida com dinheiro" e "saiu da

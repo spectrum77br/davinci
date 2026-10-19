@@ -14,6 +14,8 @@ export const SITUACOES: Array<{ key: string; label: string; cls: string }> = [
   { key: 'falta_frete', label: 'Falta frete (Melhor Envio)', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
   // 16/10 (revisão, aprovado): pedido que saiu da loja no Bling não some mais — fica marcado
   { key: 'fora_da_loja', label: 'Saiu da loja', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' },
+  // 19/10 (revisão): liberou, mas parte ficou retida em reserva (reclamação/estorno) — não é "bateu"
+  { key: 'em_disputa', label: 'Em disputa (retido)', cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' },
 ]
 
 export const ETAPAS: Array<{ key: string; label: string; cls: string }> = [

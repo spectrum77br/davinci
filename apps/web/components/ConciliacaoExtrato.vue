@@ -56,6 +56,8 @@ type Mov = {
   pedido_situacao: string | null
   pedido_situacao_label: string | null
   pedido_etapa: string | null
+  // reserva: true = retida (saiu e não voltou), false = par fechado; null nas outras linhas
+  reserva_aberta?: boolean | null
 }
 type Totais = {
   linhas: number
@@ -97,11 +99,16 @@ const fechando = ref(false)
 const pendentes = computed(() => dados.value?.contagem.pendente || 0)
 // Reservas (pro saque, por reclamação) vêm em pares que somam zero e a tela do
 // Mercado Pago nem mostra: ficam escondidas por padrão, com um clique pra ver (15/10).
+// 19/10 (revisão): só o PAR fechado se esconde — reserva que saiu e não voltou
+// (`reserva_aberta`) ou ainda sem dono é dinheiro retido e aparece sempre (injox 15/10:
+// a única linha pendente do dia estava escondida atrás de "vão e voltam, somam zero").
 const mostrarReservas = ref(false)
-const reservas = computed(() => (dados.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_')).length)
+const escondivel = (m: Mov) => m.tipo.startsWith('reserva_') && m.reserva_aberta !== true && m.status !== 'pendente'
+const reservas = computed(() => (dados.value?.movimentos || []).filter(escondivel).length)
+const reservasRetidas = computed(() => (dados.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_') && !escondivel(m)).length)
 const movimentosVisiveis = computed(() => {
   const todos = dados.value?.movimentos || []
-  return mostrarReservas.value ? todos : todos.filter((m) => !m.tipo.startsWith('reserva_'))
+  return mostrarReservas.value ? todos : todos.filter((m) => !escondivel(m))
 })
 const pct = computed(() => {
   const t = dados.value?.totais.linhas || 0
@@ -287,7 +294,7 @@ onMounted(() => {
         <Search class="size-3.5 text-muted-foreground" />
         <input v-model="q" placeholder="pedido, venda, pagamento, SKU" class="w-48 bg-transparent outline-none" @keyup.enter="carregar()" />
       </label>
-      <span v-if="dados" class="text-muted-foreground">{{ movimentosVisiveis.length }} de {{ dados.totais.linhas }} movimentos<template v-if="reservas"> · {{ reservas }} reservas {{ mostrarReservas ? 'à mostra' : 'escondidas' }} (vão e voltam, somam zero) <button type="button" class="underline" @click="mostrarReservas = !mostrarReservas">{{ mostrarReservas ? 'esconder' : 'mostrar' }}</button></template></span>
+      <span v-if="dados" class="text-muted-foreground">{{ movimentosVisiveis.length }} de {{ dados.totais.linhas }} movimentos<template v-if="reservas"> · {{ reservas }} reserva(s) {{ mostrarReservas ? 'à mostra' : 'escondida(s)' }} (par fechado: foi e voltou, soma zero) <button type="button" class="underline" @click="mostrarReservas = !mostrarReservas">{{ mostrarReservas ? 'esconder' : 'mostrar' }}</button></template><template v-if="reservasRetidas"> · <b class="text-red-700 dark:text-red-400">{{ reservasRetidas }} reserva(s) retida(s)</b> à mostra: dinheiro que saiu e ainda não voltou</template></span>
       <span class="ml-auto inline-flex items-center gap-1.5">
         <template v-if="dados?.fechado">
           <span class="inline-flex items-center gap-1 rounded bg-slate-200 px-2 py-1 font-bold text-slate-800 dark:bg-slate-700 dark:text-slate-100"><Lock class="size-3.5" /> dia fechado por {{ dados.fechado.por }} em {{ fmtDiaHora(dados.fechado.em) }}<template v-if="dados.fechado.motivo"> · motivo: {{ dados.fechado.motivo }}</template></span>

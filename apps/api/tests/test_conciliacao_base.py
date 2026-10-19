@@ -263,7 +263,9 @@ async def test_run_extrato_sync_pede_janela_e_depois_le_o_arquivo(db, make_user)
     syncs = (await db.execute(__import__("sqlalchemy").select(ConciliacaoSync))).scalars().all()
     assert [(s.chave, s.status, s.linhas) for s in syncs] == [("2026-10-01..2026-10-14", "lido", 8)]
     # dia seguinte: pede só o dia 15 (e confere a config de novo, 1×/dia: completa, nada a mudar)
-    loja.extrato_config_em = datetime.now(UTC) - timedelta(days=1)
+    # 19/10: data fixa — com o relógio real o teste quebrava a partir de 17/10 (a última
+    # conferência "ontem" já não era anterior ao `hoje` fixo do teste)
+    loja.extrato_config_em = datetime(2026, 10, 15, 12, tzinfo=UTC)
     with respx.mock(assert_all_called=False) as router:
         router.get(f"{MP}/v1/account/release_report/config").mock(
             return_value=Response(200, json=CONFIG_COMPLETA)
@@ -3077,6 +3079,132 @@ def test_liberacao_com_descricao_desconhecida_e_venda_liberada_e_dif_aparece():
         **base,
     )
     assert out["situacao"] == "cancelado" and out["dif_previsto_recebido"] is None
+
+
+def test_reserva_retida_no_pedido_e_em_disputa_e_o_par_fechado_e_bateu():
+    """19/10 (revisão): Poofy (ml) 301722 liberou 182,15 e no mesmo segundo o MP reteve
+    182,15 por reclamação — não é "bateu": é "em disputa" (pendência, sem finalizar
+    sozinho). Reserva que volta = bateu; reserva que volta e vira mediação = estornado."""
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    agora = datetime(2026, 10, 19, 12, tzinfo=UTC)
+    base = {
+        "agora": agora,
+        "data_pedido": datetime(2026, 10, 13, 12, tzinfo=UTC),
+        "bling_total": Decimal("346.00"),
+        "previsao": None,
+        "fatura": {},
+    }
+    venda = MarketplaceOrderFinancial(
+        gross_amount=Decimal("346.00"),
+        net_amount=Decimal("182.15"),
+        fee_amount=Decimal("51.90"),
+        freight_amount=Decimal("111.95"),
+        raw={},
+    )
+    d = datetime(2026, 10, 16, 20, 22, tzinfo=UTC)
+    lib = _mov(loja, "venda_liberada", d, credito="182.15", pedido_mkt="2000018828084180", pagamento="181")
+    res = _mov(loja, "reserva_disputa", d, debito="182.15", pedido_mkt="2000018828084180", pagamento="181")
+    out = calc.situacao_do_pedido(movs_extrato=[lib, res], venda=venda, **base)
+    assert out["situacao"] == "em_disputa" and out["retido"] == Decimal("182.15")
+    assert out["motivo"] == "182.15 retido em reserva por reclamação/estorno"
+    assert out["recebido"] == Decimal("182.15") and out["dif_previsto_recebido"] == Decimal("0.00")
+    etapa = calc.etapa_do_pedido(
+        agora=agora,
+        atual=None,
+        situacao="em_disputa",
+        ultimo_movimento_em=d,
+        zero_a_zero=False,
+        com_dinheiro=True,
+    )
+    assert etapa["etapa"] == "pendencia" and etapa["bateu_em"] is None
+    # a reserva voltou: bateu, nada retido
+    volta = _mov(loja, "reserva_disputa", d + timedelta(days=2), credito="182.15", pagamento="181")
+    out = calc.situacao_do_pedido(movs_extrato=[lib, res, volta], venda=venda, **base)
+    assert out["situacao"] == "bateu" and out["retido"] == Decimal("0.00")
+    # reclamação perdida: a reserva volta e a mediação tira → estornado depois, Dif. −182,15
+    med = _mov(loja, "mediacao", d + timedelta(days=2), debito="182.15", pagamento="181")
+    out = calc.situacao_do_pedido(movs_extrato=[lib, res, volta, med], venda=venda, **base)
+    assert out["situacao"] == "estornado_depois" and out["retido"] == Decimal("0.00")
+    assert out["dif_previsto_recebido"] == Decimal("-182.15")
+    # recebido a menos COM reserva aberta: a situação pior fica, o retido vai pro motivo
+    menos = _mov(loja, "venda_liberada", d, credito="150.00", pedido_mkt="2000018828084180", pagamento="181")
+    out = calc.situacao_do_pedido(movs_extrato=[menos, res], venda=venda, **base)
+    assert out["situacao"] == "recebido_a_menos" and out["retido"] == Decimal("182.15")
+    assert out["motivo"].endswith("182.15 retido em reserva por reclamação/estorno")
+    # reserva pro saque não é dinheiro retido do pedido
+    saque = _mov(loja, "reserva_saque", d, debito="9147.00", pagamento="999")
+    out = calc.situacao_do_pedido(movs_extrato=[lib, saque], venda=venda, **base)
+    assert out["situacao"] == "bateu" and out["retido"] == Decimal("0.00")
+
+
+async def test_extrato_e_raio_x_mostram_a_reserva_retida_e_escondem_so_o_par(
+    db, make_user, auth_as, client
+):
+    """19/10 (revisão): injox (ml) 15/10 — a única linha pendente do dia (reserva sem dono)
+    estava escondida como "vão e voltam, somam zero". `reserva_aberta` diz à tela o que
+    pode esconder (par fechado) e o que tem que aparecer (retida ou sem dono)."""
+    loja, _integ = await _loja(db, make_user)
+    d = _d13(10)
+    par_saida = _mov(
+        loja,
+        "reserva_disputa",
+        d,
+        debito="100.00",
+        pagamento="p1",
+        pedido_mkt="2000018405611066",
+        pedido_bling="301102",
+    )
+    par_volta = _mov(
+        loja,
+        "reserva_disputa",
+        d + timedelta(hours=1),
+        credito="100.00",
+        pagamento="p1",
+        pedido_mkt="2000018405611066",
+        pedido_bling="301102",
+    )
+    retida = _mov(loja, "reserva_disputa", d + timedelta(hours=2), debito="367.48", pagamento="p2")
+    # retida de um pedido "em disputa" (a volta, se vier, cai noutro dia)
+    presa = _mov(
+        loja,
+        "reserva_disputa",
+        d + timedelta(hours=3),
+        debito="182.15",
+        pagamento="p3",
+        pedido_mkt="2000018828084180",
+        pedido_bling="301722",
+    )
+    db.add_all([par_saida, par_volta, retida, presa])
+    db.add(await _pedido_conciliado(loja))  # 301102 bateu
+    db.add(
+        await _pedido_conciliado(
+            loja,
+            pedido_bling="301722",
+            numeroloja="2000018828084180",
+            situacao="em_disputa",
+            etapa="pendencia",
+            recebido=Decimal("182.15"),
+        )
+    )
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r = await client.get("/api/conciliacao/extrato", params={"loja": "jlas2", "dia": "2026-10-13"})
+    assert r.status_code == 200, r.text
+    por_id = {m["id"]: m for m in r.json()["movimentos"]}
+    assert por_id[str(par_saida.id)]["reserva_aberta"] is False
+    assert por_id[str(par_volta.id)]["reserva_aberta"] is False
+    assert por_id[str(retida.id)]["reserva_aberta"] is True
+    assert por_id[str(retida.id)]["status"] == "pendente"
+    assert por_id[str(presa.id)]["reserva_aberta"] is True
+    assert por_id[str(presa.id)]["status"] == "divergente"  # a linha que prende o dinheiro
+    rx = await client.get("/api/conciliacao/pedidos/301722", params={"loja": "jlas2"})
+    assert rx.status_code == 200, rx.text
+    flags = {m["id"]: m["reserva_aberta"] for m in rx.json()["movimentos"]}
+    assert flags[str(presa.id)] is True
+    rx2 = await client.get("/api/conciliacao/pedidos/301102", params={"loja": "jlas2"})
+    flags2 = {m["id"]: m["reserva_aberta"] for m in rx2.json()["movimentos"]}
+    assert flags2[str(par_saida.id)] is False and flags2[str(par_volta.id)] is False
 
 
 async def test_recalcular_loja_renomeia_liberacao_gravada_como_outro(db, make_user):

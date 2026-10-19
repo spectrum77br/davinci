@@ -106,6 +106,8 @@ type Movimento = {
   frete: number | null
   descontado_da_venda: boolean | null
   original: Record<string, unknown> | null
+  // reserva: true = retida (saiu e não voltou), false = par fechado; null nas outras linhas
+  reserva_aberta?: boolean | null
   pagamento_id: string | null
 }
 type Versao = Record<string, number | string | null | undefined>
@@ -175,13 +177,17 @@ const salvando = ref(false)
 const obsDraft = ref('')
 const originalAberto = ref<string | null>(null) // movimento com a linha original do relatório aberta
 // Reservas por reclamação vêm em pares (reserva −X, devolução +X) e somam zero:
-// ficam escondidas por padrão no Raio-X, com um clique pra ver (15/10).
+// ficam escondidas por padrão no Raio-X, com um clique pra ver (15/10). 19/10 (revisão):
+// só o par fechado se esconde — reserva retida (`reserva_aberta`) é dinheiro preso e
+// aparece sempre (Poofy (ml) 301722: "bateu" com 182,15 retidos e a linha escondida).
 const mostrarReservas = ref(false)
+const reservaEscondivel = (m: Movimento) => m.tipo.startsWith('reserva_') && m.reserva_aberta !== true
 const movimentosVisiveis = computed(() => {
   const todos = raiox.value?.movimentos || []
-  return mostrarReservas.value ? todos : todos.filter((m) => !m.tipo.startsWith('reserva_'))
+  return mostrarReservas.value ? todos : todos.filter((m) => !reservaEscondivel(m))
 })
-const reservasEscondidas = computed(() => (raiox.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_')).length)
+const reservasEscondidas = computed(() => (raiox.value?.movimentos || []).filter(reservaEscondivel).length)
+const reservasRetidas = computed(() => (raiox.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_') && m.reserva_aberta === true).length)
 const pagamentosDoPedido = computed(() => new Set((raiox.value?.movimentos || []).map((m) => m.pagamento_id).filter(Boolean)).size)
 const motivoDraft = ref('')
 
@@ -833,7 +839,7 @@ await carregar()
                 class="cursor-pointer border-b hover:bg-muted/60"
                 :class="[
                   selecionado?.pedido_bling === p.pedido_bling && 'outline outline-2 -outline-offset-2 outline-primary',
-                  ['recebido_a_menos', 'vencido', 'estornado_depois'].includes(p.situacao) && 'bg-red-50 dark:bg-red-950/20',
+                  ['recebido_a_menos', 'vencido', 'estornado_depois', 'em_disputa'].includes(p.situacao) && 'bg-red-50 dark:bg-red-950/20',
                   ['aguardando', 'recebido_a_mais'].includes(p.situacao) && 'bg-amber-50/60 dark:bg-amber-950/10',
                 ]"
                 @click="abrir(p)"
@@ -948,15 +954,16 @@ await carregar()
               <thead class="bg-muted text-[10px] uppercase text-muted-foreground"><tr><th class="px-1.5 py-1 text-left">Data</th><th class="px-1.5 py-1 text-left">Origem</th><th class="px-1.5 py-1 text-left">O que foi</th><th class="px-1.5 py-1 text-right">Valor</th><th class="px-1 py-1"></th></tr></thead>
               <tbody class="tabular-nums">
                 <tr v-if="!raiox.movimentos.length"><td colspan="5" class="px-1.5 py-2 text-center text-muted-foreground">nenhum movimento ainda</td></tr>
-                <tr v-if="reservasEscondidas" class="border-b bg-muted/30">
+                <tr v-if="reservasEscondidas || reservasRetidas" class="border-b bg-muted/30">
                   <td colspan="5" class="px-1.5 py-1 text-muted-foreground">
-                    {{ reservasEscondidas }} linha(s) de reserva por reclamação {{ mostrarReservas ? 'à mostra' : 'escondida(s)' }} (vão e voltam, somam zero)
-                    <button type="button" class="ml-1 underline" @click="mostrarReservas = !mostrarReservas">{{ mostrarReservas ? 'esconder' : 'mostrar' }}</button>
+                    <template v-if="reservasEscondidas">{{ reservasEscondidas }} linha(s) de reserva {{ mostrarReservas ? 'à mostra' : 'escondida(s)' }} (par fechado: foi e voltou, soma zero)
+                    <button type="button" class="ml-1 underline" @click="mostrarReservas = !mostrarReservas">{{ mostrarReservas ? 'esconder' : 'mostrar' }}</button></template>
+                    <b v-if="reservasRetidas" class="text-red-700 dark:text-red-400"><template v-if="reservasEscondidas"> · </template>{{ reservasRetidas }} reserva(s) retida(s): dinheiro deste pedido que saiu e ainda não voltou</b>
                     <span v-if="pagamentosDoPedido > 1" class="ml-2">· {{ pagamentosDoPedido }} pagamentos nesta venda</span>
                   </td>
                 </tr>
                 <template v-for="m in movimentosVisiveis" :key="m.id">
-                  <tr class="border-b" :class="m.tipo.startsWith('reserva_') && 'text-muted-foreground'">
+                  <tr class="border-b" :class="m.reserva_aberta === true ? 'font-semibold text-red-700 dark:text-red-400' : m.tipo.startsWith('reserva_') && 'text-muted-foreground'">
                     <td class="whitespace-nowrap px-1.5 py-1 text-muted-foreground">{{ fmtDiaHora(m.data) }}</td>
                     <td class="whitespace-nowrap px-1.5 py-1">{{ m.origem === 'ml_fatura' ? 'fatura' : m.origem === 'shopee_carteira' ? 'carteira' : 'extrato' }}<span v-if="pagamentosDoPedido > 1 && m.pagamento_id" class="ml-1 text-[10px] text-muted-foreground" :title="'pagamento ' + m.pagamento_id">pag. …{{ String(m.pagamento_id).slice(-4) }}</span></td>
                     <td class="px-1.5 py-1">{{ tipoMov(m.tipo) }}<span v-if="m.descontado_da_venda === false && !(m.tipo === 'fatura_frete' && ((raiox.versoes.extrato.frete as number) || 0) > 0)" class="ml-1 text-muted-foreground">(cobrada à parte)</span></td>
@@ -980,7 +987,7 @@ await carregar()
               </tbody>
             </table>
           </div>
-          <div class="rounded border px-2 py-1.5" :class="['recebido_a_menos', 'vencido', 'estornado_depois'].includes(raiox.pedido.situacao) ? 'border-red-300 bg-red-50 dark:bg-red-950/20' : 'border-emerald-300 bg-emerald-50 dark:bg-emerald-950/20'">
+          <div class="rounded border px-2 py-1.5" :class="['recebido_a_menos', 'vencido', 'estornado_depois', 'em_disputa'].includes(raiox.pedido.situacao) ? 'border-red-300 bg-red-50 dark:bg-red-950/20' : 'border-emerald-300 bg-emerald-50 dark:bg-emerald-950/20'">
             <b>Previsto {{ fmtMoney(raiox.pedido.venda_liquido) }} · Recebido {{ fmtMoney(raiox.pedido.recebido) }} · Diferença {{ fmtMoney(raiox.pedido.dif_previsto_recebido) }}</b>
             <span v-if="raiox.pedido.motivo"> — {{ raiox.pedido.motivo }}</span><br />
             <b v-if="raiox.pedido.recebido != null">Sobrou: {{ fmtMoney(raiox.pedido.recebido) }} − custo {{ fmtMoney(raiox.pedido.custo) }} − reembolso {{ fmtMoney(raiox.pedido.reembolso) }}<template v-if="raiox.pedido.venda_frete_pago != null"> − frete pago (Melhor Envio) {{ fmtMoney(raiox.pedido.venda_frete_pago) }}</template> = {{ fmtMoney(raiox.pedido.sobrou) }} · margem {{ fmtPct(raiox.pedido.margem) }}</b><b v-else class="font-normal text-muted-foreground">Resultado de verdade: só depois que o dinheiro entrar</b>
