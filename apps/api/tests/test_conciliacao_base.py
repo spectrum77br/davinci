@@ -3456,6 +3456,34 @@ async def test_resumo_quadro_cobrancas_da_plataforma_sem_pedido(
     assert corpo["lojas"][0]["cobrancas"] == esperado
     assert corpo["por_plataforma"]["ml"]["cobrancas"] == esperado
     assert corpo["empresa"]["cobrancas"] == esperado
+    # bloco Dias: a coluna "Cobranças extras (sem pedido)" do dia 10 e do dia 11
+    por_dia = {x["dia"]: x["cobrancas_extras"] for x in corpo["dias"]}
+    assert por_dia["2026-10-10"] == {
+        "total": 2514.89,  # 2,57 + 2.000 + 150 + 362,32 (segurado; a fatura paga com ele = 0)
+        "sem_dono": 1,
+        "imposto": 2.57,
+        "publicidade": 2000.0,
+        "penalidades": 150.0,
+        "fatura_ml": 362.32,
+    }
+    assert por_dia["2026-10-11"]["total"] == 377.27 and por_dia["2026-10-11"]["sem_dono"] == 0
+    assert por_dia["2026-10-12"]["total"] == 0.0
+    # bloco "Resultado do mês" (ainda escondido na tela): o pedido 301102 liberou em 10/10
+    rm = corpo["lojas"][0]["resultado_mes"]
+    assert rm == {
+        "entrou_pedidos_mes": 610.65,
+        "saques": 5000.0,
+        "liberados": 1,
+        "liberados_recebido": 610.65,
+        "liberados_custo": 500.0,
+        "liberados_reembolso": 0.0,
+        "liberados_frete_pago": 0.0,
+        "liberados_sobrou": 110.65,
+    }
+    assert (
+        corpo["empresa"]["resultado_mes"] == rm
+        and corpo["por_plataforma"]["ml"]["resultado_mes"] == rm
+    )
 
 
 async def test_recalculo_grava_quanto_da_fatura_foi_pago_com_o_segurado(db, make_user):

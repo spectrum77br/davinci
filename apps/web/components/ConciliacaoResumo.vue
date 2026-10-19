@@ -70,6 +70,19 @@ type Cobrancas = {
   anteriores_saiu: number
   anteriores_linhas: number
 }
+// Coluna "Cobranças extras (sem pedido)" do bloco Dias (19/10): positivo = a plataforma tirou
+type CobrancasExtras = { total: number; sem_dono: number; imposto: number; publicidade: number; penalidades: number; fatura_ml: number }
+// Bloco "Resultado do mês" (maquete de 19/10; ainda escondido na tela)
+type ResultadoMes = {
+  entrou_pedidos_mes: number
+  saques: number
+  liberados: number
+  liberados_recebido: number
+  liberados_custo: number
+  liberados_reembolso: number
+  liberados_frete_pago: number
+  liberados_sobrou: number
+}
 type DiaResumo = {
   dia: string
   fechados: number
@@ -78,6 +91,7 @@ type DiaResumo = {
   com_pendencia: number
   pendentes: { conta: string; motivo: string }[]
   obs: string[]
+  cobrancas_extras?: CobrancasExtras
 }
 type LojaResumo = {
   conta: string
@@ -85,6 +99,7 @@ type LojaResumo = {
   inicio: string
   dinheiro: Dinheiro
   cobrancas?: Cobrancas
+  resultado_mes?: ResultadoMes
   dia: DiaLoja
   pedidos: PedidosLoja
   leituras: Leituras
@@ -111,8 +126,8 @@ type Resumo = {
   mes: string
   lojas: LojaResumo[]
   agir: Agir[]
-  por_plataforma: Record<string, Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas }>
-  empresa: Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas }
+  por_plataforma: Record<string, Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas; resultado_mes?: ResultadoMes }>
+  empresa: Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas; resultado_mes?: ResultadoMes }
   cartoes: Record<string, number>
 
   dias: DiaResumo[]
@@ -128,7 +143,9 @@ const PLATAFORMAS: Array<{ key: string; label: string }> = [
   { key: 'temu', label: 'Temu' },
 ]
 const FASE_SEGUINTE = ['Shopee', 'Amazon', 'TikTok']
-const MOSTRAR_MES = false // rodapé do mês desligado em 15/10 (volta quando ele pedir)
+// Bloco "Resultado do mês": desligado em 15/10; refeito em 19/10 pela maquete aprovada, mas o
+// Vinicius pediu pra não liberar ainda ("esse painel do mês não vamos usar ainda") — true liga.
+const MOSTRAR_MES = false
 // Quadro "Cobranças da plataforma": positivo = a plataforma tirou; negativo = devolveu.
 const abertosCob = ref<Record<string, boolean>>({})
 function alternarCob(k: string) {
@@ -142,6 +159,54 @@ function fmtCob(v: number | null | undefined) {
 function cobCls(v: number | null | undefined) {
   if (v === null || v === undefined || Math.abs(v) < 0.005) return 'text-muted-foreground'
   return v > 0 ? 'text-red-600' : 'text-emerald-700'
+}
+function tituloExtras(e?: CobrancasExtras) {
+  if (!e) return ''
+  const partes: string[] = []
+  if (Math.abs(e.imposto) > 0.005) partes.push(`impostos ${fmtCob(e.imposto)}`)
+  if (Math.abs(e.publicidade) > 0.005) partes.push(`Ads ${fmtCob(e.publicidade)}`)
+  if (Math.abs(e.penalidades) > 0.005) partes.push(`penalidades e ajustes ${fmtCob(e.penalidades)}`)
+  if (Math.abs(e.fatura_ml) > 0.005) partes.push(`fatura do ML ${fmtCob(e.fatura_ml)}`)
+  return partes.join(' · ') || 'nenhuma cobrança sem pedido nesse dia'
+}
+// Bloco "Resultado do mês" (maquete de 19/10): uma coluna por marketplace + Empresa.
+const COLS_MES = computed(() => [...plataformasDoMes.value.map((p) => ({ key: p.key, label: p.label })), { key: 'empresa', label: 'Empresa' }])
+function blocoMes(key: string) {
+  return key === 'empresa' ? dados.value?.empresa : dados.value?.por_plataforma[key]
+}
+function rm(key: string): Partial<ResultadoMes> {
+  return blocoMes(key)?.resultado_mes || {}
+}
+function cbm(key: string): Partial<Cobrancas> {
+  return blocoMes(key)?.cobrancas || {}
+}
+function anterioresLiquido(key: string) {
+  const c = cbm(key)
+  return (c.anteriores_entrou || 0) - (c.anteriores_saiu || 0)
+}
+function cobrancasTotal(key: string) {
+  const c = cbm(key)
+  return (c.imposto || 0) + (c.publicidade || 0) + (c.penalidades || 0) + (c.fatura_ml || 0)
+}
+function entrouLiquido(key: string) {
+  return (rm(key).entrou_pedidos_mes || 0) + anterioresLiquido(key) - cobrancasTotal(key)
+}
+function resultadoMes(key: string) {
+  return (rm(key).liberados_sobrou || 0) - cobrancasTotal(key)
+}
+function margemLiberados(key: string) {
+  const r = rm(key)
+  return r.liberados_custo ? (r.liberados_sobrou || 0) / r.liberados_custo : null
+}
+function presoDe(key: string) {
+  return blocoMes(key)?.dinheiro?.preso ?? (key === 'empresa' ? dados.value?.por_plataforma.amazon?.dinheiro?.preso : null)
+}
+function aLiberarDe(key: string) {
+  return blocoMes(key)?.dinheiro?.a_liberar ?? null
+}
+function fmtSinal(v: number | null | undefined) {
+  if (v === null || v === undefined || Math.abs(v) < 0.005) return '—'
+  return v > 0 ? `+ ${fmtMoney(v)}` : `− ${fmtMoney(-v)}`
 }
 const mesLabel = computed(() => {
   const m = dados.value?.mes
@@ -313,10 +378,6 @@ function agirCls(g: string) {
   if (g === 'warn') return 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20'
   return 'border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/20'
 }
-function pctFinal(m: Mes) {
-  return m.pedidos ? Math.round((m.finalizados / m.pedidos) * 100) : 0
-}
-
 defineExpose({ carregar })
 watch(dia, (v) => {
   const ontem = ontemISO()
@@ -462,6 +523,7 @@ onMounted(() => {
                   <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais sem movimento</th>
                   <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais aguard. repasse</th>
                   <th class="border-b px-2 py-1 text-right">Com pendência</th>
+                  <th class="border-b px-2 py-1 text-right" title="o que a plataforma tirou (ou devolveu) sem pedido nesse dia, somando as lojas: impostos, Ads, penalidades e ajustes, fatura do ML">Cobranças extras (sem pedido)</th>
                   <th class="border-b px-2 py-1 text-left">Como ficou</th>
                 </tr>
               </thead>
@@ -472,6 +534,7 @@ onMounted(() => {
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.sem_movimento }}</td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.aguardando_repasse }}</td>
                   <td class="px-2 py-1 text-right tabular-nums font-bold" :class="d.com_pendencia ? 'text-amber-700' : ''">{{ d.com_pendencia }}</td>
+                  <td class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(d.cobrancas_extras?.total)" :title="tituloExtras(d.cobrancas_extras)">{{ fmtCob(d.cobrancas_extras?.total) }}<span v-if="d.cobrancas_extras?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas desse dia que ninguém classificou ainda">{{ d.cobrancas_extras.sem_dono }} sem dono</span></td>
                   <td class="px-2 py-1">
                     <span v-if="d.com_pendencia" class="mr-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ d.com_pendencia }} com pendência</span>
                     <span v-else class="mr-1 inline-block rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">todos fechados</span>
@@ -595,43 +658,49 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 15/10: o rodapé do mês fica guardado (Vinicius: "por enquanto não preciso"). -->
+      <!-- 19/10: bloco "Resultado do mês" (maquete docs/img/conciliacao-resultado-mes.png) — construído, mas
+           ESCONDIDO até o Vinicius liberar ("esse painel do mês não vamos usar ainda"). MOSTRAR_MES liga. -->
       <div v-if="MOSTRAR_MES" class="rounded-md border bg-card">
+        <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+          <span>Resultado do mês — {{ nomeMes(dados.mes) }} (1º a {{ fmtDia(dados.dia + 'T12:00:00') }})</span>
+          <span class="text-[10px] font-normal text-white/80">uma coluna por marketplace; "Empresa" soma tudo · pela data em que o dinheiro se mexeu, menos onde diz "vendas de {{ nomeMes(dados.mes) }}"</span>
+        </div>
         <div class="overflow-auto">
           <table class="w-full border-collapse text-[11px]">
             <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
               <tr>
-                <th class="border-b px-2 py-1 text-left">Mês atual ({{ nomeMes(dados.mes) }}, até {{ fmtDia(dados.dia + 'T12:00:00') }})</th>
-                <th class="border-b px-2 py-1 text-right">Pedidos</th>
-                <th class="border-b px-2 py-1 text-right">Vendido</th>
-                <th class="border-b px-2 py-1 text-right">Tarifas + frete</th>
-                <th class="border-b px-2 py-1 text-right">Recebido</th>
-                <th class="border-b px-2 py-1 text-right">Ajustes meses anteriores</th>
-                <th class="border-b px-2 py-1 text-right">Custo</th>
-                <th class="border-b px-2 py-1 text-right">Reembolsos</th>
-                <th class="border-b px-2 py-1 text-right">Sobrou</th>
-                <th class="border-b px-2 py-1 text-right">Margem</th>
-                <th class="border-b px-2 py-1 text-right">Finalizados</th>
+                <th class="border-b px-2 py-1 text-left">o que</th>
+                <th v-for="c in COLS_MES" :key="c.key" class="border-b px-2 py-1 text-right">{{ c.label }}</th>
               </tr>
             </thead>
-            <tbody>
-              <tr v-for="p in [...plataformasDoMes, { key: 'empresa', label: 'Empresa', mes: dados.empresa }]" :key="p.key" class="border-b" :class="p.key === 'empresa' ? 'bg-muted/40 font-bold' : ''">
-                <td class="px-2 py-1 font-bold">{{ p.label }} <span class="font-normal text-muted-foreground">({{ p.key === 'empresa' ? 'tudo' : `${p.mes.lojas || 0} loja(s)` }})</span></td>
-                <td class="px-2 py-1 text-right tabular-nums">{{ p.mes.pedidos }}</td>
-                <td class="px-2 py-1 text-right tabular-nums">{{ fmtMoney(p.mes.vendido) }}</td>
-                <td class="px-2 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney((p.mes.tarifa || 0) + (p.mes.frete || 0)) }}</td>
-                <td class="px-2 py-1 text-right tabular-nums text-emerald-700">{{ fmtMoney(p.mes.recebido) }}</td>
-                <td class="px-2 py-1 text-right tabular-nums" :class="sinal(p.mes.ajustes_meses_anteriores, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(p.mes.ajustes_meses_anteriores) }}</td>
-                <td class="px-2 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(p.mes.custo) }}</td>
-                <td class="px-2 py-1 text-right tabular-nums text-red-600">− {{ fmtMoney(p.mes.reembolso) }}</td>
-                <td class="px-2 py-1 text-right tabular-nums font-bold" :class="sinal(p.mes.sobrou, { pos: 'text-emerald-700', neg: 'text-red-600' })">{{ fmtMoney(p.mes.sobrou) }}</td>
-                <td class="px-2 py-1 text-right tabular-nums font-bold">{{ fmtPct(p.mes.margem) }}</td>
-                <td class="px-2 py-1 text-right tabular-nums">{{ p.mes.finalizados }} ({{ pctFinal(p.mes) }}%)</td>
-              </tr>
+            <tbody class="tabular-nums">
+              <tr class="border-b bg-muted/60 font-bold text-[#1f3a5f] dark:text-slate-200"><td class="px-2 py-1.5" :colspan="COLS_MES.length + 1">1. Caixa do mês — o que se mexeu nas contas das plataformas (pela data do movimento)</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">Entrou de pedidos do mês (líquido, já com estornos e mediações)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right text-emerald-700">{{ fmtSinal(rm(c.key).entrou_pedidos_mes) }}</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">Entrou de pedidos de ANTES do início do painel <span class="block text-[10px] text-muted-foreground">entrou − saiu dessas vendas; não é conferido pedido a pedido e o custo não está no painel</span></td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(-anterioresLiquido(c.key))">{{ fmtSinal(anterioresLiquido(c.key)) }}</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">Cobranças sem pedido: impostos, Ads, penalidades e ajustes, fatura do ML <span class="block text-[10px] text-muted-foreground">o quadro "Cobranças da plataforma"; ao lado, quantas linhas ainda estão sem dono</span></td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(cobrancasTotal(c.key))">{{ fmtCob(cobrancasTotal(c.key)) }}<span v-if="cbm(c.key).sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ cbm(c.key).sem_dono }} sem dono</span></td></tr>
+              <tr class="border-b text-muted-foreground"><td class="px-2 py-1">Preso na reserva da Amazon (lançado, ainda não liberado — não conta como entrou)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right">{{ fmtMoney(presoDe(c.key)) }}</td></tr>
+              <tr class="border-b bg-muted/40 font-bold"><td class="px-2 py-1">= Entrou líquido nas plataformas no mês</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(-entrouLiquido(c.key))">{{ fmtSinal(entrouLiquido(c.key)) }}</td></tr>
+              <tr class="border-b text-muted-foreground"><td class="px-2 py-1">Repasses pro banco (saques) no mês — informação, não é ganho</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right">{{ fmtMoney(rm(c.key).saques) }}</td></tr>
+
+              <tr class="border-b bg-muted/60 font-bold text-[#1f3a5f] dark:text-slate-200"><td class="px-2 py-1.5" :colspan="COLS_MES.length + 1">2. Pedidos já liberados no mês — o resultado conferido pedido a pedido (só pedidos vendidos a partir do início do painel)</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">Pedidos liberados (bateu, a menos, a mais, estornado depois)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right">{{ (rm(c.key).liberados || 0).toLocaleString('pt-BR') }} pedidos</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">Recebido (o que entrou de verdade desses pedidos)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right text-emerald-700">{{ fmtSinal(rm(c.key).liberados_recebido) }}</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">− Custo dos produtos (preço de custo do Bling)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right text-red-600">{{ fmtSinal(-(rm(c.key).liberados_custo || 0)) }}</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">− Reembolsos ao cliente (painel Reembolso)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right text-red-600">{{ fmtSinal(-(rm(c.key).liberados_reembolso || 0)) }}</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">− Frete pago fora da plataforma (Melhor Envio)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right text-red-600">{{ fmtSinal(-(rm(c.key).liberados_frete_pago || 0)) }}</td></tr>
+              <tr class="border-b bg-muted/40 font-bold"><td class="px-2 py-1">= Sobrou dos pedidos liberados <span class="block text-[10px] font-normal text-muted-foreground">margem = sobrou ÷ custo</span></td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(-(rm(c.key).liberados_sobrou || 0))">{{ fmtSinal(rm(c.key).liberados_sobrou) }}<span class="block text-[10px] font-normal text-muted-foreground">margem {{ fmtPct(margemLiberados(c.key)) }}</span></td></tr>
+              <tr class="border-b text-muted-foreground"><td class="px-2 py-1">Ainda a liberar: previsto pela plataforma (sem margem — só quando liberar)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right">{{ fmtMoney(aLiberarDe(c.key)) }}</td></tr>
+
+              <tr class="border-b bg-muted/60 font-bold text-[#1f3a5f] dark:text-slate-200"><td class="px-2 py-1.5" :colspan="COLS_MES.length + 1">3. Resultado real do mês — o que dá pra afirmar hoje</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">Sobrou dos pedidos já liberados (bloco 2)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(-(rm(c.key).liberados_sobrou || 0))">{{ fmtSinal(rm(c.key).liberados_sobrou) }}</td></tr>
+              <tr class="border-b"><td class="px-2 py-1">− Cobranças sem pedido do mês (bloco 1)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(cobrancasTotal(c.key))">{{ fmtCob(cobrancasTotal(c.key)) }}</td></tr>
+              <tr class="border-b bg-amber-50 font-extrabold dark:bg-amber-950/20"><td class="px-2 py-1.5">= Resultado do mês até {{ fmtDia(dados.dia + 'T12:00:00') }} (pedidos liberados − cobranças)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1.5 text-right" :class="cobCls(-resultadoMes(c.key))">{{ fmtSinal(resultadoMes(c.key)) }}</td></tr>
+              <tr class="border-b text-muted-foreground"><td class="px-2 py-1">+ Entrou de vendas de antes do início (sem custo no painel — à parte, não entra no resultado)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right">{{ fmtSinal(anterioresLiquido(c.key)) }}</td></tr>
+              <tr class="text-muted-foreground"><td class="px-2 py-1">Vendas ainda não liberadas (previsto; a sobra só aparece quando liberar)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right">{{ fmtMoney(aLiberarDe(c.key)) }}</td></tr>
             </tbody>
           </table>
         </div>
-        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Pedidos pela data da venda, do dia 1º até o dia escolhido. "Recebido" é o que já entrou na conta; "Sobrou" e "Margem" só com dinheiro que entrou: sobrou = recebido − custo − reembolsos; cancelado não carrega custo. O fechamento completo, com a fatura do ML e a prova dos nove do caixa, está em "Fechamento do mês".</div>
+        <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground"><b>1. Caixa</b>: o que entrou e saiu das contas das plataformas no mês, linha por linha do extrato — a mesma conta do Extrato do dia, só somada; reservas e repasses pro banco ficam de fora do "entrou líquido". <b>2. Pedidos liberados</b>: só os pedidos vendidos a partir do início do painel que já liberaram — recebido de verdade − custo − reembolso − frete pago fora = sobrou; é o único número com custo. <b>3. Resultado</b>: sobrou dos liberados − cobranças sem pedido. O que entrou de vendas de antes do início aparece à parte (sem custo); o que ainda vai liberar aparece como previsto (sem margem). A partir do mês seguinte ao início, o mês inteiro cai no bloco 2 e o resultado fecha sozinho.</div>
       </div>
     </template>
   </div>

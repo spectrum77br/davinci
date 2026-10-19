@@ -3429,6 +3429,166 @@ _TIPOS_SEM_PEDIDO_QUE_SAO_COBRANCA = (
 )
 
 
+def _balde_cobranca(tipo: str, classificacao: str | None, com_pedido: bool) -> str | None:
+    """Em que balde do quadro "Cobranças da plataforma" a linha cai; None = não é cobrança
+    sem pedido (venda com pedido, saque, reserva, venda desfeita)."""
+    if classificacao == "anterior_ao_inicio":
+        return "anteriores"
+    if com_pedido or classificacao in _CLASSIFICACOES_QUE_NAO_SAO_COBRANCA:
+        return None
+    if tipo in TIPOS_RESERVA_SET or tipo == "saque":
+        return None
+    if classificacao == "imposto":
+        return "imposto"
+    if classificacao == "publicidade":
+        return "publicidade"
+    if classificacao == "fatura_ml":
+        return "fatura_ml"
+    if tipo in _TIPOS_SEM_PEDIDO_QUE_SAO_COBRANCA or classificacao in ("ajuste", "outro"):
+        return "penalidades"
+    return None
+
+
+def _saiu_da_cobranca(tipo: str, c: Any, d: Any, pago_res: Any) -> float:
+    """Quanto saiu (positivo = a plataforma tirou): a fatura cobrada do saldo desconta a
+    parte paga com o segurado pra dívida (que já está na linha do segurado)."""
+    if tipo == "fatura_cobrada":
+        return float(d or 0) - float(pago_res or 0)
+    return float(d or 0) - float(c or 0)
+
+
+_EXTRAS_VAZIO = {
+    "total": 0.0,
+    "sem_dono": 0,
+    "imposto": 0.0,
+    "publicidade": 0.0,
+    "penalidades": 0.0,
+    "fatura_ml": 0.0,
+}
+
+
+async def _cobrancas_extras_por_dia(
+    session: AsyncSession, lojas: list[ConciliacaoLoja], ini_dt: datetime, fim_dt: datetime
+) -> dict[date, dict[str, Any]]:
+    """Coluna "Cobranças extras (sem pedido)" do bloco Dias (19/10, Vinicius): por dia,
+    somando as lojas, o que a plataforma tirou sem pedido — e quantas linhas ainda sem dono."""
+    from sqlalchemy import Numeric, cast
+
+    mov = ConciliacaoMovimento
+    ids = [loja.integration_id for loja in lojas]
+    if not ids:
+        return {}
+    dia_local = func.date(func.timezone(_FUSO_SQL, mov.data))
+    pago = cast(func.coalesce(mov.raw["_pago_com_reserva"].astext, "0"), Numeric(14, 2))
+    rows = (
+        await session.execute(
+            select(
+                dia_local,
+                mov.tipo,
+                mov.classificacao,
+                mov.pedido_bling.isnot(None),
+                func.count(),
+                func.sum(mov.credito),
+                func.sum(mov.debito),
+                func.sum(pago),
+            )
+            .where(
+                mov.integration_id.in_(ids),
+                mov.origem.in_(ORIGENS_EXTRATO),
+                mov.data >= ini_dt,
+                mov.data < fim_dt,
+            )
+            .group_by(dia_local, mov.tipo, mov.classificacao, mov.pedido_bling.isnot(None))
+        )
+    ).all()
+    por_dia: dict[date, dict[str, Any]] = {}
+    for d, tipo, classificacao, com_pedido, n, c, deb, pago_res in rows:
+        balde = _balde_cobranca(tipo, classificacao, com_pedido)
+        if balde in (None, "anteriores"):
+            continue
+        e = por_dia.setdefault(d, dict(_EXTRAS_VAZIO))
+        saiu = _saiu_da_cobranca(tipo, c, deb, pago_res)
+        e[balde] = round(e[balde] + saiu, 2)
+        e["total"] = round(e["total"] + saiu, 2)
+        if balde == "penalidades" and classificacao is None:
+            e["sem_dono"] += int(n or 0)
+    return por_dia
+
+
+async def _resultado_mes(
+    session: AsyncSession, loja: ConciliacaoLoja, ini: date, fim: date
+) -> dict[str, Any]:
+    """Bloco "Resultado do mês" (maquete aprovada em 19/10; a tela ainda não libera):
+    (1) o que entrou de pedidos do mês pela data do movimento (fora reservas, saques e
+    o preso da Amazon) e os saques; (2) os pedidos vendidos desde o início que liberaram
+    no mês (pela data da liberação): recebido − custo − reembolso − frete pago fora =
+    sobrou. Cobranças sem pedido e "anteriores ao início" vêm de `_cobrancas_da_plataforma`."""
+    from sqlalchemy import or_
+
+    mov = ConciliacaoMovimento
+    ped = ConciliacaoPedido
+    ini_dt = datetime.combine(ini, datetime.min.time(), tzinfo=_BRT)
+    fim_dt = datetime.combine(fim, datetime.min.time(), tzinfo=_BRT)
+    entrou = (
+        await session.execute(
+            select(func.sum(mov.credito - mov.debito))
+            .select_from(mov)
+            .join(
+                ped,
+                (ped.integration_id == mov.integration_id) & (ped.pedido_bling == mov.pedido_bling),
+            )
+            .where(
+                mov.integration_id == loja.integration_id,
+                mov.origem.in_(ORIGENS_EXTRATO),
+                mov.data >= ini_dt,
+                mov.data < fim_dt,
+                mov.tipo.notin_(tuple(TIPOS_RESERVA_SET)),
+                mov.tipo != "saque",
+                or_(mov.sub_tipo.is_(None), mov.sub_tipo != "DEFERRED"),
+                ped.data_pedido >= ini_dt,
+            )
+        )
+    ).scalar()
+    saques = (
+        await session.execute(
+            select(func.sum(mov.debito - mov.credito)).where(
+                mov.integration_id == loja.integration_id,
+                mov.origem.in_(ORIGENS_EXTRATO),
+                mov.data >= ini_dt,
+                mov.data < fim_dt,
+                mov.tipo == "saque",
+            )
+        )
+    ).scalar()
+    s = (
+        await session.execute(
+            select(
+                func.count(),
+                func.sum(ped.recebido),
+                func.sum(ped.custo),
+                func.sum(ped.reembolso),
+                func.sum(ped.venda_frete_pago),
+                func.sum(ped.sobrou),
+            ).where(
+                ped.integration_id == loja.integration_id,
+                ped.liberado_em >= ini_dt,
+                ped.liberado_em < fim_dt,
+                ped.situacao != "cancelado",
+            )
+        )
+    ).one()
+    return {
+        "entrou_pedidos_mes": round(float(entrou or 0), 2),
+        "saques": round(float(saques or 0), 2),
+        "liberados": int(s[0] or 0),
+        "liberados_recebido": round(float(s[1] or 0), 2),
+        "liberados_custo": round(float(s[2] or 0), 2),
+        "liberados_reembolso": round(float(s[3] or 0), 2),
+        "liberados_frete_pago": round(float(s[4] or 0), 2),
+        "liberados_sobrou": round(float(s[5] or 0), 2),
+    }
+
+
 async def _cobrancas_da_plataforma(
     session: AsyncSession, loja: ConciliacaoLoja, ini: date, fim: date
 ) -> dict[str, Any]:
@@ -3478,27 +3638,17 @@ async def _cobrancas_da_plataforma(
         "anteriores_linhas": 0,
     }
     for tipo, classificacao, com_pedido, n, c, d, pago_res in rows:
-        saiu = float(d or 0) - float(c or 0)
-        if classificacao == "anterior_ao_inicio":
+        balde = _balde_cobranca(tipo, classificacao, com_pedido)
+        if balde is None:
+            continue
+        if balde == "anteriores":
             out["anteriores_entrou"] += float(c or 0)
             out["anteriores_saiu"] += float(d or 0)
             out["anteriores_linhas"] += n
             continue
-        if com_pedido or classificacao in _CLASSIFICACOES_QUE_NAO_SAO_COBRANCA:
-            continue
-        if tipo in TIPOS_RESERVA_SET or tipo == "saque":
-            continue
-        if classificacao == "imposto":
-            out["imposto"] += saiu
-        elif classificacao == "publicidade":
-            out["publicidade"] += saiu
-        elif classificacao == "fatura_ml":
-            if tipo == "fatura_cobrada":
-                out["fatura_ml"] += float(d or 0) - float(pago_res or 0)
-            else:
-                out["fatura_ml"] += saiu
-        elif tipo in _TIPOS_SEM_PEDIDO_QUE_SAO_COBRANCA or classificacao in ("ajuste", "outro"):
-            out["penalidades"] += saiu
+        saiu = _saiu_da_cobranca(tipo, c, d, pago_res)
+        out[balde] += saiu
+        if balde == "penalidades":
             out["penalidades_linhas"] += n
             if classificacao is None:
                 out["sem_dono"] += n
@@ -3632,6 +3782,7 @@ async def _resumo_dos_dias(
         ).all()
     }
     conta_por_id = {loja.integration_id: loja.conta for loja in lojas}
+    extras_por_dia = await _cobrancas_extras_por_dia(session, lojas, ini_dt, fim_dt)
     ped = ConciliacaoPedido
     eventos: dict[date, dict[str, list[tuple[str, int]]]] = {}
     for chave, col, (campo, valor) in _EVENTOS_DIA:
@@ -3713,6 +3864,8 @@ async def _resumo_dos_dias(
                 "com_pendencia": len(pendentes),
                 "pendentes": pendentes,
                 "obs": obs,
+                # 19/10 (Vinicius): o que a plataforma tirou sem pedido naquele dia
+                "cobrancas_extras": extras_por_dia.get(d, dict(_EXTRAS_VAZIO)),
             }
         )
         d -= timedelta(days=1)
@@ -3880,6 +4033,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         obs_dia = _obs_de_eventos(eventos_dia)
         dinheiro = await _dinheiro_da_loja(session, loja)
         cobrancas = await _cobrancas_da_plataforma(session, loja, mes_ini, dia + timedelta(days=1))
+        resultado_mes = await _resultado_mes(session, loja, mes_ini, dia + timedelta(days=1))
         linha = {
             "conta": loja.conta,
             "platform": plataforma,
@@ -3887,6 +4041,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             "modo_extrato": loja.modo_extrato,
             "dinheiro": dinheiro,
             "cobrancas": cobrancas,
+            "resultado_mes": resultado_mes,
             "dia": {
                 "status": dia_status,
                 "texto": dia_texto,
@@ -4125,6 +4280,11 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             for k, v in cob.items():
                 if isinstance(v, float):
                     cob[k] = round(v, 2)
+            rm = bloco_d.setdefault("resultado_mes", {})
+            _soma_dict(rm, resultado_mes)
+            for k, v in rm.items():
+                if isinstance(v, float):
+                    rm[k] = round(v, 2)
         _soma_dict(
             plat, {k: v for k, v in mes.items() if k not in ("margem", "por_situacao", "por_etapa")}
         )
