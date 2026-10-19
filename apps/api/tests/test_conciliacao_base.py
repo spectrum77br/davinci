@@ -3183,6 +3183,13 @@ async def test_extrato_e_raio_x_mostram_a_reserva_retida_e_escondem_so_o_par(
         loja, "reserva_disputa", d - timedelta(hours=20), credito="50.00", pagamento="p4"
     )
     segunda = _mov(loja, "reserva_disputa", d + timedelta(hours=4), debito="50.00", pagamento="p4")
+    # saída e volta no MESMO segundo (kia (ml) 16/10 12:21): par fechado, nada retido
+    mesmo_seg_volta = _mov(
+        loja, "reserva_disputa", d + timedelta(hours=5), credito="55.54", pagamento="p5"
+    )
+    mesmo_seg_saida = _mov(
+        loja, "reserva_disputa", d + timedelta(hours=5), debito="55.54", pagamento="p5"
+    )
     # retida de um pedido "em disputa" (a volta, se vier, cai noutro dia)
     presa = _mov(
         loja,
@@ -3193,7 +3200,19 @@ async def test_extrato_e_raio_x_mostram_a_reserva_retida_e_escondem_so_o_par(
         pedido_mkt="2000018828084180",
         pedido_bling="301722",
     )
-    db.add_all([par_saida, par_volta, retida, presa, antiga_saida, antiga_volta, segunda])
+    db.add_all(
+        [
+            par_saida,
+            par_volta,
+            retida,
+            presa,
+            antiga_saida,
+            antiga_volta,
+            segunda,
+            mesmo_seg_volta,
+            mesmo_seg_saida,
+        ]
+    )
     db.add(await _pedido_conciliado(loja))  # 301102 bateu
     db.add(
         await _pedido_conciliado(
@@ -3217,6 +3236,8 @@ async def test_extrato_e_raio_x_mostram_a_reserva_retida_e_escondem_so_o_par(
     assert por_id[str(presa.id)]["reserva_aberta"] is True
     assert por_id[str(presa.id)]["status"] == "divergente"  # a linha que prende o dinheiro
     assert por_id[str(segunda.id)]["reserva_aberta"] is True  # a 2ª reclamação ficou
+    assert por_id[str(mesmo_seg_saida.id)]["reserva_aberta"] is False
+    assert por_id[str(mesmo_seg_volta.id)]["reserva_aberta"] is False
     r_ontem = await client.get(
         "/api/conciliacao/extrato", params={"loja": "jlas2", "dia": "2026-10-12"}
     )

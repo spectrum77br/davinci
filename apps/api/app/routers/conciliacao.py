@@ -2298,7 +2298,9 @@ def _flags_reserva(
             por_grupo[str(m.pagamento_id)].append(m)
     abertas: set[Any] = set()
     for linhas in por_grupo.values():
-        linhas.sort(key=lambda m: (m.data, str(m.id)))
+        # no mesmo segundo (reserva e devolução juntas, kia (ml) 16/10 12:21) a saída
+        # vem antes da volta — senão a volta não acha o que quitar e a saída fica "retida"
+        linhas.sort(key=lambda m: (m.data, 0 if _d0(m.debito) > 0 else 1, str(m.id)))
         fila: list[list[Any]] = []  # [linha, quanto ainda falta voltar]
         for m in linhas:
             saida, volta = _d0(m.debito), _d0(m.credito)
