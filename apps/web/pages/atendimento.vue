@@ -19,6 +19,7 @@ import {
   type Resumo,
 } from '~/components/AtendimentoPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
+import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
 import { GRUPOS_CAIXA, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
@@ -208,7 +209,7 @@ async function zerarNaoLidas() {
 // ABERTOS, respondidos ou não, e não somam); quem só lê vê "Falta responder"
 // com essas mesmas conversas, do escopo dele. Relido junto com o /resumo
 // (o polling de 30 s, o "atualizar") e quando a conversa de e-mail muda.
-const emailContagens = ref<{ aguardando: number; chamados: number } | null>(null)
+const emailContagens = ref<ContagensDeConversa | null>(null)
 const emailContagensProntas = ref(false)
 const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
 // Sobe a cada tique do polling: as Filas da aba E-mail se releem junto com o número.
@@ -222,7 +223,7 @@ async function carregarContagensEmail() {
   if (!canSugerir.value) return
   const g = ++geracaoContagensEmail
   try {
-    const recebidas = await api<{ aguardando: number; chamados: number }>('/api/atendimento/email/contagens')
+    const recebidas = await api<ContagensDeConversa>('/api/atendimento/email/contagens')
     if (g === geracaoContagensEmail) emailContagens.value = recebidas
   } catch {
     // só o número da aba
@@ -969,6 +970,8 @@ watch(selecionada, (id) => {
         :stores="resumo?.lojas || []"
         :waiting="emailEsperando"
         :waiting-ready="emailContagensProntas"
+        :conversation-counts="emailContagens"
+        :refresh-conversation-counts="carregarContagensEmail"
         :paused="!!emailConversa"
         :refresh-tick="emailTique"
         v-model:remembered-section="emailSecao"

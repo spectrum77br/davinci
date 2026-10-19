@@ -262,6 +262,10 @@ const props = defineProps<{
   // Sobe a cada tique do polling de 30 s da página (o número da aba E-mail):
   // as filas de conversa acompanham (o watch do `tique`, lá embaixo).
   tique?: number
+  // A página já lê estes números na entrada, no polling e na volta da conversa.
+  // Compartilhar o resultado mantém a aba e as filas iguais, sem outra consulta.
+  contagensDeConversa?: ContagensDeConversa | null
+  atualizarContagensDeConversa?: () => Promise<void>
 }>()
 const emit = defineEmits<{ (e: 'abrirConversa', id: string): void }>()
 
@@ -272,7 +276,9 @@ const mexe = computed(() => props.podeMexer !== false)
 const filasVisiveis = computed(() => filasDaPessoa(mexe.value))
 const fila = ref<Fila>(mexe.value ? 'sem_loja' : 'chamados')
 const contagensFilas = ref<Record<string, number> | null>(null)
-const contagensConversa = ref<ContagensDeConversa | null>(null)
+const contagensConversaLocal = ref<ContagensDeConversa | null>(null)
+const contagensCompartilhadas = computed(() => !!props.atualizarContagensDeConversa)
+const contagensConversa = computed(() => contagensCompartilhadas.value ? props.contagensDeConversa ?? null : contagensConversaLocal.value)
 const contagens = computed(() => juntarContagens(contagensFilas.value, contagensConversa.value))
 // As filas de conversa (chamados dos sites, falta responder): linhas da lista.
 const conversas = ref<ConversaResumo[]>([])
@@ -309,10 +315,11 @@ const filaInfo = computed(() => FILAS.find((f) => f.value === fila.value) || FIL
 // As contagens são ajuda: a fila aberta mostra o erro dela. As das filas de
 // e-mail só para quem mexe (a rota recusa os outros); as das conversas, todos.
 function carregarContagensDeConversa(): Promise<void> {
-  return api<ContagensDeConversa>('/api/atendimento/email/contagens').then((r) => { contagensConversa.value = r }).catch(() => {})
+  if (props.atualizarContagensDeConversa) return props.atualizarContagensDeConversa()
+  return api<ContagensDeConversa>('/api/atendimento/email/contagens').then((r) => { contagensConversaLocal.value = r }).catch(() => {})
 }
-async function carregarContagens() {
-  const pedidos: Promise<void>[] = [carregarContagensDeConversa()]
+async function carregarContagens(conversaJaSolicitada = false) {
+  const pedidos: Promise<void>[] = conversaJaSolicitada && contagensCompartilhadas.value ? [] : [carregarContagensDeConversa()]
   if (mexe.value) {
     pedidos.push(api<Record<string, number>>('/api/atendimento/email/filas').then((r) => { contagensFilas.value = r }).catch(() => {}))
   }
@@ -403,11 +410,11 @@ function buscar() {
   proximo.value = null
   void carregar()
 }
-onMounted(() => { void atualizar() })
+onMounted(() => { void Promise.all([carregar(), carregarContagens(true), carregarSaude()]) })
 // Voltou da conversa de e-mail (respondeu, fechou, vinculou): a fila e os
 // números relidos, como depois de uma ação aqui — a lista recomeça da 1ª página.
 watch(() => props.pausado, (pausado, antes) => {
-  if (antes && !pausado) void Promise.all([carregar(), carregarContagens()])
+  if (antes && !pausado) void Promise.all([carregar(), carregarContagens(true)])
 })
 // O polling de 30 s da página (o `tique`, 13/10/2026): o número da aba E-mail
 // sobe e os das filas de CONVERSA e a lista aberta delas acompanham — o e-mail
@@ -418,7 +425,7 @@ watch(() => props.pausado, (pausado, antes) => {
 // relidas na ação, na volta da conversa e no "atualizar", como sempre.
 watch(() => props.tique, () => {
   if (props.pausado) return
-  void carregarContagensDeConversa()
+  if (!contagensCompartilhadas.value) void carregarContagensDeConversa()
   if (pastasAbertas.value || !FILAS_DE_CONVERSA.has(fila.value)) return
   if (paginasExtras || ocupado.value || carregando.value) return
   void carregar(false, true)

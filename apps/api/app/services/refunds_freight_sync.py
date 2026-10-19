@@ -15,8 +15,8 @@ final do refund.
 
 Duas entradas:
   * upsert_freight_refund_for_bling_order — escopado a um pedido,
-    chamado pelo hook após o sync financeiro (baixa latência). Lê a view
-    de 20 dias (barata).
+    chamado pelo hook após o sync financeiro. A função SQL filtra o pedido
+    antes do cálculo, preservando os dois limites internos de 20 dias.
   * backfill_freight_refunds — chamado pelo cron diário pra pegar
     reconciliations de ML que fecham semanas depois. Lê a view `_all`
     (sem janela interna) com janela própria de 90 dias: com a view de
@@ -31,6 +31,7 @@ service→router. Atualizar aqui se o filtro de margens mudar.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -44,9 +45,17 @@ logger = structlog.get_logger()
 _settings = get_settings()
 SCHEMA = _settings.database_schema
 
-# View com janela de 20d embutida (a mesma da página de margens) — barata,
-# usada pelo hook por pedido (chamado a cada sync financeiro).
-_VIEW_20D = "vw_conciliacao_margens_marketplace"
+# Gerada da própria view de 20d pela migration 0418. Filtrar a view apenas
+# na saída não evita o cálculo de pricing dos outros pedidos.
+_ORDER_SOURCE = f"{SCHEMA}.refunds_freight_for_pedido(:pedido_bling)"
+
+# Uma consulta de frete por processo. O worker financeiro pode buscar APIs
+# em paralelo, mas não dispara oito cálculos pesados ao mesmo tempo. Não
+# usar um lock global de transação: os reconciliadores Shopee/TikTok chamam
+# este hook várias vezes antes de commit e poderiam travar uns aos outros.
+# O permit é devolvido assim que a consulta termina, inclusive em erro ou
+# cancelamento; não muda os commits do chamador nem descarta pedidos.
+_ORDER_CONCURRENCY = asyncio.Semaphore(1)
 
 # View idêntica SEM janela interna (diferem só nos dois filtros de data;
 # ver migration 0080). Cara (~3 min: pricing de todo o histórico), então
@@ -105,7 +114,7 @@ SELECT
     COALESCE(v.plataforma_bling, v.plataforma_financeiro)::text AS plataforma,
     btrim(v.loja_nome) AS conta,
     SUM({_FRETE_RESULTADO_SQL}) AS prejuizo
-FROM {{schema}}.{{view}} v
+FROM {{source}} v
 WHERE {_FRETE_ATTENTION_FILTER}
   AND v.pedido_bling IS NOT NULL
   AND v.loja_nome IS NOT NULL
@@ -116,7 +125,7 @@ GROUP BY
     COALESCE(v.plataforma_bling, v.plataforma_financeiro),
     btrim(v.loja_nome)
 HAVING SUM({_FRETE_RESULTADO_SQL}) >= {_MIN_PREJUIZO}
-"""
+"""  # noqa: S608 -- fragmentos constantes; pedido parametrizado
 
 
 # INSERT WHERE NOT EXISTS — só insere se ainda não houver refund
@@ -137,7 +146,7 @@ WHERE NOT EXISTS (
       AND r.conta = s.conta
       AND r.tipo = 'Logistica'
 )
-"""
+"""  # noqa: S608 -- fragmentos constantes; pedido parametrizado
 
 
 async def upsert_freight_refund_for_bling_order(
@@ -147,20 +156,21 @@ async def upsert_freight_refund_for_bling_order(
 ) -> dict[str, Any]:
     """Insere o refund Logistica de um pedido se ainda não existir.
 
-    Chamado pelo hook em marketplace_financials. Escopa a varredura da
-    view a um pedido_bling pra que o custo seja constante. Usa a view de
-    20 dias (barata); se a cobrança de frete chegou depois do pedido sair
-    dessa janela, quem cria o chamado é o backfill diário (90d).
+    Chamado pelo hook em marketplace_financials. Calcula só o pedido,
+    mantendo a janela de 20 dias; cobranças posteriores continuam sendo
+    cobertas pelo backfill diário (90d). Um savepoint isola uma eventual
+    falha SQL para que o sync financeiro possa ser salvo pelo chamador.
     """
     if not pedido_bling:
         return {"ok": False, "skipped": "missing_pedido_bling"}
 
     sql = _INSERT_TMPL.format(
         schema=SCHEMA,
-        view=_VIEW_20D,
+        source=_ORDER_SOURCE,
         extra_where="AND v.pedido_bling::text = :pedido_bling",
     )
-    result = await session.execute(text(sql), {"pedido_bling": str(pedido_bling)})
+    async with _ORDER_CONCURRENCY, session.begin_nested():
+        result = await session.execute(text(sql), {"pedido_bling": str(pedido_bling)})
     rowcount = result.rowcount or 0
     if rowcount:
         logger.info(
@@ -182,7 +192,7 @@ async def backfill_freight_refunds(session: AsyncSession) -> dict[str, Any]:
     """
     sql = _INSERT_TMPL.format(
         schema=SCHEMA,
-        view=_VIEW_ALL,
+        source=f"{SCHEMA}.{_VIEW_ALL}",
         extra_where=_BACKFILL_WINDOW_SQL,
     )
     result = await session.execute(text(sql))

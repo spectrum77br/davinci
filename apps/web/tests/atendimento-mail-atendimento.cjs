@@ -300,7 +300,7 @@ async function principal() {
     // A página passa quem mexe, quem vê, as lojas e o "abrir a conversa" — que
     // abre a conversa de e-mail NA aba E-mail (13/10/2026), nunca na Caixa.
     const paginaTpl = sfc('../pages/atendimento.vue').descriptor.template.content
-    assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:conversation-counts="emailContagens"\s+:refresh-conversation-counts="carregarContagensEmail"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
     // O número da aba E-mail (o e-mail saiu da Caixa Humano): o que falta responder nele.
     assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
     assert.match(paginaTpl, /<template v-if="aba === 'mail'">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
@@ -1039,6 +1039,65 @@ async function principal() {
       // A página passa o tique (o polling) pela Central até as Filas.
       assert.match(web('components/AtendimentoMail.vue'), /<AtendimentoMailFilas[\s\S]*?:tique="refreshTick"[\s\S]*?\/>/)
     }
+    // Na página real, a aba e Filas compartilham a mesma resposta. Montar,
+    // fazer polling ou voltar da conversa não repete a consulta da página;
+    // atualizar manualmente e concluir uma ação relêem também o número da aba.
+    for (const podeMexer of [false, true]) {
+      let refreshes = 0
+      const compartilhadas = montar('../components/AtendimentoMailFilas.vue', {
+        isAdmin: podeMexer, lojas: [], podeMexer, tique: 0,
+        contagensDeConversa: null,
+        atualizarContagensDeConversa: async () => {
+          refreshes++
+          compartilhadas.reativo.contagensDeConversa = { ...contagens, aguardando: 7 }
+        },
+      }, {
+        respostas: { ...respostas, '/api/atendimento/email/filas': { sem_loja: 3 }, '/api/atendimento/email/saude': { caixas: [] }, '/api/atendimento/email/emails?fila=sem_loja': { itens: [], proximo: null } },
+      })
+      const endpoint = '/api/atendimento/email/contagens'
+      await compartilhadas.montar()
+      assert.equal(refreshes, 0, 'montagem não repete o pedido que a página já iniciou')
+      assert.equal(compartilhadas.chamadas.some((c) => c.url === endpoint), false)
+      assert.equal(compartilhadas.estado.contagensConversa, null, 'resposta inicial lenta não inventa números')
+      compartilhadas.reativo.contagensDeConversa = { ...contagens, por_tipo_email: { informativo: 4, chamado: 1, venda: 2 } }
+      await Vue.nextTick()
+      assert.equal(compartilhadas.estado.contagens.aguardando, 2)
+      assert.deepEqual(compartilhadas.estado.contagensConversa.chamados_por_tipo, contagens.chamados_por_tipo)
+      assert.equal(compartilhadas.estado.contagensConversa.por_tipo_email.informativo, 4)
+      compartilhadas.estado.fila = 'aguardando'
+      await Vue.nextTick(); await esperar()
+      const antes = compartilhadas.chamadas.length
+      compartilhadas.reativo.tique = 1
+      await Vue.nextTick(); await esperar()
+      assert.deepEqual(compartilhadas.chamadas.slice(antes).map((c) => c.url), ['/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50'], 'polling atualiza a lista sem duplicar contagens')
+      compartilhadas.reativo.contagensDeConversa = { ...contagens, aguardando: 5 }
+      await Vue.nextTick()
+      assert.equal(compartilhadas.estado.contagens.aguardando, 5, 'a resposta tardia do polling atualiza as filas')
+      compartilhadas.reativo.pausado = true
+      await Vue.nextTick()
+      const pausada = compartilhadas.chamadas.length
+      compartilhadas.reativo.tique = 2
+      await Vue.nextTick(); await esperar()
+      assert.equal(compartilhadas.chamadas.length, pausada)
+      compartilhadas.reativo.pausado = false
+      await Vue.nextTick(); await esperar()
+      assert.equal(refreshes, 0, 'voltar não duplica a atualização que a página faz ao fechar a conversa')
+      await compartilhadas.estado.atualizar()
+      assert.equal(refreshes, 1, 'atualização manual delega à página uma vez')
+      assert.equal(compartilhadas.estado.contagens.aguardando, 7)
+      if (podeMexer) {
+        let acoes = 0
+        await compartilhadas.estado.acao('teste', async () => { acoes++ }, 'Concluído')
+        assert.equal(acoes, 1)
+        assert.equal(refreshes, 2, 'ação concluída atualiza as contagens compartilhadas')
+      } else {
+        assert.equal(compartilhadas.chamadas.some((c) => /\/email\/(filas|saude|emails)/.test(c.url)), false, 'leitor mantém somente consultas permitidas')
+      }
+      assert.equal(compartilhadas.chamadas.some((c) => c.url === endpoint), false, 'nenhuma leitura local duplica o endpoint')
+      assert.equal(r.estado.contagens.aguardando, 2, 'outra instância não recebe as contagens desta pessoa')
+    }
+    assert.match(web('pages/atendimento.vue'), /:conversation-counts="emailContagens"[\s\S]*?:refresh-conversation-counts="carregarContagensEmail"/)
+    assert.match(web('components/AtendimentoMail.vue'), /:contagens-de-conversa="conversationCounts"[\s\S]*?:atualizar-contagens-de-conversa="refreshConversationCounts"/)
     // Quem mexe vê as duas no meio das outras, e as contagens juntas.
     const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, {
       respostas: { ...respostas, '/api/atendimento/email/filas': { sem_loja: 3 }, '/api/atendimento/email/saude': { caixas: [] }, '/api/atendimento/email/emails?fila=sem_loja': { itens: [], proximo: null } },

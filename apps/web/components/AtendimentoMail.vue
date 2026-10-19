@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Download, Folder, Mail, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import type { ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
+import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 
 type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean; leitura_filtrada?: boolean }
@@ -42,7 +43,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
 type Section = 'mailboxes' | 'queues' | 'admin'
-const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
+const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
@@ -765,6 +766,8 @@ onBeforeUnmount(() => {
       :lojas="stores || []"
       :pausado="!!paused"
       :tique="refreshTick"
+      :contagens-de-conversa="conversationCounts"
+      :atualizar-contagens-de-conversa="refreshConversationCounts"
       @abrir-conversa="(id: string) => emit('openConversation', id)"
     />
 

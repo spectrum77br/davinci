@@ -1208,18 +1208,21 @@ async def test_marketplace_margem_isenta_por_condicao_especial_nome_e_sku(
     await seed("602005", "x018.sp", "Fone", "0.08", folha.id)
     await seed("602006", "b025.12", "Mala Chanfrada M3 tamanho 12", "0.08", None)
 
-    resp = await client.get("/api/margens/marketplace?attention_type=margem&status=Pendente")
+    # Testa as condições especiais nas datas fixas, sem a janela móvel da triagem.
+    resp = await client.get(
+        "/api/margens/marketplace?situacao=all&attention_type=margem&status=Pendente"
+    )
     assert resp.status_code == 200
     flagged = {it["pedido_bling"] for it in resp.json()["items"]}
     assert {"602002", "602003", "602005", "602006"} <= flagged
     assert "602001" not in flagged
     assert "602004" not in flagged
 
-    aprovado = await client.get("/api/margens/marketplace?status=Aprovado")
+    aprovado = await client.get("/api/margens/marketplace?situacao=all&status=Aprovado")
     por_pedido = {it["pedido_bling"]: it for it in aprovado.json()["items"]}
     assert por_pedido["602001"]["data_especial"] is True
     assert por_pedido["602004"]["data_especial"] is True
-    pendente = await client.get("/api/margens/marketplace?status=Pendente")
+    pendente = await client.get("/api/margens/marketplace?situacao=all&status=Pendente")
     pend = {it["pedido_bling"]: it for it in pendente.json()["items"]}
     assert pend["602002"]["data_especial"] is False
     assert pend["602006"]["data_especial"] is False
@@ -1313,8 +1316,9 @@ async def test_marketplace_margem_isenta_por_data_especial(
     await seed("601004", datetime(2026, 10, 5, **meiodia), "-0.20", filho.id)
     await seed("601005", datetime(2026, 9, 5, **meiodia), "-0.10", None)
 
+    # Testa as condições especiais nas datas fixas, sem a janela móvel da triagem.
     resp = await client.get(
-        "/api/margens/marketplace?attention_type=margem&status=Pendente"
+        "/api/margens/marketplace?situacao=all&attention_type=margem&status=Pendente"
     )
     assert resp.status_code == 200
     flagged = {it["pedido_bling"] for it in resp.json()["items"]}
@@ -1323,13 +1327,13 @@ async def test_marketplace_margem_isenta_por_data_especial(
     assert "601003" not in flagged
 
     # Isentas viram Aprovado (sem outro gatilho ativo) e levam o badge.
-    aprovado = await client.get("/api/margens/marketplace?status=Aprovado")
+    aprovado = await client.get("/api/margens/marketplace?situacao=all&status=Aprovado")
     por_pedido = {it["pedido_bling"]: it for it in aprovado.json()["items"]}
     assert por_pedido["601001"]["data_especial"] is True
     assert por_pedido["601003"]["data_especial"] is True
     # Abaixo do piso especial: continua Pendente e SEM badge (a janela não
     # aprovou esta margem).
-    pendente = await client.get("/api/margens/marketplace?status=Pendente")
+    pendente = await client.get("/api/margens/marketplace?situacao=all&status=Pendente")
     pend = {it["pedido_bling"]: it for it in pendente.json()["items"]}
     assert pend["601004"]["data_especial"] is False
     assert pend["601005"]["data_especial"] is False
