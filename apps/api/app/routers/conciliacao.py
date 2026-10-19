@@ -1364,14 +1364,9 @@ async def raio_x(
             "recebido": _num(p.recebido),
         },
     }
-    # reserva retida do pedido (19/10): o par é conferido dentro dos movimentos do pedido
-    saldo_reservas: dict[str, Decimal] = defaultdict(Decimal)
-    for m in movs:
-        if m.tipo in TIPOS_RESERVA_SET and m.pagamento_id:
-            saldo_reservas[str(m.pagamento_id)] += (m.credito or Decimal("0")) - (
-                m.debito or Decimal("0")
-            )
-    reserva_aberta = _flags_reserva(movs, dict(saldo_reservas))
+    # reserva retida do pedido (19/10): saída × volta conferidas dentro dos movimentos do
+    # pedido (todos os dias dele já estão aqui)
+    reserva_aberta = _flags_reserva(movs, movs)
     return {
         "pedido": _pedido_out(p),
         "versoes": versoes,
@@ -2288,10 +2283,34 @@ _RESERVAS_RETIDAS = tuple(t for t in TIPOS_RESERVA_SET if t != "reserva_saque")
 
 
 def _flags_reserva(
-    movs: list[ConciliacaoMovimento], saldo_por_pagamento: dict[str, Decimal]
+    movs: list[ConciliacaoMovimento], linhas_dos_grupos: list[ConciliacaoMovimento]
 ) -> dict[Any, bool]:
-    """Por linha de reserva: True = aberta (saiu e não voltou, ou sem nº de pagamento pra
-    provar o par) → a tela mostra; False = par fechado (soma zero) → pode esconder."""
+    """Por linha de reserva do dia: True = retida (saída que ainda não voltou, ou sem nº
+    de pagamento pra provar o par) → a tela mostra; False = par fechado → pode esconder.
+
+    Por nº de pagamento, as reservas de qualquer dia (`linhas_dos_grupos`) são casadas em
+    ordem: cada volta (+X) quita a saída (−X) mais antiga ainda aberta — assim um
+    pagamento com duas reclamações, uma que voltou e outra retida, só marca a retida (a
+    soma do grupo marcaria as quatro linhas)."""
+    por_grupo: dict[str, list[ConciliacaoMovimento]] = defaultdict(list)
+    for m in linhas_dos_grupos:
+        if m.tipo in _RESERVAS_RETIDAS and m.pagamento_id:
+            por_grupo[str(m.pagamento_id)].append(m)
+    abertas: set[Any] = set()
+    for linhas in por_grupo.values():
+        linhas.sort(key=lambda m: (m.data, str(m.id)))
+        fila: list[list[Any]] = []  # [linha, quanto ainda falta voltar]
+        for m in linhas:
+            saida, volta = _d0(m.debito), _d0(m.credito)
+            if saida > Decimal("0"):
+                fila.append([m, saida])
+            while volta > Decimal("0.005") and fila:
+                quitado = min(fila[0][1], volta)
+                fila[0][1] -= quitado
+                volta -= quitado
+                if fila[0][1] <= Decimal("0.005"):
+                    fila.pop(0)
+        abertas.update(item[0].id for item in fila)
     out: dict[Any, bool] = {}
     for m in movs:
         if m.tipo not in TIPOS_RESERVA_SET:
@@ -2299,8 +2318,7 @@ def _flags_reserva(
         if m.tipo == "reserva_saque":
             out[m.id] = False
             continue
-        pg = str(m.pagamento_id or "")
-        out[m.id] = (not pg) or abs(saldo_por_pagamento.get(pg, Decimal("0"))) > Decimal("0.05")
+        out[m.id] = (not m.pagamento_id) or (m.id in abertas)
     return out
 
 
@@ -2309,28 +2327,29 @@ async def _reservas_abertas(
 ) -> dict[Any, bool]:
     """19/10 (revisão): a tela escondia TODA reserva como "vão e voltam, somam zero" —
     injox (ml) 15/10 tinha uma única linha pendente (reserva +367,48 sem dono) e ela
-    estava escondida. Por nº de pagamento, soma crédito − débito de todas as reservas da
-    loja (qualquer dia): par fechado pode ser escondido; sobra ≠ 0 é dinheiro retido."""
+    estava escondida. Lê todas as reservas da loja dos pagamentos do dia (qualquer dia)
+    e casa saída com volta (`_flags_reserva`)."""
     mov = ConciliacaoMovimento
     pagamentos = {
         str(m.pagamento_id) for m in movs if m.tipo in _RESERVAS_RETIDAS and m.pagamento_id
     }
-    saldo: dict[str, Decimal] = {}
+    linhas: list[ConciliacaoMovimento] = []
     if pagamentos:
-        rows = (
-            await session.execute(
-                select(mov.pagamento_id, func.sum(mov.credito - mov.debito))
-                .where(
-                    mov.integration_id == loja.integration_id,
-                    mov.origem.in_(ORIGENS_EXTRATO),
-                    mov.tipo.in_(_RESERVAS_RETIDAS),
-                    mov.pagamento_id.in_(pagamentos),
+        linhas = list(
+            (
+                await session.execute(
+                    select(mov).where(
+                        mov.integration_id == loja.integration_id,
+                        mov.origem.in_(ORIGENS_EXTRATO),
+                        mov.tipo.in_(_RESERVAS_RETIDAS),
+                        mov.pagamento_id.in_(pagamentos),
+                    )
                 )
-                .group_by(mov.pagamento_id)
             )
-        ).all()
-        saldo = {str(pg): Decimal(str(v or 0)) for pg, v in rows}
-    return _flags_reserva(movs, saldo)
+            .scalars()
+            .all()
+        )
+    return _flags_reserva(movs, linhas)
 
 
 _TOL_SALDO = Decimal("0.01")

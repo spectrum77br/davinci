@@ -3174,6 +3174,15 @@ async def test_extrato_e_raio_x_mostram_a_reserva_retida_e_escondem_so_o_par(
         pedido_bling="301102",
     )
     retida = _mov(loja, "reserva_disputa", d + timedelta(hours=2), debito="367.48", pagamento="p2")
+    # mesmo pagamento com DUAS reclamações: a primeira voltou (ontem), a segunda ficou —
+    # só a segunda é retida (a soma do grupo marcaria as três)
+    antiga_saida = _mov(
+        loja, "reserva_disputa", d - timedelta(days=1), debito="50.00", pagamento="p4"
+    )
+    antiga_volta = _mov(
+        loja, "reserva_disputa", d - timedelta(hours=20), credito="50.00", pagamento="p4"
+    )
+    segunda = _mov(loja, "reserva_disputa", d + timedelta(hours=4), debito="50.00", pagamento="p4")
     # retida de um pedido "em disputa" (a volta, se vier, cai noutro dia)
     presa = _mov(
         loja,
@@ -3184,7 +3193,7 @@ async def test_extrato_e_raio_x_mostram_a_reserva_retida_e_escondem_so_o_par(
         pedido_mkt="2000018828084180",
         pedido_bling="301722",
     )
-    db.add_all([par_saida, par_volta, retida, presa])
+    db.add_all([par_saida, par_volta, retida, presa, antiga_saida, antiga_volta, segunda])
     db.add(await _pedido_conciliado(loja))  # 301102 bateu
     db.add(
         await _pedido_conciliado(
@@ -3207,6 +3216,13 @@ async def test_extrato_e_raio_x_mostram_a_reserva_retida_e_escondem_so_o_par(
     assert por_id[str(retida.id)]["status"] == "pendente"
     assert por_id[str(presa.id)]["reserva_aberta"] is True
     assert por_id[str(presa.id)]["status"] == "divergente"  # a linha que prende o dinheiro
+    assert por_id[str(segunda.id)]["reserva_aberta"] is True  # a 2ª reclamação ficou
+    r_ontem = await client.get(
+        "/api/conciliacao/extrato", params={"loja": "jlas2", "dia": "2026-10-12"}
+    )
+    ontem = {m["id"]: m for m in r_ontem.json()["movimentos"]}
+    assert ontem[str(antiga_saida.id)]["reserva_aberta"] is False  # a 1ª voltou
+    assert ontem[str(antiga_volta.id)]["reserva_aberta"] is False
     rx = await client.get("/api/conciliacao/pedidos/301722", params={"loja": "jlas2"})
     assert rx.status_code == 200, rx.text
     flags = {m["id"]: m["reserva_aberta"] for m in rx.json()["movimentos"]}
