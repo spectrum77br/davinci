@@ -523,7 +523,7 @@ onMounted(() => {
                   <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais sem movimento</th>
                   <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais aguard. repasse</th>
                   <th class="border-b px-2 py-1 text-right">Com pendência</th>
-                  <th class="border-b px-2 py-1 text-right" title="o que a plataforma tirou (ou devolveu) sem pedido nesse dia, somando as lojas: impostos, Ads, penalidades e ajustes, fatura do ML">Cobranças extras (sem pedido)</th>
+                  <th class="border-b px-2 py-1 text-right" title="o que a plataforma tirou (ou devolveu) SEM pedido nesse dia, somando as lojas: impostos, Ads, penalidades e ajustes, fatura do ML">Cobranças extras</th>
                   <th class="border-b px-2 py-1 text-left">Como ficou</th>
                 </tr>
               </thead>
