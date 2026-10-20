@@ -1068,7 +1068,11 @@ if (cadastro) {
     if (modo === 'preparar') fechar[0].click();
     return 'abrindo_login';
   }
-  const entrar = achar(/^(fazer login|fa[çc]a login|iniciar sess[ãa]o|log in|sign in)$/i);
+  // Em janelas largas, o rodapé do cadastro também mostra "Faça login".
+  // Prioriza o rótulo do cabeçalho, confirmado na página real.
+  const cabecalho = achar(/^fazer login$/i);
+  const entrar = cabecalho.length ? cabecalho :
+    achar(/^(fa[çc]a login|iniciar sess[ãa]o|log in|sign in)$/i);
   if (entrar.length !== 1) return 'formulario_desconhecido';
   if (modo === 'preparar') entrar[0].click();
   return 'abrindo_login';

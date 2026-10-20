@@ -136,6 +136,23 @@ def test_cadastro_sem_acao_conhecida_nao_recebe_credenciais(tmp_path):
     assert not r["campos"] and not r["clicks"] and r["cadastroVazio"]
 
 
+def test_header_fazer_login_tem_prioridade_sobre_faca_login_no_rodape(tmp_path):
+    html = (_HEADER + _CADASTRO +
+            '<footer><span data-action="wrong-login">Faça login</span></footer>')
+    r = _rodar(tmp_path, html, ("preparar", "enviar"), login_html=_LOGIN)
+    assert r["resultados"] == ["abrindo_login", "enviado"]
+    assert r["clicks"] == ["login", "submit"]
+    assert r["cadastroVazio"] and r["loginPreenchido"]
+
+
+def test_dois_rotulos_fazer_login_nao_autorizam_escolha_arbitraria(tmp_path):
+    html = (_HEADER + _CADASTRO +
+            '<footer><span data-action="other-login">Fazer login</span></footer>')
+    r = _rodar(tmp_path, html, ("preparar",), login_html=_LOGIN)
+    assert r["resultados"] == ["formulario_desconhecido"]
+    assert not r["clicks"] and not r["campos"] and r["cadastroVazio"]
+
+
 @pytest.mark.parametrize("url", [
     "http://br.seller.temu.com/login.html",
     "https://br.seller.temu.com.evil.test/login.html",
