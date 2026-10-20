@@ -342,13 +342,15 @@ def aplicar_leitura(
     return mudou
 
 
-async def avisar_graves(graves: list[tuple[str, str, str]]) -> None:
-    """Melhor esforço: aviso não pode derrubar a varredura."""
+async def avisar_graves(
+    graves: list[tuple[str, str, str]],
+    *,
+    titulo: str = "Rastreio dos Correios com ocorrência GRAVE",
+) -> None:
+    """Melhor esforço: aviso não pode derrubar a varredura. `titulo` muda pro
+    pacote de devolução (devolucao_rastreio_sync), que usa o mesmo canal."""
     linhas = [f"• Pedido {p} ({conta}) — {loc}" for p, conta, loc in graves[:15]]
-    texto = (
-        "⚠️ Rastreio dos Correios com ocorrência GRAVE "
-        f"({len(graves)} pedido(s)):\n" + "\n".join(linhas)
-    )
+    texto = f"⚠️ {titulo} ({len(graves)} pedido(s)):\n" + "\n".join(linhas)
     try:
         from app.config import get_settings
         from app.services import threema

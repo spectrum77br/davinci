@@ -122,7 +122,7 @@ async def _fetch_por_marketplace(
         return {}
 
 
-async def pedidos_em_devolucao(session: AsyncSession) -> list[str]:
+async def _pedidos_na_situacao(session: AsyncSession, situacao: str) -> list[str]:
     rows = (
         await session.execute(
             text(
@@ -130,10 +130,110 @@ async def pedidos_em_devolucao(session: AsyncSession) -> list[str]:
                 f"FROM {_qualified('vw_devolucoes')} v "
                 "WHERE v.situacao = :s"
             ),
-            {"s": _SITUACAO_AGUARDANDO_DEVOLUCAO},
+            {"s": situacao},
         )
     ).all()
     return [r[0] for r in rows if r[0]]
+
+
+async def pedidos_em_devolucao(session: AsyncSession) -> list[str]:
+    return await _pedidos_na_situacao(session, _SITUACAO_AGUARDANDO_DEVOLUCAO)
+
+
+def _gravar_localizacao_volta(
+    row: DevolucaoRastreio, loc: str | None, em: datetime
+) -> bool:
+    """Grava a localização do pacote de volta que o PRÓPRIO marketplace
+    informou (Shopee: volta pela SPX da ida ou pela reversa). Devolve True
+    quando o evento acabou de virar GRAVE (apreensão, extravio…) — é o que
+    rende aviso, uma vez por ocorrência."""
+    loc = (loc or "").strip() or None
+    if not loc or loc == row.localizacao_auto:
+        return False
+    virou_grave = bool(logistica_track.evento_grave_volta(loc)) and not (
+        logistica_track.evento_grave_volta(row.localizacao_auto)
+    )
+    row.localizacao_auto = loc
+    row.localizacao_auto_data = em
+    return virou_grave
+
+
+def _grave_da_volta(
+    row: DevolucaoRastreio, linha: Logistica | None
+) -> tuple[str, str, str]:
+    """Item do aviso Threema: (pedido, conta, "volta <código> — <evento>")."""
+    codigo = (row.rastreio or "").strip() or (row.rastreio_auto or "").strip() or "sem código"
+    conta = (linha.conta or "").strip() if linha is not None else ""
+    plat = (linha.plataforma or "").strip() if linha is not None else ""
+    quem = ", ".join(p for p in (conta, plat) if p) or "?"
+    return (row.pedido_bling or "?", quem, f"volta {codigo} — {row.localizacao_auto}")
+
+
+# Pacote de volta da Shopee que segue sendo lido FORA da aba Acompanhamento
+# (Vinicius 20/10, pedido 293379: a devolução foi pra "Problemas" com o pacote
+# apreendido, e aí ninguém mais olhava a volta). Só pedidos em Problemas — é o
+# estado que a regra da aba Status manda monitorar —, com o caso já conhecido
+# (return_sn gravado quando o pedido passou pela aba) e o pacote ainda sem
+# chegar. Teto por rodada pra não virar rajada na API da Shopee.
+_SITUACAO_PROBLEMAS = "83960"
+_VOLTA_FORA_DA_ABA_TETO = 200
+
+
+async def _ler_volta_fora_da_aba(
+    session: AsyncSession, graves: list[tuple[str, str, str]]
+) -> dict[str, int]:
+    """Relê a perna reversa (SPX) dos pedidos Shopee em Problemas cujo pacote
+    de volta ainda não chegou. Acrescenta em `graves` o que virou ocorrência
+    grave nesta rodada. Commita."""
+    resumo = {"consultados": 0, "localizacoes": 0}
+    pedidos = await _pedidos_na_situacao(session, _SITUACAO_PROBLEMAS)
+    if not pedidos:
+        return resumo
+    from app.services import logistica_shopee  # tardio: como em _fetch_por_marketplace
+
+    rows = [
+        r
+        for r in (
+            await session.execute(
+                select(DevolucaoRastreio)
+                .where(
+                    DevolucaoRastreio.pedido_bling.in_(pedidos),
+                    DevolucaoRastreio.fonte_auto == "shopee",
+                    DevolucaoRastreio.devolucao_id_auto.is_not(None),
+                    DevolucaoRastreio.pacote_entregue_em.is_(None),
+                )
+                .order_by(DevolucaoRastreio.devolucao_criada_em.desc().nulls_last())
+            )
+        ).scalars().all()
+        if logistica_shopee.le_reversa(r.rastreio_auto)
+    ][:_VOLTA_FORA_DA_ABA_TETO]
+    if not rows:
+        return resumo
+    linhas = await _linhas_logistica(session, [r.pedido_bling for r in rows])
+    casos = [
+        (linhas[r.pedido_bling], r.devolucao_id_auto or "")
+        for r in rows
+        if r.pedido_bling in linhas
+    ]
+    resumo["consultados"] = len(casos)
+    voltas = await logistica_shopee.voltas_por_pedido(session, casos)
+    agora = datetime.now(UTC)
+    for r in rows:
+        volta = voltas.get(r.pedido_bling)
+        if volta is None:
+            continue
+        antes = r.localizacao_auto
+        if _gravar_localizacao_volta(r, volta.localizacao, volta.ultimo_em or agora):
+            graves.append(_grave_da_volta(r, linhas.get(r.pedido_bling)))
+        if r.localizacao_auto != antes:
+            resumo["localizacoes"] += 1
+        if volta.ultimo_em and (
+            r.devolucao_atualizada_em is None or volta.ultimo_em > r.devolucao_atualizada_em
+        ):
+            r.devolucao_atualizada_em = volta.ultimo_em
+    # O refresh de token dos clients só dá flush — sem commit ele se perde.
+    await session.commit()
+    return resumo
 
 
 async def _linhas_logistica(
@@ -506,6 +606,7 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
     agora = datetime.now(UTC)
     gravados = 0
     novos_codigos: list[str] = []
+    graves: list[tuple[str, str, str]] = []
     # Extrato financeiro já baixado: quem diz se o reembolso foi DESCONTADO da
     # loja (Shopee/TikTok) e se a Shopee compensou. Pedido sem caso conhecido
     # mas com desconto no extrato (pacote voltando pela SPX, cancelamento)
@@ -576,12 +677,10 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             if info.entregue_em and row.pacote_entregue_em is None:
                 row.pacote_entregue_em = info.entregue_em
             # Localização vinda do PRÓPRIO marketplace (Shopee: pacote voltando
-            # pela SPX da ida). Só quando ele informa — senão quem manda na
-            # localização continua sendo o 17track.
-            loc = (info.localizacao or "").strip() or None
-            if loc and loc != row.localizacao_auto:
-                row.localizacao_auto = loc
-                row.localizacao_auto_data = info.localizacao_em or agora
+            # pela SPX da ida ou pela reversa da SPX). Só quando ele informa —
+            # senão quem manda na localização continua sendo o 17track.
+            if _gravar_localizacao_volta(row, info.localizacao, info.localizacao_em or agora):
+                graves.append(_grave_da_volta(row, linhas.get(pedido)))
             row.auto_sync_at = agora
             gravados += 1
     # Commit SEMPRE (mesmo sem devolução nova): o refresh de token dos clients
@@ -589,6 +688,22 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
     await session.commit()
 
     pull = await _puxar_correios(session, vivos=alvo)
+
+    # Rodada completa (não o recarregar de um pedido): a volta da Shopee dos
+    # pedidos que já saíram da aba pra "Problemas" continua sendo lida.
+    fora: dict[str, int] = {"consultados": 0, "localizacoes": 0}
+    if pedidos is None:
+        try:
+            fora = await _ler_volta_fora_da_aba(session, graves)
+        except Exception as e:  # noqa: BLE001 — extra, não derruba o sync
+            logger.warning("devolucao_rastreio_volta_fora_da_aba_falhou", err=str(e)[:300])
+
+    # Pacote de volta apreendido/extraviado: aviso no mesmo canal dos Correios.
+    if graves:
+        await logistica_track_sync.avisar_graves(
+            graves, titulo="Pacote de DEVOLUÇÃO com ocorrência GRAVE"
+        )
+        logger.warning("devolucao_rastreio_volta_grave", pedidos=[g[0] for g in graves][:20])
 
     # Registra no 17track os códigos novos desta rodada + os que ele disse não
     # conhecer (registro anterior falhou por saldo/rede, ou o 17track apagou).
@@ -662,6 +777,9 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         "correios_consultados": pull["consultados"],
         "correios_entregues": pull["entregues"],
         "correios_localizacoes": pull["localizacoes"],
+        "volta_fora_da_aba": fora["consultados"],
+        "volta_fora_da_aba_localizacoes": fora["localizacoes"],
+        "voltas_graves": len(graves),
     }
     logger.info("devolucao_rastreio_sync_done", **summary)
     return summary

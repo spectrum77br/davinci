@@ -739,6 +739,102 @@ async def _rts_da_ida_do_pedido(client: ShopeeClient, linha: Logistica) -> Retur
     )
 
 
+# ---------------------------------------------------------------------------
+# Pacote que volta pela perna REVERSA (código próprio da devolução).
+#
+# 20/10/2026, pedido 293379 (jlas): a devolução tinha código próprio da SPX
+# (BR265869901238B) e o pacote foi APREENDIDO pela fiscalização em 05/10, a
+# caminho da loja. O DaVinci só guardava o código: a localização da volta
+# vinha do 17track, que só conhece código dos Correios — a Acompanhamento
+# mostrava "Devolução aceita" e a Logística o "Pedido entregue" da IDA, e a
+# apreensão ficou 15 dias invisível. A linha do tempo que o Seller Center
+# mostra vem de `get_reverse_tracking_info`.
+# ---------------------------------------------------------------------------
+
+
+class VoltaReversa(NamedTuple):
+    """O último evento do pacote de volta, como a Shopee o descreve."""
+
+    localizacao: str  # `tracking_description` do evento mais recente
+    ultimo_em: datetime | None  # carimbo dele
+
+
+def volta_da_reversa(resp: dict | None) -> VoltaReversa | None:
+    """Evento mais recente da volta — das duas pernas quando a Shopee valida no
+    armazém (comprador → armazém em `tracking_info`, armazém → loja em
+    `post_return_logistics_tracking_info`) — ou None sem evento nenhum."""
+    r = resp if isinstance(resp, dict) else {}
+    eventos = [
+        e
+        for chave in ("tracking_info", "post_return_logistics_tracking_info")
+        for e in (r.get(chave) or [])
+        if isinstance(e, dict) and str(e.get("tracking_description") or "").strip()
+    ]
+    if not eventos:
+        return None
+    top = max(eventos, key=lambda e: _epoch_int(e.get("update_time")))
+    return VoltaReversa(
+        localizacao=str(top.get("tracking_description")).strip(),
+        ultimo_em=epoch_to_dt(top.get("update_time")),
+    )
+
+
+def le_reversa(tracking: str | None) -> bool:
+    """Código de volta que só a Shopee sabe rastrear (SPX). Os dos Correios o
+    17track já lê — perguntar aos dois faria a localização alternar."""
+    t = (tracking or "").strip()
+    return bool(t) and not logistica_track.is_correios(t)
+
+
+async def _volta_do_caso(
+    client: ShopeeClient, return_sn: str, pedido: str | None
+) -> VoltaReversa | None:
+    """Best-effort: erro de API loga e devolve None (a linha fica como estava)."""
+    try:
+        resp = await client.get_reverse_tracking_info(return_sn)
+    except Exception as e:  # noqa: BLE001 — extra, não derruba o sync
+        logger.warning(
+            "logistica_shopee_reversa_falhou",
+            pedido=pedido, return_sn=return_sn, err=str(e)[:200],
+        )
+        return None
+    return volta_da_reversa(resp)
+
+
+async def voltas_por_pedido(
+    session: AsyncSession, casos: list[tuple[Logistica, str]]
+) -> dict[str, VoltaReversa]:
+    """`{pedido_bling: VoltaReversa}` de casos JÁ conhecidos — (linha da
+    Logística, return_sn gravado pelo sync) —, sem varrer a lista de
+    devoluções da loja. É o que mantém a volta sendo lida depois que o pedido
+    sai de "Aguardando Devolução" (ex. foi pra "Problemas" com o pacote
+    retido). Best-effort por conta."""
+    por_conta: dict[str, list[tuple[Logistica, str]]] = {}
+    for linha, return_sn in casos:
+        if (linha.plataforma or "").strip().lower() not in _SHOPEE_PLATAFORMAS:
+            continue
+        if not (return_sn or "").strip() or not (linha.pedido_bling or "").strip():
+            continue
+        por_conta.setdefault((linha.conta or "").strip(), []).append((linha, return_sn.strip()))
+
+    out: dict[str, VoltaReversa] = {}
+    for conta, itens in por_conta.items():
+        try:
+            integ = await _shopee_integration_for_conta(session, conta)
+            if integ is None:
+                logger.warning("logistica_shopee_voltas_sem_integracao", conta=conta)
+                continue
+            client = _build_shopee_client(session, integ)
+        except Exception as e:  # noqa: BLE001 — best-effort por conta
+            logger.warning("logistica_shopee_voltas_client_falhou", conta=conta, err=str(e)[:200])
+            continue
+        for linha, return_sn in itens:
+            volta = await _volta_do_caso(client, return_sn, linha.pedido_bling)
+            if volta is not None:
+                out[(linha.pedido_bling or "").strip()] = volta
+    return out
+
+
 async def returns_por_pedido(
     session: AsyncSession,
     linhas: list[Logistica],
@@ -870,6 +966,24 @@ async def returns_por_pedido(
                 if det is not None:
                     acao, prazo = _acao_pendente_shopee(det, info.status)
                     info = info._replace(acao_pendente=acao, prazo_acao=prazo)
+            # Perna REVERSA com código da SPX ainda a caminho: onde o pacote
+            # está só a Shopee sabe (o 17track não conhece o código).
+            if (
+                info.return_id
+                and info.entregue_em is None
+                and not ja_chegou
+                and not _sem_perna_reversa(det, info)
+                and le_reversa(info.tracking)
+            ):
+                volta = await _volta_do_caso(client, info.return_id, pedido)
+                if volta is not None:
+                    mexidas = [d for d in (info.updated_at, volta.ultimo_em) if d is not None]
+                    info = info._replace(
+                        localizacao=volta.localizacao,
+                        localizacao_em=volta.ultimo_em,
+                        # "Data últ. movimentação": o evento do pacote conta.
+                        updated_at=max(mexidas) if mexidas else None,
+                    )
             # Caso sem perna reversa (só reembolso) com a ida falhada: a volta
             # está no rastreio da IDA, não no caso.
             rts: ReturnInfo | None = None

@@ -34,6 +34,7 @@ from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import (
     BlingOrder,
     Chamado,
+    DevolucaoRastreio,
     Logistica,
     LogisticaMensagemCliente,
     LogisticaStatus,
@@ -273,12 +274,59 @@ async def _chamado_aba_for(session: AsyncSession, c: Logistica) -> ChamadoAbaOut
     return (await _chamados_aba_map(session, {c.pedido_bling or ""})).get(c.pedido_bling or "")
 
 
+async def _voltas_map(
+    session: AsyncSession, pedidos: set[str]
+) -> dict[str, DevolucaoRastreio]:
+    """Pacote de VOLTA de cada pedido da página (tabela da aba Acompanhamento),
+    numa query só — só os que têm código ou localização da volta."""
+    pedidos = {p for p in pedidos if (p or "").strip()}
+    if not pedidos:
+        return {}
+    rows = (
+        await session.execute(
+            select(DevolucaoRastreio).where(
+                DevolucaoRastreio.pedido_bling.in_(pedidos),
+                or_(
+                    func.coalesce(func.btrim(DevolucaoRastreio.rastreio), "") != "",
+                    func.coalesce(func.btrim(DevolucaoRastreio.localizacao), "") != "",
+                    DevolucaoRastreio.rastreio_auto.is_not(None),
+                    DevolucaoRastreio.localizacao_auto.is_not(None),
+                ),
+            )
+        )
+    ).scalars().all()
+    return {r.pedido_bling: r for r in rows}
+
+
+async def _volta_for(session: AsyncSession, c: Logistica) -> DevolucaoRastreio | None:
+    return (await _voltas_map(session, {c.pedido_bling or ""})).get(c.pedido_bling or "")
+
+
+def _volta_campos(volta: DevolucaoRastreio | None) -> dict:
+    """Campos `volta_*` do LogisticaOut. O que foi digitado na aba
+    Acompanhamento vence o automático, como lá."""
+    if volta is None:
+        return {}
+    loc_manual = (volta.localizacao or "").strip()
+    loc = loc_manual or (volta.localizacao_auto or "").strip() or None
+    codigo = (volta.rastreio or "").strip() or (volta.rastreio_auto or "").strip()
+    return {
+        "volta_rastreio": codigo or None,
+        "volta_localizacao": loc,
+        "volta_localizacao_em": (
+            volta.localizacao_data if loc_manual else volta.localizacao_auto_data
+        ),
+        "volta_grave": bool(logistica_track.evento_grave_volta(loc)),
+    }
+
+
 def _to_out(
     c: Logistica,
     rules: list[LogisticaStatus] | None = None,
     produtos: list[LogisticaProdutoOut] | None = None,
     mensagens: list[MensagemClienteOut] | None = None,
     chamado_aba: ChamadoAbaOut | None = None,
+    volta: DevolucaoRastreio | None = None,
 ) -> LogisticaOut:
     """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
     de estados). A regra ATIVA (desambiguada pela situação atual do Bling) alimenta
@@ -323,6 +371,7 @@ def _to_out(
         prazo_entrega_amazon=c.prazo_entrega_amazon,
         entregue_em=c.entregue_em,
         problema_correios=c.problema_correios,
+        **_volta_campos(volta),
         cliente_nome=c.cliente_nome,
         cliente_email=c.cliente_email,
         bling_enriquecido_em=c.bling_enriquecido_em,
@@ -882,6 +931,8 @@ async def list_logistica(
     )
     # Ticket da aba Chamados de cada pedido (coluna Chamado sem protocolo).
     chamados_map = await _chamados_aba_map(session, {c.pedido_bling or "" for c in rows})
+    # Pacote de volta (devolução) de cada pedido — colunas Rastreio/Localização.
+    voltas_map = await _voltas_map(session, {c.pedido_bling or "" for c in rows})
     out: list[LogisticaOut] = []
     for c in rows:
         assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
@@ -895,6 +946,7 @@ async def list_logistica(
                 produtos=produtos_map.get(c.pedido_bling or ""),
                 mensagens=mensagens_map.get(c.id),
                 chamado_aba=chamados_map.get(c.pedido_bling or ""),
+                volta=voltas_map.get(c.pedido_bling or ""),
             )
         )
     return out
@@ -1086,6 +1138,7 @@ async def suspender_entrega(
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
     )
 
 
@@ -1240,6 +1293,7 @@ async def create_logistica(
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
     )
 
 
@@ -1276,6 +1330,7 @@ async def atualizar_meli(
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
     )
 
 
@@ -1311,6 +1366,7 @@ async def atualizar_shopee(
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
     )
 
 
@@ -1347,6 +1403,7 @@ async def atualizar_tiktok(
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
     )
 
 
@@ -1383,6 +1440,7 @@ async def atualizar_amazon(
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
     )
 
 
@@ -1456,6 +1514,7 @@ async def atualizar_rastreio(
                     produtos=await _produtos_for(session, c),
                     mensagens=await _mensagens_for(session, c),
                     chamado_aba=await _chamado_aba_for(session, c),
+                    volta=await _volta_for(session, c),
                 ),
             )
     if not logistica_track.is_correios(c.rastreio):
@@ -1477,6 +1536,7 @@ async def atualizar_rastreio(
             produtos=await _produtos_for(session, c),
             mensagens=await _mensagens_for(session, c),
             chamado_aba=await _chamado_aba_for(session, c),
+            volta=await _volta_for(session, c),
         ),
     )
 
@@ -1599,6 +1659,7 @@ async def enviar_chamado(
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
     )
 
 
@@ -1771,6 +1832,7 @@ async def patch_logistica(
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
     )
 
 

@@ -642,6 +642,20 @@ class ShopeeClient:
             params={"return_sn": return_sn}, what="shopee_return_detail",
         )
 
+    async def get_reverse_tracking_info(self, return_sn: str) -> dict:
+        """Rastreio do pacote de VOLTA de UMA devolução
+        (GET /api/v2/returns/get_reverse_tracking_info, API de 11/10/2025):
+        `reverse_logistics_status`, `tracking_number` e `tracking_info[]`
+        (`update_time`, `tracking_description` — o mesmo texto da linha do
+        tempo da devolução no Seller Center). Validação no armazém da Shopee
+        traz a 2ª perna (armazém → loja) em `rts_tracking_number` +
+        `post_return_logistics_tracking_info[]`. Levanta em erro de negócio
+        (`returns.error_reverse_logistics` = caso sem perna reversa)."""
+        return await self._call(
+            "GET", "/api/v2/returns/get_reverse_tracking_info",
+            params={"return_sn": return_sn}, what="shopee_reverse_tracking",
+        )
+
     async def get_return_dispute_reason(self, return_sn: str) -> list[dict]:
         """Motivos de disputa VÁLIDOS pra essa devolução
         (GET /api/v2/returns/get_return_dispute_reason) — cada um com o id

@@ -173,6 +173,15 @@ class LogisticaOut(BaseModel):
     prazo_entrega_amazon: date | None = None
     entregue_em: datetime | None = None
     problema_correios: str | None = None
+    # Pacote de VOLTA (devolução), da tabela da aba Acompanhamento
+    # (devolucao_rastreio — manual vence o automático): código, último evento
+    # e quando. As colunas Rastreio/Localização acima são da IDA; sem isto o
+    # 293379 mostrava "Pedido entregue" com a volta apreendida (20/10).
+    # `volta_grave` = o evento é perda do produto (apreensão, extravio…). Só leitura.
+    volta_rastreio: str | None = None
+    volta_localizacao: str | None = None
+    volta_localizacao_em: datetime | None = None
+    volta_grave: bool = False
     cliente_nome: str | None = None
     cliente_email: str | None = None
     # Última leitura do pedido no Bling (serviço, rastreio, contato). No Envio

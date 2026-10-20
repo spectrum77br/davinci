@@ -609,6 +609,33 @@ def evento_grave(localizacao: str | None) -> str | None:
     return None
 
 
+# No pacote de VOLTA (devolução) só avisa o que é perda do produto — pedido
+# 293379, 20/10: "Pedido apreendido pela fiscalização. Entrar em contato com
+# a Receita Federal" ficou 15 dias sem ninguém ver. "Não entregue", "recusado"
+# e "devolvido ao remetente" ficam de fora: na volta são tentativa na porta
+# da loja ou o pacote retornando ao comprador, rotina que viraria ruído.
+EVENTOS_GRAVES_VOLTA: tuple[str, ...] = (
+    "apreendid",
+    "extravi",
+    "roubo",
+    "roubad",
+    "furtad",
+    "avaria",
+    "danificad",
+    "sinistro",
+    "perdid",
+)
+
+
+def evento_grave_volta(localizacao: str | None) -> str | None:
+    """Palavra que torna grave um evento do pacote de VOLTA, ou None."""
+    txt = _sem_acento(localizacao)
+    for chave in EVENTOS_GRAVES_VOLTA:
+        if _sem_acento(chave) in txt:
+            return chave
+    return None
+
+
 # Eventos que aparecem no rastreio ANTES de o pacote ser postado (a etiqueta
 # foi gerada, a pré-postagem registrada) — vistos em produção como
 # "BR — Etiqueta emitida". Um rastreio só com isso não prova que o pacote saiu

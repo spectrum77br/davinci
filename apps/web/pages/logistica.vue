@@ -159,6 +159,13 @@ type Logistica = {
   prazo_entrega_amazon?: string | null
   entregue_em?: string | null
   problema_correios?: string | null
+  // Pacote de VOLTA (devolução) — as colunas Rastreio/Localização são da IDA.
+  // Vem da aba Acompanhamento (manual vence o automático). `volta_grave` =
+  // apreensão, extravio, roubo… (perda do produto).
+  volta_rastreio?: string | null
+  volta_localizacao?: string | null
+  volta_localizacao_em?: string | null
+  volta_grave?: boolean
   cliente_nome?: string | null
   cliente_email?: string | null
   // Última leitura do pedido no Bling (serviço, rastreio, contato). No Envio
@@ -431,6 +438,8 @@ const filteredRows = computed(() => {
         c.rastreio,
         c.chamado,
         c.localizacao,
+        c.volta_rastreio,
+        c.volta_localizacao,
         c.divergencia,
         c.status_bling,
         c.status_plataforma,
@@ -628,6 +637,7 @@ function excelColunas(): ExcelColuna[] {
       titulo: 'Localização',
       valor: (c) => (proprioSemRastreio(c) && c.localizacao ? `Destino: ${c.localizacao}` : c.localizacao),
     },
+    { titulo: 'Devolução (volta)', valor: (c) => voltaTexto(c) },
   ]
   if (proprio) {
     cols.push(
@@ -931,6 +941,24 @@ function fmtDataHora(iso: string | null | undefined): string {
     day: '2-digit', month: '2-digit', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   })
+}
+
+// ---- Pacote de volta (devolução) -------------------------------------------
+// 20/10, pedido 293379: a Localização mostrava "Pedido entregue" (a IDA) com o
+// pacote da devolução apreendido havia 15 dias. A volta aparece em cima, e a
+// ida passa a ser "Ida: …".
+function voltaTexto(c: Logistica): string {
+  if (!c.volta_localizacao && !c.volta_rastreio) return ''
+  const partes = [c.volta_rastreio, c.volta_localizacao].filter(Boolean)
+  const quando = c.volta_localizacao_em ? ` (${fmtDataHora(c.volta_localizacao_em)})` : ''
+  return `${partes.join(' — ')}${quando}`
+}
+function voltaTitulo(c: Logistica): string {
+  const linhas = [`Pacote da devolução: ${c.volta_localizacao || 'sem evento ainda'}`]
+  if (c.volta_localizacao_em) linhas.push(`Último evento em ${fmtDataHora(c.volta_localizacao_em)}`)
+  if (c.volta_rastreio) linhas.push(`Código da volta: ${c.volta_rastreio}`)
+  if (c.volta_grave) linhas.push('Ocorrência grave: o produto pode estar perdido — veja a devolução na plataforma.')
+  return linhas.join('\n')
 }
 
 // Rastreio dos Correios termina em BR (ex. AD828496989BR) — mesma regra do
@@ -2544,9 +2572,22 @@ async function aplicarStatusBling(c: Logistica) {
                   </button>
                 </div>
               </td>
-              <td class="px-3 py-2 whitespace-nowrap">{{ c.rastreio || '—' }}</td>
+              <td class="px-3 py-2 whitespace-nowrap">
+                <div>{{ c.rastreio || '—' }}</div>
+                <div
+                  v-if="c.volta_rastreio"
+                  class="text-[11px] text-muted-foreground"
+                  title="Código do pacote da devolução (volta pra loja)"
+                >volta: {{ c.volta_rastreio }}</div>
+              </td>
               <td class="px-3 py-2 whitespace-nowrap">
                 <div class="leading-tight">
+                  <div
+                    v-if="c.volta_localizacao"
+                    class="max-w-[280px] truncate text-xs"
+                    :class="c.volta_grave ? 'text-rose-700 dark:text-rose-400 font-medium' : ''"
+                    :title="voltaTitulo(c)"
+                  >↩ Devolução: {{ c.volta_localizacao }}</div>
                   <div class="flex items-start gap-1.5">
                     <!-- Envio próprio sem …BR: a cidade é só o DESTINO (endereço da
                          Amazon), não onde o pacote está — diz isso com todas as letras. -->
@@ -2555,7 +2596,11 @@ async function aplicarStatusBling(c: Logistica) {
                       class="flex-1"
                       :title="DESTINO_TITLE"
                     >Destino: {{ c.localizacao }}</span>
-                    <span v-else class="flex-1">{{ c.localizacao || '—' }}</span>
+                    <span
+                      v-else
+                      class="flex-1"
+                      :class="c.volta_localizacao ? 'text-[11px] text-muted-foreground' : ''"
+                    >{{ c.volta_localizacao ? 'Ida: ' : '' }}{{ c.localizacao || '—' }}</span>
                     <!-- Consulta os Correios agora (rastreio …BR; pode gastar 1 crédito do
                          17track). No Envio próprio ainda sem …BR, antes busca o código no Bling. -->
                     <button
@@ -2813,9 +2858,20 @@ async function aplicarStatusBling(c: Logistica) {
           </div>
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
             <div><span class="text-muted-foreground">Data:</span> {{ fmtDate(c.data) }}</div>
-            <div><span class="text-muted-foreground">Rastreio:</span> {{ c.rastreio || '—' }}</div>
             <div>
-              <span class="text-muted-foreground">Localização:</span>
+              <span class="text-muted-foreground">Rastreio:</span> {{ c.rastreio || '—' }}
+              <span v-if="c.volta_rastreio" class="text-muted-foreground"> · volta: {{ c.volta_rastreio }}</span>
+            </div>
+            <div
+              v-if="c.volta_localizacao"
+              class="col-span-2"
+              :class="c.volta_grave ? 'text-rose-700 dark:text-rose-400 font-medium' : ''"
+            >
+              <span class="text-muted-foreground">↩ Devolução:</span> {{ c.volta_localizacao }}
+              <span v-if="c.volta_localizacao_em" class="text-muted-foreground"> · {{ fmtDataHora(c.volta_localizacao_em) }}</span>
+            </div>
+            <div>
+              <span class="text-muted-foreground">{{ c.volta_localizacao ? 'Localização (ida):' : 'Localização:' }}</span>
               <template v-if="proprioSemRastreio(c) && c.localizacao">
                 <span :title="DESTINO_TITLE">Destino: {{ c.localizacao }}</span>
               </template>
