@@ -302,6 +302,20 @@ _AMAZON_PLATAFORMAS = {"amazon"}
 _SHOPEE_RETURN_ENCERRADO = {"CANCELLED", "CLOSED"}
 
 
+def shopee_volta_manda_na_localizacao(meli_status: dict[str, str] | None) -> bool:
+    """Linha Shopee cuja Localização descreve o pacote de VOLTA, não a ida:
+    devolução viva com a ida já ENTREGUE ao comprador — a ida não tem mais o
+    que contar e a volta (devolucao_rastreio_sync) escreve ali. É a Localização
+    que as regras "Localização contém" da aba Status leem (Vinicius 20/10,
+    293379: "as regras eu crio pela localização — se não aparecer preso, não
+    consigo criar regra"). Ida que FALHOU fica de fora: aí o pacote volta pelo
+    próprio rastreio da ida, que o enrich segue lendo."""
+    m = meli_status or {}
+    ret = (m.get("return_status") or "").strip().upper()
+    ida = (m.get("logistics_status") or "").strip().upper()
+    return bool(ret) and ret not in _SHOPEE_RETURN_ENCERRADO and ida == "LOGISTICS_DELIVERY_DONE"
+
+
 def assinatura_shopee(status: dict[str, str] | None) -> str:
     """Assinatura em PT da Shopee = o `order_status` traduzido. Vazio se não
     houver status.

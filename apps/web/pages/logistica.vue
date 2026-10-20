@@ -828,6 +828,11 @@ const editingRow = computed(() =>
 const editingTemVolta = computed(
   () => !!(editingRow.value?.volta_rastreio || editingRow.value?.volta_localizacao),
 )
+const rotuloLocalizacaoModal = computed(() => {
+  const r = editingRow.value
+  if (!r || !editingTemVolta.value) return 'Localização'
+  return idaSeparada(r) || !r.volta_localizacao ? 'Localização (ida)' : 'Localização (devolução)'
+})
 
 function payload() {
   const meli: MeliStatus = {}
@@ -962,6 +967,12 @@ function voltaTexto(c: Logistica): string {
   const partes = [c.volta_rastreio, c.volta_localizacao].filter(Boolean)
   const quando = c.volta_localizacao_em ? ` (${fmtDataHora(c.volta_localizacao_em)})` : ''
   return `${partes.join(' — ')}${quando}`
+}
+// Shopee com a ida entregue: o backend já escreve a volta na própria
+// Localização (é ela que as regras "Localização contém" leem) — aí não há
+// "Ida:" separada pra mostrar.
+function idaSeparada(c: Logistica): boolean {
+  return !!c.volta_localizacao && (c.localizacao || '').trim() !== c.volta_localizacao.trim()
 }
 function voltaTitulo(c: Logistica): string {
   const linhas = [`Pacote da devolução: ${c.volta_localizacao || 'sem evento ainda'}`]
@@ -2607,10 +2618,11 @@ async function aplicarStatusBling(c: Logistica) {
                       :title="DESTINO_TITLE"
                     >Destino: {{ c.localizacao }}</span>
                     <span
-                      v-else
+                      v-else-if="!c.volta_localizacao || idaSeparada(c)"
                       class="flex-1"
                       :class="c.volta_localizacao ? 'text-[11px] text-muted-foreground' : ''"
                     >{{ c.volta_localizacao ? 'Ida: ' : '' }}{{ c.localizacao || '—' }}</span>
+                    <span v-else class="flex-1" />
                     <!-- Consulta os Correios agora (rastreio …BR; pode gastar 1 crédito do
                          17track). No Envio próprio ainda sem …BR, antes busca o código no Bling. -->
                     <button
@@ -2880,8 +2892,8 @@ async function aplicarStatusBling(c: Logistica) {
               <span class="text-muted-foreground">↩ Devolução:</span> {{ c.volta_localizacao }}
               <span v-if="c.volta_localizacao_em" class="text-muted-foreground"> · {{ fmtDataHora(c.volta_localizacao_em) }}</span>
             </div>
-            <div>
-              <span class="text-muted-foreground">{{ c.volta_localizacao ? 'Localização (ida):' : 'Localização:' }}</span>
+            <div v-if="!c.volta_localizacao || idaSeparada(c)">
+              <span class="text-muted-foreground">{{ idaSeparada(c) ? 'Localização (ida):' : 'Localização:' }}</span>
               <template v-if="proprioSemRastreio(c) && c.localizacao">
                 <span :title="DESTINO_TITLE">Destino: {{ c.localizacao }}</span>
               </template>
@@ -3717,7 +3729,7 @@ async function aplicarStatusBling(c: Logistica) {
             <Input v-model="form.rastreio" placeholder="número de rastreio" :disabled="!canEdit" />
           </div>
           <div>
-            <Label>{{ editingTemVolta ? 'Localização (ida)' : 'Localização' }}</Label>
+            <Label>{{ rotuloLocalizacaoModal }}</Label>
             <Input v-model="form.localizacao" placeholder="ex: em trânsito / Correios" :disabled="!canEdit" />
           </div>
           <div>

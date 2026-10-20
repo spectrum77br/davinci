@@ -158,6 +158,24 @@ def _gravar_localizacao_volta(
     return virou_grave
 
 
+def _espelhar_na_logistica(row: DevolucaoRastreio, linha: Logistica | None) -> bool:
+    """Pedido Shopee com a ida entregue e devolução viva: a Localização da linha
+    da Logística passa a ser a do pacote de VOLTA — é nela que as regras
+    "Localização contém" da aba Status batem (Vinicius 20/10: "as regras eu
+    crio pela localização"). Roda toda rodada, não só quando o evento muda:
+    a volta pode já estar gravada aqui antes de a linha passar a recebê-la.
+    Devolve True se a linha mudou."""
+    if linha is None or (row.fonte_auto or "").strip().lower() != "shopee":
+        return False
+    loc = (row.localizacao_auto or "").strip()
+    if not loc or not logistica_rules.shopee_volta_manda_na_localizacao(linha.meli_status):
+        return False
+    if (linha.localizacao or "").strip() == loc:
+        return False
+    linha.localizacao = loc
+    return True
+
+
 def _grave_da_volta(
     row: DevolucaoRastreio, linha: Logistica | None
 ) -> tuple[str, str, str]:
@@ -185,7 +203,7 @@ async def _ler_volta_fora_da_aba(
     """Relê a perna reversa (SPX) dos pedidos Shopee em Problemas cujo pacote
     de volta ainda não chegou. Acrescenta em `graves` o que virou ocorrência
     grave nesta rodada. Commita."""
-    resumo = {"consultados": 0, "localizacoes": 0}
+    resumo = {"consultados": 0, "localizacoes": 0, "logistica": 0}
     pedidos = await _pedidos_na_situacao(session, _SITUACAO_PROBLEMAS)
     if not pedidos:
         return resumo
@@ -227,6 +245,8 @@ async def _ler_volta_fora_da_aba(
             graves.append(_grave_da_volta(r, linhas.get(r.pedido_bling)))
         if r.localizacao_auto != antes:
             resumo["localizacoes"] += 1
+        if _espelhar_na_logistica(r, linhas.get(r.pedido_bling)):
+            resumo["logistica"] += 1
         if volta.ultimo_em and (
             r.devolucao_atualizada_em is None or volta.ultimo_em > r.devolucao_atualizada_em
         ):
@@ -607,6 +627,7 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
     gravados = 0
     novos_codigos: list[str] = []
     graves: list[tuple[str, str, str]] = []
+    logistica_espelhadas = 0
     # Extrato financeiro já baixado: quem diz se o reembolso foi DESCONTADO da
     # loja (Shopee/TikTok) e se a Shopee compensou. Pedido sem caso conhecido
     # mas com desconto no extrato (pacote voltando pela SPX, cancelamento)
@@ -681,6 +702,8 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             # senão quem manda na localização continua sendo o 17track.
             if _gravar_localizacao_volta(row, info.localizacao, info.localizacao_em or agora):
                 graves.append(_grave_da_volta(row, linhas.get(pedido)))
+            if _espelhar_na_logistica(row, linhas.get(pedido)):
+                logistica_espelhadas += 1
             row.auto_sync_at = agora
             gravados += 1
     # Commit SEMPRE (mesmo sem devolução nova): o refresh de token dos clients
@@ -691,7 +714,7 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
 
     # Rodada completa (não o recarregar de um pedido): a volta da Shopee dos
     # pedidos que já saíram da aba pra "Problemas" continua sendo lida.
-    fora: dict[str, int] = {"consultados": 0, "localizacoes": 0}
+    fora: dict[str, int] = {"consultados": 0, "localizacoes": 0, "logistica": 0}
     if pedidos is None:
         try:
             fora = await _ler_volta_fora_da_aba(session, graves)
@@ -779,6 +802,7 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         "correios_localizacoes": pull["localizacoes"],
         "volta_fora_da_aba": fora["consultados"],
         "volta_fora_da_aba_localizacoes": fora["localizacoes"],
+        "logistica_localizacao_da_volta": logistica_espelhadas + fora["logistica"],
         "voltas_graves": len(graves),
     }
     logger.info("devolucao_rastreio_sync_done", **summary)

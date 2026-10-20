@@ -24,10 +24,12 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DevolucaoRastreio, Logistica, User, UserRole, UserStatus
+from app.models import DevolucaoRastreio, Logistica, LogisticaStatus, User, UserRole, UserStatus
 from app.services import devolucao_rastreio_sync as sync_svc
 from app.services import (
+    logistica_match,
     logistica_meli,
+    logistica_rules,
     logistica_shopee,
     logistica_tiktok,
     logistica_track,
@@ -405,3 +407,148 @@ async def test_painel_volta_manual_vence_o_automatico(
     assert c["volta_localizacao"] == "Chegou na agência"
     assert c["volta_localizacao_em"].startswith("2026-10-10")
     assert c["volta_grave"] is False
+
+
+# ─── a Localização da linha vira a da volta (regras "Localização contém") ──
+# Vinicius 20/10: "as regras eu crio pela localização — se não aparecer preso
+# aí eu não consigo criar regra de status".
+
+_DEVOLUCAO_IDA_ENTREGUE = {
+    "order_status": "COMPLETED", "logistics_status": "LOGISTICS_DELIVERY_DONE", "return_status": "ACCEPTED",
+}
+
+
+def test_volta_manda_na_localizacao_so_com_ida_entregue_e_devolucao_viva():
+    assert logistica_rules.shopee_volta_manda_na_localizacao(_DEVOLUCAO_IDA_ENTREGUE)
+    # Ida falhou: a volta é o próprio rastreio da ida (o enrich segue lendo).
+    assert not logistica_rules.shopee_volta_manda_na_localizacao(
+        {**_DEVOLUCAO_IDA_ENTREGUE, "logistics_status": "LOGISTICS_DELIVERY_FAILED"}
+    )
+    assert not logistica_rules.shopee_volta_manda_na_localizacao(
+        {**_DEVOLUCAO_IDA_ENTREGUE, "return_status": "CANCELLED"}
+    )
+    assert not logistica_rules.shopee_volta_manda_na_localizacao({"order_status": "COMPLETED"})
+    assert not logistica_rules.shopee_volta_manda_na_localizacao(None)
+
+
+class _FakeIda:
+    """Só o que o enrich_row usa: a ida diz "Pedido entregue"."""
+
+    def __init__(self, logistics_status: str):
+        self._log = logistics_status
+
+    async def get_order_status_map(self, sns):
+        return {str(sn): {"status": "COMPLETED", "update_time": None} for sn in sns}
+
+    async def get_tracking_number(self, order_sn):
+        return "BR263585950911RSPXLM16595187"
+
+    async def get_tracking_info(self, order_sn):
+        return {
+            "logistics_status": self._log,
+            "tracking_info": [{"update_time": _ts(2026, 9, 1, 14, 10), "description": "Pedido entregue"}],
+        }
+
+
+@pytest.mark.asyncio
+async def test_enrich_da_ida_nao_apaga_a_volta_da_localizacao():
+    linha = _linha()
+    linha.localizacao = _APREENDIDO
+    await logistica_shopee.enrich_row(None, linha, client_cache={"jlas": _FakeIda("LOGISTICS_DELIVERY_DONE")})
+    assert linha.localizacao == _APREENDIDO
+    assert linha.meli_status["return_status"] == "ACCEPTED"  # segue preservado
+
+
+@pytest.mark.asyncio
+async def test_enrich_sem_devolucao_segue_lendo_a_ida():
+    linha = _linha()
+    linha.meli_status = {"order_status": "SHIPPED"}
+    linha.localizacao = "Pedido postado Piracicaba - SP"
+    await logistica_shopee.enrich_row(None, linha, client_cache={"jlas": _FakeIda("LOGISTICS_DELIVERY_DONE")})
+    assert linha.localizacao == "Pedido entregue"
+
+
+@pytest.mark.asyncio
+async def test_problemas_escreve_a_volta_na_localizacao_da_logistica(db: AsyncSession, monkeypatch, avisos):
+    pedido = f"2{uuid.uuid4().hex[:6]}"
+    rts = f"1{uuid.uuid4().hex[:6]}"  # ida falhou: Localização continua da ida
+    db.add(Logistica(
+        pedido_bling=pedido, plataforma="Shopee", pedido_marketplace=f"mk-{pedido}", conta="jlas",
+        meli_status=dict(_DEVOLUCAO_IDA_ENTREGUE), localizacao="Pedido entregue",
+    ))
+    db.add(Logistica(
+        pedido_bling=rts, plataforma="Shopee", pedido_marketplace=f"mk-{rts}", conta="jlas",
+        meli_status={**_DEVOLUCAO_IDA_ENTREGUE, "logistics_status": "LOGISTICS_DELIVERY_FAILED"},
+        localizacao="Pedido será devolvido ao vendedor",
+    ))
+    # A volta do primeiro JÁ estava gravada (rodada anterior): mesmo sem evento
+    # novo, a Localização da Logística passa a recebê-la.
+    db.add(DevolucaoRastreio(
+        pedido_bling=pedido, rastreio_auto="BR265869901238B", devolucao_id_auto="2609A", fonte_auto="shopee",
+        localizacao_auto=_APREENDIDO, localizacao_auto_data=_APREENDIDO_EM,
+    ))
+    db.add(DevolucaoRastreio(pedido_bling=rts, rastreio_auto="BR2600000001X", devolucao_id_auto="2609B", fonte_auto="shopee"))
+    await db.commit()
+
+    async def _situacao(session, situacao):
+        return [pedido, rts] if situacao == "83960" else []
+
+    async def _voltas(session, casos):
+        return {
+            pedido: logistica_shopee.VoltaReversa(_APREENDIDO, _APREENDIDO_EM),
+            rts: logistica_shopee.VoltaReversa("Pedido apreendido pela fiscalização", _APREENDIDO_EM),
+        }
+
+    monkeypatch.setattr(sync_svc, "_pedidos_na_situacao", _situacao)
+    monkeypatch.setattr(logistica_shopee, "voltas_por_pedido", _voltas)
+
+    resumo = await sync_svc.run(db)
+
+    linhas = {
+        r.pedido_bling: r
+        for r in (await db.execute(select(Logistica).where(Logistica.pedido_bling.in_([pedido, rts])))).scalars()
+    }
+    assert linhas[pedido].localizacao == _APREENDIDO
+    assert linhas[rts].localizacao == "Pedido será devolvido ao vendedor"
+    assert resumo["logistica_localizacao_da_volta"] == 1
+    # Só o que VIROU grave nesta rodada avisa: o primeiro já estava gravado.
+    assert [g[0] for g in avisos[0][0]] == [rts]
+
+    # E a regra "Localização contém: apreendido" passa a casar com a linha.
+    regra = LogisticaStatus(
+        plataforma="Shopee", status_plataforma="Devolução solicitada", status_atual="Problemas",
+        localizacao_contem="apreendido", monitoramento=True,
+    )
+    normal = LogisticaStatus(plataforma="Shopee", status_plataforma="Devolução solicitada", status_atual="Problemas")
+    cands = logistica_match.find_matching_rules(
+        [normal, regra], assinatura="Devolução solicitada", plataforma="Shopee",
+        localizacao=linhas[pedido].localizacao,
+    )
+    assert cands[0] is regra
+
+
+@pytest.mark.asyncio
+async def test_acompanhamento_escreve_a_volta_na_localizacao_da_logistica(db: AsyncSession, monkeypatch, avisos):
+    pedido = f"0{uuid.uuid4().hex[:6]}"
+    db.add(Logistica(
+        pedido_bling=pedido, plataforma="Shopee", pedido_marketplace=f"mk-{pedido}", conta="jlas",
+        meli_status=dict(_DEVOLUCAO_IDA_ENTREGUE), localizacao="Pedido entregue",
+    ))
+    await db.commit()
+    info = ReturnInfo(
+        fonte="shopee", status="ACCEPTED", tracking="BR265869901238B", carrier=None,
+        created_at=None, updated_at=_APREENDIDO_EM, return_id="2609C",
+        localizacao="Seu pedido saiu do centro logístico: Louveira - SP", localizacao_em=_APREENDIDO_EM,
+    )
+
+    async def _shopee(session, linhas, **kw):
+        return {pedido: info}
+
+    monkeypatch.setattr(logistica_shopee, "returns_por_pedido", _shopee, raising=False)
+    _sem_outros_marketplaces(monkeypatch)
+
+    await sync_svc.run(db, pedidos=[pedido])
+
+    linha = (await db.execute(select(Logistica).where(Logistica.pedido_bling == pedido))).scalar_one()
+    assert linha.localizacao == "Seu pedido saiu do centro logístico: Louveira - SP"
+    assert avisos == []  # movimento normal não avisa

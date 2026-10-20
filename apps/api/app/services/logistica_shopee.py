@@ -232,8 +232,12 @@ async def enrich_row(
         row.rastreio = enr["rastreio"]
     # Envio por Correios com evento real do 17track (`localizacao_at`) não é
     # sobrescrito pelo proxy da plataforma — o físico é melhor que a estimativa.
-    if enr.get("localizacao") and not (
-        logistica_track.is_correios(row.rastreio) and row.localizacao_at
+    # Devolução viva com a ida entregue: a Localização é do pacote de VOLTA
+    # (devolucao_rastreio_sync) — o "Pedido entregue" da ida não volta por cima.
+    if (
+        enr.get("localizacao")
+        and not (logistica_track.is_correios(row.rastreio) and row.localizacao_at)
+        and not logistica_rules.shopee_volta_manda_na_localizacao(row.meli_status)
     ):
         row.localizacao = enr["localizacao"]
     # Divergência Shopee: cruza order_status comercial × logistics_status físico.
