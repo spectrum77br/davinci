@@ -10,7 +10,7 @@ etapa). Cobre:
   `node`): copia só o que deve, não atrapalha a página, não duplica;
 - o Leitor com um navegador FALSO: o gancho é registrado ANTES de navegar e
   só na aba própria (nunca na da equipe), sessão caída vira `sessao_caiu`
-  sem o robô insistir, aba fechada é reaberta, --seco não posta nada, e ao
+  com recuperação do login Temu e limites, aba fechada é reaberta, --seco não posta nada, e ao
   encerrar só a aba do robô fecha.
 """
 
@@ -515,6 +515,8 @@ class NavegadorFalso:
         self.no_documento: dict[str, set[str]] = {}
         self.filas: dict[str, list[dict]] = {}
         self.digitando = False
+        self.tela_login = "formulario_desconhecido"
+        self.logins: list[tuple[str, str]] = []
         self.vetadas: dict[str, int] = {}     # o que a VIGIA do documento contou
         self.switch_to = _Troca(self)
 
@@ -543,6 +545,12 @@ class NavegadorFalso:
 
     def execute_script(self, js, *args):
         h = self.current_window_handle
+        if js == robo._TEMU_LOGIN_JS:
+            self.log.append(("login", args[0], h))
+            if args[0] == "enviar" and self.tela_login == "pronto":
+                self.logins.append((args[1], args[2]))
+                return "enviado"
+            return self.tela_login
         if "drenar" in js:
             if args[0] not in self.no_documento.get(h, set()):
                 return None
@@ -587,9 +595,13 @@ class AdsPowerFalso:
 class DaVinciFalso:
     def __init__(self):
         self.posts: list[tuple[str, dict]] = []
+        self.credenciais = {"perfil_id": "k1dkegpc", "plataforma": "temu", "loja": "Barbosa",
+                            "usuario": "loja@example.test", "senha": "segredo-teste"}
 
     def post(self, caminho, corpo, timeout=60):
         self.posts.append((caminho, json.loads(json.dumps(corpo))))
+        if caminho.endswith("/robo/credenciais"):
+            return self.credenciais.copy()
         return {"ok": True, "gravadas": 1, "conversas": 1, "ignorados": 0}
 
     def pulsos(self):
@@ -692,7 +704,7 @@ def test_leitor_reaproveita_a_aba_salva(tmp_path):
     assert not [x for x in drv.log if x[0] == "nova_aba"]
 
 
-def test_leitor_sessao_caida_espera_uma_pessoa(tmp_path):
+def test_leitor_temu_formulario_desconhecido_aguarda_pessoa(tmp_path):
     leitor, drv, ctx = _leitor(tmp_path)
     leitor.passo()
     drv.abas[leitor.handle] = "https://br.seller.temu.com/login.html?redirectUrl=%2Fchat.html"
@@ -707,15 +719,16 @@ def test_leitor_sessao_caida_espera_uma_pessoa(tmp_path):
     ctx.agora.t += 60
     leitor.passo()
     assert len([x for x in drv.log if x[0] == "get"]) == navegacoes
-    # passado o intervalo, confere se a sessão voltou — mas não com alguém digitando
+    # Sem formulário reconhecido não preenche nem envia; respeita quem digita.
     ctx.agora.t += robo.REABRIR_LOGIN_S
     drv.digitando = True
     leitor.passo()
     assert len([x for x in drv.log if x[0] == "get"]) == navegacoes
     drv.digitando = False
     leitor.passo()
-    assert drv.log[-1] == ("get", leitor.handle, TEMU_CHAT)
-    # o chat.html carregou, mas ainda sem resposta do chat: não pisca "lendo"
+    assert not drv.logins
+    # Uma pessoa entrou e voltou ao chat: URL sozinha não pisca "lendo".
+    drv.abas[leitor.handle] = TEMU_CHAT
     leitor.passo()
     assert leitor.estado == "sessao_caiu"
     drv.pagina_recebe(_http())            # a sessão voltou: o chat respondeu
@@ -738,6 +751,160 @@ def test_leitor_login_automatico_nao_pisca_sessao_caiu(tmp_path):
     assert leitor.estado == "lendo"
     # o identificador de sessão que a Temu pendura na URL não sai no pulso
     assert robo.limpar_url(drv.abas[leitor.handle]) == TEMU_CHAT + "?refer_page_name=login"
+
+
+def _cair_no_login(leitor, drv, ctx):
+    drv.abas[leitor.handle] = "https://br.seller.temu.com/login.html?redirectUrl=%2Fchat.html"
+    leitor.passo()
+    ctx.agora.t += robo.LOGIN_CONFIRMA_S
+    leitor.passo()
+
+
+def test_leitor_temu_reloga_com_cadastro_e_confirma_chat(tmp_path, caplog):
+    leitor, drv, ctx = _leitor(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    _cair_no_login(leitor, drv, ctx)
+    assert drv.logins == [("loja@example.test", "segredo-teste")]
+    consulta = [(p, c) for p, c in ctx.davinci.posts if p.endswith("/credenciais")]
+    assert consulta == [("/api/atendimento/robo/credenciais", {
+        "perfil_id": "k1dkegpc", "plataforma": "temu", "loja": "Barbosa"})]
+    assert all(x[-1] == leitor.handle for x in drv.log if x[0] == "login")
+    # Login cai na home: volta já à lista sem abrir conversa.
+    drv.abas[leitor.handle] = "https://br.seller.temu.com/main/home"
+    leitor.passo()
+    assert drv.abas[leitor.handle] == TEMU_CHAT
+    ctx.agora.t += robo.LOGIN_RESULTADO_S + 1
+    leitor.passo()
+    assert leitor.estado == "sessao_caiu"  # URL + tempo não provam sessão
+    drv.pagina_recebe(_http("/api/plateau/conv/needReplyCount"))
+    leitor.passo()
+    assert leitor.estado == "sessao_caiu"  # rota sem assinatura também não
+    drv.pagina_recebe(_http())
+    leitor.passo()
+    assert leitor.estado == "lendo" and not leitor.recuperando_login
+    # Outra expiração usa a senha atual do DaVinci, sem cache de credencial.
+    ctx.agora.t += 24 * 3600
+    ctx.davinci.credenciais["senha"] = "senha-atualizada"
+    _cair_no_login(leitor, drv, ctx)
+    assert drv.logins[-1] == ("loja@example.test", "senha-atualizada")
+    for segredo in ("loja@example.test", "segredo-teste", "senha-atualizada"):
+        assert segredo not in caplog.text + json.dumps(ctx.davinci.posts)
+        assert segredo not in (tmp_path / "abas.json").read_text()
+
+
+@pytest.mark.parametrize("seco,digitando", [(True, False), (False, True)])
+def test_leitor_temu_seco_ou_digitando_nao_consulta_login(tmp_path, seco, digitando):
+    leitor, drv, ctx = _leitor(tmp_path, seco=seco)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    drv.digitando = digitando
+    _cair_no_login(leitor, drv, ctx)
+    assert not drv.logins
+    if ctx.davinci:
+        assert not [p for p, _ in ctx.davinci.posts if p.endswith("/credenciais")]
+
+
+def test_leitor_temu_nao_entrega_credencial_em_outro_dominio(tmp_path):
+    leitor, drv, ctx = _leitor(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    drv.abas[leitor.handle] = "https://br.seller.temu.com.example.test/login.html"
+    leitor.passo()
+    ctx.agora.t += robo.LOGIN_CONFIRMA_S
+    leitor.passo()
+    assert not drv.logins
+    assert not [p for p, _ in ctx.davinci.posts if p.endswith("/credenciais")]
+
+
+def test_leitor_temu_recusa_credencial_de_outro_perfil(tmp_path):
+    leitor, drv, ctx = _leitor(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    ctx.davinci.credenciais["perfil_id"] = "outro-perfil"
+    _cair_no_login(leitor, drv, ctx)
+    assert not drv.logins
+    assert "perfil" in leitor.detalhe
+
+
+def test_leitor_temu_limita_tentativas_e_rele_senha_corrigida(tmp_path):
+    leitor, drv, ctx = _leitor(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    _cair_no_login(leitor, drv, ctx)
+    for _ in range(5):
+        ctx.agora.t += robo.LOGIN_TENTAR_S
+        leitor.passo()
+    assert len(drv.logins) == robo.LOGIN_MAX_TENTATIVAS
+    ctx.davinci.credenciais["senha"] = "corrigida"
+    ctx.agora.t += robo.LOGIN_TENTAR_S
+    leitor.passo()
+    assert drv.logins[-1][1] == "corrigida" and leitor.login_tentativas == 1
+
+
+def test_leitor_temu_senha_recusada_nao_reenvia_mesma_senha(tmp_path):
+    leitor, drv, ctx = _leitor(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    _cair_no_login(leitor, drv, ctx)
+    drv.tela_login = "credenciais_recusadas"
+    drv.digitando = True  # resultado é lido mesmo se campo ganhou foco depois
+    leitor.passo()
+    assert leitor.login_recusada and "recusou" in leitor.detalhe
+    drv.digitando = False
+    drv.tela_login = "pronto"
+    ctx.agora.t += robo.LOGIN_TENTAR_S
+    leitor.passo()
+    assert len(drv.logins) == 1
+    ctx.davinci.credenciais["senha"] = "corrigida"
+    ctx.agora.t += robo.LOGIN_TENTAR_S
+    leitor.passo()
+    assert len(drv.logins) == 2
+
+
+def test_leitor_temu_reconhece_captcha_e_retoma_quando_resolvido(tmp_path):
+    leitor, drv, ctx = _leitor(tmp_path)
+    leitor.passo()
+    drv.tela_login = "verificacao"
+    _cair_no_login(leitor, drv, ctx)
+    assert leitor.login_verificacao and not drv.logins
+    assert not [p for p, _ in ctx.davinci.posts if p.endswith("/credenciais")]
+    ctx.agora.t += robo.LOGIN_TENTAR_S
+    leitor.passo()
+    assert not drv.logins
+    drv.tela_login = "pronto"  # pessoa resolveu captcha: retoma login comum
+    leitor.passo()
+    assert len(drv.logins) == 1 and not leitor.login_verificacao
+
+
+def test_leitor_temu_home_nao_martela_chat(tmp_path):
+    leitor, drv, ctx = _leitor(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    _cair_no_login(leitor, drv, ctx)
+    for _ in range(4):
+        drv.abas[leitor.handle] = "https://br.seller.temu.com/main/home"
+        leitor.passo()
+        ctx.agora.t += robo.DRENAR_S
+    assert [x for x in drv.log if x[0] == "get" and x[-1] == TEMU_CHAT] == [
+        ("get", leitor.handle, TEMU_CHAT), ("get", leitor.handle, TEMU_CHAT)]
+
+
+def test_leitor_temu_falha_webdriver_nao_vaza_argumentos(tmp_path, caplog):
+    leitor, drv, ctx = _leitor(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    original = drv.execute_script
+
+    def falhar(js, *args):
+        if js == robo._TEMU_LOGIN_JS and args[0] == "enviar":
+            raise RuntimeError(f"argumentos: {args}")
+        return original(js, *args)
+
+    drv.execute_script = falhar
+    _cair_no_login(leitor, drv, ctx)
+    assert leitor.estado == "sessao_caiu" and not drv.logins
+    assert "segredo-teste" not in caplog.text + json.dumps(ctx.davinci.posts)
 
 
 def test_leitor_captcha_pelo_corpo(tmp_path):

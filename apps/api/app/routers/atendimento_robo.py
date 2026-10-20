@@ -7,6 +7,7 @@ o que a página já recebe e manda para cá:
   POST /api/atendimento/robo/pulso    — "estou vivo": estado da leitura da loja
   POST /api/atendimento/robo/eventos  — cópias cruas do que a página recebeu
                                         (fetch/XHR e WebSocket), até 200 por vez
+  POST /api/atendimento/robo/credenciais — login Temu da loja do perfil AdsPower
 
 Quem interpreta e grava é `services/atendimento/robo.py` (e os leitores
 `robo_temu`/`robo_aliexpress`). Contrato em `schemas/atendimento_robo.py`.
@@ -28,14 +29,21 @@ import secrets
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.schemas.atendimento_robo import EventosIn, EventosOut, PulsoIn, RoboOkOut
-from app.services.atendimento import robo
+from app.schemas.atendimento_robo import (
+    CredenciaisIn,
+    CredenciaisOut,
+    EventosIn,
+    EventosOut,
+    PulsoIn,
+    RoboOkOut,
+)
+from app.services.atendimento import robo, robo_credenciais
 from app.services.atendimento.robo_leitura import Evento
 
 logger = structlog.get_logger()
@@ -94,6 +102,46 @@ def _validar[M: BaseModel](modelo: type[M], bruto: bytes) -> M:
 
 def _recusa(e: robo.RoboRecusado) -> HTTPException:
     return HTTPException(e.status, detail={"code": e.code, "detail": e.detail})
+
+
+@router.post(
+    "/credenciais",
+    response_model=CredenciaisOut,
+    dependencies=[Depends(_robo_autorizado)],
+)
+async def credenciais(
+    request: Request,
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CredenciaisOut:
+    """E-mail e senha atuais da única loja Temu ativa do perfil; nunca em cache."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _validar(CredenciaisIn, await _corpo(request, PULSO_MAX_BYTES))
+    try:
+        dados = await robo_credenciais.buscar(session, perfil_id=body.perfil_id)
+    except robo.RoboRecusado as e:
+        raise HTTPException(
+            e.status,
+            detail={"code": e.code, "detail": e.detail},
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    except Exception as e:  # noqa: BLE001 — não vazar cadastro/credencial em traceback
+        logger.error(
+            "atendimento_robo_credenciais_falhou",
+            perfil_id=body.perfil_id,
+            erro=type(e).__name__,
+        )
+        raise HTTPException(
+            500,
+            detail={"code": "robo_erro_interno"},
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    return CredenciaisOut(
+        perfil_id=dados.perfil_id,
+        loja=dados.loja,
+        usuario=dados.usuario,
+        senha=dados.senha,
+    )
 
 
 @router.post("/pulso", response_model=RoboOkOut, dependencies=[Depends(_robo_autorizado)])

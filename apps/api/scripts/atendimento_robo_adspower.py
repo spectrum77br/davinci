@@ -35,7 +35,7 @@ por loja, todas no mesmo processo):
 
 O QUE ELE NUNCA FAZ (a engenharia reversa do JS das duas páginas, 29-30/09,
 mostrou o que marca como lido PARA A EQUIPE INTEIRA):
-  - clicar em conversa, rolar o painel de mensagens, digitar;
+  - clicar em conversa, rolar o painel de mensagens, digitar no chat;
   - abrir URL de conversa específica: na Temu, `chat.html?posn=<pedido>`
     seleciona a conversa no carregamento (enterConv + markRead sem clique);
     no AliExpress, sessão na URL abre a conversa (putRangeRead). A URL de
@@ -46,10 +46,11 @@ mostrou o que marca como lido PARA A EQUIPE INTEIRA):
     própria página, no ritmo dela — o servidor não vê nada diferente. A Temu
     ainda assina cada chamada com um token antirrobô gerado no navegador
     (Anti-Content): chamada extra com padrão estranho cai em captcha;
-  - logar, resolver captcha ou verificação: sessão caída vira estado
-    `sessao_caiu` no pulso e espera uma pessoa. O robô só volta a abrir o
-    chat de tempos em tempos para ver se a sessão voltou — e nunca enquanto
-    alguém estiver digitando na aba dele.
+  - resolver captcha ou verificação: sessão caída vira `sessao_caiu` e
+    espera uma pessoa. Na Temu, o login comum é feito na própria página,
+    usando E-mail e Senha do cadastro Lojas no DaVinci, consultados por
+    perfil somente quando necessário, sem guardar em disco ou no log.
+    O robô nunca preenche cadastro de vendedor nem interrompe quem digita.
   VIGIA (conferência disso): o gancho CONTA, só pelo nome da rota, toda
   chamada de marcar lido/enviar que a página fizer na aba do robô (fetch,
   XHR e, pela lista de recursos do navegador, script/JSONP e beacon). Se
@@ -120,7 +121,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-VERSAO = "robo-adspower/1 (2026-09-30)"
+VERSAO = "robo-adspower/2 (2026-10-20)"
 LOJAS_PADRAO = Path(__file__).with_name("atendimento_robo_lojas.json")
 ESTADO_PADRAO = Path.home() / ".davinci" / "robo_atendimento_abas.json"
 
@@ -145,6 +146,12 @@ REABRIR_LOGIN_S = 10 * 60
 # (30/09) a Temu abre chat.html → login.html → chat.html sozinha em ~8 s
 # quando o cookie ainda vale — sem esta folga, a loja piscava "sessão caiu".
 LOGIN_CONFIRMA_S = 25.0
+# Login Temu: aguarda o retorno da página e confirma pela resposta assinada
+# do chat. Falhas têm folga; credencial recusada não é reenviada até mudar no
+# cadastro (só uma impressão digital fica na memória do processo).
+LOGIN_RESULTADO_S = 90.0
+LOGIN_TENTAR_S = 10 * 60
+LOGIN_MAX_TENTATIVAS = 3
 # Aba do robô fora do chat (alguém a usou para outra coisa): dá esse tempo
 # antes de voltar, para não arrancar a página da mão de quem está nela.
 VOLTAR_AO_CHAT_S = 5 * 60
@@ -388,6 +395,26 @@ def situacao_da_aba(url_atual: str | None, url_chat: str) -> str:
     return "fora"
 
 
+def origem_login_temu(url: str | None) -> bool:
+    """Credenciais só na tela HTTPS do Seller Center BR conhecida.
+
+    A classificação de URL acima é só operacional; ela NÃO autoriza enviar
+    senha (uma URL de terceiro também pode conter 'login').
+    """
+    try:
+        p = urllib.parse.urlsplit(url or "")
+        return (
+            p.scheme == "https"
+            and p.hostname in ("br.seller.temu.com", "seller.temu.com")
+            and p.port in (None, 443)
+            and p.username is None
+            and p.password is None
+            and p.path in ("/login.html", "/main/authentication")
+        )
+    except ValueError:
+        return False
+
+
 def _envelope(corpo: str) -> dict | None:
     """O objeto JSON de fora da resposta (aceita BOM e JSONP da mtop); None se não for."""
     t = corpo.lstrip("﻿").strip()
@@ -594,6 +621,25 @@ class Loja:
     @property
     def rotulo(self) -> str:
         return f"{self.plataforma}/{self.loja}"
+
+
+@dataclass(frozen=True)
+class CredenciaisTemu:
+    usuario: str = field(repr=False)
+    senha: str = field(repr=False)
+
+    def impressao(self) -> str:
+        return hashlib.sha256(json.dumps([self.usuario, self.senha]).encode()).hexdigest()
+
+
+def credenciais_temu(resposta: dict, perfil_id: str) -> CredenciaisTemu | None:
+    """Recusa resposta incompleta ou de outro perfil, sem ecoar seus valores."""
+    if resposta.get("perfil_id") != perfil_id or resposta.get("plataforma") != "temu":
+        return None
+    usuario, senha = resposta.get("usuario"), resposta.get("senha")
+    if not all(isinstance(v, str) and 0 < len(v) <= 4096 for v in (usuario, senha)):
+        return None
+    return CredenciaisTemu(usuario, senha)
 
 
 def validar_loja(item: Any) -> Loja:
@@ -967,6 +1013,112 @@ _DIGITANDO_JS = (
     "return false;"
 )
 
+# Retorna só estados, nunca valores de campos. O formulário é conferido
+# novamente no MESMO comando que preenche e envia (sem await/navegação no
+# meio). As credenciais são argumentos do WebDriver, nunca parte do source.
+_TEMU_LOGIN_JS = r"""
+const modo = arguments[0], usuario = arguments[1], senha = arguments[2];
+if (location.protocol !== 'https:' ||
+    !['br.seller.temu.com', 'seller.temu.com'].includes(location.hostname) ||
+    (location.port && location.port !== '443') ||
+    !['/login.html', '/main/authentication'].includes(location.pathname))
+  return 'origem_invalida';
+const vis = e => {
+  if (!e || !e.getClientRects().length || getComputedStyle(e).visibility === 'hidden')
+    return false;
+  const r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const frente = document.elementFromPoint(x, y);
+  return !!frente && (frente === e || e.contains(frente));
+};
+const texto = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+const modais = Array.from(document.querySelectorAll('[data-testid="beast-core-modal-inner"]'))
+  .filter(vis);
+if (modais.length > 1) return 'formulario_desconhecido';
+const raiz = modais[0] || document;
+const todos = s => Array.from(raiz.querySelectorAll(s)).filter(vis);
+const achar = re => {
+  const candidatos = [...new Set(todos('button, [role="button"], a, span')
+    .filter(e => re.test(texto(e)))
+    .map(e => e.closest('button, [role="button"], a') || e))];
+  return candidatos.filter(e => !candidatos.some(outro => outro !== e && e.contains(outro)));
+};
+const corpo = ((modais[0] || document.body).innerText || '').replace(/\s+/g, ' ');
+if (todos('iframe[src*="captcha" i], iframe[src*="challenge" i], '
+    + '[id*="captcha" i], [class*="captcha" i], .geetest_panel').length ||
+    /verifica[çc][ãa]o de seguran[çc]a|security verification|arraste.{0,40}(pe[çc]a|desliz)/i
+      .test(corpo)) return 'verificacao';
+if (todos('input[autocomplete="one-time-code"], input[name="verificationCode"], '
+    + 'input[placeholder*="código" i], input[placeholder*="verification code" i]').length ||
+    /c[oó]digo (foi )?enviado|code (has been )?sent/i.test(corpo)) return 'verificacao';
+const senhas = todos('input[type="password"]');
+const outraConta = achar(/^(fa[çc]a login com outra conta|log in with another account)$/i);
+if (outraConta.length === 1) {
+  if (modo === 'preparar') outraConta[0].click();
+  return 'abrindo_login';
+}
+const cadastro = senhas.length > 1 || senhas.some(e => e.autocomplete === 'new-password') ||
+  achar(/^(registrar-se como vendedor|register as a seller|criar conta|sign up)$/i).length;
+if (cadastro) {
+  // O cadastro pode abrir sozinho num modal e cobrir o link do header.
+  // Só fecha o modal conhecido se ele for inequivocamente de CADASTRO.
+  if (modais.length === 1) {
+    const fechar = todos('[role="button"]').filter(e => !texto(e) &&
+      e.parentElement === modais[0]);
+    if (fechar.length !== 1) return 'formulario_desconhecido';
+    if (modo === 'preparar') fechar[0].click();
+    return 'abrindo_login';
+  }
+  const entrar = achar(/^(fazer login|fa[çc]a login|iniciar sess[ãa]o|log in|sign in)$/i);
+  if (entrar.length !== 1) return 'formulario_desconhecido';
+  if (modo === 'preparar') entrar[0].click();
+  return 'abrindo_login';
+}
+if (senhas.length !== 1) {
+  const aba = achar(new RegExp('^(entrar com senha|login com senha|usar senha|'
+    + 'password login|log in with password)$', 'i'));
+  if (aba.length === 1) {
+    if (modo === 'preparar') aba[0].click();
+    return 'abrindo_login';
+  }
+  if (todos('input[autocomplete="one-time-code"]').length ||
+      /c[oó]digo (foi )?enviado|code (has been )?sent/i.test(corpo)) return 'verificacao';
+  return 'formulario_desconhecido';
+}
+if (modo === 'resultado' &&
+    /senha (incorreta|inv[áa]lida)|incorrect password|invalid password/i.test(corpo))
+  return 'credenciais_recusadas';
+const usuarios = todos('input').filter(e =>
+  e.type !== 'password' && !e.disabled && !e.readOnly &&
+  (e.id === 'username' || e.name === 'username' || e.type === 'email' ||
+   /e-?mail|telefone|phone|usu[áa]rio|account/.test(
+     [e.placeholder, e.name, e.autocomplete].join(' ').toLowerCase())));
+const enviar = achar(/^(entrar|conecte-se|login|log in|sign in|continuar|continue)$/i)
+  .filter(e => !e.disabled && e.getAttribute('aria-disabled') !== 'true');
+if (usuarios.length !== 1 || enviar.length !== 1 || senhas[0].disabled || senhas[0].readOnly)
+  return 'formulario_desconhecido';
+// A página pode ter preenchimento automático; só foco em janela ativa com
+// conteúdo impede a ação. Nenhum valor sai do navegador.
+const ativo = document.activeElement;
+if (document.hasFocus() && ativo &&
+    ((/^(INPUT|TEXTAREA)$/.test(ativo.tagName) && ativo.value) || ativo.isContentEditable))
+  return 'digitando';
+if (modo !== 'enviar') return 'pronto';
+if (typeof usuario !== 'string' || !usuario || typeof senha !== 'string' || !senha)
+  return 'credenciais_incompletas';
+const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+for (const [e, valor] of [[usuarios[0], usuario], [senhas[0], senha]]) {
+  set.call(e, valor);
+  e.dispatchEvent(new Event('input', {bubbles: true}));
+  e.dispatchEvent(new Event('change', {bubbles: true}));
+}
+// Se a página focou um campo vazio sozinha, o valor que ACABAMOS de
+// preencher não é uma pessoa digitando na rodada seguinte.
+if (document.activeElement === usuarios[0] || document.activeElement === senhas[0])
+  document.activeElement.blur();
+enviar[0].click();
+return 'enviado';
+"""
+
 
 def montar_gancho(plataforma: str, nome: str) -> str:
     """O JS do gancho para a plataforma, com o nome sorteado da fila."""
@@ -1262,6 +1414,15 @@ class Leitor(threading.Thread):
         self.pronto = False             # aba própria + gancho + chat: tudo feito
         self.fora_desde: float | None = None
         self.login_desde: float | None = None   # URL de login/verificação desde
+        self.proximo_login = 0.0
+        self.login_enviado_em: float | None = None
+        self.recuperando_login = False
+        self.login_verificacao = False
+        self.login_tentativas = 0
+        self.login_preparacoes = 0
+        self.login_impressao: str | None = None
+        self.login_recusada: str | None = None
+        self.login_voltar_chat_em: float | None = None
         # Última resposta boa de uma rota ASSINADA (só ela prova a sessão).
         self.assinada_ok_em: float | None = None
         self.ultimo_http_em: float | None = None
@@ -1645,6 +1806,151 @@ class Leitor(threading.Thread):
             if self.conversa_aberta_em is None:
                 self.conversa_aberta_em = self.ctx.agora()
 
+    def _tela_login_temu(self, modo: str, credenciais: CredenciaisTemu | None = None) -> str:
+        """Falha opaca: exceção do WebDriver pode ecoar os argumentos secretos."""
+        try:
+            self._na_nossa_aba()
+            resultado = self.drv.execute_script(
+                _TEMU_LOGIN_JS, modo,
+                credenciais.usuario if credenciais else None,
+                credenciais.senha if credenciais else None,
+            )
+            return resultado if isinstance(resultado, str) else "formulario_desconhecido"
+        except Exception:  # noqa: BLE001 — nunca propagar argumentos/traceback do login
+            return "falha_navegador"
+
+    def _recuperar_login_temu(self, agora: float) -> None:
+        """Uma etapa do login, sem bloquear o dreno, o envio nem o pulso."""
+        self._mudar_estado("sessao_caiu", "Temu deslogada: preparando login automático")
+        if not self.recuperando_login:
+            self.assinada_ok_em = None  # a resposta ANTERIOR ao login não prova recuperação
+        self.recuperando_login = True
+        if self.ctx.davinci is None:
+            self.detalhe = "Temu deslogada: modo seco não consulta credenciais nem faz login"
+            return
+        if not origem_login_temu(self.url_aba):
+            self.detalhe = "tela de login fora do endereço Temu autorizado: confira a aba do robô"
+            return
+        if self.login_verificacao:
+            tela = self._tela_login_temu("resultado")
+            if tela not in ("pronto", "abrindo_login", "credenciais_recusadas"):
+                self.detalhe = "verificação/captcha: uma pessoa precisa resolver na aba do robô"
+                return
+            self.login_verificacao = False
+            self.login_enviado_em = None
+            self.proximo_login = agora
+        if self.login_enviado_em is not None:
+            resultado = self._tela_login_temu("resultado")
+            if resultado == "verificacao":
+                self.login_verificacao = True
+                self.detalhe = "verificação/captcha: uma pessoa precisa resolver na aba do robô"
+                return
+            if resultado == "credenciais_recusadas":
+                self.login_recusada = self.login_impressao
+                self.login_enviado_em = None
+                self.detalhe = "a Temu recusou o login: confira E-mail e Senha em Lojas no DaVinci"
+                return
+            if agora - self.login_enviado_em < LOGIN_RESULTADO_S:
+                self.detalhe = "login enviado à Temu: aguardando a página e o retorno ao chat"
+                return
+            self.login_enviado_em = None
+        if self._alguem_digitando():
+            self.detalhe = "login automático aguardando: alguém está digitando na aba do robô"
+            return
+        if agora < self.proximo_login:
+            self.detalhe = "login automático aguardando o intervalo entre tentativas"
+            return
+        self.proximo_login = agora + LOGIN_TENTAR_S
+        tela = self._tela_login_temu("preparar")
+        if tela == "abrindo_login":
+            self.login_preparacoes += 1
+            if self.login_preparacoes <= 6:
+                self.proximo_login = agora + DRENAR_S
+            self.detalhe = "abrindo Fazer login na Temu"
+            return
+        self.login_preparacoes = 0
+        if tela == "verificacao":
+            self.login_verificacao = True
+            self.detalhe = "verificação/captcha: uma pessoa precisa resolver na aba do robô"
+            return
+        if tela != "pronto":
+            self.detalhe = "formulário de login Temu não reconhecido: confira a aba do robô"
+            return
+        try:
+            resposta = self.ctx.davinci.post(
+                "/api/atendimento/robo/credenciais",
+                {"perfil_id": self.loja.perfil_id, "plataforma": "temu", "loja": self.loja.loja},
+                timeout=20,
+            )
+            credenciais = credenciais_temu(resposta, self.loja.perfil_id)
+        except Exception:  # noqa: BLE001 — falha de credencial nunca ecoa corpo/valores
+            self.detalhe = "não foi possível consultar o login: confira cadastro e API do DaVinci"
+            return
+        if credenciais is None:
+            self.detalhe = "login indisponível: confira perfil, Servidor, E-mail e Senha em Lojas"
+            return
+        impressao = credenciais.impressao()
+        if self.login_impressao != impressao:
+            self.login_tentativas = 0
+            self.login_impressao = impressao
+        if impressao == self.login_recusada or self.login_tentativas >= LOGIN_MAX_TENTATIVAS:
+            self.detalhe = "login sem sucesso: corrija E-mail/Senha em Lojas ou entre na aba"
+            return
+        # Repete a conferência de origem/formulário antes de preencher. Não
+        # retém o objeto nem a resposta após este método; só o hash em memória.
+        resultado = self._tela_login_temu("enviar", credenciais)
+        if resultado == "enviado":
+            self.login_tentativas += 1
+            self.conta["logins_temu"] += 1
+            self.login_enviado_em = agora
+            self.detalhe = "login enviado à Temu: aguardando o retorno ao chat"
+            self.log.info("login Temu enviado; aguardando confirmação do chat")
+        else:
+            self.detalhe = "login Temu não enviado: a tela mudou; aguardando nova conferência"
+
+    def _confirmar_login_temu(self, agora: float, situacao: str) -> bool:
+        """Retorna True enquanto a recuperação deve manter a leitura parada."""
+        if not self.recuperando_login:
+            return False
+        if situacao == "chat" and (
+            self.assinada_ok_em is not None
+            and self.assinada_ok_em >= self.ultima_navegacao
+            and (self.login_enviado_em is None or self.assinada_ok_em >= self.login_enviado_em)
+        ):
+            self.recuperando_login = False
+            self.login_enviado_em = None
+            self.login_verificacao = False
+            self.login_tentativas = 0
+            self.login_recusada = None
+            self.login_voltar_chat_em = None
+            self.login_desde = None
+            self.log.info("sessão Temu recuperada; leitura do chat confirmada")
+            return False
+        if situacao == "fora":
+            # Depois de entrar, a Temu pode abrir a home. Volta só à LISTA,
+            # sem esperar os cinco minutos reservados a uma aba usada à mão.
+            try:
+                p = urllib.parse.urlsplit(self.url_aba or "")
+                na_temu = p.scheme == "https" and p.hostname == "br.seller.temu.com"
+            except ValueError:
+                na_temu = False
+            if na_temu and self.login_enviado_em is not None:
+                self._mudar_estado("sessao_caiu", "login Temu enviado: retomando lista do chat")
+                if (
+                    (self.login_voltar_chat_em is None or
+                     agora - self.login_voltar_chat_em >= NAVEGACAO_MIN_S)
+                    and not self._alguem_digitando()
+                ):
+                    self.login_voltar_chat_em = agora
+                    self._ir_ao_chat("login Temu concluído: voltar à lista")
+                return True
+        if situacao == "chat":
+            self._mudar_estado("sessao_caiu", "validando sessão Temu: aguardando resposta do chat")
+            if agora - self.ultima_navegacao >= REABRIR_LOGIN_S and not self._alguem_digitando():
+                self._ir_ao_chat("confirmar chat após login Temu")
+            return True
+        return False
+
     def _ler(self) -> None:
         r = self._drenar()
         if r is None:
@@ -1689,6 +1995,17 @@ class Leitor(threading.Thread):
 
         if situacao in ("login", "verificacao") or (situacao == "chat" and sinal):
             motivo = situacao if situacao != "chat" else sinal
+            if plat == "temu" and motivo == "login":
+                self._recuperar_login_temu(agora)
+                if (
+                    situacao == "chat"
+                    and agora - self.ultima_navegacao >= NAVEGACAO_MIN_S
+                    and not self._alguem_digitando()
+                ):
+                    self._ir_ao_chat("sessão Temu expirada: abrir login")
+                return
+            if plat == "temu" and motivo == "verificacao" and self.recuperando_login:
+                self.login_verificacao = True
             self._mudar_estado(
                 "sessao_caiu",
                 "tela de login: uma pessoa precisa entrar (o robô não loga)"
@@ -1698,6 +2015,9 @@ class Leitor(threading.Thread):
             intervalo = REABRIR_LOGIN_S if motivo == "login" else RECARREGAR_S[plat]
             if agora - self.ultima_navegacao >= intervalo and not self._alguem_digitando():
                 self._ir_ao_chat("conferir se a sessão voltou")
+            return
+
+        if plat == "temu" and self._confirmar_login_temu(agora, situacao):
             return
 
         if situacao == "chat":

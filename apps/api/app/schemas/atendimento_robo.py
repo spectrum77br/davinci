@@ -83,6 +83,21 @@ class RoboOkOut(BaseModel):
     ok: bool = True
 
 
+class CredenciaisIn(BaseModel):
+    perfil_id: str = Field(pattern=_PERFIL)
+    plataforma: Literal["temu"]
+    loja: str = Field(min_length=1, max_length=200)
+
+
+class CredenciaisOut(BaseModel):
+    perfil_id: str
+    plataforma: Literal["temu"] = "temu"
+    loja: str
+    # Só este endpoint autenticado devolve os segredos. Nem repr do modelo.
+    usuario: str = Field(repr=False)
+    senha: str = Field(repr=False)
+
+
 class EventosOut(BaseModel):
     ok: bool = True
     # Mensagens NOVAS gravadas (a mesma mensagem de novo não conta).

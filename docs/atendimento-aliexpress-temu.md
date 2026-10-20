@@ -1,5 +1,49 @@
 # AliExpress e Temu na /atendimento: plano (29/09/2026)
 
+## Atualização: recuperação do login Temu (20/10/2026)
+
+O robô `apps/api/scripts/atendimento_robo_adspower.py` passa a recuperar a sessão
+da Temu usando **E-mail** e **Senha** do cadastro em **Lojas**. Esta atualização
+substitui, para a Temu, a decisão antiga de aguardar login manual registrada
+no levantamento abaixo. O login do AliExpress continua manual.
+
+- A API autenticada do robô resolve o perfil do AdsPower pelo seu número no
+  espelho e procura uma única loja Temu não arquivada cujo campo **Servidor**
+  tenha esse número. O nome informado no JSON do robô não escolhe a senha.
+  Sem vínculo único ou credenciais completas, a loja continua com o aviso de
+  sessão caída e informa o cadastro a corrigir.
+- Depois de confirmar que a página ficou no login, o robô busca as credenciais
+  na hora, pela rota `POST /api/atendimento/robo/credenciais`, e usa o formulário
+  da própria Temu somente na sua aba do Seller Center. A senha não vai para o
+  JSON de configuração, estado em disco, pulso ou log.
+- A recuperação precisa distinguir **Fazer login** de **Registre-se**: a mesma
+  `login.html` também exibe cadastro, inclusive com senha e confirmação de
+  senha. Esses campos de nova conta não autorizam preencher ou enviar o formulário.
+  Na tela inspecionada em 20/10, **Conecte-se agora** também abre cadastro;
+  o login correto é aberto por **Fazer login**, depois de fechar o modal de
+  cadastro que estiver sobre ele. No modal de login, o usuário tem
+  `autocomplete="username"` e o botão de envio é `#btn-continue`.
+  A landing page continua com outros campos por baixo: visibilidade CSS
+  sozinha não prova que um campo está livre para interação.
+- Após o login, o robô retorna à lista de conversas sem abrir uma conversa.
+  A leitura só volta a aparecer saudável quando o chat confirma a sessão.
+  Captcha, código de verificação e outras confirmações precisam de uma pessoa
+  no perfil do AdsPower; as tentativas comuns têm intervalo e limite.
+
+Para ativar a atualização, publique primeiro a API com a rota de credenciais
+e confira **Servidor**, **E-mail** e **Senha** de cada loja Temu. Depois reinicie
+o LaunchAgent no Mac mini para carregar o script atualizado:
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.davinci.robo-atendimento"
+```
+
+O serviço instalado aponta para este checkout e usa `uv run --no-project
+--python 3.12 --with selenium`. O destino configurado no Mac é
+`https://app.hadken.com`; atualizar somente o backend local não atualiza essa
+API. Acompanhe os estados no log `~/Library/Logs/davinci-robo-atendimento.log`
+e no Atendimento. O modo `--seco` não busca credenciais nem faz login.
+
 **Resumo**
 - **Nenhuma das duas tem API oficial para ler ou responder o chat do comprador.** No AliExpress a certeza é alta, porque a própria plataforma diz isso por escrito. Na Temu a certeza também é alta, mas só para a documentação pública: não sei se existe uma API privada.
 - **O que a API permite trazer para a /atendimento:**

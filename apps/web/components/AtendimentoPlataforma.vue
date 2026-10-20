@@ -951,11 +951,11 @@ export const STATUS_CANAL: Record<string, { label: string; hint: string; cls: st
     hint: 'o robô do Mac mini parou de mandar sinal — as mensagens novas desta loja não estão chegando ao DaVinci (no Seller Center elas continuam chegando). Confira se o Mac mini, o AdsPower e o robô estão ligados; enquanto isso, olhe o Seller Center',
     cls: 'bg-red-500/15 text-red-700 dark:text-red-300',
   },
-  // O robô avisou que a página caiu para o login: alguém precisa entrar de
-  // novo no perfil do AdsPower (o robô nunca digita senha).
+  // A Temu tenta recuperar o login com o cadastro de Lojas. Se precisar de
+  // verificação ou houver falha, o detalhe do canal orienta a intervenção.
   sessao_caiu: {
     label: 'Sessão caiu',
-    hint: 'o Seller Center saiu da conta no perfil do AdsPower — alguém precisa entrar de novo lá (o robô não digita senha); até lá, nada novo desta loja chega ao DaVinci',
+    hint: 'o Seller Center saiu da conta no perfil do AdsPower — na Temu, o robô tenta entrar com o E-mail e a Senha cadastrados em Lojas. Confira o detalhe do canal: pode ser necessário corrigir o cadastro ou concluir uma verificação no perfil; até a sessão voltar, nada novo desta loja chega ao DaVinci',
     cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300',
   },
 }
