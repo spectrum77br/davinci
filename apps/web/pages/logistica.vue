@@ -819,6 +819,16 @@ function closeModal() {
   editingId.value = null
 }
 
+// Linha aberta no "Editar caso": o pacote de VOLTA não é campo do formulário
+// (vem da devolução, lido da plataforma) — o modal só mostra. Sem isto o
+// 293379 abria com "Localização: Pedido entregue" e nada da apreensão (20/10).
+const editingRow = computed(() =>
+  editingId.value ? rows.value.find((r) => r.id === editingId.value) || null : null,
+)
+const editingTemVolta = computed(
+  () => !!(editingRow.value?.volta_rastreio || editingRow.value?.volta_localizacao),
+)
+
 function payload() {
   const meli: MeliStatus = {}
   for (const f of opcoes.value.field_order) {
@@ -3703,16 +3713,36 @@ async function aplicarStatusBling(c: Logistica) {
             <Input v-model="form.conta" :disabled="!canEdit" />
           </div>
           <div>
-            <Label>Rastreio</Label>
+            <Label>{{ editingTemVolta ? 'Rastreio (ida)' : 'Rastreio' }}</Label>
             <Input v-model="form.rastreio" placeholder="número de rastreio" :disabled="!canEdit" />
           </div>
           <div>
-            <Label>Localização</Label>
+            <Label>{{ editingTemVolta ? 'Localização (ida)' : 'Localização' }}</Label>
             <Input v-model="form.localizacao" placeholder="ex: em trânsito / Correios" :disabled="!canEdit" />
           </div>
           <div>
             <Label>Chamado</Label>
             <Input v-model="form.chamado" placeholder="nº / referência do chamado" :disabled="!canEdit" />
+          </div>
+          <!-- Pacote da devolução: só leitura (lido da plataforma pelo robô das devoluções). -->
+          <div
+            v-if="editingTemVolta && editingRow"
+            class="md:col-span-2 rounded-md border p-3 space-y-1"
+            :class="editingRow.volta_grave ? 'border-rose-300 bg-rose-50 dark:border-rose-700 dark:bg-rose-950/40' : ''"
+          >
+            <div class="text-sm font-medium">↩ Devolução (pacote de volta)</div>
+            <div
+              class="text-sm"
+              :class="editingRow.volta_grave ? 'text-rose-700 dark:text-rose-400 font-medium' : ''"
+            >{{ editingRow.volta_localizacao || 'sem movimentação ainda' }}</div>
+            <div class="text-xs text-muted-foreground">
+              <span v-if="editingRow.volta_rastreio">Código da volta: {{ editingRow.volta_rastreio }}</span>
+              <span v-if="editingRow.volta_localizacao_em">
+                {{ editingRow.volta_rastreio ? ' · ' : '' }}último evento em {{ fmtDataHora(editingRow.volta_localizacao_em) }}</span>
+            </div>
+            <div v-if="editingRow.volta_grave" class="text-xs text-rose-700 dark:text-rose-400">
+              Ocorrência grave: o produto pode estar perdido — veja a devolução na plataforma.
+            </div>
           </div>
         </div>
 
