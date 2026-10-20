@@ -260,8 +260,8 @@ STATUS_CANAL = ("novo", "ok", "sem_escopo", "erro", "desligado", STATUS_CANAL_SE
 #                 AdsPower ou o robô caiu. Calculado na LEITURA (nenhum pulso
 #                 chega para avisar que parou), nunca gravado.
 #   sessao_caiu — o robô avisou que o Seller Center saiu da conta no perfil
-#                 do AdsPower: alguém precisa entrar de novo (o robô nunca
-#                 digita senha).
+#                 do AdsPower: tenta login com o cadastro de Lojas; captcha,
+#                 código ou falha no cadastro precisam de intervenção.
 STATUS_CANAL_PARADO = "parado"
 STATUS_CANAL_SESSAO_CAIU = "sessao_caiu"
 

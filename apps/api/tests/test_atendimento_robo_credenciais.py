@@ -56,6 +56,21 @@ async def loja(db, make_user, espelho):
     return loja
 
 
+@pytest.fixture
+async def loja_ali(db, loja):
+    ali = StoreInfo(
+        user_id=loja.user_id,
+        platform=" AliExpress ",
+        account_name="Vita",
+        server="138",
+        email="vita-privado",
+        password_enc=encrypt("senha-vita-privada"),
+    )
+    db.add(ali)
+    await db.commit()
+    return ali
+
+
 async def test_token_antes_de_ler_corpo_e_buscar_credenciais(client, monkeypatch):
     def proibido(*args, **kwargs):
         pytest.fail("Não pode buscar credenciais sem autorização")
@@ -89,6 +104,61 @@ async def test_credenciais_pelo_servidor_e_atualizadas_sem_cache(client, db, loj
     assert r.json()["senha"] == "nova-senha"
 
 
+async def test_aliexpress_e_temu_do_mesmo_perfil_recebem_so_suas_credenciais(client, loja_ali):
+    r = await client.post(URL, json={**CORPO, "plataforma": "aliexpress"}, headers=H)
+    assert r.status_code == 200
+    assert r.json() == {
+        "perfil_id": CORPO["perfil_id"],
+        "plataforma": "aliexpress",
+        "loja": "Vita",
+        "usuario": "vita-privado@tuta.com",
+        "senha": "senha-vita-privada",
+    }
+    assert r.headers["cache-control"] == "no-store"
+    temu = await client.post(URL, json=CORPO, headers=H)
+    assert temu.status_code == 200
+    assert temu.json()["plataforma"] == "temu"
+    assert temu.json()["senha"] == SENHA
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor", "status", "codigo"),
+    [
+        ("server", "999", 404, "robo_loja_nao_encontrada"),
+        ("archived_at", datetime.now(UTC), 404, "robo_loja_nao_encontrada"),
+        ("email", None, 422, "robo_credenciais_incompletas"),
+        ("password_enc", None, 422, "robo_credenciais_incompletas"),
+    ],
+)
+async def test_aliexpress_incompleta_ou_outro_perfil_nao_usa_a_senha_temu(
+    client, db, loja_ali, campo, valor, status, codigo
+):
+    setattr(loja_ali, campo, valor)
+    await db.commit()
+    r = await client.post(URL, json={**CORPO, "plataforma": "aliexpress"}, headers=H)
+    assert r.status_code == status
+    assert r.json()["detail"]["code"] == codigo
+    assert SENHA not in r.text and "privad" not in r.text
+
+
+async def test_duas_aliexpress_do_perfil_nao_escolhe_uma_nem_usa_temu(client, db, loja_ali):
+    db.add(
+        StoreInfo(
+            user_id=loja_ali.user_id,
+            platform="aliexpress",
+            account_name="Duplicada",
+            server=loja_ali.server,
+            email="duplicada-privada",
+            password_enc=encrypt("outra-senha-privada"),
+        )
+    )
+    await db.commit()
+    r = await client.post(URL, json={**CORPO, "plataforma": "aliexpress"}, headers=H)
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "robo_loja_ambigua"
+    assert SENHA not in r.text and "privad" not in r.text
+
+
 @pytest.mark.parametrize(
     ("cadastrado", "esperado"),
     [
@@ -116,8 +186,8 @@ async def test_cadastro_com_nome_igual_em_outro_perfil_nao_vaza(client, db, loja
     assert SENHA not in r.text and USUARIO not in r.text
 
 
-async def test_so_temu_sem_aceitar_segredo_no_erro_de_validacao(client):
-    r = await client.post(URL, json={**CORPO, "plataforma": "aliexpress"}, headers=H)
+async def test_so_plataformas_do_robo_sem_segredo_no_erro_de_validacao(client):
+    r = await client.post(URL, json={**CORPO, "plataforma": "shopee"}, headers=H)
     assert r.status_code == 422
     assert r.json()["detail"]["code"] == "corpo_invalido"
     r = await client.post(URL, json={**CORPO, "perfil_id": SENHA}, headers=H)
@@ -195,7 +265,10 @@ async def test_senha_cifrada_invalida_vira_erro_saneado(client, db, loja):
 
 
 def test_repr_dos_dados_nao_mostra_credenciais():
-    dados = {"perfil_id": "k1atv", "loja": "ATV", "usuario": USUARIO, "senha": SENHA}
+    dados = {
+        "perfil_id": "k1atv", "plataforma": "temu", "loja": "ATV", "usuario": USUARIO,
+        "senha": SENHA,
+    }
     for modelo in (CredenciaisOut(**dados), robo_credenciais.CredenciaisLoja(**dados)):
         assert USUARIO not in repr(modelo)
         assert SENHA not in repr(modelo)

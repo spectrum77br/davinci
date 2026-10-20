@@ -47,7 +47,7 @@ mostrou o que marca como lido PARA A EQUIPE INTEIRA):
     ainda assina cada chamada com um token antirrobô gerado no navegador
     (Anti-Content): chamada extra com padrão estranho cai em captcha;
   - resolver captcha ou verificação: sessão caída vira `sessao_caiu` e
-    espera uma pessoa. Na Temu, o login comum é feito na própria página,
+    espera uma pessoa. Na Temu e no AliExpress, o login comum é feito na própria página,
     usando E-mail e Senha do cadastro Lojas no DaVinci, consultados por
     perfil somente quando necessário, sem guardar em disco ou no log.
     O robô nunca preenche cadastro de vendedor nem interrompe quem digita.
@@ -121,7 +121,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-VERSAO = "robo-adspower/2 (2026-10-20)"
+VERSAO = "robo-adspower/3 (2026-10-20)"
 LOJAS_PADRAO = Path(__file__).with_name("atendimento_robo_lojas.json")
 ESTADO_PADRAO = Path.home() / ".davinci" / "robo_atendimento_abas.json"
 
@@ -146,7 +146,7 @@ REABRIR_LOGIN_S = 10 * 60
 # (30/09) a Temu abre chat.html → login.html → chat.html sozinha em ~8 s
 # quando o cookie ainda vale — sem esta folga, a loja piscava "sessão caiu".
 LOGIN_CONFIRMA_S = 25.0
-# Login Temu: aguarda o retorno da página e confirma pela resposta assinada
+# Login: aguarda o retorno da página e confirma pela resposta assinada
 # do chat. Falhas têm folga; credencial recusada não é reenviada até mudar no
 # cadastro (só uma impressão digital fica na memória do processo).
 LOGIN_RESULTADO_S = 90.0
@@ -270,6 +270,12 @@ PLATAFORMAS: dict[str, dict[str, Any]] = {
         # ACCS: wss://msgacs.m.aliexpress.com/accs/auth?token=...
         "ws": [r"^wss://(ws-)?msgacs\.[a-z0-9.-]+/accs/"],
         "json": [],
+        # Resposta SUCCESS da lista/sync autenticados confirma que o login
+        # voltou; a URL do chat sozinha não prova uma sessão válida.
+        "assinadas": [
+            r"/mtop\.gsp\.web\.seller\.js\.sync/",
+            r"/mtop\.gsp\.im\.use\.web\.seller\.messagebox\.querysessionlist/",
+        ],
         # putOffset = putRangeRead (marca lido); sendImMessage/send.msg (envio);
         # recall (apaga mensagem enviada). Ver "vigiar" da Temu.
         "vigiar": [
@@ -279,9 +285,6 @@ PLATAFORMAS: dict[str, dict[str, Any]] = {
             r"send\.msg",
             r"immessage\.recall",
         ],
-        # Toda mtop vai assinada (`sign` + token `_m_h5_tk`): qualquer uma com
-        # SUCCESS prova a sessão.
-        "assinadas": [r"/h5/mtop\."],
     },
 }
 
@@ -413,6 +416,37 @@ def origem_login_temu(url: str | None) -> bool:
         )
     except ValueError:
         return False
+
+
+def origem_login_aliexpress(url: str | None) -> bool:
+    """Somente o formulário de vendedor observado no perfil da Vita."""
+    try:
+        p = urllib.parse.urlsplit(url or "")
+        return (
+            p.scheme == "https"
+            and p.hostname == "login.aliexpress.com"
+            and p.port in (None, 443)
+            and p.username is None
+            and p.password is None
+            and p.path == "/user/seller/login"
+        )
+    except ValueError:
+        return False
+
+
+def login_aliexpress_sem_rota_chat(url: str | None, url_chat: str) -> str | None:
+    """Redirect HTTP herda #/window do chat e deixa o login UMI em branco.
+
+    Retira apenas o fragmento do chat da URL de login conhecida, preservando
+    query/return_url. Nada muda em captcha, outro host ou outra rota hash.
+    """
+    if not origem_login_aliexpress(url):
+        return None
+    p = urllib.parse.urlsplit(url)
+    chat = urllib.parse.urlsplit(url_chat)
+    if not p.fragment or p.fragment != chat.fragment or chat.fragment != "/window":
+        return None
+    return urllib.parse.urlunsplit(p._replace(fragment=""))
 
 
 def _envelope(corpo: str) -> dict | None:
@@ -624,7 +658,7 @@ class Loja:
 
 
 @dataclass(frozen=True)
-class CredenciaisTemu:
+class CredenciaisLogin:
     usuario: str = field(repr=False)
     senha: str = field(repr=False)
 
@@ -632,14 +666,16 @@ class CredenciaisTemu:
         return hashlib.sha256(json.dumps([self.usuario, self.senha]).encode()).hexdigest()
 
 
-def credenciais_temu(resposta: dict, perfil_id: str) -> CredenciaisTemu | None:
+def credenciais_login(
+    resposta: dict, perfil_id: str, plataforma: str
+) -> CredenciaisLogin | None:
     """Recusa resposta incompleta ou de outro perfil, sem ecoar seus valores."""
-    if resposta.get("perfil_id") != perfil_id or resposta.get("plataforma") != "temu":
+    if resposta.get("perfil_id") != perfil_id or resposta.get("plataforma") != plataforma:
         return None
     usuario, senha = resposta.get("usuario"), resposta.get("senha")
     if not all(isinstance(v, str) and 0 < len(v) <= 4096 for v in (usuario, senha)):
         return None
-    return CredenciaisTemu(usuario, senha)
+    return CredenciaisLogin(usuario, senha)
 
 
 def validar_loja(item: Any) -> Loja:
@@ -1120,6 +1156,67 @@ for (const [e, valor] of [[usuarios[0], usuario], [senhas[0], senha]]) {
 if (document.activeElement === usuarios[0] || document.activeElement === senhas[0])
   document.activeElement.blur();
 enviar[0].click();
+return 'enviado';
+"""
+
+_ALI_LOGIN_JS = r"""
+const modo = arguments[0], usuario = arguments[1], senha = arguments[2];
+if (location.protocol !== 'https:' || location.hostname !== 'login.aliexpress.com' ||
+    (location.port && location.port !== '443') || location.pathname !== '/user/seller/login')
+  return 'origem_invalida';
+if (location.hash && location.hash !== '#/') return 'rota_chat_no_login';
+const vis = e => {
+  if (!e || !e.getClientRects().length || getComputedStyle(e).visibility === 'hidden')
+    return false;
+  const r = e.getBoundingClientRect(), frente = document.elementFromPoint(
+    r.left + r.width / 2, r.top + r.height / 2);
+  return !!frente && (frente === e || e.contains(frente));
+};
+const todos = s => Array.from(document.querySelectorAll(s)).filter(vis);
+const corpo = (document.body.innerText || '').replace(/\s+/g, ' ');
+if (todos('iframe[src*="captcha" i], iframe[src*="challenge" i], '
+    + '[id*="captcha" i], [class*="captcha" i], .geetest_panel, '
+    + '.nc-container, [id*="baxia" i], input[autocomplete="one-time-code"], '
+    + 'input[name="verificationCode"], '
+    + 'input[placeholder*="código" i], input[placeholder*="verification code" i]').length ||
+    /verifica[çc][ãa]o de seguran[çc]a|security verification|c[oó]digo (foi )?enviado/i
+      .test(corpo)) return 'verificacao';
+if (modo === 'resultado' &&
+    /senha.{0,25}(incorret|inv[áa]lid)|incorrect password|invalid password/i.test(corpo))
+  return 'credenciais_recusadas';
+const usuarios = todos('input#loginName[type="text"]');
+const senhas = todos('input#password[type="password"]');
+if (usuarios.length !== 1 || senhas.length !== 1 ||
+    usuarios[0].disabled || usuarios[0].readOnly || senhas[0].disabled || senhas[0].readOnly ||
+    senhas[0].autocomplete === 'new-password') return 'formulario_desconhecido';
+const form = usuarios[0].closest('form');
+if (!form || !form.contains(senhas[0])) return 'formulario_desconhecido';
+const botoes = Array.from(form.querySelectorAll('button.gsp-button-login')).filter(vis);
+if (botoes.length !== 1) return 'formulario_desconhecido';
+const ativo = document.activeElement;
+if (document.hasFocus() && ativo &&
+    ((/^(INPUT|TEXTAREA)$/.test(ativo.tagName) && ativo.value) || ativo.isContentEditable))
+  return 'digitando';
+if (!['enviar', 'confirmar'].includes(modo)) return 'pronto';
+if (typeof usuario !== 'string' || !usuario || typeof senha !== 'string' || !senha)
+  return 'credenciais_incompletas';
+if (modo === 'enviar') {
+  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  for (const [e, valor] of [[usuarios[0], usuario], [senhas[0], senha]]) {
+    set.call(e, valor);
+    e.dispatchEvent(new Event('input', {bubbles: true}));
+    e.dispatchEvent(new Event('change', {bubbles: true}));
+  }
+  if (document.activeElement === usuarios[0] || document.activeElement === senhas[0])
+    document.activeElement.blur();
+  // React habilita o botão depois de processar os campos; o próximo comando
+  // confere tudo de novo antes do clique, sem tocar em "Registo".
+  return 'preenchido';
+}
+if (usuarios[0].value !== usuario || senhas[0].value !== senha) return 'formulario_alterado';
+if (botoes[0].disabled || botoes[0].getAttribute('aria-disabled') === 'true')
+  return 'botao_indisponivel';
+botoes[0].click();
 return 'enviado';
 """
 
@@ -1810,33 +1907,41 @@ class Leitor(threading.Thread):
             if self.conversa_aberta_em is None:
                 self.conversa_aberta_em = self.ctx.agora()
 
-    def _tela_login_temu(self, modo: str, credenciais: CredenciaisTemu | None = None) -> str:
+    def _tela_login(self, modo: str, credenciais: CredenciaisLogin | None = None) -> str:
         """Falha opaca: exceção do WebDriver pode ecoar os argumentos secretos."""
         try:
             self._na_nossa_aba()
             resultado = self.drv.execute_script(
-                _TEMU_LOGIN_JS, modo,
+                _TEMU_LOGIN_JS if self.loja.plataforma == "temu" else _ALI_LOGIN_JS, modo,
                 credenciais.usuario if credenciais else None,
                 credenciais.senha if credenciais else None,
             )
+            if resultado == "preenchido" and credenciais is not None:
+                if self.ctx.parar.wait(0.2):
+                    return "interrompido"
+                resultado = self.drv.execute_script(
+                    _ALI_LOGIN_JS, "confirmar", credenciais.usuario, credenciais.senha,
+                )
             return resultado if isinstance(resultado, str) else "formulario_desconhecido"
         except Exception:  # noqa: BLE001 — nunca propagar argumentos/traceback do login
             return "falha_navegador"
 
-    def _recuperar_login_temu(self, agora: float) -> None:
+    def _recuperar_login(self, agora: float) -> None:
         """Uma etapa do login, sem bloquear o dreno, o envio nem o pulso."""
-        self._mudar_estado("sessao_caiu", "Temu deslogada: preparando login automático")
+        nome = "Temu" if self.loja.plataforma == "temu" else "AliExpress"
+        self._mudar_estado("sessao_caiu", f"{nome}: preparando login automático")
         if not self.recuperando_login:
             self.assinada_ok_em = None  # a resposta ANTERIOR ao login não prova recuperação
         self.recuperando_login = True
         if self.ctx.davinci is None:
-            self.detalhe = "Temu deslogada: modo seco não consulta credenciais nem faz login"
+            self.detalhe = f"{nome}: modo seco não consulta credenciais nem faz login"
             return
-        if not origem_login_temu(self.url_aba):
-            self.detalhe = "tela de login fora do endereço Temu autorizado: confira a aba do robô"
+        origem = origem_login_temu if self.loja.plataforma == "temu" else origem_login_aliexpress
+        if not origem(self.url_aba):
+            self.detalhe = f"login fora do endereço {nome} autorizado: confira a aba do robô"
             return
         if self.login_verificacao:
-            tela = self._tela_login_temu("resultado")
+            tela = self._tela_login("resultado")
             if tela not in ("pronto", "abrindo_login", "credenciais_recusadas"):
                 self.detalhe = "verificação/captcha: uma pessoa precisa resolver na aba do robô"
                 return
@@ -1844,7 +1949,7 @@ class Leitor(threading.Thread):
             self.login_enviado_em = None
             self.proximo_login = agora
         if self.login_enviado_em is not None:
-            resultado = self._tela_login_temu("resultado")
+            resultado = self._tela_login("resultado")
             if resultado == "verificacao":
                 self.login_verificacao = True
                 self.detalhe = "verificação/captcha: uma pessoa precisa resolver na aba do robô"
@@ -1852,10 +1957,10 @@ class Leitor(threading.Thread):
             if resultado == "credenciais_recusadas":
                 self.login_recusada = self.login_impressao
                 self.login_enviado_em = None
-                self.detalhe = "a Temu recusou o login: confira E-mail e Senha em Lojas no DaVinci"
+                self.detalhe = f"{nome} recusou o login: confira E-mail e Senha em Lojas no DaVinci"
                 return
             if agora - self.login_enviado_em < LOGIN_RESULTADO_S:
-                self.detalhe = "login enviado à Temu: aguardando a página e o retorno ao chat"
+                self.detalhe = f"login enviado a {nome}: aguardando a página e o retorno ao chat"
                 return
             self.login_enviado_em = None
         if self._alguem_digitando():
@@ -1865,12 +1970,12 @@ class Leitor(threading.Thread):
             self.detalhe = "login automático aguardando o intervalo entre tentativas"
             return
         self.proximo_login = agora + LOGIN_TENTAR_S
-        tela = self._tela_login_temu("preparar")
+        tela = self._tela_login("preparar")
         if tela == "abrindo_login":
             self.login_preparacoes += 1
             if self.login_preparacoes <= 6:
                 self.proximo_login = agora + DRENAR_S
-            self.detalhe = "abrindo Fazer login na Temu"
+            self.detalhe = f"abrindo o formulário de login {nome}"
             return
         self.login_preparacoes = 0
         if tela == "verificacao":
@@ -1878,15 +1983,16 @@ class Leitor(threading.Thread):
             self.detalhe = "verificação/captcha: uma pessoa precisa resolver na aba do robô"
             return
         if tela != "pronto":
-            self.detalhe = "formulário de login Temu não reconhecido: confira a aba do robô"
+            self.detalhe = f"formulário de login {nome} não reconhecido: confira a aba do robô"
             return
         try:
             resposta = self.ctx.davinci.post(
                 "/api/atendimento/robo/credenciais",
-                {"perfil_id": self.loja.perfil_id, "plataforma": "temu", "loja": self.loja.loja},
+                {"perfil_id": self.loja.perfil_id, "plataforma": self.loja.plataforma,
+                 "loja": self.loja.loja},
                 timeout=20,
             )
-            credenciais = credenciais_temu(resposta, self.loja.perfil_id)
+            credenciais = credenciais_login(resposta, self.loja.perfil_id, self.loja.plataforma)
         except Exception:  # noqa: BLE001 — falha de credencial nunca ecoa corpo/valores
             self.detalhe = "não foi possível consultar o login: confira cadastro e API do DaVinci"
             return
@@ -1902,18 +2008,19 @@ class Leitor(threading.Thread):
             return
         # Repete a conferência de origem/formulário antes de preencher. Não
         # retém o objeto nem a resposta após este método; só o hash em memória.
-        resultado = self._tela_login_temu("enviar", credenciais)
+        resultado = self._tela_login("enviar", credenciais)
         if resultado == "enviado":
             self.login_tentativas += 1
-            self.conta["logins_temu"] += 1
+            self.conta[f"logins_{self.loja.plataforma}"] += 1
             self.login_enviado_em = agora
-            self.detalhe = "login enviado à Temu: aguardando o retorno ao chat"
-            self.log.info("login Temu enviado; aguardando confirmação do chat")
+            self.detalhe = f"login enviado a {nome}: aguardando o retorno ao chat"
+            self.log.info("login %s enviado; aguardando confirmação do chat", nome)
         else:
-            self.detalhe = "login Temu não enviado: a tela mudou; aguardando nova conferência"
+            self.detalhe = f"login {nome} não enviado: a tela mudou; aguardando nova conferência"
 
-    def _confirmar_login_temu(self, agora: float, situacao: str) -> bool:
+    def _confirmar_login(self, agora: float, situacao: str) -> bool:
         """Retorna True enquanto a recuperação deve manter a leitura parada."""
+        nome = "Temu" if self.loja.plataforma == "temu" else "AliExpress"
         if not self.recuperando_login:
             return False
         if situacao == "chat" and (
@@ -1928,30 +2035,33 @@ class Leitor(threading.Thread):
             self.login_recusada = None
             self.login_voltar_chat_em = None
             self.login_desde = None
-            self.log.info("sessão Temu recuperada; leitura do chat confirmada")
+            self.log.info("sessão %s recuperada; leitura do chat confirmada", nome)
             return False
         if situacao == "fora":
-            # Depois de entrar, a Temu pode abrir a home. Volta só à LISTA,
+            # Depois de entrar, a plataforma pode abrir a home. Volta só à LISTA,
             # sem esperar os cinco minutos reservados a uma aba usada à mão.
             try:
                 p = urllib.parse.urlsplit(self.url_aba or "")
-                na_temu = p.scheme == "https" and p.hostname == "br.seller.temu.com"
+                na_plataforma = (
+                    p.scheme == "https"
+                    and p.hostname == urllib.parse.urlsplit(self.loja.url).hostname
+                )
             except ValueError:
-                na_temu = False
-            if na_temu and self.login_enviado_em is not None:
-                self._mudar_estado("sessao_caiu", "login Temu enviado: retomando lista do chat")
+                na_plataforma = False
+            if na_plataforma and self.login_enviado_em is not None:
+                self._mudar_estado("sessao_caiu", f"login {nome} enviado: retomando lista do chat")
                 if (
                     (self.login_voltar_chat_em is None or
                      agora - self.login_voltar_chat_em >= NAVEGACAO_MIN_S)
                     and not self._alguem_digitando()
                 ):
                     self.login_voltar_chat_em = agora
-                    self._ir_ao_chat("login Temu concluído: voltar à lista")
+                    self._ir_ao_chat(f"login {nome} concluído: voltar à lista")
                 return True
         if situacao == "chat":
-            self._mudar_estado("sessao_caiu", "validando sessão Temu: aguardando resposta do chat")
+            self._mudar_estado("sessao_caiu", f"validando sessão {nome}: aguardando o chat")
             if agora - self.ultima_navegacao >= REABRIR_LOGIN_S and not self._alguem_digitando():
-                self._ir_ao_chat("confirmar chat após login Temu")
+                self._ir_ao_chat(f"confirmar chat após login {nome}")
             return True
         return False
 
@@ -1979,6 +2089,22 @@ class Leitor(threading.Thread):
         else:
             self.login_desde = None
 
+        if plat == "aliexpress" and situacao == "login":
+            limpa = login_aliexpress_sem_rota_chat(href, self.loja.url)
+            if limpa is not None:
+                self._mudar_estado("sessao_caiu", "corrigindo rota do chat herdada pelo login")
+                if (
+                    agora - self.ultima_navegacao >= NAVEGACAO_MIN_S
+                    and not self._alguem_digitando()
+                ):
+                    self._na_nossa_aba()
+                    self.ultima_navegacao = agora
+                    self.drv.get(limpa)
+                    self.url_aba = limpa
+                    self.login_desde = agora
+                    self.log.info("login AliExpress corrigido: removida rota herdada do chat")
+                return
+
         # A conversa aberta vem ANTES da sessão caída: com a loja em "sessão
         # caiu" alguém vai mexer justamente na aba do robô — e a volta à lista
         # em 1 min tem de valer também aí (revisão 30/09).
@@ -1999,16 +2125,16 @@ class Leitor(threading.Thread):
 
         if situacao in ("login", "verificacao") or (situacao == "chat" and sinal):
             motivo = situacao if situacao != "chat" else sinal
-            if plat == "temu" and motivo == "login":
-                self._recuperar_login_temu(agora)
+            if motivo == "login":
+                self._recuperar_login(agora)
                 if (
                     situacao == "chat"
                     and agora - self.ultima_navegacao >= NAVEGACAO_MIN_S
                     and not self._alguem_digitando()
                 ):
-                    self._ir_ao_chat("sessão Temu expirada: abrir login")
+                    self._ir_ao_chat("sessão expirada: abrir login")
                 return
-            if plat == "temu" and motivo == "verificacao" and self.recuperando_login:
+            if motivo == "verificacao" and self.recuperando_login:
                 self.login_verificacao = True
             self._mudar_estado(
                 "sessao_caiu",
@@ -2021,7 +2147,7 @@ class Leitor(threading.Thread):
                 self._ir_ao_chat("conferir se a sessão voltou")
             return
 
-        if plat == "temu" and self._confirmar_login_temu(agora, situacao):
+        if self._confirmar_login(agora, situacao):
             return
 
         if situacao == "chat":

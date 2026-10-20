@@ -370,7 +370,10 @@ async def registrar_pulso(
             "como lida no Seller Center; volte a aba para a lista de conversas"
         )
     elif estado == ESTADO_SESSAO_CAIU:
-        erro = "o Seller Center saiu da conta no perfil do AdsPower: alguém precisa entrar de novo"
+        erro = (
+            "o Seller Center saiu da conta no perfil do AdsPower: o robô tenta entrar de novo "
+            "com E-mail e Senha de Lojas; captcha e verificação precisam de uma pessoa"
+        )
         if detalhe_curto:
             erro += f" ({detalhe_curto})"
     elif estado == ESTADO_ERRO:

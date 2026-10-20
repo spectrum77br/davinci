@@ -409,7 +409,9 @@ async def test_robo_sessao_caida_e_sem_sinal_geral(db):
     o = lista[f"canal:{temu.id}"]
     assert (o.loja, o.plataforma, o.canal_id) == ("Atv", "temu", temu.id)
     assert o.motivo == "sessão caiu no AdsPower" and o.minutos >= 4 * 24 * 60 - 1
-    assert "Entrar de novo no Seller Center" in o.acao and "k1dkegpc" in o.detalhe
+    assert "robô tenta entrar novamente" in o.acao and "k1dkegpc" in o.detalhe
+    assert "Temu e no AliExpress" in o.acao and "E-mail e Senha de Lojas" in o.acao
+    assert "captcha ou verificação" in o.acao and "nunca digita senha" not in o.acao
 
     # O Mac mini apagou: nenhum pulso de loja nenhuma há 2 h → UMA linha
     # geral; junto, só a Temu, que já estava parada antes.

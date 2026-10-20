@@ -85,13 +85,13 @@ class RoboOkOut(BaseModel):
 
 class CredenciaisIn(BaseModel):
     perfil_id: str = Field(pattern=_PERFIL)
-    plataforma: Literal["temu"]
+    plataforma: Literal["temu", "aliexpress"]
     loja: str = Field(min_length=1, max_length=200)
 
 
 class CredenciaisOut(BaseModel):
     perfil_id: str
-    plataforma: Literal["temu"] = "temu"
+    plataforma: Literal["temu", "aliexpress"]
     loja: str
     # Só este endpoint autenticado devolve os segredos. Nem repr do modelo.
     usuario: str = Field(repr=False)

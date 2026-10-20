@@ -293,8 +293,9 @@ ACAO_ROBO_SEM_SINAL = (
     "atendimento rodando"
 )
 ACAO_ROBO_SESSAO = (
-    "Entrar de novo no Seller Center no perfil da loja no AdsPower (Mac mini) — o "
-    "robô nunca digita senha"
+    "O robô tenta entrar novamente na Temu e no AliExpress com E-mail e Senha de Lojas. "
+    "Se não voltar, conferir esses dados e resolver captcha ou verificação no perfil "
+    "da loja no AdsPower (Mac mini)"
 )
 ACAO_ROBO_ERRO = (
     "Ver o perfil da loja no AdsPower (Mac mini): aberto por alguém, numa conversa "

@@ -1,9 +1,9 @@
-"""Credenciais Temu do cadastro de Lojas, somente para o robô do Mac mini.
+"""Credenciais Temu e AliExpress de Lojas, somente para o robô do Mac mini.
 
 A relação é perfil AdsPower → nº no espelho → Servidor da loja ativa. O
 nome enviado pelo robô é informativo: nunca autoriza procurar uma senha por
 nome (os nomes da configuração podem ser diferentes dos cadastros atuais).
-Sem uma única loja Temu vinculada, não se entrega credencial alguma.
+Sem uma única loja ativa da plataforma vinculada, não se entrega credencial alguma.
 """
 
 from dataclasses import dataclass, field
@@ -21,13 +21,18 @@ from app.services.mail_atendimento.enderecos import endereco_do_cadastro
 @dataclass(frozen=True)
 class CredenciaisLoja:
     perfil_id: str
+    plataforma: str
     loja: str
     usuario: str = field(repr=False)
     senha: str = field(repr=False)
 
 
-async def buscar(session: AsyncSession, *, perfil_id: str) -> CredenciaisLoja:
+async def buscar(session: AsyncSession, *, perfil_id: str, plataforma: str) -> CredenciaisLoja:
     """Lê a senha cifrada na hora do login; não grava estado nem cache."""
+    nomes = {"temu": "Temu", "aliexpress": "AliExpress"}
+    if plataforma not in nomes:
+        raise RoboRecusado("plataforma_invalida", "Plataforma sem login automático do robô.")
+    nome = nomes[plataforma]
     # O schema é configuração da API; o único valor de entrada vai como bind.
     schema = get_settings().database_schema.replace('"', '""')
     perfil = (
@@ -46,7 +51,7 @@ async def buscar(session: AsyncSession, *, perfil_id: str) -> CredenciaisLoja:
             await session.execute(
                 select(StoreInfo).where(
                     StoreInfo.archived_at.is_(None),
-                    func.lower(func.trim(StoreInfo.platform)) == "temu",
+                    func.lower(func.trim(StoreInfo.platform)) == plataforma,
                     func.trim(StoreInfo.server) == servidor,
                 )
             )
@@ -56,11 +61,13 @@ async def buscar(session: AsyncSession, *, perfil_id: str) -> CredenciaisLoja:
     )
     if not lojas:
         raise RoboRecusado(
-            "robo_loja_nao_encontrada", "Nenhuma loja Temu ativa vinculada ao perfil.", status=404
+            "robo_loja_nao_encontrada",
+            f"Nenhuma loja {nome} ativa vinculada ao perfil.",
+            status=404,
         )
     if len(lojas) != 1:
         raise RoboRecusado(
-            "robo_loja_ambigua", "Mais de uma loja Temu ativa vinculada ao perfil.", status=409
+            "robo_loja_ambigua", f"Mais de uma loja {nome} ativa vinculada ao perfil.", status=409
         )
     loja = lojas[0]
     cadastrado = (loja.email or "").strip()
@@ -79,6 +86,7 @@ async def buscar(session: AsyncSession, *, perfil_id: str) -> CredenciaisLoja:
         raise RoboRecusado("robo_credenciais_incompletas", "Preencha a Senha da loja em Lojas.")
     return CredenciaisLoja(
         perfil_id=perfil_id,
+        plataforma=plataforma,
         loja=(loja.account_name or "").strip(),
         usuario=usuario,
         senha=senha,

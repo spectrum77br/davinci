@@ -545,8 +545,14 @@ class NavegadorFalso:
 
     def execute_script(self, js, *args):
         h = self.current_window_handle
-        if js == robo._TEMU_LOGIN_JS:
+        if js in (robo._TEMU_LOGIN_JS, robo._ALI_LOGIN_JS):
             self.log.append(("login", args[0], h))
+            if js == robo._ALI_LOGIN_JS and self.tela_login == "pronto":
+                if args[0] == "enviar":
+                    return "preenchido"
+                if args[0] == "confirmar":
+                    self.logins.append((args[1], args[2]))
+                    return "enviado"
             if args[0] == "enviar" and self.tela_login == "pronto":
                 self.logins.append((args[1], args[2]))
                 return "enviado"
@@ -905,6 +911,99 @@ def test_leitor_temu_falha_webdriver_nao_vaza_argumentos(tmp_path, caplog):
     _cair_no_login(leitor, drv, ctx)
     assert leitor.estado == "sessao_caiu" and not drv.logins
     assert "segredo-teste" not in caplog.text + json.dumps(ctx.davinci.posts)
+
+
+def _leitor_ali(tmp_path, *, seco=False):
+    loja = robo.Loja("k1do5vfw", "aliexpress", "Vita", ALI_CHAT)
+    leitor, drv, ctx = _leitor(tmp_path, loja=loja, seco=seco)
+    if ctx.davinci:
+        ctx.davinci.credenciais.update(perfil_id=loja.perfil_id, plataforma="aliexpress")
+    return leitor, drv, ctx
+
+
+def _login_ali(leitor, drv, ctx, fragmento=""):
+    drv.abas[leitor.handle] = (
+        "https://login.aliexpress.com/user/seller/login?bizSegment=GSP&"
+        "return_url=http%3A%2F%2Fgsp.aliexpress.com%2Fm_apps%2Fim-chat%2Fim" + fragmento)
+    leitor.passo()
+    ctx.agora.t += robo.LOGIN_CONFIRMA_S
+    leitor.passo()
+
+
+def _resposta_ali(api="mtop.gsp.web.seller.js.sync", ret="SUCCESS::ok"):
+    return {"tipo": "http", "url": ALI_H5 + api + "/1.0/", "metodo": "GET", "status": 200,
+            "recebido_em": "2026-10-20T12:00:00Z", "corpo": json.dumps({"ret": [ret], "data": {}})}
+
+
+def test_ali_corrige_fragmento_do_login_na_aba_propria_sem_mudar_query(tmp_path):
+    leitor, drv, ctx = _leitor_ali(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    _login_ali(leitor, drv, ctx, "#/window")
+    quebrada = drv.abas[leitor.handle]
+    assert quebrada.endswith("#/window") and not drv.logins
+    ctx.agora.t += robo.NAVEGACAO_MIN_S
+    leitor.passo()
+    assert drv.log[-1] == ("get", leitor.handle, quebrada.removesuffix("#/window"))
+    assert "return_url=http%3A" in drv.abas[leitor.handle]
+    assert drv.abas["EQUIPE"] == "https://br.seller.temu.com/main/orders"
+    assert not drv.logins
+    ctx.agora.t += robo.LOGIN_CONFIRMA_S
+    leitor.passo()
+    assert drv.logins == [("loja@example.test", "segredo-teste")]
+
+
+def test_ali_reloga_e_so_confirma_com_sync_ou_lista(tmp_path, caplog):
+    leitor, drv, ctx = _leitor_ali(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    _login_ali(leitor, drv, ctx)
+    assert drv.logins == [("loja@example.test", "segredo-teste")]
+    consulta = [c for p, c in ctx.davinci.posts if p.endswith("/credenciais")]
+    assert consulta == [{"perfil_id": "k1do5vfw", "plataforma": "aliexpress", "loja": "Vita"}]
+    assert [x[1] for x in drv.log if x[0] == "login"][-3:] == [
+        "preparar", "enviar", "confirmar"]
+    drv.abas[leitor.handle] = "https://gsp.aliexpress.com/m_apps/home"
+    leitor.passo()
+    assert drv.abas[leitor.handle] == ALI_CHAT
+    ctx.agora.t += robo.LOGIN_RESULTADO_S + 1
+    leitor.passo()
+    assert leitor.estado == "sessao_caiu"
+    drv.pagina_recebe(_resposta_ali("mtop.gsp.im.use.web.seller.unreadcount"))
+    leitor.passo()
+    assert leitor.estado == "sessao_caiu"
+    drv.pagina_recebe(_resposta_ali(ret="FAIL_SYS_SESSION_EXPIRED::expirou"))
+    leitor.passo()
+    assert leitor.estado == "sessao_caiu"
+    drv.pagina_recebe(_resposta_ali())
+    leitor.passo()
+    assert leitor.estado == "lendo" and not leitor.recuperando_login
+    for valor in ("loja@example.test", "segredo-teste"):
+        assert valor not in caplog.text + json.dumps(ctx.davinci.posts)
+
+
+def test_ali_resposta_de_credencial_temu_nao_e_enviada(tmp_path):
+    leitor, drv, ctx = _leitor_ali(tmp_path)
+    leitor.passo()
+    drv.tela_login = "pronto"
+    ctx.davinci.credenciais["plataforma"] = "temu"
+    _login_ali(leitor, drv, ctx)
+    assert not drv.logins
+    assert "login indisponível" in leitor.detalhe
+
+
+@pytest.mark.parametrize("seco,digitando,captcha", [
+    (True, False, False), (False, True, False), (False, False, True),
+])
+def test_ali_respeita_seco_digitacao_e_captcha(tmp_path, seco, digitando, captcha):
+    leitor, drv, ctx = _leitor_ali(tmp_path, seco=seco)
+    leitor.passo()
+    drv.digitando = digitando
+    drv.tela_login = "verificacao" if captcha else "pronto"
+    _login_ali(leitor, drv, ctx)
+    assert not drv.logins
+    if ctx.davinci:
+        assert not [p for p, _ in ctx.davinci.posts if p.endswith("/credenciais")]
 
 
 def test_leitor_captcha_pelo_corpo(tmp_path):

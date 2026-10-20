@@ -7,7 +7,7 @@ o que a página já recebe e manda para cá:
   POST /api/atendimento/robo/pulso    — "estou vivo": estado da leitura da loja
   POST /api/atendimento/robo/eventos  — cópias cruas do que a página recebeu
                                         (fetch/XHR e WebSocket), até 200 por vez
-  POST /api/atendimento/robo/credenciais — login Temu da loja do perfil AdsPower
+  POST /api/atendimento/robo/credenciais — login da loja Temu/AliExpress do perfil AdsPower
 
 Quem interpreta e grava é `services/atendimento/robo.py` (e os leitores
 `robo_temu`/`robo_aliexpress`). Contrato em `schemas/atendimento_robo.py`.
@@ -114,11 +114,13 @@ async def credenciais(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CredenciaisOut:
-    """E-mail e senha atuais da única loja Temu ativa do perfil; nunca em cache."""
+    """Login da única loja ativa da plataforma no perfil; nunca em cache."""
     response.headers["Cache-Control"] = "no-store"
     body = _validar(CredenciaisIn, await _corpo(request, PULSO_MAX_BYTES))
     try:
-        dados = await robo_credenciais.buscar(session, perfil_id=body.perfil_id)
+        dados = await robo_credenciais.buscar(
+            session, perfil_id=body.perfil_id, plataforma=body.plataforma
+        )
     except robo.RoboRecusado as e:
         raise HTTPException(
             e.status,
@@ -138,6 +140,7 @@ async def credenciais(
         ) from None
     return CredenciaisOut(
         perfil_id=dados.perfil_id,
+        plataforma=dados.plataforma,
         loja=dados.loja,
         usuario=dados.usuario,
         senha=dados.senha,
