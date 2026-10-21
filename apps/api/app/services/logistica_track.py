@@ -217,15 +217,18 @@ ERRO_JA_PARADO = -18019906  # stoptrack em número que já está parado
 _TENTATIVAS = 3
 
 
-async def _chamar(c: httpx.AsyncClient, endpoint: str, payload: Any) -> dict:
+async def _chamar(
+    c: httpx.AsyncClient, endpoint: str, payload: Any, *, base: str = _BASE
+) -> dict:
     """POST no 17track com retry curto pra 429/5xx/rede. Levanta `Track17Error`
-    quando, mesmo assim, não veio uma resposta válida (`code == 0`)."""
+    quando, mesmo assim, não veio uma resposta válida (`code == 0`). `base` troca
+    a versão da API (a Temu usa a v2.4, que tem o `cpf_or_cnpj` da J&T)."""
     ultimo = ""
     for tentativa in range(_TENTATIVAS):
         if tentativa:
             await asyncio.sleep(1.5 * tentativa)
         try:
-            r = await c.post(f"{_BASE}/{endpoint}", headers=_headers(), json=payload)
+            r = await c.post(f"{base}/{endpoint}", headers=_headers(), json=payload)
         except httpx.HTTPError as e:
             ultimo = f"rede: {str(e)[:120]}"
             continue

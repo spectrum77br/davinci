@@ -24,6 +24,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -150,3 +151,22 @@ async def status_17track(
 
     desde = await logistica_track_sync.sem_quota_desde()
     return {"sem_quota": bool(desde), "desde": desde}
+
+
+class SondaTemuIn(BaseModel):
+    pedidos: list[str] = Field(min_length=1, max_length=20)
+
+
+@router.post("/api/logistica/17track/sonda-temu")
+async def sonda_temu(
+    body: SondaTemuIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
+) -> dict[str, Any]:
+    """Teste do rastreio Temu (21/10/2026): pros pedidos Bling dados, lê o
+    código da transportadora na etiqueta, registra no 17track e devolve o que
+    ele já sabe + os créditos que sobram. Não muda pedido nenhum. POST porque
+    registrar gasta crédito (1 por código, só na 1ª vez)."""
+    from app.services import temu_rastreio
+
+    return await temu_rastreio.sondar(session, body.pedidos)
