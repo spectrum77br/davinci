@@ -3646,6 +3646,20 @@ async def check_marketplace_shipped_orders(ctx: dict) -> None:
         logger.exception("shipment_check_cron_unhandled")
 
 
+async def temu_envio_sweep(ctx: dict) -> None:
+    """Pedido Temu vermelho que a transportadora já coletou → 15 no Bling.
+
+    A Temu não tem integração e marca "Enviado" na compra da etiqueta; quem
+    prova a saída é o rastreio (Anjun/J&T) lido no 17track a partir do código
+    impresso na etiqueta. Ver app.services.temu_rastreio."""
+    from app.services import temu_rastreio  # tardio: PyMuPDF + httpx
+
+    try:
+        await temu_rastreio.rodada()
+    except Exception:  # noqa: BLE001
+        logger.exception("temu_envio_sweep_unhandled")
+
+
 async def nf_auto_enfileirar_tick(ctx: dict) -> None:
     """Sweep do auto-enfileirador de NF (pedidos Shopee/TikTok "Em aberto").
 
@@ -5825,6 +5839,11 @@ class WorkerSettingsMarketplace:
         # 300 s (21/10): com a fila do Bling a 2,5/s, uma rajada de PATCH de
         # enviados no pico passava dos 120 s padrão.
         cron(check_marketplace_shipped_orders, run_at_startup=False, timeout=300),
+        # Temu (21/10): sem API da Temu — o rastreio vem do 17track pelo código
+        # da etiqueta. A cada 15 min basta (a leitura é de graça; o registro
+        # custa 1 crédito por pedido, só na 1ª vez). :04/:19/:34/:49 ficam
+        # fora dos slots do recarregar da Logística acima.
+        cron(temu_envio_sweep, minute={4, 19, 34, 49}, run_at_startup=False, timeout=600),
     ]
     queue_name = ARQ_MARKETPLACE_QUEUE
     # Concorrência baixa — 1 tick por minuto, serializado pelo advisory

@@ -19,26 +19,38 @@ O 17track rastreia as duas (catálogo `apicarrier.all.json`):
     da LGPD. O CPF sai de `bling_orders.documento_destinatario` na hora e nunca
     volta em resposta nem vai pro log.
 
-Fase 1 (este módulo): `sondar` — registra e lê no 17track, devolve o que ele
-respondeu. Não mexe em pedido nenhum.
+Fase 1: `sondar` — registra e lê no 17track, devolve o que ele respondeu. Não
+mexe em pedido nenhum.
+
+Fase 2: `rodada` (cron a cada 15 min, só automático — Vinicius 21/10, sem
+botão): pedidos Temu ainda vermelhos → código da etiqueta → 17track; o que já
+tem evento de transportadora vai pra 15 no Bling (mesmas travas da Magalu,
+`magalu_shipment_sync`) com a hora do 1º evento como hora do envio. O CPF da
+J&T só vai no /register, uma vez; a leitura (`gettrackinfo`) é de graça.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import fitz  # PyMuPDF
 import httpx
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, NfEtiquetaArquivo
+from app.models import BlingEnvioEvento, BlingOrder, NfEtiquetaArquivo
 from app.services import logistica_track
+from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
+from app.services.margem_audit import record_margem_audit
 
 logger = structlog.get_logger()
+_BRT = ZoneInfo("America/Sao_Paulo")
 
 # A v2.4 é a que documenta o `cpf_or_cnpj` no /register.
 BASE_V24 = "https://api.17track.net/track/v2.4"
@@ -98,6 +110,29 @@ async def _documento_do_pedido(session: AsyncSession, pedido: str) -> str | None
     return next((d for d in map(_so_digitos, docs) if d), None)
 
 
+async def _preparar(
+    session: AsyncSession, pedido: str
+) -> tuple[CodigoEtiqueta | None, dict[str, Any] | None, str | None]:
+    """(código, linha do /register, erro). A linha só leva o CPF/CNPJ na J&T."""
+    blob = (
+        await session.execute(
+            select(NfEtiquetaArquivo.blob).where(NfEtiquetaArquivo.pedido_bling == pedido)
+        )
+    ).scalar_one_or_none()
+    if not blob:
+        return None, None, "sem_etiqueta"
+    cod = codigo_da_etiqueta(blob)
+    if cod is None:
+        return None, None, "codigo_nao_achado_na_etiqueta"
+    linha: dict[str, Any] = {"number": cod.codigo, "carrier": cod.carrier}
+    if cod.carrier == JT_CARRIER:
+        doc = await _documento_do_pedido(session, pedido)
+        if doc is None:
+            return cod, None, "jt_sem_cpf_no_pedido"
+        linha["cpf_or_cnpj"] = doc
+    return cod, linha, None
+
+
 def _registro(code: int | None) -> str:
     if code is None:
         return "aceito"
@@ -119,26 +154,12 @@ async def sondar(session: AsyncSession, pedidos: list[str]) -> dict[str, Any]:
     for pedido in dict.fromkeys(p.strip() for p in pedidos if p and p.strip()):
         item: dict[str, Any] = {"pedido": pedido}
         itens.append(item)
-        blob = (
-            await session.execute(
-                select(NfEtiquetaArquivo.blob).where(NfEtiquetaArquivo.pedido_bling == pedido)
-            )
-        ).scalar_one_or_none()
-        if not blob:
-            item["erro"] = "sem_etiqueta"
+        cod, linha, erro = await _preparar(session, pedido)
+        if cod is not None:
+            item.update(codigo=cod.codigo, transportadora=cod.transportadora, carrier=cod.carrier)
+        if linha is None:
+            item["erro"] = erro
             continue
-        cod = codigo_da_etiqueta(blob)
-        if cod is None:
-            item["erro"] = "codigo_nao_achado_na_etiqueta"
-            continue
-        item.update(codigo=cod.codigo, transportadora=cod.transportadora, carrier=cod.carrier)
-        linha: dict[str, Any] = {"number": cod.codigo, "carrier": cod.carrier}
-        if cod.carrier == JT_CARRIER:
-            doc = await _documento_do_pedido(session, pedido)
-            if doc is None:
-                item["erro"] = "jt_sem_cpf_no_pedido"
-                continue
-            linha["cpf_or_cnpj"] = doc
         item["cpf_enviado"] = "cpf_or_cnpj" in linha
         registrar.append(linha)
         por_codigo[cod.codigo] = item
@@ -184,3 +205,295 @@ async def sondar(session: AsyncSession, pedidos: list[str]) -> dict[str, Any]:
         com_evento=sum(1 for i in itens if i.get("eventos")),
     )
     return saida
+
+
+# ── Fase 2: rodada automática ──────────────────────────────────────────────
+
+# "Ainda não saiu": 21 (Em digitação = etiqueta enviada), 83965 (legado) e 6
+# (Em aberto com etiqueta — o Bling anda na frente do sync). Mesmo conjunto
+# da Magalu.
+_ABERTAS = (*SITUACOES_ENVIADO_ETIQUETA_STR, "6")
+_JANELA = timedelta(days=14)  # o mesmo anti-zumbi da aba Pedidos
+_RE_PO_TEMU = re.compile(r"PO-\d{3}-\d{10,}")
+# latest_status do 17track que provam que a transportadora já pegou o pacote.
+# NotFound, InfoReceived (só o aviso da etiqueta) e Expired não provam nada.
+_SAIU = frozenset(
+    {
+        "InTransit",
+        "AvailableForPickup",
+        "OutForDelivery",
+        "DeliveryFailure",
+        "Delivered",
+        "Exception",
+    }
+)
+_LOTE = 40  # máximo do /register e do /gettrackinfo
+_LOCK_RODADA = 0x74656D75  # ascii "temu"
+_ERROS_BLING = frozenset({"bling_nao_confere", "bling_nao_confirmou", "bling_falhou"})
+
+
+async def _candidatos(session: AsyncSession) -> list[BlingOrder]:
+    corte = datetime.now(UTC) - _JANELA
+    rows = (
+        await session.execute(
+            select(BlingOrder)
+            .where(
+                BlingOrder.numeroloja.like("PO-%"),
+                BlingOrder.situacao.in_(_ABERTAS),
+                BlingOrder.item_index == 0,
+                BlingOrder.bling_id.isnot(None),
+                BlingOrder.created_at >= corte,
+            )
+            .limit(500)
+        )
+    ).scalars()
+    return [o for o in rows if _RE_PO_TEMU.fullmatch(o.numeroloja or "")]
+
+
+async def _ler(
+    c: httpx.AsyncClient, linhas: list[dict[str, Any]]
+) -> tuple[dict[str, dict], list[str]]:
+    """({código: track_info} dos que o 17track conhece, [códigos que ele não
+    conhece]). Leitura de graça — sem CPF."""
+    lidos: dict[str, dict] = {}
+    nao_registrados: list[str] = []
+    for i in range(0, len(linhas), _LOTE):
+        if i:
+            await asyncio.sleep(logistica_track._PAUSA_ENTRE_LOTES)
+        lote = [{"number": li["number"], "carrier": li["carrier"]} for li in linhas[i : i + _LOTE]]
+        body = await logistica_track._chamar(c, "gettrackinfo", lote, base=BASE_V24)
+        data = body.get("data") or {}
+        for it in data.get("accepted") or []:
+            n = str((it or {}).get("number") or "").strip()
+            if n:
+                lidos[n] = it.get("track_info") or {}
+        for it in data.get("rejected") or []:
+            if logistica_track._erro_code(it) == logistica_track.ERRO_NAO_REGISTRADO:
+                nao_registrados.append(str(it.get("number") or "").strip())
+    return lidos, nao_registrados
+
+
+async def _registrar(c: httpx.AsyncClient, linhas: list[dict[str, Any]]) -> int:
+    """Registra quem o 17track ainda não conhece (1 crédito cada). Sem saldo,
+    para: o resto fica pra quando recarregarem."""
+    feitos = 0
+    for i in range(0, len(linhas), _LOTE):
+        if i:
+            await asyncio.sleep(logistica_track._PAUSA_ENTRE_LOTES)
+        body = await logistica_track._chamar(c, "register", linhas[i : i + _LOTE], base=BASE_V24)
+        aceitos, recusados = logistica_track._aceitos_e_recusados(body)
+        feitos += len(aceitos)
+        if _ERRO_SEM_QUOTA in recusados.values():
+            logger.warning("temu_rastreio_sem_quota", registrados=feitos)
+            break
+    return feitos
+
+
+def _coletado_em(track_info: dict) -> datetime | None:
+    """Hora do 1º evento da transportadora (o "Objeto coletado" da Anjun, a
+    entrega na agência da J&T) — só quando o status prova que saiu."""
+    status = str(((track_info.get("latest_status") or {}).get("status")) or "")
+    if status not in _SAIU:
+        return None
+    eventos = logistica_track.eventos_de_track_info(track_info)
+    return eventos[-1].quando if eventos else None
+
+
+async def _aplicar(
+    session: AsyncSession, bling: Any, cand: BlingOrder, coletado_em: datetime
+) -> str:
+    """Pedido Temu coletado → 15 no Bling e no DaVinci. Mesmas travas da Magalu
+    (`magalu_shipment_sync.apply_magalu_shipment`): trava do ingest, relê as
+    linhas e o Bling, só grava depois de LER 15 no Bling. Devolve o motivo."""
+    bid, numero, po, loja = cand.bling_id, cand.numero, cand.numeroloja, cand.loja
+    if coletado_em > datetime.now(UTC):
+        return "hora_invalida"
+    travou = await session.scalar(
+        text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
+        {"key": f"ingest_bling_order:{bid}"},
+    )
+    if not travou:
+        return "ingest_rodando"
+    rows = (
+        await session.scalars(
+            select(BlingOrder)
+            .where(BlingOrder.bling_id == bid)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    if not rows or any(
+        r.numero != numero
+        or r.loja != loja
+        or r.numeroloja != po
+        or r.situacao not in _ABERTAS
+        or r.item_index is None
+        for r in rows
+    ):
+        return "mudou_no_davinci"
+    # Já saiu antes e alguém voltou a situação à mão: não reescreve histórico.
+    if (
+        await session.scalar(
+            select(BlingEnvioEvento.bling_id).where(BlingEnvioEvento.bling_id == bid).limit(1)
+        )
+        is not None
+    ):
+        return "ja_teve_envio"
+
+    async def ler_bling() -> dict | None:
+        r = await bling._request("GET", f"/pedidos/vendas/{bid}")
+        if r.status_code != 200:
+            return None
+        d = r.json().get("data")
+        if (
+            not isinstance(d, dict)
+            or str(d.get("id")) != str(bid)
+            or str(d.get("numero")) != str(numero)
+            or str(d.get("numeroLoja") or "").strip() != po
+        ):
+            return None
+        return d
+
+    try:
+        vivo = await ler_bling()
+        if vivo is None:
+            return "bling_nao_confere"
+        estado = str((vivo.get("situacao") or {}).get("id"))
+        if estado not in (*_ABERTAS, "15"):
+            return "mudou_no_bling"
+        if estado != "15":
+            # Mesmo se o PATCH falhar, só o 15 LIDO em seguida autoriza gravar.
+            try:
+                await bling.update_order_situacao(bid, 15)
+            except httpx.HTTPError:
+                pass
+        confirmado = await ler_bling()
+        if confirmado is None or str((confirmado.get("situacao") or {}).get("id")) != "15":
+            return "bling_nao_confirmou"
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        return "bling_falhou"
+
+    antiga = rows[0].situacao
+    for r in rows:
+        r.situacao = "15"
+        r.em_andamento_data = coletado_em.astimezone(_BRT).date()
+    await session.flush()  # o gatilho cria o registro de envio (hora = agora)
+    for ev in (
+        await session.scalars(select(BlingEnvioEvento).where(BlingEnvioEvento.bling_id == bid))
+    ).all():
+        ev.occurred_at = coletado_em
+        ev.shipping_day = (coletado_em.astimezone(_BRT) - timedelta(hours=10)).date()
+    await record_margem_audit(
+        session,
+        acao="situacao",
+        pedido_bling=numero,
+        bling_id=bid,
+        sku=rows[0].item_codigo,
+        valor_antigo=antiga,
+        valor_novo=15,
+        origem="job_envio_temu",
+        mudado_por=None,
+    )
+    await record_margem_audit(
+        session,
+        acao="data_envio",
+        pedido_bling=numero,
+        bling_id=bid,
+        sku=rows[0].item_codigo,
+        valor_antigo=None,
+        valor_novo=coletado_em.isoformat(),
+        origem="temu_17track_coleta",
+        mudado_por=None,
+    )
+    return "confirmado"
+
+
+async def rodada() -> dict[str, int]:
+    """Uma passada: pedidos Temu vermelhos → 17track → os coletados ficam
+    verdes. Contadores pro log (o cron não tem tela)."""
+    from app.db import session_scope
+    from app.services.advisory_lock import SYNC_NAMESPACE
+    from app.services.marketplace_shipment_check import (
+        _build_bling_client,
+        _get_bling_integration,
+    )
+
+    resumo = dict.fromkeys(
+        (
+            "candidatos",
+            "sem_etiqueta",
+            "sem_codigo",
+            "jt_sem_cpf",
+            "registrados",
+            "ainda_nao_saiu",
+            "verdes",
+            "erros",
+        ),
+        0,
+    )
+    contador = {
+        "sem_etiqueta": "sem_etiqueta",
+        "codigo_nao_achado_na_etiqueta": "sem_codigo",
+        "jt_sem_cpf_no_pedido": "jt_sem_cpf",
+    }
+    async with session_scope() as session:
+        travou = (
+            await session.execute(
+                text("SELECT pg_try_advisory_xact_lock(:ns, :k)"),
+                {"ns": SYNC_NAMESPACE, "k": _LOCK_RODADA},
+            )
+        ).scalar()
+        if not travou:
+            resumo["ocupado"] = 1
+            return resumo
+        cands = await _candidatos(session)
+        resumo["candidatos"] = len(cands)
+        linhas: dict[str, dict[str, Any]] = {}
+        pedido_do_codigo: dict[str, BlingOrder] = {}
+        for o in cands:
+            _cod, linha, erro = await _preparar(session, str(o.numero))
+            if linha is None:
+                resumo[contador[erro or "sem_etiqueta"]] += 1
+                continue
+            linhas[linha["number"]] = linha
+            pedido_do_codigo[linha["number"]] = o
+        if not linhas:
+            return resumo
+        try:
+            async with httpx.AsyncClient(timeout=40.0) as c:
+                lidos, nao_registrados = await _ler(c, list(linhas.values()))
+                novos = [linhas[n] for n in nao_registrados if n in linhas]
+                if novos:
+                    resumo["registrados"] = await _registrar(c, novos)
+        except logistica_track.Track17Error as e:
+            logger.warning("temu_rastreio_17track_falhou", err=str(e)[:200])
+            resumo["erros"] += 1
+            return resumo
+        coletados = {n: h for n, ti in lidos.items() if n in linhas and (h := _coletado_em(ti))}
+        resumo["ainda_nao_saiu"] = len(linhas) - len(coletados)
+        if not coletados:
+            return resumo
+        integracao = await _get_bling_integration(session)
+        if integracao is None:
+            logger.warning("temu_rastreio_sem_bling")
+            resumo["erros"] += 1
+            return resumo
+        # Igual à Magalu: savepoint por pedido não pode travar a linha da
+        # integração (a rotação de token grava numa transação própria).
+        bling = await _build_bling_client(session, integracao, persist_in_session=False)
+        for codigo, hora in coletados.items():
+            o = pedido_do_codigo[codigo]
+            try:
+                async with session.begin_nested():
+                    motivo = await _aplicar(session, bling, o, hora)
+            except Exception as exc:  # noqa: BLE001 — um pedido não derruba os outros
+                resumo["erros"] += 1
+                logger.warning(
+                    "temu_rastreio_aplicar_falhou", pedido=o.numero, erro=type(exc).__name__
+                )
+                continue
+            resumo["verdes"] += int(motivo == "confirmado")
+            resumo["erros"] += int(motivo in _ERROS_BLING)
+            logger.info("temu_rastreio_aplicado", pedido=o.numero, motivo=motivo)
+    logger.info("temu_rastreio_rodada", **resumo)
+    return resumo
