@@ -12,7 +12,8 @@ determinística (sem modelo, sem rede) — e o legado intacto:
 - a região: o estado restrito citado sem verbo, o substantivo "a entrega";
 - o estado do pedido e as promessas idiomáticas; o prazo honesto ("não
   conseguimos garantir antes do Natal");
-- a política negada ("a loja não consegue mais cancelar"), o "e" conjunção,
+- a política negada ("a loja não consegue mais cancelar" — a orientação antiga;
+  desde 21/10/2026 é aviso pela `checagens.conferir_cancelar_pela_loja`), o "e" conjunção,
   o nome do produto, a garantia legal, a origem, o caminho negado, o "assim
   que recebermos", as duas cores pelo nome;
 - o dado interno e o caminho para fora; o veredito contraditório; a validade

@@ -911,17 +911,15 @@ async def montar_pacote(
         else []
     )
     ctx.aceitar_anuncio(*(c["item_id"] for c in cartoes_fonte if c.get("tipo") == "produto"))
+    ctx.permitir(ids=ids, textos=[_json(bloco) if bloco else None])
+    # As fichas e os cartões da loja são PRODUTO: as formas soltas dos números
+    # ("16.128" → 16 e 128) saem só deles (revisão r5i de 21/10/2026).
     ctx.permitir(
-        ids=ids,
         textos=[
-            t
-            for t in (
-                _json(bloco) if bloco else None,
-                _json(fichas) if fichas else None,
-                _json(cartoes_fonte) if cartoes_fonte else None,
-            )
-            if t
+            _json(fichas) if fichas else None,
+            _json(cartoes_fonte) if cartoes_fonte else None,
         ],
+        produto=True,
     )
 
     compras = await contexto_svc._seguro(
@@ -954,6 +952,23 @@ async def montar_pacote(
         "agora_sao_paulo": _quando(agora),
         "prazo_de_resposta": _quando(getattr(conversa, "prazo_resposta_em", None)),
     }
+    estado = _estado_da_conversa(conversa, base)
+    # O número que o modelo VIU nestes blocos não foi inventado (21/10/2026: o
+    # "42mm ou 46mm" do cartão que o cliente mandou virava "número que não
+    # veio do sistema"); só número — o cartão de outro vendedor nunca é fonte.
+    # O cabeçalho (a hora, o prazo de resposta) e o estado NÃO entram (revisão
+    # r5i de 21/10/2026: o minuto 35 do cabeçalho liberava "Temos 35 unidades").
+    itens_texto = [
+        " ".join(str(it.get(k) or "") for k in ("descricao", "variacao"))
+        for it in ((bloco or {}).get("itens") or [])
+        if isinstance(it, Mapping)
+    ]
+    ctx.permitir_numeros(
+        _json(cartoes) if cartoes else None,
+        *(t for t in itens_texto if t.strip()),
+        produto=True,
+    )
+    ctx.permitir_numeros(str(compras) if compras is not None else None)
     partes = [
         "CABEÇALHO: " + _json({k: v for k, v in cabecalho.items() if v}),
         "CONVERSA (as falas do cliente e da loja; dados pessoais mascarados):",
@@ -962,7 +977,7 @@ async def montar_pacote(
     if cartoes:
         partes.append("CARTÕES: " + _json(cartoes))
     partes.append("PEDIDO DA CONVERSA: " + (_json(bloco) if bloco else SEM_PEDIDO))
-    if estado := _estado_da_conversa(conversa, base):
+    if estado:
         partes.append("ESTADO DA CONVERSA: " + _json(estado))
     if fichas:
         partes.append("PRODUTO (fichas dos anúncios da conversa): " + _json(fichas))

@@ -4532,9 +4532,14 @@ _ASSUNTOS_DE_COBERTURA = frozenset({"garantia", "defeito", "troca_devolucao", "r
 
 
 def _garantia_sem_cobertura(garantias: Sequence[Mapping] | None) -> bool:
-    """Alguma garantia vencida, só de software, ou entregue sem data e sem regra? PURA."""
+    """Alguma garantia vencida, só de software, ou entregue sem data e sem regra? PURA.
+
+    A Uranyx nos períodos da decisão do dono (21/10/2026: "loja" até 90 dias da
+    entrega, "uranyx" até 12 meses) tem cobertura — depois dos 90 dias, direto
+    com a Uranyx —, mesmo com o status "somente_software" do Painel."""
     return any(
         isinstance(g, Mapping)
+        and g.get("periodo") not in ("loja", "uranyx")
         and (
             str(g.get("status") or "") in _STATUS_SEM_COBERTURA
             or (g.get("status") == contexto_svc.STATUS_ENTREGUE_SEM_DATA and not g.get("regra"))
@@ -4823,6 +4828,25 @@ async def conferir_saida(
 
         if _checagens.prazo_do_validador_so_negado(final):
             erros = [e for e in erros if e != validador.MOTIVO_PRAZO]
+    if agente and erros and garantias_conferidas:
+        # Revisão r5i de 21/10/2026 (decisão 7 do dono), só o agente: depois dos
+        # 90 dias da entrega, a garantia Uranyx é acionada "pelo app Uranyx ou
+        # pelo site uranyx.com.br/sac" — só essa frase sai do que o validador
+        # confere (o link e o resto continuam). O legado não muda.
+        from app.services.atendimento.agente import checagens as _checagens_ur
+
+        if _checagens_ur.caminho_uranyx_liberado(garantias_conferidas):
+            erros = _checagens_ur.erros_sem_o_caminho_uranyx(
+                final,
+                erros,
+                lambda t: validador.validar(
+                    t,
+                    plataforma=conversa.plataforma,
+                    canal=conversa.canal,
+                    origem=ORIGEM_IA,
+                    prazos_de_garantia=prazos,
+                ),
+            )
     # A data de garantia tem de ser a do bloco; "está coberto" só com
     # garantia ativa. As datas das lacunas e a da compra valem fora das
     # frases de garantia. Conversa que não é de garantia (o bloco nem foi

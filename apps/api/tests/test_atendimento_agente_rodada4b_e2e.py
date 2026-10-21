@@ -849,7 +849,9 @@ BOAS = [
         "uranyx_transito",
         "quero cancelar o celular",
         [],
-        "Olá! O seu celular já foi postado e está em trânsito, por isso o cancelamento não é mais possível. Quando ele chegar, a devolução pode ser solicitada pelo app, em Minhas Compras.",
+        # Revisão do r5i (21/10/2026): "o cancelamento não é mais possível" virou
+        # aviso; a boa é a orientação proposta, sem a negativa.
+        "Olá! O seu celular já foi postado e está em trânsito; para cancelar agora o caminho é a devolução: quando ele chegar, a devolução pode ser solicitada pelo app, em Minhas Compras.",
         "cancelamento",
         P,
     ),

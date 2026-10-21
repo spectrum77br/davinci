@@ -313,7 +313,8 @@ def test_os_assuntos_liberados_e_a_entrada_do_verificador():
         acao="responder", acao_pessoa=None, texto="Olá!", resumo=resumo, assunto="rastreio"
     )
     assert "ASSUNTOS LIBERADOS" not in sem
-    assert verificador.VERSAO == "v4" and "assunto não liberado" in verificador.SISTEMA
+    # v5 (revisão do r5i): o caminho da Uranyx no item 4
+    assert verificador.VERSAO == "v5" and "assunto não liberado" in verificador.SISTEMA
 
 
 # ─────────────── achado 3: o dado de produto pelo nome da variação ───────────────

@@ -77,7 +77,7 @@ from app.services.atendimento import (
     validador,
 )
 from app.services.atendimento import contexto as contexto_svc
-from app.services.atendimento.agente import contexto, fatos_loja, pares, sessao
+from app.services.atendimento.agente import checagens, contexto, fatos_loja, pares, sessao
 
 if TYPE_CHECKING:
     from anthropic.lib.tools import BetaAsyncFunctionTool
@@ -127,8 +127,9 @@ DESCRICOES: dict[str, str] = {
     ),
     VER_GARANTIA: (
         "Garantia de um pedido pelo Painel de Garantia: o registro, ou o cálculo a partir "
-        "da data de entrega (Uranyx: 3 meses de hardware e 12 de software a partir da "
-        "entrega; sem data de entrega, só a regra). Use só as datas e a regra que vierem aqui."
+        "da data de entrega (Uranyx: 1 ano a partir da entrega, os 90 primeiros dias com a "
+        "loja e os 9 meses seguintes direto com a Uranyx; sem data de entrega, só a regra). "
+        "Use só as datas e a regra que vierem aqui."
     ),
     CONSULTAR_MANUAL: (
         "Manual da loja para um assunto: a regra, a orientação, as respostas prontas "
@@ -147,12 +148,30 @@ DESCRICOES: dict[str, str] = {
 }
 # O pedido da conversa sai como lacuna: a `conferir_saida` preenche.
 LACUNA_PEDIDO = "{numero_pedido}"
-# A regra do Painel de Garantia (Uranyx, a partir da ENTREGA — RN01 a RN03).
+# A regra do Painel de Garantia (Uranyx, a partir da ENTREGA — RN01 a RN03) e,
+# por cima, a decisão do dono de 21/10/2026 (fontes v1.3, itens 6 a 8): 1 ano
+# de garantia, os 90 primeiros dias com a loja e os 9 meses seguintes direto
+# com a Uranyx, e o caminho da Uranyx depois dos 90 dias — exatamente
+# `CAMINHO_URANYX`, nenhum outro site, telefone ou e-mail. Os meses de
+# hardware e de software continuam (o dado do Painel; o validador os aceita),
+# mas a fala ao cliente é a do ano (o prompt).
+DIAS_COM_A_LOJA_URANYX = 90
+CAMINHO_URANYX = "pelo app Uranyx ou pelo site uranyx.com.br/sac"
 REGRA_URANYX = {
     "hardware_meses": garantia_svc.MESES_HARDWARE,
     "software_meses": garantia_svc.MESES_SOFTWARE,
     "a_partir_de": "entrega",
+    "garantia_anos": 1,
+    "loja_dias": DIAS_COM_A_LOJA_URANYX,
+    "uranyx_meses": garantia_svc.MESES_SOFTWARE - 3,
+    "caminho_depois_da_loja": CAMINHO_URANYX,
 }
+# Os fatos da garantia Uranyx (a migration 0421 do outro passo, decisões 6 e 7):
+# o id entra nas evidências quando o fato existe; a regra vale sem eles (é a
+# decisão do dono). O TEXTO do fato não vai na regra (o 1º diz "homologados
+# pela Uranyx", que a regra 8 do manual proíbe dizer ao cliente).
+CHAVES_GARANTIA_URANYX = ("uranyx_garantia_1_ano", "uranyx_garantia_caminho")
+PERIODO_LOJA, PERIODO_URANYX, PERIODO_EXPIRADA = "loja", "uranyx", "expirada"
 # A garantia LEGAL (CDC) da linha sem prazo próprio — outras marcas, e a
 # Charlots sem o fato aprovado (revisão 2 de 20/10/2026): sem número e sem
 # data, entra em `garantias_conferidas` para a fala "tem a garantia legal; para
@@ -194,6 +213,8 @@ _SEM_MASCARA = frozenset(
         "inicio",
         "fim_hardware",
         "fim_software",
+        "fim_loja",
+        "fim_uranyx",
     }
 )
 # Dado pessoal, de dinheiro e de identidade interna que nunca sai de uma
@@ -245,7 +266,8 @@ class Resultado:
     números/nomes permitidos (False só em `buscar_respostas_equipe`);
     `garantias` = só `ver_garantia`: o que vai para
     `ctx.registrar_garantias`; `ids_rastro` = ids que só vão ao rastro
-    (os `par:<id>` dos exemplos).
+    (os `par:<id>` dos exemplos); `produto` = só `ver_anuncio`: o JSON é texto
+    de produto (as formas soltas dos números, `contexto.numeros_soltos`).
     """
 
     dados: dict
@@ -253,6 +275,7 @@ class Resultado:
     permitir_texto: bool = True
     garantias: tuple[dict, ...] = ()
     ids_rastro: tuple[str, ...] = ()
+    produto: bool = False
 
 
 # ── Formato ───────────────────────────────────────────────────────────────
@@ -389,7 +412,11 @@ async def executar(
         bruto = formatar(nome, dados)
         texto = ctx.cortar_resultado(bruto)
         if texto != contexto.SEM_ORCAMENTO:
-            ctx.permitir(ids=r.ids, textos=[_json(_sem_ids(dados))] if r.permitir_texto else [])
+            ctx.permitir(
+                ids=r.ids,
+                textos=[_json(_sem_ids(dados))] if r.permitir_texto else [],
+                produto=r.produto,
+            )
             if nome == VER_GARANTIA or r.garantias:
                 ctx.registrar_garantias(r.garantias)
         ctx.registrar_passo(nome, args, _ms(), ids=[*r.ids, *r.ids_rastro], cortado=texto != bruto)
@@ -731,7 +758,9 @@ async def dados_ver_anuncio(
     if dados["especificacoes"]["campos"] or dados["especificacoes"]["conflitos"]:
         ids.append(contexto.id_especificacoes(item))
     return Resultado(
-        dados=caber(dados, listas=("atributos",), textos=("descricao",)), ids=tuple(ids)
+        dados=caber(dados, listas=("atributos",), textos=("descricao",)),
+        ids=tuple(ids),
+        produto=True,
     )
 
 
@@ -827,7 +856,54 @@ def _para_validador(g: Mapping[str, Any]) -> dict:
         "produto": g.get("produto"),
         "regra": g.get("regra"),
         **({"antes_da_compra": g["antes_da_compra"]} if "antes_da_compra" in g else {}),
+        **{k: g[k] for k in ("fim_loja", "fim_uranyx", "periodo") if k in g},
     }
+
+
+def _como_dia(valor: Any) -> date | None:
+    """A data do registro do Painel (date ou ISO) — ou None."""
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    try:
+        return date.fromisoformat(str(valor)[:10]) if valor else None
+    except ValueError:
+        return None
+
+
+def periodos_uranyx(inicio: Any, fim_software: Any, dia: date) -> dict:
+    """Os períodos da garantia Uranyx (decisões 6 a 8 do dono, 21/10/2026). PURA.
+
+    `fim_loja` = início (a entrega) + 90 dias; `fim_uranyx` = o fim do software
+    do Painel (início + 12 meses); `periodo` no `dia`: "loja" (até o fim da
+    loja), "uranyx" (até o fim da Uranyx), "expirada" — ou None sem início.
+    """
+    comeco = _como_dia(inicio)
+    if comeco is None:
+        return {"fim_loja": None, "fim_uranyx": None, "periodo": None}
+    fim_loja = comeco + timedelta(days=DIAS_COM_A_LOJA_URANYX)
+    fim_uranyx = _como_dia(fim_software) or garantia_svc.calcular_prazos(comeco)[1]
+    if garantia_svc.coberto(fim_loja, dia):
+        periodo = PERIODO_LOJA
+    elif garantia_svc.coberto(fim_uranyx, dia):
+        periodo = PERIODO_URANYX
+    else:
+        periodo = PERIODO_EXPIRADA
+    return {"fim_loja": _iso(fim_loja), "fim_uranyx": _iso(fim_uranyx), "periodo": periodo}
+
+
+async def _regra_uranyx(s: AsyncSession, ctx: ContextoAgente) -> tuple[dict, list[str]]:
+    """A regra Uranyx e os ids dos fatos dela que existirem (evidência)."""
+    ids: list[str] = []
+    for chave in CHAVES_GARANTIA_URANYX:
+        fato = await fatos_loja.fato_da_chave(s, chave, agora=ctx.agora())
+        if fato is not None:
+            ids.append(fato["id"])
+    regra = dict(REGRA_URANYX)
+    if ids:
+        regra["fatos"] = list(ids)
+    return regra, ids
 
 
 # O acessório "a0NN" é das duas marcas (`sites_marca._SKU_MARCA` o tira de
@@ -882,13 +958,16 @@ async def _calculo(s: AsyncSession, ctx: ContextoAgente, alvo: Alvo) -> Resultad
     fim_hw = fim_sw = None
     status = rotulo = None
     regra: dict | None = None
+    periodos: dict = {}
     if linha == LINHA_URANYX:
         fim_hw, fim_sw = garantia_svc.calcular_prazos(inicio) if inicio else (None, None)
         status = garantia_svc.status_em(inicio, fim_hw, fim_sw, _hoje(ctx))
         if sem_data:
             status = contexto_svc.STATUS_ENTREGUE_SEM_DATA
         rotulo = contexto_svc.STATUS_GARANTIA_IA[status]
-        regra = dict(REGRA_URANYX)
+        regra, dos_fatos = await _regra_uranyx(s, ctx)
+        ids += dos_fatos
+        periodos = periodos_uranyx(inicio, fim_sw, _hoje(ctx))
     elif linha == LINHA_CHARLOTS:
         fato = await fatos_loja.fato_da_chave(s, CHAVE_GARANTIA_CHARLOTS, agora=ctx.agora())
         if fato is not None:
@@ -926,6 +1005,7 @@ async def _calculo(s: AsyncSession, ctx: ContextoAgente, alvo: Alvo) -> Resultad
         "inicio_origem": origem,
         "fim_hardware": _iso(fim_hw),
         "fim_software": _iso(fim_sw),
+        **periodos,
         "entregue_sem_data": sem_data,
         "regra": regra,
     }
@@ -1015,12 +1095,15 @@ async def dados_ver_garantia(
             registro = [g for g in achadas if g.get("de_onde") == contexto_svc.DE_ONDE_PEDIDO]
             if not registro:
                 return await _calculo(s, ctx, alvo)
+        regra, dos_fatos = await _regra_uranyx(s, ctx)
     # O pedido já diz de qual compra é (o "de onde" só vale na garantia
-    # achada pelo que o comprador citou, sem pedido na conversa).
+    # achada pelo que o comprador citou, sem pedido na conversa). Os períodos
+    # da Uranyx (decisões 6 a 8 do dono) pelo início do registro.
     garantias = [
         {
             **{k: v for k, v in g.items() if k != "de_onde" or alvo is None},
-            "regra": dict(REGRA_URANYX),
+            **periodos_uranyx(g.get("inicio"), g.get("fim_software"), _hoje(ctx)),
+            "regra": dict(regra),
         }
         for g in registro
     ]
@@ -1030,7 +1113,7 @@ async def dados_ver_garantia(
             "garantia_registrada": True,
             "garantias": garantias,
         },
-        ids=tuple(contexto.id_garantia(g["id"]) for g in registro),
+        ids=(*(contexto.id_garantia(g["id"]) for g in registro), *dos_fatos),
         garantias=tuple(_para_validador(g) for g in garantias),
     )
 
@@ -1076,7 +1159,7 @@ async def _regra_sem_pedido(
     regra: dict | None = None
     ids: list[str] = []
     if linhas == {LINHA_URANYX}:
-        regra = dict(REGRA_URANYX)
+        regra, ids = await _regra_uranyx(s, ctx)
     elif linhas == {LINHA_CHARLOTS}:
         fato = await fatos_loja.fato_da_chave(s, CHAVE_GARANTIA_CHARLOTS, agora=ctx.agora())
         if fato is not None:
@@ -1120,13 +1203,20 @@ def _do_assunto(regras: Iterable[Any], assunto: str) -> list[dict]:
 # da regra do assunto, para o modelo não receber ordens que brigam. Vale por
 # cima da regra só no que diz.
 POR_CIMA_DA_REGRA: dict[str, str] = {
+    # Integração r5 (21/10/2026): sem o dado confiável, o que o prompt manda
+    # (VARIAÇÕES E ESTOQUE: "as opções disponíveis aparecem para seleção no
+    # próprio anúncio") — antes, dado_indisponivel, que brigava com o prompt e
+    # mandava para pessoa o que o anúncio responde.
     "estoque_variacao": (
         "Decisão do dono: diga disponível ou esgotado pelas variações do ver_anuncio "
-        "(confiavel=true); sem o dado confiável, dado_indisponivel. O resto da regra vale."
+        "(confiavel=true); sem o dado confiável (disponivel=null ou confiavel=false), diga "
+        "que as opções disponíveis aparecem para seleção no próprio anúncio. O resto da "
+        "regra vale."
     ),
     "confirmar_variacao": (
         "Decisão do dono: diga disponível ou esgotado pelas variações do ver_anuncio "
-        "(confiavel=true); sem o dado confiável, dado_indisponivel."
+        "(confiavel=true); sem o dado confiável (disponivel=null ou confiavel=false), diga "
+        "que as opções disponíveis aparecem para seleção no próprio anúncio."
     ),
     "garantia": (
         "Decisão do dono: o prazo da regra e as datas que o ver_garantia devolveu podem ser "
@@ -1146,6 +1236,40 @@ POR_CIMA_DA_REGRA: dict[str, str] = {
         "'em poucos dias', 'antes de' uma data, nem número que não veio dos dados."
     ),
 }
+
+
+# Integração r5 (21/10/2026): o eval real mostrou o rascunho de pessoa copiando
+# a frase de espera da "Sugestão" da regra do manual antigo ("dizer que … a
+# equipe verifica a situação do envio e responde por aqui"). A regra vai como
+# está (o legado a lê igual; tirar a oração de uma INSTRUÇÃO cortava junto o que
+# vale); com a espera nela, o aviso da regra 16 vai por cima. Fora: os assuntos
+# em que "a equipe analisa e responde por aqui" é a orientação aprovada do
+# pedido de evidência (`checagens.ASSUNTOS_COM_EVIDENCIA`) e o "é robô?" do
+# `pede_atendente` ("a nossa equipe acompanha a conversa").
+SEM_ESPERA_DA_REGRA = (
+    "Regra 16 do manual: a frase de espera da sugestão desta regra ('a equipe verifica, "
+    "confere ou confirma … e responde por aqui') é do atendimento antigo e nunca vai ao "
+    "cliente, nem no rascunho de pessoa: siga a orientação do assunto."
+)
+_ESPERA_APROVADA_NA_REGRA = frozenset({*checagens.ASSUNTOS_COM_EVIDENCIA, "pede_atendente"})
+
+
+def _prontas_sem_espera(prontas: list[dict]) -> list[dict]:
+    """As respostas prontas sem a oração de espera; a que sobra só com cortesia sai.
+
+    As "(sugestão para pessoa)" do manual base trazem a espera ("Nossa equipe
+    vai verificar … e responde por aqui"): o agente recebe o resto
+    (`checagens.sem_frases_de_espera`), como na resposta que ele escreve.
+    """
+    saida: list[dict] = []
+    for p in prontas:
+        texto = checagens.sem_frases_de_espera(p["texto"])
+        if texto != p["texto"] and (
+            not texto.strip() or checagens.so_cortesia_ou_recebimento(texto)
+        ):
+            continue
+        saida.append({**p, "texto": texto})
+    return saida
 
 
 def _skus_do_pedido(base: BaseDoGerar) -> list[str]:
@@ -1194,11 +1318,13 @@ async def dados_consultar_manual(
                 .limit(MAX_RESPOSTAS_PRONTAS)
             )
         ).all()
-        prontas = [
-            {"id": contexto.id_modelo(linha.id), "texto": _cortar(linha.texto)}
-            for linha in modelos
-            if (linha.texto or "").strip()
-        ]
+        prontas = _prontas_sem_espera(
+            [
+                {"id": contexto.id_modelo(linha.id), "texto": _cortar(linha.texto)}
+                for linha in modelos
+                if (linha.texto or "").strip()
+            ]
+        )
         fatos: list[dict] = []
         if not ctx.sem_fatos:
             plat = ficha.plataforma_do_catalogo(ctx.plataforma)
@@ -1226,7 +1352,12 @@ async def dados_consultar_manual(
         "respostas_prontas": prontas,
         "fatos": [{k: f.get(k) for k in ("id", "texto", "escopo")} for f in fatos],
     }
-    if por_cima := POR_CIMA_DA_REGRA.get(assunto):
+    por_cima = POR_CIMA_DA_REGRA.get(assunto)
+    if assunto not in _ESPERA_APROVADA_NA_REGRA and any(
+        checagens.tem_espera(r.get("faca")) for r in regras
+    ):
+        por_cima = f"{por_cima} {SEM_ESPERA_DA_REGRA}" if por_cima else SEM_ESPERA_DA_REGRA
+    if por_cima:
         dados["por_cima_da_regra"] = por_cima
     if len(regras) > 1:
         dados["mais_regras"] = regras[1:]

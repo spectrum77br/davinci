@@ -765,7 +765,10 @@ async def test_ver_garantia_registrada_no_painel(db: AsyncSession, make_user):
         "2027-09-01",
         "ativa",
     )
-    assert item["regra"] == {"hardware_meses": 3, "software_meses": 12, "a_partir_de": "entrega"}
+    assert item["regra"] == ferramentas.REGRA_URANYX
+    # Revisão do r5i (decisões 6 a 8 do dono): os períodos pela entrega.
+    assert (item["fim_loja"], item["fim_uranyx"]) == ("2026-11-30", "2027-09-01")
+    assert item["periodo"] in ("loja", "uranyx", "expirada")
     assert dados["evidencias"] == [f"garantia:{g.id}"]
     assert ctx.garantia_consultada is True
     assert ctx.garantias_conferidas[0]["fim_hardware"] == "2026-12-01"
@@ -800,16 +803,19 @@ async def test_ver_garantia_calculada_uranyx_com_e_sem_data_de_entrega(db: Async
     assert dados["inicio_origem"] == "rastreio da transportadora (data aproximada)"
     assert dados["regra"]["hardware_meses"] == 3 and dados["regra"]["software_meses"] == 12
     assert dados["evidencias"] == ["garantia:pedido:{numero_pedido}"]
-    assert ctx.garantias_conferidas == [
-        {
-            "inicio": "2026-09-01",
-            "fim_hardware": "2026-12-01",
-            "fim_software": "2027-09-01",
-            "status": "ativa",
-            "produto": "Celular Uranyx A18 Pro Max S5",
-            "regra": {"hardware_meses": 3, "software_meses": 12, "a_partir_de": "entrega"},
-        }
-    ]
+    (conferida,) = ctx.garantias_conferidas
+    assert {k: v for k, v in conferida.items() if k != "periodo"} == {
+        "inicio": "2026-09-01",
+        "fim_hardware": "2026-12-01",
+        "fim_software": "2027-09-01",
+        "status": "ativa",
+        "produto": "Celular Uranyx A18 Pro Max S5",
+        "regra": ferramentas.REGRA_URANYX,
+        # Revisão do r5i (decisões 6 a 8 do dono): os períodos pela entrega.
+        "fim_loja": "2026-11-30",
+        "fim_uranyx": "2027-09-01",
+    }
+    assert conferida["periodo"] == dados["periodo"]
     # As datas viram números permitidos (o validador confere a data).
     assert any("2026-12-01" in t for t in ctx.permitidos_extra())
 

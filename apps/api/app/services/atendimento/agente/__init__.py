@@ -508,36 +508,76 @@ async def _passada(
     passou, o laço sai antes de rodar as ferramentas do turno. No último
     turno permitido ainda pedindo ferramenta, sai também (as ferramentas
     dele nem rodam: o runner pararia logo depois delas).
+
+    Toda saída (o fim, o corte, o prazo, o teto, o erro do SDK) fecha os
+    geradores do runner ANTES de voltar (`fechar_runner`, 21/10/2026).
     """
     volta = _Volta()
     runner = cliente.beta.messages.tool_runner(**argumentos)
-    async for mensagem in runner:
-        volta.ultima = mensagem
-        volta.turnos += 1
-        ctx.turnos += 1
-        ctx.modelo = getattr(mensagem, "model", None) or ctx.modelo
-        final = mensagem.stop_reason not in _CONTINUA
-        try:
-            await custo.registrar(
-                mensagem.usage,
-                ctx.modelo,
-                conversa_id=conversa_id,
-                uso=ctx.uso,
-                replay=ctx.modo_replay,
-                teto_conversa=ctx.teto_conversa_usd,
-            )
-        except custo.TetoEstourado as e:
-            if not final:
-                raise
-            logger.info("atendimento_agente_teto_na_resposta_final", qual=e.qual)
-        if final:
-            break
-        if mensagem.stop_reason == "tool_use" and volta.turnos >= max_turnos:
-            break
-        if _relogio() > prazo:
-            volta.estourou_prazo = True
-            break
+    iterador = runner.__aiter__()
+    try:
+        async for mensagem in iterador:
+            volta.ultima = mensagem
+            volta.turnos += 1
+            ctx.turnos += 1
+            ctx.modelo = getattr(mensagem, "model", None) or ctx.modelo
+            final = mensagem.stop_reason not in _CONTINUA
+            try:
+                await custo.registrar(
+                    mensagem.usage,
+                    ctx.modelo,
+                    conversa_id=conversa_id,
+                    uso=ctx.uso,
+                    replay=ctx.modo_replay,
+                    teto_conversa=ctx.teto_conversa_usd,
+                )
+            except custo.TetoEstourado as e:
+                if not final:
+                    raise
+                logger.info("atendimento_agente_teto_na_resposta_final", qual=e.qual)
+            if final:
+                break
+            if mensagem.stop_reason == "tool_use" and volta.turnos >= max_turnos:
+                break
+            if _relogio() > prazo:
+                volta.estourou_prazo = True
+                break
+    finally:
+        await fechar_runner(runner, iterador)
     return volta
+
+
+async def fechar_runner(runner: Any, iterador: Any) -> None:
+    """Fecha AGORA os geradores do Tool Runner, na ordem certa (21/10/2026). Nunca levanta.
+
+    O eval real de 21/10 logou, no fim de TODA conversa, "RuntimeError:
+    generator didn't stop after athrow()" no `BaseAsyncToolRunner.__run__`
+    (`anthropic` 1.9.0, `lib/tools/_beta_runner.py`). O `break` do laço
+    deixava suspensos o `__aiter__` (o gerador do `async for`) e o
+    `__run__` (`runner._iterator`) — este dentro do `async with
+    self._handle_request(...)`, cujo `asynccontextmanager` é outro gerador.
+    O runner e o `__run__` fazem ciclo (o `self` no quadro): só o GC ou o
+    `loop.shutdown_asyncgens()` os fechavam, em ordem QUALQUER. Fechado o
+    `_handle_request` primeiro, o `__aexit__` do `__run__` faz `athrow` num
+    gerador já terminado, o Python 3.12 (o da imagem) devolve sem levantar e
+    o `contextlib` acusa o erro.
+
+    Aqui: o de fora (`aclose` no `yield` do `async for`) e depois o
+    `__run__` — o `GeneratorExit` desce pelo `async with`, e o `__aexit__`
+    fecha o `_handle_request` ainda vivo; nada sobra para o fim do loop. O
+    comportamento não muda: fechar no `yield` do turno não faz requisição
+    nem roda ferramenta (as ferramentas só rodam depois que o `async with`
+    sai normalmente). Gerador já terminado (o erro do SDK, o fim natural):
+    o `aclose` não faz nada.
+    """
+    for gerador in (iterador, getattr(runner, "_iterator", None)):
+        fechar = getattr(gerador, "aclose", None)
+        if fechar is None:
+            continue
+        try:
+            await fechar()
+        except Exception as e:  # noqa: BLE001 — fechar nunca derruba a resposta
+            logger.warning("atendimento_agente_runner_nao_fechou", err=type(e).__name__)
 
 
 async def _laco(
@@ -914,11 +954,15 @@ async def _responder(
     garantias = ctx.garantias_conferidas
     if conversa.canal == constantes.CANAL_PERGUNTA:
         garantias = [g for g in garantias if g.get("regra") and not g.get("status")] or None
+    entrada = saida.para_conferir(p, base.ids_categorias)
+    # Integração r5 (21/10/2026): a lacuna crua no motivo_pessoa ("Pedido
+    # {numero_pedido} consta…") vira o valor, ou sai — ninguém a preenche.
+    entrada["motivo_modelo"] = checagens.motivo_sem_lacuna(entrada["motivo_modelo"], base.valores)
     conferida = await ia.conferir_saida(
         session,
         conversa,
         gatilho,
-        **saida.para_conferir(p, base.ids_categorias),
+        **entrada,
         motivos=base.motivos,
         ctx=base.ctx,
         fatos=pac.fatos,
@@ -941,6 +985,22 @@ async def _responder(
         forcar=base.forcar or ctx.modo_replay,
         agente=True,
     )
+    # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
+    # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta
+    # no resto, bloqueado e sem texto). As checagens leem o texto sem ela (a do
+    # andamento lê o do modelo: sem as mesmas frases).
+    lacunas_vazias = checagens.lacunas_no_texto(conferida.texto)
+    conferida = checagens.sem_lacuna_vazia(conferida)
+    # Integração r5: o rascunho de pessoa sem texto (o prompt: "nada verdadeiro a
+    # dizer antes da pessoa") não é erro do validador — a ação é o motivo.
+    conferida = checagens.sem_o_texto_vazio_de_pessoa(
+        conferida, acao=saida.PESSOA if p.acao == saida.PESSOA or ctx.acoes_pessoa else p.acao
+    )
+    p_conferir = (
+        p.model_copy(update={"texto": checagens.sem_as_frases_das_lacunas(p.texto, lacunas_vazias)})
+        if lacunas_vazias
+        else p
+    )
     # As fichas do pacote e as que o `ver_anuncio` leu (com as variações dele):
     # a conferência de estoque e cor escolhe a do anúncio citado (revisão 2 de
     # 20/10/2026 — antes só a 1ª do pacote contava).
@@ -948,7 +1008,7 @@ async def _responder(
     # e a origem que a resposta afirma são conferidos contra ele.
     ctx.pedido_da_conversa = pac.pedido
     chk = checagens.conferir(
-        p, conferida, ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas], gatilho=gatilho
+        p_conferir, conferida, ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas], gatilho=gatilho
     )
     # A etiqueta Devolução da conversa (paridade com a Caixa Humano, spec 6.5
     # item 11): a `checagens.conferir` não recebe a conversa (contrato).
@@ -999,6 +1059,12 @@ async def _responder(
         )
     final = checagens.aplicar(conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=base.modo)
     _guardar_avisos(ctx, final)
+    # A garantia Uranyx depois dos 90 dias (decisão 7 do dono): o envio confere
+    # o texto sem a frase do caminho da Uranyx só com esta marca no rascunho.
+    if checagens.caminho_uranyx_liberado(garantias) and checagens.sem_caminho_uranyx(
+        final.texto
+    ) != (final.texto or ""):
+        ctx.isencoes = [checagens.ISENCAO_CAMINHO_URANYX]
     codigos = [pendencia.codigo for pendencia in chk.pendencias]
     # A 2ª camada (20/10/2026): o verificador, só no rascunho que poderia sair
     # sozinho, com o MESMO cliente e o que sobra do prazo; sem o "ok", pessoa.

@@ -535,7 +535,12 @@ def test_a_trava_da_ficha_pelo_texto_so_no_automatico():
         ctx = ContextoAgente.da_conversa(conversa, None, modo=modo)
         chk = checagens.conferir(p, conferida, ctx, base, fichas=[], gatilho=None)
         codigos = {x.codigo for x in chk.pendencias}
-        assert (checagens.FICHA_NO_AUTOMATICO in codigos) is pego
+        # Eval real de 21/10/2026: no `estoque_variacao` a trava da ficha (spec
+        # 6.2: só os assuntos de dado do produto) deu lugar à regra suave da
+        # característica que o anúncio não traz — o AMOLED continua pego, só no
+        # automático (`test_atendimento_agente_eval_real.py`).
+        assert (checagens.CARACTERISTICA_FORA_DO_ANUNCIO in codigos) is pego
+        assert checagens.FICHA_NO_AUTOMATICO not in codigos
 
 
 # ─────────────── o caminho para fora da plataforma ───────────────

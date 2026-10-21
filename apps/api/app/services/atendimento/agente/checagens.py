@@ -69,7 +69,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -301,9 +301,27 @@ def desdobrar(texto: str | None) -> str:
 # ── 1. Evidências ─────────────────────────────────────────────────────────
 
 
+def _orientacao_do_sistema(evidencia: str) -> bool:
+    """`regra:<assunto>` de um assunto cuja orientação o bloco 1 do sistema já traz
+    (`prompt.ORIENTACAO`)? O modelo a leu sem chamar o `consultar_manual` — o dev
+    f0537c2d95ac do eval real de 21/10/2026 ("evidência citada sem prova
+    (regra:cancelamento)" numa resposta que seguia a orientação do prompt)."""
+    from app.services.atendimento.agente import prompt
+
+    assunto = evidencia.removeprefix("regra:")
+    return assunto != evidencia and assunto in prompt.ORIENTACAO
+
+
 def conferir_evidencias(evidencias: Iterable[str], ctx: ContextoAgente) -> list[PendenciaAgente]:
-    """Id citado que nada provou (`ctx.registro.desconhecidas`) → `so_auto`. PURA."""
-    desconhecidas = ctx.registro.desconhecidas(evidencias)
+    """Id citado que nada provou (`ctx.registro.desconhecidas`) → `so_auto`. PURA.
+
+    A `regra:<assunto>` dos assuntos com a orientação no sistema prova-se sozinha
+    (`_orientacao_do_sistema`, integração r5); a dos outros (rastreio, prazo…)
+    só pelo `consultar_manual`.
+    """
+    desconhecidas = [
+        e for e in ctx.registro.desconhecidas(evidencias) if not _orientacao_do_sistema(e)
+    ]
     if not desconhecidas:
         return []
     lista = ", ".join(desconhecidas[:5]) + ("…" if len(desconhecidas) > 5 else "")
@@ -911,7 +929,10 @@ _ROTULO_CAMPO = {
 # anúncio se ele tem NFC", "caso tenha 5G…".
 _NAO_AFIRMA = re.compile(
     r"\bnao\s+(?:temos|tenho|ha|consta|encontr\w*|sei|sabemos|achamos|localiz\w*)\s+"
-    r"(?:[a-z0-9]+\s+){0,3}?(?:informac\w*|dados?|certeza|confirmac\w*|detalhes?|essa)"
+    r"(?:[a-z0-9]+\s+){0,3}?(?:informac\w*|dados?|certeza|confirmac\w*|detalhes?|essa"
+    # Integração r5 (o dev a6ff4d22739b): "não temos uma comparação de medidas
+    # entre os dois" não afirma medida nenhuma.
+    r"|comparac\w*|indicac\w*|recomendac\w*|opiniao)"
     r"|\bnao\s+(?:consigo|conseguimos|da\s+para|podemos|posso)\s+(?:[a-z0-9]+\s+){0,2}?"
     r"(?:confirmar|informar|garantir|dizer|afirmar)\b"
     r"|\b(?:confira|verifique|consulte|veja|confirme|cheque)\b"
@@ -1079,12 +1100,8 @@ def _numero(valor: Any) -> float | None:
 _ORACAO = re.compile(r";|,(?!\d)|\bmas\b")
 
 
-def _afirmacoes(texto: str) -> list[especificacoes_svc.Achado]:
-    """O que a resposta AFIRMA do produto (não as perguntas nem as ressalvas).
-
-    A ressalva tira só a ORAÇÃO dela: "Ele tem NFC, e se for o caso…" ainda
-    afirma o NFC.
-    """
+def _afirmacoes_com_oracao(texto: str) -> list[tuple[especificacoes_svc.Achado, str]]:
+    """(achado, a oração dele) do que a resposta AFIRMA do produto (ver `_afirmacoes`)."""
     saida = []
     for sentenca, pergunta in _sentencas(texto):
         # Rodada 4 (achado 15): o pedido de evidência que cita a especificação
@@ -1094,8 +1111,74 @@ def _afirmacoes(texto: str) -> list[especificacoes_svc.Achado]:
             continue
         for oracao in _ORACAO.split(sentenca):
             if oracao.strip() and not _NAO_AFIRMA.search(_plano(oracao)):
-                saida.extend(especificacoes_svc.achados_do_texto(oracao))
+                saida.extend((a, oracao) for a in especificacoes_svc.achados_do_texto(oracao))
     return saida
+
+
+def _afirmacoes(texto: str) -> list[especificacoes_svc.Achado]:
+    """O que a resposta AFIRMA do produto (não as perguntas nem as ressalvas).
+
+    A ressalva tira só a ORAÇÃO dela: "Ele tem NFC, e se for o caso…" ainda
+    afirma o NFC.
+    """
+    return [a for a, _oracao in _afirmacoes_com_oracao(texto)]
+
+
+# ── A resposta POR VERSÃO no anúncio de 2+ modelos (integração r5, 21/10/2026) ──
+#
+# O campo com `varia_por_modelo` (o anúncio liga 2+ modelos) ia sempre para o
+# aviso "varia conforme o modelo do anúncio (dado indisponível)". O prompt manda
+# responder por versão quando a descrição dá o valor de cada uma ("Versão
+# 8GB+256GB: com NFC / Versão 4GB+128GB: sem NFC" — o eval real: o NFC por
+# armazenamento escrito na descrição foi para pessoa). Vale a resposta cuja
+# oração cita UMA versão (a RAM, o armazenamento ou o código do modelo) que um
+# trecho da fonte com UMA versão também cita, com o MESMO valor do campo.
+_TRECHOS_DA_FONTE = re.compile(r"\n|;|\||•|\s-\s|(?<=[.!?])\s+")
+_CODIGO_DO_MODELO = re.compile(r"\b[a-z]{1,3}\d{1,4}[a-z]{0,3}\b")
+
+
+def _versao(trecho: str) -> frozenset[str] | None:
+    """As marcas de versão do trecho (plano): "ram:8", "armazenamento:256",
+    "modelo:f109s". None = duas versões no mesmo trecho (ambíguo)."""
+    marcas: set[str] = set()
+    por_campo: dict[str, set[str]] = {}
+    for a in especificacoes_svc.achados_do_texto(trecho):
+        if a.campo not in ("ram", "armazenamento"):
+            continue
+        for chave in a.chaves:
+            if (n := _numero(chave)) is not None:
+                por_campo.setdefault(a.campo, set()).add(str(int(n)))
+                marcas.add(f"{a.campo}:{int(n)}")
+    if any(len(v) > 1 for v in por_campo.values()):
+        return None
+    marcas.update(f"modelo:{m}" for m in _CODIGO_DO_MODELO.findall(trecho))
+    return frozenset(marcas)
+
+
+def _por_versao_na_fonte(
+    campo: str, da_resposta: frozenset, oracao: str, fontes_cruas: Sequence[str]
+) -> bool:
+    """A oração afirma o campo de UMA versão que a fonte diz com o mesmo valor? PURA.
+
+    `fontes_cruas` = os textos das fontes COMO VIERAM (a quebra de linha da
+    descrição separa as versões; o `_plano` a junta)."""
+    da_oracao = _versao(_plano(oracao))
+    if not da_oracao:
+        return False
+    for fonte in fontes_cruas:
+        for cru in _TRECHOS_DA_FONTE.split(fonte or ""):
+            trecho = _plano(cru)
+            if not trecho:
+                continue
+            if not any(
+                a.campo == campo and _bate(campo, da_resposta, _chaves_da_resposta(a))
+                for a in especificacoes_svc.achados_do_texto(trecho)
+            ):
+                continue
+            do_trecho = _versao(trecho)
+            if do_trecho and da_oracao & do_trecho:
+                return True
+    return False
 
 
 # O que ACOMPANHA o produto ("o fone vem junto?", o caso da Kia de 20/10/2026).
@@ -1293,11 +1376,12 @@ def conferir_fonte_produto(
         return []
     dados = [*(f for f in fichas if isinstance(f, Mapping)), *_do_registro(ctx)]
     especs = _especificacoes(dados)
-    fontes = [_plano(t) for d in dados for t in _textos_do(d)]
-    fontes += [_plano(t) for t in fontes_extra if isinstance(t, str) and t.strip()]
+    cruas = [t for d in dados for t in _textos_do(d) if isinstance(t, str)]
+    cruas += [t for t in fontes_extra if isinstance(t, str) and t.strip()]
+    fontes = [_plano(t) for t in cruas]
     achados_fonte = [a for t in fontes for a in especificacoes_svc.achados_do_texto(t)]
     saida: list[PendenciaAgente] = []
-    for achado in _afirmacoes(texto):
+    for achado, oracao in _afirmacoes_com_oracao(texto):
         campo = achado.campo
         rotulo = _ROTULO_CAMPO.get(campo, campo)
         familia = ("ram", "ram_fisica", "ram_virtual") if campo == "ram" else (campo,)
@@ -1312,7 +1396,10 @@ def conferir_fonte_produto(
             continue
         if any(c.get("varia_por_modelo") for c in linhas):
             # O anúncio de 2+ modelos (revisão de 20/10/2026): o valor do
-            # anúncio pode ser o do OUTRO modelo — pessoa confere.
+            # anúncio pode ser o do OUTRO modelo — pessoa confere. A resposta
+            # POR VERSÃO que a fonte dá igual passa (integração r5).
+            if _por_versao_na_fonte(campo, _chaves_da_resposta(achado), oracao, cruas):
+                continue
             saida.append(
                 _suave(
                     PRODUTO_SEM_FONTE,
@@ -1451,6 +1538,7 @@ def _sem_as_opcoes(oracao: str, opcoes: frozenset[str], *, do_cliente: bool = Fa
                 do_cliente
                 and depois_do_verbo
                 and (_CARACTERISTICA.search(limpa) or _CARACTERISTICA_2.search(limpa))
+                and _PARTE_INTEIRA + limpa not in opcoes
             ):
                 continue
         saida.append(p)
@@ -1594,8 +1682,11 @@ _SO_SIM_OU_NAO = re.compile(
 
 
 def _opcoes_das_fichas(fichas: Sequence[Any]) -> frozenset[str]:
-    return frozenset(
-        _NUMERO_E_UNIDADE.sub(r"\1\2", p)
+    """As palavras dos nomes das variações, SEM a pontuação em volta (eval real de
+    21/10/2026: "Preto (Tecido), 44mm" dava "(tecido)," e o `_sem_as_opcoes`, que
+    compara a palavra limpa, não a tirava — "tecido" virava característica)."""
+    palavras = (
+        _NUMERO_E_UNIDADE.sub(r"\1\2", p).strip(",.;:!?()")
         for f in fichas
         if isinstance(f, Mapping)
         for v in f.get("variacoes") or []
@@ -1604,6 +1695,27 @@ def _opcoes_das_fichas(fichas: Sequence[Any]) -> frozenset[str]:
             r"\1\2", validador.plano_de(str(v.get("nome") or ""))
         ).split()
     )
+    # Integração r5: a PARTE inteira de uma só palavra ("46mm" de "Prata, 46mm"),
+    # marcada (`_PARTE_INTEIRA`): é a variação mesmo depois do verbo de
+    # capacidade ("tem 46mm?" pergunta da variação, não da característica — o
+    # "tem nfc?" com o "Branco NFC" continua característica: "nfc" não é parte
+    # inteira).
+    inteiras: list[str] = []
+    for f in fichas:
+        if not isinstance(f, Mapping):
+            continue
+        for v in f.get("variacoes") or []:
+            if not isinstance(v, Mapping):
+                continue
+            for bruta in re.split(r"[,/]", str(v.get("nome") or "")):
+                parte = _NUMERO_E_UNIDADE.sub(r"\1\2", validador.plano_de(bruta)).strip(" ()")
+                if len(parte.split()) == 1:
+                    inteiras.append(_PARTE_INTEIRA + parte)
+    return frozenset([*(p for p in palavras if p), *inteiras])
+
+
+# A marca da parte inteira da variação no conjunto do `_opcoes_das_fichas`.
+_PARTE_INTEIRA = "="
 
 
 def _oracao_de_caracteristica(
@@ -2147,12 +2259,220 @@ def _responde_com_afirmacao(texto: str) -> bool:
     return False
 
 
+# Os assuntos em que a trava da ficha vale pelo TEXTO da resposta, como antes
+# (21/10/2026): os de dado do produto (a spec 6.2 — `espec_*`, condição e água —
+# e a decisão do dono, `constantes.ASSUNTOS_SO_PESSOA_NO_AGENTE`) e os GENÉRICOS
+# (`ia._ASSUNTOS_GENERICOS`), em que a característica se esconde sem assunto
+# ("o cadeado é TSA?" → "Sim, o cadeado é TSA." declarado `outro`; "Boa tarde!
+# … e a bateria é excelente." declarado `saudacao_ou_vaga`).
+_ASSUNTOS_DA_FICHA_PELO_TEXTO = frozenset(
+    {
+        *constantes.ASSUNTOS_SO_PESSOA_NO_AGENTE,
+        "outro",
+        "saudacao_ou_vaga",
+        "agradecimento",
+        "pede_atendente",
+    }
+)
+CARACTERISTICA_FORA_DO_ANUNCIO = "caracteristica_fora_do_anuncio"
+# Os nomes de característica que, sozinhos, não afirmam valor nenhum.
+_SO_O_NOME_DA_CARACTERISTICA = frozenset(
+    "memoria armazenamento ram rom tela display camera cameras bateria processador material"
+    " capacidade medidas medida dimensoes sistema operacional".split()
+)
+MOTIVO_CARACTERISTICA_FORA_DO_ANUNCIO = (
+    "afirma característica que os dados do anúncio não trazem ({termos}) — no automático,"
+    " pessoa confere"
+)
+
+
+def _textos_de(valor: Any) -> Iterator[str]:
+    if isinstance(valor, str):
+        yield valor
+    elif isinstance(valor, Mapping):
+        for v in valor.values():
+            yield from _textos_de(v)
+    elif isinstance(valor, list | tuple):
+        for v in valor:
+            yield from _textos_de(v)
+
+
+# O termo que o dado traz só NEGADO não é do dado (revisão r5i de 21/10/2026:
+# a descrição "Não tem leitor de digital. Câmera simples, sem estabilização."
+# deixava passar "ela tem leitor de digital" e "a câmera tem estabilização").
+# A negação na mesma oração do dado, até 4 palavras antes do termo ("não
+# tem", "não acompanha", "sem"), ou o atributo negado logo depois ("NFC: Não").
+_CORTE_DO_DADO = re.compile(r"[;!?,]|\.(?!\d)|\b(?:mas|porem|contudo|entretanto)\b")
+_NEGA_O_TERMO_ANTES = re.compile(r"\b(?:nao|nem|sem|nenhum\w*)\b(?:\s+\S+){0,4}?\s*$")
+_NEGA_O_TERMO_DEPOIS = re.compile(r"\s*[:=-]?\s*(?:nao|sem|nenhum\w*)\b")
+
+
+def _afirmado_no_dado(termo: str, textos: Sequence[str]) -> bool:
+    """O `termo` aparece em algum dos `textos` (já planos) fora de oração que o
+    nega? PURA. A busca é por trecho, como o `termo in dado` de antes."""
+    if not termo:
+        return False
+    for texto in textos:
+        inicio = texto.find(termo)
+        while inicio >= 0:
+            fim = inicio + len(termo)
+            corte = max((c.end() for c in _CORTE_DO_DADO.finditer(texto, 0, inicio)), default=0)
+            if not (
+                _NEGA_O_TERMO_ANTES.search(texto[corte:inicio])
+                or _NEGA_O_TERMO_DEPOIS.match(texto, fim)
+            ):
+                return True
+            inicio = texto.find(termo, inicio + 1)
+    return False
+
+
+def _termo_no_dado(termo: str, oracao: str, dado: Sequence[str]) -> bool:
+    """O dado traz o `termo` como a `oracao` o diz? Afirmado, se ela afirma;
+    também negado, se ela nega ("não tem leitor de digital"). PURA."""
+    if _afirmado_no_dado(termo, dado):
+        return True
+    onde = oracao.find(termo)
+    return (
+        onde >= 0
+        and bool(_NEGA_O_TERMO_ANTES.search(oracao[:onde]))
+        and any(termo in d for d in dado)
+    )
+
+
+_PALAVRA_DO_DADO = re.compile(r"[a-z0-9]+")
+_NEGACAO_DO_DADO = frozenset({"nao", "nem", "sem", "nenhum", "nenhuma"})
+# Verbos e nomes genéricos que a negação do dado também cobre ("não acompanha
+# carregador") e que nada dizem sozinhos.
+_SEM_PESO_NO_DADO = frozenset(
+    {
+        "acompanha", "acompanham", "possui", "possuem", "funciona", "funcionam", "suporta",
+        "suportam", "inclui", "incluem", "oferece", "oferecem", "contem", "temos", "possuimos",
+        "aparelho", "celular", "produto", "modelo", "versao", "estoque", "disponivel",
+    }
+)  # fmt: skip
+_ATRIBUTO_NEGADO = re.compile(r"^(?P<nome>[^:=]+)[:=]\s*(?:nao|sem|nenhum\w*)\b")
+
+
+def _palavras_pela_negacao(texto: str) -> tuple[set[str], set[str]]:
+    """(afirmadas, negadas): as palavras de 5+ letras de `texto` (plano), pela
+    negação da oração (até 5 palavras depois de "não/sem/nem"; o atributo
+    "NFC: Não" nega o nome). PURA. Revisão r5i de 21/10/2026."""
+    afirmadas: set[str] = set()
+    negadas: set[str] = set()
+    for segmento in _CORTE_DO_DADO.split(texto):
+        if m := _ATRIBUTO_NEGADO.match(segmento.strip()):
+            negadas.update(
+                p
+                for p in _PALAVRA_DO_DADO.findall(m.group("nome"))
+                if len(p) >= 5 and p not in _SEM_PESO_NO_DADO
+            )
+            continue
+        negada_em: int | None = None
+        for i, p in enumerate(_PALAVRA_DO_DADO.findall(segmento)):
+            if p in _NEGACAO_DO_DADO:
+                negada_em = i
+                continue
+            if len(p) < 5 or p.isdigit() or p in _SEM_PESO_NO_DADO:
+                continue
+            if negada_em is not None and i - negada_em <= 5:
+                negadas.add(p)
+            else:
+                afirmadas.add(p)
+    return afirmadas, negadas
+
+
+def caracteristicas_fora_do_dado(
+    texto: str,
+    fichas: Sequence[Any] = (),
+    *,
+    dados_extra: Iterable[Any] = (),
+    nomes_de_produto: Iterable[Any] = (),
+) -> list[str]:
+    """Os termos de característica que o texto AFIRMA e que nenhum dado traz (21/10/2026). PURA.
+
+    O dado = os textos das fichas (título, atributos, descrição, variações,
+    especificações), o que as ferramentas devolveram (`dados_extra`, o
+    `ctx.registro.textos`) e os nomes do produto. Termo a termo, pelo mesmo
+    vocabulário do `afirma_caracteristica` (`_CARACTERISTICA`,
+    `_CARACTERISTICA_2`, `_POR_TERMO`), na oração afirmada fora da cortesia e
+    do pedido de evidência, sem os nomes das variações; a oração que afirma
+    só pela FORMA ("ele aguenta tranquilo") conta inteira (não há termo para
+    achar no dado).
+    """
+    if not (texto or "").strip():
+        return []
+    nomes_de_produto = list(nomes_de_produto)
+    # Cada texto do dado e cada linha dele separados (a oração de um não
+    # continua no outro; a descrição costuma ter uma característica por linha).
+    dado = [
+        _NUMERO_E_UNIDADE.sub(r"\1\2", _plano(linha))
+        for t in (
+            *_textos_de(list(fichas)),
+            *_textos_de(list(dados_extra)),
+            *_textos_de(nomes_de_produto),
+        )
+        for linha in t.splitlines()
+    ]
+    # As palavras que o dado só traz NEGADAS ("Câmera simples, sem
+    # estabilização": "a câmera tem estabilização" afirma o que o dado nega).
+    no_dado_afirmadas: set[str] = set()
+    no_dado_negadas: set[str] = set()
+    for linha in dado:
+        afirmadas, negadas = _palavras_pela_negacao(linha)
+        no_dado_afirmadas |= afirmadas
+        no_dado_negadas |= negadas
+    so_negadas = no_dado_negadas - no_dado_afirmadas
+    opcoes = _opcoes_das_fichas(fichas)
+    nomes = _nomes_de_produto(nomes_de_produto, fichas)
+    cabecas = _cabecas(nomes_de_produto, fichas)
+    plano = _sem_as_cabecas(_sem_os_nomes(_plano(_com_eh(texto)), nomes), cabecas)
+    fora: list[str] = []
+    for sentenca, pergunta in _sentencas(plano):
+        if pergunta or acao_pessoa.pede_evidencia(sentenca):
+            continue
+        for oracao in _ORACAO.split(sentenca):
+            oracao = oracao.strip()
+            if not oracao or _NAO_AFIRMA.search(oracao) or _so_acolhimento(oracao.strip(" ,.;:!")):
+                continue
+            if not _oracao_de_caracteristica(oracao, opcoes):
+                continue
+            resto = _NUMERO_E_UNIDADE.sub(r"\1\2", _sem_as_opcoes(oracao, opcoes))
+            termos = [
+                " ".join(m.group(0).split())
+                for padrao in (_CARACTERISTICA, _CARACTERISTICA_2, *(p for _r, p, _t in _POR_TERMO))
+                for m in padrao.finditer(resto)
+            ]
+            # O que acompanha: o objeto é o termo ("o carregador vem na caixa").
+            if _ACOMPANHA.search(resto):
+                termos += [f for nome in _objetos(resto) for f in _OBJETOS[nome][:1]]
+            if not termos:
+                # Só a FORMA ("ele aguenta tranquilo"): não há termo para achar no dado.
+                fora.append(oracao)
+                continue
+            # O nome da característica ("de memória", "de armazenamento") não é o
+            # dado: o valor ao lado dele é ("12 GB de memória"). Só o nome ("a RAM e
+            # o armazenamento variam conforme a versão") vale se o dado traz algum.
+            # O termo que o dado só traz negado não conta (`_termo_no_dado`).
+            valores = [t for t in termos if t not in _SO_O_NOME_DA_CARACTERISTICA]
+            if valores:
+                fora += [t for t in valores if not _termo_no_dado(t, resto, dado)]
+            elif not any(_termo_no_dado(t, resto, dado) for t in termos):
+                fora += termos
+            # A palavra que a oração afirma e que o dado só traz negada.
+            if so_negadas:
+                afirmadas_aqui, _negadas = _palavras_pela_negacao(resto)
+                fora += sorted(afirmadas_aqui & so_negadas)
+    return list(dict.fromkeys(fora))
+
+
 def conferir_ficha_no_automatico(
     texto: str,
     fichas: Sequence[Any] = (),
     *,
     textos_cliente: Sequence[str] = (),
     nomes_de_produto: Iterable[Any] = (),
+    assunto: str | None = None,
+    dados_extra: Iterable[Any] = (),
 ) -> list[PendenciaAgente]:
     """A afirmação de característica do produto → no automático, pessoa confere
     (`ia.MOTIVO_FICHA_NO_AUTOMATICO`, `so_auto`: no copiloto é só aviso). PURA.
@@ -2162,7 +2482,51 @@ def conferir_ficha_no_automatico(
     "aguenta queda?", "funciona na Claro?"), qualquer resposta com uma oração
     afirmada vai para pessoa — a paráfrase fora do vocabulário ("Dá para usar
     debaixo do chuveiro tranquilamente.") também.
+
+    `assunto` (eval real de 21/10/2026): a trava disparava em
+    `estoque_variacao`, `troca_devolucao`, `opiniao_recomendacao` e
+    `acessorios_avulsos` — a resposta de estoque que cita o nome da variação
+    ("Preto, 44mm", "Preto (Tecido)"), a opinião que repete a ficha ("tem dual
+    chip e vem desbloqueado"). A spec 6.2 a deixa para os assuntos de dado do
+    produto; estoque e variação são da `conferir_variacoes`. Fora de
+    `_ASSUNTOS_DA_FICHA_PELO_TEXTO`:
+
+    - a resposta à PERGUNTA de característica do cliente que AFIRMA uma
+      característica ("a versão branca tem nfc?" → "Tem sim, a opção Branco NFC
+      é a versão com NFC.") continua com a trava da ficha — é o assunto de
+      produto com outro nome;
+    - a característica que ninguém perguntou e que o dado NÃO traz ("Temos a
+      preta, e a tela é AMOLED." sem AMOLED no anúncio) é regra suave própria
+      (`MOTIVO_CARACTERISTICA_FORA_DO_ANUNCIO`, `caracteristicas_fora_do_dado`);
+    - a que o dado traz, nada.
+
+    None = sem o assunto (a régua inteira, como antes).
     """
+    if assunto is not None and assunto not in _ASSUNTOS_DA_FICHA_PELO_TEXTO:
+        pergunta = bool(textos_cliente) and (
+            not _relata_problema(textos_cliente)
+            and pede_caracteristica(
+                textos_cliente, fichas, so_vocabulario=True, nomes_de_produto=nomes_de_produto
+            )
+        )
+        if not (
+            pergunta
+            and afirma_caracteristica(
+                texto, fichas, textos_cliente=textos_cliente, nomes_de_produto=nomes_de_produto
+            )
+        ):
+            fora = caracteristicas_fora_do_dado(
+                texto, fichas, dados_extra=dados_extra, nomes_de_produto=nomes_de_produto
+            )
+            if not fora:
+                return []
+            termos = ", ".join(f"'{t}'" for t in fora[:3])
+            return [
+                _suave(
+                    CARACTERISTICA_FORA_DO_ANUNCIO,
+                    MOTIVO_CARACTERISTICA_FORA_DO_ANUNCIO.format(termos=termos),
+                )
+            ]
     if not afirma_caracteristica(
         texto, fichas, textos_cliente=textos_cliente, nomes_de_produto=nomes_de_produto
     ) and not (
@@ -2732,7 +3096,8 @@ def _montar_promessa_forma() -> re.Pattern[str]:
         passiva += list(f["part"])
         terceira += list(f["fut3"])
         if verbo in _VERBOS_CONSULTA:
-            # "a loja acompanha" é a orientação da troca (spec 6.4).
+            # "a loja acompanha" era a orientação da troca (spec 6.4); o prompt de
+            # 21/10/2026 não a usa mais, e ela não promete ação concreta.
             if verbo != "acompanhar":
                 terceira_do_caso += list(f["p3"])
         else:
@@ -3288,6 +3653,267 @@ def conferir_promessa_de_equipe(
     return [_suave(PROMESSA_DE_EQUIPE, f'promete ação da equipe numa orientação ("{trecho}")')]
 
 
+# ── 5'. A promessa de ESPERA no rascunho de PESSOA (eval real de 21/10/2026) ──
+#
+# 32 dos 34 erros críticos do eval real da Kia eram rascunhos de pessoa com a
+# frase de espera ("nossa equipe vai verificar/confirmar e responder por aqui",
+# "a equipe acompanha o caso", "Assim que a análise terminar, respondemos por
+# aqui") — a regra 16 do manual; e quem envia o rascunho de pessoa já agiu (o
+# prompt: O RASCUNHO DE PESSOA). A `conferir_promessa_de_equipe` não lê o
+# rascunho de pessoa (a ação dele é da equipe: "segue o arquivo da NF", "o envio
+# foi segurado", as opções de troca). Aqui, só a ESPERA — a promessa cujo verbo
+# é conferir, analisar, confirmar, responder, retornar, avisar, acompanhar ou
+# encaminhar/repassar ("vamos encaminhar ao responsável"),
+# e a espera sem verbo de ação ("assim que tivermos retorno", "respondemos por
+# aqui") —, como regra SUAVE: o aviso para quem envia (o rascunho de pessoa
+# nunca sai sozinho). Sem a exceção do pedido de vídeo: "a equipe analisa e
+# responde por aqui" só vale na resposta (o prompt: "num rascunho de pessoa,
+# nunca").
+ESPERA_NO_RASCUNHO_DE_PESSOA = "espera_no_rascunho_de_pessoa"
+MOTIVO_ESPERA_NO_RASCUNHO_DE_PESSOA = (
+    'rascunho de pessoa com promessa de espera ("{trecho}") — quem envia já agiu: tire a frase'
+)
+# O verbo da espera dentro da promessa que o `_promessas` achou.
+_VERBO_DA_ESPERA = re.compile(
+    r"\b(?:verific|chec|confer|confirm|analis|averigu|apur|investig|retorn|respond|avis|acompanh"
+    r"|consult|avali|olh|cient|contat|tivermos|encaminh|repass)\w*"
+    r"|\b(?:dar|damos|daremos|der)\s+(?:um\s+)?(?:retorno|posicao|resposta)\b"
+    r"|\bve[rj]?\b|\bvendo\b|\bentr\w*\s+em\s+contato\b"
+)
+# A espera que o `_promessas` não tem.
+_ESPERA_ALEM = re.compile(
+    # a equipe que ACOMPANHA ("a equipe acompanha o caso", "nossa equipe
+    # acompanha a conversa e responde por aqui");
+    r"\b(?:equipe|loja|time|setor|atendimento|gente)\s+(?:[a-z0-9]+\s+){0,2}?"
+    r"(?:acompanha|acompanham|acompanhara|vai\s+acompanhar|segue\s+acompanhando"
+    r"|esta\s+acompanhando)\b"
+    # "respondemos/responde/respondendo por aqui" (o cliente nunca é o sujeito);
+    r"|\b(?:respondemos|respondendo|retornamos|retornando|responde|retorna|responderemos"
+    r"|retornaremos|confirma|confirmamos|confirmaremos|voltamos|voltaremos)\s+"
+    r"(?:por\s+aqui|aqui\s+mesmo|nesta\s+conversa|neste\s+chat|pelo\s+chat"
+    r"|por\s+esta\s+mensagem)\b"
+    # o depois da espera ("assim que tivermos retorno", "assim que a análise terminar");
+    r"|\b(?:assim\s+que|logo\s+que|quando)\s+(?:tivermos|tiver|houver|recebermos)\s+"
+    r"(?:um\s+|uma\s+|o\s+|a\s+|algum\s+|alguma\s+)?(?:retorno|resposta|novidade|posicao"
+    r"|atualizacao|confirmacao)\b"
+    r"|\b(?:assim\s+que|logo\s+que|quando)\s+a\s+(?:analise|verificacao|conferencia)\s+"
+    r"(?:terminar|acabar|for\s+concluida|estiver\s+pronta)\b"
+    r"|\b(?:mantemos|manteremos|vamos\s+manter|te\s+mantemos)\s+(?:voce\s+|vc\s+)?informad[oa]\b"
+    # o encaminhar com o pronome colado ("vamos encaminhá-la ao responsável").
+    r"|\b(?:vamos|vou|iremos|irei)\s+(?:[a-z0-9]+\s+)?(?:encaminh|repass)[a-z-]*"
+)
+
+
+def _espera(plano: str) -> re.Match[str] | None:
+    """A 1ª promessa de ESPERA do texto plano (ver acima), ou None."""
+    return next(
+        (m for m in _promessas(plano) if _VERBO_DA_ESPERA.search(m.group(0))),
+        None,
+    ) or next(
+        (m for m in _ESPERA_ALEM.finditer(plano) if not _negada(plano, m.start())),
+        None,
+    )
+
+
+def tem_espera(texto: str | None) -> bool:
+    """O texto promete a ESPERA (a equipe que vai conferir, analisar, responder…)? PURA."""
+    return bool((texto or "").strip()) and _espera(_plano(texto)) is not None
+
+
+def conferir_espera_no_rascunho_de_pessoa(texto: str, *, acao: str) -> list[PendenciaAgente]:
+    """A promessa de ESPERA no rascunho de pessoa → aviso (SUAVE). PURA (ver acima).
+
+    Só `acao == "pessoa"`; a resposta e a pergunta são da
+    `conferir_promessa_de_equipe`. A ação que a pessoa faz antes de enviar
+    ("segue o arquivo da nota", "o envio foi segurado", "podemos trocar pelo
+    azul") não é espera; o fato ("já conferimos o modelo: …") também não.
+    """
+    if acao != "pessoa" or not (texto or "").strip():
+        return []
+    achada = _espera(_plano(texto))
+    if achada is None:
+        return []
+    trecho = " ".join(achada.group(0).split())[:40]
+    return [
+        _suave(
+            ESPERA_NO_RASCUNHO_DE_PESSOA,
+            MOTIVO_ESPERA_NO_RASCUNHO_DE_PESSOA.format(trecho=trecho),
+        )
+    ]
+
+
+# ── 5''. A orientação errada que o eval real achou (21/10/2026) ───────────
+#
+# "A loja não consegue cancelar" (o manual: "não dizer que não dá para
+# cancelar"; a orientação proposta na revisão r5i, que aguarda o OK do
+# Eduardo, é "como o pedido já foi enviado, para cancelar agora o caminho é a
+# devolução" + a devolução ao receber, sem a negativa) e a TROCA no lugar da devolução
+# que o cliente pediu (a regra 9 do manual: a palavra do cliente; o prompt:
+# "Troca, só se o cliente pediu troca"). Regras SUAVES: o aviso com a orientação
+# certa e não sai sozinha.
+CANCELAR_PELA_LOJA = "cancelar_pela_loja"
+MOTIVO_CANCELAR_PELA_LOJA = (
+    'diz que não dá para cancelar ("{trecho}") — a orientação: como o pedido já foi enviado, '
+    "para cancelar agora o caminho é a devolução; ao receber, devolução ou reembolso pelo app"
+)
+# O cancelamento de PARTE do pedido ("não é possível cancelar um item agora",
+# "…cancelar só o cadeado") é outra coisa (a lente utilidade do r4 o pôs entre
+# as boas): a recusa impessoal e a da plataforma não valem para ele.
+_SO_PARTE = (
+    r"\b(?!\s+(?:(?:so|apenas|somente)\b|(?:um|uma)\s+(?:item|produto|parte)\b|parte\b"
+    r"|itens\b|alguns\b|algum\b))"
+)
+_LOJA_NAO_CANCELA = re.compile(
+    # a loja/equipe/a gente como sujeito ("a loja não consegue mais cancelá-lo",
+    # "a loja não cancela mais");
+    r"\b(?:a\s+loja|a\s+equipe|a\s+gente|o\s+vendedor|nossa\s+loja|nossa\s+equipe)\s+"
+    r"(?:[a-z0-9]+\s+){0,2}?(?:nao|nem)\s+(?:mais\s+)?(?:consegue|pode|tem\s+como)\s+"
+    r"(?:mais\s+)?(?:[a-z0-9]+\s+){0,1}?cancel[a-z-]*"
+    r"|\b(?:a\s+loja|a\s+equipe|a\s+gente|nossa\s+loja|nossa\s+equipe)\s+(?:[a-z0-9]+\s+){0,2}?"
+    r"(?:nao|nunca)\s+(?:mais\s+)?cancela\b"
+    # a 1ª pessoa ("não conseguimos cancelar", "não podemos mais cancelar");
+    r"|\b(?:nao|nem)\s+(?:mais\s+)?(?:conseguimos|consigo|podemos|posso|temos\s+como"
+    r"|tenho\s+como)\s+(?:mais\s+)?(?:[a-z0-9]+\s+){0,1}?cancel[a-z-]*"
+    # e o impessoal que o manual cita ("não dá (mais) para cancelar").
+    r"|\b(?:nao|nem)\s+da\s+(?:mais\s+)?(?:para|pra)\s+(?:[a-z0-9]+\s+){0,1}?cancel[a-z-]*"
+    # Revisão r5i de 21/10/2026: a mesma negativa no tom formal e pela
+    # plataforma ("não é (mais) possível cancelar", "não há como cancelar", "a
+    # Shopee não permite cancelar", "o cancelamento não é possível") — do pedido
+    # inteiro (`_SO_PARTE`).
+    r"|\b(?:nao|nem)\s+(?:e|eh|esta|sera|seria)\s+(?:mais\s+)?possivel\s+(?:mais\s+)?"
+    r"(?:[a-z0-9]+\s+){0,1}?cancel[a-z-]*"
+    + _SO_PARTE
+    + r"|\b(?:nao|nem)\s+(?:ha|tem|existe)\s+(?:mais\s+)?como\s+(?:[a-z0-9]+\s+){0,1}?"
+    r"cancel[a-z-]*"
+    + _SO_PARTE
+    + r"|\b(?:nao|nem)\s+(?:permite|permitem|deixa|aceita)\s+(?:mais\s+)?"
+    r"(?:[a-z0-9]+\s+){0,1}?cancel[a-z-]*"
+    + _SO_PARTE
+    + r"|\bcancelamento\s+(?:[a-z0-9]+\s+){0,3}?(?:nao|nem)\s+(?:e|esta|sera)\s+(?:mais\s+)?"
+    r"(?:possivel|permitido)\b"
+)
+
+
+def conferir_cancelar_pela_loja(texto: str) -> list[PendenciaAgente]:
+    """A negativa do cancelamento → aviso (SUAVE). PURA.
+
+    A loja (ou a 1ª pessoa) que não consegue/pode, o "não dá para", e (revisão
+    r5i de 21/10/2026) a mesma frase em tom formal ou pela plataforma: "não é
+    possível cancelar", "não há como cancelar", "a Shopee não permite cancelar
+    um pedido já enviado" — o manual diz "não dizer que não dá para cancelar",
+    e a orientação proposta não tem negativa. O cancelamento de PARTE do pedido
+    ("não é possível cancelar um item agora") fica de fora. Se o Eduardo
+    aprovar a negativa da plataforma, ela e a formal voltam a passar juntas.
+    """
+    m = _LOJA_NAO_CANCELA.search(_plano(texto))
+    if m is None:
+        return []
+    trecho = " ".join(m.group(0).split())[:40]
+    return [_suave(CANCELAR_PELA_LOJA, MOTIVO_CANCELAR_PELA_LOJA.format(trecho=trecho))]
+
+
+TROCA_NO_LUGAR_DA_DEVOLUCAO = "troca_no_lugar_da_devolucao"
+MOTIVO_TROCA_NO_LUGAR_DA_DEVOLUCAO = (
+    "chama de troca o que o cliente pediu como devolução — use a palavra dele: a devolução é "
+    "pedida no app, e a plataforma analisa e faz o reembolso"
+)
+_CLIENTE_DEVOLVE = re.compile(
+    r"\b(?:devolv\w*|devolu\w*|reembols\w*|estorn\w*|desist\w*|arrepend\w*)"
+    r"|\bdinheiro\s+de\s+volta\b"
+)
+_TROCA = re.compile(r"\btroc\w*")
+# A frase aprovada do defeito (prompt.ORIENTACAO: "troca, devolução ou
+# reembolso seguem depois da análise", sem escolher um).
+_TROCA_DA_ORIENTACAO = re.compile(r"\btroca\s*,\s*(?:a\s+)?devolucao\s+ou\s+(?:o\s+)?reembolso\b")
+
+
+def conferir_troca_no_lugar_da_devolucao(
+    texto: str, *, acao: str, textos_cliente: Sequence[str] = ()
+) -> list[PendenciaAgente]:
+    """A resposta chama de troca a devolução que o cliente pediu → aviso (SUAVE). PURA.
+
+    Só quando o cliente falou em devolver, reembolso, estorno ou desistir e
+    NUNCA em troca (o "quero trocar ou devolver" fica de fora), na resposta e
+    na pergunta (o rascunho de pessoa pode trazer as opções de troca da
+    pessoa). A frase aprovada do defeito não conta.
+    """
+    if acao not in ("responder", "perguntar") or not (texto or "").strip():
+        return []
+    clientes = [_plano(t) for t in textos_cliente if isinstance(t, str) and t.strip()]
+    if not any(_CLIENTE_DEVOLVE.search(t) for t in clientes) or any(
+        _TROCA.search(t) for t in clientes
+    ):
+        return []
+    resto = _TROCA_DA_ORIENTACAO.sub(" ", _plano(texto))
+    if not _TROCA.search(resto):
+        return []
+    return [_suave(TROCA_NO_LUGAR_DA_DEVOLUCAO, MOTIVO_TROCA_NO_LUGAR_DA_DEVOLUCAO)]
+
+
+# A troca por DEFEITO que vira "compra nova" (revisão r5i de 21/10/2026): "quero
+# trocar, veio com defeito" → "devolva e compre de novo" nega a troca da
+# garantia (regra 7 do manual). A orientação do defeito é vídeo e fotos, e a
+# troca, a devolução ou o reembolso depois da análise. Regra SUAVE.
+COMPRA_NOVA_NO_DEFEITO = "compra_nova_no_defeito"
+MOTIVO_COMPRA_NOVA_NO_DEFEITO = (
+    "manda quem relata defeito fazer uma compra nova — a troca por defeito segue a orientação "
+    "do defeito (vídeo e fotos; troca, devolução ou reembolso depois da análise)"
+)
+_COMPRA_NOVA = re.compile(
+    r"\b(?:compra\s+nova|nova\s+compra|novo\s+pedido|compr(?:e|ar|a)\s+(?:de\s+novo|novamente"
+    r"|outr[oa]|um\s+nov[oa]|uma\s+nov[oa])|(?:faca|fazer|faz)\s+(?:um\s+)?(?:novo\s+pedido"
+    r"|outro\s+pedido|outra\s+compra))\b"
+)
+
+
+def conferir_compra_nova_no_defeito(
+    texto: str, *, textos_cliente: Sequence[str]
+) -> list[PendenciaAgente]:
+    """O cliente relata defeito/avaria e a resposta manda comprar de novo → aviso (SUAVE). PURA."""
+    clientes = [t for t in textos_cliente if isinstance(t, str)]
+    if not clientes or not _COMPRA_NOVA.search(_plano(texto)):
+        return []
+    relato = _relata_problema(clientes) or any(_SINTOMA.search(_plano(t)) for t in clientes)
+    if not relato:
+        return []
+    return [_suave(COMPRA_NOVA_NO_DEFEITO, MOTIVO_COMPRA_NOVA_NO_DEFEITO)]
+
+
+# ── 5x. O manual antigo sem a frase de espera (integração r5, 21/10/2026) ──
+#
+# As respostas prontas "(sugestão para pessoa)" do manual base e o FAÇA de
+# várias regras ("dizer que … a equipe verifica a situação do envio e responde
+# por aqui") são do atendimento antigo: o `consultar_manual` as devolvia ao
+# agente, e o eval real mostrou o modelo copiando a espera nos rascunhos de
+# pessoa. O agente recebe o texto sem a ORAÇÃO de espera (até o ponto ou o
+# ponto e vírgula); a resposta pronta que sobra só com cortesia ou o "recebemos
+# a sua mensagem" sai inteira. O manual no banco não muda (o legado o lê igual).
+_ORACOES_DO_MANUAL = re.compile(r"(?<=[.!?;…])\s+|\s*\n+\s*")
+_SO_RECEBIMENTO = re.compile(
+    r"^(?:recebemos|recebi)\s+(?:a\s+)?(?:sua|tua)\s+(?:mensagem|solicitacao|pergunta|duvida)\b"
+    r"|^(?:entendido|entendi|anotado|certo|perfeito)\W*$"
+)
+
+
+def sem_frases_de_espera(texto: str | None) -> str:
+    """O texto do manual sem as orações de ESPERA (ver acima). PURA. Sem nenhuma, o mesmo."""
+    partes = [p.strip() for p in _ORACOES_DO_MANUAL.split(texto or "") if p.strip()]
+    ficam = [p for p in partes if not tem_espera(p)]
+    if len(ficam) == len(partes):
+        return texto or ""
+    saida = " ".join(ficam)
+    return saida[:-1] + "." if saida.endswith((";", ",")) else saida
+
+
+def so_cortesia_ou_recebimento(texto: str | None) -> bool:
+    """Só cumprimento, cortesia ou "recebemos a sua mensagem" (nada a orientar)? PURA."""
+    frases = [f for f in _ENTRE_FRASES.split(texto or "") if f.strip()]
+    return all(
+        _SO_CORTESIA.search(_plano(f)) or _SO_RECEBIMENTO.search(_plano(f).strip(" .!"))
+        for f in frases
+    )
+
+
 # ── 5b. O estado do pedido dito pela resposta (revisão "furos" de 20/10/2026) ──
 #
 # "Seu reembolso foi aprovado", "Pedido cancelado com sucesso", "Troca
@@ -3521,6 +4147,14 @@ _ORACAO_DE_CONDICAO = re.compile(
     r"|enquanto|antes\s+que)\b"
 )
 _NEGA_NA_ORACAO = re.compile(r"\b(?:nao|nem|nunca|ainda\s+nao)\b")
+# O "tudo certo" que REPETE o que o cliente disse ("Que bom saber que está tudo
+# certo com a sua compra!" a "acredito que acertei com a compra", o dev
+# 5812ff61b1e4 do eval real de 21/10/2026): não é o estado do pedido.
+_ECO_DO_CLIENTE = re.compile(
+    r"\b(?:que\s+(?:bom|otimo|legal|maravilha|bacana|alegria)|fico\s+(?:muito\s+)?feliz"
+    r"|ficamos\s+(?:muito\s+)?felizes|otimo|bom)\s+(?:em\s+|de\s+)?(?:saber|ler|ouvir|ver)?\s*"
+    r"(?:que\s+)?(?:ja\s+)?$"
+)
 # Rodada 4: a aprovação dentro da subordinada ("o reembolso é feito pela Shopee
 # DEPOIS QUE a devolução é aprovada") é a condição, não o fato.
 _SUBORDINADA_ANTES = re.compile(
@@ -3684,8 +4318,10 @@ def conferir_estado_do_pedido(
                 )
         if blocos and _DIZ_FALTA_ESTOQUE.search(oracao):
             saida.append(_suave(ESTADO_SEM_DADO, "diz por que o pedido não saiu sem o dado"))
-        if (m := _DIZ_QUE_ANDA_BEM.search(oracao)) and not _NEGA_NA_ORACAO.search(
-            oracao[: m.start()]
+        if (
+            (m := _DIZ_QUE_ANDA_BEM.search(oracao))
+            and not _NEGA_NA_ORACAO.search(oracao[: m.start()])
+            and not _ECO_DO_CLIENTE.search(oracao[: m.start()])
         ):
             saida.append(_suave(ESTADO_SEM_DADO, "diz que está tudo certo com o pedido sem o dado"))
         entregou = _DIZ_QUE_ENTREGOU.search(oracao)
@@ -4416,7 +5052,15 @@ _FORA_DO_APP = re.compile(
     r"(?:na|da|no|do|aqui\s+na)\s+(?:shopee|plataforma|mercado|tiktok|amazon|magalu)\b"
     r"|\btemos\s+outr[ao]s?\s+(?:lojas?|anuncios?|contas?)\b|\boutro\s+anuncio\s+nosso\b"
     r"|\bnoss[ao]s?\s+outr[ao]s?\s+(?:anuncios?|contas?)\b"
-    r"|\bloja\s+(?!(?:aqui|mesma|oficial|nossa|da|de|do|na|no)\b)(?:[a-z0-9]+\s+){1,3}(?:na|da)\s+"
+    # A outra loja NA plataforma ("a loja Uranyx Oficial na Shopee"). Eval real
+    # de 21/10/2026: o CANAL do app logo depois de "loja" ("…pela loja pelo
+    # próprio app da Shopee", "a loja dentro do app da Shopee", "a loja pelo
+    # chat da Shopee") não é outra loja — é a própria, pelo canal certo. Só o
+    # canal: "a loja pelo nome Uranyx na Shopee", "a loja com nome…" e "a loja
+    # em promoção…" continuam outra loja (revisão r5i de 21/10/2026).
+    r"|\bloja\s+(?!(?:aqui|mesma|oficial|nossa|da|de|do|na|no)\b"
+    r"|(?:pel[oa]|via|atraves\s+d[oa]|dentro\s+d[oa])\s+(?:propri[oa]\s+)?"
+    r"(?:app|aplicativo|chat)\b)(?:[a-z0-9]+\s+){1,3}(?:na|da)\s+"
     r"(?:shopee|plataforma|mercado\s*livre|tiktok|amazon|magalu)\b"
     r"|\b(?:suporte|sac|atendimento|assistencia|central)\s+(?:tecnic[oa]\s+)?d[ao]\s+"
     r"(?:marca|fabricante)\b"
@@ -4509,6 +5153,7 @@ def conferir_caminho_da_plataforma(
             for padrao in (_FABRICANTE, _FORA_DO_APP, contato)
             for achado in padrao.finditer(plano)
             if not _caminho_negado(plano, achado.start())
+            and not _presencial_negado(plano, achado.start(), achado.end())
         ),
         None,
     )
@@ -4589,6 +5234,130 @@ _NEGA_O_CAMINHO = re.compile(
     r"|\bsem\s+(?:precisar|necessidade)\s+(?:de\s+)?)$"
 )
 _CONDICAO_DO_CAMINHO = re.compile(r"\b(?:se|caso|quando|enquanto|senao)\b")
+
+# A RECUSA do atendimento presencial (eval real de 21/10/2026: o pedido de
+# retirada é respondido com "comprar e receber só pelo app"): "Não fazemos
+# retirada na loja", "Não temos loja física", "Não é possível vir buscar",
+# "…, sem retirada na loja", "A retirada na loja não está disponível" não
+# mandam o cliente para fora — eram bloqueadas como caminho para fora. Só a
+# família presencial (retirar, loja física, vir buscar, visitar, o nosso
+# endereço) e só com a negação de uma lista fechada: "não tem problema
+# retirar na loja" continua pego.
+_PRESENCIAL = re.compile(
+    r"^(?:retir|loja\s+fisica|vir\s|visit|noss[oa]\s+(?:endereco|deposito|galpao|escritorio"
+    r"|showroom))"
+)
+_NEGA_O_PRESENCIAL_ANTES = re.compile(
+    r"(?:\b(?:nao|nem)\s+(?:fazemos|fazem|trabalhamos(?:\s+com)?|temos|tem|oferecemos|oferece"
+    r"|ha|existe|e\s+possivel|da\s+(?:pra|para)|conseguimos|aceitamos|permitimos|realizamos"
+    r"|dispomos\s+de|contamos\s+com|atendemos(?:\s+com)?|e\s+feit[ao]|possuimos)"
+    r"|\bsem)\s+(?:(?:a|o|um|uma|opcao\s+de)\s+)?$"
+)
+_NEGA_O_PRESENCIAL_DEPOIS = re.compile(
+    r"^\s+(?:nao|nunca)\s+(?:esta|e|fica|existe|ha|acontece|e\s+feit[ao])"
+    r"(?:\s+(?:disponivel|possivel|permitid[ao]|oferecid[ao]|feit[ao]))?\b"
+)
+
+
+# A recusa com exceção não é recusa (revisão r5i de 21/10/2026): "Não é
+# possível vir buscar hoje, mas amanhã sim", "A retirada na loja não está
+# disponível hoje, só amanhã" convidam a vir. Na FRASE inteira (a vírgula não
+# separa): o tempo da recusa ("hoje", "agora", "no momento", "por enquanto")
+# ou "mas/só/porém… sim/amanhã".
+_FRASE_DO_PRESENCIAL = re.compile(r"[!?;\n]|\.(?!\s*(?:com|br)\b)")
+_RECUSA_COM_EXCECAO = re.compile(
+    r"\b(?:hoje|agora|no\s+momento|neste\s+momento|por\s+enquanto|essa\s+semana"
+    r"|esta\s+semana)\b"
+    r"|\b(?:mas|porem|so|somente|apenas|exceto|salvo)\b(?:\s+[a-z0-9]+){0,6}?\s+"
+    r"(?:sim|amanha|depois|outro\s+dia|semana\s+que\s+vem|segunda|terca|quarta|quinta|sexta"
+    r"|sabado|domingo)\b"
+)
+
+
+def _presencial_negado(plano: str, inicio: int, fim: int) -> bool:
+    """O caminho presencial (`_PRESENCIAL`) vem recusado (ver acima)? PURA."""
+    if not _PRESENCIAL.search(plano[inicio:fim]):
+        return False
+    corte = max((m.end() for m in _CORTE_DO_CAMINHO.finditer(plano, 0, inicio)), default=0)
+    if not (
+        _NEGA_O_PRESENCIAL_ANTES.search(plano[corte:inicio])
+        or _NEGA_O_PRESENCIAL_DEPOIS.search(plano[fim:])
+    ):
+        return False
+    comeco = max((m.end() for m in _FRASE_DO_PRESENCIAL.finditer(plano, 0, inicio)), default=0)
+    final = next((m.start() for m in _FRASE_DO_PRESENCIAL.finditer(plano, fim)), len(plano))
+    return not _RECUSA_COM_EXCECAO.search(" " + plano[comeco:final] + " ")
+
+
+# ── O caminho da Uranyx na garantia (decisão 7 do dono, 21/10/2026) ──────
+#
+# A exceção ESTREITA à regra "nunca caminho fora da plataforma": depois dos 90
+# dias da entrega (o `periodo` "uranyx" do `ver_garantia`) ou ao explicar a
+# regra antes da compra, a garantia do aparelho Uranyx é acionada direto com a
+# Uranyx, exatamente "pelo app Uranyx ou pelo site uranyx.com.br/sac". Nenhum
+# outro site, telefone, WhatsApp ou e-mail. Só o agente: a frase sai do texto
+# que o validador, a checagem do caminho e o envio (`enviar`, pela marca
+# `ISENCAO_CAMINHO_URANYX` do rascunho) conferem; o resto do texto é conferido
+# como sempre. O legado não muda.
+ISENCAO_CAMINHO_URANYX = "caminho_uranyx"
+_CAMINHO_URANYX = re.compile(
+    r"(?:\bdireto\s+com\s+a\s+uranyx\s*,?\s*)?\bpel[oa]\s+(?:app|aplicativo)\s+(?:da\s+)?"
+    r"uranyx\s+ou\s+pelo\s+site\s+(?:https?://)?(?:www\.)?uranyx\s*\.\s*com\s*\.\s*br\s*/\s*sac"
+    r"\b/?",
+    re.IGNORECASE,
+)
+
+
+def caminho_uranyx_liberado(garantias: Sequence[Mapping[str, Any]] | None) -> bool:
+    """O `ver_garantia` liberou o caminho da Uranyx? PURA. Só com a regra Uranyx
+    (`caminho_depois_da_loja`) e: o período "uranyx" (passou dos 90 dias da
+    entrega), ou a regra antes da compra (sem status e sem `antes_da_compra`
+    False). Sem data de entrega depois da compra, não (decisão 7)."""
+    for g in garantias or ():
+        if not isinstance(g, Mapping):
+            continue
+        regra = g.get("regra")
+        if not (isinstance(regra, Mapping) and regra.get("caminho_depois_da_loja")):
+            continue
+        if g.get("periodo") == "uranyx":
+            return True
+        if not g.get("status") and not g.get("periodo") and g.get("antes_da_compra", True):
+            return True
+    return False
+
+
+def sem_caminho_uranyx(texto: str | None) -> str:
+    """O texto sem a frase do caminho da Uranyx (`_CAMINHO_URANYX`). PURA."""
+    return _CAMINHO_URANYX.sub(" ", texto or "")
+
+
+def erros_sem_o_caminho_uranyx(
+    texto: str | None, erros: Sequence[str], validar: Callable[[str], Sequence[str]]
+) -> list[str]:
+    """Os `erros` do validador que continuam sem a frase do caminho da Uranyx
+    (o limite de caracteres é o do texto inteiro). PURA quanto ao texto; quem
+    chama já conferiu `caminho_uranyx_liberado`."""
+    sem = sem_caminho_uranyx(texto)
+    if sem == (texto or ""):
+        return list(erros)
+    restantes = set(validar(sem))
+    return [e for e in erros if e in restantes or e.startswith("passa do limite")]
+
+
+# "Homologado pela Uranyx/pela loja/pelo fabricante" (regra 8 do manual): o
+# texto do fato da garantia de 1 ano (a semente da 0421) diz "Aparelhos Uranyx
+# homologados pela Uranyx" — o agente nunca repete (revisão r5i de 21/10/2026).
+# A Anatel com o código do sistema é outra regra (as evidências).
+HOMOLOGADO = "homologado"
+MOTIVO_HOMOLOGADO = "diz 'homologado' (o manual proíbe: regra 8)"
+_HOMOLOGADO = re.compile(r"\bhomologad\w*\b(?!\s+(?:pel[oa]\s+)?(?:anatel|inmetro)\b)")
+
+
+def conferir_homologado(texto: str) -> list[PendenciaAgente]:
+    """ "Homologado" (fora da Anatel/Inmetro) → bloqueia. PURA."""
+    if _HOMOLOGADO.search(_plano(texto)):
+        return [_bloqueia(HOMOLOGADO, MOTIVO_HOMOLOGADO)]
+    return []
 
 
 def _caminho_negado(plano: str, inicio: int) -> bool:
@@ -5506,6 +6275,161 @@ def conferir_andamento(
     return []
 
 
+# ── 9. A lacuna sem dado nunca fica no rascunho (eval real de 21/10/2026) ──
+#
+# O legado deixa a lacuna sem dado no texto ("Seu código é {rastreio}."): a
+# pessoa vê o buraco e o validador barra o envio até alguém preencher
+# (`ia.preencher`). No eval real os rascunhos do agente para pessoa saíram com
+# "{rastreio}", "{transportadora}", "{previsao_entrega}", "{nf_numero}" no meio
+# do texto. No agente, a frase com a lacuna que o código não preencheu sai do
+# rascunho (o motivo "sem dado para {…}" do legado continua: pessoa) — e, sem
+# nada além da cortesia no que sobra, o rascunho fica BLOQUEADO e sem texto
+# (a resposta dependia do dado: a pessoa escreve).
+LACUNA_SEM_DADO = "lacuna_sem_dado"
+MOTIVO_LACUNA_TIRADA = "a frase com {lacunas} (sem o dado) saiu do rascunho"
+MOTIVO_LACUNA_SEM_RESPOSTA = "a resposta dependia de {lacunas}, sem o dado — pessoa escreve"
+_LACUNA_NO_TEXTO = re.compile(r"\{\{?\s*([A-Za-z_]+)\s*\}?\}")
+# Integração r5 (21/10/2026): NÃO é o `_FIM_DA_FRASE` da promessa (seção 5). O
+# mesmo nome aqui embaixo SOMBREAVA aquele no módulo inteiro — a promessa passou
+# a ler a frase até o próximo ponto seguido de espaço (o ";" deixou de fechar e
+# "O seu dinheiro volta amanhã; o estorno é feito pela Shopee" saía).
+_ENTRE_FRASES = re.compile(r"(?<=[.!?…])\s+|\s*\n+\s*")
+
+
+def lacunas_no_texto(texto: str | None) -> list[str]:
+    """Os nomes das lacunas que ficaram no texto ("{rastreio}" → "rastreio"), sem repetir. PURA."""
+    return list(dict.fromkeys(m.group(1).lower() for m in _LACUNA_NO_TEXTO.finditer(texto or "")))
+
+
+def sem_as_frases_das_lacunas(texto: str | None, lacunas: Iterable[str]) -> str:
+    """O texto sem as frases que têm uma das `lacunas` (o nome, sem chaves). PURA."""
+    nomes = {n.lower() for n in lacunas}
+    if not nomes:
+        return texto or ""
+    ficam = [
+        frase.strip()
+        for frase in _ENTRE_FRASES.split(texto or "")
+        if frase.strip()
+        and not any(m.group(1).lower() in nomes for m in _LACUNA_NO_TEXTO.finditer(frase))
+    ]
+    return " ".join(ficam)
+
+
+def _so_cortesia(texto: str) -> bool:
+    frases = [f for f in _ENTRE_FRASES.split(texto) if f.strip()]
+    return all(_SO_CORTESIA.search(_plano(f)) for f in frases)
+
+
+def sem_lacuna_vazia(conferida: SaidaConferida) -> SaidaConferida:
+    """A `SaidaConferida` sem nenhuma lacuna que o código não preencheu (ver acima). PURA.
+
+    Com resposta no que sobra: o texto sem as frases dessas lacunas, sem o
+    "lacuna não preenchida" do validador (o buraco saiu) e com o motivo
+    `MOTIVO_LACUNA_TIRADA` (pessoa; também em `sem_auto`). Sem resposta: texto
+    vazio, BLOQUEADO, com `MOTIVO_LACUNA_SEM_RESPOSTA` nos motivos e nos erros.
+    Sem lacuna no texto, a mesma `SaidaConferida`.
+    """
+    texto = conferida.texto or ""
+    nomes = lacunas_no_texto(texto)
+    if not nomes:
+        return conferida
+    lista = ", ".join("{" + n + "}" for n in nomes)
+    do_validador = validador._MOTIVO_LACUNA
+    erros = [e for e in conferida.erros if not e.startswith(do_validador)]
+    motivos: list[str] = []
+    for m in conferida.motivos:
+        if m.startswith("validador: "):
+            partes = [
+                p for p in m[len("validador: ") :].split("; ") if not p.startswith(do_validador)
+            ]
+            if not partes:
+                continue
+            m = "validador: " + "; ".join(partes)
+        motivos.append(m)
+    novo = sem_as_frases_das_lacunas(texto, nomes)
+    status = conferida.status
+    if novo and not _so_cortesia(novo):
+        motivo = MOTIVO_LACUNA_TIRADA.format(lacunas=lista)
+    else:
+        motivo = MOTIVO_LACUNA_SEM_RESPOSTA.format(lacunas=lista)
+        novo = ""
+        erros.append(motivo)
+        status = constantes.RASCUNHO_BLOQUEADO
+    motivos.append(motivo)
+    sem_auto = list(dict.fromkeys([*(conferida.sem_auto or []), motivo]))
+    return dataclasses.replace(
+        conferida,
+        texto=novo,
+        motivos=motivos,
+        erros=erros,
+        status=status,
+        precisa_humano=True,
+        sem_auto=sem_auto,
+    )
+
+
+def motivo_sem_lacuna(motivo: str | None, valores: Mapping[str, Any] | None) -> str:
+    """O `motivo_pessoa` do modelo sem lacuna crua (integração r5, 21/10/2026). PURA.
+
+    O eval real gravou "ação de pessoa: Abrir chamado (entrega) — Pedido
+    {numero_pedido} consta como devolvido…" (dev a0cee7b7a4fd): a coluna
+    `motivo` é para a pessoa, e ninguém preenche a lacuna dela. A lacuna com
+    o valor (`base.valores`) vira o valor; sem o valor, sai (com o espaço).
+    """
+    if not motivo or "{" not in motivo:
+        return motivo or ""
+    valores = valores if isinstance(valores, Mapping) else {}
+
+    def _troca(m: re.Match[str]) -> str:
+        valor = valores.get(m.group(1).lower())
+        return str(valor) if valor not in (None, "") else ""
+
+    return " ".join(_LACUNA_NO_TEXTO.sub(_troca, motivo).split())
+
+
+# ── 10. O rascunho de PESSOA sem texto (integração r5, 21/10/2026) ─────────
+#
+# O prompt (O RASCUNHO DE PESSOA): "Nada verdadeiro e útil a dizer antes da
+# pessoa: texto vazio". A `conferir_saida` lia o vazio como erro do validador
+# ("texto vazio", no motivo "validador: texto vazio"): a tela mostrava o erro
+# na frente da ação e a Caixa Humano, o motivo errado. O rascunho fica sem
+# texto e BLOQUEADO (nada para enviar; a pessoa escreve depois de agir — como
+# os gatilhos de código), com a ação de pessoa como o motivo.
+_DO_VALIDADOR_TEXTO_VAZIO = "texto vazio"
+
+
+def sem_o_texto_vazio_de_pessoa(conferida: SaidaConferida, *, acao: str) -> SaidaConferida:
+    """O rascunho de "pessoa" sem texto, sem o "texto vazio" do validador (ver acima). PURA.
+
+    Só `acao == "pessoa"` com o texto vazio; o resto, a mesma `SaidaConferida`.
+    O "responder" sem texto continua com o "texto vazio" (é o que o "não pede
+    resposta" do agente lê).
+    """
+    if acao != "pessoa" or (conferida.texto or "").strip():
+        return conferida
+    erros = [e for e in conferida.erros if e != _DO_VALIDADOR_TEXTO_VAZIO]
+    motivos: list[str] = []
+    for m in conferida.motivos:
+        if m.startswith("validador: "):
+            partes = [
+                p for p in m[len("validador: ") :].split("; ") if p != _DO_VALIDADOR_TEXTO_VAZIO
+            ]
+            if not partes:
+                continue
+            m = "validador: " + "; ".join(partes)
+        motivos.append(m)
+    tirados = set(conferida.motivos) - set(motivos)
+    return dataclasses.replace(
+        conferida,
+        texto="",
+        motivos=motivos,
+        erros=erros,
+        status=constantes.RASCUNHO_BLOQUEADO,
+        precisa_humano=True,
+        sem_auto=[m for m in (conferida.sem_auto or []) if m not in tirados],
+    )
+
+
 # ── Tudo junto ────────────────────────────────────────────────────────────
 
 
@@ -5564,7 +6488,12 @@ def conferir(
         pendencias += conferir_fonte_produto(texto, fichas, ctx, fontes_extra=da_base)
         if ctx.modo == constantes.MODO_AUTO:
             pendencias += conferir_ficha_no_automatico(
-                texto, fichas, textos_cliente=clientes, nomes_de_produto=da_base
+                texto,
+                fichas,
+                textos_cliente=clientes,
+                nomes_de_produto=da_base,
+                assunto=conferida.categoria,
+                dados_extra=[*ctx.registro.textos, *da_base],
             )
         pendencias += conferir_promessa_de_equipe(
             texto,
@@ -5573,9 +6502,21 @@ def conferir(
             assunto=conferida.categoria,
             textos_cliente=clientes,
         )
+        # Integração r5 (o eval real de 21/10/2026): a espera no rascunho de
+        # pessoa, "a loja não consegue cancelar" e a troca no lugar da devolução.
+        pendencias += conferir_espera_no_rascunho_de_pessoa(texto, acao=proposta.acao)
+        pendencias += conferir_cancelar_pela_loja(texto)
+        pendencias += conferir_troca_no_lugar_da_devolucao(
+            texto, acao=proposta.acao, textos_cliente=clientes
+        )
+        pendencias += conferir_compra_nova_no_defeito(texto, textos_cliente=clientes)
+        # A garantia Uranyx depois dos 90 dias (decisão 7 do dono): o caminho da
+        # Uranyx é a orientação aprovada do período — a frase sai do texto aqui e
+        # na checagem do caminho, só com o `ver_garantia` liberando.
+        uranyx_liberado = caminho_uranyx_liberado(ctx.garantias_conferidas)
         # Rodada 4: com o relato do defeito, só a orientação aprovada.
         pendencias += conferir_orientacao_do_defeito(
-            texto,
+            sem_caminho_uranyx(texto) if uranyx_liberado else texto,
             acao=proposta.acao,
             assunto=conferida.categoria,
             textos_cliente=clientes,
@@ -5598,8 +6539,11 @@ def conferir(
         # Ajuste rf3: o recado ao revisor dentro do rascunho.
         pendencias += conferir_recado_ao_revisor(texto)
         pendencias += conferir_caminho_da_plataforma(
-            texto, ctx.plataforma, marcas=marcas_das_fichas([*fichas, *_do_registro(ctx)])
+            sem_caminho_uranyx(texto) if uranyx_liberado else texto,
+            ctx.plataforma,
+            marcas=marcas_das_fichas([*fichas, *_do_registro(ctx)]),
         )
+        pendencias += conferir_homologado(texto)
         pendencias += conferir_nomes_internos(texto, ctx.nomes_da_loja)
         pendencias += conferir_regiao(texto, fichas, ctx, textos_cliente=clientes)
     pendencias += conferir_pergunta(proposta.acao, base.recentes, gatilho, texto=texto)

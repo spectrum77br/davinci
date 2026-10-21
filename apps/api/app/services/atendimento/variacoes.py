@@ -974,7 +974,10 @@ _SE_ANTES = re.compile(r"\bse\s+(?:[a-z0-9]+\s+){0,3}$")
 # Ressalva, não falta de estoque: "não temos como confirmar", "sem previsão".
 _RESSALVA = re.compile(
     r"\bnao\s+(?:temos|tenho|tem|ha)\s+(?:(?:a|uma|essa|esta)\s+)?(?:como|informac\w*|dados?"
-    r"|certeza|previsao|quantidade|data|confirmac\w*)\b"
+    r"|certeza|previsao|quantidade|data|confirmac\w*"
+    # Eval real de 21/10/2026 (dev a6ff4d22739b): "não temos uma comparação de
+    # medidas entre os dois" não é estoque (era o "não temos" do 46mm).
+    r"|comparac\w*|detalhes?|acesso|opiniao|indicac\w*|recomendac\w*)\b"
 )
 # Disponibilidade da EQUIPE ("estamos à disposição", "fico disponível").
 _DISPONIVEL_A_EQUIPE = re.compile(
@@ -1183,6 +1186,48 @@ def _predicado_depois(resto: str) -> str | None:
     return None
 
 
+# O parêntese logo depois da citação: "a Preto (disponível)".
+_PARENTESE_COLADO = re.compile(r"\s*\(([^()]*)")
+_PARENTESE_FECHADO = re.compile(r"\([^()]*\)")
+
+
+def _depois_da_citacao(sentenca: str, mencao: _Mencao, ate: int) -> str:
+    """O trecho depois da citação em que vale a marca de estoque mais adiante.
+
+    O parêntese que cita OUTRA variação é outra oração (eval real de
+    21/10/2026, dev a6ff4d22739b: "em 46mm, a cor Prata (Preto 42mm e Cinza
+    46mm estão esgotados)" lia o "esgotados" de dentro como o da Prata): o
+    trecho para no "(" quando a próxima citação (`ate`) começa dentro dele, ou
+    quando o parêntese vem depois dela. O parêntese logo depois da citação é
+    dela ("a Preto (disponível)", "a Prata (esgotada)", "temos a Prata (no
+    momento está esgotada)": revisão r5i de 21/10/2026). A citação de dentro
+    de um parêntese ("(Preto 42mm e Cinza 46mm estão esgotados)") para no ")".
+    """
+    fim = min(len(sentenca), mencao.fim + _JANELA)
+    abertos: list[int] = []
+    for i, c in enumerate(sentenca[: mencao.fim]):
+        if c == "(":
+            abertos.append(i)
+        elif c == ")" and abertos:
+            abertos.pop()
+    # O "(" ainda aberto que começou antes da citação: ela está dentro dele.
+    dentro = bool(abertos) and abertos[-1] < mencao.inicio
+    j = mencao.fim
+    while j < fim:
+        c = sentenca[j]
+        if c == ")" and dentro:
+            return sentenca[mencao.fim : j]
+        if c == "(":
+            fecha = sentenca.find(")", j)
+            fecha = len(sentenca) if fecha < 0 else fecha
+            if ate < len(sentenca) and ate <= fecha:
+                # A próxima citação vem antes do parêntese ou dentro dele.
+                return sentenca[mencao.fim : j]
+            j = fecha
+        j += 1
+    return sentenca[mencao.fim : fim]
+
+
 def _polaridade(sentenca: str, mencao: _Mencao, da_lista: frozenset[str], ate: int) -> str | None:
     """ "+" (tem/disponível), "-" (não tem/esgotado) ou None (só citou).
 
@@ -1200,7 +1245,24 @@ def _polaridade(sentenca: str, mencao: _Mencao, da_lista: frozenset[str], ate: i
     colado = _predicado_depois(sentenca[mencao.fim : ate])
     if colado in ("+", "-"):
         return colado
-    antes = _depois_da_virgula(sentenca[max(0, mencao.inicio - _JANELA) : mencao.inicio], da_lista)
+    # O parêntese colado é da citação e vale antes da marca de antes ("temos a
+    # Prata (no momento está esgotada)", "temos a Prata e a Preto (esgotada)":
+    # revisão r5i de 21/10/2026) — se a próxima citação não começa dentro dele.
+    if (parentese := _PARENTESE_COLADO.match(sentenca, mencao.fim)) and ate >= parentese.end(1):
+        dentro = parentese.group(1)
+        for marca in _MARCA.finditer(dentro):
+            if marca.lastgroup in ("neg", "pos"):
+                negada = bool(_NEGA.search(dentro[: marca.start()]))
+                return "-" if (marca.lastgroup == "neg") != negada else "+"
+    # O parêntese fechado antes da citação é da citação de antes dele ("a Preto
+    # (não está disponível) e a Prata sim"): sai da janela, com o tamanho.
+    antes = _depois_da_virgula(
+        _PARENTESE_FECHADO.sub(
+            lambda m: " " * len(m.group()),
+            sentenca[max(0, mencao.inicio - _JANELA) : mencao.inicio],
+        ),
+        da_lista,
+    )
     for marca in reversed(list(_MARCA.finditer(antes))):
         if marca.lastgroup == "so":
             if len(_PALAVRA.findall(antes[marca.end() :])) <= 2:
@@ -1211,7 +1273,7 @@ def _polaridade(sentenca: str, mencao: _Mencao, da_lista: frozenset[str], ate: i
         return "-" if _NEGA_ANTES.search(antes[: marca.start()]) else "+"
     if colado == "+fraco":
         return "+"
-    depois = sentenca[mencao.fim : mencao.fim + _JANELA]
+    depois = _depois_da_citacao(sentenca, mencao, ate)
     for marca in _MARCA.finditer(depois):
         if marca.lastgroup == "neg":
             return "-"

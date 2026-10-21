@@ -80,7 +80,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 # ── O pedido (Haiku 5.5: sem `temperature`, `top_p`, `top_k` nem `thinking`) ──
-VERSAO = "v4"
+# v5 (revisão r5i de 21/10/2026): a exceção do caminho da Uranyx no item 4
+# (decisão 7 do dono). A calibração (com a chave) precisa rodar de novo.
+VERSAO = "v5"
 MODELO = "claude-haiku-5-5"
 EFFORT = "low"
 # O JSON do `Veredito` (~100–300 tokens) + o raciocínio ADAPTATIVO, que conta no
@@ -425,7 +427,11 @@ marca ou do fabricante, assistência técnica, técnico, loja de celular, loja f
 "vir buscar", transportadora, Correios, entregador, carteiro, banco, cartão, \
 chargeback, contestação, Procon, Reclame Aqui, consumidor.gov, ou outra loja ou \
 outro anúncio nosso. O suporte do próprio marketplace e as telas do app ("Minhas \
-compras", "Central de ajuda", "Devolução/Reembolso") são permitidos.
+compras", "Central de ajuda", "Devolução/Reembolso") são permitidos. Uma exceção \
+só: a garantia do aparelho Uranyx acionada direto com a Uranyx "pelo app Uranyx ou \
+pelo site uranyx.com.br/sac", exatamente assim, quando a garantia nas EVIDÊNCIAS \
+traz esse caminho e o "periodo" "uranyx" (ou só a regra, antes da compra); \
+qualquer outro site, telefone, WhatsApp ou e-mail continua true.
 
 5. revela_dado_interno — o texto expõe o que é interno: nome de sistema, \
 integração ou conta da loja; fornecedor; de onde o produto sai (cidade, estado, \

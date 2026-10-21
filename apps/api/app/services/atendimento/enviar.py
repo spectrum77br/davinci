@@ -734,6 +734,51 @@ def _preparar_texto(texto: str | None, *, conversa: AtendimentoConversa, origem:
     return normalizado
 
 
+async def _texto_com_isencao_do_agente(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    texto: str | None,
+    *,
+    origem: str,
+    rascunho_id: UUID | None,
+    recusa: EnvioRecusado,
+) -> str:
+    """O texto recusado de um rascunho do AGENTE com isenção (revisão r5i de 21/10/2026).
+
+    Decisão 7 do dono: depois dos 90 dias da entrega, a garantia Uranyx é
+    acionada "pelo app Uranyx ou pelo site uranyx.com.br/sac" — e o link
+    barraria o envio de qualquer origem. Só quando o rascunho (`ag1`) traz
+    `fatos.agente.isencoes` com o caminho da Uranyx (o agente só marca com o
+    `ver_garantia` liberando): o texto é revalidado SEM essa frase e o que
+    continua errado (outro link, telefone…) recusa como antes. Sem a marca —
+    o legado, a pessoa escrevendo do zero — levanta a mesma recusa.
+    """
+    from app.services.atendimento import validador
+    from app.services.atendimento.agente import checagens
+
+    rascunho = await _rascunho_da_conversa(session, conversa, rascunho_id)
+    fatos = (rascunho.fatos or {}) if rascunho is not None else {}
+    agente = fatos.get("agente") if isinstance(fatos, dict) else None
+    isencoes = agente.get("isencoes") if isinstance(agente, dict) else None
+    if not (isinstance(isencoes, list) and checagens.ISENCAO_CAMINHO_URANYX in isencoes):
+        raise recusa
+    normalizado = validador.normalizar(
+        texto or "", plataforma=conversa.plataforma, canal=conversa.canal
+    )
+    motivos = checagens.erros_sem_o_caminho_uranyx(
+        normalizado,
+        validador.validar(
+            normalizado, plataforma=conversa.plataforma, canal=conversa.canal, origem=origem
+        ),
+        lambda t: validador.validar(
+            t, plataforma=conversa.plataforma, canal=conversa.canal, origem=origem
+        ),
+    )
+    if motivos or not normalizado.strip():
+        raise recusa
+    return normalizado
+
+
 # Mora no `gravar` (a resposta de fora também é comparada lá); o nome fica
 # aqui porque é o que o router e a semente usam.
 similaridade = gravar.similaridade
@@ -1285,7 +1330,12 @@ async def _preparar_envio(
     """Passos 0 e 1 do envio: trava, confere e grava a linha em voo (sem commit)."""
     await travar_conversa(session, conversa)
     destino = await _destino(session, conversa, origem=origem)
-    normalizado = _preparar_texto(texto, conversa=conversa, origem=origem)
+    try:
+        normalizado = _preparar_texto(texto, conversa=conversa, origem=origem)
+    except EnvioRecusado as recusa:
+        normalizado = await _texto_com_isencao_do_agente(
+            session, conversa, texto, origem=origem, rascunho_id=rascunho_id, recusa=recusa
+        )
     rascunho = await _rascunho_da_conversa(session, conversa, rascunho_id)
     if rascunho is not None:
         await session.refresh(rascunho)

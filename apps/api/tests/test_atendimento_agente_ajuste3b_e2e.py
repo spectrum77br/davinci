@@ -93,9 +93,11 @@ SAEM = [
         "postado",
         "desisti da compra",
         [],
-        "Olá! O pedido já foi enviado, então não é mais possível cancelar. Ao receber, você pode "
-        "solicitar a devolução pelo app, em Minhas compras, no pedido; o reembolso é feito pela "
-        "Shopee.",
+        # Revisão do r5i (21/10/2026): o "não é mais possível cancelar" virou aviso
+        # (a mesma negativa do "não dá para"); a boa é a orientação sem a negativa.
+        "Olá! O pedido já foi enviado, então para cancelar agora o caminho é a devolução: ao "
+        "receber, você pode solicitar a devolução pelo app, em Minhas compras, no pedido; o "
+        "reembolso é feito pela Shopee.",
         "cancelamento",
         ["pedido"],
     ),

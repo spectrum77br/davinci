@@ -1100,7 +1100,8 @@
    "pedido": "saiu"
   },
   "texto": "Olá! Como o pedido já foi postado, a loja não consegue mais cancelá-lo. Ao receber, você pode pedir a devolução pelo app, em Minhas compras.",
-  "sai": true
+  "sai": false,
+  "nota": "21/10/2026 (rodada 5, o eval real): a orientação do cancelamento mudou para 'a plataforma não permite cancelar um pedido já enviado'; 'a loja não consegue cancelar' virou aviso (checagens.conferir_cancelar_pela_loja) e não sai sozinha"
  },
  {
   "id": "rf3-X23",
@@ -2769,7 +2770,8 @@
    "pedido": "saiu"
   },
   "texto": "Olá! Como o pedido já foi postado, a loja não consegue mais cancelá-lo; ao receber, você pode solicitar a devolução pelo app.",
-  "sai": true
+  "sai": false,
+  "nota": "21/10/2026 (rodada 5, o eval real): a orientação do cancelamento mudou para 'a plataforma não permite cancelar um pedido já enviado'; 'a loja não consegue cancelar' virou aviso (checagens.conferir_cancelar_pela_loja) e não sai sozinha"
  },
  {
   "id": "holdout-G14",

@@ -201,6 +201,10 @@ _MOTIVO_LINK = "link"
 _MOTIVO_PIX = "pagamento fora da plataforma (PIX)"
 _MOTIVO_BANCO = "pagamento fora da plataforma (conta bancária)"
 _MOTIVO_POR_FORA = "negociação fora da plataforma"
+# O nome público (os testes do agente, 21/10/2026): o motivo vale também no
+# agente — o prompt manda escrever "a compra é pelo próprio app" e nunca
+# "direto com a loja/conosco" (revisão r5i: o envio revalida e recusaria).
+MOTIVO_POR_FORA = _MOTIVO_POR_FORA
 _MOTIVO_AVALIACAO = "pede ou condiciona avaliação"
 _MOTIVO_RECLAMACAO = "desestimula reclamação"
 _MOTIVO_ML_ISO = "caractere que o Mercado Livre não aceita"
@@ -1364,11 +1368,19 @@ def _sem_ate_o_dia_da_garantia(plano: str) -> str:
 # meses com "hardware/aparelho", os 12 com "software/sistema", os 90 dias com
 # "garantia/defeito" —; "a garantia do aparelho é de 12 meses" e "a garantia
 # é de 3 meses e a entrega leva 12 meses" continuam barrados.
+# Revisão r5i de 21/10/2026 (decisões 6 a 8 do dono, só o agente): a garantia
+# Uranyx de 1 ano — "1 ano de garantia" (com "garantia"), os 90 dias com "loja"
+# e os 9 meses com "Uranyx" na mesma oração ("os 90 primeiros dias com a loja e
+# os 9 meses seguintes direto com a Uranyx").
 PARTE_HARDWARE, PARTE_SOFTWARE, PARTE_GERAL = "hardware", "software", "geral"
+PARTE_LOJA, PARTE_URANYX = "loja", "uranyx"
 _CHAVES_DA_REGRA = (
     ("hardware_meses", "mes", PARTE_HARDWARE),
     ("software_meses", "mes", PARTE_SOFTWARE),
     ("dias", "dia", PARTE_GERAL),
+    ("garantia_anos", "ano", PARTE_GERAL),
+    ("loja_dias", "dia", PARTE_LOJA),
+    ("uranyx_meses", "mes", PARTE_URANYX),
 )
 _POR_EXTENSO = {
     1: "um",
@@ -1415,8 +1427,9 @@ def prazos_da_regra(garantias: Sequence[Mapping] | None) -> frozenset[tuple[int,
 
 def _prazo_da_regra(n: int, unidade: str) -> re.Pattern[str]:
     numero = rf"(?:{n}|{_POR_EXTENSO[n]})" if n in _POR_EXTENSO else str(n)
-    nome = r"(?:mes|meses)" if unidade == "mes" else r"dias?"
-    return re.compile(rf"(?<![\d.,]){numero}\s*{nome}\b")
+    nome = {"mes": r"(?:mes|meses)", "ano": r"anos?"}.get(unidade, r"dias?")
+    # "os 90 primeiros dias" (revisão r5i, a garantia Uranyx).
+    return re.compile(rf"(?<![\d.,]){numero}\s*(?:primeiros\s+)?{nome}\b")
 
 
 # A oração dentro da frase: a vírgula que abre OUTRO sujeito (", a troca", ",
@@ -1430,10 +1443,12 @@ _ORACAO_DA_REGRA = re.compile(
 _PALAVRA_DA_PARTE = (
     (PARTE_HARDWARE, r"hardware|aparelho|fisic\w*|pecas?|componentes?"),
     (PARTE_SOFTWARE, r"software|sistema"),
+    (PARTE_LOJA, r"loja"),
+    (PARTE_URANYX, r"uranyx"),
 )
 _PARTE_DA_REGRA_DEPOIS = re.compile(
-    r"\s+(?:(?:de|da|do|para|pro|pra|no|na|em|o|a|garantia|cobertura)\s+){0,3}"
-    r"(?P<parte>" + "|".join(p for _n, p in _PALAVRA_DA_PARTE) + r")\b"
+    r"\s+(?:(?:de|da|do|para|pro|pra|no|na|em|o|a|garantia|cobertura|com|seguintes|direto)"
+    r"\s+){0,4}(?P<parte>" + "|".join(p for _n, p in _PALAVRA_DA_PARTE) + r")\b"
 )
 _PARTE_DA_REGRA_ANTES = re.compile(r"\b(?:" + "|".join(p for _n, p in _PALAVRA_DA_PARTE) + r")\b")
 _DA_GARANTIA = re.compile(r"\b(?:garantias?|defeitos?|fabrica\w*|cobert\w*)\b")
@@ -1952,10 +1967,15 @@ def _de_que_e(prefixo: str, desde: int, frase: str) -> tuple[str | None, str | N
 
 
 def _datas_do_bloco(garantias: list[dict] | None) -> list[tuple[int, int, int]]:
+    # `fim_loja`/`fim_uranyx`: só o `ver_garantia` do agente devolve (a garantia
+    # Uranyx, revisão r5i de 21/10/2026); o legado nunca tem.
     return [
         d
         for g in garantias or []
-        for d in (_como_data(g.get(k)) for k in ("inicio", "fim_hardware", "fim_software"))
+        for d in (
+            _como_data(g.get(k))
+            for k in ("inicio", "fim_hardware", "fim_software", "fim_loja", "fim_uranyx")
+        )
         if d is not None
     ]
 
@@ -1979,7 +1999,7 @@ def _validas_para(
         return dos_dois if marco == "fim" else dos_dois + _validas_para(garantias, "inicio", None)
     else:
         fins = {"hardware": ("fim_hardware",), "software": ("fim_software",)}.get(
-            parte or "", ("fim_hardware", "fim_software")
+            parte or "", ("fim_hardware", "fim_software", "fim_loja", "fim_uranyx")
         )
         chaves = fins if marco == "fim" else ("inicio", *fins)
     return [

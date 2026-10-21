@@ -66,8 +66,9 @@ class Proposta(BaseModel):
         str,
         Field(
             description=(
-                "O que iria ao cliente, em português, de 1 a 3 frases. Em 'pessoa', o "
-                "rascunho que a pessoa da equipe confere antes de enviar."
+                "O que iria ao cliente, em português, de 1 a 3 frases. Em 'pessoa', a "
+                "resposta que vale depois que a pessoa agir (sem espera nem promessa da "
+                "equipe); vazio quando não há nada verdadeiro a dizer antes dela."
             )
         ),
     ]
@@ -86,7 +87,12 @@ class Proposta(BaseModel):
     ]
     motivo_pessoa: Annotated[
         str,
-        Field(description="Em 'pessoa', o porquê em uma frase curta; vazio nos outros casos."),
+        Field(
+            description=(
+                "Em 'pessoa', o que a pessoa precisa fazer ou decidir e por quê, numa frase "
+                "curta, sem dado pessoal nem lacuna; vazio nos outros casos."
+            )
+        ),
     ]
     evidencias: Annotated[
         list[str],

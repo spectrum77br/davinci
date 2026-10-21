@@ -357,7 +357,9 @@ async def test_a_recusa_por_parafrase_nova_vai_para_pessoa(texto, categoria):
 @pytest.mark.parametrize(
     "texto",
     [
-        # A orientação aprovada (spec 6.4, `prompt.ORIENTACAO`).
+        # A orientação ANTIGA da spec 6.4 (o `prompt.ORIENTACAO` de 21/10/2026 diz "a
+        # plataforma não permite cancelar um pedido já enviado"): continua não sendo
+        # recusa pela estrutura — a regra própria dela é a `conferir_cancelar_pela_loja`.
         "Olá! Como o pedido já foi postado, a loja não consegue mais cancelar. Ao receber, "
         "você pode pedir a devolução em Minhas compras.",
         "A loja não consegue mais cancelar, mas você pode pedir a devolução ao receber.",

@@ -958,8 +958,11 @@ def gatilhos(
         _PEDE_BRINDE.search(sem_pedido_falso) and CHAVE_RECUSA_BRINDE not in ativas
     ):
         saida.append(_gatilho(constantes.ACAO_DESCONTO_BRINDE))
-    # 14 — pós-venda para UF com restrição (a UF nunca vai ao motivo).
-    if uf_restrita:
+    # 14 — pós-venda para UF com restrição (a UF nunca vai ao motivo). O pedido
+    # já CANCELADO não tem mais o que decidir (eval real de 21/10/2026, dev
+    # b546657edb4d: o cliente do pedido cancelado pela restrição perguntou do
+    # estorno — a orientação do reembolso é a resposta, e a exceção ia junto).
+    if uf_restrita and postado != POSTADO_CANCELADO:
         saida.append(_gatilho(constantes.ACAO_EXCECAO, DETALHE_UF_RESTRITA))
     # 15 — remetente sem o fato aprovado.
     if any(ia.duvida_de_remetente(t) for t in textos) and CHAVE_REMETENTE not in ativas:

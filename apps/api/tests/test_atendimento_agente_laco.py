@@ -615,7 +615,8 @@ def test_bloco_geral_tem_as_fontes_do_dono():
         assert trecho in texto
     assert '"disponível" ou "esgotado"' in texto and "nunca quantidade" in texto
     # Garantia (fontes §1): ver_garantia, a regra a partir da entrega, CDC.
-    assert "ver_garantia" in texto and "contados da entrega" in texto
+    # (revisão do r5i: a regra Uranyx de 1 ano "a partir da entrega")
+    assert "ver_garantia" in texto and "a partir da entrega" in texto
     assert "Código de Defesa do Consumidor" in texto
     # Região (fontes §3), remetente (§2) e troca (§6, só pessoa).
     assert "conferir pelo CEP" in texto and '"trecho"' in texto

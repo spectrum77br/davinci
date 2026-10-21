@@ -23,6 +23,7 @@ número inventado.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -96,6 +97,18 @@ def id_troca(numero: str) -> str:
 def id_par(par_id: Any) -> str:
     """Um exemplo da equipe — só para o RASTRO; nunca é evidência."""
     return f"par:{_limpo(str(par_id))}"
+
+
+# O id de evidência ESCRITO num texto (o motivo "evidência citada sem prova
+# (variacoes:58265493964)", o aviso, o erro) — a forma dos `id_*` acima. A
+# máscara de dígitos (`ia.mascarar`) lia os 11 dígitos do anúncio da Shopee
+# como CPF e o motivo do eval de 21/10 saiu "(variacoes:[CPF])", sem bater com
+# a evidência citada nem com o registro: quem mascara texto com id de
+# evidência deixa o id como está (`replay.mascarar_texto`).
+EVIDENCIA_NO_TEXTO = re.compile(
+    r"(?<![\w:])(?:pedido|ficha|variacoes|restricao|espec|garantia(?::pedido)?|fato|regra"
+    r"|modelo|troca|par):[\w{}-]+(?:\.[\w{}-]+)*"
+)
 
 
 # Prefixos que nunca provam nada (exemplo de outro cliente).
@@ -272,6 +285,42 @@ def ler_extra(extra: Mapping[str, Any] | None) -> ExtraAgente:
 
 # ── Registro de evidências e rastro ───────────────────────────────────────
 
+# O número com separador ("16.128", "6,9", "15.0", "2.256") e cada grupo de
+# dígitos.
+_NUMERO_COMPOSTO = re.compile(r"\d+(?:[.,]\d+)+")
+_DIGITOS = re.compile(r"\d+")
+# O valor em dinheiro nunca se parte (revisão r5i de 21/10/2026: "R$ 349,90"
+# liberava o "90" de "Ainda restam 90 unidades"): com "R$" ou com os centavos
+# (",dd" no fim do número).
+_DINHEIRO = re.compile(r"R\$\s*\d[\d.]*(?:,\d+)?|\d[\d.]*,\d{2}(?!\d)")
+
+
+def numeros_soltos(textos: Iterable[str | None]) -> str:
+    """As formas SOLTAS dos números dos `textos`, que o `ia.numeros_inventados`
+    não enxerga sozinho (21/10/2026). PURA. "" quando não há nenhuma.
+
+    O `ia._numeros` junta o número com separador ("16.128" → "16128", "Android
+    15.0" → "150", "6,9" → "69"): a RAM e o armazenamento do título da Uranyx
+    ("16.128 Gb") escritos como "16 GB de RAM e 128 GB" — o dado do anúncio —
+    viravam "número que não veio do sistema". Aqui entra cada grupo de dígitos
+    do número com separador e o número sem o zero à esquerda ("05/11" → "5").
+    Só o agente usa (`ContextoAgente.permitidos_extra`), e só com os textos de
+    PRODUTO (título, atributos, especificações, cartões; revisão r5i). O valor
+    em dinheiro ("R$ 349,90", "349,90") não se parte.
+    """
+    extras: dict[str, None] = {}
+    for texto in textos:
+        if not texto:
+            continue
+        texto = _DINHEIRO.sub(" ", texto)
+        for composto in _NUMERO_COMPOSTO.findall(texto):
+            extras.update(dict.fromkeys(_DIGITOS.findall(composto)))
+        for grupo in _DIGITOS.findall(texto):
+            sem_zero = grupo.lstrip("0") or "0"
+            if sem_zero != grupo:
+                extras[sem_zero] = None
+    return " ".join(extras)
+
 
 @dataclass
 class RegistroEvidencias:
@@ -376,6 +425,11 @@ class ContextoAgente:
     pedidos: set[str] = field(default_factory=set)
     anuncios: set[str] = field(default_factory=set)
     registro: RegistroEvidencias = field(default_factory=RegistroEvidencias)
+    # O texto do pacote que só libera NÚMERO (`permitir_numeros`, 21/10/2026).
+    numeros_vistos: list[str] = field(default_factory=list)
+    # Os textos de PRODUTO (as fichas, o `ver_anuncio`, os cartões, os itens do
+    # pedido): só deles saem as formas soltas (`numeros_soltos`; revisão r5i).
+    textos_de_produto: list[str] = field(default_factory=list)
     # O que `ver_garantia` devolveu (o formato do bloco do Painel: inicio,
     # fim_hardware, fim_software, status, produto — e `regra` no cálculo).
     garantias_conferidas: list[dict] = field(default_factory=list)
@@ -420,6 +474,10 @@ class ContextoAgente:
     # envio (`ia.trava_do_agente`) lê `sem_auto`.
     avisos: list[str] = field(default_factory=list)
     sem_auto: list[str] = field(default_factory=list)
+    # As isenções do envio (revisão r5i de 21/10/2026): "caminho_uranyx" = a
+    # frase do caminho da Uranyx na garantia foi liberada pelo `ver_garantia`
+    # (o `enviar` revalida o texto sem ela, só neste rascunho).
+    isencoes: list[str] = field(default_factory=list)
     ms: int | None = None
     # O `max_tokens` da passada em curso (ajuste r3): a estimativa do custo da
     # requisição que estourou o tempo usa o da passada, não o da 1ª.
@@ -502,15 +560,46 @@ class ContextoAgente:
     # ── evidências ──
 
     def permitir(
-        self, *, ids: Iterable[str | None] = (), textos: Iterable[str | None] = ()
+        self,
+        *,
+        ids: Iterable[str | None] = (),
+        textos: Iterable[str | None] = (),
+        produto: bool = False,
     ) -> None:
-        """O que o pacote ou uma ferramenta PROVOU: ids citáveis e textos permitidos."""
+        """O que o pacote ou uma ferramenta PROVOU: ids citáveis e textos
+        permitidos. `produto` = os textos são do anúncio (as fichas, o
+        `ver_anuncio`): deles saem também as formas soltas dos números."""
+        textos = [t for t in textos if t]
         self.registro.permitir_ids(*ids)
         self.registro.permitir_textos(*textos)
+        if produto:
+            self.textos_de_produto.extend(textos)
+
+    def permitir_numeros(self, *textos: str | None, produto: bool = False) -> None:
+        """Texto do pacote que o modelo VIU e que só libera NÚMERO (21/10/2026).
+
+        Os cartões (inclusive o do anúncio de outro vendedor, que nunca é fonte
+        de característica), os itens do pedido e as compras do comprador: o
+        número escrito ali não foi inventado pelo modelo. Não entra no registro
+        (`registro.textos`), que é a evidência que o verificador lê. O
+        cabeçalho (a hora de agora, o prazo de resposta) e o estado da conversa
+        NÃO entram (revisão r5i de 21/10/2026: o minuto 35 liberava "Temos 35
+        unidades"). `produto` = texto de produto (os cartões, os itens): dele
+        saem também as formas soltas.
+        """
+        textos_ok = [t for t in textos if t]
+        self.numeros_vistos.extend(textos_ok)
+        if produto:
+            self.textos_de_produto.extend(textos_ok)
 
     def permitidos_extra(self) -> list[str]:
-        """O `permitidos_extra` da `ia.conferir_saida`."""
-        return list(self.registro.textos)
+        """O `permitidos_extra` da `ia.conferir_saida`: o registro, os números
+        do pacote e, quando houver, as formas soltas dos textos de PRODUTO
+        (`numeros_soltos`; nunca do pedido, do dinheiro, da hora ou das datas
+        do cabeçalho)."""
+        textos = [*self.registro.textos, *self.numeros_vistos]
+        soltos = numeros_soltos(self.textos_de_produto)
+        return [*textos, soltos] if soltos else textos
 
     def registrar_pedido_lido(self, ctx_pedido: Mapping[str, Any], postado: str | None) -> None:
         """Um OUTRO pedido lido por ferramenta (ver `pedidos_lidos`)."""
@@ -639,6 +728,7 @@ class ContextoAgente:
             "avisos_auto": list(self.avisos_auto),
             "avisos": list(self.avisos),
             "sem_auto": list(self.sem_auto),
+            "isencoes": list(self.isencoes),
             "modo_replay": self.modo_replay,
             "as_of": self.as_of.isoformat() if self.as_of else None,
         }

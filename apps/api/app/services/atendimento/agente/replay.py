@@ -76,6 +76,7 @@ from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.agente import acao_pessoa, custo, pacote, saida
+from app.services.atendimento.agente import contexto as agente_ctx
 from app.services.atendimento.agente.contexto import (
     BaseDoGerar,
     ContextoAgente,
@@ -357,6 +358,22 @@ def _sem_termos(texto: str, termos: Iterable[str | None]) -> str:
     return _CIDADE_UF.sub("[LOCAL]", texto)
 
 
+def _mascarar_fora_das_evidencias(texto: str, nomes: tuple[str | None, ...]) -> str:
+    """O `ia.mascarar` em tudo menos nos ids de evidência (`EVIDENCIA_NO_TEXTO`),
+    que passam só pela máscara dos nomes. PURA."""
+    partes: list[str] = []
+    ultimo = 0
+    for m in agente_ctx.EVIDENCIA_NO_TEXTO.finditer(texto):
+        partes.append(ia.mascarar(texto[ultimo : m.start()], nomes))
+        evidencia = m.group(0)
+        for nome in nomes:
+            evidencia = ia._mascarar_nome(evidencia, nome)
+        partes.append(evidencia)
+        ultimo = m.end()
+    partes.append(ia.mascarar(texto[ultimo:], nomes))
+    return "".join(partes)
+
+
 def mascarar_texto(
     texto: str | None,
     nomes: Sequence[str | None] = (),
@@ -370,10 +387,15 @@ def mascarar_texto(
     (`termos_do_pedido`). `digitos=False` (o pacote e o resultado das
     ferramentas, que já vêm mascarados): só nomes e termos — o id do anúncio
     da Shopee tem 11 dígitos e o `mascarar` o confundiria com telefone.
+
+    Com `digitos`, o id de evidência escrito no texto ("evidência citada sem
+    prova (variacoes:58265493964)", 21/10/2026) passa só pela máscara dos
+    nomes: o `mascarar` o virava "variacoes:[CPF]", que não batia com a
+    evidência citada (`rastro.evidencias`) nem com o registro.
     """
     t = texto or ""
     if digitos:
-        t = ia.mascarar(t, tuple(nomes))
+        t = _mascarar_fora_das_evidencias(t, tuple(nomes))
     else:
         for nome in nomes:
             t = ia._mascarar_nome(t, nome)
