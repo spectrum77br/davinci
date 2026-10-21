@@ -13,8 +13,9 @@ definePageMeta({
 })
 
 // Regra de exceção de envio da loja (campo "Exceções") — o sweep automático
-// de NF bloqueia o pedido que casa (Aguardando Cancelamento + "restrição").
-// A UF vem do campo "Restrição" da loja (uf_restrictions).
+// de NF barra o pedido pras UFs do campo "Restrição" (uf_restrictions) e
+// LIBERA o que casa uma exceção; o resto vai pra Aguardando Cancelamento +
+// "restrição". Vale também pro ML (trava do ML no sweep).
 type StoreExcecao = {
   tipo: 'valor' | 'sku' | 'palavra'
   valor?: number | null
@@ -366,7 +367,7 @@ const excDraft = reactive({
 function excecaoLabel(r: StoreExcecao): string {
   if (r.tipo === 'valor') {
     const v = Number(r.valor ?? 0)
-    return `valor ≥ R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
+    return `valor abaixo de R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
   }
   const termos = (r.termos || []).join(', ')
   return r.tipo === 'sku' ? `SKU ${termos}` : `nome contém ${termos}`
@@ -1731,8 +1732,8 @@ async function copyText(text: string) {
       </div>
     </div>
 
-    <!-- Exceções popover — editor de regras de bloqueio de envio da loja.
-         Pedido que casa vai pra Aguardando Cancelamento no sweep de NF. -->
+    <!-- Exceções popover — editor do que PODE ir pras UFs da Restrição.
+         Pedido que não casa nenhuma vai pra Aguardando Cancelamento. -->
     <div
       v-if="openExcRow"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3"
@@ -1753,8 +1754,9 @@ async function copyText(text: string) {
         <p class="text-[11px] text-muted-foreground mb-3">
           As regras valem pras UFs do campo <b>Restrição</b> da loja
           ({{ (openExcRow.uf_restrictions || []).join(', ') || 'nenhuma UF — configure a Restrição' }}).
-          Pedido pra essas UFs que casar uma regra NÃO é enviado — vai pra
-          Aguardando Cancelamento com "restrição" nas observações do Bling.
+          Pedido pra essas UFs é <b>barrado</b> — vai pra Aguardando
+          Cancelamento com "restrição" nas observações do Bling — e
+          <b>só passa</b> se casar uma regra desta lista.
         </p>
         <div v-if="openExcRow.excecoes && openExcRow.excecoes.length" class="space-y-1 mb-3">
           <div
@@ -1772,17 +1774,19 @@ async function copyText(text: string) {
             </button>
           </div>
         </div>
-        <div v-else class="text-xs text-muted-foreground mb-3">Nenhuma regra.</div>
+        <div v-else class="text-xs text-muted-foreground mb-3">
+          Nenhuma regra — sem regra cadastrada a Restrição não barra nada.
+        </div>
         <div class="border rounded p-2 space-y-2 text-xs">
           <select v-model="excDraft.tipo" class="border rounded px-1 py-1 bg-background w-full">
-            <option value="valor">Valor do pedido (≥)</option>
+            <option value="valor">Valor do pedido abaixo de</option>
             <option value="sku">SKU do item</option>
             <option value="palavra">Palavra no nome</option>
           </select>
           <input
             v-if="excDraft.tipo === 'valor'"
             v-model="excDraft.valor"
-            placeholder="Valor mínimo bloqueado, ex. 700"
+            placeholder="Passa abaixo deste valor, ex. 700"
             class="border rounded px-2 py-1 bg-background w-full"
           />
           <input

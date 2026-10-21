@@ -1236,3 +1236,148 @@ async def test_sweep_restricao_loja_palavra_libera_o_que_casa(
     db.expire_all()
     cmds = (await db.execute(select(NfCommand))).scalars().all()
     assert sorted(n for c in cmds for n in c.numeros) == ["830001"]
+
+
+_EXCECOES_RS = [
+    {"tipo": "palavra", "termos": ["mala"]},
+    {"tipo": "palavra", "termos": ["airfryer"]},
+]
+
+
+@pytest.mark.asyncio
+async def test_trava_ml_barra_rs_com_automatico_do_ml_desligado(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Caso real (21/10): conta ML de Correios não envia pro RS, só passa
+    mala/airfryer. O automático do ML está DESLIGADO (a NF sai pelo robô do
+    Eduardo) e a loja nem tem faturador — mesmo assim o celular pro RS vai
+    pra Aguardando Cancelamento (obs antes do PATCH), a mala pro RS e o
+    celular pra SP ficam "Em aberto", e nada entra na fila."""
+    monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", False, raising=False)
+    monkeypatch.setattr(get_settings(), "nf_auto_ml", False, raising=False)
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930001",
+        com_faturador=False, impressao="correios",
+        excecoes=_EXCECOES_RS, uf_restrictions=["RS"],
+    )
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="c1", bling_id=700001,
+        uf_destino="RS", item_descricao="Smartphone Galaxy A15 128GB",
+    )
+    await _seed_pedido(
+        db, numero="830002", loja="930001", sku="m1", bling_id=700002,
+        uf_destino="RS", item_descricao="Mala de Bordo 10kg ABS",
+    )
+    await _seed_pedido(
+        db, numero="830003", loja="930001", sku="c2", bling_id=700003,
+        uf_destino="SP", item_descricao="Smartphone Galaxy A15 128GB",
+    )
+    await db.commit()
+    fake = _FakeBlingSituacao(orders={700001: {"id": 700001, "observacoes": ""}})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["restricao_ml"] == 1
+    assert summary["candidatos"] == 0  # automático do ML segue desligado
+
+    assert fake.eventos == [("put", 700001), ("situacao", 700001)]
+    assert fake.chamadas == [(700001, 83955)]
+    [(_put_id, body)] = fake.puts
+    assert "restrição" in (body.get("observacoes") or "")
+
+    db.expire_all()
+    assert (await db.execute(select(NfCommand))).scalars().all() == []
+    situacoes = dict(
+        (
+            await db.execute(
+                select(BlingOrder.numero, BlingOrder.situacao).where(
+                    BlingOrder.numero.in_(["830001", "830002", "830003"])
+                )
+            )
+        ).all()
+    )
+    assert situacoes == {"830001": "83955", "830002": "6", "830003": "6"}
+    fat = (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001")
+        )
+    ).scalar_one()
+    assert fat.status_faturamento == "restricao"
+    assert "não envia pro RS" in (fat.erro_faturamento or "")
+
+    # tentativa única: a passada seguinte não mexe em mais nada
+    summary2 = await run_auto_enfileirar_nf()
+    assert summary2["restricao_ml"] == 0
+    assert len(fake.puts) == 1
+    assert len(fake.chamadas) == 1
+
+
+@pytest.mark.asyncio
+async def test_trava_ml_bling_recusou_tenta_de_novo(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Se o Bling recusar a mudança de situação, o pedido NÃO fica marcado
+    'restricao' (no ML ninguém mais segura o pedido) e a próxima passada
+    tenta de novo."""
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930001",
+        impressao="correios", excecoes=_EXCECOES_RS, uf_restrictions=["RS"],
+    )
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="c1", bling_id=700001,
+        uf_destino="RS", item_descricao="iPhone 13 128GB",
+    )
+    await db.commit()
+
+    class _BlingRecusa(_FakeBlingSituacao):
+        async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
+            raise RuntimeError("Bling 429")
+
+    recusa = _BlingRecusa(orders={700001: {"id": 700001, "observacoes": ""}})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(recusa)
+    )
+    summary = await run_auto_enfileirar_nf()
+    assert summary["restricao_ml"] == 0
+    db.expire_all()
+    assert (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001")
+        )
+    ).scalar_one_or_none() is None
+
+    ok = _FakeBlingSituacao(orders={700001: {"id": 700001, "observacoes": ""}})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(ok)
+    )
+    summary2 = await run_auto_enfileirar_nf()
+    assert summary2["restricao_ml"] == 1
+    assert ok.chamadas == [(700001, 83955)]
+
+
+@pytest.mark.asyncio
+async def test_trava_ml_loja_sem_excecao_nao_barra(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Loja ML com Restrição e SEM exceção fica inerte, como no resto do
+    sweep: nada vai pro Bling."""
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930001",
+        impressao="correios", uf_restrictions=["RS"],
+    )
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="c1", bling_id=700001,
+        uf_destino="RS", item_descricao="Smartphone Galaxy A15",
+    )
+    await db.commit()
+    fake = _FakeBlingSituacao()
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["restricao_ml"] == 0
+    assert fake.chamadas == []
+    assert fake.puts == []

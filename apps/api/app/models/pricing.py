@@ -368,15 +368,16 @@ class StoreInfo(Base, TimestampMixin):
     uf_restrictions: Mapped[list[str] | None] = mapped_column(
         ARRAY(Text), nullable=True
     )
-    # Exceções de envio POR LOJA (migration 0216): lista de regras que o sweep
-    # automático de NF avalia — pedido que casa vai pra Aguardando Cancelamento
-    # com "restrição" nas Observações (igual à restrição Apple→RJ, que segue
-    # hardcoded e NÃO é substituída por isto). As regras valem pras UFs do
-    # campo "Restrição" acima (uf_restrictions); loja sem Restrição = exceção
-    # nunca casa. Cada regra:
-    #   {"tipo": "valor", "valor": 700}       → valor total >= 700
-    #   {"tipo": "sku", "termos": [...]}      → SKU do item
-    #   {"tipo": "palavra", "termos": [...]}  → nome do item contém
+    # Exceções de envio POR LOJA (migration 0216): o que PODE ir pras UFs do
+    # campo "Restrição" acima (uf_restrictions). O sweep automático de NF
+    # barra o pedido pra essas UFs que não casa nenhuma exceção: Aguardando
+    # Cancelamento com "restrição" nas Observações (a restrição Apple→RJ da
+    # Shopee segue hardcoded à parte; no ML vale pela trava do ML, mesmo com
+    # o automático do ML desligado). Loja sem Restrição ou sem exceção = nada
+    # é barrado. Cada regra LIBERA quando:
+    #   {"tipo": "valor", "valor": 700}       → valor total < 700
+    #   {"tipo": "sku", "termos": [...]}      → algum item tem o SKU
+    #   {"tipo": "palavra", "termos": [...]}  → nome de algum item contém
     # (regras antigas podem carregar "uf" — chave ignorada.) NULL/[] = sem
     # exceções.
     excecoes: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)

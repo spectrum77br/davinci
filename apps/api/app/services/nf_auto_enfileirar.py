@@ -11,6 +11,10 @@ existe) e:
   - restrição    → Shopee + produto Apple (pelo nome) + destino RJ não é
                    enviado: "restrição" nas Observações do pedido no Bling +
                    Aguardando Cancelamento + status 'restricao';
+  - trava do ML  → pedido ML "Em aberto" pra UF da Restrição da loja que não
+                   casa nenhuma Exceção vai pra Aguardando Cancelamento do
+                   mesmo jeito, MESMO com o automático do ML desligado (a NF
+                   do ML sai pelo robô do Eduardo, fora desta fila);
   - sem estoque  → "Sem estoque — saldo negativo: <SKUs>" nas Observações +
                    Aguardando Cancelamento no Bling + status 'sem_estoque'
                    (não emite NF/etiqueta de peça que não existe);
@@ -187,6 +191,15 @@ _RESTRICAO_KEYWORDS: tuple[str, ...] = (
 )
 _RESTRICAO_OBSERVACAO = "restrição"
 
+# Trava do ML (Vinicius 21/10: "nao quero enviar celular para RS"): a NF e a
+# etiqueta do ML saem pelo robô do Eduardo, FORA desta fila, e o automático
+# do ML (nf_auto_ml) está desligado — a Restrição da loja nunca agia no ML.
+# Este passo aplica SÓ a restrição por loja (Restrição + Exceções) aos
+# pedidos ML "Em aberto", sem enfileirar nada: o barrado vai pra Aguardando
+# Cancelamento antes de o robô emitir. Não depende do horário da loja nem de
+# faturador; tentativa única igual ao resto (status 'restricao').
+_TRAVA_ML_PLATAFORMAS: tuple[str, ...] = ("ml", "mercadolivre")
+
 async def run_auto_enfileirar_nf() -> dict:
     """Uma passada do sweep. Devolve um resumo com contadores."""
     summary: dict = {
@@ -196,6 +209,7 @@ async def run_auto_enfileirar_nf() -> dict:
         "sem_estoque": 0,
         "restricao": 0,
         "restricao_loja": 0,
+        "restricao_ml": 0,
         "pulados": 0,
         "fundidos": 0,
     }
@@ -209,6 +223,17 @@ async def run_auto_enfileirar_nf() -> dict:
         if not got:
             summary["skipped"] = "lock_busy"
             return summary
+
+        # 0) Trava do ML ANTES dos candidatos: o barrado aqui ganha status
+        #    'restricao' e já não entra no `_candidatos` (tentativa única)
+        #    quando o automático do ML estiver ligado. Falha nunca derruba o
+        #    sweep da Shopee/TikTok (savepoint: erro de banco aqui não deixa a
+        #    transação abortada pro resto).
+        try:
+            async with session.begin_nested():
+                summary["restricao_ml"] = await _travar_ml(session)
+        except Exception:  # noqa: BLE001
+            logger.exception("nf_auto_enfileirar_trava_ml_falhou")
 
         numeros = await _candidatos(session)
         summary["candidatos"] = len(numeros)
@@ -681,6 +706,97 @@ async def _pedidos_restricao_loja(
         if motivo:
             bloqueio[numero] = motivo
     return bloqueio
+
+
+async def _candidatos_trava_ml(session) -> list[str]:
+    """Pedidos ML "Em aberto" (janela de 7 dias) de loja ativa com Restrição
+    e Exceções, ainda sem status_faturamento e fora da fila. Quem decide se
+    barra é a `_pedidos_restricao_loja` (UF + exceções)."""
+    cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
+    numeros = (
+        await session.execute(
+            select(BlingOrder.numero)
+            .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
+            .where(
+                BlingOrder.situacao == _SITUACAO_EM_ABERTO,
+                BlingOrder.item_index == 0,
+                BlingOrder.numero.is_not(None),
+                BlingOrder.data >= cutoff,
+                func.lower(StoreInfo.platform).in_(_TRAVA_ML_PLATAFORMAS),
+                StoreInfo.archived_at.is_(None),
+                StoreInfo.excecoes.is_not(None),
+                StoreInfo.uf_restrictions.is_not(None),
+            )
+            .distinct()
+            .order_by(BlingOrder.numero)
+        )
+    ).scalars().all()
+    if not numeros:
+        return []
+    ja_tratados = set(
+        (
+            await session.execute(
+                select(NfFaturamento.pedido_bling).where(
+                    NfFaturamento.pedido_bling.in_(numeros),
+                    NfFaturamento.status_faturamento.is_not(None),
+                )
+            )
+        ).scalars().all()
+    )
+    from app.routers.nf import _em_fila
+
+    em_fila = await _em_fila(session, "import_avulsa")
+    return [n for n in numeros if n not in ja_tratados and n not in em_fila]
+
+
+async def _travar_ml(session) -> int:
+    """Passo da trava do ML (ver `_TRAVA_ML_PLATAFORMAS`). Devolve quantos
+    pedidos foram pra Aguardando Cancelamento nesta passada.
+
+    Mesma mecânica da restrição por loja do sweep: obs "restrição" (GET→PUT)
+    ANTES do PATCH 83955. Só marca 'restricao' no painel quem o Bling ACEITOU
+    (o espelho na bling_orders só muda no sucesso): se o PATCH falhar, o
+    pedido segue "Em aberto" e a próxima passada tenta de novo — no ML
+    ninguém mais segura o pedido, então não dá pra desistir na 1ª falha. A
+    obs não duplica (linha idêntica do dia é idempotente).
+    """
+    from app.routers.nf import (
+        _SITUACAO_AGUARDANDO_CANCELAMENTO,
+        _marcar_aguardando_cancelamento,
+        _marcar_faturamento,
+    )
+
+    numeros = await _candidatos_trava_ml(session)
+    bloqueio = await _pedidos_restricao_loja(session, numeros) if numeros else {}
+    if not bloqueio:
+        return 0
+    bloqueio = dict(list(bloqueio.items())[:_MAX_POR_TICK])
+    await _escrever_observacao_restricao(session, list(bloqueio))
+    await _marcar_aguardando_cancelamento(session, list(bloqueio))
+    travados = set(
+        (
+            await session.execute(
+                select(BlingOrder.numero).where(
+                    BlingOrder.numero.in_(list(bloqueio)),
+                    BlingOrder.situacao == str(_SITUACAO_AGUARDANDO_CANCELAMENTO),
+                )
+            )
+        ).scalars().all()
+    )
+    for numero, motivo in bloqueio.items():
+        if numero in travados:
+            await _marcar_faturamento(
+                session, [numero], status_txt="restricao", erro=motivo
+            )
+    falharam = sorted(set(bloqueio) - travados)
+    if falharam:
+        logger.warning("nf_auto_enfileirar_trava_ml_pendente", pedidos=falharam)
+    if travados:
+        logger.info(
+            "nf_auto_enfileirar_restricao_ml",
+            pedidos={n: m for n, m in bloqueio.items() if n in travados},
+        )
+    return len(travados)
 
 
 def observacao_sem_estoque(skus: list[str]) -> str:
