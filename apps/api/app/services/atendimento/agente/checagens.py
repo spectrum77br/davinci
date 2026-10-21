@@ -2051,9 +2051,116 @@ def _acolhe_com_a_peca(oracao: str) -> bool:
     return not _DIAGNOSTICO_NO_ACOLHIMENTO.search(corpo)
 
 
-def _so_acolhimento(oracao: str) -> bool:
-    """Cortesia, acolhimento ou o acolhimento que cita a peça. PURA."""
-    return bool(_SO_CORTESIA.search(oracao) or _ACOLHE.search(oracao) or _acolhe_com_a_peca(oracao))
+# Barbosa ao vivo (21/10/2026, rascunho 31a72a93): "Lamentamos o transtorno com a
+# bateria descarregando rápido." — o cliente escreveu "tá descarregando muito
+# rápido". O acolhimento que REPETE o relato do próprio cliente não afirma
+# característica do produto nem diagnostica: é o problema que ELE contou. Vale
+# quando a oração inteira é o acolhimento ("lamentamos/sentimos muito/pedimos
+# desculpas", com "o transtorno/o problema/o ocorrido…" ou não) + a preposição + o
+# relato, e o relato só tem: as palavras do cliente (`_ecoa_o_cliente`), o
+# nome da peça ou do produto (`_PECA_DO_RELATO`: "bateria", "tela", "aparelho"),
+# as palavras de ligação — e nada de diagnóstico, estado ou conserto
+# (`_DIAGNOSTICO_NO_ACOLHIMENTO`). O que o cliente não disse (a causa, o valor,
+# "no começo", "é normal") continua afirmação.
+# Revisão do item 11 (21/10/2026): a palavra do cliente nem sempre é relato — ele
+# PERGUNTA ou CONTESTA a característica ("não é original", "o carregador é turbo?",
+# "era pra ser carregamento rápido"). O eco não vale quando o relato traz
+# característica (`_caracteristica_no_relato`): um termo do vocabulário
+# (`_CARACTERISTICA`, `_CARACTERISTICA_2`, `_POR_TERMO`) que não seja só o nome da
+# peça, um número, a condição (novo, lacrado, original…) ou o que acompanha.
+_ACOLHE_O_RELATO = re.compile(
+    r"^(?:(?:poxa|puxa|nossa|ah|oh)\s*,?\s*)?"
+    r"(?:(?:sinto|sentimos|lamento|lamentamos)(?:\s+muito)?"
+    r"|(?:pedimos|peco)\s+(?:sinceras\s+)?desculpas)"
+    r"(?:\s+(?:pel[oa]s?|por|com\s+(?:o|a)|o|a|esse|essa|este|esta|todo)?\s*"
+    r"(?:transtorno|incomodo|problema|ocorrido|situacao|inconveniente|inconveniencia"
+    r"|chateacao|aborrecimento))?"
+    r"\s+(?:com|d[oa]s?|n[oa]s?|pel[oa]s?|por|em)\s+"
+    r"(?P<relato>[a-z0-9]+(?:-[a-z0-9]+)*(?:\s+[a-z0-9]+(?:-[a-z0-9]+)*){0,7})$"
+)
+_LIGA_DO_RELATO = frozenset(
+    "o a os as um uma seu sua seus suas meu minha do da dos das no na nos nas de em com que".split()
+)
+# A peça ou o produto de que o relato fala (o nome sozinho não afirma valor nenhum).
+# Revisão do item 11: os acessórios (carregador, cabo, fone, capa, película) saíram —
+# dizer que vêm é característica (`_OBJETOS`); as peças da mala entraram (a rodinha).
+_PECA_DO_RELATO = frozenset(
+    """
+    aparelho celular telefone smartphone produto item pedido peca pecas bateria tela display
+    camera cameras memoria armazenamento processador sistema som audio alto-falante microfone
+    botao botoes tampa entrada mala malas rodinha rodinhas roda rodas alca alcas ziper puxador
+    """.split()
+)
+# A condição do produto no relato (a "condicao" da ficha decide; nunca o eco).
+_CONDICAO_NO_RELATO = re.compile(
+    r"(?<!\bde\s)\bnov[oa]s?\b|\bseminov\w*|\busad[oa]s?\b|\brecondicionad\w*|\blacrad\w*"
+    r"|\blacre\b|\borigina(?:l|is)\b"
+)
+
+
+def _caracteristica_no_relato(relato: str) -> bool:
+    """O relato (plano) traz característica do produto, além do nome da peça? PURA.
+
+    O número ("de 6000", "128"), a condição (`_CONDICAO_NO_RELATO`), o que
+    acompanha (`_ACOMPANHA`, `_NAO_ACOMPANHA`, os `_OBJETOS`) e todo termo do
+    vocabulário de característica que não seja só uma peça de `_PECA_DO_RELATO`
+    ("bateria" sozinha é a peça; "carregamento rápido", "turbo", "5g", "nfc",
+    "dual chip", "android", "resistente", "entrada de fone" não)."""
+    if re.search(r"\d", relato):
+        return True
+    if (
+        _CONDICAO_NO_RELATO.search(relato)
+        or _ACOMPANHA.search(relato)
+        or _NAO_ACOMPANHA.search(relato)
+        or _objetos(relato)
+    ):
+        return True
+    plano = _NUMERO_E_UNIDADE.sub(r"\1\2", relato)
+    padroes = (_CARACTERISTICA, _CARACTERISTICA_2, *(padrao for _, padrao, _ in _POR_TERMO))
+    return any(
+        m.group(0).strip() not in _PECA_DO_RELATO
+        for padrao in padroes
+        for m in padrao.finditer(plano)
+    )
+
+
+def _ecoa_o_cliente(palavra: str, do_cliente: frozenset[str]) -> bool:
+    """A palavra do relato é do cliente (a mesma, ou o mesmo radical de 5 letras:
+    "descarregando" ↔ "descarrega")? PURA."""
+    if palavra in do_cliente:
+        return True
+    return len(palavra) >= 5 and any(len(c) >= 5 and c[:5] == palavra[:5] for c in do_cliente)
+
+
+def relato_ecoado(oracao: str, textos_cliente: Sequence[str]) -> bool:
+    """A oração (plana) é o acolhimento que repete o relato do cliente (ver acima)? PURA."""
+    m = _ACOLHE_O_RELATO.search(oracao.strip(" ,.;:!"))
+    if not m or not textos_cliente:
+        return False
+    relato = m.group("relato")
+    if _DIAGNOSTICO_NO_ACOLHIMENTO.search(relato) or _caracteristica_no_relato(relato):
+        return False
+    do_cliente = frozenset(
+        p for t in textos_cliente if isinstance(t, str) for p in re.findall(r"[a-z0-9]+", _plano(t))
+    )
+    ecoadas = 0
+    for palavra in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", relato):
+        if _ecoa_o_cliente(palavra, do_cliente):
+            ecoadas += palavra not in _LIGA_DO_RELATO
+        elif palavra not in _LIGA_DO_RELATO and palavra not in _PECA_DO_RELATO:
+            return False
+    return ecoadas > 0
+
+
+def _so_acolhimento(oracao: str, textos_cliente: Sequence[str] = ()) -> bool:
+    """Cortesia, acolhimento, o acolhimento que cita a peça ou o que repete o relato
+    do cliente (`relato_ecoado`, só com os `textos_cliente`). PURA."""
+    return bool(
+        _SO_CORTESIA.search(oracao)
+        or _ACOLHE.search(oracao)
+        or _acolhe_com_a_peca(oracao)
+        or (textos_cliente and relato_ecoado(oracao, textos_cliente))
+    )
 
 
 def afirma_caracteristica(
@@ -2089,8 +2196,9 @@ def afirma_caracteristica(
             if not oracao or _NAO_AFIRMA.search(oracao):
                 continue
             # Rodada 4b (achado 7): a cortesia e o acolhimento (com a peça) não
-            # afirmam nada do produto — como no `_responde_com_afirmacao`.
-            if _so_acolhimento(oracao.strip(" ,.;:!")):
+            # afirmam nada do produto — como no `_responde_com_afirmacao`; nem o que
+            # repete o relato do cliente (Barbosa ao vivo, 21/10/2026).
+            if _so_acolhimento(oracao.strip(" ,.;:!"), textos_cliente):
                 continue
             if _oracao_de_caracteristica(oracao, opcoes):
                 return True
@@ -2440,6 +2548,7 @@ def caracteristicas_fora_do_dado(
     dados_extra: Iterable[Any] = (),
     nomes_de_produto: Iterable[Any] = (),
     fatos_citados: Sequence[str] = (),
+    textos_cliente: Sequence[str] = (),
 ) -> list[str]:
     """Os termos de característica que o texto AFIRMA e que nenhum dado traz (21/10/2026). PURA.
 
@@ -2452,6 +2561,8 @@ def caracteristicas_fora_do_dado(
     só pela FORMA ("ele aguenta tranquilo") conta inteira (não há termo para
     achar no dado). `fatos_citados` = os textos dos fatos aprovados que a
     resposta cita nas evidências (Kia ao vivo, 21/10/2026: `_no_fato_citado`).
+    `textos_cliente` (Barbosa ao vivo, 21/10/2026): o acolhimento que repete o
+    relato do cliente não afirma nada (`relato_ecoado`).
     """
     if not (texto or "").strip():
         return []
@@ -2486,7 +2597,11 @@ def caracteristicas_fora_do_dado(
             continue
         for oracao in _ORACAO.split(sentenca):
             oracao = oracao.strip()
-            if not oracao or _NAO_AFIRMA.search(oracao) or _so_acolhimento(oracao.strip(" ,.;:!")):
+            if (
+                not oracao
+                or _NAO_AFIRMA.search(oracao)
+                or _so_acolhimento(oracao.strip(" ,.;:!"), textos_cliente)
+            ):
                 continue
             if not _oracao_de_caracteristica(oracao, opcoes):
                 continue
@@ -2581,6 +2696,7 @@ def conferir_ficha_no_automatico(
                 dados_extra=dados_extra,
                 nomes_de_produto=nomes_de_produto,
                 fatos_citados=fatos_citados,
+                textos_cliente=textos_cliente,
             )
             if not fora:
                 return []
@@ -2780,7 +2896,7 @@ def conferir_orientacao_do_defeito(
             oracao = oracao.strip(" ,.;:!")
             if (
                 not oracao
-                or _so_acolhimento(oracao)
+                or _so_acolhimento(oracao, textos_cliente)
                 or _ORACAO_DE_CONDICAO.search(oracao)
                 or all(p in _ENCHIMENTO_DO_DEFEITO for p in re.findall(r"[a-z]+", oracao))
                 or (permissao and _SIM_DA_PERMISSAO.search(oracao))
@@ -4487,7 +4603,12 @@ _ORACAO_DE_ORIENTACAO = re.compile(
     r"|\brotina\s+d[ao]s?\s+(?:transportadora|correios)\b"
 )
 # O que pode sobrar da oração com lastro de orientação, do prazo de fora ou do
-# "consta aqui": só o processo, nada afirmado sobre ESTE pedido.
+# "consta aqui": só o processo, nada afirmado sobre ESTE pedido. Barbosa ao vivo
+# (21/10/2026, cd4ff3d8 e o 15da122e da Kia): "você acompanha a previsão de entrega
+# E o andamento do envio nos pedidos do app do TikTok Shop" — o "e" separa o objeto
+# do "acompanha", e "o andamento" como NOME (como "o status", "a movimentação":
+# `_ANDAMENTO_NOME`) e o "Shop" do nome da plataforma são processo, não estado do
+# pedido. O "em andamento" (o estado: "o pedido segue em andamento") não.
 _SO_PROCESSO = frozenset(
     """
     o a os as um uma uns umas seu sua seus suas meu minha voce vc ele ela eles elas pedido pedidos
@@ -4505,7 +4626,7 @@ _SO_PROCESSO = frozenset(
     quinta sexta sabado sabados domingo domingos feira feriado feriados fim semana rotina for
     forem estiver estiverem tiver tiverem sair chegar receber previsao previsoes estimativa
     informacao informacoes detalhes historico numero situacao nota fiscal nf comprovante etiqueta
-    muda mudam atualiza atualizam por
+    muda mudam atualiza atualizam por shop
     """.split()
 )
 _ORACOES_DO_ANDAMENTO = re.compile(
@@ -4583,9 +4704,25 @@ def _palavras_do_status(bloco: Mapping) -> frozenset[str]:
     )
 
 
+_ANDAMENTO_NOME = re.compile(r"\b(?:o|do|no|pelo|ao)\s+andamento\b")
+# Revisão do item 9 (21/10/2026): "o andamento" só é o NOME do processo quando a
+# oração não tem verbo de estado — "seu pedido segue o andamento normalmente", "o
+# andamento do envio já indica a entrega", "o andamento já mostra a coleta" e "…já
+# traz o código de rastreio" afirmam o andamento DESTE pedido (sem o dado, presos,
+# como antes). O caminho ("você acompanha … e o andamento do envio nos pedidos do
+# app…", "o andamento do envio e a previsão aparecem em Minhas Compras") não tem.
+_VERBO_DE_ESTADO_DO_ANDAMENTO = frozenset(
+    "segue seguem mostra mostram indica indicam traz trazem consta constam".split()
+)
+
+
 def _so_processo(resto: str) -> bool:
-    """O resto da oração só descreve o processo (`_SO_PROCESSO`)?"""
+    """O resto da oração só descreve o processo (`_SO_PROCESSO`; "o andamento" como
+    nome também — `_ANDAMENTO_NOME` —, só sem verbo de estado na oração:
+    `_VERBO_DE_ESTADO_DO_ANDAMENTO`)?"""
     palavras = re.findall(r"[a-z]+", resto)
+    if _VERBO_DE_ESTADO_DO_ANDAMENTO.isdisjoint(palavras):
+        palavras = re.findall(r"[a-z]+", _ANDAMENTO_NOME.sub(" ", resto))
     return all(p in _SO_PROCESSO for p in palavras)
 
 
@@ -5311,7 +5448,7 @@ _TELA_DE_OUTRO_APP: dict[str, tuple[tuple[re.Pattern[str], str, str], ...]] = {
         (
             re.compile(r"\bminhas\s+compras\b"),
             "Minhas compras",
-            "os pedidos no app do TikTok Shop > o pedido",
+            "nos pedidos do app do TikTok Shop > o pedido",
         ),
     ),
 }

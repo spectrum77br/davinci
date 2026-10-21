@@ -985,6 +985,9 @@ async def _responder(
     # Integração r5 (21/10/2026): a lacuna crua no motivo_pessoa ("Pedido
     # {numero_pedido} consta…") vira o valor, ou sai — ninguém a preenche.
     entrada["motivo_modelo"] = checagens.motivo_sem_lacuna(entrada["motivo_modelo"], base.valores)
+    # Barbosa ao vivo (21/10/2026, cd4ff3d8): "em os pedidos no app do TikTok Shop"
+    # vira "nos pedidos do app do TikTok Shop" antes da conferência (o texto que vai).
+    entrada["texto"] = prompt.caminho_na_frase(entrada["texto"])
     conferida = await ia.conferir_saida(
         session,
         conversa,

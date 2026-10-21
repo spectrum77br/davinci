@@ -72,7 +72,11 @@ from tests.test_atendimento_ia import (
 # 21/10/2026 (noite): os ajustes do 1º dia ao vivo na Kia e do eval do TikTok — a
 # condição pela "condicao" da ficha, o "ok" depois de a loja tratar, as
 # evidências da linha EVIDÊNCIAS (antes "bcc65fc5ce18aafe").
-RETRATO_BLOCO_GERAL = "ebaf25a7a50b2948"
+# 21/10/2026 (Barbosa ao vivo, item 10, com a revisão): "perguntar como ajudar é
+# resposta completa" na linha "confianca" do `_SAIDA` (só o "como ajudar", não toda
+# pergunta); os cabeçalhos das ferramentas e dos <dados> e o "com os 7 campos"
+# encurtaram para caber no teto (antes "ebaf25a7a50b2948").
+RETRATO_BLOCO_GERAL = "9f30de51538953e1"
 
 
 def _geral() -> str:

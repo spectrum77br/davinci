@@ -73,8 +73,22 @@ class Proposta(BaseModel):
         ),
     ]
     assunto: Annotated[str, Field(description="O id do assunto, da lista de assuntos do sistema.")]
+    # Barbosa ao vivo (21/10/2026, ef4cb373): com "o quanto a resposta está certa e
+    # completa", o "como podemos ajudar?" do pede_atendente (nada pendente: a opção
+    # "Falar com Atendente" do menu) veio com 0,7 — a pergunta não "completava" o caso
+    # e nunca saía sozinha. Revisão do item 10: a régua nova vale SÓ para esse
+    # "perguntar como ajudar" (pede_atendente e saudação, nada pendente); o resto
+    # (o "responder", o "perguntar" de qual modelo do confirmar_variacao) fica com a
+    # régua de sempre. O `ia.CONFIANCA_AUTO` (0,85) não muda.
     confianca: Annotated[
-        float, Field(description="De 0 a 1: o quanto a resposta está certa e completa.")
+        float,
+        Field(
+            description=(
+                "De 0 a 1: o quanto a resposta está certa e completa. Só em pede_atendente "
+                "e saudacao_ou_vaga, sem nada pendente do cliente: perguntar como ajudar é a "
+                "resposta certa e completa."
+            )
+        ),
     ]
     acao_pessoa: Annotated[
         AcaoPessoa | None,

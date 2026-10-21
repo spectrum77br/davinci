@@ -612,7 +612,8 @@ NO_TIKTOK = "Olá! Você pode acompanhar o envio em Minhas compras > o pedido > 
 def test_7_minhas_compras_no_tiktok_e_regra_suave():
     (p,) = checagens.conferir_caminho_da_plataforma(NO_TIKTOK, "tiktok")
     assert p.codigo == checagens.CAMINHO_DO_APP_ERRADO and p.so_auto and not p.bloqueia
-    assert "os pedidos no app do TikTok Shop > o pedido" in p.motivo
+    # Barbosa ao vivo (21/10/2026): o caminho certo já com a preposição.
+    assert "nos pedidos do app do TikTok Shop > o pedido" in p.motivo
     # Na Shopee e no ML, é o caminho certo.
     assert checagens.conferir_caminho_da_plataforma(NO_TIKTOK, "shopee") == []
     assert checagens.conferir_caminho_da_plataforma(NO_TIKTOK, "ml") == []
