@@ -32,6 +32,8 @@ export default defineNuxtConfig({
       // the sidebar link. Default off so prod ignores it until the backend
       // (alembic + ENABLE_MARKETING) is also turned on.
       enableMarketing: process.env.NUXT_PUBLIC_ENABLE_MARKETING === 'true',
+      enableCelulares: process.env.NUXT_PUBLIC_ENABLE_CELULARES === 'true',
+      celularesGatewayOrigin: process.env.NUXT_PUBLIC_CELULARES_GATEWAY_ORIGIN || '',
       turnstile: {
         siteKey: process.env.TURNSTILE_SITE_KEY || '',
       },

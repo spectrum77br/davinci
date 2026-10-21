@@ -17,6 +17,31 @@ networks:
     name: web_edge
 
 services:
+  # Celulares is opt-in. These host-owned files survive application deploys;
+  # their absence keeps the feature disabled. Never add the secrets to .env,
+  # which is shared with workers. Compose >= 2.30 is required for format: raw.
+  api:
+    env_file:
+      - path: /etc/davinci/celulares/runtime.env
+        required: false
+        format: raw
+      - path: /etc/davinci/celulares/api.env
+        required: false
+        format: raw
+    volumes:
+      - type: bind
+        source: /var/lib/davinci-celulares-tunnel
+        target: /run/davinci-celulares
+        read_only: true
+        bind:
+          create_host_path: true
+
+  web:
+    env_file:
+      - path: /etc/davinci/celulares/web.env
+        required: false
+        format: raw
+
   # Magalu-only egress through the owner's Mac. No public port: the TCP bridge
   # reaches a private Unix socket forwarded by SSH to the authenticated Mac proxy.
   magalu_proxy:

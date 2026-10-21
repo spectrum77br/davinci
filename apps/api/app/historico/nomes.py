@@ -12,6 +12,7 @@ import re
 # --- tela em que a pessoa estava (página do front, pelo Referer) ------------
 # Nome do MENU ou da ABA, que é o que a pessoa clica. Prefixo mais longo vence.
 PAGINAS: dict[str, str] = {
+    "/celulares": "Admin › Celulares",
     "/pricing/contas": "Tabela de preços › Contas",
     "/pricing/produtos": "Tabela de preços › Produtos",
     "/pricing/concorrencia": "Tabela de preços › Concorrência",
@@ -64,6 +65,7 @@ PAGINAS: dict[str, str] = {
 
 # --- plano B: pelo endereço da API (Claude conectado, pedido sem Referer) ---
 API: dict[str, str] = {
+    "/api/celulares": "Admin › Celulares",
     "/api/pricing/store-info": "Cadastros › Lojas",
     "/api/pricing": "Tabela de preços",
     "/api/products": "Produtos",
@@ -144,6 +146,10 @@ def tela_da_api(caminho: str) -> str | None:
 # --- ações que não mudam o banco mas importam -------------------------------
 # (método, rota) → frase. Sem estas, o evento só fica se o banco mudou.
 ACOES: dict[tuple[str, str], str] = {
+    ("POST", "/api/celulares/{name}/start"): "ligou um celular",
+    ("POST", "/api/celulares/{name}/stop"): "desligou um celular",
+    ("POST", "/api/celulares/{name}/restart"): "reiniciou um celular",
+    ("POST", "/api/celulares/{name}/session"): "solicitou acesso à tela de um celular",
     ("POST", "/api/pricing/push"): "enviou preço ao marketplace",
     ("POST", "/api/pricing/push-batch"): "enviou preços em lote ao marketplace",
     ("POST", "/api/pricing/push-report"): "mandou o resumo do envio de preços",

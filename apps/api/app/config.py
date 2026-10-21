@@ -40,6 +40,14 @@ class Settings(BaseSettings):
 
     jwt_secret: str = "dev-secret-change-me"
     jwt_ttl_seconds: int = 7 * 24 * 3600
+    # Piloto de celulares. Vazio = desabilitado; nenhuma rotina inicia aparelhos.
+    celulares_api_url: str = ""
+    celulares_api_socket: str = ""
+    celulares_admin_token: SecretStr = SecretStr("")
+    celulares_allowlist: str = ""
+    celulares_camera_pilot_enabled: bool = False
+    celulares_stream_origin: str = ""
+    celulares_stream_key: SecretStr = SecretStr("")
     # Senha extra que protege a página /financeiro/valuation, exigida
     # depois do login independentemente do user. Em prod vem da env
     # VALUATION_PASSWORD. TTL curto (15min) — janela apertada pra não

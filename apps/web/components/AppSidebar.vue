@@ -60,6 +60,7 @@ const auth = useAuthStore()
 const route = useRoute()
 const runtimeConfig = useRuntimeConfig()
 const enableMarketing = computed(() => Boolean(runtimeConfig.public.enableMarketing))
+const enableCelulares = computed(() => Boolean(runtimeConfig.public.enableCelulares))
 
 // Pulsing red dot on the "Tarefas" row when the current user has open
 // tarefas (data_conclusao IS NULL). Polls /api/tarefas/meu-pendente-count
@@ -139,7 +140,7 @@ type Item = {
   soComPermissao?: boolean
   // Com soComPermissao: também aparece pra quem tem `view` num destes recursos.
   tambemCom?: string[]
-  featureFlag?: 'marketing'
+  featureFlag?: 'marketing' | 'celulares'
   // Grupo unificado (lib/navGroups): o item destaca quando QUALQUER rota
   // do grupo está ativa, e some quando o usuário não pode ver nenhuma aba.
   match?: string[]
@@ -279,6 +280,7 @@ const sections = computed<Section[]>(() => [
       // não enxerga Usuários/Permissões). Admin acessa via aba.
       { to: '/tarefas', label: 'Tarefas', icon: ClipboardList, hideForAdmin: true },
       { to: '/faturas', label: 'Faturas', icon: Receipt, adminOnly: true },
+      { to: '/celulares', label: 'Celulares', icon: Smartphone, adminOnly: true, featureFlag: 'celulares' },
     ],
   },
 ])
@@ -324,6 +326,7 @@ const visibleSections = computed(() => {
           && ![it.resource, ...(it.tambemCom ?? [])].some((r) => auth.user?.permissions?.[r]?.view === true)
         ) return false
         if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
+        if (it.featureFlag === 'celulares' && !enableCelulares.value) return false
         return true
       }),
     }))
