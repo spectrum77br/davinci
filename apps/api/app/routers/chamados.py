@@ -122,7 +122,18 @@ from app.services import (
     chamados_juridico,
     chamados_leitura,
 )
-from app.services.devolution_delete import EstornoFalhouError, excluir_lancamento
+from app.services.devolution_delete import (
+    EstoqueConferindoError,
+    EstornoFalhouError,
+    EstornoSemConfirmacaoError,
+    excluir_lancamento,
+)
+from app.services.devolution_stock_return import (
+    ESTOQUE_CONFERINDO,
+    ESTOQUE_SEM_CONFIRMACAO,
+    estorno_pendente,
+    status_estoque,
+)
 from app.services.texto_html import limpar_html
 
 logger = structlog.get_logger()
@@ -1160,6 +1171,7 @@ async def exclusao_preview(
             condicao_produto=dev.condicao_produto,
             motivo_devolucao=dev.motivo_devolucao,
             data_devolvido_estoque=dev.data_devolvido_estoque,
+            estoque_status=status_estoque(dev),
             estoque_estornavel=_estornavel(dev),
             estoque_mov_sku=dev.estoque_mov_sku,
             estoque_mov_qty=dev.estoque_mov_qty,
@@ -1203,6 +1215,16 @@ async def excluir_chamado(
         if dev is None:
             raise HTTPException(422, detail={"code": "devolucao_fora_do_pedido"})
         escolhidas.append(dev)
+    # Entrada no Bling ainda em conferência: excluir agora deixaria a entrada
+    # sem dono (ninguém estorna). Barra ANTES de mexer na situação no Bling.
+    if any(dev.estoque_status == ESTOQUE_CONFERINDO for dev in escolhidas):
+        raise HTTPException(409, detail={"code": "estoque_conferindo"})
+    # Estorno anterior que pode ter saído: excluir estornaria de novo.
+    if any(
+        dev.estoque_status == ESTOQUE_SEM_CONFIRMACAO and estorno_pendente(dev)
+        for dev in escolhidas
+    ):
+        raise HTTPException(409, detail={"code": "estoque_estorno_sem_confirmacao"})
 
     situacao_aplicada: str | None = None
     if body.situacao:
@@ -1227,6 +1249,16 @@ async def excluir_chamado(
         dev_id, sku, qty = dev.id, dev.estoque_mov_sku, dev.estoque_mov_qty
         try:
             r = await excluir_lancamento(session, dev)
+        except (EstoqueConferindoError, EstornoSemConfirmacaoError) as e:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "estoque_conferindo"
+                    if isinstance(e, EstoqueConferindoError)
+                    else "estoque_estorno_sem_confirmacao",
+                    "lancamentos_excluidos": excluidos,
+                },
+            ) from e
         except EstornoFalhouError as e:
             logger.warning(
                 "chamado_excluir_estorno_falhou",

@@ -2348,6 +2348,32 @@ async def logistica_track_sync(ctx: dict) -> None:
     logger.info("logistica_track_sync_job_done", **summary)
 
 
+async def devolucao_estoque_conferir_tick(ctx: dict) -> None:
+    """A cada 2 min: devoluções cuja entrada no Bling ficou em "conferindo" (o
+    Bling respondeu erro DEPOIS de receber — 300334/298826, 15/10). Procura a
+    entrada no espelho de movimentos e confirma, ou desiste em 10 min (a tela
+    pede para conferir no extrato). Sem pendência = 1 SELECT, zero Bling."""
+    from app.services.devolution_stock_return import (
+        conferir_entradas_pendentes,
+        reaplicar_situacoes_pendentes,
+        retentar_entradas_recusadas,
+    )
+
+    try:
+        async with session_scope() as s:
+            summary = await conferir_entradas_pendentes(s)
+            # Entrada que o Bling recusou por excesso de chamadas: tenta de
+            # novo sozinho (21/10, caso 297390).
+            summary.update(await retentar_entradas_recusadas(s))
+            summary["situacoes_reaplicadas"] = await reaplicar_situacoes_pendentes(s)
+        if summary.get("conferidas") or summary.get("tentadas") or summary.get(
+            "situacoes_reaplicadas"
+        ):
+            logger.info("devolucao_estoque_conferir_done", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("devolucao_estoque_conferir_failed")
+
+
 async def devolucao_prazo_sync(ctx: dict) -> None:
     """A cada 30 min: pergunta à Shopee/TikTok até quando dá pra contestar cada
     devolução recente e avisa no Threema quando o motivo ainda está vazio a
@@ -4718,13 +4744,17 @@ async def bling_orders_period_sync_tick(ctx: dict) -> None:
 
     pool = await get_arq_pool()
     enqueued = 0
-    for bling_id in bling_ids:
+    # Espalhados 2 s um do outro (21/10): os ~130 de uma vez no :20 eram a
+    # rajada que estourava o limite do Bling (3/s por conta) e deixava quem
+    # está usando a tela esperando atrás deles na fila do Bling.
+    for i, bling_id in enumerate(bling_ids):
         try:
             await pool.enqueue_job(
                 "ingest_bling_order_run",
                 bling_id,
                 str(user_id),
                 "period_sync",
+                _defer_by=i * 2,
             )
             enqueued += 1
         except Exception as e:  # noqa: BLE001
@@ -5600,6 +5630,14 @@ class WorkerSettings:
         # ganchos do enfileirar (auto e manual) cobrem a hora da NF de
         # qualquer jeito.
         cron(prioridade_estoque_tick, minute=set(range(1, 60, 2)), run_at_startup=False),
+        # Conferência das entradas de devolução que o Bling respondeu com erro
+        # depois de receber (0421): minutos pares, 1 SELECT quando não há nada.
+        cron(
+            devolucao_estoque_conferir_tick,
+            minute=set(range(0, 60, 2)),
+            run_at_startup=True,
+            timeout=300,
+        ),
         # Manutenção das compensações de kit (retry, estorno de cancelado,
         # aviso): 2×/hora em :16/:46, minutos livres. Sem pendência = SELECTs.
         cron(prioridade_estoque_estorno_tick, minute={16, 46}, run_at_startup=False),
@@ -5784,7 +5822,9 @@ class WorkerSettingsMarketplace:
         # sweep leva ~15-25s pra 200 candidatos (Shopee/TikTok em lote de
         # 50, ML/Amazon com 6 consultas em paralelo). Overlap de ticks é
         # barrado pelo advisory lock em marketplace_shipment_check.
-        cron(check_marketplace_shipped_orders, run_at_startup=False),
+        # 300 s (21/10): com a fila do Bling a 2,5/s, uma rajada de PATCH de
+        # enviados no pico passava dos 120 s padrão.
+        cron(check_marketplace_shipped_orders, run_at_startup=False, timeout=300),
     ]
     queue_name = ARQ_MARKETPLACE_QUEUE
     # Concorrência baixa — 1 tick por minuto, serializado pelo advisory

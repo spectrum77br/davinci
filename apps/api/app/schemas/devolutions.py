@@ -36,6 +36,21 @@ class BlingStockResultOut(BaseModel):
     message: str = ""
 
 
+class EstoqueTentarDeNovoIn(BaseModel):
+    # Obrigatório quando a entrada está "sem confirmação": a pessoa conferiu no
+    # extrato do Bling que ela não existe (senão lançar de novo dobra o estoque).
+    confirmo_conferi_no_bling: bool = False
+
+
+class EstoqueJaEntrouIn(BaseModel):
+    # O SKU em que a pessoa viu a entrada no extrato do Bling (não precisa
+    # quando o que faltava conferir era o ESTORNO da entrada anterior).
+    sku: str | None = Field(default=None, max_length=80)
+    # A entrada que o DaVinci mandou foi em outro produto e a pessoa confirma
+    # que está neste (lançamento à mão em outro SKU).
+    confirmo_outro_sku: bool = False
+
+
 class DevolucaoAnexoOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -87,6 +102,30 @@ class DevolutionOut(BaseModel):
     estoque_mov_action: str | None = None
     estoque_mov_qty: int | None = None
     estoque_mov_revertido_at: datetime | None = None
+    # Resultado da entrada no Bling (0421): ok | falhou | conferindo |
+    # sem_confirmacao | None (não se aplica). Já vem "efetivo": linha antiga
+    # com movimento registrado sai como ok.
+    estoque_status: str | None = None
+    estoque_erro: str | None = None
+    estoque_tentativa_at: datetime | None = None
+    # Produto da entrada que o Bling respondeu com erro (o que está sendo
+    # conferido) — a tela cita ele na pergunta do "Tentar de novo".
+    estoque_conferir_sku: str | None = None
+    # "auto_retry" = o Bling recusou por excesso de chamadas e o DaVinci tenta
+    # de novo sozinho (até 5 vezes; contador em estoque_auto_tentativas).
+    estoque_conferir_action: str | None = None
+    estoque_auto_tentativas: int | None = None
+
+    @model_validator(mode="after")
+    def _estoque_status_efetivo(self) -> "DevolutionOut":
+        if (
+            self.estoque_status is None
+            and self.estoque_mov_bling_id is not None
+            and self.estoque_mov_revertido_at is None
+        ):
+            self.estoque_status = "ok"
+        return self
+
     created_at: datetime
     updated_at: datetime
     bling_stock_result: BlingStockResultOut | None = None
@@ -311,6 +350,7 @@ class DevolutionPage(BaseModel):
 
 class DevolutionProductOut(BaseModel):
     """Item da busca de produtos do modal de troca (Modal 1)."""
+
     sku: str
     name: str
     cost_price: float | None = None
@@ -326,6 +366,7 @@ class SkuSuffixVariant(BaseModel):
 
 class SkuSuffixesOut(BaseModel):
     """Variantes de sufixo de um SKU para o modal `.sp` (Modal 2)."""
+
     base: str
     allowed_suffixes: list[str]
     variants: list[SkuSuffixVariant]

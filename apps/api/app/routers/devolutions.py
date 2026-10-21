@@ -29,6 +29,7 @@ from app.models import (
     SituacaoBling,
     User,
 )
+from app.models.enums import AlertSeverity, AlertType
 from app.schemas.devolutions import (
     AcompanhamentoItemOut,
     AcompanhamentoOut,
@@ -44,6 +45,8 @@ from app.schemas.devolutions import (
     DevolutionPage,
     DevolutionPatch,
     DevolutionProductOut,
+    EstoqueJaEntrouIn,
+    EstoqueTentarDeNovoIn,
     SituacaoBlingOut,
     SituacaoBlingPatch,
     SituacaoBlingResult,
@@ -52,22 +55,37 @@ from app.schemas.devolutions import (
     SkuSuffixVariant,
     StockCorrectionIn,
 )
-from app.models.enums import AlertSeverity, AlertType
 from app.services import chamados_devolucao, devolucao_mensagem_comprador
 from app.services.alerts import emit_alert
-from app.services.devolution_delete import EstornoFalhouError, excluir_lancamento
+from app.services.devolution_delete import (
+    EstoqueConferindoError,
+    EstornoFalhouError,
+    EstornoSemConfirmacaoError,
+    excluir_lancamento,
+)
 from app.services.devolution_stock_return import (
     _STOCK_TRIGGER_CONDICOES,
     _SUFFIX_TAGS,
+    ESTOQUE_CONFERINDO,
+    ESTOQUE_FALHOU,
+    ESTOQUE_PENDENTES,
+    ESTOQUE_SEM_CONFIRMACAO,
     SITUACAO_AGUARDANDO_DEVOLUCAO,
     _get_bling_client,
     _is_same_situacao_error,
+    _local_bling_product_id,
     _sku_base,
     _sku_tag,
     apply_order_situacao,
-    record_stock_movement,
+    estorno_pendente,
+    limpar_status_estoque,
+    marcar_estorno_incerto,
+    registrar_estorno_conferido,
+    registrar_ja_entrou,
+    registrar_resultado_estoque,
     return_product_to_bling_stock,
     reverse_stock_movement,
+    status_estoque,
 )
 from app.services.link_mega import erro_link_mega
 from app.services.margem_audit import record_margem_audit
@@ -85,6 +103,33 @@ _REFUND_CONDICOES = {"Extraviado", "Sucata", "Manutenção"}
 # produto apareceu / voltou inteiro). Manutenção fica de fora: o refund dela
 # acompanha o custo do reparo, que continua valendo depois do conserto.
 _REFUND_REVERSIVEIS = {"Extraviado", "Sucata"}
+# Campos que decidem a entrada no estoque — travados enquanto o Bling confere.
+_CAMPOS_DO_ESTOQUE = (
+    "condicao_produto",
+    "devolver_estoque",
+    "estoque_destino_sku",
+    "estoque_nova_tag",
+    "estoque_suffix",
+    "troca_sku",
+    "troca_condicao",
+    "manutencao_destino",
+    "quantidade",
+    "sku",
+)
+_ESTOQUE_STATUS_TEXTO = {
+    "ok": "Entrou",
+    "falhou": "NÃO entrou",
+    "conferindo": "Conferindo",
+    "sem_confirmacao": "Não confirmada",
+}
+_MSG_SEM_CONFIRMACAO = (
+    "A entrada deste item no Bling não foi confirmada. Confira o extrato do SKU "
+    "e use \"Já entrou\" ou \"Tentar de novo\" na linha antes de mudar o estoque."
+)
+_MSG_CONFERINDO = (
+    "O DaVinci ainda está conferindo no Bling se a entrada deste item entrou "
+    "(até 10 min). Espere a conferência antes de mudar o estoque desta linha."
+)
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 
@@ -1374,6 +1419,8 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Tag destino", "tag_destino"),  # virtual: tag do "SKU novo" (vazio se estornado)
     ("Passou manutenção", "manutencao"),
     ("Data devolvido estoque", "data_devolvido_estoque"),
+    # virtual (0421): a data é do PEDIDO; aqui o que o Bling confirmou.
+    ("Entrada no Bling", "estoque_status_texto"),
     ("Prazo", "prazo"),
     ("Observação", "observacao"),
 ]
@@ -1556,6 +1603,12 @@ async def export_devolutions(
                     line.append(f"{value} (estornado)")
                 else:
                     line.append(value or "")
+            elif field == "estoque_status_texto":
+                st = status_estoque(r)
+                texto = _ESTOQUE_STATUS_TEXTO.get(st or "", "")
+                if st in (ESTOQUE_FALHOU, ESTOQUE_SEM_CONFIRMACAO) and r.estoque_erro:
+                    texto = f"{texto} — {r.estoque_erro}"
+                line.append(texto)
             elif field == "tag_destino":
                 # Mesma regra do filtro "tag destino" (_build_where).
                 if r.estoque_mov_revertido_at is None:
@@ -2006,6 +2059,27 @@ async def stock_correction(
             422,
             detail={"code": "no_stock_action", "message": "Nenhuma ação de estoque para essa condição"},
         )
+    if sr.get("produto_criado") and not sr.get("incerto"):
+        sr = {
+            **sr,
+            "message": (
+                f"{sr.get('message', '').split(' O produto ')[0]} O produto {sr.get('sku')} foi "
+                "criado sem estoque: na próxima correção escolha \"Voltar num produto "
+                f"existente\" → {sr.get('sku')} (não crie outro z)."
+            ),
+        }
+    if sr.get("incerto"):
+        # Aqui não há linha para o worker conferir (revisão de 15/10): quem
+        # confere é a pessoa, no extrato, antes de repetir.
+        sr = {
+            **sr,
+            "action": "unconfirmed_correcao",
+            "message": (
+                "O Bling respondeu com erro depois de receber — a entrada pode ter "
+                f"acontecido. Confira o extrato do SKU {sr.get('sku') or body.sku} "
+                "antes de lançar de novo."
+            ),
+        }
     logger.info(
         "stock_correction_done",
         sku=body.sku, condicao=condicao, qty=body.quantidade,
@@ -2107,13 +2181,15 @@ async def create_devolution(
             await session.refresh(row)
             out = DevolutionOut.model_validate(row)
     if should_stock:
+        inicio = datetime.now(UTC)
         sr = await return_product_to_bling_stock(session, row)
+        # Resultado na linha (0421): ok + movimento p/ estorno, falhou com o
+        # motivo, ou conferindo quando o Bling respondeu erro depois de receber.
+        registrar_resultado_estoque(row, sr, inicio=inicio)
+        await session.commit()
+        await session.refresh(row)
+        out = DevolutionOut.model_validate(row)
         if sr is not None:
-            out.bling_stock_result = BlingStockResultOut(**sr)
-            record_stock_movement(row, sr)  # persiste p/ permitir estorno depois
-            await session.commit()
-            await session.refresh(row)
-            out = DevolutionOut.model_validate(row)
             out.bling_stock_result = BlingStockResultOut(**sr)
     # Situação do pedido: Extraviado, Sucata e Manutenção patcham já no add;
     # Novo/Usado/Trocado quando processam o estoque.
@@ -2130,8 +2206,12 @@ async def patch_devolution(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
 ) -> DevolutionOut:
+    # FOR UPDATE: um "Tentar de novo" (ou outro save) da mesma linha espera —
+    # senão os dois lançavam a entrada (revisão de 15/10).
     row = (
-        await session.execute(select(Devolution).where(Devolution.id == devolution_id))
+        await session.execute(
+            select(Devolution).where(Devolution.id == devolution_id).with_for_update()
+        )
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
@@ -2139,6 +2219,31 @@ async def patch_devolution(
     data = body.model_dump(exclude_unset=True)
     if data.get("conta") is None and "conta" in data:
         raise HTTPException(422, detail={"code": "conta_required"})
+    # Entrada sendo conferida no Bling (respondeu erro depois de receber):
+    # mexer no que define o estoque agora lançaria de novo ou deixaria a
+    # entrada sem dono — espera a conferência (até 10 min).
+    mexe_no_estoque = any(
+        k in data and data[k] != getattr(row, k) for k in _CAMPOS_DO_ESTOQUE
+    )
+    if row.estoque_status == ESTOQUE_CONFERINDO and mexe_no_estoque:
+        raise HTTPException(409, detail={"code": "estoque_conferindo", "message": _MSG_CONFERINDO})
+    # "Sem confirmação": a entrada PODE estar no Bling. Mudar condição/toggle/
+    # destino relançaria (ou largaria a entrada sem registro) — primeiro a
+    # pessoa diz o que viu no extrato: "Já entrou" ou "Tentar de novo".
+    if status_estoque(row) == ESTOQUE_SEM_CONFIRMACAO and mexe_no_estoque:
+        raise HTTPException(
+            409, detail={"code": "estoque_sem_confirmacao", "message": _MSG_SEM_CONFIRMACAO}
+        )
+    prev_status_estoque = status_estoque(row)
+    # Linha com a entrada recusada (o worker pode ter criado o z000N e passado
+    # a lançar nele): um save comum vindo de uma tela velha não pode desfazer o
+    # destino. Destino só muda junto com condição/toggle (revisão de 21/10).
+    if row.estoque_status == ESTOQUE_FALHOU and not (
+        ("condicao_produto" in data and data["condicao_produto"] != row.condicao_produto)
+        or ("devolver_estoque" in data and data["devolver_estoque"] != row.devolver_estoque)
+    ):
+        for k in ("estoque_destino_sku", "estoque_nova_tag", "estoque_suffix"):
+            data.pop(k, None)
 
     prev_condicao = row.condicao_produto
     prev_motivo = row.motivo_devolucao
@@ -2149,6 +2254,16 @@ async def patch_devolution(
         setattr(row, key, value)
     if "sku" in data:
         row.tag = _sku_tag(row.sku)
+    # Não pede mais entrada (condição sem estoque ou toggle desligado): o
+    # resultado da tentativa anterior ("NÃO entrou") deixa de valer.
+    # Estorno que pode ter saído fica até alguém conferir ("Estorno já saiu" ou
+    # "Tentar de novo") — um save qualquer não pode apagar a dúvida (rev. 3).
+    if (
+        not (row.condicao_produto in _STOCK_TRIGGER_CONDICOES and row.devolver_estoque)
+        and row.estoque_status is not None
+        and not (row.estoque_status == ESTOQUE_SEM_CONFIRMACAO and estorno_pendente(row))
+    ):
+        limpar_status_estoque(row)
     if {"motivo_devolucao", "link_envio", "sku"} & set(data):
         await _exigir_video_fraude(session, row)
         _exigir_link_envio(row)
@@ -2197,6 +2312,22 @@ async def patch_devolution(
         and _custo_e_tecnico_preenchidos(row)
     ):
         row.reembolso = True
+
+    # Vai lançar no Bling neste request: a linha já sai daqui "conferindo" —
+    # outro save ou o Tentar de novo recebem 409 até o resultado ser gravado;
+    # se o processo cair no meio, a conferência vira sem_confirmacao em 10 min.
+    if (
+        row.condicao_produto in _STOCK_TRIGGER_CONDICOES
+        and row.devolver_estoque
+        and (row.condicao_produto != prev_condicao or not prev_devolver_estoque)
+    ):
+        row.estoque_status = ESTOQUE_CONFERINDO
+        row.estoque_erro = None
+        row.estoque_conferir_bling_id = None
+        row.estoque_conferir_sku = None
+        row.estoque_conferir_action = None
+        row.estoque_tentativa_at = datetime.now(UTC)
+        row.estoque_auto_tentativas = 0  # entrada nova: 5 tentativas sozinho de novo
 
     await session.commit()
     await session.refresh(row)
@@ -2277,29 +2408,48 @@ async def patch_devolution(
     # Estorna a entrada anterior quando o operador desliga "devolver estoque" OU
     # quando vamos relançar por mudança de condição/destino — evita estoque
     # duplicado e tira de venda o item que, p.ex., entrou Usado e virou Sucata.
+    estorno_falhou = False
     if has_pending_mov and (toggle_turned_off or should_stock):
         rev = await reverse_stock_movement(session, row)
+        if rev is not None and rev.get("action") == "reverse_incerto":
+            # Pode ter saído: ninguém estorna de novo sem conferir o extrato.
+            marcar_estorno_incerto(row, rev)
         await session.commit()
         await session.refresh(row)
         if toggle_turned_off:
             final_sr = rev
+        estorno_falhou = bool(rev is not None and not rev.get("ok"))
 
-    if should_stock:
+    if should_stock and estorno_falhou:
+        # O estorno da entrada anterior não saiu (ou não se sabe): lançar no
+        # destino novo deixaria a unidade em dois lugares e apagaria o registro
+        # da antiga (revisão de 15/10). O Tentar de novo estorna e lança.
+        if new_condicao == "Manutenção" and not row.manutencao:
+            row.manutencao = True
+        if row.estoque_status != ESTOQUE_SEM_CONFIRMACAO:
+            row.estoque_status = ESTOQUE_FALHOU
+            row.estoque_erro = (
+                f"O estorno da entrada anterior ({row.estoque_mov_sku}) não saiu no Bling; "
+                "nada foi lançado no destino novo."
+            )
+            row.estoque_tentativa_at = datetime.now(UTC)
+        await session.commit()
+        await session.refresh(row)
+        final_sr = rev
+    elif should_stock:
         # Manutenção que volta ao estoque já passou em manutenção (inclui Sucata).
         if new_condicao == "Manutenção" and not row.manutencao:
             row.manutencao = True
+        inicio = datetime.now(UTC)
         sr = await return_product_to_bling_stock(session, row)
+        registrar_resultado_estoque(row, sr, inicio=inicio)
+        # Sem ação de estoque (ex.: Sucata) também persiste o flag de manutenção.
+        await session.commit()
+        await session.refresh(row)
         if sr is not None:
             recorded = bool(sr.get("ok") and sr.get("bling_product_id"))
-            record_stock_movement(row, sr)
-            await session.commit()
-            await session.refresh(row)
             if recorded or final_sr is None:
                 final_sr = sr
-        else:
-            # Sem ação de estoque (ex.: Sucata), mas persiste o flag de manutenção.
-            await session.commit()
-            await session.refresh(row)
 
     # Extraviado, Sucata e Manutenção patcham a situação já na mudança de
     # condição (sem depender do toggle) — Manutenção precisa refletir no Bling
@@ -2307,7 +2457,13 @@ async def patch_devolution(
     # por Aguardando Devolução; se nem o desvio passar, alerta o operador.
     extraviado_now = new_condicao in ("Extraviado", "Sucata") and condicao_changed
     manutencao_now = new_condicao == "Manutenção" and condicao_changed
-    if (extraviado_now or manutencao_now or should_stock) and row.pedido_bling:
+    # Saiu de uma entrada pendente (toggle desligado, condição sem estoque): a
+    # situação do pedido tem que ser recalculada — ela estava travada nisso.
+    pendencia_saiu = (
+        prev_status_estoque in (ESTOQUE_FALHOU, ESTOQUE_SEM_CONFIRMACAO)
+        and row.estoque_status is None
+    )
+    if (extraviado_now or manutencao_now or should_stock or pendencia_saiu) and row.pedido_bling:
         await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
         await session.commit()  # persiste a linha de auditoria de situação
 
@@ -2316,6 +2472,196 @@ async def patch_devolution(
         out.bling_stock_result = BlingStockResultOut(**final_sr)
     out.chamado_troca_motivo = troca_motivo
     return await _completar_out(session, row, out)
+
+
+@router.post("/{devolution_id}/estoque/tentar-de-novo", response_model=DevolutionOut)
+async def tentar_estoque_de_novo(
+    devolution_id: UUID,
+    body: EstoqueTentarDeNovoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> DevolutionOut:
+    """Botão "Tentar de novo" da linha cuja entrada no Bling não foi confirmada
+    (caso 300588, 15/10: o Bling recusou e a data ficou como se tivesse
+    entrado). Lança a MESMA entrada (destino/condição já gravados na linha; se
+    um z000N foi criado na tentativa anterior, nele).
+
+    `sem_confirmacao` (o Bling respondeu erro e a entrada não apareceu, ou
+    linha antiga sem registro) exige `confirmo_conferi_no_bling`: se ela tiver
+    entrado, lançar de novo dobra o estoque. Se a linha ainda tem uma entrada
+    ANTERIOR sem estorno (o estorno falhou numa troca de condição), estorna
+    primeiro. Antes de chamar o Bling a linha vai para "conferindo" (commit):
+    um 2º clique recebe 409 e, se o processo cair no meio, a conferência do
+    worker vira sem_confirmacao em 10 min."""
+    row = (
+        await session.execute(
+            select(Devolution).where(Devolution.id == devolution_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "devolution_not_found"})
+    st = status_estoque(row)
+    if st == ESTOQUE_CONFERINDO:
+        raise HTTPException(409, detail={"code": "estoque_conferindo", "message": _MSG_CONFERINDO})
+    quer_entrada = bool(row.devolver_estoque) and row.condicao_produto in _STOCK_TRIGGER_CONDICOES
+    tem_estorno = estorno_pendente(row)
+    if not (st in (ESTOQUE_FALHOU, ESTOQUE_SEM_CONFIRMACAO) and (quer_entrada or tem_estorno)):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "estoque_nao_pendente",
+                "message": "Esta linha não tem entrada pendente no Bling.",
+            },
+        )
+    if st == ESTOQUE_SEM_CONFIRMACAO and not body.confirmo_conferi_no_bling:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "estoque_conferir_extrato",
+                "message": (
+                    "Confira no extrato do Bling que a entrada não existe antes de "
+                    "lançar de novo."
+                ),
+            },
+        )
+    inicio = datetime.now(UTC)
+    row.estoque_status = ESTOQUE_CONFERINDO
+    row.estoque_erro = None
+    row.estoque_conferir_bling_id = None
+    row.estoque_conferir_sku = None
+    row.estoque_conferir_action = None
+    row.estoque_tentativa_at = inicio
+    # Tentativa feita pela pessoa: o worker volta a ter 5 tentativas sozinho.
+    row.estoque_auto_tentativas = 0
+    if row.data_devolvido_estoque is None and quer_entrada:
+        row.data_devolvido_estoque = inicio
+    await session.commit()
+    await session.refresh(row)
+
+    sr: dict | None
+    if tem_estorno:
+        # Entrada anterior ainda no estoque (o estorno falhou numa troca de
+        # condição/destino, ou não se sabia se saiu): estorna primeiro.
+        rev = await reverse_stock_movement(session, row)
+        if rev is not None and rev.get("action") == "reverse_incerto":
+            marcar_estorno_incerto(row, rev)
+            sr = rev
+        elif rev is not None and not rev.get("ok"):
+            row.estoque_status = ESTOQUE_FALHOU
+            row.estoque_erro = (
+                f"O estorno da entrada anterior ({row.estoque_mov_sku}) não saiu no Bling; "
+                "nada foi lançado no destino novo."
+            )
+            sr = rev
+        elif quer_entrada:
+            await session.commit()
+            await session.refresh(row)
+            inicio = datetime.now(UTC)
+            sr = await return_product_to_bling_stock(session, row)
+            registrar_resultado_estoque(row, sr, inicio=inicio)
+        else:
+            limpar_status_estoque(row)
+            sr = rev
+    else:
+        sr = await return_product_to_bling_stock(session, row)
+        registrar_resultado_estoque(row, sr, inicio=inicio)
+    await session.commit()
+    await session.refresh(row)
+    logger.info(
+        "devolution_stock_tentar_de_novo",
+        id=str(row.id), pedido_bling=row.pedido_bling, status=row.estoque_status,
+    )
+    if row.pedido_bling:
+        await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
+        await session.commit()
+    out = DevolutionOut.model_validate(row)
+    if sr is not None:
+        out.bling_stock_result = BlingStockResultOut(**sr)
+    return await _completar_out(session, row, out)
+
+
+@router.post("/{devolution_id}/estoque/ja-entrou", response_model=DevolutionOut)
+async def estoque_ja_entrou(
+    devolution_id: UUID,
+    body: EstoqueJaEntrouIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> DevolutionOut:
+    """"Já entrou (conferi no Bling)": a linha está "sem confirmação" e a pessoa
+    viu no extrato do Bling a entrada "Devolução pedido N". Registra o movimento
+    (SKU informado, resolvido pela tabela local de produtos — nada é lançado no
+    Bling), a linha fica ok e o estorno ao excluir volta a funcionar. Revisão
+    de 15/10: sem isto a linha ficava presa e o pedido nunca resolvia."""
+    row = (
+        await session.execute(
+            select(Devolution).where(Devolution.id == devolution_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "devolution_not_found"})
+    if status_estoque(row) != ESTOQUE_SEM_CONFIRMACAO:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "estoque_nao_sem_confirmacao",
+                "message": "Só a entrada \"não confirmada\" pode ser marcada como já entrou.",
+            },
+        )
+    if estorno_pendente(row):
+        # O que não se sabia era o ESTORNO: a pessoa viu a saída no extrato.
+        da_exclusao = registrar_estorno_conferido(row)
+        await session.commit()
+        await session.refresh(row)
+        logger.info(
+            "devolution_stock_estorno_conferido", id=str(row.id), pedido_bling=row.pedido_bling
+        )
+        # Estorno de uma EXCLUSÃO: a linha vai embora — não mexe no pedido.
+        if row.pedido_bling and not da_exclusao:
+            await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
+            await session.commit()
+        return await _completar_out(session, row, DevolutionOut.model_validate(row))
+    sku = (body.sku or "").strip()
+    if not sku:
+        raise HTTPException(
+            422, detail={"code": "estoque_sku_obrigatorio", "message": "Informe o SKU."}
+        )
+    pid = await _local_bling_product_id(session, sku)
+    if pid is None:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "estoque_sku_desconhecido",
+                "message": f"O SKU {sku} não está no cadastro de produtos do DaVinci.",
+            },
+        )
+    # A entrada que o DaVinci mandou foi em outro produto: confirma de propósito
+    # (lançamento à mão em outro SKU) — senão um estorno futuro sai do lugar errado.
+    if (
+        row.estoque_conferir_bling_id
+        and int(row.estoque_conferir_bling_id) != int(pid)
+        and not body.confirmo_outro_sku
+    ):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "estoque_sku_diferente",
+                "message": (
+                    f"A entrada que o DaVinci mandou foi em {row.estoque_conferir_sku}. "
+                    f"Confirma que ela está em {sku}?"
+                ),
+            },
+        )
+    registrar_ja_entrou(row, pid=pid, sku=sku)
+    await session.commit()
+    await session.refresh(row)
+    logger.info(
+        "devolution_stock_ja_entrou",
+        id=str(row.id), pedido_bling=row.pedido_bling, sku=sku, bling_product_id=pid,
+    )
+    if row.pedido_bling:
+        await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
+        await session.commit()
+    return await _completar_out(session, row, DevolutionOut.model_validate(row))
 
 
 @router.post("/{devolution_id}/senha/pedir-de-novo", response_model=DevolutionOut)
@@ -2644,19 +2990,53 @@ async def backfill_addresses(
 async def delete_devolution(
     devolution_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "delete"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "delete"))],
 ) -> dict:
     """Exclui o lançamento, estornando no Bling o estoque que ele devolveu (a
     regra vive em services/devolution_delete — a lixeira do chamado usa a
     mesma). Se o Bling recusar o estorno, NÃO exclui (502)."""
     row = (
-        await session.execute(select(Devolution).where(Devolution.id == devolution_id))
+        await session.execute(
+            select(Devolution).where(Devolution.id == devolution_id).with_for_update()
+        )
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+    pedido, segurava = row.pedido_bling, status_estoque(row) in ESTOQUE_PENDENTES
     try:
-        return await excluir_lancamento(session, row)
+        res = await excluir_lancamento(session, row)
+    except EstoqueConferindoError as e:
+        raise HTTPException(
+            409, detail={"code": "estoque_conferindo", "message": _MSG_CONFERINDO}
+        ) from e
+    except EstornoSemConfirmacaoError as e:
+        raise HTTPException(
+            409, detail={"code": "estoque_estorno_sem_confirmacao", "message": e.message}
+        ) from e
     except EstornoFalhouError as e:
         raise HTTPException(
             502, detail={"code": "estoque_estorno_falhou", "message": e.message}
         ) from e
+    # A linha excluída segurava o pedido (entrada pendente): recalcula — sem
+    # ela o pedido pode estar resolvido (revisão de 15/10).
+    if segurava and pedido:
+        await apply_order_situacao(session, pedido, actor_id=user.id)
+        await session.commit()
+    return res
+
+
+@router.get("/{devolution_id}", response_model=DevolutionOut)
+async def get_devolution(
+    devolution_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+) -> DevolutionOut:
+    """Uma linha só — a tela relê as que estão "conferindo" a entrada no Bling
+    (0421) sem recarregar a lista. Fica no FIM do arquivo: as rotas GET fixas
+    (/acompanhamento, /order-lookup…) têm que casar antes."""
+    row = (
+        await session.execute(select(Devolution).where(Devolution.id == devolution_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "devolution_not_found"})
+    return await _completar_out(session, row, DevolutionOut.model_validate(row))

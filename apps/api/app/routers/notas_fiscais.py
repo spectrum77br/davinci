@@ -10,8 +10,8 @@ Fluxo:
     resolver o link do XML) + download do arquivo. O XLSX segue o layout
     do "NF-e Report" (28 colunas) e os campos fiscais (CNPJ, série, CFOP,
     ICMS/ST/IPI/PIS/COFINS, dest. UF/CEP) vêm do próprio XML — por isso
-    os dois exports pagam o mesmo custo. O detalhe passa pelo rate gate
-    global do Bling (5 req/s compartilhado), então ambos são limitados a
+    os dois exports pagam o mesmo custo. O detalhe passa pela fila das contas
+    de nota no Redis (5 req/s, "notas" — 21/10), então ambos são limitados a
     MAX_XML_NOTAS por request pra não estourar o timeout do proxy.
 
 Tokens: o cron `bling_notas_token_refresh` renova a cada 5h (AT dura 6h);
@@ -83,7 +83,7 @@ SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 # Bling pagina /nfe em até 100 itens; trava de segurança por conta.
 PAGE_SIZE = 100
 MAX_PAGES_PER_CONTA = 60  # 6.000 notas por conta por consulta
-# Exports = 1 chamada de detalhe por nota a 5 req/s globais — acima
+# Exports = 1 chamada de detalhe por nota a 5 req/s (fila "notas") — acima
 # disso o request passa de ~2min e o proxy derruba com 502.
 MAX_XML_NOTAS = 500
 MAX_RANGE_DAYS = 184
@@ -141,7 +141,8 @@ async def _bling_get(token: str, path: str, params: dict | None = None) -> dict:
     delay = 1.0
     last_status = 0
     for attempt in range(3):
-        await _acquire_bling_rate_slot()
+        # Contas de nota fiscal: outras contas do Bling, fila própria.
+        await _acquire_bling_rate_slot("notas")
         async with httpx.AsyncClient(timeout=30.0) as c:
             r = await c.get(
                 f"{BLING_API_BASE}{path}",
@@ -514,8 +515,8 @@ XLSX_MEDIA = (
 )
 ZIP_MEDIA = "application/zip"
 # Teto do export síncrono é MAX_XML_NOTAS (500). O job async sobe o teto
-# mas precisa caber no job_timeout do worker (1800s) a ~3-5 req/s no rate
-# gate global do Bling — 3000 notas ≈ 10-16 min, com folga.
+# mas precisa caber no job_timeout do worker (1800s) a ~3-5 req/s na fila
+# das contas de nota — 3000 notas ≈ 10-16 min, com folga.
 MAX_EXPORT_NOTAS_ASYNC = 3000
 
 _OnProgress = Callable[[int], Awaitable[None]] | None

@@ -280,5 +280,8 @@ async def test_apply_erro_rede_nao_alerta(monkeypatch, patched):
 
     res = await apply_order_situacao(session, "260987", actor_id=uuid4())
 
-    assert res["ok"] is False and res["action"] == "situacao_error"
+    # 21/10: 5xx/rede não é "transição recusada" — sem desvio (uma chamada só);
+    # o worker reaplica depois (situacao_transitoria).
+    assert res["ok"] is False and res["action"] == "situacao_transitoria"
     assert alerts == [] and audits == []
+    assert len(client.calls) == 1

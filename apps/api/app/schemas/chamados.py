@@ -317,6 +317,9 @@ class ExclusaoLancamentoOut(BaseModel):
     condicao_produto: str | None = None
     motivo_devolucao: str | None = None
     data_devolvido_estoque: datetime | None = None
+    # Resultado da entrada no Bling (devoluções, 0421): ok | falhou | conferindo
+    # | sem_confirmacao | None.
+    estoque_status: str | None = None
     # Movimento de estoque registrado e ainda não estornado: ao excluir, o back
     # dá baixa no Bling sozinho (mesma regra do DELETE /api/devolutions/{id}).
     estoque_estornavel: bool = False

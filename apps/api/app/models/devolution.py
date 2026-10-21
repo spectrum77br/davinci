@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, Text, text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, SmallInteger, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -92,4 +92,26 @@ class Devolution(Base, TimestampMixin):
     estoque_mov_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     estoque_mov_revertido_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # Resultado da entrada no Bling (alembic 0421, caso 300588): ok | falhou |
+    # conferindo | sem_confirmacao. NULL = não se aplica ou linha antiga (com
+    # estoque_mov_* conta como ok — ver services/devolution_stock_return
+    # .status_estoque). `data_devolvido_estoque` é a hora do PEDIDO; quem diz
+    # se entrou é este campo.
+    estoque_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estoque_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estoque_tentativa_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Entrada que o Bling respondeu com erro DEPOIS de receber (5xx/timeout):
+    # o worker procura o movimento no espelho e confirma (ou desiste em 10 min).
+    estoque_conferir_bling_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    estoque_conferir_sku: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estoque_conferir_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # stock_movements.id usado pela conferência (um movimento confirma uma linha só).
+    estoque_mov_ref: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    # Tentativas automáticas do worker depois de o Bling recusar por excesso
+    # de chamadas (21/10, caso 297390) — até 5, a cada ~2 min.
+    estoque_auto_tentativas: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default=text("0")
     )

@@ -222,6 +222,8 @@ type ExclusaoLancamento = {
   condicao_produto: string | null
   motivo_devolucao: string | null
   data_devolvido_estoque: string | null
+  // Resultado da entrada no Bling (15/10): ok | falhou | conferindo | sem_confirmacao | null.
+  estoque_status?: string | null
   // estoque_mov_sku preenchido e não revertido → ao excluir o back dá a saída no Bling sozinho.
   estoque_estornavel: boolean
   estoque_mov_sku: string | null
@@ -357,6 +359,8 @@ const sheetInputClass = 'h-7 w-full rounded-none border-0 bg-transparent px-1 te
 const sheetSelectClass = `${sheetInputClass} cursor-pointer`
 
 const ERROS: Record<string, string> = {
+  estoque_conferindo: 'a entrada no estoque do Bling de um desses lançamentos ainda está sendo conferida — espere até 10 min',
+  estoque_estorno_sem_confirmacao: 'o estorno de um desses lançamentos pode ter saído no Bling — confira o extrato e use "Estorno já saiu" em Devoluções antes de excluir',
   chamado_not_found: 'chamado não encontrado',
   chamado_pedido_nao_encontrado: 'pedido não encontrado no DaVinci',
   chamado_mensagem_vazia: 'digite a mensagem',
@@ -1536,6 +1540,21 @@ function lancamentoTexto(l: ExclusaoLancamento) {
 function estoqueTexto(l: ExclusaoLancamento): { texto: string; alerta: boolean } {
   if (!l.data_devolvido_estoque) return { texto: 'estoque não devolvido', alerta: false }
   const quando = fmtDateTime(l.data_devolvido_estoque)
+  // A data é do pedido; o resultado da entrada no Bling vem em estoque_status (15/10).
+  // Estorno anterior que pode ter saído: não dá para excluir daqui ainda.
+  if (l.estoque_status === 'sem_confirmacao' && l.estoque_estornavel) {
+    return { texto: 'o estorno anterior pode ter saído no Bling — confira o extrato e use "Estorno já saiu" em Devoluções; não dá para excluir daqui ainda', alerta: true }
+  }
+  // Entrada anterior ainda não estornada vale primeiro (o estorno sai ao excluir).
+  if (l.estoque_status && l.estoque_status !== 'ok' && l.estoque_estornavel) {
+    return {
+      texto: `há uma entrada anterior de ${l.estoque_mov_qty ?? '?'} un. de ${l.estoque_mov_sku || l.sku || '?'} — ao excluir, o Bling recebe a saída automaticamente`,
+      alerta: true,
+    }
+  }
+  if (l.estoque_status === 'falhou') return { texto: `a entrada no Bling falhou (pedida em ${quando}) — nada a estornar`, alerta: false }
+  if (l.estoque_status === 'conferindo') return { texto: 'a entrada no Bling ainda está sendo conferida — espere até 10 min para excluir', alerta: true }
+  if (l.estoque_status === 'sem_confirmacao') return { texto: `a entrada no Bling não foi confirmada (pedida em ${quando}) — confira o extrato; se entrou, ajuste direto no Bling`, alerta: true }
   if (l.estoque_estornavel) {
     const qty = l.estoque_mov_qty ?? '?'
     const sku = l.estoque_mov_sku || l.sku || '?'

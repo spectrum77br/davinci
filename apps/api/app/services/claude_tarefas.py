@@ -65,6 +65,7 @@ from app.models.instagram_dm import (
 from app.services.alerts import emit_alert
 from app.services.bling_situacoes import SITUACAO_CANCELADO
 from app.services.chamados import lookup_pedido
+from app.services.devolution_stock_return import ESTOQUE_PENDENTES, status_estoque
 
 logger = structlog.get_logger()
 
@@ -850,7 +851,11 @@ async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str,
             partes.append("reembolso: sim" if dv.reembolso else "reembolso: não")
             if dv.prazo_contestacao:
                 partes.append(f"prazo p/ contestar {_d(dv.prazo_contestacao)}")
-            if dv.data_devolvido_estoque:
+            st = status_estoque(dv)
+            if st in ESTOQUE_PENDENTES:
+                # 0421: a data é do pedido; a entrada no Bling não foi confirmada.
+                partes.append("entrada no estoque do Bling NÃO confirmada")
+            elif dv.data_devolvido_estoque:
                 partes.append(f"devolvido ao estoque em {_d(dv.data_devolvido_estoque)}")
             if dv.manutencao:
                 partes.append("em manutenção")

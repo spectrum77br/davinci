@@ -133,6 +133,7 @@ from app.services.atendimento import ag_cancelamento
 from app.services.atendimento.constantes import normalizar_inicio
 from app.services.bling_situacoes import SITUACAO_AGUARDANDO_CANCELAMENTO_STR
 from app.services.chamados import lookup_pedido
+from app.services.devolution_stock_return import ESTOQUE_PENDENTES, status_estoque
 
 logger = structlog.get_logger()
 
@@ -459,6 +460,9 @@ async def _chamados(session: AsyncSession, numero_bling: str | None, numero_mkt:
 
 
 def _status_devolucao(dv: Devolution) -> str:
+    if status_estoque(dv) in ESTOQUE_PENDENTES:
+        # 0421: pediram a entrada, mas o Bling não confirmou.
+        return "recebido, entrada no estoque pendente"
     if dv.data_devolvido_estoque is not None or dv.devolver_estoque:
         return "devolvido ao estoque"
     if dv.reembolso:

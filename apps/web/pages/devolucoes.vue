@@ -86,6 +86,17 @@ type DevolutionRow = {
   estoque_mov_action: string | null
   estoque_mov_qty: number | null
   estoque_mov_revertido_at: string | null
+  // Resultado da entrada no Bling (15/10, caso 300588): ok | falhou | conferindo
+  // | sem_confirmacao | null. A data acima é a do PEDIDO; quem diz se entrou é isto.
+  estoque_status?: string | null
+  estoque_erro?: string | null
+  estoque_tentativa_at?: string | null
+  // Produto da entrada que o Bling respondeu com erro (o que está sendo conferido).
+  estoque_conferir_sku?: string | null
+  // "auto_retry" = o Bling recusou por excesso de chamadas e o DaVinci tenta de
+  // novo sozinho a cada ~2 min (até 5 — estoque_auto_tentativas). 21/10.
+  estoque_conferir_action?: string | null
+  estoque_auto_tentativas?: number | null
   created_at: string
   updated_at: string
   bling_stock_result?: BlingStockResult | null
@@ -486,8 +497,38 @@ const TOAST_CORES: Record<Toast['kind'], { caixa: string; titulo: string; linha:
 function dismissToast(id: number) {
   toasts.value = toasts.value.filter((x) => x.id !== id)
 }
-function showStockToast(sr: BlingStockResult) {
+function showStockToast(sr: BlingStockResult, rowId?: string, linha?: DevolutionRow) {
   const lines = sr.message ? [sr.message] : []
+  // Recusa por excesso de chamadas: o DaVinci tenta de novo sozinho (21/10) —
+  // aviso âmbar que fecha sozinho quando a entrada entra.
+  if (sr.action === 'error' && rowId && linha && tentandoSozinho(linha)) {
+    fecharAvisoConferindo(rowId)
+    const id = pushToast({
+      kind: 'warning',
+      title: 'Bling ocupado · o DaVinci tenta de novo sozinho',
+      lines: [...lines, 'Ele tenta de novo em alguns minutos (até 5 vezes). Não precisa fazer nada.'],
+    }, 0)
+    avisoConferindo.set(rowId, id)
+    return
+  }
+  // O Bling respondeu erro DEPOIS de receber (15/10, 300334/298826): pode ter
+  // entrado. Fica na tela até a conferência terminar (ou alguém fechar) —
+  // repetir agora dobraria o estoque.
+  if (sr.action === 'unconfirmed') {
+    if (rowId) fecharAvisoConferindo(rowId)
+    const id = pushToast({ kind: 'warning', title: 'Bling · conferindo a entrada', lines }, 0)
+    if (rowId) avisoConferindo.set(rowId, id)
+    return
+  }
+  if (sr.action === 'reverse_incerto') {
+    pushToast({ kind: 'warning', title: 'Bling · o estorno pode ter saído', lines: [...lines, 'Confira o extrato antes de repetir — use “Estorno já saiu” ou “Tentar de novo” na linha.'] }, 0)
+    return
+  }
+  // Correção de estoque: não há linha para conferir — quem confere é a pessoa.
+  if (sr.action === 'unconfirmed_correcao') {
+    pushToast({ kind: 'warning', title: 'Bling · confira o extrato', lines }, 0)
+    return
+  }
   if (sr.ok) {
     const title = sr.action === 'product_created_usado'
       ? 'Bling · produto criado'
@@ -501,11 +542,215 @@ function showStockToast(sr: BlingStockResult) {
       no_sku: 'SKU não informado',
       sku_not_found: 'SKU não encontrado no Bling',
       create_failed: 'Erro ao criar produto no Bling',
-      error: 'Erro no Bling',
+      error: 'Estoque NÃO entrou no Bling',
+      reverse_error: 'Estorno NÃO saiu no Bling — o estoque continua lá',
     }
-    pushToast({ kind: sr.action === 'error' ? 'error' : 'warning', title: titles[sr.action] ?? 'Bling · aviso', lines })
+    // Erro não some sozinho (caso 300588: o aviso de 6 s sumiu e a data ficou
+    // parecendo que tinha entrado). A linha também fica marcada em vermelho.
+    const extra = rowId && sr.action === 'error' ? ['Use “Tentar de novo” na linha.'] : []
+    pushToast(
+      { kind: sr.action === 'error' || sr.action === 'reverse_error' ? 'error' : 'warning', title: titles[sr.action] ?? 'Bling · aviso', lines: [...lines, ...extra] },
+      0,
+    )
   }
 }
+
+// ── Entrada no estoque do Bling (15/10, caso 300588) ─────────────────
+// `data_devolvido_estoque` é a hora do PEDIDO; o resultado vem em estoque_status.
+const ESTOQUE_PENDENTE = new Set(['falhou', 'conferindo', 'sem_confirmacao'])
+function estoquePendente(row: DevolutionRow): boolean {
+  return ESTOQUE_PENDENTE.has(row.estoque_status || '')
+}
+// SKU onde a entrada vai/foi: o produto que o Bling respondeu com erro, o
+// destino escolhido (ou o z000N já criado). null = z ainda não criado.
+// Mesma ordem do back (return_product_to_bling_stock).
+function skuDaEntrada(row: DevolutionRow): string | null {
+  if (row.estoque_conferir_sku) return row.estoque_conferir_sku
+  if (row.estoque_destino_sku) return row.estoque_destino_sku
+  if (row.estoque_nova_tag) return null
+  const efetivo = (row.condicao_produto === 'Trocado' ? row.troca_sku : row.sku) || ''
+  const base = efetivo.includes('.') ? efetivo.slice(0, efetivo.lastIndexOf('.')) : efetivo
+  if (row.estoque_suffix) return `${base}.${row.estoque_suffix.replace(/^\./, '')}`
+  const condicao = row.condicao_produto === 'Trocado' ? row.troca_condicao
+    : row.condicao_produto === 'Manutenção' ? row.manutencao_destino : row.condicao_produto
+  if (condicao === 'Usado' && !/^(b[0-9]|u)/i.test(efetivo)) return efetivo ? `${base}.us` : null
+  return efetivo || null
+}
+function temEstornoPendente(row: DevolutionRow): boolean {
+  return !!row.estoque_mov_sku && !row.estoque_mov_revertido_at
+}
+// Campos do estoque que o servidor muda: só eles entram na linha da tela (a
+// releitura não pode apagar o que a pessoa está digitando em outra coluna).
+const CAMPOS_ESTOQUE = [
+  'estoque_status', 'estoque_erro', 'estoque_tentativa_at', 'estoque_conferir_sku',
+  'estoque_conferir_action', 'estoque_auto_tentativas',
+  'estoque_mov_sku', 'estoque_mov_bling_id', 'estoque_mov_action', 'estoque_mov_qty',
+  'estoque_mov_revertido_at', 'estoque_destino_sku', 'estoque_nova_tag', 'estoque_suffix',
+  'data_devolvido_estoque', 'situacao_bling_id', 'situacao_bling_nome',
+] as const
+function aplicarEstoque(id: string, r: DevolutionRow) {
+  const linha = items.value.find((i) => i.id === id)
+  if (!linha) return
+  for (const k of CAMPOS_ESTOQUE) (linha as any)[k] = (r as any)[k]
+}
+// Aviso âmbar "conferindo" de cada linha: fecha quando a conferência termina
+// (ou quando a lista recarrega e a linha já não está conferindo).
+const avisoConferindo = new Map<string, number>()
+function fecharAvisosResolvidos() {
+  for (const id of [...avisoConferindo.keys()]) {
+    const linha = items.value.find((i) => i.id === id)
+    if (linha && !acompanharSozinho(linha)) fecharAvisoConferindo(id)
+  }
+}
+function fecharAvisoConferindo(id: string) {
+  const t = avisoConferindo.get(id)
+  if (t != null) dismissToast(t)
+  avisoConferindo.delete(id)
+}
+const tentandoEstoque = ref<Set<string>>(new Set())
+async function acaoEstoque(row: DevolutionRow, url: string, body: Record<string, unknown>) {
+  tentandoEstoque.value = new Set([...tentandoEstoque.value, row.id])
+  const aviso = pushToast({
+    kind: 'info',
+    title: 'Atualizando o estoque no Bling…',
+    lines: [`Pedido ${row.pedido_bling || '—'} · pode levar alguns segundos, não repita`],
+  }, 0)
+  try {
+    const updated = await api<DevolutionRow>(url, { method: 'POST', body })
+    aplicarEstoque(row.id, updated)
+    if (updated.bling_stock_result) showStockToast(updated.bling_stock_result, row.id, updated)
+    else if (updated.estoque_status === 'ok') pushToast({ kind: 'success', title: 'Entrada registrada', lines: [`${updated.estoque_mov_sku || ''} · pedido ${updated.pedido_bling || '—'}`] })
+    agendarConferencia()
+  } catch (e: any) {
+    if (e?.data?.detail?.code === 'estoque_conferindo') {
+      // O DaVinci está tentando agora (worker): relê a linha, sem erro fixo.
+      try { aplicarEstoque(row.id, await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}`)) } catch { /* o próximo load corrige */ }
+      pushToast({ kind: 'info', title: 'O DaVinci está tentando agora', lines: ['Aguarde alguns segundos — a linha atualiza sozinha.'] })
+      agendarConferencia()
+    } else {
+      pushToast({ kind: 'error', title: 'Não deu para registrar o estoque', lines: [apiError(e)] }, 0)
+    }
+  } finally {
+    dismissToast(aviso)
+    const next = new Set(tentandoEstoque.value)
+    next.delete(row.id)
+    tentandoEstoque.value = next
+  }
+}
+function linhaComMudanca(row: DevolutionRow): boolean {
+  if (!hasDirty(row.id)) return false
+  pushToast({ kind: 'warning', title: 'Salve a linha antes', lines: ['A linha tem mudança não salva — salve ou desfaça antes de mexer no estoque.'] })
+  return true
+}
+async function tentarEstoqueDeNovo(row: DevolutionRow) {
+  if (!canEdit.value || tentandoEstoque.value.has(row.id) || isSaving(row.id) || linhaComMudanca(row)) return
+  const sku = skuDaEntrada(row)
+  const onde = sku ? `de ${sku}` : 'do produto z criado para este pedido'
+  const semConfirmacao = row.estoque_status === 'sem_confirmacao'
+  const pergunta = semConfirmacao && temEstornoPendente(row)
+    ? `O estorno (saída) da entrada anterior em ${row.estoque_mov_sku} não foi confirmado — ele PODE ter saído.\n\n`
+      + `Abra o extrato de ${row.estoque_mov_sku} no Bling e procure a saída "Estorno devolução pedido ${row.pedido_bling || ''}". `
+      + 'Se ela existir, use "Estorno já saiu" (estornar de novo daria baixa 2×).\n\n'
+      + (row.devolver_estoque ? 'Conferi no Bling e a saída NÃO existe. Estornar e lançar agora?' : 'Conferi no Bling e a saída NÃO existe. Estornar agora?')
+    : semConfirmacao
+    ? `A entrada ${onde} não foi confirmada — ela PODE ter entrado.\n\n`
+      + `Abra o extrato de estoque ${onde} no Bling e procure a entrada `
+      + `"Devolução pedido ${row.pedido_bling || ''}". Se ela existir, use "Já entrou" (lançar de novo dobra o estoque).\n\n`
+      + 'Conferi no Bling e a entrada NÃO existe. Lançar agora?'
+    : temEstornoPendente(row)
+    ? `Dar baixa (estorno) de ${row.estoque_mov_qty ?? 1} un. em ${row.estoque_mov_sku}`
+      + (row.devolver_estoque ? ` e lançar ${row.quantidade ?? 1} un. ${sku ? `em ${sku}` : '(produto z novo)'}` : '')
+      + ' no Bling?'
+    : `Lançar de novo a entrada de ${row.quantidade ?? 1} un. ${sku ? `em ${sku}` : '(produto z novo)'} no Bling?`
+  if (!confirm(pergunta)) return
+  await acaoEstoque(row, `/api/devolutions/${encodeURIComponent(row.id)}/estoque/tentar-de-novo`, { confirmo_conferi_no_bling: semConfirmacao })
+}
+async function estoqueJaEntrou(row: DevolutionRow) {
+  if (!canEdit.value || tentandoEstoque.value.has(row.id) || isSaving(row.id) || linhaComMudanca(row)) return
+  const url = `/api/devolutions/${encodeURIComponent(row.id)}/estoque/ja-entrou`
+  if (temEstornoPendente(row)) {
+    // O que faltava conferir era o ESTORNO (saída) da entrada anterior.
+    const ok = confirm(
+      `Você viu no extrato de ${row.estoque_mov_sku} a saída "Estorno devolução pedido ${row.pedido_bling || ''}"?\n\n`
+        + 'O DaVinci só registra que o estorno saiu (não lança nada no Bling).',
+    )
+    if (!ok) return
+    try {
+      const updated = await api<DevolutionRow>(url, { method: 'POST', body: {} })
+      aplicarEstoque(row.id, updated)
+      pushToast({
+        kind: 'success',
+        title: 'Estorno registrado',
+        lines: [updated.estoque_status === 'falhou' ? 'Falta lançar a entrada nova: use “Tentar de novo”.' : 'A saída já estava no Bling — nada foi lançado.'],
+      })
+    } catch (e: any) {
+      pushToast({ kind: 'error', title: 'Não deu para registrar o estorno', lines: [apiError(e)] }, 0)
+    }
+    return
+  }
+  const sugerido = skuDaEntrada(row) || ''
+  const sku = window.prompt(
+    `Em qual SKU você viu a entrada "Devolução pedido ${row.pedido_bling || ''}" no extrato do Bling?\n\n`
+      + 'O DaVinci só registra (não lança nada no Bling) — e o estorno ao excluir volta a funcionar.',
+    sugerido,
+  )
+  if (!sku || !sku.trim()) return
+  try {
+    await api(url, { method: 'POST', body: { sku: sku.trim() } })
+      .then((updated: any) => { aplicarEstoque(row.id, updated); pushToast({ kind: 'success', title: 'Entrada registrada', lines: [`${updated.estoque_mov_sku || ''} · pedido ${updated.pedido_bling || '—'}`] }) })
+  } catch (e: any) {
+    if (e?.data?.detail?.code === 'estoque_sku_diferente') {
+      if (confirm(`${e.data.detail.message}\n\nSó confirme se a entrada foi lançada à mão nesse SKU.`)) {
+        await acaoEstoque(row, url, { sku: sku.trim(), confirmo_outro_sku: true })
+      }
+      return
+    }
+    pushToast({ kind: 'error', title: 'Não deu para registrar o estoque', lines: [apiError(e)] }, 0)
+  }
+}
+// Linha "conferindo" (o worker confere a cada 2 min, até 10) ou recusada por
+// excesso de chamadas (o worker tenta de novo sozinho): a tela relê só essas
+// linhas a cada 60 s, sem recarregar a lista.
+function tentandoSozinho(row: DevolutionRow): boolean {
+  return row.estoque_status === 'falhou' && row.estoque_conferir_action === 'auto_retry'
+}
+function acompanharSozinho(row: DevolutionRow): boolean {
+  return row.estoque_status === 'conferindo' || tentandoSozinho(row)
+}
+let conferenciaTimer: number | null = null
+let desmontado = false
+function agendarConferencia() {
+  if (import.meta.server || desmontado || conferenciaTimer != null) return
+  if (!items.value.some(acompanharSozinho) && avisoConferindo.size === 0) return
+  conferenciaTimer = window.setTimeout(async () => {
+    conferenciaTimer = null
+    const ids = [...new Set([
+      ...items.value.filter(acompanharSozinho).map((i) => i.id),
+      ...avisoConferindo.keys(),
+    ])]
+    for (const id of ids) {
+      if (desmontado) return
+      try {
+        const r = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(id)}`)
+        if (desmontado) return
+        aplicarEstoque(id, r)
+        if (!acompanharSozinho(r)) fecharAvisoConferindo(id)
+        if (r.estoque_status === 'ok') {
+          pushToast({ kind: 'success', title: 'Bling · entrada confirmada', lines: [`${r.estoque_mov_sku || r.sku || ''} · pedido ${r.pedido_bling || '—'}`] })
+        } else if (r.estoque_status === 'sem_confirmacao') {
+          pushToast({ kind: 'warning', title: 'Bling · entrada não confirmada', lines: [r.estoque_erro || 'Confira o extrato no Bling.'] }, 0)
+        }
+      } catch {
+        // A próxima volta tenta de novo.
+      }
+    }
+    agendarConferencia()
+  }, 60_000)
+}
+onBeforeUnmount(() => {
+  desmontado = true
+  if (conferenciaTimer != null) window.clearTimeout(conferenciaTimer)
+})
 
 const items = ref<DevolutionRow[]>([])
 // Contadores dos cards (API, mesmos filtros da listagem). O grão da tabela é
@@ -1025,6 +1270,8 @@ async function load() {
     const params = listParams(PAGE_SIZE, (page.value - 1) * PAGE_SIZE)
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
+    fecharAvisosResolvidos()
+    agendarConferencia()
     applyTotals(res)
     dirtyRows.value = new Set()
     linkEnvioTocado.value = new Set()
@@ -1726,6 +1973,7 @@ async function createAllDevolutions() {
   lookupError.value = null
   const remaining: DevolutionDraft[] = []
   let added = 0
+  let pendentesNoAdd = 0
   const pedidoDoRascunho = drafts.value[0]?.pedido_bling || null
   try {
     for (const d of [...drafts.value]) {
@@ -1747,6 +1995,10 @@ async function createAllDevolutions() {
       if (extra) Object.assign(body, extra)
       try {
         let created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
+        // O resultado do Bling vem só nesta resposta (a das fotos não traz):
+        // guarda antes de subir as fotos.
+        const estoqueSr = created.bling_stock_result
+        const createdId = created.id
         // Fotos escolhidas no rascunho sobem agora (a linha precisa existir) —
         // cada upload já re-dispara o chamado no ML se ele estiver esperando foto.
         let fotosSubiram = 0
@@ -1773,7 +2025,9 @@ async function createAllDevolutions() {
         total.value += 1
         addedThisSession.value = new Set([...addedThisSession.value, `${created.pedido_bling}|${created.sku}`])
         added += 1
-        if (created.bling_stock_result) showStockToast(created.bling_stock_result)
+        if (estoqueSr) showStockToast(estoqueSr, createdId, created)
+        if (created.estoque_status === 'falhou' || created.estoque_status === 'conferindo') pendentesNoAdd += 1
+        agendarConferencia()
       } catch (e: any) {
         lookupError.value = apiError(e)
         remaining.push(d)
@@ -1787,7 +2041,17 @@ async function createAllDevolutions() {
       // depois dos produtos criados (o lançamento pode ter mexido na situação
       // sozinho — Extraviado etc.; a escolha da pessoa vale por último).
       if (addSituacaoId.value != null && pedidoDoRascunho) {
-        await alterarSituacaoBling(pedidoDoRascunho, addSituacaoId.value)
+        if (addSituacaoId.value === 545902 && pendentesNoAdd > 0) {
+          // A entrada no estoque não entrou (ou está em conferência): o pedido
+          // fica em Aguardando Devolução até a linha resolver (15/10).
+          pushToast({
+            kind: 'warning',
+            title: `Pedido ${pedidoDoRascunho}: não foi para Resolvido`,
+            lines: ['O estoque não entrou no Bling (ou está em conferência). Resolva pela linha; o pedido vai para Resolvido quando a entrada confirmar.'],
+          }, 0)
+        } else {
+          await alterarSituacaoBling(pedidoDoRascunho, addSituacaoId.value)
+        }
       }
       addSituacaoId.value = null
     }
@@ -1899,7 +2163,7 @@ function applyStockModalFields(row: DevolutionRow, extra: StockModalFields) {
 
 // Toggle "devolver estoque" inline: abre os modais antes de salvar/chamar Bling.
 async function toggleRowDevolverEstoque(row: DevolutionRow) {
-  if (!canEdit.value) return
+  if (!canEdit.value || estoqueTravado(row)) return
   const next = !row.devolver_estoque
   if (next && isStockTrigger(row.condicao_produto)) {
     const extra = await resolveStockModals(row.condicao_produto, row.sku, true)
@@ -1912,8 +2176,27 @@ async function toggleRowDevolverEstoque(row: DevolutionRow) {
 
 // Mudança de condição inline: se devolver_estoque on e condição dispara
 // estoque, abre os modais antes de salvar. Cancelar reverte a condição.
+function estoqueTravado(row: DevolutionRow): boolean {
+  if (row.estoque_status === 'conferindo') {
+    pushToast({ kind: 'warning', title: 'Espere a conferência do estoque', lines: ['O DaVinci ainda está conferindo no Bling se a entrada deste item entrou (até 10 min).'] })
+    return true
+  }
+  if (row.estoque_status === 'sem_confirmacao') {
+    pushToast({ kind: 'warning', title: 'Confira o estoque antes', lines: ['A entrada (ou o estorno) deste item não foi confirmada no Bling. Use “Já entrou” / “Estorno já saiu” ou “Tentar de novo” na linha antes de mudar a condição.'] })
+    return true
+  }
+  return false
+}
 async function changeRowCondicao(row: DevolutionRow, value: string) {
   if (!canEdit.value) return
+  if (value !== row.condicao_produto && estoqueTravado(row)) {
+    // O select já mostra o valor novo: volta ao salvo.
+    const atual = row.condicao_produto
+    row.condicao_produto = null
+    await nextTick()
+    row.condicao_produto = atual
+    return
+  }
   const prev = row.condicao_produto
   setRowText(row, 'condicao_produto', value)
   // Ao SAIR de Manutenção, o custo de manutenção é obrigatório (registra o
@@ -2016,9 +2299,24 @@ async function saveRow(row: DevolutionRow, opts: { estoque?: boolean } = {}) {
     if (!editadaNoAr) clearDirty(row.id)
     // Reembolso/condição podem mudar quais linhas entram nos filtros e cards.
     void refreshTotals()
-    if (updated.bling_stock_result) showStockToast(updated.bling_stock_result)
+    if (updated.bling_stock_result) showStockToast(updated.bling_stock_result, row.id, updated)
+    agendarConferencia()
   } catch (e: any) {
     bloqueiaSave(apiError(e))
+    // Estoque travado (conferindo / sem confirmação): a mudança não vale — a
+    // linha volta ao que está salvo, senão os botões partiriam do que só
+    // existe na tela (revisão de 15/10).
+    const code = e?.data?.detail?.code
+    if (code === 'estoque_conferindo' || code === 'estoque_sem_confirmacao') {
+      try {
+        const salvo = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}`)
+        const i = items.value.findIndex((x) => x.id === row.id)
+        if (i >= 0) items.value[i] = { ...salvo, cliente: salvo.cliente ?? items.value[i].cliente }
+        clearDirty(row.id)
+      } catch {
+        // fica como está; o próximo load corrige
+      }
+    }
   } finally {
     if (aviso != null) dismissToast(aviso)
     setSaving(row.id, false)
@@ -2101,15 +2399,35 @@ function isDeleting(id: string): boolean {
 async function removeRow(row: DevolutionRow) {
   if (!canDelete.value || isDeleting(row.id)) return
   const label = row.sku || row.pedido_bling || 'esta devolução'
+  if (row.estoque_status === 'conferindo') {
+    pushToast({
+      kind: 'warning',
+      title: 'Espere a conferência do estoque',
+      lines: ['O DaVinci ainda está conferindo no Bling se a entrada deste item entrou (até 10 min).'],
+    }, 0)
+    return
+  }
+  if (row.estoque_status === 'sem_confirmacao' && temEstornoPendente(row)) {
+    pushToast({
+      kind: 'warning',
+      title: 'Confira o estorno antes de excluir',
+      lines: ['O estorno anterior pode ter saído no Bling — use “Estorno já saiu” ou “Tentar de novo” na linha (excluir agora daria baixa 2×).'],
+    }, 0)
+    return
+  }
   // Estoque já devolvido ao Bling: com o movimento registrado, o back dá BAIXA
   // da mesma quantidade antes de excluir (03/09, Eduardo). Lançamento antigo
   // sem registro não tem como ser estornado daqui.
   const estornavel = !!row.estoque_mov_sku && !row.estoque_mov_revertido_at
   const stockNote = estornavel
     ? ` O estoque devolvido no Bling (${row.estoque_mov_qty ?? 1} un. de ${row.estoque_mov_sku}) será ESTORNADO automaticamente (saída).`
-    : (row.data_devolvido_estoque
-      ? ' O estoque já devolvido no Bling NÃO será estornado (lançamento antigo, sem registro do movimento) — ajuste-o direto no Bling.'
-      : '')
+    : row.estoque_status === 'falhou'
+      ? ''  // a entrada não aconteceu: nada a estornar
+      : row.estoque_status === 'sem_confirmacao'
+        ? ' A entrada deste item no Bling NÃO foi confirmada: confira o extrato do SKU — se ela entrou, ajuste direto no Bling.'
+        : (row.data_devolvido_estoque
+          ? ' O estoque já devolvido no Bling NÃO será estornado (lançamento antigo, sem registro do movimento) — ajuste-o direto no Bling.'
+          : '')
   if (!confirm(`Remover o lançamento de "${label}"? Esta ação não pode ser desfeita.${stockNote}`)) return
   const next = new Set(deleting.value)
   next.add(row.id)
@@ -2128,6 +2446,16 @@ async function removeRow(row: DevolutionRow) {
     }
   } catch (e: any) {
     error.value = apiError(e)
+    // O servidor pode ter marcado a linha (estorno que pode ter saído): relê
+    // para os botões certos aparecerem.
+    const code = e?.data?.detail?.code
+    if (code === 'estoque_estorno_falhou' || code === 'estoque_estorno_sem_confirmacao' || code === 'estoque_conferindo') {
+      try {
+        aplicarEstoque(row.id, await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}`))
+      } catch {
+        // o próximo load corrige
+      }
+    }
   } finally {
     const done = new Set(deleting.value)
     done.delete(row.id)
@@ -3184,7 +3512,69 @@ async function backfillAddresses() {
               <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10">
-              <div class="flex flex-col items-start gap-0.5">
+              <div v-if="estoquePendente(row)" class="flex flex-col items-start gap-0.5 max-w-[15rem] whitespace-normal" :data-estoque-status="row.estoque_status">
+                <span
+                  v-if="row.estoque_status === 'conferindo'"
+                  data-estoque-badge="conferindo"
+                  title="O Bling respondeu com erro depois de receber: a entrada pode ter acontecido. O DaVinci confere sozinho em até 10 min — não lance de novo."
+                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+                >
+                  <Loader2 class="size-3 shrink-0 animate-spin" />
+                  Conferindo no Bling…
+                </span>
+                <span
+                  v-else-if="row.estoque_status === 'falhou'"
+                  data-estoque-badge="falhou"
+                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300"
+                >
+                  <AlertCircle class="size-3 shrink-0" />
+                  Estoque NÃO entrou
+                </span>
+                <span
+                  v-else
+                  data-estoque-badge="sem_confirmacao"
+                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+                >
+                  <AlertTriangle class="size-3 shrink-0" />
+                  {{ temEstornoPendente(row) ? 'Estorno não confirmado' : 'Entrada não confirmada' }}
+                </span>
+                <span v-if="row.estoque_erro && row.estoque_status !== 'conferindo'" class="text-[11px] leading-tight text-muted-foreground">{{ row.estoque_erro }}</span>
+                <span
+                  v-if="tentandoSozinho(row)"
+                  data-estoque-tentando-sozinho
+                  class="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-300"
+                >
+                  <Loader2 class="size-3 shrink-0 animate-spin" />
+                  tentando de novo sozinho ({{ row.estoque_auto_tentativas ?? 0 }} de 5)
+                </span>
+                <span class="text-[10px] text-muted-foreground">pedido em {{ fmtDateTime(row.estoque_tentativa_at || row.data_devolvido_estoque) }}</span>
+                <div v-if="canEdit && row.estoque_status !== 'conferindo'" class="mt-0.5 flex flex-wrap gap-1">
+                  <button
+                    v-if="row.estoque_status === 'sem_confirmacao'"
+                    type="button"
+                    data-estoque-ja-entrou
+                    :disabled="tentandoEstoque.has(row.id) || isSaving(row.id)"
+                    :title="temEstornoPendente(row) ? 'Você viu a saída do estorno no extrato do Bling: o DaVinci só registra (não lança nada)' : 'Você viu a entrada no extrato do Bling: o DaVinci só registra (não lança nada)'"
+                    class="inline-flex items-center gap-1 rounded border border-emerald-300 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-60 dark:text-emerald-300"
+                    @click="estoqueJaEntrou(row)"
+                  >
+                    <CheckCircle2 class="size-3" />
+                    {{ temEstornoPendente(row) ? 'Estorno já saiu' : 'Já entrou' }}
+                  </button>
+                  <button
+                    type="button"
+                    data-estoque-tentar
+                    :disabled="tentandoEstoque.has(row.id) || isSaving(row.id)"
+                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-medium hover:bg-muted disabled:opacity-60"
+                    @click="tentarEstoqueDeNovo(row)"
+                  >
+                    <Loader2 v-if="tentandoEstoque.has(row.id)" class="size-3 animate-spin" />
+                    <RotateCcw v-else class="size-3" />
+                    Tentar de novo
+                  </button>
+                </div>
+              </div>
+              <div v-else class="flex flex-col items-start gap-0.5">
                 <span>{{ fmtDateTime(row.data_devolvido_estoque) }}</span>
                 <span
                   v-if="row.estoque_mov_sku && !row.estoque_mov_revertido_at"
@@ -3285,7 +3675,7 @@ async function backfillAddresses() {
       </div>
     </div>
 
-    <!-- Bling stock result toasts — top-right, auto-dismiss after 6s -->
+    <!-- Bling stock result toasts — top-right; sucesso some em 6 s, erro e "conferindo" ficam até fechar (15/10) -->
     <div class="fixed top-4 right-4 z-[60] flex flex-col gap-2 w-[min(380px,calc(100vw-2rem))]">
       <TransitionGroup
         enter-active-class="transition duration-150 ease-out"

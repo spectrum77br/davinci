@@ -76,6 +76,7 @@ function montar(linhaInicial) {
     'window', 'toasts', 'dirtyRows', 'savingRows', 'linkEnvioTocado', 'items', 'canEdit', 'error', 'api',
     'linkRequired', 'linkEnvioRequired', 'linkEnvioNaoMegaRow', 'videoFraudeRequired', 'bloqueiaSave',
     'showTrocaMotivoToast', 'platNome', 'refreshTotals', 'showStockToast',
+    'agendarConferencia', 'apiError',
   ]
   const fns = new Function(...nomes, transpile(`${fonte}
 return { saveRow, setRowText, markDirty, hasDirty, isSaving };`))(
@@ -85,6 +86,7 @@ return { saveRow, setRowText, markDirty, hasDirty, isSaving };`))(
     (msg) => { throw new Error(`save barrado: ${msg}`) },
     () => {}, () => '', async () => {},
     (sr) => ctx.stockToasts.push(sr),
+    () => {}, (e) => String(e),
   )
   return { ctx, ...fns }
 }

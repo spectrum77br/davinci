@@ -66,7 +66,7 @@ async def _post_oauth_token(basic_auth_b64: str, data: dict) -> dict:
         "Content-Type": "application/x-www-form-urlencoded",
         "Authorization": _basic_header(basic_auth_b64),
     }
-    await _acquire_bling_rate_slot()
+    await _acquire_bling_rate_slot("notas")
     async with httpx.AsyncClient(timeout=20.0) as c:
         r = await c.post(BLING_TOKEN_URL, headers=headers, data=data)
     if r.status_code >= 400:

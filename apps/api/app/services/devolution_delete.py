@@ -17,6 +17,22 @@ from app.services import devolution_stock_return as dsr
 logger = structlog.get_logger()
 
 
+class EstoqueConferindoError(Exception):
+    """A entrada no Bling ainda está sendo conferida (o Bling respondeu erro
+    depois de receber): excluir agora deixaria uma entrada sem dono, que
+    ninguém mais estornaria. Espera a conferência (até 10 min)."""
+
+
+class EstornoSemConfirmacaoError(Exception):
+    """O estorno anterior desta linha pode ter saído (o Bling respondeu erro
+    depois de receber): excluir agora estornaria de novo. A pessoa confere o
+    extrato primeiro ("Estorno já saiu" ou "Tentar de novo")."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
 class EstornoFalhouError(Exception):
     """O Bling recusou a baixa do estoque devolvido: a linha NÃO foi excluída."""
 
@@ -36,9 +52,27 @@ async def excluir_lancamento(session: AsyncSession, row: Devolution) -> dict:
 
     COMMITA a exclusão: o estorno já feito no Bling nunca pode ficar sem a
     exclusão correspondente (senão o operador exclui de novo e estorna 2×)."""
+    # Estado fresco e travado: um Tentar de novo/save da mesma linha no meio
+    # mudaria o que foi decidido aqui (revisão de 15/10).
+    await session.refresh(row, with_for_update=True)
+    if row.estoque_status == dsr.ESTOQUE_CONFERINDO:
+        raise EstoqueConferindoError
+    if row.estoque_status == dsr.ESTOQUE_SEM_CONFIRMACAO and dsr.estorno_pendente(row):
+        raise EstornoSemConfirmacaoError(
+            row.estoque_erro or "O estorno anterior pode ter saído: confira o extrato antes."
+        )
     estorno: dict | None = None
     if row.estoque_mov_bling_id and row.estoque_mov_revertido_at is None:
         rev = await dsr.reverse_stock_movement(session, row)
+        if rev is not None and rev.get("action") == "reverse_incerto":
+            # Pode ter saído: a linha fica "sem confirmação" e a próxima
+            # exclusão espera a pessoa conferir (senão sairia baixa 2×).
+            dsr.marcar_estorno_incerto(row, rev)
+            row.estoque_conferir_action = dsr.ESTORNO_DA_EXCLUSAO
+            await session.commit()
+            raise EstornoFalhouError(
+                f"{rev.get('message')} O lançamento NÃO foi excluído."
+            )
         if rev is not None and not rev.get("ok"):
             await session.rollback()
             raise EstornoFalhouError(

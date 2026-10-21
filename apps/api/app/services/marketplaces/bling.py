@@ -37,26 +37,47 @@ BLING_API_BASE = "https://api.bling.com.br/Api/v3"
 # Default page size for `/produtos`. Bling caps at 100.
 BLING_PRODUCTS_PAGE_SIZE = 100
 
-# Bling V3 Cloudflare gate is 3 req/s; keep one slot of headroom and cap at
-# 5 req/s globally. Limiter is shared across api/worker via Redis so parallel
-# arq jobs and webhook handlers can't burst past the cap.
-BLING_MAX_RPS = 5
+# Bling V3: 3 requisições por segundo POR CONTA, somando tudo que usa a conta
+# (developer.bling.com.br/limites — passar = 429; 300 erros em 10 s bloqueiam o
+# IP por 10 min). Até 21/10/2026 o DaVinci deixava 5/s num balde por segundo:
+# no minuto :20 (várias rotinas juntas) saíam ~5/s e o Bling recusava ~190
+# chamadas em 5 min — a entrada da devolução 297390 foi uma delas. Agora é uma
+# fila por conta no Redis (compartilhada por api e workers): uma chamada a cada
+# 1/3 s, então nunca passam 3 em nenhuma janela de 1 s, nem na virada do
+# segundo. Quem chega espera a vez (a fila tem o tamanho das tarefas que estão
+# chamando o Bling ao mesmo tempo), em vez de levar 429 e dormir 1+2+4 s.
+# 2,5 e não 3: folga para os robôs de fora do DaVinci que usam a mesma conta
+# (hermes, VPS Windows) e para a variação da rede (a vez marca a saída, não a
+# chegada ao Bling) — revisão de 21/10.
+BLING_MAX_RPS = 2.5
+# Conta principal do Bling (a integração). As contas de nota fiscal são outras
+# contas do Bling (outro limite) e usam a sua chave ("notas") no ritmo de antes
+# (5/s): o export síncrono de até 500 notas foi dimensionado para ele e passaria
+# do tempo do proxy a 2,5/s; nelas não há robô de fora dividindo a conta.
+BLING_CONTA_PRINCIPAL = "principal"
+_RPS_POR_CONTA = {BLING_CONTA_PRINCIPAL: BLING_MAX_RPS}
+_RPS_OUTRAS_CONTAS = 5.0
+_GATE_LUA = """
+local nxt = tonumber(redis.call('GET', KEYS[1]) or '0')
+local now = tonumber(ARGV[1])
+local slot = math.max(now, nxt)
+redis.call('SET', KEYS[1], string.format('%.6f', slot + tonumber(ARGV[2])), 'PX', 60000)
+return string.format('%.6f', slot)
+"""
 
 
-async def _acquire_bling_rate_slot() -> None:
-    """Token-bucket gate: consume one slot per second, sleep until one frees."""
+async def _acquire_bling_rate_slot(conta: str = BLING_CONTA_PRINCIPAL) -> None:
+    """Espera a vez desta chamada na fila da conta: a vez é a hora livre mais
+    cedo, espaçada 1/BLING_MAX_RPS s da anterior (reserva atômica no Redis)."""
     from app.redis_client import redis as _redis
-    while True:
-        bucket = int(time.time())
-        key = f"bling:rate:{bucket}"
-        n = await _redis.incr(key)
-        if n == 1:
-            await _redis.expire(key, 2)
-        if n <= BLING_MAX_RPS:
-            return
-        # Over cap for this second — wait until the next one opens.
-        wait = max(0.0, (bucket + 1) - time.time()) + 0.01
-        await asyncio.sleep(wait)
+
+    passo = f"{1 / _RPS_POR_CONTA.get(conta, _RPS_OUTRAS_CONTAS):.6f}"
+    vez = float(
+        await _redis.eval(_GATE_LUA, 1, f"bling:rate:next:{conta}", f"{time.time():.6f}", passo)
+    )
+    espera = vez - time.time()
+    if espera > 0:
+        await asyncio.sleep(espera)
 
 
 class BlingCloudflareError(RuntimeError):
