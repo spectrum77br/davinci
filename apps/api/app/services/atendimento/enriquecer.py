@@ -44,6 +44,16 @@ cartão (que vai para a tela), com `buscada_em`: nenhuma ida nova à loja. A
 busca SOB DEMANDA da ficha (`ficha_loja.py`, na hora da sugestão) grava na
 mesma chave — um aproveita a ida do outro.
 
+Variações do anúncio (20/10/2026, `variacoes.py`): o `get_model_list` que a
+Shopee já pedia para o preço do anúncio com variação (e, COM a chave do
+agente no servidor, sempre que ele tem variação — revisão de 20/10/2026: sem
+o agente ninguém lê as variações, e o sync fica com as idas de antes) e as
+`variations` do `/items` do ML vão para a chave das variações
+(`variacoes.chave_variacoes`, 30 min): nome, SKU, `variation_id` e estoque
+da loja (anúncio fora do ar: esgotado) — só o agente lê, e só
+disponível/esgotado. Anúncio da Shopee sem variação grava a lista vazia (a
+sugestão não vai à loja por ela).
+
 Índice de pedidos do comprador: a Shopee não filtra pedido por comprador, e o
 cartão "Cliente" precisa do histórico de compra. Cada retrato que dá certo
 grava a linha do pedido (`indice.registrar_pedido`) com o id do comprador na
@@ -79,6 +89,7 @@ from app.models import (
 from app.redis_client import redis
 from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import gravar
+from app.services.atendimento import variacoes as variacoes_svc
 from app.services.atendimento.constantes import CANAL_PERGUNTA
 
 logger = structlog.get_logger()
@@ -568,21 +579,28 @@ def _precos(infos: list[dict]) -> tuple[float | None, float | None]:
     return preco, original
 
 
-async def _produtos_shopee(cliente: Any, ids: list[str]) -> tuple[dict[str, dict], dict[str, dict]]:
-    """(cartões, fichas cruas) da Shopee: `get_item_base_info` (foto, título;
-    descrição e atributos para a ficha da IA) e, no anúncio com variação,
-    `get_model_list` (o preço). Levanta se a 1ª chamada falhar."""
+async def _produtos_shopee(
+    cliente: Any, ids: list[str], *, ler_variacoes: bool = False
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, list[dict]]]:
+    """(cartões, fichas cruas, variações) da Shopee: `get_item_base_info`
+    (foto, título; descrição e atributos para a ficha da IA) e, no anúncio
+    com variação, `get_model_list` (o preço, quando falta, e — com
+    `ler_variacoes`, a loja com o agente — as variações da IA). Levanta se a
+    1ª chamada falhar."""
     itens = await cliente.get_item_base_info([int(i) for i in ids])
     shop_id = _inteiro(getattr(cliente, "shop_id", None))
     saida: dict[str, dict] = {}
     fichas: dict[str, dict] = {}
+    variacoes: dict[str, list[dict]] = {}
     for it in _lista(itens):
         item_id = _texto(it.get("item_id"))
         if item_id is None or item_id not in ids:
             continue
         fotos = [u for u in (_dict(it.get("image")).get("image_url_list") or []) if _texto(u)]
         preco, original = _precos(_lista(it.get("price_info")))
-        if preco is None and it.get("has_model"):
+        if it.get("has_model") is False:
+            variacoes[item_id] = []
+        elif it.get("has_model") and (preco is None or ler_variacoes):
             try:
                 modelos = await cliente.get_model_list(int(item_id))
             except Exception as exc:  # noqa: BLE001 — sem preço, o cartão ainda sai
@@ -592,12 +610,16 @@ async def _produtos_shopee(cliente: Any, ids: list[str]) -> tuple[dict[str, dict
                     erro=_erro_curto(exc),
                 )
             else:
-                infos = [
-                    info
-                    for m in _lista(_dict(modelos).get("model"))
-                    for info in _lista(m.get("price_info"))
-                ]
-                preco, original = _precos(infos)
+                # O `item_status` do anúncio (o `get_model_list` não traz):
+                # fora do ar, tudo esgotado (`variacoes.da_shopee`).
+                variacoes[item_id] = variacoes_svc.da_shopee(modelos, it.get("item_status"))
+                if preco is None:
+                    infos = [
+                        info
+                        for m in _lista(_dict(modelos).get("model"))
+                        for info in _lista(m.get("price_info"))
+                    ]
+                    preco, original = _precos(infos)
         saida[item_id] = {
             **cartao_produto_vazio(item_id),
             "titulo": _texto(it.get("item_name")),
@@ -609,7 +631,37 @@ async def _produtos_shopee(cliente: Any, ids: list[str]) -> tuple[dict[str, dict
         bruta = ficha_svc.ficha_bruta_shopee(it)
         if bruta is not None:
             fichas[item_id] = bruta
-    return saida, fichas
+    return saida, fichas, variacoes
+
+
+def _com_agente() -> bool:
+    """A chave do agente (Claude) está no servidor? Só ele lê as variações."""
+    from app.config import get_settings
+    from app.services.atendimento import agente_config
+
+    return agente_config.chave_do_agente(get_settings()) is not None
+
+
+async def _loja_com_agente(session: AsyncSession, integration: Integration | None) -> bool:
+    """A loja tem algum canal com o agente ligado (e a chave no servidor)? Ajuste
+    r3: só ela ganha o `get_model_list` a mais no sync (as lojas sem o agente
+    ficam como eram). Uma consulta por ida à loja; sem a chave, nenhuma."""
+    if integration is None or not _com_agente():
+        return False
+    try:
+        return bool(
+            await session.scalar(
+                select(AtendimentoCanal.id)
+                .where(
+                    AtendimentoCanal.integration_id == integration.id,
+                    AtendimentoCanal.agente.is_(True),
+                )
+                .limit(1)
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — sem saber, como sem o agente
+        logger.info("atendimento_enriquecer_canal_indisponivel", erro=type(exc).__name__)
+        return False
 
 
 def _cartao_ml(body: dict) -> dict | None:
@@ -630,11 +682,15 @@ def _cartao_ml(body: dict) -> dict | None:
     }
 
 
-async def _produtos_ml(cliente: Any, ids: list[str]) -> tuple[dict[str, dict], dict[str, dict]]:
-    """(cartões, fichas cruas) do ML numa ida só ao `/items?ids=` (o cliente
-    divide de 20 em 20); a ficha = os `attributes` do anúncio."""
+async def _produtos_ml(
+    cliente: Any, ids: list[str]
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, list[dict]]]:
+    """(cartões, fichas cruas, variações) do ML numa ida só ao `/items?ids=`
+    (o cliente divide de 20 em 20); a ficha = os `attributes` do anúncio, as
+    variações = as `variations`."""
     saida: dict[str, dict] = {}
     fichas: dict[str, dict] = {}
+    variacoes: dict[str, list[dict]] = {}
     for body in _lista(await cliente.itens(ids)):
         cartao = _cartao_ml(body)
         if cartao is not None and cartao["item_id"] in ids:
@@ -642,7 +698,8 @@ async def _produtos_ml(cliente: Any, ids: list[str]) -> tuple[dict[str, dict], d
             bruta = ficha_svc.ficha_bruta_ml(body)
             if bruta is not None:
                 fichas[cartao["item_id"]] = bruta
-    return saida, fichas
+            variacoes[cartao["item_id"]] = variacoes_svc.da_ml(body)
+    return saida, fichas, variacoes
 
 
 def _titulo_base(titulos: list[str]) -> str | None:
@@ -739,6 +796,7 @@ async def _cartoes(
 
     da_loja: dict[str, dict] = {}
     fichas: dict[str, dict] = {}
+    variacoes: dict[str, list[dict]] = {}
     pode = (
         faltam
         and cliente is not None
@@ -749,9 +807,11 @@ async def _cartoes(
         resolvidos.update(faltam)
         try:
             if plataforma == "shopee":
-                da_loja, fichas = await _produtos_shopee(cliente, faltam)
+                da_loja, fichas, variacoes = await _produtos_shopee(
+                    cliente, faltam, ler_variacoes=await _loja_com_agente(session, integration)
+                )
             else:
-                da_loja, fichas = await _produtos_ml(cliente, faltam)
+                da_loja, fichas, variacoes = await _produtos_ml(cliente, faltam)
         except Exception as exc:  # noqa: BLE001 — falha da loja nunca derruba o sync
             logger.info(
                 "atendimento_enriquecer_produto_falhou",
@@ -759,7 +819,7 @@ async def _cartoes(
                 itens=faltam[:5],
                 erro=_erro_curto(exc),
             )
-            da_loja, fichas = {}, {}
+            da_loja, fichas, variacoes = {}, {}, {}
             falha = _tipo_falha(exc)
 
     for item_id in faltam:
@@ -782,6 +842,13 @@ async def _cartoes(
             ficha_svc.chave_ficha(plataforma, integ_id, item_id),
             {**bruta, "buscada_em": buscada_em},
             ficha_svc.CACHE_FICHA_S,
+        )
+    # As variações da IA (`variacoes.py`): da MESMA resposta, 30 min.
+    for item_id, lista in variacoes.items():
+        await _cache_gravar(
+            variacoes_svc.chave_variacoes(plataforma, integ_id, item_id),
+            {"variacoes": lista, "buscada_em": buscada_em},
+            variacoes_svc.CACHE_VARIACOES_S,
         )
     return cartoes, resolvidos, falha
 

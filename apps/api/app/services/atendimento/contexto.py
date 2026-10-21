@@ -51,6 +51,18 @@ cinco conversas. É texto do comprador: vai para a TELA, nunca para o modelo
 `enviado_em`, `data_envio` e `nota_fiscal` vão além do mínimo da spec: são
 as lacunas `{data_envio}` e `{nf_numero}` da IA.
 
+ENTREGUE (agente, 20/10/2026 — "correção do entregue"): o `entregue_em` só
+existe quando a transportadora mandou a data; a Shopee e o ML dizem "Pedido
+entregue" / "Entregue → Cidade/UF" só na localização, e o FATO da IA
+(`bool(entregue_em)`) dizia "não entregue" em 2.776 de 3.885 linhas da
+Shopee em 30 dias. `entregue_da_logistica(ctx["logistica"])` é a régua
+corrigida: a data OU o `status` (que traz a localização quando não há data
+nem ocorrência) que COMEÇA com "pedido entregue" ou "entregue"
+(`localizacao_diz_entregue`), menos a volta ao remetente, a devolução, o "não
+entregue" e o "Entregue à agência" (o `dropped_off` do ML: a LOJA entregou na
+agência, o comprador ainda não recebeu). Só leitura, e o dicionário não muda
+de forma (a tela e os testes leem exatamente estas chaves).
+
 `pedido.ag_cancelamento` (item 4, 02/10/2026) = o PORQUÊ do pedido em
 "Aguardando Cancelamento" (`ag_cancelamento.classificar`, com os fatos da NF
 de `etiqueta_fatos.pedido_bling` e o status na plataforma pelo retrato da
@@ -118,6 +130,7 @@ from app.models import (
 )
 from app.services import garantia as garantia_svc
 from app.services.atendimento import ag_cancelamento
+from app.services.atendimento.constantes import normalizar_inicio
 from app.services.bling_situacoes import SITUACAO_AGUARDANDO_CANCELAMENTO_STR
 from app.services.chamados import lookup_pedido
 
@@ -298,6 +311,40 @@ def _status_logistica(lg: Logistica) -> str | None:
     if lg.rastreio:
         return "postado"
     return None
+
+
+_RX_LOCALIZACAO_ENTREGUE = re.compile(r"^(?:pedido\s+)?entregue\b")
+# Começa com "entregue" e não é entrega ao comprador: a volta ao remetente, a
+# devolução, a negação e o "Entregue à agência" (a loja postou).
+_NAO_E_ENTREGA = ("remetente", "devolvid", "nao entregue", "agencia")
+
+
+def localizacao_diz_entregue(localizacao: str | None) -> bool:
+    """A localização da transportadora diz que o pedido foi entregue ao comprador. PURA.
+
+    "Pedido entregue", "Entregue", "Entregue → São Paulo/SP" → sim;
+    "Entregue à agência → Piracicaba/SP", "Pedido entregue ao remetente",
+    "Pedido será devolvido", "Devolução não entregue" → não.
+    """
+    plano = normalizar_inicio(localizacao)
+    if not _RX_LOCALIZACAO_ENTREGUE.match(plano):
+        return False
+    return not any(trecho in plano for trecho in _NAO_E_ENTREGA)
+
+
+def entregue_da_logistica(logistica: dict | None) -> bool:
+    """O pedido foi entregue? O bloco `logistica` do contexto, com a correção. PURA.
+
+    A data da transportadora (`entregue_em`) OU o `status` — que é a
+    localização quando não há data nem ocorrência — dizendo entregue. Com
+    ocorrência na transportadora, só a data vale (o lado seguro).
+    """
+    if not isinstance(logistica, dict):
+        return False
+    if logistica.get("entregue_em"):
+        return True
+    status = logistica.get("status")
+    return isinstance(status, str) and localizacao_diz_entregue(status)
 
 
 async def _logistica(

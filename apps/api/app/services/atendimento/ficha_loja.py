@@ -57,6 +57,21 @@ FALHA NUNCA DERRUBA A SUGESTÃO: erro, tempo estourado e loja recusando viram
 "sem ficha" (como antes) e log só com a plataforma e o código. SÓ LEITURA:
 nada aqui escreve na loja nem marca conversa como lida. Nada do comprador
 vai para a loja nem para o log.
+
+AS VARIAÇÕES (20/10/2026, `variacoes.py`, SÓ para o agente). A mesma
+resposta da busca da ficha já traz as variações na TikTok (`skus`) e no ML
+(`variations`), e a da Shopee diz se o anúncio tem variação (`has_model`):
+vão para a chave das variações (`variacoes.chave_variacoes`, 30 min), sem
+ida nova — a ficha devolvida é a mesma de antes. A ficha fica 3 dias no
+cache e o estoque muda: sem a lista da loja, o agente vai SÓ pelas variações
+(`variacoes_da_loja`: Shopee `get_item_base_info`, pelo `item_status`, e
+`get_model_list`; TikTok o produto; ML o `/items/{id}` desta conta) — com as
+mesmas travas da ficha, mas com cotas e espera PRÓPRIAS (revisão de
+20/10/2026: a ida pelas variações não tira vez da busca da ficha do legado):
+`MAX_BUSCAS_VARIACOES_POR_SUGESTAO` por sugestão,
+`MAX_BUSCAS_VARIACOES_POR_RODADA` e `MAX_ESPERA_VARIACOES_POR_RODADA_S` na
+rodada, `MAX_BUSCAS_VARIACOES_POR_MINUTO` por loja (chave própria) e cache
+negativo próprio (`chave_sem_variacoes`).
 """
 
 from __future__ import annotations
@@ -84,6 +99,7 @@ from app.models.enums import IntegrationPlatform
 from app.redis_client import redis
 from app.services.atendimento import clientes
 from app.services.atendimento import ficha as ficha_svc
+from app.services.atendimento import variacoes as variacoes_svc
 
 logger = structlog.get_logger()
 
@@ -95,6 +111,12 @@ logger = structlog.get_logger()
 TEMPO_MAX_BUSCA_S = 6.0
 # O mesmo teto de anúncios da ficha (`ficha.MAX_ANUNCIOS_FICHA`).
 MAX_BUSCAS_POR_SUGESTAO = 2
+# A ida SÓ pelas variações (a ficha estava no cache; a lista da loja, não):
+# cotas PRÓPRIAS, à parte das da ficha (o legado não perde vez).
+MAX_BUSCAS_VARIACOES_POR_SUGESTAO = 2
+MAX_BUSCAS_VARIACOES_POR_RODADA = 6
+MAX_BUSCAS_VARIACOES_POR_MINUTO = 6
+MAX_ESPERA_VARIACOES_POR_RODADA_S = 15.0
 # Por loja: numa rodada do cron da IA, e por minuto (qualquer caminho).
 MAX_BUSCAS_POR_RODADA = 10
 MAX_BUSCAS_POR_MINUTO = 10
@@ -163,8 +185,21 @@ def _chave_andamento(plataforma: str, integration_id: Any, item_id: str) -> str:
     return f"atd:ficha_busca:{plataforma}:{integration_id}:{item_id}"
 
 
+def chave_sem_variacoes(plataforma: str, integration_id: Any, item_id: str) -> str:
+    """O cache negativo da ida só pelas variações (à parte do da ficha)."""
+    return f"atd:variacoes_sem:{plataforma}:{integration_id}:{item_id}"
+
+
+def _chave_andamento_variacoes(plataforma: str, integration_id: Any, item_id: str) -> str:
+    return f"atd:variacoes_busca:{plataforma}:{integration_id}:{item_id}"
+
+
 def _chave_minuto(integration_id: Any) -> str:
     return f"atd:ficha_limite:{integration_id}"
+
+
+def _chave_minuto_variacoes(integration_id: Any) -> str:
+    return f"atd:variacoes_limite:{integration_id}"
 
 
 # ── A cota da rodada e a da sugestão ──────────────────────────────────────
@@ -172,20 +207,47 @@ def _chave_minuto(integration_id: Any) -> str:
 
 @dataclass
 class _Rodada:
-    """A rodada do cron em curso: as idas por loja e a espera somada (segundos)."""
+    """A rodada do cron em curso: as idas por loja e a espera somada (segundos).
+
+    As idas só pelas variações têm a conta delas (`*_variacoes`).
+    """
 
     por_loja: dict[str, int] = field(default_factory=dict)
     espera_s: float = 0.0
+    por_loja_variacoes: dict[str, int] = field(default_factory=dict)
+    espera_variacoes_s: float = 0.0
 
 
 # None = fora de rodada (o "Sugerir" da tela).
 _RODADA: ContextVar[_Rodada | None] = ContextVar("atd_ficha_rodada", default=None)
+# A cota do AGENTE na mesma rodada (revisão de 20/10/2026): as idas dele à
+# loja contam aqui, e a do legado fica intocada ("o legado não perde vez").
+_RODADA_DO_AGENTE: ContextVar[_Rodada | None] = ContextVar("atd_ficha_rodada_agente", default=None)
 
 
 @contextmanager
 def rodada() -> Iterator[None]:
     """A rodada do cron da IA (`ia.gerar_pendentes`): as cotas de idas e de espera."""
     token = _RODADA.set(_Rodada())
+    token_agente = _RODADA_DO_AGENTE.set(_Rodada())
+    try:
+        yield
+    finally:
+        _RODADA_DO_AGENTE.reset(token_agente)
+        _RODADA.reset(token)
+
+
+@contextmanager
+def cota_do_agente() -> Iterator[None]:
+    """Dentro da rodada: as idas do agente contam na cota DELE (`_RODADA_DO_AGENTE`).
+
+    Fora da rodada (o "Sugerir"), nada muda.
+    """
+    do_agente = _RODADA_DO_AGENTE.get()
+    if do_agente is None or _RODADA.get() is None:
+        yield
+        return
+    token = _RODADA.set(do_agente)
     try:
         yield
     finally:
@@ -199,6 +261,7 @@ class Busca:
     integration_id: UUID | None
     canal_id: UUID | None
     restam: int = MAX_BUSCAS_POR_SUGESTAO
+    restam_variacoes: int = MAX_BUSCAS_VARIACOES_POR_SUGESTAO
 
 
 def falta_descricao(plataforma: IntegrationPlatform, fresca: dict) -> bool:
@@ -258,12 +321,21 @@ def _falha(exc: BaseException) -> tuple[str, str]:
 # ── A ida à loja (uma por plataforma) ─────────────────────────────────────
 
 
+# A chave da resposta da loja com as variações que vieram junto (`_buscar_e_guardar`
+# a tira antes de gravar a ficha e a grava na chave das variações).
+_VARIACOES_JUNTO = "_variacoes"
+
+
 async def _shopee(cliente: Any, item_id: str, fresca: dict | None) -> dict | None:
     if not item_id.isdigit():
         return None
     for it in await cliente.get_item_base_info([int(item_id)]):
         if _texto(_dict(it).get("item_id")) == item_id:
-            return ficha_svc.ficha_bruta_shopee(it)
+            bruta = ficha_svc.ficha_bruta_shopee(it)
+            if bruta is not None and _dict(it).get("has_model") is False:
+                # Sem variação: a lista vazia poupa o `get_model_list`.
+                return {**bruta, _VARIACOES_JUNTO: []}
+            return bruta
     return None
 
 
@@ -283,7 +355,9 @@ async def _ml(cliente: Any, item_id: str, fresca: dict | None) -> dict | None:
         return None
     descricao = await cliente.descricao_do_item(item_id)
     bruta = ficha_svc.ficha_bruta_ml(body, descricao)
-    return {**bruta, "descricao_buscada": True} if bruta is not None else None
+    if bruta is None:
+        return None
+    return {**bruta, "descricao_buscada": True, _VARIACOES_JUNTO: variacoes_svc.da_ml(body)}
 
 
 async def _tiktok(cliente: Any, item_id: str, fresca: dict | None) -> dict | None:
@@ -293,7 +367,10 @@ async def _tiktok(cliente: Any, item_id: str, fresca: dict | None) -> dict | Non
         data = _dict(resp.get("data"))
         if _texto(data.get("id")) not in (None, item_id):
             return None
-        return ficha_svc.ficha_bruta_tiktok(data)
+        bruta = ficha_svc.ficha_bruta_tiktok(data)
+        if bruta is None:
+            return None
+        return {**bruta, _VARIACOES_JUNTO: variacoes_svc.da_tiktok(data)}
     nao = codigo != _TIKTOK_AUTENTICACAO and (
         codigo in _TIKTOK_SEM_ACESSO
         or bool(_TIKTOK_NAO_EXISTE.search(str(resp.get("message") or "")))
@@ -325,24 +402,34 @@ async def _soltar(chave: str) -> None:
         pass
 
 
-async def _pegar_a_vez(plataforma: str, integration_id: Any, item_id: str) -> str | None:
+async def _pegar_a_vez(
+    plataforma: str,
+    integration_id: Any,
+    item_id: str,
+    andamento: str | None = None,
+    *,
+    so_variacoes: bool = False,
+) -> str | None:
     """A vez de buscar este anúncio → a chave de "em andamento" (None = não vá agora).
 
     Não vai: outra busca do mesmo anúncio em andamento (SET NX), a loja já
-    passou do teto do minuto, ou o Redis fora do ar.
+    passou do teto do minuto, ou o Redis fora do ar. `andamento` = a chave
+    da ida só pelas variações (a da ficha é a padrão); `so_variacoes` = o
+    minuto delas (chave e teto próprios).
     """
-    andamento = _chave_andamento(plataforma, integration_id, item_id)
+    andamento = andamento or _chave_andamento(plataforma, integration_id, item_id)
+    teto = MAX_BUSCAS_VARIACOES_POR_MINUTO if so_variacoes else MAX_BUSCAS_POR_MINUTO
     try:
         if not await redis.set(andamento, "1", nx=True, ex=EM_ANDAMENTO_TTL_S):
             return None
-        limite = _chave_minuto(integration_id)
+        limite = (_chave_minuto_variacoes if so_variacoes else _chave_minuto)(integration_id)
         feitas = int(await redis.incr(limite))
         if feitas == 1 or await redis.ttl(limite) < 0:
             await redis.expire(limite, JANELA_MINUTO_S)
     except Exception as exc:  # noqa: BLE001
         logger.info("atendimento_ficha_loja_cache_indisponivel", erro=type(exc).__name__)
         return None
-    if feitas > MAX_BUSCAS_POR_MINUTO:
+    if feitas > teto:
         logger.info("atendimento_ficha_loja_sem_cota", plataforma=plataforma, cota="minuto")
         await _soltar(andamento)
         return None
@@ -394,6 +481,14 @@ async def _buscar_e_guardar(
             logger.info("atendimento_ficha_loja", plataforma=plat, resultado=RESULTADO_SEM_FICHA)
             await _gravar(negativa, RESULTADO_SEM_FICHA, CACHE_SEM_FICHA_S)
             return None
+        bruta = dict(bruta)
+        junto = bruta.pop(_VARIACOES_JUNTO, None)
+        if isinstance(junto, list):
+            await _gravar(
+                variacoes_svc.chave_variacoes(plat, integration_id, item_id),
+                variacoes_svc.para_o_cache(junto, _agora()),
+                variacoes_svc.CACHE_VARIACOES_S,
+            )
         chave = ficha_svc.chave_ficha(plat, integration_id, item_id)
         if fresca is not None:
             await _guardar_completa(chave, bruta)
@@ -415,6 +510,106 @@ async def _canal_desligado(session: AsyncSession, canal_id: UUID | None) -> bool
     return status == _CANAL_DESLIGADO
 
 
+async def _ir_a_loja(
+    session: AsyncSession,
+    busca: Busca | None,
+    plataforma: IntegrationPlatform,
+    item_id: str,
+    *,
+    so_variacoes: bool,
+    chave_negativa: Callable[[str, Any, str], str],
+    chave_andamento: Callable[[str, Any, str], str],
+    ir: Callable[[Any, UUID, str], Awaitable[Any]],
+) -> Any:
+    """As travas, as cotas e a espera de UMA ida à loja (a ficha ou só as variações).
+
+    `ir(cliente, integration_id, andamento)` = a busca que grava o cache e
+    solta a vez (`_buscar_e_guardar`, `_buscar_e_guardar_variacoes`): roda
+    numa tarefa BLINDADA — estourou o tempo, devolve None e ela termina em
+    segundo plano. As travas estão no topo. Problema da loja, do cliente ou
+    do Redis é None (não levanta); erro de BANCO sobe.
+    """
+    if busca is None or busca.integration_id is None or plataforma not in PLATAFORMAS_COM_BUSCA:
+        return None
+    if not _ID_VALIDO.match(item_id or ""):
+        return None
+    restam = busca.restam_variacoes if so_variacoes else busca.restam
+    if not get_settings().atendimento_leitura_ativa or restam <= 0:
+        return None
+    integ_id = busca.integration_id
+    plat = plataforma.value
+    evento = "atendimento_variacoes_loja" if so_variacoes else "atendimento_ficha_loja"
+    try:
+        if await redis.get(chave_negativa(plat, integ_id, item_id)):
+            return None
+    except Exception as exc:  # noqa: BLE001 — sem Redis não há cache nem trava: não vai
+        logger.info("atendimento_ficha_loja_cache_indisponivel", erro=type(exc).__name__)
+        return None
+    da_rodada = _RODADA.get()
+    if da_rodada is not None:
+        espera, teto_espera = (
+            (da_rodada.espera_variacoes_s, MAX_ESPERA_VARIACOES_POR_RODADA_S)
+            if so_variacoes
+            else (da_rodada.espera_s, MAX_ESPERA_POR_RODADA_S)
+        )
+        por_loja, teto_rodada = (
+            (da_rodada.por_loja_variacoes, MAX_BUSCAS_VARIACOES_POR_RODADA)
+            if so_variacoes
+            else (da_rodada.por_loja, MAX_BUSCAS_POR_RODADA)
+        )
+        if espera >= teto_espera:
+            logger.info(f"{evento}_sem_cota", plataforma=plat, cota="espera")
+            return None
+        if por_loja.get(str(integ_id), 0) >= teto_rodada:
+            logger.info(f"{evento}_sem_cota", plataforma=plat, cota="rodada")
+            return None
+    integration = await session.get(Integration, integ_id)
+    if (
+        integration is None
+        or integration.archived_at is not None
+        or integration.platform != plataforma
+        or await _canal_desligado(session, busca.canal_id)
+    ):
+        return None
+    try:
+        # O MESMO cliente do sync e do enriquecimento: credencial DESTA loja,
+        # renovação pela trava da integração, token novo gravado na hora.
+        cliente = await clientes.cliente_da_integracao(integration)
+    except Exception as exc:  # noqa: BLE001 — credencial ilegível: sem ficha
+        logger.info(f"{evento}_falhou", plataforma=plat, codigo=type(exc).__name__)
+        return None
+    andamento = await _pegar_a_vez(
+        plat, integ_id, item_id, chave_andamento(plat, integ_id, item_id), so_variacoes=so_variacoes
+    )
+    if andamento is None:
+        return None
+    if so_variacoes:
+        busca.restam_variacoes -= 1
+    else:
+        busca.restam -= 1
+    if da_rodada is not None:
+        conta = da_rodada.por_loja_variacoes if so_variacoes else da_rodada.por_loja
+        conta[str(integ_id)] = conta.get(str(integ_id), 0) + 1
+    tarefa = asyncio.ensure_future(ir(cliente, integ_id, andamento))
+    _EM_SEGUNDO_PLANO.add(tarefa)
+    tarefa.add_done_callback(_EM_SEGUNDO_PLANO.discard)
+    inicio = time.monotonic()
+    try:
+        return await asyncio.wait_for(asyncio.shield(tarefa), TEMPO_MAX_BUSCA_S)
+    except TimeoutError:
+        logger.info(f"{evento}_demorou", plataforma=plat)
+        return None
+    except Exception as exc:  # noqa: BLE001 — a busca não levanta; por garantia
+        logger.info(f"{evento}_falhou", plataforma=plat, codigo=type(exc).__name__)
+        return None
+    finally:
+        if da_rodada is not None:
+            if so_variacoes:
+                da_rodada.espera_variacoes_s += time.monotonic() - inicio
+            else:
+                da_rodada.espera_s += time.monotonic() - inicio
+
+
 async def ficha_da_loja(
     session: AsyncSession,
     busca: Busca | None,
@@ -431,63 +626,150 @@ async def ficha_da_loja(
     levanta); erro de BANCO sobe, para o `_seguro` da IA desfazer o SAVEPOINT
     (engolido aqui, deixaria a transação abortada para o resto da sugestão).
     """
-    if busca is None or busca.integration_id is None or plataforma not in PLATAFORMAS_COM_BUSCA:
-        return None
-    if not _ID_VALIDO.match(item_id or ""):
-        return None
-    if not get_settings().atendimento_leitura_ativa or busca.restam <= 0:
-        return None
-    integ_id = busca.integration_id
-    plat = plataforma.value
-    try:
-        if await redis.get(_chave_negativa(plat, integ_id, item_id, fresca)):
-            return None
-    except Exception as exc:  # noqa: BLE001 — sem Redis não há cache nem trava: não vai
-        logger.info("atendimento_ficha_loja_cache_indisponivel", erro=type(exc).__name__)
-        return None
-    da_rodada = _RODADA.get()
-    if da_rodada is not None:
-        if da_rodada.espera_s >= MAX_ESPERA_POR_RODADA_S:
-            logger.info("atendimento_ficha_loja_sem_cota", plataforma=plat, cota="espera")
-            return None
-        if da_rodada.por_loja.get(str(integ_id), 0) >= MAX_BUSCAS_POR_RODADA:
-            logger.info("atendimento_ficha_loja_sem_cota", plataforma=plat, cota="rodada")
-            return None
-    integration = await session.get(Integration, integ_id)
-    if (
-        integration is None
-        or integration.archived_at is not None
-        or integration.platform != plataforma
-        or await _canal_desligado(session, busca.canal_id)
-    ):
-        return None
-    try:
-        # O MESMO cliente do sync e do enriquecimento: credencial DESTA loja,
-        # renovação pela trava da integração, token novo gravado na hora.
-        cliente = await clientes.cliente_da_integracao(integration)
-    except Exception as exc:  # noqa: BLE001 — credencial ilegível: sem ficha
-        logger.info("atendimento_ficha_loja_falhou", plataforma=plat, codigo=type(exc).__name__)
-        return None
-    andamento = await _pegar_a_vez(plat, integ_id, item_id)
-    if andamento is None:
-        return None
-    busca.restam -= 1
-    if da_rodada is not None:
-        da_rodada.por_loja[str(integ_id)] = da_rodada.por_loja.get(str(integ_id), 0) + 1
-    tarefa = asyncio.ensure_future(
-        _buscar_e_guardar(cliente, plataforma, integ_id, item_id, fresca, andamento)
+
+    def _negativa(plat: str, integ_id: Any, item: str) -> str:
+        return _chave_negativa(plat, integ_id, item, fresca)
+
+    def _ir(cliente: Any, integ_id: UUID, andamento: str) -> Awaitable[dict | None]:
+        return _buscar_e_guardar(cliente, plataforma, integ_id, item_id, fresca, andamento)
+
+    return await _ir_a_loja(
+        session,
+        busca,
+        plataforma,
+        item_id,
+        so_variacoes=False,
+        chave_negativa=_negativa,
+        chave_andamento=_chave_andamento,
+        ir=_ir,
     )
-    _EM_SEGUNDO_PLANO.add(tarefa)
-    tarefa.add_done_callback(_EM_SEGUNDO_PLANO.discard)
-    inicio = time.monotonic()
+
+
+# ── Só as variações (20/10/2026) ──────────────────────────────────────────
+
+
+async def _variacoes_shopee(cliente: Any, item_id: str) -> list[dict] | None:
+    if not item_id.isdigit():
+        return None
+    # O `get_model_list` não diz se o anúncio está no ar (revisão de
+    # 20/10/2026): o `item_status` vem do `get_item_base_info`, na mesma ida.
+    base = next(
+        (
+            it
+            for it in await cliente.get_item_base_info([int(item_id)])
+            if _texto(_dict(it).get("item_id")) == item_id
+        ),
+        None,
+    )
+    if base is None:
+        return None
+    if base.get("has_model") is False:
+        return []
+    return variacoes_svc.da_shopee(
+        await cliente.get_model_list(int(item_id)), base.get("item_status")
+    )
+
+
+async def _variacoes_ml(cliente: Any, item_id: str) -> list[dict] | None:
+    # O `/items` do ML é público: só vale anúncio DESTA conta (como a ficha).
+    conta = _texto(_dict(getattr(cliente, "creds", None)).get("user_id"))
+    if conta is None:
+        return None
+    body = _dict(await cliente.get_item(item_id))
+    if _texto(body.get("id")) != item_id or _texto(body.get("seller_id")) != conta:
+        return None
+    return variacoes_svc.da_ml(body)
+
+
+async def _variacoes_tiktok(cliente: Any, item_id: str) -> list[dict] | None:
+    resp = _dict(await cliente.produto_bruto(item_id))
+    codigo = resp.get("code")
+    if codigo == 0:
+        data = _dict(resp.get("data"))
+        if _texto(data.get("id")) not in (None, item_id):
+            return None
+        return variacoes_svc.da_tiktok(data)
+    nao = codigo != _TIKTOK_AUTENTICACAO and (
+        codigo in _TIKTOK_SEM_ACESSO
+        or bool(_TIKTOK_NAO_EXISTE.search(str(resp.get("message") or "")))
+    )
+    raise _LojaRecusou(f"tiktok {codigo}", nao_encontrado=nao)
+
+
+_BUSCAS_VARIACOES: dict[IntegrationPlatform, Callable[[Any, str], Awaitable[list[dict] | None]]] = {
+    IntegrationPlatform.SHOPEE: _variacoes_shopee,
+    IntegrationPlatform.ML: _variacoes_ml,
+    IntegrationPlatform.TIKTOK: _variacoes_tiktok,
+}
+
+
+async def _buscar_e_guardar_variacoes(
+    cliente: Any,
+    plataforma: IntegrationPlatform,
+    integration_id: UUID,
+    item_id: str,
+    andamento: str,
+) -> list[dict] | None:
+    """Vai à loja só pelas variações e grava o cache (também em segundo plano)."""
+    plat = plataforma.value
+    negativa = chave_sem_variacoes(plat, integration_id, item_id)
     try:
-        return await asyncio.wait_for(asyncio.shield(tarefa), TEMPO_MAX_BUSCA_S)
-    except TimeoutError:
-        logger.info("atendimento_ficha_loja_demorou", plataforma=plat)
-        return None
-    except Exception as exc:  # noqa: BLE001 — `_buscar_e_guardar` não levanta; por garantia
-        logger.info("atendimento_ficha_loja_falhou", plataforma=plat, codigo=type(exc).__name__)
-        return None
+        try:
+            lista = await _BUSCAS_VARIACOES[plataforma](cliente, item_id)
+        except Exception as exc:  # noqa: BLE001 — falha da loja: fica com os vínculos
+            resultado, codigo = _falha(exc)
+            logger.info(
+                "atendimento_variacoes_loja_falhou",
+                plataforma=plat,
+                resultado=resultado,
+                codigo=codigo,
+            )
+            await _gravar(
+                negativa,
+                resultado,
+                CACHE_SEM_FICHA_S if resultado == RESULTADO_NAO_ENCONTRADO else CACHE_FALHA_S,
+            )
+            return None
+        if lista is None:
+            logger.info(
+                "atendimento_variacoes_loja", plataforma=plat, resultado=RESULTADO_NAO_ENCONTRADO
+            )
+            await _gravar(negativa, RESULTADO_NAO_ENCONTRADO, CACHE_SEM_FICHA_S)
+            return None
+        await _gravar(
+            variacoes_svc.chave_variacoes(plat, integration_id, item_id),
+            variacoes_svc.para_o_cache(lista, _agora()),
+            variacoes_svc.CACHE_VARIACOES_S,
+        )
+        logger.info("atendimento_variacoes_loja", plataforma=plat, resultado=RESULTADO_OK)
+        return lista
     finally:
-        if da_rodada is not None:
-            da_rodada.espera_s += time.monotonic() - inicio
+        await _soltar(andamento)
+
+
+async def variacoes_da_loja(
+    session: AsyncSession,
+    busca: Busca | None,
+    plataforma: IntegrationPlatform,
+    item_id: str,
+) -> list[dict] | None:
+    """As variações do anúncio direto da loja (`variacoes.da_*`) — ou None.
+
+    As MESMAS travas da ficha (`_ir_a_loja`), com cotas próprias (por
+    sugestão `Busca.restam_variacoes`, por rodada, por minuto e a espera) e
+    o cache negativo próprio.
+    """
+
+    def _ir(cliente: Any, integ_id: UUID, andamento: str) -> Awaitable[list[dict] | None]:
+        return _buscar_e_guardar_variacoes(cliente, plataforma, integ_id, item_id, andamento)
+
+    return await _ir_a_loja(
+        session,
+        busca,
+        plataforma,
+        item_id,
+        so_variacoes=True,
+        chave_negativa=chave_sem_variacoes,
+        chave_andamento=_chave_andamento_variacoes,
+        ir=_ir,
+    )

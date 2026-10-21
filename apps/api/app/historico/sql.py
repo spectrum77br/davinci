@@ -101,6 +101,13 @@ TETO_POR_PEDIDO = 200
 # Aba E-mail › Caixas (09/10/2026, migration 0388): o índice leve da caixa
 # (`mail_caixa_indice`: a pasta e a loja provável de cada e-mail) é cache
 # escrito pela máquina a cada minuto. Fora.
+# Agente de atendimento (20/10/2026, migration 0420): `atendimento_pares` (a
+# pergunta × resposta da equipe, texto de comprador generalizado, refeito de
+# hora em hora), `atendimento_agente_replay` (o replay noturno, 30 dias) e
+# `atendimento_site_produtos` (o instantâneo dos sites da marca, relido toda
+# madrugada) são da máquina. Fora. `atendimento_fatos` fica COM o gatilho,
+# como `atendimento_regras`: quem aprovou ou corrigiu um fato é exatamente o
+# que o Histórico serve para mostrar.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -116,7 +123,7 @@ EXCLUIDAS = re.compile(
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"
-    r"|automacao_registros|trocas)$"
+    r"|automacao_registros|trocas|pares|agente_replay|site_produtos)$"
     # a ponte do e-mail: o que a máquina decide de cada e-mail e as pastas
     r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation|caixa_indice)$"
     # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)

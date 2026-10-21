@@ -327,6 +327,36 @@ class MensagemOut(BaseModel):
     do_afiliado: bool = False
 
 
+class AcaoPessoaOut(BaseModel):
+    """Uma ação de pessoa da régua do agente (spec 6.3): o código e como a tela escreve."""
+
+    codigo: str
+    rotulo: str
+
+
+class AgenteResumoOut(BaseModel):
+    """O rastro ENXUTO do agente (Claude) num rascunho dele (20/10/2026).
+
+    Só o que a pessoa precisa para confiar (ou não) na sugestão: as
+    ferramentas que ele consultou, na ordem da 1ª consulta e sem repetir
+    (`ver_pedido`, `ver_anuncio`...), e as ações de pessoa que ele (ou o
+    código) marcou. Nada dos argumentos nem do resultado das ferramentas.
+    """
+
+    ferramentas: list[str] = Field(default_factory=list)
+    # As ferramentas que falharam (dado indisponível, fora do escopo).
+    ferramentas_com_erro: list[str] = Field(default_factory=list)
+    acoes_pessoa: list[AcaoPessoaOut] = Field(default_factory=list)
+    # responder | perguntar | pessoa (None = parou antes da proposta).
+    acao: str | None = None
+    # Por que o laço parou (`agente.PARADA_*`): fim, prazo, recusa...
+    parada: str | None = None
+    # Rodada 4 (21/10/2026): os avisos das regras SUAVES da camada
+    # determinística (`fatos.agente.avisos`) que o motivo ainda não diz — a
+    # sugestão fica (no copiloto), mas a pessoa confere o ponto antes de enviar.
+    avisos: list[str] = Field(default_factory=list)
+
+
 class RascunhoOut(BaseModel):
     id: UUID
     texto: str | None = None
@@ -343,6 +373,9 @@ class RascunhoOut(BaseModel):
     # (a Caixa Humano não conta com ela). None = não calculado (a tela trata
     # como do turno).
     do_turno_atual: bool | None = None
+    # Só no rascunho do AGENTE (`prompt_versao="ag1"`, 20/10/2026): o que ele
+    # consultou e as ações de pessoa. None = rascunho do legado.
+    agente: AgenteResumoOut | None = None
 
 
 class EnvioOut(BaseModel):
@@ -579,7 +612,9 @@ class RascunhoUnicoOut(BaseModel):
     # do provedor (tente de novo em 1 min)"), e a conta sem crédito também
     # (`ia.motivo_sem_credito`: "A IA está sem crédito no provedor (OpenAI) —
     # adicione créditos ou troque a chave") — a tela mostra como veio o motivo
-    # que não conhece.
+    # que não conhece. O canal com o agente (20/10/2026) também manda FRASE:
+    # o prazo da tela estourado ("a IA não terminou, tente de novo") e o teto
+    # de gasto do agente atingido no meio.
     motivo: str | None = None
 
 
@@ -648,11 +683,30 @@ class CanalOut(BaseModel):
     auto_categorias: list[str] = Field(default_factory=list)
     sla_horas: int
     limite_caracteres: int
+    # O AGENTE (Claude) responde neste canal no lugar da IA de hoje (o botão
+    # "Agente (Claude)", só admin — 20/10/2026). Só vale com a chave Claude no
+    # servidor (`agente_config.agente_ligado`).
+    agente: bool = False
+    # Os assuntos de ORIENTAÇÃO (`constantes.ASSUNTOS_ORIENTACAO`) que o
+    # rascunho do agente pode mandar sozinho neste canal (no Automático).
+    auto_orientacao: list[str] = Field(default_factory=list)
+    # Os OUTROS assuntos (de `auto_categorias`) em que o rascunho do agente
+    # pode sair sozinho (decisão 8: o dono marca depois do eval).
+    auto_agente: list[str] = Field(default_factory=list)
+    # O botão do agente aparece neste canal: há chave Claude no servidor
+    # (`agente_config.chave_do_agente`; a chave nunca sai daqui) e a
+    # plataforma é uma das do agente (Shopee, ML, TikTok, Amazon).
+    agente_disponivel: bool = False
 
 
 class CanalPatch(BaseModel):
     modo: str | None = None
     auto_categorias: list[str] | None = None
+    # O botão "Agente (Claude)" e os assuntos de orientação que saem sozinhos
+    # (20/10/2026): só admin; quem confere a lista é o router.
+    agente: bool | None = None
+    auto_orientacao: list[str] | None = None
+    auto_agente: list[str] | None = None
 
     @field_validator("modo")
     @classmethod
@@ -660,6 +714,18 @@ class CanalPatch(BaseModel):
         if v is not None and v not in MODOS:
             raise ValueError(f"modo desconhecido: {v}")
         return v
+
+    @field_validator("auto_orientacao", "auto_agente")
+    @classmethod
+    def _orientacao_valida(cls, v: list[str] | None) -> list[str] | None:
+        """Só o formato e sem repetição; se o assunto é de orientação (e se o
+        canal tem o agente) quem confere é o router."""
+        if v is None:
+            return None
+        invalidas = [c for c in v if not _FORMATO_CATEGORIA.match(c)]
+        if invalidas:
+            raise ValueError(f"assunto inválido: {', '.join(c[:40] for c in invalidas)}")
+        return list(dict.fromkeys(v))
 
     @field_validator("auto_categorias")
     @classmethod
@@ -823,6 +889,62 @@ class ModeloOut(BaseModel):
     ordem: int
 
 
+# ── Fatos da loja do agente (aprovação na aba do Manual, 20/10/2026) ──────
+
+
+class FatoOut(BaseModel):
+    """Um fato de `atendimento_fatos` para a lista de aprovação (spec 5.2).
+
+    `estado`: `candidato` (espera o dono), `ativo` (o agente usa) ou
+    `reprovado` (alguém decidiu que não — fica guardado, com quem e quando,
+    para a mesma correção não voltar como candidata).
+    """
+
+    id: int
+    chave: str | None = None
+    escopo: str
+    plataforma: str | None = None
+    integration_id: UUID | None = None
+    # O nome da LOJA do escopo `loja`/`anuncio` (como na Caixa).
+    loja: str | None = None
+    item_id: str | None = None
+    product_id: UUID | None = None
+    # O nome do produto do escopo `produto` (o cadastro do DaVinci).
+    produto: str | None = None
+    sku: str | None = None
+    marca: str | None = None
+    # O assunto em que o fato vale (None = qualquer assunto).
+    assunto: str | None = None
+    texto: str
+    fonte: str
+    referencia: str | None = None
+    # A conversa de onde a correção saiu (fonte `correcao`): a tela abre.
+    conversa_id: UUID | None = None
+    ativo: bool
+    estado: Literal["candidato", "ativo", "reprovado"]
+    # Ativo com `valido_ate` no passado: não vale mais.
+    vencido: bool = False
+    aprovado_por: str | None = None
+    aprovado_em: datetime | None = None
+    valido_ate: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ListaFatosOut(BaseModel):
+    fatos: list[FatoOut]
+    # Quantos há em cada estado (com os outros filtros): os números das abas.
+    contagem: dict[str, int] = Field(default_factory=dict)
+
+
+class FatoAprovarIn(BaseModel):
+    """Aprovar um fato — com o texto corrigido antes, se vier."""
+
+    texto: str | None = Field(default=None, min_length=1, max_length=2000)
+
+    _limpa = field_validator("texto", mode="before")(_texto_opcional)
+
+
 # ── Resumo, sincronização e métricas ──────────────────────────────────────
 
 
@@ -922,6 +1044,10 @@ class FlagsOut(BaseModel):
     # Os modos de loja que a Caixa Humano mostra (14/10/2026: só `auto`, a
     # decisão do dono — `humano.modos_da_caixa`); None = toda loja ("todos").
     humano_modos: list[str] | None = None
+    # Há chave Claude no servidor (`agente_config.chave_do_agente`, 20/10/2026):
+    # o botão "Agente (Claude)" dos canais aparece. Só o sim/não — a chave
+    # nunca sai do servidor.
+    agente_disponivel: bool = False
 
 
 class LeituraParadaOut(BaseModel):

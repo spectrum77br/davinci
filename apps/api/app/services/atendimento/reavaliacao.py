@@ -13,7 +13,12 @@ import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app.services.atendimento.constantes import CATEGORIAS_SO_HUMANO
+from app.services.atendimento.constantes import (
+    ASSUNTOS_ORIENTACAO,
+    ASSUNTOS_SO_PESSOA_NO_AGENTE,
+    CATEGORIAS_SO_HUMANO,
+    PROMPT_VERSAO_AGENTE,
+)
 
 CHAVE = "reavaliacao_contexto"
 MAX_TENTATIVAS = 2
@@ -85,11 +90,23 @@ def _metadados(fatos: dict) -> dict | None:
     return {"n": n, "assinaturas_vistas": vistas, "ultimo_em": dados["ultimo_em"]}
 
 
-def pode_reavaliar(rascunho: Any, *, agora: datetime) -> bool:
-    """Só retenção explícita por falta de dado, sem reabrir recusa de pessoa."""
+def pode_reavaliar(rascunho: Any, *, agora: datetime, canal: Any | None = None) -> bool:
+    """Só retenção explícita por falta de dado, sem reabrir recusa de pessoa.
+
+    O rascunho do AGENTE (`prompt_versao="ag1"`, spec 6.6, 20/10/2026) segue
+    a régua dele no lugar de `CATEGORIAS_SO_HUMANO`: ação de pessoa
+    (`fatos.agente.acoes_pessoa`) ou devolução/chamado em andamento nunca
+    reabre; as pistas de orientação do turno e o assunto de orientação
+    (`ASSUNTOS_ORIENTACAO`) só com eles no `auto_orientacao` do `canal`; os
+    outros, no `auto_agente` dele (sem o canal, não). O rascunho do legado:
+    exatamente como era (`canal` nem é lido).
+    """
     if getattr(rascunho, "status", None) not in ("pendente", "bloqueado"):
         return False
-    if getattr(rascunho, "categoria", None) in CATEGORIAS_SO_HUMANO:
+    if getattr(rascunho, "prompt_versao", None) == PROMPT_VERSAO_AGENTE:
+        if not _agente_pode(rascunho, canal):
+            return False
+    elif getattr(rascunho, "categoria", None) in CATEGORIAS_SO_HUMANO:
         return False
     fatos = _fatos(rascunho)
     if fatos.get("pedida_pela_tela"):
@@ -110,6 +127,35 @@ def pode_reavaliar(rascunho: Any, *, agora: datetime) -> bool:
         return False
     ultimo = _utc(meta["ultimo_em"]) or criado
     return agora - max(criado, ultimo) >= INTERVALO
+
+
+def _agente_pode(rascunho: Any, canal: Any | None) -> bool:
+    """A régua do agente na reavaliação (ver `pode_reavaliar`): as mesmas leituras do envio."""
+    from app.services.atendimento import ia
+
+    acoes = ia.acoes_pessoa_do_rascunho(rascunho)
+    if acoes is None or acoes or ia.andamento_no_rascunho(rascunho):
+        return False
+    liberadas = (getattr(canal, "auto_orientacao", None) or []) if canal is not None else []
+    pistas = (_fatos(rascunho).get("agente") or {}).get("pistas_orientacao") or []
+    if any(p in ASSUNTOS_ORIENTACAO and p not in liberadas for p in pistas):
+        return False
+    categoria = getattr(rascunho, "categoria", None)
+    # Rodada 4b (achado 2 da revisão r4): a pista além do assunto, liberada.
+    if ia.motivo_das_pistas_alem(
+        (_fatos(rascunho).get("agente") or {}).get("pistas_turno"), categoria, canal
+    ):
+        return False
+    if categoria in ASSUNTOS_ORIENTACAO:
+        return categoria in liberadas
+    # Os outros: só onde o dono liberou o agente (`auto_agente`, decisão 8).
+    return (
+        canal is not None
+        and categoria in (getattr(canal, "auto_agente", None) or [])
+        and categoria not in CATEGORIAS_SO_HUMANO
+        # Os assuntos de produto nunca saem sozinhos (ajuste r3).
+        and categoria not in ASSUNTOS_SO_PESSOA_NO_AGENTE
+    )
 
 
 def _material(fatos: dict) -> dict:
@@ -178,9 +224,16 @@ def _ganhou_dado(motivo: str, antes: dict, depois: dict) -> bool:
     )
 
 
-def nova_tentativa(rascunho: Any, fatos_atuais: dict, *, agora: datetime) -> dict | None:
-    """Metadados do NOVO rascunho, ou None se ainda não há o dado necessário."""
-    if not pode_reavaliar(rascunho, agora=agora):
+def nova_tentativa(
+    rascunho: Any, fatos_atuais: dict, *, agora: datetime, canal: Any = None
+) -> dict | None:
+    """Metadados do NOVO rascunho, ou None se ainda não há o dado necessário.
+
+    `canal` = o mesmo do `pode_reavaliar` (ajuste r3: sem ele o rascunho do
+    agente — que lê o `auto_agente`/`auto_orientacao` do canal — nunca era
+    refeito quando o rastreio ou a NF chegavam).
+    """
+    if not pode_reavaliar(rascunho, agora=agora, canal=canal):
         return None
     if any(fatos_atuais.get(k) for k in ("chamados_abertos", "devolucoes", "reclamacoes_abertas")):
         return None

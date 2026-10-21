@@ -75,10 +75,23 @@ de chat não aparece mais nela (detalhe, prévia, abas). A Amazon pelo Gmail é
 o chat da Amazon e fica. A lista das conversas de e-mail é a mesma rota com
 `?caixa=email` (a aba E-mail: os chamados dos sites, o que falta responder) e
 o GET de UMA conversa pelo id continua abrindo qualquer uma, no escopo.
+
+AGENTE (CLAUDE) POR CANAL (20/10/2026, `services/atendimento/agente/`): o
+canal ganha o botão "Agente (Claude)" (`agente`, só admin, e só aparece com a
+chave Claude no servidor — `agente_disponivel`, nunca a chave) e os assuntos
+de ORIENTAÇÃO que o rascunho do agente pode mandar sozinho
+(`auto_orientacao`, só `constantes.ASSUNTOS_ORIENTACAO` e só com o agente
+ligado; o `auto_categorias` continua recusando os só-pessoa). O "Sugerir" no
+canal com o agente tem prazo de 40 s e o teto em dólar do agente; o 👎 com
+correção vira par do agente (`correcao`) e fato CANDIDATO
+(`atendimento_fatos`, ativo=false), que o admin aprova ou reprova na aba do
+Manual (GET /fatos, POST /fatos/{id}/aprovar|reprovar). O rascunho do agente
+traz o rastro enxuto (`RascunhoOut.agente`).
 """
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import re
 import statistics
@@ -112,11 +125,15 @@ from app.models import (
     AtendimentoRegra,
     BlingOrder,
     Integration,
+    Product,
     User,
     UserRole,
 )
+from app.models.atendimento import AtendimentoFato
 from app.redis_client import redis
 from app.schemas.atendimento import (
+    AcaoPessoaOut,
+    AgenteResumoOut,
     AvaliacaoIn,
     AvaliacaoOut,
     AvaliacaoResumoOut,
@@ -137,9 +154,12 @@ from app.schemas.atendimento import (
     EtiquetaHistoricoOut,
     EtiquetaIn,
     EtiquetaTrocaOut,
+    FatoAprovarIn,
+    FatoOut,
     FlagsOut,
     LeituraParadaOut,
     ListaConversasOut,
+    ListaFatosOut,
     ListaRegrasOut,
     LojaResumoOut,
     MensagemOut,
@@ -166,6 +186,7 @@ from app.schemas.atendimento import (
 from app.services import vigia_leitura_atendimento
 from app.services.atendimento import (
     acesso,
+    agente_config,
     amazon_email,
     canais_externos,
     clientes,
@@ -181,6 +202,8 @@ from app.services.atendimento import lida as lida_svc
 from app.services.atendimento import notificacoes as notificacoes_svc
 from app.services.atendimento.constantes import (
     ACAO_OBSERVOU,
+    ASSUNTOS_ORIENTACAO,
+    ASSUNTOS_SO_PESSOA_NO_AGENTE,
     AUTOR_CLIENTE,
     AUTOR_LOJA,
     AUTOR_SISTEMA,
@@ -199,6 +222,11 @@ from app.services.atendimento.constantes import (
     ETIQUETA_POS_VENDA,
     ETIQUETA_PRE_VENDA,
     ETIQUETAS,
+    FATO_ESCOPO_LOJA,
+    FATO_ESCOPO_PLATAFORMA,
+    FATO_ESCOPOS,
+    FATO_FONTE_CORRECAO,
+    FATO_FONTES,
     FONTE_TUTA,
     MODO_AUTO,
     MODO_OBSERVAR,
@@ -206,16 +234,19 @@ from app.services.atendimento.constantes import (
     MSG_ENVIADA,
     MSG_FALHOU,
     MSG_REVISAR,
+    NOTA_ERRO,
     ORIGEM_HUMANO,
     ORIGEM_NOTA,
     ORIGENS_DAVINCI,
     PLATAFORMA_SITE,
     PLATAFORMAS,
+    PLATAFORMAS_CAIXA,
     PLATAFORMAS_EXTERNAS,
     PLATAFORMAS_LISTA,
     PLATAFORMAS_REDE,
     PLATAFORMAS_ROBO,
     PRIORIDADE_REGRA_PADRAO,
+    PROMPT_VERSAO_AGENTE,
     RASCUNHO_BLOQUEADO,
     RASCUNHO_DESCARTADO,
     RASCUNHO_EDITADO,
@@ -230,6 +261,7 @@ from app.services.atendimento.constantes import (
     e_chat_de_afiliado,
     limite_caracteres,
     motivo_canal_sem_envio,
+    rotulo_acao_pessoa,
     rotulo_etiqueta,
     sla_horas,
 )
@@ -531,6 +563,25 @@ TETO_DIARIO_IA = {
     "code": "teto_diario_ia",
     "detail": "As sugestões da IA de hoje acabaram (teto diário do servidor) — amanhã voltam.",
 }
+
+# O "Sugerir" no canal com o AGENTE (Claude, spec 3.4, 20/10/2026): síncrono,
+# com prazo de 40 s — o agente consulta pedido, anúncio e manual em vários
+# turnos. Estourou: nada gravado, e a tela diz para tentar de novo (o prazo
+# cooperativo do próprio agente, `atendimento_agente_prazo_s`, é o do cron).
+# O corte cancela só a tarefa da tela: a renovação de token que estiver no
+# meio segue blindada (`clientes.blindar_renovacao`).
+PRAZO_SUGERIR_AGENTE_S = 40.0
+MOTIVO_AGENTE_NAO_TERMINOU = "a IA não terminou, tente de novo"
+# O teto em dólar do agente (`agente.custo`) vale também para a tela.
+MOTIVO_TETO_AGENTE_DIA = (
+    "O gasto do agente (Claude) de hoje chegou ao teto — amanhã volta; até lá, responda você."
+)
+MOTIVO_TETO_AGENTE_CONVERSA = (
+    "Esta conversa já gastou hoje o teto do agente (Claude) — responda você."
+)
+# As plataformas do agente (o prompt dele tem as regras e os caminhos do app
+# delas): fora delas o botão nem aparece.
+PLATAFORMAS_AGENTE = ("shopee", "ml", "tiktok", "amazon")
 
 
 def _so_le(user: User) -> bool:
@@ -1462,6 +1513,51 @@ def _rascunho_out(
         status=r.status,
         created_at=_utc(r.created_at),
         do_turno_atual=do_turno_atual,
+        agente=_resumo_do_agente(r),
+    )
+
+
+def _resumo_do_agente(r: AtendimentoRascunho) -> AgenteResumoOut | None:
+    """O rastro enxuto do rascunho do AGENTE (`fatos.agente`); None no do legado.
+
+    Só os nomes das ferramentas (na ordem da 1ª consulta) e as ações de
+    pessoa — os argumentos e o que a ferramenta devolveu ficam no banco.
+    """
+    dados = r.fatos.get("agente") if isinstance(r.fatos, dict) else None
+    if r.prompt_versao != PROMPT_VERSAO_AGENTE or not isinstance(dados, dict):
+        return None
+    rastro = [p for p in dados.get("rastro") or [] if isinstance(p, dict) and p.get("ferramenta")]
+    acoes = [str(a) for a in dados.get("acoes_pessoa") or [] if a]
+    acao, parada = dados.get("acao"), dados.get("parada")
+    # Rodada 4: os avisos das regras suaves que o `motivo` não repete.
+    motivo = r.motivo or ""
+    avisos = [
+        str(a) for a in dict.fromkeys(dados.get("avisos") or []) if a and str(a) not in motivo
+    ]
+    return AgenteResumoOut(
+        ferramentas=list(dict.fromkeys(str(p["ferramenta"]) for p in rastro)),
+        ferramentas_com_erro=list(
+            dict.fromkeys(str(p["ferramenta"]) for p in rastro if p.get("erro"))
+        ),
+        acoes_pessoa=[
+            AcaoPessoaOut(codigo=a, rotulo=rotulo_acao_pessoa(a)) for a in dict.fromkeys(acoes)
+        ],
+        acao=str(acao) if acao else None,
+        parada=str(parada) if parada else None,
+        avisos=avisos[:5],
+    )
+
+
+def _agente_cabe_no_canal(canal: AtendimentoCanal) -> bool:
+    """O botão do agente pode aparecer neste canal? (há chave Claude e a plataforma é dele)
+
+    O site e as redes (canal externo) e as lojas do robô do Mac mini ficam
+    de fora: nem o prompt nem as ferramentas do agente são deles.
+    """
+    return (
+        canal.plataforma in PLATAFORMAS_AGENTE
+        and not canais_externos.eh_externo(canal)
+        and agente_config.chave_do_agente(get_settings()) is not None
     )
 
 
@@ -1500,6 +1596,10 @@ def _canal_out(
         auto_categorias=list(canal.auto_categorias or []),
         sla_horas=sla_horas(canal.plataforma, canal.canal),
         limite_caracteres=limite_caracteres(canal.plataforma, canal.canal),
+        agente=canal.agente is True,
+        auto_orientacao=list(canal.auto_orientacao or []),
+        auto_agente=list(getattr(canal, "auto_agente", None) or []),
+        agente_disponivel=_agente_cabe_no_canal(canal),
     )
 
 
@@ -1940,6 +2040,7 @@ async def resumo(
             alerta_telegram=s.atendimento_alerta_telegram,
             humano_ativa=s.atendimento_leitura_ativa and s.atendimento_humano_ativa,
             humano_modos=list(modos_humano) if modos_humano is not None else None,
+            agente_disponivel=agente_config.chave_do_agente(s) is not None,
         ),
         leitura_parada=leitura_parada,
     )
@@ -2975,6 +3076,11 @@ async def pedir_rascunho(
 
     Na fase de observação quem só lê também pede (`ROTAS_DE_QUEM_LE`): a
     sugestão fica guardada para conferir, nada sai para a plataforma.
+
+    No canal com o AGENTE (Claude, 20/10/2026): o teto em dólar do agente
+    vale aqui também (atingido → 429 `teto_agente`, sem chamar nada) e a
+    chamada tem prazo de `PRAZO_SUGERIR_AGENTE_S` — estourou, nada fica
+    gravado e o motivo é "a IA não terminou, tente de novo".
     """
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
@@ -3014,26 +3120,101 @@ async def pedir_rascunho(
                 "tente de novo daqui a pouco.",
             },
         )
+    # O id antes de tudo: o prazo estourado do agente desfaz a transação (e
+    # expira a conversa carregada).
+    conversa_id = c.id
+    canal = await session.get(AtendimentoCanal, c.canal_id) if c.canal_id else None
+    com_agente = agente_config.agente_ligado(get_settings(), canal)
     # O pedido pela tela (`forcar=True`) não passa pelo teto diário dentro da
-    # IA; o de quem só lê passa aqui (ver SUGERIR_POR_HORA_QUEM_LE).
-    if _so_le(user) and not await ia_svc._dentro_do_teto(1):
+    # IA; o de quem só lê passa aqui (ver SUGERIR_POR_HORA_QUEM_LE). No canal
+    # com o agente, o contador é o DELE (ajuste r3: o "Sugerir" do agente
+    # gastava o teto do legado).
+    teto_de_quem = {"chave": ia_svc._CHAVE_TETO_AGENTE} if com_agente else {}
+    if _so_le(user) and not await ia_svc._dentro_do_teto(1, **teto_de_quem):
         raise HTTPException(429, detail=TETO_DIARIO_IA)
 
-    r = await ia_svc.gerar_rascunho(session, c, forcar=True)
+    if not com_agente:
+        r = await ia_svc.gerar_rascunho(session, c, forcar=True)
+    else:
+        teto = await _teto_do_agente(conversa_id)
+        if teto is not None:
+            raise HTTPException(429, detail={"code": "teto_agente", "detail": teto})
+        r, estourou = await _sugerir_com_o_agente(session, c, ia_svc)
+        if estourou:
+            logger.info(
+                "atendimento_rascunho_pedido",
+                conversa_id=str(conversa_id),
+                gerado=False,
+                motivo="prazo_agente",
+                user_id=str(user.id),
+            )
+            return RascunhoUnicoOut(rascunho=None, motivo=MOTIVO_AGENTE_NAO_TERMINOU)
     await session.commit()
     motivo = None
     if r is not None:
         await session.refresh(r)
     else:
-        motivo = await ia_svc.motivo_sem_rascunho(session, c)
+        # No canal com o agente, o teto atingido NO MEIO (o agente para sem
+        # rascunho) diz o porquê; o resto é o de sempre.
+        motivo = (await _teto_do_agente(conversa_id) if com_agente else None) or (
+            await ia_svc.motivo_sem_rascunho(session, c)
+        )
     logger.info(
         "atendimento_rascunho_pedido",
-        conversa_id=str(c.id),
+        conversa_id=str(conversa_id),
         gerado=r is not None,
         motivo=motivo,
         user_id=str(user.id),
     )
     return RascunhoUnicoOut(rascunho=_rascunho_out(r), motivo=motivo)
+
+
+async def _teto_do_agente(conversa_id: UUID) -> str | None:
+    """A frase do teto em dólar do agente já atingido (o dia ou a conversa); None = cabe."""
+    from app.services.atendimento.agente import custo as custo_agente
+
+    try:
+        await custo_agente.conferir_teto(conversa_id=conversa_id)
+    except custo_agente.TetoEstourado as e:
+        if e.qual == custo_agente.TETO_CONVERSA:
+            return MOTIVO_TETO_AGENTE_CONVERSA
+        return MOTIVO_TETO_AGENTE_DIA
+    return None
+
+
+async def _sugerir_com_o_agente(
+    session: AsyncSession, c: AtendimentoConversa, ia_svc: Any
+) -> tuple[AtendimentoRascunho | None, bool]:
+    """O `gerar_rascunho` com o prazo da tela (`PRAZO_SUGERIR_AGENTE_S`) → (rascunho, estourou).
+
+    Estourou: desfaz o que ficou no meio da transação e não grava nada.
+    Exceção: a sugestão que o `_salvar` chegou a COMMITAR no último instante
+    (o corte caiu depois do commit) — essa existe, e volta como se tivesse
+    dado tempo.
+    """
+    conversa_id = c.id
+    antes = await session.scalar(
+        select(func.max(AtendimentoRascunho.created_at)).where(
+            AtendimentoRascunho.conversa_id == conversa_id
+        )
+    )
+    try:
+        async with asyncio.timeout(PRAZO_SUGERIR_AGENTE_S):
+            return await ia_svc.gerar_rascunho(session, c, forcar=True), False
+    except TimeoutError:
+        logger.warning("atendimento_agente_prazo_da_tela", conversa_id=str(conversa_id))
+    try:
+        await session.rollback()
+    except Exception as e:  # noqa: BLE001 — a conexão cortada no meio: fecha e segue
+        logger.warning("atendimento_agente_prazo_rollback", err=type(e).__name__)
+        await session.close()
+    consulta = select(AtendimentoRascunho).where(AtendimentoRascunho.conversa_id == conversa_id)
+    if antes is not None:
+        consulta = consulta.where(AtendimentoRascunho.created_at > antes)
+    gravada = await session.scalar(
+        consulta.order_by(AtendimentoRascunho.created_at.desc()).limit(1)
+    )
+    return gravada, gravada is None
 
 
 async def _travar_ou_409(session: AsyncSession, obj, code: str) -> None:
@@ -3679,7 +3860,113 @@ async def avaliar_rascunho(
             else None
         ),
     )
-    return AvaliacaoUnicaOut(avaliacao=_avaliacao_out(av, user.id))
+    saida = AvaliacaoUnicaOut(avaliacao=_avaliacao_out(av, user.id))
+    # Só com o agente no servidor (ajuste r3): sem a chave Claude o sistema
+    # inteiro fica como em origin — nada de fato candidato nem par.
+    if agente_config.chave_do_agente(get_settings()) is not None:
+        await _aprender_da_avaliacao(session, r.id, r.conversa_id)
+    return saida
+
+
+# ── O 👎 com correção ensina o agente (spec 5.5, 20/10/2026) ──────────────
+
+
+def _chave_fato_da_correcao(rascunho_id: UUID) -> str:
+    """A chave do fato candidato de UMA sugestão: a nota refeita atualiza o mesmo."""
+    return f"correcao:{rascunho_id}"
+
+
+async def _aprender_da_avaliacao(
+    session: AsyncSession, rascunho_id: UUID, conversa_id: UUID
+) -> None:
+    """Depois da nota gravada: o fato candidato e o par `correcao` do agente.
+
+    - 👎 com correção → fato CANDIDATO (`atendimento_fatos`, `fonte=correcao`,
+      `ativo=false`) com o texto MASCARADO da correção, à espera do admin na
+      aba do Manual; e o par `correcao` (turno do cliente × a correção) já
+      entra nos exemplos do agente (`enviar.par_na_hora`);
+    - a nota refeita (👍, correção apagada) tira o candidato que ninguém
+      decidiu ainda e o par que deixou de valer. O que um admin já aprovou ou
+      reprovou fica como está.
+
+    Nunca derruba a nota (já commitada): falhou, fica no log.
+    """
+    try:
+        rascunho = await session.get(AtendimentoRascunho, rascunho_id)
+        conversa = await session.get(AtendimentoConversa, conversa_id)
+        av = await _avaliacao_de(session, rascunho_id)
+        if rascunho is None or conversa is None or av is None:
+            return
+        autor = await session.get(User, av.user_id) if av.user_id is not None else None
+        async with session.begin_nested():
+            await _fato_da_correcao(session, conversa, rascunho, av, autor)
+        await enviar.par_na_hora(session, conversa)
+        await session.commit()
+    except Exception as e:  # noqa: BLE001 — a nota já está gravada; o aprendizado espera o cron
+        logger.warning(
+            "atendimento_correcao_nao_aprendida", rascunho_id=str(rascunho_id), err=type(e).__name__
+        )
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110 — a resposta já está pronta
+            pass
+
+
+async def _fato_da_correcao(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    rascunho: AtendimentoRascunho,
+    av: AtendimentoAvaliacao,
+    autor: User | None,
+) -> None:
+    """Cria, atualiza ou tira o fato candidato da correção desta sugestão.
+
+    O escopo segue a régua da nota (`ia._avaliacao_vale_aqui`): a correção de
+    admin vale na plataforma; a de quem não é admin, só na loja da conversa
+    (sem loja — robô — na plataforma, e o admin vê o escopo antes de aprovar).
+    O assunto é o da sugestão. O texto passa pela máscara (`ia.mascarar`, com
+    os nomes do comprador e do destinatário): nada de dado pessoal no fato.
+    """
+    from app.services.atendimento import ia as ia_svc
+
+    chave = _chave_fato_da_correcao(rascunho.id)
+    existente = await session.scalar(select(AtendimentoFato).where(AtendimentoFato.chave == chave))
+    indeciso = existente is not None and not existente.ativo and existente.aprovado_por is None
+    correcao = (av.correcao or "").strip()
+    if av.nota != NOTA_ERRO or not correcao:
+        if indeciso:
+            await session.delete(existente)
+        return
+    if existente is not None and not indeciso:
+        return  # um admin já decidiu (aprovou ou reprovou)
+    nomes = await ia_svc._NomesDoPedido(session).de(
+        conversa.comprador_nome,
+        conversa.comprador_id,
+        conversa.pedido_marketplace,
+        conversa.integration_id,
+    )
+    texto = " ".join(ia_svc.mascarar(correcao, nomes).split())[:2000]
+    if not texto:
+        return
+    da_loja = (
+        not (autor is not None and autor.role == UserRole.ADMIN)
+        and conversa.integration_id is not None
+    )
+    campos = {
+        "escopo": FATO_ESCOPO_LOJA if da_loja else FATO_ESCOPO_PLATAFORMA,
+        "plataforma": conversa.plataforma,
+        "integration_id": conversa.integration_id if da_loja else None,
+        "assunto": (rascunho.categoria or None) and rascunho.categoria[:32],
+        "texto": texto,
+        "fonte": FATO_FONTE_CORRECAO,
+        "referencia": f"conversa:{conversa.id} rascunho:{rascunho.id}",
+    }
+    if existente is None:
+        session.add(AtendimentoFato(chave=chave, ativo=False, **campos))
+    else:
+        for nome, valor in campos.items():
+            setattr(existente, nome, valor)
+    await session.flush()
 
 
 # ── Canais (lojas e modo) ─────────────────────────────────────────────────
@@ -3705,6 +3992,7 @@ async def editar_canal(
     Ligar `auto` — ou mexer nas categorias que saem sozinhas — só admin:
     é resposta a comprador sem pessoa conferindo. Desligar qualquer um pode.
     Categoria só-humano (troca, reembolso, defeito...) nunca entra no automático.
+    O agente e os assuntos de orientação (20/10/2026): `_editar_agente_do_canal`.
     """
     canal = await session.get(AtendimentoCanal, canal_id)
     scope = await resolve_team_scope(session, user)
@@ -3795,6 +4083,7 @@ async def editar_canal(
         # Ordem do manual e sem repetição: o JSONB compara igual entre edições.
         escolhidas = set(body.auto_categorias)
         canal.auto_categorias = [c for c in ordem if c in escolhidas]
+    _editar_agente_do_canal(canal, body, campos, eh_admin=eh_admin)
     await session.commit()
     await session.refresh(canal)
     integration = (
@@ -3807,6 +4096,9 @@ async def editar_canal(
         canal_id=str(canal.id),
         modo=canal.modo,
         auto_categorias=len(canal.auto_categorias or []),
+        agente=canal.agente,
+        auto_orientacao=len(canal.auto_orientacao or []),
+        auto_agente=len(canal.auto_agente or []),
         user_id=str(user.id),
     )
     integracao = integration.name if integration else None
@@ -3814,6 +4106,124 @@ async def editar_canal(
     nomes = await _nomes_das_lojas(session, {saida.integration_id})
     saida.conta = nomes.get(saida.integration_id) or saida.conta
     return saida
+
+
+_SO_ADMIN_AGENTE = {
+    "code": "so_admin",
+    "detail": "Só admin liga ou desliga o agente (Claude) e escolhe o que ele manda sozinho.",
+}
+
+
+def _editar_agente_do_canal(
+    canal: AtendimentoCanal, body: CanalPatch, campos: set[str], *, eh_admin: bool
+) -> None:
+    """O botão "Agente (Claude)" e os assuntos de orientação que saem sozinhos (20/10/2026).
+
+    Os dois só admin (como o automático): o agente decide o que o comprador
+    recebe, e o `auto_orientacao` é o que ele manda SEM pessoa conferir.
+    - `agente` liga só com a chave Claude no servidor e numa plataforma do
+      agente (`_agente_cabe_no_canal`); desligar não depende da chave — e
+      leva junto o `auto_orientacao` (sem o agente, ninguém o lê, e o
+      rascunho do agente que ainda estiver na fila não sai sozinho por ele);
+    - `auto_orientacao` só aceita `constantes.ASSUNTOS_ORIENTACAO` e só no
+      canal com o agente ligado (no mesmo PATCH vale o `agente` novo). O
+      `auto_categorias` (o legado) continua recusando os só-pessoa;
+    - `auto_agente` (decisão 8, revisão de 20/10/2026): os OUTROS assuntos em
+      que o rascunho do agente sai sozinho — só os que estão no
+      `auto_categorias` do canal (depois do PATCH) e fora da orientação, só
+      com o agente ligado; nasce vazio (o dono marca depois do eval, onde o
+      agente empatou ou ganhou do legado) e sai junto com o agente.
+    """
+    if "agente" in campos and body.agente is not None and body.agente != canal.agente:
+        if not eh_admin:
+            raise HTTPException(403, detail=_SO_ADMIN_AGENTE)
+        if body.agente and not _agente_cabe_no_canal(canal):
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "agente_indisponivel",
+                    "detail": "O agente (Claude) não está disponível neste canal: falta a chave "
+                    "Claude no servidor, ou a plataforma não é Shopee, Mercado Livre, TikTok "
+                    "ou Amazon.",
+                },
+            )
+        canal.agente = body.agente
+    if (
+        "auto_orientacao" in campos
+        and body.auto_orientacao is not None
+        and set(body.auto_orientacao) != set(canal.auto_orientacao or [])
+    ):
+        if not eh_admin:
+            raise HTTPException(403, detail=_SO_ADMIN_AGENTE)
+        if body.auto_orientacao and not canal.agente:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "orientacao_sem_agente",
+                    "detail": "Os assuntos de orientação só saem sozinhos no canal com o "
+                    "agente (Claude) ligado.",
+                },
+            )
+        fora = [c for c in body.auto_orientacao if c not in ASSUNTOS_ORIENTACAO]
+        if fora:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "assunto_fora_da_orientacao",
+                    "detail": "Só os assuntos de orientação do agente: " + ", ".join(fora),
+                    "categorias": fora,
+                },
+            )
+        escolhidos = set(body.auto_orientacao)
+        # A ordem das constantes: o JSONB compara igual entre edições.
+        canal.auto_orientacao = [c for c in ASSUNTOS_ORIENTACAO if c in escolhidos]
+    if (
+        "auto_agente" in campos
+        and body.auto_agente is not None
+        and set(body.auto_agente) != set(canal.auto_agente or [])
+    ):
+        if not eh_admin:
+            raise HTTPException(403, detail=_SO_ADMIN_AGENTE)
+        if body.auto_agente and not canal.agente:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "assunto_sem_agente",
+                    "detail": "O agente (Claude) só sai sozinho num assunto com o agente ligado "
+                    "no canal.",
+                },
+            )
+        liberados = set(canal.auto_categorias or [])
+        # Ajuste r3: os assuntos de produto "sempre pessoa confere" também
+        # (`constantes.ASSUNTOS_SO_PESSOA_NO_AGENTE` — a tela promete isso).
+        fora = [
+            c
+            for c in body.auto_agente
+            if c in ASSUNTOS_ORIENTACAO or c in ASSUNTOS_SO_PESSOA_NO_AGENTE or c not in liberados
+        ]
+        if fora:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "assunto_fora_do_automatico",
+                    "detail": "Só os assuntos já liberados no automático do canal (fora da "
+                    "orientação e dos de produto, que sempre têm pessoa conferindo): "
+                    + ", ".join(fora),
+                    "categorias": fora,
+                },
+            )
+        escolhidos = set(body.auto_agente)
+        # A ordem do `auto_categorias` (já na ordem do manual).
+        canal.auto_agente = [c for c in (canal.auto_categorias or []) if c in escolhidos]
+    if not canal.agente and (canal.auto_orientacao or canal.auto_agente):
+        canal.auto_orientacao = []
+        canal.auto_agente = []
+    elif canal.auto_agente:
+        # O assunto que saiu do automático do canal sai do agente também (e
+        # o de produto, de um valor antigo, sai sempre: ajuste r3).
+        liberados = set(canal.auto_categorias or []) - set(ASSUNTOS_SO_PESSOA_NO_AGENTE)
+        if any(c not in liberados for c in canal.auto_agente):
+            canal.auto_agente = [c for c in canal.auto_agente if c in liberados]
 
 
 # ── Manual da IA (regras QUANDO → FAÇA) ───────────────────────────────────
@@ -4320,6 +4730,232 @@ async def apagar_modelo(
     await session.delete(m)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Fatos da loja do agente: a lista de aprovação (spec 5.2, 20/10/2026) ──
+# O que o agente pode AFIRMAR (`atendimento_fatos`): o candidato (a correção
+# do 👎, a recusa padrão, o texto de política novo) espera o dono; só o ATIVO
+# vale (`agente.fatos_loja`), e ativo exige quem aprovou (CHECK no banco). A
+# aba do Manual lista (quem lê vê, no escopo da equipe) e o ADMIN aprova —
+# com o texto corrigido antes, se quiser — ou reprova; os dois guardam quem e
+# quando (`aprovado_por`/`aprovado_em`; reprovado = inativo com decisão, para
+# a mesma correção não voltar como candidata).
+
+FATO_CANDIDATO = "candidato"
+FATO_ATIVO = "ativo"
+FATO_REPROVADO = "reprovado"
+ESTADOS_FATO = (FATO_CANDIDATO, FATO_ATIVO, FATO_REPROVADO)
+MAX_FATOS_LISTA = 500
+_REF_CONVERSA = re.compile(r"\bconversa:([0-9a-fA-F-]{36})\b")
+
+
+def _estado_do_fato(f: AtendimentoFato) -> str:
+    if f.ativo:
+        return FATO_ATIVO
+    return FATO_CANDIDATO if f.aprovado_por is None else FATO_REPROVADO
+
+
+def _clausula_estado_fato(estado: str):
+    if estado == FATO_ATIVO:
+        return AtendimentoFato.ativo.is_(True)
+    decidido = AtendimentoFato.aprovado_por.is_not(None)
+    return and_(
+        AtendimentoFato.ativo.is_(False), decidido if estado == FATO_REPROVADO else not_(decidido)
+    )
+
+
+def _conversa_da_referencia(referencia: str | None) -> UUID | None:
+    achou = _REF_CONVERSA.search(referencia or "")
+    try:
+        return UUID(achou.group(1)) if achou else None
+    except ValueError:
+        return None
+
+
+async def _fatos_out(session: AsyncSession, fatos: list[AtendimentoFato]) -> list[FatoOut]:
+    """Os fatos para a tela, com o nome da loja e o do produto do escopo."""
+    lojas = await _nomes_das_lojas(session, {f.integration_id for f in fatos})
+    ids_produto = {f.product_id for f in fatos if f.product_id is not None}
+    produtos: dict[UUID, str] = {}
+    if ids_produto:
+        produtos = dict(
+            (
+                await session.execute(
+                    select(Product.id, Product.name).where(Product.id.in_(ids_produto))
+                )
+            ).all()
+        )
+    agora = datetime.now(UTC)
+    return [
+        FatoOut(
+            id=f.id,
+            chave=f.chave,
+            escopo=f.escopo,
+            plataforma=f.plataforma,
+            integration_id=f.integration_id,
+            loja=lojas.get(f.integration_id) if f.integration_id is not None else None,
+            item_id=f.item_id,
+            product_id=f.product_id,
+            produto=produtos.get(f.product_id) if f.product_id is not None else None,
+            sku=f.sku,
+            marca=f.marca,
+            assunto=f.assunto,
+            texto=f.texto,
+            fonte=f.fonte,
+            referencia=f.referencia,
+            conversa_id=_conversa_da_referencia(f.referencia),
+            ativo=f.ativo,
+            estado=_estado_do_fato(f),
+            vencido=bool(f.ativo and f.valido_ate is not None and _utc(f.valido_ate) <= agora),
+            aprovado_por=f.aprovado_por,
+            aprovado_em=_utc(f.aprovado_em),
+            valido_ate=_utc(f.valido_ate),
+            created_at=_utc(f.created_at),
+            updated_at=_utc(f.updated_at),
+        )
+        for f in fatos
+    ]
+
+
+@router.get("/fatos", response_model=ListaFatosOut)
+async def listar_fatos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+    estado: Annotated[str, Query()] = "todos",
+    fonte: Annotated[str | None, Query()] = None,
+    escopo: Annotated[str | None, Query()] = None,
+    plataforma: Annotated[str | None, Query()] = None,
+    assunto: Annotated[str | None, Query(max_length=32)] = None,
+    busca: Annotated[str | None, Query(max_length=200)] = None,
+    limite: Annotated[int, Query(ge=1, le=MAX_FATOS_LISTA)] = 200,
+) -> ListaFatosOut:
+    """Os fatos do agente, com filtros; `contagem` = quantos em cada estado (com os outros filtros).
+
+    Candidatos primeiro, depois os ativos e os reprovados; dentro, o mais
+    novo antes. No escopo da equipe: o fato de loja só para quem vê a loja
+    (o global, o da plataforma e o da marca, para todos).
+    """
+    if estado not in ("todos", *ESTADOS_FATO):
+        raise HTTPException(422, detail={"code": "estado_invalido"})
+    if fonte is not None and fonte not in FATO_FONTES:
+        raise HTTPException(422, detail={"code": "fonte_invalida"})
+    if escopo is not None and escopo not in FATO_ESCOPOS:
+        raise HTTPException(422, detail={"code": "escopo_invalido"})
+    if plataforma is not None and plataforma not in PLATAFORMAS_CAIXA:
+        raise HTTPException(422, detail={"code": "plataforma_invalida"})
+    scope = await resolve_team_scope(session, user)
+    t = AtendimentoFato
+    filtros = []
+    cond = _clausula_escopo(scope, t.integration_id)
+    if cond is not None:
+        filtros.append(or_(t.integration_id.is_(None), cond))
+    if fonte:
+        filtros.append(t.fonte == fonte)
+    if escopo:
+        filtros.append(t.escopo == escopo)
+    if plataforma:
+        filtros.append(t.plataforma == plataforma)
+    if assunto:
+        filtros.append(t.assunto == assunto.strip().lower())
+    termo = (busca or "").strip()
+    if termo:
+        filtros.append(t.texto.ilike(f"%{_escapar_like(termo)}%", escape="\\"))
+    # O estado pelas COLUNAS (sem parâmetro no GROUP BY — ver modelos_automaticos).
+    contagem = dict.fromkeys(ESTADOS_FATO, 0)
+    for ativo, sem_decisao, n in (
+        await session.execute(
+            select(t.ativo, t.aprovado_por.is_(None), func.count())
+            .where(*filtros)
+            .group_by(t.ativo, t.aprovado_por.is_(None))
+        )
+    ).all():
+        chave = FATO_ATIVO if ativo else (FATO_CANDIDATO if sem_decisao else FATO_REPROVADO)
+        contagem[chave] += int(n)
+    if estado != "todos":
+        filtros.append(_clausula_estado_fato(estado))
+    ordem_estado = case((t.ativo.is_(True), 1), (t.aprovado_por.is_(None), 0), else_=2)
+    fatos = list(
+        (
+            await session.scalars(
+                select(t)
+                .where(*filtros)
+                .order_by(ordem_estado, t.created_at.desc(), t.id.desc())
+                .limit(limite)
+            )
+        ).all()
+    )
+    return ListaFatosOut(fatos=await _fatos_out(session, fatos), contagem=contagem)
+
+
+async def _fato_para_decidir(session: AsyncSession, user: User, fato_id: int) -> AtendimentoFato:
+    """Aprovar e reprovar: só admin (o fato é o que o agente afirma, inclusive no
+    automático); fora do escopo da equipe = 404. Trava a linha (dois admins
+    decidindo ao mesmo tempo: o segundo vê a decisão do primeiro)."""
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "so_admin",
+                "detail": "Só admin aprova ou reprova o que o agente pode afirmar.",
+            },
+        )
+    f = await session.scalar(
+        select(AtendimentoFato).where(AtendimentoFato.id == fato_id).with_for_update()
+    )
+    scope = await resolve_team_scope(session, user)
+    if f is None or (f.integration_id is not None and not _no_escopo(scope, f.integration_id)):
+        raise HTTPException(404, detail={"code": "fato_nao_encontrado"})
+    return f
+
+
+@router.post("/fatos/{fato_id}/aprovar", response_model=FatoOut)
+async def aprovar_fato(
+    fato_id: int,
+    body: FatoAprovarIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> FatoOut:
+    """Liga o fato (o agente passa a poder afirmá-lo), com o texto corrigido, se vier."""
+    f = await _fato_para_decidir(session, user, fato_id)
+    if body.texto is not None and body.texto != f.texto:
+        f.texto = body.texto  # o `tsv` é refeito no flush (ouvinte do model)
+    f.ativo = True
+    f.aprovado_por = _nome(user) or str(user.id)
+    f.aprovado_em = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(f)
+    logger.info(
+        "atendimento_fato_aprovado",
+        fato_id=f.id,
+        fonte=f.fonte,
+        escopo=f.escopo,
+        texto_editado=body.texto is not None,
+        user_id=str(user.id),
+    )
+    return (await _fatos_out(session, [f]))[0]
+
+
+@router.post("/fatos/{fato_id}/reprovar", response_model=FatoOut)
+async def reprovar_fato(
+    fato_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> FatoOut:
+    """Desliga o fato (o candidato não entra; o ativo deixa de valer) e guarda quem decidiu."""
+    f = await _fato_para_decidir(session, user, fato_id)
+    f.ativo = False
+    f.aprovado_por = _nome(user) or str(user.id)
+    f.aprovado_em = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(f)
+    logger.info(
+        "atendimento_fato_reprovado",
+        fato_id=f.id,
+        fonte=f.fonte,
+        escopo=f.escopo,
+        user_id=str(user.id),
+    )
+    return (await _fatos_out(session, [f]))[0]
 
 
 # ── Sincronizar agora ─────────────────────────────────────────────────────

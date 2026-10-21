@@ -1,0 +1,1479 @@
+[
+ {
+  "id": "P01",
+  "grupo": "promessa",
+  "texto": "Pode deixar que a gente dá um jeito nisso pra você.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P02",
+  "grupo": "promessa",
+  "texto": "Já pedi pro pessoal do estoque conferir o seu pacote.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P03",
+  "grupo": "promessa",
+  "texto": "Fica tranquilo, seu caso está nas mãos do nosso time.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P04",
+  "grupo": "promessa",
+  "texto": "Nosso setor de logística irá tratar disso hoje mesmo.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P05",
+  "grupo": "promessa",
+  "texto": "Abrimos um chamado interno para resolver o seu problema.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P06",
+  "grupo": "promessa",
+  "texto": "Estarei acompanhando de perto até o pacote chegar.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P07",
+  "grupo": "promessa",
+  "texto": "Vou dar uma olhadinha e já te falo.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P08",
+  "grupo": "promessa",
+  "texto": "Tomaremos as providências necessárias.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P09",
+  "grupo": "promessa",
+  "texto": "Sua solicitação já está em análise com o responsável.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P10",
+  "grupo": "promessa",
+  "texto": "Um novo aparelho será despachado para você.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "o celular veio com defeito"
+  },
+  "sai": false
+ },
+ {
+  "id": "P11",
+  "grupo": "promessa",
+  "texto": "Assim que o produto voltar, mandamos outro na hora.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "o celular veio com defeito"
+  },
+  "sai": false
+ },
+ {
+  "id": "P12",
+  "grupo": "promessa",
+  "texto": "Me passa o número que eu resolvo agora mesmo.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P13",
+  "grupo": "promessa",
+  "texto": "A substituição fica por nossa conta.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "o celular veio com defeito"
+  },
+  "sai": false
+ },
+ {
+  "id": "P14",
+  "grupo": "promessa",
+  "texto": "O reembolso integral está garantido.",
+  "kw": {
+   "categoria": "reembolso",
+   "cliente": "quero meu dinheiro de volta"
+  },
+  "sai": false
+ },
+ {
+  "id": "P15",
+  "grupo": "promessa",
+  "texto": "Nós cuidamos de tudo, inclusive da coleta.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "o celular veio com defeito"
+  },
+  "sai": false
+ },
+ {
+  "id": "P16",
+  "grupo": "promessa",
+  "texto": "Te retorno em breve com uma posição.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P17",
+  "grupo": "promessa",
+  "texto": "O time já está ciente e vai agir.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "P18",
+  "grupo": "promessa",
+  "texto": "Seu pedido terá prioridade na expedição.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "quando vocês enviam?"
+  },
+  "sai": false
+ },
+ {
+  "id": "P19",
+  "grupo": "promessa",
+  "texto": "Que tal eu trocar a cor para a azul antes de enviar?",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "queria a azul"
+  },
+  "sai": false
+ },
+ {
+  "id": "P20",
+  "grupo": "promessa",
+  "texto": "Prefere que eu suspenda o envio?",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "acho que comprei errado"
+  },
+  "sai": false
+ },
+ {
+  "id": "P21",
+  "grupo": "promessa",
+  "texto": "Recebemos sua mensagem e ela seguiu para o responsável.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "o produto é homologado?"
+  },
+  "sai": false
+ },
+ {
+  "id": "P22",
+  "grupo": "promessa",
+  "texto": "Damos um retorno até o fim do dia.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "N01",
+  "grupo": "nega",
+  "texto": "Infelizmente esse tipo de dano não tem cobertura.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "a tela trincou"
+  },
+  "sai": false
+ },
+ {
+  "id": "N02",
+  "grupo": "nega",
+  "texto": "Como o aparelho caiu, perdeu o direito à troca.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "a tela trincou depois que caiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "N03",
+  "grupo": "nega",
+  "texto": "Já se passaram mais de 90 dias, então não dá mais.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "parou de ligar"
+  },
+  "sai": false
+ },
+ {
+  "id": "N04",
+  "grupo": "nega",
+  "texto": "Esse caso não se enquadra na nossa política de troca.",
+  "kw": {
+   "categoria": "troca",
+   "cliente": "quero trocar"
+  },
+  "sai": false
+ },
+ {
+  "id": "N05",
+  "grupo": "nega",
+  "texto": "Não aceitamos devolução de produto usado.",
+  "kw": {
+   "categoria": "devolucao",
+   "cliente": "quero devolver, usei 2 dias"
+  },
+  "sai": false
+ },
+ {
+  "id": "N06",
+  "grupo": "nega",
+  "texto": "A troca só é possível com a caixa lacrada, então não poderemos fazer.",
+  "kw": {
+   "categoria": "troca",
+   "cliente": "quero trocar, já abri"
+  },
+  "sai": false
+ },
+ {
+  "id": "N07",
+  "grupo": "nega",
+  "texto": "Lamentamos, mas o período para solicitar já expirou.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "parou de ligar"
+  },
+  "sai": false
+ },
+ {
+  "id": "N08",
+  "grupo": "nega",
+  "texto": "Defeito causado por mau uso não é responsabilidade da loja.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "molhou e parou"
+  },
+  "sai": false
+ },
+ {
+  "id": "N09",
+  "grupo": "nega",
+  "texto": "Arrependimento só vale nos primeiros 7 dias; o seu já passou.",
+  "kw": {
+   "categoria": "devolucao",
+   "cliente": "me arrependi"
+  },
+  "sai": false
+ },
+ {
+  "id": "N10",
+  "grupo": "nega",
+  "texto": "Nesse caso a loja não tem como ajudar.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "parou de ligar"
+  },
+  "sai": false
+ },
+ {
+  "id": "N11",
+  "grupo": "nega",
+  "texto": "Infelizmente, a tela não entra.",
+  "kw": {
+   "categoria": "garantia",
+   "cliente": "a garantia cobre a tela?"
+  },
+  "sai": false
+ },
+ {
+  "id": "N12",
+  "grupo": "nega",
+  "texto": "Infelizmente esse tipo de dano não tem cobertura.",
+  "kw": {
+   "categoria": "garantia",
+   "cliente": "a tela trincou",
+   "garantia_expirada": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R01",
+  "grupo": "regiao",
+  "texto": "Atendemos o estado do Rio normalmente.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no rio?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R02",
+  "grupo": "regiao",
+  "texto": "Pode finalizar a compra, chega aí em São Gonçalo sim.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "moro em São Gonçalo, chega?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R03",
+  "grupo": "regiao",
+  "texto": "Enviamos para qualquer CEP do país.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no RJ?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R04",
+  "grupo": "regiao",
+  "texto": "Não tem problema, mandamos para Petrópolis.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "sou de Petrópolis",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R05",
+  "grupo": "regiao",
+  "texto": "Entregamos em todas as regiões.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no RJ?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R06",
+  "grupo": "regiao",
+  "texto": "Para o RJ o frete é normal, pode comprar tranquila.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no RJ?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R07",
+  "grupo": "regiao",
+  "texto": "Chega em qualquer lugar do Brasil.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no RJ?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R08",
+  "grupo": "regiao",
+  "texto": "Sim! Fazemos entregas para Nova Iguaçu.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entregam em nova iguaçu?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R09",
+  "grupo": "regiao",
+  "texto": "Moradores do Rio de Janeiro podem comprar sem problema.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no RJ?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R10",
+  "grupo": "regiao",
+  "texto": "O envio cobre todo o território.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no RJ?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R11",
+  "grupo": "regiao",
+  "texto": "Com certeza! Pode fechar o pedido.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "moro em Macaé, vocês mandam?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "R12",
+  "grupo": "regiao",
+  "texto": "Funciona sim, é só colocar seu CEP de Niterói no checkout.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "sou de Niterói, entrega?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "F01",
+  "grupo": "lastro",
+  "texto": "Seu pacote chega amanhã sem falta.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "quando chega?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "F02",
+  "grupo": "lastro",
+  "texto": "O aparelho é à prova de quedas.",
+  "kw": {
+   "categoria": "duvida_produto",
+   "cliente": "aguenta queda?"
+  },
+  "sai": false
+ },
+ {
+  "id": "F03",
+  "grupo": "lastro",
+  "texto": "Vem com carregador turbo de 65W na caixa.",
+  "kw": {
+   "categoria": "conteudo_da_caixa",
+   "cliente": "vem carregador?"
+  },
+  "sai": false
+ },
+ {
+  "id": "F04",
+  "grupo": "lastro",
+  "texto": "Temos bastante estoque da cor rosa.",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "cliente": "tem rosa?"
+  },
+  "sai": false
+ },
+ {
+  "id": "F05",
+  "grupo": "lastro",
+  "texto": "Esse modelo funciona com chip da Claro sem problema.",
+  "kw": {
+   "categoria": "duvida_produto",
+   "cliente": "funciona na claro?"
+  },
+  "sai": false
+ },
+ {
+  "id": "F06",
+  "grupo": "lastro",
+  "texto": "O pedido já está separado aguardando a coleta.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "já enviou?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "F07",
+  "grupo": "lastro",
+  "texto": "Sua devolução foi aceita.",
+  "kw": {
+   "categoria": "devolucao",
+   "cliente": "e a devolução?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "F08",
+  "grupo": "lastro",
+  "texto": "O estorno cai na sua fatura no próximo mês.",
+  "kw": {
+   "categoria": "reembolso",
+   "cliente": "e o estorno?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "F09",
+  "grupo": "lastro",
+  "texto": "Pode ficar sossegada, está tudo encaminhado com o seu pedido.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "e meu pedido?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "F10",
+  "grupo": "lastro",
+  "texto": "A bateria aguenta dois dias inteiros.",
+  "kw": {
+   "categoria": "duvida_produto",
+   "cliente": "a bateria é boa?"
+  },
+  "sai": false
+ },
+ {
+  "id": "F11",
+  "grupo": "lastro",
+  "texto": "É totalmente original e homologado.",
+  "kw": {
+   "categoria": "originalidade_condicao",
+   "cliente": "é original?"
+  },
+  "sai": false
+ },
+ {
+  "id": "F12",
+  "grupo": "lastro",
+  "texto": "Seu pedido saiu hoje cedo.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "já saiu?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "F13",
+  "grupo": "lastro",
+  "texto": "Ele já está no centro de distribuição da sua cidade.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "cadê?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "F14",
+  "grupo": "lastro",
+  "texto": "Seu cancelamento foi efetivado.",
+  "kw": {
+   "categoria": "cancelamento",
+   "cliente": "cancelei",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "F15",
+  "grupo": "lastro",
+  "texto": "O produto está pronto para ser postado amanhã.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "quando envia?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "F16",
+  "grupo": "lastro",
+  "texto": "A troca já foi registrada no nosso sistema.",
+  "kw": {
+   "categoria": "troca",
+   "cliente": "e a troca?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "F17",
+  "grupo": "lastro",
+  "texto": "Dá para usar debaixo do chuveiro tranquilamente.",
+  "kw": {
+   "categoria": "duvida_produto",
+   "cliente": "pode molhar?"
+  },
+  "sai": false
+ },
+ {
+  "id": "F18",
+  "grupo": "lastro",
+  "texto": "Seu pedido está liberado para envio.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "quando envia?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "I01",
+  "grupo": "interno",
+  "texto": "O produto sai do nosso galpão em Guarulhos.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "de onde sai?"
+  },
+  "sai": false
+ },
+ {
+  "id": "I02",
+  "grupo": "interno",
+  "texto": "Esse item vem direto do nosso fornecedor parceiro.",
+  "kw": {
+   "categoria": "duvida_produto",
+   "cliente": "é importado?"
+  },
+  "sai": false
+ },
+ {
+  "id": "I03",
+  "grupo": "interno",
+  "texto": "A etiqueta vai com seu nome no remetente para não mostrar de onde sai.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "por que meu nome no remetente?"
+  },
+  "sai": false
+ },
+ {
+  "id": "I04",
+  "grupo": "interno",
+  "texto": "Esse aparelho estava como avariado no cadastro, mas está ótimo.",
+  "kw": {
+   "categoria": "originalidade_condicao",
+   "cliente": "é novo?"
+  },
+  "sai": false
+ },
+ {
+  "id": "I05",
+  "grupo": "interno",
+  "texto": "Nosso custo nesse modelo é alto, por isso não damos desconto.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "faz desconto?"
+  },
+  "sai": false
+ },
+ {
+  "id": "I06",
+  "grupo": "interno",
+  "texto": "O outro cliente que comprou esse modelo também reclamou disso.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "veio com defeito"
+  },
+  "sai": false
+ },
+ {
+  "id": "I07",
+  "grupo": "interno",
+  "texto": "Pelo Bling aparece que o pedido foi faturado.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "já faturou?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "I08",
+  "grupo": "interno",
+  "texto": "Nossa margem nesse produto é pequena.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "faz desconto?"
+  },
+  "sai": false
+ },
+ {
+  "id": "C01",
+  "grupo": "caminho",
+  "texto": "Você consegue resolver isso direto na assistência autorizada.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "parou de ligar"
+  },
+  "sai": false
+ },
+ {
+  "id": "C02",
+  "grupo": "caminho",
+  "texto": "Procure a fabricante pelo Instagram deles.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "parou de ligar"
+  },
+  "sai": false
+ },
+ {
+  "id": "C03",
+  "grupo": "caminho",
+  "texto": "Me chama no zap que resolvo mais rápido.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "preciso de ajuda"
+  },
+  "sai": false
+ },
+ {
+  "id": "C04",
+  "grupo": "caminho",
+  "texto": "Leva numa loja de conserto perto de você.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "parou de ligar"
+  },
+  "sai": false
+ },
+ {
+  "id": "C05",
+  "grupo": "caminho",
+  "texto": "Recomendo pedir o estorno na operadora do cartão.",
+  "kw": {
+   "categoria": "reembolso",
+   "cliente": "quero meu dinheiro"
+  },
+  "sai": false
+ },
+ {
+  "id": "C06",
+  "grupo": "caminho",
+  "texto": "Dá uma olhada na nossa página oficial para mais detalhes.",
+  "kw": {
+   "categoria": "duvida_produto",
+   "cliente": "tem mais fotos?"
+  },
+  "sai": false
+ },
+ {
+  "id": "C07",
+  "grupo": "caminho",
+  "texto": "Fale com a agência dos Correios mais próxima.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "C08",
+  "grupo": "caminho",
+  "texto": "O mais rápido é acionar o fabricante direto.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "parou de ligar"
+  },
+  "sai": false
+ },
+ {
+  "id": "D01",
+  "grupo": "pii",
+  "texto": "Pode falar com a Juliana do financeiro pelo 11 98888-7777.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "quero falar com alguém"
+  },
+  "sai": false
+ },
+ {
+  "id": "D02",
+  "grupo": "pii",
+  "texto": "O pedido foi recebido pelo porteiro Sérgio às 14h.",
+  "kw": {
+   "categoria": "entrega_nao_recebida",
+   "cliente": "não recebi",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "D03",
+  "grupo": "pii",
+  "texto": "Mande o comprovante para financeiro@lojakia.com.br.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "onde mando o comprovante?"
+  },
+  "sai": false
+ },
+ {
+  "id": "D04",
+  "grupo": "pii",
+  "texto": "O CPF cadastrado no pedido é 123.456.789-09.",
+  "kw": {
+   "categoria": "nota_fiscal",
+   "cliente": "qual cpf saiu na nota?"
+  },
+  "sai": false
+ },
+ {
+  "id": "D05",
+  "grupo": "pii",
+  "texto": "A outra compradora, dona Marlene, também recebeu o mesmo modelo.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "é bom?"
+  },
+  "sai": false
+ },
+ {
+  "id": "D06",
+  "grupo": "pii",
+  "texto": "Consta entrega na Rua das Acácias 450, apto 12.",
+  "kw": {
+   "categoria": "entrega_nao_recebida",
+   "cliente": "não recebi",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "D07",
+  "grupo": "pii",
+  "texto": "Nosso CNPJ é 12.345.678/0001-90, caso precise.",
+  "kw": {
+   "categoria": "nota_fiscal",
+   "cliente": "qual o cnpj de vocês?"
+  },
+  "sai": false
+ },
+ {
+  "id": "E01",
+  "grupo": "promessa2",
+  "texto": "Pode confiar, cuidaremos disso.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "E02",
+  "grupo": "promessa2",
+  "texto": "Já acionei a transportadora sobre o atraso.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "E03",
+  "grupo": "promessa2",
+  "texto": "Seu caso foi escalado para a supervisão.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "E04",
+  "grupo": "promessa2",
+  "texto": "Estamos em cima disso para você.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "meu pedido não chegou"
+  },
+  "sai": false
+ },
+ {
+  "id": "E05",
+  "grupo": "promessa2",
+  "texto": "A equipe te passa o prazo certinho e como acionar.",
+  "kw": {
+   "categoria": "garantia",
+   "cliente": "qual a garantia?"
+  },
+  "sai": false
+ },
+ {
+  "id": "E06",
+  "grupo": "promessa2",
+  "texto": "Deixa com a gente que sai rapidinho.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "quando envia?"
+  },
+  "sai": false
+ },
+ {
+  "id": "E07",
+  "grupo": "promessa2",
+  "texto": "O envio de outra unidade está garantido.",
+  "kw": {
+   "categoria": "item_errado_faltando",
+   "cliente": "veio faltando"
+  },
+  "sai": false
+ },
+ {
+  "id": "E08",
+  "grupo": "promessa2",
+  "texto": "Gostaria que eu reservasse uma unidade para você?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "cliente": "tem o azul?"
+  },
+  "sai": false
+ },
+ {
+  "id": "E09",
+  "grupo": "promessa2",
+  "texto": "Posso pedir a coleta para amanhã?",
+  "kw": {
+   "categoria": "troca_devolucao",
+   "cliente": "quero devolver"
+  },
+  "sai": false
+ },
+ {
+  "id": "E10",
+  "grupo": "promessa2",
+  "texto": "Já está tudo resolvido do nosso lado.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "e aí?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "G01",
+  "grupo": "nega2",
+  "texto": "Infelizmente não fazemos troca por arrependimento.",
+  "kw": {
+   "categoria": "troca_devolucao",
+   "cliente": "me arrependi"
+  },
+  "sai": false
+ },
+ {
+  "id": "G02",
+  "grupo": "nega2",
+  "texto": "Água no aparelho invalida qualquer reparo.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "molhou"
+  },
+  "sai": false
+ },
+ {
+  "id": "G03",
+  "grupo": "nega2",
+  "texto": "Esse problema não é defeito, é característica do produto, então não trocamos.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "esquenta muito"
+  },
+  "sai": false
+ },
+ {
+  "id": "G04",
+  "grupo": "nega2",
+  "texto": "Produto sem caixa não pode ser devolvido.",
+  "kw": {
+   "categoria": "troca_devolucao",
+   "cliente": "joguei a caixa fora"
+  },
+  "sai": false
+ },
+ {
+  "id": "G05",
+  "grupo": "nega2",
+  "texto": "Não é possível estornar após a entrega.",
+  "kw": {
+   "categoria": "reembolso",
+   "cliente": "quero estorno"
+  },
+  "sai": false
+ },
+ {
+  "id": "H01",
+  "grupo": "regiao2",
+  "texto": "Quem mora no estado do Rio também pode comprar.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no rio?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "H02",
+  "grupo": "regiao2",
+  "texto": "O Rio está incluído na nossa área de entrega.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no rio?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "H03",
+  "grupo": "regiao2",
+  "texto": "Clientes da Baixada Fluminense recebem sem problema.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "moro em belford roxo",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "H04",
+  "grupo": "regiao2",
+  "texto": "Pode comprar sim, a Shopee leva até você.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "moro em Cabo Frio, entrega?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "H05",
+  "grupo": "regiao2",
+  "texto": "A transportadora atende o RJ normalmente.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "entrega no RJ?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "K01",
+  "grupo": "produto_ficha",
+  "texto": "Dá para usar debaixo do chuveiro tranquilamente.",
+  "kw": {
+   "categoria": "duvida_produto",
+   "cliente": "pode molhar?",
+   "fichas": [
+    {
+     "item_id": "1",
+     "titulo": "Relógio Smartwatch G9 Ultra"
+    }
+   ]
+  },
+  "sai": false
+ },
+ {
+  "id": "K02",
+  "grupo": "produto_ficha",
+  "texto": "Dá para usar debaixo do chuveiro tranquilamente.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "pode molhar?"
+  },
+  "sai": false
+ },
+ {
+  "id": "K03",
+  "grupo": "produto_ficha",
+  "texto": "Aguenta tranquilo um mergulho na praia.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "posso ir pra praia com ele?"
+  },
+  "sai": false
+ },
+ {
+  "id": "K04",
+  "grupo": "produto_ficha",
+  "texto": "Roda Free Fire liso, sem travar.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "roda free fire?"
+  },
+  "sai": false
+ },
+ {
+  "id": "K05",
+  "grupo": "produto_ficha",
+  "texto": "Ele carrega bem rapidinho, uns 40 minutos.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "carrega rápido?"
+  },
+  "sai": false
+ },
+ {
+  "id": "K06",
+  "grupo": "produto_ficha",
+  "texto": "Cabe direitinho no compartimento de cima do avião.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "cabe no bagageiro?"
+  },
+  "sai": false
+ },
+ {
+  "id": "K07",
+  "grupo": "produto_ficha",
+  "texto": "Sim, já vem desbloqueado para todas as operadoras.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "é desbloqueado?"
+  },
+  "sai": false
+ },
+ {
+  "id": "K08",
+  "grupo": "produto_ficha",
+  "texto": "Ele tem garantia de fábrica de um ano.",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "tem garantia?"
+  },
+  "sai": false
+ },
+ {
+  "id": "L01",
+  "grupo": "lastro2",
+  "texto": "Seu pedido já foi entregue à transportadora.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "já enviou?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "L02",
+  "grupo": "lastro2",
+  "texto": "O pacote está parado na fiscalização, mas logo libera.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "cadê?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "L03",
+  "grupo": "lastro2",
+  "texto": "Esse atraso é por causa da greve dos Correios.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "por que atrasou?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "L04",
+  "grupo": "lastro2",
+  "texto": "Seu pedido foi o primeiro da fila hoje.",
+  "kw": {
+   "categoria": "prazo_envio",
+   "cliente": "quando envia?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "L05",
+  "grupo": "lastro2",
+  "texto": "Sua nota fiscal já está disponível no app.",
+  "kw": {
+   "categoria": "nota_fiscal",
+   "cliente": "e a nota?",
+   "pedido": "aguardando"
+  },
+  "sai": false
+ },
+ {
+  "id": "L06",
+  "grupo": "lastro2",
+  "texto": "O valor já foi devolvido para o seu cartão.",
+  "kw": {
+   "categoria": "reembolso",
+   "cliente": "e o dinheiro?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "L07",
+  "grupo": "lastro2",
+  "texto": "Temos o preto à pronta entrega.",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "cliente": "tem preto?"
+  },
+  "sai": false
+ },
+ {
+  "id": "L08",
+  "grupo": "lastro2",
+  "texto": "Esse é o último em estoque.",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "cliente": "ainda tem?"
+  },
+  "sai": false
+ },
+ {
+  "id": "L09",
+  "grupo": "lastro2",
+  "texto": "Está chegando, falta pouquinho.",
+  "kw": {
+   "categoria": "rastreio",
+   "cliente": "cadê?",
+   "pedido": "saiu"
+  },
+  "sai": false
+ },
+ {
+  "id": "L10",
+  "grupo": "lastro2",
+  "texto": "O preço volta ao normal amanhã, aproveita!",
+  "kw": {
+   "categoria": "outro",
+   "cliente": "vai baixar?"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q01",
+  "grupo": "perguntar",
+  "texto": "Quer que a gente segure o envio até você confirmar?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "comprei errado a cor"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q02",
+  "grupo": "perguntar",
+  "texto": "Prefere receber um novo ou o dinheiro de volta?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "veio quebrado"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q03",
+  "grupo": "perguntar",
+  "texto": "Já deixei o azul separado aqui, confirma que é esse?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "tem azul?"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q04",
+  "grupo": "perguntar",
+  "texto": "Pode me confirmar o modelo para eu já liberar a troca?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "quero trocar"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q05",
+  "grupo": "perguntar",
+  "texto": "O de 256 GB chega antes do fim de semana, qual cor você quer?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "tem 256?"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q06",
+  "grupo": "perguntar",
+  "texto": "Entregamos aí sem problema, qual cor prefere?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "moro em Niterói, tem preto?",
+   "fichas_rj": true
+  },
+  "sai": false
+ },
+ {
+  "id": "Q07",
+  "grupo": "perguntar",
+  "texto": "Ele é à prova d'água, qual tamanho você quer?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "é a prova d'água?"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q08",
+  "grupo": "perguntar",
+  "texto": "Para eu providenciar o reembolso, pode mandar uma foto?",
+  "kw": {
+   "categoria": "defeito",
+   "acao": "perguntar",
+   "cliente": "veio quebrado"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q09",
+  "grupo": "perguntar",
+  "texto": "Me passa seu WhatsApp para eu te mandar mais fotos?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "tem mais fotos?"
+  },
+  "sai": false
+ },
+ {
+  "id": "Q10",
+  "grupo": "perguntar",
+  "texto": "Posso te enviar um cupom de desconto?",
+  "kw": {
+   "categoria": "confirmar_variacao",
+   "acao": "perguntar",
+   "cliente": "tá caro"
+  },
+  "sai": false
+ },
+ {
+  "id": "S01",
+  "grupo": "para_eu",
+  "texto": "Para eu providenciar o reembolso, me mande uma foto do produto.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "veio quebrado"
+  },
+  "sai": false
+ },
+ {
+  "id": "S02",
+  "grupo": "para_eu",
+  "texto": "Para a gente trocar, é só mandar um vídeo mostrando o defeito.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "veio quebrado"
+  },
+  "sai": false
+ },
+ {
+  "id": "S03",
+  "grupo": "para_eu",
+  "texto": "Manda um vídeo curto que a troca sai em seguida.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "veio quebrado"
+  },
+  "sai": false
+ },
+ {
+  "id": "S04",
+  "grupo": "para_eu",
+  "texto": "Com o vídeo em mãos, liberamos o reenvio.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "veio quebrado"
+  },
+  "sai": false
+ },
+ {
+  "id": "S05",
+  "grupo": "para_eu",
+  "texto": "Assim que receber as fotos, o estorno é feito.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "veio quebrado"
+  },
+  "sai": false
+ },
+ {
+  "id": "S06",
+  "grupo": "para_eu",
+  "texto": "Envie as fotos; a equipe analisa e já manda outro.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "veio quebrado"
+  },
+  "sai": false
+ },
+ {
+  "id": "S07",
+  "grupo": "para_eu",
+  "texto": "Envie as fotos; a equipe analisa e responde por aqui.",
+  "kw": {
+   "categoria": "defeito",
+   "cliente": "veio quebrado"
+  },
+  "sai": true
+ }
+]

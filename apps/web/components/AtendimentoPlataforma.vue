@@ -27,6 +27,9 @@ export type Flags = {
   // só as lojas no Automático — `['auto']`); null = toda loja ("todos" no
   // servidor). A API antiga não manda (toda loja, como antes).
   humano_modos?: string[] | null
+  // Há chave Claude no servidor (20/10/2026): o botão "Agente (Claude)" dos
+  // canais aparece. Só o sim/não — a chave nunca vem para a tela.
+  agente_disponivel?: boolean
 }
 export type Canal = {
   id: string
@@ -47,6 +50,17 @@ export type Canal = {
   ultimo_erro: string | null
   nao_lidas_plataforma: number | null
   auto_categorias: string[]
+  // O AGENTE (Claude) responde nesta caixa no lugar da IA de hoje (20/10/2026,
+  // só admin liga) e os assuntos de ORIENTAÇÃO que ele pode mandar sozinho
+  // (`ASSUNTOS_ORIENTACAO`, só com o agente ligado). `agente_disponivel` = o
+  // botão aparece (chave Claude no servidor e plataforma do agente). A API
+  // antiga não manda (sem agente).
+  agente?: boolean
+  auto_orientacao?: string[]
+  // Os OUTROS assuntos (dos `auto_categorias`) em que o agente sai sozinho
+  // (decisão 8: o dono marca depois do eval; nasce vazio).
+  auto_agente?: string[]
+  agente_disponivel?: boolean
 }
 // `a_conferir` = respostas nossas que a plataforma não confirmou (status
 // `revisar`) e que alguém precisa marcar se saíram ou não. Opcional por nível:
@@ -328,6 +342,9 @@ export type Rascunho = {
   // depois: sem o selo "precisa de pessoa" (`seloPrecisaDePessoa`). A API
   // antiga não manda (vale como do turno).
   do_turno_atual?: boolean | null
+  // Só no rascunho do AGENTE (20/10/2026): o que ele consultou e as ações de
+  // pessoa (`linhaDoAgente` escreve). null = a IA de hoje.
+  agente?: AgenteResumo | null
 }
 // `enviado_em`, `data_envio` e `nota_fiscal` vão além do mínimo da spec: o
 // contexto.py manda para as lacunas {data_envio} e {nf_numero} (as mesmas da IA).
@@ -1101,6 +1118,143 @@ export function categoriasDe(r: unknown): Categoria[] {
     }))
 }
 
+// ─── agente (Claude, 20/10/2026) ────────────────────────────────────────────
+// O agente com ferramentas só de leitura, ligado caixa por caixa (o botão
+// "Agente (Claude)" em Lojas e modo, só admin, só com a chave Claude no
+// servidor). No canal com ele, os assuntos abaixo deixam de ir para pessoa
+// pelo assunto: ele orienta, e só passa para pessoa quando alguém precisa
+// AGIR ou DECIDIR (as ações de pessoa). Sai SOZINHO só o assunto que o admin
+// marcou no `auto_orientacao` da caixa. Os mesmos de
+// `constantes.ASSUNTOS_ORIENTACAO` (o backend recusa os outros com 422).
+export const ASSUNTOS_ORIENTACAO = [
+  'cancelamento', 'troca_devolucao', 'reembolso', 'garantia', 'defeito', 'item_errado_faltando',
+  'entrega_nao_recebida', 'endereco', 'desconto', 'divergencia_anuncio', 'substituicao_estoque', 'outro',
+]
+// Os assuntos de DADO DO PRODUTO que, com o agente, NUNCA saem sozinhos no
+// automático (revisão 2 de 20/10/2026): a resposta pela ficha vai sempre para
+// pessoa conferir — `ficha.CATEGORIAS_DA_FICHA` + resistência à água e
+// condição (`ia._CATEGORIAS_DA_FICHA_DO_AGENTE`) —, e a afirmação de
+// característica do produto também, em qualquer assunto. No legado eles saíam
+// pelo texto aprovado (`ficha_respostas`); liberar no agente é decisão do dono.
+export const ASSUNTOS_SO_PESSOA_NO_AGENTE = [
+  'o_que_e_o_anuncio', 'espec_celular', 'espec_mala', 'espec_eletro', 'espec_outros',
+  'conteudo_da_caixa', 'duvida_produto', 'resistencia_agua', 'originalidade_condicao',
+]
+// Reserva dos nomes (o GET /categorias do manual base manda os de verdade).
+const NOMES_ORIENTACAO: Record<string, string> = {
+  item_errado_faltando: 'Item faltando ou errado',
+  entrega_nao_recebida: 'Consta entregue e não chegou',
+  divergencia_anuncio: 'Informação conflitante no anúncio',
+  substituicao_estoque: 'Aviso de falta de estoque',
+}
+export function orientacaoLabel(c: string | null | undefined): string {
+  return nomesCategorias[c || ''] || NOMES_ORIENTACAO[c || ''] || categoriaLabel(c)
+}
+// As ferramentas do agente (`agente/ferramentas.NOMES`), como a tela escreve.
+export const FERRAMENTAS_AGENTE: Record<string, string> = {
+  ver_anuncio: 'anúncio',
+  ver_pedido: 'pedido',
+  ver_garantia: 'garantia',
+  consultar_manual: 'manual',
+  buscar_respostas_equipe: 'respostas da equipe',
+  sugerir_troca: 'troca',
+}
+export type AcaoPessoa = { codigo: string; rotulo: string }
+export type AgenteResumo = {
+  ferramentas: string[]
+  ferramentas_com_erro?: string[]
+  acoes_pessoa: AcaoPessoa[]
+  acao?: string | null
+  parada?: string | null
+  // Rodada 4 (21/10/2026): os avisos das regras suaves (a sugestão fica; a
+  // pessoa confere o ponto antes de enviar).
+  avisos?: string[]
+}
+// O rastro enxuto numa linha: "Consultou: pedido, anúncio (sem dado) · Precisa
+// de pessoa: Analisar foto ou vídeo · Confira: promete ação da equipe…". Vazio
+// no rascunho do legado.
+export function linhaDoAgente(a: AgenteResumo | null | undefined): string {
+  if (!a) return ''
+  const erro = new Set(a.ferramentas_com_erro || [])
+  const ferramentas = (a.ferramentas || []).map((f) => `${FERRAMENTAS_AGENTE[f] || f}${erro.has(f) ? ' (sem dado)' : ''}`)
+  const partes = [ferramentas.length ? `Consultou: ${ferramentas.join(', ')}` : 'Não consultou nada']
+  const acoes = (a.acoes_pessoa || []).map((x) => x.rotulo || x.codigo).filter(Boolean)
+  if (acoes.length) partes.push(`Precisa de pessoa: ${acoes.join('; ')}`)
+  const avisos = (a.avisos || []).filter(Boolean)
+  if (avisos.length) partes.push(`Confira: ${avisos.join('; ')}`)
+  return partes.join(' · ')
+}
+
+// Os FATOS que o agente pode afirmar (`atendimento_fatos`, spec 5.2): o
+// candidato espera o admin na aba do Manual; só o ativo vale.
+export type EstadoFato = 'candidato' | 'ativo' | 'reprovado'
+export type Fato = {
+  id: number
+  chave?: string | null
+  escopo: string
+  plataforma: string | null
+  integration_id: string | null
+  loja: string | null
+  item_id: string | null
+  product_id: string | null
+  produto: string | null
+  sku: string | null
+  marca: string | null
+  assunto: string | null
+  texto: string
+  fonte: string
+  referencia: string | null
+  conversa_id: string | null
+  ativo: boolean
+  estado: EstadoFato
+  vencido?: boolean
+  aprovado_por: string | null
+  aprovado_em: string | null
+  valido_ate: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+export const ESTADOS_FATO: { value: EstadoFato; label: string; hint: string; cls: string }[] = [
+  { value: 'candidato', label: 'Candidatos', hint: 'esperam o admin aprovar ou reprovar', cls: 'bg-amber-500/15 text-amber-800 dark:text-amber-300' },
+  { value: 'ativo', label: 'Ativos', hint: 'o agente pode afirmar', cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300' },
+  { value: 'reprovado', label: 'Reprovados', hint: 'alguém decidiu que não — ficam guardados', cls: 'bg-gray-500/15 text-muted-foreground' },
+]
+export function estadoFatoInfo(e: string | null | undefined) {
+  return ESTADOS_FATO.find((x) => x.value === e) ?? { value: e as EstadoFato, label: e || '—', hint: '', cls: 'bg-muted text-muted-foreground' }
+}
+// `constantes.FATO_FONTES`, como a tela escreve.
+export const FONTES_FATO: Record<string, string> = {
+  manual: 'manual',
+  frase_rapida: 'frase rápida da equipe',
+  correcao: 'correção de 👎',
+  dono: 'o dono',
+  recusa_padrao: 'recusa padrão',
+  site: 'site da marca',
+}
+// `constantes.FATO_ESCOPOS`: onde o fato vale.
+export const ESCOPOS_FATO: Record<string, string> = {
+  global: 'todas as lojas',
+  plataforma: 'a plataforma',
+  loja: 'uma loja',
+  anuncio: 'um anúncio',
+  produto: 'um produto',
+  sku: 'um SKU',
+  marca: 'uma marca',
+}
+export function alcanceDoFato(f: Pick<Fato, 'escopo' | 'plataforma' | 'loja' | 'item_id' | 'produto' | 'product_id' | 'sku' | 'marca'>): string {
+  const plat = f.plataforma ? plataformaInfo(f.plataforma).nome : ''
+  switch (f.escopo) {
+    case 'global': return 'todas as lojas'
+    case 'plataforma': return plat || 'a plataforma'
+    case 'loja': return [plat, f.loja || 'loja'].filter(Boolean).join(' · ')
+    case 'anuncio': return [plat, `anúncio ${f.item_id || ''}`.trim()].filter(Boolean).join(' · ')
+    case 'produto': return `produto ${f.produto || f.product_id || ''}`.trim()
+    case 'sku': return `SKU ${f.sku || ''}`.trim()
+    case 'marca': return `marca ${f.marca || ''}`.trim()
+    default: return f.escopo
+  }
+}
+
 // ─── Caixa Humano (09/10/2026) ──────────────────────────────────────────────
 // O Eduardo: "criaremos ao lado da Caixa uma Caixa Humano [...] só as que
 // falta responder por um humano que a IA não conseguiu". Quem decide é o
@@ -1122,6 +1276,7 @@ export const ROTULO_HUMANO: Record<string, string> = {
   e_mail: 'E-mail: só pessoa',
   pedido_nao_achado: 'Pedido não achado no Bling',
   sem_dado: 'Falta dado (rastreio/NF)',
+  acao_pessoa: 'Ação de pessoa',
   assunto: 'Assunto só de pessoa',
   so_anexo: 'Só foto/vídeo/arquivo',
   ia: 'A IA marcou: precisa de pessoa',
@@ -1847,6 +2002,13 @@ export const ERROS: Record<string, string> = {
   nao_e_conversa_de_email: 'Esta conversa não é de e-mail da ponte.',
   conversa_sem_email: 'Esta conversa não tem e-mail para vincular.',
   caixa_invalida: 'Caixa desconhecida.',
+  // Fatos do agente (aba do Manual, 20/10/2026). O resto dos códigos do
+  // agente (agente_indisponivel, orientacao_sem_agente, teto_agente…) vem com
+  // a frase do backend, que diz o porquê.
+  fato_nao_encontrado: 'Fato não encontrado (atualize a lista).',
+  estado_invalido: 'Filtro de estado desconhecido.',
+  fonte_invalida: 'Fonte desconhecida.',
+  escopo_invalido: 'Escopo desconhecido.',
 }
 // Códigos em que a frase do backend traz o específico do caso: o porquê do
 // bloqueio; quem respondeu e a que horas (conversa_mudou).
@@ -1862,7 +2024,8 @@ const DETALHE_MANDA = new Set(['so_admin'])
 const CAMPOS: Record<string, string> = {
   texto: 'texto', motivo: 'motivo', correcao: 'correção', quando: '"quando"', faca: '"faça"',
   titulo: 'título', plataforma: 'plataforma', canal: 'caixa', modo: 'modo', auto_categorias: 'categorias',
-  categoria: 'assunto', tipo: 'tipo', prioridade: 'prioridade',
+  categoria: 'assunto', tipo: 'tipo', prioridade: 'prioridade', auto_orientacao: 'assuntos de orientação',
+  auto_agente: 'assuntos do agente',
 }
 function motivoDeValidacao(x: any): string {
   const loc = Array.isArray(x?.loc) ? x.loc : []

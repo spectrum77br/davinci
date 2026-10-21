@@ -101,12 +101,32 @@ Troca de produto (07/10/2026, migration 0379 — item 4, fase 4c):
                          cada passo no Bling (`passos`). Não é atômica: o
                          `estado` diz onde parou e o `retomar` segue dali.
 
+Agente de atendimento (20/10/2026, migration 0420 — o Claude Haiku com
+ferramentas SÓ DE LEITURA no lugar da IA de uma chamada, canal por canal):
+o canal ganha `agente` (o botão "Agente (Claude)", só admin),
+`auto_orientacao` (os assuntos de orientação que podem sair sozinhos) e
+`auto_agente` (os outros assuntos em que o agente pode sair sozinho), e
+entram quatro tabelas —
+
+  `atendimento_fatos`         — fatos da loja com ESCOPO (global, plataforma,
+                                loja, anúncio, produto, SKU ou marca), que o
+                                agente cita como `fato:<id>`. Só vale o ATIVO,
+                                e ativo exige aprovação (quem e quando).
+  `atendimento_pares`         — pergunta × resposta da equipe, já mascaradas e
+                                generalizadas: exemplos de TOM, nunca fato.
+  `atendimento_agente_replay` — o replay noturno (sombra): o que o agente
+                                teria feito em cada gatilho do dia, mascarado.
+                                Nunca vira rascunho nem envio.
+  `atendimento_site_produtos` — o instantâneo das páginas de PRODUTO dos sites
+                                da marca (Uranyx, Charlots), 3ª fonte do
+                                `ver_anuncio` (depois do anúncio e do cadastro).
+
 Os valores válidos das colunas de estado estão em
 `services/atendimento/constantes.py` — um lugar só, lido pelo model, pelo
 sync, pela IA e pela tela.
 """
 
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -123,15 +143,18 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
+    inspect,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import DateTime, Time
+from sqlalchemy.types import Date, DateTime, Time
 
 from app.models.base import Base, TimestampMixin
+from app.services.atendimento.busca_texto import tsv_de
 
 
 class AtendimentoCanal(Base, TimestampMixin):
@@ -232,6 +255,28 @@ class AtendimentoCanal(Base, TimestampMixin):
     # Categorias liberadas para envio automático NESTE canal (modo `auto`).
     # Vazia = nada sai sozinho, mesmo com o modo ligado.
     auto_categorias: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # O AGENTE (Claude) responde neste canal no lugar da IA de uma chamada
+    # (20/10/2026, decisão 2 do dono): o botão "Agente (Claude)" da tela de
+    # canais, só admin. Vale com a chave Claude e o interruptor geral
+    # (`agente_config.agente_ligado`); sem chave, o canal segue no legado.
+    agente: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Os assuntos de ORIENTAÇÃO (`constantes.ASSUNTOS_ORIENTACAO`) que o
+    # rascunho do agente pode mandar sozinho neste canal — um a um, com o
+    # clique do dono depois do replay. Vazia = todos vão para pessoa. Os
+    # assuntos legados continuam em `auto_categorias`.
+    auto_orientacao: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Os OUTROS assuntos (de `auto_categorias`) em que o rascunho do AGENTE
+    # pode sair sozinho (decisão 8 da spec, revisão de 20/10/2026): o dono
+    # marca depois do eval, só onde o agente empatou ou ganhou do legado.
+    # Vazia = nesses assuntos o agente não sai sozinho (o legado segue pelo
+    # `auto_categorias`, como sempre).
+    auto_agente: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
 
@@ -1537,6 +1582,309 @@ class AtendimentoTroca(Base, TimestampMixin):
     )
     criado_por_nome: Mapped[str] = mapped_column(Text, nullable=False)
     concluida_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AtendimentoFato(Base, TimestampMixin):
+    """Um fato da loja que o AGENTE pode afirmar (20/10/2026, migration 0420).
+
+    Por que tabela nova: `atendimento_regras` é o manual (QUANDO → FAÇA) e não
+    tem escopo de loja, anúncio nem SKU. O fato é a frase curta, pronta para o
+    cliente ("O celular é desbloqueado..."), com o ESCOPO em que vale:
+
+      global     — toda loja (o assunto recorta);
+      plataforma — `plataforma`;
+      loja       — `integration_id`;
+      anuncio    — `plataforma` + `item_id` (e `integration_id`, se for de uma loja só);
+      produto    — `product_id` (o cadastro do DaVinci, pelo vínculo vivo);
+      sku        — `sku`;
+      marca      — `marca` ("uranyx", "charlots": o que vale para a marca toda).
+
+    `assunto` NULL = qualquer assunto (o escopo já recorta, ex.: a origem do
+    envio de um anúncio). O agente recebe o fato pelo `consultar_manual`, com
+    o id, e cita `fato:<id>` nas evidências.
+
+    Só o ATIVO vale, e ativo exige aprovação (`aprovado_por`, CHECK no banco):
+    o candidato (`ativo=false` — frase rápida da equipe, correção, recusa
+    padrão, texto novo de política) espera o dono na aba do Manual. Fica COM o
+    gatilho do Histórico (quem aprovou, quem mudou o texto), como as regras.
+
+    O `tsv` (busca por texto da pergunta) é calculado pela aplicação: ver
+    `services/atendimento/busca_texto.py` e o ouvinte no fim deste arquivo.
+    Os valores de `escopo` e `fonte` estão em `constantes.FATO_ESCOPOS` e
+    `constantes.FATO_FONTES`.
+    """
+
+    __tablename__ = "atendimento_fatos"
+    __table_args__ = (
+        CheckConstraint(
+            "escopo IN ('global', 'plataforma', 'loja', 'anuncio', 'produto', 'sku', 'marca')",
+            name="escopo",
+        ),
+        CheckConstraint(
+            "fonte IN ('manual', 'frase_rapida', 'correcao', 'dono', 'recusa_padrao', 'site')",
+            name="fonte",
+        ),
+        # O escopo diz qual coluna recorta: fato "da loja" sem a loja valeria
+        # para todas.
+        CheckConstraint(
+            "(escopo <> 'plataforma' OR plataforma IS NOT NULL)"
+            " AND (escopo <> 'loja' OR integration_id IS NOT NULL)"
+            " AND (escopo <> 'anuncio' OR (plataforma IS NOT NULL AND item_id IS NOT NULL))"
+            " AND (escopo <> 'produto' OR product_id IS NOT NULL)"
+            " AND (escopo <> 'sku' OR sku IS NOT NULL)"
+            " AND (escopo <> 'marca' OR marca IS NOT NULL)",
+            name="escopo_preenchido",
+        ),
+        # Ninguém liga fato sem dizer quem aprovou.
+        CheckConstraint("NOT ativo OR aprovado_por IS NOT NULL", name="ativo_aprovado"),
+        Index("ix_atendimento_fatos_tsv", "tsv", postgresql_using="gin"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # Nome estável do fato SEMEADO pela migration ("celular_desbloqueado"):
+    # deixa a semente idempotente e o código achar um fato certo. NULL nos
+    # que nascem na tela (o UNIQUE não conta NULL).
+    chave: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    escopo: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="global", server_default=text("'global'")
+    )
+    plataforma: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # CASCADE: fato de uma loja (ou de um produto) que deixou de existir não
+    # tem mais a quem valer.
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    item_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    product_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    sku: Mapped[str | None] = mapped_column(Text, nullable=True)
+    marca: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Id de `atendimento_categorias` (sem FK, pelo mesmo motivo das regras).
+    assunto: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    texto: Mapped[str] = mapped_column(Text, nullable=False)
+    # manual | frase_rapida | correcao | dono | recusa_padrao | site
+    fonte: Mapped[str] = mapped_column(String(16), nullable=False)
+    # De onde o fato saiu, para quem aprova conferir: a página do site, o
+    # arquivo da regra no código, a avaliação com correção.
+    referencia: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Nasce candidato: na dúvida, o dono confere antes.
+    ativo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Quem aprovou (o nome na tela) ou a origem da aprovação ("regra aprovada
+    # no código"). Texto, não FK: a semente não tem usuário.
+    aprovado_por: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aprovado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Fato com prazo (promoção, campanha): passado, não vale mais.
+    valido_ate: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tsv: Mapped[str] = mapped_column(TSVECTOR, nullable=False)
+
+
+class AtendimentoPar(Base, TimestampMixin):
+    """Uma pergunta do cliente × a resposta da equipe (20/10/2026, migration 0420).
+
+    O `buscar_respostas_equipe` do agente: exemplos de TOM da própria equipe,
+    nunca fato nem instrução (números, prazos e características deles nunca
+    valem). Turno inteiro do cliente × turno inteiro da loja, só resposta de
+    pessoa (origem `externo` ou `davinci_humano`); a resposta do agente
+    enviada sozinha nunca vira par.
+
+    Só a versão MASCARADA e GENERALIZADA é guardada (`ia.mascarar` e
+    `ia._generalizar`): nada de nome, pedido, rastreio ou contato. Mesmo
+    assim é texto de cliente: fica FORA do Histórico, e a retenção é de 180
+    dias (LGPD). Os valores de `fonte` estão em `constantes.FONTES_PAR`.
+    """
+
+    __tablename__ = "atendimento_pares"
+    __table_args__ = (
+        # A mesma resposta volta em toda indexação: a linha é atualizada, não repetida.
+        UniqueConstraint("conversa_id", "resposta_msg_id"),
+        Index("ix_atendimento_pares_tsv", "tsv", postgresql_using="gin"),
+        Index(
+            "ix_atendimento_pares_plataforma_integration_id_item_id",
+            "plataforma",
+            "integration_id",
+            "item_id",
+        ),
+        # A retenção de 180 dias e o corte `respondido_em < as_of` do replay.
+        Index("ix_atendimento_pares_respondido_em", "respondido_em"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    conversa_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # A mensagem da LOJA que fecha o par.
+    resposta_msg_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_mensagens.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    canal_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_canais.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    item_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    assunto: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    pergunta_gen: Mapped[str] = mapped_column(Text, nullable=False)
+    resposta_gen: Mapped[str] = mapped_column(Text, nullable=False)
+    # externo | davinci_humano | davinci_editou | davinci_igual | correcao
+    fonte: Mapped[str] = mapped_column(String(24), nullable=False)
+    # Multiplica o `ts_rank_cd` (a correção do admin pesa mais que a resposta do Duoke).
+    peso: Mapped[float] = mapped_column(
+        Float, nullable=False, default=1.0, server_default=text("1")
+    )
+    # A correção de quem não é admin vale só na mesma loja e nunca no automático.
+    autor_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    perguntado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    respondido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tsv: Mapped[str] = mapped_column(TSVECTOR, nullable=False)
+
+
+class AtendimentoAgenteReplay(Base):
+    """O que o agente TERIA feito num gatilho do dia (replay noturno, 20/10/2026).
+
+    Às 02:00 o agente refaz os gatilhos do dia anterior (Kia e as outras lojas
+    da Shopee) com `as_of` = a hora do gatilho e sem ida à loja, e grava AQUI —
+    nunca na caixa: nada vira rascunho nem envio. A decisão é a simulada
+    (`conferir_saida`, `humano.triar(agente=True)` e as regras do envio sem
+    efeito). É o que dá a base por assunto para liberar a orientação no
+    automático (fase 4 do rollout).
+
+    Tudo MASCARADO: a proposta e a decisão passam pelo `mascarar`; a resposta
+    real da equipe, pelo `_generalizar` também. O rastro guarda o conteúdo
+    completo das ferramentas (no rascunho de verdade fica só o enxuto).
+    Retenção de 30 dias; fora do Histórico (máquina).
+    """
+
+    __tablename__ = "atendimento_agente_replay"
+    __table_args__ = (
+        # Um gatilho, uma linha: a rodada que cai e volta não refaz o que já fez.
+        UniqueConstraint("dia", "gatilho_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # O dia do gatilho (fuso de São Paulo).
+    dia: Mapped[date] = mapped_column(Date, nullable=False)
+    conversa_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # A mensagem do cliente que motivou (sem FK: o replay é retrato do dia).
+    gatilho_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    # O `as_of` da rodada: nada depois disto entra (transcrição, pares).
+    gatilho_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    integration_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    # A `Proposta` do agente (acao, texto, assunto, acao_pessoa...), mascarada.
+    proposta: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # A decisão simulada: precisa de pessoa, os motivos, as ações de pessoa,
+    # o validador e se teria saído sozinha.
+    decisao: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # Ferramentas chamadas, argumentos, o que voltou, ms e a parada.
+    rastro: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # As próximas mensagens da loja depois do gatilho (sem as automáticas),
+    # generalizadas: a referência da nota, não o gabarito.
+    resposta_real: Mapped[str | None] = mapped_column(Text, nullable=True)
+    modelo: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # end_turn | tool_use (não concluiu) | refusal | max_tokens | prazo | teto | erro
+    parada: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    turnos: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # O `usage` somado das requisições (entrada, saída, cache lido e gravado).
+    uso: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    custo_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AtendimentoSiteProduto(Base, TimestampMixin):
+    """Uma página de PRODUTO do site da marca, lida e guardada (20/10/2026).
+
+    O dono aprovou os sites (uranyx.com.br, charlots.com.br) como 3ª fonte de
+    produto do agente: o anúncio da conversa vale primeiro, depois o cadastro
+    do DaVinci, e o site só para o que faltar. Os sites são PHP renderizado no
+    servidor, sem API de especificação: o leitor
+    (`services/atendimento/sites_marca.py`) faz GET nas páginas de produto
+    (nunca a home para afirmar característica) e grava aqui, de madrugada.
+
+    `specs` = [{rotulo, valor}] na ordem da página. `modelo_chave` = o modelo
+    normalizado que casa com o título do anúncio ("f110 pro 5g", "s5").
+    `hash` = do conteúdo lido: igual, só o `lido_em` anda. Fora do Histórico
+    (máquina).
+    """
+
+    __tablename__ = "atendimento_site_produtos"
+    __table_args__ = (UniqueConstraint("marca", "slug"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # "uranyx" | "charlots" (`constantes.SITES`).
+    marca: Mapped[str] = mapped_column(String(16), nullable=False)
+    slug: Mapped[str] = mapped_column(String(191), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    titulo: Mapped[str] = mapped_column(Text, nullable=False)
+    modelo_chave: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    specs: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    resumo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A frase de garantia da própria página ("Garantia de 90 dias contra
+    # defeitos de fabricação"), quando houver.
+    garantia_texto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+# O `tsv` do fato e do par, calculado pela APLICAÇÃO (o `unaccent` não é
+# IMMUTABLE): no INSERT sempre; no UPDATE só quando o texto muda. Vale para
+# quem grava pelo ORM; quem grava pelo Core passa `tsv=tsv_de(...)`.
+_TEXTOS_DO_TSV: dict[type, tuple[str, ...]] = {
+    AtendimentoFato: ("texto",),
+    AtendimentoPar: ("pergunta_gen", "resposta_gen"),
+}
+
+
+def _tsv_ao_inserir(_mapper, _conexao, alvo) -> None:
+    alvo.tsv = tsv_de(*(getattr(alvo, c) for c in _TEXTOS_DO_TSV[type(alvo)]))
+
+
+def _tsv_ao_atualizar(_mapper, _conexao, alvo) -> None:
+    campos = _TEXTOS_DO_TSV[type(alvo)]
+    estado = inspect(alvo)
+    if any(estado.attrs[c].history.has_changes() for c in campos):
+        alvo.tsv = tsv_de(*(getattr(alvo, c) for c in campos))
+
+
+for _classe in _TEXTOS_DO_TSV:
+    event.listen(_classe, "before_insert", _tsv_ao_inserir)
+    event.listen(_classe, "before_update", _tsv_ao_atualizar)
 
 
 # UMA resposta em voo por conversa — declarado no model (create_all dos testes)

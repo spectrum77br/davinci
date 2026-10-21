@@ -19,26 +19,40 @@
 //   prioridade (AtendimentoManualForm).
 // A tela NÃO calcula conflito por conta própria: quem decide o que é
 // conflito é o backend (a mesma regra que recusa o 409).
-import { BookOpen, Loader2, Palette, Pencil, Plus, RotateCcw, ShieldAlert, Tag, Trash2, TriangleAlert } from 'lucide-vue-next'
+//
+// Fatos do agente (Claude, 20/10/2026, spec 5.2): abaixo do manual, a lista
+// mínima de aprovação de `atendimento_fatos` — o que o agente pode AFIRMAR ao
+// cliente. O candidato (a correção de um 👎, a recusa padrão, o texto novo de
+// política) espera o admin; só o ativo vale. Quem lê vê (com a fonte e onde o
+// fato vale); só ADMIN aprova — com o texto corrigido antes, se quiser — ou
+// reprova, e os dois ficam com quem e quando (o backend recusa com 403).
+import { BadgeCheck, BookOpen, ExternalLink, Loader2, Palette, Pencil, Plus, RotateCcw, ShieldAlert, Tag, Trash2, TriangleAlert, X } from 'lucide-vue-next'
 import {
   CATEGORIAS,
   CATEGORIAS_SO_HUMANO,
   ERROS,
+  ESCOPOS_FATO,
+  ESTADOS_FATO,
+  FONTES_FATO,
   PLATAFORMAS_COM_CANAL,
   PRIORIDADE_PADRAO,
   TIPOS_REGRA,
+  alcanceDoFato,
   canalLabel,
   categoriaLabel,
   categoriasDe,
   comoLista,
   comoObjeto,
   erroDaApi,
+  estadoFatoInfo,
   fmtDataHora,
   plataformaInfo,
   prioridadeDe,
   registrarCategorias,
   tipoRegraDe,
   type Categoria,
+  type EstadoFato,
+  type Fato,
   type Regra,
   type TipoRegra,
 } from '~/components/AtendimentoPlataforma.vue'
@@ -434,6 +448,86 @@ async function alternar(r: Regra) {
     salvando.value = false
   }
 }
+// ─── fatos do agente: a lista de aprovação ──────────────────────────────────
+// Aprovar e reprovar só admin (o fato é o que o agente afirma, inclusive no
+// automático). `canEdit` já é "mexe e edita" (a fase de observação).
+const ehAdmin = useIsAdmin()
+const podeDecidir = computed(() => props.canEdit && ehAdmin.value)
+const fatos = ref<Fato[]>([])
+const contagemFatos = ref<Record<string, number>>({})
+const carregandoFatos = ref(false)
+const erroFatos = ref<string | null>(null)
+const filtroFatos = reactive({ estado: 'candidato' as EstadoFato | 'todos', fonte: '', escopo: '', plataforma: '', busca: '' })
+// `id` do fato sendo decidido (um por vez); `editandoFato` = o que está com o
+// texto aberto para corrigir antes de aprovar.
+const decidindo = ref<number | null>(null)
+const editandoFato = ref<number | null>(null)
+const textoFato = ref('')
+const MAX_TEXTO_FATO = 2000
+
+async function carregarFatos() {
+  carregandoFatos.value = true
+  erroFatos.value = null
+  try {
+    const query: Record<string, string> = {}
+    for (const [k, v] of Object.entries(filtroFatos)) if (v && !(k === 'estado' && v === 'todos')) query[k] = v.trim()
+    const r = await api<unknown>('/api/atendimento/fatos', { query })
+    fatos.value = comoLista<Fato>(r, 'fatos')
+    const c = r && typeof r === 'object' && !Array.isArray(r) ? (r as Record<string, unknown>).contagem : null
+    contagemFatos.value = c && typeof c === 'object' ? (c as Record<string, number>) : {}
+  } catch (e: any) {
+    erroFatos.value = erroDaApi(e, 'Não consegui carregar os fatos do agente').texto
+  } finally {
+    carregandoFatos.value = false
+  }
+}
+onMounted(() => { void carregarFatos() })
+// A busca espera a pessoa parar de digitar; os seletores recarregam na hora.
+let esperaBusca: ReturnType<typeof setTimeout> | null = null
+watch(() => filtroFatos.busca, () => {
+  if (esperaBusca) clearTimeout(esperaBusca)
+  esperaBusca = setTimeout(() => void carregarFatos(), 400)
+})
+watch(() => [filtroFatos.estado, filtroFatos.fonte, filtroFatos.escopo, filtroFatos.plataforma], () => void carregarFatos())
+onBeforeUnmount(() => { if (esperaBusca) clearTimeout(esperaBusca) })
+const totalFatos = computed(() => Object.values(contagemFatos.value).reduce((a, n) => a + (Number(n) || 0), 0))
+
+function trocarFato(f: Fato) {
+  // Fora do filtro de estado depois da decisão: sai da lista (o número acompanha no recarregar).
+  if (filtroFatos.estado !== 'todos' && f.estado !== filtroFatos.estado) fatos.value = fatos.value.filter((x) => x.id !== f.id)
+  else fatos.value = fatos.value.map((x) => (x.id === f.id ? f : x))
+}
+function editarFato(f: Fato) {
+  editandoFato.value = f.id
+  textoFato.value = f.texto
+}
+async function decidirFato(f: Fato, acao: 'aprovar' | 'reprovar', texto?: string) {
+  if (decidindo.value) return
+  const novo = (texto ?? '').trim()
+  if (texto !== undefined && !novo) return
+  if (acao === 'reprovar' && !confirm(`${f.ativo ? 'Desligar' : 'Reprovar'} este fato?\n\n${f.texto}\n\n${f.ativo ? 'O agente deixa de poder afirmá-lo.' : 'Ele fica guardado como reprovado (a mesma correção não volta como candidata).'}`)) return
+  decidindo.value = f.id
+  try {
+    const body = acao === 'aprovar' ? (texto !== undefined && novo !== f.texto ? { texto: novo } : {}) : undefined
+    const r = await api<unknown>(`/api/atendimento/fatos/${f.id}/${acao}`, { method: 'POST', body })
+    const x = r && typeof r === 'object' && typeof (r as Fato).id === 'number' ? (r as Fato) : null
+    trocarFato(x ?? { ...f, ativo: acao === 'aprovar', estado: acao === 'aprovar' ? 'ativo' : 'reprovado', texto: novo || f.texto })
+    editandoFato.value = null
+    toasts.success(acao === 'aprovar' ? 'Fato aprovado' : 'Fato reprovado', acao === 'aprovar' ? 'O agente passa a poder afirmá-lo.' : undefined)
+    void carregarFatos()
+  } catch (e: any) {
+    const er = erroDaApi(e, acao === 'aprovar' ? 'Não consegui aprovar o fato' : 'Não consegui reprovar o fato')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    decidindo.value = null
+  }
+}
+function decisaoDe(f: Fato): string {
+  if (!f.aprovado_por) return ''
+  const quando = f.aprovado_em ? ` em ${fmtDataHora(f.aprovado_em)}` : ''
+  return `${f.ativo ? 'aprovado' : 'reprovado'} por ${f.aprovado_por}${quando}`
+}
+
 async function apagar(r: Regra) {
   if (!confirm(`Apagar a regra?\n\nQuando: ${r.quando}\nFaça: ${r.faca}\n\nSe for só por um tempo, use "desativar" — ela fica guardada.`)) return
   salvando.value = true
@@ -608,5 +702,124 @@ async function apagar(r: Regra) {
         </div>
       </section>
     </template>
+  </section>
+
+  <!-- Fatos do agente (Claude): o que ele pode afirmar — a lista de aprovação -->
+  <section class="mt-4 rounded-lg border bg-card" aria-labelledby="fatos-do-agente">
+    <div class="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+      <BadgeCheck class="size-4 text-muted-foreground" />
+      <h2 id="fatos-do-agente" class="text-sm font-semibold">Fatos do agente (Claude)</h2>
+      <span class="text-xs text-muted-foreground">{{ contagemFatos.ativo ?? 0 }} ativo(s) de {{ totalFatos }}</span>
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        <select v-model="filtroFatos.fonte" class="h-8 rounded-md border bg-background px-2 text-xs" aria-label="filtrar fatos pela fonte">
+          <option value="">toda fonte</option>
+          <option v-for="(label, k) in FONTES_FATO" :key="k" :value="k">{{ label }}</option>
+        </select>
+        <select v-model="filtroFatos.escopo" class="h-8 rounded-md border bg-background px-2 text-xs" aria-label="filtrar fatos por onde valem">
+          <option value="">vale em qualquer lugar</option>
+          <option v-for="(label, k) in ESCOPOS_FATO" :key="k" :value="k">vale para {{ label }}</option>
+        </select>
+        <select v-model="filtroFatos.plataforma" class="h-8 rounded-md border bg-background px-2 text-xs" aria-label="filtrar fatos pela plataforma">
+          <option value="">toda plataforma</option>
+          <option v-for="p in PLATAFORMAS_COM_CANAL" :key="p.value" :value="p.value">{{ p.nome }}</option>
+        </select>
+        <input v-model="filtroFatos.busca" class="h-8 w-44 rounded-md border bg-background px-2 text-xs" placeholder="buscar no texto…" aria-label="buscar no texto dos fatos" maxlength="200" />
+        <Button size="sm" variant="outline" class="h-8" :disabled="carregandoFatos" title="recarregar os fatos" aria-label="recarregar os fatos" @click="carregarFatos()">
+          <RotateCcw class="size-4" :class="{ 'animate-spin': carregandoFatos }" />
+        </Button>
+      </div>
+    </div>
+    <p class="border-b px-3 py-2 text-xs text-muted-foreground">
+      O que o agente pode <b>afirmar</b> ao cliente, citando a fonte. <b>Candidato</b> (a correção de um 👎, a recusa padrão, um texto novo de política) só vale
+      depois que um admin aprova — dá para corrigir o texto antes. Reprovado fica guardado, para a mesma correção não voltar.
+      <template v-if="!podeDecidir"> Só administrador aprova ou reprova.</template>
+    </p>
+    <div class="flex flex-wrap gap-1 border-b px-3 py-1.5" role="tablist" aria-label="estado dos fatos">
+      <button
+        v-for="e in [...ESTADOS_FATO, { value: 'todos', label: 'Todos', hint: 'candidatos, ativos e reprovados', cls: '' }]"
+        :key="e.value"
+        type="button"
+        role="tab"
+        :aria-selected="filtroFatos.estado === e.value"
+        class="rounded-full px-2.5 py-0.5 text-xs"
+        :class="filtroFatos.estado === e.value ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
+        :title="e.hint"
+        @click="filtroFatos.estado = e.value as EstadoFato | 'todos'"
+      >
+        {{ e.label }}<span class="ml-1 tabular-nums opacity-80">{{ e.value === 'todos' ? totalFatos : contagemFatos[e.value] ?? 0 }}</span>
+      </button>
+    </div>
+
+    <div v-if="erroFatos" class="m-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+      {{ erroFatos }} <button type="button" class="ml-2 text-xs underline" @click="carregarFatos()">tentar de novo</button>
+    </div>
+    <div v-if="carregandoFatos && !fatos.length" class="px-3 py-6 text-center text-sm text-muted-foreground">
+      <Loader2 class="mr-1.5 inline size-4 animate-spin" />carregando…
+    </div>
+    <div v-else-if="!fatos.length && !erroFatos" class="px-3 py-6 text-center text-sm text-muted-foreground">
+      {{ filtroFatos.estado === 'candidato' ? 'Nenhum candidato esperando aprovação.' : 'Nenhum fato com esse filtro.' }}
+    </div>
+    <ol v-else class="divide-y">
+      <li v-for="f in fatos" :key="f.id" class="px-3 py-2.5" :class="f.estado === 'reprovado' ? 'opacity-60' : ''">
+        <div class="flex flex-wrap items-start gap-x-3 gap-y-1.5">
+          <div class="min-w-0 grow basis-72 space-y-1">
+            <template v-if="editandoFato === f.id">
+              <textarea
+                v-model="textoFato"
+                rows="3"
+                :maxlength="MAX_TEXTO_FATO"
+                class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+                :aria-label="`texto do fato ${f.id}`"
+              />
+              <div class="flex items-center gap-1">
+                <Button size="sm" class="h-7 text-xs" :disabled="decidindo === f.id || !textoFato.trim()" @click="decidirFato(f, 'aprovar', textoFato)">
+                  <Loader2 v-if="decidindo === f.id" class="mr-1 size-3.5 animate-spin" /><BadgeCheck v-else class="mr-1 size-3.5" /> aprovar com este texto
+                </Button>
+                <Button size="sm" variant="ghost" class="h-7 text-xs" @click="editandoFato = null">cancelar</Button>
+                <span class="ml-auto text-[10px] tabular-nums text-muted-foreground">{{ textoFato.length }}/{{ MAX_TEXTO_FATO }}</span>
+              </div>
+            </template>
+            <div v-else class="whitespace-pre-line text-sm">{{ f.texto }}</div>
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+              <span>fonte: {{ FONTES_FATO[f.fonte] || f.fonte }}</span>
+              <span v-if="f.assunto">· assunto: {{ categoriaLabel(f.assunto) }}</span>
+              <span v-if="decisaoDe(f)">· {{ decisaoDe(f) }}</span>
+              <a
+                v-if="f.conversa_id"
+                :href="`/atendimento?conversa=${encodeURIComponent(f.conversa_id)}`"
+                target="_blank"
+                rel="noopener"
+                class="inline-flex items-center gap-0.5 underline"
+                title="abrir a conversa de onde a correção saiu (outra aba)"
+              >· abrir a conversa <ExternalLink class="size-3" /></a>
+            </div>
+          </div>
+          <div class="ml-auto flex max-w-full flex-col items-end gap-1">
+            <div class="flex flex-wrap items-center justify-end gap-1">
+              <span class="rounded-full bg-muted px-2 py-0.5 text-[11px]" :title="`escopo: ${ESCOPOS_FATO[f.escopo] || f.escopo}`">{{ alcanceDoFato(f) }}</span>
+              <span class="rounded-full px-2 py-0.5 text-[11px]" :class="estadoFatoInfo(f.estado).cls">{{ estadoFatoInfo(f.estado).label.replace(/s$/, '').toLowerCase() }}</span>
+              <span v-if="f.vencido" class="rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] text-muted-foreground" :title="`valia até ${fmtDataHora(f.valido_ate)}`">vencido</span>
+            </div>
+            <div v-if="podeDecidir && editandoFato !== f.id" class="flex items-center gap-0.5">
+              <template v-if="!f.ativo">
+                <Button size="sm" variant="ghost" class="h-7 px-2 text-xs text-emerald-700 dark:text-emerald-300" :disabled="decidindo !== null" @click="decidirFato(f, 'aprovar')">aprovar</Button>
+                <Button size="sm" variant="ghost" class="h-7 px-2" title="corrigir o texto e aprovar" aria-label="corrigir o texto e aprovar" :disabled="decidindo !== null" @click="editarFato(f)"><Pencil class="size-3.5" /></Button>
+              </template>
+              <Button
+                v-if="f.estado !== 'reprovado'"
+                size="sm"
+                variant="ghost"
+                class="h-7 px-2 text-xs text-red-600"
+                :disabled="decidindo !== null"
+                :title="f.ativo ? 'o agente deixa de poder afirmar' : 'não entra'"
+                @click="decidirFato(f, 'reprovar')"
+              ><X class="mr-0.5 size-3.5" />{{ f.ativo ? 'desligar' : 'reprovar' }}</Button>
+              <Loader2 v-if="decidindo === f.id" class="size-3.5 animate-spin text-muted-foreground" />
+            </div>
+            <span v-if="f.created_at" class="text-[10px] text-muted-foreground">{{ fmtDataHora(f.created_at) }}</span>
+          </div>
+        </div>
+      </li>
+    </ol>
   </section>
 </template>

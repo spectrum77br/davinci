@@ -60,6 +60,14 @@ A 0399 (15/10/2026, o número da Caixa = o "não lida" do Duoke) põe na convers
 o `visto_em` ("visto no DaVinci": anulável, sem índice e sem preenchimento);
 roda em cima de todas (as 0397–0398 do meio são da conciliação) e o downgrade
 dela volta o catálogo ao de depois da 0396.
+
+A 0416 (o estado inicial das notificações nativas: `notificacoes_migracao` no
+canal; `notificacoes_corte_em`, `notificacoes_iniciais` e
+`notificacoes_visto_em` na conversa) e a 0420 (20/10/2026, o AGENTE de
+atendimento: `agente` e `auto_orientacao` no canal) rodam em cima de todas;
+os downgrades voltam o catálogo ao de antes de cada uma. As 4 tabelas novas
+da 0420 (fatos, pares, replay e o instantâneo dos sites da marca) são
+conferidas em `test_atendimento_agente_esquema.py`, com a semente.
 """
 
 # ruff: noqa: S608
@@ -89,10 +97,21 @@ _MIGRATION_SIMULACAO = _VERSOES / "0371_atendimento_automacoes_simulacao.py"
 _MIGRATION_TROCAS = _VERSOES / "0383_atendimento_trocas.py"
 _MIGRATION_FALTA = _VERSOES / "0396_ultima_loja_qualquer.py"
 _MIGRATION_VISTO = _VERSOES / "0399_atendimento_visto_em.py"
+_MIGRATION_NOTIFICACOES = _VERSOES / "0416_atendimento_notificacoes_nativas.py"
+_MIGRATION_AGENTE = _VERSOES / "0420_atendimento_agente.py"
 # A regra de palavras das pastas de e-mail (0387, a camada do atendimento sobre
 # a Central de e-mail) é conferida em `test_mail_atendimento_migration.py`,
-# junto das tabelas `mail_*` da mesma migration.
-DE_OUTRA_MIGRATION = frozenset({"atendimento_regras_pasta_email"})
+# junto das tabelas `mail_*` da mesma migration. As tabelas novas da 0420 (o
+# agente), em `test_atendimento_agente_esquema.py`.
+DE_OUTRA_MIGRATION = frozenset(
+    {
+        "atendimento_regras_pasta_email",
+        "atendimento_fatos",
+        "atendimento_pares",
+        "atendimento_agente_replay",
+        "atendimento_site_produtos",
+    }
+)
 TABELAS = sorted(
     t.name
     for t in Base.metadata.sorted_tables
@@ -213,6 +232,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     visto = _carregar_migration(_MIGRATION_VISTO)
     assert visto.revision == "0399_atendimento_visto_em"
     assert visto.down_revision == "0398_conciliacao_permissao"
+    notificacoes = _carregar_migration(_MIGRATION_NOTIFICACOES)
+    assert notificacoes.revision == "0416_notificacoes_nativas"
+    assert notificacoes.down_revision == "0415_mail_admin"
+    agente = _carregar_migration(_MIGRATION_AGENTE)
+    assert agente.revision == "0420_atendimento_agente"
+    assert agente.down_revision == "0419_londres_logistica_editar"
     # 7 da primeira parte + 3 da parte 2 (categorias e os índices do cartão
     # "Cliente") + 2 da 0353 (histórico da etiqueta e reclamações) + 3 da
     # 0362 (carrinhos, publicações e comentários) + 2 da 0366 (regras e
@@ -249,6 +274,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     )
     # A 0362 liga o canal de rede à conta do cadastro (`redes_sociais`).
     await db.execute(text(f'CREATE TABLE "{rascunho}".redes_sociais (id uuid PRIMARY KEY)'))
+    # A 0420 liga o fato ao produto (FK) e só semeia o de produto que existe.
+    await db.execute(text(f'CREATE TABLE "{rascunho}".products (id uuid PRIMARY KEY)'))
     await db.commit()
 
     def _rodar(conn, passo: str, migrations) -> None:
@@ -269,6 +296,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     trocas.SCHEMA = rascunho
     falta.SCHEMA = rascunho
     visto.SCHEMA = rascunho
+    notificacoes.SCHEMA = rascunho
+    agente.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -496,6 +525,18 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await conn.run_sync(_rodar, "upgrade", (visto,))
         await db.commit()
 
+        # 0416: o estado inicial das notificações nativas (canal e conversa).
+        antes_da_0416 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (notificacoes,))
+        await db.commit()
+
+        # 0420: o botão "Agente (Claude)" e os assuntos de orientação do canal.
+        antes_da_0420 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (agente,))
+        await db.commit()
+
         da_migration = await _catalogo(db, rascunho, rascunho)
         do_model = await _catalogo(db, schema_model, schema_model)
         assert da_migration["tabelas"] == TABELAS
@@ -698,6 +739,39 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         # 0399: anulável, sem default e sem índice.
         assert cols[("atendimento_conversas", "visto_em")][2] == "timestamptz"
         assert cols[("atendimento_conversas", "visto_em")][4:] == ("YES", None)
+
+        # 0416: o JSON nasce vazio; as datas, anuláveis.
+        assert cols[("atendimento_canais", "notificacoes_migracao")][4:] == ("NO", "'{}'::jsonb")
+        assert cols[("atendimento_conversas", "notificacoes_corte_em")][4:] == ("YES", None)
+        # 0420: o canal nasce SEM o agente e sem assunto de orientação liberado.
+        assert cols[("atendimento_canais", "agente")][4:] == ("NO", "false")
+        assert cols[("atendimento_canais", "auto_orientacao")][4:] == ("NO", "'[]'::jsonb")
+        assert cols[("atendimento_canais", "auto_agente")][4:] == ("NO", "'[]'::jsonb")
+
+        # O downgrade da 0420 volta EXATAMENTE ao catálogo de depois da 0416
+        # (e as tabelas dela somem).
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (agente,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0420
+        restantes = {
+            r[0]
+            for r in (
+                await db.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema = :s"
+                    ),
+                    {"s": rascunho},
+                )
+            ).all()
+        }
+        assert not restantes & (DE_OUTRA_MIGRATION - {"atendimento_regras_pasta_email"})
+
+        # O downgrade da 0416 volta EXATAMENTE ao catálogo de depois da 0399.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (notificacoes,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0416
 
         # O downgrade da 0399 volta EXATAMENTE ao catálogo de depois da 0396.
         conn = await db.connection()

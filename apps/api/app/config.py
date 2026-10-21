@@ -626,6 +626,54 @@ class Settings(BaseSettings):
     atendimento_llm_base_url: str = ""
     atendimento_llm_model: str = ""
     atendimento_llm_api_key: str = ""
+    # AGENTE de atendimento (20/10/2026, decisão 2 do dono): o Claude Haiku
+    # com ferramentas SÓ DE LEITURA (anúncio, pedido, garantia, manual,
+    # respostas da equipe, troca) no lugar da IA de uma chamada, CANAL POR
+    # CANAL. Roda num canal só com os três juntos
+    # (`services/atendimento/agente_config.agente_ligado`):
+    #   • `atendimento_agente_ativo` — o interruptor geral. Nasce LIGADO de
+    #     propósito: sem chave Claude nada roda, e é o botão do canal que
+    #     decide (desligar aqui volta tudo ao legado sem deploy);
+    #   • a chave Claude: `atendimento_agente_api_key` ou, se ela não for
+    #     `sk-ant-`, a `atendimento_llm_api_key` quando for `sk-ant-` — nunca
+    #     a do Groq. Sem chave = legado em todos os canais, sem mudança;
+    #   • `atendimento_canais.agente` — o botão "Agente (Claude)" da tela de
+    #     canais (só admin). NÃO há lista de canais aqui: é a coluna.
+    # O que sai sozinho também é do canal (`auto_categorias` e
+    # `auto_orientacao`), não daqui.
+    atendimento_agente_ativo: bool = True
+    atendimento_agente_api_key: str = ""
+    # Haiku 5.5: sem `thinking`, `temperature`, `top_p` nem `top_k` (fora do
+    # padrão dá 400); o esforço vai em `output_config.effort`.
+    atendimento_agente_modelo: str = "claude-haiku-5-5"
+    # low | medium | high — o eval decide; `medium` é o padrão do Haiku 5.5.
+    atendimento_agente_effort: str = "medium"
+    # Requisições ao modelo por resposta (o `max_iterations` do tool runner).
+    atendimento_agente_max_turnos: int = 5
+    # Prazo COOPERATIVO por conversa (s), conferido entre um turno e outro.
+    atendimento_agente_prazo_s: int = 45
+    # Teto de gasto (US$, pelo `usage` real, somado no Redis): por dia (fuso
+    # de São Paulo, replay incluído) e por conversa. Estourou: a conversa
+    # fica sem rascunho e a Caixa Humano a pega.
+    atendimento_agente_teto_usd_dia: float = 5.0
+    atendimento_agente_teto_usd_conversa: float = 0.05
+    # O VERIFICADOR semântico do agente (20/10/2026,
+    # `services/atendimento/agente/verificador.py`): depois das checagens de
+    # frase, UMA requisição ao Haiku 5.5 (sem ferramentas, mesmo teto em
+    # dólar) confere o rascunho que poderia sair sozinho. OBRIGATÓRIO para o
+    # envio sozinho do agente: `false` = nenhum rascunho do agente sai
+    # sozinho (vai para pessoa). O copiloto e o "Sugerir" não o chamam.
+    atendimento_agente_verificador: bool = True
+    # O replay noturno (sombra): refaz os gatilhos do dia anterior e grava só
+    # em `atendimento_agente_replay`, nunca na caixa. Plataformas separadas
+    # por vírgula.
+    atendimento_agente_replay: bool = False
+    atendimento_agente_replay_plataformas: str = "shopee"
+    # O instantâneo das páginas de PRODUTO dos sites da marca (Uranyx,
+    # Charlots) em `atendimento_site_produtos`: cron de madrugada, só GET
+    # (o dono aprovou os sites como fonte em 20/10/2026). Desligado = o
+    # agente fica só com o anúncio e o cadastro.
+    atendimento_sites_marca_ativo: bool = True
     # Em quais modos de canal o cron da IA escreve sugestão (lista separada
     # por vírgula). Padrão só `copiloto,auto`: ligar a IA para as 1–2 lojas
     # piloto (postas em copiloto na tela Lojas e modo) não gasta token com as

@@ -115,6 +115,20 @@ DESTA conversa e a avaliação ruim DESTE pedido já entram pelo estado.
 Também não entra o assunto que só o MODELO escolheria: as pistas de texto
 (`ia.pistas_de_categoria`) são a régua — e são largas de propósito.
 
+NO CANAL COM O AGENTE (Claude, 20/10/2026, spec 6.6): o envio automático
+consulta esta triagem (`ia._motivos_humano_para_auto`), então ela decide IGUAL ao
+rascunho do agente — senão a pista de assunto continuaria mandando para
+pessoa o que o agente orienta. `triar(..., agente=True)`
+(`_triar_do_agente`): o estado e os sinais ficam; o assunto (pista ou
+opção do menu) não é motivo; os gatilhos de código da régua "ação de
+pessoa" (`agente.acao_pessoa.gatilhos`, a mesma função pura do rascunho)
+viram o motivo `acao_pessoa`, com os códigos em `assuntos`; `sem_dado` e
+`so_anexo` seguem a 6.2 (o agente pergunta o pedido, orienta o recebimento;
+o anexo só vira pessoa depois de a loja pedir foto/vídeo); `ia` vem do
+rascunho do agente. `triar_conversa` lê o canal (`ia._agente_no_canal`) e,
+com o agente, o estado de postagem, as recusas aprovadas e a UF restrita.
+Sem o agente, a régua é EXATAMENTE a de antes. VERSAO 6 retria tudo.
+
 SÓ AS LOJAS NO AUTOMÁTICO (14/10/2026, decisão do dono: "a Caixa Humano só
 para as lojas que estão automáticas"): a Caixa Humano — a lista
 `?caixa=humano`, o número da aba e os do /resumo (total, por plataforma, por
@@ -225,6 +239,7 @@ from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ia, separa_email
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
+    ACOES_PESSOA,
     CANAL_AVALIACAO,
     CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
@@ -234,6 +249,7 @@ from app.services.atendimento.constantes import (
     ETIQUETA_AG_CANCELAMENTO,
     ETIQUETA_DEVOLUCAO,
     ETIQUETA_RECLAMACAO,
+    HUMANO_ACAO_PESSOA,
     HUMANO_AG_CANCELAMENTO,
     HUMANO_ASSUNTO,
     HUMANO_ATENDENTE,
@@ -262,6 +278,7 @@ from app.services.atendimento.constantes import (
     e_cartao_do_comprador,
     motivo_canal_sem_envio,
     reclamacao_aberta,
+    rotulo_acao_pessoa,
     rotulo_humano,
 )
 
@@ -271,7 +288,8 @@ logger = structlog.get_logger()
 # 2 (09/10/2026, revisão): pistas de assunto mais largas, a avaliação de nota
 # alta fora, a bloqueada pelo estado, a foto depois do robô, o motivo `falha`.
 # 3 (16/10/2026): menu não corta texto/foto; IA atendente segue a régua da geração.
-VERSAO = 5
+# 6 (20/10/2026): no canal com o AGENTE, a régua "ação de pessoa" (spec 6.6).
+VERSAO = 6
 # A chave em `atendimento_conversas.dados`.
 CHAVE = "humano"
 # Conversas por rodada do cron (o recálculo inicial, ~500, leva umas 3).
@@ -305,6 +323,12 @@ _CATEGORIAS_DE_PEDIDO = ("rastreio", "prazo_envio", "nota_fiscal")
 
 _JSON_LISTA_VAZIA = literal_column("'[]'::jsonb", type_=JSONB)
 _JSON_OBJETO_VAZIO = literal_column("'{}'::jsonb", type_=JSONB)
+
+# O canal com o AGENTE (Claude, 20/10/2026, spec 6.6): a Caixa Humano decide
+# IGUAL ao rascunho dele — o assunto não manda para pessoa, a régua "ação de
+# pessoa" manda (`agente.acao_pessoa.gatilhos`, a MESMA função pura). Os
+# gatilhos de código entram com `HUMANO_ACAO_PESSOA`; os códigos deles
+# (`segurar_envio`, `enviar_arquivo_nf`...) vão em `assuntos`.
 
 
 @dataclass(frozen=True)
@@ -438,6 +462,10 @@ def triar(
     sugestao: Any | None = None,
     gatilho: Any | None = None,
     ia_e_o_atendente: bool = False,
+    agente: bool = False,
+    postado: str | None = None,
+    chaves_ativas: Collection[str] = (),
+    uf_restrita: bool = False,
 ) -> Triagem:
     """Os motivos para PESSOA desta conversa (ver o topo). PURA: sem banco, sem modelo, sem rede.
 
@@ -446,7 +474,24 @@ def triar(
     `contexto.contexto_da_conversa`; `so_humano` = os assuntos só de pessoa
     (`manual.ids_so_humano`); `sugestao` = a sugestão da IA do turno atual
     (ou None); `gatilho` = a última mensagem do cliente.
+
+    `agente` = o canal está com o AGENTE (`ia._agente_no_canal`): a régua
+    dele (`_triar_do_agente`), com `postado`, `chaves_ativas` e
+    `uf_restrita` lidos por `triar_conversa`. Sem o agente, EXATAMENTE a
+    régua de antes (esses três nem são lidos).
     """
+    if agente:
+        return _triar_do_agente(
+            conversa,
+            recentes,
+            ctx,
+            sugestao=sugestao,
+            gatilho=gatilho,
+            ia_e_o_atendente=ia_e_o_atendente,
+            postado=postado,
+            chaves_ativas=chaves_ativas,
+            uf_restrita=uf_restrita,
+        )
     motivos: set[str] = set()
     etiquetas = _etiquetas(conversa)
     pedido = ctx.get("pedido")
@@ -532,6 +577,109 @@ def triar(
     return Triagem(motivos=tuple(m for m in ORDEM_HUMANO if m in motivos), assuntos=tuple(assuntos))
 
 
+def _triar_do_agente(
+    conversa: Any,
+    recentes: Sequence[Any],
+    ctx: dict,
+    *,
+    sugestao: Any | None,
+    gatilho: Any | None,
+    ia_e_o_atendente: bool,
+    postado: str | None,
+    chaves_ativas: Collection[str],
+    uf_restrita: bool,
+) -> Triagem:
+    """A régua da Caixa Humano no canal com o AGENTE (spec 6.6, 20/10/2026). PURA.
+
+    Decide igual ao rascunho do agente (`ia.conferir_saida(agente=True)` +
+    `acao_pessoa`), no que o CÓDIGO decide sem o modelo:
+      • o ESTADO fica (reclamação, Ag. cancelamento, devolução, chamado,
+        avaliação ruim, e-mail) e os SINAIS do texto também (alerta,
+        xingamento, atendente — com a regra da "IA é o atendente" —,
+        instrução);
+      • o assunto não manda: nem a pista de assunto só de pessoa nem a opção
+        sensível do menu viram `assunto` (no agente elas viram a orientação
+        do assunto, spec 6.2);
+      • os gatilhos de código da régua 6.3 (`acao_pessoa.gatilhos`, a MESMA
+        função do rascunho) viram `acao_pessoa`, com os códigos em `assuntos`;
+      • `sem_dado` só pelo turno maior que o contexto seguro: rastreio/NF sem
+        o dado, o pedido não achado no Bling, a instrução de recebimento e o
+        remetente o agente pergunta ou orienta — ou vira ação de pessoa
+        (`enviar_arquivo_nf`, `dado_indisponivel`);
+      • `so_anexo` só depois de a loja pedir foto/vídeo (a ação
+        `analisar_evidencia`); sem o pedido, o agente pergunta como ajudar;
+      • `ia` = o rascunho do turno (o do agente) mandou para pessoa.
+    Os sinais do cartão Cliente ficam de fora, como na régua de sempre.
+    """
+    from app.services.atendimento.agente import acao_pessoa
+
+    motivos: set[str] = set()
+    etiquetas = _etiquetas(conversa)
+    pedido = ctx.get("pedido")
+
+    # ── Estado do pedido e da conversa (o mesmo da régua de sempre) ──
+    if (
+        conversa.canal == CANAL_RECLAMACAO
+        or ETIQUETA_RECLAMACAO in etiquetas
+        or ia._reclamacoes_abertas(ctx)
+        or reclamacao_aberta(conversa.dados)
+    ):
+        motivos.add(HUMANO_RECLAMACAO)
+    if ETIQUETA_AG_CANCELAMENTO in etiquetas or ia.em_aguardando_cancelamento(pedido):
+        motivos.add(HUMANO_AG_CANCELAMENTO)
+    if ETIQUETA_DEVOLUCAO in etiquetas or ctx.get("devolucoes"):
+        motivos.add(HUMANO_DEVOLUCAO)
+    if ctx.get("chamados"):
+        motivos.add(HUMANO_CHAMADO)
+    if _avaliacao_ruim(conversa) or any(
+        n <= NOTA_BAIXA_AVALIACAO for n in ia._avaliacoes_pendentes(ctx)
+    ):
+        motivos.add(HUMANO_AVALIACAO)
+    if motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados) == (
+        MOTIVO_EMAIL_SO_PESSOA
+    ):
+        motivos.add(HUMANO_EMAIL)
+
+    # ── O que o cliente escreveu: os sinais e o turno incompleto ──
+    rajada = _rajada(recentes, gatilho)
+    textos_cliente = [m.texto for m in rajada if m.texto]
+    sinais = {codigo for codigo, _frase in ia.sinais_com_codigo(textos_cliente, agente=True)}
+    if ia_e_o_atendente:
+        sinais.discard(HUMANO_ATENDENTE)
+        if ia.insistiu_em_pessoa(recentes):
+            sinais.add(HUMANO_ATENDENTE)
+    motivos.update(sinais)
+    if ia.turno_incompleto(recentes, gatilho):
+        motivos.add(HUMANO_SEM_DADO)
+
+    # ── A régua "ação de pessoa" (os mesmos gatilhos do rascunho) ──
+    gatilhos = acao_pessoa.gatilhos(
+        conversa,
+        recentes,
+        ctx,
+        gatilho=gatilho,
+        postado=postado,
+        chaves_ativas=chaves_ativas,
+        ia_e_o_atendente=ia_e_o_atendente,
+        uf_restrita=uf_restrita,
+    )
+    acoes = [g.codigo for g in gatilhos]
+    if acoes:
+        motivos.add(HUMANO_ACAO_PESSOA)
+
+    # ── A sugestão do turno (a do agente) ──
+    if sugestao_pede_pessoa(sugestao):
+        motivos.add(HUMANO_IA)
+
+    # ── A bloqueada: só pelo estado, e "responder na plataforma" junto ──
+    if conversa.situacao == CONVERSA_BLOQUEADA:
+        if not motivos & HUMANO_DE_ESTADO:
+            return Triagem()
+        motivos.add(HUMANO_BLOQUEADA)
+
+    return Triagem(motivos=tuple(m for m in ORDEM_HUMANO if m in motivos), assuntos=tuple(acoes))
+
+
 def para_tela(
     cache: Any, *, ia_pausada: bool, na_caixa: bool = True, ia_sem_resposta: bool = False
 ) -> dict[str, Any] | None:
@@ -561,9 +709,18 @@ def para_tela(
         "motivos": motivos,
         "rotulos": [rotulo_humano(m) for m in motivos],
         "assuntos": assuntos,
-        "assuntos_rotulos": [CATEGORIAS_INFO.get(a, (a, ""))[0] for a in assuntos],
+        "assuntos_rotulos": [_rotulo_do_assunto(a) for a in assuntos],
         "na_caixa": bool(na_caixa),
     }
+
+
+def _rotulo_do_assunto(assunto: str) -> str:
+    """O nome do assunto; no canal com o agente, o código da ação ("Segurar o envio...")."""
+    if assunto in CATEGORIAS_INFO:
+        return CATEGORIAS_INFO[assunto][0]
+    if assunto in ACOES_PESSOA:
+        return rotulo_acao_pessoa(assunto)
+    return assunto
 
 
 def _lista(valor: Any) -> list[str]:
@@ -1008,6 +1165,19 @@ async def triar_conversa(
         )
     ctx = await contexto_svc.contexto_da_conversa(session, conversa)
     sugestao = await _sugestao_do_turno(session, conversa)
+    if await ia._agente_no_canal(session, conversa):
+        # O canal com o AGENTE (spec 6.6): o que a régua dele lê do banco.
+        return triar(
+            conversa,
+            recentes,
+            ctx,
+            so_humano=so_humano,
+            sugestao=sugestao,
+            gatilho=gatilho,
+            ia_e_o_atendente=await ia._ia_e_o_atendente(session, conversa),
+            agente=True,
+            **await _leituras_do_agente(session, conversa, ctx),
+        )
     return triar(
         conversa,
         recentes,
@@ -1017,6 +1187,48 @@ async def triar_conversa(
         gatilho=gatilho,
         ia_e_o_atendente=await ia._ia_e_o_atendente(session, conversa),
     )
+
+
+async def _leituras_do_agente(
+    session: AsyncSession, conversa: AtendimentoConversa, ctx: dict
+) -> dict[str, Any]:
+    """`postado`, `chaves_ativas` e `uf_restrita` — as MESMAS leituras do rascunho do agente.
+
+    O estado de postagem pelo id cru do Bling (`acao_pessoa.estado_de_postagem`,
+    o do pacote), as recusas padrão/remetente aprovados (`fatos_loja`) e a UF
+    com restrição de envio. Só leitura. Falha de uma leitura não derruba a
+    triagem: sem as chaves, nenhuma recusa padrão vale; sem a UF, segue sem
+    ela — o lado seguro, como no `acao_pessoa.gatilhos_de_codigo`.
+    """
+    from app.services.atendimento.agente import acao_pessoa, fatos_loja
+
+    pedido = ctx.get("pedido") if isinstance(ctx.get("pedido"), dict) else {}
+    postado = await acao_pessoa.estado_de_postagem(
+        session, numero_bling=pedido.get("numero"), logistica=ctx.get("logistica")
+    )
+    chaves: frozenset[str] = frozenset()
+    try:
+        async with session.begin_nested():
+            chaves = await fatos_loja.chaves_ativas(
+                session,
+                acao_pessoa.CHAVES_QUE_TROCAM_GATILHO,
+                plataforma=conversa.plataforma,
+                integration_id=conversa.integration_id,
+                agora=datetime.now(UTC),
+            )
+    except Exception as e:  # noqa: BLE001 — sem as chaves: o lado seguro
+        logger.warning(
+            "atendimento_humano_chaves_falhou", conversa_id=str(conversa.id), err=type(e).__name__
+        )
+    uf_restrita = False
+    try:
+        async with session.begin_nested():
+            uf_restrita = await acao_pessoa.uf_restrita(session, conversa, ctx)
+    except Exception as e:  # noqa: BLE001 — a restrição é a mais; nunca derruba
+        logger.warning(
+            "atendimento_humano_uf_falhou", conversa_id=str(conversa.id), err=type(e).__name__
+        )
+    return {"postado": postado, "chaves_ativas": chaves, "uf_restrita": uf_restrita}
 
 
 # ── A rodada ──────────────────────────────────────────────────────────────

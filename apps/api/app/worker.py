@@ -1007,6 +1007,110 @@ async def atendimento_indexar_pedidos(ctx: dict) -> dict | None:
     return resumo
 
 
+# O AGENTE de atendimento (Claude, 20/10/2026). Os pares pergunta × resposta
+# da equipe de hora em hora no :34 — par, fora do :00/:30 dos crons de token,
+# dos ímpares da leitura das caixas, das reclamações (:06…), das etiquetas
+# (:08…), das avaliações (:12/:42), do carrinho (:14/:44), das redes
+# (:09/:24/:39/:54), da troca de lote (:03…) e do :22 do índice de pedidos;
+# e entre :21 e :54, longe das janelas das postagens automáticas (11:55–12:20
+# e 18:55–19:20). Os sites da marca às 03:36 BRT (06:36 UTC): antes do
+# histórico (03:40) e longe do :14/:44 do carrinho, que fala com a mesma
+# hospedagem. O replay noturno às 02:00 BRT (05:00 UTC).
+_ATENDIMENTO_PARES_MINUTOS = {34}
+_ATENDIMENTO_SITES_MARCA_HORA_UTC, _ATENDIMENTO_SITES_MARCA_MINUTO = 6, 36
+_ATENDIMENTO_REPLAY_HORA_UTC, _ATENDIMENTO_REPLAY_MINUTO = 5, 0
+
+
+async def atendimento_indexar_pares(ctx: dict) -> dict | None:
+    """De hora em hora (:34): os pares pergunta × resposta da equipe (agente, 20/10/2026).
+
+    Incremental (o último `respondido_em` menos 6 h), com o expurgo dos 180
+    dias junto (services/atendimento/agente/pares.py, spec 5.4). Só banco:
+    lê as conversas e grava `atendimento_pares` (generalizado, sem dado de
+    comprador) — a busca `buscar_respostas_equipe` do agente. Só com o agente
+    no servidor (ajuste r3: a chave Claude E o interruptor geral
+    `atendimento_agente_ativo`) — sem a chave o sistema inteiro fica como em
+    origin; o índice retoma de onde parou (`pares.indexar`) quando a chave
+    chegar, e o backfill manual (`scripts.atendimento_indexar_pares`) vem
+    DEPOIS da chave (§2.5 do estado do build).
+    """
+    from app.services.atendimento import agente_config
+
+    if not _settings.atendimento_agente_ativo or agente_config.chave_do_agente(_settings) is None:
+        return None
+    from app.services.atendimento.agente import pares as _pares
+
+    async with session_scope() as s:
+        try:
+            resumo = await _pares.indexar(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("atendimento_indexar_pares_falhou", err=type(e).__name__)
+            return None
+    logger.info("atendimento_indexar_pares_tick", **resumo)
+    return resumo
+
+
+async def atendimento_sites_marca(ctx: dict) -> dict | None:
+    """Uma vez por dia (03:36 BRT): as páginas de produto dos sites da marca (20/10/2026).
+
+    uranyx.com.br e charlots.com.br (fontes v1.3 §5): só GET, cerca de 1 por
+    segundo, grava o instantâneo em `atendimento_site_produtos` quando a
+    página muda (services/atendimento/sites_marca.py). É a 3ª fonte de
+    especificação do agente (`ver_anuncio`). Sai na hora com
+    `atendimento_sites_marca_ativo` desligado — e (ajuste r3) sem o agente no
+    servidor (a chave Claude e `atendimento_agente_ativo`): sem ele ninguém lê.
+    """
+    from app.services.atendimento import agente_config
+
+    if (
+        not _settings.atendimento_sites_marca_ativo
+        or not _settings.atendimento_agente_ativo
+        or agente_config.chave_do_agente(_settings) is None
+    ):
+        return None
+    from app.services.atendimento import sites_marca as _sites_marca
+
+    async with session_scope() as s:
+        try:
+            resumo = await _sites_marca.atualizar_sites(s)
+        except Exception as e:  # noqa: BLE001
+            # Só o tipo: a mensagem de erro do cliente HTTP traz a URL.
+            logger.error("atendimento_sites_marca_falhou", err=type(e).__name__)
+            return None
+    logger.info("atendimento_sites_marca_tick", marcas=sorted(resumo))
+    return resumo
+
+
+async def atendimento_replay_agente(ctx: dict) -> dict | None:
+    """Às 02:00 BRT: o replay noturno do agente, em sombra (spec 9.2, 20/10/2026).
+
+    Refaz com o agente os gatilhos de ONTEM com resposta da equipe, nas
+    plataformas do replay (`atendimento_agente_replay_plataformas`), e grava
+    SÓ em `atendimento_agente_replay` — nada vai para a caixa nem para a loja
+    (services/atendimento/agente/replay.py, `replay_noturno`: concorrência 4,
+    sem ida à loja, para no teto do dia e nas janelas das postagens). Só com
+    `atendimento_agente_replay` ligado (nasce desligado) E a chave Claude.
+    Sem o executor no deploy, o cron registra e não faz nada.
+    """
+    from app.services.atendimento import agente_config
+
+    if not _settings.atendimento_agente_replay or agente_config.chave_do_agente(_settings) is None:
+        return None
+    try:
+        from app.services.atendimento.agente import replay as _replay
+    except ImportError as e:
+        logger.warning("atendimento_replay_agente_sem_executor", err=type(e).__name__)
+        return None
+    try:
+        resumo = await _replay.replay_noturno()
+    except Exception as e:  # noqa: BLE001
+        logger.error("atendimento_replay_agente_falhou", err=type(e).__name__)
+        return None
+    # O resumo é só contagem (o executor não devolve texto).
+    logger.info("atendimento_replay_agente_tick", **(resumo or {}))
+    return resumo
+
+
 # Comunicador (01/10/2026): os dois crons ficam em minutos PARES, a cada
 # 10 min — fora dos ímpares da leitura das caixas (que também lê o ML), do
 # :00/:30 dos crons de token (o refresh token do ML é de uso único e o cron
@@ -4957,6 +5061,11 @@ class WorkerSettings:
         # para enfileirar uma rodada à mão (a primeira é acompanhada pelo
         # dono). Uma tentativa só: quem escreve no Bling não repete sozinho.
         func(atendimento_troca_lote, timeout=540, max_tries=1),
+        # O agente (20/10/2026): aqui também para dar para enfileirar à mão.
+        # O replay tenta uma vez só: cada tentativa chama o modelo (custo).
+        func(atendimento_indexar_pares, timeout=600),
+        func(atendimento_sites_marca, timeout=300),
+        func(atendimento_replay_agente, timeout=3600, max_tries=1),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
         # roda uma vez, à mão, depois da aprovação. Uma tentativa só: é
         # retomável, e quem decide rodar de novo é pessoa.
@@ -5358,6 +5467,32 @@ class WorkerSettings:
             minute=_ATENDIMENTO_TROCA_LOTE_MINUTOS,
             run_at_startup=False,
             timeout=540,
+        ),
+        # O agente (20/10/2026, ver _ATENDIMENTO_PARES_MINUTOS): os pares de
+        # hora em hora (até 500 conversas por rodada; cerca de 42 por hora em
+        # produção), os sites da marca de madrugada (cerca de 57 páginas a 1
+        # por segundo) e o replay noturno — uma tentativa só (cada uma chama o
+        # modelo). Os três saem na hora com o seu interruptor desligado.
+        cron(
+            atendimento_indexar_pares,
+            minute=_ATENDIMENTO_PARES_MINUTOS,
+            run_at_startup=False,
+            timeout=600,
+        ),
+        cron(
+            atendimento_sites_marca,
+            hour={_ATENDIMENTO_SITES_MARCA_HORA_UTC},
+            minute={_ATENDIMENTO_SITES_MARCA_MINUTO},
+            run_at_startup=False,
+            timeout=300,
+        ),
+        cron(
+            atendimento_replay_agente,
+            hour={_ATENDIMENTO_REPLAY_HORA_UTC},
+            minute={_ATENDIMENTO_REPLAY_MINUTO},
+            run_at_startup=False,
+            timeout=3600,
+            max_tries=1,
         ),
         # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
         # :00): postagem presa é CONSULTADA, nunca retentada.

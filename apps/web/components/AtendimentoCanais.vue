@@ -16,9 +16,19 @@
 // Sites e redes (02/10/2026): o Carrinho dos sites (só Observar — não há por
 // onde responder) e os Comentários do Instagram/Facebook (Observar ou Humano;
 // sem o escopo de comentários no token, a leitura aparece "Sem permissão").
-import { Check, ChevronDown, Loader2, Radio, RefreshCw, RotateCcw, Search, ShieldAlert, TriangleAlert, Users } from 'lucide-vue-next'
+// Agente (Claude, 20/10/2026): ao lado do modo, o botão "Agente (Claude)" —
+// só aparece com a chave Claude no servidor (`agente_disponivel`, a chave
+// nunca vem) e só admin liga; no Automático, com o agente ligado, a lista dos
+// assuntos de orientação que ele pode mandar sozinho (`auto_orientacao`) e,
+// das categorias do automático, as que ELE pode mandar sozinho (`auto_agente`,
+// decisão 8 — nasce vazia; o dono marca depois do eval). A reversão vem da
+// auditoria diária (`scripts.agente_reversao`, revisão 2 de 20/10/2026): o
+// assunto com erro crítico ou nota < 90% em 7 dias sai daqui; volta à mão.
+import { Bot, Check, ChevronDown, Loader2, Radio, RefreshCw, RotateCcw, Search, ShieldAlert, TriangleAlert, Users } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import {
+  ASSUNTOS_ORIENTACAO,
+  ASSUNTOS_SO_PESSOA_NO_AGENTE,
   MODOS,
   MODOS_EXTERNOS,
   PLATAFORMAS_ATENDIMENTO,
@@ -33,6 +43,7 @@ import {
   haQuanto,
   leituraParada,
   modoInfo,
+  orientacaoLabel,
   plataformaInfo,
   portalMagaluDe,
   sellerCenterDe,
@@ -224,6 +235,105 @@ async function salvarCategorias(c: Canal) {
   }
 }
 
+// ─── agente (Claude) e os assuntos de orientação (só admin) ─────────────────
+// O botão só aparece com a chave Claude no servidor; a explicação de uma linha
+// fica no quadro "Quem responde em cada caixa" quando alguma caixa pode ter.
+const agenteNoServidor = computed(() => canais.value.some((c) => c.agente_disponivel))
+const AGENTE_HINT = 'a IA nova (Claude) consulta pedido, anúncio, garantia e o manual antes de responder, e só passa para pessoa quando alguém precisa agir ou decidir (só admin liga, caixa por caixa)'
+
+async function mudarAgente(c: Canal, ev: Event) {
+  const caixa = ev.target as HTMLInputElement
+  const novo = caixa.checked
+  const loja = `${plataformaInfo(c.plataforma).nome} · ${contaDe(c)} · ${canalLabel(c.canal)}`
+  const aviso = novo
+    ? 'O agente (Claude) passa a escrever as sugestões desta caixa no lugar da IA de hoje. No Automático, ele só envia sozinho nos assuntos que você marcar para ELE (categorias e orientação) — começa sem nenhum.'
+    : 'Esta caixa volta para a IA de hoje. Os assuntos liberados para o agente saem junto.'
+  if (!confirm(`${novo ? 'Ligar' : 'Desligar'} o agente (Claude) em ${loja}?\n\n${aviso}`)) {
+    caixa.checked = !!c.agente
+    return
+  }
+  salvando.value = c.id
+  try {
+    const r = comoObjeto<Canal>(await api<unknown>(`/api/atendimento/canais/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: { agente: novo } }), 'canal')
+    trocar(r ? { ...c, ...r } : { ...c, agente: novo, auto_orientacao: novo ? c.auto_orientacao : [], auto_agente: novo ? c.auto_agente : [] })
+    toasts.success(`${loja}: agente ${novo ? 'ligado' : 'desligado'}`)
+    emit('mudou')
+  } catch (e: any) {
+    caixa.checked = !!c.agente
+    const er = erroDaApi(e, 'Não consegui mudar o agente')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    salvando.value = null
+  }
+}
+
+const editandoOri = ref<string | null>(null)
+const oriEscolhidas = ref<string[]>([])
+function abrirOrientacao(c: Canal, aberto: boolean) {
+  editandoOri.value = aberto ? c.id : null
+  oriEscolhidas.value = aberto ? [...(c.auto_orientacao || [])] : []
+}
+function alternarOrientacao(assunto: string) {
+  oriEscolhidas.value = oriEscolhidas.value.includes(assunto)
+    ? oriEscolhidas.value.filter((x) => x !== assunto)
+    : [...oriEscolhidas.value, assunto]
+}
+async function salvarOrientacao(c: Canal) {
+  salvando.value = c.id
+  // Na ordem das constantes (a mesma que o backend grava).
+  const escolhidos = ASSUNTOS_ORIENTACAO.filter((a) => oriEscolhidas.value.includes(a))
+  try {
+    const r = comoObjeto<Canal>(await api<unknown>(`/api/atendimento/canais/${encodeURIComponent(c.id)}`, {
+      method: 'PATCH',
+      body: { auto_orientacao: escolhidos },
+    }), 'canal')
+    trocar(r ? { ...c, ...r } : { ...c, auto_orientacao: escolhidos })
+    editandoOri.value = null
+    toasts.success('Assuntos de orientação salvos')
+  } catch (e: any) {
+    const er = erroDaApi(e, 'Não consegui salvar os assuntos de orientação')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    salvando.value = null
+  }
+}
+
+// Das categorias do automático, as que o AGENTE manda sozinho (`auto_agente`).
+const editandoAg = ref<string | null>(null)
+const agEscolhidas = ref<string[]>([])
+function abrirDoAgente(c: Canal, aberto: boolean) {
+  editandoAg.value = aberto ? c.id : null
+  agEscolhidas.value = aberto ? [...(c.auto_agente || [])] : []
+}
+function alternarDoAgente(cat: string) {
+  // Os assuntos de produto nunca saem sozinhos com o agente (o backend recusa).
+  if (ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)) return
+  agEscolhidas.value = agEscolhidas.value.includes(cat)
+    ? agEscolhidas.value.filter((x) => x !== cat)
+    : [...agEscolhidas.value, cat]
+}
+async function salvarDoAgente(c: Canal) {
+  salvando.value = c.id
+  // Na ordem das categorias do automático (a mesma que o backend grava).
+  const escolhidos = (c.auto_categorias || []).filter(
+    (a) => agEscolhidas.value.includes(a) && !ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(a),
+  )
+  try {
+    const r = comoObjeto<Canal>(await api<unknown>(`/api/atendimento/canais/${encodeURIComponent(c.id)}`, {
+      method: 'PATCH',
+      body: { auto_agente: escolhidos },
+    }), 'canal')
+    trocar(r ? { ...c, ...r } : { ...c, auto_agente: escolhidos })
+    editandoAg.value = null
+    toasts.success('Assuntos do agente salvos')
+  } catch (e: any) {
+    const er = erroDaApi(e, 'Não consegui salvar os assuntos do agente')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    salvando.value = null
+  }
+}
+
 // ─── sincronizar agora ──────────────────────────────────────────────────────
 const sincronizando = ref(false)
 async function sincronizar() {
@@ -257,6 +367,10 @@ async function sincronizar() {
         <li v-for="m in MODOS" :key="m.value" class="flex items-baseline gap-1.5">
           <span class="shrink-0 rounded px-1.5 py-px text-[10px] font-medium" :class="m.cls">{{ m.label }}</span>
           <span class="text-muted-foreground">{{ m.hint }}</span>
+        </li>
+        <li v-if="agenteNoServidor" class="flex items-baseline gap-1.5 md:col-span-2">
+          <span class="inline-flex shrink-0 items-center gap-1 self-center rounded bg-indigo-500/15 px-1.5 py-px text-[10px] font-medium text-indigo-700 dark:text-indigo-300"><Bot class="size-3" />Agente (Claude)</span>
+          <span class="text-muted-foreground">{{ AGENTE_HINT }}</span>
         </li>
       </ul>
     </div>
@@ -343,6 +457,23 @@ async function sincronizar() {
                 </select>
                 <Loader2 v-if="salvando === c.id" class="size-3.5 animate-spin text-muted-foreground" />
               </div>
+              <!-- Marcado sem a chave (rollback): ainda dá para desmarcar. -->
+              <label
+                v-if="c.agente_disponivel || c.agente"
+                class="mt-1 flex w-fit items-center gap-1.5 text-[11px]"
+                :class="isAdmin ? 'cursor-pointer' : 'cursor-default opacity-70'"
+                :title="isAdmin ? AGENTE_HINT : 'só admin liga ou desliga o agente'"
+              >
+                <input
+                  type="checkbox"
+                  :checked="!!c.agente"
+                  :disabled="!isAdmin || salvando === c.id"
+                  :aria-label="`agente (Claude) em ${contaDe(c)} ${canalLabel(c.canal)}`"
+                  @change="mudarAgente(c, $event)"
+                />
+                <Bot class="size-3.5" :class="c.agente ? 'text-indigo-600 dark:text-indigo-300' : 'text-muted-foreground'" />
+                <span :class="c.agente ? 'font-medium text-indigo-700 dark:text-indigo-300' : 'text-muted-foreground'">Agente (Claude)</span>
+              </label>
             </td>
             <td class="px-3 py-2">
               <template v-if="c.modo === 'auto'">
@@ -371,6 +502,74 @@ async function sincronizar() {
                       <div class="mt-2 flex justify-end gap-1">
                         <Button size="sm" variant="ghost" class="h-7 text-xs" @click="abrirCategorias(c, false)">cancelar</Button>
                         <Button size="sm" class="h-7 text-xs" :disabled="salvando === c.id" @click="salvarCategorias(c)">
+                          <Check class="mr-1 size-3.5" /> salvar
+                        </Button>
+                      </div>
+                    </PopoverContent>
+                  </PopoverPortal>
+                </PopoverRoot>
+                <!-- Com o agente: os assuntos de orientação que ele manda sozinho -->
+                <PopoverRoot v-if="c.agente && c.agente_disponivel" :open="editandoOri === c.id" @update:open="(v: boolean) => abrirOrientacao(c, v)">
+                  <PopoverTrigger as-child>
+                    <button
+                      type="button"
+                      class="mt-1 flex w-fit max-w-[260px] flex-wrap items-center gap-1 rounded border border-indigo-500/30 px-1.5 py-0.5 text-left hover:bg-muted disabled:cursor-default disabled:opacity-70"
+                      :disabled="!isAdmin"
+                      :title="isAdmin ? 'escolher os assuntos de orientação que o agente pode enviar sozinho' : 'só admin muda'"
+                    >
+                      <Bot class="size-3 text-indigo-600 dark:text-indigo-300" />
+                      <template v-if="c.auto_orientacao?.length">
+                        <span v-for="a in c.auto_orientacao" :key="a" class="rounded bg-indigo-500/15 px-1 text-[10px] text-indigo-700 dark:text-indigo-300">{{ orientacaoLabel(a) }}</span>
+                      </template>
+                      <span v-else class="text-[11px] text-muted-foreground">orientação: nenhum assunto sai sozinho</span>
+                      <ChevronDown v-if="isAdmin" class="size-3 text-muted-foreground" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverPortal>
+                    <PopoverContent side="bottom" align="end" :side-offset="4" :collision-padding="8" class="z-[70] w-80 rounded-md border bg-background p-2 shadow-lg">
+                      <div class="mb-1.5 text-[11px] text-muted-foreground">Com o agente, estes assuntos não vão para pessoa só pelo assunto: ele orienta o cliente. Marque os que ele pode enviar SOZINHO — e mesmo assim só sai quando ele não marcou ação de pessoa (segurar envio, analisar foto, abrir chamado…) e nada que o validador barre. A reversão vem da auditoria diária (a rotina do Mac roda scripts.agente_reversao): 1 erro crítico, ou nota abaixo de 90% em 7 dias, tira o assunto daqui com aviso no Telegram — até ela rodar, se a nota cair, desmarque aqui.</div>
+                      <label v-for="a in ASSUNTOS_ORIENTACAO" :key="a" class="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted">
+                        <input type="checkbox" :checked="oriEscolhidas.includes(a)" @change="alternarOrientacao(a)" />
+                        {{ orientacaoLabel(a) }}
+                      </label>
+                      <div class="mt-2 flex justify-end gap-1">
+                        <Button size="sm" variant="ghost" class="h-7 text-xs" @click="abrirOrientacao(c, false)">cancelar</Button>
+                        <Button size="sm" class="h-7 text-xs" :disabled="salvando === c.id" @click="salvarOrientacao(c)">
+                          <Check class="mr-1 size-3.5" /> salvar
+                        </Button>
+                      </div>
+                    </PopoverContent>
+                  </PopoverPortal>
+                </PopoverRoot>
+                <!-- Com o agente: das categorias acima, as que ELE manda sozinho (decisão 8) -->
+                <PopoverRoot v-if="c.agente && c.agente_disponivel" :open="editandoAg === c.id" @update:open="(v: boolean) => abrirDoAgente(c, v)">
+                  <PopoverTrigger as-child>
+                    <button
+                      type="button"
+                      class="mt-1 flex w-fit max-w-[260px] flex-wrap items-center gap-1 rounded border border-indigo-500/30 px-1.5 py-0.5 text-left hover:bg-muted disabled:cursor-default disabled:opacity-70"
+                      :disabled="!isAdmin"
+                      :title="isAdmin ? 'escolher, das categorias do automático, as que o agente pode enviar sozinho' : 'só admin muda'"
+                    >
+                      <Bot class="size-3 text-indigo-600 dark:text-indigo-300" />
+                      <template v-if="c.auto_agente?.length">
+                        <span v-for="a in c.auto_agente" :key="a" class="rounded bg-indigo-500/15 px-1 text-[10px] text-indigo-700 dark:text-indigo-300">{{ categoriaLabel(a) }}</span>
+                      </template>
+                      <span v-else class="text-[11px] text-muted-foreground">categorias: o agente não envia sozinho</span>
+                      <ChevronDown v-if="isAdmin" class="size-3 text-muted-foreground" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverPortal>
+                    <PopoverContent side="bottom" align="end" :side-offset="4" :collision-padding="8" class="z-[70] w-80 rounded-md border bg-background p-2 shadow-lg">
+                      <div class="mb-1.5 text-[11px] text-muted-foreground">Das categorias do automático, marque só as que o agente empatou ou ganhou da IA de hoje no eval: nas outras, o rascunho dele fica para pessoa conferir. A reversão vem da auditoria diária (a rotina do Mac roda scripts.agente_reversao): 1 erro crítico, ou nota abaixo de 90% em 7 dias, tira o assunto daqui com aviso no Telegram — até ela rodar, se a nota cair, desmarque aqui.</div>
+                      <label v-for="cat in c.auto_categorias || []" :key="cat" class="flex items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted" :class="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat) ? 'cursor-default opacity-70' : 'cursor-pointer'">
+                        <input type="checkbox" :checked="agEscolhidas.includes(cat) && !ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" :disabled="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" @change="alternarDoAgente(cat)" />
+                        {{ categoriaLabel(cat) }}
+                        <span v-if="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" class="text-[10px] text-amber-700 dark:text-amber-300" title="dado do produto: com o agente, a resposta pela ficha sempre vai para pessoa conferir (no legado saía pelo texto aprovado); não dá para marcar">· sempre pessoa confere</span>
+                      </label>
+                      <div v-if="!c.auto_categorias?.length" class="px-1.5 py-1 text-xs text-muted-foreground">nenhuma categoria no automático</div>
+                      <div class="mt-2 flex justify-end gap-1">
+                        <Button size="sm" variant="ghost" class="h-7 text-xs" @click="abrirDoAgente(c, false)">cancelar</Button>
+                        <Button size="sm" class="h-7 text-xs" :disabled="salvando === c.id" @click="salvarDoAgente(c)">
                           <Check class="mr-1 size-3.5" /> salvar
                         </Button>
                       </div>

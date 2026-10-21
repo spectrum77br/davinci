@@ -388,6 +388,7 @@ def e_nota(origem: str | None, tipo: str | None = None) -> bool:
     """A mensagem é NOTA INTERNA? Quem monta fila, prévia, pendência e prompt pula ela."""
     return origem == ORIGEM_NOTA or tipo == TIPO_NOTA
 
+
 # ── Estados da mensagem ───────────────────────────────────────────────────
 # Entrada: `recebida`. Saída: enviando → enviada | falhou | revisar.
 # `revisar` é o envio AMBÍGUO (timeout, erro sem código): pode ter saído, e
@@ -775,6 +776,11 @@ HUMANO_EMAIL = "e_mail"
 HUMANO_PEDIDO_NAO_ACHADO = "pedido_nao_achado"
 HUMANO_SEM_DADO = "sem_dado"
 HUMANO_ASSUNTO = "assunto"
+# O canal com o AGENTE (Claude, 20/10/2026, spec 6.6): a régua "ação de
+# pessoa" (`agente.acao_pessoa.gatilhos`) no lugar do assunto só de pessoa —
+# os códigos da ação (`segurar_envio`, `enviar_arquivo_nf`...) vão nos
+# `assuntos` da triagem. Fica onde o assunto fica na ordem.
+HUMANO_ACAO_PESSOA = "acao_pessoa"
 HUMANO_SO_ANEXO = "so_anexo"
 HUMANO_IA = "ia"
 # "Ou responde ou vai para pessoa" (14/10/2026, o dono no piloto da Kia): na
@@ -818,6 +824,7 @@ ORDEM_HUMANO: tuple[str, ...] = (
     HUMANO_EMAIL,
     HUMANO_PEDIDO_NAO_ACHADO,
     HUMANO_SEM_DADO,
+    HUMANO_ACAO_PESSOA,
     HUMANO_ASSUNTO,
     HUMANO_SO_ANEXO,
     HUMANO_IA,
@@ -840,6 +847,7 @@ ROTULO_HUMANO: dict[str, str] = {
     HUMANO_EMAIL: "E-mail: só pessoa",
     HUMANO_PEDIDO_NAO_ACHADO: "Pedido não achado no Bling",
     HUMANO_SEM_DADO: "Falta dado (rastreio/NF)",
+    HUMANO_ACAO_PESSOA: "Ação de pessoa",
     HUMANO_ASSUNTO: "Assunto só de pessoa",
     HUMANO_SO_ANEXO: "Só foto/vídeo/arquivo",
     HUMANO_IA: "A IA marcou: precisa de pessoa",
@@ -866,6 +874,174 @@ TIPO_REGRA_ESTILO = "estilo"
 TIPOS_REGRA = (TIPO_REGRA_SEGURANCA, TIPO_REGRA_CATEGORIA, TIPO_REGRA_ESTILO)
 # Menor = mais importante (vem antes dentro do mesmo tipo).
 PRIORIDADE_REGRA_PADRAO = 100
+
+
+# ── Agente de atendimento (Claude, 20/10/2026) ───────────────────────────
+# O agente com ferramentas só de leitura, ligado canal por canal
+# (`agente_config.agente_ligado`). O legado (canal sem agente) não lê nada
+# daqui: `CATEGORIAS_SO_HUMANO` continua valendo para ele e para a Caixa
+# Humano desses canais, sem mudança.
+#
+# O `prompt_versao` do rascunho do agente: é por ele que o envio, o reenvio,
+# a reavaliação e a Caixa Humano sabem que a régua é a do agente (ações de
+# pessoa + `auto_orientacao`) e não a do assunto.
+PROMPT_VERSAO_AGENTE = "ag1"
+
+# Os assuntos de ORIENTAÇÃO: os 14 "só pessoa" do manual base menos
+# `reclamacao_forte` e `marca_autorizacao`, que caem sempre num gatilho de
+# pessoa (código `juridico_fraude_ofensa`). No caminho do agente o assunto não
+# manda para pessoa: ele orienta (spec 6.4) e só vai para pessoa com uma ação
+# (`ACOES_PESSOA`). Sai sozinho só o assunto que o dono pôs no
+# `auto_orientacao` do canal, um a um, depois do replay.
+ASSUNTOS_ORIENTACAO: tuple[str, ...] = (
+    "cancelamento",
+    "troca_devolucao",
+    "reembolso",
+    "garantia",
+    "defeito",
+    "item_errado_faltando",
+    "entrega_nao_recebida",
+    "endereco",
+    "desconto",
+    "divergencia_anuncio",
+    "substituicao_estoque",
+    "outro",
+)
+
+# Os assuntos de DADO DO PRODUTO que, com o agente, NUNCA saem sozinhos (a
+# decisão do Eduardo da revisão 2 de 20/10/2026; o código passou a garantir no
+# ajuste r3): `ficha.CATEGORIAS_DA_FICHA` + resistência à água e condição. A
+# trava do envio (`ia.trava_do_agente`), o pré-filtro do reenvio, a rota do
+# canal (o `auto_agente` recusa com 422) e a trava da ficha no automático
+# (`ia.conferir_saida(agente=True)`, mesmo sem a ficha). A mesma lista da tela
+# (`AtendimentoPlataforma.vue`, "sempre pessoa confere").
+ASSUNTOS_SO_PESSOA_NO_AGENTE: tuple[str, ...] = (
+    "o_que_e_o_anuncio",
+    "espec_celular",
+    "espec_mala",
+    "espec_eletro",
+    "espec_outros",
+    "conteudo_da_caixa",
+    "duvida_produto",
+    "resistencia_agua",
+    "originalidade_condicao",
+)
+
+# A régua "ação de pessoa" (spec 6.3): vai para pessoa só quando alguém
+# precisa AGIR (anexar, mudar, segurar, abrir chamado, analisar) ou DECIDIR
+# (exceção, desconto, brinde, fora da plataforma), ou bate trava dura. O
+# código detecta o que dá e sempre vence; o modelo pode acrescentar, nunca
+# tirar. Na ordem da régua (é a ordem do prompt e do `Literal` da saída).
+ACAO_AG_CANCELAMENTO = "ag_cancelamento"
+ACAO_JURIDICO_FRAUDE_OFENSA = "juridico_fraude_ofensa"
+ACAO_RECLAMACAO_ABERTA = "reclamacao_aberta"
+ACAO_AVALIACAO_BAIXA = "avaliacao_baixa"
+ACAO_INSTRUCAO = "instrucao"
+ACAO_PEDIU_PESSOA = "pediu_pessoa"
+ACAO_SEGURAR_ENVIO = "segurar_envio"
+ACAO_ALTERAR_ENDERECO = "alterar_endereco"
+ACAO_ENVIAR_ARQUIVO_NF = "enviar_arquivo_nf"
+ACAO_ANALISAR_EVIDENCIA = "analisar_evidencia"
+ACAO_ABRIR_CHAMADO = "abrir_chamado"
+ACAO_APROVAR_FORA_DA_PLATAFORMA = "aprovar_fora_da_plataforma"
+ACAO_DESCONTO_BRINDE = "desconto_brinde"
+ACAO_EXCECAO = "excecao"
+ACAO_DADO_INDISPONIVEL = "dado_indisponivel"
+ACOES_PESSOA: tuple[str, ...] = (
+    ACAO_AG_CANCELAMENTO,
+    ACAO_JURIDICO_FRAUDE_OFENSA,
+    ACAO_RECLAMACAO_ABERTA,
+    ACAO_AVALIACAO_BAIXA,
+    ACAO_INSTRUCAO,
+    ACAO_PEDIU_PESSOA,
+    ACAO_SEGURAR_ENVIO,
+    ACAO_ALTERAR_ENDERECO,
+    ACAO_ENVIAR_ARQUIVO_NF,
+    ACAO_ANALISAR_EVIDENCIA,
+    ACAO_ABRIR_CHAMADO,
+    ACAO_APROVAR_FORA_DA_PLATAFORMA,
+    ACAO_DESCONTO_BRINDE,
+    ACAO_EXCECAO,
+    ACAO_DADO_INDISPONIVEL,
+)
+# Como a tela escreve (o motivo do rascunho e o chip da Caixa Humano).
+ROTULO_ACAO_PESSOA: dict[str, str] = {
+    ACAO_AG_CANCELAMENTO: "Pedido em Ag. cancelamento",
+    ACAO_JURIDICO_FRAUDE_OFENSA: "Procon, Justiça, golpe ou ofensa",
+    ACAO_RECLAMACAO_ABERTA: "Reclamação aberta",
+    ACAO_AVALIACAO_BAIXA: "Avaliação com nota baixa",
+    ACAO_INSTRUCAO: "Texto com cara de instrução",
+    ACAO_PEDIU_PESSOA: "Insistiu em falar com pessoa",
+    ACAO_SEGURAR_ENVIO: "Segurar o envio (cancelamento antes da postagem)",
+    ACAO_ALTERAR_ENDERECO: "Alterar o endereço antes da postagem",
+    ACAO_ENVIAR_ARQUIVO_NF: "Enviar o arquivo da NF",
+    ACAO_ANALISAR_EVIDENCIA: "Analisar foto ou vídeo",
+    ACAO_ABRIR_CHAMADO: "Abrir chamado (entrega)",
+    ACAO_APROVAR_FORA_DA_PLATAFORMA: "Aprovar fora da plataforma",
+    ACAO_DESCONTO_BRINDE: "Desconto, brinde ou condição especial",
+    ACAO_EXCECAO: "Exceção à política",
+    ACAO_DADO_INDISPONIVEL: "Falta o dado para responder",
+}
+
+
+def rotulo_acao_pessoa(codigo: str) -> str:
+    """ "Analisar foto ou vídeo"... — o código cru para ação sem nome."""
+    return ROTULO_ACAO_PESSOA.get(codigo, codigo)
+
+
+# Fatos da loja (`atendimento_fatos`): os ESCOPOS e as FONTES válidos — os
+# mesmos dos CHECKs da tabela (o teste confere).
+FATO_ESCOPO_GLOBAL = "global"
+FATO_ESCOPO_PLATAFORMA = "plataforma"
+FATO_ESCOPO_LOJA = "loja"
+FATO_ESCOPO_ANUNCIO = "anuncio"
+FATO_ESCOPO_PRODUTO = "produto"
+FATO_ESCOPO_SKU = "sku"
+FATO_ESCOPO_MARCA = "marca"
+FATO_ESCOPOS: tuple[str, ...] = (
+    FATO_ESCOPO_GLOBAL,
+    FATO_ESCOPO_PLATAFORMA,
+    FATO_ESCOPO_LOJA,
+    FATO_ESCOPO_ANUNCIO,
+    FATO_ESCOPO_PRODUTO,
+    FATO_ESCOPO_SKU,
+    FATO_ESCOPO_MARCA,
+)
+FATO_FONTE_MANUAL = "manual"
+FATO_FONTE_FRASE_RAPIDA = "frase_rapida"
+FATO_FONTE_CORRECAO = "correcao"
+FATO_FONTE_DONO = "dono"
+# Recusa padrão (spec 5.2): aprovada, o agente responde a recusa sozinho
+# ("não enviamos brinde nem amostra"); sem ela, vai para pessoa decidir.
+FATO_FONTE_RECUSA_PADRAO = "recusa_padrao"
+# A página de produto do site da marca (aprovada como fonte em 20/10/2026).
+FATO_FONTE_SITE = "site"
+FATO_FONTES: tuple[str, ...] = (
+    FATO_FONTE_MANUAL,
+    FATO_FONTE_FRASE_RAPIDA,
+    FATO_FONTE_CORRECAO,
+    FATO_FONTE_DONO,
+    FATO_FONTE_RECUSA_PADRAO,
+    FATO_FONTE_SITE,
+)
+
+# De onde veio cada par pergunta × resposta da equipe (`atendimento_pares`):
+# a resposta dada fora do DaVinci (Duoke, Seller Center), a escrita pela
+# pessoa no DaVinci, o rascunho que a pessoa editou ou mandou igual, e a
+# correção da avaliação negativa. A resposta do agente enviada sozinha NUNCA
+# vira par.
+PAR_FONTE_EXTERNO = "externo"
+PAR_FONTE_HUMANO = "davinci_humano"
+PAR_FONTE_EDITOU = "davinci_editou"
+PAR_FONTE_IGUAL = "davinci_igual"
+PAR_FONTE_CORRECAO = "correcao"
+FONTES_PAR: tuple[str, ...] = (
+    PAR_FONTE_EXTERNO,
+    PAR_FONTE_HUMANO,
+    PAR_FONTE_EDITOU,
+    PAR_FONTE_IGUAL,
+    PAR_FONTE_CORRECAO,
+)
 
 
 @dataclass

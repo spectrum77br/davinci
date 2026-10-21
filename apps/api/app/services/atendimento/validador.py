@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Collection, Mapping, Sequence
 
 from app.services.atendimento.constantes import ORIGEM_IA, limite_caracteres
 
@@ -460,6 +461,9 @@ _MOTIVO_VALOR = "valor em R$ só pode vir do sistema"
 _MOTIVO_PERCENTUAL = "percentual só pode vir do sistema"
 _MOTIVO_FRETE = "frete grátis só pessoa pode prometer"
 _MOTIVO_PRAZO = "prazo em números só pode vir do sistema"
+# O nome público (rodada 4 do agente, 21/10/2026: só o caminho do agente tira
+# este motivo quando o prazo vem negado — "não conseguimos garantir até sexta").
+MOTIVO_PRAZO = _MOTIVO_PRAZO
 _MOTIVO_GARANTIA = "prazo de garantia só pode vir do sistema"
 _MOTIVO_DADO_PESSOAL = "pede ou repete dado pessoal (CPF, endereço, telefone)"
 _MOTIVO_PROMESSA = "promessa (reembolso, troca, sem custo) só pessoa pode fazer"
@@ -659,12 +663,26 @@ def _fora_do_latin1(texto: str) -> list[str]:
     return vistos
 
 
-def validar(texto: str, *, plataforma: str, canal: str, origem: str) -> list[str]:
+def validar(
+    texto: str,
+    *,
+    plataforma: str,
+    canal: str,
+    origem: str,
+    prazos_de_garantia: Collection[tuple[int, str, str]] = (),
+) -> list[str]:
     """Motivos pelos quais o texto NÃO pode sair (lista vazia = pode).
 
     Valida o texto como ele SAI (normalizado): o limite de caracteres é o
     que a plataforma conta. Motivos em português curto, sem repetir, na
     ordem em que a pessoa deve corrigir.
+
+    `prazos_de_garantia` = só o AGENTE (20/10/2026): os prazos da regra que
+    `ver_garantia` devolveu (`prazos_da_regra`: "3 meses" de hardware e "12
+    meses" de software da Uranyx, "90 dias" da Charlots) deixam de ser
+    "prazo"/"garantia em número" na frase que fala da garantia, cada um com
+    o seu par na mesma oração. Qualquer outro prazo continua barrado. Vazio
+    (o legado e a pessoa): nada muda.
     """
     limpo = normalizar(texto or "", plataforma=plataforma, canal=canal)
     if not limpo:
@@ -723,15 +741,16 @@ def validar(texto: str, *, plataforma: str, canal: str, origem: str) -> list[str
 
     # Só IA: prazo e valor vinculam — só por lacuna preenchida pelo código.
     if origem == ORIGEM_IA:
+        do_prazo = _sem_prazo_da_regra(plano, prazos_de_garantia) if prazos_de_garantia else plano
         if _algum(_VALOR, _MEDIDA_DE_TELA.sub(" ", plano)):
             motivos.append(_MOTIVO_VALOR)
         if _PERCENTUAL.search(plano):
             motivos.append(_MOTIVO_PERCENTUAL)
         if _FRETE.search(plano):
             motivos.append(_MOTIVO_FRETE)
-        if _algum(_PRAZO, _sem_ate_o_dia_da_garantia(plano)):
+        if _algum(_PRAZO, _sem_ate_o_dia_da_garantia(do_prazo)):
             motivos.append(_MOTIVO_PRAZO)
-        if _algum(_GARANTIA, plano):
+        if _algum(_GARANTIA, do_prazo):
             motivos.append(_MOTIVO_GARANTIA)
         if _algum(_DADO_PESSOAL, plano):
             motivos.append(_MOTIVO_DADO_PESSOAL)
@@ -991,6 +1010,50 @@ _FALA_DEFEITO = re.compile(
     r"|\b(?:a\s+gente|a\s+loja)\s+(?:\w+\s+){0,2}?(?:troca|substitui)\b"
     r"|\b(?:trocamos|substituimos)\b"
 )
+# No AGENTE (esclarecimento 2 do orquestrador, 20/10/2026): a orientação de
+# defeito da spec 6.4 (acolher, pedir vídeo curto e fotos por aqui, a equipe
+# analisa e responde por aqui) cita "defeito" sem ir para pessoa. Vai o
+# DIAGNÓSTICO ("é defeito de fábrica", "parece problema de hardware",
+# "constatamos o defeito"), a PROMESSA sobre o defeito na mesma frase ("se der
+# defeito, a gente troca"; "vamos consertar") — a troca por falta de estoque
+# ("podemos trocar pela cor Laranja") não é defeito — e, como no legado,
+# fabricante, assistência técnica e "protegido contra".
+_DIAGNOSTICO_DE_DEFEITO = re.compile(
+    r"\b(?:e|foi|sera|seria|parece(?:\s+ser)?|deve\s+ser|trata-se\s+de|se\s+trata\s+de)"
+    r"\s+(?:um\s+|uma\s+|o\s+|a\s+)?(?:defeito|vicio|problema|falha)"
+    r"\s+(?:de|do|da|no|na)\s+(?:fabric\w*|hardware|aparelho|placa|bateria|tela|software)\b"
+    r"|\b(?:confirmamos|constatamos|identificamos|verificamos|confirmado|constatado)"
+    r"\s+(?:o\s+|um\s+)?(?:defeito|vicio)"
+)
+_PROMESSA_DE_REPARO = re.compile(
+    r"\b(?:vamos|iremos|podemos|faremos|vai|vao)\s+(?:\w+\s+){0,2}?"
+    r"(?:consertar|reparar|trocar|substituir|arrumar)\b"
+    r"|\b(?:consertamos|reparamos|trocamos|substituimos)\b"
+    r"|\b(?:a\s+gente|a\s+loja)\s+(?:\w+\s+){0,2}?(?:troca|substitui|conserta)\b"
+)
+_ASSUNTO_DEFEITO = re.compile(
+    r"\b(?:defeit\w*|consert\w*|repar\w*|problema|falha|garantia|quebr\w*|estragad\w*"
+    r"|parou|nao\s+funciona\w*|nao\s+liga)\b"
+)
+_DEFEITO_FORA_DA_LOJA = re.compile(
+    r"\bassistencia\s+tecnica\b|\bfabricante\w*"
+    r"|\b(?:protegid[oa]s?|protecao|assegurad[oa]s?|resguardad[oa]s?|amparad[oa]s?|segurad[oa]s?)"
+    r"\s+contra\b(?!\s+(?:\w+\s+){0,2}?(?:extravios?|roubos?|furtos?|perdas?|atrasos?|avarias?"
+    r"|fraudes?|golpes?)\b)"
+)
+
+
+def diagnostica_ou_promete_defeito(texto: str) -> bool:
+    """A resposta DIAGNOSTICA o defeito ou PROMETE algo sobre ele? (só o agente) PURA."""
+    plano = _HIFEN_NA_PALAVRA.sub("", plano_de(texto or ""))
+    if _DIAGNOSTICO_DE_DEFEITO.search(plano) or _DEFEITO_FORA_DA_LOJA.search(plano):
+        return True
+    return any(
+        _PROMESSA_DE_REPARO.search(frase) and _ASSUNTO_DEFEITO.search(frase)
+        for frase in _FIM_DE_FRASE.split(plano)
+    )
+
+
 # "garan-tia": a palavra partida por hífen (só para dizer se FALA de garantia).
 _HIFEN_NA_PALAVRA = re.compile(r"(?<=[a-z])[-\u2010\u2011]\s*(?=[a-z])")
 _ABREVIACAO_MES = re.compile(rf"\b({_MES_CURTO})\.")
@@ -1287,6 +1350,413 @@ def _sem_ate_o_dia_da_garantia(plano: str) -> str:
 
     partes = _SEPARA_FRASES.split(_sem_protecao_de_terceiros(plano))
     return "".join(tira(p) for p in partes)
+
+
+# ── O prazo da REGRA de garantia, no AGENTE (20/10/2026) ──────────────────
+#
+# Esclarecimento 1 do orquestrador (fontes v1.3): o dono mandou usar o
+# cálculo do Painel de Garantia. No caminho do agente, os prazos que vieram
+# de `ver_garantia` (a regra: 3 meses de hardware e 12 de software da
+# Uranyx, a partir da entrega; os 90 dias da Charlots, do fato aprovado da
+# marca) podem ser escritos — só eles, e só na frase que fala da garantia.
+# As datas continuam com `conferir_garantia` (do bloco, no lugar certo).
+# Revisão de 20/10/2026: cada número só com o SEU par, na mesma oração — os 3
+# meses com "hardware/aparelho", os 12 com "software/sistema", os 90 dias com
+# "garantia/defeito" —; "a garantia do aparelho é de 12 meses" e "a garantia
+# é de 3 meses e a entrega leva 12 meses" continuam barrados.
+PARTE_HARDWARE, PARTE_SOFTWARE, PARTE_GERAL = "hardware", "software", "geral"
+_CHAVES_DA_REGRA = (
+    ("hardware_meses", "mes", PARTE_HARDWARE),
+    ("software_meses", "mes", PARTE_SOFTWARE),
+    ("dias", "dia", PARTE_GERAL),
+)
+_POR_EXTENSO = {
+    1: "um",
+    2: "dois",
+    3: "tres",
+    4: "quatro",
+    5: "cinco",
+    6: "seis",
+    7: "sete",
+    8: "oito",
+    9: "nove",
+    10: "dez",
+    11: "onze",
+    12: "doze",
+    15: "quinze",
+    18: "dezoito",
+    24: "vinte e quatro",
+    30: "trinta",
+    60: "sessenta",
+    90: "noventa",
+    180: "cento e oitenta",
+}
+
+
+def prazos_da_regra(garantias: Sequence[Mapping] | None) -> frozenset[tuple[int, str, str]]:
+    """Os prazos (número, "mes"|"dia", parte) da `regra` de cada garantia de `ver_garantia`. PURA.
+
+    `{"hardware_meses": 3, "software_meses": 12, ...}` → {(3, "mes",
+    "hardware"), (12, "mes", "software")}; `{"dias": 90, ...}` → {(90,
+    "dia", "geral")}; sem regra (outra linha, o registro do Painel sem
+    regra) → nada.
+    """
+    prazos: set[tuple[int, str, str]] = set()
+    for g in garantias or ():
+        regra = g.get("regra") if isinstance(g, Mapping) else None
+        if not isinstance(regra, Mapping):
+            continue
+        for chave, unidade, parte in _CHAVES_DA_REGRA:
+            n = regra.get(chave)
+            if isinstance(n, int) and not isinstance(n, bool) and 0 < n < 1000:
+                prazos.add((n, unidade, parte))
+    return frozenset(prazos)
+
+
+def _prazo_da_regra(n: int, unidade: str) -> re.Pattern[str]:
+    numero = rf"(?:{n}|{_POR_EXTENSO[n]})" if n in _POR_EXTENSO else str(n)
+    nome = r"(?:mes|meses)" if unidade == "mes" else r"dias?"
+    return re.compile(rf"(?<![\d.,]){numero}\s*{nome}\b")
+
+
+# A oração dentro da frase: a vírgula que abre OUTRO sujeito (", a troca", ",
+# e o reembolso", ", se"), ponto e vírgula, "mas", e o "e" que abre outro
+# sujeito ("e a entrega"); "3 meses de hardware e 12 de software" e "e a de
+# software, de 12 meses" ficam juntos.
+_ORACAO_DA_REGRA = re.compile(
+    r",(?=\s*(?:(?:e|mas|porem)\s+)?(?:o|a|os|as|seu|sua|seus|suas|se|quando|que|ja|ele|ela)\b)"
+    r"|;|\bmas\b|\bporem\b|\be\s+(?=(?:o|a|os|as|seu|sua|seus|suas)\b)"
+)
+_PALAVRA_DA_PARTE = (
+    (PARTE_HARDWARE, r"hardware|aparelho|fisic\w*|pecas?|componentes?"),
+    (PARTE_SOFTWARE, r"software|sistema"),
+)
+_PARTE_DA_REGRA_DEPOIS = re.compile(
+    r"\s+(?:(?:de|da|do|para|pro|pra|no|na|em|o|a|garantia|cobertura)\s+){0,3}"
+    r"(?P<parte>" + "|".join(p for _n, p in _PALAVRA_DA_PARTE) + r")\b"
+)
+_PARTE_DA_REGRA_ANTES = re.compile(r"\b(?:" + "|".join(p for _n, p in _PALAVRA_DA_PARTE) + r")\b")
+_DA_GARANTIA = re.compile(r"\b(?:garantias?|defeitos?|fabrica\w*|cobert\w*)\b")
+
+
+def _parte_de(palavra: str) -> str:
+    for parte, padrao in _PALAVRA_DA_PARTE:
+        if re.fullmatch(padrao, palavra):
+            return parte
+    return PARTE_GERAL
+
+
+def _parte_do_numero(oracao: str, m: re.Match[str]) -> str | None:
+    """A parte (hardware/software) a que o número pertence: a palavra logo
+    depois ("3 meses para hardware") ou a última antes na oração ("a garantia
+    de hardware é de 3 meses"); None = nenhuma."""
+    if depois := _PARTE_DA_REGRA_DEPOIS.match(oracao, m.end()):
+        return _parte_de(depois["parte"])
+    antes = list(_PARTE_DA_REGRA_ANTES.finditer(oracao, 0, m.start()))
+    return _parte_de(antes[-1].group(0)) if antes else None
+
+
+def _sem_prazo_da_regra(plano: str, prazos: Collection[tuple[int, str, str]]) -> str:
+    """O texto sem os prazos da regra NA FRASE QUE FALA DA GARANTIA, cada um
+    com o SEU par na mesma oração ("a garantia é de 3 meses para hardware e
+    12 meses para software"; os 90 dias com "garantia"/"defeito"). O mesmo
+    número noutra frase ("chega em 3 meses"), noutra oração ("…, e o
+    reembolso sai em 3 meses") ou com o par errado ("a garantia do aparelho
+    é de 12 meses") continua prazo."""
+    regras = [(_prazo_da_regra(n, u), parte) for n, u, parte in sorted(prazos)]
+
+    def na_oracao(oracao: str) -> str:
+        cortes: list[tuple[int, int]] = []
+        for padrao, parte in regras:
+            for m in padrao.finditer(oracao):
+                if parte == PARTE_GERAL:
+                    vale = bool(_DA_GARANTIA.search(oracao))
+                else:
+                    vale = _parte_do_numero(oracao, m) == parte
+                if vale:
+                    cortes.append(m.span())
+        for inicio, fim in sorted(cortes, reverse=True):
+            oracao = oracao[:inicio] + " " + oracao[fim:]
+        return oracao
+
+    def tira(frase: str) -> str:
+        if not _FRASE_GARANTIA.search(frase):
+            return frase
+        partes = _ORACAO_DA_REGRA.split(frase)
+        separadores = _ORACAO_DA_REGRA.findall(frase)
+        saida = na_oracao(partes[0])
+        for sep, oracao in zip(separadores, partes[1:], strict=True):
+            saida += sep + na_oracao(oracao)
+        return saida
+
+    return "".join(tira(p) for p in _SEPARA_FRASES.split(plano))
+
+
+# ── O que só o AGENTE confere na garantia e no defeito (revisão de 20/10/2026) ──
+#
+# A regra 7 e a spec 6.4: nunca dizer que não tem garantia, que venceu, que
+# acabou ou que está fora dela — nem com o status do Painel "expirada" (é
+# pessoa quem decide, e o CDC vale). E nunca sugerir reset ou formatação (o
+# comprador perde os dados). No legado, toda fala de garantia já ia para
+# pessoa; no agente, a fala que sai de `ver_garantia` não vai — por isso a
+# trava própria.
+MOTIVO_NEGA_GARANTIA = "nega a garantia ou a dá como vencida — só pessoa"
+MOTIVO_SUGERE_RESET = "sugere reset ou formatação (apaga os dados) — só pessoa"
+_NEGA_GARANTIA = re.compile(
+    r"\bsem\s+garantia\b(?!\s+(?:estendida|adicional|extra)\b)"
+    r"|\b(?:nao|nem)\s+(?:tem|possui|ha|oferece\w*|cobre|cobrimos|da|conta\s+com|vale|existe)"
+    r"\s+(?:mais\s+)?(?:\w+\s+){0,2}?garantia\b"
+    r"|\bgarantia\s+(?:\w+\s+){0,8}?(?:ja\s+)?(?:venceu|vencida|expirou|expirada|acabou|terminou"
+    r"|encerrou|encerrada|esgotou|caducou|perdeu|perdida|nao\s+(?:cobre|vale|esta\s+(?:ativa"
+    r"|valendo|vigente)|e\s+mais\s+valida))\b"
+    r"|\bfora\s+d[ao]\s+(?:prazo\s+d[ae]\s+|periodo\s+d[ae]\s+)?garantia\b"
+    r"|\bperd\w+\s+(?:a\s+)?garantia\b"
+    r"|\b(?:nao|nem)\s+(?:conseguimos|podemos|vamos)\s+(?:\w+\s+){0,2}?(?:ajudar|atender|trocar"
+    r"|consertar)\s+(?:\w+\s+){0,3}?(?:defeito|garantia)\b"
+    # Revisão 2 de 20/10/2026: a cobertura recusada sem a palavra "garantia" e
+    # as paráfrases comuns ("não é coberto", "não entra na garantia", "não há
+    # cobertura", "mau uso anula a garantia", "passou do prazo de garantia",
+    # "a garantia de hardware não está mais valendo", "o status é expirada").
+    r"|\b(?:nao|nem)\s+(?:e|esta|sao|estao|fica|ficam)\s+(?:mais\s+)?cobert[oa]s?\b"
+    r"|\b(?:nao|nem)\s+(?:tem|ha|possui|existe|conta\s+com|oferece)\s+(?:mais\s+)?cobertura\b"
+    r"|\b(?:nao|nem)\s+(?:entra|entram|se\s+enquadra\w*|esta|estao|e|sao)\s+(?:mais\s+)?"
+    r"(?:na|pela|dentro\s+da|coberto\s+pela)\s+garantia\b"
+    r"|\b(?:anula|anulam|anular|invalida|invalidam|invalidar|cancela|cancelam|tira|tiram)\s+"
+    r"(?:a\s+|sua\s+|a\s+sua\s+)?garantia\b"
+    r"|\bpassou\s+(?:do\s+)?(?:prazo|periodo)\s+(?:de\s+|da\s+)?(?:garantia|cobertura)\b"
+    r"|\bgarantia\s+(?:\w+\s+){0,4}?(?:nao|nem)\s+(?:esta|e)\s+mais\s+(?:ativa|valendo|vigente"
+    r"|valida)\b"
+    r"|\b(?:status|situacao|painel|prazo|periodo|cobertura|garantia)\s+(?:\w+\s+){0,4}?"
+    r"(?:expirad[oa]|vencid[oa])\b"
+    # Revisão "furos": a passiva ("a garantia é anulada", "fica invalidada").
+    r"|\bgarantia\s+(?:(?!nao\b|nem\b)\w+\s+){0,3}?(?:e|fica|sera|esta|seria)\s+"
+    r"(?:automaticamente\s+)?"
+    r"(?:anulad|invalidad|cancelad|suspens|perdid)[oa]\b"
+)
+# "Ainda não venceu", "não expirou": a garantia VALE (é promessa, não negação).
+_NEGACAO_DO_VENCIMENTO = re.compile(
+    r"\b(?:nao|nem)\s+(?:\w+\s+)?(?:venceu|expirou|acabou|terminou|encerrou|esgotou|caducou"
+    r"|passou|anula|invalida|perde|cancela)\b"
+)
+# O PRAZO ou a COBERTURA que acabou, numa frase de garantia (revisão 2 de
+# 20/10/2026: "a cobertura de hardware já se encerrou", "o prazo para acionar
+# já se esgotou", "o prazo de 3 meses de hardware já se encerrou") — "o prazo
+# de entrega já passou" não é de garantia e fica de fora.
+_PRAZO_QUE_ACABOU = re.compile(
+    r"(?:\b(?:prazo|periodo)\s+(?:\w+\s+){0,5}?(?:garantia|cobertura|acionar\w*|hardware"
+    r"|software)\b|\b(?:cobertura|vigencia)\b)\s+(?:\w+\s+){0,5}?(?:ja\s+)?(?:se\s+)?"
+    r"(?:encerrou|encerrad[oa]|passou(?!\s+a\b)|venceu|vencid[oa]|acabou|terminou|esgotou"
+    r"|expirou|expirad[oa]|caducou)\b"
+)
+_RESET = re.compile(
+    r"\b(?:reset\w*|hard\s*reset|formata\w*|formatar|formate|wipe)\b"
+    r"|\brestaur\w*\s+(?:(?:o|a|seu|sua)\s+)?(?:(?:as\s+)?(?:configurac\w+|padroes?)\s+)?"
+    r"(?:de\s+|d[ao]s?\s+|para\s+(?:o\s+)?)?(?:padrao\s+(?:de\s+)?)?"
+    r"(?:fabrica|aparelho|celular|relogio|telefone|smartphone|sistema)\b"
+    r"|\bredefini\w*\s+(?:\w+\s+){0,4}?(?:fabrica|padrao)\b"
+    r"|\bapagar\s+tudo\b|\bmodo\s+de\s+recupera\w*|\blimpar\s+(?:todos\s+os\s+)?dados\b"
+    # Revisão 2 de 20/10/2026: "volte o aparelho às configurações de fábrica",
+    # "apague os dados do aparelho e configure de novo".
+    r"|\bconfigurac\w+\s+(?:de\s+|da\s+|originais\s+de\s+)?fabrica\b"
+    r"|\b(?:volt\w*|retorn\w*|deix\w*)\s+(?:\w+\s+){0,4}?(?:a|as|ao|de|da|para\s+(?:a|o))\s+"
+    r"(?:configurac\w+\s+(?:de\s+)?)?fabrica\b"
+    r"|\bapag\w*\s+(?:\w+\s+){0,2}?dados\b|\bzer(?:ar|e|ando)\s+o\s+(?:aparelho|celular|relogio)\b"
+    # Revisão "furos" de 20/10/2026: "volte para as configurações originais",
+    # "apague tudo", "restaure o padrão", "redefina o telefone", "comece do
+    # zero", "modo recovery", "opções de redefinição", "remova a conta Google".
+    r"|\bconfigurac\w+\s+(?:originais|iniciais|de\s+origem)\b"
+    r"|\b(?:apag|limp|delet|exclu|remov)\w*\s+tudo\b|\blimp\w*\s+(?:o\s+|seu\s+)?(?:aparelho"
+    r"|celular|relogio|telefone|sistema)\b"
+    r"|\brestaur(?!ante)\w*\b|\bredefin\w*\b|\b(?:comec|recomec|configur)\w*\s+(?:\w+\s+)?do\s+zero\b"
+    r"|\brecovery\b|\bremov\w*\s+(?:a\s+)?(?:sua\s+)?conta\s+(?:do\s+)?google\b"
+)
+# A RECUSA de troca, conserto ou cobertura sem a palavra "garantia" (revisão
+# "furos": "o prazo para troca já acabou", "não conseguimos mais trocar o
+# aparelho", "nesse caso não é possível a troca", "hoje só vale para
+# software", "está fora do prazo"). Só o agente usa (`recusa_cobertura`). A
+# recusa padrão aprovada da troca pagando a diferença não conta, nem o prazo
+# de ENTREGA que passou.
+_RECUSA_COBERTURA = re.compile(
+    r"\b(?:nao|nem)\s+(?:e|sera|seria|foi|esta|e\s+mais)\s+possivel\s+(?:\w+\s+){0,3}?"
+    r"(?:troc|consert|repar|devolv|devoluc|reembols|cobr|substitu|atend|garant|acion)\w*"
+    r"|\b(?:nao|nem)\s+(?:mais\s+)?(?:conseguimos|consigo|podemos|posso|fazemos|faco|realizamos"
+    r"|temos\s+como|tenho\s+como|vamos|iremos|efetuamos|aceitamos|cobrimos|trocamos|consertamos"
+    r"|atendemos|oferecemos|damos)\s+(?:mais\s+)?(?:\w+\s+){0,3}?(?:troc|consert|repar|devolv|devoluc"
+    r"|reembols|cobr|substitu|atend|garant)\w*"
+    r"|\b(?:prazo|periodo)\s+(?!d[eoa]\s+(?:entrega|envio|postagem|chegada)\b)(?:\w+\s+){0,6}?"
+    r"(?:ja\s+)?(?:se\s+)?(?:acabou|passou(?!\s+a\b)|encerrou|venceu|expirou|esgotou|terminou)\b"
+    r"|\b(?:ja\s+)?passou\s+(?:o|do)\s+prazo\b(?!\s+d[eoa]\s+(?:entrega|envio|postagem|chegada))"
+    r"|\bfora\s+do\s+prazo\b(?!\s+d[eoa]\s+(?:entrega|envio|postagem|chegada))"
+    r"|\b(?:so|apenas|somente)\s+(?:vale|cobre|tem|esta\s+coberto|esta\s+valendo|fica)\s+"
+    r"(?:\w+\s+){0,2}?software\b"
+    # Ajuste r3 (a sonda da revisão: as recusas por paráfrase passavam): o
+    # estorno e o "aceitar"; a 3ª pessoa ("não pode ser devolvido", "a loja não
+    # faz troca", "a loja não troca produto com defeito", "a loja não realiza
+    # reembolso"); "perdeu o direito", "invalida", "não é responsabilidade da
+    # loja", "não tem como", "a tela não entra". O "cancelar" fica de fora: "a
+    # loja não consegue mais cancelar" é a orientação aprovada (spec 6.4).
+    r"|\b(?:nao|nem)\s+(?:e|sera|seria|foi|esta|e\s+mais)\s+possivel\s+(?:\w+\s+){0,3}?"
+    r"(?:estorn|aceit)\w*"
+    r"|\b(?:nao|nem)\s+(?:mais\s+)?(?:conseguimos|consigo|podemos|posso|temos\s+como|tenho\s+como"
+    r"|aceitamos|fazemos|realizamos)\s+(?:mais\s+)?(?:\w+\s+){0,3}?(?:estorn|aceit)\w*"
+    r"|\b(?:nao|nem)\s+(?:mais\s+)?(?:pode|podem|deve|devem|podera|poderao|consegue|conseguem)\s+"
+    r"(?:mais\s+)?(?:ser\s+)?(?:\w+\s+){0,2}?(?:troc|consert|repar|devolv|reembols|estorn|substitu"
+    r"|aceit|cobert|garant)\w*"
+    r"|\b(?:loja|equipe|gente|vendedor|empresa)\s+(?:\w+\s+){0,1}?(?:nao|nunca|nem)\s+(?:mais\s+)?"
+    r"(?:faz|fazemos|realiza|aceita|troca|devolve|reembolsa|estorna|conserta|cobre|substitui"
+    r"|oferece|da)\s+(?:\w+\s+){0,2}?(?:troc|consert|repar|devolu|devolv|reembols|estorn"
+    r"|substitu|garant|cobert|produto|aparelho|celular|item)\w*"
+    r"|\bperd\w*\s+(?:o\s+|a\s+|seu\s+|sua\s+)?(?:direito|garantia|cobertura)\b"
+    r"|\b(?:invalid\w*|anul\w*)\s+(?:\w+\s+){0,3}?(?:garantia|cobertura|reparo|conserto|troca"
+    r"|devolucao|direito|reembolso)\b"
+    r"|\b(?:nao|nem)\s+(?:e|sera|seria)\s+(?:de\s+)?(?:nossa\s+|da\s+)?responsabilidade\b"
+    r"|\b(?:nao|nem)\s+(?:temos|tem|ha|haveria)\s+como\s+(?:\w+\s+){0,2}?(?:ajud|troc|consert"
+    r"|repar|devolv|reembols|estorn|substitu|resolv|atend)\w*"
+    r"|\bnesse\s+caso\s+(?:a\s+loja\s+|nos\s+|a\s+gente\s+)?nao\s+(?:tem|temos|ha)\s+como\b"
+    r"|\b(?:nao|nem)\s+(?:entra|entram)\s+(?:na\s+|no\s+|em\s+)?(?:garantia|cobertura|troca"
+    r"|devolucao|reembolso)\b"
+    r"|\binfelizmente[\s,]+(?:o\s+|a\s+|os\s+|as\s+|esse\s+|essa\s+)?(?:\w+\s+){0,2}?nao\s+(?:entra"
+    r"|entram|cobre|cobrem|tem\s+direito)\b"
+    # Ajuste rf3 (21/10/2026): "Tela quebrada é considerada dano físico e fica
+    # de fora", "a política da loja não permite isso", "esse caso não se
+    # enquadra", "não tem direito" (a regra estrutural, `recusa_por_estrutura`,
+    # pega as que trazem o direito na oração).
+    r"|\b(?:fica|ficam|ficaria|ficariam)\s+de\s+fora\b(?!\s+d[ao]\s+(?:caixa|embalagem|kit|pacote))"
+    r"|\bpolitica\s+(?:\w+\s+){0,4}?nao\s+(?:permite|aceita|cobre|preve|contempla)\b"
+    r"|\bnao\s+se\s+enquadra\w*|\bnao\s+(?:tem|ha|possui)\s+direito\b"
+    # (a sonda de holdout do ajuste rf3) a condição que recusa: "devolução só
+    # é aceita com a embalagem intacta", "só aceitamos troca de produto lacrado".
+    r"|\b(?:troca|devoluc\w*|reembolso|garantia)\s+(?:\w+\s+){0,2}?(?:so|somente|apenas)\s+"
+    r"(?:e|eh|sao|sera|serao)\s+aceit\w*"
+    r"|\b(?:so|somente|apenas)\s+(?:aceitamos|aceita|aceitam)\s+(?:a\s+|o\s+)?(?:troca|devoluc\w*"
+    r"|produto|item|aparelho)"
+    # Rodada 4 (achados 5 e 21 da re-revisão final): "a sua solicitação foi
+    # indeferida", "não dá direito a…", "a loja não assume/não se
+    # responsabiliza", "o valor do frete é perdido".
+    r"|\bsolicitac\w*\s+(?:\w+\s+){0,3}?(?:foi\s+|esta\s+|ficou\s+)?(?:negad|indeferid|recusad"
+    r"|reprovad)[oa]s?\b"
+    r"|\b(?:nao|nem)\s+(?:da|dao|garante|confere|gera)\s+direito\b"
+    r"|\b(?:loja|equipe|empresa|vendedor|gente)\s+(?:\w+\s+)?(?:nao|nunca)\s+(?:se\s+)?(?:assume"
+    r"|responsabiliz\w*)"
+    r"|\b(?:valor|frete|dinheiro)\s+(?:\w+\s+){0,3}?(?:e|sera|fica)\s+perdid[oa]\b"
+    # "Pela nossa política, esse caso não tem como."
+    r"|\b(?:esse|nesse|neste|este|seu|o\s+seu)\s+caso\s+(?:\w+\s+){0,2}?nao\s+(?:tem|temos|ha)\s+"
+    r"(?:como|jeito)\b"
+)
+
+
+def recusa_cobertura(texto: str) -> bool:
+    """A resposta recusa troca, conserto ou cobertura (sem precisar da palavra
+    "garantia")? PURA (agente; revisão "furos" de 20/10/2026).
+
+    Rodada 4: "não conseguimos garantir a entrega até sexta" é do PRAZO, não a
+    recusa da garantia (`_GARANTIR_A_ENTREGA` sai antes)."""
+    for frase in re.split(r"[.!?;\n]+", " ".join(plano_de(texto or "").split())):
+        if "diferenca" in frase:  # a recusa padrão aprovada da troca pagando a diferença
+            continue
+        if _RECUSA_COBERTURA.search(_GARANTIR_A_ENTREGA.sub(" ", frase)):
+            return True
+    return False
+
+
+# Ajuste rf3 de 21/10/2026 (a recusa de direito por paráfrase NOVA: "não há
+# como aceitar a devolução", "a política da loja não permite trocar", "o
+# reembolso não procede", "sua solicitação de devolução foi negada", "danos por
+# mau uso não são cobertos", "não se enquadra na nossa política de troca"): a
+# lista do `_RECUSA_COBERTURA` fecha só as formas já vistas. A regra
+# ESTRUTURAL: na mesma ORAÇÃO, a negação (ou "negada", "fica de fora",
+# "excluído", "não contempla") e o substantivo/verbo de DIREITO (troca,
+# devolução, reembolso, estorno, conserto, garantia, cobertura, substituição,
+# aceitar). Sem "cancelar" (a orientação aprovada "a loja não consegue mais
+# cancelar"). Só o agente usa (`recusa_por_estrutura`), nos assuntos de
+# orientação e de cobertura.
+_NEGA_DIREITO = re.compile(
+    r"\b(?:nao|nunca|nem|negad[oa]s?|indeferid[oa]s?|recusad[oa]s?|excluid[oa]s?)\b"
+    r"|\bfica(?:m)?\s+de\s+fora\b|\bsem\s+(?:direito|cobertura)\b"
+    # Rodada 4 (achados 5, 18 e 21 da re-revisão final): a recusa sem a palavra
+    # de negação — "inviável", "fora de questão", "sem possibilidade", "é
+    # perdido", "não assume", "não dá direito", "não procede", "não se
+    # qualifica", "inelegível".
+    r"|\binviave(?:l|is)\b|\bfora\s+de\s+(?:questao|cogitacao)\b|\bsem\s+(?:possibilidade|chance)\b"
+    r"|\b(?:e|sera|fica)\s+perdid[oa]s?\b|\binelegive(?:l|is)\b|\bimpossive(?:l|is)\b"
+)
+_DIREITO = re.compile(
+    r"\b(?:troca\w*|trocar|devoluc\w*|devolv\w*|reembols\w*|estorn\w*|consert\w*|repar[oa]s?"
+    r"|reparar|garantia|cobertura|cobert[oa]s?|cobr(?:e|em|ir|imos|ira)|substitu\w*|aceit\w*"
+    r"|ressarc\w*"
+    # Rodada 4: o direito dito com outras palavras — "receber/aceitar de
+    # volta", "incluso na (nossa) política/garantia", "se responsabiliza",
+    # "considerado defeito".
+    r"|receb\w*\s+de\s+volta|(?:incluso|inclusa|incluid[oa])s?\s+(?:na|no|em)\s+(?:nossa\s+|nosso\s+)?"
+    r"(?:politica|garantia|cobertura|regra)|responsabiliz\w*"
+    r"|considerad[oa]s?\s+(?:como\s+)?defeitos?)\b"
+)
+# As orações em que o "não" não recusa nada do cliente: a condição ("se não
+# servir, peça a devolução"), o que o cliente NÃO precisa fazer ou pagar ("a
+# devolução não tem custo", "você não precisa devolver a caixa", "não perde a
+# garantia"), o lembrete ("não esqueça de…") e o "ainda não" do andamento.
+_NAO_RECUSA = re.compile(
+    r"^(?:(?:e|mas|porem|entao)\s+)?(?:se|caso|quando|enquanto|assim\s+que|depois\s+que|antes"
+    r"\s+de|antes\s+que|ate\s+que)\b"
+    r"|\bnao\s+(?:tem|ha|tera|havera|precisa\s+pagar|paga|pagara|cobra|cobramos|cobrara)\s+"
+    r"(?:nada|nenhum\w*|custo|taxa|cobranca|valor|frete)\b"
+    r"|\bsem\s+(?:custo|taxa|cobranca)\b"
+    r"|\bnao\s+(?:precisa|e\s+preciso|e\s+necessari[oa]|sera\s+necessari[oa]|perde|perdera"
+    r"|(?:se\s+)?esqueca|deixe\s+de|se\s+preocupe)\b"
+    r"|\bainda\s+nao\b"
+    # Rodada 4 (achado 7 da re-revisão final): quem FAZ é a plataforma — "o
+    # reembolso não é feito pela loja", "a troca não é feita por aqui pelo
+    # chat" (a frase que nomeia a plataforma ou o app como o caminho; conferido
+    # na frase inteira, `_QUEM_FAZ_E_A_PLATAFORMA`) — e o "não cai na hora".
+    r"|\bnao\s+(?:cai|caem|aparece|aparecem|volta|voltam|entra|entram|e\s+(?:creditad|devolvid"
+    r"|estornad)[oa])\s+(?:\w+\s+)?(?:na\s+hora|imediatamente|na\s+mesma\s+hora|no\s+mesmo\s+dia"
+    r"|de\s+imediato|instantaneamente|na\s+hora\s+da\s+compra)\b"
+)
+# Rodada 4 (achado 7): "não é feito/feita pela loja | por aqui | pelo chat" com a
+# plataforma (ou o app) nomeada na MESMA frase como quem faz.
+_NAO_E_FEITO_PELA_LOJA = re.compile(
+    r"\bnao\s+(?:e|sao|sera|serao|e\s+mais)\s+(?:feit|realizad|processad|efetuad|solicitad|pedid"
+    r"|aberto|aberta)[oa]?s?\s+(?:pela\s+loja|por\s+aqui|pelo\s+chat|aqui|pela\s+gente|por\s+nos"
+    r"|pelo\s+vendedor|com\s+a\s+loja)\b"
+)
+_A_PLATAFORMA_FAZ = re.compile(
+    r"\b(?:shopee|mercado\s*livre|tiktok|amazon|magalu|plataforma|minhas\s+compras|app"
+    r"|aplicativo)\b"
+)
+_ORACOES_DA_RECUSA = re.compile(r",|\bmas\b|\bporem\b|\bpois\b|\bporque\b|\bja\s+que\b")
+
+
+def recusa_por_estrutura(texto: str) -> bool:
+    """A resposta recusa um direito pela ESTRUTURA da oração (ver acima)? PURA (agente)."""
+    for frase in re.split(r"[.!?;\n]+", " ".join(plano_de(texto or "").split())):
+        if "diferenca" in frase:  # a recusa padrão aprovada da troca pagando a diferença
+            continue
+        for oracao in _ORACOES_DA_RECUSA.split(frase):
+            oracao = oracao.strip()
+            if _NAO_E_FEITO_PELA_LOJA.search(oracao) and _A_PLATAFORMA_FAZ.search(frase):
+                continue
+            if (
+                oracao
+                and not _NAO_RECUSA.search(oracao)
+                and _NEGA_DIREITO.search(oracao)
+                and _DIREITO.search(oracao)
+            ):
+                return True
+    return False
+
+
+def nega_garantia(texto: str) -> bool:
+    """A resposta nega a garantia, a dá como vencida ou recusa o defeito por ela? PURA (agente)."""
+    plano = _NEGACAO_DO_VENCIMENTO.sub(" ", _HIFEN_NA_PALAVRA.sub("", plano_de(texto or "")))
+    plano = " ".join(plano.split())
+    if _NEGA_GARANTIA.search(plano):
+        return True
+    return bool(_PRAZO_QUE_ACABOU.search(plano))
+
+
+def sugere_reset(texto: str) -> bool:
+    """A resposta sugere reset, formatação ou restauração de fábrica? PURA (agente)."""
+    return bool(_RESET.search(" ".join(plano_de(texto or "").split())))
 
 
 def _como_data(valor) -> tuple[int, int, int] | None:
@@ -1600,7 +2070,27 @@ def _motivo_da_promessa(frase: str, plano: str, garantias: list[dict]) -> str | 
     return None
 
 
-def fala_de_garantia(texto: str, garantias: list[dict] | None = None) -> bool:
+# "Garantir a entrega/o prazo/que chegue": o verbo do prazo (só o agente).
+# Rodada 4b (21/10/2026, achado 6 da revisão r4): também o verbo com o objeto
+# do ESTOQUE/da disponibilidade ("não conseguimos garantir como estará o
+# estoque", "…garantir que continue disponível até amanhã", "…garantir a cor")
+# — o verbo só fala de garantia com o aparelho, o defeito ou a cobertura.
+_GARANTIR_A_ENTREGA = re.compile(
+    r"\bgarantir\s+(?:a\s+entrega|o\s+prazo|a\s+data|a\s+chegada|que\s+(?:chegue|chega|chegara"
+    r"|sera\s+entregue|seja\s+entregue|o\s+pedido|a\s+entrega|o\s+envio))\b"
+    r"|\bgarant(?:ir|imos|e|o)\s+(?:a\s+|o\s+|as\s+|os\s+|essa\s+|esse\s+)?(?:estoque|disponibilidade"
+    r"|cor|cores|variac\w+|quantidade|unidades?|reposicao|preco|valor|frete|horario|postagem"
+    r"|coleta)\b"
+    r"|\bgarantir\s+(?:que|como|se|ate\s+quando)\s+(?!(?:\w+\s+){0,4}?(?:aparelho|celular|produto"
+    r"|defeito|funcion\w*|conserto|reparo|troca|cobert\w*|garantia|quebr\w*|estrag\w*)\b)"
+    r"(?:\w+\s+){0,2}?(?:continu\w*|ainda|tenha|tera|haja|havera|fique|fica|ficara|esteja|estara"
+    r"|vai\s+estar|vai\s+ter|sobre|sobra|reste|o\s+estoque|a\s+cor|a\s+variacao|disponive\w*)\b"
+)
+
+
+def fala_de_garantia(
+    texto: str, garantias: list[dict] | None = None, *, agente: bool = False
+) -> bool:
     """A resposta fala da garantia do aparelho (ou cita uma data do bloco)?
 
     Garantia é assunto só de pessoa no automático: a resposta que fala dela
@@ -1609,13 +2099,25 @@ def fala_de_garantia(texto: str, garantias: list[dict] | None = None) -> bool:
     cobertura — nunca sai sozinha. A proteção da plataforma ("Garantia
     Shopee", "Compra Garantida") e a de terceiros ("seguro da
     transportadora", "entrega garantida") não contam.
+
+    `agente=True` (esclarecimento 2 do orquestrador, 20/10/2026): citar o
+    defeito para ORIENTAR ("mande um vídeo curto mostrando o defeito") não
+    conta; conta o diagnóstico e a promessa sobre o defeito
+    (`diagnostica_ou_promete_defeito`) — e todo o resto, igual.
     """
     # Defeito/conserto/"protegido contra" no texto INTEIRO (antes de tirar a
     # proteção da plataforma e a de terceiros: "a Garantia Shopee cobre
     # defeitos" fala do aparelho).
-    if _FALA_DEFEITO.search(_HIFEN_NA_PALAVRA.sub("", plano_de(texto or ""))):
+    if agente:
+        if diagnostica_ou_promete_defeito(texto):
+            return True
+    elif _FALA_DEFEITO.search(_HIFEN_NA_PALAVRA.sub("", plano_de(texto or ""))):
         return True
     plano = _preparar(texto)
+    if agente:
+        # Ajuste r3: "não conseguimos garantir a entrega antes do Natal" é do
+        # PRAZO (o verbo, sem o produto), não da garantia do aparelho.
+        plano = _GARANTIR_A_ENTREGA.sub(" ", plano)
     if _FALA_GARANTIA.search(_HIFEN_NA_PALAVRA.sub("", plano)) or any(
         _promessas(f) for f in _frases(plano)
     ):
@@ -1669,12 +2171,18 @@ def _papeis_das_datas(frase: str, datas: list) -> list[tuple[str | None, str | N
     return [(a, m, p) for a, m, p in papeis]
 
 
+# A garantia LEGAL (CDC) e a cobertura dita por extenso (ajuste r3, agente).
+_GARANTIA_LEGAL = re.compile(r"\bgarantia\s+legal\b|\bcodigo\s+de\s+defesa\b|\bcdc\b")
+_COBERTO = re.compile(r"\bcobert[oa]s?\b|\bcobre\w*|\bgarantid[oa]s?\b|\bcobertura\b")
+
+
 def conferir_garantia(
     texto: str,
     garantias: list[dict] | None,
     *,
     outras_datas: tuple | list = (),
     conferir_promessa: bool = True,
+    prazos_de_garantia: Collection[tuple[int, str, str]] = (),
 ) -> list[str]:
     """Motivos (só IA) pelos quais a resposta não pode citar a garantia assim.
 
@@ -1687,7 +2195,11 @@ def conferir_garantia(
     em", "previsão é"). `conferir_promessa=False` = a conversa não é de
     garantia e o bloco nem foi consultado: a promessa de cobertura não
     reprova aqui (quem chama a manda para pessoa por `fala_de_garantia`).
-    Função pura.
+    `prazos_de_garantia` = só o AGENTE (revisão de 20/10/2026): a frase que
+    diz a REGRA da linha com o prazo dela ("as malas têm garantia de 90 dias
+    contra defeitos de fabricação", `prazos_da_regra`) não é promessa de
+    cobertura do pedido — sem status (antes da compra, sem data de entrega)
+    ela vale. Vazio (o legado): nada muda. Função pura.
     """
     plano = _preparar(texto)
     frases = _frases(plano)
@@ -1717,7 +2229,38 @@ def conferir_garantia(
         motivos.append(f"{MOTIVO_DATA_GARANTIA} ({', '.join(inventadas[:3])})")
 
     if garantias is not None and conferir_promessa:
+        # Só a REGRA da linha antes da compra (todas sem status) livra a frase
+        # com o prazo dela; com status (o pedido tem garantia calculada ou
+        # registrada), o prazo sai da frase e a promessa do resto é conferida
+        # (revisão 2 de 20/10/2026: "está coberto pela garantia de 3 meses para
+        # hardware" passava com a garantia expirada).
+        # (revisão "furos") e só ANTES da compra: o item que `ver_garantia` marca
+        # `antes_da_compra: False` (há pedido ou o cliente fala da compra feita)
+        # tem a promessa conferida sem o prazo da regra.
+        so_regra = all(not g.get("status") and g.get("antes_da_compra", True) for g in garantias)
+        # Ajuste r3: a garantia LEGAL (`{"legal": True}`, sem status e sem
+        # prazo — o que o `ver_garantia` do AGENTE devolve para as outras
+        # linhas e a Charlots sem o fato) não é promessa de cobertura: "tem a
+        # garantia legal; para acionar, …" sai. "Está coberto (pela garantia
+        # legal)" continua barrado. O legado nunca tem a regra legal.
+        so_legal = bool(garantias) and all(
+            not g.get("status")
+            and isinstance(g.get("regra"), Mapping)
+            and g["regra"].get("legal") is True
+            for g in garantias
+        )
         for frase in frases:
-            if _promessas(frase) and (motivo := _motivo_da_promessa(frase, plano, garantias)):
+            if so_legal and _GARANTIA_LEGAL.search(frase) and not _COBERTO.search(frase):
+                continue
+            conferida = frase
+            if prazos_de_garantia:
+                sem_prazo = _sem_prazo_da_regra(frase, prazos_de_garantia)
+                if sem_prazo != frase:
+                    if so_regra:
+                        continue  # a regra da linha, com o prazo dela (agente)
+                    conferida = sem_prazo
+            if _promessas(conferida) and (
+                motivo := _motivo_da_promessa(conferida, plano, garantias)
+            ):
                 motivos.append(motivo)
     return list(dict.fromkeys(motivos))

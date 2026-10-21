@@ -252,6 +252,7 @@ import {
   fmtDiaHora,
   lacunasAbertas,
   limiteDe,
+  linhaDoAgente,
   linksAmazon,
   modoInfo,
   modosDaCaixaHumano,
@@ -3168,6 +3169,7 @@ watch(() => props.conversaId, (novo, velho) => {
             </div>
             <div v-if="!rascunho.texto" class="italic text-muted-foreground">A IA não escreveu uma resposta que possa sair — responda você.</div>
             <div v-if="rascunho.motivo" class="text-muted-foreground"><span class="font-medium">Por quê:</span> {{ rascunho.motivo }}</div>
+            <div v-if="rascunho.agente" class="flex items-start gap-1 text-[11px] text-indigo-700 dark:text-indigo-300" data-rastro-agente><Bot class="mt-px size-3.5 shrink-0" />{{ linhaDoAgente(rascunho.agente) }}</div>
             <ul v-if="rascunho.validador_erros?.length" class="list-inside list-disc text-amber-800 dark:text-amber-300">
               <li v-for="(v, i) in rascunho.validador_erros" :key="i">{{ v }}</li>
             </ul>

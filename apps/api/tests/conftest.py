@@ -469,6 +469,13 @@ _CLEANUP_TABLES = (
     "atendimento_automacao_regras",
     # 0379: a troca de produto (FK → conversas/mensagens/users): antes delas.
     "atendimento_trocas",
+    # 0420 (agente): os pares e o replay (FK → conversas/mensagens): antes
+    # delas; os fatos (FK → integrations/products) e o instantâneo dos sites
+    # da marca (sem FK) — os globais sobreviveriam entre os testes.
+    "atendimento_pares",
+    "atendimento_agente_replay",
+    "atendimento_fatos",
+    "atendimento_site_produtos",
     # 0353: histórico da etiqueta e reclamações (FK → conversas/users/integrations).
     "atendimento_etiquetas_historico",
     "atendimento_reclamacoes",

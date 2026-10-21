@@ -98,6 +98,15 @@ No AUTOMÁTICO, a resposta de assunto de dado do produto
 (`CATEGORIAS_DA_FICHA`) com a ficha nos FATOS não sai sozinha: vai para
 pessoa (`ia.MOTIVO_FICHA_NO_AUTOMATICO`). Liberar é decisão do dono.
 
+AS VARIAÇÕES, SÓ PARA O AGENTE (20/10/2026, `variacoes.py`): com
+`com_variacoes=True` (o pacote e a `ver_anuncio` do agente), a ficha do
+anúncio ganha "variacoes" ([{nome, disponivel, confiavel, fonte}] — nunca a
+quantidade, o sku nem o variation_id), "variacoes_completas" e, quando
+alguma ficou de fora, "variacoes_omitidas"; têm teto próprio
+(`variacoes.MAX_VARIACOES_FICHA`, 12; o segundo anúncio, 6) e ficam fora do
+teto do texto (`caber`). Falha delas nunca tira a ficha. Sem a opção (o
+legado), a ficha é EXATAMENTE a de antes (decisão 1 do dono, 20/10/2026).
+
 Nunca dado de comprador: o texto do cliente só ORDENA os atributos (as
 palavras da pergunta), não entra na ficha.
 """
@@ -756,6 +765,10 @@ def _encolher(saida: list[dict], teto: int) -> list[dict]:
     return saida
 
 
+# As chaves das variações do agente (`variacoes.CHAVES_DA_FICHA`): teto próprio.
+_CHAVES_VARIACOES = ("variacoes", "variacoes_completas", "variacoes_omitidas")
+
+
 def caber(fichas: list[dict], teto: int = MAX_CHARS_FICHAS) -> list[dict]:
     """As fichas em até `teto` caracteres (JSON). PURA (não muda as de entrada).
 
@@ -764,13 +777,31 @@ def caber(fichas: list[dict], teto: int = MAX_CHARS_FICHAS) -> list[dict]:
     (linhas inteiras), depois os atributos até `MIN_ATRIBUTOS_NO_CORTE`,
     depois o anúncio inteiro. Sobrou um só e ainda não cabe: a descrição
     dele, depois os atributos (até nenhum). Ficha sem atributo nem descrição
-    sai.
+    sai. As variações do agente ficam fora da conta (teto próprio, em
+    `variacoes.py`) e voltam no fim, na ficha que ficou.
     """
-    copias = [
-        {**f, **({"atributos": list(f["atributos"])} if f.get("atributos") else {})} for f in fichas
-    ]
+    if not any(k in f for f in fichas for k in _CHAVES_VARIACOES):
+        # O legado (nunca tem variações): exatamente o corte de antes.
+        copias = [
+            {**f, **({"atributos": list(f["atributos"])} if f.get("atributos") else {})}
+            for f in fichas
+        ]
+        saida = copias[:1] + [
+            g for f in copias[1:] for g in _encolher([f], MAX_CHARS_SEGUNDA_FICHA)
+        ]
+        return _encolher(saida, teto)
+    copias: list[dict] = []
+    blocos: list[dict] = []
+    for f in fichas:
+        copia = {k: v for k, v in f.items() if k not in _CHAVES_VARIACOES}
+        if copia.get("atributos"):
+            copia["atributos"] = list(copia["atributos"])
+        copias.append(copia)
+        blocos.append({k: f[k] for k in _CHAVES_VARIACOES if k in f})
     saida = copias[:1] + [g for f in copias[1:] for g in _encolher([f], MAX_CHARS_SEGUNDA_FICHA)]
-    return _encolher(saida, teto)
+    # `_encolher` corta no lugar (as mesmas cópias): a identidade acha o bloco.
+    por_copia = {id(c): b for c, b in zip(copias, blocos, strict=True)}
+    return [{**f, **por_copia.get(id(f), {})} for f in _encolher(saida, teto)]
 
 
 # ── A ficha FRESCA (Redis): o que a loja devolveu ao enriquecimento ───────
@@ -1119,6 +1150,9 @@ async def ficha_do_anuncio(
     variation_id: str | None = None,
     palavras: frozenset[str] = frozenset(),
     loja: Busca | None = None,
+    com_variacoes: bool = False,
+    variacoes_na_loja: bool = False,
+    teto_variacoes: int | None = None,
 ) -> dict | None:
     """A ficha de UM anúncio: a fresca; o catálogo; a loja; o mesmo produto em outro anúncio.
 
@@ -1127,15 +1161,54 @@ async def ficha_do_anuncio(
     com ele (o modelo vê de que anúncio é). `loja` (a sugestão,
     `fichas_da_conversa`): pode ir à loja buscar o anúncio (`ficha_loja.py`);
     None = não vai.
+
+    `com_variacoes` (SÓ o agente; o legado nunca passa): a ficha achada
+    ganha as variações DESTE anúncio na loja da conversa (`variacoes.py`,
+    `variacoes.na_ficha`); `variacoes_na_loja` deixa ir à loja só por elas
+    (com `loja`); `teto_variacoes` = quantas no máximo (padrão
+    `variacoes.MAX_VARIACOES_FICHA`).
     """
-    # Import tardio: `ficha_loja` importa este módulo.
+    # Import tardio: `ficha_loja` e `variacoes` importam este módulo.
     from app.services.atendimento import ficha_loja
 
-    async def _propria(ficha: dict) -> dict:
+    async def _com_variacoes(ficha: dict, titulo_atual: str | None) -> dict:
+        """A ficha com as variações (só com `com_variacoes`) — falha delas nunca tira a ficha.
+
+        `titulo_atual` = o da conversa ou o da loja, nunca o do catálogo (o
+        nome da variação pelo título do vínculo só vale com o título atual).
+        """
+        if not com_variacoes:
+            return ficha
+        from app.services.atendimento import variacoes as variacoes_svc
+
+        try:
+            async with session.begin_nested():
+                bloco = await variacoes_svc.variacoes_do_anuncio(
+                    session,
+                    plataforma,
+                    integration_id,
+                    item_id,
+                    loja=loja if variacoes_na_loja else None,
+                    titulo=titulo_atual,
+                    variation_id=variation_id,
+                    palavras=palavras,
+                    teto=variacoes_svc.MAX_VARIACOES_FICHA
+                    if teto_variacoes is None
+                    else teto_variacoes,
+                )
+        except Exception as exc:  # noqa: BLE001 — a ficha segue sem as variações
+            logger.warning("atendimento_ficha_variacoes_falhou", erro=type(exc).__name__)
+            return ficha
+        return {**ficha, **variacoes_svc.na_ficha(bloco)}
+
+    async def _propria(ficha: dict, titulo_atual: str | None = None) -> dict:
         produtos = await _produtos_vinculados(
             session, plataforma, item_id, integration_id, variation_id
         )
-        return {**ficha, "produtos_vinculados": produtos} if produtos else ficha
+        return await _com_variacoes(
+            {**ficha, "produtos_vinculados": produtos} if produtos else ficha,
+            titulo_atual or titulo,
+        )
 
     fresca = await _ficha_fresca(plataforma, integration_id, item_id)
     if fresca is not None and loja is not None and ficha_loja.falta_descricao(plataforma, fresca):
@@ -1145,7 +1218,7 @@ async def ficha_do_anuncio(
     if fresca is not None:
         ficha = _ficha_da_loja(fresca, plataforma, titulo, palavras)
         if ficha is not None:
-            return await _propria(ficha)
+            return await _propria(ficha, _texto(fresca.get("titulo")))
     for nome, descricao, raw, _plat, integracao in await _do_catalogo(
         session, plataforma, item_id, integration_id
     ):
@@ -1153,13 +1226,15 @@ async def ficha_do_anuncio(
             continue
         ficha = montar_ficha(titulo or nome, descricao, raw, palavras=palavras)
         if ficha is not None:
-            return await _propria(ficha) if integracao == integration_id else ficha
+            if integracao == integration_id:
+                return await _propria(ficha)
+            return await _com_variacoes(ficha, titulo)
     if fresca is None and loja is not None:
         # Sem fresca nem catálogo válido: o anúncio direto da loja da conversa.
         bruta = await ficha_loja.ficha_da_loja(session, loja, plataforma, item_id)
         ficha = _ficha_da_loja(bruta, plataforma, titulo, palavras) if bruta else None
         if ficha is not None:
-            return await _propria(ficha)
+            return await _propria(ficha, _texto(bruta.get("titulo")) if bruta else None)
     for nome, descricao, raw, plat in await _do_mesmo_produto(session, plataforma, item_id):
         ficha = montar_ficha(nome, descricao, raw, palavras=palavras)
         if ficha is None:
@@ -1170,7 +1245,8 @@ async def ficha_do_anuncio(
             saida["titulo"] = _cortar(titulo, MAX_CHARS_TITULO_FICHA)
         if ficha.get("titulo"):
             saida["titulo_do_outro_anuncio"] = ficha.pop("titulo")
-        return {**saida, **ficha}
+        # As variações são DESTE anúncio (os vínculos da loja da conversa).
+        return await _com_variacoes({**saida, **ficha}, titulo)
     return None
 
 
@@ -1179,6 +1255,8 @@ async def fichas_da_conversa(
     conversa: AtendimentoConversa,
     mensagens: Sequence[AtendimentoMensagem],
     textos_cliente: Iterable[str | None] = (),
+    *,
+    com_variacoes: bool = False,
 ) -> list[dict]:
     """O bloco "ficha_do_anuncio" dos FATOS: até 2 anúncios, já no teto. [] = sem ficha.
 
@@ -1186,16 +1264,40 @@ async def fichas_da_conversa(
     última rajada do cliente) só ordena os atributos. Sem ficha fresca nem
     catálogo válido, vai à loja da conversa (`ficha_loja.py`): no máximo
     `ficha_loja.MAX_BUSCAS_POR_SUGESTAO` idas.
+
+    `com_variacoes` (SÓ o pacote do agente): cada ficha ganha as variações
+    (ver o topo); com pergunta de cor, variação ou estoque
+    (`variacoes.pede_variacao`), pode ir à loja só por elas
+    (`ficha_loja.MAX_BUSCAS_VARIACOES_POR_SUGESTAO`, cota própria).
     """
     from app.services.atendimento import ficha_loja
 
     plataforma = plataforma_do_catalogo(conversa.plataforma)
     if plataforma is None:
         return []
+    # O agente: (ir à loja só pelas variações?, teto do 1º anúncio, do 2º).
+    do_agente: tuple[bool, int, int] | None = None
+    if com_variacoes:
+        from app.services.atendimento import variacoes as variacoes_svc
+
+        textos_cliente = [t for t in textos_cliente if isinstance(t, str)]
+        do_agente = (
+            variacoes_svc.pede_variacao(textos_cliente),
+            variacoes_svc.MAX_VARIACOES_FICHA,
+            variacoes_svc.MAX_VARIACOES_SEGUNDA_FICHA,
+        )
     palavras = palavras_da_pergunta(textos_cliente)
     loja = ficha_loja.Busca(conversa.integration_id, conversa.canal_id)
     fichas: list[dict] = []
     for anuncio in anuncios_da_conversa(conversa, mensagens):
+        opcoes: dict[str, Any] = {}
+        if do_agente is not None:
+            na_loja, teto_primeira, teto_segunda = do_agente
+            opcoes = {
+                "com_variacoes": True,
+                "variacoes_na_loja": na_loja,
+                "teto_variacoes": teto_segunda if fichas else teto_primeira,
+            }
         ficha = await ficha_do_anuncio(
             session,
             plataforma,
@@ -1205,6 +1307,7 @@ async def fichas_da_conversa(
             variation_id=anuncio.variation_id,
             palavras=palavras,
             loja=loja,
+            **opcoes,
         )
         if ficha is None:
             break

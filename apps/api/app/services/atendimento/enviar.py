@@ -156,7 +156,7 @@ from app.models import (
     Integration,
     User,
 )
-from app.services.atendimento import clientes, gravar
+from app.services.atendimento import agente_config, clientes, gravar
 from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AVALIACAO_OBSERVOU,
@@ -965,6 +965,54 @@ async def _pendente_da_conversa(
     ).scalar_one_or_none()
 
 
+# ── O laço de correções na hora (agente, 20/10/2026, spec 5.5) ────────────
+
+
+async def indexar_pares_da_conversa(session: AsyncSession, conversa: AtendimentoConversa) -> int:
+    """Refaz AGORA os pares pergunta × resposta da equipe DESTA conversa.
+
+    O `buscar_respostas_equipe` do agente lê `atendimento_pares`, que o cron
+    de hora em hora (`agente.pares.indexar`) refaz para todas as conversas.
+    Aqui é uma conversa só, na hora em que a pessoa mandou a sugestão (igual
+    → `davinci_igual`, editada → `davinci_editou`) ou deu o 👎 com correção
+    (→ `correcao`, na rota da avaliação): o par já entra, e o que deixou de
+    valer (a correção apagada, a nota que virou 👍) sai — como o cron faz
+    com a conversa que processa. As MESMAS peças do cron: montagem, filtros
+    (curto, inseguro, proibido, instrução para a IA), máscara e retenção. A
+    resposta do agente enviada SOZINHA nunca vira par (o turno com
+    `davinci_ia` é pulado na montagem).
+
+    Só flush; quem chama faz commit. Devolve quantos pares a conversa ficou
+    tendo.
+    """
+    from app.services.atendimento.agente import pares as pares_svc
+
+    return await pares_svc.indexar_conversa(session, conversa)
+
+
+async def par_na_hora(session: AsyncSession, conversa: AtendimentoConversa) -> None:
+    """`indexar_pares_da_conversa` num SAVEPOINT: nunca derruba quem chamou.
+
+    Só com o agente no servidor (a chave Claude, `agente_config`): sem ele
+    ninguém lê os pares, e o caminho do envio fica exatamente como era — o
+    cron de hora em hora pega a conversa do mesmo jeito. Qualquer falha (a
+    tabela ainda sem a migration, uma trava) desfaz só o par e fica no log.
+    """
+    if agente_config.chave_do_agente(get_settings()) is None:
+        return
+    # O que já estava pendente (o envio, a avaliação) vai ao banco FORA do
+    # SAVEPOINT: erro aí é de quem chamou e segue a régua dele (a nova
+    # tentativa do `_gravar_resultado`), não some como falha do par.
+    await session.flush()
+    try:
+        async with session.begin_nested():
+            await indexar_pares_da_conversa(session, conversa)
+    except Exception as e:  # noqa: BLE001 — o par é bônus; o envio/a nota não esperam por ele
+        logger.warning(
+            "atendimento_par_na_hora_falhou", conversa_id=str(conversa.id), err=type(e).__name__
+        )
+
+
 async def _avaliar_rascunho(
     session: AsyncSession,
     conversa: AtendimentoConversa,
@@ -974,8 +1022,9 @@ async def _avaliar_rascunho(
     texto_digitado: str,
     user: User | None,
     origem: str,
-) -> None:
-    """Registra o que a pessoa fez com a sugestão da IA.
+) -> bool:
+    """Registra o que a pessoa fez com a sugestão da IA. True = a sugestão que a
+    PESSOA mandou vira par do agente (quem chama indexa depois do commit).
 
     - veio `rascunho_id`: similaridade ≥ 0.97 → `enviou_igual`, senão
       `editou` — com o texto que SAIU (é ele que vira exemplo). Vale também
@@ -994,12 +1043,18 @@ async def _avaliar_rascunho(
     Envio AUTOMÁTICO (origem IA) marca o rascunho `enviado` e NÃO cria
     avaliação: exemplo aprovado é o que PESSOA aprovou. Se a IA contasse
     as próprias respostas como aprovadas, ela se ensinaria sozinha — e o
-    manual só muda por pessoa.
+    manual só muda por pessoa. Pelo mesmo motivo, ela nunca vira par.
+
+    A sugestão que a pessoa mandou (igual ou editada) vira par do agente na
+    hora (`par_na_hora`, 20/10/2026): `davinci_igual` com similaridade ≥
+    0.97, `davinci_editou` abaixo — o texto que SAIU é o que ensina o tom. O
+    par é refeito DEPOIS do commit do envio (`_gravar_resultado`; revisão de
+    20/10/2026): a reindexação da conversa não fica segurando a trava dela.
     """
     if origem == ORIGEM_IA:
         if rascunho is not None and rascunho.status == RASCUNHO_PENDENTE:
             rascunho.status = RASCUNHO_ENVIADO
-        return
+        return False
     avaliado = False
     if (
         rascunho is not None
@@ -1019,10 +1074,10 @@ async def _avaliar_rascunho(
         )
         avaliado = True
     if origem != ORIGEM_HUMANO:
-        return
+        return False
     pendente = await _pendente_da_conversa(session, conversa)
     if pendente is None or (rascunho is not None and pendente.id == rascunho.id):
-        return
+        return avaliado
     pendente.status = RASCUNHO_SUBSTITUIDO
     if rascunho is None and not avaliado:
         # A sugestão estava na caixa e a pessoa escreveu outra coisa.
@@ -1034,6 +1089,42 @@ async def _avaliar_rascunho(
             similaridade=similaridade(texto_digitado, pendente.texto),
             user_id=user.id if user else None,
         )
+    return avaliado
+
+
+async def _par_depois_do_envio(
+    session: AsyncSession, conversa: AtendimentoConversa, *legiveis: Any
+) -> None:
+    """O `par_na_hora` numa transação própria, depois do commit do envio. Nunca levanta.
+
+    `legiveis` = os objetos que quem chama ainda lê (o rollback os expiraria).
+    Só no canal COM o agente (ajuste r3): com a chave no servidor, o envio por
+    pessoa num canal sem o agente reindexava a conversa antes de a rota
+    responder — o cron de hora em hora cobre esses.
+    """
+    try:
+        s = get_settings()
+        if agente_config.chave_do_agente(s) is None:
+            return
+        canal = (
+            await session.get(AtendimentoCanal, conversa.canal_id)
+            if conversa.canal_id is not None
+            else None
+        )
+        if not agente_config.agente_ligado(s, canal):
+            return
+        await par_na_hora(session, conversa)
+        await session.commit()
+    except Exception as e:  # noqa: BLE001 — o envio já está gravado; o cron indexa depois
+        logger.warning(
+            "atendimento_par_na_hora_falhou", conversa_id=str(conversa.id), err=type(e).__name__
+        )
+        await session.rollback()
+        for obj in (conversa, *legiveis):
+            try:
+                await session.refresh(obj)
+            except Exception:  # noqa: BLE001, S110 — sessão quebrada; o log já está
+                pass
 
 
 async def _avaliacao_de(
@@ -1415,8 +1506,9 @@ async def _gravar_resultado(
             if rascunho is not None:
                 await session.refresh(rascunho)
             await _aplicar_resultado(session, conversa, mensagem, resultado)
+            vira_par = False
             if avaliar and mensagem.status in (MSG_ENVIADA, MSG_REVISAR):
-                await _avaliar_rascunho(
+                vira_par = await _avaliar_rascunho(
                     session,
                     conversa,
                     mensagem,
@@ -1427,6 +1519,10 @@ async def _gravar_resultado(
                 )
             await gravar.recalcular_conversa(session, conversa)
             await session.commit()
+            if vira_par:
+                await _par_depois_do_envio(
+                    session, conversa, mensagem, *([rascunho] if rascunho is not None else [])
+                )
             return
         except DBAPIError as e:
             estado = _sqlstate(e)
