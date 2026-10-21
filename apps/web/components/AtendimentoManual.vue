@@ -528,6 +528,65 @@ function decisaoDe(f: Fato): string {
   return `${f.ativo ? 'aprovado' : 'reprovado'} por ${f.aprovado_por}${quando}`
 }
 
+// ─── fatos do agente: o "novo fato" (21/10/2026) ────────────────────────────
+// O admin escreve o fato direto, sem esperar uma correção de 👎 virar
+// candidata (POST /fatos; quem não é admin leva 403 do backend). Nasce
+// APROVADO por quem criou, fonte "o dono". Aqui vale para tudo, para uma
+// plataforma ou para uma marca; loja e anúncio ficam só na API.
+const MARCAS_FATO = [
+  { value: 'uranyx', nome: 'Uranyx' },
+  { value: 'charlots', nome: 'Charlots' },
+]
+const MIN_TEXTO_NOVO_FATO = 10
+const MAX_TEXTO_NOVO_FATO = 1000
+type FormFato = { texto: string; assunto: string; vale: 'global' | 'plataforma' | 'marca'; plataforma: string; marca: string }
+const fatoVazio = (): FormFato => ({ texto: '', assunto: '', vale: 'global', plataforma: '', marca: '' })
+const novoFato = ref<FormFato>(fatoVazio())
+const novoFatoAberto = ref(false)
+const criandoFato = ref(false)
+const assuntosNovoFato = computed(() => categorias.value.filter((c) => c.ativa !== false))
+const novoFatoPronto = computed(() => {
+  const f = novoFato.value
+  const n = f.texto.trim().length
+  if (n < MIN_TEXTO_NOVO_FATO || n > MAX_TEXTO_NOVO_FATO) return false
+  if (f.vale === 'plataforma') return !!f.plataforma
+  if (f.vale === 'marca') return !!f.marca
+  return true
+})
+function abrirNovoFato() {
+  novoFato.value = fatoVazio()
+  novoFatoAberto.value = true
+}
+function fecharNovoFato() {
+  novoFatoAberto.value = false
+  novoFato.value = fatoVazio()
+}
+async function criarFato() {
+  if (!novoFatoPronto.value || criandoFato.value) return
+  const f = novoFato.value
+  criandoFato.value = true
+  try {
+    const body = {
+      texto: f.texto.trim(),
+      assunto: f.assunto || null,
+      escopo: f.vale,
+      plataforma: f.vale === 'plataforma' ? f.plataforma : null,
+      marca: f.vale === 'marca' ? f.marca : null,
+    }
+    await api('/api/atendimento/fatos', { method: 'POST', body })
+    fecharNovoFato()
+    toasts.success('Fato criado', 'O agente passa a poder afirmá-lo.')
+    // Nasce ativo: na aba dos candidatos (ou dos reprovados) ele não apareceria.
+    if (filtroFatos.estado === 'ativo' || filtroFatos.estado === 'todos') void carregarFatos()
+    else filtroFatos.estado = 'ativo' // o `watch` dos seletores recarrega
+  } catch (e: any) {
+    const er = erroDaApi(e, 'Não consegui criar o fato')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    criandoFato.value = false
+  }
+}
+
 async function apagar(r: Regra) {
   if (!confirm(`Apagar a regra?\n\nQuando: ${r.quando}\nFaça: ${r.faca}\n\nSe for só por um tempo, use "desativar" — ela fica guardada.`)) return
   salvando.value = true
@@ -727,6 +786,9 @@ async function apagar(r: Regra) {
         <Button size="sm" variant="outline" class="h-8" :disabled="carregandoFatos" title="recarregar os fatos" aria-label="recarregar os fatos" @click="carregarFatos()">
           <RotateCcw class="size-4" :class="{ 'animate-spin': carregandoFatos }" />
         </Button>
+        <Button v-if="podeDecidir && !novoFatoAberto" size="sm" class="h-8" @click="abrirNovoFato()">
+          <Plus class="mr-1.5 size-4" /> novo fato
+        </Button>
       </div>
     </div>
     <p class="border-b px-3 py-2 text-xs text-muted-foreground">
@@ -734,6 +796,59 @@ async function apagar(r: Regra) {
       depois que um admin aprova — dá para corrigir o texto antes. Reprovado fica guardado, para a mesma correção não voltar.
       <template v-if="!podeDecidir"> Só administrador aprova ou reprova.</template>
     </p>
+
+    <!-- novo fato (só admin): nasce aprovado por quem criou -->
+    <div v-if="podeDecidir && novoFatoAberto" class="border-b bg-muted/30 px-3 py-3">
+      <div class="space-y-2">
+        <label class="block space-y-1">
+          <span class="block text-[11px] font-medium text-muted-foreground">Texto</span>
+          <textarea
+            v-model="novoFato.texto"
+            rows="3"
+            :maxlength="MAX_TEXTO_NOVO_FATO"
+            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+            placeholder="ex.: Todos os produtos são enviados com nota fiscal, que vai junto com o pedido."
+          />
+        </label>
+        <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-[220px_minmax(180px,1fr)]">
+          <label class="block space-y-1">
+            <span class="block text-[11px] font-medium text-muted-foreground">Assunto</span>
+            <select v-model="novoFato.assunto" class="h-9 w-full rounded-md border bg-background px-2 text-sm">
+              <option value="">qualquer assunto</option>
+              <option v-for="c in assuntosNovoFato" :key="c.id" :value="c.id">{{ c.nome || categoriaLabel(c.id) }}</option>
+            </select>
+          </label>
+          <div class="space-y-1">
+            <span class="block text-[11px] font-medium text-muted-foreground">Vale para</span>
+            <div class="flex gap-1.5">
+              <select v-model="novoFato.vale" class="h-9 min-w-0 flex-1 rounded-md border bg-background px-2 text-sm" aria-label="o fato vale para">
+                <option value="global">tudo (todas as lojas)</option>
+                <option value="plataforma">uma plataforma</option>
+                <option value="marca">uma marca</option>
+              </select>
+              <select v-if="novoFato.vale === 'plataforma'" v-model="novoFato.plataforma" class="h-9 min-w-0 flex-1 rounded-md border bg-background px-2 text-sm" aria-label="qual plataforma">
+                <option value="" disabled>escolha a plataforma</option>
+                <option v-for="p in PLATAFORMAS_COM_CANAL" :key="p.value" :value="p.value">{{ p.nome }}</option>
+              </select>
+              <select v-else-if="novoFato.vale === 'marca'" v-model="novoFato.marca" class="h-9 min-w-0 flex-1 rounded-md border bg-background px-2 text-sm" aria-label="qual marca">
+                <option value="" disabled>escolha a marca</option>
+                <option v-for="m in MARCAS_FATO" :key="m.value" :value="m.value">{{ m.nome }}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center justify-end gap-1.5">
+          <span class="mr-auto text-[11px] text-muted-foreground">
+            Nasce aprovado por você (fonte: o dono) — o agente já pode afirmá-lo.
+            <span class="tabular-nums" :title="`de ${MIN_TEXTO_NOVO_FATO} a ${MAX_TEXTO_NOVO_FATO} caracteres`">{{ novoFato.texto.trim().length }}/{{ MAX_TEXTO_NOVO_FATO }}</span>
+          </span>
+          <Button size="sm" variant="ghost" @click="fecharNovoFato()"><X class="mr-1 size-4" /> cancelar</Button>
+          <Button size="sm" :disabled="criandoFato || !novoFatoPronto" @click="criarFato()">
+            <Loader2 v-if="criandoFato" class="mr-1.5 size-4 animate-spin" /><BadgeCheck v-else class="mr-1.5 size-4" /> salvar
+          </Button>
+        </div>
+      </div>
+    </div>
     <div class="flex flex-wrap gap-1 border-b px-3 py-1.5" role="tablist" aria-label="estado dos fatos">
       <button
         v-for="e in [...ESTADOS_FATO, { value: 'todos', label: 'Todos', hint: 'candidatos, ativos e reprovados', cls: '' }]"

@@ -100,7 +100,7 @@ from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import Annotated, Any
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -155,6 +155,7 @@ from app.schemas.atendimento import (
     EtiquetaIn,
     EtiquetaTrocaOut,
     FatoAprovarIn,
+    FatoNovoIn,
     FatoOut,
     FlagsOut,
     LeituraParadaOut,
@@ -226,6 +227,7 @@ from app.services.atendimento.constantes import (
     FATO_ESCOPO_PLATAFORMA,
     FATO_ESCOPOS,
     FATO_FONTE_CORRECAO,
+    FATO_FONTE_DONO,
     FATO_FONTES,
     FONTE_TUTA,
     MODO_AUTO,
@@ -4953,6 +4955,71 @@ async def reprovar_fato(
         fato_id=f.id,
         fonte=f.fonte,
         escopo=f.escopo,
+        user_id=str(user.id),
+    )
+    return (await _fatos_out(session, [f]))[0]
+
+
+# ── Novo fato (21/10/2026): o ADMIN escreve o fato na aba do Manual ──
+# Sem esperar uma correção de 👎 virar candidata: quem cria é admin (a mesma
+# trava do aprovar), e o fato nasce APROVADO por ele — fonte `dono`,
+# `aprovado_por` = o nome de quem criou, `aprovado_em` = agora — ou candidato
+# (`ativo=false`), para aprovar depois. A `chave` é gerada ("dono_<8 hex>");
+# o `tsv` sai do ouvinte do model no INSERT (o mesmo `busca_texto` da busca
+# do agente). O escopo e os campos dele, o schema confere (`FatoNovoIn`); o
+# assunto (existe no manual?) e a loja (existe e está no escopo da equipe?),
+# aqui.
+
+
+@router.post("/fatos", response_model=FatoOut, status_code=status.HTTP_201_CREATED)
+async def criar_fato(
+    body: FatoNovoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> FatoOut:
+    """Cria um fato do agente (só admin): aprovado por quem criou; candidato com `ativo=false`."""
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "so_admin",
+                "detail": "Só admin cria o que o agente pode afirmar.",
+            },
+        )
+    await _conferir_categoria(session, body.assunto)
+    if body.integration_id is not None:
+        scope = await resolve_team_scope(session, user)
+        loja = await session.get(Integration, body.integration_id)
+        if loja is None or not _no_escopo(scope, body.integration_id):
+            raise HTTPException(
+                422,
+                detail={"code": "loja_nao_encontrada", "detail": "Loja não encontrada."},
+            )
+    quem = (_nome(user) or str(user.id)) if body.ativo else None
+    f = AtendimentoFato(
+        chave=f"dono_{uuid4().hex[:8]}",
+        escopo=body.escopo,
+        plataforma=body.plataforma,
+        integration_id=body.integration_id,
+        item_id=body.item_id,
+        marca=body.marca,
+        assunto=body.assunto,
+        texto=body.texto,
+        fonte=FATO_FONTE_DONO,
+        referencia="Novo fato, na aba do Manual",
+        ativo=body.ativo,
+        aprovado_por=quem,
+        aprovado_em=datetime.now(UTC) if body.ativo else None,
+    )
+    session.add(f)
+    await session.commit()
+    await session.refresh(f)
+    logger.info(
+        "atendimento_fato_criado",
+        fato_id=f.id,
+        escopo=f.escopo,
+        assunto=f.assunto,
+        ativo=f.ativo,
         user_id=str(user.id),
     )
     return (await _fatos_out(session, [f]))[0]

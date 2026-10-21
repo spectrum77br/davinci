@@ -18,13 +18,14 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.services.atendimento.constantes import (
     CANAIS_POR_PLATAFORMA,
     MODOS,
     PLATAFORMAS_CAIXA,
     PRIORIDADE_REGRA_PADRAO,
+    SITES,
     TIPO_REGRA_CATEGORIA,
     TIPOS_REGRA,
 )
@@ -943,6 +944,84 @@ class FatoAprovarIn(BaseModel):
     texto: str | None = Field(default=None, min_length=1, max_length=2000)
 
     _limpa = field_validator("texto", mode="before")(_texto_opcional)
+
+
+# O "Novo fato" (21/10/2026): o que cada escopo EXIGE e o que ele ainda aceita
+# como recorte (`agente.fatos_loja._recorte`: plataforma e loja preenchidas
+# recortam em qualquer escopo — o fato da marca só da Shopee não vale no ML).
+# O CHECK `ck_atendimento_fatos_escopo_preenchido` é a mesma regra no banco.
+_ROTULO_CAMPO_FATO = {
+    "plataforma": "plataforma",
+    "marca": "marca",
+    "integration_id": "loja",
+    "item_id": "anúncio",
+}
+_ROTULO_ESCOPO_NOVO = {
+    "global": "todas as lojas",
+    "plataforma": "uma plataforma",
+    "marca": "uma marca",
+    "loja": "uma loja",
+    "anuncio": "um anúncio",
+}
+_CAMPOS_DO_ESCOPO_NOVO: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "global": (frozenset(), frozenset()),
+    "plataforma": (frozenset({"plataforma"}), frozenset({"plataforma"})),
+    "marca": (frozenset({"marca"}), frozenset({"marca", "plataforma"})),
+    "loja": (frozenset({"integration_id"}), frozenset({"integration_id", "plataforma"})),
+    "anuncio": (
+        frozenset({"plataforma", "item_id"}),
+        frozenset({"plataforma", "item_id", "integration_id"}),
+    ),
+}
+
+
+class FatoNovoIn(BaseModel):
+    """Um fato novo escrito pelo ADMIN na aba do Manual (21/10/2026).
+
+    Nasce aprovado por quem criou (fonte `dono`); com `ativo=false`, nasce
+    candidato, para aprovar depois. `assunto` vazio = qualquer assunto; se ele
+    EXISTE no manual quem confere é o router (422 `categoria_invalida`), como
+    na regra. Cada escopo exige o seu campo (`plataforma`, `marca`, a loja ou
+    o anúncio) e recusa o que não é dele.
+    """
+
+    texto: str = Field(min_length=10, max_length=1000)
+    assunto: str | None = None
+    escopo: Literal["global", "plataforma", "marca", "loja", "anuncio"] = "global"
+    plataforma: str | None = None
+    marca: str | None = None
+    integration_id: UUID | None = None
+    item_id: str | None = Field(default=None, max_length=64)
+    ativo: bool = True
+
+    _limpa = field_validator("texto", "item_id", mode="before")(_texto_opcional)
+    _plat = field_validator("plataforma", mode="before")(_plataforma)
+    _cat = field_validator("assunto", mode="before")(_categoria)
+
+    @field_validator("marca", mode="before")
+    @classmethod
+    def _marca_valida(cls, v: str | None) -> str | None:
+        """As marcas dos sites (`constantes.SITES`: "charlots", "uranyx")."""
+        m = str(v or "").strip().lower()
+        if not m:
+            return None
+        if m not in SITES:
+            raise ValueError(f"marca desconhecida: {m[:40]}")
+        return m
+
+    @model_validator(mode="after")
+    def _escopo_preenchido(self) -> FatoNovoIn:
+        exige, aceita = _CAMPOS_DO_ESCOPO_NOVO[self.escopo]
+        onde = _ROTULO_ESCOPO_NOVO[self.escopo]
+        faltam = [c for c in sorted(exige) if getattr(self, c) is None]
+        if faltam:
+            nomes = ", ".join(_ROTULO_CAMPO_FATO[c] for c in faltam)
+            raise ValueError(f"o fato que vale para {onde} precisa de: {nomes}")
+        sobram = [c for c in _ROTULO_CAMPO_FATO if c not in aceita and getattr(self, c) is not None]
+        if sobram:
+            nomes = ", ".join(_ROTULO_CAMPO_FATO[c] for c in sobram)
+            raise ValueError(f"o fato que vale para {onde} não usa: {nomes}")
+        return self
 
 
 # ── Resumo, sincronização e métricas ──────────────────────────────────────
