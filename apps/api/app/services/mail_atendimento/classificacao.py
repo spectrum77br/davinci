@@ -80,6 +80,17 @@ class Classificacao:
     caso_id: str | None = None
     casos_ambiguos: bool = False
     tipo_inferido: bool = False
+    # 21/10/2026: o tipo veio da CATEGORIA da pasta criada (não do conteúdo).
+    tipo_pela_pasta: bool = False
+
+
+def pela_pasta(categoria: str, caso_id: str | None = None) -> Classificacao:
+    """O tipo que a categoria da pasta manda (a venda nunca tem caso)."""
+    return Classificacao(
+        categoria,
+        caso_id if categoria == TIPO_CHAMADO else None,
+        tipo_pela_pasta=True,
+    )
 
 
 def _casos_explicitos(plataforma: str | None, *textos: str | None) -> set[str]:
@@ -166,6 +177,16 @@ def tipos_de_meta(meta: Any, payload: Mapping[str, Any] | None = None) -> dict[s
     mail = dict(payload or {})
     if isinstance(mail.get("mail"), Mapping):
         mail = dict(mail["mail"])
+    pela_categoria = _tipo_da_meta_sem_conversa(meta) if not mail else None
+    if pela_categoria is not None:
+        # A linha informativa e o e-mail ligado à Pós-venda não têm mensagem:
+        # o tipo é o da categoria da pasta (21/10/2026).
+        return {
+            "tipo_email": pela_categoria,
+            "caso_id": getattr(meta, "protocolo", None) if pela_categoria == TIPO_CHAMADO else None,
+            "tipo_email_inferido": False,
+            "tipo_pela_pasta": True,
+        }
     mail.setdefault("finalidade", getattr(meta, "finalidade", None))
     protocolo = getattr(meta, "protocolo", None)
     plataforma = getattr(meta, "plataforma", None)
@@ -178,4 +199,20 @@ def tipos_de_meta(meta: Any, payload: Mapping[str, Any] | None = None) -> dict[s
         "caso_id": str(caso_id) if caso_id else None,
         "tipo_email_inferido": mail.get("tipo_email") not in TIPOS_EMAIL
         or bool(mail.get("tipo_email_inferido")),
+        "tipo_pela_pasta": bool(mail.get("tipo_pela_pasta")),
     }
+
+
+def _tipo_da_meta_sem_conversa(meta: Any) -> str | None:
+    """O tipo da meta decidida pela categoria SEM mensagem: a linha informativa
+    (`estado=informativo`) e o e-mail de pasta "chamado" (ligado ao chamado da
+    Pós-venda, ou guardado como `chamado_sem_pedido`/`chamado_sem_chamado`).
+    None = as outras."""
+    if getattr(meta, "estado", None) == "informativo":
+        return TIPO_INFORMATIVO
+    if getattr(meta, "chamado_id", None) is not None or (
+        getattr(meta, "estado", None) == "ignorado"
+        and getattr(meta, "motivo", None) in ("chamado_sem_pedido", "chamado_sem_chamado")
+    ):
+        return TIPO_CHAMADO
+    return None

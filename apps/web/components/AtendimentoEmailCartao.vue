@@ -31,6 +31,8 @@ export type EmailDaMensagem = {
   finalidade?: string | null
   tipo_email?: 'informativo' | 'chamado' | 'venda' | null
   tipo_email_inferido?: boolean
+  // O tipo veio da categoria da pasta (21/10/2026), não do conteúdo.
+  tipo_pela_pasta?: boolean
   caso_id?: string | null
   destaque?: boolean
   alias?: string | null
@@ -64,6 +66,7 @@ export type CartaoEmail = {
   finalidade: string | null
   tipo_email?: 'informativo' | 'chamado' | 'venda' | null
   tipo_email_inferido?: boolean
+  tipo_pela_pasta?: boolean
   caso_id?: string | null
   finalidade_rotulo: string | null
   destaque: boolean
@@ -142,7 +145,9 @@ export const TIPOS_EMAIL = [
 export function rotuloTipoEmail(tipo: string | null | undefined): string {
   return ({ informativo: 'Informativo', chamado: 'Chamado', venda: 'Venda' } as Record<string, string>)[tipo || ''] || ''
 }
-export function dicaTipoEmail(inferido: boolean | undefined): string {
+// `pelaPasta` (21/10/2026): o tipo é o da categoria da pasta criada (Pastas e regras).
+export function dicaTipoEmail(inferido: boolean | undefined, pelaPasta?: boolean, pasta?: string | null): string {
+  if (pelaPasta) return `Tipo pela categoria da pasta${pasta ? ` «${pasta}»` : ''} (Pastas e regras).`
   return inferido ? 'Tipo sugerido pelos dados disponíveis; o conteúdo deste e-mail ainda precisa ser conferido.' : 'Tipo identificado no conteúdo do e-mail.'
 }
 export type CartoesDaConversa = { emails: CartaoEmail[]; chamado: Chamado | null; outros_chamados: Chamado[] }
@@ -284,7 +289,7 @@ const respondivel = computed(() => !!props.podeResponder && !!props.email.messag
           :class="pasta.destaque ? 'bg-red-500/15 text-red-700 dark:text-red-300' : 'bg-muted text-muted-foreground'"
           :title="`pasta: ${pasta.texto}`"
         >{{ pasta.texto }}</span>
-        <span v-if="rotuloTipoEmail(email.tipo_email || cartao?.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] font-medium" :title="dicaTipoEmail(email.tipo_email_inferido || cartao?.tipo_email_inferido)" data-email-tipo>{{ rotuloTipoEmail(email.tipo_email || cartao?.tipo_email) }}</span>
+        <span v-if="rotuloTipoEmail(email.tipo_email || cartao?.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] font-medium" :title="dicaTipoEmail(email.tipo_email_inferido || cartao?.tipo_email_inferido, email.tipo_pela_pasta || cartao?.tipo_pela_pasta, email.pasta || cartao?.pasta)" data-email-tipo>{{ rotuloTipoEmail(email.tipo_email || cartao?.tipo_email) }}</span>
         <span v-if="email.caso_id || cartao?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300" data-email-caso>Chamado {{ email.caso_id || cartao?.caso_id }}</span>
         <span v-if="pasta.soHistorico" class="rounded bg-sky-500/15 px-1.5 py-px text-[11px] text-sky-800 dark:text-sky-300" title="e-mail de vendas da plataforma: fica como histórico, sem pendência — não é para responder" data-email-historico>só histórico</span>
         <span v-if="email.aviso_api" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" title="a plataforma tem API: o aviso por e-mail fica aqui, na conversa da API do pedido">aviso por e-mail</span>

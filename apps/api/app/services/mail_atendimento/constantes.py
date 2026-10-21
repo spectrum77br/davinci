@@ -35,11 +35,25 @@ ESTADO_DUPLICADO = "duplicado"
 ESTADO_SEGURANCA = "seguranca"
 ESTADO_PRIVADO = "privado"
 ESTADO_ERRO = "erro"
+# 21/10/2026 (categoria por pasta): o e-mail de uma pasta INFORMATIVA não abre
+# conversa — é uma LINHA do item da pasta na aba E-mail (a meta é a linha).
+ESTADO_INFORMATIVO = "informativo"
 # O que a ponte LEVOU à equipe (é contra estes, e só estes, que um e-mail
 # repetido vira "duplicado" — nunca contra um privado, ignorado ou de segurança).
+# O informativo NÃO entra: um newsletter nunca vira "fio da equipe" (a regra
+# de segurança afrouxa no fio da equipe).
 ESTADOS_DA_EQUIPE = (ESTADO_GRAVADO, ESTADO_SEM_VINCULO, ESTADO_SEM_LOJA, ESTADO_RESUMO)
+# O duplicado da pasta categorizada também conta a linha informativa (o mesmo
+# newsletter em duas caixas é uma linha só).
+ESTADOS_DUPLICAVEIS = (*ESTADOS_DA_EQUIPE, ESTADO_INFORMATIVO)
 # Os que têm o texto mostrado no cartão/fila (para quem pode ver).
-ESTADOS_COM_TEXTO = (ESTADO_GRAVADO, ESTADO_SEM_VINCULO, ESTADO_SEM_LOJA, ESTADO_RESUMO)
+ESTADOS_COM_TEXTO = (
+    ESTADO_GRAVADO,
+    ESTADO_SEM_VINCULO,
+    ESTADO_SEM_LOJA,
+    ESTADO_RESUMO,
+    ESTADO_INFORMATIVO,
+)
 
 # As filas da tela (só para quem MEXE no /atendimento).
 FILA_SEM_LOJA = "sem_loja"
@@ -47,7 +61,46 @@ FILA_SEM_VINCULO = "sem_vinculo"
 FILA_SUSPEITO = "suspeito"
 FILA_RESUMO = "resumo"
 FILA_ERRO = "erro"
-FILAS = (FILA_SEM_LOJA, FILA_SEM_VINCULO, FILA_SUSPEITO, FILA_RESUMO, FILA_ERRO)
+# As linhas das pastas informativas (`/emails?fila=informativo&pasta=<id>`).
+FILA_INFORMATIVO = "informativo"
+FILAS = (FILA_SEM_LOJA, FILA_SEM_VINCULO, FILA_SUSPEITO, FILA_RESUMO, FILA_ERRO, FILA_INFORMATIVO)
+
+# ── A categoria da pasta CRIADA (21/10/2026, decisões do dono) ─────────────
+# Só as pastas que a equipe criou (pessoais) têm categoria; a Entrada, os
+# Enviados (e a caixa da Goslin, que só tem a Entrada) ligam como sempre.
+# Os três primeiros valores são os tipos do e-mail (`classificacao.TIPOS_EMAIL`):
+# a PASTA decide o tipo (`CATEGORIAS_PELA_PASTA`).
+CATEGORIA_INFORMATIVO = "informativo"
+CATEGORIA_CHAMADO = "chamado"
+CATEGORIA_VENDA = "venda"
+# "Site (como hoje)" (21/10/2026, decisão 9 do dono: "as dos sites Uranyx e
+# Charlots então pode manter como era; o resto já vem esse novo padrão"): a
+# pasta criada liga EXATAMENTE como antes da categoria por pasta — a loja pelo
+# endereço, o tipo pelo conteúdo, o chamado RF6 do site pelo protocolo, a
+# conversa na aba E-mail (nenhuma das três acima devolve o fluxo dos sites:
+# venda recusa o site, o chamado do site não acha pedido, o informativo só
+# vira linha). A 0424 a dá só às pastas de site da Uranyx e da Charlots; numa
+# outra pasta, uma pessoa pode escolher (liga como antes, igual).
+CATEGORIA_SITE = "site"
+CATEGORIAS_PELA_PASTA = (CATEGORIA_INFORMATIVO, CATEGORIA_CHAMADO, CATEGORIA_VENDA)
+CATEGORIAS_PASTA = (*CATEGORIAS_PELA_PASTA, CATEGORIA_SITE)
+ROTULO_CATEGORIA = {
+    CATEGORIA_INFORMATIVO: "Informativo",
+    CATEGORIA_CHAMADO: "Chamado (Pós-venda)",
+    CATEGORIA_VENDA: "Venda",
+    CATEGORIA_SITE: "Site (como hoje)",
+}
+# Escolher a categoria relê os e-mails guardados SÓ destes últimos dias (a
+# tela mostra quantos): o acumulado de semanas viraria conversa de uma vez.
+RELER_DIAS = 7
+# O vínculo do e-mail de pasta "chamado" com a Pós-venda › Chamados
+# (`posvenda.ligar_ao_chamado`; o posvenda diz o detalhe em `vinculado_por`).
+VINCULADO_CHAMADO = "chamado"
+VINCULADO_CHAMADO_MANUAL = "chamado_manual"
+# A pasta de venda com o nº no formato da plataforma que ainda não chegou ao
+# Bling: a conversa da venda nasce pelo nº (em produção, 100% dos ~460 de
+# 09–21/10 existiam no Bling ~30 min depois).
+ALERTA_VENDA_PELO_NUMERO = "venda_pelo_numero"
 
 # Motivos do `ignorado` (código, nunca texto do e-mail).
 IGNORADO_PASTA_SO_CONTAR = "pasta_so_contar"
@@ -57,6 +110,21 @@ IGNORADO_ALIAS_INTERNO = "alias_interno"
 IGNORADO_ENVIADO_SEM_CONVERSA = "enviado_sem_conversa"
 IGNORADO_POR_PESSOA = "por_pessoa"
 IGNORADO_DEVOLUCAO = "devolucao_sem_conversa"
+# 21/10/2026: a pasta criada SEM categoria não liga (fica guardado; quando uma
+# pessoa escolhe a categoria, a ponte relê) e o e-mail de pasta "chamado" sem
+# pedido identificável (uma pessoa liga à mão na Pós-venda › Chamados).
+IGNORADO_PASTA_SEM_CATEGORIA = "pasta_sem_categoria"
+IGNORADO_CHAMADO_SEM_PEDIDO = "chamado_sem_pedido"
+# O pedido (ou o caso) existe, mas não há chamado dele na Pós-venda — e a
+# Pós-venda nunca cria chamado (regra do dono, 21/10: "só acrescentar").
+IGNORADO_CHAMADO_SEM_CHAMADO = "chamado_sem_chamado"
+# Os `ignorado` que NUNCA chegaram a conversa nem a chamado: a ponte pode reler
+# (apagar a meta e a volta seguinte processa) sem duplicar nada.
+IGNORADOS_RELIDOS = (
+    IGNORADO_PASTA_SEM_CATEGORIA,
+    IGNORADO_CHAMADO_SEM_PEDIDO,
+    IGNORADO_CHAMADO_SEM_CHAMADO,
+)
 PRIVADO_NAO_E_DE_LOJA = "nao_e_alias_de_loja"
 SEGURANCA_CODIGO = "codigo_ou_acesso"
 
@@ -422,8 +490,18 @@ LINK_TUTA = "https://app.tuta.com/mail?mail={lista},{elemento}"
 # regra (o roteamento, a máscara) = subir este número; o que já foi decidido
 # não é reprocessado sozinho (só sem_loja/erro, por pessoa).
 REGRAS_VERSAO = 1
+# 21/10/2026: o e-mail decidido pela CATEGORIA da pasta criada (venda,
+# informativo, chamado, ou "sem categoria"). A Entrada e os Enviados não
+# mudaram de regra: continuam na versão 1 (o banco separa um do outro) — e
+# também a pasta "Site (como hoje)" e a resposta num fio/protocolo que a equipe já
+# tem numa pasta sem categoria (as duas seguem a regra de antes, inteira).
+REGRAS_VERSAO_CATEGORIA = 2
 # E-mails por caixa em cada volta (o job roda a cada minuto).
 PONTE_POR_VOLTA = 50
+# O e-mail que CHEGOU à Central há menos que isto passa na frente na volta da
+# ponte: o guardado que uma categoria nova mandou reler (antigo) nunca segura a
+# Entrada nem o cliente que acabou de escrever.
+PONTE_FRESCOS = timedelta(minutes=30)
 # O texto que vai para a mensagem da conversa (o novo, sem a citação).
 TEXTO_NA_CONVERSA_MAX = 20_000
 # O enviado pelo Tuta que responde a um e-mail com resposta NOSSA na fila:

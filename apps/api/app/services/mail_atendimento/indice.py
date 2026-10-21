@@ -95,6 +95,7 @@ from app.services.mail_atendimento.constantes import (
     ESTADO_DUPLICADO,
     ESTADO_GRAVADO,
     ESTADO_IGNORADO,
+    ESTADO_INFORMATIVO,
     ESTADO_INTERNO,
     ESTADO_PRIVADO,
     ESTADO_RESUMO,
@@ -104,6 +105,8 @@ from app.services.mail_atendimento.constantes import (
     FINALIDADE_ENVIADOS,
     IGNORADO_ALIAS_INTERNO,
     IGNORADO_AVISO_DO_TUTA,
+    IGNORADO_CHAMADO_SEM_CHAMADO,
+    IGNORADO_CHAMADO_SEM_PEDIDO,
     IGNORADO_DEVOLUCAO,
     IGNORADO_ENVIADO_SEM_CONVERSA,
     KIND_AGENDADOS,
@@ -195,12 +198,18 @@ _ESTADOS_DEPOIS_DA_SEGURANCA = (
     ESTADO_INTERNO,
     ESTADO_RESUMO,
     ESTADO_DUPLICADO,
+    # 21/10/2026: a linha da pasta informativa (a ponte já passou da segurança).
+    ESTADO_INFORMATIVO,
 )
+# (O `pasta_sem_categoria` NÃO entra: a ponte para ANTES da segurança.)
 _IGNORADOS_DEPOIS_DA_SEGURANCA = (
     IGNORADO_AVISO_DO_TUTA,
     IGNORADO_ALIAS_INTERNO,
     IGNORADO_ENVIADO_SEM_CONVERSA,
     IGNORADO_DEVOLUCAO,
+    # 21/10/2026: o e-mail de pasta "chamado" guardado para ligar à mão.
+    IGNORADO_CHAMADO_SEM_PEDIDO,
+    IGNORADO_CHAMADO_SEM_CHAMADO,
 )
 
 # ── As pastas ─────────────────────────────────────────────────────────────

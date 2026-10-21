@@ -41,7 +41,7 @@ from app.models.mail_atendimento import (
 from app.security.cipher import decrypt_json
 from app.services import mail_v2
 from app.services.atendimento import acesso
-from app.services.mail_atendimento import codigos, pastas, ponte
+from app.services.mail_atendimento import codigos, pastas, ponte, regras
 
 ROOT = "/api/mail"
 ALIASES = ["21max@tuta.com", "16tr@tuta.com", "adm@poofy.com.br", "sac@uranyx.com.br"]
@@ -446,7 +446,12 @@ async def test_ingest_com_lote_grande_demais_ou_corpo_ruim(client, caixa):
 async def test_a_ponte_le_o_que_o_v2_mandou(client, caixa, db, monkeypatch):
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "")
     await _sync(client, caixa)
+    # Na Entrada (21/10/2026: a pasta criada sem categoria fica guardada sem ligar
+    # — `test_a_ponte_guarda_o_v2_da_pasta_sem_categoria`).
     item = _v2(
+        pasta="Pentrada",
+        caminho="Entrada",
+        kind="1",
         subject="Problema com o pedido",
         text="Recebi quebrado.",
         tuta={"phishing_status": "1", "conversation_id": "FioDoTuta1"},
@@ -471,7 +476,120 @@ async def test_a_ponte_le_o_que_o_v2_mandou(client, caixa, db, monkeypatch):
     assert meta.phishing_status == "1"
     assert meta.suspeito is True
     pasta = await db.get(MailFolder, meta.folder_id)
-    assert pasta.chave == "Pproblema"
+    assert pasta.chave == "Pentrada"
+
+
+async def _ponte_ligada(db, caixa) -> None:
+    db.add(
+        MailMailboxSettings(
+            mailbox_id=UUID(caixa["id"]),
+            visibilidade="empresa",
+            ponte_ligada=True,
+            ponte_desde=datetime.now(UTC) - timedelta(hours=1),
+            ponte_so_aliases_de_loja=False,
+        )
+    )
+    await db.commit()
+
+
+async def test_a_ponte_guarda_o_v2_da_pasta_sem_categoria(client, caixa, db, monkeypatch):
+    """21/10/2026: a pasta criada SEM categoria continua mandando o corpo (o `ler`
+    de sempre), mas a ponte não liga — nada do e-mail fica em claro na meta."""
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "")
+    await _sync(client, caixa)
+    item = _v2(tuta={"phishing_status": "1", "conversation_id": "FioDoTuta2"})
+    resultado = await _ingerir(client, caixa, item)
+    assert resultado["accepted"] == 1
+    await _ponte_ligada(db, caixa)
+    m = await _mensagem(db, caixa, item["source_id"])
+    assert await ponte.processar(db, m.id) == "ignorado"
+    await db.commit()
+    meta = await db.get(MailMessageMeta, m.id)
+    assert (meta.estado, meta.motivo, meta.regras_versao) == ("ignorado", "pasta_sem_categoria", 2)
+    assert (meta.tuta_id, meta.fio_tuta, meta.alias_recebido, meta.mid_hash) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert (await db.get(MailFolder, meta.folder_id)).chave == "Pproblema"
+
+
+async def test_movido_para_pasta_categorizada_e_relido_pela_ponte(client, caixa, db, monkeypatch):
+    """O e-mail guardado sem ligar que o conector conta noutra pasta, COM categoria:
+    a meta some e a ponte relê já na pasta nova (decisão do desenho §2.6)."""
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "")
+    await _sync(client, caixa)
+    item = _v2()
+    await _ingerir(client, caixa, item)
+    await _ponte_ligada(db, caixa)
+    m = await _mensagem(db, caixa, item["source_id"])
+    assert await ponte.processar(db, m.id) == "ignorado"
+    await db.commit()
+    vendas = await db.scalar(
+        select(MailFolder).where(
+            MailFolder.mailbox_id == UUID(caixa["id"]), MailFolder.chave == "Pvendas"
+        )
+    )
+    vendas.categoria = "venda"
+    vendas_id = vendas.id
+    await db.commit()
+    r = await client.post(
+        f"{caixa['v2']}/count",
+        headers=caixa["headers"],
+        json={"folder_key": "Pvendas", "ids": [item["source_id"]], "complete": False},
+    )
+    assert r.status_code == 200 and r.json()["moved"] == 1
+    mid = m.id
+    db.expire_all()
+    assert await db.get(MailMessageMeta, mid) is None
+    assert mid in await ponte.pendentes(db)
+    assert await ponte.processar(db, mid) not in (None, "ignorado")
+    await db.commit()
+    relida = await db.get(MailMessageMeta, mid)
+    assert relida.folder_id == vendas_id and relida.regras_versao == 2
+    # Para uma pasta SEM categoria (ou a do sistema), o guardado fica como está.
+    outro = _v2()
+    await _ingerir(client, caixa, outro)
+    m2 = await _mensagem(db, caixa, outro["source_id"])
+    mid2 = m2.id
+    await ponte.processar(db, mid2)
+    await db.commit()
+    r = await client.post(
+        f"{caixa['v2']}/count",
+        headers=caixa["headers"],
+        json={"folder_key": "Psac", "ids": [outro["source_id"]], "complete": False},
+    )
+    assert r.json()["moved"] == 1
+    db.expire_all()
+    guardado = await db.get(MailMessageMeta, mid2)
+    assert (guardado.estado, guardado.motivo) == ("ignorado", "pasta_sem_categoria")
+
+
+async def test_pasta_so_contar_com_categoria_manda_o_corpo(client, caixa, db):
+    """Escolher a categoria numa pasta "só contar" é a liberação explícita: o
+    conector passa a mandar o corpo. Sem categoria, o `ler` de sempre."""
+    from app.services.mail_v2 import leitura_da_pasta
+
+    await _sync(client, caixa)
+    linhas = {
+        p.chave: p
+        for p in (
+            await db.execute(select(MailFolder).where(MailFolder.mailbox_id == UUID(caixa["id"])))
+        ).scalars()
+    }
+    assert leitura_da_pasta(linhas["Pfinanceiro"]) == "so_contar"
+    assert leitura_da_pasta(linhas["Pproblema"]) == "corpo"
+    assert leitura_da_pasta(linhas["Pentrada"]) == "corpo"
+    r = await regras.carregar(db)
+    linhas["Pfinanceiro"].categoria = "informativo"
+    regras.reclassificar(linhas["Pfinanceiro"], r)
+    assert leitura_da_pasta(linhas["Pfinanceiro"]) == "corpo"
+    # Na pasta do sistema a categoria não vale (a Lixeira continua só contada).
+    linhas["Plixeira"].categoria = "informativo"
+    regras.reclassificar(linhas["Plixeira"], r)
+    assert leitura_da_pasta(linhas["Plixeira"]) == "so_contar"
+    await db.rollback()
 
 
 # ─── /count e /changes ──────────────────────────────────────────────────────

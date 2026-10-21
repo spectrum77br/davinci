@@ -36,6 +36,10 @@ _NOSSA = _ALEMBIC / "versions" / "0387_mail_atendimento.py"
 # A 0389 (leitores, 09/10) só acrescenta colunas na configuração: o model de
 # hoje = 0387 + 0389 (o teste dela é `test_mail_leitores.py`).
 _LEITORES = _ALEMBIC / "versions" / "0389_mail_leitores.py"
+# A 0424 (categoria da pasta, 21/10/2026) acrescenta a categoria nas pastas, o
+# estado `informativo` e o chamado da Pós-venda na meta: o model de hoje = 0387 +
+# 0389 + 0424 (o teste dela é `test_mail_pastas_categoria_migration.py`).
+_CATEGORIA = _ALEMBIC / "versions" / "0424_mail_pastas_categoria.py"
 TABELAS = [
     "atendimento_regras_pasta_email",
     "mail_agente_v2",
@@ -56,6 +60,7 @@ REFERIDAS = [
     "store_info",
     "integrations",
     "marcas",
+    "chamados",
 ]
 
 
@@ -138,6 +143,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     schema_model = Base.metadata.schema
     rascunho = f"{schema_model}_mig0387"
     dele, nossa, leitores = _carregar(_DELE), _carregar(_NOSSA), _carregar(_LEITORES)
+    categoria = _carregar(_CATEGORIA)
     assert (nossa.revision, nossa.down_revision) == ("0387_mail_atendimento", "0386_mail_central")
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
@@ -155,13 +161,16 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     dele.SCHEMA = rascunho
     nossa.SCHEMA = rascunho
     leitores.SCHEMA = rascunho
+    categoria.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, [(dele, "upgrade")])
         await db.commit()
         dele_antes = await _catalogo(db, rascunho, DELE)
         conn = await db.connection()
-        await conn.run_sync(_rodar, [(nossa, "upgrade"), (leitores, "upgrade")])
+        await conn.run_sync(
+            _rodar, [(nossa, "upgrade"), (leitores, "upgrade"), (categoria, "upgrade")]
+        )
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho, TABELAS)
@@ -301,7 +310,9 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
 
         # O downgrade da 0387 tira só o que é nosso.
         conn = await db.connection()
-        await conn.run_sync(_rodar, [(leitores, "downgrade"), (nossa, "downgrade")])
+        await conn.run_sync(
+            _rodar, [(categoria, "downgrade"), (leitores, "downgrade"), (nossa, "downgrade")]
+        )
         await db.commit()
         depois = await _catalogo(db, rascunho, TABELAS)
         assert depois == {"tabelas": [], "colunas": [], "constraints": [], "indices": []}

@@ -127,6 +127,8 @@ async def test_busca_filtrada_nao_decifra_ou_revela_loja_negada(
         db,
         cena.geral,
         pasta="problema shopee",
+        # A Shopee da Barbosa no alias dela (22max, 21/10/2026).
+        para=["22max@tuta.com"],
         assunto="Assunto invisível Shopee",
         recebido_em=_min(1),
     )

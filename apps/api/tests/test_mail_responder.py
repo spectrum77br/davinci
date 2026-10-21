@@ -34,6 +34,7 @@ from app.services.mail_atendimento import ponte
 from tests.test_mail_ponte import (
     GERAL,
     TOKEN_GERAL,
+    categorizar,
     entrar,
     meta_de,
     rodar,
@@ -169,7 +170,7 @@ async def test_nao_responder_pede_confirmacao(db, cena, client, admin):
     _mid, conversa_id = await _conversa_do_email(
         db,
         cena,
-        pasta="mensagens ml",
+        pasta="INBOX",
         de="nao-responder@mercadolivre.com.br",
         de_nome="Mercado Livre",
         assunto="Nova mensagem",
@@ -189,10 +190,13 @@ async def test_nao_responder_pede_confirmacao(db, cena, client, admin):
             {"de": "suporte@mercadolivre-br.com", "de_nome": "Mercado Livre"},
             "remetente_suspeito",
         ),
-        ({"pasta": "problema amazon", "para": ["mike14@tuta.com"]}, "resposta_pela_amazon"),
+        ({"pasta": "INBOX", "para": ["mike14@tuta.com"]}, "resposta_pela_amazon"),
     ],
 )
 async def test_travas_do_email(db, cena, client, admin, kw, codigo):
+    if kw.get("pasta") == "vendas ml":
+        # 21/10/2026: a pasta de vendas liga pela categoria (a 0422 dá `venda`).
+        await categorizar(db, cena.geral, "vendas ml", "venda")
     _mid, conversa_id = await _conversa_do_email(db, cena, **kw)
     await _ligar_envio(db, cena.geral)
     r = await _responder(client, conversa_id)
@@ -288,7 +292,7 @@ async def test_rf6_resposta_do_formulario_vai_ao_cliente_pelo_email_do_tipo(
     _mid, conversa_id = await _conversa_do_email(
         db,
         cena,
-        pasta="*uranyx atacado",
+        pasta="INBOX",
         de="atacado@uranyx.com.br",
         para=["atacado@uranyx.com.br"],
         assunto="Pedido de atacado",
@@ -314,7 +318,7 @@ async def test_rf6_protocolo_entra_no_assunto_com_um_re_so(db, cena, client, adm
     _mid, conversa_id = await _conversa_do_email(
         db,
         cena,
-        pasta="*uranyx duvidas",
+        pasta="INBOX",
         de="duvidas@uranyx.com.br",
         para=["duvidas@uranyx.com.br"],
         assunto="RE: Dúvida sobre o app",
@@ -330,7 +334,7 @@ async def test_rf6_formulario_sem_email_do_cliente_nao_responde(db, cena, client
     _mid, conversa_id = await _conversa_do_email(
         db,
         cena,
-        pasta="*uranyx sac",
+        pasta="INBOX",
         de="sac@uranyx.com.br",
         para=["sac@uranyx.com.br"],
         assunto="[US-26-0009] Dúvida",

@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from app.models import AtendimentoConversa, StoreInfo
-from app.services.mail_atendimento import chamados
+from app.services.mail_atendimento import chamados, ponte
 from tests.test_atendimento_separa_email import (
     URL,
     _chat,
@@ -49,7 +49,7 @@ async def _chamado(db, cena, protocolo: str, minutos: int):
     mid = await entrar(
         db,
         cena.geral,
-        pasta="*uranyx sac",
+        pasta="INBOX",
         de="sac@uranyx.com.br",
         de_nome="Site Uranyx",
         para=["sac@uranyx.com.br"],
@@ -84,6 +84,16 @@ async def _historico(db, cena) -> dict:
         recebido_em=AGORA - timedelta(minutes=20),
     )
     await rodar(db)
+    # 21/10/2026: na Entrada da Goslin, mia30 é das duas lojas da Oliveira (ML e
+    # Shopee) — a pessoa escolhe a loja na fila "E-mail sem loja".
+    rota = ponte.rotear.Rota(
+        alias="mia30@tuta.com",
+        store_info_id=cena.loja_oliveira_ml.id,
+        integration_id=cena.oliveira_ml.id,
+        plataforma="ml",
+    )
+    await ponte.reprocessar(db, mid_oli, rota_forcada=rota)
+    await db.commit()
     oliveira = await conversa(db, (await meta_de(db, mid_oli)).conversa_id)
     velho = await _chamado(db, cena, "US-26-0001", 30)
     novo = await _chamado(db, cena, "US-26-0002", 40)

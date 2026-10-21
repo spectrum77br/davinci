@@ -105,7 +105,9 @@ def _texto(rnd: random.Random, tamanho: int) -> str:
 
 def _conteudos(n: int) -> list[dict]:
     rnd = random.Random(42)  # noqa: S311 — dados de teste, repetíveis
-    nossos = [GERAL, *ALIASES_GERAL]
+    # Sem o alias da Shopee da Barbosa (22max, 21/10/2026): a mesma sequência
+    # sorteada de antes (as 40 pastas com e-mail, os mesmos números do relatório).
+    nossos = [GERAL, *(a for a in ALIASES_GERAL if a != "22max@tuta.com")]
     pesos = [30, 6, 1, 2, 3, 1] + [57 / len(PESSOAIS)] * len(PESSOAIS)
     saida = []
     for k in range(n):

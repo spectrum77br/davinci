@@ -33,7 +33,10 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
 
   só quem MEXE (as filas podem ter e-mail de qualquer loja e de endereço interno):
     GET   …/filas                   — as contagens
-    GET   …/emails?fila=…           — sem_loja | sem_vinculo | suspeito | resumo | erro
+    GET   …/emails?fila=…           — sem_loja | sem_vinculo | suspeito | resumo | erro |
+                                      informativo (`&pasta=<id>`: as linhas de UM item)
+    GET   …/informativos            — os itens das pastas INFORMATIVAS (21/10/2026):
+                                      um por pasta, com total, último e as lojas
     GET   …/emails/{id}             — o cartão de um e-mail da fila
     POST  …/emails/{id}/loja        — escolher a loja (e-mail sem loja, 1 clique)
     POST  …/emails/{id}/vincular    — ligar a um pedido/conversa (e-mail sem vínculo)
@@ -49,6 +52,9 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
     GET   …/envios                  — as respostas pela fila da Central ("revisar envio")
     POST  …/envios/{job}/resolver   — saiu / não saiu (nunca reenvia)
     GET   …/pastas · PATCH …/pastas/{id} · GET …/regras · PUT …/regras
+                                      (a CATEGORIA da pasta criada — Venda · Chamado
+                                      (Pós-venda) · Informativa · Site (como hoje) —
+                                      21/10/2026: só admin escolhe; a regra só sugere)
 
 (… = /api/atendimento/email)
 
@@ -71,7 +77,7 @@ POST /api/atendimento/conversas/{id}/responder (com `mail_message_id` e
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from urllib.parse import quote
 from uuid import UUID
@@ -80,7 +86,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -140,10 +146,15 @@ from app.services.mail_atendimento import (
     texto,
     venda,
 )
+from app.services.mail_atendimento import pastas as pastas_mail
 from app.services.mail_atendimento.constantes import (
+    CATEGORIA_CHAMADO,
+    CATEGORIA_VENDA,
+    CATEGORIAS_PASTA,
     ESTADO_ERRO,
     ESTADO_GRAVADO,
     ESTADO_IGNORADO,
+    ESTADO_INFORMATIVO,
     ESTADO_RESUMO,
     ESTADO_SEM_LOJA,
     ESTADO_SEM_VINCULO,
@@ -151,10 +162,15 @@ from app.services.mail_atendimento.constantes import (
     FILA_SUSPEITO,
     FILAS,
     FINALIDADES_DESTAQUE,
+    IGNORADO_CHAMADO_SEM_CHAMADO,
+    IGNORADO_CHAMADO_SEM_PEDIDO,
     IGNORADO_POR_PESSOA,
+    IGNORADOS_RELIDOS,
     LINK_TUTA,
     MOTIVOS_SEM_LOJA,
     PLATAFORMAS_PASTA,
+    RELER_DIAS,
+    ROTULO_CATEGORIA,
     ROTULO_FINALIDADE,
     ROTULO_TIPO_CAIXA,
 )
@@ -179,6 +195,7 @@ LEITURAS_SO_DE_QUEM_MEXE = frozenset(
         ("GET", f"{_PREFIXO}/filas"),
         ("GET", f"{_PREFIXO}/emails"),
         ("GET", f"{_PREFIXO}/emails/{{message_id}}"),
+        ("GET", f"{_PREFIXO}/informativos"),
         ("GET", f"{_PREFIXO}/envios"),
         ("GET", f"{_PREFIXO}/pastas"),
         ("GET", f"{_PREFIXO}/regras"),
@@ -325,7 +342,22 @@ def _tipo_da_meta_sql():
         .where(AtendimentoMensagem.id == m.mensagem_id)
         .scalar_subquery()
     )
-    return _tipo_email_sql(tipo, m.plataforma, m.finalidade, func.nullif(m.protocolo, ""))
+    return case(
+        # A linha informativa e o e-mail da Pós-venda não têm mensagem: o tipo é
+        # o da categoria da pasta (21/10/2026; `classificacao.tipos_de_meta`).
+        (m.estado == ESTADO_INFORMATIVO, literal("informativo")),
+        (
+            or_(
+                m.chamado_id.is_not(None),
+                and_(
+                    m.estado == ESTADO_IGNORADO,
+                    m.motivo.in_((IGNORADO_CHAMADO_SEM_PEDIDO, IGNORADO_CHAMADO_SEM_CHAMADO)),
+                ),
+            ),
+            literal("chamado"),
+        ),
+        else_=_tipo_email_sql(tipo, m.plataforma, m.finalidade, func.nullif(m.protocolo, "")),
+    )
 
 
 def _filtro_da_fila(fila: str):
@@ -396,8 +428,11 @@ async def listar(
     antes_de: Annotated[datetime | None, Query()] = None,
     limite: Annotated[int, Query(ge=1, le=200)] = POR_PAGINA,
     tipo_email: Annotated[str | None, Query(max_length=16)] = None,
+    pasta: Annotated[UUID | None, Query()] = None,
 ) -> dict[str, Any]:
-    """Uma fila: sem loja, sem vínculo, suspeitos, resumos ou erro (sem o texto)."""
+    """Uma fila: sem loja, sem vínculo, suspeitos, resumos, erro ou as linhas
+    informativas (sem o texto). `pasta`: só os e-mails desta pasta — com
+    `fila=informativo`, as linhas de UM item da aba E-mail (21/10/2026)."""
     _mexe(user)
     if fila not in FILAS:
         raise HTTPException(422, detail={"code": "fila_invalida"})
@@ -413,6 +448,8 @@ async def listar(
     )
     if tipo_email:
         q = q.where(_tipo_da_meta_sql() == tipo_email)
+    if pasta is not None:
+        q = q.where(MailMessageMeta.folder_id == pasta)
     if antes_de is not None:
         q = q.where(MailMessage.received_at < antes_de)
     linhas = (
@@ -644,7 +681,7 @@ async def _vincular(
     )
     if destino is not None:
         await _travar_ou_409(session, destino, "conversa_ocupada")
-        await _mover(session, conversa, destino)
+        await venda.mover_conversa(session, conversa, destino)
         alvo_final = destino
     else:
         conversa.pedido_marketplace = pedido[:64]
@@ -732,31 +769,6 @@ async def _registrar_pessoa(
         enviada_em=agora,
         payload={ponte.CHAVE: {codigo: True}},
     )
-
-
-async def _mover(session: AsyncSession, de: AtendimentoConversa, para: AtendimentoConversa) -> None:
-    """As mensagens da conversa sem vínculo vão para a conversa do pedido (MOVE, sem duplicar)."""
-    await session.execute(
-        update(AtendimentoMensagem)
-        .where(AtendimentoMensagem.conversa_id == de.id)
-        .values(conversa_id=para.id)
-        .execution_options(synchronize_session=False)
-    )
-    await session.execute(
-        update(MailOutboxMeta)
-        .where(MailOutboxMeta.conversa_id == de.id)
-        .values(conversa_id=para.id)
-        .execution_options(synchronize_session=False)
-    )
-    await session.flush()
-    await gravar.recalcular_conversa(session, para)
-    await gravar.recalcular_conversa(session, de)
-    de.situacao = "fechada"
-    de.sem_resposta_necessaria = True
-    de.dados = {
-        **(de.dados or {}),
-        ponte.CHAVE: {**ponte.dados_mail(de), "movida_para": str(para.id)},
-    }
 
 
 @router.post("/emails/{message_id}/ignorar")
@@ -1313,17 +1325,10 @@ async def resolver_envio(
 # ── Pastas e regras (quem mexe; mudar = admin) ────────────────────────────
 
 
-@router.get("/pastas")
-async def listar_pastas(
-    session: Session,
-    user: Leitor,
-    mailbox_id: Annotated[UUID | None, Query()] = None,
-) -> dict[str, Any]:
-    _mexe(user)
-    r = await regras.carregar(session)
-    # As pastas de uma caixa PRIVADA (o conector v2 manda a lista inteira da
-    # conta) só para quem abre a caixa (dono/admin) — as das caixas da empresa
-    # e das com ponte, para quem mexe (é o que a ponte lê).
+async def _caixas_das_pastas(session: AsyncSession, user: User) -> set[UUID]:
+    """As caixas cujas pastas esta pessoa (que mexe) vê: as que ela vê na Saúde e
+    as com ponte (é o que a ponte lê). As pastas de uma caixa PRIVADA (o
+    conector v2 manda a lista inteira da conta) só para quem abre a caixa."""
     visiveis = {m.id for m in await saude.caixas_visiveis(session, user)}
     visiveis |= {
         mid
@@ -1335,6 +1340,18 @@ async def listar_pastas(
             )
         ).all()
     }
+    return visiveis
+
+
+@router.get("/pastas")
+async def listar_pastas(
+    session: Session,
+    user: Leitor,
+    mailbox_id: Annotated[UUID | None, Query()] = None,
+) -> dict[str, Any]:
+    _mexe(user)
+    r = await regras.carregar(session)
+    visiveis = await _caixas_das_pastas(session, user)
     q = (
         select(MailFolder)
         .where(MailFolder.mailbox_id.in_(visiveis))
@@ -1350,8 +1367,50 @@ async def listar_pastas(
             await session.execute(select(MailMailbox).where(MailMailbox.id.in_(visiveis)))
         ).scalars()
     }
-    for p in (await session.execute(q)).scalars():
+    linhas = list((await session.execute(q)).scalars())
+    # Quantos e-mails a ponte viu em cada pasta nos últimos 30 dias, e quantos
+    # estão GUARDADOS sem ligar por falta de categoria nos últimos `RELER_DIAS`
+    # dias (21/10/2026: a tela avisa que escolher a categoria liga esses também
+    # — os mais antigos ficam guardados, `pastas.reler_ignorados`).
+    ids = [p.id for p in linhas]
+    contas: dict[UUID, tuple[int, int]] = {}
+    if ids:
+        desde = datetime.now(UTC) - timedelta(days=30)
+        guardado = and_(
+            MailMessageMeta.estado == ESTADO_IGNORADO,
+            MailMessageMeta.motivo.in_(IGNORADOS_RELIDOS),
+            MailMessageMeta.conversa_id.is_(None),
+            MailMessageMeta.mensagem_id.is_(None),
+            MailMessageMeta.chamado_id.is_(None),
+            MailMessage.received_at >= pastas_mail.desde_os_relidos(),
+        )
+        contas = {
+            folder_id: (int(total or 0), int(guardados or 0))
+            for folder_id, total, guardados in (
+                await session.execute(
+                    select(
+                        MailMessageMeta.folder_id,
+                        func.count().filter(MailMessage.received_at >= desde),
+                        func.count().filter(guardado),
+                    )
+                    .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
+                    .where(MailMessageMeta.folder_id.in_(ids))
+                    .group_by(MailMessageMeta.folder_id)
+                )
+            ).all()
+        }
+    quem = {p.categoria_por for p in linhas if p.categoria_por is not None}
+    nomes_de_quem = {
+        u.id: (u.name or u.email)
+        for u in (
+            (await session.execute(select(User).where(User.id.in_(quem)))).scalars() if quem else []
+        )
+    }
+    for p in linhas:
         classe = regras.efetiva(p, r)
+        travada = not regras.e_criada(p.tipo_tuta)
+        categoria = regras.categoria_que_vale(p)
+        total_30d, guardados = contas.get(p.id, (0, 0))
         itens.append(
             {
                 "id": str(p.id),
@@ -1370,6 +1429,16 @@ async def listar_pastas(
                 "revisada": p.revisada,
                 "vista_em": gravar._utc(p.vista_em),
                 "sumiu_em": gravar._utc(p.sumiu_em),
+                # 21/10/2026: a categoria (só de pessoa) e a sugestão da regra.
+                "categoria": categoria,
+                "categoria_rotulo": ROTULO_CATEGORIA.get(categoria or ""),
+                "categoria_sugerida": regras.categoria_sugerida(classe, p.tipo_tuta),
+                "categoria_por": nomes_de_quem.get(p.categoria_por) if p.categoria_por else None,
+                "categoria_em": gravar._utc(p.categoria_em),
+                # Entrada, Enviados, Lixeira, Spam…: nunca têm categoria.
+                "travada": travada,
+                "total_30d": total_30d,
+                "guardados": guardados,
             }
         )
     usadas = {i["mailbox_id"] for i in itens}
@@ -1380,6 +1449,9 @@ async def listar_pastas(
         ],
         "plataformas": list(PLATAFORMAS_PASTA),
         "finalidades": list(regras.FINALIDADES_VALIDAS),
+        "categorias": [{"valor": c, "rotulo": ROTULO_CATEGORIA[c]} for c in CATEGORIAS_PASTA],
+        # Escolher a categoria relê os guardados só destes últimos dias.
+        "reler_dias": RELER_DIAS,
     }
 
 
@@ -1388,19 +1460,38 @@ class PastaPatch(BaseModel):
     plataforma: str | None = Field(default=None, max_length=16)
     finalidade: str | None = Field(default=None, max_length=16)
     ignorar: bool | None = None
+    # 21/10/2026: a categoria da pasta criada (só vale se vier no corpo);
+    # null = "não vincular".
+    categoria: str | None = Field(default=None, max_length=12)
 
 
 @router.patch("/pastas/{pasta_id}")
 async def alterar_pasta(
     pasta_id: UUID, body: PastaPatch, session: Session, user: Leitor
 ) -> dict[str, Any]:
-    """Pasta nova: escolher a plataforma (e a finalidade) ou ignorar. Admin que mexe."""
+    """Pasta: a plataforma (e a finalidade), ignorar e a CATEGORIA. Admin que mexe.
+
+    A categoria (21/10/2026, decisões do dono) só numa pasta criada (a Entrada,
+    os Enviados, a Lixeira e o Spam são travados); `venda` exige a plataforma
+    de marketplace da pasta; `chamado` nunca numa pasta de SITE (o formulário
+    do site não tem pedido de marketplace: na Pós-venda tudo ficaria guardado
+    como `chamado_sem_pedido` — o site liga como antes com "Site (como hoje)"). Ao
+    ganhar categoria, o que estava guardado sem ligar nesta pasta nos últimos
+    `RELER_DIAS` dias é relido pela ponte (depois dos e-mails que acabaram de
+    chegar; nada tinha conversa: não duplica). Quem escolheu e quando ficam na
+    pasta e no log.
+    """
     _mexe(user)
     _admin(user)
     pasta = await session.get(MailFolder, pasta_id)
     if pasta is None:
         raise HTTPException(404, detail={"code": "pasta_nao_encontrada"})
     campos = body.model_fields_set
+    if "categoria" in campos and body.categoria is not None:
+        if body.categoria not in CATEGORIAS_PASTA:
+            raise HTTPException(422, detail={"code": "categoria_invalida"})
+        if not regras.e_criada(pasta.tipo_tuta):
+            raise HTTPException(422, detail={"code": "categoria_em_pasta_do_sistema"})
     if "plataforma" in campos:
         if body.plataforma and body.plataforma not in PLATAFORMAS_PASTA:
             raise HTTPException(422, detail={"code": "plataforma_invalida"})
@@ -1411,11 +1502,150 @@ async def alterar_pasta(
         pasta.finalidade_manual = body.finalidade or None
     if "ignorar" in campos and body.ignorar is not None:
         pasta.ignorar = body.ignorar
+    r = await regras.carregar(session)
+    de = pasta.categoria
+    para = body.categoria if "categoria" in campos else de
+    if para == CATEGORIA_VENDA:
+        # A conversa da venda é da loja de UMA plataforma (o site nunca é venda).
+        plataforma = regras.efetiva(pasta, r).plataforma
+        if plataforma not in PLATAFORMAS_PASTA or plataforma == PLATAFORMA_SITE:
+            await session.rollback()
+            raise HTTPException(422, detail={"code": "categoria_venda_sem_plataforma"})
+    if para == CATEGORIA_CHAMADO and regras.efetiva(pasta, r).plataforma == PLATAFORMA_SITE:
+        # O chamado da Pós-venda é de um pedido de marketplace: o formulário do
+        # site nunca liga (ficaria tudo guardado, sem tela para ligar à mão).
+        await session.rollback()
+        raise HTTPException(422, detail={"code": "categoria_chamado_em_site"})
+    if para != de:
+        pasta.categoria = para
+        pasta.categoria_por = user.id
+        pasta.categoria_em = datetime.now(UTC)
     pasta.revisada = True
-    regras.reclassificar(pasta, await regras.carregar(session))
+    regras.reclassificar(pasta, r)
+    relidos = await pastas_mail.reler_ignorados(session, pasta) if para != de and para else 0
     await session.commit()
     logger.info("mail_atendimento_pasta_alterada", pasta_id=str(pasta_id), user_id=str(user.id))
-    return {"id": str(pasta.id), "ler": pasta.ler, "revisada": pasta.revisada}
+    if para != de:
+        logger.info(
+            "mail_atendimento_pasta_categoria",
+            pasta_id=str(pasta_id),
+            de=de,
+            para=para,
+            relidos=relidos,
+            user_id=str(user.id),
+        )
+    return {
+        "id": str(pasta.id),
+        "ler": pasta.ler,
+        "revisada": pasta.revisada,
+        "categoria": pasta.categoria,
+        "relidos": relidos,
+    }
+
+
+# ── As pastas INFORMATIVAS (quem mexe) ────────────────────────────────────
+
+
+@router.get("/informativos")
+async def informativos(session: Session, user: Leitor, response: Response) -> dict[str, Any]:
+    """Os itens das pastas INFORMATIVAS (21/10/2026, decisão 4 do dono).
+
+    Um item por pasta de categoria `informativo` das caixas que a pessoa vê,
+    com quantas linhas (e-mails), o último e as lojas — contando SÓ os e-mails
+    que ela pode ver (`administracao.filtro_mensagem`). As linhas do item vêm
+    de GET /emails?fila=informativo&pasta=<id> (com a paginação `antes_de`); o
+    e-mail inteiro, de GET /emails/{id}. Sem texto aqui."""
+    _mexe(user)
+    visiveis = await _caixas_das_pastas(session, user)
+    lista = list(
+        (
+            await session.execute(
+                select(MailFolder)
+                .where(
+                    MailFolder.mailbox_id.in_(visiveis),
+                    MailFolder.categoria == ESTADO_INFORMATIVO,
+                )
+                .order_by(MailFolder.nome)
+            )
+        ).scalars()
+    )
+    lista = [p for p in lista if regras.categoria_que_vale(p) is not None]
+    caixas = {
+        m.id: m.label
+        for m in (
+            await session.execute(
+                select(MailMailbox).where(MailMailbox.id.in_({p.mailbox_id for p in lista}))
+            )
+        ).scalars()
+    }
+    grupos = (
+        (
+            await session.execute(
+                select(
+                    MailMessageMeta.folder_id,
+                    MailMessageMeta.integration_id,
+                    MailMessageMeta.store_info_id,
+                    func.count(),
+                    func.max(MailMessage.received_at),
+                )
+                .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
+                .where(
+                    MailMessageMeta.folder_id.in_([p.id for p in lista]),
+                    MailMessageMeta.estado == ESTADO_INFORMATIVO,
+                    administracao.filtro_mensagem(user, MailMessageMeta.message_id),
+                )
+                .group_by(
+                    MailMessageMeta.folder_id,
+                    MailMessageMeta.integration_id,
+                    MailMessageMeta.store_info_id,
+                )
+            )
+        ).all()
+        if lista
+        else []
+    )
+    nomes = await _nomes_das_lojas(session, {i for _, i, *_ in grupos if i is not None})
+    fichas: dict[UUID, str | None] = {}
+    por_pasta: dict[UUID, dict[str, Any]] = {}
+    for folder_id, integration_id, store_info_id, n, ultimo in grupos:
+        loja = nomes.get(integration_id) if integration_id else None
+        if loja is None and store_info_id is not None:
+            if store_info_id not in fichas:
+                ficha = await session.get(StoreInfo, store_info_id)
+                nome = " ".join((ficha.account_name or "").split()) if ficha else ""
+                fichas[store_info_id] = nome or None
+            loja = fichas[store_info_id]
+        item = por_pasta.setdefault(folder_id, {"total": 0, "ultimo_em": None, "lojas": set()})
+        item["total"] += int(n)
+        ultimo = gravar._utc(ultimo)
+        if ultimo is not None and (item["ultimo_em"] is None or ultimo > item["ultimo_em"]):
+            item["ultimo_em"] = ultimo
+        if loja:
+            item["lojas"].add(loja)
+    itens = []
+    for p in lista:
+        conta = por_pasta.get(p.id, {"total": 0, "ultimo_em": None, "lojas": set()})
+        itens.append(
+            {
+                "pasta_id": str(p.id),
+                "nome": p.nome,
+                "mailbox_id": str(p.mailbox_id),
+                "caixa": caixas.get(p.mailbox_id),
+                "total": conta["total"],
+                "ultimo_em": conta["ultimo_em"],
+                "lojas": sorted(conta["lojas"]),
+            }
+        )
+    # O item com e-mail mais novo em cima; os vazios no fim, pelo nome.
+    itens.sort(
+        key=lambda i: (
+            i["ultimo_em"] is None,
+            -i["ultimo_em"].timestamp() if i["ultimo_em"] else 0.0,
+            i["nome"].lower(),
+        )
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"itens": itens}
 
 
 @router.get("/regras")

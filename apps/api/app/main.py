@@ -31,6 +31,7 @@ from app.routers import auth as auth_router
 from app.routers import automacoes as automacoes_router
 from app.routers import cadastros as cadastros_router
 from app.routers import chamados as chamados_router
+from app.routers import chamados_emails as chamados_emails_router
 from app.routers import chamados_ia as chamados_ia_router
 from app.routers import claude_conector as claude_conector_router
 from app.routers import companies as companies_router
@@ -275,6 +276,9 @@ app.include_router(refunds_router.router)
 app.include_router(chamados_router.agent_router)
 # 24/09: aba IA de Chamado (/api/chamados/ia) — também antes de /{chamado_id}
 app.include_router(chamados_ia_router.router)
+# 21/10/2026: os e-mails ligados ao chamado (/api/chamados/emails/*, /{id}/emails)
+# — rotas NOVAS, só de leitura no chamado (services/mail_atendimento/posvenda).
+app.include_router(chamados_emails_router.router)
 app.include_router(chamados_router.router)
 app.include_router(devolutions_router.router)
 # Pós-venda › Atendimento (25/09/2026): caixa única das lojas + rascunho da IA.

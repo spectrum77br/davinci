@@ -9,13 +9,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps.team_scope import TeamScope
-from app.models import AtendimentoConversa, MailMessage
-from app.models.mail_atendimento import MailMessageMeta
-from app.services.atendimento import separa_email
+from app.models import AtendimentoConversa, AtendimentoMensagem, MailMessage
+from app.models.mail_atendimento import MailMessageMeta, MailOutboxMeta
+from app.services.atendimento import gravar, separa_email
 from app.services.atendimento.constantes import PLATAFORMAS_EXTERNAS
 from app.services.atendimento.etiqueta_fatos import chaves_do_pedido
 from app.services.mail_atendimento import administracao, ponte
@@ -130,3 +130,34 @@ async def listar(
         )
         selecionadas = [linha for linha in selecionadas if linha[0].message_id in permitidos]
     return EmailsDaVenda("ok", pedido, selecionadas)
+
+
+async def mover_conversa(
+    session: AsyncSession, de: AtendimentoConversa, para: AtendimentoConversa
+) -> None:
+    """As mensagens da conversa sem vínculo vão para a conversa do pedido (MOVE, sem duplicar).
+
+    Veio da rota "vincular" (`routers/atendimento_email`, 13/10/2026): o
+    religamento das vendas (`scripts/mail_religar_vendas.py`, 21/10/2026) usa o
+    mesmo passo. Não commita."""
+    await session.execute(
+        update(AtendimentoMensagem)
+        .where(AtendimentoMensagem.conversa_id == de.id)
+        .values(conversa_id=para.id)
+        .execution_options(synchronize_session=False)
+    )
+    await session.execute(
+        update(MailOutboxMeta)
+        .where(MailOutboxMeta.conversa_id == de.id)
+        .values(conversa_id=para.id)
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+    await gravar.recalcular_conversa(session, para)
+    await gravar.recalcular_conversa(session, de)
+    de.situacao = "fechada"
+    de.sem_resposta_necessaria = True
+    de.dados = {
+        **(de.dados or {}),
+        ponte.CHAVE: {**ponte.dados_mail(de), "movida_para": str(para.id)},
+    }

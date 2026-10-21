@@ -30,8 +30,15 @@ from app.models.mail_atendimento import MailMessageMeta
 from tests.test_mail_ponte import (
     _config as _config_ponte,  # noqa: F401 — a config autouse da ponte vale aqui
 )
+from tests.test_mail_ponte import (
+    categorizar,
+    conversa,
+    entrar,
+    meta_de,
+    pedido_existe,
+    rodar,
+)
 from tests.test_mail_ponte import cena as cena  # noqa: F401 — o mundo da ponte
-from tests.test_mail_ponte import conversa, entrar, meta_de, pedido_existe, rodar
 
 API = "/api/atendimento"
 EMAIL = f"{API}/email"
@@ -47,7 +54,7 @@ async def _formulario(db, cena, protocolo: str, caixa: str, cliente: str) -> UUI
     return await entrar(
         db,
         cena.geral,
-        pasta=f"*uranyx {caixa}",
+        pasta="INBOX",
         de=f"{caixa}@uranyx.com.br",
         de_nome="Site Uranyx",
         para=[f"{caixa}@uranyx.com.br"],
@@ -75,7 +82,7 @@ async def test_w1_tipo_do_chamado_filtra_a_lista_e_conta_no_resumo(db, cena, cli
     c_sac = (await meta_de(db, sac)).conversa_id
     c_duv = (await meta_de(db, duv)).conversa_id
     # Um e-mail de loja (não é chamado) para conferir que o tipo não o pega.
-    await entrar(db, cena.geral, pasta="mensagens ml")
+    await entrar(db, cena.geral, pasta="INBOX")
     await rodar(db)
 
     # Na Caixa (o chat), nunca: o chamado é e-mail (13/10/2026).
@@ -120,11 +127,11 @@ async def test_w1_tipo_do_chamado_filtra_a_lista_e_conta_no_resumo(db, cena, cli
 
 async def test_w2_email_sem_vinculo_filtra_e_conta(db, cena, client, admin):
     await pedido_existe(db, cena.ml, "2000012345678901")
-    sem = await entrar(db, cena.geral, pasta="mensagens ml", assunto="Oi", corpo="Quando chega?")
+    sem = await entrar(db, cena.geral, pasta="INBOX", assunto="Oi", corpo="Quando chega?")
     com = await entrar(
         db,
         cena.geral,
-        pasta="problema ml",
+        pasta="INBOX",
         de="carla@gmail.com",
         assunto="Pedido 2000012345678901",
         corpo="Chegou quebrado.",
@@ -167,7 +174,7 @@ async def test_w2_email_sem_vinculo_filtra_e_conta(db, cena, client, admin):
 
 
 async def test_w2_quem_so_le_ve_o_filtro_no_escopo(db, cena, client, make_user, auth_as):
-    await entrar(db, cena.geral, pasta="mensagens ml")
+    await entrar(db, cena.geral, pasta="INBOX")
     await rodar(db)
     # Quem só lê (a fase de observação) usa o filtro como qualquer filtro da
     # lista — na lista do e-mail (a aba E-mail), como via na Caixa até 13/10.
@@ -183,7 +190,7 @@ async def test_w2_quem_so_le_ve_o_filtro_no_escopo(db, cena, client, make_user, 
 
 
 async def test_w3_pastas_trazem_o_nome_da_caixa(db, cena, client, admin):
-    await entrar(db, cena.geral, pasta="mensagens ml")
+    await entrar(db, cena.geral, pasta="INBOX")
     await rodar(db)
     r = (await client.get(f"{EMAIL}/pastas")).json()
     assert {"id": str(cena.geral.id), "nome": "Geral — Tuta"} in r["caixas"]
@@ -212,16 +219,17 @@ async def test_w4_emails_da_venda_resume_a_conversa_e_a_familia(db, cena, client
         await entrar(
             db,
             cena.geral,
-            pasta="problema ml",
+            pasta="INBOX",
             assunto="Pedido 2000012345678901",
             corpo=corpo,
         )
     # O aviso do ML com o pedido: desde 13/10/2026, na conversa de E-MAIL do
-    # pedido (nunca no chat).
+    # pedido (nunca no chat); desde 21/10, pela pasta de VENDA (categoria venda).
+    await categorizar(db, cena.geral, "vendas ml", "venda")
     aviso = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="vendas ml",
         de="nao-responder@mercadolivre.com.br",
         de_nome="Mercado Livre",
         assunto="Nova mensagem no pedido 2000012345678901",
@@ -240,8 +248,8 @@ async def test_w4_emails_da_venda_resume_a_conversa_e_a_familia(db, cena, client
     assert caixa["caixa"] == "21max@tuta.com" and caixa["loja"] == "Barbosa"
     assert (caixa["plataforma"], caixa["quantidade"]) == ("ml", 3) and caixa["ultimo_em"]
     assert caixa["pastas"] == [
-        {"pasta": "problema ml", "finalidade": "problema", "destaque": True, "quantidade": 2},
-        {"pasta": "mensagens ml", "finalidade": "mensagens", "destaque": False, "quantidade": 1},
+        {"pasta": "INBOX", "finalidade": "entrada", "destaque": False, "quantidade": 2},
+        {"pasta": "vendas ml", "finalidade": "vendas", "destaque": False, "quantidade": 1},
     ]
     # Nada do e-mail em si: nem texto, nem assunto, nem remetente.
     plano = r.text

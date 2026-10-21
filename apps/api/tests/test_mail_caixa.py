@@ -250,8 +250,15 @@ async def test_selo_da_loja_provavel_sem_ponte(db, cena, client, auth_as):
     site = await entrar(
         db, cena.geral, pasta="INBOX", para=["sac@uranyx.com.br"], recebido_em=_min(3)
     )
-    # Entrada para um alias de DUAS lojas (ML e Shopee) sem remetente oficial: sem loja.
-    duas = await entrar(db, cena.geral, pasta="INBOX", recebido_em=_min(4))
+    # Entrada para os aliases de DUAS lojas (o do ML e o da Shopee da Barbosa)
+    # sem remetente oficial: sem loja.
+    duas = await entrar(
+        db,
+        cena.geral,
+        pasta="INBOX",
+        para=["21max@tuta.com", "22max@tuta.com"],
+        recebido_em=_min(4),
+    )
     # O aviso OFICIAL do ML na Entrada: a loja do ML.
     oficial = await entrar(
         db, cena.geral, pasta="INBOX", de="avisos@mercadolivre.com.br", recebido_em=_min(5)
@@ -301,10 +308,13 @@ async def test_caixa_so_de_loja_o_resto_e_privado(db, cena, client, auth_as):
 
 
 async def test_o_que_a_ponte_decidiu_vale_mais_que_o_provavel(db, cena, client, auth_as):
-    # Depois do corte: a ponte processa (sem pedido = sem vínculo, na loja do ML).
-    novo = await entrar(db, cena.geral, pasta="problema ml")
-    # Entrada para o alias de duas lojas: a ponte deixa SEM LOJA.
-    sem_loja = await entrar(db, cena.geral, pasta="INBOX")
+    # Depois do corte: a ponte processa (sem pedido = sem vínculo, na loja do ML) —
+    # na Entrada (21/10/2026: a pasta criada sem categoria não liga).
+    novo = await entrar(db, cena.geral, pasta="INBOX")
+    # Entrada para os aliases de duas lojas: a ponte deixa SEM LOJA.
+    sem_loja = await entrar(
+        db, cena.geral, pasta="INBOX", para=["21max@tuta.com", "22max@tuta.com"]
+    )
     await rodar(db)
     assert (await meta_de(db, novo)).estado == "sem_vinculo"
     assert (await meta_de(db, sem_loja)).estado == "sem_loja"
@@ -538,7 +548,15 @@ async def test_filtro_por_pasta_e_loja_combinados(db, cena, client, auth_as):
             db, cena.geral, pasta="vendas ml", para=["16tr@tuta.com"], recebido_em=_min(30)
         )
     )
-    ids["inbox"].append(await entrar(db, cena.geral, pasta="INBOX", recebido_em=_min(31)))
+    ids["inbox"].append(
+        await entrar(
+            db,
+            cena.geral,
+            pasta="INBOX",
+            para=["21max@tuta.com", "22max@tuta.com"],
+            recebido_em=_min(31),
+        )
+    )
     auth_as(cena.dono)
     corpo = await _pastas(client, cena.geral)
     pasta = {p["nome"]: p["id"] for p in corpo["pastas"]}

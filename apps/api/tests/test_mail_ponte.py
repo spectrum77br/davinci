@@ -6,6 +6,14 @@ GOSLIN privada (o agente IMAP dele, só a Entrada) — e o cadastro das lojas co
 `store_info.email` só com a parte antes do @. O e-mail entra na Central como o
 `ingest` dela grava (cifrado), e a ponte decide.
 
+21/10/2026 (categoria por pasta, decisões do dono): a pasta CRIADA pela equipe
+só liga com a categoria que uma pessoa escolheu (Venda · Chamado · Informativa;
+`tests/test_mail_pastas_categoria.py`); sem ela, o e-mail fica guardado sem
+ligar. A Entrada liga como sempre — por isso o e-mail padrão daqui (`entrar`)
+chega na ENTRADA (antes era a pasta "problema ml"), e a Shopee da Barbosa tem o
+alias dela (22max): o cliente que escreve para 21max na Entrada é da loja do ML
+(o alias de duas plataformas continua coberto pela Goslin, mia30).
+
 O que não pode falhar (a crítica de 08/10):
   • a caixa privada nunca vaza: só o e-mail de ALIAS DE LOJA passa, e o resto
     não deixa nada em claro (nem pasta, nem alias, nem hash);
@@ -59,6 +67,7 @@ TOKEN_GERAL = "token-da-geral-para-teste-0123456789"  # noqa: S105 — de teste
 TOKEN_GOSLIN = "token-da-goslin-para-teste-012345678"  # noqa: S105 — de teste
 ALIASES_GERAL = [
     "21max@tuta.com",
+    "22max@tuta.com",
     "16tr@tuta.com",
     "mike14@tuta.com",
     "hans21@tuta.com",
@@ -136,7 +145,8 @@ async def cena(db: AsyncSession, make_user) -> Cena:
     oliveira_ml = await _integ(db, dono, IntegrationPlatform.ML, "oliveira-ml")
     oliveira_shopee = await _integ(db, dono, IntegrationPlatform.SHOPEE, "oliveira-shopee")
     loja_ml = await _loja(db, dono, "mercadolivre", "21max", ml, "Barbosa")
-    await _loja(db, dono, "shopee", "21max", shopee, "Barbosa")
+    # A Shopee da Barbosa no alias DELA: 21max (Entrada) é só da loja do ML.
+    await _loja(db, dono, "shopee", "22max", shopee, "Barbosa")
     await _loja(db, dono, "mercadolivre", "16tr", None, "JLAS2")
     await _loja(db, dono, "amazon", "mike14", amazon, "Mike")
     loja_oliveira_ml = await _loja(db, dono, "mercadolivre", "mia30", oliveira_ml, "Oliveira")
@@ -193,7 +203,7 @@ async def entrar(
     db: AsyncSession,
     caixa: MailMailbox,
     *,
-    pasta: str = "problema ml",
+    pasta: str = "INBOX",
     de: str = "maria@gmail.com",
     de_nome: str = "Maria",
     para: list[str] | None = None,
@@ -299,6 +309,32 @@ async def contar(db, modelo) -> int:
     return int(await db.scalar(select(func.count()).select_from(modelo)) or 0)
 
 
+async def categorizar(
+    db: AsyncSession, caixa: MailMailbox, nome: str, categoria: str | None
+) -> MailFolder:
+    """A pasta CRIADA (a chave é o nome, como o agente v1 manda) com a categoria
+    que uma PESSOA escolheu — o mesmo que o PATCH /pastas grava (21/10/2026)."""
+    from app.services.mail_atendimento import regras
+
+    pasta = await db.scalar(
+        select(MailFolder).where(MailFolder.mailbox_id == caixa.id, MailFolder.chave == nome)
+    )
+    if pasta is None:
+        pasta = MailFolder(
+            mailbox_id=caixa.id,
+            chave=nome,
+            nome=regras.nome_da_pasta(nome) or nome,
+            caminho=nome,
+            tipo_tuta=regras.tipo_pelo_nome(regras.nome_da_pasta(nome)),
+        )
+        db.add(pasta)
+    pasta.categoria = categoria
+    pasta.categoria_em = datetime.now(UTC)
+    regras.reclassificar(pasta, await regras.carregar(db))
+    await db.commit()
+    return pasta
+
+
 # ─────────────── desligada e o corte ───────────────
 
 
@@ -333,7 +369,9 @@ async def test_email_antigo_nao_toma_a_vez_do_novo(db, cena):
 # ─────────────── loja, pedido e conversa ───────────────
 
 
-async def test_problema_ml_com_pedido_entra_na_conversa_da_loja(db, cena):
+async def test_cliente_com_pedido_na_entrada_entra_na_conversa_da_loja(db, cena):
+    # 21/10/2026: era a pasta "problema ml" (hoje, sem categoria, ela não liga —
+    # `test_mail_pastas_categoria.py`); a Entrada liga como sempre.
     await pedido_existe(db, cena.ml, "2000012345678901")
     mid = await entrar(
         db,
@@ -349,13 +387,15 @@ async def test_problema_ml_com_pedido_entra_na_conversa_da_loja(db, cena):
     assert (meta.alias_recebido, meta.plataforma, meta.finalidade) == (
         "21max@tuta.com",
         "ml",
-        "problema",
+        "entrada",
     )
     assert meta.pedido_marketplace == "2000012345678901"
+    # A Entrada não mudou de regra: a versão continua a 1.
     assert meta.mid_hash and meta.tuta_id and meta.regras_versao == 1
     c = await conversa(db, meta.conversa_id)
     assert (c.canal, c.plataforma, c.integration_id) == ("email", "ml", cena.ml.id)
-    assert c.dados["fonte"] == "tuta" and c.dados["mail"]["destaque"] is True
+    assert c.dados["fonte"] == "tuta" and c.dados["mail"]["destaque"] is False
+    assert "tipo_pela_pasta" not in c.dados["mail"]
     assert c.dados["mail"]["mailbox_id"] == str(cena.geral.id)
     assert c.pedido_marketplace == "2000012345678901" and c.comprador_id == "maria@gmail.com"
     assert c.aguardando_resposta is True
@@ -368,7 +408,9 @@ async def test_problema_ml_com_pedido_entra_na_conversa_da_loja(db, cena):
 
 
 async def test_sem_pedido_e_sem_vinculo_e_vendas_e_so_historico(db, cena):
-    sem = await entrar(db, cena.geral, pasta="mensagens ml")
+    # A pasta de vendas só liga com a categoria (a 0422 dá `venda` às "vendas *").
+    await categorizar(db, cena.geral, "vendas ml", "venda")
+    sem = await entrar(db, cena.geral, pasta="INBOX")
     vendas = await entrar(
         db,
         cena.geral,
@@ -398,8 +440,8 @@ async def test_sem_loja_fica_na_fila_sem_conversa(db, cena):
 async def test_loja_sem_integracao_entra_na_conversa_da_ficha(db, cena):
     # 16tr é da JLAS2 (ficha SEM FK e sem integração com o mesmo nome): a loja é
     # a ficha — crítica de 08/10 (Temu, AliExpress, as lojas da Goslin).
-    mid = await entrar(db, cena.geral, para=["16tr@tuta.com"], pasta="problema ml")
-    outra = await entrar(db, cena.geral, para=["16tr@tuta.com"], pasta="problema ml")
+    mid = await entrar(db, cena.geral, para=["16tr@tuta.com"])
+    outra = await entrar(db, cena.geral, para=["16tr@tuta.com"])
     await rodar(db)
     a, b = await meta_de(db, mid), await meta_de(db, outra)
     ficha = await db.scalar(select(StoreInfo).where(StoreInfo.email == "16tr"))
@@ -414,7 +456,7 @@ async def test_loja_sem_integracao_entra_na_conversa_da_ficha(db, cena):
     # Uma ficha de OUTRA loja nunca cai na conversa desta.
     await _loja(db, cena.dono, "mercadolivre", "hans21", None, "Hans")
     await db.commit()
-    terceiro = await entrar(db, cena.geral, para=["hans21@tuta.com"], pasta="problema ml")
+    terceiro = await entrar(db, cena.geral, para=["hans21@tuta.com"])
     await rodar(db)
     t = await meta_de(db, terceiro)
     assert t.conversa_id not in (a.conversa_id, b.conversa_id)
@@ -425,7 +467,7 @@ async def test_ficha_sem_fk_acha_a_integracao_pelo_par(db, cena):
     # do ML casa com a ficha "JLAS2" do ML pelo par (nome, plataforma).
     jlas2 = await _integ(db, cena.dono, IntegrationPlatform.ML, " JLAS2 ")
     await db.commit()
-    mid = await entrar(db, cena.geral, para=["16tr@tuta.com"], pasta="problema ml")
+    mid = await entrar(db, cena.geral, para=["16tr@tuta.com"])
     await rodar(db)
     m = await meta_de(db, mid)
     assert m.integration_id == jlas2.id and m.estado == "sem_vinculo"
@@ -631,7 +673,7 @@ async def test_senha_ou_acesso_de_remetente_desconhecido_no_login_da_loja(
 ):
     # A crítica de 08/10 (BLOQUEIO): 21max é o LOGIN das lojas Barbosa; o
     # remetente fora da lista de plataformas não é "pessoa" por padrão.
-    mid = await entrar(db, cena.geral, pasta="mensagens ml", de=de, assunto=assunto, corpo=corpo)
+    mid = await entrar(db, cena.geral, pasta="INBOX", de=de, assunto=assunto, corpo=corpo)
     await rodar(db)
     m = await meta_de(db, mid)
     assert (m.estado, m.motivo) == ("seguranca", "codigo_ou_acesso")
@@ -734,7 +776,7 @@ async def test_aviso_do_ml_fica_na_conversa_de_email_nunca_no_chat(db, cena):
     mid = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="INBOX",
         de="nao-responder@mercadolivre.com.br",
         de_nome="Mercado Livre",
         assunto="Nova mensagem no pedido 2000012345678901",
@@ -772,7 +814,7 @@ async def test_rf6_formulario_vira_chamado_com_protocolo_e_tipo(db, cena):
     mid = await entrar(
         db,
         cena.geral,
-        pasta="*uranyx sac",
+        pasta="INBOX",
         de="sac@uranyx.com.br",
         de_nome="Site Uranyx",
         para=["sac@uranyx.com.br"],
@@ -803,7 +845,7 @@ async def test_rf6_protocolo_atacado_numa_caixa_sac_vale_o_protocolo(db, cena):
     mid = await entrar(
         db,
         cena.geral,
-        pasta="*uranyx sac",
+        pasta="INBOX",
         de="sac@uranyx.com.br",
         para=["sac@uranyx.com.br"],
         assunto="[UA-26-0002] Pedido de atacado",
@@ -825,7 +867,7 @@ async def test_endereco_de_pessoa_no_dominio_da_marca_nao_vira_chamado(db, cena)
     mid = await entrar(
         db,
         cena.geral,
-        pasta="*uranyx",
+        pasta="INBOX",
         de="contador@escritorio.com.br",
         para=["gabrieli@uranyx.com.br"],
         assunto="Folha de pagamento",
@@ -842,21 +884,22 @@ async def test_aviso_do_ml_para_o_sac_que_e_login_da_loja_vai_para_a_loja(db, ce
     vr = await _integ(db, cena.dono, IntegrationPlatform.ML, "VR")
     await _loja(db, cena.dono, "mercadolivre", "sac@uranyx", vr, "VR")
     await db.commit()
-    for pasta in ("INBOX", "*uranyx sac"):
-        mid = await entrar(
-            db,
-            cena.geral,
-            pasta=pasta,
-            de="noreply@mercadolivre.com",
-            de_nome="Mercado Livre",
-            para=["sac@uranyx.com.br"],
-            assunto="Nova reclamação na venda 2000012345678901",
-            corpo="Você tem uma nova reclamação.",
-        )
-        await rodar(db)
-        m = await meta_de(db, mid)
-        assert m.integration_id == vr.id and m.plataforma == "ml", pasta
-        assert m.protocolo is None and not any(a["codigo"] == "sem_protocolo" for a in m.alertas)
+    # 21/10/2026: na Entrada (a pasta "*uranyx sac" sem categoria não liga mais;
+    # com a categoria Chamado, vai para a Pós-venda — test_mail_pastas_categoria).
+    mid = await entrar(
+        db,
+        cena.geral,
+        pasta="INBOX",
+        de="noreply@mercadolivre.com",
+        de_nome="Mercado Livre",
+        para=["sac@uranyx.com.br"],
+        assunto="Nova reclamação na venda 2000012345678901",
+        corpo="Você tem uma nova reclamação.",
+    )
+    await rodar(db)
+    m = await meta_de(db, mid)
+    assert m.integration_id == vr.id and m.plataforma == "ml"
+    assert m.protocolo is None and not any(a["codigo"] == "sem_protocolo" for a in m.alertas)
 
 
 async def test_chamado_agrupado_no_mais_novo_nao_reabre_o_fechado(db, cena):
@@ -868,7 +911,7 @@ async def test_chamado_agrupado_no_mais_novo_nao_reabre_o_fechado(db, cena):
             await entrar(
                 db,
                 cena.geral,
-                pasta="*uranyx sac",
+                pasta="INBOX",
                 de="sac@uranyx.com.br",
                 para=["sac@uranyx.com.br"],
                 assunto=f"[{protocolo}] Dúvida",
@@ -886,7 +929,7 @@ async def test_chamado_agrupado_no_mais_novo_nao_reabre_o_fechado(db, cena):
     volta = await entrar(
         db,
         cena.geral,
-        pasta="*uranyx sac",
+        pasta="INBOX",
         de="sac@uranyx.com.br",
         para=["sac@uranyx.com.br"],
         assunto="Re: [US-26-0001] Dúvida",
@@ -1116,14 +1159,27 @@ async def test_anexo_fica_so_na_central(db, cena):
     assert msg.anexos == [] and msg.payload["mail"]["anexos"] == 1
 
 
-async def test_vez_da_loja_no_aviso_de_plataforma_sem_api(db, cena):
+async def test_vez_da_loja_na_entrada_da_plataforma_sem_api(db, cena):
+    """21/10/2026: o AVISO da Temu abria a vez da loja só pela pasta
+    "problema temu" (finalidade pendente) — essa pasta, sem categoria, não liga
+    mais (e com a categoria Chamado vai para a Pós-venda). Na Entrada vale o de
+    sempre: o aviso fica como histórico e o CLIENTE abre a vez da loja."""
     temu = await _integ(db, cena.dono, IntegrationPlatform.TEMU, "jonas-temu")
     await _loja(db, cena.dono, "temu", "jonas13", temu, "Jonas")
     cena.geral.config_enc = encrypt_json(
         {"address": GERAL, "aliases": [GERAL, *ALIASES_GERAL, "jonas13@tuta.com"]}
     )
     await db.commit()
-    mid = await entrar(
+    aviso = await entrar(
+        db,
+        cena.geral,
+        pasta="INBOX",
+        para=["jonas13@tuta.com"],
+        de="noreply@temu.com",
+        de_nome="Temu",
+        assunto="Disputa aberta",
+    )
+    pasta_sem_categoria = await entrar(
         db,
         cena.geral,
         pasta="problema temu",
@@ -1133,7 +1189,15 @@ async def test_vez_da_loja_no_aviso_de_plataforma_sem_api(db, cena):
         assunto="Disputa aberta",
     )
     await rodar(db)
-    c = await conversa(db, (await meta_de(db, mid)).conversa_id)
+    c = await conversa(db, (await meta_de(db, aviso)).conversa_id)
+    assert c.aguardando_resposta is False and CHAVE_VEZ_DA_LOJA not in c.dados
+    guardado = await meta_de(db, pasta_sem_categoria)
+    assert (guardado.estado, guardado.motivo) == ("ignorado", "pasta_sem_categoria")
+    cliente = await entrar(
+        db, cena.geral, pasta="INBOX", para=["jonas13@tuta.com"], assunto="Cadê meu pedido?"
+    )
+    await rodar(db)
+    c = await conversa(db, (await meta_de(db, cliente)).conversa_id)
     assert c.aguardando_resposta is True and CHAVE_VEZ_DA_LOJA in c.dados
 
 
@@ -1158,7 +1222,7 @@ LOGIN_DA_LOJA = [
 
 @pytest.mark.parametrize(("de", "assunto", "corpo"), LOGIN_DA_LOJA)
 async def test_codigo_ou_senha_sem_frase_da_lista_nunca_vira_conversa(db, cena, de, assunto, corpo):
-    mid = await entrar(db, cena.geral, pasta="mensagens ml", de=de, assunto=assunto, corpo=corpo)
+    mid = await entrar(db, cena.geral, pasta="INBOX", de=de, assunto=assunto, corpo=corpo)
     await rodar(db)
     m = await meta_de(db, mid)
     assert (m.estado, m.motivo) == ("seguranca", "codigo_ou_acesso")
@@ -1253,7 +1317,7 @@ async def test_aviso_normal_da_plataforma_nao_vira_seguranca_nem_bolinha(db, cen
     mid = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="INBOX",
         de="no-reply@mercadolivre.com.br",
         assunto="Pedido enviado",
         corpo=corpo,
@@ -1297,7 +1361,7 @@ async def _amazon(db, cena, n: int, *, criado_em: datetime | None = None) -> UUI
     mid = await entrar(
         db,
         cena.geral,
-        pasta="mensagens amazon",
+        pasta="INBOX",
         de="abc123@marketplace.amazon.com.br",
         para=["mike14@tuta.com"],
         message_id=f"<mid{n}@marketplace.amazon.com.br>",
@@ -1511,7 +1575,7 @@ async def test_cetico_2_no_login_da_loja_nunca_vira_conversa(
     if pelo_mac:
         assunto, corpo = _do_mac(assunto, corpo)
         assert segredo not in assunto + corpo
-    mid = await entrar(db, cena.geral, pasta="mensagens ml", de=de, assunto=assunto, corpo=corpo)
+    mid = await entrar(db, cena.geral, pasta="INBOX", de=de, assunto=assunto, corpo=corpo)
     await rodar(db)
     m = await meta_de(db, mid)
     assert (m.estado, m.motivo) == ("seguranca", "codigo_ou_acesso")
@@ -1660,7 +1724,7 @@ async def test_cetico_2_link_magico_no_login_da_loja_sai_do_texto(db, cena):
     mid = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="INBOX",
         de="ola@loggi.com",
         assunto="Seu acesso à Loggi",
         corpo="Toque para abrir o app já logado: abrir <https://lg.gy/a/Zp81Kd>",
@@ -1683,7 +1747,7 @@ async def test_cetico_2_aviso_normal_da_plataforma_com_confirme_e_numero_continu
     mid = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="INBOX",
         de="noreply@mercadolivre.com",
         assunto="Você recebeu uma mensagem",
         corpo=corpo,
@@ -1792,7 +1856,7 @@ async def _amazon_esperando(db, cena, n: int) -> UUID:
     return await entrar(
         db,
         cena.geral,
-        pasta="mensagens amazon",
+        pasta="INBOX",
         de="abc123@marketplace.amazon.com.br",
         para=["mike14@tuta.com"],
         message_id=f"<mid{n}@marketplace.amazon.com.br>",
@@ -1847,7 +1911,7 @@ async def test_amazon_depois_da_conversa_a_parte_o_proximo_ainda_espera_o_gmail(
     m3 = await entrar(
         db,
         cena.geral,
-        pasta="mensagens amazon",
+        pasta="INBOX",
         de="abc123@marketplace.amazon.com.br",
         para=["mike14@tuta.com"],
         message_id="<mid3@marketplace.amazon.com.br>",

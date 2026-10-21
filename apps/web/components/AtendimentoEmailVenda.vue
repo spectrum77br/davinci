@@ -39,7 +39,7 @@ export function urlLeituraDaVenda(conversaId: string, messageId?: string): strin
 export function emailDoCartao(c: CartaoEmail): EmailDaMensagem {
   return {
     tipo: 'recebido', message_id: c.id, pasta: c.pasta, finalidade: c.finalidade,
-    tipo_email: c.tipo_email, tipo_email_inferido: c.tipo_email_inferido, caso_id: c.caso_id,
+    tipo_email: c.tipo_email, tipo_email_inferido: c.tipo_email_inferido, tipo_pela_pasta: c.tipo_pela_pasta, caso_id: c.caso_id,
     alias: c.alias, assunto: c.assunto, suspeito: c.suspeito, protocolo: c.protocolo,
   }
 }
@@ -217,7 +217,7 @@ defineExpose({ carregar })
             <ul v-else class="space-y-3">
               <li v-for="item in grupo.itens" :key="item.id" class="space-y-2 rounded-md border p-3" :data-email-venda-item="item.id">
                 <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                  <span v-if="rotuloTipoEmail(item.tipo_email)" :title="dicaTipoEmail(item.tipo_email_inferido)">{{ rotuloTipoEmail(item.tipo_email) }}</span>
+                  <span v-if="rotuloTipoEmail(item.tipo_email)" :title="dicaTipoEmail(item.tipo_email_inferido, item.tipo_pela_pasta, item.pasta)">{{ rotuloTipoEmail(item.tipo_email) }}</span>
                   <span v-if="item.caso_id">Chamado {{ item.caso_id }}</span>
                   <span v-if="item.recebido_em">{{ fmtDataHora(item.recebido_em) }}</span>
                 </div>

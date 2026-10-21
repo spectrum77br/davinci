@@ -166,7 +166,7 @@ async def _aviso_pela_ponte(db, cena, pedido: str) -> AtendimentoConversa:
     mid = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="INBOX",
         de="nao-responder@mercadolivre.com.br",
         de_nome="Mercado Livre",
         assunto=f"Nova mensagem no pedido {pedido}",

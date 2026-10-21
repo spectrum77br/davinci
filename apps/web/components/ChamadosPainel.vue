@@ -13,7 +13,9 @@ import {
   Hourglass,
   ImagePlus,
   Loader2,
+  Mail,
   MessagesSquare,
+  Paperclip,
   Plus,
   RotateCcw,
   Scale,
@@ -973,6 +975,68 @@ async function openHistorico(row: ChamadoRow, focoReplica = false) {
     await nextTick()
     replicaBalao.value = true
   }
+}
+
+// 21/10/2026 (Pós-venda × e-mail, decisão 3 do Eduardo): bloco NOVO, só leitura, com os
+// e-mails ligados ao chamado — de uma pasta com a categoria "Chamado (Pós-venda)" ou
+// ligados à mão. Não mexe no histórico nem em nada da aba (regra do dono: só acrescentar).
+// O texto protegido (links de acesso fora, código mascarado; texto puro, nenhum link
+// clicável) vem de GET /api/chamados/{id}/emails, só pra quem lê aquele e-mail no
+// Atendimento (loja no escopo da equipe); os outros veem a data, a pasta e a loja.
+type EmailAnexo = { id: string; filename?: string; content_type?: string; tamanho: number }
+type EmailLigado = {
+  id: string
+  chamado_id: string | null
+  recebido_em: string | null
+  pasta: string | null
+  loja: string | null
+  plataforma: string | null
+  pedido: string | null
+  pode_ler: boolean
+  // o remetente que imita a plataforma (o mesmo aviso do cartão do Atendimento)
+  suspeito?: boolean
+  suspeito_motivos?: string[]
+  de?: string
+  de_nome?: string
+  assunto?: string
+  texto?: string
+  links_removidos?: number
+  codigo_mascarado?: boolean
+  anexos?: EmailAnexo[]
+}
+const emailsLigados = reactive({ chamadoId: null as string | null, itens: [] as EmailLigado[], ocultos: 0 })
+
+async function carregarEmailsLigados(chamadoId: string | null) {
+  emailsLigados.chamadoId = chamadoId
+  emailsLigados.itens = []
+  emailsLigados.ocultos = 0
+  if (!chamadoId) return
+  try {
+    const r = await api<{ itens: EmailLigado[]; ocultos: number }>(`/api/chamados/${chamadoId}/emails`)
+    // o modal pode ter trocado de chamado enquanto carregava
+    if (emailsLigados.chamadoId !== chamadoId) return
+    emailsLigados.itens = r.itens || []
+    emailsLigados.ocultos = r.ocultos || 0
+  } catch {
+    // sem os e-mails o histórico continua igual: o bloco só não aparece
+  }
+}
+
+// Abriu (ou trocou) o histórico de um chamado → carrega os e-mails dele; fechou → limpa.
+watch(
+  () => (hist.open && hist.row ? hist.row.id : null),
+  (id) => { void carregarEmailsLigados(id) },
+)
+
+function emailAnexoUrl(id: string) {
+  return `/api/chamados/emails/anexos/${id}`
+}
+
+function protecaoDoEmail(e: EmailLigado): string {
+  const partes: string[] = []
+  if (e.codigo_mascarado) partes.push('código mascarado')
+  if (e.links_removidos) partes.push(`${e.links_removidos} link(s) de acesso removido(s)`)
+  return partes.join(' · ')
 }
 
 // 23/09 (Vinicius): a Observação da coluna também dentro do histórico — mesmo
@@ -2149,6 +2213,55 @@ async function confirmarExcluir() {
             <button type="button" class="rounded p-1 hover:bg-muted" @click="closeHistorico"><X class="size-4" /></button>
           </div>
         </div>
+
+        <!-- 21/10/2026 (Pós-venda × e-mail): bloco NOVO, só leitura — os e-mails ligados ao
+             chamado. Não entra no histórico (que fica como era); recolhe quando são muitos. -->
+        <details
+          v-if="emailsLigados.itens.length"
+          class="shrink-0 border-b px-4 py-2"
+          :open="emailsLigados.itens.length <= 3"
+        >
+          <summary class="cursor-pointer select-none text-xs font-medium">
+            <Mail class="mr-1 inline size-3.5 text-teal-600 dark:text-teal-400" />
+            E-mails ligados ({{ emailsLigados.itens.length }})
+            <span v-if="emailsLigados.ocultos" class="font-normal text-muted-foreground">· {{ emailsLigados.ocultos }} sem acesso ao texto</span>
+          </summary>
+          <div class="mt-2 max-h-56 space-y-2 overflow-y-auto pr-1">
+            <div
+              v-for="e in emailsLigados.itens"
+              :key="e.id"
+              class="rounded-xl border border-teal-200/70 bg-teal-50/60 px-3 py-2 dark:border-teal-800/60 dark:bg-teal-900/15"
+            >
+              <div class="flex flex-wrap items-center gap-x-2 text-[11px]">
+                <span class="inline-flex items-center gap-1 font-medium text-teal-700 dark:text-teal-300"><Mail class="size-3" /> {{ e.pode_ler ? (e.de_nome || e.de || 'e-mail') : 'e-mail' }}</span>
+                <span v-if="e.pasta" class="text-muted-foreground">· pasta «{{ e.pasta }}»</span>
+                <span v-if="e.loja" class="text-muted-foreground">· {{ e.loja }}</span>
+                <span
+                  v-if="e.suspeito"
+                  class="rounded bg-red-500/15 px-1.5 py-px font-medium text-red-700 dark:text-red-300"
+                  :title="(e.suspeito_motivos || []).join(' · ') || 'remetente suspeito: confira antes de confiar no e-mail'"
+                  data-email-suspeito
+                >remetente suspeito</span>
+                <span class="ml-auto text-muted-foreground">{{ fmtDateTime(e.recebido_em) }}</span>
+              </div>
+              <template v-if="e.pode_ler">
+                <div v-if="e.assunto" class="mt-1 break-words text-sm font-medium">{{ e.assunto }}</div>
+                <div class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">{{ e.texto }}</div>
+                <div v-if="protecaoDoEmail(e)" class="mt-1 text-[10px] text-muted-foreground">{{ protecaoDoEmail(e) }}</div>
+                <div v-if="e.anexos?.length" class="mt-2 flex flex-wrap gap-1.5">
+                  <a
+                    v-for="a in e.anexos"
+                    :key="a.id"
+                    :href="emailAnexoUrl(a.id)"
+                    class="inline-flex max-w-[220px] items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[11px] hover:bg-muted"
+                    :title="`baixar ${a.filename || 'anexo'}`"
+                  ><Paperclip class="size-3 shrink-0" /><span class="truncate">{{ a.filename || 'anexo' }}</span></a>
+                </div>
+              </template>
+              <div v-else class="mt-1 text-[11px] italic text-muted-foreground">sem acesso ao texto — só quem vê o Atendimento desta loja</div>
+            </div>
+          </div>
+        </details>
 
         <!-- 19/09: o histórico cresce até ocupar tudo acima do rodapé (flex-1 min-h-0). -->
         <div class="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">

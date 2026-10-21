@@ -135,7 +135,7 @@ async def _mundo(db, cena) -> dict:
     mid_site = await entrar(
         db,
         cena.geral,
-        pasta="*uranyx sac",
+        pasta="INBOX",
         de="sac@uranyx.com.br",
         de_nome="Site Uranyx",
         para=["sac@uranyx.com.br"],
@@ -378,7 +378,7 @@ async def test_abas_o_chat_sem_email_e_o_email_sozinho(db, cena, client, admin):
     mid = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="INBOX",
         de="nao-responder@mercadolivre.com.br",
         de_nome="Mercado Livre",
         assunto=f"Nova mensagem no pedido {PEDIDO}",
@@ -616,7 +616,7 @@ async def test_principal_do_pedido_e_o_chat_depois_do_aviso(db, cena):
     mid = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="INBOX",
         de="nao-responder@mercadolivre.com.br",
         de_nome="Mercado Livre",
         assunto=f"Nova mensagem no pedido {PEDIDO}",

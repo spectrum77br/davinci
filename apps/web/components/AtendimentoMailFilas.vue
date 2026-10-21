@@ -44,7 +44,11 @@
 //                   da Central).
 //   Pastas e regras — (não é fila) as pastas de cada caixa e a tabela de
 //                   palavras (AtendimentoMailPastas, 09/10/2026): ver todos
-//                   que mexem; mudar, admin.
+//                   que mexem; mudar, admin. Desde 21/10/2026, a CATEGORIA de
+//                   cada pasta criada (Venda, Informativo, Chamado).
+//   Pastas informativas — (no chip Informativos, para quem mexe; 21/10/2026)
+//                   um item por pasta com a categoria Informativo, uma linha
+//                   por e-mail (AtendimentoMailInformativos), em cima da lista.
 //
 // O texto (protegido: links de acesso e códigos fora, nunca HTML) só abre no
 // "ver o e-mail" (GET …/emails/{id}). Rotas: routers/atendimento_email.py.
@@ -117,6 +121,8 @@ export type ItemFila = {
   sem_integracao?: boolean
   assunto?: string | null
   de?: string | null
+  // O tipo veio da categoria da pasta (21/10/2026), não do conteúdo.
+  tipo_pela_pasta?: boolean
 }
 // A loja do cadastro (a ficha, com ou sem integração) OU — na marca ambígua
 // (o mesmo domínio em duas marcas) — a marca do site.
@@ -369,7 +375,12 @@ async function carregar(mais = false, automatico = false) {
     if (g === geracao) carregando.value = false
   }
 }
+// As pastas informativas (o chip Informativos, para quem mexe): em cima da
+// lista; relidas no "atualizar" e na volta da conversa (o `sinal`).
+const informativosAbertos = computed(() => mexe.value && tipoEmail.value === 'informativo' && !pastasAbertas.value && fila.value !== 'revisar_envio')
+const sinalInformativos = ref(0)
 async function atualizar() {
+  sinalInformativos.value++
   await Promise.all([carregar(), carregarContagens(), carregarSaude()])
 }
 watch(fila, () => {
@@ -414,7 +425,10 @@ onMounted(() => { void Promise.all([carregar(), carregarContagens(true), carrega
 // Voltou da conversa de e-mail (respondeu, fechou, vinculou): a fila e os
 // números relidos, como depois de uma ação aqui — a lista recomeça da 1ª página.
 watch(() => props.pausado, (pausado, antes) => {
-  if (antes && !pausado) void Promise.all([carregar(), carregarContagens(true)])
+  if (antes && !pausado) {
+    sinalInformativos.value++
+    void Promise.all([carregar(), carregarContagens(true)])
+  }
 })
 // O polling de 30 s da página (o `tique`, 13/10/2026): o número da aba E-mail
 // sobe e os das filas de CONVERSA e a lista aberta delas acompanham — o e-mail
@@ -514,6 +528,7 @@ const curto = (p: string) => plataformaInfo(p).curto
         <span class="text-muted-foreground">· envio {{ c.envio?.ligado ? (c.envio?.modo === 'teste' ? 'em teste' : 'ligado') : 'desligado' }}</span>
         <span v-if="c.envios_a_conferir" class="text-amber-800 dark:text-amber-300">· {{ c.envios_a_conferir }} a conferir</span>
         <span v-if="c.pastas_sem_revisar" class="text-amber-800 dark:text-amber-300">· {{ c.pastas_sem_revisar }} pasta(s) nova(s)</span>
+        <span v-if="c.pastas_sem_categoria" class="text-amber-800 dark:text-amber-300" title="pastas criadas que receberam e-mail na última semana e não têm categoria: o e-mail fica guardado sem ligar (escolha em Pastas e regras)" data-saude-sem-categoria>· {{ c.pastas_sem_categoria }} pasta(s) sem categoria guardando e-mail</span>
       </div>
       <div v-if="lojasSemCaixa.length" class="text-amber-800 dark:text-amber-300">
         {{ lojasSemCaixa.length }} loja(s) com e-mail no cadastro que nenhuma caixa lida recebe.
@@ -554,7 +569,7 @@ const curto = (p: string) => plataformaInfo(p).curto
         :aria-selected="pastasAbertas"
         class="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs"
         :class="pastasAbertas ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60'"
-        title="As pastas de cada caixa (o que entra no Atendimento) e as palavras que dizem a plataforma"
+        title="As pastas de cada caixa (a categoria de cada pasta criada: o que liga) e as palavras que dizem a plataforma"
         data-fila="pastas"
         @click="pastasAbertas = true"
       >Pastas e regras</button>
@@ -582,8 +597,14 @@ const curto = (p: string) => plataformaInfo(p).curto
           {{ t.label }}<span v-if="fila === 'todas' && !fechadas && contagensConversa?.por_tipo_email" class="ml-1 tabular-nums">{{ contagensConversa.por_tipo_email[t.value] || 0 }}</span>
         </button>
       </div>
-      <p class="text-[11px] text-muted-foreground">Os tipos incluem as pastas autorizadas a ler. Os avisos de pastas em “só contar” continuam na Central de e-mail.</p>
+      <p class="text-[11px] text-muted-foreground">Nas pastas criadas, o tipo vem da categoria da pasta (Pastas e regras); a Entrada segue como hoje, pelo conteúdo. Os avisos de pastas em “só contar” continuam na Central de e-mail.</p>
     </div>
+
+    <!-- as pastas informativas (21/10/2026): um item por pasta, uma linha por e-mail -->
+    <template v-if="informativosAbertos">
+      <AtendimentoMailInformativos :sinal="sinalInformativos" />
+      <p class="text-[11px] text-muted-foreground" data-informativos-abaixo>Abaixo, “{{ filaInfo.label }}” com o tipo Informativo: os e-mails da Entrada (que liga como hoje) e os de antes da categoria por pasta.</p>
+    </template>
 
     <!-- revisar envio -->
     <template v-if="pastasAbertas" />
@@ -692,7 +713,7 @@ const curto = (p: string) => plataformaInfo(p).curto
       <ul v-else class="space-y-2">
         <li v-for="e in itens" :key="e.id" class="space-y-1 rounded-lg border p-2.5 text-xs" :data-email-fila="e.id">
           <div class="flex flex-wrap items-center gap-1.5">
-            <span v-if="rotuloTipoEmail(e.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" :title="dicaTipoEmail(e.tipo_email_inferido)" data-fila-tipo-email>{{ rotuloTipoEmail(e.tipo_email) }}</span>
+            <span v-if="rotuloTipoEmail(e.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" :title="dicaTipoEmail(e.tipo_email_inferido, e.tipo_pela_pasta, e.pasta)" data-fila-tipo-email>{{ rotuloTipoEmail(e.tipo_email) }}</span>
             <span v-if="e.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">Chamado {{ e.caso_id }}</span>
             <span class="rounded px-1.5 py-px text-[11px]" :class="e.destaque ? 'bg-red-500/15 text-red-700 dark:text-red-300' : 'bg-muted text-muted-foreground'">{{ e.pasta || 'sem pasta' }}</span>
             <span class="text-muted-foreground">{{ fmtDataHora(e.recebido_em) }}</span>

@@ -337,6 +337,9 @@ async def _mover(
     # e-mail privado continua sem nada em claro.
     if meta is not None and meta.folder_id is not None:
         meta.folder_id = pasta.id
+        # 21/10/2026: o e-mail que estava guardado sem ligar (pasta sem
+        # categoria) e foi para uma pasta categorizada é relido pela ponte.
+        await pastas.reler_ao_mover(session, meta, pasta)
 
 
 async def _apagar(session: AsyncSession, message_id: UUID, agora: datetime) -> None:

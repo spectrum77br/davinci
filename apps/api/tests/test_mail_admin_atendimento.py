@@ -97,7 +97,8 @@ async def test_bloquear_loja_tira_previa_historico_abas_contagens_e_anexos(
     shopee_id = await entrar(
         db,
         cena.geral,
-        pasta="problema shopee",
+        pasta="INBOX",
+        para=["22max@tuta.com"],
         de="suporte@shopee.com.br",
         assunto="Chamado ABC12345 aberto na Shopee",
         corpo="TEXTO PERMITIDO SHOPEE",

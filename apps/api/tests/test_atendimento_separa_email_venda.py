@@ -33,6 +33,7 @@ from tests.test_mail_ponte import (
     AGORA,
     _amazon,
     _conversa_do_gmail,
+    categorizar,
     conversa,
     entrar,
     meta_de,
@@ -99,11 +100,14 @@ async def _venda_com_email(db, cena) -> dict:
     await db.commit()
     await pedido_existe(db, cena.ml, PEDIDO)
     for corpo in ("Chegou quebrado.", "Alguma novidade?"):
-        await entrar(db, cena.geral, pasta="problema ml", assunto=f"Pedido {PEDIDO}", corpo=corpo)
+        await entrar(db, cena.geral, pasta="INBOX", assunto=f"Pedido {PEDIDO}", corpo=corpo)
+    # 21/10/2026: o aviso vem da pasta de VENDA (categoria venda): entra na
+    # conversa de e-mail da venda — a mesma do cliente, achada pelo pedido.
+    await categorizar(db, cena.geral, "vendas ml", "venda")
     aviso = await entrar(
         db,
         cena.geral,
-        pasta="mensagens ml",
+        pasta="vendas ml",
         de="nao-responder@mercadolivre.com.br",
         de_nome="Mercado Livre",
         assunto=f"Nova mensagem no pedido {PEDIDO}",
@@ -282,8 +286,8 @@ async def test_conversa_de_email_lista_completa_como_antes(db, cena, client, adm
     assert caixa["plataforma"] == "ml"
     assert caixa["quantidade"] == 3
     assert caixa["pastas"] == [
-        {"pasta": "problema ml", "finalidade": "problema", "destaque": True, "quantidade": 2},
-        {"pasta": "mensagens ml", "finalidade": "mensagens", "destaque": False, "quantidade": 1},
+        {"pasta": "INBOX", "finalidade": "entrada", "destaque": False, "quantidade": 2},
+        {"pasta": "vendas ml", "finalidade": "vendas", "destaque": False, "quantidade": 1},
     ]
     # Os cartões completos continuam na conversa de e-mail.
     cartoes = (await client.get(f"{EMAIL}/conversas/{v['email'].id}/emails")).json()["emails"]

@@ -85,9 +85,16 @@ ESTADOS_META = (
     "seguranca",  # código, senha, acesso: NUNCA vira conversa nem aparece em fila
     "privado",  # caixa "só aliases de loja" e o e-mail não é de loja: é do dono
     "erro",  # a ponte falhou neste e-mail (sem texto guardado): reprocessar
+    "informativo",  # pasta INFORMATIVA (21/10/2026): uma linha do item da pasta, sem conversa
 )
 # `mail_folders.ler`: o corpo entra no /atendimento | só se conta | nem isso.
 LER_PASTA = ("corpo", "so_contar", "nao")
+# `mail_folders.categoria` (21/10/2026, migration 0424): o que a pasta CRIADA liga
+# — a venda (conversa de e-mail da venda), o chamado (Pós-venda › Chamados), o
+# informativo (linha do item da pasta) ou `site` ("Site (como hoje)": liga
+# exatamente como antes — o RF6 do site, o tipo pelo conteúdo). NULL = não
+# liga. Os três primeiros são os de `classificacao.TIPOS_EMAIL`.
+CATEGORIAS_PASTA = ("informativo", "chamado", "venda", "site")
 # `mail_outbox_meta.origem`: a resposta pela conversa ou só a resolução de um
 # job da caixa crua (sem mensagem do /atendimento).
 ORIGENS_ENVIO = ("conversa", "caixa")
@@ -238,12 +245,28 @@ class MailFolder(Base, TimestampMixin):
                       plataforma (financeiro, contabilidade…), Lixeira, Spam,
                       Rascunhos e a pasta nova que ninguém revisou;
       • `nao`       — uma pessoa mandou ignorar.
+
+    `categoria` (21/10/2026, decisões do dono): SÓ nas pastas criadas pela
+    equipe (pessoais); uma PESSOA escolhe (a regra de palavras apenas sugere —
+    `regras.categoria_sugerida`; a 0424 só semeou `venda` nas "vendas *" e
+    `site` nas pastas de site da Uranyx e da Charlots). `venda` → a conversa
+    de e-mail da venda; `chamado` → a Pós-venda › Chamados; `informativo` →
+    uma linha no item da pasta (aba E-mail); `site` → "Site (como hoje)": liga
+    exatamente como antes (a loja pelo endereço, o tipo pelo conteúdo, o
+    chamado RF6 do site pelo protocolo). NULL = a pasta não liga: o e-mail
+    fica `ignorado` (`pasta_sem_categoria`) e é relido quando alguém escolhe —
+    menos a resposta num fio (ou protocolo de site) que a equipe já tem, que
+    liga como sempre. A Entrada, os Enviados, a Lixeira e o Spam são travados
+    (nunca têm categoria). Quem escolheu e quando: `categoria_por`/`categoria_em`.
     """
 
     __tablename__ = "mail_folders"
     __table_args__ = (
         UniqueConstraint("mailbox_id", "chave"),
         CheckConstraint(f"ler IN ({_lista(LER_PASTA)})", name="ler"),
+        CheckConstraint(
+            f"categoria IS NULL OR categoria IN ({_lista(CATEGORIAS_PASTA)})", name="categoria"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -275,6 +298,12 @@ class MailFolder(Base, TimestampMixin):
     vista_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sumiu_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ultima_contagem: Mapped[int | None] = mapped_column(Integer)
+    # A categoria (só de PESSOA; NULL = não liga) e quem/quando escolheu.
+    categoria: Mapped[str | None] = mapped_column(String(12))
+    categoria_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    categoria_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MailMessageMeta(Base, TimestampMixin):
@@ -380,6 +409,11 @@ class MailMessageMeta(Base, TimestampMixin):
     )
     duplicado_de: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("mail_messages.id", ondelete="SET NULL")
+    )
+    # O chamado da Pós-venda (21/10/2026): o e-mail de pasta "chamado" liga ao
+    # chamado do pedido (`posvenda.ligar_ao_chamado`), nunca a uma conversa.
+    chamado_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("chamados.id", ondelete="SET NULL"), index=True
     )
     regras_versao: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")

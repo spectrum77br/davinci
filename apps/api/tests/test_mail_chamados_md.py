@@ -83,11 +83,14 @@ async def _formulario(
     assunto: str | None = None,
     recebido_em: datetime | None = None,
 ) -> UUID:
-    """O formulário do site como chega: DE sac@ PARA sac@, o cliente no corpo."""
+    """O formulário do site como chega: DE sac@ PARA sac@, o cliente no corpo.
+
+    Na Entrada (21/10/2026: a pasta "*uranyx sac" sem categoria não liga mais):
+    a caixa de site vem do alias (sac@/atacado@/duvidas@ da marca)."""
     return await entrar(
         db,
         cena.geral,
-        pasta=f"*uranyx {caixa}",
+        pasta="INBOX",
         de=f"{caixa}@uranyx.com.br",
         de_nome="Site Uranyx",
         para=[f"{caixa}@uranyx.com.br"],
@@ -242,7 +245,7 @@ async def test_s2_email_direto_com_o_protocolo_continua_no_chamado(db, cena, cli
     direto = await entrar(
         db,
         cena.geral,
-        pasta="*uranyx sac",
+        pasta="INBOX",
         de="maria.souza@empresa.com",
         de_nome="Maria Souza",
         para=["sac@uranyx.com.br"],
@@ -776,7 +779,7 @@ async def _direto(db, cena, de: str, protocolo: str, corpo: str = "E o meu pedid
     return await entrar(
         db,
         cena.geral,
-        pasta="*uranyx sac",
+        pasta="INBOX",
         de=de,
         de_nome=de.split("@")[0],
         para=["sac@uranyx.com.br"],

@@ -83,6 +83,19 @@ def filtro_mensagem(user: User, message_id=MailMessage.id):
         func.nullif(m.protocolo, ""),
     )
     tipo = case(
+        # 21/10/2026: a linha informativa e o e-mail ligado à Pós-venda não têm
+        # mensagem — o tipo é o da categoria da pasta (`classificacao.tipos_de_meta`).
+        (m.estado == "informativo", literal("informativo")),
+        (
+            or_(
+                m.chamado_id.is_not(None),
+                and_(
+                    m.estado == "ignorado",
+                    m.motivo.in_(("chamado_sem_pedido", "chamado_sem_chamado")),
+                ),
+            ),
+            literal("chamado"),
+        ),
         (tipo_payload.in_(classificacao.TIPOS_EMAIL), tipo_payload),
         (or_(m.plataforma == "site", caso.is_not(None)), literal("chamado")),
         (m.finalidade == "vendas", literal("venda")),

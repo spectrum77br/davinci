@@ -140,7 +140,8 @@ async def test_selecionadas_filtra_caixa_indice_contagens_detalhe_anexos_e_nao_e
     outro_id = await entrar(
         db,
         cena.geral,
-        pasta="problema shopee",
+        pasta="INBOX",
+        para=["22max@tuta.com"],
         de="suporte@shopee.com.br",
         assunto="Chamado ABC12345 aberto",
         anexos=[("y.txt", "text/plain", b"Y")],

@@ -93,12 +93,54 @@ def test_fallback_legado_e_rotulado_como_inferido_sem_mudar_estado():
         "tipo_email": "chamado",
         "caso_id": None,
         "tipo_email_inferido": True,
+        "tipo_pela_pasta": False,
     }
     assert classificacao.tipos_de_meta(meta, {"mail": {"tipo_email": "informativo"}}) == {
         "tipo_email": "informativo",
         "caso_id": None,
         "tipo_email_inferido": False,
+        "tipo_pela_pasta": False,
     }
+
+
+def test_tipo_pela_categoria_da_pasta_sem_mensagem():
+    """21/10/2026: a linha informativa e o e-mail da Pós-venda não têm mensagem —
+    o tipo é o da categoria da pasta, nunca o fallback da finalidade."""
+    linha = SimpleNamespace(
+        estado="informativo", finalidade="problema", plataforma="ml", protocolo=None
+    )
+    assert classificacao.tipos_de_meta(linha) == {
+        "tipo_email": "informativo",
+        "caso_id": None,
+        "tipo_email_inferido": False,
+        "tipo_pela_pasta": True,
+    }
+    sem_pedido = SimpleNamespace(
+        estado="ignorado",
+        motivo="chamado_sem_pedido",
+        finalidade="vendas",
+        plataforma="ml",
+        protocolo="5012345678",
+    )
+    assert classificacao.tipos_de_meta(sem_pedido)["tipo_email"] == "chamado"
+    assert classificacao.tipos_de_meta(sem_pedido)["caso_id"] == "5012345678"
+    ligado = SimpleNamespace(
+        estado="gravado", chamado_id="x", finalidade=None, plataforma="ml", protocolo=None
+    )
+    assert classificacao.tipos_de_meta(ligado)["tipo_email"] == "chamado"
+    # Com a mensagem, vale o payload (a venda pela pasta diz que veio da pasta).
+    venda = classificacao.tipos_de_meta(
+        ligado, {"mail": {"tipo_email": "venda", "tipo_pela_pasta": True}}
+    )
+    assert venda == {
+        "tipo_email": "venda",
+        "caso_id": None,
+        "tipo_email_inferido": False,
+        "tipo_pela_pasta": True,
+    }
+    assert classificacao.pela_pasta("venda", "123") == classificacao.Classificacao(
+        "venda", None, tipo_pela_pasta=True
+    )
 
 
 async def _email_caso(
@@ -107,10 +149,12 @@ async def _email_caso(
     *,
     assunto="Protocolo: 123456789",
     corpo="Aguardamos sua resposta.",
-    pasta="problema shopee",
+    pasta="INBOX",
     para=None,
     **kwargs,
 ):
+    # 21/10/2026: na Entrada (era a pasta "problema shopee", que sem categoria
+    # não liga mais), no alias da Shopee da Barbosa (22max).
     mid = await entrar(
         db,
         kwargs.pop("caixa", cena.geral),
@@ -118,7 +162,7 @@ async def _email_caso(
         de=kwargs.pop("de", "support@shopee.com.br"),
         assunto=assunto,
         corpo=corpo,
-        para=para,
+        para=para or ["22max@tuta.com"],
         **kwargs,
     )
     await rodar(db)
@@ -172,7 +216,7 @@ async def test_caso_igual_em_contas_ou_plataformas_diferentes_nao_se_funde(db, c
     c = await _email_caso(
         db,
         cena,
-        pasta="problema ml",
+        para=["21max@tuta.com"],
         assunto="Case: 123456789",
         de="nao-responder@mercadolivre.com.br",
     )

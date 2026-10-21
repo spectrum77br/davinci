@@ -140,6 +140,9 @@ async function principal() {
     assert.deepEqual(C.TIPOS_EMAIL.map((t) => t.value), tipos)
     assert.match(C.dicaTipoEmail(true), /sugerido/)
     assert.match(C.dicaTipoEmail(false), /identificado no conteúdo/)
+    // 21/10/2026: o tipo da pasta criada vem da categoria dela (não do conteúdo).
+    assert.equal(C.dicaTipoEmail(false, true, 'vendas ml'), 'Tipo pela categoria da pasta «vendas ml» (Pastas e regras).')
+    assert.equal(C.dicaTipoEmail(true, true), 'Tipo pela categoria da pasta (Pastas e regras).', 'a categoria vale mais que o "inferido"')
     const linhas = tipos.map((tipo, i) => ({
       id: `tipo-${i}`, plataforma: 'ml', canal: 'email', conta: 'Loja de teste',
       comprador_nome: 'Comprador', pedido_marketplace: null, situacao: 'aberta',
@@ -161,7 +164,7 @@ async function principal() {
     await esperar()
     let html = await m.html()
     for (const tipo of tipos) assert.ok(html.includes(`data-tipo-email="${tipo}"`))
-    assert.match(html, /pastas autorizadas a ler/)
+    assert.match(html, /Nas pastas criadas, o tipo vem da categoria da pasta \(Pastas e regras\); a Entrada segue como hoje, pelo conteúdo\./)
     assert.match(html, /continuam na Central de e-mail/)
     m.estado.escolherTipoEmail('chamado')
     await esperar()
@@ -212,7 +215,10 @@ async function principal() {
     const filas = ((constantes.match(/^FILAS = \(([^)]*)\)$/m) || [])[1] || '').split(',').map((x) => nomes[x.trim()]).filter(Boolean)
     const deConversa = F.FILAS.map((f) => f.value).filter((v) => F.FILAS_DE_CONVERSA.has(v))
     assert.deepEqual(deConversa, ['chamados', 'aguardando', 'todas'])
-    assert.deepEqual(F.FILAS.map((f) => f.value).filter((v) => !F.FILAS_DE_CONVERSA.has(v)), [...filas, 'revisar_envio'])
+    // A `informativo` (21/10/2026) não é aba: são as linhas das Pastas
+    // informativas, no chip Informativos (AtendimentoMailInformativos).
+    assert.ok(filas.includes('informativo'), 'a fila das linhas informativas existe na API')
+    assert.deepEqual(F.FILAS.map((f) => f.value).filter((v) => !F.FILAS_DE_CONVERSA.has(v)), [...filas.filter((f) => f !== 'informativo'), 'revisar_envio'])
     assert.deepEqual(F.FILAS.map((f) => f.label).slice(0, 5), ['Sem loja', 'Sem vínculo', 'Chamados dos sites', 'Falta responder', 'Todas as conversas'])
     // Quem só lê vê só as de conversa; quem mexe, todas.
     assert.deepEqual(F.filasDaPessoa(false).map((f) => f.value), ['chamados', 'aguardando', 'todas'])
@@ -1576,10 +1582,10 @@ async function principal() {
       assert.ok(rotasEmail.includes(`@router.${metodo}("${caminho}")`), `rota ${metodo} ${caminho}`)
     }
     const listar = rotasEmail.slice(rotasEmail.indexOf('async def listar_pastas('), rotasEmail.indexOf('class PastaPatch'))
-    for (const campo of ['id', 'mailbox_id', 'chave', 'nome', 'caminho', 'tipo', 'plataforma', 'finalidade', 'marca', 'ler', 'plataforma_manual', 'finalidade_manual', 'ignorar', 'revisada', 'vista_em', 'sumiu_em', 'caixas', 'plataformas', 'finalidades']) {
+    for (const campo of ['id', 'mailbox_id', 'chave', 'nome', 'caminho', 'tipo', 'plataforma', 'finalidade', 'marca', 'ler', 'plataforma_manual', 'finalidade_manual', 'ignorar', 'revisada', 'vista_em', 'sumiu_em', 'caixas', 'plataformas', 'finalidades', 'categoria', 'categoria_rotulo', 'categoria_sugerida', 'categoria_por', 'categoria_em', 'travada', 'total_30d', 'guardados', 'categorias']) {
       assert.ok(listar.includes(`"${campo}":`), `pastas: ${campo}`)
     }
-    assert.match(rotasEmail, /class PastaPatch\(BaseModel\):[\s\S]*?plataforma: str \| None[\s\S]*?finalidade: str \| None[\s\S]*?ignorar: bool \| None/)
+    assert.match(rotasEmail, /class PastaPatch\(BaseModel\):[\s\S]*?plataforma: str \| None[\s\S]*?finalidade: str \| None[\s\S]*?ignorar: bool \| None[\s\S]*?categoria: str \| None/)
     assert.match(rotasEmail, /class RegraIn\(BaseModel\):[\s\S]*?tipo: str[\s\S]*?palavra: str[\s\S]*?valor: str[\s\S]*?ativa: bool = True/)
     // O "ler" e os tipos de palavra da tela = os do backend.
     const regrasPy = api('services/mail_atendimento/regras.py')
@@ -1595,10 +1601,10 @@ async function principal() {
     const pasta = (id, x = {}) => ({ id, mailbox_id: 'b1', chave: id, nome: id, caminho: null, tipo: 'pessoal', plataforma: 'ml', finalidade: 'mensagens', marca: null, ler: 'corpo', plataforma_manual: null, finalidade_manual: null, ignorar: false, revisada: true, vista_em: null, sumiu_em: null, ...x })
     const grupos = PA.pastasPorCaixa({ itens: [pasta('velha', { sumiu_em: '2026-10-01T00:00:00Z' }), pasta('mensagens ml'), pasta('outra', { mailbox_id: 'b2' })], caixas: [{ id: 'b1', nome: 'Geral — Tuta' }], plataformas: [], finalidades: [] })
     assert.deepEqual(grupos.map((g) => [g.nome, g.pastas.map((p) => p.id)]), [['Geral — Tuta', ['mensagens ml', 'velha']], ['Caixa', ['outra']]], 'a que sumiu no fim; caixa sem nome = "Caixa"')
-    assert.deepEqual(PA.edicaoDe(pasta('a', { plataforma_manual: 'shopee' })), { plataforma: 'shopee', finalidade: '', ignorar: false })
-    assert.equal(PA.corpoDaPasta(pasta('a'), { plataforma: '', finalidade: '', ignorar: false }), null, 'nada mudou: nada vai')
-    assert.deepEqual(PA.corpoDaPasta(pasta('a'), { plataforma: 'shopee', finalidade: '', ignorar: true }), { plataforma: 'shopee', ignorar: true }, 'só o que mudou')
-    assert.deepEqual(PA.corpoDaPasta(pasta('a', { plataforma_manual: 'shopee' }), { plataforma: '', finalidade: '', ignorar: false }), { plataforma: '' }, "'' = volta para a palavra")
+    assert.deepEqual(PA.edicaoDe(pasta('a', { plataforma_manual: 'shopee' })), { plataforma: 'shopee', finalidade: '', ignorar: false, categoria: '' })
+    assert.equal(PA.corpoDaPasta(pasta('a'), { plataforma: '', finalidade: '', ignorar: false, categoria: '' }), null, 'nada mudou: nada vai')
+    assert.deepEqual(PA.corpoDaPasta(pasta('a'), { plataforma: 'shopee', finalidade: '', ignorar: true, categoria: '' }), { plataforma: 'shopee', ignorar: true }, 'só o que mudou')
+    assert.deepEqual(PA.corpoDaPasta(pasta('a', { plataforma_manual: 'shopee' }), { plataforma: '', finalidade: '', ignorar: false, categoria: '' }), { plataforma: '' }, "'' = volta para a palavra")
     const porTipo = PA.regrasPorTipo([{ id: '1', tipo: 'plataforma', palavra: 'shopee', valor: 'shopee', ativa: true }, { id: '2', tipo: 'plataforma', palavra: 'ml', valor: 'ml', ativa: true }, { id: '3', tipo: 'finalidade', palavra: 'vendas', valor: 'vendas', ativa: false }])
     assert.deepEqual(Object.keys(porTipo), ['plataforma', 'finalidade', 'marca'])
     assert.deepEqual(porTipo.plataforma.map((r) => r.palavra), ['ml', 'shopee'])
@@ -1688,6 +1694,379 @@ async function principal() {
     assert.equal(fl.estado.fila, 'erro')
   }
 
+  // ------------------------------------------------ W3b (21/10/2026): a CATEGORIA da pasta criada
+  // Decisões do dono: a Entrada (e os Enviados, e a caixa da Goslin) ligam
+  // como hoje; só as pastas CRIADAS têm categoria (Venda, Informativo,
+  // Chamado (Pós-venda), e "Site (como hoje)" — decisão 9: liga exatamente
+  // como antes; a 0424 a dá às pastas dos sites Uranyx e Charlots); sem
+  // categoria, não liga (fica guardado; a resposta num fio da equipe liga como
+  // hoje). Uma pessoa escolhe; a regra sugere (Venda nas "vendas *", Site nas
+  // pastas de site; nunca Chamado; Chamado nunca em pasta de site).
+  {
+    const constantesPy = api('services/mail_atendimento/constantes.py')
+    const valorPy = (nome) => (constantesPy.match(new RegExp(`^${nome} = "([a-z_]+)"$`, 'm')) || [])[1]
+    // A tupla do Python, com o `*OUTRA` expandido.
+    const tuplaPy = (nome) => ((constantesPy.match(new RegExp(`^${nome} = \\(([^)]*)\\)$`, 'm')) || [])[1] || '')
+      .split(',').map((x) => x.trim()).filter(Boolean)
+      .flatMap((x) => (x.startsWith('*') ? tuplaPy(x.slice(1)) : [valorPy(x)])).filter(Boolean)
+    const categoriasPy = tuplaPy('CATEGORIAS_PASTA')
+    assert.deepEqual([...categoriasPy].sort(), ['chamado', 'informativo', 'site', 'venda'])
+    assert.deepEqual([...PA.CATEGORIAS_PELA_PASTA].sort(), [...tuplaPy('CATEGORIAS_PELA_PASTA')].sort(), 'as que decidem o tipo = as da API')
+    assert.equal(PA.RELER_DIAS, Number((constantesPy.match(/^RELER_DIAS = (\d+)$/m) || [])[1]), 'a janela do reler = a da API')
+    assert.deepEqual(PA.CATEGORIAS.map((c) => c.value), ['', 'site', 'venda', 'informativo', 'chamado'], 'a ordem da tela; "" = sem categoria')
+    assert.deepEqual(PA.CATEGORIAS.filter((c) => c.value).map((c) => c.value).sort(), [...categoriasPy].sort(), 'as categorias da tela = as da API')
+    assert.deepEqual(PA.CATEGORIAS.map((c) => c.label), ['Sem categoria', 'Site (como hoje)', 'Venda', 'Informativo', 'Chamado (Pós-venda)'])
+    assert.match(PA.CATEGORIAS[1].dica, /^liga exatamente como antes de 21\/10: o chamado do site pelo protocolo e a conversa na aba E-mail[\s\S]*as pastas dos sites Uranyx e Charlots já vêm assim/)
+    // O rótulo da tela = o da API (ROTULO_CATEGORIA).
+    assert.match(constantesPy, /CATEGORIA_SITE: "Site \(como hoje\)",/)
+    assert.match(PA.CATEGORIAS[0].dica, /fio \(ou protocolo do site\) que a equipe já atende liga como hoje/)
+    assert.match(PA.AVISO_CHAMADO, /Pós-venda › Chamados/)
+    for (const codigo of ['categoria_invalida', 'categoria_em_pasta_do_sistema', 'categoria_venda_sem_plataforma', 'categoria_chamado_em_site']) {
+      assert.ok(PA.ERROS_PASTAS[codigo], `erro ${codigo}`)
+      assert.ok(rotasEmail.includes(`"code": "${codigo}"`), `a rota recusa com ${codigo}`)
+    }
+    assert.match(PA.ERROS_PASTAS.categoria_em_pasta_do_sistema, /a Entrada liga como hoje/)
+    assert.match(PA.ERROS_PASTAS.categoria_chamado_em_site, /escolha "Site \(como hoje\)"/)
+    assert.match(rotasEmail, /"reler_dias": RELER_DIAS,/, 'a rota diz a janela do reler')
+    assert.match(rotasEmail, /"categoria": pasta\.categoria,\s+"relidos": relidos,/, 'o PATCH devolve a categoria e os relidos')
+    assert.match(api('services/mail_atendimento/saude.py'), /"pastas_sem_categoria": /)
+
+    const pasta = (id, x = {}) => ({ id, mailbox_id: 'b1', chave: id, nome: id, caminho: null, tipo: 'pessoal', plataforma: 'ml', finalidade: 'mensagens', marca: null, ler: 'corpo', plataforma_manual: null, finalidade_manual: null, ignorar: false, revisada: true, vista_em: null, sumiu_em: null, categoria: null, categoria_sugerida: null, categoria_por: null, categoria_em: null, travada: false, total_30d: 0, guardados: 0, ...x })
+    const e = (x = {}) => ({ plataforma: '', finalidade: '', ignorar: false, categoria: '', ...x })
+    // A edição e o corpo do PATCH ('' = sem categoria → null).
+    assert.equal(PA.edicaoDe(pasta('a', { categoria: 'venda' })).categoria, 'venda')
+    assert.deepEqual(PA.corpoDaPasta(pasta('a'), e({ categoria: 'informativo' })), { categoria: 'informativo' })
+    assert.deepEqual(PA.corpoDaPasta(pasta('a', { categoria: 'venda' }), e()), { categoria: null }, 'sem categoria = null (não "")')
+    assert.equal(PA.corpoDaPasta(pasta('a', { categoria: 'venda' }), e({ categoria: 'venda' })), null)
+    assert.deepEqual(PA.corpoDaPasta(pasta('a'), { plataforma: 'shopee', finalidade: '', ignorar: false }), { plataforma: 'shopee' }, 'a edição antiga (sem a categoria) não manda categoria')
+    // A trava: a rota diz; a resposta antiga, pelo tipo.
+    assert.equal(PA.pastaTravada({ travada: true, tipo: 'pessoal' }), true)
+    assert.equal(PA.pastaTravada({ tipo: 'sistema' }), true)
+    assert.equal(PA.pastaTravada({ tipo: 'marcador' }), true)
+    assert.equal(PA.pastaTravada({ tipo: 'pessoal' }), false)
+    assert.equal(PA.pastaTravada({ travada: false, tipo: 'sistema' }), false, 'a rota vale mais')
+    assert.deepEqual(PA.notaDaTravada({ nome: 'INBOX', finalidade: 'entrada', tipo: 'sistema' }), { nome: 'Entrada', nota: 'a Entrada liga como hoje (a loja pelo endereço, o tipo pelo conteúdo)' })
+    assert.equal(PA.notaDaTravada({ nome: 'Caixa de Entrada', finalidade: null, tipo: 'sistema' }).nome, 'Entrada')
+    assert.equal(PA.notaDaTravada({ nome: 'Sent', finalidade: 'enviados', tipo: 'sistema' }).nota, 'os Enviados ligam como hoje (a volta das nossas respostas)')
+    assert.equal(PA.notaDaTravada({ nome: 'Trash', finalidade: null, tipo: 'sistema' }).nota, 'Lixeira do sistema: sem categoria, fica como hoje')
+    assert.equal(PA.notaDaTravada({ nome: 'Lixo  Eletrônico', finalidade: null, tipo: 'sistema' }).nome, 'Spam', 'sem acento, espaços juntos')
+    assert.equal(PA.notaDaTravada({ nome: 'Junk', finalidade: null, tipo: 'sistema' }).nome, 'Spam')
+    assert.equal(PA.notaDaTravada({ nome: 'importante', finalidade: null, tipo: 'marcador' }).nota, 'marcador do Tuta: sem categoria')
+    // Venda precisa da plataforma de marketplace (site não).
+    assert.equal(PA.podeVenda(pasta('a'), e()), true, 'a de hoje (ml)')
+    assert.equal(PA.podeVenda(pasta('a', { plataforma: null }), e()), false)
+    assert.equal(PA.podeVenda(pasta('a', { plataforma: 'site' }), e()), false)
+    assert.equal(PA.podeVenda(pasta('a', { plataforma: null }), e({ plataforma: 'shopee' })), true, 'a escolhida agora')
+    assert.equal(PA.podeVenda(pasta('a'), e({ plataforma: 'site' })), false)
+    assert.equal(PA.podeVenda(pasta('a', { plataforma: 'shopee', plataforma_manual: 'shopee' }), e()), true, 'volta para a palavra: a rota confere')
+    // Chamado nunca em pasta de site (o formulário não tem pedido).
+    assert.equal(PA.podeChamado(pasta('a'), e()), true)
+    assert.equal(PA.podeChamado(pasta('a', { plataforma: null }), e()), true, 'sem plataforma: a Pós-venda guarda sem pedido, a rota aceita')
+    assert.equal(PA.podeChamado(pasta('a', { plataforma: 'site' }), e()), false)
+    assert.equal(PA.podeChamado(pasta('a'), e({ plataforma: 'site' })), false, 'a escolhida agora')
+    assert.equal(PA.podeChamado(pasta('a', { plataforma: 'site' }), e({ plataforma: 'ml' })), true)
+    // A sugestão (só ao lado; nunca grava sozinha).
+    assert.equal(PA.sugestaoDaPasta(pasta('a', { categoria_sugerida: 'venda' }), e()), 'venda')
+    assert.equal(PA.sugestaoDaPasta(pasta('a', { categoria_sugerida: 'venda' }), e({ categoria: 'venda' })), '', 'já escolhida')
+    assert.equal(PA.sugestaoDaPasta(pasta('a', { categoria_sugerida: 'venda', travada: true }), e()), '')
+    assert.equal(PA.sugestaoDaPasta(pasta('a', { categoria_sugerida: 'venda', sumiu_em: '2026-10-01T00:00:00Z' }), e()), '')
+    assert.equal(PA.sugestaoDaPasta(pasta('a'), e()), '')
+    // A pergunta antes de salvar.
+    assert.equal(PA.perguntaDaCategoria(pasta('a'), e()), '')
+    assert.equal(PA.perguntaDaCategoria(pasta('a'), e({ categoria: 'informativo' })), '', 'nada a avisar: sem pergunta')
+    let q = PA.perguntaDaCategoria(pasta('envio', { ler: 'so_contar', plataforma: null }), e({ categoria: 'informativo' }))
+    assert.match(q, /^Pasta "envio" → Informativo\?/)
+    assert.match(q, /hoje só conta: com a categoria, o conteúdo dos e-mails dela passa a aparecer no DaVinci/)
+    q = PA.perguntaDaCategoria(pasta('mensagens ml', { guardados: 12 }), e({ categoria: 'chamado' }))
+    assert.ok(q.includes(PA.AVISO_CHAMADO))
+    assert.match(q, /Os 12 e-mail\(s\) guardado\(s\) desta pasta nos últimos 7 dias também ligam pela categoria nova \(os mais antigos continuam guardados\)/)
+    assert.match(PA.perguntaDaCategoria(pasta('*poofy', { plataforma: 'site', guardados: 3 }), e({ categoria: 'site' }), 3), /^Pasta "\*poofy" → Site \(como hoje\)\?[\s\S]*nos últimos 3 dias/)
+    // "Site (como hoje)" numa pasta que só conta: continua só contando (sem a pergunta do conteúdo).
+    assert.equal(PA.perguntaDaCategoria(pasta('envio', { ler: 'so_contar', plataforma: null }), e({ categoria: 'site' })), '')
+    assert.deepEqual(PA.avisosDaEdicao(pasta('envio', { ler: 'so_contar', plataforma: null }), e({ categoria: 'site' })), ['Site (como hoje): esta pasta continua só contando (o conteúdo não aparece no DaVinci).'])
+    assert.match(PA.perguntaDaCategoria(pasta('vendas ml', { categoria: 'venda' }), e()), /^Tirar a categoria da pasta "vendas ml"\?[\s\S]*deixam de ligar/)
+    // Os avisos da linha (antes de salvar).
+    assert.deepEqual(PA.avisosDaEdicao(pasta('a'), e()), [])
+    assert.deepEqual(PA.avisosDaEdicao(pasta('a'), e({ categoria: 'chamado' })), [PA.AVISO_CHAMADO])
+    assert.match(PA.avisosDaEdicao(pasta('a'), e({ categoria: 'venda', ignorar: true }))[0], /ignorar/)
+    assert.match(PA.avisosDaEdicao(pasta('a', { ler: 'so_contar' }), e({ categoria: 'informativo' }))[0], /hoje só conta/)
+    assert.deepEqual(PA.avisosDaEdicao(pasta('a', { ler: 'corpo', categoria: 'informativo' }), e({ categoria: 'informativo' })), [], 'já escolhida: nada novo')
+    assert.match(PA.avisosDaEdicao(pasta('a', { ler: 'so_contar', categoria: 'site' }), e({ categoria: 'informativo' }))[0], /hoje só conta/, 'de "Site (como hoje)" para uma que decide o tipo: o conteúdo passa a aparecer')
+    // Quem escolheu; o aviso depois de salvar.
+    const fmt = (iso) => `[${iso.slice(0, 10)}]`
+    assert.equal(PA.quemEscolheu(pasta('a', { categoria: 'informativo', categoria_por: 'Ana', categoria_em: '2026-10-21T13:00:00Z' }), fmt), 'escolhida por Ana em [2026-10-21]')
+    assert.equal(PA.quemEscolheu(pasta('a', { categoria: 'venda', categoria_em: '2026-10-21T12:00:00Z' }), fmt), 'desde [2026-10-21]', 'a da subida (sem quem)')
+    assert.equal(PA.quemEscolheu(pasta('a'), fmt), '')
+    assert.equal(PA.avisoDaPastaSalva('x', { relidos: 2 }), 'Pasta "x" salva — 2 e-mail(s) guardado(s) voltam para a ponte')
+    assert.equal(PA.avisoDaPastaSalva('x', { relidos: 0 }), 'Pasta "x" salva')
+    assert.equal(PA.avisoDaPastaSalva('x', null), 'Pasta "x" salva')
+
+    // O componente de verdade, com as pastas da produção (nomes) e categorias.
+    const ops = { plataformas: ['ml', 'shopee', 'site'], finalidades: ['vendas', 'mensagens', 'problema', 'reclamacao'] }
+    const itens = [
+      pasta('p-inbox', { nome: 'INBOX', tipo: 'sistema', travada: true, plataforma: null, finalidade: 'entrada', total_30d: 2674 }),
+      pasta('p-sent', { nome: 'Sent', tipo: 'sistema', travada: true, plataforma: null, finalidade: 'enviados' }),
+      pasta('p-trash', { nome: 'Trash', tipo: 'sistema', travada: true, plataforma: null, finalidade: null, ler: 'so_contar' }),
+      pasta('p-vendas', { nome: 'vendas ml', finalidade: 'vendas', categoria: 'venda', categoria_sugerida: 'venda', categoria_em: '2026-10-21T12:00:00Z', total_30d: 460 }),
+      pasta('p-mensagens', { nome: 'mensagens ml', categoria_sugerida: null, total_30d: 357, guardados: 12 }),
+      pasta('p-envio', { nome: 'envio', plataforma: null, finalidade: null, ler: 'so_contar', total_30d: 518 }),
+      pasta('p-news', { nome: 'newsletter', plataforma: null, finalidade: null, categoria: 'informativo', categoria_por: 'Ana', categoria_em: '2026-10-21T13:00:00Z' }),
+      pasta('p-site', { nome: '*uranyx sac', plataforma: 'site', finalidade: null, marca: 'uranyx', categoria: 'site', categoria_sugerida: 'site', categoria_em: '2026-10-21T12:00:00Z', total_30d: 39 }),
+      pasta('p-makisa', { nome: '*makisa', plataforma: 'site', finalidade: null, marca: 'makisa', categoria_sugerida: 'site', total_30d: 495 }),
+    ]
+    const patches = {}
+    const respostas = {
+      '/api/atendimento/email/pastas': { itens, caixas: [{ id: 'b1', nome: 'Principal — Tuta' }], ...ops, categorias: [{ valor: 'informativo', rotulo: 'Informativo' }, { valor: 'chamado', rotulo: 'Chamado (Pós-venda)' }, { valor: 'venda', rotulo: 'Venda' }, { valor: 'site', rotulo: 'Site (como hoje)' }], reler_dias: 7 },
+      '/api/atendimento/email/regras': { itens: [] },
+    }
+    for (const p of itens) {
+      respostas[`/api/atendimento/email/pastas/${p.id}`] = (url, opts) => {
+        patches[p.id] = opts.body
+        if (p.id === 'p-news' && opts.body?.categoria === 'venda') throw Object.assign(new Error('422'), { data: { detail: { code: 'categoria_venda_sem_plataforma' } } })
+        return { id: p.id, ler: 'corpo', revisada: true, categoria: opts.body?.categoria ?? p.categoria, relidos: p.id === 'p-mensagens' ? 12 : 0 }
+      }
+    }
+    const linha = (h, id) => {
+      const a = h.indexOf(`data-pasta="${id}"`)
+      assert.ok(a >= 0, `linha ${id}`)
+      const b = h.indexOf('data-pasta="', a + 1)
+      return h.slice(a, b > a ? b : h.indexOf('</ul>', a))
+    }
+
+    // Quem não é admin: vê a categoria (selo), a trava e a sugestão; não muda.
+    const so = montar('../components/AtendimentoMailPastas.vue', { isAdmin: false }, { respostas })
+    await so.montar()
+    let html = await so.html()
+    assert.match(html, /data-pastas-explicacao[\s\S]*?A Entrada e os Enviados ligam como hoje[\s\S]*?sem categoria, o e-mail novo fica guardado sem ligar \(a resposta num fio que a equipe já atende liga como hoje\); &quot;Site \(como hoje\)&quot; faz a pasta ligar exatamente como antes — as pastas dos sites Uranyx e Charlots já vêm assim/)
+    assert.match(html, /data-categorias-explicacao[\s\S]*?a Entrada liga como hoje/)
+    for (const c of ['sem', 'site', 'venda', 'informativo', 'chamado']) assert.match(html, new RegExp(`data-categoria-explicacao="${c}"`))
+    assert.match(html, /data-categoria-explicacao="site"[\s\S]*?Site \(como hoje\)[\s\S]*?liga exatamente como antes de 21\/10/)
+    assert.match(html, /data-categoria-explicacao="chamado"[\s\S]*?Chamado \(Pós-venda\)[\s\S]*?Pós-venda › Chamados/)
+    assert.match(html, /data-aviso-chamado[\s\S]*?Escolher Chamado manda os e-mails desta pasta para Pós-venda › Chamados/)
+    assert.match(linha(html, 'p-inbox'), /data-pasta-travada[\s\S]*?a Entrada liga como hoje/)
+    assert.doesNotMatch(linha(html, 'p-inbox'), /data-pasta-categoria|data-sugestao-categoria/, 'a Entrada nunca tem categoria')
+    assert.match(linha(html, 'p-sent'), /data-pasta-travada[\s\S]*?os Enviados ligam como hoje/)
+    assert.match(linha(html, 'p-trash'), /data-pasta-travada[\s\S]*?Lixeira do sistema/)
+    assert.match(linha(html, 'p-vendas'), /data-pasta-categoria="venda"[^>]*>Venda</)
+    assert.match(linha(html, 'p-vendas'), /data-pasta-total[^>]*>· 460 em 30 dias</)
+    assert.doesNotMatch(linha(html, 'p-vendas'), /data-sugestao-categoria/, 'a sugestão igual à escolhida não aparece')
+    assert.match(linha(html, 'p-mensagens'), /data-pasta-categoria="sem"[^>]*>Sem categoria</)
+    assert.doesNotMatch(linha(html, 'p-mensagens'), /data-sugestao-categoria/, 'mensagens/problema: sem sugestão (decisão 9: o padrão novo)')
+    // O site da Uranyx (a 0424 deu "Site (como hoje)", sem quem: "desde"); o *makisa, só a sugestão.
+    assert.match(linha(html, 'p-site'), /title="desde [^"]+" data-pasta-categoria="site"[^>]*>Site \(como hoje\)</)
+    assert.doesNotMatch(linha(html, 'p-site'), /data-sugestao-categoria/, 'a sugestão igual à escolhida não aparece')
+    assert.match(linha(html, 'p-makisa'), /data-pasta-categoria="sem"[^>]*>Sem categoria</)
+    assert.match(linha(html, 'p-makisa'), /data-sugestao-categoria[^>]*>sugestão: Site \(como hoje\)</)
+    assert.match(linha(html, 'p-mensagens'), /data-pasta-guardados[^>]*>· 12 guardado\(s\) em 7 dias</)
+    assert.match(linha(html, 'p-mensagens'), /title="e-mails dos últimos 7 dias que ficaram guardados sem ligar/)
+    assert.match(linha(html, 'p-news'), /data-pasta-categoria="informativo"[^>]*>Informativo</)
+    assert.match(linha(html, 'p-news'), /title="escolhida por Ana em [^"]+"/)
+    assert.doesNotMatch(html, /data-categoria-pasta|data-usar-sugestao|data-pasta-avisos/, 'quem não é admin: sem escolher')
+
+    // Admin: o seletor só nas criadas; a sugestão com "usar"; Venda sem plataforma desligada.
+    let responderPergunta = true
+    const ad = montar('../components/AtendimentoMailPastas.vue', { isAdmin: true }, { respostas, confirmar: () => responderPergunta })
+    await ad.montar()
+    html = await ad.html()
+    assert.doesNotMatch(linha(html, 'p-inbox'), /data-categoria-pasta/, 'a Entrada: travada')
+    assert.match(linha(html, 'p-inbox'), /data-salvar-pasta/, 'a Entrada: o resto como hoje')
+    assert.match(linha(html, 'p-mensagens'), /<select[^>]*aria-label="categoria da pasta"[\s\S]*?Sem categoria[\s\S]*?Site \(como hoje\)[\s\S]*?Venda[\s\S]*?Informativo[\s\S]*?Chamado \(Pós-venda\)/)
+    assert.doesNotMatch(linha(html, 'p-mensagens'), /data-usar-sugestao/)
+    assert.match(linha(html, 'p-makisa'), /data-usar-sugestao[^>]*>sugestão: Site \(como hoje\) · usar</)
+    assert.match(linha(html, 'p-envio'), /<option value="venda" disabled[^>]*>Venda \(escolha a plataforma\)</)
+    // A pasta de site: nem Venda nem Chamado (o site liga como antes com "Site (como hoje)").
+    assert.match(linha(html, 'p-site'), /<option value="venda" disabled[^>]*>Venda \(escolha a plataforma\)</)
+    assert.match(linha(html, 'p-site'), /<option value="chamado" disabled[^>]*>Chamado \(pasta de site não\)</)
+    assert.match(linha(html, 'p-site'), /<option value="site"[^>]*>Site \(como hoje\)</)
+    assert.doesNotMatch(linha(html, 'p-site'), /<option value="site" disabled/)
+    assert.equal(ad.estado.edicao['p-site'].categoria, 'site', 'a escolha começa na categoria da 0424')
+    assert.match(linha(html, 'p-mensagens'), /<option value="chamado"[^>]*>Chamado \(Pós-venda\)</)
+    assert.doesNotMatch(linha(html, 'p-mensagens'), /<option value="chamado" disabled/)
+    assert.equal(ad.estado.edicao['p-vendas'].categoria, 'venda', 'a escolha começa na categoria gravada')
+    assert.equal(ad.estado.edicao['p-mensagens'].categoria, '', 'sem categoria = ""')
+    // "usar" só escolhe (Site (como hoje)), sem gravar; já é a sugestão: o "usar" some.
+    ad.estado.usarSugestao(ad.estado.dados.itens[8])
+    assert.equal(ad.estado.edicao['p-makisa'].categoria, 'site')
+    assert.equal(ad.chamadas.filter((c) => c.metodo !== 'GET').length, 0, 'usar não grava')
+    html = await ad.html()
+    assert.doesNotMatch(linha(html, 'p-makisa'), /data-usar-sugestao/, 'já é a sugestão')
+    // Chamado escolhido à mão: o aviso aparece; salvar pergunta (guardados + Pós-venda).
+    ad.estado.edicao['p-mensagens'].categoria = 'chamado'
+    html = await ad.html()
+    assert.match(linha(html, 'p-mensagens'), /data-pasta-avisos[\s\S]*?Escolher Chamado manda os e-mails desta pasta para Pós-venda › Chamados/)
+    responderPergunta = false
+    await ad.estado.salvarPasta(ad.estado.dados.itens[4])
+    assert.equal(ad.chamadas.filter((c) => c.metodo !== 'GET').length, 0, 'não confirmou: nada vai')
+    assert.ok(ad.perguntas.at(-1).includes(PA.AVISO_CHAMADO) && /12 e-mail\(s\) guardado\(s\)/.test(ad.perguntas.at(-1)))
+    responderPergunta = true
+    await ad.estado.salvarPasta(ad.estado.dados.itens[4])
+    let mud = ad.chamadas.filter((c) => c.metodo !== 'GET').at(-1)
+    assert.deepEqual([mud.url, mud.metodo, mud.body], ['/api/atendimento/email/pastas/p-mensagens', 'PATCH', { categoria: 'chamado' }])
+    assert.ok(ad.avisos.some(([t, m]) => t === 'ok' && m === 'Pasta "mensagens ml" salva — 12 e-mail(s) guardado(s) voltam para a ponte'))
+    // A pasta que só conta: confirma que o conteúdo passa a aparecer.
+    let n = ad.perguntas.length
+    ad.estado.edicao['p-envio'].categoria = 'informativo'
+    html = await ad.html()
+    assert.match(linha(html, 'p-envio'), /data-pasta-avisos[\s\S]*?hoje só conta/)
+    await ad.estado.salvarPasta(ad.estado.dados.itens[5])
+    assert.equal(ad.perguntas.length, n + 1)
+    assert.match(ad.perguntas.at(-1), /^Pasta "envio" → Informativo\?[\s\S]*passa a aparecer no DaVinci/)
+    assert.deepEqual(patches['p-envio'], { categoria: 'informativo' })
+    // Tirar a categoria: pergunta e manda null.
+    ad.estado.edicao['p-vendas'].categoria = ''
+    await ad.estado.salvarPasta(ad.estado.dados.itens[3])
+    assert.match(ad.perguntas.at(-1), /^Tirar a categoria da pasta "vendas ml"\?/)
+    assert.deepEqual(patches['p-vendas'], { categoria: null })
+    // Trocar sem nada a avisar: não pergunta.
+    n = ad.perguntas.length
+    ad.estado.edicao['p-news'].categoria = 'venda'
+    await ad.estado.salvarPasta(ad.estado.dados.itens[6])
+    assert.equal(ad.perguntas.length, n, 'informativo → venda numa pasta que já lê: sem pergunta')
+    assert.deepEqual(patches['p-news'], { categoria: 'venda' })
+    assert.ok(ad.avisos.some(([t, m]) => t === 'erro' && m === PA.ERROS_PASTAS.categoria_venda_sem_plataforma), 'a recusa da rota, em português')
+    // A pasta do sistema: nunca manda categoria (nem pela função).
+    ad.estado.edicao['p-inbox'].categoria = 'venda'
+    assert.deepEqual(PA.corpoDaPasta(ad.estado.dados.itens[0], ad.estado.edicao['p-inbox']), { categoria: 'venda' }, 'a função monta…')
+    assert.match(await ad.html(), /data-pasta="p-inbox"/)
+    assert.doesNotMatch(linha(await ad.html(), 'p-inbox'), /data-pasta-avisos/, '…mas a linha travada não mostra nada de categoria (e a rota recusa)')
+  }
+
+  // ------------------------------------------------ W5 (21/10/2026): as PASTAS INFORMATIVAS no chip Informativos
+  {
+    const PI = requerer('~/components/AtendimentoMailInformativos.vue')
+    assert.ok(rotasEmail.includes('@router.get("/informativos")'))
+    const rota = rotasEmail.slice(rotasEmail.indexOf('async def informativos('), rotasEmail.indexOf('@router.get("/regras")'))
+    for (const campo of ['pasta_id', 'nome', 'mailbox_id', 'caixa', 'total', 'ultimo_em', 'lojas', 'itens']) assert.ok(rota.includes(`"${campo}"`), `informativos: ${campo}`)
+    assert.match(rota, /_mexe\(user\)/, 'só quem mexe')
+    assert.match(rota, /administracao\.filtro_mensagem\(user, MailMessageMeta\.message_id\)/, 'conta só o que a pessoa pode ver')
+    assert.doesNotMatch(rota, /decifrar|"texto"|"assunto"/, 'sem o e-mail em si')
+    assert.match(rotasEmail, /pasta: Annotated\[UUID \| None, Query\(\)\] = None,/)
+    assert.match(rotasEmail, /if pasta is not None:\s+q = q\.where\(MailMessageMeta\.folder_id == pasta\)/)
+    assert.equal(PI.URL_INFORMATIVOS, '/api/atendimento/email/informativos')
+    assert.equal(PI.urlDasLinhas('f1'), '/api/atendimento/email/emails?fila=informativo&pasta=f1')
+    assert.equal(PI.urlDasLinhas('f1', '2026-10-20T00:00:00Z'), '/api/atendimento/email/emails?fila=informativo&pasta=f1&antes_de=2026-10-20T00%3A00%3A00Z')
+    assert.equal(PI.rotuloDasLojas(['A', 'B']), 'A, B')
+    assert.equal(PI.rotuloDasLojas(['A', 'B', 'C', 'D', 'E']), 'A, B, C e mais 2')
+    assert.equal(PI.rotuloDasLojas(null), '')
+    assert.equal(PI.rotuloDoTotal(1), '1 e-mail')
+    assert.equal(PI.rotuloDoTotal(1234), '1.234 e-mails')
+
+    // O componente de verdade: um item por pasta; abrir = uma linha por e-mail; "ver o e-mail".
+    const linhaInf = (id, x = {}) => ({ id, estado: 'informativo', recebido_em: '2026-10-21T12:00:00Z', pasta: 'newsletter', plataforma: 'ml', finalidade: null, tipo_email: 'informativo', tipo_pela_pasta: true, destaque: false, alias: '21max@tuta.com', loja: 'Barbosa', integration_id: 'i1', motivo: null, motivo_texto: null, sugestoes: [], suspeito: false, suspeito_motivos: [], conversa_id: null, pedido: null, pedidos_citados: [], protocolo: null, alertas: [], abrir_no_tuta: 'https://app.tuta.com/mail/a/b', assunto: `Aviso ${id}`, de: 'avisos@example.invalid', ...x })
+    const itensInf = [
+      { pasta_id: 'f1', nome: 'newsletter', mailbox_id: 'b1', caixa: 'Principal — Tuta', total: 3, ultimo_em: '2026-10-21T12:00:00Z', lojas: ['Barbosa', 'Poofy'] },
+      { pasta_id: 'f2', nome: 'avisos', mailbox_id: 'b1', caixa: 'Principal — Tuta', total: 0, ultimo_em: null, lojas: [] },
+    ]
+    const respostasInf = {
+      '/api/atendimento/email/informativos': { itens: itensInf },
+      '/api/atendimento/email/emails': (url) => {
+        const q = new URL(url, 'https://example.com').searchParams
+        assert.equal(q.get('fila'), 'informativo')
+        if (q.get('pasta') !== 'f1') return { itens: [], proximo: null }
+        return q.get('antes_de') ? { itens: [linhaInf('m3', { loja: null, plataforma: null })], proximo: null } : { itens: [linhaInf('m1'), linhaInf('m2')], proximo: '2026-10-20T00:00:00Z' }
+      },
+      '/api/atendimento/email/emails/m1': { ...linhaInf('m1'), direcao: 'in', de_nome: 'Avisos', reply_to: [], texto: 'Texto do aviso', links_removidos: 1, codigo_mascarado: false, anexos: [] },
+    }
+    const inf = montar('../components/AtendimentoMailInformativos.vue', { sinal: 0 }, { respostas: respostasInf })
+    await inf.montar()
+    let html = await inf.html()
+    assert.deepEqual(inf.chamadas.map((c) => c.url), ['/api/atendimento/email/informativos'])
+    assert.match(html, /data-pastas-informativas[\s\S]*?Pastas informativas[\s\S]*?uma por pasta com a categoria Informativo/)
+    assert.match(html, /data-pasta-informativa="f1"[\s\S]*?newsletter[\s\S]*?>3<[\s\S]*?Principal — Tuta[\s\S]*?Barbosa, Poofy[\s\S]*?último /)
+    assert.match(html, /data-pasta-informativa="f2"[\s\S]*?nenhum e-mail ainda/)
+    assert.doesNotMatch(html, /data-linhas-informativas/, 'fechado: sem linhas')
+    // Abrir o item: as linhas (a mais nova em cima), com "ver o e-mail".
+    inf.estado.abrirItem(itensInf[0])
+    await esperar()
+    assert.equal(inf.chamadas.at(-1).url, '/api/atendimento/email/emails?fila=informativo&pasta=f1')
+    html = await inf.html()
+    assert.match(html, /data-linhas-informativas[\s\S]*?data-linha-informativa="m1"[\s\S]*?data-linha-informativa="m2"/)
+    assert.match(html, /data-linha-informativa="m1"[\s\S]*?ML Barbosa[\s\S]*?avisos@example\.invalid[\s\S]*?Aviso m1[\s\S]*?ver o e-mail[\s\S]*?Abrir no Tuta/)
+    assert.match(html, /data-mais-linhas-informativas/)
+    await inf.estado.carregarLinhas(true)
+    assert.equal(inf.chamadas.at(-1).url, '/api/atendimento/email/emails?fila=informativo&pasta=f1&antes_de=2026-10-20T00%3A00%3A00Z')
+    assert.deepEqual(inf.estado.linhas.map((l) => l.id), ['m1', 'm2', 'm3'])
+    html = await inf.html()
+    assert.match(html, /data-linha-informativa="m3"[\s\S]*?· sem loja/)
+    assert.doesNotMatch(html, /data-mais-linhas-informativas/)
+    // Ver o e-mail: o texto protegido, como nas filas.
+    await inf.estado.verEmail(inf.estado.linhas[0])
+    html = await inf.html()
+    assert.equal(inf.chamadas.at(-1).url, '/api/atendimento/email/emails/m1')
+    assert.match(html, /data-email-informativo-aberto[\s\S]*?Avisos &lt;avisos@example\.invalid&gt;[\s\S]*?Texto do aviso/)
+    assert.match(html, /fechar o e-mail/)
+    // Fechar o item; abrir o vazio.
+    inf.estado.abrirItem(itensInf[0])
+    assert.equal(inf.estado.aberta, null)
+    assert.deepEqual(inf.estado.linhas, [])
+    inf.estado.abrirItem(itensInf[1])
+    await esperar()
+    assert.match(await inf.html(), /data-pasta-informativa="f2"[\s\S]*?Nenhum e-mail nesta pasta ainda\./)
+    // O sinal das Filas ("atualizar"): relê os itens e as linhas do aberto.
+    const antes = inf.chamadas.length
+    inf.reativo.sinal = 1
+    await Vue.nextTick(); await esperar()
+    assert.deepEqual(inf.chamadas.slice(antes).map((c) => c.url), ['/api/atendimento/email/informativos', '/api/atendimento/email/emails?fila=informativo&pasta=f2'])
+    assert.equal(inf.chamadas.some((c) => c.metodo !== 'GET'), false, 'só leitura')
+    // Nenhuma pasta informativa; a falha.
+    const vazio = montar('../components/AtendimentoMailInformativos.vue', {}, { respostas: { '/api/atendimento/email/informativos': { itens: [] } } })
+    await vazio.montar()
+    assert.match(await vazio.html(), /data-sem-pastas-informativas[^>]*>Nenhuma pasta informativa ainda: escolha a categoria Informativo numa pasta em Pastas e regras\./)
+    const falha = montar('../components/AtendimentoMailInformativos.vue', {}, { respostas: { '/api/atendimento/email/informativos': Object.assign(new Error('403'), { data: { detail: { code: 'atendimento_so_quem_mexe' } } }) } })
+    await falha.montar()
+    assert.match(await falha.html(), /border-red-500\/40[\s\S]*?<\/div>/)
+
+    // Nas Filas: com o chip Informativos (quem mexe), o bloco em cima da lista.
+    const filasFonte = sfc('../components/AtendimentoMailFilas.vue').descriptor.template.content
+    assert.match(filasFonte, /<template v-if="informativosAbertos">\s+<AtendimentoMailInformativos :sinal="sinalInformativos" \/>/)
+    const stubInf = { AtendimentoMailInformativos: { props: ['sinal'], setup: (p) => () => Vue.h('div', { 'data-informativos-stub': String(p.sinal) }) } }
+    const respostasFilas = {
+      '/api/atendimento/email/filas': { sem_loja: 0, informativo: 3 },
+      '/api/atendimento/email/contagens': { aguardando: 0, chamados: 0, chamados_por_tipo: {} },
+      '/api/atendimento/email/saude': { caixas: [{ mailbox_id: 'b1', nome: 'Principal', visibilidade: 'empresa', estado: 'online', ponte_ligada: true, ponte_desde: '2026-10-08T10:00:00Z', envio: { ligado: false }, envios_a_conferir: 0, pastas_sem_revisar: 0, pastas_sem_categoria: 6 }], lojas_sem_caixa_lida: [], lojas_sem_integracao: [] },
+      '/api/atendimento/email/emails': () => ({ itens: [linhaInf('m9', { estado: 'sem_loja', loja: null, pasta: 'INBOX', tipo_pela_pasta: false, tipo_email_inferido: false })], proximo: null }),
+      '/api/atendimento/email/envios': { itens: [] },
+    }
+    const fl = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, { respostas: respostasFilas, filhos: stubInf })
+    await fl.montar()
+    html = await fl.html()
+    assert.match(html, /data-saude-sem-categoria[^>]*>· 6 pasta\(s\) sem categoria guardando e-mail</)
+    assert.match(html, /title="Tipo identificado no conteúdo do e-mail\." data-fila-tipo-email/, 'a Entrada: o tipo pelo conteúdo, como hoje')
+    assert.doesNotMatch(html, /data-informativos-stub|data-informativos-abaixo/)
+    fl.estado.escolherTipoEmail('informativo')
+    await esperar()
+    html = await fl.html()
+    assert.match(html, /data-informativos-stub="0"[\s\S]*?data-informativos-abaixo[^>]*>Abaixo, “Sem loja” com o tipo Informativo: os e-mails da Entrada \(que liga como hoje\)/)
+    assert.ok(fl.chamadas.at(-1).url.includes('tipo_email=informativo'), 'a fila de baixo continua filtrada')
+    await fl.estado.atualizar()
+    assert.match(await fl.html(), /data-informativos-stub="1"/, '"atualizar" relê as pastas informativas')
+    fl.estado.verFila('todas')
+    fl.estado.pastasAbertas = true
+    assert.doesNotMatch(await fl.html(), /data-informativos-stub/, 'Pastas e regras aberta: sem o bloco')
+    fl.estado.verFila('revisar_envio')
+    await esperar()
+    assert.doesNotMatch(await fl.html(), /data-informativos-stub/, 'revisar envio: sem os chips nem o bloco')
+    fl.estado.verFila('sem_loja')
+    fl.estado.escolherTipoEmail('chamado')
+    await esperar()
+    assert.doesNotMatch(await fl.html(), /data-informativos-stub/, 'outro chip: sem o bloco')
+    // A linha de pasta criada: a dica diz que o tipo veio da categoria da pasta.
+    respostasFilas['/api/atendimento/email/emails'] = () => ({ itens: [linhaInf('m8', { estado: 'sem_vinculo', pasta: 'problema ml', tipo_email: 'chamado' })], proximo: null })
+    fl.estado.escolherTipoEmail('chamado')
+    await esperar()
+    assert.match(await fl.html(), /title="Tipo pela categoria da pasta «problema ml» \(Pastas e regras\)\." data-fila-tipo-email/)
+    // Quem só lê: nunca o bloco (a rota é de quem mexe).
+    const leitor = montar('../components/AtendimentoMailFilas.vue', { isAdmin: false, lojas: [], podeMexer: false }, {
+      respostas: { '/api/atendimento/email/contagens': { aguardando: 0, chamados: 0, chamados_por_tipo: {} }, '/api/atendimento/conversas': { itens: [], proximo: null } },
+      filhos: stubInf,
+    })
+    await leitor.montar()
+    leitor.estado.escolherTipoEmail('informativo')
+    await esperar()
+    assert.doesNotMatch(await leitor.html(), /data-informativos-stub|data-informativos-abaixo/)
+    assert.equal(leitor.chamadas.some((c) => /informativos/.test(c.url)), false)
+  }
+
   // ------------------------------------------------ W4: "E-mails da venda" no painel ④
   {
     assert.ok(rotasEmail.includes('@router.get("/conversas/{conversa_id}/emails-da-venda")'))
@@ -1748,7 +2127,7 @@ async function principal() {
   // ------------------------------------------------ a caixa da aba: o mesmo aviso da fila do e-mail
   assert.match(web('components/AtendimentoAbaResposta.vue'), /if \(ehEmail\.value\) toasts\.success\(`\$\{AVISO_EMAIL_NA_FILA\.titulo\} \(\$\{r\.canal_rotulo \|\| 'outra conversa'\}\)`, AVISO_EMAIL_NA_FILA\.texto\)/)
 
-  console.log('ok — atendimento-mail-atendimento: contrato, regras, seções, filas (e as de conversa), configurar, prévia, cartão, chamado, caixa da aba, conversa, o e-mail fora da Caixa (lista, página, barra), pastas e regras, e-mails da venda')
+  console.log('ok — atendimento-mail-atendimento: contrato, regras, seções, filas (e as de conversa), configurar, prévia, cartão, chamado, caixa da aba, conversa, o e-mail fora da Caixa (lista, página, barra), pastas e regras (com a categoria da pasta), pastas informativas, e-mails da venda')
 }
 
 principal().catch((e) => {

@@ -39,7 +39,7 @@ async def _caso(db, cena, caso="12345678", numero=X, **kwargs):
     mid = await entrar(
         db,
         kwargs.pop("caixa", cena.geral),
-        pasta="problema ml",
+        pasta="INBOX",
         de="nao-responder@mercadolivre.com.br",
         assunto=f"Case: {caso}" + (f" Pedido {numero}" if numero else ""),
         corpo=kwargs.pop("corpo", "Mensagem deste caso."),

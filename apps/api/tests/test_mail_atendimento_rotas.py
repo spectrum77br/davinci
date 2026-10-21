@@ -184,7 +184,7 @@ async def test_cartoes_da_conversa_para_quem_le(db, cena, client, quem_le):
     r = await client.get(f"{EMAIL}/conversas/{meta.conversa_id}/emails")
     assert r.status_code == 200, r.text
     [cartao] = r.json()["emails"]
-    assert cartao["alias"] == "21max@tuta.com" and cartao["pasta"] == "problema ml"
+    assert cartao["alias"] == "21max@tuta.com" and cartao["pasta"] == "INBOX"
     assert "token=abc" not in cartao["texto"] and cartao["links_removidos"] == 1
     [anexo] = cartao["anexos"]
     assert anexo["filename"] == "foto.jpg"
@@ -248,7 +248,7 @@ async def test_rf6_sugere_e_agrupa_chamados_da_mesma_cliente(db, cena, client, a
             await entrar(
                 db,
                 cena.geral,
-                pasta="*uranyx sac",
+                pasta="INBOX",
                 de="sac@uranyx.com.br",
                 para=["sac@uranyx.com.br"],
                 assunto=f"[{protocolo}] Dúvida",
@@ -291,7 +291,7 @@ async def test_rf6_nao_agrupa_outra_cliente(db, cena, client, admin):
             await entrar(
                 db,
                 cena.geral,
-                pasta="*uranyx sac",
+                pasta="INBOX",
                 de="sac@uranyx.com.br",
                 para=["sac@uranyx.com.br"],
                 assunto=f"[US-26-001{n}] Dúvida",
@@ -372,9 +372,37 @@ async def test_pasta_e_regra_mudam_o_que_entra(db, cena, client, admin):
     assert len(regras) == 25 and any(x["palavra"] == "mercado" for x in regras)
     nova = await entrar(db, cena.geral, pasta="mensagens mercado")
     await rodar(db)
-    assert (await meta_de(db, nova)).plataforma == "ml"
+    # 21/10/2026: a pasta nova nasce SEM categoria — o e-mail fica guardado sem
+    # ligar (nada em claro), mesmo com a plataforma pela palavra nova.
+    guardado = await meta_de(db, nova)
+    assert (guardado.estado, guardado.motivo) == ("ignorado", "pasta_sem_categoria")
+    assert guardado.plataforma is None and guardado.alias_recebido is None
     pasta = await db.scalar(select(MailFolder).where(MailFolder.chave == "mensagens mercado"))
-    assert pasta.ler == "corpo"
+    assert pasta.ler == "corpo" and pasta.categoria is None
+    item = next(
+        p for p in (await client.get(f"{EMAIL}/pastas")).json()["itens"] if p["id"] == str(pasta.id)
+    )
+    # A sugestão (decisão 9 do dono): nenhuma — "mensagens" segue o padrão novo
+    # (nunca Chamado; "Site (como hoje)" só nas caixas de site).
+    assert (item["plataforma"], item["categoria"], item["categoria_sugerida"]) == (
+        "ml",
+        None,
+        None,
+    )
+    assert item["guardados"] == 1 and item["travada"] is False
+    # Uma pessoa escolhe a categoria: o que estava guardado é relido na volta seguinte.
+    r = await client.patch(f"{EMAIL}/pastas/{pasta.id}", json={"categoria": "venda"})
+    assert r.status_code == 200, r.text
+    assert (r.json()["categoria"], r.json()["relidos"]) == ("venda", 1)
+    assert await meta_de(db, nova) is None
+    await rodar(db)
+    ligado = await meta_de(db, nova)
+    assert (ligado.estado, ligado.motivo, ligado.plataforma, ligado.regras_versao) == (
+        "gravado",
+        None,
+        "ml",
+        2,
+    )
 
 
 # ─────────────── reprocessar ───────────────

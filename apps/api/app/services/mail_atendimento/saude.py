@@ -58,7 +58,13 @@ from app.redis_client import redis
 from app.services import mail_central
 from app.services.mail_atendimento import administracao, ponte, rotear
 from app.services.mail_atendimento import caixa as config_caixa
-from app.services.mail_atendimento.constantes import ESTADO_NOVO
+from app.services.mail_atendimento.constantes import (
+    ESTADO_IGNORADO,
+    ESTADO_NOVO,
+    IGNORADO_PASTA_SEM_CATEGORIA,
+    KIND_IMPORTADOS,
+    KIND_PESSOAL,
+)
 
 logger = structlog.get_logger()
 
@@ -73,6 +79,8 @@ JANELA_PONTE = timedelta(days=1)
 ESTADOS_RUINS = ("login_required", "error")
 # O carimbo da última volta da ponte (o worker grava; a faixa lê).
 CHAVE_PONTE_OK = "davinci:mail:ponte:ultimo_ok"
+# As pastas criadas pela equipe (só elas têm categoria): pessoal e importados.
+KINDS_CRIADAS = (KIND_PESSOAL, KIND_IMPORTADOS)
 
 MOTIVO_LOGIN = "o Tuta pediu para entrar de novo"
 MOTIVO_ERRO = "o agente do Mac avisou erro"
@@ -315,6 +323,26 @@ async def linha_da_caixa(
         )
         or 0
     )
+    # 21/10/2026: a pasta CRIADA sem categoria não liga — quantas receberam
+    # e-mail na última semana (o que está chegando e ficando guardado).
+    pastas_sem_categoria = int(
+        await session.scalar(
+            select(func.count(func.distinct(MailFolder.id)))
+            .select_from(MailFolder)
+            .join(MailMessageMeta, MailMessageMeta.folder_id == MailFolder.id)
+            .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
+            .where(
+                MailFolder.mailbox_id == mailbox.id,
+                MailFolder.categoria.is_(None),
+                MailFolder.sumiu_em.is_(None),
+                func.coalesce(MailFolder.tipo_tuta, KIND_PESSOAL).in_(KINDS_CRIADAS),
+                MailMessageMeta.estado == ESTADO_IGNORADO,
+                MailMessageMeta.motivo == IGNORADO_PASTA_SEM_CATEGORIA,
+                MailMessage.received_at >= agora - timedelta(days=7),
+            )
+        )
+        or 0
+    )
     a_conferir = int(
         await session.scalar(
             select(func.count())
@@ -364,6 +392,7 @@ async def linha_da_caixa(
         "emails": contagens,
         # Revisão de pasta é global, não uma contagem de mensagens permitidas.
         "pastas_sem_revisar": None if filtrada else pastas_novas,
+        "pastas_sem_categoria": None if filtrada else pastas_sem_categoria,
         "envios_a_conferir": a_conferir,
     }
 

@@ -24,6 +24,15 @@ Rascunhos, Arquivo e Agendados só são CONTADOS. Pasta pessoal sem palavra de
 plataforma nem de marca: só contada (aviso "escolher plataforma ou ignorar").
 Uma PESSOA pode escolher a plataforma (ou "ignorar") de qualquer pasta — vale
 mais que a regra. Veio do wt-tuta (`tuta/regras.py`), agora por caixa.
+
+A CATEGORIA da pasta criada (21/10/2026, decisões do dono — Venda · Chamado ·
+Informativo · "Site (como hoje)") é de pessoa: a regra nunca a grava, apenas
+SUGERE (`categoria_sugerida`; a 0424 só semeou "vendas *" = venda, decisão 5,
+e as pastas de site da Uranyx e da Charlots = site, decisão 9). A pasta com
+uma categoria que decide o tipo (venda, chamado, informativo) lê o corpo (o
+conector manda o e-mail); a "Site (como hoje)" e a SEM categoria ficam com o
+`ler` de sempre — o conector continua mandando o que mandava (e a ponte, ao
+reler quando alguém escolhe, acha o corpo que já subiu).
 """
 
 from __future__ import annotations
@@ -37,8 +46,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.mail_atendimento import AtendimentoRegraPastaEmail, MailFolder
 from app.services.mail_atendimento.constantes import (
+    CATEGORIA_SITE,
+    CATEGORIA_VENDA,
+    CATEGORIAS_PASTA,
+    CATEGORIAS_PELA_PASTA,
     FINALIDADE_ENTRADA,
     FINALIDADE_ENVIADOS,
+    FINALIDADE_VENDAS,
     KIND_ENTRADA,
     KIND_ENVIADOS,
     KIND_IMPORTADOS,
@@ -271,15 +285,60 @@ def efetiva(pasta: MailFolder, regras: Regras) -> Classe:
     )
 
 
+def e_criada(tipo_tuta: str | None) -> bool:
+    """A pasta que a EQUIPE criou (pessoal/importados): só ela tem categoria.
+    Entrada, Enviados, Lixeira, Spam, Arquivo, marcadores: travadas."""
+    return tipo_da_pasta(tipo_tuta) == "pessoal"
+
+
+def categoria_que_vale(pasta: MailFolder) -> str | None:
+    """A categoria gravada, só numa pasta criada (a do sistema nunca vale)."""
+    categoria = getattr(pasta, "categoria", None)
+    if categoria not in CATEGORIAS_PASTA or not e_criada(pasta.tipo_tuta):
+        return None
+    return categoria
+
+
+def categoria_sugerida(classe: Classe, tipo_tuta: str | None) -> str | None:
+    """A SUGESTÃO de categoria para a tela (PURA; nunca é gravada sozinha).
+
+    Com o que a regra de palavras (mais a escolha de pessoa) já diz da pasta:
+    "vendas <marketplace>" → venda; a caixa de um site ("*marca …") → "Site
+    (como hoje)" (o que ela fazia até 21/10: o chamado RF6 pelo protocolo). O
+    resto — mensagens/problema/reclamação (decisão 9 do dono: "o resto já vem
+    esse novo padrão"), a pasta que só se conta, sem plataforma — e as pastas
+    do sistema: sem sugestão.
+
+    NUNCA sugere "Chamado (Pós-venda)" (revisão de 21/10): o dono não liga
+    nenhuma pasta a chamado por enquanto, o "ligar à mão" ainda não tem tela e,
+    no site, o chamado nunca acha pedido (tudo ficaria guardado como
+    `chamado_sem_pedido` — a rota recusa Chamado em pasta de site).
+    """
+    if not e_criada(tipo_tuta) or not classe.ler:
+        return None
+    if classe.plataforma == PLATAFORMA_SITE:
+        return CATEGORIA_SITE
+    if classe.plataforma in PLATAFORMAS_PASTA and classe.finalidade == FINALIDADE_VENDAS:
+        return CATEGORIA_VENDA
+    return None
+
+
 def ler_da_pasta(pasta: MailFolder, classe: Classe) -> str:
-    """O `ler` gravado: `nao` (pessoa mandou ignorar), `corpo` ou `so_contar`."""
+    """O `ler` gravado: `nao` (pessoa mandou ignorar), `corpo` ou `so_contar`.
+
+    A pasta criada com uma categoria que decide o tipo (venda, chamado,
+    informativo) lê o corpo (a pessoa que escolheu liberou); "Site (como
+    hoje)" e SEM categoria, o de sempre pela regra."""
     if pasta.ignorar:
         return LER_NAO
-    return LER_CORPO if classe.ler else LER_SO_CONTAR
+    pela_pasta = categoria_que_vale(pasta) in CATEGORIAS_PELA_PASTA
+    return LER_CORPO if classe.ler or pela_pasta else LER_SO_CONTAR
 
 
 def reclassificar(pasta: MailFolder, regras: Regras) -> Classe:
-    """Grava na pasta o que a regra diz e o `ler` de agora; devolve a classe que vale."""
+    """Grava na pasta o que a regra diz e o `ler` de agora; devolve a classe que vale.
+
+    Nunca mexe na `categoria` (só uma pessoa escolhe)."""
     pela_regra = classificar(pasta.nome, pasta.tipo_tuta, regras)
     classe = efetiva(pasta, regras)
     pasta.plataforma = pela_regra.plataforma
