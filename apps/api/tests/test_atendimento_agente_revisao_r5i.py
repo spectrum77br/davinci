@@ -722,7 +722,10 @@ APPLE_WATCH = {
 
 def test_8_a_frase_do_prompt_passa_e_as_que_ele_proibe_nao():
     produto = prompt.bloco_geral()
-    assert "só pelo TÍTULO do anúncio, nunca pela descrição, atributo ou variação" in produto
+    # Fontes v1.3, item 10 (dono, 21/10/2026): no agente, a condição vem da
+    # "condicao" da ficha (título, atributo ou descrição); a trava só do título
+    # (`evidencias`, logo abaixo) é a do legado e não mudou.
+    assert 'original) só pela "condicao" da ficha' in produto
     assert (
         "diga o que o título traz (marca e modelo) e que a compra é protegida pela plataforma"
         in produto

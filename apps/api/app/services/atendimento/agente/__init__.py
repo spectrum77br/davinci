@@ -121,6 +121,11 @@ MOTIVO_PRAZO = "o agente passou do prazo duas vezes"
 MOTIVO_PROVEDOR_DEMOROU = "o agente não concluiu: o provedor não respondeu a tempo duas vezes"
 MOTIVO_PROVEDOR_FALHOU = "o agente não concluiu: o provedor falhou três vezes seguidas"
 MOTIVO_SEM_RESPOSTA = "o agente concluiu que a mensagem não pede resposta"
+# Kia ao vivo (21/10/2026): o turno só de "ok"/"obrigada"/"aguardando" depois
+# de a loja já ter tratado o assunto (`acao_pessoa.turno_so_de_reconhecimento`).
+MOTIVO_JA_TRATADO = (
+    "o cliente só agradeceu ou confirmou depois de a loja tratar o assunto — não pede resposta"
+)
 
 # O prazo estourado na 1ª vez não grava rascunho e tenta na próxima rodada; a
 # 2ª vai para pessoa (contador por gatilho no Redis, 1 dia). O mesmo para a
@@ -761,6 +766,28 @@ def _nao_pede_resposta(
     )
 
 
+def _ja_tratado_pela_loja(
+    p: Proposta,
+    conferida: SaidaConferida,
+    ctx: ContextoAgente,
+    base: BaseDoGerar,
+    gatilho: Any | None,
+) -> bool:
+    """O cliente só agradeceu/confirmou ("Ok Aguardando", "Obrigada") depois de a
+    loja tratar o assunto, e nada do CÓDIGO segura? (Kia ao vivo, 21/10/2026,
+    rascunho 15da122e: o agente repetiu a orientação e pediu `abrir_chamado`
+    que a equipe já tinha prometido.) Então não há o que responder, seja o que
+    o modelo propôs — menos a linha curta de cortesia dele ("Por nada!
+    Qualquer coisa, estamos à disposição."), que sai como sempre. Não no
+    "Sugerir" (a pessoa pediu a sugestão)."""
+    if base.forcar or ctx.acoes_codigo:
+        return False
+    if not acao_pessoa.turno_so_de_reconhecimento(base.recentes, gatilho):
+        return False
+    cortesia = checagens.so_cortesia_de_fechamento(conferida.texto)
+    return not (p.acao == saida.RESPONDER and not ctx.acoes_modelo and cortesia)
+
+
 async def responder(
     session: AsyncSession,
     conversa: AtendimentoConversa,
@@ -1029,10 +1056,16 @@ async def _responder(
     ]
     if da_etiqueta:
         chk = checagens.Checagens(pendencias=[*chk.pendencias, *da_etiqueta])
-    if _nao_pede_resposta(p, conferida, ctx, base):
+    ja_tratado = _ja_tratado_pela_loja(p, conferida, ctx, base, gatilho)
+    if ja_tratado or _nao_pede_resposta(p, conferida, ctx, base):
         # "ok", "obrigado", aviso: nada a responder e nada que segure — o
         # rascunho DESCARTADO marca o gatilho como tratado (o cron não volta
-        # nele) e não entra na Caixa Humano (revisão de 20/10/2026).
+        # nele) e não entra na Caixa Humano (revisão de 20/10/2026). O turno só
+        # de reconhecimento depois de a loja tratar (Kia ao vivo, 21/10/2026):
+        # a ação de pessoa que o modelo pediu de novo sai junto (a equipe já fez
+        # ou prometeu; o acompanhamento é dela).
+        if ja_tratado:
+            ctx.acoes_modelo = []
         ctx.parada = PARADA_SEM_RESPOSTA
         ex._ms()
         return ex.pronto(
@@ -1042,7 +1075,7 @@ async def _responder(
                 categoria=conferida.categoria,
                 confianca=saida.confianca(p),
                 precisa_humano=False,
-                motivo=MOTIVO_SEM_RESPOSTA,
+                motivo=MOTIVO_JA_TRATADO if ja_tratado else MOTIVO_SEM_RESPOSTA,
                 validador_ok=True,
                 validador_erros=[],
                 status=constantes.RASCUNHO_DESCARTADO,

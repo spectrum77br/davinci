@@ -857,7 +857,17 @@ def ficha_bruta_shopee(item: Any) -> dict | None:
     marca = _texto(_dict(it.get("brand")).get("original_brand_name"))
     if marca:
         raw["brand"] = {"original_brand_name": marca}
-    return _bruta(it.get("item_name"), _descricao_do_raw(it), raw)
+    return _com_condicao_do_item(_bruta(it.get("item_name"), _descricao_do_raw(it), raw), it)
+
+
+def _com_condicao_do_item(bruta: dict | None, item: dict) -> dict | None:
+    """A ficha crua com o `condition` do item ("NEW"/"USED" da Shopee, "new" do ML),
+    quando ela já existe (21/10/2026: só o agente lê, `condicao_anuncio`; a
+    `montar_ficha` não o usa — o legado não muda)."""
+    condicao = _texto(item.get("condition"))
+    if bruta is not None and condicao:
+        bruta["raw"]["condition"] = condicao
+    return bruta
 
 
 def ficha_bruta_ml(body: Any, descricao: Any = None) -> dict | None:
@@ -876,7 +886,9 @@ def ficha_bruta_ml(body: Any, descricao: Any = None) -> dict | None:
             lista.append(
                 {"id": _texto(a.get("id")), "name": nome, "value_name": valor, "values": valores}
             )
-    return _bruta(b.get("title"), descricao, {"attributes": lista} if lista else {})
+    return _com_condicao_do_item(
+        _bruta(b.get("title"), descricao, {"attributes": lista} if lista else {}), b
+    )
 
 
 def ficha_bruta_tiktok(data: Any) -> dict | None:
@@ -1153,6 +1165,7 @@ async def ficha_do_anuncio(
     com_variacoes: bool = False,
     variacoes_na_loja: bool = False,
     teto_variacoes: int | None = None,
+    com_condicao: bool = False,
 ) -> dict | None:
     """A ficha de UM anúncio: a fresca; o catálogo; a loja; o mesmo produto em outro anúncio.
 
@@ -1167,9 +1180,22 @@ async def ficha_do_anuncio(
     `variacoes.na_ficha`); `variacoes_na_loja` deixa ir à loja só por elas
     (com `loja`); `teto_variacoes` = quantas no máximo (padrão
     `variacoes.MAX_VARIACOES_FICHA`).
+
+    `com_condicao` (SÓ o agente, 21/10/2026; fontes v1.3 item 10): a ficha
+    DESTE anúncio ganha a "condicao" que ele declara no título, no atributo de
+    condição ou na descrição CRUA (`condicao_anuncio.condicao_do_anuncio`); a
+    do mesmo produto em OUTRO anúncio nunca.
     """
     # Import tardio: `ficha_loja` e `variacoes` importam este módulo.
-    from app.services.atendimento import ficha_loja
+    from app.services.atendimento import condicao_anuncio, ficha_loja
+
+    def _condicao(ficha: dict, titulo_lido: Any, descricao: Any, raw: Any) -> dict:
+        if not com_condicao:
+            return ficha
+        if not (isinstance(descricao, str) and descricao.strip()):
+            descricao = _descricao_do_raw(_base(raw))
+        condicao = condicao_anuncio.condicao_do_anuncio(titulo_lido, descricao, _base(raw))
+        return {**ficha, "condicao": condicao} if condicao else ficha
 
     async def _com_variacoes(ficha: dict, titulo_atual: str | None) -> dict:
         """A ficha com as variações (só com `com_variacoes`) — falha delas nunca tira a ficha.
@@ -1218,6 +1244,9 @@ async def ficha_do_anuncio(
     if fresca is not None:
         ficha = _ficha_da_loja(fresca, plataforma, titulo, palavras)
         if ficha is not None:
+            ficha = _condicao(
+                ficha, fresca.get("titulo") or titulo, fresca.get("descricao"), fresca.get("raw")
+            )
             return await _propria(ficha, _texto(fresca.get("titulo")))
     for nome, descricao, raw, _plat, integracao in await _do_catalogo(
         session, plataforma, item_id, integration_id
@@ -1226,6 +1255,7 @@ async def ficha_do_anuncio(
             continue
         ficha = montar_ficha(titulo or nome, descricao, raw, palavras=palavras)
         if ficha is not None:
+            ficha = _condicao(ficha, titulo or nome, descricao, raw)
             if integracao == integration_id:
                 return await _propria(ficha)
             return await _com_variacoes(ficha, titulo)
@@ -1233,8 +1263,11 @@ async def ficha_do_anuncio(
         # Sem fresca nem catálogo válido: o anúncio direto da loja da conversa.
         bruta = await ficha_loja.ficha_da_loja(session, loja, plataforma, item_id)
         ficha = _ficha_da_loja(bruta, plataforma, titulo, palavras) if bruta else None
-        if ficha is not None:
-            return await _propria(ficha, _texto(bruta.get("titulo")) if bruta else None)
+        if ficha is not None and bruta:
+            ficha = _condicao(
+                ficha, bruta.get("titulo") or titulo, bruta.get("descricao"), bruta.get("raw")
+            )
+            return await _propria(ficha, _texto(bruta.get("titulo")))
     for nome, descricao, raw, plat in await _do_mesmo_produto(session, plataforma, item_id):
         ficha = montar_ficha(nome, descricao, raw, palavras=palavras)
         if ficha is None:

@@ -267,7 +267,9 @@ class Resultado:
     `garantias` = só `ver_garantia`: o que vai para
     `ctx.registrar_garantias`; `ids_rastro` = ids que só vão ao rastro
     (os `par:<id>` dos exemplos); `produto` = só `ver_anuncio`: o JSON é texto
-    de produto (as formas soltas dos números, `contexto.numeros_soltos`).
+    de produto (as formas soltas dos números, `contexto.numeros_soltos`);
+    `fatos` = só `consultar_manual`: os fatos aprovados devolvidos ({"id",
+    "texto"}), para `ctx.registrar_fatos` (Kia ao vivo, 21/10/2026).
     """
 
     dados: dict
@@ -276,6 +278,7 @@ class Resultado:
     garantias: tuple[dict, ...] = ()
     ids_rastro: tuple[str, ...] = ()
     produto: bool = False
+    fatos: tuple[dict, ...] = ()
 
 
 # ── Formato ───────────────────────────────────────────────────────────────
@@ -419,6 +422,8 @@ async def executar(
             )
             if nome == VER_GARANTIA or r.garantias:
                 ctx.registrar_garantias(r.garantias)
+            if r.fatos:
+                ctx.registrar_fatos(r.fatos)
         ctx.registrar_passo(nome, args, _ms(), ids=[*r.ids, *r.ids_rastro], cortado=texto != bruto)
         return texto
     except ForaDoEscopo:
@@ -708,6 +713,7 @@ async def dados_ver_anuncio(
             loja=loja,
             com_variacoes=True,
             variacoes_na_loja=loja is not None,
+            com_condicao=True,
         )
         titulo = (f or {}).get("titulo") or titulo_atual
         restricao = await restricao_envio.restricao_do_anuncio(
@@ -729,12 +735,18 @@ async def dados_ver_anuncio(
                     dict(v) for v in (f or {}).get("variacoes") or [] if isinstance(v, Mapping)
                 ],
                 "variacoes_completas": (f or {}).get("variacoes_completas") is True,
+                # A condição do anúncio (fontes v1.3, item 10) só prova a do
+                # anúncio DA CONVERSA (citado ou item do pedido).
+                "condicao": (f or {}).get("condicao"),
+                "da_conversa": citado is not None,
             }
         )
     if f:
         dados["atributos"] = list(f.get("atributos") or [])
         dados["descricao"] = f.get("descricao")
         dados["fonte"] = f.get("fonte")
+        if f.get("condicao"):
+            dados["condicao"] = f["condicao"]
         if f.get("titulo_do_outro_anuncio"):
             dados["titulo_do_outro_anuncio"] = f["titulo_do_outro_anuncio"]
         ids.append(contexto.id_ficha(item))
@@ -1361,6 +1373,9 @@ async def dados_consultar_manual(
         dados["por_cima_da_regra"] = por_cima
     if len(regras) > 1:
         dados["mais_regras"] = regras[1:]
+    # O caminho do app com as palavras da plataforma da conversa (eval cego do
+    # TikTok, 21/10/2026: "Minhas compras" do manual ia para o comprador do TikTok).
+    dados = prompt.no_app_da_plataforma(dados, ctx.plataforma)
     # O que cabe: os fatos (já por relevância) valem mais que as respostas
     # prontas, e estas mais que as regras extras.
     dados = caber(dados, listas=("fatos", "respostas_prontas", "mais_regras"))
@@ -1368,7 +1383,11 @@ async def dados_consultar_manual(
         dados.pop("mais_regras", None)
     ids = [contexto.id_regra(assunto)] if regras or orientacao else []
     ids += [p["id"] for p in dados["respostas_prontas"]] + [f["id"] for f in dados["fatos"]]
-    return Resultado(dados=dados, ids=tuple(ids))
+    return Resultado(
+        dados=dados,
+        ids=tuple(ids),
+        fatos=tuple({"id": f["id"], "texto": f.get("texto")} for f in dados["fatos"]),
+    )
 
 
 # ── 5. buscar_respostas_equipe ────────────────────────────────────────────

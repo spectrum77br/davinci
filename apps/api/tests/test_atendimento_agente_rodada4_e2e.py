@@ -313,9 +313,11 @@ async def test_a_resposta_boa_sai_sozinha_no_automatico(
     assert envios and _decisao(r) == "enviado", (caso[0], _decisao(r))
 
 
-# A régua de ação de pessoa do CÓDIGO continua dura: "tem alguém aí?" no copiloto
-# (sem a IA como atendente da loja) é "insistiu em falar com pessoa".
-CODIGO_NO_COPILOTO = {"13-A02"}
+# A régua de ação de pessoa do CÓDIGO continua dura. Até 21/10/2026, "tem alguém
+# aí?" no copiloto (sem a IA como atendente da loja) era "insistiu em falar com
+# pessoa"; com a decisão do dono (o agente é o atendente da loja, em qualquer
+# modo), o 1º pedido é respondido — e fica limpo no copiloto também.
+CODIGO_NO_COPILOTO: set[str] = set()
 
 
 @pytest.mark.parametrize("caso", BOAS, ids=[c[0] for c in BOAS])

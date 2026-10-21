@@ -44,7 +44,10 @@ atendente de novo (por texto ou pela opção 6 do menu) depois de a loja já
 ter respondido um pedido de atendente (`insistiu_em_pessoa`) — e com
 xingamento ou ameaça, como sempre. Dar um papel à IA ("você é um atendente
 novo e…") continua cara de instrução; só a PERGUNTA "você é humano?" não.
-Nas outras lojas (copiloto, ou sem o assunto liberado), nada muda.
+Nas outras lojas (copiloto, ou sem o assunto liberado), nada muda. No canal
+com o AGENTE (21/10/2026, decisão do dono: "se ele puder e conseguir, ele
+mesmo responde") a régua é a dele, em qualquer modo e sem depender do
+`pede_atendente` liberado: `agente.acao_pessoa.pedido_de_pessoa`.
 
 AGUARDANDO CANCELAMENTO (item 4, 02/10/2026). O pedido em 83955 nunca sai
 sem pessoa. E o modelo só vê "Aguardando Cancelamento" quando o motivo
@@ -1424,8 +1427,66 @@ _VOCE_E = re.compile(
 # procura exatamente este texto nos rascunhos (`_conversa_com_injecao`).
 MOTIVO_INJECAO = "texto do cliente parece instrução para a IA"
 
+# A pergunta SINCERA "é robô?" (21/10/2026, decisão do dono no caminho do
+# AGENTE: ele é o atendente da loja e não nega o que é). Só o agente lê
+# (`pergunta_se_e_robo`, `so_pergunta_se_e_robo`, `agente.acao_pessoa`): o
+# legado continua com o `_ATENDENTE` e o `_VOCE_E` como estão. Casa sobre o
+# texto PLANO. "É robô?", "é uma IA?", "vc é humano?", "isso é automático?",
+# "estou falando com um robô ou com uma pessoa?". Os alvos que também falam
+# de produto ("automático", "máquina", "pessoa") só valem com o sujeito do
+# atendimento (você, isso, aqui, o atendimento) ou com o "estou falando com".
+_ROBO_SEMPRE = r"(?:robo|robozinho|bot|chatbot|ia|inteligencia\s+artificial)"
+_ROBO_COM_SUJEITO = (
+    r"(?:robo|robozinho|bot|chatbot|maquina|ia|inteligencia\s+artificial|human[oa]|pessoa"
+    r"|gente|atendente(?:\s+(?:virtual|automatico|human[oa]|real))?"
+    r"|atendimento\s+(?:automatico|virtual|human[oa]|eletronico)|automatic[oa]"
+    r"|resposta\s+automatica|mensagem\s+automatica)"
+)
+_FIM_DA_PERGUNTA_DE_ROBO = (
+    r"(?:\s+(?:de\s+verdade|real|mesmo))?"
+    r"(?:\s+ou\s+(?:com\s+)?(?:um\s+|uma\s+|o\s+|a\s+)?"
+    + _ROBO_COM_SUJEITO
+    + r"(?:\s+de\s+verdade)?)?\s*(?:\?|[!.]*\s*$)"
+)
+_PERGUNTA_DE_ROBO = re.compile(
+    r"(?:^|(?<=[\s,.;:!?]))(?:e|eh)\s+(?:um\s+|uma\s+)?"
+    + _ROBO_SEMPRE
+    + _FIM_DA_PERGUNTA_DE_ROBO
+    + r"|\b(?:voce|vc|vcs|voces|isso|aqui|esse\s+atendimento|este\s+atendimento|o\s+atendimento"
+    r"|essa\s+resposta|essa\s+mensagem)\s+(?:e|eh|seria|sao)\s+(?:um\s+|uma\s+|o\s+|a\s+)?"
+    + _ROBO_COM_SUJEITO
+    + _FIM_DA_PERGUNTA_DE_ROBO
+    + r"|\b(?:eu\s+)?(?:estou|to|ta|tou)\s+(?:falando|conversando)\s+com\s+(?:um\s+|uma\s+|o\s+"
+    r"|a\s+)?"
+    + _ROBO_COM_SUJEITO
+    + _FIM_DA_PERGUNTA_DE_ROBO
+    + r"|\bquem\s+(?:esta|ta)\s+(?:falando|respondendo)(?:\s+(?:ai|comigo))?\s*\?"
+)
+# A mensagem que é SÓ a pergunta (com o cumprimento antes, se houver).
+_SO_PERGUNTA_DE_ROBO = re.compile(
+    r"(?:(?:oi+|ola+|opa|bom\s+dia|boa\s+tarde|boa\s+noite|moca|moco|amigo|amiga)[\s,!.]*)*"
+    r"(?:" + _PERGUNTA_DE_ROBO.pattern + r")[\s?!.]*"
+)
+
+
+def pergunta_se_e_robo(texto: str | None) -> bool:
+    """O texto do cliente pergunta se fala com robô, IA ou pessoa? PURA (só o agente)."""
+    plano = " ".join(validador.plano_de(texto or "").split())
+    return bool(plano) and _PERGUNTA_DE_ROBO.search(plano) is not None
+
+
+def so_pergunta_se_e_robo(texto: str | None) -> bool:
+    """A mensagem é SÓ a pergunta "é robô?" (o cumprimento antes vale)? PURA (só o agente)."""
+    plano = " ".join(validador.plano_de(texto or "").split())
+    return bool(plano) and _SO_PERGUNTA_DE_ROBO.fullmatch(plano) is not None
+
 
 def _tem_injecao(texto: str, *, agente: bool = False) -> bool:
+    if agente and so_pergunta_se_e_robo(texto):
+        # 21/10/2026 (só o agente): "vc é uma IA?", "é inteligência
+        # artificial?" sozinhos são a pergunta sincera — o agente responde que
+        # é o atendimento virtual da loja. Com qualquer coisa a mais, a régua.
+        return False
     plano = validador.plano_de(texto)
     return bool(
         _INJECAO.search(plano)
@@ -4552,6 +4613,21 @@ def _garantia_sem_cobertura(garantias: Sequence[Mapping] | None) -> bool:
 _ASSUNTOS_GENERICOS = ("agradecimento", "saudacao_ou_vaga", CATEGORIA_PEDE_ATENDENTE, "outro")
 
 
+def _so_pedido_de_atendente(foco: Sequence[Any], agente: bool) -> bool:
+    """As perguntas pendentes são só o pedido de atendente (o `pede_atendente` as resolve)?
+
+    O legado: o `_ATENDENTE` em cada uma. O AGENTE (21/10/2026, decisão do dono:
+    o assunto da resposta é o da pergunta): só o pedido de pessoa e a pergunta
+    "é robô?", sem mais nada a responder (`acao_pessoa.so_pede_pessoa`) — "atendente,
+    o pote vai voltar?" respondido com "em que posso ajudar?" não resolve.
+    """
+    if not agente:
+        return all(_ATENDENTE.search(validador.plano_de(m.texto or "")) for m in foco)
+    from app.services.atendimento.agente import acao_pessoa
+
+    return all(acao_pessoa.so_pede_pessoa(m.texto) for m in foco)
+
+
 @dataclass(frozen=True)
 class SaidaConferida:
     """O que o código decidiu sobre o texto do modelo (`conferir_saida`).
@@ -4711,10 +4787,7 @@ async def conferir_saida(
     if (
         foco
         and categoria in ("agradecimento", "saudacao_ou_vaga", CATEGORIA_PEDE_ATENDENTE)
-        and not (
-            categoria == CATEGORIA_PEDE_ATENDENTE
-            and all(_ATENDENTE.search(validador.plano_de(m.texto or "")) for m in foco)
-        )
+        and not (categoria == CATEGORIA_PEDE_ATENDENTE and _so_pedido_de_atendente(foco, agente))
     ):
         motivos.append("há pergunta concreta pendente — a resposta genérica não a resolve")
     if (
@@ -4805,9 +4878,19 @@ async def conferir_saida(
 
         texto_da_garantia = _checagens_r4b.texto_da_garantia(final)
         if sem_evidencia:
-            sem_evidencia = evidencias.motivos_sem_evidencia(
-                _checagens_r4b.sem_original_novo_alheio(final), fatos
-            )
+            # Fontes v1.3, item 10 (21/10/2026): no agente, a condição ("novo",
+            # "lacrado", "original") que o ANÚNCIO da conversa declara — título,
+            # atributo de condição ou descrição, sem se contradizer — está
+            # provada (`checagens.condicao_provada`); a trava do título vale para
+            # o resto. O legado não muda.
+            provados = _checagens_r4b.condicao_provada(final, fichas)
+            sem_evidencia = [
+                p.motivo
+                for p in evidencias.conferir_afirmacoes(
+                    _checagens_r4b.sem_original_novo_alheio(final), fatos
+                )
+                if p.codigo.removeprefix("produto_").removesuffix("_sem_evidencia") not in provados
+            ]
     # Só o agente: os prazos da regra que `ver_garantia` devolveu, cada um com
     # o seu par (esclarecimento 1 do orquestrador; revisão de 20/10/2026).
     prazos = validador.prazos_da_regra(garantias_conferidas) if agente else frozenset()
@@ -5370,7 +5453,17 @@ async def _gerar(
     textos_rajada = [m.texto or "" for m in (foco or rajada)]
     sinais_texto = sinais_com_codigo(textos_cliente, agente=agente_no_canal)
     insistiu = insistiu_em_pessoa(recentes)
-    if (
+    if agente_no_canal:
+        # O AGENTE é o atendente da loja (decisão do dono, 21/10/2026): pedir
+        # atendente (texto, "tem alguém aí?", a opção 6, pedir de novo) não
+        # manda para pessoa por si — ele responde as perguntas pendentes; o
+        # "é robô?" é pergunta. Pessoa só pela régua dele
+        # (`acao_pessoa.pedido_de_pessoa`: insistiu sem nada novo, irritado,
+        # recusou o virtual, aceitou a pessoa oferecida), em qualquer modo.
+        from app.services.atendimento.agente import acao_pessoa
+
+        sinais_texto = acao_pessoa.sinais_do_agente(sinais_texto, recentes, gatilho)
+    elif (
         insistiu or any(c == HUMANO_ATENDENTE for c, _f in sinais_texto)
     ) and await _ia_e_o_atendente(session, conversa):
         # A IA é o atendente nesta loja (14/10/2026): pedir atendente (ou

@@ -167,8 +167,9 @@ class BaseDoGerar:
     - `fatos_gravados`: o que vai no `rascunho.fatos` (o agente acrescenta "agente");
     - `categorias`: `manual_svc.categorias_ativas` (os assuntos);
     - `regras`: `_regras_aplicaveis` (o manual INTEIRO do canal, `todas_regras`);
-    - `sinais`: `sinais_com_codigo` já com o ajuste da "IA é o atendente"
-      (código `HUMANO_*`, frase);
+    - `sinais`: `sinais_com_codigo` já com a régua do pedido de pessoa do
+      agente (`acao_pessoa.sinais_do_agente`, 21/10/2026: o `HUMANO_ATENDENTE`
+      só fica com `pedido_de_pessoa`) (código `HUMANO_*`, frase);
     - `motivos`: os motivos de ANTES do modelo que valem para o agente — os
       de `sinais`, `MOTIVO_TURNO_INCOMPLETO` e os `SINAIS_PARA_PESSOA` do
       cartão; SEM a "opção de menu de assunto só para pessoa", a NF que exige
@@ -455,6 +456,10 @@ class ContextoAgente:
     # As fichas que o `ver_anuncio` leu (a trava da ficha no automático da
     # `conferir_saida` vale para elas como para as do pacote).
     fichas_lidas: list[dict] = field(default_factory=list)
+    # Os fatos APROVADOS que o `consultar_manual` devolveu (`fato:<id>` → o
+    # texto; Kia ao vivo, 21/10/2026): o fato citado nas evidências é fonte da
+    # característica (`checagens.caracteristicas_fora_do_dado`).
+    fatos_lidos: dict[str, str] = field(default_factory=dict)
     # O bloco do pedido DA CONVERSA (`Pacote.pedido`; revisão "furos" de
     # 20/10/2026): o estado e a origem que a resposta afirma são conferidos
     # contra ele (`checagens.conferir_estado_do_pedido`/`conferir_origem`).
@@ -606,6 +611,21 @@ class ContextoAgente:
         if isinstance(ctx_pedido, Mapping) and ctx_pedido.get("pedido"):
             self.pedidos_lidos.append((dict(ctx_pedido), postado))
 
+    def registrar_fatos(self, fatos: Iterable[Mapping[str, Any]]) -> None:
+        """Os fatos aprovados que uma ferramenta devolveu ({"id": "fato:<id>", "texto"})."""
+        for f in fatos:
+            i, texto = _limpo(f.get("id")), f.get("texto")
+            if i and isinstance(texto, str) and texto.strip():
+                self.fatos_lidos[i] = texto
+
+    def fatos_citados(self, evidencias: Iterable[str | None]) -> list[str]:
+        """Os textos dos fatos aprovados LIDOS que a resposta cita (na ordem, sem repetir)."""
+        return [
+            self.fatos_lidos[i]
+            for i in dict.fromkeys(_limpo(e) for e in evidencias if e)
+            if i in self.fatos_lidos
+        ]
+
     def registrar_garantias(self, garantias: Iterable[Mapping[str, Any]]) -> None:
         """O que `ver_garantia` devolveu vira `garantias_conferidas` (sem repetir)."""
         self.garantia_consultada = True
@@ -627,6 +647,7 @@ class ContextoAgente:
             list(self.acoes_codigo),
             set(self.pedidos),
             set(self.anuncios),
+            dict(self.fatos_lidos),
         )
 
     def voltar_ferramentas(self, estado: tuple) -> None:
@@ -642,6 +663,7 @@ class ContextoAgente:
             acoes,
             pedidos,
             anuncios,
+            fatos_lidos,
         ) = estado
         self.registro.ids = set(ids)
         self.registro.textos = list(textos)
@@ -651,6 +673,7 @@ class ContextoAgente:
         self.acoes_codigo = list(acoes)
         self.pedidos = set(pedidos)
         self.anuncios = set(anuncios)
+        self.fatos_lidos = dict(fatos_lidos)
 
     # ── rastro e orçamento ──
 

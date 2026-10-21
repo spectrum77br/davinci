@@ -45,7 +45,12 @@ bloqueado, como número inventado) ou vai para PESSOA (falta o dado):
    esclarecimento por tema; a loja (ou o agente) já perguntou no turno
    anterior e o cliente não resolveu → pessoa;
 8. `conferir_andamento` — devolução ou chamado em andamento nunca sai
-   sozinho no piloto (decisão 3 da spec 12).
+   sozinho no piloto (decisão 3 da spec 12);
+9. `conferir_se_diz_humano` (21/10/2026, decisão do dono) — o texto que diz
+   que o agente é uma pessoa ("sou humano", "não sou robô", "somos humanos",
+   nome de atendente) → bloqueia; perguntado se é robô, o texto que nega
+   ("Não, aqui é a equipe da loja") → bloqueia, e o que não diz que é o
+   atendimento virtual → não sai sozinho.
 
 Revisão "furos" de 20/10/2026 (os 29 achados de `pendentes_r2.json`):
   - a frase-pergunta é separada em orações: a afirmação antes da pergunta
@@ -73,7 +78,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from app.services.atendimento import constantes, validador
+from app.services.atendimento import condicao_anuncio, constantes, evidencias, validador
 from app.services.atendimento import especificacoes as especificacoes_svc
 from app.services.atendimento import variacoes as variacoes_svc
 from app.services.atendimento.agente import acao_pessoa
@@ -90,6 +95,9 @@ VARIACAO_CONTRADIZ = "variacao_contradiz"
 VARIACAO_SEM_DADO = "variacao_sem_dado"
 PROMESSA_DE_EQUIPE = "promessa_de_equipe"
 CAMINHO_FORA_DA_PLATAFORMA = "caminho_fora_da_plataforma"
+# Eval cego do TikTok (Mini, 21/10/2026): o caminho do app de OUTRA plataforma
+# ("Minhas compras" para o comprador do TikTok Shop) → regra suave.
+CAMINHO_DO_APP_ERRADO = "caminho_do_app_errado"
 PERGUNTA_REPETIDA = "pergunta_repetida"
 ACAO_DE_PESSOA = "acao_de_pessoa"
 PRODUTO_CONTRADIZ = "produto_contradiz"
@@ -116,7 +124,8 @@ class PendenciaAgente:
     - DURA (`bloqueia`): o rascunho fica BLOQUEADO em qualquer modo (e o
       motivo vai para `validador_erros`) — só as regras duras: o recado ao
       revisor/sistema no rascunho, o nome/rótulo/sistema interno, o motivo
-      interno do remetente, o caminho para fora da plataforma;
+      interno do remetente, o caminho para fora da plataforma e (21/10/2026)
+      o agente que se diz pessoa;
     - PESSOA (nem `bloqueia` nem `so_auto`): vai para pessoa nos dois modos
       — a régua de ação de pessoa, o andamento (devolução/chamado), a
       pergunta repetida, o anúncio que se contradiz e a lista CURTA das
@@ -2381,12 +2390,56 @@ def _palavras_pela_negacao(texto: str) -> tuple[set[str], set[str]]:
     return afirmadas, negadas
 
 
+# O fato APROVADO que a resposta cita nas evidências é fonte (Kia ao vivo,
+# 21/10/2026, rascunho 8d62a0e7: "Capas feitas para outro modelo… não servem
+# no Uranyx A18 Pro Max" com `fato:11` citado — "Capinha e película são feitas
+# para as medidas de cada modelo; as de outro modelo não servem." — virava
+# "afirma característica que os dados não trazem ('servem no')"). O termo do
+# vocabulário pode vir com a preposição do complemento ("servem no" + o nome do
+# aparelho, que sai da conta): no fato citado vale a CABEÇA do termo ("servem"),
+# com a MESMA polaridade da resposta (negado lá e cá, ou afirmado lá e cá) e
+# com o mesmo assunto — alguma outra palavra de conteúdo da frase da resposta
+# no fato ("modelo", "medidas", "feitas"). Só o fato citado E lido (o
+# `consultar_manual` devolveu): o fato que o modelo não citou não vale aqui.
+_PREPOSICAO_DO_TERMO = re.compile(
+    r"(?:\s+(?:sim|nao))?\s+(?:para|pra|pro|no|na|nos|nas|em|com|ao|aos|a|de|do|da)$"
+)
+
+
+def _no_fato_citado(termo: str, oracao: str, sentenca: str, fatos: Sequence[str]) -> bool:
+    """Um fato aprovado citado sustenta o `termo` como a `oracao` o diz? PURA."""
+    cabeca = _PREPOSICAO_DO_TERMO.sub("", termo).strip()
+    if not cabeca or not fatos:
+        return False
+    onde = oracao.find(termo)
+    negada = onde >= 0 and bool(_NEGA_O_TERMO_ANTES.search(oracao[:onde]))
+    raiz = cabeca.split()[0][:5]
+    assunto = {
+        p[:5]
+        for p in _PALAVRA_DO_DADO.findall(sentenca)
+        if len(p) >= 5 and p not in _SEM_PESO_NO_DADO and p[:5] != raiz
+    }
+    for fato in fatos:
+        plano = _plano(fato)
+        palavras_do_fato = {p[:5] for p in _PALAVRA_DO_DADO.findall(plano) if len(p) >= 5}
+        if not assunto & palavras_do_fato:
+            continue
+        for segmento in _CORTE_DO_DADO.split(plano):
+            inicio = segmento.find(cabeca)
+            while inicio >= 0:
+                if bool(_NEGA_O_TERMO_ANTES.search(segmento[:inicio])) == negada:
+                    return True
+                inicio = segmento.find(cabeca, inicio + 1)
+    return False
+
+
 def caracteristicas_fora_do_dado(
     texto: str,
     fichas: Sequence[Any] = (),
     *,
     dados_extra: Iterable[Any] = (),
     nomes_de_produto: Iterable[Any] = (),
+    fatos_citados: Sequence[str] = (),
 ) -> list[str]:
     """Os termos de característica que o texto AFIRMA e que nenhum dado traz (21/10/2026). PURA.
 
@@ -2397,7 +2450,8 @@ def caracteristicas_fora_do_dado(
     `_CARACTERISTICA_2`, `_POR_TERMO`), na oração afirmada fora da cortesia e
     do pedido de evidência, sem os nomes das variações; a oração que afirma
     só pela FORMA ("ele aguenta tranquilo") conta inteira (não há termo para
-    achar no dado).
+    achar no dado). `fatos_citados` = os textos dos fatos aprovados que a
+    resposta cita nas evidências (Kia ao vivo, 21/10/2026: `_no_fato_citado`).
     """
     if not (texto or "").strip():
         return []
@@ -2455,7 +2509,12 @@ def caracteristicas_fora_do_dado(
             # O termo que o dado só traz negado não conta (`_termo_no_dado`).
             valores = [t for t in termos if t not in _SO_O_NOME_DA_CARACTERISTICA]
             if valores:
-                fora += [t for t in valores if not _termo_no_dado(t, resto, dado)]
+                fora += [
+                    t
+                    for t in valores
+                    if not _termo_no_dado(t, resto, dado)
+                    and not _no_fato_citado(t, resto, sentenca, fatos_citados)
+                ]
             elif not any(_termo_no_dado(t, resto, dado) for t in termos):
                 fora += termos
             # A palavra que a oração afirma e que o dado só traz negada.
@@ -2473,6 +2532,7 @@ def conferir_ficha_no_automatico(
     nomes_de_produto: Iterable[Any] = (),
     assunto: str | None = None,
     dados_extra: Iterable[Any] = (),
+    fatos_citados: Sequence[str] = (),
 ) -> list[PendenciaAgente]:
     """A afirmação de característica do produto → no automático, pessoa confere
     (`ia.MOTIVO_FICHA_NO_AUTOMATICO`, `so_auto`: no copiloto é só aviso). PURA.
@@ -2516,7 +2576,11 @@ def conferir_ficha_no_automatico(
             )
         ):
             fora = caracteristicas_fora_do_dado(
-                texto, fichas, dados_extra=dados_extra, nomes_de_produto=nomes_de_produto
+                texto,
+                fichas,
+                dados_extra=dados_extra,
+                nomes_de_produto=nomes_de_produto,
+                fatos_citados=fatos_citados,
             )
             if not fora:
                 return []
@@ -4958,6 +5022,115 @@ def sem_original_novo_alheio(texto: str | None) -> str:
     return _NOVO_DE_OUTRA_COISA.sub(" ", plano)
 
 
+# ── 5f. A condição do produto pelo ANÚNCIO da conversa (fontes v1.3, item 10) ─
+#
+# Decisão do dono (21/10/2026, caso paulovitor85): no agente, "novo", "lacrado",
+# "não é recondicionado" e "original" são afirmáveis quando o anúncio da conversa
+# diz — título, atributo de condição da plataforma ou descrição
+# (`condicao_anuncio`, a "condicao" da ficha). O legado segue só com o título
+# (`evidencias`). O anúncio que se contradiz → pessoa ("corrigir anúncio"); a
+# fala da loja na conversa que contradiz o anúncio → pessoa; a resposta que diz
+# o contrário do anúncio → pessoa (`_contradiz`).
+CONDICAO_CONTRADIZ = "condicao_contradiz"
+CONDICAO_CONTRA_A_LOJA = "condicao_contra_a_loja"
+_ROTULO_DA_CONDICAO = {
+    "novo": ("novo", "a condição (novo ou usado)"),
+    "lacrado": ("lacrado", "o lacre"),
+    "original": ("original", "a originalidade"),
+}
+
+
+def condicao_do_anuncio_da_conversa(fichas: Sequence[Any]) -> Mapping[str, Any] | None:
+    """A "condicao" da ficha do anúncio DA CONVERSA: a 1ª ficha do pacote dele (o
+    `de_onde` do código, nunca a de outro anúncio) ou a 1ª que o `ver_anuncio`
+    leu de um anúncio citado (`da_conversa`). A 1ª sem condição: None (a 2ª
+    é outro anúncio). PURA."""
+    for f in fichas:
+        if not isinstance(f, Mapping):
+            continue
+        de_onde = _plano(str(f.get("de_onde") or ""))
+        fonte = _plano(str(f.get("fonte") or ""))
+        if f.get("da_conversa") is True or (
+            de_onde in evidencias._DE_ONDE and "outro anuncio" not in fonte
+        ):
+            condicao = f.get("condicao")
+            return condicao if isinstance(condicao, Mapping) else None
+    return None
+
+
+def _ditas_da_condicao(texto: str | None) -> dict[str, bool]:
+    """O que o texto afirma da condição, sem o "original/novo" de outra coisa."""
+    return condicao_anuncio.afirmacoes(sem_original_novo_alheio(texto))
+
+
+def condicao_provada(texto: str | None, fichas: Sequence[Any]) -> frozenset[str]:
+    """Os campos de condição ("novo", "lacrado", "original") que o texto afirma
+    COMO o anúncio da conversa declara, sem conflito no anúncio. PURA (só a
+    `ia.conferir_saida(agente=True)`: tira o "sem confirmação no título")."""
+    condicao = condicao_do_anuncio_da_conversa(fichas)
+    if not condicao:
+        return frozenset()
+    provados = set()
+    for campo, valor in _ditas_da_condicao(texto).items():
+        dado = condicao.get(campo)
+        if isinstance(dado, Mapping) and isinstance(dado.get("valor"), bool):
+            if dado["valor"] is valor:
+                provados.add(campo)
+    return frozenset(provados)
+
+
+def conferir_condicao(
+    texto: str, fichas: Sequence[Any], textos_da_loja: Sequence[str | None] = ()
+) -> list[PendenciaAgente]:
+    """A condição que a resposta afirma contra o anúncio da conversa e a fala da
+    loja (ver acima). PURA.
+
+    - o anúncio se contradiz no campo → pessoa ("corrigir anúncio");
+    - a resposta diz o contrário do anúncio → pessoa (`_contradiz`);
+    - a loja disse na conversa o contrário do anúncio → pessoa.
+    O anúncio que nada declara fica com a trava do título (`conferir_saida`).
+    """
+    ditas = _ditas_da_condicao(texto)
+    if not ditas:
+        return []
+    condicao = condicao_do_anuncio_da_conversa(fichas) or {}
+    da_loja: dict[str, set[bool]] = {}
+    for fala in textos_da_loja:
+        for campo, valor in condicao_anuncio.afirmacoes(fala).items():
+            da_loja.setdefault(campo, set()).add(valor)
+    saida: list[PendenciaAgente] = []
+    for campo, valor in ditas.items():
+        dado = condicao.get(campo)
+        if not isinstance(dado, Mapping):
+            continue
+        termo, rotulo = _ROTULO_DA_CONDICAO[campo]
+        if dado.get("valor") == condicao_anuncio.CONFLITO:
+            saida.append(
+                _pessoa(
+                    ANUNCIO_SE_CONTRADIZ,
+                    f"o anúncio se contradiz sobre {rotulo} — corrigir anúncio (dado indisponível)",
+                )
+            )
+        elif isinstance(dado.get("valor"), bool) and dado["valor"] is not valor:
+            verbo = "é" if valor else "não é"
+            saida.append(
+                _contradiz(
+                    CONDICAO_CONTRADIZ, f"diz que {verbo} {termo}, mas o anúncio diz o contrário"
+                )
+            )
+        elif isinstance(dado.get("valor"), bool) and (not dado["valor"]) in da_loja.get(
+            campo, set()
+        ):
+            saida.append(
+                _pessoa(
+                    CONDICAO_CONTRA_A_LOJA,
+                    f"a loja disse na conversa o contrário do anúncio sobre {rotulo} — pessoa "
+                    "confere",
+                )
+            )
+    return saida
+
+
 # O que não é fala de GARANTIA do aparelho: o "Rio de Janeiro" (o "janeiro" não é
 # a data da garantia), a cobertura de ENTREGA ("não cobre envios para…",
 # "cobertura de envio", "fora da área de cobertura") e a frase aprovada da spec
@@ -5130,6 +5303,20 @@ def _contato_fora(marcas: Iterable[str] = ()) -> re.Pattern[str]:
 _CONTATO_FORA = _contato_fora()
 
 
+# A tela do app que a plataforma NÃO tem (eval cego do TikTok, 21/10/2026: 5 de
+# 80 rascunhos do TikTok mandavam a "Minhas compras", que é da Shopee e do ML).
+# (padrão sobre o texto plano, o rótulo, o caminho certo — `prompt.CAMINHOS_APP`).
+_TELA_DE_OUTRO_APP: dict[str, tuple[tuple[re.Pattern[str], str, str], ...]] = {
+    "tiktok": (
+        (
+            re.compile(r"\bminhas\s+compras\b"),
+            "Minhas compras",
+            "os pedidos no app do TikTok Shop > o pedido",
+        ),
+    ),
+}
+
+
 def conferir_caminho_da_plataforma(
     texto: str, plataforma: str, *, marcas: Sequence[str] = ()
 ) -> list[PendenciaAgente]:
@@ -5137,7 +5324,9 @@ def conferir_caminho_da_plataforma(
 
     `marcas` = as marcas do anúncio/cadastro da conversa (além das
     conhecidas, `MARCAS_CONHECIDAS`): o contato direto com elas também é
-    caminho para fora.
+    caminho para fora. A tela de OUTRO app ("Minhas compras" no TikTok Shop;
+    eval cego de 21/10/2026) é regra suave: não sai sozinho, com o aviso do
+    caminho certo.
     """
     plano = _plano(texto)
     if not plano:
@@ -5146,6 +5335,15 @@ def conferir_caminho_da_plataforma(
     for codigo, nome, padrao in _PLATAFORMAS:
         if codigo != plataforma and padrao.search(plano):
             saida.append(_bloqueia(CAMINHO_FORA_DA_PLATAFORMA, f"cita outra plataforma ({nome})"))
+    for padrao, rotulo, certo in _TELA_DE_OUTRO_APP.get(plataforma or "", ()):
+        if padrao.search(plano):
+            saida.append(
+                _suave(
+                    CAMINHO_DO_APP_ERRADO,
+                    f'cita "{rotulo}", que não existe no app desta plataforma (o caminho é '
+                    f'"{certo}")',
+                )
+            )
     contato = _contato_fora(marcas) if marcas else _CONTATO_FORA
     m = next(
         (
@@ -5357,6 +5555,142 @@ def conferir_homologado(texto: str) -> list[PendenciaAgente]:
     """ "Homologado" (fora da Anatel/Inmetro) → bloqueia. PURA."""
     if _HOMOLOGADO.search(_plano(texto)):
         return [_bloqueia(HOMOLOGADO, MOTIVO_HOMOLOGADO)]
+    return []
+
+
+# O agente nunca diz que é uma pessoa (decisão do dono, 21/10/2026: ele é o
+# atendente da loja, não precisa anunciar que é automático, mas nunca nega o
+# que é — perguntado com sinceridade, é o atendimento virtual da loja e uma
+# pessoa pode assumir se o cliente preferir). "Sou humano", "não sou robô",
+# "sou uma pessoa de verdade", "atendente humano aqui", "você está falando com
+# uma pessoa", o nome de atendente inventado ("meu nome é…", "Sou a Ana") →
+# regra DURA (bloqueia em qualquer modo, como o recado ao revisor). "Não sou
+# humano" e "sou o atendimento virtual da loja" passam.
+SE_DIZ_HUMANO = "se_diz_humano"
+MOTIVO_SE_DIZ_HUMANO = (
+    'diz que é uma pessoa ("{trecho}") — o agente é o atendimento virtual da loja e nunca nega isso'
+)
+_SE_DIZ_HUMANO = re.compile(
+    r"(?<!nao )\b(?:eu\s+)?sou\s+(?:um\s+|uma\s+)?(?:human[oa]|pessoa|gente\s+de\s+verdade"
+    r"|de\s+carne\s+e\s+osso)\b"
+    r"|\b(?:eu\s+)?sou\s+(?:um\s+|uma\s+|o\s+|a\s+)?(?:atendente|vendedor[a]?|consultor[a]?"
+    r"|funcionari[oa]|colaborador[a]?)\s+(?:human[oa]|real|de\s+verdade|de\s+carne\s+e\s+osso)\b"
+    r"|\bnao\s+(?:sou|e|eh)\s+(?:um\s+|uma\s+)?(?:robo\w*|bot|chatbot|inteligencia\s+artificial)\b"
+    r"(?!\s+(?:aspirador\w*|limpador\w*|lavador\w*|de\s+(?:limpeza|cozinha|piscina)))"
+    r"|\bnao\s+sou\s+(?:um\s+|uma\s+)?(?:maquina|ia|virtual|automatic[oa]|atendimento\s+"
+    r"(?:automatico|virtual)|resposta\s+automatica)\b"
+    r"|\b(?:atendente|atendimento)\s+human[oa]\s+(?:aqui|falando|na\s+linha|com\s+voce)\b"
+    r"|\baqui\s+(?:e|eh|quem\s+fala\s+e)\s+(?:um\s+|uma\s+)?(?:pessoa|human[oa]|atendente\s+"
+    r"(?:human[oa]|de\s+verdade|real))\b"
+    r"|\b(?:voce|vc)\s+(?:esta|ta)\s+(?:falando|conversando)\s+com\s+(?:um\s+|uma\s+)?(?:pessoa"
+    r"|human[oa]|gente|atendente\s+(?:human[oa]|de\s+verdade|real)|alguem\s+de\s+verdade)\b"
+    r"|\bmeu\s+nome\s+e\b|\bme\s+chamo\b|\baqui\s+quem\s+fala\s+e\b"
+    # Revisão de 21/10/2026: o plural, o "não um robô" e a equipe no lugar da
+    # pessoa ("Sou da equipe da loja, não um robô", "Somos humanos", "Não somos
+    # robôs", "você está falando com a equipe", "não é resposta automática").
+    # O robô do produto ("não é um robô aspirador") não conta.
+    r"|\bnao\s+(?:um|uma)\s+(?:robo\w*|bot|chatbot|maquina|ia|inteligencia\s+artificial)\b"
+    r"(?!\s+(?:aspirador\w*|limpador\w*|lavador\w*|de\s+(?:limpeza|cozinha|piscina)))"
+    r"|\bsomos\s+(?:uma\s+equipe\s+de\s+)?(?:human[oa]s|pessoas|gente)(?:\s+(?:reais|de\s+verdade))?\b"
+    r"|\bnao\s+somos\s+(?:um\s+|uns\s+|umas\s+)?(?:robo\w*|bots?|chatbots?|maquinas?|ia|virtuais"
+    r"|automatic[oa]s)\b"
+    r"|\b(?:voce|vc)\s+(?:esta|ta)\s+(?:falando|conversando)\s+com\s+(?:a\s+)?(?:nossa\s+)?"
+    r"(?:equipe|time|pessoal)\b"
+    r"|\bnao\s+(?:e|eh)\s+(?:uma\s+|um\s+)?(?:resposta|mensagem|atendimento|atendente)\s+"
+    r"(?:automatic[oa]|virtual|de\s+robo)\b"
+)
+# Perguntado se é robô (o turno com `ia.pergunta_se_e_robo`; revisão de
+# 21/10/2026: a negação mais provável de um modelo é "Não, aqui é a equipe da
+# loja", que não diz "sou humano"). O texto diz o que é — o atendimento
+# virtual da loja (`_DIZ_VIRTUAL`, sem o "não" antes); senão não sai sozinho
+# (SUAVE). Começar negando a pergunta "é robô?/é IA?/é automático?" ("Não",
+# "Claro que não", "Imagina") → DURA; "Não sou humano…" é a resposta honesta.
+# A pergunta "vc é humano?" ao contrário: o "Sim"/"Claro" do começo sem dizer
+# que é virtual → DURA.
+NAO_DISSE_QUE_E_VIRTUAL = "nao_disse_que_e_virtual"
+MOTIVO_NEGOU_SER_VIRTUAL = (
+    'nega que é o atendimento virtual ("{trecho}") — perguntado se é robô, o agente diz que '
+    "é o atendimento virtual da loja"
+)
+MOTIVO_NAO_DISSE_QUE_E_VIRTUAL = (
+    "o cliente perguntou se fala com robô e o texto não diz que é o atendimento virtual da loja"
+)
+_DIZ_VIRTUAL = re.compile(
+    r"\bvirtua(?:l|is)\b|\bautomatic[oa]s?\b|\bautomatizad[oa]s?\b"
+    r"|\b(?:sou|somos|e|eh)\s+(?:sim\s+)?(?:um\s+|uma\s+|o\s+|a\s+)?(?:robo|bot|chatbot|ia"
+    r"|inteligencia\s+artificial)\b"
+)
+_NEGACAO_ANTES = re.compile(r"\bnao\s+(?:\w+\s+){0,2}$")
+# "Olá!", "Olá, Maria!", "Oi Maria,", "Olá, tudo bem?" — o nome não é o "não".
+_SAUDACAO_NO_INICIO = re.compile(
+    r"^(?:(?:ola|oi|opa|bom\s+dia|boa\s+tarde|boa\s+noite)(?:\s*,?\s*(?!(?:nao|sim|claro"
+    r"|imagina|negativo|jamais)\b)[a-z]+(?:\s+[a-z]+)?)?\s*[!.?,]+\s*)+"
+)
+_NEGA_NO_INICIO = re.compile(
+    r"(?:nao|claro\s+que\s+nao|imagina|de\s+jeito\s+nenhum|negativo|que\s+nada|nada\s+disso"
+    r"|jamais)\b(?![\s,!.]*(?:nao\s+)?(?:sou|e|eh|somos)\s+(?:um\s+|uma\s+)?(?:human|pessoa"
+    r"|gente))"
+)
+_AFIRMA_NO_INICIO = re.compile(r"(?:sim|claro|com\s+certeza|isso\s+mesmo|pode\s+ter\s+certeza)\b")
+_ROBO_NA_PERGUNTA = re.compile(
+    r"\b(?:robo\w*|bot|chatbot|ia|inteligencia\s+artificial|maquina|automatic\w*|virtual)\b"
+)
+_HUMANO_NA_PERGUNTA = re.compile(r"\b(?:human[oa]|pessoa|gente|real|de\s+verdade)\b")
+# "Sou a Ana", "Sou o Carlos, do atendimento" — no texto CRU (o nome com
+# maiúscula); o papel ("Sou o Atendimento virtual") não é nome.
+_SOU_NOME = re.compile(
+    r"\b[Ss]ou\s+(?:o|a)\s+(?!(?:Assistente|Atendente|Atendimento|Suporte|Rob[oô]|Bot|Equipe"
+    r"|Time|Loja|Central|Canal|Chat|Sistema|Virtual)\b)[A-ZÀ-Ý][a-zà-ÿ]{2,}\b"
+)
+
+
+def se_diz_humano(texto: str | None) -> str | None:
+    """O trecho do texto do AGENTE em que ele diz (ou dá a entender) que é uma
+    pessoa, ou None. PURA (decisão do dono, 21/10/2026)."""
+    if m := _SE_DIZ_HUMANO.search(_plano(texto)):
+        return " ".join(m.group(0).split())[:40]
+    if m := _SOU_NOME.search(texto or ""):
+        return " ".join(m.group(0).split())[:40]
+    return None
+
+
+def diz_que_e_virtual(texto: str | None) -> bool:
+    """O texto diz que é o atendimento virtual/automático (sem o "não" antes)? PURA."""
+    plano = _plano(texto)
+    return any(
+        not _NEGACAO_ANTES.search(plano[max(0, m.start() - 30) : m.start()])
+        for m in _DIZ_VIRTUAL.finditer(plano)
+    )
+
+
+def conferir_se_diz_humano(
+    texto: str, textos_cliente: Sequence[str | None] = ()
+) -> list[PendenciaAgente]:
+    """O agente se diz pessoa → bloqueia (regra dura). PURA.
+
+    `textos_cliente` = o turno do cliente: com a pergunta "é robô?"
+    (`ia.pergunta_se_e_robo`), o texto que nega → bloqueia; o que não diz que é
+    o atendimento virtual → suave (não sai sozinho, com o aviso).
+    """
+    from app.services.atendimento import ia
+
+    if trecho := se_diz_humano(texto):
+        return [_bloqueia(SE_DIZ_HUMANO, MOTIVO_SE_DIZ_HUMANO.format(trecho=trecho))]
+    perguntas = [_plano(t) for t in textos_cliente if t and ia.pergunta_se_e_robo(t)]
+    if not perguntas or not (texto or "").strip():
+        return []
+    inicio = _SAUDACAO_NO_INICIO.sub("", _plano(texto))
+    robo = any(_ROBO_NA_PERGUNTA.search(p) for p in perguntas)
+    humano = any(_HUMANO_NA_PERGUNTA.search(p) for p in perguntas)
+    virtual = diz_que_e_virtual(texto)
+    if robo and not humano and (m := _NEGA_NO_INICIO.match(inicio)):
+        trecho = " ".join(inicio[: max(m.end(), 40)].split())[:40]
+        return [_bloqueia(SE_DIZ_HUMANO, MOTIVO_NEGOU_SER_VIRTUAL.format(trecho=trecho))]
+    if humano and not robo and not virtual and (m := _AFIRMA_NO_INICIO.match(inicio)):
+        trecho = " ".join(inicio[: max(m.end(), 40)].split())[:40]
+        return [_bloqueia(SE_DIZ_HUMANO, MOTIVO_NEGOU_SER_VIRTUAL.format(trecho=trecho))]
+    if not virtual:
+        return [_suave(NAO_DISSE_QUE_E_VIRTUAL, MOTIVO_NAO_DISSE_QUE_E_VIRTUAL)]
     return []
 
 
@@ -6320,6 +6654,25 @@ def _so_cortesia(texto: str) -> bool:
     return all(_SO_CORTESIA.search(_plano(f)) for f in frases)
 
 
+# A resposta ao agradecimento ("Por nada!", "Imagina!", "Nós que agradecemos!").
+_AGRADECER_DE_VOLTA = re.compile(
+    r"^(?:por\s+nada|de\s+nada|imagina|nos\s+(?:e\s+)?que\s+agradecemos"
+    r"|obrigad[oa]\s+(?:a\s+)?voce)\W*"
+)
+
+
+def so_cortesia_de_fechamento(texto: str | None) -> bool:
+    """O texto é só a linha curta de cortesia de quem responde a um "obrigada" ("Por
+    nada! Qualquer coisa, estamos à disposição.")? PURA (Kia ao vivo, 21/10/2026:
+    o turno só de reconhecimento depois de a loja tratar o assunto)."""
+    frases = [f for f in _ENTRE_FRASES.split(texto or "") if f.strip()]
+    return bool(frases) and all(
+        not (resto := _AGRADECER_DE_VOLTA.sub("", _plano(f)).strip(" ,.;:!"))
+        or _SO_CORTESIA.search(resto)
+        for f in frases
+    )
+
+
 def sem_lacuna_vazia(conferida: SaidaConferida) -> SaidaConferida:
     """A `SaidaConferida` sem nenhuma lacuna que o código não preencheu (ver acima). PURA.
 
@@ -6493,7 +6846,15 @@ def conferir(
                 textos_cliente=clientes,
                 nomes_de_produto=da_base,
                 assunto=conferida.categoria,
-                dados_extra=[*ctx.registro.textos, *da_base],
+                # Fontes v1.3, item 10: a condição que o anúncio da conversa declara
+                # e o texto afirma igual ("novo", "lacrado", "original") é dado.
+                dados_extra=[
+                    *ctx.registro.textos,
+                    *da_base,
+                    *sorted(condicao_provada(texto, fichas)),
+                ],
+                # Kia ao vivo (21/10/2026): o fato aprovado citado é fonte.
+                fatos_citados=ctx.fatos_citados(proposta.evidencias),
             )
         pendencias += conferir_promessa_de_equipe(
             texto,
@@ -6544,6 +6905,18 @@ def conferir(
             marcas=marcas_das_fichas([*fichas, *_do_registro(ctx)]),
         )
         pendencias += conferir_homologado(texto)
+        # Fontes v1.3, item 10 (21/10/2026): a condição pelo anúncio da conversa
+        # (e a fala REAL da loja na conversa, que não pode contradizê-lo).
+        from app.services.atendimento import ia as ia_svc
+
+        pendencias += conferir_condicao(
+            texto,
+            fichas,
+            [m.texto for m in base.recentes if ia_svc.resposta_da_loja(m)],
+        )
+        # 21/10/2026 (decisão do dono): o agente nunca diz que é uma pessoa —
+        # e, perguntado se é robô, diz que é o atendimento virtual da loja.
+        pendencias += conferir_se_diz_humano(texto, textos_cliente=clientes)
         pendencias += conferir_nomes_internos(texto, ctx.nomes_da_loja)
         pendencias += conferir_regiao(texto, fichas, ctx, textos_cliente=clientes)
     pendencias += conferir_pergunta(proposta.acao, base.recentes, gatilho, texto=texto)

@@ -1048,6 +1048,40 @@ _PROMESSA = re.compile(
 )
 _JANELA = 60
 _NEGA_PERTO = re.compile(r"\b(?:nao|nem|sem)\b")
+# A volta ao estoque como CONDIÇÃO (Kia ao vivo, 21/10/2026, rascunho 1d6f708e:
+# "Quando essa opção voltar ao estoque, ela aparece de novo para seleção no
+# próprio anúncio" não promete a volta): a reposição dentro da oração de
+# "quando/se/caso/assim que…" é a hipótese; a promessa estaria na oração
+# PRINCIPAL, e só quando ela diz o que a LOJA faz (verbo na 1ª pessoa —
+# "avisamos", "te aviso", "vamos separar" — ou a loja/equipe como sujeito).
+# "Ela aparece de novo no anúncio" fala do anúncio, não da loja.
+_REPOSICAO = re.compile(
+    r"\brepo(?:r|remos|sicao)\b|\bvolta(?:r|ra|rao)?\s+(?:ao|para\s+o)\s+estoque\b"
+    r"|\bchega(?:r|ra|rao|m)?\s+(?:mais|nov[oa]s?)\b"
+)
+_CONDICAO_ANTES = re.compile(
+    r"\b(?:quando|se|caso|assim\s+que|logo\s+que|sempre\s+que|depois\s+que)\s+(?:[a-z0-9]+\s+){0,5}$"
+)
+_FIM_DA_ORACAO = re.compile(r"[.!?;\n]")
+_ACAO_DA_LOJA = re.compile(
+    r"\b(?:[a-z]+(?:amos|emos|imos)|vou|irei|(?:te|lhe|o|a)\s+(?:aviso|avisamos|chamo|chamamos"
+    r"|notifico|notificamos|informo|informamos|mando|mandamos|envio|enviamos)"
+    r"|(?:a|nossa)\s+(?:loja|equipe))\b"
+)
+
+
+def _reposicao_so_como_condicao(texto: str, m: re.Match[str]) -> bool:
+    """A reposição de `m` é só a condição ("quando voltar ao estoque, aparece no
+    anúncio") e a oração principal não diz o que a loja faz? PURA (só o agente
+    lê: `conferir_variacoes` é das checagens dele)."""
+    if not _REPOSICAO.fullmatch(m.group(0)):
+        return False
+    inicio = max((f.end() for f in _FIM_DA_ORACAO.finditer(texto, 0, m.start())), default=0)
+    if not _CONDICAO_ANTES.search(texto[inicio : m.start()]):
+        return False
+    fim = _FIM_DA_ORACAO.search(texto, m.end())
+    principal = texto[m.end() : fim.start() if fim else len(texto)]
+    return not _ACAO_DA_LOJA.search(principal)
 
 
 def _chaves(nome: Any) -> list[str]:
@@ -1296,8 +1330,69 @@ def _sentencas(texto: str) -> list[tuple[str, bool]]:
     return saida
 
 
-def _implicita(sentenca: str) -> str | None:
-    """A sentença afirma estoque sem citar a opção? ("Temos sim!", "Está esgotado.")"""
+# De QUE a sentença fala (Kia ao vivo, 21/10/2026, rascunho 8d62a0e7: "Neste
+# anúncio não há capa à venda" virava "não tem 'laranja'" — o cliente pedira a
+# capa laranja e o "não há" era da CAPA, não da cor do aparelho). O "temos/há"
+# e o "está esgotado/disponível" sem a opção só valem para a opção do cliente
+# quando o que eles têm por objeto (ou por sujeito) é a própria opção: nada
+# ("Temos sim!", "Está esgotado."), um nome genérico dela ("não temos essa
+# cor", "o produto está esgotado", "não há estoque"), uma palavra da lista, uma
+# cor, uma memória ou uma palavra do título do anúncio. Outra coisa ("capa",
+# "carregador avulso") é o assunto da sentença: ela não fala da opção.
+_OBJETO_DA_OPCAO = frozenset(
+    """
+    estoque estoques unidade unidades opcao opcoes variacao variacoes cor cores modelo modelos
+    versao versoes tamanho tamanhos produto produtos item itens peca pecas aparelho aparelhos
+    disponivel disponiveis disponibilidade anuncio anuncios tudo todo toda todos todas pronta
+    """.split()
+)
+_DETERMINANTE = frozenset(
+    """
+    o a os as um uma uns umas esse essa esses essas este esta estes estas seu sua seus suas
+    """.split()
+)
+_SEM_PESO_NO_OBJETO = frozenset(
+    """
+    o a os as um uma uns umas esse essa esses essas este esta estes estas isso isto aquele aquela
+    ele ela eles elas mais ainda sim nao nem no na nos nas momento agora hoje mesmo mesma tambem
+    infelizmente de do da dos das em la aqui ai nenhum nenhuma algum alguma qualquer outro outra
+    outros outras so apenas somente ja que e esta estao ta fica ficam segue seguem continua
+    continuam seu sua seus suas nosso nossa
+    """.split()
+)
+
+
+def _fala_de_outra_coisa(
+    palavras: Sequence[str], conhecidas: frozenset[str], *, sujeito: bool = False
+) -> bool:
+    """A 1ª palavra de conteúdo de `palavras` nomeia outra coisa que não a opção?
+
+    `sujeito` = `palavras` vêm de trás para a frente, antes do "está
+    esgotado/disponível": só o nome com artigo ou demonstrativo antes ("a capa
+    está esgotada") é o sujeito — um verbo ("ficou esgotado") não é.
+    """
+    for i, p in enumerate(palavras):
+        if p in _SEM_PESO_NO_OBJETO:
+            continue
+        if sujeito and not (i + 1 < len(palavras) and palavras[i + 1] in _DETERMINANTE):
+            return False
+        return not (
+            p in _OBJETO_DA_OPCAO
+            or p in conhecidas
+            or p in _CORES
+            or p.isdigit()
+            or bool(_de_opcao(p))
+        )
+    return False
+
+
+def _implicita(sentenca: str, conhecidas: frozenset[str] = frozenset()) -> str | None:
+    """A sentença afirma estoque sem citar a opção? ("Temos sim!", "Está esgotado.")
+
+    `conhecidas` = as palavras das opções e do título do anúncio: com elas, o
+    objeto do verbo de ter (ou o sujeito do "está esgotado") que nomeia OUTRA
+    coisa ("não há capa à venda") tira a sentença da conta (ver acima).
+    """
     if _ORIENTA_ANUNCIO.search(sentenca):
         return None
     if todas := _TODAS.search(sentenca):
@@ -1305,6 +1400,17 @@ def _implicita(sentenca: str) -> str | None:
     for marca in _MARCA.finditer(sentenca):
         antes = sentenca[: marca.start()]
         negada = bool(_NEGA_ANTES.search(antes))
+        if conhecidas and (
+            (
+                marca.lastgroup == "verbo"
+                and _fala_de_outra_coisa(_TOKEN.findall(sentenca[marca.end() :])[:4], conhecidas)
+            )
+            or (
+                marca.lastgroup in ("neg", "pos")
+                and _fala_de_outra_coisa(_TOKEN.findall(antes)[::-1][:5], conhecidas, sujeito=True)
+            )
+        ):
+            continue
         if marca.lastgroup == "neg" or (marca.lastgroup == "verbo" and negada):
             return "-"
         if marca.lastgroup == "pos" and not _DADO_DO_PEDIDO.search(antes):
@@ -1319,13 +1425,27 @@ def _implicita(sentenca: str) -> str | None:
     return None
 
 
+def _titulo_principal(fatos: Mapping[str, Any]) -> str:
+    """O título da 1ª ficha (a do anúncio de que o cliente fala), ou ""."""
+    fichas = fatos.get("ficha_do_anuncio") if isinstance(fatos, Mapping) else None
+    if isinstance(fichas, list) and fichas and isinstance(fichas[0], Mapping):
+        titulo = fichas[0].get("titulo")
+        return titulo if isinstance(titulo, str) else ""
+    return ""
+
+
 def _promete_estoque(texto: str) -> bool:
     """ "Últimas unidades", "reservamos", "vamos verificar a reposição" — e não
     "não temos data de reposição" (negada nas palavras de antes: produção,
-    20/10/2026, 4 de 5 rascunhos que citavam reposição eram assim)."""
+    20/10/2026, 4 de 5 rascunhos que citavam reposição eram assim), nem a
+    volta ao estoque que é só a condição da oração (Kia ao vivo, 21/10/2026:
+    "quando essa opção voltar ao estoque, ela aparece de novo no anúncio")."""
     for m in _PROMESSA.finditer(texto):
-        if not _NEGA_PERTO.search(texto[max(0, m.start() - 45) : m.start()]):
-            return True
+        if _NEGA_PERTO.search(texto[max(0, m.start() - 45) : m.start()]):
+            continue
+        if _reposicao_so_como_condicao(texto, m):
+            continue
+        return True
     return False
 
 
@@ -1374,6 +1494,9 @@ def conferir_variacoes(
         | frozenset(p for o in opcoes for p in _PALAVRA.findall(_normal(o.nome)))
         | frozenset(_CORES)
     )
+    # O que a sentença sem a opção pode ter por objeto e ainda falar dela (as
+    # palavras da lista e do título do anúncio; ver `_implicita`).
+    conhecidas = da_lista | frozenset(_PALAVRA.findall(_normal(_titulo_principal(fatos))))
     sem_equipe = _DISPONIVEL_A_EQUIPE.sub(" ", _normal(resposta))
     # A ressalva sai da conta das afirmações, não da da promessa ("não temos
     # data de reposição" é a negação que livra a reposição).
@@ -1453,7 +1576,7 @@ def conferir_variacoes(
             continue
         mencoes = _mencoes(sentenca, principal)
         if not mencoes:
-            if sinal := _implicita(sentenca):
+            if sinal := _implicita(sentenca, conhecidas):
                 implicitas.append(sinal)
             continue
         for k, mencao in enumerate(mencoes):

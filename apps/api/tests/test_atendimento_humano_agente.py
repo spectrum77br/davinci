@@ -14,7 +14,8 @@
   pergunta neutra; mais a etiqueta Devolução do `_gerar`);
 - `triar_conversa` lê o canal (`ia._agente_no_canal`) e, com o agente, o
   estado de postagem, as recusas aprovadas e a UF restrita;
-- `VERSAO` 6 e o rótulo do motivo novo na tela.
+- `VERSAO` 7 (21/10/2026; a 6 era a da régua do agente) e o rótulo do motivo
+  novo na tela.
 
 Nada de modelo, loja ou rede: a régua é pura; o banco só no `triar_conversa`.
 """
@@ -661,7 +662,9 @@ def test_no_agente_o_turno_incompleto_continua_pessoa():
         "avaliacao_pendente_baixa",
         "alerta_procon",
         "xingamento",
-        "atendente",
+        # 21/10/2026: o "atendente" (o 1º pedido, sem insistência) saiu daqui —
+        # no canal com o agente ele não é motivo (o agente é o atendente da
+        # loja; `test_no_agente_pedir_atendente_segue_a_regua_dele`).
         "atendente_insistiu",
         "instrucao",
         "bloqueada_com_reclamacao",
@@ -677,6 +680,16 @@ def test_no_agente_o_estado_e_os_sinais_ficam(nome):
     }
     agente = set(_ag(CASOS[nome]).motivos) - {humano.HUMANO_ACAO_PESSOA}
     assert origem and agente == origem
+
+
+def test_no_agente_pedir_atendente_segue_a_regua_dele():
+    """Decisão do dono (21/10/2026): no canal com o agente, pedir atendente uma vez
+    não é motivo (com ou sem o `pede_atendente` liberado); insistir sem nada novo
+    é (o sinal e a ação `pediu_pessoa`, como no rascunho)."""
+    assert _ag(CASOS["atendente"]) == humano.Triagem()
+    assert HUMANO_ATENDENTE in _rodar(_triar_origem, CASOS["atendente"]).motivos  # o legado
+    t = _ag(CASOS["atendente_insistiu"])
+    assert HUMANO_ATENDENTE in t.motivos and "pediu_pessoa" in t.assuntos
 
 
 def test_no_agente_a_ia_atendente_e_a_bloqueada_seguem_iguais():
@@ -715,8 +728,9 @@ def test_a_acao_de_pessoa_fica_na_ordem_do_assunto_e_a_tela_escreve():
     ]
 
 
-def test_versao_6_retria_tudo():
-    assert humano.VERSAO == 6
+def test_versao_7_retria_tudo():
+    # 7 (21/10/2026): o pedido de atendente pela régua do agente.
+    assert humano.VERSAO == 7
 
 
 # ─────────────── paridade com o caminho do agente no `_gerar` ───────────────
@@ -740,14 +754,11 @@ async def _decisao_do_agente(caso: dict, *, postado, chaves_ativas, uf_restrita)
     textos_cliente = [m.texto for m in rajada if m.texto]
     foco = ia.perguntas_pendentes(recentes, gatilho)
     textos_rajada = [m.texto or "" for m in (foco or rajada)]
-    sinais_texto = ia.sinais_com_codigo(textos_cliente)
-    insistiu = ia.insistiu_em_pessoa(recentes)
-    if caso.get("ia_e_o_atendente") and (
-        insistiu or any(c == HUMANO_ATENDENTE for c, _f in sinais_texto)
-    ):
-        sinais_texto = [(c, f) for c, f in sinais_texto if c != HUMANO_ATENDENTE]
-        if insistiu:
-            sinais_texto.insert(0, (HUMANO_ATENDENTE, ia.MOTIVO_INSISTIU_EM_PESSOA))
+    # 21/10/2026: o pedido de pessoa pela régua do agente, como o `_gerar` no
+    # canal com o agente (`acao_pessoa.sinais_do_agente`, sem o `pede_atendente`).
+    sinais_texto = acao_pessoa.sinais_do_agente(
+        ia.sinais_com_codigo(textos_cliente, agente=True), recentes, gatilho
+    )
     antes = acao_pessoa.gatilhos_antes_do_modelo(recentes, gatilho, sinais=sinais_texto)
     if antes.gatilhos:
         return True

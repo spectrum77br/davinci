@@ -85,7 +85,6 @@ from app.services.atendimento.agente.contexto import (
 )
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
-    HUMANO_ATENDENTE,
     MODO_AUTO,
     MODO_COPILOTO,
     MSG_FALHOU,
@@ -698,7 +697,8 @@ async def montar_base(
     """A `BaseDoGerar` como o `_gerar` montaria no `as_of` (interfaces §7.1) e o atalho, se houver.
 
     Cópia dos passos do `_gerar` (ia:4457-4660): lacunas e fatos, rajada e
-    foco, sinais com o ajuste da "IA é o atendente", os motivos que valem
+    foco, sinais com a régua do pedido de pessoa do agente
+    (`acao_pessoa.sinais_do_agente`, 21/10/2026), os motivos que valem
     para o agente (sem a opção sensível do menu, a NF que exige pessoa, o
     recado ao entregador e a dúvida de remetente — spec 6.2), o cartão
     Cliente, os assuntos e o manual, e os atalhos aprovados (NF, cartão
@@ -715,14 +715,11 @@ async def montar_base(
     textos_cliente = [m.texto for m in rajada if m.texto]
     foco = ia.perguntas_pendentes(recentes, gatilho)
     textos_rajada = [m.texto or "" for m in (foco or rajada)]
-    sinais_texto = ia.sinais_com_codigo(textos_cliente, agente=True)
+    # O pedido de pessoa pela régua do agente (21/10/2026), como o `_gerar`.
+    sinais_texto = acao_pessoa.sinais_do_agente(
+        ia.sinais_com_codigo(textos_cliente, agente=True), recentes, gatilho
+    )
     insistiu = ia.insistiu_em_pessoa(recentes)
-    if (
-        insistiu or any(c == HUMANO_ATENDENTE for c, _f in sinais_texto)
-    ) and await ia._ia_e_o_atendente(session, conversa):
-        sinais_texto = [(c, f) for c, f in sinais_texto if c != HUMANO_ATENDENTE]
-        if insistiu:
-            sinais_texto.insert(0, (HUMANO_ATENDENTE, ia.MOTIVO_INSISTIU_EM_PESSOA))
     motivos: list[str] = list(dict.fromkeys(f for _c, f in sinais_texto))
     opcoes_sensiveis = ia.assuntos_sensiveis_do_menu(recentes, gatilho)
     if ia.turno_incompleto(recentes, gatilho):

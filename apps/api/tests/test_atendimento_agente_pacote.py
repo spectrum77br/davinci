@@ -393,17 +393,20 @@ def test_5_instrucao_nem_chama_o_modelo():
     assert g.codigo == "instrucao" and g.antes_do_modelo is True
 
 
-def test_6_pediu_pessoa_e_a_regra_da_ia_atendente():
-    assert _codigos(_gat([_cliente("quero falar com um atendente", 5)])) == ["pediu_pessoa"]
-    # Na loja em que a IA é o atendente, pedir uma vez é respondido…
+def test_6_pediu_pessoa_pela_regua_do_agente():
+    # Decisão do dono (21/10/2026): o agente é o atendente da loja — pedir uma
+    # vez é respondido, com ou sem o `pede_atendente` liberado (antes, sem ele,
+    # já era `pediu_pessoa`)…
     uma_vez = [_cliente("quero falar com um atendente", 5)]
+    assert _gat(uma_vez) == []
     assert _gat(uma_vez, ia_e_o_atendente=True) == []
-    # …insistir depois da resposta vai para pessoa.
+    # …insistir depois da resposta, sem nada novo, vai para pessoa.
     insistiu = [
         _cliente("quero falar com um atendente", 20),
         _loja("Olá! Sou o atendimento da loja, como posso ajudar?", 15),
         _cliente("quero falar com um atendente humano", 5),
     ]
+    assert _codigos(_gat(insistiu)) == ["pediu_pessoa"]
     assert _codigos(_gat(insistiu, ia_e_o_atendente=True)) == ["pediu_pessoa"]
     # Com os sinais do `_gerar` (já ajustados), vale o que veio.
     assert _gat(uma_vez, sinais=[]) == []

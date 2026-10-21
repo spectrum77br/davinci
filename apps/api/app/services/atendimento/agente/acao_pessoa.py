@@ -20,8 +20,10 @@ O que o código detecta, na ordem da régua (`gatilhos`):
   4  avaliacao_baixa     canal avaliação de nota 1–3, avaliação pendente de
                          nota baixa, cartão Cliente "avaliou mal";
   5  instrucao           texto com cara de instrução para a IA (ANTES);
-  6  pediu_pessoa        pediu atendente (já com a regra da "IA é o
-                         atendente": só a insistência conta lá);
+  6  pediu_pessoa        pediu pessoa pela régua do agente (21/10/2026,
+                         `pedido_de_pessoa`): recusou o virtual, aceitou a
+                         pessoa oferecida, pediu irritado, ou pediu de novo
+                         sem nada novo a responder — pedir uma vez não é;
   7  segurar_envio       pista de cancelamento (ou a opção 3 do menu) e o
                          pedido AINDA NÃO postado;
   8  alterar_endereco    pista de endereço/destinatário (ou a opção 4) e o
@@ -31,8 +33,10 @@ O que o código detecta, na ordem da régua (`gatilhos`):
   10 analisar_evidencia  anexo do cliente DEPOIS de a loja pedir foto/vídeo
                          (só anexo: ANTES do modelo);
   11 abrir_chamado       "não recebi" com o pedido constando entregue
-                         (`contexto.entregue_da_logistica`), extravio, ou o
-                         status de volta ao remetente;
+                         (`pedido_entregue`: a logística OU a situação
+                         Entregue do Bling — o mesmo dado do modelo, em toda
+                         plataforma, 21/10/2026), extravio, ou o status de
+                         volta ao remetente;
   12 aprovar_fora_da_plataforma  Pix, depósito, dados bancários, "por fora",
                          reembolso parcial, "pago a diferença" (a diferença
                          vira orientação com a recusa padrão aprovada);
@@ -390,8 +394,8 @@ _DESTINATARIO = re.compile(
     r"|\b(?:destinatario|cep)\b.{0,40}\b(?:errad\w*|incorret\w*|alter\w*|mud\w*|troc\w*)\b"
 )
 _NAO_RECEBEU = re.compile(
-    r"\b(?:nao|n|ainda\s+nao)\s+(?:recebi|recebemos|recebeu|chegou|chegaram|entregaram"
-    r"|entregou|foi\s+entregue)\b"
+    r"\b(?:nao|n|ainda\s+nao)\s+(?:me\s+|nos\s+)?(?:recebi|recebemos|recebeu|chegou|chegaram"
+    r"|entregaram|entregou|foi\s+entregue)\b"
     # (revisão "furos") "não veio nada", "não chegou nada" — com o pedido entregue.
     r"|\bnao\s+(?:veio|chegou|apareceu|tem|tinha)\s+nada\b"
     r"|\bconsta\s+(?:como\s+)?entregue\b"
@@ -416,6 +420,35 @@ _SO_NAO_RECEBI = re.compile(
     r"|\bninguem\s+(?:recebeu|assinou)\b"
 )
 _FRASES = re.compile(r"[^.!?\n]+[.!?\n]*")
+
+# O id e o nome da situação "Entregue" do Bling (83953; `garantia.py`).
+SITUACAO_ENTREGUE = "83953"
+
+
+def situacao_entregue(situacao: Any) -> bool:
+    """A situação do pedido (o id cru ou o nome) é "Entregue"? PURA (rodada 4b)."""
+    texto = " ".join(validador.plano_de(str(situacao or "")).split())
+    return texto in (SITUACAO_ENTREGUE, "entregue")
+
+
+def pedido_entregue(ctx_pedido: Mapping[str, Any] | None) -> bool:
+    """O pedido consta ENTREGUE? O MESMO `entregue` que o bloco do pedido mostra ao
+    modelo (`pacote.bloco_do_pedido`): a logística (a data ou o status, com a
+    correção de `contexto.entregue_da_logistica`) OU a situação Entregue do
+    Bling (83953). PURA.
+
+    Eval cego de 21/10/2026 (TikTok, Mini): 2 conversas "consta entregue" + "não
+    chegou" saíram sozinhas — o modelo leu `entregue: true` (a situação do
+    Bling; o pedido do TikTok costuma não ter a linha da logística) e a régua
+    do chamado só olhava a logística. Agora a régua lê o mesmo dado, em toda
+    plataforma.
+    """
+    ctx_pedido = ctx_pedido if isinstance(ctx_pedido, Mapping) else {}
+    logistica = ctx_pedido.get("logistica")
+    pedido = ctx_pedido.get("pedido")
+    return contexto_svc.entregue_da_logistica(
+        dict(logistica) if isinstance(logistica, Mapping) else None
+    ) or (isinstance(pedido, Mapping) and situacao_entregue(pedido.get("situacao")))
 
 
 def afirma_consta_entregue(textos: Iterable[str | None]) -> bool:
@@ -664,17 +697,601 @@ def _avaliacao_ruim(conversa: Any) -> bool:
     return estrelas <= constantes.NOTA_BAIXA_AVALIACAO
 
 
-def _sinais_da_rajada(
-    recentes: Sequence[Any], rajada: Sequence[Any], *, ia_e_o_atendente: bool
-) -> set[str]:
-    """Os códigos dos sinais como o `humano.triar` calcula (sem o `BaseDoGerar`)."""
-    textos = [m.texto for m in rajada if getattr(m, "texto", None)]
+# ── O pedido de pessoa no caminho do agente (decisão do dono, 21/10/2026) ─
+#
+# "Sobre esse aí ele conseguiria responder automaticamente, como se ele fosse o
+# atendente; se ele puder e conseguir, ele mesmo responde" (Eduardo, 21/10/2026,
+# no chat). O caso real (Kia Shopee, 20–21/10): o comprador perguntou se o pote
+# de 2,5 L esgotado ia voltar ao estoque, escolheu a opção 6 do menu ("Falar
+# com Atendente"), recebeu o "Em que podemos ajudar?", repetiu a pergunta,
+# reclamou que não teve resposta e escolheu o 6 de novo — a régua mandou para
+# pessoa com "cliente insistiu em falar com uma pessoa", e o agente sabia
+# responder (esgotado no anúncio, sem previsão de reposição).
+#
+# No canal com o AGENTE, pedir atendente (por texto, "tem alguém aí?", a opção
+# 6 do menu, pedir duas vezes) NÃO é, por si, motivo de pessoa: o agente
+# responde as perguntas pendentes como o atendimento da loja e, sem pergunta,
+# pergunta como pode ajudar. A pergunta sincera "é robô?" é pergunta (o agente
+# responde com honestidade: o atendimento virtual da loja, e uma pessoa pode
+# assumir se o cliente preferir), não pedido. O pedido de pessoa ainda vai para
+# pessoa (`pediu_pessoa`, `pedido_de_pessoa`) só quando:
+#   - o cliente recusa o atendimento virtual ("não quero falar com robô");
+#   - a loja já disse que é o atendimento virtual e ofereceu a pessoa, e o
+#     cliente pede a pessoa (ou só diz "sim", "quero", "prefiro");
+#   - o pedido vem com irritação (as palavras fortes, o grito, o "já pedi 3
+#     vezes") ou com alerta, xingamento ou reclamação — estes três já são
+#     `juridico_fraude_ofensa`, que continua igual;
+#   - o pedido é o 3º seguido (`_TETO_DE_PEDIDOS`: este turno e os dois
+#     anteriores do cliente, cada um fechado por uma resposta da loja, pediram
+#     pessoa), mesmo com pergunta nova — o teto contra o laço;
+#   - depois de uma resposta DE VERDADE da loja (não o "em que podemos
+#     ajudar?"), o cliente diz que ela não respondeu ("você não respondeu a
+#     minha pergunta") e pede pessoa, sem pergunta nova;
+#   - o cliente pede DE NOVO depois de a loja já ter respondido um pedido dele
+#     e o turno não traz nada novo a responder (`tem_o_que_responder`: nem
+#     pergunta nova, nem a pergunta que ficou sem resposta — a dos turnos que
+#     a loja fechou só com um "em que podemos ajudar?"). A pergunta que repete
+#     a de um turno já respondido de verdade não é nova (revisão de 21/10/2026:
+#     "o pote vai voltar? quero falar com atendente" cinco vezes, com a
+#     resposta real entre uma e outra, era um laço sem saída).
+# O legado (e o canal sem o agente) segue com `ia.insistiu_em_pessoa` e a "IA é
+# o atendente" de 14/10/2026, sem mudança. O assunto da resposta é o da
+# pergunta (o prompt; o manual base já diz "se há pergunta sem resposta,
+# classificar pela pergunta"): a trava do envio sozinho decide como sempre.
+
+MOTIVO_RECUSOU_VIRTUAL = "cliente insistiu em falar com uma pessoa (recusou o atendimento virtual)"
+MOTIVO_ACEITOU_A_PESSOA = (
+    "cliente insistiu em falar com uma pessoa (pediu a pessoa depois de saber que é o "
+    "atendimento virtual)"
+)
+MOTIVO_PEDIU_IRRITADO = "cliente insistiu em falar com uma pessoa, com irritação ou reclamação"
+MOTIVO_PEDIU_3_VEZES = "cliente insistiu em falar com uma pessoa (3º pedido seguido)"
+MOTIVO_NAO_RESOLVEU = (
+    "cliente insistiu em falar com uma pessoa (disse que a resposta da loja não respondeu)"
+)
+# O teto: o pedido de pessoa em tantos turnos seguidos do cliente vai para
+# pessoa mesmo com pergunta nova (revisão de 21/10/2026).
+_TETO_DE_PEDIDOS = 3
+
+# Os verbos que vêm antes do pedido ("quero falar com…", "tem como falar com…").
+_VERBOS_DO_PEDIDO = (
+    r"(?:\b(?:eu\s+)?(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|precisava(?:\s+de)?"
+    r"|necessito(?:\s+de)?|desejo|prefiro|tem\s+como|da\s+(?:pra|para)|consigo|posso|pode"
+    r"|poderia|podia|vou\s+querer)\s+(?:me\s+)?)?"
+)
+# O vocabulário do pedido que o `ia._ATENDENTE` (o do legado) não tem.
+_PEDE_PESSOA_AGENTE = re.compile(
+    r"\balguem\s+(?:\w+\s+){0,2}?(?:me\s+)?(?:atende\w*|respond\w*|ajud\w*)\b"
+    r"|\b(?:quero|queria|preciso|gostaria\s+de)\s+(?:ser\s+)?atendid[oa]\b"
+    r"|\bcade\s+(?:o\s+|a\s+|os\s+|as\s+)?(?:atendente\w*|atendimento|vendedor\w*|responsavel)\b"
+    r"|\b(?:chama|chame|chamar|passa|passe|passar|transfere|transfira|transferir|encaminha"
+    r"|encaminhe|encaminhar)\s+(?:\w+\s+){0,3}?(?:atendente|pessoa|humano|humana|alguem|vendedor\w*"
+    r"|responsavel|gerente)\b"
+    r"|\bfalar\s+com\s+(?:o\s+|a\s+)?(?:vendedor\w*|dono|dona|loja|equipe|suporte|sac)\b"
+    # a cobrança ("ninguém responde?", "cadê vocês?") — o `pede_atendente` do manual
+    r"|\bninguem\s+(?:\w+\s+)?(?:me\s+)?(?:respond\w*|atend\w*|ajud\w*)\b"
+    r"|\bcade\s+(?:voces|vcs|vc|voce|a\s+loja|o\s+atendimento|o\s+pessoal)\b"
+    r"|\b(?:atendimento|suporte)\s+human[oa]\b"
+    # revisão de 21/10/2026: "tem alguém online?", "tem algum atendente
+    # disponível?", "tem alguém?"; e a pessoa pedida com as palavras mais
+    # simples ("quero uma pessoa", "prefiro um humano", "quero alguém de
+    # verdade") — "preciso de uma pessoa pra receber" não é pedido.
+    r"|\b(?:alguem|atendente\w*|human[oa])\s+(?:disponive\w*|online|on\s*line|livre)\b"
+    r"|\btem\s+alguem\b(?=\s*(?:[?!.,;]|$))"
+    r"|\b(?:quero|queria|prefiro|pode\s+ser|me\s+passa|me\s+passe|gostaria\s+de|desejo)\s+"
+    r"(?:falar\s+com\s+)?(?:um\s+|uma\s+|a\s+|o\s+)?(?:pessoa|human[oa]|atendente\s+human[oa])\b"
+    r"(?!\s+(?:para|pra|pro)\s+(?:receber|retirar|buscar|pegar|entregar|usar))"
+    r"|\b(?:alguem|gente)\s+(?:de\s+verdade|real)\b"
+)
+# A mensagem que é só a pessoa: "pessoa", "humano", "uma pessoa por favor".
+_SO_PESSOA = re.compile(
+    r"(?:(?:sim|quero|prefiro|isso|um|uma|a|o)\s+)*(?:pessoa|human[oa]|atendente\s+human[oa])"
+    r"(?:\s+(?:de\s+verdade|real|por\s+favor|pf|pfv|pfvr|sim))*"
+)
+# A resposta ao "é robô?" que cita a pessoa (aceita a oferta, sem pergunta nova).
+_CITA_PESSOA = re.compile(r"\b(?:pessoas?|human[oa]s?|alguem|equipe|atendente\w*)\b")
+# A recusa do atendimento virtual (explícita: robô, IA, automático, virtual).
+_ALVO_VIRTUAL = (
+    r"(?:robo\w*|bot|chatbot|maquina|ia|inteligencia\s+artificial|atendimento\s+(?:automatico"
+    r"|virtual|eletronico)|atendente\s+virtual|virtual|automatico|resposta\s+automatica"
+    r"|mensage(?:m|ns)\s+automatica)"
+)
+_RECUSA_VIRTUAL = re.compile(
+    r"\bnao\s+(?:quero|gosto\s+de|aceito|vou)\s+(?:mais\s+)?(?:falar|conversar|ser\s+atendid[oa]"
+    r"|tratar)?\s*(?:com|por)?\s*(?:um\s+|uma\s+|o\s+|a\s+)?" + _ALVO_VIRTUAL + r"\b"
+    r"|\b(?:chega|cansei|para|pare|parem|parar)\s+de\s+(?:falar\s+com\s+)?(?:um\s+|uma\s+)?"
+    + _ALVO_VIRTUAL
+    + r"\b"
+    r"|\bsem\s+(?:um\s+|uma\s+)?(?:robo\w*|bot|resposta\s+automatica)\b"
+    r"|\b(?:robo|bot)\s+nao\b"
+    r"|\bnao\s+(?:e|eh)\s+(?:com\s+)?(?:um\s+)?(?:robo|bot|maquina)\s+que\s+(?:eu\s+)?quero\b"
+    r"|\b(?:pessoa|humano|humana|gente|atendente)(?:\s+de\s+verdade)?\s*,?\s+(?:e\s+)?nao\s+"
+    r"(?:com\s+)?(?:um\s+|uma\s+)?(?:robo\w*|bot|maquina)\b"
+)
+# O pedido inteiro (o verbo antes incluído) — o que sai do texto antes de
+# procurar o que mais o cliente quer (`responde_algo`).
+# O do agente na frente: "atendente disponível" sai inteiro (o `\batendente\b`
+# do legado deixaria o "disponível" como se fosse pergunta).
+_PEDIDO_INTEIRO = re.compile(
+    _VERBOS_DO_PEDIDO + r"(?:" + _PEDE_PESSOA_AGENTE.pattern + r"|" + ia._ATENDENTE.pattern + r")"
+)
+# A oferta da pessoa na resposta da loja (a resposta honesta ao "é robô?").
+_OFERTA_DE_PESSOA = re.compile(
+    r"\b(?:pessoa|atendente|alguem|colega)\s+(?:d[ao]\s+(?:nossa\s+)?(?:equipe|loja|time)\s+)?"
+    r"(?:pode|podera|consegue)\s+(?:\w+\s+)?(?:assumir|continuar|seguir|atender)"
+    r"|\bposso\s+(?:te\s+|lhe\s+)?(?:chamar|passar|transferir|encaminhar)\s+(?:\w+\s+){0,3}?"
+    r"(?:alguem|pessoa|atendente|equipe)\b"
+)
+# O "sim" de quem aceita a pessoa oferecida.
+_SO_SIM = re.compile(
+    r"(?:(?:sim|s|ss|quero|queria|prefiro|pode|podem|pode\s+ser|aceito|isso|claro|por\s+favor"
+    r"|pf|pfv|pfvr|uhum|aham|com\s+certeza|desejo|gostaria|passa|chama|pode\s+passar"
+    r"|pode\s+chamar)\s*)+"
+)
+# A irritação que acompanha o pedido (as palavras fortes; o grito e o "!!!" são
+# lidos no texto cru, `_gritou`). Alerta, xingamento e reclamação vêm pelos
+# sinais e pela pista `reclamacao_forte`. "Que demora" sozinho é o
+# `pede_atendente` do manual base ("reclama da demora"): fica com o agente.
+_IRRITACAO = re.compile(
+    r"\b(?:absurd\w*|ridicul\w*|descaso|desrespeit\w*|falta\s+de\s+respeito|pessim[oa]s?"
+    r"|horrivel|horriveis|lamentavel|inadmissivel|inaceitavel|revoltad\w*|revoltante"
+    r"|indignad\w*|irritad\w*|irritante|estressad\w*|decepcionad\w*|decepcao|frustrad\w*"
+    r"|porcaria\w*|cansei|cansad[oa]s?\s+de|nao\s+aguento\s+mais|chega\s+de|enrola\w*"
+    r"|enrolac\w*|nunca\s+mais\s+compro|pior\s+(?:loja|atendimento|compra|empresa|vendedor\w*)"
+    r"|(?:ja\s+)?(?:pedi|falei|perguntei|mandei|escrevi)\s+(?:isso\s+|isto\s+)?(?:\d+|duas|tres"
+    r"|quatro|cinco|varias|mil|muitas)\s+vezes"
+    r"|pela\s+(?:\d+\w*|segunda|terceira|quarta|quinta|decima|enesima|milesima)\s+vez)"
+)
+# "Você não respondeu a minha pergunta": aponta para uma pergunta de antes.
+_NAO_RESPONDERAM = re.compile(
+    r"\bnao\s+(?:me\s+)?(?:respond\w*|tive\s+resposta|obtive\s+resposta|recebi\s+resposta)"
+    r"|\b(?:minha|a\s+minha)\s+(?:pergunta|duvida)\b|\bsem\s+resposta\b"
+)
+# A resposta da loja que só pergunta como ajudar (não respondeu nada).
+_RESPOSTA_GENERICA = re.compile(
+    r"\b(?:em\s+que|como)\s+(?:\w+\s+){0,2}?(?:te\s+|lhe\s+)?(?:ajud\w*|ser\s+util)"
+    r"|\bqual\s+(?:e\s+)?(?:a\s+)?(?:sua\s+)?duvida\b|\bdescreva\s+(?:a\s+)?sua\s+duvida\b"
+    r"|\bconte\s+(?:aqui\s+|pra\s+gente\s+)?o\s+que\s+(?:precisa|aconteceu)\b"
+)
+_MAX_PALAVRAS_GENERICA = 25
+# O que sobra do pedido e não é pergunta: cumprimento, cortesia, o próprio
+# pedido, a cobrança ("cadê vocês?").
+_ENCHIMENTO = frozenset(
+    """
+    oi ola opa ei eae eai alo bom boa dia tarde noite tudo bem ok okay certo beleza
+    por favor pfv pf pfvr porfavor obrigado obrigada obg grato grata sim s ss nao nn
+    ainda de novo novamente urgente urgencia agora ja logo rapido aqui ai ae la
+    alguem algum alguma eu me mim comigo voce voces vc vcs gente pessoal ninguem
+    com um uma uns umas o a os as e ou so somente apenas mesmo
+    quero queria gostaria preciso precisava necessito desejo prefiro
+    pode podem poderia podiam podia consegue conseguem ajudar ajuda ajude
+    falar conversar atender atende atendam atendem atendimento atendente atendentes
+    atendido atendida humano humana pessoa pessoas real verdade
+    responder responde respondem responda chama chame passa passe transfere transfira
+    seis 6 opcao numero moca moco amigo amiga senhor senhora gentileza
+    aguardo aguardando esperando espero estou to ta tou
+    isso que pra para pro no na do da de em cade
+    tem teria existe atendendo equipe mas
+    """.split()
+)
+# As palavras que não pesam na comparação da pergunta repetida (`_raizes`): a
+# palavra de pergunta, o pronome, o artigo com preposição.
+_SEM_PESO_NA_REPETICAO = frozenset(
+    """
+    entao se qual quais quando como onde quanto quantos quantas porque por sobre
+    esse essa esses essas este esta estes estas aquele aquela meu minha meus minhas
+    seu sua seus suas dele dela ao aos pelo pela pelos pelas num numa dos das nos nas
+    ne hein afinal tambem tb mais muito
+    """.split()
+)
+# A marca da pergunta "é robô?" nas raízes (a pergunta repetida também vale).
+_RAIZ_ROBO = "<robo>"
+
+
+def _do_cliente(m: Any) -> bool:
+    return getattr(m, "autor", None) == constantes.AUTOR_CLIENTE and bool(
+        (getattr(m, "texto", None) or "").strip()
+    )
+
+
+def _plano_de(texto: str | None) -> str:
+    return " ".join(validador.plano_de(texto or "").split())
+
+
+def pede_pessoa(texto: str | None) -> bool:
+    """O cliente pede para falar com uma pessoa (o `ia._ATENDENTE` do legado, a
+    opção 6 do menu, o vocabulário do agente, a recusa do virtual)? PURA.
+
+    A pergunta sincera "é robô?"/"vc é humano?" NÃO é pedido (o agente responde).
+    """
+    plano = _plano_de(texto)
+    if not plano:
+        return False
+    if ia._OPCAO_ATENDENTE.match(plano):
+        return True
+    if _SO_PESSOA.fullmatch(" ".join(re.sub(r"[^\w\s]", " ", plano).split())):
+        return True
+    sem_a_pergunta = ia._PERGUNTA_DE_ROBO.sub(" ", plano)
+    return bool(
+        ia._ATENDENTE.search(sem_a_pergunta)
+        or _PEDE_PESSOA_AGENTE.search(sem_a_pergunta)
+        or _RECUSA_VIRTUAL.search(plano)
+    )
+
+
+def so_pede_pessoa(texto: str | None) -> bool:
+    """A mensagem é só o pedido de pessoa e/ou a pergunta "é robô?", sem mais nada a
+    responder (o que o assunto `pede_atendente` resolve)? PURA (21/10/2026).
+
+    O "você não respondeu a minha pergunta" aponta para uma pergunta de antes:
+    o "em que posso ajudar?" não a resolve.
+    """
+    plano = _plano_de(texto)
+    robo = ia._PERGUNTA_DE_ROBO.search(plano) is not None
+    return (
+        (robo or pede_pessoa(texto))
+        and not _NAO_RESPONDERAM.search(plano)
+        and not responde_algo(ia._PERGUNTA_DE_ROBO.sub(" ", plano))
+    )
+
+
+def recusa_o_virtual(texto: str | None) -> bool:
+    """O cliente recusa o atendimento virtual ("não quero falar com robô")? PURA."""
+    return bool(_RECUSA_VIRTUAL.search(_plano_de(texto)))
+
+
+def ofereceu_pessoa(texto: str | None) -> bool:
+    """A resposta da loja ofereceu a pessoa ("se preferir, uma pessoa da nossa
+    equipe pode assumir a conversa")? PURA."""
+    return bool(_OFERTA_DE_PESSOA.search(_plano_de(texto)))
+
+
+def _so_sim(texto: str | None) -> bool:
+    """Só o "sim" ("quero", "prefiro", "pode", "por favor"...), sem mais nada."""
+    plano = " ".join(re.sub(r"[^\w\s]", " ", _plano_de(texto)).split())
+    return bool(plano) and _SO_SIM.fullmatch(plano) is not None
+
+
+def _gritou(texto: str | None) -> bool:
+    """O grito: "!!!" ou o texto em caixa alta (3+ palavras, 12+ letras)."""
+    texto = texto or ""
+    if "!!!" in texto:
+        return True
+    letras = [c for c in texto if c.isalpha()]
+    return len(letras) >= 12 and len(texto.split()) >= 3 and all(c.isupper() for c in letras)
+
+
+def irritado(textos: Iterable[str | None]) -> bool:
+    """O turno mostra irritação (palavra forte, grito, "já pedi 3 vezes")? PURA."""
+    textos = [t for t in textos if t]
+    return any(_gritou(t) for t in textos) or bool(_IRRITACAO.search(_plano_de(" ".join(textos))))
+
+
+def _clausulas(plano: str) -> list[tuple[str, bool]]:
+    """(oração, terminou em "?") — a pontuação separa."""
+    return [
+        (m.group(1), "?" in m.group(2))
+        for m in re.finditer(r"([^.!?;\n]+)([.!?;\n]*)", plano)
+        if m.group(1).strip()
+    ]
+
+
+def _sem_o_pedido(plano: str) -> str:
+    """O texto plano sem o pedido de pessoa (com o verbo antes), a recusa do virtual
+    e o "você não respondeu a minha pergunta" (aponta para uma pergunta de antes)."""
+    return _NAO_RESPONDERAM.sub(" ", _RECUSA_VIRTUAL.sub(" ", _PEDIDO_INTEIRO.sub(" ", plano)))
+
+
+def _raizes(palavras: Iterable[str]) -> frozenset[str]:
+    """As raízes que pesam na comparação da pergunta repetida (o plural e o fim da
+    palavra não contam: "voltar" = "volta", "potes" = "pote")."""
+    saida = set()
+    for p in palavras:
+        if p in _ENCHIMENTO or p in _SEM_PESO_NA_REPETICAO:
+            continue
+        if len(p) > 3 and p.endswith("s"):
+            p = p[:-1]
+        saida.add(p[:5])
+    return frozenset(saida)
+
+
+def _perguntas(texto: str | None) -> list[frozenset[str]]:
+    """As perguntas da mensagem ALÉM do pedido de pessoa, cada uma pelas raízes. PURA.
+
+    A pergunta "é robô?" conta (o agente responde com honestidade). O pedido
+    (com o verbo antes), a recusa do virtual, o "não respondeu", o
+    cumprimento, a cortesia e a cobrança saem; sobra palavra e a oração é
+    pergunta ("?"), tem pista de assunto ou é demanda concreta
+    (`ia.demanda_concreta`) → conta.
+    """
+    plano = _plano_de(texto)
+    if not plano or ia.mensagem_de_continuidade(texto):
+        return []
+    saida: list[frozenset[str]] = []
+    if ia._PERGUNTA_DE_ROBO.search(plano):
+        saida.append(frozenset({_RAIZ_ROBO}))
+        plano = ia._PERGUNTA_DE_ROBO.sub(" ", plano)
+    for oracao, interrogativa in _clausulas(_sem_o_pedido(plano)):
+        palavras = [p for p in re.findall(r"[a-z0-9]+", oracao) if p not in _ENCHIMENTO]
+        if not palavras:
+            continue
+        if (
+            interrogativa
+            or ia.pistas_de_categoria(oracao)
+            or ia.demanda_concreta(" ".join(palavras))
+        ):
+            saida.append(_raizes(palavras))
+    return saida
+
+
+def responde_algo(texto: str | None) -> bool:
+    """A mensagem traz o que responder ALÉM do pedido de pessoa (`_perguntas`)? PURA."""
+    return bool(_perguntas(texto))
+
+
+def _resposta_generica(texto: str | None) -> bool:
+    """A resposta da loja só perguntou como ajudar ("Olá! Em que podemos ajudar?")."""
+    plano = _plano_de(texto)
+    return bool(_RESPOSTA_GENERICA.search(plano)) and len(plano.split()) <= _MAX_PALAVRAS_GENERICA
+
+
+def _indices_da_loja(recentes: Sequence[Any]) -> list[int]:
+    return [i for i, m in enumerate(recentes) if ia.resposta_da_loja(m)]
+
+
+def _ate_o_turno(recentes: list[Any], gatilho: Any | None) -> list[Any]:
+    """As mensagens até o fim do turno do `gatilho`: na sugestão pela tela a loja já
+    respondeu depois dele, e o que veio depois não é deste turno."""
+    if gatilho is None:
+        return recentes
+    i = next((i for i, m in enumerate(recentes) if m is gatilho), None)
+    if i is None:
+        return recentes
+    fim = next((j for j in range(i + 1, len(recentes)) if ia.resposta_da_loja(recentes[j])), None)
+    return recentes if fim is None else recentes[:fim]
+
+
+def _turnos(recentes: Sequence[Any]) -> list[tuple[list[Any], Any]]:
+    """Os turnos do cliente que a loja já fechou, na ordem: (as mensagens do cliente,
+    a resposta real da loja que fechou o turno). O turno atual não entra."""
+    saida: list[tuple[list[Any], Any]] = []
+    atual: list[Any] = []
+    for m in recentes:
+        if ia.resposta_da_loja(m):
+            saida.append((atual, m))
+            atual = []
+        elif _do_cliente(m):
+            atual.append(m)
+    return saida
+
+
+def _respondidas(turnos: Sequence[tuple[list[Any], Any]]) -> list[frozenset[str]]:
+    """As raízes de cada turno que a loja fechou com uma resposta DE VERDADE (não só
+    o "em que podemos ajudar?"): o que o cliente perguntou ali já foi respondido."""
+    saida = []
+    for msgs, loja in turnos:
+        if not msgs or _resposta_generica(getattr(loja, "texto", None)):
+            continue
+        raizes: set[str] = set()
+        for m in msgs:
+            plano = _plano_de(m.texto)
+            if ia._PERGUNTA_DE_ROBO.search(plano):
+                raizes.add(_RAIZ_ROBO)
+                plano = ia._PERGUNTA_DE_ROBO.sub(" ", plano)
+            raizes |= _raizes(re.findall(r"[a-z0-9]+", _sem_o_pedido(plano)))
+        saida.append(frozenset(raizes))
+    return saida
+
+
+def _pergunta_nova(texto: str | None, respondidas: Sequence[frozenset[str]]) -> bool:
+    """A mensagem traz pergunta que NÃO repete a de um turno já respondido de verdade?
+
+    Repete = as raízes da pergunta cabem nas de um turno respondido ("mas vai
+    voltar?" depois de "o pote de 2,5 vai voltar ao estoque?" respondido).
+    """
+    return any(not any(p <= r for r in respondidas) for p in _perguntas(texto))
+
+
+def _ficou_sem_resposta(
+    turnos: Sequence[tuple[list[Any], Any]], respondidas: Sequence[frozenset[str]]
+) -> bool:
+    """Há pergunta do cliente que a loja deixou só com o "em que podemos ajudar?"?
+
+    Volta pelos turnos fechados só com a resposta genérica (o caso real de
+    21/10/2026); a primeira resposta de verdade encerra a busca.
+    """
+    for msgs, loja in reversed(turnos):
+        if not _resposta_generica(getattr(loja, "texto", None)):
+            return False
+        if any(_pergunta_nova(m.texto, respondidas) for m in msgs):
+            return True
+    return False
+
+
+def tem_o_que_responder(recentes: Sequence[Any], gatilho: Any | None) -> bool:
+    """O turno do cliente traz algo a responder além do pedido de pessoa? PURA.
+
+    - uma mensagem do turno traz pergunta nova (`_perguntas`) — a que repete a
+      de um turno já respondido de verdade não é nova (revisão de 21/10/2026);
+    - ficou pergunta sem resposta: a dos turnos que a loja fechou só com um
+      "em que podemos ajudar?" (o caso real de 21/10/2026). O "você não
+      respondeu a minha pergunta" depois de uma resposta de verdade não traz
+      nada novo (`pedido_de_pessoa` → pessoa).
+    """
+    recentes = _ate_o_turno(list(recentes), gatilho)
+    turnos = _turnos(recentes)
+    respondidas = _respondidas(turnos)
+    rajada = [m for m in ia.rajada_do_cliente(recentes, gatilho) if _do_cliente(m)]
+    return any(_pergunta_nova(m.texto, respondidas) for m in rajada) or _ficou_sem_resposta(
+        turnos, respondidas
+    )
+
+
+def _pedidos_seguidos(turnos: Sequence[tuple[list[Any], Any]]) -> int:
+    """Quantos turnos fechados seguidos, do último para trás, pediram pessoa."""
+    n = 0
+    for msgs, _loja in reversed(turnos):
+        if not msgs:
+            continue
+        if not any(pede_pessoa(m.texto) for m in msgs):
+            break
+        n += 1
+    return n
+
+
+def _aceitou_a_oferta(textos: Sequence[str], pede: bool) -> bool:
+    """Depois da oferta da pessoa: pediu a pessoa, disse só "sim", ou citou a pessoa
+    ("uma pessoa por favor", "a equipe", "humano") sem pergunta nova."""
+    return (
+        pede
+        or all(_so_sim(t) for t in textos)
+        or (
+            any(_CITA_PESSOA.search(_plano_de(t)) for t in textos)
+            and not any(responde_algo(t) for t in textos)
+        )
+    )
+
+
+def pedido_de_pessoa(recentes: Sequence[Any], gatilho: Any | None) -> str | None:
+    """O pedido de pessoa que AINDA manda para pessoa no agente: o motivo, ou None. PURA.
+
+    Ver o comentário da seção (decisão do dono, 21/10/2026). Na ordem: recusou
+    o virtual; pediu a pessoa oferecida (ou disse "sim" à oferta); pediu com
+    irritação, alerta, xingamento ou reclamação; o 3º pedido seguido
+    (`_TETO_DE_PEDIDOS`); e, sem nada novo a responder: disse que a resposta
+    de verdade da loja não respondeu, ou pediu de novo depois da resposta da
+    loja (`ia.MOTIVO_INSISTIU_EM_PESSOA`).
+    """
+    recentes = _ate_o_turno(list(recentes), gatilho)
+    textos = [m.texto for m in ia.rajada_do_cliente(recentes, gatilho) if _do_cliente(m)]
+    if not textos:
+        return None
+    if any(recusa_o_virtual(t) for t in textos):
+        return MOTIVO_RECUSOU_VIRTUAL
+    pede = any(pede_pessoa(t) for t in textos)
+    turnos = _turnos(recentes)
+    ultima = turnos[-1][1] if turnos else None
+    if (
+        ultima is not None
+        and ofereceu_pessoa(getattr(ultima, "texto", None))
+        and _aceitou_a_oferta(textos, pede)
+    ):
+        return MOTIVO_ACEITOU_A_PESSOA
+    if not pede:
+        return None
     codigos = _codigos(ia.sinais_com_codigo(textos, agente=True))
-    if ia_e_o_atendente:
-        codigos.discard(constantes.HUMANO_ATENDENTE)
-        if ia.insistiu_em_pessoa(list(recentes)):
-            codigos.add(constantes.HUMANO_ATENDENTE)
-    return codigos
+    if (
+        irritado(textos)
+        or codigos & {constantes.HUMANO_ALERTA, constantes.HUMANO_XINGAMENTO}
+        or "reclamacao_forte" in ia.pistas_de_categoria(" ".join(textos))
+    ):
+        return MOTIVO_PEDIU_IRRITADO
+    if _pedidos_seguidos(turnos) + 1 >= _TETO_DE_PEDIDOS:
+        return MOTIVO_PEDIU_3_VEZES
+    respondidas = _respondidas(turnos)
+    if any(_pergunta_nova(t, respondidas) for t in textos) or _ficou_sem_resposta(
+        turnos, respondidas
+    ):
+        return None
+    if (
+        ultima is not None
+        and not _resposta_generica(getattr(ultima, "texto", None))
+        and any(_NAO_RESPONDERAM.search(_plano_de(t)) for t in textos)
+    ):
+        return MOTIVO_NAO_RESOLVEU
+    if any(pede_pessoa(m.texto) for msgs, _loja in turnos for m in msgs):
+        return ia.MOTIVO_INSISTIU_EM_PESSOA
+    return None
+
+
+# ── O cliente só agradece/confirma depois de a loja tratar (Kia ao vivo) ──
+#
+# Kia ao vivo, 21/10/2026 (85176yln23, rascunho 15da122e): a equipe respondeu
+# ("vamos abrir um chamado para te ajudar!"), a cliente só disse "Ok Aguardando"
+# e "Obrigada" — o agente repetiu a orientação do rastreio e pediu `abrir_chamado`
+# de novo. Regra do dono: o turno que é SÓ reconhecimento ou agradecimento, sem
+# pergunta nova, depois de a loja já ter respondido o assunto, não pede
+# rascunho (DESCARTADO, "não precisa de resposta"; no máximo a linha curta de
+# cortesia que o modelo escrever); nunca se repete a orientação já dada nem se
+# pede de novo a ação de pessoa que a equipe já fez ou prometeu — é o
+# acompanhamento da própria equipe. A ação de pessoa do CÓDIGO (o estado:
+# reclamação aberta, 83955…) continua vencendo.
+
+# As palavras do reconhecimento: o "ok", o agradecimento, a espera, o
+# cumprimento. Sem "sim"/"pode": depois de uma pergunta da loja, são resposta.
+_RECONHECIMENTO = frozenset(
+    """
+    ok okay okk oks blz beleza certo certinho ta bom entendi entendido entendo combinado perfeito
+    otimo otima show joia legal valeu vlw obrigado obrigada obrigados obrigadas obg obgd brigado
+    brigada grato grata agradeco agradecida agradecido muito mt mto muitissimo aguardo aguardando
+    aguardar aguardarei espero esperando esperar fico no na o a entao tudo bem tranquilo
+    tranquila de nada oi ola bom boa dia tarde noite ate mais amanha logo deus abencoe
+    por favor gentileza atencao pela retorno
+    """.split()
+)
+
+
+def so_reconhecimento(texto: str | None) -> bool:
+    """A mensagem é só reconhecimento, agradecimento ou espera ("Ok Aguardando",
+    "Obrigada", "fico no aguardo, obrigado!")? PURA. Pergunta ("?") não é."""
+    plano = _plano_de(texto)
+    if not plano or "?" in plano:
+        return False
+    palavras = re.findall(r"[a-z0-9]+", plano)
+    return bool(palavras) and all(p in _RECONHECIMENTO for p in palavras)
+
+
+def turno_so_de_reconhecimento(recentes: Sequence[Any], gatilho: Any | None) -> bool:
+    """O turno do cliente é SÓ reconhecimento/agradecimento depois de uma resposta
+    real da loja que tratou o assunto (Kia ao vivo, 21/10/2026)? PURA.
+
+    - a rajada (depois da última resposta real da loja) só tem texto de
+      reconhecimento (`so_reconhecimento`) — nenhum anexo, cartão nem pergunta;
+    - há resposta real da loja antes dela, que não é só o "em que podemos
+      ajudar?" (`_resposta_generica`) nem uma pergunta ao cliente (o "ok"
+      depois de "quer que eu abra o chamado?" é resposta, não reconhecimento).
+    """
+    recentes = list(recentes)
+    lojas = _indices_da_loja(recentes)
+    if not lojas:
+        return False
+    rajada = ia.rajada_do_cliente(recentes, gatilho)
+    if not rajada or any(
+        getattr(m, "autor", None) != constantes.AUTOR_CLIENTE
+        or _e_anexo(m)
+        or constantes.e_cartao_do_comprador(getattr(m, "payload", None))
+        or not so_reconhecimento(getattr(m, "texto", None))
+        for m in rajada
+    ):
+        return False
+    ultima = recentes[lojas[-1]]
+    texto_da_loja = getattr(ultima, "texto", None) or ""
+    return not _resposta_generica(texto_da_loja) and "?" not in texto_da_loja
+
+
+def sinais_do_agente(
+    sinais: Iterable[tuple[str, str]], recentes: Sequence[Any], gatilho: Any | None
+) -> list[tuple[str, str]]:
+    """Os sinais do texto (`ia.sinais_com_codigo(..., agente=True)`) com o pedido de
+    pessoa pela régua do agente (21/10/2026). PURA.
+
+    O `HUMANO_ATENDENTE` sai sempre ("cliente pediu atendente" e o "é robô?"
+    não mandam para pessoa) e volta, na frente e com o motivo, só com
+    `pedido_de_pessoa`. É o que o `ia._gerar`, o `replay.montar_base`, a
+    `gatilhos` sem os sinais e a Caixa Humano (`humano._triar_do_agente`) usam:
+    a mesma régua nos quatro.
+    """
+    saida = [(c, f) for c, f in sinais if c != constantes.HUMANO_ATENDENTE]
+    if motivo := pedido_de_pessoa(recentes, gatilho):
+        saida.insert(0, (constantes.HUMANO_ATENDENTE, motivo))
+    return saida
+
+
+def _sinais_da_rajada(recentes: Sequence[Any], gatilho: Any | None) -> set[str]:
+    """Os códigos dos sinais como o `humano.triar` calcula (sem o `BaseDoGerar`)."""
+    rajada = ia.rajada_do_cliente(list(recentes), gatilho)
+    textos = [m.texto for m in rajada if getattr(m, "texto", None)]
+    return _codigos(sinais_do_agente(ia.sinais_com_codigo(textos, agente=True), recentes, gatilho))
 
 
 def _antes(
@@ -703,14 +1320,12 @@ def gatilhos_antes_do_modelo(
     - SÓ anexo depois de a loja pedir foto/vídeo → pessoa (`analisar_evidencia`);
     - turno só com o cartão do produto/pedido → nenhum rascunho (spec 6.2).
     Anexo sem pedido antes: o agente roda (pergunta como pode ajudar).
-    `sinais` = o `BaseDoGerar.sinais`; None = calcula da rajada.
+    `sinais` = o `BaseDoGerar.sinais`; None = calcula da rajada
+    (`sinais_do_agente`). `ia_e_o_atendente` não muda nada desde 21/10/2026 (a
+    régua do pedido de pessoa do agente não depende do `pede_atendente`
+    liberado); fica pela assinatura.
     """
-    rajada = ia.rajada_do_cliente(list(recentes), gatilho)
-    codigos = (
-        _codigos(sinais)
-        if sinais is not None
-        else _sinais_da_rajada(recentes, rajada, ia_e_o_atendente=ia_e_o_atendente)
-    )
+    codigos = _codigos(sinais) if sinais is not None else _sinais_da_rajada(recentes, gatilho)
     antes, so_cartao = _antes(recentes, gatilho, codigos)
     return AntesDoModelo(gatilhos=tuple(antes), so_cartao=so_cartao and not antes)
 
@@ -850,19 +1465,16 @@ def gatilhos(
     e `gatilho` = os do `_gerar`; `ctx` = `contexto_da_conversa`; `postado`
     = `POSTADO_*`/None; `chaves_ativas` = as `CHAVES_QUE_TROCAM_GATILHO`
     com fato ativo; `sinais` = os (código `HUMANO_*`, frase) já ajustados
-    pela "IA é o atendente" (o `BaseDoGerar.sinais`) — None = calcula da
-    rajada como o `humano.triar` (com `ia_e_o_atendente`);
+    pela régua do pedido de pessoa do agente (o `BaseDoGerar.sinais`,
+    `sinais_do_agente`) — None = calcula da rajada como o `humano.triar`
+    (`ia_e_o_atendente` não muda nada desde 21/10/2026);
     `sinais_do_cliente` = os códigos do cartão Cliente; `uf_restrita` = o
     pedido vai para UF com restrição de envio (`gatilhos_de_codigo` lê).
     """
     recentes = list(recentes)
     ctx = ctx if isinstance(ctx, Mapping) else {}
     rajada, textos, plano = _planos_do_turno(recentes, gatilho)
-    codigos = (
-        _codigos(sinais)
-        if sinais is not None
-        else _sinais_da_rajada(recentes, rajada, ia_e_o_atendente=ia_e_o_atendente)
-    )
+    codigos = _codigos(sinais) if sinais is not None else _sinais_da_rajada(recentes, gatilho)
     pistas = set(ia.pistas_de_categoria(plano)) | _pistas_do_agente(plano)
     menu = set(ia.assuntos_sensiveis_do_menu(recentes, gatilho))
     etiquetas = etiquetas_da_conversa(conversa)
@@ -904,7 +1516,7 @@ def gatilhos(
     # 5 e 10 (só anexo) — os que nem chamam o modelo.
     antes, _ = _antes(recentes, gatilho, codigos)
     saida.extend(g for g in antes if g.codigo == constantes.ACAO_INSTRUCAO)
-    # 6 — pediu pessoa (o ajuste da "IA é o atendente" já veio nos sinais).
+    # 6 — pediu pessoa (a régua do agente já veio nos sinais: `sinais_do_agente`).
     if constantes.HUMANO_ATENDENTE in codigos:
         saida.append(_gatilho(constantes.ACAO_PEDIU_PESSOA))
     # 7 e 8 — o que ainda dá para fazer antes da postagem. O estado
@@ -929,10 +1541,9 @@ def gatilhos(
     # 11 — consta entregue e não chegou, extravio, volta ao remetente.
     status_log = validador.plano_de(str((logistica or {}).get("status") or ""))
     if (
-        (
-            _NAO_RECEBEU.search(plano)
-            and contexto_svc.entregue_da_logistica(dict(logistica) if logistica else None)
-        )
+        # O pedido entregue pelo MESMO dado que o modelo vê (`pedido_entregue`:
+        # a logística ou a situação Entregue do Bling — eval do TikTok, 21/10/2026).
+        (_NAO_RECEBEU.search(plano) and pedido_entregue(ctx))
         or afirma_consta_entregue([m.texto for m in rajada] + textos)
         or (_DISSE_QUE_ENTREGOU.search(plano) and _SO_NAO_RECEBI.search(plano))
     ):
@@ -1049,9 +1660,6 @@ def gatilhos_de_outro_pedido(
     """
     ctx_pedido = ctx_pedido if isinstance(ctx_pedido, Mapping) else {}
     pedido = ctx_pedido.get("pedido") if isinstance(ctx_pedido.get("pedido"), Mapping) else None
-    logistica = (
-        ctx_pedido.get("logistica") if isinstance(ctx_pedido.get("logistica"), Mapping) else None
-    )
     recentes = list(recentes)
     _rajada, _textos, plano = _planos_do_turno(recentes, gatilho)
     pistas = set(ia.pistas_de_categoria(plano)) | _pistas_do_agente(plano)
@@ -1073,11 +1681,7 @@ def gatilhos_de_outro_pedido(
             saida.append(_gatilho(constantes.ACAO_SEGURAR_ENVIO, detalhe))
         if "endereco" in pistas or "endereco" in menu or _DESTINATARIO.search(plano):
             saida.append(_gatilho(constantes.ACAO_ALTERAR_ENDERECO, detalhe))
-    if (
-        pedido
-        and _NAO_RECEBEU.search(plano)
-        and contexto_svc.entregue_da_logistica(dict(logistica) if logistica else None)
-    ):
+    if pedido and _NAO_RECEBEU.search(plano) and pedido_entregue(ctx_pedido):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_NAO_RECEBEU))
     return saida
 

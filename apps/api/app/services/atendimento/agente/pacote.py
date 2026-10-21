@@ -47,7 +47,7 @@ from app.models import (
     ProductLink,
 )
 from app.models.atendimento import AtendimentoFato
-from app.services.atendimento import automacoes_catalogo, constantes, ia, validador
+from app.services.atendimento import automacoes_catalogo, constantes, ia
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento.agente import acao_pessoa
@@ -129,6 +129,11 @@ class Pacote:
     postado: str | None = None
     pediu_evidencia: bool = False
     produto_desconhecido: bool = False
+
+
+# A linha dos ids que o pacote prova (o prompt manda copiar as evidências
+# daqui e da chave "evidencias" das ferramentas; Kia ao vivo, 21/10/2026).
+EVIDENCIAS_DOS_DADOS = "EVIDÊNCIAS DESTES DADOS (ids que você pode citar)"
 
 
 # ── Texto seguro dentro da moldura ────────────────────────────────────────
@@ -490,15 +495,10 @@ def _anuncios_do_retrato(conversa_dados: Mapping[str, Any] | None) -> list[str]:
     )[:MAX_ANUNCIOS_DO_PEDIDO]
 
 
-# O id e o nome da situação "Entregue" do Bling (83953; `garantia.py`,
-# `acao_pessoa._POSTADO_PELA_SITUACAO`).
-_SITUACAO_ENTREGUE = "83953"
-
-
-def _situacao_entregue(situacao: Any) -> bool:
-    """A situação do pedido (o id cru ou o nome) é "Entregue"? PURA (rodada 4b)."""
-    texto = " ".join(validador.plano_de(str(situacao or "")).split())
-    return texto in (_SITUACAO_ENTREGUE, "entregue")
+# O id e o nome da situação "Entregue" do Bling (83953): `acao_pessoa`, que a
+# régua do chamado lê também (`acao_pessoa.pedido_entregue`).
+_SITUACAO_ENTREGUE = acao_pessoa.SITUACAO_ENTREGUE
+_situacao_entregue = acao_pessoa.situacao_entregue
 
 
 async def bloco_do_pedido(
@@ -584,9 +584,9 @@ async def bloco_do_pedido(
         "enviado": enviado,
         "data_envio": _lacuna("data_envio", ia._data_br(data_envio), lacunas),
         # Rodada 4b (achado 15 da revisão r4): a situação 83953 (Entregue no
-        # Bling) também prova a entrega — a logística pode não ter a data.
-        "entregue": contexto_svc.entregue_da_logistica(dict(log) if log else None)
-        or _situacao_entregue(pedido.get("situacao")),
+        # Bling) também prova a entrega — a logística pode não ter a data. A
+        # régua do chamado lê o MESMO (`acao_pessoa.pedido_entregue`).
+        "entregue": acao_pessoa.pedido_entregue(ctx_pedido),
         "ultimo_status": status_sem_cidade(log.get("status")),
         "rastreio": _lacuna("rastreio", log.get("rastreio"), lacunas),
         "transportadora": _lacuna("transportadora", log.get("transportadora"), lacunas),
@@ -668,6 +668,8 @@ async def _fichas(
             teto_variacoes=variacoes_svc.MAX_VARIACOES_SEGUNDA_FICHA
             if fichas
             else variacoes_svc.MAX_VARIACOES_FICHA,
+            # A condição que o anúncio declara (fontes v1.3, item 10).
+            com_condicao=True,
         )
         if achada is None:
             break
@@ -987,6 +989,10 @@ async def montar_pacote(
         partes.append("PRODUTO: " + PRODUTO_DO_PEDIDO)
     else:
         partes.append("PRODUTO: " + SEM_FICHA)
+    # Kia ao vivo (21/10/2026, rascunho 610dcd76: "evidência citada sem prova
+    # (regra:rastreio)" sem o `consultar_manual`): os ids que ESTES dados provam,
+    # escritos — o modelo copia daqui (e das ferramentas), não adivinha.
+    partes.append(f"{EVIDENCIAS_DOS_DADOS}: " + (_json(ids) if ids else "[]"))
     if pendentes := _perguntas_pendentes(base):
         partes.append("PERGUNTAS AINDA SEM RESPOSTA NESTE TURNO:")
         partes.extend(f"- {p}" for p in pendentes)

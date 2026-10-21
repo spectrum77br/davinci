@@ -66,7 +66,13 @@ from tests.test_atendimento_ia import (
 # O retrato do bloco 1 (sha256 de `prompt.bloco_geral()`, 16 hex). Mudou o
 # prompt de propósito? O teste falha dizendo o novo valor: troque aqui — e
 # lembre que o cache de 1 h zera para todas as conversas na primeira resposta.
-RETRATO_BLOCO_GERAL = "9359d96e440eb15d"  # revisão do r5i (21/10/2026)
+# 21/10/2026 (tarde): o agente é o atendente da loja (decisão do dono) — o
+# exemplo do `pediu_pessoa`, a linha do pedido de atendente e a resposta honesta
+# ao "é robô?" (antes "9359d96e440eb15d", a revisão do r5i).
+# 21/10/2026 (noite): os ajustes do 1º dia ao vivo na Kia e do eval do TikTok — a
+# condição pela "condicao" da ficha, o "ok" depois de a loja tratar, as
+# evidências da linha EVIDÊNCIAS (antes "bcc65fc5ce18aafe").
+RETRATO_BLOCO_GERAL = "ebaf25a7a50b2948"
 
 
 def _geral() -> str:
@@ -143,8 +149,14 @@ def test_a_orientacao_aprovada_nao_promete_acompanhamento():
         assert "nossa equipe vai" not in texto, assunto
     assert "nunca prometa nem anuncie ação da equipe" in prompt.VALE_SEMPRE
     assert "o texto já é a resposta depois dela" in prompt.VALE_SEMPRE
-    # "A nossa equipe acompanha a conversa" é só a resposta ao "é robô?".
-    assert "a nossa equipe acompanha a conversa (essa frase só nessa resposta)" in _geral()
+    # A oferta da pessoa é só a resposta ao "é robô?" (decisão do dono de
+    # 21/10/2026: o atendimento virtual da loja, e uma pessoa pode assumir se o
+    # cliente preferir — antes era "a nossa equipe acompanha a conversa").
+    assert (
+        "perguntou se é robô: é o atendimento virtual da loja e, se preferir, uma pessoa da "
+        "nossa equipe pode assumir a conversa (essa frase só nessa resposta)"
+    ) in _geral()
+    assert "acompanha a conversa" not in _geral()
 
 
 def test_a_regra_antiga_do_manual_nao_manda_para_pessoa_nem_vira_espera():
@@ -193,9 +205,16 @@ def test_condicao_fora_do_titulo_sem_lancar_duvida():
     """cc95e95879e8 (dev): "não consigo confirmar" a condição de um Apple soa como
     dúvida sobre o produto. Revisão do r5i: "diga o que o anúncio informa" levava à
     condição fora do título (a descrição, a variação "NOVO") e ao "1 ano" do título,
-    que o código barra — agora, o que o TÍTULO traz e a compra protegida."""
+    que o código barra — agora, o que o TÍTULO traz e a compra protegida.
+
+    Fontes v1.3, item 10 (dono, 21/10/2026): a condição vem da "condicao" da ficha
+    (título, atributo de condição ou descrição do anúncio da conversa); o
+    "conflito" vai para pessoa; a certificação (água) segue só pelo título."""
     produto = _secao("# PRODUTO")
-    assert "só pelo TÍTULO do anúncio, nunca pela descrição, atributo ou variação" in produto
+    assert 'original) só pela "condicao" da ficha' in produto
+    assert '"conflito", ou a loja disse o contrário na conversa: pessoa' in produto
+    assert "À prova d'água só pelo TÍTULO" in produto
+    assert "nunca pela descrição, atributo ou variação" not in produto
     assert (
         'diga o que o título traz (marca e modelo) e que a compra é protegida pela plataforma, nunca "não consigo confirmar"'
         in produto

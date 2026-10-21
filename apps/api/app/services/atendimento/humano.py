@@ -127,7 +127,11 @@ viram o motivo `acao_pessoa`, com os códigos em `assuntos`; `sem_dado` e
 o anexo só vira pessoa depois de a loja pedir foto/vídeo); `ia` vem do
 rascunho do agente. `triar_conversa` lê o canal (`ia._agente_no_canal`) e,
 com o agente, o estado de postagem, as recusas aprovadas e a UF restrita.
-Sem o agente, a régua é EXATAMENTE a de antes. VERSAO 6 retria tudo.
+Sem o agente, a régua é EXATAMENTE a de antes. VERSAO 6 retria tudo; a 7
+(21/10/2026) também: no canal com o agente, o pedido de atendente segue a
+régua dele (`agente.acao_pessoa.pedido_de_pessoa`, decisão do dono: o agente
+é o atendente — pessoa só com insistência sem nada novo, irritação, recusa do
+virtual ou a pessoa oferecida aceita).
 
 SÓ AS LOJAS NO AUTOMÁTICO (14/10/2026, decisão do dono: "a Caixa Humano só
 para as lojas que estão automáticas"): a Caixa Humano — a lista
@@ -289,7 +293,9 @@ logger = structlog.get_logger()
 # alta fora, a bloqueada pelo estado, a foto depois do robô, o motivo `falha`.
 # 3 (16/10/2026): menu não corta texto/foto; IA atendente segue a régua da geração.
 # 6 (20/10/2026): no canal com o AGENTE, a régua "ação de pessoa" (spec 6.6).
-VERSAO = 6
+# 7 (21/10/2026): no canal com o AGENTE, pedir atendente não é motivo por si (a
+# régua do pedido de pessoa do agente, `acao_pessoa.pedido_de_pessoa`).
+VERSAO = 7
 # A chave em `atendimento_conversas.dados`.
 CHAVE = "humano"
 # Conversas por rodada do cron (o recálculo inicial, ~500, leva umas 3).
@@ -595,8 +601,9 @@ def _triar_do_agente(
     `acao_pessoa`), no que o CÓDIGO decide sem o modelo:
       • o ESTADO fica (reclamação, Ag. cancelamento, devolução, chamado,
         avaliação ruim, e-mail) e os SINAIS do texto também (alerta,
-        xingamento, atendente — com a regra da "IA é o atendente" —,
-        instrução);
+        xingamento, atendente — pela régua do pedido de pessoa do agente,
+        `acao_pessoa.sinais_do_agente` (21/10/2026; `ia_e_o_atendente` não
+        muda mais nada aqui) —, instrução);
       • o assunto não manda: nem a pista de assunto só de pessoa nem a opção
         sensível do menu viram `assunto` (no agente elas viram a orientação
         do assunto, spec 6.2);
@@ -643,11 +650,15 @@ def _triar_do_agente(
     # ── O que o cliente escreveu: os sinais e o turno incompleto ──
     rajada = _rajada(recentes, gatilho)
     textos_cliente = [m.texto for m in rajada if m.texto]
-    sinais = {codigo for codigo, _frase in ia.sinais_com_codigo(textos_cliente, agente=True)}
-    if ia_e_o_atendente:
-        sinais.discard(HUMANO_ATENDENTE)
-        if ia.insistiu_em_pessoa(recentes):
-            sinais.add(HUMANO_ATENDENTE)
+    # O pedido de pessoa pela régua do agente (21/10/2026, decisão do dono: o
+    # agente é o atendente — `acao_pessoa.sinais_do_agente`, a MESMA do
+    # rascunho; não depende mais do `pede_atendente` liberado).
+    sinais = {
+        codigo
+        for codigo, _frase in acao_pessoa.sinais_do_agente(
+            ia.sinais_com_codigo(textos_cliente, agente=True), recentes, gatilho
+        )
+    }
     motivos.update(sinais)
     if ia.turno_incompleto(recentes, gatilho):
         motivos.add(HUMANO_SEM_DADO)
