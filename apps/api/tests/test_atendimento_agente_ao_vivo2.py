@@ -335,7 +335,11 @@ def test_10_perguntar_como_ajudar_e_resposta_completa_so_no_pede_atendente():
         assert generico not in descricao, descricao
     geral = prompt.bloco_geral()
     (linha,) = [x for x in geral.splitlines() if x.startswith("- confianca:")]
-    assert linha == "- confianca: de 0 a 1 (perguntar como ajudar é resposta completa);", linha
+    # Item 13 (21/10/2026, noite): a linha segue com a régua do 0,9 (cada afirmação
+    # com lastro e a pergunta respondida) — o começo é o do item 10.
+    assert linha.startswith(
+        "- confianca: de 0 a 1 (perguntar como ajudar é resposta completa); "
+    ), linha
     assert "a pergunta certa" not in geral
     # O limiar do automático não mudou.
     assert ia.CONFIANCA_AUTO == 0.85

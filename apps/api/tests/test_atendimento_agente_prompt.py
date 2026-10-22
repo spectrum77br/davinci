@@ -76,7 +76,13 @@ from tests.test_atendimento_ia import (
 # resposta completa" na linha "confianca" do `_SAIDA` (só o "como ajudar", não toda
 # pergunta); os cabeçalhos das ferramentas e dos <dados> e o "com os 7 campos"
 # encurtaram para caber no teto (antes "ebaf25a7a50b2948").
-RETRATO_BLOCO_GERAL = "9f30de51538953e1"
+# 21/10/2026 (noite, item 13 da auditoria): a régua da "confianca" no `_SAIDA` — 0,9
+# com cada afirmação nos ids citados (ou na orientação do assunto) e a pergunta
+# respondida; 0,6 a 0,8 parcial ou incerta. Para caber no teto, palavras a menos no
+# `_COMO_TRABALHAR` (2), `_DADOS`, `_ESTILO`, `_VARIACOES`, `_TROCA` e `_PAPEL`, e a
+# frase repetida do "precisa agir ou decidir agora" saiu das REGRAS DURAS (antes
+# "9f30de51538953e1").
+RETRATO_BLOCO_GERAL = "835308a2d9a8805c"
 
 
 def _geral() -> str:

@@ -1085,7 +1085,9 @@ def test_a_resposta_boa_nao_e_recado(texto):
 def test_o_sistema_v3_reprova_o_texto_nao_dirigido_ao_cliente():
     # Rodada 4b: o `SISTEMA` virou v4 (os ASSUNTOS LIBERADOS do canal); o que a
     # v3 trouxe continua lá.
-    assert verificador.VERSAO == "v5"  # revisão do r5i: o caminho da Uranyx no item 4
+    # v5 (revisão do r5i): o caminho da Uranyx no item 4; v6 (item 12 da auditoria ao
+    # vivo, 21/10/2026): a coerência e os assuntos irmãos — tudo o que está abaixo fica.
+    assert int(verificador.VERSAO.removeprefix("v")) >= 5
     assert "texto não dirigido ao cliente" in verificador.SISTEMA
     assert "não é defeito" in verificador.SISTEMA
 

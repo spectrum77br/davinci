@@ -82,7 +82,20 @@ logger = structlog.get_logger()
 # ── O pedido (Haiku 5.5: sem `temperature`, `top_p`, `top_k` nem `thinking`) ──
 # v5 (revisão r5i de 21/10/2026): a exceção do caminho da Uranyx no item 4
 # (decisão 7 do dono). A calibração (com a chave) precisa rodar de novo.
-VERSAO = "v5"
+# v6 (item 12 da auditoria ao vivo, 21/10/2026 — Barbosa Shopee, rascunho
+# 68f6992d): o veredito se contradizia (o motivo dizia que as evidências
+# sustentavam "o pedido já foi enviado" e a mesma frase ia em afirma_sem_lastro)
+# e a orientação do reembolso não trazia a do cancelamento (pedido enviado →
+# devolução ao receber). Agora: a coerência explícita no `SISTEMA` (o que ele
+# julga sustentado nunca vai à lista 6 nem aos motivos) e a orientação dos
+# assuntos irmãos (`IRMAOS`) na entrada. Nenhuma marca que bloqueia afrouxou; a
+# recusa do cancelamento passou a contar no item 2. A calibração roda de novo.
+# Revisão do v6 (21/10/2026): a coerência com o ÔNUS NA PROVA — sustentada é a
+# afirmação que um campo das EVIDÊNCIAS diz (ou a regra e o caminho da
+# orientação, das regras da loja e dos caminhos do app); sem o campo apontado,
+# ela fica na lista 6. Nunca "o que está errado de verdade" (a régua da verdade
+# no mundo, não da prova, liberaria a afirmação plausível sem lastro).
+VERSAO = "v6"
 MODELO = "claude-haiku-5-5"
 EFFORT = "low"
 # O JSON do `Veredito` (~100–300 tokens) + o raciocínio ADAPTATIVO, que conta no
@@ -231,7 +244,11 @@ class Veredito(BaseModel):
     ]
     nega_direito_ou_garantia: Annotated[
         bool,
-        Field(description="O texto recusa troca, devolução, reembolso, conserto ou garantia."),
+        Field(
+            description=(
+                "O texto recusa troca, devolução, reembolso, cancelamento, conserto ou garantia."
+            )
+        ),
     ]
     contradiz_restricao_de_regiao: Annotated[
         bool,
@@ -248,7 +265,10 @@ class Veredito(BaseModel):
         Field(
             description=(
                 "Cada afirmação do texto que as EVIDÊNCIAS não sustentam, curta, com as palavras "
-                "do texto. Vazia quando tudo o que o texto afirma está nas EVIDÊNCIAS."
+                "do texto: a que você não aponta num campo das EVIDÊNCIAS (ou, se é regra ou "
+                "caminho, na ORIENTAÇÃO APROVADA, nas REGRAS DA LOJA ou nos CAMINHOS DO APP) "
+                "entra. Vazia quando tudo o que o texto afirma está nas EVIDÊNCIAS. Nunca "
+                "uma afirmação que você mesmo julga sustentada."
             )
         ),
     ]
@@ -257,7 +277,12 @@ class Veredito(BaseModel):
     ]
     motivos: Annotated[
         list[str],
-        Field(description="Até 3 frases curtas: o que está errado. Vazia quando nada está."),
+        Field(
+            description=(
+                "Até 3 frases curtas: o que falta ou está errado (nunca o que está certo ou "
+                "sustentado). Vazia quando nada falta nem está errado."
+            )
+        ),
     ]
 
 
@@ -358,7 +383,11 @@ o produto: o que não está nas EVIDÊNCIAS não está provado;
 - REGRAS DA LOJA: o que o manual da loja diz do assunto (regra, orientação, respostas \
 prontas). É orientação, NÃO é fato nem autorização de promessa;
 - ORIENTAÇÃO APROVADA DO ASSUNTO e CAMINHOS DO APP: o que o agente pode dizer sobre a \
-regra da plataforma e onde o cliente faz as coisas no app;
+regra da plataforma e onde o cliente faz as coisas no app. Cancelamento, reembolso e \
+troca_devolucao são assuntos irmãos: com um deles declarado, vem a orientação dos três, e a \
+de qualquer um é lastro para o rascunho (pedido já enviado: a devolução ou o reembolso ao \
+receber, pelo app; a plataforma analisa e devolve pela mesma forma de pagamento); os \
+ASSUNTOS LIBERADOS valem como sempre;
 - ASSUNTOS LIBERADOS (quando vier): os assuntos que o dono liberou para sair sozinhos \
 neste canal e o assunto declarado do rascunho;
 - RASCUNHO: o texto que sairia.
@@ -405,12 +434,14 @@ passar, encaminhar, conferir, verificar ou fazer algo (fora o "analisa e respond
 por aqui" do pedido de vídeo e fotos), marque true — mesmo que a regra sugira a frase.
 
 2. nega_direito_ou_garantia — o texto recusa troca, devolução, reembolso, \
-conserto, cobertura ou garantia, com ou sem a palavra "garantia": "o prazo para \
+cancelamento, conserto, cobertura ou garantia, com ou sem a palavra "garantia": "o prazo para \
 troca já acabou", "está fora do prazo", "já passou o prazo", "não conseguimos mais \
 trocar", "não fazemos a troca nesse caso", "não será possível", "infelizmente não \
 temos como", "hoje só vale para software", "não é coberto"; ou diz que algo que o \
 cliente fez anula a garantia. Recusa é decisão de pessoa — mesmo quando a garantia \
-nas EVIDÊNCIAS está vencida.
+nas EVIDÊNCIAS está vencida. Recusar o cancelamento (dizer que não dá, não é possível \
+ou a loja não consegue cancelar) conta; orientar que, com o pedido já enviado, o caminho \
+é a devolução ao receber NÃO é recusa.
 
 3. contradiz_restricao_de_regiao — as EVIDÊNCIAS trazem restrição de envio por \
 estado e o texto diz ou dá a entender que entrega lá; ou diz que entrega no Brasil \
@@ -454,9 +485,11 @@ tudo certo" sobre um pedido conta. Uma resposta curta ("Tem sim!", "Sim, \
 possui", "Não tem") afirma o que o cliente perguntou: confira contra as \
 EVIDÊNCIAS. NÃO conta: a regra da plataforma ou da loja que está na ORIENTAÇÃO \
 APROVADA ou nas REGRAS DA LOJA ("a Shopee não permite alterar o endereço depois do \
-envio", "o reembolso é feito pela plataforma pela mesma forma de pagamento") e o \
-caminho que está em CAMINHOS DO APP. Cite cada afirmação curta, com as palavras do \
-texto (até 8 palavras). Vazia = tudo o que o texto afirma está nas EVIDÊNCIAS.
+envio", "o reembolso é feito pela plataforma pela mesma forma de pagamento"), o \
+caminho que está em CAMINHOS DO APP e o estado do pedido que as EVIDÊNCIAS trazem \
+(com "enviado": true ou "postado": "sim", dizer que o pedido já foi enviado ou postado \
+tem lastro). Cite cada afirmação curta, com as palavras do texto (até 8 palavras). \
+Vazia = tudo o que o texto afirma está nas EVIDÊNCIAS.
 
 7. responde_o_que_foi_perguntado — true quando o texto trata o que o cliente \
 perguntou neste turno: responde, pergunta o dado que falta para responder ou \
@@ -464,7 +497,8 @@ orienta o caminho no app. false quando ignora a pergunta, responde outra coisa o
 deixa sem resposta uma parte importante.
 
 8. motivos — até 3 frases curtas (até 15 palavras cada), em português, dizendo o \
-que está errado. Vazia quando nada está.
+que falta ou está errado. Vazia quando nada falta nem está errado. Nunca um motivo que \
+diz que algo está certo ou sustentado.
 
 9. ok_para_envio_automatico — true SÓ quando os itens 1 a 5 são false, a lista 6 \
 está vazia, o item 7 é true e não há outro risco (tom agressivo ou irônico, \
@@ -478,6 +512,12 @@ Se for true, a lista 8 fica vazia. Na dúvida, false.
 Não são afirmação: saudação, agradecimento, desculpas, o pedido do dado que falta \
 (número do pedido, foto, vídeo, qual produto, qual cor) e a orientação de onde \
 achar algo no app.
+
+Seja coerente, com o ônus na prova: sustentada é a afirmação que um campo das \
+EVIDÊNCIAS diz, ou a regra e o caminho que a ORIENTAÇÃO APROVADA, as REGRAS DA LOJA ou \
+os CAMINHOS DO APP dizem — essa NUNCA entra na lista 6 nem nos motivos. Se você não \
+aponta o campo ou a linha que a diz, ela fica na lista 6 e o motivo diz o que falta. A \
+lista 6 e os motivos trazem só o que falta ou está errado.
 
 Seja rígido. Você é a última trava antes de o texto chegar ao cliente sem ninguém \
 ler: um falso alarme só faz uma pessoa conferir; uma liberação errada chega ao \
@@ -627,12 +667,32 @@ def _separar_regras(textos: Sequence[str]) -> tuple[list[str], list[str]]:
     return evidencias, regras
 
 
+# Os assuntos irmãos (item 12 da auditoria ao vivo, 21/10/2026, rascunho 68f6992d):
+# o reembolso de um pedido já enviado passa pela devolução ao receber — a
+# orientação do cancelamento —, e a troca pela devolução. Declarado um deles, o
+# verificador recebe a orientação aprovada dos três (o declarado primeiro).
+IRMAOS: tuple[str, ...] = ("cancelamento", "reembolso", "troca_devolucao")
+
+
+def assuntos_da_orientacao(assunto: str | None) -> list[str]:
+    """O assunto e, se ele é um dos `IRMAOS`, os outros dois (nessa ordem). PURA."""
+    if not assunto:
+        return []
+    if assunto in IRMAOS:
+        return [assunto, *(a for a in IRMAOS if a != assunto)]
+    return [assunto]
+
+
 def orientacao_aprovada(assunto: str | None, plataforma_codigo: str = "") -> list[str]:
     """As linhas da ORIENTAÇÃO APROVADA do assunto e dos CAMINHOS DO APP (ajuste r3:
-    a resposta de orientação sem `consultar_manual` não é "sem lastro"). PURA."""
+    a resposta de orientação sem `consultar_manual` não é "sem lastro"). PURA.
+
+    Item 12 (21/10/2026): com um dos `IRMAOS` declarado, vem a orientação dos três.
+    """
     linhas: list[str] = []
-    if assunto and (orientacao := prompt.ORIENTACAO.get(assunto)):
-        linhas += [f"ORIENTAÇÃO APROVADA DO ASSUNTO ({assunto}):", f"- {orientacao}"]
+    for nome in assuntos_da_orientacao(assunto):
+        if orientacao := prompt.ORIENTACAO.get(nome):
+            linhas += [f"ORIENTAÇÃO APROVADA DO ASSUNTO ({nome}):", f"- {orientacao}"]
     caminhos = prompt.CAMINHOS_APP.get(plataforma_codigo)
     if caminhos:
         linhas += ["CAMINHOS DO APP:", *(f"- {c}" for c in caminhos)]

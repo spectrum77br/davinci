@@ -580,7 +580,8 @@ def test_7_nunca_homologado():
 
 
 def test_7_o_verificador_conhece_a_excecao():
-    assert verificador.VERSAO == "v5"
+    # v5 trouxe a exceção; o v6 (item 12 da auditoria ao vivo, 21/10/2026) a mantém.
+    assert int(verificador.VERSAO.removeprefix("v")) >= 5
     assert '"pelo app Uranyx ou pelo site uranyx.com.br/sac", exatamente assim' in (
         verificador.SISTEMA
     )

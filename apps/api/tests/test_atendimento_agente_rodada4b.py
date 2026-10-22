@@ -313,8 +313,11 @@ def test_os_assuntos_liberados_e_a_entrada_do_verificador():
         acao="responder", acao_pessoa=None, texto="Olá!", resumo=resumo, assunto="rastreio"
     )
     assert "ASSUNTOS LIBERADOS" not in sem
-    # v5 (revisão do r5i): o caminho da Uranyx no item 4
-    assert verificador.VERSAO == "v5" and "assunto não liberado" in verificador.SISTEMA
+    # v5 (revisão do r5i): o caminho da Uranyx no item 4; v6 (item 12 da auditoria ao
+    # vivo, 21/10/2026): a coerência e os assuntos irmãos — a regra do assunto não
+    # liberado continua.
+    assert int(verificador.VERSAO.removeprefix("v")) >= 5
+    assert "assunto não liberado" in verificador.SISTEMA
 
 
 # ─────────────── achado 3: o dado de produto pelo nome da variação ───────────────

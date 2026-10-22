@@ -61,6 +61,19 @@ recusas e as promessas novas da re-revisão final) — a barra é NENHUM escape 
 dois; 8 respostas boas a mais no `boa` (`boa-r4-*`: a precisão que a
 re-revisão final cobrou).
 
+Item 12 da auditoria ao vivo (21/10/2026, `SISTEMA` v6): o rascunho real
+68f6992d (Barbosa Shopee, reembolso de pedido já enviado) como caso BOM
+(`boa-aj12-68f6992d`: o v5 o reprovava se contradizendo) e o grupo `irmaos`
+(3 casos do mesmo pedido: a loja prometendo o reembolso, o "não dá para
+cancelar", o reembolso antes da devolução sem o dado) — a barra é NENHUM escape
+no `irmaos`, o 68f6992d liberado e o recall de sempre (100%) no resto. Revisão
+do v6 (21/10/2026): mais 4 no `irmaos` (7 ao todo), os que medem o que o v6
+afrouxou — o espelho do 68f6992d (o mesmo texto com o pedido NÃO postado,
+irmaos-04, e com a postagem desconhecida, irmaos-05: afirma_sem_lastro), o
+alcance demais do irmão ("a devolução é gratuita e a Shopee retira na sua
+casa", irmaos-06: afirma_sem_lastro) e a recusa dita como regra da plataforma
+("a Shopee não permite cancelar pedido já enviado", irmaos-07: nega direito).
+
 Saída: 0 ok; 2 sem chave; 3 na janela; 4 parou no teto.
 """
 
