@@ -3828,3 +3828,172 @@ def test_raio_x_dif_e_real_menos_previsto():
     c = _comparativo(p, versoes, [])
     (liq,) = [x for x in c["linhas"] if x["chave"] == "liquido"]
     assert liq["previsto"] == 0.0 and liq["real"] == -8.99 and liq["dif"] == -8.99
+
+
+# --- 22/10: custo pela situação do Bling + zerar à mão ao finalizar --------------------
+
+
+def test_regra_do_custo():
+    r = calc.regra_do_custo
+    assert r(situacao="bateu", estado_bling="manutenção", zerado_a_mao=False) == "manutencao"
+    assert r(situacao="bateu", estado_bling="Manutenção ", zerado_a_mao=False) == "manutencao"
+    # "Manutenção - Sucata" é perda: conta
+    assert r(situacao="bateu", estado_bling="manutenção - sucata", zerado_a_mao=False) == "cheio"
+    # "no resolvido acontece de tudo" (Vinicius): conta
+    for estado in ("resolvido", "perdimento", "extraviado", "aguardando devolução", None):
+        assert r(situacao="bateu", estado_bling=estado, zerado_a_mao=False) == "cheio"
+    assert r(situacao="cancelado", estado_bling="cancelado", zerado_a_mao=False) == "cancelado"
+    assert r(situacao="bateu", estado_bling="perdimento", zerado_a_mao=True) == "manual"
+
+
+async def _conciliado(db, numero: str) -> ConciliacaoPedido:
+    from sqlalchemy import select
+
+    return (
+        await db.execute(select(ConciliacaoPedido).where(ConciliacaoPedido.pedido_bling == numero))
+    ).scalar_one()
+
+
+async def test_custo_segue_o_bling_e_reabre_o_finalizado(db, make_user):
+    """22/10 (Vinicius): Manutenção no Bling zera o custo; o pedido foi finalizado e o
+    Bling foi pra Perdimento → o custo volta e o pedido reabre, como faz com dinheiro
+    novo. E fica reaberto até a pessoa fechar, mesmo com o dinheiro batendo."""
+    loja, _ = await _loja(db, make_user)
+    d = lambda dia: datetime(2026, 10, dia, 12, tzinfo=UTC)  # noqa: E731
+    bo = _pedido_bling("301789", "2000017890000001", d(6), "500.00", 360.0)
+    bo.situacao = "Manutenção"
+    db.add(bo)
+    db.add(
+        _fin(
+            loja.integration_id,
+            "2000017890000001",
+            gross="500.00",
+            fee="50.00",
+            freight="0",
+            net="450.00",
+        )
+    )
+    db.add(_mov(loja, "venda_liberada", d(10), credito="450.00", pedido_mkt="2000017890000001"))
+    await db.commit()
+    agora = datetime(2026, 10, 22, 12, tzinfo=UTC)
+    r = await calc.recalcular_loja(db, loja, agora=agora)
+    await db.commit()
+    p = await _conciliado(db, "301789")
+    assert p.situacao == "bateu" and p.custo == Decimal("0") and p.custo_regra == "manutencao"
+    assert p.sobrou == Decimal("450.00") and p.margem is None
+    assert r["custo_zero_manutencao"] == 1 and "reaberto_pelo_custo" not in r
+    # a pessoa finaliza; dias depois o produto não tem conserto → Perdimento
+    p.etapa, p.etapa_em, p.etapa_por = "finalizado", agora, "vinicius"
+    bo.situacao = "Perdimento"
+    await db.commit()
+    r = await calc.recalcular_loja(db, loja, agora=agora + timedelta(days=1))
+    await db.commit()
+    p = await _conciliado(db, "301789")
+    assert p.custo == Decimal("360.00") and p.custo_regra == "cheio"
+    assert p.sobrou == Decimal("90.00")
+    assert p.etapa == "reaberto" and p.etapa_por == "robô"
+    assert p.etapa_motivo == "custo voltou: Bling em Perdimento (0.00 → 360.00)"
+    assert r["reaberto_pelo_custo"] == 1
+    # dia seguinte: o dinheiro bate, mas o pedido reaberto pelo custo espera a pessoa
+    await calc.recalcular_loja(db, loja, agora=agora + timedelta(days=9))
+    await db.commit()
+    p = await _conciliado(db, "301789")
+    assert p.etapa == "reaberto" and p.etapa_motivo.startswith("custo voltou")
+
+
+async def test_primeira_rodada_so_preenche_a_regra_do_custo(db, make_user):
+    """Linha de antes de 22/10 (regra vazia) finalizada com o Bling em Manutenção: a
+    primeira rodada zera o custo mas não reabre."""
+    loja, _ = await _loja(db, make_user)
+    d = lambda dia: datetime(2026, 10, dia, 12, tzinfo=UTC)  # noqa: E731
+    bo = _pedido_bling("301790", "2000017900000001", d(6), "500.00", 360.0)
+    bo.situacao = "Manutenção"
+    db.add(bo)
+    db.add(
+        _fin(
+            loja.integration_id,
+            "2000017900000001",
+            gross="500.00",
+            fee="50.00",
+            freight="0",
+            net="450.00",
+        )
+    )
+    db.add(_mov(loja, "venda_liberada", d(10), credito="450.00", pedido_mkt="2000017900000001"))
+    db.add(
+        ConciliacaoPedido(
+            integration_id=loja.integration_id,
+            platform=loja.platform,
+            pedido_bling="301790",
+            situacao="bateu",
+            etapa="finalizado",
+            etapa_em=datetime(2026, 10, 21, 12, tzinfo=UTC),
+            etapa_por="vinicius",
+            custo=Decimal("360.00"),
+        )
+    )
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 22, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _conciliado(db, "301790")
+    assert p.custo == Decimal("0") and p.custo_regra == "manutencao"
+    assert p.etapa == "finalizado"
+
+
+async def test_finalizar_zerando_o_custo_e_desfazer(db, make_user, auth_as, client):
+    """22/10 (Vinicius): ao finalizar, "manter ou zerar o custo?". Zerar pede motivo,
+    vale na hora e o recálculo respeita; desfazer devolve o custo pela regra."""
+    loja, _ = await _loja(db, make_user)
+    d = lambda dia: datetime(2026, 10, dia, 12, tzinfo=UTC)  # noqa: E731
+    db.add(_pedido_bling("301791", "2000017910000001", d(6), "500.00", 360.0))
+    db.add(
+        _fin(
+            loja.integration_id,
+            "2000017910000001",
+            gross="500.00",
+            fee="50.00",
+            freight="0",
+            net="450.00",
+        )
+    )
+    db.add(_mov(loja, "venda_liberada", d(10), credito="450.00", pedido_mkt="2000017910000001"))
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 22, 12, tzinfo=UTC))
+    await db.commit()
+    quem = await make_user(permissions={"conciliacao": {"view": True, "edit": True}})
+    auth_as(quem)
+    sem_motivo = await client.patch(
+        "/api/conciliacao/pedidos/301791",
+        json={"loja": "jlas2", "etapa": "finalizado", "zerar_custo": True},
+    )
+    assert sem_motivo.status_code == 422
+    assert sem_motivo.json()["detail"]["code"] == "motivo_custo_obrigatorio"
+    r = await client.patch(
+        "/api/conciliacao/pedidos/301791",
+        json={
+            "loja": "jlas2",
+            "etapa": "finalizado",
+            "zerar_custo": True,
+            "custo_motivo": "voltou pro estoque",
+        },
+    )
+    assert r.status_code == 200, r.text
+    ped = r.json()["pedido"]
+    assert ped["custo"] == 0 and ped["custo_regra"] == "manual" and ped["sobrou"] == 450.0
+    assert (
+        ped["custo_zerado_por"] == quem.email and ped["custo_zerado_motivo"] == "voltou pro estoque"
+    )
+    assert ped["custo_zerado_em"] and ped["etapa"] == "finalizado"
+    # o recálculo respeita, mesmo com o Bling dizendo outra coisa
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 23, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _conciliado(db, "301791")
+    await db.refresh(p)
+    assert p.custo == Decimal("0") and p.custo_regra == "manual" and p.etapa == "finalizado"
+    # desfazer: o custo volta pela regra (Bling Atendido = cheio)
+    r = await client.patch(
+        "/api/conciliacao/pedidos/301791", json={"loja": "jlas2", "zerar_custo": False}
+    )
+    ped = r.json()["pedido"]
+    assert ped["custo"] == 360.0 and ped["custo_regra"] == "cheio" and ped["sobrou"] == 90.0
+    assert ped["custo_zerado_em"] is None and ped["custo_zerado_motivo"] is None

@@ -239,6 +239,12 @@ class ConciliacaoPedido(Base, TimestampMixin):
     )
     # Resultado
     custo: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # de onde vem o custo (22/10): cheio | manutencao | cancelado | manual — ver
+    # `regra_do_custo`; quem zerou à mão ao finalizar fica nos três campos seguintes
+    custo_regra: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    custo_zerado_por: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    custo_zerado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    custo_zerado_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
     reembolso: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     sobrou: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     margem: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)

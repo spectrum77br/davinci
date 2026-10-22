@@ -623,6 +623,58 @@ def situacao_do_pedido(
     }
 
 
+# Situação do Bling em que o produto ainda é nosso e o custo não entra no Sobrou
+# (22/10, Vinicius). "Manutenção - Sucata" (545901) não entra: é perda.
+_BLING_CUSTO_ZERO = ("manutenção", "manutencao")
+# regras em que o custo vem da situação do Bling — troca entre elas reabre o finalizado
+_REGRAS_PELO_BLING = ("cheio", "manutencao")
+
+
+def custo_dos_itens(itens: list[BlingOrder]) -> Decimal:
+    """Custo do pedido = Σ preço de custo × quantidade das linhas do Bling."""
+    return _soma(
+        [(_d(i.preco_custo) or ZERO) * Decimal(int(i.item_quantidade or 1)) for i in itens]
+    )
+
+
+def regra_do_custo(*, situacao: str, estado_bling: str | None, zerado_a_mao: bool) -> str:
+    """De onde vem o custo do pedido no Sobrou (22/10, Vinicius): a pessoa que zerou ao
+    finalizar manda; venda desfeita (cancelado) e Manutenção no Bling zeram; o resto —
+    Resolvido inclusive ("no resolvido acontece de tudo"), Perdimento, Extraviado,
+    Aguardando Devolução — conta o custo cheio."""
+    if zerado_a_mao:
+        return "manual"
+    if situacao == "cancelado":
+        return "cancelado"
+    if (estado_bling or "").strip().lower() in _BLING_CUSTO_ZERO:
+        return "manutencao"
+    return "cheio"
+
+
+def sobrou_e_margem(
+    base: Decimal | None,
+    custo: Decimal,
+    reembolso: Decimal,
+    frete_pago: Decimal | None,
+    *,
+    cancelado: bool,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Sobrou = recebido − custo − reembolso − frete pago fora; margem = sobrou ÷ custo."""
+    if cancelado:
+        return (base or ZERO) - reembolso - (frete_pago or ZERO), None
+    sobrou = (base - custo - reembolso - (frete_pago or ZERO)) if base is not None else None
+    margem = (
+        (sobrou / custo).quantize(Decimal("0.0001"))
+        if (sobrou is not None and custo > ZERO)
+        else None
+    )
+    if margem is not None and abs(margem) >= MARGEM_MAXIMA:
+        # custo de 0,01 dava margem de 6 dígitos e estourava Numeric(10,4),
+        # derrubando o recálculo da loja inteira (16/10, revisão)
+        margem = None
+    return sobrou, margem
+
+
 def liquidacao_negativa_tiktok(extrato: list[ConciliacaoMovimento]) -> bool:
     """TikTok (22/10, Mini 301698): pedido devolvido antes de liquidar liquida NEGATIVO
     (só o frete da loja, −31,89). A linha chega como "estorno" (ORDER negativo), mas é a
@@ -824,7 +876,16 @@ def etapa_do_pedido(
         else:
             out["etapa"] = "finalizado"
         return out
-    if etapa_anterior == "reaberto" and atual is not None and atual.etapa_por != ETAPA_PELO_ROBO:
+    if (
+        etapa_anterior == "reaberto"
+        and atual is not None
+        and (
+            atual.etapa_por != ETAPA_PELO_ROBO
+            # 22/10: reaberto porque o custo mudou com o Bling — o dinheiro pode continuar
+            # batendo, então só a pessoa fecha (manter ou zerar o custo)
+            or (atual.etapa_motivo or "").startswith("custo ")
+        )
+    ):
         # 16/10 (revisão, aprovado): o que a pessoa reabriu só a pessoa fecha — o robô
         # não refinaliza nem apaga o motivo dela
         out["etapa"] = "reaberto"
@@ -1210,9 +1271,7 @@ async def recalcular_loja(
         # é só produto. Compara produto com produto (14/10: "Bling +9,99" em tudo que
         # tinha frete de R$ 9,99 pago pelo comprador).
         bling_produtos = _d(cab.totalprodutos) if cab.totalprodutos is not None else bling_total
-        custo = _soma(
-            [(_d(i.preco_custo) or ZERO) * Decimal(int(i.item_quantidade or 1)) for i in itens]
-        )
+        custo = custo_dos_itens(itens)
         previsao = (
             (_previsao_do_billing(venda.raw) or _previsao_do_unsettled(venda.raw))
             if venda
@@ -1331,28 +1390,48 @@ async def recalcular_loja(
         # Amazon: frete pago fora da plataforma (Melhor Envio) — entra no Sobrou, não
         # no Líquido; envio próprio sem ele não pode ser "bateu" (15/10, Vinicius)
         frete_pago = fretes_pagos.get(numero) if plataforma_loja == "amazon" else None
-        if calc["situacao"] == "cancelado":
-            # Venda desfeita: o produto não saiu (ou voltou) — custo zero (15/10, Vinicius).
-            # 16/10 à noite (essência do painel): "nada liberou e saiu X" NÃO zera o custo —
-            # é diferença pra alguém olhar, não suposição de que o produto voltou.
+        # Venda desfeita: o produto não saiu (ou voltou) — custo zero (15/10, Vinicius).
+        # 16/10 à noite (essência do painel): "nada liberou e saiu X" NÃO zera o custo —
+        # é diferença pra alguém olhar, não suposição de que o produto voltou.
+        # 22/10: Manutenção no Bling zera; quem finalizou zerando à mão manda.
+        regra = regra_do_custo(
+            situacao=calc["situacao"],
+            estado_bling=estado_bling,
+            zerado_a_mao=bool(atual is not None and atual.custo_zerado_em),
+        )
+        if regra != "cheio":
             custo = ZERO
-            sobrou = (base_resultado or ZERO) - reembolso - (frete_pago or ZERO)
-            margem = None
-        else:
-            sobrou = (
-                (base_resultado - custo - reembolso - (frete_pago or ZERO))
-                if base_resultado is not None
-                else None
-            )
-            margem = (
-                (sobrou / custo).quantize(Decimal("0.0001"))
-                if (sobrou is not None and custo > ZERO)
-                else None
-            )
-            if margem is not None and abs(margem) >= MARGEM_MAXIMA:
-                # custo de 0,01 dava margem de 6 dígitos e estourava Numeric(10,4),
-                # derrubando o recálculo da loja inteira (16/10, revisão)
-                margem = None
+        if regra == "manutencao":
+            contagem["custo_zero_manutencao"] += 1
+        sobrou, margem = sobrou_e_margem(
+            base_resultado,
+            custo,
+            reembolso,
+            frete_pago,
+            cancelado=calc["situacao"] == "cancelado",
+        )
+        # 22/10 (Vinicius): o Bling mudou (Manutenção → Perdimento, por exemplo) e com ele
+        # o custo de um pedido finalizado — reabre, como faz quando cai dinheiro novo.
+        # Regra vazia (linha de antes de 22/10): a primeira rodada só preenche.
+        if (
+            atual is not None
+            and atual.custo_regra in _REGRAS_PELO_BLING
+            and regra in _REGRAS_PELO_BLING
+            and atual.custo_regra != regra
+            and etapa.get("etapa") == "finalizado"
+        ):
+            verbo = "zerou" if regra == "manutencao" else "voltou"
+            etapa = {
+                **etapa,
+                "etapa": "reaberto",
+                "etapa_em": agora,
+                "etapa_por": ETAPA_PELO_ROBO,
+                "etapa_motivo": (
+                    f"custo {verbo}: Bling em {nome_bling or '—'} "
+                    f"({atual.custo or ZERO:.2f} → {custo:.2f})"
+                ),
+            }
+            contagem["reaberto_pelo_custo"] += 1
         liquido_gravado = (
             amazon["liquido"] if amazon else (_d(venda.net_amount) if venda_ok else None)
         )
@@ -1428,6 +1507,7 @@ async def recalcular_loja(
             "recebido": calc["recebido"],
             "ultimo_movimento_em": calc["ultimo_movimento_em"],
             "custo": custo,
+            "custo_regra": regra,
             "reembolso": reembolso,
             "sobrou": sobrou,
             "margem": margem,

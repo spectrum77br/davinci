@@ -767,6 +767,9 @@ _CAMPOS_PEDIDO = (
     "saidas_depois",
     "recebido",
     "custo",
+    "custo_regra",
+    "custo_zerado_por",
+    "custo_zerado_motivo",
     "reembolso",
     "sobrou",
     "margem",
@@ -789,6 +792,7 @@ _DATAS_PEDIDO = (
     "bateu_em",
     "conferido_em",
     "recalculado_em",
+    "custo_zerado_em",
 )
 
 
@@ -2110,6 +2114,10 @@ class PedidoPatch(BaseModel):
     # "finalizado" (à mão, com motivo quando teve pendência) ou "reaberto".
     etapa: str | None = Field(default=None, pattern="^(finalizado|reaberto)$")
     etapa_motivo: str | None = Field(default=None, max_length=500)
+    # 22/10 (Vinicius): ao finalizar, manter ou zerar o custo do produto (produto que
+    # voltou pro estoque). true zera com motivo; false desfaz (o custo volta pela regra).
+    zerar_custo: bool | None = None
+    custo_motivo: str | None = Field(default=None, max_length=500)
 
 
 @router.patch("/pedidos/{pedido}")
@@ -2128,6 +2136,8 @@ async def marcar_pedido(
     if body.conferido is not None:
         p.conferido_em = agora if body.conferido else None
         p.conferido_por = quem if body.conferido else None
+    if body.zerar_custo is not None:
+        await _zerar_custo(session, alvo, p, body, quem, agora)
     if body.etapa == "finalizado":
         if p.situacao not in ("bateu", "cancelado") and not (body.etapa_motivo or "").strip():
             raise HTTPException(
@@ -2149,6 +2159,68 @@ async def marcar_pedido(
     await session.commit()
     await session.refresh(p)
     return {"pedido": _pedido_out(p)}
+
+
+async def _zerar_custo(
+    session: AsyncSession,
+    loja: ConciliacaoLoja,
+    p: ConciliacaoPedido,
+    body: PedidoPatch,
+    quem: str,
+    agora: datetime,
+) -> None:
+    """Zera (ou devolve) o custo do produto no Sobrou, na hora — o recálculo respeita."""
+    from app.services.conciliacao_calculo import (
+        custo_dos_itens,
+        regra_do_custo,
+        sobrou_e_margem,
+    )
+
+    if body.zerar_custo:
+        motivo = (body.custo_motivo or "").strip()
+        if not motivo:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "motivo_custo_obrigatorio",
+                    "mensagem": "pra zerar o custo, diga o motivo (ex.: voltou pro estoque)",
+                },
+            )
+        p.custo_zerado_em = agora
+        p.custo_zerado_por = quem
+        p.custo_zerado_motivo = motivo
+        p.custo_regra = "manual"
+        p.custo = Decimal("0")
+    else:
+        p.custo_zerado_em = None
+        p.custo_zerado_por = None
+        p.custo_zerado_motivo = None
+        lojas_bling = await bling_store_ids_da_loja(
+            session, await session.get(Integration, loja.integration_id)
+        )
+        itens = (
+            (
+                await session.execute(
+                    select(BlingOrder).where(
+                        BlingOrder.numero == p.pedido_bling,
+                        BlingOrder.loja.in_(lojas_bling or {"-"}),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        p.custo_regra = regra_do_custo(
+            situacao=p.situacao, estado_bling=p.situacao_bling, zerado_a_mao=False
+        )
+        p.custo = custo_dos_itens(list(itens)) if p.custo_regra == "cheio" else Decimal("0")
+    p.sobrou, p.margem = sobrou_e_margem(
+        p.recebido,
+        p.custo,
+        p.reembolso or Decimal("0"),
+        p.venda_frete_pago,
+        cancelado=p.situacao == "cancelado",
+    )
 
 
 _COLUNAS_XLSX = [
@@ -2179,6 +2251,8 @@ _COLUNAS_XLSX = [
     ("Dif. previsto × recebido", "dif_previsto_recebido"),
     ("Dif. Bling × venda", "dif_bling_venda"),
     ("Custo", "custo"),
+    ("Custo: de onde vem", "custo_regra"),
+    ("Custo zerado à mão (motivo)", "custo_zerado_motivo"),
     ("Reembolso", "reembolso"),
     ("Sobrou", "sobrou"),
     ("Margem", "margem"),

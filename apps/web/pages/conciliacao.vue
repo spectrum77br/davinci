@@ -59,6 +59,11 @@ type Pedido = {
   saidas_depois: number | null
   recebido: number | null
   custo: number | null
+  // de onde vem o custo (22/10): cheio | manutencao | cancelado | manual (zerado ao finalizar)
+  custo_regra: string | null
+  custo_zerado_por: string | null
+  custo_zerado_em: string | null
+  custo_zerado_motivo: string | null
   reembolso: number | null
   sobrou: number | null
   margem: number | null
@@ -195,6 +200,9 @@ const reservasEscondidas = computed(() => (raiox.value?.movimentos || []).filter
 const reservasRetidas = computed(() => (raiox.value?.movimentos || []).filter((m) => m.tipo.startsWith('reserva_') && m.reserva_aberta === true).length)
 const pagamentosDoPedido = computed(() => new Set((raiox.value?.movimentos || []).map((m) => m.pagamento_id).filter(Boolean)).size)
 const motivoDraft = ref('')
+// 22/10 (Vinicius): ao finalizar pedido com custo, a pergunta "manter ou zerar o custo?"
+const perguntaCusto = ref(false)
+const custoMotivoDraft = ref('')
 
 // Token do Melhor Envio (15/10): a operação cola aqui; fica cifrado no servidor e nunca volta pra tela.
 type TokenMe = { tem_token: boolean; origem: 'painel' | 'servidor' | null; atualizado_em: string | null; atualizado_por: string | null; conta: string | null; testado_em: string | null; aviso: string | null }
@@ -431,6 +439,8 @@ async function abrir(p: Pedido) {
   raiox.value = null
   obsDraft.value = ''
   motivoDraft.value = ''
+  perguntaCusto.value = false
+  custoMotivoDraft.value = ''
   raioxLoading.value = true
   try {
     const r = await api<RaioX>(`/api/conciliacao/pedidos/${encodeURIComponent(p.pedido_bling)}`, { query: { loja: contaDoPedido(p) } })
@@ -447,10 +457,10 @@ async function abrir(p: Pedido) {
   }
 }
 
-async function marcar(patch: Record<string, unknown>) {
-  if (!selecionado.value || !canEdit.value) return
+async function marcar(patch: Record<string, unknown>): Promise<boolean> {
+  if (!selecionado.value || !canEdit.value) return false
   // só grava no pedido cujo Raio-X está na tela
-  if (raiox.value && raiox.value.pedido.pedido_bling !== selecionado.value.pedido_bling) return
+  if (raiox.value && raiox.value.pedido.pedido_bling !== selecionado.value.pedido_bling) return false
   salvando.value = true
   try {
     const r = await api<{ pedido: Pedido }>(`/api/conciliacao/pedidos/${encodeURIComponent(selecionado.value.pedido_bling)}`, {
@@ -464,9 +474,11 @@ async function marcar(patch: Record<string, unknown>) {
     toasts.success?.('salvo')
     // 16/10, revisão: os cartões (por situação/etapa) e o filtro só acompanhavam no Recarregar
     await carregar()
+    return true
   } catch (e: any) {
     const d = e?.data?.detail
     toasts.error?.(d?.mensagem || d?.code || 'não consegui salvar')
+    return false
   } finally {
     salvando.value = false
   }
@@ -480,7 +492,26 @@ async function finalizar() {
     toasts.error?.('pra finalizar com pendência, escreva o motivo')
     return
   }
+  if ((p.custo ?? 0) > 0.005) {
+    perguntaCusto.value = true // a resposta vem pelos botões "manter" / "zerar"
+    return
+  }
   await marcar({ etapa: 'finalizado', etapa_motivo: motivoDraft.value.trim() || undefined })
+}
+
+async function finalizarComCusto(zerar: boolean) {
+  if (zerar && !custoMotivoDraft.value.trim()) {
+    toasts.error?.('pra zerar o custo, escreva o motivo (ex.: voltou pro estoque)')
+    return
+  }
+  const ok = await marcar({
+    etapa: 'finalizado',
+    etapa_motivo: motivoDraft.value.trim() || undefined,
+    ...(zerar ? { zerar_custo: true, custo_motivo: custoMotivoDraft.value.trim() } : {}),
+  })
+  if (!ok) return
+  perguntaCusto.value = false
+  custoMotivoDraft.value = ''
 }
 
 async function sincronizar() {
@@ -1022,6 +1053,8 @@ await carregar()
             <b>Previsto {{ fmtMoney(raiox.pedido.venda_liquido) }} · Recebido {{ fmtMoney(raiox.pedido.recebido) }} · Diferença {{ fmtMoney(raiox.pedido.dif_previsto_recebido) }}</b>
             <span v-if="raiox.pedido.motivo"> — {{ raiox.pedido.motivo }}</span><br />
             <b v-if="raiox.pedido.recebido != null">Sobrou: {{ fmtMoney(raiox.pedido.recebido) }} − custo {{ fmtMoney(raiox.pedido.custo) }} − reembolso {{ fmtMoney(raiox.pedido.reembolso) }}<template v-if="raiox.pedido.venda_frete_pago != null"> − frete pago (Melhor Envio) {{ fmtMoney(raiox.pedido.venda_frete_pago) }}</template> = {{ fmtMoney(raiox.pedido.sobrou) }} · margem {{ fmtPct(raiox.pedido.margem) }}</b><b v-else class="font-normal text-muted-foreground">Resultado de verdade: só depois que o dinheiro entrar</b>
+            <div v-if="raiox.pedido.custo_regra === 'manual'" class="mt-1 text-muted-foreground">custo zerado à mão por {{ raiox.pedido.custo_zerado_por }} em {{ fmtDiaHora(raiox.pedido.custo_zerado_em) }}: {{ raiox.pedido.custo_zerado_motivo }}</div>
+            <div v-else-if="raiox.pedido.custo_regra === 'manutencao'" class="mt-1 text-muted-foreground">custo zero: Bling em Manutenção (o produto ainda é nosso)</div>
             <div v-if="raiox.pedido.etapa_por" class="mt-1 text-muted-foreground">etapa {{ raiox.pedido.etapa_label }} por {{ raiox.pedido.etapa_por }} em {{ fmtDiaHora(raiox.pedido.etapa_em) }}<span v-if="raiox.pedido.etapa_motivo">: {{ raiox.pedido.etapa_motivo }}</span></div>
           </div>
           <div v-if="canEdit" class="space-y-1.5">
@@ -1032,6 +1065,16 @@ await carregar()
               <button type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ conferido: !raiox.pedido.conferido })">{{ raiox.pedido.conferido ? 'Desmarcar conferido' : 'Marcar conferido' }}</button>
               <button v-if="raiox.pedido.etapa !== 'finalizado'" type="button" class="rounded bg-primary px-2 py-1 font-semibold text-primary-foreground" :disabled="salvando" @click="finalizar()">Finalizar</button>
               <button v-else type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ etapa: 'reaberto', etapa_motivo: motivoDraft || 'reaberto à mão' })">Reabrir</button>
+              <button v-if="raiox.pedido.custo_regra === 'manual'" type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ zerar_custo: false })">Desfazer custo zerado</button>
+            </div>
+            <div v-if="perguntaCusto && raiox.pedido.etapa !== 'finalizado'" class="space-y-1.5 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 dark:bg-amber-950/20">
+              <div class="font-semibold">Custo do produto: {{ fmtMoney(raiox.pedido.custo) }} — manter ou zerar?</div>
+              <input v-model="custoMotivoDraft" placeholder="motivo pra zerar (ex.: voltou pro estoque)" class="w-full rounded border bg-background px-2 py-1 text-[11px]" />
+              <div class="flex flex-wrap gap-1.5">
+                <button type="button" class="rounded bg-primary px-2 py-1 font-semibold text-primary-foreground" :disabled="salvando" @click="finalizarComCusto(false)">Manter custo e finalizar</button>
+                <button type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="finalizarComCusto(true)">Zerar custo e finalizar</button>
+                <button type="button" class="px-2 py-1 text-muted-foreground hover:underline" :disabled="salvando" @click="perguntaCusto = false">cancelar</button>
+              </div>
             </div>
           </div>
         </div>
