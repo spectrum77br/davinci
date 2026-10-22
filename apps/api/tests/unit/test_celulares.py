@@ -146,6 +146,7 @@ async def test_list_filters_allowlist_and_legacy_and_redacts(app, configured, up
         "proxy_tcp_reachable": True, "internet_confirmed": None,
     }
     assert row["has_error"] is True
+    assert row["camera_available"] is False
     assert row["memory_mb"] == 1024.2
     assert row["isolation"]["celguard"] is True
     for private in (TOKEN, "browser-secret", "private-user", "private.example", "private-serial",
@@ -155,6 +156,25 @@ async def test_list_filters_allowlist_and_legacy_and_redacts(app, configured, up
     assert sent.url == f"{BASE}/v1/phones"
     assert sent.headers["authorization"] == f"Bearer {TOKEN}"
     assert "cookie" not in sent.headers
+
+
+@pytest.mark.parametrize("enabled_names,changes,expected", [
+    ("vr", {}, True), (" vr ,cel5", {}, True),
+    ("", {}, False), (None, {}, False), (["vr"], {}, False),
+    ("VR", {}, False), ("vr,", {}, False), ("vr,../other", {}, False),
+    ("other", {}, False), ("vr", {"managed": False}, False),
+    ("vr", {"running": False}, False), ("vr", {"boot_completed": False}, False),
+    ("vr", {"last_error": "unavailable"}, False),
+])
+def test_camera_badge_requires_explicit_validated_configuration(
+    configured, enabled_names, changes, expected,
+):
+    configured.celulares_camera_enabled_names = enabled_names
+    raw = phone("vr", last_error=None)
+    raw.update(changes)
+    result = svc.phone_out(raw)
+    assert result.camera_available is expected
+    assert result.camera_test is False  # Availability does not grant the offline exception.
 
 
 @pytest.mark.parametrize("attr,value", [
@@ -345,7 +365,7 @@ async def test_action_response_must_belong_to_selected_phone(app, configured, up
     (True, "up", True), (True, "down", False), (False, "down", None),
     (None, "up", None), (True, "unexpected", None),
 ])
-def test_tcp_reachability_is_never_internet_confirmation(sidecar, state, expected):
+def test_tcp_reachability_is_never_internet_confirmation(configured, sidecar, state, expected):
     raw = phone(sidecar_running=sidecar)
     raw["proxy"]["state"] = state
     result = svc.phone_out(raw)
@@ -353,7 +373,7 @@ def test_tcp_reachability_is_never_internet_confirmation(sidecar, state, expecte
     assert result.network.internet_confirmed is None
 
 
-def test_optional_telemetry_and_unknown_fields_do_not_leak():
+def test_optional_telemetry_and_unknown_fields_do_not_leak(configured):
     raw = deepcopy(phone())
     raw.update({"mem_usage_mb": float("inf"), "cpu_pct": TOKEN, "isolamento": [], "proxy": None})
     result = svc.phone_out(raw)

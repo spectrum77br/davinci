@@ -101,6 +101,8 @@ function harness(admin = true, origin = 'https://phones.example.test') {
   h = harness();
   await h.ui.refresh();
   assert.equal(h.ui.canOpen(phone), true);
+  assert.equal(h.ui.cameraLabel(phone), 'Câmera: ainda não disponível');
+  assert.equal(h.ui.cameraLabel({ ...phone, camera_available: true }), 'Câmera disponível');
   assert.equal(h.requests[0].opts.retry, 0);
   checks++;
   h.ui.data.value.stream_enabled = undefined;
@@ -158,6 +160,8 @@ function harness(admin = true, origin = 'https://phones.example.test') {
   assert.equal(h.ui.canOpen(cameraPhone), true);
   assert.equal(h.ui.networkLabel(cameraPhone), 'Sem acesso à internet');
   assert.equal(h.ui.isolationState(cameraPhone), 'Ambiente de teste');
+  assert.equal(h.ui.cameraLabel({ ...cameraPhone, camera_available: true }), 'Câmera disponível para teste');
+  assert.equal(h.ui.cameraLabel(cameraPhone), 'Câmera: ainda não disponível');
   for (const action of ['start', 'stop', 'restart']) await h.ui.runAction(cameraPhone, action);
   assert.equal(h.requests.length, 1, 'camera test lifecycle is never requested');
   checks++;

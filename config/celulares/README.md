@@ -17,3 +17,23 @@ A ativação depende de uma lista explícita de aparelhos e de uma origem HTTPS 
 Antes de publicar, validar `docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet` com o ambiente normal do servidor. Aplicar alterações de configuração com recriação apenas dos serviços API e web, conforme o procedimento de deploy existente. Não imprimir o resultado completo de `config` com arquivos secretos carregados.
 
 Testes locais de aplicação: `pytest --noconftest tests/unit/test_celulares.py tests/unit/test_celulares_stream.py` em `apps/api`; `node tests/celulares-sfc.cjs` em `apps/web`. A verificação Python/Node com um gateway externo é opcional via `CELULARES_GATEWAY_TEST_MODULE=/caminho/session.cjs`; sem esse arquivo, apenas os testes específicos de interoperabilidade são ignorados.
+
+## Disponibilidade da câmera e continuidade do deploy
+
+`CELULARES_CAMERA_ENABLED_NAMES` habilita explicitamente o indicador da câmera
+para aparelhos já validados. Vazio não habilita nenhum aparelho comum. A API
+só retorna `camera_available=true` para um aparelho habilitado, gerenciado,
+ligado, inicializado e sem erro; a exceção existente do piloto permanece
+separada. Essa opção pode ser mantida no `runtime.env` ou no `api.env` privado.
+Ela não liga aparelhos nem altera os critérios de acesso ou isolamento.
+
+Em 22/10/2026, uma publicação substituiu a API por uma versão sem esse contrato,
+embora a opção permanecesse no ambiente. A correção está no `main`, para sobreviver
+ao deploy normal. Após publicar, conferir que a imagem em execução reconhece
+`Settings.celulares_camera_enabled_names` e `PhoneOut.camera_available`, além do
+health HTTP. Com um aparelho pronto, validar o campo pela API autenticada e o
+indicador da página. Não voltar às imagens antigas de uma release isolada.
+
+Esta correção exige somente rebuild/recriação de API e web com `--no-deps`,
+sem migrações, reinício de workers ou reinício do Android. Manter os snapshots
+das imagens e containers para reversão e preservar os arquivos privados.

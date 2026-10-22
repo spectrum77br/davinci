@@ -93,6 +93,7 @@ class PhoneOut(BaseModel):
     name: str
     read_only: bool = False
     camera_test: bool = False
+    camera_available: bool = False
     running: bool
     boot_completed: bool
     desired: Literal["running", "stopped", "removed"] | None
@@ -310,6 +311,7 @@ def phone_out(raw: dict[str, Any]) -> PhoneOut:
         name=raw["name"], running=raw["running"], boot_completed=raw["boot_completed"],
         read_only=raw.get("read_only") is True or raw["name"] == "vrcamera",
         camera_test=is_camera_pilot(raw),
+        camera_available=camera_available(raw),
         desired=desired, sidecar_running=sidecar,
         network=NetworkOut(
             egress=egress, proxy_configured=proxy is not None, proxy_tcp_reachable=tcp,
@@ -321,6 +323,23 @@ def phone_out(raw: dict[str, Any]) -> PhoneOut:
         memory_mb=_number_or_none(raw.get("mem_usage_mb")),
         cpu_percent=_number_or_none(raw.get("cpu_pct")),
         has_error=bool(raw.get("last_error")),
+    )
+
+
+def camera_available(raw: dict[str, Any]) -> bool:
+    """Disponibilidade explícita após validação; não muda a exceção do piloto."""
+    if is_camera_pilot(raw):
+        return True
+    configured = getattr(get_settings(), "celulares_camera_enabled_names", "")
+    if not isinstance(configured, str) or not configured.strip() or len(configured) > 4096:
+        return False
+    names = {name.strip() for name in configured.split(",")}
+    if len(names) > MAX_NAMES or any(not NAME_RE.fullmatch(name) for name in names):
+        return False
+    return (
+        raw.get("name") in names and raw.get("managed") is True
+        and raw.get("running") is True and raw.get("boot_completed") is True
+        and not raw.get("last_error")
     )
 
 

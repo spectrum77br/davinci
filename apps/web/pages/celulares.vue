@@ -8,6 +8,7 @@ type Phone = {
   name: string
   read_only?: boolean
   camera_test?: boolean
+  camera_available?: boolean
   running: boolean
   boot_completed: boolean
   desired: 'running' | 'stopped' | 'removed' | null
@@ -125,6 +126,11 @@ function proxyLabel(phone: Phone) {
   if (phone.network.proxy_tcp_reachable === true) return 'Responde à conexão TCP'
   if (phone.network.proxy_tcp_reachable === false) return 'Não respondeu à conexão TCP'
   return 'Conexão não verificada'
+}
+
+function cameraLabel(phone: Phone) {
+  if (phone.camera_available !== true) return 'Câmera: ainda não disponível'
+  return isCameraTest(phone) ? 'Câmera disponível para teste' : 'Câmera disponível'
 }
 
 function isCameraTest(phone: Phone) {
@@ -334,7 +340,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="flex items-center gap-2 border-t bg-muted/20 px-5 py-3 text-xs text-muted-foreground"><Camera v-if="isCameraTest(phone)" class="size-3.5 shrink-0" /><CameraOff v-else class="size-3.5 shrink-0" /><span>{{ isCameraTest(phone) ? 'Câmera disponível para teste' : 'Câmera: ainda não disponível' }}</span></div>
+        <div class="flex items-center gap-2 border-t bg-muted/20 px-5 py-3 text-xs text-muted-foreground"><Camera v-if="phone.camera_available === true" class="size-3.5 shrink-0" /><CameraOff v-else class="size-3.5 shrink-0" /><span>{{ cameraLabel(phone) }}</span></div>
       </article>
     </div>
   </div>

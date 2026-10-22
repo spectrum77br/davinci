@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     celulares_admin_token: SecretStr = SecretStr("")
     celulares_allowlist: str = ""
     celulares_camera_pilot_enabled: bool = False
+    celulares_camera_enabled_names: str = ""
     celulares_stream_origin: str = ""
     celulares_stream_key: SecretStr = SecretStr("")
     # Senha extra que protege a página /financeiro/valuation, exigida
