@@ -87,6 +87,7 @@ Auditoria ao vivo, 5ª rodada (21/10/2026, noite):
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -120,6 +121,14 @@ PRODUTO_SEM_FONTE = "produto_sem_fonte"
 ANUNCIO_SE_CONTRADIZ = "anuncio_se_contradiz"
 EM_ANDAMENTO = "devolucao_ou_chamado"
 
+# Calibração v8 com a chave (22/10/2026, viz-responde-03): o "como podemos ajudar?"
+# (saudação, agradecimento, pede_atendente) com a pergunta deixada só com a resposta
+# genérica da loja → regra suave (não sai sozinho; no copiloto, aviso).
+GENERICA_COM_PENDENCIA = "generica_com_pendencia"
+MOTIVO_GENERICA_COM_PENDENCIA = (
+    'pergunta do cliente deixada só com o "em que podemos ajudar?" — a saudação não a responde'
+)
+_ASSUNTOS_DE_CORTESIA = frozenset({"saudacao_ou_vaga", "agradecimento", "pede_atendente"})
 MOTIVO_EM_ANDAMENTO = "devolução ou chamado em andamento — no piloto, só sai com pessoa"
 MOTIVO_PERGUNTA_REPETIDA = (
     "segunda pergunta de esclarecimento seguida sobre o mesmo tema — pessoa assume"
@@ -945,6 +954,10 @@ def conferir_variacoes(
 # disponível (e confiável) contradiz; o resto sem o dado é SUAVE. O produto
 # inteiro esgotado (todas as variações, com estoque confiável) dispensa a citação.
 # A "previsão de chegada" do pedido não é estoque (`_DE_ESTOQUE`/`_DO_PEDIDO`).
+_VOLTA_OU_CHEGA = (
+    r"(?:reposicao|chegada|volta|voltam|voltar|voltara\w*|retorno|retorna\w*|reabastec\w*"
+    r"|repor|reestoque|chega|chegam|chegar|chegara\w*)"
+)
 _SEM_PREVISAO = re.compile(
     r"\b(?:previsao|data|prazo)\b(?:\s+[a-z0-9]+){0,4}?\s+(?:de\s+|da\s+|do\s+|para\s+)?"
     r"(?:reposicao|chegada|volta|retorno|reabastec\w*|repor|voltar|chegar|retornar|reestoque)\b"
@@ -953,6 +966,17 @@ _SEM_PREVISAO = re.compile(
     r"|\bsem\s+(?:[a-z0-9]+\s+)?previsao\b"
     r"|\bnao\s+(?:sabemos|sei)\s+(?:[a-z0-9]+\s+)?quando\s+(?:[a-z0-9]+\s+){0,3}?"
     r"(?:volta|voltam|chega|chegam|retorna\w*|repo\w*)"
+    # reposicao-10 (22/10/2026): as paráfrases do "sem previsão" que escapavam
+    r"|\b(?:previsao|data)\s+(?:de\s+|para\s+)?quando\s+(?:[a-z0-9]+\s+){0,5}?"
+    + _VOLTA_OU_CHEGA
+    + r"\b"
+    r"|\bnao\s+(?:ha|tem|temos|existe|possuimos|tenho)\s+(?:[a-z0-9]+\s+){0,2}?(?:previsao|data)\b"
+    r"|\bnao\s+(?:conseguimos|consigo|podemos|posso|temos\s+como|tenho\s+como|ha\s+como"
+    r"|da\s+para|da\s+pra|sabemos|sei)\s+(?:[a-z]+\s+){0,2}?quando\s+(?:[a-z0-9]+\s+){0,4}?"
+    + _VOLTA_OU_CHEGA
+    + r"\b"
+    r"|\b(?:quando|assim\s+que|logo\s+que)\s+(?:[a-z0-9]+\s+){0,3}?(?:voltar|volte|retornar|retorne)"
+    r"\s+(?:ao|para\s+o|pro)\s+estoque\b"
 )
 _CORTE_DA_ORACAO = re.compile(
     r"[;:,]|\bmas\b|\bporem\b|\bso\s+que\b|\bcontudo\b|\bentretanto\b|\btodavia\b"
@@ -4160,6 +4184,44 @@ def conferir_cancelar_pela_loja(texto: str) -> list[PendenciaAgente]:
     return [_suave(CANCELAR_PELA_LOJA, MOTIVO_CANCELAR_PELA_LOJA.format(trecho=trecho))]
 
 
+# viz-liberado-02 (calibração v8, 22/10/2026): o cancelamento do pedido que ainda
+# pode não ter saído é pedido no app, mas SEMPRE com a ação segurar_envio (a pessoa
+# segura o envio; `prompt.ORIENTACAO["cancelamento"]`: "Não postado: … (ação
+# segurar_envio)"). O gatilho 7 só vê a pista no texto do CLIENTE do turno; o rascunho
+# que orienta ou oferece o cancelamento sem ela ("senão nem quero", "compro em outra
+# loja", "eu devolvo", a ameaça num turno já respondido, ou o cliente que nem falou
+# nisso) chegava ao verificador com o cancelamento LIBERADO (os 6 canais do agente
+# liberam toda orientação) e o "cancelamento antes do envio" dos CAMINHOS DO APP como
+# lastro. Regra SUAVE: o texto pode estar certo; só não sai sozinho.
+CANCELAR_ANTES_DO_ENVIO = "cancelar_antes_do_envio"
+MOTIVO_CANCELAR_ANTES_DO_ENVIO = (
+    "orienta o cancelamento de pedido que ainda não saiu sem segurar o envio — no "
+    "automático, pessoa confere (ação segurar_envio)"
+)
+_FALA_DE_CANCELAR = re.compile(r"\bcancel\w*")
+# O estado ("não foi cancelado", "não está cancelado") não é orientação.
+_NAO_CANCELADO = re.compile(
+    r"\b(?:nao|nem)\s+(?:foi|esta|estava|sera|vai\s+ser|e|consta\s+como)\s+(?:\w+\s+)?"
+    r"cancelad\w*"
+)
+
+
+def conferir_cancelar_antes_do_envio(
+    texto: str, pedido: Mapping | None, ctx: ContextoAgente
+) -> list[PendenciaAgente]:
+    """O texto fala em cancelar e um pedido (o da conversa ou um que o `ver_pedido`
+    leu) pode ainda não ter saído — "nao" ou desconhecido, como o gatilho 7 —, sem a
+    ação segurar_envio → aviso (SUAVE). PURA. Sem pedido (antes da compra), o pedido
+    já postado e o já cancelado ficam de fora."""
+    if constantes.ACAO_SEGURAR_ENVIO in ctx.acoes_pessoa:
+        return []
+    if not _FALA_DE_CANCELAR.search(_NAO_CANCELADO.sub(" ", _plano(texto))):
+        return []
+    if not any(_saiu(b) is not True and not _cancelado(b) for b in _blocos_de_pedido(pedido, ctx)):
+        return []
+    return [_suave(CANCELAR_ANTES_DO_ENVIO, MOTIVO_CANCELAR_ANTES_DO_ENVIO)]
+
+
 TROCA_NO_LUGAR_DA_DEVOLUCAO = "troca_no_lugar_da_devolucao"
 MOTIVO_TROCA_NO_LUGAR_DA_DEVOLUCAO = (
     "chama de troca o que o cliente pediu como devolução — use a palavra dele: a devolução é "
@@ -4470,15 +4532,23 @@ def conferir_recusa_da_entrega(texto: str) -> list[PendenciaAgente]:
     return []
 
 
+# Calibração v8 (22/10/2026, atraso-440a83e7): as paráfrases do "ao receber" que
+# passavam ("após receber", "após/depois da entrega", "assim que for entregue",
+# "uma vez recebido", "com o aparelho em mãos").
 _AO_RECEBER = re.compile(
-    r"\b(?:ao|apos\s+o|depois\s+d[eo]|quando|assim\s+que|logo\s+que|depois\s+que)\s+"
-    r"(?:[a-z0-9]+\s+){0,3}?(?:receber|recebe-lo|recebe-la|recebimento|chegar|chegada"
-    r"|estiver\s+com\s+voce)\b"
+    r"\b(?:ao|apos(?:\s+o|\s+a)?|depois\s+(?:d[aeo]|que)|quando|assim\s+que|logo\s+que|uma\s+vez)\s+"
+    r"(?:[a-z0-9]+\s+){0,3}?(?:receber|recebe-lo|recebe-la|recebid[oa]s?|recebimento|chegar|chegada"
+    r"|chegue|for\s+entregue|ser\s+entregue|estiver\s+com\s+voce)\b"
+    r"|\b(?:apos|depois\s+da)\s+(?:a\s+)?entrega\b"
+    r"|\b(?:com|tendo)\s+(?:o|a)\s+(?:[a-z0-9]+\s+){0,2}?em\s+maos\b"
 )
 _DEVOLUCAO_OU_REEMBOLSO = re.compile(r"\b(?:devoluc\w*|devolver|reembols\w*|estorn\w*)")
 _PEDE_O_DINHEIRO = re.compile(
     r"\b(?:reembols\w*|estorn\w*|ressarc\w*|dinheiro\s+de\s+volta|meu\s+dinheiro"
-    r"|valor\s+de\s+volta|devolv\w*\s+(?:o\s+)?(?:meu\s+)?(?:dinheiro|valor))"
+    r"|valor\s+de\s+volta|devolv\w*\s+(?:o\s+)?(?:meu\s+)?(?:dinheiro|valor)"
+    # Calibração v8: "a devolução do valor pago", "o que paguei".
+    r"|devoluc\w*\s+(?:d[oa]\s+)?(?:meu\s+|minha\s+)?(?:valor|dinheiro|pagamento|quantia)"
+    r"|valor\s+pago|o\s+que\s+(?:eu\s+)?paguei)"
 )
 # A resposta que já dá o caminho de quem NÃO recebeu ("se ele não chegar ou ao
 # recebê-lo, o pedido de devolução ou reembolso é feito em Minhas Compras").
@@ -4493,6 +4563,9 @@ _NAO_CHEGOU_INDIRETO = re.compile(
     r"|\bnunca\s+(?:chega|chegou|apareceu|veio)\b|\bsumiu\b|\bnao\s+anda\b"
     r"|\b(?:devia|deveria|era\s+pra|era\s+para)\s+(?:ja\s+)?(?:estar|ter\s+chegado)\b"
     r"|\bcade\b"
+    # Calibração v8: "o prazo venceu e estou sem o produto".
+    r"|\b(?:estou|to|tou|continuo|fiquei|sigo|ainda\s+estou)\s+sem\s+(?:o|a|meu|minha)\s+"
+    r"(?:produto|pedido|celular|aparelho|encomenda|pacote|compra|mercadoria)\b"
 )
 
 
@@ -4508,17 +4581,25 @@ def conferir_ao_receber_a_quem_reclama(
     turno = " ".join(" ".join(validador.plano_de(t or "").split()) for t in textos_cliente)
     if not turno or not _PEDE_O_DINHEIRO.search(turno):
         return []
-    if acao_pessoa.condicao_do_cliente(turno):
+    # Calibração v8: a data/o prazo que passou também é a reclamação (como na régua
+    # do atraso, `acao_pessoa.atraso_de_entrega`, item c).
+    vencido = acao_pessoa.prazo_vencido(turno)
+    if acao_pessoa.condicao_do_cliente(turno) and not vencido:
         return []
-    if not (acao_pessoa.reclama_que_nao_chegou(turno) or _NAO_CHEGOU_INDIRETO.search(turno)):
+    if not (
+        acao_pessoa.reclama_que_nao_chegou(turno) or _NAO_CHEGOU_INDIRETO.search(turno) or vencido
+    ):
         return []
-    for sentenca, pergunta in _sentencas(_plano(texto)):
-        if pergunta:
+    sentencas = [s for s, pergunta in _sentencas(_plano(texto)) if not pergunta]
+    for i, sentenca in enumerate(sentencas):
+        if not _AO_RECEBER.search(sentenca):
             continue
-        if (
-            _AO_RECEBER.search(sentenca)
-            and _DEVOLUCAO_OU_REEMBOLSO.search(sentenca)
-            and not _CAMINHO_DO_NAO_RECEBIMENTO.search(sentenca)
+        # Calibração v8: "Ao receber o pedido, abra a solicitação. A Shopee analisa e faz
+        # o reembolso." — a devolução/o reembolso da frase SEGUINTE também conta.
+        if any(
+            _DEVOLUCAO_OU_REEMBOLSO.search(trecho)
+            and not _CAMINHO_DO_NAO_RECEBIMENTO.search(trecho)
+            for trecho in (sentenca, " ".join(sentencas[i : i + 2]))
         ):
             return [_suave(AO_RECEBER_A_QUEM_RECLAMA, MOTIVO_AO_RECEBER_A_QUEM_RECLAMA)]
     return []
@@ -6946,6 +7027,63 @@ def _nega_a_recusa(sentenca: str) -> bool:
     return bool(_NEGA_A_RECUSA.search(_plano(sentenca)))
 
 
+# PROPOSTA regiao-19: os municípios (IBGE, `nfse/municipios.json`) dos estados com
+# restrição nos dados — só o nome sem homônimo em outro estado, com 5+ letras e que não é
+# palavra comum, sobrenome ou bairro conhecido de outra cidade.
+_MUNICIPIO_QUE_NAO_E_LUGAR = frozenset(
+    """
+    areal carmo cordeiro mendes queimados vassouras sumidouro quatis cambuci macuco
+    duas_barras porto_real rio_bonito
+    feliz serio alegria progresso triunfo portao esteio cristal estrela canela barao
+    colorado esmeralda tapera pinhal gramado agudo charrua harmonia gentil segredo
+    encantado travesseiro imigrante derrubadas formigueiro viadutos sertao torres tavares
+    camargo mata butia joia tunas relvado rondinha redentora coqueiros sobradinho
+    vila_maria barra_funda ponte_preta
+    """.replace("_", " ").split()
+)
+
+
+@functools.cache
+def _municipios_do_estado(uf: str) -> re.Pattern[str] | None:
+    from collections import Counter
+
+    from app.services.nfse import municipios as municipios_svc
+
+    tabela = municipios_svc._tabela()
+    quantos = Counter(nome for *_x, nome in tabela)
+    nomes = sorted(
+        {
+            nome
+            for _c, _n, estado, nome in tabela
+            if estado == uf
+            and quantos[nome] == 1
+            and len(nome) >= 5
+            and nome not in _MUNICIPIO_QUE_NAO_E_LUGAR
+        },
+        key=len,
+        reverse=True,
+    )
+    if not nomes:
+        return None
+    return re.compile(r"\b(?:" + "|".join(re.escape(n).replace(r"\ ", " ") for n in nomes) + r")\b")
+
+
+def _ufs_dos_municipios(textos_cliente: Sequence[str], ufs: Iterable[str]) -> set[str]:
+    """As UFs (só as de `ufs`) dos municípios que o cliente nomeia. PURA."""
+    from app.services.nfse import municipios as municipios_svc
+
+    saida: set[str] = set()
+    for uf in sorted(ufs):
+        padrao = _municipios_do_estado(uf)
+        if padrao is None:
+            continue
+        for texto in textos_cliente:
+            if isinstance(texto, str) and padrao.search(municipios_svc.normalizar(texto)):
+                saida.add(uf)
+                break
+    return saida
+
+
 def conferir_regiao(
     texto: str,
     fichas: Sequence[dict],
@@ -7149,7 +7287,100 @@ def conferir_regiao(
                 saida.append(
                     _suave(REGIAO_SEM_FONTE, f"afirma a entrega em {uf} sem dado de restrição")
                 )
+    # PROPOSTA regiao-19: o cliente disse o estado restrito (ou um lugar dele) e o texto
+    # não diz a restrição — a chegada dada como certa só pela condição ("depois que o
+    # aparelho chegar, você pode devolver") não tem o verbo de entrega nem o "Sim" que
+    # as regras acima leem. Suave (um clique); nunca tira pendência.
+    # O lugar do cliente: o que `ufs_citadas` lê e o município (IBGE) que a lista curta
+    # não mapeia ("é pra minha mãe, Itaperuna"), só dos estados RESTRITOS nos dados.
+    # O texto que cita o estado restrito já passou pela leitura de cada frase acima
+    # (recusa do anúncio passa; o resto segura): esta regra é só para o texto que não o
+    # cita.
+    lugar_do_cliente = do_cliente | _ufs_dos_municipios(textos_cliente, todas)
+    no_texto = (
+        negadas_no_texto
+        | set(restricao_envio.ufs_citadas(plano))
+        | {
+            uf
+            for sentenca, _p in _sentencas(plano)
+            for uf in restricao_envio.ufs_de_destino(sentenca)
+        }
+    )
+    citado = (lugar_do_cliente & todas) - no_texto
+    if citado and not any(p.codigo in (REGIAO_CONTRADIZ, REGIAO_SEM_FONTE) for p in saida):
+        saida.append(
+            _suave(
+                REGIAO_SEM_FONTE,
+                f"o cliente citou {', '.join(sorted(citado))}, que tem restrição de envio, "
+                "e o texto não fala dela",
+            )
+        )
     return _sem_repetir(saida)
+
+
+# ── 6d. A chegada pressuposta sem o destino conferido (22/10/2026) ─────────
+#
+# Calibração com a chave (22/10/2026): o regiao-16 e o regiao-19 passaram pelo
+# verificador v8 ("comprei pra minha mãe que mora em Itaperuna, quando chegar posso
+# devolver?" → "Sim, depois que o aparelho chegar, você pode pedir a devolução…"). O
+# texto exato para no aviso da `conferir_regiao` (o "Sim" do começo), mas o mesmo
+# rascunho sem o "Sim" ("Depois que o aparelho chegar…", "Ao receber…", "Quando o
+# pedido for entregue…", "Pode sim. Quando chegar…") ou com o lugar sem palavra de
+# entrega na fala ("se ela não gostar, posso devolver?") só tinha o verificador. Sem
+# pedido na conversa ninguém conferiu o destino (com pedido, a `acao_pessoa.uf_restrita`
+# — o gatilho 14 — confere): com estado restrito nas fichas que o texto não recusa, a
+# chegada dada como certa numa oração de tempo é SUAVE (um clique). Só acrescenta aviso
+# (a `conferir_regiao`, a do d64ce17d, não muda). Fora: a loja/plataforma que recebe a
+# devolução de volta.
+_CHEGADA_PRESSUPOSTA = re.compile(
+    r"\b(?:depois\s+que|quando|assim\s+que|logo\s+que|apos|ao)\s+"
+    r"(?!(?:a|o)\s+(?:loja|shopee|plataforma|vendedor|vendedora|mercado\s+livre|tiktok|amazon)\b)"
+    r"(?:[a-z]+\s+){0,3}?"
+    r"(?:cheg(?:ar|ue|uem|arem)|receb(?:er|erem|e\s*-?\s*l[oa]s?)|for(?:em)?\s+entregues?"
+    r"|ser(?:em)?\s+entregues?)\b"
+    r"(?!\s+(?:[a-z]+\s+){0,2}?de\s+volta\b)"
+    r"(?!\s+(?:o|a|os|as|seu|sua)?\s*(?:reembolso|estorno|valor|dinheiro|resposta|mensagem|codigo"
+    r"|cupom|e-?mail|link|notificacao|aviso|devolucao)\b)"
+)
+
+
+def conferir_chegada_sem_destino(
+    texto: str, fichas: Sequence[dict], ctx: ContextoAgente | None = None
+) -> list[PendenciaAgente]:
+    """A chegada dada como certa ("depois que chegar", "ao receber") com estado restrito
+    nas fichas e SEM pedido na conversa (quem chama confere o pedido) → suave. PURA."""
+    from app.services.atendimento import restricao_envio
+
+    blocos = _restricoes([*(f for f in fichas if isinstance(f, Mapping)), *_do_registro(ctx)])
+    todas = {
+        str(u)
+        for b in blocos
+        for u in [*(b.get("ufs") or []), *(b.get("ufs_conforme_pedido") or [])]
+    }
+    if not todas:
+        return []
+    sentencas = _sentencas((texto or "").strip())
+    negadas = {
+        uf
+        for sentenca, _p in sentencas
+        if not _nega_a_recusa(sentenca)
+        for uf in restricao_envio.ufs_negadas(sentenca)
+    }
+    if todas <= negadas:
+        return []
+    if not any(
+        not pergunta and _CHEGADA_PRESSUPOSTA.search(_plano(sentenca))
+        for sentenca, pergunta in sentencas
+    ):
+        return []
+    lista = ", ".join(sorted(todas - negadas))
+    return [
+        _suave(
+            REGIAO_SEM_FONTE,
+            f"dá a chegada como certa sem citar a restrição de envio ({lista}) — sem pedido "
+            "na conversa, o destino não foi conferido",
+        )
+    ]
 
 
 # ── 7. A guarda do "perguntar" ────────────────────────────────────────────
@@ -7223,6 +7454,29 @@ def conferir_pergunta(
 
 # O nome da spec 6.5.4 ("a guarda do perguntar").
 guarda_do_perguntar = conferir_pergunta
+
+
+def conferir_generica_com_pendencia(
+    assunto: str | None,
+    recentes: Sequence[Any],
+    gatilho: Any | None,
+    texto: str | None = None,
+) -> list[PendenciaAgente]:
+    """O rascunho de cortesia (saudação, agradecimento, pede_atendente) com uma fala
+    do cliente deixada só com o "em que podemos ajudar?" → regra suave. PURA.
+
+    O `foco` da `ia.conferir_saida` só vê a rajada: a resposta genérica da loja fecha
+    o turno e o "6"/"oi"/"boa tarde" seguinte não traz pergunta (viz-responde-03)."""
+    # O mesmo "em que podemos ajudar?" declarado em outro assunto ("outro",
+    # estoque_variacao...) também não resolve a fala deixada (viz-responde-03).
+    pergunta_como_ajudar = bool(texto) and bool(
+        acao_pessoa._RESPOSTA_GENERICA.search(_plano(texto))
+    )
+    if assunto not in _ASSUNTOS_DE_CORTESIA and not pergunta_como_ajudar:
+        return []
+    if not acao_pessoa.fala_deixada_com_generica(recentes, gatilho):
+        return []
+    return [_suave(GENERICA_COM_PENDENCIA, MOTIVO_GENERICA_COM_PENDENCIA)]
 
 
 # ── 8. Devolução ou chamado em andamento ──────────────────────────────────
@@ -7425,6 +7679,68 @@ def sem_o_texto_vazio_de_pessoa(conferida: SaidaConferida, *, acao: str) -> Said
     )
 
 
+# ── O cumprimento/agradecimento genérico depois de o cliente responder à loja ──
+#
+# Calibração v8 (22/10/2026, viz-responde-04): a loja perguntou ou ofereceu algo
+# ("Quer que eu te passe também as cores disponíveis?") e o cliente respondeu só
+# "ok"/"sim"/"blz"; o rascunho genérico ("Olá! … Como podemos ajudar?", "Combinado!
+# Qualquer coisa é só chamar") não trata o que ficou em aberto. Nenhuma camada
+# determinística segurava (o "ok" não é pergunta pendente: `ia.perguntas_pendentes`
+# vazio; o "?" da loja tira o turno do "só reconhecimento") — só o verificador. SUAVE:
+# só tira o envio sozinho (monotônica); a resposta que trata a oferta (as cores) não
+# é genérica e não passa por aqui.
+GENERICA_APOS_OFERTA = "generica_apos_oferta_da_loja"
+MOTIVO_GENERICA_APOS_OFERTA = (
+    'o cliente respondeu ("ok", "sim") a uma pergunta ou oferta da loja e o texto só '
+    "cumprimenta ou agradece — não trata o que ficou em aberto"
+)
+_ASSUNTOS_GENERICOS = ("saudacao_ou_vaga", "agradecimento")
+# A oferta da loja sem "?" ("Se quiser, te passo também as cores disponíveis.").
+_OFERTA_SEM_INTERROGACAO = re.compile(
+    r"\b(?:se\s+(?:quiser|preferir|desejar)|caso\s+(?:queira|prefira|deseje))\b"
+    r"[^.!?\n]{0,40}?\b(?:te|lhe)\s+(?:\w+\s+)?(?:pass|envi|mand|inform|mostr|explic)\w*"
+)
+
+
+def conferir_generica_apos_oferta(
+    assunto: str | None, recentes: Sequence[Any], gatilho: Any | None
+) -> list[PendenciaAgente]:
+    """Assunto genérico (`saudacao_ou_vaga`/`agradecimento`), o turno do cliente só
+    "ok"/"sim" (`acao_pessoa.so_reconhecimento` ou `_so_sim`) e a última resposta real
+    da loja perguntou algo (o "?" que não é o "em que podemos ajudar?"), ofereceu algo
+    ou deixou oferta de pessoa, promessa ou espera → suave. PURA."""
+    if assunto not in _ASSUNTOS_GENERICOS:
+        return []
+    from app.services.atendimento import ia
+
+    ate = acao_pessoa._ate_o_turno(list(recentes), gatilho)
+    lojas = [m for m in ate if ia.resposta_da_loja(m)]
+    if not lojas:
+        return []
+    textos = [
+        getattr(m, "texto", None)
+        for m in ia.rajada_do_cliente(ate, gatilho)
+        if getattr(m, "autor", None) == constantes.AUTOR_CLIENTE
+    ]
+    if not textos or not all(
+        acao_pessoa.so_reconhecimento(t) or acao_pessoa._so_sim(t) for t in textos
+    ):
+        return []
+    loja = getattr(lojas[-1], "texto", None) or ""
+    plano = _plano(loja)
+    perguntou = ("?" in loja and not acao_pessoa._resposta_generica(loja)) or bool(
+        _OFERTA_SEM_INTERROGACAO.search(plano)
+    )
+    deixou = (
+        acao_pessoa.ofereceu_pessoa(loja)
+        or tem_espera(loja)
+        or next(_promessas(plano), None) is not None
+    )
+    if not (perguntou or deixou):
+        return []
+    return [_suave(GENERICA_APOS_OFERTA, MOTIVO_GENERICA_APOS_OFERTA)]
+
+
 # ── Tudo junto ────────────────────────────────────────────────────────────
 
 
@@ -7513,6 +7829,7 @@ def conferir(
         # pessoa, "a loja não consegue cancelar" e a troca no lugar da devolução.
         pendencias += conferir_espera_no_rascunho_de_pessoa(texto, acao=proposta.acao)
         pendencias += conferir_cancelar_pela_loja(texto)
+        pendencias += conferir_cancelar_antes_do_envio(texto, pedido, ctx)
         pendencias += conferir_troca_no_lugar_da_devolucao(
             texto, acao=proposta.acao, textos_cliente=clientes
         )
@@ -7571,8 +7888,19 @@ def conferir(
         # e, perguntado se é robô, diz que é o atendimento virtual da loja.
         pendencias += conferir_se_diz_humano(texto, textos_cliente=clientes)
         pendencias += conferir_nomes_internos(texto, ctx.nomes_da_loja)
-        pendencias += conferir_regiao(texto, fichas, ctx, textos_cliente=clientes)
+        da_regiao = conferir_regiao(texto, fichas, ctx, textos_cliente=clientes)
+        pendencias += da_regiao
+        # 22/10/2026 (calibração, regiao-16/19): sem pedido na conversa, a chegada
+        # pressuposta com estado restrito nas fichas — só quando a região não avisou.
+        if not da_regiao and not (
+            pedido or fatos_da_base.get("pedido") or (base.ctx or {}).get("pedido")
+        ):
+            pendencias += conferir_chegada_sem_destino(texto, fichas, ctx)
+        pendencias += conferir_generica_apos_oferta(conferida.categoria, base.recentes, gatilho)
     pendencias += conferir_pergunta(proposta.acao, base.recentes, gatilho, texto=texto)
+    pendencias += conferir_generica_com_pendencia(
+        conferida.categoria, base.recentes, gatilho, texto
+    )
     pendencias += conferir_andamento(base.ctx, motivos=conferida.motivos)
     return Checagens(pendencias=_sem_repetir(pendencias))
 

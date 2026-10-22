@@ -420,6 +420,25 @@ _NAO_RECEBEU = re.compile(
     r"|\bconsta\s+(?:como\s+)?entregue\b"
     r"|\b(?:diz|fala|mostra|aparece|esta)\s+(?:que\s+)?(?:foi\s+|esta\s+|como\s+)?entregue\b"
 )
+# Barbosa ao vivo (22/10/2026 08:33, 8e335ebf): "Não recebi a nota fiscal" com o
+# pedido entregue punha o "Abrir chamado (entrega)" ao lado do "Enviar o arquivo da
+# NF". Quando o que não chegou é SÓ a nota (e o gatilho 9 já leva a conversa à
+# pessoa), o chamado de entrega sai; a conversa segue para pessoa pela NF.
+_NAO_RECEBEU_A_NF = re.compile(
+    r"\b(?:nao|n|ainda\s+nao)\s+(?:me\s+|nos\s+)?(?:recebi|recebemos|recebeu|chegou|veio)\s+"
+    r"(?:a\s+|o\s+|minha\s+|meu\s+)?(?:nota(?:\s+fiscal)?|nf-?e?|danfe|xml)\b"
+)
+
+
+def so_a_nf_nao_chegou(plano: str, codigos: Sequence[str]) -> bool:
+    """O "não recebi" é só da nota fiscal e a NF já vai para pessoa (gatilho 9)? PURA."""
+    return (
+        constantes.ACAO_ENVIAR_ARQUIVO_NF in codigos
+        and bool(_NAO_RECEBEU_A_NF.search(plano))
+        and not _NAO_RECEBEU.search(_NAO_RECEBEU_A_NF.sub(" ", plano))
+    )
+
+
 # O cliente AFIRMA que o app mostra entregue (revisão de 20/10/2026): com o
 # "não recebi" junto, é chamado mesmo com a logística do espelho atrasada (o
 # app da plataforma atualiza antes). Só a forma afirmativa, fora de pergunta
@@ -1703,6 +1722,44 @@ def turno_so_de_reconhecimento(recentes: Sequence[Any], gatilho: Any | None) -> 
     return not _resposta_generica(texto_da_loja) and "?" not in texto_da_loja
 
 
+# Calibração v8 com a chave (22/10/2026, viz-responde-03): a pergunta deixada só
+# com o "em que podemos ajudar?" da loja continua pendente — com ou sem "?" ("queria
+# saber se o laranja volta"), que o `_perguntas` não vê. O placeholder do anexo
+# ("[Figurinha]", "[Mensagem]") e a recusa à pergunta genérica ("não, obrigado") não
+# deixam nada.
+_PLACEHOLDER = re.compile(r"^\s*\[[^\]]{1,40}\]\s*$")
+_RECUSA_DA_GENERICA = re.compile(
+    r"^\W*(?:nao|n|nn|nada)(?:\W+(?:obrigad[oa]s?|obg|valeu|vlw|era\s+so\s+isso|so\s+isso"
+    r"|por\s+enquanto|tudo\s+certo|ta\s+tudo\s+certo|nao))*\W*$"
+)
+
+
+def _fala_sem_pedido(texto: str | None) -> bool:
+    return (
+        not (texto or "").strip()
+        or _PLACEHOLDER.match(texto or "") is not None
+        or ia.mensagem_de_continuidade(texto)
+        or so_reconhecimento(texto)
+        or so_pede_pessoa(texto)
+    )
+
+
+def fala_deixada_com_generica(recentes: Sequence[Any], gatilho: Any | None) -> bool:
+    """Uma fala do cliente que pede algo ficou só com o "em que podemos ajudar?" da
+    loja (os turnos fechados só com a resposta genérica, do último para trás), e a
+    rajada não é a recusa a ela ("não, obrigado")? PURA (viz-responde-03)."""
+    recentes = _ate_o_turno(list(recentes), gatilho)
+    rajada = [m for m in ia.rajada_do_cliente(recentes, gatilho) if _do_cliente(m)]
+    if rajada and all(_RECUSA_DA_GENERICA.match(_plano_de(m.texto)) for m in rajada):
+        return False
+    for msgs, loja in reversed(_turnos(recentes)):
+        if not _resposta_generica(getattr(loja, "texto", None)):
+            return False
+        if any(not _fala_sem_pedido(m.texto) for m in msgs):
+            return True
+    return False
+
+
 def sinais_do_agente(
     sinais: Iterable[tuple[str, str]], recentes: Sequence[Any], gatilho: Any | None
 ) -> list[tuple[str, str]]:
@@ -1988,7 +2045,11 @@ def gatilhos(
     if (
         # O pedido entregue pelo MESMO dado que o modelo vê (`pedido_entregue`:
         # a logística ou a situação Entregue do Bling — eval do TikTok, 21/10/2026).
-        (_NAO_RECEBEU.search(plano) and pedido_entregue(ctx))
+        (
+            _NAO_RECEBEU.search(plano)
+            and pedido_entregue(ctx)
+            and not so_a_nf_nao_chegou(plano, [g.codigo for g in saida])
+        )
         # Revisão da rodada 6 (22/10/2026): o retrato do MESMO pedido diz entregue
         # (TO_CONFIRM_RECEIVE/COMPLETED; a logística do espelho parada) e o cliente diz
         # que não recebeu A ENTREGA — o retrato que tira o atraso põe o chamado do não
