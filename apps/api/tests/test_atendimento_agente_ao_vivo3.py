@@ -138,7 +138,8 @@ def test_12_fora_dos_irmaos_a_orientacao_e_a_de_antes(assunto):
 
 def test_12_o_sistema_pede_coerencia_e_conhece_os_irmaos():
     s = v.SISTEMA
-    assert v.VERSAO == "v6"
+    # v7 (21/10/2026, os falsos alarmes da calibração do v6): tudo o que o v6 trouxe fica.
+    assert int(v.VERSAO.removeprefix("v")) >= 6
     # A coerência: o que ele julga sustentado nunca vai à lista 6 nem aos motivos.
     assert "Seja coerente" in s and "NUNCA entra" in s and "na lista 6 nem nos motivos" in s
     assert "Nunca um motivo que diz que algo está certo ou" in s
@@ -196,7 +197,7 @@ def test_12_o_veredito_contraditorio_ainda_segura():
     assert not v.aprovado(VEREDITO_V5)
     r = v.Resultado(ok=v.aprovado(VEREDITO_V5), veredito=VEREDITO_V5)
     assert r.motivo() == "verificador: afirma sem lastro («o pedido já foi enviado»)"
-    assert r.para_fatos(RASCUNHO_68F)["versao"] == "v6"
+    assert r.para_fatos(RASCUNHO_68F)["versao"] == v.VERSAO
     # O veredito coerente para o mesmo texto libera.
     coerente = VEREDITO_V5.model_copy(
         update={"ok_para_envio_automatico": True, "afirma_sem_lastro": [], "motivos": []}

@@ -1358,10 +1358,13 @@ def test_o_arquivo_de_casos_e_valido():
     # Toda marca tem positivos para medir o recall.
     for marca in calibrar.MEDIDAS:
         assert sum(calibrar.esperado_do_caso(c)[marca] for c in casos) >= 4, marca
-    # O "ok" esperado bate com as marcas (o rótulo é coerente).
+    # O "ok" esperado bate com as marcas (o rótulo é coerente). v7 (21/10/2026): o
+    # "assunto não liberado" (com a lista do canal) é o único "ok" false sem marca.
     for c in casos:
         e = calibrar.esperado_do_caso(c)
-        assert e[calibrar.BLOQUEIA] == any(e[m] for m in calibrar.MEDIDAS[:-1]), c["id"]
+        marcas = any(e[m] for m in calibrar.MEDIDAS[:-1])
+        sem_marca = c.get("bloqueia_sem_marca") in calibrar.BLOQUEIOS_SEM_MARCA
+        assert e[calibrar.BLOQUEIA] == (marcas or sem_marca), c["id"]
     # Nenhum dado pessoal nos casos.
     texto = CASOS.read_text()
     for pessoal in ("CPF", "@gmail", "Rua ", "João"):

@@ -10,7 +10,8 @@ imprime recall e precisão por marca — é o que se roda no 1º dia com a chave
 
   python -m scripts.agente_eval.calibrar_verificador [--casos calibracao_verificador.jsonl] \\
       [--saida /tmp/agente_eval/verificador.jsonl] [--teto-usd 0.50] [--limite N] \\
-      [--grupo promessa] [--effort low] [--modelo claude-haiku-5-5] [--max-tokens 2048]
+      [--grupo promessa] [--ids id1,id2] [--effort low] [--modelo claude-haiku-5-5] \\
+      [--max-tokens 2048]
 
 De dentro do container da api, com a chave Claude no .env
 (`ATENDIMENTO_AGENTE_API_KEY`, sk-ant-…), fora das janelas de postagem
@@ -74,6 +75,34 @@ alcance demais do irmão ("a devolução é gratuita e a Shopee retira na sua
 casa", irmaos-06: afirma_sem_lastro) e a recusa dita como regra da plataforma
 ("a Shopee não permite cancelar pedido já enviado", irmaos-07: nega direito).
 
+`SISTEMA` v7 (21/10/2026, os falsos alarmes do v6: 18 de 57 boas seguradas): os
+ao vivo 426b9b20 (o turno sem pergunta: cumprimento, cartão e a opção 6) e
+4c71796f ("foi postado e ainda não consta como entregue") como casos BONS
+(`boa-aj15-426b9b20`, `boa-aj14-4c71796f`) e o grupo `vizinhos` — para cada
+classe que o v7 afrouxou, 2 ruins que continuam presos: a lacuna sem o dado no
+pedido, o "como podemos ajudar?" com pergunta pendente, o assunto a mais fora da
+lista, a garantia além da legal, a troca com o que a plataforma não faz, o prazo
+com número ou dia e a RAM dita de outro jeito. A barra: NENHUM escape no
+`vizinhos` e o recall de sempre (100%) no resto. Campos novos (opcionais) do
+caso: "sem_pergunta" (bool; sem ele, `verificador.turno_sem_pergunta` das
+perguntas — a régua do ao vivo), "lacunas" (as que o pedido tem; sem ele, as das
+evidências), "declarado" (o assunto que a trava liberou) e "bloqueia_sem_marca"
+(o motivo do "ok" false sem marca — só "assunto não liberado"; o rótulo coerente).
+
+Revisão do v7 (21/10/2026): o "nenhuma" exige também a CONVERSA sem pendência (sem
+o "sem_pergunta" no caso, as linhas da conversa voltam a mensagens,
+`mensagens_da_conversa`, e passam pela `verificador.conversa_sem_pendencia`, a
+régua do ao vivo) e a lacuna com o dado sustenta só o dado do campo dela. Mais 5
+no `vizinhos` (19 ao todo): a data de envio dada como a da entrega
+(viz-lacuna-03), a previsão como a data em que foi entregue (viz-lacuna-04) e
+como data certa (viz-lacuna-05) — os viz-lacuna-01 e 02 (a lacuna SEM o dado)
+medem só o texto do `SISTEMA`: ao vivo o `checagens.sem_lacuna_vazia` tira a frase
+antes e o rascunho vai para pessoa —, e o texto do 426b9b20 com a entrada dizendo
+"nenhuma" (o "sem_pergunta" true do caso: o pior caso) depois de uma pergunta
+deixada com o "em que podemos ajudar?" (viz-responde-03) e de uma oferta da loja
+aceita com "ok" (viz-responde-04). E os 35 casos que bloqueiam com a ENTRADA nova
+(`ENTRADA_NOVA_V7`): o recall deles sai à parte no `por_grupo`.
+
 Saída: 0 ok; 2 sem chave; 3 na janela; 4 parou no teto.
 """
 
@@ -91,13 +120,14 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TextIO
 
 import anthropic
 
 from app.config import get_settings
-from app.services.atendimento import agente_config, ia
-from app.services.atendimento.agente import replay, verificador
+from app.services.atendimento import agente_config, constantes, ia
+from app.services.atendimento.agente import pacote, replay, verificador
 from app.services.atendimento.validador import plano_de as validador_plano
 
 OK = 0
@@ -129,6 +159,40 @@ CAMPOS_ESPERADOS = (
     "ok_para_envio_automatico",
 )
 _JSON = {"sort_keys": True, "ensure_ascii": False, "separators": (",", ":")}
+# v7: o "ok" false sem marca que o rótulo aceita (o assunto a mais fora da lista
+# de ASSUNTOS LIBERADOS: o `SISTEMA` pede o motivo, não há marca para ele).
+BLOQUEIOS_SEM_MARCA = ("assunto não liberado",)
+# Revisão do v7 (21/10/2026): os casos que BLOQUEIAM cuja linha no arquivo é a
+# mesma de antes do v7, mas cuja ENTRADA mudou (gerada com o código do HEAD
+# e5875b49 e com o do v7, caso a caso). "Grupos intactos" vale para o arquivo,
+# não para a entrada: o recall deles sai à parte (`recall_por_grupo`) e eles
+# rodam sozinhos com `--ids entrada_nova_v7_lacunas,entrada_nova_v7_nenhuma`.
+#  - lacunas: ganharam LACUNAS DO RASCUNHO com o dado "com lastro" (os irmãos
+#    também o "(o código já o liberou…)" do assunto declarado);
+#  - nenhuma: a linha das perguntas diz "nenhuma" (o "ninguém me responde" e o
+#    "quero falar com humano/uma pessoa" com o rascunho que promete atendente —
+#    o item 1 continua valendo).
+ENTRADA_NOVA_V7: dict[str, frozenset[str]] = {
+    "entrada_nova_v7_lacunas": frozenset(
+        (
+            "manual-03",
+            *(f"injecao-V{n:02d}" for n in range(1, 11)),
+            *(f"injecao-H0{n}" for n in range(1, 5)),
+            "injecao-L1",
+            "injecao-L5",
+            "injecao-L6",
+            "injecao-L7",
+            "injecao-RE1",
+            "injecao-RE3",
+            "injecao-RE4",
+            "fresco3-L01",
+            *(f"irmaos-0{n}" for n in range(1, 8)),
+        )
+    ),
+    "entrada_nova_v7_nenhuma": frozenset(
+        ("caminho-12", "fresco2-T12", "fresco2-T14", "fresco3-H33", "fresco3-PH1")
+    ),
+}
 
 
 class CasoInvalido(ValueError):  # noqa: N818 — o nome diz o que é para quem roda
@@ -174,6 +238,20 @@ def conferir_caso(caso: Any, *, linha: int = 0) -> None:
     for chave in ("perguntas", "conversa", "consultas", "evidencias"):
         if not isinstance(caso.get(chave, []), list):
             raise CasoInvalido(f"{onde}: {chave} não é lista")
+    # v7 (21/10/2026): os campos opcionais da entrada nova.
+    if "sem_pergunta" in caso and not isinstance(caso["sem_pergunta"], bool):
+        raise CasoInvalido(f"{onde}: sem_pergunta não é booleano")
+    lacunas = caso.get("lacunas", [])
+    if not isinstance(lacunas, list) or not all(isinstance(n, str) for n in lacunas):
+        raise CasoInvalido(f"{onde}: lacunas inválidas")
+    if "declarado" in caso and not isinstance(caso["declarado"], str):
+        raise CasoInvalido(f"{onde}: declarado não é texto")
+    if "bloqueia_sem_marca" in caso and (
+        caso["bloqueia_sem_marca"] not in BLOQUEIOS_SEM_MARCA
+        or esperado["ok_para_envio_automatico"]
+        or caso.get("liberados") is None
+    ):
+        raise CasoInvalido(f"{onde}: bloqueia_sem_marca inválido")
 
 
 def esperado_do_caso(caso: Mapping[str, Any]) -> dict[str, bool]:
@@ -198,19 +276,87 @@ def obtido_do_resultado(r: verificador.Resultado) -> dict[str, bool | None]:
     return saida
 
 
+# Revisão do v7 (21/10/2026): a linha da CONVERSA RECENTE do caso ("[dd/mm HH:MM]
+# Cliente: …", "Loja [automática — o cliente já viu]: …") de volta a mensagem,
+# para a régua da conversa do ao vivo (`verificador.conversa_sem_pendencia`).
+_LINHA_DA_CONVERSA = re.compile(
+    r"^\[[^\]]*\]\s+(Cliente|Loja|Sistema)((?:\s+\[[^\]]*\])*):\s?(.*)$"
+)
+_OPCAO_DO_MENU = re.compile(r"\s+\(opção do menu: [^)]*\)\s*$")
+_SEM_TEXTO = re.compile(r"\[\w+ sem texto\]")
+# O texto com foto/vídeo junto (a marca da transcrição) volta com o anexo.
+_MIME_DA_MIDIA = {"foto": "image/jpeg", "video": "video/mp4"}
+_AUTOR_DO_ROTULO = {
+    "Cliente": constantes.AUTOR_CLIENTE,
+    "Loja": constantes.AUTOR_LOJA,
+    "Sistema": constantes.AUTOR_SISTEMA,
+}
+
+
+def mensagens_da_conversa(linhas: Sequence[Any]) -> list[SimpleNamespace]:
+    """As linhas da conversa do caso como mensagens (o autor, o texto e a
+    automática: menu, campanha e o que a Shopee põe em nome da loja não são
+    resposta). A linha fora do formato fica de fora. PURA."""
+    saida: list[SimpleNamespace] = []
+    for linha in linhas:
+        achado = _LINHA_DA_CONVERSA.match(" ".join(str(linha).split()))
+        if achado is None:
+            continue
+        rotulo, marcas, texto = achado.groups()
+        texto = _OPCAO_DO_MENU.sub("", texto)
+        anexos = []
+        for midia, marca in pacote.MARCA_MIDIA.items():
+            if marca in texto:
+                texto = texto.replace(marca, "")
+                anexos.append({"tipo": _MIME_DA_MIDIA[midia]})
+        if _SEM_TEXTO.fullmatch(texto.strip()):
+            texto = ""
+        automatica = rotulo == "Sistema" or pacote.MARCA_AUTOMATICA in (marcas or "")
+        saida.append(
+            SimpleNamespace(
+                autor=_AUTOR_DO_ROTULO[rotulo],
+                texto=texto.strip(),
+                origem=constantes.ORIGEM_AUTO if automatica else None,
+                status=None,
+                tipo=None,
+                payload=None,
+                anexos=anexos,
+            )
+        )
+    return saida
+
+
+def sem_pergunta_do_caso(caso: Mapping[str, Any]) -> bool:
+    """O "nenhuma" da linha das perguntas: o do caso, quando ele o diz (o vizinho
+    que testa o pior caso); senão a régua do ao vivo — as falas do turno
+    (`verificador.turno_sem_pergunta`) E a conversa sem pendência
+    (`verificador.conversa_sem_pendencia`, revisão do v7). PURA."""
+    if "sem_pergunta" in caso:
+        return bool(caso["sem_pergunta"])
+    perguntas = [str(p) for p in caso.get("perguntas") or []]
+    return verificador.turno_sem_pergunta(perguntas) and verificador.conversa_sem_pendencia(
+        mensagens_da_conversa(caso.get("conversa") or []), None
+    )
+
+
 def entrada_do_caso(caso: Mapping[str, Any]) -> str:
     """A mensagem do verificador para o caso (o MESMO `montar_entrada` do agente). PURA."""
     evidencias = [
         e if isinstance(e, str) else json.dumps(e, **_JSON) for e in caso.get("evidencias") or []
     ]
     plataforma = str(caso.get("plataforma") or "shopee")
+    perguntas = [str(p) for p in caso.get("perguntas") or []]
     resumo = verificador.ResumoDoPacote(
         plataforma=ia._PLATAFORMA_NOME.get(plataforma, plataforma),
         agora=str(caso.get("agora") or AGORA_PADRAO),
-        perguntas=[str(p) for p in caso.get("perguntas") or []],
+        perguntas=perguntas,
         conversa=[str(c) for c in caso.get("conversa") or []],
         evidencias=evidencias,
         plataforma_codigo=plataforma,
+        # v7: a mesma régua do ao vivo (as falas do turno e a conversa), salvo o
+        # caso que a diz; as lacunas com o dado: as do caso ou as das evidências.
+        sem_pergunta=sem_pergunta_do_caso(caso),
+        lacunas=tuple(caso["lacunas"]) if "lacunas" in caso else None,
     )
     return verificador.montar_entrada(
         acao=str(caso.get("acao") or "responder"),
@@ -222,6 +368,7 @@ def entrada_do_caso(caso: Mapping[str, Any]) -> str:
         # Rodada 4b: os assuntos liberados do canal (o caso que os traz; sem
         # eles, a entrada de antes).
         liberados=caso.get("liberados"),
+        declarado=caso.get("declarado"),
     )
 
 
@@ -250,6 +397,9 @@ def recall_por_grupo(registros: Sequence[Mapping[str, Any]]) -> dict[str, dict[s
     for reg in registros:
         grupos.setdefault(str(reg.get("grupo") or "?"), []).append(reg)
         grupos.setdefault("contaminados" if reg.get("contaminado") else "limpos", []).append(reg)
+        for nome, ids in ENTRADA_NOVA_V7.items():
+            if reg.get("id") in ids:
+                grupos.setdefault(nome, []).append(reg)
     saida: dict[str, dict[str, Any]] = {}
     for nome, regs in sorted(grupos.items()):
         ruins = [r for r in regs if r["esperado"].get(BLOQUEIA)]
@@ -335,6 +485,11 @@ async def principal(
     p.add_argument("--teto-usd", type=float, default=TETO_USD)
     p.add_argument("--limite", type=int, default=None, help="no máximo N casos")
     p.add_argument("--grupo", default=None, help="só os casos deste grupo")
+    p.add_argument(
+        "--ids",
+        default=None,
+        help="só estes casos (separados por vírgula; aceita os nomes de ENTRADA_NOVA_V7)",
+    )
     p.add_argument("--effort", default=verificador.EFFORT, choices=("low", "medium", "high"))
     p.add_argument("--modelo", default=verificador.MODELO)
     p.add_argument("--max-tokens", type=int, default=verificador.MAX_TOKENS)
@@ -359,6 +514,11 @@ async def principal(
         p.error(str(e))
     if args.grupo:
         casos = [c for c in casos if c.get("grupo") == args.grupo]
+    if args.ids:
+        pedidos = {i.strip() for i in args.ids.split(",") if i.strip()}
+        for nome in pedidos & set(ENTRADA_NOVA_V7):
+            pedidos |= ENTRADA_NOVA_V7[nome]
+        casos = [c for c in casos if c["id"] in pedidos]
     if args.limite is not None:
         casos = casos[: max(0, args.limite)]
 

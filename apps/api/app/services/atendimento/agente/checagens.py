@@ -4327,6 +4327,12 @@ _ORACAO_DE_CONDICAO = re.compile(
     r"|enquanto|antes\s+que)\b"
 )
 _NEGA_NA_ORACAO = re.compile(r"\b(?:nao|nem|nunca|ainda\s+nao)\b")
+# Item 14 (21/10/2026): a negação colada ao verbo da ENTREGA ("ainda não consta
+# como entregue", "não foi entregue", "nem foi entregue ainda"): no máximo duas
+# palavras entre ela e o verbo — a negação de antes ("não foi postado e já
+# consta como entregue") é de outro verbo.
+MOTIVO_NAO_ENTREGUE_CONTRADIZ = "diz que o pedido não foi entregue, mas ele consta entregue"
+_NEGA_A_ENTREGA = re.compile(r"\b(?:ainda\s+nao|nao|nem|nunca)\s+(?:[a-z0-9]+\s+){0,2}?$")
 # O "tudo certo" que REPETE o que o cliente disse ("Que bom saber que está tudo
 # certo com a sua compra!" a "acredito que acertei com a compra", o dev
 # 5812ff61b1e4 do eval real de 21/10/2026): não é o estado do pedido.
@@ -4505,6 +4511,25 @@ def conferir_estado_do_pedido(
         ):
             saida.append(_suave(ESTADO_SEM_DADO, "diz que está tudo certo com o pedido sem o dado"))
         entregou = _DIZ_QUE_ENTREGOU.search(oracao)
+        if entregou and (nega := _NEGA_A_ENTREGA.search(oracao[: entregou.start()])):
+            # Item 14 da auditoria ao vivo (21/10/2026, 4c71796f): "foi postado e
+            # ainda não consta como entregue" nega a ENTREGA, não a postagem. A
+            # negação vale só para o verbo dela: contradiz só com a entrega no
+            # dado; o resto da oração ("foi postado") se confere como sempre.
+            if entregue_pela_garantia or (blocos and all(b.get("entregue") for b in blocos)):
+                saida.append(_contradiz(ESTADO_CONTRADIZ, MOTIVO_NAO_ENTREGUE_CONTRADIZ))
+            oracao = f"{oracao[: nega.start()]} {oracao[entregou.end() :]}"
+            entregou = None
+            if _AINDA_NAO_SAIU.search(oracao) and not _DIZ_QUE_SAIU.search(oracao):
+                # "não saiu ainda e não foi entregue": a negação da SAÍDA no resto
+                # (o que a régua de antes pegava pela negação da entrega).
+                if blocos and all(_saiu(b) is True for b in blocos):
+                    saida.append(
+                        _contradiz(
+                            ESTADO_CONTRADIZ, "diz que o pedido não saiu, mas ele já foi postado"
+                        )
+                    )
+                continue
         saiu = entregou or _DIZ_QUE_SAIU.search(oracao)
         if not saiu:
             continue
@@ -4768,7 +4793,16 @@ def _oracao_com_lastro(oracao: str, blocos: Sequence[Mapping], valores: Iterable
     if any((status := _palavras_do_status(b)) and status <= palavras for b in blocos):
         return True
     estados = [_saiu(b) for b in blocos]
-    saiu = _DIZ_QUE_ENTREGOU.search(oracao) or _DIZ_QUE_SAIU.search(oracao)
+    entregou = _DIZ_QUE_ENTREGOU.search(oracao)
+    if entregou and (nega := _NEGA_A_ENTREGA.search(oracao[: entregou.start()])):
+        # Item 14 (21/10/2026): "ainda não consta como entregue" nega a ENTREGA —
+        # o lastro é o pedido não entregue no dado (não o "não saiu"); o resto da
+        # oração ("foi postado") se confere como sempre.
+        if not blocos or not all(b.get("entregue") is False for b in blocos):
+            return False
+        resto = f"{oracao[: nega.start()]} {oracao[entregou.end() :]}"
+        return _oracao_com_lastro(resto, blocos, valores)
+    saiu = entregou or _DIZ_QUE_SAIU.search(oracao)
     if saiu:
         if _NEGA_NA_ORACAO.search(oracao[: saiu.start()]):
             return bool(estados) and all(e is False for e in estados)
