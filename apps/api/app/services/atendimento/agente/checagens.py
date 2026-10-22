@@ -66,6 +66,21 @@ Revisão "furos" de 20/10/2026 (os 29 achados de `pendentes_r2.json`):
     gentílico; o caminho para fora com a marca do anúncio, técnico, loja
     física, outra loja do grupo, banco.
 
+Auditoria ao vivo, 5ª rodada (21/10/2026, noite):
+  - item 17 (7f0c1b4e, "comprei… assim que chegar posso devolver?" → "Sim,
+    depois que o aparelho chegar, você pode pedir a devolução…"): DESFEITO em
+    22/10/2026 — a `conferir_regiao` é a do d64ce17d e o aviso suave da região
+    fica (um clique de pessoa). A leitura que tirava a chegada do pedido da
+    fala do cliente só tinha o texto livre dos dois lados para decidir (o
+    7f0c1b4e não tinha pedido na conversa): três contestações seguidas acharam
+    rascunhos ruins que ela deixava sair sozinhos ("Sim, ele vai direitinho",
+    "comprei a capinha… o celular quando chegar…", "minha mãe em S. Gonçalo"),
+    e cada furo fechado pedia mais uma lista de palavras;
+  - item 21: `conferir_troca_negada_no_defeito` — a recusa da troca ("não
+    fazemos troca", "a única solução é a devolução", "não há possibilidade de
+    troca") a quem fala de defeito, avaria ou item errado, relatado ou só
+    perguntado ("se trava…?", "e se vier danificado?") → regra SUAVE.
+
 `aplicar` junta tudo (e as ações de pessoa) na `SaidaConferida` final.
 """
 
@@ -4059,6 +4074,173 @@ def conferir_compra_nova_no_defeito(
     return [_suave(COMPRA_NOVA_NO_DEFEITO, MOTIVO_COMPRA_NOVA_NO_DEFEITO)]
 
 
+# Item 21 da auditoria ao vivo (21/10/2026, Barbosa ML pergunta, 552f20ba,
+# troca_devolucao): "Se trava no primeiro uso pode troca?" → "Não fazemos troca,
+# nem pagando a diferença. A única solução é a devolução…" — o agente aplicou a
+# recusa padrão aprovada da troca (o fato da "troca pagando a diferença", que é da
+# troca SEM defeito: arrependimento, outra cor ou modelo) a quem fala de DEFEITO,
+# relatado ou só perguntado ("se trava", "e se vier com defeito", "parou", "não
+# liga"). Com defeito, avaria ou item errado, o caminho é a orientação do defeito e
+# da garantia (vídeo e fotos; a equipe analisa; a devolução pelo app também pode),
+# nunca "não fazemos troca". Só o verificador pegava (o "diferença" livra a frase
+# das réguas de recusa do validador). Regra SUAVE: o aviso e não sai sozinha.
+TROCA_NEGADA_NO_DEFEITO = "troca_negada_no_defeito"
+MOTIVO_TROCA_NEGADA_NO_DEFEITO = (
+    "recusa a troca a quem fala de defeito (relatado ou 'e se…') — a recusa padrão é da troca "
+    "sem defeito; o caminho é a orientação do defeito e da garantia (vídeo e fotos, a equipe "
+    "analisa; a devolução pelo app também pode)"
+)
+# A recusa da troca no texto da resposta ("não fazemos troca", "troca a gente não
+# faz", "não trocamos", "não é possível trocar", "a única solução é a devolução").
+# Contestação da 5ª rodada (22/10/2026): também "não fazemos esse tipo de troca",
+# "não há possibilidade de troca", "a troca não está disponível", "não efetuamos
+# trocas", "não substituímos", "só aceitamos/fazemos devolução", "a única saída é
+# pedir reembolso" — com o "diferença" na frase, nem o validador as lê.
+_RECUSA_DE_TROCA = re.compile(
+    r"\b(?:nao|nem)\s+(?:\w+\s+)?(?:fazemos|faz|fazem|realizamos|realiza|realizam|aceitamos|aceita"
+    r"|aceitam|oferecemos|oferece|trabalhamos\s+com|trabalha\s+com|temos|tem|ha|existe)\s+"
+    r"(?:a\s+|o\s+|as\s+|os\s+)?trocas?\b"
+    r"|\b(?:nao|nem)\s+(?:\w+\s+)?troca(?:mos|m)?\b"
+    r"|\btrocas?\s+(?:\w+\s+){0,3}?(?:nao|nunca)\s+(?:faz|fazemos|fazem|realiza|realizamos"
+    r"|aceita|aceitamos|tem|temos|ha|existe|e\s+feita|sao\s+feitas|e\s+possivel)\b"
+    r"|\b(?:nao|nem)\s+(?:e\s+possivel|da\s+(?:para|pra)|tem\s+como|ha\s+como|conseguimos"
+    r"|podemos)\s+(?:\w+\s+){0,2}?troc\w*"
+    r"|\b(?:unic[oa]|so\s+(?:a|uma|o|um))\s+(?:solucao|opcao|alternativa|forma|saida"
+    r"|possibilidade|caminho|jeito)\s+(?:\w+\s+){0,2}?(?:e|eh|sera|seria)\s+(?:\w+\s+)?"
+    r"(?:a\s+|o\s+)?(?:devoluc|devolv|reembols)\w*"
+    r"|\bsem\s+(?:possibilidade\s+de\s+)?troca\b"
+    r"|\b(?:nao|nem)\s+(?:\w+\s+){0,3}?(?:efetuamos|efetua|efetuam|permitimos|permite|permitem"
+    r"|trabalhamos\s+com|trabalha\s+com)\s+(?:\w+\s+){0,3}?trocas?\b"
+    r"|\b(?:nao|nem)\s+(?:fazemos|faz|fazem|realizamos|realiza|efetuamos|aceitamos)\s+(?:esse|este"
+    r"|essa|esta)\s+(?:tipo\s+de\s+)?trocas?\b"
+    r"|\b(?:nao|nem)\s+(?:ha|existe|temos|tem|possui\w*)\s+"
+    r"(?:(?!(?:custo|taxa|cobranc\w*|problema|frete|valor)\b)\w+\s+){0,2}?(?:de\s+)?trocas?\b"
+    r"|\b(?:nao|nem)\s+(?:e|sera)\s+(?:feita|realizada|possivel|permitida|aceita)\s+(?:a\s+)?trocas?\b"
+    r"|\btrocas?\s+(?:\w+\s+){0,3}?(?:nao|nunca)\s+(?:esta|estao|fica|ficam|e|sao|sera|serao)\s+"
+    r"(?:\w+\s+)?(?:disponive\w*|realizad\w*|feit\w*|permitid\w*|possive\w*|aceit\w*|oferecid\w*)"
+    r"|\b(?:nao|nem)\s+substituimos\b|\b(?:nao|nem)\s+(?:\w+\s+)?substitu\w*\s+(?:[oa]s?\s+|seu\s+"
+    r"|sua\s+)?(?:aparelho|produto|celular|item|itens|pedido|unidade|relogio|mala|fone)"
+    r"|\b(?:so|somente|apenas)\s+(?:aceitamos|aceita|fazemos|faz|realizamos|realiza|oferecemos"
+    r"|oferece|trabalhamos\s+com|trabalha\s+com|e\s+possivel|da\s+(?:para|pra))\s+(?:\w+\s+)?"
+    r"(?:a\s+|o\s+)?(?:devoluc|devolv|reembols)\w*"
+)
+# A recusa dita só para a troca SEM defeito na mesma frase ("troca de cor não
+# fazemos", "por arrependimento não fazemos troca", "sem defeito, não fazemos
+# troca", "por outro motivo…"), sem nenhuma palavra de defeito nela: essa é a
+# recusa padrão no lugar certo.
+_TROCA_SEM_DEFEITO = re.compile(
+    r"\b(?:sem\s+defeito|arrepend\w*|desist\w*|nao\s+gost\w*"
+    r"|(?:de|por|pela?|para|pra)\s+(?:outr[oa]s?\s+)?(?:cor|cores|modelo|modelos|tamanho|tamanhos"
+    r"|variac\w*|versao|versoes|memoria)"
+    r"|outr[oa]s?\s+(?:cor|cores|modelo|modelos|tamanho|tamanhos|variac\w*|versao)"
+    r"|por\s+outr[oa]s?\s+(?:motivos?|razo\w+)|n[oa]s\s+(?:outr[oa]s|demais)\s+(?:casos|situacoes))\b"
+)
+# Contestação da 5ª rodada (22/10/2026): o "defeito" de "sem defeito" não é o
+# defeito na frase — antes, a isenção acima nunca valia ("Sem defeito, não fazemos
+# troca…" depois da orientação do defeito ficava presa).
+_SEM_DEFEITO = re.compile(r"\bsem\s+(?:nenhum\s+|qualquer\s+)?defeit\w*")
+_DEFEITO_NA_FRASE = re.compile(
+    r"\b(?:defeit\w*|avaria\w*|avariad\w*|quebr\w*|trav\w*|problema\w*|garantia|estrag\w*|errad\w*"
+    r"|danific\w*|danos?|falh\w*|vici\w*)"
+)
+# A troca de OUTRA coisa (o endereço, a forma de pagamento, o cartão, a
+# transportadora…) não é a troca do produto: sai da frase antes da recusa.
+_TROCA_DE_OUTRA_COISA = re.compile(
+    r"\btroc\w*\s+(?:[oa]s?\s+|de\s+|d[oa]s?\s+)?(?:\w+\s+)?(?:endereco|forma\s+de\s+pagamento"
+    r"|meio\s+de\s+pagamento|pagamento|cartao|transportadora|cupom|nome|cpf|dados|frete|senha"
+    r"|email|telefone|numero\s+de\s+telefone)\b"
+)
+# A troca "não direto/não na hora" (primeiro o vídeo, a equipe analisa: a
+# orientação aprovada do defeito) não é recusa — só com esse caminho no texto (o
+# vídeo ou as fotos e a análise): sai da frase antes da recusa, e o resto dela
+# ("…, a única solução é a devolução") continua sendo lido.
+_TROCA_SO_DEPOIS_DA_ANALISE = re.compile(
+    r"\b(?:nao|nem)\s+(?:\w+\s+){0,3}?(?:troc|substitu)\w*\s+(?:\w+\s+)?(?:direto|diretamente"
+    r"|imediat\w*|na\s+hora|de\s+imediato|sem\s+(?:a\s+)?analise|antes\s+da\s+analise)\b"
+    r"|\btrocas?\s+(?:\w+\s+){0,2}?nao\s+(?:e|sera)\s+(?:feita\s+|realizada\s+)?(?:imediat\w*"
+    r"|diret\w*|na\s+hora|automatic\w*)"
+)
+_CAMINHO_DO_DEFEITO = re.compile(
+    r"\b(?:videos?|fotos?)\b.*\banalis\w*|\banalis\w*.*\b(?:videos?|fotos?)\b"
+)
+# O defeito só PERGUNTADO ("se trava…", "e se vier com defeito?", "caso pare de
+# funcionar", "se der problema"): a pergunta hipotética também pede a orientação
+# do defeito (o `_SINTOMA` e o `_RELATA_PROBLEMA` não leem o "se travar").
+# Contestação da 5ª rodada (22/10/2026): também "se esquentar", "se a bateria
+# viciar", "se o touch falhar", "e se bugar", "se der ruim", "se não prestar",
+# "se vier com algum dano/vício/mau funcionamento".
+_DEFEITO_HIPOTETICO = re.compile(
+    r"\b(?:se|caso)\s+(?:\w+\s+){0,3}?(?:trava|travar|travou|quebra|quebrar|quebrou|estraga"
+    r"|estragar|pifa|pifar|queima|queimar|parar|desligar|reiniciar|danific\w*|esquent\w*"
+    r"|superaquec\w*|vici\w*|bug\w*|falh\w*|morr\w*|der\s+(?:ruim|pau)"
+    r"|nao\s+(?:ligar|liga|funcionar|funciona|carregar|carrega|prest\w*)"
+    r"|(?:der|de|vier|tiver|apresentar|chegar)\s+(?:\w+\s+)?(?:com\s+)?(?:algum\s+|alguma\s+)?"
+    r"(?:defeito|problema|avaria|danos?|falhas?|vicios?|mau\s+funcionamento|superaquecimento))\b"
+    # "deu problema", "veio com problema" — fora do problema da logística, do
+    # pagamento ou do app.
+    r"|\b(?:der|deu|dar|dando|tiver|apresentar|apresentou|apresentando|vier\s+com|veio\s+com"
+    r"|esta\s+com|ta\s+com)\s+(?:algum\s+|um\s+)?problema\b(?!\s+(?:n[oa]s?|de|com)\s+(?:pagamento"
+    r"|entrega|envio|frete|pedido|cupom|endereco|rastreio|app|aplicativo|conta|compra|cartao|pix"
+    r"|boleto|link|site|sistema|login|cadastro)\b)"
+    r"|\b(?:par|deix)\w*\s+de\s+(?:funcionar|ligar|carregar)\b"
+)
+# O dano, a avaria e o ITEM ERRADO mandado pela loja, relatados ou perguntados
+# ("chegou danificado", "e se vier com algum dano?", "veio a cor errada", "e se
+# vier diferente do anúncio?") — não o erro do cliente ("comprei o modelo errado").
+_DEFEITO_OU_AVARIA = re.compile(
+    r"\b(?:danificad\w*|avariad\w*|danos?|mau\s+funcionamento|superaquec\w*"
+    r"|lacre\s+(?:\w+\s+){0,2}?(?:violad\w*|rompid\w*|abert\w*))\b"
+    r"|\b(?:vier|vierem|veio|vieram|chegar|chegarem|chegou|chegaram|mandarem|mandaram|enviarem"
+    r"|enviaram)\s+(?:\w+\s+){0,2}?(?:errad[oa]s?|diferentes?|trocad[oa]s?|outro\s+produto"
+    r"|usad[oa]s?|faltando)\b"
+)
+# O dano NEGADO ("nem está com a caixa danificada", "devolvo sem danos") não é dano.
+_DANO_NEGADO = re.compile(
+    r"\b(?:nao|nem)\s+(?:esta|estao|ta|veio|vieram|chegou|chegaram|tem|foi|ficou)\s+(?:\w+\s+){0,3}?"
+    r"(?:danificad|avariad|violad)\w*"
+    r"|\bsem\s+(?:nenhum\s+|nenhuma\s+|qualquer\s+)?(?:danos?|avaria\w*)\b"
+)
+
+
+def _fala_de_defeito(textos_cliente: Sequence[str]) -> bool:
+    """O cliente fala de defeito, avaria ou item errado — relatado ou só perguntado? PURA.
+
+    Contestação da 5ª rodada (22/10/2026): o relato é a régua da rodada 4
+    (`_relata_defeito`: o sintoma só AFIRMADO — "ele é lento?" antes da compra é
+    característica); a hipótese ("se travar…") e o dano/item errado, à parte."""
+    textos = [t for t in textos_cliente if isinstance(t, str) and t.strip()]
+    planos = [_DINHEIRO_CAIU.sub(" ", _plano(t)) for t in textos]
+    return _relata_defeito(textos) or any(
+        _DEFEITO_HIPOTETICO.search(t) or _DEFEITO_OU_AVARIA.search(_DANO_NEGADO.sub(" ", t))
+        for t in planos
+    )
+
+
+def conferir_troca_negada_no_defeito(
+    texto: str, *, textos_cliente: Sequence[str]
+) -> list[PendenciaAgente]:
+    """A resposta recusa a troca a quem fala de defeito (relatado ou hipotético) → aviso
+    (SUAVE). PURA (item 21 da auditoria ao vivo). Ficam de fora: a recusa só da troca
+    sem defeito na mesma frase ("troca de cor não fazemos", "sem defeito, não fazemos
+    troca"), a troca de outra coisa ("não conseguimos trocar o endereço") e a troca só
+    depois da análise ("não fazemos a troca direto: primeiro o vídeo")."""
+    if not (texto or "").strip() or not _fala_de_defeito(textos_cliente):
+        return []
+    com_o_caminho = bool(_CAMINHO_DO_DEFEITO.search(_plano(texto)))
+    for sentenca, _pergunta in _sentencas(_plano(texto)):
+        sentenca = _TROCA_DE_OUTRA_COISA.sub(" ", sentenca)
+        if com_o_caminho:
+            sentenca = _TROCA_SO_DEPOIS_DA_ANALISE.sub(" ", sentenca)
+        if not _RECUSA_DE_TROCA.search(sentenca):
+            continue
+        if _TROCA_SEM_DEFEITO.search(sentenca) and not _DEFEITO_NA_FRASE.search(
+            _SEM_DEFEITO.sub(" ", sentenca)
+        ):
+            continue
+        return [_suave(TROCA_NEGADA_NO_DEFEITO, MOTIVO_TROCA_NEGADA_NO_DEFEITO)]
+    return []
+
+
 # ── 5x. O manual antigo sem a frase de espera (integração r5, 21/10/2026) ──
 #
 # As respostas prontas "(sugestão para pessoa)" do manual base e o FAÇA de
@@ -6535,6 +6717,12 @@ def conferir_regiao(
     # Revisão "furos": o que o texto INTEIRO nega (a frase do anúncio dita em
     # outra frase), a pergunta de entrega e o lugar que não vira UF.
     negadas_no_texto = {uf for sentenca, _p in _sentencas(plano) for uf in _negadas(sentenca)}
+    # Item 17 da auditoria ao vivo (21/10/2026, 7f0c1b4e): a chegada do pedido já
+    # feito ("comprei… assim que chegar posso devolver?") continua lida como
+    # pergunta de entrega, e o "Sim," da devolução como "sim, entrega" — o aviso
+    # suave (um clique). A leitura sem a chegada foi desfeita em 22/10/2026: sem
+    # pedido na conversa, o texto livre não separa a compra de agora da de outra
+    # coisa, nem o lugar dito de qualquer jeito (veja o docstring do módulo).
     pergunta_de_entrega = any(
         _PERGUNTA_DE_ENTREGA.search(_plano(t)) for t in textos_cliente if isinstance(t, str)
     )
@@ -7042,6 +7230,9 @@ def conferir(
             texto, acao=proposta.acao, textos_cliente=clientes
         )
         pendencias += conferir_compra_nova_no_defeito(texto, textos_cliente=clientes)
+        # Item 21 da auditoria ao vivo (21/10/2026): a recusa padrão da troca dita a
+        # quem fala de defeito (relatado ou "e se…").
+        pendencias += conferir_troca_negada_no_defeito(texto, textos_cliente=clientes)
         # A garantia Uranyx depois dos 90 dias (decisão 7 do dono): o caminho da
         # Uranyx é a orientação aprovada do período — a frase sai do texto aqui e
         # na checagem do caminho, só com o `ver_garantia` liberando.

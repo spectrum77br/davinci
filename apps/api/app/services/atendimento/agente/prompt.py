@@ -108,6 +108,13 @@ de 31); medir no próximo eval. Para caber no teto, sem mudar regra: o "Se algu�
 precisa agir ou decidir agora…" das REGRAS DURAS saiu (o `VALE_SEMPRE` e o item 3 do
 COMO TRABALHAR já dizem), e o item 2 do COMO TRABALHAR, o `_DADOS`, o `_ESTILO`, o
 `_VARIACOES`, o `_TROCA` e o `_PAPEL` encurtaram palavras.
+
+21/10/2026 (noite, item 16 da auditoria): o cabeçalho dos ASSUNTOS do bloco 2
+(`ASSUNTOS_CABECALHO`) diz que o assunto é um de que a conversa fala e que quem só
+confirma ou repete a resposta da loja fica no assunto dessa resposta (5839ff11: "Então
+a capinha não serve ne" saiu como cobertura_regiao). O bloco 1 não muda. Sem replay de
+N amostras do mesmo turno antes e depois, não dá para dizer que conserta: o rótulo
+errado foi uma amostra só (o mesmo turno, 6 minutos antes, saiu certo).
 """
 
 from __future__ import annotations
@@ -718,6 +725,21 @@ def bloco_geral() -> str:
     return "\n\n".join(partes)
 
 
+# O cabeçalho do catálogo dos assuntos no bloco 2. Item 16 da auditoria ao vivo
+# (21/10/2026, Kia 22:29, 5839ff11): "Então a capinha não serve ne", depois da
+# resposta da loja sobre a capinha, saiu como cobertura_regiao (o certo:
+# acessorios_avulsos). Quem só confirma ou repete a resposta da loja fica no assunto
+# dessa resposta; nenhuma regra nova de "ok/obrigado" (o COMO CLASSIFICAR do manual e
+# o desempate do agradecimento já dizem que o "ok" a uma pergunta da loja herda o caso
+# aberto). Cabe no teto do catálogo (`test_bloco_da_plataforma`: MAX_CHARS_ASSUNTOS +
+# 200, com o cabeçalho).
+ASSUNTOS_CABECALHO = (
+    '# ASSUNTOS (o campo "assunto" é um destes ids, nunca um de que a conversa não '
+    "fala; na dúvida, o que aparece primeiro; quem só confirma ou repete a resposta da "
+    'loja ("então não serve, né?") fica no assunto dessa resposta)\n'
+)
+
+
 def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
     """O bloco 2 da plataforma (regras, assuntos, caminhos do app). PURA e determinística.
 
@@ -745,10 +767,7 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
         partes.append("Regras da plataforma:\n" + "\n".join(regras))
     partes.append(f"Caminhos do app da {nome} (só estes):\n" + _linhas(caminhos))
     assuntos = ia.lista_de_assuntos([dict(c) for c in categorias], MAX_CHARS_ASSUNTOS)
-    partes.append(
-        '# ASSUNTOS (o campo "assunto" é um destes ids; na dúvida, o que aparece primeiro)\n'
-        + assuntos
-    )
+    partes.append(ASSUNTOS_CABECALHO + assuntos)
     return "\n\n".join(partes)
 
 

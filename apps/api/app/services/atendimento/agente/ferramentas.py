@@ -1284,6 +1284,36 @@ def _prontas_sem_espera(prontas: list[dict]) -> list[dict]:
     return saida
 
 
+# Item 21 da auditoria ao vivo (21/10/2026, Barbosa ML pergunta, 552f20ba): "Se trava
+# no primeiro uso pode troca?" → o agente respondeu com a recusa padrão aprovada da
+# troca ("Não fazemos troca, nem pagando a diferença. A única solução é a
+# devolução…", a da `acao_pessoa.CHAVE_RECUSA_TROCA_DIFERENCA`), que é da troca SEM
+# defeito. O fato no banco não muda (o texto é do dono); o `consultar_manual` devolve
+# a recusa padrão da troca com o recorte do que ela NÃO cobre — só restringe: com
+# defeito (relatado ou só perguntado), avaria ou item errado, a orientação do defeito
+# e da garantia (`ORIENTACAO["troca_devolucao"]`: "por defeito ou avaria, a
+# orientação do defeito"). Sem número (o texto vira "permitido").
+NAO_VALE_PARA_A_RECUSA_DE_TROCA = (
+    "defeito, avaria ou item errado, relatado ou só perguntado ('se travar', 'e se vier com "
+    "defeito', 'parou de funcionar', 'não liga'): aí esta recusa não vale e nunca se diz 'não "
+    "fazemos troca' — a resposta é a orientação do defeito (vídeo curto e fotos do problema "
+    "pelo caminho de falar com a loja; a equipe analisa; a devolução pelo app também é "
+    "possível) e, para falar da garantia, a do ver_garantia."
+)
+
+
+def fato_do_manual(fato: Mapping[str, Any]) -> dict:
+    """O fato aprovado como o `consultar_manual` o devolve: id, texto e escopo; a recusa
+    padrão da TROCA com o recorte `nao_vale_para` (item 21). PURA."""
+    saida = {k: fato.get(k) for k in ("id", "texto", "escopo")}
+    if (
+        fato.get("fonte") == constantes.FATO_FONTE_RECUSA_PADRAO
+        and fato.get("assunto") == "troca_devolucao"
+    ):
+        saida["nao_vale_para"] = NAO_VALE_PARA_A_RECUSA_DE_TROCA
+    return saida
+
+
 def _skus_do_pedido(base: BaseDoGerar) -> list[str]:
     pedido = base.ctx.get("pedido") if isinstance(base.ctx, Mapping) else None
     itens = (pedido or {}).get("itens") if isinstance(pedido, Mapping) else None
@@ -1362,7 +1392,7 @@ async def dados_consultar_manual(
         "regra": regras[0] if regras else None,
         "orientacao": orientacao,
         "respostas_prontas": prontas,
-        "fatos": [{k: f.get(k) for k in ("id", "texto", "escopo")} for f in fatos],
+        "fatos": [fato_do_manual(f) for f in fatos],
     }
     por_cima = POR_CIMA_DA_REGRA.get(assunto)
     if assunto not in _ESPERA_APROVADA_NA_REGRA and any(
