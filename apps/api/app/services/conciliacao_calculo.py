@@ -40,7 +40,13 @@ from app.models import (
     Refund,
     SituacaoBling,
 )
-from app.models.conciliacao import ETAPA_PELO_ROBO, ORIGEM_EXTRATO, ORIGEM_FATURA, ORIGENS_EXTRATO
+from app.models.conciliacao import (
+    ETAPA_PELO_ROBO,
+    ORIGEM_EXTRATO,
+    ORIGEM_FATURA,
+    ORIGEM_TIKTOK,
+    ORIGENS_EXTRATO,
+)
 from app.services.conciliacao_dias import reabrir_dias
 from app.services.conciliacao_extrato import (
     TIPOS_RESERVA,
@@ -405,8 +411,18 @@ def situacao_do_pedido(
     presas = [m for m in movs_extrato if _presa_na_reserva(m)]
     dinheiro = [m for m in movs_extrato if m.tipo not in TIPOS_RESERVA and not _presa_na_reserva(m)]
     liberacoes = [m for m in dinheiro if m.tipo == "venda_liberada"]
-    liberado_valor = _soma([m.credito for m in liberacoes]) if liberacoes else None
+    # 22/10: a liberação pode ser NEGATIVA (Shopee/TikTok: pedido reembolsado, a loja paga
+    # a taxa ou o frete) — o valor liberado é crédito − débito da própria linha
+    liberado_valor = (
+        (_soma([m.credito for m in liberacoes]) - _soma([m.debito for m in liberacoes]))
+        if liberacoes
+        else None
+    )
     liberado_em = max((_quando_liberou(m) for m in liberacoes), default=None)
+    # o que entrou/saiu fora das linhas de liberação (compensação, ajuste, estorno), sem
+    # o frete (a etiqueta faz parte da liquidação)
+    fora = [m for m in dinheiro if m.tipo not in ("venda_liberada", "frete")]
+    entrou_fora = _soma([m.credito for m in fora])
     recebido = (
         (_soma([m.credito for m in dinheiro]) - _soma([m.debito for m in dinheiro]))
         if dinheiro
@@ -429,9 +445,7 @@ def situacao_do_pedido(
     # ENQUANTO o dinheiro estava preso (Amazon devolve ao cliente antes de liberar — kia
     # 302142: devolveu 759,53 em 08/10, liberou em 15/10) também é dinheiro que saiu —
     # a data do débito não precisa ser depois da liberação
-    saidas_depois = (
-        _soma([m.debito for m in dinheiro if m.tipo != "frete"]) if liberado_em else None
-    )
+    saidas_depois = _soma([m.debito for m in fora]) if liberado_em else None
     ultimo_mov = max((_entrou_em(m) for m in movs_extrato), default=None)
     cancelada = _venda_cancelada(venda)
     venda_valor = _d(venda.gross_amount) if venda else None
@@ -519,10 +533,23 @@ def situacao_do_pedido(
         ):
             situacao = "estornado_depois"
             ultimo_debito = max(
-                (m for m in dinheiro if m.debito and m.debito > ZERO), key=lambda m: m.data
+                (m for m in fora if m.debito and m.debito > ZERO), key=lambda m: m.data
             )
             quando = ultimo_debito.data.astimezone(BRT)
             motivo = f"{ultimo_debito.tipo} de {ultimo_debito.debito} em {quando:%d/%m}"
+        elif (
+            saidas_depois
+            and saidas_depois > TOLERANCIA
+            and entrou_fora > TOLERANCIA
+            and venda_liquido is not None
+            and abs(liberado_valor - venda_liquido) <= TOLERANCIA
+            and abs(recebido - liberado_valor) > TOLERANCIA
+        ):
+            # 22/10 (kfa 300588): a liberação bateu (−0,49 × −0,49) e depois a plataforma
+            # pôs E tirou dinheiro (compensação +33,04, "pagamento duplicado" −32,55). Não é
+            # "a mais" nem "a menos" — uma pessoa olha (Vinicius)
+            situacao = "estornado_depois"
+            motivo = f"fora da liberação entrou {entrou_fora:.2f} e saiu {saidas_depois:.2f}"
         else:
             if venda_liquido is None:
                 # 16/10 (Vinicius: "como pode estar bateu se nem valor tem?"): entrou
@@ -539,6 +566,13 @@ def situacao_do_pedido(
                     situacao = "recebido_a_mais"
                 if situacao != "bateu":
                     motivo = _motivo_da_diferenca(venda, fatura, liberacoes)
+                    if abs(liberado_valor - venda_liquido) <= TOLERANCIA and fora:
+                        # 22/10 (Barbosa 301789): a liberação bateu; a diferença é o que
+                        # veio à parte (compensação da Shopee pela devolução)
+                        partes = [f"entrou {entrou_fora:.2f}"] if entrou_fora else []
+                        if saidas_depois:
+                            partes.append(f"saiu {saidas_depois:.2f}")
+                        motivo = "a liberação bateu; fora dela " + " e ".join(partes)
             # 15/10: o Bling "nunca bate" (Vinicius) — a diferença Bling × venda continua
             # gravada (dif_bling_venda), mas não vira situação nem aparece na tela.
     # 19/10 (revisão): a coluna "Dif." ficava vazia justo quando o dinheiro saiu depois
@@ -587,6 +621,32 @@ def situacao_do_pedido(
         # previsão usada (a da plataforma ou a estimada) — vai pra previsao_liberacao
         "previsao": previsao,
     }
+
+
+def liquidacao_negativa_tiktok(extrato: list[ConciliacaoMovimento]) -> bool:
+    """TikTok (22/10, Mini 301698): pedido devolvido antes de liquidar liquida NEGATIVO
+    (só o frete da loja, −31,89). A linha chega como "estorno" (ORDER negativo), mas é a
+    liquidação do pedido — sem isso ficava "nada liberou e saiu 31,89" com o previsto
+    −31,89 batendo. Só quando o pedido não tem liquidação positiva: aí o ORDER negativo é
+    estorno de verdade (o pedido de setembro estornado no extrato de 15/10)."""
+    if any(m.tipo == "venda_liberada" for m in extrato):
+        return False
+    negativas = sorted(
+        (
+            m
+            for m in extrato
+            if m.origem == ORIGEM_TIKTOK and m.tipo == "estorno" and (m.sub_tipo or "") == "ORDER"
+        ),
+        key=lambda m: m.data,
+    )
+    if not negativas:
+        return False
+    m = negativas[0]
+    m.tipo = "venda_liberada"
+    m.descricao = (m.descricao or "").replace(
+        "Estorno do pedido", "Liquidação negativa do pedido", 1
+    )
+    return True
 
 
 def _presa_na_reserva(m: ConciliacaoMovimento) -> bool:
@@ -972,6 +1032,11 @@ async def recalcular_loja(
     # linha `release` com crédito, bruto e nº da venda é liberação — renomeia pra que
     # o pedido compare o valor em vez de dizer "nada liberou e entrou X"
     liberacoes_renomeadas = await _renomear_liberacoes_sem_nome(session, loja)
+    if plataforma_loja == "shopee":
+        # 0c. Liberação negativa e compensação da Shopee gravadas como "outro" (22/10)
+        from app.services.conciliacao_shopee import renomear_tipos_novos
+
+        liberacoes_renomeadas += await renomear_tipos_novos(session, loja)
 
     # 1. Pedidos do Bling da loja desde o início (uma linha por item → agrupa por número).
     rows = (
@@ -1118,6 +1183,8 @@ async def recalcular_loja(
         venda = fin_por_numeroloja.get(numeroloja) if numeroloja else None
         meus = movs_por_numero.get(numero, [])
         extrato = [m for m in meus if m.origem in ORIGENS_EXTRATO]
+        if plataforma_loja == "tiktok" and liquidacao_negativa_tiktok(extrato):
+            contagem["liquidacao_negativa"] += 1
         fatura_movs = [m for m in meus if m.origem == ORIGEM_FATURA]
         fatura = {
             "tarifa": _soma(

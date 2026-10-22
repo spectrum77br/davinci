@@ -581,3 +581,102 @@ async def test_saldo_que_pula_nao_ganha_ajuste_e_os_do_robo_saem(db, make_user):
     assert [m.id_externo for m in ajustes] == ["ajuste-saldo-2026-10-11-2"]  # o mexido fica
     dia = (await db.execute(select(ConciliacaoDia).where(ConciliacaoDia.dia == d11))).scalar_one()
     assert dia.fechado_em is None and "ajuste automático" in (dia.reaberto_motivo or "")
+
+
+def test_transacao_liberacao_negativa_e_compensacao():
+    """22/10 (kfa 300588): a renda negativa é a liberação; compensação tem nome próprio."""
+    d = date(2026, 10, 14)
+    neg = transacao_para_movimento(
+        _tx(20, "ESCROW_VERIFIED_MINUS", -0.49, 100.0, _epoch(d, 13), "261002H6M2V4DX")
+    )
+    assert neg["tipo"] == "venda_liberada" and neg["debito"] == Decimal("0.49")
+    comp = transacao_para_movimento(
+        _tx(21, "RETURN_COMPENSATION_SERVICE_ADD", 33.04, 133.04, _epoch(d, 14), "261002H6M2V4DX")
+    )
+    assert comp["tipo"] == "compensacao_shopee" and comp["credito"] == Decimal("33.04")
+    vendedor = transacao_para_movimento(
+        _tx(22, "SELLER_COMPENSATE_ADD", 128.23, 261.27, _epoch(d, 15), "2610070HT8Q2MW")
+    )
+    assert vendedor["tipo"] == "compensacao_shopee"
+
+
+async def test_recalculo_renomeia_a_liberacao_negativa_e_o_raio_x_mostra_o_depois(
+    db, make_user, auth_as, client
+):
+    """kfa 300588 (22/10): renda −0,49 gravada como "outro", compensação +33,04 e o
+    "pagamento duplicado" −32,55 vinculado à mão. O pedido liberou (−0,49 = previsto);
+    o Raio-X mostra a renda batendo, +0,49 depois da liberação e 0,00 com a loja."""
+    from app.models import ConciliacaoPedido, MarketplaceOrderFinancial
+    from app.services.conciliacao_calculo import recalcular_loja
+
+    loja = await _loja_shopee(db, make_user, inicio=date(2026, 10, 1))
+    db.add(
+        MarketplaceOrderFinancial(
+            platform=IntegrationPlatform.SHOPEE,
+            integration_id=loja.integration_id,
+            external_order_id="261006VX383P9J",
+            status="posted",
+            gross_amount=Decimal("0"),
+            fee_amount=Decimal("0.49"),
+            freight_amount=Decimal("0"),
+            net_amount=Decimal("-0.49"),
+            raw={},
+        )
+    )
+
+    def _linha(n: int, tipo: str, sub: str, dia: int, credito="0", debito="0", **kw):
+        return ConciliacaoMovimento(
+            integration_id=loja.integration_id,
+            platform=IntegrationPlatform.SHOPEE,
+            origem="shopee_carteira",
+            id_externo=f"s{n}",
+            data=datetime(2026, 10, dia, 15, tzinfo=UTC),
+            tipo=tipo,
+            descricao=sub,
+            sub_tipo=sub,
+            pedido_marketplace=kw.get("pedido_mkt", "261006VX383P9J"),
+            pedido_bling=kw.get("pedido_bling"),
+            vinculado_por=kw.get("vinculado_por"),
+            credito=Decimal(credito),
+            debito=Decimal(debito),
+            raw={},
+        )
+
+    db.add_all(
+        [
+            _linha(1, "outro", "ESCROW_VERIFIED_MINUS", 14, debito="0.49"),
+            _linha(2, "outro", "RETURN_COMPENSATION_SERVICE_ADD", 16, credito="33.04"),
+            _linha(
+                3,
+                "ajuste_shopee",
+                "ADJUSTMENT_CENTER_DEDUCT",
+                21,
+                debito="32.55",
+                pedido_mkt=None,
+                pedido_bling="310001",
+                vinculado_por="vinicius",
+            ),
+        ]
+    )
+    await db.commit()
+    r = await recalcular_loja(db, loja, agora=datetime(2026, 10, 22, 12, tzinfo=UTC))
+    await db.commit()
+    assert r.get("liberacao_renomeada") == 2
+    tipos = {m.sub_tipo: m.tipo for m in (await db.execute(select(ConciliacaoMovimento))).scalars()}
+    assert tipos["ESCROW_VERIFIED_MINUS"] == "venda_liberada"
+    assert tipos["RETURN_COMPENSATION_SERVICE_ADD"] == "compensacao_shopee"
+    p = (
+        await db.execute(
+            select(ConciliacaoPedido).where(ConciliacaoPedido.pedido_bling == "310001")
+        )
+    ).scalar_one()
+    assert p.situacao == "estornado_depois"
+    assert p.motivo == "fora da liberação entrou 33.04 e saiu 32.55"
+    assert p.liberado_valor == Decimal("-0.49") and p.recebido == Decimal("0.00")
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    resp = await client.get("/api/conciliacao/pedidos/310001", params={"loja": "Jlas"})
+    assert resp.status_code == 200, resp.text
+    por = {x["chave"]: x for x in resp.json()["comparativo"]["linhas"]}
+    assert por["liquido"]["previsto"] == -0.49 and por["liquido"]["real"] == -0.49
+    assert por["liquido"]["dif"] == 0.0
+    assert por["depois"]["real"] == 0.49 and por["ficou"]["real"] == 0.0

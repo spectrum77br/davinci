@@ -42,7 +42,13 @@ ROTA_CARTEIRA = "/api/v2/payment/get_wallet_transaction_list"
 # transaction_type da Shopee → tipo nosso (os mesmos nomes do extrato do MP onde cabe)
 TIPOS = {
     "ESCROW_VERIFIED_ADD": "venda_liberada",
+    # 22/10 (kfa 300588): pedido reembolsado libera NEGATIVO ("Renda do pedido" −0,49, a
+    # taxa) — é a liberação do pedido; caía em "outro" e o pedido nunca "liberava"
+    "ESCROW_VERIFIED_MINUS": "venda_liberada",
     "ESCROW_VERIFIED_DEDUCT": "estorno",
+    # compensação da Shopee por devolução (prazo de carência, produto bloqueado)
+    "RETURN_COMPENSATION_SERVICE_ADD": "compensacao_shopee",
+    "SELLER_COMPENSATE_ADD": "compensacao_shopee",
     "WITHDRAWAL_CREATED": "saque",
     "WITHDRAWAL_COMPLETED": "saque_confirmado",
     "WITHDRAWAL_CANCELLED": "saque_cancelado",
@@ -128,6 +134,36 @@ def transacao_para_movimento(t: dict[str, Any]) -> dict[str, Any] | None:
         "vinculado_em": None,
         "raw": t,
     }
+
+
+async def renomear_tipos_novos(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Lançamento da carteira gravado como "outro" cujo transaction_type o painel passou
+    a conhecer (22/10: liberação negativa e compensação): ganha o tipo certo."""
+    mov = ConciliacaoMovimento
+    conhecidos = (
+        "ESCROW_VERIFIED_MINUS",
+        "RETURN_COMPENSATION_SERVICE_ADD",
+        "SELLER_COMPENSATE_ADD",
+    )
+    rows = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_CARTEIRA,
+                    mov.tipo == "outro",
+                    mov.sub_tipo.in_(conhecidos),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in rows:
+        m.tipo = TIPOS[m.sub_tipo]
+    if rows:
+        await session.flush()
+    return len(rows)
 
 
 async def classificar_impostos(session: AsyncSession, loja: ConciliacaoLoja) -> int:

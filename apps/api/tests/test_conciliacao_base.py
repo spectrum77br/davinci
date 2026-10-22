@@ -3665,3 +3665,166 @@ async def test_recalcular_loja_renomeia_liberacao_gravada_como_outro(db, make_us
     assert p.dif_previsto_recebido == Decimal("-36.15")
     assert p.liberado_valor == Decimal("563.41") and p.liberado_em is not None
     assert "fee_for_divergence_in_package_dimensions" in (p.motivo or "")
+
+
+# --- 22/10: liberação negativa (Shopee/TikTok) e o que entra/sai fora dela ------------
+
+
+def _base_negativa(net: str) -> dict:
+    return {
+        "agora": datetime(2026, 10, 22, 12, tzinfo=UTC),
+        "data_pedido": datetime(2026, 10, 1, 12, tzinfo=UTC),
+        "bling_total": Decimal("0"),
+        "venda": MarketplaceOrderFinancial(
+            gross_amount=Decimal("0"),
+            net_amount=Decimal(net),
+            fee_amount=Decimal("0.49"),
+            status="posted",
+            raw={},
+        ),
+        "previsao": None,
+        "fatura": {},
+        "plataforma": "shopee",
+    }
+
+
+def test_liberacao_negativa_que_bate_com_o_previsto_e_bateu():
+    """ATV 302216: pedido reembolsado, a Shopee liberou −0,49 (a taxa). Era "nada liberou
+    e saiu 0,49" — a linha é a liberação e bate com o previsto."""
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.SHOPEE, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    lib = _mov(
+        loja,
+        "venda_liberada",
+        datetime(2026, 10, 14, 16, tzinfo=UTC),
+        debito="0.49",
+        origem="shopee_carteira",
+    )
+    out = calc.situacao_do_pedido(movs_extrato=[lib], **_base_negativa("-0.49"))
+    assert out["situacao"] == "bateu"
+    assert out["liberado_valor"] == Decimal("-0.49") and out["recebido"] == Decimal("-0.49")
+    assert out["saidas_depois"] == Decimal("0") and out["nada_liberou"] is False
+
+
+def test_liberacao_bateu_e_depois_entrou_e_saiu_nao_e_a_mais():
+    """kfa 300588 (22/10, Vinicius): liberou −0,49 (= previsto), a Shopee deu 33,04 de
+    compensação e tirou 32,55 ("pagamento duplicado"). Ficou 0,00 — não é "a mais" nem
+    "a menos": estornado depois, com o que entrou e saiu no motivo."""
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.SHOPEE, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    movs = [
+        _mov(
+            loja,
+            "venda_liberada",
+            datetime(2026, 10, 14, 16, tzinfo=UTC),
+            debito="0.49",
+            origem="shopee_carteira",
+        ),
+        _mov(
+            loja,
+            "compensacao_shopee",
+            datetime(2026, 10, 16, 9, tzinfo=UTC),
+            credito="33.04",
+            origem="shopee_carteira",
+        ),
+        _mov(
+            loja,
+            "ajuste_shopee",
+            datetime(2026, 10, 21, 18, tzinfo=UTC),
+            debito="32.55",
+            origem="shopee_carteira",
+        ),
+    ]
+    out = calc.situacao_do_pedido(movs_extrato=movs, **_base_negativa("-0.49"))
+    assert out["situacao"] == "estornado_depois"
+    assert out["motivo"] == "fora da liberação entrou 33.04 e saiu 32.55"
+    assert out["liberado_valor"] == Decimal("-0.49") and out["recebido"] == Decimal("0.00")
+    assert out["saidas_depois"] == Decimal("32.55")
+    assert out["dif_previsto_recebido"] == Decimal("0.49")
+
+
+def test_liberacao_bateu_e_a_compensacao_e_o_que_veio_a_mais():
+    """Barbosa 301789: liberou −0,49 e a Shopee deu 128,23 pela devolução (produto
+    bloqueado com senha) — recebido a mais, e o motivo diz de onde veio."""
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.SHOPEE, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    quando = datetime(2026, 10, 19, 19, 47, tzinfo=UTC)
+    movs = [
+        _mov(loja, "compensacao_shopee", quando, credito="128.23", origem="shopee_carteira"),
+        _mov(loja, "venda_liberada", quando, debito="0.49", origem="shopee_carteira"),
+    ]
+    out = calc.situacao_do_pedido(movs_extrato=movs, **_base_negativa("-0.49"))
+    assert out["situacao"] == "recebido_a_mais"
+    assert out["motivo"] == "a liberação bateu; fora dela entrou 128.23"
+    assert out["dif_previsto_recebido"] == Decimal("128.23")
+
+
+def test_liquidacao_negativa_da_tiktok_vira_a_liquidacao_so_sem_a_positiva():
+    """Mini 301698: devolvido antes de liquidar, a TikTok liquidou −31,89 (o frete). A
+    linha chega como estorno (ORDER negativo) — é a liquidação. Com liquidação positiva
+    no pedido, o ORDER negativo continua estorno."""
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.TIKTOK, conta="x", inicio=date(2026, 10, 1))
+    loja.integration_id = None
+    neg = _mov(
+        loja,
+        "estorno",
+        datetime(2026, 10, 22, 3, tzinfo=UTC),
+        debito="31.89",
+        origem="tiktok_extrato",
+        sub="ORDER",
+    )
+    neg.descricao = "Estorno do pedido 586446459275740841"
+    assert calc.liquidacao_negativa_tiktok([neg]) is True
+    assert neg.tipo == "venda_liberada"
+    assert neg.descricao == "Liquidação negativa do pedido 586446459275740841"
+    out = calc.situacao_do_pedido(
+        movs_extrato=[neg], **{**_base_negativa("-31.89"), "plataforma": "tiktok"}
+    )
+    assert out["situacao"] == "bateu" and out["liberado_valor"] == Decimal("-31.89")
+    # com a liquidação positiva, o negativo é estorno de verdade
+    pos = _mov(
+        loja,
+        "venda_liberada",
+        datetime(2026, 10, 12, 3, tzinfo=UTC),
+        credito="100.00",
+        origem="tiktok_extrato",
+        sub="ORDER",
+    )
+    est = _mov(
+        loja,
+        "estorno",
+        datetime(2026, 10, 20, 3, tzinfo=UTC),
+        debito="100.00",
+        origem="tiktok_extrato",
+        sub="ORDER",
+    )
+    assert calc.liquidacao_negativa_tiktok([pos, est]) is False and est.tipo == "estorno"
+    # ajuste da TikTok (tipo ≠ ORDER) não vira liquidação
+    aj = _mov(
+        loja,
+        "estorno",
+        datetime(2026, 10, 20, 3, tzinfo=UTC),
+        debito="5.00",
+        origem="tiktok_extrato",
+        sub="LOGISTICS_REIMBURSEMENT",
+    )
+    assert calc.liquidacao_negativa_tiktok([aj]) is False
+
+
+def test_raio_x_dif_e_real_menos_previsto():
+    """22/10 (Vinicius): no Raio-X a Dif. tinha o sinal trocado — kfa (ml) 302140 ficou
+    com −8,99 e aparecia "8,99 ✖" (parecia a mais). Agora é real − previsto, como a grade."""
+    from app.models import ConciliacaoPedido
+    from app.routers.conciliacao import _comparativo
+
+    p = ConciliacaoPedido(
+        platform=IntegrationPlatform.ML,
+        pedido_bling="302140",
+        situacao="estornado_depois",
+        venda_liquido=Decimal("0"),
+        recebido=Decimal("-8.99"),
+    )
+    versoes = {"venda": {"valor": 0.0, "tarifa": 0.0, "frete": 0.0, "liquido": 0.0}, "extrato": {}}
+    c = _comparativo(p, versoes, [])
+    (liq,) = [x for x in c["linhas"] if x["chave"] == "liquido"]
+    assert liq["previsto"] == 0.0 and liq["real"] == -8.99 and liq["dif"] == -8.99

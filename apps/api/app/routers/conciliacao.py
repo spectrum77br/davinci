@@ -1615,7 +1615,7 @@ def _comparativo(
                 if m.origem in ORIGENS_EXTRATO
                 and p.liberado_em is not None
                 and m.data > p.liberado_em
-                and m.tipo != "frete"
+                and m.tipo not in ("frete", "venda_liberada")
                 and m.tipo not in TIPOS_RESERVA_SET
             ),
             2,
@@ -1629,6 +1629,13 @@ def _comparativo(
     # de um x tá estranho" — comparar o previsto com o líquido pós-estorno não diz nada).
     real_liquido = round(recebido - a_parte + saidas, 2) if recebido is not None else None
     ficou = round(recebido - a_parte, 2) if recebido is not None else None
+    plataforma = getattr(p.platform, "value", str(p.platform))
+    if plataforma == "shopee" and recebido is not None and liberado is not None:
+        # 22/10 (kfa 300588): na Shopee a liberação é UMA linha (a renda do pedido, que
+        # pode ser negativa); tudo o mais — compensação, ajuste, entrou ou saiu, mesmo no
+        # mesmo segundo da liberação — é "depois da liberação"
+        real_liquido = round(liberado, 2)
+        depois = round(recebido - liberado, 2)
 
     def _fechar(linhas_: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if depois is not None and abs(depois) > 0.005:
@@ -1653,15 +1660,17 @@ def _comparativo(
                     "rotulo": "Previsto na venda (antes de liberar) × previsto na liberação",
                     "previsto": antes,
                     "real": agora_,
-                    "dif": round(antes - agora_, 2),
+                    "dif": round(agora_ - antes, 2),
                     "estilo": "muted",
                 }
             )
         return linhas_
 
     def linha(chave, rotulo, previsto, real, *, compara=True, estilo="") -> dict[str, Any]:
+        # 22/10 (Vinicius): Dif. = real − previsto, o mesmo sinal da grade — negativo é
+        # recebido a menos. Era previsto − real: perda aparecia positiva ("a mais")
         dif = (
-            round(previsto - real, 2)
+            round(real - previsto, 2)
             if (compara and previsto is not None and real is not None)
             else None
         )
@@ -1674,7 +1683,6 @@ def _comparativo(
             "estilo": estilo,
         }
 
-    plataforma = getattr(p.platform, "value", str(p.platform))
     if plataforma == "amazon":
         # As linhas da tela Pagamentos › Transações da Amazon (15/10, seção 24):
         # produto, frete cobrado do cliente, tarifas (comissão, Amazon for All, retenção,
@@ -2323,6 +2331,7 @@ TIPO_LABELS = {
     "saque_confirmado": "Saque confirmado",
     "saque_cancelado": "Saque cancelado",
     "ajuste_shopee": "Ajuste da Shopee",
+    "compensacao_shopee": "Compensação da Shopee",
     "ajuste_tiktok": "Ajuste da TikTok",
     "ajuste_amazon": "Ajuste da Amazon",
     "publicidade": "Publicidade (Ads)",
@@ -3502,6 +3511,7 @@ def _soma_dict(destino: dict[str, Any], origem: dict[str, Any]) -> None:
 _CLASSIFICACOES_QUE_NAO_SAO_COBRANCA = ("saque", "reserva", "venda_desfeita")
 _TIPOS_SEM_PEDIDO_QUE_SAO_COBRANCA = (
     "ajuste_shopee",
+    "compensacao_shopee",
     "ajuste_amazon",
     "ajuste_tiktok",
     "outro",
