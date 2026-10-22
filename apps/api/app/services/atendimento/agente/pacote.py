@@ -47,7 +47,7 @@ from app.models import (
     ProductLink,
 )
 from app.models.atendimento import AtendimentoFato
-from app.services.atendimento import automacoes_catalogo, constantes, ia
+from app.services.atendimento import automacoes_catalogo, cartoes_plataforma, constantes, ia
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento.agente import acao_pessoa
@@ -192,6 +192,38 @@ def _opcoes_do_menu(texto: str | None) -> dict[int, str]:
     return opcoes if len(opcoes) >= 3 else {}
 
 
+def texto_da_mensagem(m: Any) -> str | None:
+    """O texto que o agente lê de uma mensagem. PURA.
+
+    Item 24 da auditoria ao vivo (22/10/2026 01:37, Barbosa Shopee, conversa
+    ce443965…): o cartão da plataforma gravado só com o rótulo ("[Mensagem]") — o
+    pedido de devolução/reembolso que o comprador abriu, o envio, a variação —
+    vira o texto dele (`cartoes_plataforma.texto_para_exibir`), sem o valor e sem
+    o texto da transportadora; o nome do produto e a variação passam pelo
+    `_do_cartao` (o que parece instrução sai). O resto, o `texto` gravado.
+    """
+    return cartoes_plataforma.texto_para_exibir(m, para_o_modelo=True, limpar=_do_cartao)
+
+
+class _ComOTextoDoCartao:
+    """A mensagem com o texto do cartão no lugar do rótulo — só para montar a linha
+    da transcrição (`ia._linhas_da_conversa` lê o `texto`; o resto vem dela)."""
+
+    __slots__ = ("_m", "texto")
+
+    def __init__(self, m: Any, texto: str | None) -> None:
+        self._m = m
+        self.texto = texto
+
+    def __getattr__(self, nome: str) -> Any:
+        return getattr(self._m, nome)
+
+
+def _legivel(m: Any) -> Any:
+    texto = texto_da_mensagem(m)
+    return m if texto == getattr(m, "texto", None) else _ComOTextoDoCartao(m, texto)
+
+
 def _automatica(m: Any) -> bool:
     """Da loja e ninguém da equipe escreveu (o menu, o "aguarde", o cartão da campanha)."""
     if getattr(m, "autor", None) == constantes.AUTOR_CLIENTE:
@@ -226,7 +258,8 @@ def transcricao(
     mensagens = list(recentes)[-MAX_TROCAS:]
     if not mensagens:
         return []
-    linhas = ia._linhas_da_conversa(mensagens, nomes)
+    # Item 24 (22/10/2026): o cartão da plataforma com o texto dele, não "[Mensagem]".
+    linhas = ia._linhas_da_conversa([_legivel(m) for m in mensagens], nomes)
     # `_linhas_da_conversa` só tira do COMEÇO: as que sobraram são as últimas.
     pares = list(zip(mensagens[len(mensagens) - len(linhas) :], linhas, strict=True))
     pediu = acao_pessoa.fala_que_pediu_evidencia(mensagens, gatilho) if pediu_evidencia else None
@@ -791,8 +824,11 @@ def _perguntas_pendentes(base: BaseDoGerar) -> list[str]:
     )
     if len(foco) == 1 and ultima is not None and foco[0] is ultima:
         return []
+    # Item 24 (22/10/2026): o cartão do comprador com o texto dele, não "[Mensagem]".
     return [
-        _sem_moldura(" ".join(ia.mascarar(m.texto, base.nomes).split())[: ia.MAX_CHARS_MENSAGEM])
+        _sem_moldura(
+            " ".join(ia.mascarar(texto_da_mensagem(m), base.nomes).split())[: ia.MAX_CHARS_MENSAGEM]
+        )
         for m in foco
         if (m.texto or "").strip()
     ]

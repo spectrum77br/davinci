@@ -61,6 +61,8 @@ ia_ligada = _base_ia.ia_ligada
 modelo = _base_ia.modelo
 envios = _base_ia.envios
 agente_ligado = _lig.agente_ligado
+# Item 22 (22/10/2026): o pedido do teste tem 28 dias de postado (ver `_lig`).
+_sem_a_regua_dos_dias = _lig._sem_a_regua_dos_dias
 
 MODELO = "claude-haiku-5-5"
 CHAVE = "sk-ant-teste-verificador"

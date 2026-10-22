@@ -249,10 +249,15 @@ CAMPOS_DO_ENVIO = {
 def test_12_a_calibracao_tem_o_68f6992d_bom_e_sete_irmaos_ruins():
     casos = _casos()
     bom = casos[ID_BOM]
-    assert bom["grupo"] == "boa" and bom["texto"] == RASCUNHO_68F
+    assert bom["texto"] == RASCUNHO_68F
     assert bom["assunto"] == "reembolso" and bom["consultas"] == []
-    assert bom["esperado"]["ok_para_envio_automatico"] is True and bom["tolerados"] == []
-    assert not any(calibrar.esperado_do_caso(bom).values())
+    # Item 22 da auditoria ao vivo (22/10/2026): relido com o turno INTEIRO ("Meu pedido
+    # não chegou / E a data limite foi hoje / Solicito reembolso"), o "ao receber" a quem
+    # reclama que não chegou é informação errada — o caso passou a RUIM (grupo `atraso`,
+    # sem marca: `test_atendimento_agente_ao_vivo6`). O item 12 (o verificador que se
+    # contradizia) continua nos irmãos e no veredito coerente abaixo.
+    assert bom["grupo"] == "atraso" and bom["bloqueia_sem_marca"] == "informação errada"
+    assert bom["esperado"]["ok_para_envio_automatico"] is False
     assert bom["perguntas"][-1] == PERGUNTA_REEMBOLSO
     # Os assuntos liberados do canal real (os três irmãos estão neles).
     assert set(v.IRMAOS) <= set(bom["liberados"])
@@ -294,8 +299,14 @@ def test_12_o_espelho_do_68f6992d_so_muda_o_estado_do_pedido(id_, postado, codig
     casos = _casos()
     bom, c = casos[ID_BOM], casos[id_]
     assert c["texto"] == bom["texto"] == RASCUNHO_68F
-    for chave in ("assunto", "perguntas", "conversa", "consultas", "plataforma", "agora"):
+    for chave in ("assunto", "consultas", "plataforma", "agora"):
         assert c[chave] == bom[chave], chave
+    # Revisão da rodada 6 (22/10/2026): o 68f6992d foi relido com o turno INTEIRO (o
+    # item 22); os espelhos ficam no fim dele, o turno de antes ("Oiii" / "Solicito
+    # reembolso… pois não chegou.") — o grupo mede o lastro do estado de postagem, sem
+    # somar o "data limite foi hoje" da "informação errada".
+    for chave in ("perguntas", "conversa"):
+        assert c[chave] == bom[chave][-2:], chave
     (bloco,) = c["evidencias"]
     assert bloco["postado"] == postado and bloco["enviado"] is False
     assert bloco["data_envio"] is None and bloco["rastreio"] is None

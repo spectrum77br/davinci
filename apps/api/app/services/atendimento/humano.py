@@ -472,6 +472,7 @@ def triar(
     postado: str | None = None,
     chaves_ativas: Collection[str] = (),
     uf_restrita: bool = False,
+    agora: datetime | None = None,
 ) -> Triagem:
     """Os motivos para PESSOA desta conversa (ver o topo). PURA: sem banco, sem modelo, sem rede.
 
@@ -484,7 +485,9 @@ def triar(
     `agente` = o canal está com o AGENTE (`ia._agente_no_canal`): a régua
     dele (`_triar_do_agente`), com `postado`, `chaves_ativas` e
     `uf_restrita` lidos por `triar_conversa`. Sem o agente, EXATAMENTE a
-    régua de antes (esses três nem são lidos).
+    régua de antes (esses três nem são lidos). `agora` (item 22 da auditoria ao
+    vivo, 22/10/2026) = o relógio da entrega atrasada da régua do agente; None =
+    agora (o legado não o lê).
     """
     if agente:
         return _triar_do_agente(
@@ -497,6 +500,7 @@ def triar(
             postado=postado,
             chaves_ativas=chaves_ativas,
             uf_restrita=uf_restrita,
+            agora=agora,
         )
     motivos: set[str] = set()
     etiquetas = _etiquetas(conversa)
@@ -594,6 +598,7 @@ def _triar_do_agente(
     postado: str | None,
     chaves_ativas: Collection[str],
     uf_restrita: bool,
+    agora: datetime | None = None,
 ) -> Triagem:
     """A régua da Caixa Humano no canal com o AGENTE (spec 6.6, 20/10/2026). PURA.
 
@@ -673,6 +678,7 @@ def _triar_do_agente(
         chaves_ativas=chaves_ativas,
         ia_e_o_atendente=ia_e_o_atendente,
         uf_restrita=uf_restrita,
+        agora=agora,
     )
     acoes = [g.codigo for g in gatilhos]
     if acoes:

@@ -930,6 +930,159 @@ def conferir_variacoes(
     return _sem_repetir(saida)
 
 
+# ── 2b. O "sem previsão de reposição" (revisão 2 da rodada 6, 22/10/2026) ──
+#
+# Item 23: o verificador v8 dá lastro ao "não há previsão de reposição / data de
+# chegada" da variação ESGOTADA. Mas a conferência do `variacoes` tira o "não
+# temos previsão…" da conta das afirmações (`_RESSALVA`) e o "sem previsão" não é
+# negação: com a Azul DISPONÍVEL, "Não temos previsão de reposição da cor Azul",
+# "Essa cor não tem previsão de reposição", "A Azul acabou de esgotar e ainda não
+# há previsão…", a película "esgotada e sem previsão" chegavam ao modelo sem
+# nenhuma pendência — só ele conferia DE QUAL variação a frase falava. Aqui o
+# código confere: a frase do "sem previsão/data de reposição/chegada/volta" tem de
+# falar de uma variação disponivel=false e confiavel=true — a citada na oração;
+# sem ela, a última citada antes; sem nenhuma, a do cliente. A citada que está
+# disponível (e confiável) contradiz; o resto sem o dado é SUAVE. O produto
+# inteiro esgotado (todas as variações, com estoque confiável) dispensa a citação.
+# A "previsão de chegada" do pedido não é estoque (`_DE_ESTOQUE`/`_DO_PEDIDO`).
+_SEM_PREVISAO = re.compile(
+    r"\b(?:previsao|data|prazo)\b(?:\s+[a-z0-9]+){0,4}?\s+(?:de\s+|da\s+|do\s+|para\s+)?"
+    r"(?:reposicao|chegada|volta|retorno|reabastec\w*|repor|voltar|chegar|retornar|reestoque)\b"
+    r"|\b(?:reposicao|chegada|volta|retorno|reabastec\w*)\b(?:\s+[a-z0-9]+){0,4}?\s+"
+    r"(?:previsao|data)\b"
+    r"|\bsem\s+(?:[a-z0-9]+\s+)?previsao\b"
+    r"|\bnao\s+(?:sabemos|sei)\s+(?:[a-z0-9]+\s+)?quando\s+(?:[a-z0-9]+\s+){0,3}?"
+    r"(?:volta|voltam|chega|chegam|retorna\w*|repo\w*)"
+)
+_CORTE_DA_ORACAO = re.compile(
+    r"[;:,]|\bmas\b|\bporem\b|\bso\s+que\b|\bcontudo\b|\bentretanto\b|\btodavia\b"
+)
+# A frase é de ESTOQUE (não a "previsão de chegada" do pedido): a palavra do
+# estoque/da reposição, ou a variação/cor citada sem falar do pedido.
+_DE_ESTOQUE = re.compile(
+    r"\b(?:repo\w*|reabastec\w*|reestoque|estoque|esgot\w*|indisponive\w*|em\s+falta"
+    r"|acab(?:ou|aram)|zer(?:ou|aram)|unidades?)\b"
+)
+_DO_PEDIDO = re.compile(
+    r"\b(?:pedidos?|pacotes?|encomendas?|entregas?|compras?|rastreio|envio|postagem"
+    r"|transportadora|correios)\b"
+)
+_ESSA_OPCAO = re.compile(
+    r"\b(?:ess[ae]|est[ae]|dess[ae]|dest[ae]|nest[ae]|ness[ae]|para\s+ess[ae])\s+"
+    r"(?:cor|opcao|variacao|versao|modelo|tamanho)\b"
+)
+_NAO_DISTINGUE = frozenset(
+    _raiz(p)
+    for p in (
+        "cor cores opcao opcoes modelo versao tamanho unica unico padrao de da do das dos com"
+        " sem e o a os as na no em"
+    ).split()
+)
+MOTIVO_SEM_PREVISAO_DISPONIVEL = "diz que não há previsão de reposição de '{}', que está disponível"
+MOTIVO_SEM_PREVISAO_SEM_DADO = (
+    "diz que não há previsão de reposição sem a variação esgotada (com estoque confiável) "
+    "de que a frase fala"
+)
+
+
+def _proprias(lista: _Lista) -> list[tuple[_Opcao, frozenset[str]]]:
+    """Cada opção com as raízes que a DISTINGUEM das outras (sem as comuns a todas e
+    sem "cor"/"modelo"/"única")."""
+    comuns = (
+        frozenset.intersection(*(o.raizes for o in lista.opcoes))
+        if len(lista.opcoes) > 1
+        else frozenset()
+    )
+    return [(o, o.raizes - comuns - _NAO_DISTINGUE) for o in lista.opcoes]
+
+
+def _citadas_em_ordem(texto: str, lista: _Lista) -> list[tuple[int, _Opcao]]:
+    """(posição, opção) de cada palavra do texto (plano) que cita uma opção da lista."""
+    proprias = _proprias(lista)
+    saida: list[tuple[int, _Opcao]] = []
+    for m in _PALAVRA.finditer(texto):
+        raiz = _raiz(_FORMAS.get(m.group(0), m.group(0)))
+        saida += [(m.start(), o) for o, raizes in proprias if raiz in raizes]
+    return saida
+
+
+def lista_de_variacoes(variacoes: Sequence[Any]) -> _Lista | None:
+    """A lista comparável de variações soltas ({"nome", "disponivel", "confiavel"}) —
+    para o verificador ver de qual variação o texto fala. PURA."""
+    return _lista_principal([{"variacoes": list(variacoes), "variacoes_completas": True}])
+
+
+def opcoes_citadas(texto: str | None, lista: _Lista) -> set[_Opcao]:
+    """As opções da lista que o texto cita pelo nome (as palavras que as distinguem). PURA."""
+    return {o for _, o in _citadas_em_ordem(_plano(texto), lista)}
+
+
+def conferir_sem_previsao(
+    texto: str,
+    fichas: Sequence[dict],
+    textos_cliente: Sequence[str],
+) -> list[PendenciaAgente]:
+    """O "não há previsão de reposição / data de chegada" contra a variação de que a
+    frase fala (ver acima). PURA. Só o agente (a régua é das checagens dele)."""
+    plano = _plano(texto)
+    if not plano or not _SEM_PREVISAO.search(plano):
+        return []
+    fichas = _sem_repetir_fichas(fichas)
+    clientes = [t for t in textos_cliente if isinstance(t, str)]
+    if len(fichas) >= 2 and any(isinstance(f.get("variacoes"), list) for f in fichas):
+        escolhida = _qual_anuncio(texto, fichas, clientes)
+        fichas = [escolhida] if escolhida is not None else []
+    lista = _lista_principal(fichas)
+    citadas = _citadas_em_ordem(plano, lista) if lista else []
+    do_cliente = (
+        [o for _, o in _citadas_em_ordem(_plano(" ".join(clientes)), lista)] if lista else []
+    )
+    saida: list[PendenciaAgente] = []
+    inicio = 0
+    for sentenca, pergunta in _sentencas(plano):
+        pos = plano.find(sentenca, inicio)
+        pos = pos if pos >= 0 else inicio
+        inicio = pos + len(sentenca)
+        if pergunta:
+            continue
+        for m in _SEM_PREVISAO.finditer(sentenca):
+            ini = max([0, *(c.end() for c in _CORTE_DA_ORACAO.finditer(sentenca, 0, m.start()))])
+            fim = _CORTE_DA_ORACAO.search(sentenca, m.end())
+            fim_oracao = fim.start() if fim else len(sentenca)
+            antes = [o for p, o in citadas if p < pos + ini]
+            na_oracao = [o for p, o in citadas if pos + ini <= p < pos + fim_oracao]
+            de_estoque = bool(_DE_ESTOQUE.search(sentenca)) or (
+                not _DO_PEDIDO.search(sentenca)
+                and bool(na_oracao or antes or _ESSA_OPCAO.search(sentenca) or _cores_de(sentenca))
+            )
+            if not de_estoque:
+                continue
+            if lista is None:
+                saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
+                continue
+            if na_oracao:
+                disponivel = next((o for o in na_oracao if o.disponivel and o.confiavel), None)
+                if disponivel is not None:
+                    saida.append(
+                        _contradiz(
+                            VARIACAO_CONTRADIZ,
+                            MOTIVO_SEM_PREVISAO_DISPONIVEL.format(disponivel.nome),
+                        )
+                    )
+                    continue
+                faladas = na_oracao
+            else:
+                faladas = antes[-1:] or do_cliente
+            if not faladas:
+                if all(o.disponivel is False and o.confiavel for o in lista.opcoes):
+                    continue  # o produto inteiro esgotado
+                saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
+                continue
+            if not all(o.disponivel is False and o.confiavel for o in faladas):
+                saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
+    return _sem_repetir(saida)
+
+
 # ── 3. A fonte da característica do produto ───────────────────────────────
 
 _SIM_NAO = frozenset({"nfc", "rede_5g", "wifi_5ghz", "desbloqueado"})
@@ -4241,6 +4394,136 @@ def conferir_troca_negada_no_defeito(
     return []
 
 
+# ── 5w. A recusa da entrega e o "ao receber" a quem reclama (revisão 2 da rodada 6) ──
+#
+# O verificador v8 (item 9) diz que orientar a RECUSAR a entrega é errado para
+# qualquer cliente, e que mandar pedir a devolução/o reembolso só "ao receber" a
+# quem reclama que o pedido não chegou é informação errada. Só o modelo segurava:
+# "você pode recusar a entrega quando chegar", "se negar a receber", "devolver ao
+# entregador", "não retire o pacote no ponto de coleta" chegavam ao modelo sem
+# pendência — e a própria equipe ensina a recusa (31 textos em 90 dias; 21 pares do
+# agente). E o "ao receber, peça o reembolso" a quem diz "já era pra estar aqui e
+# nada até agora, quero meu dinheiro de volta" (a reclamação indireta que o
+# `acao_pessoa.reclama_que_nao_chegou` não lê). As duas: SUAVES (não sai sozinho).
+RECUSA_DA_ENTREGA = "recusa_da_entrega"
+MOTIVO_RECUSA_DA_ENTREGA = "orienta a recusar a entrega (nunca é a orientação da loja)"
+AO_RECEBER_A_QUEM_RECLAMA = "ao_receber_a_quem_reclama"
+MOTIVO_AO_RECEBER_A_QUEM_RECLAMA = (
+    "manda pedir a devolução ou o reembolso ao receber a quem reclama que o pedido não "
+    "chegou e pede o dinheiro"
+)
+_OBJETO_DA_ENTREGA = (
+    r"(?:(?:a|o|as|os|sua|seu)\s+)?(?:entregas?|pacotes?|encomendas?|recebimento|produtos?"
+    r"|pedidos?|mercadorias?|caixas?)\b"
+)
+_CLITICO = r"(?:-(?:o|a|os|as|lo|la|los|las))?"
+_RECUSA = re.compile(
+    r"\brecus(?:e|em|ar|ando)\b(?:\s+[a-z0-9]+){0,2}?\s+"
+    + _OBJETO_DA_ENTREGA
+    + r"|\brecus(?:e|em|ar|ando)"
+    + _CLITICO
+    + r"\s+(?:(?:ela|ele|la|lo)\s+)?(?:na\s+porta|no\s+ato|na\s+hora"
+    r"|quando\s+(?:[a-z0-9]+\s+){0,2}?cheg\w*|ao\s+(?:receber|entregador|carteiro))"
+    r"|\bneg(?:ar|ue|uem|ando)(?:-se)?\s+a\s+receb\w*"
+    r"|\bnao\s+(?:aceit(?:e|ar|em|ando)|receb(?:a|er|am|endo)|retir(?:e|ar|em|ando)"
+    r"|peg(?:ue|ar|uem|ando))\s+"
+    + _OBJETO_DA_ENTREGA
+    + r"|\bdevolv(?:a|er|am|endo)\s+(?:[a-z0-9]+\s+){0,2}?(?:ao|para\s+o|pro|a)\s+"
+    r"(?:entregador|carteiro|motorista|correios|transportadora)\b"
+    # "Quando o entregador for entregar, você recusa a entrega" (a própria equipe).
+    r"|\b(?:voce|vc)\s+(?:so\s+|apenas\s+|entao\s+)?recusa\b(?:\s+[a-z0-9]+){0,2}?\s+"
+    + _OBJETO_DA_ENTREGA
+)
+# "Não recuse", "evite recusar", "não é preciso recusar": a recusa negada.
+_RECUSA_NEGADA_ANTES = re.compile(
+    r"\b(?:nao|nunca|evite|evitem|jamais|sem)\s+(?:[a-z0-9]+\s+){0,2}$"
+)
+# "Se você não receber o pedido até…": o não recebimento como condição (não a recusa).
+_CONDICAO_ANTES_DA_RECUSA = re.compile(
+    r"\b(?:se|caso|quando|enquanto|ate|antes\s+de|ainda)\s+(?:[a-z0-9]+\s+){0,2}$"
+)
+
+
+def orienta_a_recusar(texto: str | None) -> bool:
+    """O texto orienta a recusar a entrega (recusar, se negar a receber, não aceitar/
+    retirar o pacote, devolver ao entregador)? PURA. Fora: a pergunta, a recusa
+    negada ("não recuse") e o "se você não receber o pedido até…"."""
+    for sentenca, pergunta in _sentencas(_plano(texto)):
+        if pergunta:
+            continue
+        for m in _RECUSA.finditer(sentenca):
+            antes = sentenca[max(0, m.start() - 40) : m.start()]
+            antes = re.split(r"[,;:]", antes)[-1]
+            if m.group(0).startswith("nao "):
+                if _CONDICAO_ANTES_DA_RECUSA.search(antes):
+                    continue
+            elif _RECUSA_NEGADA_ANTES.search(antes):
+                continue
+            return True
+    return False
+
+
+def conferir_recusa_da_entrega(texto: str) -> list[PendenciaAgente]:
+    """A resposta orienta a recusar a entrega → SUAVE (ver acima). PURA."""
+    if orienta_a_recusar(texto):
+        return [_suave(RECUSA_DA_ENTREGA, MOTIVO_RECUSA_DA_ENTREGA)]
+    return []
+
+
+_AO_RECEBER = re.compile(
+    r"\b(?:ao|apos\s+o|depois\s+d[eo]|quando|assim\s+que|logo\s+que|depois\s+que)\s+"
+    r"(?:[a-z0-9]+\s+){0,3}?(?:receber|recebe-lo|recebe-la|recebimento|chegar|chegada"
+    r"|estiver\s+com\s+voce)\b"
+)
+_DEVOLUCAO_OU_REEMBOLSO = re.compile(r"\b(?:devoluc\w*|devolver|reembols\w*|estorn\w*)")
+_PEDE_O_DINHEIRO = re.compile(
+    r"\b(?:reembols\w*|estorn\w*|ressarc\w*|dinheiro\s+de\s+volta|meu\s+dinheiro"
+    r"|valor\s+de\s+volta|devolv\w*\s+(?:o\s+)?(?:meu\s+)?(?:dinheiro|valor))"
+)
+# A resposta que já dá o caminho de quem NÃO recebeu ("se ele não chegar ou ao
+# recebê-lo, o pedido de devolução ou reembolso é feito em Minhas Compras").
+_CAMINHO_DO_NAO_RECEBIMENTO = re.compile(
+    r"\b(?:se|caso)\s+(?:[a-z0-9]+\s+){0,2}?(?:nao|nunca)\s+(?:chegar|chegue|receber|receba"
+    r"|for\s+entregue|o\s+receber|recebe-lo|recebe-la)\b"
+)
+# A reclamação indireta de que não chegou (o `reclama_que_nao_chegou` lê a direta).
+_NAO_CHEGOU_INDIRETO = re.compile(
+    r"\bnada\s+(?:d[oa]\s+|de\s+)?(?:meu\s+|minha\s+)?(?:pedido|pacote|produto|encomenda"
+    r"|compra)\b|\b(?:ate\s+(?:agora|hoje)|e)\s+nada\b|\bnao\s+apareceu\b"
+    r"|\bnunca\s+(?:chega|chegou|apareceu|veio)\b|\bsumiu\b|\bnao\s+anda\b"
+    r"|\b(?:devia|deveria|era\s+pra|era\s+para)\s+(?:ja\s+)?(?:estar|ter\s+chegado)\b"
+    r"|\bcade\b"
+)
+
+
+def conferir_ao_receber_a_quem_reclama(
+    texto: str, *, textos_cliente: Sequence[str]
+) -> list[PendenciaAgente]:
+    """O "ao receber, peça a devolução/o reembolso" a quem reclama que o pedido não
+    chegou (direta ou indiretamente) E pede o dinheiro → SUAVE (ver acima). PURA.
+
+    Quem só DESISTE de um pedido a caminho ("quero cancelar") e quem fala da chegada
+    como condição ("assim que chegar, posso devolver?") ficam com a orientação de
+    sempre."""
+    turno = " ".join(" ".join(validador.plano_de(t or "").split()) for t in textos_cliente)
+    if not turno or not _PEDE_O_DINHEIRO.search(turno):
+        return []
+    if acao_pessoa.condicao_do_cliente(turno):
+        return []
+    if not (acao_pessoa.reclama_que_nao_chegou(turno) or _NAO_CHEGOU_INDIRETO.search(turno)):
+        return []
+    for sentenca, pergunta in _sentencas(_plano(texto)):
+        if pergunta:
+            continue
+        if (
+            _AO_RECEBER.search(sentenca)
+            and _DEVOLUCAO_OU_REEMBOLSO.search(sentenca)
+            and not _CAMINHO_DO_NAO_RECEBIMENTO.search(sentenca)
+        ):
+            return [_suave(AO_RECEBER_A_QUEM_RECLAMA, MOTIVO_AO_RECEBER_A_QUEM_RECLAMA)]
+    return []
+
+
 # ── 5x. O manual antigo sem a frase de espera (integração r5, 21/10/2026) ──
 #
 # As respostas prontas "(sugestão para pessoa)" do manual base e o FAÇA de
@@ -7196,6 +7479,10 @@ def conferir(
             clientes,
             com_pedido=bool(pedido) or bool(fatos_da_base.get("pedido")),
         )
+        # Revisão 2 da rodada 6 (22/10/2026): o "sem previsão de reposição" só da
+        # variação esgotada e confiável de que a frase fala (o verificador v8 o
+        # aceita como lastro; aqui o código confere de qual variação é).
+        pendencias += conferir_sem_previsao(texto, fichas, clientes)
         da_base = _fontes_da_base(base)
         pendencias += conferir_fonte_produto(texto, fichas, ctx, fontes_extra=da_base)
         if ctx.modo == constantes.MODO_AUTO:
@@ -7233,6 +7520,10 @@ def conferir(
         # Item 21 da auditoria ao vivo (21/10/2026): a recusa padrão da troca dita a
         # quem fala de defeito (relatado ou "e se…").
         pendencias += conferir_troca_negada_no_defeito(texto, textos_cliente=clientes)
+        # Revisão 2 da rodada 6 (22/10/2026): a recusa da entrega (para qualquer
+        # cliente) e o "ao receber" a quem reclama que não chegou e pede o dinheiro.
+        pendencias += conferir_recusa_da_entrega(texto)
+        pendencias += conferir_ao_receber_a_quem_reclama(texto, textos_cliente=clientes)
         # A garantia Uranyx depois dos 90 dias (decisão 7 do dono): o caminho da
         # Uranyx é a orientação aprovada do período — a frase sai do texto aqui e
         # na checagem do caminho, só com o `ver_garantia` liberando.

@@ -92,7 +92,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -1048,6 +1048,48 @@ _PROMESSA = re.compile(
 )
 _JANELA = 60
 _NEGA_PERTO = re.compile(r"\b(?:nao|nem|sem)\b")
+# Revisão 2 da rodada 6 (22/10/2026): a negação só livra a promessa na MESMA oração.
+# A janela de 45 caracteres atravessava a vírgula e o "mas" — "não há previsão, mas
+# ela volta ao estoque logo", "não temos previsão de reposição, mas vamos repor a
+# Azul", "Não temos a Azul, reposição apenas em novembro" (a própria equipe) liam o
+# "não" da oração de antes como a negação da promessa.
+_FIM_DA_ORACAO_ANTES = re.compile(
+    r"[,;:.!?\n]|\bmas\b|\bporem\b|\bso\s+que\b|\bcontudo\b|\bentretanto\b|\btodavia\b"
+)
+# …e a negação logo DEPOIS dela ("a reposição ainda não tem previsão", "voltar ao
+# estoque sem data") também livra — a oração diz que não há previsão.
+_NEGA_DEPOIS = re.compile(
+    r"^\s*(?:[a-z0-9]+\s+){0,3}?(?:nao|nem|sem)\s+(?:[a-z0-9]+\s+){0,2}?"
+    r"(?:previsao|data|prazo|como\s+(?:saber|prever|informar|garantir)|sabemos|garantia)\b"
+)
+_FIM_DA_ORACAO_DEPOIS = re.compile(
+    r"[,;:.!?\n]|\bmas\b|\bporem\b|\bso\s+que\b|\bcontudo\b|\bentretanto\b|\btodavia\b"
+)
+# As promessas de reposição com outras palavras (o caminho AUTO da revisão 2 da
+# rodada 6: chegavam ao modelo sem nenhuma pendência). Só contam no texto que fala
+# de estoque (`_FALA_DE_ESTOQUE`): "normalmente o pacote volta para a loja" e "ele
+# volta a funcionar rapidinho" não são estoque.
+_PROMESSA_EXTRA = re.compile(
+    r"\brepo(?:mos|e|em|ndo)\b|\breabastec\w*"
+    r"|\b(?:costuma|costumam|sempre|normalmente|geralmente|logo|rapidinho)\s+(?:[a-z0-9]+\s+){0,2}?"
+    r"(?:volta|voltam|voltar|retorna\w*|reaparece\w*|repo\w*)\b"
+    r"|\b(?:volta|voltam|voltar|volte|voltem|retorna\w*|reaparece\w*)\s+(?:[a-z0-9]+\s+){0,4}?"
+    r"(?:logo|rapid\w*"
+    r"|em\s+seguida|ja\s+ja|sempre)\b"
+    r"|\b(?:proxim[oa]|nov[oa])\s+(?:remessa|lote|carga|leva)\b"
+    r"|\b(?:encomendamos|pedimos|compramos)\s+mais\b"
+    r"|\btemporariamente\s+(?:esgotad|indisponive|sem\s+estoque|em\s+falta|fora\s+de\s+estoque)\w*"
+    r"|\bquestao\s+de\s+(?:dias|tempo|semanas?|horas)\b"
+    r"|\b(?:reposicao|remessa|reabastecimento)\s+(?:[a-z0-9]+\s+){0,2}?programad\w*"
+    # "Estamos aguardando o fornecedor", "o estoque normaliza" (o reposicao-06/08).
+    r"|\b(?:aguardando|esperando)\s+(?:o\s+|a\s+|nosso\s+|nossa\s+)?(?:fornecedor\w*|fabrica"
+    r"|importacao|(?:chegada|entrega)\s+d[oa]\s+(?:lote|remessa|estoque|mercadoria|fornecedor))"
+    r"|\bestoque\s+(?:[a-z0-9]+\s+)?(?:normaliza|regulariza|reabastece|volta\s+ao\s+normal)\w*"
+)
+_FALA_DE_ESTOQUE = re.compile(
+    r"\b(?:esgot\w*|estoque|repo\w*|reabastec\w*|indisponive\w*|em\s+falta|acab(?:ou|aram)"
+    r"|unidades?|cor|cores|variac\w*|opc(?:ao|oes))\b"
+)
 # A volta ao estoque como CONDIÇÃO (Kia ao vivo, 21/10/2026, rascunho 1d6f708e:
 # "Quando essa opção voltar ao estoque, ela aparece de novo para seleção no
 # próprio anúncio" não promete a volta): a reposição dentro da oração de
@@ -1439,14 +1481,48 @@ def _promete_estoque(texto: str) -> bool:
     "não temos data de reposição" (negada nas palavras de antes: produção,
     20/10/2026, 4 de 5 rascunhos que citavam reposição eram assim), nem a
     volta ao estoque que é só a condição da oração (Kia ao vivo, 21/10/2026:
-    "quando essa opção voltar ao estoque, ela aparece de novo no anúncio")."""
-    for m in _PROMESSA.finditer(texto):
-        if _NEGA_PERTO.search(texto[max(0, m.start() - 45) : m.start()]):
+    "quando essa opção voltar ao estoque, ela aparece de novo no anúncio").
+
+    Revisão 2 da rodada 6 (22/10/2026): a negação vale só na MESMA oração (a de
+    antes do "mas"/da vírgula não livra: "não há previsão, mas volta logo") e as
+    formas de `_PROMESSA_EXTRA` ("repomos", "costuma voltar rápido", "próxima
+    remessa", "temporariamente esgotada") contam no texto que fala de estoque."""
+    return any(True for _ in _promessas(texto))
+
+
+def _promessas(texto: str, *, so_reposicao: bool = False) -> Iterator[re.Match[str]]:
+    """As promessas de estoque do texto (plano) que nenhuma negação da mesma oração
+    livra e que não são só a condição ("quando voltar ao estoque, aparece…").
+    `so_reposicao` = sem as "últimas unidades"/reserva/separamos (a volta ao estoque).
+    """
+    achadas = [*(_REPOSICAO if so_reposicao else _PROMESSA).finditer(texto)]
+    if _FALA_DE_ESTOQUE.search(texto):
+        achadas += _PROMESSA_EXTRA.finditer(texto)
+    for m in achadas:
+        antes = texto[max(0, m.start() - 45) : m.start()]
+        antes = _FIM_DA_ORACAO_ANTES.split(antes)[-1]
+        if _NEGA_PERTO.search(antes):
+            continue
+        depois = texto[m.end() : m.end() + 60]
+        if fim := _FIM_DA_ORACAO_DEPOIS.search(depois):
+            depois = depois[: fim.start()]
+        if _NEGA_DEPOIS.search(depois):
             continue
         if _reposicao_so_como_condicao(texto, m):
             continue
-        return True
-    return False
+        yield m
+
+
+def promete_reposicao(texto: str | None) -> bool:
+    """O texto promete a VOLTA ao estoque (reposição, "chega mais", "volta ao
+    estoque", "repomos", "próxima remessa"…) sem negá-la na mesma oração? PURA.
+
+    Revisão 2 da rodada 6 (22/10/2026): para os pares da equipe do agente
+    (`pares`) — a resposta real "Não temos, reposição apenas em novembro" não vira
+    exemplo. As "últimas unidades" e a reserva não contam aqui.
+    """
+    plano = _DISPONIVEL_A_EQUIPE.sub(" ", _normal(texto or ""))
+    return any(True for _ in _promessas(plano, so_reposicao=True))
 
 
 def _rotulo(mencao: _Mencao, opcoes: list[_Opcao]) -> str:

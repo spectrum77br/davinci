@@ -108,6 +108,8 @@ ia_ligada = _ver.ia_ligada
 modelo = _ver.modelo
 envios = _ver.envios
 agente_ligado = _ver.agente_ligado
+# Item 22 (22/10/2026): o pedido do teste tem 28 dias de postado (ver `_lig`).
+_sem_a_regua_dos_dias = _lig._sem_a_regua_dos_dias
 api = _ver.api
 teto_limpo = _ver.teto_limpo
 
@@ -194,10 +196,11 @@ def _montar(texto: str, resumo: v.ResumoDoPacote | None = None, **kw: Any) -> st
 
 
 def test_a_versao_e_a_v7_e_vai_no_registro():
-    assert v.VERSAO == "v7"
+    # 22/10/2026 (itens 22 e 23 da auditoria ao vivo): o v8 guarda tudo o que o v7 trouxe.
+    assert v.VERSAO == "v8"
     r = v.Resultado(ok=True, veredito=None, pediu=True)
-    assert r.para_fatos("Olá!")["versao"] == "v7"
-    assert v._nao_rodou("copiloto")["versao"] == "v7"
+    assert r.para_fatos("Olá!")["versao"] == "v8"
+    assert v._nao_rodou("copiloto")["versao"] == "v8"
 
 
 # ═══════════════ 1. as lacunas com e sem o dado ═══════════════
@@ -664,7 +667,7 @@ async def test_1_e_2_no_gerar_a_entrada_leva_as_lacunas_e_a_pergunta(
     ) in entrada
     # "cadê meu pedido?" é pergunta: a linha de sempre.
     assert "PERGUNTAS DO CLIENTE (neste turno, ainda sem resposta):\n- cadê meu pedido?" in entrada
-    assert r.fatos["agente"]["verificador"]["versao"] == "v7"
+    assert r.fatos["agente"]["verificador"]["versao"] == v.VERSAO
 
 
 async def test_2_no_gerar_o_turno_so_de_cumprimento_diz_nenhuma(

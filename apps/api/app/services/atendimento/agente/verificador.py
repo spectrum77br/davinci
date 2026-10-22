@@ -71,8 +71,9 @@ import structlog
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
-from app.services.atendimento import constantes, ia, validador
+from app.services.atendimento import cartoes_plataforma, constantes, ia, validador
 from app.services.atendimento import manual as manual_svc
+from app.services.atendimento import variacoes as variacoes_svc
 from app.services.atendimento.agente import acao_pessoa, checagens, custo, pacote, prompt, saida
 
 if TYPE_CHECKING:
@@ -119,7 +120,28 @@ logger = structlog.get_logger()
 # promessa de atendente); a lacuna com o dado sustenta só o dado do campo dela
 # (`PAPEL_DA_LACUNA`: a data de envio não é a da entrega, a previsão não é data
 # certa).
-VERSAO = "v7"
+# v8 (22/10/2026, itens 22 e 23 da auditoria ao vivo; nenhuma regra que bloqueia
+# afrouxou):
+#  1. item 22 (Barbosa Shopee, 440a83e7 e o 68f6992d relido com o turno inteiro —
+#     "Meu pedido não chegou / E a data limite foi hoje / Solicito reembolso"): a
+#     orientação irmã do "ao receber" é só de quem DESISTE de um pedido já enviado;
+#     mandar pedir a devolução ou o reembolso só ao receber a quem reclama que não
+#     chegou ou atrasou é informação errada (item 9) — e orientar a recusar a entrega
+#     continua errado para QUALQUER cliente (a revisão da rodada 6: a ressalva do
+#     "só desiste" é do "ao receber", nunca da recusa — o proibida-01);
+#  2. item 23 (Kia 01:39, 0acd80a6, estoque_variacao): a política de estoque da loja
+#     ("reposição: sem previsão", a do `prompt._VARIACOES`) vai na entrada SÓ quando
+#     as EVIDÊNCIAS trazem variação com disponivel=false (`POLITICA_DE_ESTOQUE`,
+#     `variacao_esgotada`): o esgotado, o "sem previsão de reposição", o "sem data de
+#     chegada" e o acompanhar o anúncio têm lastro; data, semana, "em breve", "logo
+#     volta", "deve chegar", quantidade ou reserva continuam sem lastro. Revisão da
+#     rodada 6: e só na resposta de ESTOQUE (`politica_de_estoque_vale`: o assunto de
+#     variação ou o rascunho que fala do esgotado) — não na garantia, na RAM, na região.
+#     Revisão 2 da rodada 6 (ainda v8: nada saiu com ele): só a variação disponivel=false
+#     E confiavel=true CITADA no texto ou na pergunta (ou o produto inteiro esgotado),
+#     nunca o esgotado do pedido já feito; e o código confere o "sem previsão" antes
+#     (`checagens.conferir_sem_previsao`).
+VERSAO = "v8"
 MODELO = "claude-haiku-5-5"
 EFFORT = "low"
 # O JSON do `Veredito` (~100–300 tokens) + o raciocínio ADAPTATIVO, que conta no
@@ -423,9 +445,12 @@ prontas). É orientação, NÃO é fato nem autorização de promessa;
 - ORIENTAÇÃO APROVADA DO ASSUNTO e CAMINHOS DO APP: o que o agente pode dizer sobre a \
 regra da plataforma e onde o cliente faz as coisas no app. Cancelamento, reembolso e \
 troca_devolucao são assuntos irmãos: com um deles declarado, vem a orientação dos três, e a \
-de qualquer um é lastro para o rascunho (pedido já enviado: a devolução ou o reembolso ao \
-receber, pelo app; a plataforma analisa e devolve pela mesma forma de pagamento); os \
-ASSUNTOS LIBERADOS valem como sempre;
+de qualquer um é lastro para o rascunho (pedido já enviado e o cliente desiste: a devolução \
+ou o reembolso ao receber, pelo app; a plataforma analisa e devolve pela mesma forma de \
+pagamento); os ASSUNTOS LIBERADOS valem como sempre;
+- POLÍTICA DE ESTOQUE DA LOJA (só vem quando as EVIDÊNCIAS trazem uma variação com \
+disponivel=false e confiavel=true, citada pelo nome no texto ou na pergunta): a reposição \
+da variação esgotada não tem previsão;
 - ASSUNTOS LIBERADOS (quando vier): os assuntos que o dono liberou para sair sozinhos \
 neste canal e o assunto declarado do rascunho;
 - LACUNAS DO RASCUNHO (quando houver): cada lacuna do texto, se o pedido tem o dado dela \
@@ -546,13 +571,22 @@ Defesa do Consumidor; o prazo citado SEM número, dia nem data, só para dizer o
 cliente o vê ou de que ele depende — a postagem segue o prazo de envio do anúncio, a \
 previsão está no pedido, o dia da entrega depende da transportadora; e o dado de um campo \
 dito com outras palavras — a RAM 16 GB (8 GB + 8 GB virtual) é 8 GB físicos mais 8 GB \
-virtuais, 16 GB no total. Continua contando: o prazo com número, dia ou data que nenhum \
+virtuais, 16 GB no total; e, com a POLÍTICA DE ESTOQUE DA LOJA na entrada, dizer da \
+variação que as EVIDÊNCIAS trazem com disponivel=false e confiavel=true que está \
+esgotada, que não há previsão de reposição nem data de chegada e que o cliente pode \
+acompanhar o anúncio. \
+Continua contando: o prazo com número, dia ou data que nenhum \
 campo traz (em 2 dias úteis, até sexta, chega no sábado); garantir o prazo (está \
 garantido, não atrasa, pode ficar tranquilo que chega); o prazo, a cobertura ou a \
 exclusão de garantia que o campo não traz; o que a plataforma faria além da orientação \
 (envia o outro modelo, retira em casa, sem custo); e o dado que o campo não diz (chamar \
-de física a memória virtual, outra divisão da RAM). Cite cada afirmação curta, com as \
-palavras do texto (até 8 palavras). Vazia = tudo o que o texto afirma está nas EVIDÊNCIAS.
+de física a memória virtual, outra divisão da RAM); e a reposição com data, semana, mês, \
+"em breve", "logo volta", "deve chegar", quantidade ou reserva, e o esgotado ou o sem \
+previsão de uma variação que as EVIDÊNCIAS não trazem com disponivel=false e \
+confiavel=true (a com confiavel=false só aparece como indisponível no anúncio), ou de um \
+produto, acessório ou peça que não é a variação esgotada. Cite cada \
+afirmação curta, com as palavras do texto (até 8 palavras). Vazia = tudo o que o texto \
+afirma está nas EVIDÊNCIAS.
 
 7. responde_o_que_foi_perguntado — true quando o texto trata o que o cliente perguntou \
 neste turno: responde, pergunta o dado que falta para responder ou orienta o caminho \
@@ -580,8 +614,11 @@ diz que algo está certo ou sustentado.
 
 9. ok_para_envio_automatico — true SÓ quando os itens 1 a 5 são false, a lista 6 \
 está vazia, o item 7 é true e não há outro risco (tom agressivo ou irônico, \
-informação errada, orientar a recusar a entrega, assunto que pede decisão de \
-pessoa, texto não dirigido ao cliente, diagnóstico ou minimização de defeito \
+informação errada — como mandar pedir a devolução ou o reembolso só ao receber a quem \
+reclama que o pedido não chegou ou atrasou (a quem só desiste de um pedido a caminho, o \
+"ao receber" é a orientação aprovada) —, orientar a recusar a entrega (a qualquer \
+cliente, também a quem só desiste), assunto que pede decisão de pessoa, texto não \
+dirigido ao cliente, diagnóstico ou minimização de defeito \
 — "é normal", "não é defeito", "o aparelho está perfeito", "é só reiniciar"; \
 ou, com ASSUNTOS LIBERADOS, o rascunho trata — responde, afirma ou orienta — um \
 assunto que NÃO está na lista, além do declarado: motivo "assunto não liberado"). \
@@ -835,7 +872,8 @@ def resumo_do_pacote(
 ) -> ResumoDoPacote:
     """O resumo a partir do que a execução do agente já tem. Só lê; nada vai ao banco."""
     foco = [m for m in base.foco if (getattr(m, "texto", None) or "").strip()]
-    perguntas = [getattr(m, "texto", "") for m in foco] or list(base.textos_cliente)
+    # Item 24 (22/10/2026): o cartão do comprador com o texto dele, não "[Mensagem]".
+    perguntas = [pacote.texto_da_mensagem(m) or "" for m in foco] or list(base.textos_cliente)
     linhas = pacote.transcricao(
         list(base.recentes), gatilho, tuple(base.nomes), pediu_evidencia=pediu_evidencia
     )
@@ -952,6 +990,147 @@ def orientacao_aprovada(assunto: str | None, plataforma_codigo: str = "") -> lis
     return linhas
 
 
+# Item 23 da auditoria ao vivo (22/10/2026 01:39, Kia, 0acd80a6): a política de
+# estoque do agente (`prompt._VARIACOES`: "reposição: sem previsão") como lastro do
+# verificador — SÓ com uma variação esgotada (disponivel=false E confiavel=true) nas
+# EVIDÊNCIAS. Revisão 2 da rodada 6 (22/10/2026): sem o confiavel=true, o "sem
+# previsão" da variação que só APARECE indisponível no anúncio ganhava lastro (o
+# `prompt._VARIACOES` manda dizer "aparece no anúncio" nesse caso).
+POLITICA_DE_ESTOQUE = (
+    "POLÍTICA DE ESTOQUE DA LOJA (vale só para a variação que as EVIDÊNCIAS trazem com "
+    "disponivel=false e confiavel=true): a reposição não tem previsão — dizer que essa "
+    "variação está esgotada, que não há previsão de reposição nem data de chegada e que o "
+    "cliente pode acompanhar o anúncio tem lastro; data, semana, mês, prazo, quantidade, "
+    "reserva ou promessa de volta não têm."
+)
+_OBJETO_JSON = re.compile(r"\{[^{}]*\}")
+
+
+def _esgotada_confiavel(valor: Mapping) -> bool:
+    return valor.get("disponivel") is False and valor.get("confiavel") is True
+
+
+def _tem_esgotada(valor: Any) -> bool:
+    if isinstance(valor, Mapping):
+        if _esgotada_confiavel(valor):
+            return True
+        return any(_tem_esgotada(v) for v in valor.values())
+    if isinstance(valor, list):
+        return any(_tem_esgotada(v) for v in valor)
+    return False
+
+
+def _dados_da_evidencia(bruto: Any) -> list[Any]:
+    """O JSON da evidência — ou, no texto cortado ("…[cortado]"), cada objeto
+    `{…}` inteiro que dá para ler."""
+    if not isinstance(bruto, str):
+        return [bruto]
+    try:
+        return [json.loads(bruto)]
+    except ValueError:
+        pass
+    saida = []
+    for m in _OBJETO_JSON.finditer(bruto):
+        try:
+            saida.append(json.loads(m.group(0)))
+        except ValueError:
+            continue
+    return saida
+
+
+def variacao_esgotada(evidencias: Iterable[Any]) -> bool:
+    """As EVIDÊNCIAS trazem alguma variação com disponivel=false E confiavel=true (o
+    JSON da ficha ou do `ver_anuncio`)? PURA. Item 23 (22/10/2026); o confiavel=true
+    é da revisão 2 da rodada 6."""
+    return any(_tem_esgotada(dado) for bruto in evidencias for dado in _dados_da_evidencia(bruto))
+
+
+def _variacoes_das_evidencias(evidencias: Iterable[Any]) -> list[Mapping]:
+    """As variações ({"nome", "disponivel", …}) de todas as evidências, na ordem."""
+    saida: list[Mapping] = []
+
+    def _junta(valor: Any) -> None:
+        if isinstance(valor, Mapping):
+            if "nome" in valor and "disponivel" in valor:
+                saida.append(valor)
+            for v in valor.values():
+                _junta(v)
+        elif isinstance(valor, list):
+            for v in valor:
+                _junta(v)
+
+    for bruto in evidencias:
+        for dado in _dados_da_evidencia(bruto):
+            _junta(dado)
+    return saida
+
+
+# Revisão da rodada 6 (22/10/2026): a política só vale para a resposta de ESTOQUE — o
+# assunto de variação (`variacoes.CATEGORIAS_DE_VARIACAO`, o declarado ou o do
+# rascunho) ou o rascunho que fala de esgotado/reposição. Na garantia, na RAM, na
+# região, a ficha com uma cor esgotada não traz a política (44 entradas da
+# calibração a ganhavam sem ser de estoque).
+_FALA_DE_ESTOQUE = re.compile(
+    r"\b(?:esgot\w*|repo(?:sicao|r|mos|e|em)\b|reabastec\w*|sem\s+estoque|fora\s+de\s+estoque"
+    r"|(?:volt|retorn)\w*\s+(?:ao|para\s+o|pro)\s+estoque|indisponive\w*)"
+)
+
+# O esgotado ligado ao pedido JÁ FEITO ("a cor do seu pedido está esgotada").
+_DO_PEDIDO_FEITO = re.compile(
+    r"\b(?:(?:seu|sua|o\s+seu|a\s+sua|meu|minha|do|no|ao)\s+(?:pedido|compra)|pedido\s+feito)\b"
+)
+
+
+def politica_de_estoque_vale(
+    evidencias: Iterable[Any],
+    *,
+    texto: str,
+    assunto: str | None = None,
+    declarado: str | None = None,
+    perguntas: Iterable[str | None] = (),
+) -> bool:
+    """A `POLITICA_DE_ESTOQUE` vai na entrada? PURA. Item 23 (22/10/2026), com o
+    escopo da revisão da rodada 6: a variação esgotada nas EVIDÊNCIAS
+    (`variacao_esgotada`) E a resposta é de estoque (o assunto de variação ou o
+    rascunho que fala de esgotado/reposição).
+
+    Revisão 2 da rodada 6 (22/10/2026): e a variação esgotada E confiável é a de que
+    se fala — CITADA pelo nome no rascunho ou na pergunta do cliente (`perguntas`;
+    "essa cor"/"ela" ficam com a da pergunta) —, ou o produto inteiro está esgotado
+    (todas as variações). Com o Preto esgotado e a Azul disponível, o "sem previsão
+    de reposição" da Azul não ganha a política; a película, a capinha e o carregador
+    também não.
+    """
+    perguntas = [p for p in perguntas if isinstance(p, str)]
+    plano = validador.plano_de(texto or "")
+    if any(
+        _FALA_DE_ESTOQUE.search(frase) and _DO_PEDIDO_FEITO.search(frase)
+        for frase in re.split(r"[.!?;\n]+", plano)
+    ):
+        # "A cor Azul do seu pedido está esgotada": o pedido feito sem a cor é decisão
+        # de pessoa, não a política do anúncio.
+        return False
+    de_estoque = bool(
+        {assunto, declarado} & variacoes_svc.CATEGORIAS_DE_VARIACAO
+        or _FALA_DE_ESTOQUE.search(plano)
+    )
+    if not de_estoque:
+        return False
+    todas = _variacoes_das_evidencias(evidencias)
+    esgotadas = [v for v in todas if _esgotada_confiavel(v)]
+    if not esgotadas:
+        return False
+    if all(_esgotada_confiavel(v) for v in todas):
+        return True
+    lista = checagens.lista_de_variacoes(todas)
+    if lista is None:
+        return False
+    citadas = checagens.opcoes_citadas(texto or "", lista) | checagens.opcoes_citadas(
+        " ".join(perguntas), lista
+    )
+    return any(o.disponivel is False and o.confiavel for o in citadas)
+
+
 def montar_entrada(
     *,
     acao: str,
@@ -1023,6 +1202,19 @@ def montar_entrada(
             else []
         ),
         *orientacao_aprovada(assunto, resumo.plataforma_codigo),
+        # v8 (item 23): a política de estoque só com a variação esgotada nas evidências
+        # e a resposta de estoque (revisão da rodada 6: `politica_de_estoque_vale`).
+        *(
+            [POLITICA_DE_ESTOQUE]
+            if politica_de_estoque_vale(
+                so_evidencias,
+                texto=texto,
+                assunto=assunto,
+                declarado=declarado,
+                perguntas=resumo.perguntas,
+            )
+            else []
+        ),
         *(
             [
                 "ASSUNTOS LIBERADOS (para sair sozinho neste canal): "
@@ -1488,6 +1680,11 @@ def _instrucao_na_conversa(base: BaseDoGerar, gatilho: Any, texto: str | None = 
         if getattr(m, "autor", None) == constantes.AUTOR_CLIENTE
     ]
     textos += [getattr(m, "texto", None) for m in base.foco or []]
+    # Revisão da rodada 6 (22/10/2026): os campos do cartão da plataforma que a
+    # transcrição do agente lê (`pacote.texto_da_mensagem`) — CRUS, antes do filtro
+    # dele —, de quem for o cartão: o que o modelo leria é o que a trava confere.
+    for m in [*list(base.recentes or []), gatilho]:
+        textos += cartoes_plataforma.campos_do_cartao(m)
     if any(isinstance(t, str) and t and ia._tem_injecao(t, agente=True) for t in textos):
         return True
     return bool(

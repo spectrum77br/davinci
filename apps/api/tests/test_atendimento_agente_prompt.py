@@ -82,7 +82,12 @@ from tests.test_atendimento_ia import (
 # `_COMO_TRABALHAR` (2), `_DADOS`, `_ESTILO`, `_VARIACOES`, `_TROCA` e `_PAPEL`, e a
 # frase repetida do "precisa agir ou decidir agora" saiu das REGRAS DURAS (antes
 # "9f30de51538953e1").
-RETRATO_BLOCO_GERAL = "835308a2d9a8805c"
+# 22/10/2026 (item 22 da auditoria ao vivo, 440a83e7): o "ao receber" do cancelamento e
+# do RESPONDA é só de quem desiste de um pedido a caminho ("pede prioridade ou data"
+# ficou à parte); "não chegou ou atrasou" é entrega_nao_recebida (nunca "ao receber"
+# nem "recuse"; a previsão vencida é abrir_chamado). Para caber no teto, as duas linhas
+# do pedido sem número/que não aparece viraram uma (antes "835308a2d9a8805c").
+RETRATO_BLOCO_GERAL = "6edf4627eca7db37"
 
 
 def _geral() -> str:
@@ -184,8 +189,12 @@ def test_responda_em_vez_de_encaminhar_lista_os_padroes_do_dev():
     assert "dado_indisponivel só depois de consultar" in secao
     assert "se o cliente não tem como dar o dado (se só ele tem, pergunte)" in secao
     for padrao in (
-        # pedido já postado → orientação (cancelar, trocar, prioridade, data)
-        "pedido já postado e o cliente quer cancelar, trocar, desistir, ou pede prioridade ou data",
+        # pedido já postado → orientação (cancelar, trocar, prioridade, data). Item 22
+        # (22/10/2026): o "ao receber" só para quem desiste; a data à parte.
+        "pedido já postado e o cliente quer cancelar, trocar ou desistir (não diz que não "
+        "chegou): devolução ou reembolso ao receber",
+        "pede prioridade ou data: envio e previsão em Minhas compras > o pedido, sem prometer "
+        "prioridade",
         # prazo antes da compra → o anúncio mostra pelo CEP
         "prazo de entrega antes da compra: aparece no anúncio ao informar o CEP",
         # tamanhos na lista completa de variações

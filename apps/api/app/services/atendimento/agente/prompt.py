@@ -115,6 +115,16 @@ confirma ou repete a resposta da loja fica no assunto dessa resposta (5839ff11: 
 a capinha não serve ne" saiu como cobertura_regiao). O bloco 1 não muda. Sem replay de
 N amostras do mesmo turno antes e depois, não dá para dizer que conserta: o rótulo
 errado foi uma amostra só (o mesmo turno, 6 minutos antes, saiu certo).
+
+22/10/2026 (madrugada, itens 22 e 24 da auditoria; Barbosa Shopee, 440a83e7 e o cartão
+de devolução das 01:37): o "ao receber" do cancelamento e do `_RESPONDA` é só de quem
+DESISTE de um pedido a caminho ("pede prioridade ou data" ficou à parte); "não chegou ou
+atrasou" é `entrega_nao_recebida` — o último status e o app, nunca "ao receber" nem
+"recuse", a previsão vencida é abrir_chamado. O bloco 1 ficou no mesmo teto (as duas
+linhas do pedido sem número/que não aparece viraram uma). A prática da Shopee (o chamado
+do atraso; o cartão de devolução aberto é reclamacao_aberta e o texto só confirma) vai no
+bloco 2, `NOTAS_DA_PLATAFORMA["shopee"]`; quem marca a ação é o código
+(`acao_pessoa.atraso_de_entrega`, `acao_pessoa.devolucao_na_plataforma`).
 """
 
 from __future__ import annotations
@@ -153,13 +163,13 @@ VALE_SEMPRE = (
 # que o `consultar_manual` devolve e o `verificador` recebe.
 ORIENTACAO: dict[str, str] = {
     "cancelamento": (
-        "Postado, sem dizer que não dá: como o pedido já foi enviado, para cancelar agora o "
+        "Postado e o cliente desiste: como o pedido já foi enviado, para cancelar agora o "
         "caminho é a devolução — ao receber, pedir a devolução ou o reembolso em Minhas "
         "compras > o pedido; a plataforma (diga o nome) analisa e devolve pela mesma forma "
         "de pagamento. Nunca 'não dá para cancelar', 'não é possível', 'não permite' nem 'a "
-        "loja não consegue cancelar'. Não postado: o cancelamento é pedido no próprio pedido, em "
-        "Minhas compras (ação segurar_envio). Nunca oriente a recusar a entrega nem proponha "
-        "cancelar."
+        "loja não consegue cancelar'. Não chegou ou atrasou: entrega_nao_recebida. Não "
+        "postado: o cancelamento é pedido no próprio pedido, em Minhas compras (ação "
+        "segurar_envio). Nunca oriente a recusar a entrega nem proponha cancelar."
     ),
     "troca_devolucao": (
         "Devolução se chama devolução: o cliente pede em Minhas compras > o pedido, e a "
@@ -199,9 +209,9 @@ ORIENTACAO: dict[str, str] = {
         "mesma garantia. A foto já chegou: analisar_evidencia."
     ),
     "entrega_nao_recebida": (
-        "Atraso: o último status (sem cidade), a data de envio e acompanhar no app; a "
-        "previsão é a do pedido. Consta entregue e não recebeu, extravio ou devolvido ao "
-        "remetente: abrir_chamado."
+        "Não chegou ou atrasou: o último status (sem cidade), a data de envio e acompanhar no "
+        "app, nunca 'ao receber' nem 'recuse'; a previsão é a do pedido. Previsão vencida, "
+        "consta entregue e não recebeu, extravio ou devolvido ao remetente: abrir_chamado."
     ),
     "endereco": (
         "Postado: a plataforma não permite alterar o endereço depois do envio; acompanhar no "
@@ -268,7 +278,7 @@ EXEMPLOS_ACAO: dict[str, str] = {
         "contesta a análise; manda evidência nova numa devolução"
     ),
     constantes.ACAO_ABRIR_CHAMADO: (
-        "'consta entregue e não recebi', extravio, pedido devolvido ao remetente"
+        "'consta entregue e não recebi', extravio, devolvido ao remetente, previsão vencida"
     ),
     constantes.ACAO_APROVAR_FORA_DA_PLATAFORMA: (
         "'me devolve por Pix', 'pago a diferença', troca, reenvio ou reembolso fora do app"
@@ -342,6 +352,25 @@ CAMINHOS_APP_PADRAO: tuple[str, ...] = (
 
 # O que só vale numa plataforma (regras 10, 11 e 12 do manual).
 NOTAS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {
+    # Itens 22 e 24 da auditoria ao vivo (22/10/2026, Barbosa Shopee, conversa
+    # ce443965…): seis rascunhos mandaram pedir o reembolso "ao receber" a quem
+    # disse "meu pedido não chegou, a data limite foi hoje" (440a83e7), e o cartão
+    # do pedido de devolução que o comprador abriu era "[Mensagem]" (96f15c48). A
+    # prática aprovada pelo dono (21/10/2026) é da Shopee: atraso e o cliente pede
+    # ajuda → uma pessoa abre o chamado; a régua do código (`acao_pessoa.
+    # atraso_de_entrega`, `devolucao_na_plataforma`) marca sozinha — a nota é o
+    # texto. No bloco 2 (só a Shopee), sem custo no teto do bloco 1.
+    "shopee": (
+        "Pedido postado e não entregue, e o cliente reclama que não chegou e que atrasou (a "
+        "data limite ou a previsão passou): o último status e acompanhar em Minhas Compras > "
+        "o pedido > Informações do envio, sem prazo e nunca 'ao receber' nem 'recuse'; a ação "
+        "é abrir_chamado (a loja abre o chamado com a Shopee).",
+        'Cartão "[Shopee] Cliente abriu pedido de devolução/reembolso" na conversa (ou o '
+        "pedido já em devolução): a solicitação está aberta na Shopee e a loja responde por lá "
+        "— a ação é reclamacao_aberta. O texto só confirma que a solicitação foi aberta pela "
+        "Shopee e que o andamento aparece em Minhas Compras > o pedido: nunca decida, aceite, "
+        "recuse, prometa nem mande pedir de novo.",
+    ),
     "ml": (
         "Pergunta pública no anúncio: a resposta fica visível para todos — nunca cite "
         "pedido, nome ou status; se não der para saber se a pessoa já comprou, responda como "
@@ -482,9 +511,9 @@ _RESPONDA = """# RESPONDA EM VEZ DE ENCAMINHAR
 Use dado_indisponivel só depois de consultar (ver_anuncio, \
 consultar_manual; ver_pedido ou ver_garantia se é do pedido) e se o cliente não tem como dar \
 o dado (se só ele tem, pergunte). Estes casos têm resposta:
-- pedido já postado e o cliente quer cancelar, trocar, desistir, ou pede prioridade ou data: \
-a orientação do assunto (devolução ou reembolso ao receber, pelo app; envio e previsão em \
-Minhas compras > o pedido), sem prometer prioridade;
+- pedido já postado e o cliente quer cancelar, trocar ou desistir (não diz que não chegou): \
+devolução ou reembolso ao receber, pelo app; pede prioridade ou data: envio e previsão em \
+Minhas compras > o pedido, sem prometer prioridade;
 - prazo de entrega antes da compra: aparece no anúncio ao informar o CEP;
 - tamanho, cor, memória ou outra opção: a lista de variações responde (com completas=true, o \
 que não está nela este anúncio não tem);
@@ -689,11 +718,9 @@ def bloco_geral() -> str:
         "# ORIENTAÇÃO POR ASSUNTO (sem ação de pessoa; os códigos citados levam a pessoa)\n"
         f"Vale sempre: {VALE_SEMPRE}\n"
         + _orientacao()
-        + "\n- pedido sem número (rastreio, prazo, nota fiscal): peça o número do pedido uma "
-        "vez ou oriente a conferir em Minhas compras; o cliente insiste que comprou aqui: "
+        + "\n- pedido sem número (rastreio, prazo, nota fiscal) ou que não aparece: peça o "
+        "número uma vez ou para conferir em Minhas compras; insistiu que comprou aqui: "
         "dado_indisponivel.\n"
-        "- pedido informado que não aparece: peça para conferir o número em Minhas compras; "
-        "insistiu: dado_indisponivel.\n"
         "- devolução ou chamado em andamento: oriente pelo status e pelo reembolso da "
         "plataforma; evidência nova ou contestação: analisar_evidencia; quer outra solução: "
         "excecao.\n"

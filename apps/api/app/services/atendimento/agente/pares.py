@@ -322,6 +322,21 @@ def tem_dado_pessoal(texto: str | None) -> bool:
     return False
 
 
+def ensina_o_que_o_agente_nao_faz(resposta: str | None) -> bool:
+    """A resposta da equipe ensina ao agente o que ele não pode dizer? PURA.
+
+    Revisão 2 da rodada 6 (22/10/2026): a recusa da entrega ("deve-se recusar o
+    recebimento do produto no ato da entrega", 21 pares da Shopee/TikTok) e a
+    promessa de reposição ("reposição apenas em novembro", "logo chegará reposição")
+    passavam no `ia._ensina_o_proibido` (o do legado, que não muda) e podiam ir ao
+    agente como exemplo de tom pelo `buscar_respostas_equipe`.
+    """
+    from app.services.atendimento import variacoes as variacoes_svc
+    from app.services.atendimento.agente import checagens
+
+    return checagens.orienta_a_recusar(resposta) or variacoes_svc.promete_reposicao(resposta)
+
+
 def _filtro(
     cliente: str,
     resposta: str,
@@ -340,7 +355,9 @@ def _filtro(
     if not ia._par_seguro(cliente, resposta):
         _somar(contagem, "inseguros")
         return False
-    if ia._ensina_o_proibido(resposta, plataforma, canal):
+    if ia._ensina_o_proibido(resposta, plataforma, canal) or ensina_o_que_o_agente_nao_faz(
+        resposta
+    ):
         _somar(contagem, "proibidos")
         return False
     return True
@@ -982,6 +999,10 @@ async def buscar(
         if tem_dado_pessoal(linha.pergunta_gen) or tem_dado_pessoal(linha.resposta_gen):
             # O par gravado antes da régua sem maiúscula (revisão 2 de
             # 20/10/2026) nunca vai ao provedor — `expurgar_dado_pessoal` o apaga.
+            continue
+        if ensina_o_que_o_agente_nao_faz(linha.resposta_gen):
+            # Revisão 2 da rodada 6: o par já indexado com a recusa da entrega ou a
+            # promessa de reposição não vai ao agente (a indexação nova já o tira).
             continue
         resposta = _cortar(linha.resposta_gen)
         chave = resposta.casefold()

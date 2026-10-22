@@ -38,6 +38,7 @@ from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
     _kia,
     _ligar,
     _pedido_uranyx,
+    _sem_a_regua_dos_dias,
     _usa,
     agente_ligado,
     api,

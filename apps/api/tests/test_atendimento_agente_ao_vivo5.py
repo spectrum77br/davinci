@@ -1389,9 +1389,10 @@ def test_a_calibracao_tem_os_casos_da_5a_rodada():
     # camada não lê esse lugar: mede o verificador nele).
     r19 = casos["regiao-19"]
     assert r19["perguntas"][1].endswith("Itaperuna") and r19["texto"] == casos["regiao-16"]["texto"]
-    # O arquivo de antes ficou igual: as 342 linhas e os 10 novos no fim.
+    # O arquivo de antes ficou igual: as 342 linhas e os 10 novos depois delas (a 6ª
+    # rodada, 22/10/2026, acrescenta os dela no fim).
     ids = [c["id"] for c in calibrar.ler_casos(calibrar.CASOS_PADRAO)]
-    assert len(ids) == 352 and ids[-10:] == list(NOVOS)
+    assert len(ids) >= 352 and ids[342:352] == list(NOVOS)
 
 
 @pytest.mark.parametrize(
@@ -1423,8 +1424,9 @@ async def test_a_calibracao_mede_os_novos_sem_modelo(tmp_path, teto_limpo, escap
 
 
 def test_a_calibracao_nao_mudou_o_sistema():
-    """Os casos novos só medem: o verificador é o v7 de sempre."""
-    assert v.VERSAO == "v7"
+    """Os casos novos só medem: o verificador é o v7 de sempre (o v8 da 6ª rodada,
+    22/10/2026, é outro conserto — itens 22 e 23)."""
+    assert v.VERSAO in ("v7", "v8")
     assert "nao_vale_para" not in v.SISTEMA
 
 

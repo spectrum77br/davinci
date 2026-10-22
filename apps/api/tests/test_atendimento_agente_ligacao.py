@@ -100,6 +100,17 @@ def _sem_limites_nem_rodada():
     ia.esquecer_limites()
 
 
+# Item 22 da auditoria ao vivo (22/10/2026): o pedido do `_pedido_completo` (Shopee) foi
+# postado em 24/09/2026 e segue "Objeto em trânsito" — com o relógio de hoje, 10 dias ou
+# mais, e a régua da entrega atrasada da Shopee (`acao_pessoa.DIAS_ATRASO_SHOPEE`)
+# mandaria o "cadê meu pedido?" destes testes para pessoa (abrir_chamado). Eles medem o
+# envio automático, não o atraso (`test_atendimento_agente_ao_vivo6`): aqui a régua dos
+# DIAS fica de fora; a da data vencida que o cliente diz continua valendo.
+@pytest.fixture(autouse=True)
+def _sem_a_regua_dos_dias(monkeypatch):
+    monkeypatch.setattr(acao_pessoa, "DIAS_ATRASO_SHOPEE", 10_000)
+
+
 async def _do_agente(
     db: AsyncSession,
     make_user,

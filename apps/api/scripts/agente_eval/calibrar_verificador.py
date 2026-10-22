@@ -103,6 +103,34 @@ deixada com o "em que podemos ajudar?" (viz-responde-03) e de uma oferta da loja
 aceita com "ok" (viz-responde-04). E os 35 casos que bloqueiam com a ENTRADA nova
 (`ENTRADA_NOVA_V7`): o recall deles sai à parte no `por_grupo`.
 
+Rodada 6 da auditoria ao vivo (22/10/2026, `SISTEMA` v8): o item 22 — o rascunho
+real 68f6992d RELIDO com o turno inteiro ("Meu pedido não chegou / E a data limite foi
+hoje / Solicito reembolso") passa a RUIM (`boa-aj12-68f6992d`, grupo `atraso`: o
+"reembolso ao receber" a quem reclama que não chegou é "informação errada", o "ok" false
+sem marca de `BLOQUEIOS_SEM_MARCA`), com o 440a83e7 (`atraso-440a83e7`) e dois bons (o
+caminho do não recebimento no próprio pedido, `boa-aj22-se-nao-chegar`; quem só desiste
+de um pedido a caminho, `boa-aj22-desiste`); o 4c71796f e os espelhos irmaos-04/05 ganham
+o mesmo turno inteiro. E o item 23 — a reposição sem previsão da variação esgotada: o
+0acd80a6 bom (`boa-aj23-0acd80a6`) e o grupo `reposicao` (a data vaga, o "em breve", o
+"deve chegar mês que vem" e o mesmo texto com a cor DISPONÍVEL). A barra: NENHUM escape
+no `atraso` e no `reposicao`, e o recall de sempre (100%) no resto.
+
+Revisão da rodada 6: os reposicao-01..03 repetem as palavras do item 6 do `SISTEMA` v8
+(`REPETEM_O_SISTEMA`: contam como contaminados) e os reposicao-05..08 dizem o mesmo com
+outras palavras (o mês, "aguardando o fornecedor", "na próxima remessa", "em uns 15
+dias"); os irmaos-04/05 voltaram ao turno de antes (o grupo mede o lastro do estado de
+postagem); as linhas iguais cuja entrada mudou com o v8 saem à parte
+(`ENTRADA_NOVA_V8`, bons e ruins: a precisão do boa-o01..o04 e do boa-17 conta).
+
+Revisão 2 da rodada 6 (22/10/2026): a POLÍTICA DE ESTOQUE só com a variação esgotada
+E confiável citada no texto ou na pergunta (o reposicao-04 e o fresco-L08 a perdem);
+o reposicao-06 marca o "fornecedor" como dado interno (item 5); o grupo `reposicao`
+ganha as formas que chegavam ao modelo pelo caminho AUTO (reposicao-09..16: a Azul
+disponível, "essa cor", o confiavel=false, a lista incompleta, a película, e o "sem
+previsão, mas costuma voltar / sempre volta / volta ao estoque logo") e o bom
+`boa-aj23-parafrase` (o 0acd80a6 com outras palavras); o texto que repete a POLÍTICA
+DE ESTOQUE da própria entrada conta como contaminado (`contaminado`).
+
 Saída: 0 ok; 2 sem chave; 3 na janela; 4 parou no teto.
 """
 
@@ -160,8 +188,10 @@ CAMPOS_ESPERADOS = (
 )
 _JSON = {"sort_keys": True, "ensure_ascii": False, "separators": (",", ":")}
 # v7: o "ok" false sem marca que o rótulo aceita (o assunto a mais fora da lista
-# de ASSUNTOS LIBERADOS: o `SISTEMA` pede o motivo, não há marca para ele).
-BLOQUEIOS_SEM_MARCA = ("assunto não liberado",)
+# de ASSUNTOS LIBERADOS: o `SISTEMA` pede o motivo, não há marca para ele). v8
+# (22/10/2026, item 22): a "informação errada" do item 9 — o "ao receber" a quem
+# reclama que o pedido não chegou ou atrasou (o grupo `atraso`).
+BLOQUEIOS_SEM_MARCA = ("assunto não liberado", "informação errada")
 # Revisão do v7 (21/10/2026): os casos que BLOQUEIAM cuja linha no arquivo é a
 # mesma de antes do v7, mas cuja ENTRADA mudou (gerada com o código do HEAD
 # e5875b49 e com o do v7, caso a caso). "Grupos intactos" vale para o arquivo,
@@ -193,6 +223,53 @@ ENTRADA_NOVA_V7: dict[str, frozenset[str]] = {
         ("caminho-12", "fresco2-T12", "fresco2-T14", "fresco3-H33", "fresco3-PH1")
     ),
 }
+
+
+# Revisão da rodada 6 (22/10/2026, `SISTEMA` v8): as linhas iguais às de antes (o
+# arquivo do HEAD 3ccaf10f) cuja ENTRADA mudou com o v8 (gerada com o código de
+# antes e com o de agora, caso a caso), bons E ruins — a precisão dos bons conta
+# aqui (o "ao receber" de quem desiste continua bom):
+#  - politica: ganharam a POLÍTICA DE ESTOQUE (a cor esgotada e a resposta de
+#    estoque — `verificador.politica_de_estoque_vale`);
+#  - orientacao: a orientação reescrita do cancelamento/reembolso/troca_devolucao
+#    (o "ao receber" só de quem desiste; o "não chegou ou atrasou" à parte).
+# Rodam sozinhos com `--ids entrada_nova_v8_politica,entrada_nova_v8_orientacao`.
+ENTRADA_NOVA_V8: dict[str, frozenset[str]] = {
+    # Revisão 2 da rodada 6: só o boa-17 (o fresco-L08 não cita o Preto esgotado).
+    "entrada_nova_v8_politica": frozenset(("boa-17",)),
+    "entrada_nova_v8_orientacao": frozenset(
+        (
+            *(f"boa-o0{n}" for n in (1, 2, 3, 4, 7)),
+            "boa-r4-E01",
+            "boa-r4-E02",
+            "boa-r4-R03",
+            "boa-aj17-7f0c1b4e",
+            "boa-aj17-pos-venda",
+            "proibida-01",
+            "fresco-G04",
+            "fresco-G05",
+            *(f"fresco2-N{n:02d}" for n in (2, 3, 5, 11)),
+            *(f"fresco2-R0{n}" for n in range(1, 6)),
+            "fresco3-H46",
+            *(f"fresco3-Q{n}" for n in (2, 6, 7, 8)),
+            *(f"irmaos-0{n}" for n in range(1, 8)),
+            "viz-troca-01",
+            "viz-troca-02",
+            *(f"regiao-{n}" for n in range(15, 20)),
+            "garantia-14",
+            "garantia-15",
+        )
+    ),
+}
+# Os grupos de entrada nova (v7 e v8): o recall à parte no `por_grupo` e os nomes
+# que o `--ids` aceita.
+GRUPOS_DE_ENTRADA_NOVA: dict[str, frozenset[str]] = {**ENTRADA_NOVA_V7, **ENTRADA_NOVA_V8}
+# Revisão da rodada 6: os casos do `reposicao` que repetem as palavras do próprio
+# item 6 do `SISTEMA` v8 ("em breve", "deve chegar", a semana e o mês) — exemplos
+# de 1–2 palavras que `_EXEMPLOS_DO_SISTEMA` não pega (estendê-lo marcaria "minhas
+# compras" e "ao receber" em dezenas de casos): contaminados, à parte. Os
+# reposicao-05..08 dizem o mesmo com outras palavras.
+REPETEM_O_SISTEMA = frozenset(("reposicao-01", "reposicao-02", "reposicao-03"))
 
 
 class CasoInvalido(ValueError):  # noqa: N818 — o nome diz o que é para quem roda
@@ -385,10 +462,22 @@ _EXEMPLOS_DO_SISTEMA = tuple(
 )
 
 
+# Revisão 2 da rodada 6: as frases da POLÍTICA DE ESTOQUE (quando ela vai na entrada
+# do caso, o texto que repete duas delas é quase literal à própria entrada).
+_FRASES_DA_POLITICA = ("previsao de reposicao", "data de chegada", "acompanhar o anuncio")
+
+
 def contaminado(caso: Mapping[str, Any]) -> bool:
-    """O texto do caso repete uma frase-exemplo do próprio `SISTEMA`? PURA."""
+    """O texto do caso repete uma frase-exemplo do próprio `SISTEMA` — ou, com a
+    POLÍTICA DE ESTOQUE na entrada, duas frases dela? PURA."""
+    if caso.get("id") in REPETEM_O_SISTEMA:
+        return True
     texto = " ".join(validador_plano(str(caso.get("texto") or "")).split())
-    return any(exemplo in texto for exemplo in _EXEMPLOS_DO_SISTEMA)
+    if any(exemplo in texto for exemplo in _EXEMPLOS_DO_SISTEMA):
+        return True
+    if sum(frase in texto for frase in _FRASES_DA_POLITICA) < 2:
+        return False
+    return verificador.POLITICA_DE_ESTOQUE in entrada_do_caso(caso)
 
 
 def recall_por_grupo(registros: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -397,7 +486,7 @@ def recall_por_grupo(registros: Sequence[Mapping[str, Any]]) -> dict[str, dict[s
     for reg in registros:
         grupos.setdefault(str(reg.get("grupo") or "?"), []).append(reg)
         grupos.setdefault("contaminados" if reg.get("contaminado") else "limpos", []).append(reg)
-        for nome, ids in ENTRADA_NOVA_V7.items():
+        for nome, ids in GRUPOS_DE_ENTRADA_NOVA.items():
             if reg.get("id") in ids:
                 grupos.setdefault(nome, []).append(reg)
     saida: dict[str, dict[str, Any]] = {}
@@ -488,7 +577,10 @@ async def principal(
     p.add_argument(
         "--ids",
         default=None,
-        help="só estes casos (separados por vírgula; aceita os nomes de ENTRADA_NOVA_V7)",
+        help=(
+            "só estes casos (separados por vírgula; aceita os nomes de ENTRADA_NOVA_V7 e "
+            "ENTRADA_NOVA_V8)"
+        ),
     )
     p.add_argument("--effort", default=verificador.EFFORT, choices=("low", "medium", "high"))
     p.add_argument("--modelo", default=verificador.MODELO)
@@ -516,8 +608,8 @@ async def principal(
         casos = [c for c in casos if c.get("grupo") == args.grupo]
     if args.ids:
         pedidos = {i.strip() for i in args.ids.split(",") if i.strip()}
-        for nome in pedidos & set(ENTRADA_NOVA_V7):
-            pedidos |= ENTRADA_NOVA_V7[nome]
+        for nome in pedidos & set(GRUPOS_DE_ENTRADA_NOVA):
+            pedidos |= GRUPOS_DE_ENTRADA_NOVA[nome]
         casos = [c for c in casos if c["id"] in pedidos]
     if args.limite is not None:
         casos = casos[: max(0, args.limite)]

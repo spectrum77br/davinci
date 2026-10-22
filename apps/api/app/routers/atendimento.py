@@ -190,6 +190,7 @@ from app.services.atendimento import (
     agente_config,
     amazon_email,
     canais_externos,
+    cartoes_plataforma,
     clientes,
     enviar,
     gravar,
@@ -1469,7 +1470,11 @@ def _mensagem_out(
         origem=m.origem,
         autor_nome=autor_nome,
         tipo=m.tipo,
-        texto=m.texto,
+        # Item 24 da auditoria ao vivo (22/10/2026 01:37, Barbosa Shopee): o cartão
+        # da plataforma gravado só com o rótulo ("[Mensagem]") — o pedido de
+        # devolução/reembolso, o envio, o convite para avaliar, a variação — sai
+        # com o texto dele; a linha gravada não muda.
+        texto=cartoes_plataforma.texto_para_exibir(m),
         anexos=list(m.anexos or []),
         # Resposta que não saiu não tem relógio da plataforma: vale a hora
         # em que a pessoa apertou "Enviar".

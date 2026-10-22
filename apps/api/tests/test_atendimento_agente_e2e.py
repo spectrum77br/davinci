@@ -97,6 +97,7 @@ from app.services.atendimento.constantes import (
     RASCUNHO_BLOQUEADO,
     RASCUNHO_PENDENTE,
 )
+from tests import test_atendimento_agente_ligacao as _lig_dias
 from tests import test_atendimento_ia as _base_ia
 from tests.test_atendimento_ficha_loja import (  # noqa: F401 — Redis e leitura: fixtures
     RedisMem,
@@ -127,6 +128,9 @@ from tests.test_atendimento_variacoes import (  # noqa: F401 — a loja falsa é
 # As fixtures da IA (o legado ligado com a chave de teste do Groq e o espião do envio).
 ia_ligada = _base_ia.ia_ligada
 envios = _base_ia.envios
+# Item 22 (22/10/2026): o pedido do `_pedido_completo` tem 28 dias de postado — a régua
+# dos dias da entrega atrasada fica de fora (ver `test_atendimento_agente_ligacao`).
+_sem_a_regua_dos_dias = _lig_dias._sem_a_regua_dos_dias
 
 CHAVE = "sk-ant-test"
 MODELO = "claude-haiku-5-5"

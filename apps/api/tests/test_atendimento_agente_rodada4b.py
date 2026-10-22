@@ -36,6 +36,7 @@ from tests.test_atendimento_agente_ligacao import (  # noqa: F401 — fixtures
     _cenario_envio,
     _decisao,
     _rascunho,
+    _sem_a_regua_dos_dias,
     _sem_limites_nem_rodada,
     agente_ligado,
     envios,

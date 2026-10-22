@@ -17,6 +17,11 @@ O que o código detecta, na ordem da régua (`gatilhos`):
   2  juridico_fraude_ofensa  alerta ou xingamento (`ia.sinais_com_codigo`);
   3  reclamacao_aberta   canal reclamação, etiqueta, reclamação aberta na
                          plataforma (contexto ou `claim_ids`), cartão Cliente;
+                         e (22/10/2026, itens 22 e 24) a devolução/reembolso
+                         que o comprador já abriu na plataforma: o retrato do
+                         MESMO pedido em TO_RETURN ou o cartão de devolução da
+                         Shopee aberto na conversa (`devolucao_na_plataforma`; o
+                         cartão só até a reclamação encerrar depois dele);
   4  avaliacao_baixa     canal avaliação de nota 1–3, avaliação pendente de
                          nota baixa, cartão Cliente "avaliou mal";
   5  instrucao           texto com cara de instrução para a IA (ANTES);
@@ -36,7 +41,9 @@ O que o código detecta, na ordem da régua (`gatilhos`):
                          (`pedido_entregue`: a logística OU a situação
                          Entregue do Bling — o mesmo dado do modelo, em toda
                          plataforma, 21/10/2026), extravio, ou o status de
-                         volta ao remetente;
+                         volta ao remetente (também o "consta entregue" do
+                         retrato do MESMO pedido); e, por ÚLTIMO (22/10/2026,
+                         item 22), a entrega atrasada (`atraso_de_entrega`);
   12 aprovar_fora_da_plataforma  Pix, depósito, dados bancários, "por fora",
                          reembolso parcial, "pago a diferença" (a diferença
                          vira orientação com a recusa padrão aprovada);
@@ -69,7 +76,7 @@ import structlog
 from sqlalchemy import select
 
 from app.models import BlingOrder
-from app.services.atendimento import constantes, ia, validador
+from app.services.atendimento import cartoes_plataforma, constantes, ia, validador
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento.agente import contexto as agente_ctx
 
@@ -127,6 +134,18 @@ DETALHE_NAO_RECEBEU = "o pedido consta entregue e o cliente diz que não recebeu
 DETALHE_EXTRAVIO = "o cliente fala de extravio ou roubo"
 DETALHE_ENTREGA_ERRADA = "o cliente diz que entregaram no lugar errado ou a outra pessoa"
 DETALHE_RASTREIO_PARADO = "o cliente diz que o rastreio está parado há dias"
+# Item 22 da auditoria ao vivo (22/10/2026 01:27, Barbosa Shopee, rascunho
+# 440a83e7): a entrega atrasada — o chamado com a plataforma, sem prometer prazo.
+DETALHE_ATRASO = (
+    "entrega atrasada e o cliente pede ajuda: abrir chamado com a plataforma para "
+    "acompanhar a entrega, sem prometer prazo"
+)
+# Itens 22 e 24 (22/10/2026): a devolução/reembolso que o comprador já abriu na
+# plataforma (o pedido em TO_RETURN, o cartão de devolução da Shopee).
+DETALHE_DEVOLUCAO_NA_PLATAFORMA = (
+    "o cliente abriu devolução/reembolso na plataforma: responder a solicitação na "
+    "central do vendedor"
+)
 DETALHE_REMETENTE = "dúvida de remetente sem fato aprovado"
 # O turno só com o cartão do produto/pedido: nem rascunho (spec 6.2).
 MOTIVO_SO_CARTAO = "o cliente só mandou o cartão do produto ou do pedido — sem resposta"
@@ -666,6 +685,421 @@ _SUMIU = re.compile(
     r"|\bnao\s+(?:achei|acho|encontrei|encontro|localizei)\s+(?:o\s+|a\s+|meu\s+|minha\s+)?"
     r"(?:pacote|encomenda|caixa|mercadoria)\b"
 )
+
+
+# ── A entrega atrasada (item 22 da auditoria ao vivo, 22/10/2026) ─────────
+#
+# Barbosa Shopee, conversa ce443965…: "Meu pedido não chegou / E a data limite
+# foi hoje / Solicito reembolso", o pedido postado em 09/10 e não entregue. Seis
+# rascunhos em 4 h 30 (c4228c07, 68f6992d, 4c71796f, 85e722a3, 10064314,
+# 440a83e7) responderam "o reembolso é pedido ao receber" — a orientação de quem
+# DESISTE de um pedido em dia, não a de quem reclama que não chegou. A prática
+# aprovada pelo dono (21/10/2026, Shopee): atraso e o cliente pede ajuda → uma
+# pessoa abre o chamado com a plataforma; o agente não promete nada. Desenho da
+# revisão (wf_5822ccf2-803, "correcao_ajustada"): o código decide, sem número
+# nenhum no pacote (nada de "envio_atrasado" que vire lastro), por último na
+# régua 11 (o "devolvido ao remetente" e o "consta entregue" vencem).
+
+# Os dias desde a postagem (São Paulo) a partir dos quais a Shopee conta como
+# atraso sem o cliente dizer que a data passou: ~p82 do tempo da coleta até a
+# entrega do Shopee Xpress em produção (n=3.960, 60 dias até 21/10/2026: p50 6,0;
+# p75 8,3; p90 12,1). Decisão pendente do dono (N=10 e se vale para ML/TikTok).
+DIAS_ATRASO_SHOPEE = 10
+# O status do retrato da plataforma (`dados.pedido_mkt`) do MESMO pedido que diz
+# entregue — o espelho da logística pode estar dias atrasado (3,4% das conversas
+# da Shopee com o retrato entregue não têm a entrega na logística nem o 83953).
+STATUS_ENTREGUE_NO_RETRATO = frozenset({"TO_CONFIRM_RECEIVE", "COMPLETED"})
+STATUS_LOGISTICA_ENTREGUE_NO_RETRATO = frozenset({"LOGISTICS_DELIVERY_DONE", "DELIVERED"})
+# O comprador já abriu devolução/reembolso na Shopee ("Em devolução").
+STATUS_EM_DEVOLUCAO_NO_RETRATO = frozenset({"TO_RETURN"})
+
+# O cliente reclama que o pedido não chegou ou atrasou. "Não recebi/não chegou"
+# com outro objeto (a nota, o código, o reembolso, a mensagem) não é a entrega.
+_OBJETO_QUE_NAO_E_A_ENTREGA = (
+    r"(?:nota|nf|nfe|danfe|codigo|rastreio|reembolso|estorno|dinheiro|valor|pix|cupom"
+    r"|mensage\w*|respost\w*|e-?mail|email|sms|link|boleto|comprovante)"
+)
+# Revisão da rodada 6 (22/10/2026, os falsos positivos do corpus de 30 dias): "não
+# chegou ASSIM", "não veio com o carregador", "não chegou funcionando" — o defeito ou
+# o item que falta, não a entrega.
+_DO_JEITO_QUE_CHEGOU = (
+    r"(?:assim|desse\s+jeito|deste\s+jeito|dessa\s+forma|desta\s+forma|com|sem|funcionando"
+    r"|ligando|carregando|cert[oa]|corret[oa]|direito|complet[oa]|quebrad\w*|danificad\w*"
+    r"|amassad\w*|errad\w*)"
+)
+_NAO_CHEGOU = re.compile(
+    # Revisão da rodada 6: também "não foi entregue" (o `_NAO_RECEBEU` já o tinha).
+    r"\b(?:nao|n|ainda\s+nao|nunca)\s+(?:me\s+|nos\s+)?(?:chegou|chegaram|recebi|recebemos"
+    r"|foi\s+entregue)\b"
+    r"(?!\s+(?:(?:a|o|as|os|meu|minha|meus|minhas|nenhum|nenhuma|nem)\s+)?"
+    rf"{_OBJETO_QUE_NAO_E_A_ENTREGA}\b)"
+    rf"(?!\s+{_DO_JEITO_QUE_CHEGOU}\b)"
+    # "Não veio" só sozinho ou com o pedido ("não veio o carregador" é item faltando).
+    r"|\b(?:nao|n|ainda\s+nao|nunca)\s+(?:me\s+)?(?:veio|vieram)\b(?=\s*(?:$|[.,;!?]|ainda\b"
+    r"|ate\b|nada\b|(?:(?:o|a)\s+)?(?:meu\s+|minha\s+)?(?:pedido|encomenda|pacote|compra)\b))"
+    # Revisão da rodada 6: "não entregaram meu pedido" — também só sozinho ou com o
+    # pedido ("não entregaram o carregador" é item faltando).
+    r"|\b(?:nao|n|ainda\s+nao|nunca)\s+(?:me\s+|nos\s+)?(?:entregaram|entregou)\b"
+    r"(?=\s*(?:$|[.,;!?]|ainda\b|ate\b|nada\b|(?:(?:o|a)\s+)?(?:meu\s+|minha\s+)?"
+    r"(?:pedido|encomenda|pacote|compra|produto|celular|aparelho|mercadoria)\b))"
+)
+# O objeto logo ANTES do "não chegou" ("a nota fiscal não chegou", "o reembolso
+# ainda não chegou"): não é a entrega. "Quero reembolso pois não chegou" é.
+_OBJETO_ANTES = re.compile(
+    rf"\b{_OBJETO_QUE_NAO_E_A_ENTREGA}(?:\s+(?:fiscal|eletronica|de\s+rastreio|do\s+rastreio"
+    r"|do\s+pedido|da\s+compra))?\s+(?:ainda\s+|tambem\s+|ate\s+agora\s+)?$"
+)
+_RECLAMA_ATRASO = re.compile(
+    # Revisão da rodada 6: "cadê O MEU pedido" (o determinante e o possessivo juntos).
+    r"\bcade\s+(?:(?:o|a|os|as)\s+)?(?:meu\s+|minha\s+|meus\s+|minhas\s+)?(?:pedido|encomenda"
+    r"|pacote|produto|compra|entrega|celular|aparelho|mercadoria)s?\b"
+    r"|\b(?:pedido|encomenda|pacote|entrega|rastreio|envio)\s+(?:\w+\s+){0,2}?parad[oa]\b"
+    # "Era pra ter chegado", "deveria ter chegado": a reclamação e a data juntas.
+    r"|\b(?:era|eram|deveria|deveriam|devia)\s+(?:pra\s+|para\s+)?(?:ter\s+)?(?:chegado"
+    r"|sido\s+entregue)\b"
+)
+# "Atrasado", "demorando": a demora DA ENTREGA. Revisão da rodada 6 (o corpus de 30
+# dias): "o reembolso está demorando", "demorando demais a devolução", "demorando
+# para confirmar", "demorou pra desligar" — a demora de outra coisa (`_demora_da_entrega`).
+_DEMORA = re.compile(
+    r"\b(?:atras(?:ad[oa]s?|ou|o|aram|ando)|demor(?:ando|ou|ado|ada|a\s+muito|a\s+demais))\b"
+)
+# Só o que é a ENTREGA (o "celular" e o "aparelho" também são o defeito: "o celular
+# demorou pra desligar").
+_SUJEITO_DA_ENTREGA = re.compile(
+    r"\b(?:pedido|encomenda|pacote|entrega|envio|compra|mercadoria|rastreio|frete"
+    r"|transportadora|correios?)\b"
+)
+_OBJETO_DA_DEMORA = re.compile(
+    rf"\b(?:{_OBJETO_QUE_NAO_E_A_ENTREGA}|devoluc\w*|troca|confirm\w*|respond\w*|atend\w*"
+    r"|aprova\w*|analis\w*|carreg\w*|deslig\w*|(?:re)?lig(?:ar|a|ando)|(?:re)?inici\w*"
+    r"|abri\w*|instal\w*|baix\w*|atualiz\w*|estorn\w*)\b"
+)
+# A data que já passou (o "previsão/prazo passou", "a data limite foi hoje", "era
+# pra ter chegado"). Sem o marcador de passado, "qual a data limite pra chegar?"
+# não é atraso. Revisão da rodada 6 (22/10/2026): o "hoje" sem verbo no passado ("a
+# data limite é hoje", "deveria chegar hoje") só vale do fim do dia em diante
+# (`_PRAZO_HOJE`, `HORA_FIM_DO_DIA`); a data que MUDOU ("foi atualizada pro dia 30",
+# "a previsão mudou") não é a que passou; "qual era a data limite?" é pergunta.
+_DATA_DO_PRAZO = r"data\s+(?:limite|prevista|maxima|estimada|de\s+entrega|da\s+entrega)"
+_NAO_MUDOU = (
+    r"(?!\s+(?:alterad|atualizad|mudad|prorrogad|adiad|estendid|remarcad|reagendad"
+    r"|postergad)\w*)"
+)
+_PASSADO = rf"(?:(?:foi|era){_NAO_MUDOU}|passou|venceu|vencid[oa]|expirou|acabou|estourou)"
+_PRAZO_VENCIDO = re.compile(
+    rf"\b{_DATA_DO_PRAZO}\b[^.?!\n]{{0,30}}?\b(?:{_PASSADO}|ontem|anteontem)\b"
+    rf"|(?<!qual\s)(?<!quando\s)\b(?:{_PASSADO}|ontem)\s+(?:\w+\s+){{0,2}}?(?:a\s+)?"
+    rf"{_DATA_DO_PRAZO}\b"
+    r"|\b(?:previsao|prazo)\s+(?:\w+\s+){0,3}?(?:ja\s+)?(?:passou|venceu|vencid[oa]|acabou"
+    r"|expirou|estourou)\b"
+    r"|\b(?:passou|venceu|acabou|estourou|expirou)\s+(?:d[oa]\s+|o\s+|a\s+)?(?:prazo|previsao"
+    r"|data)\b"
+    r"|\b(?:era|eram|era\s+pra|era\s+para|deveria|deveriam|devia)\s+(?:pra\s+|para\s+)?"
+    r"(?:ter\s+)?(?:chegado|chegar\s+(?:ate\s+)?(?:ontem|anteontem)|sido\s+entregue|entregue)\b"
+    # Revisão da rodada 6: "estava prevista para ontem", "o prazo era até ontem".
+    r"|\b(?:previst[oa]|prazo)\s+(?:\w+\s+){0,2}?(?:para|pra|pro|era|ate)\s+(?:ate\s+)?"
+    r"(?:ontem|anteontem)\b"
+)
+# O "hoje" sem verbo no passado ("a data limite é hoje", "deveria chegar hoje"): a
+# entrega ainda pode chegar no dia — só vale a partir de `HORA_FIM_DO_DIA` (São Paulo).
+HORA_FIM_DO_DIA = 18
+_PRAZO_HOJE = re.compile(
+    rf"\b{_DATA_DO_PRAZO}\b[^.?!\n]{{0,30}}?\bhoje\b"
+    rf"|\bhoje\s+(?:\w+\s+){{0,2}}?(?:a\s+)?{_DATA_DO_PRAZO}\b"
+    r"|\b(?:era|eram|deveria|deveriam|devia)\s+(?:pra\s+|para\s+)?(?:ter\s+)?chegar\s+"
+    r"(?:ate\s+)?hoje\b"
+    r"|\b(?:previst[oa]|prazo)\s+(?:\w+\s+){0,2}?(?:para|pra|pro|era|e|ate)\s+(?:ate\s+)?hoje\b"
+)
+# O prazo À FRENTE dito pelo próprio cliente ("o prazo vai até sexta", "a data limite
+# é até dia 30"): a régua dos dias da Shopee não vale (revisão da rodada 6).
+_DIA_DA_SEMANA = r"(?:segunda|terca|quarta|quinta|sexta|sabado|domingo)(?:-?feira)?"
+_PRAZO_A_FRENTE = re.compile(
+    r"\b(?:prazo|previsao|estimativa|entrega|data(?:\s+(?:limite|prevista|maxima|estimada"
+    r"|de\s+entrega|da\s+entrega))?)\s+(?:\w+\s+){0,2}?(?:vai|e|fica|seria)\s+ate\s+"
+    r"(?:(?:a|o)\s+)?(?:proxim[oa]\s+)?"
+    rf"(?P<quando>depois\s+de\s+amanha|amanha|{_DIA_DA_SEMANA}|dia\s+\d{{1,2}}(?:/\d{{1,2}})?"
+    r"|\d{1,2}/\d{1,2})\b"
+)
+# A condição do PRÓPRIO cliente (o 7f0c1b4e: "assim que chegar posso devolver?"):
+# ele espera a chegada — não é reclamação de atraso.
+# "Quando VAI chegar?" é pergunta, não condição: o verbo auxiliar no meio não vale.
+# Revisão da rodada 6 (22/10/2026): nem "quando devo/posso/irei/consigo receber?",
+# nem a oração que termina na pergunta ("quando o pedido chegar?").
+_CONDICAO_DO_CLIENTE = re.compile(
+    r"\b(?:assim\s+que|quando|depois\s+que|logo\s+que)\s+"
+    r"(?:(?!(?:vai|vao|ira|irao|irei|vou|devo|devem|deve\w*|posso|pode\w*|consig\w*|consegu\w*"
+    r"|sera|serei|terei|tenho)\b)\w+\s+){0,3}?"
+    r"(?:chegar|chegarem|receber|recebermos|for\s+entregue)\b(?!\s*\?)"
+)
+
+
+def _nao_chegou_a_entrega(plano: str) -> bool:
+    """O "não chegou/não recebi/não veio/não entregaram" sem outro objeto antes ou depois."""
+    return any(
+        not _OBJETO_ANTES.search(plano[max(0, m.start() - 40) : m.start()])
+        for m in _NAO_CHEGOU.finditer(plano)
+    )
+
+
+def _demora_da_entrega(plano: str, m: re.Match[str]) -> bool:
+    """O "atrasado/demorando" é da entrega? O pedido logo antes (até 3 palavras) diz que
+    sim; outra coisa perto (até 3 palavras antes ou depois: o reembolso, a devolução, a
+    resposta, ligar/carregar) diz que não. Revisão da rodada 6 (22/10/2026).
+
+    Revisão 2 da rodada 6: só as 3 palavras de cada lado (`rsplit`/`split` com o
+    limite) — o `split()` do texto inteiro a cada ocorrência deixava a régua
+    quadrática no texto longo (10 mil caracteres: 62 ms no `gatilhos`)."""
+    antes = " ".join(plano[: m.start()].rsplit(None, 3)[-3:])
+    depois = " ".join(plano[m.end() :].split(None, 3)[:3])
+    if _SUJEITO_DA_ENTREGA.search(antes):
+        return True
+    return not _OBJETO_DA_DEMORA.search(f"{antes} {depois}")
+
+
+def reclama_que_nao_chegou(plano: str) -> bool:
+    """O cliente reclama que o pedido não chegou ou atrasou (o texto na forma de
+    busca: sem acento, minúsculo)? PURA. Item 22 (22/10/2026).
+
+    "Não chegou/não recebi/não veio/não foi entregue/não entregaram" sem outro
+    objeto (a nota, o código, o reembolso, a mensagem — antes ou depois; nem o
+    "não chegou assim" do defeito), "cadê (o) meu pedido", o pedido "parado", e o
+    "atrasado"/"demorando" da entrega (não o do reembolso ou da devolução).
+    """
+    if _nao_chegou_a_entrega(plano) or _RECLAMA_ATRASO.search(plano):
+        return True
+    return any(_demora_da_entrega(plano, m) for m in _DEMORA.finditer(plano))
+
+
+def _hora_em_sao_paulo(agora: datetime) -> int:
+    return (agora if agora.tzinfo else agora.replace(tzinfo=UTC)).astimezone(ia.SAO_PAULO).hour
+
+
+def prazo_vencido(plano: str, agora: datetime | None = None) -> bool:
+    """O cliente diz que a data limite ou a previsão já passou? PURA. Item 22.
+
+    Revisão da rodada 6 (22/10/2026): com `agora`, o "hoje" sem verbo no passado
+    ("a data limite é hoje") também vale — do fim do dia (`HORA_FIM_DO_DIA`) em diante.
+    """
+    if _PRAZO_VENCIDO.search(plano):
+        return True
+    return (
+        agora is not None
+        and _hora_em_sao_paulo(agora) >= HORA_FIM_DO_DIA
+        and bool(_PRAZO_HOJE.search(plano))
+    )
+
+
+def cita_prazo_a_frente(plano: str, hoje: date) -> bool:
+    """O próprio cliente diz que o prazo vai até um dia que ainda não chegou ("o prazo
+    vai até sexta", "é até dia 30")? PURA. Revisão da rodada 6 (22/10/2026)."""
+    for m in _PRAZO_A_FRENTE.finditer(plano):
+        numeros = [int(n) for n in re.findall(r"\d{1,2}", m.group("quando"))]
+        if not numeros:
+            return True  # amanhã, sexta: à frente
+        try:
+            dia = date(hoje.year, numeros[1] if len(numeros) > 1 else hoje.month, numeros[0])
+        except ValueError:
+            continue
+        if dia >= hoje:
+            return True
+    return False
+
+
+def condicao_do_cliente(plano: str) -> bool:
+    """O cliente fala da chegada como condição ("assim que chegar…")? PURA. Item 22."""
+    return bool(_CONDICAO_DO_CLIENTE.search(plano))
+
+
+def _instante(valor: Any) -> datetime | None:
+    if isinstance(valor, datetime):
+        quando = valor
+    elif isinstance(valor, str) and valor.strip():
+        try:
+            quando = datetime.fromisoformat(valor.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return quando if quando.tzinfo else quando.replace(tzinfo=UTC)
+
+
+def retrato_do_pedido(
+    conversa: Any, ctx: Mapping[str, Any] | None, *, agora: datetime | None = None
+) -> Mapping[str, Any] | None:
+    """O retrato da plataforma (`dados.pedido_mkt`) só se for do MESMO pedido da
+    conversa (o `pedido_marketplace`, o número do contexto, o pack/order do ML). PURA.
+
+    Com `agora` (o `as_of` do replay), o retrato lido DEPOIS dele não vale: o
+    replay das 20:47 não sabe do TO_RETURN das 01:25.
+    """
+    dados = getattr(conversa, "dados", None)
+    retrato = dados.get("pedido_mkt") if isinstance(dados, Mapping) else None
+    if not isinstance(retrato, Mapping):
+        return None
+    lido = _instante(retrato.get("atualizado_em"))
+    if agora is not None and lido is not None:
+        if lido > (agora if agora.tzinfo else agora.replace(tzinfo=UTC)):
+            return None
+    numero = str(retrato.get("pedido") or "").strip().lower()
+    pedido = (ctx or {}).get("pedido") if isinstance(ctx, Mapping) else None
+    pedido = pedido if isinstance(pedido, Mapping) else {}
+    chaves = {
+        str(c).strip().lower()
+        for c in (
+            getattr(conversa, "pedido_marketplace", None),
+            pedido.get("numeroloja"),
+            pedido.get("numero"),
+            dados.get("pack_id"),
+            dados.get("order_id"),
+        )
+        if c
+    }
+    return retrato if numero and numero in chaves else None
+
+
+def _status_do_retrato(retrato: Mapping[str, Any] | None) -> tuple[str, str]:
+    if not isinstance(retrato, Mapping):
+        return "", ""
+    logistica = retrato.get("logistica")
+    status_log = logistica.get("status") if isinstance(logistica, Mapping) else None
+    return str(retrato.get("status") or "").strip().upper(), str(status_log or "").strip().upper()
+
+
+def entregue_no_retrato(retrato: Mapping[str, Any] | None) -> bool:
+    """O retrato do pedido diz entregue (Shopee: TO_CONFIRM_RECEIVE, COMPLETED ou a
+    logística LOGISTICS_DELIVERY_DONE; ML: o envio "delivered")? PURA. Item 22."""
+    status, status_log = _status_do_retrato(retrato)
+    return status in STATUS_ENTREGUE_NO_RETRATO or status_log in (
+        STATUS_LOGISTICA_ENTREGUE_NO_RETRATO
+    )
+
+
+def em_devolucao_no_retrato(retrato: Mapping[str, Any] | None) -> bool:
+    """O retrato do pedido está em devolução (Shopee TO_RETURN)? PURA. Item 22."""
+    return _status_do_retrato(retrato)[0] in STATUS_EM_DEVOLUCAO_NO_RETRATO
+
+
+def devolucao_na_plataforma(
+    conversa: Any,
+    recentes: Sequence[Any],
+    ctx: Mapping[str, Any] | None,
+    *,
+    agora: datetime | None = None,
+) -> bool:
+    """O comprador já abriu devolução/reembolso na plataforma? PURA. Itens 22 e 24.
+
+    O retrato do MESMO pedido em TO_RETURN (a Shopee: "Em devolução" — às 01:25 o
+    pedido do ce443965 já estava assim) ou um cartão de devolução/reembolso da
+    Shopee ABERTO na conversa (`cartoes_plataforma.devolucao_aberta_nos_cartoes`:
+    às 01:37, "Não recebi meu pacote / Apenas Reembolso"). A loja responde a
+    solicitação na Central do Vendedor: é a `reclamacao_aberta` da régua.
+
+    Revisão da rodada 6 (22/10/2026, o replay de 90 dias): o cartão é só a PONTE
+    até a reclamação chegar ao nosso banco (a sincronização leva ~1 h). Muita
+    solicitação encerra sem cartão de encerramento no chat (o "Retornado -
+    Pendente validação do vendedor" fica para sempre o último): o cartão que tem,
+    no contexto, uma reclamação/devolução da plataforma encerrada DEPOIS dele (e
+    até `agora`) já não vale (`_encerrada_depois`) — o 3571bd57 (aceita), o
+    4107ce81 e o f706abaf (canceladas pelo comprador) seguravam todo turno.
+    """
+    if em_devolucao_no_retrato(retrato_do_pedido(conversa, ctx, agora=agora)):
+        return True
+    ctx = ctx if isinstance(ctx, Mapping) else {}
+    return any(
+        not _encerrada_depois(ctx, quando, agora)
+        for quando in cartoes_plataforma.devolucoes_abertas_nos_cartoes(recentes)
+    )
+
+
+def _encerrada_depois(
+    ctx: Mapping[str, Any], desde: datetime | None, agora: datetime | None
+) -> bool:
+    """Alguma reclamação/devolução da plataforma do contexto (`ctx["reclamacoes"]`)
+    encerrou depois de `desde` (o cartão) e até `agora`? Sem a hora do cartão, não. PURA."""
+    desde = _instante(desde)
+    if desde is None:
+        return False
+    agora = _instante(agora)
+    for r in ctx.get("reclamacoes") or []:
+        fim = _instante(r.get("encerrada_em")) if isinstance(r, Mapping) else None
+        if fim is not None and fim > desde and (agora is None or fim <= agora):
+            return True
+    return False
+
+
+def _hoje(agora: datetime) -> date:
+    return (agora if agora.tzinfo else agora.replace(tzinfo=UTC)).astimezone(ia.SAO_PAULO).date()
+
+
+def dias_desde_o_envio(ctx: Mapping[str, Any] | None, agora: datetime) -> int | None:
+    """Os dias (São Paulo) desde a postagem: a data da logística ou, sem ela, o
+    `enviado_em` do pedido (na Shopee, o do retrato do mesmo pedido —
+    `contexto._ajustar_data_envio_shopee`); None sem a data. PURA. Item 22."""
+    ctx = ctx if isinstance(ctx, Mapping) else {}
+    logistica = ctx.get("logistica") if isinstance(ctx.get("logistica"), Mapping) else {}
+    pedido = ctx.get("pedido") if isinstance(ctx.get("pedido"), Mapping) else {}
+    envio = _dia(logistica.get("data_envio")) or _dia(pedido.get("enviado_em"))
+    return None if envio is None else (_hoje(agora) - envio).days
+
+
+def previsao_vencida(ctx: Mapping[str, Any] | None, agora: datetime) -> bool:
+    """A previsão de entrega da logística (na Amazon, o "entregar até") já passou
+    — o dia dela acabou? PURA. Item 22."""
+    ctx = ctx if isinstance(ctx, Mapping) else {}
+    logistica = ctx.get("logistica") if isinstance(ctx.get("logistica"), Mapping) else {}
+    previsao = _dia(logistica.get("previsao"))
+    return previsao is not None and previsao < _hoje(agora)
+
+
+def atraso_de_entrega(
+    conversa: Any,
+    ctx: Mapping[str, Any] | None,
+    plano: str,
+    *,
+    postado: str | None,
+    agora: datetime,
+) -> bool:
+    """A entrega atrasada que vira chamado (o `DETALHE_ATRASO` da régua 11). PURA.
+
+    Item 22 da auditoria ao vivo (22/10/2026), o desenho ajustado pela revisão.
+    Todas juntas:
+      a) há pedido, postado ("sim"/"mesmo_dia") e não entregue — nem pela
+         logística/Bling (`pedido_entregue`) nem pelo retrato do MESMO pedido;
+      b) o cliente reclama que não chegou ou atrasou (`reclama_que_nao_chegou`);
+      c) não é a condição do próprio cliente ("assim que chegar…", o 7f0c1b4e) —
+         revisão da rodada 6: quem diz que a data passou reclama, com ou sem o
+         "quando chegar";
+      d) o pedido não tem chamado aberto (seria o segundo);
+      e) uma destas: o cliente diz que a data/previsão passou (`prazo_vencido`,
+         qualquer plataforma — a regra rastreio do manual já dizia pessoa); na
+         Shopee, `DIAS_ATRASO_SHOPEE` dias ou mais desde a postagem, salvo o
+         prazo À FRENTE dito pelo próprio cliente (`cita_prazo_a_frente`,
+         revisão da rodada 6); na Amazon, o "entregar até" passou.
+    """
+    ctx = ctx if isinstance(ctx, Mapping) else {}
+    if not ctx.get("pedido") or postado not in (POSTADO_SIM, POSTADO_MESMO_DIA):
+        return False
+    if pedido_entregue(ctx) or entregue_no_retrato(retrato_do_pedido(conversa, ctx, agora=agora)):
+        return False
+    if not reclama_que_nao_chegou(plano):
+        return False
+    vencido = prazo_vencido(plano, agora)
+    if condicao_do_cliente(plano) and not vencido:
+        return False
+    if ctx.get("chamados"):
+        return False
+    if vencido:
+        return True
+    plataforma = getattr(conversa, "plataforma", None)
+    if plataforma == "shopee":
+        if cita_prazo_a_frente(plano, _hoje(agora)):
+            return False
+        dias = dias_desde_o_envio(ctx, agora)
+        return dias is not None and dias >= DIAS_ATRASO_SHOPEE
+    if plataforma == "amazon":
+        return previsao_vencida(ctx, agora)
+    return False
 
 
 def _plano(textos: Iterable[str | None]) -> str:
@@ -1458,6 +1892,7 @@ def gatilhos(
     ia_e_o_atendente: bool = False,
     sinais_do_cliente: Collection[str] = (),
     uf_restrita: bool = False,
+    agora: datetime | None = None,
 ) -> list[GatilhoPessoa]:
     """Os gatilhos de código da régua 6.3, na ordem dela. PURA (sem banco, sem modelo).
 
@@ -1469,10 +1904,13 @@ def gatilhos(
     `sinais_do_agente`) — None = calcula da rajada como o `humano.triar`
     (`ia_e_o_atendente` não muda nada desde 21/10/2026);
     `sinais_do_cliente` = os códigos do cartão Cliente; `uf_restrita` = o
-    pedido vai para UF com restrição de envio (`gatilhos_de_codigo` lê).
+    pedido vai para UF com restrição de envio (`gatilhos_de_codigo` lê);
+    `agora` = o relógio da régua da entrega atrasada (item 22, 22/10/2026: o
+    `ctx.agora()` do rascunho — o `as_of` no replay —; None = agora).
     """
     recentes = list(recentes)
     ctx = ctx if isinstance(ctx, Mapping) else {}
+    agora = agora or datetime.now(UTC)
     rajada, textos, plano = _planos_do_turno(recentes, gatilho)
     codigos = _codigos(sinais) if sinais is not None else _sinais_da_rajada(recentes, gatilho)
     pistas = set(ia.pistas_de_categoria(plano)) | _pistas_do_agente(plano)
@@ -1497,7 +1935,12 @@ def gatilhos(
         "reclamacao_forte" in pistas
     ):
         saida.append(_gatilho(constantes.ACAO_JURIDICO_FRAUDE_OFENSA))
-    # 3 — reclamação/mediação aberta.
+    # 3 — reclamação/mediação aberta. Itens 22 e 24 da auditoria ao vivo
+    # (22/10/2026, Barbosa Shopee 01:25–01:37): também a devolução/reembolso que o
+    # comprador já abriu na plataforma (o pedido em TO_RETURN, o cartão de
+    # devolução da Shopee aberto) — a loja responde a solicitação na Central do
+    # Vendedor; o agente só confirma que ela foi aberta, nunca decide.
+    devolucao_aberta = devolucao_na_plataforma(conversa, recentes, ctx, agora=agora)
     if (
         getattr(conversa, "canal", None) == constantes.CANAL_RECLAMACAO
         or constantes.ETIQUETA_RECLAMACAO in etiquetas
@@ -1506,6 +1949,8 @@ def gatilhos(
         or "reclamacao_aberta" in sinais_do_cliente
     ):
         saida.append(_gatilho(constantes.ACAO_RECLAMACAO_ABERTA))
+    elif devolucao_aberta:
+        saida.append(_gatilho(constantes.ACAO_RECLAMACAO_ABERTA, DETALHE_DEVOLUCAO_NA_PLATAFORMA))
     # 4 — avaliação de nota baixa.
     if (
         _avaliacao_ruim(conversa)
@@ -1544,6 +1989,15 @@ def gatilhos(
         # O pedido entregue pelo MESMO dado que o modelo vê (`pedido_entregue`:
         # a logística ou a situação Entregue do Bling — eval do TikTok, 21/10/2026).
         (_NAO_RECEBEU.search(plano) and pedido_entregue(ctx))
+        # Revisão da rodada 6 (22/10/2026): o retrato do MESMO pedido diz entregue
+        # (TO_CONFIRM_RECEIVE/COMPLETED; a logística do espelho parada) e o cliente diz
+        # que não recebeu A ENTREGA — o retrato que tira o atraso põe o chamado do não
+        # recebimento (67 conversas em 30 dias; 13 sem a linha da logística).
+        or (
+            entregue_no_retrato(retrato_do_pedido(conversa, ctx, agora=agora))
+            and _NAO_RECEBEU.search(plano)
+            and _nao_chegou_a_entrega(plano)
+        )
         or afirma_consta_entregue([m.texto for m in rajada] + textos)
         or (_DISSE_QUE_ENTREGOU.search(plano) and _SO_NAO_RECEBI.search(plano))
     ):
@@ -1556,6 +2010,13 @@ def gatilhos(
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_RASTREIO_PARADO))
     elif _DEVOLVIDO.search(status_log):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_DEVOLVIDO))
+    # Item 22 da auditoria ao vivo (22/10/2026, 440a83e7): a entrega atrasada, por
+    # ÚLTIMO (o "devolvido ao remetente" e o "consta entregue" dizem mais) e nunca
+    # com a devolução já aberta na plataforma (aí é a reclamação, acima).
+    elif not devolucao_aberta and atraso_de_entrega(
+        conversa, ctx, plano, postado=postado, agora=agora
+    ):
+        saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_ATRASO))
     # 12 — dinheiro fora do fluxo do app; a "diferença" cede à recusa padrão.
     sem_pedido_falso = _NAO_E_PEDIDO.sub(" ", plano)
     if (
@@ -1781,6 +2242,8 @@ async def gatilhos_de_codigo(
         sinais=base.sinais,
         sinais_do_cliente=base.sinais_do_cliente,
         uf_restrita=restrita,
+        # Item 22 (22/10/2026): o relógio da entrega atrasada — o `as_of` no replay.
+        agora=ctx.agora(),
     )
     ctx.acoes_codigo = agente_ctx.ordenar_acoes([g.codigo for g in lista])
     ctx.pistas_orientacao = pistas_de_orientacao(base.recentes, gatilho)
