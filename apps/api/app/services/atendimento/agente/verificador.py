@@ -1557,7 +1557,7 @@ def por_que_nao_verifica(
         return NAO_RODA_PESSOA
     if getattr(final, "sem_auto", None):
         return NAO_RODA_SEM_AUTO
-    if saida.confianca(proposta) < ia.CONFIANCA_AUTO:
+    if saida.confianca(proposta) < ia.CONFIANCA_AUTO_AGENTE:
         return NAO_RODA_CONFIANCA
     if not (final.texto or "").strip():
         return NAO_RODA_SEM_TEXTO

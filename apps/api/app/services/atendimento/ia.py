@@ -445,6 +445,18 @@ SINAIS_PARA_PESSOA = {
 _MODULO_CLIENTE = "app.services.atendimento.cliente"
 
 CONFIANCA_AUTO = 0.85
+# O AGENTE ("ag1") sai sozinho a partir de 0,80 (decisão do dono, 22/10/2026: "a
+# confiança acima de 80 deveria responder"): o rascunho dele passa ainda pelas
+# travas de código, pela trava do assunto (`trava_do_agente`) e pelo verificador
+# semântico obrigatório — o legado segue no `CONFIANCA_AUTO`.
+CONFIANCA_AUTO_AGENTE = 0.80
+
+
+def confianca_minima(do_agente: bool) -> float:
+    """A confiança mínima para o envio automático: a do agente ou a do legado. PURA."""
+    return CONFIANCA_AUTO_AGENTE if do_agente else CONFIANCA_AUTO
+
+
 # Pessoa respondeu, pelo DaVinci ou Duoke/Seller Center: dê tempo à conversa
 # humana. Mensagens automáticas não iniciam nem renovam esta pausa.
 JANELA_HUMANO = timedelta(minutes=30)
@@ -6157,7 +6169,7 @@ async def _talvez_enviar(
             motivo = "precisa_humano"
         elif rascunho.categoria in CATEGORIAS_SO_HUMANO and not do_agente:
             motivo = "assunto_so_humano"
-        elif (rascunho.confianca or 0.0) < CONFIANCA_AUTO:
+        elif (rascunho.confianca or 0.0) < confianca_minima(do_agente):
             motivo = "confianca_baixa"
         elif not (rascunho.texto or "").strip():
             motivo = "sem_texto"
@@ -6435,7 +6447,13 @@ async def reenviar_pendentes(
                     r.status == RASCUNHO_PENDENTE,
                     r.validador_ok.is_(True),
                     r.precisa_humano.is_(False),
-                    r.confianca >= CONFIANCA_AUTO,
+                    or_(
+                        r.confianca >= CONFIANCA_AUTO,
+                        and_(
+                            r.prompt_versao == PROMPT_VERSAO_AGENTE,
+                            r.confianca >= CONFIANCA_AUTO_AGENTE,
+                        ),
+                    ),
                     func.btrim(func.coalesce(r.texto, "")) != "",
                     # A pedida pela tela é para a pessoa conferir (`_gerar`).
                     ~r.fatos.has_key(FATO_PEDIDA_PELA_TELA),

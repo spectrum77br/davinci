@@ -341,8 +341,9 @@ def test_10_perguntar_como_ajudar_e_resposta_completa_so_no_pede_atendente():
         "- confianca: de 0 a 1 (perguntar como ajudar é resposta completa); "
     ), linha
     assert "a pergunta certa" not in geral
-    # O limiar do automático não mudou.
+    # O limiar do legado não mudou; o do agente é 0,80 desde 22/10/2026.
     assert ia.CONFIANCA_AUTO == 0.85
+    assert ia.CONFIANCA_AUTO_AGENTE == 0.80
 
 
 async def test_10_o_rascunho_real_de_pede_atendente_so_dependia_da_confianca():

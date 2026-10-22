@@ -79,7 +79,8 @@ class Proposta(BaseModel):
     # e nunca saía sozinha. Revisão do item 10: a régua nova vale SÓ para esse
     # "perguntar como ajudar" (pede_atendente e saudação, nada pendente); o resto
     # (o "responder", o "perguntar" de qual modelo do confirmar_variacao) fica com a
-    # régua de sempre. O `ia.CONFIANCA_AUTO` (0,85) não muda.
+    # régua de sempre. O corte do agente é o `ia.CONFIANCA_AUTO_AGENTE` (0,80
+    # desde 22/10/2026, decisão do dono); o legado segue no `ia.CONFIANCA_AUTO`.
     confianca: Annotated[
         float,
         Field(

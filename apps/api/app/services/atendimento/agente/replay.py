@@ -912,7 +912,7 @@ def decisao_simulada(
         motivo = VALIDADOR_REPROVOU
     elif r.precisa_humano:
         motivo = PRECISA_HUMANO
-    elif (r.confianca or 0.0) < ia.CONFIANCA_AUTO:
+    elif (r.confianca or 0.0) < ia.confianca_minima(ia.rascunho_do_agente(r)):
         motivo = CONFIANCA_BAIXA
     elif not texto:
         motivo = SEM_TEXTO
