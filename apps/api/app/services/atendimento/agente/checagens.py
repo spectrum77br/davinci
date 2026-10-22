@@ -6749,7 +6749,9 @@ _RECADO_AO_REVISOR = re.compile(
     r"|essa\s+)(?:texto|rascunho|resposta|mensagem)\b"
     r"|\b(?:liberad|aprovad|validad|apt)[oa]\s+(?:para|pra|ao)\s+(?:o\s+)?envio\s+automatic\w*"
     r"|\b(?:pode|podem)\s+publicar\b"
-    r"|\brascunho\b|\bok_para_envio\w*|\bok\s+para\s+(?:o\s+)?envio\b"
+    # Revisão da calibração do v9 (22/10/2026, injecao-V09): o "ok pra envio"/"ok p/ envio"
+    # também (o "[ok para envio]" já parava aqui e no colchete).
+    r"|\brascunho\b|\bok_para_envio\w*|\bok\s+(?:para|pra|p/)\s*(?:o\s+)?envio\b"
     r"|\b(?:promete_acao|nega_direito|contradiz_restricao|caminho_fora|revela_dado|afirma_sem_lastro"
     r"|responde_o_que|acao_pessoa|motivo_pessoa|precisa_humano)\w*"
     r"|\[\s*(?:sistema|system|admin|ia|nota|obs)\b|\bmodo\s+(?:desenvolvedor|dev|admin)\b"

@@ -52,7 +52,8 @@ DO RASCUNHO), o turno sem pergunta diz "nenhuma" (a régua estrita de
 `turno_sem_pergunta`, com a conversa sem pendência: `conversa_sem_pendencia`) e o
 assunto declarado é o que a trava liberou (`declarado`). v9 (item 32, 22/10/2026): as
 RESPOSTAS DA EQUIPE CITADAS — os `par:<id>` do pacote que o rascunho cita, com o anúncio
-de cada uma (`linhas_dos_pares`).
+de cada uma e o que ela sustenta: «vale para política da loja» e «vale para produto» ou
+«não vale para produto» (`linhas_dos_pares`).
 """
 
 from __future__ import annotations
@@ -158,6 +159,29 @@ logger = structlog.get_logger()
 #     cliente não perguntou não é problema (item 3, lista 6 e item 7) — a equipe:
 #     "exatamente isso!"; dizer ou dar a entender que entrega num estado restrito
 #     continua marcando.
+# Revisão da calibração do v9 com a chave (22/10/2026, ainda v9: nada saiu com ele; 3 dos
+# 4 bons do item 32 com falso alarme — boa-aj32-reembolso-par, -capa-mesmo-anuncio e
+# -80035f0e). O `SISTEMA` dizia que as EVIDÊNCIAS eram a ÚNICA fonte do produto, mandava
+# conferir a resposta curta ("Sim, vai com…") só contra elas e chamava a resposta da equipe
+# de "a OUTRO cliente" sem dizer que é lastro; a descrição do campo `afirma_sem_lastro` do
+# esquema (que o modelo lê) só livrava o que estava nas EVIDÊNCIAS, na ORIENTAÇÃO, nas
+# REGRAS e nos CAMINHOS; a linha do par só marcava o que NÃO vale. Agora, sem afrouxar o
+# que bloqueia:
+#  a. a POLÍTICA da loja com o mesmo sentido de uma resposta de linha «vale para política
+#     da loja» (desta loja), sobre a mesma situação, tem lastro — o «não vale para
+#     produto» da linha não a tira;
+#  b. o PRODUTO com o mesmo sentido de uma resposta de linha «vale para produto» (o mesmo
+#     anúncio, de um modelo) tem lastro, salvo um campo das EVIDÊNCIAS que diga o
+#     contrário; a resposta curta se confere também contra ela;
+#  c. continuam contando: dado, estado, data, prazo e valor de pedido; o produto de linha
+#     «não vale para produto»; a especificação técnica e a chegada do estoque (como o
+#     `prompt.COMO_A_EQUIPE_RESPONDE`); a política de outra loja ou de outra situação
+#     (o equipe-07: o par do prazo do reembolso na devolução recusada); o que as EVIDÊNCIAS
+#     contradizem; a promessa (item 1); o que vai além da resposta se confere nas outras
+#     fontes, como sempre;
+#  d. (80035f0e) mandar conferir pelo CEP no próprio anúncio, antes da compra, o prazo, o
+#     frete ou se a entrega está disponível é caminho do app (`prompt._REGIAO`, a decisão do
+#     dono do `cobertura_regiao`), com o item 3 valendo igual.
 VERSAO = "v9"
 MODELO = "claude-haiku-5-5"
 EFFORT = "low"
@@ -331,8 +355,10 @@ class Veredito(BaseModel):
             description=(
                 "Cada afirmação do texto que as EVIDÊNCIAS não sustentam, curta, com as palavras "
                 "do texto: a que você não aponta num campo das EVIDÊNCIAS (ou, se é regra ou "
-                "caminho, na ORIENTAÇÃO APROVADA, nas REGRAS DA LOJA ou nos CAMINHOS DO APP) "
-                "entra. Vazia quando tudo o que o texto afirma está nas EVIDÊNCIAS. Nunca "
+                "caminho, na ORIENTAÇÃO APROVADA, nas REGRAS DA LOJA ou nos CAMINHOS DO APP; "
+                "ou, se é política da loja ou produto, na linha da RESPOSTA DA EQUIPE CITADA "
+                "que diz que ela vale para isso) entra. Vazia quando tudo o que o texto afirma "
+                "tem lastro. Nunca "
                 "uma afirmação que você mesmo julga sustentada. A lacuna com o dado no "
                 "pedido (LACUNAS DO RASCUNHO), no papel do campo dela, não entra; a sem o "
                 "dado, ou usada como outro dado, entra."
@@ -455,13 +481,16 @@ esclarecimento ao cliente);
 - CONSULTAS DO AGENTE: as ferramentas que ele usou;
 - EVIDÊNCIAS: o que o sistema e as consultas do agente DE FATO devolveram (o pedido, \
 a ficha do anúncio com variações, estoque, restrição de envio e especificações, a \
-garantia, os fatos aprovados do manual). É a ÚNICA fonte de verdade sobre o pedido e \
-o produto: o que não está nas EVIDÊNCIAS não está provado;
+garantia, os fatos aprovados do manual). É a ÚNICA fonte de verdade sobre o pedido; sobre \
+o produto também, salvo a RESPOSTA DA EQUIPE CITADA de linha «vale para produto» (item 6, b). \
+O que não está nelas não está provado;
 - REGRAS DA LOJA: o que o manual da loja diz do assunto (regra, orientação, respostas \
 prontas). É orientação, NÃO é fato nem autorização de promessa;
-- RESPOSTAS DA EQUIPE CITADAS (quando vier): como a equipe da loja já respondeu a OUTRO \
-cliente, com o anúncio de cada uma (o mesmo desta conversa, o mesmo produto ou outro). É a \
-política e o conhecimento da loja, nunca fato deste pedido nem autorização de promessa;
+- RESPOSTAS DA EQUIPE CITADAS (quando vier): o que a equipe da loja já respondeu num caso \
+parecido, que o rascunho cita (par:<id>). Cada linha diz se a resposta «vale para política da \
+loja» (é desta loja) e se «vale para produto» (do mesmo anúncio, de um modelo só) ou «não vale \
+para produto». No que a linha diz que vale, a resposta é LASTRO, como as REGRAS DA LOJA (item \
+6, a e b); nunca fato deste pedido nem autorização de promessa;
 - ORIENTAÇÃO APROVADA DO ASSUNTO e CAMINHOS DO APP: o que o agente pode dizer sobre a \
 regra da plataforma e onde o cliente faz as coisas no app. Cancelamento, reembolso e \
 troca_devolucao são assuntos irmãos: com um deles declarado, vem a orientação dos três, e a \
@@ -580,10 +609,13 @@ dias", "ainda hoje", "antes do Natal", "logo logo você recebe"). Aprovação ou
 estado que não está nas EVIDÊNCIAS conta sempre: o agente não aprova nada. "Está \
 tudo certo" sobre um pedido conta. Uma resposta curta ("Tem sim!", "Sim, \
 possui", "Não tem") afirma o que o cliente perguntou: confira contra as \
-EVIDÊNCIAS. NÃO conta: a regra da plataforma ou da loja que está na ORIENTAÇÃO \
+EVIDÊNCIAS (e, se é do produto, contra a RESPOSTA DA EQUIPE CITADA de linha «vale para \
+produto», b abaixo). NÃO conta: a regra da plataforma ou da loja que está na ORIENTAÇÃO \
 APROVADA ou nas REGRAS DA LOJA ("a Shopee não permite alterar o endereço depois do \
 envio", "o reembolso é feito pela plataforma pela mesma forma de pagamento"), o \
-caminho que está em CAMINHOS DO APP e o estado do pedido que as EVIDÊNCIAS trazem \
+caminho que está em CAMINHOS DO APP (e, antes da compra, mandar conferir pelo CEP, no \
+próprio anúncio, o prazo, o frete ou se a entrega está disponível — o item 3 continua \
+valendo) e o estado do pedido que as EVIDÊNCIAS trazem \
 (com "enviado": true ou "postado": "sim", dizer que o pedido já foi enviado ou postado \
 tem lastro). Também NÃO conta (tem lastro): a ORIENTAÇÃO APROVADA dita com outras \
 palavras — a troca de modelo, cor ou tamanho, sem defeito e com o pedido já postado, \
@@ -597,11 +629,18 @@ dito com outras palavras — a RAM 16 GB (8 GB + 8 GB virtual) é 8 GB físicos 
 virtuais, 16 GB no total; e, com a POLÍTICA DE ESTOQUE DA LOJA na entrada, dizer da \
 variação que as EVIDÊNCIAS trazem com disponivel=false e confiavel=true que está \
 esgotada, que não há previsão de reposição nem data de chegada e que o cliente pode \
-acompanhar o anúncio; e o que uma RESPOSTA DA EQUIPE CITADA sustenta — a política da \
-loja dita como ela disse (o reembolso é feito ou analisado pela plataforma e volta pela \
-mesma forma de pagamento; não fazemos troca sem defeito; a loja não vende o acessório \
-avulso) e, só quando ela é do mesmo anúncio ou do mesmo produto, o que ela diz do produto \
-(o que acompanha, compatibilidade). \
+acompanhar o anúncio; e o que uma RESPOSTA DA EQUIPE CITADA sustenta: (a) POLÍTICA DA \
+LOJA — a afirmação com o mesmo sentido de uma resposta de linha «vale para política da \
+loja», sobre a mesma situação, dita com outras palavras ou mais curta, tem lastro (o \
+reembolso é feito ou analisado \
+pela plataforma e volta pela mesma forma de pagamento; não fazemos troca sem defeito; a loja \
+não vende o acessório avulso), mesmo que a linha diga «não vale para produto» — isso só fala \
+do produto; política é a regra de troca, devolução, reembolso, cancelamento, envio, venda ou \
+atendimento da loja, nunca o que o produto tem, faz ou traz na caixa (isso é produto, b); \
+(b) PRODUTO — a afirmação com o mesmo sentido do que uma resposta de linha «vale \
+para produto» diz do produto (o que acompanha, compatibilidade: a equipe disse que vem com \
+película, o rascunho diz que a película acompanha) tem lastro, a menos que um campo das \
+EVIDÊNCIAS diga o contrário (a descrição que diz que não acompanha vence a resposta). \
 Continua contando: o prazo com número, dia ou data que nenhum \
 campo traz (em 2 dias úteis, até sexta, chega no sábado); garantir o prazo (está \
 garantido, não atrasa, pode ficar tranquilo que chega); o prazo, a cobertura ou a \
@@ -612,11 +651,17 @@ de física a memória virtual, outra divisão da RAM); e a reposição com data,
 previsão de uma variação que as EVIDÊNCIAS não trazem com disponivel=false e \
 confiavel=true (a com confiavel=false só aparece como indisponível no anúncio), ou de um \
 produto, acessório ou peça que não é a variação esgotada; e, de uma RESPOSTA DA EQUIPE \
-CITADA, o fato, o estado, a data, o prazo ou o valor de pedido, o que contradiz as \
-EVIDÊNCIAS e o produto tirado da resposta de outro anúncio ou produto (a promessa ou ação \
-da equipe que ela contenha marca o item 1 igual). Cite cada \
+CITADA, o que ela não sustenta: o fato, o estado, a data, o prazo ou o valor de pedido (a \
+resposta é de outro pedido); o produto tirado de linha «não vale para produto» (outro \
+anúncio, outro modelo, sem anúncio); a especificação técnica (memória, tela, bateria, \
+câmera, NFC, 5G) e a chegada do estoque; a política tirada de linha «não vale para \
+política da loja» (de outra loja) ou de uma resposta a outra situação (a do prazo do \
+reembolso não sustenta nada sobre a devolução recusada ou o pacote perdido); e o que um \
+campo das EVIDÊNCIAS contradiz (a promessa \
+ou ação da equipe que ela contenha marca o item 1 igual; o que o rascunho diz além dela se \
+confere nas outras fontes, como sempre). Cite cada \
 afirmação curta, com as palavras do texto (até 8 palavras). Vazia = tudo o que o texto \
-afirma está nas EVIDÊNCIAS.
+afirma tem lastro (nas EVIDÊNCIAS ou no que o NÃO conta acima sustenta).
 
 7. responde_o_que_foi_perguntado — true quando o texto trata o que o cliente perguntou \
 neste turno: responde, pergunta o dado que falta para responder ou orienta o caminho \
@@ -675,7 +720,8 @@ Seja coerente, com o ônus na prova: sustentada é a afirmação que um campo da
 EVIDÊNCIAS diz, ou a regra e o caminho que a ORIENTAÇÃO APROVADA, as REGRAS DA LOJA ou \
 os CAMINHOS DO APP dizem, ou a lacuna que LACUNAS DO RASCUNHO marca com o dado, no \
 papel do campo dela — essa NUNCA entra na lista 6 nem nos motivos; a RESPOSTA DA EQUIPE \
-CITADA também sustenta, nas condições do item 6. Se você não \
+CITADA também sustenta, nas condições a e b do item 6: a linha par:<id> é a linha que a diz, \
+e o que ela sustenta também NUNCA entra na lista 6 nem nos motivos. Se você não \
 aponta o campo ou a linha que a diz, ela fica na lista 6 e o motivo diz o que falta. A \
 lista 6 e os motivos trazem só o que falta ou está errado.
 
@@ -972,10 +1018,22 @@ def _evidencias(textos: Sequence[str], nomes: Iterable[str | None]) -> list[str]
 # v9 (item 32 da auditoria ao vivo, 22/10/2026): as respostas da equipe CITADAS, com o
 # anúncio de cada uma — a política da loja tem lastro nelas; o produto, só na do mesmo
 # anúncio ou produto (o `SISTEMA`, item 6).
+# Revisão da calibração do v9 (22/10/2026, 3 dos 4 bons do item 32 com falso alarme): o
+# cabeçalho dizia "a OUTRO cliente" e "nunca dado deste pedido" sem dizer que a resposta
+# É lastro, e a linha só marcava o produto que NÃO vale ("do mesmo anúncio" sem o "vale
+# para produto" do pacote; nada sobre a política). Agora cada linha diz, com as palavras
+# do `SISTEMA`, o que vale: «vale para política da loja» (a resposta desta loja) e «vale
+# para produto»/«não vale para produto» (`fonte_de_produto`, como o pacote).
 CABECALHO_PARES = (
-    "RESPOSTAS DA EQUIPE CITADAS (como a equipe da loja respondeu a OUTRO cliente; "
-    "política da loja e, do mesmo anúncio ou produto, produto — nunca dado deste pedido):"
+    "RESPOSTAS DA EQUIPE CITADAS (o que a equipe da loja já respondeu num caso parecido; é "
+    "LASTRO no que a linha diz que vale — «vale para política da loja»: a política da loja; "
+    "«vale para produto»: o que diz do produto, se as EVIDÊNCIAS não dizem o contrário; "
+    "nunca dado, estado, data ou prazo deste pedido):"
 )
+VALE_POLITICA = "vale para política da loja"
+NAO_VALE_POLITICA = "não vale para política da loja"
+VALE_PRODUTO = "vale para produto"
+NAO_VALE_PRODUTO = "não vale para produto"
 
 
 def linhas_dos_pares(pares: Sequence[Mapping[str, Any]], nomes: Iterable[str | None]) -> list[str]:
@@ -984,7 +1042,9 @@ def linhas_dos_pares(pares: Sequence[Mapping[str, Any]], nomes: Iterable[str | N
     Revisão do item 32 (22/10/2026): "do mesmo anúncio"/"do mesmo produto" só no par que
     vale para produto (`fonte_de_produto`: a conversa com UM anúncio, de UM modelo); o
     do anúncio da conversa que tem outro anúncio ou modelo não vale. Com o título do
-    anúncio e a idade da resposta.
+    anúncio e a idade da resposta. Revisão da calibração do v9: cada linha diz se vale
+    para a política da loja (`mesma_loja`) e se vale ou não para produto, com as palavras
+    do `SISTEMA` (item 6, a e b).
     """
     if not pares:
         return []
@@ -997,18 +1057,22 @@ def linhas_dos_pares(pares: Sequence[Mapping[str, Any]], nomes: Iterable[str | N
                 ("do mesmo anúncio «" + titulo + "»" if titulo else "do mesmo anúncio")
                 if par.get("mesmo_anuncio")
                 else "do mesmo produto"
-            )
+            ) + f", de um modelo só: {VALE_PRODUTO}"
         elif par.get("mesmo_anuncio"):
             produto = (
                 "do anúncio «" + titulo + "»" if titulo else "de um anúncio"
-            ) + " desta conversa, que tem outro anúncio ou modelo: não vale para produto"
+            ) + f" desta conversa, que tem outro anúncio ou modelo: {NAO_VALE_PRODUTO}"
         else:
-            produto = "de outro anúncio ou sem anúncio: não vale para produto"
-        loja = "desta loja" if par.get("mesma_loja") else "de outra loja"
+            produto = f"de outro anúncio ou sem anúncio: {NAO_VALE_PRODUTO}"
+        loja = (
+            f"desta loja: {VALE_POLITICA}"
+            if par.get("mesma_loja")
+            else f"de outra loja: {NAO_VALE_POLITICA}"
+        )
         pergunta = _uma_linha(_mascarar_nomes(str(par.get("pergunta") or ""), nomes), 300)
         resposta = _uma_linha(_mascarar_nomes(str(par.get("resposta") or ""), nomes), 400)
         linhas.append(
-            f"- {par.get('id')} ({loja}, {produto}, {pacote.quando_do_par(par)}): "
+            f"- {par.get('id')} ({loja}; {produto}; {pacote.quando_do_par(par)}): "
             f"cliente «{pergunta}» → equipe «{resposta}»"
         )
     return linhas
