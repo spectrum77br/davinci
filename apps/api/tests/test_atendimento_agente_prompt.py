@@ -87,7 +87,11 @@ from tests.test_atendimento_ia import (
 # ficou à parte); "não chegou ou atrasou" é entrega_nao_recebida (nunca "ao receber"
 # nem "recuse"; a previsão vencida é abrir_chamado). Para caber no teto, as duas linhas
 # do pedido sem número/que não aparece viraram uma (antes "835308a2d9a8805c").
-RETRATO_BLOCO_GERAL = "6edf4627eca7db37"
+# 22/10/2026 (item 32 da auditoria ao vivo, a equipe em todo turno): o "par:<id>" do
+# exemplo da equipe usado passa a ser evidência (`_SAIDA`) e o buscar_respostas_equipe
+# fica "só o TOM; nada deles vale como dado" (`_FERRAMENTAS`) — 9 caracteres a menos; o
+# resto vai no bloco 2 (`prompt.COMO_A_EQUIPE_RESPONDE`) (antes "6edf4627eca7db37").
+RETRATO_BLOCO_GERAL = "633eaf94186a21ee"
 
 
 def _geral() -> str:

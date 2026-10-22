@@ -131,6 +131,27 @@ previsão, mas costuma voltar / sempre volta / volta ao estoque logo") e o bom
 `boa-aj23-parafrase` (o 0acd80a6 com outras palavras); o texto que repete a POLÍTICA
 DE ESTOQUE da própria entrada conta como contaminado (`contaminado`).
 
+Item 32 da auditoria ao vivo (22/10/2026, `SISTEMA` v9 — os rascunhos segurados que a
+equipe respondeu igual no Duoke): o campo opcional "pares" do caso (as RESPOSTAS DA EQUIPE
+CITADAS: [{"id": "par:<id>", "pergunta", "resposta", "mesma_loja", "mesmo_anuncio",
+"mesmo_produto", "fonte_de_produto", "titulo_do_anuncio", "idade_dias"}],
+`verificador.linhas_dos_pares`). Bons: a política do reembolso com o par
+citado (`boa-aj32-reembolso-par`), o 59071b45 ("o reembolso cai no mesmo dia?" com quem faz
+e como volta, `boa-aj32-59071b45`), o produto do par do MESMO anúncio
+(`boa-aj32-capa-mesmo-anuncio`) e o 80035f0e (a restrição dos estados perguntados, sem o
+RS que o cliente não perguntou, `boa-aj32-80035f0e`). Ruins (grupo `equipe` e `regiao`):
+o prazo do pedido tirado do par (equipe-01), o produto do par de OUTRO anúncio
+(equipe-02), a promessa que o par ensina (equipe-03), o "cai no mesmo dia" sem lastro
+(equipe-04), e a entrega dada nos outros estados (regiao-aj32-01) ou no estado restrito
+que o anúncio não cita (regiao-aj32-02). Revisão do item 32: a resposta antiga do MESMO
+anúncio que o anúncio atual contradiz ("Não acompanha capa", equipe-05) e a do OUTRO
+modelo do anúncio de dois modelos (o NFC do A18 dado ao A17, equipe-06 — o par chega
+"não vale para produto"). E o pedido à loja dentro da devolução "Em andamento"
+respondido com a política do par ("a Shopee recusou, vocês podem aceitar?", equipe-07; o
+pacote da devolução perdido, equipe-08) — o código já os segura antes (a devolução de
+rotina é só o andamento); o verificador é a segunda trava. A barra: NENHUM escape no
+`equipe` e no `regiao`, os quatro bons liberados e o recall de sempre no resto.
+
 Saída: 0 ok; 2 sem chave; 3 na janela; 4 parou no teto.
 """
 
@@ -323,6 +344,12 @@ def conferir_caso(caso: Any, *, linha: int = 0) -> None:
         raise CasoInvalido(f"{onde}: lacunas inválidas")
     if "declarado" in caso and not isinstance(caso["declarado"], str):
         raise CasoInvalido(f"{onde}: declarado não é texto")
+    # v9 (item 32): as respostas da equipe citadas.
+    pares = caso.get("pares", [])
+    if not isinstance(pares, list) or not all(
+        isinstance(par, Mapping) and str(par.get("id") or "").startswith("par:") for par in pares
+    ):
+        raise CasoInvalido(f"{onde}: pares inválidos")
     if "bloqueia_sem_marca" in caso and (
         caso["bloqueia_sem_marca"] not in BLOQUEIOS_SEM_MARCA
         or esperado["ok_para_envio_automatico"]
@@ -434,6 +461,8 @@ def entrada_do_caso(caso: Mapping[str, Any]) -> str:
         # caso que a diz; as lacunas com o dado: as do caso ou as das evidências.
         sem_pergunta=sem_pergunta_do_caso(caso),
         lacunas=tuple(caso["lacunas"]) if "lacunas" in caso else None,
+        # v9 (item 32): as respostas da equipe que o rascunho cita.
+        pares=tuple(dict(par) for par in caso.get("pares") or []),
     )
     return verificador.montar_entrada(
         acao=str(caso.get("acao") or "responder"),

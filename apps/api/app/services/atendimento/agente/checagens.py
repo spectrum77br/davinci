@@ -90,7 +90,7 @@ import dataclasses
 import functools
 import json
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -350,10 +350,14 @@ def conferir_evidencias(evidencias: Iterable[str], ctx: ContextoAgente) -> list[
 
     A `regra:<assunto>` dos assuntos com a orientação no sistema prova-se sozinha
     (`_orientacao_do_sistema`, integração r5); a dos outros (rastreio, prazo…)
-    só pelo `consultar_manual`.
+    só pelo `consultar_manual`. Item 32 da auditoria ao vivo (22/10/2026): o
+    `par:<id>` que o PACOTE mostrou (`ctx.pares_do_pacote`) é citável; o de fora
+    dele continua sem prova.
     """
     desconhecidas = [
-        e for e in ctx.registro.desconhecidas(evidencias) if not _orientacao_do_sistema(e)
+        e
+        for e in ctx.registro.desconhecidas(evidencias)
+        if not _orientacao_do_sistema(e) and e not in ctx.pares_do_pacote
     ]
     if not desconhecidas:
         return []
@@ -1107,6 +1111,69 @@ def conferir_sem_previsao(
     return _sem_repetir(saida)
 
 
+# ── 2c. A chegada do estoque com data (revisão do item 32, 22/10/2026) ───
+#
+# "O azul está esgotado no momento e chega no final de novembro!", "a reposição chega
+# no fim de novembro", "ainda está vindo", "logo vamos ter" iam ao verificador sem
+# trava de código (a brecha de antes; com o par da equipe no pacote — "consta que vai
+# chegar final de novembro!" —, o modelo passava a ver o exemplo). Nenhum dado do
+# agente traz a chegada do estoque: na frase de ESTOQUE (não a previsão de entrega do
+# pedido), a chegada/volta com mês, data, "final de", "próxima semana", "a caminho",
+# "em breve" ou o "vamos ter" → regra SUAVE (não sai sozinho; aviso no copiloto).
+_MESES_DO_ANO = (
+    r"janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro"
+)
+_CHEGADA_COM_DATA = re.compile(
+    r"\b(?:cheg\w*|volt\w*|repo\w*|retorn\w*|reabastec\w*|entra\w*|libera\w*|vem)\b"
+    r"(?:\s+[a-z0-9]+){0,5}?\s+(?:(?:no|na|em|ate|ate\s+o|ate\s+a|pelo|pela|para\s+o"
+    r"|para\s+a|pro|pra|la\s+pelo)\s+)?"
+    r"(?:(?:final|fim|comeco|inicio|meados|metade)\s+d[eoa]\s+(?:mes|semana|ano|"
+    + _MESES_DO_ANO
+    + r")|(?:"
+    + _MESES_DO_ANO
+    + r")|proxim[ao]s?\s+(?:semana|mes|dias|lote|remessa)|dia\s+\d{1,2}|\d{1,2}\s*/\s*\d{1,2}"
+    r"|amanha|semana\s+que\s+vem|mes\s+que\s+vem)\b"
+    r"|\b(?:esta|ta|estao|tao|ainda\s+esta|ja\s+esta)\s+(?:vindo|chegando|a\s+caminho)\b"
+    r"|\blogo\s+(?:vamos|vai|vao|teremos|tera|volta\w*|cheg\w*|entra\w*)\b|\bem\s+breve\b"
+    r"|\bvamos\s+(?:ter|vender|trazer|receber|repor)\b|\bteremos\b"
+)
+CHEGADA_SEM_DADO = "chegada_sem_dado"
+MOTIVO_CHEGADA_SEM_DADO = (
+    "fala de chegada ou reposição do estoque com data ou previsão que nenhum dado traz"
+)
+
+
+def conferir_chegada_do_estoque(texto: str, fichas: Sequence[Any] = ()) -> list[PendenciaAgente]:
+    """A chegada/reposição do ESTOQUE com data ou previsão (ver acima) → SUAVE. PURA. Só
+    o agente. A frase é de estoque pela palavra do estoque/da reposição, ou pela
+    variação/cor citada (`_DE_ESTOQUE`, como no "sem previsão"); a que não fala do
+    pedido (`_DO_PEDIDO`) também conta quando o TEXTO fala de estoque ("O azul está
+    esgotado. Consta que vai chegar no final de novembro!")."""
+    plano = _plano(texto)
+    if not plano or not _CHEGADA_COM_DATA.search(plano):
+        return []
+    lista = _lista_principal(_sem_repetir_fichas([f for f in fichas if isinstance(f, Mapping)]))
+
+    def _de_estoque(sentenca: str) -> bool:
+        return bool(_DE_ESTOQUE.search(sentenca)) or (
+            not _DO_PEDIDO.search(sentenca)
+            and bool(
+                (lista and _citadas_em_ordem(sentenca, lista))
+                or _ESSA_OPCAO.search(sentenca)
+                or _cores_de(sentenca)
+            )
+        )
+
+    sentencas = _sentencas(plano)
+    texto_de_estoque = any(_de_estoque(s) for s, _pergunta in sentencas)
+    for sentenca, pergunta in sentencas:
+        if pergunta or not _CHEGADA_COM_DATA.search(sentenca):
+            continue
+        if _de_estoque(sentenca) or (texto_de_estoque and not _DO_PEDIDO.search(sentenca)):
+            return [_suave(CHEGADA_SEM_DADO, MOTIVO_CHEGADA_SEM_DADO)]
+    return []
+
+
 # ── 3. A fonte da característica do produto ───────────────────────────────
 
 _SIM_NAO = frozenset({"nfc", "rede_5g", "wifi_5ghz", "desbloqueado"})
@@ -1447,7 +1514,14 @@ def _mencao_na_fonte(objeto: str, fontes: Sequence[str]) -> tuple[bool, bool]:
     return (False in mencoes), (True in mencoes)
 
 
-def _acompanha(texto: str, fontes: Sequence[str]) -> list[PendenciaAgente]:
+def _acompanha(
+    texto: str, fontes: Sequence[str], do_par: Collection[str] = frozenset()
+) -> list[PendenciaAgente]:
+    """`do_par` (revisão do item 32, 22/10/2026) = os objetos que uma resposta da equipe
+    CITADA, que vale para produto, AFIRMA que acompanham (`objetos_afirmados_no_par`):
+    só resolvem o "acompanha X" quando nenhuma fonte do anúncio cita X — a negação da
+    ficha ("Não acompanha capa") continua contradizendo, e o par nunca sustenta o "não
+    acompanha"."""
     saida = []
     for sentenca, pergunta in _sentencas(_plano(texto)):
         if pergunta or not _ACOMPANHA.search(sentenca) or _NAO_AFIRMA.search(sentenca):
@@ -1471,12 +1545,84 @@ def _acompanha(texto: str, fontes: Sequence[str]) -> list[PendenciaAgente]:
                         PRODUTO_CONTRADIZ, f"diz que acompanha {objeto}, mas o anúncio diz que não"
                     )
                 )
+            elif not negada and objeto in do_par:
+                # O anúncio não cita o objeto (nem afirma nem nega): o par citado diz.
+                continue
             else:
                 verbo = "não acompanha" if negada else "acompanha"
                 saida.append(
                     _suave(PRODUTO_SEM_FONTE, f"diz que {verbo} {objeto} sem fonte (ficha ou fato)")
                 )
     return saida
+
+
+# Revisão do item 32 da auditoria ao vivo (22/10/2026): o que a resposta da equipe
+# CITADA afirma que acompanha ("sim vai com capa de brinde!", "acompanha película"). Só
+# a oração afirmada — sem negação nenhuma e fora da pergunta — com o verbo de
+# acompanhar (o da ficha ou o da equipe: "vai com", "segue junto", "de brinde"); "não
+# trabalhamos com capinha" é política, não o que vem na caixa.
+_ACOMPANHA_NA_EQUIPE = re.compile(
+    r"\b(?:va[io]|segue|seguem|sai|saem)\s+(?:junto|com)\b|\bde\s+brinde\b|\bbrinde\b"
+)
+_NEGACAO_NA_ORACAO = re.compile(r"\b(?:nao|sem|nem|nenhum\w*|nunca|somente|so|apenas)\b")
+
+
+def objetos_afirmados_no_par(textos: Iterable[str | None]) -> frozenset[str]:
+    """Os objetos (`_OBJETOS`) que as respostas da equipe afirmam que acompanham. PURA."""
+    saida: set[str] = set()
+    for texto in textos:
+        for sentenca, pergunta in _sentencas(_plano(texto or "")):
+            if pergunta:
+                continue
+            for oracao in _FIM_DA_ORACAO.split(sentenca):
+                if _NEGACAO_NA_ORACAO.search(oracao) or not (
+                    _ACOMPANHA.search(oracao) or _ACOMPANHA_NA_EQUIPE.search(oracao)
+                ):
+                    continue
+                saida.update(_objetos(oracao))
+    return frozenset(saida)
+
+
+def acompanha_pelo_par(
+    pares_do_produto: Sequence[str],
+    fichas: Sequence[Any],
+    ctx: ContextoAgente | None = None,
+    *,
+    fontes_extra: Sequence[str] = (),
+) -> list[str]:
+    """O dado que o par CITADO dá à `caracteristicas_fora_do_dado`: "acompanha <objeto>"
+    para cada objeto que ele afirma e que NENHUMA fonte do anúncio cita (revisão do
+    item 32). Nunca o texto do par (especificação, compatibilidade: só o anúncio). PURA."""
+    if not pares_do_produto:
+        return []
+    fontes = _fontes_planas(fichas, ctx, fontes_extra)
+    return [
+        f"acompanha {objeto}"
+        for objeto in sorted(objetos_afirmados_no_par(pares_do_produto))
+        if _mencao_na_fonte(objeto, fontes) == (False, False)
+    ]
+
+
+def _fontes_planas(
+    fichas: Sequence[Any], ctx: ContextoAgente | None, fontes_extra: Sequence[str]
+) -> list[str]:
+    """Os textos planos das fontes do anúncio (as fichas, o registro e `fontes_extra`)."""
+    dados = [*(f for f in fichas if isinstance(f, Mapping)), *_do_registro(ctx)]
+    cruas = [t for d in dados for t in _textos_do(d) if isinstance(t, str)]
+    cruas += [t for t in fontes_extra if isinstance(t, str) and t.strip()]
+    return [_plano(t) for t in cruas]
+
+
+def par_vale_para_produto(fichas: Sequence[Any]) -> bool:
+    """O par citado pode ser fonte de produto nestas fichas? Só com UM anúncio (as
+    fichas do pacote e as que o `ver_anuncio` leu) e sem campo que varia por modelo
+    (revisão do item 32: o pacote já confere o vínculo, `pares.exemplos_do_turno`).
+    PURA."""
+    dados = [f for f in fichas if isinstance(f, Mapping)]
+    itens = {str(f.get("item_id") or "").strip() for f in dados} - {""}
+    if len(itens) > 1:
+        return False
+    return not any(c.get("varia_por_modelo") for e in _especificacoes(dados) for c in e["campos"])
 
 
 # As características que nenhum campo das especificações cobre e que a
@@ -1554,6 +1700,7 @@ def conferir_fonte_produto(
     ctx: ContextoAgente | None = None,
     *,
     fontes_extra: Sequence[str] = (),
+    pares_do_produto: Sequence[str] = (),
 ) -> list[PendenciaAgente]:
     """A característica afirmada tem fonte: ficha, especificações, site ou fato. PURA.
 
@@ -1572,6 +1719,12 @@ def conferir_fonte_produto(
     E o que acompanha o produto ("o fone vem junto"): citado na fonte. E o
     que não tem campo (`_POR_TERMO`): a resistência à água só pelo TÍTULO do
     anúncio, a biometria por qualquer fonte — sem ela, pessoa.
+
+    `pares_do_produto` (item 32 da auditoria ao vivo, 22/10/2026) = as respostas da
+    equipe CITADAS que valem para produto (`ctx.pares_citados(..., de_produto=True)`).
+    Revisão do item 32: só para o que ACOMPANHA, e só quando nenhuma fonte do anúncio
+    cita o objeto (`objetos_afirmados_no_par`, `_acompanha`) — nunca especificação,
+    nunca título (a água continua só pelo título), nunca contra a ficha.
     """
     if not (texto or "").strip():
         return []
@@ -1662,7 +1815,7 @@ def conferir_fonte_produto(
                 f"afirma {rotulo} ('{achado.valor}') sem fonte (anúncio, especificações ou fato)",
             )
         )
-    saida += _acompanha(texto, fontes)
+    saida += _acompanha(texto, fontes, objetos_afirmados_no_par(pares_do_produto))
     titulos = [_plano(t) for d in dados for t in _titulos_do(d)]
     titulos += [_plano(t) for t in fontes_extra if isinstance(t, str) and t.strip()]
     saida += _por_termo(texto, titulos, fontes)
@@ -7487,14 +7640,21 @@ def conferir_andamento(
     *,
     etiquetas: Iterable[str] = (),
     motivos: Sequence[str] = (),
+    rotina: bool = False,
 ) -> list[PendenciaAgente]:
     """Devolução ou chamado em andamento: nunca sai sozinho no piloto → pessoa. PURA.
 
     A `conferir_saida` já manda o do contexto ("pedido com chamado ou
     devolução"); aqui entra a etiqueta Devolução, que ela não lê.
+
+    `rotina` (item 32 da auditoria ao vivo, 22/10/2026) = a devolução já aberta na
+    plataforma sem nada para a loja decidir (`acao_pessoa.devolucao_de_rotina`): a
+    devolução e a etiqueta dela não seguram; o chamado continua segurando.
     """
     ctx_pedido = ctx_pedido if isinstance(ctx_pedido, Mapping) else {}
     if _MOTIVO_DO_LEGADO_ANDAMENTO in motivos:
+        return []
+    if rotina and not ctx_pedido.get("chamados"):
         return []
     if (
         ctx_pedido.get("chamados")
@@ -7799,8 +7959,23 @@ def conferir(
         # variação esgotada e confiável de que a frase fala (o verificador v8 o
         # aceita como lastro; aqui o código confere de qual variação é).
         pendencias += conferir_sem_previsao(texto, fichas, clientes)
+        # Revisão do item 32 (22/10/2026): a chegada do estoque com data → suave.
+        pendencias += conferir_chegada_do_estoque(texto, fichas)
         da_base = _fontes_da_base(base)
-        pendencias += conferir_fonte_produto(texto, fichas, ctx, fontes_extra=da_base)
+        # Item 32 da auditoria ao vivo (22/10/2026): a resposta da equipe CITADA que
+        # vale para produto (o mesmo anúncio ou produto, de UM modelo, com UM anúncio
+        # nas fichas — revisão) é fonte só do que acompanha e que o anúncio não cita.
+        dos_pares = (
+            [
+                str(par.get("resposta") or "")
+                for par in ctx.pares_citados(proposta.evidencias, de_produto=True)
+            ]
+            if par_vale_para_produto(fichas)
+            else []
+        )
+        pendencias += conferir_fonte_produto(
+            texto, fichas, ctx, fontes_extra=da_base, pares_do_produto=dos_pares
+        )
         if ctx.modo == constantes.MODO_AUTO:
             pendencias += conferir_ficha_no_automatico(
                 texto,
@@ -7814,6 +7989,7 @@ def conferir(
                     *ctx.registro.textos,
                     *da_base,
                     *sorted(condicao_provada(texto, fichas)),
+                    *acompanha_pelo_par(dos_pares, fichas, ctx, fontes_extra=da_base),
                 ],
                 # Kia ao vivo (21/10/2026): o fato aprovado citado é fonte.
                 fatos_citados=ctx.fatos_citados(proposta.evidencias),
@@ -7901,7 +8077,9 @@ def conferir(
     pendencias += conferir_generica_com_pendencia(
         conferida.categoria, base.recentes, gatilho, texto
     )
-    pendencias += conferir_andamento(base.ctx, motivos=conferida.motivos)
+    pendencias += conferir_andamento(
+        base.ctx, motivos=conferida.motivos, rotina=ctx.devolucao_de_rotina
+    )
     return Checagens(pendencias=_sem_repetir(pendencias))
 
 

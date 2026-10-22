@@ -125,6 +125,18 @@ linhas do pedido sem número/que não aparece viraram uma). A prática da Shopee
 do atraso; o cartão de devolução aberto é reclamacao_aberta e o texto só confirma) vai no
 bloco 2, `NOTAS_DA_PLATAFORMA["shopee"]`; quem marca a ação é o código
 (`acao_pessoa.atraso_de_entrega`, `acao_pessoa.devolucao_na_plataforma`).
+
+22/10/2026 (item 32 da auditoria ao vivo — os rascunhos segurados × a resposta da equipe
+no Duoke; o agente chamou o `buscar_respostas_equipe` em 0 de 94 rascunhos): o pacote traz
+a seção COMO A EQUIPE JÁ RESPONDEU (`pacote.secao_da_equipe`) e o bloco 2 diz como usá-la
+(`COMO_A_EQUIPE_RESPONDE`, igual em todas as plataformas): a política que a equipe repete
+é resposta, citando o par:<id>; dado de pedido nunca vem de um par; característica, só do
+par do mesmo anúncio ou produto; par nunca autoriza ação de pessoa; a devolução já aberta
+sem ação pendente da loja não é pessoa só com a marca "devolucao_sem_decisao_da_loja" do
+ESTADO DA CONVERSA (revisão: a do código, `acao_pessoa.rotina_do_turno`); o estilo curto
+da equipe. O bloco 1 ficou 9
+caracteres menor: o `_SAIDA` aceita o "par:<id>" e o `_FERRAMENTAS` diz que o
+`buscar_respostas_equipe` é só o TOM (os exemplos dele não têm id).
 """
 
 from __future__ import annotations
@@ -367,7 +379,8 @@ NOTAS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {
         "é abrir_chamado (a loja abre o chamado com a Shopee).",
         'Cartão "[Shopee] Cliente abriu pedido de devolução/reembolso" na conversa (ou o '
         "pedido já em devolução): a solicitação está aberta na Shopee e a loja responde por lá "
-        "— a ação é reclamacao_aberta. O texto só confirma que a solicitação foi aberta pela "
+        "— a ação é reclamacao_aberta (salvo com devolucao_sem_decisao_da_loja no ESTADO DA "
+        "CONVERSA: COMO A EQUIPE RESPONDE). O texto só confirma que a solicitação foi aberta pela "
         "Shopee e que o andamento aparece em Minhas Compras > o pedido: nunca decida, aceite, "
         "recuse, prometa nem mande pedir de novo.",
     ),
@@ -543,8 +556,7 @@ segurar_envio → como pedir o cancelamento no app; analisar_evidencia sem outra
 _FERRAMENTAS = """# AS FERRAMENTAS (só leitura)
 - ver_pedido: só OUTRO pedido do mesmo comprador.
 - ver_garantia(null) = a garantia do pedido da conversa.
-- buscar_respostas_equipe: só o TOM; número, prazo e característica de produto dos exemplos \
-nunca valem.
+- buscar_respostas_equipe: mais exemplos, só o TOM; nada deles vale como dado.
 - sugerir_troca: só para rascunho de pessoa.
 "não localizado neste atendimento" = não é desta conversa nem deste comprador: não insista. \
 "dado indisponível agora" = siga sem o dado (pergunte ou encaminhe), sem inventar."""
@@ -694,7 +706,7 @@ uma ação de pessoa se aplica, a acao é "pessoa";
 curta, sem dado pessoal; "" nos outros casos;
 - evidencias: os ids que sustentam a resposta, como vieram da chave "evidencias" das \
 ferramentas e da linha EVIDÊNCIAS dos <dados> ("regra:<assunto>" só com o consultar_manual \
-dele); nunca exemplo da equipe nem id que não veio."""
+dele; "par:<id>": o exemplo da equipe usado); nunca id que não veio."""
 
 # As linhas recomendadas para o Haiku 5.5 (spec 5.1, item 8), literais.
 _HAIKU = """# SEMPRE
@@ -752,6 +764,37 @@ def bloco_geral() -> str:
     return "\n\n".join(partes)
 
 
+# Item 32 da auditoria ao vivo (22/10/2026 — os rascunhos segurados × a resposta da
+# equipe no Duoke; o legado mandava sozinho 20% dos turnos de 14 a 21/10, o agente 16%):
+# o dono quer o agente respondendo como a equipe responde e só o ESSENCIAL para pessoa.
+# No bloco 2 (o bloco 1 está no teto), igual para todas as plataformas: como usar a
+# seção COMO A EQUIPE JÁ RESPONDEU do pacote (`pacote.secao_da_equipe`) — a política da
+# loja que a equipe repete é resposta, citando o par:<id>; dado de pedido nunca vem de
+# um par; característica, só do par do mesmo anúncio ou produto; par nunca autoriza
+# ação de pessoa —, a devolução já aberta sem ação pendente da loja (só com a marca
+# "devolucao_sem_decisao_da_loja" do ESTADO DA CONVERSA, que o código põe com a chave
+# ligada e o turno só de andamento: `acao_pessoa.rotina_do_turno` — revisão do item 32)
+# e o estilo curto da equipe.
+COMO_A_EQUIPE_RESPONDE = (
+    "# COMO A EQUIPE RESPONDE (a seção COMO A EQUIPE JÁ RESPONDEU dos <dados>)\n"
+    "- A equipe respondeu do mesmo jeito o mesmo tipo de pergunta: responda igual (é a "
+    "política e o conhecimento de produto da loja), adaptado a este cliente, e cite o "
+    "par:<id> em evidencias.\n"
+    "- Dado do pedido (status, datas, prazos, rastreio, valores) só do PEDIDO DA CONVERSA, "
+    "nunca de um par; o par que contradiz o anúncio ou o pedido perde. Do produto, só o "
+    "que acompanha e só de par marcado «vale para produto»; especificação e chegada do "
+    "estoque, nunca de um par.\n"
+    "- Par nunca autoriza ação de pessoa (aprovar devolução ou reembolso, arquivo da NF, "
+    "Pix, desconto, chamado): a régua vale igual.\n"
+    "- ESTADO DA CONVERSA com devolucao_sem_decisao_da_loja (devolução em espera na "
+    "plataforma, sem acao_pendente da loja, e o cliente só pergunta o andamento ou o prazo "
+    "do reembolso): não é pessoa — o status e que a plataforma analisa e faz o reembolso "
+    "pela mesma forma de pagamento, sem prazo. Sem essa marca, devolução aberta continua "
+    "reclamacao_aberta.\n"
+    "- Estilo da equipe: curto e direto, de 1 a 3 frases, sem repetir desculpas."
+)
+
+
 # O cabeçalho do catálogo dos assuntos no bloco 2. Item 16 da auditoria ao vivo
 # (21/10/2026, Kia 22:29, 5839ff11): "Então a capinha não serve ne", depois da
 # resposta da loja sobre a capinha, saiu como cobertura_regiao (o certo:
@@ -771,7 +814,8 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
     """O bloco 2 da plataforma (regras, assuntos, caminhos do app). PURA e determinística.
 
     Só a plataforma e os assuntos (o manual) entram: a loja, o canal da
-    conversa e a data vão no pacote.
+    conversa e a data vão no pacote. Item 32 (22/10/2026): e, antes dos assuntos,
+    `COMO_A_EQUIPE_RESPONDE` (igual em todas).
     """
     nome = ia._PLATAFORMA_NOME.get(plataforma, plataforma)
     canais = sorted(
@@ -793,6 +837,8 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
     if regras:
         partes.append("Regras da plataforma:\n" + "\n".join(regras))
     partes.append(f"Caminhos do app da {nome} (só estes):\n" + _linhas(caminhos))
+    # Item 32 (22/10/2026): como a equipe responde e o estilo dela.
+    partes.append(COMO_A_EQUIPE_RESPONDE)
     assuntos = ia.lista_de_assuntos([dict(c) for c in categorias], MAX_CHARS_ASSUNTOS)
     partes.append(ASSUNTOS_CABECALHO + assuntos)
     return "\n\n".join(partes)

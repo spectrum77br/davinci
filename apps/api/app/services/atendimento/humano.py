@@ -630,7 +630,12 @@ def _triar_do_agente(
     pedido = ctx.get("pedido")
 
     # ── Estado do pedido e da conversa (o mesmo da régua de sempre) ──
-    if (
+    # Item 32 da auditoria ao vivo (22/10/2026, 3c): a devolução já aberta na
+    # plataforma sem nada para a loja decidir e o turno que só pergunta o andamento
+    # (`acao_pessoa.devolucao_de_rotina`, com a chave) não é estado de pessoa — igual
+    # ao rascunho do agente (o gatilho 3 e o andamento).
+    rotina = acao_pessoa.devolucao_de_rotina(conversa, ctx, recentes, gatilho)
+    if not rotina and (
         conversa.canal == CANAL_RECLAMACAO
         or ETIQUETA_RECLAMACAO in etiquetas
         or ia._reclamacoes_abertas(ctx)
@@ -639,7 +644,7 @@ def _triar_do_agente(
         motivos.add(HUMANO_RECLAMACAO)
     if ETIQUETA_AG_CANCELAMENTO in etiquetas or ia.em_aguardando_cancelamento(pedido):
         motivos.add(HUMANO_AG_CANCELAMENTO)
-    if ETIQUETA_DEVOLUCAO in etiquetas or ctx.get("devolucoes"):
+    if not rotina and (ETIQUETA_DEVOLUCAO in etiquetas or ctx.get("devolucoes")):
         motivos.add(HUMANO_DEVOLUCAO)
     if ctx.get("chamados"):
         motivos.add(HUMANO_CHAMADO)

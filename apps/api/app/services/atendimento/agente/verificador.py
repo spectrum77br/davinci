@@ -50,7 +50,9 @@ valores das lacunas de volta a `{lacuna}` e os nomes mascarados. v7 (21/10/2026)
 cada lacuna do texto vai com o "o pedido tem o dado" e o papel do campo (LACUNAS
 DO RASCUNHO), o turno sem pergunta diz "nenhuma" (a régua estrita de
 `turno_sem_pergunta`, com a conversa sem pendência: `conversa_sem_pendencia`) e o
-assunto declarado é o que a trava liberou (`declarado`).
+assunto declarado é o que a trava liberou (`declarado`). v9 (item 32, 22/10/2026): as
+RESPOSTAS DA EQUIPE CITADAS — os `par:<id>` do pacote que o rascunho cita, com o anúncio
+de cada uma (`linhas_dos_pares`).
 """
 
 from __future__ import annotations
@@ -141,7 +143,22 @@ logger = structlog.get_logger()
 #     E confiavel=true CITADA no texto ou na pergunta (ou o produto inteiro esgotado),
 #     nunca o esgotado do pedido já feito; e o código confere o "sem previsão" antes
 #     (`checagens.conferir_sem_previsao`).
-VERSAO = "v8"
+# v9 (22/10/2026, item 32 da auditoria ao vivo — os rascunhos segurados que a equipe
+# respondeu igual no Duoke; nenhuma regra que bloqueia afrouxou fora destas três):
+#  1. as RESPOSTAS DA EQUIPE CITADAS (os `par:<id>` do pacote que o rascunho cita,
+#     `ResumoDoPacote.pares`): a POLÍTICA da loja que bate com uma delas tem lastro, e o
+#     PRODUTO só da do mesmo anúncio ou produto; fato, estado, data e prazo do pedido,
+#     promessa de ação da equipe e o que contradiz as EVIDÊNCIAS continuam contando;
+#  2. (59071b45, Kia 08:40) "o reembolso cai no mesmo dia?" respondido com quem faz o
+#     reembolso e como ele volta (a plataforma analisa e devolve pela mesma forma de
+#     pagamento), sem prazo, trata a pergunta (item 7) — a equipe: "o reembolso é feito
+#     pela plataforma!";
+#  3. (80035f0e, Barbosa ML 23:23) quem pergunta de estados específicos e recebe a
+#     restrição do anúncio para ESSES estados: não citar outro estado restrito que o
+#     cliente não perguntou não é problema (item 3, lista 6 e item 7) — a equipe:
+#     "exatamente isso!"; dizer ou dar a entender que entrega num estado restrito
+#     continua marcando.
+VERSAO = "v9"
 MODELO = "claude-haiku-5-5"
 EFFORT = "low"
 # O JSON do `Veredito` (~100–300 tokens) + o raciocínio ADAPTATIVO, que conta no
@@ -442,6 +459,9 @@ garantia, os fatos aprovados do manual). É a ÚNICA fonte de verdade sobre o pe
 o produto: o que não está nas EVIDÊNCIAS não está provado;
 - REGRAS DA LOJA: o que o manual da loja diz do assunto (regra, orientação, respostas \
 prontas). É orientação, NÃO é fato nem autorização de promessa;
+- RESPOSTAS DA EQUIPE CITADAS (quando vier): como a equipe da loja já respondeu a OUTRO \
+cliente, com o anúncio de cada uma (o mesmo desta conversa, o mesmo produto ou outro). É a \
+política e o conhecimento da loja, nunca fato deste pedido nem autorização de promessa;
 - ORIENTAÇÃO APROVADA DO ASSUNTO e CAMINHOS DO APP: o que o agente pode dizer sobre a \
 regra da plataforma e onde o cliente faz as coisas no app. Cancelamento, reembolso e \
 troca_devolucao são assuntos irmãos: com um deles declarado, vem a orientação dos três, e a \
@@ -524,7 +544,10 @@ comprar", "chega normalmente", "você recebe normalmente" a quem perguntou de um
 lugar restrito. Cidade e gentílico contam: Niterói, São Gonçalo, Duque de Caxias, \
 Nova Iguaçu, Petrópolis, Volta Redonda e "carioca"/"fluminense" são RJ; "Rio" \
 sozinho é RJ. Também true quando o texto afirma entrega numa região e as \
-EVIDÊNCIAS não dizem nada sobre cobertura ou restrição.
+EVIDÊNCIAS não dizem nada sobre cobertura ou restrição. NÃO marca: o cliente pergunta de \
+estados específicos e o texto cita a restrição do anúncio para ESSES estados, sem dizer nem \
+dar a entender que entrega em outro estado restrito — deixar de citar um estado restrito \
+que o cliente não perguntou não é problema (nem aqui, nem na lista 6, nem no item 7).
 
 4. caminho_fora_da_plataforma — o texto manda o cliente resolver FORA do \
 marketplace: site, WhatsApp, telefone, e-mail, redes sociais, suporte ou SAC da \
@@ -574,7 +597,11 @@ dito com outras palavras — a RAM 16 GB (8 GB + 8 GB virtual) é 8 GB físicos 
 virtuais, 16 GB no total; e, com a POLÍTICA DE ESTOQUE DA LOJA na entrada, dizer da \
 variação que as EVIDÊNCIAS trazem com disponivel=false e confiavel=true que está \
 esgotada, que não há previsão de reposição nem data de chegada e que o cliente pode \
-acompanhar o anúncio. \
+acompanhar o anúncio; e o que uma RESPOSTA DA EQUIPE CITADA sustenta — a política da \
+loja dita como ela disse (o reembolso é feito ou analisado pela plataforma e volta pela \
+mesma forma de pagamento; não fazemos troca sem defeito; a loja não vende o acessório \
+avulso) e, só quando ela é do mesmo anúncio ou do mesmo produto, o que ela diz do produto \
+(o que acompanha, compatibilidade). \
 Continua contando: o prazo com número, dia ou data que nenhum \
 campo traz (em 2 dias úteis, até sexta, chega no sábado); garantir o prazo (está \
 garantido, não atrasa, pode ficar tranquilo que chega); o prazo, a cobertura ou a \
@@ -584,14 +611,20 @@ de física a memória virtual, outra divisão da RAM); e a reposição com data,
 "em breve", "logo volta", "deve chegar", quantidade ou reserva, e o esgotado ou o sem \
 previsão de uma variação que as EVIDÊNCIAS não trazem com disponivel=false e \
 confiavel=true (a com confiavel=false só aparece como indisponível no anúncio), ou de um \
-produto, acessório ou peça que não é a variação esgotada. Cite cada \
+produto, acessório ou peça que não é a variação esgotada; e, de uma RESPOSTA DA EQUIPE \
+CITADA, o fato, o estado, a data, o prazo ou o valor de pedido, o que contradiz as \
+EVIDÊNCIAS e o produto tirado da resposta de outro anúncio ou produto (a promessa ou ação \
+da equipe que ela contenha marca o item 1 igual). Cite cada \
 afirmação curta, com as palavras do texto (até 8 palavras). Vazia = tudo o que o texto \
 afirma está nas EVIDÊNCIAS.
 
 7. responde_o_que_foi_perguntado — true quando o texto trata o que o cliente perguntou \
 neste turno: responde, pergunta o dado que falta para responder ou orienta o caminho \
 no app. false quando ignora a pergunta, responde outra coisa ou deixa sem resposta uma \
-parte importante. Turno SEM pergunta nem pedido (PERGUNTAS DO CLIENTE: nenhuma — só \
+parte importante. A pergunta de QUANDO o reembolso cai ou volta ("no mesmo dia?", \
+"quanto tempo?") respondida com quem faz o reembolso e como ele volta (a plataforma analisa \
+e devolve pela mesma forma de pagamento), sem prazo que nenhum campo traz, é tratada — \
+true: a loja não tem esse prazo. Turno SEM pergunta nem pedido (PERGUNTAS DO CLIENTE: nenhuma — só \
 cumprimento, agradecimento, cartão do produto ou do pedido, anexo, ou o pedido de \
 atendente sem dizer o assunto, como a opção do menu de falar com atendente) e nada \
 pendente na CONVERSA RECENTE: cumprimentar e perguntar como ajudar (apresentando-se, \
@@ -641,7 +674,8 @@ achar algo no app.
 Seja coerente, com o ônus na prova: sustentada é a afirmação que um campo das \
 EVIDÊNCIAS diz, ou a regra e o caminho que a ORIENTAÇÃO APROVADA, as REGRAS DA LOJA ou \
 os CAMINHOS DO APP dizem, ou a lacuna que LACUNAS DO RASCUNHO marca com o dado, no \
-papel do campo dela — essa NUNCA entra na lista 6 nem nos motivos. Se você não \
+papel do campo dela — essa NUNCA entra na lista 6 nem nos motivos; a RESPOSTA DA EQUIPE \
+CITADA também sustenta, nas condições do item 6. Se você não \
 aponta o campo ou a linha que a diz, ela fica na lista 6 e o motivo diz o que falta. A \
 lista 6 e os motivos trazem só o que falta ou está errado.
 
@@ -713,6 +747,11 @@ class ResumoDoPacote:
     plataforma_codigo: str = ""
     sem_pergunta: bool = False
     lacunas: tuple[str, ...] | None = None
+    # v9 (item 32, 22/10/2026): os pares do pacote que o rascunho CITA
+    # (`ctx.pares_citados`): {"id", "pergunta", "resposta", "mesma_loja",
+    # "mesmo_anuncio", "mesmo_produto", "fonte_de_produto", "titulo_do_anuncio",
+    # "idade_dias", …}.
+    pares: tuple[dict, ...] = ()
 
 
 # ── v7 (21/10/2026): o turno sem pergunta e as lacunas com o dado ──
@@ -896,6 +935,8 @@ def resumo_do_pacote(
             and conversa_sem_pendencia(base.recentes, gatilho)
         ),
         lacunas=lacunas_com_dado(base.valores),
+        # v9 (item 32): as respostas da equipe que o rascunho cita.
+        pares=tuple(ctx.pares_citados(ctx.evidencias)),
     )
 
 
@@ -926,6 +967,51 @@ def _evidencias(textos: Sequence[str], nomes: Iterable[str | None]) -> list[str]
         saida_.append(texto)
         total += len(texto)
     return saida_
+
+
+# v9 (item 32 da auditoria ao vivo, 22/10/2026): as respostas da equipe CITADAS, com o
+# anúncio de cada uma — a política da loja tem lastro nelas; o produto, só na do mesmo
+# anúncio ou produto (o `SISTEMA`, item 6).
+CABECALHO_PARES = (
+    "RESPOSTAS DA EQUIPE CITADAS (como a equipe da loja respondeu a OUTRO cliente; "
+    "política da loja e, do mesmo anúncio ou produto, produto — nunca dado deste pedido):"
+)
+
+
+def linhas_dos_pares(pares: Sequence[Mapping[str, Any]], nomes: Iterable[str | None]) -> list[str]:
+    """As linhas de RESPOSTAS DA EQUIPE CITADAS (vazia sem par citado). PURA.
+
+    Revisão do item 32 (22/10/2026): "do mesmo anúncio"/"do mesmo produto" só no par que
+    vale para produto (`fonte_de_produto`: a conversa com UM anúncio, de UM modelo); o
+    do anúncio da conversa que tem outro anúncio ou modelo não vale. Com o título do
+    anúncio e a idade da resposta.
+    """
+    if not pares:
+        return []
+    nomes = tuple(nomes)
+    linhas = [CABECALHO_PARES]
+    for par in pares:
+        titulo = _uma_linha(str(par.get("titulo_do_anuncio") or ""), 80)
+        if par.get("fonte_de_produto") is True:
+            produto = (
+                ("do mesmo anúncio «" + titulo + "»" if titulo else "do mesmo anúncio")
+                if par.get("mesmo_anuncio")
+                else "do mesmo produto"
+            )
+        elif par.get("mesmo_anuncio"):
+            produto = (
+                "do anúncio «" + titulo + "»" if titulo else "de um anúncio"
+            ) + " desta conversa, que tem outro anúncio ou modelo: não vale para produto"
+        else:
+            produto = "de outro anúncio ou sem anúncio: não vale para produto"
+        loja = "desta loja" if par.get("mesma_loja") else "de outra loja"
+        pergunta = _uma_linha(_mascarar_nomes(str(par.get("pergunta") or ""), nomes), 300)
+        resposta = _uma_linha(_mascarar_nomes(str(par.get("resposta") or ""), nomes), 400)
+        linhas.append(
+            f"- {par.get('id')} ({loja}, {produto}, {pacote.quando_do_par(par)}): "
+            f"cliente «{pergunta}» → equipe «{resposta}»"
+        )
+    return linhas
 
 
 # O que o `consultar_manual` devolve que é REGRA (orientação), não fato: vai
@@ -1201,6 +1287,8 @@ def montar_entrada(
             if regras
             else []
         ),
+        # v9 (item 32): as respostas da equipe que o rascunho cita.
+        *linhas_dos_pares(resumo.pares, nomes),
         *orientacao_aprovada(assunto, resumo.plataforma_codigo),
         # v8 (item 23): a política de estoque só com a variação esgotada nas evidências
         # e a resposta de estoque (revisão da rodada 6: `politica_de_estoque_vale`).

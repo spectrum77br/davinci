@@ -18,7 +18,10 @@ Caixa Humano, o envio e a reavaliação leem (`acoes_pessoa`, `acao`).
 
 Os exemplos de OUTROS clientes (`buscar_respostas_equipe`) nunca entram no
 registro: nem id (`par:` é recusado aqui) nem texto — número de exemplo é
-número inventado.
+número inventado. Item 32 da auditoria ao vivo (22/10/2026): os pares que o
+PACOTE mostra (`pacote.secao_da_equipe`) ficam à parte, em `pares_do_pacote` — o
+`par:<id>` deles pode ser citado (`checagens.conferir_evidencias`) e o texto vai ao
+verificador como RESPOSTA DA EQUIPE CITADA, mas nunca vira número nem nome permitido.
 """
 
 from __future__ import annotations
@@ -464,6 +467,15 @@ class ContextoAgente:
     # 20/10/2026): o estado e a origem que a resposta afirma são conferidos
     # contra ele (`checagens.conferir_estado_do_pedido`/`conferir_origem`).
     pedido_da_conversa: dict | None = None
+    # Item 32 da auditoria ao vivo (22/10/2026): os pares da equipe que o PACOTE
+    # mostrou (`par:<id>` → {"pergunta", "resposta", "mesma_loja", "mesmo_anuncio",
+    # "mesmo_produto", "fonte_de_produto", …}). Citáveis; nunca no `registro` (nada de
+    # número permitido).
+    pares_do_pacote: dict[str, dict] = field(default_factory=dict)
+    # Item 32 (3c): a devolução já aberta na plataforma sem nada para a loja decidir
+    # (`acao_pessoa.devolucao_de_rotina`): o envio sozinho não para no "em andamento"
+    # dela (`ia.andamento_no_rascunho` lê a marca no `para_fatos`).
+    devolucao_de_rotina: bool = False
     uso: Uso = field(default_factory=Uso)
     # Preenchidos pelo laço (`agente.responder`).
     acao: str | None = None
@@ -626,6 +638,27 @@ class ContextoAgente:
             if i in self.fatos_lidos
         ]
 
+    def registrar_pares(self, pares: Iterable[Mapping[str, Any]]) -> None:
+        """Os pares da equipe que o pacote mostrou (`pares.exemplos_do_turno`)."""
+        for par in pares:
+            i = _limpo(par.get("id"))
+            if i.startswith(PREFIXOS_SEM_PROVA):
+                self.pares_do_pacote[i] = dict(par)
+
+    def pares_citados(
+        self, evidencias: Iterable[str | None], *, de_produto: bool = False
+    ) -> list[dict]:
+        """Os pares do pacote que a resposta cita (na ordem, sem repetir); com
+        `de_produto`, só os que valem para produto (`fonte_de_produto`: a conversa com UM
+        anúncio, de UM modelo, e o par desse anúncio ou do mesmo conjunto de produtos —
+        revisão do item 32, 22/10/2026)."""
+        saida = []
+        for i in dict.fromkeys(_limpo(e) for e in evidencias if e):
+            par = self.pares_do_pacote.get(i)
+            if par is not None and (not de_produto or par.get("fonte_de_produto") is True):
+                saida.append(par)
+        return saida
+
     def registrar_garantias(self, garantias: Iterable[Mapping[str, Any]]) -> None:
         """O que `ver_garantia` devolveu vira `garantias_conferidas` (sem repetir)."""
         self.garantia_consultada = True
@@ -723,8 +756,25 @@ class ContextoAgente:
         return ordenar_acoes(self.acoes_codigo, self.acoes_modelo)
 
     def para_fatos(self) -> dict:
-        """O `rascunho.fatos["agente"]` (spec 3.3.3): enxuto, sem conteúdo de ferramenta."""
+        """O `rascunho.fatos["agente"]` (spec 3.3.3): enxuto, sem conteúdo de ferramenta.
+
+        Item 32 (22/10/2026): "pares_do_pacote" (os ids que o pacote mostrou) e
+        "devolucao_de_rotina" só quando há — o registro de antes não muda.
+        """
+        extra: dict[str, Any] = {}
+        if self.pares_do_pacote:
+            extra["pares_do_pacote"] = list(self.pares_do_pacote)
+            # Decisão do dono (22/10/2026): a pergunta de produto sai sozinha com a
+            # resposta da equipe do MESMO anúncio, de UM modelo (`ia.trava_do_agente`).
+            de_produto = [
+                i for i, par in self.pares_do_pacote.items() if par.get("fonte_de_produto") is True
+            ]
+            if de_produto:
+                extra["pares_de_produto"] = de_produto
+        if self.devolucao_de_rotina:
+            extra["devolucao_de_rotina"] = True
         return {
+            **extra,
             "versao": constantes.PROMPT_VERSAO_AGENTE,
             "modelo": self.modelo,
             "effort": self.effort,

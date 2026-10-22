@@ -18,6 +18,11 @@ produto que adivinhou.
 O pacote também ENCHE o `ContextoAgente`: o escopo (pedidos e anúncios que
 achou) e o registro (ids que provou e o JSON com os números permitidos).
 
+Item 32 da auditoria ao vivo (22/10/2026): e, em todo turno com pergunta, COMO A EQUIPE
+JÁ RESPONDEU CASOS PARECIDOS (`secao_da_equipe`, até `MAX_CHARS_EQUIPE`): os pares da
+equipe mais parecidos com o turno (`pares.exemplos_do_turno`), com o `par:<id>` citável
+(`ContextoAgente.pares_do_pacote`) — nunca no registro (número de par não é permitido).
+
 Nunca vai ao modelo: o valor pago, o preço do cartão, o CPF, o nome, o
 endereço, a cidade (nem a do status da transportadora, que é a origem da
 loja ou o destino do comprador), a UF do comprador, o sku, o 83955.
@@ -52,6 +57,7 @@ from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento.agente import acao_pessoa
 from app.services.atendimento.agente import contexto as agente_ctx
+from app.services.atendimento.agente import pares as pares_svc
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,6 +140,71 @@ class Pacote:
 # A linha dos ids que o pacote prova (o prompt manda copiar as evidências
 # daqui e da chave "evidencias" das ferramentas; Kia ao vivo, 21/10/2026).
 EVIDENCIAS_DOS_DADOS = "EVIDÊNCIAS DESTES DADOS (ids que você pode citar)"
+
+# Item 32 da auditoria ao vivo (22/10/2026): como a equipe respondeu o mesmo tipo de
+# pergunta (`pares.exemplos_do_turno`), no pacote de todo turno — o agente chamou o
+# `buscar_respostas_equipe` em 0 de 94 rascunhos. Cabe em `MAX_CHARS_EQUIPE` (~340
+# tokens); o bloco 2 (`prompt.COMO_A_EQUIPE_RESPONDE`) diz como usar.
+EQUIPE_CABECALHO = (
+    "COMO A EQUIPE JÁ RESPONDEU CASOS PARECIDOS (outros clientes, mascarados; política e "
+    "produto da loja — dado de pedido nunca vem daqui; cite o par:<id> que seguir):"
+)
+MAX_CHARS_EQUIPE = 1_200
+
+
+def quando_do_par(par: Mapping[str, Any]) -> str:
+    """A idade do par ("hoje", "há 1 dia", "há N dias"). PURA."""
+    dias = int(par.get("idade_dias") or 0)
+    return "hoje" if dias <= 0 else ("há 1 dia" if dias == 1 else f"há {dias} dias")
+
+
+def _onde_do_par(par: Mapping[str, Any]) -> str:
+    """De onde é o par. Revisão do item 32 (22/10/2026): o "mesmo anúncio" com o título
+    dele, e "vale para produto" só no `fonte_de_produto` (a conversa com UM anúncio, de
+    UM modelo) — o de outro anúncio da conversa ou de outro modelo não vale."""
+    loja = "esta loja" if par.get("mesma_loja") else "outra loja"
+    titulo = str(par.get("titulo_do_anuncio") or "").strip()
+    if par.get("mesmo_anuncio"):
+        produto = f"mesmo anúncio «{titulo}»" if titulo else "mesmo anúncio"
+    elif par.get("mesmo_produto"):
+        produto = "mesmo produto"
+    elif par.get("com_anuncio"):
+        produto = "outro anúncio"
+    else:
+        produto = "sem anúncio"
+    vale = "vale para produto" if par.get("fonte_de_produto") else "não vale para produto"
+    return f"{loja}, {produto}, {vale}, {quando_do_par(par)}"
+
+
+def secao_da_equipe(pares: Sequence[Mapping[str, Any]]) -> tuple[str | None, list[dict]]:
+    """(o texto da seção, os pares que couberam) — até `MAX_CHARS_EQUIPE`. PURA."""
+    linhas = [EQUIPE_CABECALHO]
+    total = len(EQUIPE_CABECALHO)
+    cabem: list[dict] = []
+    for par in pares:
+        linha = (
+            f"- {par['id']} ({_onde_do_par(par)}): cliente «{par.get('pergunta') or ''}» → "
+            f"equipe «{par.get('resposta') or ''}»"
+        )
+        if total + 1 + len(linha) > MAX_CHARS_EQUIPE:
+            break
+        linhas.append(linha)
+        total += 1 + len(linha)
+        cabem.append(dict(par))
+    if not cabem:
+        return None, []
+    return "\n".join(linhas), cabem
+
+
+def _turno_para_a_busca(base: BaseDoGerar) -> str:
+    """O turno do cliente para achar os pares ("" = só cumprimento, agradecimento ou
+    o pedido de atendente: nada a procurar). PURA."""
+    textos = [t for t in base.textos_rajada if isinstance(t, str) and t.strip()]
+    if not textos or all(
+        acao_pessoa.so_reconhecimento(t) or acao_pessoa.so_pede_pessoa(t) for t in textos
+    ):
+        return ""
+    return " ".join(" ".join(textos).split())
 
 
 # ── Texto seguro dentro da moldura ────────────────────────────────────────
@@ -920,8 +991,13 @@ def _perguntas_pendentes(base: BaseDoGerar) -> list[str]:
     ]
 
 
-def _estado_da_conversa(conversa: Any, base: BaseDoGerar) -> dict:
-    """O que pesa sem pedido: reclamação, avaliação pendente, devolução pela etiqueta."""
+def _estado_da_conversa(conversa: Any, base: BaseDoGerar, *, rotina: bool = False) -> dict:
+    """O que pesa sem pedido: reclamação, avaliação pendente, devolução pela etiqueta.
+
+    Item 32, revisão (22/10/2026): `rotina` = a marca da devolução de rotina do turno
+    (`acao_pessoa.rotina_do_turno`) vira "devolucao_sem_decisao_da_loja" — o bloco 2
+    (`prompt.COMO_A_EQUIPE_RESPONDE`) só a trata como rotina com ela.
+    """
     etiquetas = acao_pessoa.etiquetas_da_conversa(conversa)
     estado = {
         "reclamacao_aberta": bool(
@@ -932,6 +1008,7 @@ def _estado_da_conversa(conversa: Any, base: BaseDoGerar) -> dict:
         ),
         "devolucao_em_andamento": constantes.ETIQUETA_DEVOLUCAO in etiquetas,
         "avaliacao_pendente_nota": (ia._avaliacoes_pendentes(base.ctx) or [None])[0],
+        "devolucao_sem_decisao_da_loja": rotina,
     }
     return {k: v for k, v in estado.items() if v}
 
@@ -1076,7 +1153,14 @@ async def montar_pacote(
         "agora_sao_paulo": _quando(agora),
         "prazo_de_resposta": _quando(getattr(conversa, "prazo_resposta_em", None)),
     }
-    estado = _estado_da_conversa(conversa, base)
+    # Item 32, revisão (22/10/2026): a marca da devolução de rotina (a MESMA do gatilho 3).
+    estado = _estado_da_conversa(
+        conversa,
+        base,
+        rotina=acao_pessoa.rotina_do_turno(
+            conversa, base.ctx, base.recentes, gatilho, base.sinais_do_cliente
+        ),
+    )
     # O número que o modelo VIU nestes blocos não foi inventado (21/10/2026: o
     # "42mm ou 46mm" do cartão que o cliente mandou virava "número que não
     # veio do sistema"); só número — o cartão de outro vendedor nunca é fonte.
@@ -1118,6 +1202,36 @@ async def montar_pacote(
     if pendentes := _perguntas_pendentes(base):
         partes.append("PERGUNTAS AINDA SEM RESPOSTA NESTE TURNO:")
         partes.extend(f"- {p}" for p in pendentes)
+    # Item 32 (22/10/2026): como a equipe já respondeu o mesmo tipo de pergunta.
+    if busca := _turno_para_a_busca(base):
+        da_equipe = await contexto_svc._seguro(
+            session,
+            "agente_pares",
+            lambda: pares_svc.exemplos_do_turno(
+                session,
+                pergunta=busca,
+                plataforma=conversa.plataforma,
+                integration_id=conversa.integration_id,
+                # Revisão do item 32: TODOS os anúncios da conversa (o par só é fonte
+                # de produto com um só) — as fichas primeiro (a ordem da busca).
+                item_ids=[f["item_id"] for f in fichas] + [a.item_id for a in anuncios]
+                or [getattr(conversa, "anuncio_id", None) or ""],
+                conversa_id=conversa.id,
+                as_of=agora,
+                canal_no_automatico=ctx.modo == constantes.MODO_AUTO,
+                # Revisão do item 32: o título do anúncio do par (o da conversa).
+                titulos={
+                    **{a.item_id: a.titulo for a in anuncios if a.titulo},
+                    **{f["item_id"]: f.get("titulo") for f in fichas if f.get("titulo")},
+                },
+            ),
+            [],
+            conversa.id,
+        )
+        secao, mostrados = secao_da_equipe(da_equipe or [])
+        if secao:
+            partes.append(secao)
+            ctx.registrar_pares(mostrados)
     if compras is not None:
         partes.append(f"COMPRAS DO COMPRADOR NESTA LOJA: {compras}")
     miolo = _sem_moldura("\n".join(partes))

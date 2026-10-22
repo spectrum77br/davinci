@@ -301,17 +301,58 @@ _DADO_PESSOAL_PLANO = re.compile(
 )
 
 
+# Revisão do item 32 da auditoria ao vivo (22/10/2026 — o pacote leva os pares em TODO
+# turno): passavam o nome completo depois de "o nome dele é", o Pix/PicPay com o nome e o
+# [CPF] mascarado, "entregar para <nome> vizinha", a cidade ("moro em <cidade> mg") e o
+# vocativo com o nome na resposta da equipe ("fala <nome>, exatamente…"). Esses jeitos de
+# dizer tiram o par — na leitura (`buscar`), na indexação e no expurgo. As máscaras do
+# `ia.mascarar` ([CPF], [NUMERO_PESSOAL], [ENDERECO]…: o dado tirado diz que havia dado
+# pessoal ali) tiram o par só do PACOTE (`tem_mascara_de_dado`) — a indexação
+# generalizada continua (o `buscar_respostas_equipe` do copiloto, como antes).
+_MASCARA_DE_DADO = re.compile(
+    r"\[(?:cpf|cnpj|cep|rg|e-?mail|numero_pessoal|n[uú]mero_pessoal|endereco|endere[cç]o"
+    r"|telefone|celular|pix|nome_completo)[^\]]*\]",
+    re.IGNORECASE,
+)
+_DADO_PESSOAL_EXTRA = re.compile(
+    r"\b(?:pix|picpay|nubank|agencia|conta\s+(?:corrente|poupanca|bancaria|do\s+banco))\b"
+    r"|\bnome\s+(?:dele|dela|do\s+meu|da\s+minha|completo|do\s+titular|da\s+titular)\b"
+    r"|\b(?:moro|moramos|mora|resido|residimos|reside)\s+(?:em|no|na|aqui|perto)\b|\bsou\s+d[eoa]\b"
+    r"|\baqui\s+em\b"
+)
+# Quem recebe pelo nome junto do vizinho ("entregar para fulana vizinha"; "deixar com o
+# vizinho", sem nome, fica).
+_NOME_E_VIZINHO = re.compile(
+    r"\b(?:para|pra|pro|com|a|o)\s+(?:a\s+|o\s+)?(?P<nome>[a-z]{3,})\s*,?\s+"
+    r"(?:minha\s+|meu\s+|a\s+|o\s+|que\s+e\s+(?:minha\s+|meu\s+)?)?vizinh\w*"
+    r"|\bvizinh[ao]s?\s*,?\s+(?P<depois>[a-z]{3,})"
+)
+# O vocativo com o nome no começo ("fala joao!", "boa tarde maria, tudo bem?").
+_VOCATIVO = re.compile(
+    r"^(?:fala|oi|ola|opa|bom\s+dia|boa\s+tarde|boa\s+noite|obrigad[oa])\s*,?\s+"
+    r"(?P<nome>[a-z]{3,})\s*(?:[,!.]|tudo\s+(?:bem|bom))"
+)
+
+
 def tem_dado_pessoal(texto: str | None) -> bool:
     """O texto de um par tem dado pessoal de terceiro ou endereço? PURA (revisão 2 de 20/10/2026).
 
     A régua de antes (com maiúscula, sobre o texto cru) e a sem maiúscula
     (sobre o plano): "meu marido roberto", "entregue para joana", "rua das
-    flores", "dona maria".
+    flores", "dona maria". Revisão do item 32 (22/10/2026): e o Pix, "o nome dele é",
+    "moro em" e o nome com "vizinha" (acima). O vocativo com o nome e a máscara do
+    dado tirado só na leitura do pacote (`tem_mascara_de_dado`): no texto cru da
+    indexação, a generalização ainda tira o nome do comprador.
     """
     cru = texto or ""
     if _DADO_PESSOAL_DO_PAR.search(cru):
         return True
     plano = " ".join(validador.plano_de(cru).split())
+    if _DADO_PESSOAL_EXTRA.search(plano):
+        return True
+    for vizinho in _NOME_E_VIZINHO.finditer(plano):
+        if (vizinho.group("nome") or vizinho.group("depois")) not in _COMUNS_DEPOIS_DO_NOME:
+            return True
     for m in _DADO_PESSOAL_PLANO.finditer(plano):
         nome = next(
             (m.group(k) for k in (f"n{i}" for i in range(1, 13)) if m.group(k)),
@@ -320,6 +361,20 @@ def tem_dado_pessoal(texto: str | None) -> bool:
         if nome is None or nome not in _COMUNS_DEPOIS_DO_NOME:
             return True
     return False
+
+
+def tem_mascara_de_dado(texto: str | None) -> bool:
+    """O texto GENERALIZADO tem a máscara de um dado pessoal tirado ([CPF], [EMAIL],
+    [NUMERO_PESSOAL], [ENDERECO]…) ou o vocativo com um nome que a generalização não
+    tirou ("fala ciclano, …")? PURA. Revisão do item 32: o par assim não vai ao PACOTE
+    (a pergunta do outro cliente nem a resposta)."""
+    cru = texto or ""
+    if _MASCARA_DE_DADO.search(cru):
+        return True
+    vocativo = _VOCATIVO.match(" ".join(validador.plano_de(sem_citacao(cru)).split()))
+    return bool(
+        vocativo and vocativo.group("nome") not in (_COMUNS_DEPOIS_DO_NOME | _SO_CUMPRIMENTO)
+    )
 
 
 def ensina_o_que_o_agente_nao_faz(resposta: str | None) -> bool:
@@ -1023,3 +1078,319 @@ async def buscar(
         if len(saida) >= limite:
             break
     return saida
+
+
+# ── Os exemplos do PACOTE (a equipe em todo turno) ────────────────────────
+#
+# Item 32 da auditoria ao vivo (22/10/2026 — os rascunhos segurados × a resposta da
+# equipe no Duoke): o agente chamou o `buscar_respostas_equipe` em 0 de 94 rascunhos,
+# e a equipe tinha respondido igual, várias vezes, o que ele mandou para pessoa ("o
+# reembolso é feito pela plataforma!", "não fazemos troca!", "sim, vai com capa!"). O
+# pacote traz os pares mais parecidos com o turno do cliente (`exemplos_do_turno`),
+# com o id `par:<id>` para citar: a POLÍTICA da loja que a equipe repete é lastro, e o
+# PRODUTO só do par do mesmo anúncio ou do mesmo produto vinculado (`mesmo_produto`:
+# o conjunto de produtos vivos do anúncio do par é IGUAL ao de um anúncio da conversa —
+# um anúncio com o A17 e o A18 não empresta a característica do A18 ao do A17). Dado
+# de pedido nunca: o par que só faz sentido para UM pedido (status, data, rastreio,
+# valor, "segue a nota") não vem (`so_de_um_pedido`).
+#
+# Revisão do item 32 (22/10/2026): o par só é FONTE DE PRODUTO (`fonte_de_produto`)
+# quando a conversa tem UM anúncio, esse anúncio é de UM modelo só (os produtos vivos
+# dele, pelo `especificacoes.modelos_do_cadastro`, sem kit "+ acessório") e o par é
+# desse anúncio ou de um com o MESMO conjunto de produtos — a conversa com o A18 e o
+# relógio do pedido não empresta a capa do A18 ao relógio, e o anúncio do A17 e do A18
+# não empresta o NFC do A18 ao A17 (95 de 137 anúncios vinculados das lojas no
+# automático ligam 2+ produtos). O "mesmo anúncio" vem com o título dele, e cada par
+# com a idade. E a promessa de chegada com data ("consta que vai chegar final de
+# novembro!", "ainda está vindo", "logo vamos vender") e o que só a equipe vê no
+# sistema ("consta que", "já expirou", "foi cancelado", "está aparecendo") não vão ao
+# pacote; nem o par com dado pessoal de outro cliente (`tem_dado_pessoal`: Pix, "o
+# nome dele é", "moro em", as máscaras [CPF]/[CEP]/…, o vocativo com o nome).
+
+MAX_PARES_PACOTE = 4
+CANDIDATOS_PACOTE = 15
+MAX_CHARS_PERGUNTA_PACOTE = 140
+MAX_CHARS_RESPOSTA_PACOTE = 260
+# O título do anúncio do par (o mesmo da conversa), no pacote e no verificador.
+MAX_CHARS_TITULO_PACOTE = 70
+# A equipe responde curto ("sem previsão!", "não fazemos troca!"): o mínimo do pacote é
+# o da resposta SEM a citação do Duoke (o `MIN_CHARS_TURNO` da indexação conta o turno
+# inteiro, com ela).
+MIN_CHARS_RESPOSTA_PACOTE = 12
+# A pergunta da busca: o turno do cliente, curto (o `websearch_to_tsquery` de um
+# turno enorme casa com tudo).
+MAX_CHARS_BUSCA_PACOTE = 300
+
+# A resposta que só cumprimenta, agradece ou pergunta como ajudar ("bom dia tudo
+# bem?", "de nada, tenha um bom dia!") não ensina nada.
+_SO_CUMPRIMENTO = frozenset(
+    """
+    ola oi opa bom boa bons boas dia dias tarde noite tudo bem bom otimo otima tranquilo
+    como vai voce vc vcs obrigado obrigada obg grato grata agradecemos agradeco nos de nada
+    disponha imagina tenha um uma excelente otimo maravilhoso semana fim ficamos estamos
+    fico a o e em que posso podemos ajudar ajuda ajudo disposicao sempre precisar qualquer
+    duvida so chamar estou aqui pra para te lhe feliz felizes ficamos que bom
+    """.split()
+)
+# O que só faz sentido para UM pedido: a lacuna e o dado generalizado (`ia._generalizar`)
+# no texto cru, e o estado do pedido/da devolução dele no texto plano.
+_LACUNA_OU_DADO = re.compile(r"\{\s*[a-z_]+\s*\}|\[(?:data|valor|c[óo]digo|n[úu]mero)\]", re.I)
+_ESTADO_DE_UM_PEDIDO = re.compile(
+    r"\b(?:seu|sua)\s+(?:pedido|encomenda|pacote|compra|produto|aparelho|reembolso|devolucao"
+    r"|solicitacao|estorno|troca)\b"
+    r"|\b(?:o|a|esse|essa|este|esta)\s+(?:pedido|encomenda|pacote|compra|reembolso|devolucao"
+    r"|solicitacao|estorno|troca)\s+(?:ja\s+)?(?:foi|esta|ta|saiu|chegou|consta|segue|ficou)\b"
+    r"|\bja\s+(?:foi\s+)?(?:postad|enviad|despachad|entregu|coletad|emitid|aprovad|estornad"
+    r"|reembolsad|separad|faturad)\w*"
+    r"|\bfoi\s+(?:postad|enviad|despachad|entregu|coletad|emitid|aprovad|estornad|reembolsad"
+    r"|separad|faturad)\w*"
+    r"|\bem\s+transito\b|\bcodigo\s+de\s+rastreio\b|\brastreamento\b"
+    r"|\bsegue\s+(?:a\s+|o\s+|em\s+anexo\s+)?(?:nota|nf|arquivo|rastreio|codigo|comprovante)\b"
+    r"|\b(?:esta|ta)\s+em\s+(?:analise|separacao|preparacao|rota)\b"
+    # A ação da equipe NAQUELE pedido ("será enviado hoje", "vamos enviar na segunda",
+    # "posso enviar o azul no lugar?", "a nota já será enviada", "fico no aguardo").
+    r"|\b(?:sera|serao|vai\s+ser|vamos|vou|ja\s+sera)\s+(?:o\s+|a\s+)?(?:enviad|envia|mandad|manda"
+    r"|postad|posta|despach|trocad|troca|reembols|estorn|cancel|verific|confer|abri|resolv"
+    r"|separ|reserv)\w*"
+    r"|\bposso\s+(?:te\s+|lhe\s+)?(?:enviar|mandar|trocar|reservar|separar|cancelar)\b"
+    r"|\b(?:fico|ficamos|estamos|estou)\s+no\s+aguardo\b"
+    # Revisão do item 32 (22/10/2026): o que só a equipe vê no sistema daquele pedido
+    # ("consta que vai chegar…", "o aparelho já expirou a garantia", "consta que não foi
+    # comprado", "para mim já está aparecendo", "estamos analisando").
+    r"|\bconsta\b|\bja\s+expir\w*|\bexpirou\b"
+    r"|\bfoi\s+(?:cancelad|recusad|devolvid|negad|finalizad|concluid|recebid|liberad)\w*"
+    r"|\bnao\s+foi\s+(?:comprad|pag|aprovad|enviad|entregu|postad|recebid|localizad)\w*"
+    r"|\b(?:esta|ta|estao|ja\s+esta|ja\s+ta)\s+aparecendo\b"
+    r"|\baparec\w*\s+(?:aqui|pra\s+mim|para\s+mim|no\s+sistema)\b"
+    r"|\b(?:para|pra)\s+mim\s+(?:ja\s+)?(?:esta|ta|aparece|consta)\b"
+    r"|\b(?:aqui\s+)?no\s+(?:nosso\s+)?sistema\b"
+    r"|\b(?:estamos|estou)\s+(?:analisando|verificando|conferindo|aguardando|vendo)\b"
+    r"|\b(?:verifiquei|conferi|consultei|olhei|vi\s+aqui|acabei\s+de)\b"
+    r"|\bfoi\s+feit[oa]\b|\bo\s+sistema\s+(?:deu|esta|ta|mostra|acusou|acusa)\b"
+)
+_NOME_MASCARADO = re.compile(r"\s*,?\s*\[NOME\]")
+# A resposta da equipe pelo Duoke cita a fala do cliente antes ("「Tem NFC?」 - - - - sim
+# tem nfc!"): o que conta é o que vem depois da citação.
+_CITACAO_DO_DUOKE = re.compile(r"「[^」]*」(?:\s*-)*\s*")
+_MESES = r"janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro"
+# O que a equipe diz e a régua do AGENTE não deixa (o pacote não ensina): a reposição
+# "vindo da fábrica"/"ainda não chegou", o reset, a assistência/o fabricante, "não temos
+# acesso ao transporte" (falso: a loja abre chamado — item 29), a recusa do cancelamento
+# e a palavra escrita com pontos para driblar o filtro da plataforma ("c.a.n.c.e.l.a.r").
+_FORA_DA_REGUA_DO_AGENTE = re.compile(
+    r"\b(?:vindo|saindo|chegando)\s+(?:da|de)\s+fabrica\b|\bainda\s+nao\s+chegou\b"
+    r"|\breset\w*|\bpadrao\s+de\s+fabrica\b|\bformat(?:ar|e|a|ação|acao)\b"
+    r"|\blev(?:ar|e|a)\s+(?:na|a|ao|numa|em\s+uma)\s+(?:apple|assistencia|autorizada|tecnic\w*)"
+    r"|\bassistencia\s+tecnica\b|\bsite\s+do\s+fabricante\b"
+    r"|\bnao\s+temos\s+acesso\s+(?:ao|a|as|aos)?\s*(?:transporte|transportadora|entregador)"
+    r"|\bnao\s+(?:temos\s+como|conseguimos|da\s+(?:pra|para)|e\s+possivel)\s+cancel"
+    r"|(?:\b[a-z]\.+){3,}"
+    # A origem do envio sem o dado, a culpa no transporte e o estoque afirmado (o
+    # estoque é só o das variações do anúncio).
+    r"|\benviamos\s+(?:de|do|da)\b|\b(?:foi|feito)\s+no\s+transporte\b"
+    r"|\b(?:temos|tem)\s+(?:sim\s+)?(?:no|em)\s+estoque\b|\b(?:temos|tem)\s+estoque\b"
+    # Revisão do item 32 (22/10/2026): a chegada/reposição com data ou a caminho ("vai
+    # chegar final de novembro", "ainda esta vindo", "logo vamos vender", "em breve") —
+    # o `variacoes.promete_reposicao` não pegava.
+    r"|\b(?:vai|vao|deve|devem|deveria)\s+(?:chegar|voltar|entrar|repor)\b"
+    r"|\bcheg(?:a|am|ara|arao|ando)\s+(?:no|na|em|ate|dia|amanha|semana|final|fim|comeco"
+    r"|inicio|meados)\b"
+    r"|\b(?:esta|ta|estao|tao)\s+(?:vindo|chegando|a\s+caminho)\b|\bvindo\s+(?:ai|para|pra)\b"
+    r"|\blogo\s+(?:vamos|vai|vao|teremos|tera|volta\w*|cheg\w*|entra\w*)\b|\bem\s+breve\b"
+    r"|\bvamos\s+(?:ter|vender|trazer|receber|repor)\b|\bteremos\b"
+    r"|\b(?:final|fim|comeco|inicio|meados)\s+d[eo]\s+(?:mes|ano|" + _MESES + r")\b"
+    r"|\b(?:" + _MESES + r")\b|\bproxim[ao]s?\s+(?:semana|mes|lote|remessa)\b"
+    r"|\b\d{1,2}\s*/\s*\d{1,2}\b"
+    # A ação que a equipe promete fazer (o código segura a promessa no rascunho; o
+    # exemplo não a ensina): "enviaremos", "vou verificar", "vamos resolver".
+    r"|\b(?:vou|irei|iremos|farei|faremos|enviarei|enviaremos|mandarei|mandaremos|estaremos"
+    r"|verificarei|verificaremos|providenciaremos|resolveremos|trocaremos|devolveremos)\b"
+    r"|\bvamos\s+(?!la\b)[a-z]+"
+)
+# O cumprimento do começo da resposta ("bom dia tudo bem ?"): o agente não abre com ele.
+_CUMPRIMENTO_NO_COMECO = re.compile(
+    r"^(?:\s*(?:bom\s+dia|boa\s+tarde|boa\s+noite|ol[aá]|oi)\b[\s,!.]*"
+    r"(?:tudo\s+(?:bem|bom)\b\s*[?!.]*)?)+",
+    re.IGNORECASE,
+)
+
+
+def sem_citacao(texto: str | None) -> str:
+    """A resposta sem a citação do Duoke ("「…」 - - -"), numa linha. PURA."""
+    return " ".join(_CITACAO_DO_DUOKE.sub(" ", str(texto or "")).split())
+
+
+def so_cumprimento(texto: str | None) -> bool:
+    """A resposta só cumprimenta, agradece ou pergunta como ajudar? PURA."""
+    palavras = re.findall(r"[a-z0-9]+", validador.plano_de(texto or ""))
+    return all(p in _SO_CUMPRIMENTO for p in palavras)
+
+
+def so_de_um_pedido(texto: str | None) -> bool:
+    """A resposta só faz sentido para UM pedido (lacuna, dado generalizado, estado)? PURA."""
+    cru = texto or ""
+    return bool(_LACUNA_OU_DADO.search(cru)) or bool(
+        _ESTADO_DE_UM_PEDIDO.search(" ".join(validador.plano_de(cru).split()))
+    )
+
+
+def serve_ao_pacote(resposta: str | None) -> bool:
+    """O par vai ao pacote? Nem cumprimento, nem o que é de um pedido só, nem o que a
+    régua do agente proíbe, nem dado pessoal, nem cara de instrução. PURA."""
+    texto = sem_citacao(resposta)
+    if len(texto) < MIN_CHARS_RESPOSTA_PACOTE or so_cumprimento(texto) or so_de_um_pedido(texto):
+        return False
+    if tem_dado_pessoal(texto) or tem_mascara_de_dado(texto):
+        return False
+    if ensina_o_que_o_agente_nao_faz(texto):
+        return False
+    if _FORA_DA_REGUA_DO_AGENTE.search(" ".join(validador.plano_de(texto).split())):
+        return False
+    return not ia._tem_injecao(texto, agente=True)
+
+
+def para_o_pacote(texto: str | None, teto: int) -> str:
+    """O texto do par como o pacote mostra: sem a citação do Duoke, sem o "[NOME]" do
+    vocativo, numa linha, cortado no `teto`. PURA."""
+    t = " ".join(_NOME_MASCARADO.sub("", sem_citacao(texto)).split()).strip(" ,")
+    t = _CUMPRIMENTO_NO_COMECO.sub("", t).strip(" ,") or t
+    return t if len(t) <= teto else t[: teto - 1].rstrip() + "…"
+
+
+async def _produtos_dos_anuncios(
+    session: AsyncSession, plataforma: Any, chaves: Collection[tuple[UUID | None, str]]
+) -> dict[tuple[UUID | None, str], frozenset[UUID]]:
+    """(integração, anúncio) → os produtos dos vínculos VIVOS (`product_links`)."""
+    from app.models import ProductLink
+
+    itens = sorted({item for _integ, item in chaves if item})
+    if plataforma is None or not itens:
+        return {}
+    linhas = (
+        await session.execute(
+            select(
+                ProductLink.integration_id, ProductLink.external_id, ProductLink.product_id
+            ).where(
+                ProductLink.platform == plataforma,
+                ProductLink.external_id.in_(itens),
+                ProductLink.morto_desde.is_(None),
+            )
+        )
+    ).all()
+    saida: dict[tuple[UUID | None, str], set[UUID]] = {}
+    for linha in linhas:
+        saida.setdefault((linha.integration_id, str(linha.external_id)), set()).add(
+            linha.product_id
+        )
+    return {k: frozenset(v) for k, v in saida.items()}
+
+
+async def _um_modelo_so(session: AsyncSession, produtos: frozenset[UUID] | None) -> bool:
+    """Os produtos do anúncio são de UM modelo só, sem kit "+ acessório"
+    (`especificacoes.modelos_do_cadastro`)? Sem vínculo, não (na dúvida, não é fonte)."""
+    from app.models import Product
+    from app.services.atendimento import especificacoes as especificacoes_svc
+
+    if not produtos:
+        return False
+    nomes = [
+        str(nome or "")
+        for nome in (
+            await session.scalars(select(Product.name).where(Product.id.in_(list(produtos))))
+        ).all()
+    ]
+    if not nomes or any(" + " in n for n in nomes):
+        return False
+    return len(produtos) == 1 or len(especificacoes_svc.modelos_do_cadastro(nomes)) == 1
+
+
+async def exemplos_do_turno(
+    session: AsyncSession,
+    *,
+    pergunta: str,
+    plataforma: str,
+    integration_id: UUID | None,
+    item_ids: Sequence[str],
+    conversa_id: UUID,
+    as_of: datetime,
+    canal_no_automatico: bool,
+    titulos: Mapping[str, str | None] | None = None,
+    limite: int = MAX_PARES_PACOTE,
+) -> list[dict]:
+    """Os pares para o PACOTE (ver acima), os mais úteis primeiro: o do mesmo anúncio
+    ou produto, depois o da mesma loja, depois o resto (a ordem do `buscar` dentro).
+
+    Cada um: {"id" (`par:<id>`), "pergunta", "resposta" (já cortadas), "mesma_loja",
+    "mesmo_anuncio", "mesmo_produto", "fonte_de_produto", "com_anuncio", "idade_dias",
+    "titulo_do_anuncio" (só no do mesmo anúncio, de `titulos`)}. Só lê.
+    """
+    from app.services.atendimento import ficha as ficha_svc
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    consulta = " ".join(str(pergunta or "").split())[:MAX_CHARS_BUSCA_PACOTE]
+    itens = [i for i in dict.fromkeys(str(x or "").strip() for x in item_ids) if i]
+    achados = await buscar(
+        session,
+        pergunta=consulta,
+        plataforma=plataforma,
+        integration_id=integration_id,
+        item_id=itens[0] if itens else None,
+        conversa_id=conversa_id,
+        as_of=as_of,
+        canal_no_automatico=canal_no_automatico,
+        limite=CANDIDATOS_PACOTE,
+    )
+    # Revisão do item 32: a pergunta do outro cliente com a máscara de um dado também sai.
+    achados = [
+        a
+        for a in achados
+        if serve_ao_pacote(a["resposta"]) and not tem_mascara_de_dado(a["pergunta"])
+    ]
+    if not achados or limite <= 0:
+        return []
+    p = AtendimentoPar
+    onde = {
+        linha.id: (linha.integration_id, (linha.item_id or "").strip())
+        for linha in (
+            await session.execute(
+                select(p.id, p.integration_id, p.item_id).where(
+                    p.id.in_([a["id"] for a in achados])
+                )
+            )
+        ).all()
+    }
+    produtos = await _produtos_dos_anuncios(
+        session,
+        ficha_svc.plataforma_do_catalogo(plataforma),
+        [*onde.values(), *((integration_id, i) for i in itens)],
+    )
+    da_conversa = [produtos.get((integration_id, i)) for i in itens]
+    # Revisão do item 32: fonte de produto só com UM anúncio na conversa, de UM modelo.
+    unico = da_conversa[0] if len(itens) == 1 else None
+    um_modelo = await _um_modelo_so(session, unico) if unico else False
+    titulos = titulos or {}
+    saida: list[tuple[tuple[int, int, int], dict]] = []
+    for ordem, a in enumerate(achados):
+        integ, item = onde.get(a["id"], (None, ""))
+        mesmo_anuncio = bool(item) and item in itens
+        dele = produtos.get((integ, item)) if item else None
+        mesmo_produto = mesmo_anuncio or bool(dele and any(dele == c for c in da_conversa if c))
+        fonte = um_modelo and (
+            (mesmo_anuncio and integ == integration_id) or (dele is not None and dele == unico)
+        )
+        par = {
+            "id": agente_ctx.id_par(a["id"]),
+            "pergunta": para_o_pacote(a["pergunta"], MAX_CHARS_PERGUNTA_PACOTE),
+            "resposta": para_o_pacote(a["resposta"], MAX_CHARS_RESPOSTA_PACOTE),
+            "mesma_loja": bool(a["mesma_loja"]),
+            "mesmo_anuncio": mesmo_anuncio,
+            "mesmo_produto": mesmo_produto,
+            "fonte_de_produto": bool(fonte),
+            "com_anuncio": bool(item),
+            "idade_dias": int(a["idade_dias"]),
+        }
+        if mesmo_anuncio and (titulo := " ".join(str(titulos.get(item) or "").split())):
+            par["titulo_do_anuncio"] = titulo[:MAX_CHARS_TITULO_PACOTE]
+        saida.append(((0 if mesmo_produto else 1, 0 if a["mesma_loja"] else 1, ordem), par))
+    saida.sort(key=lambda par: par[0])
+    return [e for _chave, e in saida[:limite]]

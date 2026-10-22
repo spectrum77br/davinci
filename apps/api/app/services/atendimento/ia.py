@@ -4731,6 +4731,8 @@ async def conferir_saida(
     perguntar: bool = False,
     forcar: bool = False,
     agente: bool = False,
+    devolucao_de_rotina: bool = False,
+    produto_pela_equipe: bool = False,
 ) -> SaidaConferida:
     """O código confere o que o modelo disse. Não grava nada; só LÊ o banco
     para saber se a loja respondeu enquanto o modelo escrevia
@@ -4751,7 +4753,8 @@ async def conferir_saida(
     há texto literal da ficha ou política aprovada. Só o legado:
     `classificada`, `nao_classificou` (a opção sensível do menu o legado já
     mandou para pessoa ANTES do modelo). Só o agente: `opcoes_sensiveis`,
-    `perguntar` (`acao="perguntar"`). Ver o bloco acima para `agente=True`.
+    `perguntar` (`acao="perguntar"`), `devolucao_de_rotina` (item 32: a marca do
+    turno, `ContextoAgente.devolucao_de_rotina`). Ver o bloco acima para `agente=True`.
     """
     motivos = list(motivos)
     avisos: list[str] = []
@@ -4814,6 +4817,9 @@ async def conferir_saida(
             or (agente and categoria in _CATEGORIAS_DA_FICHA_DO_AGENTE)
         )
         and not resposta_aprovada
+        # Decisão do dono (22/10/2026, item 32): a resposta do agente que cita a
+        # resposta da equipe do MESMO anúncio, de um modelo, sai sozinha.
+        and not (agente and produto_pela_equipe and categoria in ASSUNTOS_PRODUTO_PELA_EQUIPE)
     ):
         motivos.append(MOTIVO_FICHA_NO_AUTOMATICO)
     # O que o modelo pode repetir: os FATOS (anúncio e a ficha dele, itens,
@@ -4834,14 +4840,20 @@ async def conferir_saida(
     inventados = numeros_inventados(texto, permitidos)
     if inventados:
         motivos.append(f"{MOTIVO_NUMERO_INVENTADO} ({', '.join(inventados[:5])})")
-    if ctx.get("chamados") or ctx.get("devolucoes"):
+    # Item 32 da auditoria ao vivo (22/10/2026, 3c): no AGENTE, a devolução já aberta
+    # na plataforma sem nada para a loja decidir, com o turno que só pergunta o
+    # andamento (`devolucao_de_rotina` = a marca do turno, `acao_pessoa.rotina_do_turno`,
+    # que o agente calcula uma vez), não segura — a resposta é o status. O legado
+    # (agente=False) não muda.
+    rotina = agente and devolucao_de_rotina
+    if (ctx.get("chamados") or ctx.get("devolucoes")) and not rotina:
         motivos.append("pedido com chamado ou devolução")
     if em_aguardando_cancelamento(ctx.get("pedido")):
         # Item 4: o 83955 nunca sai sem pessoa — seja qual for o motivo.
         motivos.append(MOTIVO_AG_CANCELAMENTO)
     if reclamacao_aberta(conversa.dados):
         motivos.append("reclamação/mediação aberta no ML")
-    elif _reclamacoes_abertas(ctx):
+    elif _reclamacoes_abertas(ctx) and not rotina:
         motivos.append("reclamação ou devolução aberta na plataforma")
     if any(n <= NOTA_BAIXA_AVALIACAO for n in _avaliacoes_pendentes(ctx)):
         motivos.append("avaliação de nota baixa (1–3) sem resposta da loja")
@@ -5930,15 +5942,22 @@ def acoes_pessoa_do_rascunho(rascunho: Any) -> list[str] | None:
 
 
 def andamento_no_rascunho(rascunho: Any, etiquetas: Collection[str] = ()) -> bool:
-    """Devolução ou chamado em andamento, pelo que o rascunho gravou (e pela etiqueta). PURA."""
+    """Devolução ou chamado em andamento, pelo que o rascunho gravou (e pela etiqueta). PURA.
+
+    Item 32 da auditoria ao vivo (22/10/2026, 3c): o rascunho do agente marcado
+    `devolucao_de_rotina` (a devolução aberta na plataforma sem nada para a loja
+    decidir) não para pela devolução nem pela etiqueta dela; o chamado e a checagem
+    do andamento continuam. Sem a marca (o legado), como sempre.
+    """
     fatos = getattr(rascunho, "fatos", None)
     fatos = fatos if isinstance(fatos, dict) else {}
     agente = fatos.get("agente") if isinstance(fatos.get("agente"), dict) else {}
     checagens = agente.get("checagens") if isinstance(agente.get("checagens"), list) else []
+    rotina = agente.get("devolucao_de_rotina") is True
     return bool(
         _int(fatos.get("chamados_abertos"))
-        or _int(fatos.get("devolucoes"))
-        or ETIQUETA_DEVOLUCAO in etiquetas
+        or (_int(fatos.get("devolucoes")) and not rotina)
+        or (ETIQUETA_DEVOLUCAO in etiquetas and not rotina)
         or _CHECAGEM_EM_ANDAMENTO in checagens
     )
 
@@ -5990,6 +6009,11 @@ def trava_do_agente(
         if categoria not in liberadas:
             return "orientacao_nao_liberada"
         return None
+    # Decisão do dono (22/10/2026, item 32): a pergunta de PRODUTO sai sozinha quando a
+    # resposta cita uma resposta da equipe do MESMO anúncio, de UM modelo
+    # (`pares_de_produto`); resistência à água e condição/originalidade seguem pessoa.
+    if categoria in ASSUNTOS_PRODUTO_PELA_EQUIPE and produto_pela_equipe(agente):
+        return None
     if categoria not in (getattr(canal, "auto_categorias", None) or []):
         return "assunto_nao_liberado"
     if categoria not in (getattr(canal, "auto_agente", None) or []):
@@ -6002,6 +6026,24 @@ def trava_do_agente(
     if categoria in CATEGORIAS_SO_HUMANO:
         return "assunto_so_humano"
     return None
+
+
+# Os assuntos de produto que a resposta da equipe do mesmo anúncio libera (decisão
+# do dono, 22/10/2026). Fora: resistência à água (só pelo título) e condição.
+ASSUNTOS_PRODUTO_PELA_EQUIPE = frozenset(ASSUNTOS_SO_PESSOA_NO_AGENTE) - {
+    "resistencia_agua",
+    "originalidade_condicao",
+}
+
+
+def produto_pela_equipe(agente: Mapping[str, Any]) -> bool:
+    """O rascunho do agente cita uma resposta da equipe que vale para produto (do mesmo
+    anúncio, de um modelo: `fatos.agente.pares_de_produto`)? PURA."""
+    de_produto = agente.get("pares_de_produto")
+    evidencias = agente.get("evidencias")
+    if not isinstance(de_produto, list) or not isinstance(evidencias, list):
+        return False
+    return any(isinstance(e, str) and e.strip() in de_produto for e in evidencias)
 
 
 # Rodada 4b (achado 2 da revisão r4): as pistas que não são assunto (o

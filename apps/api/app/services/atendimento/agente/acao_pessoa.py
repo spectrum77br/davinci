@@ -66,6 +66,7 @@ paridade com o rascunho. A parte com banco (`estado_de_postagem`,
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -1035,6 +1036,193 @@ def devolucao_na_plataforma(
     return any(
         not _encerrada_depois(ctx, quando, agora)
         for quando in cartoes_plataforma.devolucoes_abertas_nos_cartoes(recentes)
+    )
+
+
+# Item 32 da auditoria ao vivo (22/10/2026, 3c — os rascunhos segurados × a equipe):
+# a devolução já aberta na Shopee/TikTok em que a loja não tem nada a decidir agora (a
+# plataforma espera o comprador postar, o pacote voltando, a análise da plataforma) é
+# respondida pela equipe com o status ("está em análise; assim que liberar, o
+# reembolso é feito pela plataforma!"). Pessoa só quando há o que aprovar ou decidir:
+# a ação pendente da loja ("Responder à solicitação de devolução", "Conferir o pacote
+# recebido e responder", "Confirmar ou recusar o pacote recebido", "Solicitar a
+# compensação"), a disputa ou a mediação (tipo ≠ devolução), a reclamação do ML
+# (`claim_ids`), o canal ou a etiqueta Reclamação, o chamado — e a ameaça jurídica,
+# que é o gatilho 2 (não muda: decisão do dono pendente). E só nos estados de espera:
+# a Shopee "Em andamento" (PROCESSING) e o TikTok "Esperando o comprador enviar"
+# (AWAITING_BUYER_SHIP) — o "Pedido de devolução aberto" (REQUESTED) é a loja que
+# responde, mesmo se a ação pendente ainda não veio da Logística. Medido em produção
+# (22/10, 11:00): 54 devoluções abertas da Shopee em PROCESSING e 14 do TikTok em
+# AWAITING_BUYER_SHIP sem ação pendente; 95 + 6 + 2 da Shopee e 60 do TikTok com ela
+# (continuam com pessoa).
+#
+# Item 32, revisão (22/10/2026 — a rotina deixava sair sozinho o que é decisão da loja):
+# dentro da devolução "Em andamento" sem ação pendente, "a Shopee recusou, vocês podem
+# aceitar?", "posso devolver só o carregador?", "quero cancelar a devolução", "a
+# transportadora perdeu o pacote da devolução" chegavam ao verificador sem nenhuma
+# trava de código. Agora a rotina é uma lista POSITIVA, além do estado:
+#   • o turno do cliente (a rajada e as perguntas pendentes) só pergunta o ANDAMENTO
+#     ou o PRAZO do reembolso/da devolução (`pergunta_so_o_andamento`) — qualquer
+#     pedido à loja (aceitar, aprovar, cancelar, trocar, devolver parte, ficar com o
+#     produto, Pix), problema (perdeu, extraviou, sumiu, errado, não consegui postar,
+#     prazo acabou, quebrado/danificado), ameaça ou atraso longo mantém pessoa; o
+#     anexo no turno também (evidência é pessoa);
+#   • a devolução INTERNA não mostra o pacote já recebido ("recebido…", "devolvido ao
+#     estoque", "reembolso", o rastreio da volta entregue/em disputa): aí a loja tem
+#     o que decidir (3 das 52 da Shopee em produção, uma há 16 dias);
+#   • a chave `atendimento_agente_devolucao_rotina` (DESLIGADA por padrão): a rotina só
+#     vale depois do OK do dono (pendente desde a rodada do item 32).
+_PLATAFORMAS_DA_ROTINA = frozenset({"Shopee", "TikTok"})
+# O estado da devolução interna (`contexto._devolucoes`) que ainda é espera: sem
+# pacote recebido, sem reembolso, sem disputa. O resto (e o rastreio da volta
+# entregue, em disputa ou julgado) é decisão da loja.
+_DEVOLUCAO_INTERNA_EM_ESPERA = frozenset(
+    {"em andamento", "pacote voltando", "processing", "awaiting_buyer_ship", "buyer_shipped_item"}
+)
+# O assunto do turno: o reembolso/a devolução…
+_DO_REEMBOLSO = re.compile(r"\b(?:reembols\w*|estorn\w*|devolu\w*|devolv\w*|dinheiro|ressarc\w*)")
+# … e o que se pergunta dele: o andamento ou o prazo.
+_ANDAMENTO_OU_PRAZO = re.compile(
+    r"\b(?:quando|que\s+dia|quanto\s+tempo|qual\s+(?:e\s+)?(?:o\s+)?prazo|prazo|demora\w*"
+    r"|previsao|status|andamento|situacao|novidade\w*|em\s+que\s+pe|cai|caiu|cair|vai\s+cair"
+    r"|ja\s+(?:caiu|saiu|foi|liberou|liberaram|voltou)|libera\w*|onde\s+(?:acompanho|vejo"
+    r"|consigo\s+ver)|acompanh\w*|como\s+(?:esta|ta|fica|anda))\b"
+)
+# O pedido à loja, o problema na devolução e a ameaça: decisão da loja (pessoa).
+_PEDIDO_NA_DEVOLUCAO = re.compile(
+    r"\baceit\w*|\baprov\w*|\brecus\w*|\bnega(?:da|do|ram|r)\b|\bindefer\w*|\breprov\w*"
+    r"|\bcancel\w*|\bdesist\w*|\bficar\s+com\b|\btroc(?:a|ar|o|am|aram|ou|ado|ada)\b"
+    r"|\bso\s+(?:o|a|os|as|um|uma)\b|\bparcial\w*|\bparte\b|\bmetade\b"
+    r"|\bperd(?:eu|eram|ido|ida|idos|idas|emos)\b|\bextravi\w*|\bsumi\w*|\broubad\w*"
+    r"|\berrad\w*|\bnao\s+consegu\w*|\bnao\s+(?:deu|da)\s+(?:pra|para)\b"
+    r"|\bprazo\s+(?:\w+\s+)?(?:acabou|expirou|venceu|passou|terminou)\b|\bexpir\w*"
+    r"|\bvenc(?:eu|ido|ida)\b|\bpix\b|\bconta\s+(?:bancaria|corrente|poupanca)\b|\btransfer\w*"
+    r"|\bdeposit\w*|\bboleto\b|\breclame\s+aqui\b|\bprocon\b|\badvogad\w*|\bjustica\b"
+    r"|\bprocess(?:o|ar|arei|aremos)\b|\bjudicia\w*|\bquebr\w*|\bdanific\w*|\bamass\w*|\bdefeit\w*|\briscad\w*"
+    r"|\bestragad\w*|\bavaria\w*|\bembalad\w*|\breceberam\b|\b(?:voce|voces|vc|vcs)\s+"
+    r"(?:podem|pode|poderiam|poderia|consegue|conseguem|vao|vai|tem\s+como)\b"
+    r"|\bquer(?:o|ia|emos)\b(?!\s+saber)|\bposso\b(?!\s+(?:acompanhar|ver|consultar|saber))"
+    r"|\bpreciso\s+que\b|\babsurd\w*|\bdescaso\b|\bgolpe\w*|\bfraude\w*"
+)
+# O atraso longo ("já faz 40 dias que devolvi"): fora do prazo comum da plataforma.
+_ATRASO_LONGO = re.compile(
+    r"\b(?P<dias>\d{2,3})\s*dias\b|\b(?:um|1|dois|2|tres|3)\s+mes(?:es)?\b|\bsemanas\b"
+)
+DIAS_DE_ATRASO_LONGO = 15
+
+
+def pergunta_so_o_andamento(textos: Iterable[str | None]) -> bool:
+    """O turno do cliente SÓ pergunta o andamento ou o prazo do reembolso/da devolução
+    (ver acima)? PURA. Cada fala com texto (fora o reconhecimento e o cumprimento) é do
+    assunto, alguma pergunta o andamento ou o prazo, e nenhuma pede, relata problema
+    nem fala de atraso longo."""
+    uteis = [t for t in textos if (t or "").strip() and not so_reconhecimento(t)]
+    planos = [_plano_de(t) for t in uteis]
+    planos = [p for p in planos if p and not _so_cumprimento_da_rotina(p)]
+    if not planos:
+        return False
+    if any(_PEDIDO_NA_DEVOLUCAO.search(p) for p in planos):
+        return False
+    for p in planos:
+        for m in _ATRASO_LONGO.finditer(p):
+            if m.group("dias") is None or int(m.group("dias")) >= DIAS_DE_ATRASO_LONGO:
+                return False
+    if not all(_DO_REEMBOLSO.search(p) or _ANDAMENTO_OU_PRAZO.search(p) for p in planos):
+        return False
+    return any(_DO_REEMBOLSO.search(p) and _ANDAMENTO_OU_PRAZO.search(p) for p in planos)
+
+
+_CUMPRIMENTO_DA_ROTINA = frozenset(
+    "oi ola bom boa dia tarde noite tudo bem td bom blz beleza".split()
+)
+
+
+def _so_cumprimento_da_rotina(plano: str) -> bool:
+    palavras = re.findall(r"[a-z0-9]+", plano)
+    return bool(palavras) and all(p in _CUMPRIMENTO_DA_ROTINA for p in palavras)
+
+
+@functools.cache
+def _status_da_rotina() -> frozenset[str]:
+    """Os estados de espera (o código da plataforma e o texto da tela, que é o que o
+    contexto traz: `reclamacoes.status_para_tela`)."""
+    from app.services.atendimento import reclamacoes_devolucoes
+
+    codigos = {("shopee", "PROCESSING"), ("tiktok", "AWAITING_BUYER_SHIP")}
+    return frozenset(
+        {c for _p, c in codigos} | {reclamacoes_devolucoes.STATUS_TELA[p][c] for p, c in codigos}
+    )
+
+
+def rotina_ligada() -> bool:
+    """A chave da devolução de rotina (`atendimento_agente_devolucao_rotina`)."""
+    from app.config import get_settings
+
+    return bool(getattr(get_settings(), "atendimento_agente_devolucao_rotina", False))
+
+
+def devolucao_de_rotina(
+    conversa: Any,
+    ctx: Mapping[str, Any] | None,
+    recentes: Sequence[Any],
+    gatilho: Any | None,
+) -> bool:
+    """A conversa só tem devolução aberta na plataforma SEM nada para a loja decidir e
+    o turno do cliente só pergunta o andamento (ver acima)? PURA (fora a chave). Sem
+    nenhuma aberta no contexto, não (o cartão e o retrato em devolução sem a reclamação
+    sincronizada continuam com pessoa)."""
+    if not rotina_ligada():
+        return False
+    ctx = ctx if isinstance(ctx, Mapping) else {}
+    if getattr(conversa, "plataforma", None) not in ("shopee", "tiktok"):
+        return False
+    if (
+        getattr(conversa, "canal", None) == constantes.CANAL_RECLAMACAO
+        or constantes.ETIQUETA_RECLAMACAO in etiquetas_da_conversa(conversa)
+        or constantes.reclamacao_aberta(getattr(conversa, "dados", None))
+        or ctx.get("chamados")
+    ):
+        return False
+    abertas = [
+        r for r in ctx.get("reclamacoes") or [] if isinstance(r, Mapping) and r.get("aberta")
+    ]
+    if not abertas or not all(
+        r.get("tipo") == constantes.RECLAMACAO_TIPO_DEVOLUCAO
+        and r.get("plataforma") in _PLATAFORMAS_DA_ROTINA
+        and r.get("status") in _status_da_rotina()
+        and not str(r.get("acao_pendente") or "").strip()
+        for r in abertas
+    ):
+        return False
+    if not all(
+        isinstance(d, Mapping)
+        and str(d.get("status") or "").strip().lower() in _DEVOLUCAO_INTERNA_EM_ESPERA
+        for d in ctx.get("devolucoes") or []
+    ):
+        return False
+    recentes = list(recentes)
+    rajada = ia.rajada_do_cliente(recentes, gatilho)
+    if any(_e_anexo(m) for m in rajada):
+        return False
+    foco = ia.perguntas_pendentes(recentes, gatilho)
+    textos = [m.texto for m in rajada if _do_cliente(m)] + [
+        m.texto for m in foco if m not in rajada
+    ]
+    return pergunta_so_o_andamento(textos)
+
+
+def rotina_do_turno(
+    conversa: Any,
+    ctx: Mapping[str, Any] | None,
+    recentes: Sequence[Any],
+    gatilho: Any | None,
+    sinais_do_cliente: Collection[str] = (),
+) -> bool:
+    """A marca da devolução de rotina do turno — a MESMA no gatilho 3, no pacote, nas
+    checagens e no envio sozinho. A reclamação aberta em OUTRA conversa do comprador
+    (o cartão Cliente) continua com pessoa. PURA (fora a chave)."""
+    return "reclamacao_aberta" not in sinais_do_cliente and devolucao_de_rotina(
+        conversa, ctx, recentes, gatilho
     )
 
 
@@ -2130,7 +2318,11 @@ def gatilhos(
     # devolução da Shopee aberto) — a loja responde a solicitação na Central do
     # Vendedor; o agente só confirma que ela foi aberta, nunca decide.
     devolucao_aberta = devolucao_na_plataforma(conversa, recentes, ctx, agora=agora)
-    if (
+    # Item 32 (22/10/2026, 3c): a devolução de rotina (sem nada para a loja decidir) não
+    # é pessoa — o cartão da devolução e o retrato em devolução são dela também. A
+    # reclamação aberta em OUTRA conversa do comprador (o cartão Cliente) continua.
+    rotina = rotina_do_turno(conversa, ctx, recentes, gatilho, sinais_do_cliente)
+    if not rotina and (
         getattr(conversa, "canal", None) == constantes.CANAL_RECLAMACAO
         or constantes.ETIQUETA_RECLAMACAO in etiquetas
         or ia._reclamacoes_abertas(dict(ctx))
@@ -2138,7 +2330,7 @@ def gatilhos(
         or "reclamacao_aberta" in sinais_do_cliente
     ):
         saida.append(_gatilho(constantes.ACAO_RECLAMACAO_ABERTA))
-    elif devolucao_aberta:
+    elif not rotina and devolucao_aberta:
         saida.append(_gatilho(constantes.ACAO_RECLAMACAO_ABERTA, DETALHE_DEVOLUCAO_NA_PLATAFORMA))
     # 4 — avaliação de nota baixa.
     if (
@@ -2445,6 +2637,11 @@ async def gatilhos_de_codigo(
         agora=ctx.agora(),
     )
     ctx.acoes_codigo = agente_ctx.ordenar_acoes([g.codigo for g in lista])
+    # Item 32 (22/10/2026, 3c): a marca da devolução de rotina (o envio sozinho e as
+    # checagens do andamento a leem).
+    ctx.devolucao_de_rotina = rotina_do_turno(
+        conversa, base.ctx, base.recentes, gatilho, base.sinais_do_cliente
+    )
     ctx.pistas_orientacao = pistas_de_orientacao(base.recentes, gatilho)
     ctx.pistas_turno = pistas_do_turno(
         base.recentes, gatilho, com_pedido=bool((base.ctx or {}).get("pedido"))

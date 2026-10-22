@@ -615,8 +615,9 @@ def test_22_e_24_a_nota_da_shopee_so_no_bloco_da_shopee(plataforma):
 
 
 def test_v8_a_versao():
-    assert v.VERSAO == "v8"
-    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v8"
+    # Item 32 (22/10/2026): o v9 (as respostas da equipe citadas) guarda o v8 inteiro.
+    assert v.VERSAO == "v9"
+    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v9"
 
 
 def test_22_o_sistema_diz_que_o_ao_receber_a_quem_nao_recebeu_e_errado():
@@ -798,7 +799,8 @@ def test_22_o_68f6992d_relido_com_o_turno_inteiro_e_ruim():
 
 def test_a_calibracao_tem_os_casos_da_6a_rodada():
     casos = _casos()
-    ids = list(casos)
+    # Item 32 (22/10/2026): o arquivo cresceu DEPOIS das 373 linhas da rodada 6.
+    ids = list(casos)[:373]
     # Revisão 2 da rodada 6: mais 9 linhas DEPOIS das da rodada (o arquivo novo).
     assert len(ids) == 373 and ids[-9 - len(NOVOS_6) : -9] == list(NOVOS_6)
     for id_, (grupo, bloqueia, marca) in NOVOS_6.items():
@@ -842,7 +844,8 @@ def test_a_calibracao_tem_os_casos_da_6a_rodada():
 
 def test_rev6b_a_calibracao_tem_os_casos_da_revisao_2():
     casos = _casos()
-    ids = list(casos)
+    # Item 32 (22/10/2026): as linhas do v9 vêm depois das 373 da rodada 6.
+    ids = list(casos)[:373]
     assert ids[-len(NOVOS_6B) :] == list(NOVOS_6B)
     for id_, (grupo, bloqueia, marca) in NOVOS_6B.items():
         c = casos[id_]

@@ -673,6 +673,14 @@ class Settings(BaseSettings):
     # envio sozinho do agente: `false` = nenhum rascunho do agente sai
     # sozinho (vai para pessoa). O copiloto e o "Sugerir" não o chamam.
     atendimento_agente_verificador: bool = True
+    # Item 32 da auditoria ao vivo (22/10/2026, 3c): a devolução já aberta na Shopee
+    # ("Em andamento") ou no TikTok ("Esperando o comprador enviar") sem nada para a
+    # loja decidir, com o cliente só perguntando o andamento ou o prazo do reembolso,
+    # deixa de ser pessoa no agente (`agente.acao_pessoa.devolucao_de_rotina`).
+    # LIGADA com o OK do dono (22/10/2026: "se a devolução de rotina fizer sentido pros
+    # contextos pode sim"); `false` = a régua de antes (toda devolução aberta é
+    # pessoa). O legado não lê.
+    atendimento_agente_devolucao_rotina: bool = True
     # O replay noturno (sombra): refaz os gatilhos do dia anterior e grava só
     # em `atendimento_agente_replay`, nunca na caixa. Plataformas separadas
     # por vírgula.

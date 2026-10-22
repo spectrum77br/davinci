@@ -1014,6 +1014,11 @@ async def _responder(
         opcoes_sensiveis=base.opcoes_sensiveis,
         forcar=base.forcar or ctx.modo_replay,
         agente=True,
+        # Item 32 (22/10/2026, 3c): a marca da devolução de rotina do turno.
+        devolucao_de_rotina=ctx.devolucao_de_rotina,
+        # Decisão do dono (22/10/2026): a pergunta de produto com a resposta da equipe
+        # do mesmo anúncio, de um modelo, citada.
+        produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
     )
     # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
     # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta
@@ -1049,6 +1054,8 @@ async def _responder(
             base.ctx,
             etiquetas=acao_pessoa.etiquetas_da_conversa(conversa),
             motivos=conferida.motivos,
+            # Item 32 (22/10/2026): a devolução de rotina não segura pela etiqueta.
+            rotina=ctx.devolucao_de_rotina,
         )
         if pendencia.codigo not in ja
     ]
