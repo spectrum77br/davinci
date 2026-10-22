@@ -50,8 +50,11 @@ const APELIDO_ML: Record<string, string> = { zorvex: "zortex", victormei: "victo
 /** Loja do ML que usa um perfil de outro nome — pelo `user_id` do perfil (o mesmo
  *  fixo da IA de Chamado, `ferramentas/adspower.py` PERFIL_FIXO, que abre a
  *  consulta: ler e responder têm que entrar na mesma conta). Vinicius 02/10
- *  (296985): jlas2 = perfil 110 "JLAS 2 - ml", não o 32 "JLAS 2 - Mercado Livre". */
-const PERFIL_FIXO_ML: Record<string, string> = { jlas2: "k1bhpx2w" };
+ *  (296985): jlas2 = perfil 110 "JLAS 2 - ml", não o 32 "JLAS 2 - Mercado Livre".
+ *  22/10 (304535): kfa2 = perfil 111 "KFA 2 - ml" — no 33 "KFA 2 - Mercado Livre"
+ *  o ML dá 403 (CloudFront) na consulta e na Central de Ajuda. Os dois são
+ *  Firefox: abrem por BiDi (index.ts `conectar`). */
+const PERFIL_FIXO_ML: Record<string, string> = { jlas2: "k1bhpx2w", kfa2: "k1bhpyhs" };
 
 const GRUPOS_OPERACAO = new Set(["lojas", "israel", "marrocos", "contas"]);
 

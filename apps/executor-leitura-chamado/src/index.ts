@@ -36,6 +36,9 @@
  * LEITOR_TOKEN segue só lendo. Roda no começo da passada: a resposta que saiu
  * volta pra fila de leitura e a conversa com ela entra no chamado na mesma passada.
  *
+ * 22/10 (304535): perfil Firefox (FlowerBrowser) é aberto por WebDriver BiDi, e
+ * perfil que não conecta é fechado e pulado sem derrubar a passada.
+ *
  * Uso:
  *   npm start                         loop (LEITURA_MODO do .env, default seco)
  *   npm start -- --uma-vez            uma passada e sai
@@ -63,7 +66,7 @@ import * as ml from "./ml_consulta";
 import * as maos from "./ml_responder";
 import type { Caso } from "./davinci";
 
-const VERSION = "1.4.0";
+const VERSION = "1.4.1";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function arg(nome: string): string | undefined {
@@ -95,10 +98,43 @@ async function abrirPerfil(userId: string, nome: string): Promise<Sessao | null>
     log.warn(`${nome}: AdsPower não abriu o perfil (${String(e?.message || e)}) — pulo`);
     return null;
   }
-  const browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null });
-  const page = await browser.newPage();
-  await maximizar(page, nome);
-  return { browser, page, userId };
+  // 22/10 (304535): o connect ficava fora do try — o 111 "KFA 2 - ml" (Firefox)
+  // morreu em "Browser.getVersion", derrubou a passada inteira e o perfil ficou
+  // aberto. Agora quem não conecta é fechado e pulado; a passada segue.
+  let browser: Browser | undefined;
+  try {
+    const c = await conectar(ws);
+    browser = c.browser;
+    const page = await browser.newPage();
+    if (!c.bidi) await maximizar(page, nome);
+    return { browser, page, userId };
+  } catch (e: any) {
+    log.warn(`${nome}: não consegui falar com o navegador do perfil (${String(e?.message || e)}) — fecho e pulo`);
+    try {
+      browser?.disconnect();
+    } catch {
+      /* já desconectado */
+    }
+    await adspower.stop(userId).catch(() => undefined);
+    return null;
+  }
+}
+
+/** Perfil Chrome (SunBrowser) fala CDP; perfil Firefox (FlowerBrowser, ex. 110
+ *  "JLAS 2 - ml" e 111 "KFA 2 - ml") devolve `ws://…/session` e só fala WebDriver
+ *  BiDi. Mesma regra do executor (tiktok.ts) e da IA de Chamado (tela.mjs). */
+async function conectar(ws: string): Promise<{ browser: Browser; bidi: boolean }> {
+  if (!/\/session\/?$/.test(ws)) {
+    try {
+      return { browser: await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null }), bidi: false };
+    } catch {
+      /* não é Chrome: tenta o BiDi */
+    }
+  }
+  return {
+    browser: await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null, protocol: "webDriverBiDi" }),
+    bidi: true,
+  };
 }
 
 /** A janela do perfil abre do tamanho que o AdsPower lembra — no Santiago era
