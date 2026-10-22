@@ -9,9 +9,10 @@ travas da Magalu. Sem Redis: arquivo separado do test_logistica_track.
 
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -244,6 +245,7 @@ async def test_sonda_exige_edicao_do_controle_de_estoque(
 BID = 27104098429
 PO = "PO-029-04644091987833262"
 COLETA = datetime(2026, 10, 20, 15, 33, 52, tzinfo=UTC)  # 12:33 em Brasília
+AGORA = datetime(2026, 10, 22, 14, 30, tzinfo=UTC)  # 11:30 em Brasília — hora da rodada
 
 
 class Bling:
@@ -276,7 +278,12 @@ class Bling:
 
 
 async def _pedido_temu(
-    db: AsyncSession, etiqueta: bytes, *, numeroloja: str = PO, documento: str | None = None
+    db: AsyncSession,
+    etiqueta: bytes,
+    *,
+    numeroloja: str = PO,
+    documento: str | None = None,
+    etiqueta_em: datetime = AGORA - timedelta(hours=4),
 ) -> BlingOrder:
     row = BlingOrder(
         bling_id=BID,
@@ -293,7 +300,11 @@ async def _pedido_temu(
     db.add(row)
     db.add(
         NfEtiquetaArquivo(
-            pedido_bling="304816", filename="e.pdf", content_type="application/pdf", blob=etiqueta
+            pedido_bling="304816",
+            filename="e.pdf",
+            content_type="application/pdf",
+            blob=etiqueta,
+            created_at=etiqueta_em,
         )
     )
     await db.commit()
@@ -314,12 +325,38 @@ def _track(status: str, *eventos: tuple[datetime, str]) -> dict:
     }
 
 
+class RedisFalso:
+    """Só o que a rodada usa (mget/set). `quebrado` simula o Redis fora."""
+
+    def __init__(self):
+        self.dados: dict[str, str] = {}
+        self.quebrado = False
+
+    async def mget(self, chaves):
+        if self.quebrado:
+            raise ConnectionError("redis fora")
+        return [self.dados.get(k) for k in chaves]
+
+    async def set(self, chave, valor, ex=None):
+        if self.quebrado:
+            raise ConnectionError("redis fora")
+        self.dados[chave] = valor
+
+
 @pytest.fixture
-def ambiente(db, monkeypatch):
-    """Liga a rodada no `db` do teste, num Bling falso e num 17track falso."""
+def redis_falso(monkeypatch) -> RedisFalso:
+    falso = RedisFalso()
+    monkeypatch.setattr(temu_rastreio, "redis", falso)
+    return falso
+
+
+@pytest.fixture
+def ambiente(db, monkeypatch, redis_falso):
+    """Liga a rodada no `db` do teste, num Bling falso, num 17track falso e
+    num Redis falso, às 11:30 de Brasília."""
     bling = Bling()
     feitas: list[tuple[str, Any]] = []
-    respostas: dict[str, dict] = {}
+    respostas: dict[str, Any] = {}
 
     @asynccontextmanager
     async def scope():
@@ -328,8 +365,12 @@ def ambiente(db, monkeypatch):
 
     async def _chamar(_c, endpoint, payload, *, base=logistica_track._BASE):
         feitas.append((endpoint, payload))
-        return respostas.get(endpoint) or {"code": 0, "data": {"accepted": [], "rejected": []}}
+        resposta = respostas.get(endpoint)
+        if isinstance(resposta, Exception):
+            raise resposta
+        return resposta or {"code": 0, "data": {"accepted": [], "rejected": []}}
 
+    monkeypatch.setattr(temu_rastreio, "_agora", lambda: AGORA)
     monkeypatch.setattr(app_db, "session_scope", scope)
     monkeypatch.setattr(sweep, "_get_bling_integration", AsyncMock(return_value=object()))
     monkeypatch.setattr(sweep, "_build_bling_client", AsyncMock(return_value=bling))
@@ -454,3 +495,174 @@ async def test_aplicar_nao_grava_sem_ler_15_no_bling(db: AsyncSession):
     assert motivo == "bling_nao_confirmou"
     await db.refresh(row)
     assert row.situacao == "21"
+
+
+# ---- fase 3: cadastro 3 h depois + consulta econômica (Vinicius, 22/10) ----
+
+AJ = "AJ261022125545001"
+CHAVE = f"temu17:consulta:{AJ}"
+
+
+def _conhecido(
+    codigo: str,
+    status: str,
+    sync: datetime | None = None,
+    *eventos: tuple[datetime, str],
+) -> dict:
+    ti = _track(status, *eventos)
+    if sync is not None:
+        ti["tracking"] = {
+            "providers": [{"latest_sync_time": sync.isoformat().replace("+00:00", "Z")}]
+        }
+    return {"code": 0, "data": {"accepted": [{"number": codigo, "track_info": ti}]}}
+
+
+async def test_rodada_espera_3h_da_etiqueta_pra_cadastrar(db: AsyncSession, ambiente):
+    _bling, feitas, _respostas = ambiente
+    await _pedido_temu(
+        db, _pdf(f"AnjunExpress {AJ}"), etiqueta_em=AGORA - timedelta(hours=2, minutes=59)
+    )
+
+    resumo = await temu_rastreio.rodada()
+
+    assert resumo["aguardando_3h"] == 1
+    assert feitas == []  # nem leitura nem cadastro antes das 3 h
+
+
+async def test_rodada_cadastra_depois_de_3h_e_anota_sem_pagar(
+    db: AsyncSession, ambiente, redis_falso
+):
+    _bling, feitas, respostas = ambiente
+    await _pedido_temu(db, _pdf(f"AnjunExpress {AJ}"))
+    respostas["gettrackinfo"] = {
+        "code": 0,
+        "data": {
+            "rejected": [{"number": AJ, "error": {"code": logistica_track.ERRO_NAO_REGISTRADO}}]
+        },
+    }
+    respostas["register"] = {"code": 0, "data": {"accepted": [{"number": AJ}]}}
+
+    resumo = await temu_rastreio.rodada()
+
+    assert resumo["registrados"] == 1 and resumo["consultas_pagas"] == 0
+    assert [e for e, _ in feitas] == ["gettrackinfo", "register"]
+    # O cadastro já mandou o 17track à Anjun: a 1ª consulta paga só 3 h depois.
+    assert json.loads(redis_falso.dados[CHAVE]) == {"n": 0, "ultima": AGORA.isoformat()}
+
+
+async def test_rodada_consulta_economica_acha_a_coleta_e_fica_verde(
+    db: AsyncSession, ambiente, redis_falso
+):
+    bling, feitas, respostas = ambiente
+    row = await _pedido_temu(db, _pdf(f"AnjunExpress {AJ}"))
+    coleta = datetime(2026, 10, 22, 14, 9, 52, tzinfo=UTC)  # 11:09 em Brasília
+    respostas["gettrackinfo"] = _conhecido(AJ, "NotFound", AGORA - timedelta(hours=3, minutes=5))
+    respostas["getRealTimeTrackInfo"] = _conhecido(
+        AJ, "InTransit", None, (coleta, "Objeto coletado")
+    )
+
+    resumo = await temu_rastreio.rodada()
+
+    assert resumo["consultas_pagas"] == 1 and resumo["verdes"] == 1
+    consulta = next(p for e, p in feitas if e == "getRealTimeTrackInfo")
+    assert consulta == [{"number": AJ, "carrier": 191915}]  # econômico: sem cacheLevel
+    assert json.loads(redis_falso.dados[CHAVE]) == {"n": 1, "ultima": AGORA.isoformat()}
+    assert bling.escritas == [(BID, 15)]
+    await db.refresh(row)
+    assert row.situacao == "15" and row.em_andamento_data == date(2026, 10, 22)
+    ev = (await db.scalars(select(BlingEnvioEvento).where(BlingEnvioEvento.bling_id == BID))).one()
+    assert ev.occurred_at == coleta
+
+
+async def test_rodada_coletado_na_leitura_gratis_nao_paga(db: AsyncSession, ambiente):
+    _bling, feitas, respostas = ambiente
+    await _pedido_temu(db, _pdf(f"AnjunExpress {AJ}"))
+    respostas["gettrackinfo"] = _conhecido(
+        AJ, "InTransit", AGORA - timedelta(hours=5), (COLETA, "Objeto coletado")
+    )
+
+    resumo = await temu_rastreio.rodada()
+
+    assert resumo["verdes"] == 1 and resumo["consultas_pagas"] == 0
+    assert "getRealTimeTrackInfo" not in [e for e, _ in feitas]
+
+
+B = datetime(2026, 10, 22, 0, 0, tzinfo=UTC)  # base pras horas de Brasília (UTC−3)
+
+
+@pytest.mark.parametrize(
+    ("agora", "anotado", "sync", "motivo"),
+    [
+        (AGORA, None, None, None),
+        (AGORA, {"n": 3, "ultima": AGORA - timedelta(hours=3)}, None, None),
+        (B + timedelta(hours=11), None, None, None),  # 08:00
+        (B + timedelta(hours=22, minutes=59), None, None, None),  # 19:59
+        (B + timedelta(hours=10, minutes=59), None, None, "fora_do_horario"),  # 07:59
+        (B + timedelta(hours=23), None, None, "fora_do_horario"),  # 20:00
+        (AGORA, {"n": 10, "ultima": None}, None, "limite"),
+        (AGORA, {"n": 1, "ultima": AGORA - timedelta(hours=1)}, None, "aguardando"),
+        (AGORA, None, AGORA - timedelta(hours=2, minutes=59), "aguardando"),
+        # O 17track foi à Anjun sozinho há 1 h: pagar agora repetiria a resposta.
+        (
+            AGORA,
+            {"n": 2, "ultima": AGORA - timedelta(hours=5)},
+            AGORA - timedelta(hours=1),
+            "aguardando",
+        ),
+    ],
+)
+def test_quando_paga_a_consulta(agora, anotado, sync, motivo):
+    assert temu_rastreio._motivo_sem_consulta(agora, anotado, sync) == motivo
+
+
+async def test_rodada_sem_redis_nao_paga(db: AsyncSession, ambiente, redis_falso):
+    _bling, feitas, respostas = ambiente
+    redis_falso.quebrado = True
+    await _pedido_temu(db, _pdf(f"AnjunExpress {AJ}"))
+    respostas["gettrackinfo"] = _conhecido(AJ, "NotFound")
+
+    resumo = await temu_rastreio.rodada()
+
+    assert resumo["consultas_pagas"] == 0
+    assert "getRealTimeTrackInfo" not in [e for e, _ in feitas]
+
+
+async def test_rodada_jt_nao_paga_consulta(db: AsyncSession, ambiente):
+    # A consulta na hora da J&T pediria o CPF de novo: fica no automático.
+    _bling, feitas, respostas = ambiente
+    await _pedido_temu(db, _pdf("J&T 888002704060957"), documento=CPF)
+    respostas["gettrackinfo"] = _conhecido("888002704060957", "NotFound")
+
+    resumo = await temu_rastreio.rodada()
+
+    assert resumo["consultas_pagas"] == 0
+    assert "getRealTimeTrackInfo" not in [e for e, _ in feitas]
+
+
+async def test_consulta_que_falha_conta_no_teto_e_espera_3h(
+    db: AsyncSession, ambiente, redis_falso
+):
+    _bling, feitas, respostas = ambiente
+    row = await _pedido_temu(db, _pdf(f"AnjunExpress {AJ}"))
+    respostas["gettrackinfo"] = _conhecido(AJ, "NotFound")
+    respostas["getRealTimeTrackInfo"] = logistica_track.Track17Error(
+        "getRealTimeTrackInfo: HTTP 200 code=-1"
+    )
+
+    primeira = await temu_rastreio.rodada()
+    segunda = await temu_rastreio.rodada()  # 15 min depois, na mesma hora "AGORA"
+
+    assert primeira["consultas_pagas"] == 1 and primeira["erros"] == 1
+    assert segunda["consultas_pagas"] == 0
+    assert [e for e, _ in feitas].count("getRealTimeTrackInfo") == 1
+    assert json.loads(redis_falso.dados[CHAVE])["n"] == 1
+    await db.refresh(row)
+    assert row.situacao == "21"
+
+
+async def test_registro_ilegivel_no_redis_vale_como_teto(redis_falso):
+    redis_falso.dados[CHAVE] = "lixo"
+
+    lidos = await temu_rastreio._ler_consultas([AJ])
+
+    assert lidos is not None and lidos[AJ]["n"] == temu_rastreio._MAX_CONSULTAS

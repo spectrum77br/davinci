@@ -27,11 +27,23 @@ botão): pedidos Temu ainda vermelhos → código da etiqueta → 17track; o que
 tem evento de transportadora vai pra 15 no Bling (mesmas travas da Magalu,
 `magalu_shipment_sync`) com a hora do 1º evento como hora do envio. O CPF da
 J&T só vai no /register, uma vez; a leitura (`gettrackinfo`) é de graça.
+
+Fase 3 (Vinicius, 22/10 — o 305438 coletado às 11:09 seguia "não encontrado"
+no 17track às 15h): o 17track pergunta à transportadora no cadastro e depois
+só a cada 6–12 h. Cadastrado logo na etiqueta, antes da coleta, a única
+consulta rápida voltava vazia. Agora:
+  * cadastro só 3 h depois da etiqueta;
+  * se ainda não saiu, consulta na hora no modo econômico
+    (`getRealTimeTrackInfo` sem `cacheLevel` = 1 crédito; devolve o que o
+    17track buscou na transportadora nas últimas 3 h) de 3 em 3 h, das 8h às
+    20h de Brasília, até 10 por código. Só Anjun: a J&T pediria o CPF de novo.
+  * coletado → fica verde e sai da lista; as consultas param sozinhas.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -45,6 +57,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingEnvioEvento, BlingOrder, NfEtiquetaArquivo
+from app.redis_client import redis
 from app.services import logistica_track
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 from app.services.margem_audit import record_margem_audit
@@ -231,6 +244,100 @@ _LOTE = 40  # máximo do /register e do /gettrackinfo
 _LOCK_RODADA = 0x74656D75  # ascii "temu"
 _ERROS_BLING = frozenset({"bling_nao_confere", "bling_nao_confirmou", "bling_falhou"})
 
+# Fase 3 — quando perguntar ao 17track (ver docstring do módulo).
+_ESPERA_CADASTRO = timedelta(hours=3)  # da etiqueta ao cadastro
+_INTERVALO_CONSULTA = timedelta(hours=3)  # o econômico reaproveita até 3 h
+_HORARIO_CONSULTA = (8, 20)  # Brasília: das 8h às 19h59
+_MAX_CONSULTAS = 10  # pagas, por código
+# Redis: {"n": consultas pagas, "ultima": quando o 17track foi à transportadora
+# por nossa conta (cadastro ou consulta)}. Some depois da janela de 14 dias.
+_CHAVE_CONSULTA = "temu17:consulta:"
+_TTL_CONSULTA = 15 * 24 * 3600
+
+
+def _agora() -> datetime:
+    return datetime.now(UTC)
+
+
+async def _ler_consultas(codigos: list[str]) -> dict[str, dict[str, Any]] | None:
+    """{código: {"n", "ultima"}} só dos que já têm registro. None se o Redis
+    falhou — aí a rodada não paga consulta nenhuma (sem contador, sem limite)."""
+    if not codigos:
+        return {}
+    try:
+        valores = await redis.mget([f"{_CHAVE_CONSULTA}{c}" for c in codigos])
+    except Exception as e:  # noqa: BLE001 — Redis fora não derruba a rodada
+        logger.warning("temu_rastreio_redis_falhou", err=str(e)[:200])
+        return None
+    saida: dict[str, dict[str, Any]] = {}
+    for codigo, valor in zip(codigos, valores, strict=True):
+        if not valor:
+            continue
+        try:
+            d = json.loads(valor)
+            ultima = datetime.fromisoformat(d["ultima"]) if d.get("ultima") else None
+            saida[codigo] = {"n": int(d.get("n") or 0), "ultima": ultima}
+        except (ValueError, TypeError, KeyError):
+            # Registro ilegível conta como teto atingido: não gasta às cegas.
+            saida[codigo] = {"n": _MAX_CONSULTAS, "ultima": None}
+    return saida
+
+
+async def _anotar_consulta(codigo: str, n: int, quando: datetime) -> None:
+    try:
+        await redis.set(
+            f"{_CHAVE_CONSULTA}{codigo}",
+            json.dumps({"n": n, "ultima": quando.isoformat()}),
+            ex=_TTL_CONSULTA,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("temu_rastreio_redis_falhou", err=str(e)[:200])
+
+
+def _sync_17track(track_info: dict) -> datetime | None:
+    """Última vez que o 17track foi à transportadora (`latest_sync_time`), nos
+    dois lugares onde os `providers` aparecem."""
+    vezes: list[datetime] = []
+    for p in logistica_track._providers(track_info):
+        try:
+            dt = datetime.fromisoformat(str(p.get("latest_sync_time") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        vezes.append(dt if dt.tzinfo else dt.replace(tzinfo=UTC))
+    return max(vezes, default=None)
+
+
+def _motivo_sem_consulta(
+    agora: datetime, anotado: dict[str, Any] | None, sync_17track: datetime | None
+) -> str | None:
+    """None = pode pagar a consulta agora; senão, o motivo de esperar."""
+    if not (_HORARIO_CONSULTA[0] <= agora.astimezone(_BRT).hour < _HORARIO_CONSULTA[1]):
+        return "fora_do_horario"
+    anotado = anotado or {"n": 0, "ultima": None}
+    if anotado["n"] >= _MAX_CONSULTAS:
+        return "limite"
+    # A última ida à transportadora: a nossa (cadastro/consulta) ou a do
+    # próprio 17track (6–12 h). Menos de 3 h = o econômico devolveria o mesmo.
+    ultimas = [t for t in (anotado["ultima"], sync_17track) if t is not None]
+    if ultimas and agora - max(ultimas) < _INTERVALO_CONSULTA:
+        return "aguardando"
+    return None
+
+
+async def _consultar_na_hora(c: httpx.AsyncClient, linha: dict[str, Any]) -> dict | None:
+    """Consulta na hora, modo econômico (1 crédito). Sem `cacheLevel`: a doc
+    da v2.4 diz 0 na tabela e "Standard" no texto — o padrão é o econômico."""
+    body = await logistica_track._chamar(
+        c,
+        "getRealTimeTrackInfo",
+        [{"number": linha["number"], "carrier": linha["carrier"]}],
+        base=BASE_V24,
+    )
+    for it in (body.get("data") or {}).get("accepted") or []:
+        if str((it or {}).get("number") or "").strip() == linha["number"]:
+            return it.get("track_info") or {}
+    return None
+
 
 async def _candidatos(session: AsyncSession) -> list[BlingOrder]:
     corte = datetime.now(UTC) - _JANELA
@@ -273,18 +380,18 @@ async def _ler(
     return lidos, nao_registrados
 
 
-async def _registrar(c: httpx.AsyncClient, linhas: list[dict[str, Any]]) -> int:
-    """Registra quem o 17track ainda não conhece (1 crédito cada). Sem saldo,
-    para: o resto fica pra quando recarregarem."""
-    feitos = 0
+async def _registrar(c: httpx.AsyncClient, linhas: list[dict[str, Any]]) -> list[str]:
+    """Registra quem o 17track ainda não conhece (1 crédito cada) e devolve os
+    aceitos. Sem saldo, para: o resto fica pra quando recarregarem."""
+    feitos: list[str] = []
     for i in range(0, len(linhas), _LOTE):
         if i:
             await asyncio.sleep(logistica_track._PAUSA_ENTRE_LOTES)
         body = await logistica_track._chamar(c, "register", linhas[i : i + _LOTE], base=BASE_V24)
         aceitos, recusados = logistica_track._aceitos_e_recusados(body)
-        feitos += len(aceitos)
+        feitos += aceitos
         if _ERRO_SEM_QUOTA in recusados.values():
-            logger.warning("temu_rastreio_sem_quota", registrados=feitos)
+            logger.warning("temu_rastreio_sem_quota", registrados=len(feitos))
             break
     return feitos
 
@@ -421,10 +528,12 @@ async def rodada() -> dict[str, int]:
     resumo = dict.fromkeys(
         (
             "candidatos",
+            "aguardando_3h",
             "sem_etiqueta",
             "sem_codigo",
             "jt_sem_cpf",
             "registrados",
+            "consultas_pagas",
             "ainda_nao_saiu",
             "verdes",
             "erros",
@@ -448,9 +557,24 @@ async def rodada() -> dict[str, int]:
             return resumo
         cands = await _candidatos(session)
         resumo["candidatos"] = len(cands)
+        agora = _agora()
+        etiqueta_em = dict(
+            (
+                await session.execute(
+                    select(NfEtiquetaArquivo.pedido_bling, NfEtiquetaArquivo.created_at).where(
+                        NfEtiquetaArquivo.pedido_bling.in_([str(o.numero) for o in cands])
+                    )
+                )
+            ).all()
+        )
         linhas: dict[str, dict[str, Any]] = {}
         pedido_do_codigo: dict[str, BlingOrder] = {}
         for o in cands:
+            # Antes da coleta o cadastro gasta a única consulta rápida do 17track.
+            feita = etiqueta_em.get(str(o.numero))
+            if feita is not None and agora - feita < _ESPERA_CADASTRO:
+                resumo["aguardando_3h"] += 1
+                continue
             _cod, linha, erro = await _preparar(session, str(o.numero))
             if linha is None:
                 resumo[contador[erro or "sem_etiqueta"]] += 1
@@ -462,14 +586,60 @@ async def rodada() -> dict[str, int]:
         try:
             async with httpx.AsyncClient(timeout=40.0) as c:
                 lidos, nao_registrados = await _ler(c, list(linhas.values()))
+                anotados = await _ler_consultas(list(linhas))
                 novos = [linhas[n] for n in nao_registrados if n in linhas]
                 if novos:
-                    resumo["registrados"] = await _registrar(c, novos)
+                    aceitos = await _registrar(c, novos)
+                    resumo["registrados"] = len(aceitos)
+                    for codigo in aceitos:
+                        pagas = ((anotados or {}).get(codigo) or {}).get("n", 0)
+                        await _anotar_consulta(codigo, pagas, agora)
+                coletados = {
+                    n: h for n, ti in lidos.items() if n in linhas and (h := _coletado_em(ti))
+                }
+                # Sem Redis não há contador nem teto: não paga nada nesta rodada.
+                pagaveis = lidos if anotados is not None else {}
+                anotados = anotados or {}
+                for codigo, ti in pagaveis.items():
+                    if (
+                        codigo not in linhas
+                        or codigo in coletados
+                        or linhas[codigo]["carrier"] != ANJUN_CARRIER
+                        or _motivo_sem_consulta(agora, anotados.get(codigo), _sync_17track(ti))
+                    ):
+                        continue
+                    pagas = (anotados.get(codigo) or {}).get("n", 0) + 1
+                    # Anota antes de chamar: consulta que falhou também conta no teto.
+                    await _anotar_consulta(codigo, pagas, agora)
+                    if resumo["consultas_pagas"]:
+                        await asyncio.sleep(logistica_track._PAUSA_ENTRE_LOTES)
+                    resumo["consultas_pagas"] += 1
+                    pedido = pedido_do_codigo[codigo].numero
+                    try:
+                        novo = await _consultar_na_hora(c, linhas[codigo])
+                    except logistica_track.Track17Error as e:
+                        logger.warning(
+                            "temu_rastreio_consulta_falhou",
+                            pedido=pedido,
+                            n=pagas,
+                            err=str(e)[:200],
+                        )
+                        resumo["erros"] += 1
+                        continue
+                    hora = _coletado_em(novo or {})
+                    logger.info(
+                        "temu_rastreio_consulta_paga",
+                        pedido=pedido,
+                        n=pagas,
+                        status=((novo or {}).get("latest_status") or {}).get("status"),
+                        coletado=hora is not None,
+                    )
+                    if hora is not None:
+                        coletados[codigo] = hora
         except logistica_track.Track17Error as e:
             logger.warning("temu_rastreio_17track_falhou", err=str(e)[:200])
             resumo["erros"] += 1
             return resumo
-        coletados = {n: h for n, ti in lidos.items() if n in linhas and (h := _coletado_em(ti))}
         resumo["ainda_nao_saiu"] = len(linhas) - len(coletados)
         if not coletados:
             return resumo
