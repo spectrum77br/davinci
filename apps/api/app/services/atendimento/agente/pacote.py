@@ -410,19 +410,98 @@ def status_sem_cidade(status: str | None) -> str | None:
     return texto[:MAX_CHARS_ITEM] or None
 
 
+# Item 31 da auditoria ao vivo (22/10/2026): o texto do último evento da Shopee no
+# retrato da conversa traz a cidade de várias formas ("Seu pedido saiu do centro
+# logístico: Piracicaba - SP", "O pedido chegou ao centro de : São Bernardo do Campo - SP
+# e segue…", "…aguardando veículo… em Piracicaba - SP aguardando veículo", "…a caminho do
+# próximo centro logístico em Rio de Janeiro - RJ"). Sai o lugar com a preposição ou os
+# dois-pontos antes; se ainda sobrar cara de lugar (" - UF", "/UF", nome próprio no meio
+# da frase), o evento não vai ao modelo (fica o status da linha).
+_LUGAR_DO_EVENTO = re.compile(
+    r"(?:\s*(?:\b(?:em|de|no|na|para|ao)\b|:)\s*)*\s*"
+    r"\b[A-ZÀ-Ý][\wÀ-ÿ'’.]*(?:[\s-]+(?:d[aeo]s?|[A-ZÀ-Ý][\wÀ-ÿ'’.]*))*\s*[-–]\s*[A-Z]{2}\b"
+)
+_AINDA_TEM_LUGAR = re.compile(r"\s[-–]\s*[A-Z]{2}\b|/[A-Z]{2}\b|:\s*[A-ZÀ-Ý]")
+# A palavra com maiúscula que não começa frase é nome próprio (cidade, bairro, pessoa) —
+# menos os da própria logística.
+_NOMES_DA_LOGISTICA = frozenset({"shopee", "spx", "xpress", "express", "correios", "j&t"})
+
+
+def status_do_evento_sem_cidade(texto: str | None) -> str | None:
+    """O texto do último evento do retrato sem o lugar (ver acima); None se sobrar cara
+    de lugar ou de nome próprio — nunca vai ao modelo pela metade. PURA."""
+    if not isinstance(texto, str) or not texto.strip():
+        return None
+    limpo = " ".join(_LUGAR_DO_EVENTO.sub(" ", " ".join(texto.split())).split())
+    limpo = re.sub(r"\s+([,.;:!?])", r"\1", limpo).strip(" -–,;:")
+    if not limpo or _AINDA_TEM_LUGAR.search(limpo):
+        return None
+    for frase in re.split(r"(?<=[.!?])\s+", limpo):
+        for palavra in frase.split()[1:]:
+            nua = palavra.strip("()[]\"'«»,.;:!?")
+            if nua[:1].isupper() and nua.lower() not in _NOMES_DA_LOGISTICA:
+                return None
+    if len(limpo) <= MAX_CHARS_ITEM:
+        return limpo
+    # O corte no fim de uma frase ("…não pôde ser concluída hoje."), não no meio.
+    corte = max(
+        (m.end() for m in re.finditer(r"[.!?](?=\s)", limpo[: MAX_CHARS_ITEM + 1])), default=0
+    )
+    return limpo[:corte] if corte else limpo[:MAX_CHARS_ITEM]
+
+
+def _ultimo_status(
+    log: Mapping[str, Any],
+    retrato: Mapping[str, Any] | None,
+    *,
+    entregue: bool,
+    agora: datetime,
+) -> str | None:
+    """O último status do pedido para o modelo: o da linha da logística (sem cidade) ou —
+    item 31, 22/10/2026 — o último evento do retrato fresco do MESMO pedido
+    (`acao_pessoa.evento_do_retrato`, só a Shopee) quando o retrato foi lido DEPOIS de a
+    linha saber do status dela (`status_lido_em`/`evento_em`; a linha sem hora nenhuma
+    também perde). Nunca contra a entrega da linha/do Bling. PURA."""
+    da_linha = status_sem_cidade(log.get("status"))
+    # O retrato que já diz entregue não troca o status: o bloco segue com o "entregue"
+    # da logística/Bling e o "não recebi" é da régua 11 (`acao_pessoa`), não do texto.
+    if entregue or acao_pessoa.entregue_no_retrato(retrato):
+        return da_linha
+    evento = acao_pessoa.evento_do_retrato(retrato, agora)
+    if evento is None:
+        return da_linha
+    texto, _quando, lido = evento
+    horas_da_linha = [
+        h for h in (acao_pessoa._instante(log.get(k)) for k in ("status_lido_em", "evento_em")) if h
+    ]
+    if horas_da_linha and max(horas_da_linha) >= lido:
+        return da_linha
+    return status_do_evento_sem_cidade(texto) or da_linha
+
+
 def _lacuna(nome: str, valor: Any, lacunas: bool) -> Any:
     if not valor:
         return None
     return "{" + nome + "}" if lacunas else valor
 
 
-def _do_retrato(conversa_dados: Mapping[str, Any] | None, chaves: set[str]) -> list[dict]:
-    """Os itens do retrato da loja (`dados.pedido_mkt`) — só se for o MESMO pedido."""
+def _retrato_do_mesmo_pedido(
+    conversa_dados: Mapping[str, Any] | None, chaves: set[str]
+) -> Mapping[str, Any] | None:
+    """O retrato da loja (`dados.pedido_mkt`) só se for o MESMO pedido; senão None. PURA."""
     dados = conversa_dados if isinstance(conversa_dados, Mapping) else {}
     retrato = dados.get("pedido_mkt")
     if not isinstance(retrato, Mapping):
-        return []
+        return None
     if str(retrato.get("pedido") or "").strip().lower() not in chaves:
+        return None
+    return retrato
+
+
+def _do_retrato(conversa_dados: Mapping[str, Any] | None, chaves: set[str]) -> list[dict]:
+    """Os itens do retrato da loja (`dados.pedido_mkt`) — só se for o MESMO pedido."""
+    retrato = _retrato_do_mesmo_pedido(conversa_dados, chaves)
+    if retrato is None:
         return []
     saida = []
     for it in (retrato.get("itens") or [])[:MAX_ITENS_PEDIDO]:
@@ -620,7 +699,14 @@ async def bloco_do_pedido(
         # Bling) também prova a entrega — a logística pode não ter a data. A
         # régua do chamado lê o MESMO (`acao_pessoa.pedido_entregue`).
         "entregue": acao_pessoa.pedido_entregue(ctx_pedido),
-        "ultimo_status": status_sem_cidade(log.get("status")),
+        # Item 31 (22/10/2026, 79b5d2f5): o evento do retrato fresco do MESMO pedido
+        # quando é mais novo que a linha da logística (`_ultimo_status`).
+        "ultimo_status": _ultimo_status(
+            log,
+            _retrato_do_mesmo_pedido(dados, chaves),
+            entregue=acao_pessoa.pedido_entregue(ctx_pedido),
+            agora=agora,
+        ),
         "rastreio": _lacuna("rastreio", log.get("rastreio"), lacunas),
         "transportadora": _lacuna("transportadora", log.get("transportadora"), lacunas),
         "nf": _lacuna("nf_numero", nota.get("numero"), lacunas),

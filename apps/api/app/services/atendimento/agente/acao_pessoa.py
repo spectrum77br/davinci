@@ -140,6 +140,13 @@ DETALHE_ATRASO = (
     "entrega atrasada e o cliente pede ajuda: abrir chamado com a plataforma para "
     "acompanhar a entrega, sem prometer prazo"
 )
+# Item 31 da auditoria ao vivo (22/10/2026 07:55, Barbosa Shopee, 79b5d2f5 — saiu
+# sozinho): "parado desde o dia 18, não atualiza", e o retrato do MESMO pedido (lido
+# 4 min antes) mostrava o último evento da Shopee de dias atrás.
+DETALHE_PARADO = (
+    "o cliente diz que o rastreio está parado e a última atualização da plataforma é de "
+    "dias atrás: abrir chamado com a plataforma para acompanhar a entrega, sem prometer prazo"
+)
 # Itens 22 e 24 (22/10/2026): a devolução/reembolso que o comprador já abriu na
 # plataforma (o pedido em TO_RETURN, o cartão de devolução da Shopee).
 DETALHE_DEVOLUCAO_NA_PLATAFORMA = (
@@ -1121,6 +1128,131 @@ def atraso_de_entrega(
     return False
 
 
+# ── O rastreio parado com o retrato fresco (item 31, 22/10/2026) ───────────
+#
+# Barbosa Shopee, 22/10 07:49 (79b5d2f5 saiu sozinho às 07:55): "consegue ver onde
+# está? aqui está parado desde o dia 18, não atualiza". A linha da logística não era
+# relida desde a postagem ("Pedido postado"; 410 de 536 linhas da Shopee em trânsito
+# sem releitura há 5+ dias) e o agente repetiu o status velho. O retrato do MESMO
+# pedido na conversa (`dados.pedido_mkt`, relido a cada ~30 min com o chat ativo) tem o
+# último evento da Shopee e a hora dele (`logistica.descricao`/`atualizado_em`): "Seu
+# pedido já está na área de transporte … aguardando veículo", de 18/10. Só a Shopee (o
+# retrato do ML traz o subestado e o `last_updated` do envio, não o evento; o TikTok não
+# tem retrato). Só fresco (lido há até `HORAS_DO_RETRATO_FRESCO` h, e nunca depois do
+# `agora` do replay), do MESMO pedido e com o texto do evento — nunca inventado.
+HORAS_DO_RETRATO_FRESCO = 6
+# A idade do último evento a partir da qual "parado" tem lastro: ~p90 dos retratos da
+# Shopee em trânsito (194 em 60 dias até 22/10/2026, a idade do último evento na hora
+# da leitura: p50 0,46 dia; p75 1,06; p85 1,98; p90 2,88; p95 5,08) — a cadência normal
+# do SPX é diária e o fim de semana dá ~2–2,5 dias; 3 dias sem evento já é parado.
+DIAS_SEM_EVENTO = 3
+FONTES_DE_EVENTO_NO_RETRATO = frozenset({"shopee"})
+_CORTE_DA_FALA = re.compile(r"[.!?;,\n]")
+
+
+def evento_do_retrato(
+    retrato: Mapping[str, Any] | None, agora: datetime | None
+) -> tuple[str, datetime, datetime] | None:
+    """(texto do último evento, hora do evento, hora da leitura) do retrato — já do MESMO
+    pedido (quem chama confere) —, só da Shopee, lido há até `HORAS_DO_RETRATO_FRESCO` h
+    antes de `agora` (e não depois) e com o texto e a hora do evento; senão None. PURA."""
+    if not isinstance(retrato, Mapping):
+        return None
+    if str(retrato.get("fonte") or "").strip().lower() not in FONTES_DE_EVENTO_NO_RETRATO:
+        return None
+    agora = _instante(agora) or datetime.now(UTC)
+    lido = _instante(retrato.get("atualizado_em"))
+    if lido is None or lido > agora:
+        return None
+    if (agora - lido).total_seconds() > HORAS_DO_RETRATO_FRESCO * 3600:
+        return None
+    logistica = retrato.get("logistica")
+    if not isinstance(logistica, Mapping):
+        return None
+    texto = logistica.get("descricao")
+    quando = _instante(logistica.get("atualizado_em"))
+    if not isinstance(texto, str) or not texto.strip() or quando is None or quando > lido:
+        return None
+    return " ".join(texto.split()), quando, lido
+
+
+# "Parado", "não atualiza", "sem movimentação": a reclamação do rastreio parado. Não o
+# defeito ("a tela ficou parada", "o celular não atualiza", "parou de funcionar") nem a
+# condição ("se continuar parado…").
+_RECLAMA_PARADO = re.compile(
+    r"\b(?P<parado>parad[oa]s?)\b"
+    r"|\b(?P<parou>parou)\b"
+    r"|\bnao\s+(?:se\s+)?(?:atualiza\w*|anda|andou|muda|mudou|movimenta\w*|mexe|mexeu|avanca\w*"
+    r"|sai\s+do\s+lugar|saiu\s+do\s+lugar)\b"
+    r"|\bsem\s+(?:nenhuma\s+|qualquer\s+)?(?:atualizac\w*|movimentac\w*|andamento|novidade\w*)\b"
+    r"|\bnenhuma\s+(?:atualizac\w*|movimentac\w*|novidade\w*)\b"
+    r"|\bnao\s+(?:tem|teve|houve|ha)\s+(?:nenhuma\s+|mais\s+)?(?:atualizac\w*|movimentac\w*"
+    r"|andamento|novidade\w*)\b"
+    r"|\bmesmo\s+(?:lugar|status|local)\b"
+)
+_DO_APARELHO = re.compile(
+    r"\b(?:tela|celular|aparelho|imagem|video|app|aplicativo|sistema|whats\w*|android|software"
+    r"|relogio|bateria|camera|touch|jogo|play\s*store|carregador|fone|chip|sinal|internet)\b"
+)
+_PAROU_DA_ENTREGA = re.compile(r"^\s+(?:de\s+)?(?:atualiz|andar|anda|movimen|mudar|avanc)\w*")
+_SUJEITO_DO_RASTREIO = re.compile(
+    r"\b(?:rastreio|rastreamento|pedido|encomenda|pacote|status|entrega|envio|objeto|codigo"
+    r"|compra|mercadoria)\b"
+)
+_CONDICAO_DO_PARADO = re.compile(r"\b(?:se|caso|quando|senao)\b")
+
+
+def reclama_que_esta_parado(plano: str) -> bool:
+    """O cliente reclama que o rastreio está parado / não atualiza (ver acima)? PURA."""
+    for m in _RECLAMA_PARADO.finditer(plano):
+        inicio = max((c.end() for c in _CORTE_DA_FALA.finditer(plano, 0, m.start())), default=0)
+        antes = " ".join(plano[inicio : m.start()].split()[-4:])
+        if _CONDICAO_DO_PARADO.search(antes) or _DO_APARELHO.search(antes):
+            continue
+        if m.group("parou") and not (
+            _PAROU_DA_ENTREGA.match(plano[m.end() :]) or _SUJEITO_DO_RASTREIO.search(antes)
+        ):
+            continue
+        depois = " ".join(plano[m.end() :].split()[:3])
+        if re.match(
+            r"(?:de\s+)?(?:funcion|carreg|ligar|liga|respond|travad|sistema|software)", depois
+        ):
+            continue
+        return True
+    return False
+
+
+def rastreio_parado_no_retrato(
+    conversa: Any,
+    ctx: Mapping[str, Any] | None,
+    plano: str,
+    *,
+    postado: str | None,
+    agora: datetime,
+) -> bool:
+    """O `DETALHE_PARADO` da régua 11 (item 31, 22/10/2026). PURA. Todas juntas:
+    a) há pedido, postado ("sim"/"mesmo_dia") e não entregue (a logística/Bling
+       nem o retrato do MESMO pedido);
+    b) o cliente reclama que o rastreio está parado (`reclama_que_esta_parado`);
+    c) o pedido não tem chamado aberto;
+    d) o retrato fresco do MESMO pedido (`evento_do_retrato`) diz que o último evento
+       da plataforma tem `DIAS_SEM_EVENTO` dias ou mais.
+    """
+    ctx = ctx if isinstance(ctx, Mapping) else {}
+    if not ctx.get("pedido") or postado not in (POSTADO_SIM, POSTADO_MESMO_DIA):
+        return False
+    retrato = retrato_do_pedido(conversa, ctx, agora=agora)
+    if pedido_entregue(ctx) or entregue_no_retrato(retrato):
+        return False
+    if ctx.get("chamados") or not reclama_que_esta_parado(plano):
+        return False
+    evento = evento_do_retrato(retrato, agora)
+    if evento is None:
+        return False
+    agora = _instante(agora) or datetime.now(UTC)
+    return (agora - evento[1]).total_seconds() >= DIAS_SEM_EVENTO * 86400
+
+
 def _plano(textos: Iterable[str | None]) -> str:
     return " ".join(validador.plano_de(" ".join(t for t in textos if t)).split())
 
@@ -2078,6 +2210,12 @@ def gatilhos(
         conversa, ctx, plano, postado=postado, agora=agora
     ):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_ATRASO))
+    # Item 31 (22/10/2026, 79b5d2f5): "parado desde o dia 18, não atualiza" com o retrato
+    # fresco do MESMO pedido mostrando o último evento de dias atrás.
+    elif not devolucao_aberta and rastreio_parado_no_retrato(
+        conversa, ctx, plano, postado=postado, agora=agora
+    ):
+        saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_PARADO))
     # 12 — dinheiro fora do fluxo do app; a "diferença" cede à recusa padrão.
     sem_pedido_falso = _NAO_E_PEDIDO.sub(" ", plano)
     if (
