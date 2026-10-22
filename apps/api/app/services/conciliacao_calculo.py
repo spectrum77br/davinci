@@ -829,6 +829,7 @@ def etapa_do_pedido(
     ultimo_movimento_em: datetime | None,
     zero_a_zero: bool = True,
     com_dinheiro: bool = False,
+    devolvido: bool = False,
 ) -> dict[str, Any]:
     """Transições da etapa. Respeita o que a pessoa marcou (finalizado à mão, reaberto
     à mão). `zero_a_zero`: cancelado em que nada ficou na conta (16/10, revisão,
@@ -898,6 +899,12 @@ def etapa_do_pedido(
         nova = "conciliado"
     else:
         nova = "pendencia"
+    motivo_robo = None
+    if nova == "conciliado" and devolvido and situacao != "cancelado":
+        # 22/10 (Vinicius): bateu, mas recebeu zero ou menos — venda devolvida. O robô
+        # não finaliza: a pessoa decide o custo do produto (manter ou zerar) ao finalizar
+        nova = "pendencia"
+        motivo_robo = "venda devolvida (recebeu zero ou menos): decida o custo ao finalizar"
     if etapa_anterior == "reaberto" and nova != "conciliado":
         nova = "reaberto"
     if nova == "conciliado" and situacao == "cancelado":
@@ -924,7 +931,7 @@ def etapa_do_pedido(
             )
             return out
     if nova != etapa_anterior:
-        out.update(etapa=nova, etapa_em=agora, etapa_por=ETAPA_PELO_ROBO, etapa_motivo=None)
+        out.update(etapa=nova, etapa_em=agora, etapa_por=ETAPA_PELO_ROBO, etapa_motivo=motivo_robo)
     else:
         out["etapa"] = nova
     return out
@@ -1344,6 +1351,7 @@ async def recalcular_loja(
             ultimo_movimento_em=calc["ultimo_movimento_em"],
             zero_a_zero=calc["zero_a_zero"],
             com_dinheiro=calc["recebido"] is not None,
+            devolvido=calc["recebido"] is not None and calc["recebido"] <= ZERO,
         )
         reembolso = reembolso_por_numero.get(numero, ZERO)
         # Venda sem valor ainda (Shopee antes de calcular o escrow): não grava tarifa/líquido 0,00

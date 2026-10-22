@@ -3997,3 +3997,35 @@ async def test_finalizar_zerando_o_custo_e_desfazer(db, make_user, auth_as, clie
     ped = r.json()["pedido"]
     assert ped["custo"] == 360.0 and ped["custo_regra"] == "cheio" and ped["sobrou"] == 90.0
     assert ped["custo_zerado_em"] is None and ped["custo_zerado_motivo"] is None
+
+
+async def test_venda_devolvida_que_bateu_nao_finaliza_sozinha(db, make_user):
+    """22/10 (Vinicius): bateu, mas recebeu zero ou menos (devolvida, a loja pagou a
+    taxa) — o robô não finaliza depois de 7 dias: espera a pessoa decidir o custo."""
+    loja, _ = await _loja(db, make_user)
+    d = lambda dia: datetime(2026, 10, dia, 12, tzinfo=UTC)  # noqa: E731
+    db.add(_pedido_bling("302216", "2000022160000001", d(6), "657.73", 300.0))
+    db.add(
+        _fin(
+            loja.integration_id,
+            "2000022160000001",
+            gross="0",
+            fee="0.49",
+            freight="0",
+            net="-0.49",
+        )
+    )
+    db.add(_mov(loja, "venda_liberada", d(10), debito="0.49", pedido_mkt="2000022160000001"))
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 12, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _conciliado(db, "302216")
+    assert p.situacao == "bateu" and p.etapa == "pendencia" and p.etapa_por == "robô"
+    assert p.etapa_motivo == (
+        "venda devolvida (recebeu zero ou menos): decida o custo ao finalizar"
+    )
+    # 10 dias depois continua esperando a pessoa
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 22, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _conciliado(db, "302216")
+    assert p.etapa == "pendencia"
