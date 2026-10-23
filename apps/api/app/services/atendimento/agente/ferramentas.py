@@ -1,4 +1,4 @@
-"""As 6 ferramentas do agente, só de leitura (spec 4 + fontes v1.3, 20/10/2026).
+"""As 7 ferramentas do agente, só de leitura (spec 4 + fontes v1.3, 20/10/2026).
 
 Ordem FIXA (o cache do prefixo depende dela; a ablação do eval só tira):
 
@@ -16,7 +16,12 @@ Ordem FIXA (o cache do prefixo depende dela; a ablação do eval só tira):
 5. `buscar_respostas_equipe(pergunta, item_id | None)` — pares
    generalizados (só TOM: nunca fato, nunca número);
 6. `sugerir_troca(numero | None)` — opções de troca (regra de custo do
-   sistema) para o rascunho de pessoa (null = o pedido da conversa).
+   sistema) para o rascunho de pessoa (null = o pedido da conversa);
+7. `buscar_anuncios_da_loja(termo)` — item 6 da rodada "redondo" (23/10/2026): os
+   anúncios DESTA loja (a mesma integração e plataforma, vínculo vivo) cujo título ou
+   variação casa com o termo — nome curto, variações casadas, disponível e se é o da
+   conversa; nunca preço, quantidade, SKU nem link (`catalogo`). A 7ª no FIM da ordem:
+   as 6 de antes não mudam de lugar.
 
 Regras comuns (spec 4.1):
 
@@ -77,7 +82,14 @@ from app.services.atendimento import (
     validador,
 )
 from app.services.atendimento import contexto as contexto_svc
-from app.services.atendimento.agente import checagens, contexto, fatos_loja, pares, sessao
+from app.services.atendimento.agente import (
+    catalogo,
+    checagens,
+    contexto,
+    fatos_loja,
+    pares,
+    sessao,
+)
 
 if TYPE_CHECKING:
     from anthropic.lib.tools import BetaAsyncFunctionTool
@@ -93,6 +105,7 @@ VER_GARANTIA = "ver_garantia"
 CONSULTAR_MANUAL = "consultar_manual"
 BUSCAR_RESPOSTAS_EQUIPE = "buscar_respostas_equipe"
 SUGERIR_TROCA = "sugerir_troca"
+BUSCAR_ANUNCIOS_DA_LOJA = "buscar_anuncios_da_loja"
 NOMES = (
     VER_ANUNCIO,
     VER_PEDIDO,
@@ -100,6 +113,7 @@ NOMES = (
     CONSULTAR_MANUAL,
     BUSCAR_RESPOSTAS_EQUIPE,
     SUGERIR_TROCA,
+    BUSCAR_ANUNCIOS_DA_LOJA,
 )
 
 # Os únicos textos de erro que voltam ao modelo (`ToolError`).
@@ -144,6 +158,24 @@ DESCRICOES: dict[str, str] = {
         "Opções de troca de produto para um pedido parado por falta de estoque, pela regra "
         "de custo da loja. Só para a resposta com ação pessoa: quem envia a oferta e faz a "
         "troca é a equipe."
+    ),
+    # Item 6 da rodada "redondo" (23/10/2026): as regras G1 vão aqui (o bloco 1 está no
+    # teto); a conferência é a `checagens.conferir_outro_produto_da_loja`.
+    BUSCAR_ANUNCIOS_DA_LOJA: (
+        "Os anúncios DESTA loja (mesma plataforma) cujo título ou variação casa com o termo: "
+        "outro produto, acessório ou modelo que o cliente quer comprar ou saber se a loja "
+        "vende (outro modelo, capa, película, carregador, cesto ou vidro avulso). Cada um: "
+        "item_id, nome_curto, variacoes_casadas, disponivel (true = à venda e disponível; "
+        "false = esgotado; null = não se sabe) e da_conversa. Termo curto, só o produto "
+        "('cesto de vidro 4 litros', 'capa A18', 'Doogee Fire 7 Ultra'). Para dizer que a "
+        "loja tem ou vende outro produto, cite anuncio:<item_id> com disponivel=true (ou "
+        "false para dizer que está esgotado) e diga que ele aparece na página da loja no "
+        "app, pelo nome — nunca link nem preço. 'Não temos' só com o fato aprovado (capinha, "
+        "película) ou quando a busca diz que nenhum título da loja tem o acessório (a busca "
+        "vazia do termo inteiro não prova: busque de novo, mais curto); modelo ou versão que "
+        "a busca não achou: pergunte qual é ou encaminhe, nunca 'não temos'. Não prova "
+        "característica: para isso, ver_anuncio (e o de outro anúncio nunca vale para o "
+        "produto da conversa)."
     ),
 }
 # O pedido da conversa sai como lacuna: a `conferir_saida` preenche.
@@ -270,6 +302,9 @@ class Resultado:
     de produto (as formas soltas dos números, `contexto.numeros_soltos`);
     `fatos` = só `consultar_manual`: os fatos aprovados devolvidos ({"id",
     "texto"}), para `ctx.registrar_fatos` (Kia ao vivo, 21/10/2026).
+    `busca` = só `buscar_anuncios_da_loja` (item 6 da rodada "redondo", 23/10/2026): o
+    termo e os achados, para `ctx.registrar_busca`; com ela o JSON só libera NÚMERO
+    (`ctx.permitir_numeros`) — nunca vira fonte de característica (`registro.textos`).
     """
 
     dados: dict
@@ -279,6 +314,7 @@ class Resultado:
     ids_rastro: tuple[str, ...] = ()
     produto: bool = False
     fatos: tuple[dict, ...] = ()
+    busca: dict | None = None
 
 
 # ── Formato ───────────────────────────────────────────────────────────────
@@ -417,9 +453,16 @@ async def executar(
         if texto != contexto.SEM_ORCAMENTO:
             ctx.permitir(
                 ids=r.ids,
-                textos=[_json(_sem_ids(dados))] if r.permitir_texto else [],
+                textos=[_json(_sem_ids(dados))] if r.permitir_texto and r.busca is None else [],
                 produto=r.produto,
             )
+            if r.busca is not None:
+                # Item 6 da rodada "redondo": os números do nome e das variações ("Cesto 4
+                # Litros", "A18") não são inventados; a característica não vem daqui.
+                # Revisão do fechamento (23/10/2026): só os dos anúncios ACHADOS — o termo é
+                # do próprio modelo ("Doogee Fire 7 Ultra" não libera o 7).
+                ctx.permitir_numeros(_json(_sem_ids({**dados, "termo": None})))
+                ctx.registrar_busca(r.busca)
             if nome == VER_GARANTIA or r.garantias:
                 ctx.registrar_garantias(r.garantias)
             if r.fatos:
@@ -1550,6 +1593,73 @@ async def dados_sugerir_troca(
     )
 
 
+# ── 7. buscar_anuncios_da_loja (item 6 da rodada "redondo", 23/10/2026) ──────
+
+# Onde o cliente acha o outro anúncio (sem link): a página da loja no app da plataforma.
+COMO_ACHAR = "na página da loja no app (o nome da loja no anúncio), buscando pelo nome"
+# Revisão do fechamento (23/10/2026): a busca vazia do termo inteiro não prova que a loja
+# não vende (o "fone de ouvido bluetooth sem fio" da loja que tem o "Fone De Ouvido UFB10
+# Bluetooth"); só a ausência da palavra do acessório em todos os títulos
+# (`catalogo.sem_no_titulo`).
+SEM_ACHADO = (
+    "nenhum anúncio desta loja casou com o termo inteiro — isso NÃO prova que a loja não "
+    "vende: busque de novo com o termo mais curto (só o produto ou o acessório); 'não temos' "
+    "só com o fato aprovado da loja; modelo ou versão, pergunte qual é ou encaminhe"
+)
+SEM_NO_TITULO = (
+    "nenhum anúncio desta loja tem {acessorios} no título: 'não temos' vale para esse "
+    "acessório; modelo ou versão, nunca"
+)
+
+
+async def dados_buscar_anuncios_da_loja(
+    ctx: ContextoAgente, termo: str, *, base: BaseDoGerar | None = None, conversa: Any = None
+) -> Resultado:
+    """Os anúncios DESTA loja que casam com o `termo` (`catalogo`). Só leitura.
+
+    A mesma integração e a mesma plataforma da conversa (nunca o Bling, nunca outra
+    loja), vínculo vivo; até `catalogo.MAX_ANUNCIOS`, cada um com `anuncio:<item_id>`
+    nas evidências. Sem preço, quantidade, SKU nem link. "da_conversa" = o anúncio é o
+    da conversa (citado, cartão, item do pedido).
+    """
+    lido = catalogo.ler_termo(termo)
+    plat = ficha.plataforma_do_catalogo(ctx.plataforma)
+    if plat is None or ctx.integration_id is None or lido.vazio:
+        raise ForaDoEscopo
+    # Revisão do fechamento (23/10/2026): "da_conversa" só o anúncio da conversa, os
+    # cartões e os itens do pedido (o que o pacote aceitou) — nunca o outro anúncio da loja
+    # que o `ver_anuncio` acabou de ler.
+    citados = (
+        {a.item_id for a in ficha.anuncios_da_conversa(conversa, base.recentes)}
+        if conversa is not None and base is not None
+        else set()
+    )
+    citados |= {i for i in ctx.anuncios_do_pacote if i}
+    async with sessao.sessao_leitura() as s:
+        por_anuncio = await catalogo.vinculos_da_loja(s, plat, ctx.integration_id)
+    achados = catalogo.buscar_nos_vinculos(lido, por_anuncio, da_conversa=citados)
+    ausentes = [] if achados else catalogo.sem_no_titulo(lido.acessorios, por_anuncio)
+    anuncios = [a.para_o_modelo() for a in achados]
+    dados: dict[str, Any] = {"termo": lido.texto, "anuncios": anuncios}
+    if anuncios:
+        dados["como_achar"] = COMO_ACHAR
+    elif ausentes:
+        dados["nenhum"] = SEM_NO_TITULO.format(acessorios=", ".join(f"'{a}'" for a in ausentes))
+    else:
+        dados["nenhum"] = SEM_ACHADO
+    return Resultado(
+        dados=dados,
+        ids=tuple(contexto.id_anuncio(a.item_id) for a in achados),
+        busca={
+            "termo": lido.texto,
+            "acessorios": sorted(lido.acessorios),
+            "modelo": lido.modelo,
+            "anuncios": [{**a.para_o_modelo(), "titulo_plano": a.titulo_plano} for a in achados],
+            "sem_no_titulo": ausentes,
+        },
+    )
+
+
 # ── As ferramentas desta execução ─────────────────────────────────────────
 
 
@@ -1563,7 +1673,8 @@ def ferramentas(
     str)`, `ver_pedido(numero: str)`, `ver_garantia(numero: str | None)`,
     `consultar_manual(assunto: str, pergunta: str | None)`,
     `buscar_respostas_equipe(pergunta: str, item_id: str | None)`,
-    `sugerir_troca(numero: str | None)` — e que devolve `await executar(ctx, nome,
+    `sugerir_troca(numero: str | None)`, `buscar_anuncios_da_loja(termo: str)` — e que
+    devolve `await executar(ctx, nome,
     args, lambda: dados_*(...))`. A descrição vem da docstring (Args: …).
     Uma `ficha_loja.Busca` só por execução (as cotas de ida à loja da
     sugestão); nenhuma no replay.
@@ -1656,6 +1767,20 @@ def ferramentas(
             lambda: dados_sugerir_troca(ctx, base, numero, conversa=conversa),
         )
 
+    @beta_async_tool(strict=True, description=DESCRICOES[BUSCAR_ANUNCIOS_DA_LOJA])
+    async def buscar_anuncios_da_loja(termo: str) -> str:
+        """O catálogo da loja.
+
+        Args:
+            termo: o produto, acessório ou modelo em poucas palavras (ex.: 'capa A18').
+        """
+        return await executar(
+            ctx,
+            BUSCAR_ANUNCIOS_DA_LOJA,
+            {"termo": termo},
+            lambda: dados_buscar_anuncios_da_loja(ctx, termo, base=base, conversa=conversa),
+        )
+
     # A pergunta PÚBLICA do anúncio (ML): a resposta fica visível para todos —
     # nada de pedido nem troca; a garantia só pela regra da linha (revisão de
     # 20/10/2026; o legado nem busca pedido nela).
@@ -1670,6 +1795,7 @@ def ferramentas(
         consultar_manual,
         buscar_respostas_equipe,
         sugerir_troca,
+        buscar_anuncios_da_loja,
     ):
         if ferramenta.name in fora:
             continue

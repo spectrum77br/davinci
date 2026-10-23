@@ -81,6 +81,29 @@ Auditoria ao vivo, 5ª rodada (21/10/2026, noite):
     troca") a quem fala de defeito, avaria ou item errado, relatado ou só
     perguntado ("se trava…?", "e se vier danificado?") → regra SUAVE.
 
+Auditoria ao vivo, rodada "redondo" (22–23/10/2026; o detalhe de cada item fica no
+ponto do código):
+  - item 1: o último status do bloco do pedido (o evento da Shopee do retrato fresco)
+    dito EM PARTE tem lastro no andamento (`_diz_so_o_status`), e o prazo que ele mesmo
+    traz também (`_prazo_do_status`, `prazo_do_validador_sem_afirmacao`);
+  - item 2: "vocês enviam nota fiscal?" não é pergunta de entrega
+    (`_ENVIO_DE_DOCUMENTO`); o convite da saudação com "a equipe responde por aqui"
+    (`_CONVITE_DA_SAUDACAO`); "lamentamos que o vidro tenha chegado arranhado" é o eco
+    do relato (`_ACOLHE_COM_QUE`, `_DANO_NO_RELATO`);
+  - item 3: "os demais tamanhos também esgotados" com outra opção disponível contradiz
+    (`_demais_esgotadas`; antes só o verificador conferia);
+  - item 4 (a queixa do dono): `conferir_assunto_nao_pedido` — a orientação de
+    cancelamento/devolução/reembolso/troca que nada do turno pediu → regra SUAVE.
+  Revisão do fechamento (23/10/2026, a revisão adversarial das partes 1 e 2): o status dito
+  em parte só do pedido da conversa (`_blocos_do_status`) e a moldura que afirma o estado
+  sozinha (`_MOLDURA_QUE_AFIRMA`); o convite da saudação só como fecho e só na saudação e no
+  agradecimento (`_ASSUNTOS_DO_CONVITE`); "entregam COM nota fiscal aqui?" é pergunta de
+  entrega; "os outros também esgotados" sem substantivo; a devolução pedida sem a palavra
+  ("não gostei", "mandar de volta"); o atraso dito pelo cliente sem o chamado
+  (`conferir_atraso_sem_chamado`); e na G1 o "tem sim / está disponível" do produto de fora
+  (`_DISPONIBILIDADE`, `_TER`), os achados de cada busca (`_achados_citados`) e o "não temos"
+  só com o fato que nega a venda (`_fatos_que_negam`) ou o acessório fora de todo título.
+
 `aplicar` junta tudo (e as ações de pessoa) na `SaidaConferida` final.
 """
 
@@ -97,7 +120,7 @@ from typing import TYPE_CHECKING, Any
 from app.services.atendimento import condicao_anuncio, constantes, evidencias, validador
 from app.services.atendimento import especificacoes as especificacoes_svc
 from app.services.atendimento import variacoes as variacoes_svc
-from app.services.atendimento.agente import acao_pessoa
+from app.services.atendimento.agente import acao_pessoa, catalogo
 from app.services.atendimento.agente import contexto as agente_ctx
 
 if TYPE_CHECKING:
@@ -695,6 +718,69 @@ def _todas_disponiveis(texto: str, lista: _Lista | None) -> list[PendenciaAgente
     return saida
 
 
+# Item 3 da auditoria ao vivo (23/10/2026, 073983a2): "Os demais tamanhos também aparecem
+# como esgotados" — com TODAS esgotadas e confiáveis é o dado (a entrada do verificador o
+# diz: `verificador.TODAS_ESGOTADAS`); com outra opção disponível, contradiz. Antes só o
+# verificador conferia: a 1ª camada passa a conferir também (só acrescenta pendência).
+_DEMAIS_OPCOES = re.compile(
+    r"\b(?:(?:os|as)\s+)?(?:demais\s+|outr[oa]s\s+|tod[oa]s\s+(?:as\s+|os\s+)?"
+    r"|ambas\s+(?:as\s+)?|ambos\s+(?:os\s+)?)(?:cores|opcoes|variacoes|versoes|modelos"
+    r"|tamanhos)\b"
+    # Revisão do fechamento (23/10/2026): sem o substantivo ("os outros também estão
+    # esgotados", "as demais aparecem esgotadas") e o anúncio inteiro ("o anúncio inteiro
+    # está sem estoque", "tudo esgotado", "todos esgotados").
+    r"|\b(?:os|as)\s+(?:outr[oa]s|demais)\b(?=\s+(?:tambem|estao|aparecem|ficaram|seguem"
+    r"|continuam|tao|se\s+encontram|constam|esgot\w*|sem\s+estoque|indisponive\w*))"
+    r"|\b(?:o\s+)?anuncio\s+(?:inteiro|todo)\b|\btodo\s+o\s+anuncio\b"
+    r"|\b(?:tudo|tod[oa]s)\s+(?:(?:esta|estao|tambem|ja)\s+){0,2}(?:esgot\w*|sem\s+estoque"
+    r"|indisponive\w*)"
+)
+_ESGOTADAS = re.compile(r"\b(?:esgot\w*|indisponive\w*|em\s+falta|sem\s+estoque|zerad\w*)")
+# "Nenhuma está esgotada", "não estão esgotadas": não diz que as outras esgotaram.
+_ESGOTADAS_NEGADO = re.compile(
+    r"\b(?:nao|nem|nenhum\w*)\s+(?:[a-z]+\s+){0,4}?(?:esgot\w*|indisponive\w*|em\s+falta"
+    r"|sem\s+estoque|zerad\w*)"
+)
+
+
+def _demais_esgotadas(texto: str, lista: _Lista | None) -> list[PendenciaAgente]:
+    """ "As demais/todas as opções (também) esgotadas" exige TODAS as outras esgotadas e
+    confiáveis (item 3, 23/10/2026)."""
+    saida = []
+    for sentenca, pergunta in _sentencas(texto):
+        if (
+            pergunta
+            or not _DEMAIS_OPCOES.search(sentenca)
+            or not _ESGOTADAS.search(sentenca)
+            or _ESGOTADAS_NEGADO.search(sentenca)
+        ):
+            continue
+        if lista is None:
+            saida.append(
+                _suave(VARIACAO_SEM_DADO, "diz que as outras opções estão esgotadas sem a lista")
+            )
+            continue
+        disponivel = next((o for o in lista.opcoes if o.disponivel and o.confiavel), None)
+        if disponivel is not None:
+            saida.append(
+                _contradiz(
+                    VARIACAO_CONTRADIZ,
+                    f"diz que as outras opções estão esgotadas, mas '{disponivel.nome}' "
+                    "está disponível",
+                )
+            )
+        elif not lista.completa or any(
+            not (o.disponivel is False and o.confiavel) for o in lista.opcoes
+        ):
+            saida.append(
+                _suave(
+                    VARIACAO_SEM_DADO,
+                    "diz que as outras opções estão esgotadas sem a lista confiável",
+                )
+            )
+    return saida
+
+
 def _cita_todas(sentenca: str, lista: _Lista) -> bool:
     """A frase cita cada opção da lista pelo nome (as palavras que a distinguem: "A18,
     Branco NFC" e "A18, Laranja NFC" → "branco nfc" e "laranja nfc")?"""
@@ -938,6 +1024,8 @@ def conferir_variacoes(
     lista = _lista_principal(fichas)
     saida += _exclusividade(canonico, lista)
     saida += _todas_disponiveis(canonico, lista)
+    # Item 3 (23/10/2026, 073983a2): "os demais tamanhos também esgotados".
+    saida += _demais_esgotadas(canonico, lista)
     saida += _cor_parecida(canonico, lista, clientes)
     saida += _cor_desconhecida(canonico, lista)
     return _sem_repetir(saida)
@@ -1701,8 +1789,12 @@ def conferir_fonte_produto(
     *,
     fontes_extra: Sequence[str] = (),
     pares_do_produto: Sequence[str] = (),
+    sem_os_anuncios: Collection[str] = (),
 ) -> list[PendenciaAgente]:
     """A característica afirmada tem fonte: ficha, especificações, site ou fato. PURA.
+
+    `sem_os_anuncios` (item 6 da rodada "redondo", 23/10/2026) = os anúncios que não são
+    da conversa (`anuncios_de_fora`): o `ver_anuncio` deles não é fonte.
 
     Fontes: as `fichas` do pacote (título, atributos, descrição, variações,
     especificações), o que as ferramentas devolveram (`ctx.registro`: o
@@ -1728,7 +1820,10 @@ def conferir_fonte_produto(
     """
     if not (texto or "").strip():
         return []
-    dados = [*(f for f in fichas if isinstance(f, Mapping)), *_do_registro(ctx)]
+    dados = [
+        *(f for f in fichas if isinstance(f, Mapping)),
+        *_sem_os_anuncios(_do_registro(ctx), sem_os_anuncios),
+    ]
     especs = _especificacoes(dados)
     cruas = [t for d in dados for t in _textos_do(d) if isinstance(t, str)]
     cruas += [t for t in fontes_extra if isinstance(t, str) and t.strip()]
@@ -2434,7 +2529,18 @@ _PECA_DO_RELATO = frozenset(
     aparelho celular telefone smartphone produto item pedido peca pecas bateria tela display
     camera cameras memoria armazenamento processador sistema som audio alto-falante microfone
     botao botoes tampa entrada mala malas rodinha rodinhas roda rodas alca alcas ziper puxador
+    vidro cesto recipiente tigela
     """.split()
+)
+# Item 2 da auditoria ao vivo (22/10/2026 23:20, Barbosa Shopee, 3fe6b65e): o DANO que o
+# próprio cliente relatou ("veio meio arranhadinho" → "tenha chegado arranhado") é o
+# sintoma, não característica do produto — o vocabulário de resistência (`arranh\w*`) o
+# lia como "resistente a arranhões". Só no eco do relato (a palavra tem de ser do
+# cliente: `relato_ecoado`); o "vidro" (o cesto de vidro da air fryer, o vidro da tela)
+# entrou nas peças.
+_DANO_NO_RELATO = re.compile(
+    r"^(?:arranhad|riscad|quebrad|rachad|trincad|amassad|manchad|lascad|estragad|danificad"
+    r"|furad|rasgad)\w*$"
 )
 # A condição do produto no relato (a "condicao" da ficha decide; nunca o eco).
 _CONDICAO_NO_RELATO = re.compile(
@@ -2463,7 +2569,7 @@ def _caracteristica_no_relato(relato: str) -> bool:
     plano = _NUMERO_E_UNIDADE.sub(r"\1\2", relato)
     padroes = (_CARACTERISTICA, _CARACTERISTICA_2, *(padrao for _, padrao, _ in _POR_TERMO))
     return any(
-        m.group(0).strip() not in _PECA_DO_RELATO
+        m.group(0).strip() not in _PECA_DO_RELATO and not _DANO_NO_RELATO.match(m.group(0).strip())
         for padrao in padroes
         for m in padrao.finditer(plano)
     )
@@ -2477,22 +2583,41 @@ def _ecoa_o_cliente(palavra: str, do_cliente: frozenset[str]) -> bool:
     return len(palavra) >= 5 and any(len(c) >= 5 and c[:5] == palavra[:5] for c in do_cliente)
 
 
+# Item 2 da auditoria ao vivo (22/10/2026 23:20, Barbosa Shopee, 3fe6b65e): "O vidro veio
+# meio arranha Dinho" → "Lamentamos que o vidro tenha chegado arranhado." — o acolhimento
+# com "que" e o verbo da chegada no subjuntivo não era lido como eco ("caracteristica fora
+# do anúncio ('arranhado')" e "defeito fora da orientação"). Na forma "lamentamos/sentimos
+# (muito) que <relato>", o relato pode ter também o verbo da CHEGADA do produto
+# (`_CHEGADA_NO_RELATO`: "tenha chegado", "veio", "tenha vindo"); o resto é a régua de
+# sempre (as palavras do cliente, a peça, a ligação; nada de diagnóstico, estado,
+# conserto, característica ou condição).
+_ACOLHE_COM_QUE = re.compile(
+    r"^(?:(?:poxa|puxa|nossa|ah|oh)\s*,?\s*)?(?:sinto|sentimos|lamento|lamentamos)(?:\s+muito)?"
+    r"\s+que\s+(?P<relato>[a-z0-9]+(?:-[a-z0-9]+)*(?:\s+[a-z0-9]+(?:-[a-z0-9]+)*){0,7})$"
+)
+_CHEGADA_NO_RELATO = frozenset("tenha tenham chegado chegou chegaram vindo veio vieram".split())
+
+
 def relato_ecoado(oracao: str, textos_cliente: Sequence[str]) -> bool:
     """A oração (plana) é o acolhimento que repete o relato do cliente (ver acima)? PURA."""
-    m = _ACOLHE_O_RELATO.search(oracao.strip(" ,.;:!"))
-    if not m or not textos_cliente:
+    limpa = oracao.strip(" ,.;:!")
+    m = _ACOLHE_O_RELATO.search(limpa)
+    # Item 2 (22/10/2026, 3fe6b65e): "lamentamos que o vidro tenha chegado arranhado".
+    com_que = None if m else _ACOLHE_COM_QUE.search(limpa)
+    if not (m or com_que) or not textos_cliente:
         return False
-    relato = m.group("relato")
+    relato = (m or com_que).group("relato")
     if _DIAGNOSTICO_NO_ACOLHIMENTO.search(relato) or _caracteristica_no_relato(relato):
         return False
     do_cliente = frozenset(
         p for t in textos_cliente if isinstance(t, str) for p in re.findall(r"[a-z0-9]+", _plano(t))
     )
+    ligacao = _LIGA_DO_RELATO | (_CHEGADA_NO_RELATO if com_que else frozenset())
     ecoadas = 0
     for palavra in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", relato):
         if _ecoa_o_cliente(palavra, do_cliente):
-            ecoadas += palavra not in _LIGA_DO_RELATO
-        elif palavra not in _LIGA_DO_RELATO and palavra not in _PECA_DO_RELATO:
+            ecoadas += palavra not in ligacao
+        elif palavra not in ligacao and palavra not in _PECA_DO_RELATO:
             return False
     return ecoadas > 0
 
@@ -4129,6 +4254,36 @@ def _pede_evidencia(texto: str, textos_cliente: Sequence[str] = ()) -> bool:
     )
 
 
+# Item 2 da auditoria ao vivo (22/10/2026 21:50, Barbosa Shopee, cdc3507d): a saudação "Se
+# for sobre o seu pedido, conte qual é a sua dúvida que a nossa equipe responde por aqui"
+# ia para pessoa como "promete ação da equipe". Na saudação (e no "como ajudar" do pedido
+# de atendente), o convite para dizer a dúvida com a forma EXATA "(que) a (nossa) equipe
+# responde por aqui" não promete nada além da própria resposta deste chat. Qualquer outro
+# verbo ("verifica e responde", "vai analisar", "retorna"), outro assunto ou a frase fora
+# do convite continuam promessa. O prompt (bloco 2, `prompt.COMO_PENSAR`) manda nem
+# escrever isso na saudação. Revisão do fechamento (23/10/2026): o convite tem de FECHAR a
+# frase ("…responde por aqui." — qualquer complemento, "rapidinho", "logo", "o quanto
+# antes", "e resolve tudo", "com prioridade", continua promessa) e só na saudação e no
+# agradecimento (`_ASSUNTOS_DO_CONVITE`): a quem pediu atendente, "a nossa equipe
+# responde por aqui" soa como a promessa de que uma pessoa vai responder.
+_CONVITE_DA_SAUDACAO = re.compile(
+    r"\b(?:conte|diga|escreva|mande|envie|fale|informe|me\s+conta|me\s+diga|nos\s+conte"
+    r"|nos\s+diga)\s+(?:(?:aqui|por\s+aqui)\s+)?(?:qual\s+(?:e\s+|eh\s+)?)?(?:a\s+|o\s+)?"
+    r"(?:sua\s+|seu\s+)?(?:duvida|pergunta|questao|assunto)(?:\s+(?:por\s+aqui|aqui))?"
+    r"(?P<equipe>\s*,?\s*(?:que|e)\s+(?:a\s+)?(?:nossa\s+)?equipe\s+(?:te\s+|lhe\s+)?responde"
+    r"\s+(?:por\s+aqui|aqui)(?:\s+mesmo)?)(?=\s*(?:[.!]|$))"
+)
+_ASSUNTOS_DO_CONVITE = frozenset({"saudacao_ou_vaga", "agradecimento"})
+
+
+def _sem_o_convite_da_saudacao(plano: str, assunto: str | None) -> str:
+    """O texto plano sem o "que a nossa equipe responde por aqui" do convite da saudação
+    (item 2, 22/10/2026). Só na saudação e no agradecimento (`_ASSUNTOS_DO_CONVITE`)."""
+    if assunto not in _ASSUNTOS_DO_CONVITE:
+        return plano
+    return _CONVITE_DA_SAUDACAO.sub(lambda m: m.group(0)[: m.start("equipe") - m.start()], plano)
+
+
 def conferir_promessa_de_equipe(
     texto: str,
     *,
@@ -4162,6 +4317,8 @@ def conferir_promessa_de_equipe(
         )
     else:
         plano = _plano(texto)
+    # Item 2 (22/10/2026, cdc3507d): o convite da saudação com "a equipe responde por aqui".
+    plano = _sem_o_convite_da_saudacao(plano, assunto)
     # Rodada 4 (achados 13 e 14): também a troca/devolução de quem relata o
     # defeito ("o touch tá falhando, vocês trocam?") e o "pode enviar por aqui"
     # à pergunta de foto/vídeo do cliente.
@@ -5428,6 +5585,114 @@ def _palavras_do_status(bloco: Mapping) -> frozenset[str]:
     )
 
 
+# Item 1 da auditoria ao vivo (22–23/10/2026, Barbosa Shopee, 25d21d7f, f06b1b32, b683b08f,
+# 300e041a e b4d96294 — o mesmo pedido "sem atualização", 5 turnos para pessoa): o bloco
+# do pedido traz o último evento da Shopee do retrato fresco (item 31: "O pedido está em
+# separação no centro logístico, novas atualizações em até 1 dia.") e o agente o repete
+# com as palavras dele ("ele está em separação no centro logístico", "o último status
+# registrado é de separação no centro logístico"). A régua só aceitava o status INTEIRO
+# dentro da oração (o "Aguardando postagem" curto da logística): o evento longo, dito em
+# parte, ficava "sem o dado". Agora a oração cujas palavras de conteúdo são TODAS do
+# status (fora as de ligação e a moldura "o último status/a última atualização mostra
+# que…") tem lastro — o processo largo (`_SO_PROCESSO`: "a caminho", "chega", "segue")
+# não entra: "o pedido está a caminho" com o status "Aguardando coleta" continua sem
+# lastro. A entrega continua só com o `entregue` do bloco (`_DIZ_QUE_ENTREGOU` fica de
+# fora). A oração sem conteúdo nenhum ("o último status do seu pedido é", "a cidade em
+# que ele está") não afirma nada.
+_LIGA_DO_STATUS = frozenset(
+    """
+    o a os as um uma seu sua seus suas meu minha do da dos das de no na nos nas em ao aos com
+    para pra pro pelo pela e eh que ja ainda agora momento neste nesse ele ela eles elas pedido
+    pedidos pacote encomenda envio compra produto numero esta estao se encontra
+    ultimo ultima status atualizacao atualizacoes registrado registrada registro mostra mostram
+    informa indica consta aparece situacao
+    """.split()
+)
+
+
+def _palavras_de_conteudo(oracao: str) -> set[str]:
+    return {p for p in re.findall(r"[a-z0-9]+", oracao) if p not in _LIGA_DO_STATUS}
+
+
+def _palavras_dos_status(blocos: Sequence[Mapping]) -> set[str]:
+    return {
+        p
+        for b in blocos
+        for p in re.findall(r"[a-z0-9]+", _plano(str(b.get("ultimo_status") or "")))
+    }
+
+
+def _diz_so_o_status(oracao: str, blocos: Sequence[Mapping]) -> bool:
+    """A oração (plana) só repete o último status de um bloco do pedido (item 1)? PURA. O
+    número do pedido do bloco (o que a oração cita) é ligação, não conteúdo."""
+    do_status = _palavras_dos_status(blocos)
+    if not do_status or _DIZ_QUE_ENTREGOU.search(oracao):
+        return False
+    numeros = {_plano(str(b.get("numero") or "")).strip() for b in blocos}
+    conteudo = _palavras_de_conteudo(oracao) - numeros
+    return bool(conteudo) and conteudo <= do_status
+
+
+# Revisão do item 1 (23/10/2026, fechamento da rodada): a moldura que AFIRMA o estado
+# sozinha ("o envio do seu pedido já consta e aparece registrado", sem nenhuma palavra do
+# status) não é oração vazia — ela diz que o envio está registrado. Só a oração SEM esses
+# verbos ("o último status do seu pedido é", "ele está") não afirma nada.
+_MOLDURA_QUE_AFIRMA = frozenset(
+    "registrado registrada registro consta aparece aparecem mostra mostram informa indica".split()
+)
+
+
+def _nao_afirma_nada(oracao: str, blocos: Sequence[Mapping]) -> bool:
+    """A oração do pedido só com ligação ("o último status do seu pedido é", "em que ele
+    está"), com o bloco do pedido na conversa (item 1)? PURA. A moldura que afirma o
+    estado sozinha ("já consta e aparece registrado") não conta (`_MOLDURA_QUE_AFIRMA`)."""
+    palavras = set(re.findall(r"[a-z0-9]+", oracao))
+    return (
+        bool(blocos)
+        and not _palavras_de_conteudo(oracao)
+        and _MOLDURA_QUE_AFIRMA.isdisjoint(palavras)
+    )
+
+
+def _blocos_do_status(pedido: Mapping | None, ctx: ContextoAgente | None) -> list[Mapping]:
+    """Os blocos cujo último status é o dado do pedido DA CONVERSA (revisão do item 1,
+    23/10/2026): o bloco do pedido da conversa; sem ele, o do `ver_pedido` só quando UM
+    pedido foi lido. O status de OUTRO pedido ("o seu pedido está em separação" com o
+    status de separação de outro pedido) nunca vale para o da conversa — a oração que
+    cita o número dele, sim (`_status_da_oracao`). PURA."""
+    if isinstance(pedido, Mapping) and pedido:
+        return [pedido]
+    lidos = _blocos_de_pedido(None, ctx)
+    numeros = {_plano(str(b.get("numero") or "")) for b in lidos}
+    return lidos if len(numeros) == 1 else []
+
+
+def _status_da_oracao(
+    oracao: str, blocos: Sequence[Mapping], do_status: Sequence[Mapping]
+) -> list[Mapping]:
+    """Os blocos do status que valem para a oração: os do pedido da conversa
+    (`_blocos_do_status`) e o de outro pedido cujo número a oração cita. PURA."""
+    citados = [
+        b
+        for b in blocos
+        if (n := _plano(str(b.get("numero") or "")).strip())
+        and "{" not in str(b.get("numero") or "")
+        and len(n) >= 4
+        and re.search(rf"(?<![a-z0-9]){re.escape(n)}(?![a-z0-9])", oracao)
+    ]
+    return [*do_status, *(b for b in citados if b not in do_status)]
+
+
+def _prazo_do_status(oracao: str, m: re.Match[str], blocos: Sequence[Mapping]) -> bool:
+    """O prazo é o que o PRÓPRIO status traz ("novas atualizações em até 1 dia"), numa
+    oração que só repete o status (item 1)? PURA."""
+    trecho = " ".join(m.group(0).split())
+    return any(
+        trecho and trecho in " ".join(_plano(str(b.get("ultimo_status") or "")).split())
+        for b in blocos
+    ) and _diz_so_o_status(oracao, blocos)
+
+
 _ANDAMENTO_NOME = re.compile(r"\b(?:o|do|no|pelo|ao)\s+andamento\b")
 # Revisão do item 9 (21/10/2026): "o andamento" só é o NOME do processo quando a
 # oração não tem verbo de estado — "seu pedido segue o andamento normalmente", "o
@@ -5450,10 +5715,13 @@ def _so_processo(resto: str) -> bool:
     return all(p in _SO_PROCESSO for p in palavras)
 
 
-def _afirma_alem_do_dado(oracao: str, blocos: Sequence[Mapping]) -> bool:
+def _afirma_alem_do_dado(
+    oracao: str, blocos: Sequence[Mapping], do_status: Sequence[Mapping] | None = None
+) -> bool:
     """A oração afirma o que o estado geral não prova (rodada 4)? A última etapa e o
     "onde/por que" sem o status que os diga, a etapa interna sem o dado da
-    preparação, o prazo vago e o "tudo certo"."""
+    preparação, o prazo vago e o "tudo certo". `do_status` (revisão do item 1) = os
+    blocos do pedido da conversa (`_blocos_do_status`); None = nenhum."""
     if (m := _DIZ_ULTIMA_ETAPA.search(oracao)) and not _NEGA_NA_ORACAO.search(oracao[: m.start()]):
         if not any(_STATUS_DA_ULTIMA_ETAPA.search(_status_do_bloco(b)) for b in blocos):
             return True
@@ -5469,12 +5737,25 @@ def _afirma_alem_do_dado(oracao: str, blocos: Sequence[Mapping]) -> bool:
             return True
     if (m := _DIZ_QUE_ANDA_BEM.search(oracao)) and not _NEGA_NA_ORACAO.search(oracao[: m.start()]):
         return True
-    return any(not _prazo_negado(oracao, m) for m in _trechos_de_prazo(oracao))
+    # Item 1 (22–23/10/2026): o prazo que o próprio status traz, repetido com ele — só o
+    # status do pedido da conversa (revisão: `_status_da_oracao`).
+    do_pedido = _status_da_oracao(oracao, blocos, do_status or ())
+    return any(
+        not _prazo_negado(oracao, m) and not _prazo_do_status(oracao, m, do_pedido)
+        for m in _trechos_de_prazo(oracao)
+    )
 
 
-def _oracao_com_lastro(oracao: str, blocos: Sequence[Mapping], valores: Iterable[str]) -> bool:
-    """A oração (plana) sobre o pedido tem lastro no dado? (ver o topo da seção)"""
-    if _afirma_alem_do_dado(oracao, blocos):
+def _oracao_com_lastro(
+    oracao: str,
+    blocos: Sequence[Mapping],
+    valores: Iterable[str],
+    do_status: Sequence[Mapping] | None = None,
+) -> bool:
+    """A oração (plana) sobre o pedido tem lastro no dado? (ver o topo da seção)
+    `do_status` (revisão do item 1, 23/10/2026) = os blocos do pedido da conversa
+    (`_blocos_do_status`): só o status deles, dito em parte, é lastro."""
+    if _afirma_alem_do_dado(oracao, blocos, do_status):
         return False
     if _LACUNA_COM_CABECA.search(oracao):
         return True
@@ -5491,6 +5772,12 @@ def _oracao_com_lastro(oracao: str, blocos: Sequence[Mapping], valores: Iterable
     palavras = set(re.findall(r"[a-z]{4,}", oracao))
     if any((status := _palavras_do_status(b)) and status <= palavras for b in blocos):
         return True
+    # Item 1 (22–23/10/2026): o status dito EM PARTE com as palavras dele, e a oração
+    # que não afirma nada ("em que ele está") — revisão: só com o status do pedido da
+    # conversa (ou do pedido que a oração cita pelo número).
+    do_pedido = _status_da_oracao(oracao, blocos, do_status or ())
+    if _diz_so_o_status(oracao, do_pedido) or _nao_afirma_nada(oracao, do_pedido):
+        return True
     estados = [_saiu(b) for b in blocos]
     entregou = _DIZ_QUE_ENTREGOU.search(oracao)
     if entregou and (nega := _NEGA_A_ENTREGA.search(oracao[: entregou.start()])):
@@ -5500,7 +5787,7 @@ def _oracao_com_lastro(oracao: str, blocos: Sequence[Mapping], valores: Iterable
         if not blocos or not all(b.get("entregue") is False for b in blocos):
             return False
         resto = f"{oracao[: nega.start()]} {oracao[entregou.end() :]}"
-        return _oracao_com_lastro(resto, blocos, valores)
+        return _oracao_com_lastro(resto, blocos, valores, do_status)
     saiu = entregou or _DIZ_QUE_SAIU.search(oracao)
     if saiu:
         if _NEGA_NA_ORACAO.search(oracao[: saiu.start()]):
@@ -5533,6 +5820,8 @@ def conferir_andamento_sem_lastro(
     if assunto not in ASSUNTOS_DO_ANDAMENTO or not (texto or "").strip():
         return []
     blocos = _blocos_de_pedido(pedido, ctx)
+    # Revisão do item 1 (23/10/2026): o status dito em parte só vale do pedido da conversa.
+    do_status = _blocos_do_status(pedido, ctx)
     vals = [
         _plano(str(v))
         for chave, v in (valores or {}).items()
@@ -5565,9 +5854,9 @@ def conferir_andamento_sem_lastro(
             ):
                 herda = None
                 continue
-            com_lastro = (herda is True and not _afirma_alem_do_dado(oracao, blocos)) or (
-                _oracao_com_lastro(oracao, blocos, vals)
-            )
+            com_lastro = (
+                herda is True and not _afirma_alem_do_dado(oracao, blocos, do_status)
+            ) or (_oracao_com_lastro(oracao, blocos, vals, do_status))
             herda = None
             anterior = com_lastro
             if not com_lastro:
@@ -5806,13 +6095,16 @@ def _trechos_de_prazo(oracao: str) -> Iterator[re.Match[str]]:
             yield m
 
 
-def conferir_prazo_sem_lastro(texto: str) -> list[PendenciaAgente]:
+def conferir_prazo_sem_lastro(texto: str, blocos: Sequence[Mapping] = ()) -> list[PendenciaAgente]:
     """O prazo ou a data que nenhum dado sustenta ("essa semana", "antes do Natal",
     "em breve", "chega na quarta"). PURA. Rodada 4: regra SUAVE (aviso + não sai
-    sozinha); nunca bloqueia — o prazo em número continua com o validador."""
+    sozinha); nunca bloqueia — o prazo em número continua com o validador.
+
+    `blocos` (item 1 da auditoria ao vivo, 22–23/10/2026) = os blocos do pedido: o
+    prazo que o último status traz, numa oração que só repete o status, tem o dado."""
     for oracao in _oracoes_afirmadas(texto or ""):
         for m in _trechos_de_prazo(oracao):
-            if _prazo_negado(oracao, m):
+            if _prazo_negado(oracao, m) or _prazo_do_status(oracao, m, blocos):
                 continue
             trecho = " ".join(m.group(0).split())[:40]
             return [_suave(PRAZO_SEM_LASTRO, f'prazo sem dado que o sustente ("{trecho}")')]
@@ -5828,6 +6120,21 @@ def prazo_do_validador_so_negado(texto: str | None) -> bool:
     o "prazo em números só pode vir do sistema" da negativa honesta. Sem nenhuma
     ocorrência, False (nada a tirar).
     """
+    return prazo_do_validador_sem_afirmacao(texto)
+
+
+def prazo_do_validador_sem_afirmacao(texto: str | None, *, status: Iterable[Any] = ()) -> bool:
+    """Toda ocorrência do prazo do validador do legado (`validador._PRAZO`) está numa
+    oração negada pelo verbo de garantir/confirmar (`prazo_do_validador_so_negado`) OU
+    é o prazo que o último status do pedido traz, numa oração que só repete o status?
+    PURA. Sem nenhuma ocorrência, False (nada a tirar).
+
+    Item 1 da auditoria ao vivo (22–23/10/2026, 25d21d7f/f06b1b32/300e041a): "o último
+    status do seu pedido é que ele está em separação no centro logístico, com novas
+    atualizações em até 1 dia" repete o evento da Shopee do bloco do pedido (`status` = os
+    `ultimo_status` dos blocos); "seu pedido chega em até 1 dia" com o mesmo status, não.
+    """
+    blocos = [{"ultimo_status": s} for s in status if isinstance(s, str) and s.strip()]
     plano = _plano(texto)
     achou = False
     for sentenca, _pergunta in _sentencas(plano):
@@ -5835,7 +6142,9 @@ def prazo_do_validador_so_negado(texto: str | None) -> bool:
             for padrao in validador._PRAZO:
                 for m in padrao.finditer(oracao):
                     achou = True
-                    if not _NAO_GARANTE_O_PRAZO.search(oracao[: m.start()]):
+                    if not _NAO_GARANTE_O_PRAZO.search(oracao[: m.start()]) and not (
+                        _prazo_do_status(oracao, m, blocos)
+                    ):
                         return False
     return achou
 
@@ -6959,6 +7268,29 @@ _NAO_ENTREGA_LA = re.compile(
 _PERGUNTA_DE_ENTREGA = re.compile(
     r"\b(?:entreg|envi|mand|cheg|atend|despach|frete)\w*|\breceb\w*\s+(?:ai|aqui|em|no|na)\b"
 )
+# Item 2 da auditoria ao vivo (22/10/2026 14:42, Kia Shopee, d4f5a308): "Vocês enviam nota
+# fiscal?" — o verbo de entrega com o DOCUMENTO como objeto é a pergunta da nota, não da
+# entrega; o "Sim, todos os pedidos têm nota fiscal" virava "afirma a entrega sem citar a
+# restrição (RJ)". Só o documento sai da leitura (a fala que também pergunta da entrega,
+# "e entregam em Niterói?", continua pergunta de entrega).
+# Revisão do fechamento (23/10/2026): o documento tem de ser o OBJETO do verbo — "vocês
+# entregam COM nota fiscal aqui?" e "enviam com NF pra minha casa?" perguntam da entrega
+# (com/sem/junto/pra/para/aqui/em… não são as palavras do meio).
+_ENVIO_DE_DOCUMENTO = re.compile(
+    r"\b(?:envi|mand|emit|entreg)\w*\s+"
+    r"(?:(?!(?:com|sem|junto|pra|para|pro|aqui|ai|em|no|na|ate|la|ca)\b)[a-z]+\s+){0,2}?"
+    r"(?:a\s+|o\s+|as\s+|os\s+)?"
+    r"(?:notas?(?:\s+fisca(?:l|is))?|nfs?|nf-?e|danfe|cupom\s+fiscal|comprovantes?|recibos?"
+    r"|boletos?)\b"
+)
+
+
+def _pergunta_de_entrega(texto: str) -> bool:
+    """A fala do cliente pergunta da entrega (`_PERGUNTA_DE_ENTREGA`), fora o envio do
+    documento ("vocês enviam nota fiscal?", item 2 de 22/10/2026)? PURA."""
+    return bool(_PERGUNTA_DE_ENTREGA.search(_ENVIO_DE_DOCUMENTO.sub(" ", _plano(texto))))
+
+
 # O LUGAR do cliente que o código não mapeia ("moro em Itaperuna", "entregam
 # em Cachoeiras de Macacu?"): com estado restrito nos dados, pode ser ele.
 _LUGAR_DO_CLIENTE = re.compile(
@@ -7299,9 +7631,8 @@ def conferir_regiao(
     # suave (um clique). A leitura sem a chegada foi desfeita em 22/10/2026: sem
     # pedido na conversa, o texto livre não separa a compra de agora da de outra
     # coisa, nem o lugar dito de qualquer jeito (veja o docstring do módulo).
-    pergunta_de_entrega = any(
-        _PERGUNTA_DE_ENTREGA.search(_plano(t)) for t in textos_cliente if isinstance(t, str)
-    )
+    # Item 2 (22/10/2026, d4f5a308): "vocês enviam nota fiscal?" não é pergunta de entrega.
+    pergunta_de_entrega = any(_pergunta_de_entrega(t) for t in textos_cliente if isinstance(t, str))
     lugar_sem_uf = _cliente_fala_de_lugar_sem_uf(textos_cliente)
     saida: list[PendenciaAgente] = []
 
@@ -7903,6 +8234,543 @@ def conferir_generica_apos_oferta(
     return [_suave(GENERICA_APOS_OFERTA, MOTIVO_GENERICA_APOS_OFERTA)]
 
 
+# ── 9. A orientação de OUTRO assunto que o cliente não pediu (23/10/2026) ──
+#
+# Item 4 da auditoria ao vivo (a queixa principal do dono, 23/10/2026: "o agente responde
+# e emenda algo de outro assunto, tipo 'mas caso você deseje cancelar…'"). O caso real:
+# cd4ff3d8 (Barbosa TikTok, 21/10/2026 17:07), "Quando o meu pedido chegará?" → o
+# andamento E "Como ele já foi enviado, a forma de cancelar agora é a devolução: ao
+# receber, peça a devolução ou o reembolso…". No eval cego de 23/10, 3 dos 7 problemas do
+# Haiku eram assunto não pedido. O prompt (bloco 2, `prompt.SO_O_QUE_PERGUNTOU`) manda
+# responder só o que foi perguntado; aqui, a trava SUAVE (só o agente; no automático,
+# pessoa confere; no copiloto, o aviso): a frase que fala de cancelar, devolver,
+# reembolsar, estornar ou trocar quando NADA do turno pede o pós-venda —
+#   - o turno do cliente (a rajada e as perguntas pendentes) não fala disso
+#     (`_CLIENTE_FALA_DO_POS_VENDA`: cancelar, desistir, "não quero mais", devolver,
+#     reembolso, estorno, dinheiro, trocar, arrependimento, outra cor/modelo/tamanho; com
+#     pedido na conversa, a cor dita — "Traz um branco" é a troca da cor do pedido feito);
+#   - as pistas do turno (`ctx.pistas_turno`, `ctx.pistas_orientacao`: a opção "3" do
+#     menu é cancelamento) não têm cancelamento, troca_devolucao nem reembolso;
+#   - a conversa não pede: a última resposta real da loja não fala disso, e o pedido não
+#     está cancelado nem com devolução, reclamação ou chamado aberto (o status é dele).
+# Monotônica: só acrescenta o aviso; a ação de pessoa não é lida (nunca sai sozinha).
+ASSUNTO_NAO_PEDIDO = "assunto_nao_pedido"
+MOTIVO_ASSUNTO_NAO_PEDIDO = (
+    'orienta {assunto} que o cliente não pediu ("{trecho}") — no automático, pessoa confere'
+)
+ASSUNTOS_DO_POS_VENDA = frozenset({"cancelamento", "troca_devolucao", "reembolso"})
+_FALA_DE_CANCELAR = re.compile(r"\bcancel\w*|\bdesist\w*")
+_FALA_DE_DEVOLVER = re.compile(
+    r"\bdevoluc\w*|\bdevolv\w*\b(?!\s+ao\s+remetente)|\breembols\w*|\bestorn\w*"
+    r"|\btroc(?:a|as|ar|ado|ada|amos|ando|ue|uem)\b(?!\s+(?:o\s+|de\s+|do\s+|seu\s+)?endereco)"
+)
+_CLIENTE_FALA_DO_POS_VENDA = re.compile(
+    r"\bcancel\w*|\bdesist\w*|\bnao\s+(?:quero|vou\s+querer)\s+mais\b|\bdevol\w*|\breembols\w*"
+    r"|\bestorn\w*|\bdinheiro\b|\btroc\w*|\barrepend\w*|\bsegur\w*\s+(?:o\s+)?(?:envio|pedido)"
+    r"|\b(?:outr[oa]|nov[oa])\s+(?:cor|modelo|tamanho|variacao|voltagem|versao)\b"
+    r"|\b(?:mudar|alterar|trocar)\s+(?:a\s+|o\s+)?(?:cor|modelo|tamanho|variacao|voltagem|versao)\b"
+    # Revisão do fechamento (23/10/2026): o pedido de devolução sem a palavra ("não gostei,
+    # como faço?", "não serviu, como mando de volta?", "quero mandar de volta", "não ficou
+    # bom em mim", "como faço pra retornar o produto?", "não quero o produto").
+    r"|\b(?:mandar|mando|mande|manda|enviar|envio|envie|devolvo|levar|levo)\s+(?:\w+\s+){0,2}?"
+    r"de\s+volta\b"
+    r"|\bretorn(?:ar|o|a)\s+(?:o|a|esse|essa|este|esta)\s+(?:produto|pedido|item|aparelho|compra"
+    r"|celular|mercadoria)\b"
+    r"|\bnao\s+(?:gostei|gostamos|curti|serviu|serve|coube|cabe|ficou\s+bo[mn]|me\s+serviu"
+    r"|me\s+agradou|agradou)\b"
+    r"|\bnao\s+(?:quero|vou\s+querer)\s+(?:mais\s+)?(?:o|a|esse|essa|este|esta)\s+(?:produto"
+    r"|pedido|item|aparelho|compra|celular|mercadoria)\b"
+    r"|\bem\s+vez\s+d[oa]s?\b|\bno\s+lugar\s+d[oa]s?\b|\bnao\s+quero(?=\s*(?:[.!?,;]|$))"
+)
+
+
+def _pos_venda_na_conversa(pedido: Mapping | None, ctx_conversa: Mapping | None) -> bool:
+    """O pedido da conversa está cancelado ou com devolução, reclamação ou chamado
+    aberto (o status dele é do pós-venda)? PURA."""
+    bloco = pedido if isinstance(pedido, Mapping) else {}
+    if bloco and (
+        _cancelado(bloco)
+        or bloco.get("devolucoes")
+        or bloco.get("reclamacoes_abertas")
+        or bloco.get("reclamacoes")
+        or bloco.get("chamados")
+    ):
+        return True
+    c = ctx_conversa if isinstance(ctx_conversa, Mapping) else {}
+    from app.services.atendimento import ia as ia_svc
+
+    return bool(
+        c.get("devolucoes")
+        or c.get("chamados")
+        or ia_svc._reclamacoes_abertas(dict(c))
+        or "cancel" in _plano(str((c.get("pedido") or {}).get("situacao") or ""))
+    )
+
+
+def conferir_assunto_nao_pedido(
+    texto: str,
+    *,
+    acao: str,
+    textos_cliente: Sequence[str],
+    pistas: Iterable[str] = (),
+    recentes: Sequence[Any] = (),
+    pedido: Mapping | None = None,
+    ctx_conversa: Mapping | None = None,
+) -> list[PendenciaAgente]:
+    """A frase de cancelamento/devolução/reembolso/troca sem o cliente pedir (ver acima)
+    → SUAVE. PURA.
+
+    `textos_cliente` = a rajada e as perguntas pendentes; `pistas` = as do turno
+    (`ctx.pistas_turno` + `ctx.pistas_orientacao`); `recentes` = a conversa (a última
+    resposta real da loja); `pedido` = o bloco do pedido da conversa; `ctx_conversa` =
+    o contexto do legado (`base.ctx`).
+    """
+    if acao not in ("responder", "perguntar") or not (texto or "").strip():
+        return []
+    plano = _plano(texto)
+    cancelar = _FALA_DE_CANCELAR.search(plano)
+    devolver = _FALA_DE_DEVOLVER.search(plano)
+    if not (cancelar or devolver):
+        return []
+    if ASSUNTOS_DO_POS_VENDA & set(pistas):
+        return []
+    clientes = [_plano(t) for t in textos_cliente if isinstance(t, str)]
+    if any(_CLIENTE_FALA_DO_POS_VENDA.search(t) for t in clientes):
+        return []
+    tem_pedido = bool(pedido) or bool(
+        isinstance(ctx_conversa, Mapping) and ctx_conversa.get("pedido")
+    )
+    if tem_pedido and any(_cores_de(_canonico(t)) for t in clientes):
+        # "Traz um branco" com o pedido feito: a troca da cor é o pós-venda pedido.
+        return []
+    if _pos_venda_na_conversa(pedido, ctx_conversa):
+        return []
+    from app.services.atendimento import ia as ia_svc
+
+    loja = [m for m in recentes if ia_svc.resposta_da_loja(m)]
+    if loja and _CLIENTE_FALA_DO_POS_VENDA.search(_plano(loja[-1].texto or "")):
+        return []
+    achado = cancelar or devolver
+    assunto = "cancelamento" if achado is cancelar else "devolução, reembolso ou troca"
+    trecho = " ".join(plano[max(0, achado.start() - 20) : achado.end() + 20].split())[:60]
+    return [
+        _suave(ASSUNTO_NAO_PEDIDO, MOTIVO_ASSUNTO_NAO_PEDIDO.format(assunto=assunto, trecho=trecho))
+    ]
+
+
+# ── 10. O atraso dito pelo cliente sem o chamado (23/10/2026) ──────────────
+#
+# Revisão do fechamento da rodada "redondo" (23/10/2026; o caso real 22/10 20:31, Kia
+# Shopee: "Hoje era o dia da entrega do relogio e ainda não recebi"). A régua de código
+# do atraso (`acao_pessoa.atraso_de_entrega`) não lê o "hoje era o dia" antes do fim do
+# dia (`acao_pessoa.HORA_FIM_DO_DIA`, decisão da rodada 6) nem o "dia da entrega" como a
+# data do prazo; ali só o modelo escolheu abrir_chamado. Com o item 1 (o status fresco
+# dito em parte tem lastro) e o passo 4 do COMO PENSAR ("diga o que os dados mostram"), a
+# resposta só com o status sairia sozinha — e o fato 29 manda encaminhar para a pessoa
+# abrir o chamado. Regra SUAVE (só o agente; no automático, pessoa confere): o cliente
+# diz que a data passou (`acao_pessoa.prazo_vencido`, sem a hora) ou reclama que não
+# chegou (`acao_pessoa.reclama_que_nao_chegou`, `_NAO_CHEGOU_INDIRETO`) e que era hoje
+# (`_ERA_HOJE`: a régua do código só lê o "hoje" do fim do dia em diante), o pedido da
+# conversa foi postado e não foi entregue, sem chamado aberto, e nenhuma ação de pessoa
+# abre o chamado (`constantes.ACAO_ABRIR_CHAMADO`). Monotônica: só acrescenta o aviso.
+ATRASO_SEM_CHAMADO = "atraso_sem_chamado"
+MOTIVO_ATRASO_SEM_CHAMADO = (
+    "o cliente diz que a entrega era hoje ou já passou e não chegou: a loja abre o "
+    "chamado (encaminhe) — no automático, pessoa confere"
+)
+_ERA_HOJE = re.compile(
+    r"\bhoje\s+(?:\w+\s+){0,2}?(?:era|e|eh|seria|foi)\s+(?:o\s+|a\s+)?(?:dia|data|prazo"
+    r"|previsao)\b"
+    r"|\b(?:dia|data|prazo|previsao)\s+(?:\w+\s+){0,3}?(?:era|e|eh|seria|foi)\s+"
+    r"(?:pra\s+|para\s+)?hoje\b"
+    r"|\b(?:era|eram|deveria|deveriam|devia)\s+(?:pra\s+|para\s+)?(?:ter\s+)?(?:chegar|chegado"
+    r"|ser\s+entregue|sido\s+entregue)\s+(?:\w+\s+){0,2}?hoje\b"
+    r"|\b(?:previst[oa]|marcad[oa])\s+(?:\w+\s+){0,2}?(?:para|pra|pro)\s+hoje\b"
+)
+
+
+def conferir_atraso_sem_chamado(
+    texto: str,
+    *,
+    acao: str,
+    textos_cliente: Sequence[str],
+    pedido: Mapping | None,
+    acoes_pessoa: Iterable[str] = (),
+) -> list[PendenciaAgente]:
+    """O atraso que o cliente diz ("hoje era o dia da entrega e não recebi") sem a ação de
+    abrir o chamado (ver acima) → SUAVE. PURA.
+
+    `textos_cliente` = a rajada e as perguntas pendentes; `pedido` = o bloco do pedido da
+    conversa; `acoes_pessoa` = as do código e as do modelo."""
+    if acao not in ("responder", "perguntar") or not (texto or "").strip():
+        return []
+    if constantes.ACAO_ABRIR_CHAMADO in set(acoes_pessoa):
+        return []
+    bloco = pedido if isinstance(pedido, Mapping) else {}
+    if not bloco or _saiu(bloco) is not True or bloco.get("entregue") or bloco.get("chamados"):
+        return []
+    turno = " ".join(" ".join(_plano(t).split()) for t in textos_cliente if isinstance(t, str))
+    if not turno:
+        return []
+    reclama = acao_pessoa.reclama_que_nao_chegou(turno) or bool(_NAO_CHEGOU_INDIRETO.search(turno))
+    if acao_pessoa.prazo_vencido(turno) or (reclama and _ERA_HOJE.search(turno)):
+        return [_suave(ATRASO_SEM_CHAMADO, MOTIVO_ATRASO_SEM_CHAMADO)]
+    return []
+
+
+# ── 11. O OUTRO produto da loja: G1 (23/10/2026) ───────────────────────────
+#
+# Item 6 da rodada "redondo" (23/10/2026; dono: "pesquisando dentro do DaVinci"): a
+# ferramenta `buscar_anuncios_da_loja` (`agente.catalogo`) diz se a loja vende outro
+# produto, acessório ou modelo e se ele está disponível. A conferência G1 (só o agente;
+# SUAVE: no automático, pessoa confere; no copiloto, o aviso):
+#   - toda frase de que a loja TEM ou VENDE outro produto (o acessório que não é o da
+#     conversa, o modelo ou a marca que a conversa não tem, "em outro anúncio", "na
+#     nossa loja", "vendido separadamente") cita o `anuncio:<id>` da busca DESTA
+#     execução que cobre o que a frase nomeia, com disponivel=true — ou false, quando a
+#     frase diz que ele está esgotado;
+#   - "não temos/não vendemos" um ACESSÓRIO só com o fato aprovado da loja citado que o
+#     cobre (fatos 26–28: capinha e película) ou com a busca dele vazia nesta execução;
+#   - "não temos" um MODELO ou versão (ou marca) que a conversa não tem: nunca — o
+#     agente pergunta qual é ou encaminha (a busca não achar o nome não prova que não há).
+# Casos reais: 22/10 14:28 (Barbosa, o vidro de 4 L da air fryer — a loja tem o "Uranyx
+# Cesto De Vidro Para Air Fryers"); 21–22/10 (Kia, a capa do A18 — o fato 26); "tem o
+# A18?" do anúncio do A17; o Doogee Fire 7 Ultra (a loja só tem o Fire 6 Power).
+# Monotônica: só acrescenta o aviso (nenhuma checagem de antes muda).
+OUTRO_PRODUTO_SEM_BUSCA = "outro_produto_sem_busca"
+MOTIVO_OUTRO_PRODUTO_SEM_BUSCA = (
+    'diz que a loja {como} "{trecho}" sem o anúncio da busca no catálogo que o sustente '
+    "(anuncio:<id>) — no automático, pessoa confere"
+)
+NAO_TEMOS_SEM_FONTE = "nao_temos_sem_fonte"
+MOTIVO_NAO_TEMOS_SEM_FONTE = (
+    'diz que a loja não tem "{trecho}" sem o fato aprovado nem a busca vazia no catálogo — '
+    "no automático, pessoa confere"
+)
+NAO_TEMOS_MODELO = "nao_temos_modelo"
+MOTIVO_NAO_TEMOS_MODELO = (
+    'diz que a loja não tem o modelo ou a versão "{trecho}" — pergunte qual é ou encaminhe'
+)
+_LOJA_TEM = re.compile(
+    r"\b(?:temos|vendemos|trabalhamos\s+com|possuimos|(?:a|nossa)\s+loja\s+(?:tem|vende"
+    r"|trabalha\s+com)"
+    r"|(?:esta|estao|fica|ficam|aparece|aparecem)\s+(?:a\s+)?venda|a\s+venda\b"
+    r"|vendid[oa]s?\s+(?:separadamente|avuls\w*|a\s+parte|sozinh\w*|em\s+outro|no\s+anuncio"
+    r"|na\s+(?:nossa\s+)?loja|aqui|por\s+aqui|com\s+a\s+gente|pela\s+loja)"
+    r"|(?:em|no|num)\s+outro\s+anuncio|anuncio\s+(?:proprio|separado)"
+    r"|(?:na|pela)\s+(?:pagina|vitrine)\s+da\s+(?:nossa\s+)?loja|(?:em|na)\s+nossa\s+loja)\b"
+)
+# Revisão do fechamento (23/10/2026; o C17 esgotado: "Tem sim! O C17 também é vendido aqui"
+# e "o Uranyx C17 está disponível para compra aqui no app"): a afirmação de TER sem
+# "temos/vendemos" conta só na parte que NOMEIA o produto de fora — a disponibilidade ("está
+# disponível", "em estoque", "pode comprar", "é vendido", e o "esgotado": a loja o vende e
+# ele acabou, "é só procurar por ele no app") com o modelo ou o acessório de fora; o "tem"
+# da resposta ("tem o C17 sim", "Tem o C17, …", "tem o C17 aqui na loja") só com o MODELO de
+# fora — "na caixa tem carregador e cabo" é o conteúdo da caixa e "o F109S tem processador
+# Helio G81" é característica, não venda.
+_DISPONIBILIDADE = re.compile(
+    r"\bdisponive(?:l|is)\b|\bem\s+estoque\b|\bpronta\s+entrega\b"
+    r"|\bpode(?:m|ria)?\s+(?:comprar|pedir|adquirir|encontrar|achar)\b"
+    r"|\b(?:e|sao|foi|foram)\s+vendid[oa]s?\b|\bvende(?:m)?\b"
+    r"|\besgotad\w*|\bsem\s+estoque\b|\bfora\s+de\s+estoque\b"
+    r"|\b(?:procur|busc)\w*\s+(?:por\s+)?(?:ele|ela|pelo\s+nome|o\s+nome|no\s+app|na\s+loja)\b"
+)
+_TER = re.compile(
+    r"\b(?:tem|ha)\s+(?:[a-z0-9]+\s+){0,3}?sim\b|^(?:sim\s*,?\s*)?(?:tem|ha)\b"
+    r"|\b(?:tem|ha)\s+(?:[a-z0-9]+\s+){0,3}?(?:aqui|na\s+loja|no\s+app|por\s+aqui)\b"
+)
+# A negação antes do verbo de ter ("o C17 não tem NFC", "não está disponível"): não é a
+# afirmação de que a loja tem (o "não temos" é o `_LOJA_NAO_TEM`).
+_NEGA_O_TER = re.compile(r"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}?(?:tem|ha|esta|estao|e|sao)\b")
+_LOJA_NAO_TEM = re.compile(
+    r"\b(?:nao|nem)\s+(?:temos|vendemos|trabalhamos\s+com|vende(?:mos)?\b|(?:e|sao)\s+vendid\w*"
+    r"|ha\s+(?:a\s+)?venda|(?:tem|esta|estao)\s+a\s+venda)"
+    r"|\b(?:a|nossa)\s+loja\s+nao\s+(?:tem|vende|trabalha)"
+)
+# "Não temos a informação/previsão…" não diz que a loja não vende nada.
+_NAO_TEMOS_O_DADO = re.compile(
+    r"\bnao\s+(?:temos|tenho|ha|sabemos)\s+(?:[a-z0-9]+\s+){0,3}?(?:informac\w*|dados?|certeza"
+    r"|confirmac\w*|detalhes?|previsao|data|prazo|como|acesso|registro|o\s+valor|valor)"
+)
+_ESGOTADO_NA_FRASE = re.compile(
+    r"\besgotad\w*|\bindisponive\w*|\bsem\s+estoque\b|\bfora\s+de\s+estoque\b"
+)
+# A parte que diz VENDA (sem objeto nomeado: "vendemos separadamente na nossa loja") e a
+# que diz DISPONÍVEL ("está disponível na nossa loja" exige o disponivel=true).
+_VENDA_NA_PARTE = re.compile(r"\bvend\w*|\ba\s+venda\b|\btemos\b|\btrabalhamos\s+com\b")
+_DISPONIVEL_NA_PARTE = re.compile(r"\bdisponive(?:l|is)\b|\bem\s+estoque\b|\bpronta\s+entrega\b")
+# A parte que fala de OUTRO anúncio da loja ou da venda avulsa.
+_OUTRO_ANUNCIO_NA_PARTE = re.compile(
+    r"\boutro\s+anuncio|\banuncio\s+(?:proprio|separado)|\bnossa\s+loja|\bpagina\s+da"
+    r"|\bvitrine|\bseparadamente|\bavuls|\ba\s+parte\b"
+)
+# As partes de uma frase com afirmações diferentes ("não temos capinha, mas temos…").
+_PARTES_DA_FRASE = re.compile(r";|\bmas\b|\bporem\b|\bentretanto\b|\bja\s+(?=temos\b)")
+# O código de modelo é curto ("a18", "wp100", "usw10"); o maior é do pedido ou do rastreio.
+_MAX_CHARS_MODELO = 6
+# O número de especificação (o "4" de "4 litros", o "128" de "128 GB") não é modelo.
+_UNIDADE_DEPOIS = re.compile(
+    r"^(?:gb|tb|mb|g|w|v|mah|l|ml|mm|cm|kg|hz|mp|litro|polegada|peca|unidade|dia|hora|mes|mese"
+    r"|ano|minuto|semana|x|vez|veze|real|reai)$"
+)
+
+
+# A especificação colada ao número ("5G", "4G", "108MP", "50W"): não é nome de modelo.
+_ESPEC_COLADA = re.compile(r"^\d+(?:g|gb|tb|mb|w|v|mah|mp|hz|k|mm|ml|l|x|p)$")
+
+
+def _modelos_e_marcas(oracao: str) -> tuple[set[str], set[str]]:
+    """(palavras de modelo — com número, fora a especificação —, marcas) da oração. PURA."""
+    ps = catalogo.palavras(oracao)
+    modelos: set[str] = set()
+    for i, p in enumerate(ps):
+        if not any(c.isdigit() for c in p) or _ESPEC_COLADA.match(p):
+            continue
+        seguinte = ps[i + 1] if i + 1 < len(ps) else ""
+        if p.isdigit() and (_UNIDADE_DEPOIS.match(seguinte) or len(p) >= 3):
+            continue
+        if len(p) > _MAX_CHARS_MODELO:
+            # O número do pedido, o rastreio, a nota: não é nome de modelo.
+            continue
+        modelos.add(p)
+    return modelos, {p for p in ps if p in catalogo.MARCAS}
+
+
+def palavras_da_conversa(fichas: Sequence[Any], fontes_extra: Sequence[str] = ()) -> set[str]:
+    """As palavras (canônicas) do produto da CONVERSA: os títulos das fichas do pacote
+    e das lidas do anúncio da conversa, o título do anúncio e os itens do pedido. PURA."""
+    textos = [str(t) for t in fontes_extra if isinstance(t, str)]
+    for f in fichas:
+        if isinstance(f, Mapping) and (f.get("da_conversa") is not False):
+            textos += [str(f.get("titulo") or "")]
+            textos += [
+                str(v.get("nome") or "") for v in f.get("variacoes") or [] if isinstance(v, Mapping)
+            ]
+    return {p for t in textos for p in catalogo.palavras(t)}
+
+
+def _cobre(achado: Mapping[str, Any], exigidas: set[str]) -> bool:
+    """O anúncio achado nomeia tudo o que a frase nomeia (o acessório e o modelo)?"""
+    do_anuncio = set(catalogo.palavras(achado.get("titulo_plano") or ""))
+    do_anuncio |= set(catalogo.palavras(achado.get("nome_curto") or ""))
+    return exigidas <= do_anuncio
+
+
+def _fatos_que_negam(fatos_citados: Sequence[str]) -> set[str]:
+    """Os acessórios que um fato aprovado citado diz que a loja NÃO vende ("No momento não
+    trabalhamos com capinha nem película avulsas" — os fatos 26–28). O condicional ("Peças
+    e acessórios avulsos só estão à venda quando há um anúncio próprio", o fato 11) não
+    prova ausência nenhuma (revisão do fechamento, 23/10/2026: o vidro de 22/10). PURA."""
+    saida: set[str] = set()
+    for f in fatos_citados:
+        plano = _plano(f)
+        for frase, _pergunta in _sentencas(plano):
+            if (m := _LOJA_NAO_TEM.search(frase)) and not _CONDICIONAL_DA_VENDA.search(frase):
+                saida |= set(catalogo.acessorios_em(frase[m.start() :]))
+    return saida
+
+
+_CONDICIONAL_DA_VENDA = re.compile(r"\bso\s+(?:esta|estao|sao|e|ficam?|aparecem?)\b|\bquando\b")
+
+
+def _achados_citados(evidencias: Iterable[str | None], ctx: ContextoAgente) -> list[Mapping]:
+    """Os achados das buscas desta execução cujo `anuncio:<id>` a resposta cita — um por
+    busca (o mesmo anúncio buscado por "A18" e por "C17" tem o disponível de cada termo).
+    PURA."""
+    ids = {
+        i[len("anuncio:") :]
+        for i in (" ".join(str(e or "").split()) for e in evidencias)
+        if i.startswith("anuncio:")
+    }
+    saida: list[Mapping] = []
+    for b in getattr(ctx, "buscas_catalogo", None) or []:
+        anuncios = b.get("anuncios")
+        if anuncios is None:
+            # O registro antigo (sem os achados por busca): o último de cada anúncio.
+            anuncios = [
+                {"item_id": i, **ctx.anuncios_buscados[i]}
+                for i in b.get("achados") or []
+                if i in ctx.anuncios_buscados
+            ]
+        saida += [a for a in anuncios if isinstance(a, Mapping) and a.get("item_id") in ids]
+    return saida
+
+
+def conferir_outro_produto_da_loja(
+    texto: str,
+    *,
+    acao: str,
+    evidencias: Iterable[str | None],
+    ctx: ContextoAgente,
+    fichas: Sequence[Any] = (),
+    fontes_extra: Sequence[str] = (),
+    fatos_citados: Sequence[str] = (),
+) -> list[PendenciaAgente]:
+    """A conferência G1 (ver acima) → SUAVE. PURA.
+
+    `evidencias` = as da Proposta; `fichas` = as do pacote e as lidas (as de outro
+    anúncio, `da_conversa` False, não contam como o produto da conversa);
+    `fontes_extra` = o título do anúncio e os itens do pedido; `fatos_citados` = os
+    textos dos fatos aprovados que a resposta cita.
+
+    Revisão do fechamento (23/10/2026): a afirmação de ter sem "temos/vendemos"
+    (`_DISPONIBILIDADE`, `_TER`, só com o produto de fora nomeado); a marca de fora também
+    precisa do anúncio que a nomeia; cada busca com os SEUS achados (`_achados_citados`);
+    o "não temos" do acessório só com o fato que NEGA a venda (`_fatos_que_negam`) ou com
+    o acessório que nenhum título da loja tem (`catalogo.sem_no_titulo`).
+    """
+    if acao not in ("responder", "perguntar") or not (texto or "").strip():
+        return []
+    citados = _achados_citados(evidencias, ctx)
+    da_conversa = palavras_da_conversa(fichas, fontes_extra)
+    # O anúncio lido pelo `ver_anuncio` numa conversa SEM produto é o assunto dela
+    # (`anuncios_de_fora` vazio): "o A18 tem NFC" não é a afirmação de que a loja o tem.
+    fora = anuncios_de_fora(fichas, ctx, fontes_extra)
+    do_assunto = palavras_da_conversa(
+        [
+            {**f, "da_conversa": None}
+            if isinstance(f, Mapping) and str(f.get("item_id")) not in fora
+            else f
+            for f in fichas
+        ],
+        fontes_extra,
+    )
+    sem_no_titulo = {
+        a for b in ctx.buscas_catalogo if not b.get("achados") for a in b.get("sem_no_titulo") or []
+    }
+    dos_fatos = _fatos_que_negam(fatos_citados)
+    saida: list[PendenciaAgente] = []
+    # O "esgotado" vale para a resposta inteira ("é vendido separadamente na nossa loja…;
+    # no momento, o de 4 litros está esgotado"): o anúncio com disponivel=false cobre a
+    # frase de que a loja o vende só quando o texto diz que ele está esgotado.
+    diz_esgotado = bool(_ESGOTADO_NA_FRASE.search(_plano(texto)))
+    for sentenca, pergunta in _sentencas(_plano(texto)):
+        if pergunta:
+            continue
+        esgotado = bool(_ESGOTADO_NA_FRASE.search(sentenca))
+        for parte in _PARTES_DA_FRASE.split(sentenca):
+            parte = parte.strip(" ,.")
+            if not parte:
+                continue
+            trecho = " ".join(parte.split())[:60]
+            acessorios = set(catalogo.acessorios_em(parte))
+            modelos, marcas = _modelos_e_marcas(parte)
+            de_fora = (modelos | marcas) - da_conversa
+            nega = _LOJA_NAO_TEM.search(parte)
+            explicito = bool(_OUTRO_ANUNCIO_NA_PARTE.search(parte))
+            if nega and _NAO_TEMOS_O_DADO.search(parte):
+                # "Não temos como confirmar a cidade": não diz que a loja não vende nada.
+                continue
+            if nega:
+                if acessorios and acessorios <= da_conversa and not explicito:
+                    # "Não temos o cesto de 8 litros" na conversa do cesto: a variação do
+                    # produto da conversa (as checagens de variação conferem).
+                    continue
+                if acessorios:
+                    if not (acessorios <= dos_fatos or acessorios <= sem_no_titulo):
+                        saida.append(
+                            _suave(
+                                NAO_TEMOS_SEM_FONTE,
+                                MOTIVO_NAO_TEMOS_SEM_FONTE.format(trecho=trecho),
+                            )
+                        )
+                elif de_fora:
+                    saida.append(
+                        _suave(NAO_TEMOS_MODELO, MOTIVO_NAO_TEMOS_MODELO.format(trecho=trecho))
+                    )
+                continue
+            outro_acessorio = acessorios - da_conversa
+            if not _LOJA_TEM.search(parte):
+                # Revisão: o "tem sim / está disponível / é vendido aqui" do produto de fora —
+                # o modelo com letra e número ("C17") ou o acessório; nem o número solto ("tem 1
+                # ano de garantia… 9 meses") nem a marca sozinha ("os aparelhos Uranyx têm 1
+                # ano de garantia": característica, não venda).
+                modelo_de_fora = {p for p in modelos - do_assunto if not p.isdigit()}
+                acessorio_de_fora = acessorios - do_assunto
+                m = _DISPONIBILIDADE.search(parte) if modelo_de_fora or acessorio_de_fora else None
+                if m is None and modelo_de_fora:
+                    m = _TER.search(parte)
+                if m is None or _NEGA_O_TER.search(parte[: m.end()]):
+                    continue
+            if not (explicito or outro_acessorio or de_fora):
+                # "Temos sim a cor azul": a variação do produto da conversa (as checagens
+                # de variação conferem).
+                continue
+            if (
+                explicito
+                and not (acessorios or de_fora or modelos)
+                and not _VENDA_NA_PARTE.search(parte)
+            ):
+                # "Pode vir buscar na nossa loja física": não diz que a loja vende algo.
+                continue
+            exigidas = (
+                (acessorios if explicito else outro_acessorio)
+                | (modelos - da_conversa)
+                | (marcas - da_conversa)
+            )
+            if esgotado:
+                aceitos: tuple[bool, ...] = (False,)
+            elif diz_esgotado and not _DISPONIVEL_NA_PARTE.search(parte):
+                aceitos = (True, False)
+            else:
+                aceitos = (True,)
+            if any(a.get("disponivel") in aceitos and _cobre(a, exigidas) for a in citados):
+                continue
+            saida.append(
+                _suave(
+                    OUTRO_PRODUTO_SEM_BUSCA,
+                    MOTIVO_OUTRO_PRODUTO_SEM_BUSCA.format(
+                        como="tem esgotado" if esgotado else "tem ou vende", trecho=trecho
+                    ),
+                )
+            )
+    return _sem_repetir(saida)
+
+
+def anuncios_de_fora(
+    fichas: Sequence[Any], ctx: ContextoAgente, fontes_extra: Sequence[str] = ()
+) -> frozenset[str]:
+    """Os anúncios que o `ver_anuncio` leu e que NÃO são da conversa, quando a conversa
+    tem o produto dela (as fichas do pacote, a do anúncio citado ou os itens do pedido):
+    eles nunca emprestam característica ao produto da conversa (item 6 da rodada
+    "redondo", 23/10/2026). Sem produto na conversa, nenhum (o outro anúncio é o
+    assunto). PURA."""
+    de_fora = {
+        str(f.get("item_id"))
+        for f in getattr(ctx, "fichas_lidas", None) or []
+        if isinstance(f, Mapping) and f.get("da_conversa") is False and f.get("item_id")
+    }
+    if not de_fora:
+        return frozenset()
+    da_conversa = {
+        str(f.get("item_id"))
+        for f in fichas
+        if isinstance(f, Mapping) and f.get("item_id") and f.get("da_conversa") is not False
+    }
+    tem_produto = bool(da_conversa - de_fora) or any(
+        isinstance(t, str) and t.strip() for t in fontes_extra
+    )
+    return frozenset(de_fora - da_conversa) if tem_produto else frozenset()
+
+
+def _sem_os_anuncios(valores: Iterable[Any], fora: Collection[str]) -> list[Any]:
+    """Os dados (fichas, JSON do registro) sem os dos anúncios `fora`. PURA."""
+    if not fora:
+        return list(valores)
+    saida = []
+    for v in valores:
+        dado = v
+        if isinstance(v, str):
+            try:
+                dado = json.loads(v)
+            except (TypeError, ValueError):
+                dado = None
+        if isinstance(dado, Mapping) and str(dado.get("item_id")) in fora:
+            continue
+        saida.append(v)
+    return saida
+
+
 # ── Tudo junto ────────────────────────────────────────────────────────────
 
 
@@ -7951,6 +8819,10 @@ def conferir(
     pendencias += conferir_evidencias(proposta.evidencias, ctx)
     if texto:
         fatos_da_base = base.fatos if isinstance(base.fatos, Mapping) else {}
+        # Item 6 da rodada "redondo" (23/10/2026): o `ver_anuncio` de um anúncio que não é
+        # da conversa nunca empresta característica ao produto da conversa.
+        de_fora = anuncios_de_fora(fichas, ctx, _fontes_da_base(base))
+        fichas_do_produto = _sem_os_anuncios(fichas, de_fora)
         pendencias += conferir_variacoes(
             texto,
             fichas,
@@ -7976,19 +8848,24 @@ def conferir(
             else []
         )
         pendencias += conferir_fonte_produto(
-            texto, fichas, ctx, fontes_extra=da_base, pares_do_produto=dos_pares
+            texto,
+            fichas_do_produto,
+            ctx,
+            fontes_extra=da_base,
+            pares_do_produto=dos_pares,
+            sem_os_anuncios=de_fora,
         )
         if ctx.modo == constantes.MODO_AUTO:
             pendencias += conferir_ficha_no_automatico(
                 texto,
-                fichas,
+                fichas_do_produto,
                 textos_cliente=clientes,
                 nomes_de_produto=da_base,
                 assunto=conferida.categoria,
                 # Fontes v1.3, item 10: a condição que o anúncio da conversa declara
                 # e o texto afirma igual ("novo", "lacrado", "original") é dado.
                 dados_extra=[
-                    *ctx.registro.textos,
+                    *_sem_os_anuncios(ctx.registro.textos, de_fora),
                     *da_base,
                     *sorted(condicao_provada(texto, fichas)),
                     *acompanha_pelo_par(dos_pares, fichas, ctx, fontes_extra=da_base),
@@ -8044,7 +8921,9 @@ def conferir(
                 valores=getattr(base, "valores", None),
             )
         pendencias += conferir_origem(texto, pedido, ctx)
-        pendencias += conferir_prazo_sem_lastro(texto)
+        # Item 1 (22–23/10/2026): o prazo que o último status do pedido traz.
+        # Revisão: só o status do pedido da conversa (`_blocos_do_status`).
+        pendencias += conferir_prazo_sem_lastro(texto, _blocos_do_status(pedido, ctx))
         # Ajuste rf3: o recado ao revisor dentro do rascunho.
         pendencias += conferir_recado_ao_revisor(texto)
         pendencias += conferir_caminho_da_plataforma(
@@ -8075,6 +8954,43 @@ def conferir(
         ):
             pendencias += conferir_chegada_sem_destino(texto, fichas, ctx)
         pendencias += conferir_generica_apos_oferta(conferida.categoria, base.recentes, gatilho)
+        # Item 4 da auditoria ao vivo (23/10/2026, a queixa do dono): a orientação de
+        # cancelamento/devolução/reembolso/troca que nada do turno pediu.
+        pendencias += conferir_assunto_nao_pedido(
+            texto,
+            acao=proposta.acao,
+            textos_cliente=[
+                *clientes,
+                *(getattr(m, "texto", None) or "" for m in getattr(base, "foco", ()) or ()),
+            ],
+            pistas=[*ctx.pistas_turno, *ctx.pistas_orientacao],
+            recentes=base.recentes,
+            pedido=pedido,
+            ctx_conversa=base.ctx,
+        )
+        # Revisão do fechamento (23/10/2026, o 22/10 20:31 da Kia): o atraso dito pelo
+        # cliente sem a ação de abrir o chamado.
+        pendencias += conferir_atraso_sem_chamado(
+            texto,
+            acao=proposta.acao,
+            textos_cliente=[
+                *clientes,
+                *(getattr(m, "texto", None) or "" for m in getattr(base, "foco", ()) or ()),
+            ],
+            pedido=pedido,
+            acoes_pessoa=ctx.acoes_pessoa,
+        )
+        # Item 6 da rodada "redondo" (23/10/2026): G1 — o outro produto da loja só com a
+        # busca no catálogo; o "não temos" só com o fato aprovado ou a busca vazia.
+        pendencias += conferir_outro_produto_da_loja(
+            texto,
+            acao=proposta.acao,
+            evidencias=proposta.evidencias,
+            ctx=ctx,
+            fichas=fichas,
+            fontes_extra=da_base,
+            fatos_citados=ctx.fatos_citados(proposta.evidencias),
+        )
     pendencias += conferir_pergunta(proposta.acao, base.recentes, gatilho, texto=texto)
     pendencias += conferir_generica_com_pendencia(
         conferida.categoria, base.recentes, gatilho, texto

@@ -62,7 +62,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -182,7 +182,42 @@ logger = structlog.get_logger()
 #  d. (80035f0e) mandar conferir pelo CEP no próprio anúncio, antes da compra, o prazo, o
 #     frete ou se a entrega está disponível é caminho do app (`prompt._REGIAO`, a decisão do
 #     dono do `cobertura_regiao`), com o item 3 valendo igual.
-VERSAO = "v9"
+# Item 3 da auditoria ao vivo (22–23/10/2026, ainda v9: o `SISTEMA` não muda; só a ENTRADA
+# passa a trazer o dado que o rascunho usou — nenhuma regra afrouxou):
+#  a. (05df6dc5, Barbosa 22:07, "Traz um branco") a ficha inteira é UMA evidência (o JSON
+#     com as chaves em ordem: a descrição, os atributos e as especificações antes das
+#     "variacoes") e o corte de `MAX_CHARS_EVIDENCIA` comia a lista das variações — o
+#     verificador dizia "a cor branca não aparece nas variações". A evidência longa com
+#     variações ganha, logo depois, a lista inteira delas à parte (`_com_as_variacoes`);
+#  b. (073983a2, Barbosa 05:25, cesto de 2,5 L) com TODAS as variações esgotadas e
+#     confiáveis, a política de estoque diz que "os outros tamanhos também estão
+#     esgotados" é o dado (`TODAS_ESGOTADAS`), não a política — e a 1ª camada passa a
+#     conferir a frase com outra opção disponível (`checagens._demais_esgotadas`);
+#  c. (31ab491d, Barbosa 22:01, palavra-chave) a instrução de recebimento da orientação
+#     aprovada ("a entrega segue o endereço do pedido") vem também para entrega_instrucoes
+#     (`RELACIONADOS`). O "assim que o pedido for enviado", que nenhuma fonte traz,
+#     continua sem lastro;
+#  (4f4bb4a9, Kia 20:40, "garantia da Apple?") o verificador acertou: o rascunho falou da
+#  garantia legal e não da garantia Apple de 1 ano do fato 25 que o consultar_manual
+#  devolveu — nada muda.
+# v10 (item 6 da rodada "redondo", 23/10/2026; dono: "pesquisando dentro do DaVinci"): a
+# ferramenta `buscar_anuncios_da_loja` acha os anúncios DESTA loja, e a entrada traz a
+# BUSCA NO CATÁLOGO DA LOJA (`ResumoDoPacote.busca`, `linhas_da_busca`) só quando o agente
+# buscou. O `SISTEMA` aceita, SÓ com essa seção: o anúncio desta loja que ela traz não é
+# "outro anúncio nosso" do item 4 (dizer que a loja o vende e que ele aparece na página da
+# loja no app, sem link); "tem/vende" o da linha disponivel=true e "esgotado" o da linha
+# disponivel=false têm lastro (item 6); "não vende" o ACESSÓRIO da busca vazia também —
+# o modelo ou a versão da busca vazia, nunca. Sem a seção, nada muda (a entrada das 393
+# linhas de antes da calibração é a mesma). A 1ª camada confere o mesmo antes (G1,
+# `checagens.conferir_outro_produto_da_loja`). Calibração: o grupo `catalogo`.
+# Revisão do fechamento (23/10/2026, ainda v10 — nunca foi ao ar): a busca vazia do termo
+# inteiro não prova que a loja não vende ("fone de ouvido bluetooth sem fio" com o Fone UFB10
+# na loja) — a linha diz "nenhum anúncio casou com o termo (isso não prova…)", e só "nenhum
+# anúncio desta loja tem <acessório> no título" (`catalogo.sem_no_titulo`) sustenta o "não
+# vende" do acessório; cada termo com os SEUS achados (o A18 e o C17 do mesmo anúncio); o
+# TODAS_ESGOTADAS só com a lista inteira das variações. Calibração: 4 linhas novas
+# (`calibrar_verificador`).
+VERSAO = "v10"
 MODELO = "claude-haiku-5-5"
 EFFORT = "low"
 # O JSON do `Veredito` (~100–300 tokens) + o raciocínio ADAPTATIVO, que conta no
@@ -491,6 +526,11 @@ parecido, que o rascunho cita (par:<id>). Cada linha diz se a resposta «vale pa
 loja» (é desta loja) e se «vale para produto» (do mesmo anúncio, de um modelo só) ou «não vale \
 para produto». No que a linha diz que vale, a resposta é LASTRO, como as REGRAS DA LOJA (item \
 6, a e b); nunca fato deste pedido nem autorização de promessa;
+- BUSCA NO CATÁLOGO DA LOJA (quando vier): para cada termo que o agente buscou, os anúncios \
+DESTA loja, na mesma plataforma (anuncio:<id>, o nome, as variações que casaram e \
+disponivel: true = à venda e disponível; false = esgotado; null = não se sabe), ou que nenhum \
+anúncio casou. É lastro só de que a loja vende (ou não vende) aquele produto e de se ele está \
+disponível ou esgotado — nunca de característica, preço ou prazo, nem do produto da conversa;
 - ORIENTAÇÃO APROVADA DO ASSUNTO e CAMINHOS DO APP: o que o agente pode dizer sobre a \
 regra da plataforma e onde o cliente faz as coisas no app. Cancelamento, reembolso e \
 troca_devolucao são assuntos irmãos: com um deles declarado, vem a orientação dos três, e a \
@@ -584,7 +624,10 @@ marca ou do fabricante, assistência técnica, técnico, loja de celular, loja f
 "vir buscar", transportadora, Correios, entregador, carteiro, banco, cartão, \
 chargeback, contestação, Procon, Reclame Aqui, consumidor.gov, ou outra loja ou \
 outro anúncio nosso. O suporte do próprio marketplace e as telas do app ("Minhas \
-compras", "Central de ajuda", "Devolução/Reembolso") são permitidos. Uma exceção \
+compras", "Central de ajuda", "Devolução/Reembolso") são permitidos. O anúncio desta \
+loja que a BUSCA NO CATÁLOGO DA LOJA traz não é "outro anúncio nosso": dizer que a loja \
+vende esse produto e que ele aparece na página da loja no app, pelo nome (sem link), \
+não marca. Uma exceção \
 só: a garantia do aparelho Uranyx acionada direto com a Uranyx "pelo app Uranyx ou \
 pelo site uranyx.com.br/sac", exatamente assim, quando a garantia nas EVIDÊNCIAS \
 traz esse caminho e o "periodo" "uranyx" (ou só a regra, antes da compra); \
@@ -629,7 +672,12 @@ dito com outras palavras — a RAM 16 GB (8 GB + 8 GB virtual) é 8 GB físicos 
 virtuais, 16 GB no total; e, com a POLÍTICA DE ESTOQUE DA LOJA na entrada, dizer da \
 variação que as EVIDÊNCIAS trazem com disponivel=false e confiavel=true que está \
 esgotada, que não há previsão de reposição nem data de chegada e que o cliente pode \
-acompanhar o anúncio; e o que uma RESPOSTA DA EQUIPE CITADA sustenta: (a) POLÍTICA DA \
+acompanhar o anúncio; e, com a BUSCA NO CATÁLOGO DA LOJA, dizer que a loja tem ou vende o \
+produto de uma linha com disponivel=true, que o de uma linha com disponivel=false está \
+esgotado (mesmo sendo produto, acessório ou peça) e que a loja não vende o ACESSÓRIO de \
+uma linha "nenhum anúncio desta loja tem <acessório> no título" — "nenhum anúncio casou \
+com o termo" nunca sustenta "não temos", e de um modelo ou versão nada sustenta; e o que \
+uma RESPOSTA DA EQUIPE CITADA sustenta: (a) POLÍTICA DA \
 LOJA — a afirmação com o mesmo sentido de uma resposta de linha «vale para política da \
 loja», sobre a mesma situação, dita com outras palavras ou mais curta, tem lastro (o \
 reembolso é feito ou analisado \
@@ -798,6 +846,10 @@ class ResumoDoPacote:
     # "mesmo_anuncio", "mesmo_produto", "fonte_de_produto", "titulo_do_anuncio",
     # "idade_dias", …}.
     pares: tuple[dict, ...] = ()
+    # v10 (item 6 da rodada "redondo", 23/10/2026): as buscas no catálogo da loja
+    # ({"termo", "anuncios": [{"item_id", "nome_curto", "variacoes_casadas",
+    # "disponivel", "da_conversa"}]}) — vazio = a seção não vai (a entrada de antes).
+    busca: tuple[dict, ...] = ()
 
 
 # ── v7 (21/10/2026): o turno sem pergunta e as lacunas com o dado ──
@@ -983,7 +1035,79 @@ def resumo_do_pacote(
         lacunas=lacunas_com_dado(base.valores),
         # v9 (item 32): as respostas da equipe que o rascunho cita.
         pares=tuple(ctx.pares_citados(ctx.evidencias)),
+        # v10 (item 6 da rodada "redondo"): as buscas no catálogo da loja.
+        busca=busca_do_contexto(ctx),
     )
+
+
+def busca_do_contexto(ctx: ContextoAgente) -> tuple[dict, ...]:
+    """As buscas no catálogo desta execução, com os achados de CADA uma (revisão do
+    fechamento, 23/10/2026: o mesmo anúncio buscado por "A18" e por "C17" tem o disponível
+    de cada termo) e os acessórios que nenhum título da loja tem ("sem_no_titulo"). PURA."""
+    saida = []
+    for b in getattr(ctx, "buscas_catalogo", None) or []:
+        brutos = b.get("anuncios")
+        if brutos is None:
+            brutos = [
+                {"item_id": i, **ctx.anuncios_buscados[i]}
+                for i in b.get("achados") or []
+                if i in ctx.anuncios_buscados
+            ]
+        anuncios = [
+            {k: v for k, v in a.items() if k != "titulo_plano"}
+            for a in brutos
+            if isinstance(a, Mapping)
+        ]
+        busca = {"termo": b.get("termo") or "", "anuncios": anuncios}
+        if b.get("sem_no_titulo") and not anuncios:
+            busca["sem_no_titulo"] = list(b["sem_no_titulo"])
+        saida.append(busca)
+    return tuple(saida)
+
+
+CABECALHO_BUSCA = (
+    "BUSCA NO CATÁLOGO DA LOJA (os anúncios DESTA loja, na mesma plataforma, que a busca do "
+    "agente achou: prova só que a loja vende o produto e se ele está disponível — "
+    "disponivel=true à venda e disponível, false esgotado, null não se sabe —; nunca "
+    "característica, preço ou prazo, nem do produto da conversa; o cliente o acha na página "
+    "da loja no app, pelo nome):"
+)
+MAX_LINHAS_BUSCA = 12
+
+
+def linhas_da_busca(busca: Sequence[Mapping[str, Any]], nomes: Iterable[str | None]) -> list[str]:
+    """As linhas da BUSCA NO CATÁLOGO DA LOJA (v10). Sem busca, nenhuma. PURA."""
+    nomes = tuple(nomes)
+    linhas: list[str] = []
+    for b in busca:
+        termo = _mascarar_nomes(_uma_linha(b.get("termo"), 80), nomes)
+        anuncios = [a for a in b.get("anuncios") or [] if isinstance(a, Mapping)]
+        if not anuncios:
+            # Revisão do fechamento (23/10/2026): a busca vazia do termo inteiro não prova
+            # que a loja não vende; só o acessório que nenhum título da loja tem.
+            ausentes = [str(a) for a in b.get("sem_no_titulo") or [] if a]
+            linhas.append(
+                f'- termo "{termo}": nenhum anúncio desta loja tem '
+                + ", ".join(f'"{a}"' for a in ausentes)
+                + " no título"
+                if ausentes
+                else f'- termo "{termo}": nenhum anúncio casou com o termo (isso não prova '
+                "que a loja não vende)"
+            )
+            continue
+        for a in anuncios:
+            variacoes = [str(v) for v in a.get("variacoes_casadas") or [] if v]
+            disp = a.get("disponivel")
+            linhas.append(
+                f'- termo "{termo}": anuncio:{a.get("item_id")} '
+                f"«{_mascarar_nomes(_uma_linha(a.get('nome_curto'), 80), nomes)}»"
+                + (f" (variações que casaram: {', '.join(variacoes)})" if variacoes else "")
+                + f"; disponivel={'null' if disp is None else str(bool(disp)).lower()}"
+                + ("; é o anúncio desta conversa" if a.get("da_conversa") else "")
+            )
+    if not linhas:
+        return []
+    return [CABECALHO_BUSCA, *linhas[:MAX_LINHAS_BUSCA]]
 
 
 def _consultas(rastro: Sequence[PassoRastro]) -> list[str]:
@@ -995,12 +1119,52 @@ def _consultas(rastro: Sequence[PassoRastro]) -> list[str]:
     return nomes[:MAX_CONSULTAS]
 
 
+# Item 3 da auditoria ao vivo (22/10/2026 22:07, Barbosa, 05df6dc5): a lista das variações
+# de cada ficha de uma evidência que passa do corte (as chaves em ordem alfabética põem as
+# "variacoes" no fim do JSON), à parte — só o que identifica o anúncio e as variações.
+_CHAVES_DAS_VARIACOES = ("item_id", "titulo", "variacoes", "variacoes_completas")
+
+
+def _fichas_com_variacoes(valor: Any) -> Iterator[Mapping]:
+    """As fichas com variações: a do pacote ("variacoes": [...]) e a do `ver_anuncio`
+    ("variacoes": {"variacoes": [...], "completas": …})."""
+    if isinstance(valor, Mapping):
+        lista = valor.get("variacoes")
+        if isinstance(lista, Mapping):
+            lista = lista.get("variacoes")
+        if isinstance(lista, list) and lista:
+            yield valor
+            return
+        for v in valor.values():
+            yield from _fichas_com_variacoes(v)
+    elif isinstance(valor, list):
+        for v in valor:
+            yield from _fichas_com_variacoes(v)
+
+
+def _com_as_variacoes(textos: Sequence[str]) -> list[str]:
+    """As evidências e, logo depois de cada uma que o corte de `MAX_CHARS_EVIDENCIA`
+    cortaria, a lista inteira das variações de cada ficha dela (item 3). PURA."""
+    saida_: list[str] = []
+    for bruto in textos:
+        saida_.append(bruto)
+        if len(" ".join(str(bruto or "").split())) <= MAX_CHARS_EVIDENCIA:
+            continue
+        for dado in _dados_da_evidencia(bruto):
+            for ficha_ in _fichas_com_variacoes(dado):
+                so = {k: ficha_[k] for k in _CHAVES_DAS_VARIACOES if k in ficha_}
+                saida_.append(json.dumps(so, ensure_ascii=False, sort_keys=True))
+    return saida_
+
+
 def _evidencias(textos: Sequence[str], nomes: Iterable[str | None]) -> list[str]:
-    """As evidências cortadas (por item e no total), sem repetir. PURA."""
+    """As evidências cortadas (por item e no total), sem repetir. PURA. Item 3 da
+    auditoria ao vivo (22/10/2026): a evidência longa com variações leva a lista delas à
+    parte (`_com_as_variacoes`)."""
     nomes = tuple(nomes)
     saida_: list[str] = []
     total = 0
-    for bruto in textos:
+    for bruto in _com_as_variacoes(textos):
         texto = _uma_linha(_mascarar_nomes(str(bruto or ""), nomes), MAX_CHARS_EVIDENCIA)
         if not texto or texto in saida_:
             continue
@@ -1113,15 +1277,21 @@ def _separar_regras(textos: Sequence[str]) -> tuple[list[str], list[str]]:
 # orientação do cancelamento —, e a troca pela devolução. Declarado um deles, o
 # verificador recebe a orientação aprovada dos três (o declarado primeiro).
 IRMAOS: tuple[str, ...] = ("cancelamento", "reembolso", "troca_devolucao")
+# Item 3 da auditoria ao vivo (22/10/2026 22:01, Barbosa, 31ab491d, "tem palavra chave?"):
+# a instrução de recebimento ("a entrega segue o endereço do pedido e a loja não passa
+# recado ao entregador") está na orientação aprovada do `endereco` — o agente a lê no
+# bloco 1 —, e a entrega_instrucoes não tem orientação própria no `prompt.ORIENTACAO`.
+RELACIONADOS: dict[str, tuple[str, ...]] = {"entrega_instrucoes": ("endereco",)}
 
 
 def assuntos_da_orientacao(assunto: str | None) -> list[str]:
-    """O assunto e, se ele é um dos `IRMAOS`, os outros dois (nessa ordem). PURA."""
+    """O assunto e, se ele é um dos `IRMAOS`, os outros dois (nessa ordem); e os
+    `RELACIONADOS` dele (item 3, 22/10/2026). PURA."""
     if not assunto:
         return []
     if assunto in IRMAOS:
         return [assunto, *(a for a in IRMAOS if a != assunto)]
-    return [assunto]
+    return [assunto, *RELACIONADOS.get(assunto, ())]
 
 
 def orientacao_aprovada(assunto: str | None, plataforma_codigo: str = "") -> list[str]:
@@ -1153,11 +1323,58 @@ POLITICA_DE_ESTOQUE = (
     "cliente pode acompanhar o anúncio tem lastro; data, semana, mês, prazo, quantidade, "
     "reserva ou promessa de volta não têm."
 )
+# Item 3 da auditoria ao vivo (23/10/2026 05:25, Barbosa, 073983a2, "o cesto de 2,5 tem
+# previsão?"): com as três variações esgotadas e confiáveis nas EVIDÊNCIAS, o verificador
+# leu "Os demais tamanhos também aparecem como esgotados" como a política (que ele achou
+# só da variação citada). Com TODAS as variações das EVIDÊNCIAS disponivel=false e
+# confiavel=true (`todas_esgotadas`), a entrada diz que isso é o dado.
+TODAS_ESGOTADAS = (
+    "Nas EVIDÊNCIAS, TODAS as variações do anúncio estão com disponivel=false e "
+    "confiavel=true: dizer que as outras opções (tamanhos, cores, versões) também estão "
+    "esgotadas é o dado das EVIDÊNCIAS."
+)
 _OBJETO_JSON = re.compile(r"\{[^{}]*\}")
 
 
 def _esgotada_confiavel(valor: Mapping) -> bool:
     return valor.get("disponivel") is False and valor.get("confiavel") is True
+
+
+def _listas_de_variacoes(valor: Any) -> Iterator[tuple[list, Any, Any]]:
+    """(lista, completas, omitidas) de cada ficha com variações: a do pacote
+    ("variacoes": [...], "variacoes_completas", "variacoes_omitidas") e a do
+    `ver_anuncio` ("variacoes": {"variacoes": [...], "completas", "omitidas"})."""
+    if isinstance(valor, Mapping):
+        lista = valor.get("variacoes")
+        if isinstance(lista, list):
+            yield lista, valor.get("variacoes_completas"), valor.get("variacoes_omitidas")
+        elif isinstance(lista, Mapping) and isinstance(lista.get("variacoes"), list):
+            yield lista["variacoes"], lista.get("completas"), lista.get("omitidas")
+        for chave, v in valor.items():
+            if chave != "variacoes":
+                yield from _listas_de_variacoes(v)
+    elif isinstance(valor, list):
+        for v in valor:
+            yield from _listas_de_variacoes(v)
+
+
+def todas_esgotadas(evidencias: Iterable[Any]) -> bool:
+    """Há variações nas EVIDÊNCIAS e TODAS estão disponivel=false E confiavel=true? PURA.
+    Item 3 (23/10/2026, 073983a2). Revisão do fechamento (23/10/2026): e cada lista está
+    COMPLETA ("completas"/"variacoes_completas" true, nenhuma omitida) — com a lista
+    incompleta, "os outros também estão esgotados" não é o dado (o 6 L que ficou de fora
+    pode estar disponível)."""
+    evidencias = list(evidencias)
+    todas = _variacoes_das_evidencias(evidencias)
+    if not todas or not all(_esgotada_confiavel(v) for v in todas):
+        return False
+    listas = [
+        item for bruto in evidencias for dado in _dados_da_evidencia(bruto)
+        for item in _listas_de_variacoes(dado)
+    ]  # fmt: skip
+    if not listas or sum(len(lista) for lista, _c, _o in listas) != len(todas):
+        return False
+    return all(completas is True and not omitidas for _l, completas, omitidas in listas)
 
 
 def _tem_esgotada(valor: Any) -> bool:
@@ -1353,11 +1570,14 @@ def montar_entrada(
         ),
         # v9 (item 32): as respostas da equipe que o rascunho cita.
         *linhas_dos_pares(resumo.pares, nomes),
+        # v10 (item 6 da rodada "redondo"): a busca no catálogo da loja, só quando houve.
+        *linhas_da_busca(resumo.busca, nomes),
         *orientacao_aprovada(assunto, resumo.plataforma_codigo),
         # v8 (item 23): a política de estoque só com a variação esgotada nas evidências
         # e a resposta de estoque (revisão da rodada 6: `politica_de_estoque_vale`).
         *(
-            [POLITICA_DE_ESTOQUE]
+            # Item 3 (23/10/2026, 073983a2): com todas esgotadas, o "os outros também" é dado.
+            [POLITICA_DE_ESTOQUE, *([TODAS_ESGOTADAS] if todas_esgotadas(so_evidencias) else [])]
             if politica_de_estoque_vale(
                 so_evidencias,
                 texto=texto,

@@ -81,9 +81,14 @@ _OPUS_5_5 = Preco(entrada=4.00, saida=20.00, cache_leitura=0.20, cache_5m=5.00, 
 _OPUS_5 = Preco(entrada=5.00, saida=25.00, cache_leitura=0.50, cache_5m=6.25, cache_1h=10.00)
 
 # modelo → (tabela até `LIMITE_PROMPT_CURTO`, tabela acima — None = a mesma).
+# Item 5 da rodada "redondo" (23/10/2026): o agente no Sonnet 5.5 manda `fallbacks:
+# "default"` (`agente._com_fallback`) e a recusa "cyber"/"frontier_llm" é refeita pelo
+# servidor no Sonnet 5, que responde com o id dele (`msg.model` e a iteração
+# `fallback_message`): mesmo preço do Sonnet 5.5 — fora da tabela ele caía no mais caro.
 PRECOS: dict[str, tuple[Preco, Preco | None]] = {
     "claude-haiku-5-5": (_HAIKU_CURTO, _HAIKU_LONGO),
     "claude-sonnet-5-5": (_SONNET, None),
+    "claude-sonnet-5": (_SONNET, None),
     "claude-opus-5-5": (_OPUS_5_5, None),
     "claude-opus-5": (_OPUS_5, None),
 }

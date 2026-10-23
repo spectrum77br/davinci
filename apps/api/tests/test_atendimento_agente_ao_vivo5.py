@@ -1426,7 +1426,7 @@ async def test_a_calibracao_mede_os_novos_sem_modelo(tmp_path, teto_limpo, escap
 def test_a_calibracao_nao_mudou_o_sistema():
     """Os casos novos só medem: o verificador é o v7 de sempre (o v8 da 6ª rodada,
     22/10/2026, é outro conserto — itens 22 e 23)."""
-    assert v.VERSAO in ("v7", "v8", "v9")
+    assert v.VERSAO in ("v7", "v8", "v9", "v10")
     assert "nao_vale_para" not in v.SISTEMA
 
 

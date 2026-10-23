@@ -256,6 +256,8 @@ async def test_seis_ferramentas_estritas_na_ordem_e_a_ablacao(db: AsyncSession, 
         "consultar_manual": ["assunto", "pergunta"],
         "buscar_respostas_equipe": ["pergunta", "item_id"],
         "sugerir_troca": ["numero"],
+        # Item 6 da rodada "redondo" (23/10/2026).
+        "buscar_anuncios_da_loja": ["termo"],
     }
     for t in lista:
         d = t.to_dict()

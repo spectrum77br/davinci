@@ -4733,6 +4733,7 @@ async def conferir_saida(
     agente: bool = False,
     devolucao_de_rotina: bool = False,
     produto_pela_equipe: bool = False,
+    fatos_citados: Sequence[str] = (),
 ) -> SaidaConferida:
     """O código confere o que o modelo disse. Não grava nada; só LÊ o banco
     para saber se a loja respondeu enquanto o modelo escrevia
@@ -4754,7 +4755,9 @@ async def conferir_saida(
     `classificada`, `nao_classificou` (a opção sensível do menu o legado já
     mandou para pessoa ANTES do modelo). Só o agente: `opcoes_sensiveis`,
     `perguntar` (`acao="perguntar"`), `devolucao_de_rotina` (item 32: a marca do
-    turno, `ContextoAgente.devolucao_de_rotina`). Ver o bloco acima para `agente=True`.
+    turno, `ContextoAgente.devolucao_de_rotina`), `fatos_citados` (item 2 de 22/10/2026:
+    os textos dos fatos aprovados que a resposta cita — os prazos deles, com o par, não
+    são "prazo inventado"). Ver o bloco acima para `agente=True`.
     """
     motivos = list(motivos)
     avisos: list[str] = []
@@ -4916,8 +4919,15 @@ async def conferir_saida(
                 if p.codigo.removeprefix("produto_").removesuffix("_sem_evidencia") not in provados
             ]
     # Só o agente: os prazos da regra que `ver_garantia` devolveu, cada um com
-    # o seu par (esclarecimento 1 do orquestrador; revisão de 20/10/2026).
-    prazos = validador.prazos_da_regra(garantias_conferidas) if agente else frozenset()
+    # o seu par (esclarecimento 1 do orquestrador; revisão de 20/10/2026). Item 2 da
+    # auditoria ao vivo (22/10/2026, 3ee1f81e): e os dos FATOS APROVADOS que a resposta
+    # cita (`fatos_citados`: "1 ano de garantia: os 90 primeiros dias com a loja e os 9
+    # meses seguintes direto com a Uranyx"), cada um com o par do próprio fato.
+    prazos = (
+        validador.prazos_da_regra(garantias_conferidas) | validador.prazos_dos_fatos(fatos_citados)
+        if agente
+        else frozenset()
+    )
     erros = validador.validar(
         final,
         plataforma=conversa.plataforma,
@@ -4933,7 +4943,12 @@ async def conferir_saida(
         # de garantir/confirmar. O legado não muda.
         from app.services.atendimento.agente import checagens as _checagens
 
-        if _checagens.prazo_do_validador_so_negado(final):
+        # Item 1 da auditoria ao vivo (22–23/10/2026): também o prazo que o último
+        # status do bloco do pedido traz ("novas atualizações em até 1 dia", o evento
+        # da Shopee do retrato fresco), repetido numa oração que só diz o status.
+        do_pedido = fatos.get("agente_pedido") if isinstance(fatos, dict) else None
+        status = [do_pedido.get("ultimo_status")] if isinstance(do_pedido, dict) else []
+        if _checagens.prazo_do_validador_sem_afirmacao(final, status=status):
             erros = [e for e in erros if e != validador.MOTIVO_PRAZO]
     if agente and erros and garantias_conferidas:
         # Revisão r5i de 21/10/2026 (decisão 7 do dono), só o agente: depois dos

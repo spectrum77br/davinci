@@ -833,7 +833,9 @@ async def test_de_ponta_a_ponta_o_agente_responde_e_o_envio_decide(
     assert cliente["api_key"] == CHAVE_AGENTE and cliente["base_url"] == ia.BASE_CLAUDE
     assert api_falsa.cabecalhos[0]["x-api-key"] == CHAVE_AGENTE
     (pedido,) = api_falsa.pedidos
-    assert pedido["model"] == MODELO
+    # Item 5 da rodada "redondo" (23/10/2026): o padrão é o Sonnet 5.5, com o fallback do
+    # servidor; o `r.modelo` é o que a resposta (falsa) diz que respondeu.
+    assert pedido["model"] == "claude-sonnet-5-5" and pedido["fallbacks"] == "default"
     assert not {"temperature", "top_p", "top_k", "thinking"} & set(pedido)
     assert pedido["output_config"]["effort"] == agente_ligado.atendimento_agente_effort
 

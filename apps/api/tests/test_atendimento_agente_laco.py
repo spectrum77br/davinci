@@ -436,6 +436,16 @@ def pecas(monkeypatch, redis_falso, ajustes) -> _Pecas:
             """
             return registrar("sugerir_troca", {"numero": numero})
 
+        # Item 6 da rodada "redondo" (23/10/2026): a 7ª ferramenta, no fim da ordem.
+        @beta_async_tool(strict=True)
+        async def buscar_anuncios_da_loja(termo: str) -> str:
+            """O catálogo da loja.
+
+            Args:
+                termo: o produto.
+            """
+            return registrar("buscar_anuncios_da_loja", {"termo": termo})
+
         todas = [
             ver_anuncio,
             ver_pedido,
@@ -443,6 +453,7 @@ def pecas(monkeypatch, redis_falso, ajustes) -> _Pecas:
             consultar_manual,
             buscar_respostas_equipe,
             sugerir_troca,
+            buscar_anuncios_da_loja,
         ]
         # De trás para frente de propósito: o laço põe na ordem de NOMES.
         return [t for t in reversed(todas) if t.name not in ctx.ferramentas_fora]

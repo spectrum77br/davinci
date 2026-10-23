@@ -1237,6 +1237,9 @@ async def montar_pacote(
     miolo = _sem_moldura("\n".join(partes))
     texto = f"{ABRE_DADOS}\n{miolo}\n{FECHA_DADOS}\n{AVISO_DADOS}"
 
+    # Revisão do fechamento da rodada "redondo" (23/10/2026): os anúncios que o pacote
+    # aceitou, antes das ferramentas (o "da_conversa" da `buscar_anuncios_da_loja`).
+    ctx.anuncios_do_pacote = frozenset(ctx.anuncios)
     fatos = {k: v for k, v in dict(base.fatos).items() if k != "ficha_do_anuncio"}
     if fichas:
         fatos["ficha_do_anuncio"] = fichas

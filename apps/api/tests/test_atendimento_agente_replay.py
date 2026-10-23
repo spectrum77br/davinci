@@ -1321,8 +1321,11 @@ def test_exatidao_das_variacoes_spec_9_5():
 
 
 def test_bracos_do_eval():
-    assert rodar.extra_do_braco("A1") == {"effort": "low"}
-    assert rodar.extra_do_braco("A3") == {"effort": "high"}
+    # Item 5 da rodada "redondo" (23/10/2026): o padrão virou o Sonnet 5.5 — os braços A
+    # dizem o Haiku com todas as letras (a comparação de antes não muda de modelo).
+    haiku = {"modelo": "claude-haiku-5-5"}
+    assert rodar.extra_do_braco("A1") == {**haiku, "effort": "low"}
+    assert rodar.extra_do_braco("A3") == {**haiku, "effort": "high"}
     # O braço Sonnet com o teto da conversa dele (~10× o Haiku; revisão de 20/10/2026).
     assert rodar.extra_do_braco("S1") == {
         "modelo": "claude-sonnet-5-5",
@@ -1330,10 +1333,11 @@ def test_bracos_do_eval():
         "teto_conversa_usd": rodar.TETO_CONVERSA_SONNET_USD,
     }
     assert rodar.extra_do_braco("A2-sem-equipe") == {
+        **haiku,
         "effort": "medium",
         "ferramentas_fora": frozenset({"buscar_respostas_equipe"}),
     }
-    assert rodar.extra_do_braco("A2-sem-fatos") == {"effort": "medium", "sem_fatos": True}
+    assert rodar.extra_do_braco("A2-sem-fatos") == {**haiku, "effort": "medium", "sem_fatos": True}
     with pytest.raises(ValueError):
         rodar.extra_do_braco("L0")
 

@@ -102,6 +102,13 @@ def id_par(par_id: Any) -> str:
     return f"par:{_limpo(str(par_id))}"
 
 
+def id_anuncio(item_id: str) -> str:
+    """Um anúncio DESTA loja que a busca no catálogo achou (`buscar_anuncios_da_loja`,
+    item 6 da rodada "redondo", 23/10/2026): prova só que a loja vende o produto e se
+    ele está disponível — a conferência G1 (`checagens.conferir_outro_produto_da_loja`)."""
+    return f"anuncio:{_limpo(item_id)}"
+
+
 # O id de evidência ESCRITO num texto (o motivo "evidência citada sem prova
 # (variacoes:58265493964)", o aviso, o erro) — a forma dos `id_*` acima. A
 # máscara de dígitos (`ia.mascarar`) lia os 11 dígitos do anúncio da Shopee
@@ -110,7 +117,7 @@ def id_par(par_id: Any) -> str:
 # evidência deixa o id como está (`replay.mascarar_texto`).
 EVIDENCIA_NO_TEXTO = re.compile(
     r"(?<![\w:])(?:pedido|ficha|variacoes|restricao|espec|garantia(?::pedido)?|fato|regra"
-    r"|modelo|troca|par):[\w{}-]+(?:\.[\w{}-]+)*"
+    r"|modelo|troca|par|anuncio):[\w{}-]+(?:\.[\w{}-]+)*"
 )
 
 
@@ -476,6 +483,19 @@ class ContextoAgente:
     # (`acao_pessoa.devolucao_de_rotina`): o envio sozinho não para no "em andamento"
     # dela (`ia.andamento_no_rascunho` lê a marca no `para_fatos`).
     devolucao_de_rotina: bool = False
+    # Item 6 da rodada "redondo" (23/10/2026): o que a `buscar_anuncios_da_loja` achou —
+    # `anuncios_buscados` (item_id → {"nome_curto", "variacoes_casadas", "disponivel",
+    # "da_conversa", "titulo_plano"}) e `buscas_catalogo` (cada busca: {"termo",
+    # "acessorios", "modelo", "achados"}). Nunca no `registro.textos` (não é fonte de
+    # característica): o verificador as lê à parte (BUSCA NO CATÁLOGO DA LOJA) e a
+    # conferência G1 exige o `anuncio:<id>` delas.
+    anuncios_buscados: dict[str, dict] = field(default_factory=dict)
+    buscas_catalogo: list[dict] = field(default_factory=list)
+    # Revisão do fechamento (23/10/2026): os anúncios que o PACOTE aceitou (o da conversa,
+    # os cartões desta loja, os itens do pedido, as fichas), antes das ferramentas — o
+    # "da_conversa" da busca no catálogo (o `ver_anuncio` de outro anúncio da loja também
+    # o põe em `anuncios`).
+    anuncios_do_pacote: frozenset[str] = frozenset()
     uso: Uso = field(default_factory=Uso)
     # Preenchidos pelo laço (`agente.responder`).
     acao: str | None = None
@@ -667,6 +687,32 @@ class ContextoAgente:
             if item not in self.garantias_conferidas:
                 self.garantias_conferidas.append(item)
 
+    def registrar_busca(self, busca: Mapping[str, Any]) -> None:
+        """Uma busca no catálogo da loja (`buscar_anuncios_da_loja`): o termo e os
+        anúncios achados (`busca["anuncios"]`: os dicionários de `catalogo.Achado`).
+
+        Revisão do fechamento (23/10/2026): cada busca guarda os SEUS achados ("anuncios":
+        o mesmo anúncio buscado por "A18" e por "C17" tem o disponível de cada termo — as
+        variações casadas de cada um) e os acessórios que nenhum título da loja tem
+        ("sem_no_titulo", `catalogo.sem_no_titulo`); `anuncios_buscados` fica com o último."""
+        achados = [dict(a) for a in busca.get("anuncios") or [] if isinstance(a, Mapping)]
+        for a in achados:
+            item = _limpo(a.get("item_id"))
+            if item:
+                self.anuncios_buscados[item] = {k: v for k, v in a.items() if k != "item_id"}
+        self.buscas_catalogo.append(
+            {
+                "termo": _limpo(busca.get("termo")),
+                "acessorios": sorted(busca.get("acessorios") or []),
+                "modelo": bool(busca.get("modelo")),
+                "achados": [_limpo(a.get("item_id")) for a in achados if a.get("item_id")],
+                "anuncios": [
+                    {**a, "item_id": _limpo(a.get("item_id"))} for a in achados if a.get("item_id")
+                ],
+                "sem_no_titulo": sorted(str(x) for x in busca.get("sem_no_titulo") or []),
+            }
+        )
+
     def estado_das_ferramentas(self) -> tuple:
         """O que as ferramentas mudam no `ctx` (para a 2ª passada voltar a ele)."""
         return (
@@ -681,6 +727,9 @@ class ContextoAgente:
             set(self.pedidos),
             set(self.anuncios),
             dict(self.fatos_lidos),
+            {k: dict(v) for k, v in self.anuncios_buscados.items()},
+            [dict(b) for b in self.buscas_catalogo],
+            list(self.numeros_vistos),
         )
 
     def voltar_ferramentas(self, estado: tuple) -> None:
@@ -697,6 +746,9 @@ class ContextoAgente:
             pedidos,
             anuncios,
             fatos_lidos,
+            buscados,
+            buscas,
+            numeros_vistos,
         ) = estado
         self.registro.ids = set(ids)
         self.registro.textos = list(textos)
@@ -707,6 +759,9 @@ class ContextoAgente:
         self.pedidos = set(pedidos)
         self.anuncios = set(anuncios)
         self.fatos_lidos = dict(fatos_lidos)
+        self.anuncios_buscados = {k: dict(v) for k, v in buscados.items()}
+        self.buscas_catalogo = [dict(b) for b in buscas]
+        self.numeros_vistos = list(numeros_vistos)
 
     # ── rastro e orçamento ──
 
@@ -773,6 +828,12 @@ class ContextoAgente:
                 extra["pares_de_produto"] = de_produto
         if self.devolucao_de_rotina:
             extra["devolucao_de_rotina"] = True
+        if self.buscas_catalogo:
+            # Item 6 da rodada "redondo" (23/10/2026): o termo e os anúncios achados.
+            extra["buscas_catalogo"] = [
+                {"termo": b.get("termo"), "achados": list(b.get("achados") or [])}
+                for b in self.buscas_catalogo
+            ]
         return {
             **extra,
             "versao": constantes.PROMPT_VERSAO_AGENTE,

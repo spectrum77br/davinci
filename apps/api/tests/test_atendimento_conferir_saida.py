@@ -1049,7 +1049,9 @@ def test_o_legado_continua_no_modelo_de_origin_e_o_agente_no_haiku():
         chave_dm="",
     )
     assert (p.tipo, p.modelo) == (ia.PROVEDOR_CLAUDE, "claude-opus-5")
-    assert Settings.model_fields["atendimento_agente_modelo"].default == "claude-haiku-5-5"
+    # Item 5 da rodada "redondo" (23/10/2026): o agente passou ao Sonnet 5.5 (o verificador
+    # continua no Haiku); o legado não muda nada.
+    assert Settings.model_fields["atendimento_agente_modelo"].default == "claude-sonnet-5-5"
     assert not ia._com_fallback("claude-haiku-5-5")
     pedido = ia.pedido_claude("claude-haiku-5-5", "S", "U", max_tokens=900, fallback=False)
     assert not {"temperature", "top_p", "top_k", "thinking", "fallbacks"} & set(pedido)

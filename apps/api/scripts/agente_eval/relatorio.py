@@ -73,6 +73,21 @@ ESTRATO_ESTOQUE = "estoque_variacao"
 # (`agente.checagens.PRODUTO_*`; o teste confere).
 CHECAGENS_DE_PRODUTO = frozenset({"produto_sem_fonte", "produto_contradiz"})
 FAIXAS_CONFIANCA = ((0.0, 0.5), (0.5, 0.85), (0.85, 1.01))
+# Item 8 da rodada "redondo" (23/10/2026): o que a troca para o Sonnet 5.5 e o COMO PENSAR
+# do bloco 2 devem mover (sem nota: lido dos registros). A ação `dado_indisponivel` que o
+# MODELO escolheu deve cair; o assunto não pedido (`checagens.ASSUNTO_NAO_PEDIDO`), também;
+# a G1 (`checagens.OUTRO_PRODUTO_SEM_BUSCA`, `NAO_TEMOS_SEM_FONTE`, `NAO_TEMOS_MODELO`)
+# mostra o outro produto dito sem a busca; e as ferramentas que o COMO PENSAR manda usar.
+ACAO_DADO_INDISPONIVEL = "dado_indisponivel"
+CHECAGEM_ASSUNTO_NAO_PEDIDO = "assunto_nao_pedido"
+CHECAGENS_G1 = frozenset({"outro_produto_sem_busca", "nao_temos_sem_fonte", "nao_temos_modelo"})
+FERRAMENTAS_DA_RODADA = (
+    "ver_anuncio",
+    "ver_pedido",
+    "consultar_manual",
+    "buscar_respostas_equipe",
+    "buscar_anuncios_da_loja",
+)
 
 
 def _ler_jsonl(caminho: Path) -> list[dict]:
@@ -112,6 +127,51 @@ def _assunto(reg: Mapping[str, Any]) -> str:
     decisao = reg.get("decisao") or {}
     proposta = reg.get("proposta") or {}
     return str(decisao.get("categoria") or proposta.get("assunto") or reg.get("atalho") or "?")
+
+
+def metricas_da_rodada(validos: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Item 8 da rodada "redondo": as taxas do braço que o eval S1 compara (ver o topo). PURA.
+
+    Só os itens que o agente respondeu (nem o L0, nem o pulado): o `dado_indisponivel` que o
+    modelo escolheu, o assunto não pedido, a G1, a decisão simulada (pessoa, apto ao
+    automático, enviaria), as ferramentas usadas (itens que chamaram cada uma), os turnos e
+    a latência p50/p90.
+    """
+    regs = [r for r in validos.values() if not r.get("pulado") and r.get("parada") != PARADA_LEGADO]
+    n = len(regs)
+
+    def _conta(teste: Any) -> tuple[int, int]:
+        return _par(sum(1 for r in regs if teste(r)), n)
+
+    def _checagens(r: Mapping[str, Any]) -> set[str]:
+        return set((r.get("rastro") or {}).get("checagens") or [])
+
+    def _do_modelo(r: Mapping[str, Any]) -> set[str]:
+        decisao = r.get("decisao") or {}
+        proposta = r.get("proposta") or {}
+        return {*(decisao.get("acoes_modelo") or []), proposta.get("acao_pessoa")}
+
+    usadas = Counter(
+        nome
+        for r in regs
+        for nome in {p.get("ferramenta") for p in (r.get("rastro") or {}).get("passos") or []}
+        if nome
+    )
+    ms = sorted(int(r["ms"]) for r in regs if isinstance(r.get("ms"), int))
+    turnos = [int(r["turnos"]) for r in regs if isinstance(r.get("turnos"), int)]
+    return {
+        "n": n,
+        "dado_indisponivel_do_modelo": _conta(lambda r: ACAO_DADO_INDISPONIVEL in _do_modelo(r)),
+        "assunto_nao_pedido": _conta(lambda r: CHECAGEM_ASSUNTO_NAO_PEDIDO in _checagens(r)),
+        "g1": _conta(lambda r: bool(_checagens(r) & CHECAGENS_G1)),
+        "pessoa": _conta(lambda r: bool((r.get("decisao") or {}).get("pessoa"))),
+        "apto_auto": _conta(lambda r: bool((r.get("decisao") or {}).get("apto_auto"))),
+        "enviaria": _conta(lambda r: bool((r.get("decisao") or {}).get("enviaria"))),
+        "ferramentas": {nome: _par(usadas.get(nome, 0), n) for nome in FERRAMENTAS_DA_RODADA},
+        "turnos_media": sum(turnos) / len(turnos) if turnos else None,
+        "latencia_p50_ms": _percentil(ms, 0.5) if ms else None,
+        "latencia_p90_ms": _percentil(ms, 0.9) if ms else None,
+    }
 
 
 def _metricas_do_braco(
@@ -236,6 +296,8 @@ def _metricas_do_braco(
         ),
         "por_assunto": {k: dict(v) for k, v in sorted(por_assunto.items())},
         "calibracao": {k: _par(*v) for k, v in calibracao.items()},
+        # Item 8 da rodada "redondo" (23/10/2026).
+        "redondo": metricas_da_rodada(validos),
     }
 
 
@@ -450,6 +512,25 @@ def imprimir(m: Mapping[str, Any], *, eco: TextIO | None = None) -> None:
             file=eco,
         )
         print(f"  paradas: {b['paradas']}", file=eco)
+        rd = b.get("redondo") or {}
+        if rd.get("n"):
+            # Item 8 da rodada "redondo" (23/10/2026): o que o Sonnet e o COMO PENSAR movem.
+            ms50, ms90 = rd["latencia_p50_ms"], rd["latencia_p90_ms"]
+            dado = _pct(rd["dado_indisponivel_do_modelo"])
+            print(
+                f"  rodada redondo: dado_indisponivel do modelo {dado}"
+                f" · assunto não pedido {_pct(rd['assunto_nao_pedido'])} · G1 {_pct(rd['g1'])}"
+                f" · pessoa {_pct(rd['pessoa'])} · apto ao automático {_pct(rd['apto_auto'])}"
+                f" · enviaria {_pct(rd['enviaria'])}",
+                file=eco,
+            )
+            print(
+                "  ferramentas (itens que usaram): "
+                + ", ".join(f"{k} {_pct(v)}" for k, v in rd["ferramentas"].items())
+                + (f" · turnos {rd['turnos_media']:.1f}" if rd["turnos_media"] is not None else "")
+                + (f" · latência p50 {ms50} ms · p90 {ms90} ms" if ms50 is not None else ""),
+                file=eco,
+            )
         if b["sem_legado"] or b["versoes_do_legado"]:
             # O L0: quantos itens têm a sugestão do legado e de qual versão.
             print(

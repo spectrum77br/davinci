@@ -137,6 +137,23 @@ ESTADO DA CONVERSA (revisão: a do código, `acao_pessoa.rotina_do_turno`); o es
 da equipe. O bloco 1 ficou 9
 caracteres menor: o `_SAIDA` aceita o "par:<id>" e o `_FERRAMENTAS` diz que o
 `buscar_respostas_equipe` é só o TOM (os exemplos dele não têm id).
+
+23/10/2026 (rodada "redondo", itens 2 e 4 da auditoria ao vivo — a queixa do dono: "o
+agente responde e emenda algo de outro assunto, tipo 'mas caso você deseje cancelar…'"):
+o bloco 2 ganha `SO_O_QUE_PERGUNTOU` (igual em todas as plataformas, depois do COMO A
+EQUIPE RESPONDE): só o que o cliente perguntou neste turno, em 1 a 3 frases, nunca a
+orientação de outro assunto que ele não pediu nem a conversa pede (cancelar, devolver,
+reembolso, troca, garantia, chamado); a saudação sem pergunta só pergunta como ajudar,
+sem "a equipe responde" (cdc3507d). O bloco 1 não muda (está no teto); a trava suave é a
+`checagens.conferir_assunto_nao_pedido`.
+
+23/10/2026 (rodada "redondo", itens 5 a 7 — o agente passa ao Sonnet 5.5): o bloco 2 troca o
+`SO_O_QUE_PERGUNTOU` pelo `COMO_PENSAR`, que o contém: o que o cliente perguntou; pesquisar
+(o pedido, o anúncio, o catálogo da loja pela `buscar_anuncios_da_loja`, as respostas da
+equipe); responder só isso; e falta de dado não é motivo de pessoa quando dá para dizer o
+que se sabe e onde o cliente vê o resto no app (pessoa só nas ações essenciais da régua ou
+na decisão da loja). As regras da busca no catálogo (G1) vão na descrição da ferramenta. O
+bloco 1 não muda (o "# SEMPRE" das 3 linhas do Haiku vale igual no Sonnet).
 """
 
 from __future__ import annotations
@@ -795,6 +812,50 @@ COMO_A_EQUIPE_RESPONDE = (
 )
 
 
+# Item 4 da auditoria ao vivo (23/10/2026, a queixa principal do dono: "o agente responde e
+# emenda algo de outro assunto, tipo 'mas caso você deseje cancelar…'"; cd4ff3d8: "Quando o
+# meu pedido chegará?" → o andamento E "a forma de cancelar agora é a devolução…"; no eval
+# cego de 23/10, 3 dos 7 problemas do Haiku) e item 2 (cdc3507d, a saudação com "a nossa
+# equipe responde por aqui"). No bloco 2 (o bloco 1 está no teto), igual em todas as
+# plataformas; a trava suave é a `checagens.conferir_assunto_nao_pedido`.
+SO_O_QUE_PERGUNTOU = (
+    "# SÓ O QUE FOI PERGUNTADO\n"
+    "- Responda só o que o cliente perguntou neste turno, em 1 a 3 frases; nunca emende "
+    "orientação de outro assunto que ele não pediu nem a conversa pede (cancelar, devolver, "
+    'reembolso, troca, garantia, chamado — nada de "caso deseje cancelar…").\n'
+    "- Saudação sem pergunta: pergunte como pode ajudar, sem dizer que a equipe responde."
+)
+
+
+# Item 7 da rodada "redondo" (23/10/2026; dono: "faça ele realmente inteligente, pensando,
+# pesquisando dentro do DaVinci, vendo o produto, vendo as respostas da equipe, respondendo
+# só o que está na pergunta, sem inventar; o mais automático possível; caixa humano só o
+# essencial"). No bloco 2 (o bloco 1 está no teto), igual em todas as plataformas, NO LUGAR
+# do `SO_O_QUE_PERGUNTOU` (que ele contém, com as mesmas regras): o passo a passo de como
+# pensar — o que o cliente perguntou; pesquisar (ver_pedido, ver_anuncio, o catálogo da
+# loja, as respostas da equipe); responder só isso; e falta de dado NÃO é motivo de pessoa
+# quando dá para dizer o que se sabe e onde o cliente vê o resto no app — pessoa só nas
+# ações essenciais da régua ou na decisão da loja. O raciocínio fica no pensamento do
+# modelo, nunca no texto (no Sonnet 5.5, pedir o raciocínio por escrito convida a recusa
+# "reasoning_extraction"). Medir: a fração do `dado_indisponivel` escolhido pelo modelo
+# (`acoes_modelo`) e a do `assunto_nao_pedido` no eval S1 (item 8).
+COMO_PENSAR = (
+    "# COMO PENSAR (antes do JSON; o raciocínio é seu e nunca vai no texto)\n"
+    "1. Veja o que o cliente perguntou ou pediu neste turno (a última fala e o pendente).\n"
+    "2. Pesquise o que falta: o pedido e o anúncio (ver_pedido, ver_anuncio), outro produto "
+    "ou acessório da loja (buscar_anuncios_da_loja) e como a equipe responde isso "
+    "(buscar_respostas_equipe).\n"
+    "3. Responda só o que o cliente perguntou neste turno, em 1 a 3 frases, sem inventar; "
+    "nunca emende orientação de outro assunto que ele não pediu nem a conversa pede (cancelar, "
+    'devolver, reembolso, troca, garantia, chamado — nada de "caso deseje cancelar…").\n'
+    "4. Falta de dado não é motivo de pessoa: diga o que os dados mostram e onde o cliente vê o "
+    "resto no app. Pessoa só com um código da régua (como arquivo da NF, evidência de defeito, "
+    "aprovar devolução, Pix ou dados bancários, desconto, chamado, ameaça jurídica) ou com "
+    "decisão da loja.\n"
+    "- Saudação sem pergunta: pergunte como pode ajudar, sem dizer que a equipe responde."
+)
+
+
 # O cabeçalho do catálogo dos assuntos no bloco 2. Item 16 da auditoria ao vivo
 # (21/10/2026, Kia 22:29, 5839ff11): "Então a capinha não serve ne", depois da
 # resposta da loja sobre a capinha, saiu como cobertura_regiao (o certo:
@@ -815,7 +876,9 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
 
     Só a plataforma e os assuntos (o manual) entram: a loja, o canal da
     conversa e a data vão no pacote. Item 32 (22/10/2026): e, antes dos assuntos,
-    `COMO_A_EQUIPE_RESPONDE` (igual em todas).
+    `COMO_A_EQUIPE_RESPONDE` (igual em todas); item 4 da auditoria ao vivo
+    (23/10/2026): e `SO_O_QUE_PERGUNTOU` (igual em todas) — desde o item 7 da rodada
+    "redondo" (23/10/2026), dentro do `COMO_PENSAR`.
     """
     nome = ia._PLATAFORMA_NOME.get(plataforma, plataforma)
     canais = sorted(
@@ -839,6 +902,9 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
     partes.append(f"Caminhos do app da {nome} (só estes):\n" + _linhas(caminhos))
     # Item 32 (22/10/2026): como a equipe responde e o estilo dela.
     partes.append(COMO_A_EQUIPE_RESPONDE)
+    # Item 7 da rodada "redondo" (23/10/2026): como pensar — contém o "só o que foi
+    # perguntado" do item 4 (`SO_O_QUE_PERGUNTOU`), com as mesmas regras.
+    partes.append(COMO_PENSAR)
     assuntos = ia.lista_de_assuntos([dict(c) for c in categorias], MAX_CHARS_ASSUNTOS)
     partes.append(ASSUNTOS_CABECALHO + assuntos)
     return "\n\n".join(partes)

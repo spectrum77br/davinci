@@ -544,7 +544,8 @@ def test_32_revisao_a_chegada_nao_segura_nenhum_bom_da_calibracao():
 
 
 def test_32_v9_as_respostas_da_equipe_citadas():
-    assert v.VERSAO == "v9"
+    # O v10 (rodada "redondo", 23/10/2026: a busca no catálogo) guarda o v9 inteiro.
+    assert v.VERSAO in ("v9", "v10")
     s = v.SISTEMA
     assert "RESPOSTAS DA EQUIPE CITADAS (quando vier)" in s
     assert "nunca fato deste pedido nem autorização de promessa" in s
@@ -631,8 +632,10 @@ NOVOS_32 = {
 def test_32_a_calibracao_tem_os_casos_do_v9():
     casos = {c["id"]: c for c in calibrar.ler_casos(calibrar.CASOS_PADRAO)}
     ids = list(casos)
-    # As 373 de antes ficaram iguais e na frente (e as do item 32 na ordem).
-    assert len(ids) == 373 + len(NOVOS_32) and ids[373:] == list(NOVOS_32)
+    # As 373 de antes ficaram iguais e na frente (e as do item 32 na ordem). Rodada
+    # "redondo" (23/10/2026): o arquivo cresceu DEPOIS das linhas do item 32.
+    fim = 373 + len(NOVOS_32)
+    assert len(ids) >= fim and ids[373:fim] == list(NOVOS_32)
     for id_, (grupo, bloqueia, marca) in NOVOS_32.items():
         c = casos[id_]
         assert c["grupo"] == grupo, id_
@@ -681,7 +684,7 @@ def test_32_v9_revisao_a_resposta_da_equipe_e_lastro_sem_ressalva():
     a ÚNICA fonte do produto, mandava conferir a resposta curta só contra elas e chamava a
     resposta da equipe de "a OUTRO cliente" sem dizer que é lastro."""
     s = _sistema()
-    assert v.VERSAO == "v9"
+    assert v.VERSAO in ("v9", "v10")
     assert "É a ÚNICA fonte de verdade sobre o pedido e o produto" not in s
     assert (
         "É a ÚNICA fonte de verdade sobre o pedido; sobre o produto também, salvo a RESPOSTA "

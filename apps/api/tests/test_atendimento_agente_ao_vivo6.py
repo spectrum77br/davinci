@@ -615,9 +615,10 @@ def test_22_e_24_a_nota_da_shopee_so_no_bloco_da_shopee(plataforma):
 
 
 def test_v8_a_versao():
-    # Item 32 (22/10/2026): o v9 (as respostas da equipe citadas) guarda o v8 inteiro.
-    assert v.VERSAO == "v9"
-    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v9"
+    # Item 32 (22/10/2026): o v9 (as respostas da equipe citadas) guarda o v8 inteiro; o v10
+    # (rodada "redondo", 23/10/2026: a busca no catálogo da loja) guarda o v9 inteiro.
+    assert v.VERSAO == "v10"
+    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v10"
 
 
 def test_22_o_sistema_diz_que_o_ao_receber_a_quem_nao_recebeu_e_errado():
@@ -1477,8 +1478,18 @@ def test_rev6_a_calibracao_conta_a_entrada_nova_do_v8_a_parte():
         entrada = calibrar.entrada_do_caso(casos[id_])
         assert "Postado e o cliente desiste" in entrada or "Não chegou ou atrasou" in entrada
         assert v.POLITICA_DE_ESTOQUE not in entrada, id_
-    # Fora dos dois grupos (e dos casos novos da rodada), ninguém ganha a política.
-    novos = {*NOVOS_6, ID_68F, "boa-aj14-4c71796f", *(c for c in casos if c in NOVOS_6B)}
+    # Fora dos dois grupos (e dos casos novos da rodada), ninguém ganha a política. Rodada
+    # "redondo" (23/10/2026): as linhas do cesto (073983a2) também a ganham, de propósito.
+    novos = {
+        *NOVOS_6,
+        ID_68F,
+        "boa-aj14-4c71796f",
+        *(c for c in casos if c in NOVOS_6B),
+        *(c for c in casos if "-redondo-" in c),
+        # Parte 2 (item 6): o cesto da busca no catálogo com a air fryer da conversa esgotada.
+        "boa-catalogo-cesto",
+        "viz-catalogo-cesto-disponivel",
+    }
     for id_, c in casos.items():
         if id_ not in politica and id_ not in novos:
             assert v.POLITICA_DE_ESTOQUE not in calibrar.entrada_do_caso(c), id_
