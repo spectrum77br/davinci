@@ -69,6 +69,11 @@ ULTIMOS_EVENTOS = [
         "Package was returned to the sender by the shipping carrier at Piracicaba.",
         "Devolvido ao remetente em Piracicaba",
     ),
+    # 23/10/2026, achado pela migração 0427.
+    (
+        "Package was unable to be delivered and is being returned to the sender.",
+        "Falha na entrega — retornando ao remetente",
+    ),
 ]
 
 # Textos vistos no histórico dos pedidos (podem virar último evento).

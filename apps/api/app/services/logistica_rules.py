@@ -432,6 +432,10 @@ TIKTOK_TRACKING_PT: tuple[tuple[re.Pattern[str], str], ...] = tuple(
             r"package was unable to be delivered\. delivery will be rescheduled.*",
             "Falha na entrega — nova tentativa",
         ),
+        (
+            r"package was unable to be delivered and is being returned to (?:the )?sender.*",
+            "Falha na entrega — retornando ao remetente",
+        ),
         (r"package was unable to be delivered", "Falha na entrega"),
         (
             r"package was unable to be picked up\. a redelivery will be scheduled.*",
