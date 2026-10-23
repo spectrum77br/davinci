@@ -65,6 +65,7 @@ from app.routers import mail_caixa as mail_caixa_router
 from app.routers import marca_emails as marca_emails_router
 from app.routers import marcas as marcas_router
 from app.routers import nfse as nfse_router
+from app.routers import nfse_compras as nfse_compras_router
 from app.routers import nfse_webhook as nfse_webhook_router
 from app.routers import margem_audit as margem_audit_router
 from app.routers import margens as margens_router
@@ -249,6 +250,7 @@ app.include_router(marcas_router.router)
 app.include_router(nfse_router.router_desbloqueio)  # POST /api/nfse/unlock (sem a trava)
 app.include_router(nfse_router.router_arquivos)  # PDF/XML: a chave OU o link de 60 s
 app.include_router(nfse_router.router)
+app.include_router(nfse_compras_router.router)  # Contabilidade › Compra (mesma trava)
 app.include_router(redes_sociais_router.router)
 app.include_router(email_padroes_router.router)
 app.include_router(marca_emails_router.router)

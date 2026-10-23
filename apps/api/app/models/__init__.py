@@ -185,6 +185,7 @@ from app.models.mail_atendimento import (
     MailReconciliation,
 )
 from app.models.marca import Marca, MarcaEmail, MarcaEmailPadrao, RedeSocial
+from app.models.compra import CompraPedido, CompraPedidoItem, CompraProduto, CompraVendedora
 from app.models.nfse import (
     CompanyFiscal,
     NfseChamada,
@@ -307,6 +308,10 @@ __all__ = [
     "MailReconciliation",
     "MailCaixaIndice",
     "CompanyFiscal",
+    "CompraPedido",
+    "CompraPedidoItem",
+    "CompraProduto",
+    "CompraVendedora",
     "NfseChamada",
     "NfseEmissao",
     "NfseEvento",

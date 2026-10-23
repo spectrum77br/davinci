@@ -884,7 +884,7 @@ async def test_integrar_fica_no_historico(
     q = select(HistoricoEvento).where(HistoricoEvento.rota == rota)
     [ev] = (await db.execute(q.execution_options(populate_existing=True))).scalars().all()
     assert ev.acao == ACOES[("POST", rota)]
-    assert ev.tela == "Cadastros › Emissão de Serviço"
+    assert ev.tela == "Cadastros › Contabilidade"
 
 
 # --- revisão de 01/10/2026 --------------------------------------------------------------

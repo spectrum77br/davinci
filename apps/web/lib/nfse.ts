@@ -570,6 +570,9 @@ export type NfseApi = {
   // Chame direto do clique: imprimir abre a aba antes de esperar o servidor.
   imprimirLote(notas: NotaDoLote[]): Promise<ResultadoArquivos | null>
   baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml'): Promise<ResultadoArquivos | null>
+  // Contabilidade › Compra (23/10): baixa um arquivo da API com a chave (a planilha do Bling).
+  // false = não baixou (o erro já virou aviso na tela).
+  baixarArquivo(path: string, nome: string, opts?: any): Promise<boolean>
 }
 
 // O que o lote de arquivos precisa de cada nota.

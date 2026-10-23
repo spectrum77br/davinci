@@ -197,7 +197,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   lojas_info: 'Lojas (info)',
   nf_faturador: 'NF (Faturador)',
   nf_faturamento: 'Faturamento NF',
-  emissao_servico: 'Emissão de Serviço (NFS-e)',
+  emissao_servico: 'Contabilidade (Emissão de Serviço e Compra)',
   segmentos: 'Segmentos',
   marcas: 'Marcas',
   redes_sociais: 'Redes Sociais',

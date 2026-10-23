@@ -167,7 +167,7 @@ def montar_linhas(pedido: PedidoInfo, linhas: list[NfLinha]) -> list[list[str]]:
             "",                         # E-mail Comprador
             _s(l.nome),                 # Produto (nome fonte da regra)
             _s(l.sku),                  # SKU (sku fonte da regra)
-            _UN_PADRAO,                 # Un
+            _s(l.unidade) or _UN_PADRAO,  # Un
             _br(Decimal(l.quantidade)), # Quantidade
             _br(l.valor_unitario),      # Valor Unitário
             _br(l.valor_total),         # Valor Total

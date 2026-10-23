@@ -65,6 +65,9 @@ class NfLinha:
     quantidade: int
     valor_unitario: Decimal
     valor_total: Decimal
+    # Contabilidade › Compra (23/10/2026): a unidade do produto comprado. None = UN
+    # (a venda avulsa sempre foi UN).
+    unidade: str | None = None
 
 
 def _dec(v: object) -> Decimal:

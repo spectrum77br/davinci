@@ -645,7 +645,7 @@ async def test_baixar_em_lote_fica_no_historico(client, db, make_user):
     q = select(HistoricoEvento).where(HistoricoEvento.rota == URL_ARQUIVOS)
     [ev] = (await db.execute(q.execution_options(populate_existing=True))).scalars().all()
     assert ev.acao == ACOES[("POST", URL_ARQUIVOS)]
-    assert ev.tela == "Cadastros › Emissão de Serviço"
+    assert ev.tela == "Cadastros › Contabilidade"
 
 
 def test_zip_puro_nomes_repetidos_ganham_sufixo():

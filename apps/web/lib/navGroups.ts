@@ -41,9 +41,10 @@ export const TABS_USUARIOS: RouteTab[] = [
 
 export const TABS_CADASTROS: RouteTab[] = [
   { to: '/companies', label: 'Empresas', resource: 'empresa' },
-  // Emissão de Serviço (NFS-e pela NFE.io) mora ao lado de Empresas — Eduardo,
-  // 30/09/2026: "é para ficar lá em cadastros, não em nf faturador".
-  { to: '/emissao-servico', label: 'Emissão de Serviço', resource: 'emissao_servico' },
+  // Contabilidade (ex-Emissão de Serviço, 23/10/2026) mora ao lado de Empresas — Eduardo,
+  // 30/09/2026: "é para ficar lá em cadastros, não em nf faturador". Dentro: Emissão
+  // de Serviço (NFS-e pela NFE.io) e Compra.
+  { to: '/emissao-servico', label: 'Contabilidade', resource: 'emissao_servico' },
   { to: '/cadastros', label: 'Cadastros', resource: 'cadastro' },
   { to: '/store-info', label: 'Lojas', resource: 'lojas_info' },
   { to: '/admin/segments', label: 'Segmentos', resource: 'segmentos' },

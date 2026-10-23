@@ -1,4 +1,9 @@
 <script setup lang="ts">
+// Cadastros › Contabilidade (23/10/2026, Eduardo: "o nome emissao de serviço vai ser trocado por
+// contabilidade, dentro vai ter o nome emissao de servico e do lado [...] a nova aba compra"). A rota
+// continua /emissao-servico (links e a senha extra não mudam); ?area=compra abre a Compra
+// (components/ContabilidadeCompra.vue). Abaixo, a Emissão de Serviço:
+//
 // Cadastros › Emissão de Serviço (ao lado de Empresas desde 30/09): NFS-e de intermediação das empresas do
 // grupo. Eduardo: tomador do grupo ou de fora, "todo mês, as mesmas" — por isso
 // as notas fixas e o "Emitir do mês".
@@ -28,7 +33,8 @@ import { computed, onBeforeUnmount, onMounted, provide, ref, unref, watch, type 
 import { onBeforeRouteLeave, type LocationQuery, type LocationQueryRaw } from 'vue-router'
 import { TooltipProvider } from 'reka-ui'
 import {
-  BookUser, Building2, CheckCircle2, FilePlus2, FileText, FlaskConical, Loader2, Lock, Plus, RotateCcw, Send, ShieldAlert,
+  BookUser, Building2, CheckCircle2, FilePlus2, FileText, FlaskConical, Loader2, Lock, Plus, ReceiptText, RotateCcw, Send,
+  ShieldAlert, ShoppingCart,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import { SENHA_EXTRA_TRAVA } from '~/composables/useSenhaExtra'
@@ -65,6 +71,11 @@ const ABAS: readonly AbaId[] = ['emitir', 'notas', 'cadastros', 'empresas']
 
 function textoDaQuery(v: unknown): string | null {
   return typeof v === 'string' && v ? v : null
+}
+// Contabilidade: as duas áreas da página (Emissão de Serviço | Compra).
+type Area = 'servico' | 'compra'
+function areaDaQuery(v: unknown): Area {
+  return textoDaQuery(v) === 'compra' ? 'compra' : 'servico'
 }
 function abaDaQuery(v: unknown): AbaId {
   const s = textoDaQuery(v)
@@ -109,6 +120,7 @@ const contadorNotas = ref(0)
 const contadorEmitir = ref<number | null>(null)
 const mes = ref(mesDaQuery(route.query.mes))
 const aba = ref<AbaId>(abaDaQuery(route.query.aba))
+const area = ref<Area>(areaDaQuery(route.query.area))
 
 // Janelas montadas uma vez (cada uma faz defineExpose com a sua API).
 const confirmRef = ref<ConfirmApi | null>(null)
@@ -417,7 +429,21 @@ async function baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml'): Promise<Res
   }
 }
 
-const nfseApi: NfseApi = { api: apiN, abrirPdf, baixarXml, imprimirLote, baixarLote }
+// Contabilidade › Compra (23/10/2026): a planilha do Bling (CSV) desce com a chave
+// no cabeçalho; o nome é montado aqui (o $fetch com blob não lê o do servidor).
+async function baixarArquivo(path: string, nome: string, opts: any = {}): Promise<boolean> {
+  try {
+    const arquivo = await apiN<Blob>(path, { ...opts, responseType: 'blob' })
+    salvarBlob(arquivo, nome)
+    return true
+  } catch (e) {
+    const lido = await lerErroDeArquivo(e)
+    if (!trava.eTravamento(lido)) toasts.error('Não deu para baixar o arquivo', erroApi(lido))
+    return false
+  }
+}
+
+const nfseApi: NfseApi = { api: apiN, abrirPdf, baixarXml, imprimirLote, baixarLote, baixarArquivo }
 provide(NFSE_API, nfseApi)
 
 function bloquear() {
@@ -883,6 +909,17 @@ const opcoesAbas = computed(() => [
   },
 ])
 
+const opcoesArea = [
+  { id: 'servico', rotulo: 'Emissão de Serviço', icone: ReceiptText },
+  { id: 'compra', rotulo: 'Compra', icone: ShoppingCart },
+]
+const areaModel = computed({
+  get: () => area.value as string,
+  set: (v: string) => {
+    area.value = areaDaQuery(v)
+  },
+})
+
 const abaModel = computed({
   get: () => aba.value as string,
   set: (v: string) => {
@@ -939,6 +976,10 @@ watch(mes, (m) => {
   mudarQuery({ mes: m === mesAtual() ? undefined : m })
 })
 
+watch(area, (a) => {
+  mudarQuery({ area: a === 'compra' ? 'compra' : undefined })
+})
+
 function abrirDaQuery(q: LocationQuery) {
   const n = textoDaQuery(q.nota)
   if (n && n !== notaAberta) abrirNota(n)
@@ -954,6 +995,8 @@ watch(
     if (navegando > 0) return
     const a = abaDaQuery(q.aba)
     if (a !== aba.value) aba.value = a
+    const ar = areaDaQuery(q.area)
+    if (ar !== area.value) area.value = ar
     const m = mesDaQuery(q.mes)
     if (m !== mes.value) mes.value = m
     if (carregado.value) abrirDaQuery(q)
@@ -1006,15 +1049,17 @@ onBeforeRouteLeave(() => {
     <div class="space-y-5">
       <RouteTabs :tabs="TABS_CADASTROS" />
 
-      <SenhaExtraTrava v-if="!trava.token.value" titulo="Emissão de Serviço" :trava="trava" :minutos="30" />
+      <SenhaExtraTrava v-if="!trava.token.value" titulo="Contabilidade" :trava="trava" :minutos="30" />
       <template v-else>
       <SenhaExtraRenovar :trava="trava" />
       <PageHeader
-        title="Emissão de Serviço"
-        description="Notas fiscais de serviço (NFS-e) das empresas do grupo, emitidas pela NFE.io."
+        title="Contabilidade"
+        :description="area === 'compra'
+          ? 'Compras das empresas do grupo (embalagem e outros produtos) das contas Bling de NF, com base no faturamento do mês.'
+          : 'Notas fiscais de serviço (NFS-e) das empresas do grupo, emitidas pela NFE.io.'"
       >
         <template #actions>
-          <NfseDica :texto="seloServidor.dica" lado="bottom">
+          <NfseDica v-if="area === 'servico'" :texto="seloServidor.dica" lado="bottom">
             <span
               tabindex="0"
               class="h-7 cursor-default px-2.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -1042,11 +1087,11 @@ onBeforeRouteLeave(() => {
           </Button>
           <!-- 01/10/2026 (Eduardo: "ele precisa ir lá pra cima do lado de nota avulsa, e
                precisa aparecer em emitir do mês"): saiu do cartão "Notas fixas". -->
-          <Button v-if="canEdit" size="sm" variant="outline" @click="abrirModelo()">
+          <Button v-if="canEdit && area === 'servico'" size="sm" variant="outline" @click="abrirModelo()">
             <Plus class="mr-1.5 size-4" aria-hidden="true" />
             nova nota fixa
           </Button>
-          <Button v-if="canEdit" size="sm" variant="outline" @click="abrirAvulsa({ competencia: mes })">
+          <Button v-if="canEdit && area === 'servico'" size="sm" variant="outline" @click="abrirAvulsa({ competencia: mes })">
             <FilePlus2 class="mr-1.5 size-4" aria-hidden="true" />
             nota avulsa
           </Button>
@@ -1057,6 +1102,13 @@ onBeforeRouteLeave(() => {
         </template>
       </PageHeader>
 
+      <NfseSegmentado v-model="areaModel" :opcoes="opcoesArea" />
+
+      <KeepAlive>
+        <ContabilidadeCompra v-if="area === 'compra'" />
+      </KeepAlive>
+
+      <div v-show="area === 'servico'" class="space-y-5">
       <NfseAviso
         v-if="erroStatus"
         tom="perigo"
@@ -1097,6 +1149,7 @@ onBeforeRouteLeave(() => {
         <NfseCadastros v-else-if="aba === 'cadastros'" />
         <NfsePrestadores v-else />
       </KeepAlive>
+      </div>
 
       <!-- Janelas: montadas uma vez, abertas por qualquer aba via useNfseTela(). -->
       <NfseConfirmDialog ref="confirmRef" />
