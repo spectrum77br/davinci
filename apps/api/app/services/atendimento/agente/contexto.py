@@ -146,6 +146,12 @@ MAX_PASSOS_RASTRO = 40
 MAX_EVIDENCIAS = 20
 
 
+# D1 (decisão do dono, 23/10/2026 ~12:40): as ações de pessoa que, no "responde e marca"
+# (`acao_pessoa.responde_e_marca_do_turno`), ficam para DEPOIS do envio — a resposta
+# informativa sai e a conversa continua na Caixa Humano com a etiqueta delas.
+ACOES_POS_ENVIO = frozenset({constantes.ACAO_RECLAMACAO_ABERTA})
+
+
 def ordenar_acoes(*listas: Iterable[str | None]) -> list[str]:
     """A união das ações de pessoa, na ordem da régua (`constantes.ACOES_PESSOA`). PURA.
 
@@ -483,6 +489,12 @@ class ContextoAgente:
     # (`acao_pessoa.devolucao_de_rotina`): o envio sozinho não para no "em andamento"
     # dela (`ia.andamento_no_rascunho` lê a marca no `para_fatos`).
     devolucao_de_rotina: bool = False
+    # D1 (decisão do dono, 23/10/2026 ~12:40): o "responde e marca" — a devolução/
+    # reclamação aberta na plataforma com o turno só informativo
+    # (`acao_pessoa.responde_e_marca_do_turno`): as ações de `acao_pessoa.ACOES_POS_ENVIO`
+    # (a `reclamacao_aberta`) não travam o envio (`acoes_pessoa`) e ficam para DEPOIS dele
+    # (`acoes_pos_envio`, no `para_fatos`): a conversa continua na Caixa Humano.
+    responde_e_marca: bool = False
     # Item 6 da rodada "redondo" (23/10/2026): o que a `buscar_anuncios_da_loja` achou —
     # `anuncios_buscados` (item_id → {"nome_curto", "variacoes_casadas", "disponivel",
     # "da_conversa", "titulo_plano"}) e `buscas_catalogo` (cada busca: {"termo",
@@ -496,6 +508,11 @@ class ContextoAgente:
     # "da_conversa" da busca no catálogo (o `ver_anuncio` de outro anúncio da loja também
     # o põe em `anuncios`).
     anuncios_do_pacote: frozenset[str] = frozenset()
+    # Liberações do dono (23/10/2026, L1 e L2): a resposta de produto (ou de condição) se
+    # apoia só nos dados do anúncio da conversa e passou na conferência estrita
+    # (`checagens.liberacao_pelo_anuncio`, que a `checagens.conferir` marca aqui). A
+    # trava do envio (`ia.trava_do_agente`) lê a marca no `para_fatos`.
+    produto_pelo_anuncio: bool = False
     uso: Uso = field(default_factory=Uso)
     # Preenchidos pelo laço (`agente.responder`).
     acao: str | None = None
@@ -807,8 +824,21 @@ class ContextoAgente:
 
     @property
     def acoes_pessoa(self) -> list[str]:
-        """As do código mais as do modelo, na ordem da régua."""
-        return ordenar_acoes(self.acoes_codigo, self.acoes_modelo)
+        """As do código mais as do modelo, na ordem da régua — sem as que ficam para depois
+        do envio no "responde e marca" (D1, `acoes_pos_envio`)."""
+        todas = ordenar_acoes(self.acoes_codigo, self.acoes_modelo)
+        if not self.responde_e_marca:
+            return todas
+        return [a for a in todas if a not in ACOES_POS_ENVIO]
+
+    @property
+    def acoes_pos_envio(self) -> list[str]:
+        """D1: as ações de pessoa que continuam marcadas DEPOIS do envio (a conversa fica
+        na Caixa Humano com a etiqueta delas). Vazio fora do "responde e marca"."""
+        if not self.responde_e_marca:
+            return []
+        todas = ordenar_acoes(self.acoes_codigo, self.acoes_modelo)
+        return [a for a in todas if a in ACOES_POS_ENVIO]
 
     def para_fatos(self) -> dict:
         """O `rascunho.fatos["agente"]` (spec 3.3.3): enxuto, sem conteúdo de ferramenta.
@@ -828,6 +858,13 @@ class ContextoAgente:
                 extra["pares_de_produto"] = de_produto
         if self.devolucao_de_rotina:
             extra["devolucao_de_rotina"] = True
+        if self.responde_e_marca:
+            # D1 (23/10/2026): só quando há (o registro de antes não muda).
+            extra["responde_e_marca"] = True
+            extra["acoes_pos_envio"] = self.acoes_pos_envio
+        if self.produto_pelo_anuncio:
+            # Liberações L1/L2 (23/10/2026): só quando há (o registro de antes não muda).
+            extra["produto_pelo_anuncio"] = True
         if self.buscas_catalogo:
             # Item 6 da rodada "redondo" (23/10/2026): o termo e os anúncios achados.
             extra["buscas_catalogo"] = [

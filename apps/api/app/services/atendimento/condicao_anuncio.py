@@ -63,6 +63,11 @@ _NAO_NOVO_SEMPRE = (
     r"|refurbished|refurb|open\s*-?\s*box|de\s+vitrine|de\s+mostruario|mostruario"
 )
 _NAO_NOVO = re.compile(r"\b(?:" + _NAO_NOVO_SEMPRE + r")\b")
+# Revisão L1–L3 (achado 4, 23/10/2026): no TÍTULO, "Vitrine", "Mostruário", "Showroom" e
+# "Exposição" soltos ("Apple Watch Series 9 45mm Vitrine") também dizem que não é novo; na
+# descrição, o "de exposição" e o "showroom".
+_NAO_NOVO_NO_TITULO = re.compile(r"\b(?:vitrine|mostruario|showroom|exposicao)\b")
+_NAO_NOVO_NA_DESCRICAO = re.compile(r"\b(?:de\s+exposicao|showroom)\b")
 # "usado" só como CONDIÇÃO: no título, no atributo, ou na descrição com o
 # produto/copula antes ("produto usado", "aparelho usado", "é usado", "estado de
 # usado") e sem o complemento do verbo usar depois ("usado para", "usado na água").
@@ -100,7 +105,13 @@ _NOVO_DO_PRODUTO = re.compile(
     r"|origina(?:l|is)|com\s+nota|com\s+garantia|em\s+folha)\b"
 )
 _LACRADO = re.compile(r"\blacrad[oa]s?\b")
-_NAO_LACRADO = re.compile(r"\b(?:sem\s+lacre|lacre\s+(?:rompido|violado|aberto)|deslacrad[oa]s?)\b")
+# Revisão L1–L3: "caixa aberta", "pode ter sido aberto", "aberto para teste/conferência"
+# também dizem que não vem lacrado (o "Lacrado" do título vira conflito: pessoa).
+_NAO_LACRADO = re.compile(
+    r"\b(?:sem\s+lacre|lacre\s+(?:rompido|violado|aberto)|deslacrad[oa]s?|caixa\s+aberta"
+    r"|(?:pode|podem)\s+ter\s+sido\s+abert[oa]s?"
+    r"|abert[oa]s?\s+(?:para|pra)\s+(?:teste|testes|conferencia|inspecao|revisao))\b"
+)
 # O "original" do PRODUTO (não "carregador original", "caixa original").
 _ACESSORIO_ANTES = re.compile(
     r"\b(?:carregador\w*|cabo\w*|fonte\w*|caixa\w*|embalage\w*|pulseira\w*|peca\w*|tela\w*"
@@ -116,7 +127,9 @@ _NAO_ORIGINAL = re.compile(r"\b(?:replica\w*|primeira\s+linha|imitac\w*|falsific
 _NOME_CONDICAO = re.compile(r"\b(?:condicao|condition|estado|item\s*condition)\b")
 _NOME_ORIGINAL = re.compile(r"\b(?:original|originalidade|autenticidade|genuino)\b")
 _VALOR_NOVO = re.compile(r"^(?:nov[oa]s?|new|brand\s+new|novo\s+com\s+etiqueta|lacrad[oa])\b")
-_VALOR_NAO_NOVO = re.compile(r"^(?:usad[oa]s?|used|" + _NAO_NOVO_SEMPRE + r"|not\s+new|seminovo)\b")
+_VALOR_NAO_NOVO = re.compile(
+    r"^(?:usad[oa]s?|used|" + _NAO_NOVO_SEMPRE + r"|not\s+new|seminovo|vitrine|showroom)\b"
+)
 _VALOR_SIM = re.compile(r"^(?:sim|yes|s|original|genuino|autentico)\b")
 _VALOR_NAO = re.compile(r"^(?:nao|no|n)\b")
 
@@ -138,7 +151,7 @@ def _do_titulo(titulo: Any) -> dict[str, set[bool]]:
     for campo, negativa in evidencias._afirmacoes(str(titulo)):
         if campo in CAMPOS:
             achado.setdefault(campo, set()).add(not negativa)
-    for padrao in (_NAO_NOVO, _USADO_SOLTO):
+    for padrao in (_NAO_NOVO, _USADO_SOLTO, _NAO_NOVO_NO_TITULO):
         for m in padrao.finditer(plano):
             achado.setdefault("novo", set()).add(_sinal(plano, m.start()))
     for m in _NAO_ORIGINAL.finditer(plano):
@@ -153,7 +166,7 @@ def _da_frase(frase: str) -> dict[str, set[bool]]:
         achado.setdefault("novo", set()).add(not _sinal(frase, m.start()))
     if _SEM_USO.search(frase):
         achado.setdefault("novo", set()).add(True)
-    for padrao in (_NAO_NOVO, _USADO_NA_DESCRICAO):
+    for padrao in (_NAO_NOVO, _USADO_NA_DESCRICAO, _NAO_NOVO_NA_DESCRICAO):
         for m in padrao.finditer(frase):
             # "não é recondicionado" = novo; "é recondicionado" = não novo.
             achado.setdefault("novo", set()).add(_sinal(frase, m.start()))

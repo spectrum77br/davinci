@@ -1300,7 +1300,7 @@ def test_16_o_bloco_da_plataforma_manda_ficar_no_assunto_da_resposta(plataforma)
     # O teto do catálogo (o `test_bloco_da_plataforma`) e o do prefixo.
     lista = texto.split("# ASSUNTOS")[1]
     assert len(lista) <= prompt.MAX_CHARS_ASSUNTOS + 200
-    assert len(texto) / 3.5 <= 4_500
+    assert len(texto) / 3.5 <= 5_000  # D1–D3 do dono (23/10/2026)
 
 
 def test_16_o_bloco_geral_nao_muda():
@@ -1426,7 +1426,7 @@ async def test_a_calibracao_mede_os_novos_sem_modelo(tmp_path, teto_limpo, escap
 def test_a_calibracao_nao_mudou_o_sistema():
     """Os casos novos só medem: o verificador é o v7 de sempre (o v8 da 6ª rodada,
     22/10/2026, é outro conserto — itens 22 e 23)."""
-    assert v.VERSAO in ("v7", "v8", "v9", "v10")
+    assert v.VERSAO in ("v7", "v8", "v9", "v10", "v11", "v12")
     assert "nao_vale_para" not in v.SISTEMA
 
 

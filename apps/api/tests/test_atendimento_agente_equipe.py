@@ -98,12 +98,12 @@ def test_32_o_par_que_vai_ao_pacote():
         # A citação do Duoke com só o cumprimento depois.
         "「Quando vai ter reposição do bordo e azul」 - - - - - - - - - bom dia tudo bem ?",
         # O que a régua do agente não deixa dizer (a reposição a caminho, o reset, a
-        # assistência, o "não temos acesso ao transporte", a palavra com pontos).
+        # assistência, a palavra com pontos). D3 (23/10/2026): o "não temos acesso ao
+        # transporte" saiu daqui — é a resposta-padrão da entrega (`test_..._decisoes_dono`).
         "esta sem previsão mais esta vindo da fabrica!",
         "sim mais ainda não chegou!",
         "pode fazer um reset de padrão de fabrica e zera tudo!",
         "sim cobre sim pode levar na apple caso queira",
-        "Pode seguir o prazo informado na compra, não temos acesso ao transporte!",
         "não temos como c.a.n.c.e.l.a.r a compra somente você!",
         # A ação da equipe NAQUELE pedido e o que só ela sabe.
         "combinado, sera enviado o azul hoje!",
@@ -545,7 +545,7 @@ def test_32_revisao_a_chegada_nao_segura_nenhum_bom_da_calibracao():
 
 def test_32_v9_as_respostas_da_equipe_citadas():
     # O v10 (rodada "redondo", 23/10/2026: a busca no catálogo) guarda o v9 inteiro.
-    assert v.VERSAO in ("v9", "v10")
+    assert v.VERSAO in ("v9", "v10", "v11", "v12")
     s = v.SISTEMA
     assert "RESPOSTAS DA EQUIPE CITADAS (quando vier)" in s
     assert "nunca fato deste pedido nem autorização de promessa" in s
@@ -684,7 +684,7 @@ def test_32_v9_revisao_a_resposta_da_equipe_e_lastro_sem_ressalva():
     a ÚNICA fonte do produto, mandava conferir a resposta curta só contra elas e chamava a
     resposta da equipe de "a OUTRO cliente" sem dizer que é lastro."""
     s = _sistema()
-    assert v.VERSAO in ("v9", "v10")
+    assert v.VERSAO in ("v9", "v10", "v11", "v12")
     assert "É a ÚNICA fonte de verdade sobre o pedido e o produto" not in s
     assert (
         "É a ÚNICA fonte de verdade sobre o pedido; sobre o produto também, salvo a RESPOSTA "
@@ -1138,7 +1138,7 @@ def test_32_o_bloco_2_traz_como_a_equipe_responde(plataforma):
         "curto e direto, de 1 a 3 frases, sem repetir desculpas",
     ):
         assert trecho in prompt.COMO_A_EQUIPE_RESPONDE, trecho
-    assert len(texto) / 3.5 <= 4_500
+    assert len(texto) / 3.5 <= 5_000  # D1–D3 do dono (23/10/2026)
 
 
 def test_32_o_bloco_1_cita_o_par_e_cabe_no_teto():

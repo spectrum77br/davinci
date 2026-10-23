@@ -28,6 +28,7 @@ import { Bot, Check, ChevronDown, Loader2, Radio, RefreshCw, RotateCcw, Search, 
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import {
   ASSUNTOS_ORIENTACAO,
+  ASSUNTOS_PELO_ANUNCIO,
   ASSUNTOS_SO_PESSOA_NO_AGENTE,
   MODOS,
   MODOS_EXTERNOS,
@@ -564,7 +565,8 @@ async function sincronizar() {
                       <label v-for="cat in c.auto_categorias || []" :key="cat" class="flex items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted" :class="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat) ? 'cursor-default opacity-70' : 'cursor-pointer'">
                         <input type="checkbox" :checked="agEscolhidas.includes(cat) && !ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" :disabled="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" @change="alternarDoAgente(cat)" />
                         {{ categoriaLabel(cat) }}
-                        <span v-if="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" class="text-[10px] text-amber-700 dark:text-amber-300" title="dado do produto: com o agente, a resposta pela ficha sempre vai para pessoa conferir (no legado saía pelo texto aprovado); não dá para marcar">· sempre pessoa confere</span>
+                        <span v-if="ASSUNTOS_PELO_ANUNCIO.includes(cat)" class="text-[10px] text-amber-700 dark:text-amber-300" title="dado do produto: com o agente, sai sozinho só quando a resposta se apoia nos dados do anúncio da conversa e passa nas checagens e no verificador (liberação do dono, 23/10/2026); senão, pessoa confere. Não se marca aqui">· sai pelo anúncio</span>
+                        <span v-else-if="ASSUNTOS_SO_PESSOA_NO_AGENTE.includes(cat)" class="text-[10px] text-amber-700 dark:text-amber-300" title="dado do produto: com o agente, a resposta sempre vai para pessoa conferir; não dá para marcar">· sempre pessoa confere</span>
                       </label>
                       <div v-if="!c.auto_categorias?.length" class="px-1.5 py-1 text-xs text-muted-foreground">nenhuma categoria no automático</div>
                       <div class="mt-2 flex justify-end gap-1">

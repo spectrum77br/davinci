@@ -651,13 +651,23 @@ async def test_ver_anuncio_kia_bordo_e_fone(
     ]
     campos = {c["campo"]: c for c in dados["especificacoes"]["campos"]}
     assert campos["nfc"]["valor"] == "sim" and campos["nfc"]["fonte"] == "anuncio"
-    assert dados["restricao_envio"] is None
+    # Liberação L3 do dono (23/10/2026): sem restrição e com a descrição lida, a PROVA de
+    # que nenhuma fonte restringe (o "Enviamos para todo o Brasil" só sai com ela).
+    assert dados["restricao_envio"] == {
+        "ufs": [],
+        "fonte": None,
+        "trecho": None,
+        "ufs_conforme_pedido": [],
+        "nenhuma": True,
+        "conferido": ["anuncio", "regra_apple_shopee", "loja"],
+    }
     for proibido in ("dg089", "dg088", BRANCO, LARANJA, "175", "178", "produtos_vinculados"):
         assert proibido not in texto, proibido
     assert set(dados["evidencias"]) == {
         f"ficha:{ITEM_A18}",
         f"variacoes:{ITEM_A18}",
         f"espec:{ITEM_A18}",
+        f"restricao:{ITEM_A18}",
     }
     assert all(ctx.registro.permite(e) for e in dados["evidencias"])
     # Replay/eval: nada foi à loja.
@@ -707,6 +717,8 @@ async def test_ver_anuncio_rj_do_anuncio_e_da_loja_sem_o_valor(
         "fonte": "anuncio",
         "trecho": "Não enviamos para o Rio de Janeiro.",
         "ufs_conforme_pedido": [],
+        # Liberação L3 (23/10/2026): o que foi conferido.
+        "conferido": ["anuncio", "regra_apple_shopee", "loja"],
     }
     assert f"restricao:{ITEM_A18}" in dados["evidencias"]
 

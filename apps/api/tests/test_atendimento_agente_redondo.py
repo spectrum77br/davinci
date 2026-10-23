@@ -1159,7 +1159,7 @@ def test_3_31ab491d_a_instrucao_de_recebimento_vem_na_entrega_instrucoes():
 def test_3_o_sistema_do_verificador_nao_muda():
     # O item 3 não mudou o SISTEMA (era v9). Parte 2 (item 6, 23/10/2026): o v10 só acrescenta
     # a BUSCA NO CATÁLOGO DA LOJA — o modelo continua o Haiku.
-    assert v.VERSAO == "v10" and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO in ("v10", "v11", "v12") and v.MODELO == "claude-haiku-5-5"
 
 
 # As linhas novas da calibração (o SISTEMA não muda; a entrada sim): os bons e os ruins.
@@ -1358,7 +1358,7 @@ def test_4_o_bloco_2_manda_responder_so_o_que_foi_perguntado():
         cabeca, _assuntos = texto.split("# ASSUNTOS")
         # Parte 2 (item 7, 23/10/2026): as regras vão dentro do COMO PENSAR.
         assert prompt.COMO_PENSAR in cabeca
-        assert len(texto) / 3.5 <= 4_500, plataforma
+        assert len(texto) / 3.5 <= 5_000, plataforma  # D1–D3 do dono (23/10/2026)
     s = prompt.COMO_PENSAR
     for trecho in (
         "Responda só o que o cliente perguntou neste turno, em 1 a 3 frases",

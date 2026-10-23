@@ -723,6 +723,8 @@ async def test_rodada_grava_so_a_chave_e_a_api_mostra(client, db, make_user, pes
         "assuntos": ["cancelamento"],
         "assuntos_rotulos": ["Cancelamento"],
         "na_caixa": True,
+        # D1 (23/10/2026): o "responde e marca" (a IA já respondeu; a ação continua).
+        "pos_envio": False,
     }
     # Junto com o filtro do prazo ("Falta responder") e com a busca.
     r = await client.get(f"{URL}/conversas", params={"caixa": "humano", "filtro": "aguardando"})

@@ -1028,14 +1028,31 @@ async def _responder(
         opcoes_sensiveis=base.opcoes_sensiveis,
         forcar=base.forcar or ctx.modo_replay,
         agente=True,
-        # Item 32 (22/10/2026, 3c): a marca da devolução de rotina do turno.
-        devolucao_de_rotina=ctx.devolucao_de_rotina,
+        # Item 32 (22/10/2026, 3c): a marca da devolução de rotina do turno. D1 (23/10/2026):
+        # e o "responde e marca" (a devolução aberta segue com a pessoa DEPOIS do envio).
+        devolucao_de_rotina=ctx.devolucao_de_rotina or ctx.responde_e_marca,
         # Decisão do dono (22/10/2026): a pergunta de produto com a resposta da equipe
         # do mesmo anúncio, de um modelo, citada.
         produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
         # Item 2 da auditoria ao vivo (22/10/2026, 3ee1f81e): os prazos dos fatos
         # aprovados citados ("1 ano de garantia: os 90 primeiros dias com a loja…").
         fatos_citados=ctx.fatos_citados(ctx.evidencias),
+        # Liberações do dono (23/10/2026, L1 e L2): a resposta de produto ou de condição
+        # que se apoia só no anúncio da conversa (a `checagens.conferir` confere de novo
+        # no texto final e marca `ctx.produto_pelo_anuncio`).
+        produto_pelo_anuncio=checagens.liberacao_da_proposta(
+            p,
+            entrada["texto"],
+            entrada["categoria"],
+            ctx,
+            base,
+            fichas=[*pac.fichas, *ctx.fichas_lidas],
+        ),
+        # D2 do dono (23/10/2026): a garantia Apple antes da compra só como o fato aprovado
+        # (ou a resposta da equipe da mesma loja) diz, com a condição pelo anúncio.
+        garantia_apple_pelo_fato=checagens.garantia_apple_da_proposta(
+            p, entrada["texto"], ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas]
+        ),
     )
     # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
     # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta
@@ -1071,8 +1088,9 @@ async def _responder(
             base.ctx,
             etiquetas=acao_pessoa.etiquetas_da_conversa(conversa),
             motivos=conferida.motivos,
-            # Item 32 (22/10/2026): a devolução de rotina não segura pela etiqueta.
-            rotina=ctx.devolucao_de_rotina,
+            # Item 32 (22/10/2026): a devolução de rotina não segura pela etiqueta; D1: nem
+            # o "responde e marca" (a etiqueta fica na Caixa Humano depois do envio).
+            rotina=ctx.devolucao_de_rotina or ctx.responde_e_marca,
         )
         if pendencia.codigo not in ja
     ]

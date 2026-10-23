@@ -425,7 +425,11 @@ def test_sem_restricao_e_o_cliente_citando_o_estado_vai_para_pessoa():
         "Sim, entregamos para todo o Brasil.", [], textos_cliente=["moro em SP, entregam aí?"]
     )
     assert p.codigo == checagens.REGIAO_SEM_FONTE and not p.bloqueia
-    assert checagens.conferir_regiao("Enviamos para todo o Brasil.", []) == []
+    # Liberação L3 do dono (23/10/2026): "todo o Brasil" sem a prova de nenhuma restrição
+    # (a restrição conferida, `restricao_envio.sem_restricao_conferida`) passou a ser
+    # suave também sem o estado do cliente (antes só o verificador o segurava).
+    (p,) = checagens.conferir_regiao("Enviamos para todo o Brasil.", [])
+    assert p.codigo == checagens.REGIAO_SEM_FONTE and not p.bloqueia and p.so_auto
 
 
 def test_o_detector_le_o_rio_sozinho_e_a_negacao_depois_do_estado():

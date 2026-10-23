@@ -389,17 +389,27 @@ NOTAS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {
     # ajuda → uma pessoa abre o chamado; a régua do código (`acao_pessoa.
     # atraso_de_entrega`, `devolucao_na_plataforma`) marca sozinha — a nota é o
     # texto. No bloco 2 (só a Shopee), sem custo no teto do bloco 1.
+    # D3 e D1 do dono (23/10/2026 ~12:40–12:50): a entrega respondida como a equipe (o
+    # chamado só com a condição dele — `acao_pessoa.chamado_de_entrega_shopee`) e o
+    # "responde e marca" da devolução aberta (`acao_pessoa.responde_e_marca_do_turno`).
     "shopee": (
-        "Pedido postado e não entregue, e o cliente reclama que não chegou e que atrasou (a "
-        "data limite ou a previsão passou): o último status e acompanhar em Minhas Compras > "
-        "o pedido > Informações do envio, sem prazo e nunca 'ao receber' nem 'recuse'; a ação "
-        "é abrir_chamado (a loja abre o chamado com a Shopee).",
-        'Cartão "[Shopee] Cliente abriu pedido de devolução/reembolso" na conversa (ou o '
-        "pedido já em devolução): a solicitação está aberta na Shopee e a loja responde por lá "
-        "— a ação é reclamacao_aberta (salvo com devolucao_sem_decisao_da_loja no ESTADO DA "
-        "CONVERSA: COMO A EQUIPE RESPONDE). O texto só confirma que a solicitação foi aberta pela "
-        "Shopee e que o andamento aparece em Minhas Compras > o pedido: nunca decida, aceite, "
-        "recuse, prometa nem mande pedir de novo.",
+        "Entrega (cadê, sem atualização, hoje/ontem era o dia, atrasou): diga o que o PEDIDO "
+        "mostra (postado em {data_envio}, o último status ou consta entregue) e a política da "
+        "loja como a equipe diz: depois do envio a entrega é da Shopee e a loja não tem acesso "
+        "ao transporte; vale o prazo de Minhas Compras > o pedido > Informações do envio — cite "
+        "o par:<id> da equipe que diz isso. Sem cidade, data prometida ou ação prometida; nunca "
+        "'ao receber' nem 'recuse'. abrir_chamado só se o cliente pede para a loja verificar ou "
+        "agir com a Shopee, pede o dinheiro ou cancelar pelo atraso, o rastreio está parado há "
+        "dias ou houve falha/volta na entrega.",
+        'Devolução/reembolso já aberto na Shopee (o cartão "[Shopee] Cliente abriu pedido de '
+        'devolução/reembolso", o pedido em devolução, reclamação no PEDIDO): com '
+        "responde_e_marca no ESTADO DA CONVERSA, só a "
+        "informação — o estado da solicitação do PEDIDO, que a Shopee analisa e devolve pela "
+        "mesma forma de pagamento, onde acompanhar e como postar pela própria solicitação —, "
+        'sem acao_pessoa (a equipe segue com a decisão); da equipe, só "a equipe analisa a '
+        'devolução pela Shopee"; nunca aprovada/recusada, data, prazo, valor, Pix nem outra '
+        "solicitação. Sem essa marca (nem devolucao_sem_decisao_da_loja), a ação é "
+        "reclamacao_aberta e o texto só confirma que a solicitação foi aberta e onde acompanhar.",
     ),
     "ml": (
         "Pergunta pública no anúncio: a resposta fica visível para todos — nunca cite "
@@ -856,6 +866,31 @@ COMO_PENSAR = (
 )
 
 
+# Liberações do dono (23/10/2026 ~10:40, "quero que ele responda quase tudo, como um
+# atendente humano"). No bloco 2 (o bloco 1 está no teto e o hash dele é fixo), igual em
+# todas as plataformas, depois do COMO PENSAR: L1 — a pergunta de produto se responde com
+# os dados do anúncio da conversa que o agente leu, citando a ficha (o que só o site da
+# marca, o cadastro ou outro anúncio trazem não sai sozinho: `checagens.liberacao_pelo_anuncio`);
+# L2 — a condição só como a "condicao" da ficha diz; L3 — a região: a frase fixa com a
+# prova de "nenhuma restrição" (`restricao_envio` com "nenhuma": true), o estado do cliente
+# fora da restrição se responde, e a restrição se diz inteira — nunca "todo o Brasil" com
+# ela; não é dado_indisponivel.
+PRODUTO_CONDICAO_REGIAO = (
+    "# PRODUTO, CONDIÇÃO E ESTADO\n"
+    "- Produto: responda pelo anúncio da conversa (título, atributos, descrição, variações), "
+    "citando ficha:<id>; o que só o site, o cadastro ou outro anúncio trazem não sai sozinho.\n"
+    '- Condição: só como a "condicao" da ficha diz (nada de "de fábrica" ou "nunca aberto").\n'
+    '- Estado: restricao_envio "nenhuma": true → "Enviamos para todo o Brasil; o frete e o '
+    'prazo aparecem ao informar o seu CEP no anúncio." (cite restricao:<id>); com restrição, '
+    'nunca "todo o Brasil": diga os estados dela ou que o do cliente recebe. Não é '
+    "dado_indisponivel.\n"
+    "- Garantia Apple antes da compra: só o fato aprovado ou a resposta da equipe desta loja "
+    '("garantia Apple de 1 ano a partir da ativação"), citando fato:<id> ou par:<id>; nada de '
+    "garantia da loja, legal, cobertura ou outro prazo. Com variação aberta/ativada no "
+    "anúncio, a condição é a de cada variação (ou pergunte qual)."
+)
+
+
 # O cabeçalho do catálogo dos assuntos no bloco 2. Item 16 da auditoria ao vivo
 # (21/10/2026, Kia 22:29, 5839ff11): "Então a capinha não serve ne", depois da
 # resposta da loja sobre a capinha, saiu como cobertura_regiao (o certo:
@@ -878,7 +913,8 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
     conversa e a data vão no pacote. Item 32 (22/10/2026): e, antes dos assuntos,
     `COMO_A_EQUIPE_RESPONDE` (igual em todas); item 4 da auditoria ao vivo
     (23/10/2026): e `SO_O_QUE_PERGUNTOU` (igual em todas) — desde o item 7 da rodada
-    "redondo" (23/10/2026), dentro do `COMO_PENSAR`.
+    "redondo" (23/10/2026), dentro do `COMO_PENSAR`; e as liberações do dono de 23/10/2026
+    (`PRODUTO_CONDICAO_REGIAO`, igual em todas).
     """
     nome = ia._PLATAFORMA_NOME.get(plataforma, plataforma)
     canais = sorted(
@@ -905,6 +941,8 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
     # Item 7 da rodada "redondo" (23/10/2026): como pensar — contém o "só o que foi
     # perguntado" do item 4 (`SO_O_QUE_PERGUNTOU`), com as mesmas regras.
     partes.append(COMO_PENSAR)
+    # Liberações do dono (23/10/2026, L1–L3): produto, condição e entrega por estado.
+    partes.append(PRODUTO_CONDICAO_REGIAO)
     assuntos = ia.lista_de_assuntos([dict(c) for c in categorias], MAX_CHARS_ASSUNTOS)
     partes.append(ASSUNTOS_CABECALHO + assuntos)
     return "\n\n".join(partes)

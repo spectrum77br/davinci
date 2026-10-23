@@ -682,7 +682,10 @@ def test_tamanho_do_prefixo():
     tokens_plataforma = max(plataformas.values()) / 3.5
     # Bloco 1 ~4-6 mil tokens; bloco 2 com o catálogo inteiro ~3-4 mil.
     assert 4_000 <= tokens_geral <= 6_500, geral
-    assert 2_500 <= tokens_plataforma <= 4_500, plataformas
+    # Liberações do dono (23/10/2026, `prompt.PRODUTO_CONDICAO_REGIAO`): 4_500 → 4_700.
+    # D1–D3 do dono (23/10/2026: a entrega como a equipe, o "responde e marca", a garantia
+    # Apple): 4_700 → 5_000.
+    assert 2_500 <= tokens_plataforma <= 5_000, plataformas
 
 
 # ─────────────── os argumentos do runner ───────────────

@@ -268,6 +268,10 @@ export type HumanoConversa = {
   // precisa de pessoa, mas a loja está fora (em Observar, o Duoke responde):
   // o chip e a faixa só informam. A API antiga não manda (= está).
   na_caixa?: boolean
+  // D1 (23/10/2026, "responde e marca"): a IA já respondeu o cliente com a
+  // informação e a ação (aprovar/recusar a devolução na plataforma) continua
+  // com a pessoa — a mesma etiqueta de sempre, com a frase dizendo isso.
+  pos_envio?: boolean
 }
 // Uma mudança de etiqueta (a linha do tempo): `por_nome` null = o sistema.
 export type EtiquetaHistorico = {
@@ -1140,6 +1144,11 @@ export const ASSUNTOS_SO_PESSOA_NO_AGENTE = [
   'o_que_e_o_anuncio', 'espec_celular', 'espec_mala', 'espec_eletro', 'espec_outros',
   'conteudo_da_caixa', 'duvida_produto', 'resistencia_agua', 'originalidade_condicao',
 ]
+// Liberações do dono (23/10/2026): destes, os que saem sozinhos quando a resposta se apoia
+// só nos dados do anúncio da conversa (e passa nas checagens e no verificador), com o assunto
+// no automático da caixa — não se marcam aqui (`constantes.ASSUNTOS_LIBERADOS_PELO_ANUNCIO`).
+// A resistência à água continua sempre com pessoa.
+export const ASSUNTOS_PELO_ANUNCIO = ASSUNTOS_SO_PESSOA_NO_AGENTE.filter((a) => a !== 'resistencia_agua')
 // Reserva dos nomes (o GET /categorias do manual base manda os de verdade).
 const NOMES_ORIENTACAO: Record<string, string> = {
   item_errado_faltando: 'Item faltando ou errado',
@@ -1304,6 +1313,7 @@ export function rotulosHumano(h: HumanoConversa | null | undefined): string[] {
 // conversa está nela; da loja fora dos modos (em Observar — ela não aparece
 // na Caixa Humano), "Precisa de pessoa": a IA não responderia ali.
 export function faixaHumano(h: HumanoConversa | null | undefined): { nome: string; frase: string } {
+  if (h?.pos_envio === true) return { nome: 'Caixa Humano', frase: 'a IA já respondeu o cliente; a ação continua com a pessoa' }
   return h?.na_caixa === false
     ? { nome: 'Precisa de pessoa', frase: 'a IA não responderia esta' }
     : { nome: 'Caixa Humano', frase: 'a IA não responde esta' }

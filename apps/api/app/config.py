@@ -694,6 +694,13 @@ class Settings(BaseSettings):
     # contextos pode sim"); `false` = a régua de antes (toda devolução aberta é
     # pessoa). O legado não lê.
     atendimento_agente_devolucao_rotina: bool = True
+    # D1 (decisão do dono, 23/10/2026 ~12:40): "responde e marca" — com a devolução/
+    # reclamação ABERTA na plataforma (Shopee/TikTok) e o turno só informativo, a resposta
+    # do agente pode sair sozinha e a conversa CONTINUA na Caixa Humano com a ação
+    # (aprovar/recusar na Central do Vendedor): `agente.acao_pessoa.responde_e_marca_do_turno`
+    # e `atendimento_conversas.dados.humano_pos_envio`. `false` = a régua de antes (toda
+    # devolução aberta vai inteira para pessoa). O legado não lê.
+    atendimento_agente_responde_e_marca: bool = True
     # O replay noturno (sombra): refaz os gatilhos do dia anterior e grava só
     # em `atendimento_agente_replay`, nunca na caixa. Plataformas separadas
     # por vírgula.

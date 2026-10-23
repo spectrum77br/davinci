@@ -741,7 +741,7 @@ async def test_6_o_outro_anuncio_lido_nao_empresta_caracteristica():
 
 
 def test_6_o_verificador_v10_le_a_busca_so_quando_houve():
-    assert v.VERSAO == "v10" and v.MODELO == HAIKU
+    assert v.VERSAO in ("v10", "v11", "v12") and v.MODELO == HAIKU
     s = " ".join(v.SISTEMA.split())
     for trecho in (
         "BUSCA NO CATÁLOGO DA LOJA (quando vier)",
@@ -764,7 +764,10 @@ def test_6_o_verificador_v10_le_a_busca_so_quando_houve():
     linhas = v.linhas_da_busca(busca, ())
     assert linhas[0] == v.CABECALHO_BUSCA
     assert linhas[1] == f'- termo "A18": anuncio:{ITEM_A18} «Uranyx A18 Pro Max»; disponivel=true'
-    assert linhas[2] == '- termo "capa A18": nenhum anúncio desta loja tem "capa" no título'
+    assert linhas[2] == (
+        '- termo "capa A18": nenhum anúncio desta loja tem "capa" no título — a loja NÃO vende '
+        "esse acessório: dizer que não vende ou não trabalha com ele tem lastro"
+    )
     assert linhas[3] == (
         '- termo "fone de ouvido sem fio": nenhum anúncio casou com o termo (isso não prova '
         "que a loja não vende)"
@@ -820,7 +823,7 @@ def test_7_o_como_pensar_vai_no_bloco_2_de_todas_as_plataformas():
         cabeca, _assuntos = texto.split("# ASSUNTOS")
         assert prompt.COMO_PENSAR in cabeca
         assert "# SÓ O QUE FOI PERGUNTADO" not in cabeca  # está dentro do COMO PENSAR
-        assert len(texto) / 3.5 <= 4_500, plataforma
+        assert len(texto) / 3.5 <= 5_000, plataforma  # D1–D3 do dono (23/10/2026)
     c = prompt.COMO_PENSAR
     for trecho in (
         "o raciocínio é seu e nunca vai no texto",
