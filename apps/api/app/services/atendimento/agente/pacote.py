@@ -52,7 +52,13 @@ from app.models import (
     ProductLink,
 )
 from app.models.atendimento import AtendimentoFato
-from app.services.atendimento import automacoes_catalogo, cartoes_plataforma, constantes, ia
+from app.services.atendimento import (
+    automacoes_catalogo,
+    cartoes_plataforma,
+    constantes,
+    ia,
+    validador,
+)
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento.agente import acao_pessoa
@@ -215,10 +221,30 @@ def _turno_da_entrega(base: BaseDoGerar, bloco: Mapping | None, gatilho: Any) ->
     pistas = set(acao_pessoa.pistas_do_turno(base.recentes, gatilho, com_pedido=True))
     if not pistas <= _PISTAS_DA_ENTREGA:
         return False
-    _rajada, _textos, plano = acao_pessoa._planos_do_turno(base.recentes, gatilho)
+    rajada, _textos, plano = acao_pessoa._planos_do_turno(base.recentes, gatilho)
+    if not plano.strip() and not pistas:
+        # Rodada "fechar o eval" (23/10/2026, 627872de074f): o turno só com a imagem (o
+        # print do rastreio) depois de "ontem era o dia de receber e nada" — o assunto é o
+        # da fala anterior do cliente.
+        plano = acao_pessoa._plano([_fala_anterior_do_cliente(base.recentes, rajada)])
+        pistas = set(ia.pistas_de_categoria(plano)) if plano.strip() else set()
+        if not pistas <= _PISTAS_DA_ENTREGA:
+            return False
     return bool(pistas & {"rastreio", "prazo_envio", "entrega_nao_recebida"}) or (
         acao_pessoa.fala_da_entrega(plano)
     )
+
+
+def _fala_anterior_do_cliente(recentes: Sequence[Any], rajada: Sequence[Any]) -> str | None:
+    """A última fala de TEXTO do cliente antes da rajada (o "6" do menu não conta). PURA."""
+    da_rajada = {id(m) for m in rajada}
+    for m in reversed(list(recentes)):
+        if id(m) in da_rajada or getattr(m, "autor", None) != constantes.AUTOR_CLIENTE:
+            continue
+        texto = (getattr(m, "texto", None) or "").strip()
+        if len(validador.plano_de(texto).split()) >= 2:
+            return texto
+    return None
 
 
 def _turno_para_a_busca(base: BaseDoGerar) -> str:

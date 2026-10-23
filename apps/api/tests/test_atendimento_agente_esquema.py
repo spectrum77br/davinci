@@ -749,7 +749,8 @@ def test_configuracao_padrao_do_agente():
     # de US$ 10 por dia e US$ 0,50 por conversa (o verificador continua no Haiku).
     assert padrao["atendimento_agente_modelo"] == "claude-sonnet-5-5"
     assert padrao["atendimento_agente_effort"] == "medium"
-    assert padrao["atendimento_agente_max_turnos"] == 5
+    # Rodada "fechar o eval" (23/10/2026): 5 → 8 pedidos, o último sem ferramentas.
+    assert padrao["atendimento_agente_max_turnos"] == 8
     assert padrao["atendimento_agente_prazo_s"] == 60
     assert padrao["atendimento_agente_teto_usd_dia"] == 10.0
     assert padrao["atendimento_agente_teto_usd_conversa"] == 0.50

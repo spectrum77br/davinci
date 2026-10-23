@@ -244,6 +244,17 @@ logger = structlog.get_logger()
 # boa-catalogo-cesto perdeu o "o valor aparece nele" (o preço não é dado da busca). 5 linhas
 # novas no grupo `liberacoes` (o cartão × o pedido, o 5G do pedido, a vitrine, a mala × o
 # celular).
+# v13 (rodada "fechar o eval", 23/10/2026 — os falsos alarmes da calibração v12 nas linhas
+# que fazem a meta: dono-d3-hoje-era-o-dia-par-boa, dono-d3-sem-atualizacao-par-boa,
+# dono-d1-ja-pedi-nao-chegou-boa, liberacoes-l3-maceio-boa,
+# liberacoes-l1-c2-nfc-nao-informa-boa, liberacoes-l1-watch-o-que-e-boa e
+# boa-redondo-05df6dc5). Só o SISTEMA muda (a entrada de todas as linhas é a mesma): o que
+# já está na entrada e é lastro — a linha da RESTRIÇÃO com «os demais estados recebem», a
+# lista de variações "completas" (as opções e a que não existe), o "ultimo_status" dito em
+# parte, a política da entrega da equipe em qualquer das formas dela; e, no item 7, "o
+# anúncio não informa" (sem o campo), o que o anúncio vende e o turno do D1 que só conta o
+# que o cliente fez. Nada que bloqueava afrouxou: o campo que contradiz continua no item 6.
+# Calibração: o grupo `fechar_eval` (boas e ruins de cada classe).
 # v12 (decisões D1–D3 do dono, 23/10/2026 ~12:40–12:50; nada que bloqueava afrouxou fora
 # destas três):
 #  D1. "responde e marca": com a devolução/reclamação aberta na plataforma e o turno só
@@ -263,7 +274,7 @@ logger = structlog.get_logger()
 #      `SISTEMA` não muda para ela.
 # As linhas de antes da calibração mantêm a entrada (a seção nova só com o campo
 # "pos_envio" do caso). Calibração: o grupo `dono_d123`.
-VERSAO = "v12"
+VERSAO = "v13"
 MODELO = "claude-haiku-5-5"
 EFFORT = "low"
 # O JSON do `Veredito` (~100–300 tokens) + o raciocínio ADAPTATIVO, que conta no
@@ -743,13 +754,20 @@ uma linha "nenhum anúncio desta loja tem <acessório> no título" — "nenhum a
 com o termo" nunca sustenta "não temos", e de um modelo ou versão nada sustenta; e, com a \
 CONDIÇÃO DECLARADA NO ANÚNCIO, dizer que o produto é novo, lacrado ou original como a linha \
 diz — «de fábrica», «nunca aberto», «100% original», «genuíno» e o que a linha não diz \
-continuam contando; e a entrega que o item 3 aceita pela RESTRIÇÃO DE ENVIO POR ESTADO; e o que \
+continuam contando; e a entrega que o item 3 aceita pela RESTRIÇÃO DE ENVIO POR ESTADO — a \
+linha que termina em «os demais estados recebem» sustenta «enviamos para <estado que não está \
+na linha>, sim»; e, com uma lista de variações de "completas": true, dizer as opções dela e \
+que uma opção fora dela não existe no anúncio («não tem a cor branca; as opções são Preto, \
+Laranja e Prata»); e o "ultimo_status" do PEDIDO dito com as palavras dele, inteiro ou só a \
+parte principal e sem cidade («o último status é: em separação no centro logístico»); e o que \
 uma RESPOSTA DA EQUIPE CITADA sustenta: (a) POLÍTICA DA \
 LOJA — a afirmação com o mesmo sentido de uma resposta de linha «vale para política da \
 loja», sobre a mesma situação, dita com outras palavras ou mais curta, tem lastro (o \
 reembolso é feito ou analisado \
 pela plataforma e volta pela mesma forma de pagamento; não fazemos troca sem defeito; a loja \
-não vende o acessório avulso), mesmo que a linha diga «não vale para produto» — isso só fala \
+não vende o acessório avulso; depois do envio a entrega é da plataforma, fica por conta dela e \
+a loja não tem acesso ao transporte, vale o prazo do app — uma política só: a linha que diz uma \
+dessas formas sustenta as outras), mesmo que a linha diga «não vale para produto» — isso só fala \
 do produto; política é a regra de troca, devolução, reembolso, cancelamento, envio, venda ou \
 atendimento da loja, nunca o que o produto tem, faz ou traz na caixa (isso é produto, b); \
 (b) PRODUTO — a afirmação com o mesmo sentido do que uma resposta de linha «vale \
@@ -790,7 +808,13 @@ no app. false quando ignora a pergunta, responde outra coisa ou deixa sem respos
 parte importante. A pergunta de QUANDO o reembolso cai ou volta ("no mesmo dia?", \
 "quanto tempo?") respondida com quem faz o reembolso e como ele volta (a plataforma analisa \
 e devolve pela mesma forma de pagamento), sem prazo que nenhum campo traz, é tratada — \
-true: a loja não tem esse prazo. Turno SEM pergunta nem pedido (PERGUNTAS DO CLIENTE: nenhuma — só \
+true: a loja não tem esse prazo. Dizer que o anúncio não informa o dado perguntado, quando \
+nenhum campo das EVIDÊNCIAS o traz, trata a pergunta (true; se um campo o traz, é o item 6); \
+a pergunta do que o anúncio vende («é do relógio ou só da pulseira?») respondida com o produto \
+que o título e os atributos dizem é tratada; com a AÇÃO QUE CONTINUA COM A PESSOA, o turno que \
+só conta o que o cliente já fez («já pedi o reembolso», «o pedido não chegou») é tratado pelo \
+estado da solicitação e pelo caminho no app. Turno SEM pergunta nem pedido (PERGUNTAS DO \
+CLIENTE: nenhuma — só \
 cumprimento, agradecimento, cartão do produto ou do pedido, anexo, ou o pedido de \
 atendente sem dizer o assunto, como a opção do menu de falar com atendente) e nada \
 pendente na CONVERSA RECENTE: cumprimentar e perguntar como ajudar (apresentando-se, \
