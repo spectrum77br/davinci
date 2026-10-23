@@ -295,7 +295,8 @@ async def test_a2_nao_vendemos_com_a_busca_vazia(sem_no_titulo, segura):
         )
         assert r.decisao != VAI
     else:
-        assert linhas[1].endswith('nenhum anúncio desta loja tem "fone" no título')
+        # Calibração v10 (revisão L1–L3): a linha diz o que prova.
+        assert 'nenhum anúncio desta loja tem "fone" no título — a loja NÃO vende' in linhas[1]
 
 
 def test_a2_o_anuncio_com_os_titulos_divergentes_no_comeco_casa():
@@ -698,15 +699,68 @@ async def _atraso(fala: str, *, assunto: str = "entrega_nao_recebida", bloco=Non
     ("fala", "assunto"),
     [
         ("Hoje era o dia da entrega do relogio e ainda não recebi", "entrega_nao_recebida"),
-        ("Hoje era o dia da entrega e ainda não chegou, me ajuda", "rastreio"),
         ("a previsão era hoje e não chegou", "rastreio"),
         ("era pra chegar hoje e nada", "rastreio"),
     ],
 )
-async def test_m7_o_atraso_sem_o_chamado_nao_sai(fala, assunto):
+async def test_m7_d3_o_hoje_era_o_dia_sozinho_nao_segura_na_shopee(fala, assunto):
+    """D3 (decisão do dono, 23/10/2026 ~12:50): na Shopee, o "hoje era o dia" SOZINHO é a
+    resposta-padrão da equipe ("pode seguir o prazo informado na compra pela plataforma"):
+    nem a trava suave nem a régua do chamado seguram (antes da D3, a trava M7 segurava)."""
     r = await _atraso(fala, assunto=assunto)
-    assert checagens.ATRASO_SEM_CHAMADO in r.codigos, r.codigos
+    assert checagens.ATRASO_SEM_CHAMADO not in r.codigos, r.codigos
+    assert constantes.ACAO_ABRIR_CHAMADO not in r.ctx.acoes_pessoa
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "Hoje era o dia da entrega e ainda não chegou, me ajuda",
+        "era pra chegar hoje, vocês podem ver com a Shopee?",
+        "a previsão era hoje e não chegou, quero o reembolso",
+    ],
+)
+async def test_m7_d3_com_a_condicao_do_chamado_segura(fala):
+    """D3: com a condição do chamado (o pedido de ajuda/ação, o dinheiro pelo atraso) a
+    régua do CÓDIGO abre o chamado (antes era só a trava suave)."""
+    r = await _atraso(fala, assunto="rastreio")
+    assert constantes.ACAO_ABRIR_CHAMADO in r.ctx.acoes_pessoa, r.ctx.acoes_pessoa
     assert r.decisao != VAI
+
+
+def test_m7_d3_a_trava_suave_continua_por_baixo_na_shopee():
+    """D3: sem a ação do chamado (a régua do código não viu o postado, por exemplo), a trava
+    suave segura o pedido de ação e a falha da entrega; o "hoje era o dia" sozinho, não."""
+    bloco = _bloco_1(STATUS_CD)
+
+    def trava(fala: str, status: str = STATUS_CD) -> list[str]:
+        return [
+            p.codigo
+            for p in checagens.conferir_atraso_sem_chamado(
+                TEXTO_STATUS,
+                acao="responder",
+                textos_cliente=[fala],
+                pedido={**bloco, "ultimo_status": status},
+                plataforma="shopee",
+            )
+        ]
+
+    assert trava("Hoje era o dia da entrega e ainda não chegou, me ajuda") == [
+        checagens.ATRASO_SEM_CHAMADO
+    ]
+    assert trava("Hoje era o dia da entrega e ainda não recebi") == []
+    falha = "Houve um imprevisto durante a entrega e ela não pôde ser concluída hoje."
+    assert trava("Hoje era o dia da entrega e ainda não recebi", falha) == [
+        checagens.ATRASO_SEM_CHAMADO
+    ]
+    # Fora da Shopee, como antes.
+    assert checagens.conferir_atraso_sem_chamado(
+        TEXTO_STATUS,
+        acao="responder",
+        textos_cliente=["Hoje era o dia da entrega e ainda não recebi"],
+        pedido=bloco,
+        plataforma="ml",
+    )
 
 
 async def test_m7_o_que_nao_e_o_atraso_nao_segura():

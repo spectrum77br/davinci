@@ -141,13 +141,16 @@ def _agente_pode(rascunho: Any, canal: Any | None) -> bool:
     if any(p in ASSUNTOS_ORIENTACAO and p not in liberadas for p in pistas):
         return False
     categoria = getattr(rascunho, "categoria", None)
+    agente = _fatos(rascunho).get("agente") or {}
+    agente = agente if isinstance(agente, dict) else {}
     # Rodada 4b (achado 2 da revisão r4): a pista além do assunto, liberada.
-    if ia.motivo_das_pistas_alem(
-        (_fatos(rascunho).get("agente") or {}).get("pistas_turno"), categoria, canal
-    ):
+    if ia.motivo_das_pistas_alem(agente.get("pistas_turno"), categoria, canal, agente=agente):
         return False
     if categoria in ASSUNTOS_ORIENTACAO:
         return categoria in liberadas
+    # Liberações do dono (23/10/2026, L1 e L2): o de produto com a marca do código.
+    if canal is not None and ia.produto_pelo_anuncio(agente, categoria, canal):
+        return True
     # Os outros: só onde o dono liberou o agente (`auto_agente`, decisão 8).
     return (
         canal is not None

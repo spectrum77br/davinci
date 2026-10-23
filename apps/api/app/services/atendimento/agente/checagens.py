@@ -104,6 +104,26 @@ ponto do código):
   (`_DISPONIBILIDADE`, `_TER`), os achados de cada busca (`_achados_citados`) e o "não temos"
   só com o fato que nega a venda (`_fatos_que_negam`) ou o acessório fora de todo título.
 
+Liberações do dono (23/10/2026 ~10:40, "quero que ele responda quase tudo"):
+  - L1/L2: `liberacao_pelo_anuncio` — a resposta de produto (o_que_e_o_anuncio, espec_*,
+    conteudo_da_caixa, duvida_produto) ou de condição (originalidade_condicao) que se apoia SÓ
+    no anúncio da conversa que ela cita (sem o site da marca, o cadastro, outro anúncio ou a
+    ficha emprestada; o número com unidade inteiro; a resposta curta com o termo perguntado no
+    dado; a condição como a "condicao" do anúncio, sem "de fábrica"/"nunca aberto" além dele)
+    troca a trava da ficha no automático pela conferência estrita e marca
+    `ctx.produto_pelo_anuncio` (a trava do envio a lê); as outras checagens continuam;
+  - L3: `conferir_regiao` com a prova de "nenhuma restrição" (`sem_restricao_na_conversa`:
+    o anúncio, a regra Apple→RJ e a loja conferidos em todos os anúncios da conversa) deixa a
+    entrega no estado do cliente e o "todo o Brasil"; sem a prova, o "todo o Brasil" é suave;
+    a pergunta de um produto Apple que a conversa não tem não usa a prova de outro anúncio.
+  - Revisão L1–L3 (23/10/2026): o título do cartão e os itens do pedido nunca são DADO da
+    liberação (só o nome do anúncio citado, `_nomes_do_citado`); com 2+ anúncios na
+    conversa, só a ficha do anúncio que o cliente nomeia (`_cliente_fala_so_do`); a prova
+    L3 não vale para a pergunta de outro produto (`_pergunta_de_outro_produto`: modelo,
+    marca ou tipo); "tem 12 GB de RAM" à pergunta de característica não é estoque
+    (`capacidade_sem_estoque`); a lista exclusiva do anúncio ("acompanha apenas o cabo")
+    nega o que não traz; o "não vem X" com X no anúncio citado não libera.
+
 `aplicar` junta tudo (e as ações de pessoa) na `SaidaConferida` final.
 """
 
@@ -958,12 +978,38 @@ _COBRE_VERBO_CRU = re.compile(
 )
 
 
+# Revisão L1–L3 (achado 5, 23/10/2026): na resposta de CARACTERÍSTICA liberada pelo anúncio
+# (a marca L1, a pergunta sem estoque nem versão), o "tem/possui 12 GB de RAM" é a
+# capacidade do aparelho, não a disponibilidade de uma versão — lido como "conta com".
+_CAPACIDADE_DITA = re.compile(
+    r"\b(?:tem|possui|tera|traz)\s+(?=\d+(?:[.,]\d+)?\s*(?:gb|tb)\s+(?:de\s+)?"
+    r"(?:mem[oó]ria|ram|armazenamento|rom|interna|espa[cç]o)\b)",
+    re.IGNORECASE,
+)
+
+
+def capacidade_sem_estoque(marca: bool, assunto: str | None, textos_cliente: Sequence[str]) -> bool:
+    """A resposta é de característica liberada pelo anúncio (achado 5): a marca L1, um
+    assunto de produto (não a condição) e o cliente sem estoque, variação ou capacidade
+    ("tem a de 256 GB?") na pergunta? PURA."""
+    if not marca or assunto not in constantes.ASSUNTOS_LIBERADOS_PELO_ANUNCIO:
+        return False
+    if assunto == constantes.ASSUNTO_CONDICAO:
+        return False
+    cliente = validador.plano_de(" ".join(t for t in textos_cliente if isinstance(t, str)))
+    return not (
+        variacoes_svc._INTENCAO_ESTOQUE.search(cliente)
+        or re.search(r"\d\s*(?:gb|tb)\b|\b(?:versao|versoes|modelo\s+de|a\s+de)\b", cliente)
+    )
+
+
 def conferir_variacoes(
     texto: str,
     fichas: Sequence[dict],
     textos_cliente: Sequence[str],
     *,
     com_pedido: bool = False,
+    caracteristica: bool = False,
 ) -> list[PendenciaAgente]:
     """`variacoes.conferir_variacoes(texto, {"ficha_do_anuncio": fichas},
     textos_cliente, estoque_aprovado=True)` em `PendenciaAgente`, com a camada
@@ -981,6 +1027,9 @@ def conferir_variacoes(
     """
     if not (texto or "").strip():
         return []
+    if caracteristica:
+        # Revisão L1–L3 (achado 5): `capacidade_sem_estoque`.
+        texto = _CAPACIDADE_DITA.sub("conta com ", texto)
     # A afirmação antes da pergunta de cortesia ("O preto está disponível sim,
     # deseja algo mais?") vira frase própria: a conferência do `variacoes` só
     # sabe pular a frase com "?" inteira (revisão "furos" de 20/10/2026).
@@ -1602,6 +1651,57 @@ def _mencao_na_fonte(objeto: str, fontes: Sequence[str]) -> tuple[bool, bool]:
     return (False in mencoes), (True in mencoes)
 
 
+# Revisão L1–L3 (achado 7, 23/10/2026): a lista EXCLUSIVA do anúncio ("o aparelho acompanha
+# apenas o cabo de carregamento") nega o que ela não traz — o "não vem carregador" tem a
+# fonte. O que a lista traz, ou outra fonte cita, continua como antes.
+_LISTA_EXCLUSIVA = re.compile(
+    r"\b(?:acompanha|acompanham|vem|vem\s+com|inclui|incluso|inclusos|inclusa|inclusas)\b"
+    r"[^.!?;]{0,40}?\b(?:apenas|somente|so)\b[^.!?;]*"
+)
+
+
+def _fora_da_lista_exclusiva(objeto: str, fontes: Sequence[str]) -> bool:
+    """Uma fonte (plana) diz o que acompanha com "apenas/somente/só" e o objeto não está
+    nessa lista? PURA."""
+    return any(
+        not _mencoes_do_objeto(objeto, m.group(0))
+        for fonte in fontes
+        for m in _LISTA_EXCLUSIVA.finditer(fonte)
+    )
+
+
+def negados_pela_lista_exclusiva(texto: str, fontes: Sequence[str]) -> list[str]:
+    """O dado "Não acompanha <objeto>" de cada objeto que o texto diz que NÃO acompanha, que
+    nenhuma fonte cita e que a lista exclusiva de uma fonte deixa de fora (achado 7). PURA."""
+    planas = [_plano(f) for f in fontes if isinstance(f, str)]
+    saida: list[str] = []
+    for sentenca, pergunta in _sentencas(_plano(texto)):
+        if pergunta:
+            continue
+        for objeto in _objetos(sentenca):
+            mencoes = _mencoes_do_objeto(objeto, sentenca)
+            if not (mencoes and all(mencoes)):
+                continue
+            positiva, _negada = _mencao_na_fonte(objeto, planas)
+            if not positiva and _fora_da_lista_exclusiva(objeto, planas):
+                saida.append(f"Não acompanha {_OBJETOS[objeto][0]}")
+    return list(dict.fromkeys(saida))
+
+
+def _nega_o_que_o_anuncio_cita(texto: str, fontes: Sequence[str]) -> bool:
+    """O texto diz que um objeto NÃO vem (toda menção dele negada) e a fonte o cita sem
+    negar? PURA (a liberação L1)."""
+    planas = [_plano(f) for f in fontes if isinstance(f, str)]
+    for sentenca, pergunta in _sentencas(_plano(texto)):
+        if pergunta:
+            continue
+        for objeto in _objetos(sentenca):
+            mencoes = _mencoes_do_objeto(objeto, sentenca)
+            if mencoes and all(mencoes) and _mencao_na_fonte(objeto, planas)[0]:
+                return True
+    return False
+
+
 def _acompanha(
     texto: str, fontes: Sequence[str], do_par: Collection[str] = frozenset()
 ) -> list[PendenciaAgente]:
@@ -1621,6 +1721,8 @@ def _acompanha(
                 continue
             if negada and negada_fonte and not positiva_fonte:
                 continue
+            if negada and not positiva_fonte and _fora_da_lista_exclusiva(objeto, fontes):
+                continue  # Revisão L1–L3 (achado 7): a lista exclusiva do anúncio.
             if negada and positiva_fonte:
                 saida.append(
                     _contradiz(
@@ -5482,6 +5584,17 @@ _ORACAO_DE_ORIENTACAO = re.compile(
     r"|\bdepende\w*\s+d[ao]s?\s+(?:rotina|transportadora|correios|regiao|cep|endereco"
     r"|plataforma|shopee)\b(?:\s+d[ao]s?\s+(?:transportadora|correios|regiao|plataforma))?"
     r"|\brotina\s+d[ao]s?\s+(?:transportadora|correios)\b"
+    # D3 (decisão do dono, 23/10/2026 ~12:50): a política da equipe para a entrega ("depois
+    # do envio, a entrega fica por conta da Shopee"; "quem faz a entrega é a Shopee") não
+    # afirma estado nenhum DESTE pedido — o verificador confere a política contra o par da
+    # equipe citado.
+    r"|\b(?:fica|ficam|e|sao|esta|estao)\s+(?:inteiramente\s+|totalmente\s+|100\s*%?\s+)?"
+    r"(?:por\s+conta|a\s+cargo|sob\s+(?:a\s+)?responsabilidade)\s+d[ao]\s+(?:propri[ao]\s+)?"
+    r"(?:shopee|plataforma|transportadora)\b"
+    r"|\bquem\s+(?:faz|realiza|cuida\s+d)\w*\s+(?:a\s+)?entrega\s+(?:e|eh)\s+(?:a\s+)?(?:propria\s+)?"
+    r"(?:shopee|plataforma|transportadora)\b"
+    r"|\b(?:a\s+loja\s+)?nao\s+(?:temos|tem)\s+acesso\s+(?:ao|a|as|aos)\s+(?:transporte"
+    r"|processo\s+logistico|logistica|questoes\s+logisticas|entregador|transportadora)\b"
 )
 # O que pode sobrar da oração com lastro de orientação, do prazo de fora ou do
 # "consta aqui": só o processo, nada afirmado sobre ESTE pedido. Barbosa ao vivo
@@ -7571,6 +7684,96 @@ def _ufs_dos_municipios(textos_cliente: Sequence[str], ufs: Iterable[str]) -> se
     return saida
 
 
+def sem_restricao_na_conversa(
+    fichas: Sequence[Any], ctx: ContextoAgente | None = None, *, textos_cliente: Sequence[str] = ()
+) -> bool:
+    """Liberação L3 (23/10/2026): o sistema conferiu e NENHUMA fonte restringe o envio dos
+    anúncios desta conversa? PURA.
+
+    True só com a prova (`restricao_envio.sem_restricao_conferida`: o anúncio, a regra
+    Apple→RJ e a restrição da loja conferidos, a descrição lida) em todo bloco de restrição
+    dos dados (as fichas do pacote e o `ver_anuncio`), toda ficha do pacote com o bloco (a
+    que falhou não se sabe) e nenhuma restrição em lugar nenhum. E a pergunta de um produto
+    Apple (iPhone, iPad…) que nenhum anúncio da conversa é: a prova é de OUTRO produto
+    (a regra Apple→RJ vale para ele) — False."""
+    from app.services.atendimento import restricao_envio
+
+    blocos = _restricoes([*(f for f in fichas if isinstance(f, Mapping)), *_do_registro(ctx)])
+    if not blocos or not all(restricao_envio.sem_restricao_conferida(b) for b in blocos):
+        return False
+    do_pacote = [
+        f
+        for f in fichas
+        if isinstance(f, Mapping) and _plano(str(f.get("de_onde") or "")) in evidencias._DE_ONDE
+    ]
+    if any(not isinstance(f.get("restricao_envio"), Mapping) for f in do_pacote):
+        return False
+    titulos = " ".join(
+        _plano(t)
+        for d in [*fichas, *_do_registro(ctx)]
+        if isinstance(d, Mapping)
+        for t in _titulos_do(d)
+    )
+    for texto in textos_cliente:
+        plano = _plano(texto) if isinstance(texto, str) else ""
+        for marca in restricao_envio._RESTRICAO_KEYWORDS:
+            if re.search(rf"\b{marca}", plano) and not re.search(rf"\b{marca}", titulos):
+                return False
+    # Revisão L1–L3 (achado 3, 23/10/2026): a pergunta de OUTRO produto (não só Apple) — o
+    # modelo, a marca ou o tipo de produto que nenhum anúncio da conversa é — não usa a prova
+    # dos anúncios da conversa ("e o celular Redmi Note 14, entrega no RS?" com a mala).
+    marcas = " ".join(_plano(m) for m in marcas_das_fichas([*fichas, *_do_registro(ctx)]))
+    return not _pergunta_de_outro_produto(textos_cliente, f"{titulos} {marcas}")
+
+
+# O tipo de produto (cada grupo, os nomes dele) para a pergunta de outro produto (L3).
+_TIPOS_DE_PRODUTO: tuple[tuple[str, ...], ...] = (
+    ("celular", "celulares", "smartphone", "smartphones", "telefone", "iphone"),
+    ("relogio", "relogios", "smartwatch", "smartwatches", "watch", "smartband"),
+    ("fone", "fones", "headset", "headphone", "earbuds", "airpods"),
+    ("mala", "malas", "bagagem", "mochila"),
+    ("airfryer", "air fryer", "fritadeira"),
+    ("balanca", "balancas"),
+    ("notebook", "notebooks", "laptop", "macbook"),
+    ("tablet", "tablets", "ipad"),
+    ("tv", "televisao", "televisor"),
+    ("caixa de som", "caixinha de som", "soundbar"),
+)
+# As marcas que o cliente pode citar de outro produto (fora as do título e da ficha).
+_MARCAS_CONHECIDAS = (
+    "samsung", "xiaomi", "redmi", "poco", "motorola", "moto", "realme", "apple", "lg",
+    "positivo", "oukitel", "hotwav", "uranyx", "fossibot", "oscal", "blackview", "doogee",
+    "ulefone", "infinix", "tecno", "asus", "lenovo", "huawei", "honor", "oppo", "nokia",
+    "multilaser", "philco", "mondial", "britania", "electrolux", "jbl", "philips", "amazfit",
+    "haylou", "qcy", "lenoxx", "galaxy",
+)  # fmt: skip
+
+
+def _pergunta_de_outro_produto(textos_cliente: Sequence[str], titulos: str) -> bool:
+    """Revisão L1–L3 (achado 3): o cliente cita um modelo ("A17", "Note 14"), uma marca ou um
+    tipo de produto que os títulos (e as marcas) dos anúncios da conversa não têm? O tipo só
+    conta quando os títulos dizem OUTRO tipo (o "esse celular" com o título "Uranyx A17 Pro
+    Max", sem a palavra, é o mesmo). PURA."""
+    cliente = " ".join(_plano(t) for t in textos_cliente if isinstance(t, str))
+    if not cliente:
+        return False
+    if _modelos_do(cliente) - _modelos_do(titulos):
+        return True
+    if re.search(r"\bnote\s+\d", cliente) and not re.search(r"\bnote\s+\d", titulos):
+        return True
+    for marca in _MARCAS_CONHECIDAS:
+        if re.search(rf"\b{marca}\b", cliente) and not re.search(rf"\b{marca}\b", titulos):
+            return True
+
+    def _tem(grupo: tuple[str, ...], texto: str) -> bool:
+        return any(re.search(rf"\b{re.escape(n)}\b", texto) for n in grupo)
+
+    dos_titulos = [g for g in _TIPOS_DE_PRODUTO if _tem(g, titulos)]
+    return bool(dos_titulos) and any(
+        _tem(g, cliente) and g not in dos_titulos for g in _TIPOS_DE_PRODUTO
+    )
+
+
 def conferir_regiao(
     texto: str,
     fichas: Sequence[dict],
@@ -7602,7 +7805,15 @@ def conferir_regiao(
         return []
     from app.services.atendimento import restricao_envio
 
-    blocos = _restricoes([*(f for f in fichas if isinstance(f, Mapping)), *_do_registro(ctx)])
+    todos_os_blocos = _restricoes(
+        [*(f for f in fichas if isinstance(f, Mapping)), *_do_registro(ctx)]
+    )
+    # Liberação L3 (23/10/2026): a prova de "nenhuma restrição" (`restricao_envio`
+    # `conferida`) não é bloco de restrição; com ela em TODOS os anúncios da conversa
+    # (`sem_restricao_na_conversa`), a entrega no estado do cliente e "todo o Brasil" têm o
+    # dado. Sem ela (não se sabe), "todo o Brasil" é suave (pessoa confere).
+    blocos = [b for b in todos_os_blocos if not restricao_envio.sem_restricao_conferida(b)]
+    nenhuma = sem_restricao_na_conversa(fichas, ctx, textos_cliente=textos_cliente)
     restritas = {str(u) for b in blocos for u in b.get("ufs") or []}
     conforme = {str(u) for b in blocos for u in b.get("ufs_conforme_pedido") or []}
     do_anuncio = {
@@ -7721,7 +7932,7 @@ def conferir_regiao(
                         f"afirma a entrega sem citar a restrição do anúncio ({lista})",
                     )
                 )
-        elif not blocos and do_cliente and not destinos:
+        elif not blocos and not nenhuma and do_cliente and not destinos:
             if _afirmacao_de_entrega(
                 sentenca, _COBERTURA_GERAL_OU_SEM_RESTRICAO
             ) or _afirmacao_de_entrega(sentenca, _AFIRMA_ENTREGA):
@@ -7731,6 +7942,14 @@ def conferir_regiao(
                         "afirma a entrega no estado que o cliente citou sem dado de restrição",
                     )
                 )
+        elif not blocos and not nenhuma and _afirmacao_de_entrega(sentenca, _COBERTURA_GERAL):
+            # Liberação L3 (23/10/2026): "todo o Brasil" só com a prova de nenhuma restrição.
+            saida.append(
+                _suave(
+                    REGIAO_SEM_FONTE,
+                    "afirma a entrega em todo o Brasil sem a restrição de envio conferida",
+                )
+            )
         if not destinos:
             continue
         for uf in destinos:
@@ -7762,7 +7981,7 @@ def conferir_regiao(
                             f"diz que entrega em {uf}, mas o anúncio não envia para lá",
                         )
                     )
-            elif not blocos:
+            elif not blocos and not nenhuma:
                 # Rodada 4b (achado 17): o destino citado só na orientação do
                 # frete/prazo pelo CEP não afirma a entrega.
                 if all(
@@ -8396,12 +8615,22 @@ def conferir_atraso_sem_chamado(
     textos_cliente: Sequence[str],
     pedido: Mapping | None,
     acoes_pessoa: Iterable[str] = (),
+    plataforma: str | None = None,
 ) -> list[PendenciaAgente]:
     """O atraso que o cliente diz ("hoje era o dia da entrega e não recebi") sem a ação de
     abrir o chamado (ver acima) → SUAVE. PURA.
 
     `textos_cliente` = a rajada e as perguntas pendentes; `pedido` = o bloco do pedido da
-    conversa; `acoes_pessoa` = as do código e as do modelo."""
+    conversa; `acoes_pessoa` = as do código e as do modelo.
+
+    D3 (decisão do dono, 23/10/2026 ~12:50): na SHOPEE (`plataforma`), o "hoje/ontem era o
+    dia" e a data que passou SOZINHOS não seguram — a equipe responde com a resposta-
+    padrão ("pode seguir o prazo informado na compra pela plataforma, não temos acesso ao
+    transporte"). Segura só com a condição do chamado que o texto mostra
+    (`acao_pessoa.chamado_de_entrega_shopee`: o cliente pede para a loja agir/verificar,
+    pede o dinheiro/cancelamento com o atraso dito, ou o último status do bloco diz falha
+    ou volta da entrega) sem a ação de abrir o chamado — a rede por baixo da régua do
+    código (que lê também o retrato fresco). Fora da Shopee, como antes."""
     if acao not in ("responder", "perguntar") or not (texto or "").strip():
         return []
     if constantes.ACAO_ABRIR_CHAMADO in set(acoes_pessoa):
@@ -8413,9 +8642,168 @@ def conferir_atraso_sem_chamado(
     if not turno:
         return []
     reclama = acao_pessoa.reclama_que_nao_chegou(turno) or bool(_NAO_CHEGOU_INDIRETO.search(turno))
+    if plataforma == "shopee" and (bloco.get("reclamacoes_abertas") or bloco.get("reclamacoes")):
+        # D3 (23/10/2026): com a devolução/reclamação já aberta na plataforma, o atraso é
+        # dela (a régua do código também não abre o chamado: `not devolucao_aberta`).
+        return []
+    if plataforma == "shopee":
+        if not (reclama or acao_pessoa.fala_da_entrega(turno) or _ERA_HOJE.search(turno)):
+            return []
+        if acao_pessoa.pede_acao_na_entrega(turno) or acao_pessoa.falha_na_entrega(
+            str(bloco.get("ultimo_status") or "")
+        ):
+            return [_suave(ATRASO_SEM_CHAMADO, MOTIVO_ATRASO_SEM_CHAMADO)]
+        return []
     if acao_pessoa.prazo_vencido(turno) or (reclama and _ERA_HOJE.search(turno)):
         return [_suave(ATRASO_SEM_CHAMADO, MOTIVO_ATRASO_SEM_CHAMADO)]
     return []
+
+
+# ── 10a. D3: a política da entrega só com a resposta da equipe citada (23/10/2026) ──
+#
+# A resposta-padrão da equipe para a entrega ("depois do envio, a entrega fica por conta da
+# Shopee; não temos acesso ao transporte") é POLÍTICA da loja: o lastro dela é a resposta da
+# equipe da MESMA loja que a diz, citada (`par:<id>`, `pares.politica_da_entrega`) — o
+# verificador a confere contra a linha do par (v9). Sem o par citado, a frase nova não sai
+# sozinha (regra SUAVE, só o agente): "a entrega é feita pela Shopee" (a orientação de
+# antes) continua como era.
+POLITICA_DA_ENTREGA_SEM_PAR = "politica_da_entrega_sem_par"
+MOTIVO_POLITICA_DA_ENTREGA_SEM_PAR = (
+    'diz a política da entrega ("{trecho}") sem citar a resposta da equipe desta loja que a '
+    "diz (par:<id>) — no automático, pessoa confere"
+)
+_POLITICA_DA_ENTREGA_NO_TEXTO = re.compile(
+    r"\bnao\s+(?:temos|tem|possuimos)\s+acesso\s+(?:ao|a|as|aos)\s+(?:transporte|processo"
+    r"|logistica|questoes|entregador|transportadora|rastreamento|entrega)\w*"
+    r"|\b(?:fica|ficam|e|sao|esta|estao)\s+(?:inteiramente\s+|totalmente\s+|100\s*%?\s+)?"
+    r"(?:por\s+conta|a\s+cargo|sob\s+(?:a\s+)?responsabilidade)\s+d[ao]\s+(?:propri[ao]\s+)?"
+    r"(?:shopee|plataforma|transportadora)\b"
+    r"|\bquem\s+(?:faz|realiza)\s+(?:a\s+)?entrega\s+(?:e|eh)\s+(?:a\s+)?(?:propria\s+)?"
+    r"(?:shopee|plataforma|transportadora)\b"
+)
+
+
+def conferir_politica_da_entrega(
+    texto: str, *, evidencias_: Sequence[str], ctx: ContextoAgente
+) -> list[PendenciaAgente]:
+    """D3: a política da entrega sem a resposta da equipe citada (ver acima) → SUAVE. PURA."""
+    m = _POLITICA_DA_ENTREGA_NO_TEXTO.search(" ".join(_plano(texto).split()))
+    if m is None:
+        return []
+    from app.services.atendimento.agente import pares as pares_svc
+
+    if any(
+        par.get("mesma_loja") is True and pares_svc.politica_da_entrega(par.get("resposta"))
+        for par in ctx.pares_citados(evidencias_)
+    ):
+        return []
+    trecho = " ".join(m.group(0).split())[:50]
+    return [
+        _suave(
+            POLITICA_DA_ENTREGA_SEM_PAR, MOTIVO_POLITICA_DA_ENTREGA_SEM_PAR.format(trecho=trecho)
+        )
+    ]
+
+
+# ── 10b. D1: o "responde e marca" (decisão do dono, 23/10/2026 ~12:40) ─────
+#
+# Com a devolução/reclamação aberta na plataforma e o turno só informativo
+# (`acao_pessoa.responde_e_marca_do_turno`), a resposta pode sair sozinha e a conversa
+# fica na Caixa Humano com a ação (aprovar/recusar na Central do Vendedor). A resposta
+# só INFORMA: o estado da solicitação (o bloco do pedido), que a Shopee analisa e devolve
+# pela mesma forma de pagamento, onde acompanhar no app e como postar pela própria
+# solicitação. Regra SUAVE (só o agente, só com a marca; no automático, pessoa confere):
+#   - nunca diz que a devolução/o reembolso foi aprovado, recusado, aceito, pago, liberado,
+#     concluído ou cancelado, nem decide por ela ("aprovamos", "pode ficar com o produto",
+#     "não precisa devolver");
+#   - nunca promete data, prazo ou valor do reembolso ("cai amanhã", "em até 3 dias",
+#     "dia 30", "o valor de…");
+#   - nunca pede ou fala de Pix, conta ou dados bancários;
+#   - nunca manda abrir outra solicitação nem recusar a entrega;
+#   - da equipe, só "a equipe analisa a devolução/a solicitação pela Shopee" (a ação está
+#     de fato na fila: a marca); qualquer outra ação prometida segura (a checagem da
+#     promessa de sempre também).
+# Monotônica: só acrescenta o aviso.
+RESPONDE_E_MARCA = "responde_e_marca_fora_da_forma"
+MOTIVO_RESPONDE_E_MARCA = (
+    "com a devolução aberta, a resposta {o_que} — só informar o estado e o caminho; a "
+    "decisão é da pessoa — no automático, pessoa confere"
+)
+_DECIDE_A_DEVOLUCAO = re.compile(
+    r"\b(?:foi|foram|esta|estao|ja\s+foi|ja\s+esta|ficou|ficaram|sera|serao|vai\s+ser|vao\s+ser"
+    r"|seja|sendo)\s+(?:\w+\s+)?(?:aprovad|recusad|negad|aceit|indeferid|deferid|autorizad"
+    r"|liberad|finalizad|concluid|reembolsad|estornad|creditad|pag[oa]s?\b|devolvid|cancelad"
+    r"|encerrad|resolvid)\w*"
+    r"|\b(?:aprovamos|recusamos|aceitamos|negamos|autorizamos|liberamos|estornamos|reembolsamos"
+    r"|aprovaremos|aceitaremos|autorizaremos|liberaremos)\b"
+    r"|\b(?:vamos|vou|iremos|irei|podemos|posso)\s+(?:\w+\s+)?(?:aprovar|aceitar|recusar|negar"
+    r"|autorizar|liberar|estornar|reembolsar|devolver\s+o\s+(?:valor|dinheiro))\b"
+    r"|\bpode\s+ficar\s+com\b|\bnao\s+precisa\s+(?:devolver|enviar\s+de\s+volta|postar)\b"
+    r"|\b(?:reembols\w*|devoluc\w*|estorno|dinheiro|valor)\s+(?:\w+\s+){0,2}?(?:e|esta|fica|sera)\s+"
+    r"garantid[oa]\b|\bpode\s+(?:ficar\s+tranquil[oa]|contar)\b"
+    r"|\b(?:voce|vc)\s+(?:vai|ira)\s+(?:receber|ter)\s+(?:o\s+|seu\s+|o\s+seu\s+)?(?:reembols\w*"
+    r"|dinheiro|estorno|valor)"
+    # O resultado dado como feito ou certo ("já caiu", "o dinheiro vai cair amanhã"); "volta
+    # pela mesma forma de pagamento" é o processo da plataforma (a orientação aprovada).
+    r"|\b(?:reembols\w*|dinheiro|estorno|valor)\s+(?:ja\s+)?(?:caiu|voltou|entrou|chegou|foi\s+pago)\b"
+    r"|\b(?:reembols\w*|dinheiro|estorno|valor)\s+(?:vai|ira|vao)\s+(?:cair|voltar|entrar|chegar)\b"
+    r"(?!\s+(?:\w+\s+){0,2}?pel[ao])"
+)
+_PRAZO_DO_REEMBOLSO = re.compile(
+    r"\b(?:em\s+ate|ate\s+(?:o\s+)?dia|dentro\s+de|no\s+prazo\s+de|amanha|depois\s+de\s+amanha"
+    r"|hoje|\d+\s*(?:dias?|horas?|semanas?|meses|uteis)|proxim[oa]s?\s+(?:dias|semana|mes)"
+    r"|essa\s+semana|esta\s+semana|nesta\s+semana|semana\s+que\s+vem|mes\s+que\s+vem"
+    r"|(?:fim|final|comeco|inicio)\s+d[eo]\s+(?:mes|semana)|em\s+breve|logo\s+logo|rapidinho"
+    r"|dia\s+\d{1,2}|\d{1,2}\s*/\s*\d{1,2}|r\$\s*\d|\d+\s*reais)\b"
+)
+_PIX_OU_BANCO = re.compile(
+    r"\bpix\b|\bchave\b|\bconta\s+(?:bancaria|corrente|poupanca)\b|\bdados\s+bancarios\b"
+    r"|\bagencia\s+e\s+conta\b|\btransferencia\b|\bdeposito\b"
+)
+_OUTRA_SOLICITACAO = re.compile(
+    r"\b(?:abr\w*|faca|fazer|pedir|peca|solicit\w*)\s+(?:\w+\s+){0,2}?(?:outr[ao]|nov[ao]|de\s+novo"
+    r"|novamente)\s*(?:solicitac\w*|devoluc\w*|pedido\s+de\s+reembolso|reembolso)?"
+    # Com a solicitação já aberta, ensinar a pedi-la ("para pedir a devolução, acesse…
+    # e escolha a opção de devolução") é mandar pedir de novo.
+    r"|\b(?:para|pra)\s+(?:pedir|solicitar|abrir|fazer)\s+(?:a\s+|o\s+|uma\s+|um\s+)?(?:devoluc\w*"
+    r"|reembolso|solicitac\w*|pedido\s+de\s+(?:devoluc\w*|reembolso))"
+    r"|\bescolh\w*\s+(?:a\s+)?opcao\s+(?:de\s+)?(?:devoluc\w*|reembolso)"
+    r"|\b(?:abra|solicite|peca)\s+(?:a\s+|o\s+|uma\s+|um\s+)?(?:devoluc\w*|reembolso|solicitac\w*)"
+    r"|\brecus\w*\s+(?:a\s+|o\s+)?(?:entrega|pacote|produto|aparelho|pedido|encomenda|recebimento)\b"
+)
+# A única menção da equipe que vale com a ação na fila (a marca): "a equipe analisa a
+# devolução/a solicitação pela Shopee" (e "na Shopee", "pela plataforma").
+_EQUIPE_ANALISA = re.compile(
+    r"\b(?:a\s+|nossa\s+|a\s+nossa\s+)?(?:equipe|loja)\s+(?:ja\s+)?(?:analisa|acompanha|esta\s+"
+    r"analisando|esta\s+acompanhando)\s+(?:a\s+|sua\s+|a\s+sua\s+)?(?:devoluc\w*|solicitac\w*"
+    r"|reclamac\w*)\s+(?:pela|na)\s+(?:propria\s+)?(?:shopee|plataforma)\b"
+)
+_OUTRA_ACAO_DA_EQUIPE = re.compile(
+    r"\b(?:equipe|loja|time|setor|nos|a\s+gente)\s+(?:\w+\s+){0,2}?(?:analisa|acompanha|verifica"
+    r"|resolve|aprova|aceita|responde|retorna|avisa|cuida|trata|providencia|libera|confere)\w*"
+)
+
+
+def conferir_responde_e_marca(texto: str, *, acao: str, marca: bool) -> list[PendenciaAgente]:
+    """D1: a resposta do "responde e marca" fora da forma (ver acima) → SUAVE. PURA.
+    `marca` = `ctx.responde_e_marca`."""
+    if not marca or acao not in ("responder", "perguntar") or not (texto or "").strip():
+        return []
+    plano = " ".join(_plano(texto).split())
+    achados: list[str] = []
+    if _DECIDE_A_DEVOLUCAO.search(plano):
+        achados.append("decide ou dá o resultado da devolução/do reembolso")
+    if _PRAZO_DO_REEMBOLSO.search(plano):
+        achados.append("promete data, prazo ou valor")
+    if _PIX_OU_BANCO.search(plano):
+        achados.append("fala de Pix ou dados bancários")
+    if _OUTRA_SOLICITACAO.search(plano):
+        achados.append("manda abrir outra solicitação ou recusar a entrega")
+    if _OUTRA_ACAO_DA_EQUIPE.search(_EQUIPE_ANALISA.sub(" ", plano)):
+        achados.append("promete ação da equipe além de «a equipe analisa a devolução pela Shopee»")
+    return [
+        _suave(RESPONDE_E_MARCA, MOTIVO_RESPONDE_E_MARCA.format(o_que=o_que)) for o_que in achados
+    ]
 
 
 # ── 11. O OUTRO produto da loja: G1 (23/10/2026) ───────────────────────────
@@ -8771,6 +9159,784 @@ def _sem_os_anuncios(valores: Iterable[Any], fora: Collection[str]) -> list[Any]
     return saida
 
 
+# ── 8. Liberações do dono (23/10/2026, L1 e L2): produto e condição pelo anúncio ──
+#
+# Dono (23/10/2026 ~10:40, "quero que ele responda quase tudo, como um atendente humano"):
+# as perguntas de PRODUTO (o_que_e_o_anuncio, espec_*, conteudo_da_caixa, duvida_produto)
+# e a de CONDIÇÃO (originalidade_condicao) deixam de ser "sempre pessoa" quando a resposta
+# se apoia nos dados do ANÚNCIO DA CONVERSA — título, atributos, descrição, variações e as
+# especificações de fonte "anuncio" — ou na resposta da equipe que vale para produto; as
+# checagens de sempre e o verificador continuam. A conferência daqui é ESTRITA e só abre a
+# porta (sem ela, a régua de antes: `conferir_ficha_no_automatico` e a trava do assunto):
+#   - o rascunho cita a ficha (ficha:/espec:/variacoes:) de um anúncio DA CONVERSA, ou um
+#     par que vale para produto — e nenhuma de outro anúncio;
+#   - toda característica afirmada está nos dados do anúncio da conversa (a mesma régua
+#     termo a termo da `caracteristicas_fora_do_dado`), sem o site da marca, o cadastro,
+#     outro anúncio (o `ver_anuncio` de fora, a ficha emprestada de outro anúncio do mesmo
+#     produto) nem o que as outras ferramentas devolveram; o atributo em inglês "NFC: No"
+#     conta como negado;
+#   - a resposta curta ("Sim!", "Tem sim", "Não") à pergunta de característica só com o
+#     termo perguntado no dado, do mesmo lado (afirmado ou negado);
+#   - a condição (L2) só como a "condicao" do anúncio da conversa declara (título, atributo
+#     de condição ou descrição: `condicao_provada`), sem conflito no anúncio nem contra a
+#     fala da loja (`conferir_condicao`); "de fábrica", "nunca aberto", "100% original",
+#     "genuíno" e afins só com as mesmas palavras no anúncio (`_CONDICAO_ALEM`);
+#   - a resistência à água não entra (continua só pelo título e sempre com pessoa).
+
+
+def _atributo_em_portugues(atributo: Any) -> Any:
+    """ "NFC: No" → "NFC: nao"; "NFC: Yes" → "NFC: sim"; "X: Not applicable" sai (não diz
+    nada). O resto como veio. PURA."""
+    if not isinstance(atributo, str):
+        return atributo
+    m = re.match(r"^\s*(?P<nome>[^:=]+?)\s*[:=]\s*(?P<valor>[^:=]+?)\s*$", atributo)
+    if m is None:
+        return atributo
+    valor = " ".join(m.group("valor").lower().split())
+    if valor in ("yes", "y", "true"):
+        return f"{m.group('nome')}: sim"
+    if valor in ("no", "n", "false", "none", "without"):
+        return f"{m.group('nome')}: nao"
+    if valor in ("not applicable", "n/a", "na", "-"):
+        return None
+    # A unidade em inglês do atributo da plataforma ("Screen Size: 6.75 inches").
+    return re.sub(r"\binch(?:es)?\b", "polegadas", atributo, flags=re.IGNORECASE)
+
+
+def _so_do_anuncio(dado: Mapping[str, Any]) -> dict:
+    """Do dado de um anúncio da conversa (a ficha do pacote ou o `ver_anuncio`), só o que o
+    PRÓPRIO anúncio diz: o título, os atributos e a descrição (não os da ficha emprestada de
+    outro anúncio do mesmo produto), os nomes das variações e as especificações de fonte
+    "anuncio" sem conflito. PURA."""
+    from app.services.atendimento import especificacoes as espec_svc
+    from app.services.atendimento import ficha as ficha_svc
+
+    emprestada = str(dado.get("fonte") or "").startswith(ficha_svc.FONTE_OUTRO_ANUNCIO)
+    saida: dict[str, Any] = {"item_id": dado.get("item_id"), "titulo": dado.get("titulo")}
+    if not emprestada:
+        atributos = [
+            a
+            for a in (_atributo_em_portugues(x) for x in dado.get("atributos") or [])
+            if isinstance(a, str) and a.strip()
+        ]
+        if atributos:
+            saida["atributos"] = atributos
+        if isinstance(dado.get("descricao"), str) and dado["descricao"].strip():
+            saida["descricao"] = dado["descricao"]
+    variacoes = dado.get("variacoes")
+    if isinstance(variacoes, Mapping):
+        variacoes = variacoes.get("variacoes")
+    nomes = [
+        {"nome": v.get("nome"), "disponivel": v.get("disponivel")}
+        for v in variacoes or []
+        if isinstance(v, Mapping) and isinstance(v.get("nome"), str)
+    ]
+    if nomes:
+        saida["variacoes"] = nomes
+    espec = dado.get("especificacoes")
+    if isinstance(espec, Mapping) and not emprestada:
+        campos = [
+            dict(c)
+            for c in espec.get("campos") or []
+            if isinstance(c, Mapping)
+            and c.get("fonte") == espec_svc.FONTE_ANUNCIO
+            and not c.get("conflito_no_anuncio")
+            and not c.get("varia_por_modelo")
+        ]
+        if campos:
+            saida["especificacoes"] = {"campos": campos, "conflitos": []}
+    return saida
+
+
+def dados_do_anuncio_da_conversa(
+    fichas: Sequence[Any], ctx: ContextoAgente | None = None
+) -> tuple[list[dict], frozenset[str]]:
+    """(os dados do ANÚNCIO DA CONVERSA para a liberação L1, os ids desses anúncios). PURA.
+
+    Da conversa: a ficha do pacote (com o `de_onde` do código) e o anúncio citado que o
+    `ver_anuncio` leu (`da_conversa`); nunca o `ver_anuncio` de outro anúncio da loja. O
+    dado: o do pacote e o JSON do `ver_anuncio` desses anúncios (`_so_do_anuncio`)."""
+    ids: set[str] = set()
+    saida: list[dict] = []
+    for f in fichas:
+        if not isinstance(f, Mapping) or not f.get("item_id") or f.get("da_conversa") is False:
+            continue
+        de_onde = _plano(str(f.get("de_onde") or ""))
+        if f.get("da_conversa") is True or de_onde in evidencias._DE_ONDE:
+            ids.add(str(f["item_id"]))
+            if de_onde in evidencias._DE_ONDE:
+                saida.append(_so_do_anuncio(f))
+    for dado in _do_registro(ctx):
+        if (
+            isinstance(dado, Mapping)
+            and str(dado.get("item_id")) in ids
+            and ("atributos" in dado or "descricao" in dado or "sem_ficha" in dado)
+        ):
+            saida.append(_so_do_anuncio(dado))
+    return saida, frozenset(ids)
+
+
+# A condição dita ALÉM do que "novo/lacrado/original" provam: só com as mesmas palavras no
+# anúncio da conversa (o dono, L2: nunca "original de fábrica", "nunca aberto" além do anúncio).
+_CONDICAO_ALEM = re.compile(
+    r"\bde\s+fabrica\b|\bnunca\s+(?:foi\s+|foram\s+)?(?:abert|usad|ligad|violad|aberto)\w*"
+    r"|\b(?:sem|zero)\s+uso\b|\b100\s*%\s*(?:original|originais|nov[oa]s?|lacrad[oa]s?)\b"
+    r"|\bgenuin[oa]s?\b|\bautentic[oa]s?\b|\blacre\s+(?:original|intacto|inviolad[oa])\b"
+    r"|\bselad[oa]s?\b|\bprimeira\s+mao\b|\bnunca\s+aberto\b"
+)
+
+
+def _condicao_alem_do_anuncio(texto: str, dados: Sequence[Any]) -> list[str]:
+    """As expressões de `_CONDICAO_ALEM` do texto que o anúncio da conversa não traz. PURA."""
+    plano = _plano(texto)
+    fonte = " ".join(_plano(t) for t in _textos_de(list(dados)) if isinstance(t, str))
+    return [
+        m.group(0)
+        for m in _CONDICAO_ALEM.finditer(plano)
+        if " ".join(m.group(0).split()) not in fonte
+    ]
+
+
+def condicao_pelo_anuncio(
+    texto: str, fichas: Sequence[Any], textos_da_loja: Sequence[str | None] = ()
+) -> bool:
+    """L2 (23/10/2026): o texto afirma a condição (novo, lacrado, original) e TUDO o que
+    afirma é o que o anúncio da conversa declara, sem conflito nem contra a fala da loja.
+    PURA."""
+    ditas = _ditas_da_condicao(texto)
+    if not ditas:
+        return False
+    if set(ditas) - condicao_provada(texto, fichas):
+        return False
+    return not conferir_condicao(texto, fichas, textos_da_loja)
+
+
+# As palavras que, numa oração afirmada só pela FORMA ("ele é novo", "acompanha o
+# aparelho"), não são conteúdo: o verbo de capacidade, o pronome, o "sim".
+_SEM_CONTEUDO_NA_FORMA = frozenset(
+    """
+    acompanha acompanham possui possuem funciona funcionam suporta suportam inclui incluem
+    oferece oferecem contem temos tem sao esta estao ele ela eles elas este esse essa isso
+    isto aqui sim nao tambem muito bem pode podem serve servem fica ficam vem
+    """.split()
+)
+
+
+def _oracao_com_as_palavras_no_dado(fora: str, dados: Sequence[Any]) -> bool:
+    """A oração que a `caracteristicas_fora_do_dado` devolve INTEIRA (a afirmada só pela
+    forma: "ele é novo", "acompanha o aparelho") tem TODAS as palavras de conteúdo (4+
+    letras, fora o verbo e o pronome) afirmadas no dado — e pelo menos uma? O termo do
+    vocabulário (uma palavra ou o termo curto) nunca passa por aqui. PURA."""
+    palavras = re.findall(r"[a-z0-9]+", _plano(fora))
+    if len(palavras) < 2:
+        return False
+    conteudo = [
+        p for p in palavras if len(p) >= 4 and not p.isdigit() and p not in _SEM_CONTEUDO_NA_FORMA
+    ]
+    if not conteudo:
+        return False
+    linhas = [
+        _NUMERO_E_UNIDADE.sub(r"\1\2", _plano(linha))
+        for t in _textos_de(list(dados))
+        if isinstance(t, str)
+        for linha in t.splitlines()
+    ]
+    return all(_afirmado_no_dado(p, linhas) for p in conteudo)
+
+
+# O número com unidade da resposta ("4 GB", "6,75 polegadas", "5160 mAh") tem de estar no
+# dado INTEIRO, não como pedaço de outro número (a busca por trecho achava "4gb" em "64gb").
+_NUMERO_COM_UNIDADE = re.compile(
+    r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(gb|tb|mb|mah|mm|cm|kg|g|l|litros?|w|watts?|v|volts?|hz"
+    r"|mp|polegadas?|pol)\b"
+)
+
+
+_UNIDADE_CANONICA = {
+    "litro": "l",
+    "litros": "l",
+    "watt": "w",
+    "watts": "w",
+    "volt": "v",
+    "volts": "v",
+    "polegada": "pol",
+    "polegadas": "pol",
+}
+
+
+def _numeros_do(texto: str) -> set[tuple[str, str]]:
+    saida = set()
+    for m in _NUMERO_COM_UNIDADE.finditer(_plano(texto)):
+        numero = m.group(1).replace(",", ".")
+        saida.add((numero, _UNIDADE_CANONICA.get(m.group(2), m.group(2))))
+    return saida
+
+
+def _numeros_fora_do_dado(texto: str, dados: Sequence[Any]) -> list[str]:
+    """Os números com unidade que o texto AFIRMA (fora da pergunta) e que o dado não traz
+    inteiros, com a mesma unidade. PURA (liberação L1)."""
+    afirmado = " ".join(
+        sentenca for sentenca, pergunta in _sentencas(_plano(texto)) if not pergunta
+    )
+    no_dado: set[tuple[str, str]] = set()
+    for t in _textos_de(list(dados)):
+        if isinstance(t, str):
+            no_dado |= _numeros_do(t)
+    return [f"{n} {u}" for n, u in sorted(_numeros_do(afirmado)) if (n, u) not in no_dado]
+
+
+# As palavras do texto da LOJA sobre onde está o dado e da proteção da compra ("o anúncio não
+# informa", "as especificações estão na descrição", "a compra é protegida pela plataforma"):
+# não são característica do produto.
+_PALAVRAS_DA_LOJA = frozenset(
+    """
+    anuncio anuncios descricao ficha informa informam informacao informacoes plataforma compra
+    compras protegida protegido especificacoes especificacao pagina loja conforme segundo aparece
+    aparecem opcoes opcao selecao versao versoes modelo modelos produto aparelho celular detalhes
+    consta constam mostra mostram traz dizer dados dado cada abaixo acima mesmo mesma nossa nosso
+    dele dela deles delas nele nela neles nelas seus suas sobre essa esse isso estes estas
+    """.split()
+)
+
+
+def _afirmacoes_fora_do_dado(
+    texto: str,
+    dados: Sequence[Any],
+    *,
+    textos_cliente: Sequence[str],
+    fichas: Sequence[Any],
+    nomes_de_produto: Sequence[Any],
+) -> list[str]:
+    """À pergunta de característica, as orações AFIRMADAS da resposta que nem o vocabulário
+    nem a forma leem como característica (a paráfrase: "dá para usar debaixo do chuveiro
+    tranquilo", "é ótimo para fotos à noite") e que têm palavra de conteúdo fora do dado do
+    anúncio. A régua antiga (`_responde_com_afirmacao`) segurava qualquer uma; a liberação L1
+    só deixa a que o dado traz palavra por palavra. PURA."""
+    opcoes = _opcoes_das_fichas(fichas)
+    nomes = _nomes_de_produto(nomes_de_produto, fichas)
+    cabecas = _cabecas(nomes_de_produto, fichas)
+    plano = _sem_as_cabecas(_sem_os_nomes(_plano(_com_eh(texto)), nomes), cabecas)
+    linhas = [
+        _NUMERO_E_UNIDADE.sub(r"\1\2", _plano(linha))
+        for t in _textos_de(list(dados))
+        if isinstance(t, str)
+        for linha in t.splitlines()
+    ]
+    fora: list[str] = []
+    for sentenca, pergunta in _sentencas(plano):
+        if pergunta or acao_pessoa.pede_evidencia(sentenca):
+            continue
+        for oracao in _ORACAO.split(sentenca):
+            oracao = oracao.strip(" ,.;:!")
+            if (
+                not oracao
+                or _NAO_AFIRMA.search(oracao)
+                or _so_acolhimento(oracao, textos_cliente)
+                or _SO_SIM_OU_NAO.search(oracao)
+                or _oracao_de_caracteristica(oracao, opcoes)
+            ):
+                continue
+            conteudo = [
+                p
+                for p in re.findall(r"[a-z0-9]+", _sem_as_opcoes(oracao, opcoes))
+                if len(p) >= 4
+                and not p.isdigit()
+                and p not in _SEM_CONTEUDO_NA_FORMA
+                and p not in _SEM_PESO_NO_DADO
+                and p not in _PALAVRAS_DA_LOJA
+            ]
+            if any(not _afirmado_no_dado(p, linhas) for p in conteudo):
+                fora.append(oracao)
+    return fora
+
+
+def _termos_da_oracao(oracao: str) -> list[str]:
+    """Os termos de característica de uma oração (plana), pelo vocabulário. PURA."""
+    termos = [
+        " ".join(m.group(0).split())
+        for padrao in (_CARACTERISTICA, _CARACTERISTICA_2, *(p for _r, p, _t in _POR_TERMO))
+        for m in padrao.finditer(oracao)
+    ]
+    if _ACOMPANHA.search(oracao):
+        termos += [f for nome in _objetos(oracao) for f in _OBJETOS[nome][:1]]
+    return [t for t in dict.fromkeys(termos) if t not in _SO_O_NOME_DA_CARACTERISTICA]
+
+
+def _termos_perguntados(
+    textos_cliente: Sequence[str], fichas: Sequence[Any], nomes_de_produto: Sequence[Any]
+) -> list[str]:
+    """Os termos de característica que o cliente PERGUNTA (a régua `so_vocabulario` do
+    `pede_caracteristica`: só a frase que pergunta, fora a do pedido e o nome). PURA."""
+    opcoes = _opcoes_das_fichas(fichas)
+    nomes = _palavras_dos_nomes(nomes_de_produto, fichas)
+    saida: list[str] = []
+    for texto in textos_cliente:
+        if not isinstance(texto, str):
+            continue
+        for sentenca, pergunta in _frases_inteiras(_plano(_com_eh(texto))):
+            if not (pergunta or _ABRE_PERGUNTA.search(sentenca)) or (
+                _ORACAO_DO_PEDIDO_DO_CLIENTE.search(sentenca)
+            ):
+                continue
+            for oracao in _ORACAO.split(sentenca):
+                oracao = _sem_as_palavras_do_nome(oracao.strip(), nomes)
+                if oracao:
+                    resto = _NUMERO_E_UNIDADE.sub(
+                        r"\1\2", _sem_as_opcoes(oracao, opcoes, do_cliente=True)
+                    )
+                    saida += _termos_da_oracao(resto)
+    return list(dict.fromkeys(saida))
+
+
+def _curta_com_o_dado(
+    texto: str,
+    dados: Sequence[Any],
+    *,
+    textos_cliente: Sequence[str],
+    fichas: Sequence[Any],
+    nomes_de_produto: Sequence[Any],
+) -> bool:
+    """A resposta curta ("Sim!", "Tem sim", "Não") à pergunta de característica tem o termo
+    perguntado no dado, do mesmo lado? Sem resposta curta, True. PURA."""
+    nomes = _nomes_de_produto(nomes_de_produto, fichas)
+    cabecas = _cabecas(nomes_de_produto, fichas)
+    plano = _sem_as_cabecas(_sem_os_nomes(_plano(_com_eh(texto)), nomes), cabecas)
+    curtas = [
+        oracao.strip(" ,.;:!")
+        for sentenca, pergunta in _sentencas(plano)
+        if not pergunta
+        for oracao in _ORACAO.split(sentenca)
+        if _SO_SIM_OU_NAO.search(oracao.strip(" ,.;:!"))
+    ]
+    if not curtas:
+        return True
+    perguntados = _termos_perguntados(textos_cliente, fichas, nomes_de_produto)
+    if not perguntados:
+        # A pergunta pela forma ("pode usar tranquilo?", "é novo?") não tem termo para
+        # achar: a resposta curta só com a afirmação inteira junto ("Sim, ele é novo", que
+        # a régua termo a termo já conferiu); o "Sim" sozinho, não.
+        afirmadas = [
+            oracao.strip(" ,.;:!")
+            for sentenca, pergunta in _sentencas(plano)
+            if not pergunta
+            for oracao in _ORACAO.split(sentenca)
+            if oracao.strip(" ,.;:!") and not _so_acolhimento(oracao.strip(" ,.;:!"))
+        ]
+        return len(afirmadas) > len(curtas) or not pede_caracteristica(
+            textos_cliente, fichas, nomes_de_produto=nomes_de_produto, fora_do_pedido=True
+        )
+    linhas = [
+        _NUMERO_E_UNIDADE.sub(r"\1\2", _plano(linha))
+        for t in _textos_de(list(dados))
+        if isinstance(t, str)
+        for linha in t.splitlines()
+    ]
+    negativa = any(re.match(r"(?:nao|negativo)\b", c) for c in curtas)
+    positiva = any(not re.match(r"(?:nao|negativo)\b", c) for c in curtas)
+    for termo in perguntados:
+        afirmado = _afirmado_no_dado(termo, linhas)
+        citado = any(termo in linha for linha in linhas)
+        if positiva and not afirmado:
+            return False
+        if negativa and (afirmado or not citado):
+            return False
+    return True
+
+
+def liberacao_pelo_anuncio(
+    texto: str,
+    assunto: str | None,
+    *,
+    evidencias: Iterable[str | None],
+    fichas: Sequence[Any],
+    ctx: ContextoAgente | None = None,
+    fontes_extra: Sequence[str] = (),
+    textos_cliente: Sequence[str] = (),
+    pares_do_produto: Sequence[str] = (),
+    fatos_citados: Sequence[str] = (),
+    textos_da_loja: Sequence[str | None] = (),
+) -> bool:
+    """A resposta de produto (L1) ou de condição (L2) se apoia SÓ no anúncio da conversa
+    (ver o bloco acima)? PURA. True abre a porta do envio sozinho (a marca
+    `ctx.produto_pelo_anuncio`); as outras checagens e o verificador continuam."""
+    if assunto not in constantes.ASSUNTOS_LIBERADOS_PELO_ANUNCIO or not (texto or "").strip():
+        return False
+    dados, ids = dados_do_anuncio_da_conversa(fichas, ctx)
+    if not dados:
+        return False
+    citadas = [str(e).strip() for e in evidencias if isinstance(e, str) and e.strip()]
+    do_anuncio = [e for e in citadas if e.startswith(("ficha:", "espec:", "variacoes:"))]
+    if any(e.split(":", 1)[1] not in ids for e in do_anuncio):
+        return False  # o dado de OUTRO anúncio
+    if not do_anuncio and not pares_do_produto:
+        return False
+    # Com dois anúncios na conversa (o cartão e o item do pedido), a resposta se apoia em UM:
+    # o que ela cita — o dado de um nunca vale para o outro; citar os dois é pessoa.
+    citados = {e.split(":", 1)[1] for e in do_anuncio}
+    if len(citados) > 1:
+        return False
+    # Revisão L1–L3 (achado 2, 23/10/2026): com 2+ anúncios na conversa, o citado tem de ser
+    # o de que o cliente fala — o modelo dele (A17, A18…) na pergunta, e só o dele. Sem o
+    # cliente nomear (o "esse tem NFC?" com o cartão do A17 e o pedido do A18), não se sabe
+    # de qual anúncio é a pergunta: pessoa.
+    if len(ids) > 1 and (
+        len(citados) != 1 or not _cliente_fala_so_do(textos_cliente, dados, next(iter(citados)))
+    ):
+        return False
+    if citados:
+        dados = [d for d in dados if str(d.get("item_id")) in citados]
+        # Revisão L1–L3: o `ver_anuncio` de fora (`da_conversa` False) também sai — o título
+        # dele nunca é nome do produto da resposta.
+        fichas = [
+            f
+            for f in fichas
+            if not (isinstance(f, Mapping) and f.get("item_id")) or str(f["item_id"]) in citados
+        ]
+    # Revisão L1–L3 (achado 1, 23/10/2026): o título do cartão e os itens do pedido
+    # (`fontes_extra`) nunca são DADO da liberação — podem ser de OUTRO anúncio (o pedido do
+    # A18 com o cartão do A17: o "5G" e os "108MP" do título dele não valem para o A17). Só o
+    # nome do anúncio citado sai do texto como nome (`_nomes_do_citado`).
+    nomes = _nomes_do_citado(fontes_extra, dados)
+    if assunto == constantes.ASSUNTO_CONDICAO and not condicao_pelo_anuncio(
+        texto, fichas, textos_da_loja
+    ):
+        return False
+    if _condicao_alem_do_anuncio(texto, dados):
+        return False
+    textos_do_citado = [t for t in _textos_de(list(dados)) if isinstance(t, str)]
+    # Revisão L1–L3: o "não vem fone" com o fone no título/descrição do anúncio citado (a
+    # `_acompanha` só lê a oração com o verbo de acompanhar; "não vem X" passava).
+    if _nega_o_que_o_anuncio_cita(texto, textos_do_citado):
+        return False
+    extra = [
+        *sorted(condicao_provada(texto, fichas)),
+        *acompanha_pelo_par(pares_do_produto, fichas, ctx, fontes_extra=nomes),
+        # Revisão L1–L3 (achado 7): o "não vem X" pela lista exclusiva do anúncio citado.
+        *negados_pela_lista_exclusiva(texto, textos_do_citado),
+    ]
+    fora = caracteristicas_fora_do_dado(
+        texto,
+        dados,
+        dados_extra=extra,
+        nomes_de_produto=nomes,
+        fatos_citados=fatos_citados,
+        textos_cliente=textos_cliente,
+    )
+    if [f for f in fora if not _oracao_com_as_palavras_no_dado(f, [*dados, *extra])]:
+        return False
+    if _numeros_fora_do_dado(texto, [*dados, *extra, *fatos_citados]):
+        return False
+    if pede_caracteristica(
+        textos_cliente, fichas, nomes_de_produto=nomes, fora_do_pedido=True
+    ) and _afirmacoes_fora_do_dado(
+        texto,
+        [*dados, *extra, *fatos_citados],
+        textos_cliente=textos_cliente,
+        fichas=fichas,
+        nomes_de_produto=nomes,
+    ):
+        return False
+    return _curta_com_o_dado(
+        texto,
+        [*dados, *extra, *fatos_citados],
+        textos_cliente=textos_cliente,
+        fichas=fichas,
+        nomes_de_produto=nomes,
+    )
+
+
+def _nomes_do_citado(fontes_extra: Sequence[Any], dados: Sequence[Mapping]) -> list[str]:
+    """Os nomes do anúncio CITADO (revisão L1–L3, achado 1): o título dele e, de
+    `fontes_extra` (o título do cartão, os itens do pedido), só o que é o mesmo título
+    (`ficha.mesmo_titulo`: a linha da variação "Título - Prata,12 GB" vale). PURA."""
+    from app.services.atendimento import ficha as ficha_svc
+
+    titulos = [str(d["titulo"]) for d in dados if isinstance(d.get("titulo"), str)]
+    return [
+        *titulos,
+        *(
+            n
+            for n in fontes_extra
+            if isinstance(n, str)
+            and any(ficha_svc.mesmo_titulo(n, t) or ficha_svc.mesmo_titulo(t, n) for t in titulos)
+        ),
+    ]
+
+
+# O MODELO dito na pergunta ou no título ("A17", "A18", "C2", "F109", "S7"): letra(s) e
+# número juntos. Fora o que é característica ou padrão ("IP68", "Wi-Fi 6", "USB-C"…).
+_MODELO = re.compile(r"\b[a-z]{1,6}\d{1,4}[a-z]?\b")
+_NAO_E_MODELO = re.compile(
+    r"^(?:ipx?|wifi|android|ios|bt|usb|pd|qc|hdmi|sd|ddr|lpddr|ufs|mt|lte|cat|type|rs|rj|sp|mg"
+    r"|ba|pa|am|uf|nf|cep)\d"
+)
+
+
+def _modelos_do(texto: Any) -> set[str]:
+    """Os modelos (`_MODELO`) de um texto, no plano. PURA."""
+    return {
+        m.group(0)
+        for m in _MODELO.finditer(_plano(str(texto or "")))
+        if not _NAO_E_MODELO.match(m.group(0))
+    }
+
+
+def _cliente_fala_so_do(
+    textos_cliente: Sequence[str], dados: Sequence[Mapping], citado: str
+) -> bool:
+    """Revisão L1–L3 (achado 2): com 2+ anúncios na conversa, o cliente nomeia o modelo do
+    anúncio CITADO (o que só o título dele tem) e nenhum modelo só dos outros? PURA."""
+    modelos: dict[str, set[str]] = {}
+    for d in dados:
+        if isinstance(d, Mapping) and d.get("item_id"):
+            modelos.setdefault(str(d["item_id"]), set()).update(_modelos_do(d.get("titulo")))
+    cliente = set()
+    for t in textos_cliente:
+        cliente |= _modelos_do(t)
+    falados = set()
+    for item, seus in modelos.items():
+        dos_outros = set().union(*(m for i, m in modelos.items() if i != item))
+        if (seus - dos_outros) & cliente:
+            falados.add(item)
+    return falados == {citado}
+
+
+def _pares_de_produto(proposta: Proposta, ctx: ContextoAgente, fichas: Sequence[Any]) -> list[str]:
+    """As respostas da equipe CITADAS que valem para produto (com UM anúncio nas fichas)."""
+    if not par_vale_para_produto(fichas):
+        return []
+    return [
+        str(par.get("resposta") or "")
+        for par in ctx.pares_citados(proposta.evidencias, de_produto=True)
+    ]
+
+
+# ── 12. D2: a garantia Apple antes da compra (decisão do dono, 23/10/2026) ──
+#
+# Kia 22/10 17:10 (16792993), 17:34 (9b4622da) e 20:40 (4f4bb4a9): "é original lacrado,
+# posso comprar com garantia?" / "garantia da Apple?" sobre o Apple Watch, ANTES da
+# compra. Seguravam o validador ("promessa de cobertura sem garantia ativa"), "a resposta
+# fala de garantia — só pessoa" e "a categoria da IA não bate com o texto do cliente".
+# Agora sai (com todas as checagens e o verificador) SÓ nesta forma: a condição pelo
+# anúncio da conversa (L2) e a garantia SÓ como o fato aprovado diz — "garantia Apple de
+# 1 ano a partir da ativação" (o fato 25 da Kia, citado) ou a resposta da equipe da MESMA
+# loja citada que diz o mesmo ("a garantia é com a Apple após ativação", 26/06) —, de um
+# produto Apple (o anúncio da conversa), sem pedido na conversa. Nada de garantia da
+# loja, "com a loja", "garantia legal/CDC", outro número, cobertura ("cobre", "compra
+# protegida") nem defeito. Toda frase que fala de garantia tem de ser essa; o resto do
+# texto passa pelas checagens de sempre.
+_APPLE = re.compile(r"\b(?:apple|iphone|ipad|macbook|mac\s*mini|airpods|imac|apple\s+watch)\b")
+_FALA_DE_GARANTIA = re.compile(
+    r"\bgarant\w*|\bcobert\w*|\bcobre\b|\bcobrem\b|\bassistencia\b|\bprotegid\w*|\bcdc\b"
+    r"|\bcodigo\s+de\s+defesa\b|\bdefeit\w*|\bconserto\w*|\breparo\w*"
+)
+_GARANTIA_APPLE_1_ANO = re.compile(
+    r"\bgarantia\b(?=.*\bapple\b)(?=.*\b(?:1|um)\s+ano\b)(?=.*\bativ(?:acao|ado|ada|ar|a)\b)"
+)
+# O que a frase da garantia Apple NUNCA traz (a garantia da loja, a legal, a cobertura).
+_ALEM_DO_FATO_25 = re.compile(
+    r"\b(?:loja|nossa|nosso|nossos|nossas|conosco|gente|legal|cdc|codigo|defesa|consumidor|cobre"
+    r"|cobrem|cobert\w*|defeit\w*|troca\w*|assistencia|protegid\w*|plataforma|shopee|garantid[oa]s?"
+    r"|vitalicia|total|qualquer|tudo|estendid\w*|extra|adicional|alem)\b"
+)
+_PRAZO_NA_FRASE = re.compile(
+    r"\b(\d+|um|uma|dois|duas|tres|seis|doze|noventa)\s*(?:dias?|mes(?:es)?|anos?|horas?|semanas?)\b"
+)
+_PAR_GARANTIA_APPLE = re.compile(
+    r"\bgarantia\b.*\b(?:com|da|direto\s+com)\s+a?\s*apple\b.*\bativ|\bapple\b.*\bgarantia\b.*\bativ"
+)
+
+
+def frase_da_garantia_apple(frase: str) -> bool:
+    """A frase (plana) diz da garantia SÓ o que o fato aprovado diz — "garantia Apple de 1
+    ano a partir da ativação", com ou sem a condição do anúncio antes ("é novo e lacrado,
+    com garantia…") — e nada além (`_ALEM_DO_FATO_25`, nenhum número fora o 1)? PURA (D2)."""
+    if not _GARANTIA_APPLE_1_ANO.search(frase) or _ALEM_DO_FATO_25.search(frase):
+        return False
+    # Nenhum outro prazo ("90 dias", "2 anos"); o número do nome do produto ("Series 11")
+    # não é prazo.
+    return all(
+        " ".join(m.group(0).split()) in ("1 ano", "um ano") for m in _PRAZO_NA_FRASE.finditer(frase)
+    )
+
+
+def sem_as_frases_da_garantia_apple(texto: str | None) -> str:
+    """O texto sem as frases da garantia Apple do fato (`frase_da_garantia_apple`). PURA."""
+    ficam = [
+        frase
+        for frase, _p in _frases_inteiras(texto or "")
+        if not frase_da_garantia_apple(_plano(frase))
+    ]
+    return ". ".join(ficam)
+
+
+def _produto_apple(fichas: Sequence[Any]) -> bool:
+    """O anúncio DA CONVERSA é Apple (título, marca nos atributos)? PURA."""
+    for f in fichas:
+        if not isinstance(f, Mapping):
+            continue
+        de_onde = _plano(str(f.get("de_onde") or ""))
+        if not (f.get("da_conversa") is True or de_onde in evidencias._DE_ONDE):
+            continue
+        partes = [str(f.get("titulo") or ""), *(str(a) for a in f.get("atributos") or [])]
+        if any(_APPLE.search(_plano(p)) for p in partes):
+            return True
+    return False
+
+
+def garantia_apple_pelo_fato(
+    texto: str | None,
+    *,
+    evidencias_: Sequence[str],
+    ctx: ContextoAgente,
+    base: BaseDoGerar,
+    fichas: Sequence[Any],
+) -> bool:
+    """A resposta tem a forma liberada da garantia Apple antes da compra (D2, ver acima)?
+    PURA. Todas juntas: o agente no automático; sem pedido na conversa; o cliente fala de
+    garantia; o anúncio da conversa é Apple; um fato aprovado CITADO (lido pelo
+    `consultar_manual`) diz "garantia Apple de 1 ano a partir da ativação" — ou uma
+    resposta da equipe da MESMA loja citada diz a garantia com a Apple após a ativação (o
+    "1 ano" dela, então, só com o anúncio dizendo "1 ano"); toda frase do texto que fala de
+    garantia é a do fato (`frase_da_garantia_apple`) e há ao menos uma."""
+    if ctx.modo != constantes.MODO_AUTO or not (texto or "").strip():
+        return False
+    ctx_base = base.ctx if isinstance(base.ctx, Mapping) else {}
+    fatos_base = base.fatos if isinstance(base.fatos, Mapping) else {}
+    if (
+        ctx_base.get("pedido")
+        or fatos_base.get("pedido")
+        or getattr(ctx, "pedido_da_conversa", None)
+    ):
+        return False
+    clientes = " ".join(_plano(t) for t in [*base.textos_rajada, *base.textos_cliente] if t)
+    if not re.search(r"\bgarant\w*", clientes) or not _produto_apple(fichas):
+        return False
+    do_fato = any(_GARANTIA_APPLE_1_ANO.search(_plano(t)) for t in ctx.fatos_citados(evidencias_))
+    do_par = any(
+        par.get("mesma_loja") is True and _PAR_GARANTIA_APPLE.search(_plano(par.get("resposta")))
+        for par in ctx.pares_citados(evidencias_)
+    )
+    if not (do_fato or do_par):
+        return False
+    falas = [_plano(f) for f, _p in _frases_inteiras(texto or "")]
+    de_garantia = [f for f in falas if _FALA_DE_GARANTIA.search(f)]
+    if not de_garantia or not all(frase_da_garantia_apple(f) for f in de_garantia):
+        return False
+    if do_fato:
+        return True
+    # Só o par: o "1 ano" tem de estar no anúncio da conversa.
+    do_anuncio = " ".join(
+        _plano(" ".join([str(f.get("titulo") or ""), str(f.get("descricao") or "")]))
+        for f in fichas
+        if isinstance(f, Mapping)
+    )
+    return bool(re.search(r"\b(?:1|um)\s+ano\b", do_anuncio))
+
+
+def garantia_apple_da_proposta(
+    proposta: Proposta,
+    texto: str | None,
+    ctx: ContextoAgente,
+    base: BaseDoGerar,
+    *,
+    fichas: Sequence[Any],
+) -> bool:
+    """`garantia_apple_pelo_fato` com o que a proposta cita (o agente a chama antes da
+    `ia.conferir_saida`). PURA (D2)."""
+    return garantia_apple_pelo_fato(
+        texto, evidencias_=proposta.evidencias, ctx=ctx, base=base, fichas=fichas
+    )
+
+
+# D2 (cautela dos pares da equipe, 07/10/2026: "foi comprado o modelo aberto com garantia
+# ativada, estava informado na hora de selecionar o modelo!"): a Kia vende alguns Apple
+# "aberto com garantia ativada", escolhido na VARIAÇÃO. "Novo e lacrado" só vale para a
+# variação que o anúncio diz; com uma variação aberta/ativada (aberto, ativado, vitrine,
+# open box, seminovo, recondicionado, usado…) no anúncio da conversa, a condição depende
+# da variação: a resposta diz a de cada uma como o anúncio diz, ou pergunta qual — nunca
+# "lacrado"/"novo" para o anúncio inteiro. Regra SUAVE (só o agente).
+CONDICAO_POR_VARIACAO = "condicao_varia_por_variacao"
+MOTIVO_CONDICAO_POR_VARIACAO = (
+    "o anúncio tem variação aberta/ativada ({variacao}) e a resposta diz novo/lacrado sem "
+    "separar a variação — no automático, pessoa confere"
+)
+_VARIACAO_ABERTA = re.compile(
+    r"\b(?:abert[oa]s?|ativad[oa]s?|vitrine|mostruario|open\s*box|seminov[oa]s?|semi\s+nov[oa]s?"
+    r"|recondicionad[oa]s?|usad[oa]s?|exposicao|sem\s+lacre|caixa\s+aberta|reembalad[oa]s?"
+    r"|outlet|salvad[oa]s?|vitrine)\b"
+)
+_DESCRICAO_COM_ABERTA = re.compile(
+    r"\b(?:abert[oa]|ativad[oa])\s+(?:e\s+)?com\s+(?:a\s+)?garantia|\bgarantia\s+(?:ja\s+)?ativad[oa]"
+    r"|\bopen\s*box\b|\bseminov\w*|\brecondicionad\w*|\bvitrine\b|\bmostruario\b"
+)
+
+
+def variacoes_abertas(fichas: Sequence[Any]) -> list[str]:
+    """Os nomes das variações abertas/ativadas do anúncio DA CONVERSA (e a marca da
+    descrição que oferece a opção aberta). PURA (D2)."""
+    saida: list[str] = []
+    for f in fichas:
+        if not isinstance(f, Mapping):
+            continue
+        de_onde = _plano(str(f.get("de_onde") or ""))
+        if not (f.get("da_conversa") is True or de_onde in evidencias._DE_ONDE):
+            continue
+        for v in f.get("variacoes") or []:
+            nome = str((v or {}).get("nome") or "") if isinstance(v, Mapping) else str(v or "")
+            if nome and _VARIACAO_ABERTA.search(_plano(nome)) and nome not in saida:
+                saida.append(nome)
+        if m := _DESCRICAO_COM_ABERTA.search(_plano(str(f.get("descricao") or ""))):
+            saida.append(m.group(0))
+    return saida
+
+
+def conferir_condicao_por_variacao(texto: str, fichas: Sequence[Any]) -> list[PendenciaAgente]:
+    """D2: "novo/lacrado" dito para o anúncio inteiro com variação aberta/ativada (ver
+    acima) → SUAVE. A resposta que separa a variação (nomeia a aberta/ativada) passa. PURA."""
+    abertas = variacoes_abertas(fichas)
+    if not abertas or not (texto or "").strip():
+        return []
+    ditas = _ditas_da_condicao(texto)
+    if not (ditas.get("novo") is True or ditas.get("lacrado") is True):
+        return []
+    if _VARIACAO_ABERTA.search(_plano(texto)):
+        return []
+    return [
+        _suave(CONDICAO_POR_VARIACAO, MOTIVO_CONDICAO_POR_VARIACAO.format(variacao=abertas[0][:40]))
+    ]
+
+
+def liberacao_da_proposta(
+    proposta: Proposta,
+    texto: str | None,
+    assunto: str | None,
+    ctx: ContextoAgente,
+    base: BaseDoGerar,
+    *,
+    fichas: Sequence[Any],
+) -> bool:
+    """A `liberacao_pelo_anuncio` com o que a `conferir` usa (o agente a chama antes da
+    `ia.conferir_saida`, no texto do modelo; a `conferir`, de novo, no texto final). PURA."""
+    if ctx.modo != constantes.MODO_AUTO:
+        return False
+    from app.services.atendimento import ia as ia_svc
+
+    clientes = list(dict.fromkeys([*base.textos_rajada, *base.textos_cliente]))
+    return liberacao_pelo_anuncio(
+        texto or "",
+        assunto,
+        evidencias=proposta.evidencias,
+        fichas=fichas,
+        ctx=ctx,
+        fontes_extra=_fontes_da_base(base),
+        textos_cliente=clientes,
+        pares_do_produto=_pares_de_produto(proposta, ctx, fichas),
+        fatos_citados=ctx.fatos_citados(proposta.evidencias),
+        textos_da_loja=[m.texto for m in base.recentes if ia_svc.resposta_da_loja(m)],
+    )
+
+
 # ── Tudo junto ────────────────────────────────────────────────────────────
 
 
@@ -8823,11 +9989,20 @@ def conferir(
         # da conversa nunca empresta característica ao produto da conversa.
         de_fora = anuncios_de_fora(fichas, ctx, _fontes_da_base(base))
         fichas_do_produto = _sem_os_anuncios(fichas, de_fora)
+        # Liberações do dono (23/10/2026, L1 e L2): a resposta de produto ou de condição
+        # que se apoia só no anúncio da conversa não passa pela trava da ficha (a
+        # conferência estrita a substitui); a marca vai ao `fatos.agente`.
+        ctx.produto_pelo_anuncio = liberacao_da_proposta(
+            proposta, texto, conferida.categoria, ctx, base, fichas=fichas
+        )
         pendencias += conferir_variacoes(
             texto,
             fichas,
             clientes,
             com_pedido=bool(pedido) or bool(fatos_da_base.get("pedido")),
+            caracteristica=capacidade_sem_estoque(
+                ctx.produto_pelo_anuncio, conferida.categoria, clientes
+            ),
         )
         # Revisão 2 da rodada 6 (22/10/2026): o "sem previsão de reposição" só da
         # variação esgotada e confiável de que a frase fala (o verificador v8 o
@@ -8855,7 +10030,8 @@ def conferir(
             pares_do_produto=dos_pares,
             sem_os_anuncios=de_fora,
         )
-        if ctx.modo == constantes.MODO_AUTO:
+        # A marca L1/L2 (`ctx.produto_pelo_anuncio`, calculada acima, antes das variações).
+        if ctx.modo == constantes.MODO_AUTO and not ctx.produto_pelo_anuncio:
             pendencias += conferir_ficha_no_automatico(
                 texto,
                 fichas_do_produto,
@@ -8941,6 +10117,9 @@ def conferir(
             fichas,
             [m.texto for m in base.recentes if ia_svc.resposta_da_loja(m)],
         )
+        # D2 (23/10/2026): com variação aberta/ativada no anúncio, "novo/lacrado" só por
+        # variação.
+        pendencias += conferir_condicao_por_variacao(texto, fichas)
         # 21/10/2026 (decisão do dono): o agente nunca diz que é uma pessoa —
         # e, perguntado se é robô, diz que é o atendimento virtual da loja.
         pendencias += conferir_se_diz_humano(texto, textos_cliente=clientes)
@@ -8979,7 +10158,14 @@ def conferir(
             ],
             pedido=pedido,
             acoes_pessoa=ctx.acoes_pessoa,
+            plataforma=ctx.plataforma,
         )
+        # D1 (23/10/2026): a resposta do "responde e marca" só informa.
+        pendencias += conferir_responde_e_marca(
+            texto, acao=proposta.acao, marca=ctx.responde_e_marca
+        )
+        # D3 (23/10/2026): a política da entrega só com a resposta da equipe citada.
+        pendencias += conferir_politica_da_entrega(texto, evidencias_=proposta.evidencias, ctx=ctx)
         # Item 6 da rodada "redondo" (23/10/2026): G1 — o outro produto da loja só com a
         # busca no catálogo; o "não temos" só com o fato aprovado ou a busca vazia.
         pendencias += conferir_outro_produto_da_loja(
@@ -8996,7 +10182,9 @@ def conferir(
         conferida.categoria, base.recentes, gatilho, texto
     )
     pendencias += conferir_andamento(
-        base.ctx, motivos=conferida.motivos, rotina=ctx.devolucao_de_rotina
+        base.ctx,
+        motivos=conferida.motivos,
+        rotina=ctx.devolucao_de_rotina or ctx.responde_e_marca,
     )
     return Checagens(pendencias=_sem_repetir(pendencias))
 

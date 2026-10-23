@@ -482,6 +482,51 @@ def restricao_no_texto(*textos: str | None) -> tuple[list[str], str | None]:
     return ufs, trecho
 
 
+# Revisão L1–L3 (achado 6, 23/10/2026): a frase do anúncio que LIMITA o envio sem uma UF que
+# o `ufs_negadas` leia (região, cidade, "somente para", "exceto") — a prova de "nenhuma
+# restrição" (`restricao_do_anuncio(conferida=True)`) não sai com ela. Larga de propósito: o
+# que ela pega a mais só tira a prova (pessoa confere), nunca afirma restrição.
+_VERBO_DE_ENVIO = r"(?:envi|entreg|despach|mand|atend|vend|frete|cheg)\w*"
+# Na frase, sozinhas: a negação do envio e o envio "somente/apenas para".
+_LIMITA_ENVIO = re.compile(
+    r"\b(?:nao|nem)\s+(?:\w+\s+){0,3}?" + _VERBO_DE_ENVIO
+    + r"|\b" + _VERBO_DE_ENVIO + r"\s+(?:\w+\s+){0,3}?(?:somente|apenas|so|exclusivamente)\s+"
+    r"(?:para|pra|no|na|nos|nas|em|ao|aos|o\s+estado|a\s+regiao)\b"
+)  # fmt: skip
+# Com o envio na MESMA frase: "somente/apenas para …".
+_LIMITA_NA_FRASE = re.compile(
+    r"\b(?:somente|apenas|exclusivamente)\s+(?:para|pra|no|na|nos|nas|em|ao|aos)\b"
+)
+# Com o envio em qualquer lugar da descrição: "exceto …", "região Norte".
+_LIMITA_COM_ENVIO = re.compile(
+    r"\bexceto\b|\bcom\s+excecao\b|\bmenos\s+(?:para|pra)\b"
+    r"|\bregi(?:ao|oes)\s+(?:norte|nordeste|sul|sudeste|centro)"
+)
+_ENVIO_NA_DESCRICAO = re.compile(r"\b" + _VERBO_DE_ENVIO)
+
+
+def limitacao_de_envio_nao_lida(*textos: str | None) -> bool:
+    """O título ou a descrição têm frase que LIMITA o envio (`_LIMITA_ENVIO`; o "somente
+    para" com o envio na frase; o "exceto"/a região com o envio na descrição)? PURA (só o
+    `conferida` da liberação L3 a usa)."""
+    for bruto in textos:
+        if not isinstance(bruto, str) or not bruto.strip():
+            continue
+        texto = ficha_svc._TAG.sub(" ", ficha_svc._TAG_QUEBRA.sub("\n", bruto))
+        plano_todo = " ".join(plano_de(texto[:MAX_CHARS_DESCRICAO]).split())
+        if not _ENVIO_NA_DESCRICAO.search(plano_todo):
+            continue
+        for sentenca in _SENTENCAS.split(texto[:MAX_CHARS_DESCRICAO]):
+            plano = " ".join(plano_de(sentenca).split())
+            if not plano:
+                continue
+            if _LIMITA_ENVIO.search(plano) or _LIMITA_COM_ENVIO.search(plano):
+                return True
+            if _LIMITA_NA_FRASE.search(plano) and _ENVIO_NA_DESCRICAO.search(plano):
+                return True
+    return False
+
+
 def regra_apple_shopee(plataforma: Any, titulo: str | None) -> list[str]:
     """A regra fixa do faturamento (Shopee + Apple → RJ) no título do anúncio. PURA.
 
@@ -671,8 +716,18 @@ async def restricao_do_anuncio(
     integration_id: UUID | None,
     item_id: str,
     titulo: str | None,
+    *,
+    conferida: bool = False,
 ) -> dict | None:
     """A restrição de envio de UM anúncio da loja da conversa — ou None (nenhuma).
+
+    `conferida` (liberação L3 do dono, 23/10/2026; só o agente: o pacote e o
+    `ver_anuncio`) = o resultado diz o que foi conferido: com restrição, a chave
+    "conferido" (as três fontes); SEM restrição e com a descrição do anúncio lida,
+    `{"ufs": [], "ufs_conforme_pedido": [], "nenhuma": True, "conferido": [...]}` — a
+    prova de que nem o anúncio, nem a regra Apple→RJ, nem a loja restringem (o "Enviamos
+    para todo o Brasil" só sai com ela). Sem a descrição lida (Redis e catálogo sem o
+    anúncio), None como antes: não se sabe.
 
     `{"ufs": [...], "fonte": "anuncio"|"regra_apple_shopee"|"loja",
     "fontes": [...], "trecho": str|None, "ufs_conforme_pedido": [...]}`:
@@ -703,15 +758,43 @@ async def restricao_do_anuncio(
     ufs = sorted({u for lista in por_fonte.values() for u in lista})
     conforme = sorted(u for u in conforme if u not in ufs)
     if not ufs and not conforme:
+        # Revisão L1–L3 (achado 6, 23/10/2026): a frase de envio negada ou limitada que o
+        # leitor não converteu em UF ("não enviamos para a região Norte", "somente para SP",
+        # "não pode ser enviado para Manaus") — não se sabe: sem a prova.
+        if (
+            conferida
+            and isinstance(descricao, str)
+            and descricao.strip()
+            and not limitacao_de_envio_nao_lida(titulo_atual, descricao)
+        ):
+            return {
+                "ufs": [],
+                "ufs_conforme_pedido": [],
+                "nenhuma": True,
+                "conferido": list(_ORDEM_FONTES),
+            }
         return None
     fontes = [f for f in _ORDEM_FONTES if f in por_fonte] or [FONTE_LOJA]
-    return {
+    saida = {
         "ufs": ufs,
         "fonte": fontes[0],
         "fontes": fontes,
         "trecho": trecho if FONTE_ANUNCIO in por_fonte else None,
         "ufs_conforme_pedido": conforme,
     }
+    if conferida:
+        saida["conferido"] = list(_ORDEM_FONTES)
+    return saida
+
+
+def sem_restricao_conferida(restricao: Any) -> bool:
+    """O bloco `restricao_envio` é a prova de "nenhuma restrição" (`conferida`)? PURA."""
+    return (
+        isinstance(restricao, dict)
+        and restricao.get("nenhuma") is True
+        and not restricao.get("ufs")
+        and not restricao.get("ufs_conforme_pedido")
+    )
 
 
 # ── O pedido (pós-venda) ──────────────────────────────────────────────────

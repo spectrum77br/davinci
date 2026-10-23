@@ -1174,15 +1174,16 @@ _NOME_MASCARADO = re.compile(r"\s*,?\s*\[NOME\]")
 _CITACAO_DO_DUOKE = re.compile(r"「[^」]*」(?:\s*-)*\s*")
 _MESES = r"janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro"
 # O que a equipe diz e a régua do AGENTE não deixa (o pacote não ensina): a reposição
-# "vindo da fábrica"/"ainda não chegou", o reset, a assistência/o fabricante, "não temos
-# acesso ao transporte" (falso: a loja abre chamado — item 29), a recusa do cancelamento
-# e a palavra escrita com pontos para driblar o filtro da plataforma ("c.a.n.c.e.l.a.r").
+# "vindo da fábrica"/"ainda não chegou", o reset, a assistência/o fabricante, a recusa do
+# cancelamento e a palavra escrita com pontos para driblar o filtro da plataforma
+# ("c.a.n.c.e.l.a.r"). D3 (decisão do dono, 23/10/2026 ~12:50): "não temos acesso ao
+# transporte" SAIU desta lista — é a resposta-padrão da equipe para a entrega sem a
+# condição do chamado (o chamado o código marca: `acao_pessoa.chamado_de_entrega_shopee`).
 _FORA_DA_REGUA_DO_AGENTE = re.compile(
     r"\b(?:vindo|saindo|chegando)\s+(?:da|de)\s+fabrica\b|\bainda\s+nao\s+chegou\b"
     r"|\breset\w*|\bpadrao\s+de\s+fabrica\b|\bformat(?:ar|e|a|ação|acao)\b"
     r"|\blev(?:ar|e|a)\s+(?:na|a|ao|numa|em\s+uma)\s+(?:apple|assistencia|autorizada|tecnic\w*)"
     r"|\bassistencia\s+tecnica\b|\bsite\s+do\s+fabricante\b"
-    r"|\bnao\s+temos\s+acesso\s+(?:ao|a|as|aos)?\s*(?:transporte|transportadora|entregador)"
     r"|\bnao\s+(?:temos\s+como|conseguimos|da\s+(?:pra|para)|e\s+possivel)\s+cancel"
     r"|(?:\b[a-z]\.+){3,}"
     # A origem do envio sem o dado, a culpa no transporte e o estoque afirmado (o
@@ -1302,6 +1303,78 @@ async def _um_modelo_so(session: AsyncSession, produtos: frozenset[UUID] | None)
     if not nomes or any(" + " in n for n in nomes):
         return False
     return len(produtos) == 1 or len(especificacoes_svc.modelos_do_cadastro(nomes)) == 1
+
+
+# D3 (decisão do dono, 23/10/2026 ~12:50): a resposta-padrão da equipe para a entrega
+# ("Pode seguir o prazo informado na hora da compra pela plataforma, não temos acesso ao
+# transporte!", "Após o envio dos produtos não temos acesso ao processo logístico, ele
+# fica inteiramente por conta da plataforma.") — nos turnos de rastreio o pacote trazia
+# os pares do MESMO anúncio (produto) e nenhum desses. Com o pedido postado e não
+# entregue e o turno da entrega (ou vago), o pacote traz até `MAX_PARES_DA_POLITICA`
+# deles, da MESMA loja, na frente: o agente responde igual e cita o par:<id> (a política
+# da loja que o verificador aceita — v9).
+_POLITICA_DA_ENTREGA = re.compile(
+    r"\bprazo\s+informad\w*|\bacesso\s+(?:ao|a|as|aos)\s+(?:transporte|processo\s+logistico"
+    r"|questoes\s+logisticas|logistica)\b|\bpor\s+conta\s+da\s+(?:plataforma|shopee)\b"
+    r"|\bquem\s+faz\s+a\s+entrega\s+e\s+a\s+(?:shopee|plataforma)\b"
+)
+CONSULTA_DA_POLITICA_DE_ENTREGA = "prazo informado plataforma acesso transporte processo logístico"
+MAX_PARES_DA_POLITICA = 2
+
+
+def politica_da_entrega(resposta: str | None) -> bool:
+    """A resposta da equipe é a resposta-padrão da entrega (ver acima)? PURA (D3)."""
+    return bool(_POLITICA_DA_ENTREGA.search(validador.plano_de(sem_citacao(resposta))))
+
+
+async def exemplos_da_politica_de_entrega(
+    session: AsyncSession,
+    *,
+    plataforma: str,
+    integration_id: UUID | None,
+    conversa_id: UUID,
+    as_of: datetime,
+    canal_no_automatico: bool,
+) -> list[dict]:
+    """Os pares da resposta-padrão da entrega da MESMA loja (ver acima), no formato de
+    `exemplos_do_turno`. Só lê. Sem a loja, nada."""
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    if integration_id is None:
+        return []
+    achados = await buscar(
+        session,
+        pergunta=CONSULTA_DA_POLITICA_DE_ENTREGA,
+        plataforma=plataforma,
+        integration_id=integration_id,
+        item_id=None,
+        conversa_id=conversa_id,
+        as_of=as_of,
+        canal_no_automatico=canal_no_automatico,
+        limite=CANDIDATOS_PACOTE,
+    )
+    saida: list[dict] = []
+    for a in achados:
+        if not a["mesma_loja"] or not politica_da_entrega(a["resposta"]):
+            continue
+        if not serve_ao_pacote(a["resposta"]) or tem_mascara_de_dado(a["pergunta"]):
+            continue
+        saida.append(
+            {
+                "id": agente_ctx.id_par(a["id"]),
+                "pergunta": para_o_pacote(a["pergunta"], MAX_CHARS_PERGUNTA_PACOTE),
+                "resposta": para_o_pacote(a["resposta"], MAX_CHARS_RESPOSTA_PACOTE),
+                "mesma_loja": True,
+                "mesmo_anuncio": False,
+                "mesmo_produto": False,
+                "fonte_de_produto": False,
+                "com_anuncio": False,
+                "idade_dias": int(a["idade_dias"]),
+            }
+        )
+        if len(saida) >= MAX_PARES_DA_POLITICA:
+            break
+    return saida
 
 
 async def exemplos_do_turno(

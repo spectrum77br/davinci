@@ -402,6 +402,10 @@ def conferir_caso(caso: Any, *, linha: int = 0) -> None:
         for b in busca
     ):
         raise CasoInvalido(f"{onde}: busca inválida")
+    # v12 (D1 do dono, 23/10/2026): a ação que continua com a pessoa depois do envio.
+    pos_envio = caso.get("pos_envio", [])
+    if not isinstance(pos_envio, list) or not all(isinstance(a, str) for a in pos_envio):
+        raise CasoInvalido(f"{onde}: pos_envio inválido")
     if "bloqueia_sem_marca" in caso and (
         caso["bloqueia_sem_marca"] not in BLOQUEIOS_SEM_MARCA
         or esperado["ok_para_envio_automatico"]
@@ -517,6 +521,8 @@ def entrada_do_caso(caso: Mapping[str, Any]) -> str:
         pares=tuple(dict(par) for par in caso.get("pares") or []),
         # v10 (item 6 da rodada "redondo"): a busca no catálogo da loja (o caso que a traz).
         busca=tuple(dict(b) for b in caso.get("busca") or []),
+        # v12 (D1): a ação que continua com a pessoa (o caso que a traz).
+        pos_envio=tuple(str(a) for a in caso.get("pos_envio") or []),
     )
     return verificador.montar_entrada(
         acao=str(caso.get("acao") or "responder"),

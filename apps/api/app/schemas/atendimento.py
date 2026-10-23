@@ -115,6 +115,9 @@ class HumanoOut(BaseModel):
     # `humano.LojasDaCaixa.tem`). False = precisa de pessoa, mas a loja está
     # fora dos modos (em Observar, o Duoke responde): o chip só informa.
     na_caixa: bool = True
+    # D1 (23/10/2026, "responde e marca"): a IA já respondeu o cliente e a ação
+    # (aprovar/recusar a devolução na plataforma) continua com a pessoa.
+    pos_envio: bool = False
 
 
 class EmailResumoOut(BaseModel):

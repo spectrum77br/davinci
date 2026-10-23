@@ -2187,7 +2187,13 @@ async def _listar_marketplace(
         # têm os filtros próprios). A Caixa Humano e a aba E-mail continuam na
         # régua delas (a fila), em todo canal.
         consulta = consulta.where(
-            aguardando if caixa_humano or caixa_email else pendente.falta_responder_no_chat_sql()
+            # D1 (23/10/2026): na Caixa Humano, também a conversa que o agente respondeu com
+            # a ação pendente ("responde e marca", `humano.pos_envio_sql`).
+            or_(aguardando, humano_svc.pos_envio_sql())
+            if caixa_humano
+            else aguardando
+            if caixa_email
+            else pendente.falta_responder_no_chat_sql()
         )
     elif filtro == "vencendo":
         consulta = consulta.where(aguardando, prazo >= agora, prazo < agora + VENCENDO)

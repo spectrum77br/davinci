@@ -382,7 +382,11 @@ class _Destino:
 
 
 async def _destino(
-    session: AsyncSession, conversa: AtendimentoConversa, *, origem: str
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    *,
+    origem: str,
+    rascunho_id: UUID | None = None,
 ) -> _Destino:
     """Confere as travas que não dependem do texto; levanta `EnvioRecusado`.
 
@@ -500,7 +504,13 @@ async def _destino(
                 RECUSA_NAO_AGUARDA,
                 "Uma pessoa respondeu há menos de 30 minutos; a IA aguarda.",
             )
-        if await ia._motivos_humano_para_auto(session, conversa):
+        # D1 (23/10/2026): o rascunho do "responde e marca" segue a mesma régua da IA.
+        rascunho = (
+            await _rascunho_da_conversa(session, conversa, rascunho_id)
+            if rascunho_id is not None
+            else None
+        )
+        if await ia._motivos_humano_para_auto(session, conversa, rascunho):
             raise EnvioRecusado(
                 RECUSA_NAO_AGUARDA,
                 "A triagem da Caixa Humano exige uma pessoa nesta conversa.",
@@ -1329,7 +1339,7 @@ async def _preparar_envio(
 ) -> tuple[AtendimentoMensagem, _Destino, str, AtendimentoRascunho | None]:
     """Passos 0 e 1 do envio: trava, confere e grava a linha em voo (sem commit)."""
     await travar_conversa(session, conversa)
-    destino = await _destino(session, conversa, origem=origem)
+    destino = await _destino(session, conversa, origem=origem, rascunho_id=rascunho_id)
     try:
         normalizado = _preparar_texto(texto, conversa=conversa, origem=origem)
     except EnvioRecusado as recusa:

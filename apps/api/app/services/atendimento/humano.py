@@ -295,7 +295,10 @@ logger = structlog.get_logger()
 # 6 (20/10/2026): no canal com o AGENTE, a régua "ação de pessoa" (spec 6.6).
 # 7 (21/10/2026): no canal com o AGENTE, pedir atendente não é motivo por si (a
 # régua do pedido de pessoa do agente, `acao_pessoa.pedido_de_pessoa`).
-VERSAO = 7
+# 8 (23/10/2026): no canal com o agente, as decisões D1–D3 do dono — o "responde e marca"
+# (a conversa respondida com a ação pendente continua aqui: `pos_envio_vale`), o chamado
+# da entrega na Shopee só com a condição dele e o "6" do menu que não é insistência.
+VERSAO = 8
 # A chave em `atendimento_conversas.dados`.
 CHAVE = "humano"
 # Conversas por rodada do cron (o recálculo inicial, ~500, leva umas 3).
@@ -343,6 +346,13 @@ class Triagem:
 
     motivos: tuple[str, ...] = ()
     assuntos: tuple[str, ...] = ()
+    # D1 (23/10/2026, "responde e marca"): os motivos que a resposta informativa do agente
+    # pode deixar para DEPOIS do envio (a devolução/reclamação aberta e a ação dela) — só
+    # o envio sozinho os lê (`ia._motivos_humano_para_auto`); nunca gravado.
+    marca: tuple[str, ...] = ()
+    # D1: a conversa já respondida pelo agente com a ação pendente (`pos_envio_vale`) —
+    # gravado no cálculo ("pos_envio": true) para a tela dizer "respondida pela IA".
+    pos_envio: bool = False
 
     @property
     def para_pessoa(self) -> bool:
@@ -352,9 +362,53 @@ class Triagem:
 # ── A régua (pura) ────────────────────────────────────────────────────────
 
 
+# ── D1: o "responde e marca" (decisão do dono, 23/10/2026 ~12:40) ───────────
+#
+# A resposta informativa do agente com a devolução/reclamação aberta na plataforma sai
+# sozinha (`agente.acao_pessoa.responde_e_marca_do_turno`) e a conversa CONTINUA na Caixa
+# Humano com a etiqueta da ação (aprovar/recusar na Central do Vendedor). Sem isto, a
+# resposta tirava a conversa da fila ("esperando resposta" = o cliente falou por último) e
+# a ação se perdia. O envio grava `dados.humano_pos_envio` = {"turno": <o epoch do turno
+# respondido, como `turno_sql`>, "ate": <epoch do envio + `FOLGA_POS_ENVIO`>, "acoes":
+# [...], "rascunho": "<id>"} (`marcar_pos_envio`); a conversa entra no escopo enquanto
+# (`pos_envio_vale` / `pos_envio_sql`): o turno é o mesmo (o cliente não escreveu de novo
+# — se escrever, ela volta pela fila de sempre), ninguém da loja respondeu depois (a
+# `ultima_da_loja_em` até o "ate": a resposta de pessoa tira) e não foi marcada "não
+# precisa responder". Fechar a conversa também tira (o escopo). Ela só aparece com motivo
+# do cálculo do turno (a devolução/reclamação ainda aberta): a espera da IA e a IA pausada
+# só valem para quem espera resposta.
+CHAVE_POS_ENVIO = "humano_pos_envio"
+# A folga do "ate" sobre a hora do envio: a sincronização pode regravar a hora da mensagem
+# do agente com o relógio da plataforma, segundos depois.
+FOLGA_POS_ENVIO = timedelta(minutes=2)
+
+
+def _epoch_de(valor: datetime | None) -> float | None:
+    valor = _utc(valor)
+    return None if valor is None else valor.timestamp()
+
+
+def pos_envio_vale(conversa: Any) -> bool:
+    """A marca do "responde e marca" vale agora (ver acima)? PURA — a gêmea de `pos_envio_sql`."""
+    dados = conversa.dados if isinstance(getattr(conversa, "dados", None), dict) else {}
+    marca = dados.get(CHAVE_POS_ENVIO)
+    if not isinstance(marca, dict) or getattr(conversa, "sem_resposta_necessaria", False):
+        return False
+    turno = _epoch_de(
+        getattr(conversa, "ultima_do_cliente_em", None) or getattr(conversa, "created_at", None)
+    )
+    ate = marca.get("ate")
+    if turno is None or not isinstance(marca.get("turno"), (int, float)):
+        return False
+    if abs(float(marca["turno"]) - turno) > 1e-6:
+        return False
+    loja = _epoch_de(getattr(conversa, "ultima_da_loja_em", None))
+    return loja is None or (isinstance(ate, (int, float)) and loja <= float(ate))
+
+
 def no_escopo(conversa: Any) -> bool:
     """A conversa pode estar na Caixa Humano? PURA — a gêmea de `escopo_sql`."""
-    if not conversa.aguardando_resposta:
+    if not conversa.aguardando_resposta and not pos_envio_vale(conversa):
         return False
     # A bloqueada entra no escopo: a régua decide (só pelo estado — `triar`).
     if conversa.situacao == CONVERSA_FECHADA:
@@ -432,6 +486,10 @@ def ia_sem_resposta(conversa: Any, agora: datetime) -> bool:
     como na consulta (`caixa_humano_sql`, `para_tela`).
     """
     if conversa.situacao == CONVERSA_BLOQUEADA:
+        return False
+    # D1 (23/10/2026): a conversa respondida pelo agente com a ação pendente
+    # (`pos_envio_vale`) não espera a IA.
+    if not getattr(conversa, "aguardando_resposta", True):
         return False
     turno = _utc(conversa.ultima_do_cliente_em or getattr(conversa, "created_at", None))
     return turno is not None and turno <= agora - ESPERA_IA
@@ -699,7 +757,31 @@ def _triar_do_agente(
             return Triagem()
         motivos.add(HUMANO_BLOQUEADA)
 
-    return Triagem(motivos=tuple(m for m in ORDEM_HUMANO if m in motivos), assuntos=tuple(acoes))
+    # ── D1 (23/10/2026): o "responde e marca" ──
+    # A conversa que o agente já respondeu (a ação pendente, `pos_envio_vale`) sai daqui
+    # quando a pessoa agiu na plataforma: a devolução/reclamação ficou só em espera, sem
+    # ação pendente da loja (`acao_pessoa.devolucao_sem_acao_da_loja`).
+    pos_envio = not getattr(conversa, "aguardando_resposta", True) and pos_envio_vale(conversa)
+    if pos_envio and acao_pessoa.devolucao_sem_acao_da_loja(conversa, ctx):
+        motivos -= {HUMANO_RECLAMACAO, HUMANO_DEVOLUCAO}
+        acoes = [a for a in acoes if a not in acao_pessoa.ACOES_POS_ENVIO]
+        if not acoes:
+            motivos.discard(HUMANO_ACAO_PESSOA)
+    # Com a devolução/reclamação aberta e o turno só informativo (a MESMA régua do
+    # rascunho, `acao_pessoa.responde_e_marca_do_turno`, aqui sem o cartão Cliente — que
+    # o rascunho confere), o envio sozinho pode deixar a reclamação, a devolução e a ação
+    # dela para DEPOIS: a conversa continua aqui (`pos_envio_vale`).
+    marca: set[str] = set()
+    if acao_pessoa.responde_e_marca_do_turno(
+        conversa, ctx, recentes, gatilho, acoes=acoes, agora=agora
+    ):
+        marca = {HUMANO_RECLAMACAO, HUMANO_DEVOLUCAO, HUMANO_ACAO_PESSOA} & motivos
+    return Triagem(
+        motivos=tuple(m for m in ORDEM_HUMANO if m in motivos),
+        assuntos=tuple(acoes),
+        marca=tuple(m for m in ORDEM_HUMANO if m in marca),
+        pos_envio=pos_envio and bool(motivos),
+    )
 
 
 def para_tela(
@@ -727,13 +809,18 @@ def para_tela(
     if ia_pausada:
         motivos.append(HUMANO_IA_PAUSADA)
     assuntos = _lista(dados.get("assuntos"))
-    return {
+    saida = {
         "motivos": motivos,
         "rotulos": [rotulo_humano(m) for m in motivos],
         "assuntos": assuntos,
         "assuntos_rotulos": [_rotulo_do_assunto(a) for a in assuntos],
         "na_caixa": bool(na_caixa),
     }
+    if dados.get("pos_envio") is True:
+        # D1 (23/10/2026): a IA já respondeu o cliente; a ação continua com a pessoa (só
+        # quando há: a linha de antes não muda).
+        saida["pos_envio"] = True
+    return saida
 
 
 def _rotulo_do_assunto(assunto: str) -> str:
@@ -810,6 +897,8 @@ def ia_sem_resposta_sql(agora: datetime):
     limite = cast(literal(agora - ESPERA_IA), DateTime(timezone=True))
     return and_(
         c.situacao != CONVERSA_BLOQUEADA,
+        # D1 (23/10/2026): só quem espera resposta (a do "responde e marca" não).
+        c.aguardando_resposta.is_(True),
         func.coalesce(turno_em_sql() <= limite, false()),
     )
 
@@ -824,11 +913,32 @@ def momento_da_sugestao_sql(rascunho: Any, gatilho: Any):
     return func.coalesce(gatilho.enviada_em, gatilho.created_at, rascunho.created_at)
 
 
+def pos_envio_sql():
+    """A marca do "responde e marca" vale agora? Nunca NULL — a gêmea de `pos_envio_vale`.
+
+    Comparações de JSONB com JSONB (o número do epoch), sem conversão de tipo que possa
+    dar erro: chave ausente vira NULL = não.
+    """
+    c = AtendimentoConversa
+    return and_(
+        c.aguardando_resposta.is_(False),
+        func.coalesce(c.sem_resposta_necessaria.is_(False), true()),
+        func.coalesce(c.dados[(CHAVE_POS_ENVIO, "turno")] == turno_sql(), false()),
+        or_(
+            c.ultima_da_loja_em.is_(None),
+            func.coalesce(
+                _epoch(c.ultima_da_loja_em) <= c.dados[(CHAVE_POS_ENVIO, "ate")], false()
+            ),
+        ),
+    )
+
+
 def escopo_sql():
     """WHERE de quem pode estar na Caixa Humano — a gêmea de `no_escopo`. Nunca NULL."""
     c = AtendimentoConversa
     return and_(
-        c.aguardando_resposta.is_(True),
+        # D1 (23/10/2026): ou a conversa que o agente respondeu com a ação pendente.
+        or_(c.aguardando_resposta.is_(True), pos_envio_sql()),
         c.situacao != CONVERSA_FECHADA,
         # O e-mail da ponte mora na aba E-mail (13/10/2026, `separa_email`).
         separa_email.na_caixa_sql(c),
@@ -848,9 +958,14 @@ def _com_motivo_sql():
 
 
 def _pausada_sql():
-    """A IA pausada na conversa (menos a bloqueada, que só entra pelo estado)."""
+    """A IA pausada na conversa (menos a bloqueada, que só entra pelo estado). D1
+    (23/10/2026): só em quem espera resposta (a do "responde e marca" entra pelo motivo)."""
     c = AtendimentoConversa
-    return and_(c.ia_pausada.is_(True), c.situacao != CONVERSA_BLOQUEADA)
+    return and_(
+        c.ia_pausada.is_(True),
+        c.situacao != CONVERSA_BLOQUEADA,
+        c.aguardando_resposta.is_(True),
+    )
 
 
 def para_pessoa_sql(lojas: LojasDaCaixa | None, agora: datetime | None = None):
@@ -1104,6 +1219,9 @@ async def gravar_triagem(
         .scalar_subquery()
     )
     base = {"v": VERSAO, "motivos": list(triagem.motivos), "assuntos": list(triagem.assuntos)}
+    if triagem.pos_envio:
+        # D1 (23/10/2026): a conversa já respondida pelo agente, com a ação pendente.
+        base["pos_envio"] = True
     valor = cast(literal(json.dumps(base), Text), JSONB).op("||", return_type=JSONB)(
         func.jsonb_build_object(
             literal_column("'turno'"),
@@ -1126,6 +1244,39 @@ async def gravar_triagem(
         .execution_options(synchronize_session=False)
     )
     return (resultado.rowcount or 0) == 1
+
+
+async def marcar_pos_envio(
+    session: AsyncSession, conversa: AtendimentoConversa, rascunho: Any, acoes: Sequence[str]
+) -> None:
+    """D1 (23/10/2026): grava a marca do "responde e marca" depois do envio sozinho (ver
+    `CHAVE_POS_ENVIO`). Um UPDATE (jsonb_set: as outras chaves de `dados` ficam), com o
+    `turno` pelo MESMO SQL da régua (`turno_sql`) e o "ate" = agora + `FOLGA_POS_ENVIO`.
+    Não commita (quem chama, sim). O cálculo da triagem refaz sozinho: o rascunho mexido
+    depois dele (`desatualizada_sql`)."""
+    c = AtendimentoConversa
+    base = {"acoes": [a for a in acoes if isinstance(a, str)], "rascunho": str(rascunho.id)}
+    valor = cast(literal(json.dumps(base), Text), JSONB).op("||", return_type=JSONB)(
+        func.jsonb_build_object(
+            literal_column("'turno'"),
+            turno_sql(),
+            literal_column("'ate'"),
+            _epoch(func.now() + literal(FOLGA_POS_ENVIO)),
+        )
+    )
+    await session.execute(
+        update(c)
+        .where(c.id == conversa.id)
+        .values(
+            dados=func.jsonb_set(
+                func.coalesce(c.dados, _JSON_OBJETO_VAZIO),
+                literal_column(f"ARRAY['{CHAVE_POS_ENVIO}']::text[]"),
+                valor,
+            ),
+            updated_at=c.updated_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
 
 
 # ── A leitura de uma conversa ─────────────────────────────────────────────

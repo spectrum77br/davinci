@@ -266,10 +266,15 @@ def test_22_o_turno_do_ce443965_vira_chamado_de_atraso():
         (12, "está demorando demais", True),
         (12, "o pedido está parado", True),
         (12, "atrasou a entrega", True),
-        # A data que passou vale com qualquer idade.
-        (2, "não chegou e a previsão já passou", True),
-        (2, "era pra ter chegado ontem, cadê?", True),
-        (2, "Meu pedido não chegou. Hoje era a data limite", True),
+        # D3 (decisão do dono, 23/10/2026 ~12:50): na Shopee, a data que passou SOZINHA
+        # não vira chamado (a equipe responde com a resposta-padrão da entrega); com o
+        # pedido de ação ou o do dinheiro por causa do atraso, vira. Fora da Shopee, a
+        # data que passou continua valendo com qualquer idade (test_rev6_…).
+        (2, "não chegou e a previsão já passou", False),
+        (2, "era pra ter chegado ontem, cadê?", False),
+        (2, "Meu pedido não chegou. Hoje era a data limite", False),
+        (2, "não chegou e a previsão já passou, vocês podem ver com a Shopee?", True),
+        (2, "era pra ter chegado ontem, quero o reembolso", True),
         # Pergunta de data não é a data vencida.
         (3, "qual a data limite pra chegar? foi enviado ontem", False),
         # Sem reclamação de chegada, os dias sozinhos não bastam.
@@ -603,7 +608,7 @@ def test_22_e_24_a_nota_da_shopee_so_no_bloco_da_shopee(plataforma):
     texto = prompt.bloco_da_plataforma(plataforma, _categorias_do_manual())
     for nota in prompt.NOTAS_DA_PLATAFORMA["shopee"]:
         assert (nota in texto) is (plataforma == "shopee")
-    assert len(texto) / 3.5 <= 4_500
+    assert len(texto) / 3.5 <= 5_000  # D1–D3 do dono (23/10/2026)
     if plataforma == "shopee":
         assert "nunca 'ao receber' nem 'recuse'" in texto and "abrir_chamado" in texto
         assert '"[Shopee] Cliente abriu pedido de devolução/reembolso"' in texto
@@ -617,8 +622,8 @@ def test_22_e_24_a_nota_da_shopee_so_no_bloco_da_shopee(plataforma):
 def test_v8_a_versao():
     # Item 32 (22/10/2026): o v9 (as respostas da equipe citadas) guarda o v8 inteiro; o v10
     # (rodada "redondo", 23/10/2026: a busca no catálogo da loja) guarda o v9 inteiro.
-    assert v.VERSAO == "v10"
-    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v10"
+    assert v.VERSAO == "v12"  # decisões D1–D3 do dono (23/10/2026)
+    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v12"
 
 
 def test_22_o_sistema_diz_que_o_ao_receber_a_quem_nao_recebeu_e_errado():

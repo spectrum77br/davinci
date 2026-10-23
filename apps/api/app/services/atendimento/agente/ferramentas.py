@@ -759,8 +759,9 @@ async def dados_ver_anuncio(
             com_condicao=True,
         )
         titulo = (f or {}).get("titulo") or titulo_atual
+        # Liberação L3 (23/10/2026): com a prova de "nenhuma restrição".
         restricao = await restricao_envio.restricao_do_anuncio(
-            s, plat, ctx.integration_id, item, titulo
+            s, plat, ctx.integration_id, item, titulo, conferida=True
         )
         produtos = await especificacoes.produtos_do_anuncio(s, plat, ctx.integration_id, item)
         espec = await especificacoes.especificacoes_do_produto(s, f, produtos, titulo)
@@ -799,7 +800,11 @@ async def dados_ver_anuncio(
     if dados["variacoes"]:
         ids.append(contexto.id_variacoes(item))
     dados["restricao_envio"] = (
-        {k: restricao.get(k) for k in ("ufs", "fonte", "trecho", "ufs_conforme_pedido")}
+        {
+            k: restricao.get(k)
+            for k in ("ufs", "fonte", "trecho", "ufs_conforme_pedido", "nenhuma", "conferido")
+            if k in restricao or k in ("ufs", "fonte", "trecho", "ufs_conforme_pedido")
+        }
         if restricao
         else None
     )

@@ -914,7 +914,9 @@ ASSUNTOS_ORIENTACAO: tuple[str, ...] = (
 # trava do envio (`ia.trava_do_agente`), o pré-filtro do reenvio, a rota do
 # canal (o `auto_agente` recusa com 422) e a trava da ficha no automático
 # (`ia.conferir_saida(agente=True)`, mesmo sem a ficha). A mesma lista da tela
-# (`AtendimentoPlataforma.vue`, "sempre pessoa confere").
+# (`AtendimentoPlataforma.vue`, "sempre pessoa confere"). Liberações do dono de
+# 23/10/2026: menos a água, saem sozinhos pelo anúncio da conversa
+# (`ASSUNTOS_LIBERADOS_PELO_ANUNCIO`, logo abaixo) — o `auto_agente` continua sem eles.
 ASSUNTOS_SO_PESSOA_NO_AGENTE: tuple[str, ...] = (
     "o_que_e_o_anuncio",
     "espec_celular",
@@ -925,6 +927,19 @@ ASSUNTOS_SO_PESSOA_NO_AGENTE: tuple[str, ...] = (
     "duvida_produto",
     "resistencia_agua",
     "originalidade_condicao",
+)
+
+# Liberações do dono (23/10/2026, L1 e L2: "quero que ele responda quase tudo, como um
+# atendente humano"): dos assuntos acima, os que saem SOZINHOS quando a resposta se apoia
+# só nos dados do ANÚNCIO DA CONVERSA (título, atributos, descrição, variações e as
+# especificações de fonte "anuncio"), cita a ficha dele e passa por todas as checagens
+# (`checagens.liberacao_pelo_anuncio`, marca `fatos.agente.produto_pelo_anuncio`), com o
+# assunto no `auto_categorias` do canal — o `auto_agente` continua sem eles (a rota recusa).
+# A condição (L2) só como a "condicao" que o anúncio declara. Fora: a resistência à água
+# (continua só pelo título e sempre com pessoa).
+ASSUNTO_CONDICAO = "originalidade_condicao"
+ASSUNTOS_LIBERADOS_PELO_ANUNCIO: tuple[str, ...] = tuple(
+    a for a in ASSUNTOS_SO_PESSOA_NO_AGENTE if a != "resistencia_agua"
 )
 
 # A régua "ação de pessoa" (spec 6.3): vai para pessoa só quando alguém

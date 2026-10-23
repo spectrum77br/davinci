@@ -196,6 +196,31 @@ def secao_da_equipe(pares: Sequence[Mapping[str, Any]]) -> tuple[str | None, lis
     return "\n".join(linhas), cabem
 
 
+# D3 (23/10/2026): os assuntos do turno em que a resposta-padrão da entrega cabe (o turno
+# vago — o cumprimento, o "6", o "?" — também: a pergunta pendente é a da entrega).
+_PISTAS_DA_ENTREGA = frozenset(
+    {"rastreio", "prazo_envio", "entrega_nao_recebida", "pede_atendente", "saudacao_ou_vaga",
+     "agradecimento"}
+)  # fmt: skip
+
+
+def _turno_da_entrega(base: BaseDoGerar, bloco: Mapping | None, gatilho: Any) -> bool:
+    """O pedido da conversa postado e não entregue, e o turno (a rajada e as perguntas
+    pendentes: o "?" e o "6" depois de "sem atualização" contam) fala da entrega, sem outro
+    assunto? PURA (D3)."""
+    if not isinstance(bloco, Mapping) or bloco.get("entregue"):
+        return False
+    if bloco.get("postado") not in (acao_pessoa.POSTADO_SIM, acao_pessoa.POSTADO_MESMO_DIA):
+        return False
+    pistas = set(acao_pessoa.pistas_do_turno(base.recentes, gatilho, com_pedido=True))
+    if not pistas <= _PISTAS_DA_ENTREGA:
+        return False
+    _rajada, _textos, plano = acao_pessoa._planos_do_turno(base.recentes, gatilho)
+    return bool(pistas & {"rastreio", "prazo_envio", "entrega_nao_recebida"}) or (
+        acao_pessoa.fala_da_entrega(plano)
+    )
+
+
 def _turno_para_a_busca(base: BaseDoGerar) -> str:
     """O turno do cliente para achar os pares ("" = só cumprimento, agradecimento ou
     o pedido de atendente: nada a procurar). PURA."""
@@ -888,8 +913,9 @@ async def _com_fontes(session: AsyncSession, conversa: Any, fichas: list[dict]) 
         nova = {k: v for k, v in f.items() if k != "produtos_vinculados"}
 
         async def _restricao(item: str = item, titulo: str | None = titulo) -> dict | None:
+            # Liberação L3 (23/10/2026): com a prova de "nenhuma restrição".
             return await restricao_envio.restricao_do_anuncio(
-                session, plataforma, integ, item, titulo
+                session, plataforma, integ, item, titulo, conferida=True
             )
 
         async def _espec(item: str = item, titulo: str | None = titulo, f: dict = f) -> dict:
@@ -991,12 +1017,16 @@ def _perguntas_pendentes(base: BaseDoGerar) -> list[str]:
     ]
 
 
-def _estado_da_conversa(conversa: Any, base: BaseDoGerar, *, rotina: bool = False) -> dict:
+def _estado_da_conversa(
+    conversa: Any, base: BaseDoGerar, *, rotina: bool = False, responde_e_marca: bool = False
+) -> dict:
     """O que pesa sem pedido: reclamação, avaliação pendente, devolução pela etiqueta.
 
     Item 32, revisão (22/10/2026): `rotina` = a marca da devolução de rotina do turno
     (`acao_pessoa.rotina_do_turno`) vira "devolucao_sem_decisao_da_loja" — o bloco 2
-    (`prompt.COMO_A_EQUIPE_RESPONDE`) só a trata como rotina com ela.
+    (`prompt.COMO_A_EQUIPE_RESPONDE`) só a trata como rotina com ela. D1 (23/10/2026):
+    `responde_e_marca` (`acao_pessoa.responde_e_marca_do_turno`) vira "responde_e_marca":
+    o bloco 2 manda responder só a informação, sem a ação de pessoa.
     """
     etiquetas = acao_pessoa.etiquetas_da_conversa(conversa)
     estado = {
@@ -1009,6 +1039,7 @@ def _estado_da_conversa(conversa: Any, base: BaseDoGerar, *, rotina: bool = Fals
         "devolucao_em_andamento": constantes.ETIQUETA_DEVOLUCAO in etiquetas,
         "avaliacao_pendente_nota": (ia._avaliacoes_pendentes(base.ctx) or [None])[0],
         "devolucao_sem_decisao_da_loja": rotina,
+        "responde_e_marca": responde_e_marca and not rotina,
     }
     return {k: v for k, v in estado.items() if v}
 
@@ -1160,6 +1191,11 @@ async def montar_pacote(
         rotina=acao_pessoa.rotina_do_turno(
             conversa, base.ctx, base.recentes, gatilho, base.sinais_do_cliente
         ),
+        # D1 (23/10/2026): a marca do "responde e marca" (sem as ações do código, que vêm
+        # depois do pacote: a definitiva é a do `gatilhos_de_codigo`).
+        responde_e_marca=acao_pessoa.responde_e_marca_do_turno(
+            conversa, base.ctx, base.recentes, gatilho, base.sinais_do_cliente, agora=agora
+        ),
     )
     # O número que o modelo VIU nestes blocos não foi inventado (21/10/2026: o
     # "42mm ou 46mm" do cartão que o cliente mandou virava "número que não
@@ -1203,6 +1239,7 @@ async def montar_pacote(
         partes.append("PERGUNTAS AINDA SEM RESPOSTA NESTE TURNO:")
         partes.extend(f"- {p}" for p in pendentes)
     # Item 32 (22/10/2026): como a equipe já respondeu o mesmo tipo de pergunta.
+    da_equipe: list[dict] = []
     if busca := _turno_para_a_busca(base):
         da_equipe = await contexto_svc._seguro(
             session,
@@ -1228,7 +1265,30 @@ async def montar_pacote(
             [],
             conversa.id,
         )
-        secao, mostrados = secao_da_equipe(da_equipe or [])
+    # D3 (23/10/2026): com o pedido postado e não entregue e o turno da entrega (ou vago),
+    # a resposta-padrão da equipe para a entrega, da mesma loja, na frente.
+    if _turno_da_entrega(base, bloco, gatilho):
+        politica = await contexto_svc._seguro(
+            session,
+            "agente_pares_entrega",
+            lambda: pares_svc.exemplos_da_politica_de_entrega(
+                session,
+                plataforma=conversa.plataforma,
+                integration_id=conversa.integration_id,
+                conversa_id=conversa.id,
+                as_of=agora,
+                canal_no_automatico=ctx.modo == constantes.MODO_AUTO,
+            ),
+            [],
+            conversa.id,
+        )
+        ids_da_politica = {p["id"] for p in politica or []}
+        da_equipe = [
+            *(politica or []),
+            *(p for p in da_equipe or [] if p.get("id") not in ids_da_politica),
+        ][: pares_svc.MAX_PARES_PACOTE]
+    if da_equipe:
+        secao, mostrados = secao_da_equipe(da_equipe)
         if secao:
             partes.append(secao)
             ctx.registrar_pares(mostrados)

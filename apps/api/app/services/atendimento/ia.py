@@ -276,6 +276,7 @@ from app.services.atendimento.constantes import (
     ACENTOS_DE,
     ACENTOS_PARA,
     ACOES_QUE_SAIRAM,
+    ASSUNTOS_LIBERADOS_PELO_ANUNCIO,
     ASSUNTOS_ORIENTACAO,
     ASSUNTOS_SO_PESSOA_NO_AGENTE,
     AUTOR_CLIENTE,
@@ -3188,20 +3189,43 @@ async def _humano_respondeu_recente(session: AsyncSession, conversa: Atendimento
 
 
 async def _motivos_humano_para_auto(
-    session: AsyncSession, conversa: AtendimentoConversa
+    session: AsyncSession, conversa: AtendimentoConversa, rascunho: Any | None = None
 ) -> tuple[str, ...]:
     """A mesma triagem real da Caixa Humano, relida agora, sem o alerta de atraso.
 
     `ia_sem_resposta` é um aviso de fila após 10 min, não um veto: usá-lo
     aqui impediria para sempre a retomada após a pausa humana de 30 min.
     A pausa explícita e a atribuição continuam sendo travas do envio.
+
+    D1 (decisão do dono, 23/10/2026 — "responde e marca"): o `rascunho` do agente marcado
+    `responde_e_marca` (a devolução/reclamação aberta, o turno só informativo) não para
+    pelos motivos que a triagem de AGORA diz que a marca cobre (`Triagem.marca`: a
+    reclamação, a devolução e a ação delas) — eles continuam na Caixa Humano depois do
+    envio (`humano.marcar_pos_envio`). Qualquer outro motivo segura como sempre.
     """
     from app.services.atendimento import humano
 
     triagem = await humano.triar_conversa(
         session, conversa, so_humano=await humano.assuntos_so_humano(session)
     )
+    if responde_e_marca_no_rascunho(rascunho) and triagem.marca:
+        return tuple(m for m in triagem.motivos if m not in triagem.marca)
     return triagem.motivos
+
+
+def responde_e_marca_no_rascunho(rascunho: Any | None) -> bool:
+    """O rascunho do AGENTE marcado "responde e marca" (D1, `fatos.agente.responde_e_marca`)
+    com as ações para depois do envio gravadas? PURA."""
+    if rascunho is None or not rascunho_do_agente(rascunho):
+        return False
+    fatos = getattr(rascunho, "fatos", None)
+    agente = fatos.get("agente") if isinstance(fatos, dict) else None
+    return (
+        isinstance(agente, dict)
+        and agente.get("responde_e_marca") is True
+        and isinstance(agente.get("acoes_pos_envio"), list)
+        and bool(agente.get("acoes_pos_envio"))
+    )
 
 
 # ── Fatos e lacunas ───────────────────────────────────────────────────────
@@ -4734,6 +4758,8 @@ async def conferir_saida(
     devolucao_de_rotina: bool = False,
     produto_pela_equipe: bool = False,
     fatos_citados: Sequence[str] = (),
+    produto_pelo_anuncio: bool = False,
+    garantia_apple_pelo_fato: bool = False,
 ) -> SaidaConferida:
     """O código confere o que o modelo disse. Não grava nada; só LÊ o banco
     para saber se a loja respondeu enquanto o modelo escrevia
@@ -4757,7 +4783,14 @@ async def conferir_saida(
     `perguntar` (`acao="perguntar"`), `devolucao_de_rotina` (item 32: a marca do
     turno, `ContextoAgente.devolucao_de_rotina`), `fatos_citados` (item 2 de 22/10/2026:
     os textos dos fatos aprovados que a resposta cita — os prazos deles, com o par, não
-    são "prazo inventado"). Ver o bloco acima para `agente=True`.
+    são "prazo inventado"), `produto_pelo_anuncio` (liberações L1/L2 do dono, 23/10/2026:
+    a resposta de produto ou condição que se apoia só no anúncio da conversa —
+    `checagens.liberacao_pelo_anuncio`; as checagens a conferem de novo no texto final).
+    `garantia_apple_pelo_fato` (D2 do dono, 23/10/2026: a garantia Apple antes da compra
+    SÓ como o fato aprovado diz — `checagens.garantia_apple_pelo_fato`): as frases dela
+    não contam como fala de garantia nem como promessa de cobertura, e a pista "garantia"
+    do cliente não briga com a categoria de condição.
+    Ver o bloco acima para `agente=True`.
     """
     motivos = list(motivos)
     avisos: list[str] = []
@@ -4792,6 +4825,18 @@ async def conferir_saida(
     da_categoria = motivos_da_categoria(
         categoria, textos_cliente, textos_rajada, ids_categorias, pista_so_humano=not agente
     )
+    if agente and garantia_apple_pelo_fato and categoria in _CATEGORIAS_DA_GARANTIA_APPLE:
+        # D2 (23/10/2026): "é original lacrado, tem garantia da Apple?" respondido com a
+        # condição do anúncio e a garantia do fato — a pista "garantia" é a do próprio turno.
+        da_categoria = [
+            m
+            for m in da_categoria
+            if not (
+                m.startswith(f"a categoria da IA ({categoria}) não bate")
+                and set(pistas_de_categoria(" ".join(textos_rajada)))
+                <= _CATEGORIAS_DA_GARANTIA_APPLE
+            )
+        ]
     if agente:
         # A trava contra indução de assunto só vale no automático (spec 6.5):
         # regra suave (rodada 4) — no copiloto é aviso.
@@ -4823,6 +4868,10 @@ async def conferir_saida(
         # Decisão do dono (22/10/2026, item 32): a resposta do agente que cita a
         # resposta da equipe do MESMO anúncio, de um modelo, sai sozinha.
         and not (agente and produto_pela_equipe and categoria in ASSUNTOS_PRODUTO_PELA_EQUIPE)
+        # Liberações do dono (23/10/2026, L1 e L2): a resposta que se apoia só nos dados
+        # do anúncio da conversa (e cita a ficha dele) segue para as checagens e o
+        # verificador; a `checagens.conferir` confere de novo no texto final.
+        and not (agente and produto_pelo_anuncio and categoria in ASSUNTOS_LIBERADOS_PELO_ANUNCIO)
     ):
         motivos.append(MOTIVO_FICHA_NO_AUTOMATICO)
     # O que o modelo pode repetir: os FATOS (anúncio e a ficha dele, itens,
@@ -4904,6 +4953,10 @@ async def conferir_saida(
         from app.services.atendimento.agente import checagens as _checagens_r4b
 
         texto_da_garantia = _checagens_r4b.texto_da_garantia(final)
+        if garantia_apple_pelo_fato:
+            # D2 (23/10/2026): a frase da garantia Apple do fato aprovado não é fala de
+            # garantia nem promessa de cobertura (o resto do texto se confere como sempre).
+            texto_da_garantia = _checagens_r4b.sem_as_frases_da_garantia_apple(texto_da_garantia)
         if sem_evidencia:
             # Fontes v1.3, item 10 (21/10/2026): no agente, a condição ("novo",
             # "lacrado", "original") que o ANÚNCIO da conversa declara — título,
@@ -4928,6 +4981,16 @@ async def conferir_saida(
         if agente
         else frozenset()
     )
+    if agente and garantia_apple_pelo_fato:
+        # D2 (23/10/2026): com a resposta da equipe da mesma loja como lastro da garantia
+        # Apple, o "1 ano" é o que o anúncio da conversa diz ("1 Ano de Garantia Apple").
+        prazos |= validador.prazos_dos_fatos(
+            [
+                " ".join(str(f.get(k) or "") for k in ("titulo", "descricao"))
+                for f in fichas
+                if isinstance(f, Mapping)
+            ]
+        )
     erros = validador.validar(
         final,
         plataforma=conversa.plataforma,
@@ -5968,7 +6031,9 @@ def andamento_no_rascunho(rascunho: Any, etiquetas: Collection[str] = ()) -> boo
     fatos = fatos if isinstance(fatos, dict) else {}
     agente = fatos.get("agente") if isinstance(fatos.get("agente"), dict) else {}
     checagens = agente.get("checagens") if isinstance(agente.get("checagens"), list) else []
-    rotina = agente.get("devolucao_de_rotina") is True
+    # D1 (23/10/2026): o "responde e marca" também não para pela devolução (a conversa
+    # continua na Caixa Humano depois do envio); o chamado continua parando.
+    rotina = agente.get("devolucao_de_rotina") is True or agente.get("responde_e_marca") is True
     return bool(
         _int(fatos.get("chamados_abertos"))
         or (_int(fatos.get("devolucoes")) and not rotina)
@@ -6018,7 +6083,9 @@ def trava_do_agente(
     # Rodada 4b (achado 2 da revisão r4): toda pista do turno (e do rascunho)
     # que o assunto declarado não cobre, liberada no canal — o assunto não
     # liberado não sai junto com o liberado.
-    if motivo := motivo_das_pistas_alem(agente.get("pistas_turno"), categoria, canal):
+    if motivo := motivo_das_pistas_alem(
+        agente.get("pistas_turno"), categoria, canal, agente=agente
+    ):
         return motivo
     if categoria in ASSUNTOS_ORIENTACAO:
         if categoria not in liberadas:
@@ -6028,6 +6095,12 @@ def trava_do_agente(
     # resposta cita uma resposta da equipe do MESMO anúncio, de UM modelo
     # (`pares_de_produto`); resistência à água e condição/originalidade seguem pessoa.
     if categoria in ASSUNTOS_PRODUTO_PELA_EQUIPE and produto_pela_equipe(agente):
+        return None
+    # Liberações do dono (23/10/2026, L1 e L2): a pergunta de produto (e a de condição)
+    # respondida só com os dados do anúncio da conversa, com a marca que o CÓDIGO pôs
+    # (`checagens.liberacao_pelo_anuncio`), sai sozinha onde o assunto está no
+    # `auto_categorias` do canal (o `auto_agente` continua sem os de produto).
+    if produto_pelo_anuncio(agente, categoria, canal):
         return None
     if categoria not in (getattr(canal, "auto_categorias", None) or []):
         return "assunto_nao_liberado"
@@ -6043,12 +6116,30 @@ def trava_do_agente(
     return None
 
 
+# D2 (23/10/2026): as categorias em que a garantia Apple do fato aprovado acompanha a
+# pergunta de condição ("é original lacrado, tem garantia da Apple?").
+_CATEGORIAS_DA_GARANTIA_APPLE = frozenset({"originalidade_condicao", "garantia"})
+
+
 # Os assuntos de produto que a resposta da equipe do mesmo anúncio libera (decisão
 # do dono, 22/10/2026). Fora: resistência à água (só pelo título) e condição.
 ASSUNTOS_PRODUTO_PELA_EQUIPE = frozenset(ASSUNTOS_SO_PESSOA_NO_AGENTE) - {
     "resistencia_agua",
     "originalidade_condicao",
 }
+
+
+def produto_pelo_anuncio(agente: Mapping[str, Any], assunto: str | None, canal: Any) -> bool:
+    """O rascunho do agente responde o `assunto` de produto (ou de condição) só com os
+    dados do anúncio da conversa — a marca `fatos.agente.produto_pelo_anuncio` que o código
+    pôs (`checagens.liberacao_pelo_anuncio`) — e o canal tem o assunto no automático? PURA
+    (liberações L1/L2 do dono, 23/10/2026)."""
+    return (
+        agente.get("produto_pelo_anuncio") is True
+        and assunto in ASSUNTOS_LIBERADOS_PELO_ANUNCIO
+        and assunto not in CATEGORIAS_SO_HUMANO
+        and assunto in (getattr(canal, "auto_categorias", None) or [])
+    )
 
 
 def produto_pela_equipe(agente: Mapping[str, Any]) -> bool:
@@ -6091,13 +6182,21 @@ def pistas_alem_do_assunto(pistas: Any, categoria: str | None) -> list[str]:
     return saida
 
 
-def motivo_das_pistas_alem(pistas: Any, categoria: str | None, canal: Any) -> str | None:
+def motivo_das_pistas_alem(
+    pistas: Any, categoria: str | None, canal: Any, *, agente: Mapping[str, Any] | None = None
+) -> str | None:
     """Por que uma pista além do assunto não deixa sair sozinho neste canal, ou
-    None. PURA (rodada 4b; `trava_do_agente` e `reavaliacao._agente_pode`)."""
+    None. PURA (rodada 4b; `trava_do_agente` e `reavaliacao._agente_pode`).
+
+    `agente` (liberações L1/L2 do dono, 23/10/2026) = o `fatos.agente` do rascunho: com a
+    marca `produto_pelo_anuncio` (o texto INTEIRO conferido contra o anúncio da conversa),
+    a pista de produto liberada pelo anúncio e no `auto_categorias` do canal não segura."""
     auto_categorias = getattr(canal, "auto_categorias", None) or []
     auto_agente = getattr(canal, "auto_agente", None) or []
     for p in pistas_alem_do_assunto(pistas, categoria):
         if p in ASSUNTOS_SO_PESSOA_NO_AGENTE:
+            if agente is not None and produto_pelo_anuncio(agente, p, canal):
+                continue
             return "assunto_de_produto"
         if p in CATEGORIAS_SO_HUMANO or p not in auto_categorias or p not in auto_agente:
             return "assunto_nao_liberado_agente"
@@ -6124,7 +6223,9 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
     `auto_categorias` e fora de `CATEGORIAS_SO_HUMANO` — como sempre. Agente:
     as pistas de orientação do turno no `auto_orientacao`; o de orientação
     pelo `auto_orientacao`; o resto como o legado E no `auto_agente`, fora
-    dos assuntos de produto (ajuste r3); e (ajuste r3, com `agora`) o "ok"
+    dos assuntos de produto (ajuste r3) — menos o de produto com a marca
+    `produto_pelo_anuncio` (liberações L1/L2, 23/10/2026: como o legado, sem o
+    `auto_agente`); e (ajuste r3, com `agora`) o "ok"
     do verificador ainda dentro da validade (`verificador.VALIDADE_OK`: o
     estoque e o status conferidos não valem por 24 h). Quem decide de
     verdade é o `_talvez_enviar` (relê tudo).
@@ -6158,6 +6259,13 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
                     r.categoria.not_in(ASSUNTOS_SO_PESSOA_NO_AGENTE),
                     legado,
                     k.auto_agente.has_key(r.categoria),
+                ),
+                # Liberações do dono (23/10/2026, L1 e L2): o de produto com a marca
+                # `produto_pelo_anuncio` que o código pôs, no `auto_categorias` do canal.
+                and_(
+                    r.categoria.in_(ASSUNTOS_LIBERADOS_PELO_ANUNCIO),
+                    r.fatos.contains({"agente": {"produto_pelo_anuncio": True}}),
+                    legado,
                 ),
             ),
         ),
@@ -6295,7 +6403,7 @@ async def _talvez_enviar(
             await _registrar_auto_envio(session, conversa, rascunho, motivo)
             return False
 
-        motivos_humano = await _motivos_humano_para_auto(session, conversa)
+        motivos_humano = await _motivos_humano_para_auto(session, conversa, rascunho)
         if motivos_humano:
             await _registrar_auto_envio(
                 session, conversa, rascunho, "caixa_humano", motivos_humano=motivos_humano
@@ -6342,6 +6450,16 @@ async def _talvez_enviar(
             )
             return True
         resultado = mensagem.status
+        if resultado == "enviada" and responde_e_marca_no_rascunho(rascunho):
+            # D1 (23/10/2026): a resposta saiu e a ação continua com a pessoa — a conversa
+            # fica na Caixa Humano (`humano.CHAVE_POS_ENVIO`).
+            from app.services.atendimento import humano
+
+            agente_fatos = (rascunho.fatos or {}).get("agente") or {}
+            await humano.marcar_pos_envio(
+                session, conversa, rascunho, list(agente_fatos.get("acoes_pos_envio") or [])
+            )
+            await session.commit()
         await _registrar_auto_envio(
             session,
             conversa,
