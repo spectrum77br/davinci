@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -505,9 +505,10 @@ async def test_difal_da_shopee_e_imposto_classificado_pelo_robo(db, make_user):
 
 async def test_saldo_que_pula_nao_ganha_ajuste_e_os_do_robo_saem(db, make_user):
     """16/10 à noite (Vinicius, essência do painel): a carteira muda de saldo sem listar o
-    lançamento (renda 292,39, saldo sobe 291,41) → NÃO se inventa linha de ajuste pra
-    fechar o dia: a diferença de −0,98 aparece e eles decidem. Ajuste que o robô tinha
-    criado sai e o dia reabre; ajuste que uma pessoa mexeu fica."""
+    lançamento (renda 292,39, saldo sobe 291,41) → NÃO se inventa ajuste classificado pra
+    fechar o dia: a diferença de −0,98 aparece e eles decidem (23/10: como linha sem dono,
+    ver o teste seguinte). Ajuste que o robô tinha criado sai e o dia reabre; ajuste que
+    uma pessoa mexeu fica."""
     from app.models import ConciliacaoDia
     from app.services.conciliacao_jobs import fechar_dias_prontos
 
@@ -525,8 +526,13 @@ async def test_saldo_que_pula_nao_ganha_ajuste_e_os_do_robo_saem(db, make_user):
         "2026-10-11": [],
     }
     movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
-    assert not [m for m in movs if m.tipo == "ajuste_shopee"]
-    # o dia 11 não fecha sozinho: diferença de −0,98 fica à vista
+    # 23/10: o pulo ganha a linha que faltou, SEM DONO (nenhum pedido devolvido de −0,98)
+    assert [
+        (m.id_externo, m.debito, m.classificacao, m.pedido_bling)
+        for m in movs
+        if m.tipo == "ajuste_shopee"
+    ] == [("nao-listado-11", Decimal("0.98"), None, None)]
+    # o dia 11 não fecha sozinho: a linha de −0,98 sem dono fica à vista
     fechados = await fechar_dias_prontos(db, loja)
     assert "2026-10-11" in fechados["abertos"]
     # linhas que o robô tinha criado antes da regra (uma sem dono, outra mexida por alguém)
@@ -577,10 +583,214 @@ async def test_saldo_que_pula_nao_ganha_ajuste_e_os_do_robo_saem(db, make_user):
     r2 = await run_carteira_sync(db, loja, cliente, hoje=date(2026, 10, 12))
     assert r2["ajustes_removidos"] == ["ajuste-saldo-2026-10-11-1"]
     movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
-    ajustes = [m for m in movs if m.tipo == "ajuste_shopee"]
+    ajustes = [m for m in movs if m.id_externo.startswith("ajuste-saldo-")]
     assert [m.id_externo for m in ajustes] == ["ajuste-saldo-2026-10-11-2"]  # o mexido fica
     dia = (await db.execute(select(ConciliacaoDia).where(ConciliacaoDia.dia == d11))).scalar_one()
     assert dia.fechado_em is None and "ajuste automático" in (dia.reaberto_motivo or "")
+
+
+async def test_pulo_da_carteira_ganha_a_linha_que_faltou_ligada_ao_pedido_devolvido(
+    db, make_user, auth_as, client
+):
+    """23/10 (ATV e mega "saldo não bate −0,49"): a Shopee desconta a renda negativa do
+    pedido devolvido (−0,49) sem listar a linha. No pulo o robô escreve a linha que faltou
+    e liga ao pedido devolvido provável (o mais antigo esperando a liberação, venda −0,49,
+    nada na carteira); pulo sem pedido provável fica sem dono; pulo pra cima e dia fechado
+    não são mexidos; se a linha de verdade aparecer, a do robô sai."""
+    from app.models import ConciliacaoDia, ConciliacaoPedido
+    from app.services.conciliacao_shopee import (
+        PREFIXO_NAO_LISTADO,
+        inserir_movimentos,
+        lancar_descontos_nao_listados,
+    )
+
+    loja = await _loja_shopee(db, make_user)
+    d10, d11, d12, d13 = (date(2026, 10, d) for d in (10, 11, 12, 13))
+
+    def pedido(numero: str, sn: str, situacao: str, dia: int) -> ConciliacaoPedido:
+        return ConciliacaoPedido(
+            integration_id=loja.integration_id,
+            platform=IntegrationPlatform.SHOPEE,
+            pedido_bling=numero,
+            bling_id=int(numero),
+            numeroloja=sn,
+            situacao=situacao,
+            venda_liquido=Decimal("-0.49"),
+            data_pedido=datetime(2026, 10, dia, 12, tzinfo=UTC),
+        )
+
+    db.add_all(
+        [
+            pedido("310007", "261007DEVOLV7", "aguardando", 7),
+            pedido("310005", "261005DEVOLV5", "aguardando", 5),  # o mais antigo: 1º pulo
+            pedido("310004", "261004BATEU04", "bateu", 4),  # já liberou: não serve
+            pedido("310006", "261006COMLINH", "aguardando", 6),  # já tem linha na carteira
+        ]
+    )
+    await db.commit()
+    txs = [
+        _tx(10, "ESCROW_VERIFIED_ADD", 100.0, 100.0, _epoch(d10, 9), "261006VX383P9J"),
+        # 11/10: a renda de 200,00 entra e o saldo sobe 199,51 (−0,49 não listado)
+        _tx(11, "ESCROW_VERIFIED_ADD", 200.0, 299.51, _epoch(d11, 10), "2610AAAAAAAAA"),
+        _tx(12, "ESCROW_VERIFIED_MINUS", -0.49, 299.02, _epoch(d11, 11), "261006COMLINH"),
+        # 12/10: −0,49 (2º pedido), −5,00 (sem pedido) e +0,47 (pra cima: fica à vista)
+        _tx(13, "ESCROW_VERIFIED_ADD", 50.0, 348.53, _epoch(d12, 9), "2610BBBBBBBBB"),
+        _tx(14, "ESCROW_VERIFIED_ADD", 50.0, 393.53, _epoch(d12, 10), "2610CCCCCCCCC"),
+        _tx(15, "ESCROW_VERIFIED_ADD", 10.0, 404.0, _epoch(d12, 11), "2610DDDDDDDDD"),
+    ]
+    r = await run_carteira_sync(db, loja, _ShopeeFalsa(txs), hoje=d13)
+    await db.commit()
+    assert [(x["dia"], x["valor"], x["pedido"]) for x in r["nao_listados"]] == [
+        ("2026-10-11", "-0.49", "310005"),
+        ("2026-10-12", "-0.49", "310007"),
+        ("2026-10-12", "-5.00", None),
+    ]
+
+    async def do_robo() -> dict[str, ConciliacaoMovimento]:
+        return {
+            m.id_externo: m
+            for m in (
+                await db.execute(
+                    select(ConciliacaoMovimento).where(
+                        ConciliacaoMovimento.id_externo.like(f"{PREFIXO_NAO_LISTADO}%")
+                    )
+                )
+            ).scalars()
+        }
+
+    robo = await do_robo()
+    assert set(robo) == {"nao-listado-11", "nao-listado-13", "nao-listado-14"}
+    l11 = robo["nao-listado-11"]
+    assert (l11.tipo, l11.sub_tipo, l11.pedido_bling, l11.pedido_marketplace, l11.bling_id) == (
+        "venda_liberada",
+        "ESCROW_NAO_LISTADO",
+        "310005",
+        "261005DEVOLV5",
+        310005,
+    )
+    assert l11.debito == Decimal("0.49") and l11.saldo_apos == Decimal("99.51")
+    assert l11.data == datetime.fromtimestamp(_epoch(d11, 10), tz=UTC) - timedelta(seconds=1)
+    assert "não mostrou no extrato" in l11.descricao
+    assert robo["nao-listado-13"].pedido_bling == "310007"
+    sem_dono = robo["nao-listado-14"]
+    assert (sem_dono.tipo, sem_dono.debito, sem_dono.pedido_bling, sem_dono.classificacao) == (
+        "ajuste_shopee",
+        Decimal("5.00"),
+        None,
+        None,
+    )
+
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    r11 = (
+        await client.get("/api/conciliacao/extrato", params={"loja": "Jlas", "dia": "2026-10-11"})
+    ).json()
+    assert r11["totais"]["diferenca"] == 0.0
+    assert [m["pedido_bling"] for m in r11["movimentos"]][0] == "310005"
+    assert r11["movimentos"][0]["status"] == "automatico"
+    r12 = (
+        await client.get("/api/conciliacao/extrato", params={"loja": "Jlas", "dia": "2026-10-12"})
+    ).json()
+    assert r12["totais"]["diferenca"] == 0.47  # o pulo pra cima continua à vista
+    assert r12["contagem"]["pendente"] >= 1  # a linha de −5,00 sem dono
+
+    # a releitura não duplica nem troca o pedido
+    ids = {k: m.id for k, m in robo.items()}
+    r2 = await run_carteira_sync(db, loja, _ShopeeFalsa(txs), hoje=d13)
+    await db.commit()
+    assert "nao_listados" not in r2
+    assert {k: m.id for k, m in (await do_robo()).items()} == ids
+
+    # a Shopee passa a listar o −5,00: o pulo some e a linha do robô sai; dia fechado
+    # por pessoa (13/10, pulo de −0,49) não é mexido
+    real = transacao_para_movimento(
+        _tx(17, "ADJUSTMENT_CENTER_DEDUCT", -5.0, 343.53, _epoch(d12, 9, 30))
+    )
+    d13_linha = transacao_para_movimento(
+        _tx(16, "ESCROW_VERIFIED_ADD", 20.0, 423.51, _epoch(d13, 9), "2610EEEEEEEEE")
+    )
+    assert await inserir_movimentos(db, loja, [real, d13_linha], reabrir=False) == 2
+    db.add(
+        ConciliacaoDia(
+            integration_id=loja.integration_id,
+            dia=d13,
+            fechado_em=datetime(2026, 10, 14, 9, tzinfo=UTC),
+            fechado_por="cairo",
+        )
+    )
+    await db.flush()
+    assert await lancar_descontos_nao_listados(db, loja, ate=d13) == []
+    await db.commit()
+    assert set(await do_robo()) == {"nao-listado-11", "nao-listado-13"}
+    r13 = (
+        await client.get("/api/conciliacao/extrato", params={"loja": "Jlas", "dia": "2026-10-13"})
+    ).json()
+    assert r13["totais"]["diferenca"] == -0.49
+
+
+async def test_pulo_de_dois_devolvidos_e_o_pulo_mais_novo_fica_com_o_pedido(
+    db, make_user, auth_as, client
+):
+    """Barbosa 15/10: um pulo de −0,98 = dois devolvidos de −0,49 → duas linhas, uma por
+    pedido. E o pulo antigo (11/10) não leva os pedidos: liga do pulo mais novo pro mais
+    velho, e o antigo fica sem dono (é de pedido de antes do painel)."""
+    from app.models import ConciliacaoPedido
+    from app.services.conciliacao_shopee import PREFIXO_NAO_LISTADO
+
+    loja = await _loja_shopee(db, make_user)
+    d10, d11, d12 = (date(2026, 10, d) for d in (10, 11, 12))
+    db.add_all(
+        [
+            ConciliacaoPedido(
+                integration_id=loja.integration_id,
+                platform=IntegrationPlatform.SHOPEE,
+                pedido_bling=numero,
+                bling_id=int(numero),
+                numeroloja=f"2610DEVOLV{numero[-2:]}",
+                situacao="aguardando",
+                venda_liquido=Decimal("-0.49"),
+                data_pedido=datetime(2026, 10, 6, 12, tzinfo=UTC),
+            )
+            for numero in ("310011", "310012")
+        ]
+    )
+    await db.commit()
+    txs = [
+        _tx(10, "ESCROW_VERIFIED_ADD", 100.0, 100.0, _epoch(d10, 9), "261006VX383P9J"),
+        _tx(11, "ESCROW_VERIFIED_ADD", 50.0, 149.51, _epoch(d11, 10), "2610AAAAAAAAA"),
+        _tx(12, "ESCROW_VERIFIED_ADD", 292.39, 440.92, _epoch(d12, 10), "2610BBBBBBBBB"),
+    ]
+    r = await run_carteira_sync(db, loja, _ShopeeFalsa(txs), hoje=date(2026, 10, 13))
+    await db.commit()
+    assert sorted((x["dia"], x["valor"], x["pedido"] or "") for x in r["nao_listados"]) == [
+        ("2026-10-11", "-0.49", ""),
+        ("2026-10-12", "-0.49", "310011"),
+        ("2026-10-12", "-0.49", "310012"),
+    ]
+    robo = {
+        m.id_externo: m
+        for m in (
+            await db.execute(
+                select(ConciliacaoMovimento).where(
+                    ConciliacaoMovimento.id_externo.like(f"{PREFIXO_NAO_LISTADO}%")
+                )
+            )
+        ).scalars()
+    }
+    assert set(robo) == {"nao-listado-11", "nao-listado-12", "nao-listado-12-2"}
+    assert robo["nao-listado-11"].tipo == "ajuste_shopee"
+    assert [robo["nao-listado-12"].saldo_apos, robo["nao-listado-12-2"].saldo_apos] == [
+        Decimal("149.02"),
+        Decimal("148.53"),
+    ]
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    for dia in ("2026-10-11", "2026-10-12"):
+        corpo = (
+            await client.get("/api/conciliacao/extrato", params={"loja": "Jlas", "dia": dia})
+        ).json()
+        assert corpo["totais"]["diferenca"] == 0.0, dia
+    # a releitura mantém as três
+    r2 = await run_carteira_sync(db, loja, _ShopeeFalsa(txs), hoje=date(2026, 10, 13))
+    assert "nao_listados" not in r2
 
 
 def test_transacao_liberacao_negativa_e_compensacao():

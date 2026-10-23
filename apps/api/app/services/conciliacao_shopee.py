@@ -14,8 +14,10 @@ um dia; linha repetida é barrada pelo unique `transaction_id`) até ontem.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import combinations
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -28,6 +30,7 @@ from app.models import (
     ConciliacaoDia,
     ConciliacaoLoja,
     ConciliacaoMovimento,
+    ConciliacaoPedido,
     ConciliacaoSync,
     Integration,
 )
@@ -327,6 +330,246 @@ async def remover_ajustes_do_robo(session: AsyncSession, loja: ConciliacaoLoja) 
     return ids
 
 
+PREFIXO_NAO_LISTADO = "nao-listado-"
+# pedido que ainda espera a liberação: é onde cabe a renda que a carteira não listou
+_SITUACOES_SEM_LIBERACAO = ("aguardando", "vencido")
+_TOL_PULO = Decimal("0.005")
+# um pulo pode juntar mais de um desconto (Barbosa 15/10: −0,98 = dois devolvidos)
+_MAX_PEDIDOS_POR_PULO = 3
+_MAX_CANDIDATOS_POR_PULO = 30
+
+
+def _pedidos_do_pulo(cabem: list[ConciliacaoPedido], pulo: Decimal) -> list[ConciliacaoPedido]:
+    """Os pedidos cuja venda soma exatamente o pulo: um só antes de dois, e os mais
+    novos primeiro (`cabem` já vem do mais novo pro mais velho)."""
+    for k in range(1, _MAX_PEDIDOS_POR_PULO + 1):
+        for combo in combinations(cabem, k):
+            if sum((p.venda_liquido or Decimal("0") for p in combo), Decimal("0")) == pulo:
+                return list(combo)
+    return []
+
+
+def _linhas_nao_listadas(
+    loja: ConciliacaoLoja,
+    m: ConciliacaoMovimento,
+    antes: ConciliacaoMovimento | None,
+    pulo: Decimal,
+    pedidos: list[ConciliacaoPedido],
+    inicio_dia: datetime,
+) -> list[ConciliacaoMovimento]:
+    """As linhas que faltaram, logo antes da linha `m` em que o saldo pulou: uma por
+    pedido provável, ou uma sem dono com o pulo inteiro."""
+    partes: list[tuple[ConciliacaoPedido | None, Decimal]] = [
+        (p, p.venda_liquido or Decimal("0")) for p in pedidos
+    ] or [(None, pulo)]
+    # saldo antes da linha `m` = o que a carteira tinha depois dos descontos
+    saldo = Decimal(m.saldo_apos) - (m.credito or Decimal("0")) + (m.debito or Decimal("0"))
+    saldo -= pulo  # antes dos descontos
+    piso = antes.data if antes is not None else inicio_dia
+    linhas: list[ConciliacaoMovimento] = []
+    for i, (pedido, valor) in enumerate(partes):
+        saldo += valor
+        quando = m.data - timedelta(seconds=len(partes) - i)
+        comum: dict[str, Any] = {
+            "integration_id": loja.integration_id,
+            "platform": loja.platform,
+            "origem": ORIGEM_CARTEIRA,
+            "id_externo": f"{PREFIXO_NAO_LISTADO}{m.id_externo}" + (f"-{i + 1}" if i else ""),
+            "data": max(quando, piso),
+            "credito": Decimal("0"),
+            "debito": -valor,
+            "saldo_apos": saldo,
+            "raw": {
+                "motivo": "saldo da carteira pulou sem lançamento listado",
+                "antes_da_linha": m.id_externo,
+                "pulo": str(pulo),
+                "pedido_provavel": pedido.pedido_bling if pedido else None,
+            },
+        }
+        if pedido is None:
+            linhas.append(
+                ConciliacaoMovimento(
+                    **comum,
+                    tipo="ajuste_shopee",
+                    sub_tipo="SALDO_NAO_LISTADO",
+                    descricao="Desconto que a Shopee não mostrou no extrato "
+                    "(nenhum pedido devolvido com esse valor)",
+                )
+            )
+        else:
+            linhas.append(
+                ConciliacaoMovimento(
+                    **comum,
+                    tipo="venda_liberada",
+                    sub_tipo="ESCROW_NAO_LISTADO",
+                    descricao=f"Renda do pedido #{pedido.numeroloja} — a Shopee descontou e "
+                    "não mostrou no extrato (pedido provável)",
+                    pedido_marketplace=pedido.numeroloja,
+                    pedido_bling=pedido.pedido_bling,
+                    bling_id=pedido.bling_id,
+                )
+            )
+    return linhas
+
+
+async def lancar_descontos_nao_listados(
+    session: AsyncSession, loja: ConciliacaoLoja, *, ate: date
+) -> list[dict[str, Any]]:
+    """23/10 (Vinicius, ATV e mega "saldo não bate −0,49"): a carteira desconta a renda
+    negativa de pedido devolvido (−0,49: a taxa de proteção de envio que a Shopee guarda)
+    e às vezes NÃO lista a linha — o saldo da renda seguinte sobe 0,49 a menos. ATV tinha
+    5 pulos de 19 a 22/10 e 5 pedidos "Aguardando Devolução" com venda −0,49 e nada na
+    carteira; mega, 1 e 1.
+
+    No ponto do pulo (só pra baixo, só dia aberto) o robô escreve a linha que faltou e
+    liga ao pedido devolvido provável: ainda esperando a liberação, venda da Margem igual
+    ao pulo (ou dois/três que somam o pulo) e nenhuma linha na carteira. Liga do pulo mais
+    novo pro mais velho, cada um com o pedido mais novo que cabe: pulo antigo (05/10) é de
+    pedido de antes do início do painel, não dos devolvidos de agora. Qual pulo é de qual
+    pedido é palpite (o valor é o mesmo). Sem pedido provável a linha fica SEM DONO.
+    Refeito a cada leitura: se a linha de verdade aparecer, o pulo some e a do robô sai.
+    Linha do robô que uma pessoa mexeu (vínculo ou classificação) fica."""
+    from app.routers.conciliacao import _ordena_dia, _saldo_anterior
+
+    mov = ConciliacaoMovimento
+    fechados = set(
+        (
+            await session.execute(
+                select(ConciliacaoDia.dia).where(
+                    ConciliacaoDia.integration_id == loja.integration_id,
+                    ConciliacaoDia.fechado_em.isnot(None),
+                )
+            )
+        ).scalars()
+    )
+    ini = datetime.combine(loja.inicio, datetime.min.time(), tzinfo=BRT)
+    fim = datetime.combine(ate + timedelta(days=1), datetime.min.time(), tzinfo=BRT)
+    carteira = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_CARTEIRA,
+                    mov.data >= ini,
+                    mov.data < fim,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not carteira:
+        return []
+
+    def do_robo(m: ConciliacaoMovimento) -> bool:
+        return (
+            (m.id_externo or "").startswith(PREFIXO_NAO_LISTADO)
+            and m.vinculado_por is None
+            and m.classificacao is None
+        )
+
+    por_dia: dict[date, list[ConciliacaoMovimento]] = defaultdict(list)
+    for m in carteira:
+        por_dia[m.data.astimezone(BRT).date()].append(m)
+
+    # 1. os pulos de cada dia aberto, sem as linhas do robô que ninguém mexeu
+    robo_por_linha: dict[str, list[ConciliacaoMovimento]] = defaultdict(list)
+    pulos: list[tuple[date, ConciliacaoMovimento, ConciliacaoMovimento | None, Decimal]] = []
+    for dia in sorted(por_dia):
+        if dia in fechados:
+            continue
+        resto: list[ConciliacaoMovimento] = []
+        for m in por_dia[dia]:
+            if do_robo(m):
+                robo_por_linha[str((m.raw or {}).get("antes_da_linha") or "")].append(m)
+            else:
+                resto.append(m)
+        anterior = await _saldo_anterior(session, loja, dia)
+        if anterior is None or not resto:
+            continue
+        saldo = Decimal(anterior)
+        antes: ConciliacaoMovimento | None = None
+        for m in _ordena_dia(resto, saldo):
+            saldo += (m.credito or Decimal("0")) - (m.debito or Decimal("0"))
+            if m.saldo_apos is not None:
+                pulo = Decimal(m.saldo_apos) - saldo
+                saldo = Decimal(m.saldo_apos)
+                if pulo < -_TOL_PULO:
+                    pulos.append((dia, m, antes, pulo))
+            antes = m
+
+    # 2. pulo que já tem as linhas certas do robô fica como está
+    manter: set[Any] = set()
+    a_ligar = []
+    for p in pulos:
+        existentes = robo_por_linha.get(p[1].id_externo, [])
+        soma = sum(
+            ((e.debito or Decimal("0")) - (e.credito or Decimal("0")) for e in existentes),
+            Decimal("0"),
+        )
+        if existentes and soma == -p[3]:
+            manter.update(e.id for e in existentes)
+        else:
+            a_ligar.append(p)
+
+    # 3. pedido provável: sem linha na carteira (de verdade ou do robô que fica)
+    com_linha = {
+        x
+        for m in carteira
+        if not do_robo(m) or m.id in manter
+        for x in (m.pedido_bling, m.pedido_marketplace)
+        if x
+    }
+    livres = sorted(
+        (
+            p
+            for p in (
+                await session.execute(
+                    select(ConciliacaoPedido).where(
+                        ConciliacaoPedido.integration_id == loja.integration_id,
+                        ConciliacaoPedido.situacao.in_(_SITUACOES_SEM_LIBERACAO),
+                        ConciliacaoPedido.venda_liquido < 0,
+                    )
+                )
+            ).scalars()
+            if p.pedido_bling not in com_linha and (p.numeroloja or "") not in com_linha
+        ),
+        key=lambda p: (p.data_pedido or datetime.min.replace(tzinfo=UTC), p.pedido_bling),
+        reverse=True,
+    )
+    escolhas: dict[str, list[ConciliacaoPedido]] = {}
+    for _dia, m, _antes, pulo in sorted(a_ligar, key=lambda x: x[1].data, reverse=True):
+        cabem = [p for p in livres if p.data_pedido is None or p.data_pedido <= m.data]
+        escolha = _pedidos_do_pulo(cabem[:_MAX_CANDIDATOS_POR_PULO], pulo)
+        for p in escolha:
+            livres.remove(p)
+        escolhas[m.id_externo] = escolha
+
+    # 4. sai a linha do robô que não serve mais (a de verdade apareceu) e entram as novas
+    for linhas in robo_por_linha.values():
+        for e in linhas:
+            if e.id not in manter:
+                await session.delete(e)
+    await session.flush()
+    lancadas: list[dict[str, Any]] = []
+    for dia, m, antes, pulo in a_ligar:
+        inicio_dia = datetime.combine(dia, datetime.min.time(), tzinfo=BRT)
+        for linha in _linhas_nao_listadas(loja, m, antes, pulo, escolhas[m.id_externo], inicio_dia):
+            session.add(linha)
+            lancadas.append(
+                {
+                    "dia": dia.isoformat(),
+                    "antes_da_linha": m.id_externo,
+                    "valor": str(-linha.debito),
+                    "pedido": linha.pedido_bling,
+                }
+            )
+    await session.flush()
+    if lancadas:
+        logger.info("conciliacao_shopee_nao_listados", loja=loja.conta, linhas=lancadas)
+    return lancadas
+
+
 async def run_carteira_sync(
     session: AsyncSession,
     loja: ConciliacaoLoja,
@@ -418,6 +661,9 @@ async def run_carteira_sync(
                 **({"fechado": True} if dia in fechados else {}),
             }
         )
+    nao_listados = await lancar_descontos_nao_listados(session, loja, ate=ontem)
+    if nao_listados:
+        resumo["nao_listados"] = nao_listados
     removidos = await remover_ajustes_do_robo(session, loja)
     if removidos:
         resumo["ajustes_removidos"] = removidos
