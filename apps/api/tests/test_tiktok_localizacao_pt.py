@@ -64,6 +64,11 @@ ULTIMOS_EVENTOS = [
         "Falha na entrega: destinatário ausente — nova tentativa",
     ),
     ("Arrived at the Americana carrier's facility.", "Chegou na transportadora em Americana"),
+    # 23/10/2026, pedido 299162 (action 80101).
+    (
+        "Package was returned to the sender by the shipping carrier at Piracicaba.",
+        "Devolvido ao remetente em Piracicaba",
+    ),
 ]
 
 # Textos vistos no histórico dos pedidos (podem virar último evento).
@@ -180,7 +185,7 @@ def test_codigos_da_familia_cobrem_o_observado():
     for code in (
         10101, 20101, 20201, 20301, 30901, 31001, 31101, 31301, 31401, 32101, 32401, 32601,
         32701, 36201, 39901, 40101, 40201, 40501, 40601, 40801, 41001, 41101, 50101, 50102,
-        60101, 90101, 100101, 3010001,
+        60101, 80101, 90101, 100101, 3010001,
     ):
         assert code in logistica_rules.TIKTOK_ACTION_CODE_PT
 
@@ -218,6 +223,7 @@ def test_divergencia_reconhece_os_rotulos_em_pt():
         "Falha na entrega — nova tentativa",
         "Devolvido → loja",
         "Devolução a caminho",
+        "Devolvido ao remetente em Piracicaba",
     ):
         assert f({"order_status": "DELIVERED"}, loc) is not None, loc
     for loc in ("Entregue", "Saiu para entrega", "Chegou no hub de Manaus", "Postado em Limeira"):

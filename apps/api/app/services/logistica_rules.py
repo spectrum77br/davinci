@@ -443,6 +443,13 @@ TIKTOK_TRACKING_PT: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         ),
         (r"package lost in transit", "Extraviado em trânsito"),
         (r"package damaged in transit", "Danificado em trânsito"),
+        # action 80101 (23/10/2026, pedido 299162): o pacote voltou pra nós.
+        # "Devolvido" é prefixo de problema em `detectar_divergencia_tiktok`.
+        (
+            r"package was returned to the sender by the shipping carrier at (?P<cidade>.+)",
+            "Devolvido ao remetente em {cidade}",
+        ),
+        (r"package was returned to the sender.*", "Devolvido ao remetente"),
     )
 )
 # Fallback quando o texto não casa com nada acima: o rótulo GENÉRICO da
@@ -476,6 +483,7 @@ TIKTOK_ACTION_CODE_PT: dict[int, str] = {
     60101: "Falha na entrega",
     50101: "Entregue",
     50102: "Entregue",
+    80101: "Devolvido ao remetente",
     90101: "Danificado em trânsito",
     100101: "Extraviado em trânsito",
 }
