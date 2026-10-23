@@ -745,12 +745,14 @@ def test_configuracao_padrao_do_agente():
     padrao = {nome: campo.default for nome, campo in Settings.model_fields.items()}
     assert padrao["atendimento_agente_ativo"] is True
     assert padrao["atendimento_agente_api_key"] == ""
-    assert padrao["atendimento_agente_modelo"] == "claude-haiku-5-5"
+    # Item 5 da rodada "redondo" (23/10/2026): o Sonnet 5.5, o prazo de 60 s e os tetos
+    # de US$ 10 por dia e US$ 0,50 por conversa (o verificador continua no Haiku).
+    assert padrao["atendimento_agente_modelo"] == "claude-sonnet-5-5"
     assert padrao["atendimento_agente_effort"] == "medium"
     assert padrao["atendimento_agente_max_turnos"] == 5
-    assert padrao["atendimento_agente_prazo_s"] == 45
-    assert padrao["atendimento_agente_teto_usd_dia"] == 5.0
-    assert padrao["atendimento_agente_teto_usd_conversa"] == 0.05
+    assert padrao["atendimento_agente_prazo_s"] == 60
+    assert padrao["atendimento_agente_teto_usd_dia"] == 10.0
+    assert padrao["atendimento_agente_teto_usd_conversa"] == 0.50
     assert padrao["atendimento_agente_replay"] is False
     assert padrao["atendimento_agente_replay_plataformas"] == "shopee"
     assert padrao["atendimento_sites_marca_ativo"] is True

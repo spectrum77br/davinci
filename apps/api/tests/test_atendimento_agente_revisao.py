@@ -654,7 +654,9 @@ def test_o_prazo_do_agente_na_rodada_e_no_sugerir(monkeypatch):
         ia._INICIO_DA_RODADA.reset(token)
     token = ia._INICIO_DA_RODADA.set(_time.monotonic())
     try:
-        assert ia.prazo_do_agente(False) <= 45
+        # Item 5 da rodada "redondo" (23/10/2026): o prazo do Sonnet é 60 s (o pior caso da
+        # rodada continua limitado pelo `AGENTE_FIM_DO_LACO_S`).
+        assert ia.prazo_do_agente(False) <= 60
     finally:
         ia._INICIO_DA_RODADA.reset(token)
     # A margem da rodada (300 s do job): o pior caso de uma conversa começada

@@ -1158,6 +1158,8 @@ export const FERRAMENTAS_AGENTE: Record<string, string> = {
   consultar_manual: 'manual',
   buscar_respostas_equipe: 'respostas da equipe',
   sugerir_troca: 'troca',
+  // Rodada "redondo" (23/10/2026, item 6): a busca no catálogo da própria loja.
+  buscar_anuncios_da_loja: 'catálogo da loja',
 }
 export type AcaoPessoa = { codigo: string; rotulo: string }
 export type AgenteResumo = {

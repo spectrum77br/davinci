@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from app.services.atendimento.constantes import ORIGEM_IA, limite_caracteres
 
@@ -1446,12 +1446,121 @@ _PALAVRA_DA_PARTE = (
     (PARTE_LOJA, r"loja"),
     (PARTE_URANYX, r"uranyx"),
 )
+# Item 2 da auditoria ao vivo (22/10/2026 22:09, Barbosa Shopee, 3ee1f81e): o verbo de
+# ligação entre o número e o par ("os primeiros 90 dias SÃO com a loja e os 9 meses
+# seguintes SÃO direto com a Uranyx": 5 palavras até o par) — só no agente (o legado
+# nunca tem prazo da regra).
 _PARTE_DA_REGRA_DEPOIS = re.compile(
-    r"\s+(?:(?:de|da|do|para|pro|pra|no|na|em|o|a|garantia|cobertura|com|seguintes|direto)"
-    r"\s+){0,4}(?P<parte>" + "|".join(p for _n, p in _PALAVRA_DA_PARTE) + r")\b"
+    r"\s+(?:(?:de|da|do|para|pro|pra|no|na|em|o|a|garantia|cobertura|com|seguintes|direto"
+    r"|sao|serao|fica|ficam)\s+){0,5}(?P<parte>"
+    + "|".join(p for _n, p in _PALAVRA_DA_PARTE)
+    + r")\b"
 )
 _PARTE_DA_REGRA_ANTES = re.compile(r"\b(?:" + "|".join(p for _n, p in _PALAVRA_DA_PARTE) + r")\b")
 _DA_GARANTIA = re.compile(r"\b(?:garantias?|defeitos?|fabrica\w*|cobert\w*)\b")
+# O demonstrativo que RETOMA o prazo já dito ("nesses primeiros 90 dias", "desses 9 meses").
+_RETOMA_O_PRAZO = re.compile(
+    r"\b(?:n|d)?(?:esses|estes|essas|estas)\s+(?:(?:primeiros|ultimos|seguintes)\s+)?$"
+)
+# O prazo escrito num FATO APROVADO ("1 ano de garantia", "os 90 primeiros dias com a loja",
+# "garantia de 90 dias contra defeitos").
+_PRAZO_DO_FATO = re.compile(
+    r"(?<![\d.,])(?P<n>\d{1,3})\s*(?:primeiros\s+)?(?P<u>dias?|mes|meses|anos?)\b"
+)
+# Revisão do fechamento da rodada "redondo" (23/10/2026): o prazo vindo de FATO leva a marca
+# `DO_FATO` na parte ("fato:loja", "fato:geral:apple") — `_sem_prazo_da_regra` o confere
+# mais estrito que o da regra do `ver_garantia`, e `conferir_garantia` nunca pula a
+# promessa por ele (só a regra da linha antes da compra pula). O prazo GERAL de fato (sem
+# par no próprio fato: "garantia Apple de 1 ano", "1 ano de garantia") só vale na oração
+# da garantia que (a) não fala da loja ("1 ano com a loja" com o fato 25 da Apple), (b) não
+# dá outro par logo depois do número ("1 ano direto com a Uranyx") e (c) diz a MARCA que o
+# fato diz (`_MARCAS_DO_FATO`: o fato 25 da Kia, "produtos Apple", não vale para "o celular
+# tem 1 ano de garantia").
+DO_FATO = "fato:"
+_MARCAS_DO_FATO = (
+    "apple",
+    "uranyx",
+    "charlots",
+    "samsung",
+    "xiaomi",
+    "motorola",
+    "doogee",
+    "oukitel",
+    "blackview",
+    "fossibot",
+)
+_FALA_DA_LOJA = re.compile(r"\bloja\b")
+
+
+def _marcas_do_texto(plano: str) -> list[str]:
+    return [m for m in _MARCAS_DO_FATO if re.search(rf"\b{m}\b", plano)]
+
+
+def _parte_do_fato(parte: str) -> tuple[str, tuple[str, ...]] | None:
+    """("geral"|"loja"|…, marcas) da parte de um prazo de FATO; None = prazo da regra."""
+    if not parte.startswith(DO_FATO):
+        return None
+    base, *marcas = parte[len(DO_FATO) :].split(":")
+    return base, tuple(m for m in marcas if m)
+
+
+def _geral_do_fato_vale(oracao: str, m: re.Match[str], marcas: Sequence[str]) -> bool:
+    """O prazo GERAL de um fato vale nesta oração (ver acima)? PURA. A loja conta até o
+    próximo prazo ou os dois-pontos ("1 ano de garantia: os 90 primeiros dias com a loja…"
+    — a loja ali é do par dos 90 dias)."""
+    if not _DA_GARANTIA.search(oracao):
+        return False
+    fim = len(oracao)
+    if (dois_pontos := oracao.find(":", m.end())) >= 0:
+        fim = dois_pontos
+    if proximo := _PRAZO_DO_FATO.search(oracao, m.end()):
+        fim = min(fim, proximo.start())
+    if _FALA_DA_LOJA.search(oracao[:fim]):
+        return False
+    if _PARTE_DA_REGRA_DEPOIS.match(oracao, m.end()):
+        return False
+    return all(re.search(rf"\b{marca}\b", oracao) for marca in marcas)
+
+
+def so_da_regra(prazos: Collection[tuple[int, str, str]]) -> frozenset[tuple[int, str, str]]:
+    """Os prazos da REGRA do `ver_garantia` (sem os de fato). PURA."""
+    return frozenset(p for p in prazos if not str(p[2]).startswith(DO_FATO))
+
+
+def prazos_dos_fatos(textos: Iterable[str | None]) -> frozenset[tuple[int, str, str]]:
+    """Os prazos (número, "dia"|"mes"|"ano", parte) dos FATOS APROVADOS citados, cada um
+    com o par que o PRÓPRIO fato dá. PURA. Só o agente usa (o legado não cita fato).
+
+    Item 2 da auditoria ao vivo (22/10/2026 22:09, Barbosa Shopee, 3ee1f81e): o agente
+    citou o fato 23 ("Aparelhos Uranyx … têm 1 ano de garantia: os 90 primeiros dias com
+    a loja e os 9 meses seguintes direto com a Uranyx") e o validador barrava "prazo de
+    garantia só pode vir do sistema" — o número de fato aprovado citado é do sistema. O
+    par vem da palavra logo depois do número no fato ("90 primeiros dias com a loja" →
+    loja; "9 meses seguintes direto com a Uranyx" → uranyx) e, sem ela, da garantia na
+    oração ("1 ano de garantia" → geral); número sem par nenhum não entra. No rascunho,
+    cada número só sai do que o validador confere com o MESMO par, na frase da garantia
+    (`_sem_prazo_da_regra`): "a garantia é de 90 dias" com o fato da Uranyx continua
+    barrado.
+    """
+    prazos: set[tuple[int, str, str]] = set()
+    unidades = {"dia": "dia", "dias": "dia", "mes": "mes", "meses": "mes", "ano": "ano"}
+    for texto in textos:
+        if not isinstance(texto, str) or not texto.strip():
+            continue
+        plano = plano_de(texto)
+        # Revisão (23/10/2026): a marca que o fato diz vai com o prazo geral dele.
+        marcas = "".join(f":{m}" for m in _marcas_do_texto(plano))
+        for frase in _SEPARA_FRASES.split(plano):
+            for oracao in _ORACAO_DA_REGRA.split(frase):
+                for m in _PRAZO_DO_FATO.finditer(oracao):
+                    n, unidade = int(m["n"]), unidades.get(m["u"], "ano")
+                    if not 0 < n < 1000:
+                        continue
+                    if depois := _PARTE_DA_REGRA_DEPOIS.match(oracao, m.end()):
+                        prazos.add((n, unidade, DO_FATO + _parte_de(depois["parte"])))
+                    elif _DA_GARANTIA.search(oracao):
+                        prazos.add((n, unidade, f"{DO_FATO}{PARTE_GERAL}{marcas}"))
+    return frozenset(prazos)
 
 
 def _parte_de(palavra: str) -> str:
@@ -1478,20 +1587,39 @@ def _sem_prazo_da_regra(plano: str, prazos: Collection[tuple[int, str, str]]) ->
     número noutra frase ("chega em 3 meses"), noutra oração ("…, e o
     reembolso sai em 3 meses") ou com o par errado ("a garantia do aparelho
     é de 12 meses") continua prazo."""
-    regras = [(_prazo_da_regra(n, u), parte) for n, u, parte in sorted(prazos)]
+    regras = [(_prazo_da_regra(n, u), parte, (n, u)) for n, u, parte in sorted(prazos)]
+    # Item 2 da auditoria ao vivo (22/10/2026, 3ee1f81e): o mesmo prazo RETOMADO numa frase
+    # seguinte da garantia ("se precisar acionar a garantia nesses primeiros 90 dias")
+    # depois de dito com o seu par — só com o demonstrativo logo antes do número.
+    ditos: set[tuple[int, str]] = set()
 
     def na_oracao(oracao: str) -> str:
         cortes: list[tuple[int, int]] = []
-        for padrao, parte in regras:
+        for padrao, parte, chave in regras:
+            do_fato = _parte_do_fato(parte)
             for m in padrao.finditer(oracao):
-                if parte == PARTE_GERAL:
+                if do_fato is not None and do_fato[0] == PARTE_GERAL:
+                    # Revisão (23/10/2026): o prazo geral de FATO, mais estrito.
+                    vale = _geral_do_fato_vale(oracao, m, do_fato[1])
+                elif do_fato is not None:
+                    vale = _parte_do_numero(oracao, m) == do_fato[0]
+                elif parte == PARTE_GERAL:
                     vale = bool(_DA_GARANTIA.search(oracao))
                 else:
                     vale = _parte_do_numero(oracao, m) == parte
+                if not vale and chave in ditos and _RETOMA_O_PRAZO.search(oracao[: m.start()]):
+                    vale = True
                 if vale:
                     cortes.append(m.span())
-        for inicio, fim in sorted(cortes, reverse=True):
+                    ditos.add(chave)
+        # O mesmo número pela regra E pelo fato (revisão de 23/10/2026: "fato:loja" e
+        # "loja"): cada trecho sai uma vez só (o corte repetido comia o texto ao lado).
+        fim_anterior = None
+        for inicio, fim in sorted(set(cortes), reverse=True):
+            if fim_anterior is not None and fim > fim_anterior:
+                continue
             oracao = oracao[:inicio] + " " + oracao[fim:]
+            fim_anterior = inicio
         return oracao
 
     def tira(frase: str) -> str:
@@ -2276,7 +2404,10 @@ def conferir_garantia(
             if prazos_de_garantia:
                 sem_prazo = _sem_prazo_da_regra(frase, prazos_de_garantia)
                 if sem_prazo != frase:
-                    if so_regra:
+                    # Revisão (23/10/2026): só o prazo da REGRA livra a frase da promessa;
+                    # o de fato só sai da conta do número (`so_da_regra`).
+                    da_regra = so_da_regra(prazos_de_garantia)
+                    if so_regra and da_regra and _sem_prazo_da_regra(frase, da_regra) != frase:
                         continue  # a regra da linha, com o prazo dela (agente)
                     conferida = sem_prazo
             if _promessas(conferida) and (

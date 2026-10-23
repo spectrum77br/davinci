@@ -12,8 +12,9 @@ decisão 12). Nada é enviado nem vira rascunho; a sessão é só leitura.
                  (a ÚNICA etapa que vai à loja, dentro das cotas; --sem-loja só confere o cache)
   3. rodar     python -m scripts.agente_eval.rodar --amostra /tmp/agente_eval/amostra.jsonl \\
                  --saida /tmp/agente_eval --braco A2 [--teto-usd 2.0]
-               um braço por vez: A1 (Haiku low), A2 (medium), A3 (high), S1 (Sonnet medium,
-               só comparação); ablação: A2-sem-equipe, A2-sem-fatos. Grava
+               um braço por vez: A1 (Haiku low), A2 (Haiku medium), A3 (Haiku high), S1
+               (Sonnet medium — o padrão ao vivo desde 23/10/2026); ablação:
+               A2-sem-equipe, A2-sem-fatos, S1-sem-equipe, S1-sem-fatos. Grava
                resultados_<braço>.jsonl (mascarado) e RETOMA do que já está nele.
                --braco L0: a sugestão que o LEGADO escreveu para cada gatilho, lida
                do banco (sem modelo, sem custo, sem a chave Claude).
@@ -76,6 +77,9 @@ SAIDA_PADRAO = Path("/tmp/agente_eval")  # noqa: S108 — dentro do container
 # (o legado com o Haiku) não existe aqui.
 BRACO_LEGADO = "L0"
 MODELO_SONNET = "claude-sonnet-5-5"
+# Item 5 da rodada "redondo" (23/10/2026): o padrão do agente virou o Sonnet 5.5 — os
+# braços A continuam o HAIKU (a comparação de antes), com o modelo explícito.
+MODELO_HAIKU = "claude-haiku-5-5"
 # O braço Sonnet custa ~10× o Haiku: o teto da CONVERSA dele é outro (a 1ª
 # requisição com o cache frio já passava dos US$ 0,05 do Haiku; revisão de
 # 20/10/2026). O replay/eval soma na chave PRÓPRIA da conversa
@@ -83,9 +87,9 @@ MODELO_SONNET = "claude-sonnet-5-5"
 # vivo; o DIA é um só.
 TETO_CONVERSA_SONNET_USD = 0.5
 BRACOS: dict[str, dict[str, Any]] = {
-    "A1": {"effort": "low"},
-    "A2": {"effort": "medium"},
-    "A3": {"effort": "high"},
+    "A1": {"modelo": MODELO_HAIKU, "effort": "low"},
+    "A2": {"modelo": MODELO_HAIKU, "effort": "medium"},
+    "A3": {"modelo": MODELO_HAIKU, "effort": "high"},
     "S1": {
         "modelo": MODELO_SONNET,
         "effort": "medium",

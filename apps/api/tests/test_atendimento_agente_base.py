@@ -1019,6 +1019,8 @@ def test_constantes_do_contrato():
         "consultar_manual",
         "buscar_respostas_equipe",
         "sugerir_troca",
+        # Item 6 da rodada "redondo" (23/10/2026): o catálogo da loja, no fim da ordem.
+        "buscar_anuncios_da_loja",
     )
     assert set(constantes.ASSUNTOS_ORIENTACAO) <= set(prompt.ORIENTACAO)
     assert {"reclamacao_forte", "marca_autorizacao"} <= set(prompt.ORIENTACAO)

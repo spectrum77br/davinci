@@ -635,9 +635,10 @@ class Settings(BaseSettings):
     atendimento_llm_base_url: str = ""
     atendimento_llm_model: str = ""
     atendimento_llm_api_key: str = ""
-    # AGENTE de atendimento (20/10/2026, decisão 2 do dono): o Claude Haiku
-    # com ferramentas SÓ DE LEITURA (anúncio, pedido, garantia, manual,
-    # respostas da equipe, troca) no lugar da IA de uma chamada, CANAL POR
+    # AGENTE de atendimento (20/10/2026, decisão 2 do dono): o Claude (Haiku até
+    # 23/10/2026, Sonnet 5.5 desde o item 5 da rodada "redondo") com ferramentas SÓ
+    # DE LEITURA (anúncio, pedido, garantia, manual, respostas da equipe, troca, o
+    # catálogo da loja) no lugar da IA de uma chamada, CANAL POR
     # CANAL. Roda num canal só com os três juntos
     # (`services/atendimento/agente_config.agente_ligado`):
     #   • `atendimento_agente_ativo` — o interruptor geral. Nasce LIGADO de
@@ -652,20 +653,32 @@ class Settings(BaseSettings):
     # `auto_orientacao`), não daqui.
     atendimento_agente_ativo: bool = True
     atendimento_agente_api_key: str = ""
-    # Haiku 5.5: sem `thinking`, `temperature`, `top_p` nem `top_k` (fora do
-    # padrão dá 400); o esforço vai em `output_config.effort`.
-    atendimento_agente_modelo: str = "claude-haiku-5-5"
-    # low | medium | high — o eval decide; `medium` é o padrão do Haiku 5.5.
+    # Item 5 da rodada "redondo" (23/10/2026, decisão do dono: "troca para o Sonnet";
+    # eval cego de 23/10, 20 turnos reais da Shopee: o Sonnet 5.5 melhor em 9, o Haiku
+    # em 5, 6 empates). O Sonnet 5.5 pensa sozinho (raciocínio adaptativo, o padrão):
+    # NUNCA mandar `thinking` {"type": "disabled"} (dá 400 nele) nem `temperature`,
+    # `top_p` ou `top_k`; o esforço vai em `output_config.effort`. O VERIFICADOR
+    # continua no Haiku 5.5 (`agente.verificador.MODELO`, fixo no código). Voltar ao
+    # Haiku é só `ATENDIMENTO_AGENTE_MODELO=claude-haiku-5-5` no .env (e os tetos).
+    atendimento_agente_modelo: str = "claude-sonnet-5-5"
+    # low | medium | high — o eval decide; `medium` (o eval S1) é o ponto de partida
+    # do Sonnet 5.5 para várias ferramentas por resposta.
     atendimento_agente_effort: str = "medium"
     # Requisições ao modelo por resposta (o `max_iterations` do tool runner).
     atendimento_agente_max_turnos: int = 5
-    # Prazo COOPERATIVO por conversa (s), conferido entre um turno e outro.
-    atendimento_agente_prazo_s: int = 45
+    # Prazo COOPERATIVO por conversa (s), conferido entre um turno e outro. Item 5
+    # (23/10/2026): 45 → 60 — o Sonnet pensa antes de quase toda resposta e o COMO
+    # PENSAR do bloco 2 o manda pesquisar (anúncio, catálogo, equipe); a rodada do cron
+    # continua limitando (`ia.AGENTE_FIM_DO_LACO_S`), e o "Sugerir" também
+    # (`ia.PRAZO_SUGERIR_COOPERATIVO_S`).
+    atendimento_agente_prazo_s: int = 60
     # Teto de gasto (US$, pelo `usage` real, somado no Redis): por dia (fuso
     # de São Paulo, replay incluído) e por conversa. Estourou: a conversa
-    # fica sem rascunho e a Caixa Humano a pega.
-    atendimento_agente_teto_usd_dia: float = 5.0
-    atendimento_agente_teto_usd_conversa: float = 0.05
+    # fica sem rascunho e a Caixa Humano a pega. Item 5 (23/10/2026): o Sonnet custa
+    # ~US$ 0,035 por resposta (frio, com o cache gravado, 0,09–0,11) — o da conversa
+    # 0,05 → 0,50 (várias rodadas numa conversa) e o do dia 5 → 10.
+    atendimento_agente_teto_usd_dia: float = 10.0
+    atendimento_agente_teto_usd_conversa: float = 0.50
     # O VERIFICADOR semântico do agente (20/10/2026,
     # `services/atendimento/agente/verificador.py`): depois das checagens de
     # frase, UMA requisição ao Haiku 5.5 (sem ferramentas, mesmo teto em

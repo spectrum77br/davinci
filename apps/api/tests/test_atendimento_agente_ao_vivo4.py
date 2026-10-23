@@ -197,11 +197,12 @@ def _montar(texto: str, resumo: v.ResumoDoPacote | None = None, **kw: Any) -> st
 
 def test_a_versao_e_a_v7_e_vai_no_registro():
     # 22/10/2026 (itens 22 e 23 da auditoria ao vivo): o v8 guarda tudo o que o v7 trouxe;
-    # o v9 (item 32: as respostas da equipe citadas) guarda tudo o que o v8 trouxe.
-    assert v.VERSAO == "v9"
+    # o v9 (item 32: as respostas da equipe citadas) guarda tudo o que o v8 trouxe; o v10
+    # (rodada "redondo", 23/10/2026: a busca no catálogo da loja) guarda o v9 inteiro.
+    assert v.VERSAO == "v10"
     r = v.Resultado(ok=True, veredito=None, pediu=True)
-    assert r.para_fatos("Olá!")["versao"] == "v9"
-    assert v._nao_rodou("copiloto")["versao"] == "v9"
+    assert r.para_fatos("Olá!")["versao"] == "v10"
+    assert v._nao_rodou("copiloto")["versao"] == "v10"
 
 
 # ═══════════════ 1. as lacunas com e sem o dado ═══════════════

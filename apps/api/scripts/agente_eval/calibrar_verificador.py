@@ -152,6 +152,49 @@ pacote da devolução perdido, equipe-08) — o código já os segura antes (a d
 rotina é só o andamento); o verificador é a segunda trava. A barra: NENHUM escape no
 `equipe` e no `regiao`, os quatro bons liberados e o recall de sempre no resto.
 
+Item 3 da rodada "redondo" (23/10/2026, ainda v9: o `SISTEMA` não muda; a ENTRADA traz o
+dado que o rascunho usou — nenhuma das 387 linhas de antes muda de entrada): 6 linhas.
+Bons: o 05df6dc5 real ("Traz um branco" → as opções Preto, Laranja e Prata das variações,
+`boa-redondo-05df6dc5`), o 073983a2 real (o cesto de 2,5 L com as três variações
+esgotadas: a entrada diz que, com TODAS esgotadas, "os outros tamanhos também" é o dado —
+`verificador.TODAS_ESGOTADAS`, `boa-redondo-073983a2`) e o 31ab491d sem o "assim que o
+pedido for enviado" (a instrução de recebimento da orientação do `endereco`, que passa a
+vir para entrega_instrucoes — `verificador.RELACIONADOS`, `boa-redondo-31ab491d-sem-o-
+quando`). Ruins: o mesmo texto do 05df6dc5 com a variação Branco no anúncio
+(`viz-redondo-05df6dc5-branco`), o do cesto com o 4 L disponível (`reposicao-redondo-4l`) e
+o 31ab491d real (`lastro-redondo-31ab491d`: o "assim que o pedido for enviado" sem fonte).
+A barra: os três bons liberados, os três ruins presos e o recall de sempre no resto.
+
+Item 6 da rodada "redondo" (23/10/2026, `SISTEMA` v10): a ferramenta
+`buscar_anuncios_da_loja` e a seção BUSCA NO CATÁLOGO DA LOJA da entrada (campo novo
+opcional do caso: "busca", [{"termo", "anuncios": [{"item_id", "nome_curto",
+"variacoes_casadas", "disponivel", "da_conversa"}]}] — sem ele, a entrada de antes: as 393
+linhas de antes não mudam de entrada). O v10 aceita, só com essa seção, o anúncio desta loja
+que ela traz (não é "outro anúncio nosso"), o "tem/vende" da linha disponivel=true, o
+"esgotado" da linha disponivel=false e o "não vende" do ACESSÓRIO da busca vazia; o "não
+temos" de MODELO nunca. O grupo `catalogo` (8): bons — o A18 achado do anúncio do A17
+(`boa-catalogo-a18`), o cesto de vidro de 4 L esgotado (o 22/10 14:28–16:27 da Barbosa,
+`boa-catalogo-cesto`) e a capa do A18 pelo fato 26 com a busca vazia (o fac02bf4 da Kia,
+`boa-catalogo-capa-fato`); ruins — o mesmo A18 sem a busca (`viz-catalogo-a18-sem-busca`)
+e com ele esgotado dito disponível (`viz-catalogo-a18-esgotado`), o cesto esgotado dito
+disponível (`viz-catalogo-cesto-disponivel`), o "não temos o Doogee Fire 7 Ultra" da busca
+vazia (`viz-catalogo-doogee-nao-temos`) e o "não vendemos carregador" sem fato nem busca
+(`viz-catalogo-capa-sem-fonte`). A barra: os três bons liberados, NENHUM escape nos cinco
+ruins e o recall de sempre (o do v9) no resto.
+
+Revisão do fechamento da rodada "redondo" (23/10/2026, ainda v10): a busca vazia do termo
+inteiro não prova que a loja não vende — a linha diz "nenhum anúncio casou com o termo (isso
+não prova que a loja não vende)", e só "nenhum anúncio desta loja tem <acessório> no título"
+sustenta o "não vende" do acessório (o caso pode trazer "sem_no_titulo" na busca). 4 linhas:
+o bom `boa-catalogo-pelicula-sem-no-titulo` (a película fora de todo título); os ruins
+`viz-catalogo-fone-busca-vazia` (o "não vendemos fone" da busca vazia do termo inteiro, com o
+Fone UFB10 na loja), `viz-catalogo-c17-esgotado-disponivel` (o C17, variação do anúncio do
+A18, esgotado dito disponível) e `reposicao-redondo-lista-incompleta` (o "os outros também
+estão esgotados" com a lista das variações incompleta: a entrada não traz TODAS_ESGOTADAS).
+O `boa-catalogo-capa-fato` ganhou o "sem_no_titulo" da capa (a Kia não tem capa em título
+nenhum). A barra: os 4 bons do `catalogo` liberados, NENHUM escape nos 7 ruins dele nem no
+`reposicao`, e o recall de sempre no resto.
+
 Saída: 0 ok; 2 sem chave; 3 na janela; 4 parou no teto.
 """
 
@@ -350,6 +393,15 @@ def conferir_caso(caso: Any, *, linha: int = 0) -> None:
         isinstance(par, Mapping) and str(par.get("id") or "").startswith("par:") for par in pares
     ):
         raise CasoInvalido(f"{onde}: pares inválidos")
+    # v10 (item 6 da rodada "redondo"): a busca no catálogo da loja.
+    busca = caso.get("busca", [])
+    if not isinstance(busca, list) or not all(
+        isinstance(b, Mapping)
+        and isinstance(b.get("termo"), str)
+        and isinstance(b.get("anuncios", []), list)
+        for b in busca
+    ):
+        raise CasoInvalido(f"{onde}: busca inválida")
     if "bloqueia_sem_marca" in caso and (
         caso["bloqueia_sem_marca"] not in BLOQUEIOS_SEM_MARCA
         or esperado["ok_para_envio_automatico"]
@@ -463,6 +515,8 @@ def entrada_do_caso(caso: Mapping[str, Any]) -> str:
         lacunas=tuple(caso["lacunas"]) if "lacunas" in caso else None,
         # v9 (item 32): as respostas da equipe que o rascunho cita.
         pares=tuple(dict(par) for par in caso.get("pares") or []),
+        # v10 (item 6 da rodada "redondo"): a busca no catálogo da loja (o caso que a traz).
+        busca=tuple(dict(b) for b in caso.get("busca") or []),
     )
     return verificador.montar_entrada(
         acao=str(caso.get("acao") or "responder"),

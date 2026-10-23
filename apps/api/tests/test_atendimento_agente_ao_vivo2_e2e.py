@@ -9,7 +9,9 @@ API da Anthropic e a loja são falsas. Os textos são os dos rascunhos reais
 
 (9)  cd4ff3d8: TikTok, Bling 15 "Em andamento" (com e sem a linha da logística)
      → o "já foi postado" e o caminho não seguram mais ("afirma o andamento do
-     pedido sem o dado"), e o texto sai com "nos pedidos do app do TikTok Shop";
+     pedido sem o dado"), e o texto sai com "nos pedidos do app do TikTok Shop" (rodada
+     "redondo", 23/10/2026: o rascunho real agora para no assunto não pedido — a
+     orientação de cancelamento a quem só perguntou quando chega, item 4);
 (10) ef4cb373: Shopee, a opção 6 do menu → o "Como podemos ajudar?" com a
      confiança da resposta certa sai sozinho; com a de antes (0,7), o limiar de
      sempre segura. O pedido vai com a régua nova da confiança;
@@ -137,7 +139,14 @@ async def test_9_o_rascunho_real_do_tiktok_postado_sai_sem_o_alarme(
     assert not any("andamento" in m or "postagem" in m for m in agente_["sem_auto"]), agente_
     # O texto que fica (e iria ao cliente) lê "nos pedidos do app do TikTok Shop".
     assert CAMINHO_CORRIDO in r.texto and "em os pedidos" not in r.texto, r.texto
-    assert r.status == RASCUNHO_PENDENTE and not r.precisa_humano, r.motivo
+    # Item 4 da rodada "redondo" (23/10/2026, a queixa do dono): o cd4ff3d8 é o caso real do
+    # assunto que o cliente não pediu ("Quando o meu pedido chegará?" → "…a forma de
+    # cancelar agora é a devolução…"). O item 9 continua valendo (nem o andamento nem o
+    # caminho seguram); a única trava agora é a do assunto não pedido (suave: pessoa
+    # confere, a sugestão fica pendente).
+    assert r.status == RASCUNHO_PENDENTE and r.precisa_humano, r.motivo
+    assert agente_["checagens"] == [checagens.ASSUNTO_NAO_PEDIDO], agente_["checagens"]
+    assert envios == []
 
 
 async def test_9_o_tiktok_sem_postar_continua_preso(

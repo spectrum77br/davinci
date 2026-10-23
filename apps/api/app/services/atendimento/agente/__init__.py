@@ -1,4 +1,10 @@
-"""O AGENTE de atendimento (Claude Haiku 5.5 com ferramentas só de leitura, 20/10/2026).
+"""O AGENTE de atendimento (Claude com ferramentas só de leitura, 20/10/2026).
+
+O modelo é o `atendimento_agente_modelo`: o Haiku 5.5 até 23/10/2026 e, desde o item 5
+da rodada "redondo" (decisão do dono), o Sonnet 5.5 — o mesmo laço, o mesmo pedido
+(raciocínio adaptativo, sem `thinking` nem amostragem; `fallbacks: "default"` só nos
+modelos que o aceitam, `_com_fallback`). O VERIFICADOR continua no Haiku 5.5
+(`verificador.MODELO`).
 
 Substitui a IA legada (Groq, prompt v10, uma chamada só) canal a canal: roda
 quando `agente_config.agente_ligado(settings, canal)` — chave Claude,
@@ -21,8 +27,9 @@ Módulos (contrato completo em `scratchpad/agente/interfaces.md`):
 - `pacote`    — a 1ª mensagem (só banco e cache);
 - `acao_pessoa` — os gatilhos de código da régua 6.3;
 - `checagens` — variações, evidências, promessa da equipe, caminho da
-  plataforma, guarda do "perguntar";
-- `ferramentas` — as 6 ferramentas (`@beta_async_tool(strict=True)`);
+  plataforma, guarda do "perguntar", o outro produto da loja (G1);
+- `ferramentas` — as 7 ferramentas (`@beta_async_tool(strict=True)`), a 7ª
+  (`buscar_anuncios_da_loja`, 23/10/2026) o catálogo da própria loja;
 - `pares`     — a indexação e a busca das respostas da equipe;
 - `fatos_loja` — os fatos aprovados por escopo;
 - `prompt`    — os 2 blocos de sistema (com cache de 1 h);
@@ -89,7 +96,9 @@ __all__ = [
 # `atendimento_agente_replay.parada` e `fatos.agente.parada`) ──
 PARADA_FIM = "fim"  # o modelo fechou com a Proposta (end_turn + o JSON da Proposta)
 PARADA_SEM_AGENTE = "sem_agente"  # gatilho de código antes do modelo: nem chamou
-PARADA_RECUSA = "recusa"  # stop_reason "refusal" (Haiku: sem fallback no servidor)
+# stop_reason "refusal" (no Sonnet 5.5 o servidor refaz a "cyber"/"frontier_llm" no Sonnet
+# 5 com o `fallbacks: "default"`; a que sobra — ou a do Haiku, sem fallback — vem aqui).
+PARADA_RECUSA = "recusa"
 PARADA_MAX_ITERACOES = "max_iteracoes"  # bateu max_iterations ainda pedindo ferramenta
 PARADA_MAX_TOKENS = "max_tokens"  # cortado no max_tokens (já com a nova tentativa)
 PARADA_FORMATO = "fora_do_formato"  # o texto final não é a Proposta
@@ -244,9 +253,11 @@ class ResultadoAgente:
 
 logger = structlog.get_logger()
 
-# O pedido ao modelo (spec 3.3 e 7.1). Haiku 5.5: sem `temperature`,
+# O pedido ao modelo (spec 3.3 e 7.1). Haiku 5.5 e Sonnet 5.5: sem `temperature`,
 # `top_p`, `top_k` nem `thinking` (fora do padrão dá 400; o raciocínio é
-# adaptativo); o esforço vai em `output_config.effort`.
+# adaptativo — e o Sonnet 5.5 recusa `thinking` {"type": "disabled"}); o esforço vai em
+# `output_config.effort`. O raciocínio conta no `max_tokens` (item 5 da rodada
+# "redondo", 23/10/2026: o eval S1 do Sonnet, em medium, coube nos 4.000 por requisição).
 MAX_TOKENS = 4_000
 # Revisão de 20/10/2026: o pedido não é streaming — o tempo de leitura cobre a
 # geração inteira (o raciocínio incluso). 25 s cortava resposta longa, e a
@@ -268,8 +279,10 @@ EFFORT_PADRAO = "medium"
 # A cauda do laço: o ponto de cache automático do pedido (5 min). Os 2 do
 # sistema (1 h) + este = 3 dos 4 que a API aceita.
 CACHE_CAUDA = {"type": "ephemeral"}
-# O fallback do servidor é só do braço Sonnet do eval (spec 7.1); o Haiku
-# 5.5 não aceita `fallbacks`.
+# O fallback do servidor (spec 7.1): o braço Sonnet do eval e, desde o item 5 da rodada
+# "redondo" (23/10/2026), o agente ao vivo no Sonnet 5.5; o Haiku 5.5 não aceita
+# `fallbacks`. A resposta refeita vem com o id do outro modelo (`msg.model`), que o
+# `custo` conhece; a recusa que sobra para no `PARADA_RECUSA` (pessoa, sem texto).
 _MODELOS_COM_FALLBACK = ("claude-sonnet-", "claude-opus-", "claude-fable-")
 # As paradas de um turno que cortaram a resposta e as que ainda pedem outra
 # volta (ferramenta ou continuação do servidor); as outras fecham o laço.
@@ -807,8 +820,9 @@ async def responder(
     - teto (antes ou no meio) → sem rascunho (`PARADA_TETO`);
     - gatilho de código antes do modelo (instrução, só anexo depois do
       pedido de evidência) → rascunho sem texto para pessoa, sem custo;
-    - `refusal` → bloqueado, "recusa do modelo (<categoria>)" (o Haiku não
-      tem fallback no servidor);
+    - `refusal` → bloqueado e SEM texto, para pessoa: "recusa do modelo
+      (<categoria>)" — nunca um envio vazio (no Sonnet o servidor já refez a
+      recusa "cyber"/"frontier_llm" no Sonnet 5; o Haiku não tem fallback);
     - `max_tokens` → 1 nova passada; de novo → bloqueado, cortado;
     - bateu `max_turnos` ainda pedindo ferramenta → "o agente não concluiu";
     - prazo cooperativo (`atendimento_agente_prazo_s`): na 1ª vez do gatilho
@@ -1019,6 +1033,9 @@ async def _responder(
         # Decisão do dono (22/10/2026): a pergunta de produto com a resposta da equipe
         # do mesmo anúncio, de um modelo, citada.
         produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
+        # Item 2 da auditoria ao vivo (22/10/2026, 3ee1f81e): os prazos dos fatos
+        # aprovados citados ("1 ano de garantia: os 90 primeiros dias com a loja…").
+        fatos_citados=ctx.fatos_citados(ctx.evidencias),
     )
     # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
     # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta
