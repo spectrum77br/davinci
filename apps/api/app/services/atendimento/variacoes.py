@@ -1529,6 +1529,27 @@ def _rotulo(mencao: _Mencao, opcoes: list[_Opcao]) -> str:
     return opcoes[0].nome if len(opcoes) == 1 else mencao.texto
 
 
+_PRIMEIRA_FRASE = re.compile(r"^\W*[^.!?\n]*")
+_PALAVRA_DE_CONTEUDO = re.compile(r"[a-z]{5,}")
+
+
+def _sim_da_ultima(
+    texto: str, ultima: str | None, principal: _Lista | None, da_lista: frozenset[str]
+) -> bool:
+    """O "Sim" do começo responde à última fala do cliente, que não cita cor nem opção (ver
+    `conferir_variacoes`)? PURA."""
+    if not ultima:
+        return False
+    plano = _normal(ultima)
+    if _mencoes(plano, principal) or _INTENCAO_ESTOQUE.search(plano):
+        return False
+    palavras = {p for p in _PALAVRA_DE_CONTEUDO.findall(plano) if p not in da_lista}
+    sim = _SIM_NO_INICIO.search(texto)
+    primeira = _PRIMEIRA_FRASE.match(texto[sim.end() :] if sim else texto)
+    frase = set(_PALAVRA_DE_CONTEUDO.findall(primeira.group(0) if primeira else ""))
+    return bool(palavras & frase)
+
+
 def conferir_variacoes(
     resposta: str | None,
     fatos: Mapping[str, Any],
@@ -1536,6 +1557,7 @@ def conferir_variacoes(
     *,
     estoque_aprovado: bool = False,
     com_pedido: bool = False,
+    ultima_do_cliente: str | None = None,
 ) -> list[Pendencia]:
     """O que a resposta afirma de variação e estoque contra o dado da ficha. PURA.
 
@@ -1548,6 +1570,10 @@ def conferir_variacoes(
     ("confira no anúncio") não afirmam nada. Sem nenhuma afirmação, [].
     `com_pedido` (ajuste rf3) = há pedido na conversa: a pergunta do envio que
     cita a cor ("a preta já foi enviada?") não pede estoque.
+    `ultima_do_cliente` (só o agente; rodada "fechar o eval", 23/10/2026, 13d675aa6186)
+    = a última fala do cliente: sem cor/opção nela e com o "Sim" do começo respondendo
+    a ela (uma palavra dela na 1ª frase: "Traz um branco" … "O telefone tem garantia" →
+    "Sim, o aparelho tem 1 ano de garantia"), o "Sim" não confirma a cor de antes.
     """
     if not resposta:
         return []
@@ -1690,12 +1716,23 @@ def conferir_variacoes(
                 _anotar("diz que acabou sem todas as variações esgotadas", False)
     # "Sim! Pode comprar." para "tem o bordô?": a resposta começa dizendo que
     # tem a opção que o cliente citou e nenhuma frase a conferiu.
+    sim_da_ultima = bool(intencao and _SIM_NO_INICIO.search(texto)) and _sim_da_ultima(
+        texto, ultima_do_cliente, principal, da_lista
+    )
+    if sim_da_ultima:
+        # O "Sim" responde à última fala; a cor/opção pedida antes e que a resposta nem
+        # cita ficou sem resposta (13d675aa6186: "Traz um branco" … "tem garantia?").
+        na_resposta = [m.chaves for m in _mencoes(texto, principal)]
+        for mencao in do_cliente:
+            if not any(c & mencao.chaves for c in [*na_resposta, *conferidas]):
+                _anotar(f"o pedido de '{mencao.texto}' ficou sem resposta", False)
     if (
         intencao
         and _SIM_NO_INICIO.search(texto)
         and not _PEDIDO_FEITO.search(cliente)
         and not (com_pedido and _PEDIDO_A_CAMINHO.search(cliente))
         and not (com_pedido and _CONFIRMA_O_PEDIDO.search(texto))
+        and not sim_da_ultima
     ):
         pode_bloquear = False
         for mencao in do_cliente:

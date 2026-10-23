@@ -660,6 +660,8 @@ async def test_ver_anuncio_kia_bordo_e_fone(
         "ufs_conforme_pedido": [],
         "nenhuma": True,
         "conferido": ["anuncio", "regra_apple_shopee", "loja"],
+        # Rodada "fechar o eval" (23/10/2026): a restrição em uma frase (só o agente).
+        "resumo": "nenhuma restrição: todos os estados recebem",
     }
     for proibido in ("dg089", "dg088", BRANCO, LARANJA, "175", "178", "produtos_vinculados"):
         assert proibido not in texto, proibido
@@ -719,6 +721,7 @@ async def test_ver_anuncio_rj_do_anuncio_e_da_loja_sem_o_valor(
         "ufs_conforme_pedido": [],
         # Liberação L3 (23/10/2026): o que foi conferido.
         "conferido": ["anuncio", "regra_apple_shopee", "loja"],
+        "resumo": "não envia para RJ; todos os outros estados recebem",
     }
     assert f"restricao:{ITEM_A18}" in dados["evidencias"]
 

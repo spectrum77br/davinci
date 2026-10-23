@@ -397,16 +397,18 @@ NOTAS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {
         "mostra (postado em {data_envio}, o último status ou consta entregue) e a política da "
         "loja como a equipe diz: depois do envio a entrega é da Shopee e a loja não tem acesso "
         "ao transporte; vale o prazo de Minhas Compras > o pedido > Informações do envio — cite "
-        "o par:<id> da equipe que diz isso. Sem cidade, data prometida ou ação prometida; nunca "
+        "o par:<id> da equipe que diz isso. Sem cidade, data prometida ou ação prometida, nem a "
+        "data que o cliente citou ('neste fim de semana'); nunca "
         "'ao receber' nem 'recuse'. abrir_chamado só se o cliente pede para a loja verificar ou "
         "agir com a Shopee, pede o dinheiro ou cancelar pelo atraso, o rastreio está parado há "
         "dias ou houve falha/volta na entrega.",
         'Devolução/reembolso já aberto na Shopee (o cartão "[Shopee] Cliente abriu pedido de '
         'devolução/reembolso", o pedido em devolução, reclamação no PEDIDO): com '
-        "responde_e_marca no ESTADO DA CONVERSA, só a "
+        'responde_e_marca no ESTADO DA CONVERSA, acao "responder" (nem "pessoa" nem '
+        "acao_pessoa: a decisão já fica com a equipe), só a "
         "informação — o estado da solicitação do PEDIDO, que a Shopee analisa e devolve pela "
-        "mesma forma de pagamento, onde acompanhar e como postar pela própria solicitação —, "
-        'sem acao_pessoa (a equipe segue com a decisão); da equipe, só "a equipe analisa a '
+        "mesma forma de pagamento, onde acompanhar e como postar pela própria solicitação; "
+        'o cartão sozinho: confirme que recebeu a solicitação —; da equipe, só "a equipe analisa a '
         'devolução pela Shopee"; nunca aprovada/recusada, data, prazo, valor, Pix nem outra '
         "solicitação. Sem essa marca (nem devolucao_sem_decisao_da_loja), a ação é "
         "reclamacao_aberta e o texto só confirma que a solicitação foi aberta e onde acompanhar.",
@@ -854,7 +856,7 @@ COMO_PENSAR = (
     "1. Veja o que o cliente perguntou ou pediu neste turno (a última fala e o pendente).\n"
     "2. Pesquise o que falta: o pedido e o anúncio (ver_pedido, ver_anuncio), outro produto "
     "ou acessório da loja (buscar_anuncios_da_loja) e como a equipe responde isso "
-    "(buscar_respostas_equipe).\n"
+    "(buscar_respostas_equipe). Cada consulta uma vez (o resultado não muda).\n"
     "3. Responda só o que o cliente perguntou neste turno, em 1 a 3 frases, sem inventar; "
     "nunca emende orientação de outro assunto que ele não pediu nem a conversa pede (cancelar, "
     'devolver, reembolso, troca, garantia, chamado — nada de "caso deseje cancelar…").\n'
@@ -862,7 +864,8 @@ COMO_PENSAR = (
     "resto no app. Pessoa só com um código da régua (como arquivo da NF, evidência de defeito, "
     "aprovar devolução, Pix ou dados bancários, desconto, chamado, ameaça jurídica) ou com "
     "decisão da loja.\n"
-    "- Saudação sem pergunta: pergunte como pode ajudar, sem dizer que a equipe responde."
+    "- Saudação sem pergunta: pergunte como pode ajudar, sem dizer que a equipe responde.\n"
+    "- Só agradecimento: agradeça, sem repetir nada do produto (lacrado, original, novo)."
 )
 
 
@@ -882,7 +885,8 @@ PRODUTO_CONDICAO_REGIAO = (
     '- Condição: só como a "condicao" da ficha diz (nada de "de fábrica" ou "nunca aberto").\n'
     '- Estado: restricao_envio "nenhuma": true → "Enviamos para todo o Brasil; o frete e o '
     'prazo aparecem ao informar o seu CEP no anúncio." (cite restricao:<id>); com restrição, '
-    'nunca "todo o Brasil": diga os estados dela ou que o do cliente recebe. Não é '
+    'siga o "resumo" dela (fonte "loja" também): o estado do cliente fora dela recebe, o que '
+    '"depende do valor do pedido" nunca é sim nem não, e nunca "todo o Brasil". Não é '
     "dado_indisponivel.\n"
     "- Garantia Apple antes da compra: só o fato aprovado ou a resposta da equipe desta loja "
     '("garantia Apple de 1 ano a partir da ativação"), citando fato:<id> ou par:<id>; nada de '

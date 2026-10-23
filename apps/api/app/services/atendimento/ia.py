@@ -1640,6 +1640,31 @@ def demanda_concreta(texto: str) -> bool:
     )
 
 
+# Rodada "fechar o eval" (23/10/2026, só o agente): o "quem" do agradecimento ("eu quem
+# agradeço", "quem agradece sou eu") não é pergunta.
+_QUEM_AGRADECE = re.compile(
+    r"\bquem\s+(?:agradec\w*|tem\s+que\s+agradec\w*)|\bagradec\w*\s+(?:\w+\s+)?sou\s+eu\b"
+)
+_PALAVRA_DE_PERGUNTA = re.compile(
+    r"\b(?:qual|quais|quanto\w*|como|onde|quando|quem|por\s+que|porque|tem|teria|possui|"
+    r"existe|vem|vai|quero|gostaria|preciso|pode|poderia|manda\w*|envia\w*|passa\w*|"
+    r"explique\w*|explicar)\b"
+)
+
+
+def foco_so_de_agradecimento(foco: Sequence[Any]) -> bool:
+    """As falas pendentes são só agradecimento (sem "?", sem outro assunto, sem palavra de
+    pergunta fora do "eu quem agradeço")? PURA — só o agente chama."""
+    for m in foco:
+        texto = getattr(m, "texto", None) or ""
+        if "?" in texto or set(pistas_de_categoria(texto)) - {"agradecimento"}:
+            return False
+        plano = _QUEM_AGRADECE.sub(" ", validador.plano_de(texto))
+        if _PALAVRA_DE_PERGUNTA.search(plano) or "agradecimento" not in pistas_de_categoria(texto):
+            return False
+    return bool(foco)
+
+
 def _foco_do_turno(mensagens: Sequence[AtendimentoMensagem]) -> list[AtendimentoMensagem]:
     gatilho = next((m for m in reversed(mensagens) if m.autor == AUTOR_CLIENTE), None)
     return perguntas_pendentes(mensagens, gatilho)
@@ -4851,6 +4876,9 @@ async def conferir_saida(
         foco
         and categoria in ("agradecimento", "saudacao_ou_vaga", CATEGORIA_PEDE_ATENDENTE)
         and not (categoria == CATEGORIA_PEDE_ATENDENTE and _so_pedido_de_atendente(foco, agente))
+        # Rodada "fechar o eval" (23/10/2026, 11a4570bdfb5, só o agente): "Eu quem agradeço,
+        # voltarei sim" é agradecimento (o "quem" não pergunta nada).
+        and not (agente and foco_so_de_agradecimento(foco))
     ):
         motivos.append("há pergunta concreta pendente — a resposta genérica não a resolve")
     if (

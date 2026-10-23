@@ -199,10 +199,10 @@ def test_a_versao_e_a_v7_e_vai_no_registro():
     # 22/10/2026 (itens 22 e 23 da auditoria ao vivo): o v8 guarda tudo o que o v7 trouxe;
     # o v9 (item 32: as respostas da equipe citadas) guarda tudo o que o v8 trouxe; o v10
     # (rodada "redondo", 23/10/2026: a busca no catálogo da loja) guarda o v9 inteiro.
-    assert v.VERSAO == "v12"  # decisões D1–D3 do dono (23/10/2026)
+    assert v.VERSAO == "v13"  # rodada "fechar o eval" (23/10/2026)
     r = v.Resultado(ok=True, veredito=None, pediu=True)
-    assert r.para_fatos("Olá!")["versao"] == "v12"
-    assert v._nao_rodou("copiloto")["versao"] == "v12"
+    assert r.para_fatos("Olá!")["versao"] == "v13"
+    assert v._nao_rodou("copiloto")["versao"] == "v13"
 
 
 # ═══════════════ 1. as lacunas com e sem o dado ═══════════════

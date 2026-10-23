@@ -27,6 +27,7 @@ verificador como RESPOSTA DA EQUIPE CITADA, mas nunca vira número nem nome perm
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -369,6 +370,45 @@ class RegistroEvidencias:
         )
 
 
+# Rodada "fechar o eval" (23/10/2026): a consulta repetida (`ContextoAgente.consulta_repetida`).
+# Só as BUSCAS (o manual, as respostas da equipe, o catálogo): o eval repetiu só elas; as
+# leituras de um dado (ver_anuncio, ver_pedido, ver_garantia, sugerir_troca) seguem como são.
+CHAVE_DA_CONSULTA = {
+    "consultar_manual": "assunto",
+    "buscar_respostas_equipe": "item_id",
+    "buscar_anuncios_da_loja": "",
+}
+TEXTO_DA_CONSULTA = ("pergunta", "termo")
+BUSCA_EXATA = frozenset({"buscar_anuncios_da_loja"})
+MIN_COMUM_REPETIDA = 0.5
+_PALAVRA_DA_CONSULTA = re.compile(r"[a-z0-9]{3,}")
+_VAZIAS_DA_CONSULTA = frozenset(
+    {"que", "com", "sem", "para", "por", "uma", "uns", "umas", "dos", "das", "nos", "nas",
+     "vem", "tem", "ter", "esse", "essa", "este", "esta", "isso", "qual", "quais", "como",
+     "quando", "onde", "mais", "muito", "pode", "posso", "vai", "vou", "ser", "sim", "nao",
+     "cliente", "pergunta", "loja", "voces", "vcs", "ele", "ela", "seu", "sua", "meu",
+     "minha", "aqui", "tambem", "dele", "dela", "pra", "pro", "the"}
+)  # fmt: skip
+
+
+def palavras_da_consulta(texto: str | None) -> frozenset[str]:
+    """As palavras de conteúdo de uma pergunta/termo (sem acento, sem o plural em -s). PURA."""
+    decomposto = unicodedata.normalize("NFKD", str(texto or "").lower())
+    plano = "".join(c for c in decomposto if not unicodedata.combining(c))
+    saida = set()
+    for p in _PALAVRA_DA_CONSULTA.findall(plano):
+        if p in _VAZIAS_DA_CONSULTA:
+            continue
+        saida.add(p[:-1] if len(p) > 4 and p.endswith("s") else p)
+    return frozenset(saida)
+
+
+def _chave_da_consulta(ferramenta: str, args: Mapping[str, Any]) -> tuple[str, frozenset[str]]:
+    principal = _limpo(str(args.get(CHAVE_DA_CONSULTA.get(ferramenta, ""), "") or "")).lower()
+    texto = next((args.get(k) for k in TEXTO_DA_CONSULTA if isinstance(args.get(k), str)), None)
+    return principal, palavras_da_consulta(texto)
+
+
 @dataclass(frozen=True)
 class PassoRastro:
     """Uma chamada de ferramenta, ENXUTA: sem o conteúdo devolvido."""
@@ -379,6 +419,9 @@ class PassoRastro:
     ids: tuple[str, ...]
     erro: str | None = None
     cortado: bool = False
+    # Rodada "fechar o eval" (23/10/2026): a consulta repetida (`consulta_repetida`) que
+    # voltou curta, sem rodar de novo.
+    repetida: bool = False
 
     def para_fatos(self) -> dict:
         saida: dict[str, Any] = {
@@ -391,6 +434,8 @@ class PassoRastro:
             saida["erro"] = self.erro
         if self.cortado:
             saida["cortado"] = True
+        if self.repetida:
+            saida["repetida"] = True
         return saida
 
 
@@ -513,6 +558,11 @@ class ContextoAgente:
     # (`checagens.liberacao_pelo_anuncio`, que a `checagens.conferir` marca aqui). A
     # trava do envio (`ia.trava_do_agente`) lê a marca no `para_fatos`.
     produto_pelo_anuncio: bool = False
+    # Rodada "fechar o eval" (23/10/2026): o laço mandou o último pedido SEM ferramentas
+    # (`tool_choice` none — o último permitido ou o fim do prazo chegando) e as consultas
+    # já feitas nesta passada (`consulta_repetida`: a mesma de novo volta curta).
+    fechou_sem_ferramentas: bool = False
+    consultas: list[tuple[str, str, frozenset[str]]] = field(default_factory=list)
     uso: Uso = field(default_factory=Uso)
     # Preenchidos pelo laço (`agente.responder`).
     acao: str | None = None
@@ -771,6 +821,9 @@ class ContextoAgente:
         self.registro.textos = list(textos)
         self.garantias_conferidas = [dict(g) for g in garantias]
         self.fichas_lidas = list(fichas)
+        # A 2ª passada começa do pacote: nada consultado, nada fechado.
+        self.consultas = []
+        self.fechou_sem_ferramentas = False
         self.pedidos_lidos = list(pedidos_lidos)
         self.acoes_codigo = list(acoes)
         self.pedidos = set(pedidos)
@@ -797,6 +850,43 @@ class ContextoAgente:
         self.chars_de_ferramenta += len(texto)
         return texto
 
+    def consulta_repetida(self, ferramenta: str, args: Mapping[str, Any]) -> bool:
+        """A MESMA consulta (ou quase) já rodou nesta passada, com resultado?
+
+        Rodada "fechar o eval" (23/10/2026): no eval real do Sonnet 5.5, 4 de 27 turnos
+        gastaram os pedidos chamando o `consultar_manual` 3–4 vezes com o mesmo assunto e
+        a pergunta quase igual ("película incluída", "película", "película") — e pararam
+        sem texto. Repetida = a mesma ferramenta, o mesmo argumento principal
+        (`CHAVE_DA_CONSULTA`) e o texto livre (pergunta/termo) vazio de um dos lados ou com
+        mais da metade das palavras de conteúdo do menor em comum. Só conta a consulta que
+        voltou com resultado (`registrar_consulta`): o erro e o "fora do escopo" se repetem
+        como sempre. Só as buscas de `CHAVE_DA_CONSULTA`. Não muda o que a ferramenta devolve
+        na 1ª vez."""
+        if ferramenta not in CHAVE_DA_CONSULTA:
+            return False
+        principal, palavras = _chave_da_consulta(ferramenta, args)
+        for nome, chave, antes in self.consultas:
+            if nome != ferramenta or chave != principal:
+                continue
+            if ferramenta in BUSCA_EXATA:
+                # O catálogo: "capa A18" não é a busca do "A18" — só o mesmo termo.
+                if palavras == antes:
+                    return True
+                continue
+            if not palavras or not antes:
+                return True
+            comuns = len(palavras & antes) / min(len(palavras), len(antes))
+            if comuns > MIN_COMUM_REPETIDA:
+                return True
+        return False
+
+    def registrar_consulta(self, ferramenta: str, args: Mapping[str, Any]) -> None:
+        """A consulta que voltou com resultado (ver `consulta_repetida`)."""
+        if ferramenta not in CHAVE_DA_CONSULTA:
+            return
+        principal, palavras = _chave_da_consulta(ferramenta, args)
+        self.consultas.append((ferramenta, principal, palavras))
+
     def registrar_passo(
         self,
         ferramenta: str,
@@ -806,6 +896,7 @@ class ContextoAgente:
         ids: Iterable[str] = (),
         erro: str | None = None,
         cortado: bool = False,
+        repetida: bool = False,
     ) -> PassoRastro:
         """Uma chamada de ferramenta no rastro (argumentos curtos, sem o resultado)."""
         passo = PassoRastro(
@@ -815,6 +906,7 @@ class ContextoAgente:
             ids=tuple(list(dict.fromkeys(_limpo(i) for i in ids if i))[:MAX_IDS_RASTRO]),
             erro=(_limpo(erro)[:MAX_CHARS_ARG_RASTRO] or None) if erro else None,
             cortado=cortado,
+            repetida=repetida,
         )
         if len(self.rastro) < MAX_PASSOS_RASTRO:
             self.rastro.append(passo)
@@ -865,6 +957,9 @@ class ContextoAgente:
         if self.produto_pelo_anuncio:
             # Liberações L1/L2 (23/10/2026): só quando há (o registro de antes não muda).
             extra["produto_pelo_anuncio"] = True
+        if self.fechou_sem_ferramentas:
+            # Rodada "fechar o eval" (23/10/2026): só quando houve.
+            extra["fechou_sem_ferramentas"] = True
         if self.buscas_catalogo:
             # Item 6 da rodada "redondo" (23/10/2026): o termo e os anúncios achados.
             extra["buscas_catalogo"] = [

@@ -499,6 +499,26 @@ def erro_do_provedor(e: anthropic.AnthropicError, modelo: str) -> ia.ErroProvedo
     )
 
 
+# Rodada "fechar o eval" (23/10/2026): no eval real do Sonnet 5.5 (27 turnos da Shopee), 4
+# terminaram no último pedido permitido ainda pedindo ferramenta — sem texto, pessoa. O
+# pedido que será o último (`max_turnos`) ou que começa com menos de
+# `FECHAR_ANTES_DO_PRAZO_S` do prazo vai com `tool_choice` {"type": "none"}: o modelo
+# responde com o que já leu (a Proposta), sem ferramenta. O "none" vale no Haiku 5.5 e no
+# Sonnet 5.5 (só o "any"/"tool" forçados dão 400 no Sonnet 5.5) e muda só esse pedido.
+TOOL_CHOICE_SEM_FERRAMENTAS = {"type": "none"}
+FECHAR_ANTES_DO_PRAZO_S = 15.0
+
+
+def fechar_na_proxima(turnos: int, max_turnos: int, prazo: float) -> bool:
+    """O próximo pedido deve ir sem ferramentas (ver acima)?"""
+    return turnos + 1 >= max_turnos or prazo - _relogio() < FECHAR_ANTES_DO_PRAZO_S
+
+
+def _sem_ferramentas(params: Any) -> Any:
+    """Os parâmetros do runner com o `tool_choice` que fecha o laço (para `set_messages_params`)."""
+    return {**params, "tool_choice": dict(TOOL_CHOICE_SEM_FERRAMENTAS)}
+
+
 @dataclass
 class _Volta:
     """Uma passada do Tool Runner: a última mensagem e por que parou."""
@@ -525,7 +545,10 @@ async def _passada(
     execução. O prazo é conferido ENTRE um turno e outro (cooperativo):
     passou, o laço sai antes de rodar as ferramentas do turno. No último
     turno permitido ainda pedindo ferramenta, sai também (as ferramentas
-    dele nem rodam: o runner pararia logo depois delas).
+    dele nem rodam: o runner pararia logo depois delas). Rodada "fechar o
+    eval" (23/10/2026): o pedido que será o último (ou que começa perto do
+    prazo) já vai sem ferramentas (`fechar_na_proxima`) — a saída sem texto
+    só sobra quando o modelo nem assim responde.
 
     Toda saída (o fim, o corte, o prazo, o teto, o erro do SDK) fecha os
     geradores do runner ANTES de voltar (`fechar_runner`, 21/10/2026).
@@ -560,6 +583,14 @@ async def _passada(
             if _relogio() > prazo:
                 volta.estourou_prazo = True
                 break
+            if (
+                mensagem.stop_reason == "tool_use"
+                and not ctx.fechou_sem_ferramentas
+                and fechar_na_proxima(volta.turnos, max_turnos, prazo)
+            ):
+                # As ferramentas deste turno ainda rodam; o próximo pedido é a resposta.
+                runner.set_messages_params(_sem_ferramentas)
+                ctx.fechou_sem_ferramentas = True
     finally:
         await fechar_runner(runner, iterador)
     return volta
@@ -616,6 +647,7 @@ async def _laco(
     """
     volta = _Volta()
     antes = ctx.estado_das_ferramentas()
+    ctx.consultas, ctx.fechou_sem_ferramentas = [], False
     for passada in range(1, PASSADAS_MAX_TOKENS + 1):
         ctx.max_tokens_da_passada = int(argumentos.get("max_tokens") or MAX_TOKENS)
         volta = await _passada(
@@ -972,6 +1004,11 @@ async def _responder(
     p = proposta_da_mensagem(ultima)
     if p is None:
         return ex.sem_texto(PARADA_FORMATO, MOTIVO_FORA_DO_FORMATO)
+    # Rodada "fechar o eval" (23/10/2026): a política da entrega dita com a resposta-padrão
+    # da MESMA loja no pacote ganha o par:<id> nas evidências; e, no "responde e marca"
+    # (D1), a `reclamacao_aberta` que o modelo ainda pediu vira a ação de depois do envio.
+    p = checagens.com_par_da_politica(p, ctx)
+    p, pos_envio_do_modelo = checagens.responde_e_marca_da_proposta(p, ctx)
 
     # Os OUTROS pedidos que as ferramentas leram: a régua de ESTADO roda neles
     # também (revisão de 20/10/2026) — o código sempre vence.
@@ -988,7 +1025,7 @@ async def _responder(
     )
     # A proposta passa pelas MESMAS travas do legado e depois pelas do agente.
     ctx.acao = p.acao
-    ctx.acoes_modelo = saida.acoes_do_modelo(p)
+    ctx.acoes_modelo = [*saida.acoes_do_modelo(p), *pos_envio_do_modelo]
     ctx.evidencias = saida.evidencias(p)
     # A pergunta PÚBLICA: só a regra da linha (sem data, sem pedido) entra na
     # conferência da garantia; sem ela, None (antes da compra).

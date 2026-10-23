@@ -511,6 +511,25 @@ _EXTRAVIO = re.compile(
     r"|\b(?:roubaram|furtaram|levaram)\s+(?:o\s+|a\s+|meu\s+|minha\s+)?(?:pacote|encomenda"
     r"|pedido|caixa|produto|mercadoria)\b"
 )
+# Rodada "fechar o eval" (23/10/2026, a421f4642d0c): "fiquei com medo de extravio também,
+# pq não tem um mês que roubaram um espelho meu na transportadora" — e logo depois "mas
+# enfim, saiu hoje de Piracicaba" — é o MEDO (ou a história de outro pacote), não o relato
+# de que ESTE se perdeu: o extravio dito só com o medo/receio/risco antes não abre chamado.
+# O relato ("foi extraviado", "extraviaram meu pacote", "consta extraviado") continua.
+_MEDO_DO_EXTRAVIO = re.compile(
+    r"\b(?:medo|receio|risco|perigo|preocupad\w*|apreensiv\w*|insegur\w*)\s+(?:\w+\s+){0,2}?"
+    r"(?:de\s+|do\s+|da\s+|com\s+(?:o\s+|a\s+)?)?(?:ser\s+|ter\s+(?:sido\s+)?)?$"
+)
+
+
+def extravio_relatado(plano: str) -> bool:
+    """O cliente RELATA extravio/roubo (`_EXTRAVIO`), fora do medo dele? PURA."""
+    for m in _EXTRAVIO.finditer(plano):
+        if not _MEDO_DO_EXTRAVIO.search(plano[max(0, m.start() - 40) : m.start()]):
+            return True
+    return False
+
+
 # O status da transportadora de volta à loja ("Pedido será devolvido ao
 # vendedor", "entregue ao remetente") ou perdido — não a devolução do comprador.
 _DEVOLVIDO = re.compile(
@@ -1386,10 +1405,37 @@ def responde_e_marca_do_turno(
     if any(_e_anexo(m) for m in rajada):
         return False
     foco = ia.perguntas_pendentes(recentes, gatilho)
-    textos = [m.texto for m in rajada if _do_cliente(m)] + [
+    textos = [_texto_do_turno_d1(m) for m in rajada if _do_cliente(m)] + [
         m.texto for m in foco if m not in rajada
     ]
     return turno_informativo_da_devolucao(textos)
+
+
+# Rodada "fechar o eval" (23/10/2026, 0e1493a92afe): o turno só com o cartão "[Shopee]
+# Cliente abriu pedido de devolução/reembolso — motivo: Mudei de ideia" ficava fora do D1
+# (o texto do cartão é "[Mensagem]"): o cartão ABERTO conta pelo que diz — a solicitação,
+# o motivo e a solução —, e o motivo de problema (defeito, danificado, errado, faltando,
+# diferente, falsificado, usado, vazio) segue com pessoa.
+_MOTIVO_COM_PROBLEMA = re.compile(
+    r"\bdefeit\w*|\bnao\s+(?:funciona|liga|carrega|ligou|funcionou)\b|\bdanific\w*|\bquebr\w*"
+    r"|\bavaria\w*|\berrad\w*|\bfalt\w*|\bincomplet\w*|\bdiferente\b|\bfalsific\w*|\bpirata\b"
+    r"|\busad[oa]\b|\bvazi[oa]\b|\bembalagem\b|\bamass\w*|\briscad\w*|\bvencid\w*|\bestragad\w*"
+)
+
+
+def _texto_do_turno_d1(m: Any) -> str | None:
+    """O texto da fala para o D1: o cartão de devolução ABERTO vira o que ele diz (ver
+    acima; com o motivo de problema, a palavra "defeito" — o turno fica com pessoa). PURA."""
+    try:
+        d = cartoes_plataforma.devolucao_do_cartao(getattr(m, "payload", None))
+    except Exception:  # noqa: BLE001 — o cartão que não se lê fica como estava ("[Mensagem]")
+        d = None
+    if d is None or d.encerrada:
+        return getattr(m, "texto", None)
+    motivo = " ".join(x for x in (d.motivo, d.solucao) if x)
+    if _MOTIVO_COM_PROBLEMA.search(_plano_de(motivo)):
+        return "pedido de devolução aberto por defeito"
+    return f"pedido de devolução aberto: {motivo}" if motivo else "pedido de devolução aberto"
 
 
 def _encerrada_depois(
@@ -2771,7 +2817,7 @@ def gatilhos(
         or (_DISSE_QUE_ENTREGOU.search(plano) and _SO_NAO_RECEBI.search(plano))
     ):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_NAO_RECEBEU))
-    elif _EXTRAVIO.search(plano) or _SUMIU.search(plano):
+    elif extravio_relatado(plano) or _SUMIU.search(plano):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_EXTRAVIO))
     elif _ENTREGA_ERRADA.search(plano):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_ENTREGA_ERRADA))

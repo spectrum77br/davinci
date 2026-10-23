@@ -421,6 +421,19 @@ def caber(
 
 # ── O embrulho comum ──────────────────────────────────────────────────────
 
+# Rodada "fechar o eval" (23/10/2026): a resposta da consulta repetida
+# (`ContextoAgente.consulta_repetida`) e as notas que só o modelo lê (nunca lastro).
+JA_CONSULTADO = (
+    "esta mesma consulta já foi feita neste turno e o resultado está acima: use-o. Não "
+    "consulte de novo — responda com o que tem; se o dado não está lá, diga o que se sabe "
+    "e onde o cliente vê o resto no app, ou use a ação de pessoa."
+)
+NOTAS_DO_MODELO = ("sobre_a_pergunta",)
+
+
+def _sem_notas(dados: Mapping[str, Any]) -> dict:
+    return {k: v for k, v in dados.items() if k not in NOTAS_DO_MODELO}
+
 
 async def executar(
     ctx: ContextoAgente,
@@ -443,6 +456,11 @@ async def executar(
     def _ms() -> float:
         return (time.monotonic() - t0) * 1000
 
+    # Rodada "fechar o eval" (23/10/2026): a mesma consulta de novo não roda (o resultado
+    # já está na conversa) — volta curta, e o modelo responde com o que tem.
+    if ctx.consulta_repetida(nome, args):
+        ctx.registrar_passo(nome, args, _ms(), repetida=True)
+        return formatar(nome, {"ja_consultado": JA_CONSULTADO})
     try:
         r = await consulta()
         dados = _mascarar(r.dados, ctx.nomes)
@@ -453,7 +471,11 @@ async def executar(
         if texto != contexto.SEM_ORCAMENTO:
             ctx.permitir(
                 ids=r.ids,
-                textos=[_json(_sem_ids(dados))] if r.permitir_texto and r.busca is None else [],
+                # A nota para o modelo (`sobre_a_pergunta`) nunca é lastro: tem as
+                # palavras do próprio cliente.
+                textos=[_json(_sem_ids(_sem_notas(dados)))]
+                if r.permitir_texto and r.busca is None
+                else [],
                 produto=r.produto,
             )
             if r.busca is not None:
@@ -467,6 +489,7 @@ async def executar(
                 ctx.registrar_garantias(r.garantias)
             if r.fatos:
                 ctx.registrar_fatos(r.fatos)
+            ctx.registrar_consulta(nome, args)
         ctx.registrar_passo(nome, args, _ms(), ids=[*r.ids, *r.ids_rastro], cortado=texto != bruto)
         return texto
     except ForaDoEscopo:
@@ -802,7 +825,15 @@ async def dados_ver_anuncio(
     dados["restricao_envio"] = (
         {
             k: restricao.get(k)
-            for k in ("ufs", "fonte", "trecho", "ufs_conforme_pedido", "nenhuma", "conferido")
+            for k in (
+                "ufs",
+                "fonte",
+                "trecho",
+                "ufs_conforme_pedido",
+                "nenhuma",
+                "conferido",
+                "resumo",
+            )
             if k in restricao or k in ("ufs", "fonte", "trecho", "ufs_conforme_pedido")
         }
         if restricao
@@ -1362,6 +1393,40 @@ def fato_do_manual(fato: Mapping[str, Any]) -> dict:
     return saida
 
 
+# Rodada "fechar o eval" (23/10/2026): o eval real do Sonnet 5.5 consultou o manual 3–4
+# vezes seguidas por "original lacrado garantia Apple", "funciona no Brasil", "vai com
+# película" e "vidro da airfryer" — o resultado não dizia se respondia a dúvida. A nota
+# `sobre_a_pergunta` diz quais fatos/respostas prontas falam das palavras da pergunta, ou
+# que nenhum fala (o manual não tem o dado: o anúncio, a equipe ou pessoa).
+MAX_PALAVRAS_DA_NOTA = 4
+
+
+def nota_da_pergunta(pergunta: str | None, dados: Mapping[str, Any]) -> str | None:
+    """A nota do `consultar_manual` sobre a pergunta (ver acima); None sem pergunta. PURA."""
+    palavras = contexto.palavras_da_consulta(pergunta)
+    if not palavras:
+        return None
+    falam: list[str] = []
+    for item in [*(dados.get("fatos") or []), *(dados.get("respostas_prontas") or [])]:
+        if isinstance(item, Mapping) and palavras & contexto.palavras_da_consulta(
+            str(item.get("texto") or "")
+        ):
+            falam.append(str(item.get("id")))
+    if falam:
+        return (
+            f"falam das palavras da pergunta: {', '.join(falam)}. Confira se respondem "
+            "exatamente o que o cliente perguntou; se não, o manual não tem esse dado — "
+            "não consulte de novo."
+        )
+    termos = ", ".join(sorted(palavras)[:MAX_PALAVRAS_DA_NOTA])
+    return (
+        f"nenhum fato aprovado nem resposta pronta deste assunto fala de «{termos}»: o "
+        "manual não tem esse dado — não consulte de novo. Responda pelo anúncio (PRODUTO ou "
+        "ver_anuncio) ou pela resposta da equipe; sem o dado, diga o que se sabe e onde o "
+        "cliente vê o resto, ou use a ação de pessoa."
+    )
+
+
 def _skus_do_pedido(base: BaseDoGerar) -> list[str]:
     pedido = base.ctx.get("pedido") if isinstance(base.ctx, Mapping) else None
     itens = (pedido or {}).get("itens") if isinstance(pedido, Mapping) else None
@@ -1459,6 +1524,8 @@ async def dados_consultar_manual(
     dados = caber(dados, listas=("fatos", "respostas_prontas", "mais_regras"))
     if not dados.get("mais_regras"):
         dados.pop("mais_regras", None)
+    if nota := nota_da_pergunta(pergunta, dados):
+        dados["sobre_a_pergunta"] = nota
     ids = [contexto.id_regra(assunto)] if regras or orientacao else []
     ids += [p["id"] for p in dados["respostas_prontas"]] + [f["id"] for f in dados["fatos"]]
     return Resultado(

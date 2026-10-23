@@ -912,7 +912,10 @@ def decisao_simulada(
         motivo = VALIDADOR_REPROVOU
     elif r.precisa_humano:
         motivo = PRECISA_HUMANO
-    elif (r.confianca or 0.0) < ia.confianca_minima(ia.rascunho_do_agente(r)):
+    # Rodada "fechar o eval" (23/10/2026): o resultado é SEMPRE do agente — o
+    # `ia.rascunho_do_agente(r)` lia o `prompt_versao` que o `ResultadoAgente` não tem e
+    # cortava no 0,85 do legado (377ef84c9635, 72561421e33b e eb6a5eebe6cd, com 0,80).
+    elif (r.confianca or 0.0) < ia.confianca_minima(True):
         motivo = CONFIANCA_BAIXA
     elif not texto:
         motivo = SEM_TEXTO

@@ -772,6 +772,7 @@ async def restricao_do_anuncio(
                 "ufs_conforme_pedido": [],
                 "nenhuma": True,
                 "conferido": list(_ORDEM_FONTES),
+                "resumo": RESUMO_NENHUMA,
             }
         return None
     fontes = [f for f in _ORDEM_FONTES if f in por_fonte] or [FONTE_LOJA]
@@ -784,7 +785,31 @@ async def restricao_do_anuncio(
     }
     if conferida:
         saida["conferido"] = list(_ORDEM_FONTES)
+        saida["resumo"] = resumo_da_restricao(ufs, conforme)
     return saida
+
+
+# Rodada "fechar o eval" (23/10/2026, 0bd8541e29d9 — "vocês fazem entrega para Maceió?"):
+# com a restrição só da loja ("fonte": "loja", "ufs": [], "ufs_conforme_pedido": ["RJ"]),
+# o agente leu "sem lista de estados" e foi para pessoa (a equipe: "sim enviamos para todo
+# brasil!"). O `resumo` diz a regra inteira em uma frase (só o agente: `conferida`); o
+# valor do limite nunca vai (revisão de 20/10/2026).
+RESUMO_NENHUMA = "nenhuma restrição: todos os estados recebem"
+
+
+def resumo_da_restricao(ufs: Sequence[str], conforme: Sequence[str]) -> str:
+    """A restrição em uma frase (ver acima). PURA."""
+    partes = []
+    if ufs:
+        partes.append(f"não envia para {', '.join(ufs)}")
+    if conforme:
+        partes.append(
+            f"{', '.join(conforme)}: depende do valor do pedido (não diga sim nem não para "
+            f"{'esse estado' if len(conforme) == 1 else 'esses estados'})"
+        )
+    if not partes:
+        return RESUMO_NENHUMA
+    return "; ".join(partes) + "; todos os outros estados recebem"
 
 
 def sem_restricao_conferida(restricao: Any) -> bool:

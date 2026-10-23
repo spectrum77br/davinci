@@ -741,7 +741,7 @@ async def test_6_o_outro_anuncio_lido_nao_empresta_caracteristica():
 
 
 def test_6_o_verificador_v10_le_a_busca_so_quando_houve():
-    assert v.VERSAO in ("v10", "v11", "v12") and v.MODELO == HAIKU
+    assert v.VERSAO in ("v10", "v11", "v12", "v13") and v.MODELO == HAIKU
     s = " ".join(v.SISTEMA.split())
     for trecho in (
         "BUSCA NO CATÁLOGO DA LOJA (quando vier)",

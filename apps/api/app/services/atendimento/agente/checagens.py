@@ -1010,6 +1010,7 @@ def conferir_variacoes(
     *,
     com_pedido: bool = False,
     caracteristica: bool = False,
+    ultima: str | None = None,
 ) -> list[PendenciaAgente]:
     """`variacoes.conferir_variacoes(texto, {"ficha_do_anuncio": fichas},
     textos_cliente, estoque_aprovado=True)` em `PendenciaAgente`, com a camada
@@ -1053,7 +1054,12 @@ def conferir_variacoes(
     fatos = {"ficha_do_anuncio": fichas}
     achadas = list(
         variacoes_svc.conferir_variacoes(
-            texto, fatos, clientes, estoque_aprovado=True, com_pedido=com_pedido
+            texto,
+            fatos,
+            clientes,
+            estoque_aprovado=True,
+            com_pedido=com_pedido,
+            ultima_do_cliente=ultima,
         )
     )
     canonico = _canonico(texto)
@@ -1062,7 +1068,12 @@ def conferir_variacoes(
         validador.plano_de(t) for t in clientes
     ]:
         achadas += variacoes_svc.conferir_variacoes(
-            canonico, fatos, clientes_canonicos, estoque_aprovado=True, com_pedido=com_pedido
+            canonico,
+            fatos,
+            clientes_canonicos,
+            estoque_aprovado=True,
+            com_pedido=com_pedido,
+            ultima_do_cliente=_canonico(ultima) if ultima else None,
         )
     saida = [
         _contradiz(VARIACAO_CONTRADIZ, p.motivo)
@@ -4829,6 +4840,12 @@ _DANO_NEGADO = re.compile(
 )
 
 
+_RECUSA_INCLUI_DEFEITO = re.compile(
+    r"\b(?:com\s+ou\s+sem|mesmo\s+com|nem\s+com|ainda\s+que\s+(?:\w+\s+)?(?:tenha|com)|inclusive\s+com"
+    r"|seja\s+qual\s+for)\s+(?:\w+\s+){0,2}?(?:defeit\w*|problema\w*|avaria\w*|dano\w*)"
+)
+
+
 def _fala_de_defeito(textos_cliente: Sequence[str]) -> bool:
     """O cliente fala de defeito, avaria ou item errado — relatado ou só perguntado? PURA.
 
@@ -4851,7 +4868,14 @@ def conferir_troca_negada_no_defeito(
     sem defeito na mesma frase ("troca de cor não fazemos", "sem defeito, não fazemos
     troca"), a troca de outra coisa ("não conseguimos trocar o endereço") e a troca só
     depois da análise ("não fazemos a troca direto: primeiro o vídeo")."""
-    if not (texto or "").strip() or not _fala_de_defeito(textos_cliente):
+    if not (texto or "").strip():
+        return []
+    if not _fala_de_defeito(textos_cliente):
+        # Rodada "fechar o eval" (23/10/2026, b72f465c7e38): a própria resposta estende a
+        # recusa ao defeito ("não fazemos troca … nem com ou sem problema no aparelho").
+        for sentenca, _pergunta in _sentencas(_plano(texto)):
+            if _RECUSA_DE_TROCA.search(sentenca) and _RECUSA_INCLUI_DEFEITO.search(sentenca):
+                return [_suave(TROCA_NEGADA_NO_DEFEITO, MOTIVO_TROCA_NEGADA_NO_DEFEITO)]
         return []
     com_o_caminho = bool(_CAMINHO_DO_DEFEITO.search(_plano(texto)))
     for sentenca, _pergunta in _sentencas(_plano(texto)):
@@ -5369,8 +5393,41 @@ def _preparado(b: Mapping) -> bool:
     return _saiu(b) is True or bool(_PROVA_A_PREPARACAO.search(_status_do_bloco(b)))
 
 
+# Rodada "fechar o eval" (23/10/2026, b72f465c7e38): sem o pedido na conversa, "Ele
+# chegou ontem" do próprio cliente é o lastro de repetir que o aparelho já foi entregue; a
+# situação Finalizado/Concluído/Entregue do bloco também prova a entrega. A negação ("não
+# chegou", "ainda não recebi") e a pergunta ("chegou?") não contam.
+_CLIENTE_RECEBEU = re.compile(
+    r"\b(?:chegou|chegaram|recebi|recebemos|veio|vieram|entregaram|ja\s+(?:esta|ta)\s+"
+    r"(?:comigo|aqui|em\s+maos))\b"
+)
+_NEGA_O_RECEBIMENTO = re.compile(r"\b(?:nao|nem|nunca|ainda\s+nao|n)\s+(?:\w+\s+){0,2}?$")
+_SITUACAO_DE_ENTREGUE = frozenset({"finalizado", "concluido", "entregue", "completo"})
+
+
+def cliente_disse_que_recebeu(textos: Sequence[str | None]) -> bool:
+    """O cliente diz, fora de pergunta e sem negar, que o pedido chegou (ver acima)? PURA."""
+    for t in textos:
+        for frase in re.split(r"(?<=[.!?\n])", _plano(t or "")):
+            if "?" in frase:
+                continue
+            for m in _CLIENTE_RECEBEU.finditer(frase):
+                if not _NEGA_O_RECEBIMENTO.search(frase[max(0, m.start() - 30) : m.start()]):
+                    return True
+    return False
+
+
+def _entregue_no_bloco(bloco: Mapping) -> bool:
+    situacao = " ".join(_plano(str(bloco.get("situacao") or "")).split())
+    return bool(bloco.get("entregue")) or situacao in _SITUACAO_DE_ENTREGUE
+
+
 def conferir_estado_do_pedido(
-    texto: str, pedido: Mapping | None = None, ctx: ContextoAgente | None = None
+    texto: str,
+    pedido: Mapping | None = None,
+    ctx: ContextoAgente | None = None,
+    *,
+    cliente_recebeu: bool = False,
 ) -> list[PendenciaAgente]:
     """O estado do pedido que a resposta afirma contra o bloco do pedido. PURA.
 
@@ -5502,7 +5559,9 @@ def conferir_estado_do_pedido(
                 )
             continue
         if entregou:
-            if entregue_pela_garantia or any(b.get("entregue") for b in blocos):
+            if entregue_pela_garantia or any(_entregue_no_bloco(b) for b in blocos):
+                continue
+            if cliente_recebeu and not blocos:
                 continue
             if estados and all(e is False for e in estados):
                 saida.append(
@@ -5915,6 +5974,31 @@ def _oracao_com_lastro(
     return False
 
 
+# Rodada "fechar o eval" (23/10/2026, 29a36129ce61): "Sentimos o transtorno de não ver
+# atualização do seu pedido." — o acolhimento que REPETE a queixa do cliente não afirma o
+# andamento. Só a oração que começa pelo acolhimento (sentimos/lamentamos/entendemos… o
+# transtorno, a preocupação, a demora…) e não traz nenhuma palavra de estado, lugar ou
+# tempo depois dele; "sentimos a demora, que ele já saiu" continua conferida.
+_ACOLHIMENTO_DA_ORACAO = re.compile(
+    r"^(?:nos\s+)?(?:sentimos|lamentamos|entendemos|compreendemos|sinto|lamento|entendo"
+    r"|compreendo)\s+(?:muito\s+)?(?:(?:pel[oa]|com|por|a|o|sua|seu)\s+)*"
+    r"(?:transtorno|preocupacao|demora|chateacao|incomodo|ansiedade|frustracao|situacao"
+    r"|inconveniente|aborrecimento|espera)\b"
+)
+_ESTADO_DEPOIS_DO_ACOLHIMENTO = re.compile(
+    r"\b(?:saiu|sairam|foi|foram|esta|estao|ta|chegou|chega|chegar|chegara|postad\w*"
+    r"|enviad\w*|entreg\w*|extravi\w*|parad\w*|caminho|transito|centro|separa\w*|coletad\w*"
+    r"|devolvid\w*|cancelad\w*|previs\w*|prazo|amanha|hoje|ontem|semana|cidade|rota|saida)\b"
+    r"|\d"
+)
+
+
+def so_acolhimento(oracao: str) -> bool:
+    """A oração (já no plano) é só o acolhimento da queixa (ver acima)? PURA."""
+    m = _ACOLHIMENTO_DA_ORACAO.search(oracao.strip())
+    return m is not None and not _ESTADO_DEPOIS_DO_ACOLHIMENTO.search(oracao[m.end() :])
+
+
 def conferir_andamento_sem_lastro(
     texto: str,
     pedido: Mapping | None = None,
@@ -5963,6 +6047,7 @@ def conferir_andamento_sem_lastro(
             if (
                 _ORACAO_DE_CONDICAO.search(oracao)
                 or _SO_CORTESIA.search(oracao)
+                or so_acolhimento(oracao)
                 or not _ORACAO_DO_PEDIDO.search(oracao)
             ):
                 herda = None
@@ -8705,6 +8790,58 @@ def conferir_politica_da_entrega(
     ]
 
 
+def par_da_politica_do_pacote(ctx: ContextoAgente) -> str | None:
+    """O `par:<id>` da resposta-padrão da entrega da MESMA loja que o PACOTE mostrou
+    (`pares.politica_da_entrega`), ou None. PURA (rodada "fechar o eval")."""
+    from app.services.atendimento.agente import pares as pares_svc
+
+    for i, par in ctx.pares_do_pacote.items():
+        if par.get("mesma_loja") is True and pares_svc.politica_da_entrega(par.get("resposta")):
+            return i
+    return None
+
+
+def com_par_da_politica(proposta: Proposta, ctx: ContextoAgente) -> Proposta:
+    """A política da entrega dita sem o `par:<id>` citado, com a resposta-padrão da MESMA
+    loja já no pacote: o par entra nas evidências (rodada "fechar o eval", 23/10/2026). PURA.
+
+    No eval real do Sonnet 5.5 o modelo escreveu a frase da equipe ("depois do envio a
+    entrega fica por conta da Shopee; não temos acesso ao transporte") e não citou o par
+    que o pacote trouxe — a checagem segurava (`POLITICA_DA_ENTREGA_SEM_PAR`). O par
+    anexado é o lastro que a checagem e o verificador (RESPOSTAS DA EQUIPE CITADAS) leem;
+    sem par da política no pacote, nada muda (a checagem segura como antes)."""
+    texto = proposta.texto or ""
+    if not _POLITICA_DA_ENTREGA_NO_TEXTO.search(" ".join(_plano(texto).split())):
+        return proposta
+    if not conferir_politica_da_entrega(texto, evidencias_=proposta.evidencias, ctx=ctx):
+        return proposta
+    par = par_da_politica_do_pacote(ctx)
+    if par is None:
+        return proposta
+    return proposta.model_copy(update={"evidencias": [*proposta.evidencias, par]})
+
+
+def responde_e_marca_da_proposta(
+    proposta: Proposta, ctx: ContextoAgente
+) -> tuple[Proposta, list[str]]:
+    """D1 com a ação de pessoa do modelo que é só "depois do envio" (rodada "fechar o
+    eval", 23/10/2026, 0e1493a92afe): com a marca `ctx.responde_e_marca`, a Proposta
+    "pessoa"/`reclamacao_aberta` com texto vira "responder" e a ação volta à parte (a
+    lista devolvida, que o laço junta às ações do modelo — fica em `acoes_pos_envio`).
+    Sem a marca, sem texto, com outra ação ou "perguntar": a Proposta como veio. PURA."""
+    acao = proposta.acao_pessoa
+    if (
+        not ctx.responde_e_marca
+        or not (proposta.texto or "").strip()
+        or proposta.acao not in ("responder", "pessoa")
+        or (acao is not None and acao not in agente_ctx.ACOES_POS_ENVIO)
+        or (proposta.acao == "responder" and acao is None)
+    ):
+        return proposta, []
+    nova = proposta.model_copy(update={"acao": "responder", "acao_pessoa": None})
+    return nova, [acao] if acao else []
+
+
 # ── 10b. D1: o "responde e marca" (decisão do dono, 23/10/2026 ~12:40) ─────
 #
 # Com a devolução/reclamação aberta na plataforma e o turno só informativo
@@ -10003,6 +10140,8 @@ def conferir(
             caracteristica=capacidade_sem_estoque(
                 ctx.produto_pelo_anuncio, conferida.categoria, clientes
             ),
+            # Rodada "fechar o eval" (23/10/2026): o "Sim" da última fala (13d675aa6186).
+            ultima=(base.textos_rajada or [None])[-1],
         )
         # Revisão 2 da rodada 6 (22/10/2026): o "sem previsão de reposição" só da
         # variação esgotada e confiável de que a frase fala (o verificador v8 o
@@ -10085,7 +10224,9 @@ def conferir(
             com_pedido=bool(pedido) or bool(fatos_da_base.get("pedido")),
         )
         # Revisão "furos": o estado do pedido, a origem do envio e o prazo sem lastro.
-        pendencias += conferir_estado_do_pedido(texto, pedido, ctx)
+        pendencias += conferir_estado_do_pedido(
+            texto, pedido, ctx, cliente_recebeu=cliente_disse_que_recebeu(clientes)
+        )
         if ctx.modo == constantes.MODO_AUTO:
             # Ajuste rf3 (21/10/2026): a regra estrutural do andamento, no texto
             # com as lacunas (o do modelo).

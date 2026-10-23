@@ -664,8 +664,14 @@ class Settings(BaseSettings):
     # low | medium | high — o eval decide; `medium` (o eval S1) é o ponto de partida
     # do Sonnet 5.5 para várias ferramentas por resposta.
     atendimento_agente_effort: str = "medium"
-    # Requisições ao modelo por resposta (o `max_iterations` do tool runner).
-    atendimento_agente_max_turnos: int = 5
+    # Requisições ao modelo por resposta (o `max_iterations` do tool runner). Rodada
+    # "fechar o eval" (23/10/2026): 5 → 8 — no eval real do Sonnet 5.5 (27 turnos da
+    # Shopee), 4 pararam no 5º pedido ainda consultando o manual, sem texto (pessoa). O
+    # último pedido permitido vai SEM ferramentas (`tool_choice` none: o laço sempre fecha
+    # com a Proposta) e a consulta repetida volta curta ("já consultado"). Custo: cada
+    # pedido a mais lê o prefixo do cache (~US$ 0,01 no Sonnet); o prazo (60 s) e os
+    # tetos em dólar continuam valendo.
+    atendimento_agente_max_turnos: int = 8
     # Prazo COOPERATIVO por conversa (s), conferido entre um turno e outro. Item 5
     # (23/10/2026): 45 → 60 — o Sonnet pensa antes de quase toda resposta e o COMO
     # PENSAR do bloco 2 o manda pesquisar (anúncio, catálogo, equipe); a rodada do cron
