@@ -1697,7 +1697,7 @@ async def test_shopee_ja_contestada_a_mao_nao_e_prazo_vencido(client, make_user,
     # do Bling é obrigatória — stub no lugar do Bling de verdade
     from app.services import chamados as chamados_svc
 
-    async def _aplicar(session, ch_, nome):
+    async def _aplicar(session, ch_, nome, **_kw):
         ch_.status_bling = nome
         return {"bling_order_id": 0, "situacao": nome, "situacao_id": 0}
 

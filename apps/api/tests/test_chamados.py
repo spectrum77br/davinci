@@ -120,7 +120,7 @@ def _sem_bling_ao_resolver(monkeypatch) -> list[str]:
     (sem catálogo de situações nem cliente do Bling)."""
     aplicadas: list[str] = []
 
-    async def _aplicar(session, ch, nome):
+    async def _aplicar(session, ch, nome, **_kw):
         aplicadas.append(nome)
         ch.status_bling = nome
         session.add(svc.registrar_sistema(ch, f"Status Bling alterado para {nome}"))

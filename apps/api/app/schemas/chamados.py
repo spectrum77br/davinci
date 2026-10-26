@@ -372,6 +372,8 @@ class ExcluirPrejuizoMantidoOut(BaseModel):
     tipo: str | None = None
     prejuizo: float | None = None
     reembolso: float | None = None
+    # Valor do prejuízo (na Manutenção, o débito do conserto).
+    valor: float | None = None
     # O que alguém mexeu (conferido, reembolso lançado…) — por isso ficou.
     motivo: str | None = None
 

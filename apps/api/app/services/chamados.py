@@ -38,7 +38,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import Text, and_, cast, exists, func, or_, select
+from sqlalchemy import Text, and_, cast, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -53,6 +53,7 @@ from app.models import (
     StoreInfo,
 )
 from app.services import logistica_bling, logistica_meli
+from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.ml import MercadoLivreClient
 
 logger = structlog.get_logger()
@@ -937,9 +938,18 @@ async def _bling_order_id(session: AsyncSession, ch: Chamado) -> int:
     return int(bid)
 
 
-async def aplicar_status_bling(session: AsyncSession, ch: Chamado, nome: str) -> dict:
+async def aplicar_status_bling(
+    session: AsyncSession, ch: Chamado, nome: str, *, actor_id: UUID | None = None
+) -> dict:
     """PATCH da situação do pedido no Bling (endpoint dedicado, reversível) e
-    sincroniza o snapshot `status_bling` + histórico. NÃO commita."""
+    sincroniza o snapshot `status_bling` + histórico. NÃO commita.
+
+    26/10 (caso 300978): a mudança é de uma PESSOA (Alterar status Bling,
+    Resolver, lixeira do chamado) — grava margem_audit (origem 'chamados') e o
+    espelho `BlingOrder.situacao` na hora, como o endpoint manual da aba
+    Lançamentos. Sem isso, a exclusão de um lançamento logo depois não via a
+    escolha e voltava o pedido para a situação de antes da devolução por cima
+    dela (e a aba Acompanhamento só refletia no próximo sync)."""
     nome = (nome or "").strip()
     if not nome:
         raise ChamadoError("chamado_sem_status_bling")
@@ -959,6 +969,29 @@ async def aplicar_status_bling(session: AsyncSession, ch: Chamado, nome: str) ->
     # legado "Enviado Etiqueta" move pra 21 → snapshot/histórico dizem
     # "Em digitação" (mesmo ajuste de logistica_bling.apply_alterar_status_bling).
     nome_aplicado = await logistica_bling._situacao_nome_por_id(session, sid) or nome
+    numero = (ch.pedido_bling or "").strip()
+    espelho = (
+        await session.execute(
+            select(BlingOrder.situacao)
+            .where(BlingOrder.numero == numero, BlingOrder.bling_id.isnot(None))
+            .order_by(BlingOrder.data.desc().nullslast())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    await session.execute(
+        update(BlingOrder).where(BlingOrder.numero == numero).values(situacao=str(sid))
+    )
+    # Só registra quando muda (record_margem_audit ignora antigo == novo).
+    await record_margem_audit(
+        session,
+        acao="situacao",
+        pedido_bling=numero,
+        bling_id=bling_id,
+        valor_antigo=espelho,
+        valor_novo=sid,
+        origem="chamados",
+        mudado_por=actor_id,
+    )
     ch.status_bling = nome_aplicado
     texto = (
         f"Status Bling alterado para {nome_aplicado}"

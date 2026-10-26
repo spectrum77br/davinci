@@ -66,7 +66,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid5
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -2722,11 +2722,18 @@ async def processar_pendentes(
     """Cron (de hora em hora): retenta as aberturas `pendente` (plataforma
     ainda não liberou, foto que chegou depois). Chamado Encerrado (19/09: a
     plataforma já decidiu, falta a pessoa concluir) fica de fora como o
-    resolvido — abrir contestação num caso decidido não faz sentido. Best-effort
-    por linha; commita no fim."""
+    resolvido — abrir contestação num caso decidido não faz sentido.
+
+    Uma abertura por vez, com commit por linha (26/10, caso 300978): a lixeira
+    da aba Devoluções agora apaga o chamado automático da última linha, e um
+    lote com commit só no fim perdia TUDO (inclusive o "enviada" de uma
+    contestação que já tinha saído na plataforma) quando um chamado do lote
+    sumia no meio. Cada linha pega o mesmo lock do disparo do worker e relê a
+    abertura travada (SKIP LOCKED): chamado em exclusão/sendo disparado fica
+    para a próxima hora; abertura que sumiu é pulada, não vira "falhou"."""
     rows = (
         await session.execute(
-            select(ChamadoMensagem, Chamado)
+            select(ChamadoMensagem.id, Chamado.id)
             .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
             .where(
                 ChamadoMensagem.tipo == TIPO_ABERTURA,
@@ -2740,8 +2747,32 @@ async def processar_pendentes(
         )
     ).all()
     abertos = pendentes = falhas = 0
-    for msg, ch in rows:
+    for msg_id, ch_id in rows:
         try:
+            livre = (
+                await session.execute(
+                    text("SELECT pg_try_advisory_xact_lock(hashtext(:k))"),
+                    {"k": f"chamado_devolucao_disparar:{ch_id}"},
+                )
+            ).scalar()
+            msg = None
+            if livre:
+                msg = (
+                    await session.execute(
+                        select(ChamadoMensagem)
+                        .where(
+                            ChamadoMensagem.id == msg_id,
+                            ChamadoMensagem.status == "pendente",
+                        )
+                        .with_for_update(skip_locked=True)
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalar_one_or_none()
+            ch = await session.get(Chamado, ch_id) if msg is not None else None
+            if ch is None:
+                # Disparo/exclusão com ele agora, ou já saiu da fila: próxima hora.
+                await session.commit()
+                continue
             dev = None
             if ch.origem_ref:
                 dev = await session.get(Devolution, UUID(str(ch.origem_ref)))
@@ -2749,12 +2780,15 @@ async def processar_pendentes(
                 msg.status = "falhou"
                 msg.erro = "devolucao_nao_encontrada"
                 falhas += 1
+                await session.commit()
                 continue
             r = await disparar(session, ch, dev, agora=agora)
+            await session.commit()
         except Exception as e:  # noqa: BLE001
+            await session.rollback()
             falhas += 1
             logger.warning(
-                "chamado_devolucao_pendente_erro", chamado_id=str(ch.id), err=str(e)[:200]
+                "chamado_devolucao_pendente_erro", chamado_id=str(ch_id), err=str(e)[:200]
             )
             continue
         st = (r.status if r is not None else msg.status) or ""
@@ -2764,5 +2798,4 @@ async def processar_pendentes(
             pendentes += 1
         else:
             falhas += 1
-    await session.commit()
     return {"verificados": len(rows), "abertos": abertos, "pendentes": pendentes, "falhas": falhas}

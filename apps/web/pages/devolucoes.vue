@@ -2404,7 +2404,7 @@ type ExclusaoResult = {
   estoque_estornado: boolean
   mensagem: string | null
   prejuizos_apagados?: { qtd: number; total: number }
-  prejuizos_mantidos?: { tipo: string | null; prejuizo: number | null; reembolso: number | null; motivo: string | null }[]
+  prejuizos_mantidos?: { tipo: string | null; prejuizo: number | null; reembolso: number | null; valor?: number | null; motivo: string | null }[]
   situacao_revertida?: { de: string; para: number; nome: string; nome_de?: string | null }
   situacao_recalculada?: { para: number; nome: string }
   situacao_aviso?: string
@@ -2412,26 +2412,40 @@ type ExclusaoResult = {
   chamado_apagado?: boolean
   chamado_mantido?: { id: string; motivo: string } | null
   chamado_reapontado?: boolean
+  // O passo do chamado falhou depois de a situação já ter sido gravada.
+  chamado_aviso?: string
 }
 const CONDICOES_COM_PREJUIZO = ['Extraviado', 'Sucata', 'Manutenção']
+// Linhas neutras não decidem a situação do pedido (espelho de
+// linhas_que_contam no back): sobrando só elas, a situação volta.
+const CONDICOES_NEUTRAS = ['Entregue', 'Não devolvido']
 // O que a exclusão desfaz, em português simples, pro diálogo de confirmação.
+// A regra fina é do back (a página pode não ter todas as linhas do pedido),
+// então o texto é condicional.
 function textoDoQueDesfaz(row: DevolutionRow): string {
   const itens: string[] = []
   const cond = row.condicao_produto || ''
   if (CONDICOES_COM_PREJUIZO.includes(cond)) {
-    itens.push(`• o prejuízo ${cond} que o DaVinci lançou sozinho na tela Reembolso para esta linha (se ninguém lançou valor nem conferiu)`)
+    itens.push(cond === 'Manutenção'
+      ? '• o débito do conserto que o DaVinci lançou sozinho na tela Reembolso para esta linha (se o valor ainda for só o débito do conserto e ninguém conferiu, anotou protocolo ou observação)'
+      : `• o prejuízo ${cond} que o DaVinci lançou sozinho na tela Reembolso para esta linha (se ninguém lançou reembolso, conferiu, anotou protocolo ou observação)`)
+  }
+  if (row.manutencao && cond !== 'Manutenção') {
+    itens.push('• o débito do conserto (Manutenção) que o DaVinci lançou para esta linha, se ninguém mexeu nele')
   }
   if (row.pedido_bling) {
-    const outras = items.value.some((i) => i.id !== row.id && i.pedido_bling === row.pedido_bling)
+    const outras = items.value.some((i) =>
+      i.id !== row.id && i.pedido_bling === row.pedido_bling
+      && !CONDICOES_NEUTRAS.includes(i.condicao_produto || ''))
     if (outras) {
-      itens.push('• a situação do pedido no Bling é recalculada pelas outras linhas do pedido')
+      itens.push('• a situação do pedido no Bling é recalculada pelas outras linhas do pedido (se elas não definirem a situação, volta para a de antes da devolução)')
     } else {
       const hoje = row.situacao_bling_nome ? ` (hoje: ${row.situacao_bling_nome})` : ''
-      itens.push(`• se esta for a última linha do pedido: a situação no Bling volta para a de antes da devolução${hoje}, se ninguém mudou à mão`)
-      if (row.tem_chamado) {
-        itens.push('• e o chamado aberto automaticamente é apagado, se ninguém mexeu nele (sem protocolo, sem resposta)')
-      }
+      itens.push(`• se não sobrar outra linha que decida a situação: ela volta no Bling para a de antes da devolução${hoje}, se ninguém mudou à mão`)
     }
+  }
+  if (row.tem_chamado) {
+    itens.push('• o chamado aberto automaticamente é apagado se nenhuma linha que ficar pedir chamado e ninguém tiver mexido nele (sem protocolo, sem resposta, sem observação)')
   }
   return itens.length ? `\n\nO DaVinci também desfaz:\n${itens.join('\n')}\n\nO que alguém já mexeu fica, e você recebe o aviso.` : ''
 }
@@ -2450,9 +2464,12 @@ function avisarExclusao(row: DevolutionRow, res: ExclusaoResult) {
   const avisos: string[] = []
   if (res.situacao_aviso) avisos.push(res.situacao_aviso)
   for (const m of res.prejuizos_mantidos || []) {
-    avisos.push(`O prejuízo ${m.tipo || ''} de ${brl(m.prejuizo)} ficou: ${m.motivo || 'alguém mexeu nele'}. Confira na tela Reembolso.`)
+    const valor = m.valor ?? m.prejuizo
+    const de = valor != null ? ` de ${brl(valor)}` : ''
+    avisos.push(`O prejuízo ${m.tipo || ''}${de} ficou: ${m.motivo || 'alguém mexeu nele'}. Confira na tela Reembolso.`)
   }
   if (res.chamado_mantido) avisos.push(`O chamado ficou: ${res.chamado_mantido.motivo}. Confira na aba Chamados.`)
+  if (res.chamado_aviso) avisos.push(res.chamado_aviso)
   if (avisos.length) {
     pushToast({
       kind: res.situacao_devia_ser ? 'error' : 'warning',

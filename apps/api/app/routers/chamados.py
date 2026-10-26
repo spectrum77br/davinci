@@ -1021,11 +1021,11 @@ async def alterar_status_bling(
     chamado_id: UUID,
     body: AlterarStatusIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> AlterarStatusOut:
     ch = await _get(session, chamado_id)
     try:
-        res = await svc.aplicar_status_bling(session, ch, body.situacao)
+        res = await svc.aplicar_status_bling(session, ch, body.situacao, actor_id=user.id)
     except svc.ChamadoError as e:
         raise HTTPException(422, detail={"code": e.code}) from e
     except Exception as e:  # noqa: BLE001
@@ -1059,7 +1059,7 @@ async def resolver(
         raise HTTPException(422, detail={"code": "chamado_situacao_obrigatoria"})
     if body.situacao:
         try:
-            await svc.aplicar_status_bling(session, ch, body.situacao)
+            await svc.aplicar_status_bling(session, ch, body.situacao, actor_id=user.id)
         except svc.ChamadoError as e:
             raise HTTPException(422, detail={"code": e.code}) from e
         except Exception as e:  # noqa: BLE001
@@ -1240,7 +1240,9 @@ async def excluir_chamado(
     situacao_aplicada: str | None = None
     if body.situacao:
         try:
-            res = await svc.aplicar_status_bling(session, ch, body.situacao)
+            res = await svc.aplicar_status_bling(
+                session, ch, body.situacao, actor_id=user.id
+            )
         except svc.ChamadoError as e:
             raise HTTPException(422, detail={"code": e.code}) from e
         except Exception as e:  # noqa: BLE001
@@ -1287,8 +1289,7 @@ async def excluir_chamado(
                 },
             ) from e
         excluidos += 1
-        if r.get("prejuizo"):
-            prejuizos.append(r["prejuizo"])
+        prejuizos.extend(r.get("prejuizos") or [])
         if r.get("estoque_estornado"):
             estornos.append(ExcluirEstornoOut(sku=sku, qty=qty, mensagem=r.get("mensagem")))
 
@@ -1774,17 +1775,22 @@ async def _entregar(
     session: AsyncSession, conds: list, limite: int, *, marcar: bool = True
 ) -> list[AgentTarefaOut]:
     """As tarefas que casam com `conds`, da mais velha pra mais nova. `marcar`:
-    passa pra `enviando` (o robô vai postar); sem marcar é só olhar (modo seco)."""
-    rows = (
-        await session.execute(
-            select(ChamadoMensagem, Chamado)
-            .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
-            .options(selectinload(ChamadoMensagem.anexos))
-            .where(*conds)
-            .order_by(ChamadoMensagem.created_at)
-            .limit(limite)
-        )
-    ).all()
+    passa pra `enviando` (o robô vai postar); sem marcar é só olhar (modo seco).
+
+    Marcando, trava as mensagens e PULA as travadas (26/10, caso 300978): a
+    lixeira da aba Devoluções pode estar apagando o chamado automático agora —
+    sem isso o lease marcava uma mensagem que sumia e respondia 500 ao robô."""
+    q = (
+        select(ChamadoMensagem, Chamado)
+        .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
+        .options(selectinload(ChamadoMensagem.anexos))
+        .where(*conds)
+        .order_by(ChamadoMensagem.created_at)
+        .limit(limite)
+    )
+    if marcar:
+        q = q.with_for_update(skip_locked=True, of=ChamadoMensagem)
+    rows = (await session.execute(q)).all()
     tarefas: list[AgentTarefaOut] = []
     if not rows:
         return tarefas

@@ -252,7 +252,7 @@ type ExcluirOut = {
   // 26/10 (caso 300978): prejuízos automáticos das linhas excluídas — só vêm
   // quando há o que dizer.
   prejuizos_apagados?: { qtd: number; total: number }
-  prejuizos_mantidos?: { tipo: string | null; prejuizo: number | null; reembolso: number | null; motivo: string | null }[]
+  prejuizos_mantidos?: { tipo: string | null; prejuizo: number | null; reembolso: number | null; valor?: number | null; motivo: string | null }[]
 }
 
 const PAGE_SIZE = 100
@@ -1670,13 +1670,16 @@ async function confirmarExcluir() {
         res.situacao ? `Bling → ${res.situacao}` : '',
       ].filter(Boolean).join(' · '),
     )
-    // Prejuízo que alguém já tinha mexido (valor lançado, conferido) fica — aviso até fechar.
+    // Prejuízo que alguém já tinha mexido (valor lançado, conferido, protocolo) fica — aviso até fechar.
     const mantidos = res.prejuizos_mantidos || []
     if (mantidos.length) {
       toasts.push({
         kind: 'warning',
         title: 'Prejuízos que ficaram na tela Reembolso',
-        lines: mantidos.map((m) => `${m.tipo || ''} de ${fmtBRL(m.prejuizo)}: ${m.motivo || 'alguém mexeu nele'}`),
+        lines: mantidos.map((m) => {
+          const valor = m.valor ?? m.prejuizo
+          return `${m.tipo || ''}${valor != null ? ` de ${fmtBRL(valor)}` : ''}: ${m.motivo || 'alguém mexeu nele'}`
+        }),
       }, 0)
     }
     closeExcluir()
@@ -2789,7 +2792,7 @@ async function confirmarExcluir() {
                   <div class="text-xs">{{ lancamentoTexto(l) }}</div>
                   <div class="text-[11px]" :class="estoqueTexto(l).alerta ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground'">{{ estoqueTexto(l).texto }}</div>
                   <div v-if="CONDICOES_COM_PREJUIZO.includes(l.condicao_produto || '')" class="text-[11px] text-muted-foreground">
-                    leva junto o prejuízo {{ l.condicao_produto }} que o DaVinci lançou na tela Reembolso (se ninguém lançou valor nem conferiu)
+                    leva junto o prejuízo {{ l.condicao_produto }} que o DaVinci lançou na tela Reembolso ({{ l.condicao_produto === 'Manutenção' ? 'se o valor ainda for só o débito do conserto e ninguém conferiu' : 'se ninguém lançou reembolso, conferiu, anotou protocolo ou observação' }})
                   </div>
                 </div>
               </label>

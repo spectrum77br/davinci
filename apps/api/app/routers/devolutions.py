@@ -71,6 +71,7 @@ from app.services.devolution_stock_return import (
     _get_bling_client,
     _local_bling_product_id,
     _order_situacao_target,
+    _pendente_do_backfill,
     _sku_base,
     _sku_tag,
     apply_order_situacao,
@@ -194,11 +195,25 @@ async def _sync_manutencao_to_refund(
         conds.append(Refund.pedido_marketplace == row.pedido_marketplace)
     else:
         return  # sem pedido não há como casar o refund
-    refund = (
-        (await session.execute(select(Refund).where(*conds).order_by(desc(Refund.created_at))))
-        .scalars()
-        .first()
+    # O refund DESTA linha (26/10, caso 300978): kit com duas linhas em
+    # Manutenção levava o delta de uma para o refund da outra (o mais recente
+    # do pedido) e, na exclusão, nenhum batia mais com o seu custo. Casa pelo
+    # vínculo exato / custo de ANTES da mudança; sem achar (refund à mão ou
+    # antigo), cai no mais recente do pedido, como sempre.
+    achado = await devolucao_exclusao.achar_refund_auto(
+        session, row, "Manutenção", custo=float(row.custo_manutencao or 0) - delta
     )
+    refund = achado.refund if achado.duvida is None else None
+    if refund is None:
+        refund = (
+            (
+                await session.execute(
+                    select(Refund).where(*conds).order_by(desc(Refund.created_at))
+                )
+            )
+            .scalars()
+            .first()
+        )
     if refund is None:
         return
     refund.reembolso = (refund.reembolso or 0) - delta
@@ -2970,106 +2985,174 @@ async def delete_devolution(
             502, detail={"code": "estoque_estorno_falhou", "message": e.message}
         ) from e
 
-    prejuizo = res.pop("prejuizo", None)
-    out = {**res, **devolucao_exclusao.resumo_prejuizos([prejuizo])}
+    prejuizos = res.pop("prejuizos", None) or []
+    out = {**res, **devolucao_exclusao.resumo_prejuizos(prejuizos)}
+    # Dois passos, cada um com o seu commit e o seu aviso: o que um já gravou
+    # (a situação voltou no Bling) nunca some da resposta por erro do outro.
     try:
         out.update(
-            await _desfazer_apos_exclusao(
-                session,
-                pedido=pedido,
-                dev_id=devolution_id,
-                segurava=segurava,
-                alvo_antes=alvo_antes,
-                user=user,
+            await _desfazer_situacao_apos_exclusao(
+                session, pedido=pedido, segurava=segurava, alvo_antes=alvo_antes, user=user
             )
         )
     except Exception as exc:  # noqa: BLE001 — a linha já saiu; nunca 500 aqui
         await session.rollback()
-        logger.exception("devolution_delete_desfazer_falhou", pedido_bling=pedido)
+        logger.exception("devolution_delete_situacao_falhou", pedido_bling=pedido)
         out["situacao_aviso"] = (
-            "O lançamento foi excluído, mas não consegui conferir a situação do pedido e "
-            f"o chamado automático ({str(exc)[:120]}). Confira o pedido no Bling e na aba Chamados."
+            "O lançamento foi excluído, mas não consegui conferir a situação do pedido "
+            f"({str(exc)[:120]}). Confira o pedido no Bling."
+        )
+    try:
+        out.update(
+            await _desfazer_chamado_apos_exclusao(
+                session, pedido=pedido, dev_id=devolution_id, user=user
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        await session.rollback()
+        logger.exception("devolution_delete_chamado_falhou", pedido_bling=pedido)
+        out["chamado_aviso"] = (
+            f"O chamado automático não foi conferido ({str(exc)[:120]}). Confira na aba "
+            "Chamados."
         )
     return out
 
 
-async def _desfazer_apos_exclusao(
+def _resposta_da_volta(sit: dict, *, nome_antes: str | None = None) -> dict:
+    """Campos da resposta para o resultado de devolucao_exclusao.reverter_situacao.
+    `nome_antes` = há linhas que ficaram, mas elas não definem a situação (a que
+    saiu definia)."""
+    st = sit["status"]
+    if st == "revertida":
+        return {
+            "situacao_revertida": {
+                "de": sit["de"], "para": sit["para"], "nome": sit["nome"],
+                "nome_de": sit.get("nome_de"),
+            }
+        }
+    if st == "falhou":
+        return {
+            "situacao_aviso": (
+                f"A situação do pedido NÃO voltou no Bling (devia voltar para "
+                f"{sit['nome']}): {sit.get('erro')}. Mude na mão no Bling."
+            ),
+            "situacao_devia_ser": {"para": sit["para"], "nome": sit["nome"]},
+        }
+    if st == "mudada_depois":
+        atual = sit.get("nome_atual")
+        return {
+            "situacao_aviso": (
+                "A situação do pedido não foi mexida: alguém mudou depois do lançamento"
+                + (f" (está em {atual})" if atual else "")
+                + "."
+            )
+        }
+    if nome_antes is not None:
+        return {
+            "situacao_aviso": (
+                f"As linhas que ficaram não definem a situação do pedido: ela continua em "
+                f"{nome_antes} — mude na mão se precisar."
+            )
+        }
+    atual = sit.get("atual")
+    if st == "sem_historico" and atual and atual.isdigit() and (
+        int(atual) in devolucao_exclusao.SITUACOES_DO_FLUXO
+    ):
+        # Linha de antes da trilha de situação (01/06) ou sem situação no espelho
+        # ao lançar: não há de onde voltar — mas o pedido parado em Problemas
+        # some do Acompanhamento, então avisa.
+        return {
+            "situacao_aviso": (
+                "Não achei de onde o pedido veio (sem histórico da mudança): ele continua "
+                f"em {sit.get('nome_atual') or atual}. Mude na mão no Bling se precisar."
+            )
+        }
+    return {}
+
+
+async def _desfazer_situacao_apos_exclusao(
     session: AsyncSession,
     *,
     pedido: str | None,
-    dev_id: UUID,
     segurava: bool,
     alvo_antes: int | None,
     user: User,
 ) -> dict:
-    """Situação do pedido e chamado automático depois que a linha saiu (commit
-    próprio — a exclusão já está gravada). Campos novos e opcionais da resposta
-    do DELETE: situacao_revertida {de, para, nome} | situacao_recalculada
-    {para, nome} | situacao_aviso; chamado_apagado; chamado_mantido {id,
-    motivo}; chamado_reapontado."""
+    """Situação do pedido depois que a linha saiu (commit próprio — a exclusão
+    já está gravada). Campos novos e opcionais da resposta do DELETE:
+    situacao_revertida {de, para, nome} | situacao_recalculada {para, nome} |
+    situacao_aviso (+ situacao_devia_ser)."""
+    if not pedido:
+        return {}
     out: dict = {}
+    # Estado do banco (populate_existing): as irmãs lidas antes da exclusão
+    # podem ter mudado no meio (outra pessoa, worker).
     restantes = await devolucao_exclusao.linhas_do_pedido(session, pedido)
-    if pedido:
-        contam = devolucao_exclusao.linhas_que_contam(restantes)
-        if not contam:
+    contam = devolucao_exclusao.linhas_que_contam(restantes)
+    if not contam:
+        recalcular = segurava
+        if not any(_pendente_do_backfill(r) for r in restantes):
             # Nenhuma linha decide mais a situação: volta para a de antes.
             sit = await devolucao_exclusao.reverter_situacao(session, pedido, actor_id=user.id)
             await devolucao_exclusao.tirar_da_fila_de_situacao(pedido)
-            st = sit["status"]
-            if st == "revertida":
-                out["situacao_revertida"] = {
-                    "de": sit["de"], "para": sit["para"], "nome": sit["nome"],
-                    "nome_de": sit.get("nome_de"),
-                }
-            elif st == "falhou":
-                out["situacao_aviso"] = (
-                    f"A situação do pedido NÃO voltou no Bling (devia voltar para "
-                    f"{sit['nome']}): {sit.get('erro')}. Mude na mão no Bling."
+            out.update(_resposta_da_volta(sit))
+            recalcular = segurava and sit["status"] == "sem_historico"
+        # Sobrou linha antiga do backfill (0421): ela "não trava nem destrava" —
+        # o pedido não reabre (revisão de 15/10, caso 292022); fica como antes.
+        if recalcular:
+            # Pedido que só tinha a entrada pendente, sem mudança do fluxo
+            # para desfazer: recalcula como antes (revisão de 15/10).
+            r = await apply_order_situacao(session, pedido, actor_id=user.id)
+            if r is not None and not r.get("ok"):
+                out.setdefault(
+                    "situacao_aviso",
+                    f"O Bling não aceitou a situação do pedido: {r.get('message') or ''}".strip(),
                 )
-                out["situacao_devia_ser"] = {"para": sit["para"], "nome": sit["nome"]}
-            elif st == "mudada_depois":
-                atual = sit.get("nome_atual")
-                out["situacao_aviso"] = (
-                    "A situação do pedido não foi mexida: alguém mudou depois do lançamento"
-                    + (f" (está em {atual})" if atual else "")
-                    + "."
+    else:
+        alvo_depois = _order_situacao_target(contam)
+        if segurava or alvo_depois != alvo_antes:
+            if alvo_depois is None and alvo_antes is not None:
+                # A linha excluída é que definia a situação e as que ficaram não
+                # definem (ex.: item ainda sem condição): volta como se não
+                # sobrasse linha — senão o pedido fica em Problemas, fora do
+                # Acompanhamento.
+                sit = await devolucao_exclusao.reverter_situacao(
+                    session, pedido, actor_id=user.id
                 )
-            elif st == "sem_historico" and segurava:
-                # Pedido que só tinha a entrada pendente, sem mudança do fluxo
-                # para desfazer: recalcula como antes (revisão de 15/10).
-                await apply_order_situacao(session, pedido, actor_id=user.id)
-        else:
-            alvo_depois = _order_situacao_target(contam)
-            if segurava or alvo_depois != alvo_antes:
-                if alvo_depois is None:
-                    nome = None
-                    if alvo_antes is not None:
-                        nome = await devolucao_exclusao.nome_situacao(session, alvo_antes)
+                await devolucao_exclusao.tirar_da_fila_de_situacao(pedido)
+                nome = None
+                if sit["status"] in ("sem_historico", "ja_estava"):
+                    nome = await devolucao_exclusao.nome_situacao(session, alvo_antes)
+                out.update(_resposta_da_volta(sit, nome_antes=nome))
+            elif alvo_depois is not None:
+                r = await apply_order_situacao(session, pedido, actor_id=user.id)
+                nome = await devolucao_exclusao.nome_situacao(session, alvo_depois)
+                if r is not None and not r.get("ok"):
                     out["situacao_aviso"] = (
-                        "As linhas que ficaram não definem a situação do pedido: ela continua "
-                        + (f"em {nome}" if nome else "como está")
-                        + " — mude na mão se precisar."
+                        f"A situação do pedido devia ir para {nome}, mas o Bling não "
+                        f"aceitou: {r.get('message') or ''}".strip()
                     )
                 else:
-                    r = await apply_order_situacao(session, pedido, actor_id=user.id)
-                    nome = await devolucao_exclusao.nome_situacao(session, alvo_depois)
-                    if r is not None and not r.get("ok"):
-                        out["situacao_aviso"] = (
-                            f"A situação do pedido devia ir para {nome}, mas o Bling não "
-                            f"aceitou: {r.get('message') or ''}".strip()
-                        )
-                    else:
-                        out["situacao_recalculada"] = {"para": alvo_depois, "nome": nome}
-        await session.commit()
+                    out["situacao_recalculada"] = {"para": alvo_depois, "nome": nome}
+    await session.commit()
+    return out
 
+
+async def _desfazer_chamado_apos_exclusao(
+    session: AsyncSession, *, pedido: str | None, dev_id: UUID, user: User
+) -> dict:
+    """Chamado automático depois que a linha saiu (commit próprio). Campos da
+    resposta: chamado_apagado; chamado_mantido {id, motivo}; chamado_reapontado."""
+    restantes = await devolucao_exclusao.linhas_do_pedido(session, pedido)
     ch = await devolucao_exclusao.desfazer_chamado(
         session, pedido=pedido, dev_id=dev_id, restantes=restantes, actor_id=user.id
     )
     await session.commit()
-    out["chamado_apagado"] = bool(ch["apagados"])
-    out["chamado_mantido"] = ch["mantidos"][0] if ch["mantidos"] else None
-    out["chamado_reapontado"] = ch["reapontado"]
-    return out
+    return {
+        "chamado_apagado": bool(ch["apagados"]),
+        "chamado_mantido": ch["mantidos"][0] if ch["mantidos"] else None,
+        "chamado_reapontado": ch["reapontado"],
+    }
 
 
 @router.get("/{devolution_id}", response_model=DevolutionOut)

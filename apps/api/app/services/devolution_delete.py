@@ -61,7 +61,8 @@ async def excluir_lancamento(
     Prejuízo automático (caso 300978, 26/10): linha Extraviado/Sucata/Manutenção
     leva junto, no mesmo commit, o Refund que o DaVinci criou para ELA — se
     ninguém mexeu nele; se mexeram, fica e `actor_id` recebe o aviso
-    (services/devolucao_exclusao). Vale para as duas lixeiras."""
+    (services/devolucao_exclusao). Linha que passou por Manutenção leva também
+    o débito do conserto. Vale para as duas lixeiras."""
     # Estado fresco e travado: um Tentar de novo/save da mesma linha no meio
     # mudaria o que foi decidido aqui (revisão de 15/10).
     await session.refresh(row, with_for_update=True)
@@ -95,18 +96,30 @@ async def excluir_lancamento(
 
     dev_id, pedido_bling = row.id, row.pedido_bling
     condicao = (row.condicao_produto or "").strip()
-    prejuizo: dict | None = None
+    # O prejuízo da condição atual e — se a linha passou por Manutenção e saiu
+    # (Manutenção → Novo/Usado; Extraviado → Manutenção → Extraviado) — o débito
+    # do conserto que ficou de propósito no PATCH: ele também é desta linha.
+    tipos: list[tuple[str, bool]] = []
     if condicao in devolucao_exclusao.REFUND_CONDICOES:
+        tipos.append((condicao, True))
+    if row.manutencao and condicao != "Manutenção":
+        tipos.append(("Manutenção", False))
+    prejuizos: list[dict] = []
+    for tipo, principal in tipos:
         # Savepoint: um erro aqui não pode desfazer o estorno já feito no
         # Bling — a linha sai mesmo assim e o prejuízo fica (com log).
         try:
             async with session.begin_nested():
-                prejuizo = await devolucao_exclusao.desfazer_refund_auto(
-                    session, row, condicao, actor_id, exclusao=True
+                r = await devolucao_exclusao.desfazer_refund_auto(
+                    session, row, tipo, actor_id, exclusao=True,
+                    # Busca secundária: só o certo; na dúvida, quieto.
+                    avisar_duvida=principal,
                 )
         except Exception:  # noqa: BLE001
-            logger.exception("devolution_delete_refund_falhou", id=str(dev_id))
-            prejuizo = {"acao": "erro", "tipo": condicao, "motivo": "não consegui conferir"}
+            logger.exception("devolution_delete_refund_falhou", id=str(dev_id), tipo=tipo)
+            r = {"acao": "erro", "tipo": tipo, "motivo": "não consegui conferir"}
+        if r is not None:
+            prejuizos.append(r)
     await session.delete(row)
     await session.commit()
     estornado = bool(estorno and estorno.get("ok"))
@@ -115,12 +128,12 @@ async def excluir_lancamento(
         id=str(dev_id),
         pedido_bling=pedido_bling,
         estoque_estornado=estornado,
-        prejuizo=(prejuizo or {}).get("acao"),
+        prejuizos=[p.get("acao") for p in prejuizos],
     )
     return {
         "ok": True,
         "estoque_estornado": estornado,
         "mensagem": (estorno or {}).get("message"),
-        # {acao: apagado|mantido|erro, tipo, prejuizo, reembolso, motivo} ou None
-        "prejuizo": prejuizo,
+        # [{acao: apagado|mantido|erro, tipo, prejuizo, reembolso, valor, motivo}]
+        "prejuizos": prejuizos,
     }
