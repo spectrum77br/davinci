@@ -246,9 +246,9 @@ async def test_o_pedido_do_verificador_sem_ferramentas_nem_amostragem(teto_limpo
     assert pedido["model"] == "claude-haiku-5-5" and pedido["max_tokens"] == verificador.MAX_TOKENS
     # Ajuste r3: o raciocínio adaptativo do Haiku 5.5 conta no `max_tokens`
     # (o guia usa 1024 para classificar UMA palavra em `low`): folga, com teto.
-    assert 1024 <= verificador.MAX_TOKENS <= 2048
+    assert 1024 <= verificador.MAX_TOKENS <= 4096
     assert pedido["output_config"] == {
-        "effort": "low",
+        "effort": verificador.EFFORT,
         "format": {"type": "json_schema", "schema": verificador.esquema()},
     }
     assert pedido["system"] == [
@@ -811,7 +811,7 @@ async def test_no_automatico_com_o_ok_sai_e_o_pedido_e_o_combinado(
     assert do_agente["output_config"]["effort"] == agente_ligado.atendimento_agente_effort
     (pedido,) = api.pedidos
     assert not {"tools", "tool_choice", "temperature", "top_p", "top_k", "thinking"} & set(pedido)
-    assert pedido["output_config"]["effort"] == "low"
+    assert pedido["output_config"]["effort"] == verificador.EFFORT
     entrada = pedido["messages"][0]["content"]
     # O texto final com a lacuna de volta; o dado do pedido só como evidência.
     assert "RASCUNHO:\nOlá! Seu pedido já foi enviado; o rastreio é {rastreio}." in entrada
@@ -1297,7 +1297,7 @@ async def test_a_calibracao_imprime_recall_e_precisao(tmp_path, teto_limpo):
 
     assert codigo == calibrar.OK
     # O MESMO pedido do agente (o sistema, o esquema, a moldura).
-    assert all(p["output_config"]["effort"] == "low" for p in falsa.pedidos)
+    assert all(p["output_config"]["effort"] == verificador.EFFORT for p in falsa.pedidos)
     assert falsa.pedidos[0]["messages"][0]["content"].startswith(pacote.ABRE_DADOS)
     resumo = json.loads(eco.getvalue().strip().splitlines()[-1])
     m = resumo["metricas"]

@@ -276,14 +276,18 @@ logger = structlog.get_logger()
 # "pos_envio" do caso). Calibração: o grupo `dono_d123`.
 VERSAO = "v13"
 MODELO = "claude-haiku-5-5"
-EFFORT = "low"
+# 26/10/2026: "low" → "medium". Calibração v13 (462 linhas): o medium segura mais ruim
+# (97,3% × 96,4%) e barra menos da metade das boas (12 × 26 de 97), por ~US$ 0,0005
+# a conferência.
+EFFORT = "medium"
 # O JSON do `Veredito` (~100–300 tokens) + o raciocínio ADAPTATIVO, que conta no
 # `max_tokens` (o guia do Haiku 5.5: um teto feito só para a resposta curta é
 # comido pelo raciocínio; o exemplo de classificação de UMA palavra em `low`
 # usa 1024). Ajuste r3: 600 → 2048 — o teto não custa nada a mais (a saída só
 # é cobrada quando gerada) e o corte é uma requisição paga jogada fora (falha
-# fechada: vai para pessoa).
-MAX_TOKENS = 2048
+# fechada: vai para pessoa). 26/10/2026: 2048 → 4096 com o `medium` (3 cortes em 462 na
+# calibração v13).
+MAX_TOKENS = 4096
 # O tempo da requisição: no máximo `TIMEOUT_S`, nunca além do prazo da
 # conversa; com menos de `MIN_S` até o prazo, nem chama ("sem tempo"). Na
 # rodada do cron o verificador tem orçamento próprio (`agente.responder`).
