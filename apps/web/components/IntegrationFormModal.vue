@@ -2,7 +2,7 @@
 import { ref, computed, watch } from 'vue'
 import { X } from 'lucide-vue-next'
 
-type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu'
+type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu' | 'carrefour'
 
 type Field = {
   key: string
@@ -10,6 +10,7 @@ type Field = {
   placeholder?: string
   type?: 'text' | 'password'
   required?: boolean
+  createOnly?: boolean
 }
 type PlatformSpec = {
   label: string
@@ -121,6 +122,22 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
     },
     fields: [],
   },
+  carrefour: {
+    label: 'Carrefour',
+    marketplace: 'carrefour',
+    hint: {
+      tone: 'info',
+      lines: [
+        '**Carrefour:** selecione a loja e informe a chave da API e o ID dessa loja no portal Carrefour.',
+        'Esta conexão permite testar o acesso e importar ofertas para consulta. O envio de estoque e preços ainda não está disponível.',
+        'O ID da loja fica fixo após salvar. Cada conta Carrefour precisa de sua própria integração.',
+      ],
+    },
+    fields: [
+      { key: 'api_key', label: 'Chave da API', type: 'password', required: true },
+      { key: 'shop_id', label: 'ID da loja (Shop ID)', placeholder: 'Número da loja no Carrefour', required: true, createOnly: true },
+    ],
+  },
 }
 
 const PLATFORMS = Object.keys(PLATFORM_SPECS) as Platform[]
@@ -203,6 +220,7 @@ const creating = ref(false)
 const createErr = ref<string | null>(null)
 
 const currentSpec = computed<PlatformSpec>(() => PLATFORM_SPECS[draft.value.platform])
+const visibleFields = computed(() => currentSpec.value.fields.filter(f => !isEdit.value || !f.createOnly))
 
 const eligibleStores = computed(() => {
   const mk = PLATFORM_MK[draft.value.platform]
@@ -244,8 +262,19 @@ watch(() => props.open, async (open) => {
 
 const requiredOk = computed(() => {
   if (isEdit.value) return draft.value.name.trim().length > 0
+  if (draft.value.platform === 'carrefour' && !eligibleStores.value.some(s => s.id === draft.value.store_id)) return false
   return currentSpec.value.fields.every(f => !f.required || (draft.value.creds[f.key] || '').trim() !== '')
 })
+
+const CARREFOUR_ERRORS: Record<string, string> = {
+  carrefour_store_required: 'Selecione a loja Carrefour que deseja conectar.',
+  integration_store_platform_mismatch: 'A loja selecionada precisa ser do Carrefour.',
+  carrefour_api_key_required: 'Informe a chave da API do Carrefour.',
+  carrefour_api_key_invalid: 'A chave da API contém caracteres inválidos.',
+  carrefour_shop_id_invalid: 'Informe o ID numérico da loja no Carrefour.',
+  carrefour_shop_id_immutable: 'O ID da loja não pode ser alterado nesta integração.',
+  carrefour_credentials_invalid: 'Confira os campos da integração Carrefour.',
+}
 
 async function submitForm() {
   creating.value = true
@@ -278,7 +307,8 @@ async function submitForm() {
     }
     emit('update:open', false)
   } catch (e: any) {
-    createErr.value = e?.data?.detail?.code || e?.message || 'erro'
+    const code = e?.data?.detail?.code
+    createErr.value = CARREFOUR_ERRORS[code] || code || e?.message || 'erro'
   } finally {
     creating.value = false
   }
@@ -319,7 +349,7 @@ function close() {
         </div>
 
         <div v-if="!lockStore && !isEdit">
-          <Label>Loja <span class="text-xs text-muted-foreground">(opcional)</span></Label>
+          <Label>Loja <span class="text-xs text-muted-foreground">{{ draft.platform === 'carrefour' ? '(obrigatória)' : '(opcional)' }}</span></Label>
           <select v-model="draft.store_id" class="w-full border rounded px-2 py-1 bg-background">
             <option value="">— nenhuma —</option>
             <option v-for="s in eligibleStores" :key="s.id" :value="s.id">
@@ -345,7 +375,7 @@ function close() {
           />
         </div>
 
-        <div v-for="f in currentSpec.fields" :key="f.key">
+        <div v-for="f in visibleFields" :key="f.key">
           <Label>
             {{ f.label }}
             <span v-if="f.required && !isEdit" class="text-red-500">*</span>
