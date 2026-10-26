@@ -62,12 +62,13 @@ from app.models import (
     AtendimentoZapMidia,
     AtendimentoZapNumero,
 )
-from app.services.atendimento import canais_externos, gravar, zap_contas
+from app.services.atendimento import canais_externos, gravar, zap_contas, zap_erros
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
     AUTOR_SISTEMA,
     CANAL_ZAP,
+    ERRO_CONFERIDO_NAO_SAIU,
     MSG_ENVIADA,
     MSG_ENVIANDO,
     MSG_FALHOU,
@@ -125,6 +126,14 @@ ORCAMENTO_S = 90.0
 
 # Ordem que não volta atrás (§5.6).
 RANK_STATUS = {"sent": 1, "delivered": 2, "read": 3, "played": 4}
+# Entregue (ou mais) é prova: um `failed` que chega depois não desfaz.
+_RANK_ENTREGUE = RANK_STATUS["delivered"]
+# O efeito FORTE vindo do webhook (pausar o número, marcar o token) só com
+# esta janela de ocorrências em wamids diferentes (§5.6 item 4).
+JANELA_EFEITO_FORTE = timedelta(hours=24)
+# Respostas de atendimento no mês por número (o "N de 1.000 grátis", grátis
+# ou cobradas): alerta nestes marcos (§5.6 item 6; revisão de 26/10/2026).
+ALERTAS_RESPOSTAS_MES = (800, 1000)
 _CAMPO_DO_STATUS = {
     "sent": "enviada_em",
     "delivered": "entregue_em",
@@ -137,6 +146,8 @@ _CONTA_RESTRITA = ("RESTRICT", "VIOLATION", "DISABLED", "BAN", "DELETED")
 # ... e o que REABILITA (`DISABLED_UPDATE` com `ban_info.waba_ban_state`).
 _CONTA_REABILITADA = "REINSTATE"
 _FRASE_RESTRICAO_PADRAO = "A Meta restringiu a conta do WhatsApp"
+# O erro da Meta no número sem a frase guardada (não deveria acontecer).
+_FRASE_ERRO_PADRAO = "A Meta avisou um problema neste número de WhatsApp."
 
 # Opt-out (§5.3 item 6). A mensagem INTEIRA, sem acento e sem pontuação.
 _OPT_OUT_EXATO = frozenset({"parar", "sair", "stop"})
@@ -631,17 +642,37 @@ async def _canal(session: AsyncSession, numero: AtendimentoZapNumero) -> Atendim
     return canal
 
 
+def _aviso_que_fica(numero: AtendimentoZapNumero) -> str | None:
+    """A frase que a mensagem seguinte NÃO apaga da barra; None = nenhuma. PURA.
+
+    - RESTRITO pela Meta: só o `account_update` de reabilitação
+      (`_conta_ou_erro`) tira o número desse estado;
+    - ERRO da Meta no número (revisão de 26/10/2026): pagamento (131042, que
+      também pausa) e número não registrado (131045/133010). Fica até o
+      número voltar a mandar (`zap.depois_do_envio`). Sem isto o canal voltava
+      a `ok` no mesmo `_processar_um` do `failed` (ou no "oi" seguinte) e o
+      número ficava pausado sem aviso nenhum.
+    """
+    saude = numero.saude or {}
+    if numero.saude_status == "restrito":
+        return _texto(saude.get("restricao")) or _FRASE_RESTRICAO_PADRAO
+    if numero.saude_status == "erro":
+        erro = saude.get("erro_meta") if isinstance(saude.get("erro_meta"), dict) else {}
+        return _texto(erro.get("frase")) or _texto(numero.ultimo_erro) or _FRASE_ERRO_PADRAO
+    return None
+
+
 def _saude_ok(canal: AtendimentoCanal, numero: AtendimentoZapNumero, agora: datetime) -> None:
     """A barra "Lojas e modo" lê daqui: sem isto o canal ficaria `novo` para sempre.
 
-    Número RESTRITO pela Meta continua recebendo, mas a barra segue em `erro`
-    com a frase da restrição: o aviso não pode sumir na mensagem seguinte (na
-    Onda 1 a barra é o único lugar que mostra isso). Só o `account_update` de
-    reabilitação (`_conta_ou_erro`) tira o número desse estado. O erro
-    passageiro de `value.errors` volta a `ok` aqui, como antes."""
+    Número RESTRITO pela Meta (ou com ERRO da Meta: pagamento, não
+    registrado) continua recebendo, mas a barra segue em `erro` com a frase:
+    o aviso não pode sumir na mensagem seguinte (na Onda 2 a barra é o único
+    lugar que mostra isso — `_aviso_que_fica`). O erro passageiro de
+    `value.errors` volta a `ok` aqui, como antes."""
     numero.ultimo_ok_em = agora
-    if numero.saude_status == "restrito":
-        frase = _texto((numero.saude or {}).get("restricao")) or _FRASE_RESTRICAO_PADRAO
+    frase = _aviso_que_fica(numero)
+    if frase:
         if canal.status != "erro" or canal.ultimo_erro != frase:
             _saude_erro(canal, frase, agora)
         return
@@ -1101,6 +1132,136 @@ async def _alvo_do_status(
     return await _mensagem_da_conversa(session, contato.conversa_id, wamid)
 
 
+def _code_do_status(st: dict) -> int | None:
+    erros = st.get("errors") if isinstance(st.get("errors"), list) else []
+    primeiro = erros[0] if erros and isinstance(erros[0], dict) else {}
+    code = primeiro.get("code")
+    if isinstance(code, bool):
+        return None
+    if isinstance(code, int):
+        return code
+    return int(code) if isinstance(code, str) and code.isdigit() else None
+
+
+async def _ocorrencias_do_code(
+    session: AsyncSession, numero: AtendimentoZapNumero, code: int, agora: datetime
+) -> int:
+    """Quantos wamids DIFERENTES deste número tiveram `failed` com este código em 24 h.
+
+    A fonte é a própria caixa de entrada (o evento `s:<wamid>:failed` é a
+    prova, e o UNIQUE da chave já tira a reentrega): conta o evento de agora.
+    """
+    st = AtendimentoZapEvento.payload["status"]
+    return int(
+        await session.scalar(
+            select(func.count(func.distinct(st["id"].astext))).where(
+                AtendimentoZapEvento.tipo == TIPO_STATUS,
+                AtendimentoZapEvento.phone_number_id == numero.phone_number_id,
+                AtendimentoZapEvento.recebido_em >= agora - JANELA_EFEITO_FORTE,
+                st["status"].astext == "failed",
+                st["errors"][0]["code"].astext == str(code),
+            )
+        )
+        or 0
+    )
+
+
+async def _efeito_do_webhook(
+    session: AsyncSession,
+    numero: AtendimentoZapNumero,
+    conversa: AtendimentoConversa,
+    code: int | None,
+    agora: datetime,
+) -> None:
+    """O efeito de um `failed` que veio pelo WEBHOOK (§5.6 item 4).
+
+    O fechamento da janela (131047) já foi aplicado por quem chama. O opt-out
+    de marketing (131050) vale na hora. O efeito FORTE (pausar o número,
+    marcar o token, travar o registro) só com 2 ocorrências em wamids
+    diferentes em 24 h — na 1ª, só o alerta: quem roubasse o app secret não
+    pausaria o número com um `failed` forjado. A resposta da NOSSA chamada
+    (`zap.depois_do_envio`) vale na primeira.
+    """
+    info = zap_erros.traduzir(code)
+    efeito = info.efeito
+    if not efeito or efeito == zap_erros.EFEITO_FECHAR_JANELA:
+        return
+    contato_id = None
+    try:
+        contato_id = UUID(str(conversa.externo_id))
+    except (TypeError, ValueError):
+        contato_id = None
+    if efeito in zap_erros.EFEITOS_FORTES:
+        vezes = await _ocorrencias_do_code(session, numero, int(code or 0), agora)
+        if vezes < zap_erros.OCORRENCIAS_PARA_EFEITO_FORTE:
+            logger.error(
+                "zap_efeito_forte_alerta",
+                numero=str(numero.id),
+                code=code,
+                efeito=efeito,
+                ocorrencias=vezes,
+            )
+            return
+    await zap_erros.aplicar_efeito(
+        session,
+        efeito,
+        numero_id=numero.id,
+        conta_id=numero.conta_ref,
+        conversa_id=conversa.id,
+        contato_id=contato_id,
+        code=code,
+        origem="webhook",
+        agora=agora,
+    )
+
+
+async def _contar_do_mes(
+    session: AsyncSession, numero: AtendimentoZapNumero, agora: datetime
+) -> None:
+    """As RESPOSTAS do número no mês (o "N de 1.000 grátis"): alerta em 800 e 1.000.
+
+    Revisão de 26/10/2026: conta toda resposta de atendimento com custo
+    anotado (`pricing.category = service`, QUALQUER `pricing.type`) — o aviso
+    é para ANTES de a franquia acabar. Contar só as `regular` (cobradas)
+    deixava o contador em 0 se a Meta marca a franquia como `free_*` (o tipo
+    dentro dela está [a confirmar], §14.3), e o alerta dos 800 sairia perto de
+    1.800. As cobradas vão no mesmo log (o custo). A linha do número fica
+    TRAVADA para contar: dois workers processando status do mesmo número
+    contariam o mesmo total e pulariam o marco. Só roda quando um wamid
+    acabou de ganhar o custo (uma vez por wamid). A tela de números (Onda 4)
+    mostra o mesmo contador.
+    """
+    if numero.canal_id is None:
+        return
+    await gravar.travar_linha(session, numero)
+    inicio = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    entrega = AtendimentoMensagem.payload["zap"]["entrega"]
+    respostas, cobradas = (
+        await session.execute(
+            select(
+                func.count(AtendimentoMensagem.id),
+                func.count(AtendimentoMensagem.id).filter(
+                    entrega["tipo_preco"].astext == "regular"
+                ),
+            )
+            .join(AtendimentoConversa, AtendimentoConversa.id == AtendimentoMensagem.conversa_id)
+            .where(
+                AtendimentoConversa.canal_id == numero.canal_id,
+                AtendimentoMensagem.autor == AUTOR_LOJA,
+                entrega["categoria"].astext == "service",
+                entrega["custo_em"].astext >= inicio.isoformat(),
+            )
+        )
+    ).one()
+    if int(respostas or 0) in ALERTAS_RESPOSTAS_MES:
+        logger.error(
+            "zap_respostas_mes",
+            numero=str(numero.id),
+            respostas=int(respostas or 0),
+            cobradas=int(cobradas or 0),
+        )
+
+
 async def _status(
     session: AsyncSession,
     ev: AtendimentoZapEvento,
@@ -1112,7 +1273,16 @@ async def _status(
     Nunca mexe em linha `enviando` (é do envio em curso). A ordem não volta
     atrás (sent < delivered < read < played); cada horário é gravado uma vez;
     o custo (`pricing`) é anotado uma vez por wamid, pelo `pricing.type`.
-    Os efeitos fortes vindos do webhook (pausar o número) são da Onda 2.
+
+    Onda 2 (26/10/2026):
+      - CONCILIAÇÃO do ambíguo: a linha `revisar` (timeout no envio) que
+        recebe status ganha o `externo_id = wamid` (se livre), passa a
+        `enviada` (ou `falhou`) e ganha `payload.zap.conciliado = true`.
+        Nada é reenviado;
+      - entregue/lida é prova: um `failed` que chega DEPOIS de um
+        `delivered`/`read` só fica anotado (não desfaz);
+      - o efeito do `failed` vindo do webhook (`_efeito_do_webhook`): o forte
+        só com 2 ocorrências em 24 h.
     """
     st = (ev.payload or {}).get("status")
     st = st if isinstance(st, dict) else {}
@@ -1135,54 +1305,101 @@ async def _status(
         ev.proxima_em = agora + ESPERA_STATUS
         return None
     quando = _ts(st.get("timestamp")) or agora
+    wamid = _texto(st.get("id"))
     payload = dict(alvo.payload or {})
     zap = dict(payload.get("zap") or {})
     entrega = dict(zap.get("entrega") or {})
     mudou_status = False
+    # A `revisar` que uma pessoa marcou "Não saiu" (revisão, 26/10/2026): na
+    # Cloud API não há caixa da Meta onde conferir, e o status que chega
+    # depois é a prova — concilia como a `revisar` (até o `sent` desfaz).
+    conferida_nao_saiu = alvo.status == MSG_FALHOU and alvo.erro == ERRO_CONFERIDO_NAO_SAIU
+    era_revisar = alvo.status == MSG_REVISAR or conferida_nao_saiu
+    code: int | None = None
     if situacao == "failed":
-        erros = st.get("errors") if isinstance(st.get("errors"), list) else []
-        primeiro = erros[0] if erros and isinstance(erros[0], dict) else {}
-        code = primeiro.get("code")
-        code = (
-            int(code)
-            if isinstance(code, int) or (isinstance(code, str) and code.isdigit())
-            else None
-        )
+        code = _code_do_status(st)
         entrega.setdefault("falhou_em", _iso(quando))
         entrega["erro_code"] = code
+        ja_entregue = int(entrega.get("rank") or 0) >= _RANK_ENTREGUE
         if not entrega.get("rank"):
             entrega["status"] = "failed"
-        if alvo.status in (MSG_ENVIADA, MSG_REVISAR):
+        if ja_entregue:
+            # Entregue/lida é prova de que saiu: o `failed` fora de ordem só fica anotado.
+            logger.warning("zap_falha_depois_de_entregue", mensagem=str(alvo.id), code=code)
+        elif alvo.status in (MSG_ENVIADA, MSG_REVISAR) or conferida_nao_saiu:
             alvo.status = MSG_FALHOU
             alvo.erro = f"meta:{code}" if code is not None else "meta:failed"
             mudou_status = True
-        if code == 131047:
-            # Passaram 24 h: a janela fecha AGORA (corrige diferença de relógio).
-            conversa.pode_enviar_ate = agora
+        if code in (131047, 470):
+            # Passaram 24 h: a janela fecha no instante da FALHA (o timestamp
+            # do status), não na hora em que o evento é processado (revisão,
+            # 26/10/2026): o status adiado (linha `enviando`) ou reentregue
+            # chega depois de uma mensagem nova do cliente, e fechar "agora"
+            # trancaria a janela que ele acabou de reabrir. O
+            # `zap.fim_da_janela` ignora o fechamento anterior à última
+            # mensagem do cliente.
+            conversa.pode_enviar_ate = quando
     elif situacao in RANK_STATUS:
         rank = RANK_STATUS[situacao]
         if rank > int(entrega.get("rank") or 0):
             entrega["status"] = situacao
             entrega["rank"] = rank
         entrega.setdefault(_CAMPO_DO_STATUS[situacao], _iso(quando))
-        if alvo.status == MSG_FALHOU and situacao != "sent":
+        if alvo.status == MSG_REVISAR or conferida_nao_saiu:
+            # O ambíguo SAIU (até o `sent` prova): vira `enviada`, sem reenviar.
+            if conferida_nao_saiu:
+                # Alguém marcou "Não saiu" e talvez já tenha respondido de novo:
+                # o cliente pode ter recebido as duas. Fica no log.
+                logger.warning("zap_conferido_nao_saiu_mas_saiu", mensagem=str(alvo.id))
+            alvo.status = MSG_ENVIADA
+            alvo.erro = None
+            if alvo.enviada_em is None:
+                alvo.enviada_em = quando
+            mudou_status = True
+        elif alvo.status == MSG_FALHOU and situacao != "sent":
             logger.warning("zap_status_desfez_falha", mensagem=str(alvo.id), status=situacao)
             alvo.status = MSG_ENVIADA
             alvo.erro = None
             mudou_status = True
     else:
         logger.info("zap_status_desconhecido", evento=ev.id)
+    if era_revisar and situacao in (*RANK_STATUS, "failed"):
+        # Conciliação (§5.6 item 5): o wamid que o timeout não trouxe.
+        if wamid and alvo.externo_id != wamid and await _wamid_livre(session, alvo, wamid):
+            alvo.externo_id = wamid
+        zap["conciliado"] = True
+        logger.info("zap_envio_conciliado", mensagem=str(alvo.id), status=situacao)
     preco = st.get("pricing") if isinstance(st.get("pricing"), dict) else None
+    custo_novo = False
     if preco and "tipo_preco" not in entrega:
-        # Vem no `sent` E no `delivered`: conta uma vez por wamid.
+        # Vem no `sent` E no `delivered`: conta uma vez por wamid. `billable`
+        # não é usado (a Meta vai remover): `regular` = cobrada, `free_*` = grátis.
         entrega["categoria"] = _texto(preco.get("category"))
         entrega["tipo_preco"] = _texto(preco.get("type"))
+        entrega["custo_em"] = _iso(agora)
+        custo_novo = entrega["categoria"] == "service"
     zap["entrega"] = entrega
     alvo.payload = {**payload, "zap": zap}
     await session.flush()
+    if situacao == "failed" and code is not None:
+        await _efeito_do_webhook(session, numero, conversa, code, agora)
+    if custo_novo:
+        await _contar_do_mes(session, numero, agora)
     if mudou_status:
         await gravar.recalcular_conversa(session, conversa)
     return R_GRAVADO
+
+
+async def _wamid_livre(session: AsyncSession, alvo: AtendimentoMensagem, wamid: str) -> bool:
+    """O wamid ainda não está em OUTRA linha desta conversa (o UNIQUE da mensagem)?"""
+    dono = await session.scalar(
+        select(AtendimentoMensagem.id).where(
+            AtendimentoMensagem.conversa_id == alvo.conversa_id,
+            AtendimentoMensagem.externo_id == wamid,
+            AtendimentoMensagem.id != alvo.id,
+        )
+    )
+    return dono is None
 
 
 async def _preferencia(

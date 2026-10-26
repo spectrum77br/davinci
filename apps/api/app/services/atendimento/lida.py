@@ -57,8 +57,20 @@ Por plataforma (`PLATAFORMAS_QUE_MARCAM`):
                      da leitura (5 × 20). Leitura dedicada, só neste caso.
   ml      pergunta   não há "lida": a pergunta sai da fila respondida.
 
+  zap     zap        (26/10/2026, Onda 2 de docs/zap/desenho.md §6.7 — o tique
+                     azul, decisão do Eduardo: "o cliente PODE ver") POST
+                     /{phone_number_id}/messages `{status: "read",
+                     message_id: <último wamid do cliente>}` (`zap.marcar_lida`;
+                     só até 30 dias depois de receber). Atrás da chave própria
+                     `atendimento_zap_marcar_lida` (DESLIGADA) e das chaves do
+                     envio (`atendimento_envio_ativo` e
+                     `atendimento_zap_envio_ativo`), com o número `envio_ligado`
+                     e o canal num modo que envia — e SÓ quando um
+                     ADMINISTRADOR abre (só eles veem o Zap).
+
 Não se aplica (a rota recusa com `nao_se_aplica` e a tela nem chama): Amazon
-(e-mail; a caixa abre em EXAMINE), o e-mail da Central (Tuta), o Zap, Temu e
+(e-mail; a caixa abre em EXAMINE), o e-mail da Central (Tuta), o Zap com a
+chave do tique azul desligada, Temu e
 AliExpress (o robô do Mac mini só lê: abrir a conversa no Seller Center é que
 marcaria), Magalu (o cliente recusa o `read_by` de propósito — liberar é outra
 decisão), o carrinho do site, os comentários das redes, o Direct do Instagram
@@ -122,16 +134,25 @@ from sqlalchemy import DateTime, case, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import AtendimentoCanal, AtendimentoConversa, AtendimentoMensagem, Integration, User
+from app.models import (
+    AtendimentoCanal,
+    AtendimentoConversa,
+    AtendimentoMensagem,
+    Integration,
+    User,
+    UserRole,
+)
 from app.redis_client import redis
-from app.services.atendimento import acesso, clientes
+from app.services.atendimento import acesso, canais_externos, clientes, gravar, zap, zap_erros
 from app.services.atendimento import notificacoes as notificacoes_svc
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_SISTEMA,
     CANAL_CHAT,
     CANAL_POS_VENDA,
+    CANAL_ZAP,
     MODOS_QUE_ENVIAM,
+    PLATAFORMA_WHATSAPP,
     e_chat_de_afiliado,
 )
 
@@ -208,6 +229,28 @@ class ResultadoLida:
     aviso: str | None = None
 
 
+# Zap (26/10/2026): as recusas próprias do tique azul.
+RECUSA_ZAP_NUMERO_PAUSADO = "zap_numero_pausado"
+MOTIVO_ZAP_SO_ADMIN = "Só administrador marca a conversa do Zap como lida no WhatsApp."
+MOTIVO_ZAP_ENVIO_DESLIGADO = (
+    "Zap: o envio pelo DaVinci está desligado — quem responde é o Duoke, e o "
+    "cliente não vê o tique azul."
+)
+MOTIVO_ZAP_SEM_NUMERO = "Este número de WhatsApp não está mais cadastrado no DaVinci."
+MOTIVO_ZAP_NUMERO_PAUSADO = "Este número está pausado no DaVinci: o tique azul não vai."
+MOTIVO_ZAP_EM_OBSERVACAO = (
+    "Este número está em observar: quem responde é o Duoke, e o cliente não vê o tique azul."
+)
+RECUSA_ZAP_FORA_DOS_TESTES = "zap_fora_dos_testes"
+MOTIVO_ZAP_FORA_DOS_TESTES = (
+    "Modo teste: o tique azul só vai para os números de teste (ou o contato está bloqueado)."
+)
+
+
+def e_zap(conversa: AtendimentoConversa) -> bool:
+    return conversa.plataforma == PLATAFORMA_WHATSAPP and conversa.canal == CANAL_ZAP
+
+
 def se_aplica(conversa: AtendimentoConversa) -> bool:
     """A plataforma desta conversa tem "marcar como lida" pela API?
 
@@ -215,7 +258,12 @@ def se_aplica(conversa: AtendimentoConversa) -> bool:
     `business_type=11` não acha a conversa (o `get_message` e o
     `get_one_conversation` respondem `param_error` — medido), e com ele nunca
     foi medido. O "visto no DaVinci" (`gravar_visto`) continua valendo.
+
+    O Zap (26/10/2026): só com a chave do tique azul
+    (`atendimento_zap_marcar_lida`, desligada) — o cliente VÊ que alguém leu.
     """
+    if e_zap(conversa):
+        return bool(get_settings().atendimento_zap_marcar_lida)
     if e_chat_de_afiliado(conversa.plataforma, conversa.dados):
         return False
     return conversa.canal in PLATAFORMAS_QUE_MARCAM.get(conversa.plataforma, frozenset())
@@ -237,14 +285,50 @@ async def _canal_e_loja(
     return canal, integration
 
 
+async def _conferir_zap(
+    session: AsyncSession, conversa: AtendimentoConversa, user: User
+) -> tuple[AtendimentoCanal, None]:
+    """As travas do tique azul no Zap (as do envio, sem as da mensagem). Canal e número RELIDOS."""
+    if user.role != UserRole.ADMIN:
+        raise LidaRecusada(RECUSA_SO_LEITURA, MOTIVO_ZAP_SO_ADMIN)
+    if not get_settings().atendimento_zap_envio_ativo:
+        raise LidaRecusada(RECUSA_ENVIO_DESLIGADO, MOTIVO_ZAP_ENVIO_DESLIGADO)
+    canal = (
+        await session.get(AtendimentoCanal, conversa.canal_id, populate_existing=True)
+        if conversa.canal_id is not None
+        else None
+    )
+    numero = await zap.numero_do_pnid(session, canais_externos.pnid_do_canal(canal))
+    if canal is None or numero is None:
+        raise LidaRecusada(RECUSA_SEM_INTEGRACAO, MOTIVO_ZAP_SEM_NUMERO)
+    if numero.etapa not in zap.ETAPAS_QUE_ENVIAM or not numero.envio_ligado:
+        raise LidaRecusada(RECUSA_ZAP_NUMERO_PAUSADO, MOTIVO_ZAP_NUMERO_PAUSADO)
+    if canal.modo not in MODOS_QUE_ENVIAM:
+        raise LidaRecusada(RECUSA_CANAL_EM_OBSERVACAO, MOTIVO_ZAP_EM_OBSERVACAO)
+    # O contato: as mesmas réguas do envio (§6.3 travas 10 e 11) — bloqueado
+    # ou apagado (LGPD) não recebe nada, e fora de produção só a lista de teste.
+    contato = await zap.contato_da_conversa(session, conversa)
+    if (
+        contato is None
+        or contato.bloqueado
+        or contato.apagado_em is not None
+        or not zap.destino_liberado(
+            contato.wa_id, zap.lista_de_teste(numero), producao=get_settings().is_prod
+        )
+    ):
+        raise LidaRecusada(RECUSA_ZAP_FORA_DOS_TESTES, MOTIVO_ZAP_FORA_DOS_TESTES)
+    return canal, None
+
+
 async def conferir(
     session: AsyncSession, conversa: AtendimentoConversa, user: User | None
-) -> tuple[AtendimentoCanal, Integration]:
+) -> tuple[AtendimentoCanal, Integration | None]:
     """As travas que não dependem da plataforma; levanta `LidaRecusada`.
 
     A ordem: a pessoa (quem só lê, ou ninguém — IA/cron —, nunca), a
     conversa (plataforma com "lida"), o servidor (envio ligado) e a loja
     (conectada, num modo em que o DaVinci responde). Canal e loja RELIDOS.
+    No Zap (sem loja), o número no lugar da loja (`_conferir_zap`).
     """
     if user is None or not acesso.pode_mexer(user):
         raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem mexe no Atendimento marca como lida.")
@@ -252,6 +336,8 @@ async def conferir(
         raise LidaRecusada(RECUSA_NAO_SE_APLICA, MOTIVO_NAO_SE_APLICA)
     if not get_settings().atendimento_envio_ativo:
         raise LidaRecusada(RECUSA_ENVIO_DESLIGADO, MOTIVO_ENVIO_DESLIGADO)
+    if e_zap(conversa):
+        return await _conferir_zap(session, conversa, user)
     canal, integration = await _canal_e_loja(session, conversa)
     if canal is None or integration is None or integration.archived_at is not None:
         raise LidaRecusada(RECUSA_SEM_INTEGRACAO, MOTIVO_SEM_INTEGRACAO)
@@ -268,10 +354,15 @@ async def marcar_ao_abrir(
     As MESMAS travas da rota (`conferir`) e algo para marcar (`nao_lidas` > 0):
     tela e API nunca discordam. Nunca levanta — no pior caso, False.
     """
-    if (conversa.nao_lidas or 0) <= 0:
+    zap_conversa = e_zap(conversa)
+    if not zap_conversa and (conversa.nao_lidas or 0) <= 0:
         return False
     try:
         await conferir(session, conversa, user)
+        if zap_conversa:
+            # O Zap não tem `nao_lidas`: algo a marcar = mensagem do cliente
+            # que a Meta ainda não recebeu como lida (`_wamid_para_marcar`).
+            return await _wamid_para_marcar(session, conversa) is not None
     except LidaRecusada:
         return False
     except Exception as e:  # noqa: BLE001 — o detalhe da conversa nunca cai por isto
@@ -607,6 +698,114 @@ _PREPARAR = {
 }
 
 
+async def _wamid_para_marcar(session: AsyncSession, conversa: AtendimentoConversa) -> str | None:
+    """A última mensagem do cliente (≤ 30 dias) que AINDA não foi marcada; None = nada a marcar.
+
+    O Zap não tem `nao_lidas` (a Meta não manda contador): a marca é o
+    `dados.zap.lida_wamid` — o wamid que a Meta já aceitou como lido.
+    """
+    wamid = await zap.ultima_de_entrada(session, conversa, datetime.now(UTC))
+    if wamid is None:
+        return None
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    zap_dados = dados.get("zap") if isinstance(dados.get("zap"), dict) else {}
+    return None if zap_dados.get("lida_wamid") == wamid else wamid
+
+
+# A Meta recusou o `message_id` de um jeito que não muda tentando de novo
+# (pedido inválido: o wamid não existe para ela, passou dos 30 dias) [confirmar
+# no ensaio do §11.5]. O wamid fica gravado como "já tratado": sem isto, cada
+# abertura da conversa repetia a chamada e o aviso de falha. Limite, token e
+# permissão NÃO entram (passam, ou a credencial é trocada).
+_LIDA_RECUSA_DEFINITIVA = frozenset({100, 131009})
+
+
+async def _gravar_lida(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    wamid: str,
+    *,
+    recusada: int | None = None,
+) -> None:
+    """Grava `dados.zap.lida_wamid` (e `lida_em`) sobre a linha RELIDA e travada. Commita.
+
+    A chamada à Meta leva até `TEMPO_MAXIMO_S`; nesse meio-tempo o
+    processador do webhook pode ter gravado outra chave de `dados` (o `ctwa`
+    do anúncio, o `comprador_plataforma`). Regravar a cópia lida no começo
+    do pedido (a sessão não expira no commit) apagaria isso (revisão,
+    26/10/2026): trava, relê e só então mescla a chave do Zap.
+    """
+    await gravar.travar_linha(session, conversa)
+    dados = dict(conversa.dados or {})
+    zap_dados = dict(dados.get("zap") or {})
+    zap_dados["lida_wamid"] = wamid
+    zap_dados["lida_em"] = datetime.now(UTC).isoformat()
+    if recusada is not None:
+        zap_dados["lida_recusada"] = recusada
+    else:
+        zap_dados.pop("lida_recusada", None)
+    conversa.dados = {**dados, "zap": zap_dados}
+    await session.commit()
+    await session.refresh(conversa)
+
+
+async def _marcar_no_zap(
+    session: AsyncSession, conversa: AtendimentoConversa, *, user: User | None
+) -> ResultadoLida:
+    """O tique azul (26/10/2026, §6.7): marca a última mensagem do CLIENTE como lida na Meta.
+
+    As travas já passaram (`conferir`). Sem nada novo para marcar: "já lida".
+    A Meta aceitou: grava `dados.zap.lida_wamid` (a próxima abertura não vai
+    de novo). Falhou: `marcada=False` com o aviso — a tela não quebra; na
+    recusa definitiva (`_LIDA_RECUSA_DEFINITIVA`) o wamid também fica
+    gravado, para a abertura seguinte não repetir a chamada. O
+    token é decifrado só aqui, na memória; a chamada não renova token
+    nenhum, então o teto de tempo pode cancelar (marcar de novo é idempotente).
+    """
+    wamid = await _wamid_para_marcar(session, conversa)
+    if wamid is None:
+        return ResultadoLida(marcada=False, motivo=MOTIVO_JA_LIDA)
+    if not await _pegar_trava(conversa.id):
+        return ResultadoLida(marcada=False, motivo=MOTIVO_EM_ANDAMENTO)
+    log = {
+        "conversa_id": str(conversa.id),
+        "plataforma": conversa.plataforma,
+        "canal": conversa.canal,
+        "user_id": str(user.id) if user is not None else None,
+    }
+    try:
+        canal = (
+            await session.get(AtendimentoCanal, conversa.canal_id) if conversa.canal_id else None
+        )
+        numero = await zap.numero_do_pnid(session, canais_externos.pnid_do_canal(canal))
+        token = (
+            zap.token_valido(await zap.conta_do_numero(session, numero))
+            if numero is not None
+            else None
+        )
+        if numero is None or token is None:
+            erro: str | None = "zap sem_credencial"
+        else:
+            try:
+                falha = await asyncio.wait_for(
+                    zap.marcar_lida(numero.phone_number_id, token, wamid), timeout=TEMPO_MAXIMO_S
+                )
+                erro = f"zap {falha}" if falha else None
+            except Exception as e:  # noqa: BLE001 — a tela não quebra; fica no log
+                erro = f"zap {_erro_curto(e)}"
+        if erro:
+            logger.warning("atendimento_lida_plataforma_falhou", erro=erro, **log)
+            code = zap_erros.codigo_do_erro(erro.removeprefix("zap "))
+            if code in _LIDA_RECUSA_DEFINITIVA:
+                await _gravar_lida(session, conversa, wamid, recusada=code)
+            return ResultadoLida(marcada=False, motivo=MOTIVO_PLATAFORMA_FALHOU, aviso=AVISO_FALHOU)
+        await _gravar_lida(session, conversa, wamid)
+        logger.info("atendimento_lida_marcada", zerou=False, **log)
+        return ResultadoLida(marcada=True)
+    finally:
+        await _soltar_trava(conversa.id)
+
+
 def _terminou_depois_do_tempo(conversa_id: Any, log: dict, tarefa: asyncio.Future) -> None:
     """A chamada que passou do tempo acabou: registra como foi e solta a trava.
 
@@ -655,6 +854,8 @@ async def marcar_como_lida(
     plataforma não levanta: `marcada=False` com o aviso, e `nao_lidas` fica.
     """
     canal, integration = await conferir(session, conversa, user)
+    if e_zap(conversa):
+        return await _marcar_no_zap(session, conversa, user=user)
     if (conversa.nao_lidas or 0) <= 0:
         return ResultadoLida(marcada=False, motivo=MOTIVO_JA_LIDA)
     if not await _pegar_trava(conversa.id):

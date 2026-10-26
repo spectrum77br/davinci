@@ -19,6 +19,13 @@
 //  - a página: a faixa "Zap: envio desligado — responda pelo Duoke" só com
 //    número de WhatsApp no /resumo;
 //  - a aba Lojas e modo: o canal do número só em Observar (travado).
+// Onda 2 (26/10/2026 — responder TEXTO): o modo Humano (só admin escolhe,
+// igual ao backend); as frases das travas do §6.3 em ERROS, IGUAIS às do
+// backend (`enviar.MOTIVO_*`); nas travas que reusam um código genérico
+// (observar, sem número, só pessoa) a frase do servidor (fala do número, não
+// da "loja"); os tiques no balão (✓ enviada · ✓✓ entregue · ✓✓ azul lida;
+// "segurada pela Meta"); a frase do erro da Meta no balão que falhou
+// (`entrega_erro`); o cinto do adaptador com frase própria.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -54,6 +61,13 @@ function trecho(src, ini, fim) {
 const api = (rel) => fs.readFileSync(path.resolve(__dirname, '../../api/app', rel), 'utf8')
 const constantes = api('services/atendimento/constantes.py')
 const config = api('config.py')
+const enviarPy = api('services/atendimento/enviar.py')
+// A frase de uma constante do Python: `NOME = "…"` ou `NOME = (\n "…"\n "…"\n)`.
+function fraseDe(src, nome) {
+  const m = new RegExp(`^${nome} = (?:\\(([\\s\\S]*?)^\\)|("[^"\\n]*"))`, 'm').exec(src)
+  assert.ok(m, `constante ${nome}`)
+  return [...(m[1] || m[2]).matchAll(/"([^"]*)"/g)].map((x) => x[1]).join('')
+}
 
 const P = exportsDe(sfc('../components/AtendimentoPlataforma.vue'))
 const filtroSfc = sfc('../components/AtendimentoFiltroPlataforma.vue')
@@ -85,11 +99,11 @@ const CORTE = ['corteDaBarra', 'gruposVisiveis', 'nomeDoCorte', 'ativaTodasDoCor
   assert.match(constantes, /^CANAL_ZAP = "zap"$/m)
   assert.match(constantes, /^PLATAFORMAS_EXTERNAS = \(PLATAFORMA_SITE, \*PLATAFORMAS_REDE, PLATAFORMA_WHATSAPP\)$/m)
 
-  // O modo: só Observar na Onda 1 — o mesmo que o PATCH /canais aceita.
-  assert.deepEqual(P.MODOS_EXTERNOS.whatsapp, ['observar'])
+  // O modo: Observar ou (Onda 2, 26/10/2026) Humano — o mesmo que o PATCH /canais aceita.
+  assert.deepEqual(P.MODOS_EXTERNOS.whatsapp, ['observar', 'humano'])
   const bloco = (constantes.match(/^MODOS_EXTERNOS[^=]*= \{([\s\S]*?)^\}/m) || [])[1] || ''
   const zapModos = (bloco.match(/PLATAFORMA_WHATSAPP: \(([^)]*)\)/) || [])[1] || ''
-  assert.deepEqual(zapModos.split(',').map((x) => x.trim()).filter(Boolean), ['MODO_OBSERVAR'])
+  assert.deepEqual(zapModos.split(',').map((x) => x.trim()).filter(Boolean), ['MODO_OBSERVAR', 'MODO_HUMANO'])
 
   // O limite de caracteres: o mesmo do backend (4.096 da Cloud API).
   const limites = (constantes.match(/^LIMITE_CARACTERES[^=]*= \{([\s\S]*?)^\}/m) || [])[1] || ''
@@ -315,24 +329,46 @@ const zapConversa = { id: 'cv1', plataforma: 'whatsapp', canal: 'zap', conta: '(
   assert.equal(pode({ ...zapConversa, plataforma: 'shopee', canal: 'chat' }), true, 'nas outras, como antes')
 }
 {
-  // A caixa de resposta diz "Responda pelo Duoke": a frase do backend
-  // (MOTIVO_ZAP_SEM_ENVIO, que não muda na Onda 1), sem tradução na tela.
-  const bloco = (constantes.match(/^MOTIVO_ZAP_SEM_ENVIO = \(([\s\S]*?)^\)/m) || [])[1] || ''
-  const frase = [...bloco.matchAll(/"([^"]*)"/g)].map((x) => x[1]).join('')
-  assert.match(frase, /Responda pelo Duoke\.$/)
+  // A caixa de resposta: com a chave do Zap desligada diz "Responda pelo
+  // Duoke" (Onda 2: o código próprio `zap_envio_desligado`, frase igual à do
+  // backend); as travas que reusam um código genérico mostram a frase do
+  // SERVIDOR (fala do número, não da "loja"); o Zap no formato antigo
+  // (MOTIVO_ZAP_SEM_ENVIO, `canal_sem_envio`) segue com a frase do backend.
+  const antigo = fraseDe(constantes, 'MOTIVO_ZAP_SEM_ENVIO')
+  assert.match(antigo, /Responda pelo Duoke\.$/)
   assert.equal(P.ERROS.canal_sem_envio, undefined)
   const js = transpile(trecho(cs, '// Por que não dá para responder, em linguagem simples.', 'const podeDigitar')) + '\nreturn bloqueioEnvio'
   const bloqueio = (d, props) => new Function(
     'computed', 'detalhe', 'ehEmail', 'sellerCenterDe', 'motivoSellerCenter', 'AVISO_SO_LEITURA', 'props', 'avaliacaoDaConversa',
-    'TRAVAS_GERAIS_DO_EMAIL', 'motivoLegivel', 'ERROS', 'travaEmail', 'CODIGOS_CONFIRMAVEIS', 'bloqueioLegivel', 'semConta', js,
+    'TRAVAS_GERAIS_DO_EMAIL', 'motivoLegivel', 'ERROS', 'travaEmail', 'CODIGOS_CONFIRMAVEIS', 'bloqueioLegivel', 'semConta',
+    'CODIGOS_ZAP_FRASE_DO_SERVIDOR', js,
   )(
     Vue.computed, Vue.ref(d), Vue.ref(false), P.sellerCenterDe, P.motivoSellerCenter, P.AVISO_SO_LEITURA, props, Vue.ref(null),
     new Set(), P.motivoLegivel, P.ERROS, Vue.ref(null), new Set(), C.bloqueioLegivel, Vue.ref(false),
+    P.CODIGOS_ZAP_FRASE_DO_SERVIDOR,
   ).value
-  const envio = { pode_enviar: false, codigo: 'canal_sem_envio', motivo: frase, limite_caracteres: 4096, modo: 'observar', sla_horas: 24, modo_observacao: false }
+  const base = { pode_enviar: false, limite_caracteres: 4096, modo: 'humano', sla_horas: 24, modo_observacao: false }
   const props = { canEdit: true, flags: { envio_ativo: true, zap_envio_ativo: false } }
-  assert.equal(bloqueio({ conversa: zapConversa, envio }, props), frase, 'a caixa à mostra, travada com "Responda pelo Duoke"')
+  const desligado = fraseDe(enviarPy, 'MOTIVO_ZAP_ENVIO_DESLIGADO')
+  assert.match(desligado, /Responda pelo Duoke\.$/)
+  const envio = { ...base, codigo: 'zap_envio_desligado', motivo: desligado }
+  assert.equal(bloqueio({ conversa: zapConversa, envio }, props), desligado, 'a caixa à mostra, travada com "Responda pelo Duoke"')
   assert.equal(bloqueio({ conversa: zapConversa, envio }, { ...props, canEdit: false }), P.AVISO_SO_LEITURA, 'quem só lê: a frase de sempre')
+  // Os códigos genéricos no Zap: a frase do servidor.
+  const observar = fraseDe(enviarPy, 'MOTIVO_ZAP_EM_OBSERVACAO')
+  assert.equal(bloqueio({ conversa: zapConversa, envio: { ...base, modo: 'observar', codigo: 'canal_em_observacao', motivo: observar } }, props), observar)
+  const soPessoa = fraseDe(constantes, 'MOTIVO_ZAP_SO_PESSOA')
+  assert.equal(bloqueio({ conversa: zapConversa, envio: { ...base, codigo: 'canal_sem_envio', motivo: soPessoa } }, props), soPessoa)
+  const semNumero = fraseDe(enviarPy, 'MOTIVO_ZAP_SEM_NUMERO')
+  assert.equal(bloqueio({ conversa: zapConversa, envio: { ...base, codigo: 'sem_integracao', motivo: semNumero } }, props), semNumero)
+  // Fora do Zap, os genéricos continuam com a frase da tela.
+  const shopee = { ...zapConversa, plataforma: 'shopee', canal: 'chat' }
+  assert.equal(bloqueio({ conversa: shopee, envio: { ...base, modo: 'observar', codigo: 'canal_em_observacao', motivo: 'x' } }, props), P.ERROS.canal_em_observacao)
+  // O formato antigo (Zap com a plataforma da venda): a frase do backend.
+  const zapAntigo = { ...zapConversa, plataforma: 'shopee' }
+  assert.equal(bloqueio({ conversa: zapAntigo, envio: { ...base, codigo: 'canal_sem_envio', motivo: antigo } }, props), antigo)
+  // Tudo liberado: nada trava.
+  assert.equal(bloqueio({ conversa: zapConversa, envio: { ...base, pode_enviar: true, codigo: null, motivo: null } }, { ...props, flags: { envio_ativo: true, zap_envio_ativo: true } }), '')
 }
 {
   // Os tipos do WhatsApp e a mídia ainda sem a nossa cópia.
@@ -383,14 +419,99 @@ const zapConversa = { id: 'cv1', plataforma: 'whatsapp', canal: 'zap', conta: '(
   assert.match(pagina, /const zap = avisoZap\(resumo\.value\)\s+if \(zap\) out\.push\(\{ chave: 'zap', \.\.\.zap \}\)/)
 }
 
-// ------------------------------------------------ Lojas e modo: só Observar, travado
+// ------------------------------------------------ Lojas e modo: Observar ou Humano (só admin)
 {
   const canaisSfc = sfc('../components/AtendimentoCanais.vue')
   const js = transpile(trecho(canaisSfc.scriptSetup.content, 'function opcoesModo', 'function tituloModo')) + '\nreturn { opcoesModo, modoTravado, soAdmin }'
-  const M = new Function('MODOS', 'MODOS_EXTERNOS', 'sellerCenterDe', 'props', js)(P.MODOS, P.MODOS_EXTERNOS, P.sellerCenterDe, { isAdmin: true })
+  const modos = (isAdmin) => new Function('MODOS', 'MODOS_EXTERNOS', 'sellerCenterDe', 'props', js)(P.MODOS, P.MODOS_EXTERNOS, P.sellerCenterDe, { isAdmin })
   const canal = { id: 'cz1', integration_id: null, externo_ref: 'zap:1111', plataforma: 'whatsapp', canal: 'zap', modo: 'observar' }
-  assert.deepEqual(M.opcoesModo(canal).map((m) => m.value), ['observar'], 'nem admin escolhe outro modo na Onda 1')
-  assert.equal(M.modoTravado(canal), true)
+  const admin = modos(true)
+  assert.deepEqual(admin.opcoesModo(canal).map((m) => m.value), ['observar', 'humano'], 'Onda 2: Humano entra (nunca copiloto/auto)')
+  assert.equal(admin.modoTravado(canal), false)
+  assert.equal(admin.soAdmin(canal, 'humano'), false)
+  // Quem não é admin vê a opção travada (o backend recusa com 403 so_admin).
+  const equipe = modos(false)
+  assert.equal(equipe.soAdmin(canal, 'humano'), true)
+  // Voltar para Observar qualquer um com edição pode.
+  assert.equal(equipe.soAdmin({ ...canal, modo: 'humano' }, 'observar'), false)
+  const aviso = trecho(canaisSfc.scriptSetup.content, 'async function mudarModo', 'copiloto:')
+  assert.match(aviso, /este número de WhatsApp pelo DaVinci/, 'o aviso de ligar o Humano fala do número e do Duoke')
 }
 
-console.log('ok — atendimento-zap (Onda 1: vocabulário, ícone, barra, janela, conversa sem painel do pedido, faixa do topo)')
+// ------------------------------------------------ Onda 2: as travas, os tiques, o erro no balão
+{
+  // As frases das travas do §6.3: em ERROS, IGUAIS às do backend.
+  const travas = {
+    zap_envio_desligado: 'MOTIVO_ZAP_ENVIO_DESLIGADO',
+    zap_numero_pausado: 'MOTIVO_ZAP_NUMERO_PAUSADO',
+    zap_sem_credencial: 'MOTIVO_ZAP_SEM_CREDENCIAL',
+    zap_contato_bloqueado: 'MOTIVO_ZAP_CONTATO_BLOQUEADO',
+    zap_contato_sem_telefone: 'MOTIVO_ZAP_CONTATO_SEM_TELEFONE',
+    zap_fora_dos_testes: 'MOTIVO_ZAP_FORA_DOS_TESTES',
+    fora_da_janela: 'MOTIVO_FORA_DA_JANELA',
+    zap_laco: 'MOTIVO_ZAP_LACO',
+    zap_teto_dia: 'MOTIVO_ZAP_TETO_DIA',
+  }
+  for (const [codigo, nome] of Object.entries(travas)) {
+    assert.ok(new RegExp(`^RECUSA_[A-Z_]+ = "${codigo}"$`, 'm').test(enviarPy), `o backend tem o código ${codigo}`)
+    assert.equal(P.ERROS[codigo], fraseDe(enviarPy, nome), `ERROS.${codigo} = ${nome}`)
+  }
+  // Os genéricos que no Zap trazem a frase do servidor.
+  // O número pausado também: pausado pela Meta, o backend diz o porquê (revisão, 26/10/2026).
+  assert.deepEqual([...P.CODIGOS_ZAP_FRASE_DO_SERVIDOR].sort(), ['canal_em_observacao', 'canal_sem_envio', 'conversa_bloqueada', 'sem_integracao', 'zap_numero_pausado'])
+  assert.match(enviarPy, /O número foi pausado por aviso da Meta\./)
+
+  // Os tiques: só da NOSSA resposta enviada; o maior status que a Meta avisou.
+  const t = (m) => P.tiqueDoZap({ status: 'enviada', entrega: null, retida_pela_meta: false, ...m })
+  assert.equal(t({}).tipo, 'um', 'a Meta aceitou, sem aviso ainda: ✓')
+  assert.equal(t({ entrega: 'sent' }).tipo, 'um')
+  assert.equal(t({ entrega: 'delivered' }).tipo, 'dois')
+  assert.equal(t({ entrega: 'read' }).tipo, 'azul')
+  assert.equal(t({ entrega: 'played' }).tipo, 'azul')
+  assert.match(t({ entrega: 'played' }).titulo, /ouvida/)
+  assert.match(t({ retida_pela_meta: true }).titulo, /segurou/)
+  assert.equal(t({ retida_pela_meta: true, entrega: 'delivered' }).tipo, 'dois', 'entregue vale mais que "segurada"')
+  for (const status of ['falhou', 'revisar', 'enviando']) assert.equal(t({ status, entrega: 'read' }), null, status)
+  assert.equal(P.tiqueDoZap(null), null)
+  // No balão: os tiques só no Zap e só do lado da loja; fora dele, o ✓✓ de sempre.
+  assert.match(tela, /<template v-if="ehZap && lado\(l\.m\) === 'loja' && tiqueDoZap\(l\.m\)">/)
+  assert.match(tela, /data-tique-zap/)
+  assert.match(tela, /tiqueDoZap\(l\.m\)!\.tipo === 'azul' \? 'text-sky-500'/)
+  assert.match(tela, /segurada pela Meta/)
+  assert.match(tela, /<CheckCheck v-else-if="l\.m\.status === 'enviada' && lado\(l\.m\) === 'loja'" class="size-3" \/>/)
+
+  // O balão que não saiu: a frase da Meta (traduzida no servidor) vem primeiro.
+  assert.equal(P.erroDoBalao({ erro: 'meta:131026', entrega_erro: 'Não foi entregue: o número pode não ter WhatsApp.' }), 'Não foi entregue: o número pode não ter WhatsApp.')
+  assert.equal(P.erroDoBalao({ erro: 'timeout', entrega_erro: null }), P.erroEnvioLegivel('timeout'), 'fora do Zap: a régua de sempre')
+  assert.match(P.erroEnvioLegivel('zap_cinto:envio_desligado'), /barrado no último instante.*nada saiu/)
+  assert.match(P.erroEnvioLegivel('zap_sem_destino'), /nada saiu/)
+  assert.equal(P.erroEnvioLegivel('meta:sem_resposta'), 'A Meta não respondeu a tempo.')
+  assert.match(tela, /\{\{ erroDoBalao\(l\.m\) \}\}/)
+  assert.ok(!/\{\{ erroEnvioLegivel\(l\.m\.erro\) \}\}/.test(tela), 'o balão usa o erroDoBalao')
+}
+
+// ------------------------------------------------ Onda 2 (revisão, 26/10/2026): a resposta em `revisar` no Zap
+{
+  // Na Cloud API não há caixa da Meta onde "conferir lá": o aviso de entrega
+  // concilia. O balão e o toast dizem isso; o "Não saiu" (que libera responder
+  // de novo) só depois do tempo em que o servidor ainda espera o status.
+  const zapEntrada = api('services/atendimento/zap_entrada.py')
+  assert.match(zapEntrada, /^ESPERA_STATUS_MAX = timedelta\(hours=1\)$/m)
+  assert.equal(P.ZAP_ESPERA_STATUS_MS, 60 * 60 * 1000, 'o mesmo tempo do servidor')
+  assert.ok(!/[Cc]onfira (lá|na plataforma)/.test(P.ZAP_REVISAR.balao + P.ZAP_REVISAR.toast))
+  assert.match(P.ZAP_REVISAR.balao, /aviso de entrega/)
+  const agora = Date.parse('2026-10-26T15:00:00Z')
+  assert.equal(P.zapPodeMarcarNaoSaiu({ enviada_em: '2026-10-26T14:30:00Z' }, agora), false, 'meia hora: ainda espera')
+  assert.equal(P.zapPodeMarcarNaoSaiu({ enviada_em: '2026-10-26T13:59:00Z' }, agora), true, 'passou de 1 h sem status')
+  assert.equal(P.zapPodeMarcarNaoSaiu({ enviada_em: null }, agora), true, 'sem hora: não esconde')
+  assert.match(tela, /<div v-if="ehZap" data-zap-revisar>\{\{ ZAP_REVISAR\.balao \}\}<\/div>/)
+  assert.match(tela, /v-if="!ehZap \|\| zapPodeMarcarNaoSaiu\(l\.m, agora\)"/)
+  const script = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoConversa.vue'), 'utf8')
+  assert.match(script, /plataforma === 'whatsapp' \? ZAP_REVISAR\.toast :/)
+  assert.match(script, /ehZap\.value \? ZAP_REVISAR\.toast :/)
+  // O servidor: a `revisar` marcada "Não saiu" que recebe status é conciliada (SAIU).
+  assert.match(constantes, /^ERRO_CONFERIDO_NAO_SAIU = "conferido: não saiu"$/m)
+  assert.match(zapEntrada, /conferida_nao_saiu = alvo\.status == MSG_FALHOU and alvo\.erro == ERRO_CONFERIDO_NAO_SAIU/)
+}
+
+console.log('ok — atendimento-zap (Ondas 1 e 2: vocabulário, ícone, barra, janela, conversa sem painel do pedido, faixa do topo, modo Humano, travas, tiques)')

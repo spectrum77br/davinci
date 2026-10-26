@@ -40,7 +40,7 @@
 export const ATRASO_MARCAR_LIDA_MS = 1500
 
 export type DetalheParaLida = {
-  conversa: { id: string; nao_lidas?: number | null }
+  conversa: { id: string; nao_lidas?: number | null; canal?: string | null }
   marcar_lida?: boolean
   // Até onde a tela mostra (15/10/2026): vai no POST como `ate`.
   visto_ate?: string | null
@@ -49,6 +49,10 @@ export type DetalheParaLida = {
 /** A tela deve marcar esta conversa como lida (depois do atraso)? */
 export function querMarcarLida(d: DetalheParaLida | null | undefined, podeMexer: boolean): boolean {
   if (!d || !podeMexer || d.marcar_lida !== true) return false
+  // Zap (26/10/2026, o tique azul): a Meta não manda contador de não lidas
+  // (fica 0); o `marcar_lida` do servidor já diz se há mensagem do cliente
+  // ainda não marcada (lida.py `_wamid_para_marcar`).
+  if (d.conversa?.canal === 'zap') return true
   const n = d.conversa?.nao_lidas
   // Sem o número (API antiga): o servidor decide — a rota é idempotente.
   return n === null || n === undefined || n > 0

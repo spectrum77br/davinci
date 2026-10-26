@@ -90,8 +90,9 @@ def _painel_externo(plataforma: str) -> PainelOut:
 
     Não há pedido no Bling nem perfil de loja no AdsPower, e nada sai pela
     caixa (`enviar` recusa): o painel não procura nada disso. No Zap a
-    conversa é PRÉ-VENDA (sem venda vinculada até a Onda 6) e, na Onda 1,
-    quem responde é o Duoke (a foto de saída é da Onda 3).
+    conversa é PRÉ-VENDA (sem venda vinculada até a Onda 6); desde a Onda 2
+    (26/10/2026) a pessoa responde TEXTO pela caixa (com as travas do Zap), e
+    a foto de saída é da Onda 3.
     """
     if plataforma == PLATAFORMA_WHATSAPP:
         return PainelOut(
@@ -102,9 +103,10 @@ def _painel_externo(plataforma: str) -> PainelOut:
             envio_foto={
                 "pode": False,
                 "motivo": (
-                    "Zap (WhatsApp): o envio ainda não existe no DaVinci. Responda pelo Duoke."
+                    "Zap (WhatsApp): mandar foto pelo DaVinci chega na próxima etapa — "
+                    "por enquanto, só texto."
                 ),
-                "codigo": "canal_sem_envio",
+                "codigo": "foto_nao_suportada",
             },
         )
     origem = "Carrinho do site" if plataforma == PLATAFORMA_SITE else "Comentário de rede social"

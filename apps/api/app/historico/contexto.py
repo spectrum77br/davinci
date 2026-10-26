@@ -21,6 +21,13 @@ from sqlalchemy import text
 MARCAR_TRANSACAO = text(
     "SELECT set_config('davinci.ator', :ator, true), set_config('davinci.req', :req, true)"
 )
+# O contrário, numa transação que é da MÁQUINA dentro do pedido da pessoa (o
+# efeito que a Meta mandou aplicar depois de um envio, o carimbo do "último
+# envio" do número — Zap, 26/10/2026): o gatilho só grava com a marca, e o
+# Histórico não diz que foi a pessoa. Vale só até o fim desta transação.
+DESMARCAR_TRANSACAO = text(
+    "SELECT set_config('davinci.ator', '', true), set_config('davinci.req', '', true)"
+)
 
 
 @dataclass

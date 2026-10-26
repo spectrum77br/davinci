@@ -23,6 +23,21 @@ Duas camadas:
        sua nota") e desestimular reclamação ("não precisa abrir reclamação");
      • lacuna não preenchida (`{rastreio}` saindo literal para o cliente).
 
+ZAP (`plataforma='whatsapp'` + `canal='zap'`, 26/10/2026 — docs/zap/desenho.md §7):
+   o número de WhatsApp é canal da PRÓPRIA marca — o cliente já está no
+   WhatsApp. O bloco de contato fora da loja (e-mail, WhatsApp, link,
+   telefone, @perfil, rede social) NÃO gera motivo ali (os `_apagar` seguem
+   rodando: um link com "pix" no caminho não vira falso PIX). Continuam:
+   vazio, limite, lacuna, avaliação, reclamação, "por fora" e as regras só da
+   IA. E entra uma regra SÓ do Zap, para PESSOA e IA, pela política do
+   WhatsApp ("Don't share or ask people to share full length individual
+   payment card numbers, financial account numbers…" — whatsappbusiness.com/
+   policy): número de cartão (13 a 19 dígitos que passam no Luhn, com cara de
+   cartão), agência e conta, pedido de cartão/RG/CPF e número de CPF — e o
+   PIX, BLOQUEADO no Zap por decisão do Eduardo (26/10/2026: "por enquanto",
+   para pessoa e IA). Conta bancária e documento não são vetáveis. Pedir CPF
+   para a nota fiscal: barra até a política confirmar a exceção [confirmar].
+
 2. SÓ IA (`origem == "davinci_ia"`) — prazo e valor ditos em canal de
    atendimento VINCULAM o fornecedor (CDC art. 30 e 35; o art. 34 fecha o
    "foi o robô"). A IA não diz R$ (nem "199,90." no fim da frase, nem
@@ -57,7 +72,12 @@ import re
 import unicodedata
 from collections.abc import Collection, Iterable, Mapping, Sequence
 
-from app.services.atendimento.constantes import ORIGEM_IA, limite_caracteres
+from app.services.atendimento.constantes import (
+    CANAL_ZAP,
+    ORIGEM_IA,
+    PLATAFORMA_WHATSAPP,
+    limite_caracteres,
+)
 
 # ── Normalização ──────────────────────────────────────────────────────────
 
@@ -211,6 +231,12 @@ _MOTIVO_ML_ISO = "caractere que o Mercado Livre não aceita"
 _MOTIVO_EMOJI_AMAZON = "emoji (Amazon)"
 _MOTIVO_DOCUMENTO_MAGALU = "documento (CPF/CNPJ): a moderação da Magalu barra"
 _MOTIVO_LACUNA = "lacuna não preenchida"
+# Zap (26/10/2026): a política do WhatsApp — para pessoa E IA, só no Zap.
+_MOTIVO_ZAP_PIX = "PIX: bloqueado no WhatsApp por enquanto"
+_MOTIVO_ZAP_CARTAO = "número de cartão: a Meta proíbe no WhatsApp"
+_MOTIVO_ZAP_CONTA = "agência e conta bancária: a Meta proíbe no WhatsApp"
+_MOTIVO_ZAP_DOCUMENTO = "número de documento (CPF/RG): a Meta proíbe no WhatsApp"
+_MOTIVO_ZAP_PEDE = "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"
 
 # O e-mail vem ANTES de link e @perfil: "fulano@gmail.com" é um motivo só.
 _EMAIL = (
@@ -299,7 +325,11 @@ _LINK = (
     re.compile(r"\b[a-z0-9][a-z0-9-]{1,62}\s*\.\s*(?:com|net|org)\s*\.\s*br\b"),
 )
 
-_PIX = re.compile(r"\bpix\b")
+# "pix" seguido de LETRA é outra palavra ("pixel"); seguido de dígito é o
+# PIX copia e cola (EMV do Banco Central: "br.gov.bcb.pix0136<chave>…"), que
+# o `\b` deixava passar (revisão da Onda 2 do Zap, 26/10/2026). O
+# identificador do arranjo também vale sozinho.
+_PIX = re.compile(r"\bpix(?![a-z])|br\.gov\.bcb\.pix")
 _BANCO = (
     re.compile(r"\b(?:dados|conta|transferencia)\s+bancari[ao]s?\b|\bagencia\s+e\s+conta\b"),
     # "transfere pra minha conta", "deposita na conta" — mas não o estorno
@@ -640,6 +670,154 @@ _DOCUMENTO_MAGALU = (
 )
 
 
+# Zap (26/10/2026, docs/zap/desenho.md §7): o que a política do WhatsApp
+# proíbe pedir ou mandar, para PESSOA e IA, só no Zap. Casa sobre o plano.
+# É o `_DADO_SENSIVEL_ZAP` do desenho, partido em quatro (um motivo cada,
+# para a pessoa saber o que tirar): `_tem_cartao`, `_CONTA_BANCARIA_ZAP`,
+# `_DOCUMENTO_ZAP` e `_PEDE_ZAP` — mais o PIX, que no Zap tem a frase própria
+# (`_MOTIVO_ZAP_PIX`: bloqueado "por enquanto", decisão do Eduardo).
+#
+# Cartão: 13 a 19 dígitos seguidos ou em grupos (espaço, ponto, hífen), com
+# a cara de cartão — o começo E o tamanho da bandeira — E o dígito
+# verificador (Luhn). A cara e o Luhn juntos tiram o número de pedido (ML
+# "2000…", Amazon "702-…"); o tamanho tira o telefone com DDI ("+55 11
+# 98888-7777" = 13 dígitos começando por 55: Mastercard tem 16), que no Zap
+# é liberado. O número inteiro: um pedaço de um número maior (a chave da NF,
+# 44 dígitos, em grupos de 4) não conta — nem dígito colado, nem grupo
+# continuando depois de um espaço/ponto/hífen.
+_CARTAO_CANDIDATO = re.compile(
+    r"(?<![\d.,/-])(?<!\d[ .-])\d(?:[ .-]?\d){12,18}(?![ .-]?\d)(?![/-])"
+)
+# (começo, tamanhos) de cada bandeira aceita no Brasil.
+_BANDEIRAS_CARTAO: tuple[tuple[re.Pattern[str], tuple[int, ...]], ...] = (
+    (re.compile(r"^4"), (13, 16, 19)),  # Visa (e o Elo 4011/4312/4389/4514/4576)
+    # Mastercard (51–55, 2221–2720); Elo/Aura 50…
+    (re.compile(r"^(?:5[0-5]|2(?:2[2-9]|[3-6]\d|7[01]|720))"), (16, 19)),
+    (re.compile(r"^3[47]"), (15,)),  # Amex
+    (re.compile(r"^3[068]"), (14, 16, 19)),  # Diners; Hipercard 38…
+    (re.compile(r"^35"), (16, 17, 18, 19)),  # JCB
+    (re.compile(r"^6"), (16, 17, 18, 19)),  # Discover, Elo 6…, Hipercard 606282
+)
+# Agência e conta: "ag 1234", "agência: 0001-9", "c/c 12345-6", "conta
+# corrente 98765-0", "conta poupança", "cc 12345". A palavra "conta" sozinha
+# (a conta da loja, a conta do pedido) só com 4+ dígitos logo depois.
+_CONTA_BANCARIA_ZAP = (
+    re.compile(r"\bag(?:encia|\.)?\s*(?:n[o°º]?\.?\s*)?[:#]?\s*\d{3,5}(?:\s*-\s*[\dx])?\b"),
+    re.compile(
+        r"(?:\bc/c|\bcc\b|\bconta(?:\s+(?:corrente|poupanca|salario))?)\.?\s*"
+        r"(?:n[o°º]?\.?\s*)?[:#]?\s*\d{4,13}(?:\s*-\s*[\dx])?\b"
+    ),
+    re.compile(r"\bconta\s+(?:corrente|poupanca|salario)\b"),
+    # A ordem inversa do "agência e conta" do `_BANCO` (revisão, 26/10/2026).
+    re.compile(r"\bconta\s+e\s+agencia\b"),
+)
+# O número de documento escrito: CPF formatado, ou dígitos logo depois da
+# palavra ("CPF 123.456.789-09", "rg: 12.345.678-9").
+_DOCUMENTO_ZAP = (
+    re.compile(r"(?<![\w/.-])\d{3}\.\d{3}\.\d{3}-\d{2}(?![\w/-])"),
+    re.compile(r"\b(?:cpf|rg|cnh|identidade)\b[^\d\n]{0,8}\d[\d./ -]{5,17}[\dx]"),
+)
+# O link INTEIRO (com o caminho), só para limpar o plano do Zap: lá o link
+# é liberado, e o `_apagar(_LINK)` tira só o "www."/"https://" — sem isto
+# "www.loja.com.br/pix-desconto" viraria um falso PIX pelo caminho.
+_URL_INTEIRA_ZAP = (
+    re.compile(r"(?:\bhttps?\s*:\s*/\s*/|\bwww\s*\.)\S*"),
+    re.compile(
+        r"\b[a-z0-9][a-z0-9-]{1,62}\.(?:com|net|org|br|io|me|ly|app|shop|store|site"
+        r"|online|info|biz|co|link|xyz|tv|gg)(?:\.[a-z]{2})?/\S*"
+    ),
+)
+# PEDIR cartão, CPF ou RG: o verbo de pedir antes (até 3 palavras), "qual
+# o seu CPF", "foto do RG", "número/dados do cartão". "Nunca pedimos o
+# número do cartão" passa ("pedimos" não está na lista: é aviso, não pedido).
+_VERBO_PEDE = (
+    r"(?:inform|envi|mand|pass|confirm|digit|forne[cç]|preciso\s+d|precisamos\s+d"
+    r"|precisa\s+d|poderia\s+(?:me\s+)?(?:inform|envi|mand|pass)|me\s+(?:diga|diz|fala|fale))"
+)
+_PEDE_ZAP = (
+    re.compile(rf"\b{_VERBO_PEDE}\w*\s+(?:\w+\s+){{0,3}}?(?:cpf|rg|cnh|identidade)\b"),
+    re.compile(
+        r"\bqual\s+(?:e\s+|eh\s+)?(?:o\s+|a\s+)?(?:seu\s+|sua\s+)?"
+        r"(?:cpf|rg|cnh|identidade|numero\s+do\s+(?:seu\s+)?cartao)\b"
+    ),
+    re.compile(
+        rf"\b(?:{_VERBO_PEDE}\w*|qual)\s+(?:\w+\s+){{0,3}}?(?:numeros?|numeracao|dados|digitos"
+        r"|cvv|codigo\s+de\s+seguranca|foto|frente|verso|validade)\s+d[oe]\s+(?:seu\s+|sua\s+)?"
+        r"cartao\b"
+    ),
+    # "me passa o cartão de crédito", "envie seu cartão": o artigo/possessivo
+    # E (sem o "seu") o "de crédito/débito". "Passa NO cartão de crédito" (a
+    # forma de pagar, na venda) e "mando o cartão junto com o presente" (o
+    # cartãozinho da loja de festa) não são pedido do número.
+    re.compile(
+        rf"\b{_VERBO_PEDE}\w*\s+(?:me\s+|pra\s+mim\s+|para\s+mim\s+)?"
+        r"(?:(?:o\s+|os\s+dados\s+do\s+)(?:seu\s+)?cartao\s+(?:de\s+)?(?:credito|debito)"
+        r"|seu\s+cartao)\b"
+    ),
+    re.compile(
+        r"\bfoto\s+d[oa]\s+(?:seu\s+|sua\s+)?(?:rg|cpf|cnh|identidade|documento|cartao)\b"
+    ),
+    re.compile(r"\b(?:cvv|cvc)\b"),
+)
+# PEDIR o número da CONTA (financeira): "manda o número da sua conta", "me
+# fala o número da sua conta e agência" (revisão, 26/10/2026) — o motivo é o
+# da conta bancária. "Os dados da sua conta no site/app" (o cadastro na loja)
+# não é conta bancária.
+_PEDE_CONTA_ZAP = re.compile(
+    rf"\b(?:{_VERBO_PEDE}\w*|qual)\s+(?:\w+\s+){{0,3}}?(?:numeros?|numeracao|dados)\s+"
+    r"d[ae]\s+(?:sua\s+)?(?:conta|agencia)\b"
+    r"(?!\s+(?:n[oa]|d[oa])\s+(?:site|app|aplicativo|loja|cadastro|shopee|mercado|amazon"
+    r"|tiktok|magalu))"
+)
+# Documento no Zap: FALHA FECHADO (decisão do Eduardo, 26/10/2026: não se pede
+# CPF pelo Zap; §7 do desenho). O pedido nem sempre tem verbo ("CPF?", "Seu
+# CPF, por favor", "Nome completo e CPF") nem vem colado nele ("Pode me
+# enviar nome completo, CPF e endereço?"): QUALQUER menção a CPF/RG/CNH/
+# identidade barra. Fica de fora só a negação explícita ("não precisamos do
+# seu CPF", "nunca pedimos CPF nem RG") — com os verbos de pedir/precisar e
+# só artigo/possessivo no meio, para "não esquece de mandar o CPF" (que é
+# pedido) continuar barrado. CNPJ (o da loja) não entra; "identidade
+# visual" (a da festa) também não.
+_DOC_ZAP = r"(?:cpf|rg|cnh|identidade(?!\s+visual))"
+_MENCIONA_DOCUMENTO_ZAP = re.compile(rf"\b{_DOC_ZAP}\b")
+_NEGA_DOCUMENTO_ZAP = re.compile(
+    r"\b(?:nao|nunca|jamais)\s+(?:(?:e|eh|sera|vai\s+ser)\s+)?"
+    r"(?:precis\w*|ped\w*|solicit\w*|exig\w*|necessari\w*|preciso)\s+"
+    r"(?:(?:d[eoa]s?|o|a|os|as|seu|sua|seus|suas|nenhum|nenhuma|informar|enviar|mandar"
+    r"|passar)\s+){0,3}"
+    rf"{_DOC_ZAP}(?:\s*(?:,|\be\b|\bnem\b|\bou\b)\s*(?:(?:o|a|seu|sua)\s+)?{_DOC_ZAP})*\b"
+)
+
+
+def _luhn(digitos: str) -> bool:
+    soma = 0
+    for i, ch in enumerate(reversed(digitos)):
+        n = int(ch)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        soma += n
+    return soma % 10 == 0
+
+
+def _tem_cartao(plano: str) -> bool:
+    """Um número de cartão no texto (13–19 dígitos, cara de cartão e Luhn)? PURA."""
+    for m in _CARTAO_CANDIDATO.finditer(plano):
+        digitos = re.sub(r"\D", "", m.group(0))
+        tamanho_ok = any(
+            p.match(digitos) and len(digitos) in tamanhos for p, tamanhos in _BANDEIRAS_CARTAO
+        )
+        if tamanho_ok and _luhn(digitos):
+            return True
+    return False
+
+
+def e_zap(plataforma: str | None, canal: str | None) -> bool:
+    """A conversa é do Zap do número (o canal da marca, não o de marketplace)? PURA."""
+    return plataforma == PLATAFORMA_WHATSAPP and canal == CANAL_ZAP
+
+
 # ── Validação ─────────────────────────────────────────────────────────────
 
 
@@ -698,30 +876,63 @@ def validar(
         motivos.append(f"passa do limite de {limite} caracteres ({len(limpo)})")
 
     plano = plano_de(limpo)
+    # Zap (26/10/2026): o canal da própria marca — o contato não é "fora da loja".
+    zap = e_zap(plataforma, canal)
+
+    # Zap: o número de cartão, ANTES de o telefone sair do texto (no Zap ele
+    # não é motivo, mas os dígitos são os mesmos).
+    if zap and _tem_cartao(plano):
+        motivos.append(_MOTIVO_ZAP_CARTAO)
 
     # Contato fora da loja. A ordem importa: o que casou sai do texto antes
-    # da regra seguinte (e-mail não vira também link e @perfil).
+    # da regra seguinte (e-mail não vira também link e @perfil). No Zap os
+    # `_apagar` continuam (um link com "pix" no caminho não vira falso PIX),
+    # mas nada disso vira motivo.
     if _algum(_EMAIL, plano):
-        motivos.append(_MOTIVO_EMAIL)
+        if not zap:
+            motivos.append(_MOTIVO_EMAIL)
         plano = _apagar(_EMAIL, plano)
     if _algum(_WHATSAPP, plano):
-        motivos.append(_MOTIVO_WHATSAPP)
+        if not zap:
+            motivos.append(_MOTIVO_WHATSAPP)
         plano = _apagar(_WHATSAPP, plano)
+    if zap:
+        # O link inteiro sai antes (o caminho não vira PIX nem documento).
+        plano = _apagar(_URL_INTEIRA_ZAP, plano)
     if _algum(_LINK, plano):
-        motivos.append(_MOTIVO_LINK)
+        if not zap:
+            motivos.append(_MOTIVO_LINK)
         plano = _apagar(_LINK, plano)
-    if _algum(_TELEFONE, plano):
-        motivos.append(_MOTIVO_TELEFONE)
-    if _PERFIL.search(plano):
-        motivos.append(_MOTIVO_PERFIL)
-    if _algum(_REDE_SOCIAL, plano):
-        motivos.append(_MOTIVO_REDE)
+    if not zap:
+        if _algum(_TELEFONE, plano):
+            motivos.append(_MOTIVO_TELEFONE)
+        if _PERFIL.search(plano):
+            motivos.append(_MOTIVO_PERFIL)
+        if _algum(_REDE_SOCIAL, plano):
+            motivos.append(_MOTIVO_REDE)
     if _PIX.search(plano):
-        motivos.append(_MOTIVO_PIX)
+        # No Zap a frase é a da decisão (bloqueado "por enquanto"), não a do
+        # marketplace ("fora da plataforma").
+        motivos.append(_MOTIVO_ZAP_PIX if zap else _MOTIVO_PIX)
     if _algum(_BANCO, plano):
-        motivos.append(_MOTIVO_BANCO)
+        motivos.append(_MOTIVO_ZAP_CONTA if zap else _MOTIVO_BANCO)
     if _FORA_DA_PLATAFORMA.search(plano) or _algum(_POR_FORA, plano):
         motivos.append(_MOTIVO_POR_FORA)
+    if zap:
+        # A política do WhatsApp (pessoa e IA): conta, documento, pedido.
+        if _algum(_CONTA_BANCARIA_ZAP, plano) or _PEDE_CONTA_ZAP.search(plano):
+            motivos.append(_MOTIVO_ZAP_CONTA)
+        tem_documento = bool(_algum(_DOCUMENTO_ZAP, plano))
+        if tem_documento:
+            motivos.append(_MOTIVO_ZAP_DOCUMENTO)
+        # A negação explícita sai antes ("não precisamos do seu CPF" não é
+        # pedido); o resto que fala de documento barra (falha fechado). Com o
+        # número escrito, o motivo do número já diz o que tirar.
+        sem_negacao = _NEGA_DOCUMENTO_ZAP.sub(" ", plano)
+        if _algum(_PEDE_ZAP, sem_negacao) or (
+            not tem_documento and _MENCIONA_DOCUMENTO_ZAP.search(sem_negacao)
+        ):
+            motivos.append(_MOTIVO_ZAP_PEDE)
 
     # Regras da plataforma.
     if plataforma == "ml":

@@ -1208,6 +1208,12 @@ E com você: **quem guarda o chip** de cada número? O código de confirmação 
 - O preço exato no Brasil e as 1.000 respostas grátis por número (a página de preços diverge do FAQ).
 - Se existe caixa de entrada da Meta para número na Cloud API, para o plano de volta atrás.
 - Como o Duoke conecta cada número (§13.2). Não há documentação pública da integração de WhatsApp do Duoke.
+- Revisão da Onda 2 (26/10/2026), a confirmar no ensaio do §11.5 ou depois:
+  - Qual `pricing.type` a Meta manda nas respostas **dentro** das 1.000 grátis (`free_customer_service` ou `regular` com `billable=false`). O contador "N de 1.000" já conta toda resposta de atendimento (`category=service`, qualquer `type`), e o alerta sai em 800 e 1.000.
+  - Que códigos a Meta devolve no "marcar como lida" para um `message_id` que ela nunca vai aceitar. Hoje 100 e 131009 gravam o wamid como tratado, e a abertura seguinte não repete a chamada.
+  - O tique azul só é validado de verdade na **Onda 4b**: sem túnel, o wamid real do "oi" que sai do celular não chega ao localhost, e o "oi" simulado (`wamid.LOCAL…`) não vai à Meta.
+  - O 133016 (registro travado por 72 h) não segura o aviso na barra na Onda 2: ele só vem do "registrar" (Onda 4), que lê `saude.registro_travado`.
+- Decidido em 26/10/2026 (não é mais pergunta): **não se pede CPF pelo Zap**. O validador falha fechado: qualquer menção a CPF, RG, CNH ou identidade barra (pessoa e IA), menos a negação explícita ("não precisamos do seu CPF").
 
 ---
 

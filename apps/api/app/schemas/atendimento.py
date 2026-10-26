@@ -329,6 +329,15 @@ class MensagemOut(BaseModel):
     # como `sistema` (não abre a vez na fila), mas é gente — a tela desenha o
     # balão dele à esquerda, com "Afiliado · <nome>" (`autor_nome`).
     do_afiliado: bool = False
+    # Zap (26/10/2026, Onda 2 — docs/zap/desenho.md §5.6 item 7): os tiques da
+    # nossa resposta. `entrega` = o maior status que a Meta mandou pelo webhook
+    # (`payload.zap.entrega`: sent · delivered · read · played · failed);
+    # `entrega_erro` = a frase do erro da Meta (`zap_erros`), para o balão
+    # que não saiu; `retida_pela_meta` = o envio voltou
+    # `held_for_quality_assessment` (`payload.envio.zap.message_status`).
+    entrega: str | None = None
+    entrega_erro: str | None = None
+    retida_pela_meta: bool = False
 
 
 class AcaoPessoaOut(BaseModel):

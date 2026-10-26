@@ -167,6 +167,8 @@ assert.match(schemas, /class ConversaResumoOut\(BaseModel\):[\s\S]*?eh_pergunta:
 // Rede social em Humano (responder/ocultar EM PÚBLICO como a marca): só admin.
 const canais = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoCanais.vue'), 'utf8')
 assert.match(canais, /:disabled="soAdmin\(c, m\.value\)"/)
-assert.match(canais, /modo === 'auto' \|\| \(!!c\.externo_ref && REDES\.includes\(c\.plataforma\) && modo === 'humano'\)/)
+// (26/10/2026: o Zap entra na mesma lista — Onda 2 de docs/zap/desenho.md.)
+assert.match(canais, /const HUMANO_SO_ADMIN = \[\.\.\.REDES, 'whatsapp'\]/)
+assert.match(canais, /modo === 'auto' \|\| \(!!c\.externo_ref && HUMANO_SO_ADMIN\.includes\(c\.plataforma\) && modo === 'humano'\)/)
 
 console.log('ok — atendimento-publicacao')

@@ -1,11 +1,15 @@
 # ruff: noqa: S105, S106  (segredos de teste, nada real)
-"""Apoio dos testes do Zap (WhatsApp Cloud API, RF10, Onda 1).
+"""Apoio dos testes do Zap (WhatsApp Cloud API, RF10, Ondas 1 e 2).
 
 Nada aqui fala com a Meta: o app, a WABA e o número são INVENTADOS, o Redis é
 um falso em memória (o Redis de verdade é compartilhado entre os agentes que
 rodam testes ao mesmo tempo) e a fila do arq é um falso que anota o job.
 Os corpos vêm das fixtures `tests/fixtures/whatsapp/*.json` (o formato real da
 Meta), pelo mesmo `montar_corpo` do script local.
+
+Onda 2 (26/10/2026): a Graph API de mentira (`GraphFalso`, fixture `graph`) e
+o caminho feliz do envio com tudo ligado (fixture `envio`), usados pelos
+testes do envio e dos status.
 """
 
 from __future__ import annotations
@@ -13,27 +17,29 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.db as _db
 from app.config import get_settings
 from app.main import app as app_fastapi
 from app.models import (
+    AtendimentoCanal,
+    AtendimentoConversa,
     AtendimentoZapApp,
     AtendimentoZapConta,
     AtendimentoZapEvento,
     AtendimentoZapNumero,
 )
 from app.routers import webhooks, whatsapp_webhook
-from app.services.atendimento import canais_externos, zap_contas, zap_entrada
+from app.services.atendimento import canais_externos, zap_api, zap_contas, zap_entrada
 from scripts.atendimento_zap_local import montar_corpo
 
 API_URL = "https://api.davinci.test"
@@ -46,7 +52,12 @@ DISPLAY = "+55 11 90000-0000"
 WA_ID = "5511987654321"
 NOME = "Ana Fictícia"
 URL = f"/api/webhooks/meta/whatsapp/{APP_ID}"
-T0 = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+# O relógio das mensagens de mentira: UMA HORA ATRÁS, em segundos inteiros (o
+# `timestamp` da Meta é em segundos). Era fixo (19/10/2026 12:00) e virou
+# bomba-relógio: o "Falta responder" só conta o turno dos últimos 7 dias
+# (`pendente.turno_recente`, 26/10/2026) e a janela de 24 h do envio (Onda 2)
+# é medida contra o relógio de agora.
+T0 = (datetime.now(UTC) - timedelta(hours=1)).replace(microsecond=0)
 
 
 class RedisFalso:
@@ -85,6 +96,66 @@ class RedisFalso:
             self.dados.pop(chave, None)
             return 1
         return 0
+
+
+class GraphFalso:
+    """A Graph API de MENTIRA (`httpx.MockTransport`): nenhum teste fala com a Meta.
+
+    `quando(metodo, caminho, resposta)`: a resposta é um dict (200), um
+    `(status, corpo)`, um `httpx.Response`, uma exceção (levantada) ou uma
+    função `request → …`. A chamada não prevista REPROVA. O `POST
+    /{pnid}/messages` já nasce respondendo com um wamid novo a cada envio
+    (`wamid.OUT1`, `wamid.OUT2`…) — o caminho feliz do envio (Onda 2).
+    """
+
+    def __init__(self, versao: str = "v26.0", pnid: str = "930000000000001") -> None:
+        self.versao = versao
+        self.rotas: dict[tuple[str, str], Any] = {}
+        self.chamadas: list[Any] = []
+        self.enviados = 0
+        self.quando("POST", f"/{versao}/{pnid}/messages", self._ok)
+
+    def _ok(self, request) -> dict:
+        corpo = json.loads(request.content or b"{}")
+        if corpo.get("status") == "read":
+            return {"success": True}
+        self.enviados += 1
+        return {
+            "messaging_product": "whatsapp",
+            "contacts": [{"input": corpo.get("to"), "wa_id": corpo.get("to")}],
+            "messages": [{"id": f"wamid.OUT{self.enviados}", "message_status": "accepted"}],
+        }
+
+    def quando(self, metodo: str, caminho: str, resposta: Any) -> None:
+        self.rotas[(metodo, caminho)] = resposta
+
+    def mensagens(self, pnid: str = "930000000000001", resposta: Any = None) -> None:
+        """Troca a resposta do `POST /{pnid}/messages` (None = o caminho feliz)."""
+        self.quando("POST", f"/{self.versao}/{pnid}/messages", resposta or self._ok)
+
+    def handler(self, request):
+        import httpx
+
+        self.chamadas.append(request)
+        resposta = self.rotas.get((request.method, request.url.path))
+        if resposta is None:
+            raise AssertionError(f"chamada não prevista: {request.method} {request.url.path}")
+        if isinstance(resposta, Exception):
+            raise resposta
+        if callable(resposta):
+            resposta = resposta(request)
+        if isinstance(resposta, httpx.Response):
+            return resposta
+        status, corpo = resposta if isinstance(resposta, tuple) else (200, resposta)
+        return httpx.Response(status, json=corpo)
+
+    def cliente(self):
+        import httpx
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+
+    def corpos(self) -> list[dict]:
+        return [json.loads(r.content or b"{}") for r in self.chamadas if r.method == "POST"]
 
 
 class PoolFalso:
@@ -242,4 +313,67 @@ async def eventos(db: AsyncSession) -> list[AtendimentoZapEvento]:
         )
         .scalars()
         .all()
+    )
+
+
+# ── Onda 2: o envio com tudo ligado ───────────────────────────────────────
+
+
+@pytest.fixture
+def graph(monkeypatch):
+    """A Graph API de mentira no lugar do cliente HTTP do `zap_api`."""
+    g = GraphFalso()
+    monkeypatch.setattr(zap_api, "novo_cliente", g.cliente)
+    monkeypatch.setattr(get_settings(), "meta_whatsapp_graph_version", "v26.0")
+    return g
+
+
+async def conversa_do_numero(db: AsyncSession, pnid: str = PNID) -> AtendimentoConversa:
+    """A (única) conversa do número, RELIDA."""
+    canal = (
+        await db.execute(
+            select(AtendimentoCanal).where(
+                AtendimentoCanal.externo_ref == canais_externos.ref_do_zap(pnid)
+            )
+        )
+    ).scalar_one()
+    return (
+        await db.execute(
+            select(AtendimentoConversa)
+            .where(AtendimentoConversa.canal_id == canal.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+@pytest_asyncio.fixture
+async def envio(db, zap, graph, monkeypatch):
+    """O caminho feliz, com TUDO ligado: as chaves, a lista de teste (o
+    celular do cliente), o número (`envio_ligado`, etapa `teste`) e o canal em
+    `humano`; o cliente mandou "oi" há 1 h (janela aberta)."""
+    s = zap.settings
+    monkeypatch.setattr(s, "atendimento_envio_ativo", True)
+    monkeypatch.setattr(s, "atendimento_zap_envio_ativo", True)
+    monkeypatch.setattr(s, "atendimento_zap_destinos_teste", WA_ID)
+    monkeypatch.setattr(s, "atendimento_simulador", False)
+    monkeypatch.setattr(s, "atendimento_simulador_exceto", "")
+    monkeypatch.setattr(s, "atendimento_zap_max_contato_10min", 8)
+    monkeypatch.setattr(s, "atendimento_zap_max_dia_numero", 300)
+    app, conta, numero = await cadastrar(db)
+    await gravar_corpo(corpo("texto", wamid="wamid.OI"), app=app)
+    assert (await processar())["processados"] == 1
+    await db.execute(
+        update(AtendimentoZapNumero)
+        .where(AtendimentoZapNumero.id == numero.id)
+        .values(envio_ligado=True)
+    )
+    await db.execute(
+        update(AtendimentoCanal)
+        .where(AtendimentoCanal.externo_ref == canais_externos.ref_do_zap(PNID))
+        .values(modo="humano")
+    )
+    await db.commit()
+    conversa = await conversa_do_numero(db)
+    return SimpleNamespace(
+        app=app, conta=conta, numero=numero, conversa=conversa, graph=graph, settings=s
     )

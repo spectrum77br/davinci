@@ -20,11 +20,28 @@ Mensagem para comprador não se desenvia; por isso a ordem abaixo é rígida:
   `_destino` com ela é recusado ali. A resposta `enviando` com o job VIVO
   na fila (`responder.fila_viva_existe`) não é "envio preso".
 
+  ZAP (26/10/2026, Onda 2 de docs/zap/desenho.md): a conversa do número de
+  WhatsApp (`canal='zap'` E `plataforma='whatsapp'`) desvia no `_destino`
+  para `_destino_zap` — logo depois da ponte do e-mail e ANTES da régua
+  `motivo_canal_sem_envio` —, que confere as 14 travas do §6.3 na ordem
+  (só pessoa; simulador e freio único; a chave do Zap; conversa bloqueada;
+  canal e número relidos; o botão "pausar" do número; o modo; a credencial;
+  o contato; a lista de teste; a janela de 24 h; o laço; o teto do dia) e
+  devolve o `_Destino` com o `zap.ZapDestino` (sem integração). Daí em
+  diante é o caminho de sempre: a linha em voo, `_chamar_plataforma` (que
+  chama `zap.enviar_texto` em vez do adaptador do marketplace) e a régua de
+  resultado; o efeito de um erro da Meta (pausar o número, marcar o token,
+  fechar a janela) é aplicado DEPOIS, numa transação curta
+  (`zap.depois_do_envio`). O Zap NÃO entra em `ADAPTADORES`: a automática e
+  a foto nunca o pegam. O Zap no formato antigo (com a plataforma da venda)
+  continua recusado pela régua (premissa P2).
+
   1. TRAVAS (`EnvioRecusado`, nada vai à plataforma):
        canal_sem_envio     — e-mail do Tuta ou Zap (05/10/2026): o envio deles
                              ainda não existe no DaVinci, e sem esta trava
                              cairiam no adaptador do marketplace da venda
-                             (`constantes.motivo_canal_sem_envio`);
+                             (`constantes.motivo_canal_sem_envio`). No Zap do
+                             número (Onda 2), a IA e a automática (só pessoa);
        somente_leitura     — plataforma sem adaptador de envio (Instagram) ou
                              lida pelo robô do Mac mini (Temu, AliExpress:
                              "responda no Seller Center");
@@ -146,6 +163,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import is_unique_violation
+from app.historico.contexto import DESMARCAR_TRANSACAO
 from app.models import (
     AtendimentoAutomacaoRegra,
     AtendimentoAvaliacao,
@@ -153,18 +171,29 @@ from app.models import (
     AtendimentoConversa,
     AtendimentoMensagem,
     AtendimentoRascunho,
+    AtendimentoZapNumero,
     Integration,
     User,
+    UserRole,
 )
-from app.services.atendimento import agente_config, clientes, gravar
+from app.services.atendimento import (
+    agente_config,
+    canais_externos,
+    clientes,
+    gravar,
+    zap,
+    zap_erros,
+)
 from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AVALIACAO_OBSERVOU,
     CANAL_AVALIACAO,
+    CANAL_ZAP,
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
     MODO_AUTO,
     MODOS_QUE_ENVIAM,
+    MOTIVO_ZAP_SO_PESSOA,
     MSG_ENVIADA,
     MSG_ENVIANDO,
     MSG_FALHOU,
@@ -175,6 +204,7 @@ from app.services.atendimento.constantes import (
     ORIGEM_IA,
     ORIGENS_DAVINCI,
     PLATAFORMA_SITE,
+    PLATAFORMA_WHATSAPP,
     PLATAFORMAS_REDE,
     PLATAFORMAS_RESPONDEM_AVALIACAO,
     PLATAFORMAS_ROBO,
@@ -259,6 +289,49 @@ RECUSAS_TEMPORARIAS = ("conversa_ocupada", "envio_em_andamento")
 # resposta da loja (de fora ou do DaVinci) — a mesma recusa da rota
 # POST /avaliacoes/{id}/responder, para a caixa de baixo não responder duas vezes.
 RECUSA_AVALIACAO_JA_RESPONDIDA = "ja_respondida"
+
+# Zap (26/10/2026, Onda 2 — docs/zap/desenho.md §6.3): os códigos e as
+# frases das travas próprias do número de WhatsApp. A tela traduz pelo
+# código (`ERROS` de AtendimentoPlataforma.vue); a frase vai no `detail`.
+RECUSA_ZAP_ENVIO_DESLIGADO = "zap_envio_desligado"
+RECUSA_ZAP_NUMERO_PAUSADO = "zap_numero_pausado"
+RECUSA_ZAP_SEM_CREDENCIAL = "zap_sem_credencial"
+RECUSA_ZAP_CONTATO_BLOQUEADO = "zap_contato_bloqueado"
+RECUSA_ZAP_CONTATO_SEM_TELEFONE = "zap_contato_sem_telefone"
+RECUSA_ZAP_FORA_DOS_TESTES = "zap_fora_dos_testes"
+RECUSA_FORA_DA_JANELA = "fora_da_janela"
+RECUSA_ZAP_LACO = "zap_laco"
+RECUSA_ZAP_TETO_DIA = "zap_teto_dia"
+# Só administrador vê e responde o Zap (decisão do Eduardo, 26/10/2026). A
+# rota já esconde a conversa de quem não é admin (404); isto é o cinto no
+# caminho único, para qualquer outro caminho que chegue com uma pessoa.
+RECUSA_ZAP_SO_ADMIN = "zap_so_admin"
+MOTIVO_ZAP_ENVIO_DESLIGADO = "Zap: o envio pelo DaVinci está desligado. Responda pelo Duoke."
+MOTIVO_ZAP_SEM_NUMERO = "Este número de WhatsApp não está mais cadastrado no DaVinci."
+MOTIVO_ZAP_NUMERO_PAUSADO = (
+    "Este número está pausado no DaVinci (Lojas e modo → Números do WhatsApp)."
+)
+MOTIVO_ZAP_EM_OBSERVACAO = "Este número está em observar: quem responde é o Duoke."
+MOTIVO_ZAP_SEM_CREDENCIAL = (
+    "A conexão com a Meta deste número caiu. Peça ao administrador um token novo."
+)
+MOTIVO_ZAP_CONTATO_BLOQUEADO = "Este contato está bloqueado no DaVinci."
+# O cliente só com o identificador da Meta (BSUID, sem telefone): o envio
+# pelo campo `recipient` ainda não foi confirmado [confirmar — §14.3].
+MOTIVO_ZAP_CONTATO_SEM_TELEFONE = (
+    "Este cliente aparece no WhatsApp sem telefone (só o identificador da Meta): "
+    "o DaVinci ainda não responde por ele. Responda pelo Duoke."
+)
+MOTIVO_ZAP_FORA_DOS_TESTES = "Modo teste: só os números de teste recebem."
+MOTIVO_FORA_DA_JANELA = (
+    "Passaram 24 h desde a última mensagem do cliente. O WhatsApp só deixa mandar "
+    "um modelo aprovado."
+)
+MOTIVO_ZAP_LACO = "Muitas mensagens seguidas para este cliente. Espere alguns minutos."
+MOTIVO_ZAP_TETO_DIA = (
+    "Este número já mandou o máximo de mensagens de hoje. Fale com o administrador."
+)
+MOTIVO_ZAP_SO_ADMIN = "No Zap (WhatsApp) só administrador responde."
 
 # Temu/AliExpress (lidas pelo robô do Mac mini): nada sai pelo DaVinci.
 _NOME_SELLER_CENTER = {"temu": "Temu", "aliexpress": "AliExpress"}
@@ -372,10 +445,16 @@ def campanha_por_auto_reply() -> bool:
 
 @dataclass
 class _Destino:
-    """Por onde a resposta sai: o canal (modo) e a loja (credenciais)."""
+    """Por onde a resposta sai: o canal (modo) e a loja (credenciais).
+
+    Zap (26/10/2026): sem loja (`integration=None`) e com o `zap` — o número,
+    a conta, o contato e o token decifrado só na memória (`zap.ZapDestino`,
+    com o token fora do `repr`).
+    """
 
     canal: AtendimentoCanal
-    integration: Integration
+    integration: Integration | None
+    zap: zap.ZapDestino | None = None
 
 
 # ── Travas ────────────────────────────────────────────────────────────────
@@ -405,6 +484,11 @@ async def _destino(
         # (`enviar_resposta` → `responder.enfileirar_resposta`). Quem chega
         # aqui com ele (foto, automática, um caminho novo) é recusado.
         raise EnvioRecusado(RECUSA_CANAL_SEM_ENVIO, MOTIVO_EMAIL_SO_RESPOSTA)
+    if conversa.canal == CANAL_ZAP and conversa.plataforma == PLATAFORMA_WHATSAPP:
+        # Zap do número (26/10/2026, Onda 2): as travas do §6.3, na ordem. A
+        # decisão é pelo canal E pela plataforma — o Zap no formato antigo
+        # (com a plataforma da venda) cai na régua abaixo e segue recusado.
+        return await _destino_zap(session, conversa, origem=origem)
     motivo_sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
     if motivo_sem_envio:
         # E-mail do Tuta e Zap (05/10/2026): a PRIMEIRA trava, antes até do
@@ -431,22 +515,7 @@ async def _destino(
             "Esta conversa é só de leitura aqui: responda pela própria plataforma.",
         )
     settings = get_settings()
-    if settings.atendimento_simulador and settings.is_prod:
-        # O simulador finge que saiu. Em produção isso é a conversa sair da
-        # fila com o comprador sem resposta — recusa, e alto no log.
-        logger.error("atendimento_simulador_em_producao", conversa_id=str(conversa.id))
-        raise EnvioRecusado(
-            RECUSA_SIMULADOR_EM_PRODUCAO,
-            "O simulador de envio (só para teste local) está ligado em produção: "
-            "nada foi enviado. Desligue ATENDIMENTO_SIMULADOR.",
-        )
-    if not settings.atendimento_envio_ativo:
-        raise EnvioRecusado(
-            RECUSA_ENVIO_DESLIGADO,
-            MOTIVO_AVALIACAO_ENVIO_DESLIGADO
-            if conversa.canal == CANAL_AVALIACAO
-            else "O envio pelo DaVinci está desligado (ATENDIMENTO_ENVIO_ATIVO).",
-        )
+    _travas_do_sistema(settings, conversa)
     if conversa.situacao == CONVERSA_BLOQUEADA:
         raise EnvioRecusado(
             RECUSA_CONVERSA_BLOQUEADA,
@@ -516,6 +585,134 @@ async def _destino(
                 "A triagem da Caixa Humano exige uma pessoa nesta conversa.",
             )
     return _Destino(canal=canal, integration=integration)
+
+
+def _travas_do_sistema(settings: Any, conversa: AtendimentoConversa) -> None:
+    """As travas do SISTEMA, as mesmas para todo canal: o simulador ligado em
+    produção e o freio único (`atendimento_envio_ativo`). Levanta `EnvioRecusado`.
+
+    Movidas do `_destino` (26/10/2026) sem mudar nada, para o `_destino_zap`
+    chamar as mesmas, na mesma ordem.
+    """
+    if settings.atendimento_simulador and settings.is_prod:
+        # O simulador finge que saiu. Em produção isso é a conversa sair da
+        # fila com o comprador sem resposta — recusa, e alto no log.
+        logger.error("atendimento_simulador_em_producao", conversa_id=str(conversa.id))
+        raise EnvioRecusado(
+            RECUSA_SIMULADOR_EM_PRODUCAO,
+            "O simulador de envio (só para teste local) está ligado em produção: "
+            "nada foi enviado. Desligue ATENDIMENTO_SIMULADOR.",
+        )
+    if not settings.atendimento_envio_ativo:
+        raise EnvioRecusado(
+            RECUSA_ENVIO_DESLIGADO,
+            MOTIVO_AVALIACAO_ENVIO_DESLIGADO
+            if conversa.canal == CANAL_AVALIACAO
+            else "O envio pelo DaVinci está desligado (ATENDIMENTO_ENVIO_ATIVO).",
+        )
+
+
+def _motivo_numero_pausado(numero: AtendimentoZapNumero) -> str:
+    """A frase da trava 7: quem pausou foi a META (pagamento, restrição) ou o DaVinci.
+
+    Revisão de 26/10/2026: o número pausado pelo efeito da Meta dizia "pausado
+    no DaVinci" — a pessoa ia procurar quem pausou, e a causa (pagar a conta
+    Meta, a restrição) não aparecia.
+    """
+    saude = numero.saude or {}
+    pausa = saude.get("pausado_pela_meta")
+    if isinstance(pausa, dict) and numero.saude_status in ("erro", "restrito"):
+        return f"{zap_erros.frase(pausa.get('code'))} O número foi pausado por aviso da Meta."
+    return MOTIVO_ZAP_NUMERO_PAUSADO
+
+
+async def _destino_zap(
+    session: AsyncSession, conversa: AtendimentoConversa, *, origem: str
+) -> _Destino:
+    """As travas do Zap (docs/zap/desenho.md §6.3), NA ORDEM; levanta `EnvioRecusado`.
+
+    É também o que a faixa da tela mostra (`motivo_para_nao_enviar` passa por
+    aqui): a faixa e o botão dizem a mesma coisa. Canal, número, conta e
+    contato são RELIDOS do banco (`populate_existing`): o "pausar" de um
+    número, a troca de modo e o token caído valem na hora. Para sair
+    mensagem, tudo ao mesmo tempo: o freio único, a chave do Zap, o botão do
+    número e o canal num modo que envia — as listas de teste só RESTRINGEM.
+    """
+    settings = get_settings()
+    # 1. Só pessoa: a IA não sugere nem envia no Zap (P8), a automática nunca.
+    if origem != ORIGEM_HUMANO:
+        raise EnvioRecusado(RECUSA_CANAL_SEM_ENVIO, MOTIVO_ZAP_SO_PESSOA)
+    # 2–3. Simulador em produção e o freio único (as de todo canal).
+    _travas_do_sistema(settings, conversa)
+    # 4. A chave do Zap.
+    if not settings.atendimento_zap_envio_ativo:
+        raise EnvioRecusado(RECUSA_ZAP_ENVIO_DESLIGADO, MOTIVO_ZAP_ENVIO_DESLIGADO)
+    # 5. A conversa.
+    if conversa.situacao == CONVERSA_BLOQUEADA:
+        raise EnvioRecusado(
+            RECUSA_CONVERSA_BLOQUEADA,
+            conversa.bloqueio_motivo or "O WhatsApp não deixa mais responder nesta conversa.",
+        )
+    # 6. O canal `zap:<pnid>` e o número, relidos.
+    canal = (
+        await session.get(AtendimentoCanal, conversa.canal_id, populate_existing=True)
+        if conversa.canal_id is not None
+        else None
+    )
+    pnid = canais_externos.pnid_do_canal(canal)
+    numero = await zap.numero_do_pnid(session, pnid)
+    if canal is None or pnid is None or numero is None:
+        raise EnvioRecusado(RECUSA_SEM_INTEGRACAO, MOTIVO_ZAP_SEM_NUMERO)
+    # 7. O botão "pausar" do número e a etapa da migração.
+    if numero.etapa not in zap.ETAPAS_QUE_ENVIAM or not numero.envio_ligado:
+        raise EnvioRecusado(RECUSA_ZAP_NUMERO_PAUSADO, _motivo_numero_pausado(numero))
+    # 8. O modo do canal (observar = o Duoke responde).
+    if canal.modo not in MODOS_QUE_ENVIAM:
+        raise EnvioRecusado(RECUSA_CANAL_EM_OBSERVACAO, MOTIVO_ZAP_EM_OBSERVACAO)
+    # 9. A credencial da conta (WABA).
+    conta = await zap.conta_do_numero(session, numero)
+    token = zap.token_valido(conta)
+    if conta is None or token is None:
+        raise EnvioRecusado(RECUSA_ZAP_SEM_CREDENCIAL, MOTIVO_ZAP_SEM_CREDENCIAL)
+    # 10. O contato (bloqueado, apagado a pedido — LGPD — ou sem telefone).
+    contato = await zap.contato_da_conversa(session, conversa)
+    if contato is None or contato.bloqueado or contato.apagado_em is not None:
+        raise EnvioRecusado(RECUSA_ZAP_CONTATO_BLOQUEADO, MOTIVO_ZAP_CONTATO_BLOQUEADO)
+    if not contato.wa_id:
+        raise EnvioRecusado(RECUSA_ZAP_CONTATO_SEM_TELEFONE, MOTIVO_ZAP_CONTATO_SEM_TELEFONE)
+    # 11. A lista de teste (global + número), pelo número normalizado; fora
+    # de produção, sem lista nada sai (fail-closed).
+    lista = zap.lista_de_teste(numero)
+    if not zap.destino_liberado(contato.wa_id, lista, producao=settings.is_prod):
+        raise EnvioRecusado(RECUSA_ZAP_FORA_DOS_TESTES, MOTIVO_ZAP_FORA_DOS_TESTES)
+    # 12. A janela de 24 h, numa fonte só (com o 131047 fechando a conversa).
+    agora = datetime.now(UTC)
+    fim = zap.fim_da_janela(contato.ultima_recebida_em, conversa.pode_enviar_ate)
+    if fim is None or agora > fim:
+        raise EnvioRecusado(RECUSA_FORA_DA_JANELA, MOTIVO_FORA_DA_JANELA)
+    # 13. Contra laço: o mesmo contato, muitas vezes em 10 min.
+    if await zap.envios_ao_contato(session, conversa.id, agora) >= int(
+        settings.atendimento_zap_max_contato_10min
+    ):
+        raise EnvioRecusado(RECUSA_ZAP_LACO, MOTIVO_ZAP_LACO)
+    # 14. O teto do dia DESTE número.
+    if await zap.envios_do_numero_hoje(session, canal.id, agora) >= zap.teto_do_numero(numero):
+        raise EnvioRecusado(RECUSA_ZAP_TETO_DIA, MOTIVO_ZAP_TETO_DIA)
+    return _Destino(
+        canal=canal,
+        integration=None,
+        zap=zap.ZapDestino(
+            numero_id=numero.id,
+            phone_number_id=numero.phone_number_id,
+            conta_id=conta.id,
+            contato_id=contato.id,
+            to=contato.wa_id,
+            janela_ate=fim,
+            destinos_teste=lista,
+            producao=bool(settings.is_prod),
+            token=token,
+        ),
+    )
 
 
 async def _destino_avaliacao(
@@ -829,13 +1026,24 @@ def vai_para_o_simulador(plataforma: str) -> bool:
 async def _chamar_plataforma(
     session: AsyncSession,
     conversa: AtendimentoConversa,
-    integration: Integration,
+    integration: Integration | None,
     texto: str,
+    *,
+    zap_destino: zap.ZapDestino | None = None,
+    mensagem_id: UUID | None = None,
 ) -> ResultadoEnvio:
     """Fala com a plataforma. Nunca levanta: o que der errado vira resultado.
 
     A mensagem automática não passa por aqui: `_chamar_plataforma_automatica`
     (a parte, o `to_id`, o `auto_reply` da campanha).
+
+    Zap (26/10/2026): com `zap_destino`, chama `zap.enviar_texto` (com o id
+    da mensagem no `biz_opaque_callback_data`) dentro do mesmo teto de tempo
+    — sem passar por `clientes.cliente_da_integracao`. Os nomeados só são
+    passados quando há Zap (o único chamador): os testes que trocam esta
+    função por uma de 4 parâmetros continuam valendo. O simulador vale igual
+    (`vai_para_o_simulador('whatsapp')`): com `ATENDIMENTO_SIMULADOR_EXCETO=
+    whatsapp`, só o Zap sai de verdade no localhost.
     """
     s = get_settings()
     if s.atendimento_simulador and s.is_prod:
@@ -847,6 +1055,22 @@ async def _chamar_plataforma(
         return ResultadoEnvio(
             ok=True, externo_id=f"sim:{uuid4()}", payload={"simulador": True}
         )
+    if zap_destino is not None:
+        try:
+            return await asyncio.wait_for(
+                zap.enviar_texto(session, conversa, zap_destino, texto, mensagem_id=mensagem_id),
+                timeout=TEMPO_MAXIMO_ENVIO_S,
+            )
+        except TimeoutError:
+            return ResultadoEnvio(ok=False, ambiguo=True, erro="timeout")
+        except Exception as e:  # noqa: BLE001 — o adaptador levantou: pode ter saído
+            return ResultadoEnvio(
+                ok=False, ambiguo=True, erro=f"erro_inesperado: {type(e).__name__}"
+            )
+    if conversa.plataforma == PLATAFORMA_WHATSAPP:
+        # Cinto: o Zap sem o destino montado pelo `_destino_zap` (um caminho
+        # novo que pulou as travas) nunca cai no adaptador de outra plataforma.
+        return ResultadoEnvio(ok=False, erro="zap_sem_destino")
     try:
         # Amazon responde por e-mail (SMTP pelos settings), não pela API da
         # loja: montar o cliente SP-API ali só daria um jeito a mais de falhar.
@@ -1435,6 +1659,15 @@ async def enviar_resposta(
             confirmar_nao_responde=confirmar_nao_responde,
             mail_message_id=mail_message_id,
         )
+    if (
+        conversa.canal == CANAL_ZAP
+        and conversa.plataforma == PLATAFORMA_WHATSAPP
+        and origem == ORIGEM_HUMANO
+        and (user is None or user.role != UserRole.ADMIN)
+    ):
+        # Zap do número: só administrador (26/10/2026). A IA e a automática
+        # caem na trava 1 do `_destino_zap`, com a frase delas.
+        raise EnvioRecusado(RECUSA_ZAP_SO_ADMIN, MOTIVO_ZAP_SO_ADMIN)
     # ── 0. a conversa travada e relida: daqui em diante, o estado é o de AGORA
     # Tudo até a linha em voo roda num SAVEPOINT: numa recusa ele é desfeito
     # e a trava da conversa SOLTA na hora (trava pega num savepoint desfeito
@@ -1469,7 +1702,16 @@ async def enviar_resposta(
     )
 
     # ── 2. a plataforma (ou o simulador) ──────────────────────────────────
-    resultado = await _chamar_plataforma(session, conversa, destino.integration, normalizado)
+    # Os nomeados SÓ com o Zap: um falso de 4 parâmetros (os testes) segue valendo.
+    extra = (
+        {"zap_destino": destino.zap, "mensagem_id": mensagem.id} if destino.zap is not None else {}
+    )
+    # Os ids enquanto os objetos estão carregados (o efeito do Zap roda depois
+    # de um `_gravar_resultado` que pode ter terminado num rollback).
+    conversa_id, mensagem_id = conversa.id, mensagem.id
+    resultado = await _chamar_plataforma(
+        session, conversa, destino.integration, normalizado, **extra
+    )
 
     # ── 3. o resultado, sobre o estado ATUAL do banco ─────────────────────
     await _gravar_resultado(
@@ -1482,6 +1724,18 @@ async def enviar_resposta(
         user=user,
         origem=origem,
     )
+    if destino.zap is not None:
+        # Zap: o efeito do erro da Meta (pausar o número, token, janela) e o
+        # "último envio" do número, DEPOIS do resultado, numa transação própria.
+        await _depois_do_zap(
+            session,
+            conversa,
+            mensagem,
+            destino.zap,
+            resultado,
+            conversa_id=conversa_id,
+            mensagem_id=mensagem_id,
+        )
     logger.info(
         "atendimento_envio_concluido",
         conversa_id=str(conversa.id),
@@ -1493,6 +1747,50 @@ async def enviar_resposta(
     if conversa.canal == CANAL_AVALIACAO and mensagem.status == MSG_ENVIADA:
         await _avaliacao_respondida(session, conversa, mensagem)
     return mensagem
+
+
+async def _depois_do_zap(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    mensagem: AtendimentoMensagem,
+    destino: zap.ZapDestino,
+    resultado: ResultadoEnvio,
+    *,
+    conversa_id: UUID,
+    mensagem_id: UUID,
+) -> None:
+    """O efeito do erro da Meta (§6.2 item 7) numa transação CURTA e própria.
+
+    Dentro do adaptador ele se perderia no rollback do laço de
+    `_gravar_resultado`; aqui ele vale mesmo que o resultado não tenha sido
+    gravado (o número restrito pela Meta tem de parar de qualquer jeito).
+    Nunca levanta: a resposta já saiu (ou não) — falhar aqui só fica no log.
+    Os ids vêm de quem chama (lidos antes da plataforma): depois de um
+    rollback os objetos estão expirados e ler `conversa.id` seria IO fora
+    do greenlet.
+    """
+    try:
+        # Transação da MÁQUINA (revisão, 26/10/2026): o carimbo do "último
+        # envio" e o efeito da Meta (pausar o número, derrubar o token) não
+        # entram no Histórico como alteração da pessoa que clicou em Enviar
+        # — pelo webhook, o mesmo efeito já não tem ator. O motivo fica no
+        # próprio número (`ultimo_erro`, `saude.pausado_pela_meta`).
+        await session.execute(DESMARCAR_TRANSACAO)
+        await zap.depois_do_envio(session, destino, conversa_id=conversa_id, resultado=resultado)
+        await session.commit()
+    except Exception as e:  # noqa: BLE001
+        await session.rollback()
+        logger.error(
+            "zap_efeito_nao_aplicado",
+            conversa_id=str(conversa_id),
+            mensagem_id=str(mensagem_id),
+            err=type(e).__name__,
+        )
+        for obj in (conversa, mensagem):
+            try:
+                await session.refresh(obj)
+            except Exception:  # noqa: BLE001, S110 — sessão quebrada; o log já está
+                pass
 
 
 async def _avaliacao_respondida(
@@ -1559,6 +1857,11 @@ async def _gravar_resultado(
     em "A conferir") e a pessoa recebe a mensagem como está, nunca um 500
     por um envio que pode ter saído.
     """
+    # Os ids ANTES do laço (26/10/2026): o rollback expira os objetos, e ler
+    # `conversa.id` depois dele seria um lazy load fora do greenlet
+    # (`MissingGreenlet`) — o log da falha virava a própria falha, e o
+    # "nunca um 500" acima não valia (achado pelo teste do Zap, §6.2 item 7).
+    log_ids = {"conversa_id": str(conversa.id), "mensagem_id": str(mensagem.id)}
     for tentativa in range(1, TENTATIVAS_RESULTADO + 1):
         try:
             await gravar.travar_linha(session, conversa)
@@ -1589,8 +1892,7 @@ async def _gravar_resultado(
             await session.rollback()
             logger.warning(
                 "atendimento_envio_resultado_repetir",
-                conversa_id=str(conversa.id),
-                mensagem_id=str(mensagem.id),
+                **log_ids,
                 tentativa=tentativa,
                 sqlstate=estado,
                 err=type(e).__name__,
@@ -1598,8 +1900,7 @@ async def _gravar_resultado(
             if estado not in _SQLSTATE_TRANSITORIO or tentativa == TENTATIVAS_RESULTADO:
                 logger.error(
                     "atendimento_envio_resultado_nao_gravado",
-                    conversa_id=str(conversa.id),
-                    mensagem_id=str(mensagem.id),
+                    **log_ids,
                     ok=resultado.ok,
                     ambiguo=resultado.ambiguo,
                 )

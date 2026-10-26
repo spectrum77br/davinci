@@ -215,11 +215,13 @@ from app.services.atendimento.constantes import (
     CANAL_COMENTARIO,
     CANAL_EMAIL,
     CANAL_PERGUNTA,
+    CANAL_ZAP,
     CATEGORIAS,
     CATEGORIAS_INFO,
     CATEGORIAS_SO_HUMANO,
     CONVERSA_ABERTA,
     CONVERSA_FECHADA,
+    ERRO_CONFERIDO_NAO_SAIU,
     ETIQUETA_AVALIACAO,
     ETIQUETA_MIDIA,
     ETIQUETA_POS_VENDA,
@@ -280,10 +282,9 @@ logger = structlog.get_logger()
 
 # O "Sugerir" no Zap (19/10/2026, docs/zap/desenho.md P8): a IA fica fora do
 # Zap na v1. Frase própria — a das outras externas fala de carrinho e comentário.
-FRASE_ZAP_SEM_IA = (
-    "A IA não sugere resposta no Zap (WhatsApp): quem responde é uma pessoa. "
-    "Por enquanto, responda pelo Duoke."
-)
+# Onda 2 (26/10/2026): sem o "responda pelo Duoke" — com o envio ligado, a
+# pessoa responde pela própria caixa da conversa (a faixa diz qual trava vale).
+FRASE_ZAP_SEM_IA = "A IA não sugere resposta no Zap (WhatsApp): quem responde é uma pessoa."
 
 # Fase de observação (`SO_ADMIN`): vale para todas as rotas deste router (e
 # dos routers irmãos do mesmo prefixo, que usam a mesma dependência), antes
@@ -657,10 +658,53 @@ def _no_escopo(scope: TeamScope, integration_id: UUID | None) -> bool:
     )
 
 
-def _clausula_escopo(scope: TeamScope, coluna):
-    """WHERE da equipe sobre uma coluna `integration_id`; None = sem filtro."""
-    if scope.unrestricted:
+# Zap do número (decisão do Eduardo, 26/10/2026): SÓ ADMINISTRADOR vê o Zap —
+# a conversa, a linha da lista e da barra, o canal em "Lojas e modo". A
+# conversa e o canal do Zap não têm loja (`integration_id` NULL), e o escopo
+# por equipe deixa ver tudo a quem não tem equipe (`resolve_team_scope`):
+# sem isto, qualquer pessoa ativa sem equipe lia o Zap (nome e telefone do
+# cliente) e, com a permissão fina, respondia por ele. Quem é a pessoa vem do
+# próprio escopo (`email_user`, o usuário do pedido); escopo sem pessoa não vê.
+def _ve_o_zap(scope: TeamScope) -> bool:
+    quem = scope.email_user
+    return quem is not None and quem.role == UserRole.ADMIN
+
+
+def _zap_escondido(scope: TeamScope, obj: Any) -> bool:
+    """A conversa (ou o canal) é do Zap do número e a pessoa não é admin? PURA."""
+    return (
+        getattr(obj, "plataforma", None) == PLATAFORMA_WHATSAPP
+        and getattr(obj, "canal", None) == CANAL_ZAP
+        and not _ve_o_zap(scope)
+    )
+
+
+def _sem_zap_sql(scope: TeamScope, coluna):
+    """O WHERE que tira o Zap de quem não é admin; None = nada a tirar.
+
+    Pela tabela da `coluna` (`AtendimentoConversa`/`AtendimentoCanal`, também
+    num `aliased`): as duas têm `plataforma` e `canal` (NOT NULL). Outra
+    tabela (integração, regra, fato) não tem Zap.
+    """
+    if _ve_o_zap(scope):
         return None
+    dono = getattr(coluna, "parent", None)
+    mapper = getattr(dono, "mapper", None)
+    if mapper is None or mapper.class_ not in (AtendimentoConversa, AtendimentoCanal):
+        return None
+    tabela = dono.entity
+    return not_(and_(tabela.plataforma == PLATAFORMA_WHATSAPP, tabela.canal == CANAL_ZAP))
+
+
+def _clausula_escopo(scope: TeamScope, coluna):
+    """WHERE da equipe sobre uma coluna `integration_id`; None = sem filtro.
+
+    Sem restrição de equipe, ainda tira o Zap de quem não é admin
+    (`_sem_zap_sql`). Com equipe, o `IN` já deixa de fora o que não tem loja
+    (o Zap incluído).
+    """
+    if scope.unrestricted:
+        return _sem_zap_sql(scope, coluna)
     if not scope.integration_ids:
         return false()
     return coluna.in_(scope.integration_ids)
@@ -766,7 +810,7 @@ async def _conversa_ou_404(
 ) -> AtendimentoConversa:
     uid = _uuid_ou_404(conversa_id, "conversa_nao_encontrada")
     c = await session.get(AtendimentoConversa, uid)
-    if c is None or not _no_escopo(scope, c.integration_id):
+    if c is None or not _no_escopo(scope, c.integration_id) or _zap_escondido(scope, c):
         raise HTTPException(404, detail={"code": "conversa_nao_encontrada"})
     if separa_email.e_conversa_de_email(c) and scope.email_user is not None:
         visivel = await session.scalar(
@@ -1467,6 +1511,39 @@ def _simulado(m: AtendimentoMensagem) -> bool:
     return isinstance(envio, dict) and envio.get("simulador") is True
 
 
+def _entrega_do_zap(m: AtendimentoMensagem) -> dict[str, Any]:
+    """Os tiques da NOSSA resposta no Zap (26/10/2026, §5.6 item 7). Vazio fora do Zap.
+
+    Dois caminhos fixos no payload: `payload.zap.entrega` (o processador do
+    webhook grava) e `payload.envio.zap` (o envio grava). A frase do erro é a
+    da tabela única (`zap_erros`), pelo `erro` gravado (`meta:<code>`).
+    """
+    if m.autor != AUTOR_LOJA or not isinstance(m.payload, dict):
+        return {}
+    from app.services.atendimento import zap_erros
+
+    zap_p = m.payload.get("zap") if isinstance(m.payload.get("zap"), dict) else {}
+    envio = m.payload.get("envio") if isinstance(m.payload.get("envio"), dict) else {}
+    envio_zap = envio.get("zap") if isinstance(envio.get("zap"), dict) else None
+    entrega = zap_p.get("entrega") if isinstance(zap_p.get("entrega"), dict) else None
+    if entrega is None and envio_zap is None:
+        return {}
+    status = entrega.get("status") if entrega else None
+    erro = None
+    if m.status == MSG_FALHOU:
+        if isinstance(m.erro, str) and m.erro.startswith("meta:"):
+            erro = zap_erros.frase_da_mensagem(m.erro)
+        elif entrega and isinstance(entrega.get("erro_code"), int):
+            erro = zap_erros.frase(entrega["erro_code"])
+    return {
+        "entrega": str(status) if status else None,
+        "entrega_erro": erro,
+        "retida_pela_meta": bool(
+            envio_zap and envio_zap.get("message_status") == "held_for_quality_assessment"
+        ),
+    }
+
+
 def _mensagem_out(
     m: AtendimentoMensagem, *, conversa: AtendimentoConversa, nomes: dict[UUID, str | None]
 ) -> MensagemOut:
@@ -1504,6 +1581,7 @@ def _mensagem_out(
         simulado=_simulado(m),
         email=_email_da_mensagem(m),
         do_afiliado=do_afiliado,
+        **(_entrega_do_zap(m) if conversa.canal == CANAL_ZAP else {}),
     )
 
 
@@ -3760,6 +3838,8 @@ async def conferir_mensagem(
     c = await session.get(AtendimentoConversa, m.conversa_id) if m is not None else None
     if m is None or c is None or not _no_escopo(scope, c.integration_id):
         raise HTTPException(404, detail={"code": "mensagem_nao_encontrada"})
+    if _zap_escondido(scope, c):
+        raise HTTPException(404, detail={"code": "mensagem_nao_encontrada"})
     if separa_email.e_conversa_de_email(c):
         await _conversa_ou_404(session, str(c.id), scope)
     await _travar_ou_409(session, c, "conversa_ocupada")
@@ -3792,7 +3872,7 @@ async def conferir_mensagem(
         m.erro = None
     else:
         m.status = MSG_FALHOU
-        m.erro = "conferido: não saiu"
+        m.erro = ERRO_CONFERIDO_NAO_SAIU
     await gravar.recalcular_conversa(session, c)
     await session.commit()
     logger.info(
@@ -3817,7 +3897,12 @@ async def _rascunho_ou_404(
 ) -> AtendimentoRascunho:
     r = await session.get(AtendimentoRascunho, rascunho_id)
     conversa = await session.get(AtendimentoConversa, r.conversa_id) if r is not None else None
-    if r is None or conversa is None or not _no_escopo(scope, conversa.integration_id):
+    if (
+        r is None
+        or conversa is None
+        or not _no_escopo(scope, conversa.integration_id)
+        or _zap_escondido(scope, conversa)
+    ):
         raise HTTPException(404, detail={"code": "rascunho_nao_encontrado"})
     if separa_email.e_conversa_de_email(conversa):
         await _conversa_ou_404(session, str(conversa.id), scope)
@@ -4151,7 +4236,7 @@ async def editar_canal(
     """
     canal = await session.get(AtendimentoCanal, canal_id)
     scope = await resolve_team_scope(session, user)
-    if canal is None or not _no_escopo(scope, canal.integration_id):
+    if canal is None or not _no_escopo(scope, canal.integration_id) or _zap_escondido(scope, canal):
         raise HTTPException(404, detail={"code": "canal_nao_encontrado"})
     # Desligar o `auto` numa emergência não pode pendurar atrás da rodada do
     # sync (que grava o contador de não lidas no canal): 409 e tenta de novo.
@@ -4168,7 +4253,7 @@ async def editar_canal(
             422,
             detail={
                 "code": "modo_invalido_externo",
-                "detail": "Site: só observar. Rede social: observar ou humano "
+                "detail": "Site: só observar. Rede social e Zap: observar ou humano "
                 "(a resposta é sempre de uma pessoa).",
             },
         )

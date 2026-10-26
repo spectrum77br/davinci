@@ -337,6 +337,13 @@ export type Mensagem = {
   // grava como `sistema` (fora da fila), mas é gente — balão à esquerda,
   // com "Afiliado · <nome>" em cima (o `autor_nome`).
   do_afiliado?: boolean
+  // Zap (26/10/2026, Onda 2 — docs/zap/desenho.md §5.6): os tiques da nossa
+  // resposta, pelo que a Meta avisou (sent · delivered · read · played ·
+  // failed); a frase do erro da Meta; e a resposta segurada pela Meta
+  // (`held_for_quality_assessment`). Só nas conversas do Zap.
+  entrega?: string | null
+  entrega_erro?: string | null
+  retida_pela_meta?: boolean
 }
 export type Rascunho = {
   id: string
@@ -685,14 +692,14 @@ export function nomeDoGrupo(plataforma: string | null | undefined): string {
   return NOME_GRUPO[cod] || plataformaInfo(cod).nome
 }
 // O modo que a aba Lojas aceita no canal externo (constantes.MODOS_EXTERNOS):
-// o site não tem por onde responder; a rede, só por pessoa; o WhatsApp, só
-// Observar na Onda 1 (quem responde é o Duoke — o `humano` entra com o envio,
-// na Onda 2; IA sozinha, nunca).
+// o site não tem por onde responder; a rede, só por pessoa; o WhatsApp,
+// Observar (o Duoke responde) ou, desde a Onda 2 (26/10/2026, junto com o
+// envio), Humano — só admin liga; IA sozinha, nunca.
 export const MODOS_EXTERNOS: Record<string, string[]> = {
   site: ['observar'],
   instagram: ['observar', 'humano'],
   facebook: ['observar', 'humano'],
-  whatsapp: ['observar'],
+  whatsapp: ['observar', 'humano'],
 }
 
 export function plataformaInfo(codigo: string | null | undefined): PlataformaInfo {
@@ -2082,7 +2089,24 @@ export const ERROS: Record<string, string> = {
   estado_invalido: 'Filtro de estado desconhecido.',
   fonte_invalida: 'Fonte desconhecida.',
   escopo_invalido: 'Escopo desconhecido.',
+  // Zap (26/10/2026, Onda 2 — docs/zap/desenho.md §6.3): as travas do envio
+  // pelo número de WhatsApp (as frases do backend, `enviar.MOTIVO_ZAP_*`).
+  zap_envio_desligado: 'Zap: o envio pelo DaVinci está desligado. Responda pelo Duoke.',
+  zap_numero_pausado: 'Este número está pausado no DaVinci (Lojas e modo → Números do WhatsApp).',
+  zap_sem_credencial: 'A conexão com a Meta deste número caiu. Peça ao administrador um token novo.',
+  zap_contato_bloqueado: 'Este contato está bloqueado no DaVinci.',
+  zap_contato_sem_telefone: 'Este cliente aparece no WhatsApp sem telefone (só o identificador da Meta): o DaVinci ainda não responde por ele. Responda pelo Duoke.',
+  zap_fora_dos_testes: 'Modo teste: só os números de teste recebem.',
+  fora_da_janela: 'Passaram 24 h desde a última mensagem do cliente. O WhatsApp só deixa mandar um modelo aprovado.',
+  zap_laco: 'Muitas mensagens seguidas para este cliente. Espere alguns minutos.',
+  zap_teto_dia: 'Este número já mandou o máximo de mensagens de hoje. Fale com o administrador.',
 }
+// As travas do Zap que REUSAM um código genérico (observar, sem integração,
+// bloqueada): na conversa do Zap a frase do backend é a certa — a da tela
+// fala de "loja", e lá é o número. O número pausado também (revisão de
+// 26/10/2026): pausado pela META, o backend diz o porquê (pagamento,
+// restrição) em vez do "pausado no DaVinci".
+export const CODIGOS_ZAP_FRASE_DO_SERVIDOR = new Set(['canal_em_observacao', 'sem_integracao', 'conversa_bloqueada', 'canal_sem_envio', 'zap_numero_pausado'])
 // Códigos em que a frase do backend traz o específico do caso: o porquê do
 // bloqueio; quem respondeu e a que horas (conversa_mudou).
 const DETALHE_UTIL = new Set(['conversa_bloqueada', 'conversa_mudou'])
@@ -2170,6 +2194,11 @@ const ERROS_ENVIO: [RegExp, string][] = [
   [/modera[çc][ãa]o|rejected_response/i, 'A moderação da Magalu recusou a resposta — tire CPF, Pix, e-mail ou outro dado de contato e escreva de novo.'],
   // Limite de requisições da plataforma (Magalu: ~200 leituras/min por loja).
   [/HTTP 429\b|too_many_requests|rate.?limit/i, 'A plataforma pediu para esperar (muitas requisições agora) — a mensagem não saiu. Tente de novo em 1 minuto.'],
+  // Zap (26/10/2026): o cinto do adaptador barrou no último instante (a chave,
+  // a lista de teste ou a janela mudou entre o clique e a saída) — nada saiu.
+  // O erro da Meta (`meta:<code>`) vem com a frase pronta em `entrega_erro`.
+  [/^zap_cinto:|^zap_sem_destino/, 'O envio pelo Zap foi barrado no último instante (a chave, a lista de teste ou a janela mudou) — nada saiu.'],
+  [/^meta:(?:sem_resposta|sem_wamid)/, 'A Meta não respondeu a tempo.'],
 ]
 export function erroEnvioLegivel(erro: string | null | undefined): string {
   const e = (erro || '').trim()
@@ -2181,6 +2210,45 @@ export function erroEnvioLegivel(erro: string | null | undefined): string {
   const codigo = /code=(\S+)/.exec(e)?.[1] || /HTTP \d+\s+(\S+)/.exec(e)?.[1]
   return codigo ? `A plataforma recusou a mensagem (código ${codigo}).` : 'A plataforma recusou a mensagem — ela não chegou ao comprador.'
 }
+// A frase do balão que NÃO saiu: no Zap, a frase do erro da Meta que o
+// servidor já traduziu (`entrega_erro`, a tabela única `zap_erros`); nas
+// outras, a régua de sempre pelo `erro` gravado.
+export function erroDoBalao(m: Pick<Mensagem, 'erro' | 'entrega_erro'> | null | undefined): string {
+  return (m?.entrega_erro || '').trim() || erroEnvioLegivel(m?.erro)
+}
+
+// Os tiques da NOSSA resposta no Zap (26/10/2026, docs/zap/desenho.md §8.2):
+// ✓ enviada (a Meta aceitou ou avisou `sent`) · ✓✓ entregue · ✓✓ azul lida
+// (ou ouvida). `falhou` e `revisar` têm a faixa própria no balão; `enviando`,
+// o selo. Fora do Zap (sem `entrega` e sem ser canal zap): null — o ✓✓ de
+// sempre ("a plataforma aceitou").
+export type TiqueZap = { tipo: 'um' | 'dois' | 'azul'; titulo: string }
+export function tiqueDoZap(m: Pick<Mensagem, 'status' | 'entrega' | 'retida_pela_meta'> | null | undefined): TiqueZap | null {
+  if (!m || m.status !== 'enviada') return null
+  const e = (m.entrega || '').toLowerCase()
+  if (e === 'read' || e === 'played') return { tipo: 'azul', titulo: e === 'played' ? 'ouvida pelo cliente' : 'lida pelo cliente' }
+  if (e === 'delivered') return { tipo: 'dois', titulo: 'entregue no celular do cliente' }
+  if (m.retida_pela_meta) return { tipo: 'um', titulo: 'enviada — a Meta segurou para avaliar a qualidade (ainda não entregue)' }
+  return { tipo: 'um', titulo: 'enviada — ainda sem aviso de entrega da Meta' }
+}
+
+// A resposta do Zap em `revisar` (revisão de 26/10/2026): na Cloud API não há
+// caixa da Meta onde "conferir lá" — quem diz se saiu é o aviso de entrega
+// (o `status` do webhook concilia pelo `biz_opaque`, §5.6 item 5). O "Não
+// saiu" (que libera responder de novo) só aparece depois do tempo em que o
+// servidor ainda espera o status (`zap_entrada.ESPERA_STATUS_MAX`, 1 h): antes
+// disso, marcar "não saiu" e responder de novo manda DUAS mensagens ao cliente.
+export const ZAP_ESPERA_STATUS_MS = 60 * 60 * 1000
+export const ZAP_REVISAR = {
+  balao: 'A Meta não respondeu a tempo. O aviso de entrega dela confirma em instantes se saiu: espere antes de responder de novo — o DaVinci não manda de novo sozinho.',
+  toast: 'Pode ter saído. O aviso de entrega da Meta confirma em instantes: espere antes de responder de novo.',
+}
+export function zapPodeMarcarNaoSaiu(m: Pick<Mensagem, 'enviada_em'> | null | undefined, agora: number): boolean {
+  const desde = m?.enviada_em ? Date.parse(m.enviada_em) : NaN
+  if (Number.isNaN(desde)) return true
+  return agora - desde >= ZAP_ESPERA_STATUS_MS
+}
+
 // Motivo de "não pode enviar" que vem no detalhe da conversa: pode ser código
 // ou frase pronta — código conhecido vira frase.
 export function motivoLegivel(m: string | null | undefined): string {

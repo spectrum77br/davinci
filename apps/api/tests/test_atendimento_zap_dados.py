@@ -4,10 +4,11 @@
 O que se garante aqui (o webhook, o processador e a tela constroem em cima):
 
 - o vocabulário (`constantes`): `whatsapp` é plataforma EXTERNA (na lista,
-  fora da caixa do sync/IA/manual), com a caixa `zap`, só `observar` na Onda
-  1, prazo de 24 h e 4.096 caracteres; o Zap continua sem envio ("Responda
-  pelo Duoke") e o formato antigo (Zap com a plataforma da venda) continua
-  recusado (P2);
+  fora da caixa do sync/IA/manual), com a caixa `zap`, `observar` ou (desde
+  a Onda 2, 26/10/2026) `humano`, prazo de 24 h e 4.096 caracteres; o Zap
+  do número responde só por pessoa (`MOTIVO_ZAP_SO_PESSOA`: a IA e a
+  automática ficam de fora) e o formato antigo (Zap com a plataforma da
+  venda) continua recusado (P2);
 - a referência do canal (`canais_externos`): `zap:<phone_number_id>`, o
   `garantir_canal` do número (nasce em `observar`), o nome na barra e o
   filtro `?externo_ref=zap:` da lista (sem 422);
@@ -37,6 +38,7 @@ from app.models import (
     AtendimentoZapMidia,
     AtendimentoZapNumero,
     User,
+    UserRole,
 )
 from app.routers import atendimento as rota
 from app.security import cipher
@@ -45,9 +47,11 @@ from app.services.atendimento.constantes import (
     CANAIS_EXTERNOS,
     CANAL_ZAP,
     LIMITE_CARACTERES,
+    MODO_HUMANO,
     MODO_OBSERVAR,
     MODOS_EXTERNOS,
     MOTIVO_ZAP_SEM_ENVIO,
+    MOTIVO_ZAP_SO_PESSOA,
     PLATAFORMA_WHATSAPP,
     PLATAFORMAS,
     PLATAFORMAS_CAIXA,
@@ -71,7 +75,8 @@ def _permissao_fina(monkeypatch):
 
 @pytest.fixture
 async def pessoa(make_user, auth_as) -> User:
-    u = await make_user(permissions=PODE_TUDO)
+    # Só administrador vê o Zap (decisão do Eduardo, 26/10/2026).
+    u = await make_user(permissions=PODE_TUDO, role=UserRole.ADMIN)
     auth_as(u)
     return u
 
@@ -79,7 +84,7 @@ async def pessoa(make_user, auth_as) -> User:
 # ── Vocabulário (puro) ────────────────────────────────────────────────────
 
 
-def test_whatsapp_e_plataforma_externa_so_leitura_na_onda_1():
+def test_whatsapp_e_plataforma_externa_observar_ou_humano():
     assert PLATAFORMA_WHATSAPP == "whatsapp"
     assert PLATAFORMA_WHATSAPP in PLATAFORMAS_EXTERNAS
     assert PLATAFORMA_WHATSAPP in PLATAFORMAS_LISTA
@@ -87,7 +92,8 @@ def test_whatsapp_e_plataforma_externa_so_leitura_na_onda_1():
     assert PLATAFORMA_WHATSAPP not in PLATAFORMAS
     assert PLATAFORMA_WHATSAPP not in PLATAFORMAS_CAIXA
     assert CANAIS_EXTERNOS[PLATAFORMA_WHATSAPP] == (CANAL_ZAP,)
-    assert MODOS_EXTERNOS[PLATAFORMA_WHATSAPP] == (MODO_OBSERVAR,)
+    # Onda 2 (26/10/2026): `humano` junto com o envio; IA sozinha, nunca.
+    assert MODOS_EXTERNOS[PLATAFORMA_WHATSAPP] == (MODO_OBSERVAR, MODO_HUMANO)
     assert SLA_HORAS[(PLATAFORMA_WHATSAPP, CANAL_ZAP)] == 24
     assert LIMITE_CARACTERES[(PLATAFORMA_WHATSAPP, CANAL_ZAP)] == 4096
     # As externas que já existiam não mudam.
@@ -95,9 +101,11 @@ def test_whatsapp_e_plataforma_externa_so_leitura_na_onda_1():
     assert MODOS_EXTERNOS["instagram"] == ("observar", "humano")
 
 
-def test_zap_continua_sem_envio_e_o_formato_antigo_recusado():
-    # Onda 1: o compositor diz "Responda pelo Duoke" (a régua não muda).
-    assert motivo_canal_sem_envio(CANAL_ZAP, PLATAFORMA_WHATSAPP, {}) == MOTIVO_ZAP_SEM_ENVIO
+def test_zap_so_pessoa_e_o_formato_antigo_recusado():
+    # Onda 2 (26/10/2026): o Zap do número responde só por PESSOA — a régua
+    # continua não vazia (a IA, a automática e a Caixa Humano ficam de fora);
+    # o envio desvia antes dela (`enviar._destino_zap`).
+    assert motivo_canal_sem_envio(CANAL_ZAP, PLATAFORMA_WHATSAPP, {}) == MOTIVO_ZAP_SO_PESSOA
     # P2 (trava de 05/10): Zap com a plataforma da venda, recusado para sempre.
     for plat in ("shopee", "ml", "tiktok", "amazon", "magalu"):
         assert motivo_canal_sem_envio(CANAL_ZAP, plat, None) == MOTIVO_ZAP_SEM_ENVIO, plat
@@ -129,7 +137,8 @@ def test_referencia_do_zap():
     assert canais_externos.partes("site:uranyx") == ("site", "site", "uranyx")
     assert canais_externos.partes("rede:facebook:139") == ("rede", "facebook", "139")
     assert canais_externos.modo_permitido("whatsapp", "observar")
-    assert not canais_externos.modo_permitido("whatsapp", "humano")
+    assert canais_externos.modo_permitido("whatsapp", "humano")  # Onda 2
+    assert not canais_externos.modo_permitido("whatsapp", "copiloto")
     assert not canais_externos.modo_permitido("whatsapp", "auto")
 
 

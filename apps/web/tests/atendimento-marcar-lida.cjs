@@ -96,6 +96,10 @@ function det(id, extra = {}) {
   // Nada para marcar: não chama; o número desconhecido (API antiga) deixa o servidor decidir.
   assert.equal(L.querMarcarLida({ conversa: { id: 'a', nao_lidas: 0 }, marcar_lida: true }, true), false)
   assert.equal(L.querMarcarLida({ conversa: { id: 'a' }, marcar_lida: true }, true), true)
+  // Zap (26/10/2026, o tique azul): sem contador de não lidas — vale o `marcar_lida` do servidor.
+  assert.equal(L.querMarcarLida({ conversa: { id: 'z', nao_lidas: 0, canal: 'zap' }, marcar_lida: true }, true), true)
+  assert.equal(L.querMarcarLida({ conversa: { id: 'z', nao_lidas: 0, canal: 'zap' }, marcar_lida: false }, true), false)
+  assert.equal(L.querMarcarLida({ conversa: { id: 'z', nao_lidas: 0, canal: 'zap' }, marcar_lida: true }, false), false)
   assert.equal(L.querMarcarLida(null, true), false)
   // O visto (15/10/2026): quem mexe, em qualquer modo — só não o Direct (`ig:`) e quem só lê.
   assert.equal(L.querMarcarVisto(det('a', { marcar_lida: false }), true), true)

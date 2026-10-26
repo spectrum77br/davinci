@@ -504,3 +504,195 @@ def test_regras_duras_buracos_da_revisao(texto, motivo):
     # Duro para todos: a pessoa E a IA.
     assert motivo in _v(texto, origem=ORIGEM_HUMANO), texto
     assert motivo in _v(texto, origem=ORIGEM_IA), texto
+
+
+# ─────────────── Zap (WhatsApp da marca, Onda 2 — 26/10/2026) ───────────────
+# docs/zap/desenho.md §7: no número de WhatsApp da própria marca o contato não
+# é "fora da loja" (o cliente já está no WhatsApp). PIX (decisão do Eduardo,
+# "por enquanto"), conta bancária, cartão e documento: barrados para PESSOA e
+# IA, pela política do WhatsApp. Pedir CPF (inclusive para a nota): barrado.
+
+
+def _zap(texto: str, *, origem: str = ORIGEM_HUMANO) -> list[str]:
+    return _v(texto, plataforma="whatsapp", canal="zap", origem=origem)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Me chama no WhatsApp (11) 98888-7777",
+        "Nosso fixo é +55 11 3333-4444",
+        "+55 11 98888-7777",
+        "Veja o catálogo em https://www.selmafestas.com.br/baloes",
+        "manda um e-mail para vendas@selmafestas.com.br",
+        "nos siga no Instagram @selmafestas",
+        "Passa no cartão de crédito em até 3x",
+        "Vou mandar o cartão junto com o presente",
+        "Nunca pedimos o número do cartão por aqui",
+        "Nosso CNPJ é 12.345.678/0001-90",
+        # O pedido do ML (16 dígitos, 2000…) e a chave da NF em grupos de 4.
+        "Seu pedido 2000003456789012 já saiu",
+        "Chave da nota: 3525 1012 3456 7800 0190 5500 1000 0012 3410 0001 2345",
+        # 16 dígitos com cara de Visa, mas o dígito verificador não fecha.
+        "o código é 4111 1111 1111 1112",
+    ],
+)
+def test_zap_libera_contato_da_marca_e_nao_barra_a_toa(texto):
+    assert _zap(texto) == [], texto
+    # Para a IA também nada do Zap barra (as regras SÓ da IA — o CNPJ escrito,
+    # p.ex. — continuam, e são outro assunto).
+    motivos_ia = _zap(texto, origem=ORIGEM_IA)
+    assert not any("a Meta proíbe" in m or m.startswith(("contato", "link")) for m in motivos_ia)
+
+
+@pytest.mark.parametrize(
+    "texto,motivo",
+    [
+        # PIX: bloqueado no Zap por decisão do Eduardo (26/10/2026).
+        ("pode pagar no pix", "PIX: bloqueado no WhatsApp por enquanto"),
+        ("te passo a chave PIX", "PIX: bloqueado no WhatsApp por enquanto"),
+        # Conta bancária, cartão e documento: a política do WhatsApp.
+        ("me passa seus dados bancários", "agência e conta bancária: a Meta proíbe no WhatsApp"),
+        ("ag 1234 c/c 56789-0", "agência e conta bancária: a Meta proíbe no WhatsApp"),
+        (
+            "Banco do Brasil, agência 0001-9, conta corrente 12345-6",
+            "agência e conta bancária: a Meta proíbe no WhatsApp",
+        ),
+        ("o cartão é 4111 1111 1111 1111", "número de cartão: a Meta proíbe no WhatsApp"),
+        ("5555-5555-5555-4444 validade 12/28", "número de cartão: a Meta proíbe no WhatsApp"),
+        ("amex 378282246310005", "número de cartão: a Meta proíbe no WhatsApp"),
+        ("elo 6362 9700 0045 7013", "número de cartão: a Meta proíbe no WhatsApp"),
+        ("CPF 123.456.789-09", "número de documento (CPF/RG): a Meta proíbe no WhatsApp"),
+        ("meu RG é 12.345.678-9", "número de documento (CPF/RG): a Meta proíbe no WhatsApp"),
+        ("qual o seu CPF?", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        ("Me passa seu CPF para a nota", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        (
+            "Precisamos do seu CPF para emitir a NF",
+            "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp",
+        ),
+        ("Manda foto do RG", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        ("Me passa o número do cartão", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        (
+            "Informe os dados do cartão de crédito",
+            "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp",
+        ),
+        ("envie seu cartão", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        ("qual o CVV?", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        # O que vale para a conversa venha de onde vier.
+        ("por fora sai mais barato", "negociação fora da plataforma"),
+        ("Nos avalie com 5 estrelas!", "pede ou condiciona avaliação"),
+        ("Não abra reclamação, resolvemos aqui", "desestimula reclamação"),
+        ("Seu código é {rastreio}", "lacuna não preenchida ({rastreio})"),
+    ],
+)
+def test_zap_barra_para_pessoa_e_ia(texto, motivo):
+    assert motivo in _zap(texto), (texto, _zap(texto))
+    assert motivo in _zap(texto, origem=ORIGEM_IA), (texto, _zap(texto, origem=ORIGEM_IA))
+
+
+# Revisão da Onda 2 (26/10/2026): o que passava e não podia.
+_PIX_EMV = (
+    "00020126580014br.gov.bcb.pix0136123e4567-e12b-12d1-a456-426655440000520400005303986540"
+    "510.005802BR5913Loja Exemplo6009SAO PAULO62070503***6304ABCD"
+)
+_PIX_EMV_TELEFONE = (
+    "00020126360014BR.GOV.BCB.PIX0114+5511987654321520400005303986540510.005802BR5913Loja "
+    "Exemplo6009SAO PAULO62070503***6304ABCD"
+)
+
+
+@pytest.mark.parametrize("texto", [_PIX_EMV, _PIX_EMV_TELEFONE, "chave pix123 ok"])
+def test_pix_copia_e_cola_barrado_no_zap_e_no_marketplace(texto):
+    # O "pix" grudado no dígito (o EMV do Banco Central) passava pelo `\b`.
+    assert "PIX: bloqueado no WhatsApp por enquanto" in _zap(texto)
+    assert "PIX: bloqueado no WhatsApp por enquanto" in _zap(texto, origem=ORIGEM_IA)
+    assert "pagamento fora da plataforma (PIX)" in _v(texto)
+
+
+def test_pix_nao_pega_outra_palavra():
+    assert _zap("o pixel da tela queimou") == []
+    assert _v("o pixel da tela queimou") == []
+
+
+@pytest.mark.parametrize(
+    "texto,motivo",
+    [
+        # O número do cartão no plural e "numeração".
+        ("Me passa os números do seu cartão", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        (
+            "manda os numeros do cartao de credito",
+            "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp",
+        ),
+        ("Informe a numeração do cartão", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        # O número da conta (financeira) e a ordem "conta e agência".
+        ("manda o número da sua conta", "agência e conta bancária: a Meta proíbe no WhatsApp"),
+        (
+            "Me fala o número da sua conta e agência",
+            "agência e conta bancária: a Meta proíbe no WhatsApp",
+        ),
+        ("conta e agência, por favor", "agência e conta bancária: a Meta proíbe no WhatsApp"),
+        # O CPF sem verbo, em lista ou longe do verbo: falha fechado (decisão de
+        # 26/10/2026 — não se pede CPF pelo Zap).
+        (
+            "Pode me enviar nome completo, CPF e endereço?",
+            "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp",
+        ),
+        ("Nome completo e CPF, por favor", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        ("Seu CPF, por favor?", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        ("CPF?", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        ("não esquece de mandar o CPF", "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp"),
+        # A negação não apaga o pedido que vem depois.
+        (
+            "Não precisamos do CPF, só manda o RG",
+            "pedir cartão, CPF ou RG: a Meta proíbe no WhatsApp",
+        ),
+    ],
+)
+def test_zap_pedidos_que_passavam(texto, motivo):
+    assert motivo in _zap(texto), (texto, _zap(texto))
+    assert motivo in _zap(texto, origem=ORIGEM_IA), (texto, _zap(texto, origem=ORIGEM_IA))
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Não precisamos do seu CPF",
+        "Nunca pedimos CPF nem RG por aqui",
+        "Não é necessário o CPF",
+        "Adorei a identidade visual da festa",
+        "Confirme os dados da sua conta no site",
+    ],
+)
+def test_zap_negacao_e_falsos_positivos_passam(texto):
+    assert _zap(texto) == [], (texto, _zap(texto))
+
+
+def test_zap_cpf_com_numero_um_motivo_so():
+    # O número escrito já diz o que tirar: não vira também "pedir".
+    assert _zap("CPF 123.456.789-09") == ["número de documento (CPF/RG): a Meta proíbe no WhatsApp"]
+
+
+def test_zap_link_com_pix_no_caminho_nao_vira_falso_pix():
+    assert _zap("veja www.selmafestas.com.br/pix-desconto") == []
+
+
+def test_zap_regras_so_da_ia_continuam():
+    motivos = _zap("custa R$ 59,90 e chega em 3 dias", origem=ORIGEM_IA)
+    assert "valor em R$ só pode vir do sistema" in motivos
+    assert "prazo em números só pode vir do sistema" in motivos
+    assert _zap("custa R$ 59,90 e chega em 3 dias") == []
+
+
+def test_zap_limite_de_4096():
+    assert _zap("a" * 4096) == []
+    assert _zap("a" * 4097) == ["passa do limite de 4096 caracteres (4097)"]
+
+
+def test_marketplace_e_zap_antigo_iguais():
+    # Fora do Zap do número nada muda: contato continua barrado…
+    assert "contato fora da loja (WhatsApp)" in _v("me chama no WhatsApp")
+    assert "contato fora da loja (WhatsApp)" in _v("me chama no zap", canal="zap")
+    # … e as regras novas (cartão, documento) não entram no marketplace.
+    for texto in ("Me passa o número do cartão", "o cartão é 4111 1111 1111 1111"):
+        assert not any("a Meta proíbe" in m for m in _v(texto)), texto
+    assert "pagamento fora da plataforma (PIX)" in _v("pode pagar no pix")

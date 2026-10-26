@@ -234,6 +234,7 @@ import {
   ERROS,
   MODERACAO_MAGALU_ENVIADA,
   canalLabel,
+  CODIGOS_ZAP_FRASE_DO_SERVIDOR,
   SINAIS_CLIENTE,
   cartaoPedidoDe,
   cartaoProdutoDe,
@@ -245,6 +246,7 @@ import {
   duracao,
   envioSimulado,
   erroDaApi,
+  erroDoBalao,
   erroEnvioLegivel,
   faixaHumano,
   fmtData,
@@ -278,7 +280,10 @@ import {
   sugestaoDeAntes,
   tamanhoDoEnvio,
   textoModosHumano,
+  tiqueDoZap,
   usePollingVisivel,
+  ZAP_REVISAR,
+  zapPodeMarcarNaoSaiu,
   useRelogio,
   variasCaixas,
   type Anexo,
@@ -1311,6 +1316,10 @@ const bloqueioEnvio = computed(() => {
   }
   if (d.envio.pode_enviar) return ''
   const codigo = d.envio.codigo || ''
+  // Zap (26/10/2026): as travas que reusam um código genérico (observar, sem
+  // integração, bloqueada, só pessoa) trazem a frase do NÚMERO no backend — a
+  // da tela fala de "loja". As próprias do Zap têm frase em ERROS.
+  if (d.conversa.canal === 'zap' && CODIGOS_ZAP_FRASE_DO_SERVIDOR.has(codigo) && d.envio.motivo) return d.envio.motivo
   // Bloqueio: a frase do backend traz o porquê do caso (janela fechou,
   // comprador bloqueou…). Nos outros, a frase simples da tela.
   if (codigo === 'conversa_bloqueada') {
@@ -1434,7 +1443,7 @@ function concluirEnvio(id: string, m: Mensagem | null | undefined, sugestao: Sug
     // pessoa deixou — o texto editado e a sugestão de origem. Limpar aqui
     // fazia o próximo tique pôr de volta a sugestão ORIGINAL (a caixa vazia
     // conta como intocada), e a pessoa reenviava sem a correção dela.
-    const motivo = erroEnvioLegivel(m.erro)
+    const motivo = erroDoBalao(m)
     mostrarErroEnvio(id, { texto: 'A plataforma recusou — a resposta NÃO chegou ao comprador. O texto continua na caixa.', motivos: [motivo] })
     toasts.error(`A plataforma recusou a resposta${onde}`, motivo)
     return
@@ -1448,7 +1457,7 @@ function concluirEnvio(id: string, m: Mensagem | null | undefined, sugestao: Sug
   // Magalu: o "aceito" da API é a entrada na moderação, não a publicação.
   const detalheEnvio = sim || (passaPelaModeracao(plataforma) ? MODERACAO_MAGALU_ENVIADA : '')
   if (!m || m.status === 'enviada') toasts.success(`Resposta enviada${onde}`, detalheEnvio || undefined)
-  else if (m.status === 'revisar') toasts.warning(`Não deu para confirmar o envio${onde}`, 'Pode ter saído. Confira na plataforma e marque no balão se saiu — o DaVinci não tenta de novo sozinho.')
+  else if (m.status === 'revisar') toasts.warning(`Não deu para confirmar o envio${onde}`, plataforma === 'whatsapp' ? ZAP_REVISAR.toast : 'Pode ter saído. Confira na plataforma e marque no balão se saiu — o DaVinci não tenta de novo sozinho.')
   else if (m.email?.tipo === 'resposta') toasts.info(`${AVISO_EMAIL_NA_FILA.titulo}${onde}`, AVISO_EMAIL_NA_FILA.texto)
   else toasts.info(`Resposta saindo${onde}`, 'Acompanhe o status no balão.')
 }
@@ -2253,8 +2262,8 @@ async function tentarDeNovo(m: Mensagem) {
   try {
     const r = await api<{ mensagem: Mensagem }>(`/api/atendimento/conversas/${encodeURIComponent(id)}/responder`, { method: 'POST', body })
     const nova = r?.mensagem
-    if (nova?.status === 'falhou') toasts.error('A plataforma recusou de novo', erroEnvioLegivel(nova.erro))
-    else if (nova?.status === 'revisar') toasts.warning('Não deu para confirmar o envio', 'Pode ter saído. Confira na plataforma e marque no balão se saiu.')
+    if (nova?.status === 'falhou') toasts.error('A plataforma recusou de novo', erroDoBalao(nova))
+    else if (nova?.status === 'revisar') toasts.warning('Não deu para confirmar o envio', ehZap.value ? ZAP_REVISAR.toast : 'Pode ter saído. Confira na plataforma e marque no balão se saiu.')
     else if (nova?.status === 'enviando' && nova.email?.tipo === 'resposta') toasts.info(AVISO_EMAIL_NA_FILA.titulo, AVISO_EMAIL_NA_FILA.texto)
     else toasts.success('Resposta enviada')
   } catch (e: any) {
@@ -2970,7 +2979,7 @@ watch(() => props.conversaId, (novo, velho) => {
                 </div>
                 <!-- A frase diz o que fazer; o código cru (para o suporte) fica no title. -->
                 <div v-if="l.m.status === 'falhou'" class="mt-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-700 dark:text-red-300" :title="l.m.erro || ''">
-                  {{ erroEnvioLegivel(l.m.erro) }}
+                  {{ erroDoBalao(l.m) }}
                   <!-- Só com o envio ligado e só na última tentativa (não reenvia sozinho). -->
                   <button
                     v-if="!l.de && podeTentarDeNovo(l.m)"
@@ -2986,7 +2995,9 @@ watch(() => props.conversaId, (novo, velho) => {
                 </div>
                 <div v-if="l.m.status === 'revisar' && lado(l.m) === 'loja' && !l.de" class="mt-1 space-y-1 rounded bg-amber-500/10 px-1.5 py-1 text-[11px] text-amber-900 dark:text-amber-200">
                   <div class="font-medium">Não sabemos se chegou ao comprador.</div>
-                  <div>A plataforma não confirmou o envio. Confira lá e marque aqui — o DaVinci não manda de novo sozinho.</div>
+                  <!-- Zap: não há caixa da Meta onde conferir; o aviso de entrega concilia (revisão, 26/10/2026). -->
+                  <div v-if="ehZap" data-zap-revisar>{{ ZAP_REVISAR.balao }}</div>
+                  <div v-else>A plataforma não confirmou o envio. Confira lá e marque aqui — o DaVinci não manda de novo sozinho.</div>
                   <div v-if="canEdit" class="flex flex-wrap gap-1 pt-0.5">
                     <button
                       type="button"
@@ -2998,6 +3009,7 @@ watch(() => props.conversaId, (novo, velho) => {
                       <Loader2 v-if="conferindo === l.m.id" class="size-3 animate-spin" /><Check v-else class="size-3" /> Saiu
                     </button>
                     <button
+                      v-if="!ehZap || zapPodeMarcarNaoSaiu(l.m, agora)"
                       type="button"
                       class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-300"
                       title="a resposta NÃO aparece na plataforma: libera responder de novo"
@@ -3011,7 +3023,15 @@ watch(() => props.conversaId, (novo, velho) => {
               </div>
               <div class="mt-0.5 flex items-center gap-1 px-1 text-[10px] text-muted-foreground" :title="fmtDataHora(l.m.enviada_em)">
                 {{ fmtDiaHora(l.m.enviada_em) }}
-                <CheckCheck v-if="l.m.status === 'enviada' && lado(l.m) === 'loja'" class="size-3" />
+                <!-- Zap (26/10/2026): os tiques do WhatsApp — ✓ enviada · ✓✓ entregue · ✓✓ azul lida. -->
+                <template v-if="ehZap && lado(l.m) === 'loja' && tiqueDoZap(l.m)">
+                  <span class="inline-flex items-center" :title="tiqueDoZap(l.m)!.titulo" :aria-label="tiqueDoZap(l.m)!.titulo" data-tique-zap>
+                    <Check v-if="tiqueDoZap(l.m)!.tipo === 'um'" class="size-3" />
+                    <CheckCheck v-else class="size-3" :class="tiqueDoZap(l.m)!.tipo === 'azul' ? 'text-sky-500' : ''" />
+                  </span>
+                  <span v-if="l.m.retida_pela_meta && tiqueDoZap(l.m)!.tipo === 'um'" class="text-amber-700 dark:text-amber-300">segurada pela Meta</span>
+                </template>
+                <CheckCheck v-else-if="l.m.status === 'enviada' && lado(l.m) === 'loja'" class="size-3" />
               </div>
               <!-- IA × equipe: o que a IA teria dito no lugar desta resposta -->
               <AtendimentoIaTeria

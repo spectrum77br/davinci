@@ -134,6 +134,15 @@ MOTIVO_TUTA_SEM_ENVIO = (
 MOTIVO_ZAP_SEM_ENVIO = (
     "Zap (WhatsApp): o envio do Zap ainda não existe no DaVinci. Responda pelo Duoke."
 )
+# Zap no formato NOVO (`plataforma='whatsapp'`, Onda 2 de docs/zap/desenho.md,
+# 26/10/2026): o envio existe, mas SÓ por pessoa — a IA não sugere nem envia
+# (P8), a mensagem automática nunca. O mesmo padrão do e-mail da ponte
+# (`MOTIVO_EMAIL_SO_PESSOA`): o `enviar._destino` desvia o Zap ANTES desta
+# régua (`_destino_zap`, com as travas do §6.3), e todo o resto que a lê (o
+# cron e o "Sugerir" da IA, a automática, a Caixa Humano) continua de fora.
+# O Zap no formato ANTIGO (com a plataforma da venda) segue com
+# `MOTIVO_ZAP_SEM_ENVIO` para sempre (premissa P2).
+MOTIVO_ZAP_SO_PESSOA = "No Zap quem responde é uma pessoa (a IA não sugere nem envia)."
 # O e-mail que a PONTE da Central levou à conversa (`dados.fonte='tuta'` +
 # `dados.mail`, 08/10/2026): a pessoa responde pela caixa da conversa (a fila
 # da Central de e-mail); a IA e a mensagem automática NUNCA respondem e-mail.
@@ -174,9 +183,13 @@ def motivo_canal_sem_envio(canal: str | None, plataforma: str | None, dados: obj
     (só o Tuta grava e-mail fora dela) ou com a marca `dados.fonte = 'tuta'`;
     e o chat de afiliado da Shopee (15/10/2026, `e_chat_de_afiliado`).
     O cron da IA filtra o mesmo no SQL (`ia._sql_canal_sem_envio`).
+
+    Zap (26/10/2026, Onda 2): o do número de WhatsApp (`whatsapp`) responde
+    por PESSOA (`MOTIVO_ZAP_SO_PESSOA`; o envio desvia antes, em
+    `enviar._destino_zap`); o com a plataforma da venda, nunca.
     """
     if canal == CANAL_ZAP:
-        return MOTIVO_ZAP_SEM_ENVIO
+        return MOTIVO_ZAP_SO_PESSOA if plataforma == PLATAFORMA_WHATSAPP else MOTIVO_ZAP_SEM_ENVIO
     if e_chat_de_afiliado(plataforma, dados):
         return MOTIVO_AFILIADO_SEM_ENVIO
     if canal != CANAL_EMAIL:
@@ -254,9 +267,10 @@ MODOS_EXTERNOS: dict[str, tuple[str, ...]] = {
     PLATAFORMA_SITE: (MODO_OBSERVAR,),
     PLATAFORMA_INSTAGRAM: (MODO_OBSERVAR, MODO_HUMANO),
     PLATAFORMA_FACEBOOK: (MODO_OBSERVAR, MODO_HUMANO),
-    # Zap: só observar na Onda 1 (só leitura; quem responde é o Duoke). O
-    # `humano` entra na Onda 2, junto com o envio; IA sozinha, nunca (P8).
-    PLATAFORMA_WHATSAPP: (MODO_OBSERVAR,),
+    # Zap: observar (quem responde é o Duoke) ou, desde a Onda 2 (26/10/2026,
+    # junto com o envio), `humano` — só admin liga (PATCH /canais), e o envio
+    # ainda depende das chaves e do botão do número. IA nunca (P8).
+    PLATAFORMA_WHATSAPP: (MODO_OBSERVAR, MODO_HUMANO),
 }
 
 # Saúde da leitura do canal. `sem_escopo` = a plataforma disse "sem
@@ -416,6 +430,10 @@ MSG_ENVIANDO = "enviando"
 MSG_ENVIADA = "enviada"
 MSG_FALHOU = "falhou"
 MSG_REVISAR = "revisar"
+# O `erro` da `revisar` que uma pessoa marcou "Não saiu" (POST
+# /mensagens/{id}/conferir). No Zap, o status da Meta que chega depois para
+# ela (pelo `biz_opaque`) desfaz a marcação: SAIU (`zap_entrada._status`).
+ERRO_CONFERIDO_NAO_SAIU = "conferido: não saiu"
 
 # ── Situação da conversa ──────────────────────────────────────────────────
 CONVERSA_ABERTA = "aberta"

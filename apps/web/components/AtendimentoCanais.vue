@@ -140,13 +140,15 @@ function opcoesModo(c: Canal) {
   if (externos) return MODOS.filter((m) => externos.includes(m.value) || m.value === c.modo)
   return MODOS.filter((m) => m.value !== 'auto' || props.isAdmin || c.modo === 'auto')
 }
-// A opção que só admin escolhe: o Automático e, na rede social, o Humano
-// (responder e ocultar EM PÚBLICO como a marca — o backend recusa com 403
-// so_admin). Voltar para Observar qualquer um com edição pode.
+// A opção que só admin escolhe: o Automático e, na rede social e no Zap, o
+// Humano (responder EM PÚBLICO / pelo WhatsApp como a marca — o backend
+// recusa com 403 so_admin todo canal externo num modo que envia; o Zap desde
+// 26/10/2026). Voltar para Observar qualquer um com edição pode.
 const REDES = ['instagram', 'facebook']
+const HUMANO_SO_ADMIN = [...REDES, 'whatsapp']
 function soAdmin(c: Canal, modo: string) {
   if (props.isAdmin || modo === c.modo) return false
-  return modo === 'auto' || (!!c.externo_ref && REDES.includes(c.plataforma) && modo === 'humano')
+  return modo === 'auto' || (!!c.externo_ref && HUMANO_SO_ADMIN.includes(c.plataforma) && modo === 'humano')
 }
 // Temu/AliExpress em Observar: não há outro modo possível — o seletor trava.
 function modoTravado(c: Canal) {
@@ -175,7 +177,9 @@ async function mudarModo(c: Canal, ev: Event) {
     observar: 'O DaVinci volta a só ler esta caixa. Ninguém responde por aqui.',
     humano: c.externo_ref && REDES.includes(c.plataforma)
       ? 'Quem tem acesso passa a poder responder e ocultar comentários EM PÚBLICO como a marca, pelo DaVinci (só sai com o envio ligado no servidor). Combine com quem responde pelo app para a pessoa não receber duas respostas.'
-      : `A equipe passa a responder esta caixa pelo DaVinci. Combine com ${fora} para o comprador não receber duas respostas.`,
+      : c.externo_ref && c.plataforma === 'whatsapp'
+        ? 'A equipe passa a responder este número de WhatsApp pelo DaVinci (só sai com as chaves do Zap ligadas no servidor e o número sem pausa). Combine com quem usa o Duoke para o cliente não receber duas respostas.'
+        : `A equipe passa a responder esta caixa pelo DaVinci. Combine com ${fora} para o comprador não receber duas respostas.`,
     copiloto: `A IA passa a sugerir e uma pessoa confere e envia pelo DaVinci. Combine com ${fora} para o comprador não receber duas respostas.`,
     auto: 'A IA passa a ENVIAR SOZINHA nas categorias liberadas desta caixa (sem ninguém conferir). Só ligue depois de provado em Copiloto.',
   }

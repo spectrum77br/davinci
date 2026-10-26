@@ -5,8 +5,10 @@
 - o `/resumo`: UMA linha por número, a saúde do canal (`ok` depois da 1ª
   mensagem; "nenhuma mensagem chegou ainda" antes) e as flags `zap_*`;
 - o "Sugerir" com a frase do Zap; o painel do pedido com o texto do Zap;
-- a trava de 05/10 intacta (P2): o Zap, no formato novo ou no antigo, não
-  sai pelo DaVinci ("Responda pelo Duoke");
+- a trava de 05/10 intacta (P2): o Zap no formato antigo não sai pelo
+  DaVinci ("Responda pelo Duoke"); o do número (Onda 2, 26/10/2026) só por
+  PESSOA e só com as chaves — com o freio único ligado e a chave do Zap
+  desligada, nada sai (`zap_envio_desligado`);
 - o script local (`cadastrar --ficticio` e `simular --processar`): um "oi"
   assinado com o segredo FICTÍCIO entra pelo webhook e aparece na barra como
   PRÉ-VENDA, com a loja `ok` — sem nenhuma chave real.
@@ -22,11 +24,12 @@ from sqlalchemy import select
 
 import app.db as _db
 from app.main import app as app_fastapi
-from app.models import AtendimentoCanal, AtendimentoConversa, User
+from app.models import AtendimentoCanal, AtendimentoConversa, User, UserRole
 from app.routers import atendimento as rota
 from app.services.atendimento import canais_externos, enviar
 from app.services.atendimento.constantes import (
     MOTIVO_ZAP_SEM_ENVIO,
+    MOTIVO_ZAP_SO_PESSOA,
     PLATAFORMA_WHATSAPP,
     motivo_canal_sem_envio,
 )
@@ -54,7 +57,8 @@ def _permissao_fina(monkeypatch):
 
 @pytest.fixture
 async def pessoa(make_user, auth_as) -> User:
-    u = await make_user(permissions=PODE_TUDO)
+    # Só administrador vê o Zap (decisão do Eduardo, 26/10/2026).
+    u = await make_user(permissions=PODE_TUDO, role=UserRole.ADMIN)
     auth_as(u)
     return u
 
@@ -220,34 +224,38 @@ async def test_lista_sugerir_e_painel_da_conversa_do_zap(client, db, zap, pessoa
     assert r.status_code == 200, r.text
     painel = r.json()
     assert painel["envio_foto"]["pode"] is False
-    assert painel["envio_foto"]["codigo"] == "canal_sem_envio"
-    assert "Responda pelo Duoke" in painel["envio_foto"]["motivo"]
+    # Onda 2: a foto de saída é da Onda 3 — por enquanto, só texto.
+    assert painel["envio_foto"]["codigo"] == "foto_nao_suportada"
+    assert "só texto" in painel["envio_foto"]["motivo"]
     assert "Zap" in painel["adspower"]["motivo"]
 
 
 async def test_trava_de_05_10_intacta_o_zap_nao_sai_pelo_davinci(db, zap, pessoa, monkeypatch):
-    """P2: o Zap no formato NOVO (whatsapp) também diz "Responda pelo Duoke"
-    na Onda 1; o formato ANTIGO (Zap com a plataforma da venda) segue recusado."""
-    assert motivo_canal_sem_envio("zap", "whatsapp", {}) == MOTIVO_ZAP_SEM_ENVIO
+    """P2: o Zap no formato ANTIGO (com a plataforma da venda) segue recusado
+    para sempre. O do número (Onda 2, 26/10/2026) responde só por PESSOA e só
+    com a chave do Zap: com o freio único ligado e ela desligada, nada sai —
+    nem pela pessoa (`zap_envio_desligado`), nem pela IA (`canal_sem_envio`)."""
+    assert motivo_canal_sem_envio("zap", "whatsapp", {}) == MOTIVO_ZAP_SO_PESSOA
     assert motivo_canal_sem_envio("zap", "shopee", {}) == MOTIVO_ZAP_SEM_ENVIO
     app, _, _ = await cadastrar(db)
     await gravar_corpo(corpo("texto"), app=app)
     await processar()
     conversa = await _conversa(db)
-    # Mesmo com o freio único ligado, nada sai.
+    # Mesmo com o freio único ligado, nada sai: a chave do Zap nasce desligada.
     monkeypatch.setattr(zap.settings, "atendimento_envio_ativo", True)
+    assert zap.settings.atendimento_zap_envio_ativo is False
     recusa = await enviar.motivo_para_nao_enviar(db, conversa)
     assert recusa is not None
-    assert (recusa.code, recusa.detail) == ("canal_sem_envio", MOTIVO_ZAP_SEM_ENVIO)
+    assert recusa.code == "zap_envio_desligado" and "Duoke" in recusa.detail
     with pytest.raises(EnvioRecusado) as e:
         await enviar.enviar_resposta(db, conversa, "Oi!", user=pessoa)
-    assert e.value.code == "canal_sem_envio"
+    assert e.value.code == "zap_envio_desligado"
     with pytest.raises(EnvioRecusado) as e:
         await enviar.enviar_resposta(db, conversa, "Oi!", user=None, origem="davinci_ia")
-    assert e.value.code == "canal_sem_envio"
+    assert (e.value.code, e.value.detail) == ("canal_sem_envio", MOTIVO_ZAP_SO_PESSOA)
     await db.rollback()
-    # O canal do número nem aceita modo que envie na Onda 1.
-    assert not canais_externos.modo_permitido("whatsapp", "humano")
+    # O canal do número aceita `humano` desde a Onda 2 (só admin liga).
+    assert canais_externos.modo_permitido("whatsapp", "humano")
 
 
 # ─────────────── o script local (Pronto quando, §12) ───────────────
