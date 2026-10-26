@@ -2396,6 +2396,83 @@ const deleting = ref<Set<string>>(new Set())
 function isDeleting(id: string): boolean {
   return deleting.value.has(id)
 }
+// Resposta da lixeira (26/10, caso 300978): além do estorno, o que o DaVinci
+// desfez sozinho — prejuízo automático, situação do pedido e chamado — e o que
+// ficou porque alguém já tinha mexido.
+type ExclusaoResult = {
+  ok: boolean
+  estoque_estornado: boolean
+  mensagem: string | null
+  prejuizos_apagados?: { qtd: number; total: number }
+  prejuizos_mantidos?: { tipo: string | null; prejuizo: number | null; reembolso: number | null; motivo: string | null }[]
+  situacao_revertida?: { de: string; para: number; nome: string; nome_de?: string | null }
+  situacao_recalculada?: { para: number; nome: string }
+  situacao_aviso?: string
+  situacao_devia_ser?: { para: number; nome: string }
+  chamado_apagado?: boolean
+  chamado_mantido?: { id: string; motivo: string } | null
+  chamado_reapontado?: boolean
+}
+const CONDICOES_COM_PREJUIZO = ['Extraviado', 'Sucata', 'Manutenção']
+// O que a exclusão desfaz, em português simples, pro diálogo de confirmação.
+function textoDoQueDesfaz(row: DevolutionRow): string {
+  const itens: string[] = []
+  const cond = row.condicao_produto || ''
+  if (CONDICOES_COM_PREJUIZO.includes(cond)) {
+    itens.push(`• o prejuízo ${cond} que o DaVinci lançou sozinho na tela Reembolso para esta linha (se ninguém lançou valor nem conferiu)`)
+  }
+  if (row.pedido_bling) {
+    const outras = items.value.some((i) => i.id !== row.id && i.pedido_bling === row.pedido_bling)
+    if (outras) {
+      itens.push('• a situação do pedido no Bling é recalculada pelas outras linhas do pedido')
+    } else {
+      const hoje = row.situacao_bling_nome ? ` (hoje: ${row.situacao_bling_nome})` : ''
+      itens.push(`• se esta for a última linha do pedido: a situação no Bling volta para a de antes da devolução${hoje}, se ninguém mudou à mão`)
+      if (row.tem_chamado) {
+        itens.push('• e o chamado aberto automaticamente é apagado, se ninguém mexeu nele (sem protocolo, sem resposta)')
+      }
+    }
+  }
+  return itens.length ? `\n\nO DaVinci também desfaz:\n${itens.join('\n')}\n\nO que alguém já mexeu fica, e você recebe o aviso.` : ''
+}
+// Toast do resultado: o resumo some sozinho; o que NÃO foi desfeito fica até fechar.
+function avisarExclusao(row: DevolutionRow, res: ExclusaoResult) {
+  const partes: string[] = []
+  if (res.situacao_revertida) partes.push(`Pedido voltou para ${res.situacao_revertida.nome}`)
+  else if (res.situacao_recalculada) partes.push(`Pedido foi para ${res.situacao_recalculada.nome}`)
+  const np = res.prejuizos_apagados?.qtd || 0
+  if (np) partes.push(`${np} prejuízo${np > 1 ? 's' : ''} apagado${np > 1 ? 's' : ''} (${brl(res.prejuizos_apagados?.total)})`)
+  if (res.chamado_apagado) partes.push('chamado apagado')
+  const linhas = partes.length ? [partes.join(' · ')] : []
+  if (res.estoque_estornado) linhas.push(res.mensagem || 'Estoque estornado no Bling.')
+  pushToast({ kind: 'success', title: 'Lançamento excluído', lines: linhas })
+
+  const avisos: string[] = []
+  if (res.situacao_aviso) avisos.push(res.situacao_aviso)
+  for (const m of res.prejuizos_mantidos || []) {
+    avisos.push(`O prejuízo ${m.tipo || ''} de ${brl(m.prejuizo)} ficou: ${m.motivo || 'alguém mexeu nele'}. Confira na tela Reembolso.`)
+  }
+  if (res.chamado_mantido) avisos.push(`O chamado ficou: ${res.chamado_mantido.motivo}. Confira na aba Chamados.`)
+  if (avisos.length) {
+    pushToast({
+      kind: res.situacao_devia_ser ? 'error' : 'warning',
+      title: row.pedido_bling ? `Pedido ${row.pedido_bling}: nem tudo foi desfeito` : 'Nem tudo foi desfeito',
+      lines: avisos,
+    }, 0)
+  }
+  // Situação nova: as outras linhas do pedido e a aba Acompanhamento (que
+  // lista só Aguardando Devolução) refletem na hora.
+  const nova = res.situacao_recalculada
+  if (nova && row.pedido_bling) {
+    for (const r of items.value) {
+      if (r.pedido_bling === row.pedido_bling) {
+        r.situacao_bling_id = nova.para
+        r.situacao_bling_nome = nova.nome
+      }
+    }
+  }
+  if (res.situacao_revertida || nova) void loadAcompanhamento()
+}
 async function removeRow(row: DevolutionRow) {
   if (!canDelete.value || isDeleting(row.id)) return
   const label = row.sku || row.pedido_bling || 'esta devolução'
@@ -2428,22 +2505,20 @@ async function removeRow(row: DevolutionRow) {
         : (row.data_devolvido_estoque
           ? ' O estoque já devolvido no Bling NÃO será estornado (lançamento antigo, sem registro do movimento) — ajuste-o direto no Bling.'
           : '')
-  if (!confirm(`Remover o lançamento de "${label}"? Esta ação não pode ser desfeita.${stockNote}`)) return
+  if (!confirm(`Remover o lançamento de "${label}"? Esta ação não pode ser desfeita.${stockNote}${textoDoQueDesfaz(row)}`)) return
   const next = new Set(deleting.value)
   next.add(row.id)
   deleting.value = next
   error.value = null
   try {
-    const res = await api<{ ok: boolean; estoque_estornado: boolean; mensagem: string | null }>(
+    const res = await api<ExclusaoResult>(
       `/api/devolutions/${encodeURIComponent(row.id)}`,
       { method: 'DELETE' },
     )
     items.value = items.value.filter((i) => i.id !== row.id)
     total.value = Math.max(0, total.value - 1)
     void refreshTotals()
-    if (res?.estoque_estornado) {
-      pushToast({ kind: 'success', title: 'Lançamento excluído', lines: [res.mensagem || 'Estoque estornado no Bling.'] })
-    }
+    if (res) avisarExclusao(row, res)
   } catch (e: any) {
     error.value = apiError(e)
     // O servidor pode ter marcado a linha (estorno que pode ter saído): relê

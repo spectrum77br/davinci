@@ -8,10 +8,13 @@ regra do estorno tem que ser UMA só, senão uma lixeira desfaz o estoque e a
 outra deixa fantasma.
 """
 
+from uuid import UUID
+
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Devolution
+from app.services import devolucao_exclusao
 from app.services import devolution_stock_return as dsr
 
 logger = structlog.get_logger()
@@ -41,7 +44,9 @@ class EstornoFalhouError(Exception):
         super().__init__(message)
 
 
-async def excluir_lancamento(session: AsyncSession, row: Devolution) -> dict:
+async def excluir_lancamento(
+    session: AsyncSession, row: Devolution, *, actor_id: UUID | None = None
+) -> dict:
     """Exclui o lançamento. Se ele já devolveu estoque ao Bling (movimento
     registrado em estoque_mov_* e ainda não estornado), dá BAIXA da mesma
     quantidade no Bling ANTES de excluir — Eduardo 03/09: "quando eu clicar em
@@ -51,7 +56,12 @@ async def excluir_lancamento(session: AsyncSession, row: Devolution) -> dict:
     ser estornado daqui (o front avisa: ajustar direto no Bling).
 
     COMMITA a exclusão: o estorno já feito no Bling nunca pode ficar sem a
-    exclusão correspondente (senão o operador exclui de novo e estorna 2×)."""
+    exclusão correspondente (senão o operador exclui de novo e estorna 2×).
+
+    Prejuízo automático (caso 300978, 26/10): linha Extraviado/Sucata/Manutenção
+    leva junto, no mesmo commit, o Refund que o DaVinci criou para ELA — se
+    ninguém mexeu nele; se mexeram, fica e `actor_id` recebe o aviso
+    (services/devolucao_exclusao). Vale para as duas lixeiras."""
     # Estado fresco e travado: um Tentar de novo/save da mesma linha no meio
     # mudaria o que foi decidido aqui (revisão de 15/10).
     await session.refresh(row, with_for_update=True)
@@ -84,6 +94,19 @@ async def excluir_lancamento(session: AsyncSession, row: Devolution) -> dict:
         estorno = rev
 
     dev_id, pedido_bling = row.id, row.pedido_bling
+    condicao = (row.condicao_produto or "").strip()
+    prejuizo: dict | None = None
+    if condicao in devolucao_exclusao.REFUND_CONDICOES:
+        # Savepoint: um erro aqui não pode desfazer o estorno já feito no
+        # Bling — a linha sai mesmo assim e o prejuízo fica (com log).
+        try:
+            async with session.begin_nested():
+                prejuizo = await devolucao_exclusao.desfazer_refund_auto(
+                    session, row, condicao, actor_id, exclusao=True
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("devolution_delete_refund_falhou", id=str(dev_id))
+            prejuizo = {"acao": "erro", "tipo": condicao, "motivo": "não consegui conferir"}
     await session.delete(row)
     await session.commit()
     estornado = bool(estorno and estorno.get("ok"))
@@ -92,9 +115,12 @@ async def excluir_lancamento(session: AsyncSession, row: Devolution) -> dict:
         id=str(dev_id),
         pedido_bling=pedido_bling,
         estoque_estornado=estornado,
+        prejuizo=(prejuizo or {}).get("acao"),
     )
     return {
         "ok": True,
         "estoque_estornado": estornado,
         "mensagem": (estorno or {}).get("message"),
+        # {acao: apagado|mantido|erro, tipo, prejuizo, reembolso, motivo} ou None
+        "prejuizo": prejuizo,
     }

@@ -249,6 +249,10 @@ type ExcluirOut = {
   lancamentos_excluidos: number
   estornos: { sku: string | null; qty: number | null; mensagem: string | null }[]
   situacao: string | null
+  // 26/10 (caso 300978): prejuízos automáticos das linhas excluídas — só vêm
+  // quando há o que dizer.
+  prejuizos_apagados?: { qtd: number; total: number }
+  prejuizos_mantidos?: { tipo: string | null; prejuizo: number | null; reembolso: number | null; motivo: string | null }[]
 }
 
 const PAGE_SIZE = 100
@@ -1600,6 +1604,10 @@ function lancamentoTexto(l: ExclusaoLancamento) {
   return [produto, estado].filter(Boolean).join(' · ') || '(lançamento sem produto)'
 }
 
+// 26/10 (caso 300978): linhas com prejuízo automático na tela Reembolso — ao
+// excluir, o DaVinci apaga o que ele lançou (se ninguém mexeu).
+const CONDICOES_COM_PREJUIZO = ['Extraviado', 'Sucata', 'Manutenção']
+
 // Linha embaixo da caixinha: o que acontece com o estoque desse lançamento ao excluir.
 function estoqueTexto(l: ExclusaoLancamento): { texto: string; alerta: boolean } {
   if (!l.data_devolvido_estoque) return { texto: 'estoque não devolvido', alerta: false }
@@ -1652,14 +1660,25 @@ async function confirmarExcluir() {
     total.value = Math.max(0, total.value - 1)
     const n = res.lancamentos_excluidos
     const estornos = res.estornos.map((x) => `${x.sku || '?'} ×${x.qty ?? '?'}`).join(', ')
+    const np = res.prejuizos_apagados?.qtd || 0
     toasts.success(
       'Chamado excluído',
       [
         n ? `${n} lançamento${n > 1 ? 's' : ''} removido${n > 1 ? 's' : ''}` : '',
         estornos ? `estoque estornado: ${estornos}` : '',
+        np ? `${np} prejuízo${np > 1 ? 's' : ''} apagado${np > 1 ? 's' : ''} (${fmtBRL(res.prejuizos_apagados?.total)})` : '',
         res.situacao ? `Bling → ${res.situacao}` : '',
       ].filter(Boolean).join(' · '),
     )
+    // Prejuízo que alguém já tinha mexido (valor lançado, conferido) fica — aviso até fechar.
+    const mantidos = res.prejuizos_mantidos || []
+    if (mantidos.length) {
+      toasts.push({
+        kind: 'warning',
+        title: 'Prejuízos que ficaram na tela Reembolso',
+        lines: mantidos.map((m) => `${m.tipo || ''} de ${fmtBRL(m.prejuizo)}: ${m.motivo || 'alguém mexeu nele'}`),
+      }, 0)
+    }
     closeExcluir()
     // Excluído de dentro do histórico → o histórico fecha junto (o chamado não existe mais).
     if (hist.open && hist.row?.id === row.id) closeHistorico()
@@ -2769,6 +2788,9 @@ async function confirmarExcluir() {
                 <div class="min-w-0 space-y-0.5">
                   <div class="text-xs">{{ lancamentoTexto(l) }}</div>
                   <div class="text-[11px]" :class="estoqueTexto(l).alerta ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground'">{{ estoqueTexto(l).texto }}</div>
+                  <div v-if="CONDICOES_COM_PREJUIZO.includes(l.condicao_produto || '')" class="text-[11px] text-muted-foreground">
+                    leva junto o prejuízo {{ l.condicao_produto }} que o DaVinci lançou na tela Reembolso (se ninguém lançou valor nem conferiu)
+                  </div>
                 </div>
               </label>
             </div>

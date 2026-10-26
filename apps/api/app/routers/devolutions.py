@@ -29,7 +29,6 @@ from app.models import (
     SituacaoBling,
     User,
 )
-from app.models.enums import AlertSeverity, AlertType
 from app.schemas.devolutions import (
     AcompanhamentoItemOut,
     AcompanhamentoOut,
@@ -55,8 +54,7 @@ from app.schemas.devolutions import (
     SkuSuffixVariant,
     StockCorrectionIn,
 )
-from app.services import chamados_devolucao, devolucao_mensagem_comprador
-from app.services.alerts import emit_alert
+from app.services import chamados_devolucao, devolucao_exclusao, devolucao_mensagem_comprador
 from app.services.devolution_delete import (
     EstoqueConferindoError,
     EstornoFalhouError,
@@ -70,16 +68,16 @@ from app.services.devolution_stock_return import (
     ESTOQUE_FALHOU,
     ESTOQUE_PENDENTES,
     ESTOQUE_SEM_CONFIRMACAO,
-    SITUACAO_AGUARDANDO_DEVOLUCAO,
     _get_bling_client,
-    _is_same_situacao_error,
     _local_bling_product_id,
+    _order_situacao_target,
     _sku_base,
     _sku_tag,
     apply_order_situacao,
     estorno_pendente,
     limpar_status_estoque,
     marcar_estorno_incerto,
+    mudar_situacao_com_desvio,
     registrar_estorno_conferido,
     registrar_ja_entrou,
     registrar_resultado_estoque,
@@ -98,7 +96,7 @@ router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
 # prejuízo = custo do produto, link de abertura obrigatório, não mexe no
 # estoque e patcha a situação do pedido já no add — só que pra PERDIMENTO
 # (83956), não pra Extraviado (services/devolution_stock_return).
-_REFUND_CONDICOES = {"Extraviado", "Sucata", "Manutenção"}
+_REFUND_CONDICOES = devolucao_exclusao.REFUND_CONDICOES
 # Condições cujo reembolso automático é DESFEITO quando a linha sai delas (o
 # produto apareceu / voltou inteiro). Manutenção fica de fora: o refund dela
 # acompanha o custo do reparo, que continua valendo depois do conserto.
@@ -164,62 +162,15 @@ async def _desfazer_refund_auto(
 ) -> str | None:
     """Ao SAIR de Extraviado/Sucata (Eduardo 15/09, caso 293843: lançado
     Extraviado, o pacote chegou e virou Novo) o reembolso automático daquela
-    condição — prejuízo = custo do produto — perde o sentido: apaga se a agência
-    ainda não lançou valor nele; se já lançou, mantém e avisa no sino/Telegram
-    pra revisar. Devolve "apagado" | "mantido" | None (não achou). NÃO commita."""
-    conds = [
-        Refund.tipo == condicao_anterior,
-        func.btrim(Refund.conta) == (row.conta or "").strip(),
-    ]
-    if row.pedido_bling:
-        conds.append(Refund.pedido_bling == row.pedido_bling)
-    elif row.pedido_marketplace:
-        conds.append(Refund.pedido_marketplace == row.pedido_marketplace)
-    else:
-        return None
-    refunds = list(
-        (await session.execute(select(Refund).where(*conds).order_by(desc(Refund.created_at))))
-        .scalars()
-        .all()
+    condição — prejuízo = custo do produto — perde o sentido: apaga se ninguém
+    mexeu nele (reembolso 0, não conferido); se mexeram, mantém e avisa no
+    sino/Telegram pra revisar. A regra é a MESMA da exclusão do lançamento
+    (services/devolucao_exclusao, caso 300978). Devolve "apagado" | "mantido" |
+    None (não achou). NÃO commita."""
+    r = await devolucao_exclusao.desfazer_refund_auto(
+        session, row, condicao_anterior, actor_id, exclusao=False
     )
-    if not refunds:
-        return None
-    # Kit: um refund por linha, sem ligação com a linha — casa pelo custo do
-    # item (prejuízo = custo_produto no auto-create); senão o mais recente.
-    custo = float(row.custo_produto or 0)
-    refund = next(
-        (r for r in refunds if abs(float(r.prejuizo or 0) - custo) < 0.005), refunds[0]
-    )
-    pedido = row.pedido_bling or row.pedido_marketplace or ""
-    if not refund.reembolso:
-        await session.delete(refund)
-        logger.info(
-            "refund_auto_removed",
-            refund_id=str(refund.id),
-            pedido_bling=row.pedido_bling,
-            tipo=condicao_anterior,
-            nova_condicao=row.condicao_produto,
-        )
-        return "apagado"
-    try:
-        await emit_alert(
-            session,
-            user_id=actor_id,
-            type=AlertType.GENERIC,
-            severity=AlertSeverity.WARNING,
-            title=f"Pedido {pedido}: reembolso {condicao_anterior} já tem valor — revisar",
-            message=(
-                f"A devolução do pedido {pedido} saiu de {condicao_anterior} para "
-                f"{row.condicao_produto or '—'} (o produto apareceu), mas o reembolso "
-                f"{condicao_anterior} já tem R$ {float(refund.reembolso):.2f} lançado. "
-                "Confira na tela de Reembolso se ele ainda vale."
-            ),
-            dedupe_key=f"devolucao_refund_revisar:{refund.id}",
-            payload={"refund_id": str(refund.id), "pedido_bling": row.pedido_bling},
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("refund_auto_alert_failed", refund_id=str(refund.id))
-    return "mantido"
+    return r["acao"] if r is not None else None
 
 
 async def _sync_manutencao_to_refund(
@@ -1486,31 +1437,18 @@ async def alterar_situacao_bling(
     if client is None:
         raise HTTPException(503, detail={"code": "bling_sem_integracao"})
 
-    via_desvio = False
+    # Regra do desvio em services/devolution_stock_return — a mesma da volta
+    # da situação ao excluir o lançamento (caso 300978).
     try:
-        await client.update_order_situacao(bling_id, alvo)
+        via_desvio = await mudar_situacao_com_desvio(client, bling_id, alvo, situacao_antiga)
     except httpx.HTTPStatusError as exc:
-        texto = exc.response.text or ""
-        if _is_same_situacao_error(exc.response.status_code, texto):
-            pass  # já está no alvo — idempotente
-        elif str(situacao_antiga) != str(SITUACAO_AGUARDANDO_DEVOLUCAO) and alvo != SITUACAO_AGUARDANDO_DEVOLUCAO:
-            try:
-                await client.update_order_situacao(bling_id, SITUACAO_AGUARDANDO_DEVOLUCAO)
-                await client.update_order_situacao(bling_id, alvo)
-                via_desvio = True
-            except httpx.HTTPStatusError as exc2:
-                raise HTTPException(
-                    400,
-                    detail={
-                        "code": "bling_recusou_situacao",
-                        "message": (exc2.response.text or str(exc2))[:300],
-                    },
-                ) from exc2
-        else:
-            raise HTTPException(
-                400,
-                detail={"code": "bling_recusou_situacao", "message": texto[:300] or str(exc)},
-            ) from exc
+        raise HTTPException(
+            400,
+            detail={
+                "code": "bling_recusou_situacao",
+                "message": (exc.response.text or str(exc))[:300],
+            },
+        ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
             502, detail={"code": "bling_indisponivel", "message": str(exc)[:200]}
@@ -2994,7 +2932,14 @@ async def delete_devolution(
 ) -> dict:
     """Exclui o lançamento, estornando no Bling o estoque que ele devolveu (a
     regra vive em services/devolution_delete — a lixeira do chamado usa a
-    mesma). Se o Bling recusar o estorno, NÃO exclui (502)."""
+    mesma). Se o Bling recusar o estorno, NÃO exclui (502).
+
+    Desfaz também o que o DaVinci fez sozinho por causa da linha (caso 300978,
+    26/10 — services/devolucao_exclusao): o prejuízo automático dela; a situação
+    do pedido (volta para a de antes da devolução quando não sobra linha, senão
+    recalcula); e o chamado automático (apaga quando não sobra linha que peça
+    chamado, senão reaponta a origem). O que alguém mexeu fica e vira aviso.
+    Depois da exclusão nada estoura: falha aqui vira aviso na resposta."""
     row = (
         await session.execute(
             select(Devolution).where(Devolution.id == devolution_id).with_for_update()
@@ -3002,9 +2947,16 @@ async def delete_devolution(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
-    pedido, segurava = row.pedido_bling, status_estoque(row) in ESTOQUE_PENDENTES
+    pedido = (row.pedido_bling or "").strip() or None
+    segurava = status_estoque(row) in ESTOQUE_PENDENTES
+    # Situação que as linhas pediam ANTES (com a que sai): só recalcula se a
+    # linha excluída mudava a conta.
+    alvo_antes: int | None = None
+    if pedido:
+        antes = await devolucao_exclusao.linhas_do_pedido(session, pedido)
+        alvo_antes = _order_situacao_target(devolucao_exclusao.linhas_que_contam(antes))
     try:
-        res = await excluir_lancamento(session, row)
+        res = await excluir_lancamento(session, row, actor_id=user.id)
     except EstoqueConferindoError as e:
         raise HTTPException(
             409, detail={"code": "estoque_conferindo", "message": _MSG_CONFERINDO}
@@ -3017,12 +2969,107 @@ async def delete_devolution(
         raise HTTPException(
             502, detail={"code": "estoque_estorno_falhou", "message": e.message}
         ) from e
-    # A linha excluída segurava o pedido (entrada pendente): recalcula — sem
-    # ela o pedido pode estar resolvido (revisão de 15/10).
-    if segurava and pedido:
-        await apply_order_situacao(session, pedido, actor_id=user.id)
+
+    prejuizo = res.pop("prejuizo", None)
+    out = {**res, **devolucao_exclusao.resumo_prejuizos([prejuizo])}
+    try:
+        out.update(
+            await _desfazer_apos_exclusao(
+                session,
+                pedido=pedido,
+                dev_id=devolution_id,
+                segurava=segurava,
+                alvo_antes=alvo_antes,
+                user=user,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — a linha já saiu; nunca 500 aqui
+        await session.rollback()
+        logger.exception("devolution_delete_desfazer_falhou", pedido_bling=pedido)
+        out["situacao_aviso"] = (
+            "O lançamento foi excluído, mas não consegui conferir a situação do pedido e "
+            f"o chamado automático ({str(exc)[:120]}). Confira o pedido no Bling e na aba Chamados."
+        )
+    return out
+
+
+async def _desfazer_apos_exclusao(
+    session: AsyncSession,
+    *,
+    pedido: str | None,
+    dev_id: UUID,
+    segurava: bool,
+    alvo_antes: int | None,
+    user: User,
+) -> dict:
+    """Situação do pedido e chamado automático depois que a linha saiu (commit
+    próprio — a exclusão já está gravada). Campos novos e opcionais da resposta
+    do DELETE: situacao_revertida {de, para, nome} | situacao_recalculada
+    {para, nome} | situacao_aviso; chamado_apagado; chamado_mantido {id,
+    motivo}; chamado_reapontado."""
+    out: dict = {}
+    restantes = await devolucao_exclusao.linhas_do_pedido(session, pedido)
+    if pedido:
+        contam = devolucao_exclusao.linhas_que_contam(restantes)
+        if not contam:
+            # Nenhuma linha decide mais a situação: volta para a de antes.
+            sit = await devolucao_exclusao.reverter_situacao(session, pedido, actor_id=user.id)
+            await devolucao_exclusao.tirar_da_fila_de_situacao(pedido)
+            st = sit["status"]
+            if st == "revertida":
+                out["situacao_revertida"] = {
+                    "de": sit["de"], "para": sit["para"], "nome": sit["nome"],
+                    "nome_de": sit.get("nome_de"),
+                }
+            elif st == "falhou":
+                out["situacao_aviso"] = (
+                    f"A situação do pedido NÃO voltou no Bling (devia voltar para "
+                    f"{sit['nome']}): {sit.get('erro')}. Mude na mão no Bling."
+                )
+                out["situacao_devia_ser"] = {"para": sit["para"], "nome": sit["nome"]}
+            elif st == "mudada_depois":
+                atual = sit.get("nome_atual")
+                out["situacao_aviso"] = (
+                    "A situação do pedido não foi mexida: alguém mudou depois do lançamento"
+                    + (f" (está em {atual})" if atual else "")
+                    + "."
+                )
+            elif st == "sem_historico" and segurava:
+                # Pedido que só tinha a entrada pendente, sem mudança do fluxo
+                # para desfazer: recalcula como antes (revisão de 15/10).
+                await apply_order_situacao(session, pedido, actor_id=user.id)
+        else:
+            alvo_depois = _order_situacao_target(contam)
+            if segurava or alvo_depois != alvo_antes:
+                if alvo_depois is None:
+                    nome = None
+                    if alvo_antes is not None:
+                        nome = await devolucao_exclusao.nome_situacao(session, alvo_antes)
+                    out["situacao_aviso"] = (
+                        "As linhas que ficaram não definem a situação do pedido: ela continua "
+                        + (f"em {nome}" if nome else "como está")
+                        + " — mude na mão se precisar."
+                    )
+                else:
+                    r = await apply_order_situacao(session, pedido, actor_id=user.id)
+                    nome = await devolucao_exclusao.nome_situacao(session, alvo_depois)
+                    if r is not None and not r.get("ok"):
+                        out["situacao_aviso"] = (
+                            f"A situação do pedido devia ir para {nome}, mas o Bling não "
+                            f"aceitou: {r.get('message') or ''}".strip()
+                        )
+                    else:
+                        out["situacao_recalculada"] = {"para": alvo_depois, "nome": nome}
         await session.commit()
-    return res
+
+    ch = await devolucao_exclusao.desfazer_chamado(
+        session, pedido=pedido, dev_id=dev_id, restantes=restantes, actor_id=user.id
+    )
+    await session.commit()
+    out["chamado_apagado"] = bool(ch["apagados"])
+    out["chamado_mantido"] = ch["mantidos"][0] if ch["mantidos"] else None
+    out["chamado_reapontado"] = ch["reapontado"]
+    return out
 
 
 @router.get("/{devolution_id}", response_model=DevolutionOut)

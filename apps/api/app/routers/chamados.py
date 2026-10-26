@@ -105,6 +105,8 @@ from app.schemas.chamados import (
     ExcluirEstornoOut,
     ExcluirIn,
     ExcluirOut,
+    ExcluirPrejuizoMantidoOut,
+    ExcluirPrejuizosOut,
     ExclusaoLancamentoOut,
     ExclusaoPreviewOut,
     IaAvaliacaoOut,
@@ -121,6 +123,7 @@ from app.services import (
     chamados_ia_aviso,
     chamados_juridico,
     chamados_leitura,
+    devolucao_exclusao,
 )
 from app.services.devolution_delete import (
     EstoqueConferindoError,
@@ -1191,7 +1194,10 @@ async def exclusao_preview(
     )
 
 
-@router.post("/{chamado_id}/excluir", response_model=ExcluirOut)
+# exclude_unset: os prejuízos só aparecem quando há o que dizer (caso 300978).
+@router.post(
+    "/{chamado_id}/excluir", response_model=ExcluirOut, response_model_exclude_unset=True
+)
 async def excluir_chamado(
     chamado_id: UUID,
     body: ExcluirIn,
@@ -1202,7 +1208,12 @@ async def excluir_chamado(
     situação no Bling (se o Bling recusar, nada é apagado), exclui as linhas uma
     a uma com commit por linha (o estorno feito no Bling nunca fica sem a
     exclusão correspondente; se um estorno falhar, para ali e o chamado FICA),
-    e só então apaga o chamado."""
+    e só então apaga o chamado.
+
+    Cada linha leva junto o prejuízo automático que o DaVinci criou para ela,
+    se ninguém mexeu (mesma regra da lixeira da aba Devoluções — caso 300978);
+    a resposta diz quantos saíram e quais ficaram. A situação NÃO é mexida
+    aqui além da que a pessoa escolheu."""
     ch = await _get(session, chamado_id)
     if (ch.pedido_bling or "").strip() and not body.situacao:
         raise HTTPException(422, detail={"code": "chamado_situacao_obrigatoria"})
@@ -1244,11 +1255,12 @@ async def excluir_chamado(
 
     excluidos = 0
     estornos: list[ExcluirEstornoOut] = []
+    prejuizos: list[dict] = []
     for dev in escolhidas:
         # Guardados antes: o rollback do estorno que falha expira o objeto.
         dev_id, sku, qty = dev.id, dev.estoque_mov_sku, dev.estoque_mov_qty
         try:
-            r = await excluir_lancamento(session, dev)
+            r = await excluir_lancamento(session, dev, actor_id=user.id)
         except (EstoqueConferindoError, EstornoSemConfirmacaoError) as e:
             raise HTTPException(
                 409,
@@ -1275,6 +1287,8 @@ async def excluir_chamado(
                 },
             ) from e
         excluidos += 1
+        if r.get("prejuizo"):
+            prejuizos.append(r["prejuizo"])
         if r.get("estoque_estornado"):
             estornos.append(ExcluirEstornoOut(sku=sku, qty=qty, mensagem=r.get("mensagem")))
 
@@ -1290,12 +1304,20 @@ async def excluir_chamado(
         situacao=situacao_aplicada,
         autor=_autor(user),
     )
-    return ExcluirOut(
+    out = ExcluirOut(
         ok=True,
         lancamentos_excluidos=excluidos,
         estornos=estornos,
         situacao=situacao_aplicada,
     )
+    resumo = devolucao_exclusao.resumo_prejuizos(prejuizos)
+    if resumo["prejuizos_apagados"]["qtd"]:
+        out.prejuizos_apagados = ExcluirPrejuizosOut(**resumo["prejuizos_apagados"])
+    if resumo["prejuizos_mantidos"]:
+        out.prejuizos_mantidos = [
+            ExcluirPrejuizoMantidoOut(**m) for m in resumo["prejuizos_mantidos"]
+        ]
+    return out
 
 
 @router.post("/{chamado_id}/reler", response_model=ChamadoOut)

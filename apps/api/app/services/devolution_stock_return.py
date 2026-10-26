@@ -468,6 +468,31 @@ def _is_same_situacao_error(status: int, body: str) -> bool:
     return status == 400 and "mesma situa" in (body or "").lower()
 
 
+async def mudar_situacao_com_desvio(
+    client: Any, bling_id: int, alvo: int, situacao_atual: str | int | None
+) -> bool:
+    """Muda a situação do pedido no Bling com a regra de DESVIO das mudanças
+    feitas por pessoa (endpoint manual da aba Lançamentos e a volta da situação
+    ao excluir o lançamento): se o Bling recusar a ida direta (caminhos de mão
+    única), passa por "Aguardando Devolução" e reaplica o alvo. "Mesma
+    situação" é sucesso. Devolve True quando precisou do desvio; levanta o erro
+    do Bling (httpx) quando nem o desvio passou. Não mexe no espelho local."""
+    try:
+        await client.update_order_situacao(int(bling_id), int(alvo))
+        return False
+    except httpx.HTTPStatusError as exc:
+        if _is_same_situacao_error(exc.response.status_code, exc.response.text or ""):
+            return False  # já está no alvo — idempotente
+        if (
+            str(situacao_atual) == str(SITUACAO_AGUARDANDO_DEVOLUCAO)
+            or int(alvo) == SITUACAO_AGUARDANDO_DEVOLUCAO
+        ):
+            raise
+    await client.update_order_situacao(int(bling_id), SITUACAO_AGUARDANDO_DEVOLUCAO)
+    await client.update_order_situacao(int(bling_id), int(alvo))
+    return True
+
+
 async def _alert_manual_situacao(
     session: AsyncSession, actor_id: UUID | None, pedido: str, target: int
 ) -> None:

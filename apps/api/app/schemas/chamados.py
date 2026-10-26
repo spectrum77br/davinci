@@ -363,12 +363,29 @@ class ExcluirEstornoOut(BaseModel):
     mensagem: str | None = None
 
 
+class ExcluirPrejuizosOut(BaseModel):
+    qtd: int = 0
+    total: float = 0
+
+
+class ExcluirPrejuizoMantidoOut(BaseModel):
+    tipo: str | None = None
+    prejuizo: float | None = None
+    reembolso: float | None = None
+    # O que alguém mexeu (conferido, reembolso lançado…) — por isso ficou.
+    motivo: str | None = None
+
+
 class ExcluirOut(BaseModel):
     ok: bool = True
     lancamentos_excluidos: int = 0
     # Só as linhas que deram baixa no Bling ao serem excluídas.
     estornos: list[ExcluirEstornoOut] = Field(default_factory=list)
     situacao: str | None = None
+    # Caso 300978 (26/10): prejuízos automáticos das linhas excluídas. Só vêm
+    # na resposta quando há o que dizer (a rota usa exclude_unset).
+    prejuizos_apagados: ExcluirPrejuizosOut | None = None
+    prejuizos_mantidos: list[ExcluirPrejuizoMantidoOut] | None = None
 
 
 # ------------------------------------------------------------------ robô (agent)
