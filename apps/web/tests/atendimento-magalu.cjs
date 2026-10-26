@@ -135,9 +135,10 @@ const obs = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoOb
 assert.match(obs, /if \(portal\.value\) return `o \$\{portal\.value\.nome\}`/)
 assert.match(obs, /v-else-if="portal"[\s\S]{0,120}:href="portal\.url"/)
 
-// Barra de lojas: a Magalu vem depois da Amazon, antes das lojas do robô.
+// Barra de lojas: a Magalu vem depois da Amazon, antes das lojas do robô (e o
+// WhatsApp, 19/10/2026, no fim).
 const lojas = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoLojas.vue'), 'utf8')
-assert.match(lojas, /const ORDEM = \['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress', 'site', 'instagram', 'facebook'\]/)
+assert.match(lojas, /const ORDEM = \['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress', 'site', 'instagram', 'facebook', 'whatsapp'\]/)
 
 // Lista: canal na linha (variasCaixas) e a Magalu no filtro só com o /resumo
 // (08/10/2026: o filtro de plataforma virou os chips do topo da lista — só a

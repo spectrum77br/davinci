@@ -1,0 +1,38 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "{{WABA_ID}}",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "{{DISPLAY}}",
+              "phone_number_id": "{{PNID}}"
+            },
+            "statuses": [
+              {
+                "id": "{{ALVO}}",
+                "status": "failed",
+                "timestamp": "{{TS}}",
+                "recipient_id": "{{WA_ID}}",
+                "errors": [
+                  {
+                    "code": 131047,
+                    "title": "Re-engagement message",
+                    "message": "Re-engagement message",
+                    "error_data": {
+                      "details": "Message failed to send because more than 24 hours have passed since the customer last replied to this number."
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

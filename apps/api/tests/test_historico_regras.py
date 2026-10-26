@@ -123,6 +123,11 @@ async def test_toda_tabela_de_negocio_tem_o_gatilho(db):
         "atendimento_regras",
         "atendimento_modelos",
         "atendimento_categorias",
+        # 0430 (Zap): o app, a WABA e o número — pausar o envio, trocar a
+        # etapa ou o token aparece para quem lê (os `*_enc` saem como arquivo).
+        "atendimento_zap_apps",
+        "atendimento_zap_contas",
+        "atendimento_zap_numeros",
     ):
         assert tabela in com, tabela
     for tabela in (
@@ -143,8 +148,46 @@ async def test_toda_tabela_de_negocio_tem_o_gatilho(db):
         "atendimento_carrinhos",
         "atendimento_publicacoes",
         "atendimento_comentarios",
+        # 0430 (Zap): telefone/BSUID/nome do contato, o texto do cliente no
+        # evento do webhook e o nome do arquivo da mídia — a exclusão LGPD
+        # não pode deixar cópia no Histórico.
+        "atendimento_zap_contatos",
+        "atendimento_zap_eventos",
+        "atendimento_zap_midias",
     ):
         assert tabela not in com, tabela
+
+
+def test_zap_sem_corpo_e_fora_do_gatilho():
+    """Zap (docs/zap/desenho.md §4.3): as rotas com corpo sensível não guardam
+    o corpo, e só o app, a WABA e o número recebem o gatilho."""
+    for caminho in (
+        "/api/atendimento/zap/conversas/abc/modelo",
+        "/api/atendimento/zap/conversas/abc/vinculo",
+        "/api/atendimento/zap/contatos/abc/apagar",
+        # O webhook da Meta (já era: `webhooks/`).
+        "/api/webhooks/meta/whatsapp/123456",
+    ):
+        assert nomes.SEM_CORPO.search(caminho), caminho
+    # O cadastro e o "pausar" ficam com o corpo (a máscara esconde o segredo).
+    for caminho in (
+        "/api/atendimento/zap/numeros/abc",
+        "/api/atendimento/zap/numeros/pausar-todos",
+        "/api/atendimento/zap/apps",
+    ):
+        assert not nomes.SEM_CORPO.search(caminho), caminho
+    zap = [
+        "atendimento_zap_apps",
+        "atendimento_zap_contas",
+        "atendimento_zap_numeros",
+        "atendimento_zap_contatos",
+        "atendimento_zap_eventos",
+        "atendimento_zap_midias",
+    ]
+    assert hsql.a_cobrir(zap) == zap[:3]
+    # As colunas cifradas do Zap são segredo para a máscara também.
+    for coluna in ("segredo_enc", "verify_token_enc", "token_enc", "pin_enc"):
+        assert e_segredo(coluna), coluna
 
 
 @pytest.mark.asyncio

@@ -464,6 +464,16 @@ _CLEANUP_TABLES = (
     "marketing_personagens",
     # Atendimento unificado: filhas antes das mães, todas antes de
     # integrations e users (FKs CASCADE/SET NULL para os dois).
+    # 0430: o Zap — mídia (FK → mensagens CASCADE, números), eventos (FK →
+    # apps), contato (FK → números RESTRICT, conversas), número (FK → contas
+    # RESTRICT, canais, marcas), WABA (FK → apps RESTRICT) e app (FK → users):
+    # nesta ordem, antes de mensagens/conversas/canais e de marcas/users.
+    "atendimento_zap_midias",
+    "atendimento_zap_eventos",
+    "atendimento_zap_contatos",
+    "atendimento_zap_numeros",
+    "atendimento_zap_contas",
+    "atendimento_zap_apps",
     # 0366: o registro das automáticas (FK → regras/conversas/mensagens) e
     # as regras (FK → integrations/users): antes de todas.
     "atendimento_automacao_registros",

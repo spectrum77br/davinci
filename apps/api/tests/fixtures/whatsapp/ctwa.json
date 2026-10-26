@@ -1,0 +1,49 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "{{WABA_ID}}",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "{{DISPLAY}}",
+              "phone_number_id": "{{PNID}}"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "{{NOME}}"
+                },
+                "wa_id": "{{WA_ID}}"
+              }
+            ],
+            "messages": [
+              {
+                "from": "{{WA_ID}}",
+                "id": "{{WAMID}}",
+                "timestamp": "{{TS}}",
+                "type": "text",
+                "text": {
+                  "body": "{{TEXTO}}"
+                },
+                "referral": {
+                  "source_url": "https://fb.me/anuncio",
+                  "source_id": "120200000000001",
+                  "source_type": "ad",
+                  "headline": "Mala de bordo",
+                  "body": "Promoção",
+                  "media_type": "image",
+                  "image_url": "https://exemplo.invalid/foto.jpg",
+                  "ctwa_clid": "ARAkLkA8rmlFeiCktE"
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

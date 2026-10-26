@@ -4,6 +4,7 @@ import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import {
   AVISO_SO_LEITURA,
   avisoSimulador,
+  avisoZap,
   categoriasDe,
   comoLista,
   erroDaApi,
@@ -273,6 +274,9 @@ const avisos = computed(() => {
   if (!f.leitura_ativa) out.push({ chave: 'leitura', curto: 'Leitura desligada: sem mensagens novas das lojas', texto: 'Leitura desligada — o DaVinci não está buscando mensagens novas nas lojas; a lista mostra só o que já tinha sido lido.' })
   if (!f.envio_ativo) out.push({ chave: 'envio', curto: 'Envio desligado: responda pelo Duoke', texto: 'Envio desligado — ninguém responde pelo DaVinci; continue respondendo pelo Duoke ou pela central da loja.' })
   if (!f.ia_ativa) out.push({ chave: 'ia', curto: 'IA desligada: sem sugestão de resposta', texto: 'IA desligada — sem sugestão de resposta; dá para ler e (se o envio estiver ligado) responder normalmente.' })
+  // O Zap (WhatsApp, 19/10/2026): só com número de WhatsApp no /resumo.
+  const zap = avisoZap(resumo.value)
+  if (zap) out.push({ chave: 'zap', ...zap })
   // Com a exceção (ex.: Amazon real no teste local), a faixa diz onde CHEGA.
   const sim = avisoSimulador(f)
   if (sim) out.push({ chave: 'simulador', ...sim, forte: true })

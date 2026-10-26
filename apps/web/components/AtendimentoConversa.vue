@@ -250,6 +250,7 @@ import {
   fmtData,
   fmtDataHora,
   fmtDiaHora,
+  janelaDoZap,
   lacunasAbertas,
   limiteDe,
   linhaDoAgente,
@@ -805,8 +806,29 @@ const STATUS_MSG: Record<string, { label: string; cls: string; hint: string }> =
   },
   falhou: { label: 'não saiu', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'a plataforma recusou — a mensagem NÃO chegou ao comprador' },
 }
+// Os tipos do Zap (19/10/2026, docs/zap/desenho.md §5.4): o que o leitor do
+// WhatsApp grava em `mensagem.tipo` — áudio, localização, contato, figurinha
+// e botão (resposta de lista/botão ou de modelo).
 const TIPO_LABEL: Record<string, string> = {
   imagem: 'imagem', video: 'vídeo', produto: 'produto', pedido: 'cartão do pedido', arquivo: 'arquivo', outro: 'conteúdo',
+  audio: 'áudio', localizacao: 'localização', contato: 'contato', figurinha: 'figurinha', botao: 'botão',
+}
+// A mídia do cliente no Zap chega SEM link: o anexo é `{tipo, midia_id, mime,
+// status: 'pendente'}` e quem guarda a nossa cópia é o baixador (Onda 3,
+// §5.5). Até lá o balão diz o que é e em que pé está — "[Foto — aguardando
+// download]" —, não um "imagem" solto que parece arquivo quebrado.
+const MIDIA_ZAP_ROTULO: Record<string, string> = { imagem: 'Foto', audio: 'Áudio', video: 'Vídeo', arquivo: 'Documento', figurinha: 'Figurinha' }
+const MIDIA_ZAP_ESTADO: Record<string, string> = {
+  pendente: 'aguardando download',
+  baixando: 'aguardando download',
+  expirada: 'a mídia expirou antes de ser baixada',
+  grande_demais: 'grande demais para baixar',
+  falhou: 'não deu para baixar',
+}
+// Só as chaves do próprio mapa (o `status`/`tipo` do anexo vêm de fora) — e
+// sem o Object.hasOwn, que o Safari < 15.4 não tem.
+function doMapa(mapa: Record<string, string>, chave: string): boolean {
+  return Object.prototype.hasOwnProperty.call(mapa, chave)
 }
 
 // Links no texto viram clicáveis (igual Chamados, sem v-html: o texto vem da
@@ -871,6 +893,13 @@ function pecasDe(m: Mensagem): Peca[] {
     }
     const bruta = s('url') || s('link') || s('src') || s('image_url') || s('thumb_url') || s('url_imagem')
     const url = /^https?:\/\//i.test(bruta) ? bruta : null
+    // Zap: a mídia que ainda não tem a nossa cópia (`midia_id` sem link).
+    const midiaZap = a.midia_id !== undefined && a.midia_id !== null && a.midia_id !== ''
+    const st = s('status').toLowerCase()
+    if (midiaZap && !url && doMapa(MIDIA_ZAP_ESTADO, st)) {
+      const rotulo = doMapa(MIDIA_ZAP_ROTULO, tipo) ? MIDIA_ZAP_ROTULO[tipo] : 'Anexo'
+      return { chave, tipo: 'nome', nome: `[${rotulo} — ${MIDIA_ZAP_ESTADO[st]}]` }
+    }
     // Sem nome, o tipo em português ("vídeo"), não o código cru da API ("video").
     const nome = s('nome') || s('name') || s('filename') || s('titulo') || TIPO_LABEL[tipo] || tipo || 'anexo'
     const imagem = !!url && (tipo.includes('imag') || tipo.startsWith('image') || /\.(png|jpe?g|webp|gif)(\?|$)/i.test(url))
@@ -1120,6 +1149,9 @@ const prazo = computed(() => (conversa.value ? prazoDe(conversa.value, agora.val
 const modo = computed(() => modoInfo(detalhe.value?.envio.modo))
 const janela = computed(() => {
   const c = conversa.value
+  // Zap: a janela de 24 h do WhatsApp, SEMPRE à mostra (neutra; âmbar só nas
+  // últimas 2 h; vermelha quando fecha) — `janelaDoZap`.
+  if (c?.canal === 'zap') return janelaDoZap(c.pode_enviar_ate, agora.value)
   if (!c?.pode_enviar_ate) return null
   const fim = new Date(c.pode_enviar_ate).getTime()
   if (Number.isNaN(fim)) return null
@@ -1658,10 +1690,11 @@ async function conferir(m: Mensagem, saiu: boolean) {
 const gerandoIds = reactive(new Set<string>())
 const gerando = computed(() => gerandoIds.has(props.conversaId))
 // Fechada/bloqueada: o backend não gera (e o botão só levaria a um "não
-// sugeriu nada" sem explicação).
+// sugeriu nada" sem explicação). No Zap a IA não entra (nem sugere, nem
+// envia — premissa P8 de docs/zap/desenho.md): o backend recusaria.
 const podeSugerir = computed(() => {
   const c = conversa.value
-  return !!c && canAvaliar.value && !c.somente_leitura && !c.ia_pausada && c.situacao !== 'fechada' && c.situacao !== 'bloqueada'
+  return !!c && c.canal !== 'zap' && canAvaliar.value && !c.somente_leitura && !c.ia_pausada && c.situacao !== 'fechada' && c.situacao !== 'bloqueada'
     && props.flags?.ia_ativa !== false && !rascunho.value
 })
 // Por que não veio sugestão, quando a API diz (`motivo`). Sem motivo, a frase
@@ -1896,8 +1929,9 @@ function aoCarregarReclamacoes(r: ReclamacoesResposta) {
   reclamacoesQtd.value = r?.itens?.length || 0
 }
 // Carrinho do site e comentário das redes (02/10/2026) não têm pedido de
-// plataforma: nem reclamação nem avaliação para buscar.
-const CANAIS_SEM_PEDIDO = new Set(['carrinho', 'comentario'])
+// plataforma: nem reclamação nem avaliação para buscar. O Zap (19/10/2026)
+// também não, até o "transferir para a venda" (Onda 6 de docs/zap/desenho.md).
+const CANAIS_SEM_PEDIDO = new Set(['carrinho', 'comentario', 'zap'])
 const temCartaoReclamacao = computed(() => {
   const c = conversa.value
   return !!c && !c.id.startsWith('ig:') && !c.somente_leitura && !CANAIS_SEM_PEDIDO.has(c.canal)
@@ -1908,6 +1942,14 @@ const canalExterno = computed<'carrinho' | 'comentario' | null>(() => {
   const c = conversa.value?.canal
   return c === 'carrinho' || c === 'comentario' ? c : null
 })
+// A conversa do Zap (WhatsApp, 19/10/2026). Ela também não tem pedido de
+// plataforma: o painel do pedido, a gaveta, o "ver no pedido" e os blocos de
+// marketplace (pausar a IA, o perfil do AdsPower) somem — mas o `canalExterno`
+// NÃO se amplia: ele também esconde a caixa de resposta e diz "nada é
+// mandado", e no Zap a equipe responde (com o envio ligado; até lá a caixa
+// diz "Responda pelo Duoke").
+const ehZap = computed(() => conversa.value?.canal === 'zap')
+const semPainelDePedido = computed(() => !!canalExterno.value || ehZap.value)
 // O cartão do topo, aberto (padrão) ou recolhido. Recolher só esconde
 // (v-show): o texto que estava sendo escrito na resposta não se perde.
 const cartaoExternoAberto = ref(true)
@@ -1922,6 +1964,7 @@ const seloCanal = computed(() => {
   if (c.id.startsWith('ig:')) return 'Direct'
   if (c.canal === 'comentario') return ehMencao.value ? 'Menção' : 'Comentário'
   if (c.canal === 'carrinho') return 'Carrinho'
+  if (c.canal === 'zap') return canalLabel(c.canal)
   if (variasCaixas(c.plataforma) || c.plataforma === 'amazon' || c.canal === 'avaliacao') return canalLabel(c.canal)
   return ''
 })
@@ -2445,7 +2488,7 @@ watch(() => props.conversaId, (novo, velho) => {
                   <span class="ml-1 hidden 2xl:inline">{{ atribuidaAMim ? 'Soltar' : 'Atribuir a mim' }}</span>
                 </Button>
                 <Button
-                  v-if="!canalExterno"
+                  v-if="!semPainelDePedido"
                   size="sm"
                   variant="outline"
                   class="h-7 px-2 text-xs"
@@ -2610,7 +2653,7 @@ watch(() => props.conversaId, (novo, velho) => {
               <!-- 🖥 AdsPower: o perfil da loja desta conversa, no computador de quem
                    clicou (RF11). Desligado com o porquê quando não há perfil. -->
               <AtendimentoAdsPower
-                v-if="!conversa.somente_leitura && !canalExterno"
+                v-if="!conversa.somente_leitura && !semPainelDePedido"
                 :conversa-id="conversa.id"
                 :perfil="painelDados?.adspower ?? null"
                 :carregando="painelCarregando"
@@ -2635,7 +2678,8 @@ watch(() => props.conversaId, (novo, velho) => {
                 <PanelTopOpen v-else class="size-3.5" />
                 <span class="ml-1">{{ canalExterno === 'carrinho' ? 'Carrinho' : 'Publicação' }}</span>
               </Button>
-              <Button v-else size="sm" :variant="pedidoVisivel ? 'secondary' : 'outline'" class="h-7 px-2 text-xs" :title="pedidoVisivel ? 'esconder o pedido' : 'mostrar o pedido'" @click="alternarPedido">
+              <!-- O Zap (19/10/2026) não tem pedido: nem o botão, nem o painel. -->
+              <Button v-else-if="!semPainelDePedido" size="sm" :variant="pedidoVisivel ? 'secondary' : 'outline'" class="h-7 px-2 text-xs" :title="pedidoVisivel ? 'esconder o pedido' : 'mostrar o pedido'" @click="alternarPedido">
                 <PanelRightClose v-if="pedidoVisivel" class="size-3.5" />
                 <PanelRightOpen v-else class="size-3.5" />
                 <span class="ml-1">Pedido</span>
@@ -2740,7 +2784,7 @@ watch(() => props.conversaId, (novo, velho) => {
         >
           <Ban class="size-3.5 shrink-0" />
           <span class="min-w-0 flex-1 truncate">{{ agCancelamento.faixa }}</span>
-          <button v-if="!pedidoVisivel && !canalExterno" type="button" class="shrink-0 underline hover:opacity-80" title="abrir o painel do pedido, com o motivo completo" @click="alternarPedido">ver no pedido</button>
+          <button v-if="!pedidoVisivel && !semPainelDePedido" type="button" class="shrink-0 underline hover:opacity-80" title="abrir o painel do pedido, com o motivo completo" @click="alternarPedido">ver no pedido</button>
         </div>
 
         <!-- Cartão da reclamação/mediação/devolução da plataforma (item 1): nº,
@@ -3333,10 +3377,11 @@ watch(() => props.conversaId, (novo, velho) => {
     </div>
 
     <!-- pedido -->
-    <div v-if="gaveta && !telaLarga && !canalExterno" class="fixed inset-0 z-40 bg-black/40" @click="gaveta = false" />
-    <!-- Carrinho/comentário (02/10/2026): sem pedido — o cartão deles é o do topo. -->
+    <div v-if="gaveta && !telaLarga && !semPainelDePedido" class="fixed inset-0 z-40 bg-black/40" @click="gaveta = false" />
+    <!-- Carrinho/comentário (02/10/2026): sem pedido — o cartão deles é o do
+         topo. O Zap (19/10/2026) também não tem pedido (até a Onda 6). -->
     <aside
-      v-if="detalhe && pedidoVisivel && !canalExterno"
+      v-if="detalhe && pedidoVisivel && !semPainelDePedido"
       class="flex min-h-0 flex-col border-l bg-card"
       :class="telaLarga ? 'w-[340px] shrink-0' : 'fixed inset-y-0 right-0 z-50 w-[min(380px,92vw)] shadow-2xl'"
     >

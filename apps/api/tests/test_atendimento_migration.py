@@ -1,4 +1,4 @@
-"""As migrations 0346…0362 do atendimento criam EXATAMENTE o que o model declara (e desfazem).
+"""As migrations 0346…0430 do atendimento criam EXATAMENTE o que o model declara (e desfazem).
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Sem este teste, uma coluna esquecida na 0346 (ou um índice parcial
@@ -68,6 +68,13 @@ atendimento: `agente` e `auto_orientacao` no canal) rodam em cima de todas;
 os downgrades voltam o catálogo ao de antes de cada uma. As 4 tabelas novas
 da 0420 (fatos, pares, replay e o instantâneo dos sites da marca) são
 conferidas em `test_atendimento_agente_esquema.py`, com a semente.
+
+A 0430 (19/10/2026, o canal Zap — WhatsApp Cloud API, docs/zap/desenho.md
+§4.2) cria as seis `atendimento_zap_*` (app, WABA, número, contato, eventos
+do webhook e mídia): CHECKs das colunas de estado, os UNIQUE parciais do
+contato (bsuid e wa_id_norm) e o índice parcial da fila de eventos. A FK
+`numeros.marca_id` exige o stub `marcas` no rascunho. Roda em cima de todas e
+o downgrade dela volta o catálogo ao de depois da 0416.
 """
 
 # ruff: noqa: S608
@@ -84,6 +91,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Base
+from app.models import atendimento_zap as zap_model
 from app.services.atendimento import automacoes_catalogo as cat
 
 _VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
@@ -99,6 +107,7 @@ _MIGRATION_FALTA = _VERSOES / "0396_ultima_loja_qualquer.py"
 _MIGRATION_VISTO = _VERSOES / "0399_atendimento_visto_em.py"
 _MIGRATION_NOTIFICACOES = _VERSOES / "0416_atendimento_notificacoes_nativas.py"
 _MIGRATION_AGENTE = _VERSOES / "0420_atendimento_agente.py"
+_MIGRATION_ZAP = _VERSOES / "0430_atendimento_zap.py"
 # A regra de palavras das pastas de e-mail (0387, a camada do atendimento sobre
 # a Central de e-mail) é conferida em `test_mail_atendimento_migration.py`,
 # junto das tabelas `mail_*` da mesma migration. As tabelas novas da 0420 (o
@@ -238,11 +247,29 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     agente = _carregar_migration(_MIGRATION_AGENTE)
     assert agente.revision == "0420_atendimento_agente"
     assert agente.down_revision == "0419_londres_logistica_editar"
+    zap = _carregar_migration(_MIGRATION_ZAP)
+    assert zap.revision == "0430_atendimento_zap"
+    # Nasceu 0415 no desenho (17/10), virou 0417 em 19/10 e 0430 em 26/10:
+    # o origin chegou primeiro com as 0415–0429.
+    assert zap.down_revision == "0429_compra_contabilidade"
+    # Os valores dos CHECKs da migration são cópia dos do model.
+    for na_migration, no_model in (
+        (zap.CONTA_STATUS, zap_model.ZAP_CONTA_STATUS),
+        (zap.NUMERO_ETAPAS, zap_model.ZAP_NUMERO_ETAPAS),
+        (zap.NUMERO_SAUDE, zap_model.ZAP_NUMERO_SAUDE),
+        (zap.OPT_OUT_TIPOS, zap_model.ZAP_OPT_OUT_TIPOS),
+        (zap.EVENTO_TIPOS, zap_model.ZAP_EVENTO_TIPOS),
+        (zap.EVENTO_RESULTADOS, zap_model.ZAP_EVENTO_RESULTADOS),
+        (zap.MIDIA_DIRECOES, zap_model.ZAP_MIDIA_DIRECOES),
+        (zap.MIDIA_STATUS, zap_model.ZAP_MIDIA_STATUS),
+    ):
+        assert na_migration == no_model
     # 7 da primeira parte + 3 da parte 2 (categorias e os índices do cartão
     # "Cliente") + 2 da 0353 (histórico da etiqueta e reclamações) + 3 da
     # 0362 (carrinhos, publicações e comentários) + 2 da 0366 (regras e
-    # registro das mensagens automáticas) + 1 da 0383 (trocas de produto).
-    assert len(TABELAS) == 18
+    # registro das mensagens automáticas) + 1 da 0383 (trocas de produto) +
+    # 6 da 0430 (o Zap).
+    assert len(TABELAS) == 24
     assert {
         "atendimento_categorias",
         "atendimento_pedidos_comprador",
@@ -255,6 +282,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         "atendimento_automacao_regras",
         "atendimento_automacao_registros",
         "atendimento_trocas",
+        "atendimento_zap_apps",
+        "atendimento_zap_contas",
+        "atendimento_zap_numeros",
+        "atendimento_zap_contatos",
+        "atendimento_zap_eventos",
+        "atendimento_zap_midias",
     } <= set(TABELAS)
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
@@ -276,6 +309,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     await db.execute(text(f'CREATE TABLE "{rascunho}".redes_sociais (id uuid PRIMARY KEY)'))
     # A 0420 liga o fato ao produto (FK) e só semeia o de produto que existe.
     await db.execute(text(f'CREATE TABLE "{rascunho}".products (id uuid PRIMARY KEY)'))
+    # A 0430 liga o número do Zap à marca (`atendimento_zap_numeros.marca_id`).
+    await db.execute(text(f'CREATE TABLE "{rascunho}".marcas (id uuid PRIMARY KEY)'))
     await db.commit()
 
     def _rodar(conn, passo: str, migrations) -> None:
@@ -298,6 +333,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     visto.SCHEMA = rascunho
     notificacoes.SCHEMA = rascunho
     agente.SCHEMA = rascunho
+    zap.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -537,6 +573,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await conn.run_sync(_rodar, "upgrade", (agente,))
         await db.commit()
 
+        # 0430: o canal Zap (as seis `atendimento_zap_*`).
+        antes_da_0430 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (zap,))
+        await db.commit()
+
         da_migration = await _catalogo(db, rascunho, rascunho)
         do_model = await _catalogo(db, schema_model, schema_model)
         assert da_migration["tabelas"] == TABELAS
@@ -600,6 +642,35 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "fk_atendimento_trocas_conversa_id_atendimento_conversas",
             "fk_atendimento_trocas_mensagem_aceite",
             "fk_atendimento_trocas_criado_por_users",
+            # 0430: o Zap — os UNIQUE da chave de cada nível (app_id, waba_id,
+            # phone_number_id, a chave do evento, a mídia por número), os
+            # CHECKs das colunas de estado e as FKs (a do contato com nome à mão).
+            "pk_atendimento_zap_apps",
+            "uq_atendimento_zap_apps_app_id",
+            "fk_atendimento_zap_apps_criado_por_users",
+            "uq_atendimento_zap_contas_waba_id",
+            "ck_atendimento_zap_contas_status",
+            "fk_atendimento_zap_contas_app_ref_atendimento_zap_apps",
+            "uq_atendimento_zap_numeros_phone_number_id",
+            "uq_atendimento_zap_numeros_canal_id",
+            "ck_atendimento_zap_numeros_etapa",
+            "ck_atendimento_zap_numeros_saude_status",
+            "fk_atendimento_zap_numeros_conta_ref_atendimento_zap_contas",
+            "fk_atendimento_zap_numeros_marca_id_marcas",
+            "fk_atendimento_zap_numeros_canal_id_atendimento_canais",
+            "uq_atendimento_zap_contatos_conversa_id",
+            "ck_atendimento_zap_contatos_opt_out_tipo",
+            "fk_atendimento_zap_contatos_numero",
+            "fk_atendimento_zap_contatos_conversa_id_atendimento_conversas",
+            "uq_atendimento_zap_eventos_chave",
+            "ck_atendimento_zap_eventos_tipo",
+            "ck_atendimento_zap_eventos_resultado",
+            "fk_atendimento_zap_eventos_app_ref_atendimento_zap_apps",
+            "uq_atendimento_zap_midias_numero_ref_media_id",
+            "ck_atendimento_zap_midias_direcao",
+            "ck_atendimento_zap_midias_status",
+            "fk_atendimento_zap_midias_numero_ref_atendimento_zap_numeros",
+            "fk_atendimento_zap_midias_mensagem_id_atendimento_mensagens",
         } <= nomes
         assert "ck_atendimento_canais_integracao_ou_robo" not in nomes
         assert da_migration["colunas"] == do_model["colunas"]
@@ -743,10 +814,81 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         # 0416: o JSON nasce vazio; as datas, anuláveis.
         assert cols[("atendimento_canais", "notificacoes_migracao")][4:] == ("NO", "'{}'::jsonb")
         assert cols[("atendimento_conversas", "notificacoes_corte_em")][4:] == ("YES", None)
+        assert cols[("atendimento_conversas", "notificacoes_iniciais")][4:] == ("NO", "'{}'::jsonb")
+        assert cols[("atendimento_conversas", "notificacoes_visto_em")][4:] == ("YES", None)
         # 0420: o canal nasce SEM o agente e sem assunto de orientação liberado.
         assert cols[("atendimento_canais", "agente")][4:] == ("NO", "false")
         assert cols[("atendimento_canais", "auto_orientacao")][4:] == ("NO", "'[]'::jsonb")
         assert cols[("atendimento_canais", "auto_agente")][4:] == ("NO", "'[]'::jsonb")
+
+        # 0430: TUDO nasce desligado — o número nasce sem envio, em preparo, sem
+        # lista de teste e sem tentativa de registro; o app nasce ativo e de
+        # produção; o contato, sem bloqueio; o evento novo, sem `proxima_em`.
+        assert cols[("atendimento_zap_numeros", "envio_ligado")][4:] == ("NO", "false")
+        assert cols[("atendimento_zap_numeros", "etapa")][4:] == (
+            "NO",
+            "'preparando'::character varying",
+        )
+        assert cols[("atendimento_zap_numeros", "destinos_teste")][2] == "_varchar"
+        assert cols[("atendimento_zap_numeros", "destinos_teste")][4:] == (
+            "NO",
+            "'{}'::character varying[]",
+        )
+        assert cols[("atendimento_zap_numeros", "registro_tentativas")][2] == "_timestamptz"
+        assert cols[("atendimento_zap_numeros", "pin_enc")][2:5] == ("bytea", None, "YES")
+        assert cols[("atendimento_zap_apps", "segredo_enc")][2:5] == ("bytea", None, "NO")
+        assert cols[("atendimento_zap_apps", "verify_token_enc")][2:5] == ("bytea", None, "NO")
+        assert cols[("atendimento_zap_apps", "teste")][4:] == ("NO", "false")
+        assert cols[("atendimento_zap_apps", "ativo")][4:] == ("NO", "true")
+        assert cols[("atendimento_zap_contas", "token_enc")][2:5] == ("bytea", None, "NO")
+        assert cols[("atendimento_zap_contas", "token_nunca_vence")][4:] == ("NO", "false")
+        assert cols[("atendimento_zap_contatos", "bloqueado")][4:] == ("NO", "false")
+        assert cols[("atendimento_zap_eventos", "id")][2] == "int8"
+        assert cols[("atendimento_zap_eventos", "proxima_em")][4:] == ("YES", None)
+        assert cols[("atendimento_zap_eventos", "recebido_em")][4:] == ("NO", "now()")
+        assert cols[("atendimento_zap_midias", "status")][4:] == (
+            "NO",
+            "'pendente'::character varying",
+        )
+        assert cols[("atendimento_zap_midias", "sha256_local")][2:4] == ("bpchar", 64)
+        # Os dois UNIQUE PARCIAIS do contato (P3) e a fila (o evento novo, com
+        # `proxima_em` NULL, primeiro; só o que falta processar).
+        assert "UNIQUE" in defs["uq_atendimento_zap_contatos_bsuid"]
+        assert "(numero_ref, bsuid)" in defs["uq_atendimento_zap_contatos_bsuid"]
+        assert "WHERE (bsuid IS NOT NULL)" in defs["uq_atendimento_zap_contatos_bsuid"]
+        assert "(numero_ref, wa_id_norm)" in defs["uq_atendimento_zap_contatos_wa_id_norm"]
+        assert "WHERE (wa_id_norm IS NOT NULL)" in defs["uq_atendimento_zap_contatos_wa_id_norm"]
+        assert "(proxima_em NULLS FIRST, id)" in defs["ix_atendimento_zap_eventos_fila"]
+        assert "WHERE (processado_em IS NULL)" in defs["ix_atendimento_zap_eventos_fila"]
+        assert "UNIQUE" not in defs["ix_atendimento_zap_eventos_fila"]
+        assert "(mensagem_id)" in defs["ix_atendimento_zap_midias_mensagem_id"]
+        assert "ON DELETE RESTRICT" in restricoes[
+            "fk_atendimento_zap_contas_app_ref_atendimento_zap_apps"
+        ]
+        assert "ON DELETE RESTRICT" in restricoes[
+            "fk_atendimento_zap_numeros_conta_ref_atendimento_zap_contas"
+        ]
+        assert "ON DELETE RESTRICT" in restricoes["fk_atendimento_zap_contatos_numero"]
+        assert "ON DELETE SET NULL" in restricoes["fk_atendimento_zap_numeros_marca_id_marcas"]
+        assert "ON DELETE SET NULL" in restricoes[
+            "fk_atendimento_zap_numeros_canal_id_atendimento_canais"
+        ]
+        assert "ON DELETE SET NULL" in restricoes[
+            "fk_atendimento_zap_contatos_conversa_id_atendimento_conversas"
+        ]
+        assert "ON DELETE CASCADE" in restricoes[
+            "fk_atendimento_zap_midias_mensagem_id_atendimento_mensagens"
+        ]
+        assert "'aguardando_duoke'" in restricoes["ck_atendimento_zap_numeros_etapa"]
+        assert "IS NULL" in restricoes["ck_atendimento_zap_contatos_opt_out_tipo"]
+        assert "IS NULL" in restricoes["ck_atendimento_zap_eventos_resultado"]
+
+        # O downgrade da 0430 volta EXATAMENTE ao catálogo de depois da 0420.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (zap,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0430
+        assert not [t for t in antes_da_0430["tabelas"] if t.startswith("atendimento_zap_")]
 
         # O downgrade da 0420 volta EXATAMENTE ao catálogo de depois da 0416
         # (e as tabelas dela somem).

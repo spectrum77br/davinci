@@ -108,6 +108,9 @@ export const PLATAFORMAS_AG: { valor: string; nome: string }[] = [
   { valor: 'temu', nome: 'Temu' },
   { valor: 'aliexpress', nome: 'AliExpress' },
   { valor: 'site', nome: 'Sites' },
+  // O WhatsApp (19/10/2026) está nos chips da Caixa; aqui só aparece se algum
+  // pedido da lista vier dele (com o nome, não o código cru).
+  { valor: 'whatsapp', nome: 'WhatsApp' },
 ]
 export function plataformasDaLista(pedidos: { plataforma: string | null }[] | null | undefined): { valor: string; nome: string; n: number }[] {
   const conta: Record<string, number> = {}

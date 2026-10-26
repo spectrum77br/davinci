@@ -30,6 +30,13 @@ export type Flags = {
   // Há chave Claude no servidor (20/10/2026): o botão "Agente (Claude)" dos
   // canais aparece. Só o sim/não — a chave nunca vem para a tela.
   agente_disponivel?: boolean
+  // Zap (WhatsApp Cloud API, RF10 — docs/zap/desenho.md §6.1): as chaves
+  // PRÓPRIAS do Zap, que nascem desligadas. `zap_leitura_ativa` = o worker
+  // processa o que o webhook guardou; `zap_envio_ativo` = a resposta pelo Zap
+  // (além do freio único `envio_ativo`, do botão do número e do modo). A API
+  // antiga não manda (= desligadas).
+  zap_leitura_ativa?: boolean
+  zap_envio_ativo?: boolean
 }
 export type Canal = {
   id: string
@@ -649,6 +656,10 @@ export type PlataformaInfo = { value: string; nome: string; curto: string; cor: 
 // Site e Facebook (02/10/2026) são canais EXTERNOS: o carrinho abandonado
 // dos sites Charlots e Uranyx (lido do site) e os comentários da Página
 // (como os do Instagram). Têm canal na aba Lojas, mas não manual nem modelo.
+// WhatsApp (19/10/2026, Onda 1 de docs/zap/desenho.md) é canal EXTERNO
+// também: um canal por NÚMERO das lojas (`externo_ref = "zap:<phone_number_id>"`,
+// canal `zap`), pela API oficial da Meta. "Zap" é o nome curto (o do selo e
+// da aba); a cor é o verde da marca, só a cor.
 export const PLATAFORMAS_ATENDIMENTO: PlataformaInfo[] = [
   { value: 'shopee', nome: 'Shopee', curto: 'Shopee', cor: 'bg-orange-600', de: 'da Shopee' },
   { value: 'ml', nome: 'Mercado Livre', curto: 'ML', cor: 'bg-yellow-400 ring-1 ring-yellow-500/70', de: 'do Mercado Livre' },
@@ -660,10 +671,11 @@ export const PLATAFORMAS_ATENDIMENTO: PlataformaInfo[] = [
   { value: 'instagram', nome: 'Instagram', curto: 'Insta', cor: 'bg-pink-500', de: 'do Instagram' },
   { value: 'facebook', nome: 'Facebook', curto: 'Face', cor: 'bg-[#1877F2]', de: 'do Facebook' },
   { value: 'site', nome: 'Site', curto: 'Site', cor: 'bg-teal-600', de: 'do site' },
+  { value: 'whatsapp', nome: 'WhatsApp', curto: 'Zap', cor: 'bg-[#25D366]', de: 'do WhatsApp' },
 ]
-// Só na tela/aba Lojas: as redes e o site não têm manual da IA nem modelo
-// (o Instagram também tem o Direct, só leitura).
-export const PLATAFORMAS_EXTERNAS = ['instagram', 'facebook', 'site']
+// Só na tela/aba Lojas: as redes, o site e o WhatsApp não têm manual da IA
+// nem modelo (o Instagram também tem o Direct, só leitura).
+export const PLATAFORMAS_EXTERNAS = ['instagram', 'facebook', 'site', 'whatsapp']
 // As que têm canal/modo/manual (as externas ficam de fora).
 export const PLATAFORMAS_COM_CANAL = PLATAFORMAS_ATENDIMENTO.filter((p) => !PLATAFORMAS_EXTERNAS.includes(p.value))
 // O nome do GRUPO na barra de lojas ("Sites", no plural: Charlots e Uranyx).
@@ -673,11 +685,14 @@ export function nomeDoGrupo(plataforma: string | null | undefined): string {
   return NOME_GRUPO[cod] || plataformaInfo(cod).nome
 }
 // O modo que a aba Lojas aceita no canal externo (constantes.MODOS_EXTERNOS):
-// o site não tem por onde responder; a rede, só por pessoa.
+// o site não tem por onde responder; a rede, só por pessoa; o WhatsApp, só
+// Observar na Onda 1 (quem responde é o Duoke — o `humano` entra com o envio,
+// na Onda 2; IA sozinha, nunca).
 export const MODOS_EXTERNOS: Record<string, string[]> = {
   site: ['observar'],
   instagram: ['observar', 'humano'],
   facebook: ['observar', 'humano'],
+  whatsapp: ['observar'],
 }
 
 export function plataformaInfo(codigo: string | null | undefined): PlataformaInfo {
@@ -822,7 +837,8 @@ export const CANAIS_ATENDIMENTO: { value: string; label: string; plataforma: str
 // Também não é caixa configurável; a resposta dela é PÚBLICA.
 // `carrinho` e `comentario` (02/10/2026): o carrinho abandonado do site e o
 // comentário/menção das redes — também não são caixas que se configuram.
-const CANAL_LABEL: Record<string, string> = { chat: 'Chat', pergunta: 'Pergunta', pos_venda: 'Pós-venda', email: 'E-mail', sac: 'SAC', dm: 'Direct', reclamacao: 'Reclamação', avaliacao: 'Avaliação', carrinho: 'Carrinho', comentario: 'Comentário' }
+// `zap` (19/10/2026): a caixa de um número de WhatsApp (uma por número).
+const CANAL_LABEL: Record<string, string> = { chat: 'Chat', pergunta: 'Pergunta', pos_venda: 'Pós-venda', email: 'E-mail', sac: 'SAC', dm: 'Direct', reclamacao: 'Reclamação', avaliacao: 'Avaliação', carrinho: 'Carrinho', comentario: 'Comentário', zap: 'Zap' }
 export function canalLabel(canal: string | null | undefined): string {
   return CANAL_LABEL[canal || ''] || canal || ''
 }
@@ -896,6 +912,8 @@ export const LIMITE_CARACTERES: Record<string, number> = {
   'amazon:email': 2000,
   'magalu:chat': 2200,
   'magalu:sac': 3000,
+  // Texto do WhatsApp (Cloud API): 4.096 caracteres por mensagem.
+  'whatsapp:zap': 4096,
 }
 export function limiteDe(plataforma: string | null, canal: string | null): number | null {
   if (plataforma && canal) return LIMITE_CARACTERES[`${plataforma}:${canal}`] ?? null
@@ -1878,6 +1896,49 @@ export function prazoDe(c: Pick<ConversaResumo, 'aguardando_resposta' | 'prazo_r
     return { nivel: 'vencendo', texto: `vence em ${duracao(falta / 60000)}`, titulo: `responder até ${quando}`, cls: 'bg-amber-500/20 text-amber-800 dark:text-amber-300' }
   }
   return { nivel: 'ok', texto: `vence em ${duracao(falta / 60000)}`, titulo: `responder até ${quando}`, cls: 'bg-muted text-muted-foreground' }
+}
+
+// ─── Zap: a janela de 24 h do WhatsApp (19/10/2026, docs/zap/desenho.md §8.2) ─
+// Passadas 24 h da última mensagem do cliente, o WhatsApp só aceita um MODELO
+// aprovado pela Meta (pago — fica para a Onda 5). `pode_enviar_ate` = a
+// última fala do cliente + 24 h (o servidor grava). Na conversa do Zap a
+// faixa aparece SEMPRE — neutra com a janela aberta, âmbar só nas últimas
+// 2 h (a régua VENCENDO do Instagram, services/atendimento/instagram.py) e
+// vermelha quando fecha. A régua genérica de 48 h deixaria o Zap sempre âmbar.
+export const JANELA_ZAP_VENCENDO_MS = 2 * 3600 * 1000
+export type JanelaZap = { nivel: 'aberta' | 'vencendo' | 'fechada'; texto: string; cls: string }
+export function janelaDoZap(podeEnviarAte: string | null | undefined, agora = Date.now()): JanelaZap | null {
+  const d = data(podeEnviarAte)
+  if (!d) return null
+  const falta = d.getTime() - agora
+  if (falta <= 0) {
+    return {
+      nivel: 'fechada',
+      cls: 'border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300',
+      texto: `Passaram 24 h: o WhatsApp só aceita um modelo aprovado (a janela fechou em ${fmtDataHora(podeEnviarAte)}).`,
+    }
+  }
+  // Hoje: só a hora ("até 14:32"); amanhã, com o dia.
+  const ate = d.toDateString() === new Date(agora).toDateString() ? fmtHora(podeEnviarAte) : fmtDataHora(podeEnviarAte)
+  const texto = `Janela do WhatsApp: dá para responder até ${ate} (faltam ${duracao(falta / 60000)}).`
+  if (falta < JANELA_ZAP_VENCENDO_MS) return { nivel: 'vencendo', cls: 'border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-200', texto }
+  return { nivel: 'aberta', cls: 'bg-muted/40 text-muted-foreground', texto }
+}
+
+// A faixa do topo da página (19/10/2026): "Zap: envio desligado — responda
+// pelo Duoke", só quando existe número de WhatsApp no /resumo (um canal ou uma
+// linha da barra). Na Onda 1 o Zap não tem envio no DaVinci: a faixa fica
+// enquanto o freio único e a chave do Zap não estiverem os dois ligados.
+export function temZap(r: Pick<Resumo, 'canais' | 'lojas'> | null | undefined): boolean {
+  return (r?.canais || []).some((c) => c.plataforma === 'whatsapp') || (r?.lojas || []).some((l) => l.plataforma === 'whatsapp')
+}
+export function avisoZap(r: Pick<Resumo, 'canais' | 'lojas' | 'flags'> | null | undefined): { curto: string; texto: string } | null {
+  if (!r || !temZap(r)) return null
+  if (r.flags?.envio_ativo && r.flags?.zap_envio_ativo) return null
+  return {
+    curto: 'Zap: envio desligado — responda pelo Duoke',
+    texto: 'Zap (WhatsApp) — o envio pelo DaVinci está desligado: as conversas dos números de WhatsApp aparecem aqui só para leitura; responda pelo Duoke.',
+  }
 }
 
 // Relógio da tela: "há X min" e o selo de prazo andam sozinhos sem refazer a

@@ -1,0 +1,10 @@
+{
+  "object": "instagram",
+  "entry": [
+    {
+      "id": "{{WABA_ID}}",
+      "time": "{{ENTRY_TIME}}",
+      "messaging": []
+    }
+  ]
+}

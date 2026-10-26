@@ -94,6 +94,7 @@ from app.routers import garantias as garantias_router
 from app.routers import users as users_router
 from app.routers import celulares as celulares_router
 from app.routers import webhooks as webhooks_router
+from app.routers import whatsapp_webhook as whatsapp_webhook_router
 from app.services.bootstrap import promote_owner_if_needed
 from app.services.sentry import init_sentry
 from app.worker_pool import close_arq_pool
@@ -238,6 +239,9 @@ app.include_router(jobs_router.router)
 app.include_router(sync_router.router)
 app.include_router(webhooks_router.router)
 app.include_router(nfse_webhook_router.router)  # POST /api/webhooks/nfeio
+# Zap (WhatsApp Cloud API, RF10 — docs/zap/desenho.md §5.1): GET/POST
+# /api/webhooks/meta/whatsapp/{app_id}. Só grava o evento cru; o worker processa.
+app.include_router(whatsapp_webhook_router.router)
 app.include_router(settings_router.router)
 app.include_router(alerts_router.router)
 app.include_router(claude_conector_router.router)

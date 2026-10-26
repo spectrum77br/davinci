@@ -524,6 +524,37 @@ class Settings(BaseSettings):
     # "Enviar" recusa com `envio_desligado`; o canal ainda precisa estar em
     # humano/copiloto/auto.
     atendimento_envio_ativo: bool = False
+    # Zap (WhatsApp Cloud API oficial da Meta, RF10 — docs/zap/desenho.md §6.1):
+    # TUDO nasce desligado. O webhook (`/api/webhooks/meta/whatsapp/{app_id}`)
+    # guarda o evento cru mesmo com as chaves desligadas — quem decide
+    # processar é o worker. Para sair mensagem, tudo ao mesmo tempo: o freio
+    # único (`atendimento_envio_ativo`), `atendimento_zap_envio_ativo`, o
+    # botão do número (`atendimento_zap_numeros.envio_ligado`, no banco) e o
+    # canal num modo que envia. Nenhuma lista libera uma chave desligada: as de
+    # teste só RESTRINGEM.
+    #   • leitura: o worker processa os eventos (também precisa da
+    #     `atendimento_leitura_ativa`);
+    #   • destinos_teste: wa_ids por vírgula; não vazia = SÓ eles recebem
+    #     (comparados pelo número normalizado, com ou sem o 9º dígito);
+    #   • max_dia_numero: o teto PADRÃO por número por dia — cada número tem o
+    #     seu (`numeros.teto_dia`, a partir do volume medido no Duoke);
+    #   • max_contato_10min: contra laço, envios ao MESMO contato em 10 min;
+    #   • retencao_midia_dias: [VETÁVEL] decisão LGPD do Eduardo;
+    #   • marcar_lida (tiques azuis) e modelos (pagos): Onda 5; ia: Onda 7.
+    atendimento_zap_leitura_ativa: bool = False
+    atendimento_zap_envio_ativo: bool = False
+    atendimento_zap_destinos_teste: str = ""
+    atendimento_zap_max_dia_numero: int = 300
+    atendimento_zap_max_contato_10min: int = 8
+    atendimento_zap_midia_max_mb: int = 32
+    # Versão da Graph API PRÓPRIA do Zap: subir a do Instagram
+    # (`meta_graph_version`) não muda os payloads do WhatsApp sem aviso.
+    meta_whatsapp_graph_version: str = "v26.0"
+    atendimento_zap_retencao_eventos_dias: int = 30
+    atendimento_zap_retencao_midia_dias: int = 180
+    atendimento_zap_marcar_lida: bool = False
+    atendimento_zap_modelos_ativo: bool = False
+    atendimento_zap_ia_ativa: bool = False
     # Gera rascunhos com a IA. Separado do envio pelo mesmo motivo do
     # `dm_ia_ativa`: dá pra ler uma semana do que ela TERIA dito antes de
     # deixar alguém enviar.

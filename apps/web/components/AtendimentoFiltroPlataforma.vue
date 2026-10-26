@@ -46,7 +46,9 @@ import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import type { Resumo } from '~/components/AtendimentoPlataforma.vue'
 
 export type GrupoCaixa = { valor: string; plataformas: string[]; nome: string }
-// A ordem do Eduardo (07/10/2026).
+// A ordem do Eduardo (07/10/2026). O WhatsApp (19/10/2026, o Zap — todos os
+// números juntos) entra no fim, depois das Redes, como a aba Zap vem depois
+// do E-mail.
 export const GRUPOS_CAIXA: GrupoCaixa[] = [
   { valor: 'ml', plataformas: ['ml'], nome: 'Mercado Livre' },
   { valor: 'shopee', plataformas: ['shopee'], nome: 'Shopee' },
@@ -57,6 +59,7 @@ export const GRUPOS_CAIXA: GrupoCaixa[] = [
   { valor: 'aliexpress', plataformas: ['aliexpress'], nome: 'AliExpress' },
   { valor: 'site', plataformas: ['site'], nome: 'Sites' },
   { valor: 'instagram,facebook', plataformas: ['instagram', 'facebook'], nome: 'Redes' },
+  { valor: 'whatsapp', plataformas: ['whatsapp'], nome: 'WhatsApp' },
 ]
 
 // O número do chip: o do Duoke (`nao_lidas_duoke`, na Caixa), o "falta

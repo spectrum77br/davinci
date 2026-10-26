@@ -1130,6 +1130,14 @@ class FlagsOut(BaseModel):
     # o botão "Agente (Claude)" dos canais aparece. Só o sim/não — a chave
     # nunca sai do servidor.
     agente_disponivel: bool = False
+    # Zap (WhatsApp Cloud API, 19/10/2026 — docs/zap/desenho.md §8.1): as
+    # chaves EFETIVAS. `zap_leitura_ativa` = `atendimento_leitura_ativa` E
+    # `atendimento_zap_leitura_ativa` (o worker processa o que o webhook
+    # guardou); `zap_envio_ativo` = o freio único (`atendimento_envio_ativo`) E
+    # `atendimento_zap_envio_ativo` — o botão de cada número e o modo do canal
+    # ainda valem por cima (Onda 2). As duas nascem False.
+    zap_leitura_ativa: bool = False
+    zap_envio_ativo: bool = False
 
 
 class LeituraParadaOut(BaseModel):

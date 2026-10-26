@@ -99,8 +99,10 @@ function filtros(o = {}) {
 
 // ------------------------------------------------ funções puras
 {
-  // A ordem do Eduardo, e "Redes" = Instagram + Facebook.
-  assert.deepEqual(F.GRUPOS_CAIXA.map((g) => g.nome), ['Mercado Livre', 'Shopee', 'TikTok', 'Amazon', 'Magalu', 'Temu', 'AliExpress', 'Sites', 'Redes'])
+  // A ordem do Eduardo, e "Redes" = Instagram + Facebook; o WhatsApp (o Zap,
+  // 19/10/2026) no fim.
+  assert.deepEqual(F.GRUPOS_CAIXA.map((g) => g.nome), ['Mercado Livre', 'Shopee', 'TikTok', 'Amazon', 'Magalu', 'Temu', 'AliExpress', 'Sites', 'Redes', 'WhatsApp'])
+  assert.deepEqual(F.GRUPOS_CAIXA.find((g) => g.nome === 'WhatsApp').plataformas, ['whatsapp'])
   assert.deepEqual(F.GRUPOS_CAIXA.find((g) => g.nome === 'Redes').plataformas, ['instagram', 'facebook'])
   assert.equal(F.GRUPOS_CAIXA.find((g) => g.nome === 'Redes').valor, 'instagram,facebook')
 
@@ -315,8 +317,13 @@ async function principal() {
   assert.deepEqual([ig.plataforma, ig.plataforma_topo], ['instagram', 'instagram,facebook'])
   assert.deepEqual(LJ.corteDaBarra(ig), ['instagram', 'facebook'])
   assert.equal(F.chipDoTopo(redes, ig), true, 'o botão mostra "Redes"')
+  // O WhatsApp (o Zap, 19/10/2026) é grupo do menu: o nome dele na barra corta.
+  const zap = LJ.filtrosDoGrupo(filtros(), 'whatsapp')
+  assert.deepEqual([zap.plataforma, zap.plataforma_topo], ['whatsapp', 'whatsapp'])
+  assert.deepEqual(LJ.corteDaBarra(zap), ['whatsapp'])
+  assert.equal(F.topoDoValor('whatsapp'), 'whatsapp')
   // Plataforma fora do menu: filtra, não corta.
-  assert.equal(LJ.filtrosDoGrupo(filtros(), 'whatsapp').plataforma_topo, '')
+  assert.equal(LJ.filtrosDoGrupo(filtros(), 'xyz').plataforma_topo, '')
   // O grupo do menu de um valor ('' = nenhum).
   assert.equal(F.topoDoValor(''), '')
   assert.equal(F.topoDoValor('shopee'), 'shopee')

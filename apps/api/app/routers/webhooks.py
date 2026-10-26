@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import unicodedata
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -683,28 +684,45 @@ META_SIG_FAIL_KEY = "webhook:meta:sig_fail_count"
 META_SIG_FAIL_SNAPSHOT_KEY = "webhook:meta:sig_fail_last"
 
 
-def _verify_meta_signature(body: bytes, header: str | None) -> bool:
-    """HMAC-SHA256 do corpo CRU com a chave secreta do app.
+def assinatura_meta_ok(body: bytes, header: str | None, segredos: Sequence[bytes]) -> bool:
+    """`X-Hub-Signature-256: sha256=<hex>` = HMAC-SHA256 do corpo CRU com um dos segredos. PURA.
 
     O corpo cru importa: a Meta assina os bytes que enviou, com os não-ASCII
     já escapados. Reserializar o JSON (`json.dumps`) quebra a assinatura de
     forma intermitente — e em português, com acento e emoji, quebra sempre.
+
+    Segredo vazio não vale (nunca assina "com nada"). Quem passa mais de um é
+    o Zap (`routers/whatsapp_webhook.py`, 19/10/2026); o Instagram passa um só.
     """
-    s = get_settings()
-    # A do app do Instagram primeiro: é ela que assina o objeto `instagram`.
-    secret = (s.instagram_app_secret or s.meta_app_secret or "").encode()
-    if not secret or not header:
+    if not header:
         return False
     sig = header.strip()
     if not sig.startswith("sha256="):
         return False
-    expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
     # BYTES, não str: `compare_digest` com str não-ASCII levanta TypeError,
     # e header é decodificado em latin-1 — um curl com byte alto viraria 500
     # em vez de 403, com traceback no log.
-    return hmac.compare_digest(
-        expected.encode(), sig[len("sha256=") :].encode("latin-1", "ignore")
-    )
+    recebida = sig[len("sha256=") :].encode("latin-1", "ignore")
+    ok = False
+    for segredo in segredos:
+        if not segredo:
+            continue
+        esperado = hmac.new(segredo, body, hashlib.sha256).hexdigest().encode()
+        # Sem sair no primeiro acerto: o tempo não diz qual segredo bateu.
+        ok = hmac.compare_digest(esperado, recebida) or ok
+    return ok
+
+
+def _verify_meta_signature(body: bytes, header: str | None) -> bool:
+    """HMAC-SHA256 do corpo CRU com a chave secreta do app do Instagram.
+
+    Invólucro de `assinatura_meta_ok` (19/10/2026: o Zap reaproveita a parte
+    pura). O comportamento do Instagram não muda.
+    """
+    s = get_settings()
+    # A do app do Instagram primeiro: é ela que assina o objeto `instagram`.
+    secret = (s.instagram_app_secret or s.meta_app_secret or "").encode()
+    return assinatura_meta_ok(body, header, [secret])
 
 
 def _pediu_humano(texto: str | None) -> bool:

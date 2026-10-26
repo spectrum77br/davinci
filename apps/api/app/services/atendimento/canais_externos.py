@@ -1,4 +1,4 @@
-"""Canal EXTERNO do atendimento: sites e redes sociais (02/10/2026, migration 0362).
+"""Canal EXTERNO do atendimento: sites, redes sociais e o Zap (02/10/2026, migration 0362).
 
 Até aqui todo canal tinha por onde ler: a integração de marketplace (API da
 loja) ou o robô do Mac mini (perfil do AdsPower). O carrinho abandonado dos
@@ -9,6 +9,10 @@ canal é identificado por uma REFERÊNCIA externa em
   site:<site>                      — "site:charlots", "site:uranyx"
   rede:instagram:<ig_user_id>      — a conta profissional do Instagram
   rede:facebook:<page_id>          — a Página do Facebook
+  zap:<phone_number_id>            — um número de WhatsApp das lojas (RF10,
+                                     19/10/2026, docs/zap/desenho.md): o id
+                                     do número na Cloud API da Meta, só
+                                     dígitos — NÃO é o telefone
 
 O nome que a tela mostra ("Charlots", "@charlots_br") fica em
 `cursor["externo"]["nome"]` (como o robô guarda o da loja em
@@ -17,14 +21,17 @@ rede, em `rede_social_id` — é por ela que a barra de lojas junta o Direct e
 os comentários da mesma conta.
 
 O cron do sync nunca vê estes canais (ele junta com `integrations`); quem os
-cria é o leitor de cada um (`carrinhos.py`, `redes.py`), sempre por
-`garantir_canal` — nasce em `observar`, como toda loja.
+cria é o leitor de cada um (`carrinhos.py`, `redes.py`, o processador do Zap
+`zap_entrada.py`), sempre por `garantir_canal` — nasce em `observar`, como
+toda loja. O número do Zap também guarda o canal em
+`atendimento_zap_numeros.canal_id`.
 
 Nada aqui commita (só flush) e nada sai para fora.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -39,12 +46,17 @@ from app.services.atendimento.constantes import (
     MODOS_EXTERNOS,
     NOME_SITE,
     PLATAFORMA_SITE,
+    PLATAFORMA_WHATSAPP,
     PLATAFORMAS_REDE,
     SITES,
 )
 
 PREFIXO_SITE = "site:"
 PREFIXO_REDE = "rede:"
+PREFIXO_ZAP = "zap:"
+# O `phone_number_id` da Meta: só dígitos, até o tamanho da coluna
+# (`atendimento_zap_numeros.phone_number_id`, String(32)).
+_PNID = re.compile(r"[0-9]{1,32}")
 # Onde o nome e o resto do que o leitor quer guardar moram no `cursor`.
 CHAVE_CURSOR = "externo"
 _NOME_MAX = 120
@@ -71,9 +83,23 @@ def ref_da_rede(plataforma: str, conta_id: str | int) -> str:
     return f"{PREFIXO_REDE}{plat}:{conta}"
 
 
+def ref_do_zap(phone_number_id: str | int) -> str:
+    """'1065…' → 'zap:1065…' (o id do NÚMERO na Cloud API, não o telefone).
+
+    Fora do formato (vazio, com letra, com ':' ou maior que 32 dígitos) →
+    `ReferenciaInvalida`: o canal de um número tem de ser achado pelo mesmo
+    `phone_number_id` que o webhook manda em `metadata`.
+    """
+    pnid = str(phone_number_id if phone_number_id is not None else "").strip()
+    if not _PNID.fullmatch(pnid):
+        raise ReferenciaInvalida("phone_number_id inválido")
+    return f"{PREFIXO_ZAP}{pnid}"
+
+
 def partes(ref: str | None) -> tuple[str, str, str] | None:
     """A referência em (tipo, plataforma, id): ('site', 'site', 'charlots'),
-    ('rede', 'instagram', '1784…'). Formato estranho → None.
+    ('rede', 'instagram', '1784…'), ('zap', 'whatsapp', '<phone_number_id>').
+    Formato estranho → None.
     """
     texto = (ref or "").strip()
     if texto.startswith(PREFIXO_SITE):
@@ -83,7 +109,16 @@ def partes(ref: str | None) -> tuple[str, str, str] | None:
         plat, _, conta = texto[len(PREFIXO_REDE) :].partition(":")
         if plat in PLATAFORMAS_REDE and conta:
             return ("rede", plat, conta)
+    if texto.startswith(PREFIXO_ZAP):
+        pnid = texto[len(PREFIXO_ZAP) :]
+        return ("zap", PLATAFORMA_WHATSAPP, pnid) if _PNID.fullmatch(pnid) else None
     return None
+
+
+def pnid_do_canal(canal: AtendimentoCanal | None) -> str | None:
+    """O `phone_number_id` do canal do Zap; None para os outros."""
+    p = partes(canal.externo_ref) if canal is not None else None
+    return p[2] if p and p[0] == "zap" else None
 
 
 def site_do_canal(canal: AtendimentoCanal | None) -> str | None:
@@ -93,7 +128,7 @@ def site_do_canal(canal: AtendimentoCanal | None) -> str | None:
 
 
 def eh_externo(canal: AtendimentoCanal | None) -> bool:
-    """Canal de site ou de rede (sem integração e sem robô)."""
+    """Canal de site, de rede ou do Zap (sem integração e sem robô)."""
     return (
         canal is not None
         and canal.integration_id is None
@@ -108,13 +143,21 @@ def dados_externo(canal: AtendimentoCanal) -> dict:
 
 
 def nome_do_canal(canal: AtendimentoCanal) -> str:
-    """O nome da 'loja' na barra: o gravado pelo leitor; sem ele, o do site ou a referência."""
+    """O nome da 'loja' na barra: o gravado pelo leitor; sem ele, o do site, o
+    do número do Zap ou a referência.
+
+    No Zap o leitor grava `nome_na_barra`, o `verified_name` ou o número de
+    exibição (`garantir_canal(nome=…)`); sem nada gravado ainda, a linha diz
+    que é um número de WhatsApp — nunca o `phone_number_id` cru sozinho.
+    """
     nome = str(dados_externo(canal).get("nome") or "").strip()
     if nome:
         return nome
     p = partes(canal.externo_ref)
     if p and p[0] == "site":
         return NOME_SITE.get(p[2], p[2].capitalize())
+    if p and p[0] == "zap":
+        return f"WhatsApp · número {p[2]}"
     return canal.externo_ref or "—"
 
 
@@ -126,6 +169,8 @@ def descricao_da_origem(canal: AtendimentoCanal) -> str:
     if p and p[0] == "rede":
         rede = "Instagram" if p[1] == "instagram" else "Facebook"
         return f"{rede} · token do DaVinci Publicador"
+    if p and p[0] == "zap":
+        return "WhatsApp · API oficial da Meta (webhook)"
     return "origem externa"
 
 

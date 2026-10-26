@@ -12,6 +12,9 @@
 // branco no quadrado azul (30/09/2026, idem: o azul da marca e a inicial).
 // Facebook = "f" branco no círculo azul; Site = globo branco no quadrado
 // verde-azulado (02/10/2026: os sites Charlots e Uranyx — não é marca).
+// WhatsApp = balão branco com o fone no círculo verde (19/10/2026, o Zap —
+// desenho próprio, só a cor da marca; NÃO o `Zap` do lucide, que é um raio e
+// já é o ícone das Automáticas).
 import { computed, useId } from 'vue'
 
 // Nome para o leitor de tela. Cópia curta de propósito: importar de
@@ -27,6 +30,7 @@ const NOMES: Record<string, string> = {
   instagram: 'Instagram',
   facebook: 'Facebook',
   site: 'Site',
+  whatsapp: 'WhatsApp',
 }
 
 const props = withDefaults(defineProps<{
@@ -144,6 +148,13 @@ const letra = computed(() => (cod.value[0] || '?').toUpperCase())
         <ellipse cx="12" cy="12" rx="2.6" ry="6.2" />
         <path d="M5.8 12h12.4" stroke-linecap="round" />
       </g>
+    </template>
+
+    <!-- WhatsApp (o Zap): balão branco com o fone no círculo verde -->
+    <template v-else-if="cod === 'whatsapp'">
+      <circle cx="12" cy="12" r="10" fill="#25D366" />
+      <path d="M7.55 16.15L6.4 19.3l3.45-1.68A6.3 6.3 0 1 0 7.55 16.15z" fill="none" stroke="#fff" stroke-width="1.5" stroke-linejoin="round" />
+      <path d="M9.9 9.3c.15 2.3 2.5 4.75 4.8 4.9" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" />
     </template>
 
     <!-- Desconhecida: bolinha cinza com a inicial -->

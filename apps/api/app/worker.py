@@ -1349,6 +1349,46 @@ async def atendimento_redes(ctx: dict) -> dict | None:
         return None
 
 
+# Zap (WhatsApp Cloud API, RF10 — docs/zap/desenho.md §5.2): o webhook só
+# grava o evento cru (`atendimento_zap_eventos`); quem processa é o worker.
+# O job vem do webhook (coalescido: um por rajada de 3 s) e o cron de 1 min
+# é a rede. Os dois saem na hora com a leitura desligada
+# (`atendimento_leitura_ativa` E `atendimento_zap_leitura_ativa`, as duas
+# nascem desligadas): os eventos ficam pendentes até ligarem.
+
+
+async def atendimento_zap_processar(ctx: dict) -> dict | None:  # noqa: ARG001
+    """Enfileirado pelo webhook do Zap: processa a caixa de entrada do WhatsApp.
+
+    Um evento por transação, com commit a cada um (o "Enviar" da tela nunca
+    espera um lote) — ver services/atendimento/zap_entrada.py. Uma rodada por
+    vez (trava no Redis, 120 s); apaga o pedido coalescido ao começar.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_zap_leitura_ativa):
+        return None
+    from app.services.atendimento import zap_entrada as _zap_entrada
+
+    try:
+        return await _zap_entrada.rodada(origem="job")
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_zap_processar_falhou", err=type(e).__name__)
+        return None
+
+
+async def atendimento_zap_varrer(ctx: dict) -> dict | None:  # noqa: ARG001
+    """A cada minuto (segundo 45): a rede do Zap — o que o job não pegou
+    (enfileirar falhou, evento em backoff, status esperando a mensagem)."""
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_zap_leitura_ativa):
+        return None
+    from app.services.atendimento import zap_entrada as _zap_entrada
+
+    try:
+        return await _zap_entrada.rodada(origem="cron")
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_zap_varrer_falhou", err=type(e).__name__)
+        return None
+
+
 # A ponte da Central de e-mail (08/10/2026): uma volta por minuto, com a
 # trava no Redis (uma de cada vez — a reserva da meta é a segunda defesa).
 _MAIL_PONTE_TRAVA = "davinci:mail:ponte:trava"
@@ -5098,6 +5138,10 @@ class WorkerSettings:
         # Carrinho dos sites e redes sociais (02/10/2026).
         func(atendimento_carrinhos, timeout=600),
         func(atendimento_redes, timeout=840),
+        # Zap (19/10/2026): o processador da caixa de entrada do webhook. O
+        # `timeout` = a trava da rodada no Redis (120 s); a rodada para sozinha
+        # aos 90 s (`zap_entrada.ORCAMENTO_S`) e o resto fica para a próxima.
+        func(atendimento_zap_processar, timeout=120),
         # Mensagens automáticas (05/10/2026): em `functions` para dar para
         # enfileirar uma rodada à mão.
         func(atendimento_automacoes, timeout=110),
@@ -5491,6 +5535,11 @@ class WorkerSettings:
             run_at_startup=False,
             timeout=840,
         ),
+        # Zap (19/10/2026): a rede de 1 min do processador (o job do webhook é o
+        # caminho rápido). No SEGUNDO 45 — os outros crons deste worker começam
+        # no 0 e o índice da Caixa no 30. `timeout=120` = a trava da rodada.
+        # Sai na hora com a leitura do Zap desligada.
+        cron(atendimento_zap_varrer, second={45}, run_at_startup=False, timeout=120),
         # Mensagens automáticas (05/10/2026) nos minutos pares. `timeout=110`
         # = a trava da rodada no Redis: o job morto pelo arq não deixa a
         # trava viva por cima da próxima. Sai na hora com o interruptor

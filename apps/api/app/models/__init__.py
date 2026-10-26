@@ -23,6 +23,14 @@ from app.models.atendimento import (
     AtendimentoSiteProduto,
     AtendimentoTroca,
 )
+from app.models.atendimento_zap import (
+    AtendimentoZapApp,
+    AtendimentoZapConta,
+    AtendimentoZapContato,
+    AtendimentoZapEvento,
+    AtendimentoZapMidia,
+    AtendimentoZapNumero,
+)
 from app.models.audit import AuditFinding, AuditRun, AuditUpload
 from app.models.auth_code import AuthCode
 from app.models.automacao import Automacao
@@ -342,6 +350,12 @@ __all__ = [
     "AtendimentoRegra",
     "AtendimentoSiteProduto",
     "AtendimentoTroca",
+    "AtendimentoZapApp",
+    "AtendimentoZapConta",
+    "AtendimentoZapContato",
+    "AtendimentoZapEvento",
+    "AtendimentoZapMidia",
+    "AtendimentoZapNumero",
     "ClaudeConector",
     "AlertSeverity",
     "AlertType",

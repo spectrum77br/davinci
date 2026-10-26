@@ -265,7 +265,10 @@ GET_QUE_GRAVA = re.compile(
 # resposta ao comprador do Atendimento, que pode ter nome e endereço dele).
 SEM_CORPO = re.compile(
     r"^/api/(auth/|pricing/mega/login|companies/unlock|financeiro/valuation/unlock|nfse/unlock"
-    r"|claude-mcp/|webhooks/|aprovar/|atendimento/(conversas|rascunhos|mensagens)/)"
+    r"|claude-mcp/|webhooks/|aprovar/|atendimento/(conversas|rascunhos|mensagens)/"
+    # Zap (19/10/2026, docs/zap/desenho.md §4.3): o corpo leva os parâmetros
+    # do modelo, a busca do vínculo por CPF e o pedido de exclusão LGPD.
+    r"|atendimento/zap/(conversas|contatos)/)"
     # Garantias (07/10/2026): o corpo leva nome, CPF e a solução do atendimento.
     r"|^/api/garantias(/|$)"
     r"|/callback|/certificates/[^/]+/download$"

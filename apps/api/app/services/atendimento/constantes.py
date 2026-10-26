@@ -49,7 +49,11 @@ PLATAFORMAS_CAIXA = PLATAFORMAS + PLATAFORMAS_ROBO
 #               "rede:instagram:<ig_user_id>"`. O Direct continua no adaptador
 #               só leitura (`instagram.py`, sobre `dm_conversas`);
 #   facebook  — comentários dos posts da Página; `externo_ref =
-#               "rede:facebook:<page_id>"`.
+#               "rede:facebook:<page_id>"`;
+#   whatsapp  — o Zap (RF10, 19/10/2026, docs/zap/desenho.md): UM canal por
+#               número de WhatsApp das lojas, pela Cloud API oficial da Meta
+#               (webhook → `atendimento_zap_eventos` → worker);
+#               `externo_ref = "zap:<phone_number_id>"`, `canal = 'zap'`.
 # FORA de `PLATAFORMAS_CAIXA` de propósito: o cron do sync, o da IA (que só
 # sugere no clique aqui) e o manual não as veem. Nada sai pelo DaVinci por
 # elas enquanto o envio estiver desligado (`enviar` não tem adaptador delas:
@@ -57,8 +61,9 @@ PLATAFORMAS_CAIXA = PLATAFORMAS + PLATAFORMAS_ROBO
 PLATAFORMA_SITE = "site"
 PLATAFORMA_INSTAGRAM = "instagram"
 PLATAFORMA_FACEBOOK = "facebook"
+PLATAFORMA_WHATSAPP = "whatsapp"
 PLATAFORMAS_REDE = (PLATAFORMA_INSTAGRAM, PLATAFORMA_FACEBOOK)
-PLATAFORMAS_EXTERNAS = (PLATAFORMA_SITE, *PLATAFORMAS_REDE)
+PLATAFORMAS_EXTERNAS = (PLATAFORMA_SITE, *PLATAFORMAS_REDE, PLATAFORMA_WHATSAPP)
 # O que o filtro `?plataforma=` da lista aceita (a caixa + as externas; o
 # Instagram também traz as DMs do adaptador).
 PLATAFORMAS_LISTA = PLATAFORMAS_CAIXA + PLATAFORMAS_EXTERNAS
@@ -96,9 +101,13 @@ CANAL_CARRINHO = "carrinho"
 # marca é a RESPOSTA (autor loja), nunca conversa nova. Quem escreve é
 # `services/atendimento/redes.py`.
 CANAL_COMENTARIO = "comentario"
-# WhatsApp (RF10, o outro dev; 02/10/2026 só o NOME): a conversa do Zap entra
-# na mesma `atendimento_conversas` com `canal = 'zap'` e vira a aba "Zap" da
-# conversa do pedido (`services/atendimento/abas.py`). Ainda sem leitor.
+# WhatsApp (RF10; 02/10/2026 só o NOME): a conversa do Zap entra na mesma
+# `atendimento_conversas` com `canal = 'zap'` e vira a aba "Zap" da conversa
+# do pedido (`services/atendimento/abas.py`). Desde 19/10/2026 (Onda 1 de
+# docs/zap/desenho.md) o leitor grava com `plataforma = 'whatsapp'`
+# (`PLATAFORMA_WHATSAPP`), no canal externo do número. O formato antigo — Zap
+# com a plataforma da venda — continua recusado para sempre
+# (`motivo_canal_sem_envio`, premissa P2).
 CANAL_ZAP = "zap"
 # E-mail do TUTA (RF5, o outro dev; 02/10/2026 só o NOME): `canal = 'email'`
 # com `dados.fonte = 'tuta'`. Na Amazon o canal `email` é o da PLATAFORMA (o
@@ -188,6 +197,8 @@ CANAIS_EXTERNOS: dict[str, tuple[str, ...]] = {
     PLATAFORMA_SITE: (CANAL_CARRINHO,),
     PLATAFORMA_INSTAGRAM: (CANAL_COMENTARIO,),
     PLATAFORMA_FACEBOOK: (CANAL_COMENTARIO,),
+    # Uma caixa por número de WhatsApp (canal externo `zap:<phone_number_id>`).
+    PLATAFORMA_WHATSAPP: (CANAL_ZAP,),
 }
 
 # Canais que são SEMPRE depois da compra, com ou sem número de pedido gravado
@@ -243,6 +254,9 @@ MODOS_EXTERNOS: dict[str, tuple[str, ...]] = {
     PLATAFORMA_SITE: (MODO_OBSERVAR,),
     PLATAFORMA_INSTAGRAM: (MODO_OBSERVAR, MODO_HUMANO),
     PLATAFORMA_FACEBOOK: (MODO_OBSERVAR, MODO_HUMANO),
+    # Zap: só observar na Onda 1 (só leitura; quem responde é o Duoke). O
+    # `humano` entra na Onda 2, junto com o envio; IA sozinha, nunca (P8).
+    PLATAFORMA_WHATSAPP: (MODO_OBSERVAR,),
 }
 
 # Saúde da leitura do canal. `sem_escopo` = a plataforma disse "sem
@@ -292,6 +306,8 @@ SLA_HORAS: dict[tuple[str, str], int] = {
     (PLATAFORMA_SITE, CANAL_CARRINHO): 24,
     (PLATAFORMA_INSTAGRAM, CANAL_COMENTARIO): 24,
     (PLATAFORMA_FACEBOOK, CANAL_COMENTARIO): 24,
+    # Zap (P16): 24 h, igual à janela do WhatsApp — passou dela, só modelo pago.
+    (PLATAFORMA_WHATSAPP, CANAL_ZAP): 24,
 }
 SLA_PADRAO_HORAS = 24
 
@@ -334,6 +350,8 @@ LIMITE_CARACTERES: dict[tuple[str, str], int] = {
     # mesmo teto da legenda); a Página do Facebook aceita bem mais, 8.000.
     (PLATAFORMA_INSTAGRAM, CANAL_COMENTARIO): 2200,
     (PLATAFORMA_FACEBOOK, CANAL_COMENTARIO): 8000,
+    # Texto do WhatsApp (Cloud API): 4.096 caracteres por mensagem.
+    (PLATAFORMA_WHATSAPP, CANAL_ZAP): 4096,
 }
 LIMITE_PADRAO_CARACTERES = 1000
 
@@ -655,6 +673,12 @@ ROTULO_TIPO_PLATAFORMA = {
     "coupon_card": "Cupom",
     "allocated_service": "Atendente designado",
     "buyer_enter_from_transfer": "Conversa transferida",
+    # WhatsApp (`messages[].type` da Cloud API; o `sticker` já está acima)
+    "audio": "Áudio",
+    "location": "Localização",
+    "contacts": "Contato",
+    "interactive": "Botão",
+    "button": "Botão",
 }
 ROTULO_TIPO_DESCONHECIDO = "Mensagem"
 

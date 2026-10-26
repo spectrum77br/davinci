@@ -1,0 +1,37 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "{{WABA_ID}}",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "{{DISPLAY}}",
+              "phone_number_id": "{{PNID}}"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "{{NOME}}"
+                },
+                "wa_id": "{{WA_ID}}"
+              }
+            ],
+            "user_preferences": [
+              {
+                "wa_id": "{{WA_ID}}",
+                "detail": "User requested to stop marketing messages",
+                "category": "marketing_messages",
+                "value": "{{VALOR}}",
+                "timestamp": "{{TS}}"
+              }
+            ]
+          },
+          "field": "user_preferences"
+        }
+      ]
+    }
+  ]
+}

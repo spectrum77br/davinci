@@ -108,6 +108,15 @@ TETO_POR_PEDIDO = 200
 # madrugada) são da máquina. Fora. `atendimento_fatos` fica COM o gatilho,
 # como `atendimento_regras`: quem aprovou ou corrigiu um fato é exatamente o
 # que o Histórico serve para mostrar.
+# Zap (19/10/2026, migration 0430 — docs/zap/desenho.md §4.3): o contato
+# (`atendimento_zap_contatos`: telefone, BSUID, nome do perfil), a caixa de
+# entrada do webhook (`atendimento_zap_eventos`: o texto do cliente no
+# `payload`) e a mídia (`atendimento_zap_midias`: o nome do arquivo) ficam
+# FORA — senão "apagar os dados deste contato" (LGPD), "reprocessar" e o
+# vínculo copiariam para cá, por 365 dias, exatamente o que a exclusão manda
+# apagar. O app, a WABA e o número (`atendimento_zap_(apps|contas|numeros)`)
+# ficam COM: os `*_enc` são BYTEA e saem como `{_arquivo: true}`, e pausar o
+# envio de um número, trocar a etapa ou o token é o que o Histórico mostra.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -123,7 +132,7 @@ EXCLUIDAS = re.compile(
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"
-    r"|automacao_registros|trocas|pares|agente_replay|site_produtos)$"
+    r"|automacao_registros|trocas|pares|agente_replay|site_produtos|zap_(contatos|eventos|midias))$"
     # a ponte do e-mail: o que a máquina decide de cada e-mail e as pastas
     r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation|caixa_indice|bridge_identities)$"
     # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)

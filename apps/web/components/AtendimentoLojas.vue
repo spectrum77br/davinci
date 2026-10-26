@@ -363,8 +363,11 @@ const emit = defineEmits<{
 
 // Ordem do Duoke: Shopee, TikTok, Mercado Livre; depois as que o Duoke não
 // tem — Amazon, Magalu (por API, como as de cima), as lojas do robô (Temu,
-// AliExpress) —, os sites e as redes (Instagram com o Direct, Facebook).
-const ORDEM = ['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress', 'site', 'instagram', 'facebook']
+// AliExpress) —, os sites, as redes (Instagram com o Direct, Facebook) e o
+// WhatsApp (19/10/2026, o Zap): UMA linha por número — o /resumo manda cada
+// número com o `externo_ref` dele ("zap:<phone_number_id>"), e a linha filtra
+// a lista por ela, como o site.
+const ORDEM = ['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress', 'site', 'instagram', 'facebook', 'whatsapp']
 
 type LojaBarra = {
   // Chave da linha: o integration_id; a loja do robô que vier sem integração
@@ -641,6 +644,14 @@ function motivo(l: LojaBarra): string {
     )
   }
   if (l.plataforma === 'site') partes.push('Carrinho abandonado do lojista no site (lido do site, servidor a servidor)')
+  // O Zap: o número chega pela API oficial da Meta (o webhook); sem as duas
+  // chaves de envio ligadas, a resposta continua pelo Duoke.
+  if (l.plataforma === 'whatsapp') {
+    const f = props.resumo?.flags
+    partes.push(f?.envio_ativo && f?.zap_envio_ativo
+      ? 'Número de WhatsApp (API oficial da Meta)'
+      : 'Número de WhatsApp (API oficial da Meta) — por enquanto só leitura: a resposta é pelo Duoke')
+  }
   // Sem integração nem origem, a lista não separa esta loja das outras da plataforma.
   if (!l.integration_id && !l.externo_ref && !l.rede_social_id && (grupos.value.find((g) => g.plataforma === l.plataforma)?.lojas.filter((x) => !x.so_email).length ?? 0) > 1) {
     partes.push(`Clicar mostra as conversas de todas as lojas ${plataformaInfo(l.plataforma).nome}`)

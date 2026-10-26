@@ -198,6 +198,7 @@ from app.services.atendimento import (
     pendente,
     robo,
     separa_email,
+    zap_entrada,
 )
 from app.services.atendimento import etiqueta as etiqueta_svc
 from app.services.atendimento import lida as lida_svc
@@ -242,6 +243,7 @@ from app.services.atendimento.constantes import (
     ORIGEM_NOTA,
     ORIGENS_DAVINCI,
     PLATAFORMA_SITE,
+    PLATAFORMA_WHATSAPP,
     PLATAFORMAS,
     PLATAFORMAS_CAIXA,
     PLATAFORMAS_EXTERNAS,
@@ -275,6 +277,13 @@ from app.services.mail_atendimento import rotear as mail_rotear
 from app.services.mail_atendimento.constantes import ROTULO_TIPO_CAIXA
 
 logger = structlog.get_logger()
+
+# O "Sugerir" no Zap (19/10/2026, docs/zap/desenho.md P8): a IA fica fora do
+# Zap na v1. Frase própria — a das outras externas fala de carrinho e comentário.
+FRASE_ZAP_SEM_IA = (
+    "A IA não sugere resposta no Zap (WhatsApp): quem responde é uma pessoa. "
+    "Por enquanto, responda pelo Duoke."
+)
 
 # Fase de observação (`SO_ADMIN`): vale para todas as rotas deste router (e
 # dos routers irmãos do mesmo prefixo, que usam a mesma dependência), antes
@@ -1595,6 +1604,11 @@ def _canal_out(
         # onde lê" é a origem externa.
         conta = conta or canais_externos.nome_do_canal(canal)
         integracao = integracao or canais_externos.descricao_da_origem(canal)
+        if canal.plataforma == PLATAFORMA_WHATSAPP and not zap_entrada.leitura_ligada():
+            # Zap: o webhook continua GRAVANDO, mas o processador não roda —
+            # as mensagens chegaram e estão paradas. Calculado AGORA (como o
+            # robô), para a barra não dizer "nenhuma mensagem chegou".
+            status_canal = _CANAL_DESLIGADO
     return CanalOut(
         id=canal.id,
         integration_id=canal.integration_id,
@@ -1678,6 +1692,25 @@ def _motivo_do_status(canal: CanalOut) -> str | None:
     erro = (canal.ultimo_erro or "").strip()[:200]
     if canal.status == "ok":
         return None
+    if canal.plataforma == PLATAFORMA_WHATSAPP:
+        # Zap (19/10/2026): o número não é "lido" — a Meta EMPURRA as mensagens
+        # pelo webhook; quem grava a saúde é o processador (`zap_entrada`).
+        if canal.status == "novo":
+            texto = "Nenhuma mensagem chegou ainda por este número (webhook da Meta)"
+        elif canal.status == "desligado":
+            # `_canal_out`: a leitura do Zap precisa das DUAS chaves.
+            chave = (
+                "ATENDIMENTO_ZAP_LEITURA_ATIVA"
+                if get_settings().atendimento_leitura_ativa
+                else "ATENDIMENTO_LEITURA_ATIVA"
+            )
+            return (
+                f"Leitura do Zap desligada no DaVinci ({chave}): as mensagens "
+                "que chegam ficam guardadas até ligar"
+            )
+        else:
+            texto = "A Meta avisou um problema neste número de WhatsApp"
+        return f"{texto}: {erro}" if erro and canal.status != "novo" else texto
     if canal.status == "sem_escopo" and canal.plataforma in PLATAFORMAS_REDE:
         # Rede social (02/10/2026): o token do usuário de sistema do "DaVinci
         # Publicador" sem o escopo de comentários (o `ultimo_erro` diz qual).
@@ -2059,6 +2092,10 @@ async def resumo(
             humano_ativa=s.atendimento_leitura_ativa and s.atendimento_humano_ativa,
             humano_modos=list(modos_humano) if modos_humano is not None else None,
             agente_disponivel=agente_config.chave_do_agente(s) is not None,
+            # Zap (19/10/2026): o EFETIVO — com a chave geral junto (a leitura
+            # precisa de `atendimento_leitura_ativa`; o envio, do freio único).
+            zap_leitura_ativa=s.atendimento_leitura_ativa and s.atendimento_zap_leitura_ativa,
+            zap_envio_ativo=s.atendimento_envio_ativo and s.atendimento_zap_envio_ativo,
         ),
         leitura_parada=leitura_parada,
     )
@@ -3202,6 +3239,13 @@ async def pedir_rascunho(
         )
     scope = await resolve_team_scope(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
+    if c.plataforma == PLATAFORMA_WHATSAPP:
+        # Zap (19/10/2026, docs/zap/desenho.md P8): a IA fica fora do Zap na
+        # v1 — nem sugere, nem envia. O prompt e os exemplos são de marketplace.
+        raise HTTPException(
+            409,
+            detail={"code": "canal_sem_ia", "detail": FRASE_ZAP_SEM_IA},
+        )
     if c.plataforma in PLATAFORMAS_EXTERNAS:
         # Carrinho do site e comentário das redes (02/10/2026): o prompt e o
         # validador da IA são de marketplace — nada de gastar o provedor com

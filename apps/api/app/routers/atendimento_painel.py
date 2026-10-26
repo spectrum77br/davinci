@@ -56,7 +56,11 @@ from app.schemas.atendimento_painel import (
     PainelOut,
 )
 from app.services.atendimento import enviar, foto, instagram, painel
-from app.services.atendimento.constantes import PLATAFORMA_SITE, PLATAFORMAS_EXTERNAS
+from app.services.atendimento.constantes import (
+    PLATAFORMA_SITE,
+    PLATAFORMA_WHATSAPP,
+    PLATAFORMAS_EXTERNAS,
+)
 from app.services.atendimento.enviar import EnvioRecusado
 
 logger = structlog.get_logger()
@@ -82,11 +86,27 @@ def _painel_do_instagram() -> PainelOut:
 
 
 def _painel_externo(plataforma: str) -> PainelOut:
-    """Carrinho do site e comentário das redes (02/10/2026): o cartão é outro.
+    """Carrinho do site, comentário das redes e o Zap (02/10 e 19/10/2026): o cartão é outro.
 
     Não há pedido no Bling nem perfil de loja no AdsPower, e nada sai pela
-    caixa (`enviar` recusa): o painel não procura nada disso.
+    caixa (`enviar` recusa): o painel não procura nada disso. No Zap a
+    conversa é PRÉ-VENDA (sem venda vinculada até a Onda 6) e, na Onda 1,
+    quem responde é o Duoke (a foto de saída é da Onda 3).
     """
+    if plataforma == PLATAFORMA_WHATSAPP:
+        return PainelOut(
+            adspower={
+                "motivo": "Zap (WhatsApp) sem venda vinculada: não há perfil de loja no AdsPower.",
+                "codigo": "sem_perfil",
+            },
+            envio_foto={
+                "pode": False,
+                "motivo": (
+                    "Zap (WhatsApp): o envio ainda não existe no DaVinci. Responda pelo Duoke."
+                ),
+                "codigo": "canal_sem_envio",
+            },
+        )
     origem = "Carrinho do site" if plataforma == PLATAFORMA_SITE else "Comentário de rede social"
     return PainelOut(
         adspower={
