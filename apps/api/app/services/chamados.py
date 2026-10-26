@@ -38,7 +38,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import Text, and_, cast, exists, func, or_, select, update
+from sqlalchemy import Text, and_, cast, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -52,7 +52,7 @@ from app.models import (
     SituacaoBling,
     StoreInfo,
 )
-from app.services import logistica_bling, logistica_meli
+from app.services import espelho_situacao, logistica_bling, logistica_meli
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.ml import MercadoLivreClient
 
@@ -972,15 +972,12 @@ async def aplicar_status_bling(
     numero = (ch.pedido_bling or "").strip()
     espelho = (
         await session.execute(
-            select(BlingOrder.situacao)
-            .where(BlingOrder.numero == numero, BlingOrder.bling_id.isnot(None))
-            .order_by(BlingOrder.data.desc().nullslast())
-            .limit(1)
+            select(BlingOrder.situacao).where(BlingOrder.bling_id == bling_id).limit(1)
         )
     ).scalar_one_or_none()
-    await session.execute(
-        update(BlingOrder).where(BlingOrder.numero == numero).values(situacao=str(sid))
-    )
+    # Com as datas de transição que o sync carimbaria (entrada em Aguardando
+    # Devolução etc.): o webhook que chega depois já vê a situação nova.
+    await espelho_situacao.adiantar_situacao(session, bling_id, sid)
     # Só registra quando muda (record_margem_audit ignora antigo == novo).
     await record_margem_audit(
         session,

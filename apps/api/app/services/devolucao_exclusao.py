@@ -33,8 +33,9 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import httpx
 import structlog
-from sqlalchemy import desc, func, select, text, update
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +52,7 @@ from app.models import (
 )
 from app.models.enums import AlertSeverity, AlertType
 from app.services import devolution_stock_return as dsr
+from app.services import espelho_situacao
 from app.services.alerts import emit_alert
 from app.services.margem_audit import record_margem_audit
 
@@ -224,6 +226,7 @@ async def achar_refund_auto(
     *,
     custo: float | None = None,
     travar: bool = True,
+    ignorar: frozenset[UUID] = frozenset(),
 ) -> RefundAchado:
     """O prejuízo que o DaVinci criou para ESTA linha.
 
@@ -244,7 +247,10 @@ async def achar_refund_auto(
     antes de existir o `created_by` não dá pra saber — vira dúvida).
 
     `travar`: SELECT … FOR UPDATE com o estado do banco (um PATCH da agência no
-    mesmo refund termina antes e a decisão já vê o valor dele)."""
+    mesmo refund termina antes e a decisão já vê o valor dele).
+
+    `ignorar`: refunds já decididos (o exato que ficou porque alguém mexeu) —
+    a busca segue para os outros automáticos da linha (os de PATCH)."""
     conds = _pedido_conds(Refund, row)
     if conds is None:
         return RefundAchado(None)
@@ -261,7 +267,7 @@ async def achar_refund_auto(
     )
     if travar:
         q = q.with_for_update()
-    refunds = list((await session.execute(q)).scalars().all())
+    refunds = [r for r in (await session.execute(q)).scalars().all() if r.id not in ignorar]
     if not refunds:
         return RefundAchado(None)
     exato = next((r for r in refunds if r.created_at == row.created_at), None)
@@ -354,7 +360,8 @@ async def desfazer_refund_auto(
     293843). `avisar_duvida=False`: a dúvida sem refund certo vira None (busca
     secundária — o débito de Manutenção de uma linha que já saiu dela). Devolve
     None (não achou) ou {acao: apagado|mantido, tipo, prejuizo, reembolso,
-    valor, motivo}. NÃO commita."""
+    valor, motivo, extras?} — `extras`: os outros automáticos do mesmo tipo da
+    linha (de PATCH), decididos quando o exato ficou. NÃO commita."""
     achado = await achar_refund_auto(session, row, tipo)
     refund = achado.refund
     pedido = row.pedido_bling or row.pedido_marketplace or ""
@@ -384,6 +391,40 @@ async def desfazer_refund_auto(
         }
     if achado.duvida is not None and not avisar_duvida:
         return None
+    out = await _apagar_ou_manter(session, row, tipo, actor_id, achado, exclusao=exclusao)
+    if achado.exato and out["acao"] == "mantido":
+        # O exato ficou (alguém mexeu): a linha pode ter OUTRO automático do
+        # mesmo tipo, criado num PATCH (Extraviado → Entregue → Extraviado de
+        # novo cria um segundo). Sem isso ele ficava fantasma.
+        extras: list[dict] = []
+        vistos = {refund.id}
+        for _ in range(10):
+            extra = await achar_refund_auto(session, row, tipo, ignorar=frozenset(vistos))
+            if extra.refund is None or extra.duvida is not None:
+                break
+            vistos.add(extra.refund.id)
+            extras.append(
+                await _apagar_ou_manter(session, row, tipo, actor_id, extra, exclusao=exclusao)
+            )
+        if extras:
+            out["extras"] = extras
+    return out
+
+
+async def _apagar_ou_manter(
+    session: AsyncSession,
+    row: Devolution,
+    tipo: str,
+    actor_id: UUID | None,
+    achado: RefundAchado,
+    *,
+    exclusao: bool,
+) -> dict:
+    """Apaga o refund achado se ninguém mexeu; senão mantém e avisa."""
+    refund = achado.refund
+    if refund is None:  # pragma: no cover — quem chama já conferiu
+        raise ValueError("refund ausente")
+    pedido = row.pedido_bling or row.pedido_marketplace or ""
     info = {
         "refund_id": str(refund.id),
         "tipo": tipo,
@@ -451,9 +492,15 @@ async def desfazer_refund_auto(
 def resumo_prejuizos(resultados: list[dict | None]) -> dict:
     """Campos da resposta das duas lixeiras: prejuízos automáticos apagados
     (qtd e total — na Manutenção, o débito do conserto) e os mantidos (com o
-    motivo — alguém mexeu, ou não deu pra saber qual era)."""
-    apagados = [r for r in resultados if r and r.get("acao") == "apagado"]
-    mantidos = [r for r in resultados if r and r.get("acao") in ("mantido", "erro")]
+    motivo — alguém mexeu, ou não deu pra saber qual era). Os `extras` de um
+    resultado (outros automáticos da mesma linha) entram como itens próprios."""
+    todos: list[dict] = []
+    for r in resultados:
+        if r:
+            todos.append(r)
+            todos.extend(x for x in (r.get("extras") or []) if x)
+    apagados = [r for r in todos if r.get("acao") == "apagado"]
+    mantidos = [r for r in todos if r.get("acao") in ("mantido", "erro")]
     return {
         "prejuizos_apagados": {
             "qtd": len(apagados),
@@ -589,14 +636,56 @@ async def _espelho_do_pedido(session: AsyncSession, pedido: str):
     ).first()
 
 
+def motivo_do_bling(exc: httpx.HTTPStatusError) -> str:
+    """O motivo de uma recusa do Bling, em texto curto: `error.fields[].msg`,
+    `error.description` ou `error.message` do JSON; senão o corpo cru; senão
+    o texto do httpx."""
+    corpo = ""
+    try:
+        corpo = (exc.response.text or "").strip()
+        erro = (exc.response.json() or {}).get("error") or {}
+    except Exception:  # noqa: BLE001 — corpo que não é JSON
+        erro = {}
+    partes: list[str] = []
+    if isinstance(erro, dict):
+        for f in erro.get("fields") or []:
+            msg = (f.get("msg") if isinstance(f, dict) else None) or ""
+            if msg.strip():
+                partes.append(msg.strip())
+        if not partes:
+            for chave in ("description", "message"):
+                v = erro.get(chave)
+                if isinstance(v, str) and v.strip():
+                    partes.append(v.strip())
+                    break
+    texto = "; ".join(partes) or corpo or str(exc)
+    return texto[:300]
+
+
+async def _situacao_real(client: Any, bling_id: int | None) -> str | None:
+    """A situação do pedido no Bling agora (GET do pedido). None = não deu
+    para ler (sem cliente, Bling fora) — quem chama fica com o espelho."""
+    if client is None or bling_id is None:
+        return None
+    try:
+        pedido = await client.get_order(int(bling_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("devolucao_exclusao_situacao_real_falhou", bling_id=bling_id, erro=str(exc))
+        return None
+    sit = (pedido or {}).get("situacao")
+    sid = sit.get("id") if isinstance(sit, dict) else sit
+    return str(sid) if sid is not None and str(sid).isdigit() else None
+
+
 async def reverter_situacao(
     session: AsyncSession, pedido: str, *, actor_id: UUID | None
 ) -> dict:
     """Sem nenhuma linha que conte no pedido: volta a situação para a que ele
     tinha ANTES de o fluxo de devolução mexer. Só reverte se a situação atual
     (espelho) ainda for a última que o fluxo pôs — ou a anterior a ela, se a
-    mudança é de minutos atrás (o fluxo não atualiza o espelho; o sync chega
-    depois) — e se ninguém mudou por outro caminho depois. Aplica com a regra do
+    mudança é de minutos atrás (o espelho de antes de 26/10 só mudava com o
+    sync) — e se ninguém mudou por outro caminho depois. Espelho fora disso:
+    confere a situação real no Bling antes de desistir (webhook perdido). Aplica com a regra do
     desvio do endpoint manual, atualiza o espelho e grava margem_audit (origem
     'devolucao_exclusao', mudado_por = quem excluiu). Bling fora/recusando: não
     levanta — devolve `falhou` com a situação que devia ser (e avisa no sino).
@@ -628,17 +717,28 @@ async def reverter_situacao(
         possiveis.add((seq[-1].valor_antigo or "").strip())
     if ultima == alvo:
         possiveis.add(alvo)
+    client = await dsr._get_bling_client(session)
     if atual and atual not in possiveis:
-        # Mudada no painel do Bling (o sync trouxe pro espelho) — é de alguém.
-        return {"status": "mudada_depois", **sobre_atual, "para": int(alvo), "nome": nome_alvo}
+        # O espelho pode estar atrasado (webhook perdido — o Bling V3 perde com
+        # frequência — ou o recálculo de uma exclusão anterior antes do sync):
+        # antes de dizer "alguém mudou", confere a situação REAL no Bling.
+        real = await _situacao_real(client, order_row.bling_id)
+        if real is None or real not in possiveis:
+            # Mudada no painel do Bling (o sync trouxe pro espelho) — é de alguém.
+            if real is not None and real != atual:
+                sobre_atual = {"atual": real, "nome_atual": await nome_situacao(session, real)}
+            return {
+                "status": "mudada_depois", **sobre_atual, "para": int(alvo), "nome": nome_alvo
+            }
+        atual = real
+        sobre_atual = {"atual": real, "nome_atual": await nome_situacao(session, real)}
     if ultima == alvo:
-        return {"status": "ja_estava", "para": int(alvo), "nome": nome_alvo}
+        return {"status": "ja_estava", **sobre_atual, "para": int(alvo), "nome": nome_alvo}
 
     base = {"de": ultima, "nome_de": await nome_situacao(session, ultima),
             "para": int(alvo), "nome": nome_alvo}
     erro: str | None = None
     via_desvio = False
-    client = await dsr._get_bling_client(session)
     if client is None:
         erro = "nenhuma integração Bling encontrada"
     else:
@@ -646,6 +746,10 @@ async def reverter_situacao(
             via_desvio = await dsr.mudar_situacao_com_desvio(
                 client, int(order_row.bling_id), int(alvo), ultima
             )
+        except httpx.HTTPStatusError as exc:
+            # O motivo que o Bling deu (ex.: pedido com nota fiscal), não a
+            # mensagem genérica do httpx com URL interna e link do MDN.
+            erro = motivo_do_bling(exc)
         except Exception as exc:  # noqa: BLE001 — a exclusão já valeu
             erro = str(exc)[:300] or exc.__class__.__name__
     if erro is not None:
@@ -666,10 +770,9 @@ async def reverter_situacao(
         )
         return {**base, "status": "falhou", "erro": erro}
 
-    # Espelho na hora: a aba Acompanhamento (só 83957) lê daqui.
-    await session.execute(
-        update(BlingOrder).where(BlingOrder.numero == pedido).values(situacao=str(alvo))
-    )
+    # Espelho na hora: a aba Acompanhamento (só 83957) lê daqui — com a data
+    # de entrada em Aguardando Devolução que o sync carimbaria.
+    await espelho_situacao.adiantar_situacao(session, order_row.bling_id, alvo)
     await record_margem_audit(
         session,
         acao="situacao",

@@ -327,6 +327,9 @@ class ExclusaoLancamentoOut(BaseModel):
     estoque_mov_qty: int | None = None
     # O motivo é dos que abrem chamado (Não recebido, Extraviado…): vem marcado.
     marcado_padrao: bool = False
+    # Passou por Manutenção (e saiu): a exclusão leva junto o débito do conserto
+    # que o DaVinci lançou, se ninguém mexeu (caso 300978).
+    manutencao: bool = False
 
 
 class ExclusaoPreviewOut(BaseModel):

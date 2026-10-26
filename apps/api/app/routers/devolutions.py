@@ -54,7 +54,12 @@ from app.schemas.devolutions import (
     SkuSuffixVariant,
     StockCorrectionIn,
 )
-from app.services import chamados_devolucao, devolucao_exclusao, devolucao_mensagem_comprador
+from app.services import (
+    chamados_devolucao,
+    devolucao_exclusao,
+    devolucao_mensagem_comprador,
+    espelho_situacao,
+)
 from app.services.devolution_delete import (
     EstoqueConferindoError,
     EstornoFalhouError,
@@ -1469,10 +1474,10 @@ async def alterar_situacao_bling(
             502, detail={"code": "bling_indisponivel", "message": str(exc)[:200]}
         ) from exc
 
-    # Espelho local na hora: as abas Acompanhamento/Fraude leem daqui.
-    await session.execute(
-        update(BlingOrder).where(BlingOrder.numero == pedido).values(situacao=str(alvo))
-    )
+    # Espelho local na hora: as abas Acompanhamento/Fraude leem daqui. Com as
+    # datas de transição que o sync carimbaria (entrada em Aguardando
+    # Devolução) — o webhook que chega depois já vê a situação nova.
+    await espelho_situacao.adiantar_situacao(session, bling_id, alvo)
     await record_margem_audit(
         session,
         acao="situacao",
@@ -3018,10 +3023,10 @@ async def delete_devolution(
     return out
 
 
-def _resposta_da_volta(sit: dict, *, nome_antes: str | None = None) -> dict:
+def _resposta_da_volta(sit: dict, *, linhas_ficaram: bool = False) -> dict:
     """Campos da resposta para o resultado de devolucao_exclusao.reverter_situacao.
-    `nome_antes` = há linhas que ficaram, mas elas não definem a situação (a que
-    saiu definia)."""
+    `linhas_ficaram` = há linhas que ficaram, mas elas não definem a situação (a
+    que saiu definia)."""
     st = sit["status"]
     if st == "revertida":
         return {
@@ -3047,17 +3052,24 @@ def _resposta_da_volta(sit: dict, *, nome_antes: str | None = None) -> dict:
                 + "."
             )
         }
-    if nome_antes is not None:
+    atual = sit.get("atual")
+    # Só avisa quando o pedido está PARADO numa situação que só o fluxo põe
+    # (Problemas/Perdimento/Manutenção) — o que o espelho mostra, não o alvo
+    # das linhas: o Bling pode ter recusado a ida e o pedido nem saiu de
+    # Aguardando Devolução (revisão de 26/10).
+    parado_no_fluxo = bool(
+        atual and atual.isdigit() and int(atual) in devolucao_exclusao.SITUACOES_DO_FLUXO
+    )
+    if linhas_ficaram and st in ("sem_historico", "ja_estava"):
+        if not parado_no_fluxo:
+            return {}
         return {
             "situacao_aviso": (
                 f"As linhas que ficaram não definem a situação do pedido: ela continua em "
-                f"{nome_antes} — mude na mão se precisar."
+                f"{sit.get('nome_atual') or atual} — mude na mão se precisar."
             )
         }
-    atual = sit.get("atual")
-    if st == "sem_historico" and atual and atual.isdigit() and (
-        int(atual) in devolucao_exclusao.SITUACOES_DO_FLUXO
-    ):
+    if st == "sem_historico" and parado_no_fluxo:
         # Linha de antes da trilha de situação (01/06) ou sem situação no espelho
         # ao lançar: não há de onde voltar — mas o pedido parado em Problemas
         # some do Acompanhamento, então avisa.
@@ -3120,11 +3132,10 @@ async def _desfazer_situacao_apos_exclusao(
                     session, pedido, actor_id=user.id
                 )
                 await devolucao_exclusao.tirar_da_fila_de_situacao(pedido)
-                nome = None
-                if sit["status"] in ("sem_historico", "ja_estava"):
-                    nome = await devolucao_exclusao.nome_situacao(session, alvo_antes)
-                out.update(_resposta_da_volta(sit, nome_antes=nome))
+                out.update(_resposta_da_volta(sit, linhas_ficaram=True))
             elif alvo_depois is not None:
+                # apply_order_situacao grava o espelho quando o Bling muda (a
+                # aba Acompanhamento recarrega e já vê a situação nova).
                 r = await apply_order_situacao(session, pedido, actor_id=user.id)
                 nome = await devolucao_exclusao.nome_situacao(session, alvo_depois)
                 if r is not None and not r.get("ok"):
@@ -3132,7 +3143,9 @@ async def _desfazer_situacao_apos_exclusao(
                         f"A situação do pedido devia ir para {nome}, mas o Bling não "
                         f"aceitou: {r.get('message') or ''}".strip()
                     )
-                else:
+                elif r is not None and r.get("action") == "situacao_patched":
+                    # Só anuncia "foi para" quando a situação mudou de verdade
+                    # ("mesma situação" no Bling = nada mudou).
                     out["situacao_recalculada"] = {"para": alvo_depois, "nome": nome}
     await session.commit()
     return out

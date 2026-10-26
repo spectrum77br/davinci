@@ -232,6 +232,8 @@ type ExclusaoLancamento = {
   estoque_mov_qty: number | null
   // motivo dos que abrem chamado (Não recebido, Extraviado…) → já vem marcado.
   marcado_padrao: boolean
+  // passou por Manutenção (e saiu): a exclusão leva junto o débito do conserto.
+  manutencao?: boolean
 }
 type ExclusaoPreview = {
   chamado_id: string
@@ -2793,6 +2795,9 @@ async function confirmarExcluir() {
                   <div class="text-[11px]" :class="estoqueTexto(l).alerta ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground'">{{ estoqueTexto(l).texto }}</div>
                   <div v-if="CONDICOES_COM_PREJUIZO.includes(l.condicao_produto || '')" class="text-[11px] text-muted-foreground">
                     leva junto o prejuízo {{ l.condicao_produto }} que o DaVinci lançou na tela Reembolso ({{ l.condicao_produto === 'Manutenção' ? 'se o valor ainda for só o débito do conserto e ninguém conferiu' : 'se ninguém lançou reembolso, conferiu, anotou protocolo ou observação' }})
+                  </div>
+                  <div v-if="l.manutencao && l.condicao_produto !== 'Manutenção'" class="text-[11px] text-muted-foreground">
+                    leva junto o débito do conserto (Manutenção) que o DaVinci lançou para esta linha, se ninguém mexeu nele
                   </div>
                 </div>
               </label>

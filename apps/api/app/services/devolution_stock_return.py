@@ -66,12 +66,14 @@ from app.models import (
     BlingOrder,
     Devolution,
     Integration,
+    MargemAudit,
     PrioridadeEstoqueMovimento,
     Product,
     StockMovement,
 )
 from app.models.enums import AlertSeverity, AlertType, IntegrationPlatform
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services import espelho_situacao
 from app.services.alerts import emit_alert
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient, BlingCloudflareError
@@ -567,7 +569,19 @@ async def apply_order_situacao(
     alvo = int(target)
     try:
         try:
-            await client.update_order_situacao(int(bling_id), alvo)
+            mudou = await client.update_order_situacao(int(bling_id), alvo)
+            if mudou is False:
+                # O BlingClient engole o 400 "mesma situação" e devolve False:
+                # já está no alvo — mesmo desfecho do except abaixo (sem
+                # auditoria, e quem chamou não anuncia "foi para").
+                logger.info(
+                    "devolution_situacao_unchanged",
+                    pedido_bling=pedido, bling_id=int(bling_id), situacao=alvo,
+                )
+                return _result(
+                    True, "situacao_unchanged",
+                    message=f"Pedido {pedido} já estava na situação {alvo}",
+                )
             logger.info(
                 "devolution_situacao_patched",
                 pedido_bling=pedido, bling_id=int(bling_id), situacao=alvo,
@@ -627,16 +641,35 @@ async def apply_order_situacao(
                     # avisa o operador p/ ajustar a situação na mão no Bling.
                     await _alert_manual_situacao(session, actor_id, pedido, alvo)
                 return _result(False, "situacao_error", message=str(exc2))
+        valor_antigo = situacao_antiga
+        if str(situacao_antiga or "").strip() == str(alvo):
+            # O Bling ACEITOU a mudança, mas o espelho já mostrava o alvo: ele
+            # estava atrasado (webhook ainda não chegou ou se perdeu). A
+            # situação de antes é a última que o DaVinci gravou na trilha —
+            # sem isso o passo some da trilha (record_margem_audit ignora
+            # antigo == novo) e a volta da exclusão perde a cadeia (revisão
+            # de 26/10, caso 300978).
+            valor_antigo = (
+                await session.execute(
+                    select(MargemAudit.valor_novo)
+                    .where(MargemAudit.pedido_bling == pedido, MargemAudit.acao == "situacao")
+                    .order_by(MargemAudit.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none() or situacao_antiga
         await record_margem_audit(
             session,
             acao="situacao",
             pedido_bling=pedido,
             bling_id=bling_id,
-            valor_antigo=situacao_antiga,
+            valor_antigo=valor_antigo,
             valor_novo=alvo,
             origem="devolucao",
             mudado_por=actor_id,
         )
+        # Espelho na hora (revisão de 26/10): a aba Acompanhamento lê daqui, e
+        # a próxima mudança/volta parte da situação real, não da de antes.
+        await espelho_situacao.adiantar_situacao(session, bling_id, alvo)
         return _result(True, "situacao_patched", message=f"Pedido {pedido} → situação {alvo}")
     except Exception as exc:  # noqa: BLE001
         # Cinto de segurança (auditoria/alerta nunca derrubam o caller).

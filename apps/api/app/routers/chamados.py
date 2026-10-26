@@ -1179,6 +1179,7 @@ async def exclusao_preview(
             estoque_mov_sku=dev.estoque_mov_sku,
             estoque_mov_qty=dev.estoque_mov_qty,
             marcado_padrao=svc.motivo_pede_chamado(dev) and not substituido,
+            manutencao=bool(dev.manutencao),
         )
         for dev in await _lancamentos_do_chamado(session, ch)
     ]

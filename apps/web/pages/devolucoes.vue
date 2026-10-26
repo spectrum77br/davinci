@@ -2477,9 +2477,12 @@ function avisarExclusao(row: DevolutionRow, res: ExclusaoResult) {
       lines: avisos,
     }, 0)
   }
-  // Situação nova: as outras linhas do pedido e a aba Acompanhamento (que
-  // lista só Aguardando Devolução) refletem na hora.
-  const nova = res.situacao_recalculada
+  // Situação nova (voltou ou recalculada): as outras linhas do pedido e a aba
+  // Acompanhamento (que lista só Aguardando Devolução) refletem na hora — o
+  // back já gravou o espelho.
+  const nova = res.situacao_revertida
+    ? { para: res.situacao_revertida.para, nome: res.situacao_revertida.nome }
+    : res.situacao_recalculada
   if (nova && row.pedido_bling) {
     for (const r of items.value) {
       if (r.pedido_bling === row.pedido_bling) {
@@ -2488,7 +2491,32 @@ function avisarExclusao(row: DevolutionRow, res: ExclusaoResult) {
       }
     }
   }
-  if (res.situacao_revertida || nova) void loadAcompanhamento()
+  if (nova) void loadAcompanhamento()
+  // Chamado apagado/reapontado: as irmãs que ficaram ainda mostram o selo
+  // dele. Relê cada uma (load() perderia edições não salvas, e zerar às cegas
+  // esconderia um chamado manual do mesmo pedido).
+  if ((res.chamado_apagado || res.chamado_reapontado) && row.pedido_bling) {
+    void atualizarChamadoDasIrmas(row)
+  }
+}
+// Campos do chamado na linha (os que _completar_out preenche no back).
+const CAMPOS_CHAMADO = [
+  'tem_chamado', 'chamado_numero', 'chamado_resolvido', 'chamado_plataforma',
+  'chamado_ml_status', 'chamado_ml_erro', 'chamado_enviada_at',
+] as const
+async function atualizarChamadoDasIrmas(row: DevolutionRow) {
+  const irmas = items.value.filter((i) => i.id !== row.id && i.pedido_bling === row.pedido_bling)
+  for (const irma of irmas) {
+    try {
+      const atual = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(irma.id)}`)
+      const linha = items.value.find((i) => i.id === irma.id)
+      if (!linha) continue
+      for (const k of CAMPOS_CHAMADO) (linha as any)[k] = (atual as any)[k] ?? null
+      if (!atual.tem_chamado) linha.tem_chamado = false
+    } catch {
+      // o próximo load corrige
+    }
+  }
 }
 async function removeRow(row: DevolutionRow) {
   if (!canDelete.value || isDeleting(row.id)) return

@@ -198,7 +198,8 @@ async def _espelho(db, pedido: str = PEDIDO) -> str | None:
 
 
 async def _sync_espelho(db, situacao: int, pedido: str = PEDIDO) -> None:
-    """O sync do Bling traz a situação nova pro espelho (o fluxo não grava)."""
+    """O sync do Bling traz a situação pro espelho (força um valor — o fluxo
+    também grava desde a revisão de 26/10)."""
     for o in (await db.execute(select(BlingOrder).where(BlingOrder.numero == pedido))).scalars():
         o.situacao = str(situacao)
     await db.commit()
@@ -1563,3 +1564,387 @@ async def test_episodio_anterior_nao_vira_alvo_da_volta(client, db, make_user, a
     r = await client.delete(f"/api/devolutions/{linha['id']}")
     assert r.json()["situacao_revertida"]["para"] == AGUARDANDO
     assert bling.situacoes == [(BLING_ID, AGUARDANDO)]
+
+
+# ── Revisão 2 (26/10): espelho, datas, kit misto e avisos ───────────────────
+
+
+class _BlingComEstado(_FakeBling):
+    """Bling com a situação de verdade: responde "mesma situação" (False), como
+    o BlingClient real, e devolve a situação no GET do pedido."""
+
+    def __init__(self, estado: int = AGUARDANDO) -> None:
+        super().__init__()
+        self.estado = estado
+
+    async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> bool:
+        if self.falha is not None:
+            raise self.falha
+        if int(situacao_id) == self.estado:
+            return False
+        self.situacoes.append((int(bling_order_id), int(situacao_id)))
+        self.estado = int(situacao_id)
+        return True
+
+    async def get_order(self, bling_order_id: int) -> dict:
+        return {"id": bling_order_id, "situacao": {"id": self.estado, "valor": 0}}
+
+
+@pytest.fixture
+def bling_real(bling, monkeypatch) -> _BlingComEstado:
+    fake = _BlingComEstado()
+
+    async def _client(_session):
+        return fake
+
+    monkeypatch.setattr(dsr, "_get_bling_client", _client)
+    monkeypatch.setattr(devolutions_router, "_get_bling_client", _client)
+    monkeypatch.setattr(logistica_bling, "_bling_client", _client)
+    return fake
+
+
+async def _webhook(db, situacao: int, pedido: str = PEDIDO) -> None:
+    """O que o sync (bling_orders.upsert_order) faz ao chegar o webhook: a data
+    de entrada em Aguardando Devolução é decidida com a situação do ESPELHO
+    como a anterior."""
+    from app.services.bling_orders import _next_aguardando_devolucao_data
+
+    for o in (
+        await db.execute(
+            select(BlingOrder)
+            .where(BlingOrder.numero == pedido)
+            .execution_options(populate_existing=True)
+        )
+    ).scalars():
+        nova = _next_aguardando_devolucao_data(
+            nova_situacao=str(situacao),
+            situacao_antiga=o.situacao,
+            data_existente=o.aguardando_devolucao_data,
+            agora=datetime.now(UTC),
+        )
+        o.situacao = str(situacao)
+        if nova is not None:
+            o.aguardando_devolucao_data = nova
+    await db.commit()
+
+
+async def _data_devolucao(db, pedido: str = PEDIDO):
+    return (
+        await db.execute(
+            select(BlingOrder.aguardando_devolucao_data)
+            .where(BlingOrder.numero == pedido)
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().first()
+
+
+async def _episodio_antigo(db, situacao: int = PROBLEMAS) -> None:
+    """Pedido parado em `situacao`, com a data de Aguardando Devolução de um
+    episódio anterior (01/09)."""
+    await db.execute(
+        update(BlingOrder)
+        .where(BlingOrder.numero == PEDIDO)
+        .values(situacao=str(situacao), aguardando_devolucao_data=datetime(2026, 9, 1).date())
+    )
+    await db.commit()
+
+
+def _hoje():
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(UTC).astimezone(ZoneInfo("America/Sao_Paulo")).date()
+
+
+async def _envelhecer_trilha(db, minutos: int) -> None:
+    await db.execute(
+        update(MargemAudit)
+        .where(MargemAudit.pedido_bling == PEDIDO)
+        .values(created_at=MargemAudit.created_at - timedelta(minutes=minutos))
+    )
+    await db.commit()
+
+
+async def _entrada_falhou(db, dev_id: str) -> None:
+    """A entrada no Bling da linha falhou há pouco (segura o pedido)."""
+    await db.execute(
+        update(Devolution)
+        .where(Devolution.id == dev_id)
+        .values(
+            estoque_status="falhou", estoque_tentativa_at=datetime.now(UTC),
+            estoque_mov_sku=None, estoque_mov_bling_id=None, estoque_mov_action=None,
+            estoque_mov_qty=None,
+        )
+    )
+    await db.commit()
+
+
+async def _lancar_novo(client, sku: str = "x020.sp") -> dict:
+    return await _lancar(
+        client, sku=sku, condicao_produto="Novo", motivo_devolucao=None,
+        devolver_estoque=True, estoque_destino_sku=sku, link_abertura=None,
+    )
+
+
+async def test_resolver_chamado_em_aguardando_carimba_a_entrada(
+    client, db, make_user, auth_as, bling
+):
+    """Achado 1: a aba Chamados adianta o espelho — com a data de entrada em
+    Aguardando Devolução que o sync carimbaria. Sem isso o webhook via
+    83957→83957 e ficava a data do episódio velho (01/09)."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    await _lancar(client)
+    (ch,) = await _chamados(db)
+    await _episodio_antigo(db)
+
+    r = await client.post(
+        f"/api/chamados/{ch.id}/alterar-status-bling", json={"situacao": "Aguardando Devolução"}
+    )
+    assert r.status_code == 200, r.text
+    await _webhook(db, AGUARDANDO)
+    assert await _espelho(db) == str(AGUARDANDO)
+    assert await _data_devolucao(db) == _hoje()
+
+
+async def test_volta_da_exclusao_carimba_a_entrada_em_aguardando(
+    client, db, make_user, auth_as, bling
+):
+    """Achado 1 na volta da exclusão (devolucao_exclusao) e no endpoint manual."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    linha = await _lancar(client)
+    await _episodio_antigo(db)
+
+    r = await client.delete(f"/api/devolutions/{linha['id']}")
+    assert r.json()["situacao_revertida"]["para"] == AGUARDANDO
+    await _webhook(db, AGUARDANDO)
+    assert await _data_devolucao(db) == _hoje()
+
+    # Endpoint manual da aba Lançamentos: mesma regra.
+    await _episodio_antigo(db)
+    r = await client.post(
+        f"/api/devolutions/pedido/{PEDIDO}/situacao-bling", json={"situacao_id": AGUARDANDO}
+    )
+    assert r.status_code == 200, r.text
+    await _webhook(db, AGUARDANDO)
+    assert await _data_devolucao(db) == _hoje()
+
+
+async def test_kit_misto_excluido_antes_do_sync_volta_para_aguardando(
+    client, db, make_user, auth_as, bling_real
+):
+    """Achado 2: Novo (→ Resolvido, webhook chega) e Extraviado (→ Problemas).
+    A Extraviado é excluída antes do webhook do Problemas (o recálculo manda
+    para Resolvido); 15 min depois sai a Novo: o pedido volta para 83957 —
+    antes ficava em Resolvido com o aviso falso "alguém mudou"."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    novo = await _lancar_novo(client)
+    assert bling_real.estado == RESOLVIDO
+    await _sync_espelho(db, bling_real.estado)  # webhook do Resolvido
+    extraviada = await _lancar(client, sku="b045.16", custo=68.50)
+    assert bling_real.estado == PROBLEMAS
+    # Sem webhook do Problemas: a operadora exclui segundos depois.
+    r = await client.delete(f"/api/devolutions/{extraviada['id']}")
+    assert r.status_code == 200, r.text
+    assert bling_real.estado == RESOLVIDO
+    await _sync_espelho(db, bling_real.estado)  # chegam os webhooks
+    await _envelhecer_trilha(db, 15)
+
+    r = await client.delete(f"/api/devolutions/{novo['id']}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "situacao_aviso" not in body, body
+    assert body["situacao_revertida"]["para"] == AGUARDANDO
+    assert bling_real.estado == AGUARDANDO
+    assert await _espelho(db) == str(AGUARDANDO)
+
+
+async def test_webhook_perdido_confere_a_situacao_real_no_bling(
+    client, db, make_user, auth_as, bling_real
+):
+    """Achado 2 (variante): o webhook do Problemas se perdeu e o espelho ficou
+    em Resolvido. As duas linhas saem 20 min depois: o DaVinci confere a
+    situação real no Bling (Problemas, a última que o fluxo pôs) e volta."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    novo = await _lancar_novo(client)
+    extraviada = await _lancar(client, sku="b045.16", custo=68.50)
+    assert bling_real.estado == PROBLEMAS
+    await _sync_espelho(db, RESOLVIDO)  # espelho atrasado (webhook perdido)
+    await _envelhecer_trilha(db, 20)
+
+    r = await client.delete(f"/api/devolutions/{novo['id']}")
+    assert r.status_code == 200, r.text
+    r = await client.delete(f"/api/devolutions/{extraviada['id']}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "situacao_aviso" not in body, body
+    assert body["situacao_revertida"]["para"] == AGUARDANDO
+    assert bling_real.estado == AGUARDANDO
+
+
+async def test_mudada_de_verdade_o_aviso_cita_a_situacao_real(
+    client, db, make_user, auth_as, bling_real
+):
+    """Achado 2 (aviso): espelho atrasado em Resolvido, mas no Bling alguém pôs
+    o pedido em Atendido (15): não volta, e o aviso diz a situação REAL."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    novo = await _lancar_novo(client)
+    extraviada = await _lancar(client, sku="b045.16", custo=68.50)
+    await _sync_espelho(db, RESOLVIDO)
+    await _envelhecer_trilha(db, 20)
+    bling_real.estado = 15  # mudado no painel do Bling
+    await client.delete(f"/api/devolutions/{novo['id']}")
+    bling_real.situacoes.clear()
+
+    r = await client.delete(f"/api/devolutions/{extraviada['id']}")
+    aviso = r.json()["situacao_aviso"]
+    assert "alguém mudou" in aviso
+    assert "está em 15" in aviso and "Resolvido" not in aviso
+    assert bling_real.situacoes == []
+
+
+async def test_segundo_prejuizo_de_patch_nao_fica_fantasma(client, db, make_user, auth_as, bling):
+    """Achado 3: R1 (vínculo exato) anotado pela agência; a linha vai para
+    Entregue (R1 fica) e volta para Extraviado (nasce R3). Excluir a linha:
+    R1 fica com aviso; R3, automático e intocado, é apagado."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    linha = await _lancar(client, motivo_devolucao=None)
+    (r1,) = await _refunds(db)
+    p = await client.patch(f"/api/refunds/{r1.id}", json={"observacao": "abri disputa"})
+    assert p.status_code == 200, p.text
+    await _patch(client, linha["id"], condicao_produto="Entregue")
+    await _patch(client, linha["id"], condicao_produto="Extraviado")
+    refunds = await _refunds(db)
+    assert len(refunds) == 2
+    r3 = next(r for r in refunds if r.id != r1.id)
+
+    r = await client.delete(f"/api/devolutions/{linha['id']}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["prejuizos_apagados"] == {"qtd": 1, "total": 61.90}
+    assert len(body["prejuizos_mantidos"]) == 1
+    assert await _existe(db, Refund, r1.id)
+    assert not await _existe(db, Refund, r3.id)
+
+
+async def test_recalculo_grava_o_espelho_para_a_aba_acompanhamento(
+    client, db, make_user, auth_as, bling
+):
+    """Achado 4: A Extraviado + B Novo com a entrada que falhou. Excluir A manda
+    o pedido para Aguardando Devolução — e o espelho (que a aba Acompanhamento
+    lê) vai junto, sem esperar o sync."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    novo = await _lancar_novo(client)
+    a = await _lancar(client, sku="b045.16", custo=68.50)
+    await _entrada_falhou(db, novo["id"])
+    await _sync_espelho(db, PROBLEMAS)
+
+    r = await client.delete(f"/api/devolutions/{a['id']}")
+    assert r.status_code == 200, r.text
+    assert r.json()["situacao_recalculada"] == {"para": AGUARDANDO, "nome": "Aguardando Devolução"}
+    assert await _espelho(db) == str(AGUARDANDO)
+
+
+async def test_bling_recusou_ir_para_problemas_aviso_nao_inventa_situacao(
+    client, db, make_user, auth_as, bling
+):
+    """Achado 6: o Bling estava fora quando a Extraviado foi lançada — o pedido
+    nem saiu de Aguardando Devolução. Excluir a Extraviado (sobra uma linha
+    sem condição) não pode avisar "continua em Problemas"."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    await _lancar(client, sku="b045.16", custo=68.50, condicao_produto=None,
+                  motivo_devolucao=None, link_abertura=None)
+    bling.falha = httpx.ConnectError("bling fora do ar")
+    extraviada = await _lancar(client)
+    bling.falha = None
+    assert await _espelho(db) == str(AGUARDANDO)
+
+    r = await client.delete(f"/api/devolutions/{extraviada['id']}")
+    assert r.status_code == 200, r.text
+    assert "Problemas" not in (r.json().get("situacao_aviso") or "")
+
+
+async def test_bling_recusa_a_volta_aviso_traz_o_motivo_do_bling(
+    client, db, make_user, auth_as, bling
+):
+    """Achado 7: o 400 do Bling traz o motivo no corpo — o aviso e o alerta
+    mostram ESSE motivo, não a mensagem do httpx com o link do MDN."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    linha = await _lancar(client)
+    req = httpx.Request("PATCH", "https://api.bling.com.br/Api/v3/pedidos/vendas/1/situacoes/83957")
+    corpo = (
+        '{"error": {"type": "VALIDATION_ERROR", "message": "Não foi possível alterar",'
+        ' "description": "A venda possui nota fiscal emitida"}}'
+    )
+    bling.falha = httpx.HTTPStatusError(
+        "400", request=req, response=httpx.Response(400, text=corpo, request=req)
+    )
+
+    r = await client.delete(f"/api/devolutions/{linha['id']}")
+    assert r.status_code == 200, r.text
+    aviso = r.json()["situacao_aviso"]
+    assert "nota fiscal emitida" in aviso
+    assert "mozilla" not in aviso and "api.bling.com.br" not in aviso
+    alerta = await _alerta(db, f"devolucao_exclusao_situacao:{PEDIDO}:{AGUARDANDO}")
+    assert alerta is not None and "nota fiscal emitida" in alerta.message
+    assert "mozilla" not in alerta.message
+
+
+async def test_recalculo_sem_mudanca_nao_anuncia_foi_para(
+    client, db, make_user, auth_as, bling_real
+):
+    """Achado 8: A Extraviado + B Novo com a entrada que falhou; excluir B não
+    muda nada (Problemas antes e depois) — o Bling responde "mesma situação" e
+    a resposta não diz "Pedido foi para Problemas"."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    novo = await _lancar_novo(client)
+    await _lancar(client, sku="b045.16", custo=68.50)
+    await _entrada_falhou(db, novo["id"])
+    assert bling_real.estado == PROBLEMAS
+    bling_real.situacoes.clear()
+
+    r = await client.delete(f"/api/devolutions/{novo['id']}")
+    assert r.status_code == 200, r.text
+    assert "situacao_recalculada" not in r.json()
+    assert bling_real.situacoes == []
+
+
+async def test_previa_da_lixeira_do_chamado_marca_linha_que_passou_por_manutencao(
+    client, db, make_user, auth_as, bling
+):
+    """Achado 9: a prévia da lixeira do chamado diz que a linha passou por
+    Manutenção (a tela avisa que o débito do conserto vai junto)."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed(db, user)
+    await _lancar(client)
+    manut = await _lancar(
+        client, sku="b045.16", custo=68.50, condicao_produto="Manutenção",
+        motivo_devolucao=None, custo_manutencao=30, tecnico="Zé",
+    )
+    await _patch(client, manut["id"], condicao_produto="Usado")
+    (ch,) = await _chamados(db)
+
+    r = await client.get(f"/api/chamados/{ch.id}/exclusao")
+    assert r.status_code == 200, r.text
+    por_id = {item["id"]: item for item in r.json()["lancamentos"]}
+    assert por_id[manut["id"]]["manutencao"] is True
+    assert all(v["manutencao"] is False for k, v in por_id.items() if k != manut["id"])
