@@ -621,9 +621,12 @@ async def run_tiktok_sync(
             soma = sum((_d(tx.get("settlement_amount")) for tx in txs), ZERO)
             total = _d(st.get("settlement_amount"))
             if st.get("settlement_amount") not in (None, "") and soma != total:
+                # 26/10 (Vinicius): o painel mostra de que dia e de quanto é o extrato
+                dia = dia_do_extrato(st)
+                de = f" de {dia:%d/%m}" if dia else ""
                 raise RuntimeError(
-                    f"transações incompletas: {len(txs)} linha(s) somam {soma}, "
-                    f"o extrato diz {total}"
+                    f"transações incompletas no extrato{de} ({total}): "
+                    f"{len(txs)} linha(s) somam {soma}"
                 )
             txs.sort(key=lambda x: (int(x.get("order_create_time") or 0), str(x.get("id"))))
             movs: list[dict[str, Any]] = []

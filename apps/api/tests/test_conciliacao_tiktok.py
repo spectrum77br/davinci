@@ -759,6 +759,7 @@ async def test_extrato_com_transacoes_incompletas_fica_em_erro_e_e_relido(db, ma
     (erro,) = r["erros"]
     assert erro["extrato"] == "2" and "transações incompletas" in erro["erro"]
     assert "344.45" in erro["erro"] and "544.45" in erro["erro"]
+    assert "extrato de 14/10 (544.45)" in erro["erro"]  # 26/10: o dia e o valor do extrato
     sync = (await db.execute(select(ConciliacaoSync))).scalar_one()
     assert sync.status == "erro" and "incompletas" in sync.erro
     assert (await db.execute(select(ConciliacaoMovimento))).scalars().all() == []

@@ -4190,7 +4190,8 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         if fatura_problema:
             problemas_dia.append(fatura_problema)
         if loja.ultimo_erro and not (loja.ultimo_erro.startswith("fatura:") and fatura_problema):
-            problemas_dia.append(f"erro: {loja.ultimo_erro[:80]}")
+            # 26/10 (Vinicius): inteiro — cortado em 80 sumia o "de quanto/que dia" do extrato
+            problemas_dia.append(f"erro: {loja.ultimo_erro}")
         if fechado and not fechado.fechado_em and fechado.reaberto_motivo:
             problemas_dia.append(
                 f"dia reaberto por {fechado.reaberto_por}: {fechado.reaberto_motivo}"

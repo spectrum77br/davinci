@@ -2046,6 +2046,15 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     assert linha["problemas_dia"] == ["fatura não lida · HTTP 403 PolicyAgent"]
     assert any("fatura do ML não lida" in a["titulo"] for a in r.json()["agir"])
     assert r.json()["dias"][3]["pendentes"] == [{"conta": "jlas2", "motivo": "fatura não lida"}]
+    # erro de leitura vai inteiro (26/10: cortado em 80 sumia o dia e o valor do extrato)
+    erro_extrato = (
+        "extrato: 7699692125977315090: RuntimeError: transações incompletas no extrato "
+        "de 25/10 (123.45): 0 linha(s) somam 0.00"
+    )
+    loja.ultimo_erro = erro_extrato
+    await db.commit()
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-12"})
+    assert f"erro: {erro_extrato}" in r.json()["lojas"][0]["problemas_dia"]
     loja.ultimo_erro = None
     loja.ultimo_extrato_em = datetime.now(UTC) - timedelta(days=3)
     await db.commit()
