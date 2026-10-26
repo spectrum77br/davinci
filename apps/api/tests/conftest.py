@@ -125,6 +125,7 @@ async def _setup_schema():
             "temu",
             "shein",
             "magalu",
+            "carrefour",
         ),
         "link_sync_status": (
             "ok",

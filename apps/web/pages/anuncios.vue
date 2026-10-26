@@ -20,7 +20,7 @@ definePageMeta({
 
 type Integration = {
   id: string
-  platform: 'bling' | 'ml' | 'shopee' | 'amazon'
+  platform: 'bling' | 'ml' | 'shopee' | 'amazon' | 'carrefour'
   name: string
   store_id: string | null
 }
@@ -108,6 +108,7 @@ const PLATFORM_LABEL: Record<string, string> = {
   ml: 'Mercado Livre',
   shopee: 'Shopee',
   amazon: 'Amazon',
+  carrefour: 'Carrefour',
 }
 
 const STATUS_LABEL: Record<Listing['status'], string> = {
@@ -151,7 +152,7 @@ const integrationById = computed(() =>
   Object.fromEntries(integrations.value.map(i => [i.id, i])),
 )
 const importableIntegrations = computed(() =>
-  integrations.value.filter(i => i.platform === 'ml' || i.platform === 'shopee'),
+  integrations.value.filter(i => i.platform === 'ml' || i.platform === 'shopee' || i.platform === 'carrefour'),
 )
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 

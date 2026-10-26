@@ -219,7 +219,9 @@ async def enqueue_import(
     ).scalar_one_or_none()
     if integ is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
-    if integ.platform not in {IntegrationPlatform.ML, IntegrationPlatform.SHOPEE}:
+    if integ.platform not in {
+        IntegrationPlatform.ML, IntegrationPlatform.SHOPEE, IntegrationPlatform.CARREFOUR,
+    }:
         raise HTTPException(
             501,
             detail={

@@ -98,15 +98,16 @@ const canDelete = useCan('empresa', 'delete')
 const STORE_STATUSES: StoreStatus[] = ['active', 'inactive', 'closing', 'banned', 'pending', 'under_review']
 
 // Marketplace → integration platform (for the manual creds modal).
-const MK_TO_INTEGRATION_PLATFORM: Record<string, 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu' | null> = {
+const MK_TO_INTEGRATION_PLATFORM: Record<string, 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu' | 'carrefour' | null> = {
   ml: 'ml',
   shopee: 'shopee',
   amazon: 'amazon',
   tiktok: 'tiktok',
   temu: 'temu',
   magalu: 'magalu',
+  carrefour: 'carrefour',
   // Bling is multi-channel and lives at the company level — we surface it separately.
-  site: null, aliexpress: null, shein: null, carrefour: null, netshoes: null,
+  site: null, aliexpress: null, shein: null, netshoes: null,
 }
 
 type IntegrationRef = { id: string; platform: string; name: string; store_id: string | null }
@@ -332,7 +333,7 @@ function isExpired(cert: CompanyCertificate) {
 
 const showNewIntegration = ref(false)
 const newIntegrationStoreId = ref<string | null>(null)
-const newIntegrationPlatform = ref<'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu' | null>(null)
+const newIntegrationPlatform = ref<'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu' | 'carrefour' | null>(null)
 
 function openNewIntegration(s: StoreOut) {
   const platform = MK_TO_INTEGRATION_PLATFORM[s.marketplace]

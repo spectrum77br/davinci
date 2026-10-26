@@ -51,6 +51,76 @@ def _to_platform(v: str) -> IntegrationPlatform:
         raise HTTPException(400, detail={"code": "platform_invalid", "value": v}) from e
 
 
+def _validated_carrefour_credentials(credentials: dict, *, existing: dict | None = None) -> dict:
+    """Validate operator input without accepting cached authorization or URLs."""
+    if set(credentials) - {"api_key", "shop_id"}:
+        raise HTTPException(400, detail={"code": "carrefour_credentials_invalid"})
+    merged = {**(existing or {}), **credentials}
+    api_key = merged.get("api_key")
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise HTTPException(400, detail={"code": "carrefour_api_key_required"})
+    api_key = api_key.strip()
+    if (
+        len(api_key) > 4096 or not api_key.isascii()
+        or any(ord(char) < 33 or ord(char) == 127 for char in api_key)
+    ):
+        raise HTTPException(400, detail={"code": "carrefour_api_key_invalid"})
+    shop_id = merged.get("shop_id")
+    shop_text = (
+        str(shop_id).strip()
+        if isinstance(shop_id, (str, int)) and not isinstance(shop_id, bool) else ""
+    )
+    if (
+        not shop_text.isascii() or not shop_text.isdecimal()
+        or len(shop_text) > 19 or not 0 < int(shop_text) <= 9223372036854775807
+    ):
+        raise HTTPException(400, detail={"code": "carrefour_shop_id_invalid"})
+    shop_text = str(int(shop_text))
+    if existing and str(existing.get("shop_id")) != shop_text:
+        # Existing offers are scoped to this shop. Changing it in place would
+        # let one account overwrite the other account's local offer records.
+        raise HTTPException(400, detail={"code": "carrefour_shop_id_immutable"})
+    merged.update(api_key=api_key, shop_id=shop_text)
+    if not existing or existing.get("api_key") != api_key:
+        merged.pop("_carrefour_account_check", None)
+    return merged
+
+
+def _validate_carrefour_store(platform: IntegrationPlatform, store: Store | None) -> None:
+    if platform != IntegrationPlatform.CARREFOUR:
+        return
+    if store is None:
+        raise HTTPException(400, detail={"code": "carrefour_store_required"})
+    if store.marketplace.value != "carrefour":
+        raise HTTPException(400, detail={"code": "integration_store_platform_mismatch"})
+
+
+def _connection_test_time(platform: IntegrationPlatform, info: dict | None) -> datetime:
+    now = datetime.now(UTC)
+    if platform == IntegrationPlatform.CARREFOUR and isinstance(info, dict):
+        checked_at = info.get("checked_at")
+        if (
+            isinstance(checked_at, int) and not isinstance(checked_at, bool)
+            and 0 < checked_at <= now.timestamp()
+        ):
+            return datetime.fromtimestamp(checked_at, tz=UTC)
+    return now
+
+
+async def _locked_carrefour_integration(
+    session: AsyncSession, integration_id: UUID,
+) -> Integration:
+    integration = await session.scalar(
+        select(Integration).where(
+            Integration.id == integration_id,
+            Integration.platform == IntegrationPlatform.CARREFOUR,
+        ).with_for_update(key_share=True).execution_options(populate_existing=True)
+    )
+    if integration is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    return integration
+
+
 async def _resolve_store(session: AsyncSession, i: Integration) -> Store | None:
     """Resolve the linked store for an integration.
 
@@ -151,6 +221,7 @@ async def create_integration(
 ) -> IntegrationOut:
     # Loja é opcional. Quando informada, validamos e vinculamos; quando
     # ausente, criamos a integração "solta" (store_id=None).
+    platform = _to_platform(body.platform)
     store = None
     if body.store_id is not None:
         store = (
@@ -161,12 +232,17 @@ async def create_integration(
         if store.integration_id is not None:
             raise HTTPException(409, detail={"code": "store_already_linked"})
 
+    _validate_carrefour_store(platform, store)
+    credentials = body.credentials or {}
+    if platform == IntegrationPlatform.CARREFOUR:
+        credentials = _validated_carrefour_credentials(credentials)
+
     integ = Integration(
         user_id=user.id,
         store_id=store.id if store else None,
-        platform=_to_platform(body.platform),
+        platform=platform,
         name=body.name,
-        credentials=encrypt_json(body.credentials or {}),
+        credentials=encrypt_json(credentials),
     )
     session.add(integ)
     try:
@@ -195,6 +271,9 @@ async def patch_integration(
     if i is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
     data = body.model_dump(exclude_unset=True)
+    if i.platform == IntegrationPlatform.CARREFOUR:
+        i = await _locked_carrefour_integration(session, i.id)
+        _validate_carrefour_store(i.platform, await _resolve_store(session, i))
     if "name" in data and data["name"] is not None:
         i.name = data["name"]
     if "status" in data and data["status"] is not None:
@@ -204,8 +283,15 @@ async def patch_integration(
     if "credentials" in data and data["credentials"] is not None:
         # Merge with existing — never blow away refresh_token by accident.
         existing = decrypt_json(i.credentials) if i.credentials else {}
-        existing.update(data["credentials"])
-        i.credentials = encrypt_json(existing)
+        if i.platform == IntegrationPlatform.CARREFOUR:
+            updated = _validated_carrefour_credentials(data["credentials"], existing=existing)
+            if updated.get("api_key") != existing.get("api_key"):
+                i.last_test_at = None
+                i.last_test_ok = None
+                i.last_error = None
+        else:
+            updated = {**existing, **data["credentials"]}
+        i.credentials = encrypt_json(updated)
     await session.commit()
     await session.refresh(i)
     s = await _resolve_store(session, i)
@@ -271,7 +357,19 @@ async def test_integration(
     creds = decrypt_json(i.credentials)
     client = client_for(i.platform, creds, on_token_refresh=_make_token_save_callback(session, i), integration_id=i.id)
     result = await client.test_connection()
-    i.last_test_at = datetime.now(UTC)
+    if i.platform == IntegrationPlatform.CARREFOUR:
+        i = await _locked_carrefour_integration(session, i.id)
+        current = decrypt_json(i.credentials)
+        if any(current.get(key) != client.creds.get(key) for key in ("api_key", "shop_id")):
+            # A key rotation may commit after the client's check transaction.
+            # Do not apply the previous key's result to the newly saved key.
+            await session.rollback()
+            return TestConnectionOut(
+                ok=False,
+                code="carrefour_credentials_changed",
+                detail="A chave do Carrefour mudou durante a verificação. Teste novamente.",
+            )
+    i.last_test_at = _connection_test_time(i.platform, result.info)
     i.last_test_ok = result.ok
     i.last_error = None if result.ok else (result.detail or "")[:1000]
     await session.commit()

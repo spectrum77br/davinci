@@ -5,7 +5,7 @@ import { SquarePen, Plus, RefreshCw, Trash2, Zap, Search, KeyRound } from 'lucid
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'integracoes', action: 'view' } })
 
-type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu'
+type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu' | 'carrefour'
 
 type Integration = {
   id: string
@@ -38,10 +38,12 @@ const PLATFORM_LABELS: Record<string, string> = {
   tiktok: 'TikTok Shop',
   temu: 'Temu',
   magalu: 'Magalu',
+  carrefour: 'Carrefour',
 }
 
 const { api } = useApi()
 const items = ref<Integration[]>([])
+const carrefourChecks = ref<Record<string, { checkedAt: string; cached: boolean }>>({})
 const companies = ref<Company[]>([])
 const stores = ref<Store[]>([])
 const loading = ref(false)
@@ -113,7 +115,7 @@ const filtered = computed(() => {
 // Display order for the platform headers — alphabetical by long name with
 // the most-used marketplaces first; everything else falls through alphabetically.
 const PLATFORM_ORDER: string[] = [
-  'ml', 'shopee', 'amazon', 'tiktok', 'temu', 'aliexpress', 'shein', 'magalu', 'site', 'bling',
+  'ml', 'shopee', 'amazon', 'tiktok', 'temu', 'aliexpress', 'shein', 'magalu', 'carrefour', 'site', 'bling',
 ]
 
 const grouped = computed(() => {
@@ -149,10 +151,21 @@ async function testIntegration(i: Integration) {
     const r = await api<{
       ok: boolean; detail: string | null
       code?: string; ttl_seconds?: number; retry_after_epoch?: number
+      info?: { cached?: boolean; checked_at?: number } | null
     }>(
       `/api/integrations/${i.id}/test`,
       { method: 'POST' }
     )
+    if (i.platform === 'carrefour') {
+      const checks = { ...carrefourChecks.value }
+      const checkedAt = r.info?.checked_at
+      if (typeof checkedAt === 'number' && Number.isFinite(checkedAt) && checkedAt > 0) {
+        checks[i.id] = { checkedAt: new Date(checkedAt * 1000).toISOString(), cached: r.info?.cached === true }
+      } else {
+        delete checks[i.id]
+      }
+      carrefourChecks.value = checks
+    }
     if (r.code === 'bling_cf_cooldown_active' && r.retry_after_epoch) {
       cooldownUntil.value = { ...cooldownUntil.value, [i.id]: r.retry_after_epoch }
       error.value = r.detail || 'Bling em cooldown (Cloudflare rate-limit). Tente mais tarde.'
@@ -161,6 +174,11 @@ async function testIntegration(i: Integration) {
     if (r.code === 'bling_reauth_needed') {
       error.value = r.detail || 'Reconectar Bling — refresh_token expirou'
       await refresh()
+      return
+    }
+    if (r.code === 'carrefour_credentials_changed') {
+      await refresh()
+      error.value = r.detail || 'A chave do Carrefour mudou. Teste novamente.'
       return
     }
     if (!r.ok) error.value = `teste falhou: ${r.detail || 'erro'}`
@@ -247,6 +265,13 @@ async function toggleVacation(i: Integration) {
 function fmtDate(s: string | null) {
   if (!s) return '—'
   return new Date(s).toLocaleString('pt-BR')
+}
+
+function carrefourCheck(i: Integration) {
+  const check = carrefourChecks.value[i.id]
+  // A key update clears last_test_at. Never show the old key's cached result.
+  if (i.platform !== 'carrefour' || !i.last_test_at || !check) return null
+  return new Date(i.last_test_at).getTime() === new Date(check.checkedAt).getTime() ? check : null
 }
 
 function statusClass(i: Integration) {
@@ -341,6 +366,9 @@ const tab = ref<'integracoes' | 'automacoes'>(
             </span>
           </div>
           <div class="break-words font-medium">{{ i.name }}</div>
+          <p v-if="i.platform === 'carrefour'" class="text-xs text-muted-foreground">
+            Leitura e importação de ofertas. Envio de estoque e preços ainda não disponível.
+          </p>
           <div class="break-words text-xs text-muted-foreground space-y-0.5">
             <div v-if="i.store_id">
               loja: <code>{{ storeById[i.store_id]?.marketplace }}</code> /
@@ -348,7 +376,11 @@ const tab = ref<'integracoes' | 'automacoes'>(
                   || companyById[storeById[i.store_id]?.company_id || '']?.apelido || '?' }}
             </div>
             <div v-if="i.token_expires_at">token expira: {{ fmtDate(i.token_expires_at) }}</div>
-            <div v-if="i.last_test_at">testada: {{ fmtDate(i.last_test_at) }}</div>
+            <div v-if="i.last_test_at">
+              {{ i.platform === 'carrefour' ? 'verificação Carrefour' : 'testada' }}:
+              {{ fmtDate(carrefourCheck(i)?.checkedAt || i.last_test_at) }}
+              <span v-if="carrefourCheck(i)?.cached"> · resultado armazenado, sem nova consulta</span>
+            </div>
             <div v-if="i.last_error" class="integration-error text-red-400 truncate" :title="i.last_error">
               erro: {{ i.last_error }}
             </div>
@@ -373,7 +405,7 @@ const tab = ref<'integracoes' | 'automacoes'>(
                 : OAUTH_AUTHORIZE_LABELS[i.platform] }}
             </Button>
             <Button
-              v-if="canEdit && i.platform !== 'bling'"
+              v-if="canEdit && i.platform !== 'bling' && i.platform !== 'carrefour'"
               size="sm"
               :variant="i.vacation_mode ? 'default' : 'outline'"
               :disabled="vacationId === i.id"

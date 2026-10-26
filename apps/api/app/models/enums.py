@@ -60,6 +60,7 @@ class IntegrationPlatform(StrEnum):
     TEMU = "temu"
     SHEIN = "shein"
     MAGALU = "magalu"
+    CARREFOUR = "carrefour"
 
 
 PLATFORMS: tuple[str, ...] = tuple(p.value for p in IntegrationPlatform)

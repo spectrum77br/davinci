@@ -38,6 +38,7 @@ from app.models import (
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.auto_link import _magalu_sku_key, _SkuIndex
+from app.services.marketplaces.carrefour import CarrefourClient
 from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -84,6 +85,8 @@ def _client_for_listings(session: AsyncSession, integ: Integration):
         return MercadoLivreClient(creds, on_token_refresh=on_refresh)
     if integ.platform == IntegrationPlatform.MAGALU:
         return MagaluClient(creds, on_token_refresh=on_refresh, integration_id=integ.id)
+    if integ.platform == IntegrationPlatform.CARREFOUR:
+        return CarrefourClient(creds, on_token_refresh=on_refresh, integration_id=integ.id)
     return None
 
 

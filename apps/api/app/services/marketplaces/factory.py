@@ -7,6 +7,7 @@ from app.models import IntegrationPlatform
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.base import MarketplaceClient
 from app.services.marketplaces.bling import BlingClient
+from app.services.marketplaces.carrefour import CarrefourClient
 from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -34,6 +35,10 @@ def client_for(
         return TemuClient(creds, on_token_refresh=on_token_refresh)
     if platform == IntegrationPlatform.MAGALU:
         return MagaluClient(
+            creds, on_token_refresh=on_token_refresh, integration_id=integration_id
+        )
+    if platform == IntegrationPlatform.CARREFOUR:
+        return CarrefourClient(
             creds, on_token_refresh=on_token_refresh, integration_id=integration_id
         )
     raise HTTPException(501, detail={"code": "platform_not_implemented", "platform": platform.value})
