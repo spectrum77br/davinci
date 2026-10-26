@@ -773,6 +773,66 @@ async def test_extrato_com_transacoes_incompletas_fica_em_erro_e_e_relido(db, ma
     assert loja.ultimo_extrato_em == AGORA
 
 
+def _extrato_ajuste(sid: int, d: date, total: str, payment_id: int) -> dict:
+    e = _extrato(sid, d, total, payment_id)
+    e.update(revenue_amount="0", net_sales_amount="0", adjustment_amount=total)
+    return e
+
+
+async def test_extrato_so_de_ajuste_sem_transacao_entra_como_ajuste(db, make_user):
+    """26/10 (Barbosa 22/10): ajuste de saldo em dois extratos, +95,44 e −95,44, no mesmo
+    pagamento. A TikTok manda a transação da metade positiva e a lista VAZIA da negativa,
+    que ficava "erro" pra sempre. Agora a negativa entra como uma linha de ajuste com o
+    valor do extrato; extrato vazio que tem venda continua "erro"."""
+    loja = await _loja_tiktok(db, make_user)
+    d14 = date(2026, 10, 14)
+    cliente = _TikTokFalsa(
+        [
+            _extrato(2, d14, "344.45", 903),
+            _extrato_ajuste(3, d14, "95.44", 903),
+            _extrato_ajuste(4, d14, "-95.44", 903),
+            _extrato(5, d14, "200", 904),  # venda sem transação: continua erro
+        ],
+        {
+            "2": [_tx(20, PEDIDO)],
+            "3": [_tx(30, "", tipo="NET_EARNINGS_BALANCE", settlement="95.44", **_ZERADO)],
+        },
+        [_repasse(903, "344.45", d14), _repasse(904, "200", d14)],
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    (erro,) = r["erros"]
+    assert erro["extrato"] == "5" and "transações incompletas" in erro["erro"]
+    assert r["inseridos"] == 6  # 3 extratos × (linha + repasse)
+    syncs = {s.chave: s for s in (await db.execute(select(ConciliacaoSync))).scalars()}
+    assert {k: s.status for k, s in syncs.items()} == {
+        "2": "lido",
+        "3": "lido",
+        "4": "lido",
+        "5": "erro",
+    }
+    assert syncs["4"].linhas == 2
+    movs = (
+        (
+            await db.execute(
+                select(ConciliacaoMovimento).where(ConciliacaoMovimento.tipo == "ajuste_tiktok")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    por_id = {m.id_externo: m for m in movs}
+    assert set(por_id) == {"30", "extrato-ajuste:4"}
+    neg = por_id["extrato-ajuste:4"]
+    assert (neg.credito, neg.debito) == (Decimal("0"), Decimal("95.44"))
+    assert neg.descricao == "Ajuste da TikTok sem transação (o extrato só tem ajuste)"
+    assert neg.raw["_statement_id"] == "4"
+    # as duas metades se anulam
+    assert sum((m.credito - m.debito for m in movs), Decimal("0")) == Decimal("0")
+    # rodada seguinte: nada entra de novo
+    r2 = await run_tiktok_sync(db, loja, cliente, agora=AGORA)
+    assert r2["inseridos"] == 0
+
+
 class _TikTokRepassesQuebrada(_TikTokFalsa):
     """A API de repasses falha enquanto `quebrada` for True; o resto funciona."""
 

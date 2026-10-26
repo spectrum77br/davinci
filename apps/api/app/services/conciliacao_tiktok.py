@@ -186,6 +186,27 @@ def transacao_para_movimento(
     }
 
 
+def transacao_do_extrato_so_de_ajuste(statement: dict[str, Any]) -> dict[str, Any] | None:
+    """26/10 (Vinicius; atv −320,71 de 23/10 e Barbosa −95,44 de 22/10): a TikTok lança
+    um ajuste de saldo (NET_EARNINGS_BALANCE) em DOIS extratos, +X e −X, sem venda, taxa
+    nem frete. A metade positiva vem com a transação; a negativa vem com a lista VAZIA e
+    a prova dos nove (0 ≠ −X) a recusava a cada rodada, pra sempre. Extrato só de ajuste
+    e sem transação vira UMA linha de ajuste com o valor do próprio extrato; extrato vazio
+    com venda, taxa ou frete continua "erro"."""
+    total = _d(statement.get("settlement_amount"))
+    if total == ZERO or _d(statement.get("adjustment_amount")) != total:
+        return None
+    campos = ("revenue_amount", "net_sales_amount", "fee_amount", "shipping_cost_amount")
+    if any(_d(statement.get(k)) != ZERO for k in campos):
+        return None
+    return {
+        "id": f"extrato-ajuste:{statement.get('id')}",
+        "type": "AJUSTE_SEM_TRANSACAO",
+        "settlement_amount": str(total),
+        "_sem_transacao": True,
+    }
+
+
 def _zerada_sem_pedido(m: dict[str, Any]) -> bool:
     return (
         m["tipo"] == "venda_liberada"
@@ -615,6 +636,10 @@ async def run_tiktok_sync(
         row.pedido_em = agora
         try:
             txs = await ler_transacoes(cliente, sid)
+            if not txs:
+                # 26/10: metade negativa do ajuste de saldo vem sem transação
+                ajuste = transacao_do_extrato_so_de_ajuste(st)
+                txs = [ajuste] if ajuste else txs
             # 16/10, revisão: página perdida/transação faltando era gravada como "lido" e
             # nunca relida. Prova dos nove antes de gravar: soma das transações = total do
             # extrato; se não bate, nada entra e o extrato fica "erro" (relido na próxima)
@@ -635,6 +660,8 @@ async def run_tiktok_sync(
                 liq = _d(tx.get("settlement_amount"))
                 saldo += liq
                 m = transacao_para_movimento(tx, st, ordem=i, saldo_apos=saldo)
+                if m and tx.get("_sem_transacao"):
+                    m["descricao"] = "Ajuste da TikTok sem transação (o extrato só tem ajuste)"
                 if m:
                     movs.append(m)
             rep = (
