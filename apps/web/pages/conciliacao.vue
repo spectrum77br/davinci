@@ -202,6 +202,7 @@ const pagamentosDoPedido = computed(() => new Set((raiox.value?.movimentos || []
 const motivoDraft = ref('')
 // 22/10 (Vinicius): ao finalizar pedido com custo, a pergunta "manter ou zerar o custo?"
 const perguntaCusto = ref(false)
+const caixaCusto = ref<HTMLElement | null>(null)
 const custoMotivoDraft = ref('')
 
 // Token do Melhor Envio (15/10): a operação cola aqui; fica cifrado no servidor e nunca volta pra tela.
@@ -494,6 +495,10 @@ async function finalizar() {
   }
   if ((p.custo ?? 0) > 0.005) {
     perguntaCusto.value = true // a resposta vem pelos botões "manter" / "zerar"
+    // 26/10 (Vinicius: "clico em finalizar e não acontece nada"): a pergunta abre logo
+    // abaixo dos botões e, com o Raio-X comprido, ficava fora da tela — rola até ela
+    await nextTick()
+    caixaCusto.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     return
   }
   await marcar({ etapa: 'finalizado', etapa_motivo: motivoDraft.value.trim() || undefined })
@@ -1067,7 +1072,7 @@ await carregar()
               <button v-else type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ etapa: 'reaberto', etapa_motivo: motivoDraft || 'reaberto à mão' })">Reabrir</button>
               <button v-if="raiox.pedido.custo_regra === 'manual'" type="button" class="rounded border px-2 py-1 font-semibold hover:bg-muted" :disabled="salvando" @click="marcar({ zerar_custo: false })">Desfazer custo zerado</button>
             </div>
-            <div v-if="perguntaCusto && raiox.pedido.etapa !== 'finalizado'" class="space-y-1.5 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 dark:bg-amber-950/20">
+            <div v-if="perguntaCusto && raiox.pedido.etapa !== 'finalizado'" ref="caixaCusto" class="space-y-1.5 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 dark:bg-amber-950/20">
               <div class="font-semibold">Custo do produto: {{ fmtMoney(raiox.pedido.custo) }} — manter ou zerar?</div>
               <input v-model="custoMotivoDraft" placeholder="motivo pra zerar (ex.: voltou pro estoque)" class="w-full rounded border bg-background px-2 py-1 text-[11px]" />
               <div class="flex flex-wrap gap-1.5">
