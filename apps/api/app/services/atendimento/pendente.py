@@ -299,16 +299,36 @@ def nao_lida_conta(conversa: Any) -> bool:
     )
 
 
-def falta_responder(conversa: Any) -> bool:
+def turno_recente(conversa: Any, agora: datetime | None = None) -> bool:
+    """A última mensagem do comprador está na janela do número (`JANELA_DO_NUMERO`)? PURA.
+
+    26/10/2026, o Eduardo: "7 dias tanto na caixa principal tanto na humana" — a
+    conversa parada há mais de 7 dias sai do "Falta responder" (e da Caixa
+    Humano); o comprador escrevendo de novo, ela volta. A gêmea de `turno_recente_sql`.
+    """
+    ultima = _utc(getattr(conversa, "ultima_do_cliente_em", None))
+    return ultima is not None and ultima > _utc(agora or datetime.now(UTC)) - JANELA_DO_NUMERO
+
+
+def turno_recente_sql(c: Any = AtendimentoConversa, agora: datetime | None = None):
+    """SQL de `turno_recente` (nunca NULL)."""
+    limite = _utc(agora or datetime.now(UTC)) - JANELA_DO_NUMERO
+    return func.coalesce(c.ultima_do_cliente_em > limite, false())
+
+
+def falta_responder(conversa: Any, agora: datetime | None = None) -> bool:
     """A conversa conta no "Falta responder" da Caixa (igual ao Duoke)? PURA.
 
-    A gêmea de `falta_responder_sql` (o teste confere as duas).
+    A gêmea de `falta_responder_sql` (o teste confere as duas). No chat, só o
+    turno dos últimos 7 dias (`turno_recente`); a fila da plataforma tem o prazo dela.
     """
     if pela_fila(conversa):
         return bool(getattr(conversa, "aguardando_resposta", False))
     if getattr(conversa, "situacao", None) == CONVERSA_FECHADA:
         return False
     if getattr(conversa, "sem_resposta_necessaria", False):
+        return False
+    if not turno_recente(conversa, agora):
         return False
     return nao_lida_conta(conversa) or comprador_por_ultimo(conversa)
 
@@ -338,7 +358,7 @@ def nao_lida_conta_sql(c: Any = AtendimentoConversa):
     )
 
 
-def falta_responder_sql(c: Any = AtendimentoConversa):
+def falta_responder_sql(c: Any = AtendimentoConversa, agora: datetime | None = None):
     """SQL de `falta_responder` (nunca NULL). O filtro e o número da aba são só
     do chat: `falta_responder_no_chat_sql`."""
     fila = pela_fila_sql(c)
@@ -348,6 +368,7 @@ def falta_responder_sql(c: Any = AtendimentoConversa):
             not_(fila),
             c.situacao != CONVERSA_FECHADA,
             c.sem_resposta_necessaria.is_(False),
+            turno_recente_sql(c, agora),
             or_(nao_lida_conta_sql(c), comprador_por_ultimo_sql(c)),
         ),
     )
@@ -364,9 +385,9 @@ def do_chat(conversa: Any) -> bool:
     return canal not in CANAIS_FORA_DO_CHAT and not separa_email.e_conversa_de_email(conversa)
 
 
-def falta_responder_no_chat(conversa: Any) -> bool:
+def falta_responder_no_chat(conversa: Any, agora: datetime | None = None) -> bool:
     """O filtro "Falta responder" da Caixa: a régua do Duoke, só no chat. PURA."""
-    return do_chat(conversa) and falta_responder(conversa)
+    return do_chat(conversa) and falta_responder(conversa, agora)
 
 
 # ── O número da Caixa = o "não lida" do Duoke (15/10/2026) ───────────────
@@ -630,9 +651,9 @@ def do_numero_sql(c: Any = AtendimentoConversa):
     return or_(do_chat_sql(c), reclamacao_no_numero_sql(c))
 
 
-def falta_responder_no_chat_sql(c: Any = AtendimentoConversa):
+def falta_responder_no_chat_sql(c: Any = AtendimentoConversa, agora: datetime | None = None):
     """SQL de `falta_responder_no_chat` — o filtro e o número da aba "Falta responder"."""
-    return and_(do_chat_sql(c), falta_responder_sql(c))
+    return and_(do_chat_sql(c), falta_responder_sql(c, agora))
 
 
 def nao_lidas_duoke_sql(c: Any = AtendimentoConversa, agora: datetime | None = None):

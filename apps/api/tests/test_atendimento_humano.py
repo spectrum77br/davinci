@@ -1444,7 +1444,8 @@ async def test_ia_sem_resposta_vai_para_a_caixa_humano(
     pergunta = "Esse carregador serve no Moto G?"  # a IA consegue: nenhum motivo gravado
     atrasada = await _conversa(db, kia, canal_kia, "atrasada", pergunta, ha=timedelta(minutes=11))
     na_hora = await _conversa(db, kia, canal_kia, "na_hora", pergunta, ha=timedelta(minutes=5))
-    # Fora da janela de 7 dias da IA (7 das 9 da Kia em 14/10/2026).
+    # Fora da janela de 7 dias (26/10/2026, `humano.JANELA_CAIXA`): não entra na
+    # Caixa Humano (continua no "Falta responder" da Caixa).
     velha = await _conversa(db, kia, canal_kia, "velha", "obrigado!", ha=timedelta(days=8))
     observar = await _conversa(db, outra, canal_outra, "observar", pergunta, ha=timedelta(hours=1))
     assunto = await _conversa(db, kia, canal_kia, "assunto", "quero trocar", ha=timedelta(hours=1))
@@ -1472,7 +1473,6 @@ async def test_ia_sem_resposta_vai_para_a_caixa_humano(
     # Sem rodada nenhuma (a triagem ainda nem passou): só a espera.
     esperadas = {
         str(atrasada.id): ["ia_sem_resposta"],
-        str(velha.id): ["ia_sem_resposta"],
         str(menu.id): ["ia_sem_resposta"],
         str(assunto.id): ["ia_sem_resposta"],
     }
@@ -1486,9 +1486,9 @@ async def test_ia_sem_resposta_vai_para_a_caixa_humano(
     assert linha["humano"]["rotulos"] == ["A IA não respondeu"]
     assert linha["humano"]["na_caixa"] is True
     res = (await client.get(f"{URL}/resumo")).json()
-    assert res["humano"] == 4
+    assert res["humano"] == 3
     por_loja = {lj["conta"]: lj["humano"] for lj in res["lojas"] if lj["integration_id"]}
-    assert por_loja == {"kia": 4, "outra": 0}
+    assert por_loja == {"kia": 3, "outra": 0}
     # Na Caixa: o chip só nas lojas dos modos (a do Observar, o Duoke responde).
     itens = {i["id"]: i for i in (await client.get(f"{URL}/conversas")).json()["itens"]}
     assert itens[str(observar.id)]["humano"] is None
@@ -1512,12 +1512,12 @@ async def test_ia_sem_resposta_vai_para_a_caixa_humano(
     assert [(c.externo_id, humano.ia_sem_resposta(c, agora)) for c, _ in linhas] == [
         (c.externo_id, sql) for c, sql in linhas
     ]
-    assert contagem["na_caixa"] == 4
-    assert contagem["motivo_principal"] == {"shopee": {"ia_sem_resposta": 3, "assunto": 1}}
+    assert contagem["na_caixa"] == 3
+    assert contagem["motivo_principal"] == {"shopee": {"ia_sem_resposta": 2, "assunto": 1}}
     seco = await humano.simular()
     assert (seco["na_caixa"], seco["motivo_principal"]) == (
-        4,
-        {"shopee": {"ia_sem_resposta": 3, "assunto": 1}},
+        3,
+        {"shopee": {"ia_sem_resposta": 2, "assunto": 1}},
     )
 
     # A IA respondeu: sai na hora. Pessoa (por fora) também.
@@ -1541,7 +1541,7 @@ async def test_ia_sem_resposta_vai_para_a_caixa_humano(
         enviada_em=AGORA - timedelta(minutes=1),
     )
     await db.commit()
-    del esperadas[str(atrasada.id)], esperadas[str(velha.id)]
+    del esperadas[str(atrasada.id)]
     assert await caixa() == esperadas
     # O cliente escreveu de novo: espera de novo os 10 minutos.
     await gravar.gravar_mensagem(

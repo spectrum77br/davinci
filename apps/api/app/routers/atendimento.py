@@ -2367,7 +2367,9 @@ def _humano_da_linha(
     """
     from app.services.atendimento import humano as humano_svc
 
-    na_caixa = humano_svc.na_caixa_da_loja(lojas, c.canal_id, c.integration_id)
+    na_caixa = humano_svc.na_caixa_da_loja(
+        lojas, c.canal_id, c.integration_id
+    ) and humano_svc.na_janela(c, agora)
     return humano_svc.para_tela(
         cache,
         ia_pausada=c.ia_pausada,

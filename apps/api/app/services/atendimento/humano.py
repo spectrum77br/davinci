@@ -318,6 +318,12 @@ MODOS_TODOS = "todos"
 # roda a cada minuto: com folga, ela respondeu antes disso.
 ESPERA_IA_MIN = 10
 ESPERA_IA = timedelta(minutes=ESPERA_IA_MIN)
+# A Caixa Humano só mostra o turno dos últimos 7 dias (26/10/2026, o Eduardo:
+# "por que ainda marca 25 na barbosa?" — 21 eram conversas paradas desde
+# 22/09): a mesma janela do número do Duoke (`pendente.JANELA_DO_NUMERO`). A
+# mais velha continua no "Falta responder" da Caixa; o cliente escrevendo de
+# novo, ela volta.
+JANELA_CAIXA = timedelta(days=7)
 # Os motivos que a CONSULTA põe (não são gravados): a tela os junta no fim.
 _MOTIVOS_DA_CONSULTA = frozenset({HUMANO_IA_SEM_RESPOSTA, HUMANO_IA_PAUSADA})
 
@@ -435,6 +441,13 @@ def ia_sem_resposta(conversa: Any, agora: datetime) -> bool:
         return False
     turno = _utc(conversa.ultima_do_cliente_em or getattr(conversa, "created_at", None))
     return turno is not None and turno <= agora - ESPERA_IA
+
+
+def na_janela(conversa: Any, agora: datetime) -> bool:
+    """O turno está na janela da Caixa Humano (`JANELA_CAIXA`)? PURA — a gêmea do
+    corte em `caixa_humano_sql` (o mesmo turno: `turno_em_sql`)."""
+    turno = _utc(conversa.ultima_do_cliente_em or getattr(conversa, "created_at", None))
+    return turno is not None and turno > agora - JANELA_CAIXA
 
 
 def sugestao_do_turno(momento: datetime | None, ultima_do_cliente_em: datetime | None) -> bool:
@@ -1017,6 +1030,7 @@ def caixa_humano_sql(lojas: LojasDaCaixa | None, agora: datetime | None = None):
         escopo_sql(),
         or_(_com_motivo_sql(), _pausada_sql(), espera),
         loja_no_modo_sql(lojas),
+        turno_em_sql() > cast(literal(agora - JANELA_CAIXA), DateTime(timezone=True)),
     )
 
 
@@ -1465,7 +1479,7 @@ async def simular(*, limite: int | None = None) -> dict[str, Any]:
             ):
                 motivos.append(HUMANO_IA_SEM_RESPOSTA)
             quantos[len(motivos)] += 1
-            if not motivos:
+            if not motivos or not na_janela(conversa, agora):
                 continue
             resumo["para_pessoa"] += 1
             contagem[p]["para_pessoa"] += 1
