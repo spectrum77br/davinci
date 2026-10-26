@@ -103,13 +103,16 @@ export function filtroPadrao(caixa: string | null | undefined): string {
 // linha marcada, o maior entre as mensagens do comprador sem resposta e as não
 // lidas. A reclamação do ML tem número desde 15/10/2026 (o Duoke a junta ao
 // pack e conta a mensagem do mediador): a bolinha dela é esse número.
+// Na Caixa Humano a bolinha também é o número da conversa (26/10/2026, o
+// Eduardo: "as notificações iguais ao Duoke … ainda tá marcando 4"): quem abriu
+// ou respondeu zera; sem o número, pela fila, como antes.
 type LinhaMarcavel = { aguardando_resposta?: boolean; falta_responder?: boolean; pendentes?: number; nao_lidas?: number; numero_duoke?: number | null }
 export function linhaMarcada(c: LinhaMarcavel, pelaFila = false): boolean {
   return pelaFila || c.falta_responder === undefined ? !!c.aguardando_resposta : !!c.falta_responder
 }
 export function bolinhaDaLinha(c: LinhaMarcavel, pelaFila = false): number {
+  if (c.falta_responder !== undefined && typeof c.numero_duoke === 'number') return Math.max(c.numero_duoke, 0)
   if (pelaFila || c.falta_responder === undefined) return c.pendentes ?? c.nao_lidas ?? 0
-  if (typeof c.numero_duoke === 'number') return Math.max(c.numero_duoke, 0)
   return c.falta_responder ? Math.max(c.pendentes ?? 0, c.nao_lidas ?? 0) : 0
 }
 // O selo de prazo é o da FILA: na linha que o Duoke já dá por respondida (só a

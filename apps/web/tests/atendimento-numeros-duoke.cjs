@@ -373,9 +373,10 @@ async function renderizados() {
   assert.equal(L.bolinhaDaLinha(avaliacao), 1)
   assert.equal(L.bolinhaDaLinha(linha({ falta_responder: false, pendentes: 2, numero_duoke: null })), 0)
   assert.equal(L.bolinhaDaLinha(linha({ falta_responder: true, pendentes: 4, nao_lidas: 1 })), 4)
-  // A Caixa Humano: pela fila, como sempre (o número não entra).
+  // A Caixa Humano (26/10/2026): também o número da conversa — aberta, zera; sem o número, pela fila.
   assert.equal(L.bolinhaDaLinha(kia, true), 9)
-  assert.equal(L.bolinhaDaLinha(aberta, true), 3)
+  assert.equal(L.bolinhaDaLinha(aberta, true), 0)
+  assert.equal(L.bolinhaDaLinha(avaliacao, true), 1)
   // A soma das bolinhas das linhas de uma loja é o número dela (o servidor manda a mesma régua).
   assert.equal([kia, aberta, linha({ falta_responder: true, numero_duoke: 2 })].reduce((n, c) => n + L.bolinhaDaLinha(c), 0), 11)
   assert.match(web('components/AtendimentoLista.vue'), /:nao-lidas="bolinhaDaLinha\(c, emHumano\)"/)
