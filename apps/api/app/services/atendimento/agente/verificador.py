@@ -957,6 +957,10 @@ produtos (o termo «roda mala» que só trouxe malas) não sustenta «não encon
 Continua contando: dizer ou sugerir que existe outra opção — maior, outro tamanho, outra cor, \
 outro modelo («se quiser a mala maior, é compra nova pelo anúncio») — sem essa opção nas \
 EVIDÊNCIAS (afirma_sem_lastro); responder «é original?» só com novo ou lacrado (item 7 false); \
+a instrução física do aparelho (onde vai o chip ou o cartão, a gaveta e o pino, a tampa \
+traseira, a bateria) sem o anúncio DO MODELO que a diga nem a resposta da equipe do mesmo \
+produto — o fato aprovado que não diz o modelo não sustenta: muda de modelo para modelo \
+(afirma_sem_lastro); \
 e, do aparelho Uranyx, «90 dias», «1 ano», «9 meses», o app Uranyx, o site \
 uranyx.com.br/sac e o SAC da Uranyx (afirma_sem_lastro; o caminho marca o item 4), mesmo que \
 a garantia ou um fato das EVIDÊNCIAS os traga — a garantia da Apple de 1 ano a partir da \

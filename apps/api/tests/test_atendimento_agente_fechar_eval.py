@@ -894,12 +894,15 @@ def test_8_tempo_do_pedido():
 
 # ═══════════════ 9. a calibração v13 ═══════════════
 
+# v16 (27/10/2026): o "fechar-d3-par-de-outra-loja-ruim" virou bom — na Shopee a política da
+# entrega é FRASE-PADRÃO do dono (v15) e vale sem a resposta da equipe (o id fica).
 FECHAR_BOAS = {
     "fechar-d3-par-anexado-boa", "fechar-d3-acolhimento-boa", "fechar-d1-cartao-boa", "fechar-agradecimento-boa",
     "fechar-sim-garantia-e-branco-boa", "fechar-recebido-troca-boa", "fechar-l3-resumo-boa",
+    "fechar-d3-par-de-outra-loja-ruim",
 }  # fmt: skip
 FECHAR_RUINS = {
-    "fechar-d3-par-anexado-prazo-ruim", "fechar-d3-par-de-outra-loja-ruim", "fechar-d3-acolhimento-cidade-ruim",
+    "fechar-d3-par-anexado-prazo-ruim", "fechar-d3-acolhimento-cidade-ruim",
     "fechar-d1-cartao-aceita-ruim", "fechar-agradecimento-produto-ruim", "fechar-sim-garantia-ignora-branco-ruim",
     "fechar-recebido-troca-com-defeito-ruim", "fechar-l3-resumo-rj-ruim", "fechar-nao-informa-mas-informa-ruim",
     "fechar-o-que-e-pulseira-ruim", "fechar-variacoes-incompletas-branco-ruim", "fechar-status-inventado-ruim",

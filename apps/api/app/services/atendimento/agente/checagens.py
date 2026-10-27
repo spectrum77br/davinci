@@ -10321,13 +10321,19 @@ def conferir(
         if ctx.modo == constantes.MODO_AUTO:
             # Ajuste rf3 (21/10/2026): a regra estrutural do andamento, no texto
             # com as lacunas (o do modelo).
-            pendencias += conferir_andamento_sem_lastro(
+            do_andamento = conferir_andamento_sem_lastro(
                 proposta.texto or texto,
                 pedido,
                 ctx,
                 assunto=conferida.categoria,
                 valores=getattr(base, "valores", None),
             )
+            pendencias += do_andamento
+            # v16 (27/10/2026; o fresco2-E02 da calibração, que escapava das duas camadas):
+            # o preparo do pedido ("pronto para ser despachado", "já separado") sem o dado.
+            sem_dado = any(x.codigo == PEDIDO_SEM_LASTRO for x in do_andamento)
+            if sem_dado and _PREPARO_DO_PEDIDO.search(_plano(texto)):
+                pendencias.append(_pessoa(PREPARO_SEM_O_DADO, MOTIVO_PREPARO_SEM_O_DADO))
         pendencias += conferir_origem(texto, pedido, ctx)
         # Item 1 (22–23/10/2026): o prazo que o último status do pedido traz.
         # Revisão: só o status do pedido da conversa (`_blocos_do_status`).
@@ -10440,6 +10446,16 @@ def conferir(
             ]
             pendencias += conferir_entregue_a_quem_nao_recebeu(texto, do_turno)
             pendencias += conferir_modelo_sem_o_dado(texto, pedido, fichas)
+            # v16 no holdout (27/10/2026): a instrução física sem o lastro do modelo.
+            pendencias += conferir_fisico_sem_o_modelo(
+                texto,
+                acao=proposta.acao,
+                fichas=fichas,
+                pares_de_produto=[
+                    str(par.get("id"))
+                    for par in ctx.pares_citados(proposta.evidencias, de_produto=True)
+                ],
+            )
             # v16 (27/10/2026): a condição perguntada sem resposta e o "não informa".
             pendencias += conferir_condicao_sem_resposta(texto, do_turno, acao=proposta.acao)
             pendencias += conferir_anuncio_nao_informa(texto, acao=proposta.acao)
@@ -11071,8 +11087,8 @@ MOTIVO_CONDICAO_SEM_RESPOSTA = (
 )
 ANUNCIO_NAO_INFORMA = "anuncio_nao_informa"
 MOTIVO_ANUNCIO_NAO_INFORMA = (
-    'responde "o anúncio não informa" — confira se um campo ou a resposta da equipe do mesmo '
-    "produto traz o dado"
+    'resposta evasiva ("o anúncio não informa", "não consigo afirmar", "se houver") — a equipe '
+    "costuma saber: confira se um campo ou a resposta da equipe do mesmo produto traz o dado"
 )
 
 # A condição DO PRODUTO perguntada ("esse celular é original?", "é original lacrado?") — não o
@@ -11087,8 +11103,17 @@ _CONDICAO_PERGUNTADA = (
 )
 _NAO_INFORMA = re.compile(
     r"\b(?:anuncio|descricao|ficha|titulo|pagina\s+do\s+produto)\b[^.!?;\n]{0,40}?"
-    r"\bnao\s+(?:informa|traz|especifica|menciona|detalha|cita|diz)\b"
+    r"\bnao\s+(?:informa|traz|especifica|menciona|detalha|cita|diz|consta)\b"
     r"|\bnao\s+(?:consta|esta\s+informad\w*)\s+no\s+anuncio\b"
+    # O holdout de 27/10/2026 (8 dos 10 rascunhos evasivos de produto não estavam ok): o "não
+    # consigo afirmar/confirmar/informar", o "se houver" e a "lista pode não estar completa".
+    r"|\bnao\s+(?:consigo|conseguimos|posso|podemos)\s+(?:\w+\s+){0,2}?"
+    r"(?:afirmar|confirmar|informar|dizer|assegurar)\b(?![^.!?;\n]{0,60}\b(?:prazo|data|entrega"
+    r"|chega\w*|reembols\w*|transport\w*|pedido|rastrei\w*|envio|cidade|status)\b)"
+    # "Se houver a frasqueira sozinha, ela aparece na loja" (9805bfacdf87) — não o "se houver
+    # cupom ativo, ele aparece no anúncio" da política (18-K12 da rodada 4b).
+    r"|\bse\s+houver\b(?!\s+(?:algum\s+|um\s+)?(?:cupo\w*|desconto|promoc\w*|atualizac\w*))"
+    r"|\bpode\s+nao\s+estar\s+complet\w*"
 )
 
 
@@ -11113,3 +11138,69 @@ def conferir_anuncio_nao_informa(texto: str, *, acao: str) -> list[PendenciaAgen
     if acao != "responder" or not _NAO_INFORMA.search(_plano(texto)):
         return []
     return [_pessoa(ANUNCIO_NAO_INFORMA, MOTIVO_ANUNCIO_NAO_INFORMA)]
+
+
+# ── 12d. O v16 no holdout (27/10/2026): a instrução física sem o modelo ──────
+#
+# 904411b56a3f (Barbosa, crítico): "o chip vai na gaveta, que abre com um pino no furinho" — o
+# fato 13 é GLOBAL, mas no C57 Pro o chip vai embaixo da tampa traseira (a resposta da
+# equipe). A instrução física do aparelho (onde vai o chip ou o cartão, gaveta, pino, tampa
+# traseira, bateria) muda de modelo para modelo: no automático, só com o lastro DO MODELO — o
+# anúncio (título, atributos, descrição) que diz a mesma peça, ou a resposta da equipe do mesmo
+# produto citada. O fato aprovado (que não diz o modelo) não basta. DURA.
+FISICO_SEM_O_MODELO = "fisico_sem_o_modelo"
+MOTIVO_FISICO_SEM_O_MODELO = (
+    "instrução física do aparelho ('{peca}') sem o anúncio do modelo nem a resposta da equipe "
+    "do mesmo produto — muda de modelo para modelo (pessoa)"
+)
+DURAS = DURAS | {FISICO_SEM_O_MODELO}
+_PECA_FISICA = re.compile(
+    r"\b(?P<p>gaveta|bandeja\s+(?:do|de|dos)\s+chip\w*|pino|furinho|agulh\w*|ejetor"
+    r"|tampa\s+(?:traseira|de\s+tras)|traseira\s+do\s+(?:celular|aparelho)"
+    r"|(?:tirar|tire|retire|retirar|remova|remover|abra|abrir)\s+a\s+tampa"
+    r"|compartimento\s+(?:do|da|de)\s+(?:chip|bateria|cartao)|slot\s+(?:do|de)\s+(?:chip|cartao))\b"
+)
+
+
+# As duas famílias: a gaveta (e o pino que a abre) e a tampa (o compartimento embaixo dela).
+_GAVETA = re.compile(r"\b(?:gavet\w*|bandej\w*|pino|furinho|agulh\w*|ejetor|slot)\b")
+_TAMPA = re.compile(r"\b(?:tampa|traseira|compartimento)\b")
+
+
+def conferir_fisico_sem_o_modelo(
+    texto: str,
+    *,
+    acao: str,
+    fichas: Sequence[Any] = (),
+    pares_de_produto: Sequence[str] = (),
+) -> list[PendenciaAgente]:
+    """(ver acima) → DURA. PURA."""
+    if acao not in ("responder", "perguntar") or pares_de_produto:
+        return []
+    plano = _plano(texto)
+    m = _PECA_FISICA.search(plano)
+    if not m:
+        return []
+    peca = m.group("p")
+    familia = _GAVETA if _GAVETA.search(peca) else _TAMPA
+    fontes = " ".join(_plano(t) for f in fichas for t in _textos_do(f) if isinstance(t, str))
+    if familia.search(fontes):
+        return []  # o anúncio do modelo diz a mesma peça
+    return [_pessoa(FISICO_SEM_O_MODELO, MOTIVO_FISICO_SEM_O_MODELO.format(peca=peca))]
+
+
+# ── 12e. O v16 (27/10/2026): o preparo do pedido sem o dado ──────────────────
+#
+# O fresco2-E02 da calibração escapava do código e do verificador v15: "Seu pedido está pronto
+# para ser despachado" com o pedido "Aguardando postagem". O andamento sem o dado
+# (`PEDIDO_SEM_LASTRO`) segue aviso (dois bons do eval o tinham), mas o PREPARO dito sem o
+# status que o diga é DURO no automático.
+PREPARO_SEM_O_DADO = "preparo_sem_o_dado"
+MOTIVO_PREPARO_SEM_O_DADO = (
+    "diz que o pedido está pronto, separado ou embalado sem o status que o diga (pessoa)"
+)
+DURAS = DURAS | {PREPARO_SEM_O_DADO}
+_PREPARO_DO_PEDIDO = re.compile(
+    r"\b(?:pront[oa]s?\s+para\s+(?:ser\s+)?(?:despach\w*|envi\w*|post\w*|sair|coleta)"
+    r"|(?:ja\s+)?(?:foi|esta|estao|foram)\s+(?:separad|embalad|preparad)\w*)\b"
+)
