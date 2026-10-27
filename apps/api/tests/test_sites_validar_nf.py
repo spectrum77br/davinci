@@ -36,9 +36,12 @@ TOK_SEM_MARCA = "tok-site-poofy-5555555555"
 UR = {"Authorization": f"Bearer {TOK_UR}"}
 CH = {"Authorization": f"Bearer {TOK_CH}"}
 
-# Pedido de celular da Uranyx de 10/10/2026, NF emitida no dia 12.
-DIA_PEDIDO = date(2026, 10, 10)
-DIA_NF = date(2026, 10, 12)
+# Pedido de celular da Uranyx de 20/09/2026, NF emitida no dia 22: a janela da
+# data vai de 15/09 a 22/10. RUIM fica fora dela e depois de COBERTURA_DESDE.
+DIA_PEDIDO = date(2026, 9, 20)
+DIA_NF = date(2026, 9, 22)
+OK = DIA_PEDIDO.isoformat()
+RUIM = "2026-09-08"
 CHAVE = "35261012345678000190550010000123451000000017"  # nNF = 000012345
 
 
@@ -318,14 +321,14 @@ async def test_pedido_vazio_ou_estranho_e_ausente(client: AsyncClient, celular_u
     """`pedido: ""` (o site manda assim quando o cliente não preenche) nunca é 422.
 
     A data decide."""
-    corpo = {"nf": "12345", "data_compra": "2026-10-10", "pedido": pedido}
+    corpo = {"nf": "12345", "data_compra": OK, "pedido": pedido}
     assert (await _pergunta(client, corpo)).json() == {"encontrada": True}
-    corpo["data_compra"] = "2026-09-20"
+    corpo["data_compra"] = RUIM
     assert (await _pergunta(client, corpo)).json() == {"encontrada": False}
 
 
 async def test_sem_a_chave_pedido_tambem_vale(client: AsyncClient, celular_uranyx):
-    r = await _pergunta(client, {"nf": "12345", "data_compra": "2026-10-10"})
+    r = await _pergunta(client, {"nf": "12345", "data_compra": OK})
     assert r.json() == {"encontrada": True}
 
 
@@ -335,13 +338,13 @@ async def test_campos_a_mais_sao_ignorados(client: AsyncClient, celular_uranyx):
 
 
 async def test_nf_numerica_no_json_e_aceita(client: AsyncClient, celular_uranyx):
-    assert (await _pergunta(client, {"nf": 12345, "data_compra": "2026-10-10"})).json() == {
+    assert (await _pergunta(client, {"nf": 12345, "data_compra": OK})).json() == {
         "encontrada": True
     }
 
 
 @pytest.mark.parametrize(
-    "data", ["2026-10-10", "10/10/2026", "2026-10-10T00:00:00", " 2026-10-10 "]
+    "data", ["2026-09-20", "20/09/2026", "2026-09-20T00:00:00", " 2026-09-20 "]
 )
 async def test_formatos_de_data(client: AsyncClient, celular_uranyx, data):
     assert (await _pergunta(client, _corpo(data_compra=data))).json() == {"encontrada": True}
@@ -377,6 +380,14 @@ async def test_numero_que_nao_existe(client: AsyncClient, celular_uranyx, digita
     assert (await _pergunta(client, _corpo(nf=digitado))).json() == {"encontrada": False}
 
 
+@pytest.mark.parametrize("digitado", ["1234.1", "1234.001", "1234-1", "1.234"])
+async def test_numero_com_ponto_e_serie(client: AsyncClient, db: AsyncSession, digitado):
+    """ "1234.1" é a NF 1234 da série 1 (antes virava só 12341)."""
+    await _pedido(db, "500160", ["dg053.ci"])
+    await _nota(db, "1234", "500160")
+    assert (await _pergunta(client, _corpo(nf=digitado))).json() == {"encontrada": True}
+
+
 def test_numeros_da_nf_puro():
     f = rota.numeros_da_nf
     assert f("000.012.345") == (["12345"], None)
@@ -384,6 +395,11 @@ def test_numeros_da_nf_puro():
     assert f("12345-1") == (["123451", "12345", "1"], None)
     assert f("Série 001 Nº 000.012.345") == (["1", "12345"], None)
     assert f("0000") == ([], None)
+    # O ponto só junta no formato de milhar; senão separa número e série.
+    assert f("12.345") == (["12345"], None)
+    assert f("1234.1") == (["12341", "1234", "1"], None)
+    assert f("1234.001") == (["1234001", "1234", "1"], None)
+    assert f("12345.") == (["12345"], None)
     assert f("1 2 3 4 5 6 7 8") == (["12345678", "1", "2", "3", "4", "5"], None)
     # Chave de acesso, junta ou impressa de 4 em 4: vale pela chave e pelo nNF.
     assert f(CHAVE) == (["12345"], CHAVE)
@@ -417,10 +433,33 @@ async def test_nota_nao_autorizada_nao_conta(client: AsyncClient, db: AsyncSessi
     assert (await _pergunta(client, _corpo(nf="888"))).json() == {"encontrada": False}
 
 
-async def test_nota_sem_pedido_nao_conta(client: AsyncClient, db: AsyncSession):
-    """Sem pedido não há como saber a marca: fica de fora."""
+async def test_nota_sem_pedido_e_409_nunca_true(client: AsyncClient, db: AsyncSession):
+    """NF autorizada sem pedido ligado: existe, mas a marca não tem como ser conferida.
+
+    Na janela da data (ou pela chave inteira) → 409 (o site aceita como "não
+    conferida"), para as duas marcas; fora da janela → `false`. Nunca `true`.
+    """
+    chave = "35260998765432000110550040000043211000000025"
+    await _nota(db, "4321", None, chave=chave)
+    for tok in (UR, CH):
+        r = await _pergunta(client, _corpo(nf="4321"), tok)
+        assert r.status_code == 409
+        assert r.json() == {"detail": {"code": "sites_nf_sem_cobertura"}}
+        r = await _pergunta(client, _corpo(nf="004.321", data_compra="2026-10-20"), tok)
+        assert r.status_code == 409  # 28 dias depois da NF: ainda na janela
+    assert (await _pergunta(client, _corpo(nf="4321", data_compra=RUIM))).json() == {
+        "encontrada": False
+    }
+    # Pela chave inteira, a data não importa — e mesmo assim não vira `true`.
+    assert (await _pergunta(client, _corpo(nf=chave, data_compra=RUIM))).status_code == 409
+
+
+async def test_nota_sem_pedido_nao_atrapalha_a_ligada(client: AsyncClient, db: AsyncSession):
+    """Se a NF da marca bate, a solta de mesmo número não importa: `true`."""
+    await _pedido(db, "500150", ["dg053.ci"])
+    await _nota(db, "4321", "500150")
     await _nota(db, "4321", None)
-    assert (await _pergunta(client, _corpo(nf="4321"))).json() == {"encontrada": False}
+    assert (await _pergunta(client, _corpo(nf="4321"))).json() == {"encontrada": True}
 
 
 # ─────────────── a marca vem do token ───────────────
@@ -444,6 +483,7 @@ async def test_nf_da_charlots(client: AsyncClient, db: AsyncSession):
     ("skus", "uranyx", "charlots"),
     [
         (["dg053.ci"], True, False),
+        (["xx1"], True, False),  # "Smartphones Uranyx Séries…" sem o código dg
         (["uaf001m1.110"], True, False),
         (["dg053.pi+a003.pi"], True, False),
         (["a003.pi"], True, False),  # acessório de celular (sufixo regional)
@@ -478,18 +518,18 @@ async def test_loja_interna_nao_conta(client: AsyncClient, db: AsyncSession, mak
 
 
 async def test_mesmo_numero_em_dois_emitentes(client: AsyncClient, db: AsyncSession):
-    """NF 12345 da Charlots em outubro e da Uranyx em setembro: cada token vê só a sua."""
-    await _pedido(db, "500600", ["b009.24"], dia=date(2026, 10, 1))
-    await _nota(db, "12345", "500600", dia=date(2026, 10, 1))
-    await _pedido(db, "500601", ["dg053.ci"], dia=date(2026, 9, 10))
-    await _nota(db, "12345", "500601", dia=date(2026, 9, 11))
-    assert (await _pergunta(client, _corpo(data_compra="2026-10-01"), CH)).json() == {
+    """NF 12345 da Charlots em 20/10 e da Uranyx em 08/09: cada token vê só a sua."""
+    await _pedido(db, "500600", ["b009.24"], dia=date(2026, 10, 20))
+    await _nota(db, "12345", "500600", dia=date(2026, 10, 20))
+    await _pedido(db, "500601", ["dg053.ci"], dia=date(2026, 9, 8))
+    await _nota(db, "12345", "500601", dia=date(2026, 9, 9))
+    assert (await _pergunta(client, _corpo(data_compra="2026-10-20"), CH)).json() == {
         "encontrada": True
     }
-    assert (await _pergunta(client, _corpo(data_compra="2026-10-01"), UR)).json() == {
+    assert (await _pergunta(client, _corpo(data_compra="2026-10-20"), UR)).json() == {
         "encontrada": False
     }
-    assert (await _pergunta(client, _corpo(data_compra="2026-09-10"), UR)).json() == {
+    assert (await _pergunta(client, _corpo(data_compra="2026-09-08"), UR)).json() == {
         "encontrada": True
     }
 
@@ -504,9 +544,11 @@ async def test_mesmo_numero_em_dois_emitentes(client: AsyncClient, db: AsyncSess
         (DIA_PEDIDO - timedelta(days=5), True),  # 5 dias antes do pedido
         (DIA_PEDIDO, True),
         (DIA_NF, True),
-        (DIA_NF + timedelta(days=15), True),  # 15 dias depois da NF (a data da entrega)
-        (DIA_NF + timedelta(days=16), False),
-        (date(2026, 9, 1), False),
+        (DIA_NF + timedelta(days=16), True),
+        (DIA_NF + timedelta(days=25), True),  # a data da entrega, 25 dias depois da NF
+        (DIA_NF + timedelta(days=30), True),
+        (DIA_NF + timedelta(days=31), False),
+        (rota.COBERTURA_DESDE, False),
     ],
 )
 async def test_janela_da_data(client: AsyncClient, celular_uranyx, data, esperado):
@@ -521,38 +563,36 @@ async def test_janela_da_data(client: AsyncClient, celular_uranyx, data, esperad
 async def test_pedido_certo_vale_mesmo_com_a_data_errada(
     client: AsyncClient, celular_uranyx, pedido
 ):
-    r = await _pergunta(client, _corpo(data_compra="2026-09-15", pedido=pedido))
+    r = await _pergunta(client, _corpo(data_compra=RUIM, pedido=pedido))
     assert r.json() == {"encontrada": True}
 
 
 async def test_pedido_de_outro_numero_nao_atrapalha_a_data(client: AsyncClient, celular_uranyx):
     """O cliente pôs o nº do pacote em vez do pedido: com a data certa, segue `true`."""
     assert (await _pergunta(client, _corpo(pedido="999888777"))).json() == {"encontrada": True}
-    assert (
-        await _pergunta(client, _corpo(pedido="999888777", data_compra="2026-09-15"))
-    ).json() == {"encontrada": False}
+    assert (await _pergunta(client, _corpo(pedido="999888777", data_compra=RUIM))).json() == {
+        "encontrada": False
+    }
 
 
 async def test_pedido_amazon_com_hifens(client: AsyncClient, db: AsyncSession):
     await _pedido(db, "500700", ["dg053.ci"], numeroloja="702-1234567-7654321")
     await _nota(db, "88", "500700")
-    r = await _pergunta(
-        client, _corpo(nf="88", data_compra="2026-09-15", pedido="70212345677654321")
-    )
+    r = await _pergunta(client, _corpo(nf="88", data_compra=RUIM, pedido="70212345677654321"))
     assert r.json() == {"encontrada": True}
 
 
 async def test_chave_de_acesso_vale_sozinha(client: AsyncClient, celular_uranyx):
     """A chave inteira (44 dígitos) é o fator forte: a data não precisa bater."""
-    r = await _pergunta(client, _corpo(nf=CHAVE, data_compra="2026-09-15"))
+    r = await _pergunta(client, _corpo(nf=CHAVE, data_compra=RUIM))
     assert r.json() == {"encontrada": True}
     impressa = " ".join(CHAVE[i : i + 4] for i in range(0, 44, 4))
-    assert (await _pergunta(client, _corpo(nf=impressa, data_compra="2026-09-15"))).json() == {
+    assert (await _pergunta(client, _corpo(nf=impressa, data_compra=RUIM))).json() == {
         "encontrada": True
     }
     # Chave de outra nota com o mesmo nNF: só a data decide.
     outra = CHAVE[:-1] + "9"
-    assert (await _pergunta(client, _corpo(nf=outra, data_compra="2026-09-15"))).json() == {
+    assert (await _pergunta(client, _corpo(nf=outra, data_compra=RUIM))).json() == {
         "encontrada": False
     }
     assert (await _pergunta(client, _corpo(nf=outra))).json() == {"encontrada": True}
@@ -564,7 +604,7 @@ async def test_chave_de_acesso_vale_sozinha(client: AsyncClient, celular_uranyx)
 
 
 async def test_compra_antiga_sem_nota_409(client: AsyncClient, celular_uranyx):
-    """Antes de 01/09/2026 o DaVinci não tem as NFs completas: não diz "não existe"."""
+    """Antes de 07/09/2026 o DaVinci não tem as NFs completas: não diz "não existe"."""
     r = await _pergunta(client, _corpo(nf="4444", data_compra="2026-05-20"))
     assert r.status_code == 409
     assert r.json() == {"detail": {"code": "sites_nf_sem_cobertura"}}
@@ -581,10 +621,82 @@ async def test_compra_antiga_achada_e_true(client: AsyncClient, db: AsyncSession
     assert r.json() == {"encontrada": True}
 
 
-async def test_a_partir_de_setembro_e_false(client: AsyncClient, celular_uranyx):
+async def test_a_partir_de_7_de_setembro_e_false(client: AsyncClient, celular_uranyx):
+    """De 1 a 4/09 ainda faltava NF em ~39% dos pedidos da marca: a cobertura começa em 07/09."""
+    assert rota.COBERTURA_DESDE == date(2026, 9, 7)
+    r = await _pergunta(client, _corpo(nf="4444", data_compra="2026-09-06"))
+    assert r.status_code == 409
     r = await _pergunta(client, _corpo(nf="4444", data_compra=rota.COBERTURA_DESDE.isoformat()))
     assert r.status_code == 200
     assert r.json() == {"encontrada": False}
+
+
+# ─────────────── o pedido prova a compra quando a NF não está no DaVinci ───────────────
+
+
+@pytest.mark.parametrize(
+    ("numeroloja", "digitado"),
+    [
+        ("702-1111111-2222222", "70211111112222222"),  # Amazon, sem os hífens
+        ("702-1111111-2222222", "702-1111111-2222222"),
+        ("PO-211-12345678901234567", "po21112345678901234567"),  # Temu
+        ("PO-211-12345678901234567", "PO-211-12345678901234567"),
+        (None, "500900"),  # presencial: só o nº do Bling
+    ],
+)
+async def test_pedido_da_marca_sem_nf_e_409(
+    client: AsyncClient, db: AsyncSession, numeroloja, digitado
+):
+    """Amazon (~25% sem NF), Temu e presencial (100%): o pedido prova a compra → 409."""
+    await _pedido(db, "500900", ["dg053.ci"], numeroloja=numeroloja)
+    r = await _pergunta(client, _corpo(nf="4444", pedido=digitado))
+    assert r.status_code == 409
+    assert r.json() == {"detail": {"code": "sites_nf_sem_cobertura"}}
+    # Sem o pedido, é o `false` de sempre.
+    assert (await _pergunta(client, _corpo(nf="4444"))).json() == {"encontrada": False}
+    # O pedido é da Uranyx: para a Charlots, `false`.
+    assert (await _pergunta(client, _corpo(nf="4444", pedido=digitado), CH)).json() == {
+        "encontrada": False
+    }
+
+
+async def test_pedido_com_nf_e_numero_errado_e_false(client: AsyncClient, celular_uranyx):
+    """O pedido tem NF no DaVinci e o cliente digitou outro número: `false`."""
+    r = await _pergunta(client, _corpo(nf="4444", pedido="2000009876543210"))
+    assert r.status_code == 200
+    assert r.json() == {"encontrada": False}
+
+
+async def test_pedido_com_nf_antiga_tambem_conta(client: AsyncClient, db: AsyncSession):
+    """NF em `bling_notas_emitidas` (pelo nº do marketplace) também é NF: `false`."""
+    await _pedido(db, "400900", ["dg041.pi"], numeroloja="2000004444")
+    await _nota_emitida(db, "000555", "2000004444", dia=DIA_NF)
+    r = await _pergunta(client, _corpo(nf="4444", pedido="2000004444"))
+    assert r.json() == {"encontrada": False}
+
+
+async def test_pedido_sem_nf_de_loja_interna_e_false(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    dono = await make_user()
+    db.add(StoreInfo(user_id=dono.id, platform="interno", bling_store_id="203999998"))
+    await db.commit()
+    await _pedido(db, "500950", ["dg053.ci"], loja="203999998", numeroloja="TR-1")
+    assert (await _pergunta(client, _corpo(nf="4444", pedido="TR-1"))).json() == {
+        "encontrada": False
+    }
+
+
+def test_formas_do_pedido_digitado_puro():
+    f = rota.formas_do_pedido_digitado
+    assert f("70211111112222222") == ["70211111112222222", "702-1111111-2222222"]
+    assert f(" po-211-12345678901234567 ") == [
+        "po-211-12345678901234567",
+        "PO-211-12345678901234567",
+        "PO21112345678901234567",
+    ]
+    assert f("000500900") == ["000500900", "500900"]
+    assert f("") == [] and f(None) == [] and f(True) == [] and f("x" * 101) == []
 
 
 # ─────────────── nada vaza ───────────────
@@ -592,7 +704,7 @@ async def test_a_partir_de_setembro_e_false(client: AsyncClient, celular_uranyx)
 
 async def test_nao_achada_e_data_errada_tem_a_mesma_resposta(client: AsyncClient, celular_uranyx):
     sem_nota = await _pergunta(client, _corpo(nf="4444"))
-    data_errada = await _pergunta(client, _corpo(data_compra="2026-09-15"))
+    data_errada = await _pergunta(client, _corpo(data_compra=RUIM))
     outra_marca = await _pergunta(client, _corpo(), CH)
     for r in (sem_nota, data_errada, outra_marca):
         assert r.status_code == 200
@@ -628,7 +740,7 @@ async def test_log_sem_nf_pedido_data_nem_ip(client: AsyncClient, celular_uranyx
     for dado in (
         "12345",
         "2000009876543210",
-        "2026-10-10",
+        OK,
         "203.0.113.77",
         "4444",
         "sem numero",

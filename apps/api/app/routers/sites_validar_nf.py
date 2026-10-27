@@ -17,10 +17,13 @@ limite por IP antes de chamar).
   nunca eco do que veio. NF que não existe, NF de outra marca e NF que existe
   mas com data/pedido que não batem dão o MESMO `false` (mesma consulta, mesma
   forma de resposta).
-- **409 `sites_nf_sem_cobertura`**: não achou E a compra é de antes de
-  `COBERTURA_DESDE`. O DaVinci não tem as NFs dessa época completas (medido
-  em 27/10/2026, abaixo), então não sabe dizer "não existe". O site trata
-  como qualquer não-200: aceita o SAC marcado "NF não conferida".
+- **409 `sites_nf_sem_cobertura`**: nenhuma NF da marca bateu, mas o DaVinci
+  não pode dizer "não existe" (`sem_cobertura`): a compra é de antes de
+  `COBERTURA_DESDE` (época sem as NFs completas); OU o `pedido` digitado é de
+  um pedido da marca que não tem NF autorizada no DaVinci (Amazon, Temu,
+  presencial…); OU a NF existe sem pedido ligado, na janela da data (marca
+  impossível de conferir — nunca vira `true`). O site trata como qualquer
+  não-200: aceita o SAC marcado "NF não conferida".
 - 401 token (o de `sites_estoque`), 422 corpo malformado (`code` + `campo`,
   nunca o valor), 429 passou do limite do site.
 
@@ -32,7 +35,9 @@ são ignorados.
 - `nf_nota` (XML das notas, coletor desde 19/08/2026): 19,4 mil notas
   autorizadas (`situacao = '100'`), 22 emitentes, séries 1 a 5, número de 1 a
   4 dígitos SEM zero à esquerda; `pedido_bling` liga ao pedido. Cobre ~92%
-  dos pedidos entregues de set/2026 e ~98% de out/2026.
+  dos pedidos entregues de set/2026 e ~98% de out/2026 — mas só ~61% dos
+  pedidos da marca de 1 a 4/09 e ~25% dos da Amazon nem têm NF. 702 notas
+  estão sem `pedido_bling` (as "soltas").
 - `bling_notas_emitidas` (contas de emissão do Pós Vendas, jan a ago/2026):
   14,7 mil notas, número com 6 dígitos e zeros à esquerda; `complemento` é o
   nº do pedido no marketplace (`bling_orders.numeroloja`). Só a Uranyx, e só
@@ -41,14 +46,14 @@ são ignorados.
 ## A regra
 
 1. **Número** (`numeros_da_nf`): só dígitos e sem zero à esquerda, dos dois
-   lados; série ignorada. Os candidatos são o texto inteiro só em dígitos e
-   cada grupo de dígitos separado por algo que não seja ponto ("000.012.345"
-   → 12345; "1/12345" → 12345, 1 e 112345). Os 44 dígitos da chave de acesso
-   valem pela chave e pelo nNF dela.
+   lados; série ignorada. Os candidatos (até 6) são o texto inteiro só em
+   dígitos e cada grupo de dígitos; o ponto só junta no formato de milhar
+   ("000.012.345" → 12345; "1/12345" → 112345, 1 e 12345; "1234.1" → 12341,
+   1234 e 1). Os 44 dígitos da chave de acesso valem pela chave e pelo nNF.
 2. **Marca** (`MARCA_SKU`): a NF tem de ser de um pedido do Bling com pelo
    menos um item da marca do token, fora das lojas `interno`. Uranyx: `u*`,
-   `dg<dígito>` e acessório `a0NN.<sufixo>` (fone, carregador, relógio — os de
-   celular têm sufixo regional); Charlots: `b<dígito>`, `bp<dígito>` e os
+   `dg<dígito>`, `xx<dígito>` e acessório `a0NN.<sufixo>` (fone, carregador,
+   relógio — os de celular têm sufixo regional); Charlots: `b<dígito>`, `bp<dígito>` e os
    acessórios de mala sem sufixo de `sku_tags` (rodinha, balança, chaveiro).
    Salvado (`z*`), Apple (`i*`) e o resto não contam para nenhuma.
 3. **2º fator** (`confere`), qualquer um basta:
@@ -73,9 +78,9 @@ fraude de quem sabe o que digita. O pedido é o fator forte.
 - Fora do openapi; corpo até 4 KiB; resposta `Cache-Control: no-store`.
 - Log só com site, resultado, por onde casou e o tempo. Nunca a NF, o pedido,
   a data ou o IP do cliente.
-- Só leitura, sem migration: as duas tabelas de NF são varridas (~25 ms em
-  produção com 34 mil notas); o pedido entra pelos índices de `numero` e
-  `numeroloja`.
+- Só leitura, sem migration, uma consulta só para tudo: as duas tabelas de NF
+  são varridas (~25 ms em produção com 34 mil notas); o pedido entra pelos
+  índices de `numero` e `numeroloja`.
 """
 
 from __future__ import annotations
@@ -83,7 +88,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
@@ -114,10 +119,13 @@ MAX_CANDIDATOS = 6
 # O número da NF-e (nNF) tem até 9 dígitos.
 MAX_DIGITOS_NUMERO = 9
 DIAS_ANTES = 5
-DIAS_DEPOIS = 15
-# Antes disto o DaVinci não tem as NFs completas (o coletor do `nf_nota`
-# começou em 19/08/2026 e só pegou o mês inteiro a partir de setembro).
-COBERTURA_DESDE = date(2026, 9, 1)
+# 30, não 15: o cliente digita a data da ENTREGA, e 27 de 590 entregas
+# medidas chegaram mais de 15 dias depois do pedido/NF.
+DIAS_DEPOIS = 30
+# Antes disto o DaVinci não tem as NFs completas: o coletor do `nf_nota`
+# começou em 19/08/2026; de 1 a 4/09 ainda faltavam 306 de 780 pedidos da
+# marca, e só de 5/09 em diante passa de 97%.
+COBERTURA_DESDE = date(2026, 9, 7)
 DATA_MINIMA = date(2015, 1, 1)
 
 # Acessórios de mala sem sufixo (a006, a015, a073…a080): a mesma lista que põe
@@ -130,27 +138,44 @@ ACESSORIOS_MALA: tuple[str, ...] = tuple(
     )
 )
 # Sobre `lower(item_codigo)`; `(^|\+)` olha também cada componente de kit.
+# `xx<dígito>`: smartphones Uranyx sem o código `dg` ("Smartphones Uranyx
+# Séries…", 19 pedidos de 23/09 a 17/10/2026). Salvado (`z*`) fica de fora de
+# propósito: é peça avulsa de devolução, sem a marca garantir.
 MARCA_SKU: dict[str, str] = {
-    "uranyx": r"(^|\+)(u|dg[0-9]|a0[0-9]{2}\.)",
+    "uranyx": r"(^|\+)(u|dg[0-9]|xx[0-9]|a0[0-9]{2}\.)",
     "charlots": r"(^|\+)(b[0-9]|bp[0-9]|(" + "|".join(ACESSORIOS_MALA) + r")(\+|$))",
 }
 
 _SEM_CACHE = {"Cache-Control": "no-store"}
 
-_RX_GRUPO = re.compile(r"[0-9][0-9.]*")
+_RX_PEDACO = re.compile(r"[0-9.]+")
+# O ponto só é separador de milhar no formato de milhar ("000.012.345",
+# "12.345"); "1234.1" e "1234.001" são número e série.
+_RX_MILHAR = re.compile(r"[0-9]{1,3}(?:\.[0-9]{3})+")
 _RX_DATA_ISO = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})(?:[T ][0-9:.+\-Z]*)?")
 _RX_DATA_BR = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4})")
 
+# Uma consulta só, sempre a mesma (o tempo não diz o que achou), com três
+# tipos de linha:
+#   marca  — NF autorizada com o número/chave, em pedido da marca do token;
+#   solta  — NF autorizada com o número/chave SEM pedido ligado (a marca não
+#            tem como ser conferida: nunca vira `true`);
+#   pedido — pedido da marca com o nº digitado (Bling ou marketplace, pelos
+#            índices de `numero` e `numeroloja`) e se ele tem NF autorizada.
 _SQL = text(
     """
-    WITH notas AS (
-        SELECT n.pedido_bling AS numero,
+    WITH nf AS MATERIALIZED (
+        SELECT n.pedido_bling,
                (n.data_emissao AT TIME ZONE 'America/Sao_Paulo')::date AS nf_dia,
                coalesce(n.chave = :chave, false) AS pela_chave
         FROM nf_nota n
         WHERE n.situacao = '100'
-          AND n.pedido_bling IS NOT NULL
           AND (ltrim(n.numero, '0') = ANY(:numeros) OR n.chave = :chave)
+    ),
+    notas AS (
+        SELECT pedido_bling AS numero, nf_dia, pela_chave
+        FROM nf
+        WHERE pedido_bling IS NOT NULL
         UNION ALL
         SELECT o.numero,
                b.data_emissao::date,
@@ -161,21 +186,50 @@ _SQL = text(
           AND b.complemento IS NOT NULL
           AND o.numero IS NOT NULL
           AND (ltrim(b.numero, '0') = ANY(:numeros) OR b.chave_acesso = :chave)
+    ),
+    da_marca AS (
+        SELECT nt.numero,
+               nt.nf_dia,
+               bool_or(nt.pela_chave) AS pela_chave,
+               min((o.data AT TIME ZONE 'America/Sao_Paulo')::date) AS pedido_dia,
+               array_agg(DISTINCT o.numeroloja) FILTER (WHERE o.numeroloja IS NOT NULL) AS lojas
+        FROM notas nt
+        JOIN bling_orders o ON o.numero = nt.numero
+        WHERE NOT EXISTS (
+            SELECT 1 FROM store_info si
+            WHERE si.bling_store_id = o.loja AND lower(btrim(si.platform)) = 'interno'
+        )
+        GROUP BY nt.numero, nt.nf_dia
+        HAVING bool_or(lower(o.item_codigo) ~ :marca)
+        LIMIT 200
+    ),
+    do_pedido AS (
+        SELECT o.numero,
+               array_agg(DISTINCT o.numeroloja) FILTER (WHERE o.numeroloja IS NOT NULL) AS lojas
+        FROM bling_orders o
+        WHERE (o.numero = ANY(:formas) OR o.numeroloja = ANY(:formas))
+          AND NOT EXISTS (
+              SELECT 1 FROM store_info si
+              WHERE si.bling_store_id = o.loja AND lower(btrim(si.platform)) = 'interno'
+          )
+        GROUP BY o.numero
+        HAVING bool_or(lower(o.item_codigo) ~ :marca)
+        LIMIT 20
     )
-    SELECT nt.numero,
-           nt.nf_dia,
-           bool_or(nt.pela_chave) AS pela_chave,
-           min((o.data AT TIME ZONE 'America/Sao_Paulo')::date) AS pedido_dia,
-           array_agg(DISTINCT o.numeroloja) FILTER (WHERE o.numeroloja IS NOT NULL) AS lojas
-    FROM notas nt
-    JOIN bling_orders o ON o.numero = nt.numero
-    WHERE NOT EXISTS (
-        SELECT 1 FROM store_info si
-        WHERE si.bling_store_id = o.loja AND lower(btrim(si.platform)) = 'interno'
-    )
-    GROUP BY nt.numero, nt.nf_dia
-    HAVING bool_or(lower(o.item_codigo) ~ :marca)
-    LIMIT 200
+    SELECT 'marca' AS tipo, numero, nf_dia, pela_chave, pedido_dia, lojas, NULL::boolean AS tem_nf
+    FROM da_marca
+    UNION ALL
+    SELECT 'solta', NULL::text, s.nf_dia, s.pela_chave, NULL::date, NULL::text[], NULL::boolean
+    FROM (SELECT nf_dia, pela_chave FROM nf WHERE pedido_bling IS NULL LIMIT 50) s
+    UNION ALL
+    SELECT 'pedido', p.numero, NULL::date, false, NULL::date, p.lojas,
+           EXISTS (
+               SELECT 1 FROM nf_nota n WHERE n.pedido_bling = p.numero AND n.situacao = '100'
+           ) OR EXISTS (
+               SELECT 1 FROM bling_notas_emitidas b
+               WHERE b.complemento = ANY(p.lojas) AND b.situacao IN (5, 6, 7)
+           )
+    FROM do_pedido p
     """
 )
 
@@ -186,6 +240,9 @@ class Consulta:
     chave: str | None
     data_compra: date
     pedido: str | None
+    # Como o nº do pedido pode estar gravado (com hífen da Amazon/Temu etc.):
+    # a busca pelos índices compara o texto cru.
+    pedido_formas: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -197,6 +254,29 @@ class Achado:
     pedido_dia: date | None
     nf_dia: date | None
     pela_chave: bool = False
+
+
+@dataclass(frozen=True)
+class NotaSolta:
+    """NF autorizada com o número/chave, mas sem pedido ligado: marca desconhecida."""
+
+    nf_dia: date | None
+    pela_chave: bool
+
+
+@dataclass(frozen=True)
+class PedidoDigitado:
+    """Pedido da marca com o nº que o cliente digitou, e se ele tem NF autorizada."""
+
+    numero: str
+    tem_nf: bool
+
+
+@dataclass(frozen=True)
+class Resultado:
+    achados: list[Achado]
+    soltas: list[NotaSolta]
+    pedidos: list[PedidoDigitado]
 
 
 def _invalido(campo: str) -> HTTPException:
@@ -214,8 +294,9 @@ def numeros_da_nf(bruto: str) -> tuple[list[str], str | None]:
     """(números candidatos sem zero à esquerda, chave de 44 dígitos ou None). PURA.
 
     "000.012.345" → ["12345"]; "1/12345" → ["112345", "1", "12345"];
-    "Série 001 Nº 000.012.345" → ["1", "12345"] (os 12 dígitos juntos passam
-    de 9 depois de tirar os zeros: não é número de NF).
+    "1234.1" → ["12341", "1234", "1"]; "Série 001 Nº 000.012.345" → ["1",
+    "12345"] (os 12 dígitos juntos passam de 9 depois de tirar os zeros: não é
+    número de NF).
     """
     digitos = re.sub(r"[^0-9]", "", bruto)
     candidatos: list[str] = []
@@ -231,8 +312,13 @@ def numeros_da_nf(bruto: str) -> tuple[list[str], str | None]:
         somar(digitos[25:34])
         return candidatos, digitos
     somar(digitos)
-    for grupo in _RX_GRUPO.findall(bruto):
-        somar(re.sub(r"[^0-9]", "", grupo))
+    for pedaco in _RX_PEDACO.findall(bruto):
+        pedaco = pedaco.strip(".")
+        if _RX_MILHAR.fullmatch(pedaco):
+            somar(pedaco.replace(".", ""))
+        else:
+            for grupo in pedaco.split("."):
+                somar(grupo)
     return candidatos[:MAX_CANDIDATOS], None
 
 
@@ -263,6 +349,25 @@ def normalizar_pedido(valor: Any) -> str | None:
     if len(s) > MAX_PEDIDO:
         return None
     return re.sub(r"[^0-9A-Za-z]", "", s).upper() or None
+
+
+def formas_do_pedido_digitado(valor: Any) -> list[str]:
+    """O texto cru que o nº do pedido pode ter no banco, para a busca pelos índices. PURA.
+
+    Como foi digitado, só letras e dígitos (com e sem zero à esquerda) e, pelo
+    formato, o da Amazon (`999-9999999-9999999`) e o da Temu
+    (`AA-999-99999999999999999`), que o Bling grava com hífen.
+    """
+    normal = normalizar_pedido(valor)
+    if normal is None:
+        return []
+    cru = str(valor).strip()
+    formas = [cru, cru.upper(), normal, normal.lstrip("0")]
+    if re.fullmatch(r"[0-9]{17}", normal):
+        formas.append(f"{normal[:3]}-{normal[3:10]}-{normal[10:]}")
+    if re.fullmatch(r"[A-Z]{2}[0-9]{20}", normal):
+        formas.append(f"{normal[:2]}-{normal[2:5]}-{normal[5:]}")
+    return list(dict.fromkeys(f for f in formas if f))
 
 
 def ler_corpo(bruto: bytes) -> Consulta:
@@ -296,6 +401,7 @@ def ler_corpo(bruto: bytes) -> Consulta:
         chave=chave,
         data_compra=data_compra,
         pedido=normalizar_pedido(corpo.get("pedido")),
+        pedido_formas=formas_do_pedido_digitado(corpo.get("pedido")),
     )
 
 
@@ -315,34 +421,68 @@ def confere(achado: Achado, consulta: Consulta) -> str | None:
             do_pedido |= _formas_do_pedido(loja)
         if do_cliente & do_pedido:
             return "pedido"
-    dias = [d for d in (achado.pedido_dia, achado.nf_dia) if d is not None]
-    if dias and (
-        min(dias) - timedelta(days=DIAS_ANTES)
-        <= consulta.data_compra
-        <= max(dias) + timedelta(days=DIAS_DEPOIS)
-    ):
+    if na_janela(consulta.data_compra, achado.pedido_dia, achado.nf_dia):
         return "data"
     return None
 
 
-async def notas_da_marca(session: AsyncSession, site: str, consulta: Consulta) -> list[Achado]:
-    """As NFs com aquele número (ou chave) em pedidos da marca do site."""
-    if not consulta.numeros and not consulta.chave:
-        return []
+def na_janela(data_compra: date, *dias: date | None) -> bool:
+    """De `DIAS_ANTES` antes da mais cedo a `DIAS_DEPOIS` depois da mais tarde. PURA."""
+    conhecidos = [d for d in dias if d is not None]
+    return bool(conhecidos) and (
+        min(conhecidos) - timedelta(days=DIAS_ANTES)
+        <= data_compra
+        <= max(conhecidos) + timedelta(days=DIAS_DEPOIS)
+    )
+
+
+def sem_cobertura(consulta: Consulta, r: Resultado) -> str | None:
+    """Por que o DaVinci não pode dizer "não existe" (→ 409) — ou None. PURA.
+
+    Só vale depois de nenhuma NF da marca bater.
+    - "epoca": compra de antes de `COBERTURA_DESDE`.
+    - "pedido_sem_nf": o pedido digitado é da marca e não tem NF autorizada no
+      DaVinci (Amazon, Temu, presencial…): a compra está provada, a NF não.
+    - "nf_sem_pedido": a NF existe, sem pedido ligado, na janela da data (ou
+      pela chave inteira): a marca não tem como ser conferida.
+    """
+    if consulta.data_compra < COBERTURA_DESDE:
+        return "epoca"
+    if consulta.pedido and any(not p.tem_nf for p in r.pedidos):
+        return "pedido_sem_nf"
+    if any(s.pela_chave or na_janela(consulta.data_compra, s.nf_dia) for s in r.soltas):
+        return "nf_sem_pedido"
+    return None
+
+
+async def consultar(session: AsyncSession, site: str, consulta: Consulta) -> Resultado:
+    """As NFs com aquele número (ou chave), as soltas e o pedido digitado — numa consulta só."""
     linhas = await session.execute(
         _SQL,
-        {"numeros": consulta.numeros, "chave": consulta.chave, "marca": MARCA_SKU[site]},
+        {
+            "numeros": consulta.numeros,
+            "chave": consulta.chave,
+            "formas": consulta.pedido_formas,
+            "marca": MARCA_SKU[site],
+        },
     )
-    return [
-        Achado(
-            numero=str(r.numero),
-            lojas=tuple(r.lojas or ()),
-            pedido_dia=r.pedido_dia,
-            nf_dia=r.nf_dia,
-            pela_chave=bool(r.pela_chave),
-        )
-        for r in linhas
-    ]
+    r = Resultado(achados=[], soltas=[], pedidos=[])
+    for x in linhas:
+        if x.tipo == "marca":
+            r.achados.append(
+                Achado(
+                    numero=str(x.numero),
+                    lojas=tuple(x.lojas or ()),
+                    pedido_dia=x.pedido_dia,
+                    nf_dia=x.nf_dia,
+                    pela_chave=bool(x.pela_chave),
+                )
+            )
+        elif x.tipo == "solta":
+            r.soltas.append(NotaSolta(nf_dia=x.nf_dia, pela_chave=bool(x.pela_chave)))
+        else:
+            r.pedidos.append(PedidoDigitado(numero=str(x.numero), tem_nf=bool(x.tem_nf)))
+    return r
 
 
 async def site_com_limite(site: Annotated[str, Depends(site_do_token)]) -> str:
@@ -385,21 +525,23 @@ async def validar_nf(
         logger.info("sites_validar_nf_invalido", site=site, campo=e.detail.get("campo"))
         raise
 
-    achados = await notas_da_marca(session, site, consulta)
-    via = next((v for v in (confere(a, consulta) for a in achados) if v), None)
+    achado = await consultar(session, site, consulta)
+    via = next((v for v in (confere(a, consulta) for a in achado.achados) if v), None)
+    motivo = None if via else sem_cobertura(consulta, achado)
 
     if via:
         resultado = "encontrada"
-    elif consulta.data_compra < COBERTURA_DESDE:
+    elif motivo:
         resultado = "sem_cobertura"
     else:
-        resultado = "fora_da_janela" if achados else "sem_nota"
+        resultado = "fora_da_janela" if achado.achados else "sem_nota"
     # Nunca a NF, o pedido, a data nem o IP: só o desfecho e por onde casou.
     logger.info(
         "sites_validar_nf",
         site=site,
         resultado=resultado,
         via=via,
+        motivo=motivo,
         com_pedido=consulta.pedido is not None,
         ms=round((time.perf_counter() - inicio) * 1000),
     )
