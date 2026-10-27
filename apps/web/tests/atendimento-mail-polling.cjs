@@ -61,6 +61,21 @@ function mount(props = {}) {
 }
 async function run() {
   {
+    const m = mount(); await m.start(); await m.state.openMessage('m1')
+    m.state.draft = 'Keep this reply while folders synchronize'
+    m.data.folders.pastas.push({ id: 'p-empty', nome: 'informativo', total: 0, quantidade: 0 })
+    await m.advance(30_000)
+    assert.ok(m.state.folders.some((folder) => folder.nome === 'informativo'), 'new empty folder appears automatically without reload')
+    m.state.chooseFilter('folder', 'p-empty'); await settle()
+    m.data.folders.pastas = [{ id: 's1', nome: 'Entrada' }, { id: 'p-renamed', nome: 'comunicados', total: 0, quantidade: 0 }]
+    await m.advance(30_000)
+    assert.equal(m.state.folderId, null, 'renamed/removed selected folder returns to all messages')
+    assert.ok(m.state.folders.some((folder) => folder.nome === 'comunicados'))
+    assert.equal(m.state.folders.some((folder) => folder.nome === 'informativo'), false, 'old folder does not remain cached')
+    assert.equal(m.state.draft, 'Keep this reply while folders synchronize')
+    m.stop()
+  }
+  {
     const m = mount({ canOperate: true, waitingReady: false }); await m.start()
     assert.equal(m.state.section, 'loading'); assert.equal(m.calls.length, 0)
     m.props.waitingReady = true; m.props.waiting = 3; await settle()

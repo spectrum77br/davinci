@@ -125,7 +125,7 @@ EXCLUIDAS = re.compile(
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"
     r"|automacao_registros|trocas|pares|agente_replay|site_produtos)$"
     # a ponte do e-mail: o que a máquina decide de cada e-mail e as pastas
-    r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation|caixa_indice)$"
+    r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation|caixa_indice|bridge_identities)$"
     # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)
     r"|garantias$|garantia_(atendimentos|atendimento_anexos|log)$)"
     r"|(_bak|bkp|backup)",

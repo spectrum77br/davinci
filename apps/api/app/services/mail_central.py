@@ -254,6 +254,8 @@ async def enrich_presentation(session: AsyncSession, message: MailMessage, item:
 async def ingest(session: AsyncSession, mailbox: MailMailbox, body: Ingest) -> dict:
     # The route locks the mailbox: ingestion is serial per account and the
     # unique constraint is the second defense against replay/concurrent batches.
+    from app.services import mail_bridge_sync
+
     accepted = duplicates = updated = 0
     for item in body.messages:
         exists = await session.scalar(
@@ -262,6 +264,10 @@ async def ingest(session: AsyncSession, mailbox: MailMailbox, body: Ingest) -> d
                 MailMessage.source_id == item.source_id,
             )
         )
+        if exists is None:
+            exists = await mail_bridge_sync.canonical_message(
+                session, mailbox.id, item.source_id, item.message_id
+            )
         if exists:
             if await enrich_presentation(session, exists, item):
                 updated += 1
@@ -278,6 +284,7 @@ async def ingest(session: AsyncSession, mailbox: MailMailbox, body: Ingest) -> d
                 "attachments",
             },
         )
+        content = mail_bridge_sync.decorate_ingest_content(mailbox, item.source_id, content)
         message = MailMessage(
             id=uuid4(),
             mailbox_id=mailbox.id,
@@ -299,6 +306,7 @@ async def ingest(session: AsyncSession, mailbox: MailMailbox, body: Ingest) -> d
                     size=len(data),
                 )
             )
+        await mail_bridge_sync.remember_message(session, message, item.message_id, mailbox)
         accepted += 1
     mailbox.last_sync_at = datetime.now(UTC)
     await session.flush()

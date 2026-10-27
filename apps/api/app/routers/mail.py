@@ -25,6 +25,7 @@ from app.schemas.mail import (
     Receipt,
     ReplyIn,
 )
+from app.schemas.mail_bridge_sync import BridgeSnapshot
 from app.security.cipher import decrypt_bytes, decrypt_json, encrypt_json
 from app.services import mail_central as service
 from app.services.mail_atendimento import administracao as mail_admin
@@ -348,6 +349,19 @@ async def heartbeat(request: Request, session: Session, mailbox: AgentMailbox):
     send_enabled = await mailbox_settings.envio_efetivo(session, mailbox)
     await session.commit()
     return {"ok": True, "send_enabled": send_enabled}
+
+
+@router.post("/agent/{mailbox_id}/reconcile")
+async def reconcile(request: Request, session: Session, mailbox: AgentMailbox):
+    from app.services.mail_bridge_sync import reconcile as apply_snapshot
+
+    body = await limited_body(request, BridgeSnapshot, 8 * 1024 * 1024)
+    try:
+        result = await apply_snapshot(session, mailbox, body)
+    except service.MailError as error:
+        raise fail(error.code, error.status) from None
+    await session.commit()
+    return result
 
 
 @router.post("/agent/{mailbox_id}/ingest")

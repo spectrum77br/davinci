@@ -58,10 +58,12 @@ from app.models.mail_atendimento import MailCaixaIndice, MailMailboxSettings
 from app.models.user import User
 from app.routers.atendimento import _nomes_das_lojas
 from app.routers.mail import readable_mailbox
+from app.security.cipher import decrypt_json
 from app.services.atendimento import acesso, separa_email
 from app.services.atendimento import lojas as lojas_svc
 from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento import indice, pastas, ponte, regras, rotear
+from app.services.mail_bridge_sync import folder_content
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -326,10 +328,14 @@ async def _acesso_versao(session: AsyncSession, mailbox: MailMailbox, user: User
             .where(MailMessage.mailbox_id == mailbox.id)
         )
     ).one()
+    config = decrypt_json(mailbox.config_enc)
+    # The bridge refreshes folder names and counts independently of access.
+    # Re-encryption or a new inventory must not close a draft or reset a search.
+    config.pop("bridge_folder_catalog", None)
     payload = {
         "mailbox": str(mailbox.id),
         "owner": str(mailbox.owner_user_id),
-        "config": hashlib.sha256(bytes(mailbox.config_enc)).hexdigest(),
+        "config": config,
         "user": str(user.id),
         "role": user.role,
         "status": user.status,
@@ -364,6 +370,33 @@ async def _acesso_versao(session: AsyncSession, mailbox: MailMailbox, user: User
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def _pastas_do_catalogo(mailbox: MailMailbox) -> dict[str, pastas.PastaDoEmail]:
+    """Current bridge folders, including empty ones; names stay encrypted at rest."""
+    catalogo = decrypt_json(mailbox.config_enc).get("bridge_folder_catalog")
+    if not isinstance(catalogo, dict) or catalogo.get("version") != 1:
+        return {}
+    folders = catalogo.get("folders")
+    if not isinstance(folders, list):
+        return {}
+    saida = {}
+    for folder in folders:
+        if not isinstance(folder, dict) or not isinstance(folder.get("name"), str):
+            continue
+        if not folder["name"].strip() or folder.get("kind") not in {
+            "inbox",
+            "sent",
+            "drafts",
+            "trash",
+            "spam",
+            "archive",
+            "custom",
+        }:
+            continue
+        lida = pastas.do_conteudo(folder_content(folder))
+        saida[indice.chave_da_pasta(mailbox.id, lida)] = lida
+    return saida
+
+
 @router.get("/mailboxes/{mailbox_id}/pastas")
 async def pastas_da_caixa(
     mailbox_id: UUID,
@@ -393,6 +426,12 @@ async def pastas_da_caixa(
         else await _contar_pastas(session, mailbox.id, cad, loja=loja, user=user)
     )
     nomes = await _nomes_das_pastas(session, mailbox.id, {c for c, _t in todas}, user)
+    # A restricted reader only learns folders through messages they can read.
+    # Full mailbox readers also see new/empty folders immediately after sync.
+    if not await mail_admin.tem_politica(session, mailbox.id, user):
+        for chave, lida in _pastas_do_catalogo(mailbox).items():
+            todas.setdefault((chave, lida.tipo_tuta), 0)
+            nomes[chave] = (indice.nome_da_pasta(lida), lida.caminho)
     itens = []
     for (chave, tipo_tuta), total in todas.items():
         tipo = indice.tipo_da_chave(chave)
