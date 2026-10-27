@@ -1249,9 +1249,13 @@ async def _ml_resolve_pack(
 # a tela mostrava "envio 27/10 23:59" (pedido 306103) e só ficava vermelha
 # 10 h depois do horário real. O horário certo é o fim da janela da etiqueta
 # (`packageTimeSlot.endTime` da Easy Ship). Enquanto o app não tem o papel da
-# Easy Ship (403 em todas as lojas em 27/10), vale 14:00 do dia do
-# LatestShipDate pra venda feita até 11:00 desse dia. Envio próprio (MFN sem
-# EasyShip) e pacote que já saiu seguem com o LatestShipDate.
+# Easy Ship (403 em todas as lojas em 27/10), o corte sai da HORA DA VENDA:
+# até 11:00 → 14:00 do mesmo dia; depois das 11:00 → 14:00 do dia seguinte.
+# O LatestShipDate não ajuda aqui: venda das 12:00 também vem "hoje 23:59"
+# (306219, Vinicius: "caiu depois das 11 horas, ficaria para amanhã até as
+# 14"). Domingo não é dia de expedição → segunda (mesma regra de
+# `_operational_ship_date`; sábado não é pulado, feriado não entra). Envio
+# próprio (MFN sem EasyShip) e pacote que já saiu seguem com o LatestShipDate.
 _AMAZON_DBA_CORTE_HORA = 14
 _AMAZON_DBA_VENDA_ATE_HORA = 11
 # Pacote agendado (etiqueta comprada) — só aí existe janela na Easy Ship.
@@ -1264,19 +1268,27 @@ _easyship_janela: dict[str, tuple[float, datetime | None]] = {}
 _easyship_negado_ate: dict[str, float] = {}
 
 
-def _corte_dba(latest_ship: datetime, compra: datetime | None) -> datetime:
-    """14:00 BRT do dia do `LatestShipDate`, quando a venda foi até 11:00
-    desse dia (ou antes). Venda depois das 11:00 do próprio dia, ou corte que
-    passaria do LatestShipDate, mantém o LatestShipDate."""
-    dia = latest_ship.astimezone(_BRT).date()
-    if compra is not None:
-        limite_venda = datetime(
-            dia.year, dia.month, dia.day, _AMAZON_DBA_VENDA_ATE_HORA, tzinfo=_BRT,
-        )
-        if compra > limite_venda:
-            return latest_ship
+def _corte_14h(dia: date) -> datetime:
+    """14:00 BRT do `dia` (domingo vira segunda), em UTC."""
+    if dia.weekday() == 6:  # domingo
+        dia += timedelta(days=1)
     corte = datetime(dia.year, dia.month, dia.day, _AMAZON_DBA_CORTE_HORA, tzinfo=_BRT)
-    return min(corte.astimezone(UTC), latest_ship)
+    return corte.astimezone(UTC)
+
+
+def _corte_dba(latest_ship: datetime, compra: datetime | None) -> datetime:
+    """Corte do DBA sem a janela da Easy Ship: 14:00 do dia da venda (venda
+    até 11:00) ou do dia seguinte (venda depois das 11:00). Se a Amazon der um
+    LatestShipDate mais adiante (prazo de manuseio maior), vale 14:00 desse dia.
+    Sem a hora da venda, só o dia do LatestShipDate."""
+    corte = _corte_14h(latest_ship.astimezone(_BRT).date())
+    if compra is None:
+        return corte
+    venda = compra.astimezone(_BRT)
+    dia = venda.date()
+    if (venda.hour, venda.minute, venda.second) > (_AMAZON_DBA_VENDA_ATE_HORA, 0, 0):
+        dia += timedelta(days=1)
+    return max(corte, _corte_14h(dia))
 
 
 async def _fim_janela_easyship(client: AmazonClient, order_id: str) -> datetime | None:
@@ -1310,7 +1322,7 @@ async def _prazo_amazon(
     if easy in _EASYSHIP_AGENDADO:
         fim = await _fim_janela_easyship(client, order_id)
         if fim is not None:
-            return min(fim, latest_ship)
+            return fim
     return _corte_dba(latest_ship, _iso_to_utc_dt(result.get("purchase_date")))
 
 

@@ -752,15 +752,62 @@ async def test_amazon_dba_venda_de_ontem_tambem_vale_14h(_easyship_limpo):
 
 
 @pytest.mark.asyncio
-async def test_amazon_dba_venda_depois_das_11h_mantem_latest_ship(_easyship_limpo):
-    """Venda às 12:00 do próprio dia não cabe na regra das 11h: fica o que a
-    Amazon mandou em vez de inventar um corte antes da venda."""
+async def test_amazon_dba_venda_depois_das_11h_vai_pra_amanha_14h(_easyship_limpo):
+    """306219 (702-1124584-2249065): vendido depois das 11:00 e a Amazon
+    manda LatestShipDate "hoje 23:59" — o corte é amanhã às 14:00."""
     from app.services import marketplace_shipment_check as m
 
     cli = _FakeAmazonDBA(_dba("PendingSchedule", compra="2026-10-27T15:00:00Z"))
     deadlines: dict[int, datetime] = {}
     await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
-    assert deadlines == {999: datetime(2026, 10, 28, 2, 59, 59, tzinfo=UTC)}
+    assert deadlines == {999: datetime(2026, 10, 28, 17, 0, tzinfo=UTC)}
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_11h_em_ponto_ainda_e_hoje(_easyship_limpo):
+    from app.services import marketplace_shipment_check as m
+
+    cli = _FakeAmazonDBA(_dba("PendingSchedule", compra="2026-10-27T14:00:00Z"))
+    deadlines: dict[int, datetime] = {}
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+    assert deadlines == {999: _CORTE_14H}
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_sabado_depois_das_11h_vai_pra_segunda(_easyship_limpo):
+    """Domingo não é dia de expedição (mesma regra de _operational_ship_date)."""
+    from app.services import marketplace_shipment_check as m
+
+    payload = _dba("PendingSchedule", compra="2026-10-24T18:00:00Z")  # sáb 15:00
+    payload["latest_ship_date"] = "2026-10-25T02:59:59Z"  # sáb 23:59
+    cli = _FakeAmazonDBA(payload)
+    deadlines: dict[int, datetime] = {}
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+    assert deadlines == {999: datetime(2026, 10, 26, 17, 0, tzinfo=UTC)}  # seg 14:00
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_sem_hora_da_venda_usa_dia_do_latest_ship(_easyship_limpo):
+    from app.services import marketplace_shipment_check as m
+
+    cli = _FakeAmazonDBA(_dba("PendingSchedule", compra=None))
+    deadlines: dict[int, datetime] = {}
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+    assert deadlines == {999: _CORTE_14H}
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_janela_da_etiqueta_vale_mesmo_depois_do_latest_ship(_easyship_limpo):
+    """Etiqueta de venda das 12:00 agendada pra amanhã: a janela manda."""
+    from app.services import marketplace_shipment_check as m
+
+    cli = _FakeAmazonDBA(
+        _dba("PendingPickUp", compra="2026-10-27T15:00:00Z"),
+        janela="2026-10-28T17:00:00Z",
+    )
+    deadlines: dict[int, datetime] = {}
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+    assert deadlines == {999: datetime(2026, 10, 28, 17, 0, tzinfo=UTC)}
 
 
 @pytest.mark.asyncio
