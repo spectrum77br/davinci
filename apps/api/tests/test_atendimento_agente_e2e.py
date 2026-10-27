@@ -925,15 +925,15 @@ async def test_j_promessa_da_equipe_numa_orientacao_vai_para_pessoa(
             evidencias=["pedido"],
         )
     ]
-    # O portão do dono (27/10/2026): a promessa da equipe é AVISO — o verificador decide.
-    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
-
+    # v16 em produção (27/10/2026; o manual-05 da calibração escapava): a promessa da equipe
+    # é DURA no automático — nem chega ao verificador.
     r = await ia.gerar_rascunho(db, conversa)
 
     fatos = _do_agente(r)
     assert "promessa_de_equipe" in fatos["checagens"], fatos["checagens"]
+    assert "promessa_dura" in fatos["checagens"], fatos["checagens"]
     assert r.precisa_humano and envios == [] and _decisao(r) == "precisa_humano"
-    _aviso_no_verificador(api, "promete ação da equipe")
+    assert not api.verificador
 
 
 # ─────────────── (k) sem a chave: o legado intacto ───────────────

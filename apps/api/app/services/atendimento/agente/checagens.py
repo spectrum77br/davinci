@@ -10446,6 +10446,15 @@ def conferir(
             ]
             pendencias += conferir_entregue_a_quem_nao_recebeu(texto, do_turno)
             pendencias += conferir_modelo_sem_o_dado(texto, pedido, fichas)
+            # v16 em produção (27/10/2026): a promessa da equipe e a palavra-chave sem o envio.
+            pendencias += conferir_promessa_dura(
+                texto,
+                acao=proposta.acao,
+                assunto=conferida.categoria,
+                textos_cliente=clientes,
+                responde_e_marca=bool(getattr(ctx, "responde_e_marca", False)),
+            )
+            pendencias += conferir_palavra_chave_sem_envio(texto, pedido, acao=proposta.acao)
             # v16 no holdout (27/10/2026): a instrução física sem o lastro do modelo.
             pendencias += conferir_fisico_sem_o_modelo(
                 texto,
@@ -11204,3 +11213,91 @@ _PREPARO_DO_PEDIDO = re.compile(
     r"\b(?:pront[oa]s?\s+para\s+(?:ser\s+)?(?:despach\w*|envi\w*|post\w*|sair|coleta)"
     r"|(?:ja\s+)?(?:foi|esta|estao|foram)\s+(?:separad|embalad|preparad)\w*)\b"
 )
+
+
+# ── 12f. O v16 em produção (27/10/2026): os 2 escapes da calibração v16 ─────────
+#
+# A calibração v16 no servidor deixou passar, no caminho AUTO, o que nem o código nem o
+# verificador seguraram:
+#   1. PROMESSA_DURA — a promessa de ação da equipe (manual-05: «seguiu para o responsável»;
+#      "encaminhei", "vamos verificar", "a equipe vai…"), que era aviso. No automático vira
+#      DURA, menos: o "me diga X que eu confiro por aqui" (o próprio atendimento, na próxima
+#      mensagem — c2b1890fa5fd, 12d108dcf3f4); a orientação aprovada do defeito "a (nossa)
+#      equipe analisa e responde por aqui" junto do pedido de vídeo/foto (48ba9d4b3e13); e a
+#      linha do D1 "a equipe analisa a devolução (pela Shopee)" com o responde-e-marca.
+#   2. PALAVRA_CHAVE_SEM_ENVIO — a instrução da palavra-chave/código de retirada da entrega
+#      com o pedido que ainda não foi enviado nem postado, ou sem o pedido
+#      (lastro-redondo-31ab491d: «assim que o pedido for enviado… a entrega segue o endereço
+#      do pedido»): a palavra-chave ainda não existe — pessoa.
+PROMESSA_DURA = "promessa_dura"
+MOTIVO_PROMESSA_DURA = "promete ação da equipe ('{trecho}') — no automático, só pessoa"
+PALAVRA_CHAVE_SEM_ENVIO = "palavra_chave_sem_envio"
+MOTIVO_PALAVRA_CHAVE_SEM_ENVIO = (
+    "orienta a palavra-chave ou o código de retirada da entrega sem o pedido enviado (pessoa)"
+)
+DURAS = DURAS | {PROMESSA_DURA, PALAVRA_CHAVE_SEM_ENVIO}
+
+_PEDE_O_DADO_AO_CLIENTE = re.compile(
+    r"\b(?:me\s+(?:diga|diz|conta|conte|informe|mande|envie|fala|fale|passe)|se\s+(?:voce\s+|vc\s+)?"
+    r"(?:me\s+)?(?:disser|informar|mandar|enviar|falar|passar))\b"
+)
+_EU_CONFIRO = re.compile(
+    r"\b(?:que\s+|e\s+)?eu\s+(?:confiro|verifico|vejo|confirmo)\b(?:\s+(?:por\s+aqui|aqui|com\s+voce))?"
+)
+_ANALISA_E_RESPONDE = re.compile(
+    r"\b(?:a\s+)?(?:nossa\s+)?equipe\s+analisa\s+e\s+(?:te\s+|lhe\s+)?responde\s+(?:por\s+aqui|aqui)\b"
+)
+_D1_DA_DEVOLUCAO = re.compile(
+    r"\b(?:a\s+)?(?:nossa\s+)?equipe\s+analisa\s+a\s+(?:sua\s+)?(?:devolucao|solicitacao)"
+    r"(?:\s+pela\s+shopee)?\b"
+)
+# O relativo que descreve o que já se conferiu ("as opções que conseguimos confirmar por aqui")
+# não promete nada (c2b1890fa5fd).
+_JA_CONFERIDO = re.compile(
+    r"\bque\s+(?:conseguimos|consegui|pudemos|podemos)\s+(?:confirmar|ver|verificar|conferir)"
+    r"(?:\s+(?:por\s+aqui|aqui|no\s+anuncio))?\b"
+)
+_PALAVRA_CHAVE = re.compile(r"\bpalavra\s*-?\s*chave\b|\bcodigo\s+de\s+(?:retirada|entrega)\b")
+
+
+def conferir_promessa_dura(
+    texto: str,
+    *,
+    acao: str,
+    assunto: str,
+    textos_cliente: Sequence[str] = (),
+    responde_e_marca: bool = False,
+) -> list[PendenciaAgente]:
+    """1. (ver acima) → DURA no automático. PURA. A mesma régua de `conferir_promessa_de_equipe`
+    no texto sem as três exceções."""
+    if not conferir_promessa_de_equipe(
+        texto, acao=acao, acoes_pessoa=(), assunto=assunto, textos_cliente=textos_cliente
+    ):
+        return []
+    plano = _JA_CONFERIDO.sub(" ", _plano(texto))
+    if _PEDE_O_DADO_AO_CLIENTE.search(plano):
+        plano = _EU_CONFIRO.sub(" ", plano)
+    if _pede_evidencia(texto, textos_cliente):
+        plano = _ANALISA_E_RESPONDE.sub(" ", plano)
+    if responde_e_marca:
+        plano = _D1_DA_DEVOLUCAO.sub(" ", plano)
+    resto = conferir_promessa_de_equipe(
+        plano, acao=acao, acoes_pessoa=(), assunto=assunto, textos_cliente=textos_cliente
+    )
+    if not resto:
+        return []
+    trecho = resto[0].motivo.split('("', 1)[-1].rstrip('")')
+    return [_pessoa(PROMESSA_DURA, MOTIVO_PROMESSA_DURA.format(trecho=trecho))]
+
+
+def conferir_palavra_chave_sem_envio(
+    texto: str, pedido: Mapping[str, Any] | None, *, acao: str
+) -> list[PendenciaAgente]:
+    """2. (ver acima) → DURA no automático. PURA."""
+    if acao not in ("responder", "perguntar") or not _PALAVRA_CHAVE.search(_plano(texto)):
+        return []
+    bloco = pedido if isinstance(pedido, Mapping) else {}
+    enviado = bloco.get("enviado") is True or _plano(str(bloco.get("postado") or "")) == "sim"
+    if enviado:
+        return []
+    return [_pessoa(PALAVRA_CHAVE_SEM_ENVIO, MOTIVO_PALAVRA_CHAVE_SEM_ENVIO)]

@@ -1188,8 +1188,9 @@ PESSOA_NO_COPILOTO = {"18-X06", "17-X07", "c4-X12", "c4-X13"}
 
 # O portão do dono (27/10/2026): o que não é DURO chega ao verificador como AVISO — a
 # minimização do defeito, a promessa, a ficha no automático e o andamento sem lastro.
+# v16 em produção (27/10/2026): a promessa da equipe (12-X08) voltou a ser DURA no automático.
 AVISADOS = {
-    "21-X01", "21-X02", "21-X03", "21-X04", "21-X05", "21-X14", "21-X17", "12-X08", "8-X09",
+    "21-X01", "21-X02", "21-X03", "21-X04", "21-X05", "21-X14", "21-X17", "8-X09",
     "16-X11", "3-X15",
 }  # fmt: skip
 

@@ -774,3 +774,63 @@ def test_v16_a_resposta_evasiva_e_aviso():
         )
         == []
     )
+
+
+def test_v16_a_promessa_da_equipe_e_dura_menos_as_tres_excecoes():
+    # manual-05 (escape da calibração v16): «seguiu para o responsável».
+    (p,) = checagens.conferir_promessa_dura(
+        "Olá! Recebemos sua mensagem e ela seguiu para o responsável.",
+        acao="responder",
+        assunto="outro",
+    )
+    assert p.codigo == checagens.PROMESSA_DURA and checagens.pendencia_dura(p)
+    for texto in ("Vamos verificar e te retornamos.", "A equipe vai analisar o seu caso."):
+        assert checagens.conferir_promessa_dura(texto, acao="responder", assunto="rastreio")
+    # 1. o "me diga X que eu confiro" do próprio atendimento.
+    assert (
+        checagens.conferir_promessa_dura(
+            "As opções que conseguimos confirmar por aqui são Preto e Azul. Se você me disser "
+            "qual modelo procura, eu confiro com você.",
+            acao="responder",
+            assunto="estoque_variacao",
+        )
+        == []
+    )
+    # 2. a orientação aprovada do defeito, com o pedido de vídeo e fotos.
+    assert (
+        checagens.conferir_promessa_dura(
+            "Se o produto chegar com algum problema, é só mandar por aqui um vídeo curto e "
+            "fotos do problema, e a nossa equipe analisa e responde por aqui.",
+            acao="responder",
+            assunto="troca_devolucao",
+        )
+        == []
+    )
+    # 3. a linha do D1 ("a equipe analisa a devolução pela Shopee") passa com o
+    # responde-e-marca; a promessa a mais na mesma resposta, não.
+    d1 = "A sua solicitação está aberta na Shopee; a equipe analisa a devolução pela Shopee."
+    assert (
+        checagens.conferir_promessa_dura(
+            d1, acao="responder", assunto="troca_devolucao", responde_e_marca=True
+        )
+        == []
+    )
+    assert checagens.conferir_promessa_dura(
+        d1 + " Vamos verificar e te retornamos.",
+        acao="responder",
+        assunto="troca_devolucao",
+        responde_e_marca=True,
+    )
+
+
+def test_v16_a_palavra_chave_so_com_o_pedido_enviado():
+    texto = (
+        "A palavra-chave aparece no próprio pedido, em Minhas Compras > o pedido > Informações "
+        "do envio, assim que o pedido for enviado."
+    )
+    nao_enviado = {"enviado": False, "postado": "nao"}
+    (p,) = checagens.conferir_palavra_chave_sem_envio(texto, nao_enviado, acao="responder")
+    assert p.codigo == checagens.PALAVRA_CHAVE_SEM_ENVIO and checagens.pendencia_dura(p)
+    assert checagens.conferir_palavra_chave_sem_envio(texto, None, acao="responder")
+    for enviado in ({"enviado": True}, {"postado": "sim"}):
+        assert checagens.conferir_palavra_chave_sem_envio(texto, enviado, acao="responder") == []
