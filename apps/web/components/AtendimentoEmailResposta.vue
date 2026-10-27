@@ -19,6 +19,12 @@
 // desligada; a "não responder" (o endereço de aviso da plataforma) é a única
 // que se passa por cima, marcando "enviar mesmo assim".
 // Funções puras aqui em cima (tests/atendimento-mail-atendimento.cjs).
+//
+// MINIMIZAR (27/10/2026): os detalhes (De/Para/Assunto, o que vai junto, as
+// travas, o "enviar mesmo assim" e os avisos) recolhem; a linha do título fica
+// e, recolhida, mostra "De → Para" e o selo "N avisos" (âmbar quando há trava).
+// Começa ABERTA; o navegador lembra a escolha (uma chave só). Recolher só
+// esconde: as travas e a `trava` da caixa de baixo continuam valendo.
 
 export type BloqueioEmail = { codigo: string; texto: string; confirmavel: boolean }
 export type PreviaEmail = {
@@ -129,6 +135,14 @@ export function avisosVisiveis(p: Pick<PreviaEmail, 'modo' | 'avisos'> | null | 
   return (p?.avisos || []).filter((a) => !(p?.modo === 'teste' && /^modo de teste/i.test(a)))
 }
 
+// O selo da linha do título recolhida ('' = nada a avisar).
+export function rotuloDosAvisos(n: number): string {
+  if (!n) return ''
+  return n === 1 ? '1 aviso' : `${n} avisos`
+}
+
+export const RESPOSTA_ABERTA_KEY = 'davinci.atendimento.emailRespostaAberta'
+
 export function rotuloDoModo(modo: string | null | undefined): string {
   if (modo === 'teste') return 'modo de teste: só os endereços de teste da caixa recebem'
   if (modo === 'real') return 'envio real'
@@ -137,7 +151,7 @@ export function rotuloDoModo(modo: string | null | undefined): string {
 </script>
 
 <script setup lang="ts">
-import { ExternalLink, FlaskConical, Loader2, Lock, Mail, TriangleAlert } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, ExternalLink, FlaskConical, Loader2, Lock, Mail, TriangleAlert } from 'lucide-vue-next'
 import { erroDaApi } from '~/components/AtendimentoPlataforma.vue'
 
 const props = defineProps<{
@@ -187,20 +201,58 @@ const travas = computed(() => travasQueImpedem(previa.value, confirmouNaoRespond
 const confirmavel = computed(() => confirmavelDa(previa.value))
 const rotuloConfirmar = computed(() => rotuloDaConfirmacao(previa.value))
 const avisos = computed(() => avisosVisiveis(previa.value))
+
+// Minimizar: começa aberta; o navegador lembra (sem localStorage, só não lembra).
+const aberta = ref(true)
+onMounted(() => {
+  try {
+    const salvo = localStorage.getItem(RESPOSTA_ABERTA_KEY)
+    if (salvo !== null) aberta.value = salvo === '1'
+  } catch {
+    // sem localStorage — começa aberta
+  }
+})
+function alternar() {
+  aberta.value = !aberta.value
+  try {
+    localStorage.setItem(RESPOSTA_ABERTA_KEY, aberta.value ? '1' : '0')
+  } catch {
+    // só não lembra
+  }
+}
+const nAvisos = computed(() => travas.value.length + avisos.value.length)
 </script>
 
 <template>
   <div class="space-y-1 rounded-md border border-slate-300/70 bg-slate-50 px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900/30" data-email-previa>
     <div class="flex flex-wrap items-center gap-1.5">
-      <Mail class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <span class="font-medium">Resposta por e-mail</span>
+      <button
+        type="button"
+        class="-ml-1 inline-flex items-center gap-1 rounded px-1 font-medium hover:bg-slate-500/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+        :aria-expanded="aberta"
+        :title="aberta ? 'minimizar os detalhes e os avisos do e-mail' : 'mostrar os detalhes e os avisos do e-mail'"
+        data-email-previa-alternar
+        @click="alternar"
+      >
+        <ChevronDown v-if="aberta" class="size-3.5 shrink-0" aria-hidden="true" />
+        <ChevronRight v-else class="size-3.5 shrink-0" aria-hidden="true" />
+        <Mail class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <span>Resposta por e-mail</span>
+        <span
+          v-if="!aberta && nAvisos"
+          class="inline-flex items-center gap-0.5 rounded px-1.5 text-[11px] font-normal"
+          :class="travas.length ? 'bg-amber-500/20 text-amber-900 dark:text-amber-200' : 'bg-muted text-muted-foreground'"
+          data-email-avisos-selo
+        ><Lock v-if="travas.length" class="size-3" aria-hidden="true" /><TriangleAlert v-else class="size-3" aria-hidden="true" />{{ rotuloDosAvisos(nAvisos) }}</span>
+      </button>
       <span v-if="previa?.modo === 'teste'" class="inline-flex items-center gap-0.5 rounded bg-violet-500/15 px-1.5 text-[11px] text-violet-800 dark:text-violet-300" :title="rotuloDoModo(previa.modo)"><FlaskConical class="size-3" />modo de teste</span>
       <Loader2 v-if="carregando" class="size-3 animate-spin" />
+      <span v-if="!aberta && previa?.mail_message_id" class="min-w-0 truncate text-[11px] text-muted-foreground" :title="`${previa.de || '—'} → ${previa.para || '—'}`">{{ previa.de || '—' }} → {{ previa.para || '—' }}</span>
       <button v-if="mailMessageId" type="button" class="ml-auto underline" @click="emit('responderMaisNovo')">responder o mais novo</button>
       <a v-if="previa?.abrir_no_tuta" :href="previa.abrir_no_tuta" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-0.5 underline" :class="mailMessageId ? '' : 'ml-auto'" title="abre o e-mail respondido no Tuta (lá ele fica lido)"><ExternalLink class="size-3" />Abrir no Tuta</a>
     </div>
     <div v-if="erro" class="text-red-700 dark:text-red-300">{{ erro }}</div>
-    <template v-else-if="previa">
+    <div v-else-if="previa" v-show="aberta" class="max-h-[22vh] space-y-1 overflow-y-auto overscroll-contain" data-email-previa-corpo>
       <div v-if="previa.mail_message_id" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[11px]">
         <span class="text-muted-foreground">De</span><span class="break-all" data-email-de>{{ previa.de || '—' }}</span>
         <span class="text-muted-foreground">Para</span><span class="break-all" data-email-para>{{ previa.para || '—' }}<template v-if="previa.formulario"> (o cliente do formulário do site)</template></span>
@@ -221,6 +273,6 @@ const avisos = computed(() => avisosVisiveis(previa.value))
       <div v-for="(a, i) in avisos" :key="i" class="flex items-start gap-1 text-muted-foreground">
         <TriangleAlert class="mt-px size-3 shrink-0" aria-hidden="true" /><span>{{ a }}</span>
       </div>
-    </template>
+    </div>
   </div>
 </template>

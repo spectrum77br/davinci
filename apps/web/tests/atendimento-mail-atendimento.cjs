@@ -1319,6 +1319,43 @@ async function principal() {
     // Sem protocolo: o selo "sem protocolo".
     const sem = montar('../components/AtendimentoEmailChamado.vue', { chamado: { ...chamado, protocolo: null, protocolos: [] }, outros: [], podeMexer: true })
     assert.match(await sem.html(), />sem protocolo</)
+    // Minimizar (27/10/2026): começa recolhida — a linha do título fica e diz o
+    // que ficou escondido; recolher só esconde (os botões continuam no HTML).
+    const r = montar('../components/AtendimentoEmailChamado.vue', { chamado: { ...chamado, alertas: [{ codigo: 'sem_protocolo', texto: 'Sem protocolo.' }] }, outros: [outro], podeMexer: true })
+    let hr = await r.html()
+    assert.match(hr, /data-email-chamado-alternar[^>]*aria-expanded="false"|aria-expanded="false"[^>]*data-email-chamado-alternar/)
+    assert.match(hr, /data-email-chamado-resumo[^>]*>[\s\S]*1 aviso · 1 outro chamado aberto desta cliente</)
+    assert.match(hr, /style="display:none;"[^>]*data-email-chamado-corpo|data-email-chamado-corpo[^>]*style="display:none;"/)
+    assert.match(hr, /data-email-agrupar/, 'recolhida: o agrupar continua lá, só escondido')
+    r.estado.alternar()
+    await Vue.nextTick()
+    hr = await r.html()
+    assert.doesNotMatch(hr, /data-email-chamado-resumo/)
+    assert.doesNotMatch(hr, /display:none/)
+    assert.equal(H.resumoDoCorpo(0, 2, true), '2 outros chamados abertos desta cliente · pedido citado')
+    assert.equal(H.resumoDoCorpo(0, 0, false), '')
+    // Sem nada no corpo: sem botão de minimizar.
+    assert.doesNotMatch(await sem.html(), /data-email-chamado-alternar/)
+  }
+  // A prévia da resposta: começa aberta; recolhida, fica "De → Para" e o selo dos avisos (a trava continua).
+  {
+    const p = { mail_message_id: 'e1', de: 'sac@uranyx.com.br', para: 'cliente@x.com', formulario: true, assunto: 'Re: SAC', assinatura: '', citacao_cabeca: '', citacao: '', modo: 'real', pode_mexer: true, bloqueios: [{ codigo: 'envio_desligado', texto: 'O envio desta caixa está desligado.', confirmavel: false }], avisos: ['Confira o endereço.'], abrir_no_tuta: null }
+    const m = montar('../components/AtendimentoEmailResposta.vue', { conversaId: 'c9', mailMessageId: null, versao: 1 }, { respostas: { '/api/atendimento/email/conversas/c9/previa': p } })
+    await m.html(); await esperar()
+    let h = await m.html()
+    assert.equal(m.estado.aberta, true)
+    assert.match(h, /data-email-trava/)
+    assert.doesNotMatch(h, /data-email-avisos-selo/)
+    m.estado.alternar()
+    await Vue.nextTick()
+    h = await m.html()
+    assert.match(h, /data-email-previa-alternar[^>]*aria-expanded="false"|aria-expanded="false"[^>]*data-email-previa-alternar/)
+    assert.match(h, /data-email-avisos-selo[^>]*>[\s\S]*2 avisos</)
+    assert.match(h, /sac@uranyx\.com\.br → cliente@x\.com/)
+    assert.match(h, /style="display:none;"[^>]*data-email-previa-corpo|data-email-previa-corpo[^>]*style="display:none;"/)
+    assert.match(m.estado.trava, /^O envio desta caixa está desligado\./, 'recolhida: a trava da caixa continua')
+    assert.equal(R.rotuloDosAvisos(1), '1 aviso')
+    assert.equal(R.rotuloDosAvisos(0), '')
   }
 
   // ------------------------------------------------ a caixa da aba E-mail (outra conversa responde)

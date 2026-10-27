@@ -17,6 +17,13 @@
 // (quem mexe, confirma) junta os dois e FICA O MAIS ANTIGO (POST
 // /api/atendimento/email/conversas/{id}/agrupar); "Não agrupar" (quem mexe)
 // some com a sugestão e fica lembrado nos dois (…/nao-agrupar). Nada se apaga.
+//
+// MINIMIZAR (27/10/2026): o corpo (cliente, pedido, alertas, sugestões) recolhe
+// e a linha do título fica; recolhida, ela diz o que ficou escondido
+// ("1 aviso · 2 outros chamados abertos desta cliente"). Começa RECOLHIDA (o
+// dono não via a mensagem com a faixa e a prévia abertas) e o navegador
+// lembra a escolha (uma chave só, vale para todas as conversas). Recolher só
+// esconde: os botões continuam os mesmos.
 
 import type { Chamado } from '~/components/AtendimentoEmailCartao.vue'
 
@@ -86,10 +93,21 @@ export function frasePedidoSugerido(c: Pick<Chamado, 'pedido_citado' | 'pedido_s
   })
   return `Pedido citado no formulário: ${c.pedido_citado} — no Bling: ${partes.join('; ')}. Só sugestão: nada foi ligado.`
 }
+
+// O que a faixa recolhida avisa que ficou escondido ('' = nada que chame atenção).
+export function resumoDoCorpo(alertas: number, sugestoes: number, pedidoCitado: boolean): string {
+  const partes: string[] = []
+  if (alertas) partes.push(alertas === 1 ? '1 aviso' : `${alertas} avisos`)
+  if (sugestoes) partes.push(sugestoes === 1 ? '1 outro chamado aberto desta cliente' : `${sugestoes} outros chamados abertos desta cliente`)
+  if (pedidoCitado) partes.push('pedido citado')
+  return partes.join(' · ')
+}
+
+export const CHAMADO_ABERTO_KEY = 'davinci.atendimento.emailChamadoAberto'
 </script>
 
 <script setup lang="ts">
-import { Loader2, Ticket, TriangleAlert } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, Loader2, Ticket, TriangleAlert } from 'lucide-vue-next'
 import { erroDaApi, fmtDiaHora } from '~/components/AtendimentoPlataforma.vue'
 
 const props = defineProps<{
@@ -113,6 +131,26 @@ const recusados = ref<string[]>([])
 const sugestoes = computed(() => props.outros.filter((o) => !recusados.value.includes(o.conversa_id)))
 const protocolos = computed(() => protocolosDoChamado(props.chamado))
 const pedidoSugerido = computed(() => frasePedidoSugerido(props.chamado))
+
+// Minimizar: começa recolhida; o navegador lembra (sem localStorage, só não lembra).
+const aberto = ref(false)
+onMounted(() => {
+  try {
+    aberto.value = localStorage.getItem(CHAMADO_ABERTO_KEY) === '1'
+  } catch {
+    // sem localStorage — começa recolhida
+  }
+})
+function alternar() {
+  aberto.value = !aberto.value
+  try {
+    localStorage.setItem(CHAMADO_ABERTO_KEY, aberto.value ? '1' : '0')
+  } catch {
+    // só não lembra
+  }
+}
+const temCorpo = computed(() => !!(props.chamado.cliente_nome || props.chamado.telefone || pedidoSugerido.value || props.chamado.alertas?.length || sugestoes.value.length))
+const resumo = computed(() => resumoDoCorpo(props.chamado.alertas?.length || 0, sugestoes.value.length, !!pedidoSugerido.value))
 
 async function agrupar(outro: Chamado) {
   if (agrupando.value || !props.podeMexer) return
@@ -157,10 +195,26 @@ async function naoAgrupar(outro: Chamado) {
 </script>
 
 <template>
-  <div class="space-y-1 border-b bg-teal-50/60 px-3 py-1.5 text-xs dark:bg-teal-900/15" data-email-chamado>
+  <div class="shrink-0 space-y-1 border-b bg-teal-50/60 px-3 py-1.5 text-xs dark:bg-teal-900/15" data-email-chamado>
     <div class="flex flex-wrap items-center gap-1.5">
-      <Ticket class="size-3.5 shrink-0 text-teal-700 dark:text-teal-300" aria-hidden="true" />
-      <span class="font-medium">Chamado do site</span>
+      <button
+        v-if="temCorpo"
+        type="button"
+        class="-ml-1 inline-flex items-center gap-1 rounded px-1 font-medium hover:bg-teal-500/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+        :aria-expanded="aberto"
+        :title="aberto ? 'minimizar o chamado (cliente, avisos e sugestões)' : 'mostrar o chamado (cliente, avisos e sugestões)'"
+        data-email-chamado-alternar
+        @click="alternar"
+      >
+        <ChevronDown v-if="aberto" class="size-3.5 shrink-0" aria-hidden="true" />
+        <ChevronRight v-else class="size-3.5 shrink-0" aria-hidden="true" />
+        <Ticket class="size-3.5 shrink-0 text-teal-700 dark:text-teal-300" aria-hidden="true" />
+        <span>Chamado do site</span>
+      </button>
+      <template v-else>
+        <Ticket class="size-3.5 shrink-0 text-teal-700 dark:text-teal-300" aria-hidden="true" />
+        <span class="font-medium">Chamado do site</span>
+      </template>
       <template v-if="protocolos.length">
         <span
           v-for="(p, i) in protocolos"
@@ -180,50 +234,59 @@ async function naoAgrupar(outro: Chamado) {
         :class="chamado.status === 'resolvido' ? 'text-muted-foreground' : chamado.status === 'aguardando_cliente' ? 'border-sky-500/40 text-sky-800 dark:text-sky-300' : 'border-teal-500/40 text-teal-800 dark:text-teal-300'"
         data-email-chamado-status
       >{{ chamado.status_rotulo }}</span>
+      <span
+        v-if="!aberto && resumo"
+        class="ml-auto inline-flex cursor-pointer items-center gap-1 text-[11px]"
+        :class="chamado.alertas?.length ? 'text-amber-800 dark:text-amber-300' : 'text-sky-800 dark:text-sky-300'"
+        data-email-chamado-resumo
+        @click="alternar"
+      ><TriangleAlert v-if="chamado.alertas?.length" class="size-3 shrink-0" aria-hidden="true" />{{ resumo }}</span>
     </div>
-    <div v-if="chamado.cliente_nome || chamado.telefone" class="text-muted-foreground" data-email-chamado-cliente>
-      Cliente: {{ [chamado.cliente_nome, chamado.telefone].filter(Boolean).join(' · ') }}
-    </div>
-    <div v-if="pedidoSugerido" class="text-muted-foreground" data-email-pedido-sugerido>{{ pedidoSugerido }}</div>
-    <div v-for="a in chamado.alertas || []" :key="a.codigo" class="flex items-start gap-1 text-amber-800 dark:text-amber-300" data-email-chamado-alerta>
-      <TriangleAlert class="mt-px size-3 shrink-0" aria-hidden="true" /><span>{{ a.texto }}</span>
-    </div>
-    <div v-if="sugestoes.length" class="space-y-0.5" data-email-outros-chamados>
-      <div class="text-sky-800 dark:text-sky-300">{{ fraseDasSugestoes(sugestoes) }}</div>
-      <div v-for="o in sugestoes" :key="o.conversa_id" class="flex flex-wrap items-center gap-1.5">
-        <span class="font-medium">{{ rotuloDoChamado(o) }}</span>
-        <span v-if="o.cliente_nome" class="text-muted-foreground" data-email-outro-cliente>· {{ o.cliente_nome }}</span>
-        <span v-if="o.motivo_rotulo" class="text-muted-foreground">· {{ o.motivo_rotulo }}</span>
-        <span v-if="o.ultima_mensagem_em" class="text-muted-foreground">· {{ fmtDiaHora(o.ultima_mensagem_em) }}</span>
-        <button
-          type="button"
-          class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 hover:bg-muted"
-          title="abrir o outro chamado"
-          data-email-ver-chamado
-          @click="emit('abrir', o.conversa_id)"
-        >Ver chamado</button>
-        <button
-          v-if="podeMexer"
-          type="button"
-          class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 hover:bg-muted disabled:opacity-50"
-          :disabled="!!agrupando || !!recusando"
-          title="junta os dois chamados; fica o mais antigo (pede confirmação)"
-          data-email-agrupar
-          @click="agrupar(o)"
-        >
-          <Loader2 v-if="agrupando === o.conversa_id" class="size-3 animate-spin" />Agrupar conversas
-        </button>
-        <button
-          v-if="podeMexer"
-          type="button"
-          class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 hover:bg-muted disabled:opacity-50"
-          :disabled="!!agrupando || !!recusando"
-          title="a sugestão some dos dois chamados (fica registrado)"
-          data-email-nao-agrupar
-          @click="naoAgrupar(o)"
-        >
-          <Loader2 v-if="recusando === o.conversa_id" class="size-3 animate-spin" />Não agrupar
-        </button>
+    <div v-show="aberto" class="max-h-[30vh] space-y-1 overflow-y-auto overscroll-contain" data-email-chamado-corpo>
+      <div v-if="chamado.cliente_nome || chamado.telefone" class="text-muted-foreground" data-email-chamado-cliente>
+        Cliente: {{ [chamado.cliente_nome, chamado.telefone].filter(Boolean).join(' · ') }}
+      </div>
+      <div v-if="pedidoSugerido" class="text-muted-foreground" data-email-pedido-sugerido>{{ pedidoSugerido }}</div>
+      <div v-for="a in chamado.alertas || []" :key="a.codigo" class="flex items-start gap-1 text-amber-800 dark:text-amber-300" data-email-chamado-alerta>
+        <TriangleAlert class="mt-px size-3 shrink-0" aria-hidden="true" /><span>{{ a.texto }}</span>
+      </div>
+      <div v-if="sugestoes.length" class="space-y-0.5" data-email-outros-chamados>
+        <div class="text-sky-800 dark:text-sky-300">{{ fraseDasSugestoes(sugestoes) }}</div>
+        <div v-for="o in sugestoes" :key="o.conversa_id" class="flex flex-wrap items-center gap-1.5">
+          <span class="font-medium">{{ rotuloDoChamado(o) }}</span>
+          <span v-if="o.cliente_nome" class="text-muted-foreground" data-email-outro-cliente>· {{ o.cliente_nome }}</span>
+          <span v-if="o.motivo_rotulo" class="text-muted-foreground">· {{ o.motivo_rotulo }}</span>
+          <span v-if="o.ultima_mensagem_em" class="text-muted-foreground">· {{ fmtDiaHora(o.ultima_mensagem_em) }}</span>
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 hover:bg-muted"
+            title="abrir o outro chamado"
+            data-email-ver-chamado
+            @click="emit('abrir', o.conversa_id)"
+          >Ver chamado</button>
+          <button
+            v-if="podeMexer"
+            type="button"
+            class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 hover:bg-muted disabled:opacity-50"
+            :disabled="!!agrupando || !!recusando"
+            title="junta os dois chamados; fica o mais antigo (pede confirmação)"
+            data-email-agrupar
+            @click="agrupar(o)"
+          >
+            <Loader2 v-if="agrupando === o.conversa_id" class="size-3 animate-spin" />Agrupar conversas
+          </button>
+          <button
+            v-if="podeMexer"
+            type="button"
+            class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 hover:bg-muted disabled:opacity-50"
+            :disabled="!!agrupando || !!recusando"
+            title="a sugestão some dos dois chamados (fica registrado)"
+            data-email-nao-agrupar
+            @click="naoAgrupar(o)"
+          >
+            <Loader2 v-if="recusando === o.conversa_id" class="size-3 animate-spin" />Não agrupar
+          </button>
+        </div>
       </div>
     </div>
   </div>
