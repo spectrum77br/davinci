@@ -261,7 +261,7 @@ async function principal() {
   assert.ok(iTopo > 0 && iTopo < iChips && iChips < iCaixa)
   assert.ok(pagina.indexOf('<AtendimentoLeituraParada') < iChips, 'depois da faixa das lojas sem ler')
   // Os mesmos filtros da lista (o v-model da página): busca, aba e menu juntos.
-  assert.match(pagina, /<AtendimentoLista\s+v-show="!emailsDaLoja"\s+v-model:filtros="filtros"/)
+  assert.match(pagina, /<AtendimentoLista\s+v-show="!emailsDaLoja && !emailsNoCelular"\s+v-model:filtros="filtros"/)
   assert.match(pagina, /for \(const k of \['plataforma', 'integration_id', 'canal', 'externo_ref', 'rede_social_id'\] as const\)/)
   assert.match(pagina, /localStorage\.setItem\(FILTROS_KEY, JSON\.stringify\(resto\)\)/)
   assert.match(pagina, /if \(f\.plataforma\) p\.set\('plataforma', f\.plataforma\)/)

@@ -1,11 +1,13 @@
 <script lang="ts">
 // Os E-MAILS DE UMA LOJA na Caixa (27/10/2026) — o Eduardo: "botar um
-// AMPLIÁVEL que vai abrir os e-mails embaixo de cada loja, com as 3
-// categorias linkadas pra cada loja … então poderá ampliar e visualizar os
-// e-mails ali pelo atendimento mesmo de cada loja". O clique num tipo
-// (Informativo · Chamado · Venda) embaixo da loja, na barra de lojas
-// (AtendimentoLojas), troca a lista do meio da Caixa por esta: as conversas de
-// e-mail DAQUELA loja e DAQUELE tipo. A conversa abre na coluna da conversa da
+// AMPLIÁVEL que vai abrir os e-mails embaixo de cada loja … então poderá
+// ampliar e visualizar os e-mails ali pelo atendimento mesmo de cada loja".
+// O clique num tipo embaixo da loja, na barra de lojas (AtendimentoLojas: os
+// tipos da barra — hoje Informativo e Chamado; a escolha do dono é a
+// constante TIPOS_EMAIL_NA_BARRA_DE_LOJAS da API, que chega em `tipos`),
+// troca a lista do meio da Caixa por esta: as conversas de e-mail DAQUELA
+// loja e DAQUELE tipo. Quem não é admin vê e-mail SÓ por aqui (a aba E-mail
+// é só de admin; a API recusa a lista sem a loja ou fora dos tipos da barra). A conversa abre na coluna da conversa da
 // própria Caixa, com a barra do e-mail (AtendimentoEmailConversaBarra: voltar,
 // vincular ao pedido) — a mesma visão da aba E-mail.
 //
@@ -20,7 +22,7 @@
 // chat: a lista e os números dela continuam sem e-mail (`separa_email`).
 // Funções puras aqui em cima (tests/atendimento-email-lojas.cjs).
 import { urlDaFila } from '~/components/AtendimentoMailFilas.vue'
-import { TIPOS_EMAIL_DA_LOJA, numeroDoTipo, type EscolhaEmail, type TipoEmailDaLoja } from '~/components/AtendimentoLojas.vue'
+import { TIPOS_EMAIL_DA_LOJA, numeroDoTipo, tiposDaBarra, type EscolhaEmail, type TipoEmailDaLoja } from '~/components/AtendimentoLojas.vue'
 
 type DaLoja = Pick<EscolhaEmail, 'integration_id' | 'store_info_id' | 'tipo'>
 
@@ -67,7 +69,7 @@ export function vazioDaLoja(tipo: TipoEmailDaLoja, fechadas: boolean, busca: str
   return fechadas ? `Nenhum e-mail ${rotulo} fechado desta loja.` : `Nenhum e-mail ${rotulo} aberto desta loja.`
 }
 
-export { TIPOS_EMAIL_DA_LOJA, numeroDoTipo }
+export { TIPOS_EMAIL_DA_LOJA, numeroDoTipo, tiposDaBarra }
 </script>
 
 <script setup lang="ts">
@@ -82,6 +84,8 @@ const props = defineProps<{
   escolha: EscolhaEmail
   // Os números da loja (o mesmo GET …/email/contagens?por_loja=true da barra).
   contagem?: EmailsDaLoja | null
+  // Os tipos da barra (`tipos_na_barra` da API): os chips.
+  tipos?: string[] | null
   podeMexer?: boolean
   // A conversa de e-mail aberta na coluna da conversa.
   selecionada?: string | null
@@ -117,6 +121,12 @@ const linhaAberta = ref<string | null>(null)
 const detalhe = ref<CartaoEmail | null>(null)
 let geracaoLinhas = 0
 
+// Os chips: os tipos da barra (o escolhido sempre aparece, mesmo se a lista mudou).
+const chips = computed(() => {
+  const lista = tiposDaBarra(props.tipos)
+  const escolhido = TIPOS_EMAIL_DA_LOJA.find((t) => t.value === props.escolha.tipo)
+  return escolhido && !lista.some((t) => t.value === escolhido.value) ? [...lista, escolhido] : lista
+})
 const comLinhas = computed(() => mostraLinhas(props.escolha.tipo, !!props.podeMexer, fechadas.value, busca.value))
 
 // `automatico` (o polling): a falha não mostra erro — a lista fica e o próximo tique tenta de novo.
@@ -256,10 +266,10 @@ function nomeDaLinha(c: ConversaResumo): string {
         <AtendimentoIconePlataforma :plataforma="escolha.plataforma" :tamanho="15" decorativo />
         <span class="min-w-0 truncate" :title="`${plataformaInfo(escolha.plataforma).nome} · ${escolha.conta}`">{{ escolha.conta }}</span>
       </div>
-      <!-- os três tipos da loja (o mesmo da barra) -->
+      <!-- os tipos da loja (os mesmos da barra) -->
       <div class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="tipo de e-mail" data-tipos-da-loja>
         <button
-          v-for="t in TIPOS_EMAIL_DA_LOJA"
+          v-for="t in chips"
           :key="t.value"
           type="button"
           class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5"

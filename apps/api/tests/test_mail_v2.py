@@ -743,7 +743,7 @@ async def test_contadores_do_v2_valem_no_teto_da_conta(client, caixa, db, monkey
 
 
 async def test_pastas_da_caixa_privada_so_para_quem_abre_a_caixa(
-    client, make_user, auth_as, caixa, monkeypatch
+    db, client, make_user, auth_as, caixa, monkeypatch
 ):
     await _sync(client, caixa)
     # Alguém que MEXE mas não é dono nem admin (hoje mexe = admin; a trava
@@ -752,8 +752,12 @@ async def test_pastas_da_caixa_privada_so_para_quem_abre_a_caixa(
     pessoa = await make_user(role=UserRole.USER)
     auth_as(pessoa)
     r = await client.get("/api/atendimento/email/pastas")
-    assert r.status_code == 200, r.text
-    assert r.json()["itens"] == []
+    # 27/10/2026: a aba E-mail (as Pastas também) é só de admin, mesmo para quem mexe.
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "aba_email_so_admin"
+    # E a régua das caixas das pastas segue sem a caixa privada para ela.
+    from app.routers import atendimento_email
+
+    assert UUID(caixa["id"]) not in await atendimento_email._caixas_das_pastas(db, pessoa)
     auth_as(caixa["admin"])
     r = await client.get("/api/atendimento/email/pastas")
     assert {p["chave"] for p in r.json()["itens"]} >= {"Pproblema", "Pfinanceiro"}

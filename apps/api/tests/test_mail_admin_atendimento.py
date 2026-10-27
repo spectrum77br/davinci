@@ -5,6 +5,7 @@ Estes cenários usam mensagens cifradas reais da Central e a ponte de verdade;
 não substituem os filtros de autorização nem inferem acesso pelo comprador.
 """
 
+import json
 from uuid import uuid4
 
 import pytest
@@ -21,6 +22,12 @@ from app.models import (
 )
 from app.models.mail_atendimento import MailFolder, MailOutboxMeta
 from app.security.cipher import encrypt_json
+from app.services.mail_atendimento import saude
+from tests.test_atendimento_separa_email import (
+    _ids_pela_barra,
+    _lista_inteira_recusada,
+    _tipo_email,
+)
 from tests.test_mail_ponte import _config, cena, entrar, meta_de, pedido_existe, rodar
 from tests.test_mail_venda_rotas import X, Y, _caso, _chat
 
@@ -55,6 +62,17 @@ async def _tipo(db, meta, tipo):
     c = await db.get(AtendimentoConversa, meta.conversa_id)
     c.dados = {**c.dados, "mail": {**c.dados["mail"], "tipo_email": tipo}}
     await db.commit()
+
+
+async def _saude_de(db, client, user) -> dict:
+    """A saúde das caixas como a PESSOA veria. Desde 27/10/2026 a rota (só da
+    aba E-mail) é só de admin — 403 para ela; a régua por pessoa (a política
+    de acesso) continua no serviço, que é o que se confere aqui."""
+    r = await client.get(f"{EMAIL}/saude")
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"]["code"] == "aba_email_so_admin"
+    caixas = await saude.caixas_visiveis(db, user)
+    return {"caixas": [await saude.linha_da_caixa(db, c, user=user) for c in caixas]}
 
 
 async def _id_anexo(db, mid):
@@ -118,9 +136,18 @@ async def test_bloquear_loja_tira_previa_historico_abas_contagens_e_anexos(
     await _negado_na_conversa(client, ml.conversa_id)
     anexo = await _id_anexo(db, ml.message_id)
     assert (await client.get(f"{EMAIL}/anexos/{anexo}")).status_code == 404
-    r = await client.get(f"{ATENDIMENTO}/conversas", params={"caixa": "email"})
-    assert r.status_code == 200, r.text
-    assert [c["id"] for c in r.json()["itens"]] == [str(shopee.conversa_id)]
+    # A lista da loja (a barra de lojas: desde 27/10/2026 a aba E-mail inteira é
+    # só de admin): a Shopee permitida aparece; a do ML bloqueada, não.
+    await _lista_inteira_recusada(client)
+    assert await _ids_pela_barra(client, integration_id=str(cena.shopee.id)) == {
+        str(shopee.conversa_id)
+    }
+    await _tipo_email(db, ml.conversa_id, "chamado")
+    assert await _ids_pela_barra(client, integration_id=str(cena.ml.id)) == set()
+    r = await client.get(
+        f"{ATENDIMENTO}/conversas",
+        params={"caixa": "email", "integration_id": str(cena.ml.id), "tipo_email": "chamado"},
+    )
     assert "TEXTO BLOQUEADO ML" not in r.text and str(ml.conversa_id) not in r.text
     counts = await client.get(f"{EMAIL}/contagens")
     assert counts.status_code == 200
@@ -166,9 +193,8 @@ async def test_caso_misto_nao_libera_historico_y_mas_venda_x_mantem_email_x(
 
     # A cópia já gravada do caso contém X e Y; ela inteira fica oculta.
     await _negado_na_conversa(client, x.conversa_id)
-    assert (await client.get(f"{ATENDIMENTO}/conversas", params={"caixa": "email"})).json()[
-        "itens"
-    ] == []
+    await _lista_inteira_recusada(client)
+    assert await _ids_pela_barra(client, integration_id=str(cena.ml.id)) == set()
     # A venda X e a Central continuam liberando só o e-mail autorizado X.
     sale_x = await client.get(f"{EMAIL}/venda/{chat_x.id}")
     assert sale_x.status_code == 200, sale_x.text
@@ -401,16 +427,15 @@ async def test_saude_mantem_caixa_da_empresa_sem_politica_e_omite_caixa_bloquead
     await _caso(db, cena)
     pessoa = await make_user(role=UserRole.USER)
     auth_as(pessoa)
-    baseline = await client.get(f"{EMAIL}/saude")
-    assert baseline.status_code == 200, baseline.text
-    assert [c["mailbox_id"] for c in baseline.json()["caixas"]] == [str(cena.geral.id)]
-    assert sum(baseline.json()["caixas"][0]["emails"].values()) == 1
+    baseline = await _saude_de(db, client, pessoa)
+    assert [c["mailbox_id"] for c in baseline["caixas"]] == [str(cena.geral.id)]
+    assert sum(baseline["caixas"][0]["emails"].values()) == 1
 
     await _salvar(client, auth_as, cena, pessoa, modo="bloqueado")
-    blocked = await client.get(f"{EMAIL}/saude")
-    assert blocked.status_code == 200, blocked.text
-    assert blocked.json()["caixas"] == []
-    assert str(cena.geral.id) not in blocked.text and cena.geral.label not in blocked.text
+    blocked = await _saude_de(db, client, pessoa)
+    assert blocked["caixas"] == []
+    texto = json.dumps(blocked, default=str)
+    assert str(cena.geral.id) not in texto and cena.geral.label not in texto
 
 
 async def test_saude_filtra_tipo_pedido_envios_pastas_e_lixeira_inclusive_admin(
@@ -449,9 +474,8 @@ async def test_saude_filtra_tipo_pedido_envios_pastas_e_lixeira_inclusive_admin(
     await db.commit()
     pessoa = await make_user(role=UserRole.USER)
     auth_as(pessoa)
-    baseline = await client.get(f"{EMAIL}/saude")
-    assert baseline.status_code == 200, baseline.text
-    [caixa] = baseline.json()["caixas"]
+    baseline = await _saude_de(db, client, pessoa)
+    [caixa] = baseline["caixas"]
     assert sum(caixa["emails"].values()) == 3
     assert caixa["envios_a_conferir"] == 3 and caixa["pastas_sem_revisar"] >= 1
 
@@ -463,9 +487,8 @@ async def test_saude_filtra_tipo_pedido_envios_pastas_e_lixeira_inclusive_admin(
         tipos_permitidos=["informativo"],
         pedidos_permitidos=[{"loja": f"i:{cena.ml.id}", "numero": X}],
     )
-    filtered = await client.get(f"{EMAIL}/saude")
-    assert filtered.status_code == 200, filtered.text
-    [caixa] = filtered.json()["caixas"]
+    filtered = await _saude_de(db, client, pessoa)
+    [caixa] = filtered["caixas"]
     assert sum(caixa["emails"].values()) == 1
     assert caixa["envios_a_conferir"] == 1 and caixa["pastas_sem_revisar"] is None
 

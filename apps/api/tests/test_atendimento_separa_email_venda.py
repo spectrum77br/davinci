@@ -84,6 +84,15 @@ async def _ids_do_email(client) -> set[str]:
     return {i["id"] for i in r.json()["itens"]}
 
 
+async def _abre_a_conversa(client, conversa_id) -> bool:
+    """Quem não é admin (27/10/2026: a aba E-mail é só de admin) não tem a lista
+    de todas as lojas: a conversa de e-mail da venda ele abre pelo id (o link do
+    painel do chat abre na Caixa) — 200 no escopo dele, 404 fora."""
+    r = await client.get(f"{URL}/conversas/{conversa_id}")
+    assert r.status_code in (200, 404), r.text
+    return r.status_code == 200
+
+
 async def _venda_com_email(db, cena) -> dict:
     """O pack do ML (o chat) e a conversa de e-mail do MESMO pedido: dois e-mails
     da compradora e o aviso do ML (os três na conversa de e-mail, nunca no chat)."""
@@ -241,7 +250,9 @@ async def test_quem_nao_ve_nao_recebe_id_nem_numero(
     r = await client.get(_venda(pack.id))
     assert r.status_code == 404
     assert str(email.id) not in r.text and '"total"' not in r.text
-    assert str(email.id) not in await _ids_do_email(client), "a lista da aba E-mail também não"
+    assert not await _abre_a_conversa(client, email.id), "a conversa de e-mail também não"
+    r = await client.get(f"{URL}/conversas", params={"caixa": "email", "filtro": "todas"})
+    assert r.status_code == 403, "a lista inteira (a aba E-mail) é só de admin"
     # Equipe com o ML: vê o chat, os números e o id — o mesmo que a lista mostra.
     db.add(
         StoreInfo(
@@ -258,7 +269,7 @@ async def test_quem_nao_ve_nao_recebe_id_nem_numero(
     auth_as(do_ml)
     corpo = (await client.get(_venda(pack.id))).json()
     assert corpo["total"] == 3 and [c["id"] for c in corpo["conversas"]] == [str(email.id)]
-    assert str(email.id) in await _ids_do_email(client)
+    assert await _abre_a_conversa(client, email.id)
     # Quem só lê (sem equipe) vê como na lista da aba E-mail.
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", OUTRO)
     auth_as(await make_user(role=UserRole.USER))

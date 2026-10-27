@@ -320,9 +320,9 @@ const paginaTpl = paginaSfc.descriptor.template.content
   assert.match(pagina, /const naCaixa = computed\(\(\) => aba\.value === 'caixa' \|\| aba\.value === 'humano'\)/)
   assert.match(paginaTpl, /<!-- Caixa: lojas \| fila \| conversa \+ pedido -->[\s\S]*?<div\s+v-show="naCaixa"\s+ref="caixaEl"/)
   assert.match(paginaTpl, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"/)
-  assert.match(paginaTpl, /<AtendimentoLista\s+v-show="!emailsDaLoja"\s+v-model:filtros="filtros"[\s\S]*?:caixa="emHumano \? 'humano' : ''"/)
+  assert.match(paginaTpl, /<AtendimentoLista\s+v-show="!emailsDaLoja && !emailsNoCelular"\s+v-model:filtros="filtros"[\s\S]*?:caixa="emHumano \? 'humano' : ''"/)
   // O vazio sem loja no modo abre "Lojas e modo" (14/10/2026).
-  assert.match(paginaTpl, /<AtendimentoLista\s+v-show="!emailsDaLoja"\s+v-model:filtros="filtros"[^/]*?@abrir-aba="abrirAba"\s*\/>/)
+  assert.match(paginaTpl, /<AtendimentoLista\s+v-show="!emailsDaLoja && !emailsNoCelular"\s+v-model:filtros="filtros"[^/]*?@abrir-aba="abrirAba"\s*\/>/)
   assert.match(paginaTpl, /:ativa="naCaixa"/)
   // A conversa aberta fica no link nas duas (e, desde 13/10/2026, a de e-mail na aba E-mail).
   assert.match(pagina, /const aberta = naCaixa\.value \? selecionada\.value : aba\.value === 'mail' \? emailConversa\.value : null\n  if \(aberta\) query\.conversa = aberta/)

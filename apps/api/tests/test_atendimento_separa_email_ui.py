@@ -28,6 +28,9 @@ from tests.test_atendimento_separa_email import (
     URL,
     _chat,
     _ids,
+    _ids_pela_barra,
+    _lista_inteira_recusada,
+    _tipo_email,
 )
 from tests.test_atendimento_separa_email import (
     admin as admin,  # noqa: F401 — a fixture do dono autenticado
@@ -161,9 +164,17 @@ async def test_busca_pelo_nome_pedido_e_qualquer_protocolo(db, cena, client, adm
 
 async def test_escopo_da_equipe_e_quem_so_le(db, cena, client, make_user, auth_as, quem_le):
     h = await _historico(db, cena)
-    # Quem só lê (sem equipe = sem corte): o mesmo que via na Caixa.
-    assert await _ids(client, caixa="email", filtro="todas") == {h["ml"], h["oliveira"], h["novo"]}
-    assert await _ids(client, caixa="email", filtro="fechadas") == {h["velho"]}
+    for cid in (h["ml"], h["oliveira"]):
+        await _tipo_email(db, cid, "chamado")
+    # Quem só lê (sem equipe = sem corte): o mesmo que via na Caixa — desde
+    # 27/10/2026 pela barra de lojas (a aba E-mail inteira é só de admin).
+    await _lista_inteira_recusada(client)
+    assert await _ids_pela_barra(client, integration_id=str(cena.ml.id), filtro="todas") == {
+        h["ml"]
+    }
+    assert await _ids_pela_barra(
+        client, integration_id=str(cena.oliveira_ml.id), filtro="todas"
+    ) == {h["oliveira"]}
     contagens = (await client.get(f"{EMAIL}/contagens")).json()
     assert (contagens["aguardando"], contagens["chamados"]) == (2, 1), "a Oliveira e o chamado"
     # A equipe da Barbosa (só a loja do ML dela): só a conversa de e-mail dela.
@@ -173,10 +184,18 @@ async def test_escopo_da_equipe_e_quem_so_le(db, cena, client, make_user, auth_a
     membro.sales_teams = [7]
     await db.commit()
     auth_as(membro)
-    assert await _ids(client, caixa="email", filtro="todas") == {h["ml"]}
-    assert await _ids(client, caixa="email", filtro="todas", q="Pedro") == set()
-    # O chamado do site não tem loja (integração): fora do escopo, como na Caixa.
-    assert await _ids(client, caixa="email", filtro="fechadas") == set()
+    assert await _ids_pela_barra(client, integration_id=str(cena.ml.id), filtro="todas") == {
+        h["ml"]
+    }
+    assert (
+        await _ids_pela_barra(client, integration_id=str(cena.ml.id), filtro="todas", q="Pedro")
+        == set()
+    )
+    assert (
+        await _ids_pela_barra(client, integration_id=str(cena.oliveira_ml.id), filtro="todas")
+        == set()
+    ), "a loja de fora do escopo"
+    await _lista_inteira_recusada(client)
     r = await client.get(f"{EMAIL}/contagens")
     assert r.status_code == 200, r.text
     assert r.json()["aguardando"] == 0 and r.json()["chamados"] == 0

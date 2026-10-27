@@ -27,6 +27,7 @@ from sqlalchemy import select
 
 from app.models import AtendimentoConversa, UserRole
 from app.models.mail_atendimento import MailMessageMeta
+from app.services.mail_atendimento import constantes as mail_constantes
 from tests.test_mail_ponte import (
     _config as _config_ponte,  # noqa: F401 — a config autouse da ponte vale aqui
 )
@@ -177,13 +178,30 @@ async def test_w2_quem_so_le_ve_o_filtro_no_escopo(db, cena, client, make_user, 
     await entrar(db, cena.geral, pasta="INBOX")
     await rodar(db)
     # Quem só lê (a fase de observação) usa o filtro como qualquer filtro da
-    # lista — na lista do e-mail (a aba E-mail), como via na Caixa até 13/10.
+    # lista — desde 27/10/2026 na lista da LOJA (a barra de lojas da Caixa: a
+    # aba E-mail inteira é só de admin), num tipo da barra.
     auth_as(await make_user(role=UserRole.USER))
     r = await client.get(
         f"{API}/conversas", params={"caixa": "email", "filtro": "email_sem_vinculo"}
     )
-    assert r.status_code == 200, r.text
-    assert len(r.json()["itens"]) == 1
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "aba_email_so_admin"
+    achadas = set()
+    for tipo in mail_constantes.TIPOS_EMAIL_NA_BARRA_DE_LOJAS + ("venda",):
+        r = await client.get(
+            f"{API}/conversas",
+            params={
+                "caixa": "email",
+                "filtro": "email_sem_vinculo",
+                "integration_id": str(cena.ml.id),
+                "tipo_email": tipo,
+            },
+        )
+        if tipo == "venda":
+            assert r.status_code == 403, "a Venda não está na barra"
+            continue
+        assert r.status_code == 200, r.text
+        achadas |= {i["id"] for i in r.json()["itens"]}
+    assert len(achadas) == 1
 
 
 # ─────────────── W3: o nome da caixa nas pastas ───────────────

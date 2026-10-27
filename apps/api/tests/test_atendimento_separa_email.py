@@ -43,6 +43,7 @@ from app.services.atendimento import abas as abas_svc
 from app.services.atendimento import amazon_email, etiqueta_fatos, gravar, humano, separa_email
 from app.services.atendimento import cliente as cliente_svc
 from app.services.atendimento import sync as sync_svc
+from app.services.mail_atendimento import constantes as mail_constantes
 from tests.test_mail_ponte import (
     AGORA,
     conversa,
@@ -168,6 +169,29 @@ async def _ids(client, **params) -> set[str]:
     return {i["id"] for i in r.json()["itens"]}
 
 
+async def _ids_pela_barra(client, **params) -> set[str]:
+    """A lista de UMA loja como a barra de lojas da Caixa pede — todos os tipos
+    que ela mostra. Desde 27/10/2026 a aba E-mail é só de admin: quem não é
+    admin vê o e-mail SÓ por aqui (a lista inteira é 403 `aba_email_so_admin`)."""
+    ids: set[str] = set()
+    for t in mail_constantes.TIPOS_EMAIL_NA_BARRA_DE_LOJAS:
+        ids |= await _ids(client, caixa="email", tipo_email=t, **params)
+    return ids
+
+
+async def _lista_inteira_recusada(client) -> None:
+    """A lista de todas as lojas (a aba E-mail) para quem não é admin: 403."""
+    r = await client.get(f"{URL}/conversas", params={"caixa": "email", "filtro": "todas"})
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"]["code"] == "aba_email_so_admin"
+
+
+async def _tipo_email(db, conversa_id, tipo: str) -> None:
+    c = await db.get(AtendimentoConversa, conversa_id)
+    c.dados = {**c.dados, "mail": {**c.dados["mail"], "tipo_email": tipo}}
+    await db.commit()
+
+
 # ─────────────── a régua (pura e SQL, gêmeas) ───────────────
 
 
@@ -286,7 +310,12 @@ async def test_resumo_metricas_e_contagens(db, cena, client, admin):
 
 async def test_quem_so_le_ve_as_conversas_de_email_como_via_na_caixa(db, cena, client, quem_le):
     m = await _mundo(db, cena)
-    assert await _ids(client, caixa="email") == {str(m["ml"].id), str(m["site"].id)}
+    # 27/10/2026: a aba E-mail é só de admin — quem só lê vê o e-mail da loja
+    # pela barra de lojas (uma loja, um tipo da barra); o chamado do site e a
+    # lista de todas as lojas ficam na aba (403).
+    await _lista_inteira_recusada(client)
+    await _tipo_email(db, m["ml"].id, "chamado")
+    assert await _ids_pela_barra(client, integration_id=str(cena.ml.id)) == {str(m["ml"].id)}
     assert (await client.get(f"{EMAIL}/contagens")).status_code == 200
     assert (await client.get(f"{URL}/conversas/{m['ml'].id}")).status_code == 200
     # Vincular é de quem mexe.

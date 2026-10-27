@@ -84,6 +84,18 @@ CATEGORIA_VENDA = "venda"
 CATEGORIA_SITE = "site"
 CATEGORIAS_PELA_PASTA = (CATEGORIA_INFORMATIVO, CATEGORIA_CHAMADO, CATEGORIA_VENDA)
 CATEGORIAS_PASTA = (*CATEGORIAS_PELA_PASTA, CATEGORIA_SITE)
+# OS TIPOS DE E-MAIL EMBAIXO DE CADA LOJA na barra de lojas da Caixa (27/10/2026)
+# — o ÚNICO lugar da escolha. O Eduardo, 27/10: "botar um AMPLIÁVEL que vai
+# abrir os e-mails embaixo de cada loja"; no mesmo dia mudou para só
+# Informativo e Chamado embaixo de cada loja (a Venda fica só na aba E-mail) e
+# ainda vai escolher quais pastas entram — a troca é AQUI. Daqui saem os
+# números por loja (GET /api/atendimento/email/contagens?por_loja=true, que
+# manda a lista em `tipos_na_barra`), os tipos que a barra e a lista da loja
+# mostram (o web não tem lista própria) e o que quem NÃO é admin pode listar
+# (GET /api/atendimento/conversas?caixa=email: só pela loja e só destes tipos
+# — a aba E-mail inteira é só de admin). Valores de `classificacao.TIPOS_EMAIL`
+# (= CATEGORIAS_PELA_PASTA), na ordem da barra (tests/test_atendimento_email_lojas.py).
+TIPOS_EMAIL_NA_BARRA_DE_LOJAS: tuple[str, ...] = (CATEGORIA_INFORMATIVO, CATEGORIA_CHAMADO)
 ROTULO_CATEGORIA = {
     CATEGORIA_INFORMATIVO: "Informativo",
     CATEGORIA_CHAMADO: "Chamado (Pós-venda)",

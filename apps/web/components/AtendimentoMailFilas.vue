@@ -91,7 +91,8 @@ export const TIPOS_CHAMADO: { value: string; label: string; hint: string }[] = [
 // Os números das filas de conversa (GET /api/atendimento/email/contagens).
 // `por_loja` (27/10/2026, `?por_loja=true`): os mesmos números por loja — o
 // ampliável de e-mails da barra de lojas da Caixa (AtendimentoLojas).
-export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number>; por_loja?: EmailsDaLoja[] }
+// `tipos_na_barra`: os tipos que a barra mostra (a escolha do dono, na API).
+export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number>; por_loja?: EmailsDaLoja[]; tipos_na_barra?: string[] }
 export function juntarContagens(filas: Record<string, number> | null, conversas: ContagensDeConversa | null): Record<string, number> {
   return { ...(filas || {}), ...(conversas ? { chamados: conversas.chamados, aguardando: conversas.aguardando } : {}) }
 }

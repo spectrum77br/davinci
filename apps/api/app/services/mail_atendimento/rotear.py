@@ -183,6 +183,32 @@ async def integracao_da_ficha(session: AsyncSession, ficha: StoreInfo) -> tuple[
     return pelo_par, pelo_par is not None
 
 
+async def integracoes_das_fichas(
+    session: AsyncSession, fichas: set[UUID] | None = None
+) -> dict[UUID, UUID]:
+    """{ficha: a integração dela} pela MESMA régua de `integracao_da_ficha` (o FK
+    ativo, senão o par nome + plataforma único). `fichas` = só essas (None = todas);
+    a ficha sem integração fica de fora.
+
+    27/10/2026, a barra de lojas da Caixa: a conversa de e-mail que a ponte ligou
+    só à ficha (sem a integração na hora) entra na linha da loja da integração."""
+    if fichas is not None and not fichas:
+        return {}
+    ativas, pares = await _pares_das_integracoes(session)
+    q = select(StoreInfo.id, StoreInfo.integration_id, StoreInfo.account_name, StoreInfo.platform)
+    if fichas is not None:
+        q = q.where(StoreInfo.id.in_(fichas))
+    saida: dict[UUID, UUID] = {}
+    for fid, fk, nome, plataforma in (await session.execute(q)).all():
+        if fk is not None and fk in ativas:
+            saida[fid] = fk
+            continue
+        pelo_par = integracao_pelo_par(pares, nome, plataforma_da_ficha(plataforma))
+        if pelo_par is not None:
+            saida[fid] = pelo_par
+    return saida
+
+
 async def cadastro(session: AsyncSession) -> Cadastro:
     """Lojas (com e-mail), caixas das marcas e marcas — cache por sessão."""
     cache = session.info.get(_CHAVE_CACHE)

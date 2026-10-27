@@ -270,6 +270,8 @@ from app.services.atendimento.constantes import (
 )
 from app.services.atendimento.enviar import EnvioRecusado
 from app.services.mail_atendimento import administracao as mail_admin
+from app.services.mail_atendimento import constantes as mail_constantes
+from app.services.mail_atendimento import rotear as mail_rotear
 from app.services.mail_atendimento.constantes import ROTULO_TIPO_CAIXA
 
 logger = structlog.get_logger()
@@ -318,6 +320,15 @@ SO_LEITURA = {
     "code": "atendimento_so_leitura",
     "detail": "Só leitura por enquanto — sugestões e 👍/👎 liberados. Responder e mudar a "
     "caixa ficam com quem cuida do Atendimento.",
+}
+# A ABA E-MAIL INTEIRA é só de admin (27/10/2026) — o Eduardo: quem não é admin
+# vê e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). O 403
+# das rotas que só a aba usa (aqui, GET /conversas?caixa=email sem a loja; as
+# do e-mail em routers/atendimento_email.py, `_aba_inteira`).
+ABA_EMAIL_SO_ADMIN = {
+    "code": "aba_email_so_admin",
+    "detail": "A aba E-mail é só de admin: os e-mails de cada loja ficam na barra de "
+    "lojas da Caixa.",
 }
 
 
@@ -2107,6 +2118,7 @@ async def _listar_marketplace(
     caixa_humano: bool = False,
     caixa_email: bool = False,
     store_info_id: UUID | None = None,
+    fichas_da_loja: set[UUID] | None = None,
 ) -> list[dict[str, Any]]:
     from app.services.atendimento import humano as humano_svc
 
@@ -2163,7 +2175,21 @@ async def _listar_marketplace(
     elif plataforma:
         # Um GRUPO da caixa (08/10/2026): "Redes" = Instagram + Facebook.
         consulta = consulta.where(AtendimentoConversa.plataforma.in_(plataforma))
-    if integration_id:
+    if integration_id and caixa_email and fichas_da_loja:
+        # O e-mail da loja na barra de lojas (27/10/2026): também o que a ponte
+        # ligou só à FICHA cuja integração é esta (o FK vazio na hora; a régua
+        # da ponte, `rotear.integracoes_das_fichas`) — o mesmo das contagens.
+        ficha_txt = AtendimentoConversa.dados[separa_email.CHAVE_MAIL]["store_info_id"].astext
+        consulta = consulta.where(
+            or_(
+                AtendimentoConversa.integration_id == integration_id,
+                and_(
+                    AtendimentoConversa.integration_id.is_(None),
+                    ficha_txt.in_(sorted(str(f) for f in fichas_da_loja)),
+                ),
+            )
+        )
+    elif integration_id:
         consulta = consulta.where(AtendimentoConversa.integration_id == integration_id)
     if canal_id:
         # Uma loja do robô (Temu/AliExpress): sem integração, ela é o canal.
@@ -2448,7 +2474,10 @@ async def listar_conversas(
     com os mesmos filtros e o mesmo escopo; sem o Direct do Instagram.
     `store_info_id` (27/10/2026, só com `caixa=email`): as conversas de e-mail
     da loja SEM integração (a ficha) — o "ampliável" de e-mails da barra de
-    lojas; a loja com integração usa `integration_id`.
+    lojas; a loja com integração usa `integration_id` (com `caixa=email`, mais
+    as da ficha cuja integração é ela — a régua da ponte). Quem NÃO é admin
+    (a aba E-mail é só de admin, 27/10/2026) só lista o e-mail com a loja e um
+    tipo da barra (`TIPOS_EMAIL_NA_BARRA_DE_LOJAS`); sem isso, 403.
     """
     plataformas = _plataformas_do_filtro(plataforma)
     canal = (canal or "").strip().lower() or None
@@ -2477,6 +2506,24 @@ async def listar_conversas(
     if store_info_id is not None and not caixa_email:
         # A ficha é a loja do E-MAIL: o chat da loja do robô filtra pelo canal.
         raise HTTPException(422, detail={"code": "store_info_id_so_no_email"})
+    if caixa_email and user.role != UserRole.ADMIN:
+        # A aba E-mail é só de admin (27/10/2026): quem não é admin vê e-mail SÓ
+        # pela barra de lojas da Caixa — a lista de UMA loja, de um tipo que a
+        # barra mostra (`TIPOS_EMAIL_NA_BARRA_DE_LOJAS`). A lista de todas as
+        # lojas, o chamado do site e os outros tipos ficam na aba (403).
+        if (integration_id is None and store_info_id is None) or (
+            tipo_email not in mail_constantes.TIPOS_EMAIL_NA_BARRA_DE_LOJAS
+        ):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=ABA_EMAIL_SO_ADMIN)
+    fichas_da_loja = (
+        {
+            f
+            for f, i in (await mail_rotear.integracoes_das_fichas(session)).items()
+            if i == integration_id
+        }
+        if caixa_email and integration_id is not None
+        else None
+    )
     # A Caixa Humano vai pelo turno com qualquer filtro (14/10/2026); a Caixa
     # e a aba E-mail, pela ordem do filtro, como sempre.
     pelo_prazo = filtro in FILTROS_PELO_PRAZO and not caixa_humano
@@ -2512,6 +2559,7 @@ async def listar_conversas(
             caixa_humano=caixa_humano,
             caixa_email=caixa_email,
             store_info_id=store_info_id,
+            fichas_da_loja=fichas_da_loja,
         )
     quer_instagram = (
         (not plataformas or instagram.PLATAFORMA in plataformas)

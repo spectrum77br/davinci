@@ -100,23 +100,37 @@ export function filtrosTodasDoCorte(f: FiltrosLista, corte: string[]): FiltrosLi
 // ─── Os E-MAILS de cada loja (27/10/2026) ───────────────────────────────────
 // O Eduardo, 27/10: "vamos mudar um pouco a disposição da caixa de
 // atendimento: botar um AMPLIÁVEL que vai abrir os e-mails embaixo de cada
-// loja, com as 3 categorias linkadas pra cada loja — INFORMATIVO, CHAMADO e
-// VENDA … então poderá ampliar e visualizar os e-mails ali pelo atendimento
-// mesmo de cada loja". A seta da linha abre, embaixo da loja, os três tipos
-// com o número de cada um; o clique abre os e-mails da loja daquele tipo na
-// própria Caixa (a lista do meio e a conversa — AtendimentoLojaEmails). A
-// loja SEM e-mail não tem seta (a barra fica como era: uma seta que abre um
-// vazio em metade das lojas seria ruído numa coluna de 196 px usada o dia
-// inteiro). Os números vêm de GET /api/atendimento/email/contagens?por_loja=true
-// (a mesma régua da aba E-mail: só a conversa de e-mail, o acesso da pessoa e
-// o escopo da equipe). O chat da loja e a bolinha dela NÃO mudam: o e-mail
-// continua fora da lista e dos números da Caixa (`separa_email`).
+// loja … então poderá ampliar e visualizar os e-mails ali pelo atendimento
+// mesmo de cada loja". No mesmo dia: embaixo de cada loja só Informativo e
+// Chamado (a Venda fica na aba E-mail) — e ele ainda escolhe quais entram. A
+// ESCOLHA NÃO MORA AQUI: é a constante TIPOS_EMAIL_NA_BARRA_DE_LOJAS da API
+// (apps/api/app/services/mail_atendimento/constantes.py), que chega em
+// `tipos_na_barra` (GET /api/atendimento/email/contagens?por_loja=true) junto
+// dos números. Aqui só os rótulos de cada tipo que existe. Também no mesmo
+// dia: a aba E-mail é só de admin — quem não é admin vê e-mail SÓ por aqui.
+// A seta da linha abre, embaixo da loja, os tipos da barra com o número de
+// cada um; o clique abre os e-mails da loja daquele tipo na própria Caixa (a
+// lista do meio e a conversa — AtendimentoLojaEmails). A loja SEM e-mail não
+// tem seta (uma seta que abre um vazio em metade das lojas seria ruído numa
+// coluna de 196 px usada o dia inteiro). A loja que só tem e-mail (a ficha
+// sem integração: sem chat no DaVinci) ganha uma linha "só e-mail" no grupo
+// da plataforma, para nenhum e-mail de loja ficar sem caminho. O chat da loja
+// e a bolinha dela NÃO mudam: o e-mail continua fora da lista e dos números
+// da Caixa (`separa_email`).
 export type TipoEmailDaLoja = 'informativo' | 'chamado' | 'venda'
+// Os rótulos de TODOS os tipos (quais aparecem: `tiposDaBarra`).
 export const TIPOS_EMAIL_DA_LOJA: { value: TipoEmailDaLoja; label: string }[] = [
   { value: 'informativo', label: 'Informativo' },
   { value: 'chamado', label: 'Chamado' },
   { value: 'venda', label: 'Venda' },
 ]
+// Os tipos que a barra mostra, na ordem da API. Sem a lista (a API antiga): nenhum.
+export function tiposDaBarra(tipos: readonly string[] | null | undefined): { value: TipoEmailDaLoja; label: string }[] {
+  const lista = Array.isArray(tipos) ? tipos : []
+  return lista
+    .map((t) => TIPOS_EMAIL_DA_LOJA.find((x) => x.value === t))
+    .filter((t, i, todos): t is { value: TipoEmailDaLoja; label: string } => !!t && todos.indexOf(t) === i)
+}
 // Um tipo da loja: as abertas (o número dos chips de "Todas as conversas" da
 // aba E-mail), as esperando resposta ("Falta responder"), todas (as fechadas
 // também) e — só no informativo, só para quem mexe — as linhas das pastas
@@ -126,9 +140,8 @@ export type EmailsDaLoja = {
   integration_id: string | null
   store_info_id: string | null
   plataforma: string | null
-  // O nome da ficha (só na loja sem integração: a do robô).
+  // O nome da loja (o da integração ou o da ficha).
   loja: string | null
-  total: number
   tipos: Partial<Record<TipoEmailDaLoja, ContaDoTipo>>
 }
 // O que o clique num tipo manda para a página (a loja da linha + o tipo).
@@ -143,30 +156,54 @@ export type EscolhaEmail = {
 type LinhaDaBarra = { chave: string; integration_id?: string | null; externo_ref?: string | null; rede_social_id?: string | null; plataforma: string; conta: string }
 
 function nomeComparavel(v: string | null | undefined): string {
-  return (v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/\s+/g, ' ')
-}
-// Os e-mails da linha da barra: pela integração; a loja do robô (sem
-// integração, sem site nem conta de rede) pela ficha de MESMA plataforma e
-// mesmo nome — uma só (duas fichas com o mesmo nome: sem seta, nunca a errada).
-// O site e as contas de rede não têm loja de e-mail aqui (o chamado do site
-// tem a fila própria na aba E-mail). Sem e-mail nenhum: null (sem seta).
-export function emailsDaLoja(porLoja: EmailsDaLoja[] | null | undefined, l: LinhaDaBarra): EmailsDaLoja | null {
-  const lista = porLoja || []
-  let achada: EmailsDaLoja | null = null
-  if (l.integration_id) {
-    achada = lista.find((e) => e.integration_id === l.integration_id) || null
-  } else if (!l.externo_ref && !l.rede_social_id) {
-    const nome = nomeComparavel(l.conta)
-    const iguais = nome ? lista.filter((e) => !e.integration_id && !!e.store_info_id && e.plataforma === l.plataforma && nomeComparavel(e.loja) === nome) : []
-    achada = iguais.length === 1 ? iguais[0] : null
-  }
-  return achada && (Number(achada.total) || 0) > 0 ? achada : null
+  return (v || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase().replace(/\s+/g, ' ')
 }
 // O número do tipo na barra: o que a lista vai mostrar ao clicar (as abertas
 // e, no informativo de quem mexe, as linhas das pastas informativas).
 export function numeroDoTipo(e: EmailsDaLoja | null | undefined, t: TipoEmailDaLoja): number {
   const c = e?.tipos?.[t]
   return c ? (Number(c.abertas) || 0) + (Number(c.linhas) || 0) : 0
+}
+// A loja tem o que mostrar na barra? Só os tipos DA BARRA, só as abertas e as
+// linhas (a loja só com Venda, ou só com fechadas, fica sem seta).
+export function temEmailNaBarra(e: EmailsDaLoja | null | undefined, tipos: readonly string[] | null | undefined): boolean {
+  return !!e && tiposDaBarra(tipos).some((t) => numeroDoTipo(e, t.value) > 0)
+}
+// A loja do robô (sem integração, sem site nem conta de rede) é a ficha de
+// MESMA plataforma e mesmo nome — uma só (duas fichas com o mesmo nome: a
+// linha fica sem seta e elas viram linhas "só e-mail", nunca a errada).
+function fichaDoRobo(lista: EmailsDaLoja[], l: LinhaDaBarra): EmailsDaLoja | null {
+  if (l.integration_id || l.externo_ref || l.rede_social_id) return null
+  const nome = nomeComparavel(l.conta)
+  const iguais = nome ? lista.filter((e) => !e.integration_id && !!e.store_info_id && e.plataforma === l.plataforma && nomeComparavel(e.loja) === nome) : []
+  return iguais.length === 1 ? iguais[0] : null
+}
+function daLinha(lista: EmailsDaLoja[], l: LinhaDaBarra): EmailsDaLoja | null {
+  if (l.integration_id) return lista.find((e) => e.integration_id === l.integration_id) || null
+  return fichaDoRobo(lista, l)
+}
+// Os e-mails da linha da barra: pela integração ou (a loja do robô) pela
+// ficha. O site e as contas de rede não têm loja de e-mail aqui (o chamado do
+// site fica na aba E-mail). Sem nada nos tipos da barra: null (sem seta).
+export function emailsDaLoja(porLoja: EmailsDaLoja[] | null | undefined, l: LinhaDaBarra, tipos: readonly string[] | null | undefined): EmailsDaLoja | null {
+  const achada = daLinha(porLoja || [], l)
+  return temEmailNaBarra(achada, tipos) ? achada : null
+}
+// As lojas com e-mail que NÃO têm linha na barra (a ficha sem integração numa
+// plataforma com integração — "luno", "atlas" na Shopee —, a ficha ambígua):
+// viram a linha "só e-mail" (`chaveSoEmail`), para quem não é admin chegar a
+// elas (a aba E-mail é só de admin).
+export function lojasSemLinha(porLoja: EmailsDaLoja[] | null | undefined, linhas: LinhaDaBarra[], tipos: readonly string[] | null | undefined): EmailsDaLoja[] {
+  const lista = (porLoja || []).filter((e) => temEmailNaBarra(e, tipos))
+  const usadas = new Set<EmailsDaLoja>()
+  for (const l of linhas) {
+    const e = daLinha(lista, l)
+    if (e) usadas.add(e)
+  }
+  return lista.filter((e) => !usadas.has(e) && !!e.plataforma)
+}
+export function chaveSoEmail(e: Pick<EmailsDaLoja, 'integration_id' | 'store_info_id'>): string {
+  return e.integration_id ? `email:i:${e.integration_id}` : `email:f:${e.store_info_id || ''}`
 }
 // A bolinha vermelha do tipo: os e-mails esperando resposta (o "Falta responder").
 export function esperandoDoTipo(e: EmailsDaLoja | null | undefined, t: TipoEmailDaLoja): number {
@@ -185,8 +222,8 @@ export function tituloDoTipo(e: EmailsDaLoja | null | undefined, t: TipoEmailDaL
   if (linhas) partes.push(`${linhas} de pasta(s) informativa(s)`)
   return `${partes.join(' · ')}\nAbre os e-mails desta loja aqui na Caixa`
 }
-export function tituloDoAmpliavel(e: EmailsDaLoja, conta: string, aberto: boolean): string {
-  const resumo = TIPOS_EMAIL_DA_LOJA.map((t) => `${t.label} ${numeroDoTipo(e, t.value)}`).join(' · ')
+export function tituloDoAmpliavel(e: EmailsDaLoja, conta: string, aberto: boolean, tipos: readonly string[] | null | undefined): string {
+  const resumo = tiposDaBarra(tipos).map((t) => `${t.label} ${numeroDoTipo(e, t.value)}`).join(' · ')
   return `${aberto ? 'Esconder' : 'Mostrar'} os e-mails da loja ${conta} (${resumo})`
 }
 export function escolhaDoEmail(l: LinhaDaBarra, e: EmailsDaLoja, tipo: TipoEmailDaLoja): EscolhaEmail {
@@ -258,7 +295,7 @@ export function alternarAberta(lista: string[], chave: string): string[] {
 // pessoa da loja ou desde que alguém abriu a conversa no DaVinci — o robô não
 // zera, abrir zera (services/atendimento/pendente.py). O title da loja
 // explica (`TEXTO_NUMERO_DA_LOJA`).
-import { ChevronRight, ChevronsLeft, ChevronsRight, Inbox, Info, LifeBuoy, Lock, ShoppingBag, TriangleAlert, Unplug } from 'lucide-vue-next'
+import { ChevronRight, ChevronsLeft, ChevronsRight, Inbox, Info, LifeBuoy, Lock, Mail, ShoppingBag, TriangleAlert, Unplug } from 'lucide-vue-next'
 import type { NumeroDaCaixa } from '~/components/AtendimentoFiltroPlataforma.vue'
 import {
   leituraParada,
@@ -275,9 +312,12 @@ import {
 
 // `emails` (27/10/2026): os e-mails de cada loja por tipo (a página lê; sem
 // ele — a Caixa Humano, a API antiga — a barra fica como era, sem seta).
-// `emailAberto`: a loja e o tipo cujos e-mails a Caixa mostra agora.
-// `emailsAbertos` (v-model): as lojas com a seta aberta (a página lembra).
-const props = defineProps<{ resumo: Resumo | null; numero?: NumeroDaCaixa; emails?: EmailsDaLoja[] | null; emailAberto?: { chave: string; tipo: string } | null }>()
+// `tiposEmail`: os tipos que a barra mostra (`tipos_na_barra` da API — a
+// escolha do dono mora lá). `emailAberto`: a loja e o tipo cujos e-mails a
+// Caixa mostra agora. `emailsAbertos` (v-model): as lojas com a seta aberta
+// (a página lembra). `modo="emails"` (o celular e o tablet, sem a barra de
+// lojas): só as lojas com e-mail, abertas pelo clique na linha, sem o chat.
+const props = defineProps<{ resumo: Resumo | null; numero?: NumeroDaCaixa; emails?: EmailsDaLoja[] | null; tiposEmail?: string[] | null; emailAberto?: { chave: string; tipo: string } | null; modo?: '' | 'emails' }>()
 const filtros = defineModel<FiltrosLista>('filtros', { required: true })
 const recolhida = defineModel<boolean>('recolhida', { default: false })
 const emailsAbertos = defineModel<string[]>('emailsAbertos', { default: () => [] })
@@ -326,6 +366,9 @@ type LojaBarra = {
   // problema e outro lendo (parcial: acesa, com alerta).
   apagada: boolean
   parcial: boolean
+  // A loja só de e-mail (27/10/2026): sem chat no DaVinci, com os e-mails dela.
+  so_email?: boolean
+  emails?: EmailsDaLoja | null
 }
 
 // As lojas vêm do /resumo (a API nova manda todas, com zero, e o pior estado
@@ -424,10 +467,43 @@ const lojas = computed<LojaBarra[]>(() => {
   return [...mapa.values()]
 })
 
+// As lojas com e-mail sem linha na barra (27/10/2026): a linha "só e-mail" no
+// grupo da plataforma (sem número nem clique de chat). Só onde há a seta.
+const tiposDaLoja = computed(() => tiposDaBarra(props.tiposEmail))
+const lojasSoEmail = computed<LojaBarra[]>(() => {
+  if (!props.emails || props.numero === 'humano') return []
+  return lojasSemLinha(props.emails, lojas.value, props.tiposEmail).map((e) => ({
+    chave: chaveSoEmail(e),
+    integration_id: '',
+    externo_ref: '',
+    rede_social_id: '',
+    direct: 0,
+    direct_total: 0,
+    comentarios: false,
+    plataforma: e.plataforma || '',
+    conta: e.loja || 'loja sem nome',
+    nao_lidas: 0,
+    nao_lidas_plataforma: null,
+    aguardando: 0,
+    humano: 0,
+    vencidas: 0,
+    status: 'ok',
+    motivo: null,
+    apagada: false,
+    parcial: false,
+    so_email: true,
+    emails: e,
+  }))
+})
+
 type Grupo = { plataforma: string; nome: string; lojas: LojaBarra[]; nao_lidas: number }
 const grupos = computed<Grupo[]>(() => {
   const porPlat = new Map<string, LojaBarra[]>()
-  const base = props.numero === 'humano' ? lojasDaCaixaHumano(lojas.value, props.resumo?.canais, modosHumano.value) : lojas.value
+  const chat = props.numero === 'humano' ? lojasDaCaixaHumano(lojas.value, props.resumo?.canais, modosHumano.value) : lojas.value
+  // No modo "emails" (o celular), só as lojas com e-mail.
+  const base = props.modo === 'emails'
+    ? [...chat, ...lojasSoEmail.value].filter((l) => !!emailsDe(l))
+    : [...chat, ...lojasSoEmail.value]
   for (const l of base) porPlat.set(l.plataforma, [...(porPlat.get(l.plataforma) || []), l])
   const ordem = [...ORDEM, ...[...porPlat.keys()].filter((p) => !ORDEM.includes(p)).sort()]
   return ordem
@@ -478,6 +554,14 @@ function contador(n: number) {
 const TEXTO_NUMERO_DA_LOJA = 'mensagem(ns) não lida(s) do cliente'
 function motivo(l: LojaBarra): string {
   const partes = [`${plataformaInfo(l.plataforma).nome} · ${l.conta}`]
+  if (l.so_email) {
+    partes.push('Só e-mail: a loja não tem chat no DaVinci (sem integração ligada). O clique mostra os e-mails dela.')
+    return partes.join('\n')
+  }
+  if (props.modo === 'emails') {
+    partes.push('O clique mostra os e-mails desta loja.')
+    return partes.join('\n')
+  }
   if (l.apagada) {
     const st = statusCanalInfo(l.status)
     partes.push(st ? `${st.label}: ${st.hint}` : l.status)
@@ -514,7 +598,7 @@ function motivo(l: LojaBarra): string {
   }
   if (l.plataforma === 'site') partes.push('Carrinho abandonado do lojista no site (lido do site, servidor a servidor)')
   // Sem integração nem origem, a lista não separa esta loja das outras da plataforma.
-  if (!l.integration_id && !l.externo_ref && !l.rede_social_id && (grupos.value.find((g) => g.plataforma === l.plataforma)?.lojas.length ?? 0) > 1) {
+  if (!l.integration_id && !l.externo_ref && !l.rede_social_id && (grupos.value.find((g) => g.plataforma === l.plataforma)?.lojas.filter((x) => !x.so_email).length ?? 0) > 1) {
     partes.push(`Clicar mostra as conversas de todas as lojas ${plataformaInfo(l.plataforma).nome}`)
   }
   return partes.join('\n')
@@ -538,6 +622,11 @@ function escolherGrupo(p: string) {
   filtros.value = filtrosDoGrupo(filtros.value, p)
 }
 function escolherLoja(l: LojaBarra) {
+  // A loja só de e-mail e o modo "emails" (o celular): o clique abre os e-mails.
+  if (l.so_email || props.modo === 'emails') {
+    alternarEmails(l)
+    return
+  }
   // Site e conta de rede: a lista filtra pela origem (todas as caixas do
   // site) ou pela conta (o Direct e os comentários dela).
   if (!l.integration_id && (l.rede_social_id || l.externo_ref)) {
@@ -587,7 +676,7 @@ function ativaPlataforma(p: string) {
   return (filtros.value.plataforma || '').split(',').includes(p) && !filtros.value.integration_id && !filtros.value.externo_ref && !filtros.value.rede_social_id
 }
 function ativaLoja(l: LojaBarra) {
-  if (props.emailAberto) return false
+  if (props.emailAberto || l.so_email || props.modo === 'emails') return false
   if (l.rede_social_id) return filtros.value.rede_social_id === l.rede_social_id
   if (!l.integration_id && l.externo_ref) return filtros.value.externo_ref === l.externo_ref
   if (!l.integration_id) return ativaPlataforma(l.plataforma)
@@ -595,9 +684,21 @@ function ativaLoja(l: LojaBarra) {
 }
 
 // ─── os e-mails de cada loja (27/10/2026) ───
-// A seta só na barra aberta (recolhida, não cabe) e só na loja com e-mail.
+// A seta só na barra aberta (recolhida, não cabe) e só na loja com e-mail nos
+// tipos da barra.
 function emailsDe(l: LojaBarra): EmailsDaLoja | null {
-  return recolhida.value || !props.emails ? null : emailsDaLoja(props.emails, l)
+  if (!props.emails || (recolhida.value && props.modo !== 'emails')) return null
+  if (l.so_email) return temEmailNaBarra(l.emails, props.tiposEmail) ? l.emails || null : null
+  return emailsDaLoja(props.emails, l, props.tiposEmail)
+}
+// A loja cujos e-mails a Caixa mostra agora (a barra recolhida acende o ícone dela).
+function emailAbertoNaLinha(l: LojaBarra): boolean {
+  return !!props.emailAberto && props.emailAberto.chave === l.chave
+}
+// A linha some? Só a "só e-mail" com a barra recolhida (sem seta, não cabe), a
+// não ser a que está aberta na Caixa.
+function linhaVisivel(l: LojaBarra): boolean {
+  return !l.so_email || !recolhida.value || props.modo === 'emails' || emailAbertoNaLinha(l)
 }
 function emailsAbertosDe(l: LojaBarra): boolean {
   return (emailsAbertos.value || []).includes(l.chave)
@@ -626,8 +727,9 @@ function idDosEmails(l: LojaBarra): string {
 <template>
   <nav class="flex min-h-0 flex-1 flex-col" aria-label="lojas">
     <div class="flex shrink-0 items-center border-b px-2 py-1.5" :class="recolhida ? 'justify-center' : 'justify-between'">
-      <span v-if="!recolhida" class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Lojas</span>
+      <span v-if="!recolhida" class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{{ modo === 'emails' ? 'E-mails das lojas' : 'Lojas' }}</span>
       <button
+        v-if="modo !== 'emails'"
         type="button"
         class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
         :title="recolhida ? 'mostrar o nome das lojas' : 'recolher a barra de lojas'"
@@ -642,6 +744,7 @@ function idDosEmails(l: LojaBarra): string {
     <div class="min-h-0 flex-1 overflow-y-auto py-1">
       <!-- Todas -->
       <button
+        v-if="modo !== 'emails'"
         type="button"
         class="relative mx-1 flex w-[calc(100%-0.5rem)] items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px]"
         :class="[ativaTodas ? 'bg-primary/10 font-semibold text-primary' : 'hover:bg-muted', recolhida ? 'justify-center gap-1 px-1' : '']"
@@ -667,7 +770,16 @@ function idDosEmails(l: LojaBarra): string {
       <template v-for="g in visiveis" :key="g.plataforma">
         <!-- cabeçalho do grupo: filtra a plataforma inteira (cortada numa
              plataforma só, some: a linha "Todas · Shopee" já faz isso) -->
-        <template v-if="!semCabecalho">
+        <!-- o modo "emails" (o celular): o nome da plataforma, sem filtrar o chat -->
+        <div
+          v-if="modo === 'emails'"
+          class="mx-1 mt-2 flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+          :data-grupo="g.plataforma"
+        >
+          <AtendimentoIconePlataforma :plataforma="g.plataforma" :tamanho="14" decorativo />
+          <span class="min-w-0 flex-1 truncate">{{ g.nome }}</span>
+        </div>
+        <template v-else-if="!semCabecalho">
           <button
             v-if="!recolhida"
             type="button"
@@ -697,43 +809,57 @@ function idDosEmails(l: LojaBarra): string {
         </template>
 
         <template v-for="l in g.lojas" :key="l.chave">
-          <div class="relative">
+          <div v-if="linhaVisivel(l)" class="relative">
+            <!-- a linha do CHAT (o clique filtra a lista); a "só e-mail" e o modo
+                 "emails" (o celular) abrem os e-mails da loja pelo próprio clique -->
             <button
               type="button"
               class="relative mx-1 flex w-[calc(100%-0.5rem)] items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px]"
               :class="[
                 ativaLoja(l) ? 'bg-primary/10 font-semibold text-primary' : 'hover:bg-muted',
+                recolhida && emailAbertoNaLinha(l) ? 'bg-primary/10 text-primary ring-1 ring-primary/40' : '',
                 l.apagada ? 'opacity-50' : '',
+                l.so_email ? 'text-muted-foreground' : '',
                 recolhida ? 'justify-center gap-1 px-1' : '',
-                emailsDe(l) ? 'pr-7' : '',
+                emailsDe(l) && !l.so_email && modo !== 'emails' ? 'pr-7' : '',
               ]"
-              :aria-pressed="ativaLoja(l)"
+              :aria-pressed="l.so_email || modo === 'emails' ? undefined : ativaLoja(l)"
+              :aria-expanded="(l.so_email || modo === 'emails') && emailsDe(l) ? emailsAbertosDe(l) : undefined"
+              :aria-controls="(l.so_email || modo === 'emails') && emailsDe(l) && emailsAbertosDe(l) ? idDosEmails(l) : undefined"
+              :aria-current="recolhida && emailAbertoNaLinha(l) ? 'true' : undefined"
               :title="motivo(l)"
+              :data-so-email="l.so_email ? l.chave : undefined"
               @click="escolherLoja(l)"
             >
               <AtendimentoIconePlataforma :plataforma="l.plataforma" :tamanho="recolhida ? 18 : 15" decorativo />
               <span v-if="!recolhida" class="min-w-0 flex-1 truncate">{{ l.conta }}</span>
-              <template v-if="l.apagada">
-                <Lock v-if="l.status === 'sem_escopo' || l.status === 'desligado'" class="size-3.5 shrink-0 text-muted-foreground" />
-                <Unplug v-else-if="leituraParada(l.status)" class="size-3.5 shrink-0 text-red-600 dark:text-red-400" aria-label="leitura parada" />
-                <TriangleAlert v-else class="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <template v-if="l.so_email || modo === 'emails'">
+                <Mail v-if="l.so_email && !recolhida" class="size-3.5 shrink-0" aria-hidden="true" />
+                <ChevronRight v-if="!recolhida" class="size-3.5 shrink-0 transition-transform" :class="emailsAbertosDe(l) ? 'rotate-90' : ''" aria-hidden="true" />
               </template>
-              <TriangleAlert v-if="l.parcial && !recolhida" class="size-3 shrink-0 text-amber-600 dark:text-amber-400" />
-              <span
-                v-if="!l.apagada && l.nao_lidas"
-                class="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold leading-none text-white tabular-nums"
-                :class="recolhida ? 'h-4 min-w-4 px-0.5 text-[9px]' : ''"
-              >{{ contador(l.nao_lidas) }}</span>
+              <template v-else>
+                <template v-if="l.apagada">
+                  <Lock v-if="l.status === 'sem_escopo' || l.status === 'desligado'" class="size-3.5 shrink-0 text-muted-foreground" />
+                  <Unplug v-else-if="leituraParada(l.status)" class="size-3.5 shrink-0 text-red-600 dark:text-red-400" aria-label="leitura parada" />
+                  <TriangleAlert v-else class="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                </template>
+                <TriangleAlert v-if="l.parcial && !recolhida" class="size-3 shrink-0 text-amber-600 dark:text-amber-400" />
+                <span
+                  v-if="!l.apagada && l.nao_lidas"
+                  class="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold leading-none text-white tabular-nums"
+                  :class="recolhida ? 'h-4 min-w-4 px-0.5 text-[9px]' : ''"
+                >{{ contador(l.nao_lidas) }}</span>
+              </template>
             </button>
             <!-- o AMPLIÁVEL dos e-mails da loja (27/10/2026): só na loja com e-mail -->
             <button
-              v-if="emailsDe(l)"
+              v-if="emailsDe(l) && !l.so_email && modo !== 'emails'"
               type="button"
-              class="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              class="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               :aria-expanded="emailsAbertosDe(l)"
-              :aria-controls="idDosEmails(l)"
-              :aria-label="tituloDoAmpliavel(emailsDe(l)!, l.conta, emailsAbertosDe(l))"
-              :title="tituloDoAmpliavel(emailsDe(l)!, l.conta, emailsAbertosDe(l))"
+              :aria-controls="emailsAbertosDe(l) ? idDosEmails(l) : undefined"
+              :aria-label="tituloDoAmpliavel(emailsDe(l)!, l.conta, emailsAbertosDe(l), tiposEmail)"
+              :title="tituloDoAmpliavel(emailsDe(l)!, l.conta, emailsAbertosDe(l), tiposEmail)"
               :data-ampliar-emails="l.chave"
               @click="alternarEmails(l)"
             >
@@ -749,10 +875,10 @@ function idDosEmails(l: LojaBarra): string {
             :data-emails-loja="l.chave"
           >
             <button
-              v-for="t in TIPOS_EMAIL_DA_LOJA"
+              v-for="t in tiposDaLoja"
               :key="t.value"
               type="button"
-              class="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[12px]"
+              class="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               :class="ativaEmail(l, t.value) ? 'bg-primary/10 font-semibold text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
               :aria-pressed="ativaEmail(l, t.value)"
               :title="tituloDoTipo(emailsDe(l), t.value, l.conta)"
@@ -774,8 +900,12 @@ function idDosEmails(l: LojaBarra): string {
         </template>
       </template>
 
+      <div v-if="modo === 'emails' && resumo && !visiveis.length" class="px-3 py-6 text-center text-xs text-muted-foreground" data-sem-emails-de-loja>
+        {{ emails ? 'Nenhuma loja com e-mail para mostrar agora.' : 'Carregando os e-mails das lojas…' }}
+      </div>
+
       <!-- Instagram (Direct, só leitura) — só com a API antiga, sem as contas -->
-      <template v-if="mostrarInstagram">
+      <template v-if="mostrarInstagram && modo !== 'emails'">
         <div v-if="recolhida" class="mx-2 mt-1.5 border-t pt-1.5" />
         <div v-else class="mx-1 mt-2 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Instagram</div>
         <button

@@ -27,6 +27,7 @@ from app.models import (
 )
 from app.models.mail_atendimento import MailFolder, MailMailboxSettings
 from app.services import vigia_leitura_atendimento
+from app.services.mail_atendimento import saude as saude_svc
 from tests.test_mail_ponte import (
     GOSLIN,
     _loja,
@@ -310,9 +311,14 @@ async def test_rf6_nao_agrupa_outra_cliente(db, cena, client, admin):
 
 
 async def test_saude_caixa_privada_so_para_o_dono_e_admin(db, cena, client, quem_le, auth_as):
-    r = (await client.get(f"{EMAIL}/saude")).json()
-    assert [c["nome"] for c in r["caixas"]] == ["Geral — Tuta"]
-    assert "lojas_sem_caixa_lida" not in r
+    # Desde 27/10/2026 a saúde (só da aba E-mail) é só de admin: quem só lê,
+    # 403; a régua do serviço segue sem a caixa privada para ele.
+    r = await client.get(f"{EMAIL}/saude")
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "aba_email_so_admin"
+    caixas = await saude_svc.caixas_visiveis(db, quem_le)
+    assert [(await saude_svc.linha_da_caixa(db, c, user=quem_le))["nome"] for c in caixas] == [
+        "Geral — Tuta"
+    ]
     auth_as(cena.dono)
     r = (await client.get(f"{EMAIL}/saude")).json()
     assert sorted(c["nome"] for c in r["caixas"]) == ["Geral — Tuta", "Goslin — Tuta"]

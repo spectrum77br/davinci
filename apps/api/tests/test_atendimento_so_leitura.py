@@ -224,6 +224,10 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
     assert rota_email.LEITURAS_SO_DE_QUEM_MEXE <= existentes, (
         rota_email.LEITURAS_SO_DE_QUEM_MEXE - existentes
     )
+    # E as da aba E-mail que só admin faz (27/10/2026).
+    assert rota_email.LEITURAS_SO_DE_ADMIN <= existentes, (
+        rota_email.LEITURAS_SO_DE_ADMIN - existentes
+    )
 
 
 @pytest.mark.parametrize(
@@ -244,6 +248,13 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
             # Administração de acesso/lixeira (19/10): nem leitura do painel
             # fica disponível a leitores ou a admins fora da lista operacional.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
+        elif (metodo, molde) in rota_email.LEITURAS_SO_DE_ADMIN:
+            # A aba E-mail é só de admin (27/10/2026): a leitura que só ela faz.
+            if quem == "admin_fora_da_lista":
+                assert r.status_code not in (401, 403), (metodo, caminho, r.status_code, r.text)
+            else:
+                assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
+                assert r.json()["detail"]["code"] == "aba_email_so_admin", (metodo, caminho)
         elif (metodo, molde) in rota_email.LEITURAS_SO_DE_QUEM_MEXE:
             # As filas de e-mail (08/10/2026): só quem mexe — podem ter e-mail
             # de qualquer loja e de endereço interno.

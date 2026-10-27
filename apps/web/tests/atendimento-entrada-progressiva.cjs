@@ -46,7 +46,7 @@ function mount({ tab, conversation, saved, intercept } = {}) {
   const filter = { GRUPOS_CAIXA: [], plataformasDoValor: (v) => v ? v.split(',') : [], topoDoValor: (v) => v }
   const requiring = (name) => {
     if (name === 'lucide-vue-next') return {}
-    if (name === '@vueuse/core') return { useResizeObserver: () => {}, useWindowSize: () => ({ height: Vue.ref(0) }) }
+    if (name === '@vueuse/core') return { useResizeObserver: () => {}, useWindowSize: () => ({ height: Vue.ref(0), width: Vue.ref(1440) }) }
     if (name.includes('AtendimentoPlataforma.vue')) return platform
     if (name.includes('AtendimentoFiltroPlataforma.vue')) return filter
     return require(name)

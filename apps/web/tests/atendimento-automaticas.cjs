@@ -1418,7 +1418,8 @@ async function principal() {
   assert.deepEqual(abas[6], ['automaticas', 'Automáticas', 'Bot'])
   assert.match(pagina, /import \{[^}]*\bBot\b[^}]*\} from 'lucide-vue-next'/)
   // `?tab=automaticas` abre direto (a regra geral das abas).
-  assert.match(pagina, /const aba = ref<Aba>\(ABAS\.some\(\(a\) => a\.value === abaQuery\) \? \(abaQuery as Aba\) : 'caixa'\)/)
+  // (27/10/2026: as abas à mostra — a aba E-mail só para admin.)
+  assert.match(pagina, /const aba = ref<Aba>\(abasDe\(ehAdmin\.value\)\.some\(\(a\) => a\.value === abaQuery\) \? \(abaQuery as Aba\) : 'caixa'\)/)
   assert.match(pagina, /<LazyAtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" \/>/)
   assert.match(pagina, /function abrirConversaNaCaixa\(id: string\) \{\n {2}aba\.value = 'caixa'\n {2}selecionar\(id\)\n\}/)
   // A mesma trava da página (fase de observação, 07/10/2026: toda pessoa
