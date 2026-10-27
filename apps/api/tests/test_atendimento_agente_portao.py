@@ -725,3 +725,52 @@ def test_v16_o_sistema_e_a_calibracao():
     for c in casos:
         calibrar.conferir_caso(c)
         assert not calibrar.contaminado(c), c["id"]
+
+
+def test_v16_a_instrucao_fisica_so_com_o_modelo():
+    # 904411b56a3f (crítico do holdout): o fato 13 é global; no C57 Pro o chip vai na tampa.
+    texto = "O chip vai na gaveta de chip do celular, que abre com um pino no furinho ao lado dela."
+    serie_c = {"item_id": "1", "titulo": "Uranyx Séries C", "descricao": "Oukitel C2\nDual SIM"}
+    (p,) = checagens.conferir_fisico_sem_o_modelo(texto, acao="responder", fichas=[serie_c])
+    assert p.codigo == checagens.FISICO_SEM_O_MODELO and checagens.pendencia_dura(p)
+    # O anúncio do modelo que diz a mesma peça, ou a resposta da equipe do mesmo produto.
+    com_gaveta = {"item_id": "2", "descricao": "gaveta para 2 chips nano, abre com o pino"}
+    assert (
+        checagens.conferir_fisico_sem_o_modelo(texto, acao="responder", fichas=[com_gaveta]) == []
+    )
+    assert (
+        checagens.conferir_fisico_sem_o_modelo(
+            texto, acao="responder", fichas=[serie_c], pares_de_produto=["par:1"]
+        )
+        == []
+    )
+    # A tampa não se prova pela gaveta (outra família).
+    assert checagens.conferir_fisico_sem_o_modelo(
+        "Tire a tampa traseira para colocar o chip.", acao="responder", fichas=[com_gaveta]
+    )
+    # Sem peça física, nada.
+    assert (
+        checagens.conferir_fisico_sem_o_modelo(
+            "O celular é desbloqueado.", acao="responder", fichas=[serie_c]
+        )
+        == []
+    )
+    assert "a instrução física do aparelho" in verificador.SISTEMA
+
+
+def test_v16_a_resposta_evasiva_e_aviso():
+    for texto in (
+        "Não conseguimos afirmar como ele roda o PUBG.",
+        "Peças avulsas só se houver um anúncio próprio.",
+        "A lista pode não estar completa.",
+        "Nas características do anúncio não consta infravermelho.",
+    ):
+        (p,) = checagens.conferir_anuncio_nao_informa(texto, acao="responder")
+        assert not checagens.pendencia_dura(p), texto
+    # O prazo que a loja não garante é a política, não evasiva.
+    assert (
+        checagens.conferir_anuncio_nao_informa(
+            "Não conseguimos informar a data de entrega; vale o prazo do app.", acao="responder"
+        )
+        == []
+    )
