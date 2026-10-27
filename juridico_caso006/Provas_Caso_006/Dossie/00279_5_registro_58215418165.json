@@ -1,0 +1,57 @@
+{
+ "anuncio": {
+  "id": "58215418165",
+  "marketplace": "Shopee",
+  "shop_id": "1323981951",
+  "loja": "Express Eletrônicos - Loja Oficial",
+  "titulo": "Celular Smartphone HOTWAV A17 Pro Max 256GB/16GB 128GB/16GB 4+12=16GB Tela 6,75\" Dual SIM Bateria 5160mAh Original",
+  "url": "https://shopee.com.br/product/1323981951/58215418165",
+  "hom": "08216-25-18234",
+  "grupo": "GRUPO 1",
+  "escopo": "Coberto",
+  "certificacao": "Anatel"
+ },
+ "denuncia_marketplace": {
+  "canal": "Shopee",
+  "data": "2026-09-11",
+  "hora": "18:56",
+  "id": 10,
+  "resultado": "Aguardando",
+  "situacao": "Em análise"
+ },
+ "texto": "MAKISA TRADING LTDA, CNPJ 40.191.104/0001-45, titular do Certificado de Homologação nº 08216-25-18234, emitido em 02/04/2026 para o produto Telefone Móvel Celular, fabricado por URANYX INDUSTRIES LIMITED, denuncia a comercialização irregular de produto para telecomunicações na plataforma Shopee Brasil.\n\nAnúncio denunciado: https://shopee.com.br/product/1323981951/58215418165 (ID 58215418165). Título: \"Celular Smartphone HOTWAV A17 Pro Max 256GB/16GB 128GB/16GB 4+12=16GB Tela 6,75\" Dual SIM Bateria 5160mAh Original\". Vendas registradas: 84. Vendedor: loja \"Express Eletrônicos - Loja Oficial\", Shop ID 1323981951.\n\nNo campo de homologação do anúncio, o vendedor declara o número 08216-25-18234, que corresponde ao certificado de titularidade da denunciante; declara ainda \"Uranyx Industries Limited\" no campo Fabricante e \"A17 Pro Max\" no campo Modelo. A captura da página, feita em 14/09/2026 às 15:41, segue anexa.\n\nNão há entre as partes qualquer vínculo contratual, licença ou autorização. O certificado consigna expressamente sua condição de intransferível e declara ser válido somente para o solicitante nele identificado; por ser ato administrativo expedido em favor de solicitante determinado, a homologação não se estende a terceiros.\n\nAcresce que o produto efetivamente ofertado não é o produto homologado. O modelo anunciado (\"A17 Pro Max\") não consta da relação de modelos comerciais abrangidos pelo Certificado nº 08216-25-18234, que compreende apenas USM002 (FOSSIBOT F110 PRO, FOSSIBOT F110, FOSSIBOT F117, HOTWAV A17PROMAX, HOTWAV A36, OUKITEL C3, OUKITEL C2, OUKITEL C68, OUKITEL G6, OUKITEL G7, OUKITEL G1, OUKITEL WP28E, OUKITEL WP28S, OUKITEL WP23PLUS, OUKITEL WP23). O número declarado, portanto, não cobre o produto ofertado nem mesmo em tese.\n\nProvidências já adotadas: a denunciante registrou denúncia junto à própria plataforma Shopee em 11/09/2026, cujos prints (formulário preenchido e confirmação) seguem anexos, sem resposta até o momento. O anúncio permanece ativo.\n\nO art. 55 do Regulamento aprovado pela Resolução Anatel nº 715/2019 estabelece que a homologação é pré-requisito obrigatório para a utilização e a comercialização de produtos para telecomunicações no País, exigência que decorre dos arts. 19, 156 e 162 da Lei nº 9.472/1997.\n\nRequer a apuração das irregularidades, a retirada imediata do anúncio, as providências junto à plataforma para bloqueio da oferta, a aplicação das sanções do art. 173 da Lei nº 9.472/1997 e a comunicação do número do processo e do resultado da apuração.\n\nAnexos: 1) captura do anúncio no ato; 2) denúncia registrada na plataforma (formulário e confirmação); 3) Certificado de Homologação nº 08216-25-18234; 4) consulta pública do certificado na base da Anatel; 5) registro da denúncia no sistema da denunciante (JSON com SHA-256).",
+ "situacao_modelo": "g1",
+ "gerado_em": "2026-09-14T23:10:08",
+ "anexos": [
+  {
+   "n": 1,
+   "rotulo": "captura do anúncio no ato",
+   "arquivo": "1_captura_58215418165.png",
+   "sha256": "44e00c826534632ac4daafa86380d337eb4e96b3e80491aea1231e6bdac46cc1"
+  },
+  {
+   "n": 2,
+   "rotulo": "denúncia no marketplace (formulário)",
+   "arquivo": "2_1_marketplace_58215418165.jpg",
+   "sha256": "414b3a4c9867d8b6257652755672133ac490a77e6e0240d6876764974dec7777"
+  },
+  {
+   "n": 2,
+   "rotulo": "denúncia no marketplace (confirmação)",
+   "arquivo": "2_2_marketplace_58215418165.jpg",
+   "sha256": "e1765ce191134863afe0c6f28d6f3c63a514c54bed44320df5f6e541f701b553"
+  },
+  {
+   "n": 3,
+   "rotulo": "certificado de homologação 08216-25-18234",
+   "arquivo": "08216-25-18234 - Makisa.pdf",
+   "sha256": "0437e1bd9ae18fc6be0c1ac848cdd3bbecb633c0fea1d483e52b7a1c677549a8"
+  },
+  {
+   "n": 4,
+   "rotulo": "consulta pública do nº na base da Anatel",
+   "arquivo": "4_consulta_anatel_08216-25-18234.csv",
+   "sha256": "545a8d74d536db031b12c4ec86cbd2fb58c55c16bb4da4fb3f4efe052f8e07f1"
+  }
+ ]
+}
