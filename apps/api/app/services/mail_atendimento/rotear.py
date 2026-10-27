@@ -61,9 +61,12 @@ from app.models import Integration, Marca, MarcaEmail, StoreInfo
 from app.services.atendimento.lojas import _PLATAFORMA_DA_FICHA, _PREFIXOS, _SEPARADOR
 from app.services.mail_atendimento import enderecos, suspeito
 from app.services.mail_atendimento.constantes import (
+    DOMINIOS_DOS_SITES,
     LOCAIS_DE_SITE,
     LOCAIS_DE_SITE_SO_NOS_SITES_DO_ATENDIMENTO,
+    LOCAIS_DOS_SITES,
     MARCAS_DOS_SITES_DO_ATENDIMENTO,
+    MARCAS_SO_EMAIL,
     PLATAFORMA_SITE,
     SEM_LOJA_ALIAS_SEM_CADASTRO,
     SEM_LOJA_AMBIGUO,
@@ -401,8 +404,11 @@ def _marcas_do_local(
 ) -> tuple[list[str], str | None]:
     """(as marcas do domínio, a marca da pasta) que valem para o endereço: o admin@
     só nas marcas dos sites do atendimento (`LOCAIS_DE_SITE_SO_NOS_SITES_DO_ATENDIMENTO`)."""
-    do_dominio = marcas_do_dominio(endereco, cad)
-    if marca_pasta is not None and marca_pasta not in cad.marcas:
+    # Makisa e 7buyers: só de e-mail — nunca chamado do site (nem pela pasta).
+    do_dominio = [s for s in marcas_do_dominio(endereco, cad) if s not in MARCAS_SO_EMAIL]
+    if marca_pasta is not None and (
+        marca_pasta not in cad.marcas or marca_pasta in MARCAS_SO_EMAIL
+    ):
         marca_pasta = None
     if enderecos.local(endereco) in LOCAIS_DE_SITE_SO_NOS_SITES_DO_ATENDIMENTO:
         do_dominio = [s for s in do_dominio if s in MARCAS_DOS_SITES_DO_ATENDIMENTO]
@@ -418,11 +424,33 @@ def e_caixa_de_site(endereco: str | None, cad: Cadastro, *, marca_pasta: str | N
     if not endereco:
         return False
     if endereco in cad.caixas:
-        return True
+        return cad.caixas[endereco].slug not in MARCAS_SO_EMAIL
     if enderecos.e_do_tuta(endereco) or enderecos.local(endereco) not in LOCAIS_DE_SITE:
         return False
     do_dominio, da_pasta = _marcas_do_local(endereco, cad, marca_pasta)
     return bool(do_dominio) or da_pasta is not None
+
+
+def e_endereco_dos_sites(endereco: str | None) -> bool:
+    """sac@ ou admin@ de um dos 4 sites (`DOMINIOS_DOS_SITES`)? PURA. Só para o
+    filtro da caixa privada e o "só contar" do conector — nunca decide a rota."""
+    if not endereco or "@" not in endereco:
+        return False
+    return (
+        enderecos.local(endereco) in LOCAIS_DOS_SITES
+        and enderecos.dominio(endereco) in DOMINIOS_DOS_SITES
+    )
+
+
+def passa_no_filtro_privado(endereco: str | None, cad: Cadastro) -> bool:
+    """O endereço passa no filtro da caixa PRIVADA (`ponte_so_aliases_de_loja`)?
+    O login de loja, a caixa de site (RF6) e os sac@/admin@ dos 4 sites (27/10/2026:
+    sem isso o e-mail do site virava "privado" e as caixas da barra ficavam vazias)."""
+    if not endereco:
+        return False
+    return (
+        cad.e_de_loja(endereco) or e_caixa_de_site(endereco, cad) or e_endereco_dos_sites(endereco)
+    )
 
 
 def cliente_pelo_reply_to(
@@ -472,7 +500,7 @@ def _rota_do_site(
     """A caixa de site (RF6) → o chamado da marca; o resto do domínio da marca não é site."""
     if not alias:
         return None
-    if alias in cad.caixas:
+    if alias in cad.caixas and cad.caixas[alias].slug not in MARCAS_SO_EMAIL:
         cx = cad.caixas[alias]
         return Rota(
             alias=alias,

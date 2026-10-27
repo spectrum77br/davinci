@@ -31,11 +31,19 @@ O que não pode falhar:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
 
-from app.models import AtendimentoConversa, MailMailbox, Marca, StoreInfo, UserRole
+from app.models import (
+    AtendimentoConversa,
+    MailAttachment,
+    MailMailbox,
+    Marca,
+    StoreInfo,
+    UserRole,
+)
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.mail_atendimento import barra_lojas, pedido, responder, rotear
 from app.services.mail_atendimento import constantes as mail_constantes
@@ -44,7 +52,9 @@ from tests.test_atendimento_separa_email import admin as admin
 from tests.test_atendimento_separa_email import quem_le as quem_le
 from tests.test_mail_ponte import (
     ALIASES_GERAL,
+    ALIASES_GOSLIN,
     GERAL,
+    GOSLIN,
     _config,
     categorizar,
     cena,
@@ -566,6 +576,7 @@ async def _cena_da_makisa(db, cena) -> dict[str, str]:
         para=["21max@tuta.com"],
         assunto="Seu código de verificação",
         corpo="Use o código 482913 para entrar na sua conta.",
+        anexos=[("codigo.txt", "text/plain", b"482913")],
     )
     await rodar(db)
     for chave, mid in ids.items():
@@ -614,6 +625,16 @@ async def test_makisa_mostra_os_emails_da_pasta_em_sac_e_admin(db, cena, client,
     assert r.status_code == 200 and r.json()["loja"] == "Makisa"
     assert r.json()["texto"] == "Quero trocar o tamanho."
     assert (await client.get(f"{EMAIL}/lojas/emails/{ids['codigo']}")).status_code == 404
+    # Nem o anexo dele (a mesma régua).
+    anexo = await db.scalar(
+        select(MailAttachment.id).where(MailAttachment.message_id == UUID(ids["codigo"]))
+    )
+    assert (await client.get(f"{EMAIL}/lojas/anexos/{anexo}")).status_code == 404
+    # O código não aparece em nenhuma caixa de nenhum site.
+    for site in ("makisa", "uranyx", "charlots", "7buyers"):
+        for caixa in ("sac", "admin"):
+            itens = (await _lista(client, site, caixa)).json()["itens"]
+            assert ids["codigo"] not in {i["id"] for i in itens}, (site, caixa)
     # Nenhum outro site vê a pasta da Makisa.
     assert (await _lista(client, "uranyx", "admin")).json()["itens"] == []
 
@@ -671,8 +692,15 @@ def test_admin_so_e_caixa_de_site_nas_marcas_do_atendimento():
     assert not rotear.e_caixa_de_site("admin@7buyers.com.br", cad)
     assert not rotear.e_caixa_de_site("admin@7buyers.com.br", cad, marca_pasta="7buyers")
     assert not rotear.e_caixa_de_site("admin@makisa.com.br", cad, marca_pasta="makisa")
-    # O sac@ da marca como sempre foi.
-    assert rotear.e_caixa_de_site("sac@7buyers.com.br", cad)
+    # Makisa e 7buyers só mostram: nem o sac@ deles vira chamado do site.
+    assert not rotear.e_caixa_de_site("sac@7buyers.com.br", cad)
+    assert rotear.e_caixa_de_site("sac@uranyx.com.br", cad)
+    # Mas passam no filtro da caixa privada (o e-mail chega às caixas da barra).
+    for endereco in ("sac@makisa.com.br", "admin@makisa.com.br", "sac@7buyers.com.br",
+                     "admin@7buyers.com.br", "admin@uranyx.com.br", "sac@charlots.com.br"):
+        assert rotear.passa_no_filtro_privado(endereco, cad), endereco
+    assert not rotear.passa_no_filtro_privado("admin@poofy.com.br", cad)
+    assert not rotear.passa_no_filtro_privado("gabrieli@7buyers.com.br", cad)
     # O admin@ da Uranyx que caiu na pasta "*7buyers": a marca do domínio, nunca a da pasta.
     rota = rotear._rota_do_site(
         "admin@uranyx.com.br", cad, marca_pasta="7buyers", caixa_pasta=None
@@ -752,3 +780,83 @@ async def test_admin_do_site_so_de_email_nunca_vira_conversa(db, cena, client, a
     for caixa, mid in ids.items():
         r = await _lista(client, site, caixa)
         assert r.status_code == 200 and [i["id"] for i in r.json()["itens"]] == [mid], caixa
+
+
+# ─────────────── a caixa PRIVADA (como a "Principal — Tuta" em produção) ───────────────
+#
+# Produção, 27/10: a caixa dos sites é privada com `ponte_so_aliases_de_loja`
+# (só o e-mail das LOJAS passa). Os sac@/admin@ dos 4 sites passam no filtro:
+# Uranyx e Charlots viram o chamado do site; Makisa e 7buyers só aparecem nas
+# caixas da barra (nenhuma conversa). O endereço pessoal continua privado.
+
+SITES_8 = [
+    f"{local}@{dominio}"
+    for dominio in ("uranyx.com.br", "charlots.com.br", "makisa.com.br", "7buyers.com.br")
+    for local in ("sac", "admin")
+]
+
+
+async def test_caixa_privada_deixa_passar_os_enderecos_dos_4_sites(db, cena, client, admin):
+    goslin = await db.get(MailMailbox, cena.goslin.id)
+    goslin.config_enc = encrypt_json(
+        {"address": GOSLIN, "aliases": [GOSLIN, *ALIASES_GOSLIN, *SITES_8, "pessoal@tuta.com"]}
+    )
+    db.add(Marca(nome="Charlots Park", slug="charlots-park", dominio_br="charlots.com.br"))
+    db.add(Marca(nome="7buyers", slug="7buyers", dominio_br="7buyers.com.br"))
+    await db.commit()
+    rotear.esquecer(db)
+    for nome in ("*uranyx", "*charlots"):
+        await categorizar(db, cena.goslin, nome, "site")
+    for nome in ("*makisa", "*7buyers"):
+        await categorizar(db, cena.goslin, nome, None)
+    conversas_antes = len((await db.execute(select(AtendimentoConversa.id))).all())
+    chamados = {
+        "sac@charlots.com.br": ("*charlots", "[CS-26-0009] SAC — Vestido — Joana"),
+        "admin@charlots.com.br": ("*charlots", "[CA-26-0003] Atacado — Boutique — Grade"),
+        "admin@uranyx.com.br": ("*uranyx", "[UDS-26-0070] Fale com a gente — Ana"),
+    }
+    ids = {}
+    for para, (pasta, assunto) in chamados.items():
+        ids[para] = await entrar(
+            db, cena.goslin, pasta=pasta, de="cliente@gmail.com", para=[para],
+            assunto=assunto, corpo="Nome: Cliente\nMensagem: preciso de ajuda",
+        )
+    so_mostrar = {}
+    for site in ("makisa", "7buyers"):
+        for caixa in ("sac", "admin"):
+            so_mostrar[(site, caixa)] = await entrar(
+                db, cena.goslin, pasta=f"*{site}", de="cliente@gmail.com",
+                para=[f"{caixa}@{site}.com.br"], assunto=f"Contato {caixa}", corpo="Olá!",
+            )
+    # O sac@ da 7buyers fora da pasta (a Entrada): passa no filtro, mas não vira chamado.
+    entrada = await entrar(
+        db, cena.goslin, pasta="INBOX", de="cliente@gmail.com", para=["sac@7buyers.com.br"],
+        assunto="Dúvida", corpo="Olá!",
+    )
+    pessoal = await entrar(db, cena.goslin, para=["pessoal@tuta.com"], de="amigo@gmail.com")
+    await rodar(db)
+
+    for para, mid in ids.items():
+        m = await meta_de(db, mid)
+        assert m.estado == "gravado" and m.conversa_id is not None, (para, m.estado, m.motivo)
+        c = await conversa(db, m.conversa_id)
+        assert c.plataforma == "site", para
+    for chave, mid in so_mostrar.items():
+        m = await meta_de(db, mid)
+        assert (m.estado, m.motivo, m.conversa_id) == (
+            "ignorado", "pasta_sem_categoria", None,
+        ), chave
+    m = await meta_de(db, entrada)
+    assert m.estado != "privado" and m.conversa_id is None, (m.estado, m.motivo)
+    assert (await meta_de(db, pessoal)).estado == "privado"
+    depois = len((await db.execute(select(AtendimentoConversa.id))).all())
+    assert depois == conversas_antes + 3
+
+    sites = await _sites(client)
+    assert sites["charlots"]["grupos"]["sac"]["emails"] == 1
+    assert sites["charlots"]["grupos"]["admin"]["emails"] == 1
+    assert sites["uranyx"]["grupos"]["admin"]["emails"] == 1
+    for (site, caixa), mid in so_mostrar.items():
+        assert sites[site]["grupos"][caixa]["emails"] == 1, (site, caixa)
+        r = await _lista(client, site, caixa)
+        assert [i["id"] for i in r.json()["itens"]] == [str(mid)], (site, caixa)

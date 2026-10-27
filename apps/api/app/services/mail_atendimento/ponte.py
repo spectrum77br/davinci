@@ -1718,7 +1718,11 @@ async def processar(
     alias_filtro: str | None = None
     if cfg.ponte_so_aliases_de_loja:
         alias_filtro = alias_de_loja(
-            email, principal=principal, aliases=aliases, e_de_loja=cad.e_de_loja, enviado=enviado
+            email,
+            principal=principal,
+            aliases=aliases,
+            e_de_loja=lambda e: rotear.passa_no_filtro_privado(e, cad),
+            enviado=enviado,
         )
         if alias_filtro is None:
             return _so_estado(meta, ESTADO_PRIVADO, PRIVADO_NAO_E_DE_LOJA, agora)

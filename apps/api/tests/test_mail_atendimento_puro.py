@@ -1126,7 +1126,10 @@ def _site(cad, endereco, *, marca=None, de="cliente@gmail.com", plataforma="site
 
 def test_so_caixa_de_site_vira_chamado():
     cad = _cad_marcas()
-    assert _site(cad, "sac@7buyers.com.br").site
+    # A 7buyers (e a Makisa) só MOSTRAM o e-mail desde 27/10/2026 (MARCAS_SO_EMAIL):
+    # nem o sac@ dela vira chamado do site.
+    assert not _site(cad, "sac@7buyers.com.br").site
+    assert _site(cad, "sac@uranyx.com.br").site
     assert _site(cad, "support@uranyx.com").site
     assert _site(cad, "atacado@uranyx.com.br").tipo_caixa == "atacado"
     # Endereço de PESSOA no domínio da marca (o contador para gabrieli@): não é site.
@@ -1145,7 +1148,7 @@ def test_so_caixa_de_site_vira_chamado():
     assert not _site(cad, "sac@makisa.com.br", marca="makisa").site
     assert not rotear.e_caixa_de_site("sac@makisa.com.br", cad, marca_pasta="makisa")
     # …e o sac@ de uma marca de verdade nessa pasta segue o domínio dele.
-    assert _site(cad, "sac@7buyers.com.br", marca="makisa").marca_slug == "7buyers"
+    assert _site(cad, "sac@uranyx.com.br", marca="makisa").marca_slug == "uranyx"
 
 
 def test_marca_pela_pasta_antes_do_dominio_e_dominio_em_duas_marcas():

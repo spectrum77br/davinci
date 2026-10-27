@@ -815,3 +815,24 @@ async def test_html_repair_v2_preserves_routing_and_rejects_conflicting_item_onl
     assert again["duplicates"] == 1 and "updated" not in again
     assert await db.get(MailMessageTuta, m.id) is None
     process.assert_not_awaited()
+
+
+async def test_admin_dos_4_sites_sobe_e_o_admin_de_fora_so_conta(db):
+    """27/10/2026: o admin@ dos 4 sites (Uranyx, Charlots, Makisa, 7buyers) sempre
+    SOBE (o e-mail chega nas caixas da barra; a Makisa e a 7buyers só mostram); o
+    admin@ de outro domínio continua só contado."""
+    contas = {
+        "admin@uranyx.com.br",
+        "admin@charlots.com.br",
+        "admin@makisa.com.br",
+        "admin@7buyers.com.br",
+        "sac@makisa.com.br",
+        "admin@escritorio.com.br",
+        "admin@poofy.com.br",
+        "financeiro@makisa.com.br",
+    }
+    assert await mail_v2.aliases_so_contar(db, contas) == [
+        "admin@escritorio.com.br",
+        "admin@poofy.com.br",
+        "financeiro@makisa.com.br",
+    ]

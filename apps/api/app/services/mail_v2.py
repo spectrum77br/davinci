@@ -145,12 +145,20 @@ async def _sincronizar_pastas(
 
 async def aliases_so_contar(session: AsyncSession, enderecos_da_conta: set[str]) -> list[str]:
     """Os endereços da conta que são INTERNOS (adm@, financeiro@, ti@…) e não são
-    de loja nem caixa de site: o e-mail SÓ para eles nem sobe (só é contado)."""
+    de loja nem caixa de site: o e-mail SÓ para eles nem sobe (só é contado).
+
+    O sac@ e o admin@ dos 4 sites (27/10/2026: Uranyx, Charlots, Makisa, 7buyers)
+    sempre sobem — o admin@ da Makisa e da 7buyers não é caixa de site na rota
+    (só mostrar), mas o e-mail dele tem de chegar nas caixas da barra."""
     cad = await rotear.cadastro(session)
     return sorted(
         a
         for a in enderecos_da_conta
-        if enderecos.local(a) in LOCAIS_INTERNOS and not cad.e_de_loja(a) and a not in cad.caixas
+        if enderecos.local(a) in LOCAIS_INTERNOS
+        and not cad.e_de_loja(a)
+        and a not in cad.caixas
+        and not rotear.e_caixa_de_site(a, cad)
+        and not rotear.e_endereco_dos_sites(a)
     )
 
 

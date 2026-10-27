@@ -354,6 +354,16 @@ LOCAIS_DE_SITE: dict[str, str | None] = {
 # como sempre foi (caixa de site em qualquer domínio de marca).
 LOCAIS_DE_SITE_SO_NOS_SITES_DO_ATENDIMENTO = frozenset({"admin"})
 MARCAS_DOS_SITES_DO_ATENDIMENTO = frozenset({"uranyx", "charlots-park", "charlots"})
+# Os ENDEREÇOS dos 4 sites (27/10/2026, o Eduardo: cada site tem exatamente sac@
+# e admin@): passam no filtro da caixa privada (`ponte_so_aliases_de_loja`) e
+# sobem pelo conector v2 (nunca "só contar") — o e-mail chega nas caixas da
+# barra. Makisa e 7buyers são SÓ DE E-MAIL (`MARCAS_SO_EMAIL`): a rota nunca
+# os faz chamado do site (nem o sac@, nem a pasta "*makisa"/"*7buyers").
+LOCAIS_DOS_SITES = frozenset({"sac", "admin"})
+DOMINIOS_DOS_SITES = frozenset(
+    {"uranyx.com.br", "charlots.com.br", "makisa.com.br", "7buyers.com.br"}
+)
+MARCAS_SO_EMAIL = frozenset({"makisa", "7buyers"})
 
 # ── Remetente ──────────────────────────────────────────────────────────────
 REMETENTE_COMPRADOR = "comprador"

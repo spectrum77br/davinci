@@ -483,7 +483,7 @@ def provavel(
             email,
             principal=base.principal,
             aliases=base.aliases,
-            e_de_loja=cad.e_de_loja,
+            e_de_loja=lambda e: rotear.passa_no_filtro_privado(e, cad),
             enviado=enviado,
         )
         is None
