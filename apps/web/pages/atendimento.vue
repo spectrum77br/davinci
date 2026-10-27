@@ -802,8 +802,14 @@ watch(selecionada, (id) => {
 // No celular e no tablet (sem a barra de lojas) o botão "E-mails das lojas"
 // em cima da lista abre as mesmas lojas e tipos.
 const emailsDaLoja = ref<EscolhaEmail | null>(null)
-// O e-mail (sem conversa) que o clique numa caixa da barra mandou abrir na lista.
+// O e-mail (sem conversa: o informativo, o do código) aberto na ÁREA PRINCIPAL
+// (27/10/2026, o Eduardo: "o e-mail tem que abrir ali na box principal, não ali
+// na esquerda; se clicar ali amplia pra cá"): a linha da lista do meio fica
+// acesa e o e-mail inteiro abre na coluna da conversa
+// (AtendimentoEmailDaLojaAberto). Outra loja ou pasta, ou uma conversa, fecha.
 const emailDaCaixaAberto = ref<string | null>(null)
+// A linha clicada: o assunto, a data e a pasta já na tela enquanto o e-mail carrega.
+const emailDaCaixaLinha = ref<EmailDaCaixa | null>(null)
 const emailNaCaixa = ref<string | null>(null)
 const emailNaCaixaLinha = ref<ConversaResumo | null>(null)
 const emailNaCaixaVersao = ref(0)
@@ -833,35 +839,52 @@ const contagemDaLoja = computed<EmailsDaLoja | null>(() => {
 // Há e-mail na tela da Caixa (a lista da loja ou uma conversa de e-mail): a
 // conversa do chat fica escondida e PARADA.
 const emailNaTela = computed(() => !!emailsDaLoja.value || !!emailNaCaixa.value)
-// A conversa na coluna da conversa (no celular a lista some quando há uma).
-const abertaNaCaixa = computed(() => emailNaCaixa.value || (emailsDaLoja.value ? null : selecionada.value))
+// A conversa (ou o e-mail da loja) na coluna da conversa (no celular a lista some quando há uma).
+const abertaNaCaixa = computed(() => emailNaCaixa.value || (emailsDaLoja.value ? emailDaCaixaAberto.value : selecionada.value))
 function fecharEmailNaCaixa() {
   emailNaCaixa.value = null
   emailNaCaixaLinha.value = null
   emailNaCaixaOrigem.value = null
 }
+// "fechar o e-mail" (a área principal): volta ao "Escolha um e-mail na lista"; a lista fica.
+function fecharEmailDaLoja() {
+  emailDaCaixaAberto.value = null
+  emailDaCaixaLinha.value = null
+}
 function fecharEmailsDaLoja() {
   fecharEmailNaCaixa()
+  fecharEmailDaLoja()
   emailsDaLoja.value = null
-  emailDaCaixaAberto.value = null
 }
 function abrirEmailsDaLoja(e: EscolhaEmail) {
-  if (emailsDaLoja.value?.chave !== e.chave || emailsDaLoja.value?.grupo !== e.grupo || emailNaCaixaOrigem.value) fecharEmailNaCaixa()
+  const outra = emailsDaLoja.value?.chave !== e.chave || emailsDaLoja.value?.grupo !== e.grupo
+  if (outra || emailNaCaixaOrigem.value) fecharEmailNaCaixa()
+  if (outra) fecharEmailDaLoja()
   emailsDaLoja.value = e
-  emailDaCaixaAberto.value = null
   emailsNoCelular.value = false
+}
+// Um e-mail da lista da loja (ou da lista curta da barra): o sem conversa abre
+// na área principal; o de uma conversa, a conversa (na mesma coluna).
+function abrirEmailDaLoja(email: EmailDaCaixa) {
+  if (email.conversa_id) {
+    selecionarEmailNaCaixa(email.conversa_id)
+    return
+  }
+  fecharEmailNaCaixa()
+  emailDaCaixaAberto.value = email.id
+  emailDaCaixaLinha.value = email
 }
 function trocarGrupoDaLoja(g: string) {
   if (emailsDaLoja.value && emailsDaLoja.value.grupo !== g) abrirEmailsDaLoja({ ...emailsDaLoja.value, grupo: g })
 }
-// Um e-mail da lista curta de uma caixa: a lista da loja naquela pasta e o
-// e-mail aberto nela — ou, sendo de uma conversa, a conversa na coluna dela.
+// Um e-mail da lista curta de uma caixa: a lista da loja naquela pasta (a
+// linha acesa) e o e-mail na área principal — ou a conversa dele.
 function abrirEmailDaBarra(e: EscolhaEmail, email: EmailDaCaixa) {
   abrirEmailsDaLoja(e)
-  if (email.conversa_id) selecionarEmailNaCaixa(email.conversa_id)
-  else emailDaCaixaAberto.value = email.id
+  abrirEmailDaLoja(email)
 }
 function selecionarEmailNaCaixa(id: string) {
+  fecharEmailDaLoja()
   if (emailNaCaixa.value !== id) emailNaCaixaLinha.value = null
   emailNaCaixa.value = id
 }
@@ -1176,6 +1199,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
           :tique="emailTique"
           :sinal="emailNaCaixaSinal"
           @selecionar="selecionarEmailNaCaixa"
+          @ver="abrirEmailDaLoja"
           @grupo="trocarGrupoDaLoja"
           @fechar="fecharEmailsDaLoja"
         />
@@ -1250,8 +1274,16 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
             />
           </div>
         </div>
+        <!-- o e-mail da loja sem conversa, grande, na área principal (27/10/2026: "se clicar ali amplia pra cá") -->
+        <AtendimentoEmailDaLojaAberto
+          v-else-if="emailsDaLoja && emailDaCaixaAberto"
+          :email-id="emailDaCaixaAberto"
+          :linha="emailDaCaixaLinha"
+          :loja="emailsDaLoja.conta"
+          @fechar="fecharEmailDaLoja"
+        />
         <div v-else-if="emailsDaLoja" class="flex flex-1 items-center justify-center p-6">
-          <EmptyState :icon="Mail" :title="`E-mails · ${emailsDaLoja.conta}`" description="Escolha um e-mail na lista: a conversa abre aqui, com o vínculo ao pedido e a resposta, como na aba E-mail." />
+          <EmptyState :icon="Mail" :title="`E-mails · ${emailsDaLoja.conta}`" description="Escolha um e-mail na lista: ele abre aqui — a conversa com o vínculo ao pedido e a resposta, como na aba E-mail; o informativo com o texto e os anexos." />
         </div>
       </section>
     </div>

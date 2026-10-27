@@ -9,8 +9,11 @@
 // TODO e-mail da pasta ligado àquela loja, o mais novo primeiro — a conversa de
 // e-mail (abre na coluna da conversa, com a barra do e-mail: voltar, vincular
 // ao pedido), a linha informativa e o que a ponte segurou como segurança (o
-// código de postagem da devolução: "ver o e-mail" mostra o texto, sem os links
-// de acesso) —, dos últimos `dias` dias (o número da caixa). Quem não é admin
+// código de postagem da devolução) —, dos últimos `dias` dias (o número da
+// caixa). O e-mail que não é conversa abre na ÁREA PRINCIPAL, não aqui
+// (27/10/2026, o Eduardo: "o e-mail tem que abrir ali na box principal, não ali
+// na esquerda; se clicar ali amplia pra cá"): a linha só fica acesa e o texto
+// inteiro vai para AtendimentoEmailDaLojaAberto. Quem não é admin
 // vê e-mail SÓ por aqui (a aba E-mail é só de admin). Nada aqui muda a Caixa do
 // chat: a lista e os números dela continuam sem e-mail (`separa_email`).
 // Funções puras aqui em cima (tests/atendimento-email-lojas.cjs).
@@ -35,20 +38,9 @@ export { gruposDaBarra, motivosDaCaixaVazia, numeroDoGrupo, urlDosEmailsDaCaixa 
 </script>
 
 <script setup lang="ts">
-import { ArrowLeft, ChevronDown, ChevronUp, Download, Loader2, Mail, RefreshCw } from 'lucide-vue-next'
+import { ArrowLeft, Loader2, Mail, RefreshCw } from 'lucide-vue-next'
 import type { EmailsDaLoja } from '~/components/AtendimentoLojas.vue'
 import { erroDaApi, fmtDataHora, plataformaInfo } from '~/components/AtendimentoPlataforma.vue'
-import { tamanhoLegivel } from '~/components/AtendimentoEmailCartao.vue'
-
-type Detalhe = {
-  id: string
-  texto: string | null
-  de: string | null
-  de_nome?: string | null
-  links_removidos?: number
-  seguranca?: boolean
-  anexos?: { id: string; filename?: string; tamanho?: number }[]
-}
 
 const props = defineProps<{
   // A loja e o grupo escolhidos na barra (a página guarda).
@@ -60,7 +52,7 @@ const props = defineProps<{
   dias?: number
   // A conversa de e-mail aberta na coluna da conversa.
   selecionada?: string | null
-  // O e-mail (sem conversa) que o clique na caixa mandou abrir.
+  // O e-mail (sem conversa) aberto na área principal: a linha dele acesa.
   aberto?: string | null
   // Sobe a cada tique do polling de 30 s da página (e quando a conversa aberta
   // muda o que a lista mostra — `sinal`): relê a 1ª página, sem "carregar mais".
@@ -69,12 +61,13 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   (e: 'selecionar', id: string): void
+  // O e-mail sem conversa: abre na área principal (a página guarda qual).
+  (e: 'ver', email: EmailDaCaixa): void
   (e: 'fechar'): void
   (e: 'grupo', grupo: string): void
 }>()
 
-const { api, url } = useApi()
-const toasts = useToasts()
+const { api } = useApi()
 
 const itens = ref<EmailDaCaixa[]>([])
 const proximo = ref<string | null>(null)
@@ -82,8 +75,6 @@ const carregando = ref(false)
 const erro = ref<string | null>(null)
 let paginasExtras = false
 let geracao = 0
-const linhaAberta = ref<string | null>(null)
-const detalhe = ref<Detalhe | null>(null)
 
 const chips = computed(() => gruposDaBarra(props.grupos))
 const grupoAtual = computed(() => chips.value.find((g) => g.chave === props.escolha.grupo) || null)
@@ -117,39 +108,13 @@ async function carregar(mais = false, automatico = false) {
   }
 }
 
-async function verEmail(id: string, alternar = true) {
-  if (alternar && linhaAberta.value === id) {
-    linhaAberta.value = null
-    detalhe.value = null
-    return
-  }
-  linhaAberta.value = id
-  detalhe.value = null
-  try {
-    const d = await api<Detalhe>(urlDoEmailDaCaixa(id))
-    if (linhaAberta.value === id) detalhe.value = d
-  } catch (x: any) {
-    if (linhaAberta.value === id) {
-      linhaAberta.value = null
-      const er = erroDaApi(x, 'Não consegui abrir o e-mail')
-      toasts.error(er.texto, er.motivos)
-    }
-  }
-}
-
 function recomecar() {
   itens.value = []
   proximo.value = null
-  linhaAberta.value = null
-  detalhe.value = null
   void carregar()
 }
 // Outra loja ou outro grupo: do começo.
-watch(() => chaveDaEscolha(props.escolha), () => {
-  recomecar()
-  if (props.aberto) void verEmail(props.aberto, false)
-})
-watch(() => props.aberto, (id) => { if (id) void verEmail(id, false) })
+watch(() => chaveDaEscolha(props.escolha), recomecar)
 // O polling da página e a conversa aberta que mudou: a 1ª página de novo — só
 // sem o "carregar mais" (reler voltaria para o começo) e sem leitura no meio.
 function aoTique() {
@@ -158,14 +123,15 @@ function aoTique() {
 }
 watch(() => props.tique, aoTique)
 watch(() => props.sinal, aoTique)
-onMounted(() => {
-  void carregar()
-  if (props.aberto) void verEmail(props.aberto, false)
-})
+onMounted(() => { void carregar() })
 
+// A conversa abre na coluna da conversa; o e-mail sem conversa, na área principal.
 function abrir(e: EmailDaCaixa) {
   if (e.conversa_id) emit('selecionar', e.conversa_id)
-  else void verEmail(e.id)
+  else emit('ver', e)
+}
+function acesa(e: EmailDaCaixa): boolean {
+  return e.conversa_id ? props.selecionada === e.conversa_id : props.aberto === e.id
 }
 const rotuloDoGrupo = computed(() => grupoAtual.value?.rotulo || props.escolha.grupo)
 </script>
@@ -215,13 +181,12 @@ const rotuloDoGrupo = computed(() => grupoAtual.value?.rotulo || props.escolha.g
         <p v-for="(m, i) in motivos" :key="i">{{ m }}</p>
       </div>
       <ul v-else class="space-y-1.5">
-        <li v-for="e in itens" :key="e.id" class="space-y-1">
+        <li v-for="e in itens" :key="e.id">
           <button
             type="button"
             class="w-full space-y-0.5 rounded-lg border p-2 text-left text-xs hover:bg-muted/50"
-            :class="(e.conversa_id && selecionada === e.conversa_id) || linhaAberta === e.id ? 'border-primary bg-primary/5' : ''"
-            :aria-current="e.conversa_id && selecionada === e.conversa_id ? 'true' : undefined"
-            :aria-expanded="e.conversa_id ? undefined : linhaAberta === e.id"
+            :class="acesa(e) ? 'border-primary bg-primary/5' : ''"
+            :aria-current="acesa(e) ? 'true' : undefined"
             :data-email-da-loja="e.id"
             @click="abrir(e)"
           >
@@ -235,23 +200,8 @@ const rotuloDoGrupo = computed(() => grupoAtual.value?.rotulo || props.escolha.g
             </div>
             <div class="break-words font-medium">{{ tituloDaLinha(e) }}</div>
             <div v-if="e.de" class="break-all text-muted-foreground">De {{ e.de }}</div>
-            <div v-if="!e.conversa_id" class="inline-flex items-center gap-0.5 text-[11px] underline">
-              <component :is="linhaAberta === e.id ? ChevronUp : ChevronDown" class="size-3" />{{ linhaAberta === e.id ? 'fechar o e-mail' : 'ver o e-mail' }}
-            </div>
+            <div v-if="!e.conversa_id" class="text-[11px]" :class="aberto === e.id ? 'font-medium text-primary' : 'text-muted-foreground underline'">{{ aberto === e.id ? 'aberto ao lado' : 'ver o e-mail' }}</div>
           </button>
-          <div v-if="linhaAberta === e.id" class="space-y-1.5 rounded-md border bg-background p-2 text-xs" data-email-da-loja-aberto>
-            <div v-if="!detalhe" class="flex justify-center py-3"><Loader2 class="size-4 animate-spin" /></div>
-            <template v-else>
-              <div class="break-all text-[11px]"><span class="text-muted-foreground">De</span> {{ detalhe.de_nome ? `${detalhe.de_nome} <${detalhe.de}>` : detalhe.de }}</div>
-              <div v-if="detalhe.links_removidos" class="text-[11px] text-muted-foreground">{{ detalhe.links_removidos }} link(s) de acesso removido(s)</div>
-              <pre class="max-h-[360px] overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">{{ detalhe.texto || '(e-mail sem texto)' }}</pre>
-              <div v-if="detalhe.anexos?.length" class="space-y-0.5">
-                <a v-for="an in detalhe.anexos" :key="an.id" :href="url(urlDoAnexoDaCaixa(an.id))" class="flex max-w-full items-center gap-1 underline" rel="noopener noreferrer">
-                  <Download class="size-3 shrink-0" aria-hidden="true" /><span class="truncate">{{ an.filename || 'anexo' }}</span><span class="shrink-0 text-muted-foreground">{{ tamanhoLegivel(an.tamanho) }}</span>
-                </a>
-              </div>
-            </template>
-          </div>
         </li>
       </ul>
       <div v-if="proximo" class="flex justify-center">
