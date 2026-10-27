@@ -30,6 +30,7 @@ isso esta URL nunca vai para log e `_redigir_zap` mascara `input_token=`.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -43,6 +44,10 @@ from app.services.atendimento import zap_erros
 from app.services.marketing.meta_client import GRAPH_HOST, _eh_ambiguo, _headers, _redigir
 
 logger = structlog.get_logger()
+
+# O httpx em INFO loga "HTTP Request: GET <url>" — e a URL do debug_token leva
+# o token no `input_token`. Fixo em WARNING para ninguém ligar sem querer.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 __all__ = [
     "ESCOPOS_OBRIGATORIOS",
