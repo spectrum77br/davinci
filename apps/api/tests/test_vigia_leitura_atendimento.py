@@ -194,6 +194,9 @@ async def test_medir_e_limites():
         "robo": 60,
         "site": 120,
         "redes": 60,
+        # O Zap (Onda 4, 27/10/2026): 3 h, só no número ativo, em horário
+        # comercial e com movimento em 24 h (test_atendimento_zap_saude.py).
+        "zap": 180,
         "reclamacoes": 60,
         "avaliacoes": 120,
     }

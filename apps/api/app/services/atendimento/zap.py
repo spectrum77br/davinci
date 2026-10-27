@@ -21,6 +21,14 @@ token, fechar a janela) volta descrito em `ResultadoEnvio.payload['zap']
 Marcar como LIDA na Meta (o tique azul, decisão do Eduardo de 26/10/2026)
 mora aqui também (`marcar_lida`), atrás da chave `atendimento_zap_marcar_lida`
 (desligada) e das mesmas chaves do envio — quem chama é o `lida.py`.
+
+FOTO (Onda 3, 27/10/2026 — §6.8): `enviar_imagem` sobe a foto (`POST
+/{pnid}/media`) e manda a mensagem `type=image` com a legenda OPCIONAL (já
+passada pelo validador no `enviar._preparar_foto`). Chega aqui pelo
+`enviar.enviar_foto`, com as MESMAS travas do texto (`_destino_zap`) e o
+mesmo cinto. O upload que falha não mandou nada a ninguém (`falhou`, nunca
+ambíguo); a mensagem segue a régua do texto. A nossa cópia (o balão) já está
+no disco antes daqui (`zap_midia.guardar_saida`): o WhatsApp não devolve URL.
 """
 
 from __future__ import annotations
@@ -41,9 +49,10 @@ from app.models import (
     AtendimentoMensagem,
     AtendimentoZapConta,
     AtendimentoZapContato,
+    AtendimentoZapMidia,
     AtendimentoZapNumero,
 )
-from app.services.atendimento import zap_api, zap_contas, zap_erros
+from app.services.atendimento import zap_api, zap_contas, zap_erros, zap_midia
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
@@ -195,6 +204,28 @@ def corpo_texto(to: str, texto: str, *, mensagem_id: UUID | None) -> dict[str, A
     return corpo
 
 
+def corpo_imagem(
+    to: str, media_id: str, legenda: str | None, *, mensagem_id: UUID | None
+) -> dict[str, Any]:
+    """O corpo do `POST /{pnid}/messages` da FOTO (§6.8): o id da mídia subida e a legenda.
+
+    Sem legenda, a chave `caption` nem vai (a foto sai sozinha).
+    """
+    imagem: dict[str, Any] = {"id": media_id}
+    if legenda:
+        imagem["caption"] = legenda
+    corpo: dict[str, Any] = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "image",
+        "image": imagem,
+    }
+    if mensagem_id is not None:
+        corpo["biz_opaque_callback_data"] = str(mensagem_id)
+    return corpo
+
+
 # ── Leituras do banco (as travas) ─────────────────────────────────────────
 
 
@@ -333,6 +364,13 @@ async def enviar_texto(
         logger.error("zap_envio_cinto", motivo=barrou, **log)
         return ResultadoEnvio(ok=False, erro=f"{ERRO_CINTO}:{barrou}")
     corpo = corpo_texto(destino.to, texto, mensagem_id=mensagem_id)
+    return await _postar(destino, corpo, log)
+
+
+async def _postar(
+    destino: ZapDestino, corpo: dict[str, Any], log: dict[str, str]
+) -> ResultadoEnvio:
+    """O `POST /{pnid}/messages` e a régua do resultado (texto e foto). Nunca levanta."""
     try:
         resposta = await zap_api.enviar_mensagem(destino.phone_number_id, destino.token, corpo)
     except zap_api.ZapApiErro as exc:
@@ -377,20 +415,94 @@ async def enviar_texto(
     return ResultadoEnvio(ok=True, externo_id=wamid[:191], payload={"zap": zap})
 
 
+async def enviar_imagem(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    destino: ZapDestino,
+    copia: zap_midia.CopiaDeSaida,
+    legenda: str | None,
+    *,
+    mensagem_id: UUID | None,
+) -> ResultadoEnvio:
+    """A FOTO (§6.8): `POST /{pnid}/media` e depois a mensagem `type=image`. Nunca levanta.
+
+      upload recusado/sem resposta → `falhou` (nada chegou ao cliente: a
+                                     mensagem nem foi pedida); com código da
+                                     Meta, `erro="meta:<code>"` e o efeito da
+                                     tabela (o 190 derruba o token igual);
+      mensagem                     → a régua do texto (`_postar`): o wamid, o
+                                     ambíguo, o erro com efeito.
+    O `payload` leva o id da mídia na Meta (`zap.media_id`) e a URL RELATIVA
+    da nossa cópia (`imagem_url`), que o `enviar._aplicar_resultado` põe no
+    balão. `session` não é usada (o adaptador não grava).
+    """
+    del session
+    agora = _agora()
+    log = {"conversa_id": str(conversa.id), "numero": str(destino.numero_id)}
+    barrou = _cinto(destino, agora)
+    if barrou is not None:
+        logger.error("zap_envio_cinto", motivo=barrou, foto=True, **log)
+        return ResultadoEnvio(ok=False, erro=f"{ERRO_CINTO}:{barrou}")
+    try:
+        media_id = await zap_api.subir_midia(
+            destino.phone_number_id,
+            destino.token,
+            nome=copia.nome,
+            dados=copia.dados,
+            mime=copia.mime,
+        )
+    except zap_api.ZapApiErro as exc:
+        logger.warning("zap_foto_upload_falhou", code=exc.code, http=exc.http_status, **log)
+        if exc.code is not None:
+            info = zap_erros.traduzir(exc.code)
+            return ResultadoEnvio(
+                ok=False,
+                erro=f"meta:{exc.code}",
+                payload={
+                    "zap": {
+                        "code": exc.code,
+                        "subcode": exc.subcode,
+                        "classe": info.classe,
+                        "efeito": info.efeito,
+                        "etapa": "upload",
+                    }
+                },
+            )
+        motivo = f"http_{exc.http_status}" if exc.http_status else "sem_resposta"
+        return ResultadoEnvio(
+            ok=False,
+            erro=f"zap_upload:{motivo}",
+            payload={"zap": {"http": exc.http_status, "etapa": "upload"}},
+        )
+    corpo = corpo_imagem(destino.to, media_id, legenda, mensagem_id=mensagem_id)
+    resultado = await _postar(destino, corpo, log)
+    zap = dict((resultado.payload or {}).get("zap") or {})
+    zap["media_id"] = media_id[:64]
+    resultado.payload = {**(resultado.payload or {}), "zap": zap, "imagem_url": copia.url}
+    return resultado
+
+
 async def depois_do_envio(
     session: AsyncSession,
     destino: ZapDestino,
     *,
     conversa_id: UUID,
     resultado: ResultadoEnvio,
+    midia_id: UUID | None = None,
 ) -> None:
     """Depois de gravar o resultado: o "último envio" do número e o EFEITO do erro.
 
     O efeito vem da resposta da NOSSA chamada (pelo TLS do graph.facebook.com):
     vale na primeira vez (§5.6 item 4 — o do webhook espera 2 ocorrências).
+    Foto (Onda 3): a nossa cópia ganha o id da mídia na Meta (`media_id`).
     Não commita (o `enviar._depois_do_zap` commita numa transação própria).
     """
     agora = _agora()
+    if midia_id is not None:
+        media_id = ((resultado.payload or {}).get("zap") or {}).get("media_id")
+        midia = await session.get(AtendimentoZapMidia, midia_id)
+        if midia is not None and isinstance(media_id, str) and media_id:
+            midia.media_id = media_id[:64]
     if resultado.ok:
         numero = await session.get(AtendimentoZapNumero, destino.numero_id, populate_existing=True)
         if numero is not None:

@@ -514,4 +514,86 @@ const zapConversa = { id: 'cv1', plataforma: 'whatsapp', canal: 'zap', conta: '(
   assert.match(zapEntrada, /conferida_nao_saiu = alvo\.status == MSG_FALHOU and alvo\.erro == ERRO_CONFERIDO_NAO_SAIU/)
 }
 
-console.log('ok — atendimento-zap (Ondas 1 e 2: vocabulário, ícone, barra, janela, conversa sem painel do pedido, faixa do topo, modo Humano, travas, tiques)')
+// ------------------------------------------------ Onda 3 (27/10/2026): a mídia
+{
+  // A nossa cópia (`/api/atendimento/zap/midia/<id>`, só admin): foto, player
+  // de áudio e de vídeo, documento com nome e tamanho — e os estados em
+  // português, IGUAIS aos do servidor.
+  const js = transpile(trecho(cs, 'const TIPO_LABEL', '// Links no texto viram') + '\n' + trecho(cs, 'type Peca', '// Uma vez por leitura da conversa'))
+    + '\nreturn { pecasDe, tamanhoLegivel, MIDIA_ZAP_ESTADO }'
+  const { pecasDe, tamanhoLegivel, MIDIA_ZAP_ESTADO } = new Function('cartaoPedidoDe', 'cartaoProdutoDe', js)(P.cartaoPedidoDe, P.cartaoProdutoDe)
+  const id = '0b6c5c0e-6f43-4d0a-9a7e-1f2a3b4c5d6e'
+  const url = `/api/atendimento/zap/midia/${id}`
+  const msg = (anexos) => ({ id: 'm1', anexos })
+  const so = (anexo) => pecasDe(msg([anexo]))[0]
+  assert.deepEqual(so({ tipo: 'imagem', midia_id: id, status: 'baixada', url, mime: 'image/jpeg' }), { chave: 'm1-0', tipo: 'imagem', url, nome: 'Foto' })
+  assert.deepEqual(so({ tipo: 'figurinha', midia_id: id, status: 'baixada', url }), { chave: 'm1-0', tipo: 'imagem', url, nome: 'Figurinha' })
+  assert.deepEqual(so({ tipo: 'audio', midia_id: id, status: 'baixada', url, voz: true }), { chave: 'm1-0', tipo: 'audio', url, nome: 'Áudio' })
+  assert.deepEqual(so({ tipo: 'video', midia_id: id, status: 'baixada', url }), { chave: 'm1-0', tipo: 'video', url, nome: 'Vídeo' })
+  assert.deepEqual(so({ tipo: 'arquivo', midia_id: id, status: 'baixada', url, nome: 'nota fiscal.pdf', tamanho: 123456 }), { chave: 'm1-0', tipo: 'documento', url, nome: 'nota fiscal.pdf', tamanho: '121 KB' })
+  assert.equal(tamanhoLegivel(500), '500 B')
+  assert.equal(tamanhoLegivel(5 * 1024 * 1024 + 300000), '5,3 MB')
+  assert.equal(tamanhoLegivel(undefined), '')
+  // A foto que a equipe mandou (a mesma cópia).
+  assert.equal(so({ tipo: 'imagem', midia_id: id, status: 'baixada', url, nome: 'mala.jpg' }).tipo, 'imagem')
+  // Os estados sem cópia, em português.
+  // A retenção de 180 dias (Onda 4): o registro fica e diz "mídia expirada";
+  // a exclusão a pedido do cliente (LGPD) diz isso.
+  assert.equal(so({ tipo: 'imagem', midia_id: id, status: 'apagada' }).nome, '[Foto — mídia expirada (apagada depois de 180 dias)]')
+  assert.equal(so({ tipo: 'imagem', midia_id: id, status: 'apagada_a_pedido' }).nome, '[Foto — apagada a pedido do cliente]')
+  assert.equal(so({ tipo: 'arquivo', midia_id: id, status: 'falhou' }).nome, '[Documento — não deu para baixar]')
+  assert.equal(so({ tipo: 'video', midia_id: id, status: 'expirada' }).nome, '[Vídeo — a mídia expirou antes de ser baixada]')
+  // SÓ o endereço da nossa cópia vale como link relativo: `//outro`, caminho
+  // com `..` ou relativo sem `midia_id` (as outras plataformas) nunca viram link.
+  for (const ruim of ['//evil.com/x.jpg', `/api/atendimento/zap/midia/${id}/../../x`, '/api/outra/coisa', 'javascript:alert(1)']) {
+    assert.equal(so({ tipo: 'imagem', midia_id: id, status: 'baixada', url: ruim }).tipo, 'nome', ruim)
+  }
+  assert.equal(so({ tipo: 'imagem', status: 'baixada', url }).tipo, 'nome', 'sem midia_id: não é a cópia do Zap')
+  // Os estados da tela = os do servidor (o CHECK da tabela), menos `baixada`,
+  // mais o do ANEXO apagado a pedido do cliente (LGPD, Onda 4 — o registro da
+  // mídia fica `apagada`; `zap_cadastro.STATUS_ANEXO_APAGADO`).
+  const modelo = api('models/atendimento_zap.py')
+  const estados = [...trecho(modelo, 'ZAP_MIDIA_STATUS = (', ')\n').matchAll(/"([a-z_]+)"/g)].map((m) => m[1])
+  const cadastroPy = api('services/atendimento/zap_cadastro.py')
+  const apagadoAPedido = (/^STATUS_ANEXO_APAGADO = "([a-z_]+)"$/m.exec(cadastroPy) || [])[1]
+  assert.equal(apagadoAPedido, 'apagada_a_pedido')
+  assert.deepEqual(Object.keys(MIDIA_ZAP_ESTADO).sort(), [...estados.filter((e) => e !== 'baixada'), apagadoAPedido].sort())
+  // A rota da cópia é a do servidor.
+  const zapMidia = api('services/atendimento/zap_midia.py')
+  assert.match(zapMidia, /^ROTA_MIDIA = "\/api\/atendimento\/zap\/midia"$/m)
+  // O template: áudio/vídeo só carregam no play; o documento BAIXA (nunca abre aqui).
+  assert.match(tela, /<audio v-else-if="pc\.tipo === 'audio'" :src="pc\.url" controls preload="none"/)
+  assert.match(tela, /<video v-else-if="pc\.tipo === 'video'" :src="pc\.url" controls preload="none"/)
+  assert.match(tela, /v-else-if="pc\.tipo === 'documento'"\s+:href="pc\.url"\s+download/)
+  // A foto de saída do Zap: legenda OPCIONAL com o teto do servidor (1.024).
+  assert.match(tela, /:maxlength="envioFoto\?\.legenda_max \|\| limite \|\| 350"/)
+  assert.match(tela, /Legenda \(opcional\)/)
+  assert.match(tela, /'pode ir com uma legenda \(opcional\)'/)
+  const fotoPy = api('services/atendimento/foto.py')
+  assert.match(fotoPy, /LIMITE_LEGENDA: dict\[tuple\[str, str\], int\] = \{\(PLATAFORMA_WHATSAPP, CANAL_ZAP\): 1024\}/)
+  // O upload que falhou: a frase diz que nada saiu.
+  assert.match(P.erroEnvioLegivel('zap_upload:http_500'), /não subiu para a Meta — nada chegou ao cliente/)
+  assert.match(P.erroEnvioLegivel('zap_upload:sem_resposta'), /nada chegou ao cliente/)
+}
+
+// ------------------------------------------------ as páginas públicas da Meta (modo Live)
+{
+  // A Meta exige a política de privacidade e a exclusão de dados abertas SEM
+  // login, inclusive no host do operador (gestaoestoque.com) — senão o app sai do Live.
+  const ler = (rel) => fs.readFileSync(path.resolve(__dirname, rel), 'utf8')
+  const lista = (src, nome) => {
+    const m = new RegExp(`const ${nome} = \\[([^\\]]*)\\]`).exec(src)
+    assert.ok(m, `lista ${nome}`)
+    return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])
+  }
+  const publicas = lista(ler('../middleware/auth.global.ts'), 'publicRoutes')
+  const operador = lista(ler('../middleware/operator-domain.global.ts'), 'allowedPrefixes')
+  for (const rota of ['/privacidade', '/exclusao-de-dados']) {
+    assert.ok(publicas.includes(rota), `${rota} sem login (auth.global.ts)`)
+    assert.ok(operador.includes(rota), `${rota} no host do operador (operator-domain.global.ts)`)
+    const pagina = ler(`../pages${rota}.vue`)
+    assert.match(pagina, /definePageMeta\(\{ layout: false \}\)/, `${rota} sem o layout do app`)
+  }
+}
+
+console.log('ok — atendimento-zap (Ondas 1, 2 e 3: vocabulário, ícone, barra, janela, conversa sem painel do pedido, faixa do topo, modo Humano, travas, tiques, mídia)')

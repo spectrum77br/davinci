@@ -220,13 +220,17 @@ async def test_lista_sugerir_e_painel_da_conversa_do_zap(client, db, zap, pessoa
     assert r.json()["detail"] == {"code": "canal_sem_ia", "detail": rota.FRASE_ZAP_SEM_IA}
     assert "Zap" in rota.FRASE_ZAP_SEM_IA and "carrinho" not in rota.FRASE_ZAP_SEM_IA
 
+    monkeypatch.setattr(zap.settings, "atendimento_envio_ativo", False)
     r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
     assert r.status_code == 200, r.text
     painel = r.json()
+    # Onda 3 (27/10/2026): a foto do Zap segue as MESMAS travas do texto — com
+    # o envio desligado, o botão diz o porquê; a legenda é opcional (1.024).
     assert painel["envio_foto"]["pode"] is False
-    # Onda 2: a foto de saída é da Onda 3 — por enquanto, só texto.
-    assert painel["envio_foto"]["codigo"] == "foto_nao_suportada"
-    assert "só texto" in painel["envio_foto"]["motivo"]
+    assert painel["envio_foto"]["codigo"] == "envio_desligado"
+    assert painel["envio_foto"]["legenda_permitida"] is True
+    assert painel["envio_foto"]["legenda_obrigatoria"] is False
+    assert painel["envio_foto"]["legenda_max"] == 1024
     assert "Zap" in painel["adspower"]["motivo"]
 
 

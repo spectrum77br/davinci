@@ -17,20 +17,18 @@ useHead({
         Política de Privacidade — DaVinci
       </h1>
       <p class="mt-2 text-sm text-muted-foreground">
-        Última atualização: 24 de junho de 2026
+        Última atualização: 27 de outubro de 2026
       </p>
 
       <div class="mt-8 space-y-8 text-sm leading-relaxed">
         <section>
           <h2 class="text-lg font-semibold">1. Quem somos</h2>
           <p class="mt-2">
-            O DaVinci é um sistema interno de gestão (ERP) para vendedores em marketplaces,
-            operado por
-            <!-- PREENCHER --><strong>[RAZÃO SOCIAL]</strong>,
-            CNPJ
-            <!-- PREENCHER --><strong>[CNPJ]</strong>,
-            acessível em app.hadken.com. Este sistema centraliza pedidos, estoque, anúncios e
-            financeiro de múltiplos canais de venda.
+            O DaVinci é o sistema interno de gestão (ERP) e de atendimento usado pelas lojas que
+            vendem em marketplaces e atendem os seus clientes, acessível em app.hadken.com. Ele
+            centraliza pedidos, estoque, anúncios, financeiro e as conversas de atendimento de
+            múltiplos canais de venda. Cada loja é a responsável (controladora) pelos dados dos
+            seus próprios clientes; o DaVinci é a ferramenta com que ela os trata.
           </p>
         </section>
 
@@ -53,6 +51,44 @@ useHead({
               <strong>Dados de clientes finais presentes nos pedidos:</strong> nome, endereço de
               entrega e contato, tratados exclusivamente para a operação logística e fiscal do
               pedido.
+            </li>
+            <li>
+              <strong>Conversas de atendimento pelo WhatsApp:</strong> quando você fala com uma
+              das lojas pelo WhatsApp, recebemos pela plataforma oficial da Meta (WhatsApp
+              Business Platform) o seu número de telefone, o nome do seu perfil, as mensagens e os
+              arquivos que você enviar (fotos, áudios, vídeos e documentos) e os avisos de entrega
+              e leitura das respostas.
+            </li>
+          </ul>
+        </section>
+
+        <section>
+          <h2 class="text-lg font-semibold">2.1 Atendimento pelo WhatsApp</h2>
+          <ul class="mt-2 list-disc pl-5 space-y-3">
+            <li>
+              As mensagens passam pelos servidores da Meta, que as entrega ao DaVinci; o
+              tratamento feito pela Meta segue a política de privacidade do WhatsApp.
+            </li>
+            <li>
+              Usamos as conversas só para responder ao seu atendimento (dúvidas de compra,
+              entrega, troca e devolução). Nunca pedimos pelo WhatsApp senha, número de cartão,
+              dados bancários, CPF ou RG.
+            </li>
+            <li>
+              As fotos, áudios, vídeos e documentos recebidos ficam guardados por até
+              <strong>180 dias</strong> e depois são apagados; o texto das conversas fica pelo
+              tempo necessário ao atendimento e às obrigações legais da loja. Os avisos técnicos
+              que a Meta manda junto com cada mensagem ficam até <strong>30 dias</strong>.
+            </li>
+            <li>
+              Depois de um pedido de exclusão, os dados somem do DaVinci na hora; as cópias de
+              segurança (backup) que ainda os tenham são apagadas no ciclo normal do backup,
+              sem nunca voltarem ao sistema.
+            </li>
+            <li>
+              Você pode pedir a exclusão da sua conversa e do seu contato a qualquer momento —
+              veja
+              <NuxtLink to="/exclusao-de-dados" class="underline">exclusão de dados</NuxtLink>.
             </li>
           </ul>
         </section>
@@ -106,7 +142,9 @@ useHead({
           <p class="mt-2">
             Você pode revogar a autorização OAuth a qualquer momento no painel do respectivo
             marketplace e/ou solicitar a exclusão dos seus dados enviando e-mail para
-            <!-- PREENCHER --><strong>[E-MAIL DE CONTATO]</strong>.
+            <a href="mailto:stuart18@tuta.com" class="underline">stuart18@tuta.com</a>
+            (passo a passo em
+            <NuxtLink to="/exclusao-de-dados" class="underline">exclusão de dados</NuxtLink>).
             Atenderemos no prazo legal.
           </p>
         </section>
@@ -138,9 +176,8 @@ useHead({
         <section>
           <h2 class="text-lg font-semibold">12. Contato / Encarregado (DPO)</h2>
           <p class="mt-2">
-            <!-- PREENCHER --><strong>[NOME/E-MAIL DO ENCARREGADO]</strong>,
-            e-mail
-            <!-- PREENCHER --><strong>[E-MAIL DE CONTATO]</strong>.
+            Para qualquer assunto de privacidade e dados pessoais, escreva para
+            <a href="mailto:stuart18@tuta.com" class="underline">stuart18@tuta.com</a>.
           </p>
         </section>
       </div>

@@ -451,6 +451,25 @@ def test_lista_de_teste_casa_com_e_sem_o_9o_digito(monkeypatch):
     assert not zap_svc.destino_liberado(None, frozenset(), producao=True)
 
 
+async def test_numero_de_teste_manda_com_o_9_e_o_real_como_veio(db, envio, pessoa):
+    # Ensaio real de 27/10/2026: o webhook trouxe o wa_id SEM o 9 e a lista
+    # literal do app de teste da Meta devolveu 131030. No número de TESTE o
+    # POST vai com o normalizado (com o 9).
+    await db.execute(
+        update(AtendimentoZapContato)
+        .where(AtendimentoZapContato.wa_id_norm == WA_ID)
+        .values(wa_id=WA_ID_SEM_9)
+    )
+    await db.commit()
+    await enviar.enviar_resposta(db, envio.conversa, "Oi! Temos a mala sim.", user=pessoa)
+    assert envio.graph.corpos()[0]["to"] == WA_ID
+    # Número real: o wa_id como a Meta mandou (ela responde por ele).
+    real = SimpleNamespace(teste=False)
+    contato = SimpleNamespace(wa_id=WA_ID_SEM_9, wa_id_norm=WA_ID)
+    assert enviar._to_do_zap(real, contato) == WA_ID_SEM_9
+    assert enviar._to_do_zap(SimpleNamespace(teste=True), contato) == WA_ID
+
+
 async def test_contato_sem_telefone_so_bsuid_nao_sai(db, envio):
     contato = await _contato(db, envio.conversa)
     await db.execute(
@@ -848,16 +867,14 @@ async def test_ia_e_automatica_nunca_no_zap(db, envio, pessoa):
     assert "whatsapp" not in enviar.ADAPTADORES
 
 
-async def test_foto_no_zap_ainda_nao(db, envio, pessoa):
+async def test_foto_so_no_zap_do_numero(db, envio, pessoa):
+    """Onda 3 (27/10/2026): a foto do Zap do número sai (os casos estão em
+    `test_atendimento_zap_midia.py`); o Zap no formato ANTIGO (com a
+    plataforma da venda) continua sem foto (P2)."""
     from app.services.atendimento import foto as foto_mod
 
-    assert foto_mod.motivo_sem_foto(envio.conversa)
-    foto = SimpleNamespace(
-        sha256="0" * 64, nome="a.jpg", mime="image/jpeg", tamanho=10, conteudo=b"x"
-    )
-    with pytest.raises(EnvioRecusado) as e:
-        await enviar.enviar_foto(db, envio.conversa, foto, user=pessoa)
-    assert e.value.code == "foto_nao_suportada"
+    assert foto_mod.motivo_sem_foto(envio.conversa) is None
+    assert foto_mod.motivo_sem_foto(SimpleNamespace(plataforma="shopee", canal="zap"))
     assert envio.graph.chamadas == []
 
 

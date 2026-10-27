@@ -54,7 +54,7 @@ SUBCOMANDOS
   simular --tipo <tipo> [--de <wa_id>] [--nome <perfil>] [--texto "oi"]
           [--alvo <wamid>] [--status sent|delivered|read|played|failed]
           [--valor stop|resume|<evento>] [--wamid <id>] [--biz <id>] [--direto]
-          [--processar] [--teste]
+          [--processar] [--teste] [--media-id <id>] [--arquivo <caminho>] [--baixar]
       Monta o evento no formato REAL da Meta a partir de
       `tests/fixtures/whatsapp/<tipo>.json` (com o `phone_number_id` do número
       fictício — ou, com `--teste`, do número de TESTE da Meta cadastrado
@@ -69,6 +69,22 @@ SUBCOMANDOS
       contato, botao, lista, botao_modelo, reacao, nao_suportada, sistema,
       so_bsuid, ctwa, status, status_falhou, erros, preferencia,
       account_update, qualidade, modelo_status, objeto_inesperado.
+      MÍDIA (Onda 3, 27/10/2026 — imagem, audio, video, documento, figurinha):
+        --media-id   o id de uma mídia que EXISTE na Meta (o `subir-midia`
+                     devolve); sem ele, um id inventado;
+        --arquivo    (com --processar) a cópia vem deste arquivo do
+                     computador, sem a Meta — o "download" do número
+                     FICTÍCIO, com as mesmas conferências do baixador (teto,
+                     tipo pela assinatura, caminho gerado pelo servidor);
+        --baixar     (com --processar e --teste) baixa da Meta de verdade, no
+                     mesmo processo (o worker local faz o mesmo sozinho).
+
+  subir-midia --arquivo <caminho> [--pnid ID]
+      Só com o app de TESTE (§11.4, "mídia de verdade sem túnel"): sobe o
+      arquivo para a Meta (`POST /{pnid}/media`, com o token do banco local)
+      e mostra o `media_id` — o `simular --teste --media-id <id> --processar
+      --baixar` faz o baixador ir buscar de verdade. Recusa o número fictício
+      (o token dele é de mentira) e arquivo fora da lista de tipos.
 
 COMO RODAR (de fora do container; a API local não recarrega sozinha —
 reinicie a api depois de editar o código, e rode a migration 0430 antes):
@@ -110,10 +126,19 @@ from app.models import (
     AtendimentoCanal,
     AtendimentoZapApp,
     AtendimentoZapConta,
+    AtendimentoZapMidia,
     AtendimentoZapNumero,
 )
 from app.security.cipher import decrypt_json
-from app.services.atendimento import canais_externos, zap, zap_api, zap_contas, zap_entrada
+from app.services.atendimento import (
+    canais_externos,
+    zap,
+    zap_api,
+    zap_cadastro,
+    zap_contas,
+    zap_entrada,
+    zap_midia,
+)
 from app.services.atendimento.constantes import (
     CANAL_ZAP,
     MODO_HUMANO,
@@ -224,8 +249,13 @@ def montar_corpo(
     novo_wa_id: str | None = None,
     biz: str | None = None,
     ts: datetime | None = None,
+    media_id: str | None = None,
 ) -> dict:
-    """O corpo do webhook no formato da Meta, a partir da fixture do tipo."""
+    """O corpo do webhook no formato da Meta, a partir da fixture do tipo.
+
+    `media_id` (Onda 3): o id de uma mídia que existe na Meta (`subir-midia`);
+    sem ele, um id inventado.
+    """
     quando = ts or datetime.now(UTC)
     padrao_valor = {"preferencia": "stop", "account_update": "ACCOUNT_RESTRICTION"}.get(tipo, "")
     campos = {
@@ -244,7 +274,7 @@ def montar_corpo(
         "BIZ": biz,
         "TS": str(int(quando.timestamp())),
         "ENTRY_TIME": int(quando.timestamp()),
-        "MEDIA_ID": _digitos(16),
+        "MEDIA_ID": media_id or _digitos(16),
     }
     return _trocar(carregar_fixture(tipo), campos)
 
@@ -379,6 +409,9 @@ async def simular(
     direto: bool = False,
     processar: bool = False,
     teste: bool = False,
+    media_id: str | None = None,
+    arquivo: str | None = None,
+    baixar: bool = False,
     cliente: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Um evento de mentira, assinado, no webhook local (ou direto na caixa).
@@ -387,6 +420,10 @@ async def simular(
     da Meta cadastrados pelo `cadastrar` — o "oi" simulado abre a janela do
     lado do DaVinci (o do celular abriu a do lado da Meta), e o status
     simulado com o wamid que a Meta devolveu mostra os tiques.
+
+    Mídia (Onda 3): `arquivo` guarda a cópia a partir de um arquivo local (o
+    fictício, sem a Meta); `baixar` (só com `teste`) roda o baixador de
+    verdade no mesmo processo. Os dois depois do `processar`.
     """
     _so_local()
     ficticio = await (_app_de_teste(session) if teste else _ficticio(session))
@@ -404,6 +441,11 @@ async def simular(
     app_ref, app_id = app.id, app.app_id
     segredo = str(decrypt_json(app.segredo_enc).get("atual") or "")
     wamid = wamid or f"{zap.WAMID_SIMULADO}{uuid4().hex}"
+    if baixar and not teste:
+        print("RECUSADO: --baixar só com --teste (o token do fictício é de mentira).")
+        raise Recusado(2)
+    numero_ref = numero.id
+    media_id = media_id or (_digitos(16) if tipo in _TIPOS_COM_MIDIA else None)
     corpo_dict = montar_corpo(
         tipo,
         waba_id=conta.waba_id,
@@ -417,9 +459,12 @@ async def simular(
         status=status,
         valor=valor,
         biz=biz,
+        media_id=media_id,
     )
     corpo = json.dumps(corpo_dict, ensure_ascii=False).encode()
     saida: dict[str, Any] = {"tipo": tipo, "wamid": wamid}
+    if media_id:
+        saida["media_id"] = media_id
     if direto:
         itens = zap_entrada.itens_do_corpo(corpo_dict)
         saida["novos"] = await zap_entrada.gravar_itens(session, itens, app_ref=app_ref)
@@ -449,21 +494,102 @@ async def simular(
             saida["resposta"] = resp.text[:200]
     if processar:
         saida["processado"] = await zap_entrada.processar_eventos(session)
+        if media_id and (arquivo or baixar):
+            saida["midia"] = await _midia_simulada(
+                session, numero_ref, media_id, arquivo=arquivo, baixar=baixar
+            )
     return saida
+
+
+# Os tipos da fixture que trazem mídia (o `{{MEDIA_ID}}`).
+_TIPOS_COM_MIDIA = frozenset({"imagem", "audio", "video", "documento", "figurinha"})
+
+
+async def _midia_simulada(
+    session: AsyncSession,
+    numero_ref: Any,
+    media_id: str,
+    *,
+    arquivo: str | None,
+    baixar: bool,
+) -> dict[str, Any]:
+    """A mídia do evento simulado: a cópia de um arquivo local ou o baixador de verdade."""
+    midia = (
+        await session.execute(
+            select(AtendimentoZapMidia).where(
+                AtendimentoZapMidia.numero_ref == numero_ref,
+                AtendimentoZapMidia.media_id == media_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if midia is None:
+        return {"status": "sem_midia"}
+    midia_id = midia.id
+    if arquivo:
+        origem = Path(arquivo)
+        if not origem.is_file():
+            print(f"RECUSADO: arquivo não encontrado: {arquivo}")
+            raise Recusado(2)
+        status = await zap_midia.guardar_local(session, midia_id, origem)
+    else:
+        status = await zap_midia.baixar(session, midia_id)
+    return {"id": str(midia_id), "status": status}
+
+
+# ── Subir mídia de verdade (Onda 3) ───────────────────────────────────────
+
+
+async def subir_midia(
+    session: AsyncSession,
+    *,
+    arquivo: str,
+    pnid: str | None = None,
+    cliente: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """`POST /{pnid}/media` com o arquivo, pelo número de TESTE (§11.4). Devolve o `media_id`.
+
+    Só o app "DaVinci Zap Teste" e o número de teste da Meta (+1 555): o
+    fictício tem token de mentira, e número real nunca entra no computador.
+    O arquivo passa pelas MESMAS conferências do baixador (tipo pela
+    assinatura, teto) antes de sair daqui. Nada é gravado no banco.
+    """
+    _so_local()
+    achado = await _app_de_teste(session, pnid=pnid)
+    if achado is None:
+        print("Nenhum número de TESTE da Meta cadastrado: rode `cadastrar` (o fictício não sobe).")
+        raise Recusado(2)
+    app, conta, numero = achado
+    if not (app.teste and numero.teste and eh_numero_de_teste(numero.display_phone_number)):
+        raise Recusado(2)  # nunca um número que não seja o de teste
+    origem = Path(arquivo)
+    if not origem.is_file():
+        print(f"RECUSADO: arquivo não encontrado: {arquivo}")
+        raise Recusado(2)
+    if origem.stat().st_size > zap_midia.teto_bytes():
+        print("RECUSADO: o arquivo passa do teto (ATENDIMENTO_ZAP_MIDIA_MAX_MB).")
+        raise Recusado(2)
+    dados = origem.read_bytes()
+    texto = "text/plain" if origem.suffix.lower() == ".txt" else None
+    mime = zap_midia.detectar_tipo(dados, declarado=texto)
+    if mime is None:
+        print("RECUSADO: tipo de arquivo não aceito (o mesmo crivo do baixador).")
+        raise Recusado(2)
+    pnid_numero = numero.phone_number_id
+    token = zap_contas.token_da_conta(conta)
+    await session.rollback()
+    media_id = await zap_api.subir_midia(
+        pnid_numero, token, nome=origem.name, dados=dados, mime=mime, cliente=cliente
+    )
+    return {"media_id": media_id, "mime": mime, "bytes": len(dados)}
 
 
 # ── O app de TESTE de verdade (Onda 2) ────────────────────────────────────
 
 
-def eh_numero_de_teste(display: str | None) -> bool:
-    """O número de teste da Meta: um +1 555 (código de área fictício dos EUA). PURA.
-
-    É a trava do §11.3: a WABA com QUALQUER outro número (um real) não entra
-    no computador — a credencial de produção nunca fica no banco local.
-    [confirmar] se a Meta passa a dar número de teste fora do +1 555.
-    """
-    digitos = re.sub(r"\D", "", display or "")
-    return digitos.startswith("1555") and len(digitos) == 11
+# O número de teste da Meta (+1 555): a trava do §11.3 — a WABA com QUALQUER
+# outro número (um real) não entra no computador. A régua mora em
+# `zap_cadastro` desde a Onda 4 (27/10/2026): a tela usa a mesma.
+eh_numero_de_teste = zap_cadastro.eh_numero_de_teste
 
 
 async def _app_de_teste(
@@ -589,6 +715,11 @@ async def cadastrar_teste(
         }
         - {str(waba_id)}
     )
+    if not inspecao.alvos_detalhados:
+        # A Meta não detalhou as contas do token (27/10/2026): a WABA de teste
+        # ficou conferida pelo `ler_waba`/`listar_numeros` acima; as "outras"
+        # não dá para listar — o "davinciteste" só tem os ativos de teste.
+        print("Aviso: a Meta não detalhou as contas do token; conferi lendo a conta de teste.")
     if outras:
         print(
             f"RECUSADO: o token enxerga outras {len(outras)} conta(s) do WhatsApp além da de "
@@ -912,6 +1043,16 @@ def _argumentos(argv: list[str] | None) -> argparse.Namespace:
     sim.add_argument(
         "--teste", action="store_true", help="com o app/número de TESTE da Meta (Onda 2)"
     )
+    sim.add_argument("--media-id", help="o id de uma mídia que existe na Meta (subir-midia)")
+    sim.add_argument(
+        "--arquivo", help="(com --processar) a cópia vem deste arquivo local, sem a Meta"
+    )
+    sim.add_argument(
+        "--baixar", action="store_true", help="(com --processar --teste) baixa da Meta de verdade"
+    )
+    sub_m = sub.add_parser("subir-midia", help="sobe um arquivo para a Meta pelo número de TESTE")
+    sub_m.add_argument("--arquivo", required=True)
+    sub_m.add_argument("--pnid", help="phone_number_id do número de teste")
     return parser.parse_args(argv)
 
 
@@ -941,6 +1082,14 @@ async def _rodar(args: argparse.Namespace) -> int:
         if args.comando == "esquecer-token":
             print(json.dumps(await esquecer_token(session, waba_id=args.waba_id), indent=2))
             return 0
+        if args.comando == "subir-midia":
+            try:
+                saida_m = await subir_midia(session, arquivo=args.arquivo, pnid=args.pnid)
+            except zap_api.ZapApiErro as exc:
+                print(f"A Meta recusou o upload: {exc}")  # a frase já vem sem token
+                return 1
+            print(json.dumps(saida_m, indent=2))
+            return 0
         saida = await simular(
             session,
             tipo=args.tipo,
@@ -955,6 +1104,9 @@ async def _rodar(args: argparse.Namespace) -> int:
             direto=args.direto,
             processar=args.processar,
             teste=args.teste,
+            media_id=args.media_id,
+            arquivo=args.arquivo,
+            baixar=args.baixar,
         )
         print(json.dumps(saida, indent=2, ensure_ascii=False, default=str))
         return 0 if saida.get("http", 200) == 200 else 1

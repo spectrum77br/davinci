@@ -47,6 +47,13 @@ JANELA_SEGREDO_ANTERIOR = timedelta(hours=1)
 MOTIVO_ROTINA = "rotina"
 MOTIVO_VAZOU = "vazou"
 
+# Onda 4 (27/10/2026): a falha de assinatura POR APP, só no Redis (o webhook
+# conta; o alarme do cron de saúde lê). O contador global
+# (`webhook:meta_wa:sig_fail_count`) não diz QUAL app — e o alarme é por
+# proporção: falhas de um app E nenhum evento válido dele no mesmo período
+# (um estranho com curl gera falhas, mas não para os eventos verdadeiros).
+CHAVE_FALHA_ASSINATURA_APP = "webhook:meta_wa:sig_fail_app:{app_ref}"
+
 CACHE_TTL_S = 60.0
 # Teto do cache em memória: o negativo guarda ids inventados por estranhos.
 CACHE_MAX = 512

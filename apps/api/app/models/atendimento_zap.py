@@ -42,7 +42,10 @@ saem como `{_arquivo: true}`, e pausar um número, trocar a etapa ou o token é
 exatamente o que o Histórico serve para mostrar.
 
 Os valores das colunas de estado estão nos CHECKs abaixo (e no §4.2 do
-desenho); a migration é a `0430_atendimento_zap`.
+desenho); a migration é a `0430_atendimento_zap`. A `0431_atendimento_zap_saude`
+(Onda 4, 27/10/2026) acrescenta a saúde da WABA (`contas.saude`), o CASO da
+migração do número (`numeros.caso_migracao`, a trava do "registrar") e os
+índices da limpeza e da fila da mídia.
 """
 
 from datetime import datetime
@@ -86,6 +89,11 @@ ZAP_NUMERO_ETAPAS = (
 )
 ZAP_NUMERO_SAUDE = ("novo", "ok", "restrito", "erro", "sem_eventos")
 ZAP_OPT_OUT_TIPOS = ("todos", "marketing")
+# O caso da migração do número (§13.3, Onda 4): A = API oficial numa conta do
+# Duoke (migração entre contas); A2 = a conta já é nossa e o Duoke só tem
+# acesso (NUNCA registrar de novo: só queimaria tentativas); B = aplicativo
+# por QR code. O "registrar" só aparece com A ou B, na etapa `migrando`.
+ZAP_NUMERO_CASOS = ("A", "A2", "B")
 ZAP_EVENTO_TIPOS = ("mensagem", "status", "erro", "preferencia", "conta", "ignorado")
 ZAP_EVENTO_RESULTADOS = (
     "gravado",
@@ -212,6 +220,14 @@ class AtendimentoZapConta(Base, TimestampMixin):
     # O `error.code` da Meta (131047, 190, 368…).
     ultimo_erro_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ultimo_erro_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Onda 4 (0431, 27/10/2026): o que o cron de saúde e os botões da tela
+    # viram na Meta — os apps inscritos na WABA (`inscritos`, `outros_apps`,
+    # `inscricao_em`) e a última inspeção do token que FALHOU
+    # (`inspecao_erro`, `inspecao_erro_em`; a que deu certo vai nas colunas).
+    # Só ids e frases: nunca o token.
+    saude: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
 
 class AtendimentoZapNumero(Base, TimestampMixin):
@@ -239,6 +255,9 @@ class AtendimentoZapNumero(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint(_em("etapa", ZAP_NUMERO_ETAPAS), name="etapa"),
         CheckConstraint(_em("saude_status", ZAP_NUMERO_SAUDE), name="saude_status"),
+        CheckConstraint(
+            _em("caso_migracao", ZAP_NUMERO_CASOS, nulo=True), name="caso_migracao"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -315,6 +334,9 @@ class AtendimentoZapNumero(Base, TimestampMixin):
     )
     migrado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Onda 4 (0431): A / A2 / B (`ZAP_NUMERO_CASOS`). NULL = ainda não
+    # descoberto — e sem caso o "registrar" não aparece.
+    caso_migracao: Mapped[str | None] = mapped_column(String(4), nullable=True)
 
 
 class AtendimentoZapContato(Base, TimestampMixin):
@@ -429,6 +451,9 @@ class AtendimentoZapEvento(Base):
     __table_args__ = (
         CheckConstraint(_em("tipo", ZAP_EVENTO_TIPOS), name="tipo"),
         CheckConstraint(_em("resultado", ZAP_EVENTO_RESULTADOS, nulo=True), name="resultado"),
+        # Onda 4 (0431): a retenção de 30 dias e o alarme do backlog leem pela
+        # data de chegada.
+        Index("ix_atendimento_zap_eventos_recebido_em", "recebido_em"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
@@ -478,6 +503,10 @@ class AtendimentoZapMidia(Base, TimestampMixin):
         CheckConstraint(_em("status", ZAP_MIDIA_STATUS), name="status"),
         # O `media_id` é por número: a mesma mídia não é baixada duas vezes.
         UniqueConstraint("numero_ref", "media_id"),
+        # Onda 4 (0431): a fila do baixador (`status`, `proxima_em`) e a
+        # limpeza da retenção (`apagar_em`) sem varrer a tabela inteira.
+        Index("ix_atendimento_zap_midias_status_proxima_em", "status", "proxima_em"),
+        Index("ix_atendimento_zap_midias_apagar_em", "apagar_em"),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)

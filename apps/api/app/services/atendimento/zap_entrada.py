@@ -113,7 +113,10 @@ ESPERA_STATUS_MAX = timedelta(hours=1)
 # Janela do WhatsApp (resposta livre) e a do anúncio CTWA (só custo).
 JANELA_24H = timedelta(hours=24)
 JANELA_CTWA = timedelta(hours=72)
-# O id da mídia vale 7 dias na Meta (o baixador é da Onda 3).
+# O id da mídia vale 7 dias na Meta (a régua do desenho; o alerta "a menos
+# de 24 h de expirar" da Onda 4 lê daqui). O baixador (Onda 3, `zap_midia`)
+# tenta até 30 dias e só dá `expirada` antes disso se a Meta disser que a
+# mídia não existe mais [confirmar o prazo real no ensaio].
 VALIDADE_MIDIA_META = timedelta(days=7)
 # A saúde do canal na barra: no máximo uma escrita por minuto por canal.
 _SAUDE_A_CADA = timedelta(seconds=60)
@@ -834,7 +837,9 @@ async def _registrar_midia(
     midia: dict,
     quando: datetime,
 ) -> None:
-    """A mídia como `pendente` (o baixador é da Onda 3)."""
+    """A mídia como `pendente`: o baixador (`zap_midia.baixar`, Onda 3) é enfileirado
+    pela rodada do worker logo depois do commit. A retenção (180 dias) já fica
+    marcada no `apagar_em` (a limpeza é da Onda 4)."""
     s = get_settings()
     media_id = (midia.get("media_id") or "")[:64] or None
     valores = {
@@ -1215,6 +1220,48 @@ async def _efeito_do_webhook(
     )
 
 
+def inicio_do_mes(agora: datetime) -> datetime:
+    """O começo do mês (UTC) do contador "N de 1.000 grátis"."""
+    return agora.astimezone(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+async def respostas_do_mes(
+    session: AsyncSession, canal_ids: list[UUID], agora: datetime
+) -> dict[UUID, tuple[int, int]]:
+    """As RESPOSTAS de atendimento do mês por canal do número: `{canal: (todas, cobradas)}`.
+
+    A MESMA conta do alerta de 800/1.000 (`_contar_do_mes`) e da tela de
+    números (Onda 4, 27/10/2026): toda resposta com custo anotado na
+    categoria `service` (qualquer `pricing.type`); as `regular` são as
+    cobradas. Uma vez por wamid (o custo só é anotado no primeiro status com
+    `pricing`). Canal sem resposta não aparece.
+    """
+    ids = [c for c in canal_ids if c is not None]
+    if not ids:
+        return {}
+    entrega = AtendimentoMensagem.payload["zap"]["entrega"]
+    linhas = (
+        await session.execute(
+            select(
+                AtendimentoConversa.canal_id,
+                func.count(AtendimentoMensagem.id),
+                func.count(AtendimentoMensagem.id).filter(
+                    entrega["tipo_preco"].astext == "regular"
+                ),
+            )
+            .join(AtendimentoConversa, AtendimentoConversa.id == AtendimentoMensagem.conversa_id)
+            .where(
+                AtendimentoConversa.canal_id.in_(ids),
+                AtendimentoMensagem.autor == AUTOR_LOJA,
+                entrega["categoria"].astext == "service",
+                entrega["custo_em"].astext >= inicio_do_mes(agora).isoformat(),
+            )
+            .group_by(AtendimentoConversa.canal_id)
+        )
+    ).all()
+    return {canal: (int(todas or 0), int(cobradas or 0)) for canal, todas, cobradas in linhas}
+
+
 async def _contar_do_mes(
     session: AsyncSession, numero: AtendimentoZapNumero, agora: datetime
 ) -> None:
@@ -1234,25 +1281,9 @@ async def _contar_do_mes(
     if numero.canal_id is None:
         return
     await gravar.travar_linha(session, numero)
-    inicio = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    entrega = AtendimentoMensagem.payload["zap"]["entrega"]
-    respostas, cobradas = (
-        await session.execute(
-            select(
-                func.count(AtendimentoMensagem.id),
-                func.count(AtendimentoMensagem.id).filter(
-                    entrega["tipo_preco"].astext == "regular"
-                ),
-            )
-            .join(AtendimentoConversa, AtendimentoConversa.id == AtendimentoMensagem.conversa_id)
-            .where(
-                AtendimentoConversa.canal_id == numero.canal_id,
-                AtendimentoMensagem.autor == AUTOR_LOJA,
-                entrega["categoria"].astext == "service",
-                entrega["custo_em"].astext >= inicio.isoformat(),
-            )
-        )
-    ).one()
+    respostas, cobradas = (await respostas_do_mes(session, [numero.canal_id], agora)).get(
+        numero.canal_id, (0, 0)
+    )
     if int(respostas or 0) in ALERTAS_RESPOSTAS_MES:
         logger.error(
             "zap_respostas_mes",
@@ -1780,6 +1811,11 @@ async def rodada(*, origem: str = "cron", tempo_max_s: float = ORCAMENTO_S) -> d
     O job apaga o pedido coalescido ao começar (o que chegar durante a rodada
     pede outra). Uma rodada por vez (trava no Redis); ao terminar, relê a
     fila uma última vez antes de soltar a trava. Nunca levanta.
+
+    Onda 3 (27/10/2026): depois dos eventos (já commitados), enfileira um job
+    por MÍDIA pendente (`zap_midia.enfileirar_pendentes`) — a do evento que
+    acabou de chegar e a que o backoff liberou. A URL da Meta vale ~5 min: o
+    download não espera o próximo minuto.
     """
     if not leitura_ligada():
         return None
@@ -1795,9 +1831,12 @@ async def rodada(*, origem: str = "cron", tempo_max_s: float = ORCAMENTO_S) -> d
     if not pegou:
         return {"pulado": "ocupado"}
     try:
+        from app.services.atendimento import zap_midia
+
         async with _db.SessionLocal() as session:
             resumo = await processar_eventos(session, tempo_max_s=tempo_max_s)
             ultima = await processar_eventos(session, tempo_max_s=5.0)
+            resumo["midias"] = await zap_midia.enfileirar_pendentes(session)
         for k in ("processados", "pendentes", "erros"):
             resumo[k] = resumo.get(k, 0) + ultima.get(k, 0)
     except Exception as exc:  # noqa: BLE001
@@ -1805,10 +1844,10 @@ async def rodada(*, origem: str = "cron", tempo_max_s: float = ORCAMENTO_S) -> d
         return None
     finally:
         await _soltar_trava(redis_cli, token)
-    if resumo.get("processados") or resumo.get("erros"):
+    if resumo.get("processados") or resumo.get("erros") or resumo.get("midias"):
         logger.info(
             "zap_rodada",
             origem=origem,
-            **{k: resumo.get(k) for k in ("processados", "pendentes", "erros")},
+            **{k: resumo.get(k) for k in ("processados", "pendentes", "erros", "midias")},
         )
     return resumo

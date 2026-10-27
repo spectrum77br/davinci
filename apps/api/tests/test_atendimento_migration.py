@@ -1,4 +1,4 @@
-"""As migrations 0346…0430 do atendimento criam EXATAMENTE o que o model declara (e desfazem).
+"""As migrations 0346…0431 do atendimento criam EXATAMENTE o que o model declara (e desfazem).
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Sem este teste, uma coluna esquecida na 0346 (ou um índice parcial
@@ -75,6 +75,11 @@ do webhook e mídia): CHECKs das colunas de estado, os UNIQUE parciais do
 contato (bsuid e wa_id_norm) e o índice parcial da fila de eventos. A FK
 `numeros.marca_id` exige o stub `marcas` no rascunho. Roda em cima de todas e
 o downgrade dela volta o catálogo ao de depois da 0416.
+
+A 0431 (27/10/2026, Onda 4 do Zap — a tela "Números do WhatsApp", a saúde e
+a limpeza) acrescenta a `saude` da WABA, o `caso_migracao` do número (com o
+CHECK A/A2/B) e os índices da retenção e da fila da mídia; roda em cima da
+0430 e o downgrade volta ao catálogo de depois dela.
 """
 
 # ruff: noqa: S608
@@ -108,6 +113,7 @@ _MIGRATION_VISTO = _VERSOES / "0399_atendimento_visto_em.py"
 _MIGRATION_NOTIFICACOES = _VERSOES / "0416_atendimento_notificacoes_nativas.py"
 _MIGRATION_AGENTE = _VERSOES / "0420_atendimento_agente.py"
 _MIGRATION_ZAP = _VERSOES / "0430_atendimento_zap.py"
+_MIGRATION_ZAP_SAUDE = _VERSOES / "0431_atendimento_zap_saude.py"
 # A regra de palavras das pastas de e-mail (0387, a camada do atendimento sobre
 # a Central de e-mail) é conferida em `test_mail_atendimento_migration.py`,
 # junto das tabelas `mail_*` da mesma migration. As tabelas novas da 0420 (o
@@ -252,6 +258,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     # Nasceu 0415 no desenho (17/10), virou 0417 em 19/10 e 0430 em 26/10:
     # o origin chegou primeiro com as 0415–0429.
     assert zap.down_revision == "0429_compra_contabilidade"
+    # Onda 4 (27/10/2026): em cima da 0430 do Zap (o origin/main tem outra
+    # 0430 — na publicação as duas do Zap podem ser renumeradas).
+    zap_saude = _carregar_migration(_MIGRATION_ZAP_SAUDE)
+    assert zap_saude.revision == "0431_atendimento_zap_saude"
+    assert zap_saude.down_revision == "0430_atendimento_zap"
+    assert zap_saude.NUMERO_CASOS == zap_model.ZAP_NUMERO_CASOS
     # Os valores dos CHECKs da migration são cópia dos do model.
     for na_migration, no_model in (
         (zap.CONTA_STATUS, zap_model.ZAP_CONTA_STATUS),
@@ -334,6 +346,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     notificacoes.SCHEMA = rascunho
     agente.SCHEMA = rascunho
     zap.SCHEMA = rascunho
+    zap_saude.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -579,6 +592,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await conn.run_sync(_rodar, "upgrade", (zap,))
         await db.commit()
 
+        # 0431: a saúde da WABA, o caso da migração e os índices da limpeza.
+        antes_da_0431 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (zap_saude,))
+        await db.commit()
+
         da_migration = await _catalogo(db, rascunho, rascunho)
         do_model = await _catalogo(db, schema_model, schema_model)
         assert da_migration["tabelas"] == TABELAS
@@ -671,6 +690,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "ck_atendimento_zap_midias_status",
             "fk_atendimento_zap_midias_numero_ref_atendimento_zap_numeros",
             "fk_atendimento_zap_midias_mensagem_id_atendimento_mensagens",
+            # 0431: o caso da migração do número (A / A2 / B).
+            "ck_atendimento_zap_numeros_caso_migracao",
         } <= nomes
         assert "ck_atendimento_canais_integracao_ou_robo" not in nomes
         assert da_migration["colunas"] == do_model["colunas"]
@@ -882,6 +903,26 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "'aguardando_duoke'" in restricoes["ck_atendimento_zap_numeros_etapa"]
         assert "IS NULL" in restricoes["ck_atendimento_zap_contatos_opt_out_tipo"]
         assert "IS NULL" in restricoes["ck_atendimento_zap_eventos_resultado"]
+        # 0431: a saúde da WABA nasce vazia; o número, sem caso (o "registrar"
+        # não aparece); os índices da retenção e da fila da mídia.
+        assert cols[("atendimento_zap_contas", "saude")][4:] == ("NO", "'{}'::jsonb")
+        assert cols[("atendimento_zap_numeros", "caso_migracao")][2:] == (
+            "varchar",
+            4,
+            "YES",
+            None,
+        )
+        assert "'A2'" in restricoes["ck_atendimento_zap_numeros_caso_migracao"]
+        assert "IS NULL" in restricoes["ck_atendimento_zap_numeros_caso_migracao"]
+        assert "(recebido_em)" in defs["ix_atendimento_zap_eventos_recebido_em"]
+        assert "(status, proxima_em)" in defs["ix_atendimento_zap_midias_status_proxima_em"]
+        assert "(apagar_em)" in defs["ix_atendimento_zap_midias_apagar_em"]
+
+        # O downgrade da 0431 volta EXATAMENTE ao catálogo de depois da 0430.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (zap_saude,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0431
 
         # O downgrade da 0430 volta EXATAMENTE ao catálogo de depois da 0420.
         conn = await db.connection()

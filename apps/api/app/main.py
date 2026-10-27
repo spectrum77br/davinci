@@ -26,6 +26,7 @@ from app.routers import atendimento_reclamacoes as atendimento_reclamacoes_route
 from app.routers import atendimento_redes as atendimento_redes_router
 from app.routers import atendimento_robo as atendimento_robo_router
 from app.routers import atendimento_troca as atendimento_troca_router
+from app.routers import atendimento_zap as atendimento_zap_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import automacoes as automacoes_router
@@ -332,6 +333,12 @@ app.include_router(atendimento_lida_router.router)
 # Mensagens automáticas (05/10/2026): a aba "Automáticas" — as regras por
 # loja (modo seco até a troca), o registro sem texto e a conta com o Duoke.
 app.include_router(atendimento_automacoes_router.router)
+# Zap (WhatsApp Cloud API, 27/10/2026 — docs/zap/desenho.md §8.5): as rotas
+# internas `/api/atendimento/zap/*`. Onda 3: só a mídia (a nossa cópia, só
+# admin, `nosniff` + CSP sandbox); o cadastro e a saúde vêm na Onda 4.
+app.include_router(atendimento_zap_router.router)
+# Onda 4 (27/10/2026): a tela "Números do WhatsApp" (só admin; 404 para os outros).
+app.include_router(atendimento_zap_router.router_numeros)
 # Temu/AliExpress (30/09/2026): o robô do Mac mini manda o que a página do
 # Seller Center recebe (token próprio; vazio = desligado).
 app.include_router(atendimento_robo_router.router)

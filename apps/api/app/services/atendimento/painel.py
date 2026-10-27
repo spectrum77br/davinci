@@ -1169,6 +1169,7 @@ async def situacao_da_foto(session: AsyncSession, conversa: AtendimentoConversa)
         "max_bytes": foto.MAX_BYTES_UPLOAD,
         "legenda_obrigatoria": foto.legenda_obrigatoria(conversa),
         "legenda_permitida": foto.legenda_permitida(conversa),
+        "legenda_max": foto.limite_da_legenda(conversa),
     }
     motivo = foto.motivo_sem_foto(conversa)
     if motivo:

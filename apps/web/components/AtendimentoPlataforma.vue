@@ -2199,6 +2199,9 @@ const ERROS_ENVIO: [RegExp, string][] = [
   // O erro da Meta (`meta:<code>`) vem com a frase pronta em `entrega_erro`.
   [/^zap_cinto:|^zap_sem_destino/, 'O envio pelo Zap foi barrado no último instante (a chave, a lista de teste ou a janela mudou) — nada saiu.'],
   [/^meta:(?:sem_resposta|sem_wamid)/, 'A Meta não respondeu a tempo.'],
+  // A foto do Zap (27/10/2026, Onda 3): o upload para a Meta falhou ANTES da
+  // mensagem — nada chegou ao cliente.
+  [/^zap_upload:|^zap_sem_copia/, 'A foto não subiu para a Meta — nada chegou ao cliente. Anexe de novo para tentar outra vez.'],
 ]
 export function erroEnvioLegivel(erro: string | null | undefined): string {
   const e = (erro || '').trim()

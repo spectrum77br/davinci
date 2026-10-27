@@ -139,7 +139,15 @@ no Duoke enquanto ela sai por aqui), nem as travas da IA (automático, vez).
 FOTO (01/10/2026): `enviar_foto` é o mesmo caminho para UMA imagem (Shopee,
 TikTok e pós-venda do ML; `foto.py`): mesmas travas, mesma linha em voo,
 mesma régua de resultado. O upload para a plataforma só acontece aqui —
-com o envio desligado, nada sobe.
+com o envio desligado, nada sobe. ZAP (27/10/2026, Onda 3 — §6.8): a foto do
+número de WhatsApp passa pelas MESMAS 14 travas do texto (`_destino_zap`; só
+admin, como o texto); a legenda é OPCIONAL e passa pelo validador (até 1.024
+caracteres); a nossa cópia vai para o disco junto da linha em voo
+(`zap_midia.guardar_saida`: o WhatsApp não devolve URL, o balão usa a rota
+`/api/atendimento/zap/midia/<id>`, URL RELATIVA aceita pelo
+`_aplicar_resultado`); o ramo do Zap no `_chamar_plataforma_foto` vem ANTES
+do `cliente_da_integracao` (o Zap não tem loja); e o efeito de um erro da
+Meta é aplicado depois, como no texto (`_depois_do_zap`).
 
 Texto de comprador (e o nosso) nunca vai para o log — só ids e estados.
 """
@@ -171,6 +179,7 @@ from app.models import (
     AtendimentoConversa,
     AtendimentoMensagem,
     AtendimentoRascunho,
+    AtendimentoZapContato,
     AtendimentoZapNumero,
     Integration,
     User,
@@ -183,6 +192,7 @@ from app.services.atendimento import (
     gravar,
     zap,
     zap_erros,
+    zap_midia,
 )
 from app.services.atendimento.constantes import (
     AUTOR_LOJA,
@@ -626,6 +636,20 @@ def _motivo_numero_pausado(numero: AtendimentoZapNumero) -> str:
     return MOTIVO_ZAP_NUMERO_PAUSADO
 
 
+def _to_do_zap(numero: AtendimentoZapNumero, contato: AtendimentoZapContato) -> str:
+    """Para quem vai o POST: o `wa_id` do webhook — menos no número de TESTE da Meta.
+
+    Ensaio real de 27/10/2026: a lista de destinatários do app de teste é
+    LITERAL e o celular brasileiro entra nela COM o 9º dígito
+    (5547984177571), mas o webhook entrega o `wa_id` SEM o 9
+    (554784177571) → 131030 "fora da lista". No número de teste vai o
+    normalizado (com o 9); nos números reais, o `wa_id` como a Meta mandou.
+    """
+    if numero.teste and contato.wa_id_norm:
+        return contato.wa_id_norm
+    return contato.wa_id
+
+
 async def _destino_zap(
     session: AsyncSession, conversa: AtendimentoConversa, *, origem: str
 ) -> _Destino:
@@ -706,7 +730,7 @@ async def _destino_zap(
             phone_number_id=numero.phone_number_id,
             conta_id=conta.id,
             contato_id=contato.id,
-            to=contato.wa_id,
+            to=_to_do_zap(numero, contato),
             janela_ate=fim,
             destinos_teste=lista,
             producao=bool(settings.is_prod),
@@ -1124,6 +1148,22 @@ async def _externo_id_livre(
     return dono is None
 
 
+def _url_do_balao(url: object) -> bool:
+    """A URL da foto que saiu pode ir para o `<img>` do balão?
+
+    `https://` (a CDN da plataforma) ou um caminho RELATIVO da própria API (a
+    nossa cópia do Zap, 27/10/2026) — a regra do `gravar.url_avatar`: aceita
+    `/…`, recusa `//outro-site`, `javascript:`, `data:`, `http://` e espaço.
+    """
+    if not isinstance(url, str) or not url or len(url) > 2048:
+        return False
+    if any(c.isspace() for c in url) or "\\" in url:
+        return False
+    if url.startswith("https://"):
+        return True
+    return url.startswith("/") and not url.startswith("//")
+
+
 async def _aplicar_resultado(
     session: AsyncSession,
     conversa: AtendimentoConversa,
@@ -1159,9 +1199,9 @@ async def _aplicar_resultado(
         mensagem.erro = (resultado.erro or resultado.bloqueio or "envio_falhou")[:500]
     mensagem.payload = payload
     url = (resultado.payload or {}).get("imagem_url")
-    if resultado.ok and mensagem.tipo == "imagem" and isinstance(url, str) and url.startswith("https://"):
-        # A foto que saiu: o balão mostra a imagem pela URL da plataforma
-        # (a nossa cópia nunca é guardada).
+    if resultado.ok and mensagem.tipo == "imagem" and _url_do_balao(url):
+        # A foto que saiu: o balão mostra a imagem pela URL da plataforma — ou,
+        # no Zap (27/10/2026), pela nossa cópia (URL RELATIVA da rota).
         primeiro = (mensagem.anexos or [{}])[0]
         mensagem.anexos = [{**(primeiro if isinstance(primeiro, dict) else {}), "url": url}]
     if resultado.bloqueio:
@@ -1758,6 +1798,7 @@ async def _depois_do_zap(
     *,
     conversa_id: UUID,
     mensagem_id: UUID,
+    midia_id: UUID | None = None,
 ) -> None:
     """O efeito do erro da Meta (§6.2 item 7) numa transação CURTA e própria.
 
@@ -1776,7 +1817,9 @@ async def _depois_do_zap(
         # — pelo webhook, o mesmo efeito já não tem ator. O motivo fica no
         # próprio número (`ultimo_erro`, `saude.pausado_pela_meta`).
         await session.execute(DESMARCAR_TRANSACAO)
-        await zap.depois_do_envio(session, destino, conversa_id=conversa_id, resultado=resultado)
+        await zap.depois_do_envio(
+            session, destino, conversa_id=conversa_id, resultado=resultado, midia_id=midia_id
+        )
         await session.commit()
     except Exception as e:  # noqa: BLE001
         await session.rollback()
@@ -1961,8 +2004,12 @@ async def _preparar_foto(
     user: User | None,
     ultima_vista_id: UUID | None,
     confirmar: bool,
-) -> tuple[AtendimentoMensagem, _Destino, str | None]:
-    """Passos 0 e 1 da foto: trava, confere e grava a linha em voo (sem commit)."""
+) -> tuple[AtendimentoMensagem, _Destino, str | None, zap_midia.CopiaDeSaida | None]:
+    """Passos 0 e 1 da foto: trava, confere e grava a linha em voo (sem commit).
+
+    Zap (27/10/2026): a foto é reduzida ao teto da Cloud API e a NOSSA cópia
+    vai para o disco junto da linha em voo (devolvida: é ela que sobe).
+    """
     from app.services.atendimento import foto as foto_mod
 
     await travar_conversa(session, conversa)
@@ -1975,6 +2022,11 @@ async def _preparar_foto(
         # ML: a foto vai DENTRO de uma mensagem — o texto passa pelo validador
         # como qualquer resposta (vazio = `texto_invalido`).
         legenda_ok = _preparar_texto(legenda, conversa=conversa, origem=ORIGEM_HUMANO)
+    elif foto_mod.legenda_permitida(conversa):
+        # Zap: a legenda é opcional — mas, escrita, passa pelo validador (sem
+        # isto ela levaria PIX ou "por fora" sem conferência) e pelo teto dela.
+        if (legenda or "").strip():
+            legenda_ok = _preparar_legenda(legenda, conversa=conversa)
     elif (legenda or "").strip():
         raise EnvioRecusado(
             RECUSA_FOTO_INVALIDA,
@@ -1983,6 +2035,13 @@ async def _preparar_foto(
     await _conferir_foto_repetida(session, conversa, foto.sha256)
     if ultima_vista_id is not None and not confirmar:
         await _conferir_mudou(session, conversa, ultima_vista_id)
+    pronta: tuple[str, bytes, str] | None = None
+    if destino.zap is not None:
+        # O teto da Cloud API (5 MB): reduz ANTES — a cópia é o que sai.
+        try:
+            pronta = foto_mod.preparar_para(PLATAFORMA_WHATSAPP, foto)
+        except foto_mod.FotoInvalida as e:
+            raise EnvioRecusado(RECUSA_FOTO_INVALIDA, e.detail) from e
 
     await aposentar_envios_presos(session, conversa_id=conversa.id)
     mensagem = AtendimentoMensagem(
@@ -2011,17 +2070,78 @@ async def _preparar_foto(
         raise EnvioRecusado(
             RECUSA_ENVIO_EM_ANDAMENTO, "Há uma resposta sendo enviada nesta conversa."
         ) from e
-    return mensagem, destino, legenda_ok
+    copia: zap_midia.CopiaDeSaida | None = None
+    if destino.zap is not None and pronta is not None:
+        nome, dados, mime = pronta
+        copia = await zap_midia.guardar_saida(
+            session,
+            numero_id=destino.zap.numero_id,
+            mensagem_id=mensagem.id,
+            nome=nome,
+            dados=dados,
+            mime=mime,
+        )
+        # O balão mostra a NOSSA cópia desde já (enviando, enviada ou não).
+        mensagem.anexos = [
+            {
+                "tipo": "imagem",
+                "nome": nome,
+                "mime": copia.mime,
+                "tamanho": len(dados),
+                "midia_id": str(copia.midia_id),
+                "status": zap_midia.M_BAIXADA,
+                "url": copia.url,
+            }
+        ]
+        await session.flush()
+    return mensagem, destino, legenda_ok, copia
+
+
+def _preparar_legenda(legenda: str | None, *, conversa: AtendimentoConversa) -> str | None:
+    """A legenda OPCIONAL (Zap): o validador da caixa + o teto da legenda (1.024).
+
+    Levanta `texto_invalido` com TODOS os motivos de uma vez; vazia depois de
+    normalizar = sem legenda.
+    """
+    from app.services.atendimento import foto as foto_mod
+    from app.services.atendimento import validador
+
+    normalizado = validador.normalizar(
+        legenda or "", plataforma=conversa.plataforma, canal=conversa.canal
+    )
+    if not normalizado.strip():
+        return None
+    motivos = list(
+        validador.validar(
+            normalizado, plataforma=conversa.plataforma, canal=conversa.canal, origem=ORIGEM_HUMANO
+        )
+    )
+    teto = foto_mod.limite_da_legenda(conversa)
+    if teto is not None and len(normalizado) > teto:
+        motivos.append(f"A legenda da foto passa de {teto} caracteres ({len(normalizado)}).")
+    if motivos:
+        raise EnvioRecusado(RECUSA_TEXTO_INVALIDO, motivos)
+    return normalizado
 
 
 async def _chamar_plataforma_foto(
     session: AsyncSession,
     conversa: AtendimentoConversa,
-    integration: Integration,
+    integration: Integration | None,
     foto,
     legenda: str | None,
+    *,
+    zap_destino: zap.ZapDestino | None = None,
+    mensagem_id: UUID | None = None,
+    copia: zap_midia.CopiaDeSaida | None = None,
 ) -> ResultadoEnvio:
-    """Sobe a foto e manda a mensagem. Nunca levanta (como `_chamar_plataforma`)."""
+    """Sobe a foto e manda a mensagem. Nunca levanta (como `_chamar_plataforma`).
+
+    Zap (27/10/2026): com `zap_destino`, chama `zap.enviar_imagem` com a
+    NOSSA cópia (já reduzida) dentro do mesmo teto de tempo — ANTES do
+    `clientes.cliente_da_integracao`, que com `None` daria
+    `cliente_indisponivel`. Os nomeados só vêm com o Zap (o único chamador).
+    """
     from app.services.atendimento import foto as foto_mod
 
     s = get_settings()
@@ -2029,6 +2149,25 @@ async def _chamar_plataforma_foto(
         return ResultadoEnvio(ok=False, erro="simulador_em_producao")
     if vai_para_o_simulador(conversa.plataforma):
         return ResultadoEnvio(ok=True, externo_id=f"sim:{uuid4()}", payload={"simulador": True})
+    if zap_destino is not None:
+        if copia is None:
+            return ResultadoEnvio(ok=False, erro="zap_sem_copia")
+        try:
+            return await asyncio.wait_for(
+                zap.enviar_imagem(
+                    session, conversa, zap_destino, copia, legenda, mensagem_id=mensagem_id
+                ),
+                timeout=TEMPO_MAXIMO_FOTO_S,
+            )
+        except TimeoutError:
+            return ResultadoEnvio(ok=False, ambiguo=True, erro="timeout")
+        except Exception as e:  # noqa: BLE001 — o adaptador levantou: pode ter saído
+            return ResultadoEnvio(
+                ok=False, ambiguo=True, erro=f"erro_inesperado: {type(e).__name__}"
+            )
+    if conversa.plataforma == PLATAFORMA_WHATSAPP:
+        # Cinto: o Zap sem o destino das travas nunca cai em outro adaptador.
+        return ResultadoEnvio(ok=False, erro="zap_sem_destino")
     try:
         cliente = await clientes.cliente_da_integracao(integration)
     except Exception as e:  # noqa: BLE001
@@ -2059,11 +2198,19 @@ async def enviar_foto(
     O mesmo contrato do `enviar_resposta`: `EnvioRecusado` = nada saiu (trava
     nossa); erro da plataforma vira `falhou`/`revisar` na mensagem; COMMITA
     antes de falar com a plataforma e depois. Só pessoa manda foto (a IA
-    nunca). `legenda` só no ML (obrigatória lá); Shopee/TikTok: foto sozinha.
+    nunca). `legenda` no ML (obrigatória) e no Zap (opcional, até 1.024);
+    Shopee/TikTok: foto sozinha.
     """
+    if (
+        conversa.canal == CANAL_ZAP
+        and conversa.plataforma == PLATAFORMA_WHATSAPP
+        and (user is None or user.role != UserRole.ADMIN)
+    ):
+        # Zap do número: só administrador (o mesmo cinto do texto).
+        raise EnvioRecusado(RECUSA_ZAP_SO_ADMIN, MOTIVO_ZAP_SO_ADMIN)
     ponto = await session.begin_nested()
     try:
-        mensagem, destino, legenda_ok = await _preparar_foto(
+        mensagem, destino, legenda_ok, copia = await _preparar_foto(
             session,
             conversa,
             foto,
@@ -2075,10 +2222,16 @@ async def enviar_foto(
     except BaseException:
         await ponto.rollback()
         raise
-    await ponto.commit()
-    # Em voo já conta como resposta na fila (como o texto).
-    gravar.recalcular(conversa, [mensagem])
-    await session.commit()
+    try:
+        await ponto.commit()
+        # Em voo já conta como resposta na fila (como o texto).
+        gravar.recalcular(conversa, [mensagem])
+        await session.commit()
+    except BaseException:
+        if copia is not None:
+            # A linha não gravou: a cópia do Zap não fica órfã no disco.
+            zap_midia.remover_arquivo(copia.caminho)
+        raise
     logger.info(
         "atendimento_foto_iniciada",
         conversa_id=str(conversa.id),
@@ -2087,8 +2240,15 @@ async def enviar_foto(
         bytes=foto.tamanho,
         simulador=get_settings().atendimento_simulador,
     )
+    # Os nomeados SÓ com o Zap (como no texto).
+    extra = (
+        {"zap_destino": destino.zap, "mensagem_id": mensagem.id, "copia": copia}
+        if destino.zap is not None
+        else {}
+    )
+    conversa_id, mensagem_id = conversa.id, mensagem.id
     resultado = await _chamar_plataforma_foto(
-        session, conversa, destino.integration, foto, legenda_ok
+        session, conversa, destino.integration, foto, legenda_ok, **extra
     )
     await _gravar_resultado(
         session,
@@ -2101,6 +2261,18 @@ async def enviar_foto(
         origem=ORIGEM_HUMANO,
         avaliar=False,
     )
+    if destino.zap is not None:
+        # Zap: o efeito do erro da Meta e o id da mídia na Meta, numa transação própria.
+        await _depois_do_zap(
+            session,
+            conversa,
+            mensagem,
+            destino.zap,
+            resultado,
+            conversa_id=conversa_id,
+            mensagem_id=mensagem_id,
+            midia_id=copia.midia_id if copia is not None else None,
+        )
     logger.info(
         "atendimento_foto_concluida",
         conversa_id=str(conversa.id),

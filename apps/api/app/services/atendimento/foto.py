@@ -19,6 +19,17 @@ Por plataforma (a resposta é a do chat da conversa):
                       `attachments: [id]` e um TEXTO (o ML manda o anexo junto
                       de uma mensagem; até 350 caracteres, como o texto).
                       Pergunta do ML (no anúncio) não aceita anexo.
+  Zap (WhatsApp)      Onda 3 (27/10/2026, docs/zap/desenho.md §6.8): `POST
+                      /{pnid}/media` (multipart) → id → mensagem `type=image`
+                      com legenda OPCIONAL (até 1024 caracteres, pelo
+                      validador). O ramo mora no adaptador do Zap
+                      (`zap.enviar_imagem`), chamado pelo
+                      `enviar._chamar_plataforma_foto` ANTES do
+                      `cliente_da_integracao` (o Zap não tem loja); a nossa
+                      cópia fica no disco (`zap_midia.guardar_saida`) porque o
+                      WhatsApp não devolve URL. Só o Zap DO NÚMERO
+                      (`whatsapp` + `zap`): o formato antigo (com a plataforma
+                      da venda) continua sem foto.
   Amazon, Magalu, Temu, AliExpress, Instagram: sem foto pelo DaVinci (por
   enquanto).
 
@@ -26,7 +37,7 @@ Tamanho: a tela aceita até 10 MB e até `MAX_PIXELS` de resolução (JPEG ou
 PNG, conferido pelos BYTES e pelo cabeçalho, não pelo nome); na hora de
 subir, a foto é REDUZIDA até o teto medido de cada plataforma
 (`chamados_devolucao.preparar_foto`, o mesmo das evidências de devolução):
-Shopee 900 KB, TikTok 3 MB, ML 5 MB.
+Shopee 900 KB, TikTok 3 MB, ML 5 MB, Zap 5 MB (o teto de imagem da Cloud API).
 
 Erro ANTES de a mensagem sair (o upload) é falha limpa — nada chegou ao
 comprador e dá para tentar de novo. Erro no envio da mensagem segue a regra
@@ -52,6 +63,8 @@ from app.models import AtendimentoConversa
 from app.services.atendimento.constantes import (
     CANAL_CHAT,
     CANAL_POS_VENDA,
+    CANAL_ZAP,
+    PLATAFORMA_WHATSAPP,
     ResultadoEnvio,
 )
 
@@ -67,6 +80,8 @@ MAX_BYTES_PLATAFORMA: dict[str, int] = {
     "shopee": 900_000,
     "tiktok": 3_000_000,
     "ml": 5 * 1024 * 1024,
+    # Cloud API: imagem até 5 MB (documentação da mídia, consultada em 17/10).
+    PLATAFORMA_WHATSAPP: 5 * 1024 * 1024,
 }
 # Teto de RESOLUÇÃO (largura × altura, lido do cabeçalho). Os 10 MB não
 # bastam: um PNG de 1 MB com 9000×9000 pixels decodifica para mais de 1 GB
@@ -74,12 +89,24 @@ MAX_BYTES_PLATAFORMA: dict[str, int] = {
 # megapixels cobre a foto de celular e de câmera (12–24 MP); acima disso a
 # pessoa reduz antes de anexar.
 MAX_PIXELS = 40_000_000
-# (plataforma, caixa) que aceitam foto pelo DaVinci.
+# (plataforma, caixa) que aceitam foto pelo DaVinci. O Zap do número desde a
+# Onda 3 (27/10/2026).
 CAIXAS_COM_FOTO = frozenset(
-    {("shopee", CANAL_CHAT), ("tiktok", CANAL_CHAT), ("ml", CANAL_POS_VENDA)}
+    {
+        ("shopee", CANAL_CHAT),
+        ("tiktok", CANAL_CHAT),
+        ("ml", CANAL_POS_VENDA),
+        (PLATAFORMA_WHATSAPP, CANAL_ZAP),
+    }
 )
-# No ML a foto vai DENTRO de uma mensagem com texto.
+# No ML a foto vai DENTRO de uma mensagem com texto (obrigatório).
 CAIXAS_COM_LEGENDA = frozenset({("ml", CANAL_POS_VENDA)})
+# No Zap a legenda é PERMITIDA sem ser obrigatória (§6.8): a foto pode ir
+# sozinha ou com uma frase — que passa pelo validador como qualquer resposta.
+CAIXAS_COM_LEGENDA_OPCIONAL = frozenset({(PLATAFORMA_WHATSAPP, CANAL_ZAP)})
+# O teto da LEGENDA, quando é menor que o do texto da caixa (o WhatsApp corta
+# a legenda em 1.024; o texto vai até 4.096).
+LIMITE_LEGENDA: dict[tuple[str, str], int] = {(PLATAFORMA_WHATSAPP, CANAL_ZAP): 1024}
 
 # O ML: o anexo sobe para o site da conta (Brasil).
 ML_SITE = "MLB"
@@ -220,8 +247,15 @@ def legenda_obrigatoria(conversa: AtendimentoConversa) -> bool:
 
 
 def legenda_permitida(conversa: AtendimentoConversa) -> bool:
-    """Shopee e TikTok mandam a foto SOZINHA (o texto vai pela caixa)."""
-    return legenda_obrigatoria(conversa)
+    """ML (obrigatória) e Zap (opcional) levam texto junto; Shopee e TikTok mandam
+    a foto SOZINHA (o texto vai pela caixa)."""
+    par = (conversa.plataforma, conversa.canal)
+    return legenda_obrigatoria(conversa) or par in CAIXAS_COM_LEGENDA_OPCIONAL
+
+
+def limite_da_legenda(conversa: AtendimentoConversa) -> int | None:
+    """O teto próprio da legenda (Zap: 1.024); None = o limite do texto da caixa."""
+    return LIMITE_LEGENDA.get((conversa.plataforma, conversa.canal))
 
 
 def preparar_para(plataforma: str, foto: Foto) -> tuple[str, bytes, str]:
@@ -258,7 +292,13 @@ async def enviar_imagem(
 
     O `payload` leva `imagem_url` (Shopee/TikTok: a URL da plataforma, que a
     tela mostra no balão) ou `ml_anexo` (ML: o id do anexo).
+
+    O Zap NÃO passa por aqui (`zap.enviar_imagem`, com o destino montado
+    pelas travas do Zap): chegar aqui com ele é um caminho novo que pulou as
+    travas — cinto, nada sai.
     """
+    if conversa.plataforma == PLATAFORMA_WHATSAPP:
+        return ResultadoEnvio(ok=False, erro="zap_sem_destino")
     try:
         nome, dados, mime = preparar_para(conversa.plataforma, foto)
     except FotoInvalida as e:

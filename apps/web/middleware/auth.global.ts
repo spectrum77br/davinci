@@ -4,7 +4,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
     await auth.fetchMe()
   }
 
-  const publicRoutes = ['/login', '/pending-approval', '/privacidade']
+  const publicRoutes = ['/login', '/pending-approval', '/privacidade', '/exclusao-de-dados']
   const isPublic = publicRoutes.includes(to.path)
 
   if (!auth.isAuthenticated && !isPublic) {

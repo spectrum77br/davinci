@@ -24,6 +24,8 @@ PADROES = {
     "atendimento_zap_marcar_lida": False,
     "atendimento_zap_modelos_ativo": False,
     "atendimento_zap_ia_ativa": False,
+    # Onda 4 (27/10/2026): a tela "Números do WhatsApp" cadastra e fala com a Meta.
+    "atendimento_zap_cadastro_ativo": False,
 }
 
 

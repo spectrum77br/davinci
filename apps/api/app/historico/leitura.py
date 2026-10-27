@@ -29,6 +29,8 @@ ROTULOS = (
     "sku", "apelido", "nome", "name", "account_name", "titulo", "numero", "codigo",
     "razao_social", "slug", "label", "pedido_bling", "pedido_marketplace",
     "apelido_override", "tarefa", "email",
+    # Zap (Onda 4): o número do WhatsApp é chamado pelo nome da barra.
+    "nome_na_barra",
 )
 
 # Quais chaves compõem o NOME do item, por tabela, em ordem. Tabela fora
@@ -323,6 +325,11 @@ PARAMETROS_TABELA = {
     "status_id": "logistica_status",
     "pricing_product_id": "pricing_products",
     "pricing_account_id": "pricing_accounts",
+    # Zap (Onda 4): o app, a conta e o número da tela "Números do WhatsApp". O
+    # contato NÃO (a exclusão LGPD não pode escrever o nome dele no Histórico).
+    "app_ref": "atendimento_zap_apps",
+    "conta_ref": "atendimento_zap_contas",
+    "numero_ref": "atendimento_zap_numeros",
 }
 
 

@@ -728,10 +728,11 @@ Fica dentro de "Lojas e modo" (`AtendimentoCanais`, montado em `pages/atendiment
 | POST | `/numeros/{id}/testar` | `GET /{pnid}?fields=display_phone_number,verified_name,name_status,quality_rating,messaging_limit_tier,code_verification_status,throughput,webhook_configuration` [confirmar os campos]. O `webhook_configuration` mostra se há um **endereço alternativo** posto no número ou na WABA, que tem prioridade sobre o do app (por exemplo, um deixado pelo Duoke). Se `phone_number` ou `whatsapp_business_account` vier preenchido com algo que não é a nossa URL: alerta "as mensagens deste número estão indo para outro lugar". O mesmo campo entra no cron de saúde | admin |
 | PATCH | `/numeros/{id}` | `envio_ligado`, `etapa`, `destinos_teste`, `teto_dia`, `marca_id`, `nome_na_barra` (com confirmação) | admin |
 | POST | `/numeros/pausar-todos` | Botão de emergência | admin |
-| POST | `/numeros/{id}/registrar` | `POST /{pnid}/register` com o PIN. **Só habilitada** com `etapa='migrando'` e caso **A** ou **B** marcado no número (no caso **A2** ela nunca aparece: o número já está registrado pelo Duoke e registrar com outro PIN só queimaria tentativas). **Uma tentativa por clique, nunca automática nem em retentativa.** Para com 3 tentativas em 72 h (`registro_tentativas`); a Meta bloqueia o número por 72 h na 10ª (133016). 131031 e 133016 travam o botão com "não tente de novo; fale com o suporte" | admin |
+| POST | `/numeros/{id}/registrar` | `POST /{pnid}/register` com o PIN. **Só habilitada** com `etapa='migrando'` e caso **A** ou **B** marcado no número (no caso **A2** ela nunca aparece: o número já está registrado pelo Duoke e registrar com outro PIN só queimaria tentativas) — ou no **número de teste** na etapa `teste` (ensaio real de 27/10/2026: 133010 até o register). **Uma tentativa por clique, nunca automática nem em retentativa.** Para com 3 tentativas em 72 h (`registro_tentativas`); a Meta bloqueia o número por 72 h na 10ª (133016). 131031 e 133016 travam o botão com "não tente de novo; fale com o suporte" | admin |
 | GET | `/numeros/{id}/pin` | Mostra o PIN sob clique. Entra em `REVELACOES` ("viu o PIN do número do WhatsApp") | admin |
 | POST | `/eventos/{id}/reprocessar` | Evento `numero_desconhecido`/`waba_desconhecida`/`numero_de_outra_waba`/`json_invalido`/`erro` | admin |
 | POST | `/contatos/{id}/apagar` | Pedido de exclusão LGPD (§10.5). Em `SEM_CORPO` | admin |
+| POST | `/contatos/apagar-por-telefone` | O campo "Pedido de exclusão de dados (LGPD)" da tela: acha TODOS os contatos do telefone (com/sem 55 e 9º dígito, em todos os números) e apaga cada um. Em `SEM_CORPO` (o telefone nunca vai ao Histórico) | admin |
 | GET | `/midia/{id}` | §5.5 (Onda 3) | `pode_ver` + escopo |
 | GET/POST | `/modelos`, `/modelos/sincronizar`, `/conversas/{id}/modelo` | Onda 5 | admin / pode_mexer |
 | POST/DELETE | `/conversas/{id}/vinculo` | Onda 6 | pode_mexer |
@@ -769,6 +770,7 @@ O que já existe e não muda:
 - **Conferência estrita do token** (`zap_api.inspecionar_token`, função nova):
   - `GET /debug_token` devolve `is_valid`, `app_id`, `scopes`, `granular_scopes` e `expires_at`;
   - exige `is_valid`, `app_id == app.app_id`, os dois escopos e o `waba_id` dentro de `granular_scopes[].target_ids`;
+  - **exceção (ensaio real de 27/10/2026, decisão do orquestrador):** a Meta entregou o token do usuário do sistema com os escopos em `granular_scopes` **sem** `target_ids`. Esse token **não é recusado** (nem em produção nem fora dela): `inspecionar_token` devolve `alvos_detalhados=False`, e a conferência passa a ser a **leitura da WABA com o próprio token** (`GET /{waba}` + `GET /{waba}/phone_numbers`) antes de gravar — no cron diário também (`ler_waba`). Sem o detalhe, "outras WABAs" fica **não sabido** (`saude.outras_wabas=None`, nunca 0), a tela avisa "a Meta não disse quais contas este token enxerga: confira que o usuário do sistema é Funcionário e tem só esta conta", e a trava local "token sem outra WABA" (P4) deixa de valer para esse token (sobra a dos números +1 555);
   - `expires_at = 0` grava `token_nunca_vence=true`;
   - falha na inspeção (a Meta não respondeu, o app não pode inspecionar) é **erro**: no cadastro, nada é gravado; no cron diário, vira alerta, nunca "sem validade". Na função antiga, um token do painel que falhasse na inspeção passaria por "nunca vence" e o alerta de 7 dias nunca dispararia;
   - o `debug_token` exige o token em `?input_token=` na URL [confirmar se aceita no corpo]. Por isso o `zap_api` mascara também `input_token=` (o `_RE_ACCESS_TOKEN_QS`, `meta_client.py:173`, só pega `access_token=`) e nunca loga a URL dessa chamada.
@@ -996,22 +998,28 @@ Todas podem ser publicadas sozinhas, com as chaves desligadas, e **só com o OK 
 
 ### Onda 3 — Mídia (M)
 
-- [ ] Criar `services/atendimento/zap_midia.py` (baixador, §5.5: `follow_redirects=False`, tipo pela assinatura) e o job `atendimento_zap_baixar_midia`; o `varrer` passa a cuidar das mídias pendentes.
-- [ ] Criar `routers/atendimento_zap.py` com só a rota `GET /midia/{id}` (com `CSP: sandbox`) e **registrá-lo em `app/main.py`** (`app.include_router(atendimento_zap_router.router)`).
-- [ ] Mídia de saída (§6.8): `foto.py` (`CAIXAS_COM_FOTO`, `legenda_permitida` ≠ `legenda_obrigatoria`), `enviar.py:1517-1525` (legenda opcional pelo validador), ramo do Zap em `_chamar_plataforma_foto` (`:1560-1588`), URL relativa em `_aplicar_resultado` (`:883`), `envio_foto` do Zap em `routers/atendimento_painel.py:84-101`; `zap_api.py` com upload.
-- [ ] Local: `WorkerSettingsZap` mínima e o worker no `docker-compose.atend-local.yml` com o volume `atend_uploads` (§11.1).
-- [ ] Web: `pecasDe` com URL relativa, `<audio>`, `<video>`, documento e estados.
-- [ ] Script: subcomando `subir-midia`.
-- [ ] Testes: `test_atendimento_zap_midia.py`.
+- [x] Criar `services/atendimento/zap_midia.py` (baixador, §5.5: `follow_redirects=False`, tipo pela assinatura) e o job `atendimento_zap_baixar_midia`; o `varrer` passa a cuidar das mídias pendentes.
+- [x] Criar `routers/atendimento_zap.py` com só a rota `GET /midia/{id}` (com `CSP: sandbox`) e **registrá-lo em `app/main.py`** (`app.include_router(atendimento_zap_router.router)`).
+- [x] Mídia de saída (§6.8): `foto.py` (`CAIXAS_COM_FOTO`, `legenda_permitida` ≠ `legenda_obrigatoria`), `enviar.py:1517-1525` (legenda opcional pelo validador), ramo do Zap em `_chamar_plataforma_foto` (`:1560-1588`), URL relativa em `_aplicar_resultado` (`:883`), `envio_foto` do Zap em `routers/atendimento_painel.py:84-101`; `zap_api.py` com upload.
+- [x] Local: `WorkerSettingsZap` mínima e o worker no `docker-compose.atend-local.yml` com o volume `atend_uploads` (§11.1).
+- [x] Web: `pecasDe` com URL relativa, `<audio>`, `<video>`, documento e estados.
+- [x] Script: subcomando `subir-midia`.
+- [x] Testes: `test_atendimento_zap_midia.py`.
 - [ ] No fim, o Eduardo revoga o token de teste.
+
+Feito em 27/10/2026 (local, sem publicar). Notas:
+- O ramo da foto do Zap mora no adaptador do Zap (`zap.enviar_imagem`), não dentro do `foto.enviar_imagem`: ele precisa do destino montado pelas travas (o token) e do id da mensagem. O `foto.enviar_imagem` ganhou só o cinto (Zap sem destino não sai).
+- A **nossa cópia** da foto de saída vai para o disco junto da linha em voo (antes da Meta): o balão mostra a foto mesmo enquanto sai, no simulador e quando falha.
+- **Documento de saída** (a equipe mandar PDF pelo Zap) ficou de fora: a lista do §12 só pede a foto, e o caso que motiva (mandar a DANFE) leva o CPF do cliente — a política do WhatsApp proíbe "share … National Identification numbers". Decisão do Eduardo antes de abrir.
+- A limpeza da retenção (`zap_midia.apagar_vencidas`) já existe e tem teste; o cron `atendimento_zap_limpeza` que a chama é da Onda 4. A varredura da fila da mídia e a limpeza ainda não têm índice próprio (a tabela é pequena hoje); a Onda 4 pode pôr os dois índices (`status, proxima_em` e `apagar_em`) numa migration só.
 
 ### Onda 4 — Tela de números, saúde e alarmes (M)
 
-- [ ] Completar `routers/atendimento_zap.py` (tabela §8.5) com a dependência de admin.
-- [ ] Criar `AtendimentoZapNumeros.vue` dentro de `AtendimentoCanais`.
-- [ ] `app/historico/nomes.py`: `REVELACOES` (verify token, PIN) e `ACOES`/`FRASES` das rotas novas.
-- [ ] Rotas de credencial: `inspecionar_token` no `POST /contas`, "trocar token", troca de segredo `rotina`/`vazou`, `inscrever` com conferência de `subscribed_apps`, `testar` com `webhook_configuration`, "registrar" com as travas de etapa, caso e contador.
-- [ ] Cron `atendimento_zap_saude` (a cada 15 min). Gera alerta quando:
+- [x] Completar `routers/atendimento_zap.py` (tabela §8.5) com a dependência de admin.
+- [x] Criar `AtendimentoZapNumeros.vue` dentro de `AtendimentoCanais`.
+- [x] `app/historico/nomes.py`: `REVELACOES` (verify token, PIN) e `ACOES`/`FRASES` das rotas novas.
+- [x] Rotas de credencial: `inspecionar_token` no `POST /contas`, "trocar token", troca de segredo `rotina`/`vazou`, `inscrever` com conferência de `subscribed_apps`, `testar` com `webhook_configuration`, "registrar" com as travas de etapa, caso e contador.
+- [x] Cron `atendimento_zap_saude` (a cada 15 min). Gera alerta quando:
   - há falha de assinatura de um app **e** nenhum evento válido dele no mesmo período (proporção, §5.1);
   - o backlog de eventos passa de 10 min;
   - há mídia a menos de 24 h de expirar sem ter sido baixada;
@@ -1020,11 +1028,22 @@ Todas podem ser publicadas sozinhas, com as chaves desligadas, e **só com o OK 
   - o `webhook_configuration` do número ou da WABA aponta para outro lugar, ou há outro app em `subscribed_apps`;
   - o contador do mês chega a 800 e a 1.000 respostas cobradas, ou o dia chega a 70 % do teto;
   - um número `ativo` com movimento nas últimas 24 h fica mais de 3 h **sem webhook** em horário comercial ("a Meta parou de mandar?").
-- [ ] `worker.py:4166-4175`: ler `webhook:meta_wa:*` (e `webhook:meta:*`).
-- [ ] Cron `atendimento_zap_limpeza` (retenção).
-- [ ] `vigia_leitura_atendimento.py`: `CLASSE_ZAP` em `classe_do_canal` (`:187-201`) e em `LIMITES` (`:142`).
-- [ ] Rota LGPD `POST /contatos/{id}/apagar`, varrendo tudo o que o §10.5 lista.
-- [ ] Testes: `test_atendimento_zap_cadastro.py`.
+- [x] `worker.py:4166-4175`: ler `webhook:meta_wa:*` (e `webhook:meta:*`).
+- [x] Cron `atendimento_zap_limpeza` (retenção).
+- [x] `vigia_leitura_atendimento.py`: `CLASSE_ZAP` em `classe_do_canal` (`:187-201`) e em `LIMITES` (`:142`).
+- [x] Rota LGPD `POST /contatos/{id}/apagar`, varrendo tudo o que o §10.5 lista.
+- [x] Testes: `test_atendimento_zap_cadastro.py`.
+
+Feito em 27/10/2026 (local, sem publicar). Notas:
+- **Chave nova `atendimento_zap_cadastro_ativo`** (nasce `False`, com teste do padrão): a tela "Números do WhatsApp" só cadastra e só fala com a Meta (até o GET do "Testar") com ela ligada; desligada, só MOSTRA o que está no banco. "Pausar" e "Pausar todos" valem sempre (parar nunca espera chave). Na Onda 4b ela é ligada na mesma publicação, com o OK do Eduardo.
+- **Os crons** `atendimento_zap_saude` (:02/:17/:32/:47) e `atendimento_zap_limpeza` (04:50 UTC) andam com a leitura do Zap (`atendimento_leitura_ativa` E `atendimento_zap_leitura_ativa`). O worker mínimo do localhost (`WorkerSettingsZap`) NÃO tem a saúde: ela chamaria a Meta sozinha a cada 15 min.
+- **Router próprio** (`router_numeros`, mesmo prefixo), com duas travas: a da caixa (`_so_admin`, a de TODA rota de `/api/atendimento` — `test_atendimento_so_leitura.py` confere) e a do Zap. Quem não é admin leva 404 nos GET; nas escritas, enquanto a caixa estiver na fase de observação, a trava da caixa responde antes (403 "só leitura", como em qualquer escrita dela); fora da fase de observação, 404 em tudo. O admin fora do `ATENDIMENTO_USUARIOS` vê e não mexe (403). A rota da mídia (Onda 3) ficou como estava.
+- **Migration nova `0431_atendimento_zap_saude`** (em cima da 0430 do Zap): `contas.saude` (JSONB: apps inscritos, outra WABA no token, inspeção que falhou), `numeros.caso_migracao` (A/A2/B, com CHECK — a trava do "registrar") e os índices `eventos(recebido_em)`, `midias(status, proxima_em)` e `midias(apagar_em)`. O `origin/main` já tem outra `0430` (`0430_integration_carrefour`): na publicação, a 0430 e a 0431 do Zap podem precisar ser renumeradas.
+- **Alarmes** (`zap_saude.calcular`, só banco e Redis): a tela mostra a mesma lista que o cron avisa. O cron avisa cada alarme NOVO como Alerta do DaVinci para cada admin ativo (um por alarme por dia; vai ao Telegram de quem ligou o aviso). Além da lista: "o app do DaVinci não está inscrito" (sem isso nenhuma mensagem chega) e "erro da Meta no número" (pagamento, não registrado). A assinatura conta POR APP (`zap_contas.CHAVE_FALHA_ASSINATURA_APP`, só Redis) e alarma com 3+ falhas e nenhum evento válido do app na hora; o `webhook_signature_alert_scan` roda o mesmo alarme (sem a chave da leitura: assinatura errada importa antes de ligar) com a mesma chave de dedupe, e passou a ler também o `webhook:meta:*` do Instagram (aviso, ≥ 10 na hora).
+- **Retenção**: a mídia passada dos 180 dias perde o arquivo e o balão diz "mídia expirada (apagada depois de 180 dias)" (o registro fica `apagada`; `expirada` continua sendo "expirou antes de ser baixada"). Os eventos PROCESSADOS com mais de 30 dias saem; o PENDENTE fica (apagar perderia mensagem calado — o alarme da fila parada avisa). Contato não tem prazo no §10.5: só sai pelo pedido de exclusão.
+- **LGPD** (`POST /contatos/{id}/apagar`, `zap_cadastro.apagar_contato`): anonimiza o contato (e o bloqueia: a trava 10 do envio recusa), limpa a conversa (comprador, avatar, resumo, `dados.zap`), troca o texto de TODAS as mensagens por "[apagado a pedido]" e limpa `payload.zap` e os anexos, apaga os rascunhos, as mídias (arquivo, nome; o balão diz "apagada a pedido do cliente") e os eventos do webhook daquele contato (pelos wamids e pelo telefone/BSUID). O Histórico guarda só a ação ("apagou os dados de um contato do Zap"), sem corpo. **O botão na tela da conversa ficou para depois** (a rota existe e tem teste).
+- **Vigia de leitura parada**: `CLASSE_ZAP` (3 h, só número `ativo`, em horário comercial — segunda a sábado, 8 h–20 h em SP — e com movimento nas últimas 24 h); a linha do Zap parado só aparece para admin no `/resumo`.
+- A tela mostra a lista de celulares de teste do número (é o celular do dono, só admin vê, e é ela que ele edita).
 
 ### Onda 4b — Ensaio em produção com o número de teste (só com OK)
 
@@ -1214,6 +1233,17 @@ E com você: **quem guarda o chip** de cada número? O código de confirmação 
   - O tique azul só é validado de verdade na **Onda 4b**: sem túnel, o wamid real do "oi" que sai do celular não chega ao localhost, e o "oi" simulado (`wamid.LOCAL…`) não vai à Meta.
   - O 133016 (registro travado por 72 h) não segura o aviso na barra na Onda 2: ele só vem do "registrar" (Onda 4), que lê `saude.registro_travado`.
 - Decidido em 26/10/2026 (não é mais pergunta): **não se pede CPF pelo Zap**. O validador falha fechado: qualquer menção a CPF, RG, CNH ou identidade barra (pessoa e IA), menos a negação explícita ("não precisamos do seu CPF").
+- Onda 3 (27/10/2026), a confirmar no ensaio (§11.4, `subir-midia` + `simular --teste --media-id … --processar --baixar`) ou na Onda 4b:
+  - O formato do `sha256` da mídia: o baixador aceita **hex e base64**; o que não é nenhum dos dois só fica no log (não recusa).
+  - Os domínios da URL de download: o Bearer só vai para `lookaside.fbsbx.com`, `*.fbcdn.net` e `graph.facebook.com` (https, porta 443, sem usuário na URL), conferidos a cada redirecionamento. Domínio fora da lista = a mídia fica `pendente` com o erro "endereço de download fora da lista da Meta" (o alarme da Onda 4 pega).
+  - O prazo da mídia na Meta: o desenho diz 7 dias (`expira_meta_em`, que o alerta da Onda 4 lê); a documentação da mídia **subida** diz 30. O baixador tenta até **30 dias** do registro (um GET a cada 12 h) e só dá `expirada` antes disso se, passados os 7 dias, a Graph disser que a mídia não existe (404 ou código 100).
+  - O cabeçalho do download (`Authorization: Bearer`, como na documentação, e um `User-Agent` próprio) e o `GET /{media_id}` **sem** o `phone_number_id` opcional (ele restringe à mídia subida por aquele número).
+- Onda 4 (27/10/2026), a confirmar no ensaio da Onda 4b:
+  - Os campos de `GET /{phone_number_id}` para a saúde: o DaVinci pede `display_phone_number, verified_name, name_status, quality_rating, messaging_limit_tier, code_verification_status, throughput, platform_type, status, webhook_configuration`; se a Meta recusar algum (código 100), pede de novo só o mínimo (`id, display_phone_number, verified_name, quality_rating`) — e aí o `webhook_configuration` não é conferido (`saude.webhook_conferido=false`).
+  - O `webhook_configuration`: o DaVinci alarma quando `phone_number` ou `whatsapp_business_account` vêm com outro endereço, e quando o `application` não é a nossa URL. Se o alternativo vale só para o app que o pôs ou para todos os apps da WABA continua em aberto; o alarme sai do mesmo jeito.
+  - O formato do `GET /{waba}/subscribed_apps` (`data[].whatsapp_business_api_data.{id,name}`; aceita também `{id,name}` no topo).
+  - O `POST /{pnid}/register` responde `{success: true}`; o 131031/133016 travam o botão (já na tabela única). **Ensaio real de 27/10/2026:** o número de TESTE também precisou do register com PIN (133010 "não registrado", `platform_type` NOT_APPLICABLE → CLOUD_API depois do register): o "Registrar" vale também para o número de teste na etapa `teste`, com as mesmas travas (1 por clique, 3 em 72 h, número travado no banco durante a contagem); o que dá certo limpa o `erro_meta` 131045/133010 e a plataforma.
+  - A saúde guarda `platform_type` (`saude.plataforma`): fora de CLOUD_API a pill diz "Não registrado na API" e, nas etapas que mandam, o cron alarma; `status` BANNED/RESTRICTED/FLAGGED/DISCONNECTED e o nome DECLINED também alarmam; o "Testar" só diz "vêm para o DaVinci" com o webhook conferido. Na recusa de campo (código 100) o DaVinci tenta o mínimo **com** o `webhook_configuration` antes do mínimo puro; se nem assim vier, o "fora" anterior fica e `webhook_conferido=false` vira aviso.
 
 ---
 

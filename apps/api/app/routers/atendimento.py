@@ -2205,6 +2205,9 @@ async def _leitura_parada(
     if not scope.unrestricted:
         permitidas = set(scope.integration_ids or ())
         linhas = [lp for lp in linhas if lp.integration_id in permitidas]
+    if not _ve_o_zap(scope):
+        # O número do WhatsApp parado (Onda 4) é só de quem vê o Zap: admin.
+        linhas = [lp for lp in linhas if lp.plataforma != PLATAFORMA_WHATSAPP]
     return [LeituraParadaOut(**asdict(lp)) for lp in linhas]
 
 

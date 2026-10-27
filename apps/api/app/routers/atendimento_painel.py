@@ -13,9 +13,10 @@ mesmo escopo por equipe (`_conversa_ou_404`):
        e, com o pedido em 83955, o porquê (`ag_cancelamento`, item 4).
   POST /api/atendimento/conversas/{id}/notas    nota interna (só a equipe vê).
   POST /api/atendimento/conversas/{id}/foto     UMA foto ao comprador (multipart:
-       `arquivo`, `legenda` só no ML, `ultima_vista_id`, `confirmar`) — pelo
-       caminho único de saída (`enviar.enviar_foto`): as mesmas travas e os
-       mesmos códigos do POST /responder (409/422).
+       `arquivo`, `legenda` no ML (obrigatória) e no Zap (opcional, 27/10/2026),
+       `ultima_vista_id`, `confirmar`) — pelo caminho único de saída
+       (`enviar.enviar_foto`): as mesmas travas e os mesmos códigos do POST
+       /responder (409/422).
   POST /api/atendimento/adspower/aberto         registra quem abriu qual perfil
        do AdsPower e quando (o DaVinci não fala com o AdsPower: quem abre é o
        navegador de quem clicou, na API local do computador dele).
@@ -85,30 +86,32 @@ def _painel_do_instagram() -> PainelOut:
     )
 
 
+async def _painel_do_zap(session: AsyncSession, conversa) -> PainelOut:
+    """O Zap do número (19/10/2026): sem pedido no Bling nem perfil no AdsPower.
+
+    A conversa é PRÉ-VENDA (sem venda vinculada até a Onda 6). A foto de
+    saída (Onda 3, 27/10/2026, docs/zap/desenho.md §6.8): o botão segue as
+    MESMAS travas do texto (`painel.situacao_da_foto` → `_destino_zap`) e a
+    legenda é OPCIONAL, até 1.024 caracteres. Só leitura: nada a gravar.
+    """
+    envio_foto = await painel.situacao_da_foto(session, conversa)
+    await session.rollback()
+    return PainelOut(
+        adspower={
+            "motivo": "Zap (WhatsApp) sem venda vinculada: não há perfil de loja no AdsPower.",
+            "codigo": "sem_perfil",
+        },
+        envio_foto=envio_foto,
+    )
+
+
 def _painel_externo(plataforma: str) -> PainelOut:
-    """Carrinho do site, comentário das redes e o Zap (02/10 e 19/10/2026): o cartão é outro.
+    """Carrinho do site e comentário das redes (02/10/2026): o cartão é outro.
 
     Não há pedido no Bling nem perfil de loja no AdsPower, e nada sai pela
-    caixa (`enviar` recusa): o painel não procura nada disso. No Zap a
-    conversa é PRÉ-VENDA (sem venda vinculada até a Onda 6); desde a Onda 2
-    (26/10/2026) a pessoa responde TEXTO pela caixa (com as travas do Zap), e
-    a foto de saída é da Onda 3.
+    caixa (`enviar` recusa): o painel não procura nada disso. O Zap tem o
+    seu (`_painel_do_zap`): ele responde pela caixa.
     """
-    if plataforma == PLATAFORMA_WHATSAPP:
-        return PainelOut(
-            adspower={
-                "motivo": "Zap (WhatsApp) sem venda vinculada: não há perfil de loja no AdsPower.",
-                "codigo": "sem_perfil",
-            },
-            envio_foto={
-                "pode": False,
-                "motivo": (
-                    "Zap (WhatsApp): mandar foto pelo DaVinci chega na próxima etapa — "
-                    "por enquanto, só texto."
-                ),
-                "codigo": "foto_nao_suportada",
-            },
-        )
     origem = "Carrinho do site" if plataforma == PLATAFORMA_SITE else "Comentário de rede social"
     return PainelOut(
         adspower={
@@ -138,6 +141,8 @@ async def painel_do_pedido(
         return _painel_do_instagram()
     scope = await resolve_team_scope(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
+    if c.plataforma == PLATAFORMA_WHATSAPP:
+        return await _painel_do_zap(session, c)
     if c.plataforma in PLATAFORMAS_EXTERNAS:
         return _painel_externo(c.plataforma)
     dados = await painel.painel_da_conversa(session, c, user=user, forcar_observacoes=atualizar)
@@ -182,7 +187,7 @@ async def enviar_foto(
     ultima_vista_id: Annotated[UUID | None, Form()] = None,
     confirmar: Annotated[bool, Form()] = False,
 ) -> ResponderOut:
-    """Manda UMA foto ao comprador (Shopee, TikTok, pós-venda do ML).
+    """Manda UMA foto ao comprador (Shopee, TikTok, pós-venda do ML e o Zap do número).
 
     Trava → 409 com o `code` (texto/foto reprovados → 422), como o
     /responder. Erro da PLATAFORMA não é erro HTTP: volta 200 com a mensagem

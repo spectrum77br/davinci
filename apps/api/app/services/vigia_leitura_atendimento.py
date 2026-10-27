@@ -34,6 +34,13 @@ gravada por quem lê:
   (`atendimento/robo.py`);
 - carrinho dos sites: a cada 30 min (`atendimento/carrinhos.py`);
 - comentários das redes: a cada 15 min (`atendimento/redes.py`);
+- número do WhatsApp (Zap, Onda 4 — 27/10/2026): o processador do webhook
+  grava o `ultimo_ok_em` a cada evento. O webhook é EMPURRADO (a Meta manda
+  quando o cliente escreve): número quieto à noite não é leitura parada. Por
+  isso só entra o número `ativo` (no DaVinci de verdade), em horário
+  comercial (segunda a sábado, 8 h–20 h em SP) e com movimento nas últimas
+  24 h — e o limite é de 3 h ("a Meta parou de mandar?"). Só administrador
+  vê esta linha (o Zap é só deles, decisão de 26/10/2026);
 - caixa de e-mail da EMPRESA com a ponte ligada (08/10/2026): o sinal do
   agente do Mac na Central de e-mail (`mail_mailboxes.last_seen_at`, a cada
   ≤ 3 min) — 30 min sem sinal, ou o agente pedindo login/avisando erro; o
@@ -53,7 +60,8 @@ token, a caixa `desligado` e a integração arquivada.
 ## O limite é pelo ritmo de cada leitura (`LIMITES`)
 
     loja por API 30 min · Magalu 6 h · robô 60 min · redes 60 min ·
-    carrinho 2 h · reclamações 60 min · avaliações 2 h · e-mail 30 min
+    carrinho 2 h · reclamações 60 min · avaliações 2 h · e-mail 30 min ·
+    WhatsApp 3 h (só ativo, em horário comercial, com movimento em 24 h)
 
 Medido em produção em 05/10 (13 h de log do worker): nenhuma loja por API
 passou de 6 min sem ler; o robô, 31 min (o perfil do AliExpress aberto por
@@ -101,7 +109,9 @@ from app.redis_client import redis
 from app.services.atendimento import canais_externos, lojas
 from app.services.atendimento import robo as robo_atd
 from app.services.atendimento.constantes import (
+    CANAL_ZAP,
     PLATAFORMA_SITE,
+    PLATAFORMA_WHATSAPP,
     PLATAFORMAS,
     PLATAFORMAS_REDE,
     PLATAFORMAS_ROBO,
@@ -134,6 +144,7 @@ CLASSE_MAGALU = "magalu"  # o MESMO sync, mas a leitura falha à noite (proxy)
 CLASSE_ROBO = "robo"  # Temu, AliExpress: o pulso do robô do Mac mini
 CLASSE_SITE = "site"  # carrinho dos sites, a cada 30 min
 CLASSE_REDES = "redes"  # comentários do Instagram/Facebook, a cada 15 min
+CLASSE_ZAP = "zap"  # número do WhatsApp: o webhook (empurrado), Onda 4
 RODADA_RECLAMACOES = "reclamacoes"  # a cada 10 min
 RODADA_AVALIACOES = "avaliacoes"  # a cada 30 min
 
@@ -145,9 +156,16 @@ LIMITES: dict[str, timedelta] = {
     CLASSE_ROBO: timedelta(minutes=60),
     CLASSE_SITE: timedelta(hours=2),
     CLASSE_REDES: timedelta(minutes=60),
+    # O Zap (27/10/2026): 3 h sem webhook, mas só no número ativo, em horário
+    # comercial e com movimento nas últimas 24 h (`ZAP_MOVIMENTO`).
+    CLASSE_ZAP: timedelta(hours=3),
     RODADA_RECLAMACOES: timedelta(minutes=60),
     RODADA_AVALIACOES: timedelta(hours=2),
 }
+
+# O número quieto há mais de um dia não acusa (a noite e o domingo inteiros
+# também não): o alarme é para "estava movimentado e parou".
+ZAP_MOVIMENTO = timedelta(hours=24)
 
 # A linha da tela.
 TIPO_LOJA = "loja"
@@ -197,6 +215,8 @@ def classe_do_canal(canal: AtendimentoCanal) -> str | None:
             return CLASSE_SITE
         if canal.plataforma in PLATAFORMAS_REDE:
             return CLASSE_REDES
+        if canal.plataforma == PLATAFORMA_WHATSAPP and canal.canal == CANAL_ZAP:
+            return CLASSE_ZAP
     return None
 
 
@@ -264,6 +284,7 @@ MOTIVO_REDE_SEM_ESCOPO = "token sem permissão"
 MOTIVO_GERAL_LOJAS = "nenhuma loja lê"
 MOTIVO_GERAL_ROBO = "Mac mini sem sinal"
 MOTIVO_RODADA = "rodada não termina lendo"
+MOTIVO_ZAP = "nenhuma mensagem chega"
 
 # Sem permissão (`sem_escopo`): o que falta depende da plataforma.
 ACAO_SEM_ESCOPO = {
@@ -320,6 +341,10 @@ ACAO_GERAL_ROBO = (
 ACAO_RODADA = (
     "Ver o log do worker (atendimento_{nome}_falhou) — enquanto isso o que é novo "
     "não entra no atendimento"
+)
+ACAO_ZAP = (
+    "Abrir Lojas e modo › Números do WhatsApp e clicar em Testar conexão: a Meta parou "
+    "de mandar? (o app inscrito na conta, o endereço do webhook, o token)"
 )
 # A caixa de e-mail da empresa (a Central de e-mail, lida pelo agente do Mac).
 PLATAFORMA_EMAIL = "email"
@@ -397,6 +422,7 @@ async def _caixas(session: AsyncSession, agora: datetime) -> list[_Caixa]:
         CLASSE_ROBO: bool((s.atendimento_robo_token or "").strip()),
         CLASSE_SITE: s.atendimento_leitura_ativa and s.atendimento_carrinhos_ativa,
         CLASSE_REDES: s.atendimento_leitura_ativa and s.atendimento_redes_ativa,
+        CLASSE_ZAP: s.atendimento_leitura_ativa and s.atendimento_zap_leitura_ativa,
     }
     if not any(ligadas.values()):
         return []
@@ -606,6 +632,61 @@ def _externos(caixas: list[_Caixa], corte: datetime | None) -> list[LeituraParad
     return out
 
 
+async def _zap(session: AsyncSession, caixas: list[_Caixa], agora: datetime) -> list[LeituraParada]:
+    """Os números do WhatsApp: só o `ativo`, em horário comercial, que tinha
+    movimento nas últimas 24 h e está há mais de 3 h sem nenhum evento."""
+    if not caixas:
+        return []
+    from app.models import AtendimentoZapNumero
+    from app.services.atendimento import zap_saude
+
+    if not zap_saude.em_horario_comercial(agora):
+        return []
+    ativos = set(
+        (
+            await session.execute(
+                select(AtendimentoZapNumero.canal_id).where(
+                    AtendimentoZapNumero.canal_id.in_([c.canal.id for c in caixas]),
+                    AtendimentoZapNumero.etapa == "ativo",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: list[LeituraParada] = []
+    for c in caixas:
+        idade = c.idade
+        if (
+            c.canal.id not in ativos
+            or not idade.parado
+            or idade.nunca_leu
+            or idade.desde is None
+            or agora - idade.desde > ZAP_MOVIMENTO
+        ):
+            continue
+        erro = _texto_curto(c.canal.ultimo_erro)
+        out.append(
+            LeituraParada(
+                chave=f"canal:{c.canal.id}",
+                tipo=TIPO_LOJA,
+                plataforma=c.canal.plataforma,
+                loja=canais_externos.nome_do_canal(c.canal),
+                motivo=MOTIVO_ZAP,
+                acao=ACAO_ZAP,
+                desde=idade.desde,
+                nunca_leu=False,
+                minutos=idade.minutos,
+                limite_min=_limite_min(LIMITES[CLASSE_ZAP]),
+                canal_id=c.canal.id,
+                caixas=(c.rotulo,),
+                detalhe=canais_externos.descricao_da_origem(c.canal)
+                + (f" · {erro}" if erro else ""),
+            )
+        )
+    return out
+
+
 # ── As rodadas sem caixa (reclamações, avaliações) ────────────────────────
 
 
@@ -789,6 +870,7 @@ async def leitura_parada(
     out.extend(_robo(robo, agora, geral_robo.desde if geral_robo is not None else None))
 
     out.extend(_externos(por_classe[CLASSE_SITE] + por_classe[CLASSE_REDES], corte))
+    out.extend(await _zap(session, por_classe[CLASSE_ZAP], agora))
     out.extend(await _rodadas(agora, corte))
     out.extend(await _caixas_de_email(session, agora))
     return sorted(

@@ -555,6 +555,14 @@ class Settings(BaseSettings):
     atendimento_zap_marcar_lida: bool = False
     atendimento_zap_modelos_ativo: bool = False
     atendimento_zap_ia_ativa: bool = False
+    # Onda 4 (27/10/2026, docs/zap/desenho.md §8.4/§8.5): a tela "Números do
+    # WhatsApp" (Lojas e modo, só admin) CADASTRA e fala com a Meta — app,
+    # conta (token), inscrever, testar, registrar, mudar etapa/teto/envio.
+    # Desligada, a tela só MOSTRA (e o "pausar"/"pausar todos" continuam
+    # valendo: parar nunca espera chave). Os crons `atendimento_zap_saude`
+    # (alarmes, a cada 15 min) e `atendimento_zap_limpeza` (retenção) andam
+    # com a LEITURA do Zap (`atendimento_zap_leitura_ativa`).
+    atendimento_zap_cadastro_ativo: bool = False
     # Gera rascunhos com a IA. Separado do envio pelo mesmo motivo do
     # `dm_ia_ativa`: dá pra ler uma semana do que ela TERIA dito antes de
     # deixar alguém enviar.

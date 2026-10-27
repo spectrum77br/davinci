@@ -31,6 +31,7 @@ from app.models import (
     User,
     UserRole,
     UserSettings,
+    UserStatus,
 )
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
@@ -1386,6 +1387,67 @@ async def atendimento_zap_varrer(ctx: dict) -> dict | None:  # noqa: ARG001
         return await _zap_entrada.rodada(origem="cron")
     except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
         logger.error("atendimento_zap_varrer_falhou", err=type(e).__name__)
+        return None
+
+
+async def atendimento_zap_saude(ctx: dict) -> dict | None:  # noqa: ARG001
+    """A cada 15 min (Onda 4, 27/10/2026 — docs/zap/desenho.md §12): a saúde do Zap.
+
+    Renova da Meta o que só ela sabe (só GET: o token uma vez por dia, os apps
+    inscritos na conta, a qualidade e o `webhook_configuration` de cada
+    número), calcula os alarmes da lista do desenho e avisa os
+    administradores (o Alerta do DaVinci; um por alarme por dia). Sai na hora
+    com a leitura do Zap desligada. Nunca levanta.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_zap_leitura_ativa):
+        return None
+    from app.services.atendimento import zap_saude as _zap_saude
+
+    try:
+        return await _zap_saude.rodada()
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_zap_saude_falhou", err=type(e).__name__)
+        return None
+
+
+async def atendimento_zap_limpeza(ctx: dict) -> dict | None:  # noqa: ARG001
+    """Uma vez por dia (Onda 4): a retenção do Zap (docs/zap/desenho.md §10.5).
+
+    A mídia passada dos 180 dias perde o arquivo (o balão diz "mídia
+    expirada"); os eventos PROCESSADOS com mais de 30 dias somem (o pendente
+    fica — apagar perderia mensagem); as sobras de download de um worker que
+    caiu. Sai na hora com a leitura do Zap desligada. Nunca levanta.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_zap_leitura_ativa):
+        return None
+    from app.services.atendimento import zap_saude as _zap_saude
+
+    try:
+        return await _zap_saude.limpeza()
+    except Exception as e:  # noqa: BLE001
+        logger.error("atendimento_zap_limpeza_falhou", err=type(e).__name__)
+        return None
+
+
+async def atendimento_zap_baixar_midia(ctx: dict, midia_id: str) -> str | None:  # noqa: ARG001
+    """Baixa UMA mídia recebida pelo Zap (Onda 3, 27/10/2026 — docs/zap/desenho.md §5.5).
+
+    Enfileirado pela rodada do processador (logo depois do commit das
+    mensagens) e pelo `varrer` (a rede: backoff vencido, worker que caiu no
+    meio) — um job por TENTATIVA (`zap_midia.enfileirar_pendentes`). A URL da
+    Meta vale ~5 min: baixa na hora, com o Bearer só para host da lista, e
+    guarda a cópia por 180 dias. Sai na hora com a leitura desligada (baixar
+    é ler). Nunca levanta: o erro vira `pendente` com backoff na própria
+    mídia.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_zap_leitura_ativa):
+        return None
+    from app.services.atendimento import zap_midia as _zap_midia
+
+    try:
+        return await _zap_midia.baixar_job(midia_id)
+    except Exception as e:  # noqa: BLE001 — a mídia fica `baixando` e o prazo a devolve à fila
+        logger.error("atendimento_zap_baixar_midia_falhou", err=type(e).__name__)
         return None
 
 
@@ -4375,6 +4437,80 @@ WEBHOOK_SIG_FAIL_ALERT_THRESHOLD = 10
 
 
 async def webhook_signature_alert_scan(ctx: dict) -> None:
+    """Falha de assinatura de webhook acumulando = um caminho de entrada
+    quebrado em silêncio. Três origens, cada uma no seu contador do Redis:
+
+      - Bling (`webhook:bling:*`): o estoque inline (o de sempre);
+      - Instagram/Facebook (`webhook:meta:*`, 27/10/2026 — ninguém lia): o
+        Direct e os comentários; aviso (o contador é envenenável por curl,
+        então é "confira", não "quebrou");
+      - Zap (`webhook:meta_wa:*`, Onda 4 — docs/zap/desenho.md §5.1): POR APP
+        e por PROPORÇÃO (falhas E nenhum evento válido do app na hora), o
+        mesmo alarme do cron `atendimento_zap_saude`, com a mesma chave de
+        dedupe (nunca em dobro). Sem a chave da leitura de propósito: a
+        assinatura errada importa ANTES de ligar a leitura (o ensaio da 4b).
+
+    Uma origem que falha não derruba as outras.
+    """
+    for origem, varredura in (
+        ("bling", _assinatura_bling),
+        ("meta", _assinatura_instagram),
+        ("meta_wa", _assinatura_zap),
+    ):
+        try:
+            await varredura()
+        except Exception as e:  # noqa: BLE001 — o alarme é acessório
+            logger.warning("webhook_sig_alert_falhou", origem=origem, err=type(e).__name__)
+
+
+async def _assinatura_instagram() -> None:
+    """O contador do webhook do Instagram/Facebook (`routers/webhooks.py`)."""
+    from app.routers.webhooks import META_SIG_FAIL_KEY
+
+    count = int(await redis.get(META_SIG_FAIL_KEY) or 0)
+    if count < WEBHOOK_SIG_FAIL_ALERT_THRESHOLD:
+        return
+    hour_bucket = datetime.now(UTC).strftime("%Y%m%d%H")
+    async with session_scope() as s:
+        admins = (
+            (
+                await s.execute(
+                    select(User.id).where(
+                        User.role == UserRole.ADMIN, User.status == UserStatus.ACTIVE
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for uid in admins:
+            await emit_alert(
+                s,
+                user_id=uid,
+                type=AlertType.GENERIC,
+                severity=AlertSeverity.WARNING,
+                title="Webhook do Instagram/Facebook: assinatura inválida",
+                message=(
+                    f"{count} avisos do Instagram/Facebook recusados por assinatura na última "
+                    "hora. Se o Direct ou os comentários pararam de chegar, confira a chave "
+                    "secreta do app da Meta no servidor."
+                ),
+                payload={"sig_fail_count": count, "hour_bucket": hour_bucket},
+                dedupe_key=f"webhook_meta_sig_fail:{hour_bucket}",
+            )
+
+
+async def _assinatura_zap() -> None:
+    """O Zap: por app e por proporção (`zap_saude.alarme_assinatura`)."""
+    from app.services.atendimento import zap_saude as _zap_saude
+
+    async with session_scope() as s:
+        alertas = await _zap_saude.alarme_assinatura(s)
+        if alertas:
+            await _zap_saude.avisar(s, alertas)
+
+
+async def _assinatura_bling() -> None:
     """If webhook signature failures pile up, the inline stock-update path is
     silently broken (wrong header alias, rotated secret, etc). Read the
     rolling 1h Redis counter populated by the webhook router; alert+telegram
@@ -5142,6 +5278,9 @@ class WorkerSettings:
         # `timeout` = a trava da rodada no Redis (120 s); a rodada para sozinha
         # aos 90 s (`zap_entrada.ORCAMENTO_S`) e o resto fica para a próxima.
         func(atendimento_zap_processar, timeout=120),
+        # Zap (27/10/2026, Onda 3): uma mídia por job. 300 s cobre o teto de
+        # 32 MB; o prazo da `baixando` (10 min) devolve à fila a que o arq matou.
+        func(atendimento_zap_baixar_midia, timeout=300),
         # Mensagens automáticas (05/10/2026): em `functions` para dar para
         # enfileirar uma rodada à mão.
         func(atendimento_automacoes, timeout=110),
@@ -5540,6 +5679,18 @@ class WorkerSettings:
         # no 0 e o índice da Caixa no 30. `timeout=120` = a trava da rodada.
         # Sai na hora com a leitura do Zap desligada.
         cron(atendimento_zap_varrer, second={45}, run_at_startup=False, timeout=120),
+        # Zap (27/10/2026, Onda 4): a saúde e os alarmes a cada 15 min (:02,
+        # :17, :32, :47, no segundo 20 — fora do :00 dos outros e do :45 do
+        # varrer) e a retenção uma vez por dia (04:50 UTC = 01:50 em SP, a
+        # madrugada). `timeout` = a trava da rodada da saúde (14 min).
+        cron(
+            atendimento_zap_saude,
+            minute={2, 17, 32, 47},
+            second={20},
+            run_at_startup=False,
+            timeout=840,
+        ),
+        cron(atendimento_zap_limpeza, hour={4}, minute={50}, run_at_startup=False, timeout=1200),
         # Mensagens automáticas (05/10/2026) nos minutos pares. `timeout=110`
         # = a trava da rodada no Redis: o job morto pelo arq não deixa a
         # trava viva por cima da próxima. Sai na hora com o interruptor
@@ -5848,6 +5999,38 @@ class WorkerSettingsUI:
     on_shutdown = shutdown
 
 
+class WorkerSettingsZap:
+    """SÓ NO LOCALHOST (27/10/2026, Onda 3 — docs/zap/desenho.md §11.1): o worker
+    MÍNIMO do Zap, no molde do `WorkerSettingsUI`.
+
+    No ambiente local do Atendimento (`docker-compose.atend-local.yml`, que
+    não vai para o git) subir o `WorkerSettings` ligaria TODOS os crons contra
+    o banco local; este só tem o processador da caixa de entrada, o baixador
+    de mídia e o `varrer` do Zap. Escuta a fila DEFAULT (é nela que o webhook
+    e o `varrer` enfileiram): no localhost não há outro worker nela, e um job
+    de outra função que cair aqui é recusado pelo arq (função desconhecida).
+    O volume de uploads TEM de ser o mesmo da api (`atend_uploads`): a mídia
+    que ele baixa é a que a rota da api serve. Em produção quem roda tudo
+    isso é o `WorkerSettings` (fila default); esta classe não é usada lá.
+    """
+
+    redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
+    functions = [
+        func(atendimento_zap_processar, timeout=120),
+        func(atendimento_zap_baixar_midia, timeout=300),
+    ]
+    cron_jobs = [
+        cron(atendimento_zap_varrer, second={45}, run_at_startup=False, timeout=120),
+    ]
+    max_jobs = 4
+    job_timeout = 300
+    keep_result = 3600
+    # Sem retentativa do arq: o backoff é o da própria mídia/evento.
+    max_tries = 1
+    on_startup = startup
+    on_shutdown = shutdown
+
+
 class WorkerSettingsMarketplace:
     """Worker dedicado pro cron `check_marketplace_shipped_orders`
     (sweeps de 21/83965 → 15 quando marketplace confirma envio). Antes
@@ -6075,6 +6258,10 @@ __all__ = [
     "WorkerSettingsMarketplace",
     "WorkerSettingsSync",
     "WorkerSettingsUI",
+    "WorkerSettingsZap",
+    "atendimento_zap_baixar_midia",
+    "atendimento_zap_limpeza",
+    "atendimento_zap_saude",
     "audit_run",
     "auth_codes_cleanup",
     "auto_import_link",

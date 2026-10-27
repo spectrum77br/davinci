@@ -69,7 +69,8 @@ router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 TETO_CORPO = 4 * 1024 * 1024
 
 # Falha de assinatura: SÓ Redis, chaves próprias do Zap (o alarme da Onda 4 é
-# por proporção — falhas E nenhum evento válido do app no mesmo período).
+# por proporção — falhas E nenhum evento válido do app no mesmo período; o
+# contador POR APP é `zap_contas.CHAVE_FALHA_ASSINATURA_APP`).
 SIG_FAIL_KEY = "webhook:meta_wa:sig_fail_count"
 SIG_FAIL_SNAPSHOT_KEY = "webhook:meta_wa:sig_fail_last"
 # Assinatura que bateu só com o segredo ANTERIOR (troca de rotina, 1 h).
@@ -275,6 +276,8 @@ async def receber_zap(
                 snapshot_key=SIG_FAIL_SNAPSHOT_KEY,
             )
             await _contar_falha_do_ip(app.id, ip)
+            # Por APP (Onda 4): o alarme por proporção do cron de saúde.
+            await _contar(zap_contas.CHAVE_FALHA_ASSINATURA_APP.format(app_ref=app.id))
             logger.warning("zap_webhook_sig_invalida", app=str(app.id), body_len=len(corpo))
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="assinatura inválida")
     await _marcar_ip_ok(ip)

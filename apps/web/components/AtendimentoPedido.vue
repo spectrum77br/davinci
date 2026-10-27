@@ -177,6 +177,8 @@ export type EnvioFoto = {
   max_bytes: number
   legenda_obrigatoria: boolean
   legenda_permitida: boolean
+  // O teto da legenda quando é menor que o do texto (Zap: 1.024, 27/10/2026).
+  legenda_max?: number | null
 }
 export type Painel = {
   pedido: { numero_bling: string; bling_id: number | null; numeroloja: string | null; situacao_id: string | null; situacao: string | null } | null

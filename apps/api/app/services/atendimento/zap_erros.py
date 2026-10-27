@@ -132,7 +132,10 @@ _FRASE_REGISTRO = (
     "Não tente de novo; fale com o suporte da Meta."
 )
 _FRASE_PAGAMENTO = "Problema de pagamento na conta Meta: as mensagens não estão saindo."
-_FRASE_NAO_REGISTRADO = "Este número não está registrado na API do WhatsApp."
+_FRASE_NAO_REGISTRADO = (
+    "Este número não está registrado na API do WhatsApp: use Registrar (com o PIN de "
+    "6 dígitos) em Lojas e modo → Números do WhatsApp."
+)
 _FRASE_TOKEN = "A conexão com a Meta caiu: é preciso um token novo."  # noqa: S105 — frase
 _FRASE_PERMISSAO = "O token não tem permissão nesta conta do WhatsApp."
 _FRASE_MIDIA = "Tipo ou arquivo não aceito pelo WhatsApp."

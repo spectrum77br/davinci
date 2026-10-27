@@ -96,6 +96,27 @@ async def test_inspecao_estrita_aceita_o_token_certo(graph):
     assert "access_token" not in req.url.params
 
 
+async def test_inspecao_sem_target_ids_aceita_e_avisa(graph):
+    # O que a Meta devolveu em 27/10/2026 para o "davinciteste" COM a WABA de
+    # teste atribuída: os escopos do WhatsApp sem `target_ids`. Não recusa; a
+    # conferência da WABA fica com quem chamou (`alvos_detalhados=False`).
+    graph.quando(
+        "GET",
+        "/v26.0/debug_token",
+        _debug(
+            granular_scopes=[
+                {"scope": "whatsapp_business_management"},
+                {"scope": "whatsapp_business_messaging"},
+                {"scope": "manage_app_solution"},
+            ]
+        ),
+    )
+    insp = await zap_api.inspecionar_token(TOKEN, app_id=APP_ID, waba_id=WABA)
+    assert insp.alvos_detalhados is False
+    graph.quando("GET", "/v26.0/debug_token", _debug())
+    assert (await zap_api.inspecionar_token(TOKEN, app_id=APP_ID, waba_id=WABA)).alvos_detalhados
+
+
 async def test_inspecao_com_validade(graph):
     vence = int((datetime.now(UTC) + timedelta(days=60)).timestamp())
     graph.quando("GET", "/v26.0/debug_token", _debug(expires_at=vence))

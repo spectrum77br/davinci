@@ -24,6 +24,10 @@
 // decisão 8 — nasce vazia; o dono marca depois do eval). A reversão vem da
 // auditoria diária (`scripts.agente_reversao`, revisão 2 de 20/10/2026): o
 // assunto com erro crítico ou nota < 90% em 7 dias sai daqui; volta à mão.
+// Zap (27/10/2026, Onda 4 — docs/zap/desenho.md §8.4): no topo, a tela
+// "Números do WhatsApp" (`AtendimentoZapNumeros`), SÓ para administrador
+// (`verZap`; a API dá 404 para os outros). Quem mexe é o admin que mexe na
+// caixa (`isAdmin`); o admin que só lê vê a tela sem os botões.
 import { Bot, Check, ChevronDown, Loader2, Radio, RefreshCw, RotateCcw, Search, ShieldAlert, TriangleAlert, Users } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import {
@@ -59,6 +63,8 @@ const props = defineProps<{
   canEdit: boolean
   isAdmin: boolean
   lojas: ResumoLoja[]
+  // Administrador (mesmo o que só lê): vê a tela "Números do WhatsApp".
+  verZap?: boolean
 }>()
 const emit = defineEmits<{ (e: 'mudou'): void }>()
 
@@ -359,6 +365,8 @@ async function sincronizar() {
 
 <template>
   <div class="space-y-4">
+    <LazyAtendimentoZapNumeros v-if="verZap" :pode-mexer="isAdmin" />
+
     <div class="grid grid-cols-2 gap-2 lg:grid-cols-4">
       <StatCard label="Lendo normalmente" :value="totais.ok" :icon="Radio" :hint="`de ${canais.length} caixa(s)`" compact />
       <StatCard label="Com erro" :value="totais.erro" :icon="TriangleAlert" tone="danger" hint="a última leitura falhou (ou o robô do Mac mini parou)" compact />

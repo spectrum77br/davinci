@@ -149,6 +149,9 @@ class EnvioFotoOut(BaseModel):
     max_bytes: int = 0
     legenda_obrigatoria: bool = False
     legenda_permitida: bool = False
+    # O teto da legenda quando é menor que o do texto da caixa (Zap: 1.024,
+    # 27/10/2026); None = o limite do texto.
+    legenda_max: int | None = None
 
 
 class TrocaAbertaOut(BaseModel):

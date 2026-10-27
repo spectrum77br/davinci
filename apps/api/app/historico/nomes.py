@@ -118,6 +118,8 @@ API: dict[str, str] = {
     "/api/claude-conector": "Tarefas › Conector do Claude",
     "/api/claude-mcp": "Claude (conector)",
     "/api/settings": "Admin › Configurações",
+    # Zap (Onda 4, 27/10/2026): a tela fica em Atendimento › Lojas e modo.
+    "/api/atendimento/zap": "Atendimento › Números do WhatsApp",
     "/api/faturas": "Admin › Faturas",
     "/api/historico": "Sistema › Histórico",
 }
@@ -213,6 +215,68 @@ ACOES: dict[tuple[str, str], str] = {
     ("PUT", "/api/garantias/{garantia_id}"): "corrigiu uma garantia",
     ("POST", "/api/garantias/{garantia_id}/recalcular"): "conferiu a entrega de uma garantia",
     ("POST", "/api/garantias/{garantia_id}/atendimentos"): "vinculou atendimento a uma garantia",
+    # Zap — a tela "Números do WhatsApp" (Onda 4, 27/10/2026, docs/zap/desenho.md
+    # §8.5). O app, a conta e o número têm o gatilho (o que mudou aparece; os
+    # `*_enc` saem como arquivo); a frase diz o que a pessoa fez, inclusive
+    # quando nada mudou no banco (pausar todos sem nenhum ligado, inscrever,
+    # testar) e quando o que mudou está FORA do gatilho (a exclusão LGPD mexe só
+    # em tabelas com dado do cliente — e não guarda o corpo: SEM_CORPO).
+    ("POST", "/api/atendimento/zap/apps"): "cadastrou um app do WhatsApp (Meta)",
+    (
+        "POST",
+        "/api/atendimento/zap/apps/{app_ref}/verify-token",
+    ): "gerou outro código de verificação do webhook do WhatsApp",
+    (
+        "POST",
+        "/api/atendimento/zap/apps/{app_ref}/segredo",
+    ): "trocou a chave secreta do app do WhatsApp",
+    ("POST", "/api/atendimento/zap/contas"): "cadastrou uma conta do WhatsApp (token da Meta)",
+    (
+        "POST",
+        "/api/atendimento/zap/contas/{conta_ref}/token",
+    ): "trocou o token da conta do WhatsApp",
+    (
+        "POST",
+        "/api/atendimento/zap/contas/{conta_ref}/inscrever",
+    ): "inscreveu o app do DaVinci na conta do WhatsApp (Meta)",
+    (
+        "POST",
+        "/api/atendimento/zap/contas/{conta_ref}/conferir-inscricao",
+    ): "conferiu os apps inscritos na conta do WhatsApp",
+    ("POST", "/api/atendimento/zap/numeros"): "cadastrou um número do WhatsApp",
+    (
+        "POST",
+        "/api/atendimento/zap/numeros/{numero_ref}/testar",
+    ): "testou a conexão do número do WhatsApp",
+    ("PATCH", "/api/atendimento/zap/numeros/{numero_ref}"): "alterou o número do WhatsApp",
+    (
+        "POST",
+        "/api/atendimento/zap/numeros/{numero_ref}/pausar",
+    ): "pausou o envio do número do WhatsApp",
+    (
+        "POST",
+        "/api/atendimento/zap/numeros/pausar-todos",
+    ): "pausou o envio de todos os números do WhatsApp",
+    (
+        "POST",
+        "/api/atendimento/zap/numeros/{numero_ref}/registrar",
+    ): "tentou registrar o número do WhatsApp na Meta",
+    (
+        "POST",
+        "/api/atendimento/zap/eventos/{evento_id}/reprocessar",
+    ): "reprocessou um evento do WhatsApp",
+    (
+        "POST",
+        "/api/atendimento/zap/eventos/reprocessar",
+    ): "reprocessou os eventos parados do WhatsApp",
+    (
+        "POST",
+        "/api/atendimento/zap/contatos/{contato_ref}/apagar",
+    ): "apagou os dados de um contato do Zap",
+    (
+        "POST",
+        "/api/atendimento/zap/contatos/apagar-por-telefone",
+    ): "apagou os dados de um contato do Zap (pelo telefone)",
 }
 
 # Só a frase (o evento fica se o banco mudou): GET que carimba e retorno de
@@ -241,6 +305,13 @@ REVELACOES: dict[tuple[str, str], str] = {
     # "Ver o CPF completo" — o CPF do pedido, antes de existir garantia (sem
     # log próprio onde gravar): fica aqui.
     ("GET", "/api/garantias/pedido"): "consultou pedido para cadastrar garantia (dados do cliente)",
+    # Zap (Onda 4, 27/10/2026, §4.3): o código que o Eduardo cola na Meta e o
+    # PIN do número — mostrados só sob clique, e cada vez fica aqui.
+    (
+        "GET",
+        "/api/atendimento/zap/apps/{app_ref}/verify-token",
+    ): "viu o código de verificação do webhook do WhatsApp",
+    ("GET", "/api/atendimento/zap/numeros/{numero_ref}/pin"): "viu o PIN do número do WhatsApp",
 }
 
 # Pedidos de pessoa que na verdade rodam robô: o recarregar automático da
@@ -330,6 +401,10 @@ TABELAS: dict[str, str] = {
     "nfse_modelo": "Modelo de NFS-e mensal",
     "nfse_emissao": "Nota fiscal de serviço (NFS-e)",
     "nfse_evento": "Cancelamento de NFS-e",
+    # Zap (Onda 4): só as três com o gatilho (contato, evento e mídia ficam fora).
+    "atendimento_zap_apps": "App do WhatsApp (Meta)",
+    "atendimento_zap_contas": "Conta do WhatsApp (WABA)",
+    "atendimento_zap_numeros": "Número do WhatsApp",
 }
 
 CAMPOS: dict[str, str] = {
@@ -400,6 +475,19 @@ CAMPOS: dict[str, str] = {
     "preco_catalogo": "Catálogo (custo)",
     "canal": "Canal (kit/catálogo)",
     "conta_base_id": "Conta de kit (base do catálogo)",
+    # Zap — a tela "Números do WhatsApp" (Onda 4, 27/10/2026).
+    "envio_ligado": "Envio ligado",
+    "etapa": "Etapa",
+    "caso_migracao": "Caso da migração",
+    "teto_dia": "Teto do dia",
+    "destinos_teste": "Celulares de teste",
+    "nome_na_barra": "Nome na barra",
+    "segredo_enc": "Chave secreta",
+    "verify_token_enc": "Código de verificação",
+    "token_enc": "Token",
+    "pin_enc": "PIN",
+    "inscrito_em": "Inscrito em",
+    "registro_tentativas": "Tentativas de registro",
 }
 for _i in range(1, 6):
     CAMPOS[f"margin{_i}"] = f"Margem {_i}"

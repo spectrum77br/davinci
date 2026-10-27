@@ -177,6 +177,7 @@ import {
   ExternalLink,
   Globe,
   Hash,
+  FileText,
   ImagePlus,
   Loader2,
   Lock,
@@ -821,7 +822,12 @@ const TIPO_LABEL: Record<string, string> = {
 // A mídia do cliente no Zap chega SEM link: o anexo é `{tipo, midia_id, mime,
 // status: 'pendente'}` e quem guarda a nossa cópia é o baixador (Onda 3,
 // §5.5). Até lá o balão diz o que é e em que pé está — "[Foto — aguardando
-// download]" —, não um "imagem" solto que parece arquivo quebrado.
+// download]" —, não um "imagem" solto que parece arquivo quebrado. Baixada
+// (27/10/2026), o anexo ganha a URL RELATIVA da nossa cópia
+// (`/api/atendimento/zap/midia/<id>`, só admin) e vira foto, player de áudio
+// ou de vídeo, ou o link do documento com o nome e o tamanho. Apagada pela
+// retenção de 180 dias, o registro fica e diz "mídia expirada" (decisão do
+// Eduardo, 26/10/2026); apagada a pedido do cliente (LGPD, Onda 4), diz isso.
 const MIDIA_ZAP_ROTULO: Record<string, string> = { imagem: 'Foto', audio: 'Áudio', video: 'Vídeo', arquivo: 'Documento', figurinha: 'Figurinha' }
 const MIDIA_ZAP_ESTADO: Record<string, string> = {
   pendente: 'aguardando download',
@@ -829,6 +835,18 @@ const MIDIA_ZAP_ESTADO: Record<string, string> = {
   expirada: 'a mídia expirou antes de ser baixada',
   grande_demais: 'grande demais para baixar',
   falhou: 'não deu para baixar',
+  apagada: 'mídia expirada (apagada depois de 180 dias)',
+  apagada_a_pedido: 'apagada a pedido do cliente',
+}
+// Só o endereço da NOSSA cópia vale como link relativo (o resto continua só
+// http/https): nada de `//outro-site` nem `javascript:` vindo de anexo.
+const RE_MIDIA_ZAP = /^\/api\/atendimento\/zap\/midia\/[0-9a-f-]{36}$/i
+function tamanhoLegivel(bytes: unknown): string {
+  const n = typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0 ? bytes : null
+  if (n === null) return ''
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1).replace('.', ',')} MB`
 }
 // Só as chaves do próprio mapa (o `status`/`tipo` do anexo vêm de fora) — e
 // sem o Object.hasOwn, que o Safari < 15.4 não tem.
@@ -881,6 +899,9 @@ type Peca =
   | { chave: string; tipo: 'pedido'; cartao: CartaoPedido }
   | { chave: string; tipo: 'produto'; cartao: CartaoProduto }
   | { chave: string; tipo: 'imagem'; url: string; nome: string }
+  | { chave: string; tipo: 'audio'; url: string; nome: string }
+  | { chave: string; tipo: 'video'; url: string; nome: string }
+  | { chave: string; tipo: 'documento'; url: string; nome: string; tamanho: string }
   | { chave: string; tipo: 'link'; url: string; nome: string }
   | { chave: string; tipo: 'nome'; nome: string }
 function pecasDe(m: Mensagem): Peca[] {
@@ -897,13 +918,21 @@ function pecasDe(m: Mensagem): Peca[] {
       if (cartao) return { chave, tipo: 'produto', cartao }
     }
     const bruta = s('url') || s('link') || s('src') || s('image_url') || s('thumb_url') || s('url_imagem')
-    const url = /^https?:\/\//i.test(bruta) ? bruta : null
     // Zap: a mídia que ainda não tem a nossa cópia (`midia_id` sem link).
     const midiaZap = a.midia_id !== undefined && a.midia_id !== null && a.midia_id !== ''
+    const url = /^https?:\/\//i.test(bruta) ? bruta : midiaZap && RE_MIDIA_ZAP.test(bruta) ? bruta : null
     const st = s('status').toLowerCase()
     if (midiaZap && !url && doMapa(MIDIA_ZAP_ESTADO, st)) {
       const rotulo = doMapa(MIDIA_ZAP_ROTULO, tipo) ? MIDIA_ZAP_ROTULO[tipo] : 'Anexo'
       return { chave, tipo: 'nome', nome: `[${rotulo} — ${MIDIA_ZAP_ESTADO[st]}]` }
+    }
+    if (midiaZap && url && RE_MIDIA_ZAP.test(url)) {
+      // A nossa cópia (Onda 3): o tipo do anexo diz o player.
+      const rotulo = doMapa(MIDIA_ZAP_ROTULO, tipo) ? MIDIA_ZAP_ROTULO[tipo] : 'Anexo'
+      if (tipo === 'audio') return { chave, tipo: 'audio', url, nome: s('nome') || rotulo }
+      if (tipo === 'video') return { chave, tipo: 'video', url, nome: s('nome') || rotulo }
+      if (tipo === 'arquivo') return { chave, tipo: 'documento', url, nome: s('nome') || rotulo, tamanho: tamanhoLegivel(a.tamanho) }
+      if (tipo === 'imagem' || tipo === 'figurinha') return { chave, tipo: 'imagem', url, nome: s('nome') || rotulo }
     }
     // Sem nome, o tipo em português ("vídeo"), não o código cru da API ("video").
     const nome = s('nome') || s('name') || s('filename') || s('titulo') || TIPO_LABEL[tipo] || tipo || 'anexo'
@@ -2124,11 +2153,13 @@ function aoCriarNota(m: Mensagem) {
   }
 }
 
-// ─── foto na resposta (Shopee, TikTok, pós-venda do ML) ────────────────────
+// ─── foto na resposta (Shopee, TikTok, pós-venda do ML, Zap) ───────────────
 // Uma imagem por vez, pelo POST /conversas/{id}/foto (caminho único de saída
 // no backend: as mesmas travas do texto). A foto só sobe para a plataforma no
 // envio; escolher e desistir não manda nada a lugar nenhum. No ML ela vai
-// junto de um texto (obrigatório lá); na Shopee e no TikTok, sozinha.
+// junto de um texto (obrigatório lá); na Shopee e no TikTok, sozinha; no Zap
+// (Onda 3, 27/10/2026) a legenda é OPCIONAL, até `legenda_max` (1.024), e
+// passa pelo mesmo validador do texto no servidor.
 const envioFoto = computed(() => painelDados.value?.envio_foto ?? null)
 const TIPOS_FOTO = ['image/jpeg', 'image/png']
 const MAX_FOTO = 10 * 1024 * 1024
@@ -2973,6 +3004,22 @@ watch(() => props.conversaId, (novo, velho) => {
                     >
                       <img :src="pc.url" :alt="pc.nome" loading="lazy" referrerpolicy="no-referrer" class="size-28 object-cover" />
                     </button>
+                    <!-- Zap (Onda 3): a nossa cópia — áudio e vídeo só carregam no play; o documento baixa (nunca abre aqui). -->
+                    <audio v-else-if="pc.tipo === 'audio'" :src="pc.url" controls preload="none" class="h-10 w-64 max-w-full" :title="pc.nome" data-midia-zap="audio" />
+                    <video v-else-if="pc.tipo === 'video'" :src="pc.url" controls preload="none" playsinline class="max-h-64 w-64 max-w-full rounded-md border bg-black" :title="pc.nome" data-midia-zap="video" />
+                    <a
+                      v-else-if="pc.tipo === 'documento'"
+                      :href="pc.url"
+                      download
+                      rel="noopener noreferrer"
+                      class="inline-flex max-w-[260px] items-center gap-1.5 rounded border bg-background px-2 py-1 text-xs hover:bg-muted"
+                      :title="`baixar ${pc.nome}`"
+                      data-midia-zap="documento"
+                    >
+                      <FileText class="size-4 shrink-0" />
+                      <span class="truncate underline">{{ pc.nome }}</span>
+                      <span v-if="pc.tamanho" class="shrink-0 text-muted-foreground">· {{ pc.tamanho }}</span>
+                    </a>
                     <a v-else-if="pc.tipo === 'link'" :href="pc.url" target="_blank" rel="noopener noreferrer" class="max-w-[220px] truncate rounded border bg-background px-2 py-0.5 text-xs underline">{{ pc.nome }}</a>
                     <span v-else class="rounded border bg-background px-2 py-0.5 text-xs text-muted-foreground">{{ pc.nome }}</span>
                   </template>
@@ -3115,13 +3162,13 @@ watch(() => props.conversaId, (novo, velho) => {
             <img :src="foto.previa" alt="foto anexada" class="size-16 shrink-0 rounded border object-cover" />
             <div class="min-w-0 flex-1 space-y-1">
               <div class="truncate font-medium" :title="foto.arquivo.name">{{ foto.arquivo.name }}</div>
-              <div class="text-muted-foreground">{{ (foto.arquivo.size / 1024).toFixed(0) }} KB · {{ envioFoto?.legenda_permitida ? 'vai junto do texto abaixo' : 'vai sozinha (o texto vai pela caixa, separado)' }}</div>
+              <div class="text-muted-foreground">{{ (foto.arquivo.size / 1024).toFixed(0) }} KB · {{ envioFoto?.legenda_obrigatoria ? 'vai junto do texto abaixo' : envioFoto?.legenda_permitida ? 'pode ir com uma legenda (opcional)' : 'vai sozinha (o texto vai pela caixa, separado)' }}</div>
               <input
                 v-if="envioFoto?.legenda_permitida"
                 v-model="legendaFoto"
-                :maxlength="limite || 350"
+                :maxlength="envioFoto?.legenda_max || limite || 350"
                 class="h-7 w-full rounded-md border bg-background px-2 text-xs"
-                :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto da foto (obrigatório no Mercado Livre)' : 'Texto que vai junto da foto'"
+                :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto da foto (obrigatório no Mercado Livre)' : 'Legenda (opcional) — vai junto da foto'"
                 aria-label="texto que vai junto da foto"
               />
               <div v-if="motivoSemFoto" class="text-amber-800 dark:text-amber-300">{{ motivoSemFoto }}</div>
