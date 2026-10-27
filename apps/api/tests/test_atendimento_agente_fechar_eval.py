@@ -848,7 +848,7 @@ def test_7_entregue_pelo_relato_do_cliente_so_sem_o_pedido():
 
 
 def test_8_o_sistema_v13_diz_o_lastro_que_ja_esta_na_entrada():
-    assert v.VERSAO == "v15" and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO == "v16" and v.MODELO == "claude-haiku-5-5"
     s = " ".join(v.SISTEMA.split())
     for trecho in (
         "a linha que termina em «os demais estados recebem» sustenta «enviamos para <estado que não está na linha>, sim»",
@@ -878,7 +878,7 @@ def _categorias():
 
 def test_8_o_bloco_2_cabe_e_diz_as_correcoes():
     shopee = prompt.bloco_da_plataforma("shopee", _categorias())
-    assert len(shopee) / 3.5 <= 5_000
+    assert len(shopee) / 3.5 <= 5_250  # garantia da equipe (o dono, 27/10/2026)
     assert "Cada consulta uma vez (o resultado não muda)" in shopee
     assert 'acao "responder" (nem "pessoa" nem acao_pessoa' in shopee
     assert "o cartão sozinho: confirme que recebeu a solicitação" in shopee

@@ -412,6 +412,16 @@ NOTAS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {
         'devolução pela Shopee"; nunca aprovada/recusada, data, prazo, valor, Pix nem outra '
         "solicitação. Sem essa marca (nem devolucao_sem_decisao_da_loja), a ação é "
         "reclamacao_aberta e o texto só confirma que a solicitação foi aberta e onde acompanhar.",
+        # O dono, 27/10/2026: a garantia como a equipe responde hoje (vale por cima da seção
+        # GARANTIA do bloco 1, que não muda — o hash dele é fixo).
+        "Garantia/defeito (decisão do dono; vale por cima da seção GARANTIA): como a "
+        "equipe — enquanto o app oferece a devolução, «tem garantia, mas a única forma é a "
+        "devolução pela Shopee»; defeito: pergunte qual é e peça um vídeo curto (e fotos), sem "
+        "diagnóstico; a regra «a nossa garantia não cobre aparelho quebrado, molhado ou com mau "
+        "uso» (o caso do cliente, pessoa); garantia estendida: direto com a plataforma; "
+        "homologação/Anatel de um Uranyx: «homologado pela Uranyx». Do Uranyx, nunca prazo em "
+        "dias, meses ou anos, datas, o app Uranyx, o site nem o SAC; a Apple, o fato da garantia "
+        "Apple.",
     ),
     "ml": (
         "Pergunta pública no anúncio: a resposta fica visível para todos — nunca cite "

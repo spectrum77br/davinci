@@ -580,15 +580,16 @@ async def test_e_garantia_com_a_data_de_entrega_as_datas_do_painel_passam(
 
     r = await ia.gerar_rascunho(db, conversa)
 
+    # O dono, 27/10/2026 (a garantia como a equipe responde): o ver_garantia da Uranyx não
+    # traz mais as datas de fim nem os meses — e o rascunho com eles fica bloqueado.
     resultado = api.resultado(1)
-    assert '"fim_hardware":"2026-12-01"' in resultado and '"hardware_meses":3' in resultado
+    assert '"fim_hardware"' not in resultado and '"hardware_meses"' not in resultado
+    assert '"como_a_equipe_responde"' in resultado
     for proibido in ("52998224725", "João", "Rua das Flores"):
         assert proibido not in api.tudo(), proibido
     fatos = _do_agente(r)
     assert fatos["garantia_consultada"] is True
-    assert r.status == RASCUNHO_PENDENTE and r.validador_ok, (r.motivo, r.validador_erros)
-    assert not r.precisa_humano, r.motivo
-    assert r.texto == texto
+    assert r.status == RASCUNHO_BLOQUEADO and not r.validador_ok, (r.motivo, r.validador_erros)
 
 
 async def test_e_garantia_sem_data_de_entrega_so_a_regra(
@@ -611,8 +612,8 @@ async def test_e_garantia_sem_data_de_entrega_so_a_regra(
     r = await ia.gerar_rascunho(db, conversa)
 
     assert '"entregue_sem_data":true' in api.resultado(1)
-    assert r.status == RASCUNHO_PENDENTE and r.validador_ok, (r.motivo, r.validador_erros)
-    assert not r.precisa_humano, r.motivo
+    # O dono, 27/10/2026: os 3 e os 12 meses da Uranyx não saem mais (nem só a regra).
+    assert r.status == RASCUNHO_BLOQUEADO and not r.validador_ok, (r.motivo, r.validador_erros)
 
     # A mesma regra com uma data inventada (não veio do Painel): bloqueada.
     conversa.aguardando_resposta = True

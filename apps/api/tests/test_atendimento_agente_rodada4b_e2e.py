@@ -1122,7 +1122,23 @@ RUINS = [
 ]
 
 
-@pytest.mark.parametrize("caso", BOAS, ids=[c[0] for c in BOAS])
+# O dono, 27/10/2026 (a garantia como a equipe responde): as falas da garantia Uranyx com os
+# 3/12 meses e as datas do Painel deixaram de ser boas — não saem mais sozinhas.
+GARANTIA_ANTIGA = {"15-K05", "rev-R14", "rev-R15", "rev-R16", "rev-R17", "rev-R18", "rev-R19",
+                   "rev-R21"}  # fmt: skip
+BOAS_HOJE = [c for c in BOAS if c[0] not in GARANTIA_ANTIGA]
+DA_GARANTIA_ANTIGA = [c for c in BOAS if c[0] in GARANTIA_ANTIGA]
+
+
+@pytest.mark.parametrize("caso", DA_GARANTIA_ANTIGA, ids=[c[0] for c in DA_GARANTIA_ANTIGA])
+async def test_a_garantia_uranyx_com_meses_ou_datas_nao_sai_mais(
+    db: AsyncSession, make_user, agente_ligado, api, envios, redis_mem, lojas, caso
+):
+    r = await _gerar(db, make_user, redis_mem, lojas, api, MODO_AUTO, caso)
+    assert not envios and _decisao(r) != "enviado", (caso[0], _decisao(r))
+
+
+@pytest.mark.parametrize("caso", BOAS_HOJE, ids=[c[0] for c in BOAS_HOJE])
 async def test_a_resposta_boa_sai_sozinha_no_automatico(
     db: AsyncSession, make_user, agente_ligado, api, envios, redis_mem, lojas, caso
 ):
@@ -1133,7 +1149,7 @@ async def test_a_resposta_boa_sai_sozinha_no_automatico(
     assert envios and _decisao(r) == "enviado", (caso[0], _decisao(r))
 
 
-@pytest.mark.parametrize("caso", BOAS, ids=[c[0] for c in BOAS])
+@pytest.mark.parametrize("caso", BOAS_HOJE, ids=[c[0] for c in BOAS_HOJE])
 async def test_a_resposta_boa_fica_limpa_no_copiloto(
     db: AsyncSession, make_user, agente_ligado, api, envios, redis_mem, lojas, caso
 ):

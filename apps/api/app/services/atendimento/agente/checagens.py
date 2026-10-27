@@ -1193,10 +1193,26 @@ def opcoes_citadas(texto: str | None, lista: _Lista) -> set[_Opcao]:
     return {o for _, o in _citadas_em_ordem(_plano(texto), lista)}
 
 
+# v16 (o dono, 27/10/2026): a reposição sem previsão também da opção que o PRÓPRIO cliente diz
+# esgotada ou de que pergunta quando volta ("quando vai ter azul?", "previsão de retorno do
+# produto esgotado?") quando os dados não trazem as opções do anúncio (nenhuma lista), e a dita
+# como condição ("se estiver esgotada, não há previsão") — o aviso "sem a variação esgotada"
+# segurava o «sem previsão» igual ao da equipe (ccef00af2b17, 85f56d89186a, 30670d4d00ee). Com a
+# lista, nada muda: a opção DISPONÍVEL continua contradição e a que a lista não tem (ou só sem
+# estoque confiável), aviso (o reposicao-12 da calibração).
+_CLIENTE_DIZ_ESGOTADO = re.compile(
+    r"\b(?:esgotad\w*|acabou|acabaram|sem\s+estoque|indisponivel|nao\s+tem\s+mais"
+    r"|quando\s+(?:vai\s+ter|volta\w*|chega\w*|tera|terao|estara|estarao|repo\w*)"
+    r"|previsao\s+de\s+(?:retorno|reposicao|chegada|voltar)|vai\s+voltar|volta\s+a\s+ter)\b"
+)
+_CONDICAO_DA_FRASE = re.compile(r"^\W*(?:e\s+)?(?:se|caso)\b")
+
+
 def conferir_sem_previsao(
     texto: str,
     fichas: Sequence[dict],
     textos_cliente: Sequence[str],
+    conversa: Sequence[str | None] = (),
 ) -> list[PendenciaAgente]:
     """O "não há previsão de reposição / data de chegada" contra a variação de que a
     frase fala (ver acima). PURA. Só o agente (a régua é das checagens dele)."""
@@ -1205,6 +1221,13 @@ def conferir_sem_previsao(
         return []
     fichas = _sem_repetir_fichas(fichas)
     clientes = [t for t in textos_cliente if isinstance(t, str)]
+    # v16: e a conversa recente (`conversa`: o cliente que já disse que está esgotada ou já
+    # perguntou quando volta, a loja que já disse "sem previsão" — 85f56d89186a).
+    falas = " ".join([*clientes, *(t for t in conversa if isinstance(t, str))])
+    cliente_diz_esgotado = bool(
+        _CLIENTE_DIZ_ESGOTADO.search(_plano(falas))
+        or _SEM_PREVISAO.search(_plano(" ".join(t for t in conversa if isinstance(t, str))))
+    )
     if len(fichas) >= 2 and any(isinstance(f.get("variacoes"), list) for f in fichas):
         escolhida = _qual_anuncio(texto, fichas, clientes)
         fichas = [escolhida] if escolhida is not None else []
@@ -1233,8 +1256,12 @@ def conferir_sem_previsao(
             )
             if not de_estoque:
                 continue
+            condicional = bool(
+                _CONDICAO_DA_FRASE.search(sentenca[ini:]) or _CONDICAO_DA_FRASE.search(sentenca)
+            )
             if lista is None:
-                saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
+                if not (cliente_diz_esgotado or condicional):
+                    saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
                 continue
             if na_oracao:
                 disponivel = next((o for o in na_oracao if o.disponivel and o.confiavel), None)
@@ -1252,6 +1279,8 @@ def conferir_sem_previsao(
             if not faladas:
                 if all(o.disponivel is False and o.confiavel for o in lista.opcoes):
                     continue  # o produto inteiro esgotado
+                if condicional:
+                    continue  # v16: a política dita como condição
                 saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
                 continue
             if not all(o.disponivel is False and o.confiavel for o in faladas):
@@ -1259,14 +1288,14 @@ def conferir_sem_previsao(
                 # "Essa cor não tem previsão"): a variação DO CLIENTE disponível é a
                 # contradição — o aviso diz qual (o verificador confere nas EVIDÊNCIAS).
                 disponivel = next((o for o in faladas if o.disponivel and o.confiavel), None)
-                if disponivel is not None and not antes:
+                if disponivel is not None and not antes and not condicional:
                     saida.append(
                         _contradiz(
                             VARIACAO_CONTRADIZ,
                             MOTIVO_SEM_PREVISAO_DISPONIVEL.format(disponivel.nome),
                         )
                     )
-                else:
+                elif not condicional:
                     saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
     return _sem_repetir(saida)
 
@@ -1960,7 +1989,7 @@ def conferir_fonte_produto(
         rotulo = _ROTULO_CAMPO.get(campo, campo)
         familia = ("ram", "ram_fisica", "ram_virtual") if campo == "ram" else (campo,)
         linhas = [c for e in especs for c in e["campos"] if c.get("campo") in familia]
-        if any(c.get("conflito_no_anuncio") for c in linhas):
+        if any(_conflito_de_verdade(c) for c in linhas):
             saida.append(
                 _pessoa(
                     ANUNCIO_SE_CONTRADIZ,
@@ -6481,6 +6510,20 @@ def condicao_provada(texto: str | None, fichas: Sequence[Any]) -> frozenset[str]
     return frozenset(provados)
 
 
+def _conflito_de_verdade(campo: Mapping[str, Any]) -> bool:
+    """O `conflito_no_anuncio` do campo, sem o falso: os valores que só detalham o mesmo dado
+    ("Android / Android 15" — d65181f63951, v16 de 27/10/2026) não se contradizem. PURA."""
+    if not campo.get("conflito_no_anuncio"):
+        return False
+    partes = [_plano(p).strip() for p in str(campo.get("valor") or "").split("/")]
+    partes = [p for p in partes if p]
+    if len(partes) < 2:
+        return True
+    return not all(
+        a == b or a.startswith(b + " ") or b.startswith(a + " ") for a in partes for b in partes
+    )
+
+
 def conferir_condicao(
     texto: str, fichas: Sequence[Any], textos_da_loja: Sequence[str | None] = ()
 ) -> list[PendenciaAgente]:
@@ -6951,11 +6994,22 @@ def erros_sem_o_caminho_uranyx(
 HOMOLOGADO = "homologado"
 MOTIVO_HOMOLOGADO = "diz 'homologado' (o manual proíbe: regra 8)"
 _HOMOLOGADO = re.compile(r"\bhomologad\w*\b(?!\s+(?:pel[oa]\s+)?(?:anatel|inmetro)\b)")
+# O dono, 27/10/2026 (a garantia como a equipe responde): "homologado pela Uranyx" é a fala da
+# equipe quando o CLIENTE pergunta da homologação ou da Anatel — só aí, e só essa forma.
+_HOMOLOGADO_PELA_URANYX = re.compile(r"\bhomologad[oa]s?\s+pela\s+uranyx\b")
+_PERGUNTA_DA_HOMOLOGACAO = re.compile(r"\b(?:homologa\w*|anatel)\b")
 
 
-def conferir_homologado(texto: str) -> list[PendenciaAgente]:
-    """ "Homologado" (fora da Anatel/Inmetro) → bloqueia. PURA."""
-    if _HOMOLOGADO.search(_plano(texto)):
+def conferir_homologado(
+    texto: str, textos_cliente: Sequence[str | None] = ()
+) -> list[PendenciaAgente]:
+    """ "Homologado" (fora da Anatel/Inmetro) → bloqueia. PURA. Com o cliente perguntando da
+    homologação ou da Anatel, o "homologado pela Uranyx" da equipe passa (27/10/2026)."""
+    plano = _plano(texto)
+    cliente = _plano(" ".join(t for t in textos_cliente if isinstance(t, str)))
+    if _PERGUNTA_DA_HOMOLOGACAO.search(cliente):
+        plano = _HOMOLOGADO_PELA_URANYX.sub(" ", plano)
+    if _HOMOLOGADO.search(plano):
         return [_bloqueia(HOMOLOGADO, MOTIVO_HOMOLOGADO)]
     return []
 
@@ -7564,6 +7618,10 @@ _REGIAO_NAO_AFIRMA = re.compile(
     # anúncio"). "Confirmar"/"saber"/"informar" NÃO entram: "posso confirmar
     # que entregamos no seu endereço" afirma.
     r"|\b(?:coloque|colocar|digite|digitar)\b"
+    # v16 (27/10/2026, 6df9e8ec8e22): "o pedido é enviado para o endereço cadastrado" fala do
+    # endereço da compra, não afirma a entrega num estado.
+    r"|\bpara\s+o\s+(?:seu\s+)?endereco\s+(?:cadastrado|do\s+pedido|da\s+compra|informado"
+    r"|que\s+(?:voce|vc)\s+(?:cadastrou|informou|escolheu))\b"
 )
 _NEGA_ANTES = re.compile(r"\b(?:nao|nem|nunca)\b")
 
@@ -8610,6 +8668,9 @@ _CLIENTE_FALA_DO_POS_VENDA = re.compile(
     r"|\bnao\s+(?:quero|vou\s+querer)\s+(?:mais\s+)?(?:o|a|esse|essa|este|esta)\s+(?:produto"
     r"|pedido|item|aparelho|compra|celular|mercadoria)\b"
     r"|\bem\s+vez\s+d[oa]s?\b|\bno\s+lugar\s+d[oa]s?\b|\bnao\s+quero(?=\s*(?:[.!?,;]|$))"
+    # O dono, 27/10/2026 (a garantia como a equipe responde): a garantia e o defeito pedem a
+    # devolução pela plataforma ("tem garantia, mas a única forma é a devolução pela Shopee").
+    r"|\bgarantia\b|\bdefeit\w*|\bparou\s+de\b|\bnao\s+(?:liga|carrega|funciona)\b"
 )
 
 
@@ -10171,7 +10232,12 @@ def conferir(
         # Revisão 2 da rodada 6 (22/10/2026): o "sem previsão de reposição" só da
         # variação esgotada e confiável de que a frase fala (o verificador v8 o
         # aceita como lastro; aqui o código confere de qual variação é).
-        pendencias += conferir_sem_previsao(texto, fichas, clientes)
+        pendencias += conferir_sem_previsao(
+            texto,
+            fichas,
+            clientes,
+            conversa=[getattr(m, "texto", None) for m in getattr(base, "recentes", ()) or ()],
+        )
         # Revisão do item 32 (22/10/2026): a chegada do estoque com data → suave.
         pendencias += conferir_chegada_do_estoque(texto, fichas)
         da_base = _fontes_da_base(base)
@@ -10273,7 +10339,7 @@ def conferir(
             ctx.plataforma,
             marcas=marcas_das_fichas([*fichas, *_do_registro(ctx)]),
         )
-        pendencias += conferir_homologado(texto)
+        pendencias += conferir_homologado(texto, textos_cliente=clientes)
         # Fontes v1.3, item 10 (21/10/2026): a condição pelo anúncio da conversa
         # (e a fala REAL da loja na conversa, que não pode contradizê-lo).
         from app.services.atendimento import ia as ia_svc
@@ -10374,6 +10440,9 @@ def conferir(
             ]
             pendencias += conferir_entregue_a_quem_nao_recebeu(texto, do_turno)
             pendencias += conferir_modelo_sem_o_dado(texto, pedido, fichas)
+            # v16 (27/10/2026): a condição perguntada sem resposta e o "não informa".
+            pendencias += conferir_condicao_sem_resposta(texto, do_turno, acao=proposta.acao)
+            pendencias += conferir_anuncio_nao_informa(texto, acao=proposta.acao)
             pendencias += conferir_conteudo_sem_o_dado(
                 texto,
                 do_turno,
@@ -10982,3 +11051,65 @@ def conferir_conteudo_sem_o_dado(
     if not re.search(_OBJETO_DA_CAIXA, plano) or not _NEGA_A_CAIXA.search(plano):
         return []
     return [_pessoa(CONTEUDO_SEM_O_DADO, MOTIVO_CONTEUDO_SEM_O_DADO)]
+
+
+# ── 12c. O v16 (27/10/2026): a pergunta da condição e o "o anúncio não informa" ──
+#
+# Os não-ok que o v15 soltou no eval de todas as lojas (as notas do dono), com regra
+# genérica: no automático, AVISO ao verificador (não DURA — a liberação L1 do dono manda o
+# "o anúncio não informa" ao verificador, e a D2, a garantia Apple do fato; o SISTEMA v16 diz
+# que «é original?» respondido só com novo/lacrado não trata a pergunta); fora dele, pessoa:
+#   1. CONDICAO_SEM_RESPOSTA — o cliente pergunta se é ORIGINAL ou LACRADO e o rascunho
+#      não diz a palavra (fc6ea9e62468: "Esses celular original?" → "é novo e lacrado, com
+#      a compra protegida" — a equipe responde "sim, original, lacrado, com garantia");
+#   2. ANUNCIO_NAO_INFORMA — a resposta é "o anúncio (a descrição, a ficha) não informa X"
+#      (fadfe6c44abb: "o anúncio não informa carregamento por indução" — a equipe responde
+#      direto que não tem): no eval, 6 dos 7 rascunhos com essa frase não estavam ok.
+CONDICAO_SEM_RESPOSTA = "condicao_sem_resposta"
+MOTIVO_CONDICAO_SEM_RESPOSTA = (
+    "o cliente pergunta se é {palavra} e a resposta não diz — a equipe responde direto"
+)
+ANUNCIO_NAO_INFORMA = "anuncio_nao_informa"
+MOTIVO_ANUNCIO_NAO_INFORMA = (
+    'responde "o anúncio não informa" — confira se um campo ou a resposta da equipe do mesmo '
+    "produto traz o dado"
+)
+
+# A condição DO PRODUTO perguntada ("esse celular é original?", "é original lacrado?") — não o
+# "cartão original" do estorno (rev-R60 da rodada 4b).
+_ORIGINAL_DO_PRODUTO = re.compile(
+    r"\b(?:e|eh|sao|seria|sera|vem|esse|essa|esses|essas|este|esta|celular|celulares|aparelho"
+    r"|produto|relogio|smartwatch|telefone|item)\s+(?:\w+\s+){0,2}?origina(?:l|is)\b"
+)
+_CONDICAO_PERGUNTADA = (
+    ("original", _ORIGINAL_DO_PRODUTO, re.compile(r"\borigina\w*")),
+    ("lacrado", re.compile(r"\blacrad\w*"), re.compile(r"\blacrad\w*")),
+)
+_NAO_INFORMA = re.compile(
+    r"\b(?:anuncio|descricao|ficha|titulo|pagina\s+do\s+produto)\b[^.!?;\n]{0,40}?"
+    r"\bnao\s+(?:informa|traz|especifica|menciona|detalha|cita|diz)\b"
+    r"|\bnao\s+(?:consta|esta\s+informad\w*)\s+no\s+anuncio\b"
+)
+
+
+def conferir_condicao_sem_resposta(
+    texto: str, perguntas: Sequence[str | None], *, acao: str
+) -> list[PendenciaAgente]:
+    """1. (ver acima) → pessoa (no automático, aviso). PURA. `perguntas` = as falas do turno."""
+    if acao != "responder":
+        return []
+    plano = _plano(texto)
+    turno = " ".join(_plano(t) for t in perguntas if isinstance(t, str))
+    for palavra, no_turno, no_texto in _CONDICAO_PERGUNTADA:
+        if no_turno.search(turno) and not no_texto.search(plano):
+            return [
+                _pessoa(CONDICAO_SEM_RESPOSTA, MOTIVO_CONDICAO_SEM_RESPOSTA.format(palavra=palavra))
+            ]
+    return []
+
+
+def conferir_anuncio_nao_informa(texto: str, *, acao: str) -> list[PendenciaAgente]:
+    """2. (ver acima) → pessoa (no automático, aviso). PURA."""
+    if acao != "responder" or not _NAO_INFORMA.search(_plano(texto)):
+        return []
+    return [_pessoa(ANUNCIO_NAO_INFORMA, MOTIVO_ANUNCIO_NAO_INFORMA)]
