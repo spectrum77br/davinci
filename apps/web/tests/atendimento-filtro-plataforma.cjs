@@ -480,7 +480,7 @@ async function barraRenderizada() {
   assert.match(pagina, /plataforma_topo: '' \}\)/)
   // Não vai para a API (a lista filtra por `plataforma`).
   assert.doesNotMatch(pagina, /p\.set\('plataforma_topo'/)
-  assert.match(pagina, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"/)
+  assert.match(pagina, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+v-model:grupos-abertos="gruposEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"/)
 }
 
 // ------------------------------------------------ o contrato com a API

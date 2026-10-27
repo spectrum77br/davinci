@@ -14,7 +14,10 @@
    ele, o PAR (nome da conta sem espaços nas pontas e minúsculo, plataforma
    normalizada) contra as integrações não arquivadas — o mesmo pareamento de
    `deps/team_scope.py` e de `routers/pricing._resolve_linked_integration`
-   (o selo "Integração" de Cadastros › Lojas). Nem FK nem par (Temu,
+   (o selo "Integração" de Cadastros › Lojas). Desde 27/10/2026 o NOME do par
+   é comparado também sem acento, com os espaços de dentro juntados e sem o
+   nome da plataforma na frente (`_nome_do_par`: "VR " na Carrefour casa com a
+   integração "Carrefour VR"; "Vr"/"VR " já casavam). Nem FK nem par (Temu,
    AliExpress, Magalu, a ficha com nome diferente): a LOJA continua sendo a
    ficha — o e-mail entra na conversa dela, sem integração (RF5: são contas
    que "só têm a aba E-mail"), e a Saúde lista a ficha para o dono ligar.
@@ -43,6 +46,8 @@ Veio do wt-tuta (`tuta/rotear.py`), agora com a lista de endereços da caixa.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -50,7 +55,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, Marca, MarcaEmail, StoreInfo
-from app.services.atendimento.lojas import _PLATAFORMA_DA_FICHA
+from app.services.atendimento.lojas import _PLATAFORMA_DA_FICHA, _PREFIXOS, _SEPARADOR
 from app.services.mail_atendimento import enderecos, suspeito
 from app.services.mail_atendimento.constantes import (
     LOCAIS_DE_SITE,
@@ -73,9 +78,27 @@ def plataforma_da_ficha(valor: str | None) -> str:
     return _PLATAFORMA_DA_FICHA.get(plat, plat)
 
 
-def _nome_do_par(valor: str | None) -> str:
-    """O nome da conta para o PAR ficha × integração (sem espaços nas pontas, minúsculo)."""
-    return (valor or "").strip().lower()
+def _sem_acento(valor: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", valor) if not unicodedata.combining(c))
+
+
+def _nome_do_par(valor: str | None, plataforma: str | None = None) -> str:
+    """O nome da conta para o PAR ficha × integração.
+
+    Sem espaços nas pontas e minúsculo (como sempre) e, desde 27/10/2026, sem
+    acento, com os espaços de dentro juntados e sem o nome da PRÓPRIA plataforma
+    na frente ("Carrefour VR" na Carrefour → "vr", "Shopee - Atlas" → "atlas";
+    se sobrar nada, o nome inteiro). Os dois lados passam pela mesma régua."""
+    nome = " ".join(_sem_acento(valor or "").split()).casefold()
+    if not plataforma:
+        return nome
+    prefixos = (*_PREFIXOS.get(plataforma, ()), plataforma)
+    for prefixo in prefixos:
+        inicio = re.escape(_sem_acento(prefixo).casefold())
+        m = re.match(rf"{inicio}{_SEPARADOR}(?P<resto>.+)$", nome)
+        if m and m.group("resto").strip():
+            return m.group("resto").strip()
+    return nome
 
 
 @dataclass(frozen=True)
@@ -151,7 +174,7 @@ def integracao_pelo_par(
     pares: dict[tuple[str, str], list[UUID]], nome: str | None, plataforma: str
 ) -> UUID | None:
     """A integração do PAR (nome, plataforma) — só quando há UMA (duas = ninguém adivinha)."""
-    achadas = pares.get((_nome_do_par(nome), plataforma)) or []
+    achadas = pares.get((_nome_do_par(nome, plataforma), plataforma)) or []
     return achadas[0] if len(achadas) == 1 else None
 
 
@@ -169,8 +192,8 @@ async def _pares_das_integracoes(
         )
     ).all():
         ativas.add(iid)
-        chave = (_nome_do_par(nome), str(getattr(plat, "value", plat) or "").lower())
-        pares.setdefault(chave, []).append(iid)
+        plataforma = str(getattr(plat, "value", plat) or "").lower()
+        pares.setdefault((_nome_do_par(nome, plataforma), plataforma), []).append(iid)
     return ativas, pares
 
 

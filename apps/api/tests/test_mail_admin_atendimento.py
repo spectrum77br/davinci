@@ -26,6 +26,7 @@ from app.services.mail_atendimento import saude
 from tests.test_atendimento_separa_email import (
     _ids_pela_barra,
     _lista_inteira_recusada,
+    _na_barra,
     _tipo_email,
 )
 from tests.test_mail_ponte import _config, cena, entrar, meta_de, pedido_existe, rodar
@@ -139,14 +140,16 @@ async def test_bloquear_loja_tira_previa_historico_abas_contagens_e_anexos(
     # A lista da loja (a barra de lojas: desde 27/10/2026 a aba E-mail inteira é
     # só de admin): a Shopee permitida aparece; a do ML bloqueada, não.
     await _lista_inteira_recusada(client)
+    await _na_barra(db, shopee.conversa_id)
     assert await _ids_pela_barra(client, integration_id=str(cena.shopee.id)) == {
         str(shopee.conversa_id)
     }
     await _tipo_email(db, ml.conversa_id, "chamado")
+    await _na_barra(db, ml.conversa_id)
     assert await _ids_pela_barra(client, integration_id=str(cena.ml.id)) == set()
     r = await client.get(
         f"{ATENDIMENTO}/conversas",
-        params={"caixa": "email", "integration_id": str(cena.ml.id), "tipo_email": "chamado"},
+        params={"caixa": "email", "integration_id": str(cena.ml.id), "grupo_email": "problemas"},
     )
     assert "TEXTO BLOQUEADO ML" not in r.text and str(ml.conversa_id) not in r.text
     counts = await client.get(f"{EMAIL}/contagens")

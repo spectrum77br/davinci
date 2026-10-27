@@ -1077,6 +1077,23 @@ def test_integracao_da_ficha_pelo_par_nome_e_plataforma():
     assert rotear.plataforma_da_ficha("mercadolivre") == "ml"
 
 
+def test_o_nome_do_par_sem_acento_espacos_e_o_nome_da_plataforma():
+    """27/10/2026: "VR " (ficha) × "Carrefour VR" (integração) na Carrefour."""
+    assert rotear._nome_do_par("Carrefour VR", "carrefour") == "vr"
+    assert rotear._nome_do_par("VR ", "carrefour") == "vr"
+    assert rotear._nome_do_par(" Vr", "ml") == "vr"
+    assert rotear._nome_do_par("Mercado Livre - KFA", "ml") == "kfa"
+    assert rotear._nome_do_par("Shopee  Ótica   Já", "shopee") == "otica ja"
+    # Sobrou nada: o nome inteiro (o nome não some).
+    assert rotear._nome_do_par("Shopee", "shopee") == "shopee"
+    # Só o nome da PRÓPRIA plataforma sai.
+    assert rotear._nome_do_par("Shopee X", "ml") == "shopee x"
+    x = uuid4()
+    pares = {(rotear._nome_do_par("Carrefour VR", "carrefour"), "carrefour"): [x]}
+    assert rotear.integracao_pelo_par(pares, "VR ", "carrefour") == x
+    assert rotear.integracao_pelo_par(pares, "VR ", "ml") is None
+
+
 def _cad_marcas() -> rotear.Cadastro:
     """Como em produção: poofy (nome "charlots") e charlots-park dividem charlots.com.br."""
     cad = rotear.Cadastro()

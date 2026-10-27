@@ -20,7 +20,7 @@ import {
 } from '~/components/AtendimentoPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
-import type { EmailsDaLoja, EscolhaEmail, TipoEmailDaLoja } from '~/components/AtendimentoLojas.vue'
+import type { EmailDaCaixa, EmailsDaLoja, EscolhaEmail, GrupoDaBarra } from '~/components/AtendimentoLojas.vue'
 import { GRUPOS_CAIXA, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
@@ -223,10 +223,11 @@ async function zerarNaoLidas() {
 // Na Caixa (27/10/2026) a MESMA leitura traz também os números por loja
 // (`?por_loja=true`): o ampliável de e-mails da barra de lojas.
 const emailContagens = ref<ContagensDeConversa | null>(null)
-// A última leitura COM os números por loja e os tipos da barra (a API manda a
-// lista: a escolha do dono mora lá, TIPOS_EMAIL_NA_BARRA_DE_LOJAS).
+// A última leitura COM os números por loja e as pastas da barra (a API manda a
+// lista: a escolha do dono mora lá, GRUPOS_EMAIL_NA_BARRA_DE_LOJAS) e a janela.
 const emailPorLoja = ref<EmailsDaLoja[] | null>(null)
-const emailTiposNaBarra = ref<string[]>([])
+const emailGruposNaBarra = ref<GrupoDaBarra[]>([])
+const emailDias = ref(30)
 const emailContagensProntas = ref(false)
 const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
 // Sobe a cada tique do polling: as Filas da aba E-mail se releem junto com o número.
@@ -250,7 +251,8 @@ async function carregarContagensEmail() {
     // E-mail para a Caixa não apaga as setas enquanto a nova leitura chega).
     if (Array.isArray(recebidas?.por_loja)) {
       emailPorLoja.value = recebidas.por_loja
-      emailTiposNaBarra.value = Array.isArray(recebidas.tipos_na_barra) ? recebidas.tipos_na_barra : []
+      emailGruposNaBarra.value = Array.isArray(recebidas.grupos_na_barra) ? recebidas.grupos_na_barra : []
+      emailDias.value = Number(recebidas.dias) || 30
     }
   } catch {
     // só o número da aba
@@ -783,21 +785,25 @@ watch(selecionada, (id) => {
 // O Eduardo, 27/10: "vamos mudar um pouco a disposição da caixa de
 // atendimento: botar um AMPLIÁVEL que vai abrir os e-mails embaixo de cada
 // loja … então poderá ampliar e visualizar os e-mails ali pelo atendimento
-// mesmo de cada loja". No mesmo dia: embaixo de cada loja só Informativo e
-// Chamado (a escolha é a constante TIPOS_EMAIL_NA_BARRA_DE_LOJAS da API, que
-// chega em `tipos_na_barra`) e a aba E-mail só para admin — quem não é admin
-// vê e-mail SÓ por aqui. Na barra de lojas da CAIXA (a Caixa Humano é só o
-// que a IA não pode responder: lá não), a loja com e-mail tem a seta; embaixo,
-// os tipos da barra com os números (GET …/email/contagens?por_loja=true, a
-// mesma leitura do número da aba E-mail). O clique num tipo troca a lista do
-// meio pelos e-mails da loja (AtendimentoLojaEmails) e a conversa de e-mail
-// abre na coluna da conversa, com a barra do e-mail (voltar, vincular ao
-// pedido) — como na aba E-mail. O CHAT não muda: a lista dele fica guardada
+// mesmo de cada loja". No mesmo dia: embaixo de cada loja as PASTAS do Tuta
+// que ele unificou — Problemas, Envios, Devolução e Informativo (a constante
+// GRUPOS_EMAIL_NA_BARRA_DE_LOJAS da API, que chega em `grupos_na_barra`) —,
+// cada uma abre e fecha sozinha, e a aba E-mail só para admin — quem não é
+// admin vê e-mail SÓ por aqui. Na barra de lojas da CAIXA (a Caixa Humano é só
+// o que a IA não pode responder: lá não), TODA loja tem a seta; embaixo, as
+// caixas com os números (GET …/email/contagens?por_loja=true, a mesma leitura
+// do número da aba E-mail; a lista curta de cada caixa só carrega aberta). O
+// "ver todos" (ou um e-mail da caixa) troca a lista do meio pelos e-mails da
+// loja naquela pasta (AtendimentoLojaEmails) e a conversa de e-mail abre na
+// coluna da conversa, com a barra do e-mail (voltar, vincular ao pedido) —
+// como na aba E-mail. O CHAT não muda: a lista dele fica guardada
 // (volta em "conversas", num clique de loja na barra ou no menu Plataforma)
 // e o e-mail continua fora dos números e da lista da Caixa (`separa_email`).
 // No celular e no tablet (sem a barra de lojas) o botão "E-mails das lojas"
 // em cima da lista abre as mesmas lojas e tipos.
 const emailsDaLoja = ref<EscolhaEmail | null>(null)
+// O e-mail (sem conversa) que o clique numa caixa da barra mandou abrir na lista.
+const emailDaCaixaAberto = ref<string | null>(null)
 const emailNaCaixa = ref<string | null>(null)
 const emailNaCaixaLinha = ref<ConversaResumo | null>(null)
 const emailNaCaixaVersao = ref(0)
@@ -837,14 +843,23 @@ function fecharEmailNaCaixa() {
 function fecharEmailsDaLoja() {
   fecharEmailNaCaixa()
   emailsDaLoja.value = null
+  emailDaCaixaAberto.value = null
 }
 function abrirEmailsDaLoja(e: EscolhaEmail) {
-  if (emailsDaLoja.value?.chave !== e.chave || emailsDaLoja.value?.tipo !== e.tipo || emailNaCaixaOrigem.value) fecharEmailNaCaixa()
+  if (emailsDaLoja.value?.chave !== e.chave || emailsDaLoja.value?.grupo !== e.grupo || emailNaCaixaOrigem.value) fecharEmailNaCaixa()
   emailsDaLoja.value = e
+  emailDaCaixaAberto.value = null
   emailsNoCelular.value = false
 }
-function trocarTipoDaLoja(t: TipoEmailDaLoja) {
-  if (emailsDaLoja.value && emailsDaLoja.value.tipo !== t) abrirEmailsDaLoja({ ...emailsDaLoja.value, tipo: t })
+function trocarGrupoDaLoja(g: string) {
+  if (emailsDaLoja.value && emailsDaLoja.value.grupo !== g) abrirEmailsDaLoja({ ...emailsDaLoja.value, grupo: g })
+}
+// Um e-mail da lista curta de uma caixa: a lista da loja naquela pasta e o
+// e-mail aberto nela — ou, sendo de uma conversa, a conversa na coluna dela.
+function abrirEmailDaBarra(e: EscolhaEmail, email: EmailDaCaixa) {
+  abrirEmailsDaLoja(e)
+  if (email.conversa_id) selecionarEmailNaCaixa(email.conversa_id)
+  else emailDaCaixaAberto.value = email.id
 }
 function selecionarEmailNaCaixa(id: string) {
   if (emailNaCaixa.value !== id) emailNaCaixaLinha.value = null
@@ -919,32 +934,45 @@ watch(ehAdmin, (v) => {
 watch(emailNaCaixa, (id) => {
   if (iniciou && id) void carregarModelos()
 })
-// As lojas com a seta aberta, lembradas POR PESSOA neste navegador (a chave
-// leva o id de quem entrou). Lido só no cliente e sempre com try.
+// As lojas com a seta aberta e as CAIXAS abertas embaixo delas (`loja|pasta`),
+// lembradas POR PESSOA neste navegador (a chave leva o id de quem entrou).
+// Lido só no cliente e sempre com try.
 const EMAILS_ABERTOS_KEY = 'davinci.atendimento.lojasEmailsAbertos'
+const GRUPOS_ABERTOS_KEY = 'davinci.atendimento.gruposEmailsAbertos'
 const lojasEmailsAbertos = ref<string[]>([])
+const gruposEmailsAbertos = ref<string[]>([])
 let emailsAbertosLidos = false
 function chaveDosEmailsAbertos() {
   return `${EMAILS_ABERTOS_KEY}:${auth.user?.id || 'anonimo'}`
 }
-onMounted(() => {
+function chaveDosGruposAbertos() {
+  return `${GRUPOS_ABERTOS_KEY}:${auth.user?.id || 'anonimo'}`
+}
+function lerAbertos(chave: string): string[] {
   try {
-    const salvo = JSON.parse(localStorage.getItem(chaveDosEmailsAbertos()) || '[]')
-    if (Array.isArray(salvo)) lojasEmailsAbertos.value = [...new Set(salvo.filter((x: unknown): x is string => typeof x === 'string' && !!x))].slice(0, 300)
+    const salvo = JSON.parse(localStorage.getItem(chave) || '[]')
+    if (Array.isArray(salvo)) return [...new Set(salvo.filter((x: unknown): x is string => typeof x === 'string' && !!x))].slice(0, 300)
   } catch {
     // sem localStorage (ou valor estragado) — começa tudo fechado
   }
-  // Depois do valor inicial: daqui em diante, mudança é clique da pessoa.
-  void nextTick(() => { emailsAbertosLidos = true })
-})
-watch(lojasEmailsAbertos, (v) => {
+  return []
+}
+function gravarAbertos(chave: string, v: string[]) {
   if (!emailsAbertosLidos) return
   try {
-    localStorage.setItem(chaveDosEmailsAbertos(), JSON.stringify(v.slice(0, 300)))
+    localStorage.setItem(chave, JSON.stringify(v.slice(0, 300)))
   } catch {
     // sem localStorage — só não lembra
   }
+}
+onMounted(() => {
+  lojasEmailsAbertos.value = lerAbertos(chaveDosEmailsAbertos())
+  gruposEmailsAbertos.value = lerAbertos(chaveDosGruposAbertos())
+  // Depois do valor inicial: daqui em diante, mudança é clique da pessoa.
+  void nextTick(() => { emailsAbertosLidos = true })
 })
+watch(lojasEmailsAbertos, (v) => gravarAbertos(chaveDosEmailsAbertos(), v))
+watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
 </script>
 
 <template>
@@ -1091,12 +1119,16 @@ watch(lojasEmailsAbertos, (v) => {
           v-model:filtros="filtros"
           v-model:recolhida="lojasRecolhidas"
           v-model:emails-abertos="lojasEmailsAbertos"
+          v-model:grupos-abertos="gruposEmailsAbertos"
           :resumo="resumo"
           :numero="emHumano ? 'humano' : 'nao_lidas_duoke'"
           :emails="aba === 'caixa' ? emailPorLoja : null"
-          :tipos-email="emailTiposNaBarra"
-          :email-aberto="emailsDaLoja ? { chave: emailsDaLoja.chave, tipo: emailsDaLoja.tipo } : null"
+          :grupos-email="emailGruposNaBarra"
+          :dias-email="emailDias"
+          :tique="emailTique"
+          :email-aberto="emailsDaLoja ? { chave: emailsDaLoja.chave, grupo: emailsDaLoja.grupo } : null"
           @abrir-emails="abrirEmailsDaLoja"
+          @abrir-email="abrirEmailDaBarra"
         />
       </aside>
       <aside
@@ -1118,6 +1150,7 @@ watch(lojasEmailsAbertos, (v) => {
         <AtendimentoLojas
           v-if="emailsNoCelular && !emailsDaLoja"
           v-model:emails-abertos="lojasEmailsAbertos"
+          v-model:grupos-abertos="gruposEmailsAbertos"
           class="lg:hidden"
           modo="emails"
           :filtros="filtros"
@@ -1125,21 +1158,25 @@ watch(lojasEmailsAbertos, (v) => {
           :resumo="resumo"
           numero="nao_lidas_duoke"
           :emails="emailPorLoja"
-          :tipos-email="emailTiposNaBarra"
+          :grupos-email="emailGruposNaBarra"
+          :dias-email="emailDias"
+          :tique="emailTique"
           @abrir-emails="abrirEmailsDaLoja"
+          @abrir-email="abrirEmailDaBarra"
         />
         <!-- os e-mails da loja escolhida na barra (27/10/2026); a lista do chat fica guardada -->
         <AtendimentoLojaEmails
           v-if="emailsDaLoja"
           :escolha="emailsDaLoja"
           :contagem="contagemDaLoja"
-          :tipos="emailTiposNaBarra"
-          :pode-mexer="mexe"
+          :grupos="emailGruposNaBarra"
+          :dias="emailDias"
           :selecionada="emailNaCaixa"
+          :aberto="emailDaCaixaAberto"
           :tique="emailTique"
           :sinal="emailNaCaixaSinal"
           @selecionar="selecionarEmailNaCaixa"
-          @tipo="trocarTipoDaLoja"
+          @grupo="trocarGrupoDaLoja"
           @fechar="fecharEmailsDaLoja"
         />
         <AtendimentoLista

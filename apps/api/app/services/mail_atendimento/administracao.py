@@ -14,11 +14,25 @@ venda. Assim o histórico de um chamado misto nunca abre conteúdo proibido.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import String, Uuid, and_, case, cast, false, func, literal, not_, or_, select
+from sqlalchemy import (
+    String,
+    Uuid,
+    and_,
+    case,
+    cast,
+    false,
+    func,
+    literal,
+    not_,
+    or_,
+    select,
+    true,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -203,9 +217,7 @@ def filtro_conversa(user: User, c=AtendimentoConversa):
         (
             and_(
                 func.length(ref) == 36,
-                ref.op("~")(
-                    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-                ),
+                ref.op("~")(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),
             ),
             cast(ref, Uuid()),
         ),
@@ -253,6 +265,78 @@ def filtro_conversa(user: User, c=AtendimentoConversa):
         not_(separa_email.conversa_de_email_sql(c)),
         and_(not_(meta_negada), not_(copia_negada), not_(legado_sem_prova)),
     )
+
+
+@dataclass(frozen=True)
+class VisaoRapida:
+    """`filtro_mensagem`/`filtro_conversa` decididos UMA vez por pedido (27/10/2026).
+
+    O Eduardo, 27/10: "otimiza pra abrir rápido" — a barra de lojas da Caixa
+    levava ~5 s em produção para quem não é admin, quase tudo no JIT do
+    Postgres compilando as subconsultas correlatas do filtro (o custo estimado
+    passava de 1 milhão; medido com EXPLAIN ANALYZE). Quem NÃO tem regra
+    nenhuma em `mail_acessos` (o admin, ou a pessoa ativa sem linha — em
+    produção, todas) vê exatamente o que o filtro deixa: tudo, menos a LIXEIRA
+    local. Para ela, o filtro vira uma lista de ids pronta (os e-mails na
+    lixeira e as conversas que têm um deles: a meta ou a cópia da mensagem) —
+    o MESMO resultado, com predicados simples e indexados. Quem tem alguma
+    regra (ou não está ativa) segue no filtro inteiro, sem atalho
+    (`tests/test_mail_visao_rapida.py` confere os dois caminhos)."""
+
+    exato: bool
+    user: User
+    excluidos: frozenset[UUID] = frozenset()
+    conversas_escondidas: frozenset[UUID] = frozenset()
+
+    def filtro_mensagem(self, message_id=MailMessage.id):
+        if self.exato:
+            return filtro_mensagem(self.user, message_id)
+        return message_id.notin_(sorted(self.excluidos)) if self.excluidos else true()
+
+    def filtro_conversa(self, c=AtendimentoConversa):
+        if self.exato:
+            return filtro_conversa(self.user, c)
+        if not self.conversas_escondidas:
+            return true()
+        return or_(
+            not_(separa_email.conversa_de_email_sql(c)),
+            c.id.notin_(sorted(self.conversas_escondidas)),
+        )
+
+
+async def visao_rapida(session: AsyncSession, user: User) -> VisaoRapida:
+    """A `VisaoRapida` de quem pede (uma ou duas consultas leves)."""
+    if user.role != UserRole.ADMIN and (
+        user.status != UserStatus.ACTIVE
+        or await session.scalar(select(literal(1)).where(MailAcesso.user_id == user.id).limit(1))
+    ):
+        return VisaoRapida(exato=True, user=user)
+    # A lixeira que vale: a do e-mail que existe na Central (a cópia na
+    # conversa só esconde quando o original existe — `filtro_conversa`).
+    excluidos = frozenset(
+        (
+            await session.execute(
+                select(MailLixeira.message_id)
+                .join(MailMessage, MailMessage.id == MailLixeira.message_id)
+                .where(MailLixeira.excluido_em.is_not(None))
+            )
+        ).scalars()
+    )
+    if not excluidos:
+        return VisaoRapida(exato=False, user=user)
+    pelas_metas = select(MailMessageMeta.conversa_id).where(
+        MailMessageMeta.message_id.in_(sorted(excluidos)),
+        MailMessageMeta.conversa_id.is_not(None),
+    )
+    # A cópia: `payload.mail.message_id` igual ao id canônico (minúsculo, 36
+    # caracteres — o mesmo que o CASE do filtro converte).
+    pelas_copias = select(AtendimentoMensagem.conversa_id).where(
+        AtendimentoMensagem.payload["mail"]["message_id"].astext.in_(
+            sorted(str(i) for i in excluidos)
+        )
+    )
+    escondidas = frozenset((await session.execute(pelas_metas.union(pelas_copias))).scalars())
+    return VisaoRapida(exato=False, user=user, excluidos=excluidos, conversas_escondidas=escondidas)
 
 
 async def exigir_mensagem(session: AsyncSession, user: User, message_id: UUID) -> None:

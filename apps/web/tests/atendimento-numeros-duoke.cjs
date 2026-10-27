@@ -228,7 +228,7 @@ async function renderizados() {
   const pagina = web('pages/atendimento.vue')
   // O menu e a barra: o número do Duoke na Caixa, o da Caixa Humano nela.
   assert.match(pagina, /<AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano \? 'humano' : 'nao_lidas_duoke'" \/>/)
-  assert.match(pagina, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"/)
+  assert.match(pagina, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+v-model:grupos-abertos="gruposEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"/)
   // A aba Caixa: o total do Duoke, vermelho (a API antiga não manda: sem número).
   assert.match(pagina, /const naoLidasDuoke = computed\(\(\) => Number\(resumo\.value\?\.nao_lidas_duoke\) \|\| 0\)/)
   assert.match(pagina, /v-if="a\.value === 'caixa' && naoLidasDuoke"[\s\S]{0,600}data-marca-caixa\s*>\{\{ naoLidasDuoke > 99 \? '99\+' : naoLidasDuoke \}\}<\/span>/)

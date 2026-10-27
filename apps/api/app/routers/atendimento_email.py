@@ -34,10 +34,14 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
 
   A ABA E-MAIL é só de ADMIN (27/10/2026, o dono): quem não é admin vê e-mail
   SÓ pela barra de lojas da Caixa — GET …/contagens?por_loja=true (os números
-  de cada loja nos tipos de `TIPOS_EMAIL_NA_BARRA_DE_LOJAS`), a lista da loja
-  (GET /api/atendimento/conversas?caixa=email com a loja e um desses tipos) e a
-  conversa de e-mail (as rotas "pela conversa" acima). As rotas que só a aba
-  usa recusam quem não é admin com 403 `aba_email_so_admin` (`_aba_inteira`).
+  de cada loja nos GRUPOS de `GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`: as pastas
+  Problemas · Envios · Devolução, e o porquê da caixa vazia), a lista da loja
+  (GET /api/atendimento/conversas?caixa=email com a loja e `grupo_email`), os
+  E-MAILS da loja no grupo (GET …/lojas/emails, …/lojas/emails/{id} e
+  …/lojas/anexos/{id}: todo e-mail das pastas, também o que a ponte segurou
+  como segurança) e a conversa de e-mail (as rotas "pela conversa" acima).
+  As rotas que só a aba usa recusam quem não é admin com 403
+  `aba_email_so_admin` (`_aba_inteira`).
 
   só quem MEXE (as filas podem ter e-mail de qualquer loja e de endereço interno):
     GET   …/filas                   — as contagens
@@ -95,6 +99,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, case, func, literal, or_, select, update
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -144,6 +149,7 @@ from app.services.atendimento.constantes import (
 )
 from app.services.mail_atendimento import (
     administracao,
+    barra_lojas,
     chamados,
     classificacao,
     codigos,
@@ -166,6 +172,7 @@ from app.services.mail_atendimento.constantes import (
     ESTADO_IGNORADO,
     ESTADO_INFORMATIVO,
     ESTADO_RESUMO,
+    ESTADO_SEGURANCA,
     ESTADO_SEM_LOJA,
     ESTADO_SEM_VINCULO,
     ESTADOS_COM_TEXTO,
@@ -961,20 +968,27 @@ async def contagens(
     o /atendimento, no escopo da equipe — as mesmas conversas que ela via na
     Caixa. Uma consulta; só quando a aba E-mail pede (não é a lista quente).
 
-    `por_loja` (27/10/2026): também os números POR LOJA — o "ampliável" de
-    e-mails da barra de lojas da Caixa (`_contagens_por_loja`) — e os tipos que
-    a barra mostra (`tipos_na_barra`). A MESMA consulta, agrupada por loja e
-    tipo: os números de cima saem da soma dos grupos (uma passada no banco, não
-    duas). A barra é o único caminho de quem não é admin até o e-mail (a aba
-    E-mail é só de admin): esta rota segue para quem vê o /atendimento.
+    `por_loja` (27/10/2026): também os números POR LOJA nos GRUPOS da barra de
+    lojas da Caixa (as pastas Problemas · Envios · Devolução —
+    `GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`, que vão em `grupos_na_barra`) e o porquê
+    da caixa vazia (`_contagens_por_loja`). A MESMA consulta, agrupada: os
+    números de cima saem da soma dos grupos. A barra é o único caminho de quem
+    não é admin até o e-mail (a aba E-mail é só de admin): esta rota segue para
+    quem vê o /atendimento.
+
+    Rápida (27/10/2026, "otimiza pra abrir rápido"): o filtro de acesso é
+    decidido uma vez por pedido (`administracao.visao_rapida`, o mesmo
+    resultado) e a consulta roda sem JIT (o Postgres gastava ~4 s compilando).
     """
     c = AtendimentoConversa
     aberta = c.situacao != CONVERSA_FECHADA
     scope = await resolve_team_scope(session, user)
     cond = _clausula_escopo(scope, c.integration_id)
     response.headers["Cache-Control"] = "no-store"
+    visao = await administracao.visao_rapida(session, user)
+    await session.execute(sql_text("SET LOCAL jit = off"))
     if por_loja:
-        return await _contagens_por_loja(session, user, scope)
+        return await _contagens_por_loja(session, user, scope, visao)
     chamado = and_(c.plataforma == PLATAFORMA_SITE, aberta)
     tipo = _tipo_do_chamado()
     tipo_email = _tipo_do_email_sql()
@@ -983,7 +997,7 @@ async def contagens(
         func.count().filter(chamado),
         *[func.count().filter(chamado, tipo == t) for t in TIPOS_CHAMADO],
         *[func.count().filter(aberta, tipo_email == t) for t in classificacao.TIPOS_EMAIL],
-    ).where(separa_email.conversa_de_email_sql(), administracao.filtro_conversa(user))
+    ).where(separa_email.conversa_de_email_sql(), visao.filtro_conversa())
     if cond is not None:
         q = q.where(cond)
     aguardando, chamados, *resto = (await session.execute(q)).one()
@@ -998,54 +1012,81 @@ async def contagens(
     }
 
 
+# As plataformas da ficha que não são loja (o CD, a venda presencial).
+_FICHAS_QUE_NAO_SAO_LOJA = frozenset({"interno", "presencial"})
+
+
+def _conta_vazia() -> dict[str, int]:
+    return {"emails": 0, "abertas": 0, "aguardando": 0, "total": 0}
+
+
+# O e-mail que não é de loja nenhuma para a barra (o diagnóstico `emails_30d`).
+_ESTADOS_FORA_DA_LOJA = ("novo", "privado", "interno", "sem_loja", "erro")
+
+
 async def _contagens_por_loja(
-    session: AsyncSession, user: User, scope: TeamScope
+    session: AsyncSession, user: User, scope: TeamScope, visao: administracao.VisaoRapida
 ) -> dict[str, Any]:
-    """Os números de cima E os de CADA loja, por tipo (27/10/2026) — a barra de lojas da Caixa.
+    """Os números de cima E os de CADA loja, por GRUPO (pasta) — a barra de lojas da Caixa.
 
-    O Eduardo, 27/10: "botar um AMPLIÁVEL que vai abrir os e-mails embaixo de
-    cada loja"; no mesmo dia, só Informativo e Chamado embaixo de cada loja (a
-    Venda fica na aba E-mail) — os tipos da barra são `TIPOS_EMAIL_NA_BARRA_DE_LOJAS`
-    (o único lugar da escolha), que vai na resposta (`tipos_na_barra`).
+    O Eduardo, 27/10: embaixo de cada loja as pastas Problemas, Envios e
+    Devolução (`GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`, o único lugar da escolha, que
+    vai em `grupos_na_barra` com o status de cada pasta na ponte), cada uma
+    com os e-mails só daquela loja; e TODA loja tem as três caixas, mesmo
+    vazias — a vazia diz por quê. A caixa mostra TODO e-mail das pastas do
+    grupo ligado à loja (`barra_lojas.email_da_caixa_sql`: a conversa, a linha
+    informativa, o que a ponte segurou como segurança, o guardado; a loja da
+    meta, senão a do índice); a conversa entra no grupo pela pasta do e-mail
+    RECEBIDO mais recente dela.
 
-    A loja é a que a PONTE deu ao e-mail: a integração da conversa de e-mail,
-    ou — sem integração — a ficha do cadastro (`dados.mail.store_info_id`). A
-    ficha cuja integração existe (o FK ativo, senão o par nome + plataforma:
-    `rotear.integracoes_das_fichas`, a régua da ponte) soma na loja da
-    integração; a que não tem integração fica com a chave da ficha e o NOME
-    dela (a barra acha a loja do robô pelo nome, ou mostra a loja só de e-mail).
-    O chamado do site (sem loja) não entra: ele tem a fila própria.
+    `por_loja` traz TODA loja que a pessoa vê: as integrações (no escopo da
+    equipe) e as fichas SEM integração (Temu, AliExpress, a Shopee "atlas" sem
+    API…: só para quem vê todas as equipes — a ficha não tem integração para o
+    escopo), mesmo sem e-mail nenhum; arquivada só com e-mail. A loja é a que
+    a PONTE deu ao e-mail: a integração da conversa ou — sem integração — a
+    ficha (`dados.mail.store_info_id`); a ficha cuja integração existe (o FK
+    ativo, senão o par nome + plataforma: `rotear.integracoes_das_fichas`)
+    soma na loja da integração. O chamado do site (sem loja) não entra.
 
-    UMA consulta, agrupada (loja, tipo, chamado do site, aberta, esperando),
-    com a régua de cima (e da aba E-mail): só as conversas de e-mail
-    (`separa_email`), o filtro de acesso da pessoa (`filtro_conversa`: a caixa
-    privada, as lojas e os tipos bloqueados) e o escopo da equipe. Os números
-    de cima (`aguardando`, `chamados`, `chamados_por_tipo`, `por_tipo_email`)
-    são a soma dos grupos — os mesmos do caminho sem `por_loja`. Por tipo da barra:
-      • `abertas`    — as abertas (o número dos chips de "Todas as conversas");
-      • `aguardando` — esperando resposta (o "Falta responder");
-      • `total`      — todas, as fechadas também.
-    `linhas` (só no informativo, só para quem MEXE — a rota da fila recusa os
-    outros): as linhas das pastas INFORMATIVAS da loja (sem conversa; GET
-    /emails?fila=informativo&integration_id=…), com o filtro de acesso de cada
-    e-mail e só das pastas que valem (`_pastas_informativas`, a régua de GET
-    /informativos). Só números, ids e o nome da loja: nada de assunto,
-    remetente ou texto.
+    Por loja: `alias` (o endereço dela para a ponte — `barra_lojas.alias_das_lojas`),
+    `emails_30d` (os e-mails da loja nos últimos `DIAS_DA_BARRA_DE_LOJAS` dias,
+    em qualquer pasta: o diagnóstico da caixa vazia) e, por grupo:
+      • `emails`     — os e-mails da caixa nesses dias (o número da caixa; a
+        lista de GET …/lojas/emails mostra os mesmos);
+      • `abertas`    — as conversas de e-mail abertas do grupo;
+      • `aguardando` — esperando resposta (a bolinha vermelha);
+      • `total`      — as conversas do grupo, as fechadas também.
+
+    UMA consulta agrupada para as conversas e uma para os e-mails, com a régua
+    de cima (e da aba E-mail): só as conversas de e-mail (`separa_email`), o
+    filtro de acesso da pessoa (`visao`: o mesmo de `filtro_conversa`, decidido
+    uma vez) e o escopo da equipe. Os números de cima (`aguardando`,
+    `chamados`, `chamados_por_tipo`, `por_tipo_email`) são a soma dos grupos —
+    os mesmos do caminho sem `por_loja`. Só números, ids, códigos e o nome da
+    loja: nada de assunto, remetente, endereço ou texto.
     """
     c = AtendimentoConversa
+    pastas = await barra_lojas.pastas_da_barra(session)
+    ultima = barra_lojas.ultima_pasta_recebida()
     ficha_txt = func.nullif(c.dados[separa_email.CHAVE_MAIL]["store_info_id"].astext, "")
     # Numa subconsulta: os CASE com literais agrupam pelo nome da coluna.
-    base = select(
-        c.integration_id.label("integration_id"),
-        case((c.integration_id.is_(None), ficha_txt), else_=None).label("ficha"),
-        c.plataforma.label("plataforma"),
-        _tipo_do_email_sql().label("tipo"),
-        case((c.plataforma == PLATAFORMA_SITE, _tipo_do_chamado()), else_=None).label(
-            "tipo_chamado"
-        ),
-        (c.situacao != CONVERSA_FECHADA).label("aberta"),
-        c.aguardando_resposta.is_(True).label("esperando"),
-    ).where(separa_email.conversa_de_email_sql(), administracao.filtro_conversa(user))
+    base = (
+        select(
+            c.integration_id.label("integration_id"),
+            case((c.integration_id.is_(None), ficha_txt), else_=None).label("ficha"),
+            c.plataforma.label("plataforma"),
+            _tipo_do_email_sql().label("tipo"),
+            case((c.plataforma == PLATAFORMA_SITE, _tipo_do_chamado()), else_=None).label(
+                "tipo_chamado"
+            ),
+            (c.situacao != CONVERSA_FECHADA).label("aberta"),
+            c.aguardando_resposta.is_(True).label("esperando"),
+            pastas.grupo_sql(ultima.c.folder_id).label("grupo"),
+        )
+        .select_from(c)
+        .outerjoin(ultima, ultima.c.conversa_id == c.id)
+        .where(separa_email.conversa_de_email_sql(), visao.filtro_conversa())
+    )
     cond = _clausula_escopo(scope, c.integration_id)
     if cond is not None:
         base = base.where(cond)
@@ -1058,15 +1099,24 @@ async def _contagens_por_loja(
         b.c.tipo_chamado,
         b.c.aberta,
         b.c.esperando,
+        b.c.grupo,
     )
-    grupos = (await session.execute(select(*colunas, func.count()).group_by(*colunas))).all()
+    linhas = (await session.execute(select(*colunas, func.count()).group_by(*colunas))).all()
 
     aguardando = chamados = 0
     por_tipo_chamado = dict.fromkeys(TIPOS_CHAMADO, 0)
     por_tipo_email = dict.fromkeys(classificacao.TIPOS_EMAIL, 0)
-    # A soma por loja: (integração, ficha, plataforma) → tipo → números.
-    brutos: dict[tuple, dict[str, dict[str, int]]] = {}
-    for integration_id, ficha_id, plataforma, t, t_chamado, e_aberta, esperando, n in grupos:
+    na_barra = barra_lojas.chaves()
+    # A soma por loja: (integração, ficha) → {plataforma, grupos: grupo → números}.
+    brutos: dict[tuple[UUID | None, UUID | None], dict[str, Any]] = {}
+
+    def conta(integration_id, store_info_id, plataforma) -> dict[str, Any]:
+        return brutos.setdefault(
+            (integration_id, store_info_id),
+            {"plataforma": plataforma, "emails_30d": 0, "grupos": {}},
+        )
+
+    for integration_id, ficha_id, plataforma, t, t_chamado, e_aberta, esperando, g, n in linhas:
         n = int(n or 0)
         e_aberta = e_aberta is True
         if esperando is True:
@@ -1078,53 +1128,64 @@ async def _contagens_por_loja(
         if e_aberta and t in por_tipo_email:
             por_tipo_email[t] += n
         store_info_id = None if integration_id is not None else _uuid(ficha_id)
-        if integration_id is None and store_info_id is None:
+        if (integration_id is None and store_info_id is None) or g not in na_barra:
             continue
-        conta = brutos.setdefault((integration_id, store_info_id, plataforma), {}).setdefault(
-            t, {"abertas": 0, "aguardando": 0, "total": 0, "linhas": 0}
+        numeros = conta(integration_id, store_info_id, plataforma)["grupos"].setdefault(
+            g, _conta_vazia()
         )
-        conta["total"] += n
+        numeros["total"] += n
         if e_aberta:
-            conta["abertas"] += n
+            numeros["abertas"] += n
         if esperando is True:
-            conta["aguardando"] += n
-    # Lida do módulo na hora (a escolha do dono é UMA constante; os testes a trocam).
-    na_barra = tuple(mail_constantes.TIPOS_EMAIL_NA_BARRA_DE_LOJAS)
-    if acesso.pode_mexer(user) and ESTADO_INFORMATIVO in na_barra:
-        pastas = [p.id for p in await _pastas_informativas(session, user)]
-        m = MailMessageMeta
-        base = select(
-            m.integration_id.label("integration_id"),
-            case((m.integration_id.is_(None), m.store_info_id), else_=None).label("ficha"),
-            m.plataforma.label("plataforma"),
-        ).where(
-            *_filtro_da_fila(ESTADO_INFORMATIVO),
-            m.folder_id.in_(pastas),
-            administracao.filtro_mensagem(user, m.message_id),
-            or_(m.integration_id.is_not(None), m.store_info_id.is_not(None)),
+            numeros["aguardando"] += n
+
+    # Os e-mails da loja nos últimos dias: em qualquer pasta (o diagnóstico) e,
+    # por grupo, os que a caixa mostra (o número da caixa = a lista dela).
+    m = MailMessageMeta
+    i = barra_lojas.indice_alias()
+    integ, ficha = barra_lojas.loja_do_email_sql(i, m)
+    desde = datetime.now(UTC) - timedelta(days=mail_constantes.DIAS_DA_BARRA_DE_LOJAS)
+    base_m = (
+        select(
+            integ.label("integration_id"),
+            case((integ.is_(None), ficha), else_=None).label("ficha"),
+            pastas.grupo_sql(m.folder_id).label("grupo"),
+            and_(*barra_lojas.email_da_caixa_sql(pastas, None, m)).label("na_caixa"),
         )
-        cond = _clausula_escopo(scope, m.integration_id)
-        if cond is not None:
-            base = base.where(cond)
-        b = base.subquery()
-        q = select(b.c.integration_id, b.c.ficha, b.c.plataforma, func.count()).group_by(
-            b.c.integration_id, b.c.ficha, b.c.plataforma
+        .join(MailMessage, MailMessage.id == m.message_id)
+        .outerjoin(i, i.message_id == m.message_id)
+        .where(
+            MailMessage.received_at >= desde,
+            or_(integ.is_not(None), ficha.is_not(None)),
+            m.estado.notin_(_ESTADOS_FORA_DA_LOJA),
+            visao.filtro_mensagem(m.message_id),
         )
-        for integration_id, store_info_id, plataforma, n in (
-            (await session.execute(q)).all() if pastas else []
-        ):
-            conta = brutos.setdefault((integration_id, store_info_id, plataforma), {}).setdefault(
-                ESTADO_INFORMATIVO, {"abertas": 0, "aguardando": 0, "total": 0, "linhas": 0}
-            )
-            conta["linhas"] += int(n or 0)
+    )
+    cond_m = _clausula_escopo(scope, integ)
+    if cond_m is not None:
+        base_m = base_m.where(cond_m)
+    bm = base_m.subquery()
+    for integration_id, store_info_id, g, n, n_caixa in (
+        await session.execute(
+            select(
+                bm.c.integration_id,
+                bm.c.ficha,
+                bm.c.grupo,
+                func.count(),
+                func.count().filter(bm.c.na_caixa.is_(True)),
+            ).group_by(bm.c.integration_id, bm.c.ficha, bm.c.grupo)
+        )
+    ).all():
+        item = conta(integration_id, store_info_id, None)
+        item["emails_30d"] += int(n or 0)
+        if g in na_barra and n_caixa:
+            item["grupos"].setdefault(g, _conta_vazia())["emails"] += int(n_caixa or 0)
 
     # A ficha cuja integração existe soma na loja da integração (a régua da ponte).
-    fichas = {f for (i, f, _) in brutos if i is None and f is not None}
-    da_integracao = await rotear.integracoes_das_fichas(session, fichas)
+    da_integracao = await rotear.integracoes_das_fichas(session)
     lojas: dict[tuple[UUID | None, UUID | None], dict[str, Any]] = {}
-    for (integration_id, store_info_id, plataforma), tipos in brutos.items():
-        if integration_id is None and store_info_id in da_integracao:
-            integration_id, store_info_id = da_integracao[store_info_id], None
+
+    def item_da_loja(integration_id, store_info_id, plataforma) -> dict[str, Any]:
         item = lojas.setdefault(
             (integration_id, store_info_id),
             {
@@ -1132,51 +1193,80 @@ async def _contagens_por_loja(
                 "store_info_id": str(store_info_id) if store_info_id else None,
                 "plataforma": plataforma,
                 "loja": None,
-                "tipos": {
-                    t: {"abertas": 0, "aguardando": 0, "total": 0, "linhas": 0} for t in na_barra
-                },
+                "alias": barra_lojas.ALIAS_SEM_CADASTRO,
+                "emails_30d": 0,
+                "grupos": {g: _conta_vazia() for g in na_barra},
             },
         )
-        for t, conta in tipos.items():
-            if t not in na_barra:
-                continue
-            for k, v in conta.items():
-                item["tipos"][t][k] += v
-    # Fora da barra o tipo não conta (a loja só com Venda não tem e-mail aqui).
-    saida_lojas = [
-        i for i in lojas.values() if any(c["total"] or c["linhas"] for c in i["tipos"].values())
-    ]
+        if plataforma and not item["plataforma"]:
+            item["plataforma"] = plataforma
+        return item
+
+    for (integration_id, store_info_id), dados in brutos.items():
+        if integration_id is None and store_info_id in da_integracao:
+            integration_id, store_info_id = da_integracao[store_info_id], None
+        item = item_da_loja(integration_id, store_info_id, dados["plataforma"])
+        item["emails_30d"] += dados["emails_30d"]
+        for g, numeros in dados["grupos"].items():
+            for k, v in numeros.items():
+                item["grupos"][g][k] += v
+
+    # TODA loja da pessoa, mesmo sem e-mail (a caixa vazia diz por quê): as
+    # integrações no escopo e — para quem vê todas as equipes — as fichas sem
+    # integração. A arquivada só entra com e-mail (já está em `lojas`).
+    integracoes = select(Integration.id, Integration.platform).where(
+        Integration.archived_at.is_(None), Integration.platform != "bling"
+    )
+    if not scope.unrestricted:
+        integracoes = integracoes.where(Integration.id.in_(sorted(scope.integration_ids or ())))
+    for iid, plataforma in (await session.execute(integracoes)).all():
+        item_da_loja(iid, None, str(getattr(plataforma, "value", plataforma) or ""))
+    nomes_fichas: dict[UUID, str | None] = {}
+    fichas = select(StoreInfo.id, StoreInfo.account_name, StoreInfo.platform, StoreInfo.archived_at)
+    for fid, nome, plataforma, arquivada in (await session.execute(fichas)).all():
+        nomes_fichas[fid] = " ".join((nome or "").split()) or None
+        plat = rotear.plataforma_da_ficha(str(getattr(plataforma, "value", plataforma) or ""))
+        if (None, fid) in lojas:
+            # A ficha com e-mail (mesmo arquivada): a plataforma do cadastro, se faltar.
+            lojas[(None, fid)]["plataforma"] = lojas[(None, fid)]["plataforma"] or plat
+            continue
+        if not scope.unrestricted or fid in da_integracao or arquivada is not None:
+            continue
+        if plat not in _FICHAS_QUE_NAO_SAO_LOJA:
+            item_da_loja(None, fid, plat)
     # O NOME da loja: o da integração (o do Duoke, como na aba E-mail) ou o da ficha.
-    nomes = await _nomes_das_lojas(
-        session, {UUID(i["integration_id"]) for i in saida_lojas if i["integration_id"]}
-    )
-    sem_integracao = {UUID(i["store_info_id"]) for i in saida_lojas if i["store_info_id"]}
-    nomes_fichas = (
-        {
-            f.id: " ".join((f.account_name or "").split()) or None
-            for f in (
-                await session.execute(select(StoreInfo).where(StoreInfo.id.in_(sem_integracao)))
-            ).scalars()
-        }
-        if sem_integracao
-        else {}
-    )
-    for i in saida_lojas:
-        i["loja"] = (
-            nomes.get(UUID(i["integration_id"]))
-            if i["integration_id"]
-            else nomes_fichas.get(UUID(i["store_info_id"]))
-        )
+    nomes = await _nomes_das_lojas(session, {i for (i, _f) in lojas if i is not None})
+    alias_integ, alias_ficha = await barra_lojas.alias_das_lojas(session)
+    saida = []
+    for (integration_id, store_info_id), item in lojas.items():
+        if integration_id is not None:
+            item["loja"] = nomes.get(integration_id)
+            item["alias"] = alias_integ.get(integration_id, barra_lojas.ALIAS_SEM_CADASTRO)
+        else:
+            item["loja"] = nomes_fichas.get(store_info_id)
+            item["alias"] = alias_ficha.get(store_info_id, barra_lojas.ALIAS_SEM_CADASTRO)
+        if item["plataforma"]:
+            saida.append(item)
     return {
         "aguardando": aguardando,
         "chamados": chamados,
         "chamados_por_tipo": por_tipo_chamado,
         "por_tipo_email": por_tipo_email,
-        "tipos_na_barra": list(na_barra),
+        "grupos_na_barra": [
+            {
+                "chave": g.chave,
+                "rotulo": g.rotulo,
+                "pastas": list(g.pastas),
+                "status": pastas.status.get(g.chave, barra_lojas.SEM_PASTA),
+            }
+            for g in barra_lojas.grupos()
+        ],
+        "dias": mail_constantes.DIAS_DA_BARRA_DE_LOJAS,
         "por_loja": sorted(
-            saida_lojas,
+            saida,
             key=lambda i: (
                 i["plataforma"] or "",
+                (i["loja"] or "").casefold(),
                 i["integration_id"] or "",
                 i["store_info_id"] or "",
             ),
@@ -1194,6 +1284,224 @@ def _uuid(valor: Any) -> UUID | None:
         return UUID(str(valor))
     except ValueError:
         return None
+
+
+# ── Os E-MAILS de uma loja num grupo da barra (quem vê) ───────────────────
+
+
+async def _emails_da_caixa(
+    session: AsyncSession,
+    user: User,
+    *,
+    grupo: str | None,
+    integration_id: UUID | None = None,
+    store_info_id: UUID | None = None,
+    message_id: UUID | None = None,
+):
+    """A consulta dos e-mails da caixa (uma loja num grupo, ou um e-mail de qualquer
+    caixa): a régua de `barra_lojas.email_da_caixa_sql`, a loja (a da meta, senão
+    a do índice), o filtro de acesso da pessoa, o escopo da equipe e a janela."""
+    pastas = await barra_lojas.pastas_da_barra(session)
+    visao = await administracao.visao_rapida(session, user)
+    scope = await resolve_team_scope(session, user)
+    m = MailMessageMeta
+    i = barra_lojas.indice_alias()
+    integ, ficha = barra_lojas.loja_do_email_sql(i, m)
+    c = AtendimentoConversa
+    q = (
+        select(m, MailMessage, integ.label("integ"), ficha.label("ficha"), c)
+        .join(MailMessage, MailMessage.id == m.message_id)
+        .outerjoin(i, i.message_id == m.message_id)
+        .outerjoin(c, c.id == m.conversa_id)
+        .where(
+            *barra_lojas.email_da_caixa_sql(pastas, grupo, m),
+            or_(integ.is_not(None), ficha.is_not(None)),
+            visao.filtro_mensagem(m.message_id),
+        )
+    )
+    if message_id is not None:
+        q = q.where(m.message_id == message_id)
+    else:
+        desde = datetime.now(UTC) - timedelta(days=mail_constantes.DIAS_DA_BARRA_DE_LOJAS)
+        q = q.where(MailMessage.received_at >= desde)
+    if integration_id is not None:
+        fichas = await _fichas_da_integracao(session, integration_id)
+        q = q.where(
+            or_(
+                integ == integration_id,
+                and_(integ.is_(None), ficha.in_(sorted(fichas))) if fichas else literal(False),
+            )
+        )
+    elif store_info_id is not None:
+        q = q.where(integ.is_(None), ficha == store_info_id)
+    cond = _clausula_escopo(scope, integ)
+    if cond is not None:
+        q = q.where(cond)
+    return q
+
+
+async def _linha_da_caixa(
+    session: AsyncSession, meta: MailMessageMeta, message: MailMessage, integ, ficha, conversa
+) -> dict[str, Any]:
+    """Uma linha da caixa: sem o texto — o assunto, o remetente, a pasta e a conversa."""
+    pasta = await session.get(MailFolder, meta.folder_id) if meta.folder_id else None
+    email = ponte.decifrar(message)
+    assunto, _texto, _n = barra_lojas.texto_da_caixa(email.assunto, "")
+    return {
+        "id": str(meta.message_id),
+        "estado": meta.estado,
+        "recebido_em": gravar._utc(message.received_at),
+        "pasta": pasta.nome if pasta is not None else None,
+        "assunto": assunto,
+        "de": email.de,
+        "de_nome": email.de_nome,
+        "integration_id": str(integ) if integ else None,
+        "store_info_id": str(ficha) if ficha and not integ else None,
+        "seguranca": meta.estado == ESTADO_SEGURANCA,
+        "anexos": int(message.attachment_count or 0),
+        # O e-mail de uma conversa abre a conversa (com a resposta e o vínculo).
+        "conversa_id": str(conversa.id) if conversa is not None else None,
+        "aguardando_resposta": bool(conversa.aguardando_resposta) if conversa else False,
+        "situacao": conversa.situacao if conversa is not None else None,
+        "comprador_nome": conversa.comprador_nome if conversa is not None else None,
+    }
+
+
+@router.get("/lojas/emails")
+async def emails_da_caixa(
+    session: Session,
+    user: Leitor,
+    response: Response,
+    grupo: Annotated[str, Query(max_length=32)],
+    integration_id: Annotated[UUID | None, Query()] = None,
+    store_info_id: Annotated[UUID | None, Query()] = None,
+    antes_de: Annotated[datetime | None, Query()] = None,
+    limite: Annotated[int, Query(ge=1, le=200)] = POR_PAGINA,
+) -> dict[str, Any]:
+    """Os E-MAILS de UMA loja num GRUPO da barra de lojas (27/10/2026), o mais novo primeiro.
+
+    TODO e-mail das pastas do grupo ligado à loja (`barra_lojas.email_da_caixa_sql`):
+    a conversa de e-mail, a linha informativa, o que a ponte segurou como
+    segurança e o que ela guardou sem ligar — o duplicado, uma vez só. Quem vê
+    o /atendimento (como a lista da loja em GET /conversas?caixa=email) — só a
+    loja escolhida, no escopo da equipe e com o filtro de acesso da pessoa; só
+    os últimos `DIAS_DA_BARRA_DE_LOJAS` dias (o número da caixa é o mesmo). Sem
+    o texto: o assunto (sem link de acesso), o remetente e a conversa; o e-mail
+    inteiro em GET …/lojas/emails/{id}."""
+    grupo = (grupo or "").strip().lower()
+    if grupo not in barra_lojas.chaves():
+        raise HTTPException(422, detail={"code": "grupo_email_invalido"})
+    if (integration_id is None) == (store_info_id is None):
+        raise HTTPException(422, detail={"code": "loja_obrigatoria"})
+    response.headers["Cache-Control"] = "no-store"
+    await session.execute(sql_text("SET LOCAL jit = off"))
+    q = await _emails_da_caixa(
+        session, user, grupo=grupo, integration_id=integration_id, store_info_id=store_info_id
+    )
+    if antes_de is not None:
+        q = q.where(MailMessage.received_at < antes_de)
+    linhas = (
+        await session.execute(
+            q.order_by(MailMessage.received_at.desc(), MailMessage.id.desc()).limit(limite + 1)
+        )
+    ).all()
+    tem_mais = len(linhas) > limite
+    linhas = linhas[:limite]
+    return {
+        "itens": [await _linha_da_caixa(session, *linha) for linha in linhas],
+        "proximo": gravar._utc(linhas[-1][1].received_at).isoformat()
+        if tem_mais and linhas
+        else None,
+    }
+
+
+async def _email_da_caixa_ou_404(
+    session: AsyncSession, user: User, message_id: UUID
+) -> tuple[MailMessageMeta, MailMessage, Any, Any]:
+    q = await _emails_da_caixa(session, user, grupo=None, message_id=message_id)
+    achada = (await session.execute(q)).first()
+    if achada is None:
+        raise HTTPException(404, detail={"code": "email_nao_encontrado"})
+    meta, message, integ, ficha, _conversa = achada
+    return meta, message, integ, ficha
+
+
+@router.get("/lojas/emails/{message_id}")
+async def email_da_caixa(
+    message_id: UUID, session: Session, user: Leitor, response: Response
+) -> dict[str, Any]:
+    """O e-mail inteiro de UMA linha da caixa da barra (nunca HTML).
+
+    A mesma régua da lista (um e-mail das pastas da barra, ligado a uma loja, no
+    escopo da equipe, com o filtro de acesso da pessoa); fora dela, 404 (nunca
+    diz que o e-mail existe). O texto: os links de acesso removidos e a senha
+    escrita mascarada; o código fica (`barra_lojas.texto_da_caixa`, o dono)."""
+    meta, message, integ, ficha = await _email_da_caixa_ou_404(session, user, message_id)
+    response.headers["Cache-Control"] = "no-store"
+    pasta = await session.get(MailFolder, meta.folder_id) if meta.folder_id else None
+    loja = (await _nomes_das_lojas(session, {integ})).get(integ) if integ else None
+    if loja is None and ficha is not None:
+        f = await session.get(StoreInfo, ficha)
+        loja = (" ".join((f.account_name or "").split()) or None) if f else None
+    email = ponte.decifrar(message)
+    assunto, corpo, links = barra_lojas.texto_da_caixa(email.assunto, texto.legivel(email.texto))
+    anexos = (
+        await session.scalars(select(MailAttachment).where(MailAttachment.message_id == message.id))
+    ).all()
+    return {
+        "id": str(meta.message_id),
+        "estado": meta.estado,
+        "recebido_em": gravar._utc(message.received_at),
+        "pasta": pasta.nome if pasta is not None else None,
+        "loja": loja,
+        "conversa_id": str(meta.conversa_id) if meta.conversa_id else None,
+        "seguranca": meta.estado == ESTADO_SEGURANCA,
+        "de": email.de,
+        "de_nome": email.de_nome,
+        "reply_to": [r for r in email.reply_to if r != email.de],
+        "assunto": assunto,
+        "texto": corpo,
+        "links_removidos": links,
+        "anexos": [
+            {
+                "id": str(a.id),
+                "tamanho": a.size,
+                **{
+                    k: v
+                    for k, v in decrypt_json(a.metadata_enc).items()
+                    if k in ("filename", "content_type")
+                },
+            }
+            for a in anexos
+        ],
+    }
+
+
+@router.get("/lojas/anexos/{attachment_id}")
+async def anexo_da_caixa(attachment_id: UUID, session: Session, user: Leitor) -> Response:
+    """O anexo de um e-mail da caixa da barra (a mesma régua do e-mail: 404 fora dela).
+
+    A etiqueta de postagem da devolução vem em anexo: quem vê a loja baixa."""
+    attachment = await session.get(MailAttachment, attachment_id)
+    if attachment is None:
+        raise HTTPException(404, detail={"code": "anexo_nao_encontrado"})
+    try:
+        await _email_da_caixa_ou_404(session, user, attachment.message_id)
+    except HTTPException:
+        raise HTTPException(404, detail={"code": "anexo_nao_encontrado"}) from None
+    metadata = decrypt_json(attachment.metadata_enc)
+    nome = str(metadata.get("filename") or "anexo").replace("\\", "/").rsplit("/", 1)[-1]
+    nome = nome or "anexo"
+    return Response(
+        content=decrypt_bytes(attachment.content_enc),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(nome, safe='')}",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
+    )
 
 
 # ── Na conversa (quem vê) ─────────────────────────────────────────────────

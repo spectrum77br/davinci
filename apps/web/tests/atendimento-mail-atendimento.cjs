@@ -245,7 +245,9 @@ async function principal() {
     assert.deepEqual(F.juntarContagens(null, null), {})
     assert.ok(rotas.includes('@router.get("/contagens")'))
     const contagensPy = rotas.slice(rotas.indexOf('async def contagens('), rotas.indexOf('# ── Na conversa (quem vê)'))
-    assert.match(contagensPy, /\.where\(separa_email\.conversa_de_email_sql\(\), administracao\.filtro_conversa\(user\)\)/)
+    // 27/10/2026: o filtro de acesso decidido uma vez por pedido (o mesmo resultado de `filtro_conversa`).
+    assert.match(contagensPy, /visao = await administracao\.visao_rapida\(session, user\)/)
+    assert.match(contagensPy, /\.where\(separa_email\.conversa_de_email_sql\(\), visao\.filtro_conversa\(\)\)/)
     for (const campo of ['aguardando', 'chamados', 'chamados_por_tipo']) assert.ok(contagensPy.includes(`"${campo}":`), `contagens: ${campo}`)
     assert.ok(!rotas.includes('(f"{_PREFIXO}/contagens")'), 'as contagens das conversas: quem vê (não é leitura só de quem mexe)')
     assert.match(rotas, /saida\["revisar_envio"\] = /)
@@ -1538,7 +1540,9 @@ async function principal() {
     assert.match(separa, /def na_caixa_sql\(c: Any = AtendimentoConversa\):[\s\S]*?return not_\(conversa_de_email_sql\(c\)\)/)
     // A lista: a Caixa só com o chat; `caixa=email` só com o e-mail.
     assert.match(rotasAtd, /^CAIXAS = \("", CAIXA_HUMANO, CAIXA_EMAIL\)$/m)
-    assert.match(rotasAtd, /if caixa_email:\s+consulta = consulta\.where\(\s*separa_email\.conversa_de_email_sql\(\), mail_admin\.filtro_conversa\(user\)\s*\)\s+else:\s+consulta = consulta\.where\(separa_email\.na_caixa_sql\(\)\)/)
+    // 27/10/2026: o filtro de acesso decidido uma vez pelo pedido (`visao_rapida`) — ou o inteiro, sem ele.
+    assert.match(rotasAtd, /if caixa_email:\s+consulta = consulta\.where\(\s*separa_email\.conversa_de_email_sql\(\),[\s\S]*?filtro_email if filtro_email is not None else mail_admin\.filtro_conversa\(user\),\s*\)\s+else:\s+consulta = consulta\.where\(separa_email\.na_caixa_sql\(\)\)/)
+    assert.match(rotasAtd, /filtro_email = \(await mail_admin\.visao_rapida\(session, user\)\)\.filtro_conversa\(\)/)
     assert.match(rotasAtd, /and not caixa_email\n\s+\)/, 'o Direct nunca entra na lista do e-mail')
     // O /resumo (plataformas, barra de lojas, etiquetas, Caixa Humano): só a Caixa.
     assert.match(rotasAtd, /cond = and_\(separa_email\.na_caixa_sql\(\), \*\(\[escopo\] if escopo is not None else \[\]\)\)/)

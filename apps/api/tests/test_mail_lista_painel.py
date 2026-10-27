@@ -27,7 +27,8 @@ from sqlalchemy import select
 
 from app.models import AtendimentoConversa, UserRole
 from app.models.mail_atendimento import MailMessageMeta
-from app.services.mail_atendimento import constantes as mail_constantes
+from app.services.mail_atendimento import barra_lojas
+from tests.test_atendimento_separa_email import _na_barra
 from tests.test_mail_ponte import (
     _config as _config_ponte,  # noqa: F401 — a config autouse da ponte vale aqui
 )
@@ -175,30 +176,23 @@ async def test_w2_email_sem_vinculo_filtra_e_conta(db, cena, client, admin):
 
 
 async def test_w2_quem_so_le_ve_o_filtro_no_escopo(db, cena, client, make_user, auth_as):
-    await entrar(db, cena.geral, pasta="INBOX")
+    mid = await entrar(db, cena.geral, pasta="INBOX")
     await rodar(db)
     # Quem só lê (a fase de observação) usa o filtro como qualquer filtro da
     # lista — desde 27/10/2026 na lista da LOJA (a barra de lojas da Caixa: a
-    # aba E-mail inteira é só de admin), num tipo da barra.
+    # aba E-mail inteira é só de admin), num grupo (pasta) da barra.
+    await _na_barra(db, (await meta_de(db, mid)).conversa_id, "envio")
     auth_as(await make_user(role=UserRole.USER))
     r = await client.get(
         f"{API}/conversas", params={"caixa": "email", "filtro": "email_sem_vinculo"}
     )
     assert r.status_code == 403 and r.json()["detail"]["code"] == "aba_email_so_admin"
+    loja = {"caixa": "email", "filtro": "email_sem_vinculo", "integration_id": str(cena.ml.id)}
+    r = await client.get(f"{API}/conversas", params={**loja, "tipo_email": "chamado"})
+    assert r.status_code == 403, "o tipo sem o grupo da barra: a aba E-mail"
     achadas = set()
-    for tipo in mail_constantes.TIPOS_EMAIL_NA_BARRA_DE_LOJAS + ("venda",):
-        r = await client.get(
-            f"{API}/conversas",
-            params={
-                "caixa": "email",
-                "filtro": "email_sem_vinculo",
-                "integration_id": str(cena.ml.id),
-                "tipo_email": tipo,
-            },
-        )
-        if tipo == "venda":
-            assert r.status_code == 403, "a Venda não está na barra"
-            continue
+    for grupo in barra_lojas.chaves():
+        r = await client.get(f"{API}/conversas", params={**loja, "grupo_email": grupo})
         assert r.status_code == 200, r.text
         achadas |= {i["id"] for i in r.json()["itens"]}
     assert len(achadas) == 1

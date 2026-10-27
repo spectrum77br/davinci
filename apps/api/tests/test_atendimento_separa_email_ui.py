@@ -30,7 +30,7 @@ from tests.test_atendimento_separa_email import (
     _ids,
     _ids_pela_barra,
     _lista_inteira_recusada,
-    _tipo_email,
+    _na_barra,
 )
 from tests.test_atendimento_separa_email import (
     admin as admin,  # noqa: F401 — a fixture do dono autenticado
@@ -165,9 +165,10 @@ async def test_busca_pelo_nome_pedido_e_qualquer_protocolo(db, cena, client, adm
 async def test_escopo_da_equipe_e_quem_so_le(db, cena, client, make_user, auth_as, quem_le):
     h = await _historico(db, cena)
     for cid in (h["ml"], h["oliveira"]):
-        await _tipo_email(db, cid, "chamado")
+        await _na_barra(db, cid)
     # Quem só lê (sem equipe = sem corte): o mesmo que via na Caixa — desde
-    # 27/10/2026 pela barra de lojas (a aba E-mail inteira é só de admin).
+    # 27/10/2026 pela barra de lojas (a aba E-mail inteira é só de admin; a
+    # barra mostra as pastas Problemas · Envios · Devolução).
     await _lista_inteira_recusada(client)
     assert await _ids_pela_barra(client, integration_id=str(cena.ml.id), filtro="todas") == {
         h["ml"]

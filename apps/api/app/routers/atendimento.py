@@ -270,7 +270,7 @@ from app.services.atendimento.constantes import (
 )
 from app.services.atendimento.enviar import EnvioRecusado
 from app.services.mail_atendimento import administracao as mail_admin
-from app.services.mail_atendimento import constantes as mail_constantes
+from app.services.mail_atendimento import barra_lojas as mail_barra
 from app.services.mail_atendimento import rotear as mail_rotear
 from app.services.mail_atendimento.constantes import ROTULO_TIPO_CAIXA
 
@@ -2119,6 +2119,8 @@ async def _listar_marketplace(
     caixa_email: bool = False,
     store_info_id: UUID | None = None,
     fichas_da_loja: set[UUID] | None = None,
+    pastas_do_grupo: list[UUID] | None = None,
+    filtro_email: Any = None,
 ) -> list[dict[str, Any]]:
     from app.services.atendimento import humano as humano_svc
 
@@ -2151,12 +2153,24 @@ async def _listar_marketplace(
     # vem só na aba E-mail (`caixa=email`) — 13/10/2026, `separa_email`.
     if caixa_email:
         consulta = consulta.where(
-            separa_email.conversa_de_email_sql(), mail_admin.filtro_conversa(user)
+            separa_email.conversa_de_email_sql(),
+            # O filtro de acesso decidido uma vez pelo pedido (`visao_rapida`, o
+            # mesmo resultado de `filtro_conversa`) — ou o inteiro, sem ele.
+            filtro_email if filtro_email is not None else mail_admin.filtro_conversa(user),
         )
     else:
         consulta = consulta.where(separa_email.na_caixa_sql())
     if caixa_email and tipo_email:
         consulta = consulta.where(_tipo_do_email_sql() == tipo_email)
+    if caixa_email and pastas_do_grupo is not None:
+        # Um GRUPO da barra de lojas (27/10/2026, as pastas Problemas · Envios ·
+        # Devolução): a conversa cujo e-mail RECEBIDO mais recente está numa das
+        # pastas dele (`barra_lojas`, a mesma régua dos números).
+        consulta = consulta.where(
+            AtendimentoConversa.id.in_(mail_barra.conversas_do_grupo_sql(pastas_do_grupo))
+            if pastas_do_grupo
+            else false()
+        )
     if caixa_email and store_info_id is not None:
         # A loja SEM integração (a ficha do cadastro: a do robô, a Temu, a
         # AliExpress) na barra de lojas da Caixa (27/10/2026): as conversas de
@@ -2441,6 +2455,7 @@ async def listar_conversas(
     tipo_email: Annotated[str | None, Query(max_length=16)] = None,
     caixa: Annotated[str | None, Query(max_length=16)] = None,
     store_info_id: Annotated[UUID | None, Query()] = None,
+    grupo_email: Annotated[str | None, Query(max_length=32)] = None,
 ) -> ListaConversasOut:
     """A fila, mais recente primeiro; página seguinte com `antes_de=<proximo>`.
 
@@ -2475,9 +2490,12 @@ async def listar_conversas(
     `store_info_id` (27/10/2026, só com `caixa=email`): as conversas de e-mail
     da loja SEM integração (a ficha) — o "ampliável" de e-mails da barra de
     lojas; a loja com integração usa `integration_id` (com `caixa=email`, mais
-    as da ficha cuja integração é ela — a régua da ponte). Quem NÃO é admin
-    (a aba E-mail é só de admin, 27/10/2026) só lista o e-mail com a loja e um
-    tipo da barra (`TIPOS_EMAIL_NA_BARRA_DE_LOJAS`); sem isso, 403.
+    as da ficha cuja integração é ela — a régua da ponte). `grupo_email`
+    (27/10/2026, só com `caixa=email`): um GRUPO da barra de lojas — as pastas
+    Problemas · Envios · Devolução (`GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`): a
+    conversa cujo e-mail recebido mais recente está numa pasta dele. Quem NÃO
+    é admin (a aba E-mail é só de admin, 27/10/2026) só lista o e-mail com a
+    loja e um grupo da barra; sem isso, 403.
     """
     plataformas = _plataformas_do_filtro(plataforma)
     canal = (canal or "").strip().lower() or None
@@ -2506,15 +2524,24 @@ async def listar_conversas(
     if store_info_id is not None and not caixa_email:
         # A ficha é a loja do E-MAIL: o chat da loja do robô filtra pelo canal.
         raise HTTPException(422, detail={"code": "store_info_id_so_no_email"})
+    grupo_email = (grupo_email or "").strip().lower() or None
+    if grupo_email and (grupo_email not in mail_barra.chaves() or not caixa_email):
+        raise HTTPException(422, detail={"code": "grupo_email_invalido"})
     if caixa_email and user.role != UserRole.ADMIN:
         # A aba E-mail é só de admin (27/10/2026): quem não é admin vê e-mail SÓ
-        # pela barra de lojas da Caixa — a lista de UMA loja, de um tipo que a
-        # barra mostra (`TIPOS_EMAIL_NA_BARRA_DE_LOJAS`). A lista de todas as
-        # lojas, o chamado do site e os outros tipos ficam na aba (403).
-        if (integration_id is None and store_info_id is None) or (
-            tipo_email not in mail_constantes.TIPOS_EMAIL_NA_BARRA_DE_LOJAS
-        ):
+        # pela barra de lojas da Caixa — a lista de UMA loja, num GRUPO (pasta)
+        # que a barra mostra (`GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`). A lista de todas
+        # as lojas, o chamado do site e o e-mail fora dos grupos ficam na aba (403).
+        if (integration_id is None and store_info_id is None) or grupo_email is None:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail=ABA_EMAIL_SO_ADMIN)
+    pastas_do_grupo = (
+        (await mail_barra.pastas_da_barra(session)).ids(grupo_email) if grupo_email else None
+    )
+    filtro_email = None
+    if caixa_email:
+        # Rápida (27/10/2026): o acesso decidido uma vez (o mesmo resultado) e sem JIT.
+        filtro_email = (await mail_admin.visao_rapida(session, user)).filtro_conversa()
+        await session.execute(text("SET LOCAL jit = off"))
     fichas_da_loja = (
         {
             f
@@ -2560,6 +2587,8 @@ async def listar_conversas(
             caixa_email=caixa_email,
             store_info_id=store_info_id,
             fichas_da_loja=fichas_da_loja,
+            pastas_do_grupo=pastas_do_grupo,
+            filtro_email=filtro_email,
         )
     quer_instagram = (
         (not plataformas or instagram.PLATAFORMA in plataformas)

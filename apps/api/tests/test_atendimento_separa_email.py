@@ -38,12 +38,12 @@ from sqlalchemy import func, select, text
 
 from app.config import get_settings
 from app.models import AtendimentoConversa, AtendimentoMensagem, UserRole
-from app.models.mail_atendimento import MailMessageMeta
+from app.models.mail_atendimento import MailFolder, MailMessageMeta
 from app.services.atendimento import abas as abas_svc
 from app.services.atendimento import amazon_email, etiqueta_fatos, gravar, humano, separa_email
 from app.services.atendimento import cliente as cliente_svc
 from app.services.atendimento import sync as sync_svc
-from app.services.mail_atendimento import constantes as mail_constantes
+from app.services.mail_atendimento import barra_lojas
 from tests.test_mail_ponte import (
     AGORA,
     conversa,
@@ -170,13 +170,42 @@ async def _ids(client, **params) -> set[str]:
 
 
 async def _ids_pela_barra(client, **params) -> set[str]:
-    """A lista de UMA loja como a barra de lojas da Caixa pede — todos os tipos
-    que ela mostra. Desde 27/10/2026 a aba E-mail é só de admin: quem não é
-    admin vê o e-mail SÓ por aqui (a lista inteira é 403 `aba_email_so_admin`)."""
+    """A lista de UMA loja como a barra de lojas da Caixa pede — todos os grupos
+    (as pastas Problemas · Envios · Devolução) que ela mostra. Desde 27/10/2026 a
+    aba E-mail é só de admin: quem não é admin vê o e-mail SÓ por aqui (a lista
+    inteira é 403 `aba_email_so_admin`)."""
     ids: set[str] = set()
-    for t in mail_constantes.TIPOS_EMAIL_NA_BARRA_DE_LOJAS:
-        ids |= await _ids(client, caixa="email", tipo_email=t, **params)
+    for g in barra_lojas.chaves():
+        ids |= await _ids(client, caixa="email", grupo_email=g, **params)
     return ids
+
+
+async def _na_barra(db, conversa_id, pasta: str = "problemas") -> None:
+    """Os e-mails da conversa numa pasta de um grupo da barra (27/10/2026: a
+    barra de lojas mostra só as pastas Problemas · Envios · Devolução · Informativo)."""
+    metas = (
+        (
+            await db.execute(
+                select(MailMessageMeta).where(MailMessageMeta.conversa_id == conversa_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for meta in metas:
+        folder = await db.scalar(
+            select(MailFolder).where(
+                MailFolder.mailbox_id == meta.mailbox_id, MailFolder.chave == pasta
+            )
+        )
+        if folder is None:
+            folder = MailFolder(
+                mailbox_id=meta.mailbox_id, chave=pasta, nome=pasta, caminho=pasta, tipo_tuta="0"
+            )
+            db.add(folder)
+            await db.flush()
+        meta.folder_id = folder.id
+    await db.commit()
 
 
 async def _lista_inteira_recusada(client) -> None:
@@ -311,10 +340,11 @@ async def test_resumo_metricas_e_contagens(db, cena, client, admin):
 async def test_quem_so_le_ve_as_conversas_de_email_como_via_na_caixa(db, cena, client, quem_le):
     m = await _mundo(db, cena)
     # 27/10/2026: a aba E-mail é só de admin — quem só lê vê o e-mail da loja
-    # pela barra de lojas (uma loja, um tipo da barra); o chamado do site e a
-    # lista de todas as lojas ficam na aba (403).
+    # pela barra de lojas (uma loja, um grupo/pasta da barra); o chamado do site
+    # e a lista de todas as lojas ficam na aba (403).
     await _lista_inteira_recusada(client)
-    await _tipo_email(db, m["ml"].id, "chamado")
+    assert await _ids_pela_barra(client, integration_id=str(cena.ml.id)) == set()
+    await _na_barra(db, m["ml"].id)
     assert await _ids_pela_barra(client, integration_id=str(cena.ml.id)) == {str(m["ml"].id)}
     assert (await client.get(f"{EMAIL}/contagens")).status_code == 200
     assert (await client.get(f"{URL}/conversas/{m['ml'].id}")).status_code == 200

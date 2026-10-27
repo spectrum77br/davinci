@@ -1,94 +1,67 @@
 <script lang="ts">
-// Os E-MAILS DE UMA LOJA na Caixa (27/10/2026) — o Eduardo: "botar um
-// AMPLIÁVEL que vai abrir os e-mails embaixo de cada loja … então poderá
-// ampliar e visualizar os e-mails ali pelo atendimento mesmo de cada loja".
-// O clique num tipo embaixo da loja, na barra de lojas (AtendimentoLojas: os
-// tipos da barra — hoje Informativo e Chamado; a escolha do dono é a
-// constante TIPOS_EMAIL_NA_BARRA_DE_LOJAS da API, que chega em `tipos`),
-// troca a lista do meio da Caixa por esta: as conversas de e-mail DAQUELA
-// loja e DAQUELE tipo. Quem não é admin vê e-mail SÓ por aqui (a aba E-mail
-// é só de admin; a API recusa a lista sem a loja ou fora dos tipos da barra). A conversa abre na coluna da conversa da
-// própria Caixa, com a barra do e-mail (AtendimentoEmailConversaBarra: voltar,
-// vincular ao pedido) — a mesma visão da aba E-mail.
-//
-// Sem rota nova: a lista é a de "Todas as conversas" da aba E-mail (GET
-// /api/atendimento/conversas?caixa=email — `urlDaFila`), com a loja
-// (`integration_id`, ou `store_info_id` na loja sem integração) e o tipo; as
-// abertas ou, no chip, as fechadas; a busca pelo nome, pedido ou protocolo.
-// No Informativo, para quem MEXE, vêm em cima as linhas das pastas
-// informativas da loja (sem conversa — GET …/email/emails?fila=informativo
-// com a loja; "ver o e-mail" = GET …/email/emails/{id}, texto PROTEGIDO, nunca
-// HTML), como no chip Informativos da aba E-mail. Nada aqui muda a Caixa do
+// Os E-MAILS DE UMA LOJA numa PASTA, na Caixa (27/10/2026) — o Eduardo: "botar
+// um AMPLIÁVEL que vai abrir os e-mails embaixo de cada loja … então poderá
+// ampliar e visualizar os e-mails ali pelo atendimento mesmo de cada loja". As
+// caixas embaixo de cada loja são as pastas do Tuta que ele unificou
+// (Problemas · Envios · Devolução · Informativo — a constante
+// GRUPOS_EMAIL_NA_BARRA_DE_LOJAS da API, que chega em `grupos`). O "ver todos"
+// (ou o clique num e-mail) da caixa troca a lista do meio da Caixa por esta:
+// TODO e-mail da pasta ligado àquela loja, o mais novo primeiro — a conversa de
+// e-mail (abre na coluna da conversa, com a barra do e-mail: voltar, vincular
+// ao pedido), a linha informativa e o que a ponte segurou como segurança (o
+// código de postagem da devolução: "ver o e-mail" mostra o texto, sem os links
+// de acesso) —, dos últimos `dias` dias (o número da caixa). Quem não é admin
+// vê e-mail SÓ por aqui (a aba E-mail é só de admin). Nada aqui muda a Caixa do
 // chat: a lista e os números dela continuam sem e-mail (`separa_email`).
 // Funções puras aqui em cima (tests/atendimento-email-lojas.cjs).
-import { urlDaFila } from '~/components/AtendimentoMailFilas.vue'
-import { TIPOS_EMAIL_DA_LOJA, numeroDoTipo, tiposDaBarra, type EscolhaEmail, type TipoEmailDaLoja } from '~/components/AtendimentoLojas.vue'
+import { urlDosEmailsDaCaixa } from '~/components/AtendimentoLojaGrupoEmails.vue'
+import { gruposDaBarra, motivosDaCaixaVazia, numeroDoGrupo, type EmailDaCaixa, type EscolhaEmail, type GrupoDaBarra } from '~/components/AtendimentoLojas.vue'
 
-type DaLoja = Pick<EscolhaEmail, 'integration_id' | 'store_info_id' | 'tipo'>
-
-function lojaDaEscolha(e: DaLoja): URLSearchParams | null {
-  const q = new URLSearchParams()
-  if (e.integration_id) q.set('integration_id', e.integration_id)
-  else if (e.store_info_id) q.set('store_info_id', e.store_info_id)
-  else return null
-  return q
+export function urlDoEmailDaCaixa(id: string): string {
+  return `/api/atendimento/email/lojas/emails/${encodeURIComponent(id)}`
+}
+export function urlDoAnexoDaCaixa(id: string): string {
+  return `/api/atendimento/email/lojas/anexos/${encodeURIComponent(id)}`
+}
+export function chaveDaEscolha(e: Pick<EscolhaEmail, 'chave' | 'grupo' | 'integration_id' | 'store_info_id'> | null | undefined): string {
+  return e ? [e.chave, e.grupo, e.integration_id, e.store_info_id].join('|') : ''
+}
+// O nome da linha: o assunto; sem ele, o cliente ou o remetente.
+export function tituloDaLinha(e: Pick<EmailDaCaixa, 'assunto' | 'comprador_nome' | 'de'>): string {
+  return e.assunto || e.comprador_nome || e.de || '(sem assunto)'
 }
 
-// A lista da loja: a de "Todas as conversas" da aba E-mail + a loja. Sem loja
-// nenhuma (nunca devia acontecer): null — NUNCA a lista de todas as lojas.
-export function urlDosEmailsDaLoja(e: DaLoja, o: { fechadas?: boolean; busca?: string | null; antesDe?: string | null } = {}): string | null {
-  const loja = lojaDaEscolha(e)
-  if (!loja) return null
-  return `${urlDaFila('todas', o.antesDe || null, null, o.busca || null, !!o.fechadas, e.tipo)}&${loja.toString()}`
-}
-
-// As linhas das pastas informativas da loja (só quem mexe; a rota recusa os outros).
-export function urlDasLinhasDaLoja(e: DaLoja, antesDe?: string | null): string | null {
-  const loja = lojaDaEscolha(e)
-  if (!loja) return null
-  const q = new URLSearchParams({ fila: 'informativo' })
-  for (const [k, v] of loja) q.set(k, v)
-  if (antesDe) q.set('antes_de', antesDe)
-  return `/api/atendimento/email/emails?${q.toString()}`
-}
-
-// As linhas vêm só no Informativo, para quem mexe, nas abertas e sem busca
-// (a fila das linhas não tem busca nem "fechada").
-export function mostraLinhas(tipo: TipoEmailDaLoja, podeMexer: boolean, fechadas: boolean, busca: string): boolean {
-  return podeMexer && tipo === 'informativo' && !fechadas && !busca
-}
-
-export function chaveDaEscolha(e: Pick<EscolhaEmail, 'chave' | 'tipo' | 'integration_id' | 'store_info_id'> | null | undefined): string {
-  return e ? [e.chave, e.tipo, e.integration_id, e.store_info_id].join('|') : ''
-}
-
-// A lista vazia: o porquê, pelo tipo (e pela busca / pelo chip).
-export function vazioDaLoja(tipo: TipoEmailDaLoja, fechadas: boolean, busca: string): string {
-  const rotulo = (TIPOS_EMAIL_DA_LOJA.find((t) => t.value === tipo)?.label || tipo).toLowerCase()
-  if (busca) return 'Nada encontrado para essa busca nesta loja.'
-  return fechadas ? `Nenhum e-mail ${rotulo} fechado desta loja.` : `Nenhum e-mail ${rotulo} aberto desta loja.`
-}
-
-export { TIPOS_EMAIL_DA_LOJA, numeroDoTipo, tiposDaBarra }
+export { gruposDaBarra, motivosDaCaixaVazia, numeroDoGrupo, urlDosEmailsDaCaixa }
 </script>
 
 <script setup lang="ts">
 import { ArrowLeft, ChevronDown, ChevronUp, Download, Loader2, Mail, RefreshCw } from 'lucide-vue-next'
 import type { EmailsDaLoja } from '~/components/AtendimentoLojas.vue'
-import type { ItemFila } from '~/components/AtendimentoMailFilas.vue'
-import { erroDaApi, fmtDataHora, plataformaInfo, prazoDe, type ConversaResumo } from '~/components/AtendimentoPlataforma.vue'
-import { avisosDeProtecao, dicaTipoEmail, remetenteLegivel, rotuloTipoEmail, tamanhoLegivel, urlDoAnexo, type CartaoEmail } from '~/components/AtendimentoEmailCartao.vue'
+import { erroDaApi, fmtDataHora, plataformaInfo } from '~/components/AtendimentoPlataforma.vue'
+import { tamanhoLegivel } from '~/components/AtendimentoEmailCartao.vue'
+
+type Detalhe = {
+  id: string
+  texto: string | null
+  de: string | null
+  de_nome?: string | null
+  links_removidos?: number
+  seguranca?: boolean
+  anexos?: { id: string; filename?: string; tamanho?: number }[]
+}
 
 const props = defineProps<{
-  // A loja e o tipo escolhidos na barra (a página guarda).
+  // A loja e o grupo escolhidos na barra (a página guarda).
   escolha: EscolhaEmail
   // Os números da loja (o mesmo GET …/email/contagens?por_loja=true da barra).
   contagem?: EmailsDaLoja | null
-  // Os tipos da barra (`tipos_na_barra` da API): os chips.
-  tipos?: string[] | null
-  podeMexer?: boolean
+  // Os grupos da barra (`grupos_na_barra` da API): os chips.
+  grupos?: GrupoDaBarra[] | null
+  dias?: number
   // A conversa de e-mail aberta na coluna da conversa.
   selecionada?: string | null
+  // O e-mail (sem conversa) que o clique na caixa mandou abrir.
+  aberto?: string | null
   // Sobe a cada tique do polling de 30 s da página (e quando a conversa aberta
   // muda o que a lista mostra — `sinal`): relê a 1ª página, sem "carregar mais".
   tique?: number
@@ -97,44 +70,32 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'selecionar', id: string): void
   (e: 'fechar'): void
-  (e: 'tipo', tipo: TipoEmailDaLoja): void
+  (e: 'grupo', grupo: string): void
 }>()
 
 const { api, url } = useApi()
 const toasts = useToasts()
 
-const conversas = ref<ConversaResumo[]>([])
+const itens = ref<EmailDaCaixa[]>([])
 const proximo = ref<string | null>(null)
 const carregando = ref(false)
 const erro = ref<string | null>(null)
-const fechadas = ref(false)
-const buscaTexto = ref('')
-const busca = ref('')
 let paginasExtras = false
 let geracao = 0
-// As linhas das pastas informativas (quem mexe) e o e-mail aberto de uma delas.
-const linhas = ref<ItemFila[]>([])
-const proximoLinhas = ref<string | null>(null)
-const carregandoLinhas = ref(false)
-const erroLinhas = ref<string | null>(null)
 const linhaAberta = ref<string | null>(null)
-const detalhe = ref<CartaoEmail | null>(null)
-let geracaoLinhas = 0
+const detalhe = ref<Detalhe | null>(null)
 
-// Os chips: os tipos da barra (o escolhido sempre aparece, mesmo se a lista mudou).
-const chips = computed(() => {
-  const lista = tiposDaBarra(props.tipos)
-  const escolhido = TIPOS_EMAIL_DA_LOJA.find((t) => t.value === props.escolha.tipo)
-  return escolhido && !lista.some((t) => t.value === escolhido.value) ? [...lista, escolhido] : lista
-})
-const comLinhas = computed(() => mostraLinhas(props.escolha.tipo, !!props.podeMexer, fechadas.value, busca.value))
+const chips = computed(() => gruposDaBarra(props.grupos))
+const grupoAtual = computed(() => chips.value.find((g) => g.chave === props.escolha.grupo) || null)
+const diasDaBarra = computed(() => Number(props.dias) || 30)
+const motivos = computed(() => motivosDaCaixaVazia(grupoAtual.value, props.contagem, diasDaBarra.value))
 
 // `automatico` (o polling): a falha não mostra erro — a lista fica e o próximo tique tenta de novo.
 async function carregar(mais = false, automatico = false) {
   const g = ++geracao
-  const endereco = urlDosEmailsDaLoja(props.escolha, { fechadas: fechadas.value, busca: busca.value, antesDe: mais ? proximo.value : null })
+  const endereco = urlDosEmailsDaCaixa(props.escolha, { antesDe: mais ? proximo.value : null })
   if (!endereco) {
-    conversas.value = []
+    itens.value = []
     erro.value = 'Esta loja não tem como filtrar os e-mails.'
     return
   }
@@ -142,10 +103,10 @@ async function carregar(mais = false, automatico = false) {
   if (!automatico) erro.value = null
   if (!mais) paginasExtras = false
   try {
-    const r = await api<{ itens: ConversaResumo[]; proximo: string | null }>(endereco)
+    const r = await api<{ itens: EmailDaCaixa[]; proximo: string | null }>(endereco)
     if (g !== geracao) return
     const novos = r?.itens || []
-    conversas.value = mais ? [...conversas.value, ...novos.filter((x) => !conversas.value.some((y) => y.id === x.id))] : novos
+    itens.value = mais ? [...itens.value, ...novos.filter((x) => !itens.value.some((y) => y.id === x.id))] : novos
     proximo.value = r?.proximo || null
     if (mais) paginasExtras = true
     if (automatico) erro.value = null
@@ -156,60 +117,39 @@ async function carregar(mais = false, automatico = false) {
   }
 }
 
-async function carregarLinhas(mais = false) {
-  const g = ++geracaoLinhas
-  if (!comLinhas.value) {
-    linhas.value = []
-    proximoLinhas.value = null
-    erroLinhas.value = null
-    carregandoLinhas.value = false
+async function verEmail(id: string, alternar = true) {
+  if (alternar && linhaAberta.value === id) {
+    linhaAberta.value = null
+    detalhe.value = null
     return
   }
-  const endereco = urlDasLinhasDaLoja(props.escolha, mais ? proximoLinhas.value : null)
-  if (!endereco) return
-  carregandoLinhas.value = true
-  erroLinhas.value = null
+  linhaAberta.value = id
+  detalhe.value = null
   try {
-    const r = await api<{ itens: ItemFila[]; proximo: string | null }>(endereco)
-    if (g !== geracaoLinhas) return
-    const novas = r?.itens || []
-    linhas.value = mais ? [...linhas.value, ...novas.filter((x) => !linhas.value.some((y) => y.id === x.id))] : novas
-    proximoLinhas.value = r?.proximo || null
-  } catch (e: any) {
-    if (g === geracaoLinhas) erroLinhas.value = erroDaApi(e, 'Não consegui carregar as pastas informativas desta loja').texto
-  } finally {
-    if (g === geracaoLinhas) carregandoLinhas.value = false
+    const d = await api<Detalhe>(urlDoEmailDaCaixa(id))
+    if (linhaAberta.value === id) detalhe.value = d
+  } catch (x: any) {
+    if (linhaAberta.value === id) {
+      linhaAberta.value = null
+      const er = erroDaApi(x, 'Não consegui abrir o e-mail')
+      toasts.error(er.texto, er.motivos)
+    }
   }
 }
 
 function recomecar() {
-  conversas.value = []
+  itens.value = []
   proximo.value = null
   linhaAberta.value = null
   detalhe.value = null
-  void Promise.all([carregar(), carregarLinhas()])
+  void carregar()
 }
-// Outra loja ou outro tipo: do começo, nas abertas, sem busca.
+// Outra loja ou outro grupo: do começo.
 watch(() => chaveDaEscolha(props.escolha), () => {
-  fechadas.value = false
-  buscaTexto.value = ''
-  busca.value = ''
-  linhas.value = []
   recomecar()
+  if (props.aberto) void verEmail(props.aberto, false)
 })
-function verFechadas(v: boolean) {
-  if (fechadas.value === v) return
-  fechadas.value = v
-  recomecar()
-}
-function buscar() {
-  busca.value = buscaTexto.value.trim().slice(0, 200)
-  recomecar()
-}
-function limparBusca() {
-  buscaTexto.value = ''
-  buscar()
-}
+watch(() => props.aberto, (id) => { if (id) void verEmail(id, false) })
 // O polling da página e a conversa aberta que mudou: a 1ª página de novo — só
 // sem o "carregar mais" (reler voltaria para o começo) e sem leitura no meio.
 function aoTique() {
@@ -218,36 +158,20 @@ function aoTique() {
 }
 watch(() => props.tique, aoTique)
 watch(() => props.sinal, aoTique)
-onMounted(() => { void Promise.all([carregar(), carregarLinhas()]) })
+onMounted(() => {
+  void carregar()
+  if (props.aberto) void verEmail(props.aberto, false)
+})
 
-async function verLinha(e: ItemFila) {
-  if (linhaAberta.value === e.id) {
-    linhaAberta.value = null
-    detalhe.value = null
-    return
-  }
-  linhaAberta.value = e.id
-  detalhe.value = null
-  try {
-    const d = await api<CartaoEmail>(`/api/atendimento/email/emails/${encodeURIComponent(e.id)}`)
-    if (linhaAberta.value === e.id) detalhe.value = d
-  } catch (x: any) {
-    if (linhaAberta.value === e.id) {
-      linhaAberta.value = null
-      const er = erroDaApi(x, 'Não consegui abrir o e-mail')
-      toasts.error(er.texto, er.motivos)
-    }
-  }
+function abrir(e: EmailDaCaixa) {
+  if (e.conversa_id) emit('selecionar', e.conversa_id)
+  else void verEmail(e.id)
 }
-
-const rotuloDoTipo = computed(() => TIPOS_EMAIL_DA_LOJA.find((t) => t.value === props.escolha.tipo)?.label || props.escolha.tipo)
-function nomeDaLinha(c: ConversaResumo): string {
-  return c.comprador_nome || (c.pedido_marketplace ? `Pedido ${c.pedido_marketplace}` : 'Cliente')
-}
+const rotuloDoGrupo = computed(() => grupoAtual.value?.rotulo || props.escolha.grupo)
 </script>
 
 <template>
-  <div class="flex min-h-0 flex-1 flex-col" :aria-label="`E-mails ${rotuloDoTipo} da loja ${escolha.conta}`" data-emails-da-loja>
+  <div class="flex min-h-0 flex-1 flex-col" :aria-label="`E-mails ${rotuloDoGrupo} da loja ${escolha.conta}`" data-emails-da-loja>
     <div class="shrink-0 space-y-1.5 border-b p-2">
       <div class="flex items-center gap-1.5">
         <button
@@ -266,109 +190,68 @@ function nomeDaLinha(c: ConversaResumo): string {
         <AtendimentoIconePlataforma :plataforma="escolha.plataforma" :tamanho="15" decorativo />
         <span class="min-w-0 truncate" :title="`${plataformaInfo(escolha.plataforma).nome} · ${escolha.conta}`">{{ escolha.conta }}</span>
       </div>
-      <!-- os tipos da loja (os mesmos da barra) -->
-      <div class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="tipo de e-mail" data-tipos-da-loja>
+      <!-- as pastas da loja (as mesmas caixas da barra) -->
+      <div class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="pasta de e-mail" data-grupos-da-loja>
         <button
-          v-for="t in chips"
-          :key="t.value"
+          v-for="g in chips"
+          :key="g.chave"
           type="button"
           class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5"
-          :class="escolha.tipo === t.value ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'"
-          :aria-pressed="escolha.tipo === t.value"
-          :data-tipo-da-loja="t.value"
-          @click="emit('tipo', t.value)"
+          :class="escolha.grupo === g.chave ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'"
+          :aria-pressed="escolha.grupo === g.chave"
+          :data-grupo-da-loja="g.chave"
+          @click="emit('grupo', g.chave)"
         >
-          {{ t.label }}<span v-if="contagem" class="tabular-nums">{{ numeroDoTipo(contagem, t.value) }}</span>
+          {{ g.rotulo }}<span v-if="contagem" class="tabular-nums">{{ numeroDoGrupo(contagem, g.chave) }}</span>
         </button>
       </div>
-      <div class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="abertas ou fechadas" data-situacao-da-loja>
-        <button
-          v-for="op in [{ v: false, label: 'Abertas' }, { v: true, label: 'Fechadas' }]"
-          :key="op.label"
-          type="button"
-          class="rounded-full border px-2 py-0.5"
-          :class="fechadas === op.v ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'"
-          :aria-pressed="fechadas === op.v"
-          :data-situacao="op.v ? 'fechadas' : 'abertas'"
-          @click="verFechadas(op.v)"
-        >{{ op.label }}</button>
-      </div>
-      <form class="flex items-center gap-1 text-xs" role="search" data-busca-emails-da-loja @submit.prevent="buscar">
-        <input v-model="buscaTexto" type="search" maxlength="200" class="h-7 min-w-0 flex-1 rounded border bg-background px-1.5" placeholder="buscar: nome, pedido ou protocolo" aria-label="buscar nos e-mails desta loja" />
-        <button type="submit" class="rounded border px-2 py-0.5 hover:bg-muted disabled:opacity-50" :disabled="carregando">buscar</button>
-        <button v-if="busca" type="button" class="text-muted-foreground underline" @click="limparBusca">limpar</button>
-      </form>
+      <p class="text-[11px] text-muted-foreground">Os e-mails da pasta dos últimos {{ diasDaBarra }} dias, o mais novo primeiro.</p>
     </div>
 
     <div class="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
       <div v-if="erro" class="rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-xs text-red-700 dark:text-red-300" role="alert">{{ erro }}</div>
-
-      <!-- as linhas das pastas INFORMATIVAS da loja (quem mexe; sem conversa) -->
-      <section v-if="comLinhas && (linhas.length || carregandoLinhas || erroLinhas)" class="space-y-1.5" aria-label="pastas informativas da loja" data-linhas-da-loja>
-        <h4 class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Pastas informativas</h4>
-        <div v-if="erroLinhas" class="text-xs text-red-700 dark:text-red-300">{{ erroLinhas }}</div>
-        <div v-else-if="carregandoLinhas && !linhas.length" class="flex justify-center py-3"><Loader2 class="size-4 animate-spin" /></div>
-        <ul v-else class="space-y-1.5">
-          <li v-for="e in linhas" :key="e.id" class="space-y-1 rounded-lg border p-2 text-xs" :data-linha-da-loja="e.id">
-            <div class="flex flex-wrap items-center gap-1.5">
-              <span class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">{{ e.pasta || 'sem pasta' }}</span>
-              <span class="ml-auto text-muted-foreground">{{ fmtDataHora(e.recebido_em) }}</span>
-            </div>
-            <div class="break-words font-medium">{{ e.assunto || '(sem assunto)' }}</div>
-            <div class="break-all text-muted-foreground">De {{ e.de || '—' }}</div>
-            <button type="button" class="inline-flex items-center gap-0.5 underline" :aria-expanded="linhaAberta === e.id" @click="verLinha(e)">
-              <component :is="linhaAberta === e.id ? ChevronUp : ChevronDown" class="size-3" />{{ linhaAberta === e.id ? 'fechar o e-mail' : 'ver o e-mail' }}
-            </button>
-            <div v-if="linhaAberta === e.id" class="space-y-1.5 rounded-md border bg-background p-2" data-linha-da-loja-aberta>
-              <div v-if="!detalhe" class="flex justify-center py-3"><Loader2 class="size-4 animate-spin" /></div>
-              <template v-else>
-                <div class="break-all text-[11px]"><span class="text-muted-foreground">De</span> {{ remetenteLegivel(detalhe) }}</div>
-                <div v-for="(p, i) in avisosDeProtecao(detalhe)" :key="i" class="text-[11px] text-muted-foreground">{{ p }}</div>
-                <pre class="max-h-[280px] overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">{{ detalhe.texto || '(e-mail sem texto)' }}</pre>
-                <div v-if="detalhe.anexos?.length" class="space-y-0.5">
-                  <a v-for="an in detalhe.anexos" :key="an.id" :href="url(urlDoAnexo(an.id))" class="flex max-w-full items-center gap-1 underline" rel="noopener noreferrer">
-                    <Download class="size-3 shrink-0" aria-hidden="true" /><span class="truncate">{{ an.filename || 'anexo' }}</span><span class="shrink-0 text-muted-foreground">{{ tamanhoLegivel(an.tamanho) }}</span>
-                  </a>
-                </div>
-              </template>
-            </div>
-          </li>
-        </ul>
-        <div v-if="proximoLinhas" class="flex justify-center">
-          <button type="button" class="rounded border px-3 py-1 text-xs hover:bg-muted disabled:opacity-50" :disabled="carregandoLinhas" @click="carregarLinhas(true)">carregar mais</button>
-        </div>
-        <h4 class="pt-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Conversas de e-mail</h4>
-      </section>
-
-      <!-- as conversas de e-mail da loja, do tipo escolhido -->
-      <div v-if="carregando && !conversas.length" class="flex justify-center py-8"><Loader2 class="size-5 animate-spin" /></div>
-      <div v-else-if="!conversas.length && !erro" class="py-8 text-center text-xs text-muted-foreground" data-emails-da-loja-vazio>
-        {{ vazioDaLoja(escolha.tipo, fechadas, busca) }}
-        <button type="button" class="ml-1 underline hover:text-foreground" data-ver-a-outra-metade @click="verFechadas(!fechadas)">ver as {{ fechadas ? 'abertas' : 'fechadas' }}</button>
+      <div v-if="carregando && !itens.length" class="flex justify-center py-8"><Loader2 class="size-5 animate-spin" /></div>
+      <div v-else-if="!itens.length && !erro" class="space-y-1 py-8 text-center text-xs text-muted-foreground" data-emails-da-loja-vazio>
+        <p v-for="(m, i) in motivos" :key="i">{{ m }}</p>
       </div>
       <ul v-else class="space-y-1.5">
-        <li v-for="c in conversas" :key="c.id">
+        <li v-for="e in itens" :key="e.id" class="space-y-1">
           <button
             type="button"
             class="w-full space-y-0.5 rounded-lg border p-2 text-left text-xs hover:bg-muted/50"
-            :class="selecionada === c.id ? 'border-primary bg-primary/5' : ''"
-            :aria-current="selecionada === c.id ? 'true' : undefined"
-            :data-email-da-loja="c.id"
-            @click="emit('selecionar', c.id)"
+            :class="(e.conversa_id && selecionada === e.conversa_id) || linhaAberta === e.id ? 'border-primary bg-primary/5' : ''"
+            :aria-current="e.conversa_id && selecionada === e.conversa_id ? 'true' : undefined"
+            :aria-expanded="e.conversa_id ? undefined : linhaAberta === e.id"
+            :data-email-da-loja="e.id"
+            @click="abrir(e)"
           >
             <div class="flex flex-wrap items-center gap-1.5">
-              <span v-if="rotuloTipoEmail(c.email?.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" :title="dicaTipoEmail(c.email?.tipo_email_inferido)">{{ rotuloTipoEmail(c.email?.tipo_email) }}</span>
-              <span v-if="c.email?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">Chamado {{ c.email.caso_id }}</span>
-              <span v-if="c.email?.protocolo && !c.email?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">{{ c.email.protocolo }}</span>
-              <span v-if="prazoDe(c)" class="rounded px-1.5 py-px text-[11px]" :class="prazoDe(c)!.cls" :title="prazoDe(c)!.titulo">{{ prazoDe(c)!.texto }}</span>
-              <span v-else-if="c.aguardando_resposta" class="rounded bg-red-500/15 px-1.5 py-px text-[11px] text-red-700 dark:text-red-300">falta responder</span>
-              <span v-if="c.situacao === 'fechada'" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">fechada</span>
-              <span class="ml-auto text-muted-foreground">{{ fmtDataHora(c.ultima_mensagem_em) }}</span>
+              <span v-if="e.pasta" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">{{ e.pasta }}</span>
+              <span v-if="e.seguranca" class="rounded bg-amber-500/15 px-1.5 py-px text-[11px] text-amber-800 dark:text-amber-300" title="A ponte segurou este e-mail como de segurança (tem código): nesta pasta ele aparece para quem vê a loja">com código</span>
+              <span v-if="e.conversa_id && e.aguardando_resposta" class="rounded bg-red-500/15 px-1.5 py-px text-[11px] text-red-700 dark:text-red-300">falta responder</span>
+              <span v-else-if="e.conversa_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">conversa</span>
+              <span v-if="e.situacao === 'fechada'" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">fechada</span>
+              <span class="ml-auto text-muted-foreground">{{ fmtDataHora(e.recebido_em) }}</span>
             </div>
-            <div class="break-words font-medium">{{ nomeDaLinha(c) }}</div>
-            <div v-if="c.ultima_mensagem_resumo" class="line-clamp-2 break-words text-muted-foreground">{{ c.ultima_mensagem_resumo }}</div>
-            <div v-if="c.email?.alias" class="break-all text-[11px] text-muted-foreground">para {{ c.email.alias }}</div>
+            <div class="break-words font-medium">{{ tituloDaLinha(e) }}</div>
+            <div v-if="e.de" class="break-all text-muted-foreground">De {{ e.de }}</div>
+            <div v-if="!e.conversa_id" class="inline-flex items-center gap-0.5 text-[11px] underline">
+              <component :is="linhaAberta === e.id ? ChevronUp : ChevronDown" class="size-3" />{{ linhaAberta === e.id ? 'fechar o e-mail' : 'ver o e-mail' }}
+            </div>
           </button>
+          <div v-if="linhaAberta === e.id" class="space-y-1.5 rounded-md border bg-background p-2 text-xs" data-email-da-loja-aberto>
+            <div v-if="!detalhe" class="flex justify-center py-3"><Loader2 class="size-4 animate-spin" /></div>
+            <template v-else>
+              <div class="break-all text-[11px]"><span class="text-muted-foreground">De</span> {{ detalhe.de_nome ? `${detalhe.de_nome} <${detalhe.de}>` : detalhe.de }}</div>
+              <div v-if="detalhe.links_removidos" class="text-[11px] text-muted-foreground">{{ detalhe.links_removidos }} link(s) de acesso removido(s)</div>
+              <pre class="max-h-[360px] overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">{{ detalhe.texto || '(e-mail sem texto)' }}</pre>
+              <div v-if="detalhe.anexos?.length" class="space-y-0.5">
+                <a v-for="an in detalhe.anexos" :key="an.id" :href="url(urlDoAnexoDaCaixa(an.id))" class="flex max-w-full items-center gap-1 underline" rel="noopener noreferrer">
+                  <Download class="size-3 shrink-0" aria-hidden="true" /><span class="truncate">{{ an.filename || 'anexo' }}</span><span class="shrink-0 text-muted-foreground">{{ tamanhoLegivel(an.tamanho) }}</span>
+                </a>
+              </div>
+            </template>
+          </div>
         </li>
       </ul>
       <div v-if="proximo" class="flex justify-center">

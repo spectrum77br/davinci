@@ -84,18 +84,32 @@ CATEGORIA_VENDA = "venda"
 CATEGORIA_SITE = "site"
 CATEGORIAS_PELA_PASTA = (CATEGORIA_INFORMATIVO, CATEGORIA_CHAMADO, CATEGORIA_VENDA)
 CATEGORIAS_PASTA = (*CATEGORIAS_PELA_PASTA, CATEGORIA_SITE)
-# OS TIPOS DE E-MAIL EMBAIXO DE CADA LOJA na barra de lojas da Caixa (27/10/2026)
-# — o ÚNICO lugar da escolha. O Eduardo, 27/10: "botar um AMPLIÁVEL que vai
-# abrir os e-mails embaixo de cada loja"; no mesmo dia mudou para só
-# Informativo e Chamado embaixo de cada loja (a Venda fica só na aba E-mail) e
-# ainda vai escolher quais pastas entram — a troca é AQUI. Daqui saem os
-# números por loja (GET /api/atendimento/email/contagens?por_loja=true, que
-# manda a lista em `tipos_na_barra`), os tipos que a barra e a lista da loja
-# mostram (o web não tem lista própria) e o que quem NÃO é admin pode listar
-# (GET /api/atendimento/conversas?caixa=email: só pela loja e só destes tipos
-# — a aba E-mail inteira é só de admin). Valores de `classificacao.TIPOS_EMAIL`
-# (= CATEGORIAS_PELA_PASTA), na ordem da barra (tests/test_atendimento_email_lojas.py).
-TIPOS_EMAIL_NA_BARRA_DE_LOJAS: tuple[str, ...] = (CATEGORIA_INFORMATIVO, CATEGORIA_CHAMADO)
+# AS PASTAS EMBAIXO DE CADA LOJA na barra de lojas da Caixa (27/10/2026) — o
+# ÚNICO lugar da escolha. O Eduardo, 27/10: "botar um AMPLIÁVEL que vai abrir
+# os e-mails embaixo de cada loja"; no mesmo dia decidiu que os grupos são as
+# três PASTAS do Tuta que ele unificou — Problemas (a pasta "problemas"),
+# Envios ("envio") e Devolução ("devoluçoes", a grafia do Tuta, sem o til) —,
+# e logo depois uma quarta, Informativo ("informativo"), cada uma com "opção
+# de encolher ou abrir", só com os e-mails DAQUELA loja (a Venda não entra).
+# Cada grupo: (chave, rótulo, os nomes das pastas). O nome
+# casa INTEIRO com o nome da pasta (a última parte do caminho) ou com a chave
+# dela, sem acento e sem diferenciar maiúsculas (`barra_lojas.grupo_da_pasta`),
+# em qualquer caixa com a ponte. A caixa mostra TODO e-mail da pasta ligado à
+# loja (também o que a ponte segurou como segurança — `barra_lojas`). Trocar, tirar ou pôr um
+# grupo é AQUI: daqui saem os números por loja (GET /api/atendimento/email/
+# contagens?por_loja=true, que manda a lista em `grupos_na_barra`), os grupos
+# que a barra e a lista da loja mostram (o web não tem lista própria) e o que
+# quem NÃO é admin pode listar (GET /api/atendimento/conversas?caixa=email: só
+# pela loja e só destes grupos — a aba E-mail inteira é só de admin).
+GRUPOS_EMAIL_NA_BARRA_DE_LOJAS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("problemas", "Problemas", ("problemas",)),
+    ("envios", "Envios", ("envio",)),
+    ("devolucao", "Devolução", ("devoluçoes", "devolucoes", "devoluções")),
+    ("informativo", "Informativo", ("informativo",)),
+)
+# Os números "recentes" da barra (o diagnóstico de cada loja: quantos e-mails
+# a ponte ligou à loja nestes últimos dias, em qualquer pasta e em cada grupo).
+DIAS_DA_BARRA_DE_LOJAS = 30
 ROTULO_CATEGORIA = {
     CATEGORIA_INFORMATIVO: "Informativo",
     CATEGORIA_CHAMADO: "Chamado (Pós-venda)",
