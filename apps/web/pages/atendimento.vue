@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BarChart3, BookOpen, Bot, Eye, Inbox, MessageSquareText, RotateCcw, Store, TriangleAlert, UserRound } from 'lucide-vue-next'
+import { BarChart3, BookOpen, Bot, Eye, Inbox, Mail, MessageSquareText, RotateCcw, Store, TriangleAlert, UserRound } from 'lucide-vue-next'
 import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import {
   AVISO_SO_LEITURA,
@@ -20,6 +20,7 @@ import {
 } from '~/components/AtendimentoPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
+import type { EmailsDaLoja, EscolhaEmail, TipoEmailDaLoja } from '~/components/AtendimentoLojas.vue'
 import { GRUPOS_CAIXA, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
@@ -209,6 +210,8 @@ async function zerarNaoLidas() {
 // ABERTOS, respondidos ou não, e não somam); quem só lê vê "Falta responder"
 // com essas mesmas conversas, do escopo dele. Relido junto com o /resumo
 // (o polling de 30 s, o "atualizar") e quando a conversa de e-mail muda.
+// Na Caixa (27/10/2026) a MESMA leitura traz também os números por loja
+// (`?por_loja=true`): o ampliável de e-mails da barra de lojas.
 const emailContagens = ref<ContagensDeConversa | null>(null)
 const emailContagensProntas = ref(false)
 const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
@@ -223,7 +226,7 @@ async function carregarContagensEmail() {
   if (!canSugerir.value) return
   const g = ++geracaoContagensEmail
   try {
-    const recebidas = await api<ContagensDeConversa>('/api/atendimento/email/contagens')
+    const recebidas = await api<ContagensDeConversa>(aba.value === 'caixa' ? '/api/atendimento/email/contagens?por_loja=true' : '/api/atendimento/email/contagens')
     if (g === geracaoContagensEmail) emailContagens.value = recebidas
   } catch {
     // só o número da aba
@@ -743,6 +746,114 @@ function mostrarCaixaInteira() {
 watch(selecionada, (id) => {
   if (id && import.meta.client) void nextTick(mostrarCaixaInteira)
 })
+
+// ─── os E-MAILS de cada loja na Caixa (27/10/2026) ──────────────────────────
+// O Eduardo, 27/10: "vamos mudar um pouco a disposição da caixa de
+// atendimento: botar um AMPLIÁVEL que vai abrir os e-mails embaixo de cada
+// loja, com as 3 categorias linkadas pra cada loja … então poderá ampliar e
+// visualizar os e-mails ali pelo atendimento mesmo de cada loja". Na barra de
+// lojas da CAIXA (a Caixa Humano é só o que a IA não pode responder: lá não),
+// a loja com e-mail tem a seta; embaixo, Informativo · Chamado · Venda com os
+// números (GET …/email/contagens?por_loja=true, a mesma leitura do número da
+// aba E-mail). O clique num tipo troca a lista do meio pelos e-mails da loja
+// (AtendimentoLojaEmails) e a conversa de e-mail abre na coluna da conversa,
+// com a barra do e-mail (voltar, vincular ao pedido) — como na aba E-mail. O
+// CHAT não muda: a lista dele fica guardada (volta em "conversas", num clique
+// de loja na barra ou no menu Plataforma) e o e-mail continua fora dos números
+// e da lista da Caixa (`separa_email`).
+const emailsDaLoja = ref<EscolhaEmail | null>(null)
+const emailNaCaixa = ref<string | null>(null)
+const emailNaCaixaLinha = ref<ConversaResumo | null>(null)
+const emailNaCaixaVersao = ref(0)
+// Sobe quando a conversa aberta muda o que a lista mostra (respondeu, fechou, vinculou).
+const emailNaCaixaSinal = ref(0)
+const contagemDaLoja = computed<EmailsDaLoja | null>(() => {
+  const e = emailsDaLoja.value
+  if (!e) return null
+  return (emailContagens.value?.por_loja || []).find((x) => (e.integration_id ? x.integration_id === e.integration_id : !x.integration_id && x.store_info_id === e.store_info_id)) || null
+})
+// A conversa na coluna da conversa (no celular a lista some quando há uma).
+const abertaNaCaixa = computed(() => (emailsDaLoja.value ? emailNaCaixa.value : selecionada.value))
+function fecharEmailNaCaixa() {
+  emailNaCaixa.value = null
+  emailNaCaixaLinha.value = null
+}
+function fecharEmailsDaLoja() {
+  fecharEmailNaCaixa()
+  emailsDaLoja.value = null
+}
+function abrirEmailsDaLoja(e: EscolhaEmail) {
+  if (emailsDaLoja.value?.chave !== e.chave || emailsDaLoja.value?.tipo !== e.tipo) fecharEmailNaCaixa()
+  emailsDaLoja.value = e
+}
+function trocarTipoDaLoja(t: TipoEmailDaLoja) {
+  if (emailsDaLoja.value && emailsDaLoja.value.tipo !== t) abrirEmailsDaLoja({ ...emailsDaLoja.value, tipo: t })
+}
+function selecionarEmailNaCaixa(id: string) {
+  if (emailNaCaixa.value !== id) emailNaCaixaLinha.value = null
+  emailNaCaixa.value = id
+}
+// A conversa aberta mandou a linha dela: a de CHAT (um link de dentro do
+// e-mail apontou o chat do comprador) vai para a lista do chat, aberta.
+function aoMudarEmailNaCaixa(c: ConversaResumo) {
+  if (c.id !== emailNaCaixa.value) return
+  if (c.email === null) {
+    fecharEmailsDaLoja()
+    selecionar(c.id)
+    return
+  }
+  const antes = emailNaCaixaLinha.value
+  emailNaCaixaLinha.value = c
+  if (antes && (!!antes.aguardando_resposta !== !!c.aguardando_resposta || antes.situacao !== c.situacao)) {
+    emailNaCaixaSinal.value++
+    void carregarContagensEmail()
+  }
+}
+// Vinculou ao pedido: as mensagens podem ter ido para a conversa de e-mail do pedido.
+function aoVincularEmailNaCaixa(id: string) {
+  if (id && id !== emailNaCaixa.value) selecionarEmailNaCaixa(id)
+  else emailNaCaixaVersao.value++
+  emailNaCaixaSinal.value++
+}
+// Saiu da Caixa: os e-mails da loja fecham; voltou: os números por loja de
+// novo (só a Caixa pede o `por_loja`).
+watch(aba, (a) => {
+  if (a !== 'caixa') fecharEmailsDaLoja()
+  else if (iniciou) void carregarContagensEmail()
+})
+// Um filtro do CHAT (uma loja ou "Todas" na barra, o menu Plataforma): a lista do chat de volta.
+watch(filtros, () => {
+  if (emailsDaLoja.value) fecharEmailsDaLoja()
+}, { deep: true })
+watch(emailNaCaixa, (id) => {
+  if (iniciou && id) void carregarModelos()
+})
+// As lojas com a seta aberta, lembradas POR PESSOA neste navegador (a chave
+// leva o id de quem entrou). Lido só no cliente e sempre com try.
+const EMAILS_ABERTOS_KEY = 'davinci.atendimento.lojasEmailsAbertos'
+const lojasEmailsAbertos = ref<string[]>([])
+let emailsAbertosLidos = false
+function chaveDosEmailsAbertos() {
+  return `${EMAILS_ABERTOS_KEY}:${auth.user?.id || 'anonimo'}`
+}
+onMounted(() => {
+  try {
+    const salvo = JSON.parse(localStorage.getItem(chaveDosEmailsAbertos()) || '[]')
+    if (Array.isArray(salvo)) lojasEmailsAbertos.value = [...new Set(salvo.filter((x: unknown): x is string => typeof x === 'string' && !!x))].slice(0, 300)
+  } catch {
+    // sem localStorage (ou valor estragado) — começa tudo fechado
+  }
+  // Depois do valor inicial: daqui em diante, mudança é clique da pessoa.
+  void nextTick(() => { emailsAbertosLidos = true })
+})
+watch(lojasEmailsAbertos, (v) => {
+  if (!emailsAbertosLidos) return
+  try {
+    localStorage.setItem(chaveDosEmailsAbertos(), JSON.stringify(v.slice(0, 300)))
+  } catch {
+    // sem localStorage — só não lembra
+  }
+})
 </script>
 
 <template>
@@ -884,13 +995,37 @@ watch(selecionada, (id) => {
         class="hidden min-h-0 shrink-0 flex-col border-r bg-muted/30 lg:flex"
         :class="lojasRecolhidas ? 'w-[64px]' : 'w-[196px]'"
       >
-        <AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano ? 'humano' : 'nao_lidas_duoke'" />
+        <!-- os e-mails de cada loja (27/10/2026): só na Caixa -->
+        <AtendimentoLojas
+          v-model:filtros="filtros"
+          v-model:recolhida="lojasRecolhidas"
+          v-model:emails-abertos="lojasEmailsAbertos"
+          :resumo="resumo"
+          :numero="emHumano ? 'humano' : 'nao_lidas_duoke'"
+          :emails="aba === 'caixa' ? emailContagens?.por_loja ?? null : null"
+          :email-aberto="emailsDaLoja ? { chave: emailsDaLoja.chave, tipo: emailsDaLoja.tipo } : null"
+          @abrir-emails="abrirEmailsDaLoja"
+        />
       </aside>
       <aside
         class="min-h-0 w-full flex-col border-r lg:flex lg:w-[300px] lg:shrink-0 2xl:w-[330px]"
-        :class="selecionada ? 'hidden' : 'flex'"
+        :class="abertaNaCaixa ? 'hidden' : 'flex'"
       >
+        <!-- os e-mails da loja escolhida na barra (27/10/2026); a lista do chat fica guardada -->
+        <AtendimentoLojaEmails
+          v-if="emailsDaLoja"
+          :escolha="emailsDaLoja"
+          :contagem="contagemDaLoja"
+          :pode-mexer="mexe"
+          :selecionada="emailNaCaixa"
+          :tique="emailTique"
+          :sinal="emailNaCaixaSinal"
+          @selecionar="selecionarEmailNaCaixa"
+          @tipo="trocarTipoDaLoja"
+          @fechar="fecharEmailsDaLoja"
+        />
         <AtendimentoLista
+          v-show="!emailsDaLoja"
           v-model:filtros="filtros"
           :itens="itens"
           :carregando="carregando"
@@ -908,9 +1043,10 @@ watch(selecionada, (id) => {
           @abrir-aba="abrirAba"
         />
       </aside>
-      <section class="min-h-0 min-w-0 flex-1 lg:flex" :class="selecionada ? 'flex' : 'hidden'">
+      <section class="min-h-0 min-w-0 flex-1 lg:flex" :class="abertaNaCaixa ? 'flex' : 'hidden'">
         <AtendimentoConversa
           v-if="selecionada"
+          v-show="!emailsDaLoja"
           :conversa-id="selecionada"
           :can-edit="canEdit"
           :can-sugerir="canSugerir"
@@ -918,15 +1054,49 @@ watch(selecionada, (id) => {
           :flags="resumo?.flags || null"
           :meu-id="auth.user?.id || null"
           :lojas="resumo?.lojas || []"
-          :ativa="naCaixa"
+          :ativa="naCaixa && !emailsDaLoja"
           @mudou="aoMudarConversa"
           @voltar="selecionada = null"
           @abrir-aba="abrirAba"
           @abrir-conversa="abrirDoChat"
         />
-        <div v-else class="flex flex-1 items-center justify-center p-6">
+        <div v-else-if="!emailsDaLoja" class="flex flex-1 items-center justify-center p-6">
           <EmptyState :icon="Inbox" title="Escolha uma conversa" description="A conversa abre aqui, com o que a IA responderia e o pedido da loja ao lado. Dica: com o foco na lista, ↑ e ↓ andam pelas conversas." />
         </div>
+        <!-- a conversa de e-mail da loja (27/10/2026): a barra do e-mail em cima, como na aba E-mail -->
+        <template v-if="emailsDaLoja">
+          <div v-if="emailNaCaixa" class="flex min-h-0 min-w-0 flex-1 flex-col" data-email-na-caixa>
+            <div class="shrink-0 border-b p-2">
+              <AtendimentoEmailConversaBarra
+                :conversa="emailNaCaixaLinha"
+                :pode-mexer="mexe"
+                na-caixa
+                @voltar="fecharEmailNaCaixa"
+                @vinculado="aoVincularEmailNaCaixa"
+              />
+            </div>
+            <div class="flex min-h-0 min-w-0 flex-1">
+              <AtendimentoConversa
+                :key="`${emailNaCaixa}:${emailNaCaixaVersao}`"
+                :conversa-id="emailNaCaixa"
+                :can-edit="canEdit"
+                :can-sugerir="canSugerir"
+                :modelos="modelos"
+                :flags="resumo?.flags || null"
+                :meu-id="auth.user?.id || null"
+                :lojas="resumo?.lojas || []"
+                :ativa="naCaixa"
+                @mudou="aoMudarEmailNaCaixa"
+                @voltar="fecharEmailNaCaixa"
+                @abrir-aba="abrirAba"
+                @abrir-conversa="selecionarEmailNaCaixa"
+              />
+            </div>
+          </div>
+          <div v-else class="flex flex-1 items-center justify-center p-6">
+            <EmptyState :icon="Mail" :title="`E-mails · ${emailsDaLoja.conta}`" description="Escolha um e-mail na lista: a conversa abre aqui, com o vínculo ao pedido e a resposta, como na aba E-mail." />
+          </div>
+        </template>
       </section>
     </div>
 

@@ -2106,6 +2106,7 @@ async def _listar_marketplace(
     tipo_email: str | None = None,
     caixa_humano: bool = False,
     caixa_email: bool = False,
+    store_info_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
     from app.services.atendimento import humano as humano_svc
 
@@ -2144,6 +2145,16 @@ async def _listar_marketplace(
         consulta = consulta.where(separa_email.na_caixa_sql())
     if caixa_email and tipo_email:
         consulta = consulta.where(_tipo_do_email_sql() == tipo_email)
+    if caixa_email and store_info_id is not None:
+        # A loja SEM integração (a ficha do cadastro: a do robô, a Temu, a
+        # AliExpress) na barra de lojas da Caixa (27/10/2026): as conversas de
+        # e-mail que a ponte ligou à ficha (`dados.mail.store_info_id`). A loja
+        # com integração filtra por `integration_id`, como sempre.
+        consulta = consulta.where(
+            AtendimentoConversa.integration_id.is_(None),
+            AtendimentoConversa.dados[separa_email.CHAVE_MAIL]["store_info_id"].astext
+            == str(store_info_id),
+        )
     if caixa_humano:
         # Falta responder e a IA não pode, nas lojas dos modos (com qualquer filtro).
         consulta = consulta.where(humano_svc.caixa_humano_sql(lojas_humano, agora))
@@ -2403,6 +2414,7 @@ async def listar_conversas(
     tipo_chamado: Annotated[str | None, Query(max_length=16)] = None,
     tipo_email: Annotated[str | None, Query(max_length=16)] = None,
     caixa: Annotated[str | None, Query(max_length=16)] = None,
+    store_info_id: Annotated[UUID | None, Query()] = None,
 ) -> ListaConversasOut:
     """A fila, mais recente primeiro; página seguinte com `antes_de=<proximo>`.
 
@@ -2434,6 +2446,9 @@ async def listar_conversas(
     A conversa de e-mail da ponte NUNCA vem na Caixa nem na Caixa Humano
     (13/10/2026, `separa_email`): `caixa=email` traz SÓ elas (a aba E-mail),
     com os mesmos filtros e o mesmo escopo; sem o Direct do Instagram.
+    `store_info_id` (27/10/2026, só com `caixa=email`): as conversas de e-mail
+    da loja SEM integração (a ficha) — o "ampliável" de e-mails da barra de
+    lojas; a loja com integração usa `integration_id`.
     """
     plataformas = _plataformas_do_filtro(plataforma)
     canal = (canal or "").strip().lower() or None
@@ -2459,6 +2474,9 @@ async def listar_conversas(
     tipo_email = (tipo_email or "").strip().lower() or None
     if tipo_email and (tipo_email not in ("informativo", "chamado", "venda") or not caixa_email):
         raise HTTPException(422, detail={"code": "tipo_email_invalido"})
+    if store_info_id is not None and not caixa_email:
+        # A ficha é a loja do E-MAIL: o chat da loja do robô filtra pelo canal.
+        raise HTTPException(422, detail={"code": "store_info_id_so_no_email"})
     # A Caixa Humano vai pelo turno com qualquer filtro (14/10/2026); a Caixa
     # e a aba E-mail, pela ordem do filtro, como sempre.
     pelo_prazo = filtro in FILTROS_PELO_PRAZO and not caixa_humano
@@ -2493,6 +2511,7 @@ async def listar_conversas(
             tipo_email=tipo_email,
             caixa_humano=caixa_humano,
             caixa_email=caixa_email,
+            store_info_id=store_info_id,
         )
     quer_instagram = (
         (not plataformas or instagram.PLATAFORMA in plataformas)

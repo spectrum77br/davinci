@@ -55,6 +55,7 @@
 // Funções puras aqui em cima (tests/atendimento-mail-atendimento.cjs).
 
 import type { ConversaResumo, ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
+import type { EmailsDaLoja } from '~/components/AtendimentoLojas.vue'
 import { TIPOS_EMAIL, dicaTipoEmail, rotuloTipoEmail } from '~/components/AtendimentoEmailCartao.vue'
 
 export type Fila = 'sem_loja' | 'sem_vinculo' | 'chamados' | 'aguardando' | 'todas' | 'suspeito' | 'resumo' | 'erro' | 'revisar_envio'
@@ -88,7 +89,9 @@ export const TIPOS_CHAMADO: { value: string; label: string; hint: string }[] = [
   { value: 'duvidas', label: 'Dúvidas e sugestões', hint: 'chamados de Dúvidas e sugestões dos sites (protocolo DS: UDS-26-0001…)' },
 ]
 // Os números das filas de conversa (GET /api/atendimento/email/contagens).
-export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number> }
+// `por_loja` (27/10/2026, `?por_loja=true`): os mesmos números por loja — o
+// ampliável de e-mails da barra de lojas da Caixa (AtendimentoLojas).
+export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number>; por_loja?: EmailsDaLoja[] }
 export function juntarContagens(filas: Record<string, number> | null, conversas: ContagensDeConversa | null): Record<string, number> {
   return { ...(filas || {}), ...(conversas ? { chamados: conversas.chamados, aguardando: conversas.aguardando } : {}) }
 }

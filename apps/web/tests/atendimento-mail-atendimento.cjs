@@ -405,7 +405,8 @@ async function principal() {
     assert.equal(st.contagensLidas, lidas + 1, 'voltou aos e-mails: relê o número')
     // O número: GET /email/contagens no carregar e no polling (qualquer aba).
     assert.match(pagina, /const emailEsperando = computed\(\(\) => emailContagens\.value\?\.aguardando \|\| 0\)/)
-    assert.match(pagina, /const recebidas = await api<[^>]+>\('\/api\/atendimento\/email\/contagens'\)/)
+    // Na Caixa (27/10/2026) a MESMA leitura traz os números por loja (o ampliável de e-mails da barra).
+    assert.match(pagina, /const recebidas = await api<[^>]+>\(aba\.value === 'caixa' \? '\/api\/atendimento\/email\/contagens\?por_loja=true' : '\/api\/atendimento\/email\/contagens'\)/)
     // Quem não vê o /atendimento não pergunta (a rota recusaria); a seção escolhida na visita fica na página.
     assert.match(pagina, /async function carregarContagensEmail\(\) \{\n(?:\s*\/\/[^\n]*\n)*\s+if \(!canSugerir\.value\) return\n/)
     assert.match(pagina, /const emailSecao = ref<'' \| 'mailboxes' \| 'queues' \| 'admin'>\(''\)/)

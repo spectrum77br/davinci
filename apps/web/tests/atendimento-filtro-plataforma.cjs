@@ -261,7 +261,7 @@ async function principal() {
   assert.ok(iTopo > 0 && iTopo < iChips && iChips < iCaixa)
   assert.ok(pagina.indexOf('<AtendimentoLeituraParada') < iChips, 'depois da faixa das lojas sem ler')
   // Os mesmos filtros da lista (o v-model da página): busca, aba e menu juntos.
-  assert.match(pagina, /<AtendimentoLista\s+v-model:filtros="filtros"/)
+  assert.match(pagina, /<AtendimentoLista\s+v-show="!emailsDaLoja"\s+v-model:filtros="filtros"/)
   assert.match(pagina, /for \(const k of \['plataforma', 'integration_id', 'canal', 'externo_ref', 'rede_social_id'\] as const\)/)
   assert.match(pagina, /localStorage\.setItem\(FILTROS_KEY, JSON\.stringify\(resto\)\)/)
   assert.match(pagina, /if \(f\.plataforma\) p\.set\('plataforma', f\.plataforma\)/)
@@ -480,7 +480,7 @@ async function barraRenderizada() {
   assert.match(pagina, /plataforma_topo: '' \}\)/)
   // Não vai para a API (a lista filtra por `plataforma`).
   assert.doesNotMatch(pagina, /p\.set\('plataforma_topo'/)
-  assert.match(pagina, /<AtendimentoLojas v-model:filtros="filtros" v-model:recolhida="lojasRecolhidas" :resumo="resumo" :numero="emHumano \? 'humano' : 'nao_lidas_duoke'" \/>/)
+  assert.match(pagina, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"/)
 }
 
 // ------------------------------------------------ o contrato com a API

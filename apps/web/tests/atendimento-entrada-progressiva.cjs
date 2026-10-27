@@ -30,7 +30,7 @@ function mount({ tab, conversation, saved, intercept } = {}) {
     if (value !== undefined) return value
     if (url.startsWith('/api/atendimento/conversas?')) return { itens: [{ id: 'first' }], proximo: null }
     if (url === '/api/atendimento/resumo') return { lojas: [], nao_lidas_duoke: 3 }
-    if (url === '/api/atendimento/email/contagens') return { aguardando: 1, chamados: 0 }
+    if (url.startsWith('/api/atendimento/email/contagens')) return { aguardando: 1, chamados: 0 }
     if (url === '/api/atendimento/modelos') return [{ id: 'model1' }]
     if (url === '/api/atendimento/categorias') return []
     throw Error(`Unexpected ${url}`)
@@ -79,7 +79,7 @@ async function run() {
     const summary = deferred(), emailCounts = deferred()
     const m = mount({ saved: { plataforma: 'shopee', integration_id: 'store1', filtro: 'aguardando' }, intercept: (url) => {
       if (url === '/api/atendimento/resumo') return summary.promise
-      if (url === '/api/atendimento/email/contagens') return emailCounts.promise
+      if (url.startsWith('/api/atendimento/email/contagens')) return emailCounts.promise
     } })
     assert.equal(m.calls.length, 0, 'nenhum pedido de dados durante SSR/setup')
     assert.equal(m.state.emailContagensProntas, false)
@@ -140,7 +140,7 @@ async function run() {
     let summaries = 0, emails = 0
     const m = mount({ intercept: (url) => {
       if (url === '/api/atendimento/resumo') return ++summaries === 1 ? oldSummary.promise : freshSummary.promise
-      if (url === '/api/atendimento/email/contagens') return ++emails === 1 ? oldEmail.promise : freshEmail.promise
+      if (url.startsWith('/api/atendimento/email/contagens')) return ++emails === 1 ? oldEmail.promise : freshEmail.promise
     } })
     m.start(); await settle()
     const summaryRefresh = m.state.carregarResumo(), emailRefresh = m.state.carregarContagensEmail()

@@ -37,6 +37,9 @@ const props = defineProps<{
   podeMexer: boolean
   // Aberta de dentro de um chat: o "voltar ao chat" (a página sabe qual).
   comChat?: boolean
+  // Aberta na CAIXA pelo ampliável de e-mails da barra de lojas (27/10/2026):
+  // o aviso diz onde ela está (fora da lista e dos números do chat).
+  naCaixa?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'voltar'): void
@@ -79,7 +82,7 @@ async function vincular() {
       <MessageSquare class="size-3.5" /> voltar ao chat
     </button>
     <span class="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
-      <Mail class="size-3.5 shrink-0" />Conversa de e-mail: fica só aqui, na aba E-mail (não aparece na Caixa do chat).
+      <Mail class="size-3.5 shrink-0" /><template v-if="naCaixa">E-mail da loja, aberto pela barra de lojas: fica fora da lista e dos números do chat.</template><template v-else>Conversa de e-mail: fica só aqui, na aba E-mail (não aparece na Caixa do chat).</template>
     </span>
     <form v-if="mostraVincular" class="ml-auto flex flex-wrap items-center gap-1.5" data-vincular-conversa-email @submit.prevent="vincular">
       <input v-model="pedido" class="h-7 w-48 rounded border bg-background px-1.5" placeholder="nº do pedido na plataforma" aria-label="número do pedido" :disabled="salvando" />
