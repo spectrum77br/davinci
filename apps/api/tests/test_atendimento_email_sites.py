@@ -20,7 +20,12 @@ O que não pode falhar:
   • GET …/email/contagens?por_loja=true → `sites_na_barra` com SAC e Admin; a
     lista (GET …/lojas/emails?site=…&grupo=sac|admin) e o e-mail inteiro; o
     e-mail de segurança da pasta do site fica fora; quem não vê todas as
-    equipes não tem as caixas dos sites.
+    equipes não tem as caixas dos sites;
+  • Makisa e 7buyers (sites só de e-mail, `so_email`): as caixas pela pasta
+    (sem a categoria; a pasta sem categoria guarda sem o alias — a caixa sai
+    do endereço que recebeu), o código guardado sem a régua fica fora, a pasta
+    que não chegou diz por quê; admin@makisa/admin@7buyers nunca viram
+    chamado do site (admin@ só é caixa de site na Uranyx e na Charlots).
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from app.models import AtendimentoConversa, Marca, MailMailbox, StoreInfo, UserRole
+from app.models import AtendimentoConversa, MailMailbox, Marca, StoreInfo, UserRole
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.mail_atendimento import barra_lojas, pedido, responder, rotear
 from app.services.mail_atendimento import constantes as mail_constantes
@@ -103,7 +108,26 @@ def test_a_caixa_do_site_pelo_endereco_que_recebeu():
     # As pastas antigas ficam como estão (não são as caixas da barra).
     assert barra_lojas.site_da_pasta("*uranyx sac") is None
     assert barra_lojas.site_da_pasta("*poofy") is None
-    assert [s.externo_ref for s in barra_lojas.sites()] == ["site:uranyx", "site:charlots"]
+    # Makisa e 7buyers (27/10/2026): sites só de e-mail (fora dos SITES do atendimento).
+    assert barra_lojas.site_da_pasta("*Makisa") == "makisa"
+    assert barra_lojas.site_da_pasta("*7buyers") == "7buyers"
+    assert [(s.externo_ref, s.so_email) for s in barra_lojas.sites()] == [
+        ("site:uranyx", False),
+        ("site:charlots", False),
+        ("site:makisa", True),
+        ("site:7buyers", True),
+    ]
+
+
+def test_o_codigo_guardado_sem_a_regua_fica_fora_do_site():
+    codigo = ("Seu código de verificação", "Use o código 482913 para entrar na sua conta.")
+    # O guardado sem categoria e o duplicado: a régua estrita da ponte, na hora.
+    assert barra_lojas.escondido_no_site("ignorado", *codigo)
+    assert barra_lojas.escondido_no_site("duplicado", *codigo)
+    assert not barra_lojas.escondido_no_site("ignorado", "Dúvida", "Quando chega meu pedido?")
+    # O de segurança sempre fora; o que passou pela régua (a conversa) fica.
+    assert barra_lojas.escondido_no_site("seguranca", "Oi", "Oi")
+    assert not barra_lojas.escondido_no_site("gravado", *codigo)
 
 
 def test_quem_responde_o_email_do_site():
@@ -148,7 +172,8 @@ def test_cliente_pelo_reply_to_so_no_formulario_do_site():
     assert rotear.cliente_pelo_reply_to(**{**base, "de": "maria@uranyx.com.br"}) is None
     assert rotear.cliente_pelo_reply_to(**{**base, "de": "noreply@brevo.com"}) is None
     assert rotear.cliente_pelo_reply_to(**{**base, "reply_to": []}) is None
-    assert rotear.cliente_pelo_reply_to(**{**base, "reply_to": ["ana@gmail.com", "bia@hotmail.com"]}) is None
+    dois = ["ana@gmail.com", "bia@hotmail.com"]
+    assert rotear.cliente_pelo_reply_to(**{**base, "reply_to": dois}) is None
     assert rotear.cliente_pelo_reply_to(**{**base, "reply_to": ["sac@uranyx.com.br"]}) is None
     assert rotear.cliente_pelo_reply_to(**{**base, "reply_to": ["noreply@loja.com.br"]}) is None
     assert rotear.cliente_pelo_reply_to(**{**base, "nossos": ["21max@tuta.com"]}) is None
@@ -450,7 +475,7 @@ async def test_os_numeros_e_as_listas_das_caixas_dos_sites(db, cena, client, adm
     r = await client.get(f"{EMAIL}/lojas/emails/{ids['seguranca']}")
     assert r.status_code == 404
     # Parâmetros errados.
-    assert (await _lista(client, "makisa", "sac")).status_code == 422
+    assert (await _lista(client, "poofy", "sac")).status_code == 422
     assert (await _lista(client, "uranyx", "problemas")).status_code == 422
 
 
@@ -487,5 +512,243 @@ async def test_quem_ve_so_a_equipe_nao_tem_as_caixas_dos_sites(
     await db.commit()
     auth_as(membro)
     assert await _sites(client) == {}
-    r = await _lista(client, "uranyx", "sac")
-    assert r.status_code == 403 and r.json()["detail"]["code"] == "email_do_site_fora_do_escopo"
+    for site in ("uranyx", "makisa", "7buyers"):
+        r = await _lista(client, site, "sac")
+        assert r.status_code == 403 and r.json()["detail"]["code"] == "email_do_site_fora_do_escopo"
+
+
+# ─────────────── Makisa e 7buyers: sites SÓ DE E-MAIL (27/10/2026) ───────────────
+#
+# O Eduardo, 27/10: as pastas "*makisa" e "*7buyers" do Tuta também são sites —
+# "por enquanto só chega os e-mails e eles mostram no atendimento". A barra
+# ganha uma linha só de e-mail para cada um (sem carrinho: fora dos SITES do
+# atendimento), com as mesmas caixas SAC e Admin; a ponte não muda nada.
+
+MAKISA = ["sac@makisa.com.br", "cheng28@tuta.com"]
+
+
+async def _cena_da_makisa(db, cena) -> dict[str, str]:
+    """A pasta "*makisa" como em produção (criada, SEM categoria) e três e-mails."""
+    geral = await db.get(MailMailbox, cena.geral.id)
+    geral.config_enc = encrypt_json(
+        {"address": GERAL, "aliases": [GERAL, *ALIASES_GERAL, *MAKISA]}
+    )
+    await db.commit()
+    rotear.esquecer(db)
+    await categorizar(db, cena.geral, "*makisa", None)
+    ids = {}
+    ids["sac"] = await entrar(
+        db,
+        cena.geral,
+        pasta="*makisa",
+        de="cliente@gmail.com",
+        de_nome="Cliente",
+        para=["SAC@makisa.com.br"],
+        assunto="Troca do produto",
+        corpo="Quero trocar o tamanho.",
+    )
+    # O login de loja que cai na pasta (cheng28@, 21max@…): Admin.
+    ids["admin"] = await entrar(
+        db,
+        cena.geral,
+        pasta="*makisa",
+        de="avisos@fornecedor.com.br",
+        para=["cheng28@tuta.com"],
+        assunto="Sua fatura de outubro",
+        corpo="A fatura está disponível.",
+    )
+    # O código de acesso da conta da loja na mesma pasta: guardado SEM a régua.
+    ids["codigo"] = await entrar(
+        db,
+        cena.geral,
+        pasta="*makisa",
+        de="no-reply@accounts.google.com",
+        para=["21max@tuta.com"],
+        assunto="Seu código de verificação",
+        corpo="Use o código 482913 para entrar na sua conta.",
+    )
+    await rodar(db)
+    for chave, mid in ids.items():
+        ids[chave] = str(mid)
+    return ids
+
+
+async def test_makisa_mostra_os_emails_da_pasta_em_sac_e_admin(db, cena, client, admin):
+    conversas_antes = len((await db.execute(select(AtendimentoConversa.id))).all())
+    ids = await _cena_da_makisa(db, cena)
+    # A ponte como hoje: a pasta sem categoria guarda, sem conversa nem chamado.
+    for chave in ("sac", "admin", "codigo"):
+        m = await meta_de(db, ids[chave])
+        assert (m.estado, m.motivo, m.conversa_id) == (
+            "ignorado",
+            "pasta_sem_categoria",
+            None,
+        ), chave
+    assert len((await db.execute(select(AtendimentoConversa.id))).all()) == conversas_antes
+
+    sites = await _sites(client)
+    mk = sites["makisa"]
+    assert (mk["externo_ref"], mk["nome"], mk["pastas"], mk["so_email"], mk["status"]) == (
+        "site:makisa",
+        "Makisa",
+        ["*makisa"],
+        True,
+        "sem_categoria",
+    )
+    assert [x["chave"] for x in mk["caixas"]] == ["sac", "admin"]
+    assert mk["grupos"]["sac"] == {"emails": 1, "abertas": 0, "aguardando": 0, "total": 0}
+    # Sem o alias gravado (a pasta sem categoria): a caixa pelo endereço que
+    # recebeu; o código de acesso fica fora do número e da lista.
+    assert mk["grupos"]["admin"] == {"emails": 1, "abertas": 0, "aguardando": 0, "total": 0}
+    assert mk["emails_30d"] == 2
+    assert sites["uranyx"]["so_email"] is False and sites["charlots"]["so_email"] is False
+
+    r = await _lista(client, "makisa", "sac")
+    assert r.status_code == 200, r.text
+    [item] = r.json()["itens"]
+    assert (item["id"], item["conversa_id"], item["pasta"]) == (ids["sac"], None, "*makisa")
+    r = await _lista(client, "makisa", "admin")
+    assert [i["id"] for i in r.json()["itens"]] == [ids["admin"]]
+    # O e-mail inteiro abre (o nome do site); o código de acesso não (404).
+    r = await client.get(f"{EMAIL}/lojas/emails/{ids['sac']}")
+    assert r.status_code == 200 and r.json()["loja"] == "Makisa"
+    assert r.json()["texto"] == "Quero trocar o tamanho."
+    assert (await client.get(f"{EMAIL}/lojas/emails/{ids['codigo']}")).status_code == 404
+    # Nenhum outro site vê a pasta da Makisa.
+    assert (await _lista(client, "uranyx", "admin")).json()["itens"] == []
+
+
+async def test_7buyers_sem_a_pasta_mostra_as_caixas_vazias_com_o_porque(
+    db, cena, client, admin
+):
+    await _cena_da_makisa(db, cena)
+    b7 = (await _sites(client))["7buyers"]
+    assert (b7["externo_ref"], b7["nome"], b7["pastas"], b7["so_email"], b7["status"]) == (
+        "site:7buyers",
+        "7buyers",
+        ["*7buyers"],
+        True,
+        "sem_pasta",
+    )
+    assert b7["emails_30d"] == 0
+    vazia = {"emails": 0, "abertas": 0, "aguardando": 0, "total": 0}
+    assert b7["grupos"] == {"sac": vazia, "admin": vazia}
+    for grupo in ("sac", "admin"):
+        r = await _lista(client, "7buyers", grupo)
+        assert r.status_code == 200 and r.json() == {"itens": [], "proximo": None}
+
+
+async def test_quem_nao_e_admin_ve_a_makisa_pela_barra(db, cena, client, quem_le, auth_as):
+    ids = await _cena_da_makisa(db, cena)
+    auth_as(quem_le)
+    sites = await _sites(client)
+    assert sites["makisa"]["grupos"]["sac"]["emails"] == 1 and "7buyers" in sites
+    r = await _lista(client, "makisa", "sac")
+    assert r.status_code == 200 and [i["id"] for i in r.json()["itens"]] == [ids["sac"]]
+
+
+# ─────────────── admin@makisa e admin@7buyers: só mostrar (27/10/2026) ───────────────
+#
+# O Eduardo criou admin@makisa.com.br e admin@7buyers.com.br no Tuta (regras
+# para "*makisa" e "*7buyers"). A 7buyers é MARCA (domínio 7buyers.com.br), mas
+# não é site do atendimento: o admin@ dela não pode virar chamado do site (o
+# admin@ só é caixa de site na Uranyx e na Charlots) — continua interno, e a
+# caixa Admin da barra mostra o e-mail pela pasta. Nada quebra nem levanta.
+
+DOS_SITES_SO_EMAIL = [
+    "sac@makisa.com.br",
+    "admin@makisa.com.br",
+    "sac@7buyers.com.br",
+    "admin@7buyers.com.br",
+]
+
+
+def test_admin_so_e_caixa_de_site_nas_marcas_do_atendimento():
+    cad = rotear.Cadastro()
+    cad.marcas["uranyx"] = (None, "Uranyx", ("uranyx.com.br",))
+    cad.marcas["7buyers"] = (None, "7buyers", ("7buyers.com.br",))
+    assert rotear.e_caixa_de_site("admin@uranyx.com.br", cad)
+    assert not rotear.e_caixa_de_site("admin@7buyers.com.br", cad)
+    assert not rotear.e_caixa_de_site("admin@7buyers.com.br", cad, marca_pasta="7buyers")
+    assert not rotear.e_caixa_de_site("admin@makisa.com.br", cad, marca_pasta="makisa")
+    # O sac@ da marca como sempre foi.
+    assert rotear.e_caixa_de_site("sac@7buyers.com.br", cad)
+    # O admin@ da Uranyx que caiu na pasta "*7buyers": a marca do domínio, nunca a da pasta.
+    rota = rotear._rota_do_site(
+        "admin@uranyx.com.br", cad, marca_pasta="7buyers", caixa_pasta=None
+    )
+    assert rota is not None and rota.marca_slug == "uranyx"
+    sem = rotear._rota_do_site("admin@7buyers.com.br", cad, marca_pasta="7buyers", caixa_pasta=None)
+    assert sem is None
+
+
+async def _com_os_sites_so_email(db, cena) -> None:
+    geral = await db.get(MailMailbox, cena.geral.id)
+    geral.config_enc = encrypt_json(
+        {"address": GERAL, "aliases": [GERAL, *ALIASES_GERAL, *DOS_SITES_SO_EMAIL]}
+    )
+    # Como em produção: a 7buyers é marca ativa (sem marca_emails); a Makisa não.
+    db.add(Marca(nome="7buyers", slug="7buyers", dominio_br="7buyers.com.br"))
+    await db.commit()
+    rotear.esquecer(db)
+
+
+@pytest.mark.parametrize("site", ["makisa", "7buyers"])
+async def test_admin_do_site_so_de_email_nunca_vira_conversa(db, cena, client, admin, site):
+    await _com_os_sites_so_email(db, cena)
+    conversas_antes = len((await db.execute(select(AtendimentoConversa.id))).all())
+    # Na Entrada (a ponte roteia): endereço interno, como antes de 27/10.
+    na_entrada = await entrar(
+        db,
+        cena.geral,
+        pasta="INBOX",
+        de="parceiro@empresa.com.br",
+        para=[f"admin@{site}.com.br"],
+        assunto="Proposta de parceria",
+        corpo="Podemos conversar?",
+    )
+    await rodar(db)
+    m = await meta_de(db, na_entrada)
+    assert (m.estado, m.motivo, m.conversa_id) == ("ignorado", "alias_interno", None)
+    # Na pasta do site sem categoria (como a regra nova do Tuta manda): guardado e
+    # mostrado na caixa Admin; o sac@ na caixa SAC.
+    await categorizar(db, cena.geral, f"*{site}", None)
+    ids = {}
+    for caixa in ("admin", "sac"):
+        ids[caixa] = str(
+            await entrar(
+                db,
+                cena.geral,
+                pasta=f"*{site}",
+                de="cliente@gmail.com",
+                para=[f"{caixa}@{site}.com.br"],
+                assunto=f"Contato pelo {caixa}",
+                corpo="Olá, preciso de ajuda.",
+            )
+        )
+    await rodar(db)
+    for mid in ids.values():
+        m = await meta_de(db, mid)
+        assert (m.estado, m.motivo, m.conversa_id) == ("ignorado", "pasta_sem_categoria", None)
+    # A pasta do site com a categoria "Site (como hoje)": o admin@ continua interno.
+    await categorizar(db, cena.geral, f"*{site}", "site")
+    categorizado = await entrar(
+        db,
+        cena.geral,
+        pasta=f"*{site}",
+        de="cliente@gmail.com",
+        para=[f"admin@{site}.com.br"],
+        assunto="Outra pergunta",
+        corpo="Olá de novo.",
+    )
+    await rodar(db)
+    m = await meta_de(db, categorizado)
+    assert (m.estado, m.motivo, m.conversa_id) == ("ignorado", "alias_interno", None)
+    assert len((await db.execute(select(AtendimentoConversa.id))).all()) == conversas_antes
+
+    sites = await _sites(client)
+    assert sites[site]["grupos"]["sac"]["emails"] == 1
+    assert sites[site]["grupos"]["admin"]["emails"] == 1
+    for caixa, mid in ids.items():
+        r = await _lista(client, site, caixa)
+        assert r.status_code == 200 and [i["id"] for i in r.json()["itens"]] == [mid], caixa

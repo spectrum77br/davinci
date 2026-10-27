@@ -68,6 +68,7 @@ from app.models.mail_atendimento import (
     MailMailboxSettings,
     MailMessageMeta,
 )
+from app.services.atendimento.constantes import SITES as SITES_DO_ATENDIMENTO
 from app.services.mail_atendimento import codigos, constantes, regras, rotear
 from app.services.mail_atendimento.constantes import (
     CAIXA_DO_SITE_ADMIN,
@@ -362,8 +363,20 @@ async def alias_das_lojas(
 # sites são os códigos de acesso das contas da marca (o dono só liberou o
 # código nas pastas das lojas). Só para quem vê todas as equipes (a conversa
 # do site não tem loja: é o "site" de sempre).
+#
+# Makisa e 7buyers (27/10/2026): sites SÓ DE E-MAIL (`Site.so_email` — fora dos
+# SITES do atendimento: sem carrinho nem linha de chat). A web desenha uma
+# linha só de e-mail para eles, com as mesmas caixas; a régua é a mesma (a
+# pasta, não a categoria dela; nenhuma conversa nova: a ponte não muda).
 
 ESTADOS_NO_SITE = tuple(e for e in ESTADOS_NA_CAIXA if e != ESTADO_SEGURANCA)
+# O e-mail que a ponte guardou SEM passar pela régua de segurança: a pasta
+# criada sem categoria guarda o e-mail (`ignorado`/`pasta_sem_categoria`) antes
+# do passo da segurança, e o duplicado também não passa por ele. Na pasta do
+# site cai o login de loja ("*makisa": cheng28@, 21max@…) — o código de acesso
+# chegaria na caixa do site com o código à mostra. A lista e o e-mail inteiro
+# do site aplicam a régua ESTRITA da ponte na hora (`escondido_no_site`).
+ESTADOS_SEM_A_REGUA = (ESTADO_IGNORADO, ESTADO_DUPLICADO)
 
 
 @dataclass(frozen=True)
@@ -379,6 +392,11 @@ class Site:
     @property
     def nomes(self) -> frozenset[str]:
         return frozenset(normalizar(p) for p in self.pastas)
+
+    @property
+    def so_email(self) -> bool:
+        """Sem a linha do site no atendimento (fora dos SITES: sem carrinho, sem token)."""
+        return self.chave not in SITES_DO_ATENDIMENTO
 
 
 def sites() -> tuple[Site, ...]:
@@ -402,10 +420,40 @@ def site_da_pasta(
     return None
 
 
+def escondido_no_site(estado: str | None, assunto: str | None, texto: str | None) -> bool:
+    """O e-mail da pasta do site fica FORA da caixa do site? (PURA)
+
+    O de segurança (a ponte segurou) e o guardado sem a régua
+    (`ESTADOS_SEM_A_REGUA`) que a régua ESTRITA da ponte diz que é de segurança
+    (`codigos.e_de_seguranca`: código, senha, novo login, link de entrada).
+    `texto`: o texto legível do e-mail."""
+    if estado == ESTADO_SEGURANCA:
+        return True
+    if estado not in ESTADOS_SEM_A_REGUA:
+        return False
+    return codigos.e_de_seguranca(assunto, texto)
+
+
 def caixa_do_alias(alias: str | None) -> str:
     """A caixa do site pelo endereço que recebeu: sac@ = SAC; o resto = Admin. PURA."""
     local = (alias or "").strip().lower().partition("@")[0]
     return CAIXA_DO_SITE_SAC if local == CAIXA_DO_SITE_SAC else CAIXA_DO_SITE_ADMIN
+
+
+def caixa_do_email(recebeu: list[str], aliases: set[str]) -> str:
+    """A caixa do site pelo 1º endereço DA CAIXA que recebeu (o `alias_recebido` que
+    a ponte gravaria: o delivered_to, o Para, o Cc). PURA."""
+    nossos = rotear.nossos_do_email(recebeu=recebeu, aliases=aliases)
+    return caixa_do_alias(nossos[0] if nossos else None)
+
+
+def precisa_ler_no_site_sql(m=MailMessageMeta):
+    """O e-mail da pasta do site que o SQL não separa sozinho: sem o endereço que
+    recebeu (a pasta sem categoria guarda o e-mail ANTES de a ponte gravar o
+    alias — "*makisa" em produção) ou guardado sem a régua de segurança. A
+    caixa e o "esconder" dele saem do e-mail decifrado (`caixa_do_email`,
+    `escondido_no_site`)."""
+    return or_(m.alias_recebido.is_(None), m.estado.in_(ESTADOS_SEM_A_REGUA))
 
 
 def caixa_do_alias_sql(coluna):
@@ -483,5 +531,8 @@ def email_do_site_sql(
         ),
     ]
     if caixa:
-        onde.append(caixa_do_alias_sql(m.alias_recebido) == caixa)
+        # O que precisa ler vem junto: quem chama separa pelo e-mail decifrado.
+        precisa = precisa_ler_no_site_sql(m)
+        pela_meta = and_(not_(precisa), caixa_do_alias_sql(m.alias_recebido) == caixa)
+        onde.append(or_(pela_meta, precisa))
     return tuple(onde)

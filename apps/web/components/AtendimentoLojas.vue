@@ -160,11 +160,16 @@ export type EscolhaEmail = {
 // quem vê todas as equipes: o chamado do site não tem loja). O e-mail abre como
 // o das lojas: a conversa (o chamado do site) na coluna da conversa, com a
 // resposta pelo mesmo endereço que recebeu; o resto na área principal.
+// `so_email` (27/10/2026: Makisa e 7buyers — "por enquanto só chega os e-mails e
+// eles mostram no atendimento"): o site sem a linha do carrinho no atendimento;
+// a barra desenha uma linha SÓ DE E-MAIL para ele (`sitesSemLinha`), com as
+// mesmas caixas — o clique na linha abre e fecha as caixas, nunca filtra o chat.
 export type SiteDaBarra = {
   site: string
   externo_ref: string
   nome: string
   pastas: string[]
+  so_email?: boolean
   status: StatusDaPasta | string
   caixas: { chave: string; rotulo: string }[]
   emails_30d?: number
@@ -236,6 +241,17 @@ export function siteDaLinha(sites: readonly SiteDaBarra[] | null | undefined, l:
 export function gruposDoSite(s: SiteDaBarra | null | undefined): GrupoDaBarra[] {
   if (!s) return []
   return gruposDaBarra((s.caixas || []).map((c) => ({ chave: c.chave, rotulo: c.rotulo, pastas: s.pastas || [], status: s.status })))
+}
+// Os sites SÓ DE E-MAIL (`so_email`) que não têm linha na barra: viram uma
+// linha própria no grupo Site (a chave é a que a linha do site teria,
+// "ext:site:<site>" — as caixas abertas lembradas valem para as duas).
+export function sitesSemLinha(sites: readonly SiteDaBarra[] | null | undefined, linhas: readonly Pick<LinhaDaBarra, 'externo_ref' | 'integration_id'>[]): SiteDaBarra[] {
+  if (!Array.isArray(sites)) return []
+  const comLinha = new Set(linhas.filter((l) => !l.integration_id && l.externo_ref).map((l) => l.externo_ref))
+  return sites.filter((s) => s && s.so_email === true && !!s.externo_ref && Array.isArray(s.caixas) && s.caixas.length > 0 && !comLinha.has(s.externo_ref))
+}
+export function chaveDoSiteSoEmail(s: Pick<SiteDaBarra, 'externo_ref'>): string {
+  return `ext:${s.externo_ref}`
 }
 // Os números do site no formato dos da loja (a mesma caixa, as mesmas contas).
 export function emailsDoSite(s: SiteDaBarra): EmailsDaLoja {
@@ -588,14 +604,44 @@ const lojasSoEmail = computed<LojaBarra[]>(() => {
   }))
 })
 
+// Os sites só de e-mail (27/10/2026: Makisa e 7buyers) — SEMPRE, mesmo com as
+// caixas vazias (a pasta que ainda não chegou diz por quê). Como a ficha sem
+// chat: na Caixa (não na Humano), com o /resumo já lido (a linha do site que
+// existe nunca vira duas).
+const sitesSoEmail = computed<LojaBarra[]>(() => {
+  if (!props.emails || !props.resumo || props.numero === 'humano') return []
+  return sitesSemLinha(props.sitesEmail, lojas.value).map((s) => ({
+    chave: chaveDoSiteSoEmail(s),
+    integration_id: '',
+    externo_ref: s.externo_ref,
+    rede_social_id: '',
+    direct: 0,
+    direct_total: 0,
+    comentarios: false,
+    plataforma: 'site',
+    conta: s.nome || s.site,
+    nao_lidas: 0,
+    nao_lidas_plataforma: null,
+    aguardando: 0,
+    humano: 0,
+    vencidas: 0,
+    status: 'ok',
+    motivo: null,
+    apagada: false,
+    parcial: false,
+    so_email: true,
+    emails: emailsDoSite(s),
+  }))
+})
+
 type Grupo = { plataforma: string; nome: string; lojas: LojaBarra[]; nao_lidas: number }
 const grupos = computed<Grupo[]>(() => {
   const porPlat = new Map<string, LojaBarra[]>()
   const chat = props.numero === 'humano' ? lojasDaCaixaHumano(lojas.value, props.resumo?.canais, modosHumano.value) : lojas.value
   // No modo "emails" (o celular), só as lojas (com as caixas de e-mail).
   const base = props.modo === 'emails'
-    ? [...chat, ...lojasSoEmail.value].filter((l) => !!emailsDe(l))
-    : [...chat, ...lojasSoEmail.value]
+    ? [...chat, ...lojasSoEmail.value, ...sitesSoEmail.value].filter((l) => !!emailsDe(l))
+    : [...chat, ...lojasSoEmail.value, ...sitesSoEmail.value]
   for (const l of base) porPlat.set(l.plataforma, [...(porPlat.get(l.plataforma) || []), l])
   const ordem = [...ORDEM, ...[...porPlat.keys()].filter((p) => !ORDEM.includes(p)).sort()]
   return ordem
@@ -646,6 +692,10 @@ function contador(n: number) {
 const TEXTO_NUMERO_DA_LOJA = 'mensagem(ns) não lida(s) do cliente'
 function motivo(l: LojaBarra): string {
   const partes = [`${plataformaInfo(l.plataforma).nome} · ${l.conta}`]
+  if (l.so_email && l.externo_ref) {
+    partes.push('Site só de e-mail (sem carrinho nem chat no DaVinci): o clique mostra os e-mails do site — SAC (sac@) e Admin (admin@ e os outros endereços).')
+    return partes.join('\n')
+  }
   if (l.so_email) {
     partes.push('Sem chat no DaVinci (a loja não tem integração ligada): o clique mostra as pastas de e-mail dela.')
     return partes.join('\n')

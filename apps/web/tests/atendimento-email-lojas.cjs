@@ -427,8 +427,74 @@ async function principal() {
     const api = (rel) => fs.readFileSync(path.resolve(__dirname, '../../api/app', rel), 'utf8')
     assert.match(api('routers/atendimento_email.py'), /"sites_na_barra": await _contagens_dos_sites\(session, scope, visao\)/)
     assert.match(api('routers/atendimento_email.py'), /site: Annotated\[str \| None, Query\(max_length=32\)\] = None,/)
-    assert.match(api('services/mail_atendimento/constantes.py'), /SITES_EMAIL_NA_BARRA_DE_LOJAS: tuple\[tuple\[str, str, tuple\[str, \.\.\.\]\], \.\.\.\] = \(\n    \("uranyx", "Uranyx", \("\*uranyx",\)\),\n    \("charlots", "Charlots", \("\*charlots",\)\),\n\)/)
-    assert.doesNotMatch(web('components/AtendimentoLojas.vue'), /'\*uranyx'|'\*charlots'|'sac@|'admin@/)
+    assert.match(api('services/mail_atendimento/constantes.py'), /SITES_EMAIL_NA_BARRA_DE_LOJAS: tuple\[tuple\[str, str, tuple\[str, \.\.\.\]\], \.\.\.\] = \(\n    \("uranyx", "Uranyx", \("\*uranyx",\)\),\n    \("charlots", "Charlots", \("\*charlots",\)\),\n    \("makisa", "Makisa", \("\*makisa",\)\),\n    \("7buyers", "7buyers", \("\*7buyers",\)\),\n\)/)
+    assert.match(api('routers/atendimento_email.py'), /"so_email": st\.so_email,/)
+    assert.doesNotMatch(web('components/AtendimentoLojas.vue'), /'\*uranyx'|'\*charlots'|'\*makisa'|'\*7buyers'|'makisa'|'7buyers'|'sac@|'admin@/)
+  }
+
+  // ------------------------------------------------ os sites SÓ DE E-MAIL (Makisa e 7buyers, 27/10/2026)
+  {
+    const caixas = [{ chave: 'sac', rotulo: 'SAC' }, { chave: 'admin', rotulo: 'Admin' }]
+    const SITES = [
+      { site: 'charlots', externo_ref: 'site:charlots', nome: 'Charlots', pastas: ['*charlots'], so_email: false, status: 'liga', caixas, emails_30d: 9, grupos: { sac: conta(7), admin: conta(2) } },
+      // Site do carrinho sem a linha na barra: continua sem linha (nunca vira "só e-mail").
+      { site: 'uranyx', externo_ref: 'site:uranyx', nome: 'Uranyx', pastas: ['*uranyx'], so_email: false, status: 'liga', caixas, emails_30d: 1, grupos: { sac: conta(1) } },
+      { site: 'makisa', externo_ref: 'site:makisa', nome: 'Makisa', pastas: ['*makisa'], so_email: true, status: 'sem_categoria', caixas, emails_30d: 5, grupos: { sac: conta(3), admin: conta(2) } },
+      { site: '7buyers', externo_ref: 'site:7buyers', nome: '7buyers', pastas: ['*7buyers'], so_email: true, status: 'sem_pasta', caixas, emails_30d: 0, grupos: { sac: conta(0), admin: conta(0) } },
+    ]
+    const linhas = RESUMO.lojas.map((l) => ({ ...l, integration_id: l.integration_id || '', externo_ref: l.externo_ref || '' }))
+    // As puras: só o site `so_email` sem linha; a chave é a que a linha do site teria.
+    assert.deepEqual(LJ.sitesSemLinha(SITES, linhas).map((x) => x.site), ['makisa', '7buyers'])
+    assert.deepEqual(LJ.sitesSemLinha(SITES, [...linhas, { integration_id: '', externo_ref: 'site:makisa' }]).map((x) => x.site), ['7buyers'], 'a linha do site que existe ganha')
+    assert.deepEqual(LJ.sitesSemLinha([{ ...SITES[2], caixas: [] }], linhas), [], 'sem caixas, sem linha')
+    assert.deepEqual(LJ.sitesSemLinha(null, linhas), [])
+    assert.equal(LJ.chaveDoSiteSoEmail(SITES[2]), 'ext:site:makisa')
+    // O porquê da caixa vazia da 7buyers: a pasta ainda não chegou pela ponte.
+    const b7 = LJ.emailsDoSite(SITES[3])
+    assert.deepEqual(LJ.motivosDaCaixaVazia(LJ.gruposDoSite(SITES[3])[0], b7, 30), ['A pasta “*7buyers” ainda não chegou na ponte: o Tuta ainda não mandou essa pasta.'])
+    assert.deepEqual(LJ.motivosDaCaixaVazia(LJ.gruposDoSite(SITES[3])[1], b7, 30), ['A pasta “*7buyers” ainda não chegou na ponte: o Tuta ainda não mandou essa pasta.'])
+
+    // A barra renderizada: as duas linhas no grupo Site, em ordem, com a seta na própria linha.
+    const base = { resumo: RESUMO, filtros: filtros(), numero: 'nao_lidas_duoke', emails: POR_LOJA, gruposEmail: GRUPOS, diasEmail: 30, sitesEmail: SITES }
+    let html = await renderizarBarra(base)
+    assert.deepEqual([...html.matchAll(/data-so-email="(ext:site:[^"]+)"/g)].map((x) => x[1]), ['ext:site:7buyers', 'ext:site:makisa'])
+    assert.doesNotMatch(html, /data-so-email="ext:site:uranyx"|data-so-email="ext:site:charlots"/)
+    assert.match(html, /title="Site · Makisa\nSite só de e-mail \(sem carrinho nem chat no DaVinci\): o clique mostra os e-mails do site — SAC \(sac@\) e Admin \(admin@ e os outros endereços\)\."/)
+    assert.match(html, /aria-expanded="false"[^>]*data-so-email="ext:site:makisa"/)
+    assert.doesNotMatch(html, /data-ampliar-emails="ext:site:makisa"/, 'o clique na linha já abre')
+    // Abertas: SAC e Admin com os números; a 7buyers vazia diz por quê.
+    html = await renderizarBarra({ ...base, emailsAbertos: ['ext:site:makisa', 'ext:site:7buyers'], gruposAbertos: ['ext:site:7buyers|sac'] })
+    const grupoMk = (html.match(/<div id="emails-loja-ext_site_makisa" role="group" aria-label="E-mails do site Makisa"[\s\S]*?data-email-grupo="admin"[\s\S]*?<\/button>/) || [''])[0]
+    const caixasMk = [...grupoMk.matchAll(/data-email-grupo="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)].map((m) => [m[1], m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()])
+    assert.deepEqual(caixasMk, [['sac', 'SAC 3'], ['admin', 'Admin 2']])
+    assert.match(html, /id="emails-loja-ext_site_7buyers" role="group" aria-label="E-mails do site 7buyers"/)
+    assert.match(html, /data-stub-caixa="sac" data-total="0"[^>]*>A pasta “\*7buyers” ainda não chegou na ponte: o Tuta ainda não mandou essa pasta\.</)
+    // Sem `emails` (outra aba), na Caixa Humano, sem o /resumo ou sem os sites (quem vê só a equipe): nenhuma.
+    assert.doesNotMatch(await renderizarBarra({ ...base, emails: null }), /data-so-email="ext:site/)
+    assert.doesNotMatch(await renderizarBarra({ ...base, numero: 'humano' }), /data-so-email="ext:site/)
+    assert.doesNotMatch(await renderizarBarra({ ...base, resumo: null }), /data-so-email="ext:site/)
+    assert.doesNotMatch(await renderizarBarra({ ...base, sitesEmail: [] }), /data-so-email="ext:site/)
+    // Recolhida: some (como a ficha sem chat); o celular: entra com as caixas.
+    assert.doesNotMatch(await renderizarBarra({ ...base, recolhida: true }), /data-so-email="ext:site/)
+    assert.match(await renderizarBarra({ ...base, modo: 'emails' }), /data-so-email="ext:site:makisa"/)
+
+    // O clique (setup de verdade): a linha abre e fecha (nunca mexe no chat); a caixa manda o site.
+    const b = montar('../components/AtendimentoLojas.vue', { ...base, emailsAbertos: [], gruposAbertos: [] })
+    const mk = b.estado.sitesSoEmail.find((l) => l.chave === 'ext:site:makisa')
+    assert.deepEqual([mk.plataforma, mk.conta, mk.externo_ref, mk.so_email], ['site', 'Makisa', 'site:makisa', true])
+    assert.deepEqual(b.estado.gruposDe(mk).map((g) => [g.chave, g.status]), [['sac', 'sem_categoria'], ['admin', 'sem_categoria']])
+    const antes = JSON.stringify(b.estado.filtros)
+    b.estado.escolherLoja(mk)
+    assert.deepEqual(b.estado.emailsAbertos, ['ext:site:makisa'])
+    assert.equal(JSON.stringify(b.estado.filtros), antes)
+    assert.equal(b.estado.ativaLoja(mk), false)
+    b.estado.clicarGrupo(mk, 'sac')
+    assert.deepEqual(b.estado.gruposAbertos, ['ext:site:makisa|sac'])
+    assert.deepEqual(b.emitidos.at(-1), ['abrirEmails', { chave: 'ext:site:makisa', integration_id: '', store_info_id: '', plataforma: 'site', conta: 'Makisa', grupo: 'sac', site: 'makisa' }])
+    b.estado.abrirEmail(mk, 'admin', { id: 'mk1', conversa_id: null })
+    assert.deepEqual(b.emitidos.at(-1), ['abrirEmail', { chave: 'ext:site:makisa', integration_id: '', store_info_id: '', plataforma: 'site', conta: 'Makisa', grupo: 'admin', site: 'makisa' }, { id: 'mk1', conversa_id: null }])
+    // A lista curta e a do meio: a rota com o site.
+    assert.equal(LG.urlDosEmailsDaCaixa({ integration_id: '', store_info_id: '', grupo: 'admin', site: '7buyers' }, { limite: 5 }), '/api/atendimento/email/lojas/emails?grupo=admin&site=7buyers&limite=5')
   }
 
   // ------------------------------------------------ a barra: o clique (setup de verdade)

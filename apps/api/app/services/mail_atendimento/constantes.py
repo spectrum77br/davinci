@@ -124,9 +124,17 @@ DIAS_DA_BARRA_DE_LOJAS = 30
 # SAC responde como sac@, o Admin como admin@ — `responder.de_alias`).
 # Cada site: (chave = o "site:<chave>" da barra, o nome, as pastas — o nome
 # inteiro da pasta, sem acento e sem maiúsculas, em qualquer caixa com a ponte).
+# Makisa e 7buyers (27/10/2026, o Eduardo: "por enquanto só chega os e-mails e
+# eles mostram no atendimento"): sites SÓ DE E-MAIL — não estão nos SITES do
+# atendimento (`app.services.atendimento.constantes.SITES`: sem carrinho, sem
+# token, sem a linha do chat), então a barra mostra uma linha só de e-mail
+# ("site:makisa", "site:7buyers") com as mesmas caixas SAC e Admin. Só a
+# leitura: a ponte não muda nada (esta constante não entra na rota do e-mail).
 SITES_EMAIL_NA_BARRA_DE_LOJAS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("uranyx", "Uranyx", ("*uranyx",)),
     ("charlots", "Charlots", ("*charlots",)),
+    ("makisa", "Makisa", ("*makisa",)),
+    ("7buyers", "7buyers", ("*7buyers",)),
 )
 CAIXA_DO_SITE_SAC = "sac"
 CAIXA_DO_SITE_ADMIN = "admin"
@@ -337,6 +345,15 @@ LOCAIS_DE_SITE: dict[str, str | None] = {
     "suporte": None,
     "admin": None,
 }
+# admin@ só é CAIXA DE SITE nas marcas dos sites do ATENDIMENTO (27/10/2026,
+# Uranyx e Charlots — os de carrinho, `app.services.atendimento.constantes.
+# SITES`). Makisa e 7buyers (o Eduardo criou admin@makisa e admin@7buyers no
+# Tuta, para as pastas "*makisa" e "*7buyers"): por enquanto SÓ MOSTRAR — o
+# admin@ deles continua endereço interno (nunca vira chamado do site, como
+# antes de 27/10); a caixa Admin da barra mostra o e-mail pela pasta. sac@ fica
+# como sempre foi (caixa de site em qualquer domínio de marca).
+LOCAIS_DE_SITE_SO_NOS_SITES_DO_ATENDIMENTO = frozenset({"admin"})
+MARCAS_DOS_SITES_DO_ATENDIMENTO = frozenset({"uranyx", "charlots-park", "charlots"})
 
 # ── Remetente ──────────────────────────────────────────────────────────────
 REMETENTE_COMPRADOR = "comprador"

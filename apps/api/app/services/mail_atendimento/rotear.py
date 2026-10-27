@@ -33,7 +33,9 @@
    plataforma; senão sem loja, com a sugestão pelo domínio do remetente.
 5. CAIXA DE SITE (RF6) → o chamado do site, só para: o endereço de
    `marca_emails`, ou sac@/admin@/atacado@/duvidas@/support@ (`LOCAIS_DE_SITE`;
-   admin@ desde 27/10/2026: o "Fale com a gente" e o Atacado dos sites) num
+   admin@ desde 27/10/2026: o "Fale com a gente" e o Atacado dos sites — só
+   nas marcas dos sites do atendimento, Uranyx e Charlots; o admin@ da
+   Makisa e da 7buyers continua interno, só mostrado pela pasta) num
    domínio de marca (ou numa pasta "*marca" de marca que EXISTE no
    cadastro). Qualquer outro endereço do domínio da marca (gabrieli@,
    ouvidoria@…) NÃO é site: vai para "sem loja" (só quem mexe vê). A marca:
@@ -60,6 +62,8 @@ from app.services.atendimento.lojas import _PLATAFORMA_DA_FICHA, _PREFIXOS, _SEP
 from app.services.mail_atendimento import enderecos, suspeito
 from app.services.mail_atendimento.constantes import (
     LOCAIS_DE_SITE,
+    LOCAIS_DE_SITE_SO_NOS_SITES_DO_ATENDIMENTO,
+    MARCAS_DOS_SITES_DO_ATENDIMENTO,
     PLATAFORMA_SITE,
     SEM_LOJA_ALIAS_SEM_CADASTRO,
     SEM_LOJA_AMBIGUO,
@@ -392,18 +396,33 @@ def marcas_do_dominio(endereco: str | None, cad: Cadastro) -> list[str]:
     )
 
 
+def _marcas_do_local(
+    endereco: str, cad: Cadastro, marca_pasta: str | None
+) -> tuple[list[str], str | None]:
+    """(as marcas do domínio, a marca da pasta) que valem para o endereço: o admin@
+    só nas marcas dos sites do atendimento (`LOCAIS_DE_SITE_SO_NOS_SITES_DO_ATENDIMENTO`)."""
+    do_dominio = marcas_do_dominio(endereco, cad)
+    if marca_pasta is not None and marca_pasta not in cad.marcas:
+        marca_pasta = None
+    if enderecos.local(endereco) in LOCAIS_DE_SITE_SO_NOS_SITES_DO_ATENDIMENTO:
+        do_dominio = [s for s in do_dominio if s in MARCAS_DOS_SITES_DO_ATENDIMENTO]
+        if marca_pasta not in MARCAS_DOS_SITES_DO_ATENDIMENTO:
+            marca_pasta = None
+    return do_dominio, marca_pasta
+
+
 def e_caixa_de_site(endereco: str | None, cad: Cadastro, *, marca_pasta: str | None = None) -> bool:
     """O endereço é uma CAIXA DE SITE (RF6)? `marca_emails`, ou sac@/atacado@/duvidas@/
-    support@ num domínio de marca (ou numa pasta "*marca" de marca do cadastro)."""
+    support@ num domínio de marca (ou numa pasta "*marca" de marca do cadastro); o
+    admin@ só nas marcas dos sites do atendimento (Uranyx, Charlots — 27/10/2026)."""
     if not endereco:
         return False
     if endereco in cad.caixas:
         return True
     if enderecos.e_do_tuta(endereco) or enderecos.local(endereco) not in LOCAIS_DE_SITE:
         return False
-    return bool(marcas_do_dominio(endereco, cad)) or (
-        marca_pasta is not None and marca_pasta in cad.marcas
-    )
+    do_dominio, da_pasta = _marcas_do_local(endereco, cad, marca_pasta)
+    return bool(do_dominio) or da_pasta is not None
 
 
 def cliente_pelo_reply_to(
@@ -466,9 +485,9 @@ def _rota_do_site(
     if not e_caixa_de_site(alias, cad, marca_pasta=marca_pasta):
         return None
     tipo = LOCAIS_DE_SITE.get(enderecos.local(alias)) or caixa_pasta
-    do_dominio = marcas_do_dominio(alias, cad)
+    do_dominio, marca_pasta = _marcas_do_local(alias, cad, marca_pasta)
     # A pasta "*marca" (de marca que EXISTE) diz a marca antes do domínio.
-    if marca_pasta is not None and marca_pasta in cad.marcas:
+    if marca_pasta is not None:
         slug = marca_pasta
     elif len(do_dominio) == 1:
         slug = do_dominio[0]

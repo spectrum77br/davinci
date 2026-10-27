@@ -98,7 +98,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, case, func, literal, or_, select, update
+from sqlalchemy import and_, case, func, literal, not_, or_, select, update
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1289,7 +1289,13 @@ async def _contagens_dos_sites(
     está na pasta do site, pela caixa dele: `abertas`, `aguardando` (a bolinha)
     e `total`. `status`: o da pasta do site na ponte (o porquê da caixa vazia).
     Só para quem vê todas as equipes (o chamado do site não tem loja): os outros
-    recebem a lista vazia. Só números e códigos."""
+    recebem a lista vazia. Só números e códigos.
+
+    `so_email` (27/10/2026: Makisa e 7buyers): o site sem a linha do carrinho
+    no atendimento — a barra desenha uma linha só de e-mail. O e-mail que o SQL
+    não separa (a pasta sem categoria guarda sem o endereço que recebeu; o
+    guardado sem a régua de segurança) é contado pelo e-mail decifrado
+    (`_classes_no_site`, lembrado), com a mesma régua da lista."""
     if not scope.unrestricted:
         return []
     pastas = await barra_lojas.pastas_dos_sites(session)
@@ -1333,17 +1339,19 @@ async def _contagens_dos_sites(
                 alvo["aguardando"] += int(n or 0)
         m = MailMessageMeta
         desde = datetime.now(UTC) - timedelta(days=mail_constantes.DIAS_DA_BARRA_DE_LOJAS)
+        precisa = barra_lojas.precisa_ler_no_site_sql(m)
+        do_site = (
+            *barra_lojas.email_do_site_sql(pastas, None, None, m),
+            MailMessage.received_at >= desde,
+            visao.filtro_mensagem(m.message_id),
+        )
         qm = (
             select(
                 pastas.site_sql(m.folder_id).label("site"),
                 barra_lojas.caixa_do_alias_sql(m.alias_recebido).label("caixa"),
             )
             .join(MailMessage, MailMessage.id == m.message_id)
-            .where(
-                *barra_lojas.email_do_site_sql(pastas, None, None, m),
-                MailMessage.received_at >= desde,
-                visao.filtro_mensagem(m.message_id),
-            )
+            .where(*do_site, not_(precisa))
         ).subquery()
         for site, caixa, n in (
             await session.execute(
@@ -1353,12 +1361,36 @@ async def _contagens_dos_sites(
             alvo = numeros.get(site, {}).get(caixa)
             if alvo is not None:
                 alvo["emails"] += int(n or 0)
+        # O que o SQL não separa (sem o endereço que recebeu, ou guardado sem a
+        # régua de segurança): pelo e-mail decifrado, lembrado por e-mail.
+        lidas = (
+            await session.execute(
+                select(
+                    pastas.site_sql(m.folder_id),
+                    m.message_id,
+                    MailMessage.mailbox_id,
+                    m.estado,
+                    m.alias_recebido,
+                )
+                .join(MailMessage, MailMessage.id == m.message_id)
+                .where(*do_site, precisa)
+            )
+        ).all()
+        classes = await _classes_no_site(session, [tuple(r[1:]) for r in lidas])
+        for site, mid, *_r in lidas:
+            caixa, escondido = classes.get(mid, (None, True))
+            alvo = numeros.get(site, {}).get(caixa)
+            if alvo is not None and not escondido:
+                alvo["emails"] += 1
     return [
         {
             "site": st.chave,
             "externo_ref": st.externo_ref,
             "nome": st.nome,
             "pastas": list(st.pastas),
+            # Makisa e 7buyers (27/10/2026): sem a linha do site no atendimento —
+            # a barra desenha uma linha só de e-mail com as caixas.
+            "so_email": st.so_email,
             "status": pastas.status.get(st.chave, barra_lojas.SEM_PASTA),
             "caixas": [{"chave": k, "rotulo": r} for k, r in barra_lojas.caixas_do_site()],
             "emails_30d": sum(g["emails"] for g in numeros[st.chave].values()),
@@ -1402,6 +1434,81 @@ async def _emails_do_site(
         desde = datetime.now(UTC) - timedelta(days=mail_constantes.DIAS_DA_BARRA_DE_LOJAS)
         q = q.where(MailMessage.received_at >= desde)
     return q
+
+
+# (e-mail, estado) → (caixa, esconder): o e-mail da pasta do site que o SQL não
+# separa (`barra_lojas.precisa_ler_no_site_sql`). Nunca muda para o mesmo e-mail
+# no mesmo estado: lembrado no processo (a contagem é lida a cada volta da tela).
+_CLASSES_NO_SITE: dict[tuple[UUID, str], tuple[str, bool]] = {}
+_CLASSES_NO_SITE_MAX = 20_000
+
+
+async def _classes_no_site(
+    session: AsyncSession, linhas: list[tuple[UUID, UUID, str | None, str | None]]
+) -> dict[UUID, tuple[str, bool]]:
+    """(message_id, mailbox_id, estado, alias) → {message_id: (caixa, escondido)}.
+
+    A caixa: a do alias gravado; sem ele, a do 1º endereço da caixa que recebeu
+    (`barra_lojas.caixa_do_email`). Escondido: `barra_lojas.escondido_no_site`
+    (a régua estrita da segurança). Só decifra o que ainda não foi lembrado."""
+    saida: dict[UUID, tuple[str, bool]] = {}
+    faltam = []
+    for mid, mailbox_id, estado, alias in linhas:
+        lembrada = _CLASSES_NO_SITE.get((mid, estado or ""))
+        if lembrada is not None:
+            saida[mid] = lembrada
+        else:
+            faltam.append((mid, mailbox_id, estado, alias))
+    if not faltam:
+        return saida
+    mensagens = {
+        mm.id: mm
+        for mm in (
+            await session.execute(
+                select(MailMessage).where(MailMessage.id.in_([f[0] for f in faltam]))
+            )
+        ).scalars()
+    }
+    aliases: dict[UUID, set[str]] = {}
+    for mid, mailbox_id, estado, alias in faltam:
+        message = mensagens.get(mid)
+        if message is None:
+            continue
+        email = ponte.decifrar(message)
+        if alias:
+            caixa = barra_lojas.caixa_do_alias(alias)
+        else:
+            if mailbox_id not in aliases:
+                mailbox = await session.get(MailMailbox, mailbox_id)
+                aliases[mailbox_id] = ponte.aliases_da_caixa(mailbox)[1] if mailbox else set()
+            caixa = barra_lojas.caixa_do_email(email.recebeu, aliases[mailbox_id])
+        escondido = barra_lojas.escondido_no_site(estado, email.assunto, texto.legivel(email.texto))
+        if len(_CLASSES_NO_SITE) >= _CLASSES_NO_SITE_MAX:
+            _CLASSES_NO_SITE.clear()
+        _CLASSES_NO_SITE[(mid, estado or "")] = saida[mid] = (caixa, escondido)
+    return saida
+
+
+async def _fica_no_site(session: AsyncSession, linhas: list, caixa: str | None) -> list:
+    """As linhas da consulta do site (meta, e-mail, …) que a caixa mostra: o que o SQL
+    não separa passa por `_classes_no_site` (a caixa certa, sem o código)."""
+    precisam = [
+        (meta.message_id, message.mailbox_id, meta.estado, meta.alias_recebido)
+        for meta, message, *_r in linhas
+        if meta.alias_recebido is None or meta.estado in barra_lojas.ESTADOS_SEM_A_REGUA
+    ]
+    if not precisam:
+        return list(linhas)
+    classes = await _classes_no_site(session, precisam)
+    saida = []
+    for linha in linhas:
+        meta = linha[0]
+        if meta.alias_recebido is None or meta.estado in barra_lojas.ESTADOS_SEM_A_REGUA:
+            da_linha, escondido = classes.get(meta.message_id, (None, True))
+            if escondido or (caixa is not None and da_linha != caixa):
+                continue
+        saida.append(linha)
+    return saida
 
 
 def _uuid(valor: Any) -> UUID | None:
@@ -1550,11 +1657,20 @@ async def emails_da_caixa(
         )
     if antes_de is not None:
         q = q.where(MailMessage.received_at < antes_de)
-    linhas = (
-        await session.execute(
-            q.order_by(MailMessage.received_at.desc(), MailMessage.id.desc()).limit(limite + 1)
-        )
-    ).all()
+    q = q.order_by(MailMessage.received_at.desc(), MailMessage.id.desc())
+    if site is None:
+        linhas = (await session.execute(q.limit(limite + 1))).all()
+    else:
+        # O site: o que o SQL não separa (a caixa pelo e-mail decifrado, o código
+        # guardado sem a régua) sai depois — lê em lotes até ter a página.
+        linhas = []
+        lote, pulo = max(limite + 1, 100), 0
+        while len(linhas) <= limite:
+            bruto = (await session.execute(q.offset(pulo).limit(lote))).all()
+            linhas += await _fica_no_site(session, bruto, grupo)
+            if len(bruto) < lote:
+                break
+            pulo += lote
     tem_mais = len(linhas) > limite
     linhas = linhas[:limite]
     return {
@@ -1574,6 +1690,8 @@ async def _email_da_caixa_ou_404(
         # A caixa de um SITE (27/10/2026): a mesma régua da lista dele.
         q = await _emails_do_site(session, user, site=None, caixa=None, message_id=message_id)
         achada = (await session.execute(q)).first()
+        if achada is not None and not await _fica_no_site(session, [achada], None):
+            achada = None
     if achada is None:
         raise HTTPException(404, detail={"code": "email_nao_encontrado"})
     meta, message, integ, ficha, _conversa = achada
