@@ -397,7 +397,8 @@ class Settings(BaseSettings):
     # apagar a entrada e recriar só a api.
     #
     # VAZIO = ROTA FECHADA (401), nunca aberta — o mesmo desenho do
-    # `portal_tokens` acima.
+    # `portal_tokens` acima. Os mesmos tokens abrem POST /api/sites/validar-nf
+    # (routers/sites_validar_nf.py, 27/10/2026): o SAC do site confere a NF.
     sites_estoque_tokens: str = ""
 
     # ─── Fotos e vídeos com marca d'água para os sites (01/10/2026) ──────

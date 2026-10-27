@@ -87,6 +87,7 @@ from app.routers import settings as settings_router
 from app.routers import sites_custos as sites_custos_router
 from app.routers import sites_estoque as sites_estoque_router
 from app.routers import sites_midia as sites_midia_router
+from app.routers import sites_validar_nf as sites_validar_nf_router
 from app.routers import stores as stores_router
 from app.routers import sync as sync_router
 from app.routers import tarefas as tarefas_router
@@ -236,6 +237,9 @@ app.include_router(sites_custos_router.router)
 # Bearer do estoque; os bytes saem por link cifrado no PATH, fora do access log.
 app.include_router(sites_midia_router.router)
 sites_midia_router.mascarar_link_no_access_log()
+# O SAC dos mesmos sites confere a NF (27/10/2026): mesmo Bearer do estoque,
+# a marca vem do token; responde só {"encontrada": bool}. Fora do openapi.
+app.include_router(sites_validar_nf_router.router)
 app.include_router(jobs_router.router)
 app.include_router(sync_router.router)
 app.include_router(webhooks_router.router)
