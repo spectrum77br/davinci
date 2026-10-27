@@ -98,9 +98,10 @@ from zoneinfo import ZoneInfo
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, case, func, literal, not_, or_, select, update
+from sqlalchemy import and_, case, exists, func, literal, not_, or_, select, update
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.db import get_session
 from app.deps.team_scope import TeamScope, resolve_team_scope
@@ -141,6 +142,7 @@ from app.security.cipher import decrypt_bytes, decrypt_json
 from app.services import mail_central
 from app.services.atendimento import abas, acesso, gravar, separa_email
 from app.services.atendimento.constantes import (
+    AUTOR_CLIENTE,
     AUTOR_SISTEMA,
     CANAL_EMAIL,
     CONVERSA_FECHADA,
@@ -1301,7 +1303,11 @@ async def _contagens_dos_sites(
     pastas = await barra_lojas.pastas_dos_sites(session)
     lista = barra_lojas.sites()
     chaves_caixa = [k for k, _r in barra_lojas.caixas_do_site()]
-    numeros = {st.chave: {k: _conta_vazia() for k in chaves_caixa} for st in lista}
+    # `nao_lidas` (27/10/2026): a bolinha vermelha do site — a conversa não lida
+    # (`_nao_lida_sql`); `aguardando` continua o "falta responder".
+    numeros = {
+        st.chave: {k: {**_conta_vazia(), "nao_lidas": 0} for k in chaves_caixa} for st in lista
+    }
     todas = pastas.ids()
     if todas:
         c = AtendimentoConversa
@@ -1312,6 +1318,7 @@ async def _contagens_dos_sites(
                 barra_lojas.caixa_do_alias_sql(u.c.alias).label("caixa"),
                 (c.situacao != CONVERSA_FECHADA).label("aberta"),
                 c.aguardando_resposta.is_(True).label("esperando"),
+                _nao_lida_sql(c).label("nao_lida"),
             )
             .select_from(c)
             .join(u, u.c.conversa_id == c.id)
@@ -1325,8 +1332,8 @@ async def _contagens_dos_sites(
         if cond is not None:
             q = q.where(cond)
         sq = q.subquery()
-        cols = (sq.c.site, sq.c.caixa, sq.c.aberta, sq.c.esperando)
-        for site, caixa, aberta, esperando, n in (
+        cols = (sq.c.site, sq.c.caixa, sq.c.aberta, sq.c.esperando, sq.c.nao_lida)
+        for site, caixa, aberta, esperando, nao_lida, n in (
             await session.execute(select(*cols, func.count()).group_by(*cols))
         ).all():
             alvo = numeros.get(site, {}).get(caixa)
@@ -1337,6 +1344,8 @@ async def _contagens_dos_sites(
                 alvo["abertas"] += int(n or 0)
             if esperando is True:
                 alvo["aguardando"] += int(n or 0)
+            if nao_lida is True:
+                alvo["nao_lidas"] += int(n or 0)
         m = MailMessageMeta
         desde = datetime.now(UTC) - timedelta(days=mail_constantes.DIAS_DA_BARRA_DE_LOJAS)
         precisa = barra_lojas.precisa_ler_no_site_sql(m)
@@ -1673,12 +1682,49 @@ async def emails_da_caixa(
             pulo += lote
     tem_mais = len(linhas) > limite
     linhas = linhas[:limite]
+    itens = [await _linha_da_caixa(session, *linha) for linha in linhas]
+    if site is not None:
+        # A bolinha do site (27/10/2026): a conversa NÃO LIDA (`_nao_lida_sql`).
+        ids = {UUID(i["conversa_id"]) for i in itens if i["conversa_id"]}
+        nao_lidas = (
+            set(
+                (
+                    await session.execute(
+                        select(AtendimentoConversa.id).where(
+                            AtendimentoConversa.id.in_(ids), _nao_lida_sql()
+                        )
+                    )
+                ).scalars()
+            )
+            if ids
+            else set()
+        )
+        for i in itens:
+            i["nao_lida"] = bool(i["conversa_id"]) and UUID(i["conversa_id"]) in nao_lidas
     return {
-        "itens": [await _linha_da_caixa(session, *linha) for linha in linhas],
+        "itens": itens,
         "proximo": gravar._utc(linhas[-1][1].received_at).isoformat()
         if tem_mais and linhas
         else None,
     }
+
+
+def _nao_lida_sql(c=AtendimentoConversa):
+    """A conversa (do site) NÃO LIDA — a bolinha vermelha da caixa do site (27/10/2026).
+
+    O Eduardo: "e-mail novo que chega vira bolinha vermelha, e ao clicar some",
+    como o não lido do Duoke. Falta responder E chegou e-mail do CLIENTE depois
+    do "visto no DaVinci" (`visto_em`: a abertura da conversa grava, POST /visto
+    ou /lida — o mesmo relógio, a CHEGADA da mensagem); nunca aberta = não lida."""
+    mm = aliased(AtendimentoMensagem)
+    nova = exists(
+        select(literal(1)).where(
+            mm.conversa_id == c.id,
+            mm.autor == AUTOR_CLIENTE,
+            or_(c.visto_em.is_(None), mm.created_at > c.visto_em),
+        )
+    )
+    return and_(c.aguardando_resposta.is_(True), nova)
 
 
 async def _email_da_caixa_ou_404(

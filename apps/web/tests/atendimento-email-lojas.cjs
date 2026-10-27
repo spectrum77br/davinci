@@ -594,7 +594,8 @@ async function principal() {
     // O e-mail da conversa abre a conversa; o outro vai para a ÁREA PRINCIPAL
     // (27/10/2026): a lista só avisa a página — não lê nem abre nada aqui.
     m.estado.abrir(m.estado.itens[0])
-    assert.deepEqual(m.emitidos.at(-1), ['selecionar', 'c2'])
+    // A linha vai junto (27/10/2026): a página apaga a bolinha do site na hora.
+    assert.deepEqual(m.emitidos.at(-1), ['selecionar', 'c2', m.estado.itens[0]])
     const chamadasAntes = m.chamadas.length
     m.estado.abrir(m.estado.itens[1])
     await esperar()
@@ -812,7 +813,7 @@ async function principal() {
     const ini = pagina.indexOf('// ─── os E-MAILS de cada loja na Caixa (27/10/2026)')
     const fim = pagina.indexOf('</script>', ini)
     assert.ok(ini > 0 && fim > ini)
-    function bloco({ usuario = 'u1', guardado = new Map(), quebrado = false, largura = 1440, admin = false } = {}) {
+    function bloco({ usuario = 'u1', guardado = new Map(), quebrado = false, largura = 1440, admin = false, sites = [] } = {}) {
       const aba = Vue.ref('caixa')
       const filtros = Vue.ref(filtros0())
       const selecionada = Vue.ref(null)
@@ -825,17 +826,50 @@ async function principal() {
         getItem: (k) => { if (quebrado) throw new Error('bloqueado'); return guardado.has(k) ? guardado.get(k) : null },
         setItem: (k, v) => { if (quebrado) throw new Error('bloqueado'); guardado.set(k, v) },
       }
-      const nomes = ['ref', 'computed', 'watch', 'nextTick', 'onMounted', 'aba', 'filtros', 'selecionada', 'emailPorLoja', 'larguraJanela', 'lojasRecolhidas', 'canSugerir', 'ehAdmin', 'iniciou', 'auth', 'localStorage', 'carregarContagensEmail', 'carregarModelos', 'selecionar']
+      const emailSitesNaBarra = Vue.ref(sites)
+      const nomes = ['ref', 'computed', 'watch', 'nextTick', 'onMounted', 'aba', 'filtros', 'selecionada', 'emailPorLoja', 'larguraJanela', 'lojasRecolhidas', 'canSugerir', 'ehAdmin', 'iniciou', 'auth', 'localStorage', 'carregarContagensEmail', 'carregarModelos', 'selecionar', 'emailSitesNaBarra', 'sitesSemANaoLida', 'emailsDoSite', 'gruposDoSite']
       const corpo = `${transpileTs(pagina.slice(ini, fim))}\nreturn { emailsDaLoja, emailDaCaixaAberto, emailDaCaixaLinha, abrirEmailDaLoja, fecharEmailDaLoja, emailNaCaixa, emailNaCaixaLinha, emailNaCaixaVersao, emailNaCaixaSinal, emailNaCaixaOrigem, emailsNoCelular, querPorLoja, contagemDaLoja, emailNaTela, abertaNaCaixa, abrirEmailsDaLoja, trocarGrupoDaLoja, abrirEmailDaBarra, fecharEmailsDaLoja, fecharEmailNaCaixa, selecionarEmailNaCaixa, abrirEmailAvulsoNaCaixa, voltarAoChatDaCaixa, aoMudarEmailNaCaixa, aoVincularEmailNaCaixa, lojasEmailsAbertos, gruposEmailsAbertos, chaveDosEmailsAbertos, chaveDosGruposAbertos }`
       const ehAdmin = Vue.ref(admin)
       const out = new Function(...nomes, corpo)(
         Vue.ref, Vue.computed, Vue.watch, Vue.nextTick, (fn) => montados.push(fn), aba, filtros, selecionada, emailPorLoja, larguraJanela, lojasRecolhidas, Vue.ref(true), ehAdmin, true, { user: usuario ? { id: usuario } : null }, localStorage,
         () => { lidas.contagens++ }, () => { lidas.modelos++ }, (id) => { lidas.selecionadas.push(id); selecionada.value = id },
+        emailSitesNaBarra, LJ.sitesSemANaoLida, LJ.emailsDoSite, LJ.gruposDoSite,
       )
-      return { ...out, aba, filtros, selecionada, larguraJanela, lojasRecolhidas, ehAdmin, montados, lidas, guardado, async montar() { for (const fn of montados) fn(); await Vue.nextTick(); await esperar() } }
+      return { ...out, aba, filtros, selecionada, larguraJanela, lojasRecolhidas, ehAdmin, montados, lidas, guardado, emailSitesNaBarra, async montar() { for (const fn of montados) fn(); await Vue.nextTick(); await esperar() } }
     }
     function filtros0() { return filtros() }
     const ATV = { chave: 'i-sh', integration_id: 'i-sh', store_info_id: '', plataforma: 'shopee', conta: 'ATV', grupo: 'problemas' }
+    // A bolinha da caixa do SITE é a não lida (27/10/2026): abrir apaga na hora; o visto gravado relê os números.
+    {
+      const caixas = [{ chave: 'sac', rotulo: 'SAC' }, { chave: 'admin', rotulo: 'Admin' }]
+      const sites = [{ site: 'uranyx', externo_ref: 'site:uranyx', nome: 'Uranyx', pastas: ['*uranyx'], status: 'liga', caixas, emails_30d: 48, grupos: { sac: { emails: 48, abertas: 22, aguardando: 22, total: 22, nao_lidas: 2 } } }]
+      const b = bloco({ sites })
+      const U = { chave: 'ext:site:uranyx', integration_id: '', store_info_id: '', plataforma: 'site', conta: 'Uranyx', grupo: 'sac', site: 'uranyx' }
+      assert.equal(LJ.esperandoDoGrupo(b.contagemDaLoja.value ?? LJ.emailsDoSite(sites[0]), 'sac'), 2)
+      // Na lista curta da caixa (a barra): a conversa abre, a bolinha baixa.
+      const curto = { id: 'm9', conversa_id: 'c9', nao_lida: true, aguardando_resposta: true }
+      b.abrirEmailDaBarra(U, curto)
+      assert.deepEqual([b.emailNaCaixa.value, curto.nao_lida, b.emailSitesNaBarra.value[0].grupos.sac.nao_lidas], ['c9', false, 1])
+      assert.equal(LJ.esperandoDoGrupo(b.contagemDaLoja.value, 'sac'), 1, 'a bolinha do site na lista do meio também')
+      assert.equal(b.emailSitesNaBarra.value[0].grupos.sac.aguardando, 22, 'o "falta responder" fica')
+      // De novo (já lida) não baixa outra vez; na lista do meio, a outra baixa.
+      b.abrirEmailDaBarra(U, curto)
+      assert.equal(b.emailSitesNaBarra.value[0].grupos.sac.nao_lidas, 1)
+      b.selecionarEmailNaCaixa('c8', { id: 'm8', conversa_id: 'c8', nao_lida: true })
+      assert.deepEqual([b.emailNaCaixa.value, b.emailSitesNaBarra.value[0].grupos.sac.nao_lidas], ['c8', 0])
+      b.selecionarEmailNaCaixa('c7', { id: 'm7', conversa_id: 'c7', nao_lida: true })
+      assert.equal(b.emailSitesNaBarra.value[0].grupos.sac.nao_lidas, 0, 'nunca abaixo de zero')
+      // A conversa aberta gravou o visto (POST /visto): os números são relidos.
+      b.selecionarEmailNaCaixa('c9')
+      b.aoMudarEmailNaCaixa({ id: 'c9', email: { tipo_email: 'chamado' }, aguardando_resposta: true, situacao: 'aberta', visto_em: null })
+      const antes = b.lidas.contagens
+      b.aoMudarEmailNaCaixa({ id: 'c9', email: { tipo_email: 'chamado' }, aguardando_resposta: true, situacao: 'aberta', visto_em: '2026-10-27T18:30:00Z' })
+      assert.equal(b.lidas.contagens, antes + 1)
+      // As puras: a não lida manda na bolinha do site; a loja (sem ela) segue o aguardando.
+      assert.equal(LJ.esperandoDoGrupo({ grupos: { sac: { aguardando: 5, nao_lidas: 0 } } }, 'sac'), 0)
+      assert.equal(LJ.esperandoDoGrupo({ grupos: { problemas: { aguardando: 5 } } }, 'problemas'), 5)
+      assert.deepEqual(LJ.sitesSemANaoLida(sites, 'charlots', 'sac'), sites, 'outro site: igual')
+    }
     {
       const b = bloco()
       b.selecionada.value = 'chat-1'

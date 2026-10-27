@@ -21,7 +21,7 @@ import {
 } from '~/components/AtendimentoPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
-import { emailsDoSite, gruposDoSite } from '~/components/AtendimentoLojas.vue'
+import { emailsDoSite, gruposDoSite, sitesSemANaoLida } from '~/components/AtendimentoLojas.vue'
 import type { EmailDaCaixa, EmailsDaLoja, EscolhaEmail, GrupoDaBarra, SiteDaBarra } from '~/components/AtendimentoLojas.vue'
 import { GRUPOS_CAIXA, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
@@ -899,9 +899,20 @@ function trocarGrupoDaLoja(g: string) {
 // linha acesa) e o e-mail na área principal — ou a conversa dele.
 function abrirEmailDaBarra(e: EscolhaEmail, email: EmailDaCaixa) {
   abrirEmailsDaLoja(e)
+  baixarBolinhaDoSite(e, email)
   abrirEmailDaLoja(email)
 }
-function selecionarEmailNaCaixa(id: string) {
+// A bolinha da caixa do SITE é a conversa NÃO LIDA (27/10/2026, o Eduardo: "e-mail
+// novo que chega vira bolinha vermelha, e ao clicar some"): abrir o e-mail da
+// conversa apaga a dele na hora; a conversa aberta grava o visto (POST /visto ou
+// /lida, AtendimentoConversa) e os números são relidos (`aoMudarEmailNaCaixa`).
+function baixarBolinhaDoSite(e: EscolhaEmail | null | undefined, email: EmailDaCaixa | null | undefined) {
+  if (!e?.site || !email?.conversa_id || !email.nao_lida) return
+  email.nao_lida = false
+  emailSitesNaBarra.value = sitesSemANaoLida(emailSitesNaBarra.value, e.site, e.grupo)
+}
+function selecionarEmailNaCaixa(id: string, email?: EmailDaCaixa) {
+  if (email) baixarBolinhaDoSite(emailsDaLoja.value, email)
   fecharEmailDaLoja()
   if (emailNaCaixa.value !== id) emailNaCaixaLinha.value = null
   emailNaCaixa.value = id
@@ -935,7 +946,9 @@ function aoMudarEmailNaCaixa(c: ConversaResumo) {
   }
   const antes = emailNaCaixaLinha.value
   emailNaCaixaLinha.value = c
-  if (antes && (!!antes.aguardando_resposta !== !!c.aguardando_resposta || antes.situacao !== c.situacao)) {
+  // O visto gravado (abriu a conversa) também: a bolinha da caixa do site é a não lida.
+  if (antes && (!!antes.aguardando_resposta !== !!c.aguardando_resposta || antes.situacao !== c.situacao
+    || (antes.visto_em ?? null) !== (c.visto_em ?? null))) {
     emailNaCaixaSinal.value++
     void carregarContagensEmail()
   }

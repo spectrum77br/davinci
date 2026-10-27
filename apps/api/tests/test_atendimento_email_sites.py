@@ -465,8 +465,9 @@ async def test_os_numeros_e_as_listas_das_caixas_dos_sites(db, cena, client, adm
         "liga",
     )
     assert [x["chave"] for x in u["caixas"]] == ["sac", "admin"]
-    assert u["grupos"]["sac"] == {"emails": 1, "abertas": 1, "aguardando": 1, "total": 1}
-    assert u["grupos"]["admin"] == {"emails": 1, "abertas": 1, "aguardando": 1, "total": 1}
+    um = {"emails": 1, "abertas": 1, "aguardando": 1, "total": 1, "nao_lidas": 1}
+    assert u["grupos"]["sac"] == um
+    assert u["grupos"]["admin"] == um
     assert u["emails_30d"] == 2
     assert c["grupos"]["sac"]["emails"] == 1 and c["grupos"]["admin"]["emails"] == 0
 
@@ -607,10 +608,11 @@ async def test_makisa_mostra_os_emails_da_pasta_em_sac_e_admin(db, cena, client,
         "sem_categoria",
     )
     assert [x["chave"] for x in mk["caixas"]] == ["sac", "admin"]
-    assert mk["grupos"]["sac"] == {"emails": 1, "abertas": 0, "aguardando": 0, "total": 0}
+    so_um = {"emails": 1, "abertas": 0, "aguardando": 0, "total": 0, "nao_lidas": 0}
+    assert mk["grupos"]["sac"] == so_um
     # Sem o alias gravado (a pasta sem categoria): a caixa pelo endereço que
     # recebeu; o código de acesso fica fora do número e da lista.
-    assert mk["grupos"]["admin"] == {"emails": 1, "abertas": 0, "aguardando": 0, "total": 0}
+    assert mk["grupos"]["admin"] == so_um
     assert mk["emails_30d"] == 2
     assert sites["uranyx"]["so_email"] is False and sites["charlots"]["so_email"] is False
 
@@ -652,7 +654,7 @@ async def test_7buyers_sem_a_pasta_mostra_as_caixas_vazias_com_o_porque(
         "sem_pasta",
     )
     assert b7["emails_30d"] == 0
-    vazia = {"emails": 0, "abertas": 0, "aguardando": 0, "total": 0}
+    vazia = {"emails": 0, "abertas": 0, "aguardando": 0, "total": 0, "nao_lidas": 0}
     assert b7["grupos"] == {"sac": vazia, "admin": vazia}
     for grupo in ("sac", "admin"):
         r = await _lista(client, "7buyers", grupo)
@@ -967,3 +969,36 @@ async def test_sac_do_site_na_pasta_cai_no_sac_e_o_resto_no_admin(db, cena, clie
     assert [i["id"] for i in r.json()["itens"]] == [str(sac)]
     r = await _lista(client, "7buyers", "admin")
     assert [i["id"] for i in r.json()["itens"]] == [str(outro)]
+
+
+
+# ─────────────── a bolinha do site: NÃO LIDA (27/10/2026, 15:25) ───────────────
+#
+# O Eduardo: "e-mail novo que chega vira bolinha vermelha, e ao clicar some".
+# A bolinha da caixa do site conta a conversa não lida (falta responder e
+# e-mail do cliente depois do "visto no DaVinci"); abrir a conversa (o POST
+# /visto da tela, o mesmo da Caixa) apaga; a resposta nova do cliente acende.
+
+
+async def test_abrir_a_conversa_apaga_a_bolinha_e_o_email_novo_acende(db, cena, client, admin):
+    ids = await _cena_da_barra(db, cena)
+    r = await _lista(client, "uranyx", "sac")
+    [item] = r.json()["itens"]
+    assert item["nao_lida"] is True and item["aguardando_resposta"] is True
+    cid = item["conversa_id"]
+    assert (await _sites(client))["uranyx"]["grupos"]["sac"]["nao_lidas"] == 1
+    # Abriu a conversa (a tela chama o POST /visto ao abrir).
+    r = await client.post(f"{URL}/conversas/{cid}/visto", json={})
+    assert r.status_code == 200, r.text
+    g = (await _sites(client))["uranyx"]["grupos"]["sac"]
+    assert (g["nao_lidas"], g["aguardando"]) == (0, 1), "lida, mas ainda falta responder"
+    [item] = (await _lista(client, "uranyx", "sac")).json()["itens"]
+    assert item["nao_lida"] is False and item["aguardando_resposta"] is True
+    # O cliente escreve de novo no mesmo chamado: a bolinha volta.
+    await entrar(
+        db, cena.geral, pasta="*uranyx", de="maria@gmail.com", para=["sac@uranyx.com.br"],
+        assunto="Re: [US-26-0123] SAC — A17 — Maria", corpo="Alguma novidade?",
+    )
+    await rodar(db)
+    assert (await _sites(client))["uranyx"]["grupos"]["sac"]["nao_lidas"] == 1
+    assert ids["sac"]

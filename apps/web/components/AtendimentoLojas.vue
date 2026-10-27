@@ -123,7 +123,10 @@ export type GrupoDaBarra = { chave: string; rotulo: string; pastas: string[]; st
 // Um grupo da loja: os e-mails da caixa nos últimos dias (o número; a lista
 // mostra os mesmos), as conversas abertas, as esperando resposta (a bolinha) e
 // todas as conversas (as fechadas também).
-export type ContaDoGrupo = { emails: number; abertas: number; aguardando: number; total: number }
+// `nao_lidas` (27/10/2026, só nos SITES): as conversas NÃO LIDAS — a bolinha
+// vermelha da caixa do site ("e-mail novo que chega vira bolinha vermelha, e ao
+// clicar some"); sem ela (as lojas), a bolinha é o `aguardando` de sempre.
+export type ContaDoGrupo = { emails: number; abertas: number; aguardando: number; total: number; nao_lidas?: number }
 // O endereço da loja para a ponte (o porquê da caixa vazia).
 export type AliasDaLoja = 'na_ponte' | 'fora_da_caixa' | 'sem_cadastro'
 export type EmailsDaLoja = {
@@ -178,6 +181,8 @@ export type SiteDaBarra = {
 // Um e-mail da caixa (GET /api/atendimento/email/lojas/emails): sem o texto.
 export type EmailDaCaixa = {
   id: string
+  // A conversa do e-mail NÃO LIDA (só nas caixas dos sites, 27/10/2026).
+  nao_lida?: boolean
   estado: string
   recebido_em: string | null
   pasta: string | null
@@ -211,7 +216,18 @@ export function numeroDoGrupo(e: EmailsDaLoja | null | undefined, g: string): nu
 }
 // A bolinha vermelha da caixa: as conversas de e-mail esperando resposta.
 export function esperandoDoGrupo(e: EmailsDaLoja | null | undefined, g: string): number {
-  return Number(e?.grupos?.[g]?.aguardando) || 0
+  const conta = e?.grupos?.[g]
+  if (conta && typeof conta.nao_lidas === 'number') return Number(conta.nao_lidas) || 0
+  return Number(conta?.aguardando) || 0
+}
+// Abriu um e-mail NÃO LIDO da caixa de um site: a bolinha baixa na hora (a
+// releitura dos números, depois do visto gravado, confirma). PURA: os sites novos.
+export function sitesSemANaoLida<T extends { site: string; grupos: Partial<Record<string, ContaDoGrupo>> }>(sites: readonly T[], site: string, grupo: string): T[] {
+  return sites.map((s) => {
+    const conta = s.site === site ? s.grupos?.[grupo] : null
+    if (!conta || typeof conta.nao_lidas !== 'number') return s
+    return { ...s, grupos: { ...s.grupos, [grupo]: { ...conta, nao_lidas: Math.max(0, conta.nao_lidas - 1) } } }
+  })
 }
 // A loja do robô (sem integração, sem site nem conta de rede) é a ficha de
 // MESMA plataforma e mesmo nome — uma só (duas fichas com o mesmo nome: a

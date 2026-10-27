@@ -50,7 +50,7 @@ function mount({ tab, conversation, saved, intercept } = {}) {
     if (name.includes('AtendimentoPlataforma.vue')) return platform
     if (name.includes('AtendimentoFiltroPlataforma.vue')) return filter
     // As caixas dos sites (27/10/2026): só as funções que a página usa.
-    if (name.includes('AtendimentoLojas.vue')) return { emailsDoSite: (s) => ({ ...s }), gruposDoSite: () => [] }
+    if (name.includes('AtendimentoLojas.vue')) return { emailsDoSite: (s) => ({ ...s }), gruposDoSite: () => [], sitesSemANaoLida: (s) => s }
     return require(name)
   }
   const globals = {

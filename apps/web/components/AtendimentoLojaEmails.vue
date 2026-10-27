@@ -60,7 +60,7 @@ const props = defineProps<{
   sinal?: number
 }>()
 const emit = defineEmits<{
-  (e: 'selecionar', id: string): void
+  (e: 'selecionar', id: string, email?: EmailDaCaixa): void
   // O e-mail sem conversa: abre na área principal (a página guarda qual).
   (e: 'ver', email: EmailDaCaixa): void
   (e: 'fechar'): void
@@ -127,7 +127,8 @@ onMounted(() => { void carregar() })
 
 // A conversa abre na coluna da conversa; o e-mail sem conversa, na área principal.
 function abrir(e: EmailDaCaixa) {
-  if (e.conversa_id) emit('selecionar', e.conversa_id)
+  // A linha vai junto (27/10/2026): a página apaga a bolinha do site na hora.
+  if (e.conversa_id) emit('selecionar', e.conversa_id, e)
   else emit('ver', e)
 }
 function acesa(e: EmailDaCaixa): boolean {
