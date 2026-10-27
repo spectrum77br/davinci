@@ -343,6 +343,94 @@ async function principal() {
     assert.match(html, /data-sem-emails-de-loja>\s*Nenhuma loja para mostrar agora\./)
   }
 
+
+  // ------------------------------------------------ as caixas dos SITES (SAC · Admin, 27/10/2026)
+  {
+    const SITES = [
+      { site: 'charlots', externo_ref: 'site:charlots', nome: 'Charlots', pastas: ['*charlots'], status: 'liga', caixas: [{ chave: 'sac', rotulo: 'SAC' }, { chave: 'admin', rotulo: 'Admin' }], emails_30d: 9, grupos: { sac: conta(7, 2, 3), admin: conta(2) } },
+      // Sem a linha na barra (o /resumo não mandou o site): nada.
+      { site: 'uranyx', externo_ref: 'site:uranyx', nome: 'Uranyx', pastas: ['*uranyx'], status: 'sem_categoria', caixas: [{ chave: 'sac', rotulo: 'SAC' }, { chave: 'admin', rotulo: 'Admin' }], emails_30d: 0, grupos: {} },
+    ]
+    const linhaSite = { chave: 'ext:site:charlots', integration_id: '', externo_ref: 'site:charlots', rede_social_id: '', plataforma: 'site', conta: 'Charlots' }
+    // As puras: o site da linha, as caixas e os números no formato das lojas.
+    assert.equal(LJ.siteDaLinha(SITES, linhaSite), SITES[0])
+    assert.equal(LJ.siteDaLinha(null, linhaSite), null)
+    assert.equal(LJ.siteDaLinha(SITES, { ...linhaSite, externo_ref: 'zap:123' }), null)
+    assert.equal(LJ.siteDaLinha(SITES, { ...linhaSite, integration_id: 'i-x' }), null)
+    assert.equal(LJ.siteDaLinha([{ ...SITES[0], caixas: [] }], linhaSite), null, 'sem caixas, sem seta')
+    assert.deepEqual(LJ.gruposDoSite(SITES[0]), [
+      { chave: 'sac', rotulo: 'SAC', pastas: ['*charlots'], status: 'liga' },
+      { chave: 'admin', rotulo: 'Admin', pastas: ['*charlots'], status: 'liga' },
+    ])
+    assert.deepEqual(LJ.gruposDoSite(null), [])
+    const e = LJ.emailsDoSite(SITES[0])
+    assert.deepEqual([e.site, e.plataforma, e.loja, e.integration_id, e.store_info_id], ['charlots', 'site', 'Charlots', null, null])
+    assert.equal(LJ.numeroDoGrupo(e, 'sac'), 7)
+    assert.equal(LJ.esperandoDoGrupo(e, 'sac'), 2)
+    assert.deepEqual(LJ.escolhaDoEmail(linhaSite, e, 'admin'), { chave: 'ext:site:charlots', integration_id: '', store_info_id: '', plataforma: 'site', conta: 'Charlots', grupo: 'admin', site: 'charlots' })
+    assert.equal(LJ.tituloDoAmpliavel(e, 'Charlots', false, LJ.gruposDoSite(SITES[0])), 'Mostrar os e-mails do site Charlots (SAC 7 · Admin 2)')
+    // O porquê da caixa vazia do site: a pasta primeiro; senão o endereço.
+    const u = LJ.emailsDoSite(SITES[1])
+    assert.deepEqual(LJ.motivosDaCaixaVazia(LJ.gruposDoSite(SITES[1])[0], u, 30), ['A pasta “*uranyx” está sem categoria: a ponte guarda os e-mails dela sem ligar à loja (E-mail › Pastas).'])
+    assert.deepEqual(LJ.motivosDaCaixaVazia(LJ.gruposDoSite(SITES[0])[1], { ...e, grupos: {} }, 30), ['Nenhum e-mail para o admin@ (nem para os outros endereços) do site nos últimos 30 dias.'])
+    assert.deepEqual(LJ.motivosDaCaixaVazia(LJ.gruposDoSite(SITES[0])[0], { ...e, grupos: {} }, 30), ['Nenhum e-mail para o sac@ do site nos últimos 30 dias.'])
+    // A rota da lista: o site no lugar da loja.
+    assert.equal(LG.urlDosEmailsDaCaixa({ integration_id: '', store_info_id: '', grupo: 'sac', site: 'charlots' }, { limite: 5 }), '/api/atendimento/email/lojas/emails?grupo=sac&site=charlots&limite=5')
+    assert.notEqual(LE.chaveDaEscolha({ chave: 'x', grupo: 'sac', integration_id: '', store_info_id: '', site: 'charlots' }), LE.chaveDaEscolha({ chave: 'x', grupo: 'sac', integration_id: '', store_info_id: '', site: 'uranyx' }))
+
+    // A barra renderizada: a seta no site (só com `sitesEmail`), as duas caixas embaixo.
+    const base = { resumo: RESUMO, filtros: filtros(), numero: 'nao_lidas_duoke', emails: POR_LOJA, gruposEmail: GRUPOS, diasEmail: 30 }
+    let html = await renderizarBarra(base)
+    assert.doesNotMatch(html, /data-ampliar-emails="ext:site:charlots"/, 'sem `sitesEmail`: o site como era')
+    html = await renderizarBarra({ ...base, sitesEmail: SITES })
+    assert.match(html, /aria-label="Mostrar os e-mails do site Charlots \(SAC 7 · Admin 2\)"[^>]*data-ampliar-emails="ext:site:charlots"/)
+    assert.match(html, /title="Site · Charlots[^"]*A seta mostra os e-mails do site: SAC \(sac@\) e Admin/)
+    html = await renderizarBarra({ ...base, sitesEmail: SITES, emailsAbertos: ['ext:site:charlots'], gruposAbertos: ['ext:site:charlots|admin'] })
+    const grupo = (html.match(/<div id="emails-loja-ext_site_charlots" role="group" aria-label="E-mails do site Charlots"[\s\S]*?data-email-grupo="admin"[\s\S]*?<\/div>/) || [''])[0]
+    assert.ok(grupo, 'as caixas embaixo do site')
+    const caixas = [...grupo.matchAll(/data-email-grupo="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)].map((m) => [m[1], m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()])
+    assert.deepEqual(caixas, [['sac', 'SAC 2 7'], ['admin', 'Admin 2']])
+    assert.match(html, /data-stub-caixa="admin" data-total="2"/)
+    // Recolhida, na Caixa Humano (sem `emails`): nada.
+    assert.doesNotMatch(await renderizarBarra({ ...base, sitesEmail: SITES, recolhida: true }), /data-ampliar-emails/)
+    assert.doesNotMatch(await renderizarBarra({ ...base, emails: null, sitesEmail: SITES, numero: 'humano' }), /data-ampliar-emails/)
+    // O celular (modo "emails"): o site entra com as caixas dele.
+    html = await renderizarBarra({ ...base, sitesEmail: SITES, modo: 'emails' })
+    assert.match(html, /Site · Charlots\nO clique mostra os e-mails desta loja\./)
+
+    // O clique (setup de verdade): a caixa do site manda o site, não a loja; o clique na linha filtra o chat como sempre.
+    const b = montar('../components/AtendimentoLojas.vue', { ...base, sitesEmail: SITES, emailsAbertos: [], gruposAbertos: [] })
+    const site = b.estado.lojas.find((l) => l.externo_ref === 'site:charlots')
+    assert.ok(b.estado.emailsDe(site))
+    assert.deepEqual(b.estado.gruposDe(site).map((g) => g.chave), ['sac', 'admin'])
+    b.estado.clicarGrupo(site, 'sac')
+    assert.deepEqual(b.estado.gruposAbertos, ['ext:site:charlots|sac'])
+    assert.deepEqual(b.emitidos.at(-1), ['abrirEmails', { chave: 'ext:site:charlots', integration_id: '', store_info_id: '', plataforma: 'site', conta: 'Charlots', grupo: 'sac', site: 'charlots' }])
+    b.estado.escolherLoja(site)
+    assert.equal(b.estado.filtros.externo_ref, 'site:charlots')
+
+    // A lista curta da caixa do site: a rota com o site.
+    const URL_CAIXA = '/api/atendimento/email/lojas/emails'
+    const m = montar('../components/AtendimentoLojaGrupoEmails.vue', { escolha: { chave: 'ext:site:charlots', integration_id: '', store_info_id: '', plataforma: 'site', conta: 'Charlots', grupo: 'admin', site: 'charlots' }, total: 2, motivos: [] }, {
+      respostas: { [URL_CAIXA]: { itens: [{ id: 's1', estado: 'gravado', recebido_em: '2026-10-27T10:00:00Z', pasta: '*charlots', assunto: '[CA-26-0001] Atacado — Boutique — Grade', de: 'nao-responda@envio.charlots.com.br', conversa_id: 'c9', aguardando_resposta: true }], proximo: null } },
+    })
+    await m.montar()
+    assert.deepEqual(m.chamadas.map((c) => c.url), ['/api/atendimento/email/lojas/emails?grupo=admin&site=charlots&limite=5'])
+    assert.match(await m.html(), /data-email-da-caixa="s1"[\s\S]*?falta responder/)
+
+    // A página: os sites da API, os chips da lista do meio e a contagem do site.
+    const pagina = web('pages/atendimento.vue')
+    assert.match(pagina, /emailSitesNaBarra\.value = Array\.isArray\(recebidas\.sites_na_barra\) \? recebidas\.sites_na_barra : \[\]/)
+    assert.match(pagina, /if \(e\.site\) \{\n    const s = emailSitesNaBarra\.value\.find\(\(x\) => x\.site === e\.site\)\n    return s \? emailsDoSite\(s\) : null\n  \}/)
+    assert.match(pagina, /if \(e\?\.site\) return gruposDoSite\(emailSitesNaBarra\.value\.find\(\(x\) => x\.site === e\.site\)\)\n  return emailGruposNaBarra\.value/)
+    // O contrato com a API: as caixas e os sites moram lá.
+    const api = (rel) => fs.readFileSync(path.resolve(__dirname, '../../api/app', rel), 'utf8')
+    assert.match(api('routers/atendimento_email.py'), /"sites_na_barra": await _contagens_dos_sites\(session, scope, visao\)/)
+    assert.match(api('routers/atendimento_email.py'), /site: Annotated\[str \| None, Query\(max_length=32\)\] = None,/)
+    assert.match(api('services/mail_atendimento/constantes.py'), /SITES_EMAIL_NA_BARRA_DE_LOJAS: tuple\[tuple\[str, str, tuple\[str, \.\.\.\]\], \.\.\.\] = \(\n    \("uranyx", "Uranyx", \("\*uranyx",\)\),\n    \("charlots", "Charlots", \("\*charlots",\)\),\n\)/)
+    assert.doesNotMatch(web('components/AtendimentoLojas.vue'), /'\*uranyx'|'\*charlots'|'sac@|'admin@/)
+  }
+
   // ------------------------------------------------ a barra: o clique (setup de verdade)
   {
     const b = montar('../components/AtendimentoLojas.vue', { resumo: RESUMO, filtros: filtros(), numero: 'nao_lidas_duoke', emails: POR_LOJA, gruposEmail: GRUPOS, emailsAbertos: [], gruposAbertos: [] })
@@ -560,12 +648,12 @@ async function principal() {
     const pagina = web('pages/atendimento.vue')
     const tpl = sfc('../pages/atendimento.vue').descriptor.template.content
     // A barra: os números por loja SÓ na Caixa (a Caixa Humano não tem a seta), as pastas da API, as lojas e as caixas abertas, o clique.
-    assert.match(tpl, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+v-model:grupos-abertos="gruposEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"\s+:emails="aba === 'caixa' \? emailPorLoja : null"\s+:grupos-email="emailGruposNaBarra"\s+:dias-email="emailDias"\s+:tique="emailTique"\s+:email-aberto="emailsDaLoja \? \{ chave: emailsDaLoja\.chave, grupo: emailsDaLoja\.grupo \} : null"\s+@abrir-emails="abrirEmailsDaLoja"\s+@abrir-email="abrirEmailDaBarra"\s*\/>/)
+    assert.match(tpl, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+v-model:grupos-abertos="gruposEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"\s+:emails="aba === 'caixa' \? emailPorLoja : null"\s+:grupos-email="emailGruposNaBarra"\s+:sites-email="emailSitesNaBarra"\s+:dias-email="emailDias"\s+:tique="emailTique"\s+:email-aberto="emailsDaLoja \? \{ chave: emailsDaLoja\.chave, grupo: emailsDaLoja\.grupo \} : null"\s+@abrir-emails="abrirEmailsDaLoja"\s+@abrir-email="abrirEmailDaBarra"\s*\/>/)
     // Celular e tablet (sem a barra): o botão "E-mails das lojas" e a barra no modo "emails".
     assert.match(tpl, /<div v-if="aba === 'caixa' && canSugerir && !emailsDaLoja" class="[^"]*lg:hidden" data-emails-celular>[\s\S]*?@click="emailsNoCelular = !emailsNoCelular"[\s\S]*?'E-mails das lojas'/)
-    assert.match(tpl, /<AtendimentoLojas\s+v-if="emailsNoCelular && !emailsDaLoja"[\s\S]*?class="lg:hidden"\s+modo="emails"[\s\S]*?:emails="emailPorLoja"\s+:grupos-email="emailGruposNaBarra"\s+:dias-email="emailDias"\s+:tique="emailTique"\s+@abrir-emails="abrirEmailsDaLoja"\s+@abrir-email="abrirEmailDaBarra"\s*\/>/)
+    assert.match(tpl, /<AtendimentoLojas\s+v-if="emailsNoCelular && !emailsDaLoja"[\s\S]*?class="lg:hidden"\s+modo="emails"[\s\S]*?:emails="emailPorLoja"\s+:grupos-email="emailGruposNaBarra"\s+:sites-email="emailSitesNaBarra"\s+:dias-email="emailDias"\s+:tique="emailTique"\s+@abrir-emails="abrirEmailsDaLoja"\s+@abrir-email="abrirEmailDaBarra"\s*\/>/)
     // A lista do meio: os e-mails da loja; a do chat fica GUARDADA (v-show), com os filtros dela.
-    assert.match(tpl, /<AtendimentoLojaEmails\s+v-if="emailsDaLoja"\s+:escolha="emailsDaLoja"\s+:contagem="contagemDaLoja"\s+:grupos="emailGruposNaBarra"\s+:dias="emailDias"\s+:selecionada="emailNaCaixa"\s+:aberto="emailDaCaixaAberto"\s+:tique="emailTique"\s+:sinal="emailNaCaixaSinal"\s+@selecionar="selecionarEmailNaCaixa"\s+@ver="abrirEmailDaLoja"\s+@grupo="trocarGrupoDaLoja"\s+@fechar="fecharEmailsDaLoja"\s*\/>\s*<AtendimentoLista\s+v-show="!emailsDaLoja && !emailsNoCelular"/)
+    assert.match(tpl, /<AtendimentoLojaEmails\s+v-if="emailsDaLoja"\s+:escolha="emailsDaLoja"\s+:contagem="contagemDaLoja"\s+:grupos="gruposDaEscolha"\s+:dias="emailDias"\s+:selecionada="emailNaCaixa"\s+:aberto="emailDaCaixaAberto"\s+:tique="emailTique"\s+:sinal="emailNaCaixaSinal"\s+@selecionar="selecionarEmailNaCaixa"\s+@ver="abrirEmailDaLoja"\s+@grupo="trocarGrupoDaLoja"\s+@fechar="fecharEmailsDaLoja"\s*\/>\s*<AtendimentoLista\s+v-show="!emailsDaLoja && !emailsNoCelular"/)
     // O e-mail da loja sem conversa: na área principal (depois da conversa de e-mail, antes do "Escolha um e-mail").
     assert.match(tpl, /<\/div>\s*(?:<!--[^>]*-->\s*)?<AtendimentoEmailDaLojaAberto\s+v-else-if="emailsDaLoja && emailDaCaixaAberto"\s+:email-id="emailDaCaixaAberto"\s+:linha="emailDaCaixaLinha"\s+:loja="emailsDaLoja\.conta"\s+@fechar="fecharEmailDaLoja"\s*\/>\s*<div v-else-if="emailsDaLoja"[^>]*>\s*<EmptyState :icon="Mail" :title="`E-mails · \$\{emailsDaLoja\.conta\}`"/)
     assert.ok(tpl.indexOf('data-email-na-caixa') < tpl.indexOf('<AtendimentoEmailDaLojaAberto'), 'a conversa de e-mail tem a vez')

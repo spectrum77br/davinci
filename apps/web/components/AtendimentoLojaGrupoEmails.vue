@@ -14,9 +14,11 @@ import type { EmailDaCaixa, EscolhaEmail } from '~/components/AtendimentoLojas.v
 
 export const LIMITE_CURTO = 5
 
-export function urlDosEmailsDaCaixa(e: Pick<EscolhaEmail, 'integration_id' | 'store_info_id' | 'grupo'>, o: { antesDe?: string | null; limite?: number } = {}): string | null {
+// O site (27/10/2026): `site` no lugar da loja, e o grupo é a caixa (sac | admin).
+export function urlDosEmailsDaCaixa(e: Pick<EscolhaEmail, 'integration_id' | 'store_info_id' | 'grupo' | 'site'>, o: { antesDe?: string | null; limite?: number } = {}): string | null {
   const q = new URLSearchParams({ grupo: e.grupo })
-  if (e.integration_id) q.set('integration_id', e.integration_id)
+  if (e.site) q.set('site', e.site)
+  else if (e.integration_id) q.set('integration_id', e.integration_id)
   else if (e.store_info_id) q.set('store_info_id', e.store_info_id)
   else return null
   if (o.limite) q.set('limite', String(o.limite))
@@ -82,7 +84,7 @@ async function carregar() {
 }
 onMounted(() => { void carregar() })
 watch(() => props.tique, () => { if (!carregando.value) void carregar() })
-watch(() => [props.escolha.grupo, props.escolha.integration_id, props.escolha.store_info_id].join('|'), () => { void carregar() })
+watch(() => [props.escolha.grupo, props.escolha.integration_id, props.escolha.store_info_id, props.escolha.site || ''].join('|'), () => { void carregar() })
 
 const mais = computed(() => Math.max(Number(props.total) || 0, itens.value.length) > itens.value.length)
 </script>

@@ -136,8 +136,12 @@ export type EmailsDaLoja = {
   // Os e-mails da loja nos últimos dias, em qualquer pasta (o diagnóstico).
   emails_30d?: number
   grupos: Partial<Record<string, ContaDoGrupo>>
+  // O SITE (27/10/2026): a linha "site:<site>" com as caixas SAC e Admin.
+  site?: string | null
 }
 // O que o clique numa caixa manda para a página (a loja da linha + o grupo).
+// `site` (27/10/2026): a caixa de um site ('uranyx', 'charlots'); o grupo é
+// `sac` ou `admin`, e a loja fica vazia.
 export type EscolhaEmail = {
   chave: string
   integration_id: string
@@ -145,6 +149,26 @@ export type EscolhaEmail = {
   plataforma: string
   conta: string
   grupo: string
+  site?: string
+}
+// As caixas de e-mail de um SITE (27/10/2026, o Eduardo): a linha do site na
+// barra (Uranyx, Charlots — `externo_ref` "site:<site>", a do carrinho) ganha o
+// mesmo ampliável das lojas, com DUAS caixas — SAC e Admin —, separadas pelo
+// endereço que RECEBEU o e-mail (sac@ = SAC; admin@ e os outros = Admin). A
+// escolha mora na API (SITES_EMAIL_NA_BARRA_DE_LOJAS e CAIXAS_EMAIL_DO_SITE),
+// que manda `sites_na_barra` em GET …/email/contagens?por_loja=true (só para
+// quem vê todas as equipes: o chamado do site não tem loja). O e-mail abre como
+// o das lojas: a conversa (o chamado do site) na coluna da conversa, com a
+// resposta pelo mesmo endereço que recebeu; o resto na área principal.
+export type SiteDaBarra = {
+  site: string
+  externo_ref: string
+  nome: string
+  pastas: string[]
+  status: StatusDaPasta | string
+  caixas: { chave: string; rotulo: string }[]
+  emails_30d?: number
+  grupos: Partial<Record<string, ContaDoGrupo>>
 }
 // Um e-mail da caixa (GET /api/atendimento/email/lojas/emails): sem o texto.
 export type EmailDaCaixa = {
@@ -199,9 +223,23 @@ function daLinha(lista: EmailsDaLoja[], l: LinhaDaBarra): EmailsDaLoja | null {
   return fichaDoRobo(lista, l)
 }
 // A linha da barra é uma LOJA (tem caixas de e-mail)? A integração ou a loja do
-// robô; o site e as contas de rede não (o chamado do site fica na aba E-mail).
+// robô; o site (tem as caixas DELE — `siteDaLinha`) e as contas de rede não.
 export function linhaTemCaixas(l: LinhaDaBarra): boolean {
   return !l.externo_ref && !l.rede_social_id
+}
+// O site da linha da barra ("site:uranyx"), se a API mandou as caixas dele.
+export function siteDaLinha(sites: readonly SiteDaBarra[] | null | undefined, l: Pick<LinhaDaBarra, 'externo_ref' | 'integration_id'>): SiteDaBarra | null {
+  if (l.integration_id || !l.externo_ref || !l.externo_ref.startsWith('site:') || !Array.isArray(sites)) return null
+  return sites.find((s) => s && s.externo_ref === l.externo_ref && Array.isArray(s.caixas) && s.caixas.length > 0) || null
+}
+// As caixas do site como os grupos da barra (o status é o da pasta do site).
+export function gruposDoSite(s: SiteDaBarra | null | undefined): GrupoDaBarra[] {
+  if (!s) return []
+  return gruposDaBarra((s.caixas || []).map((c) => ({ chave: c.chave, rotulo: c.rotulo, pastas: s.pastas || [], status: s.status })))
+}
+// Os números do site no formato dos da loja (a mesma caixa, as mesmas contas).
+export function emailsDoSite(s: SiteDaBarra): EmailsDaLoja {
+  return { integration_id: null, store_info_id: null, plataforma: 'site', loja: s.nome, alias: 'na_ponte', emails_30d: Number(s.emails_30d) || 0, grupos: s.grupos || {}, site: s.site }
 }
 // Os e-mails da linha da barra: pela integração ou (a loja do robô) pela
 // ficha. A loja que a API não mandou (a lista dela é de outra pessoa, a API
@@ -236,6 +274,11 @@ export function motivosDaCaixaVazia(g: GrupoDaBarra | null | undefined, e: Email
   else if (g?.status === 'so_contar') motivos.push(`A pasta ${pasta} ainda não está configurada: a ponte só conta os e-mails dela (E-mail › Pastas).`)
   else if (g?.status === 'sem_categoria') motivos.push(`A pasta ${pasta} está sem categoria: a ponte guarda os e-mails dela sem ligar à loja (E-mail › Pastas).`)
   else if (g?.status === 'outra_categoria') motivos.push(`A pasta ${pasta} é de Chamado: os e-mails dela vão para Pós-venda › Chamados.`)
+  if (e?.site) {
+    // O site: a caixa é a do endereço que recebeu (sac@ ou admin@ e os outros).
+    if (!motivos.length) motivos.push(`Nenhum e-mail ${g?.chave === 'sac' ? 'para o sac@' : 'para o admin@ (nem para os outros endereços)'} do site nos últimos ${dias} dias.`)
+    return motivos
+  }
   if (e?.alias === 'sem_cadastro') motivos.push('Nenhum e-mail ligado a esta loja — o endereço/alias da loja não está na ponte (Cadastros › Lojas, campo e-mail).')
   else if (e?.alias === 'fora_da_caixa') motivos.push('Nenhum e-mail ligado a esta loja — o e-mail do cadastro não está em nenhuma caixa do Tuta lida pela ponte.')
   else if (e && e.alias && !(Number(e.emails_30d) > 0)) motivos.push(`Nenhum e-mail ligado a esta loja nos últimos ${dias} dias.`)
@@ -252,9 +295,10 @@ export function tituloDoGrupo(e: EmailsDaLoja | null | undefined, g: GrupoDaBarr
 }
 export function tituloDoAmpliavel(e: EmailsDaLoja | null, conta: string, aberto: boolean, grupos: readonly GrupoDaBarra[] | null | undefined): string {
   const resumo = gruposDaBarra(grupos).map((g) => `${g.rotulo} ${numeroDoGrupo(e, g.chave)}`).join(' · ')
-  return `${aberto ? 'Esconder' : 'Mostrar'} os e-mails da loja ${conta}${resumo ? ` (${resumo})` : ''}`
+  return `${aberto ? 'Esconder' : 'Mostrar'} os e-mails ${e?.site ? 'do site' : 'da loja'} ${conta}${resumo ? ` (${resumo})` : ''}`
 }
 export function escolhaDoEmail(l: LinhaDaBarra, e: EmailsDaLoja, grupo: string): EscolhaEmail {
+  if (e.site) return { chave: l.chave, integration_id: '', store_info_id: '', plataforma: 'site', conta: l.conta, grupo, site: e.site }
   return {
     chave: l.chave,
     integration_id: e.integration_id || '',
@@ -351,7 +395,8 @@ import {
 // lembra as duas. `tique`: o polling da página (relê as caixas abertas).
 // `modo="emails"` (o celular e o tablet, sem a barra de lojas): só as lojas,
 // abertas pelo clique na linha, sem o chat.
-const props = defineProps<{ resumo: Resumo | null; numero?: NumeroDaCaixa; emails?: EmailsDaLoja[] | null; gruposEmail?: GrupoDaBarra[] | null; diasEmail?: number; emailAberto?: { chave: string; grupo: string } | null; modo?: '' | 'emails'; tique?: number }>()
+// `sitesEmail` (27/10/2026): as caixas SAC e Admin de cada site (`sites_na_barra`).
+const props = defineProps<{ resumo: Resumo | null; numero?: NumeroDaCaixa; emails?: EmailsDaLoja[] | null; gruposEmail?: GrupoDaBarra[] | null; sitesEmail?: SiteDaBarra[] | null; diasEmail?: number; emailAberto?: { chave: string; grupo: string } | null; modo?: '' | 'emails'; tique?: number }>()
 const filtros = defineModel<FiltrosLista>('filtros', { required: true })
 const recolhida = defineModel<boolean>('recolhida', { default: false })
 const emailsAbertos = defineModel<string[]>('emailsAbertos', { default: () => [] })
@@ -643,7 +688,10 @@ function motivo(l: LojaBarra): string {
         : `${direct} — a conta não tem leitura de comentários`,
     )
   }
-  if (l.plataforma === 'site') partes.push('Carrinho abandonado do lojista no site (lido do site, servidor a servidor)')
+  if (l.plataforma === 'site') {
+    partes.push('Carrinho abandonado do lojista no site (lido do site, servidor a servidor)')
+    if (siteDaLinha(props.sitesEmail, l)) partes.push('A seta mostra os e-mails do site: SAC (sac@) e Admin (admin@ e os outros endereços)')
+  }
   // O Zap: o número chega pela API oficial da Meta (o webhook); sem as duas
   // chaves de envio ligadas, a resposta continua pelo Duoke.
   if (l.plataforma === 'whatsapp') {
@@ -743,9 +791,18 @@ function ativaLoja(l: LojaBarra) {
 // contas de rede não são loja de e-mail) — mesmo sem e-mail: a caixa vazia diz
 // por quê.
 function emailsDe(l: LojaBarra): EmailsDaLoja | null {
-  if (!props.emails || !gruposDaLoja.value.length || (recolhida.value && props.modo !== 'emails')) return null
+  if (!props.emails || (recolhida.value && props.modo !== 'emails')) return null
+  // O site: as caixas SAC e Admin dele (sem elas — quem não vê todas as equipes —, sem seta).
+  const site = siteDaLinha(props.sitesEmail, l)
+  if (site) return emailsDoSite(site)
+  if (!gruposDaLoja.value.length) return null
   if (l.so_email) return l.emails || null
   return emailsDaLoja(props.emails, l)
+}
+// As caixas embaixo da linha: as do site (SAC · Admin) ou as pastas das lojas.
+function gruposDe(l: LojaBarra): GrupoDaBarra[] {
+  const site = siteDaLinha(props.sitesEmail, l)
+  return site ? gruposDoSite(site) : gruposDaLoja.value
 }
 // A loja cujos e-mails a Caixa mostra agora (a barra recolhida acende o ícone dela).
 function emailAbertoNaLinha(l: LojaBarra): boolean {
@@ -946,8 +1003,8 @@ function idDaCaixa(l: LojaBarra, g: string): string {
               class="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               :aria-expanded="emailsAbertosDe(l)"
               :aria-controls="emailsAbertosDe(l) ? idDosEmails(l) : undefined"
-              :aria-label="tituloDoAmpliavel(emailsDe(l), l.conta, emailsAbertosDe(l), gruposDaLoja)"
-              :title="tituloDoAmpliavel(emailsDe(l), l.conta, emailsAbertosDe(l), gruposDaLoja)"
+              :aria-label="tituloDoAmpliavel(emailsDe(l), l.conta, emailsAbertosDe(l), gruposDe(l))"
+              :title="tituloDoAmpliavel(emailsDe(l), l.conta, emailsAbertosDe(l), gruposDe(l))"
               :data-ampliar-emails="l.chave"
               @click="alternarEmails(l)"
             >
@@ -958,13 +1015,13 @@ function idDaCaixa(l: LojaBarra, g: string): string {
             v-if="emailsDe(l) && emailsAbertosDe(l)"
             :id="idDosEmails(l)"
             role="group"
-            :aria-label="`E-mails da loja ${l.conta}`"
+            :aria-label="`E-mails ${emailsDe(l)?.site ? 'do site' : 'da loja'} ${l.conta}`"
             class="mb-1 ml-5 mr-1 space-y-px border-l border-border/70 pl-1"
             :data-emails-loja="l.chave"
           >
-            <!-- uma CAIXA por pasta (Problemas · Envios · Devolução · Informativo):
-                 abre e fecha sozinha; aberta, a lista curta dos e-mails dela -->
-            <template v-for="g in gruposDaLoja" :key="g.chave">
+            <!-- uma CAIXA por pasta (Problemas · Envios · Devolução · Informativo) —
+                 no site, SAC · Admin: abre e fecha sozinha; aberta, a lista curta dos e-mails dela -->
+            <template v-for="g in gruposDe(l)" :key="g.chave">
               <button
                 type="button"
                 class="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

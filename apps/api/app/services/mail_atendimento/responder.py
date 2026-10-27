@@ -27,8 +27,9 @@
                               da Central (E-mail › Caixas): CONFIRMÁVEL;
      e as de sempre: texto_invalido, envio_repetido, conversa_mudou,
      envio_em_andamento.
-2. A RESPOSTA: De = o endereço da caixa que RECEBEU (no site, RF6, o e-mail
-   do TIPO do chamado na marca — `marca_emails` — quando a caixa tem ele);
+2. A RESPOSTA: De = o endereço da caixa que RECEBEU (no site, desde
+   27/10/2026, também: o SAC como sac@, o Admin como admin@ — `de_do_site`;
+   sem ele, o do TIPO do chamado na marca, `marca_emails`);
    Para = o que a Central calcula (Reply-To, senão o remetente; nunca um
    endereço nosso) — no formulário do site (DE sac@ PARA sac@) o cliente
    lido do corpo, no SERVIDOR; Assunto = "Re: " + o original (+ o
@@ -89,6 +90,8 @@ from app.services.mail_atendimento import caixa as config_caixa
 from app.services.mail_atendimento import codigos, enderecos, ponte, texto
 from app.services.mail_atendimento.constantes import (
     ASSINATURA_LOJA,
+    CAIXA_DO_SITE_ADMIN,
+    CAIXA_DO_SITE_SAC,
     CITACAO_MAX_CARACTERES,
     CITACAO_MAX_LINHAS,
     ESTADO_GRAVADO,
@@ -345,6 +348,20 @@ async def assinatura(session: AsyncSession, conversa: AtendimentoConversa) -> st
     return ASSINATURA_LOJA.format(loja=nome or conversa.conta or "Equipe")
 
 
+def de_do_site(alias_recebido: str | None) -> list[str]:
+    """Os endereços que respondem o e-mail de SITE recebido por `alias_recebido`, na
+    ordem de preferência (PURA). sac@ → ele mesmo; qualquer outro endereço (a
+    caixa Admin: admin@, duvidas@, atacado@…) → admin@ do mesmo domínio, depois
+    ele mesmo."""
+    alias = enderecos.normalizar(alias_recebido)
+    if not alias:
+        return []
+    local, _, dominio = alias.partition("@")
+    if local == CAIXA_DO_SITE_SAC or local == CAIXA_DO_SITE_ADMIN or not dominio:
+        return [alias]
+    return [f"{CAIXA_DO_SITE_ADMIN}@{dominio}", alias]
+
+
 async def de_alias(
     session: AsyncSession,
     conversa: AtendimentoConversa,
@@ -355,16 +372,28 @@ async def de_alias(
     estrito: bool,
     principal: str | None = None,
 ) -> str | None:
-    """O endereço que envia: o que RECEBEU (RF5); no site, o do TIPO do chamado (RF6).
+    """O endereço que envia: o que RECEBEU (RF5) — no site também (27/10/2026).
 
-    O do tipo (sac@/atacado@/duvidas@ da marca, `marca_emails`) só vale se é
-    da caixa — e, com o remetente estrito ligado, se também recebeu o e-mail
-    (a Central recusaria outro). Nunca o endereço principal no lugar do que
-    recebeu; `principal` (a caixa `empresa`): nem quando foi ELE que recebeu
-    (o login da conta do Tuta nunca vai para o cliente).
+    Site (o dono, 27/10/2026: "o SAC responde como sac@, o Admin como admin@"):
+    a caixa SAC (recebido por sac@) responde pelo sac@ que recebeu; a caixa
+    Admin pelo admin@ do MESMO domínio (o e-mail que ainda chegar no
+    duvidas@/atacado@ antigo sai como admin@) quando ele é da caixa — e, com o
+    remetente estrito, só se também recebeu; senão pelo próprio endereço que
+    recebeu (`de_do_site`). Sem o recebido na caixa, o de antes: o do TIPO do
+    chamado na marca (`marca_emails`), nas mesmas condições. Nunca o endereço
+    principal no lugar do que recebeu; `principal` (a caixa `empresa`): nem
+    quando foi ELE que recebeu (o login da conta do Tuta nunca vai para o cliente).
     """
     aliases = {a for a in aliases if a != principal}
     recebidos = [a for a in recebidos if a != principal]
+
+    def serve(endereco: str | None) -> bool:
+        return bool(endereco) and endereco in aliases and (not estrito or endereco in recebidos)
+
+    if conversa.plataforma == PLATAFORMA_SITE:
+        for candidato in de_do_site(meta.alias_recebido):
+            if serve(candidato):
+                return candidato
     if conversa.plataforma == PLATAFORMA_SITE and meta.marca_id is not None:
         tipo = ponte.dados_mail(conversa).get("caixa") or meta.tipo_caixa
         if tipo:

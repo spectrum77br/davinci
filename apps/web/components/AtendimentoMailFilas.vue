@@ -55,7 +55,7 @@
 // Funções puras aqui em cima (tests/atendimento-mail-atendimento.cjs).
 
 import type { ConversaResumo, ResumoLoja } from '~/components/AtendimentoPlataforma.vue'
-import type { EmailsDaLoja, GrupoDaBarra } from '~/components/AtendimentoLojas.vue'
+import type { EmailsDaLoja, GrupoDaBarra, SiteDaBarra } from '~/components/AtendimentoLojas.vue'
 import { TIPOS_EMAIL, dicaTipoEmail, rotuloTipoEmail } from '~/components/AtendimentoEmailCartao.vue'
 
 export type Fila = 'sem_loja' | 'sem_vinculo' | 'chamados' | 'aguardando' | 'todas' | 'suspeito' | 'resumo' | 'erro' | 'revisar_envio'
@@ -93,7 +93,7 @@ export const TIPOS_CHAMADO: { value: string; label: string; hint: string }[] = [
 // ampliável de e-mails da barra de lojas da Caixa (AtendimentoLojas).
 // `grupos_na_barra`: as pastas que a barra mostra embaixo de cada loja (a
 // escolha do dono, na API) com o status de cada uma na ponte; `dias`: a janela.
-export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number>; por_loja?: EmailsDaLoja[]; grupos_na_barra?: GrupoDaBarra[]; dias?: number }
+export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number>; por_loja?: EmailsDaLoja[]; grupos_na_barra?: GrupoDaBarra[]; sites_na_barra?: SiteDaBarra[]; dias?: number }
 export function juntarContagens(filas: Record<string, number> | null, conversas: ContagensDeConversa | null): Record<string, number> {
   return { ...(filas || {}), ...(conversas ? { chamados: conversas.chamados, aguardando: conversas.aguardando } : {}) }
 }

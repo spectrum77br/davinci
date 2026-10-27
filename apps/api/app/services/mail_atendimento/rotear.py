@@ -32,7 +32,8 @@
    site). Sem isso, a loja só vale se o alias é de UMA loja de UMA
    plataforma; senão sem loja, com a sugestão pelo domínio do remetente.
 5. CAIXA DE SITE (RF6) → o chamado do site, só para: o endereço de
-   `marca_emails`, ou sac@/atacado@/duvidas@/support@ (`LOCAIS_DE_SITE`) num
+   `marca_emails`, ou sac@/admin@/atacado@/duvidas@/support@ (`LOCAIS_DE_SITE`;
+   admin@ desde 27/10/2026: o "Fale com a gente" e o Atacado dos sites) num
    domínio de marca (ou numa pasta "*marca" de marca que EXISTE no
    cadastro). Qualquer outro endereço do domínio da marca (gabrieli@,
    ouvidoria@…) NÃO é site: vai para "sem loja" (só quem mexe vê). A marca:
@@ -403,6 +404,47 @@ def e_caixa_de_site(endereco: str | None, cad: Cadastro, *, marca_pasta: str | N
     return bool(marcas_do_dominio(endereco, cad)) or (
         marca_pasta is not None and marca_pasta in cad.marcas
     )
+
+
+def cliente_pelo_reply_to(
+    *,
+    de: str | None,
+    reply_to: list[str],
+    nossos: list[str],
+    conhecidos: set[str],
+    cad: Cadastro,
+    marca_pasta: str | None = None,
+) -> str | None:
+    """O CLIENTE do formulário do site que chega pelo remetente técnico do site (PURA).
+
+    27/10/2026 (os sites novos): o e-mail da equipe sai DE
+    `nao-responda@envio.<domínio da marca>` (o Brevo do site), com o Reply-To =
+    o cliente, PARA a caixa do formulário (sac@ ou admin@). É o formulário — o
+    mesmo de antes (DE sac@ PARA sac@, o cliente no corpo) —, só que o cliente
+    vem no Reply-To. Vale só quando: o remetente é "não responder" num domínio
+    de MARCA (ou subdomínio: envio.uranyx.com.br); quem recebeu é uma CAIXA DE
+    SITE; e o Reply-To tem UM endereço de fora (não é nosso, nem de marca, nem
+    aviso/serviço). Senão None (o e-mail segue a régua de sempre)."""
+    if not de or de in conhecidos or not enderecos.nao_responde(de):
+        return None
+    if not marcas_do_dominio(de, cad):
+        return None
+    if not any(e_caixa_de_site(a, cad, marca_pasta=marca_pasta) for a in nossos):
+        return None
+    clientes = []
+    for r in reply_to:
+        r = enderecos.normalizar(r)
+        if (
+            r
+            and r != de
+            and r not in conhecidos
+            and r not in cad.caixas
+            and not marcas_do_dominio(r, cad)
+            and enderecos.cara_de_pessoa(r)
+            and r not in clientes
+        ):
+            clientes.append(r)
+    return clientes[0] if len(clientes) == 1 else None
 
 
 def _rota_do_site(

@@ -57,7 +57,7 @@ import unicodedata
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import and_, case, exists, literal, not_, or_, select
+from sqlalchemy import and_, case, exists, func, literal, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -70,6 +70,8 @@ from app.models.mail_atendimento import (
 )
 from app.services.mail_atendimento import codigos, constantes, regras, rotear
 from app.services.mail_atendimento.constantes import (
+    CAIXA_DO_SITE_ADMIN,
+    CAIXA_DO_SITE_SAC,
     CATEGORIA_INFORMATIVO,
     CATEGORIA_SITE,
     CATEGORIA_VENDA,
@@ -284,10 +286,14 @@ def texto_da_caixa(assunto: str | None, texto: str | None) -> tuple[str, str, in
 
 
 def ultima_pasta_recebida():
-    """(conversa_id, folder_id) do e-mail RECEBIDO mais recente de cada conversa."""
+    """(conversa_id, folder_id, alias) do e-mail RECEBIDO mais recente de cada conversa."""
     m, mm = MailMessageMeta, MailMessage
     return (
-        select(m.conversa_id.label("conversa_id"), m.folder_id.label("folder_id"))
+        select(
+            m.conversa_id.label("conversa_id"),
+            m.folder_id.label("folder_id"),
+            m.alias_recebido.label("alias"),
+        )
         .join(mm, mm.id == m.message_id)
         .where(m.conversa_id.is_not(None), mm.direction != "sent")
         .distinct(m.conversa_id)
@@ -340,3 +346,142 @@ async def alias_das_lojas(
         if integ is not None and por_integracao.get(integ) != ALIAS_NA_PONTE:
             por_integracao[integ] = st
     return por_integracao, por_ficha
+
+
+# ── As caixas dos SITES (27/10/2026) ───────────────────────────────────────
+#
+# O Eduardo, 27/10: a linha de cada SITE na barra (Uranyx e Charlots — a do
+# carrinho, `externo_ref` "site:<site>") ganha o mesmo ampliável das lojas,
+# com DUAS caixas: SAC e Admin. Todo e-mail de um site cai numa pasta só do
+# Tuta ("*uranyx", "*charlots" — `SITES_EMAIL_NA_BARRA_DE_LOJAS`, o único lugar
+# da escolha); a caixa é a do endereço que RECEBEU (`alias_recebido`, sem
+# diferenciar maiúsculas): sac@ = SAC, o resto (admin@, duvidas@, atacado@,
+# app@, support@, sem alias) = Admin. A caixa do site mostra o e-mail da pasta
+# como a das lojas (a conversa — o chamado do site —, o guardado, o duplicado
+# uma vez só), MENOS o que a ponte segurou como segurança: nas pastas dos
+# sites são os códigos de acesso das contas da marca (o dono só liberou o
+# código nas pastas das lojas). Só para quem vê todas as equipes (a conversa
+# do site não tem loja: é o "site" de sempre).
+
+ESTADOS_NO_SITE = tuple(e for e in ESTADOS_NA_CAIXA if e != ESTADO_SEGURANCA)
+
+
+@dataclass(frozen=True)
+class Site:
+    chave: str
+    nome: str
+    pastas: tuple[str, ...]
+
+    @property
+    def externo_ref(self) -> str:
+        return f"site:{self.chave}"
+
+    @property
+    def nomes(self) -> frozenset[str]:
+        return frozenset(normalizar(p) for p in self.pastas)
+
+
+def sites() -> tuple[Site, ...]:
+    """Os sites da barra, na ordem (lidos da constante na hora: os testes a trocam)."""
+    return tuple(Site(c, n, tuple(p)) for c, n, p in constantes.SITES_EMAIL_NA_BARRA_DE_LOJAS)
+
+
+def caixas_do_site() -> tuple[tuple[str, str], ...]:
+    return tuple(constantes.CAIXAS_EMAIL_DO_SITE)
+
+
+def site_da_pasta(
+    nome: str | None, caminho: str | None = None, chave: str | None = None
+) -> str | None:
+    """O site de uma pasta pelo nome (a última parte do caminho) ou pela chave. PURA."""
+    candidatos = {normalizar(nome), normalizar(regras.nome_da_pasta(caminho)), normalizar(chave)}
+    candidatos.discard("")
+    for st in sites():
+        if candidatos & st.nomes:
+            return st.chave
+    return None
+
+
+def caixa_do_alias(alias: str | None) -> str:
+    """A caixa do site pelo endereço que recebeu: sac@ = SAC; o resto = Admin. PURA."""
+    local = (alias or "").strip().lower().partition("@")[0]
+    return CAIXA_DO_SITE_SAC if local == CAIXA_DO_SITE_SAC else CAIXA_DO_SITE_ADMIN
+
+
+def caixa_do_alias_sql(coluna):
+    """`caixa_do_alias` em SQL."""
+    local = func.split_part(func.lower(func.coalesce(coluna, "")), "@", 1)
+    return case(
+        (local == CAIXA_DO_SITE_SAC, literal(CAIXA_DO_SITE_SAC)), else_=literal(CAIXA_DO_SITE_ADMIN)
+    )
+
+
+@dataclass
+class PastasDosSites:
+    # site → as pastas (de qualquer caixa)
+    por_site: dict[str, list[UUID]]
+    # site → o melhor status entre as pastas das caixas com a ponte ligada
+    status: dict[str, str]
+
+    def ids(self, site: str | None = None) -> list[UUID]:
+        if site:
+            return self.por_site.get(site, [])
+        return [i for lista in self.por_site.values() for i in lista]
+
+    def site_sql(self, folder_id):
+        """O site (a chave) da pasta, em SQL — NULL fora dos sites."""
+        ramos = [(folder_id.in_(ids), literal(st)) for st, ids in self.por_site.items() if ids]
+        return case(*ramos, else_=None) if ramos else literal(None)
+
+
+async def pastas_dos_sites(session: AsyncSession) -> PastasDosSites:
+    """As pastas de cada site e o status delas (uma consulta)."""
+    ligadas = set(
+        (
+            await session.execute(
+                select(MailMailboxSettings.mailbox_id).where(
+                    MailMailboxSettings.ponte_ligada.is_(True)
+                )
+            )
+        ).scalars()
+    )
+    chaves_dos_sites = [st.chave for st in sites()]
+    por_site: dict[str, list[UUID]] = {st: [] for st in chaves_dos_sites}
+    status: dict[str, str] = dict.fromkeys(chaves_dos_sites, SEM_PASTA)
+    for pasta in (await session.execute(select(MailFolder).order_by(MailFolder.id))).scalars():
+        st = site_da_pasta(pasta.nome, pasta.caminho, pasta.chave)
+        if st is None:
+            continue
+        por_site[st].append(pasta.id)
+        if pasta.mailbox_id in ligadas and pasta.sumiu_em is None:
+            s = status_da_pasta(pasta)
+            if _ORDEM_STATUS.index(s) < _ORDEM_STATUS.index(status[st]):
+                status[st] = s
+    return PastasDosSites(por_site=por_site, status=status)
+
+
+def email_do_site_sql(
+    pastas: PastasDosSites, site: str | None = None, caixa: str | None = None, m=MailMessageMeta
+):
+    """WHERE do e-mail que a caixa de um site (ou de qualquer site) mostra."""
+    ids = pastas.ids(site)
+    if not ids:
+        return (literal(False),)
+    todas = pastas.ids()
+    original = aliased(MailMessageMeta)
+    original_no_site = exists(
+        select(literal(1)).where(
+            original.message_id == m.duplicado_de, original.folder_id.in_(todas)
+        )
+    )
+    onde = [
+        m.folder_id.in_(ids),
+        or_(
+            m.estado.in_(ESTADOS_NO_SITE),
+            and_(m.estado == ESTADO_IGNORADO, m.motivo.in_(IGNORADOS_NA_CAIXA)),
+            and_(m.estado == ESTADO_DUPLICADO, not_(original_no_site)),
+        ),
+    ]
+    if caixa:
+        onde.append(caixa_do_alias_sql(m.alias_recebido) == caixa)
+    return tuple(onde)

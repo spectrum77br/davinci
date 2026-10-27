@@ -21,7 +21,8 @@ import {
 } from '~/components/AtendimentoPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
-import type { EmailDaCaixa, EmailsDaLoja, EscolhaEmail, GrupoDaBarra } from '~/components/AtendimentoLojas.vue'
+import { emailsDoSite, gruposDoSite } from '~/components/AtendimentoLojas.vue'
+import type { EmailDaCaixa, EmailsDaLoja, EscolhaEmail, GrupoDaBarra, SiteDaBarra } from '~/components/AtendimentoLojas.vue'
 import { GRUPOS_CAIXA, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 
 // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
@@ -228,6 +229,8 @@ const emailContagens = ref<ContagensDeConversa | null>(null)
 // lista: a escolha do dono mora lá, GRUPOS_EMAIL_NA_BARRA_DE_LOJAS) e a janela.
 const emailPorLoja = ref<EmailsDaLoja[] | null>(null)
 const emailGruposNaBarra = ref<GrupoDaBarra[]>([])
+// As caixas SAC e Admin de cada site (27/10/2026: `sites_na_barra`, só para quem vê todas as equipes).
+const emailSitesNaBarra = ref<SiteDaBarra[]>([])
 const emailDias = ref(30)
 const emailContagensProntas = ref(false)
 const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
@@ -253,6 +256,7 @@ async function carregarContagensEmail() {
     if (Array.isArray(recebidas?.por_loja)) {
       emailPorLoja.value = recebidas.por_loja
       emailGruposNaBarra.value = Array.isArray(recebidas.grupos_na_barra) ? recebidas.grupos_na_barra : []
+      emailSitesNaBarra.value = Array.isArray(recebidas.sites_na_barra) ? recebidas.sites_na_barra : []
       emailDias.value = Number(recebidas.dias) || 30
     }
   } catch {
@@ -838,7 +842,17 @@ watch(querPorLoja, (v) => {
 const contagemDaLoja = computed<EmailsDaLoja | null>(() => {
   const e = emailsDaLoja.value
   if (!e) return null
+  if (e.site) {
+    const s = emailSitesNaBarra.value.find((x) => x.site === e.site)
+    return s ? emailsDoSite(s) : null
+  }
   return (emailPorLoja.value || []).find((x) => (e.integration_id ? x.integration_id === e.integration_id : !x.integration_id && x.store_info_id === e.store_info_id)) || null
+})
+// Os chips da lista do meio: as caixas do site (SAC · Admin) ou as pastas das lojas.
+const gruposDaEscolha = computed<GrupoDaBarra[]>(() => {
+  const e = emailsDaLoja.value
+  if (e?.site) return gruposDoSite(emailSitesNaBarra.value.find((x) => x.site === e.site))
+  return emailGruposNaBarra.value
 })
 // Há e-mail na tela da Caixa (a lista da loja ou uma conversa de e-mail): a
 // conversa do chat fica escondida e PARADA.
@@ -1151,6 +1165,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
           :numero="emHumano ? 'humano' : 'nao_lidas_duoke'"
           :emails="aba === 'caixa' ? emailPorLoja : null"
           :grupos-email="emailGruposNaBarra"
+          :sites-email="emailSitesNaBarra"
           :dias-email="emailDias"
           :tique="emailTique"
           :email-aberto="emailsDaLoja ? { chave: emailsDaLoja.chave, grupo: emailsDaLoja.grupo } : null"
@@ -1186,6 +1201,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
           numero="nao_lidas_duoke"
           :emails="emailPorLoja"
           :grupos-email="emailGruposNaBarra"
+          :sites-email="emailSitesNaBarra"
           :dias-email="emailDias"
           :tique="emailTique"
           @abrir-emails="abrirEmailsDaLoja"
@@ -1196,7 +1212,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
           v-if="emailsDaLoja"
           :escolha="emailsDaLoja"
           :contagem="contagemDaLoja"
-          :grupos="emailGruposNaBarra"
+          :grupos="gruposDaEscolha"
           :dias="emailDias"
           :selecionada="emailNaCaixa"
           :aberto="emailDaCaixaAberto"

@@ -1252,6 +1252,7 @@ async def _contagens_por_loja(
         "chamados": chamados,
         "chamados_por_tipo": por_tipo_chamado,
         "por_tipo_email": por_tipo_email,
+        "sites_na_barra": await _contagens_dos_sites(session, scope, visao),
         "grupos_na_barra": [
             {
                 "chave": g.chave,
@@ -1272,6 +1273,135 @@ async def _contagens_por_loja(
             ),
         ),
     }
+
+
+async def _contagens_dos_sites(
+    session: AsyncSession, scope: TeamScope, visao: administracao.VisaoRapida
+) -> list[dict[str, Any]]:
+    """As caixas SAC e Admin de cada SITE na barra de lojas (27/10/2026).
+
+    O Eduardo, 27/10: a linha do site (Uranyx, Charlots — `externo_ref`
+    "site:<site>") com o mesmo ampliável das lojas e DUAS caixas, separadas pelo
+    endereço que RECEBEU (`barra_lojas.caixa_do_alias`: sac@ = SAC, o resto =
+    Admin). Por caixa, como nas lojas: `emails` (os e-mails da pasta do site nos
+    últimos `DIAS_DA_BARRA_DE_LOJAS` dias — `barra_lojas.email_do_site_sql`, a
+    mesma régua da lista), e as conversas de e-mail cujo RECEBIDO mais recente
+    está na pasta do site, pela caixa dele: `abertas`, `aguardando` (a bolinha)
+    e `total`. `status`: o da pasta do site na ponte (o porquê da caixa vazia).
+    Só para quem vê todas as equipes (o chamado do site não tem loja): os outros
+    recebem a lista vazia. Só números e códigos."""
+    if not scope.unrestricted:
+        return []
+    pastas = await barra_lojas.pastas_dos_sites(session)
+    lista = barra_lojas.sites()
+    chaves_caixa = [k for k, _r in barra_lojas.caixas_do_site()]
+    numeros = {st.chave: {k: _conta_vazia() for k in chaves_caixa} for st in lista}
+    todas = pastas.ids()
+    if todas:
+        c = AtendimentoConversa
+        u = barra_lojas.ultima_pasta_recebida()
+        q = (
+            select(
+                pastas.site_sql(u.c.folder_id).label("site"),
+                barra_lojas.caixa_do_alias_sql(u.c.alias).label("caixa"),
+                (c.situacao != CONVERSA_FECHADA).label("aberta"),
+                c.aguardando_resposta.is_(True).label("esperando"),
+            )
+            .select_from(c)
+            .join(u, u.c.conversa_id == c.id)
+            .where(
+                u.c.folder_id.in_(todas),
+                separa_email.conversa_de_email_sql(),
+                visao.filtro_conversa(),
+            )
+        )
+        cond = _clausula_escopo(scope, c.integration_id)
+        if cond is not None:
+            q = q.where(cond)
+        sq = q.subquery()
+        cols = (sq.c.site, sq.c.caixa, sq.c.aberta, sq.c.esperando)
+        for site, caixa, aberta, esperando, n in (
+            await session.execute(select(*cols, func.count()).group_by(*cols))
+        ).all():
+            alvo = numeros.get(site, {}).get(caixa)
+            if alvo is None:
+                continue
+            alvo["total"] += int(n or 0)
+            if aberta is True:
+                alvo["abertas"] += int(n or 0)
+            if esperando is True:
+                alvo["aguardando"] += int(n or 0)
+        m = MailMessageMeta
+        desde = datetime.now(UTC) - timedelta(days=mail_constantes.DIAS_DA_BARRA_DE_LOJAS)
+        qm = (
+            select(
+                pastas.site_sql(m.folder_id).label("site"),
+                barra_lojas.caixa_do_alias_sql(m.alias_recebido).label("caixa"),
+            )
+            .join(MailMessage, MailMessage.id == m.message_id)
+            .where(
+                *barra_lojas.email_do_site_sql(pastas, None, None, m),
+                MailMessage.received_at >= desde,
+                visao.filtro_mensagem(m.message_id),
+            )
+        ).subquery()
+        for site, caixa, n in (
+            await session.execute(
+                select(qm.c.site, qm.c.caixa, func.count()).group_by(qm.c.site, qm.c.caixa)
+            )
+        ).all():
+            alvo = numeros.get(site, {}).get(caixa)
+            if alvo is not None:
+                alvo["emails"] += int(n or 0)
+    return [
+        {
+            "site": st.chave,
+            "externo_ref": st.externo_ref,
+            "nome": st.nome,
+            "pastas": list(st.pastas),
+            "status": pastas.status.get(st.chave, barra_lojas.SEM_PASTA),
+            "caixas": [{"chave": k, "rotulo": r} for k, r in barra_lojas.caixas_do_site()],
+            "emails_30d": sum(g["emails"] for g in numeros[st.chave].values()),
+            "grupos": numeros[st.chave],
+        }
+        for st in lista
+    ]
+
+
+async def _emails_do_site(
+    session: AsyncSession,
+    user: User,
+    *,
+    site: str | None,
+    caixa: str | None,
+    message_id: UUID | None = None,
+):
+    """A consulta dos e-mails da caixa de um SITE (ou de um e-mail de qualquer site):
+    `barra_lojas.email_do_site_sql`, o filtro de acesso da pessoa e a janela. Quem
+    não vê todas as equipes: nada (o chamado do site não tem loja). As colunas são
+    as da caixa da loja (a meta, o e-mail, a integração e a ficha da meta, a conversa)."""
+    scope = await resolve_team_scope(session, user)
+    pastas = await barra_lojas.pastas_dos_sites(session)
+    visao = await administracao.visao_rapida(session, user)
+    m = MailMessageMeta
+    c = AtendimentoConversa
+    q = (
+        select(m, MailMessage, m.integration_id.label("integ"), m.store_info_id.label("ficha"), c)
+        .join(MailMessage, MailMessage.id == m.message_id)
+        .outerjoin(c, c.id == m.conversa_id)
+        .where(
+            *barra_lojas.email_do_site_sql(pastas, site, caixa, m),
+            visao.filtro_mensagem(m.message_id),
+        )
+    )
+    if not scope.unrestricted:
+        q = q.where(literal(False))
+    if message_id is not None:
+        q = q.where(m.message_id == message_id)
+    else:
+        desde = datetime.now(UTC) - timedelta(days=mail_constantes.DIAS_DA_BARRA_DE_LOJAS)
+        q = q.where(MailMessage.received_at >= desde)
+    return q
 
 
 def _uuid(valor: Any) -> UUID | None:
@@ -1375,6 +1505,7 @@ async def emails_da_caixa(
     grupo: Annotated[str, Query(max_length=32)],
     integration_id: Annotated[UUID | None, Query()] = None,
     store_info_id: Annotated[UUID | None, Query()] = None,
+    site: Annotated[str | None, Query(max_length=32)] = None,
     antes_de: Annotated[datetime | None, Query()] = None,
     limite: Annotated[int, Query(ge=1, le=200)] = POR_PAGINA,
 ) -> dict[str, Any]:
@@ -1387,17 +1518,36 @@ async def emails_da_caixa(
     loja escolhida, no escopo da equipe e com o filtro de acesso da pessoa; só
     os últimos `DIAS_DA_BARRA_DE_LOJAS` dias (o número da caixa é o mesmo). Sem
     o texto: o assunto (sem link de acesso), o remetente e a conversa; o e-mail
-    inteiro em GET …/lojas/emails/{id}."""
+    inteiro em GET …/lojas/emails/{id}.
+
+    `site` (27/10/2026): a caixa de um SITE (`grupo` = `sac` ou `admin`, a
+    caixa do endereço que recebeu) — os e-mails da pasta do site
+    (`barra_lojas.email_do_site_sql`), só para quem vê todas as equipes (403
+    `email_do_site_fora_do_escopo` para os outros)."""
     grupo = (grupo or "").strip().lower()
-    if grupo not in barra_lojas.chaves():
-        raise HTTPException(422, detail={"code": "grupo_email_invalido"})
-    if (integration_id is None) == (store_info_id is None):
-        raise HTTPException(422, detail={"code": "loja_obrigatoria"})
+    site = (site or "").strip().lower() or None
+    if site is not None:
+        if site not in {st.chave for st in barra_lojas.sites()}:
+            raise HTTPException(422, detail={"code": "site_invalido"})
+        if grupo not in {k for k, _r in barra_lojas.caixas_do_site()}:
+            raise HTTPException(422, detail={"code": "grupo_email_invalido"})
+        if integration_id is not None or store_info_id is not None:
+            raise HTTPException(422, detail={"code": "site_ou_loja"})
+        if not (await resolve_team_scope(session, user)).unrestricted:
+            raise HTTPException(403, detail={"code": "email_do_site_fora_do_escopo"})
+    else:
+        if grupo not in barra_lojas.chaves():
+            raise HTTPException(422, detail={"code": "grupo_email_invalido"})
+        if (integration_id is None) == (store_info_id is None):
+            raise HTTPException(422, detail={"code": "loja_obrigatoria"})
     response.headers["Cache-Control"] = "no-store"
     await session.execute(sql_text("SET LOCAL jit = off"))
-    q = await _emails_da_caixa(
-        session, user, grupo=grupo, integration_id=integration_id, store_info_id=store_info_id
-    )
+    if site is not None:
+        q = await _emails_do_site(session, user, site=site, caixa=grupo)
+    else:
+        q = await _emails_da_caixa(
+            session, user, grupo=grupo, integration_id=integration_id, store_info_id=store_info_id
+        )
     if antes_de is not None:
         q = q.where(MailMessage.received_at < antes_de)
     linhas = (
@@ -1421,6 +1571,10 @@ async def _email_da_caixa_ou_404(
     q = await _emails_da_caixa(session, user, grupo=None, message_id=message_id)
     achada = (await session.execute(q)).first()
     if achada is None:
+        # A caixa de um SITE (27/10/2026): a mesma régua da lista dele.
+        q = await _emails_do_site(session, user, site=None, caixa=None, message_id=message_id)
+        achada = (await session.execute(q)).first()
+    if achada is None:
         raise HTTPException(404, detail={"code": "email_nao_encontrado"})
     meta, message, integ, ficha, _conversa = achada
     return meta, message, integ, ficha
@@ -1443,6 +1597,10 @@ async def email_da_caixa(
     if loja is None and ficha is not None:
         f = await session.get(StoreInfo, ficha)
         loja = (" ".join((f.account_name or "").split()) or None) if f else None
+    if loja is None and pasta is not None:
+        # O e-mail da pasta de um SITE: o nome do site.
+        do_site = barra_lojas.site_da_pasta(pasta.nome, pasta.caminho, pasta.chave)
+        loja = next((st.nome for st in barra_lojas.sites() if st.chave == do_site), None)
     email = ponte.decifrar(message)
     assunto, corpo, links = barra_lojas.texto_da_caixa(email.assunto, texto.legivel(email.texto))
     anexos = (

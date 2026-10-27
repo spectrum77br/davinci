@@ -110,6 +110,30 @@ GRUPOS_EMAIL_NA_BARRA_DE_LOJAS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 # Os números "recentes" da barra (o diagnóstico de cada loja: quantos e-mails
 # a ponte ligou à loja nestes últimos dias, em qualquer pasta e em cada grupo).
 DIAS_DA_BARRA_DE_LOJAS = 30
+# AS CAIXAS DE E-MAIL DOS SITES na barra de lojas da Caixa (27/10/2026) — o
+# ÚNICO lugar da escolha. O Eduardo, 27/10: cada site (Uranyx e Charlots) tem
+# DOIS endereços de contato — sac@<domínio> (o formulário SAC) e
+# admin@<domínio> ("Fale com a gente" e "Atacado"; os antigos duvidas@ e
+# atacado@ ainda podem receber) —, e as regras do Tuta mandam todos de UM
+# site para UMA pasta ("*uranyx", "*charlots"). Na barra, a linha do SITE
+# (`externo_ref` "site:<site>", a do carrinho) ganha o mesmo ampliável das
+# lojas, com DUAS caixas — SAC e Admin —, separadas pelo endereço que RECEBEU
+# o e-mail (`mail_message_meta.alias_recebido`, sem diferenciar maiúsculas):
+# sac@<qualquer domínio> = SAC; o resto (admin@, duvidas@, atacado@, app@,
+# support@, sem alias) = Admin. A resposta sai pelo endereço que recebeu (o
+# SAC responde como sac@, o Admin como admin@ — `responder.de_alias`).
+# Cada site: (chave = o "site:<chave>" da barra, o nome, as pastas — o nome
+# inteiro da pasta, sem acento e sem maiúsculas, em qualquer caixa com a ponte).
+SITES_EMAIL_NA_BARRA_DE_LOJAS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("uranyx", "Uranyx", ("*uranyx",)),
+    ("charlots", "Charlots", ("*charlots",)),
+)
+CAIXA_DO_SITE_SAC = "sac"
+CAIXA_DO_SITE_ADMIN = "admin"
+CAIXAS_EMAIL_DO_SITE: tuple[tuple[str, str], ...] = (
+    (CAIXA_DO_SITE_SAC, "SAC"),
+    (CAIXA_DO_SITE_ADMIN, "Admin"),
+)
 ROTULO_CATEGORIA = {
     CATEGORIA_INFORMATIVO: "Informativo",
     CATEGORIA_CHAMADO: "Chamado (Pós-venda)",
@@ -299,6 +323,11 @@ ALERTA_LOJA_SEM_INTEGRACAO = (
 # e qualquer outro endereço do domínio da marca NÃO são site — vão para
 # "sem loja", que só quem mexe vê). O tipo do chamado: o do nome; `None` = o
 # protocolo (ou a pasta) diz.
+# admin@ (27/10/2026, o Eduardo): o endereço do "Fale com a gente" e do
+# "Atacado" dos sites (no lugar de duvidas@ e atacado@, que continuam valendo
+# para o e-mail que ainda chegar) — o tipo é o do protocolo (UDS/UA/CDS/CA).
+# Fora de um domínio de marca (ou de uma pasta "*marca"), admin@ continua
+# endereço INTERNO (`LOCAIS_INTERNOS`: nunca vai para a fila).
 LOCAIS_DE_SITE: dict[str, str | None] = {
     "sac": "sac",
     "atacado": "atacado",
@@ -306,6 +335,7 @@ LOCAIS_DE_SITE: dict[str, str | None] = {
     "duvida": "duvidas",
     "support": None,
     "suporte": None,
+    "admin": None,
 }
 
 # ── Remetente ──────────────────────────────────────────────────────────────

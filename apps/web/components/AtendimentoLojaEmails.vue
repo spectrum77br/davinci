@@ -26,8 +26,8 @@ export function urlDoEmailDaCaixa(id: string): string {
 export function urlDoAnexoDaCaixa(id: string): string {
   return `/api/atendimento/email/lojas/anexos/${encodeURIComponent(id)}`
 }
-export function chaveDaEscolha(e: Pick<EscolhaEmail, 'chave' | 'grupo' | 'integration_id' | 'store_info_id'> | null | undefined): string {
-  return e ? [e.chave, e.grupo, e.integration_id, e.store_info_id].join('|') : ''
+export function chaveDaEscolha(e: Pick<EscolhaEmail, 'chave' | 'grupo' | 'integration_id' | 'store_info_id' | 'site'> | null | undefined): string {
+  return e ? [e.chave, e.grupo, e.integration_id, e.store_info_id, e.site || ''].join('|') : ''
 }
 // O nome da linha: o assunto; sem ele, o cliente ou o remetente.
 export function tituloDaLinha(e: Pick<EmailDaCaixa, 'assunto' | 'comprador_nome' | 'de'>): string {
@@ -137,7 +137,7 @@ const rotuloDoGrupo = computed(() => grupoAtual.value?.rotulo || props.escolha.g
 </script>
 
 <template>
-  <div class="flex min-h-0 flex-1 flex-col" :aria-label="`E-mails ${rotuloDoGrupo} da loja ${escolha.conta}`" data-emails-da-loja>
+  <div class="flex min-h-0 flex-1 flex-col" :aria-label="`E-mails ${rotuloDoGrupo} ${escolha.site ? 'do site' : 'da loja'} ${escolha.conta}`" data-emails-da-loja>
     <div class="shrink-0 space-y-1.5 border-b p-2">
       <div class="flex items-center gap-1.5">
         <button
@@ -171,7 +171,7 @@ const rotuloDoGrupo = computed(() => grupoAtual.value?.rotulo || props.escolha.g
           {{ g.rotulo }}<span v-if="contagem" class="tabular-nums">{{ numeroDoGrupo(contagem, g.chave) }}</span>
         </button>
       </div>
-      <p class="text-[11px] text-muted-foreground">Os e-mails da pasta dos últimos {{ diasDaBarra }} dias, o mais novo primeiro.</p>
+      <p class="text-[11px] text-muted-foreground">{{ escolha.site ? `Os e-mails do site para o ${escolha.grupo === 'sac' ? 'sac@' : 'admin@ (e os outros endereços)'} dos últimos ${diasDaBarra} dias, o mais novo primeiro — a resposta sai pelo mesmo endereço.` : `Os e-mails da pasta dos últimos ${diasDaBarra} dias, o mais novo primeiro.` }}</p>
     </div>
 
     <div class="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">

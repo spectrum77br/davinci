@@ -49,6 +49,8 @@ function mount({ tab, conversation, saved, intercept } = {}) {
     if (name === '@vueuse/core') return { useResizeObserver: () => {}, useWindowSize: () => ({ height: Vue.ref(0), width: Vue.ref(1440) }) }
     if (name.includes('AtendimentoPlataforma.vue')) return platform
     if (name.includes('AtendimentoFiltroPlataforma.vue')) return filter
+    // As caixas dos sites (27/10/2026): só as funções que a página usa.
+    if (name.includes('AtendimentoLojas.vue')) return { emailsDoSite: (s) => ({ ...s }), gruposDoSite: () => [] }
     return require(name)
   }
   const globals = {

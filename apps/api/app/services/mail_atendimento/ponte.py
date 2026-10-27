@@ -1759,19 +1759,34 @@ async def processar(
     conhecidos = aliases | cad.enderecos_completos() | set(cad.caixas)
     tipo = remetente_tipo(email.de, conhecidos)
     nossos = rotear.nossos_do_email(recebeu=email.recebeu, aliases=aliases)
+    marca_da_pasta = classe.marca if classe.plataforma == PLATAFORMA_SITE else None
+    # O formulário do site pelo remetente técnico (27/10/2026: DE
+    # nao-responda@envio.<marca>, Reply-To = o cliente, PARA sac@/admin@).
+    cliente_rt = (
+        None
+        if enviado
+        else rotear.cliente_pelo_reply_to(
+            de=email.de,
+            reply_to=email.reply_to,
+            nossos=nossos,
+            conhecidos=conhecidos,
+            cad=cad,
+            marca_pasta=marca_da_pasta,
+        )
+    )
 
     # 4. Segurança: código, senha, acesso — nunca vira conversa. Só de PESSOA
     # num lugar de pessoa (o formulário do site, o cliente na caixa de site
     # ou num fio da equipe; nunca num login de loja) a regra afrouxa: aí só o
     # código de acesso de verdade esconde ("esqueci minha senha" de um
     # cliente é atendimento).
-    de_pessoa = await de_pessoa_para_seguranca(
+    de_pessoa = cliente_rt is not None or await de_pessoa_para_seguranca(
         session,
         email,
         tipo=tipo,
         nossos=nossos,
         cad=cad,
-        marca_pasta=classe.marca if classe.plataforma == PLATAFORMA_SITE else None,
+        marca_pasta=marca_da_pasta,
     )
     if codigos.e_de_seguranca(email.assunto, texto.legivel(email.texto), de_pessoa=de_pessoa):
         meta.codigo_mascarado = True
@@ -1782,7 +1797,11 @@ async def processar(
         not enviado
         and nossos
         and all(
-            enderecos.local(a) in LOCAIS_INTERNOS and not cad.e_de_loja(a) and a not in cad.caixas
+            enderecos.local(a) in LOCAIS_INTERNOS
+            and not cad.e_de_loja(a)
+            and a not in cad.caixas
+            # admin@ da MARCA é caixa de site (27/10/2026); admin@ de fora, interno.
+            and not rotear.e_caixa_de_site(a, cad, marca_pasta=marca_da_pasta)
             for a in nossos
         )
     ):
@@ -1895,6 +1914,15 @@ async def processar(
         # Nome, telefone e nº do pedido do formulário (RF6), lidos do texto JÁ
         # protegido (o mesmo que a equipe vê): o nome do chamado é o da
         # cliente, nunca o do site que mandou o e-mail.
+        campos_form = enderecos.campos_do_formulario(protegido.texto)
+        tipo = REMETENTE_COMPRADOR
+        meta.remetente_tipo = tipo
+    elif cliente_rt is not None and rota.site:
+        # O formulário pelo remetente técnico do site (o Brevo): o cliente é o
+        # Reply-To (a resposta vai para ele — a Central calcula o mesmo) e os
+        # campos (nome, telefone, pedido) vêm do texto protegido, como sempre.
+        formulario = True
+        contato_form = cliente_rt
         campos_form = enderecos.campos_do_formulario(protegido.texto)
         tipo = REMETENTE_COMPRADOR
         meta.remetente_tipo = tipo
