@@ -14,11 +14,18 @@ limite por IP antes de chamar).
     {"nf": "<como o cliente digitou>", "data_compra": "AAAA-MM-DD", "pedido": "<opcional>"}
 
 - **200 `{"encontrada": true|false}`** e nada mais: nunca dado do cliente,
-  nunca eco do que veio. NF que não existe, NF de outra marca e NF que existe
-  mas com data/pedido que não batem dão o MESMO `false` (mesma consulta, mesma
-  forma de resposta).
-- **409 `sites_nf_sem_cobertura`**: nenhuma NF da marca bateu, mas o DaVinci
-  não pode dizer "não existe" (`sem_cobertura`): a compra é de antes de
+  nunca eco do que veio. `true` SÓ quando a NF da marca está LIGADA ao que o
+  cliente deu: o pedido digitado é o pedido dessa NF (Bling ou marketplace) ou
+  veio a chave inteira de 44 dígitos (Eduardo/sites, 27/10/2026: com número
+  e data só, "123" passava nas duas marcas). `false` quando não há NF da marca
+  com o número na janela, ou quando há e o pedido digitado (ou vazio) não é o
+  dela — a regra do dono: "se não der certo avisa pra mandar como dúvida".
+  NF que não existe, de outra marca, fora da janela ou com outro pedido dão o
+  MESMO `false` (mesma consulta, mesma resposta).
+- **409 `sites_nf_sem_cobertura`**: só nas lacunas do DaVinci, em que ele não
+  pode dizer "não existe" (`sem_cobertura`), ou quando a NF é de pedido do ML
+  e o cliente digitou um nº de pedido do ML que não é o guardado (no carrinho
+  o Bling guarda só o pack id): a compra é de antes de
   `COBERTURA_DESDE` (época sem as NFs completas); OU o `pedido` digitado é de
   um pedido da marca que não tem NF autorizada no DaVinci (Amazon, Temu,
   presencial…); OU a NF existe sem pedido ligado, na janela da data (marca
@@ -56,11 +63,12 @@ são ignorados.
    relógio — os de celular têm sufixo regional); Charlots: `b<dígito>`, `bp<dígito>` e os
    acessórios de mala sem sufixo de `sku_tags` (rodinha, balança, chaveiro).
    Salvado (`z*`), Apple (`i*`) e o resto não contam para nenhuma.
-3. **2º fator** (`confere`), qualquer um basta:
+3. **Ligação** (`confere`): `true` com um destes —
    - a chave de acesso inteira (44 dígitos) bateu;
    - o `pedido` bate com o nº do pedido no Bling ou no marketplace (só letras
-     e dígitos, sem diferenciar maiúsculas, zero à esquerda ignorado);
-   - a `data_compra` cai entre `DIAS_ANTES` dias antes da mais cedo e
+     e dígitos, sem diferenciar maiúsculas, zero à esquerda ignorado).
+   Só a data não basta: com pedido errado/vazio dá `false` (409 no ML, acima).
+   A janela: a `data_compra` cai entre `DIAS_ANTES` dias antes da mais cedo e
      `DIAS_DEPOIS` dias depois da mais tarde entre a data do pedido e a da
      emissão da NF (dias de São Paulo). Folgado de propósito: `false` barra um
      cliente de verdade, e quem confunde costuma pôr a data da entrega.
@@ -192,7 +200,10 @@ _SQL = text(
                nt.nf_dia,
                bool_or(nt.pela_chave) AS pela_chave,
                min((o.data AT TIME ZONE 'America/Sao_Paulo')::date) AS pedido_dia,
-               array_agg(DISTINCT o.numeroloja) FILTER (WHERE o.numeroloja IS NOT NULL) AS lojas
+               array_agg(DISTINCT o.numeroloja) FILTER (WHERE o.numeroloja IS NOT NULL) AS lojas,
+               (SELECT lower(btrim(si.platform)) FROM store_info si
+                WHERE si.bling_store_id = min(o.loja)
+                ORDER BY si.archived_at NULLS FIRST LIMIT 1) AS plataforma
         FROM notas nt
         JOIN bling_orders o ON o.numero = nt.numero
         WHERE NOT EXISTS (
@@ -216,10 +227,12 @@ _SQL = text(
         HAVING bool_or(lower(o.item_codigo) ~ :marca)
         LIMIT 20
     )
-    SELECT 'marca' AS tipo, numero, nf_dia, pela_chave, pedido_dia, lojas, NULL::boolean AS tem_nf
+    SELECT 'marca' AS tipo, numero, nf_dia, pela_chave, pedido_dia, lojas, NULL::boolean AS tem_nf,
+           plataforma
     FROM da_marca
     UNION ALL
-    SELECT 'solta', NULL::text, s.nf_dia, s.pela_chave, NULL::date, NULL::text[], NULL::boolean
+    SELECT 'solta', NULL::text, s.nf_dia, s.pela_chave, NULL::date, NULL::text[], NULL::boolean,
+           NULL::text
     FROM (SELECT nf_dia, pela_chave FROM nf WHERE pedido_bling IS NULL LIMIT 50) s
     UNION ALL
     SELECT 'pedido', p.numero, NULL::date, false, NULL::date, p.lojas,
@@ -228,7 +241,8 @@ _SQL = text(
            ) OR EXISTS (
                SELECT 1 FROM bling_notas_emitidas b
                WHERE b.complemento = ANY(p.lojas) AND b.situacao IN (5, 6, 7)
-           )
+           ),
+           NULL::text
     FROM do_pedido p
     """
 )
@@ -254,6 +268,7 @@ class Achado:
     pedido_dia: date | None
     nf_dia: date | None
     pela_chave: bool = False
+    plataforma: str | None = None
 
 
 @dataclass(frozen=True)
@@ -426,6 +441,27 @@ def confere(achado: Achado, consulta: Consulta) -> str | None:
     return None
 
 
+# O número e a data sozinhos não provam nada (NF de 1 a 4 dígitos, quase todos
+# os números existem numa janela de 30 dias): só estes dão `true`.
+VIAS_QUE_CONFIRMAM = ("chave", "pedido")
+
+# O que o cliente vê e o DaVinci guarda, por plataforma (pedidos entregues da
+# marca com NF, out/2026): Shopee (order SN), TikTok (order id), Amazon
+# (702-…) e o ML de compra simples estão em `numeroloja`. No CARRINHO do ML o
+# Bling grava o pack id em `numeroloja` e os order ids de cada item não ficam
+# em lugar nenhum: um nº com cara de pedido do ML que não bate pode ser um
+# deles → 409, não `false`.
+PLATAFORMAS_ML = ("ml", "mercadolivre", "mercado_livre", "mercado livre")
+_RX_PEDIDO_ML = re.compile(r"2[0-9]{15}")
+
+
+def pedido_ml_nao_mapeavel(achado: Achado, consulta: Consulta) -> bool:
+    """A NF é de pedido do ML e o cliente digitou um nº de pedido do ML (16 dígitos). PURA."""
+    return (achado.plataforma or "") in PLATAFORMAS_ML and bool(
+        consulta.pedido and _RX_PEDIDO_ML.fullmatch(consulta.pedido)
+    )
+
+
 def na_janela(data_compra: date, *dias: date | None) -> bool:
     """De `DIAS_ANTES` antes da mais cedo a `DIAS_DEPOIS` depois da mais tarde. PURA."""
     conhecidos = [d for d in dias if d is not None]
@@ -476,6 +512,7 @@ async def consultar(session: AsyncSession, site: str, consulta: Consulta) -> Res
                     pedido_dia=x.pedido_dia,
                     nf_dia=x.nf_dia,
                     pela_chave=bool(x.pela_chave),
+                    plataforma=x.plataforma,
                 )
             )
         elif x.tipo == "solta":
@@ -526,13 +563,24 @@ async def validar_nf(
         raise
 
     achado = await consultar(session, site, consulta)
-    via = next((v for v in (confere(a, consulta) for a in achado.achados) if v), None)
-    motivo = None if via else sem_cobertura(consulta, achado)
+    vias = [(a, confere(a, consulta)) for a in achado.achados]
+    # `true` só com a NF ligada ao cliente (pedido ou chave).
+    via = next((v for _, v in vias if v in VIAS_QUE_CONFIRMAM), None)
+    so_data = [a for a, v in vias if v == "data"]
+    motivo = None
+    if not via:
+        # As lacunas do DaVinci primeiro (409); depois a NF que existe na data
+        # com um pedido que não é o dela: `false`, menos o carrinho do ML.
+        motivo = sem_cobertura(consulta, achado)
+        if motivo is None and any(pedido_ml_nao_mapeavel(a, consulta) for a in so_data):
+            motivo = "pedido_ml_nao_mapeavel"
 
     if via:
         resultado = "encontrada"
     elif motivo:
         resultado = "sem_cobertura"
+    elif so_data:
+        resultado = "pedido_nao_confere"
     else:
         resultado = "fora_da_janela" if achado.achados else "sem_nota"
     # Nunca a NF, o pedido, a data nem o IP: só o desfecho e por onde casou.

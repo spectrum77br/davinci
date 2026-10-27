@@ -243,7 +243,7 @@ async def test_redis_fora_do_ar_nao_derruba(client: AsyncClient, monkeypatch, ce
         raise ConnectionError("redis down")
 
     monkeypatch.setattr(rota, "sliding_window_check", _caiu)
-    r = await _pergunta(client, _corpo())
+    r = await _pergunta(client, _corpo(pedido="500123"))
     assert r.status_code == 200
     assert r.json() == {"encontrada": True}
 
@@ -318,36 +318,40 @@ async def test_corpo_grande_422(client: AsyncClient):
 
 @pytest.mark.parametrize("pedido", ["", "   ", None, "-", "x" * 101, 0, {"a": 1}, True])
 async def test_pedido_vazio_ou_estranho_e_ausente(client: AsyncClient, celular_uranyx, pedido):
-    """`pedido: ""` (o site manda assim quando o cliente não preenche) nunca é 422.
+    """`pedido: ""` (cliente antigo do site) nunca é 422 — e não confirma nada.
 
-    A data decide."""
+    A NF existe, com o pedido conhecido, e o cliente não deu o pedido: `false`
+    ("NF não encontrada, mande como dúvida"), na data certa ou não."""
     corpo = {"nf": "12345", "data_compra": OK, "pedido": pedido}
-    assert (await _pergunta(client, corpo)).json() == {"encontrada": True}
+    r = await _pergunta(client, corpo)
+    assert r.status_code == 200
+    assert r.json() == {"encontrada": False}
     corpo["data_compra"] = RUIM
     assert (await _pergunta(client, corpo)).json() == {"encontrada": False}
 
 
-async def test_sem_a_chave_pedido_tambem_vale(client: AsyncClient, celular_uranyx):
+async def test_sem_a_chave_pedido_e_false(client: AsyncClient, celular_uranyx):
     r = await _pergunta(client, {"nf": "12345", "data_compra": OK})
-    assert r.json() == {"encontrada": True}
+    assert r.status_code == 200
+    assert r.json() == {"encontrada": False}
 
 
 async def test_campos_a_mais_sao_ignorados(client: AsyncClient, celular_uranyx):
-    corpo = {**_corpo(), "site": "charlots", "captcha": "x", "cpf": "000"}
+    corpo = {**_corpo(pedido="500123"), "site": "charlots", "captcha": "x", "cpf": "000"}
     assert (await _pergunta(client, corpo)).json() == {"encontrada": True}
 
 
 async def test_nf_numerica_no_json_e_aceita(client: AsyncClient, celular_uranyx):
-    assert (await _pergunta(client, {"nf": 12345, "data_compra": OK})).json() == {
-        "encontrada": True
-    }
+    corpo = {"nf": 12345, "data_compra": OK, "pedido": 500123}
+    assert (await _pergunta(client, corpo)).json() == {"encontrada": True}
 
 
 @pytest.mark.parametrize(
     "data", ["2026-09-20", "20/09/2026", "2026-09-20T00:00:00", " 2026-09-20 "]
 )
 async def test_formatos_de_data(client: AsyncClient, celular_uranyx, data):
-    assert (await _pergunta(client, _corpo(data_compra=data))).json() == {"encontrada": True}
+    r = await _pergunta(client, _corpo(data_compra=data, pedido="500123"))
+    assert r.json() == {"encontrada": True}
 
 
 # ─────────────── o número da NF ───────────────
@@ -370,7 +374,7 @@ async def test_formatos_de_data(client: AsyncClient, celular_uranyx, data):
     ],
 )
 async def test_normalizacao_do_numero(client: AsyncClient, celular_uranyx, digitado):
-    r = await _pergunta(client, _corpo(nf=digitado))
+    r = await _pergunta(client, _corpo(nf=digitado, pedido="500123"))
     assert r.status_code == 200
     assert r.json() == {"encontrada": True}
 
@@ -385,7 +389,8 @@ async def test_numero_com_ponto_e_serie(client: AsyncClient, db: AsyncSession, d
     """ "1234.1" é a NF 1234 da série 1 (antes virava só 12341)."""
     await _pedido(db, "500160", ["dg053.ci"])
     await _nota(db, "1234", "500160")
-    assert (await _pergunta(client, _corpo(nf=digitado))).json() == {"encontrada": True}
+    r = await _pergunta(client, _corpo(nf=digitado, pedido="500160"))
+    assert r.json() == {"encontrada": True}
 
 
 def test_numeros_da_nf_puro():
@@ -420,7 +425,9 @@ async def test_bling_notas_emitidas_com_zeros_a_esquerda(client: AsyncClient, db
     await _pedido(db, "400777", ["dg041.pi"], dia=date(2026, 6, 3), numeroloja="2000001111")
     await _nota_emitida(db, "001234", "2000001111", dia=date(2026, 6, 4))
     for digitado in ("1234", "001234", "1.234", "000.001.234"):
-        r = await _pergunta(client, _corpo(nf=digitado, data_compra="2026-06-03"))
+        r = await _pergunta(
+            client, _corpo(nf=digitado, data_compra="2026-06-03", pedido="2000001111")
+        )
         assert r.json() == {"encontrada": True}, digitado
 
 
@@ -459,7 +466,8 @@ async def test_nota_sem_pedido_nao_atrapalha_a_ligada(client: AsyncClient, db: A
     await _pedido(db, "500150", ["dg053.ci"])
     await _nota(db, "4321", "500150")
     await _nota(db, "4321", None)
-    assert (await _pergunta(client, _corpo(nf="4321"))).json() == {"encontrada": True}
+    r = await _pergunta(client, _corpo(nf="4321", pedido="500150"))
+    assert r.json() == {"encontrada": True}
 
 
 # ─────────────── a marca vem do token ───────────────
@@ -475,8 +483,9 @@ async def test_nf_de_outra_marca_e_false(client: AsyncClient, celular_uranyx):
 async def test_nf_da_charlots(client: AsyncClient, db: AsyncSession):
     await _pedido(db, "500300", ["b009.24", "a075"])
     await _nota(db, "321", "500300")
-    assert (await _pergunta(client, _corpo(nf="321"), CH)).json() == {"encontrada": True}
-    assert (await _pergunta(client, _corpo(nf="321"), UR)).json() == {"encontrada": False}
+    corpo = _corpo(nf="321", pedido="500300")
+    assert (await _pergunta(client, corpo, CH)).json() == {"encontrada": True}
+    assert (await _pergunta(client, corpo, UR)).json() == {"encontrada": False}
 
 
 @pytest.mark.parametrize(
@@ -504,8 +513,9 @@ async def test_regra_da_marca_pelos_skus(
 ):
     await _pedido(db, "500400", skus)
     await _nota(db, "55", "500400")
-    assert (await _pergunta(client, _corpo(nf="55"), UR)).json() == {"encontrada": uranyx}
-    assert (await _pergunta(client, _corpo(nf="55"), CH)).json() == {"encontrada": charlots}
+    corpo = _corpo(nf="55", pedido="500400")
+    assert (await _pergunta(client, corpo, UR)).json() == {"encontrada": uranyx}
+    assert (await _pergunta(client, corpo, CH)).json() == {"encontrada": charlots}
 
 
 async def test_loja_interna_nao_conta(client: AsyncClient, db: AsyncSession, make_user):
@@ -523,38 +533,114 @@ async def test_mesmo_numero_em_dois_emitentes(client: AsyncClient, db: AsyncSess
     await _nota(db, "12345", "500600", dia=date(2026, 10, 20))
     await _pedido(db, "500601", ["dg053.ci"], dia=date(2026, 9, 8))
     await _nota(db, "12345", "500601", dia=date(2026, 9, 9))
-    assert (await _pergunta(client, _corpo(data_compra="2026-10-20"), CH)).json() == {
-        "encontrada": True
-    }
-    assert (await _pergunta(client, _corpo(data_compra="2026-10-20"), UR)).json() == {
-        "encontrada": False
-    }
-    assert (await _pergunta(client, _corpo(data_compra="2026-09-08"), UR)).json() == {
-        "encontrada": True
-    }
+    ch = _corpo(data_compra="2026-10-20", pedido="500600")
+    assert (await _pergunta(client, ch, CH)).json() == {"encontrada": True}
+    assert (await _pergunta(client, ch, UR)).json() == {"encontrada": False}
+    ur = _corpo(data_compra="2026-09-08", pedido="500601")
+    assert (await _pergunta(client, ur, UR)).json() == {"encontrada": True}
+    assert (await _pergunta(client, ur, CH)).json() == {"encontrada": False}
 
 
 # ─────────────── o 2º fator ───────────────
 
 
+LOJA_ML = "203000777"
+PACK_ML = "2000008888888888"  # o Bling guarda o pack id do carrinho em `numeroloja`
+
+
+@pytest.fixture
+async def carrinho_ml(db: AsyncSession, make_user) -> None:
+    """Pedido 500800 de um carrinho do ML (pack 2000008888888888), com a NF 777."""
+    dono = await make_user()
+    db.add(StoreInfo(user_id=dono.id, platform="ML", bling_store_id=LOJA_ML))
+    await db.commit()
+    await _pedido(db, "500800", ["dg053.ci"], numeroloja=PACK_ML, loja=LOJA_ML)
+    await _nota(db, "777", "500800")
+
+
 @pytest.mark.parametrize(
     ("data", "esperado"),
     [
-        (DIA_PEDIDO - timedelta(days=6), False),
-        (DIA_PEDIDO - timedelta(days=5), True),  # 5 dias antes do pedido
-        (DIA_PEDIDO, True),
-        (DIA_NF, True),
-        (DIA_NF + timedelta(days=16), True),
-        (DIA_NF + timedelta(days=25), True),  # a data da entrega, 25 dias depois da NF
-        (DIA_NF + timedelta(days=30), True),
-        (DIA_NF + timedelta(days=31), False),
-        (rota.COBERTURA_DESDE, False),
+        (DIA_PEDIDO - timedelta(days=6), 200),
+        (DIA_PEDIDO - timedelta(days=5), 409),  # 5 dias antes do pedido
+        (DIA_PEDIDO, 409),
+        (DIA_NF, 409),
+        (DIA_NF + timedelta(days=16), 409),
+        (DIA_NF + timedelta(days=25), 409),  # a data da entrega, 25 dias depois da NF
+        (DIA_NF + timedelta(days=30), 409),
+        (DIA_NF + timedelta(days=31), 200),
+        (rota.COBERTURA_DESDE, 200),
     ],
 )
-async def test_janela_da_data(client: AsyncClient, celular_uranyx, data, esperado):
-    r = await _pergunta(client, _corpo(data_compra=data.isoformat()))
-    assert r.status_code == 200
-    assert r.json() == {"encontrada": esperado}
+async def test_janela_da_data_no_carrinho_do_ml(client: AsyncClient, carrinho_ml, data, esperado):
+    """A janela vale onde só a data ainda conta: o order id de um item do carrinho do ML.
+
+    Na janela → 409 (pode ser o pedido de um item: o DaVinci só guarda o
+    pack); fora dela → `false`.
+    """
+    r = await _pergunta(
+        client, _corpo(nf="777", data_compra=data.isoformat(), pedido="2000001234567890")
+    )
+    assert r.status_code == esperado
+    if esperado == 200:
+        assert r.json() == {"encontrada": False}
+
+
+async def test_carrinho_do_ml(client: AsyncClient, carrinho_ml):
+    # O pack id (o que o ML mostra na compra do carrinho) e o nº do Bling: `true`.
+    for pedido in (PACK_ML, "2000-0088-8888-8888", "500800"):
+        r = await _pergunta(client, _corpo(nf="777", pedido=pedido))
+        assert r.json() == {"encontrada": True}, pedido
+    # Outro nº com cara de pedido do ML (o de um item do carrinho): 409.
+    assert (await _pergunta(client, _corpo(nf="777", pedido="2000001234567890"))).status_code == 409
+    # Sem pedido, ou um nº que não é de pedido do ML: `false`.
+    for pedido in ("", "12345", "251027ABCDEF12"):
+        r = await _pergunta(client, _corpo(nf="777", pedido=pedido))
+        assert r.status_code == 200
+        assert r.json() == {"encontrada": False}, pedido
+    # Para a Charlots, a NF não é dela: `false` mesmo com o nº do ML.
+    r = await _pergunta(client, _corpo(nf="777", pedido="2000001234567890"), CH)
+    assert r.json() == {"encontrada": False}
+
+
+async def test_123_so_com_o_pedido_certo(client: AsyncClient, db: AsyncSession):
+    """O teste dos sites em produção: "123" com a data e sem pedido dava `true` nas duas marcas.
+
+    Agora: pedido vazio ou errado → `false`; pedido certo ou a chave → `true`.
+    """
+    chave_ur = "35261012345678000190550010000001231000000017"
+    await _pedido(db, "500170", ["dg053.ci"], numeroloja="251001ABCDEF12")  # Shopee
+    await _nota(db, "123", "500170", chave=chave_ur)
+    await _pedido(db, "500171", ["b009.24"], numeroloja="583920174635281930")  # TikTok
+    await _nota(db, "123", "500171")
+    data = "2026-10-20"
+    for tok in (UR, CH):
+        for pedido in ("", "999999", "2000001234567890"):
+            r = await _pergunta(client, {"nf": "123", "data_compra": data, "pedido": pedido}, tok)
+            assert r.status_code == 200
+            assert r.json() == {"encontrada": False}, (tok, pedido)
+    certo_ur = {"nf": "123", "data_compra": data, "pedido": "251001abcdef12"}
+    assert (await _pergunta(client, certo_ur, UR)).json() == {"encontrada": True}
+    assert (await _pergunta(client, certo_ur, CH)).json() == {"encontrada": False}
+    certo_ch = {"nf": "123", "data_compra": data, "pedido": "583920174635281930"}
+    assert (await _pergunta(client, certo_ch, CH)).json() == {"encontrada": True}
+    assert (await _pergunta(client, certo_ch, UR)).json() == {"encontrada": False}
+    pela_chave = {"nf": chave_ur, "data_compra": data, "pedido": ""}
+    assert (await _pergunta(client, pela_chave, UR)).json() == {"encontrada": True}
+    assert (await _pergunta(client, pela_chave, CH)).json() == {"encontrada": False}
+
+
+def test_pedido_ml_nao_mapeavel_puro():
+    a = rota.Achado(numero="1", lojas=(), pedido_dia=None, nf_dia=None, plataforma="ml")
+    shopee = rota.Achado(numero="1", lojas=(), pedido_dia=None, nf_dia=None, plataforma="shopee")
+
+    def c(pedido):
+        return rota.Consulta(numeros=[], chave=None, data_compra=DIA_PEDIDO, pedido=pedido)
+
+    assert rota.pedido_ml_nao_mapeavel(a, c("2000001234567890"))
+    assert not rota.pedido_ml_nao_mapeavel(a, c("200000123456789"))  # 15 dígitos
+    assert not rota.pedido_ml_nao_mapeavel(a, c(None))
+    assert not rota.pedido_ml_nao_mapeavel(shopee, c("2000001234567890"))
 
 
 @pytest.mark.parametrize(
@@ -567,12 +653,12 @@ async def test_pedido_certo_vale_mesmo_com_a_data_errada(
     assert r.json() == {"encontrada": True}
 
 
-async def test_pedido_de_outro_numero_nao_atrapalha_a_data(client: AsyncClient, celular_uranyx):
-    """O cliente pôs o nº do pacote em vez do pedido: com a data certa, segue `true`."""
-    assert (await _pergunta(client, _corpo(pedido="999888777"))).json() == {"encontrada": True}
-    assert (await _pergunta(client, _corpo(pedido="999888777", data_compra=RUIM))).json() == {
-        "encontrada": False
-    }
+async def test_pedido_errado_e_false(client: AsyncClient, celular_uranyx):
+    """A NF existe e o pedido dela é conhecido; o cliente deu outro nº: `false`, na data ou não."""
+    for data in (OK, RUIM):
+        r = await _pergunta(client, _corpo(pedido="999888777", data_compra=data))
+        assert r.status_code == 200
+        assert r.json() == {"encontrada": False}
 
 
 async def test_pedido_amazon_com_hifens(client: AsyncClient, db: AsyncSession):
@@ -590,12 +676,12 @@ async def test_chave_de_acesso_vale_sozinha(client: AsyncClient, celular_uranyx)
     assert (await _pergunta(client, _corpo(nf=impressa, data_compra=RUIM))).json() == {
         "encontrada": True
     }
-    # Chave de outra nota com o mesmo nNF: só a data decide.
+    # Chave de outra nota com o mesmo nNF: vale só como número (precisa do pedido).
     outra = CHAVE[:-1] + "9"
-    assert (await _pergunta(client, _corpo(nf=outra, data_compra=RUIM))).json() == {
-        "encontrada": False
+    assert (await _pergunta(client, _corpo(nf=outra))).json() == {"encontrada": False}
+    assert (await _pergunta(client, _corpo(nf=outra, pedido="500123"))).json() == {
+        "encontrada": True
     }
-    assert (await _pergunta(client, _corpo(nf=outra))).json() == {"encontrada": True}
     # E a chave não abre a NF para a outra marca.
     assert (await _pergunta(client, _corpo(nf=CHAVE), CH)).json() == {"encontrada": False}
 
@@ -616,9 +702,12 @@ async def test_compra_antiga_sem_nota_409(client: AsyncClient, celular_uranyx):
 async def test_compra_antiga_achada_e_true(client: AsyncClient, db: AsyncSession):
     await _pedido(db, "400800", ["dg041.pi"], dia=date(2026, 4, 2), numeroloja="2000003333")
     await _nota_emitida(db, "002468", "2000003333", dia=date(2026, 4, 3))
-    r = await _pergunta(client, _corpo(nf="2468", data_compra="2026-04-02"))
+    r = await _pergunta(client, _corpo(nf="2468", data_compra="2026-04-02", pedido="2000003333"))
     assert r.status_code == 200
     assert r.json() == {"encontrada": True}
+    # Sem o pedido, numa época sem cobertura: 409.
+    r = await _pergunta(client, _corpo(nf="2468", data_compra="2026-04-02"))
+    assert r.status_code == 409
 
 
 async def test_a_partir_de_7_de_setembro_e_false(client: AsyncClient, celular_uranyx):
@@ -776,7 +865,7 @@ async def test_rapida(client: AsyncClient, db: AsyncSession, celular_uranyx):
     tempos = []
     for _ in range(10):
         t = time.perf_counter()
-        r = await _pergunta(client, _corpo(nf="1001"))
+        r = await _pergunta(client, _corpo(nf="1001", pedido="600001"))
         tempos.append(time.perf_counter() - t)
         assert r.json() == {"encontrada": True}
     assert sorted(tempos)[8] < 0.3
