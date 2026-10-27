@@ -196,7 +196,11 @@ async def run_sync_marketplace_financials_for_bling_order(
     *,
     bling_order_id: int,
     trigger: str = "manual",
+    mesmo_excluido: bool = False,
 ) -> dict[str, Any]:
+    """`mesmo_excluido` (27/10, 303469 ATV): a Conciliação relê a venda que a
+    plataforma JÁ PAGOU mesmo com o pedido excluído no Bling — sem isso o escrow
+    ficava o de antes da liberação e o pedido "recebido a menos" pra sempre."""
     rows = (
         (
             await session.execute(
@@ -213,7 +217,7 @@ async def run_sync_marketplace_financials_for_bling_order(
         return {"ok": False, "skipped": "bling_order_not_found"}
 
     order = rows[0]
-    if str(order.situacao or "").lower() == "excluido":
+    if str(order.situacao or "").lower() == "excluido" and not mesmo_excluido:
         return {"ok": True, "skipped": "deleted_order"}
 
     external_order_id = _external_order_id(order)

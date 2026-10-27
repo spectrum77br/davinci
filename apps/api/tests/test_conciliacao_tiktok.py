@@ -458,7 +458,8 @@ async def test_reler_financeiro_liquidados_so_relê_estimado_ou_velho(db, make_u
     await db.flush()
     chamados: list[tuple[int, str]] = []
 
-    async def _fake(session, *, bling_order_id, trigger):
+    async def _fake(session, *, bling_order_id, trigger, mesmo_excluido=False):
+        assert mesmo_excluido  # 27/10: a TikTok já liquidou — relê mesmo excluído no Bling
         chamados.append((bling_order_id, trigger))
 
     monkeypatch.setattr(
@@ -949,7 +950,8 @@ async def test_reler_financeiro_liquidados_anda_do_mais_antigo_e_estimado_primei
     await db.flush()
     chamados: list[tuple[int, str]] = []
 
-    async def _fake(session, *, bling_order_id, trigger):
+    async def _fake(session, *, bling_order_id, trigger, mesmo_excluido=False):
+        assert mesmo_excluido  # 27/10: a TikTok já liquidou — relê mesmo excluído no Bling
         chamados.append((bling_order_id, trigger))
 
     monkeypatch.setattr(

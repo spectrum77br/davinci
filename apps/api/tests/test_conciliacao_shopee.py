@@ -259,10 +259,10 @@ async def test_reler_escrow_liberados_so_relê_leitura_mais_velha_que_a_liberaca
         )
     )
     await db.commit()
-    chamados: list[tuple[int, str]] = []
+    chamados: list[tuple[int, str, bool]] = []
 
-    async def falso(session, *, bling_order_id, trigger="manual"):
-        chamados.append((bling_order_id, trigger))
+    async def falso(session, *, bling_order_id, trigger="manual", mesmo_excluido=False):
+        chamados.append((bling_order_id, trigger, mesmo_excluido))
         return {"ok": True}
 
     import app.services.marketplace_financials as mf
@@ -270,7 +270,8 @@ async def test_reler_escrow_liberados_so_relê_leitura_mais_velha_que_a_liberaca
     monkeypatch.setattr(mf, "run_sync_marketplace_financials_for_bling_order", falso)
     r = await mod.reler_escrow_liberados(db, loja)
     assert r == {"candidatos": 1, "relidos": 1, "erros": []}
-    assert chamados == [(5000, "conciliacao_liberacao")]
+    # 27/10 (303469): a Shopee já pagou — relê mesmo com o pedido excluído no Bling
+    assert chamados == [(5000, "conciliacao_liberacao", True)]
     # leitura mais nova que a liberação: não relê
     fin = (
         await db.execute(
@@ -284,6 +285,30 @@ async def test_reler_escrow_liberados_so_relê_leitura_mais_velha_que_a_liberaca
     chamados.clear()
     r = await mod.reler_escrow_liberados(db, loja)
     assert r["candidatos"] == 0 and chamados == []
+
+
+async def test_margem_so_rele_pedido_excluido_quando_a_conciliacao_pede(db):
+    """27/10 (303469): excluído no Bling a Margem pula — menos na releitura da liberação."""
+    from app.services.marketplace_financials import (
+        run_sync_marketplace_financials_for_bling_order as reler,
+    )
+
+    db.add(
+        BlingOrder(
+            bling_id=7000,
+            numero="303469",
+            data=datetime(2026, 10, 12, 12, tzinfo=UTC),
+            situacao="excluido",
+            item_index=0,
+        )
+    )
+    await db.commit()
+    assert await reler(db, bling_order_id=7000) == {"ok": True, "skipped": "deleted_order"}
+    # passa da trava (e para no passo seguinte: este pedido de teste não tem nº da loja)
+    assert await reler(db, bling_order_id=7000, mesmo_excluido=True) == {
+        "ok": True,
+        "skipped": "missing_external_order_id",
+    }
 
 
 def test_comparativo_shopee_preenche_o_real_com_o_escrow_da_liberacao():
@@ -383,6 +408,53 @@ def test_conta_shopee_e_a_tela_de_detalhes_de_renda():
     assert (
         conta_shopee(MarketplaceOrderFinancial(platform="shopee", external_order_id="x", raw={}))
         is None
+    )
+
+
+def test_conta_shopee_preco_diferente_do_custo_dos_produtos():
+    """303469 ATV (27/10): a tela mostra Preço do Produto 627,00 − Cupom 25,00 = Subtotal
+    602,00 · −3,00 · −74,90 = 524,10. O preço de venda (627) ≠ cost_of_goods_sold (681):
+    o subtotal é 681 − rebate 79, e a linha do meio é a diferença (25)."""
+    from app.models import MarketplaceOrderFinancial
+    from app.services.conciliacao_calculo import conta_shopee
+
+    income = {
+        "order_selling_price": 627,
+        "cost_of_goods_sold": 681,
+        "buyer_total_amount": 601.95,
+        "seller_product_rebate": {
+            "amount": 79,
+            "commission_fee_offset": 60.63,
+            "service_fee_offset": 18.37,
+        },
+        "commission_fee": 85.81,
+        "net_commission_fee": 25.18,
+        "service_fee": 60.38,
+        "net_service_fee": 42.01,
+        "order_ams_commission_fee": 7.22,
+        "shipping_seller_protection_fee_amount": 0.49,
+        "actual_shipping_fee": 12.04,
+        "shopee_shipping_rebate": 12.04,
+        "seller_coin_cash_back": 3,
+        "seller_discount": 1069,
+        "voucher_from_shopee": 25,
+        "escrow_amount": 524.1,
+    }
+    c = conta_shopee(
+        MarketplaceOrderFinancial(
+            platform="shopee",
+            external_order_id="261013FRE3CFH3",
+            raw={"escrow": {"order_income": income}},
+        )
+    )
+    assert c["preco"] == Decimal("627") and c["subsidio"] == Decimal("25")
+    assert c["subtotal_produtos"] == Decimal("602")
+    assert c["cupons"] == Decimal("3") and c["taxas"] == Decimal("67.68")
+    assert c["afiliados"] == Decimal("7.22")
+    assert (
+        c["subtotal_produtos"] + c["frete_loja"] - c["cupons"] - c["taxas"] - c["afiliados"]
+        == c["renda"]
+        == Decimal("524.1")
     )
 
 

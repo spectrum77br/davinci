@@ -715,8 +715,12 @@ async def reler_escrow_liberados(
             continue
         vistos.add(bling_id)
         try:
+            # 27/10 (303469): pedido excluído no Bling que a Shopee pagou também relê
             await run_sync_marketplace_financials_for_bling_order(
-                session, bling_order_id=int(bling_id), trigger="conciliacao_liberacao"
+                session,
+                bling_order_id=int(bling_id),
+                trigger="conciliacao_liberacao",
+                mesmo_excluido=True,
             )
             relidos += 1
         except Exception as e:  # noqa: BLE001

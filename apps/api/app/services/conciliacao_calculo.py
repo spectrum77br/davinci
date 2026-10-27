@@ -146,8 +146,14 @@ def conta_shopee(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] 
             return ZERO
 
     rebate = inc.get("seller_product_rebate")
-    subsidio = Decimal(str(rebate.get("amount") or 0)) if isinstance(rebate, dict) else ZERO
+    rebate_valor = Decimal(str(rebate.get("amount") or 0)) if isinstance(rebate, dict) else ZERO
     preco = d("order_selling_price") or d("cost_of_goods_sold")
+    # 27/10 (303469 ATV, tela "Detalhes de Renda"): Preço do Produto 627 − Cupom 25 =
+    # Subtotal 602 = cost_of_goods_sold 681 − rebate 79. Quase sempre o preço de venda
+    # é igual ao cost_of_goods_sold e o "subsídio" é o rebate; quando difere (3 em 227
+    # pedidos lidos), só cost_of_goods_sold − rebate fecha a renda do pedido
+    subtotal_produtos = (d("cost_of_goods_sold") or preco) - rebate_valor
+    subsidio = preco - subtotal_produtos
     # 15/10, Vinicius: afiliados não é "a porcentagem sempre igual" — sai da tarifa
     # e vai pra Extras; a tarifa fica com comissão, serviço, transação e encargos
     afiliados = d("order_ams_commission_fee")
@@ -165,7 +171,7 @@ def conta_shopee(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] 
     return {
         "preco": preco,
         "subsidio": subsidio,
-        "subtotal_produtos": preco - subsidio,
+        "subtotal_produtos": subtotal_produtos,
         "frete_loja": frete_loja,
         "cupons": cupons,
         "taxas": taxas,
