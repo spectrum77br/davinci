@@ -402,7 +402,7 @@ def _entrada(avisos: tuple[str, ...]) -> str:
 
 
 def test_v14_os_avisos_vao_na_entrada_sem_o_fecho_de_politica():
-    assert verificador.VERSAO == "v14"
+    assert verificador.VERSAO == "v15"
     assert "AVISOS DAS CHECAGENS" not in _entrada(())
     e = _entrada(("afirma o NFC ('sim') sem fonte — no automático, pessoa confere",))
     assert verificador.CABECALHO_AVISOS in e
@@ -410,7 +410,7 @@ def test_v14_os_avisos_vao_na_entrada_sem_o_fecho_de_politica():
     # O SISTEMA diz que o aviso é dica, não veredito.
     assert "Cada aviso é uma DICA, não um veredito" in verificador.SISTEMA
     assert "«vale para produto só no modelo nomeado na resposta»" in verificador.SISTEMA
-    assert '"Tudo bem, sim!"' in verificador.SISTEMA
+    assert "«Tudo bem, sim!»" in verificador.SISTEMA
 
 
 def test_v14_o_par_do_mesmo_anuncio_vale_para_o_modelo_nomeado():
@@ -505,3 +505,83 @@ def test_regatilho_a_linha_da_calibracao_vira_registro():
     sec = regatilho.secoes(r["rastro"]["pacote"])
     assert sec["PRODUTO"][0]["variacoes"] == [{"nome": "Preto", "disponivel": False}]
     assert r["rastro"]["transcricao"][-1].endswith("Cliente: tem o preto?")
+
+
+# ─────────────── 8. v15: as frases-padrão da loja na Shopee ───────────────
+
+AIR_110_ESGOTADA = {
+    "item_id": "1",
+    "titulo": "Air Fryer 110v 220v",
+    "variacoes": [
+        {"nome": "110v", "disponivel": False, "confiavel": True},
+        {"nome": "220v", "disponivel": True, "confiavel": True},
+    ],
+}
+FATO_26 = {
+    "fatos": [{"id": "fato:26", "texto": "No momento não trabalhamos com capinha nem película."}]
+}
+
+
+def _entrada_shopee(evidencias, texto, perguntas, plataforma="shopee") -> str:
+    resumo = verificador.ResumoDoPacote(
+        plataforma="Shopee", agora="27/10/2026 10:00", perguntas=perguntas, conversa=[],
+        evidencias=[json.dumps(e, ensure_ascii=False) for e in evidencias],
+        plataforma_codigo=plataforma,
+    )  # fmt: skip
+    return verificador.montar_entrada(
+        acao="responder", acao_pessoa=None, texto=texto, resumo=resumo, assunto="estoque_variacao"
+    )
+
+
+def test_v15_as_frases_padrao_vao_so_na_shopee():
+    assert verificador.VERSAO == "v15"
+    e = _entrada_shopee([], "Olá!", ["oi"])
+    assert verificador.CABECALHO_FRASES_PADRAO in e
+    for frase in verificador.FRASES_PADRAO_SHOPEE:
+        assert f"- {frase}" in e
+    assert verificador.FRASE_PADRAO_REPOSICAO not in e
+    assert verificador.CABECALHO_FRASES_PADRAO not in _entrada_shopee([], "Olá!", ["oi"], "ml")
+    # O SISTEMA diz o que a seção vale e que a empatia não é afirmação.
+    assert "FRASES-PADRÃO DA LOJA NESTA PLATAFORMA (quando vier)" in verificador.SISTEMA
+    assert "empatia e acolhimento" in verificador.SISTEMA
+
+
+def test_v15_a_reposicao_so_com_a_opcao_esgotada_nas_evidencias():
+    texto = "A 110v está esgotada e não temos previsão de reposição."
+    com = _entrada_shopee([AIR_110_ESGOTADA], texto, ["tem previsão da 110v?"])
+    assert verificador.FRASE_PADRAO_REPOSICAO in com
+    disponivel = {
+        **AIR_110_ESGOTADA,
+        "variacoes": [{"nome": "110v", "disponivel": True, "confiavel": True}],
+    }
+    sem = _entrada_shopee([disponivel], texto, ["tem previsão da 110v?"])
+    assert verificador.FRASE_PADRAO_REPOSICAO not in sem
+
+
+def test_v15_o_acessorio_so_com_o_fato_que_nega_a_venda():
+    com = _entrada_shopee([FATO_26], "Não temos capinha.", ["vende capinha?"])
+    assert "a loja não tem anúncio de capinha nem película" in com
+    sem = _entrada_shopee([], "Não temos capinha.", ["vende capinha?"])
+    assert "a loja não tem anúncio de" not in sem
+
+
+def test_a_regiao_sem_dado_no_estado_que_o_cliente_cita_e_dura():
+    p = checagens._suave(
+        checagens.REGIAO_SEM_FONTE,
+        "afirma a entrega no estado que o cliente citou sem dado de restrição",
+    )
+    assert checagens.pendencia_dura(p)
+    aviso = checagens._suave(
+        checagens.REGIAO_SEM_FONTE, "afirma a entrega sem citar a restrição do anúncio (RJ)"
+    )
+    assert not checagens.pendencia_dura(aviso)
+
+
+def test_a_calibracao_tem_o_grupo_das_frases_padrao():
+    from scripts.agente_eval import calibrar_verificador as calibrar
+
+    casos = [c for c in calibrar.ler_casos(calibrar.CASOS_PADRAO) if c["grupo"] == "frases_padrao"]
+    boas = [c for c in casos if c["esperado"]["ok_para_envio_automatico"]]
+    ruins = [c for c in casos if not c["esperado"]["ok_para_envio_automatico"]]
+    assert len(boas) >= 8 and len(ruins) >= 6
+    assert all(verificador.CABECALHO_FRASES_PADRAO in calibrar.entrada_do_caso(c) for c in casos)

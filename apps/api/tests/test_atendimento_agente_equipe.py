@@ -545,7 +545,7 @@ def test_32_revisao_a_chegada_nao_segura_nenhum_bom_da_calibracao():
 
 def test_32_v9_as_respostas_da_equipe_citadas():
     # O v10 (rodada "redondo", 23/10/2026: a busca no catálogo) guarda o v9 inteiro.
-    assert v.VERSAO in ("v9", "v10", "v11", "v12", "v13", "v14")
+    assert v.VERSAO in ("v9", "v10", "v11", "v12", "v13", "v14", "v15")
     s = v.SISTEMA
     assert "RESPOSTAS DA EQUIPE CITADAS (quando vier)" in s
     assert "nunca fato deste pedido nem autorização de promessa" in s
@@ -690,7 +690,7 @@ def test_32_v9_revisao_a_resposta_da_equipe_e_lastro_sem_ressalva():
     a ÚNICA fonte do produto, mandava conferir a resposta curta só contra elas e chamava a
     resposta da equipe de "a OUTRO cliente" sem dizer que é lastro."""
     s = _sistema()
-    assert v.VERSAO in ("v9", "v10", "v11", "v12", "v13", "v14")
+    assert v.VERSAO in ("v9", "v10", "v11", "v12", "v13", "v14", "v15")
     assert "É a ÚNICA fonte de verdade sobre o pedido e o produto" not in s
     assert (
         "É a ÚNICA fonte de verdade sobre o pedido; sobre o produto também, salvo a RESPOSTA "
