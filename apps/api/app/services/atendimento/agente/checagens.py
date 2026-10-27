@@ -1255,7 +1255,19 @@ def conferir_sem_previsao(
                 saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
                 continue
             if not all(o.disponivel is False and o.confiavel for o in faladas):
-                saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
+                # O portão (27/10/2026; o reposicao-10 da calibração, "Quando chega o azul?" →
+                # "Essa cor não tem previsão"): a variação DO CLIENTE disponível é a
+                # contradição — o aviso diz qual (o verificador confere nas EVIDÊNCIAS).
+                disponivel = next((o for o in faladas if o.disponivel and o.confiavel), None)
+                if disponivel is not None and not antes:
+                    saida.append(
+                        _contradiz(
+                            VARIACAO_CONTRADIZ,
+                            MOTIVO_SEM_PREVISAO_DISPONIVEL.format(disponivel.nome),
+                        )
+                    )
+                else:
+                    saida.append(_suave(VARIACAO_SEM_DADO, MOTIVO_SEM_PREVISAO_SEM_DADO))
     return _sem_repetir(saida)
 
 
@@ -6301,12 +6313,25 @@ def conferir_prazo_sem_lastro(texto: str, blocos: Sequence[Mapping] = ()) -> lis
     `blocos` (item 1 da auditoria ao vivo, 22–23/10/2026) = os blocos do pedido: o
     prazo que o último status traz, numa oração que só repete o status, tem o dado."""
     for oracao in _oracoes_afirmadas(texto or ""):
+        if _ECO_DA_NECESSIDADE.search(oracao.strip()):
+            # O portão (27/10/2026, 8d3644a22825): "Entendemos a sua necessidade de receber
+            # antes da viagem" ecoa o cliente — não promete prazo.
+            continue
         for m in _trechos_de_prazo(oracao):
             if _prazo_negado(oracao, m) or _prazo_do_status(oracao, m, blocos):
                 continue
             trecho = " ".join(m.group(0).split())[:40]
             return [_suave(PRAZO_SEM_LASTRO, f'prazo sem dado que o sustente ("{trecho}")')]
     return []
+
+
+# O acolhimento que repete a necessidade do cliente ("Entendemos a sua necessidade/pressa/
+# preocupação de receber antes de…", "Sabemos que você precisa dele até…").
+_ECO_DA_NECESSIDADE = re.compile(
+    r"^(?:nos\s+)?(?:entendemos|compreendemos|entendo|compreendo|sabemos|sei)\s+(?:\w+\s+){0,3}?"
+    r"(?:necessidade|pressa|urgencia|preocupacao|ansiedade|vontade|que\s+(?:voce|vc)\s+"
+    r"(?:precisa|quer|queria|gostaria))\b"
+)
 
 
 def prazo_do_validador_so_negado(texto: str | None) -> bool:
@@ -10267,6 +10292,35 @@ def conferir(
         pendencias += conferir_nomes_internos(texto, ctx.nomes_da_loja)
         da_regiao = conferir_regiao(texto, fichas, ctx, textos_cliente=clientes)
         pendencias += da_regiao
+        if (
+            ctx.modo == constantes.MODO_AUTO
+            and any(
+                x.codigo == REGIAO_SEM_FONTE
+                and x.motivo.startswith("afirma a entrega sem citar a restrição")
+                for x in da_regiao
+            )
+            and (
+                _cliente_fala_de_lugar_sem_uf(clientes)
+                or _ufs_dos_municipios(
+                    clientes,
+                    {
+                        str(u)
+                        for r in _restricoes([*fichas, *_do_registro(ctx)])
+                        for u in r.get("ufs") or []
+                    },
+                )
+            )
+        ):
+            # O portão (27/10/2026; o regiao-18 da calibração, "minha filha que vive em
+            # Itaperuna… quando chegar posso devolver?"): o lugar que o código não mapeia com a
+            # entrega pressuposta e a restrição no anúncio — (h), pessoa.
+            pendencias.append(
+                _contradiz(
+                    REGIAO_CONTRADIZ,
+                    "o cliente cita um lugar que pode ser de estado restrito e o texto pressupõe "
+                    "a entrega sem citar a restrição do anúncio",
+                )
+            )
         # 22/10/2026 (calibração, regiao-16/19): sem pedido na conversa, a chegada
         # pressuposta com estado restrito nas fichas — só quando a região não avisou.
         if not da_regiao and not (
@@ -10307,6 +10361,29 @@ def conferir(
         )
         # D3 (23/10/2026): a política da entrega só com a resposta da equipe citada.
         pendencias += conferir_politica_da_entrega(texto, evidencias_=proposta.evidencias, ctx=ctx)
+        if ctx.modo == constantes.MODO_AUTO:
+            # O portão (27/10/2026): (a) Pix e dados bancários; (c)/(g) o resultado prometido.
+            pendencias += conferir_pix_ou_banco(texto)
+            pendencias += conferir_promete_resultado(texto)
+            # Os erros críticos do eval de todas as lojas (27/10/2026): o "entregue" a quem
+            # não recebeu, o modelo que a variação do pedido não diz e o conteúdo da caixa
+            # sem o dado.
+            do_turno = [
+                *clientes,
+                *(getattr(m, "texto", None) or "" for m in getattr(base, "foco", ()) or ()),
+            ]
+            pendencias += conferir_entregue_a_quem_nao_recebeu(texto, do_turno)
+            pendencias += conferir_modelo_sem_o_dado(texto, pedido, fichas)
+            pendencias += conferir_conteudo_sem_o_dado(
+                texto,
+                do_turno,
+                acao=proposta.acao,
+                fichas=fichas,
+                pares_de_produto=[
+                    str(par.get("id"))
+                    for par in ctx.pares_citados(proposta.evidencias, de_produto=True)
+                ],
+            )
         # Item 6 da rodada "redondo" (23/10/2026): G1 — o outro produto da loja só com a
         # busca no catálogo; o "não temos" só com o fato aprovado ou a busca vazia.
         pendencias += conferir_outro_produto_da_loja(
@@ -10322,10 +10399,21 @@ def conferir(
     pendencias += conferir_generica_com_pendencia(
         conferida.categoria, base.recentes, gatilho, texto
     )
+    if ctx.modo == constantes.MODO_AUTO:
+        # O portão (27/10/2026): o cumprimento/"como podemos ajudar?" com o que responder.
+        pendencias += conferir_generica_com_pergunta(
+            texto, acao=proposta.acao, recentes=base.recentes, gatilho=gatilho
+        )
     pendencias += conferir_andamento(
         base.ctx,
         motivos=conferida.motivos,
         rotina=ctx.devolucao_de_rotina or ctx.responde_e_marca,
+    )
+    # Pedido do dono (27/10/2026): com a resposta da equipe do MESMO produto citada, o aviso
+    # de característica diz que há o par (o verificador confere contra a linha dele).
+    pendencias = com_o_par_do_produto(
+        pendencias,
+        [str(par.get("id")) for par in ctx.pares_citados(proposta.evidencias, de_produto=True)],
     )
     return Checagens(pendencias=_sem_repetir(pendencias))
 
@@ -10351,6 +10439,9 @@ def aplicar(
     - as outras (PESSOA): motivo (pessoa), nos dois modos;
     - toda pendência e toda ação de pessoa entram em `sem_auto` (o rascunho
       não sai sozinho por nenhum caminho: `ia.trava_do_agente`);
+    - O PORTÃO (27/10/2026): no `MODO_AUTO`, a pendência que não é DURA
+      (`pendencia_dura`) só vira aviso (`avisos`) — nem motivo, nem pessoa, nem
+      `sem_auto`; o verificador a recebe como dica. No copiloto, como acima;
     - status SUBSTITUIDO (a loja respondeu) não muda, a não ser para BLOQUEADO.
     """
     acoes = conferir_acao_de_pessoa(acoes_pessoa)
@@ -10370,6 +10461,11 @@ def aplicar(
             lista.append(motivo)
 
     for p in [*acoes, *checagens.pendencias]:
+        if modo == constantes.MODO_AUTO and not pendencia_dura(p):
+            # O portão (27/10/2026): no automático, o que não é DURO só avisa — o aviso vai à
+            # pessoa e ao verificador (a seção AVISOS DAS CHECAGENS); não segura sozinho.
+            _junta(avisos, p.motivo)
+            continue
         _junta(sem_auto, p.motivo)
         if p.codigo == ACAO_DE_PESSOA:
             precisa = True
@@ -10396,3 +10492,488 @@ def aplicar(
         avisos=avisos,
         sem_auto=sem_auto,
     )
+
+
+# ── 12. O PORTÃO do envio sozinho (redesenho do dono, 27/10/2026) ─────────
+#
+# "Responder corretamente pra tudo sem uma regra atrapalhar a outra" (Eduardo, 26–27/10):
+# medido ao vivo, o agente saía sozinho em ~10% dos turnos e os rascunhos segurados eram,
+# em maioria, respostas BOAS presas por regras suaves empilhadas (a capacidade "6 L" do
+# cesto contra os "4 L" da air fryer, o "Tudo bem, sim." sem lastro, o D1 que nunca valia).
+# O automático do agente passa a ser:
+#
+#   acao "responder" com texto  E  nenhum bloqueio DURO  E  o "ok" do verificador.
+#
+# DURO (sempre pessoa — o código, determinístico): Pix/dados bancários/transferência; desconto
+# ou negociação de preço; prometer reembolso, aprovação, estorno/chargeback, data, prazo ou
+# valor que os dados não trazem; ameaça jurídica (Procon, Reclame Aqui, advogado, justiça);
+# o pedido do ARQUIVO da NF; a evidência de defeito ou item errado para analisar; aprovar ou
+# recusar devolução/reembolso; contradizer a restrição de região; o chamado de entrega (D3:
+# só a etiqueta da Caixa Humano, nunca o painel de Chamados); a reclamação/mediação do ML e
+# o canal de reclamação; as técnicas (dado interno, contato ou link fora da plataforma,
+# injeção, recusa ou texto vazio, a escolha "pessoa" do próprio modelo); o cliente que
+# insiste em falar com uma pessoa; a resposta genérica com pergunta pendente; a confiança
+# abaixo de `CONFIANCA_DURA`.
+#
+# TODO o resto que segurava (as pendências suaves e as de "pessoa" que não estão acima, a
+# trava da ficha no automático, o assunto de produto, o andamento no turno informativo da
+# devolução aberta, a G1, variação e estoque, pedido_sem_lastro, caracteristica_fora_do_
+# anuncio, assunto_nao_pedido, politica_da_entrega_sem_par, a confiança entre 0,5 e 0,8…)
+# deixa de segurar SOZINHO: vira AVISO (`SaidaConferida.avisos`) que vai ao verificador na
+# seção "AVISOS DAS CHECAGENS" — uma dica, não um veredito. No copiloto nada muda.
+
+PIX_OU_BANCO = "pix_ou_banco"
+MOTIVO_PIX_OU_BANCO = "fala de Pix, dados bancários, transferência ou depósito — pessoa"
+PROMETE_RESULTADO = "promete_resultado"
+MOTIVO_PROMETE_RESULTADO = (
+    'promete ou dá como certo reembolso, estorno, aprovação ou troca ("{trecho}") — pessoa decide'
+)
+GENERICA_COM_PERGUNTA = "generica_com_pergunta"
+MOTIVO_GENERICA_COM_PERGUNTA = (
+    'o cliente perguntou algo e a resposta é só o cumprimento/o "como podemos ajudar?" — pessoa'
+)
+CONFIANCA_BAIXA = "confianca_baixa"
+CONFIANCA_ABAIXO_DO_PISO = "confianca_abaixo_do_piso"
+ASSUNTO_DE_PRODUTO = "assunto_de_produto"
+MOTIVO_ASSUNTO_DE_PRODUTO = (
+    "assunto de produto ({assunto}) sem a marca do anúncio da conversa nem a resposta da "
+    "equipe do mesmo produto — confira cada característica contra as EVIDÊNCIAS"
+)
+# A confiança do modelo: abaixo do piso, pessoa; do piso ao `CONFIANCA_AVISO`, aviso.
+CONFIANCA_DURA = 0.50
+CONFIANCA_AVISO = 0.80
+MOTIVO_CONFIANCA_BAIXA = "o próprio agente deu confiança {conf:.2f} (abaixo de 0,80)"
+MOTIVO_CONFIANCA_ABAIXO_DO_PISO = "confiança do agente {conf:.2f}, abaixo de 0,50 — pessoa"
+
+# As pendências que continuam DURAS (as `_bloqueia` já são).
+DURAS: frozenset[str] = frozenset(
+    {
+        ACAO_DE_PESSOA,
+        # (h) a restrição de região contrariada.
+        REGIAO_CONTRADIZ,
+        # (k) contato/caminho fora da plataforma, dado interno, remetente, recado, "sou humano".
+        CAMINHO_FORA_DA_PLATAFORMA,
+        ROTULO_INTERNO,
+        MOTIVO_DO_REMETENTE,
+        RECADO_AO_REVISOR,
+        SE_DIZ_HUMANO,
+        HOMOLOGADO,
+        # (f) e (g): a compra nova e a recusa da troca a quem relata defeito. (A resposta além
+        # da orientação aprovada do defeito é AVISO: no eval de todas as lojas, 27/10/2026,
+        # segurava 3 respostas boas sozinha — o acolhimento "a tela do seu celular", a
+        # orientação aprovada — e nenhuma ruim; o verificador confere o diagnóstico.)
+        COMPRA_NOVA_NO_DEFEITO,
+        TROCA_NEGADA_NO_DEFEITO,
+        # A recusa da entrega nunca é a orientação da loja (o dono).
+        RECUSA_DA_ENTREGA,
+        # (i) D3: a condição do chamado de entrega sem a ação de abrir o chamado.
+        ATRASO_SEM_CHAMADO,
+        # O chamado aberto e a devolução fora do D1/rotina (`conferir_andamento` só a põe aí).
+        EM_ANDAMENTO,
+        # A resposta genérica com o que responder no turno.
+        GENERICA_COM_PENDENCIA,
+        GENERICA_APOS_OFERTA,
+        GENERICA_COM_PERGUNTA,
+        # (c) a data ou o prazo que os dados não trazem ("hoje à tarde ele sai", "essa
+        # semana", a chegada do estoque com data).
+        PRAZO_SEM_LASTRO,
+        CHEGADA_SEM_DADO,
+        # (g) recusar o cancelamento ("não dá para cancelar") é decisão de pessoa.
+        CANCELAR_PELA_LOJA,
+        # (a) e (c)/(g).
+        PIX_OU_BANCO,
+        PROMETE_RESULTADO,
+        CONFIANCA_ABAIXO_DO_PISO,
+        # O "não" do verificador é a última trava.
+        "verificador",
+    }
+)
+# Do D1 ("responde e marca"): decidir, prometer data/prazo/valor ou falar de Pix é DURO; o
+# resto (outra ação da equipe, mandar abrir outra solicitação) é aviso.
+_RESPONDE_E_MARCA_DURO = (
+    "decide ou dá o resultado",
+    "promete data, prazo ou valor",
+    "fala de Pix",
+)
+
+
+_MOTIVOS_DUROS_DA_VARIACAO = ("promessa de estoque", "cita o sku ou o id interno")
+
+
+def pendencia_dura(p: PendenciaAgente) -> bool:
+    """A pendência segura o envio sozinho por si (o portão de 27/10/2026)? PURA."""
+    if p.bloqueia or p.codigo in DURAS:
+        return True
+    if p.motivo.startswith(_MOTIVOS_DUROS_DA_VARIACAO):
+        # (c) a reposição prometida ("volta ao estoque logo", "últimas unidades", "reservo") e
+        # (k) o sku/id interno da variação — seja qual for o código da conferência.
+        return True
+    if p.codigo == ESTADO_CONTRADIZ:
+        # (c) a aprovação ou conclusão que só a equipe dá; o resto do estado é aviso.
+        return p.motivo.startswith("afirma aprovação")
+    if p.codigo == ESTADO_SEM_DADO:
+        # (c) o reembolso/estorno e a aprovação da plataforma sem o dado; o resto é aviso.
+        return p.motivo.startswith(("afirma o reembolso", "diz o que a plataforma aprovou"))
+    if p.codigo == RESPONDE_E_MARCA:
+        return any(x in p.motivo for x in _RESPONDE_E_MARCA_DURO)
+    return False
+
+
+# Os motivos da `ia.conferir_saida(agente=True)` que viram AVISO no automático do agente
+# (todo motivo que não está aqui continua duro: o validador, o número inventado, a garantia,
+# a recusa de direito, o 83955, a reclamação do ML, a avaliação baixa, os sinais do cliente,
+# o turno incompleto, o "há pergunta concreta pendente"…).
+_AVISOS_DO_LEGADO_EXATOS = frozenset(
+    {
+        "categoria fora da lista",
+        "pedido não encontrado no sistema",
+        "conversa sem pedido identificado",
+    }
+)
+_AVISOS_DO_LEGADO_PREFIXOS = (
+    "a categoria da IA (",
+    "sem dado para {",
+    "lacuna desconhecida {",
+)
+
+
+def motivo_e_aviso(motivo: str) -> bool:
+    """O motivo da 1ª camada (a `conferir_saida` do agente e o `sem_lacuna_vazia`) é só
+    aviso no automático do agente? PURA."""
+    from app.services.atendimento import ia as ia_svc
+
+    m = str(motivo or "")
+    if m in _AVISOS_DO_LEGADO_EXATOS or m.startswith(_AVISOS_DO_LEGADO_PREFIXOS):
+        return True
+    if m == ia_svc.MOTIVO_FICHA_NO_AUTOMATICO:
+        return True
+    # A frase da lacuna sem o dado saiu do rascunho: o verificador confere o que sobrou.
+    antes, depois = MOTIVO_LACUNA_TIRADA.split("{lacunas}")
+    return m.startswith(antes) and m.endswith(depois)
+
+
+def separar_avisos(
+    conferida: SaidaConferida, *, modo: str, pessoa_do_modelo: bool
+) -> SaidaConferida:
+    """No AUTOMÁTICO do agente, os motivos que são só aviso (`motivo_e_aviso`) saem dos
+    `motivos`/`sem_auto` e vão para os `avisos`; o `precisa_humano` fica com o que é duro
+    (e com a escolha "pessoa" do próprio modelo). No copiloto, a mesma. PURA."""
+    if modo != constantes.MODO_AUTO:
+        return conferida
+    avisos = list(getattr(conferida, "avisos", None) or [])
+    motivos: list[str] = []
+    for m in conferida.motivos:
+        if motivo_e_aviso(m):
+            if m not in avisos:
+                avisos.append(m)
+        else:
+            motivos.append(m)
+    # O `sem_auto` (o que a trava lê) só com o que continua duro.
+    sem_auto = [m for m in (getattr(conferida, "sem_auto", None) or []) if m in motivos]
+    return dataclasses.replace(
+        conferida,
+        motivos=motivos,
+        avisos=avisos,
+        sem_auto=sem_auto,
+        precisa_humano=bool(pessoa_do_modelo or motivos),
+    )
+
+
+_PIX_NO_TEXTO = re.compile(
+    r"\bpix\b|\bdados\s+bancarios\b|\bconta\s+(?:bancaria|corrente|poupanca)\b"
+    r"|\bagencia\s+e\s+(?:a\s+|o\s+numero\s+da\s+)?conta\b|\btransferencia\s+bancaria\b"
+    r"|\b(?:fazer|faca|faz|fazemos|fizemos|faremos|realiz\w*|mand\w*)\s+(?:uma\s+|a\s+)?"
+    r"transferencia\b|\btransfer(?:ir|imos|iremos|ido|ida)\s+(?:o\s+)?(?:valor|dinheiro)\b"
+    r"|\bdeposit(?:ar|amos|aremos|ado|ada)\b|\bdeposito\s+(?:bancario|na\s+(?:sua\s+)?conta"
+    r"|em\s+conta|do\s+valor)\b|\bted\b"
+)
+
+
+def conferir_pix_ou_banco(texto: str) -> list[PendenciaAgente]:
+    """(a) A resposta fala de Pix, dados bancários, transferência ou depósito → DURA. PURA."""
+    if _PIX_NO_TEXTO.search(_plano(texto)):
+        return [_pessoa(PIX_OU_BANCO, MOTIVO_PIX_OU_BANCO)]
+    return []
+
+
+_OBJETO_DO_RESULTADO = (
+    r"(?:reembols\w*|estorn\w*|ressarc\w*|devoluc\w*|troca|solicitac\w*|cancelament\w*"
+    r"|dinheiro|valor|credito)"
+)
+_PELA_PLATAFORMA = (
+    r"(?!\s+(?:\w+\s+){0,2}?pel[ao]s?\s+(?:propri[ao]\s+)?(?:shopee|plataforma|mercado|tiktok"
+    r"|amazon|ml|marketplace|app)\b)"
+)
+_PROMETE_RESULTADO = re.compile(
+    rf"\b{_OBJETO_DO_RESULTADO}\s+(?:\w+\s+){{0,3}}?(?:foi|foram|esta|estao|ja\s+foi|ja\s+esta"
+    r"|ficou|ficaram|sera|serao|vai\s+ser|vao\s+ser|seria)\s+(?:\w+\s+)?(?:aprovad|aceit|autorizad"
+    r"|liberad|deferid|confirmad|efetuad|realizad|feit|processad|pag[oa]|creditad|estornad"
+    rf"|reembolsad|garantid|recusad|negad|indeferid)\w*\b{_PELA_PLATAFORMA}"
+    r"|\b(?:aprovamos|autorizamos|liberamos|estornamos|reembolsamos|ressarcimos|aprovei|autorizei"
+    r"|liberei|estornei|reembolsei|aprovaremos|autorizaremos|liberaremos|estornaremos"
+    r"|reembolsaremos|aceitaremos|recusamos|negamos)\b"
+    # "aceitamos a SUA devolução" decide; "aceitamos devolução pelo app" é a política.
+    r"|\baceitamos\s+(?:a\s+)?sua\s+(?:devoluc\w*|troca|solicitac\w*|cancelament\w*)"
+    r"|\b(?:vamos|vou|iremos|irei|podemos|posso|conseguimos|consigo)\s+(?:\w+\s+)?(?:aprovar"
+    r"|autorizar|liberar|estornar|reembolsar|ressarcir|aceitar\s+(?:a\s+|sua\s+)?(?:devoluc\w*"
+    r"|troca)|devolver\s+(?:o\s+|seu\s+|o\s+seu\s+)?(?:valor|dinheiro)|fazer\s+(?:o\s+|a\s+)?"
+    r"(?:estorno|reembolso|troca)|trocar\s+(?:o|a|seu|sua)\b|enviar\s+(?:outr[oa]|um\s+nov[oa]"
+    r"|uma\s+nov[oa])|mandar\s+(?:outr[oa]|um\s+nov[oa]|uma\s+nov[oa])|reenviar)"
+    r"|\b(?:voce|vc)\s+(?:vai|ira)\s+(?:receber|ter)\s+(?:o\s+|seu\s+|o\s+seu\s+|um\s+|uma\s+)?"
+    r"(?:reembols\w*|dinheiro|estorno|valor|credito|nov[oa]\s+(?:aparelho|produto|item)"
+    r"|outr[oa]\s+(?:aparelho|produto|item))"
+    r"|\bpode\s+ficar\s+com\s+(?:o|a)\s+(?:produto|item|aparelho|pedido)\b"
+    r"|\bnao\s+precisa\s+(?:devolver|enviar\s+de\s+volta|postar)\b"
+    r"|\bchargeback\b|\bcontestac\w*\s+(?:no|do|junto\s+ao)\s+(?:cartao|banco)\b"
+)
+_NEGA_O_RESULTADO = re.compile(r"\b(?:nao|nem|nunca|ainda\s+nao)\b")
+
+
+def conferir_promete_resultado(texto: str) -> list[PendenciaAgente]:
+    """(c)/(g) A resposta promete, decide ou dá como certo reembolso, estorno, aprovação,
+    troca ou reenvio → DURA. O processo da plataforma ("a Shopee analisa e devolve pela
+    mesma forma de pagamento", "o reembolso é feito pela Shopee") não conta; a oração
+    negada e a condição também não. PURA."""
+    for oracao in _oracoes_afirmadas(texto or ""):
+        for m in _PROMETE_RESULTADO.finditer(oracao):
+            # "não precisa devolver" é a própria decisão; nas outras, a negação desfaz.
+            if not m.group(0).startswith("nao ") and _NEGA_O_RESULTADO.search(
+                oracao[max(0, m.start() - 12) : m.end()]
+            ):
+                continue
+            trecho = " ".join(m.group(0).split())[:50]
+            return [_pessoa(PROMETE_RESULTADO, MOTIVO_PROMETE_RESULTADO.format(trecho=trecho))]
+    return []
+
+
+def resposta_so_generica(texto: str | None) -> bool:
+    """O texto é só cumprimento/cortesia e o "como podemos ajudar?" (sem nada que responda)?
+    PURA (o 06:53 da Kia, 27/10/2026: "Olá! Como podemos ajudar com o Apple Watch Series
+    11?")."""
+    frases = [f.strip(" ,.;:!?") for f in _ENTRE_FRASES.split(_plano(texto)) if f.strip()]
+    frases = [f for p in frases for f in re.split(r"[!?]+", p) if f.strip(" ,.;:")]
+    if not any(acao_pessoa._RESPOSTA_GENERICA.search(f) for f in frases):
+        return False
+    return all(
+        acao_pessoa._RESPOSTA_GENERICA.search(f) or _SO_CORTESIA.search(f.strip(" ,.;:"))
+        for f in frases
+    )
+
+
+def conferir_generica_com_pergunta(
+    texto: str, *, acao: str, recentes: Sequence[Any], gatilho: Any | None
+) -> list[PendenciaAgente]:
+    """A resposta é só o cumprimento/o "como podemos ajudar?" e o turno (ou a conversa)
+    traz algo a responder (`acao_pessoa.tem_o_que_responder`) → DURA. PURA."""
+    if acao != "responder" or not resposta_so_generica(texto):
+        return []
+    if not acao_pessoa.tem_o_que_responder(recentes, gatilho):
+        return []
+    return [_pessoa(GENERICA_COM_PERGUNTA, MOTIVO_GENERICA_COM_PERGUNTA)]
+
+
+def avisos_do_portao(
+    *,
+    confianca: float,
+    assunto: str | None,
+    produto_pelo_anuncio: bool,
+    produto_pela_equipe: bool,
+) -> list[PendenciaAgente]:
+    """Os avisos (e o piso duro) que o portão acrescenta: a confiança do próprio agente e o
+    assunto de produto sem a marca do anúncio nem a resposta da equipe. PURA."""
+    saida: list[PendenciaAgente] = []
+    if confianca < CONFIANCA_DURA:
+        motivo = MOTIVO_CONFIANCA_ABAIXO_DO_PISO.format(conf=confianca)
+        saida.append(_pessoa(CONFIANCA_ABAIXO_DO_PISO, motivo))
+    elif confianca < CONFIANCA_AVISO:
+        saida.append(_suave(CONFIANCA_BAIXA, MOTIVO_CONFIANCA_BAIXA.format(conf=confianca)))
+    if (
+        assunto in constantes.ASSUNTOS_SO_PESSOA_NO_AGENTE
+        and not produto_pelo_anuncio
+        and not produto_pela_equipe
+    ):
+        saida.append(_suave(ASSUNTO_DE_PRODUTO, MOTIVO_ASSUNTO_DE_PRODUTO.format(assunto=assunto)))
+    return saida
+
+
+def com_o_par_do_produto(
+    pendencias: Sequence[PendenciaAgente], pares_de_produto: Sequence[str]
+) -> list[PendenciaAgente]:
+    """O aviso de característica do produto (fonte, ficha no automático, característica fora
+    do anúncio) quando o rascunho cita a resposta da equipe do MESMO produto: o aviso diz
+    que há o par (o verificador confere contra a linha dele). PURA."""
+    if not pares_de_produto:
+        return list(pendencias)
+    do_produto = {PRODUTO_SEM_FONTE, FICHA_NO_AUTOMATICO, CARACTERISTICA_FORA_DO_ANUNCIO}
+    citados = ", ".join(pares_de_produto[:3])
+    saida = []
+    for p in pendencias:
+        if p.codigo in do_produto and not pendencia_dura(p):
+            p = dataclasses.replace(
+                p,
+                motivo=f"{p.motivo} (o rascunho cita {citados}, resposta da equipe do mesmo "
+                "produto: confira contra ela)",
+            )
+        saida.append(p)
+    return saida
+
+
+# ── 12b. Os três duros dos erros críticos do eval de todas as lojas (27/10/2026) ──
+#
+# O eval cego de 150 turnos reais (7 avaliadores) achou 7 erros críticos; três classes
+# passavam pela 1ª camada e dependiam só do verificador. Regras GENÉRICAS (não do caso):
+#   1. ENTREGUE_A_QUEM_NAO_RECEBEU — o texto dá o pedido como entregue ("consta como
+#      entregue", "o último status é 'Pedido entregue'") a quem, no turno, diz que não
+#      recebeu, que a data mudou ou que ainda espera (4b80203b2114: "Agora já trocaram a
+#      data / De novo"; 9bd4d5c7eea1: "Meu celular chega hj / Quero o meu celular"): é a
+#      condição do chamado de entrega (D3 — chamado é 100% pessoa);
+#   2. MODELO_SEM_O_DADO — com o anúncio de mais de um modelo (A17 e A18 no mesmo anúncio),
+#      o texto chama o aparelho do cliente por um modelo que a variação do PEDIDO não diz
+#      ("…não serve no seu Uranyx A17 Pro Max" para a variação "16 GB / 128 GB Premium
+#      NFC", que é o A18 — b57125a03f67);
+#   3. CONTEUDO_SEM_O_DADO — a pergunta do que vem junto (capinha, película, case,
+#      carregador, brinde) respondida com a negativa, o "só"/"apenas" ou o "não consta/não
+#      informa" sem a resposta da equipe do mesmo produto citada (c4ab05b7cbe1 e
+#      92980f147e4e: a equipe sabe que vai uma capinha transparente) — o que a caixa traz
+#      e o anúncio não diz, a equipe sabe: pessoa.
+ENTREGUE_A_QUEM_NAO_RECEBEU = "entregue_a_quem_nao_recebeu"
+MOTIVO_ENTREGUE_A_QUEM_NAO_RECEBEU = (
+    "dá o pedido como entregue a quem diz que não recebeu ou que a data mudou — é chamado "
+    "de entrega (pessoa)"
+)
+MODELO_SEM_O_DADO = "modelo_sem_o_dado"
+MOTIVO_MODELO_SEM_O_DADO = (
+    "chama o aparelho do cliente de '{modelo}', mas o anúncio tem mais de um modelo e a "
+    "variação do pedido não diz qual — pessoa confere"
+)
+CONTEUDO_SEM_O_DADO = "conteudo_sem_o_dado"
+MOTIVO_CONTEUDO_SEM_O_DADO = (
+    'a pergunta do que vem junto respondida com a negativa ou o "não consta" sem a '
+    "resposta da equipe do mesmo produto — o que a caixa traz, a equipe sabe (pessoa)"
+)
+DURAS = DURAS | {ENTREGUE_A_QUEM_NAO_RECEBEU, MODELO_SEM_O_DADO, CONTEUDO_SEM_O_DADO}
+
+_ENTREGUE_NO_TEXTO = re.compile(
+    r"\b(?:consta|aparece|esta|foi|ja\s+foi|ficou)\s+(?:como\s+)?entregue\b"
+    r"|\bstatus\s+(?:\w+\s+){0,3}?(?:e|eh|esta|consta)?\s*:?\s*[\"'“]?\s*(?:pedido\s+)?entregue\b"
+)
+_AINDA_NAO_RECEBEU = re.compile(
+    r"\b(?:trocaram|mudaram|mudou|alteraram|alterou|adiaram|adiou)\s+(?:\w+\s+){0,2}?"
+    r"(?:a\s+)?data\b|\breagend\w*|\bnova\s+data\b|\bchega\s+(?:hj|hoje|amanha|quando)\b"
+    r"|\bquando\s+(?:chega|vai\s+chegar|vem)\b|\b(?:quero|cade|kd)\s+(?:o\s+|a\s+)?(?:meu|minha)\s+"
+    r"(?:celular|pedido|produto|encomenda|aparelho|pacote)\b|\bainda\s+(?:esperando|aguardando)\b"
+    r"|\b(?:to|estou|tou)\s+esperando\s+(?:o|a|meu|minha)\b"
+)
+
+
+def conferir_entregue_a_quem_nao_recebeu(
+    texto: str, textos_cliente: Sequence[str]
+) -> list[PendenciaAgente]:
+    """1. (ver acima) → DURA. PURA."""
+    plano = _plano(texto)
+    if not plano or not any(
+        not _NEGA_A_ENTREGA.search(plano[: m.start()]) for m in _ENTREGUE_NO_TEXTO.finditer(plano)
+    ):
+        return []
+    turno = " ".join(_plano(t) for t in textos_cliente if isinstance(t, str))
+    if not turno:
+        return []
+    if (
+        _AINDA_NAO_RECEBEU.search(turno)
+        or acao_pessoa.reclama_que_nao_chegou(turno)
+        or acao_pessoa._NAO_RECEBEU.search(turno)
+    ):
+        return [_pessoa(ENTREGUE_A_QUEM_NAO_RECEBEU, MOTIVO_ENTREGUE_A_QUEM_NAO_RECEBEU)]
+    return []
+
+
+_MODELO_DO_CLIENTE = re.compile(
+    r"\b(?:seu|sua|o\s+seu|do\s+seu|no\s+seu|ao\s+seu|para\s+o\s+seu|pro\s+seu|pelo\s+seu"
+    r"|com\s+o\s+seu)\s+(?:aparelho\s+|celular\s+|smartphone\s+)?(?:\w+\s+)?"
+    r"(?P<modelo>[a-z]{1,3}\d{1,3}[a-z]?)\b"
+)
+_MODELO_NO_TEXTO = re.compile(r"\b([a-z]{1,3}\d{1,3}[a-z]?)\b")
+_NAO_E_CODIGO_DE_MODELO = re.compile(r"^(?:gb|tb|mb|mah|hz|mp|w|v|x|k|ram|rom|usb|ip|wifi)\d")
+
+
+def _modelos(texto: str) -> set[str]:
+    """Os códigos de modelo do texto (A17, WP53, C2, F109). PURA."""
+    return {
+        m for m in _MODELO_NO_TEXTO.findall(_plano(texto)) if not _NAO_E_CODIGO_DE_MODELO.match(m)
+    }
+
+
+def _anuncio_de_varios_modelos(fichas: Sequence[Any]) -> bool:
+    """Alguma ficha é de um anúncio de mais de um modelo (a especificação com
+    `varia_por_modelo`, ou dois modelos no título)? PURA."""
+    for f in fichas:
+        if not isinstance(f, Mapping):
+            continue
+        esp = f.get("especificacoes") if isinstance(f.get("especificacoes"), Mapping) else {}
+        if any(
+            isinstance(c, Mapping) and c.get("varia_por_modelo") for c in esp.get("campos") or []
+        ):
+            return True
+        if len(_modelos(str(f.get("titulo") or ""))) >= 2:
+            return True
+    return False
+
+
+def conferir_modelo_sem_o_dado(
+    texto: str, pedido: Mapping | None, fichas: Sequence[Any]
+) -> list[PendenciaAgente]:
+    """2. (ver acima) → DURA. PURA. `pedido` = o bloco do pedido da conversa."""
+    if not isinstance(pedido, Mapping) or not _anuncio_de_varios_modelos(fichas):
+        return []
+    m = _MODELO_DO_CLIENTE.search(_plano(texto))
+    if not m:
+        return []
+    modelo = m.group("modelo").replace(" ", "")
+    variacoes = " ".join(
+        str(i.get("variacao") or "") for i in pedido.get("itens") or [] if isinstance(i, Mapping)
+    )
+    if modelo in {x.replace(" ", "") for x in _modelos(variacoes)}:
+        return []
+    return [_pessoa(MODELO_SEM_O_DADO, MOTIVO_MODELO_SEM_O_DADO.format(modelo=modelo.upper()))]
+
+
+_OBJETO_DA_CAIXA = (
+    r"(?:capinha|capa|case|pelicula|carregador|fonte|fone|cabo|brinde\w*|estojo|acessorio\w*"
+    r"|adaptador|pulseira)"
+)
+_PERGUNTA_DA_CAIXA = re.compile(
+    rf"\b(?:vem|vai|acompanha\w*|veio|traz|inclu\w*|ganha|junto)\b.{{0,40}}\b{_OBJETO_DA_CAIXA}"
+    rf"|\b{_OBJETO_DA_CAIXA}\b.{{0,30}}\b(?:vem|vai|acompanha|junto|inclus\w*|de\s+brinde)\b"
+)
+_NEGA_A_CAIXA = re.compile(
+    r"\b(?:nao|nem)\s+(?:\w+\s+){0,3}?(?:consta\w*|vem|vai|acompanha\w*|traz|cita\w*|informa\w*"
+    r"|inclu\w*|menciona\w*|aparece\w*)\b|\bacompanha\w*\s+(?:apenas|somente|so)\b"
+    r"|\b(?:apenas|somente)\s+(?:o|a|os|as)\s+\w+|\bnao\s+temos\s+(?:essa\s+)?informac\w*"
+    r"|\bconferir\s+ao\s+receber\b"
+    r"|\b(?:aparece|vem|acompanha|esta)\s+so\s+(?:na|no|nas|nos|para|com|em)\b"
+    rf"|\bsem\s+{_OBJETO_DA_CAIXA}"
+)
+
+
+def conferir_conteudo_sem_o_dado(
+    texto: str,
+    textos_cliente: Sequence[str],
+    *,
+    acao: str,
+    pares_de_produto: Sequence[str] = (),
+    fichas: Sequence[Any] = (),
+) -> list[PendenciaAgente]:
+    """3. (ver acima) → DURA. PURA. Com a resposta da equipe do mesmo produto citada, ou com a
+    lista exclusiva do anúncio que deixa o objeto de fora ("acompanha apenas o cabo"), não."""
+    if acao != "responder" or pares_de_produto:
+        return []
+    fontes = [t for f in fichas for t in _textos_do(f)] if fichas else []
+    if fontes and negados_pela_lista_exclusiva(texto, fontes):
+        return []
+    plano = _plano(texto)
+    turno = " ".join(_plano(t) for t in textos_cliente if isinstance(t, str))
+    if not plano or not _PERGUNTA_DA_CAIXA.search(turno):
+        return []
+    if not re.search(_OBJETO_DA_CAIXA, plano) or not _NEGA_A_CAIXA.search(plano):
+        return []
+    return [_pessoa(CONTEUDO_SEM_O_DADO, MOTIVO_CONTEUDO_SEM_O_DADO)]

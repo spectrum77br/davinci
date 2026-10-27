@@ -93,14 +93,30 @@ def _rascunho_ag1(categoria: str) -> types.SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize("categoria", ASSUNTOS_SO_PESSOA_NO_AGENTE)
+@pytest.mark.parametrize(
+    "categoria", [a for a in ASSUNTOS_SO_PESSOA_NO_AGENTE if a != "resistencia_agua"]
+)
 def test_a_trava_do_envio_nunca_solta_o_assunto_de_produto(categoria):
-    # Mesmo marcado no `auto_agente` (um valor antigo no banco), não sai.
+    # O portão do dono (27/10/2026): o assunto de produto no `auto_categorias` do canal passa
+    # pela trava (o "assunto de produto" virou AVISO ao verificador); fora dele, não sai —
+    # mesmo marcado no `auto_agente` (um valor antigo no banco).
     canal = types.SimpleNamespace(
         auto_categorias=[categoria], auto_agente=[categoria], auto_orientacao=[]
     )
-    assert ia.trava_do_agente(_rascunho_ag1(categoria), canal) == "assunto_de_produto"
+    assert ia.trava_do_agente(_rascunho_ag1(categoria), canal) is None
+    assert reavaliacao._agente_pode(_rascunho_ag1(categoria), canal)
+    canal = types.SimpleNamespace(auto_categorias=[], auto_agente=[categoria], auto_orientacao=[])
+    assert ia.trava_do_agente(_rascunho_ag1(categoria), canal) == "assunto_nao_liberado"
     assert not reavaliacao._agente_pode(_rascunho_ag1(categoria), canal)
+
+
+def test_a_agua_continua_sempre_com_pessoa():
+    # A decisão L1 do dono (só pelo título, sempre pessoa) continua no portão de 27/10/2026.
+    canal = types.SimpleNamespace(
+        auto_categorias=["resistencia_agua"], auto_agente=["resistencia_agua"], auto_orientacao=[]
+    )
+    assert ia.trava_do_agente(_rascunho_ag1("resistencia_agua"), canal) == "assunto_de_produto"
+    assert not reavaliacao._agente_pode(_rascunho_ag1("resistencia_agua"), canal)
     # O de antes continua: rastreio marcado sai.
     canal = types.SimpleNamespace(
         auto_categorias=["rastreio"], auto_agente=["rastreio"], auto_orientacao=[]
@@ -135,7 +151,7 @@ async def test_o_assunto_de_produto_vai_para_pessoa_sem_a_ficha(categoria):
     final = await _completo(
         "Dá para usar debaixo do chuveiro tranquilamente.", categoria=categoria, cliente="oi"
     )
-    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in final.motivos and not _sai(final)
+    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in [*final.motivos, *final.avisos] and not _sai(final)
     # A pergunta de esclarecimento ("qual é o produto?") não afirma: fica de fora.
     final = await _completo(
         "Qual é o produto? Pode me mandar o nome do anúncio?",
@@ -172,7 +188,7 @@ async def test_sem_a_ficha_o_legado_fica_como_era():
 async def test_a_pergunta_de_caracteristica_com_qualquer_afirmacao_vai_para_pessoa(cliente, texto):
     for categoria in ("duvida_produto", "outro"):
         final = await _completo(texto, categoria=categoria, cliente=cliente)
-        assert ia.MOTIVO_FICHA_NO_AUTOMATICO in final.motivos, (categoria, final.motivos)
+        assert ia.MOTIVO_FICHA_NO_AUTOMATICO in [*final.motivos, *final.avisos], categoria
         assert not _sai(final)
     # No copiloto é só aviso (pessoa lê de qualquer jeito).
     final = await _completo(texto, categoria="outro", cliente=cliente, modo=MODO_COPILOTO)
@@ -1023,7 +1039,7 @@ async def test_o_relogio_no_automatico_com_a_ficha():
     final = await _completo(
         "Ele mede a pressão.", categoria="duvida_produto", cliente="mede pressão?", fichas=RELOGIO
     )
-    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in final.motivos
+    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in [*final.motivos, *final.avisos]
 
 
 # ─────────────── 15. o custo: o teto da conversa com o Redis fora, a parte do dia ───────────────

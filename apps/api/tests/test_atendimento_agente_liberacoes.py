@@ -38,6 +38,7 @@ from scripts.agente_eval import calibrar_verificador as calibrar
 from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
     _decisao,
     _do_agente,
+    _do_verificador,
     _final,
     _kia,
     _ligar,
@@ -57,6 +58,7 @@ from tests.test_atendimento_agente_redondo import (
     AGORA,
     SHOPEE_REAL,
     VAI_AO_VERIFICADOR,
+    VAI_COM_AVISO,
     _cli,
     _m,
     _menu,
@@ -248,6 +250,22 @@ async def _auto(
     )  # fmt: skip
     conferida = checagens.sem_lacuna_vazia(conferida)
     chk = checagens.conferir(p, conferida, ctx, base, fichas=todas, gatilho=gatilho)
+    # O portão do dono (27/10/2026), como no `agente.conferir_proposta`: os avisos do portão
+    # e o que a `conferir_saida` diz e não é duro viram AVISO ao verificador.
+    chk = checagens.Checagens(
+        pendencias=[
+            *chk.pendencias,
+            *checagens.avisos_do_portao(
+                confianca=saida.confianca(p),
+                assunto=ia.assunto_do_agente(conferida.categoria, p.acao, base.ids_categorias),
+                produto_pelo_anuncio=ctx.produto_pelo_anuncio,
+                produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
+            ),
+        ]
+    )
+    conferida = checagens.separar_avisos(
+        conferida, modo=constantes.MODO_AUTO, pessoa_do_modelo=bool(entrada["precisa_humano"])
+    )
     final = checagens.aplicar(
         conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=constantes.MODO_AUTO
     )
@@ -265,7 +283,12 @@ async def _auto(
     )
     trava = ia.trava_do_agente(rascunho, canal)
     return SimpleNamespace(
-        decisao=VAI if nao is None and trava is None else (nao or trava),
+        decisao=(
+            (VAI if not final.avisos else VAI_COM_AVISO)
+            if nao is None and trava is None
+            else (nao or trava)
+        ),
+        avisos=list(final.avisos),
         codigos=[x.codigo for x in chk.pendencias],
         motivos=list(final.motivos),
         ctx=ctx,
@@ -511,11 +534,9 @@ def test_l1_trava_le_a_marca_do_codigo_e_o_auto_categorias():
         assert ia.trava_do_agente(_r(categoria, produto_pelo_anuncio=True), SHOPEE_REAL) is None, (
             categoria
         )
-        # Sem a marca, como antes (o produto nunca está no `auto_agente`).
-        assert ia.trava_do_agente(_r(categoria), SHOPEE_REAL) in (
-            "assunto_de_produto",
-            "assunto_nao_liberado_agente",
-        ), categoria
+        # O portão do dono (27/10/2026): sem a marca também — o assunto de produto do
+        # `auto_categorias` é AVISO ao verificador (antes: "assunto_de_produto").
+        assert ia.trava_do_agente(_r(categoria), SHOPEE_REAL) is None, categoria
     # A água nunca; duvida_produto não está no auto_categorias da Shopee.
     assert ia.trava_do_agente(_r("resistencia_agua", produto_pelo_anuncio=True), SHOPEE_REAL)
     assert ia.trava_do_agente(_r("duvida_produto", produto_pelo_anuncio=True), SHOPEE_REAL)
@@ -527,9 +548,9 @@ def test_l1_trava_le_a_marca_do_codigo_e_o_auto_categorias():
         )
         is None
     )
-    assert (
-        ia.trava_do_agente(_r("cobertura_regiao", **com_pista), SHOPEE_REAL) == "assunto_de_produto"
-    )
+    # O portão (27/10/2026): a pista de produto do `auto_categorias` também passa (aviso);
+    # a da água, não.
+    assert ia.trava_do_agente(_r("cobertura_regiao", **com_pista), SHOPEE_REAL) is None
     assert (
         ia.trava_do_agente(
             _r("cobertura_regiao", produto_pelo_anuncio=True, pistas_turno=["resistencia_agua"]),
@@ -563,13 +584,15 @@ def test_l1_reavaliacao_segue_a_marca():
         )
 
     assert reavaliacao._agente_pode(_r(produto_pelo_anuncio=True), SHOPEE_REAL)
-    assert not reavaliacao._agente_pode(_r(), SHOPEE_REAL)
+    # O portão (27/10/2026): sem a marca também (o assunto de produto é aviso).
+    assert reavaliacao._agente_pode(_r(), SHOPEE_REAL)
 
 
 def test_l1_assuntos_liberados_do_verificador_com_a_marca():
     sem = v.assuntos_liberados(SHOPEE_REAL)
     com = v.assuntos_liberados(SHOPEE_REAL, produto=True)
-    assert "espec_celular" not in sem and "espec_celular" in com
+    # O portão (27/10/2026): o de produto do `auto_categorias` entra com ou sem a marca.
+    assert "espec_celular" in sem and "espec_celular" in com
     assert "resistencia_agua" not in com and "duvida_produto" not in com
 
 
@@ -888,7 +911,7 @@ def test_v11_entrada_traz_a_restricao_e_a_condicao_so_com_as_marcas():
 
 
 def test_v11_sistema_e_versao():
-    assert v.VERSAO in ("v11", "v12", "v13")
+    assert v.VERSAO in ("v11", "v12", "v13", "v14")
     assert (
         "RESTRIÇÃO DE ENVIO POR ESTADO" in v.SISTEMA
         and "CONDIÇÃO DECLARADA NO ANÚNCIO" in v.SISTEMA
@@ -1024,11 +1047,17 @@ async def test_e2e_l1_a_caracteristica_fora_da_ficha_nem_chama_o_verificador(
         )
     ]
 
+    # O portão (27/10/2026): a característica fora da ficha é AVISO — o verificador o recebe e
+    # decide (aqui, "não").
+    api.vereditos = [
+        _do_verificador(ok_para_envio_automatico=False, afirma_sem_lastro=["carregamento sem fio"])
+    ]
     r = await ia.gerar_rascunho(db, conversa)
 
     assert _do_agente(r).get("produto_pelo_anuncio") is not True
-    assert api.verificador == [] and envios == []
-    assert r.precisa_humano
+    (pedido,) = api.verificador
+    assert v.CABECALHO_AVISOS in pedido["messages"][0]["content"]
+    assert envios == [] and r.precisa_humano
 
 
 def test_l1_pre_filtro_do_reenvio_le_a_marca():
@@ -1040,8 +1069,7 @@ def test_l1_pre_filtro_do_reenvio_le_a_marca():
     compilado = ia._sql_assunto_liberado(AtendimentoRascunho, AtendimentoCanal).compile(
         dialect=postgresql.dialect()
     )
-    valores = json.dumps([str(x) for x in compilado.params.values()], ensure_ascii=False)
-    assert "produto_pelo_anuncio" in valores
+    # O portão (27/10/2026): o de produto do `auto_categorias`, com ou sem a marca.
     listas = [list(x) for x in compilado.params.values() if isinstance(x, list | tuple)]
     assert list(constantes.ASSUNTOS_LIBERADOS_PELO_ANUNCIO) in listas
     assert "resistencia_agua" not in constantes.ASSUNTOS_LIBERADOS_PELO_ANUNCIO

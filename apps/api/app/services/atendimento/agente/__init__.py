@@ -833,6 +833,208 @@ def _ja_tratado_pela_loja(
     return not (p.acao == saida.RESPONDER and not ctx.acoes_modelo and cortesia)
 
 
+@dataclass
+class Conferido:
+    """O que a 1ª camada (determinística) decidiu sobre a Proposta do modelo — antes do
+    verificador (`conferir_proposta`). `sem_resposta` = nada a responder (o rascunho
+    DESCARTADO); `ja_tratado` = o turno só de reconhecimento depois de a loja tratar."""
+
+    proposta: Proposta
+    conferida: SaidaConferida
+    chk: checagens.Checagens
+    final: SaidaConferida | None = None
+    codigos: list[str] = field(default_factory=list)
+    sem_resposta: bool = False
+    ja_tratado: bool = False
+
+
+async def conferir_proposta(
+    session: AsyncSession | None,
+    conversa: AtendimentoConversa,
+    gatilho: AtendimentoMensagem,
+    base: BaseDoGerar,
+    ctx: ContextoAgente,
+    p: Proposta,
+    pac: Any,
+    *,
+    forcar_conferencia: bool | None = None,
+) -> Conferido:
+    """A 1ª camada sobre a Proposta do modelo: a `conferir_saida(agente=True)`, as checagens,
+    o andamento, o PORTÃO (27/10/2026: o que é duro segura; o resto vira aviso) e o
+    "não pede resposta". Sem modelo e sem verificador — o `responder` e a re-análise
+    offline (`scripts.agente_eval.regatilho`) passam pelo MESMO código. `pac` = o
+    `pacote.Pacote` (`fatos`, `fichas`, `pedido`); `forcar_conferencia` = o `forcar` da
+    `conferir_saida` (None = `base.forcar` ou o replay)."""
+    forcar = (base.forcar or ctx.modo_replay) if forcar_conferencia is None else forcar_conferencia
+    # Rodada "fechar o eval" (23/10/2026): a política da entrega dita com a resposta-padrão
+    # da MESMA loja no pacote ganha o par:<id> nas evidências; e, no "responde e marca"
+    # (D1), a `reclamacao_aberta` que o modelo ainda pediu vira a ação de depois do envio.
+    p = checagens.com_par_da_politica(p, ctx)
+    p, pos_envio_do_modelo = checagens.responde_e_marca_da_proposta(p, ctx)
+
+    # Os OUTROS pedidos que as ferramentas leram: a régua de ESTADO roda neles
+    # também (revisão de 20/10/2026) — o código sempre vence.
+    andamento_de_outro: list[checagens.PendenciaAgente] = []
+    for ctx_pedido, postado in ctx.pedidos_lidos:
+        dele = acao_pessoa.gatilhos_de_outro_pedido(ctx_pedido, postado, base.recentes, gatilho)
+        ctx.acoes_codigo = contexto.ordenar_acoes(ctx.acoes_codigo, [g.codigo for g in dele])
+        andamento_de_outro += checagens.conferir_andamento(ctx_pedido)
+
+    # Rodada 4b: o assunto que o rascunho trata pelas lacunas também precisa
+    # estar liberado ("…a previsão é {previsao_entrega}" declarado nota_fiscal).
+    ctx.pistas_turno = list(
+        dict.fromkeys([*ctx.pistas_turno, *acao_pessoa.pistas_do_rascunho(p.texto)])
+    )
+    # A proposta passa pelas MESMAS travas do legado e depois pelas do agente.
+    ctx.acao = p.acao
+    ctx.acoes_modelo = [*saida.acoes_do_modelo(p), *pos_envio_do_modelo]
+    ctx.evidencias = saida.evidencias(p)
+    # A pergunta PÚBLICA: só a regra da linha (sem data, sem pedido) entra na
+    # conferência da garantia; sem ela, None (antes da compra).
+    garantias = ctx.garantias_conferidas
+    if conversa.canal == constantes.CANAL_PERGUNTA:
+        garantias = [g for g in garantias if g.get("regra") and not g.get("status")] or None
+    entrada = saida.para_conferir(p, base.ids_categorias)
+    # Integração r5 (21/10/2026): a lacuna crua no motivo_pessoa ("Pedido
+    # {numero_pedido} consta…") vira o valor, ou sai — ninguém a preenche.
+    entrada["motivo_modelo"] = checagens.motivo_sem_lacuna(entrada["motivo_modelo"], base.valores)
+    # Barbosa ao vivo (21/10/2026, cd4ff3d8): "em os pedidos no app do TikTok Shop"
+    # vira "nos pedidos do app do TikTok Shop" antes da conferência (o texto que vai).
+    entrada["texto"] = prompt.caminho_na_frase(entrada["texto"])
+    conferida = await ia.conferir_saida(
+        session,
+        conversa,
+        gatilho,
+        **entrada,
+        motivos=base.motivos,
+        ctx=base.ctx,
+        fatos=pac.fatos,
+        valores=base.valores,
+        categorias=base.categorias,
+        regras=base.regras,
+        textos_cliente=base.textos_cliente,
+        textos_rajada=base.textos_rajada,
+        foco=base.foco,
+        # As fichas do pacote e as que o `ver_anuncio` leu: a trava da ficha
+        # no automático vale para as duas (revisão de 20/10/2026).
+        fichas=[*pac.fichas, *ctx.fichas_lidas],
+        resposta_aprovada=False,
+        garantias_conferidas=garantias,
+        garantia_consultada=ctx.garantia_consultada,
+        permitidos_extra=ctx.permitidos_extra(),
+        modo=base.modo,
+        nf_politica_aprovada=base.nf_politica_aprovada,
+        opcoes_sensiveis=base.opcoes_sensiveis,
+        forcar=forcar,
+        agente=True,
+        # Item 32 (22/10/2026, 3c): a marca da devolução de rotina do turno. D1 (23/10/2026):
+        # e o "responde e marca" (a devolução aberta segue com a pessoa DEPOIS do envio).
+        devolucao_de_rotina=ctx.devolucao_de_rotina or ctx.responde_e_marca,
+        # Decisão do dono (22/10/2026): a pergunta de produto com a resposta da equipe
+        # do mesmo anúncio, de um modelo, citada.
+        produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
+        # Item 2 da auditoria ao vivo (22/10/2026, 3ee1f81e): os prazos dos fatos
+        # aprovados citados ("1 ano de garantia: os 90 primeiros dias com a loja…").
+        fatos_citados=ctx.fatos_citados(ctx.evidencias),
+        # Liberações do dono (23/10/2026, L1 e L2): a resposta de produto ou de condição
+        # que se apoia só no anúncio da conversa (a `checagens.conferir` confere de novo
+        # no texto final e marca `ctx.produto_pelo_anuncio`).
+        produto_pelo_anuncio=checagens.liberacao_da_proposta(
+            p,
+            entrada["texto"],
+            entrada["categoria"],
+            ctx,
+            base,
+            fichas=[*pac.fichas, *ctx.fichas_lidas],
+        ),
+        # D2 do dono (23/10/2026): a garantia Apple antes da compra só como o fato aprovado
+        # (ou a resposta da equipe da mesma loja) diz, com a condição pelo anúncio.
+        garantia_apple_pelo_fato=checagens.garantia_apple_da_proposta(
+            p, entrada["texto"], ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas]
+        ),
+    )
+    # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
+    # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta
+    # no resto, bloqueado e sem texto). As checagens leem o texto sem ela (a do
+    # andamento lê o do modelo: sem as mesmas frases).
+    lacunas_vazias = checagens.lacunas_no_texto(conferida.texto)
+    conferida = checagens.sem_lacuna_vazia(conferida)
+    # Integração r5: o rascunho de pessoa sem texto (o prompt: "nada verdadeiro a
+    # dizer antes da pessoa") não é erro do validador — a ação é o motivo.
+    conferida = checagens.sem_o_texto_vazio_de_pessoa(
+        conferida, acao=saida.PESSOA if p.acao == saida.PESSOA or ctx.acoes_pessoa else p.acao
+    )
+    p_conferir = (
+        p.model_copy(update={"texto": checagens.sem_as_frases_das_lacunas(p.texto, lacunas_vazias)})
+        if lacunas_vazias
+        else p
+    )
+    # As fichas do pacote e as que o `ver_anuncio` leu (com as variações dele):
+    # a conferência de estoque e cor escolhe a do anúncio citado (revisão 2 de
+    # 20/10/2026 — antes só a 1ª do pacote contava).
+    # O bloco do pedido da conversa (revisão "furos" de 20/10/2026): o estado
+    # e a origem que a resposta afirma são conferidos contra ele.
+    ctx.pedido_da_conversa = pac.pedido
+    chk = checagens.conferir(
+        p_conferir, conferida, ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas], gatilho=gatilho
+    )
+    # A etiqueta Devolução da conversa (paridade com a Caixa Humano, spec 6.5
+    # item 11): a `checagens.conferir` não recebe a conversa (contrato).
+    ja = {pendencia.codigo for pendencia in chk.pendencias}
+    da_etiqueta = [
+        pendencia
+        for pendencia in checagens.conferir_andamento(
+            base.ctx,
+            etiquetas=acao_pessoa.etiquetas_da_conversa(conversa),
+            motivos=conferida.motivos,
+            # Item 32 (22/10/2026): a devolução de rotina não segura pela etiqueta; D1: nem
+            # o "responde e marca" (a etiqueta fica na Caixa Humano depois do envio).
+            rotina=ctx.devolucao_de_rotina or ctx.responde_e_marca,
+        )
+        if pendencia.codigo not in ja
+    ]
+    da_etiqueta += [
+        pendencia
+        for pendencia in andamento_de_outro
+        if pendencia.codigo not in ja and pendencia not in da_etiqueta
+    ]
+    if da_etiqueta:
+        chk = checagens.Checagens(pendencias=[*chk.pendencias, *da_etiqueta])
+    if base.modo == constantes.MODO_AUTO:
+        # O portão (27/10/2026): a confiança do próprio agente (abaixo de 0,5 pessoa; até 0,8
+        # aviso) e o assunto de produto sem a marca do anúncio nem a resposta da equipe (aviso).
+        do_portao = checagens.avisos_do_portao(
+            confianca=saida.confianca(p),
+            assunto=ia.assunto_do_agente(conferida.categoria, p.acao, base.ids_categorias),
+            produto_pelo_anuncio=ctx.produto_pelo_anuncio,
+            produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
+        )
+        if do_portao:
+            chk = checagens.Checagens(pendencias=[*chk.pendencias, *do_portao])
+    ja_tratado = _ja_tratado_pela_loja(p, conferida, ctx, base, gatilho)
+    if ja_tratado or _nao_pede_resposta(p, conferida, ctx, base):
+        # "ok", "obrigado", aviso: nada a responder e nada que segure (ver o `responder`).
+        if ja_tratado:
+            ctx.acoes_modelo = []
+        return Conferido(p, conferida, chk, sem_resposta=True, ja_tratado=ja_tratado)
+    # O portão (27/10/2026): no automático, o que a 1ª camada do legado diz e não é duro
+    # (a ficha no automático, a indução de assunto, o pedido não identificado, a frase da
+    # lacuna tirada…) vira aviso; o `precisa_humano` fica com o duro e com o "pessoa" do modelo.
+    conferida = checagens.separar_avisos(
+        conferida, modo=base.modo, pessoa_do_modelo=bool(entrada["precisa_humano"])
+    )
+    final = checagens.aplicar(conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=base.modo)
+    _guardar_avisos(ctx, final)
+    # A garantia Uranyx depois dos 90 dias (decisão 7 do dono): o envio confere
+    # o texto sem a frase do caminho da Uranyx só com esta marca no rascunho.
+    if checagens.caminho_uranyx_liberado(garantias) and checagens.sem_caminho_uranyx(
+        final.texto
+    ) != (final.texto or ""):
+        ctx.isencoes = [checagens.ISENCAO_CAMINHO_URANYX]
+    codigos = [pendencia.codigo for pendencia in chk.pendencias]
+    return Conferido(p, conferida, chk, final=final, codigos=codigos)
+
+
 async def responder(
     session: AsyncSession,
     conversa: AtendimentoConversa,
@@ -1004,150 +1206,16 @@ async def _responder(
     p = proposta_da_mensagem(ultima)
     if p is None:
         return ex.sem_texto(PARADA_FORMATO, MOTIVO_FORA_DO_FORMATO)
-    # Rodada "fechar o eval" (23/10/2026): a política da entrega dita com a resposta-padrão
-    # da MESMA loja no pacote ganha o par:<id> nas evidências; e, no "responde e marca"
-    # (D1), a `reclamacao_aberta` que o modelo ainda pediu vira a ação de depois do envio.
-    p = checagens.com_par_da_politica(p, ctx)
-    p, pos_envio_do_modelo = checagens.responde_e_marca_da_proposta(p, ctx)
-
-    # Os OUTROS pedidos que as ferramentas leram: a régua de ESTADO roda neles
-    # também (revisão de 20/10/2026) — o código sempre vence.
-    andamento_de_outro: list[checagens.PendenciaAgente] = []
-    for ctx_pedido, postado in ctx.pedidos_lidos:
-        dele = acao_pessoa.gatilhos_de_outro_pedido(ctx_pedido, postado, base.recentes, gatilho)
-        ctx.acoes_codigo = contexto.ordenar_acoes(ctx.acoes_codigo, [g.codigo for g in dele])
-        andamento_de_outro += checagens.conferir_andamento(ctx_pedido)
-
-    # Rodada 4b: o assunto que o rascunho trata pelas lacunas também precisa
-    # estar liberado ("…a previsão é {previsao_entrega}" declarado nota_fiscal).
-    ctx.pistas_turno = list(
-        dict.fromkeys([*ctx.pistas_turno, *acao_pessoa.pistas_do_rascunho(p.texto)])
-    )
-    # A proposta passa pelas MESMAS travas do legado e depois pelas do agente.
-    ctx.acao = p.acao
-    ctx.acoes_modelo = [*saida.acoes_do_modelo(p), *pos_envio_do_modelo]
-    ctx.evidencias = saida.evidencias(p)
-    # A pergunta PÚBLICA: só a regra da linha (sem data, sem pedido) entra na
-    # conferência da garantia; sem ela, None (antes da compra).
-    garantias = ctx.garantias_conferidas
-    if conversa.canal == constantes.CANAL_PERGUNTA:
-        garantias = [g for g in garantias if g.get("regra") and not g.get("status")] or None
-    entrada = saida.para_conferir(p, base.ids_categorias)
-    # Integração r5 (21/10/2026): a lacuna crua no motivo_pessoa ("Pedido
-    # {numero_pedido} consta…") vira o valor, ou sai — ninguém a preenche.
-    entrada["motivo_modelo"] = checagens.motivo_sem_lacuna(entrada["motivo_modelo"], base.valores)
-    # Barbosa ao vivo (21/10/2026, cd4ff3d8): "em os pedidos no app do TikTok Shop"
-    # vira "nos pedidos do app do TikTok Shop" antes da conferência (o texto que vai).
-    entrada["texto"] = prompt.caminho_na_frase(entrada["texto"])
-    conferida = await ia.conferir_saida(
-        session,
-        conversa,
-        gatilho,
-        **entrada,
-        motivos=base.motivos,
-        ctx=base.ctx,
-        fatos=pac.fatos,
-        valores=base.valores,
-        categorias=base.categorias,
-        regras=base.regras,
-        textos_cliente=base.textos_cliente,
-        textos_rajada=base.textos_rajada,
-        foco=base.foco,
-        # As fichas do pacote e as que o `ver_anuncio` leu: a trava da ficha
-        # no automático vale para as duas (revisão de 20/10/2026).
-        fichas=[*pac.fichas, *ctx.fichas_lidas],
-        resposta_aprovada=False,
-        garantias_conferidas=garantias,
-        garantia_consultada=ctx.garantia_consultada,
-        permitidos_extra=ctx.permitidos_extra(),
-        modo=base.modo,
-        nf_politica_aprovada=base.nf_politica_aprovada,
-        opcoes_sensiveis=base.opcoes_sensiveis,
-        forcar=base.forcar or ctx.modo_replay,
-        agente=True,
-        # Item 32 (22/10/2026, 3c): a marca da devolução de rotina do turno. D1 (23/10/2026):
-        # e o "responde e marca" (a devolução aberta segue com a pessoa DEPOIS do envio).
-        devolucao_de_rotina=ctx.devolucao_de_rotina or ctx.responde_e_marca,
-        # Decisão do dono (22/10/2026): a pergunta de produto com a resposta da equipe
-        # do mesmo anúncio, de um modelo, citada.
-        produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
-        # Item 2 da auditoria ao vivo (22/10/2026, 3ee1f81e): os prazos dos fatos
-        # aprovados citados ("1 ano de garantia: os 90 primeiros dias com a loja…").
-        fatos_citados=ctx.fatos_citados(ctx.evidencias),
-        # Liberações do dono (23/10/2026, L1 e L2): a resposta de produto ou de condição
-        # que se apoia só no anúncio da conversa (a `checagens.conferir` confere de novo
-        # no texto final e marca `ctx.produto_pelo_anuncio`).
-        produto_pelo_anuncio=checagens.liberacao_da_proposta(
-            p,
-            entrada["texto"],
-            entrada["categoria"],
-            ctx,
-            base,
-            fichas=[*pac.fichas, *ctx.fichas_lidas],
-        ),
-        # D2 do dono (23/10/2026): a garantia Apple antes da compra só como o fato aprovado
-        # (ou a resposta da equipe da mesma loja) diz, com a condição pelo anúncio.
-        garantia_apple_pelo_fato=checagens.garantia_apple_da_proposta(
-            p, entrada["texto"], ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas]
-        ),
-    )
-    # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
-    # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta
-    # no resto, bloqueado e sem texto). As checagens leem o texto sem ela (a do
-    # andamento lê o do modelo: sem as mesmas frases).
-    lacunas_vazias = checagens.lacunas_no_texto(conferida.texto)
-    conferida = checagens.sem_lacuna_vazia(conferida)
-    # Integração r5: o rascunho de pessoa sem texto (o prompt: "nada verdadeiro a
-    # dizer antes da pessoa") não é erro do validador — a ação é o motivo.
-    conferida = checagens.sem_o_texto_vazio_de_pessoa(
-        conferida, acao=saida.PESSOA if p.acao == saida.PESSOA or ctx.acoes_pessoa else p.acao
-    )
-    p_conferir = (
-        p.model_copy(update={"texto": checagens.sem_as_frases_das_lacunas(p.texto, lacunas_vazias)})
-        if lacunas_vazias
-        else p
-    )
-    # As fichas do pacote e as que o `ver_anuncio` leu (com as variações dele):
-    # a conferência de estoque e cor escolhe a do anúncio citado (revisão 2 de
-    # 20/10/2026 — antes só a 1ª do pacote contava).
-    # O bloco do pedido da conversa (revisão "furos" de 20/10/2026): o estado
-    # e a origem que a resposta afirma são conferidos contra ele.
-    ctx.pedido_da_conversa = pac.pedido
-    chk = checagens.conferir(
-        p_conferir, conferida, ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas], gatilho=gatilho
-    )
-    # A etiqueta Devolução da conversa (paridade com a Caixa Humano, spec 6.5
-    # item 11): a `checagens.conferir` não recebe a conversa (contrato).
-    ja = {pendencia.codigo for pendencia in chk.pendencias}
-    da_etiqueta = [
-        pendencia
-        for pendencia in checagens.conferir_andamento(
-            base.ctx,
-            etiquetas=acao_pessoa.etiquetas_da_conversa(conversa),
-            motivos=conferida.motivos,
-            # Item 32 (22/10/2026): a devolução de rotina não segura pela etiqueta; D1: nem
-            # o "responde e marca" (a etiqueta fica na Caixa Humano depois do envio).
-            rotina=ctx.devolucao_de_rotina or ctx.responde_e_marca,
-        )
-        if pendencia.codigo not in ja
-    ]
-    da_etiqueta += [
-        pendencia
-        for pendencia in andamento_de_outro
-        if pendencia.codigo not in ja and pendencia not in da_etiqueta
-    ]
-    if da_etiqueta:
-        chk = checagens.Checagens(pendencias=[*chk.pendencias, *da_etiqueta])
-    ja_tratado = _ja_tratado_pela_loja(p, conferida, ctx, base, gatilho)
-    if ja_tratado or _nao_pede_resposta(p, conferida, ctx, base):
+    c = await conferir_proposta(session, conversa, gatilho, base, ctx, p, pac)
+    p, conferida = c.proposta, c.conferida
+    if c.sem_resposta:
         # "ok", "obrigado", aviso: nada a responder e nada que segure — o
         # rascunho DESCARTADO marca o gatilho como tratado (o cron não volta
         # nele) e não entra na Caixa Humano (revisão de 20/10/2026). O turno só
         # de reconhecimento depois de a loja tratar (Kia ao vivo, 21/10/2026):
         # a ação de pessoa que o modelo pediu de novo sai junto (a equipe já fez
         # ou prometeu; o acompanhamento é dela).
-        if ja_tratado:
-            ctx.acoes_modelo = []
+        ja_tratado = c.ja_tratado
         ctx.parada = PARADA_SEM_RESPOSTA
         ex._ms()
         return ex.pronto(
@@ -1172,15 +1240,7 @@ async def _responder(
                 conferida=conferida,
             )
         )
-    final = checagens.aplicar(conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=base.modo)
-    _guardar_avisos(ctx, final)
-    # A garantia Uranyx depois dos 90 dias (decisão 7 do dono): o envio confere
-    # o texto sem a frase do caminho da Uranyx só com esta marca no rascunho.
-    if checagens.caminho_uranyx_liberado(garantias) and checagens.sem_caminho_uranyx(
-        final.texto
-    ) != (final.texto or ""):
-        ctx.isencoes = [checagens.ISENCAO_CAMINHO_URANYX]
-    codigos = [pendencia.codigo for pendencia in chk.pendencias]
+    final, codigos = c.final, c.codigos
     # A 2ª camada (20/10/2026): o verificador, só no rascunho que poderia sair
     # sozinho, com o MESMO cliente e o que sobra do prazo; sem o "ok", pessoa.
     conf = await verificador.no_rascunho(

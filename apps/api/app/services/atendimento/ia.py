@@ -449,8 +449,10 @@ CONFIANCA_AUTO = 0.85
 # O AGENTE ("ag1") sai sozinho a partir de 0,80 (decisão do dono, 22/10/2026: "a
 # confiança acima de 80 deveria responder"): o rascunho dele passa ainda pelas
 # travas de código, pela trava do assunto (`trava_do_agente`) e pelo verificador
-# semântico obrigatório — o legado segue no `CONFIANCA_AUTO`.
-CONFIANCA_AUTO_AGENTE = 0.80
+# semântico obrigatório — o legado segue no `CONFIANCA_AUTO`. O PORTÃO do dono
+# (27/10/2026): a confiança só SEGURA abaixo de 0,50 (o piso duro); de 0,50 a 0,80 vira
+# aviso ao verificador (`agente.checagens.avisos_do_portao`).
+CONFIANCA_AUTO_AGENTE = 0.50
 
 
 def confianca_minima(do_agente: bool) -> float:
@@ -5239,8 +5241,21 @@ def _andamento_pela_etiqueta(resultado: Any, conversa: AtendimentoConversa, base
     from app.services.atendimento.agente import acao_pessoa, checagens
 
     ja = list(resultado.conferida.motivos) if resultado.conferida is not None else []
+    # O D1 ao vivo (26/10/2026, 8d9e76e0 e 43979d0f: "Tô esperando o reembolso", "Sabe quando
+    # será feito o ressarcimento?"): o `responder` já tinha a marca "responde e marca" e não
+    # segurava; esta rede, sem a marca, punha "devolução ou chamado em andamento" de volta
+    # pela etiqueta Devolução. A devolução de rotina e o D1 não seguram aqui também (o
+    # chamado continua segurando: `conferir_andamento`).
+    agente_fatos = resultado.fatos_agente if isinstance(resultado.fatos_agente, dict) else {}
+    rotina = (
+        agente_fatos.get("devolucao_de_rotina") is True
+        or agente_fatos.get("responde_e_marca") is True
+    )
     for pendencia in checagens.conferir_andamento(
-        base.ctx, etiquetas=acao_pessoa.etiquetas_da_conversa(conversa), motivos=ja
+        base.ctx,
+        etiquetas=acao_pessoa.etiquetas_da_conversa(conversa),
+        motivos=ja,
+        rotina=rotina,
     ):
         fatos = dict(resultado.fatos_agente or {})
         codigos = list(fatos.get("checagens") or [])
@@ -5484,9 +5499,12 @@ def anotar_pistas_alem(resultado: Any) -> None:
     o pré-filtro SQL do reenvio (`_sql_assunto_liberado`) lê a lista pronta."""
     fatos = getattr(resultado, "fatos_agente", None)
     if isinstance(fatos, dict):
-        fatos["pistas_alem"] = pistas_alem_do_assunto(
+        alem = pistas_alem_do_assunto(
             fatos.get("pistas_turno"), getattr(resultado, "categoria", None)
         )
+        # O portão (27/10/2026): a pista de PRODUTO pede só o `auto_categorias` do canal.
+        fatos["pistas_alem"] = [p for p in alem if p not in ASSUNTOS_SO_PESSOA_NO_AGENTE]
+        fatos["pistas_alem_produto"] = [p for p in alem if p in ASSUNTOS_SO_PESSOA_NO_AGENTE]
 
 
 async def _gerar(
@@ -6130,14 +6148,18 @@ def trava_do_agente(
     # `auto_categorias` do canal (o `auto_agente` continua sem os de produto).
     if produto_pelo_anuncio(agente, categoria, canal):
         return None
+    # O PORTÃO do dono (27/10/2026): o assunto de produto no `auto_categorias` do canal sai
+    # como os outros — o "assunto de produto" virou AVISO ao verificador
+    # (`agente.checagens.avisos_do_portao`); o `auto_agente` continua sem eles.
+    if assunto_de_produto_liberado(categoria, canal):
+        return None
     if categoria not in (getattr(canal, "auto_categorias", None) or []):
         return "assunto_nao_liberado"
     if categoria not in (getattr(canal, "auto_agente", None) or []):
         return "assunto_nao_liberado_agente"
     if categoria in ASSUNTOS_SO_PESSOA_NO_AGENTE:
-        # Os assuntos de produto "sempre pessoa confere" (ajuste r3): nem
-        # marcados no `auto_agente` (a rota recusa; um valor antigo no banco
-        # não solta).
+        # Os assuntos de produto fora do `auto_categorias` (um valor antigo do
+        # `auto_agente` no banco não solta).
         return "assunto_de_produto"
     if categoria in CATEGORIAS_SO_HUMANO:
         return "assunto_so_humano"
@@ -6155,6 +6177,31 @@ ASSUNTOS_PRODUTO_PELA_EQUIPE = frozenset(ASSUNTOS_SO_PESSOA_NO_AGENTE) - {
     "resistencia_agua",
     "originalidade_condicao",
 }
+
+
+# O cumprimento do agente espera o reenvio (ver `_talvez_enviar`).
+MOTIVO_GENERICA_ESPERA = "generica_espera_o_turno"
+
+
+def resposta_generica_do_agente(rascunho: Any) -> bool:
+    """O rascunho do agente é só cumprimento/"como podemos ajudar?"
+    (`agente.checagens.resposta_so_generica`)? PURA."""
+    from app.services.atendimento.agente import checagens
+
+    return checagens.resposta_so_generica(getattr(rascunho, "texto", None))
+
+
+def assunto_de_produto_liberado(assunto: str | None, canal: Any) -> bool:
+    """O assunto de PRODUTO (`ASSUNTOS_SO_PESSOA_NO_AGENTE`) está no `auto_categorias` do
+    canal (e fora dos só de pessoa)? PURA. O portão do dono (27/10/2026): então o rascunho do
+    agente sai como os outros — o assunto de produto é aviso ao verificador, não trava."""
+    # A resistência à água continua de fora (a decisão L1 do dono: só pelo título, sempre
+    # com pessoa).
+    return (
+        assunto in ASSUNTOS_LIBERADOS_PELO_ANUNCIO
+        and assunto not in CATEGORIAS_SO_HUMANO
+        and assunto in (getattr(canal, "auto_categorias", None) or [])
+    )
 
 
 def produto_pelo_anuncio(agente: Mapping[str, Any], assunto: str | None, canal: Any) -> bool:
@@ -6223,7 +6270,10 @@ def motivo_das_pistas_alem(
     auto_agente = getattr(canal, "auto_agente", None) or []
     for p in pistas_alem_do_assunto(pistas, categoria):
         if p in ASSUNTOS_SO_PESSOA_NO_AGENTE:
-            if agente is not None and produto_pelo_anuncio(agente, p, canal):
+            # O portão (27/10/2026): a pista de produto no `auto_categorias` do canal não segura.
+            if assunto_de_produto_liberado(p, canal) or (
+                agente is not None and produto_pelo_anuncio(agente, p, canal)
+            ):
                 continue
             return "assunto_de_produto"
         if p in CATEGORIAS_SO_HUMANO or p not in auto_categorias or p not in auto_agente:
@@ -6266,6 +6316,10 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
     # Rodada 4b: as pistas além do assunto (`pistas_alem_do_assunto`, gravadas
     # com o assunto final) liberadas no canal.
     alem = func.coalesce(r.fatos["agente"]["pistas_alem"], cast(literal("[]"), JSONB))
+    # O portão (27/10/2026): as pistas de produto só no `auto_categorias`.
+    alem_produto = func.coalesce(
+        r.fatos["agente"]["pistas_alem_produto"], cast(literal("[]"), JSONB)
+    )
     validade = () if agora is None else (r.created_at >= agora - verificador.VALIDADE_OK,)
     return or_(
         and_(~do_agente, legado),
@@ -6277,6 +6331,7 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
             k.auto_orientacao.contains(pistas),
             k.auto_categorias.contains(alem),
             k.auto_agente.contains(alem),
+            k.auto_categorias.contains(alem_produto),
             or_(
                 and_(
                     r.categoria.in_(ASSUNTOS_ORIENTACAO),
@@ -6288,11 +6343,10 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
                     legado,
                     k.auto_agente.has_key(r.categoria),
                 ),
-                # Liberações do dono (23/10/2026, L1 e L2): o de produto com a marca
-                # `produto_pelo_anuncio` que o código pôs, no `auto_categorias` do canal.
+                # O portão do dono (27/10/2026; antes, L1/L2 só com a marca
+                # `produto_pelo_anuncio`): o de produto no `auto_categorias` do canal.
                 and_(
                     r.categoria.in_(ASSUNTOS_LIBERADOS_PELO_ANUNCIO),
-                    r.fatos.contains({"agente": {"produto_pelo_anuncio": True}}),
                     legado,
                 ),
             ),
@@ -6421,6 +6475,14 @@ async def _talvez_enviar(
                     ligado=get_settings().atendimento_agente_verificador,
                     agora=datetime.now(UTC),
                 )
+            if motivo is None and not reenvio and resposta_generica_do_agente(rascunho):
+                # O 06:53 da Kia (27/10/2026): "Olá!" → "Como podemos ajudar com o Apple
+                # Watch?" saiu sozinho, e a pergunta ("Você tem apenas a pulseira…?",
+                # 06:52:09) só chegou ao banco às 06:53:59 (a sincronização da conversa). O
+                # cumprimento/"como podemos ajudar?" do agente não sai na hora: espera o
+                # reenvio (`REENVIO_DEPOIS`), que confere de novo se o gatilho ainda é a
+                # última fala do cliente (`_cobre`).
+                motivo = MOTIVO_GENERICA_ESPERA
         elif rascunho.categoria not in (canal.auto_categorias or []):
             motivo = "assunto_nao_liberado"
         elif rascunho.categoria in manual_svc.ids_so_humano(

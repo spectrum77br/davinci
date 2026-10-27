@@ -63,8 +63,11 @@ PEDIDOS = {"aguardando": AGUARDANDO, "saiu": SAIU, "entregue": ENTREGUE}
 
 
 def _sai(f: ia.SaidaConferida) -> bool:
-    """O rascunho poderia sair sozinho (sem pessoa, sem bloqueio, sem `sem_auto`)."""
-    return f.status == RASCUNHO_PENDENTE and not f.precisa_humano and not f.sem_auto
+    """O rascunho sairia sem a 1ª camada dizer nada (sem pessoa, sem bloqueio, sem `sem_auto`
+    e — o portão de 27/10/2026 — sem AVISO ao verificador)."""
+    return (
+        f.status == RASCUNHO_PENDENTE and not f.precisa_humano and not f.sem_auto and not f.avisos
+    )
 
 
 async def _os_dois(texto: str, **kw: Any) -> tuple[ia.SaidaConferida, ia.SaidaConferida]:
@@ -100,11 +103,12 @@ def test_a_regra_suave_nunca_bloqueia_e_nao_sai_sozinha(modo):
     )
     assert suave.suave and not suave.bloqueia
     assert final.status == RASCUNHO_PENDENTE and final.texto == _conferida().texto
-    assert final.avisos == ["promete (x)"] and final.sem_auto == ["promete (x)"]
+    assert final.avisos == ["promete (x)"]
     assert final.erros == []
     if modo == MODO_AUTO:
-        # No automático o rascunho não sai sozinho: vai para pessoa com o aviso.
-        assert final.precisa_humano and final.motivos == ["promete (x)"]
+        # O portão (27/10/2026): no automático a regra suave só AVISA o verificador — não
+        # segura sozinha (nem pessoa, nem `sem_auto`).
+        assert not final.precisa_humano and final.motivos == [] and final.sem_auto == []
     else:
         # No copiloto a sugestão fica como está: só o aviso.
         assert not final.precisa_humano and final.motivos == []

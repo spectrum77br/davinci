@@ -32,8 +32,11 @@ from app.services.atendimento.constantes import (
 from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
     ITEM_A18,
     ITEM_A18_HOJE,
+    NAO_DO_VERIFICADOR,
+    _aviso_no_verificador,
     _decisao,
     _do_agente,
+    _do_verificador,
     _final,
     _kia,
     _ligar,
@@ -411,13 +414,16 @@ AVISOS = {
 async def test_a_regressao_nao_sai_sozinha_mesmo_com_o_ok_do_verificador(
     db: AsyncSession, make_user, agente_ligado, api, envios, redis_mem, lojas, caso
 ):
+    # O portão do dono (27/10/2026): o que não é duro chega ao verificador COM o aviso — e o
+    # "não" dele segura; o duro nem chega a ele (não paga a requisição).
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
     r = await _gerar(db, make_user, redis_mem, lojas, api, MODO_AUTO, caso)
     agente = _do_agente(r)
     assert not envios, (caso[0], r.motivo)
     assert r.status == RASCUNHO_PENDENTE and r.precisa_humano, (caso[0], r.status, r.motivo)
     assert agente["sem_auto"], agente
-    # O verificador nem roda (o rascunho já não é elegível: não paga a requisição).
-    assert agente["verificador"]["rodou"] is False
+    if agente["verificador"]["rodou"]:
+        _aviso_no_verificador(api)
     if caso[0] in AVISOS:
         assert AVISOS[caso[0]] in agente["avisos"], agente["avisos"]
 

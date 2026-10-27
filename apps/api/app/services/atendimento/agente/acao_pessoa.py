@@ -1301,9 +1301,9 @@ MAX_PALAVRAS_FALA_CURTA = 10
 
 def turno_informativo_da_devolucao(textos: Iterable[str | None]) -> bool:
     """O turno do cliente, com a devolução já aberta, só pede INFORMAÇÃO (ver acima)?
-    PURA (D1). Toda fala útil (fora o reconhecimento, o cumprimento, o "6" do menu e o
-    "[Mensagem]" do cartão) é do assunto ou curta, nenhuma pede/decide/relata problema
-    (`_DECISAO_NA_DEVOLUCAO`) nem fala de atraso longo, e ao menos uma é do assunto."""
+    PURA (D1). Há fala útil (fora o reconhecimento, o cumprimento, o "6" do menu e o
+    "[Mensagem]" do cartão) e nenhuma pede/decide/relata problema (`_DECISAO_NA_DEVOLUCAO`)
+    nem fala de atraso longo — da devolução ou de outro assunto (o portão, 27/10/2026)."""
     planos = []
     for t in textos:
         if not (t or "").strip() or so_reconhecimento(t):
@@ -1323,11 +1323,12 @@ def turno_informativo_da_devolucao(textos: Iterable[str | None]) -> bool:
         for m in _ATRASO_LONGO.finditer(p):
             if m.group("dias") is None or int(m.group("dias")) >= DIAS_DE_ATRASO_LONGO:
                 return False
-    if not all(
-        _DA_DEVOLUCAO_ABERTA.search(p) or len(p.split()) <= MAX_PALAVRAS_FALA_CURTA for p in planos
-    ):
-        return False
-    return any(_DA_DEVOLUCAO_ABERTA.search(p) for p in planos)
+    # O portão do dono (27/10/2026: "o D1 nunca valia"; Barbosa ao vivo, "Obrigado. Vocês
+    # vendem também capinha para ele?" com a devolução aberta): o turno que só pede
+    # INFORMAÇÃO — da devolução ou de outro assunto — responde e marca; a devolução segue
+    # com a pessoa depois do envio. O pedido, a decisão, o problema, a evidência, a ameaça e
+    # o atraso longo continuam fora (acima).
+    return True
 
 
 def devolucao_sem_acao_da_loja(conversa: Any, ctx: Mapping[str, Any] | None) -> bool:

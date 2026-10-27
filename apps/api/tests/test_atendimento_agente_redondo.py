@@ -105,6 +105,9 @@ SHOPEE_REAL = SimpleNamespace(
     auto_categorias=AUTO_CATEGORIAS, auto_agente=AUTO_AGENTE, auto_orientacao=AUTO_ORIENTACAO
 )
 VAI_AO_VERIFICADOR = "verificador"
+# O portão do dono (27/10/2026): o rascunho chega ao verificador COM os avisos da 1ª camada
+# (o que não é duro): o verificador decide; a 1ª camada "pegou" o caso, sem segurar.
+VAI_COM_AVISO = "verificador_com_aviso"
 
 AGORA = datetime(2026, 10, 22, 18, 0, tzinfo=UTC)
 _seq = itertools.count()
@@ -306,6 +309,22 @@ async def _auto(
     conferida = checagens.sem_lacuna_vazia(conferida)
     ctx.pedido_da_conversa = bloco
     chk = checagens.conferir(p, conferida, ctx, base, fichas=[*fichas, *lidas], gatilho=gatilho)
+    # O portão do dono (27/10/2026), como no `agente.conferir_proposta`: os avisos do portão
+    # e o que a `conferir_saida` diz e não é duro viram AVISO ao verificador.
+    chk = checagens.Checagens(
+        pendencias=[
+            *chk.pendencias,
+            *checagens.avisos_do_portao(
+                confianca=saida.confianca(p),
+                assunto=ia.assunto_do_agente(conferida.categoria, p.acao, base.ids_categorias),
+                produto_pelo_anuncio=ctx.produto_pelo_anuncio,
+                produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
+            ),
+        ]
+    )
+    conferida = checagens.separar_avisos(
+        conferida, modo=constantes.MODO_AUTO, pessoa_do_modelo=bool(entrada["precisa_humano"])
+    )
     final = checagens.aplicar(
         conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=constantes.MODO_AUTO
     )
@@ -323,7 +342,12 @@ async def _auto(
     )
     trava = ia.trava_do_agente(rascunho, SHOPEE_REAL)
     return SimpleNamespace(
-        decisao=VAI_AO_VERIFICADOR if nao is None and trava is None else (nao or trava),
+        decisao=(
+            (VAI_AO_VERIFICADOR if not final.avisos else VAI_COM_AVISO)
+            if nao is None and trava is None
+            else (nao or trava)
+        ),
+        avisos=list(final.avisos),
         codigos=[x.codigo for x in chk.pendencias],
         motivos=list(final.motivos),
         erros=list(final.erros),
@@ -433,12 +457,14 @@ ANTES_1 = {
     "b4d96294": [checagens.PEDIDO_SEM_LASTRO],
 }
 DEPOIS_1 = {
-    # O "regra:rastreio" sem o consultar_manual: a evidência inventada continua segurando.
-    "25d21d7f": v.NAO_RODA_PESSOA,
+    # O "regra:rastreio" sem o consultar_manual: a evidência sem prova — o portão (27/10/2026)
+    # a manda ao verificador como AVISO.
+    "25d21d7f": VAI_COM_AVISO,
     "f06b1b32": VAI_AO_VERIFICADOR,
-    # A confiança do próprio modelo (0,7 < 0,80): a régua de sempre.
-    "b683b08f": v.NAO_RODA_CONFIANCA,
-    "300e041a": v.NAO_RODA_CONFIANCA,
+    # A confiança do próprio modelo (0,7 < 0,80): o portão do dono (27/10/2026) — aviso ao
+    # verificador (o piso duro é 0,50).
+    "b683b08f": VAI_COM_AVISO,
+    "300e041a": VAI_COM_AVISO,
     "b4d96294": VAI_AO_VERIFICADOR,
 }
 
@@ -463,7 +489,9 @@ async def test_1_os_cinco_rascunhos_reais_passam_o_andamento_e_o_prazo_do_status
     assert not any(validador.MOTIVO_PRAZO in m for m in r.motivos), r.motivos
     assert r.decisao == DEPOIS_1[rid], (r.decisao, r.motivos)
     if rid == "25d21d7f":
-        assert r.codigos == [checagens.EVIDENCIA_SEM_PROVA]
+        # O portão (27/10/2026): mais o aviso da confiança do próprio agente (0,75).
+        assert r.codigos[0] == checagens.EVIDENCIA_SEM_PROVA
+        assert set(r.codigos) <= {checagens.EVIDENCIA_SEM_PROVA, checagens.CONFIANCA_BAIXA}
 
 
 @pytest.mark.parametrize("rid", list(RASCUNHOS_1))
@@ -1159,7 +1187,7 @@ def test_3_31ab491d_a_instrucao_de_recebimento_vem_na_entrega_instrucoes():
 def test_3_o_sistema_do_verificador_nao_muda():
     # O item 3 não mudou o SISTEMA (era v9). Parte 2 (item 6, 23/10/2026): o v10 só acrescenta
     # a BUSCA NO CATÁLOGO DA LOJA — o modelo continua o Haiku.
-    assert v.VERSAO in ("v10", "v11", "v12", "v13") and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14") and v.MODELO == "claude-haiku-5-5"
 
 
 # As linhas novas da calibração (o SISTEMA não muda; a entrada sim): os bons e os ruins.
@@ -1237,9 +1265,10 @@ async def test_4_cd4ff3d8_nao_sai_sozinho():
         plataforma="tiktok",
     )
     assert r.codigos == [checagens.ASSUNTO_NAO_PEDIDO], r.motivos
-    (motivo,) = r.motivos
+    # O portão (27/10/2026): o assunto não pedido é AVISO ao verificador.
+    (motivo,) = r.avisos
     assert motivo.startswith("orienta cancelamento que o cliente não pediu (")
-    assert r.decisao == v.NAO_RODA_PESSOA
+    assert r.decisao == VAI_COM_AVISO
     # Só a resposta ao que perguntou: vai ao verificador.
     so = RASCUNHO_CD4F.split(" Como ele já foi enviado")[0]
     r = await _auto(

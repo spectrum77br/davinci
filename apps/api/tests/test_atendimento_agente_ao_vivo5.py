@@ -443,9 +443,10 @@ async def test_17_o_rascunho_real_no_caminho_do_agente_e_o_do_ao_vivo(pedido):
         p, FALAS_7F0C, fichas=[FICHA_A18], permitir=permitir, pedido=pedido
     )
     assert [x.codigo for x in chk.pendencias] == [checagens.REGIAO_SEM_FONTE]
-    assert final.motivos == [MOTIVO_7F0C] and final.sem_auto == [MOTIVO_7F0C]
-    assert v.por_que_nao_verifica(final, p, ctx, base, conversa) == v.NAO_RODA_PESSOA
-    assert ia.trava_do_agente(_rascunho(final, ctx, **pistas), KIA) == "sem_auto"
+    # O portão do dono (27/10/2026): o aviso da região vai ao verificador (não segura sozinho).
+    assert final.avisos == [MOTIVO_7F0C] and final.motivos == [] and final.sem_auto == []
+    assert v.por_que_nao_verifica(final, p, ctx, base, conversa) is None
+    assert ia.trava_do_agente(_rascunho(final, ctx, **pistas), KIA) is None
 
 
 async def test_17_o_pedido_na_conversa_nao_muda_a_regiao():
@@ -456,8 +457,8 @@ async def test_17_o_pedido_na_conversa_nao_muda_a_regiao():
     com, *_ = await _caminho(p, ["já chegou, posso trocar?"], fichas=LOJA_RJ, pedido=BLOCO_ENTREGUE)
     sem, *_ = await _caminho(p, ["já chegou, posso trocar?"], fichas=LOJA_RJ)
     motivo = "afirma a entrega sem citar a restrição do anúncio (RJ)"
-    assert motivo in com.motivos and motivo in com.sem_auto
-    assert motivo in sem.motivos and motivo in sem.sem_auto
+    assert motivo in [*com.motivos, *com.avisos]
+    assert motivo in sem.avisos  # o portão (27/10/2026): aviso ao verificador
 
 
 async def _o_aviso_no_caminho(casos: list[tuple[str, str]], pedido: dict | None) -> None:
@@ -474,9 +475,14 @@ async def _o_aviso_no_caminho(casos: list[tuple[str, str]], pedido: dict | None)
             p, [cliente], fichas=[FICHA_A18], permitir=permitir, pedido=pedido
         )
         assert checagens.REGIAO_SEM_FONTE in [x.codigo for x in chk.pendencias], (texto, cliente)
-        assert final.precisa_humano and final.sem_auto, (texto, cliente)
-        assert v.por_que_nao_verifica(final, p, ctx, base, conversa) == v.NAO_RODA_PESSOA
-        assert ia.trava_do_agente(_rascunho(final, ctx, **pistas), KIA) == "sem_auto"
+        # O portão (27/10/2026): o aviso vai ao verificador; o duro (o lugar restrito que o
+        # cliente cita) segura.
+        assert final.avisos or (final.precisa_humano and final.sem_auto), (texto, cliente)
+        if final.precisa_humano:
+            assert v.por_que_nao_verifica(final, p, ctx, base, conversa) == v.NAO_RODA_PESSOA
+            assert ia.trava_do_agente(_rascunho(final, ctx, **pistas), KIA) == "sem_auto"
+        else:
+            assert v.por_que_nao_verifica(final, p, ctx, base, conversa) is None
 
 
 # ── 17. 1ª contestação da 5ª rodada (22/10/2026): os furos da 1ª versão ──
@@ -1015,7 +1021,11 @@ async def test_21_o_rascunho_real_no_caminho_do_agente():
     )
     motivo = checagens.MOTIVO_TROCA_NEGADA_NO_DEFEITO
     assert [x.codigo for x in chk.pendencias] == [checagens.TROCA_NEGADA_NO_DEFEITO]
-    assert motivo in auto.motivos and motivo in auto.sem_auto and motivo in auto.avisos
+    assert (
+        motivo in auto.motivos
+        and motivo in [*auto.sem_auto, *auto.avisos]
+        and motivo in auto.avisos
+    )
     assert auto.precisa_humano and auto.status == constantes.RASCUNHO_PENDENTE
     assert auto.texto == RASCUNHO_552F
     assert v.por_que_nao_verifica(auto, p, ctx, base, conversa) == v.NAO_RODA_PESSOA
@@ -1426,7 +1436,7 @@ async def test_a_calibracao_mede_os_novos_sem_modelo(tmp_path, teto_limpo, escap
 def test_a_calibracao_nao_mudou_o_sistema():
     """Os casos novos só medem: o verificador é o v7 de sempre (o v8 da 6ª rodada,
     22/10/2026, é outro conserto — itens 22 e 23)."""
-    assert v.VERSAO in ("v7", "v8", "v9", "v10", "v11", "v12", "v13")
+    assert v.VERSAO in ("v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14")
     assert "nao_vale_para" not in v.SISTEMA
 
 

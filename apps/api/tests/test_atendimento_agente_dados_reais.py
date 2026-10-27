@@ -55,8 +55,11 @@ from app.services.atendimento.constantes import (
 )
 from tests.test_atendimento_agente_e2e import (
     ITEM_A18,
+    NAO_DO_VERIFICADOR,
+    _aviso_no_verificador,
     _decisao,
     _do_agente,
+    _do_verificador,
     _final,
     _kia,
     _ligar,
@@ -1074,8 +1077,11 @@ async def test_7_a_lista_de_variacoes_continua_pegando_o_contrario(
             evidencias=[f"variacoes:{ITEM_RELOGIO}"],
         ),
     ]
+    # O portão (27/10/2026): o estoque dito ao contrário é AVISO — o verificador decide.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
     r = await ia.gerar_rascunho(db, conversa)
     assert "variacao_contradiz" in _do_agente(r)["checagens"] and envios == []
+    _aviso_no_verificador(api, "esgotada")
 
 
 # ─── 7.6 a orientação errada do eval ───
@@ -1123,6 +1129,8 @@ async def test_7_a_troca_no_lugar_da_devolucao_e_aviso(
             evidencias=["pedido"],
         )
     ]
+    # O portão (27/10/2026): a troca no lugar da devolução é AVISO — o verificador decide.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 

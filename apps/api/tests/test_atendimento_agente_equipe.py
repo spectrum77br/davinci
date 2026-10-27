@@ -545,7 +545,7 @@ def test_32_revisao_a_chegada_nao_segura_nenhum_bom_da_calibracao():
 
 def test_32_v9_as_respostas_da_equipe_citadas():
     # O v10 (rodada "redondo", 23/10/2026: a busca no catálogo) guarda o v9 inteiro.
-    assert v.VERSAO in ("v9", "v10", "v11", "v12", "v13")
+    assert v.VERSAO in ("v9", "v10", "v11", "v12", "v13", "v14")
     s = v.SISTEMA
     assert "RESPOSTAS DA EQUIPE CITADAS (quando vier)" in s
     assert "nunca fato deste pedido nem autorização de promessa" in s
@@ -582,8 +582,10 @@ def test_32_v9_as_respostas_da_equipe_citadas():
     assert "não vale para produto" in linhas[3] and "Maria" not in linhas[3]
     assert "desta loja: vale para política da loja;" in linhas[3]
     assert linhas[4].startswith(
+        # v14 (o pedido do dono, 27/10/2026): o mesmo anúncio vale para o modelo nomeado.
         "- par:4 (desta loja: vale para política da loja; de um anúncio desta conversa, que "
-        "tem outro anúncio ou modelo: não vale para produto; há 120 dias)"
+        "tem outro anúncio ou modelo: vale para produto só no modelo nomeado na resposta; "
+        "há 120 dias)"
     )
 
 
@@ -658,9 +660,13 @@ def test_32_a_calibracao_tem_os_casos_do_v9():
     contra = casos["equipe-05"]
     assert contra["texto"] == bom["texto"] and contra["pares"][0]["fonte_de_produto"] is True
     assert "Não acompanha capa" in contra["evidencias"][0]["descricao"]
-    # Revisão: o par do outro modelo chega ao verificador como "não vale para produto".
+    # Revisão: o par do outro modelo chega ao verificador como "não vale para produto" — v14
+    # (27/10/2026): "vale para produto só no modelo nomeado na resposta".
     modelo = calibrar.entrada_do_caso(casos["equipe-06"])
-    assert "que tem outro anúncio ou modelo: não vale para produto; há 40 dias" in modelo
+    assert (
+        "que tem outro anúncio ou modelo: vale para produto só no modelo nomeado na resposta; "
+        "há 40 dias" in modelo
+    )
     # Os textos reais (sem dado pessoal: nenhum número longo nas falas nem no texto).
     falas = json.dumps(
         [casos[i][k] for i in NOVOS_32 for k in ("perguntas", "conversa", "texto")],
@@ -684,7 +690,7 @@ def test_32_v9_revisao_a_resposta_da_equipe_e_lastro_sem_ressalva():
     a ÚNICA fonte do produto, mandava conferir a resposta curta só contra elas e chamava a
     resposta da equipe de "a OUTRO cliente" sem dizer que é lastro."""
     s = _sistema()
-    assert v.VERSAO in ("v9", "v10", "v11", "v12", "v13")
+    assert v.VERSAO in ("v9", "v10", "v11", "v12", "v13", "v14")
     assert "É a ÚNICA fonte de verdade sobre o pedido e o produto" not in s
     assert (
         "É a ÚNICA fonte de verdade sobre o pedido; sobre o produto também, salvo a RESPOSTA "
@@ -721,7 +727,9 @@ def test_32_v9_revisao_a_resposta_da_equipe_e_lastro_sem_ressalva():
     for continua in (
         "o fato, o estado, a data, o prazo ou o valor de pedido (a resposta é de outro pedido)",
         "o produto tirado de linha «não vale para produto»",
-        "a especificação técnica (memória, tela, bateria, câmera, NFC, 5G) e a chegada do estoque",
+        # v14 (o pedido do dono, 27/10/2026): a especificação do par «vale para produto» tem
+        # lastro; a chegada do estoque continua contando.
+        "a chegada do estoque",
         "a política tirada de linha «não vale para política da loja» (de outra loja) ou de "
         "uma resposta a outra situação",
         "o que um campo das EVIDÊNCIAS contradiz",
@@ -763,16 +771,18 @@ def test_32_v9_revisao_as_entradas_dos_tres_bons():
     ruim = casos["equipe-04"]
     assert ruim["pares"] == bom["pares"] and ruim["evidencias"] == bom["evidencias"]
     # boa-aj32-capa-mesmo-anuncio: «vale para produto» na linha; o equipe-02 (outro anúncio)
-    # e o equipe-06 (o anúncio de dois modelos), «não vale para produto».
+    # e o equipe-06 (o anúncio de dois modelos), «não vale para produto» — v14: o equipe-06,
+    # do mesmo anúncio, vale só para o modelo que a resposta nomeia.
     capa = _linha_do_par(calibrar.entrada_do_caso(casos["boa-aj32-capa-mesmo-anuncio"]))
     assert capa.startswith(
         "- par:900004 (desta loja: vale para política da loja; do mesmo anúncio «"
     )
     assert "», de um modelo só: vale para produto; há 20 dias)" in capa
     assert v.NAO_VALE_PRODUTO not in capa
-    for id_ in ("equipe-02", "equipe-06"):
-        linha = _linha_do_par(calibrar.entrada_do_caso(casos[id_]))
-        assert f": {v.NAO_VALE_PRODUTO};" in linha, id_
+    linha = _linha_do_par(calibrar.entrada_do_caso(casos["equipe-02"]))
+    assert f": {v.NAO_VALE_PRODUTO};" in linha
+    linha = _linha_do_par(calibrar.entrada_do_caso(casos["equipe-06"]))
+    assert f": {v.VALE_PRODUTO_NOMEADO};" in linha
     # boa-aj32-80035f0e: sem par — o lastro é o trecho do anúncio e o caminho do CEP.
     regiao = casos["boa-aj32-80035f0e"]
     assert "pares" not in regiao
@@ -1130,8 +1140,11 @@ def test_32_o_bloco_2_traz_como_a_equipe_responde(plataforma):
     for trecho in (
         "cite o par:<id> em evidencias",
         "nunca de um par",
-        "só de par marcado «vale para produto»",
-        "especificação e chegada do estoque, nunca de um par",
+        # v14 (o pedido do dono, 27/10/2026): sem o dado no anúncio, a resposta da equipe do
+        # mesmo produto; a chegada do estoque, nunca.
+        "só par «vale para produto»",
+        "sem o dado no anúncio, responda como ela",
+        "chegada do estoque, nunca",
         "devolucao_sem_decisao_da_loja",
         "Par nunca autoriza ação de pessoa",
         "sem acao_pendente da loja",
@@ -1292,7 +1305,7 @@ async def test_32_revisao_fonte_de_produto_so_com_um_anuncio_de_um_modelo(
     # O pacote mostra o título e se vale.
     texto, _cabem = pacote.secao_da_equipe([par, dois_modelos])
     assert "mesmo anúncio «Uranyx A18 Pro Max 6,9 256gb», vale para produto" in texto
-    assert "mesmo anúncio, não vale para produto" in texto
+    assert "mesmo anúncio, vale para produto só no modelo nomeado na resposta" in texto
 
 
 async def test_32_o_pacote_traz_a_equipe_e_registra_os_pares(
@@ -1329,7 +1342,7 @@ async def test_32_o_pacote_traz_a_equipe_e_registra_os_pares(
     assert par_id.startswith("par:") and par_id in pac.texto
     # Revisão: o título do anúncio e se vale para produto (sem vínculo do anúncio no
     # cadastro, na dúvida, não vale).
-    assert ", não vale para produto, há 1 dia)" in pac.texto
+    assert ", vale para produto só no modelo nomeado na resposta, há 1 dia)" in pac.texto
     assert "(esta loja, mesmo anúncio «" in pac.texto
     # A seção fica dentro da moldura e nunca libera o número do par.
     assert pac.texto.index(pacote.EQUIPE_CABECALHO) < pac.texto.index(pacote.FECHA_DADOS)

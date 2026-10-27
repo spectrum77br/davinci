@@ -77,7 +77,11 @@ NAO_POSTADO = {
 
 
 def _sai(f: ia.SaidaConferida) -> bool:
-    return f.status == RASCUNHO_PENDENTE and not f.precisa_humano and not f.sem_auto
+    """O rascunho sairia sem a 1ª camada dizer nada (sem pessoa, sem bloqueio, sem `sem_auto`
+    e — o portão de 27/10/2026 — sem AVISO ao verificador)."""
+    return (
+        f.status == RASCUNHO_PENDENTE and not f.precisa_humano and not f.sem_auto and not f.avisos
+    )
 
 
 async def _os_dois(texto: str, **kw: Any) -> tuple[ia.SaidaConferida, ia.SaidaConferida]:
@@ -295,8 +299,9 @@ def test_os_assuntos_liberados_e_a_entrada_do_verificador():
         auto_categorias=["rastreio", "nota_fiscal", "espec_celular", "garantia"],
         auto_agente=["rastreio", "espec_celular", "garantia"],
     )
-    # Orientação pelo `auto_orientacao`; o resto pelos dois, fora o de produto e o só de pessoa.
-    assert verificador.assuntos_liberados(canal) == ["cancelamento", "rastreio"]
+    # Orientação pelo `auto_orientacao`; o resto pelos dois, fora o só de pessoa; o de produto
+    # pelo `auto_categorias` (o portão, 27/10/2026: o "assunto de produto" é aviso).
+    assert verificador.assuntos_liberados(canal) == ["cancelamento", "rastreio", "espec_celular"]
     base = _base_do_verificador()
     ctx = _ctx_do_verificador()
     resumo = verificador.resumo_do_pacote(ctx, base, None)
@@ -357,7 +362,8 @@ async def test_o_nfc_pela_variacao_nao_sai_sozinho_em_nenhum_assunto(assunto):
         modo=MODO_AUTO,
     )
     assert not _sai(auto) and auto.status == RASCUNHO_PENDENTE
-    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in auto.sem_auto
+    # O portão (27/10/2026): a ficha no automático é AVISO ao verificador.
+    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in auto.avisos
 
 
 @pytest.mark.parametrize(
@@ -688,7 +694,7 @@ async def test_o_acolhimento_com_a_minimizacao_continua_pego(modo):
         cliente="a bateria acaba rápido",
         modo=modo,
     )
-    assert checagens.MOTIVO_DEFEITO_FORA_DA_ORIENTACAO in f.sem_auto
+    assert checagens.MOTIVO_DEFEITO_FORA_DA_ORIENTACAO in [*f.sem_auto, *f.avisos]
     assert f.status == RASCUNHO_PENDENTE
 
 
@@ -1141,7 +1147,7 @@ def test_a_pergunta_antes_da_compra_nao_e_relato(pergunta):
 async def test_a_minimizacao_do_defeito_nao_sai_e_avisa_no_copiloto(categoria, cliente, texto):
     auto, copiloto = await _os_dois(texto, categoria=categoria, cliente=cliente)
     assert not _sai(auto) and auto.status == RASCUNHO_PENDENTE
-    assert checagens.MOTIVO_DEFEITO_FORA_DA_ORIENTACAO in auto.sem_auto
+    assert checagens.MOTIVO_DEFEITO_FORA_DA_ORIENTACAO in [*auto.sem_auto, *auto.avisos]
     # No copiloto: a sugestão fica (sem pessoa), com o aviso.
     assert copiloto.status == RASCUNHO_PENDENTE and not copiloto.precisa_humano
     assert checagens.MOTIVO_DEFEITO_FORA_DA_ORIENTACAO in copiloto.avisos
