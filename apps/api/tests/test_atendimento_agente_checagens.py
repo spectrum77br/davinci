@@ -594,9 +594,10 @@ def test_aplicar_acoes_bloqueio_so_auto_e_substituido():
     assert final.erros == ["diz que tem 'bordo'"] and not final.validador_ok
     assert final.avisos_auto == ["evidência sem prova (x)"]
     assert final.motivo.endswith("— cliente quer outra cor")
-    # No automático, o `so_auto` é motivo (pessoa).
+    # No automático (o portão, 27/10/2026), o que não é duro é AVISO ao verificador.
     auto = checagens.aplicar(c, chk, acoes_pessoa=[], modo=constantes.MODO_AUTO)
-    assert "evidência sem prova (x)" in auto.motivos and auto.avisos_auto == []
+    assert "evidência sem prova (x)" in auto.avisos and auto.avisos_auto == []
+    assert "evidência sem prova (x)" not in auto.motivos
     # SUBSTITUIDO (a loja respondeu) só muda para BLOQUEADO.
     sub = _conferida(status=constantes.RASCUNHO_SUBSTITUIDO)
     so_pessoa = checagens.Checagens([checagens.PendenciaAgente("x", "pessoa", False, False)])

@@ -568,7 +568,8 @@ _AUTO = {
         ),
         (_resultado(validador_ok=False), _CONV, _AUTO, replay.VALIDADOR_REPROVOU, False, False),
         (_resultado(gravar=False, parada="prazo"), _CONV, _AUTO, replay.SEM_RASCUNHO, False, True),
-        (_resultado(confianca=0.5), _CONV, _AUTO, replay.CONFIANCA_BAIXA, False, False),
+        # O portão (27/10/2026): só abaixo do piso de 0,50.
+        (_resultado(confianca=0.49), _CONV, _AUTO, replay.CONFIANCA_BAIXA, False, False),
         (
             _resultado(categoria="reclamacao_forte"),
             _CONV,
@@ -809,7 +810,8 @@ async def test_evidencia_sem_prova_no_automatico_vai_para_pessoa(
     db: AsyncSession, make_user, ajustes
 ):
     """O agente cita `regra:rastreio`, mas o manual (vazio) não provou nada: no
-    automático a checagem de evidência manda para pessoa (spec 6.5, item 1)."""
+    automático a checagem de evidência manda para pessoa (spec 6.5, item 1) — o portão do
+    dono (27/10/2026): é AVISO ao verificador (não segura sozinho)."""
     conversa, gatilho = await _cenario_rastreio(
         db, make_user, modo="auto", auto_categorias=["rastreio"]
     )
@@ -822,8 +824,8 @@ async def test_evidencia_sem_prova_no_automatico_vai_para_pessoa(
     async with replay.sessao_replay() as s:
         c = await s.get(AtendimentoConversa, conversa.id)
         r = await replay.rodar_gatilho(s, c, _momento(gatilho), gravar=False, cliente=api.cliente())
-    assert r.decisao["motivo"] == replay.PRECISA_HUMANO and r.decisao["pessoa"] is True
-    assert r.decisao["motivos"] == ["evidência citada sem prova (regra:rastreio)"]
+    assert r.decisao["motivo"] == replay.ENVIARIA and r.decisao["pessoa"] is False
+    assert r.decisao["motivos"] == []
     assert r.rastro["checagens"] == [checagens.EVIDENCIA_SEM_PROVA]
 
 

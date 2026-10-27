@@ -55,8 +55,11 @@ from tests.test_atendimento_agente_ao_vivo2 import (
 )
 from tests.test_atendimento_agente_ao_vivo_e2e import AUTO_KIA, _no_canal
 from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
+    NAO_DO_VERIFICADOR,
+    _aviso_no_verificador,
     _decisao,
     _do_agente,
+    _do_verificador,
     _final,
     agente_ligado,
     api,
@@ -129,6 +132,8 @@ async def test_9_o_rascunho_real_do_tiktok_postado_sai_sem_o_alarme(
     api.roteiro = [
         _final(texto=RASCUNHO_POSTADO, assunto="rastreio", confianca=0.8, evidencias=["pedido"])
     ]
+    # O portão do dono (27/10/2026): o assunto não pedido é AVISO — o verificador decide.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
@@ -145,8 +150,9 @@ async def test_9_o_rascunho_real_do_tiktok_postado_sai_sem_o_alarme(
     # caminho seguram); a única trava agora é a do assunto não pedido (suave: pessoa
     # confere, a sugestão fica pendente).
     assert r.status == RASCUNHO_PENDENTE and r.precisa_humano, r.motivo
-    assert agente_["checagens"] == [checagens.ASSUNTO_NAO_PEDIDO], agente_["checagens"]
+    assert agente_["checagens"] == [checagens.ASSUNTO_NAO_PEDIDO, "verificador"], agente_
     assert envios == []
+    _aviso_no_verificador(api, "orienta cancelamento que o cliente não pediu")
 
 
 async def test_9_o_tiktok_sem_postar_continua_preso(
@@ -159,11 +165,14 @@ async def test_9_o_tiktok_sem_postar_continua_preso(
     await _no_canal(db, conversa, MODO_AUTO, orientacao=["cancelamento"])
     await _msg(db, conversa, PERGUNTA_CHEGA, ha=timedelta(minutes=6))
     api.roteiro = [_final(texto=RASCUNHO_POSTADO, assunto="rastreio", evidencias=["pedido"])]
+    # O portão (27/10/2026): o estado dito ao contrário é AVISO — o verificador decide.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
     assert r.precisa_humano and envios == []
-    assert any("ainda não foi postado" in m for m in _do_agente(r)["sem_auto"]), _do_agente(r)
+    assert any("ainda não foi postado" in m for m in _do_agente(r)["avisos"]), _do_agente(r)
+    _aviso_no_verificador(api, "ainda não foi postado")
 
 
 # A revisão do item 9: "o andamento" afirmado (com verbo de estado) e o caminho certo.
@@ -187,19 +196,26 @@ async def test_9_o_andamento_afirmado_sem_postar_nao_sai(
     await _no_canal(db, conversa, MODO_AUTO)
     await _msg(db, conversa, PERGUNTA_CHEGA, ha=timedelta(minutes=6))
     api.roteiro = [_final(texto=texto, assunto="rastreio", confianca=0.95, evidencias=["pedido"])]
+    # O portão (27/10/2026): o andamento sem lastro é AVISO — o verificador decide.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
     assert '"postado":"nao"' in api.pacote()
     agente_ = _do_agente(r)
-    assert checagens.MOTIVO_PEDIDO_SEM_LASTRO in agente_["sem_auto"], agente_["sem_auto"]
+    assert checagens.MOTIVO_PEDIDO_SEM_LASTRO in agente_["avisos"], agente_["avisos"]
+    _aviso_no_verificador(api, "afirma o andamento do pedido sem o dado")
     assert envios == [] and _decisao(r) != "enviado", (_decisao(r), r.motivo)
 
 
 # ─────────────── (10) ef4cb373: o pede_atendente com a confiança certa ───────────────
 
 
-@pytest.mark.parametrize(("confianca", "decisao"), [(0.9, "enviado"), (0.7, "confianca_baixa")])
+# O portão (27/10/2026): de 0,50 a 0,80 a confiança é aviso (o verificador decide); abaixo
+# de 0,50, pessoa.
+@pytest.mark.parametrize(
+    ("confianca", "decisao"), [(0.9, "enviado"), (0.7, "enviado"), (0.4, "precisa_humano")]
+)
 async def test_10_o_como_podemos_ajudar_sai_com_a_confianca_da_resposta_certa(
     db: AsyncSession, make_user, agente_ligado, api, envios, confianca, decisao
 ):
@@ -222,7 +238,10 @@ async def test_10_o_como_podemos_ajudar_sai_com_a_confianca_da_resposta_certa(
 
     assert "pede_atendente" in AUTO_KIA
     assert r.categoria == "pede_atendente" and r.texto == RASCUNHO_ATENDENTE, (r.categoria, r.texto)
-    assert not r.precisa_humano and _do_agente(r)["sem_auto"] == [], r.motivo
+    if confianca >= 0.5:
+        assert not r.precisa_humano and _do_agente(r)["sem_auto"] == [], r.motivo
+    else:
+        assert r.precisa_humano and "abaixo de 0,50" in (r.motivo or ""), r.motivo
     assert _decisao(r) == decisao
     if decisao == "enviado":
         assert [e["texto"] for e in envios] == [RASCUNHO_ATENDENTE]
@@ -273,11 +292,15 @@ async def test_11_a_causa_que_o_cliente_nao_disse_continua_presa(
     await _msg(db, conversa, RELATO_BATERIA, ha=timedelta(minutes=6))
     texto = RASCUNHO_BATERIA.replace("rápido.", "rápido por causa do uso intenso.", 1)
     api.roteiro = [_final(texto=texto, assunto="defeito", evidencias=["pedido"])]
+    # O portão (27/10/2026): o defeito fora da orientação é AVISO — o verificador decide.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
-    assert r.precisa_humano and envios == []
+    # O canal sem o defeito no `auto_orientacao`: a régua do canal segura (o aviso fica).
+    assert envios == [] and _decisao(r) != "enviado"
     assert "defeito_fora_da_orientacao" in _do_agente(r)["checagens"], _do_agente(r)
+    assert any("fora da orientação" in m for m in _do_agente(r)["avisos"]), _do_agente(r)
 
 
 # A revisão do item 11: o pedido de vídeo do rascunho real, depois do acolhimento.
@@ -314,6 +337,9 @@ async def test_11_com_o_defeito_no_auto_so_o_relato_sai_sozinho(
     await _msg(db, conversa, relato, ha=timedelta(minutes=6))
     texto = f"{acolhimento} {_PEDIDO_DE_VIDEO}"
     api.roteiro = [_final(texto=texto, assunto="defeito", confianca=0.9, evidencias=["pedido"])]
+    if not sai:
+        # O portão (27/10/2026): os avisos vão ao verificador — e o "não" dele segura.
+        api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 

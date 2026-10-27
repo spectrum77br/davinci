@@ -669,7 +669,8 @@ _CONVERSA = types.SimpleNamespace(plataforma="shopee", canal="chat", dados={}, e
         ({"final": {"erros": ["número inventado"]}}, verificador.NAO_RODA_VALIDADOR),
         ({"final": {"precisa_humano": True}}, verificador.NAO_RODA_PESSOA),
         ({"ctx": {"acoes_codigo": ["segurar_envio"]}}, verificador.NAO_RODA_PESSOA),
-        ({"proposta": {"confianca": 0.5}}, verificador.NAO_RODA_CONFIANCA),
+        # O portão (27/10/2026): só abaixo do piso de 0,50.
+        ({"proposta": {"confianca": 0.49}}, verificador.NAO_RODA_CONFIANCA),
         ({"final": {"texto": "  "}}, verificador.NAO_RODA_SEM_TEXTO),
         ({"conversa": {"plataforma": "amazon"}}, verificador.NAO_RODA_PLATAFORMA),
     ],

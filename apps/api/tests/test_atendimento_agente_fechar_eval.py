@@ -313,16 +313,19 @@ async def test_1_a_nota_nunca_e_lastro():
 @pytest.mark.parametrize(
     ("confianca", "motivo"),
     [
+        # O portão do dono (27/10/2026): a confiança só segura abaixo de 0,50 (o piso
+        # duro); de 0,50 a 0,80 é aviso ao verificador.
         (0.80, replay.ENVIARIA),
         (0.85, replay.ENVIARIA),
-        (0.79, replay.CONFIANCA_BAIXA),
-        (0.7, replay.CONFIANCA_BAIXA),
+        (0.79, replay.ENVIARIA),
+        (0.5, replay.ENVIARIA),
+        (0.49, replay.CONFIANCA_BAIXA),
     ],
 )
 def test_2_o_eval_corta_no_0_80_do_agente(confianca, motivo):
     d = replay.decisao_simulada(_resultado(confianca=confianca), conversa=_CONV, canal=_AUTO)
     assert d["motivo"] == motivo
-    assert ia.confianca_minima(True) == 0.80 and ia.confianca_minima(False) == 0.85
+    assert ia.confianca_minima(True) == 0.50 and ia.confianca_minima(False) == 0.85
 
 
 # ═══════════════ 3. D3 ═══════════════
@@ -845,7 +848,7 @@ def test_7_entregue_pelo_relato_do_cliente_so_sem_o_pedido():
 
 
 def test_8_o_sistema_v13_diz_o_lastro_que_ja_esta_na_entrada():
-    assert v.VERSAO == "v13" and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO == "v14" and v.MODELO == "claude-haiku-5-5"
     s = " ".join(v.SISTEMA.split())
     for trecho in (
         "a linha que termina em «os demais estados recebem» sustenta «enviamos para <estado que não está na linha>, sim»",

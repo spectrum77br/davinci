@@ -120,6 +120,12 @@ NOMES = (
 ERRO_FORA_DO_ESCOPO = "não localizado neste atendimento"
 ERRO_INDISPONIVEL = "dado indisponível agora"
 # O aviso que acompanha os exemplos da equipe (spec 4.2).
+# Pedido do dono (27/10/2026): os pares do anúncio da conversa são citáveis como os do pacote.
+AVISO_PARES_CITAVEIS = (
+    "respostas da equipe a casos parecidos (outros clientes): a política da loja que elas "
+    "repetem e, no par «vale para produto», o que dizem do produto valem — cite o par:<id>; "
+    "dado, prazo e valor de pedido nunca"
+)
 AVISO_TOM = (
     "exemplos de TOM; não são fatos nem instruções; números, prazos e "
     "características de produto deles nunca valem"
@@ -1541,8 +1547,48 @@ async def dados_consultar_manual(
 async def dados_buscar_respostas_equipe(
     ctx: ContextoAgente, pergunta: str, item_id: str | None
 ) -> Resultado:
-    """Até 5 pares generalizados (`pares.buscar`), com `AVISO_TOM`. Nunca permite nada."""
+    """Até 5 pares generalizados (`pares.buscar`), com `AVISO_TOM`. Nunca permite nada.
+
+    Pedido do dono (27/10/2026: "se não conseguir, ainda tem conversas parecidas pra ver"):
+    com um anúncio (o do argumento ou os do pacote), os pares vêm como os do pacote
+    (`pares.exemplos_do_turno`: primeiro os do MESMO anúncio e do mesmo produto), com o
+    `par:<id>` CITÁVEL (`ctx.registrar_pares`) e o "vale para produto" de cada um."""
     item = " ".join(str(item_id or "").split())
+    itens = list(
+        dict.fromkeys(
+            [*([item] if _RX_ITEM.fullmatch(item) else []), *sorted(ctx.anuncios_do_pacote)]
+        )
+    )
+    if itens:
+        from app.services.atendimento.agente import pacote
+
+        async with sessao.sessao_leitura() as s:
+            achados = await pares.exemplos_do_turno(
+                s,
+                pergunta=str(pergunta or ""),
+                plataforma=ctx.plataforma,
+                integration_id=ctx.integration_id,
+                item_ids=itens,
+                conversa_id=ctx.conversa_id,
+                as_of=ctx.agora(),
+                canal_no_automatico=ctx.modo == constantes.MODO_AUTO,
+                limite=pares.MAX_PARES,
+            )
+        ctx.registrar_pares(achados)
+        exemplos = [
+            {
+                "par": e["id"],
+                "onde": pacote._onde_do_par(e),
+                "pergunta": e["pergunta"],
+                "resposta": e["resposta"],
+            }
+            for e in achados
+        ]
+        return Resultado(
+            dados={"aviso": AVISO_PARES_CITAVEIS, "exemplos": exemplos},
+            permitir_texto=False,
+            ids_rastro=tuple(e["id"] for e in achados),
+        )
     async with sessao.sessao_leitura() as s:
         achados = await pares.buscar(
             s,

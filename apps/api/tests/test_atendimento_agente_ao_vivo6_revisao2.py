@@ -117,27 +117,29 @@ RASCUNHO_0ACD = (
             PERGUNTA,
             CONTRADIZ,
         ),
-        # "Essa cor"/"dessa cor" é a do cliente (a Azul disponível): suave.
+        # "Essa cor"/"dessa cor" é a do cliente (a Azul disponível): o portão do dono
+        # (27/10/2026; o reposicao-10 da calibração) diz a contradição com o nome dela — o
+        # aviso preciso ao verificador.
         (
             "Olá! Essa cor não tem previsão de reposição; você pode acompanhar o anúncio.",
             AZUL_DISPONIVEL,
             True,
             PERGUNTA,
-            SUAVE,
+            CONTRADIZ,
         ),
         (
             "Olá! Não há previsão de reposição dessa cor no momento; acompanhe o anúncio.",
             AZUL_DISPONIVEL,
             True,
             "tem azul?",
-            SUAVE,
+            CONTRADIZ,
         ),
         (
             "Olá! Para essa cor não temos data de chegada nem previsão de reposição.",
             AZUL_DISPONIVEL,
             True,
             PERGUNTA,
-            SUAVE,
+            CONTRADIZ,
         ),
         # A Azul com confiavel=false (só aparece indisponível no anúncio): suave.
         (
@@ -314,9 +316,10 @@ async def test_no_caminho_auto_o_sem_previsao_errado_nao_sai_sozinho(texto, vari
         x.codigo in (checagens.VARIACAO_SEM_DADO, checagens.VARIACAO_CONTRADIZ)
         for x in chk.pendencias
     ), texto
-    assert final.precisa_humano and final.sem_auto
-    assert v.por_que_nao_verifica(final, p, ctx, base, conversa) == v.NAO_RODA_PESSOA
-    assert ia.trava_do_agente(_rascunho(final, ctx, **PISTAS_ESTOQUE), KIA_ESTOQUE) == "sem_auto"
+    # O portão do dono (27/10/2026): o estoque dito errado é AVISO — o verificador o recebe
+    # com a variação de que fala (e o SISTEMA v14 manda conferir o disponivel=true).
+    assert final.avisos and not final.precisa_humano and final.sem_auto == []
+    assert v.por_que_nao_verifica(final, p, ctx, base, conversa) is None
 
 
 async def test_no_caminho_auto_o_0acd80a6_continua_indo_ao_verificador():
@@ -509,7 +512,7 @@ async def test_no_caminho_auto_a_promessa_depois_do_mas_nao_sai_sozinha():
     )
     motivo = "promessa de estoque (últimas unidades, reserva ou reposição)"
     assert motivo in [x.motivo for x in chk.pendencias]
-    assert final.precisa_humano and motivo in final.sem_auto
+    assert motivo in [*final.sem_auto, *final.avisos]
     assert ia.trava_do_agente(_rascunho(final, ctx, **PISTAS_ESTOQUE), KIA_ESTOQUE) == "sem_auto"
 
 
@@ -699,7 +702,10 @@ async def test_no_caminho_auto_a_recusa_nao_sai_sozinha():
     p = _proposta(texto, "cancelamento", ["regra:cancelamento"])
     final, chk, ctx, base, conversa = await _caminho(p, ["Não chegou ainda, quero cancelar"])
     assert checagens.RECUSA_DA_ENTREGA in [x.codigo for x in chk.pendencias]
-    assert final.precisa_humano and checagens.MOTIVO_RECUSA_DA_ENTREGA in final.sem_auto
+    assert final.precisa_humano and checagens.MOTIVO_RECUSA_DA_ENTREGA in [
+        *final.sem_auto,
+        *final.avisos,
+    ]
     pistas = {"pistas_turno": ["cancelamento"], "pistas_orientacao": ["cancelamento"]}
     assert ia.trava_do_agente(_rascunho(final, ctx, **pistas), KIA) == "sem_auto"
 

@@ -372,7 +372,7 @@ async def test_3_a_ficha_no_automatico_nao_dispara_fora_dos_assuntos_de_produto(
     )
     auto = await _completo(texto, categoria=assunto, modo=MODO_AUTO, cliente=cliente, fichas=fichas)
     assert ia.MOTIVO_FICHA_NO_AUTOMATICO not in auto.motivos, auto.motivos
-    assert ia.MOTIVO_FICHA_NO_AUTOMATICO not in auto.sem_auto
+    assert ia.MOTIVO_FICHA_NO_AUTOMATICO not in [*auto.sem_auto, *auto.avisos]
 
 
 async def test_3_a_resposta_de_estoque_do_eval_sai_sozinha():
@@ -442,7 +442,8 @@ def test_3_o_nome_da_variacao_com_pontuacao_nao_e_caracteristica():
 async def test_3_a_ficha_no_automatico_continua_onde_vale(assunto, cliente, texto, fichas):
     auto = await _completo(texto, categoria=assunto, modo=MODO_AUTO, cliente=cliente, fichas=fichas)
     assert not _sai(auto)
-    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in auto.sem_auto, auto.sem_auto
+    # O portão (27/10/2026): a ficha no automático é AVISO ao verificador.
+    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in auto.avisos, auto.avisos
 
 
 PRETA = [
@@ -480,8 +481,12 @@ async def test_3_a_caracteristica_que_o_anuncio_nao_traz_continua_pega(texto, te
         fatos={"ficha_do_anuncio": PRETA},
     )
     assert not _sai(auto) and auto.status == RASCUNHO_PENDENTE
-    motivo = next(m for m in auto.sem_auto if m.startswith("afirma característica que os dados"))
-    assert termo in motivo and ia.MOTIVO_FICHA_NO_AUTOMATICO not in auto.sem_auto
+    motivo = next(
+        m
+        for m in [*auto.sem_auto, *auto.avisos]
+        if m.startswith("afirma característica que os dados")
+    )
+    assert termo in motivo and ia.MOTIVO_FICHA_NO_AUTOMATICO not in [*auto.sem_auto, *auto.avisos]
     # No copiloto: limpa (a régua é do automático, como a da ficha).
     copiloto = await _completo(
         texto,
@@ -742,7 +747,7 @@ async def test_5_a_resposta_da_retirada_sai_sozinha_no_automatico():
         texto, categoria="outro", modo=MODO_AUTO, cliente="posso retirar aí na loja?"
     )
     assert auto.status == RASCUNHO_PENDENTE and not auto.erros, (auto.motivos, auto.erros)
-    assert not any("fora da plataforma" in m for m in auto.sem_auto), auto.sem_auto
+    assert not any("fora da plataforma" in m for m in [*auto.sem_auto, *auto.avisos]), auto.sem_auto
 
 
 # ═══════════════ 6. a lacuna sem dado no rascunho ═══════════════
@@ -822,9 +827,12 @@ async def test_6_o_rascunho_do_agente_nunca_sai_com_a_lacuna(
     r = await ia.gerar_rascunho(db, conversa)
     assert r.texto == f"Olá! Seu pedido já foi enviado; o rastreio é {RASTREIO}.", r.texto
     assert "{" not in r.texto and r.status == RASCUNHO_PENDENTE and r.precisa_humano
-    assert checagens.MOTIVO_LACUNA_TIRADA.format(lacunas="{nf_numero}") in (r.motivo or "")
+    # O portão (27/10/2026): no automático, a frase da lacuna tirada é AVISO ao verificador.
+    lacuna = checagens.MOTIVO_LACUNA_TIRADA.format(lacunas="{nf_numero}")
+    assert lacuna in (_do_agente(r)["avisos"] if modo == MODO_AUTO else (r.motivo or ""))
     assert envios == []  # pessoa confere (o motivo "sem dado" do legado continua)
-    assert checagens.MOTIVO_LACUNA_TIRADA.format(lacunas="{nf_numero}") in _do_agente(r)["sem_auto"]
+    # No copiloto, como antes (`sem_auto`); no automático, não segura sozinha.
+    assert (lacuna in _do_agente(r)["sem_auto"]) is (modo != MODO_AUTO)
 
 
 async def test_6_so_a_lacuna_sem_dado_vira_bloqueado_sem_texto(

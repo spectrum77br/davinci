@@ -64,7 +64,7 @@ from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
     telegram,
 )
 from tests.test_atendimento_agente_laco import _categorias_do_manual
-from tests.test_atendimento_agente_redondo import SHOPEE_REAL, VAI_AO_VERIFICADOR
+from tests.test_atendimento_agente_redondo import SHOPEE_REAL, VAI_AO_VERIFICADOR, VAI_COM_AVISO
 from tests.test_atendimento_humano import _loja_db
 from tests.test_atendimento_ia import PEDIDO_MKT, _importar_manual_base, _pedido_completo
 from tests.test_atendimento_ia import _conversa as _conversa_ia
@@ -271,6 +271,22 @@ async def _auto(
     conferida = checagens.sem_lacuna_vazia(conferida)
     ctx.pedido_da_conversa = bloco
     chk = checagens.conferir(p, conferida, ctx, base, fichas=fichas, gatilho=gatilho)
+    # O portão do dono (27/10/2026), como no `agente.conferir_proposta`: os avisos do portão
+    # e o que a `conferir_saida` diz e não é duro viram AVISO ao verificador.
+    chk = checagens.Checagens(
+        pendencias=[
+            *chk.pendencias,
+            *checagens.avisos_do_portao(
+                confianca=saida.confianca(p),
+                assunto=ia.assunto_do_agente(conferida.categoria, p.acao, base.ids_categorias),
+                produto_pelo_anuncio=ctx.produto_pelo_anuncio,
+                produto_pela_equipe=bool(ctx.pares_citados(ctx.evidencias, de_produto=True)),
+            ),
+        ]
+    )
+    conferida = checagens.separar_avisos(
+        conferida, modo=constantes.MODO_AUTO, pessoa_do_modelo=bool(entrada["precisa_humano"])
+    )
     final = checagens.aplicar(
         conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=constantes.MODO_AUTO
     )
@@ -285,7 +301,12 @@ async def _auto(
     )  # fmt: skip
     trava = ia.trava_do_agente(rascunho, SHOPEE_REAL)
     return SimpleNamespace(
-        decisao=VAI if nao is None and trava is None else (nao or trava),
+        decisao=(
+            (VAI if not final.avisos else VAI_COM_AVISO)
+            if nao is None and trava is None
+            else (nao or trava)
+        ),
+        avisos=list(final.avisos),
         codigos=[x.codigo for x in chk.pendencias], motivos=list(final.motivos), ctx=ctx,
         rascunho=rascunho, base=base,
     )  # fmt: skip
@@ -1173,7 +1194,7 @@ def test_v12_a_entrada_so_traz_a_acao_da_pessoa_no_responde_e_marca():
         consultas=[],
     )
     assert v.CABECALHO_POS_ENVIO in com and "central do vendedor" in com
-    assert v.VERSAO == "v13" and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO == "v14" and v.MODELO == "claude-haiku-5-5"
     assert (
         "AÇÃO QUE CONTINUA COM A PESSOA" in v.SISTEMA and "não vale para essa variação" in v.SISTEMA
     )

@@ -342,8 +342,8 @@ def test_13_a_resposta_toda_com_lastro_vale_0_9():
     # O legado segue em 0,85; o agente sai a partir de 0,80 (decisão do dono,
     # 22/10/2026), sempre com as travas e o verificador.
     assert ia.CONFIANCA_AUTO == 0.85
-    assert ia.CONFIANCA_AUTO_AGENTE == 0.80
-    assert ia.confianca_minima(True) == 0.80
+    assert ia.CONFIANCA_AUTO_AGENTE == 0.50  # o portão (27/10/2026): o piso duro
+    assert ia.confianca_minima(True) == 0.50  # o portão (27/10/2026)
     assert ia.confianca_minima(False) == 0.85
     # A descrição do campo continua a do item 10.
     descricao = saida.esquema()["properties"]["confianca"]["description"]

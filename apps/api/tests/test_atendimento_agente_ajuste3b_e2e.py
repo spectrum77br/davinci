@@ -27,6 +27,9 @@ from app.services.atendimento.constantes import (
 from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
     ITEM_A18,
     ITEM_A18_HOJE,
+    NAO_DO_VERIFICADOR,
+    _aviso_no_verificador,
+    _do_verificador,
     _final,
     _kia,
     _ligar,
@@ -256,10 +259,15 @@ async def test_o_rascunho_ruim_nao_sai_mesmo_com_o_ok_do_verificador(
     db: AsyncSession, make_user, agente_ligado, api, envios, redis_mem, lojas, caso
 ):
     _id, setup, cliente, texto, assunto, evidencias, status = caso
+    # O portão do dono (27/10/2026): o que não é duro chega ao verificador COM o aviso — e o
+    # "não" dele segura; o duro nem chega a ele.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
     r = await _gerar(
         db, make_user, redis_mem, lojas, api, setup, cliente, [], texto, assunto, evidencias
     )
     assert not envios, (_id, r.status, r.motivo)
     assert r.precisa_humano or r.status == RASCUNHO_BLOQUEADO
+    if api.verificador:
+        _aviso_no_verificador(api)
     if status is not None:
         assert r.status == status, (_id, r.status, r.motivo)

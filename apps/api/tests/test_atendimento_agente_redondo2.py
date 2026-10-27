@@ -47,8 +47,11 @@ from app.services.atendimento.agente import contexto as agente_ctx
 from app.services.atendimento.agente import verificador as v
 from scripts.agente_eval import calibrar_verificador as calibrar
 from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
+    NAO_DO_VERIFICADOR,
+    _aviso_no_verificador,
     _decisao,
     _do_agente,
+    _do_verificador,
     _usa,
     agente_ligado,
     api,
@@ -741,7 +744,7 @@ async def test_6_o_outro_anuncio_lido_nao_empresta_caracteristica():
 
 
 def test_6_o_verificador_v10_le_a_busca_so_quando_houve():
-    assert v.VERSAO in ("v10", "v11", "v12", "v13") and v.MODELO == HAIKU
+    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14") and v.MODELO == HAIKU
     s = " ".join(v.SISTEMA.split())
     for trecho in (
         "BUSCA NO CATÁLOGO DA LOJA (quando vier)",
@@ -903,11 +906,14 @@ async def test_e2e_6_sem_citar_o_anuncio_achado_nao_sai(db, make_user, agente_li
         _usa("buscar_anuncios_da_loja", termo="A18"),
         _final_e2e(texto=TEXTO_A18, assunto="estoque_variacao", confianca=0.9, evidencias=[]),
     ]
+    # O portão do dono (27/10/2026): a G1 é AVISO — o verificador decide (aqui, "não").
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
-    assert any("busca no catálogo" in m for m in _do_agente(r)["sem_auto"]), r.motivo
+    assert any("busca no catálogo" in m for m in _do_agente(r)["avisos"]), r.motivo
     assert envios == [] and _decisao(r) != "enviado"
+    _aviso_no_verificador(api, "busca no catálogo")
 
 
 # ═══════════════ 8. o que o eval S1 mede (o relatório) ═══════════════

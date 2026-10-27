@@ -151,6 +151,9 @@ def _agente_pode(rascunho: Any, canal: Any | None) -> bool:
     # Liberações do dono (23/10/2026, L1 e L2): o de produto com a marca do código.
     if canal is not None and ia.produto_pelo_anuncio(agente, categoria, canal):
         return True
+    # O portão do dono (27/10/2026): o de produto no `auto_categorias` do canal.
+    if canal is not None and ia.assunto_de_produto_liberado(categoria, canal):
+        return True
     # Os outros: só onde o dono liberou o agente (`auto_agente`, decisão 8).
     return (
         canal is not None

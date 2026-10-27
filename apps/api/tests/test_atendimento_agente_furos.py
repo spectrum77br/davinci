@@ -112,14 +112,29 @@ async def _completo(
         evidencias=[],
     )
     chk = checagens.conferir(proposta, conferida, ctx, base, fichas=list(fichas), gatilho=None)
+    # O portão (27/10/2026): o que a `conferir_saida` diz e não é duro vira aviso.
+    conferida = checagens.separar_avisos(conferida, modo=modo, pessoa_do_modelo=acao == "pessoa")
     return checagens.aplicar(conferida, chk, acoes_pessoa=[], modo=modo)
 
 
 def _sai(final: ia.SaidaConferida) -> bool:
+    """A 1ª camada deixa o rascunho ir SEM dizer nada: nem segura (o duro) nem avisa o
+    verificador (o portão do dono, 27/10/2026: o que não é duro chega ao verificador como
+    AVISO — `_sai(...) is False` = a 1ª camada pega o caso, segurando ou avisando)."""
     return (
         final.status == RASCUNHO_PENDENTE
         and not final.precisa_humano
         and not getattr(final, "sem_auto", None)
+        and not getattr(final, "avisos", None)
+    )
+
+
+def _segura(final: ia.SaidaConferida) -> bool:
+    """O portão (27/10/2026): a 1ª camada SEGURA o rascunho sozinha (o bloqueio duro)."""
+    return (
+        final.status != RASCUNHO_PENDENTE
+        or bool(final.precisa_humano)
+        or bool(getattr(final, "sem_auto", None))
     )
 
 
@@ -188,14 +203,15 @@ async def test_a_afirmacao_antes_da_cortesia_e_conferida():
     )
     # Rodada 4: a contradição com o dado vai para pessoa nos dois modos, sem
     # bloquear (antes, bloqueava) — a afirmação antes da cortesia continua pega.
-    assert final.precisa_humano and not final.bloqueado and not _sai(final), final.motivos
+    # O portão (27/10/2026): a variação dita ao contrário é AVISO ao verificador.
+    assert final.avisos and not final.bloqueado and not _sai(final), final.motivos
     final = await _completo(
         "Ele tem NFC e é à prova d'água, posso ajudar em algo mais?",
         categoria="duvida_produto",
         cliente="tem nfc?",
         fichas=NFC_NAO,
     )
-    assert final.precisa_humano and any("NFC" in m for m in final.motivos), final.motivos
+    assert not _sai(final) and any("NFC" in m for m in [*final.motivos, *final.avisos])
     for texto in (
         "Sim, entregamos no RJ, posso ajudar em algo mais?",
         "Entregamos no Rio de Janeiro sim, tudo bem?",
@@ -206,7 +222,7 @@ async def test_a_afirmacao_antes_da_cortesia_e_conferida():
         )
         assert final.precisa_humano and not final.bloqueado and not _sai(final), texto
     final = await _completo("Pode usar na piscina sem problema, certo?", fichas=RELOGIO)
-    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in final.motivos
+    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in [*final.motivos, *final.avisos]
 
 
 @pytest.mark.parametrize(
@@ -565,7 +581,8 @@ async def test_sem_pedido_toda_afirmacao_vai_para_pessoa(texto):
         conversa={"pedido_marketplace": PEDIDO_MKT},
         valores={},
     )
-    assert "pedido não encontrado no sistema" in final.motivos and not _sai(final), texto
+    # O portão (27/10/2026): no automático do agente, o pedido não identificado é AVISO.
+    assert "pedido não encontrado no sistema" in final.avisos and not _sai(final), texto
 
 
 @pytest.mark.parametrize(
@@ -789,7 +806,7 @@ async def test_a_resposta_curta_a_pergunta_de_caracteristica(texto, assunto):
     final = await _completo(
         texto, categoria=assunto, cliente="esse celular tem NFC?", fichas=NFC_NAO
     )
-    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in final.motivos and not _sai(final)
+    assert ia.MOTIVO_FICHA_NO_AUTOMATICO in [*final.motivos, *final.avisos] and not _sai(final)
     # No copiloto, só o aviso.
     copiloto = await _completo(
         texto,
@@ -805,7 +822,7 @@ async def test_a_resposta_curta_a_pergunta_de_caracteristica(texto, assunto):
 async def test_a_caracteristica_no_caminho_completo_seja_qual_for_o_assunto(assunto):
     for texto in ("É resistente a quedas.", "Tem Google Play.", "Pode usar na piscina."):
         final = await _completo(texto, categoria=assunto, fichas=RELOGIO)
-        assert ia.MOTIVO_FICHA_NO_AUTOMATICO in final.motivos, (assunto, texto)
+        assert ia.MOTIVO_FICHA_NO_AUTOMATICO in [*final.motivos, *final.avisos], (assunto, texto)
 
 
 @pytest.mark.parametrize(

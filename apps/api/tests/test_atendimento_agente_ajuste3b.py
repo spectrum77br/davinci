@@ -284,7 +284,8 @@ async def test_a_regra_estrutural_so_no_automatico_e_so_nos_dois_assuntos():
     texto = "Olá! Seu pedido está na doca aguardando o caminhão."
     auto = await _completo(texto, categoria="prazo_envio", cliente="cadê?", pedido=AGUARDANDO)
     assert not _sai(auto)
-    assert checagens.MOTIVO_PEDIDO_SEM_LASTRO in auto.motivos
+    # O portão (27/10/2026): o andamento sem lastro é AVISO ao verificador.
+    assert checagens.MOTIVO_PEDIDO_SEM_LASTRO in auto.avisos
     copiloto = await _completo(
         texto, categoria="prazo_envio", cliente="cadê?", pedido=AGUARDANDO, modo=MODO_COPILOTO
     )

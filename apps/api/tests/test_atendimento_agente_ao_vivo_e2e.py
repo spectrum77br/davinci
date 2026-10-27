@@ -50,7 +50,9 @@ from tests.test_atendimento_agente_ao_vivo import (
     VAMOS_ABRIR,
 )
 from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
+    NAO_DO_VERIFICADOR,
     _do_agente,
+    _do_verificador,
     _final,
     _ligar,
     _usa,
@@ -332,6 +334,8 @@ async def test_7_o_manual_no_tiktok_vem_com_o_caminho_do_tiktok(
         _usa("consultar_manual", assunto="cancelamento", pergunta=None),
         _final(texto=NO_TIKTOK, assunto="rastreio", evidencias=["regra:cancelamento"]),
     ]
+    # O portão do dono (27/10/2026): o caminho do app errado é AVISO — o verificador decide.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
@@ -342,9 +346,9 @@ async def test_7_o_manual_no_tiktok_vem_com_o_caminho_do_tiktok(
     assert 'No TikTok Shop não existe \\"Minhas compras\\"' in json.dumps(
         api.pedidos[0]["system"], ensure_ascii=False
     )
-    # O "Minhas compras" no rascunho do TikTok não sai sozinho (regra suave).
+    # O "Minhas compras" no rascunho do TikTok: o aviso vai ao verificador (o portão).
     agente_ = _do_agente(r)
-    assert any("Minhas compras" in m for m in agente_["sem_auto"]), agente_["sem_auto"]
+    assert any("Minhas compras" in m for m in agente_["avisos"]), agente_["avisos"]
     assert envios == []
 
 

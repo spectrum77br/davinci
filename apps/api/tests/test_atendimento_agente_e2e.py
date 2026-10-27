@@ -285,6 +285,20 @@ def _do_verificador(*, entrada: int = 900, saida: int = 60, **kw: Any) -> dict:
     return _resposta([{"type": "text", "text": texto}], "end_turn", entrada=entrada, saida=saida)
 
 
+# O portão do dono (27/10/2026): o "não" do verificador ao rascunho que chegou COM aviso.
+NAO_DO_VERIFICADOR = {"ok_para_envio_automatico": False, "afirma_sem_lastro": ["o trecho avisado"]}
+
+
+def _aviso_no_verificador(api: Any, *trechos: str) -> str:
+    """A única requisição ao verificador traz a seção AVISOS DAS CHECAGENS (e os trechos)."""
+    (pedido,) = api.verificador
+    entrada = pedido["messages"][0]["content"]
+    assert verificador.CABECALHO_AVISOS in entrada
+    for t in trechos:
+        assert t in entrada, t
+    return entrada
+
+
 def _usa(nome: str, **entrada: Any) -> dict:
     """O modelo pede uma ferramenta."""
     bloco = {"type": "tool_use", "id": f"toolu_{uuid4().hex[:12]}", "name": nome, "input": entrada}
@@ -910,12 +924,15 @@ async def test_j_promessa_da_equipe_numa_orientacao_vai_para_pessoa(
             evidencias=["pedido"],
         )
     ]
+    # O portão do dono (27/10/2026): a promessa da equipe é AVISO — o verificador decide.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
     fatos = _do_agente(r)
     assert "promessa_de_equipe" in fatos["checagens"], fatos["checagens"]
     assert r.precisa_humano and envios == [] and _decisao(r) == "precisa_humano"
+    _aviso_no_verificador(api, "promete ação da equipe")
 
 
 # ─────────────── (k) sem a chave: o legado intacto ───────────────

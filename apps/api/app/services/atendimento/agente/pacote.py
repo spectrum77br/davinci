@@ -178,7 +178,14 @@ def _onde_do_par(par: Mapping[str, Any]) -> str:
         produto = "outro anúncio"
     else:
         produto = "sem anúncio"
-    vale = "vale para produto" if par.get("fonte_de_produto") else "não vale para produto"
+    if par.get("fonte_de_produto"):
+        vale = "vale para produto"
+    elif par.get("mesmo_anuncio"):
+        # O pedido do dono (27/10/2026): o mesmo anúncio com mais de um modelo vale para o
+        # modelo que a resposta nomeia ("o modelo p1 Pro tem nfc!").
+        vale = "vale para produto só no modelo nomeado na resposta"
+    else:
+        vale = "não vale para produto"
     return f"{loja}, {produto}, {vale}, {quando_do_par(par)}"
 
 

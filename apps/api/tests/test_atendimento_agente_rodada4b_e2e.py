@@ -1170,14 +1170,34 @@ BLOQUEADOS = {"4-X10", "20-X16"}
 PESSOA_NO_COPILOTO = {"18-X06", "17-X07", "c4-X12", "c4-X13"}
 
 
+# O portão do dono (27/10/2026): o que não é DURO chega ao verificador como AVISO — a
+# minimização do defeito, a promessa, a ficha no automático e o andamento sem lastro.
+AVISADOS = {
+    "21-X01", "21-X02", "21-X03", "21-X04", "21-X05", "21-X14", "21-X17", "12-X08", "8-X09",
+    "16-X11", "3-X15",
+}  # fmt: skip
+
+
 @pytest.mark.parametrize("caso", RUINS, ids=[c[0] for c in RUINS])
 async def test_o_controle_nao_sai_sozinho_mesmo_com_o_ok_do_verificador(
     db: AsyncSession, make_user, agente_ligado, api, envios, redis_mem, lojas, caso
 ):
-    r = await _gerar(db, make_user, redis_mem, lojas, api, MODO_AUTO, caso)
+    avisado = caso[0] in AVISADOS
+    # O avisado: o verificador recebe o aviso e diz "não" (o duro nem chega a ele).
+    nao = {"ok_para_envio_automatico": False, "afirma_sem_lastro": ["o trecho avisado"]}
+    r = await _gerar(
+        db, make_user, redis_mem, lojas, api, MODO_AUTO, caso, veredito=nao if avisado else None
+    )
     agente = _do_agente(r)
     assert not envios and r.precisa_humano, (caso[0], r.motivo)
     assert agente["sem_auto"], agente
+    if avisado:
+        (pedido,) = api.verificador
+        entrada = pedido["messages"][0]["content"]
+        assert verificador.CABECALHO_AVISOS in entrada, caso[0]
+        assert MOTIVOS_DOS_RUINS[caso[0]].split(" — ")[0] in entrada, caso[0]
+        assert "verificador:" in (r.motivo or "")
+        return
     assert MOTIVOS_DOS_RUINS[caso[0]] in (r.motivo or ""), r.motivo
     assert (r.status == RASCUNHO_BLOQUEADO) is (caso[0] in BLOQUEADOS), (caso[0], r.status)
 
@@ -1276,8 +1296,9 @@ async def test_o_verificador_recebe_os_assuntos_liberados(
     assert "ASSUNTOS LIBERADOS (para sair sozinho neste canal): " in entrada
     linha = next(x for x in entrada.splitlines() if x.startswith("ASSUNTOS LIBERADOS"))
     assert "rastreio" in linha and "nota_fiscal" not in linha
-    # Os de produto nunca entram na lista (sempre pessoa confere).
-    assert "espec_celular" not in linha
+    # O portão do dono (27/10/2026): o de produto do `auto_categorias` entra na lista (o
+    # "assunto de produto" virou aviso; antes, nunca entrava).
+    assert "espec_celular" in linha
     assert "ASSUNTO DECLARADO DO RASCUNHO: rastreio" in entrada
     assert "assunto não liberado" in pedido["system"][0]["text"]
 

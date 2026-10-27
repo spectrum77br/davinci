@@ -62,8 +62,11 @@ from app.services.atendimento.constantes import (
     RASCUNHO_PENDENTE,
 )
 from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
+    NAO_DO_VERIFICADOR,
+    _aviso_no_verificador,
     _decisao,
     _do_agente,
+    _do_verificador,
     _final,
     _ligar,
     _usa,
@@ -534,6 +537,8 @@ async def test_f_perguntado_se_e_robo_o_texto_que_foge_nao_sai_sozinho(
     await _msg(db, conversa, "é robô?", ha=timedelta(minutes=6))
     texto = "Olá! Sou do atendimento da loja. Em que posso ajudar?"
     api.roteiro = [_final(texto=texto, assunto="pede_atendente")]
+    # O portão do dono (27/10/2026): o aviso vai ao verificador — e o "não" dele segura.
+    api.vereditos = [_do_verificador(**NAO_DO_VERIFICADOR)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
@@ -541,6 +546,7 @@ async def test_f_perguntado_se_e_robo_o_texto_que_foge_nao_sai_sozinho(
     assert checagens.NAO_DISSE_QUE_E_VIRTUAL in agente["checagens"], agente["checagens"]
     assert r.status != RASCUNHO_BLOQUEADO and r.texto == texto, (r.status, r.motivo)
     assert envios == []
+    _aviso_no_verificador(api)
 
 
 # ─────────────── (g) o legado ───────────────

@@ -981,11 +981,14 @@ async def buscar(
     as_of: datetime,
     canal_no_automatico: bool,
     limite: int = MAX_PARES,
+    so_itens: Sequence[str] | None = None,
 ) -> list[dict]:
     """Os exemplos para `buscar_respostas_equipe`.
 
     Cada um: {"id", "pergunta", "resposta", "fonte", "mesma_loja",
     "mesmo_anuncio", "idade_dias"} (`id` só para o rastro, como `par:<id>`).
+    `so_itens` (pedido do dono, 27/10/2026) = só os pares desses anúncios (o da conversa
+    e os do mesmo produto): a busca que vem ANTES da geral.
     """
     qualquer = busca_texto.consulta_de(pergunta)
     if qualquer is None or limite <= 0:
@@ -1026,6 +1029,7 @@ async def buscar(
                 p.respondido_em >= as_of - timedelta(days=RETENCAO_DIAS),
                 p.tsv.op("@@")(qualquer),
                 escopo,
+                *((p.item_id.in_(list(so_itens)),) if so_itens else ()),
             )
             .order_by(
                 case((casa_todas, 0), else_=1),
@@ -1286,6 +1290,44 @@ async def _produtos_dos_anuncios(
     return {k: frozenset(v) for k, v in saida.items()}
 
 
+MAX_ANUNCIOS_DO_PRODUTO = 30
+
+
+async def _anuncios_do_mesmo_produto(
+    session: AsyncSession,
+    plataforma: Any,
+    integration_id: UUID | None,
+    itens: Sequence[str],
+) -> list[str]:
+    """Os anúncios da conversa e os outros anúncios (da mesma plataforma, vínculo vivo) de
+    um produto deles — a busca dos pares que vem antes da geral (pedido do dono, 27/10/2026).
+    Sem vínculo, só os da conversa. Só lê."""
+    from app.models import ProductLink
+
+    itens = [i for i in itens if i]
+    if not itens or plataforma is None:
+        return list(itens)
+    produtos = await _produtos_dos_anuncios(
+        session, plataforma, [(integration_id, i) for i in itens]
+    )
+    ids = sorted({pid for conj in produtos.values() for pid in conj}, key=str)
+    if not ids:
+        return list(itens)
+    outros = (
+        await session.scalars(
+            select(ProductLink.external_id)
+            .where(
+                ProductLink.platform == plataforma,
+                ProductLink.product_id.in_(ids),
+                ProductLink.morto_desde.is_(None),
+            )
+            .order_by(ProductLink.external_id)
+            .limit(MAX_ANUNCIOS_DO_PRODUTO)
+        )
+    ).all()
+    return list(dict.fromkeys([*itens, *(str(x) for x in outros if x)]))
+
+
 async def _um_modelo_so(session: AsyncSession, produtos: frozenset[UUID] | None) -> bool:
     """Os produtos do anúncio são de UM modelo só, sem kit "+ acessório"
     (`especificacoes.modelos_do_cadastro`)? Sem vínculo, não (na dúvida, não é fonte)."""
@@ -1402,17 +1444,31 @@ async def exemplos_do_turno(
 
     consulta = " ".join(str(pergunta or "").split())[:MAX_CHARS_BUSCA_PACOTE]
     itens = [i for i in dict.fromkeys(str(x or "").strip() for x in item_ids) if i]
-    achados = await buscar(
-        session,
-        pergunta=consulta,
-        plataforma=plataforma,
-        integration_id=integration_id,
-        item_id=itens[0] if itens else None,
-        conversa_id=conversa_id,
-        as_of=as_of,
-        canal_no_automatico=canal_no_automatico,
-        limite=CANDIDATOS_PACOTE,
+    comum = {
+        "pergunta": consulta,
+        "plataforma": plataforma,
+        "integration_id": integration_id,
+        "item_id": itens[0] if itens else None,
+        "conversa_id": conversa_id,
+        "as_of": as_of,
+        "canal_no_automatico": canal_no_automatico,
+        "limite": CANDIDATOS_PACOTE,
+    }
+    # Pedido do dono (27/10/2026: "o agente tem dados suficientes pra responder por ele mesmo
+    # e, se não conseguir, ainda tem conversas parecidas pra ver" — "esse P1 Pro tem NFC?" com
+    # a equipe dizendo "o modelo p1 Pro tem nfc!"): PRIMEIRO os pares do MESMO anúncio e dos
+    # anúncios do mesmo produto (vínculo vivo), depois a busca geral da plataforma.
+    mesmos = await _anuncios_do_mesmo_produto(
+        session, ficha_svc.plataforma_do_catalogo(plataforma), integration_id, itens
     )
+    primeiros = await buscar(session, **comum, so_itens=mesmos) if mesmos else []
+    gerais = await buscar(session, **comum)
+    vistos: set[Any] = set()
+    achados = []
+    for a in [*primeiros, *gerais]:
+        if a["id"] not in vistos:
+            vistos.add(a["id"])
+            achados.append(a)
     # Revisão do item 32: a pergunta do outro cliente com a máscara de um dado também sai.
     achados = [
         a
