@@ -112,8 +112,8 @@ _MIGRATION_FALTA = _VERSOES / "0396_ultima_loja_qualquer.py"
 _MIGRATION_VISTO = _VERSOES / "0399_atendimento_visto_em.py"
 _MIGRATION_NOTIFICACOES = _VERSOES / "0416_atendimento_notificacoes_nativas.py"
 _MIGRATION_AGENTE = _VERSOES / "0420_atendimento_agente.py"
-_MIGRATION_ZAP = _VERSOES / "0430_atendimento_zap.py"
-_MIGRATION_ZAP_SAUDE = _VERSOES / "0431_atendimento_zap_saude.py"
+_MIGRATION_ZAP = _VERSOES / "0432_atendimento_zap.py"
+_MIGRATION_ZAP_SAUDE = _VERSOES / "0433_atendimento_zap_saude.py"
 # A regra de palavras das pastas de e-mail (0387, a camada do atendimento sobre
 # a Central de e-mail) é conferida em `test_mail_atendimento_migration.py`,
 # junto das tabelas `mail_*` da mesma migration. As tabelas novas da 0420 (o
@@ -254,15 +254,15 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     assert agente.revision == "0420_atendimento_agente"
     assert agente.down_revision == "0419_londres_logistica_editar"
     zap = _carregar_migration(_MIGRATION_ZAP)
-    assert zap.revision == "0430_atendimento_zap"
+    assert zap.revision == "0432_atendimento_zap"
     # Nasceu 0415 no desenho (17/10), virou 0417 em 19/10 e 0430 em 26/10:
     # o origin chegou primeiro com as 0415–0429.
-    assert zap.down_revision == "0429_compra_contabilidade"
+    assert zap.down_revision == "0431_mail_bridge_sync"
     # Onda 4 (27/10/2026): em cima da 0430 do Zap (o origin/main tem outra
     # 0430 — na publicação as duas do Zap podem ser renumeradas).
     zap_saude = _carregar_migration(_MIGRATION_ZAP_SAUDE)
-    assert zap_saude.revision == "0431_atendimento_zap_saude"
-    assert zap_saude.down_revision == "0430_atendimento_zap"
+    assert zap_saude.revision == "0433_atendimento_zap_saude"
+    assert zap_saude.down_revision == "0432_atendimento_zap"
     assert zap_saude.NUMERO_CASOS == zap_model.ZAP_NUMERO_CASOS
     # Os valores dos CHECKs da migration são cópia dos do model.
     for na_migration, no_model in (

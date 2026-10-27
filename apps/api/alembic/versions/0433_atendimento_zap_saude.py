@@ -27,8 +27,8 @@ Nasceu em cima da 0430 do Zap. O origin/main já tem OUTRA 0430
 (`0430_integration_carrefour`): na publicação as duas do Zap podem precisar
 ser renumeradas (a 0430 do Zap passa a vir depois da do main, e esta junto).
 
-Revision ID: 0431_atendimento_zap_saude
-Revises: 0430_atendimento_zap
+Revision ID: 0433_atendimento_zap_saude
+Revises: 0432_atendimento_zap
 """
 
 from collections.abc import Sequence
@@ -38,8 +38,8 @@ from sqlalchemy.dialects import postgresql as pg
 
 from alembic import op
 
-revision: str = "0431_atendimento_zap_saude"
-down_revision: str | None = "0430_atendimento_zap"
+revision: str = "0433_atendimento_zap_saude"
+down_revision: str | None = "0432_atendimento_zap"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

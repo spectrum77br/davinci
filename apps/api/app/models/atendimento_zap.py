@@ -42,7 +42,7 @@ saem como `{_arquivo: true}`, e pausar um número, trocar a etapa ou o token é
 exatamente o que o Histórico serve para mostrar.
 
 Os valores das colunas de estado estão nos CHECKs abaixo (e no §4.2 do
-desenho); a migration é a `0430_atendimento_zap`. A `0431_atendimento_zap_saude`
+desenho); a migration é a `0432_atendimento_zap`. A `0433_atendimento_zap_saude`
 (Onda 4, 27/10/2026) acrescenta a saúde da WABA (`contas.saude`), o CASO da
 migração do número (`numeros.caso_migracao`, a trava do "registrar") e os
 índices da limpeza e da fila da mídia.

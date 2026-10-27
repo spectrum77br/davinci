@@ -46,8 +46,8 @@ O downgrade apaga as seis tabelas (o que o Zap leu se perde; os canais
 Nasceu como 0415 no desenho (17/10), virou 0417 em 19/10 e 0430 em 26/10: o
 origin/main chegou primeiro com as 0415–0429 — esta é a 0430, em cima da 0429.
 
-Revision ID: 0430_atendimento_zap
-Revises: 0429_compra_contabilidade
+Revision ID: 0432_atendimento_zap
+Revises: 0431_mail_bridge_sync
 """
 
 from collections.abc import Sequence
@@ -57,8 +57,8 @@ from sqlalchemy.dialects import postgresql as pg
 
 from alembic import op
 
-revision: str = "0430_atendimento_zap"
-down_revision: str | None = "0429_compra_contabilidade"
+revision: str = "0432_atendimento_zap"
+down_revision: str | None = "0431_mail_bridge_sync"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
