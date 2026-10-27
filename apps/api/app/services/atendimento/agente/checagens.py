@@ -10611,6 +10611,11 @@ def pendencia_dura(p: PendenciaAgente) -> bool:
     if p.codigo == ESTADO_CONTRADIZ:
         # (c) a aprovação ou conclusão que só a equipe dá; o resto do estado é aviso.
         return p.motivo.startswith("afirma aprovação")
+    if p.codigo == REGIAO_SEM_FONTE:
+        # (h) a entrega afirmada no estado que o cliente citou sem dado nenhum de restrição
+        # (o liberacoes-l3-outro-produto-ruim da calibração v14: o "todo o Brasil" do Redmi
+        # que a conversa não tem — escapava das duas camadas; nunca apareceu no eval real).
+        return p.motivo.startswith("afirma a entrega no estado que o cliente citou sem dado")
     if p.codigo == ESTADO_SEM_DADO:
         # (c) o reembolso/estorno e a aprovação da plataforma sem o dado; o resto é aviso.
         return p.motivo.startswith(("afirma o reembolso", "diz o que a plataforma aprovou"))

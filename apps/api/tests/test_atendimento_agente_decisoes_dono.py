@@ -1194,7 +1194,7 @@ def test_v12_a_entrada_so_traz_a_acao_da_pessoa_no_responde_e_marca():
         consultas=[],
     )
     assert v.CABECALHO_POS_ENVIO in com and "central do vendedor" in com
-    assert v.VERSAO == "v14" and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO == "v15" and v.MODELO == "claude-haiku-5-5"
     assert (
         "AÇÃO QUE CONTINUA COM A PESSOA" in v.SISTEMA and "não vale para essa variação" in v.SISTEMA
     )

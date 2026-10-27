@@ -622,8 +622,8 @@ def test_22_e_24_a_nota_da_shopee_so_no_bloco_da_shopee(plataforma):
 def test_v8_a_versao():
     # Item 32 (22/10/2026): o v9 (as respostas da equipe citadas) guarda o v8 inteiro; o v10
     # (rodada "redondo", 23/10/2026: a busca no catálogo da loja) guarda o v9 inteiro.
-    assert v.VERSAO == "v14"  # o portão do dono (27/10/2026)
-    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v14"
+    assert v.VERSAO == "v15"  # as frases-padrão (27/10/2026)
+    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v15"
 
 
 def test_22_o_sistema_diz_que_o_ao_receber_a_quem_nao_recebeu_e_errado():
@@ -1495,7 +1495,7 @@ def test_rev6_a_calibracao_conta_a_entrada_nova_do_v8_a_parte():
         "boa-catalogo-cesto",
         "viz-catalogo-cesto-disponivel",
         # O portão (27/10/2026): as linhas de estoque do grupo `portao`.
-        *(c for c in casos if c.startswith("portao-")),
+        *(c for c in casos if c.startswith(("portao-", "fp-"))),
     }
     for id_, c in casos.items():
         if id_ not in politica and id_ not in novos:

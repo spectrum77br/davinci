@@ -848,7 +848,7 @@ def test_7_entregue_pelo_relato_do_cliente_so_sem_o_pedido():
 
 
 def test_8_o_sistema_v13_diz_o_lastro_que_ja_esta_na_entrada():
-    assert v.VERSAO == "v14" and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO == "v15" and v.MODELO == "claude-haiku-5-5"
     s = " ".join(v.SISTEMA.split())
     for trecho in (
         "a linha que termina em «os demais estados recebem» sustenta «enviamos para <estado que não está na linha>, sim»",
