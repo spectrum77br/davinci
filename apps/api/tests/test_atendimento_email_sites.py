@@ -866,3 +866,104 @@ async def test_caixa_privada_deixa_passar_os_enderecos_dos_4_sites(db, cena, cli
         assert sites[site]["grupos"][caixa]["emails"] == 1, (site, caixa)
         r = await _lista(client, site, caixa)
         assert [i["id"] for i in r.json()["itens"]] == [str(mid)], (site, caixa)
+
+
+# ─────────────── a caixa privada: a PASTA do site passa (27/10/2026, 15:15) ───────────────
+#
+# Produção: as pastas "*7buyers", "*charlots" e "*uranyx" da "Principal — Tuta"
+# (privada, só aliases de loja) ficavam "privado" — o e-mail que a regra do Tuta
+# põe na pasta do site (o De de um fornecedor, gabrieli@, o encaminhado da
+# empresa) não é para sac@/admin@. O Eduardo: "o que não for do SAC cai em
+# Admin". A pasta do site passa no filtro, mas SÓ PARA MOSTRAR: nunca conversa
+# (nem com a pasta em "Site (como hoje)"); fora das pastas dos sites, privado.
+
+
+async def _caixa_privada_dos_sites(db, cena):
+    goslin = await db.get(MailMailbox, cena.goslin.id)
+    goslin.config_enc = encrypt_json(
+        {"address": GOSLIN, "aliases": [GOSLIN, *ALIASES_GOSLIN, *SITES_8]}
+    )
+    db.add(Marca(nome="Charlots Park", slug="charlots-park", dominio_br="charlots.com.br"))
+    db.add(Marca(nome="7buyers", slug="7buyers", dominio_br="7buyers.com.br"))
+    await db.commit()
+    rotear.esquecer(db)
+    # A Charlots depois do comando do dono ("Site (como hoje)"); a *7buyers nem existe.
+    await categorizar(db, cena.goslin, "*charlots", "site")
+
+
+async def test_a_pasta_do_site_passa_na_caixa_privada_so_para_mostrar(
+    db, cena, client, admin
+):
+    from app.models.mail_atendimento import MailFolder
+
+    await _caixa_privada_dos_sites(db, cena)
+    conversas_antes = len((await db.execute(select(AtendimentoConversa.id))).all())
+    ids = {}
+    ids["gabrieli"] = await entrar(
+        db, cena.goslin, pasta="*7buyers", de="fornecedor@empresa.com.br",
+        para=["gabrieli@7buyers.com.br"], assunto="Danfe 123 — 7Buyers Club",
+        corpo="Segue a nota fiscal.",
+    )
+    ids["bertec"] = await entrar(
+        db, cena.goslin, pasta="*charlots", de="financeiro1@bertecempreendimentos.com.br",
+        para=[GOSLIN], assunto="Orçamento e proposta", corpo="Segue o orçamento.",
+    )
+    ids["codigo"] = await entrar(
+        db, cena.goslin, pasta="*7buyers", de="no-reply@accounts.google.com",
+        para=["gabrieli@7buyers.com.br"], assunto="Seu código de verificação",
+        corpo="Use o código 482913 para entrar na sua conta.",
+    )
+    # O mesmo tipo de e-mail fora das pastas dos sites: privado como sempre.
+    ids["entrada"] = await entrar(
+        db, cena.goslin, pasta="INBOX", de="financeiro1@bertecempreendimentos.com.br",
+        para=[GOSLIN], assunto="Orçamento", corpo="Segue.",
+    )
+    ids["contabilidade"] = await entrar(
+        db, cena.goslin, pasta="contabilidade", de="financeiro1@bertecempreendimentos.com.br",
+        para=[GOSLIN], assunto="Orçamento", corpo="Segue.",
+    )
+    await rodar(db)
+
+    for chave in ("gabrieli", "bertec", "codigo"):
+        m = await meta_de(db, ids[chave])
+        assert (m.estado, m.motivo, m.conversa_id, m.alias_recebido) == (
+            "ignorado", "so_pela_pasta_do_site", None, None,
+        ), chave
+        assert m.folder_id is not None, chave
+    pasta_7b = await db.get(MailFolder, (await meta_de(db, ids["gabrieli"])).folder_id)
+    assert pasta_7b.nome == "*7buyers"
+    for chave in ("entrada", "contabilidade"):
+        m = await meta_de(db, ids[chave])
+        assert (m.estado, m.motivo, m.folder_id) == ("privado", "nao_e_alias_de_loja", None), chave
+    # Nenhuma conversa (nem na *charlots com a categoria "site").
+    assert len((await db.execute(select(AtendimentoConversa.id))).all()) == conversas_antes
+
+    sites = await _sites(client)
+    assert sites["7buyers"]["grupos"]["admin"]["emails"] == 1, "o código fica fora do número"
+    assert sites["7buyers"]["grupos"]["sac"]["emails"] == 0
+    assert sites["charlots"]["grupos"]["admin"]["emails"] == 1
+    r = await _lista(client, "7buyers", "admin")
+    assert [i["id"] for i in r.json()["itens"]] == [str(ids["gabrieli"])]
+    r = await _lista(client, "charlots", "admin")
+    assert [i["id"] for i in r.json()["itens"]] == [str(ids["bertec"])]
+    # O código: fora da lista, do e-mail inteiro e de toda caixa.
+    assert (await client.get(f"{EMAIL}/lojas/emails/{ids['codigo']}")).status_code == 404
+    r = await client.get(f"{EMAIL}/lojas/emails/{ids['gabrieli']}")
+    assert r.status_code == 200 and r.json()["loja"] == "7buyers"
+
+
+async def test_sac_do_site_na_pasta_cai_no_sac_e_o_resto_no_admin(db, cena, client, admin):
+    await _caixa_privada_dos_sites(db, cena)
+    sac = await entrar(
+        db, cena.goslin, pasta="*7buyers", de="cliente@gmail.com",
+        para=["sac@7buyers.com.br"], assunto="Troca", corpo="Quero trocar.",
+    )
+    outro = await entrar(
+        db, cena.goslin, pasta="*7buyers", de="cliente@gmail.com",
+        para=[GOSLIN], assunto="Pergunta", corpo="Olá.",
+    )
+    await rodar(db)
+    r = await _lista(client, "7buyers", "sac")
+    assert [i["id"] for i in r.json()["itens"]] == [str(sac)]
+    r = await _lista(client, "7buyers", "admin")
+    assert [i["id"] for i in r.json()["itens"]] == [str(outro)]

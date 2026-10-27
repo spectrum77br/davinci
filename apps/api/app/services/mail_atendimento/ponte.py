@@ -109,8 +109,8 @@ from app.services.atendimento.constantes import (
     MSG_REVISAR,
     ORIGEM_EXTERNO,
 )
-from app.services.mail_atendimento import caixa as config_caixa
 from app.services.mail_atendimento import (
+    barra_lojas,
     classificacao,
     codigos,
     enderecos,
@@ -121,6 +121,7 @@ from app.services.mail_atendimento import (
     suspeito,
     texto,
 )
+from app.services.mail_atendimento import caixa as config_caixa
 from app.services.mail_atendimento.constantes import (
     ALERTA_LOJA_SEM_INTEGRACAO,
     ALERTA_OUTRO_REMETENTE,
@@ -168,6 +169,7 @@ from app.services.mail_atendimento.constantes import (
     IGNORADO_PASTA_NAO_LER,
     IGNORADO_PASTA_SEM_CATEGORIA,
     IGNORADO_PASTA_SO_CONTAR,
+    IGNORADO_SO_PELA_PASTA_DO_SITE,
     IGNORADOS_RELIDOS,
     JOBS_VIVOS,
     LOCAIS_INTERNOS,
@@ -1714,8 +1716,10 @@ async def processar(
     cad = await rotear.cadastro(session)
     enviado = message.direction == "sent"
 
-    # 1. O filtro da caixa (a privada só leva o e-mail das LOJAS).
+    # 1. O filtro da caixa (a privada só leva o e-mail das LOJAS — e o dos sites).
     alias_filtro: str | None = None
+    so_pela_pasta = False
+    lida = pastas.do_conteudo(email.conteudo)
     if cfg.ponte_so_aliases_de_loja:
         alias_filtro = alias_de_loja(
             email,
@@ -1725,16 +1729,30 @@ async def processar(
             enviado=enviado,
         )
         if alias_filtro is None:
-            return _so_estado(meta, ESTADO_PRIVADO, PRIVADO_NAO_E_DE_LOJA, agora)
+            # A pasta de um dos 4 sites (27/10/2026): tudo o que as regras do Tuta
+            # põem nela chega à caixa do site — mas SÓ para mostrar (abaixo).
+            if not barra_lojas.e_pasta_de_site(lida):
+                return _so_estado(meta, ESTADO_PRIVADO, PRIVADO_NAO_E_DE_LOJA, agora)
+            so_pela_pasta = True
+            nossos_da_pasta = (
+                [email.de]
+                if enviado and email.de in aliases
+                else rotear.nossos_do_email(recebeu=email.recebeu, aliases=aliases)
+            )
+            alias_filtro = nossos_da_pasta[0] if nossos_da_pasta else None
 
     # 2. A pasta.
-    pasta, classe = await pastas.garantir(
-        session, message.mailbox_id, pastas.do_conteudo(email.conteudo), agora=agora
-    )
+    pasta, classe = await pastas.garantir(session, message.mailbox_id, lida, agora=agora)
     meta.folder_id = pasta.id
     if pastas.so_contar(pasta):
         motivo = IGNORADO_PASTA_NAO_LER if pasta.ignorar else IGNORADO_PASTA_SO_CONTAR
         return _so_estado(meta, ESTADO_IGNORADO, motivo, agora)
+    if so_pela_pasta:
+        # Passou só pela pasta do site (nem loja, nem sac@/admin@ do site): a caixa
+        # do site MOSTRA (SAC se chegou no sac@, senão Admin; o código fica fora
+        # pela régua estrita na hora) — nunca conversa nem chamado, nem com a pasta
+        # na categoria "Site (como hoje)". Nada em claro (o alias sai do e-mail).
+        return _so_estado(meta, ESTADO_IGNORADO, IGNORADO_SO_PELA_PASTA_DO_SITE, agora)
     # 2b. A CATEGORIA da pasta criada (21/10/2026, decisões do dono): só uma
     # pessoa escolhe. Venda, informativo e chamado decidem pela pasta (regras
     # versão 2). Sem categoria, o e-mail fica guardado sem ligar (nada em

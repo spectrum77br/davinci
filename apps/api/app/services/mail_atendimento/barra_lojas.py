@@ -87,6 +87,7 @@ from app.services.mail_atendimento.constantes import (
     IGNORADO_CHAMADO_SEM_PEDIDO,
     IGNORADO_PASTA_SEM_CATEGORIA,
     IGNORADO_PASTA_SO_CONTAR,
+    IGNORADO_SO_PELA_PASTA_DO_SITE,
     KIND_LIXEIRA,
     KIND_RASCUNHOS,
     KIND_SPAM,
@@ -370,6 +371,9 @@ async def alias_das_lojas(
 # pasta, não a categoria dela; nenhuma conversa nova: a ponte não muda).
 
 ESTADOS_NO_SITE = tuple(e for e in ESTADOS_NA_CAIXA if e != ESTADO_SEGURANCA)
+# O guardado que a caixa do site mostra: o das lojas e o que passou na caixa
+# privada só pela pasta do site (`IGNORADO_SO_PELA_PASTA_DO_SITE`).
+IGNORADOS_NO_SITE = (*IGNORADOS_NA_CAIXA, IGNORADO_SO_PELA_PASTA_DO_SITE)
 # O e-mail que a ponte guardou SEM passar pela régua de segurança: a pasta
 # criada sem categoria guarda o e-mail (`ignorado`/`pasta_sem_categoria`) antes
 # do passo da segurança, e o duplicado também não passa por ele. Na pasta do
@@ -432,6 +436,14 @@ def escondido_no_site(estado: str | None, assunto: str | None, texto: str | None
     if estado not in ESTADOS_SEM_A_REGUA:
         return False
     return codigos.e_de_seguranca(assunto, texto)
+
+
+def e_pasta_de_site(lida) -> bool:
+    """A pasta do e-mail (`pastas.do_conteudo`) é a de um dos sites da barra? PURA.
+    A mesma régua de `site_da_pasta` (o nome inteiro, sem acento e sem maiúsculas)."""
+    if lida is None:
+        return False
+    return site_da_pasta(lida.nome, lida.caminho, lida.chave) is not None
 
 
 def caixa_do_alias(alias: str | None) -> str:
@@ -526,7 +538,7 @@ def email_do_site_sql(
         m.folder_id.in_(ids),
         or_(
             m.estado.in_(ESTADOS_NO_SITE),
-            and_(m.estado == ESTADO_IGNORADO, m.motivo.in_(IGNORADOS_NA_CAIXA)),
+            and_(m.estado == ESTADO_IGNORADO, m.motivo.in_(IGNORADOS_NO_SITE)),
             and_(m.estado == ESTADO_DUPLICADO, not_(original_no_site)),
         ),
     ]

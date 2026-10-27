@@ -176,6 +176,15 @@ IGNORADO_CHAMADO_SEM_PEDIDO = "chamado_sem_pedido"
 # O pedido (ou o caso) existe, mas não há chamado dele na Pós-venda — e a
 # Pós-venda nunca cria chamado (regra do dono, 21/10: "só acrescentar").
 IGNORADO_CHAMADO_SEM_CHAMADO = "chamado_sem_chamado"
+# O e-mail que passou no filtro da caixa PRIVADA só pela PASTA do site
+# (27/10/2026, o Eduardo: "o que não for do SAC cai em Admin" — tudo o que as
+# regras do Tuta põem em "*uranyx", "*charlots", "*makisa", "*7buyers" chega
+# às caixas da barra). Para um endereço que não é de loja nem sac@/admin@ do
+# site (gabrieli@, o principal, o encaminhado da empresa, o De de um
+# fornecedor): SÓ MOSTRAR na caixa Admin/SAC do site — nunca conversa nem
+# chamado, em qualquer categoria da pasta; nada em claro (o alias sai do
+# e-mail decifrado na hora, como a pasta sem categoria).
+IGNORADO_SO_PELA_PASTA_DO_SITE = "so_pela_pasta_do_site"
 # Os `ignorado` que NUNCA chegaram a conversa nem a chamado: a ponte pode reler
 # (apagar a meta e a volta seguinte processa) sem duplicar nada.
 IGNORADOS_RELIDOS = (

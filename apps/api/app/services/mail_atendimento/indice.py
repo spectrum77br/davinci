@@ -81,8 +81,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models.mail import MailMailbox, MailMessage
 from app.models.mail_atendimento import MailCaixaIndice, MailFolder, MailMessageMeta
-from app.services.mail_atendimento import caixa as config_caixa
 from app.services.mail_atendimento import (
+    barra_lojas,
     codigos,
     pastas,
     pedido,
@@ -91,6 +91,7 @@ from app.services.mail_atendimento import (
     rotear,
     texto,
 )
+from app.services.mail_atendimento import caixa as config_caixa
 from app.services.mail_atendimento.constantes import (
     ESTADO_DUPLICADO,
     ESTADO_GRAVADO,
@@ -127,7 +128,7 @@ logger = structlog.get_logger()
 
 # A versão do cálculo (pasta, segurança, loja provável). Mudar o cálculo =
 # subir este número: o job refaz tudo, aos poucos.
-INDICE_VERSAO = 2  # 27/10/2026: o filtro da caixa privada deixa passar os 4 sites
+INDICE_VERSAO = 3  # 27/10/2026: a caixa privada deixa passar os 4 sites (e as pastas deles)
 # E-mails decifrados por lote (um commit por lote no job; ~0,7 s de CPU).
 LOTE = 200
 # A rota indexa na hora no máximo isto (~0,3 s de CPU; o mais novo primeiro);
@@ -478,8 +479,11 @@ def provavel(
     mostrar. Nunca grava nada. `legivel`: o `texto_para_regras` já calculado.
     """
     cad = base.cad
-    if base.so_aliases_de_loja and (
-        ponte.alias_de_loja(
+    # A pasta de um dos 4 sites passa no filtro da caixa privada (como na ponte).
+    if (
+        base.so_aliases_de_loja
+        and not barra_lojas.e_pasta_de_site(pastas.do_conteudo(email.conteudo))
+        and ponte.alias_de_loja(
             email,
             principal=base.principal,
             aliases=base.aliases,
