@@ -701,6 +701,12 @@ def test_admin_so_e_caixa_de_site_nas_marcas_do_atendimento():
         assert rotear.passa_no_filtro_privado(endereco, cad), endereco
     assert not rotear.passa_no_filtro_privado("admin@poofy.com.br", cad)
     assert not rotear.passa_no_filtro_privado("gabrieli@7buyers.com.br", cad)
+    # Só os 8 endereços dos sites (e os logins de loja): a caixa de site das outras
+    # marcas e os antigos duvidas@/atacado@ continuam privados.
+    cad.marcas["lukako"] = (None, "Lukako", ("lukako.com.br",))
+    for endereco in ("suporte@lukako.com.br", "duvidas@uranyx.com.br", "atacado@uranyx.com.br",
+                     "sac@mail.uranyx.com.br", "admin@uranyx.com"):
+        assert not rotear.passa_no_filtro_privado(endereco, cad), endereco
     # O admin@ da Uranyx que caiu na pasta "*7buyers": a marca do domínio, nunca a da pasta.
     rota = rotear._rota_do_site(
         "admin@uranyx.com.br", cad, marca_pasta="7buyers", caixa_pasta=None

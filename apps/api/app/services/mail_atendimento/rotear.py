@@ -444,13 +444,13 @@ def e_endereco_dos_sites(endereco: str | None) -> bool:
 
 def passa_no_filtro_privado(endereco: str | None, cad: Cadastro) -> bool:
     """O endereço passa no filtro da caixa PRIVADA (`ponte_so_aliases_de_loja`)?
-    O login de loja, a caixa de site (RF6) e os sac@/admin@ dos 4 sites (27/10/2026:
-    sem isso o e-mail do site virava "privado" e as caixas da barra ficavam vazias)."""
+    SÓ o login de loja e os sac@/admin@ dos 4 sites (27/10/2026: sem isso o e-mail
+    do site virava "privado" e as caixas da barra ficavam vazias). A caixa de site
+    (RF6) das OUTRAS marcas e os antigos duvidas@/atacado@ continuam privados — a
+    regra do Eduardo é "só sac@ e admin@ de cada site"."""
     if not endereco:
         return False
-    return (
-        cad.e_de_loja(endereco) or e_caixa_de_site(endereco, cad) or e_endereco_dos_sites(endereco)
-    )
+    return cad.e_de_loja(endereco) or e_endereco_dos_sites(endereco)
 
 
 def cliente_pelo_reply_to(

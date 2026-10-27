@@ -127,7 +127,7 @@ logger = structlog.get_logger()
 
 # A versão do cálculo (pasta, segurança, loja provável). Mudar o cálculo =
 # subir este número: o job refaz tudo, aos poucos.
-INDICE_VERSAO = 1
+INDICE_VERSAO = 2  # 27/10/2026: o filtro da caixa privada deixa passar os 4 sites
 # E-mails decifrados por lote (um commit por lote no job; ~0,7 s de CPU).
 LOTE = 200
 # A rota indexa na hora no máximo isto (~0,3 s de CPU; o mais novo primeiro);
