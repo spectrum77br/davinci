@@ -9,7 +9,7 @@ Testa o SQL exato do bloco "Local stamp" (linhas ~258-268).
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import func, update
@@ -581,8 +581,6 @@ async def test_ml_sla_pulado_quando_ja_tem_prazo_no_banco():
 
 @pytest.mark.asyncio
 async def test_ml_sla_falha_nao_derruba_sweep():
-    from datetime import datetime
-
     from app.services import marketplace_shipment_check as m
 
     m._ml_pack_real_order.clear()
@@ -654,6 +652,128 @@ async def test_amazon_enviado_tambem_carimba_prazo():
     )
     assert res == (999, date(2026, 8, 6))
     assert deadlines == {999: datetime(2026, 8, 7, 2, 59, 59, tzinfo=UTC)}
+
+
+# ---- Amazon DBA: entregar até 14:00 (Vinicius, 27/10/2026) ----
+# "tudo que eu vender até 11 horas eu preciso postar até 14:00" — o
+# LatestShipDate continua 23:59, o horário real é o fim da janela da
+# etiqueta (Easy Ship) ou, sem ela, 14:00 do dia do envio.
+
+_LATEST_2359 = "2026-10-28T02:59:59Z"  # 27/10 23:59 BRT
+_CORTE_14H = datetime(2026, 10, 27, 17, 0, tzinfo=UTC)  # 27/10 14:00 BRT
+
+
+class _FakeAmazonDBA(_FakeAmazonClient):
+    def __init__(self, payload, *, janela=None, negado=False, seller="S1"):
+        super().__init__(payload)
+        self.janela = janela
+        self.negado = negado
+        self.seller_id = seller
+        self.marketplace_id = "A2Q3Y263D00KWC"
+        self.easyship_negado = False
+        self.easyship_calls = 0
+
+    async def get_easyship_janela_fim(self, order_id):
+        self.easyship_calls += 1
+        if self.negado:
+            self.easyship_negado = True
+            return None
+        return self.janela
+
+
+def _dba(easyship, compra="2026-10-27T11:30:00Z"):  # 08:30 BRT
+    return {
+        "order_status": "Unshipped",
+        "easyship_status": easyship,
+        "last_update_date": "2026-10-27T11:30:00Z",
+        "latest_ship_date": _LATEST_2359,
+        "purchase_date": compra,
+    }
+
+
+@pytest.fixture
+def _easyship_limpo():
+    from app.services import marketplace_shipment_check as m
+
+    m._easyship_janela.clear()
+    m._easyship_negado_ate.clear()
+    yield
+    m._easyship_janela.clear()
+    m._easyship_negado_ate.clear()
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_usa_fim_da_janela_da_etiqueta(_easyship_limpo):
+    """Pedido 306103 (702-9099596-5829863): Seller Central "Entrega: até
+    14:00 BRT", DaVinci mostrava "envio 27/10 23:59"."""
+    from app.services import marketplace_shipment_check as m
+
+    cli = _FakeAmazonDBA(_dba("PendingPickUp"), janela="2026-10-27T16:30:00Z")
+    deadlines: dict[int, datetime] = {}
+    assert await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines) is None
+    assert deadlines == {999: datetime(2026, 10, 27, 16, 30, tzinfo=UTC)}
+    # A janela fica guardada: o tick seguinte não pergunta de novo.
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+    assert cli.easyship_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_sem_permissao_vale_14h_e_para_de_perguntar(_easyship_limpo):
+    from app.services import marketplace_shipment_check as m
+
+    cli = _FakeAmazonDBA(_dba("PendingDropOff"), negado=True)
+    deadlines: dict[int, datetime] = {}
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1", 1), deadlines)
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-2", 2), deadlines)
+    assert deadlines == {1: _CORTE_14H, 2: _CORTE_14H}
+    assert cli.easyship_calls == 1  # 403 na loja: o 2º pedido nem pergunta
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_sem_etiqueta_vale_14h(_easyship_limpo):
+    """Sem etiqueta comprada não há janela: nem pergunta à Easy Ship."""
+    from app.services import marketplace_shipment_check as m
+
+    cli = _FakeAmazonDBA(_dba("PendingSchedule"))
+    deadlines: dict[int, datetime] = {}
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+    assert deadlines == {999: _CORTE_14H}
+    assert cli.easyship_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_venda_de_ontem_tambem_vale_14h(_easyship_limpo):
+    from app.services import marketplace_shipment_check as m
+
+    cli = _FakeAmazonDBA(_dba("PendingSchedule", compra="2026-10-26T20:00:00Z"))
+    deadlines: dict[int, datetime] = {}
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+    assert deadlines == {999: _CORTE_14H}
+
+
+@pytest.mark.asyncio
+async def test_amazon_dba_venda_depois_das_11h_mantem_latest_ship(_easyship_limpo):
+    """Venda às 12:00 do próprio dia não cabe na regra das 11h: fica o que a
+    Amazon mandou em vez de inventar um corte antes da venda."""
+    from app.services import marketplace_shipment_check as m
+
+    cli = _FakeAmazonDBA(_dba("PendingSchedule", compra="2026-10-27T15:00:00Z"))
+    deadlines: dict[int, datetime] = {}
+    await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+    assert deadlines == {999: datetime(2026, 10, 28, 2, 59, 59, tzinfo=UTC)}
+
+
+@pytest.mark.asyncio
+async def test_amazon_envio_proprio_e_dba_que_saiu_mantem_latest_ship(_easyship_limpo):
+    from app.services import marketplace_shipment_check as m
+
+    latest = datetime(2026, 10, 28, 2, 59, 59, tzinfo=UTC)
+    for easy in (None, "PickedUp"):
+        cli = _FakeAmazonDBA(_dba(easy) | {"order_status": "Shipped"})
+        deadlines: dict[int, datetime] = {}
+        await m._amazon_shipped_for(cli, _fake_pending_order("702-1"), deadlines)
+        assert deadlines == {999: latest}, easy
+        assert cli.easyship_calls == 0
 
 
 # ---- Amazon: EasyShip manda mais que o order_status ----

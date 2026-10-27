@@ -362,3 +362,45 @@ async def test_get_order_status_rejects_response_for_a_different_order():
             }})
         )
         assert await client.get_order_status("701-3967231-6921832") is None
+
+
+# ---- Easy Ship: janela da etiqueta DBA (Vinicius, 27/10/2026) ----
+
+
+@pytest.mark.asyncio
+async def test_easyship_janela_manda_marketplace_e_le_o_fim():
+    """O "Compra de etiqueta de envio › Entrega: até 14:00 BRT" do Seller
+    Central é o `packageTimeSlot.endTime`. A Easy Ship exige `marketplaceId`."""
+    client = AmazonClient(_amz_creds())
+    with respx.mock(base_url=SP_API_BASE_NA) as router:
+        route = router.get("/easyShip/2022-03-23/package").mock(
+            return_value=httpx.Response(200, json={
+                "scheduledPackageId": {"amazonOrderId": "702-9099596-5829863"},
+                "packageTimeSlot": {
+                    "slotId": "s1",
+                    "startTime": "2026-10-27T11:00:00Z",
+                    "endTime": "2026-10-27T17:00:00Z",
+                    "handoverMethod": "PICKUP",
+                },
+                "trackingDetails": {"trackingId": "TBR455528892"},
+            })
+        )
+        assert await client.get_easyship_janela_fim("702-9099596-5829863") == "2026-10-27T17:00:00Z"
+        assert await client.get_easyship_tracking("702-9099596-5829863") == "TBR455528892"
+    params = route.calls[0].request.url.params
+    assert params["amazonOrderId"] == "702-9099596-5829863"
+    assert params["marketplaceId"] == BR_MARKETPLACE
+    assert client.easyship_negado is False
+
+
+@pytest.mark.asyncio
+async def test_easyship_403_marca_negado():
+    """Hoje (27/10) o app não tem o papel Direct-to-Consumer Shipping: 403."""
+    client = AmazonClient(_amz_creds())
+    with respx.mock(base_url=SP_API_BASE_NA) as router:
+        router.get("/easyShip/2022-03-23/package").mock(
+            return_value=httpx.Response(403, json={"errors": [{"code": "Unauthorized"}]})
+        )
+        assert await client.get_easyship_janela_fim("702-1") is None
+        assert await client.get_easyship_tracking("702-1") is None
+    assert client.easyship_negado is True

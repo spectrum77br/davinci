@@ -877,7 +877,8 @@ async def _check_marketplace_shipped(
 
     `deadlines` (opcional, mutado in-place): recebe `{bling_id: "despachar
     até" (UTC)}` capturado de carona nas mesmas respostas — Shopee
-    `ship_by_date`, TikTok `rts_sla_time`, Amazon `LatestShipDate`, ML
+    `ship_by_date`, TikTok `rts_sla_time`, Amazon `LatestShipDate` (DBA: fim
+    da janela da etiqueta / 14:00, ver `_prazo_amazon`), ML
     `/shipments/{id}/sla` (este só quando ainda NULL no banco: custa 1
     request extra por pedido).
 
@@ -1241,6 +1242,78 @@ async def _ml_resolve_pack(
     return ids[0]
 
 
+# ── Prazo do DBA (Vinicius, 27/10/2026) ─────────────────────────────────────
+# A Amazon passou a exigir que o pacote DBA (etiqueta da Amazon, coleta ou
+# ponto) seja entregue até 14:00: "tudo que eu vender até 11 horas eu preciso
+# postar até 14:00". O `LatestShipDate` do pedido continua vindo 23:59, então
+# a tela mostrava "envio 27/10 23:59" (pedido 306103) e só ficava vermelha
+# 10 h depois do horário real. O horário certo é o fim da janela da etiqueta
+# (`packageTimeSlot.endTime` da Easy Ship). Enquanto o app não tem o papel da
+# Easy Ship (403 em todas as lojas em 27/10), vale 14:00 do dia do
+# LatestShipDate pra venda feita até 11:00 desse dia. Envio próprio (MFN sem
+# EasyShip) e pacote que já saiu seguem com o LatestShipDate.
+_AMAZON_DBA_CORTE_HORA = 14
+_AMAZON_DBA_VENDA_ATE_HORA = 11
+# Pacote agendado (etiqueta comprada) — só aí existe janela na Easy Ship.
+_EASYSHIP_AGENDADO = frozenset({"PendingPickUp", "PendingDropOff"})
+# A varredura roda a cada minuto e a janela quase nunca muda: lida no máximo a
+# cada 15 min por pedido. Loja que deu 403 só é perguntada de novo após 1 h.
+_EASYSHIP_JANELA_TTL_S = 15 * 60
+_EASYSHIP_NEGADO_TTL_S = 60 * 60
+_easyship_janela: dict[str, tuple[float, datetime | None]] = {}
+_easyship_negado_ate: dict[str, float] = {}
+
+
+def _corte_dba(latest_ship: datetime, compra: datetime | None) -> datetime:
+    """14:00 BRT do dia do `LatestShipDate`, quando a venda foi até 11:00
+    desse dia (ou antes). Venda depois das 11:00 do próprio dia, ou corte que
+    passaria do LatestShipDate, mantém o LatestShipDate."""
+    dia = latest_ship.astimezone(_BRT).date()
+    if compra is not None:
+        limite_venda = datetime(
+            dia.year, dia.month, dia.day, _AMAZON_DBA_VENDA_ATE_HORA, tzinfo=_BRT,
+        )
+        if compra > limite_venda:
+            return latest_ship
+    corte = datetime(dia.year, dia.month, dia.day, _AMAZON_DBA_CORTE_HORA, tzinfo=_BRT)
+    return min(corte.astimezone(UTC), latest_ship)
+
+
+async def _fim_janela_easyship(client: AmazonClient, order_id: str) -> datetime | None:
+    """Fim da janela da etiqueta DBA (UTC), com o cache acima. None quando a
+    loja não deixa ler a Easy Ship (403) ou o pacote não tem janela."""
+    agora = time.monotonic()
+    loja = client.seller_id or client.marketplace_id
+    if _easyship_negado_ate.get(loja, 0.0) > agora:
+        return None
+    guardado = _easyship_janela.get(order_id)
+    if guardado is not None and guardado[0] > agora:
+        return guardado[1]
+    fim = _iso_to_utc_dt(await client.get_easyship_janela_fim(order_id))
+    if client.easyship_negado:
+        _easyship_negado_ate[loja] = agora + _EASYSHIP_NEGADO_TTL_S
+        return None
+    if len(_easyship_janela) > 2000:
+        for k in [k for k, (ate, _) in _easyship_janela.items() if ate <= agora]:
+            del _easyship_janela[k]
+    _easyship_janela[order_id] = (agora + _EASYSHIP_JANELA_TTL_S, fim)
+    return fim
+
+
+async def _prazo_amazon(
+    client: AmazonClient, result: dict[str, Any], order_id: str, latest_ship: datetime,
+) -> datetime:
+    """O "despachar até" do pedido Amazon (ver "Prazo do DBA" acima)."""
+    easy = str(result.get("easyship_status") or "").strip()
+    if not easy or easy in AMAZON_EASYSHIP_SAIU:
+        return latest_ship
+    if easy in _EASYSHIP_AGENDADO:
+        fim = await _fim_janela_easyship(client, order_id)
+        if fim is not None:
+            return min(fim, latest_ship)
+    return _corte_dba(latest_ship, _iso_to_utc_dt(result.get("purchase_date")))
+
+
 async def _amazon_shipped_for(
     client: AmazonClient,
     o: BlingOrder,
@@ -1276,7 +1349,9 @@ async def _amazon_shipped_for(
     if deadlines is not None and o.bling_id:
         dl = _iso_to_utc_dt(result.get("latest_ship_date"))
         if dl is not None:
-            deadlines[int(o.bling_id)] = dl
+            deadlines[int(o.bling_id)] = await _prazo_amazon(
+                client, result, str(o.numeroloja), dl,
+            )
     if not amazon_shipment_confirmed(result):
         if (
             own_shipping_orders is not None

@@ -60,6 +60,9 @@ class AmazonClient:
     def __init__(self, creds: dict, on_token_refresh=None):
         self.creds = dict(creds)
         self._on_refresh = on_token_refresh
+        # Easy Ship respondeu 403 (app sem o papel de shipping) — ver
+        # `get_easyship_package`; a varredura de envio para de perguntar.
+        self.easyship_negado = False
 
     @property
     def access_token(self) -> str:
@@ -214,6 +217,8 @@ class AmazonClient:
             "last_update_date": payload.get("LastUpdateDate"),
             # "Despachar até" (ISO) — horário de corte do pedido na aba Pedidos.
             "latest_ship_date": payload.get("LatestShipDate"),
+            # Hora da venda (ISO) — decide se o DBA cai no corte das 14:00.
+            "purchase_date": payload.get("PurchaseDate"),
             # Janela de entrega prometida ao cliente (ISO) — "Prazo para
             # entrega" do Seller Central. Só vem em pedido do vendedor já
             # fora de Pending/Canceled. Depois de LatestDeliveryDate a Amazon
@@ -268,25 +273,32 @@ class AmazonClient:
             motivo = motivo or (str(brc.get("BuyerCancelReason") or "").strip() or None)
         return {"pedido": pedido, "motivo": motivo}
 
-    async def get_easyship_tracking(self, order_id: str) -> str | None:
-        """Número de rastreio de um pedido EasyShip via Easy Ship API
-        (`GET /easyShip/2022-03-23/package?amazonOrderId=`).
+    async def get_easyship_package(self, order_id: str) -> dict | None:
+        """Pacote agendado de um pedido EasyShip (DBA) via Easy Ship API
+        (`GET /easyShip/2022-03-23/package?amazonOrderId=&marketplaceId=`).
 
-        Best-effort: hoje o app SP-API costuma NÃO ter o papel de shipping
-        aprovado (Amazon devolve 403 Unauthorized) → retorna None sem
-        derrubar o enrichment. Assim que o papel `Direct-to-Consumer
-        Shipping`/EasyShip for aprovado no Developer Central, o rastreio
-        passa a popular sozinho, sem novo deploy."""
+        Best-effort: hoje o app SP-API NÃO tem o papel `Direct-to-Consumer
+        Shipping (Restricted)` aprovado (a Amazon devolve 403 Unauthorized,
+        conferido em 27/10/2026) → retorna None e marca `easyship_negado`,
+        sem derrubar quem chamou. Assim que o papel for aprovado no
+        Developer Central e a loja reautorizar o app, rastreio e janela de
+        entrega passam a vir sozinhos, sem novo deploy. O `marketplaceId` é
+        obrigatório na Easy Ship (faltava até 27/10)."""
         try:
             r = await self._request(
                 "GET",
                 "/easyShip/2022-03-23/package",
-                params={"amazonOrderId": str(order_id)},
+                params={
+                    "amazonOrderId": str(order_id),
+                    "marketplaceId": self.marketplace_id,
+                },
             )
         except httpx.HTTPError as e:
             logger.info("amazon_easyship_http_error", order_id=order_id, err=str(e)[:200])
             return None
         if r.status_code != 200:
+            if r.status_code == 403:
+                self.easyship_negado = True
             logger.info(
                 "amazon_easyship_non_200",
                 order_id=order_id, status=r.status_code, body=r.text[:200],
@@ -294,7 +306,24 @@ class AmazonClient:
             return None
         body = r.json() or {}
         pkg = body.get("payload") if isinstance(body.get("payload"), dict) else body
-        pkg = pkg or {}
+        return pkg if isinstance(pkg, dict) else None
+
+    async def get_easyship_janela_fim(self, order_id: str) -> str | None:
+        """Fim da janela de entrega do pacote DBA (ISO) — o "Compra de
+        etiqueta de envio › Entrega: até 14:00 BRT" do Seller Central
+        (`packageTimeSlot.endTime`). Só existe depois que a etiqueta foi
+        comprada (pacote agendado); None sem pacote ou sem permissão."""
+        pkg = await self.get_easyship_package(order_id)
+        slot = (pkg or {}).get("packageTimeSlot")
+        fim = slot.get("endTime") if isinstance(slot, dict) else None
+        return str(fim) if fim else None
+
+    async def get_easyship_tracking(self, order_id: str) -> str | None:
+        """Número de rastreio de um pedido EasyShip via Easy Ship API (ver
+        `get_easyship_package`; None enquanto o app não tem o papel)."""
+        pkg = await self.get_easyship_package(order_id)
+        if pkg is None:
+            return None
         details = pkg.get("trackingDetails") if isinstance(pkg.get("trackingDetails"), dict) else {}
         tracking = (
             (details or {}).get("trackingId")
