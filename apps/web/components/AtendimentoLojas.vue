@@ -248,7 +248,7 @@ export function tituloDoGrupo(e: EmailsDaLoja | null | undefined, g: GrupoDaBarr
   const partes = [`${g.rotulo} · ${conta}: ${n} e-mail(s) nos últimos ${dias} dias`]
   const esperando = esperandoDoGrupo(e, g.chave)
   if (esperando) partes.push(`${esperando} esperando resposta`)
-  return `${partes.join(' · ')}\n${n ? 'Abre a lista curta; "ver todos" abre aqui na Caixa' : motivosDaCaixaVazia(g, e, dias).join('\n')}`
+  return `${partes.join(' · ')}\n${n ? 'Abre a lista da loja aqui na Caixa' : motivosDaCaixaVazia(g, e, dias).join('\n')}`
 }
 export function tituloDoAmpliavel(e: EmailsDaLoja | null, conta: string, aberto: boolean, grupos: readonly GrupoDaBarra[] | null | undefined): string {
   const resumo = gruposDaBarra(grupos).map((g) => `${g.rotulo} ${numeroDoGrupo(e, g.chave)}`).join(' · ')
@@ -759,6 +759,18 @@ function grupoAberto(l: LojaBarra, g: string): boolean {
 function alternarGrupo(l: LojaBarra, g: string) {
   gruposAbertos.value = alternarAberta(gruposAbertos.value || [], chaveDoGrupoAberto(l.chave, g))
 }
+// O clique na caixa (27/10/2026, o Eduardo: "ao clicar em problemas já deve abrir a
+// listagem"): abre a caixa (a lista curta) E a lista da loja no meio; na caixa aberta e
+// já na tela, o clique fecha a caixa (a lista do meio fica).
+function clicarGrupo(l: LojaBarra, g: string) {
+  const aberto = grupoAberto(l, g)
+  if (aberto && ativaEmail(l, g)) {
+    alternarGrupo(l, g)
+    return
+  }
+  if (!aberto) alternarGrupo(l, g)
+  abrirEmails(l, g)
+}
 function escolhaDe(l: LojaBarra, g: string): EscolhaEmail | null {
   const e = emailsDe(l)
   return e ? escolhaDoEmail(l, e, g) : null
@@ -947,7 +959,7 @@ function idDaCaixa(l: LojaBarra, g: string): string {
                 :aria-controls="grupoAberto(l, g.chave) ? idDaCaixa(l, g.chave) : undefined"
                 :title="tituloDoGrupo(emailsDe(l), g, l.conta, dias)"
                 :data-email-grupo="g.chave"
-                @click="alternarGrupo(l, g.chave)"
+                @click="clicarGrupo(l, g.chave)"
               >
                 <ChevronRight class="size-3 shrink-0 transition-transform" :class="grupoAberto(l, g.chave) ? 'rotate-90' : ''" aria-hidden="true" />
                 <span class="min-w-0 flex-1 truncate">{{ g.rotulo }}</span>

@@ -219,7 +219,7 @@ async function principal() {
     assert.match(LJ.motivosDaCaixaVazia({ ...prob, status: 'outra_categoria' }, atv)[0], /é de Chamado/)
     assert.equal(LJ.tituloDoAmpliavel(atv, 'ATV', false, GRUPOS), 'Mostrar os e-mails da loja ATV (Problemas 31 · Envios 0 · Devolução 4 · Informativo 0)')
     assert.match(LJ.tituloDoAmpliavel(atv, 'ATV', true, GRUPOS), /^Esconder/)
-    assert.equal(LJ.tituloDoGrupo(atv, prob, 'ATV'), 'Problemas · ATV: 31 e-mail(s) nos últimos 30 dias · 2 esperando resposta\nAbre a lista curta; "ver todos" abre aqui na Caixa')
+    assert.equal(LJ.tituloDoGrupo(atv, prob, 'ATV'), 'Problemas · ATV: 31 e-mail(s) nos últimos 30 dias · 2 esperando resposta\nAbre a lista da loja aqui na Caixa')
     assert.match(LJ.tituloDoGrupo(poofy, envio, 'Poofy'), /0 e-mail\(s\)[\s\S]*ainda não está configurada[\s\S]*não está na ponte/)
     // O clique: a loja (integração OU ficha, nunca as duas) e o grupo.
     assert.deepEqual(LJ.escolhaDoEmail(linha({ integration_id: 'i-sh', plataforma: 'shopee', conta: 'ATV' }), atv, 'problemas'), { chave: 'i-sh', integration_id: 'i-sh', store_info_id: '', plataforma: 'shopee', conta: 'ATV', grupo: 'problemas' })
@@ -356,6 +356,13 @@ async function principal() {
     assert.equal(JSON.stringify(b.estado.filtros), antes)
     b.estado.abrirEmails(luno, 'problemas')
     assert.deepEqual(b.emitidos.at(-1), ['abrirEmails', { chave: 'email:f:f-luno', integration_id: '', store_info_id: 'f-luno', plataforma: 'shopee', conta: 'luno', grupo: 'problemas' }])
+    // O clique na caixa (27/10/2026): abre a caixa E a lista da loja no meio de uma vez.
+    b.estado.gruposAbertos = []
+    const antesDoClique = b.emitidos.length
+    b.estado.clicarGrupo(atv, 'devolucao')
+    assert.deepEqual(b.estado.gruposAbertos, ['i-sh|devolucao'])
+    assert.equal(b.emitidos.length, antesDoClique + 1)
+    assert.deepEqual(b.emitidos.at(-1), ['abrirEmails', { ...escolhaAtv, grupo: 'devolucao' }])
   }
 
   // ------------------------------------------------ a caixa aberta: a lista curta (setup de verdade)
