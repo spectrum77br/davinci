@@ -511,9 +511,12 @@ const lojas = computed<LojaBarra[]>(() => {
 // as caixas de e-mail (sem número de chat). Só onde há a seta.
 const gruposDaLoja = computed(() => gruposDaBarra(props.gruposEmail))
 const dias = computed(() => Number(props.diasEmail) || 30)
+// Só a loja que TEM e-mail numa das caixas (27/10/2026, o Eduardo: "criou lojas a
+// mais ali no atendimento"): a ficha sem chat e sem e-mail nas pastas não vira linha.
 const lojasSoEmail = computed<LojaBarra[]>(() => {
   if (!props.emails || props.numero === 'humano') return []
-  return lojasSemLinha(props.emails, lojas.value).map((e) => ({
+  const comEmail = (e: EmailsDaLoja) => gruposDaLoja.value.some((g) => numeroDoGrupo(e, g.chave) > 0)
+  return lojasSemLinha(props.emails, lojas.value).filter(comEmail).map((e) => ({
     chave: chaveSoEmail(e),
     integration_id: '',
     externo_ref: '',

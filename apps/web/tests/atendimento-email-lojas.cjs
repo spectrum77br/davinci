@@ -280,7 +280,8 @@ async function principal() {
     // A linha da loja continua igual (o número do Duoke, o clique filtra o chat); só abre espaço para a seta.
     assert.match(html, /<button type="button" class="relative mx-1 [^"]*pr-7"[^>]*title="Shopee · ATV[^"]*">[\s\S]*?>71<\/span><\/button>/)
     // As lojas sem linha de chat (as fichas): no grupo da plataforma, como as outras (sem o cinza, sem número de chat).
-    assert.deepEqual([...html.matchAll(/data-so-email="([^"]+)"/g)].map((m) => m[1]).sort(), ['email:f:f-eron1', 'email:f:f-eron2', 'email:f:f-luno'])
+    // A ficha sem e-mail nas caixas (f-eron2) não vira linha (27/10/2026).
+    assert.deepEqual([...html.matchAll(/data-so-email="([^"]+)"/g)].map((m) => m[1]).sort(), ['email:f:f-eron1', 'email:f:f-luno'])
     const luno = (html.match(/<button[^>]*data-so-email="email:f:f-luno"[\s\S]*?<\/button>/) || [''])[0]
     assert.match(luno, /aria-expanded="false"/)
     assert.match(luno, /title="Shopee · luno\nSem chat no DaVinci \(a loja não tem integração ligada\): o clique mostra as pastas de e-mail dela\."/)
