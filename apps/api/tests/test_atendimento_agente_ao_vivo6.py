@@ -608,7 +608,7 @@ def test_22_e_24_a_nota_da_shopee_so_no_bloco_da_shopee(plataforma):
     texto = prompt.bloco_da_plataforma(plataforma, _categorias_do_manual())
     for nota in prompt.NOTAS_DA_PLATAFORMA["shopee"]:
         assert (nota in texto) is (plataforma == "shopee")
-    assert len(texto) / 3.5 <= 5_000  # D1–D3 do dono (23/10/2026)
+    assert len(texto) / 3.5 <= 5_250  # D1–D3 (23/10); garantia (27/10/2026)
     if plataforma == "shopee":
         assert "nunca 'ao receber' nem 'recuse'" in texto and "abrir_chamado" in texto
         assert '"[Shopee] Cliente abriu pedido de devolução/reembolso"' in texto
@@ -622,8 +622,8 @@ def test_22_e_24_a_nota_da_shopee_so_no_bloco_da_shopee(plataforma):
 def test_v8_a_versao():
     # Item 32 (22/10/2026): o v9 (as respostas da equipe citadas) guarda o v8 inteiro; o v10
     # (rodada "redondo", 23/10/2026: a busca no catálogo da loja) guarda o v9 inteiro.
-    assert v.VERSAO == "v15"  # as frases-padrão (27/10/2026)
-    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v15"
+    assert v.VERSAO == "v16"  # a garantia da equipe e o título do anúncio (27/10/2026)
+    assert v.Resultado(ok=True, veredito=None, pediu=True).para_fatos("Olá!")["versao"] == "v16"
 
 
 def test_22_o_sistema_diz_que_o_ao_receber_a_quem_nao_recebeu_e_errado():
@@ -1495,7 +1495,7 @@ def test_rev6_a_calibracao_conta_a_entrada_nova_do_v8_a_parte():
         "boa-catalogo-cesto",
         "viz-catalogo-cesto-disponivel",
         # O portão (27/10/2026): as linhas de estoque do grupo `portao`.
-        *(c for c in casos if c.startswith(("portao-", "fp-"))),
+        *(c for c in casos if c.startswith(("portao-", "fp-", "v16-"))),
     }
     for id_, c in casos.items():
         if id_ not in politica and id_ not in novos:

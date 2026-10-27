@@ -343,7 +343,9 @@ def _ev(item: str) -> list[str]:
 )
 async def test_l1_produto_pelo_anuncio_vai_ao_verificador(cliente, texto, assunto, ficha):
     r = await _auto(_p(texto, assunto, _ev(ficha["item_id"])), _turno(cliente), fichas=[ficha])
-    assert r.decisao == VAI, (r.decisao, r.codigos, r.motivos)
+    # v16 (27/10/2026): o "o anúncio não informa" vai com AVISO ao verificador (a L1 continua).
+    assert r.decisao in (VAI, VAI_COM_AVISO), (r.decisao, r.codigos, r.motivos)
+    assert set(r.codigos) <= {checagens.ANUNCIO_NAO_INFORMA}, r.codigos
     assert r.rascunho.fatos["agente"]["produto_pelo_anuncio"] is True
 
 
@@ -911,7 +913,7 @@ def test_v11_entrada_traz_a_restricao_e_a_condicao_so_com_as_marcas():
 
 
 def test_v11_sistema_e_versao():
-    assert v.VERSAO in ("v11", "v12", "v13", "v14", "v15")
+    assert v.VERSAO in ("v11", "v12", "v13", "v14", "v15", "v16")
     assert (
         "RESTRIÇÃO DE ENVIO POR ESTADO" in v.SISTEMA
         and "CONDIÇÃO DECLARADA NO ANÚNCIO" in v.SISTEMA
@@ -937,9 +939,10 @@ def test_v11_calibracao_tem_as_liberacoes_e_as_linhas_de_antes_sem_as_secoes_nov
         tem = v.CABECALHO_RESTRICAO in entrada or v.CABECALHO_CONDICAO in entrada
         # D1–D3 (23/10/2026): as linhas do grupo `dono_d123` (a garantia Apple, com a
         # condição do anúncio) também trazem a seção; e as do `fechar_eval` (o resumo da
-        # restrição, o C2 e o relógio, 23/10/2026).
+        # restrição, o C2 e o relógio, 23/10/2026); e as do `v16` (27/10/2026: o título, o
+        # «é original?», o receio e a garantia, com a condição do anúncio).
         assert tem == (
-            c.get("grupo") in ("liberacoes", "dono_d123", "fechar_eval")
+            c.get("grupo") in ("liberacoes", "dono_d123", "fechar_eval", "v16")
             and (
                 "conferido" in json.dumps(c["evidencias"])
                 or "condicao" in json.dumps(c["evidencias"])

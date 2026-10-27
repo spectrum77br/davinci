@@ -292,7 +292,18 @@ logger = structlog.get_logger()
 # no SISTEMA, que a empatia e o acolhimento não são afirmação, que o «sem previsão» trata o
 # «quando volta?» e que o endereço do pedido não é afirmação de região. Calibração: o grupo
 # `frases_padrao` (cada frase boa → ok; as variantes ruins → bloqueia).
-VERSAO = "v15"
+# v16 (o dono, 27/10/2026, depois do v15 no eval de todas as lojas — 20 bons ainda segurados):
+# o que o anúncio É pelo título e pelos atributos (a descrição que cita a marca de fábrica não
+# desmente; a medida do título vence a faixa genérica do atributo), o nome da variação, a
+# BUSCA vazia do termo exato («não encontramos anúncio de X», nunca «não vendemos»), a
+# reposição sem previsão também da opção que o cliente diz esgotada e dita como condição, o
+# "false" só com o problema apontado no texto (aviso e confiança sozinhos não são dúvida), e a
+# GARANTIA como a equipe responde hoje (o dono, 27/10/2026: a devolução pela Shopee, o vídeo
+# do defeito, "não cobre quebrado, molhado ou mau uso", a estendida com a plataforma,
+# "homologado pela Uranyx"); do aparelho Uranyx, «90 dias», «1 ano», «9 meses», o app
+# Uranyx, o site uranyx.com.br/sac e o SAC não têm lastro (o caminho da Uranyx saiu).
+# Calibração: o grupo `v16` (cada caso bom → ok; o espelho ruim → bloqueia).
+VERSAO = "v16"
 MODELO = "claude-haiku-5-5"
 # 26/10/2026: "low" → "medium". Calibração v13 (462 linhas): o medium segura mais ruim
 # (97,3% × 96,4%) e barra menos da metade das boas (12 × 26 de 97), por ~US$ 0,0005
@@ -440,6 +451,8 @@ class Veredito(BaseModel):
             description=(
                 "true só quando nenhuma marca abaixo é true, afirma_sem_lastro está vazia, "
                 "responde_o_que_foi_perguntado é true e não há outro risco. Na dúvida, false. "
+                "A dúvida é concreta, sobre o texto: aviso ou confiança do agente, sozinhos, não "
+                "são dúvida. "
                 "A política do envio automático (o assunto declarado, o canal, a confiança) "
                 "o código já decidiu: não é risco."
             )
@@ -647,8 +660,9 @@ a falta de aviso também não prova nada;
 - FRASES-PADRÃO DA LOJA NESTA PLATAFORMA (quando vier): o que a loja diz sempre do mesmo \
 jeito, decidido pelo dono (a entrega depois do envio é da plataforma e a loja não tem acesso \
 ao transporte, vale o prazo do app; a compra protegida; o pagamento e o parcelamento \
-definidos na finalização; as fotos, o vídeo e as opções no próprio anúncio; o cumprimento; e, \
-quando a linha vem, a reposição sem previsão da opção esgotada e o acessório sem anúncio). A \
+definidos na finalização; as fotos, o vídeo e as opções no próprio anúncio; o cumprimento; a \
+reposição sem previsão da opção esgotada, nos casos que a linha diz; a garantia como a equipe \
+responde; e, quando a linha vem, o acessório sem anúncio). A \
 afirmação com o MESMO sentido de uma linha TEM LASTRO, dita com outras palavras — nunca entra \
 na lista 6 nem nos motivos; o que ela diz a mais (prazo, data, valor, estado do pedido, \
 promessa) se confere como sempre, e a frase usada para recusar ajuda que o cliente pede \
@@ -749,11 +763,10 @@ outro anúncio nosso. O suporte do próprio marketplace e as telas do app ("Minh
 compras", "Central de ajuda", "Devolução/Reembolso") são permitidos. O anúncio desta \
 loja que a BUSCA NO CATÁLOGO DA LOJA traz não é "outro anúncio nosso": dizer que a loja \
 vende esse produto e que ele aparece na página da loja no app, pelo nome (sem link), \
-não marca — mesmo quando o rascunho o chama de «outro anúncio da nossa loja». Uma exceção \
-só: a garantia do aparelho Uranyx acionada direto com a Uranyx "pelo app Uranyx ou \
-pelo site uranyx.com.br/sac", exatamente assim, quando a garantia nas EVIDÊNCIAS \
-traz esse caminho e o "periodo" "uranyx" (ou só a regra, antes da compra); \
-qualquer outro site, telefone, WhatsApp ou e-mail continua true.
+não marca — mesmo quando o rascunho o chama de «outro anúncio da nossa loja». Sem exceção \
+de marca: a garantia do aparelho Uranyx mandada ao app Uranyx, ao site uranyx.com.br/sac ou \
+ao SAC da Uranyx também é true (decisão do dono, 27/10/2026), como qualquer outro site, \
+telefone, WhatsApp ou e-mail.
 
 5. revela_dado_interno — o texto expõe o que é interno: nome de sistema, \
 integração ou conta da loja; fornecedor; de onde o produto sai (cidade, estado, \
@@ -838,8 +851,9 @@ exclusão de garantia que o campo não traz; o que a plataforma faria além da o
 de física a memória virtual, outra divisão da RAM); e a reposição com data, semana, mês, \
 "em breve", "logo volta", "deve chegar", quantidade ou reserva, e o esgotado ou o sem \
 previsão de uma variação que as EVIDÊNCIAS não trazem com disponivel=false e \
-confiavel=true (a com confiavel=false só aparece como indisponível no anúncio), ou de um \
-produto, acessório ou peça que não é a variação esgotada; e, de uma RESPOSTA DA EQUIPE \
+confiavel=true (a com confiavel=false só aparece como indisponível no anúncio), fora dos \
+casos que a FRASE-PADRÃO da reposição diz, ou de um produto, acessório ou peça que não é a \
+variação esgotada; e, de uma RESPOSTA DA EQUIPE \
 CITADA, o que ela não sustenta: o fato, o estado, a data, o prazo ou o valor de pedido (a \
 resposta é de outro pedido); o produto tirado de linha «não vale para produto» (outro \
 anúncio, outro modelo, sem anúncio); a chegada do estoque; o que acompanha dito como NÃO \
@@ -906,7 +920,10 @@ dirigido ao cliente, diagnóstico ou minimização de defeito \
 — "é normal", "não é defeito", "o aparelho está perfeito", "é só reiniciar"; \
 ou, com ASSUNTOS LIBERADOS, o rascunho trata — responde, afirma ou orienta — um \
 assunto que NÃO está na lista, além do declarado: motivo "assunto não liberado"). \
-Se for true, a lista 8 fica vazia. Na dúvida, false.
+Se for true, a lista 8 fica vazia. Na dúvida, false — a dúvida concreta sobre o TEXTO, e o \
+motivo diz qual é. O aviso das checagens, a confiança do agente ou o assunto ser de produto, \
+sozinhos, não são dúvida: confira o que eles apontam e, sem achar no texto um problema (um \
+item de 1 a 5, a lista 6, o item 7 ou um risco deste item), true.
 
 A política do envio automático NÃO é sua: se o assunto declarado pode sair sozinho, o \
 modo do canal, a confiança do agente, se o assunto costuma ir para pessoa — o código já \
@@ -923,6 +940,30 @@ pelo transtorno», «Entendemos a sua preocupação», «Agradecemos o seu retor
 «tudo bem?» do cliente («Tudo bem, sim!», «Tudo ótimo, e com você?»), o pedido do dado que falta \
 (número do pedido, foto, vídeo, qual produto, qual cor) e a orientação de onde \
 achar algo no app.
+
+Também têm lastro (v16, o dono, 27/10/2026): (i) o que o anúncio É — o TÍTULO e os \
+atributos de marca, modelo e sistema («é o <título>», «é um aparelho Android», «não é um \
+iPhone» quando a marca e o sistema dizem outro), mesmo que a descrição cite a marca de \
+fábrica ou outros modelos; e a medida, a capacidade e as peças que o TÍTULO ou a descrição \
+dizem («a mala de bordo de 18 polegadas, até 10 kg») — o atributo de categoria em faixa \
+(«Case Size: 20 - 25 inches») não as desmente; (ii) o NOME da variação diz o que ela tem: \
+«16 GB / 128 GB Premium NFC» sustenta que essa versão tem NFC e 16/128 GB, e, com «NFC: No» \
+ou «não tem NFC» no anúncio, que a versão sem NFC no nome não tem; (iii) a BUSCA NO CATÁLOGO \
+DA LOJA: a linha do anúncio sustenta «temos o <nome da linha>»; com o mesmo anúncio aberto \
+nas EVIDÊNCIAS, o título e as variações dele valem como sempre; a linha «nenhum anúncio casou \
+com o termo» do termo que o rascunho cita sustenta «não encontramos (não localizei) anúncio \
+de <termo>» — nunca «não vendemos» nem «não temos» —, e a busca cujo termo só trouxe OUTROS \
+produtos (o termo «roda mala» que só trouxe malas) não sustenta «não encontramos <peça>». \
+Continua contando: dizer ou sugerir que existe outra opção — maior, outro tamanho, outra cor, \
+outro modelo («se quiser a mala maior, é compra nova pelo anúncio») — sem essa opção nas \
+EVIDÊNCIAS (afirma_sem_lastro); responder «é original?» só com novo ou lacrado (item 7 false); \
+e, do aparelho Uranyx, «90 dias», «1 ano», «9 meses», o app Uranyx, o site \
+uranyx.com.br/sac e o SAC da Uranyx (afirma_sem_lastro; o caminho marca o item 4), mesmo que \
+a garantia ou um fato das EVIDÊNCIAS os traga — a garantia da Apple de 1 ano a partir da \
+ativação, do fato aprovado, continua valendo. Não contam: o receio sem pergunta («tenho medo \
+de comprar») acolhido com o que tem lastro (produto novo, compra protegida pela Shopee) trata o \
+turno (item 7 true); pedir o dado para responder na próxima mensagem («me diga o modelo que eu \
+confiro por aqui») não promete ação da equipe (item 1) — «a equipe confere/retorna» marca.
 
 Seja coerente, com o ônus na prova: sustentada é a afirmação que um campo das \
 EVIDÊNCIAS diz, ou a regra e o caminho que a ORIENTAÇÃO APROVADA, as REGRAS DA LOJA ou \
@@ -1857,9 +1898,33 @@ FRASES_PADRAO_SHOPEE: tuple[str, ...] = (
     "O cumprimento e a pergunta de como ajudar, com o produto do cartão ou do anúncio da "
     "conversa («Olá! Como podemos ajudar com o <produto>?»).",
 )
+# v16 (o dono, 27/10/2026): a reposição vale sempre na Shopee, nos casos que a linha diz — a
+# opção esgotada nas EVIDÊNCIAS, a que o próprio cliente diz esgotada ou de que pergunta quando
+# volta (o v15 só com a variação esgotada nos dados segurava o «sem previsão» igual ao da
+# equipe: ccef00af2b17, 85f56d89186a, 30670d4d00ee) e a dita como condição.
 FRASE_PADRAO_REPOSICAO = (
-    "A opção que as EVIDÊNCIAS trazem esgotada não tem previsão de reposição; quando ela "
-    "voltar, aparece para seleção no próprio anúncio."
+    "Opção esgotada não tem previsão de reposição; quando ela voltar, aparece para seleção no "
+    "próprio anúncio — vale para a opção que as EVIDÊNCIAS trazem esgotada (disponivel=false), "
+    "para a que o próprio cliente diz esgotada ou de que pergunta quando volta quando as "
+    "EVIDÊNCIAS não trazem as opções do anúncio (nenhum dado de estoque) e dita como condição "
+    "(«se ela estiver esgotada, não há previsão»); nunca para a opção que as EVIDÊNCIAS trazem "
+    "disponível ou que a lista delas não tem, nem com data, prazo ou promessa de volta."
+)
+# v16 (o dono, 27/10/2026 — "a garantia segue o que a equipe responde hoje"; 54 pares de
+# garantia dos últimos 30 dias): as falas da equipe, só na Shopee. Do aparelho Uranyx, nunca
+# 90 dias, 1 ano, 9 meses, o app nem o site (o SISTEMA); a Apple continua com o fato 25.
+FRASES_PADRAO_GARANTIA_SHOPEE: tuple[str, ...] = (
+    "Garantia ou defeito enquanto o app oferece a devolução: tem garantia, e a única forma é a "
+    "devolução pela Shopee (Minhas Compras > o pedido > Devolução/Reembolso) — «tem garantia, "
+    "mas a devolução é pela Shopee».",
+    "Defeito relatado: perguntar qual é o defeito e pedir um vídeo curto (e fotos) do problema "
+    "por aqui, sem diagnóstico («Qual seria o defeito? Consegue mandar um vídeo?»).",
+    "A regra da garantia da loja: não cobre aparelho quebrado, molhado ou com mau uso — dita "
+    "como a regra, ou porque o cliente perguntou se cobre (dizer que o aparelho DESTE cliente "
+    "não tem cobertura é decisão de pessoa).",
+    "Garantia estendida comprada na plataforma: é diretamente com a plataforma.",
+    "Aparelho Uranyx (a marca do anúncio ou do pedido), quando o cliente pergunta da "
+    "homologação ou da Anatel: «homologado pela Uranyx».",
 )
 FRASE_PADRAO_ACESSORIO = (
     "No momento a loja não tem anúncio de {acessorio} (o fato aprovado das EVIDÊNCIAS): "
@@ -1906,14 +1971,19 @@ def linhas_das_frases_padrao(
     declarado: str | None = None,
     perguntas: Iterable[str | None] = (),
 ) -> list[str]:
-    """As linhas de FRASES-PADRÃO DA LOJA (só na Shopee; vazia nas outras). PURA (v15)."""
+    """As linhas de FRASES-PADRÃO DA LOJA (só na Shopee; vazia nas outras). PURA (v15).
+
+    v16: a reposição (com os casos dela) e a garantia como a equipe responde vão sempre; o
+    acessório, só com o fato aprovado que nega a venda. `texto`, `assunto`, `declarado` e
+    `perguntas` ficam na assinatura (quem chama não muda)."""
     if plataforma_codigo != "shopee":
         return []
-    linhas = [CABECALHO_FRASES_PADRAO, *(f"- {f}" for f in FRASES_PADRAO_SHOPEE)]
-    if politica_de_estoque_vale(
-        evidencias, texto=texto, assunto=assunto, declarado=declarado, perguntas=perguntas
-    ):
-        linhas.append(f"- {FRASE_PADRAO_REPOSICAO}")
+    linhas = [
+        CABECALHO_FRASES_PADRAO,
+        *(f"- {f}" for f in FRASES_PADRAO_SHOPEE),
+        f"- {FRASE_PADRAO_REPOSICAO}",
+        *(f"- {f}" for f in FRASES_PADRAO_GARANTIA_SHOPEE),
+    ]
     for acessorio in _acessorios_negados_pelos_fatos(evidencias):
         linhas.append(f"- {FRASE_PADRAO_ACESSORIO.format(acessorio=acessorio)}")
     return linhas

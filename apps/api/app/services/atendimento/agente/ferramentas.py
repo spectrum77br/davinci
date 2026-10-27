@@ -193,17 +193,51 @@ LACUNA_PEDIDO = "{numero_pedido}"
 # `CAMINHO_URANYX`, nenhum outro site, telefone ou e-mail. Os meses de
 # hardware e de software continuam (o dado do Painel; o validador os aceita),
 # mas a fala ao cliente é a do ano (o prompt).
+#
+# Decisão do dono de 27/10/2026 (por cima da de 21/10): a garantia Uranyx segue o que a
+# EQUIPE responde hoje (54 pares de garantia dos últimos 30 dias: o app 1 vez, o site 1, o SAC
+# nenhuma, "90 dias"/"1 ano" nunca). A regra sai SEM número e SEM o caminho da Uranyx — o
+# validador não aceita mais "90 dias", "1 ano", "9 meses" nem os meses de hardware e
+# software da Uranyx (só aceita o número que a regra traz), e sem `caminho_depois_da_loja`
+# a isenção do caminho (`checagens.caminho_uranyx_liberado`) nunca vale: o app e o site da
+# Uranyx voltam a ser caminho fora da plataforma. As datas do Painel também não saem (o fim
+# do hardware e do software são os 3 e os 12 meses); o status continua ("expirada" → pessoa).
 DIAS_COM_A_LOJA_URANYX = 90
 CAMINHO_URANYX = "pelo app Uranyx ou pelo site uranyx.com.br/sac"
+FALAS_DA_GARANTIA_DA_EQUIPE: tuple[str, ...] = (
+    "enquanto o app oferece a devolução: tem garantia, e a única forma é a devolução pela "
+    "plataforma (a opção de devolução/reembolso do pedido) — «tem garantia, mas a devolução é "
+    "pela Shopee»",
+    "defeito relatado: perguntar qual é o defeito e pedir um vídeo curto (e fotos) do problema "
+    "por aqui, sem diagnóstico («Qual seria o defeito? Consegue mandar um vídeo?»); a equipe "
+    "analisa",
+    "a regra: a nossa garantia não cobre aparelho quebrado, molhado ou com mau uso (a regra, "
+    "nunca a decisão do caso do cliente)",
+    "garantia estendida comprada na plataforma: é diretamente com a plataforma",
+    "perguntou da homologação ou da Anatel: homologado pela Uranyx",
+)
+NUNCA_NA_GARANTIA_URANYX = (
+    "90 dias, 1 ano, 9 meses, os meses de hardware ou de software, datas de fim, o app Uranyx, "
+    "o site uranyx.com.br/sac e o SAC da Uranyx (decisão do dono, 27/10/2026)"
+)
 REGRA_URANYX = {
-    "hardware_meses": garantia_svc.MESES_HARDWARE,
-    "software_meses": garantia_svc.MESES_SOFTWARE,
     "a_partir_de": "entrega",
-    "garantia_anos": 1,
-    "loja_dias": DIAS_COM_A_LOJA_URANYX,
-    "uranyx_meses": garantia_svc.MESES_SOFTWARE - 3,
-    "caminho_depois_da_loja": CAMINHO_URANYX,
+    "como_a_equipe_responde": list(FALAS_DA_GARANTIA_DA_EQUIPE),
+    "nunca": NUNCA_NA_GARANTIA_URANYX,
 }
+# As datas e os períodos do Painel que não vão ao modelo na garantia Uranyx (27/10/2026).
+_DATAS_DA_URANYX = ("fim_hardware", "fim_software", "fim_loja", "fim_uranyx")
+
+
+def sem_prazo_uranyx(g: Mapping[str, Any]) -> dict:
+    """A garantia Uranyx sem as datas de fim nem o período (só o "expirada", que vai a
+    pessoa): a decisão do dono de 27/10/2026 (ver `REGRA_URANYX`). PURA."""
+    saida = {k: v for k, v in g.items() if k not in _DATAS_DA_URANYX and k != "periodo"}
+    if g.get("periodo") == PERIODO_EXPIRADA:
+        saida["periodo"] = PERIODO_EXPIRADA
+    return saida
+
+
 # Os fatos da garantia Uranyx (a migration 0421 do outro passo, decisões 6 e 7):
 # o id entra nas evidências quando o fato existe; a regra vale sem eles (é a
 # decisão do dono). O TEXTO do fato não vai na regra (o 1º diz "homologados
@@ -1106,6 +1140,8 @@ async def _calculo(s: AsyncSession, ctx: ContextoAgente, alvo: Alvo) -> Resultad
         "entregue_sem_data": sem_data,
         "regra": regra,
     }
+    if linha == LINHA_URANYX:
+        dados = sem_prazo_uranyx(dados)
     return Resultado(dados=dados, ids=tuple(ids), garantias=(_para_validador(dados),))
 
 
@@ -1197,11 +1233,13 @@ async def dados_ver_garantia(
     # achada pelo que o comprador citou, sem pedido na conversa). Os períodos
     # da Uranyx (decisões 6 a 8 do dono) pelo início do registro.
     garantias = [
-        {
-            **{k: v for k, v in g.items() if k != "de_onde" or alvo is None},
-            **periodos_uranyx(g.get("inicio"), g.get("fim_software"), _hoje(ctx)),
-            "regra": dict(regra),
-        }
+        sem_prazo_uranyx(
+            {
+                **{k: v for k, v in g.items() if k != "de_onde" or alvo is None},
+                **periodos_uranyx(g.get("inicio"), g.get("fim_software"), _hoje(ctx)),
+                "regra": dict(regra),
+            }
+        )
         for g in registro
     ]
     return Resultado(

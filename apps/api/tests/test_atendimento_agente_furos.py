@@ -644,14 +644,26 @@ async def test_a_regra_da_linha_so_livra_antes_da_compra():
         garantias=[{"status": None, "regra": uranyx, "antes_da_compra": False}],
     )
     assert depois.bloqueado and any("cobertura" in e for e in depois.erros), depois.erros
+    # O prazo da regra da linha livra antes da compra (a Charlots, com o fato aprovado).
+    charlots = {"dias": 90, "a_partir_de": "entrega", "fato": "fato:8"}
     antes = await _completo(
+        "A garantia é de 90 dias a partir da entrega.",
+        categoria="garantia",
+        cliente="qual a garantia?",
+        modo=MODO_COPILOTO,
+        garantias=[{"status": None, "regra": charlots}],
+    )
+    assert not antes.bloqueado, antes.erros
+    # O aparelho Uranyx (o dono, 27/10/2026): a regra sem número — os meses não saem nem
+    # antes da compra.
+    uranyx_antes = await _completo(
         "A garantia é de 3 meses para hardware e 12 meses para software, a partir da entrega.",
         categoria="garantia",
         cliente="qual a garantia?",
         modo=MODO_COPILOTO,
         garantias=[{"status": None, "regra": uranyx}],
     )
-    assert not antes.bloqueado, antes.erros
+    assert uranyx_antes.bloqueado, uranyx_antes.erros
 
 
 def test_depois_da_compra_pela_fala_e_pelo_pedido():

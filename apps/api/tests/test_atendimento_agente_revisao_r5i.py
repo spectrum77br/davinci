@@ -381,9 +381,18 @@ def test_7_os_periodos_da_garantia_uranyx():
         "fim_uranyx": None,
         "periodo": None,
     }
+    # O dono, 27/10/2026 (por cima das decisões 6 a 8): a regra sai sem número e sem o
+    # caminho da Uranyx — as falas da equipe e o que nunca dizer.
     regra = ferramentas.REGRA_URANYX
-    assert (regra["garantia_anos"], regra["loja_dias"], regra["uranyx_meses"]) == (1, 90, 9)
-    assert regra["caminho_depois_da_loja"] == CAMINHO
+    for chave in ("garantia_anos", "loja_dias", "uranyx_meses", "caminho_depois_da_loja",
+                  "hardware_meses", "software_meses"):  # fmt: skip
+        assert chave not in regra
+    assert regra["como_a_equipe_responde"] == list(ferramentas.FALAS_DA_GARANTIA_DA_EQUIPE)
+    assert "uranyx.com.br/sac" in regra["nunca"] and "90 dias" in regra["nunca"]
+    # As datas e o período não vão ao modelo (só o "expirada", que vai a pessoa).
+    g = {"status": "ativa", "fim_hardware": "x", "fim_software": "y", "periodo": "uranyx"}
+    assert ferramentas.sem_prazo_uranyx(g) == {"status": "ativa"}
+    assert ferramentas.sem_prazo_uranyx({"periodo": "expirada"}) == {"periodo": "expirada"}
 
 
 def _garantia(periodo: str | None, **mais: Any) -> dict:
@@ -451,8 +460,14 @@ async def _completo_com_garantia(
 
 
 def test_7_o_caminho_da_uranyx_so_depois_dos_90_dias_ou_antes_da_compra():
-    assert checagens.caminho_uranyx_liberado([_garantia("uranyx")])
-    assert checagens.caminho_uranyx_liberado([{"status": None, "regra": ferramentas.REGRA_URANYX}])
+    # O dono, 27/10/2026: a regra não traz mais o caminho — a isenção nunca vale.
+    assert not checagens.caminho_uranyx_liberado([_garantia("uranyx")])
+    assert not checagens.caminho_uranyx_liberado(
+        [{"status": None, "regra": ferramentas.REGRA_URANYX}]
+    )
+    # A regra antiga (com o caminho) ainda seria lida igual (a função não mudou).
+    antiga = {**ferramentas.REGRA_URANYX, "caminho_depois_da_loja": CAMINHO}
+    assert checagens.caminho_uranyx_liberado([_garantia("uranyx", regra=antiga)])
     assert not checagens.caminho_uranyx_liberado([_garantia("loja")])
     assert not checagens.caminho_uranyx_liberado([_garantia("expirada")])
     # Sem data de entrega depois da compra: a regra sem o caminho.
@@ -480,6 +495,8 @@ A_REGRA = (
 
 @pytest.mark.parametrize("texto", [DEPOIS_DOS_90, A_REGRA])
 async def test_7_a_garantia_uranyx_depois_dos_90_dias_passa_so_no_agente(texto):
+    # O dono, 27/10/2026 ("a garantia segue o que a equipe responde"): o caminho da Uranyx e
+    # os 90 dias / 1 ano / 9 meses não saem mais — nem no agente, nos dois modos.
     for modo in (MODO_COPILOTO, MODO_AUTO):
         final = await _completo_com_garantia(
             texto,
@@ -487,14 +504,9 @@ async def test_7_a_garantia_uranyx_depois_dos_90_dias_passa_so_no_agente(texto):
             cliente="meu celular parou de carregar, tem garantia?",
             garantias=[_garantia("uranyx")],
         )
-        assert final.status == RASCUNHO_PENDENTE and not final.erros, (final.motivos, final.erros)
-        assert not any("fora da plataforma" in m for m in final.motivos), final.motivos
-        # O caminho da Uranyx é a orientação do período, mesmo com o relato do
-        # defeito: sem aviso, e sai sozinho no automático (o 1º teste da
-        # orientação do defeito marcava "fora da orientação").
-        assert not final.avisos and not final.sem_auto, (final.avisos, final.sem_auto)
+        assert final.status == RASCUNHO_BLOQUEADO and final.erros, (final.motivos, final.erros)
         if modo == MODO_AUTO:
-            assert _sai(final)
+            assert not _sai(final)
     # O legado (sem as garantias do agente) barra o link e o prazo.
     conversa, kw = _chamada(_base_conferir(texto=texto, categoria="garantia"))
     legado = await ia.conferir_saida(None, conversa, SimpleNamespace(), **kw)
@@ -531,15 +543,14 @@ async def test_7_so_a_frase_exata_passa(texto):
 
 def test_7_os_prazos_da_regra_de_1_ano():
     prazos = validador.prazos_da_regra([_garantia("uranyx")])
-    assert (
-        validador.validar(
-            A_REGRA,
-            plataforma="shopee",
-            canal="chat",
-            origem="davinci_ia",
-            prazos_de_garantia=prazos,
-        )
-        == []
+    # O dono, 27/10/2026: a regra sem número — o "1 ano: 90 dias + 9 meses" é barrado.
+    assert prazos == frozenset() or not prazos
+    assert validador.validar(
+        A_REGRA,
+        plataforma="shopee",
+        canal="chat",
+        origem="davinci_ia",
+        prazos_de_garantia=prazos,
     )
     # O "3 meses" do aparelho Uranyx (a fala antiga) continua barrado sem o par.
     assert validador.validar(
@@ -557,15 +568,13 @@ def test_7_os_prazos_da_regra_de_1_ano():
         origem="davinci_ia",
         prazos_de_garantia=prazos,
     )
-    # As datas dos períodos são do bloco.
-    g = _garantia("uranyx")
-    assert (
-        validador.conferir_garantia(
-            "A garantia com a loja foi até 18/08/2026; com a Uranyx vai até 20/05/2027.",
-            [g],
-            prazos_de_garantia=prazos,
-        )
-        == []
+    # As datas dos períodos não saem do `ver_garantia` (sem_prazo_uranyx): sem elas no
+    # bloco, a data é barrada.
+    g = ferramentas.sem_prazo_uranyx(_garantia("uranyx"))
+    assert validador.conferir_garantia(
+        "A garantia com a loja foi até 18/08/2026; com a Uranyx vai até 20/05/2027.",
+        [g],
+        prazos_de_garantia=prazos,
     )
 
 
@@ -577,15 +586,24 @@ def test_7_nunca_homologado():
     assert checagens.conferir_homologado("O aparelho é homologado pela Anatel.") == []
     assert checagens.conferir_homologado(A_REGRA) == []
     assert 'nunca "homologado"' in prompt.bloco_geral()
+    # O dono, 27/10/2026: "homologado pela Uranyx" é a fala da equipe quando o CLIENTE
+    # pergunta da homologação ou da Anatel — só aí e só essa forma.
+    certo = "Sim, o aparelho é homologado pela Uranyx."
+    assert checagens.conferir_homologado(certo, ["é homologado pela anatel?"]) == []
+    assert checagens.conferir_homologado(certo, ["é original?"])
+    assert checagens.conferir_homologado("É homologado pela loja.", ["é homologado?"])
 
 
 def test_7_o_verificador_conhece_a_excecao():
-    # v5 trouxe a exceção; o v6 (item 12 da auditoria ao vivo, 21/10/2026) a mantém.
-    assert int(verificador.VERSAO.removeprefix("v")) >= 5
-    assert '"pelo app Uranyx ou pelo site uranyx.com.br/sac", exatamente assim' in (
-        verificador.SISTEMA
-    )
-    assert 'o "periodo" "uranyx"' in verificador.SISTEMA
+    # v5 trouxe a exceção; o v16 (o dono, 27/10/2026) a tirou: o app, o site e o SAC da
+    # Uranyx marcam o item 4, e os 90 dias / 1 ano / 9 meses do Uranyx não têm lastro.
+    assert int(verificador.VERSAO.removeprefix("v")) >= 16
+    assert "exatamente assim" not in verificador.SISTEMA.split("4. caminho_fora")[1][:1500]
+    assert "ao SAC da Uranyx também é true" in verificador.SISTEMA
+    assert "do aparelho Uranyx, «90 dias», «1 ano», «9 meses»" in verificador.SISTEMA
+    shopee = prompt.bloco_da_plataforma("shopee", [])
+    assert "«tem garantia, mas a única forma é a devolução pela Shopee»" in shopee
+    assert "Do Uranyx, nunca prazo em dias, meses ou anos, datas, o app Uranyx" in shopee
 
 
 def test_7_o_prompt_da_garantia_uranyx():
@@ -646,18 +664,20 @@ async def test_7_ver_garantia_traz_os_periodos_e_os_fatos(db: AsyncSession, make
     base = await _base_f(db, conversa)
     ctx = _ctx(conversa, base)
     dados = await _chamar(ctx, base, conversa, "ver_garantia", numero=None)
-    assert dados["linha"] == "uranyx" and dados["periodo"] == "uranyx"
-    inicio = date.fromisoformat(dados["inicio"])
-    assert dados["fim_loja"] == (inicio + timedelta(days=90)).isoformat()
-    assert dados["fim_uranyx"] == dados["fim_software"]
-    assert dados["regra"]["caminho_depois_da_loja"] == CAMINHO
+    # O dono, 27/10/2026: sem período, sem datas de fim e sem o caminho da Uranyx.
+    assert dados["linha"] == "uranyx" and "periodo" not in dados
+    for chave in ("fim_loja", "fim_uranyx", "fim_hardware", "fim_software"):
+        assert chave not in dados
+    assert "caminho_depois_da_loja" not in dados["regra"]
+    assert dados["regra"]["como_a_equipe_responde"]
     ids = [f"fato:{f.id}" for f in fatos]
     assert dados["regra"]["fatos"] == ids and set(ids) <= set(dados["evidencias"])
-    # O texto do fato ("homologados") não vai na regra.
-    assert "homologad" not in json.dumps(dados, ensure_ascii=False)
+    # O texto do fato não vai na regra (a fala "homologado pela Uranyx" da equipe vai, só
+    # para quem pergunta da homologação — o dono, 27/10/2026).
+    assert "homologados pela Uranyx têm" not in json.dumps(dados, ensure_ascii=False)
     (conferida,) = ctx.garantias_conferidas
-    assert conferida["periodo"] == "uranyx" and conferida["fim_loja"] == dados["fim_loja"]
-    assert checagens.caminho_uranyx_liberado(ctx.garantias_conferidas)
+    assert "periodo" not in conferida and "fim_loja" not in conferida
+    assert not checagens.caminho_uranyx_liberado(ctx.garantias_conferidas)
 
 
 async def test_7_o_envio_aceita_o_caminho_so_no_rascunho_do_agente_marcado(

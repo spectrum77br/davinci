@@ -685,7 +685,7 @@ def test_tamanho_do_prefixo():
     # Liberações do dono (23/10/2026, `prompt.PRODUTO_CONDICAO_REGIAO`): 4_500 → 4_700.
     # D1–D3 do dono (23/10/2026: a entrega como a equipe, o "responde e marca", a garantia
     # Apple): 4_700 → 5_000.
-    assert 2_500 <= tokens_plataforma <= 5_000, plataformas
+    assert 2_500 <= tokens_plataforma <= 5_250, plataformas  # garantia (27/10/2026)
 
 
 # ─────────────── os argumentos do runner ───────────────

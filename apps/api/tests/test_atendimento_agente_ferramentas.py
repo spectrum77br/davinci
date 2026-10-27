@@ -776,19 +776,15 @@ async def test_ver_garantia_registrada_no_painel(db: AsyncSession, make_user):
     dados = _ler(texto, "ver_garantia")
     assert dados["garantia_registrada"] is True and dados["pedido"] == "{numero_pedido}"
     (item,) = dados["garantias"]
-    assert (item["inicio"], item["fim_hardware"], item["fim_software"], item["status"]) == (
-        "2026-09-01",
-        "2026-12-01",
-        "2027-09-01",
-        "ativa",
-    )
+    assert (item["inicio"], item["status"]) == ("2026-09-01", "ativa")
     assert item["regra"] == ferramentas.REGRA_URANYX
-    # Revisão do r5i (decisões 6 a 8 do dono): os períodos pela entrega.
-    assert (item["fim_loja"], item["fim_uranyx"]) == ("2026-11-30", "2027-09-01")
-    assert item["periodo"] in ("loja", "uranyx", "expirada")
+    # O dono, 27/10/2026 (por cima das decisões 6 a 8): sem as datas de fim nem o período
+    # (o fim do hardware e do software são os 3 e os 12 meses que não se dizem mais).
+    for chave in ("fim_hardware", "fim_software", "fim_loja", "fim_uranyx", "periodo"):
+        assert chave not in item
     assert dados["evidencias"] == [f"garantia:{g.id}"]
     assert ctx.garantia_consultada is True
-    assert ctx.garantias_conferidas[0]["fim_hardware"] == "2026-12-01"
+    assert ctx.garantias_conferidas[0]["fim_hardware"] is None
     _sem_pii(texto)
     assert "1234" not in texto  # a NF do destinatário
 
@@ -811,37 +807,32 @@ async def test_ver_garantia_calculada_uranyx_com_e_sem_data_de_entrega(db: Async
     dados = await _chamar(ctx, base, conversa, "ver_garantia", numero=None)
     assert dados["garantia_registrada"] is False and dados["linha"] == "uranyx"
     assert dados["produto_uranyx"] is True and dados["produto"] == "Celular Uranyx A18 Pro Max S5"
-    assert (dados["inicio"], dados["fim_hardware"], dados["fim_software"]) == (
-        "2026-09-01",
-        "2026-12-01",
-        "2027-09-01",
-    )
+    assert dados["inicio"] == "2026-09-01"
+    # O dono, 27/10/2026: sem as datas de fim, o período nem os meses na regra.
+    for chave in ("fim_hardware", "fim_software", "fim_loja", "fim_uranyx", "periodo"):
+        assert chave not in dados
     assert dados["status"] == "ativa" and dados["entregue_sem_data"] is False
     assert dados["inicio_origem"] == "rastreio da transportadora (data aproximada)"
-    assert dados["regra"]["hardware_meses"] == 3 and dados["regra"]["software_meses"] == 12
+    assert "hardware_meses" not in dados["regra"] and "software_meses" not in dados["regra"]
     assert dados["evidencias"] == ["garantia:pedido:{numero_pedido}"]
     (conferida,) = ctx.garantias_conferidas
-    assert {k: v for k, v in conferida.items() if k != "periodo"} == {
+    assert conferida == {
         "inicio": "2026-09-01",
-        "fim_hardware": "2026-12-01",
-        "fim_software": "2027-09-01",
+        "fim_hardware": None,
+        "fim_software": None,
         "status": "ativa",
         "produto": "Celular Uranyx A18 Pro Max S5",
         "regra": ferramentas.REGRA_URANYX,
-        # Revisão do r5i (decisões 6 a 8 do dono): os períodos pela entrega.
-        "fim_loja": "2026-11-30",
-        "fim_uranyx": "2027-09-01",
     }
-    assert conferida["periodo"] == dados["periodo"]
-    # As datas viram números permitidos (o validador confere a data).
-    assert any("2026-12-01" in t for t in ctx.permitidos_extra())
+    # As datas de fim não viram números permitidos.
+    assert not any("2026-12-01" in t for t in ctx.permitidos_extra())
 
     # Sem data de entrega, mas o Bling já diz "Entregue" (83953): só a regra.
     conversa2 = await _conversa(db, make_user, pedido="251002URANYX02")
     await _bling(db, "300002", "251002URANYX02", situacao="83953")
     base2 = await _base(db, conversa2)
     dados2 = await _chamar(_ctx(conversa2, base2), base2, conversa2, "ver_garantia", numero=None)
-    assert dados2["inicio"] is None and dados2["fim_hardware"] is None
+    assert dados2["inicio"] is None and "fim_hardware" not in dados2
     assert dados2["status"] == "entregue_sem_data" and dados2["entregue_sem_data"] is True
     assert dados2["regra"]["a_partir_de"] == "entrega"
     # Sem data e sem entrega no Bling: aguardando.

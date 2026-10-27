@@ -785,18 +785,16 @@ def _erros_do_validador(texto: str, prazos: frozenset) -> list[str]:
 def test_2_3ee1f81e_os_prazos_do_fato_e_da_regra_com_o_par():
     # Revisão do fechamento (23/10/2026): o prazo de FATO leva a marca "fato:" (e o geral, a
     # marca do produto que o fato diz).
-    assert validador.prazos_dos_fatos([FATO_23, FATO_24]) == {
-        (1, "ano", "fato:geral:uranyx"),
-        (90, "dia", "fato:loja"),
-        (9, "mes", "fato:uranyx"),
-    }
+    # O dono, 27/10/2026: o fato da garantia Uranyx não livra mais prazo nenhum.
+    assert validador.prazos_dos_fatos([FATO_23, FATO_24]) == frozenset()
     assert validador.prazos_dos_fatos([FATO_8]) == {(90, "dia", "fato:geral:charlots")}
     assert validador.prazos_dos_fatos([FATO_25]) == {(1, "ano", "fato:geral:apple")}
     assert validador.prazos_dos_fatos([FATO_NF, "", None]) == frozenset()
     regra = validador.prazos_da_regra(GARANTIA_URANYX)
-    # O rascunho real: nenhum prazo sobra, pela regra do ver_garantia OU pelo fato citado.
+    # O rascunho real (o dono, 27/10/2026): o "1 ano: 90 dias + 9 meses" do Uranyx não sai
+    # mais — nem pela regra do ver_garantia nem pelo fato citado.
     for prazos in (regra, validador.prazos_dos_fatos([FATO_23, FATO_24])):
-        assert _erros_do_validador(RASCUNHO_3EE1, prazos) == []
+        assert _erros_do_validador(RASCUNHO_3EE1, prazos)
     # Sem prazo nenhum (o legado): os dois motivos de sempre.
     assert _erros_do_validador(RASCUNHO_3EE1, frozenset()) == [
         "prazo em números só pode vir do sistema",
@@ -831,6 +829,8 @@ def test_2_3ee1f81e_o_prazo_sem_o_par_continua_barrado(texto):
 
 
 async def test_2_3ee1f81e_no_caminho_auto_vai_ao_verificador():
+    # O dono, 27/10/2026 (a garantia como a equipe responde): o "1 ano: 90 dias com a loja +
+    # 9 meses com a Uranyx" não sai mais — o mesmo rascunho agora fica com pessoa.
     ctxd = {
         "pedido": {"numero": "9", "numeroloja": "261021AAAA0004", "situacao": "Em andamento"},
         "logistica": {"status": "Pedido postado"},
@@ -848,7 +848,8 @@ async def test_2_3ee1f81e_no_caminho_auto_vai_ao_verificador():
         fatos_lidos={"fato:23": FATO_23, "fato:24": FATO_24},
         garantias=GARANTIA_URANYX,
     )
-    assert r.decisao == VAI_AO_VERIFICADOR, r.motivos
+    assert r.decisao != VAI_AO_VERIFICADOR, r.motivos
+    assert any("prazo de garantia só pode vir do sistema" in m for m in r.motivos), r.motivos
 
 
 # 3fe6b65e (Barbosa, 22/10 23:20): a air fryer entregue, o vidro arranhado.
@@ -1187,7 +1188,8 @@ def test_3_31ab491d_a_instrucao_de_recebimento_vem_na_entrega_instrucoes():
 def test_3_o_sistema_do_verificador_nao_muda():
     # O item 3 não mudou o SISTEMA (era v9). Parte 2 (item 6, 23/10/2026): o v10 só acrescenta
     # a BUSCA NO CATÁLOGO DA LOJA — o modelo continua o Haiku.
-    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14", "v15") and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14", "v15", "v16")
+    assert v.MODELO == "claude-haiku-5-5"
 
 
 # As linhas novas da calibração (o SISTEMA não muda; a entrada sim): os bons e os ruins.
@@ -1387,7 +1389,7 @@ def test_4_o_bloco_2_manda_responder_so_o_que_foi_perguntado():
         cabeca, _assuntos = texto.split("# ASSUNTOS")
         # Parte 2 (item 7, 23/10/2026): as regras vão dentro do COMO PENSAR.
         assert prompt.COMO_PENSAR in cabeca
-        assert len(texto) / 3.5 <= 5_000, plataforma  # D1–D3 do dono (23/10/2026)
+        assert len(texto) / 3.5 <= 5_250, plataforma  # D1–D3 (23/10); garantia (27/10/2026)
     s = prompt.COMO_PENSAR
     for trecho in (
         "Responda só o que o cliente perguntou neste turno, em 1 a 3 frases",

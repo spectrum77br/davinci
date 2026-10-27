@@ -402,7 +402,7 @@ def _entrada(avisos: tuple[str, ...]) -> str:
 
 
 def test_v14_os_avisos_vao_na_entrada_sem_o_fecho_de_politica():
-    assert verificador.VERSAO == "v15"
+    assert verificador.VERSAO == "v16"
     assert "AVISOS DAS CHECAGENS" not in _entrada(())
     e = _entrada(("afirma o NFC ('sim') sem fonte — no automático, pessoa confere",))
     assert verificador.CABECALHO_AVISOS in e
@@ -534,28 +534,39 @@ def _entrada_shopee(evidencias, texto, perguntas, plataforma="shopee") -> str:
 
 
 def test_v15_as_frases_padrao_vao_so_na_shopee():
-    assert verificador.VERSAO == "v15"
+    assert verificador.VERSAO == "v16"
     e = _entrada_shopee([], "Olá!", ["oi"])
     assert verificador.CABECALHO_FRASES_PADRAO in e
     for frase in verificador.FRASES_PADRAO_SHOPEE:
         assert f"- {frase}" in e
-    assert verificador.FRASE_PADRAO_REPOSICAO not in e
+    # v16: a reposição (com os casos dela) e a garantia como a equipe responde, sempre.
+    assert f"- {verificador.FRASE_PADRAO_REPOSICAO}" in e
+    for frase in verificador.FRASES_PADRAO_GARANTIA_SHOPEE:
+        assert f"- {frase}" in e
     assert verificador.CABECALHO_FRASES_PADRAO not in _entrada_shopee([], "Olá!", ["oi"], "ml")
     # O SISTEMA diz o que a seção vale e que a empatia não é afirmação.
     assert "FRASES-PADRÃO DA LOJA NESTA PLATAFORMA (quando vier)" in verificador.SISTEMA
     assert "empatia e acolhimento" in verificador.SISTEMA
 
 
-def test_v15_a_reposicao_so_com_a_opcao_esgotada_nas_evidencias():
+def test_v16_a_reposicao_vai_sempre_com_os_casos_dela():
+    # v16 (27/10/2026): a linha vai sempre na Shopee e diz os casos — a opção esgotada nas
+    # EVIDÊNCIAS, a que o cliente diz esgotada (ou pergunta quando volta) e a condição; a
+    # opção disponível nos dados, nunca (o SISTEMA continua com a contradição).
     texto = "A 110v está esgotada e não temos previsão de reposição."
-    com = _entrada_shopee([AIR_110_ESGOTADA], texto, ["tem previsão da 110v?"])
-    assert verificador.FRASE_PADRAO_REPOSICAO in com
     disponivel = {
         **AIR_110_ESGOTADA,
         "variacoes": [{"nome": "110v", "disponivel": True, "confiavel": True}],
     }
-    sem = _entrada_shopee([disponivel], texto, ["tem previsão da 110v?"])
-    assert verificador.FRASE_PADRAO_REPOSICAO not in sem
+    for ev in ([AIR_110_ESGOTADA], [disponivel], []):
+        assert verificador.FRASE_PADRAO_REPOSICAO in _entrada_shopee(ev, texto, ["e a 110v?"])
+    for trecho in (
+        "a que o próprio cliente diz esgotada ou de que pergunta quando volta",
+        "dita como condição",
+        "nunca para a opção que as EVIDÊNCIAS trazem disponível",
+    ):
+        assert trecho in verificador.FRASE_PADRAO_REPOSICAO
+    assert "fora dos casos que a FRASE-PADRÃO da reposição diz" in verificador.SISTEMA
 
 
 def test_v15_o_acessorio_so_com_o_fato_que_nega_a_venda():
@@ -585,3 +596,132 @@ def test_a_calibracao_tem_o_grupo_das_frases_padrao():
     ruins = [c for c in casos if not c["esperado"]["ok_para_envio_automatico"]]
     assert len(boas) >= 8 and len(ruins) >= 6
     assert all(verificador.CABECALHO_FRASES_PADRAO in calibrar.entrada_do_caso(c) for c in casos)
+
+
+# ═══════════════ v16 (o dono, 27/10/2026) ═══════════════
+
+
+def test_v16_a_condicao_perguntada_sem_resposta_e_aviso():
+    (p,) = checagens.conferir_condicao_sem_resposta(
+        "É o Uranyx A17 Pro Max, novo e lacrado.", ["Esses celular original"], acao="responder"
+    )
+    assert p.codigo == checagens.CONDICAO_SEM_RESPOSTA and not checagens.pendencia_dura(p)
+    assert (
+        checagens.conferir_condicao_sem_resposta(
+            "Sim, é original e lacrado.", ["é original?"], acao="responder"
+        )
+        == []
+    )
+    # O "cartão original" do estorno não é a condição do produto (rev-R60).
+    assert (
+        checagens.conferir_condicao_sem_resposta(
+            "Volta para o mesmo cartão.",
+            ["o estorno volta pro meu cartão original?"],
+            acao="responder",
+        )  # fmt: skip
+        == []
+    )
+    (q,) = checagens.conferir_anuncio_nao_informa(
+        "O anúncio não informa carregamento por indução.", acao="responder"
+    )
+    assert q.codigo == checagens.ANUNCIO_NAO_INFORMA and not checagens.pendencia_dura(q)
+
+
+def test_v16_o_sem_previsao_do_que_o_cliente_diz_esgotado_e_da_condicao():
+    # Sem dado de estoque nenhum: o cliente que diz esgotado (ou pergunta quando volta).
+    texto = "No momento não temos previsão de reposição do produto esgotado."
+    assert (
+        checagens.conferir_sem_previsao(texto, [], ["Tem previsão de retorno do produto esgotado?"])
+        == []
+    )
+    assert checagens.conferir_sem_previsao(texto, [], ["Qual o prazo de entrega?"])
+    # A loja que já disse "sem previsão" na conversa (85f56d89186a).
+    assert (
+        checagens.conferir_sem_previsao(
+            "Como já informamos, a cor azul está sem previsão de reposição.",
+            [],
+            ["qual loja tem a cor azul?"],
+            conversa=["Quando vai ter azul?", "sem previsão!"],
+        )
+        == []
+    )
+    # A condição, com a opção citada disponível (ccef00af2b17).
+    rosa = {
+        "item_id": "1",
+        "variacoes": [
+            {"nome": "M1 Rosa", "disponivel": True, "confiavel": True},
+            {"nome": "M2 Roxa", "disponivel": False, "confiavel": True},
+        ],
+        "variacoes_completas": True,
+    }
+    cond = (
+        "A M1 Rosa está disponível. Se a cor que você quer for rosa em outro modelo e estiver "
+        "esgotada, não temos previsão de reposição."
+    )
+    assert not [
+        p
+        for p in checagens.conferir_sem_previsao(cond, [rosa], ["o rosa tá esgotado?"])
+        if p.motivo == checagens.MOTIVO_SEM_PREVISAO_SEM_DADO
+    ]
+    # Com a lista, a opção disponível continua contradição.
+    (p,) = checagens.conferir_sem_previsao(
+        "A M1 Rosa não tem previsão de reposição.", [rosa], ["quando volta a rosa?"]
+    )
+    assert p.codigo == checagens.VARIACAO_CONTRADIZ
+
+
+def test_v16_o_endereco_do_pedido_e_o_android_15():
+    assert (
+        checagens._afirmacao_de_entrega(
+            "o pedido é enviado para o endereço cadastrado", checagens._AFIRMA_ENTREGA
+        )
+        is False
+    )
+    assert checagens._afirmacao_de_entrega("enviamos para o Rio", checagens._AFIRMA_ENTREGA)
+    assert not checagens._conflito_de_verdade(
+        {"conflito_no_anuncio": True, "valor": "Android / Android 15"}
+    )
+    assert checagens._conflito_de_verdade(
+        {"conflito_no_anuncio": True, "valor": "128 GB ou 64 GB / 12 GB"}
+    )
+    assert checagens._conflito_de_verdade({"conflito_no_anuncio": True, "valor": "12 / 128"})
+
+
+def test_v16_o_regatilho_reaplica_a_garantia_de_hoje():
+    antiga = {
+        "linha": "uranyx",
+        "status": "ativa",
+        "fim_hardware": "2026-12-01",
+        "fim_loja": "2026-11-30",
+        "periodo": "loja",
+        "regra": {"loja_dias": 90, "uranyx_meses": 9, "fatos": ["fato:23"]},
+    }
+    hoje = regatilho.garantia_de_hoje({**antiga, "garantias": [dict(antiga)]})
+    for g in (hoje, hoje["garantias"][0]):
+        assert "fim_hardware" not in g and "periodo" not in g and "fim_loja" not in g
+        assert "loja_dias" not in g["regra"] and g["regra"]["fatos"] == ["fato:23"]
+        assert g["regra"]["como_a_equipe_responde"]
+    # A Charlots (regra com "dias") não muda.
+    charlots = {"status": "ativa", "regra": {"dias": 90}, "fim_hardware": "2026-12-01"}
+    assert regatilho.garantia_de_hoje(charlots) == charlots
+
+
+def test_v16_o_sistema_e_a_calibracao():
+    s = verificador.SISTEMA
+    for trecho in (
+        "Também têm lastro (v16",
+        "«Case Size: 20 - 25 inches»",
+        "«não encontramos (não localizei) anúncio",
+        "responder «é original?» só com novo ou lacrado (item 7 false)",
+        "Na dúvida, false — a dúvida concreta sobre o TEXTO",
+    ):
+        assert trecho in s, trecho
+    from scripts.agente_eval import calibrar_verificador as calibrar
+
+    casos = [c for c in calibrar.ler_casos(calibrar.CASOS_PADRAO) if c.get("grupo") == "v16"]
+    boas = [c for c in casos if c["esperado"]["ok_para_envio_automatico"]]
+    ruins = [c for c in casos if not c["esperado"]["ok_para_envio_automatico"]]
+    assert len(boas) >= 16 and len(ruins) >= 13
+    for c in casos:
+        calibrar.conferir_caso(c)
+        assert not calibrar.contaminado(c), c["id"]

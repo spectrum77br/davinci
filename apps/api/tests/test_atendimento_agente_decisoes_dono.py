@@ -1068,7 +1068,9 @@ async def test_d2_a_garantia_apple_do_fato_vai_ao_verificador(fala, assunto):
         fatos_lidos=FATO_25,
         conversa=PRE_VENDA,
     )
-    assert r.decisao == VAI, (r.codigos, r.motivos)
+    # v16 (27/10/2026): o «é original?» sem "original" no rascunho vai com AVISO ao verificador.
+    assert r.decisao in (VAI, VAI_COM_AVISO), (r.codigos, r.motivos)
+    assert set(r.codigos) <= {checagens.CONDICAO_SEM_RESPOSTA}, r.codigos
 
 
 async def test_d2_a_resposta_da_equipe_da_mesma_loja_tambem_e_lastro():
@@ -1079,7 +1081,9 @@ async def test_d2_a_resposta_da_equipe_da_mesma_loja_tambem_e_lastro():
         pares_do_pacote=[PAR_APPLE],
         conversa=PRE_VENDA,
     )
-    assert r.decisao == VAI, (r.codigos, r.motivos)
+    # v16 (27/10/2026): o «é original?» sem "original" no rascunho vai com AVISO ao verificador.
+    assert r.decisao in (VAI, VAI_COM_AVISO), (r.codigos, r.motivos)
+    assert set(r.codigos) <= {checagens.CONDICAO_SEM_RESPOSTA}, r.codigos
     outra = await _auto(
         _p(D2_TEXTO, "originalidade_condicao", [f"ficha:{ITEM_WATCH}", "par:1500"]),
         [*_cli(TURNOS_D2[0][0])],
@@ -1194,7 +1198,7 @@ def test_v12_a_entrada_so_traz_a_acao_da_pessoa_no_responde_e_marca():
         consultas=[],
     )
     assert v.CABECALHO_POS_ENVIO in com and "central do vendedor" in com
-    assert v.VERSAO == "v15" and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO == "v16" and v.MODELO == "claude-haiku-5-5"
     assert (
         "AÇÃO QUE CONTINUA COM A PESSOA" in v.SISTEMA and "não vale para essa variação" in v.SISTEMA
     )
@@ -1237,7 +1241,7 @@ def test_bloco_2_diz_as_tres_decisoes_so_onde_cabem():
     assert "garantia Apple de 1 ano a partir da ativação" in shopee
     ml = prompt.bloco_da_plataforma("ml", _categorias_do_manual())
     assert "responde_e_marca" not in ml and "garantia Apple de 1 ano a partir da ativação" in ml
-    assert len(shopee) / 3.5 <= 5_000
+    assert len(shopee) / 3.5 <= 5_250  # garantia da equipe (o dono, 27/10/2026)
 
 
 # ═══════════════ E2E: o D1 inteiro — o agente, o verificador, o envio e a Caixa Humano ═══════════════

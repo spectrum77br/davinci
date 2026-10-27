@@ -1527,6 +1527,9 @@ def so_da_regra(prazos: Collection[tuple[int, str, str]]) -> frozenset[tuple[int
     return frozenset(p for p in prazos if not str(p[2]).startswith(DO_FATO))
 
 
+_FATO_DA_GARANTIA_URANYX = re.compile(r"\buranyx\b.*\bgarantia\b|\bgarantia\b.*\buranyx\b")
+
+
 def prazos_dos_fatos(textos: Iterable[str | None]) -> frozenset[tuple[int, str, str]]:
     """Os prazos (número, "dia"|"mes"|"ano", parte) dos FATOS APROVADOS citados, cada um
     com o par que o PRÓPRIO fato dá. PURA. Só o agente usa (o legado não cita fato).
@@ -1548,6 +1551,11 @@ def prazos_dos_fatos(textos: Iterable[str | None]) -> frozenset[tuple[int, str, 
         if not isinstance(texto, str) or not texto.strip():
             continue
         plano = plano_de(texto)
+        # O dono, 27/10/2026 (a garantia como a equipe responde): o prazo do fato da garantia
+        # Uranyx ("1 ano: 90 dias com a loja e 9 meses com a Uranyx") não livra mais nada —
+        # o fato fica fora até ser desativado ou reescrito no banco.
+        if _FATO_DA_GARANTIA_URANYX.search(plano):
+            continue
         # Revisão (23/10/2026): a marca que o fato diz vai com o prazo geral dele.
         marcas = "".join(f":{m}" for m in _marcas_do_texto(plano))
         for frase in _SEPARA_FRASES.split(plano):

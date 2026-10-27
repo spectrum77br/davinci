@@ -306,8 +306,37 @@ def _dados_da_ferramenta(resultado: str | None) -> tuple[str | None, Any]:
         return m.group(1), None
 
 
+def _uranyx_antiga(regra: Any) -> bool:
+    return isinstance(regra, Mapping) and (
+        "loja_dias" in regra or "caminho_depois_da_loja" in regra or "uranyx_meses" in regra
+    )
+
+
+def garantia_de_hoje(dados: Mapping[str, Any]) -> dict:
+    """O `ver_garantia` gravado com a regra Uranyx de ANTES (o "1 ano: 90 dias + 9 meses" e o
+    caminho da Uranyx) como o código de hoje o devolveria (o dono, 27/10/2026): a regra nova,
+    sem as datas de fim nem o período (`ferramentas.sem_prazo_uranyx`). PURA."""
+
+    def _hoje(g: Mapping[str, Any]) -> dict:
+        regra = g.get("regra")
+        if not _uranyx_antiga(regra):
+            return dict(g)
+        nova = dict(ferramentas.REGRA_URANYX)
+        if isinstance(regra, Mapping) and regra.get("fatos"):
+            nova["fatos"] = list(regra["fatos"])
+        return ferramentas.sem_prazo_uranyx({**g, "regra": nova})
+
+    saida = _hoje(dados)
+    if isinstance(dados.get("garantias"), list):
+        saida["garantias"] = [_hoje(g) if isinstance(g, Mapping) else g for g in dados["garantias"]]
+    return saida
+
+
 def reaplicar_ferramentas(ctx: Any, rastro: Mapping[str, Any]) -> None:
-    """O que cada ferramenta devolveu volta ao `ctx` como no `ferramentas.executar`."""
+    """O que cada ferramenta devolveu volta ao `ctx` como no `ferramentas.executar`.
+
+    v16: o `ver_garantia` gravado com a regra Uranyx de antes volta como o de hoje
+    (`garantia_de_hoje`)."""
     passos = list(rastro.get("passos") or [])
     for i, f in enumerate(rastro.get("ferramentas") or []):
         nome = f.get("ferramenta")
@@ -316,6 +345,8 @@ def reaplicar_ferramentas(ctx: Any, rastro: Mapping[str, Any]) -> None:
         ctx.registrar_passo(nome, dict(f.get("args") or {}), 0, ids=ids)
         if not isinstance(dados, Mapping) or dados.get("ja_consultado"):
             continue
+        if nome == ferramentas.VER_GARANTIA:
+            dados = garantia_de_hoje(dados)
         provados = [x for x in ids if not x.startswith(agente_ctx.PREFIXOS_SEM_PROVA)]
         provados += [str(x) for x in dados.get("evidencias") or [] if isinstance(x, str)]
         corpo = json.dumps(dados, ensure_ascii=False, sort_keys=True)
@@ -371,7 +402,13 @@ def reaplicar_ferramentas(ctx: Any, rastro: Mapping[str, Any]) -> None:
                 }
             )
         if nome == ferramentas.VER_GARANTIA:
-            ctx.registrar_garantias([ferramentas._para_validador(dados)])
+            ctx.registrar_garantias(
+                [
+                    ferramentas._para_validador(g)
+                    for g in (dados.get("garantias") or [dados])
+                    if isinstance(g, Mapping)
+                ]
+            )
         if dados.get("fatos"):
             ctx.registrar_fatos([x for x in dados["fatos"] if isinstance(x, Mapping)])
 
@@ -710,6 +747,11 @@ async def regatilhar(
             "ok": v.ok,
             "falha": v.falha,
             "motivo": None if v.ok else v.motivo(),
+            # v16: o que o verificador escreveu (o "não liberou" sem marca não dizia o porquê).
+            "motivos": list(v.veredito.motivos) if v.veredito is not None else [],
+            "afirma_sem_lastro": (
+                list(v.veredito.afirma_sem_lastro) if v.veredito is not None else []
+            ),
             "custo_usd": round(v.uso.custo_usd, 6),
         },  # fmt: skip
         "custo_usd": round(v.uso.custo_usd, 6),
