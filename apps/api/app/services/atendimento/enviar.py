@@ -522,6 +522,7 @@ async def _destino(
     origem: str,
     rascunho_id: UUID | None = None,
     para: str | None = None,
+    nf_automatica: bool = False,
 ) -> _Destino:
     """Confere as travas que não dependem do texto; levanta `EnvioRecusado`.
 
@@ -637,7 +638,9 @@ async def _destino(
             if rascunho_id is not None
             else None
         )
-        if await ia._motivos_humano_para_auto(session, conversa, rascunho):
+        if await ia._motivos_humano_para_auto(
+            session, conversa, rascunho, nf_automatica=nf_automatica
+        ):
             raise EnvioRecusado(
                 RECUSA_NAO_AGUARDA,
                 "A triagem da Caixa Humano exige uma pessoa nesta conversa.",
@@ -2161,6 +2164,7 @@ async def _preparar_foto(
     ultima_vista_id: UUID | None,
     confirmar: bool,
     para: str | None = None,
+    nf_chave: str | None = None,
 ) -> tuple[AtendimentoMensagem, _Destino, str | None, zap_midia.CopiaDeSaida | None]:
     """Passos 0 e 1 da foto: trava, confere e grava a linha em voo (sem commit).
 
@@ -2222,6 +2226,9 @@ async def _preparar_foto(
             "foto": {"sha256": foto.sha256, "mime": foto.mime, "bytes": foto.tamanho},
             # Reclamação: a quem foi (o `receiver_role`, o mesmo da leitura).
             **({"para": destino.receiver_role} if destino.para else {}),
+            # A NF do botão "NF" (28/10/2026): a chave marca a NF que a pessoa
+            # mandou — o agente nunca a repete (`nf_automatica.ja_enviada`).
+            **({"nf": {"chave": nf_chave, "automatica": False}} if nf_chave else {}),
         },
     )
     await session.flush()
@@ -2361,6 +2368,7 @@ async def enviar_foto(
     ultima_vista_id: UUID | None = None,
     confirmar: bool = False,
     para: str | None = None,
+    nf_chave: str | None = None,
 ) -> AtendimentoMensagem:
     """Envia UMA foto (já conferida: `foto.validar_foto`) na conversa; devolve a mensagem.
 
@@ -2388,6 +2396,7 @@ async def enviar_foto(
             ultima_vista_id=ultima_vista_id,
             confirmar=confirmar,
             para=para,
+            nf_chave=nf_chave,
         )
     except BaseException:
         await ponto.rollback()
@@ -2454,6 +2463,201 @@ async def enviar_foto(
         bloqueio=bool(resultado.bloqueio),
     )
     return mensagem
+
+
+# ── A NF pelo agente, sozinha (28/10/2026, `nf_automatica.py`) ────────────
+# O mesmo caminho da foto, com as travas da IA (`_destino(origem=ORIGEM_IA,
+# nf_automatica=True)`: só a ação da NF é liberada na triagem) e, sob a trava
+# da conversa, o gatilho ainda sem resposta e a NF nunca repetida na conversa.
+# A imagem sai primeiro (upload que falha = nada saiu); a frase depois, na
+# mesma rodada — sem as travas da "vez" (a conversa já foi respondida pela
+# imagem), mas com o validador e a trava da conversa.
+
+RECUSA_NF_JA_ENVIADA = "nf_ja_enviada"
+
+
+async def enviar_nf_automatica(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    foto,
+    *,
+    rascunho: AtendimentoRascunho,
+    chave: str,
+    legenda: str,
+    numero: str | None = None,
+) -> tuple[AtendimentoMensagem, AtendimentoMensagem | None]:
+    """Manda a NF (a imagem/PDF já pronta) e depois a `legenda`. Devolve (nf, frase).
+
+    O contrato do `enviar_foto`: `EnvioRecusado` = nada saiu; erro da
+    plataforma vira `falhou`/`revisar` na mensagem. A frase só sai com a NF
+    `enviada` (None se não saiu). O rascunho vira `enviado` na MESMA transação
+    da linha em voo: uma segunda rodada não o pega pendente.
+    """
+    from app.services.atendimento import foto as foto_mod
+    from app.services.atendimento import nf_automatica
+
+    ponto = await session.begin_nested()
+    try:
+        await travar_conversa(session, conversa)
+        destino = await _destino(
+            session, conversa, origem=ORIGEM_IA, rascunho_id=rascunho.id, nf_automatica=True
+        )
+        if destino.zap is not None or foto_mod.motivo_sem_foto(conversa):
+            raise EnvioRecusado(RECUSA_FOTO_NAO_SUPORTADA, "Esta caixa não recebe a NF sozinha.")
+        await session.refresh(rascunho)
+        await _conferir_gatilho_ia(session, conversa, rascunho)
+        if await nf_automatica.ja_enviada(
+            session, conversa, chave=chave, sha256=foto.sha256, numero=numero
+        ):
+            raise EnvioRecusado(RECUSA_NF_JA_ENVIADA, "Esta NF já foi enviada nesta conversa.")
+        legenda_ok = _preparar_texto(legenda, conversa=conversa, origem=ORIGEM_IA)
+        # No ML o anexo vai DENTRO de uma mensagem com texto: a frase vai junto.
+        junto = foto_mod.legenda_obrigatoria(conversa)
+        await aposentar_envios_presos(session, conversa_id=conversa.id)
+        tipo = "arquivo" if foto.mime == foto_mod.PDF else "imagem"
+        mensagem = AtendimentoMensagem(
+            conversa_id=conversa.id,
+            externo_id=None,
+            autor=AUTOR_LOJA,
+            origem=ORIGEM_IA,
+            autor_user_id=None,
+            tipo=tipo,
+            texto=legenda_ok if junto else None,
+            anexos=[{"tipo": tipo, "nome": foto.nome, "mime": foto.mime, "tamanho": foto.tamanho}],
+            enviada_em=None,
+            status=MSG_ENVIANDO,
+            rascunho_id=rascunho.id,
+            payload={
+                "foto": {"sha256": foto.sha256, "mime": foto.mime, "bytes": foto.tamanho},
+                "nf": {"chave": chave, "automatica": True},
+            },
+        )
+        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(mensagem)
+                await session.flush()
+        except IntegrityError as e:
+            if not is_unique_violation(e):
+                raise
+            raise EnvioRecusado(
+                RECUSA_ENVIO_EM_ANDAMENTO, "Há uma resposta sendo enviada nesta conversa."
+            ) from e
+        rascunho.status = RASCUNHO_ENVIADO
+    except BaseException:
+        await ponto.rollback()
+        raise
+    await ponto.commit()
+    gravar.recalcular(conversa, [mensagem])
+    await session.commit()
+    logger.info(
+        "atendimento_nf_auto_iniciada",
+        conversa_id=str(conversa.id),
+        mensagem_id=str(mensagem.id),
+        plataforma=conversa.plataforma,
+        bytes=foto.tamanho,
+    )
+    resultado = await _chamar_plataforma_foto(
+        session, conversa, destino.integration, foto, legenda_ok if junto else None
+    )
+    await _gravar_resultado(
+        session,
+        conversa,
+        mensagem,
+        resultado,
+        rascunho=None,
+        texto_digitado=legenda_ok if junto else "",
+        user=None,
+        origem=ORIGEM_IA,
+        avaliar=False,
+    )
+    if mensagem.status == MSG_FALHOU:
+        # Revisão de 28/10 (B2): nada chegou — a sugestão volta para a pessoa (o
+        # cartão com "Anexar a NF"); duplicar não dá: a falhada não conta e a
+        # próxima tentativa passa de novo por tudo, sob a trava.
+        rascunho.status = RASCUNHO_PENDENTE
+        await session.commit()
+    if mensagem.status != MSG_ENVIADA or junto:
+        return mensagem, None
+    return mensagem, await _frase_depois_da_nf(session, conversa, destino, legenda_ok, rascunho)
+
+
+async def _frase_depois_da_nf(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    destino: _Destino,
+    texto: str,
+    rascunho: AtendimentoRascunho,
+) -> AtendimentoMensagem | None:
+    """A frase depois da NF que saiu. Nunca levanta: sem ela, a NF já chegou."""
+    try:
+        ponto = await session.begin_nested()
+        try:
+            await travar_conversa(session, conversa)
+            # Revisão de 28/10 (C5): a imagem levou até 150 s — a pessoa pode ter
+            # assumido, pausado a IA ou fechado; a loja pode ter saído do automático.
+            await session.refresh(conversa)
+            canal = (
+                await session.get(AtendimentoCanal, conversa.canal_id, populate_existing=True)
+                if conversa.canal_id is not None
+                else None
+            )
+            if (
+                conversa.ia_pausada
+                or conversa.atribuido_a is not None
+                or conversa.sem_resposta_necessaria
+                or conversa.situacao in (CONVERSA_FECHADA, CONVERSA_BLOQUEADA)
+                or canal is None
+                or canal.modo != MODO_AUTO
+            ):
+                await ponto.rollback()
+                await session.commit()
+                return None
+            await aposentar_envios_presos(session, conversa_id=conversa.id)
+            frase = AtendimentoMensagem(
+                conversa_id=conversa.id,
+                externo_id=None,
+                autor=AUTOR_LOJA,
+                origem=ORIGEM_IA,
+                autor_user_id=None,
+                tipo="texto",
+                texto=texto,
+                anexos=[],
+                enviada_em=None,
+                status=MSG_ENVIANDO,
+                rascunho_id=rascunho.id,
+                payload={"nf_frase": True},
+            )
+            async with session.begin_nested():
+                session.add(frase)
+                await session.flush()
+        except BaseException:
+            await ponto.rollback()
+            raise
+        await ponto.commit()
+        await session.commit()
+        resultado = await _chamar_plataforma(session, conversa, destino.integration, texto)
+        await _gravar_resultado(
+            session,
+            conversa,
+            frase,
+            resultado,
+            rascunho=None,
+            texto_digitado=texto,
+            user=None,
+            origem=ORIGEM_IA,
+            avaliar=False,
+        )
+        return frase
+    except Exception as e:  # noqa: BLE001 — a NF já saiu; a frase é complemento
+        logger.warning(
+            "atendimento_nf_auto_frase_falhou", conversa_id=str(conversa.id), err=type(e).__name__
+        )
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        return None
 
 
 # ── Mensagem automática (05/10/2026) ──────────────────────────────────────

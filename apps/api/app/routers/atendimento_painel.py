@@ -30,6 +30,7 @@ Registro no `main.py`: `app.include_router(atendimento_painel_router.router)`
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -200,6 +201,7 @@ async def enviar_foto(
     ultima_vista_id: Annotated[UUID | None, Form()] = None,
     confirmar: Annotated[bool, Form()] = False,
     para: Annotated[Literal["comprador", "mediador"] | None, Form()] = None,
+    nf_chave: Annotated[str | None, Form(max_length=64)] = None,
 ) -> ResponderOut:
     """Manda UMA foto ao comprador (Shopee, TikTok, pós-venda do ML e o Zap do número).
 
@@ -244,6 +246,8 @@ async def enviar_foto(
             ultima_vista_id=ultima_vista_id,
             confirmar=confirmar,
             para=para,
+            # Só a chave de 44 dígitos (o anexo do botão "NF"); o resto é ignorado.
+            nf_chave=nf_chave if nf_chave and re.fullmatch(r"\d{44}", nf_chave) else None,
         )
     except EnvioRecusado as e:
         logger.info(
@@ -281,6 +285,9 @@ async def nf_do_pedido(
         headers={
             "Content-Disposition": f'inline; filename="{nf.nome_arquivo}"',
             "X-NF-Numero": nf.numero,
+            # A tela devolve no POST /foto: a NF mandada pela pessoa fica marcada
+            # e o agente nunca a repete (`nf_automatica.ja_enviada`).
+            "X-NF-Chave": nf.chave,
             "Cache-Control": "no-store",
         },
     )

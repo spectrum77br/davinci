@@ -60,6 +60,10 @@ assert.match(fonte, /\$fetch\.raw<Blob>\(`\/api\/atendimento\/conversas\/\$\{enc
 // O nome do arquivo vem da NF que o servidor escolheu (cabeçalho), não do painel.
 assert.match(fonte, /r\.headers\.get\('x-nf-numero'\) \|\| envioFoto\.value\?\.nf_numero/)
 assert.match(fonte, /new File\(\[r\._data\], numero \? `NF_\$\{numero\}\.pdf` : 'NF\.pdf', \{ type: 'application\/pdf' \}\)/)
+// A chave da NF volta no POST /foto: a NF mandada pela pessoa fica marcada (o
+// agente nunca a repete na conversa).
+assert.match(fonte, /const nfChave = r\.headers\.get\('x-nf-chave'\) \|\| undefined/)
+assert.match(fonte, /if \(f\.nfChave\) fd\.append\('nf_chave', f\.nfChave\)/)
 // O erro vem como Blob e o `data` do FetchError é só leitura: lê numa cópia.
 assert.match(fonte, /let dados = e\?\.data\n    if \(dados instanceof Blob\)/)
 assert.doesNotMatch(fonte, /e\.data = JSON\.parse/)

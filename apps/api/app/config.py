@@ -594,6 +594,10 @@ class Settings(BaseSettings):
     # Envio AUTOMÁTICO. Só vale para canal em modo `auto` e categoria liberada
     # nele — os três precisam concordar.
     atendimento_auto_ativo: bool = False
+    # A NF pelo agente SOZINHA nas lojas no automático (28/10/2026, OK do Eduardo;
+    # `services/atendimento/nf_automatica.py`). Desligada, a NF fica com a pessoa
+    # (o "Anexar a NF" do cartão da sugestão).
+    atendimento_nf_automatica: bool = True
     # MENSAGENS AUTOMÁTICAS (05/10/2026, docs/atendimento-automacoes.md): o
     # motor que recria no DaVinci as automações que o Duoke manda hoje (menu
     # e respostas das opções, "aguarde", convite para seguir, "ficou alguma

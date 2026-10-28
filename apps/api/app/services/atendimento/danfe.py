@@ -78,6 +78,7 @@ class NfDoPedido:
     serie: str | None
     pedido_bling: str
     emitida_em: datetime | None
+    chave: str = ""
 
     @property
     def nome_arquivo(self) -> str:
@@ -167,6 +168,7 @@ async def nf_da_conversa(session: AsyncSession, conversa: AtendimentoConversa) -
                 NfNota.valor,
                 NfNota.data_emissao,
                 NfNota.xml,
+                NfNota.chave,
             )
             .where(NfNota.pedido_bling == pedido, NfNota.situacao == SITUACAO_AUTORIZADA)
             .order_by(NfNota.data_emissao.desc().nulls_last())
@@ -194,6 +196,7 @@ async def nf_da_conversa(session: AsyncSession, conversa: AtendimentoConversa) -
         serie=n.serie,
         pedido_bling=pedido,
         emitida_em=n.data_emissao,
+        chave=str(n.chave or ""),
     )
 
 

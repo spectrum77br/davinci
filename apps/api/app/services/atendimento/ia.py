@@ -273,6 +273,7 @@ from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.ag_cancelamento import TEXTOS_IA
 from app.services.atendimento.constantes import (
+    ACAO_ENVIAR_ARQUIVO_NF,
     ACENTOS_DE,
     ACENTOS_PARA,
     ACOES_QUE_SAIRAM,
@@ -290,8 +291,10 @@ from app.services.atendimento.constantes import (
     CONVERSA_FECHADA,
     ETIQUETA_DEVOLUCAO,
     FONTE_TUTA,
+    HUMANO_ACAO_PESSOA,
     HUMANO_ALERTA,
     HUMANO_ATENDENTE,
+    HUMANO_IA,
     HUMANO_INSTRUCAO,
     HUMANO_XINGAMENTO,
     LACUNAS,
@@ -3225,7 +3228,11 @@ async def _humano_respondeu_recente(session: AsyncSession, conversa: Atendimento
 
 
 async def _motivos_humano_para_auto(
-    session: AsyncSession, conversa: AtendimentoConversa, rascunho: Any | None = None
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    rascunho: Any | None = None,
+    *,
+    nf_automatica: bool = False,
 ) -> tuple[str, ...]:
     """A mesma triagem real da Caixa Humano, relida agora, sem o alerta de atraso.
 
@@ -3246,6 +3253,16 @@ async def _motivos_humano_para_auto(
     )
     if responde_e_marca_no_rascunho(rascunho) and triagem.marca:
         return tuple(m for m in triagem.motivos if m not in triagem.marca)
+    if nf_automatica and tuple(triagem.assuntos) == (ACAO_ENVIAR_ARQUIVO_NF,):
+        # A NF sozinha (28/10/2026, `nf_automatica`): a ação de pessoa do turno é SÓ
+        # a NF — a que este envio cumpre. A sugestão que pede pessoa só é liberada
+        # quando é ESTE rascunho (revisão de 28/10: a mais nova, de outro turno,
+        # segura). Os outros motivos (reclamação, devolução, sem dado...) seguram.
+        liberados = {HUMANO_ACAO_PESSOA}
+        do_turno = await humano._sugestao_do_turno(session, conversa)
+        if rascunho is not None and do_turno is not None and do_turno.id == rascunho.id:
+            liberados.add(HUMANO_IA)
+        return tuple(m for m in triagem.motivos if m not in liberados)
     return triagem.motivos
 
 
@@ -6413,6 +6430,12 @@ async def _talvez_enviar(
     try:
         motivo = None
         do_agente = rascunho_do_agente(rascunho)
+        from app.services.atendimento import nf_automatica
+
+        if do_agente and nf_automatica.candidato(rascunho):
+            # Só a ação "Enviar o arquivo da NF" (28/10/2026, OK do Eduardo): o caminho
+            # da NF sozinha, com as mesmas travas da conversa e as da NF.
+            return await nf_automatica.talvez_enviar(session, conversa, rascunho)
         if not get_settings().atendimento_auto_ativo:
             motivo = "auto_desligado"
         elif rascunho.status != RASCUNHO_PENDENTE:

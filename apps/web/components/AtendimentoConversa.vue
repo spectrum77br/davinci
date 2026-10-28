@@ -2319,7 +2319,9 @@ const motivoSemFoto = computed(() => {
   return ef.motivo ? bloqueioLegivel(motivoLegivel(ef.motivo)) : 'A foto não pode sair por aqui agora.'
 })
 const fotoInput = ref<HTMLInputElement | null>(null)
-const foto = ref<{ arquivo: File; previa: string; pdf: boolean } | null>(null)
+// `nfChave`: a chave da NF do botão "NF" (28/10/2026) — vai no POST /foto e marca a
+// NF mandada pela pessoa (o agente nunca a repete na conversa).
+const foto = ref<{ arquivo: File; previa: string; pdf: boolean; nfChave?: string } | null>(null)
 const legendaFoto = ref('')
 const enviandoFoto = ref(false)
 function descartarFoto() {
@@ -2385,7 +2387,8 @@ async function anexarNf() {
     if (!aberta(id) || foto.value || !r._data) return
     const numero = r.headers.get('x-nf-numero') || envioFoto.value?.nf_numero
     const arquivo = new File([r._data], numero ? `NF_${numero}.pdf` : 'NF.pdf', { type: 'application/pdf' })
-    foto.value = { arquivo, previa: URL.createObjectURL(arquivo), pdf: true }
+    const nfChave = r.headers.get('x-nf-chave') || undefined
+    foto.value = { arquivo, previa: URL.createObjectURL(arquivo), pdf: true, nfChave }
     if (envioFoto.value?.legenda_obrigatoria && !legendaFoto.value.trim()) legendaFoto.value = LEGENDA_NF
   } catch (e: any) {
     // O erro veio como Blob (responseType) e o `data` do FetchError é só
@@ -2412,6 +2415,7 @@ async function enviarFoto(opcoes?: { confirmar?: boolean }) {
   const id = d.conversa.id
   const fd = new FormData()
   fd.append('arquivo', f.arquivo, f.arquivo.name)
+  if (f.nfChave) fd.append('nf_chave', f.nfChave)
   if (legenda && envioFoto.value?.legenda_permitida) fd.append('legenda', legenda)
   // Reclamação do ML: o anexo vai na mensagem ao destino da caixa.
   if (destinosReclamacao.value.length && destinoCaixa.value) fd.append('para', destinoCaixa.value)
