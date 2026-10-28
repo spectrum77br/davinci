@@ -26,6 +26,10 @@ Eventos:
   venha só dela; decisão do Vinicius, uma vez por pedido;
 - `problema_correios`: ocorrência grave lida pelo 17track (apreendido,
   extraviado, devolvido…);
+- `aguardando_retirada`: os Correios deixaram o pacote numa agência pro
+  cliente buscar (Vinicius, 28/10, pedido 304667: ninguém avisava, e se o
+  cliente não busca o pacote volta). Não vai se o histórico já fala em
+  devolução — aí a agência é a nossa;
 - `previsao_vencida`: previsão dos Correios (Bling) passou e não entregou;
 - `entregue`: 17track "Delivered" — escrito como "se não recebeu, responda"
   (evitar problema na entrega é o que a Amazon permite).
@@ -59,12 +63,20 @@ SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 EVENTO_RASTREIO = "rastreio"
 EVENTO_PROBLEMA = "problema_correios"
+EVENTO_RETIRADA = "aguardando_retirada"
 EVENTO_PREVISAO = "previsao_vencida"
 EVENTO_ENTREGUE = "entregue"
-EVENTOS: tuple[str, ...] = (EVENTO_RASTREIO, EVENTO_PROBLEMA, EVENTO_PREVISAO, EVENTO_ENTREGUE)
+EVENTOS: tuple[str, ...] = (
+    EVENTO_RASTREIO,
+    EVENTO_PROBLEMA,
+    EVENTO_RETIRADA,
+    EVENTO_PREVISAO,
+    EVENTO_ENTREGUE,
+)
 EVENTO_LABELS_PT: dict[str, str] = {
     EVENTO_RASTREIO: "Aviso de rastreio",
     EVENTO_PROBLEMA: "Problema na transportadora",
+    EVENTO_RETIRADA: "Aguardando retirada na agência",
     EVENTO_PREVISAO: "Previsão da transportadora vencida",
     EVENTO_ENTREGUE: "Pacote entregue",
 }
@@ -110,6 +122,21 @@ TEMPLATES_PADRAO: dict[str, dict[str, str]] = {
             "Já estamos acompanhando junto à transportadora para resolver o mais rápido "
             "possível. Se precisar de algo, é só responder esta mensagem.\n\n"
             "Código de rastreio: {rastreio}\n\n"
+            "Atenciosamente,\nequipe da loja"
+        ),
+    },
+    EVENTO_RETIRADA: {
+        "assunto": "Pedido {pedido_amazon}: retire seu pacote na agência dos Correios",
+        "corpo": (
+            "Olá, {cliente}.\n\n"
+            "Os Correios encaminharam o pacote do seu pedido {pedido_amazon} para "
+            "retirada em uma agência. Última informação deles: \"{localizacao}\".\n\n"
+            "Para saber o endereço e o horário da agência, consulte o código de "
+            "rastreio {rastreio} no site ou no aplicativo dos Correios. Na retirada, "
+            "leve um documento com foto.\n\n"
+            "Retire o quanto antes: se o prazo de guarda dos Correios acabar, o pacote "
+            "volta para nós e a entrega atrasa. Se tiver qualquer dúvida, é só "
+            "responder esta mensagem.\n\n"
             "Atenciosamente,\nequipe da loja"
         ),
     },
@@ -289,10 +316,22 @@ def eventos_devidos(row: Logistica, hoje: date | None = None) -> list[str]:
         out.append(EVENTO_RASTREIO)
     if row.problema_correios_em is not None and row.problema_correios:
         out.append(EVENTO_PROBLEMA)
+    # Pacote na agência esperando o cliente. Se o histórico já fala em
+    # devolução, a agência é a nossa — quem confere é o run(), que lê o 17track.
+    na_agencia = (
+        logistica_track.is_correios(row.rastreio)
+        and row.entregue_em is None
+        and logistica_track.evento_retirada(row.localizacao)
+    )
+    if na_agencia:
+        out.append(EVENTO_RETIRADA)
+    # Enquanto o pacote espera na agência, "previsão vencida" diria que ele
+    # "ainda está a caminho" — e o cliente acabou de ouvir que é pra buscar.
     if (
         row.previsao_correios is not None
         and row.previsao_correios < hoje
         and row.entregue_em is None
+        and not na_agencia
     ):
         out.append(EVENTO_PREVISAO)
     if row.entregue_em is not None:
@@ -312,11 +351,30 @@ class Sender(Protocol):
     ) -> None: ...
 
 
+async def ler_historico(row: Logistica) -> list[logistica_track.EventoRastreio] | None:
+    """Eventos dos Correios do pedido (17track), do mais novo pro mais antigo.
+    [] = rastreio que não é dos Correios ou que o 17track não conhece; None =
+    o 17track não respondeu."""
+    rastreio = (row.rastreio or "").strip()
+    if not logistica_track.is_correios(rastreio):
+        return []
+    try:
+        por_numero = await logistica_track.eventos([rastreio])
+    except Exception as e:  # noqa: BLE001 — quem chama decide o que fazer sem histórico
+        logger.warning(
+            "logistica_cartao_rastreio_sem_eventos", pedido=row.pedido_bling, err=str(e)[:200]
+        )
+        return None
+    return por_numero.get(rastreio) or []
+
+
 async def montar_cartao(
-    session: AsyncSession, row: Logistica
+    session: AsyncSession,
+    row: Logistica,
+    historico: list[logistica_track.EventoRastreio] | None = None,
 ) -> tuple[str, str, bytes] | None:
     """Cartão de rastreio pra anexar (nome, mime, png), ou None quando não faz
-    sentido mandar imagem.
+    sentido mandar imagem. `historico` já lido poupa a ida ao 17track.
 
     Sai None — e a mensagem vai sem anexo, nunca deixa de ir — só quando:
     - o rastreio não é dos Correios (o 17track só lê `...BR`);
@@ -326,16 +384,7 @@ async def montar_cartao(
     Pedido com só "Etiqueta emitida" LEVA o cartão (Vinicius, 22/09).
     """
     rastreio = (row.rastreio or "").strip()
-    if not logistica_track.is_correios(rastreio):
-        return None
-    try:
-        por_numero = await logistica_track.eventos([rastreio])
-    except Exception as e:  # noqa: BLE001 — imagem é extra, mensagem é o que importa
-        logger.warning(
-            "logistica_cartao_rastreio_sem_eventos", pedido=row.pedido_bling, err=str(e)[:200]
-        )
-        return None
-    brutos = por_numero.get(rastreio) or []
+    brutos = historico if historico is not None else await ler_historico(row)
     if not brutos:
         return None
     eventos = [
@@ -601,7 +650,15 @@ async def run(
     """Uma rodada: manda ao cliente o que ainda não foi mandado. Desligado por
     padrão (`amazon_mensagens_cliente`); falha de envio fica registrada com o
     erro e é retentada até MAX_TENTATIVAS."""
-    resumo = {"desligado": 0, "pedidos": 0, "devidas": 0, "enviadas": 0, "falhas": 0, "puladas": 0}
+    resumo = {
+        "desligado": 0,
+        "pedidos": 0,
+        "devidas": 0,
+        "enviadas": 0,
+        "falhas": 0,
+        "puladas": 0,
+        "retirada_adiada": 0,
+    }
     if not get_settings().amazon_mensagens_cliente:
         resumo["desligado"] = 1
         return resumo
@@ -611,6 +668,9 @@ async def run(
         return resumo
     templates = await carregar_templates(session)
     hist = await _historico(session, rows)
+    # Histórico dos Correios lido uma vez por PEDIDO na rodada: confere a
+    # retirada e desenha o cartão.
+    rastros: dict[Any, list[logistica_track.EventoRastreio] | None] = {}
     fila: list[tuple[Logistica, str]] = []
     for r in rows:
         for ev in eventos_devidos(r, hoje):
@@ -621,6 +681,16 @@ async def run(
             if not tpl.ativo:
                 resumo["puladas"] += 1
                 continue
+            if ev == EVENTO_RETIRADA:
+                if r.id not in rastros:
+                    rastros[r.id] = await ler_historico(r)
+                rastro = rastros[r.id]
+                # Sem histórico não dá pra saber de quem é a agência: espera a
+                # próxima rodada (não gasta tentativa). Voltando ao remetente,
+                # a agência é a nossa e o cliente não tem o que buscar.
+                if rastro is None or logistica_track.voltando_ao_remetente(rastro):
+                    resumo["retirada_adiada"] += 1
+                    continue
             fila.append((r, ev))
     resumo["devidas"] = len(fila)
     if not fila:
@@ -636,7 +706,7 @@ async def run(
     for r, ev in fila[:limit]:
         assunto, corpo = renderizar(templates[ev], r)
         if r.id not in cartoes:
-            cartoes[r.id] = await montar_cartao(session, r)
+            cartoes[r.id] = await montar_cartao(session, r, rastros.get(r.id))
         cartao = cartoes[r.id]
         m = hist.get((r.id, ev))
         if m is None:

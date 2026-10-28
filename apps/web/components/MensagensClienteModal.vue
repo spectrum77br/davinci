@@ -259,7 +259,7 @@ async function salvar(t: Template) {
       <div v-if="cfg && podeEditar" class="rounded-md border border-dashed p-3 space-y-2">
         <div class="font-medium text-sm">Testar os textos</div>
         <p class="text-xs text-muted-foreground">
-          Manda os três textos para um e-mail seu, montados com os dados de um pedido de Envio
+          Manda todos os textos para um e-mail seu, montados com os dados de um pedido de Envio
           próprio (ou com um exemplo, se deixar o pedido em branco). Nada vai para o cliente.
         </p>
         <div class="flex flex-wrap gap-2">

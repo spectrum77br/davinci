@@ -660,6 +660,31 @@ def evento_pre_postagem(localizacao: str | None) -> bool:
     return any(_sem_acento(chave) in txt for chave in EVENTOS_PRE_POSTAGEM)
 
 
+# Pacote parado numa agência esperando o destinatário ir buscar — vistos em
+# produção (28/10, pedido 304667): "Objeto encaminhado para retirada no
+# endereço indicado" e "Objeto aguardando retirada no endereço indicado".
+# "Objeto não retirado no prazo" é o fim disso (volta ao remetente), não casa.
+EVENTOS_RETIRADA: tuple[str, ...] = (
+    "aguardando retirada",
+    "para retirada",
+)
+
+
+def evento_retirada(localizacao: str | None) -> bool:
+    """O último evento dos Correios é "aguardando retirada na agência"?"""
+    txt = _sem_acento(localizacao)
+    return any(_sem_acento(chave) in txt for chave in EVENTOS_RETIRADA)
+
+
+def voltando_ao_remetente(eventos: list[EventoRastreio]) -> bool:
+    """Algum evento do histórico já fala em devolução ao remetente? Depois
+    disso, "aguardando retirada" é na agência do VENDEDOR, não do comprador."""
+    return any(
+        "devolv" in _sem_acento(e.descricao) or "devoluc" in _sem_acento(e.descricao)
+        for e in eventos
+    )
+
+
 def parse_push_entregues(payload: dict) -> set[str]:
     """Números do push cujo estado é ENTREGUE (mesmo desempacotamento do
     `parse_push`, sem mexer no contrato dele)."""

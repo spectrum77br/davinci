@@ -596,3 +596,112 @@ async def test_enviar_agora_exige_a_chave_do_servidor_ligada(db: AsyncSession, m
         await msgs.enviar_agora(db, pedido_bling="296762", evento="rastreio", sender=sender)
     assert e.value.code == "envio_desligado"
     assert sender.enviados == []
+
+
+# ---- pacote aguardando retirada na agência (28/10/2026, pedido 304667) ----
+#
+# Os Correios deixaram o pacote numa agência e ninguém avisava o cliente: se
+# ele não busca, o pacote volta.
+
+_LOC_RETIRADA = "Morrinhos/CE — Objeto encaminhado para retirada no endereço indicado"
+_EV_RETIRADA = {
+    "time_iso": "2026-10-27T12:02:00-03:00",
+    "description": "Objeto encaminhado para retirada no endereço indicado",
+    "location": "CE",
+}
+_EV_DEVOLVIDO = {
+    "time_iso": "2026-10-20T09:00:00-03:00",
+    "description": "Objeto devolvido ao remetente",
+    "location": "CE",
+}
+
+
+def test_eventos_devidos_aguardando_retirada():
+    # Na agência: avisa a retirada e segura a "previsão vencida", que diria
+    # "ainda está a caminho".
+    assert msgs.eventos_devidos(_linha(localizacao=_LOC_RETIRADA), HOJE) == [
+        msgs.EVENTO_RASTREIO,
+        msgs.EVENTO_RETIRADA,
+    ]
+    aguardando = "Sao Paulo/SP — Objeto aguardando retirada no endereço indicado"
+    assert msgs.EVENTO_RETIRADA in msgs.eventos_devidos(_linha(localizacao=aguardando), HOJE)
+    # Não retirado no prazo é o fim da espera (volta), não a espera.
+    nao_retirado = "Objeto não retirado no prazo - será devolvido ao remetente"
+    assert msgs.EVENTO_RETIRADA not in msgs.eventos_devidos(
+        _linha(localizacao=nao_retirado), HOJE
+    )
+    # Entregue ou DBA: nada de retirada.
+    entregue = _linha(localizacao=_LOC_RETIRADA, entregue_em=datetime.now(UTC))
+    assert msgs.EVENTO_RETIRADA not in msgs.eventos_devidos(entregue, HOJE)
+    assert msgs.eventos_devidos(_linha(localizacao=_LOC_RETIRADA, amazon_canal="dba"), HOJE) == []
+
+
+@pytest.mark.asyncio
+async def test_run_avisa_retirada_com_o_local_e_le_o_17track_uma_vez(
+    db: AsyncSession, ligado, monkeypatch
+):
+    from app.services import logistica_track
+
+    db.add(_linha(localizacao=_LOC_RETIRADA))
+    await db.commit()
+    chamadas: list[list[str]] = []
+    retorno = {
+        "AD912266053BR": logistica_track.eventos_de_track_info(
+            _track_info([_EV_RETIRADA, _EV_TRANSFERENCIA, _EV_POSTADO])
+        )
+    }
+
+    async def fake(numbers):
+        chamadas.append(numbers)
+        return retorno
+
+    monkeypatch.setattr(logistica_track, "eventos", fake)
+    sender = FakeSender()
+    out = await msgs.run(db, sender=sender, hoje=HOJE)
+
+    assert out["enviadas"] == 2 and out["retirada_adiada"] == 0
+    retirada = next(e for e in sender.enviados if "agência" in e["subject"])
+    assert "701-3967231-6921832" in retirada["text"]
+    assert _LOC_RETIRADA in retirada["text"] and "AD912266053BR" in retirada["text"]
+    assert retirada["attachments"] and retirada["attachments"][0][0] == "rastreio.png"
+    # Um pedido, uma leitura: a mesma serve pra conferir a volta e pro cartão.
+    assert len(chamadas) == 1
+    hist = (await db.execute(select(LogisticaMensagemCliente))).scalars().all()
+    assert sorted(h.evento for h in hist) == ["aguardando_retirada", "rastreio"]
+
+
+@pytest.mark.asyncio
+async def test_run_nao_avisa_retirada_do_pacote_voltando(db: AsyncSession, ligado, monkeypatch):
+    """Depois de "devolvido ao remetente", a agência é a NOSSA."""
+    from app.services import logistica_track
+
+    db.add(_linha(localizacao="Piracicaba/SP — Objeto aguardando retirada no endereço indicado"))
+    await db.commit()
+    _patch_eventos(
+        monkeypatch,
+        {
+            "AD912266053BR": logistica_track.eventos_de_track_info(
+                _track_info([_EV_RETIRADA, _EV_DEVOLVIDO, _EV_POSTADO])
+            )
+        },
+    )
+    sender = FakeSender()
+    out = await msgs.run(db, sender=sender, hoje=HOJE)
+    assert out["retirada_adiada"] == 1
+    assert [e for e in sender.enviados if "agência" in e["subject"]] == []
+
+
+@pytest.mark.asyncio
+async def test_run_sem_17track_deixa_a_retirada_pra_proxima_rodada(
+    db: AsyncSession, ligado, monkeypatch
+):
+    """Sem histórico não dá pra saber de quem é a agência: não manda e não
+    gasta tentativa."""
+    db.add(_linha(localizacao=_LOC_RETIRADA))
+    await db.commit()
+    _patch_eventos(monkeypatch, erro=RuntimeError("17track fora"))
+    sender = FakeSender()
+    out = await msgs.run(db, sender=sender, hoje=HOJE)
+    assert out["retirada_adiada"] == 1
+    hist = (await db.execute(select(LogisticaMensagemCliente))).scalars().all()
+    assert [h.evento for h in hist] == ["rastreio"]
