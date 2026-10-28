@@ -701,9 +701,14 @@ async def resumo(
 
     dia = svc.hoje()
     escopo = _clausula(await resolve_team_scope(session, user))
-    dados = await garantia_resumo.resumo(
-        session, _filtros_do_painel(body, escopo, dia), dia, pedido=_filtros_do_pedido(body)
-    )
+    filtros = _filtros_do_painel(body, escopo, dia)
+    if body.periodo == "pedido" and body.ate:
+        # As vendidas até o fim do período (a compra no Bling): o pedido do
+        # período não se divide pela venda que veio depois (revisão 28/10).
+        fim = datetime.combine(body.ate + timedelta(days=1), time(), svc.SAO_PAULO)
+        compra = func.coalesce(garantia_pedido.compra_da_garantia(), Garantia.criado_em)
+        filtros.append(compra < fim)
+    dados = await garantia_resumo.resumo(session, filtros, dia, pedido=_filtros_do_pedido(body))
     return ResumoOut(**dados)
 
 
@@ -1410,6 +1415,21 @@ async def corrigir(
         await session.execute(
             GarantiaConversa.__table__.delete().where(GarantiaConversa.garantia_id == g.id)
         )
+        # O pedido de garantia que o robô achou nelas (mensagem, SAC,
+        # devolução) também era do pedido antigo: o robô reavalia o novo.
+        if g.solicitacao_origem in garantia_pedido.ORIGENS_DO_ROBO:
+            svc.registrar_log(
+                session,
+                g.id,
+                "alterou",
+                user,
+                campo="pedido_de_garantia",
+                anterior=garantia_pedido.ORIGEM_ROTULOS.get(g.solicitacao_origem),
+                novo="o robô reavalia pelo pedido novo",
+            )
+            g.solicitada_em = None
+            g.solicitacao_origem = None
+            g.solicitacao_ref = None
     try:
         await session.commit()
     except IntegrityError as e:
@@ -1532,7 +1552,9 @@ async def registrar_atendimento(
                 blob=blob,
             )
         )
-    # O atendimento registrado é pedido de garantia (se ainda não era).
+    # O atendimento registrado é pedido de garantia (se ainda não era). Relê
+    # a garantia (com trava): o robô pode ter marcado durante o download.
+    await session.refresh(g, with_for_update=True)
     garantia_pedido.marcar_pela_pessoa(g, quando, garantia_pedido.ORIGEM_ATENDIMENTO)
     svc.registrar_log(
         session,

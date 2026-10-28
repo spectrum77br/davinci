@@ -549,9 +549,15 @@ async def test_troca_de_pedido_tira_as_conversas_mesmo_com_o_robo_desligado(
     auth_as(await make_user(role=UserRole.ADMIN))
     await _pedido(db)
     await _nf(db)
-    await _conversa(db, pedido="261001ABCD1234")
-    await _rodar(db)  # o robô (ligado nesta hora) criou e ligou
+    await _conversa(
+        db,
+        pedido="261001ABCD1234",
+        msgs=[("cliente", "o celular parou de funcionar", COMPRA + timedelta(days=9), ())],
+    )
+    await _rodar(db)  # o robô (ligado nesta hora) criou, ligou e marcou o pedido de garantia
     [g] = await _garantias(db)
+    await db.refresh(g)
+    assert g.solicitacao_origem == "mensagem"
     await _pedido(db, numero="310009", numeroloja="261009NOVO0009")
     await _nf(db, pedido="310009", numero="2999", doc=CPF_2)
     assert len(set((await db.execute(select(GarantiaConversa.conversa_id))).scalars())) == 1
@@ -562,6 +568,8 @@ async def test_troca_de_pedido_tira_as_conversas_mesmo_com_o_robo_desligado(
     assert not list((await db.execute(select(GarantiaConversa.conversa_id))).scalars())
     h = (await client.get(f"/api/garantias/{g.id}/historico")).json()
     assert h["conversas"] == [] and h["mensagens"] == []
+    # O pedido de garantia era das conversas do pedido antigo: o robô reavalia.
+    assert (r.json()["pedido_em"], r.json()["pedido_origem"]) == (None, None)
 
 
 async def test_falha_ao_ligar_nao_derruba_o_cadastro(client, db, make_user, auth_as, monkeypatch):

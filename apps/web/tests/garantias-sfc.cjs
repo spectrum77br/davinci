@@ -250,6 +250,11 @@ const LINHA = {
   assert.deepEqual(L.corpoDoResumo({ ...f0, busca: '306200', ordem: 'atividade', com_conversa: true }), {}, 'a busca e o "só com conversa" são da lista')
   assert.deepEqual(L.corpoDoResumo({ ...f0, status: 'ativa', periodo: 'entrega', de: '2026-10-01', ate: '', origem: 'robo' }),
     { status: 'ativa', periodo: 'entrega', de: '2026-10-01', origem: 'robo' })
+  // Pedido de garantia (28/10): a data do pedido é o dia em São Paulo (às
+  // 22h30 de 27/10 em SP já é 28/10 em UTC).
+  assert.equal(L.rotuloDoPedido({ pedido_em: '2026-10-28T01:30:00Z', pedido_origem: 'mensagem', nao_e_pedido: false }), '💬 mensagem do cliente · 27/10/2026')
+  assert.equal(L.rotuloDoPedido({ pedido_em: null, pedido_origem: null, nao_e_pedido: false }), 'sem pedido de garantia')
+  assert.equal(L.rotuloDoPedido({ pedido_em: '2026-10-28T01:30:00Z', pedido_origem: 'mensagem', nao_e_pedido: true }), 'não é pedido de garantia')
   // SAC do site: ":" entre o rótulo e o valor colados (só na tela). O
   // formulário põe uma linha em branco entre os campos; cada rótulo vale uma
   // vez e só abrindo parágrafo — a descrição do cliente fica como ele escreveu.

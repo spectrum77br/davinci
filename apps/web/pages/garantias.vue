@@ -259,6 +259,17 @@ function aoSalvar(g: GarantiaDetalhe) {
   void carregar()
   versaoResumo.value++
 }
+function aoMudarDetalhe(r?: GarantiaDetalhe) {
+  // A linha aberta no histórico acompanha o pedido de garantia (ela continua
+  // aberta mesmo quando sai da lista dos pedidos).
+  const linha = selecionadaLinha.value
+  if (r && linha && linha.id === r.id) {
+    selecionadaLinha.value = { ...linha, pedido_em: r.pedido_em, pedido_origem: r.pedido_origem, pedido_origem_rotulo: r.pedido_origem_rotulo, nao_e_pedido: r.nao_e_pedido }
+  }
+  void carregar()
+  versaoHistorico.value++
+  versaoResumo.value++
+}
 function abrirDoForm(id: number) {
   formAberto.value = false
   corrigindo.value = null
@@ -578,7 +589,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       :versao="versaoDetalhe"
       @fechar="fecharDetalhe"
       @corrigir="corrigir"
-      @mudou="carregar(); versaoHistorico++; versaoResumo++"
+      @mudou="aoMudarDetalhe"
     />
     <GarantiaForm
       v-if="formAberto"

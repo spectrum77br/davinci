@@ -145,20 +145,27 @@ async def test_devolucao_de_defeito_marca_e_bloqueado_nao(db):
     await _nf(db)
     await _pedido(db, numero="310002", numeroloja="261001ABCD9999")
     await _nf(db, pedido="310002", numero="2612", doc="11144477735")
-    devolvido = datetime(2026, 10, 9, 13, tzinfo=UTC)
+    # `data` é a data da VENDA (o módulo Devoluções copia do pedido); o pedido
+    # de garantia é a hora em que a devolução foi LANÇADA (revisão 28/10).
+    lancada = datetime(2026, 10, 9, 13, tzinfo=UTC)
     db.add_all(
         [
             Devolution(
                 pedido_bling="310001",
                 conta="Loja Teste",
                 motivo_devolucao="Dano funcional / Não funciona",
-                data=devolvido,
+                data=COMPRA,
+                created_at=lancada,
             ),
             # O cliente desistiu e devolveu com a senha dele: não é defeito,
             # nem quando vai para a manutenção desbloquear.
             Devolution(
                 pedido_bling="310002",
-                conta="Loja Teste", motivo_devolucao="Bloqueado", manutencao=True, data=devolvido
+                conta="Loja Teste",
+                motivo_devolucao="Bloqueado",
+                manutencao=True,
+                data=COMPRA,
+                created_at=lancada,
             ),
         ]
     )
@@ -168,8 +175,52 @@ async def test_devolucao_de_defeito_marca_e_bloqueado_nao(db):
     for g in por_pedido.values():
         await db.refresh(g)
     assert por_pedido["310001"].solicitacao_origem == gp.ORIGEM_DEVOLUCAO
-    assert por_pedido["310001"].solicitada_em == devolvido
+    assert por_pedido["310001"].solicitada_em == lancada
     assert por_pedido["310002"].solicitada_em is None
+
+
+async def test_chat_da_shopee_ligado_pelo_pedido_tambem_para_no_proximo_pedido(db, make_user):
+    """O chat da Shopee é do comprador mesmo quando ligou pelo nº do pedido."""
+    loja = await _loja(db, await make_user(role=UserRole.ADMIN))
+    novo = COMPRA + timedelta(days=15)
+    await _conversa(
+        db,
+        pedido="261001ABCD1234",
+        integ=loja,
+        comprador="88",
+        msgs=[("cliente", "o celular não liga", novo + timedelta(days=2), ())],
+    )
+    for pedido, criado in (("261001ABCD1234", COMPRA), ("261016NOVO0002", novo)):
+        db.add(
+            AtendimentoPedidoComprador(
+                integration_id=loja,
+                plataforma="shopee",
+                comprador_id="88",
+                pedido=pedido,
+                criado_em=criado,
+            )
+        )
+    await db.commit()
+    await _pedido(db)
+    await _nf(db)
+    await _rodar(db)
+    assert (await _a_garantia(db)).solicitada_em is None
+
+
+async def test_marca_em_lotes(db, monkeypatch):
+    """As candidatas vão às fontes em lotes (o teto de parâmetros do asyncpg)."""
+    monkeypatch.setattr(gp, "_LOTE", 1)
+    await _pedido(db)
+    await _nf(db)
+    await _pedido(db, numero="310002", numeroloja="261001ABCD9999")
+    await _nf(db, pedido="310002", numero="2612", doc="11144477735")
+    for pedido in ("261001ABCD1234", "261001ABCD9999"):
+        await _conversa(
+            db,
+            pedido=pedido,
+            msgs=[("cliente", "parou de funcionar", COMPRA + timedelta(days=5), ())],
+        )
+    assert (await _rodar(db)).pedidos == 2
 
 
 async def test_sac_ligado_marca_o_pedido(db):

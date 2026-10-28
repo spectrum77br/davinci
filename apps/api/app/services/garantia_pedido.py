@@ -51,6 +51,8 @@ ORIGEM_DEVOLUCAO = "devolucao"
 ORIGEM_ATENDIMENTO = "atendimento"
 ORIGEM_MANUAL = "manual"
 ORIGEM_PESSOA = "pessoa"
+# As origens que o robô marca (e reavalia quando o pedido da garantia muda).
+ORIGENS_DO_ROBO = (ORIGEM_MENSAGEM, ORIGEM_SAC, ORIGEM_DEVOLUCAO)
 ORIGEM_ROTULOS = {
     ORIGEM_MENSAGEM: "mensagem do cliente",
     ORIGEM_SAC: "SAC do site",
@@ -68,6 +70,8 @@ CONDICAO_MANUTENCAO = "Manutenção"
 # Sem a data da compra no Bling: desde as primeiras NFs de produto do DaVinci.
 INICIO = datetime(2026, 8, 19, tzinfo=UTC)
 ROTULO_ROBO = svc.ROTULO_GARANTIA_AUTOMATICA
+# As candidatas vão às fontes em lotes (o asyncpg aceita até 32.767 parâmetros).
+_LOTE = 1000
 
 
 def _plano(texto: str | None) -> str:
@@ -231,7 +235,8 @@ def pede_garantia(texto: str | None) -> bool:
 # ── Os sinais ─────────────────────────────────────────────────────────────
 
 
-def _compra():
+def compra_da_garantia():
+    """O dia da compra no Bling (00:00 de São Paulo) da garantia da linha."""
     return (
         select(func.min(BlingOrder.data))
         .where(BlingOrder.numero == Garantia.pedido_bling)
@@ -242,9 +247,12 @@ def _compra():
 
 async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tuple]:
     """A 1ª mensagem do cliente, depois da compra, que pede a garantia — nas
-    conversas ligadas (fora as do SAC, que contam pelo formulário). Na conversa
-    do comprador (Shopee/TikTok, uma para todos os pedidos dele), só até o
-    PRÓXIMO pedido dele: dali para baixo pode ser sobre o outro."""
+    conversas ligadas (fora as do SAC, que contam pelo formulário). A compra é
+    a HORA do pedido no índice do comprador (Shopee/TikTok); sem ela, o dia do
+    pedido no Bling (00:00 de São Paulo). Na conversa do comprador (uma para
+    todos os pedidos dele — também quando ligou pelo nº do pedido), só até o
+    PRÓXIMO pedido dele: dali para baixo pode ser sobre o outro (revisão
+    28/10)."""
     if not ids:
         return {}
     g, gc, c, m, p = (
@@ -254,11 +262,17 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         AtendimentoMensagem,
         AtendimentoPedidoComprador,
     )
+    hora_do_pedido = (
+        select(func.min(p.criado_em))
+        .where(p.pedido == g.pedido_marketplace)
+        .correlate(g)
+        .scalar_subquery()
+    )
     base = (
         select(
             g.id.label("gid"),
             func.coalesce(g.pedido_marketplace, "").label("pedido"),
-            func.coalesce(_compra(), literal(INICIO)).label("compra"),
+            func.coalesce(hora_do_pedido, compra_da_garantia(), literal(INICIO)).label("compra"),
         )
         .where(g.id.in_(ids))
         .cte("base")
@@ -287,7 +301,7 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
             m.tipo == "texto",
             m.texto.is_not(None),
             quando >= base.c.compra,
-            or_(gc.como != "comprador", proximo.is_(None), quando < proximo),
+            or_(proximo.is_(None), quando < proximo),
         )
         .order_by(base.c.gid, quando, m.id)
     )
@@ -324,12 +338,13 @@ async def _por_sac(session: AsyncSession, ids: list[int]) -> dict[int, tuple]:
 
 
 async def _por_devolucao(session: AsyncSession, ids: list[int]) -> dict[int, tuple]:
-    """A devolução de defeito (motivo) ou mandada para a manutenção."""
+    """A devolução de defeito (motivo) ou mandada para a manutenção, na hora
+    em que foi LANÇADA (`devolutions.data` é a data da venda — revisão 28/10)."""
     if not ids:
         return {}
     d, g = Devolution, Garantia
     q = (
-        select(g.id, d.id, func.coalesce(d.data, d.created_at), d.motivo_devolucao)
+        select(g.id, d.id, d.created_at, d.motivo_devolucao)
         .join(d, d.pedido_bling == g.pedido_bling)
         .where(
             g.id.in_(ids),
@@ -415,9 +430,11 @@ async def marcar_pedidos(
         return 0
     ids = [r.id for r in linhas]
     sinais: dict[int, list[tuple]] = {}
-    for fonte in (_por_mensagem, _por_sac, _por_devolucao, _por_atendimento):
-        for gid, sinal in (await fonte(session, ids)).items():
-            sinais.setdefault(gid, []).append(sinal)
+    for i in range(0, len(ids), _LOTE):
+        lote = ids[i : i + _LOTE]
+        for fonte in (_por_mensagem, _por_sac, _por_devolucao, _por_atendimento):
+            for gid, sinal in (await fonte(session, lote)).items():
+                sinais.setdefault(gid, []).append(sinal)
     for r in linhas:
         if r.origem == ORIGEM_MANUAL:
             sinais.setdefault(r.id, []).append(

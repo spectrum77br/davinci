@@ -64,7 +64,7 @@ export function rotuloDoPedido(g: Pick<GarantiaLinha, 'pedido_em' | 'pedido_orig
   if (g.nao_e_pedido) return 'não é pedido de garantia'
   if (!g.pedido_em || !g.pedido_origem) return 'sem pedido de garantia'
   const o = ORIGEM_PEDIDO[g.pedido_origem]
-  return `${o ? `${o.emoji} ${o.rotulo}` : g.pedido_origem} · ${dataBR(g.pedido_em.slice(0, 10))}`
+  return `${o ? `${o.emoji} ${o.rotulo}` : g.pedido_origem} · ${dataBR(g.pedido_em)}`
 }
 
 export type Indicadores = {

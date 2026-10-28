@@ -43,8 +43,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'fechar'): void
   (e: 'corrigir', g: GarantiaDetalhe): void
-  // Algo mudou (conferiu a entrega): a lista relê.
-  (e: 'mudou'): void
+  // Algo mudou (conferiu a entrega, marcou/tirou o pedido de garantia): a
+  // lista relê; com a garantia salva, a linha aberta acompanha.
+  (e: 'mudou', g?: GarantiaDetalhe): void
 }>()
 
 const { api } = useApi()
@@ -107,7 +108,7 @@ async function marcarPedido(pedido: boolean) {
     g.value = { ...r, cpf: g.value.cpf, cpf_completo: g.value.cpf_completo }
     log.value = null
     toasts.success(pedido ? 'Marcada como pedido de garantia' : 'Não é pedido de garantia', pedido ? 'A garantia entra no Painel.' : 'Sai do Painel (continua na busca) e o robô não marca de novo.')
-    emit('mudou')
+    emit('mudou', r)
   } catch (e) {
     toasts.error('Não consegui mudar o pedido de garantia', errosDaApi(e).geral)
   } finally {
