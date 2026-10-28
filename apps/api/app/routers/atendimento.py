@@ -87,6 +87,12 @@ correção vira par do agente (`correcao`) e fato CANDIDATO
 (`atendimento_fatos`, ativo=false), que o admin aprova ou reprova na aba do
 Manual (GET /fatos, POST /fatos/{id}/aprovar|reprovar). O rascunho do agente
 traz o rastro enxuto (`RascunhoOut.agente`).
+
+ANEXO DO COMPRADOR NO ML (28/10/2026, `services/atendimento/anexo_ml.py`):
+GET /conversas/{id}/anexos/{arquivo} entrega a foto/arquivo que o comprador
+mandou no pós-venda ou na reclamação do ML — buscado na hora pela API
+oficial, com o token da loja da conversa, e só o `arquivo` que está numa
+mensagem daquela conversa. Só leitura, no escopo da equipe.
 """
 
 from __future__ import annotations
@@ -190,6 +196,7 @@ from app.services.atendimento import (
     acesso,
     agente_config,
     amazon_email,
+    anexo_ml,
     canais_externos,
     cartoes_plataforma,
     clientes,
@@ -3243,6 +3250,58 @@ async def detalhe_conversa(
     # falhar, nada depois dele depende da sessão.
     detalhe["cliente"] = await _cliente(session, c)
     return ConversaDetalheOut(**detalhe)
+
+
+@router.get("/conversas/{conversa_id}/anexos/{arquivo}")
+async def anexo_da_conversa(
+    conversa_id: str,
+    arquivo: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+) -> Response:
+    """A foto/arquivo que o comprador mandou no ML, para o `<img>` e o link do balão.
+
+    28/10/2026 (`services/atendimento/anexo_ml.py`): pós-venda e reclamação do
+    ML. Quem lê a conversa vê o anexo dela (`_view` + o escopo da equipe em
+    `_conversa_ou_404`); o `arquivo` tem de estar numa mensagem DESTA conversa
+    — senão 404, sem ir ao ML. Os bytes vêm na hora, com o token da loja da
+    conversa; `inline` só a imagem que o navegador mostra, o resto baixa.
+    """
+    nao_encontrado = HTTPException(404, detail={"code": anexo_ml.NAO_ENCONTRADO})
+    if instagram.e_instagram(conversa_id):
+        raise nao_encontrado
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    if not anexo_ml.conversa_aceita(c) or c.integration_id is None:
+        raise nao_encontrado
+    anexo = await anexo_ml.anexo_da_conversa(session, c, arquivo)
+    if anexo is None:
+        raise nao_encontrado
+    integration = await session.get(Integration, c.integration_id)
+    if integration is None or getattr(integration.platform, "value", None) != anexo_ml.PLATAFORMA:
+        raise nao_encontrado
+    try:
+        cliente = await clientes.cliente_da_integracao(integration)
+    except Exception as e:  # noqa: BLE001 — credencial ilegível: a tela fica com o nome
+        logger.info(
+            "atendimento_anexo_ml_indisponivel",
+            conversa_id=str(c.id),
+            code="cliente_indisponivel",
+            err=type(e).__name__,
+        )
+        raise HTTPException(502, detail={"code": anexo_ml.INDISPONIVEL}) from None
+    # Nada foi escrito: solta a conexão do banco antes da ida ao ML
+    # (`expire_on_commit=False` — a conversa e a pessoa continuam lidas).
+    await session.commit()
+    try:
+        baixado = await anexo_ml.baixar(cliente, c, arquivo, anexo)
+    except anexo_ml.AnexoIndisponivel as e:
+        raise HTTPException(e.http, detail={"code": e.code}) from None
+    return Response(
+        content=baixado.conteudo,
+        media_type=baixado.mime,
+        headers=anexo_ml.cabecalhos(baixado, anexo, arquivo),
+    )
 
 
 async def _historico_etiqueta(

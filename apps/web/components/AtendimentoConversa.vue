@@ -981,7 +981,26 @@ type Peca =
   | { chave: string; tipo: 'documento'; url: string; nome: string; tamanho: string }
   | { chave: string; tipo: 'link'; url: string; nome: string }
   | { chave: string; tipo: 'nome'; nome: string }
-function pecasDe(m: Mensagem): Peca[] {
+// O anexo que o comprador manda no ML (28/10/2026): a leitura guarda só o
+// `arquivo` (o id do anexo no ML), o nome, o tipo e o tamanho — nunca a URL,
+// que expira. No pós-venda e na reclamação do ML a tela pede o arquivo à rota
+// da conversa (`GET /api/atendimento/conversas/<id>/anexos/<arquivo>`), que
+// busca na hora com o token da loja: foto vira miniatura que abre grande; PDF
+// e o resto, o link de baixar. Erro ao carregar a foto: volta o nome.
+type ContextoAnexo = { conversaId: string; plataforma: string; canal: string }
+const CANAIS_ANEXO_ML = ['pos_venda', 'reclamacao']
+// O mesmo formato que a rota confere (`anexo_ml.arquivo_valido`): sem barra nem `..`.
+const RE_ARQUIVO_ML = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/
+// O que o navegador mostra numa <img> (HEIC/HEIF não: o Chrome não abre — baixa).
+const RE_IMAGEM_ML = /^image\/(jpe?g|pjpeg|png|gif|webp)$/
+const RE_EXT_IMAGEM_ML = /\.(jpe?g|png|gif|webp)$/i
+function urlDoAnexoMl(a: Anexo, ctx?: ContextoAnexo | null): string | null {
+  if (!ctx || ctx.plataforma !== 'ml' || !CANAIS_ANEXO_ML.includes(ctx.canal) || !ctx.conversaId) return null
+  const arquivo = typeof a.arquivo === 'string' ? a.arquivo : ''
+  if (!RE_ARQUIVO_ML.test(arquivo) || arquivo.includes('..')) return null
+  return `/api/atendimento/conversas/${encodeURIComponent(ctx.conversaId)}/anexos/${encodeURIComponent(arquivo)}`
+}
+function pecasDe(m: Mensagem, ctx?: ContextoAnexo | null): Peca[] {
   return (m.anexos || []).filter((a): a is Anexo => !!a && typeof a === 'object').map((a, i): Peca => {
     const chave = `${m.id}-${i}`
     const s = (k: string) => (typeof a[k] === 'string' ? (a[k] as string) : '')
@@ -1011,6 +1030,14 @@ function pecasDe(m: Mensagem): Peca[] {
       if (tipo === 'arquivo') return { chave, tipo: 'documento', url, nome: s('nome') || rotulo, tamanho: tamanhoLegivel(a.tamanho) }
       if (tipo === 'imagem' || tipo === 'figurinha') return { chave, tipo: 'imagem', url, nome: s('nome') || rotulo }
     }
+    // ML (pós-venda e reclamação): o arquivo pela rota da conversa.
+    const urlMl = url ? null : urlDoAnexoMl(a, ctx)
+    if (urlMl) {
+      const nomeMl = s('nome') || s('arquivo') || 'anexo'
+      const foto = RE_IMAGEM_ML.test(tipo) || (!tipo.includes('/') && RE_EXT_IMAGEM_ML.test(s('arquivo')))
+      if (foto) return { chave, tipo: 'imagem', url: urlMl, nome: nomeMl }
+      return { chave, tipo: 'documento', url: urlMl, nome: nomeMl, tamanho: tamanhoLegivel(a.tamanho) }
+    }
     // Sem nome, o tipo em português ("vídeo"), não o código cru da API ("video").
     const nome = s('nome') || s('name') || s('filename') || s('titulo') || TIPO_LABEL[tipo] || tipo || 'anexo'
     const imagem = !!url && (tipo.includes('imag') || tipo.startsWith('image') || /\.(png|jpe?g|webp|gif)(\?|$)/i.test(url))
@@ -1019,15 +1046,23 @@ function pecasDe(m: Mensagem): Peca[] {
     return { chave, tipo: 'nome', nome }
   })
 }
-// Uma vez por leitura da conversa, não a cada desenho do balão.
+// Uma vez por leitura da conversa, não a cada desenho do balão — com a
+// conversa (o anexo do ML vai pela rota dela).
+const contextoAnexo = computed<ContextoAnexo | null>(() => {
+  const c = conversa.value
+  return c ? { conversaId: String(c.id), plataforma: c.plataforma, canal: c.canal } : null
+})
 const pecas = computed(() => {
   const mapa = new Map<string, Peca[]>()
-  for (const m of detalhe.value?.mensagens || []) mapa.set(m.id, pecasDe(m))
+  for (const m of detalhe.value?.mensagens || []) mapa.set(m.id, pecasDe(m, contextoAnexo.value))
   return mapa
 })
 function pecasDaMsg(m: Mensagem): Peca[] {
-  return pecas.value.get(m.id) ?? pecasDe(m)
+  return pecas.value.get(m.id) ?? pecasDe(m, contextoAnexo.value)
 }
+// A foto que não carregou (a rota do anexo do ML respondeu erro): o balão
+// volta a mostrar só o nome. Por peça (`chave` = mensagem + posição).
+const fotoFalhou = ref<Record<string, boolean>>({})
 function temCartao(m: Mensagem) {
   return pecasDaMsg(m).some((p) => p.tipo === 'pedido' || p.tipo === 'produto')
 }
@@ -2541,6 +2576,7 @@ watch(() => props.conversaId, (novo, velho) => {
   gaveta.value = false
   contaEscolhida.value = ''
   imagemAberta.value = null
+  fotoFalhou.value = {}
   destacadaId.value = null
   // Item 3: o painel e a foto são DESTA conversa; a nota em escrita fica
   // guardada no AtendimentoNota (por conversa).
@@ -3190,13 +3226,13 @@ watch(() => props.conversaId, (novo, velho) => {
                     <AtendimentoCartaoPedido v-if="pc.tipo === 'pedido'" :cartao="pc.cartao" :plataforma="conversa.plataforma" :retrato="pedidoMkt" />
                     <AtendimentoCartaoProduto v-else-if="pc.tipo === 'produto'" :cartao="pc.cartao" />
                     <button
-                      v-else-if="pc.tipo === 'imagem'"
+                      v-else-if="pc.tipo === 'imagem' && !fotoFalhou[pc.chave]"
                       type="button"
                       class="overflow-hidden rounded-md border bg-background"
                       :title="`abrir ${pc.nome}`"
                       @click="imagemAberta = { url: pc.url, nome: pc.nome }"
                     >
-                      <img :src="pc.url" :alt="pc.nome" loading="lazy" referrerpolicy="no-referrer" class="size-28 object-cover" />
+                      <img :src="pc.url" :alt="pc.nome" loading="lazy" referrerpolicy="no-referrer" class="size-28 object-cover" @error="fotoFalhou[pc.chave] = true" />
                     </button>
                     <!-- Zap (Onda 3): a nossa cópia — áudio e vídeo só carregam no play; o documento baixa (nunca abre aqui). -->
                     <audio v-else-if="pc.tipo === 'audio'" :src="pc.url" controls preload="none" class="h-10 w-64 max-w-full" :title="pc.nome" data-midia-zap="audio" />
