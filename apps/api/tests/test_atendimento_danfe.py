@@ -45,7 +45,18 @@ def _xml(
     protocolo: bool = True,
     tp_nf: str = "1",
     fin_nfe: str = "1",
+    duplicatas: int = 0,
 ) -> bytes:
+    cobr = (
+        "<cobr>"
+        + "".join(
+            f"<dup><nDup>{i:03d}</nDup><dVenc>2026-11-{i:02d}</dVenc><vDup>141.33</vDup></dup>"
+            for i in range(1, duplicatas + 1)
+        )
+        + "</cobr>"
+        if duplicatas
+        else ""
+    )
     det = "".join(
         f"""<det nItem="{i}"><prod><cProd>b096.{i}</cProd><xProd>Mala de teste {i} com um nome
         comprido o bastante para quebrar a linha da descrição</xProd><NCM>42021210</NCM>
@@ -70,7 +81,7 @@ Teste Ltda</xNome><enderEmit><xLgr>Avenida Teste</xLgr><nro>54</nro><xBairro>Cen
 <xMun>Sao Paulo</xMun><UF>SP</UF><CEP>01001000</CEP></enderEmit><IE>111111111111</IE></emit>
 <dest><CPF>12345678909</CPF><xNome>Cliente Teste</xNome><enderDest><xLgr>Rua Um</xLgr>
 <nro>1</nro><xBairro>Bairro</xBairro><xMun>Sao Paulo</xMun><UF>SP</UF><CEP>01002000</CEP>
-</enderDest></dest>{det}<total><ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS><vBCST>0.00</vBCST>
+</enderDest></dest>{det}{cobr}<total><ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS><vBCST>0.00</vBCST>
 <vST>0.00</vST><vProd>{v_nf}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg><vDesc>0.00</vDesc>
 <vIPI>0.00</vIPI><vOutro>0.00</vOutro><vNF>{v_nf}</vNF><vTotTrib>159.21</vTotTrib></ICMSTot>
 </total><transp><modFrete>0</modFrete></transp><infAdic><infCpl>Pedido de teste</infCpl>
@@ -94,8 +105,23 @@ def test_danfe_traz_a_mesma_nota_do_xml():
     texto = _texto(pdf)
     assert "DANFE" in texto
     assert danfe.chave_formatada(CHAVE) in texto
-    assert "Nº 000.001.883" in texto and "SÉRIE 1" in texto
-    assert "135260000000001 - 27/10/2026 12:19:02" in texto
+    # O padrão visual do Bling (28/10/2026): "Nº 001883", "SERIE: 1", protocolo
+    # com o fuso, CEP "01.002-000", CFOP "5.102", os blocos com os nomes do Bling.
+    assert "Nº 001883" in texto and "SERIE: 1" in texto and "Série 1" in texto
+    assert "135260000000001 27/10/2026 12:19:02-03:00" in texto
+    assert "01.002-000" in texto and "5.102" in texto
+    for bloco in (
+        "Destinatário/Remetente",
+        "Faturas",
+        "Cálculo do imposto",
+        "Transportador/Volumes transportados",
+        "Itens da nota fiscal",
+        "Cálculo do ISSQN",
+        "Dados adicionais",
+        "Controle do Fisco",
+    ):
+        assert bloco in texto, bloco
+    assert doc[0].rect.width == 612 and doc[0].rect.height == 792  # folha carta, como o Bling
     assert "00.000.000/0001-91" in texto and "123.456.789-09" in texto
     assert "424,00" in texto and "Venda de mercadoria" in texto
     assert "SEM VALOR FISCAL" not in texto
@@ -115,7 +141,9 @@ def test_muitos_itens_viram_mais_folhas_e_homologacao_sem_valor():
     pdf = danfe.gerar_pdf(_xml(itens=40))
     doc = pymupdf.open(stream=pdf, filetype="pdf")
     assert doc.page_count >= 2
-    assert "FOLHA 2/" in doc[1].get_text()
+    assert "Página: 2 de" in doc[1].get_text()
+    # A última folha leva o ISSQN e os dados adicionais (e nunca a tabela vazia).
+    assert "Dados adicionais" in doc[-1].get_text() and "Mala de teste" in doc[-1].get_text()
     assert "SEM VALOR FISCAL" in _texto(danfe.gerar_pdf(_xml(tp_amb="2")))
     assert "SEM VALOR FISCAL" in _texto(danfe.gerar_pdf(_xml(protocolo=False)))
 
@@ -355,3 +383,13 @@ def test_pagina_de_formato_absurdo_nao_vira_imagem():
     imagem = foto.pdf_em_imagem(foto.validar_foto(doc.tobytes(), "b.pdf"))
     largura, altura = foto.dimensoes(imagem.conteudo)
     assert largura * altura <= foto.MAX_PIXELS_PDF_IMAGEM * 1.05
+
+
+def test_duplicatas_entram_em_faturas_e_empurram_o_resto():
+    sem = pymupdf.open(stream=danfe.gerar_pdf(_xml()), filetype="pdf")[0]
+    com = pymupdf.open(stream=danfe.gerar_pdf(_xml(duplicatas=4)), filetype="pdf")[0]
+    texto = com.get_text()
+    assert "001" in texto and "03/11/2026" in texto and "141,33" in texto
+    assert "004" in texto  # 4 duplicatas: duas fileiras
+    titulo = lambda pg: pg.search_for("Cálculo do imposto")[0].y0  # noqa: E731
+    assert titulo(com) > titulo(sem) + 10
