@@ -443,6 +443,8 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("a nf está errada", False),
         ("qual o número de série?", False),
         ("dei nota 5 pra vocês", False),
+        ("eu vou querer a nota fiscal", True),
+        ("solicito a nota fiscal do pedido", True),
         ("", False),
     ],
 )
@@ -690,3 +692,35 @@ async def test_nf_da_pessoa_pelo_nome_ou_pela_chave(db, make_user, ligado, plata
     r = await _rascunho(db, conversa, gatilho)
     await ia._talvez_enviar(db, conversa, r)
     assert _decisao(r) == "nf:nf_ja_enviada" and plataforma == []
+
+
+def test_pedido_pelo_menu():
+    from types import SimpleNamespace as M
+
+    menu = M(id=1, autor="loja", texto="Escolha: 1 - Rastreio 2 - Nota fiscal 3 - Encerramento")
+    oi, dois = M(id=0, autor="cliente", texto="oi"), M(id=2, autor="cliente", texto="2")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, dois], dois) is True
+    outro = M(id=1, autor="loja", texto="Escolha: 1 - Rastreio 2 - Garantia")
+    assert nf_automatica.pedido_pelo_menu([oi, outro, dois], dois) is False
+    tres = M(id=2, autor="cliente", texto="3")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, tres], tres) is False
+    mais = M(id=3, autor="cliente", texto="e o rastreio?")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, dois, mais], dois) is False
+    # O gatilho de antes do menu não é a resposta a ele.
+    assert nf_automatica.pedido_pelo_menu([oi, menu, dois], oi) is False
+
+
+async def test_resposta_2_ao_menu_manda_a_nf(db, make_user, ligado, plataforma):
+    conversa, _ = await _cenario(db, make_user, texto="oi")
+    await _msg(
+        db,
+        conversa,
+        "Escolha uma opção: 1 - Rastreio 2 - Nota fiscal 3 - Encerramento da compra",
+        autor="loja",
+        origem="davinci_auto",
+        ha=timedelta(minutes=2),
+    )
+    gatilho = await _msg(db, conversa, "2", ha=timedelta(minutes=1))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)

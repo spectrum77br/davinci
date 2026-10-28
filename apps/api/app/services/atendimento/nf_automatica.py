@@ -118,6 +118,8 @@ _PEDE = re.compile(
     r"(?:a\s+)?" + _DOC + r"\b"
     r"|\b" + _DOC + r"\b(?:\s+\w+){0,3}?\s+nao\s+(?:veio|chegou|estava|tinha|foi)\b"
     r"|\bcade\s+(?:a\s+)?" + _DOC + r"\b"
+    # "vou querer a nota", "quero receber a nf", "solicito a nota fiscal"
+    r"|\b(?:querer|receber|solicit\w*)\b(?:\s+\w+){0,3}?\s+(?:a\s+|da\s+|de\s+)?" + _DOC + r"\b"
 )
 # Pedido que NÃO é "mande a NF do pedido": CNPJ, XML, correção, reemissão,
 # série/IMEI, nota de outro, ou outro assunto colado (dinheiro, devolução).
@@ -143,13 +145,44 @@ _PALAVRAS_DO_PEDIDO = frozenset(
     pode poderia podem poderiam consegue conseguem conseguiria tem como teria seria possivel
     voce voces vc vcs me mim pra para pro por aqui ai la
     manda mande mandar mandem envia envie enviar enviem passa passe passar
-    preciso precisava precisaria quero queria gostaria necessito
+    preciso precisava precisaria quero queria gostaria necessito eu vou querer receber
+    solicito solicitar solicitacao
     nao veio vieram recebi chegou encontrei achei tinha estava foi cade ainda
     nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
     a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
     esse este essa esta junto caixa pacote embalagem pedido compra produto
     """.split()
 )
+
+
+# O menu do robô da loja (o do Duoke, 28/10/2026): "Escolha uma opção: 1 - Rastreio
+# 2 - Nota fiscal …" — a resposta "2" é o pedido da NF.
+_MENU_NF = re.compile(r"\b2\s*[-–.)]\s*nota\s+fiscal\b")
+
+
+def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
+    """O cliente respondeu SÓ "2" depois do menu da loja em que o 2 é "Nota fiscal"? PURA.
+
+    O que vale é o que o cliente escreveu DEPOIS do último menu (o menu do robô
+    não conta como resposta da loja, então a rajada pega o "oi" de antes), e o
+    gatilho do rascunho está entre essas falas.
+    """
+    ultimo = max(
+        (
+            i
+            for i, m in enumerate(recentes)
+            if m.autor == constantes.AUTOR_LOJA
+            and _MENU_NF.search(validador.plano_de(m.texto or ""))
+        ),
+        default=None,
+    )
+    if ultimo is None:
+        return False
+    depois = [m for m in recentes[ultimo + 1 :] if m.autor == constantes.AUTOR_CLIENTE]
+    if not depois or gatilho is None or all(m.id != gatilho.id for m in depois):
+        return False
+    plano = " ".join(validador.plano_de(" ".join(m.texto or "" for m in depois)).split())
+    return plano.strip(" .!") == "2"
 
 
 def pedido_claro(textos: Sequence[str | None]) -> bool:
@@ -563,7 +596,7 @@ async def _travas_da_conversa(
         # O cliente escreveu de novo depois do turno que este rascunho responde.
         return "turno_mudou"
     textos = [m.texto for m in ia.rajada_do_cliente(recentes, gatilho)]
-    if not pedido_claro(textos):
+    if not pedido_claro(textos) and not pedido_pelo_menu(recentes, gatilho):
         return "pedido_nao_claro"
     if await ia._motivos_humano_para_auto(session, conversa, rascunho, nf_automatica=True):
         return "caixa_humano"

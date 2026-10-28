@@ -3253,9 +3253,10 @@ async def _motivos_humano_para_auto(
     )
     if responde_e_marca_no_rascunho(rascunho) and triagem.marca:
         return tuple(m for m in triagem.motivos if m not in triagem.marca)
-    if nf_automatica and tuple(triagem.assuntos) == (ACAO_ENVIAR_ARQUIVO_NF,):
+    if nf_automatica and set(triagem.assuntos) <= {ACAO_ENVIAR_ARQUIVO_NF}:
         # A NF sozinha (28/10/2026, `nf_automatica`): a ação de pessoa do turno é SÓ
-        # a NF — a que este envio cumpre. A sugestão que pede pessoa só é liberada
+        # a NF — a que este envio cumpre — ou nenhuma (o "2" do menu: quem marcou a
+        # NF foi o modelo). A sugestão que pede pessoa só é liberada
         # quando é ESTE rascunho (revisão de 28/10: a mais nova, de outro turno,
         # segura). Os outros motivos (reclamação, devolução, sem dado...) seguram.
         liberados = {HUMANO_ACAO_PESSOA}
