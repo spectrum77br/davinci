@@ -1,5 +1,5 @@
 """As migrations 0380 (Painel de Garantia Uranyx), 0434 (garantia automática) e
-0438 (pedido de garantia) criam EXATAMENTE o que o model declara.
+0439 (pedido de garantia) criam EXATAMENTE o que o model declara.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Aqui a 0380 roda de verdade num schema descartável e o catálogo do
@@ -132,8 +132,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     assert mod.down_revision == "0379_pricing_carrefour_netshoes"
     mod_auto = _carregar("0434_garantia_automatica")
     assert mod_auto.down_revision == "0433_atendimento_zap_saude"
-    mod_pedido = _carregar("0438_garantia_pedido")
-    assert mod_pedido.down_revision == "0437_conciliacao_recomeca_24_10"
+    mod_pedido = _carregar("0439_garantia_pedido")
+    assert mod_pedido.down_revision == "0438_mail_composer"
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -268,7 +268,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
         await db.commit()
 
-        # O downgrade tira tudo o que a 0438, a 0434 e a 0380 puseram.
+        # O downgrade tira tudo o que a 0439, a 0434 e a 0380 puseram.
         conn = await db.connection()
         await conn.run_sync(_rodar, "downgrade", mod_pedido)
         await conn.run_sync(_rodar, "downgrade", mod_auto)

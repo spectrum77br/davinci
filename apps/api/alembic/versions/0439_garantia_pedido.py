@@ -16,8 +16,8 @@ Resumo dava a divisão das vendas (Celular 77,8%), não a dos pedidos.
   SAC, devolução) o robô marca (`garantia_pedido.marcar_pedidos`) — no deploy,
   rodar a carga antes de subir a tela.
 
-Revision ID: 0438_garantia_pedido
-Revises: 0437_conciliacao_recomeca_24_10
+Revision ID: 0439_garantia_pedido
+Revises: 0438_mail_composer
 """
 
 from collections.abc import Sequence
@@ -27,8 +27,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0438_garantia_pedido"
-down_revision: str | None = "0437_conciliacao_recomeca_24_10"
+revision: str = "0439_garantia_pedido"
+down_revision: str | None = "0438_mail_composer"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 SCHEMA = "davinci"
