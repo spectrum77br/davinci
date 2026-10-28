@@ -85,8 +85,15 @@ GARANTIA_LOG_ACOES = (
     "descartou",
     # O pedido do Bling voltou de Cancelado: a do robô volta para a lista.
     "reativou",
+    # Pedido de garantia (28/10/2026): o robô achou o pedido (mensagem, SAC,
+    # devolução); a pessoa marcou ou disse "não é pedido de garantia".
+    "pedido_automatico",
+    "marcou_pedido",
+    "tirou_pedido",
 )
 GARANTIA_ORIGENS = ("manual", "robo")
+# De onde veio o pedido de garantia (`garantia_pedido`).
+GARANTIA_PEDIDO_ORIGENS = ("mensagem", "sac", "devolucao", "atendimento", "manual", "pessoa")
 # Como a conversa chegou à garantia: o nº do pedido na conversa (`pedido`) ou o
 # índice comprador × pedido da loja (`comprador` — Shopee/TikTok, uma conversa
 # por comprador com todos os pedidos dele).
@@ -170,6 +177,11 @@ class Garantia(Base):
         # O robô cria sem pessoa; o cadastro na tela sempre tem quem cadastrou.
         CheckConstraint(f"origem IN ({_lista_sql(GARANTIA_ORIGENS)})", name="origem_valida"),
         CheckConstraint("origem <> 'manual' OR criado_por IS NOT NULL", name="manual_tem_autor"),
+        CheckConstraint(
+            f"solicitacao_origem IS NULL OR solicitacao_origem IN "
+            f"({_lista_sql(GARANTIA_PEDIDO_ORIGENS)})",
+            name="solicitacao_origem_valida",
+        ),
         # Uma NF identificada pela chave (casada com o XML do pedido) tem uma
         # garantia só (ponto 3: uma garantia por NF).
         Index(
@@ -235,6 +247,18 @@ class Garantia(Base):
     # atendimento sai da lista (não se apaga: o log aponta para ela).
     descartada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     descartada_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Pedido de garantia (28/10/2026): o Painel mostra só a garantia que o
+    # cliente PEDIU; a venda sem pedido fica por trás (o "vendidas" do Resumo).
+    solicitada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    solicitacao_origem: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    solicitacao_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # "Não é pedido de garantia" (a pessoa): sai do Painel e o robô não marca de novo.
+    nao_solicitada_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    nao_solicitada_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     atualizado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     atualizado_por: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True

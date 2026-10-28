@@ -42,8 +42,7 @@ from sqlalchemy import Text, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder
-from app.models.atendimento import AtendimentoMensagem
-from app.models.garantia import Garantia, GarantiaAtendimento, GarantiaConversa
+from app.models.garantia import Garantia, GarantiaAtendimento
 from app.models.product import Product, ProductCategory
 from app.services import garantia as svc
 from app.services.estoque_familia import lote_de
@@ -126,8 +125,8 @@ def item_principal(itens: list[Any] | None) -> dict | None:
 @dataclass
 class _Produto:
     base: str
-    total: int = 0
-    cliente_escreveu: int = 0
+    vendidas: int = 0
+    pediram: int = 0
     com_atendimento: int = 0
     nomes: Counter = field(default_factory=Counter)
 
@@ -135,13 +134,15 @@ class _Produto:
 @dataclass
 class _Departamento:
     chave: str
-    total: int = 0
+    vendidas: int = 0
+    pediram: int = 0
+    # Os pedidos: a situação da garantia hoje e de onde veio o pedido.
     status: Counter = field(default_factory=Counter)
-    cliente_escreveu: int = 0
+    origens: Counter = field(default_factory=Counter)
     com_atendimento: int = 0
     hardware: int = 0
     software: int = 0
-    categorias: Counter = field(default_factory=Counter)
+    categorias: dict[str, list[int]] = field(default_factory=dict)  # nome → [vendidas, pediram]
     produtos: dict[str, _Produto] = field(default_factory=dict)
 
 
@@ -189,42 +190,25 @@ async def _categorias_dos_produtos(session: AsyncSession, skus: set[str]) -> dic
     return saida
 
 
-async def resumo(session: AsyncSession, filtros: list, dia: date | None = None) -> dict:
-    """As garantias (com os `filtros` da lista já com escopo e sem as
-    descartadas) por departamento: totais, status, quem escreveu, atendimentos
-    registrados, categorias do Bling e produtos. Só contagens."""
+async def resumo(
+    session: AsyncSession, filtros: list, dia: date | None = None, *, pedido: list | None = None
+) -> dict:
+    """As vendas com garantia (os `filtros` da barra, já com escopo e sem as
+    descartadas) por departamento e quantas PEDIRAM garantia — a porcentagem
+    da tela é pediram ÷ vendidas (pedido do Eduardo, 28/10: "a garantia é só
+    para o pessoal que solicita"). `pedido` = as condições a mais do pedido (o
+    período pela data do pedido). Da situação, da origem e dos atendimentos,
+    só os pedidos. Só contagens."""
+    from app.services import garantia_pedido
+
     dia = dia or svc.hoje()
-    # A compra (o Bling grava o dia, às 00:00 de São Paulo) e a fala do
-    # cliente desde então numa conversa ligada.
-    # `correlate(Garantia)` explícito: aninhada dentro do EXISTS, a
-    # subconsulta da compra NÃO se correlaciona sozinha — virava
-    # `FROM bling_orders, garantias` e pegava a compra mais antiga de TODAS as
-    # garantias (achado na prévia de 28/10: 1.619 em vez de 1.585).
-    compra = (
-        select(func.min(BlingOrder.data))
-        .where(BlingOrder.numero == Garantia.pedido_bling)
-        .correlate(Garantia)
-        .scalar_subquery()
-    )
-    m = AtendimentoMensagem
-    cliente_escreveu = (
-        select(GarantiaConversa.garantia_id)
-        .join(m, m.conversa_id == GarantiaConversa.conversa_id)
-        .where(
-            GarantiaConversa.garantia_id == Garantia.id,
-            m.autor == "cliente",
-            func.coalesce(m.enviada_em, m.created_at) >= func.coalesce(compra, Garantia.criado_em),
-        )
-        .correlate(Garantia)
-        .exists()
-        .label("cliente_escreveu")
-    )
     # "Entregue — sem data no DaVinci": sem data de entrega, mas o Bling já dá
     # o pedido como entregue. Fica à parte do "Aguardando entrega" (a regra do
     # painel: nunca dizer "aguardando" de quem já recebeu).
     sem_data_entregue = and_(
         Garantia.data_inicio.is_(None), svc._pedido_entregue_no_bling().correlate(Garantia)
     ).label("entregue_sem_data")
+    pediu = and_(garantia_pedido.filtro_pedido(), *(pedido or [])).label("pediu")
     linhas = (
         await session.execute(
             select(
@@ -234,12 +218,13 @@ async def resumo(session: AsyncSession, filtros: list, dia: date | None = None) 
                 Garantia.data_inicio,
                 Garantia.fim_hardware,
                 Garantia.fim_software,
-                cliente_escreveu,
+                Garantia.solicitacao_origem,
+                pediu,
                 sem_data_entregue,
             ).where(*filtros)
         )
     ).all()
-    ids = [r.id for r in linhas]
+    ids = [r.id for r in linhas if r.pediu]
     atend: dict[int, Counter] = defaultdict(Counter)
     for i in range(0, len(ids), _LOTE):
         for gid, tipo, n in (
@@ -271,56 +256,73 @@ async def resumo(session: AsyncSession, filtros: list, dia: date | None = None) 
         categoria = do_pedido.get((str(r.pedido_bling), sku)) or do_cadastro.get(sku)
         chave = departamento_da_categoria(categoria) or departamento_da_familia(sku)
         d = deps.setdefault(chave, _Departamento(chave))
-        d.total += 1
+        d.vendidas += 1
+        cat = d.categorias.setdefault(categoria or SEM_CATEGORIA, [0, 0])
+        cat[0] += 1
+        base = produto_base(sku) or "(sem sku)"
+        p = d.produtos.setdefault(base, _Produto(base))
+        p.vendidas += 1
+        if nome := nome_do_produto(item.get("descricao")):
+            p.nomes[nome] += 1
+        if not r.pediu:
+            continue
+        d.pediram += 1
+        cat[1] += 1
+        p.pediram += 1
         st = svc.status_em(r.data_inicio, r.fim_hardware, r.fim_software, dia)
         d.status["entregue_sem_data" if r.entregue_sem_data else st] += 1
-        d.categorias[categoria or SEM_CATEGORIA] += 1
+        d.origens[r.solicitacao_origem or garantia_pedido.ORIGEM_PESSOA] += 1
         a = atend.get(r.id) or Counter()
-        if r.cliente_escreveu:
-            d.cliente_escreveu += 1
         if a:
             d.com_atendimento += 1
             d.hardware += a.get("hardware", 0)
             d.software += a.get("software", 0)
-        base = produto_base(sku) or "(sem sku)"
-        p = d.produtos.setdefault(base, _Produto(base))
-        p.total += 1
-        p.cliente_escreveu += 1 if r.cliente_escreveu else 0
-        p.com_atendimento += 1 if a else 0
-        if nome := nome_do_produto(item.get("descricao")):
-            p.nomes[nome] += 1
+            p.com_atendimento += 1
 
     ordem = list(DEPARTAMENTOS)
     return {
-        "total": len(linhas),
+        "vendidas": len(linhas),
+        "pediram": sum(d.pediram for d in deps.values()),
         "hoje": dia,
         "departamentos": [
             {
                 "chave": d.chave,
                 "nome": DEPARTAMENTOS[d.chave],
-                "total": d.total,
+                "vendidas": d.vendidas,
+                "pediram": d.pediram,
                 "status": {
                     s: d.status.get(s, 0) for s in (*svc.STATUS_ROTULOS, "entregue_sem_data")
                 },
-                "cliente_escreveu": d.cliente_escreveu,
+                "origens": {o: d.origens.get(o, 0) for o in garantia_pedido.ORIGEM_ROTULOS},
                 "com_atendimento": d.com_atendimento,
                 "atendimentos_hardware": d.hardware,
                 "atendimentos_software": d.software,
                 "categorias": [
-                    {"nome": nome, "total": n, "sem_categoria": nome == SEM_CATEGORIA}
-                    for nome, n in d.categorias.most_common()
+                    {
+                        "nome": nome,
+                        "vendidas": v,
+                        "pediram": n,
+                        "sem_categoria": nome == SEM_CATEGORIA,
+                    }
+                    for nome, (v, n) in sorted(
+                        d.categorias.items(), key=lambda x: (-x[1][1], -x[1][0])
+                    )
                 ],
                 "produtos": [
                     {
                         "base": p.base,
                         "nome": p.nomes.most_common(1)[0][0] if p.nomes else p.base,
-                        "total": p.total,
-                        "cliente_escreveu": p.cliente_escreveu,
+                        "vendidas": p.vendidas,
+                        "pediram": p.pediram,
                         "com_atendimento": p.com_atendimento,
                     }
-                    for p in sorted(d.produtos.values(), key=lambda x: (-x.total, x.base))
+                    for p in sorted(
+                        d.produtos.values(), key=lambda x: (-x.pediram, -x.vendidas, x.base)
+                    )
                 ],
             }
-            for d in sorted(deps.values(), key=lambda x: (-x.total, ordem.index(x.chave)))
+            for d in sorted(
+                deps.values(), key=lambda x: (-x.pediram, -x.vendidas, ordem.index(x.chave))
+            )
         ],
     }

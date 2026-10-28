@@ -17,7 +17,8 @@
 // Atendimento — a lista à esquerda (a garantia com mensagem mais nova em cima)
 // e o histórico das conversas ligadas à direita, com fotos e vídeos. A vista
 // "Tabela" é a de antes. O robô cria a garantia pela NF de produto; o selo
-// ✨ marca as criadas sozinhas.
+// ✨ marca as criadas sozinhas. Pedido de garantia (28/10/2026): o Painel
+// mostra só quem PEDIU (mensagem, SAC, devolução por defeito, atendimento).
 import { AlertCircle, ArrowLeft, Info, Loader2, Plus, RefreshCw, Search, ShieldCheck, Sparkles } from 'lucide-vue-next'
 import {
   CARTOES,
@@ -33,6 +34,9 @@ import {
   filtroDoCartao,
   nomePlataforma,
   corpoDaLista,
+  numeroBR,
+  pct,
+  rotuloDoPedido,
   textoNf,
   type Cartao,
   type FiltrosLista,
@@ -60,7 +64,7 @@ async function carregarRegras() {
   } catch {
     // fica o padrão (o mesmo do servidor hoje)
   }
-  // Robô desligado: ninguém liga conversa sozinho — "só com conversa"
+  // Robô desligado: ninguém marca o pedido de garantia sozinho — "pedidos"
   // esconderia as garantias. Abre em "todas" (se a pessoa não escolheu).
   if (!regras.value.vinculo_automatico && !mostrarEscolhido.value) mostrar.value = 'todas'
 }
@@ -78,15 +82,18 @@ function vistaGuardada(): Vista {
   }
 }
 const vista = ref<Vista>('conversas')
-// Conversas: "só com conversa" (padrão) ou todas as garantias.
-const mostrar = ref<'com_conversa' | 'todas'>('com_conversa')
+// Pedido de garantia (28/10/2026): o Painel é de quem PEDIU a garantia
+// ("a garantia é só para o pessoal que solicita", Eduardo); "todas" mostra
+// também a venda sem pedido. A busca acha todas.
+const mostrar = ref<'pedidos' | 'todas'>('pedidos')
 const mostrarEscolhido = ref(false)
 
 // ─── lista ──────────────────────────────────────────────────────────────────
-const filtros = reactive<FiltrosLista>({ ...FILTROS_PADRAO, ordem: 'atividade', com_conversa: true, origem: 'todas' })
+const filtros = reactive<FiltrosLista>({ ...FILTROS_PADRAO, ordem: 'atividade', com_conversa: false, origem: 'todas' })
 function aplicarVista() {
   filtros.ordem = vista.value === 'conversas' ? 'atividade' : 'cadastro'
-  filtros.com_conversa = vista.value === 'conversas' && mostrar.value === 'com_conversa'
+  filtros.com_conversa = false
+  filtros.mostrar = mostrar.value
 }
 watch([vista, mostrar], () => {
   aplicarVista()
@@ -163,7 +170,7 @@ watch(() => filtros.busca, () => {
   if (atraso) clearTimeout(atraso)
   atraso = setTimeout(() => carregar({ trocouFiltro: true }), 300)
 })
-watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.ordem, filtros.com_conversa, filtros.origem], () => { void carregar({ trocouFiltro: true }) })
+watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.ordem, filtros.com_conversa, filtros.origem, filtros.mostrar], () => { void carregar({ trocouFiltro: true }) })
 
 const ativo = computed(() => cartaoAtivo(filtros))
 function clicarCartao(c: Cartao) {
@@ -202,8 +209,8 @@ function selecionar(id: number) {
   selecionadaLinha.value = itens.value.find((x) => x.id === id) || null
   historicoNoCelular.value = true
 }
-// "Só com conversa" não vale para a busca (corpoDaLista).
-const soComConversa = computed(() => !!filtros.com_conversa && !filtros.busca.trim())
+// "Pedidos de garantia" não vale para a busca (acha a venda sem pedido).
+const soPedidos = computed(() => filtros.mostrar !== 'todas' && !filtros.busca.trim())
 const versaoHistorico = ref(0)
 // "atualizar", cadastrar e corrigir também releem o resumo.
 const versaoResumo = ref(0)
@@ -339,8 +346,9 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       <div class="w-[calc(50%-0.25rem)] sm:w-44">
         <label for="gar-periodo" class="mb-1 block text-xs font-medium text-muted-foreground">Período por</label>
         <select id="gar-periodo" v-model="filtros.periodo" class="h-9 w-full rounded-md border bg-background px-2 text-sm">
-          <option value="cadastro">data de cadastro</option>
+          <option value="pedido">data do pedido de garantia</option>
           <option value="entrega">data de entrega</option>
+          <option value="cadastro">data de cadastro</option>
         </select>
       </div>
       <div class="flex w-full items-end gap-2 sm:w-auto">
@@ -361,11 +369,11 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
           <option value="resumo">Resumo por departamento</option>
         </select>
       </div>
-      <div v-if="vista === 'conversas'" class="w-[calc(50%-0.25rem)] sm:w-44">
+      <div v-if="vista !== 'resumo'" class="w-[calc(50%-0.25rem)] sm:w-52">
         <label for="gar-mostrar" class="mb-1 block text-xs font-medium text-muted-foreground">Mostrar</label>
         <select id="gar-mostrar" v-model="mostrar" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-mostrar @change="mostrarEscolhido = true">
-          <option value="com_conversa">só com conversa</option>
-          <option value="todas">todas as garantias</option>
+          <option value="pedidos">pedidos de garantia</option>
+          <option value="todas">todas as vendas com nota</option>
         </select>
       </div>
       <div class="w-[calc(50%-0.25rem)] sm:w-44">
@@ -400,7 +408,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       </button>
     </div>
     <p v-if="indicadores" class="-mt-1 text-xs text-muted-foreground">
-      {{ indicadores.total }} {{ indicadores.total === 1 ? 'garantia' : 'garantias' }} ·
+      <span data-total-pedidos>{{ indicadores.total }} {{ indicadores.total === 1 ? 'pedido de garantia' : 'pedidos de garantia' }}<template v-if="indicadores.vendidas"> em {{ numeroBR(indicadores.vendidas) }} vendas com nota ({{ pct(indicadores.total, indicadores.vendidas) }})</template></span> ·
       <button type="button" class="underline-offset-2 hover:underline" @click="filtros.status = 'aguardando_entrega'; filtros.com_atendimento_no_mes = false">🟡 {{ indicadores.aguardando_entrega }} sem data de entrega</button>
       <template v-if="indicadores.entregue_sem_data">
         (<button type="button" class="underline-offset-2 hover:underline" data-entregue-sem-data @click="filtros.status = 'entregue_sem_data'; filtros.com_atendimento_no_mes = false">{{ indicadores.entregue_sem_data }} já {{ indicadores.entregue_sem_data === 1 ? 'entregue' : 'entregues' }} no Bling</button>)
@@ -425,11 +433,11 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
     <EmptyState
       v-else-if="carregado && !itens.length"
       :icon="ShieldCheck"
-      :title="soComConversa ? (temFiltro ? 'Nenhuma garantia com conversa com esses filtros' : 'Nenhuma garantia com conversa ainda') : temFiltro ? 'Nenhuma garantia com esses filtros' : 'Nenhuma garantia cadastrada ainda'"
-      :description="soComConversa ? 'Em &quot;Mostrar&quot; está &quot;só com conversa&quot;: as garantias sem conversa do cliente ficam escondidas.' : temFiltro ? 'Mude a busca, o status ou o período.' : 'Cadastre a primeira pelo + Nova garantia: informe o pedido e a data de entrega vira o início da garantia.'"
+      :title="soPedidos ? (temFiltro ? 'Nenhum pedido de garantia com esses filtros' : 'Nenhum pedido de garantia ainda') : temFiltro ? 'Nenhuma garantia com esses filtros' : 'Nenhuma garantia cadastrada ainda'"
+      :description="soPedidos ? 'Em &quot;Mostrar&quot; está &quot;pedidos de garantia&quot;: as vendas em que o cliente não pediu garantia ficam escondidas.' : temFiltro ? 'Mude a busca, o status ou o período.' : 'Cadastre a primeira pelo + Nova garantia: informe o pedido e a data de entrega vira o início da garantia.'"
       data-vazio
     >
-      <Button v-if="soComConversa" size="sm" variant="outline" data-mostrar-todas @click="mostrar = 'todas'; mostrarEscolhido = true">mostrar todas as garantias</Button>
+      <Button v-if="soPedidos" size="sm" variant="outline" data-mostrar-todas @click="mostrar = 'todas'; mostrarEscolhido = true">mostrar todas as vendas</Button>
       <Button v-if="temFiltro" size="sm" variant="outline" @click="limparFiltros">limpar filtros</Button>
       <Button v-else-if="acesso.cadastra" size="sm" @click="novaGarantia()"><Plus class="mr-1 size-4" /> Nova garantia</Button>
     </EmptyState>
@@ -456,6 +464,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
                 </div>
                 <div class="truncate text-xs text-muted-foreground">pedido {{ g.pedido_bling }}<template v-if="g.plataforma"> · {{ nomePlataforma(g.plataforma) }}</template> · NF {{ textoNf(g.nf_numero, g.nf_serie) }}</div>
                 <div v-if="g.ultima_previa" class="mt-0.5 truncate text-xs" :class="g.ultima_autor === 'cliente' ? 'text-foreground' : 'text-muted-foreground'">{{ g.ultima_autor === 'loja' ? 'Loja: ' : g.ultima_autor === 'mediador' ? 'Mediador: ' : '' }}{{ g.ultima_previa }}</div>
+                <div class="mt-0.5 truncate text-[11px]" :class="g.pedido_em && !g.nao_e_pedido ? 'text-foreground' : 'text-muted-foreground'" data-pedido>{{ rotuloDoPedido(g) }}</div>
                 <div class="mt-1 flex items-center gap-1.5">
                   <GarantiaStatus :status="g.status" :entregue-sem-data="g.entregue_sem_data" />
                   <span v-if="g.conversas" class="text-[10px] text-muted-foreground">{{ g.conversas }} {{ g.conversas === 1 ? 'conversa' : 'conversas' }}</span>
@@ -493,6 +502,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
           <thead class="bg-muted">
             <tr class="text-left">
               <th class="px-3 py-2.5 font-medium">Nome</th>
+              <th class="whitespace-nowrap px-3 py-2.5 font-medium">Pedido de garantia</th>
               <th class="whitespace-nowrap px-3 py-2.5 font-medium">CPF</th>
               <th class="px-3 py-2.5 font-medium">NF</th>
               <th class="px-3 py-2.5 font-medium">Entrega</th>
@@ -517,6 +527,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
                 <div class="font-medium">{{ g.cliente_nome }}</div>
                 <div class="text-xs text-muted-foreground">pedido {{ g.pedido_bling }}<template v-if="g.plataforma"> · {{ nomePlataforma(g.plataforma) }}</template></div>
               </td>
+              <td class="whitespace-nowrap px-3 py-2.5 text-xs" :class="g.pedido_em && !g.nao_e_pedido ? '' : 'text-muted-foreground'" data-pedido>{{ rotuloDoPedido(g) }}</td>
               <td class="whitespace-nowrap px-3 py-2.5 font-mono text-xs">{{ g.cpf_mascarado || '—' }}</td>
               <td class="whitespace-nowrap px-3 py-2.5 font-mono">{{ textoNf(g.nf_numero, g.nf_serie) }}</td>
               <td class="whitespace-nowrap px-3 py-2.5 tabular-nums">{{ dataCurta(g.data_inicio) }}</td>
@@ -545,6 +556,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
               <div><div class="text-muted-foreground">Fim HW</div><div class="tabular-nums">{{ dataCurta(g.fim_hardware) }}</div></div>
               <div><div class="text-muted-foreground">Fim SW</div><div class="tabular-nums">{{ dataCurta(g.fim_software) }}</div></div>
             </div>
+            <div class="text-xs" :class="g.pedido_em && !g.nao_e_pedido ? '' : 'text-muted-foreground'" data-pedido>{{ rotuloDoPedido(g) }}</div>
             <div class="text-xs text-muted-foreground">pedido {{ g.pedido_bling }} · {{ g.atendimentos }} {{ g.atendimentos === 1 ? 'atendimento' : 'atendimentos' }}</div>
           </button>
         </li>

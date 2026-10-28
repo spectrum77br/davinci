@@ -97,6 +97,7 @@ class Resultado:
     conversas_ligadas: int = 0
     descartadas: int = 0
     reativadas: int = 0
+    pedidos: int = 0
     ids_criados: list[int] = field(default_factory=list)
 
     def como_dict(self) -> dict:
@@ -107,6 +108,7 @@ class Resultado:
             "conversas_ligadas": self.conversas_ligadas,
             "descartadas": self.descartadas,
             "reativadas": self.reativadas,
+            "pedidos": self.pedidos,
         }
 
 
@@ -489,6 +491,11 @@ async def rodar(
     r.conversas_ligadas += await garantia_sac.ligar_sac(session, desde=agora - JANELA_LIGACAO)
     r.descartadas = await descartar_canceladas(session, agora=agora)
     r.reativadas = await reativar_descancelados(session)
+    # O pedido de garantia (28/10/2026): o Painel mostra só quem PEDIU
+    # (mensagem, SAC, devolução por defeito) — services/garantia_pedido.py.
+    from app.services import garantia_pedido
+
+    r.pedidos = await garantia_pedido.marcar_pedidos(session, desde=agora - JANELA_LIGACAO)
     return r
 
 
@@ -503,6 +510,7 @@ async def retroativo(session: AsyncSession, *, desde: date = INICIO_DAS_NOTAS) -
         total.criadas += r.criadas
         total.conversas_ligadas += r.conversas_ligadas
         total.descartadas += r.descartadas
+        total.pedidos += r.pedidos
         for k, v in r.pendencias.items():
             total.pendencias[k] = total.pendencias.get(k, 0) + v
         logger.info("garantia_auto_retroativo_lote", **r.como_dict())
@@ -512,5 +520,8 @@ async def retroativo(session: AsyncSession, *, desde: date = INICIO_DAS_NOTAS) -
     from app.services import garantia_sac
 
     total.conversas_ligadas += await garantia_sac.ligar_sac(session)
+    from app.services import garantia_pedido
+
+    total.pedidos += await garantia_pedido.marcar_pedidos(session)
     await session.commit()
     return total

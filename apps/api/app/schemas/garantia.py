@@ -86,7 +86,8 @@ class ListaFiltro(BaseModel):
 
     busca: str | None = Field(default=None, max_length=100)
     status: StatusFiltro = "todos"
-    periodo: Literal["cadastro", "entrega"] = "cadastro"
+    # `pedido`: a data do pedido de garantia (28/10/2026).
+    periodo: Literal["cadastro", "entrega", "pedido"] = "cadastro"
     de: date | None = None
     ate: date | None = None
     com_atendimento_no_mes: bool = False
@@ -96,6 +97,9 @@ class ListaFiltro(BaseModel):
     ordem: Literal["cadastro", "atividade"] = "cadastro"
     com_conversa: bool = False
     origem: Literal["todas", "robo", "manual"] = "todas"
+    # Pedido de garantia (28/10/2026): o Painel mostra só quem PEDIU; "todas"
+    # mostra também a venda sem pedido. A busca procura em todas.
+    mostrar: Literal["pedidos", "todas"] = "pedidos"
     limite: int = Field(default=200, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
@@ -156,6 +160,12 @@ class GarantiaLinhaOut(BaseModel):
     criado_em: datetime
     # Garantia automática (28/10/2026).
     origem: str = "manual"
+    # Pedido de garantia (28/10/2026): quando e de onde; `nao_e_pedido` = a
+    # pessoa disse "não é pedido de garantia".
+    pedido_em: datetime | None = None
+    pedido_origem: str | None = None
+    pedido_origem_rotulo: str | None = None
+    nao_e_pedido: bool = False
     conversas: int = 0
     # A conversa ligada com a mensagem mais recente (a prévia só para quem lê
     # o Atendimento, e nunca de conversa de e-mail).
@@ -175,6 +185,8 @@ class IndicadoresOut(BaseModel):
     entregue_sem_data: int
     expiradas: int
     total: int
+    # As vendas com garantia (com e sem pedido) que a pessoa enxerga.
+    vendidas: int = 0
 
 
 class GarantiaListaOut(BaseModel):
@@ -231,6 +243,15 @@ class AtendimentoOut(BaseModel):
     cobertura_hoje_rotulo: str
     solucao: str
     criado_em: datetime
+
+
+class PedidoMarcar(BaseModel):
+    """PUT /api/garantias/{id}/pedido: a pessoa marca (true) ou diz "não é
+    pedido de garantia" (false)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pedido: bool
 
 
 class PermissoesOut(BaseModel):
@@ -401,7 +422,8 @@ class HistoricoOut(BaseModel):
 
 class ResumoCategoriaOut(BaseModel):
     nome: str
-    total: int
+    vendidas: int
+    pediram: int = 0
     # Sem categoria no pedido nem no cadastro: veio pela família do SKU.
     sem_categoria: bool = False
 
@@ -409,18 +431,20 @@ class ResumoCategoriaOut(BaseModel):
 class ResumoProdutoOut(BaseModel):
     base: str  # o SKU base (dg053, u015…)
     nome: str
-    total: int
-    # Alguma conversa ligada tem mensagem do CLIENTE desde a compra.
-    cliente_escreveu: int = 0
+    vendidas: int
+    pediram: int = 0
     com_atendimento: int = 0
 
 
 class ResumoDepartamentoOut(BaseModel):
     chave: str  # celular | eletro | acessorios | outros
     nome: str
-    total: int
+    vendidas: int
+    # Pedido de garantia (28/10/2026): a porcentagem é pediram ÷ vendidas.
+    pediram: int = 0
+    # Dos pedidos: a situação da garantia hoje e de onde veio o pedido.
     status: dict[str, int]
-    cliente_escreveu: int = 0
+    origens: dict[str, int] = {}
     com_atendimento: int = 0
     atendimentos_hardware: int = 0
     atendimentos_software: int = 0
@@ -429,10 +453,11 @@ class ResumoDepartamentoOut(BaseModel):
 
 
 class ResumoOut(BaseModel):
-    """POST /api/garantias/resumo: as garantias por departamento (as
-    porcentagens a tela calcula das contagens)."""
+    """POST /api/garantias/resumo: as vendas com garantia e os pedidos de
+    garantia por departamento (as porcentagens a tela calcula das contagens)."""
 
-    total: int
+    vendidas: int
+    pediram: int
     hoje: date
     departamentos: list[ResumoDepartamentoOut]
 

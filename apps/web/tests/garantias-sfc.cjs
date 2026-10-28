@@ -411,7 +411,7 @@ const LINHA = {
   }
   const acoes = /GARANTIA_LOG_ACOES = \(([\s\S]*?)\n\)/.exec(api('models/garantia.py'))[1]
   const acoesPy = [...acoes.matchAll(/^ {4}"([a-z_]+)",/gm)].map((m) => m[1])
-  assert.deepEqual(acoesPy, ['cadastrou', 'alterou', 'consultou', 'registrou_atendimento', 'recalculou', 'buscou_cpf', 'criou_automatico', 'descartou', 'reativou'])
+  assert.deepEqual(acoesPy, ['cadastrou', 'alterou', 'consultou', 'registrou_atendimento', 'recalculou', 'buscou_cpf', 'criou_automatico', 'descartou', 'reativou', 'pedido_automatico', 'marcou_pedido', 'tirou_pedido'])
   for (const a of acoesPy) assert.ok(L.ACOES_LOG[a], `ação ${a}`)
   // As rotas que a tela chama existem (lista e busca são POST: o termo vai no corpo).
   assert.ok(!rotas.includes('@router.get("",') && !rotas.includes('@router.get("/busca"'), 'nada de busca por GET')
@@ -496,15 +496,17 @@ async function testarPagina() {
   assert.equal(m.estado.itens.length, 2)
   assert.equal(m.estado.indicadores.ativas, 128)
   // Garantia automática (28/10/2026): a vista padrão é Conversas — mais nova em
-  // cima, só as com conversa. A Tabela é a lista de antes.
-  assert.deepEqual(chamadas.find((c) => c.url === '/api/garantias/lista').opts, { method: 'POST', body: { limite: 100, offset: 0, ordem: 'atividade', com_conversa: true } })
+  // cima. Pedido de garantia (28/10): o padrão é só os PEDIDOS (o servidor
+  // filtra sem precisar do campo); "todas as vendas" manda mostrar=todas. A
+  // Tabela é a lista de antes.
+  assert.deepEqual(chamadas.find((c) => c.url === '/api/garantias/lista').opts, { method: 'POST', body: { limite: 100, offset: 0, ordem: 'atividade' } })
   assert.equal(m.estado.vista, 'conversas')
   m.estado.mostrar = 'todas'
   await new Promise((r) => setTimeout(r, 0))
-  assert.deepEqual(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body, { limite: 100, offset: 0, ordem: 'atividade' })
+  assert.deepEqual(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body, { limite: 100, offset: 0, ordem: 'atividade', mostrar: 'todas' })
   m.estado.vista = 'tabela'
   await new Promise((r) => setTimeout(r, 0))
-  assert.deepEqual(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body, { limite: 100, offset: 0 })
+  assert.deepEqual(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body, { limite: 100, offset: 0, mostrar: 'todas' })
   // A busca (nome/CPF) vai no corpo, nunca na URL.
   m.estado.filtros.busca = '529.982.247-25'
   await m.estado.carregar()
@@ -553,7 +555,9 @@ async function testarPagina() {
     assert.match(h, /data-nova-garantia/)
     assert.match(h, /placeholder="Nome \/ CPF \/ NF \/ Pedido"/)
     const ths = [...h.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)].map((x) => texto(x[1]))
-    assert.deepEqual(ths, ['Nome', 'CPF', 'NF', 'Entrega', 'Fim HW', 'Fim SW', 'Status', 'Atend.'])
+    assert.deepEqual(ths, ['Nome', 'Pedido de garantia', 'CPF', 'NF', 'Entrega', 'Fim HW', 'Fim SW', 'Status', 'Atend.'])
+    // A venda sem pedido (busca ou "todas as vendas") diz que não tem pedido.
+    assert.match(h, /sem pedido de garantia/)
     assert.match(h, /\*\*\*\.982\.247-\*\*/, 'CPF mascarado na lista')
     assert.ok(!/529\.982\.247-25|52998224725/.test(h), 'nunca o CPF completo na lista')
     assert.match(texto(h), /07\/10\/26 07\/01\/27 07\/10\/27/, 'Entrega, Fim HW e Fim SW em dd/mm/aa')
@@ -572,7 +576,12 @@ async function testarPagina() {
     assert.match(carregandoHtml, /data-carregando/)
     assert.ok(!/data-nova-garantia/.test(carregandoHtml))
     await cx.estado.carregar()
-    assert.match(await html(appCom(cx.mesmo, {}, g)), /Nenhuma garantia com conversa ainda/)
+    // Pedido de garantia (28/10): o Painel vazio fala dos PEDIDOS e oferece
+    // mostrar todas as vendas.
+    const vazioPedidos = await html(appCom(cx.mesmo, {}, g))
+    assert.match(vazioPedidos, /Nenhum pedido de garantia ainda/)
+    assert.match(vazioPedidos, /data-mostrar-todas/)
+    cx.estado.mostrar = 'todas'
     cx.estado.vista = 'tabela'
     cx.estado.aplicarVista()
     const vazioHtml = await html(appCom(cx.mesmo, {}, g))

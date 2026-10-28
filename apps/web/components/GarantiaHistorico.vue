@@ -17,6 +17,7 @@ import {
   dataCurta,
   errosDaApi,
   formularioSacLegivel,
+  rotuloDoPedido,
   ladoDaMensagem,
   linhasDoHistorico,
   nomePlataforma,
@@ -230,6 +231,9 @@ function aoRegistrar(_a: AtendimentoGarantia) {
         <span><span class="text-muted-foreground">Fim SW</span> <span class="tabular-nums">{{ dataCurta(garantia.fim_software) }}</span></span>
         <span v-if="garantia.origem === 'robo'" class="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 text-violet-700 dark:text-violet-300" title="criada sozinha pelo DaVinci com a nota fiscal de produto do pedido" data-selo-robo>
           <Sparkles class="size-3" /> criada sozinha pela NF
+        </span>
+        <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5" :class="garantia.pedido_em && !garantia.nao_e_pedido ? 'bg-amber-500/15 text-amber-800 dark:text-amber-200' : 'bg-muted text-muted-foreground'" title="o pedido de garantia do cliente: de onde veio e quando" data-selo-pedido>
+          {{ rotuloDoPedido(garantia) }}
         </span>
       </div>
       <!-- as conversas ligadas: abrir no Atendimento ou registrar o atendimento -->

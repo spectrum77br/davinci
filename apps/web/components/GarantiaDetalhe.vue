@@ -23,6 +23,7 @@ import {
   ehImagem,
   errosDaApi,
   nomePlataforma,
+  rotuloDoPedido,
   tamanhoLegivel,
   textoAviso,
   textoNf,
@@ -93,6 +94,24 @@ async function conferirEntrega() {
     toasts.error('Não consegui conferir a entrega', errosDaApi(e).geral)
   } finally {
     conferindo.value = false
+  }
+}
+
+// ─── pedido de garantia (28/10/2026): a pessoa corrige o robô ──────────────
+const marcando = ref(false)
+async function marcarPedido(pedido: boolean) {
+  if (!g.value || marcando.value) return
+  marcando.value = true
+  try {
+    const r = await api<GarantiaDetalhe>(`/api/garantias/${g.value.id}/pedido`, { method: 'PUT', body: { pedido } })
+    g.value = { ...r, cpf: g.value.cpf, cpf_completo: g.value.cpf_completo }
+    log.value = null
+    toasts.success(pedido ? 'Marcada como pedido de garantia' : 'Não é pedido de garantia', pedido ? 'A garantia entra no Painel.' : 'Sai do Painel (continua na busca) e o robô não marca de novo.')
+    emit('mudou')
+  } catch (e) {
+    toasts.error('Não consegui mudar o pedido de garantia', errosDaApi(e).geral)
+  } finally {
+    marcando.value = false
   }
 }
 
@@ -210,6 +229,11 @@ onKeyStroke('Escape', () => emit('fechar'))
                 <span class="font-mono">{{ g.pedido_bling }}</span> <span class="text-xs text-muted-foreground">(Bling)</span>
                 <div v-if="g.pedido_marketplace" class="text-xs"><span class="font-mono">{{ g.pedido_marketplace }}</span> <span class="text-muted-foreground">{{ nomePlataforma(g.plataforma) }}<template v-if="g.conta"> · {{ g.conta }}</template></span></div>
               </dd>
+              <dt class="text-muted-foreground">Pedido de garantia</dt>
+              <dd data-pedido-de-garantia>
+                <span :class="g.pedido_em && !g.nao_e_pedido ? '' : 'text-muted-foreground'">{{ rotuloDoPedido(g) }}</span>
+                <span v-if="g.pedido_em && !g.nao_e_pedido" class="ml-1 text-xs text-muted-foreground">({{ dataHoraBR(g.pedido_em) }})</span>
+              </dd>
               <dt class="text-muted-foreground">Cadastro</dt><dd>{{ dataHoraBR(g.criado_em) }}</dd>
               <dt class="text-muted-foreground">Cadastrado por</dt><dd>{{ g.criado_por?.nome || '—' }}</dd>
               <template v-if="g.atualizado_em">
@@ -248,6 +272,12 @@ onKeyStroke('Escape', () => emit('fechar'))
             </section>
 
             <div v-if="g.permissoes.cadastrar" class="flex flex-wrap justify-end gap-2 border-t pt-3">
+              <Button v-if="g.pedido_em && !g.nao_e_pedido" size="sm" variant="outline" :disabled="marcando" title="o cliente não pediu garantia: sai do Painel (continua na busca) e o robô não marca de novo" data-tirar-pedido @click="marcarPedido(false)">
+                <Loader2 v-if="marcando" class="mr-1 size-4 animate-spin" /> Não é pedido de garantia
+              </Button>
+              <Button v-else size="sm" variant="outline" :disabled="marcando" title="o cliente pediu garantia (o robô não achou): entra no Painel" data-marcar-pedido @click="marcarPedido(true)">
+                <Loader2 v-if="marcando" class="mr-1 size-4 animate-spin" /> Marcar como pedido de garantia
+              </Button>
               <Button size="sm" variant="outline" :disabled="conferindo" title="relê a data de entrega na Logística agora (o robô faz isso de hora em hora)" @click="conferirEntrega">
                 <Loader2 v-if="conferindo" class="mr-1 size-4 animate-spin" /><RefreshCw v-else class="mr-1 size-4" /> Conferir entrega agora
               </Button>

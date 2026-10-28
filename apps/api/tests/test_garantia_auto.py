@@ -412,11 +412,15 @@ async def test_lista_conversas_em_cima_e_sem_as_descartadas(client, db, make_use
         msgs=[("cliente", "chegou quebrado", COMPRA + timedelta(days=5), ())],
     )
     await _rodar(db)
+    # O Painel é dos pedidos de garantia: "chegou quebrado" é pedido (28/10).
     r = await client.post("/api/garantias/lista", json={"ordem": "atividade"})
+    assert [i["pedido_bling"] for i in r.json()["itens"]] == ["310003"]
+    assert r.json()["itens"][0]["pedido_origem"] == "mensagem"
+    r = await client.post("/api/garantias/lista", json={"ordem": "atividade", "mostrar": "todas"})
     itens = r.json()["itens"]
     assert [i["pedido_bling"] for i in itens] == ["310003", "310001"]
     assert itens[0]["origem"] == "robo" and itens[0]["conversas"] == 1
-    r = await client.post("/api/garantias/lista", json={"com_conversa": True})
+    r = await client.post("/api/garantias/lista", json={"com_conversa": True, "mostrar": "todas"})
     assert [i["pedido_bling"] for i in r.json()["itens"]] == ["310003"]
 
     g = next(x for x in await _garantias(db) if x.pedido_bling == "310001")

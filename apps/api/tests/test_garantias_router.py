@@ -646,6 +646,7 @@ async def test_filtro_por_status_periodo_e_indicadores(client, db, make_user, au
         "entregue_sem_data": 0,  # o pedido 300003 está Em andamento no Bling
         "expiradas": 0,
         "total": 3,
+        "vendidas": 3,
     }
     # Entrega 01/10 → hardware até 01/01/2027: em 15/12 faltam ≤ 30 dias.
     monkeypatch.setattr(svc, "hoje", lambda: date(2026, 12, 15))

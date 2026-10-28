@@ -43,6 +43,28 @@ export type GarantiaLinha = {
   ultima_previa?: string | null
   ultima_autor?: string | null
   ultima_plataforma?: string | null
+  // Pedido de garantia (28/10/2026): o Painel mostra só quem PEDIU; a venda
+  // sem pedido aparece na busca e em "Mostrar: todas as vendas".
+  pedido_em?: string | null
+  pedido_origem?: OrigemPedido | null
+  pedido_origem_rotulo?: string | null
+  nao_e_pedido?: boolean
+}
+
+export type OrigemPedido = 'mensagem' | 'sac' | 'devolucao' | 'atendimento' | 'manual' | 'pessoa'
+export const ORIGEM_PEDIDO: Record<OrigemPedido, { emoji: string; rotulo: string }> = {
+  mensagem: { emoji: '💬', rotulo: 'mensagem do cliente' },
+  sac: { emoji: '📋', rotulo: 'SAC do site' },
+  devolucao: { emoji: '↩️', rotulo: 'devolução por defeito' },
+  atendimento: { emoji: '🛠️', rotulo: 'atendimento registrado' },
+  manual: { emoji: '✍️', rotulo: 'cadastrada à mão' },
+  pessoa: { emoji: '👤', rotulo: 'marcada pela equipe' },
+}
+export function rotuloDoPedido(g: Pick<GarantiaLinha, 'pedido_em' | 'pedido_origem' | 'nao_e_pedido'>): string {
+  if (g.nao_e_pedido) return 'não é pedido de garantia'
+  if (!g.pedido_em || !g.pedido_origem) return 'sem pedido de garantia'
+  const o = ORIGEM_PEDIDO[g.pedido_origem]
+  return `${o ? `${o.emoji} ${o.rotulo}` : g.pedido_origem} · ${dataBR(g.pedido_em.slice(0, 10))}`
 }
 
 export type Indicadores = {
@@ -54,6 +76,8 @@ export type Indicadores = {
   entregue_sem_data: number
   expiradas: number
   total: number
+  // As vendas com garantia (com e sem pedido) que a pessoa enxerga.
+  vendidas?: number
 }
 
 export type GarantiaLista = { itens: GarantiaLinha[]; total: number; indicadores: Indicadores; hoje: string }
@@ -331,6 +355,9 @@ export const ACOES_LOG: Record<string, string> = {
   criou_automatico: 'Criou sozinho pela NF de produto',
   descartou: 'Descartou (pedido cancelado)',
   reativou: 'Reativou (pedido saiu de Cancelado)',
+  pedido_automatico: 'Pedido de garantia (achado pelo robô)',
+  marcou_pedido: 'Marcou como pedido de garantia',
+  tirou_pedido: 'Não é pedido de garantia',
 }
 export const CAMPOS_LOG: Record<string, string> = {
   pedido: 'Pedido',
@@ -652,7 +679,8 @@ export function barraPrazo(p: Prazo | null | undefined): { pct: number; texto: s
 export type FiltrosLista = {
   busca: string
   status: FiltroStatus
-  periodo: 'cadastro' | 'entrega'
+  // `pedido`: a data do pedido de garantia (28/10/2026).
+  periodo: 'cadastro' | 'entrega' | 'pedido'
   de: string
   ate: string
   com_atendimento_no_mes: boolean
@@ -661,9 +689,12 @@ export type FiltrosLista = {
   ordem?: 'cadastro' | 'atividade'
   com_conversa?: boolean
   origem?: 'todas' | 'robo' | 'manual'
+  // Pedido de garantia (28/10/2026): o Painel é dos pedidos; "todas" mostra
+  // também a venda sem pedido.
+  mostrar?: 'pedidos' | 'todas'
 }
 
-export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'cadastro', de: '', ate: '', com_atendimento_no_mes: false }
+export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'pedido', de: '', ate: '', com_atendimento_no_mes: false, mostrar: 'pedidos' }
 
 export const LIMITE_PAGINA = 100
 
@@ -672,13 +703,14 @@ export type CorpoLista = {
   offset: number
   busca?: string
   status?: FiltroStatus
-  periodo?: 'cadastro' | 'entrega'
+  periodo?: 'cadastro' | 'entrega' | 'pedido'
   de?: string
   ate?: string
   com_atendimento_no_mes?: boolean
   ordem?: 'cadastro' | 'atividade'
   com_conversa?: boolean
   origem?: 'robo' | 'manual'
+  mostrar?: 'todas'
 }
 
 /**
@@ -701,32 +733,34 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
   // quer achar a garantia mesmo sem conversa nenhuma.
   if (f.com_conversa && !busca) q.com_conversa = true
   if (f.origem && f.origem !== 'todas') q.origem = f.origem
+  if (f.mostrar === 'todas') q.mostrar = 'todas'
   return q
 }
 
 // ─── resumo por departamento (28/10/2026) ───────────────────────────────────
-// POST /api/garantias/resumo: as garantias por departamento (a categoria do
-// produto no Bling, a mesma do Faturamento). Só contagens: as porcentagens
-// são feitas aqui, de um jeito só.
-export type ResumoCategoria = { nome: string; total: number; sem_categoria: boolean }
-// cliente_escreveu: alguma conversa ligada tem mensagem do CLIENTE desde a
-// compra (a mensagem automática da loja não conta).
-export type ResumoProduto = { base: string; nome: string; total: number; cliente_escreveu: number; com_atendimento: number }
+// POST /api/garantias/resumo: as vendas com garantia e os PEDIDOS de
+// garantia por departamento (a categoria do produto no Bling, a mesma do
+// Faturamento). A porcentagem é pediram ÷ vendidas ("a garantia é só para o
+// pessoal que solicita", Eduardo, 28/10). Só contagens: as porcentagens são
+// feitas aqui, de um jeito só.
+export type ResumoCategoria = { nome: string; vendidas: number; pediram: number; sem_categoria: boolean }
+export type ResumoProduto = { base: string; nome: string; vendidas: number; pediram: number; com_atendimento: number }
 export type ResumoDepartamento = {
   chave: 'celular' | 'eletro' | 'acessorios' | 'outros'
   nome: string
-  total: number
-  // Os 4 status e, à parte, "entregue_sem_data" (o Bling já entregou, falta a
-  // data no DaVinci — fora do "Aguardando entrega").
+  vendidas: number
+  pediram: number
+  // Dos PEDIDOS: os 4 status e, à parte, "entregue_sem_data" (o Bling já
+  // entregou, falta a data no DaVinci — fora do "Aguardando entrega").
   status: Record<StatusGarantia | 'entregue_sem_data', number>
-  cliente_escreveu: number
+  origens: Partial<Record<OrigemPedido, number>>
   com_atendimento: number
   atendimentos_hardware: number
   atendimentos_software: number
   categorias: ResumoCategoria[]
   produtos: ResumoProduto[]
 }
-export type Resumo = { total: number; hoje: string; departamentos: ResumoDepartamento[] }
+export type Resumo = { vendidas: number; pediram: number; hoje: string; departamentos: ResumoDepartamento[] }
 
 // O corpo do resumo: os filtros da barra (período, origem, status) — a
 // busca e o "só com conversa" são da lista.

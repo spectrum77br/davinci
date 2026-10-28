@@ -3599,13 +3599,17 @@ async def garantias_conversas_diario(ctx: dict) -> None:
     últimas horas). Ponteiro: nada é copiado."""
     if not get_settings().garantia_automatica:
         return
-    from app.services import garantia_auto, garantia_sac
+    from app.services import garantia_auto, garantia_pedido, garantia_sac
 
     async with session_scope() as s:
         novas = await garantia_auto.ligar_conversas(s)
         # O SAC do site: o protocolo que chegou antes de a garantia existir.
         sac = await garantia_sac.ligar_sac(s)
-    logger.info("garantias_conversas_diario", conversas_ligadas=novas, sac_ligados=sac)
+        # O pedido de garantia de todas (a volta de 15 min só olha as mexidas).
+        pedidos = await garantia_pedido.marcar_pedidos(s)
+    logger.info(
+        "garantias_conversas_diario", conversas_ligadas=novas, sac_ligados=sac, pedidos=pedidos
+    )
 
 
 async def alerts_cleanup(ctx: dict) -> None:

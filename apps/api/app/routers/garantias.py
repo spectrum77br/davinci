@@ -84,6 +84,7 @@ from app.schemas.garantia import (
     ListaFiltro,
     LogOut,
     NotaSugeridaOut,
+    PedidoMarcar,
     PedidoParaCadastroOut,
     PermissoesOut,
     PessoaRef,
@@ -95,7 +96,7 @@ from app.schemas.garantia import (
     VinculoOut,
 )
 from app.services import garantia as svc
-from app.services import garantia_sac
+from app.services import garantia_pedido, garantia_sac
 from app.services.atendimento import acesso, cartoes_plataforma, separa_email
 from app.services.atendimento.contexto import _chaves_do_pedido
 from app.services.mail_atendimento import administracao as mail_admin
@@ -242,6 +243,10 @@ def _linha(
         atendimentos=n_atend,
         criado_em=g.criado_em,
         origem=g.origem or "manual",
+        pedido_em=g.solicitada_em,
+        pedido_origem=g.solicitacao_origem,
+        pedido_origem_rotulo=garantia_pedido.ORIGEM_ROTULOS.get(g.solicitacao_origem or ""),
+        nao_e_pedido=g.nao_solicitada_em is not None,
         **conversa,
     )
 
@@ -518,8 +523,14 @@ def _filtro_busca(termo: str | None):
 
 
 async def _indicadores(session: AsyncSession, escopo, dia) -> IndicadoresOut:
-    base = [escopo] if escopo is not None else []
-    base.append(Garantia.descartada_em.is_(None))
+    """Os cartões do topo contam os PEDIDOS de garantia (28/10/2026); `vendidas`
+    = todas as vendas com garantia que a pessoa enxerga."""
+    vivas = [escopo] if escopo is not None else []
+    vivas.append(Garantia.descartada_em.is_(None))
+    vendidas = (
+        await session.execute(select(func.count()).select_from(Garantia).where(*vivas))
+    ).scalar_one()
+    base = [*vivas, garantia_pedido.filtro_pedido()]
     contar = {
         "ativas": svc.filtro_status(svc.STATUS_ATIVA, dia),
         "somente_software": svc.filtro_status(svc.STATUS_SOMENTE_SOFTWARE, dia),
@@ -552,6 +563,7 @@ async def _indicadores(session: AsyncSession, escopo, dia) -> IndicadoresOut:
     return IndicadoresOut(
         **{k: getattr(linha, k) for k in contar},
         total=linha.total,
+        vendidas=vendidas,
         atendimentos_no_mes=(await session.execute(q)).scalar_one(),
     )
 
@@ -633,7 +645,7 @@ def _filtros_do_painel(body: ListaFiltro, escopo, dia) -> list:
     if body.status != "todos":
         filtros.append(svc.filtro_status(body.status, dia))
     de, ate = body.de, body.ate
-    if de or ate:
+    if (de or ate) and body.periodo != "pedido":
         if body.periodo == "entrega":
             if de:
                 filtros.append(Garantia.data_inicio >= de)
@@ -659,6 +671,23 @@ def _filtros_do_painel(body: ListaFiltro, escopo, dia) -> list:
     return filtros
 
 
+def _filtros_do_pedido(body: ListaFiltro) -> list:
+    """O período pela data do PEDIDO de garantia (o dia em São Paulo, de `de`
+    a `ate` inclusive): na lista, filtra as garantias; no Resumo, só os
+    pedidos (as vendidas são todas)."""
+    if body.periodo != "pedido" or not (body.de or body.ate):
+        return []
+    filtros = []
+    if body.de:
+        filtros.append(
+            Garantia.solicitada_em >= datetime.combine(body.de, time(), svc.SAO_PAULO)
+        )
+    if body.ate:
+        fim = datetime.combine(body.ate + timedelta(days=1), time(), svc.SAO_PAULO)
+        filtros.append(Garantia.solicitada_em < fim)
+    return filtros
+
+
 @router.post("/resumo", response_model=ResumoOut)
 async def resumo(
     body: ListaFiltro,
@@ -672,7 +701,9 @@ async def resumo(
 
     dia = svc.hoje()
     escopo = _clausula(await resolve_team_scope(session, user))
-    dados = await garantia_resumo.resumo(session, _filtros_do_painel(body, escopo, dia), dia)
+    dados = await garantia_resumo.resumo(
+        session, _filtros_do_painel(body, escopo, dia), dia, pedido=_filtros_do_pedido(body)
+    )
     return ResumoOut(**dados)
 
 
@@ -694,6 +725,11 @@ async def listar(
     filtros = _filtros_do_painel(body, escopo, dia)
     if (f := _filtro_busca(body.busca)) is not None:
         filtros.append(f)
+    elif body.mostrar == "pedidos" or _filtros_do_pedido(body):
+        # O Painel é dos PEDIDOS de garantia (28/10/2026); a busca acha todas
+        # (o cliente que liga e ainda não tem pedido).
+        filtros.append(garantia_pedido.filtro_pedido())
+    filtros.extend(_filtros_do_pedido(body))
     if body.com_conversa:
         filtros.append(
             select(GarantiaConversa.garantia_id)
@@ -962,6 +998,10 @@ async def cadastrar(
     svc.aplicar_pedido(g, pedido, nf, serie, nota)
     svc.aplicar_entrega(g, entrega)
     g.entrega_verificada_em = datetime.now(UTC)
+    # Quem cadastra à mão atende um pedido de garantia.
+    garantia_pedido.marcar_pela_pessoa(
+        g, g.entrega_verificada_em, garantia_pedido.ORIGEM_MANUAL
+    )
     session.add(g)
     try:
         await session.flush()
@@ -1492,6 +1532,8 @@ async def registrar_atendimento(
                 blob=blob,
             )
         )
+    # O atendimento registrado é pedido de garantia (se ainda não era).
+    garantia_pedido.marcar_pela_pessoa(g, quando, garantia_pedido.ORIGEM_ATENDIMENTO)
     svc.registrar_log(
         session,
         g.id,
@@ -1504,6 +1546,39 @@ async def registrar_atendimento(
     await session.refresh(at)
     arquivos = await _arquivos_dos(session, [at.id])
     return _atendimento_out(at, g, arquivos.get(at.id, []))
+
+
+@router.put("/{garantia_id}/pedido", response_model=GarantiaSalvaOut)
+async def marcar_pedido(
+    garantia_id: int,
+    body: PedidoMarcar,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_cadastrar)],
+) -> GarantiaSalvaOut:
+    """A pessoa corrige o robô (28/10/2026): "marcar como pedido de garantia"
+    (entra no Painel) ou "não é pedido de garantia" (sai do Painel e o robô não
+    marca de novo). Fica no log."""
+    g = await _garantia_visivel(session, garantia_id, user)
+    agora = datetime.now(UTC)
+    if body.pedido:
+        if g.solicitada_em is not None and g.nao_solicitada_em is None:
+            return await _detalhe(session, g, user)
+        garantia_pedido.marcar_pela_pessoa(g, agora)
+        svc.registrar_log(
+            session, g.id, "marcou_pedido", user, detalhe="marcou como pedido de garantia"
+        )
+    else:
+        if g.nao_solicitada_em is not None:
+            return await _detalhe(session, g, user)
+        g.nao_solicitada_em = agora
+        g.nao_solicitada_por = user.id
+        svc.registrar_log(
+            session, g.id, "tirou_pedido", user, detalhe="não é pedido de garantia"
+        )
+    g.atualizado_em = agora
+    g.atualizado_por = user.id
+    await session.commit()
+    return await _detalhe(session, g, user)
 
 
 @router.get("/{garantia_id}/log", response_model=list[LogOut])

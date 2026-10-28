@@ -1,5 +1,5 @@
-"""As migrations 0380 (Painel de Garantia Uranyx) e 0434 (garantia automática)
-criam EXATAMENTE o que o model declara.
+"""As migrations 0380 (Painel de Garantia Uranyx), 0434 (garantia automática) e
+0438 (pedido de garantia) criam EXATAMENTE o que o model declara.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Aqui a 0380 roda de verdade num schema descartável e o catálogo do
@@ -132,6 +132,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     assert mod.down_revision == "0379_pricing_carrefour_netshoes"
     mod_auto = _carregar("0434_garantia_automatica")
     assert mod_auto.down_revision == "0433_atendimento_zap_saude"
+    mod_pedido = _carregar("0438_garantia_pedido")
+    assert mod_pedido.down_revision == "0437_conciliacao_recomeca_24_10"
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -151,10 +153,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
 
     mod.SCHEMA = rascunho
     mod_auto.SCHEMA = rascunho
+    mod_pedido.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")
         await conn.run_sync(_rodar, "upgrade", mod_auto)
+        await conn.run_sync(_rodar, "upgrade", mod_pedido)
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho)
@@ -176,6 +180,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "fk_garantia_atendimentos_garantia_id_garantias",
             "ck_garantia_atendimentos_cobertura_valida",
             "ck_garantia_log_acao_valida",
+            "ck_garantias_solicitacao_origem_valida",
+            "fk_garantias_nao_solicitada_por_users",
         } <= nomes
         # O nome da FK do anexo passa de 63 caracteres (o SQLAlchemy encurta):
         # confere pelo que ela faz.
@@ -245,8 +251,26 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
         await db.commit()
 
-        # O downgrade tira tudo o que a 0434 e a 0380 puseram.
+        # O pedido de garantia: a origem fora da lista, o banco recusa.
+        await db.execute(
+            text(
+                f'INSERT INTO "{rascunho}".garantias'
+                " (pedido_bling, nf_numero, cliente_nome, cpf, origem)"
+                " VALUES ('4', '13', 'Fulano', '52998224725', 'robo')"
+            )
+        )
+        await db.commit()
+        with pytest.raises(Exception, match="ck_garantias_solicitacao_origem_valida"):
+            await db.execute(
+                text(f"UPDATE \"{rascunho}\".garantias SET solicitacao_origem = 'palpite'")
+            )
+        await db.rollback()
+        await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
+        await db.commit()
+
+        # O downgrade tira tudo o que a 0438, a 0434 e a 0380 puseram.
         conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", mod_pedido)
         await conn.run_sync(_rodar, "downgrade", mod_auto)
         await conn.run_sync(_rodar, "downgrade")
         await db.commit()
