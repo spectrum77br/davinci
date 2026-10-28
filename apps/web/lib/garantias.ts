@@ -822,11 +822,12 @@ const ROTULOS_SAC = [
 ].sort((a, b) => b.length - a.length)
 // Cada rótulo vale uma vez e só na linha que abre parágrafo (o formulário põe
 // uma linha em branco entre os campos): a continuação da descrição fica como o
-// cliente escreveu ("Correios entregou…" não vira "Cor: reios…").
+// cliente escreveu ("Correios entregou…" não vira "Cor: reios…"). Na tela, um
+// campo por linha, com a linha em branco só antes de cada seção ("2. Dados…").
 export function formularioSacLegivel(texto: string | null | undefined): string {
   const usados = new Set<string>()
   let anterior = ''
-  return (texto || '').split('\n').map((linha, i) => {
+  const linhas = (texto || '').split(/\r?\n/).map((linha, i) => {
     const abre = i === 0 || !anterior.trim()
     anterior = linha
     const r = abre ? ROTULOS_SAC.find((x) => !usados.has(x) && linha.startsWith(x)) : undefined
@@ -835,7 +836,14 @@ export function formularioSacLegivel(texto: string | null | undefined): string {
     const resto = linha.slice(r.length)
     if (!resto || /^\s*:/.test(resto)) return linha
     return `${r}${r.endsWith('?') ? '' : ':'} ${resto.trimStart()}`
-  }).join('\n')
+  })
+  const saida: string[] = []
+  for (const linha of linhas) {
+    if (!linha.trim()) continue
+    if (saida.length && /^\d+\.\s/.test(linha)) saida.push('')
+    saida.push(linha)
+  }
+  return saida.join('\n')
 }
 
 // Um anexo da mensagem, do jeito que a tela desenha: foto (miniatura que
