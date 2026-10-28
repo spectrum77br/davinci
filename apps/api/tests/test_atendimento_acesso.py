@@ -97,12 +97,17 @@ async def test_trava_do_router_segue_a_lista(lista, monkeypatch):
     liberado = _user(UserRole.ADMIN, "um@x.com")
     assert await rota._so_admin(escrita, liberado) is liberado
 
-    # Admin fora da lista e não-admin: leem e sugerem, não escrevem.
+    configurar = _pedido("PATCH", "/api/atendimento/canais/{canal_id}")
+    assert await rota._so_admin(configurar, liberado) is liberado
+
+    # Admin fora da lista e não-admin: leem, sugerem e respondem (28/10/2026,
+    # ROTAS_DE_QUEM_RESPONDE), mas não configuram a caixa.
     for quem in (_user(UserRole.ADMIN, "outro@x.com"), _user(UserRole.USER, "um@x.com")):
         assert await rota._so_admin(leitura, quem) is quem
         assert await rota._so_admin(sugerir, quem) is quem
+        assert await rota._so_admin(escrita, quem) is quem
         with pytest.raises(HTTPException) as e:
-            await rota._so_admin(escrita, quem)
+            await rota._so_admin(configurar, quem)
         assert e.value.status_code == 403
         assert e.value.detail["code"] == "atendimento_so_leitura"
 

@@ -344,7 +344,8 @@ def test_rotas_novas_tem_a_trava_da_caixa():
 
 async def test_rotas_novas_na_fase_de_observacao(db, client, make_user, auth_as, monkeypatch):
     """Quem só lê (07/10/2026): lê o painel e registra o AdsPower (o perfil só
-    vem com o cadastro de Lojas); a nota e a foto são de quem mexe."""
+    vem com o cadastro de Lojas); a nota e a foto, desde 28/10/2026, são de
+    quem responde (toda a equipe): passam da trava e caem no 404 da conversa."""
     monkeypatch.setattr(rota, "SO_ADMIN", True)
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "dono@davinci-test.com")
     u = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
@@ -356,8 +357,7 @@ async def test_rotas_novas_na_fase_de_observacao(db, client, make_user, auth_as,
     assert r.json()["detail"]["resource"] == "lojas_info"
     for caminho in (f"/conversas/{uuid4()}/notas", f"/conversas/{uuid4()}/foto"):
         r = await client.post(URL + caminho, json={"texto": "x"})
-        assert r.status_code == 403
-        assert r.json()["detail"]["code"] == "atendimento_so_leitura"
+        assert r.status_code not in (401, 403), r.text
 
 
 # ─────────────── estoque ───────────────

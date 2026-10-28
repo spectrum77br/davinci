@@ -1069,14 +1069,19 @@ async def test_aba_avaliacao_e_responder_desligado(
 ):
     integ, chat_id = await _pendente_shopee(db, make_user, redis_falso)
     # Fase de observação (07/10/2026): toda pessoa ativa lê a aba (é GET); o
-    # responder/tratar é de quem mexe (ATENDIMENTO_USUARIOS).
+    # responder/tratar é de quem RESPONDE — toda a equipe desde 28/10/2026 —,
+    # e o operador do estoque nem vê.
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "dono@davinci-test.com")
     auth_as(await make_user(role=UserRole.USER))
     r = await client.get(f"/api/atendimento/conversas/{chat_id}/avaliacoes")
     assert r.status_code == 200 and r.json()["pendentes"] == 1
     linha_lida = await _linha(db, "9301")
+    operador = await make_user(permissions={"controle_estoque": {"view": True}})
+    operador.stock_tags = ["estoque"]
+    await db.commit()
+    auth_as(operador)
     r = await client.post(f"/api/atendimento/avaliacoes/{linha_lida.id}/tratada", json={})
-    assert r.status_code == 403 and r.json()["detail"]["code"] == "atendimento_so_leitura"
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "atendimento_restrito"
 
     monkeypatch.setattr(rota_atendimento, "SO_ADMIN", False)
     auth_as(await make_user(role=UserRole.ADMIN))
