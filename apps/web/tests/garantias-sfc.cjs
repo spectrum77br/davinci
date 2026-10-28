@@ -237,6 +237,33 @@ const LINHA = {
   assert.deepEqual(L.corpoDaLista(f0), { limite: 100, offset: 0 })
   assert.deepEqual(L.corpoDaLista({ ...f0, busca: ' João ', status: 'expirada', periodo: 'entrega', de: '2026-01-01', ate: '', com_atendimento_no_mes: true }, 100),
     { limite: 100, offset: 100, busca: 'João', status: 'expirada', periodo: 'entrega', de: '2026-01-01', com_atendimento_no_mes: true })
+  // Garantia automática (28/10/2026): ordem, "só com conversa" e origem.
+  assert.deepEqual(L.corpoDaLista({ ...f0, ordem: 'atividade', com_conversa: true, origem: 'robo' }),
+    { limite: 100, offset: 0, ordem: 'atividade', com_conversa: true, origem: 'robo' })
+  assert.deepEqual(L.corpoDaLista({ ...f0, ordem: 'cadastro', com_conversa: false, origem: 'todas' }), { limite: 100, offset: 0 })
+  // O histórico: foto, vídeo (toca na tela), cartão e o anexo do ML sem link.
+  const pecas = L.pecasDoHistorico({ id: 'm1', anexos: [
+    { tipo: 'imagem', url: 'https://img.sp.mms.shopee.sg/a' },
+    { tipo: 'video', url: 'https://v.vod.susercontent.com/b' },
+    { url: 'https://x.tiktokcdn.com/c.mp4' },
+    { tipo: 'pedido', pedido: '1' },
+    { tipo: 'imagem', nome: 'foto.jpg' },
+    { tipo: 'imagem', url: 'javascript:alert(1)' },
+  ] })
+  assert.deepEqual(pecas.map((x) => x.tipo), ['imagem', 'video', 'video', 'cartao', 'nome', 'nome'])
+  const hist = {
+    garantia_id: 1, restrito: false, desde: null, cortadas: 0,
+    conversas: [{ id: 'c1', plataforma: 'shopee', canal: 'chat' }, { id: 'c2', plataforma: 'ml', canal: 'pos_venda' }],
+    mensagens: [
+      { id: 'a', conversa_id: 'c1', autor: 'cliente', origem: 'cliente', tipo: 'texto', texto: 'não liga', anexos: [], enviada_em: '2026-10-10T15:00:00Z' },
+      { id: 'b', conversa_id: 'c2', autor: 'loja', origem: 'externo', tipo: 'texto', texto: 'ok', anexos: [], enviada_em: '2026-10-11T15:00:00Z' },
+    ],
+    marcos: [{ tipo: 'entrega', em: '2026-10-05T18:00:00Z', texto: 'Entregue', atendimento_id: null }],
+  }
+  assert.deepEqual(L.linhasDoHistorico(hist, Date.parse('2026-10-11T18:00:00Z')).map((x) => x.tipo === 'dia' ? `dia:${x.texto}` : x.tipo),
+    ['dia:05/10/2026', 'marco', 'dia:Ontem', 'conversa', 'msg', 'dia:Hoje', 'conversa', 'msg'])
+  assert.deepEqual(['cliente', 'loja', 'mediador', 'equipe', 'sistema'].map((a) => L.ladoDaMensagem({ autor: a, origem: a })),
+    ['cliente', 'loja', 'mediador', 'nota', 'sistema'])
   const f1 = L.filtroDoCartao(f0, 'ativas')
   assert.equal(f1.status, 'ativa')
   assert.equal(L.cartaoAtivo(f1), 'ativas')
@@ -363,7 +390,7 @@ const LINHA = {
   }
   const acoes = /GARANTIA_LOG_ACOES = \(([\s\S]*?)\n\)/.exec(api('models/garantia.py'))[1]
   const acoesPy = [...acoes.matchAll(/^ {4}"([a-z_]+)",/gm)].map((m) => m[1])
-  assert.deepEqual(acoesPy, ['cadastrou', 'alterou', 'consultou', 'registrou_atendimento', 'recalculou', 'buscou_cpf'])
+  assert.deepEqual(acoesPy, ['cadastrou', 'alterou', 'consultou', 'registrou_atendimento', 'recalculou', 'buscou_cpf', 'criou_automatico', 'descartou'])
   for (const a of acoesPy) assert.ok(L.ACOES_LOG[a], `ação ${a}`)
   // As rotas que a tela chama existem (lista e busca são POST: o termo vai no corpo).
   assert.ok(!rotas.includes('@router.get("",') && !rotas.includes('@router.get("/busca"'), 'nada de busca por GET')
@@ -447,7 +474,16 @@ async function testarPagina() {
   await new Promise((r) => setTimeout(r, 0))
   assert.equal(m.estado.itens.length, 2)
   assert.equal(m.estado.indicadores.ativas, 128)
-  assert.deepEqual(chamadas.find((c) => c.url === '/api/garantias/lista').opts, { method: 'POST', body: { limite: 100, offset: 0 } })
+  // Garantia automática (28/10/2026): a vista padrão é Conversas — mais nova em
+  // cima, só as com conversa. A Tabela é a lista de antes.
+  assert.deepEqual(chamadas.find((c) => c.url === '/api/garantias/lista').opts, { method: 'POST', body: { limite: 100, offset: 0, ordem: 'atividade', com_conversa: true } })
+  assert.equal(m.estado.vista, 'conversas')
+  m.estado.mostrar = 'todas'
+  await new Promise((r) => setTimeout(r, 0))
+  assert.deepEqual(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body, { limite: 100, offset: 0, ordem: 'atividade' })
+  m.estado.vista = 'tabela'
+  await new Promise((r) => setTimeout(r, 0))
+  assert.deepEqual(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body, { limite: 100, offset: 0 })
   // A busca (nome/CPF) vai no corpo, nunca na URL.
   m.estado.filtros.busca = '529.982.247-25'
   await m.estado.carregar()
@@ -482,6 +518,15 @@ async function testarPagina() {
     const cx = comEstado(componente('../pages/garantias.vue', g))
     await html(appCom(cx.C, {}, g, ST))
     await cx.estado.carregar()
+    // A vista Conversas: a lista no estilo do Atendimento, com a garantia aberta.
+    const hc = await html(appCom(cx.mesmo, {}, g, ST))
+    assert.match(hc, /data-vista-conversas/)
+    assert.match(hc, /data-lista-conversas/)
+    assert.equal(cx.estado.selecionadaId, 7, 'a primeira garantia já vem aberta')
+    assert.ok(!/<th/.test(hc), 'sem a tabela na vista Conversas')
+    // A vista Tabela: a de antes.
+    cx.estado.vista = 'tabela'
+    cx.estado.aplicarVista()
     const h = await html(appCom(cx.mesmo, {}, g, ST))
     assert.match(h, /Painel de Garantia — Uranyx/)
     assert.match(h, /data-nova-garantia/)
@@ -506,6 +551,9 @@ async function testarPagina() {
     assert.match(carregandoHtml, /data-carregando/)
     assert.ok(!/data-nova-garantia/.test(carregandoHtml))
     await cx.estado.carregar()
+    assert.match(await html(appCom(cx.mesmo, {}, g)), /Nenhuma garantia com conversa ainda/)
+    cx.estado.vista = 'tabela'
+    cx.estado.aplicarVista()
     const vazioHtml = await html(appCom(cx.mesmo, {}, g))
     assert.match(vazioHtml, /Nenhuma garantia cadastrada ainda/)
   }

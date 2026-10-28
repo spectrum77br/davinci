@@ -1,4 +1,5 @@
-"""A migration 0380 (Painel de Garantia Uranyx) cria EXATAMENTE o que o model declara.
+"""As migrations 0380 (Painel de Garantia Uranyx) e 0432 (garantia automática)
+criam EXATAMENTE o que o model declara.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Aqui a 0380 roda de verdade num schema descartável e o catálogo do
@@ -22,13 +23,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Base
 
-_MIGRATION = Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0380_garantias.py"
-TABELAS = ["garantia_atendimento_anexos", "garantia_atendimentos", "garantia_log", "garantias"]
-_FILTRO = "('garantias', 'garantia_atendimentos', 'garantia_atendimento_anexos', 'garantia_log')"
+_VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
+TABELAS = [
+    "garantia_atendimento_anexos",
+    "garantia_atendimentos",
+    "garantia_conversas",
+    "garantia_log",
+    "garantia_pendencias",
+    "garantias",
+]
+_FILTRO = (
+    "('garantias', 'garantia_atendimentos', 'garantia_atendimento_anexos', 'garantia_log',"
+    " 'garantia_conversas', 'garantia_pendencias')"
+)
 
 
-def _carregar():
-    spec = importlib.util.spec_from_file_location("migration_0380_garantias", _MIGRATION)
+def _carregar(nome: str = "0380_garantias"):
+    spec = importlib.util.spec_from_file_location(f"migration_{nome}", _VERSOES / f"{nome}.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -119,22 +130,31 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     mod = _carregar()
     assert mod.revision == "0380_garantias"
     assert mod.down_revision == "0379_pricing_carrefour_netshoes"
+    mod_auto = _carregar("0432_garantia_automatica")
+    assert mod_auto.down_revision == "0431_mail_bridge_sync"
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
-    # Só o que a 0380 referencia: users(id).
+    # Só o que as duas referenciam: users(id), a conversa do Atendimento e o
+    # índice comprador × pedido.
     await db.execute(text(f'CREATE TABLE "{rascunho}".users (id uuid PRIMARY KEY)'))
+    await db.execute(text(f'CREATE TABLE "{rascunho}".atendimento_conversas (id uuid PRIMARY KEY)'))
+    await db.execute(
+        text(f'CREATE TABLE "{rascunho}".atendimento_pedidos_comprador (pedido varchar(64))')
+    )
     await db.commit()
 
-    def _rodar(conn, passo: str) -> None:
+    def _rodar(conn, passo: str, modulo=None) -> None:
         ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
         with Operations.context(ctx):
-            getattr(mod, passo)()
+            getattr(modulo or mod, passo)()
 
     mod.SCHEMA = rascunho
+    mod_auto.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")
+        await conn.run_sync(_rodar, "upgrade", mod_auto)
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho)
@@ -204,8 +224,30 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
         await db.commit()
 
-        # O downgrade tira tudo o que a 0380 pôs.
+        # A garantia do robô: sem pessoa, origem 'robo'; a manual sem pessoa, não.
+        await db.execute(
+            text(
+                f'INSERT INTO "{rascunho}".garantias'
+                " (pedido_bling, nf_numero, cliente_nome, cpf, origem)"
+                " VALUES ('2', '11', 'Fulano', '52998224725', 'robo')"
+            )
+        )
+        await db.commit()
+        with pytest.raises(Exception, match="ck_garantias_manual_tem_autor"):
+            await db.execute(
+                text(
+                    f'INSERT INTO "{rascunho}".garantias'
+                    " (pedido_bling, nf_numero, cliente_nome, cpf)"
+                    " VALUES ('3', '12', 'Fulano', '52998224725')"
+                )
+            )
+        await db.rollback()
+        await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
+        await db.commit()
+
+        # O downgrade tira tudo o que a 0432 e a 0380 puseram.
         conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", mod_auto)
         await conn.run_sync(_rodar, "downgrade")
         await db.commit()
         depois = await _catalogo(db, rascunho)

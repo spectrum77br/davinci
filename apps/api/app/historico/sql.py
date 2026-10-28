@@ -136,7 +136,9 @@ EXCLUIDAS = re.compile(
     # a ponte do e-mail: o que a máquina decide de cada e-mail e as pastas
     r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation|caixa_indice|bridge_identities)$"
     # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)
-    r"|garantias$|garantia_(atendimentos|atendimento_anexos|log)$)"
+    # (28/10/2026: o ponteiro conversa × garantia e as pendências do robô —
+    # escritos pela máquina)
+    r"|garantias$|garantia_(atendimentos|atendimento_anexos|log|conversas|pendencias)$)"
     r"|(_bak|bkp|backup)",
     re.I,
 )

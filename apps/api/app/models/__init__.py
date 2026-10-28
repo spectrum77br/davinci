@@ -144,7 +144,9 @@ from app.models.garantia import (
     Garantia,
     GarantiaAtendimento,
     GarantiaAtendimentoAnexo,
+    GarantiaConversa,
     GarantiaLog,
+    GarantiaPendencia,
 )
 from app.models.imagem_publica import ImagemPublica
 from app.models.imobilizado import IMOBILIZADO_STATUS, Imobilizado, ImobilizadoHistorico
@@ -554,7 +556,9 @@ __all__ = [
     "Garantia",
     "GarantiaAtendimento",
     "GarantiaAtendimentoAnexo",
+    "GarantiaConversa",
     "GarantiaLog",
+    "GarantiaPendencia",
     "IMOBILIZADO_STATUS",
     "Imobilizado",
     "ImobilizadoHistorico",

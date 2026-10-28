@@ -34,6 +34,15 @@ export type GarantiaLinha = {
   entregue_sem_data: boolean
   atendimentos: number
   criado_em: string
+  // Garantia automática (28/10/2026): 'robo' = criada sozinha pela NF de
+  // produto; a conversa ligada mais recente (a prévia só para quem lê o
+  // Atendimento).
+  origem?: 'manual' | 'robo'
+  conversas?: number
+  ultima_mensagem_em?: string | null
+  ultima_previa?: string | null
+  ultima_autor?: string | null
+  ultima_plataforma?: string | null
 }
 
 export type Indicadores = {
@@ -319,6 +328,8 @@ export const ACOES_LOG: Record<string, string> = {
   registrou_atendimento: 'Registrou atendimento',
   recalculou: 'Recalculou pela entrega',
   buscou_cpf: 'Buscou pelo CPF completo',
+  criou_automatico: 'Criou sozinho pela NF de produto',
+  descartou: 'Descartou (pedido cancelado)',
 }
 export const CAMPOS_LOG: Record<string, string> = {
   pedido: 'Pedido',
@@ -644,6 +655,11 @@ export type FiltrosLista = {
   de: string
   ate: string
   com_atendimento_no_mes: boolean
+  // Garantia automática (28/10/2026): a vista "Conversas" ordena pela última
+  // mensagem e pode mostrar só as garantias com conversa ligada.
+  ordem?: 'cadastro' | 'atividade'
+  com_conversa?: boolean
+  origem?: 'todas' | 'robo' | 'manual'
 }
 
 export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'cadastro', de: '', ate: '', com_atendimento_no_mes: false }
@@ -659,6 +675,9 @@ export type CorpoLista = {
   de?: string
   ate?: string
   com_atendimento_no_mes?: boolean
+  ordem?: 'cadastro' | 'atividade'
+  com_conversa?: boolean
+  origem?: 'robo' | 'manual'
 }
 
 /**
@@ -676,7 +695,149 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
     if (f.ate) q.ate = f.ate
   }
   if (f.com_atendimento_no_mes) q.com_atendimento_no_mes = true
+  if (f.ordem === 'atividade') q.ordem = 'atividade'
+  if (f.com_conversa) q.com_conversa = true
+  if (f.origem && f.origem !== 'todas') q.origem = f.origem
   return q
+}
+
+// ─── histórico das conversas (garantia automática, 28/10/2026) ──────────────
+// GET /api/garantias/{id}/historico: as conversas ligadas à garantia, lidas
+// na hora do Atendimento (sem cópia), e os marcos (compra, entrega, outro
+// pedido do mesmo comprador, atendimento registrado).
+export type HistoricoConversa = {
+  id: string
+  plataforma: string
+  canal: string
+  comprador_nome: string | null
+  conta: string | null
+  pedido_marketplace: string | null
+  como: 'pedido' | 'comprador'
+  link: string
+  email: boolean
+}
+export type HistoricoMensagem = {
+  id: string
+  conversa_id: string
+  autor: string
+  origem: string
+  tipo: string
+  texto: string | null
+  anexos: Record<string, unknown>[]
+  enviada_em: string | null
+  status: string | null
+}
+export type HistoricoMarco = {
+  tipo: 'compra' | 'entrega' | 'outro_pedido' | 'atendimento'
+  em: string
+  texto: string
+  atendimento_id: number | null
+}
+export type Historico = {
+  garantia_id: number
+  restrito: boolean
+  conversas: HistoricoConversa[]
+  mensagens: HistoricoMensagem[]
+  marcos: HistoricoMarco[]
+  desde: string | null
+  cortadas: number
+}
+
+// Um anexo da mensagem, do jeito que a tela desenha: foto (miniatura que
+// abre grande), vídeo (toca na tela), cartão de pedido/produto, link ou só
+// o nome (o ML não manda o link do arquivo).
+export type PecaHistorico =
+  | { chave: string; tipo: 'imagem'; url: string; nome: string }
+  | { chave: string; tipo: 'video'; url: string; nome: string }
+  | { chave: string; tipo: 'cartao'; nome: string; anexo: Record<string, unknown> }
+  | { chave: string; tipo: 'link'; url: string; nome: string }
+  | { chave: string; tipo: 'nome'; nome: string }
+
+const RE_VIDEO = /\.(mp4|mov|m4v|webm|3gp)(\?|$)/i
+const RE_IMAGEM = /\.(png|jpe?g|webp|gif|heic)(\?|$)/i
+export function pecasDoHistorico(m: Pick<HistoricoMensagem, 'id' | 'anexos'>): PecaHistorico[] {
+  return (m.anexos || []).filter((a) => !!a && typeof a === 'object').map((a, i): PecaHistorico => {
+    const chave = `${m.id}-${i}`
+    const s = (k: string) => (typeof a[k] === 'string' ? (a[k] as string) : '')
+    const tipo = (s('tipo') || s('type') || s('content_type')).toLowerCase()
+    if (tipo === 'pedido' || tipo === 'produto') {
+      return { chave, tipo: 'cartao', nome: tipo === 'pedido' ? 'cartão do pedido' : 'cartão do produto', anexo: a }
+    }
+    const bruta = s('url') || s('link') || s('src') || s('video_url') || s('image_url') || s('thumb_url') || s('url_imagem')
+    const url = /^https?:\/\//i.test(bruta) ? bruta : null
+    const video = tipo.includes('video') || tipo.startsWith('video/') || (!!url && RE_VIDEO.test(url))
+    const nome = s('nome') || s('name') || s('filename') || s('titulo') || (video ? 'vídeo' : tipo.includes('imag') ? 'foto' : tipo || 'anexo')
+    if (url && video) return { chave, tipo: 'video', url, nome }
+    if (url && (tipo.includes('imag') || tipo.startsWith('image') || RE_IMAGEM.test(url))) return { chave, tipo: 'imagem', url, nome }
+    if (url) return { chave, tipo: 'link', url, nome }
+    return { chave, tipo: 'nome', nome }
+  })
+}
+
+// A linha do tempo: as mensagens e os marcos pela hora, com o separador de dia
+// e, quando há mais de uma conversa, o aviso de onde muda a conversa.
+export type LinhaHistorico =
+  | { tipo: 'dia'; chave: string; texto: string }
+  | { tipo: 'conversa'; chave: string; conversa: HistoricoConversa | null }
+  | { tipo: 'marco'; chave: string; marco: HistoricoMarco }
+  | { tipo: 'msg'; chave: string; m: HistoricoMensagem }
+
+function msHist(iso: string | null | undefined): number {
+  const t = iso ? new Date(iso).getTime() : Number.NaN
+  return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t
+}
+export function rotuloDoDia(iso: string, agoraMs = Date.now()): string {
+  const d = new Date(iso)
+  const hoje = new Date(agoraMs)
+  const ontem = new Date(agoraMs - 86400000)
+  if (d.toDateString() === hoje.toDateString()) return 'Hoje'
+  if (d.toDateString() === ontem.toDateString()) return 'Ontem'
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+}
+export function linhasDoHistorico(h: Historico, agoraMs = Date.now()): LinhaHistorico[] {
+  type Item = { t: number; iso: string | null; ordem: number; linha: LinhaHistorico }
+  const itens: Item[] = [
+    ...h.marcos.map((mc, i): Item => ({ t: msHist(mc.em), iso: mc.em, ordem: 0, linha: { tipo: 'marco', chave: `marco-${i}`, marco: mc } })),
+    ...h.mensagens.map((m): Item => ({ t: msHist(m.enviada_em), iso: m.enviada_em, ordem: 1, linha: { tipo: 'msg', chave: m.id, m } })),
+  ]
+  itens.sort((a, b) => (a.t === b.t ? a.ordem - b.ordem : a.t - b.t))
+  const porId = new Map(h.conversas.map((c) => [c.id, c]))
+  const varias = h.conversas.length > 1
+  const out: LinhaHistorico[] = []
+  let dia = ''
+  let conversa: string | null = null
+  for (const it of itens) {
+    if (it.iso && Number.isFinite(it.t)) {
+      const dd = new Date(it.iso).toDateString()
+      if (dd !== dia) {
+        out.push({ tipo: 'dia', chave: `dia-${dd}`, texto: rotuloDoDia(it.iso, agoraMs) })
+        dia = dd
+      }
+    }
+    if (it.linha.tipo === 'msg' && varias && it.linha.m.conversa_id !== conversa) {
+      conversa = it.linha.m.conversa_id
+      out.push({ tipo: 'conversa', chave: `conv-${it.linha.chave}`, conversa: porId.get(conversa) ?? null })
+    }
+    out.push(it.linha)
+  }
+  return out
+}
+
+// De que lado fica o balão (como o Atendimento: cliente à esquerda, loja à
+// direita, mediador à esquerda com o rótulo; nota interna e sistema no meio).
+export function ladoDaMensagem(m: Pick<HistoricoMensagem, 'autor' | 'origem'>): 'cliente' | 'loja' | 'mediador' | 'nota' | 'sistema' {
+  if (m.autor === 'equipe') return 'nota'
+  if (m.autor === 'mediador') return 'mediador'
+  if (m.autor === 'sistema' || m.origem === 'sistema') return 'sistema'
+  return m.autor === 'cliente' ? 'cliente' : 'loja'
+}
+
+export const CANAL_ROTULO: Record<string, string> = {
+  chat: 'chat',
+  pos_venda: 'pós-venda',
+  email: 'e-mail',
+  reclamacao: 'reclamação',
+  avaliacao: 'avaliação',
 }
 
 // Os 4 cartões do §4.1 — clicar filtra a lista.

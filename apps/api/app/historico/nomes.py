@@ -301,6 +301,9 @@ REVELACOES: dict[tuple[str, str], str] = {
     ("GET", "/api/companies/{company_id}/proxy/senha"): "viu a senha do proxy da empresa",
     # Garantias (§6 "quem consultou"): abrir o detalhe mostra nome e CPF.
     ("GET", "/api/garantias/{garantia_id}"): "abriu uma garantia (dados do cliente)",
+    # Garantia automática (28/10/2026): o histórico mostra as conversas do
+    # cliente ligadas à garantia (lidas na hora do Atendimento).
+    ("GET", "/api/garantias/{garantia_id}/historico"): "abriu o histórico de uma garantia",
     # O "ao informar o pedido" do cadastro sugere nome e — para quem tem
     # "Ver o CPF completo" — o CPF do pedido, antes de existir garantia (sem
     # log próprio onde gravar): fica aqui.

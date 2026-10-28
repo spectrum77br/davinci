@@ -401,6 +401,13 @@ class Settings(BaseSettings):
     # (routers/sites_validar_nf.py, 27/10/2026): o SAC do site confere a NF.
     sites_estoque_tokens: str = ""
 
+    # ─── Garantia automática (28/10/2026) ───────────────────────────────
+    # O robô `garantias_automaticas` (worker, a cada 15 min) cria a garantia
+    # do pedido Uranyx pela NF de produto e liga as conversas do pedido
+    # (services/garantia_auto.py). Desligado = o painel continua como antes
+    # (cadastro manual); as garantias já criadas ficam.
+    garantia_automatica: bool = False
+
     # ─── Fotos e vídeos com marca d'água para os sites (01/10/2026) ──────
     # GET /api/sites/midia (routers/sites_midia.py) usa os MESMOS tokens de
     # `sites_estoque_tokens` — não há token novo. As derivadas (foto e vídeo

@@ -23,6 +23,16 @@ Quatro tabelas:
   CPF completo, registrou atendimento, e o robô que recalculou a entrega
   (§6). Só inserção.
 
+Garantia automática (28/10/2026, migration 0432): o robô cria a garantia do
+pedido Uranyx pela NF de PRODUTO (`origem='robo'`, sem `criado_por`) e liga as
+conversas do pedido sozinho:
+
+* `garantia_conversas` — PONTEIRO garantia × conversa (sem cópia do texto): o
+  histórico do painel é lido na hora em `atendimento_mensagens`. A cópia
+  congelada continua sendo só o "Registrar atendimento" (`garantia_atendimentos`).
+* `garantia_pendencias` — o pedido que o robô viu e NÃO criou (motivo), para
+  não reler a cada volta e para a tela de exceções.
+
 LGPD: as quatro ficam FORA do gatilho do Histórico (`historico/sql.py`,
 EXCLUIDAS) — senão CPF, nome e o texto do comprador seriam copiados para
 `historico_alteracao` por 365 dias. O Histórico geral continua registrando
@@ -69,7 +79,16 @@ GARANTIA_LOG_ACOES = (
     # Busca pelo CPF completo que achou a garantia (lista ou "Vincular à
     # garantia"): o CPF entra mascarado; a busca tem teto por pessoa.
     "buscou_cpf",
+    # Garantia automática (28/10/2026): o robô criou pela NF de produto; o
+    # robô descartou (pedido cancelado antes de qualquer atendimento).
+    "criou_automatico",
+    "descartou",
 )
+GARANTIA_ORIGENS = ("manual", "robo")
+# Como a conversa chegou à garantia: o nº do pedido na conversa (`pedido`) ou o
+# índice comprador × pedido da loja (`comprador` — Shopee/TikTok, uma conversa
+# por comprador com todos os pedidos dele).
+GARANTIA_LIGACOES = ("pedido", "comprador")
 # As tabelas que só recebem linha nova (gatilho `garantia_so_insercao`).
 GARANTIA_TABELAS_SO_INSERCAO = (
     "garantia_atendimentos",
@@ -146,6 +165,9 @@ class Garantia(Base):
             "data_inicio IS NULL OR (fim_hardware > data_inicio AND fim_software >= fim_hardware)",
             name="prazos_em_ordem",
         ),
+        # O robô cria sem pessoa; o cadastro na tela sempre tem quem cadastrou.
+        CheckConstraint(f"origem IN ({_lista_sql(GARANTIA_ORIGENS)})", name="origem_valida"),
+        CheckConstraint("origem <> 'manual' OR criado_por IS NOT NULL", name="manual_tem_autor"),
         # Uma NF identificada pela chave (casada com o XML do pedido) tem uma
         # garantia só (ponto 3: uma garantia por NF).
         Index(
@@ -200,9 +222,17 @@ class Garantia(Base):
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    criado_por: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    # NULL = o robô (origem 'robo').
+    criado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
+    origem: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="manual", server_default="manual"
+    )
+    # A garantia do robô cujo pedido foi cancelado ANTES de qualquer
+    # atendimento sai da lista (não se apaga: o log aponta para ela).
+    descartada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    descartada_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
     atualizado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     atualizado_por: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
@@ -315,6 +345,50 @@ class GarantiaLog(Base):
     user_nome: Mapped[str] = mapped_column(Text, nullable=False)
     em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class GarantiaConversa(Base):
+    """A conversa do Atendimento ligada à garantia (28/10/2026). Ponteiro: o
+    texto e as fotos ficam em `atendimento_mensagens` e o painel lê na hora.
+    CASCADE nos dois lados — o ponteiro não é prova de nada (a prova é o
+    "Registrar atendimento", copiado e congelado)."""
+
+    __tablename__ = "garantia_conversas"
+    __table_args__ = (
+        CheckConstraint(f"como IN ({_lista_sql(GARANTIA_LIGACOES)})", name="como_valido"),
+        Index("ix_garantia_conversas_conversa", "conversa_id"),
+    )
+
+    garantia_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("garantias.id", ondelete="CASCADE"), primary_key=True
+    )
+    conversa_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    como: Mapped[str] = mapped_column(String(16), nullable=False)
+    ligada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class GarantiaPendencia(Base):
+    """Pedido Uranyx com NF de produto que o robô NÃO transformou em garantia
+    (CPF que não é CPF, NF de produto repetida, acessório que não é Uranyx…).
+    Uma linha por pedido, regravada a cada nova tentativa (`visto_em`)."""
+
+    __tablename__ = "garantia_pendencias"
+
+    pedido_bling: Mapped[str] = mapped_column(String(20), primary_key=True)
+    motivo: Mapped[str] = mapped_column(String(40), nullable=False)
+    detalhe: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visto_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    tentativas: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
     )
 
 

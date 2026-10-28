@@ -915,7 +915,10 @@ async def garantia_para_ia(
                     cpf_conversa = None
     if cpf_conversa is None and do_pedido:
         cpf_conversa = await session.scalar(
-            select(Garantia.cpf).where(or_(*do_pedido)).order_by(Garantia.id.desc()).limit(1)
+            select(Garantia.cpf)
+            .where(or_(*do_pedido), Garantia.descartada_em.is_(None))
+            .order_by(Garantia.id.desc())
+            .limit(1)
         )
 
     # Pedido citado: o nº curto do Bling à parte (só do mesmo CPF, ver
@@ -954,7 +957,10 @@ async def garantia_para_ia(
     achadas = list(
         (
             await session.execute(
-                select(Garantia).where(or_(*conds)).order_by(Garantia.id.desc()).limit(MAX_ACHADAS)
+                select(Garantia)
+                .where(or_(*conds), Garantia.descartada_em.is_(None))
+                .order_by(Garantia.id.desc())
+                .limit(MAX_ACHADAS)
             )
         ).scalars()
     )
@@ -1052,7 +1058,10 @@ async def contexto_da_conversa(session: AsyncSession, conversa: AtendimentoConve
     ctx = vazio()
     if conversa.plataforma == "ml" and conversa.canal == "pergunta":
         ctx["outras_perguntas"] = await _seguro(
-            session, "outras_perguntas", lambda: _outras_perguntas(session, conversa), [],
+            session,
+            "outras_perguntas",
+            lambda: _outras_perguntas(session, conversa),
+            [],
             conversa.id,
         )
     if conversa.plataforma in ("shopee", "ml") and conversa.canal != "pergunta":

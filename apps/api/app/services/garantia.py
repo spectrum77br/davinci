@@ -55,6 +55,10 @@ GARANTIA_POR = "nf"
 #    garantia" e busca por CPF, NF ou pedido. O DaVinci só PREENCHE a busca com
 #    o pedido da conversa (`busca_sugerida`) e acende o alerta de CPF sem
 #    garantia; nunca vincula sozinho.
+#    28/10/2026: com `settings.garantia_automatica` o robô cria a garantia pela
+#    NF de produto e LIGA as conversas do pedido (ponteiro, services/
+#    garantia_auto.py). O "Registrar atendimento" (tipo, solução, cópia
+#    congelada) continua sendo de pessoa.
 VINCULO_AUTOMATICO = False
 # 5. Correção da data de entrega: a garantia é RECALCULADA sozinha (robô de
 #    hora em hora, `recalcular_todas`), com linha no log da garantia. Com
@@ -217,6 +221,11 @@ ANEXO_MAX_REDIRECTS = 3
 _TIPOS_CARTAO = ("produto", "pedido")
 
 ROTULO_SISTEMA = "Sistema (robô da entrega)"
+# Quem "cadastrou" a garantia que o robô criou pela NF (28/10/2026).
+ROTULO_GARANTIA_AUTOMATICA = "Sistema (garantia automática)"
+# O robô da entrega relê só as garantias entregues há menos que isto (a linha
+# da Logística some 91 dias depois da compra) e as que estão sem data.
+DIAS_CONFERIR_ENTREGA = 100
 
 
 # ── Datas e prazos ──────────────────────────────────────────────────────────
@@ -608,9 +617,26 @@ async def recalcular(
 
 
 async def recalcular_todas(session: AsyncSession) -> dict[str, int]:
-    """O robô de hora em hora: relê a entrega de toda garantia e recalcula
-    a que mudou (ponto 5). Uma leitura da Logística por lote de 1000."""
-    garantias = list((await session.execute(select(Garantia).order_by(Garantia.id))).scalars())
+    """O robô de hora em hora: relê a entrega das garantias e recalcula a que
+    mudou (ponto 5). Uma leitura da Logística por lote de 1000.
+
+    Desde a garantia automática (28/10/2026) são milhares: confere só as que
+    ainda podem mudar — sem data, ou entregues há menos de
+    `DIAS_CONFERIR_ENTREGA` (a Logística apaga a linha do pedido 91 dias depois
+    da compra: depois disso não há o que reler). A descartada fica de fora."""
+    corte = hoje() - timedelta(days=DIAS_CONFERIR_ENTREGA)
+    garantias = list(
+        (
+            await session.execute(
+                select(Garantia)
+                .where(
+                    Garantia.descartada_em.is_(None),
+                    or_(Garantia.data_inicio.is_(None), Garantia.data_inicio >= corte),
+                )
+                .order_by(Garantia.id)
+            )
+        ).scalars()
+    )
     lgs = await logisticas_dos_pedidos(
         session, [(g.pedido_bling, g.pedido_marketplace) for g in garantias]
     )
@@ -644,7 +670,9 @@ def registrar_log(
     anterior: str | None = None,
     novo: str | None = None,
     detalhe: str | None = None,
+    robo: str = ROTULO_SISTEMA,
 ) -> None:
+    """`ator` None = um robô; `robo` diz qual (o da entrega é o padrão)."""
     session.add(
         GarantiaLog(
             garantia_id=garantia_id,
@@ -654,7 +682,7 @@ def registrar_log(
             valor_novo=novo,
             detalhe=detalhe,
             user_id=ator.id if ator else None,
-            user_nome=nome_pessoa(ator) if ator else ROTULO_SISTEMA,
+            user_nome=nome_pessoa(ator) if ator else robo,
         )
     )
 
@@ -769,6 +797,12 @@ async def buscar_pedido(session: AsyncSession, termo: str) -> PedidoInfo | None:
     ).scalar_one_or_none()
     if primeiro is None:
         return None
+    return await pedido_pelo_numero_bling(session, str(primeiro))
+
+
+async def pedido_pelo_numero_bling(session: AsyncSession, primeiro: str) -> PedidoInfo | None:
+    """O pedido pelo nº do BLING, só por ele (o robô da garantia automática:
+    o nº curto do Bling pode ser o `numeroloja` de outra compra)."""
     linhas = list(
         (
             await session.execute(
@@ -778,6 +812,8 @@ async def buscar_pedido(session: AsyncSession, termo: str) -> PedidoInfo | None:
             )
         ).scalars()
     )
+    if not linhas:
+        return None
     cab = linhas[0]
     itens = [
         {
@@ -856,6 +892,32 @@ async def buscar_pedido(session: AsyncSession, termo: str) -> PedidoInfo | None:
         cpf_nota_emitida=cpf_nota_emitida,
         situacao_id=str(cab.situacao) if cab.situacao else None,
     )
+
+
+def aplicar_pedido(
+    g: Garantia,
+    pedido: PedidoInfo,
+    nf: str,
+    serie: str,
+    nota: NotaDoPedido | None,
+) -> None:
+    """Copia o pedido (nº, loja, plataforma, itens) e a NF para a garantia."""
+    g.pedido_bling = pedido.numero
+    g.pedido_marketplace = pedido.numeroloja
+    g.loja = pedido.loja
+    g.plataforma = pedido.plataforma
+    g.conta = pedido.conta
+    g.itens = [
+        {k: i.get(k) for k in ("descricao", "sku", "quantidade", "uranyx")} for i in pedido.itens
+    ]
+    aplicar_nf(g, nf, serie, nota)
+
+
+def aplicar_nf(g: Garantia, nf: str, serie: str, nota: NotaDoPedido | None) -> None:
+    g.nf_numero = nf
+    g.nf_serie = serie
+    g.nf_chave = nota.chave if nota else None
+    g.nf_emitente_cnpj = nota.emitente_cnpj if nota else None
 
 
 def nota_informada(pedido: PedidoInfo, numero: str, serie: str) -> NotaDoPedido | None:
@@ -1150,7 +1212,7 @@ async def garantias_do_cpf_ou_pedido(
         conds.append(Garantia.pedido_bling == pedido_bling)
     if not conds:
         return []
-    q = select(Garantia).where(or_(*conds))
+    q = select(Garantia).where(or_(*conds), Garantia.descartada_em.is_(None))
     if filtro_escopo is not None:
         q = q.where(filtro_escopo)
     return list((await session.execute(q.order_by(Garantia.id.desc()).limit(20))).scalars())

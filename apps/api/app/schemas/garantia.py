@@ -90,6 +90,12 @@ class ListaFiltro(BaseModel):
     de: date | None = None
     ate: date | None = None
     com_atendimento_no_mes: bool = False
+    # Garantia automática (28/10/2026): a vista "Conversas" do painel ordena
+    # pela última mensagem das conversas ligadas e pode mostrar só as que têm
+    # conversa; `origem` separa as do robô das cadastradas na tela.
+    ordem: Literal["cadastro", "atividade"] = "cadastro"
+    com_conversa: bool = False
+    origem: Literal["todas", "robo", "manual"] = "todas"
     limite: int = Field(default=200, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
@@ -148,6 +154,15 @@ class GarantiaLinhaOut(BaseModel):
     entregue_sem_data: bool = False
     atendimentos: int = 0
     criado_em: datetime
+    # Garantia automática (28/10/2026).
+    origem: str = "manual"
+    conversas: int = 0
+    # A conversa ligada com a mensagem mais recente (a prévia só para quem lê
+    # o Atendimento, e nunca de conversa de e-mail).
+    ultima_mensagem_em: datetime | None = None
+    ultima_previa: str | None = None
+    ultima_autor: str | None = None
+    ultima_plataforma: str | None = None
 
 
 class IndicadoresOut(BaseModel):
@@ -328,6 +343,54 @@ class SituacaoConversaOut(BaseModel):
     # O que a busca do "Vincular à garantia" já vem preenchida (ponto 4).
     busca_sugerida: str | None = None
     vinculos: list[VinculoOut]
+
+
+class HistoricoConversaOut(BaseModel):
+    id: UUID
+    plataforma: str
+    canal: str
+    comprador_nome: str | None = None
+    conta: str | None = None
+    pedido_marketplace: str | None = None
+    como: str  # 'pedido' | 'comprador'
+    link: str
+    email: bool = False
+
+
+class HistoricoMensagemOut(BaseModel):
+    id: UUID
+    conversa_id: UUID
+    autor: str
+    origem: str
+    tipo: str
+    texto: str | None = None
+    anexos: list[dict[str, Any]] = []
+    enviada_em: datetime | None = None
+    status: str | None = None
+
+
+class HistoricoMarcoOut(BaseModel):
+    """Um aviso no meio da linha do tempo: a compra, a entrega, outro pedido
+    do mesmo comprador (daí para baixo a conversa pode ser dele) e cada
+    atendimento registrado na garantia."""
+
+    tipo: str  # 'compra' | 'entrega' | 'outro_pedido' | 'atendimento'
+    em: datetime
+    texto: str
+    atendimento_id: int | None = None
+
+
+class HistoricoOut(BaseModel):
+    garantia_id: int
+    # A pessoa não lê o Atendimento (ou nenhuma conversa está no escopo dela).
+    restrito: bool = False
+    conversas: list[HistoricoConversaOut] = []
+    mensagens: list[HistoricoMensagemOut] = []
+    marcos: list[HistoricoMarcoOut] = []
+    # A partir de quando as mensagens das conversas por comprador contam.
+    desde: datetime | None = None
+    # Cortou as mais antigas (passou de MAX_HISTORICO).
+    cortadas: int = 0
 
 
 class RegrasOut(BaseModel):

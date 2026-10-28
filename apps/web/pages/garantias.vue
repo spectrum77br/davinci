@@ -13,7 +13,12 @@
 // buscando o pedido (é o que o /atendimento usa).
 // A lista é POST /api/garantias/lista com os filtros no CORPO: a busca leva
 // nome e CPF, que não podem ir para o log de acesso (ele grava a query).
-import { AlertCircle, Info, Loader2, Plus, RefreshCw, Search, ShieldCheck } from 'lucide-vue-next'
+// Garantia automática (28/10/2026): a vista "Conversas" (o padrão) é a do
+// Atendimento — a lista à esquerda (a garantia com mensagem mais nova em cima)
+// e o histórico das conversas ligadas à direita, com fotos e vídeos. A vista
+// "Tabela" é a de antes. O robô cria a garantia pela NF de produto; o selo
+// ✨ marca as criadas sozinhas.
+import { AlertCircle, ArrowLeft, Info, Loader2, Plus, RefreshCw, Search, ShieldCheck, Sparkles } from 'lucide-vue-next'
 import {
   CARTOES,
   FILTROS_PADRAO,
@@ -23,6 +28,7 @@ import {
   cartaoAtivo,
   dataBR,
   dataCurta,
+  dataHoraBR,
   errosDaApi,
   filtroDoCartao,
   nomePlataforma,
@@ -56,8 +62,34 @@ async function carregarRegras() {
   }
 }
 
+// ─── vista: Conversas (padrão) ou Tabela ────────────────────────────────────
+type Vista = 'conversas' | 'tabela'
+const CHAVE_VISTA = 'garantias.vista'
+function vistaGuardada(): Vista {
+  try {
+    return localStorage.getItem(CHAVE_VISTA) === 'tabela' ? 'tabela' : 'conversas'
+  } catch {
+    return 'conversas'
+  }
+}
+const vista = ref<Vista>('conversas')
+// Conversas: "só com conversa" (padrão) ou todas as garantias.
+const mostrar = ref<'com_conversa' | 'todas'>('com_conversa')
+
 // ─── lista ──────────────────────────────────────────────────────────────────
-const filtros = reactive<FiltrosLista>({ ...FILTROS_PADRAO })
+const filtros = reactive<FiltrosLista>({ ...FILTROS_PADRAO, ordem: 'atividade', com_conversa: true, origem: 'todas' })
+function aplicarVista() {
+  filtros.ordem = vista.value === 'conversas' ? 'atividade' : 'cadastro'
+  filtros.com_conversa = vista.value === 'conversas' && mostrar.value === 'com_conversa'
+}
+watch([vista, mostrar], () => {
+  aplicarVista()
+  try {
+    localStorage.setItem(CHAVE_VISTA, vista.value)
+  } catch {
+    // sem armazenamento local: vale só nesta visita
+  }
+})
 const itens = ref<GarantiaLinha[]>([])
 const total = ref(0)
 const indicadores = ref<Indicadores | null>(null)
@@ -78,6 +110,8 @@ async function carregar() {
     total.value = r.total
     indicadores.value = r.indicadores
     carregado.value = true
+    // A vista Conversas sempre tem uma aberta (a primeira, se a de antes saiu).
+    if (!itens.value.some((x) => x.id === selecionadaId.value)) selecionadaId.value = itens.value[0]?.id ?? null
   } catch (e) {
     if (g !== geracao) return
     erro.value = errosDaApi(e).geral || 'Não consegui carregar as garantias.'
@@ -108,20 +142,32 @@ watch(() => filtros.busca, () => {
   if (atraso) clearTimeout(atraso)
   atraso = setTimeout(carregar, 300)
 })
-watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes], () => { void carregar() })
+watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.ordem, filtros.com_conversa, filtros.origem], () => { void carregar() })
 
 const ativo = computed(() => cartaoAtivo(filtros))
 function clicarCartao(c: Cartao) {
   Object.assign(filtros, filtroDoCartao(filtros, c))
 }
-const temFiltro = computed(() => !!(filtros.busca.trim() || filtros.status !== 'todos' || filtros.de || filtros.ate || filtros.com_atendimento_no_mes))
+const temFiltro = computed(() => !!(filtros.busca.trim() || filtros.status !== 'todos' || filtros.de || filtros.ate || filtros.com_atendimento_no_mes || (filtros.origem && filtros.origem !== 'todas')))
 function limparFiltros() {
-  Object.assign(filtros, { ...FILTROS_PADRAO })
+  Object.assign(filtros, { ...FILTROS_PADRAO, origem: 'todas' })
+  aplicarVista()
 }
 const buscaParcialDeCpf = computed(() => {
   const d = filtros.busca.replace(/\D/g, '')
   return /^[\d.\-\s]+$/.test(filtros.busca.trim()) && d.length > 9 && d.length < 11
 })
+
+// ─── vista Conversas: a garantia aberta no histórico ───────────────────────
+const selecionadaId = ref<number | null>(null)
+const selecionada = computed(() => itens.value.find((x) => x.id === selecionadaId.value) || null)
+// No celular a lista e o histórico se revezam.
+const historicoNoCelular = ref(false)
+function selecionar(id: number) {
+  selecionadaId.value = id
+  historicoNoCelular.value = true
+}
+const versaoHistorico = ref(0)
 
 // ─── detalhe e cadastro ─────────────────────────────────────────────────────
 const abertaId = ref<number | null>(null)
@@ -182,6 +228,8 @@ watch(abertaId, (id) => {
 })
 
 onMounted(() => {
+  vista.value = vistaGuardada()
+  aplicarVista()
   void carregarRegras()
   void carregar()
   const id = Number(route.query.garantia)
@@ -225,7 +273,8 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
         <li>{{ regras.ultimo_dia_coberto ? 'A garantia vale até a data final, inclusive.' : 'A garantia termina no dia anterior à data final.' }}</li>
         <li>{{ regras.cadastro_antes_da_entrega ? 'Pode cadastrar antes da entrega: fica 🟡 Aguardando entrega e os prazos entram sozinhos quando a data aparecer.' : 'Só dá para cadastrar depois da entrega.' }}</li>
         <li>{{ regras.garantia_por === 'nf' ? 'Uma garantia por NF (o mesmo CPF não se repete na mesma NF); os itens da NF aparecem no detalhe.' : 'Uma garantia por produto.' }}</li>
-        <li>{{ regras.vinculo_automatico ? 'O Atendimento vincula sozinho pelo CPF/telefone.' : 'O vínculo com o Atendimento é manual: o atendente clica em "Vincular à garantia" e busca por CPF, NF ou pedido (a busca já vem com o pedido da conversa).' }}</li>
+        <li v-if="regras.vinculo_automatico">A garantia <strong class="text-foreground">cai sozinha</strong>: todo pedido com produto Uranyx que tem a nota fiscal de PRODUTO no DaVinci vira garantia (✨), com o nome e o CPF da nota. A nota de embalagem nunca vira garantia. Se faltar algo (CPF que é CNPJ, nota repetida), o pedido fica para o cadastro manual. As conversas do pedido (Shopee, TikTok, Mercado Livre, Amazon) entram sozinhas no histórico, com fotos e vídeos; o "Registrar atendimento" (tipo e solução) continua sendo da pessoa.</li>
+        <li v-else>O vínculo com o Atendimento é manual: o atendente clica em "Vincular à garantia" e busca por CPF, NF ou pedido (a busca já vem com o pedido da conversa).</li>
         <li>{{ regras.recalcular_quando_entrega_mudar ? 'Se a data de entrega for corrigida, a garantia é recalculada sozinha (fica no log).' : 'A data de entrega corrigida depois não muda a garantia.' }}</li>
         <li>Status: 🟢 Ativa (hardware e software) · 🔵 Somente software · 🔴 Expirada · 🟡 Aguardando entrega — ou 🟡 "Entregue — sem data no DaVinci", quando o Bling já dá o pedido como entregue mas nenhuma fonte tem a data (a Logística guarda a data só desde 15/07/2026). Na lista o CPF aparece mascarado.</li>
         <li>Sem escolher mensagens, a data do atendimento é a 1ª mensagem do cliente no trecho atual da conversa (uma pausa de até {{ regras.dias_pausa_atendimento }} dias não abre trecho novo).</li>
@@ -263,6 +312,28 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
           <label for="gar-ate" class="mb-1 block text-xs font-medium text-muted-foreground">Até</label>
           <Input id="gar-ate" v-model="filtros.ate" type="date" class="h-9" :min="filtros.de || undefined" />
         </div>
+      </div>
+      <div class="w-[calc(50%-0.25rem)] sm:w-40">
+        <label for="gar-vista" class="mb-1 block text-xs font-medium text-muted-foreground">Visualização</label>
+        <select id="gar-vista" v-model="vista" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-vista>
+          <option value="conversas">Conversas</option>
+          <option value="tabela">Tabela</option>
+        </select>
+      </div>
+      <div v-if="vista === 'conversas'" class="w-[calc(50%-0.25rem)] sm:w-44">
+        <label for="gar-mostrar" class="mb-1 block text-xs font-medium text-muted-foreground">Mostrar</label>
+        <select id="gar-mostrar" v-model="mostrar" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-mostrar>
+          <option value="com_conversa">só com conversa</option>
+          <option value="todas">todas as garantias</option>
+        </select>
+      </div>
+      <div class="w-[calc(50%-0.25rem)] sm:w-44">
+        <label for="gar-origem" class="mb-1 block text-xs font-medium text-muted-foreground">Origem</label>
+        <select id="gar-origem" v-model="filtros.origem" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-origem>
+          <option value="todas">todas</option>
+          <option value="robo">criadas sozinhas (NF)</option>
+          <option value="manual">cadastradas na tela</option>
+        </select>
       </div>
       <Button v-if="temFiltro" size="sm" variant="ghost" class="h-9" @click="limparFiltros">limpar filtros</Button>
     </div>
@@ -307,13 +378,64 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
     <EmptyState
       v-else-if="carregado && !itens.length"
       :icon="ShieldCheck"
-      :title="temFiltro ? 'Nenhuma garantia com esses filtros' : 'Nenhuma garantia cadastrada ainda'"
-      :description="temFiltro ? 'Mude a busca, o status ou o período.' : 'Cadastre a primeira pelo + Nova garantia: informe o pedido e a data de entrega vira o início da garantia.'"
+      :title="temFiltro ? 'Nenhuma garantia com esses filtros' : filtros.com_conversa ? 'Nenhuma garantia com conversa ainda' : 'Nenhuma garantia cadastrada ainda'"
+      :description="temFiltro ? 'Mude a busca, o status ou o período.' : filtros.com_conversa ? 'Quando um cliente escrever sobre um pedido com garantia, ele aparece aqui. Em Mostrar, escolha &quot;todas as garantias&quot; para ver as outras.' : 'Cadastre a primeira pelo + Nova garantia: informe o pedido e a data de entrega vira o início da garantia.'"
       data-vazio
     >
       <Button v-if="temFiltro" size="sm" variant="outline" @click="limparFiltros">limpar filtros</Button>
       <Button v-else-if="acesso.cadastra" size="sm" @click="novaGarantia()"><Plus class="mr-1 size-4" /> Nova garantia</Button>
     </EmptyState>
+
+    <!-- vista Conversas: lista à esquerda, histórico à direita (como o Atendimento) -->
+    <div v-else-if="carregado && vista === 'conversas'" class="grid gap-3 md:h-[calc(100vh-15rem)] md:min-h-[520px] md:grid-cols-[minmax(280px,360px)_1fr]" data-vista-conversas>
+      <div class="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card" :class="historicoNoCelular ? 'hidden md:flex' : ''">
+        <ul class="min-h-0 flex-1 divide-y overflow-y-auto" data-lista-conversas>
+          <li v-for="g in itens" :key="g.id">
+            <button
+              type="button"
+              class="flex w-full gap-2.5 px-3 py-2.5 text-left hover:bg-muted/50"
+              :class="selecionadaId === g.id ? 'bg-primary/5 ring-1 ring-inset ring-primary/40' : ''"
+              :aria-current="selecionadaId === g.id"
+              :data-garantia-id="g.id"
+              @click="selecionar(g.id)"
+            >
+              <AtendimentoIconePlataforma :plataforma="g.ultima_plataforma || g.plataforma || ''" :tamanho="28" decorativo class="mt-0.5 shrink-0" />
+              <div class="min-w-0 flex-1">
+                <div class="flex items-baseline gap-1.5">
+                  <span class="truncate text-sm font-medium">{{ g.cliente_nome }}</span>
+                  <Sparkles v-if="g.origem === 'robo'" class="size-3 shrink-0 text-violet-500" aria-label="criada sozinha pela NF" />
+                  <span class="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">{{ g.ultima_mensagem_em ? dataHoraBR(g.ultima_mensagem_em) : dataCurta(g.criado_em) }}</span>
+                </div>
+                <div class="truncate text-xs text-muted-foreground">pedido {{ g.pedido_bling }}<template v-if="g.plataforma"> · {{ nomePlataforma(g.plataforma) }}</template> · NF {{ textoNf(g.nf_numero, g.nf_serie) }}</div>
+                <div v-if="g.ultima_previa" class="mt-0.5 truncate text-xs" :class="g.ultima_autor === 'cliente' ? 'text-foreground' : 'text-muted-foreground'">{{ g.ultima_autor === 'cliente' ? '' : 'Loja: ' }}{{ g.ultima_previa }}</div>
+                <div class="mt-1 flex items-center gap-1.5">
+                  <GarantiaStatus :status="g.status" :entregue-sem-data="g.entregue_sem_data" />
+                  <span v-if="g.conversas" class="text-[10px] text-muted-foreground">{{ g.conversas }} {{ g.conversas === 1 ? 'conversa' : 'conversas' }}</span>
+                  <span v-if="g.atendimentos" class="text-[10px] text-muted-foreground">· {{ g.atendimentos }} atend.</span>
+                </div>
+              </div>
+            </button>
+          </li>
+        </ul>
+        <div class="flex items-center justify-between gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
+          <span>{{ itens.length }} de {{ total }}</span>
+          <Button v-if="itens.length < total" size="sm" variant="outline" class="h-7" :disabled="carregandoMais" @click="carregarMais">
+            <Loader2 v-if="carregandoMais" class="mr-1 size-3.5 animate-spin" /> mais {{ Math.min(LIMITE_PAGINA, total - itens.length) }}
+          </Button>
+        </div>
+      </div>
+      <div class="min-h-[60vh] md:min-h-0" :class="historicoNoCelular ? '' : 'hidden md:block'">
+        <Button size="sm" variant="ghost" class="mb-2 md:hidden" @click="historicoNoCelular = false"><ArrowLeft class="mr-1 size-4" /> garantias</Button>
+        <GarantiaHistorico
+          v-if="selecionada"
+          :garantia="selecionada"
+          :versao="versaoHistorico"
+          class="h-[70vh] md:h-full"
+          @detalhes="abrir"
+          @mudou="carregar"
+        />
+      </div>
+    </div>
 
     <template v-else-if="carregado">
       <!-- tabela (tela larga) -->
@@ -395,7 +517,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       :versao="versaoDetalhe"
       @fechar="fecharDetalhe"
       @corrigir="corrigir"
-      @mudou="carregar"
+      @mudou="carregar(); versaoHistorico++"
     />
     <GarantiaForm
       v-if="formAberto"

@@ -37,10 +37,11 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import false, func, or_, select, true
+from sqlalchemy import and_, false, func, or_, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import (
     require_active_user,
@@ -49,6 +50,7 @@ from app.deps.auth import (
 )
 from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import (
+    BlingOrder,
     Garantia,
     GarantiaAtendimento,
     GarantiaAtendimentoAnexo,
@@ -56,7 +58,12 @@ from app.models import (
     User,
     UserRole,
 )
-from app.models.atendimento import AtendimentoConversa
+from app.models.atendimento import (
+    AtendimentoConversa,
+    AtendimentoMensagem,
+    AtendimentoPedidoComprador,
+)
+from app.models.garantia import GarantiaConversa
 from app.schemas.garantia import (
     AnexoOut,
     AtendimentoCreate,
@@ -68,6 +75,10 @@ from app.schemas.garantia import (
     GarantiaListaOut,
     GarantiaSalvaOut,
     GarantiaUpdate,
+    HistoricoConversaOut,
+    HistoricoMarcoOut,
+    HistoricoMensagemOut,
+    HistoricoOut,
     IndicadoresOut,
     ItemOut,
     ListaFiltro,
@@ -83,8 +94,9 @@ from app.schemas.garantia import (
     VinculoOut,
 )
 from app.services import garantia as svc
-from app.services.atendimento import acesso
+from app.services.atendimento import acesso, separa_email
 from app.services.atendimento.contexto import _chaves_do_pedido
+from app.services.mail_atendimento import administracao as mail_admin
 from app.services.rate_limit import RateLimitError, sliding_window_check
 
 logger = structlog.get_logger()
@@ -199,9 +211,16 @@ async def _contagem_atendimentos(session: AsyncSession, ids: list[int]) -> dict[
     return dict(linhas.all())
 
 
-def _linha(g: Garantia, n_atend: int, dia, situacao_bling: str | None = None) -> GarantiaLinhaOut:
+def _linha(
+    g: Garantia,
+    n_atend: int,
+    dia,
+    situacao_bling: str | None = None,
+    conversa: dict | None = None,
+) -> GarantiaLinhaOut:
     st = svc.status_da(g, dia)
     sem_data = svc.entregue_sem_data(g.data_inicio, situacao_bling)
+    conversa = conversa or {}
     return GarantiaLinhaOut(
         id=g.id,
         cliente_nome=g.cliente_nome,
@@ -220,7 +239,69 @@ def _linha(g: Garantia, n_atend: int, dia, situacao_bling: str | None = None) ->
         entregue_sem_data=sem_data,
         atendimentos=n_atend,
         criado_em=g.criado_em,
+        origem=g.origem or "manual",
+        **conversa,
     )
+
+
+async def _conversas_das(
+    session: AsyncSession, ids: list[int], user: User | None
+) -> dict[int, dict]:
+    """Garantia automática: quantas conversas cada garantia tem e a mais
+    recente delas (quando, quem, de onde). A PRÉVIA do texto só vai para quem
+    lê o Atendimento, de conversa no escopo dela e que não é de e-mail (o
+    e-mail tem permissão por pessoa)."""
+    if not ids:
+        return {}
+    gc, c = GarantiaConversa, AtendimentoConversa
+    contagem = dict(
+        (
+            await session.execute(
+                select(gc.garantia_id, func.count())
+                .where(gc.garantia_id.in_(ids))
+                .group_by(gc.garantia_id)
+            )
+        ).all()
+    )
+    if not contagem:
+        return {}
+    linhas = (
+        await session.execute(
+            select(
+                gc.garantia_id,
+                c.ultima_mensagem_em,
+                c.ultima_mensagem_resumo,
+                c.ultima_autor,
+                c.plataforma,
+                c.integration_id,
+                separa_email.conversa_de_email_sql(c).label("email"),
+            )
+            .join(c, c.id == gc.conversa_id)
+            .where(gc.garantia_id.in_(list(contagem)))
+            .order_by(gc.garantia_id, c.ultima_mensagem_em.desc().nulls_last())
+            .distinct(gc.garantia_id)
+        )
+    ).all()
+    le = user is not None and acesso.pode_ver(user)
+    scope = await resolve_team_scope(session, user) if le else None
+    saida: dict[int, dict] = {}
+    for r in linhas:
+        previa = (
+            r.ultima_mensagem_resumo
+            if le
+            and scope is not None
+            and not r.email
+            and _conversa_no_escopo(scope, r.integration_id)
+            else None
+        )
+        saida[r.garantia_id] = {
+            "conversas": contagem.get(r.garantia_id, 0),
+            "ultima_mensagem_em": r.ultima_mensagem_em,
+            "ultima_previa": (previa or "")[:160] or None,
+            "ultima_autor": r.ultima_autor,
+            "ultima_plataforma": r.plataforma,
+        }
+    return saida
 
 
 async def _situacoes(session: AsyncSession, garantias: list[Garantia]) -> dict[str, str]:
@@ -230,10 +311,16 @@ async def _situacoes(session: AsyncSession, garantias: list[Garantia]) -> dict[s
     )
 
 
-async def _linhas(session: AsyncSession, garantias: list[Garantia], dia) -> list[GarantiaLinhaOut]:
+async def _linhas(
+    session: AsyncSession, garantias: list[Garantia], dia, user: User | None = None
+) -> list[GarantiaLinhaOut]:
     contagem = await _contagem_atendimentos(session, [g.id for g in garantias])
     situacoes = await _situacoes(session, garantias)
-    return [_linha(g, contagem.get(g.id, 0), dia, situacoes.get(g.pedido_bling)) for g in garantias]
+    conversas = await _conversas_das(session, [g.id for g in garantias], user)
+    return [
+        _linha(g, contagem.get(g.id, 0), dia, situacoes.get(g.pedido_bling), conversas.get(g.id))
+        for g in garantias
+    ]
 
 
 def _entrega(g: Garantia) -> EntregaOut:
@@ -374,7 +461,8 @@ async def _detalhe(
         entrega=_entrega(g),
         hardware=_prazo(g.data_inicio, g.fim_hardware, dia),
         software=_prazo(g.data_inicio, g.fim_software, dia),
-        criado_por=_ref(pessoas, g.criado_por),
+        # A do robô não tem pessoa: "Sistema (garantia automática)".
+        criado_por=_ref(pessoas, g.criado_por) or PessoaRef(nome=svc.ROTULO_GARANTIA_AUTOMATICA),
         atualizado_em=g.atualizado_em,
         atualizado_por=_ref(pessoas, g.atualizado_por),
         atendimentos_lista=atend,
@@ -429,6 +517,7 @@ def _filtro_busca(termo: str | None):
 
 async def _indicadores(session: AsyncSession, escopo, dia) -> IndicadoresOut:
     base = [escopo] if escopo is not None else []
+    base.append(Garantia.descartada_em.is_(None))
     contar = {
         "ativas": svc.filtro_status(svc.STATUS_ATIVA, dia),
         "somente_software": svc.filtro_status(svc.STATUS_SOMENTE_SOFTWARE, dia),
@@ -547,8 +636,18 @@ async def listar(
     if cpf:
         await _teto_da_busca_por_cpf(user)
     filtros = [escopo] if escopo is not None else []
+    # A garantia do robô descartada (pedido cancelado) sai da lista.
+    filtros.append(Garantia.descartada_em.is_(None))
     if (f := _filtro_busca(body.busca)) is not None:
         filtros.append(f)
+    if body.origem != "todas":
+        filtros.append(Garantia.origem == body.origem)
+    if body.com_conversa:
+        filtros.append(
+            select(GarantiaConversa.garantia_id)
+            .where(GarantiaConversa.garantia_id == Garantia.id)
+            .exists()
+        )
     if body.status != "todos":
         filtros.append(svc.filtro_status(body.status, dia))
     de, ate = body.de, body.ate
@@ -578,19 +677,30 @@ async def listar(
     total = (
         await session.execute(select(func.count()).select_from(Garantia).where(*filtros))
     ).scalar_one()
+    ordem = [Garantia.criado_em.desc(), Garantia.id.desc()]
+    if body.ordem == "atividade":
+        # A vista "Conversas": a garantia com mensagem mais nova em cima (como
+        # a Caixa do Atendimento); sem conversa, pela data de cadastro.
+        ultima = (
+            select(func.max(AtendimentoConversa.ultima_mensagem_em))
+            .join(GarantiaConversa, GarantiaConversa.conversa_id == AtendimentoConversa.id)
+            .where(GarantiaConversa.garantia_id == Garantia.id)
+            .scalar_subquery()
+        )
+        ordem = [ultima.desc().nulls_last(), *ordem]
     garantias = list(
         (
             await session.execute(
                 select(Garantia)
                 .where(*filtros)
-                .order_by(Garantia.criado_em.desc(), Garantia.id.desc())
+                .order_by(*ordem)
                 .limit(body.limite)
                 .offset(body.offset)
             )
         ).scalars()
     )
     resposta = GarantiaListaOut(
-        itens=await _linhas(session, garantias, dia),
+        itens=await _linhas(session, garantias, dia, user),
         total=total,
         indicadores=await _indicadores(session, escopo, dia),
         hoje=dia,
@@ -609,7 +719,8 @@ async def regras(_u: Annotated[User, Depends(_consultar_ou_registrar)]) -> Regra
         ultimo_dia_coberto=svc.ULTIMO_DIA_COBERTO,
         cadastro_antes_da_entrega=svc.CADASTRO_ANTES_DA_ENTREGA,
         garantia_por=svc.GARANTIA_POR,
-        vinculo_automatico=svc.VINCULO_AUTOMATICO,
+        # Desde 28/10/2026 o robô liga sozinho (quando ligado no .env).
+        vinculo_automatico=svc.VINCULO_AUTOMATICO or get_settings().garantia_automatica,
         recalcular_quando_entrega_mudar=svc.RECALCULAR_QUANDO_ENTREGA_MUDAR,
         dias_alerta_hardware=svc.DIAS_ALERTA_HARDWARE,
         dias_pausa_atendimento=svc.DIAS_PAUSA_NOVO_ATENDIMENTO,
@@ -694,7 +805,7 @@ async def buscar_para_vincular(
     cpf = svc.cpf_da_busca(body.q)
     if cpf:
         await _teto_da_busca_por_cpf(user)
-    filtros = [_filtro_busca(body.q)]
+    filtros = [_filtro_busca(body.q), Garantia.descartada_em.is_(None)]
     escopo = _clausula(await resolve_team_scope(session, user))
     if escopo is not None:
         filtros.append(escopo)
@@ -822,7 +933,7 @@ async def cadastrar(
     if entrega is None and not svc.CADASTRO_ANTES_DA_ENTREGA:
         raise _erro(422, "pedido_sem_entrega", "pedido")
     g = Garantia(criado_por=user.id, cliente_nome=nome, cpf=cpf)
-    _aplicar_pedido(g, pedido, nf, serie, nota)
+    svc.aplicar_pedido(g, pedido, nf, serie, nota)
     svc.aplicar_entrega(g, entrega)
     g.entrega_verificada_em = datetime.now(UTC)
     session.add(g)
@@ -920,31 +1031,6 @@ async def _outras_do_pedido(session: AsyncSession, pedido_bling: str, ignorar_id
     ).scalar_one()
 
 
-def _aplicar_pedido(
-    g: Garantia,
-    pedido: svc.PedidoInfo,
-    nf: str,
-    serie: str,
-    nota: svc.NotaDoPedido | None,
-) -> None:
-    g.pedido_bling = pedido.numero
-    g.pedido_marketplace = pedido.numeroloja
-    g.loja = pedido.loja
-    g.plataforma = pedido.plataforma
-    g.conta = pedido.conta
-    g.itens = [
-        {k: i.get(k) for k in ("descricao", "sku", "quantidade", "uranyx")} for i in pedido.itens
-    ]
-    _aplicar_nf(g, nf, serie, nota)
-
-
-def _aplicar_nf(g: Garantia, nf: str, serie: str, nota: svc.NotaDoPedido | None) -> None:
-    g.nf_numero = nf
-    g.nf_serie = serie
-    g.nf_chave = nota.chave if nota else None
-    g.nf_emitente_cnpj = nota.emitente_cnpj if nota else None
-
-
 # ── Rotas de uma garantia ───────────────────────────────────────────────────
 
 
@@ -966,6 +1052,186 @@ async def detalhe(
     # get_session não comita sozinho: sem isto o log da consulta se perderia.
     await session.commit()
     return await _detalhe(session, g, user, revelar_cpf=True)
+
+
+# Garantia automática (28/10/2026): o histórico das conversas ligadas.
+MAX_HISTORICO = 400
+# Shopee e TikTok: UMA conversa por comprador com todos os pedidos dele — só
+# conta o que veio depois da compra (o que veio antes é de outro pedido ou
+# pré-venda).
+_PLATAFORMAS_POR_COMPRADOR = ("shopee", "tiktok")
+
+
+def _por_comprador(c: AtendimentoConversa, como: str) -> bool:
+    return como == "comprador" or (c.plataforma in _PLATAFORMAS_POR_COMPRADOR and c.canal == "chat")
+
+
+async def _data_da_compra(session: AsyncSession, pedido_bling: str) -> datetime | None:
+    return await session.scalar(
+        select(func.min(BlingOrder.data)).where(BlingOrder.numero == pedido_bling)
+    )
+
+
+@router.get("/{garantia_id}/historico", response_model=HistoricoOut)
+async def historico(
+    garantia_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_consultar)],
+) -> HistoricoOut:
+    """As conversas ligadas à garantia, lidas NA HORA (sem cópia), no estilo
+    do Atendimento: as mensagens uma embaixo da outra, com as fotos e os
+    vídeos (o link do CDN da plataforma, como o Atendimento mostra), e os
+    marcos (compra, entrega, outro pedido do mesmo comprador, atendimento
+    registrado). As conversas seguem as regras do Atendimento: só para quem
+    lê a caixa, no escopo da equipe, e o e-mail pela permissão de cada um.
+    Abrir grava "consultou" no log da garantia (é texto do cliente)."""
+    g = await _garantia_visivel(session, garantia_id, user)
+    dia_compra = await _data_da_compra(session, g.pedido_bling)
+    desde = (
+        datetime.combine(svc.dia_em_sp(dia_compra), time(), svc.SAO_PAULO) if dia_compra else None
+    )
+    marcos: list[HistoricoMarcoOut] = []
+    if dia_compra:
+        marcos.append(
+            HistoricoMarcoOut(
+                tipo="compra", em=dia_compra, texto=f"Compra — pedido {g.pedido_bling}"
+            )
+        )
+    if g.entrega_em or g.data_inicio:
+        quando = g.entrega_em or datetime.combine(g.data_inicio, time(12), svc.SAO_PAULO)
+        marcos.append(
+            HistoricoMarcoOut(
+                tipo="entrega",
+                em=quando,
+                texto="Entregue — começa a garantia"
+                + (
+                    f" ({svc.ORIGEM_ROTULOS.get(g.entrega_origem, '')})" if g.entrega_origem else ""
+                ),
+            )
+        )
+    for a in (
+        await session.execute(
+            select(GarantiaAtendimento).where(GarantiaAtendimento.garantia_id == g.id)
+        )
+    ).scalars():
+        marcos.append(
+            HistoricoMarcoOut(
+                tipo="atendimento",
+                em=a.data_atendimento,
+                texto=f"Atendimento registrado por {a.atendente_nome} — "
+                f"{'Hardware' if a.tipo_problema == 'hardware' else 'Software'}"
+                f" · {svc.COBERTURA_ROTULOS.get(a.cobertura, a.cobertura)} · {a.solucao}",
+                atendimento_id=a.id,
+            )
+        )
+    out = HistoricoOut(garantia_id=g.id, desde=desde, marcos=marcos)
+    if not acesso.pode_ver(user):
+        out.restrito = True
+        out.marcos.sort(key=lambda m: m.em)
+        return out
+
+    scope = await resolve_team_scope(session, user)
+    c, gc = AtendimentoConversa, GarantiaConversa
+    ligadas = [
+        (conv, como)
+        for conv, como in (
+            await session.execute(
+                select(c, gc.como)
+                .join(gc, gc.conversa_id == c.id)
+                .where(gc.garantia_id == g.id, mail_admin.filtro_conversa(user, c))
+                .order_by(c.ultima_mensagem_em.desc().nulls_last())
+            )
+        ).all()
+        if _conversa_no_escopo(scope, conv.integration_id)
+    ]
+    if not ligadas:
+        out.restrito = bool(
+            await session.scalar(select(func.count()).select_from(gc).where(gc.garantia_id == g.id))
+        )
+        out.marcos.sort(key=lambda m: m.em)
+        return out
+
+    m = AtendimentoMensagem
+    filtros = []
+    for conv, como in ligadas:
+        if _por_comprador(conv, como) and desde is not None:
+            filtros.append(and_(m.conversa_id == conv.id, m.enviada_em >= desde))
+        else:
+            filtros.append(m.conversa_id == conv.id)
+    mensagens = list(
+        (
+            await session.execute(
+                select(m)
+                .where(or_(*filtros))
+                .order_by(m.enviada_em.desc().nulls_last())
+                .limit(MAX_HISTORICO + 1)
+            )
+        ).scalars()
+    )
+    if len(mensagens) > MAX_HISTORICO:
+        mensagens = mensagens[:MAX_HISTORICO]
+        out.cortadas = 1
+    mensagens.reverse()
+
+    # Outro pedido do MESMO comprador depois desta compra: dali para baixo a
+    # conversa (uma por comprador) pode ser daquele pedido.
+    p = AtendimentoPedidoComprador
+    for conv, como in ligadas:
+        if not _por_comprador(conv, como) or not conv.comprador_id or not conv.integration_id:
+            continue
+        for outro in (
+            await session.execute(
+                select(p.pedido, p.criado_em).where(
+                    p.integration_id == conv.integration_id,
+                    p.comprador_id == conv.comprador_id,
+                    p.pedido != (g.pedido_marketplace or ""),
+                    p.criado_em > (desde or dia_compra or datetime.min.replace(tzinfo=UTC)),
+                )
+            )
+        ).all():
+            out.marcos.append(
+                HistoricoMarcoOut(
+                    tipo="outro_pedido",
+                    em=outro.criado_em,
+                    texto=f"O comprador fez OUTRO pedido ({outro.pedido}) — daqui para baixo a "
+                    "conversa pode ser sobre esse outro pedido",
+                )
+            )
+
+    out.conversas = [
+        HistoricoConversaOut(
+            id=conv.id,
+            plataforma=conv.plataforma,
+            canal=conv.canal,
+            comprador_nome=conv.comprador_nome,
+            conta=g.conta,
+            pedido_marketplace=conv.pedido_marketplace,
+            como=como,
+            link=svc.LINK_CONVERSA.format(id=conv.id),
+            email=separa_email.e_conversa_de_email(conv),
+        )
+        for conv, como in ligadas
+    ]
+    out.mensagens = [
+        HistoricoMensagemOut(
+            id=x.id,
+            conversa_id=x.conversa_id,
+            autor=x.autor,
+            origem=x.origem,
+            tipo=x.tipo,
+            texto=x.texto,
+            anexos=[a for a in (x.anexos or []) if isinstance(a, dict)],
+            enviada_em=x.enviada_em,
+            status=x.status,
+        )
+        for x in mensagens
+    ]
+    out.marcos.sort(key=lambda mm: mm.em)
+    svc.registrar_log(
+        session, g.id, "consultou", user, detalhe=f"abriu o histórico ({len(ligadas)} conversa(s))"
+    )
+    await session.commit()
+    return out
 
 
 @router.put("/{garantia_id}", response_model=GarantiaSalvaOut)
@@ -1008,7 +1274,7 @@ async def corrigir(
     if novo_pedido is not None:
         mudancas.append(("pedido", g.pedido_bling, novo_pedido.numero))
         anterior = g.data_inicio
-        _aplicar_pedido(g, novo_pedido, nf_final, serie_final, nota)
+        svc.aplicar_pedido(g, novo_pedido, nf_final, serie_final, nota)
         svc.aplicar_entrega(
             g, await svc.resolver_entrega(session, novo_pedido.numero, novo_pedido.numeroloja)
         )
@@ -1024,7 +1290,7 @@ async def corrigir(
         if g.data_inicio is None:
             avisos.append(novo_pedido.aviso_sem_entrega)
     if muda_nf:
-        _aplicar_nf(g, nf_final, serie_final, nota)
+        svc.aplicar_nf(g, nf_final, serie_final, nota)
         if nf_final != nf_antes:
             mudancas.append(("nf_numero", nf_antes, nf_final))
         if serie_final != serie_antes:

@@ -3578,6 +3578,21 @@ async def garantias_recalcular_entrega(ctx: dict) -> None:
     logger.info("garantias_recalcular_entrega", **contagem)
 
 
+async def garantias_automaticas(ctx: dict) -> None:
+    """Garantia automática (28/10/2026): cria a garantia do pedido Uranyx pela
+    NF de produto, liga as conversas do pedido (ponteiro) e descarta a do robô
+    cujo pedido foi cancelado. Só lê o espelho (Bling, NF, Logística,
+    Atendimento) e grava nas tabelas da garantia: nenhuma chamada externa.
+    Desligado por `GARANTIA_AUTOMATICA` (config)."""
+    if not get_settings().garantia_automatica:
+        return
+    from app.services import garantia_auto
+
+    async with session_scope() as s:
+        r = await garantia_auto.rodar(s)
+    logger.info("garantias_automaticas", **r.como_dict())
+
+
 async def alerts_cleanup(ctx: dict) -> None:
     """Delete alerts older than 60 days (B10). Carona diária da Ouvidoria:
     rodadas com mais de 30 dias (`ouvidoria_rodadas` cresce centenas de linhas
@@ -5200,6 +5215,7 @@ class WorkerSettings:
         alerts_cleanup,
         historico_manutencao,
         garantias_recalcular_entrega,
+        garantias_automaticas,
         condicao_especial_gc,
         func(mega_midias_recontar, timeout=2400),
         # 2 h: a 1ª rodada com os vídeos converte o acervo inteiro (2,9 GB).
@@ -5551,6 +5567,7 @@ class WorkerSettings:
         # :57, depois das varreduras da Logística (:09/:14/:29/:39/:44/:49/:59
         # fecham a hora com a entrega mais nova). Só banco, segundos.
         cron(garantias_recalcular_entrega, minute=57, run_at_startup=False),
+        cron(garantias_automaticas, minute={7, 22, 37, 52}, run_at_startup=False),
         # Condição Especial de segmento encerrada há 30d (services/condicao_especial).
         cron(condicao_especial_gc, hour=6, minute=10, run_at_startup=False),  # 03:10 BRT
         # Recontagem das pastas do MEGA (fotos/vídeos/embalagens): 04:25 BRT,
