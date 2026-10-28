@@ -992,11 +992,15 @@ def validar(
             motivos.append(_MOTIVO_PERFIL)
         if _algum(_REDE_SOCIAL, plano):
             motivos.append(_MOTIVO_REDE)
-    if _PIX.search(plano):
-        # No Zap a frase é a da decisão (bloqueado "por enquanto"), não a do
-        # marketplace ("fora da plataforma").
+    # Pix e conta bancária (28/10/2026, o dono: "tem que puder deixar a questao de pix
+    # quando e a pessoa digitando" — a devolução em dinheiro da roda que não veio sai
+    # por Pix): no marketplace quem responde pela tela decide; a IA, o agente e a
+    # automática seguem barrados. No Zap a regra é a da política do WhatsApp, para
+    # pessoa e IA (a frase é a da decisão, bloqueado "por enquanto").
+    pix_e_conta_valem = zap or origem != ORIGEM_HUMANO
+    if _PIX.search(plano) and pix_e_conta_valem:
         motivos.append(_MOTIVO_ZAP_PIX if zap else _MOTIVO_PIX)
-    if _algum(_BANCO, plano):
+    if _algum(_BANCO, plano) and pix_e_conta_valem:
         motivos.append(_MOTIVO_ZAP_CONTA if zap else _MOTIVO_BANCO)
     if _FORA_DA_PLATAFORMA.search(plano) or _algum(_POR_FORA, plano):
         motivos.append(_MOTIVO_POR_FORA)

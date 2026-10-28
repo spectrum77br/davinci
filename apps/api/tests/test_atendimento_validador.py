@@ -190,7 +190,15 @@ def test_link_so_fora_da_pessoa(texto):
     ],
 )
 def test_bloqueia_pagamento_e_negocio_por_fora(texto, motivo):
-    assert motivo in _v(texto)
+    if motivo.startswith("pagamento fora da plataforma"):
+        # 28/10/2026, o dono: Pix e conta são decisão de quem responde pela tela (a
+        # devolução em dinheiro da roda que não veio); a IA e a automática seguem barradas.
+        assert motivo not in _v(texto, origem=ORIGEM_HUMANO), texto
+        assert motivo in _v(texto, origem=ORIGEM_IA), texto
+        assert motivo in _v(texto, origem=ORIGEM_AUTO), texto
+    else:
+        # A negociação por fora continua barrada para todos.
+        assert motivo in _v(texto), texto
 
 
 @pytest.mark.parametrize(
@@ -542,9 +550,6 @@ def test_pergunta_publica_do_ml_nao_publica_preco():
         ("fulano@uol", "contato fora da loja (e-mail)"),
         ("fulano [arroba] uol [ponto] com", "contato fora da loja (e-mail)"),
         # Pagamento por fora.
-        ("transfere pra minha conta", "pagamento fora da plataforma (conta bancária)"),
-        ("deposita na conta", "pagamento fora da plataforma (conta bancária)"),
-        ("faz um ted", "pagamento fora da plataforma (conta bancária)"),
         ("compra direto comigo que sai mais barato", "negociação fora da plataforma"),
         ("boleto por fora", "negociação fora da plataforma"),
     ],
@@ -552,6 +557,13 @@ def test_pergunta_publica_do_ml_nao_publica_preco():
 def test_regras_duras_buracos_da_revisao(texto, motivo):
     # Duro para todos: a pessoa E a IA.
     assert motivo in _v(texto, origem=ORIGEM_HUMANO), texto
+    assert motivo in _v(texto, origem=ORIGEM_IA), texto
+
+
+@pytest.mark.parametrize("texto", ["transfere pra minha conta", "deposita na conta", "faz um ted"])
+def test_conta_bancaria_so_fora_da_pessoa(texto):
+    motivo = "pagamento fora da plataforma (conta bancária)"
+    assert motivo not in _v(texto, origem=ORIGEM_HUMANO), texto
     assert motivo in _v(texto, origem=ORIGEM_IA), texto
 
 
@@ -716,7 +728,8 @@ def test_pix_copia_e_cola_barrado_no_zap_e_no_marketplace(texto):
     # O "pix" grudado no dígito (o EMV do Banco Central) passava pelo `\b`.
     assert "PIX: bloqueado no WhatsApp por enquanto" in _zap(texto)
     assert "PIX: bloqueado no WhatsApp por enquanto" in _zap(texto, origem=ORIGEM_IA)
-    assert "pagamento fora da plataforma (PIX)" in _v(texto)
+    assert "pagamento fora da plataforma (PIX)" in _v(texto, origem=ORIGEM_IA)
+    assert "pagamento fora da plataforma (PIX)" not in _v(texto, origem=ORIGEM_HUMANO)
 
 
 def test_pix_nao_pega_outra_palavra():
@@ -805,4 +818,4 @@ def test_marketplace_e_zap_antigo_iguais():
     # … e as regras novas (cartão, documento) não entram no marketplace.
     for texto in ("Me passa o número do cartão", "o cartão é 4111 1111 1111 1111"):
         assert not any("a Meta proíbe" in m for m in _v(texto)), texto
-    assert "pagamento fora da plataforma (PIX)" in _v("pode pagar no pix")
+    assert "pagamento fora da plataforma (PIX)" in _v("pode pagar no pix", origem=ORIGEM_IA)
