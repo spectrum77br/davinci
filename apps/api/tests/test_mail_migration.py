@@ -30,7 +30,12 @@ async def test_mail_migration_matches_models_and_downgrades(db):
     spec.loader.exec_module(migration)
     schema = f"mail_migration_{uuid4().hex[:12]}"
     migration.SCHEMA = schema
-    tables = ["mail_mailboxes", "mail_messages", "mail_attachments", "mail_outbox"]
+    composer_path = path.with_name("0438_mail_composer.py")
+    composer_spec = importlib.util.spec_from_file_location("composer_migration_test", composer_path)
+    composer = importlib.util.module_from_spec(composer_spec)
+    composer_spec.loader.exec_module(composer)
+    composer.SCHEMA = schema
+    tables = ["mail_mailboxes", "mail_messages", "mail_attachments", "mail_outbox", "mail_drafts"]
 
     def catalog(connection, selected_schema):
         inspector = inspect(connection)
@@ -52,7 +57,7 @@ async def test_mail_migration_matches_models_and_downgrades(db):
             }
         return result
 
-    async def run(step):
+    async def run(step, module=migration):
         connection = await db.connection()
 
         def execute(sync_connection):
@@ -60,7 +65,7 @@ async def test_mail_migration_matches_models_and_downgrades(db):
                 sync_connection, opts={"target_metadata": Base.metadata}
             )
             with Operations.context(context):
-                getattr(migration, step)()
+                getattr(module, step)()
 
         await connection.run_sync(execute)
 
@@ -69,10 +74,12 @@ async def test_mail_migration_matches_models_and_downgrades(db):
     await db.execute(text(f'CREATE TABLE "{schema}".users (id uuid PRIMARY KEY)'))  # noqa: S608
     try:
         await run("upgrade")
+        await run("upgrade", composer)
         connection = await db.connection()
         actual = await connection.run_sync(catalog, schema)
         expected = await connection.run_sync(catalog, Base.metadata.schema)
         assert actual == expected
+        await run("downgrade", composer)
         await run("downgrade")
         connection = await db.connection()
         remaining = await connection.run_sync(lambda c: inspect(c).get_table_names(schema=schema))

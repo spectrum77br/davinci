@@ -8,15 +8,18 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.db import get_session
 from app.deps.auth import require_active_user, require_admin
 from app.models.enums import UserRole, UserStatus
-from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
+from app.models.mail import MailAttachment, MailDraft, MailMailbox, MailMessage, MailOutbox
 from app.models.user import User
 from app.schemas.mail import (
+    ComposeDraftIn,
+    ComposeSendIn,
     Heartbeat,
     Ingest,
     MailboxCreate,
@@ -28,6 +31,7 @@ from app.schemas.mail import (
 from app.schemas.mail_bridge_sync import BridgeSnapshot
 from app.security.cipher import decrypt_bytes, decrypt_json, encrypt_json
 from app.services import mail_central as service
+from app.services import mail_composer
 from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento import caixa as mailbox_settings
 from app.services.mail_atendimento import responder as mail_responder
@@ -240,20 +244,22 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
     message, mailbox = await user_message(session, message_id, user, read=True)
     attachments = (
         await session.scalars(
-            select(MailAttachment).where(
+            select(MailAttachment)
+            .where(
                 MailAttachment.message_id == message.id,
             )
+            .options(load_only(MailAttachment.id, MailAttachment.size, MailAttachment.metadata_enc))
         )
     ).all()
-    outbox = (
-        await session.scalars(
-            select(MailOutbox)
-            .where(
-                MailOutbox.message_id == message.id,
-            )
-            .order_by(MailOutbox.created_at)
+    outbox_rows = await session.stream_scalars(
+        select(MailOutbox)
+        .where(
+            MailOutbox.message_id == message.id,
         )
-    ).all()
+        .order_by(MailOutbox.created_at)
+        .execution_options(yield_per=1)
+    )
+    outbox = [service.outbox_view(job) async for job in outbox_rows]
     caixa_cfg = await mailbox_settings.config_da_caixa(session, mailbox.id)
     reply = service.reply_envelope(
         mailbox,
@@ -278,7 +284,7 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
             **reply,
             "send_ready": service.send_ready(mailbox),
         },
-        "outbox": [service.outbox_view(job) for job in outbox],
+        "outbox": outbox,
     }
 
 
@@ -328,6 +334,10 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
     mailbox = await session.get(MailMailbox, job.mailbox_id) if job else None
     if job is None or mailbox is None or not service.allowed(mailbox, user):
         raise fail("job_not_found")
+    if decrypt_json(job.content_enc).get("action") is not None and (
+        job.author_user_id != user.id or not await mail_composer.can_compose(session, mailbox, user)
+    ):
+        raise fail("job_not_found")
     await require_operator(session, mailbox, user)
     job = await session.scalar(
         select(MailOutbox)
@@ -343,6 +353,162 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
     await mail_responder.apos_resolver_na_caixa(session, job, user, saiu=body.saiu)
     await session.commit()
     return service.outbox_view(job)
+
+
+async def compose_mailbox(session, mailbox_id, user, *, lock=False):
+    mailbox = await user_mailbox(session, mailbox_id, user)
+    if not await mail_composer.can_compose(session, mailbox, user):
+        raise fail("compose_not_allowed", 403)
+    if lock:
+        mailbox = await session.scalar(
+            select(MailMailbox)
+            .where(MailMailbox.id == mailbox.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    return mailbox
+
+
+@router.get("/mailboxes/{mailbox_id}/compose-context")
+async def compose_context(
+    mailbox_id: UUID,
+    session: Session,
+    user: ActiveUser,
+    response: Response,
+    source_message_id: UUID | None = None,
+    action: str = Query("new", pattern="^(new|reply|reply_all|forward)$"),
+):
+    mailbox = await readable_mailbox(session, mailbox_id, user)
+    try:
+        source = await mail_composer.source_message(session, mailbox, user, source_message_id)
+        result = await mail_composer.context(session, mailbox, user, source, action)
+    except service.MailError as error:
+        raise fail(error.code, error.status) from None
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.post("/mailboxes/{mailbox_id}/send", status_code=202)
+async def compose_send(mailbox_id: UUID, request: Request, session: Session, user: ActiveUser):
+    mailbox = await compose_mailbox(session, mailbox_id, user, lock=True)
+    body = await limited_body(request, ComposeSendIn, mail_composer.MAX_REQUEST_BYTES)
+    try:
+        job = await mail_composer.queue(session, mailbox, user, body)
+    except service.MailError as error:
+        raise fail(error.code, error.status) from None
+    await session.commit()
+    return mail_composer.outbox_view(job)
+
+
+@router.get("/mailboxes/{mailbox_id}/outbox")
+async def compose_outbox(mailbox_id: UUID, session: Session, user: ActiveUser, response: Response):
+    await compose_mailbox(session, mailbox_id, user)
+    jobs = await session.stream_scalars(
+        select(MailOutbox)
+        .where(
+            MailOutbox.mailbox_id == mailbox_id,
+            MailOutbox.author_user_id == user.id,
+        )
+        .order_by(MailOutbox.created_at.desc())
+        .limit(100)
+        .execution_options(yield_per=1)
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"items": [mail_composer.outbox_view(job) async for job in jobs]}
+
+
+@router.get("/mailboxes/{mailbox_id}/drafts")
+async def list_drafts(mailbox_id: UUID, session: Session, user: ActiveUser, response: Response):
+    await compose_mailbox(session, mailbox_id, user)
+    drafts = await session.stream_scalars(
+        select(MailDraft)
+        .where(
+            MailDraft.mailbox_id == mailbox_id,
+            MailDraft.author_user_id == user.id,
+        )
+        .order_by(MailDraft.updated_at.desc())
+        .limit(100)
+        .execution_options(yield_per=1)
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"items": [mail_composer.draft_view(draft, detail=False) async for draft in drafts]}
+
+
+@router.post("/mailboxes/{mailbox_id}/drafts", status_code=201)
+async def create_draft(mailbox_id: UUID, request: Request, session: Session, user: ActiveUser):
+    mailbox = await compose_mailbox(session, mailbox_id, user, lock=True)
+    body = await limited_body(request, ComposeDraftIn, mail_composer.MAX_REQUEST_BYTES)
+    count = await session.scalar(
+        select(func.count())
+        .select_from(MailDraft)
+        .where(
+            MailDraft.mailbox_id == mailbox_id,
+            MailDraft.author_user_id == user.id,
+        )
+    )
+    if count >= 100:
+        raise fail("draft_limit_reached", 409)
+    try:
+        await mail_composer.validate_draft(session, mailbox, user, body)
+    except service.MailError as error:
+        raise fail(error.code, error.status) from None
+    draft = MailDraft(
+        mailbox_id=mailbox_id,
+        author_user_id=user.id,
+        content_enc=encrypt_json(body.model_dump(mode="json")),
+    )
+    session.add(draft)
+    await session.commit()
+    await session.refresh(draft)
+    return mail_composer.draft_view(draft)
+
+
+async def own_draft(session, draft_id, user, *, lock=False):
+    statement = select(MailDraft).where(
+        MailDraft.id == draft_id,
+        MailDraft.author_user_id == user.id,
+    )
+    if lock:
+        statement = statement.with_for_update()
+    draft = await session.scalar(statement)
+    if draft is None:
+        raise fail("draft_not_found")
+    mailbox = await compose_mailbox(session, draft.mailbox_id, user)
+    return draft, mailbox
+
+
+@router.get("/drafts/{draft_id}")
+async def get_draft(draft_id: UUID, session: Session, user: ActiveUser, response: Response):
+    draft, mailbox = await own_draft(session, draft_id, user)
+    body = ComposeDraftIn.model_validate(decrypt_json(draft.content_enc))
+    try:
+        await mail_composer.source_message(session, mailbox, user, body.source_message_id)
+    except service.MailError as error:
+        raise fail(error.code, error.status) from None
+    response.headers["Cache-Control"] = "no-store"
+    return mail_composer.draft_view(draft)
+
+
+@router.patch("/drafts/{draft_id}")
+async def update_draft(draft_id: UUID, request: Request, session: Session, user: ActiveUser):
+    draft, mailbox = await own_draft(session, draft_id, user, lock=True)
+    body = await limited_body(request, ComposeDraftIn, mail_composer.MAX_REQUEST_BYTES)
+    try:
+        await mail_composer.validate_draft(session, mailbox, user, body)
+    except service.MailError as error:
+        raise fail(error.code, error.status) from None
+    draft.content_enc = encrypt_json(body.model_dump(mode="json"))
+    await session.commit()
+    await session.refresh(draft)
+    return mail_composer.draft_view(draft)
+
+
+@router.delete("/drafts/{draft_id}", status_code=204)
+async def delete_draft(draft_id: UUID, session: Session, user: ActiveUser):
+    draft, _ = await own_draft(session, draft_id, user, lock=True)
+    await session.delete(draft)
+    await session.commit()
+    return Response(status_code=204)
 
 
 @router.post("/agent/{mailbox_id}/heartbeat")

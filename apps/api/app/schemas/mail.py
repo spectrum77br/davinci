@@ -5,6 +5,7 @@ import binascii
 from typing import Annotated, Literal
 from uuid import UUID
 
+from email_validator import validate_email
 from pydantic import (
     AwareDatetime,
     BaseModel,
@@ -134,6 +135,93 @@ class ReplyIn(StrictModel):
         if not value.strip() or "\x00" in value:
             raise ValueError("empty_or_invalid_text")
         return value
+
+
+class ComposeAttachmentIn(AttachmentIn):
+    @field_validator("filename")
+    @classmethod
+    def safe_filename(cls, value):
+        if not value.strip() or not value.isprintable() or any(c in "/\\" for c in value):
+            raise ValueError("invalid_filename")
+        return value
+
+    @field_validator("content_type")
+    @classmethod
+    def leaf_mime_type(cls, value):
+        if value.lower().startswith("multipart/"):
+            raise ValueError("invalid_attachment_type")
+        return value
+
+
+class ComposeDraftIn(StrictModel):
+    action: Literal["new", "reply", "reply_all", "forward"] = "new"
+    source_message_id: UUID | None = None
+    from_address: EmailStr | None = None
+    to: list[EmailStr] = Field(default_factory=list, max_length=100)
+    cc: list[EmailStr] = Field(default_factory=list, max_length=100)
+    bcc: list[EmailStr] = Field(default_factory=list, max_length=100)
+    subject: Header = ""
+    text: str = Field(default="", max_length=100_000)
+    attachments: list[ComposeAttachmentIn] = Field(default_factory=list, max_length=10)
+    source_attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
+
+    @staticmethod
+    def smtp_address(value):
+        local, _, _ = str(value).rpartition("@")
+        if not local.isascii() or len(local) > 64:
+            raise ValueError("smtp_address_not_supported")
+        return validate_email(str(value), check_deliverability=False).ascii_email
+
+    @field_validator("from_address")
+    @classmethod
+    def smtp_sender(cls, value):
+        return cls.smtp_address(value) if value is not None else None
+
+    @field_validator("to", "cc", "bcc")
+    @classmethod
+    def smtp_recipients(cls, value):
+        return [cls.smtp_address(address) for address in value]
+
+    @field_validator("subject")
+    @classmethod
+    def safe_subject(cls, value):
+        if any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("invalid_subject")
+        return value
+
+    @model_validator(mode="after")
+    def compose_limits(self):
+        if "\x00" in self.text:
+            raise ValueError("invalid_text")
+        if len(self.to) + len(self.cc) + len(self.bcc) > 100:
+            raise ValueError("too_many_recipients")
+        if len(self.attachments) + len(self.source_attachment_ids) > 10:
+            raise ValueError("too_many_attachments")
+        if len(set(self.source_attachment_ids)) != len(self.source_attachment_ids):
+            raise ValueError("duplicate_attachment")
+        if sum(len(base64.b64decode(a.data_base64)) for a in self.attachments) > 15 * 1024 * 1024:
+            raise ValueError("attachments_too_large")
+        if self.source_attachment_ids and (
+            self.action != "forward" or self.source_message_id is None
+        ):
+            raise ValueError("source_attachments_require_forward")
+        return self
+
+
+class ComposeSendIn(ComposeDraftIn):
+    request_id: UUID
+
+    @model_validator(mode="after")
+    def ready_to_send(self):
+        if self.from_address is None or not (self.to or self.cc or self.bcc):
+            raise ValueError("sender_and_recipient_required")
+        if self.action == "new" and self.source_message_id is not None:
+            raise ValueError("new_message_has_no_source")
+        if self.action != "new" and self.source_message_id is None:
+            raise ValueError("source_message_required")
+        if not self.text.strip() and not (self.attachments or self.source_attachment_ids):
+            raise ValueError("empty_message")
+        return self
 
 
 class OutboxResolve(StrictModel):

@@ -56,3 +56,27 @@ Uma resposta pendente ou incerta precisa ser conferida antes da exclusão.
 
 As alterações de acesso, exclusões e restaurações registram autor, data e
 identificadores para auditoria, sem copiar assunto ou corpo para os registros.
+
+## Escrever e responder
+
+Em **Caixas**, o compositor permite escrever uma nova mensagem, responder,
+responder a todos ou encaminhar. Confira o remetente autorizado, os campos
+**Para**, **CC** e **CCO**, o assunto e os arquivos antes de confirmar o envio.
+O destinatário em CCO não aparece nos cabeçalhos recebidos pelos outros.
+
+É possível adicionar até **10 arquivos**, com **10 MB por arquivo** e **15 MB
+no total**. Ao encaminhar, os anexos originais podem ser mantidos ou removidos;
+eles também contam nesse limite. O DaVinci verifica novamente a permissão de
+leitura do original antes de utilizar seus anexos.
+
+Os **rascunhos do DaVinci** são salvos cifrados e pertencem à pessoa que os
+escreveu. Não são rascunhos compartilhados nem sincronizados com a pasta de
+rascunhos do Tuta. Salvar um rascunho não envia a mensagem. O envio efetivo é
+feito pelo conector do Tuta, que registra a mensagem nos enviados da conta.
+
+O histórico de envios diferencia mensagem aguardando envio, enviada, falha e
+resultado incerto. Um envio incerto nunca é repetido automaticamente: primeiro
+confira os enviados no Tuta. As permissões, remetentes autorizados, pausa,
+modo de teste e limites da caixa continuam valendo, inclusive para CC e CCO.
+O compositor livre exige acesso de operação à caixa completa; permissões
+restritas a mensagens não liberam acesso aos demais remetentes ou rascunhos.

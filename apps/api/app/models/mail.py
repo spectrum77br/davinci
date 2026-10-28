@@ -87,8 +87,8 @@ class MailOutbox(Base, TimestampMixin):
     mailbox_id: Mapped[UUID] = mapped_column(
         ForeignKey("mail_mailboxes.id", ondelete="CASCADE"), nullable=False
     )
-    message_id: Mapped[UUID] = mapped_column(
-        ForeignKey("mail_messages.id", ondelete="CASCADE"), nullable=False
+    message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("mail_messages.id", ondelete="CASCADE"), nullable=True
     )
     author_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     request_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
@@ -99,3 +99,17 @@ class MailOutbox(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     receipt_enc: Mapped[bytes | None] = mapped_column(LargeBinary)
     error_code: Mapped[str | None] = mapped_column(String(64))
+
+
+class MailDraft(Base, TimestampMixin):
+    __tablename__ = "mail_drafts"
+    __table_args__ = (Index("ix_mail_drafts_author_mailbox", "author_user_id", "mailbox_id"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    mailbox_id: Mapped[UUID] = mapped_column(
+        ForeignKey("mail_mailboxes.id", ondelete="CASCADE"), nullable=False
+    )
+    author_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    content_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

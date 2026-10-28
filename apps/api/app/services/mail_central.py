@@ -403,7 +403,8 @@ async def queue_reply(
     if existing:
         original = decrypt_json(existing.content_enc)
         if (
-            existing.message_id != message.id
+            original.get("action") is not None
+            or existing.message_id != message.id
             or existing.author_user_id != user.id
             or (original["text"] != body.text or original["from_address"] != sender)
         ):
@@ -495,23 +496,22 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
         job.error_code = "receipt_timeout"
     if not send_ready(mailbox):
         return []
-    jobs = (
-        await session.scalars(
-            select(MailOutbox)
-            .where(
-                MailOutbox.mailbox_id == mailbox.id,
-                MailOutbox.status == "queued",
-            )
-            .order_by(MailOutbox.created_at)
-            .limit(LEASE_SCAN)
-            .with_for_update(skip_locked=True)
+    jobs = await session.stream_scalars(
+        select(MailOutbox)
+        .where(
+            MailOutbox.mailbox_id == mailbox.id,
+            MailOutbox.status == "queued",
         )
-    ).all()
+        .order_by(MailOutbox.created_at)
+        .limit(LEASE_SCAN)
+        .with_for_update(skip_locked=True)
+        .execution_options(yield_per=1)
+    )
     result = []
-    config = decrypt_json(mailbox.config_enc) if jobs else {"address": "", "aliases": []}
+    config = decrypt_json(mailbox.config_enc)
     aliases = {address.lower() for address in config["aliases"]}
     main = str(config["address"]).lower()
-    for job in jobs:
+    async for job in jobs:
         if len(result) >= LEASE_BATCH:
             break
         # Recheck the author still has access before dispatching a queued reply.
@@ -523,7 +523,8 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
             continue
         from app.services.mail_atendimento import administracao as mail_admin
 
-        if not await session.scalar(
+        payload = decrypt_json(job.content_enc)
+        if job.message_id is not None and not await session.scalar(
             select(MailMessage.id).where(
                 MailMessage.id == job.message_id, mail_admin.filtro_mensagem(author)
             )
@@ -532,7 +533,19 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
             job.error_code = "author_access_revoked"
             job.completed_at = now
             continue
-        payload = decrypt_json(job.content_enc)
+        if payload.get("action") is not None:
+            from app.services import mail_composer
+
+            if not await mail_composer.can_compose(session, mailbox, author):
+                job.status = "failed"
+                job.error_code = "author_access_revoked"
+                job.completed_at = now
+                continue
+        elif job.message_id is None:
+            job.status = "failed"
+            job.error_code = "author_access_revoked"
+            job.completed_at = now
+            continue
         # Aliases can be edited after queueing: a removed sender never goes out.
         if payload["from_address"].lower() not in aliases:
             job.status = "failed"
@@ -542,13 +555,22 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
         # Atendimento replies and company mailboxes: the global brake, a pause
         # or test mode switched on after queueing hold/fail the job here; one
         # queued for too long fails. Raw replies of a private mailbox: no-op.
-        held = await mailbox_settings.trava_no_lease(
-            session,
-            job,
-            payload.get("to"),
-            agora=now,
-            from_main=payload["from_address"].lower() == main,
-        )
+        recipients = payload.get("to") or []
+        if isinstance(recipients, str):
+            recipients = [recipients]
+        recipients = [*recipients, *payload.get("cc", []), *payload.get("bcc", [])]
+        held = None
+        for recipient in recipients or [None]:
+            blocked = await mailbox_settings.trava_no_lease(
+                session,
+                job,
+                recipient,
+                agora=now,
+                from_main=payload["from_address"].lower() == main,
+            )
+            if blocked:
+                held = blocked
+                break
         if held == mailbox_settings.SEGURAR:
             continue
         if held:
@@ -556,11 +578,18 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
             job.error_code = held
             job.completed_at = now
             continue
+        # One attachment-bearing job per response keeps the lease within the
+        # bridge's body limit even when several 15 MiB messages are queued.
+        if payload.get("attachments") and result:
+            break
         token = secrets.token_urlsafe(32)
         job.lease_token_hash = token_hash(token)
         job.leased_at = now
         job.status = "leased"
         result.append({"id": str(job.id), "lease_token": token, **payload})
+        if payload.get("attachments"):
+            break
+    await jobs.close()
     await session.flush()
     return result
 

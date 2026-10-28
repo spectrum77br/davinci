@@ -38,7 +38,7 @@ async function montar(nome, props, fn) {
   const el = document.createElement('div'); document.body.appendChild(el)
   const app = Vue.createApp({ render: () => Vue.h(requerer(`~/components/${nome}`).default, props) })
   app.config.warnHandler = (m) => avisos.push(m)
-  for (const child of ['AtendimentoMailFilas', 'AtendimentoMailConfigurar', 'AtendimentoMailPastas', 'AtendimentoMailBody', 'AtendimentoMailPastasDaCaixa', 'AtendimentoMailSelo']) app.component(child, { setup: () => () => Vue.h('div') })
+  for (const child of ['AtendimentoMailFilas', 'AtendimentoMailComposer', 'AtendimentoMailConfigurar', 'AtendimentoMailPastas', 'AtendimentoMailBody', 'AtendimentoMailPastasDaCaixa', 'AtendimentoMailSelo']) app.component(child, { setup: () => () => Vue.h('div') })
   app.component('AtendimentoMailAdministracao', requerer('~/components/AtendimentoMailAdministracao.vue').default)
   app.mount(el); await tick()
   return { el, chamadas, avisos, fechar: () => { app.unmount(); el.remove() } }
