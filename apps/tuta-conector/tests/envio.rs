@@ -185,6 +185,22 @@ async fn resposta_sai_como_reply_pelo_alias_que_recebeu() {
 }
 
 #[tokio::test]
+async fn resposta_do_site_sai_com_o_html_da_central_sem_plaintext() {
+	// 28/10/2026: a resposta do site leva a assinatura da marca (logo, cores):
+	// o corpo é o HTML que a Central montou e o envio vai SEM `plaintext`.
+	let cena = Cena::nova("envio-html", true);
+	let html = "<div>Segue a tabela.</div><div><table><tr><td><img src=\"https://uranyx.com.br/assets/img/logo.png\"></td></tr></table></div>";
+	cena.cv().enfileirar_com_html(JOB, "21MAX@tuta.com", "cliente@exemplo.com.br", FIO, "Segue a tabela.", html);
+	let mut e = cena.enviador();
+	let r = e.uma_volta().await.unwrap();
+	assert_eq!((r.tarefas, r.enviadas, r.falharam, r.incertas), (1, 1, 0, 0), "{r}");
+	let envio = cena.cx().envios[0].clone();
+	assert_eq!(envio.corpo, html);
+	assert!(!envio.plaintext && !envio.confidencial);
+	assert_eq!(envio.remetente, "21max@tuta.com");
+}
+
+#[tokio::test]
 async fn sem_as_duas_chaves_nem_pede_trabalho() {
 	let cena = Cena::nova("envio-chave-local", false);
 	cena.cv().enfileirar(JOB, "21max@tuta.com", "cliente@exemplo.com.br", Some(FIO), "oi");

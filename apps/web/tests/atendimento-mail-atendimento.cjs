@@ -271,7 +271,7 @@ async function principal() {
     assert.match(schemas, /class MensagemOut\(BaseModel\):[\s\S]*?email: dict\[str, Any\] \| None = None/)
     // A prévia: os campos que a tela lê são os que a rota devolve.
     const previa = rotas.slice(rotas.indexOf('async def previa('), rotas.indexOf('class AgruparIn'))
-    for (const campo of ['mail_message_id', 'de', 'para', 'formulario', 'assunto', 'assinatura', 'citacao_cabeca', 'citacao', 'modo', 'pode_mexer', 'bloqueios', 'avisos', 'abrir_no_tuta']) {
+    for (const campo of ['mail_message_id', 'de', 'para', 'formulario', 'assunto', 'assinatura', 'assinatura_html', 'citacao_cabeca', 'citacao', 'modo', 'pode_mexer', 'bloqueios', 'avisos', 'abrir_no_tuta']) {
       assert.ok(previa.includes(`"${campo}":`), `prévia: ${campo}`)
     }
     assert.match(previa, /\{"codigo": b\.codigo, "texto": b\.texto, "confirmavel": b\.confirmavel\}/)
@@ -1190,6 +1190,7 @@ async function principal() {
     assert.doesNotMatch(html, /data-email-junto/, 'a assinatura e a citação ficam recolhidas')
     m.estado.verCitacao = true
     assert.match(await m.html(), /data-email-junto>Atenciosamente,\nAtlas\n\nEm 08\/10\/2026 10:00, ML escreveu:\ntexto</)
+    assert.doesNotMatch(await m.html(), /data-email-assinatura-html/, 'loja: só a assinatura em texto')
     html = await m.html()
     assert.match(html, /data-email-de>mia30@tuta\.com/)
     assert.match(html, /data-email-para>noreply@mercadolivre\.com/)
@@ -1336,6 +1337,17 @@ async function principal() {
     assert.equal(H.resumoDoCorpo(0, 0, false), '')
     // Sem nada no corpo: sem botão de minimizar.
     assert.doesNotMatch(await sem.html(), /data-email-chamado-alternar/)
+  }
+  // Site (28/10/2026): a assinatura de Cadastros › E-mails em HTML aparece no "ver" (no lugar da de texto).
+  {
+    const p = { mail_message_id: 'e1', de: 'admin@uranyx.com.br', para: 'cliente@x.com', formulario: true, assunto: 'Re: [UDS-26-0001] Dúvida', assinatura: 'Atenciosamente,\nEquipe Uranyx\nAdministrativo', assinatura_html: '<table><tr><td><p>Equipe Uranyx</p><p>Administrativo</p></td></tr></table>', citacao_cabeca: 'Em 28/10/2026 09:00, Ana escreveu:', citacao: 'oi', modo: 'real', pode_mexer: true, bloqueios: [], avisos: [], abrir_no_tuta: null }
+    const m = montar('../components/AtendimentoEmailResposta.vue', { conversaId: 'c8', mailMessageId: null, versao: 1 }, { respostas: { '/api/atendimento/email/conversas/c8/previa': p } })
+    await m.html(); await esperar()
+    m.estado.verCitacao = true
+    await Vue.nextTick()
+    const h = await m.html()
+    assert.match(h, /data-email-assinatura-html[^>]*><table><tr><td><p>Equipe Uranyx<\/p><p>Administrativo<\/p>/)
+    assert.match(h, /data-email-junto>Em 28\/10\/2026 09:00, Ana escreveu:\noi</, 'o texto da assinatura não se repete')
   }
   // A prévia da resposta: começa aberta; recolhida, fica "De → Para" e o selo dos avisos (a trava continua).
   {

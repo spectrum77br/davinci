@@ -2113,6 +2113,7 @@ async def previa(
         "formulario": p.formulario,
         "assunto": p.assunto,
         "assinatura": p.assinatura,
+        "assinatura_html": p.assinatura_html,
         "citacao_cabeca": p.citacao_cabeca,
         "citacao": p.citacao,
         "modo": p.modo,

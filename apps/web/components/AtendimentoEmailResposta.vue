@@ -3,13 +3,15 @@
 // "como vai sair" acima da caixa de resposta, antes do Enviar —
 //
 //   De      = o endereço da caixa que RECEBEU o e-mail (nunca o principal no
-//             lugar dele); no chamado do site (RF6), o e-mail do TIPO na marca
-//             (sac@, atacado@, duvidas@ — `marca_emails`);
+//             lugar dele); no site, a caixa SAC pelo sac@ e a Admin pelo
+//             admin@ (`marca_emails`: desde 28/10/2026 só sac@ e admin@);
 //   Para    = o Reply-To válido, senão o remetente; no formulário do site, o
 //             cliente lido do corpo (no servidor);
 //   Assunto = "Re: " + o original (+ o [protocolo] no site);
 //   e, embaixo do texto da pessoa, a ASSINATURA da loja/marca e a CITAÇÃO
-//   curta "Em DD/MM/AAAA HH:MM, Fulano escreveu:".
+//   curta "Em DD/MM/AAAA HH:MM, Fulano escreveu:". No site (28/10/2026) a
+//   assinatura é a de Cadastros › E-mails, com logo (`assinatura_html`): o
+//   "ver" mostra como ela sai.
 //
 // A resposta sai pela caixa de sempre (POST /conversas/{id}/responder, o
 // caminho único, com `mail_message_id` e `confirmar_nao_responde`) e entra na
@@ -34,6 +36,8 @@ export type PreviaEmail = {
   formulario: boolean
   assunto: string
   assinatura: string
+  // A mesma assinatura em HTML (só no site; montada e escapada no servidor).
+  assinatura_html?: string
   citacao_cabeca: string
   citacao: string
   // `caixa` = caixa privada (a regra da Central); `teste`/`real` = caixa da empresa
@@ -262,7 +266,10 @@ const nAvisos = computed(() => travas.value.length + avisos.value.length)
         Vai junto, embaixo do seu texto: {{ previa.assinatura && previa.citacao_cabeca ? 'a assinatura e a citação do e-mail' : previa.assinatura ? 'a assinatura' : 'a citação do e-mail' }}
         · <button type="button" class="underline" :aria-expanded="verCitacao" @click="verCitacao = !verCitacao">{{ verCitacao ? 'esconder' : 'ver' }}</button>
       </div>
-      <div v-if="verCitacao" class="whitespace-pre-wrap border-l-2 pl-2 text-[11px] text-muted-foreground" data-email-junto>{{ [previa.assinatura, previa.citacao_cabeca && `${previa.citacao_cabeca}\n${previa.citacao}`].filter(Boolean).join('\n\n') }}</div>
+      <template v-if="verCitacao">
+        <div v-if="previa.assinatura_html" class="overflow-x-auto rounded border bg-white p-2 text-[#222]" data-email-assinatura-html v-html="previa.assinatura_html" />
+        <div class="whitespace-pre-wrap border-l-2 pl-2 text-[11px] text-muted-foreground" data-email-junto>{{ [previa.assinatura_html ? '' : previa.assinatura, previa.citacao_cabeca && `${previa.citacao_cabeca}\n${previa.citacao}`].filter(Boolean).join('\n\n') }}</div>
+      </template>
       <div v-for="t in travas" :key="t.codigo" class="flex items-start gap-1 text-amber-900 dark:text-amber-200" data-email-trava>
         <Lock class="mt-px size-3 shrink-0" aria-hidden="true" /><span>{{ t.texto }}</span>
       </div>

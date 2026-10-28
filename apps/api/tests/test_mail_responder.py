@@ -112,6 +112,8 @@ async def test_responde_pelo_alias_que_recebeu_pela_fila_dela_e_volta_enviada(
     assert carga["subject"] == "Re: Pergunta sobre o pedido"
     assert carga["text"].startswith("Chega amanhã.\n\nAtenciosamente,\n")
     assert "escreveu:\n> Quando chega?" in carga["text"]
+    # Loja: só o texto (o conector faz o HTML dele); o HTML é só do site.
+    assert "html" not in carga
     liga = await db.get(MailOutboxMeta, job.id)
     assert str(liga.atendimento_mensagem_id) == msg["id"] and liga.conversa_id == conversa_id
     # A ligação é da conversa e lembra que o job nasceu na caixa da EMPRESA (a
@@ -312,6 +314,22 @@ async def test_rf6_resposta_do_formulario_vai_ao_cliente_pelo_email_do_tipo(
     assert carga["from_address"] == "atacado@uranyx.com.br"
     assert carga["subject"] == "Re: [UA-26-0007] Pedido de atacado"
     assert "Equipe Uranyx" in carga["text"]
+    # 28/10/2026: a assinatura de Cadastros › E-mails também em HTML (o
+    # endereço antigo que recebeu é da caixa Admin).
+    assert "Equipe Uranyx\nAdministrativo\nE-mail: atacado@uranyx.com.br" in carga["text"]
+    corpo = carga["html"]
+    assert corpo.startswith('<div style="font-family:Arial')
+    assert "Segue a tabela de atacado." in corpo
+    assert "uranyx.com.br/assets/img/logo.png" in corpo
+    assert 'href="mailto:atacado@uranyx.com.br"' in corpo and "Administrativo" in corpo
+    assert corpo.index("Segue a tabela") < corpo.index("Equipe Uranyx") < corpo.index("<blockquote")
+    # O Mac recebe o HTML pelo lease (o contrato v1 espalha a carga).
+    agente = f"{MAIL}/agent/{cena.geral.id}"
+    r = await client.post(
+        f"{agente}/outbox/lease", json={}, headers={"Authorization": f"Bearer {TOKEN_GERAL}"}
+    )
+    [tarefa] = r.json()["jobs"]
+    assert tarefa["html"] == corpo
 
 
 async def test_rf6_protocolo_entra_no_assunto_com_um_re_so(db, cena, client, admin):

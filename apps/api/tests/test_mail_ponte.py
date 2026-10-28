@@ -156,7 +156,8 @@ async def cena(db: AsyncSession, make_user) -> Cena:
     )
     db.add(marca)
     await db.flush()
-    for tipo in ("sac", "atacado", "duvidas"):
+    # O cadastro de hoje (28/10/2026, migration 0435): só sac@ e admin@.
+    for tipo in ("sac", "admin"):
         db.add(MarcaEmail(marca_id=marca.id, tipo=tipo, email=f"{tipo}@uranyx.com.br"))
     geral = _caixa(dono, "Geral — Tuta", GERAL, ALIASES_GERAL, TOKEN_GERAL)
     goslin = _caixa(dono, "Goslin — Tuta", GOSLIN, ALIASES_GOSLIN, TOKEN_GOSLIN)

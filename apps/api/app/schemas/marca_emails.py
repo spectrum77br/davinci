@@ -7,15 +7,14 @@ from app.schemas.marcas import _email
 
 
 class MarcaEmailsWrite(BaseModel):
-    """Os três endereços de uma vez; vazio/null apaga o daquele tipo."""
+    """Os dois endereços (sac@ e admin@) de uma vez; vazio/null apaga o daquele tipo."""
 
     model_config = ConfigDict(extra="forbid")
 
     sac: str | None = Field(default=None, max_length=254)
-    duvidas: str | None = Field(default=None, max_length=254)
-    atacado: str | None = Field(default=None, max_length=254)
+    admin: str | None = Field(default=None, max_length=254)
 
-    _v_email = field_validator("sac", "duvidas", "atacado", mode="before")(_email)
+    _v_email = field_validator("sac", "admin", mode="before")(_email)
 
 
 class MarcaEmailsRef(BaseModel):
@@ -32,6 +31,12 @@ class MarcaEmailsRef(BaseModel):
     sac_fone: str | None = None
     has_logo: bool = False
     updated_at: datetime
+    # A assinatura (app.services.assinatura_email): o nome e a cor da marca, se
+    # tem logo PÚBLICO (no site da marca) e o WhatsApp já formatado.
+    nome_exibicao: str = ""
+    cor: str = ""
+    logo_publico: bool = False
+    fone_formatado: str = ""
 
 
 class MarcaEmailsRow(BaseModel):
@@ -42,3 +47,10 @@ class MarcaEmailsRow(BaseModel):
 class MarcaEmailsGridOut(BaseModel):
     tipos: list[str]
     rows: list[MarcaEmailsRow]
+
+
+class AssinaturaOut(BaseModel):
+    """A assinatura pronta: o HTML (com logo) e a mesma em texto puro."""
+
+    html: str
+    texto: str

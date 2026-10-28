@@ -37,8 +37,11 @@
 //!   um job à fila; o diário é a segunda defesa).
 //!
 //! O texto vai como texto (escapado, quebras de linha; `plaintext`): o Tuta
-//! monta o e-mail. Não marca o original como "respondido" (a chave local
-//! `marcar_respondido` continua sem efeito).
+//! monta o e-mail. Quando a Central manda o corpo em HTML (`html`: a resposta
+//! do site com a assinatura da marca, 28/10/2026), vai esse HTML e SEM
+//! `plaintext` (com ele o Tuta tiraria o logo e as cores). Não marca o
+//! original como "respondido" (a chave local `marcar_respondido` continua sem
+//! efeito).
 
 use crate::chaveiro::{self, Cofre};
 use crate::config::{self, Conta};
@@ -237,6 +240,21 @@ pub fn texto_para_html(texto: &str) -> String {
 		.replace('"', "&quot;")
 		.replace("\r\n", "<br>")
 		.replace(['\n', '\r'], "<br>")
+}
+
+/// A Central mandou o corpo em HTML (e não vazio)?
+#[must_use]
+pub fn tem_html(t: &Tarefa) -> bool {
+	t.html.as_deref().is_some_and(|h| !h.trim().is_empty())
+}
+
+/// O corpo do rascunho: o HTML da Central quando veio; senão o texto como HTML.
+#[must_use]
+pub fn corpo_da_tarefa(t: &Tarefa) -> String {
+	match t.html.as_deref() {
+		Some(html) if tem_html(t) => html.to_owned(),
+		_ => texto_para_html(&t.text),
+	}
 }
 
 /// O diário já viu este job além do "recebido" (ou fechado, ou interrompido)?
@@ -729,7 +747,7 @@ impl Enviador {
 
 		// 4. Enviar. Falha DEPOIS do rascunho = incerto (nunca reenvia).
 		self.marcar(&t.id, Passo::Enviando)?;
-		match enviar_rascunho(&sdk, &aleatorio, &chave, &rascunho).await {
+		match enviar_rascunho(&sdk, &aleatorio, &chave, &rascunho, !tem_html(t)).await {
 			Ok(message_id) => {
 				log::info!("envio {} saiu pelo Tuta", t.id);
 				self.concluir(t, "sent", Some(message_id), None, r).await;
@@ -766,7 +784,7 @@ async fn criar_rascunho(
 	let r = sem_panico(async {
 		let chave_do_grupo = sdk.get_current_sym_group_key(grupo).await?;
 		let dono = chave_do_grupo.object.encrypt_key(chave, InitializationVector::generate(aleatorio));
-		let corpo = texto_para_html(&t.text);
+		let corpo = corpo_da_tarefa(t);
 		let dados = DraftCreateData {
 			_format: 0,
 			previousMessageId: Some(fio.to_owned()),
@@ -817,11 +835,14 @@ async fn criar_rascunho(
 	}
 }
 
+/// `so_texto`: o corpo é o texto da pessoa (`plaintext`); falso quando a
+/// Central mandou o HTML (o Tuta manda o HTML como veio).
 async fn enviar_rascunho(
 	sdk: &Arc<LoggedInSdk>,
 	aleatorio: &RandomizerFacade,
 	chave: &GenericAesKey,
 	rascunho: &IdTupleGenerated,
+	so_texto: bool,
 ) -> Result<String, ApiCallError> {
 	let r = sem_panico(async {
 		let id_parametros = CustomId(URL_SAFE_NO_PAD.encode(aleatorio.generate_random_array::<4>()));
@@ -832,7 +853,7 @@ async fn enviar_rascunho(
 			mailSessionKey: Some(bytes.clone()),
 			bucketEncMailSessionKey: None,
 			senderNameUnencrypted: None,
-			plaintext: true,
+			plaintext: so_texto,
 			calendarMethod: false,
 			sessionEncEncryptionAuthStatus: None,
 			sendAt: None,
@@ -848,7 +869,7 @@ async fn enviar_rascunho(
 				mailSessionKey: Some(bytes),
 				bucketEncMailSessionKey: None,
 				senderNameUnencrypted: None,
-				plaintext: true,
+				plaintext: so_texto,
 				calendarMethod: false,
 				sessionEncEncryptionAuthStatus: None,
 				mail: rascunho.clone(),
@@ -940,6 +961,24 @@ mod testes {
 		assert_eq!(conferir_tarefa(&tarefa("21max@tuta.com", "c@example.com", Some("  ")), &ativos), Err("sem_fio"));
 		assert_eq!(conferir_tarefa(&tarefa("21max@tuta.com", "alguem@tutanota.de", Some("<p@x>")), &ativos), Err("destinatario_tuta"));
 		assert_eq!(conferir_tarefa(&tarefa("21max@tuta.com", "sem arroba", Some("<p@x>")), &ativos), Err("destinatario_invalido"));
+	}
+
+	#[test]
+	fn corpo_usa_o_html_da_central_quando_veio() {
+		let mut t = tarefa("21max@tuta.com", "c@example.com", Some("<p@x>"));
+		assert_eq!(corpo_da_tarefa(&t), "Oi<br>Tudo certo");
+		assert!(!tem_html(&t));
+		t.html = Some("<div>Oi</div><table><tr><td>Equipe Uranyx</td></tr></table>".into());
+		assert!(tem_html(&t));
+		assert_eq!(corpo_da_tarefa(&t), "<div>Oi</div><table><tr><td>Equipe Uranyx</td></tr></table>");
+		t.html = Some("  ".into());
+		assert_eq!(corpo_da_tarefa(&t), "Oi<br>Tudo certo");
+		let com_html: Tarefa = serde_json::from_value(serde_json::json!({
+			"id": "x", "lease_token": "t", "from_address": "a@b.c", "to": "d@e.f",
+			"subject": "Re: x", "text": "oi", "html": "<b>oi</b>"
+		}))
+		.unwrap();
+		assert_eq!(com_html.html.as_deref(), Some("<b>oi</b>"));
 	}
 
 	#[test]

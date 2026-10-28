@@ -370,6 +370,12 @@ impl Central {
 			"message_id": format!("<{id}@mail.davinci.local>"),
 		}));
 	}
+
+	/// O job da resposta do site: o corpo em HTML (texto + assinatura da marca).
+	pub fn enfileirar_com_html(&mut self, id: &str, de: &str, para: &str, fio: &str, texto: &str, html: &str) {
+		self.enfileirar(id, de, para, Some(fio), texto);
+		self.fila.back_mut().unwrap()["html"] = json!(html);
+	}
 }
 
 pub fn central(estado: Central) -> (ServidorFalso, Arc<Mutex<Central>>) {

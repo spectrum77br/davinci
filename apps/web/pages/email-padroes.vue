@@ -1,16 +1,17 @@
 <script setup lang="ts">
 // Cadastros › E-mails (Eduardo, 05/10/2026): os endereços do Tuta de cada
-// marca — sac@, duvidas@ e atacado@ — só das marcas com conta em Redes
-// Sociais. Substituiu a matriz de assinaturas por canal: os endereços são
-// aliases da conta principal do Tuta, que tem uma assinatura só. Só cadastro:
-// nada aqui cria endereço nem envia e-mail.
+// marca só das marcas com conta em Redes Sociais. Desde 28/10/2026 são só
+// dois — sac@ e admin@ ("oq n for do sac cai em admin"). Os endereços são
+// aliases da conta principal do Tuta. Só cadastro: nada aqui cria endereço
+// nem envia e-mail.
 // Assinatura (Eduardo, 07/10/2026): prévia por marca e caixa, com "Copiar
 // assinatura" (HTML com logo) pra colar em Configurações → E-mail do Tuta.
+// Desde 28/10/2026 a assinatura vem da API (GET /api/marca-emails/{id}/
+// assinatura): é a MESMA que a resposta do /atendimento põe no fim do e-mail.
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { apiErrMsg, MARCAS_ERROS } from '~/lib/apiError'
 import { MARCA_EMAIL_TIPO_LABELS, type MarcaEmailTipo } from '~/lib/redesSociais'
-import { formatarFone, montarAssinatura, nomeExibicao, visualDe } from '~/lib/assinaturaEmail'
 import { AlertCircle, Check, ClipboardCopy, Code, Copy, Loader2, RefreshCw, Wand2 } from 'lucide-vue-next'
 
 definePageMeta({
@@ -18,7 +19,11 @@ definePageMeta({
   permission: { resource: 'email_padroes', action: 'view' },
 })
 
-type Marca = { id: string; nome: string; slug: string; ativo: boolean; site: string | null; sac_fone?: string | null; has_logo: boolean; updated_at: string }
+type Marca = {
+  id: string; nome: string; slug: string; ativo: boolean; site: string | null; sac_fone?: string | null; has_logo: boolean; updated_at: string
+  // Da assinatura (app/services/assinatura_email.py).
+  nome_exibicao: string; cor: string; logo_publico: boolean; fone_formatado: string
+}
 type Emails = Record<MarcaEmailTipo, string | null>
 type Row = { marca: Marca; emails: Emails }
 type Grid = { tipos: MarcaEmailTipo[]; rows: Row[] }
@@ -69,6 +74,9 @@ async function load() {
     grid.value = await api<Grid>('/api/marca-emails')
     rascunhos.value = Object.fromEntries(grid.value.rows.map(r => [r.marca.id, rascunhoDe(r)]))
     loaded.value = true
+    // "recarregar" também refaz a prévia (o cadastro da marca pode ter mudado;
+    // a prévia que falhou tenta de novo).
+    agendarAssinatura()
   } catch (e) { error.value = apiErrMsg(e, MARCAS_ERROS) }
   finally { loading.value = false }
 }
@@ -108,6 +116,15 @@ const sigEmail = ref('')
 const sigFone = ref('')
 const sigAviso = ref('')
 const sigEl = ref<HTMLElement | null>(null)
+const assinaturaHtml = ref('')
+const assinaturaTexto = ref('')
+// A prévia pedida à API depois de 250 ms parado; só a ÚLTIMA resposta vale
+// (cada mudança invalida o pedido em curso: a resposta velha não aparece nem
+// libera o copiar). Falhou: a prévia some (nunca copia a de outra marca).
+const sigCarregando = ref(false)
+const sigErro = ref('')
+let sigPedido = 0
+let sigTimer: ReturnType<typeof setTimeout> | undefined
 // Sem escolha ainda: a primeira marca que já tem e-mail salvo (hoje a uranyx).
 const sigRow = computed(() => grid.value.rows.find(r => r.marca.id === sigMarcaId.value)
   ?? grid.value.rows.find(r => Object.values(r.emails).some(Boolean)) ?? grid.value.rows[0] ?? null)
@@ -119,20 +136,49 @@ function resetAssinatura() {
   const row = sigRow.value
   if (!row) return
   sigEmail.value = emailDaCaixa(row, sigTipo.value)
-  sigFone.value = formatarFone(row.marca.sac_fone)
+  sigFone.value = row.marca.fone_formatado
 }
 watch([() => sigRow.value?.marca.id, sigTipo], resetAssinatura)
-const assinaturaHtml = computed(() => sigRow.value ? montarAssinatura(sigRow.value.marca, sigTipo.value, sigEmail.value, sigFone.value) : '')
+async function buscarAssinatura() {
+  const row = sigRow.value
+  const n = ++sigPedido
+  if (!row) { assinaturaHtml.value = ''; assinaturaTexto.value = ''; sigCarregando.value = false; return }
+  const q = new URLSearchParams({ tipo: sigTipo.value, email: sigEmail.value.trim(), fone: sigFone.value.trim() })
+  sigCarregando.value = true
+  try {
+    const out = await api<{ html: string; texto: string }>(`/api/marca-emails/${row.marca.id}/assinatura?${q}`)
+    if (n !== sigPedido) return
+    assinaturaHtml.value = out.html
+    assinaturaTexto.value = out.texto
+    sigErro.value = ''
+  } catch (e) {
+    if (n !== sigPedido) return
+    assinaturaHtml.value = ''
+    assinaturaTexto.value = ''
+    sigErro.value = `Não foi possível montar a assinatura: ${apiErrMsg(e, MARCAS_ERROS)}`
+  } finally {
+    if (n === sigPedido) sigCarregando.value = false
+  }
+}
+function agendarAssinatura() {
+  clearTimeout(sigTimer)
+  sigPedido++
+  sigCarregando.value = true
+  sigErro.value = ''
+  sigTimer = setTimeout(buscarAssinatura, 250)
+}
+watch([() => sigRow.value?.marca.id, sigTipo, sigEmail, sigFone], agendarAssinatura)
 function avisar(msg: string) {
   sigAviso.value = msg
   setTimeout(() => { if (sigAviso.value === msg) sigAviso.value = '' }, 3500)
 }
 // Copia como HTML (o Tuta cola com logo, tabela e links) + texto puro de reserva.
+// Com a prévia atualizando, o botão fica desligado (nunca copia a de antes).
 async function copiarAssinatura() {
   const html = assinaturaHtml.value
-  if (!html) return
+  if (!html || sigCarregando.value) return
   await nextTick()
-  const texto = sigEl.value?.innerText ?? ''
+  const texto = assinaturaTexto.value || sigEl.value?.innerText || ''
   try {
     await navigator.clipboard.write([new ClipboardItem({
       'text/html': new Blob([html], { type: 'text/html' }),
@@ -153,6 +199,7 @@ async function copiarAssinatura() {
   }
 }
 async function copiarAssinaturaHtml() {
+  if (!assinaturaHtml.value || sigCarregando.value) return
   try { await navigator.clipboard.writeText(assinaturaHtml.value); avisar('HTML copiado.') }
   catch { avisar('Não foi possível copiar o HTML.') }
 }
@@ -161,7 +208,7 @@ async function copiarAssinaturaHtml() {
 <template>
   <div class="space-y-4">
     <RouteTabs :tabs="TABS_CADASTROS" />
-    <PageHeader title="E-mails das marcas" description="Os endereços do Tuta de cada marca com redes sociais: SAC, dúvidas e atacado.">
+    <PageHeader title="E-mails das marcas" description="Os endereços do Tuta de cada marca com redes sociais: SAC e Admin (o que não é do SAC cai no Admin).">
       <template #actions>
         <Button size="sm" variant="ghost" :disabled="loading" @click="load">
           <RefreshCw class="size-4 mr-1" :class="{ 'animate-spin': loading }" /> recarregar
@@ -200,7 +247,7 @@ async function copiarAssinaturaHtml() {
               </div>
             </td>
             <td v-if="canEdit" class="px-3 py-2"><div class="flex items-center justify-end gap-1">
-              <Button v-if="podePreencher(row)" size="sm" variant="ghost" :disabled="salvando === row.marca.id" title="Preencher os vazios com sac@, duvidas@ e atacado@ do site da marca" @click="preencher(row)">
+              <Button v-if="podePreencher(row)" size="sm" variant="ghost" :disabled="salvando === row.marca.id" title="Preencher os vazios com sac@ e admin@ do site da marca" @click="preencher(row)">
                 <Wand2 class="size-4 mr-1" /> padrão
               </Button>
               <Button size="sm" :disabled="!sujo(row) || !!salvando" @click="salvar(row)">
@@ -226,7 +273,7 @@ async function copiarAssinaturaHtml() {
           class="flex items-center gap-2 rounded-full border px-4 py-1.5 text-sm font-semibold hover:bg-accent"
           :class="row.marca.id === sigRow.marca.id ? 'border-primary ring-1 ring-primary' : ''"
           :aria-pressed="row.marca.id === sigRow.marca.id" @click="sigMarcaId = row.marca.id">
-          <span class="size-2.5 rounded-full" :style="{ background: visualDe(row.marca.slug).cor }" />{{ nomeExibicao(row.marca) }}
+          <span class="size-2.5 rounded-full" :style="{ background: row.marca.cor }" />{{ row.marca.nome_exibicao }}
         </button>
       </div>
       <div class="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)] items-start">
@@ -247,9 +294,10 @@ async function copiarAssinaturaHtml() {
             <Input id="sig-fone" v-model="sigFone" autocomplete="off" class="h-9" placeholder="+55 11 90000-0000" />
           </div>
           <p class="text-xs text-muted-foreground">E-mail e telefone vêm do cadastro (tabela acima e Redes Sociais). Mudar aqui vale só para esta cópia.</p>
-          <p v-if="!visualDe(sigRow.marca.slug).logo" class="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
-            Sem logo público para {{ nomeExibicao(sigRow.marca) }}: a assinatura usa o nome em texto.
+          <p v-if="!sigRow.marca.logo_publico" class="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+            Sem logo público para {{ sigRow.marca.nome_exibicao }}: a assinatura usa o nome em texto.
           </p>
+          <p class="text-xs text-muted-foreground">A resposta enviada pelo atendimento do DaVinci sai com esta mesma assinatura (a da caixa que envia: sac@ = SAC, admin@ = Admin).</p>
         </div>
         <div class="space-y-3 min-w-0">
           <div class="rounded-lg border overflow-hidden">
@@ -257,12 +305,16 @@ async function copiarAssinaturaHtml() {
             <div class="bg-white text-[#222] px-6 py-6 overflow-x-auto">
               <p class="mb-4 text-sm leading-relaxed text-[#333]" style="font-family:Arial,Helvetica,sans-serif">Olá, tudo bem?<br>Segue abaixo como a assinatura vai aparecer no fim do e-mail.</p>
               <div ref="sigEl" v-html="assinaturaHtml" />
+              <p v-if="!assinaturaHtml && sigCarregando" class="text-sm text-[#777]">Montando a assinatura…</p>
             </div>
           </div>
           <div class="flex flex-wrap items-center gap-2">
-            <Button size="sm" @click="copiarAssinatura"><ClipboardCopy class="size-4 mr-1" /> Copiar assinatura</Button>
-            <Button size="sm" variant="outline" @click="copiarAssinaturaHtml"><Code class="size-4 mr-1" /> Copiar HTML</Button>
+            <Button size="sm" :disabled="!assinaturaHtml || sigCarregando" @click="copiarAssinatura">
+              <Loader2 v-if="sigCarregando" class="size-4 mr-1 animate-spin" /><ClipboardCopy v-else class="size-4 mr-1" /> Copiar assinatura
+            </Button>
+            <Button size="sm" variant="outline" :disabled="!assinaturaHtml || sigCarregando" @click="copiarAssinaturaHtml"><Code class="size-4 mr-1" /> Copiar HTML</Button>
             <span role="status" class="text-sm font-semibold text-emerald-600">{{ sigAviso }}</span>
+            <span v-if="sigErro" role="alert" class="text-sm text-destructive">{{ sigErro }}</span>
           </div>
           <details class="rounded-lg border px-4 py-3 text-sm">
             <summary class="cursor-pointer font-semibold">Como colar no Tuta</summary>

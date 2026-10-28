@@ -180,6 +180,11 @@ pub struct Tarefa {
 	pub to: String,
 	pub subject: String,
 	pub text: String,
+	/// O corpo em HTML que a Central montou (a resposta do site, 28/10/2026:
+	/// o texto escapado + a assinatura da marca com logo). Sem ele, o HTML
+	/// sai do texto (`envio::texto_para_html`).
+	#[serde(default)]
+	pub html: Option<String>,
 	#[serde(default)]
 	pub in_reply_to: Option<String>,
 	#[serde(default)]

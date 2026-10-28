@@ -103,14 +103,14 @@ export function fmtFone(fone: string | null | undefined): string {
   return d
 }
 
-// E-mails do Tuta por marca (app/models/enums.py::MarcaEmailTipo), na ordem
-// do pedido do Eduardo (05/10/2026): sac@, duvidas@, atacado@.
-export type MarcaEmailTipo = 'sac' | 'duvidas' | 'atacado'
+// E-mails do Tuta por marca (app/models/enums.py::MarcaEmailTipo). Desde
+// 28/10/2026 só sac@ e admin@ ("oq n for do sac cai em admin"); duvidas@ e
+// atacado@ saíram.
+export type MarcaEmailTipo = 'sac' | 'admin'
 
 export const MARCA_EMAIL_TIPO_LABELS: Record<MarcaEmailTipo, string> = {
   sac: 'SAC',
-  duvidas: 'Dúvidas',
-  atacado: 'Atacado',
+  admin: 'Admin',
 }
 
 // Placeholders dos templates (app/services/email_marca.py::PLACEHOLDERS).

@@ -2,16 +2,20 @@
 
 Só entram as marcas com conta em Redes Sociais (hoje uranyx, charlots, 7buyers
 e locagil): "deixar registrar só os e-mails das que temos em redes sociais".
-Cada uma tem sac@, duvidas@ e atacado@ (enums.MarcaEmailTipo), todos aliases
-da conta principal do Tuta. Substituiu a matriz de assinaturas por canal: o
-Tuta tem uma assinatura só por conta, então rodapé por marca/canal não tinha
-onde ser colado. Só cadastro — nada aqui envia e-mail ou mexe no Tuta.
+Cada uma tem sac@ e admin@ (enums.MarcaEmailTipo; desde 28/10/2026 — os
+antigos duvidas@ e atacado@ saíram), aliases da conta principal do Tuta.
+Substituiu a matriz de assinaturas por canal: o Tuta tem uma assinatura só por
+conta, então rodapé por marca/canal não tinha onde ser colado. Só cadastro —
+nada aqui envia e-mail ou mexe no Tuta.
+
+A assinatura da tela (`GET /{marca_id}/assinatura`) é montada aqui, pela
+mesma função da resposta do /atendimento (app.services.assinatura_email).
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, exists, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,11 +24,13 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import MARCA_EMAIL_TIPOS, Marca, MarcaEmail, RedeSocial, User
 from app.schemas.marca_emails import (
+    AssinaturaOut,
     MarcaEmailsGridOut,
     MarcaEmailsRef,
     MarcaEmailsRow,
     MarcaEmailsWrite,
 )
+from app.services import assinatura_email
 
 router = APIRouter(prefix="/api/marca-emails", tags=["email_padroes"])
 _view = require_permission("email_padroes", "view")
@@ -40,6 +46,11 @@ def _tem_rede(marca_id):
 def _row(m: Marca, emails: dict[str, str]) -> MarcaEmailsRow:
     marca = MarcaEmailsRef.model_validate(m)
     marca.has_logo = bool(m.logo_mime)
+    visual = assinatura_email.visual_de(m.slug)
+    marca.nome_exibicao = assinatura_email.nome_exibicao(m)
+    marca.cor = visual.cor
+    marca.logo_publico = visual.logo is not None
+    marca.fone_formatado = assinatura_email.formatar_fone(m.sac_fone)
     return MarcaEmailsRow(marca=marca, emails=MarcaEmailsWrite.model_construct(**emails))
 
 
@@ -99,3 +110,24 @@ async def save_marca_emails(
         )
     await session.commit()
     return _row(marca, {t: e for t, e in dados.items() if e})
+
+
+@router.get("/{marca_id}/assinatura", response_model=AssinaturaOut)
+async def assinatura_da_marca(
+    marca_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_view)],
+    tipo: Annotated[Literal["sac", "admin"], Query()] = "sac",
+    email: Annotated[str, Query(max_length=254)] = "",
+    fone: Annotated[str, Query(max_length=40)] = "",
+) -> AssinaturaOut:
+    """A prévia de Cadastros › E-mails: a MESMA assinatura que a resposta do
+    /atendimento põe no fim do e-mail. `email`/`fone` vêm da tela (mudar lá
+    vale só para a cópia); nada é gravado."""
+    marca = await session.get(Marca, marca_id)
+    if marca is None:
+        raise HTTPException(404, detail={"code": "marca_not_found"})
+    return AssinaturaOut(
+        html=assinatura_email.montar_html(marca, tipo, email, fone),
+        texto=assinatura_email.montar_texto(marca, tipo, email, fone),
+    )

@@ -57,7 +57,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Integration, Marca, MarcaEmail, StoreInfo
+from app.models import Integration, Marca, MarcaEmail, MarcaEmailTipo, StoreInfo
+from app.services.assinatura_email import MARCA_DA_ASSINATURA
 from app.services.atendimento.lojas import _PLATAFORMA_DA_FICHA, _PREFIXOS, _SEPARADOR
 from app.services.mail_atendimento import enderecos, suspeito
 from app.services.mail_atendimento.constantes import (
@@ -77,6 +78,7 @@ from app.services.mail_atendimento.constantes import (
 )
 
 _CHAVE_CACHE = "mail_atendimento_cadastro"
+_SO_ASSINA = frozenset(MARCA_DA_ASSINATURA.values())
 # A caixa do site pela parte antes do @ (sac@, atacado@, duvidas@, support@).
 CAIXA_DO_LOCAL = LOCAIS_DE_SITE
 
@@ -304,6 +306,16 @@ async def cadastro(session: AsyncSession) -> Cadastro:
         m = por_id.get(e.marca_id)
         endereco = enderecos.normalizar(e.email)
         if m is None or not endereco:
+            continue
+        if e.tipo == MarcaEmailTipo.ADMIN or m.slug in _SO_ASSINA:
+            # O admin@ cadastrado (28/10/2026: só sac@ e admin@) NÃO é caixa pelo
+            # cadastro: ele é caixa de site pelo NOME, com as travas de sempre
+            # (só nas marcas dos sites do atendimento; o das outras marcas
+            # continua interno; o tipo vem do protocolo ou da pasta). Nem nada
+            # da marca que só ASSINA (`assinatura_email.MARCA_DA_ASSINATURA`: a
+            # `poofy`, a Charlots das Redes Sociais — o chamado é da
+            # `charlots-park`, pela letra C e pela pasta). O cadastro deles serve
+            # à resposta (`responder.de_alias`) e à assinatura.
             continue
         c.caixas[endereco] = CaixaMarca(marca_id=m.id, slug=m.slug, nome=m.nome, tipo=e.tipo)
     session.info[_CHAVE_CACHE] = c

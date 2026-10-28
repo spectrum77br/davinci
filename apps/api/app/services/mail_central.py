@@ -328,6 +328,7 @@ async def queue_reply(
     *,
     form_recipient: str | None = None,
     subject_tag: str | None = None,
+    html: str | None = None,
 ) -> MailOutbox:
     from app.services.mail_atendimento import administracao as mail_admin
 
@@ -344,6 +345,10 @@ async def queue_reply(
     # from the original message, only in company mailboxes, and only when the
     # original sender is one of this mailbox's addresses. `subject_tag` puts the
     # site protocol ("US-26-0014") in brackets when the subject lacks it.
+    # `html` (also internal-only, 28/10/2026): the site reply's body as HTML,
+    # built by the Atendimento layer from escaped text plus the brand
+    # signature (logo); the agent sends it instead of the text-as-HTML. The
+    # raw /reply route never passes it, so a person cannot inject HTML.
     existing = await session.scalar(
         select(MailOutbox).where(
             MailOutbox.mailbox_id == mailbox.id,
@@ -427,6 +432,8 @@ async def queue_reply(
         "message_id": f"<{job_id}@mail.davinci.local>",
     }
     payload["references"] = [value for value in payload["references"] if value]
+    if html:
+        payload["html"] = html
     job = MailOutbox(
         id=job_id,
         mailbox_id=mailbox.id,

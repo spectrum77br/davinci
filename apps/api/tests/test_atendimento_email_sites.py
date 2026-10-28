@@ -105,6 +105,32 @@ def test_admin_e_caixa_de_site_so_no_dominio_da_marca():
     assert rota is not None and rota.marca_slug == "uranyx" and rota.tipo_caixa is None
 
 
+async def test_admin_cadastrado_nao_entra_na_rota_pelo_cadastro(db, cena):
+    """28/10/2026: o admin@ em `marca_emails` (Cadastros › E-mails) não vira caixa
+    pelo cadastro — o da Locagil continua interno; o da Uranyx segue caixa de site
+    pelo NOME (o tipo do protocolo/pasta, as travas de sempre)."""
+    from app.models import MarcaEmail
+
+    locagil = Marca(nome="locagil", slug="locagil", dominio_br="locagil.com.br")
+    db.add(locagil)
+    await db.flush()
+    uranyx = (await db.execute(select(Marca).where(Marca.slug == "uranyx"))).scalar_one()
+    db.add(MarcaEmail(marca_id=locagil.id, tipo="admin", email="admin@locagil.com.br"))
+    await db.commit()
+    rotear.esquecer(db)
+    cad = await rotear.cadastro(db)
+    assert "admin@locagil.com.br" not in cad.caixas
+    assert "admin@uranyx.com.br" not in cad.caixas  # o da cena (sac + admin)
+    assert "sac@uranyx.com.br" in cad.caixas
+    assert cad.caixas["sac@uranyx.com.br"].marca_id == uranyx.id
+    assert not rotear.e_caixa_de_site("admin@locagil.com.br", cad)
+    assert rotear.e_caixa_de_site("admin@uranyx.com.br", cad)
+    rota = rotear._rota_do_site(
+        "admin@uranyx.com.br", cad, marca_pasta=None, caixa_pasta="atacado"
+    )
+    assert rota is not None and rota.tipo_caixa == "atacado"
+
+
 def test_a_caixa_do_site_pelo_endereco_que_recebeu():
     assert barra_lojas.caixa_do_alias("sac@uranyx.com.br") == "sac"
     assert barra_lojas.caixa_do_alias("SAC@Charlots.com.br") == "sac"
@@ -343,7 +369,13 @@ async def test_admin_responde_como_admin_para_o_cliente_do_reply_to(db, cena, cl
     # Antes: o e-mail do TIPO (atacado@); agora o que recebeu (admin@).
     assert (previa["de"], previa["para"]) == ("admin@uranyx.com.br", "compras@revenda.com.br")
     assert previa["formulario"] is False
-    r = await _responder(client, cid, texto="Segue a tabela.")
+    # A assinatura da caixa Admin (28/10/2026): a de Cadastros › E-mails.
+    assert previa["assinatura"].startswith(
+        "Atenciosamente,\nEquipe Uranyx\nAdministrativo\nE-mail: admin@uranyx.com.br\n"
+    )
+    assert "Administrativo" in previa["assinatura_html"]
+    assert 'href="mailto:admin@uranyx.com.br"' in previa["assinatura_html"]
+    r = await _responder(client, cid, texto="Segue a tabela.\n<sem tag>")
     assert r.status_code == 200, r.text
     [job] = await _jobs(db)
     carga = decrypt_json(job.content_enc)
@@ -352,6 +384,10 @@ async def test_admin_responde_como_admin_para_o_cliente_do_reply_to(db, cena, cl
         "compras@revenda.com.br",
     )
     assert carga["subject"].startswith("Re: [UA-26-0045]")
+    # O corpo em HTML: o texto da pessoa ESCAPADO, a assinatura e a citação.
+    assert "Segue a tabela.<br>&lt;sem tag&gt;" in carga["html"]
+    assert previa["assinatura_html"] in carga["html"]
+    assert "<blockquote" in carga["html"]
 
 
 async def test_sac_responde_como_sac_mesmo_com_protocolo_de_atacado(db, cena, client, admin):
@@ -369,6 +405,68 @@ async def test_sac_responde_como_sac_mesmo_com_protocolo_de_atacado(db, cena, cl
     await _ligar_envio(db, cena.geral)
     previa = (await client.get(f"{EMAIL}/conversas/{cid}/previa")).json()
     assert (previa["de"], previa["para"]) == ("sac@uranyx.com.br", "loja@revenda.com.br")
+    assert "Serviço de Atendimento ao Consumidor" in previa["assinatura_html"]
+    assert 'href="mailto:sac@uranyx.com.br"' in previa["assinatura_html"]
+
+
+async def test_charlots_assina_como_a_charlots_de_cadastros_emails(db, cena, client, admin):
+    """O chamado da Charlots é da `charlots-park` (a letra C); a assinatura é a
+    da `poofy` (Redes Sociais / Cadastros › E-mails): logo, site e WhatsApp."""
+    await _com_os_enderecos_do_site(db, cena)
+    await _pastas_dos_sites(db, cena)
+    db.add(
+        Marca(
+            nome="charlots",
+            slug="poofy",
+            dominio_br="charlots.com.br",
+            site="https://charlots.com.br",
+            sac_fone="11977770710",
+        )
+    )
+    await db.commit()
+    rotear.esquecer(db)
+    _mid, cid = await _chamado(
+        db,
+        cena,
+        pasta="*charlots",
+        de=BREVO_C,
+        para=["sac@charlots.com.br"],
+        reply_to="maria@gmail.com",
+        assunto="[CS-26-0123] SAC — Vestido — Maria",
+        corpo="Nome: Maria\nMensagem: o zíper quebrou",
+    )
+    conversa = await db.get(AtendimentoConversa, cid)
+    assert conversa.dados["mail"]["marca"] == "charlots-park"
+    # O sac@ salvo na linha da Charlots de Cadastros › E-mails (a `poofy`, o
+    # botão "padrão") não puxa o chamado para a `poofy`: a rota segue pela
+    # letra C e pela pasta.
+    from app.models import MarcaEmail
+
+    poofy = (await db.execute(select(Marca).where(Marca.slug == "poofy"))).scalar_one()
+    db.add(MarcaEmail(marca_id=poofy.id, tipo="sac", email="sac@charlots.com.br"))
+    await db.commit()
+    rotear.esquecer(db)
+    assert "sac@charlots.com.br" not in (await rotear.cadastro(db)).caixas
+    _mid2, cid2 = await _chamado(
+        db,
+        cena,
+        pasta="*charlots",
+        de=BREVO_C,
+        para=["sac@charlots.com.br"],
+        reply_to="joana@gmail.com",
+        assunto="[CS-26-0124] SAC — Saia — Joana",
+        corpo="Nome: Joana\nMensagem: tamanho errado",
+    )
+    conversa2 = await db.get(AtendimentoConversa, cid2)
+    assert conversa2.dados["mail"]["marca"] == "charlots-park"
+    assert not conversa2.dados["mail"].get("alertas")
+    await _ligar_envio(db, cena.geral)
+    previa = (await client.get(f"{EMAIL}/conversas/{cid}/previa")).json()
+    assert previa["de"] == "sac@charlots.com.br"
+    html = previa["assinatura_html"]
+    assert "logo-charlots-dark.png" in html and "Equipe Charlots<" in html
+    assert ">www.charlots.com.br</a>" in html and "https://wa.me/5511977770710" in html
+    assert "Charlots Park" not in html and "charlotspark" not in html
 
 
 async def test_o_antigo_duvidas_responde_como_admin(db, cena, client, admin):

@@ -1308,6 +1308,27 @@ def test_corpo_da_resposta_com_assinatura_e_citacao():
     )
     corpo = p.corpo_texto("Olá! Vamos trocar.")
     assert corpo == "Olá! Vamos trocar.\n\nAtenciosamente,\nBarbosa\n\nEm X, Y escreveu:\n> oi"
+    # Loja: sem assinatura em HTML, sem corpo HTML (o conector faz o dele).
+    assert p.corpo_html("Olá!") is None
+
+
+def test_corpo_html_do_site_escapa_e_poe_a_assinatura():
+    p = responder.Previa(
+        assinatura="Atenciosamente,\nEquipe Uranyx",
+        assinatura_html="<table><tr><td>Equipe Uranyx</td></tr></table>",
+        citacao_cabeca="Em 28/10/2026 09:00, Ana <ana@x.com> escreveu:",
+        citacao="linha 1\n<b>linha 2</b>",
+    )
+    corpo = p.corpo_html("  Oi Ana!\r\nSegue <o link> & mais  ")
+    assert corpo is not None
+    assert "Oi Ana!<br>Segue &lt;o link&gt; &amp; mais</div>" in corpo
+    assinatura = "<table><tr><td>Equipe Uranyx</td></tr></table>"
+    assert f'<div style="margin-top:18px;">{assinatura}</div>' in corpo
+    assert "Ana &lt;ana@x.com&gt; escreveu:" in corpo
+    assert "linha 1<br>&lt;b&gt;linha 2&lt;/b&gt;</blockquote>" in corpo
+    assert corpo.index("Oi Ana") < corpo.index("Equipe Uranyx") < corpo.index("<blockquote")
+    sem_citacao = responder.Previa(assinatura_html="<table></table>").corpo_html("Oi")
+    assert sem_citacao is not None and "blockquote" not in sem_citacao
 
 
 def test_texto_da_resposta_validado():

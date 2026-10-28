@@ -35,7 +35,12 @@
    lido do corpo, no SERVIDOR; Assunto = "Re: " + o original (+ o
    [protocolo] no site); Texto = o da pessoa + a assinatura da loja/marca +
    a citação curta ("Em DD/MM/AAAA HH:MM, Fulano escreveu:"), com o texto
-   citado já protegido (links de acesso e códigos fora).
+   citado já protegido (links de acesso e códigos fora). No SITE (28/10/2026,
+   "se for respondido o email pelo proprio davinci deve ser colocado o rodape
+   de assinatura"), a assinatura é a de Cadastros › E-mails — a MESMA função
+   (`app.services.assinatura_email`), da caixa que envia (sac@ → SAC, o resto
+   → Admin) — e a resposta leva também o HTML (logo e cores; `html` do job da
+   fila, que o conector usa no lugar do texto). Fora do site, só o texto.
 3. A mensagem nasce `enviando` e é COMMITADA junto do job da fila DELA
    (`mail_central.queue_reply`, request_id = o id da mensagem: o mesmo
    clique repetido nunca vira 2 envios; a Central só deixa 1 resposta viva
@@ -48,6 +53,7 @@ Texto (do cliente e o nosso) nunca vai para o log: só ids, estados e códigos.
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -64,19 +70,19 @@ from app.db import is_unique_violation
 from app.models import (
     AtendimentoConversa,
     AtendimentoMensagem,
-    Company,
     Integration,
     MailMailbox,
     MailMessage,
     MailOutbox,
     Marca,
     MarcaEmail,
+    MarcaEmailTipo,
     User,
 )
 from app.models.mail_atendimento import MailMessageMeta, MailOutboxMeta
 from app.schemas.mail import ReplyIn
 from app.security.cipher import decrypt_json
-from app.services import mail_central
+from app.services import assinatura_email, mail_central
 from app.services.atendimento import gravar, lojas
 from app.services.atendimento.constantes import (
     AUTOR_LOJA,
@@ -243,6 +249,8 @@ class Previa:
     assunto: str = ""
     tag: str | None = None
     assinatura: str = ""
+    # A mesma assinatura em HTML (só no site): a resposta sai também em HTML.
+    assinatura_html: str = ""
     citacao_cabeca: str = ""
     citacao: str = ""
     bloqueios: list[Bloqueio] = field(default_factory=list)
@@ -258,6 +266,33 @@ class Previa:
             citado = "\n".join(f"> {linha}" for linha in self.citacao.splitlines())
             partes.append(f"{self.citacao_cabeca}\n{citado}")
         return "\n\n".join(p for p in partes if p)
+
+    def corpo_html(self, texto_pessoa: str) -> str | None:
+        """O corpo em HTML (só com a assinatura em HTML, no site): o texto da
+        pessoa escapado, a assinatura e a citação. Sem ela: None (o conector
+        faz o HTML do texto, como sempre)."""
+        if not self.assinatura_html:
+            return None
+        fonte = (
+            "font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:21px;color:#222222;"
+        )
+        partes = [f'<div style="{fonte}">{_texto_html(texto_pessoa.strip())}</div>']
+        partes.append(f'<div style="margin-top:18px;">{self.assinatura_html}</div>')
+        if self.citacao_cabeca:
+            partes.append(
+                f'<div style="{fonte}margin-top:18px;color:#555555;">'
+                f"{_texto_html(self.citacao_cabeca)}</div>"
+                '<blockquote style="margin:4px 0 0 0;padding:0 0 0 10px;'
+                f'border-left:2px solid #cccccc;{fonte}color:#555555;">'
+                f"{_texto_html(self.citacao)}</blockquote>"
+            )
+        return "\n".join(partes)
+
+
+def _texto_html(texto: str) -> str:
+    """Texto → HTML escapado, cada quebra de linha um <br>."""
+    linhas = texto.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "<br>".join(html.escape(linha) for linha in linhas)
 
 
 # ── O e-mail respondido ───────────────────────────────────────────────────
@@ -317,35 +352,40 @@ def citacao(email: ponte.Email) -> tuple[str, str]:
     return cabeca, citado
 
 
-async def assinatura(session: AsyncSession, conversa: AtendimentoConversa) -> str:
-    """A assinatura da loja (o nome dela) ou da marca (o cadastro: site, Zap, e-mail SAC)."""
+async def assinatura(
+    session: AsyncSession, conversa: AtendimentoConversa, de: str | None = None
+) -> tuple[str, str]:
+    """(texto, html) da assinatura. Site: a da marca em Cadastros › E-mails
+    (`assinatura_email`: a caixa pelo endereço que envia — sac@ → SAC, o resto →
+    Admin —, esse endereço, o site e o WhatsApp da marca), em texto e em HTML.
+    Loja: o nome dela, só texto."""
     mail = ponte.dados_mail(conversa)
     if conversa.plataforma == PLATAFORMA_SITE:
         slug = mail.get("marca")
-        marca = (
-            (await session.execute(select(Marca).where(Marca.slug == slug))).scalar_one_or_none()
-            if slug
-            else None
-        )
+        marca = None
+        # A marca que assina (`MARCA_DA_ASSINATURA`: a Charlots do chamado é a
+        # `charlots-park`, a da assinatura é a `poofy`); sem ela, a do chamado.
+        for candidata in dict.fromkeys(
+            (assinatura_email.MARCA_DA_ASSINATURA.get(slug or "", slug), slug)
+        ):
+            if candidata and marca is None:
+                marca = (
+                    await session.execute(select(Marca).where(Marca.slug == candidata))
+                ).scalar_one_or_none()
         if marca is not None:
-            from app.services.email_marca import variaveis_da_marca
-
-            company = await session.get(Company, marca.company_id) if marca.company_id else None
-            v = variaveis_da_marca(marca, company)
-            linhas = ["Atenciosamente,", f"Equipe {v['marca']}"]
-            if v["site"]:
-                linhas.append(v["site"])
-            if v["whatsapp"]:
-                linhas.append(f"WhatsApp {v['whatsapp']}")
-            if v["email_sac"]:
-                linhas.append(v["email_sac"])
-            return "\n".join(linhas)
-        return "Atenciosamente,\n" + (mail.get("marca_nome") or conversa.conta or "Equipe")
+            tipo = assinatura_email.tipo_do_endereco(de)
+            email = de or ""
+            fone = assinatura_email.formatar_fone(marca.sac_fone)
+            return (
+                assinatura_email.montar_texto(marca, tipo, email, fone),
+                assinatura_email.montar_html(marca, tipo, email, fone),
+            )
+        return "Atenciosamente,\n" + (mail.get("marca_nome") or conversa.conta or "Equipe"), ""
     integration = (
         await session.get(Integration, conversa.integration_id) if conversa.integration_id else None
     )
     nome = await lojas.nome_da_loja(session, integration) if integration is not None else ""
-    return ASSINATURA_LOJA.format(loja=nome or conversa.conta or "Equipe")
+    return ASSINATURA_LOJA.format(loja=nome or conversa.conta or "Equipe"), ""
 
 
 def de_do_site(alias_recebido: str | None) -> list[str]:
@@ -379,8 +419,9 @@ async def de_alias(
     Admin pelo admin@ do MESMO domínio (o e-mail que ainda chegar no
     duvidas@/atacado@ antigo sai como admin@) quando ele é da caixa — e, com o
     remetente estrito, só se também recebeu; senão pelo próprio endereço que
-    recebeu (`de_do_site`). Sem o recebido na caixa, o de antes: o do TIPO do
-    chamado na marca (`marca_emails`), nas mesmas condições. Nunca o endereço
+    recebeu (`de_do_site`). Sem o recebido na caixa, o de antes: o da marca em
+    `marca_emails` (desde 28/10/2026 só sac@ e admin@: o chamado SAC pelo sac@,
+    qualquer outro tipo pelo admin@), nas mesmas condições. Nunca o endereço
     principal no lugar do que recebeu; `principal` (a caixa `empresa`): nem
     quando foi ELE que recebeu (o login da conta do Tuta nunca vai para o cliente).
     """
@@ -397,15 +438,27 @@ async def de_alias(
     if conversa.plataforma == PLATAFORMA_SITE and meta.marca_id is not None:
         tipo = ponte.dados_mail(conversa).get("caixa") or meta.tipo_caixa
         if tipo:
-            achado = enderecos.normalizar(
-                await session.scalar(
-                    select(MarcaEmail.email)
-                    .where(MarcaEmail.marca_id == meta.marca_id, MarcaEmail.tipo == tipo)
-                    .limit(1)
-                )
+            cadastro = MarcaEmailTipo.SAC if tipo == MarcaEmailTipo.SAC else MarcaEmailTipo.ADMIN
+            # A marca do chamado e, depois, a que assina por ela (a Charlots da
+            # `charlots-park` tem os e-mails na `poofy` — Cadastros › E-mails).
+            marcas = [meta.marca_id]
+            assina = assinatura_email.MARCA_DA_ASSINATURA.get(
+                ponte.dados_mail(conversa).get("marca") or ""
             )
-            if achado and achado in aliases and (not estrito or achado in recebidos):
-                return achado
+            if assina:
+                outra = await session.scalar(select(Marca.id).where(Marca.slug == assina))
+                if outra is not None and outra != meta.marca_id:
+                    marcas.append(outra)
+            for marca_id in marcas:
+                achado = enderecos.normalizar(
+                    await session.scalar(
+                        select(MarcaEmail.email)
+                        .where(MarcaEmail.marca_id == marca_id, MarcaEmail.tipo == cadastro)
+                        .limit(1)
+                    )
+                )
+                if achado and achado in aliases and (not estrito or achado in recebidos):
+                    return achado
     if meta.alias_recebido and meta.alias_recebido in aliases:
         if not estrito or meta.alias_recebido in recebidos:
             return meta.alias_recebido
@@ -476,7 +529,7 @@ async def previa(
         p.para = enderecos.normalizar(envelope["to"]) or None
     p.tag = meta.protocolo if conversa.plataforma == PLATAFORMA_SITE else None
     p.assunto = assunto_da_resposta(codigos.proteger(email.assunto, "").assunto, p.tag)
-    p.assinatura = await assinatura(session, conversa)
+    p.assinatura, p.assinatura_html = await assinatura(session, conversa, p.de)
     p.citacao_cabeca, p.citacao = citacao(email)
     if meta.tuta_id:
         lista, _, elemento = meta.tuta_id.partition("/")
@@ -756,6 +809,7 @@ async def enfileirar_resposta(
                 ),
                 form_recipient=p.para if p.formulario else None,
                 subject_tag=p.tag,
+                html=p.corpo_html(normalizado),
             )
         except mail_central.MailError as erro:
             if erro.code == "reply_already_pending":
