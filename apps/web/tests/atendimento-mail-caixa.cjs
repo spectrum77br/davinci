@@ -344,6 +344,10 @@ async function principal() {
     assert.match(html, /xl:grid-cols-\[230px_340px_minmax\(0,1fr\)\]/, '3 colunas: pastas | lista | leitura')
     assert.match(html, /data-mail-list-header[\s\S]*?>Todas<\/h3>[\s\S]*?>5</)
     assert.match(html, /data-mail-organizing[^>]*>Organizando 3 e-mail\(s\)/)
+    // A lista que rola é POSICIONADA (28/10/2026): o "(loja provável)" sr-only (absolute) de cada
+    // selo fica dentro dela. Sem o `relative`, cada um ia para a altura dele na lista inteira e a
+    // página ganhava milhares de px vazios abaixo da moldura do app.
+    assert.match(html, /<aside class="[^"]*\brelative\b[^"]*\boverflow-y-auto\b[^"]*" aria-label="Mensagens">/, 'a lista de e-mails contém os sr-only dos selos')
     // Cada e-mail com o selo da loja (+ a pasta, em "Todas").
     const e1 = html.slice(html.indexOf('data-mail-item="e1"'), html.indexOf('data-mail-item="e2"'))
     assert.match(e1, /Ana Cliente[\s\S]*Pergunta &lt;b&gt;importante&lt;\/b&gt;/, 'o assunto é texto, nunca HTML')

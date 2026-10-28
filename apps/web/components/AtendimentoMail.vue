@@ -866,7 +866,8 @@ onBeforeUnmount(() => {
             @pasta="(value: string | null) => chooseFilter('folder', value)"
             @loja="(value: string | null) => chooseFilter('store', value)"
           />
-          <aside class="max-h-[760px] overflow-y-auto border-b lg:border-b-0 lg:border-r" aria-label="Mensagens">
+          <!-- relative: o "(loja provável)" sr-only (absolute) de cada selo fica DENTRO da rolagem; sem ele a página crescia um vão vazio embaixo (28/10/2026) -->
+          <aside class="relative max-h-[760px] overflow-y-auto border-b lg:border-b-0 lg:border-r" aria-label="Mensagens">
             <div v-if="folders.length" class="sticky top-0 z-10 space-y-2 border-b bg-background/95 p-3 backdrop-blur" data-mail-list-header>
               <AtendimentoMailPastasDaCaixa
                 modo="seletor"
