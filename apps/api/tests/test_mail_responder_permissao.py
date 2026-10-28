@@ -133,6 +133,13 @@ async def test_saiu_nao_saiu_so_da_propria(client, account, make_user, auth_as, 
         job.leased_at = datetime.now(UTC) - timedelta(minutes=16)
     await db.commit()
     await claim(client, account)  # o lease vencido vira "uncertain"
+    # a tela só mostra "Saiu/Não saiu" onde a pessoa pode conferir
+    flags = {
+        j["id"]: j["pode_conferir"]
+        for m in (message_id, message_2)
+        for j in (await client.get(f"{ROOT}/messages/{m}")).json()["outbox"]
+    }
+    assert flags == {r_admin.json()["id"]: False, r_marrocos.json()["id"]: True}
     resolve = f"{ROOT}/outbox/{{}}/resolve"
     assert (await client.post(resolve.format(r_admin.json()["id"]), json={"saiu": True})).status_code == 404
     r = await client.post(resolve.format(r_marrocos.json()["id"]), json={"saiu": True})
@@ -148,3 +155,49 @@ async def test_nao_escreve_novo_nem_configura(client, account, make_user, auth_a
     assert (await client.post(f"{ROOT}/mailboxes/{box}/send", json=novo)).status_code in (403, 404)
     assert (await client.patch(f"{ROOT}/mailboxes/{box}", json={"label": "x"})).status_code == 403
     assert (await client.post(f"{ROOT}/mailboxes/{box}/token")).status_code == 403
+
+
+# ── concessão FILTRADA por loja (revisão de 28/10/2026) ──────────────────────
+from app.models.mail_atendimento import MailMailboxSettings  # noqa: E402
+from tests.test_mail_admin import _salvar  # noqa: E402
+from tests.test_mail_ponte import GERAL, cena, rodar  # noqa: E402, F401
+from tests.test_mail_venda_rotas import X, _caso  # noqa: E402
+
+
+async def test_concessao_filtrada_so_responde_com_o_remetente_que_ve(
+    db, cena, client, make_user, auth_as  # noqa: F811
+):
+    """Liberado só para a loja ML Barbosa: responder com o e-mail de OUTRA loja
+    da caixa, um inexistente ou o principal dá o MESMO 409 (sem pista de quais
+    existem) e nada vai para a fila; o remetente que ele vê passa da trava."""
+    x = await _caso(db, cena, "12345678", X)
+    await rodar(db)
+    pessoa = await make_user(role=UserRole.USER, permissions=RESPONDE)
+    auth_as(cena.dono)
+    await _salvar(client, cena, pessoa, modo="selecionadas", lojas_permitidas=[f"i:{cena.ml.id}"])
+    for estrito in (False, True):
+        cfg = await db.get(MailMailboxSettings, cena.geral.id)
+        cfg.remetente_estrito = estrito
+        await db.commit()
+        auth_as(pessoa)
+        caixas = (await client.get(f"{ROOT}/mailboxes")).json()["items"]
+        assert caixas[0]["pode_responder"] is True and caixas[0]["aliases"] == []
+        visiveis = (await client.get(f"{ROOT}/messages/{x.message_id}")).json()["reply"][
+            "allowed_from_addresses"
+        ]
+        for remetente in ("sac@uranyx.com.br", "nao-existe@tuta.com", GERAL):
+            r = await client.post(
+                f"{ROOT}/messages/{x.message_id}/reply",
+                json={"request_id": str(uuid4()), "text": "oi", "from_address": remetente},
+            )
+            assert (r.status_code, r.json()) == (
+                409,
+                {"detail": {"code": "sender_not_authorized"}},
+            ), (estrito, remetente)
+        assert await db.scalar(select(MailOutbox.id)) is None
+        for remetente in visiveis:
+            r = await client.post(
+                f"{ROOT}/messages/{x.message_id}/reply",
+                json={"request_id": str(uuid4()), "text": "oi", "from_address": remetente},
+            )
+            assert r.json().get("detail", {}).get("code") != "sender_not_authorized", r.text

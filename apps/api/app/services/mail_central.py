@@ -556,6 +556,20 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
             job.error_code = "author_access_revoked"
             job.completed_at = now
             continue
+        else:
+            # A filtered grant (28/10/2026): the sender must still be one the
+            # author sees for this message, never another store's alias.
+            original = await session.get(MailMessage, job.message_id)
+            recorte = (
+                await mail_admin.remetentes_da_concessao(session, mailbox, original, author)
+                if original is not None
+                else None
+            )
+            if recorte is not None and payload["from_address"].lower() not in recorte[0]:
+                job.status = "failed"
+                job.error_code = "sender_not_authorized"
+                job.completed_at = now
+                continue
         # Aliases can be edited after queueing: a removed sender never goes out.
         if payload["from_address"].lower() not in aliases:
             job.status = "failed"

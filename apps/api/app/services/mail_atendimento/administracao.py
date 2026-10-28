@@ -399,6 +399,30 @@ async def pode_responder_caixa(session: AsyncSession, mailbox: MailMailbox, user
     return mail_central.allowed(mailbox, user) or acesso.responde_email(user)
 
 
+async def remetentes_da_concessao(
+    session: AsyncSession, mailbox: MailMailbox, message: MailMessage, user: User
+) -> tuple[set[str], str] | None:
+    """Quem tem concessão FILTRADA (MailAcesso, `tem_politica`) e responde sem
+    ser dono/admin só pode usar os remetentes que o detalhe mostra a ele (os
+    endereços que receberam ESTE e-mail), nunca o de outra loja da caixa
+    (revisão de 28/10/2026). (permitidos, remetente padrão) — None = sem
+    recorte: dono/admin e leitor da caixa inteira seguem a regra da Central."""
+    from app.services import mail_central
+    from app.services.mail_atendimento import caixa as mailbox_settings
+
+    if mail_central.allowed(mailbox, user) or not await tem_politica(session, mailbox.id, user):
+        return None
+    cfg = await mailbox_settings.config_da_caixa(session, mailbox.id)
+    env = mail_central.reply_envelope(
+        mailbox, message, strict=cfg.remetente_estrito, main_allowed=not cfg.empresa
+    )
+    visiveis = {*env["receiving_aliases"], env["from_address"]}
+    permitidos = {
+        str(a).lower() for a in env["allowed_from_addresses"] if a and a in visiveis
+    }
+    return permitidos, str(env["from_address"] or "").lower()
+
+
 async def tem_politica(session: AsyncSession, mailbox_id: UUID, user: User) -> bool:
     return user.role != UserRole.ADMIN and bool(
         await session.scalar(

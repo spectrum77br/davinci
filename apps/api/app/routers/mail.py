@@ -263,7 +263,20 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
         .order_by(MailOutbox.created_at)
         .execution_options(yield_per=1)
     )
-    outbox = [service.outbox_view(job) async for job in outbox_rows]
+    dono = service.allowed(mailbox, user)
+    responde = dono or await mail_admin.pode_responder_caixa(session, mailbox, user)
+    pode_compor = await mail_composer.can_compose(session, mailbox, user) if dono else False
+    outbox = []
+    async for job in outbox_rows:
+        item = service.outbox_view(job)
+        acao = decrypt_json(job.content_enc).get("action")
+        propria = job.author_user_id == user.id
+        # A mesma regra do POST /outbox/{id}/resolve (28/10/2026).
+        item["pode_conferir"] = bool(
+            (dono and (acao is None or (propria and pode_compor)))
+            or (responde and not dono and acao is None and propria)
+        )
+        outbox.append(item)
     caixa_cfg = await mailbox_settings.config_da_caixa(session, mailbox.id)
     reply = service.reply_envelope(
         mailbox,
@@ -328,6 +341,14 @@ async def reply(message_id: UUID, request: Request, session: Session, user: Acti
         .execution_options(populate_existing=True)
     )
     body = await limited_body(request, ReplyIn, 512 * 1024)
+    recorte = await mail_admin.remetentes_da_concessao(session, mailbox, message, user)
+    if recorte is not None:
+        # Concessão filtrada: só o remetente que a pessoa vê. Qualquer outro
+        # (de outra loja, inexistente ou o principal) = o MESMO código, antes de
+        # todas as outras recusas — sem dar pista de quais endereços existem.
+        permitidos, padrao = recorte
+        if str(body.from_address or padrao or "").lower() not in permitidos:
+            raise fail("sender_not_authorized", 409)
     try:
         job = await service.queue_reply(session, mailbox, message, user, body)
     except service.MailError as error:
@@ -359,7 +380,9 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
         job.author_user_id != user.id or not await mail_composer.can_compose(session, mailbox, user)
     ):
         raise fail("job_not_found")
-    if propria:
+    if acao is None and job.author_user_id == user.id:
+        # A própria resposta simples: a mesma trava de responder (dono não-admin
+        # com a permissão também confere a dele na caixa da empresa).
         if await mailbox_settings.bloqueia_resposta(session, mailbox.id, user):
             raise fail("atendimento_permission_required", 403)
     else:

@@ -86,7 +86,7 @@ async function salvar() {
   const novos = escolhidos.value.filter((id) => !visao.value!.leitores.some((l) => l.id === id))
   if (novos.length) {
     const nomes = opcoes.value.filter((o) => novos.includes(o.id)).map((o) => o.nome).join(', ')
-    if (!confirm(`Deixar ${nomes} ver a caixa "${props.mailbox.label}" inteira (só leitura: lista, e-mails e anexos)?`)) return
+    if (!confirm(`Deixar ${nomes} ver a caixa "${props.mailbox.label}" inteira (lista, e-mails e anexos)? Responder, só quem tiver a permissão "Atendimento — aba E-mail: responder".`)) return
   }
   salvando.value = true
   erro.value = null
@@ -103,9 +103,9 @@ onMounted(() => { void carregar() })
 
 <template>
   <fieldset class="space-y-2 border-t pt-3" :disabled="salvando" data-mail-leitores>
-    <legend class="sr-only">Quem mais vê (só leitura)</legend>
-    <div class="flex items-center gap-2 text-xs font-medium"><Eye class="h-3.5 w-3.5" /> Quem mais vê (só leitura) <Loader2 v-if="carregando" class="h-3.5 w-3.5 animate-spin" /></div>
-    <p class="text-[11px] text-muted-foreground">Além do dono e dos admins. Quem estiver marcado vê a caixa inteira na aba E-mail (lista, e-mails e anexos), mas não responde, não configura e não troca a chave.</p>
+    <legend class="sr-only">Quem mais vê</legend>
+    <div class="flex items-center gap-2 text-xs font-medium"><Eye class="h-3.5 w-3.5" /> Quem mais vê <Loader2 v-if="carregando" class="h-3.5 w-3.5 animate-spin" /></div>
+    <p class="text-[11px] text-muted-foreground">Além do dono e dos admins. Quem estiver marcado vê a caixa inteira na aba E-mail (lista, e-mails e anexos), mas não configura e não troca a chave. Responde os e-mails recebidos só quem também tiver a permissão "Atendimento — aba E-mail: responder" (Usuários › Permissões).</p>
     <p v-if="erro" role="alert" class="rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">{{ erro }}</p>
     <div v-if="visao" class="max-h-48 space-y-1 overflow-y-auto rounded border p-2">
       <p v-if="!opcoes.length" class="text-xs text-muted-foreground">Nenhum usuário ativo além do dono e dos admins.</p>

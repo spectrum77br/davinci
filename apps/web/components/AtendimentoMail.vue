@@ -25,7 +25,7 @@ type StoreBadge = { tipo: string; rotulo: string; plataforma: string | null; loj
 type FolderItem = { id: string | null; nome: string; caminho: string | null; tipo: string; quantidade: number; total: number }
 type StoreItem = StoreBadge & { chave: string; quantidade: number; total: number }
 type IndexItem = { id: string; recebido_em: string; direcao: string; tem_anexos: boolean; ponte: string | null; conversa_id?: string | null; de: string | null; de_nome: string | null; assunto: string | null; assunto_oculto: boolean; pasta: { id: string; nome: string; tipo: string }; selo: StoreBadge }
-type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null }
+type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null; pode_conferir?: boolean }
 type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string | null; allowed_from_addresses?: string[]; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
 
 // `canOperate` = the person operates /atendimento (`atendimento_mexe`): sees the
@@ -733,7 +733,7 @@ onBeforeUnmount(() => {
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
         <p v-if="section === 'queues'" class="text-sm text-muted-foreground">{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
         <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Acessos por pessoa, loja e venda, regras de exibição e lixeira do DaVinci.</p>
-        <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável, aos administradores e a quem um admin liberar (só leitura).</p>
+        <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável, aos administradores e a quem um admin liberar (só leitura; quem tem a permissão "Atendimento — aba E-mail: responder" também responde).</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
         <button v-if="isAdmin" class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" @click="showSetup = !showSetup"><Plus class="h-4 w-4" /> Cadastrar caixa</button>
@@ -978,14 +978,14 @@ onBeforeUnmount(() => {
                 <p class="break-all text-xs text-muted-foreground">{{ job.from_address }} → {{ job.to }}</p>
                 <p v-if="job.status === 'failed' && jobFailure(job.error_code)" class="text-xs text-red-700">{{ jobFailure(job.error_code) }}</p>
                 <p class="whitespace-pre-wrap break-words text-sm">{{ job.text }}</p>
-                <div v-if="job.status === 'uncertain' && canAnswer" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
+                <div v-if="job.status === 'uncertain' && (job.pode_conferir ?? !readOnly)" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
                   <span class="text-xs text-muted-foreground">Conferiu nos Enviados do Tuta?</span>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, true)">Saiu</button>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, false)">Não saiu</button>
                 </div>
               </div>
             </section>
-            <form v-if="detail.reply.can_reply && canAnswer" class="space-y-3 border-t pt-4" @submit.prevent="sendReply">
+            <form v-if="detail.reply.can_reply && canAnswer && (!readOnly || replyAddresses.length > 0)" class="space-y-3 border-t pt-4" @submit.prevent="sendReply">
               <h4 class="font-medium">Responder</h4>
               <p class="break-all text-sm">Para: <strong>{{ detail.reply.to }}</strong></p>
               <p v-if="detail.reply_to && detail.reply_to !== detail.from_address" class="text-xs text-amber-700">A mensagem indica este endereço de resposta, diferente do remetente. Confira antes de enviar.</p>

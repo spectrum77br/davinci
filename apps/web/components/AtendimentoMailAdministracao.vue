@@ -50,7 +50,7 @@ export function resumoPoliticaEmail(f: FormPoliticaEmail): string {
   if (!f.tipos_permitidos.length) return 'Nenhuma categoria selecionada: esta pessoa não verá e-mails desta caixa.'
   const permitidas = f.lojas_permitidas.filter((l) => !f.lojas_bloqueadas.includes(l))
   if (f.modo === 'selecionadas' && !permitidas.length) return 'Nenhuma loja permitida: esta pessoa não verá e-mails desta caixa, mesmo com pedidos adicionados.'
-  const partes = [f.modo === 'padrao' ? 'Mantém o acesso que esta pessoa já tem.' : 'Libera somente a seleção abaixo; o acesso novo à caixa é só leitura.']
+  const partes = [f.modo === 'padrao' ? 'Mantém o acesso que esta pessoa já tem.' : 'Libera somente a seleção abaixo; o acesso novo à caixa é só leitura (responde só quem tiver a permissão "Atendimento — aba E-mail: responder").']
   if (f.modo === 'selecionadas') partes.push(`${permitidas.length} loja(s) permitida(s).`)
   if (f.pedidos_permitidos.length) partes.push(`Restringe a ${f.pedidos_permitidos.length} venda(s) específica(s).`)
   partes.push(`${f.tipos_permitidos.length} de 3 categorias; ${f.lojas_bloqueadas.length} loja(s) bloqueada(s).`)
