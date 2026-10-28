@@ -626,9 +626,17 @@ async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_ant
     await db.delete(s[2])
     s[0].id_externo = "repasse:905"
     await db.commit()
-    # …e os dias fechados pelo robô "batendo" (o saldo sintético não tinha com o que comparar)
+    # 28/10: extrato pago sem a linha de repasse não termina em 0 — o robô não fecha mais
     fechados = await fechar_dias_prontos(db, loja)
-    assert {"2026-10-11", "2026-10-12"} <= set(fechados["fechados"])
+    assert not {"2026-10-11", "2026-10-12"} & set(fechados["fechados"])
+    # …mas na época os dias foram fechados pelo robô "batendo" (o saldo sintético era o
+    # da última linha e não tinha com o que comparar)
+    for dia in (d11, d12):
+        db.add(
+            ConciliacaoDia(
+                integration_id=loja.integration_id, dia=dia, fechado_em=AGORA, fechado_por="robô"
+            )
+        )
     await db.commit()
     # rodada seguinte: a linha velha ganha o id do extrato, os repasses que faltavam
     # entram e os dias reabrem
@@ -720,6 +728,39 @@ async def test_repasse_gravado_sem_ver_o_extrato_de_antes_e_refeito(db, make_use
     # rodada seguinte: nada a refazer
     r = await run_tiktok_sync(db, loja, inteiro, agora=agora)
     assert r["repasses"]["refeitos"] == []
+
+
+async def test_extrato_nao_pago_ao_lado_de_um_pago_nao_vira_saldo_nao_bate(db, make_user):
+    """28/10 (atv (tiktok) 27/10): o pedido devolvido liquidou −3,18; a TikTok zerou o
+    pagamento com um ajuste de +3,18 e passou −3,18 pra um extrato que ainda não pagou.
+    Com os três no mesmo dia, o "tem que dar" era o saldo da última linha (um repasse: 0)
+    e o dia acusava "saldo não bate +3,18". Tem que dar = o que a TikTok ainda não pagou
+    (−3,18); o dia fica "aguardando o repasse" e o robô não fecha."""
+    from app.routers.conciliacao import _movimentos_do_dia, _totais_do_dia
+
+    loja = await _loja_tiktok(db, make_user)
+    d27 = date(2026, 10, 27)
+    negativo = {**_ZERADO, "apos": "0", "revenue": "0", "shipping": "-3.18", "settlement": "-3.18"}
+    pendente = _extrato_ajuste(3, d27, "-3.18", 921)
+    pendente["payment_status"] = "PROCESSING"
+    cliente = _TikTokFalsa(
+        [_extrato(1, d27, "-3.18", 920), _extrato_ajuste(2, d27, "3.18", 920), pendente],
+        {
+            "1": [_tx(10, PEDIDO, **negativo)],
+            "2": [_tx(20, "", tipo="NET_EARNINGS_BALANCE", settlement="3.18", **_ZERADO)],
+        },
+        [_repasse(920, "0", d27)],  # a TikTok não pagou nada: −3,18 + 3,18
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=datetime(2026, 10, 28, 12, tzinfo=UTC))
+    assert not r["erros"] and r["inseridos"] == 5
+    movs = await _movimentos_do_dia(db, loja, d27, Decimal("0"))
+    t = _totais_do_dia(movs, Decimal("0"))
+    assert t["saldo_final"] == -3.18 and t["saldo_informado"] == -3.18 and t["diferenca"] == 0.0
+    for m in movs:
+        m.classificacao = m.classificacao or "ajuste"  # a pessoa classificou as linhas
+    await db.commit()
+    feito = await fechar_dias_prontos(db, loja)
+    assert d27.isoformat() not in feito["fechados"]  # só fecha quando a TikTok descontar
 
 
 async def test_repasse_leva_o_valor_pago_e_a_diferenca_fica_no_ultimo_extrato(db, make_user):

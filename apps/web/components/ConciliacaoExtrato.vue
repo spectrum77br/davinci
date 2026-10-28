@@ -19,7 +19,7 @@ const rodape = computed(() =>
 )
 const notaRodape = computed(() =>
   props.plataforma === 'tiktok'
-    ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). A TikTok não guarda saldo: o extrato do dia soma os pedidos liquidados e o repasse leva tudo pro banco — a conta tem que dar zero. Extrato que a TikTok ainda não pagou fica com as linhas marcadas "aguardando o repasse" e o dia só fecha quando o repasse entrar.'
+    ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). A TikTok não guarda saldo: o extrato do dia soma os pedidos liquidados e o repasse leva tudo pro banco — extrato pago termina em zero. Extrato que a TikTok ainda não pagou fica com as linhas marcadas "aguardando o repasse": o "tem que dar" é o total dele, e o dia só fecha quando o repasse entrar.'
     : props.plataforma === 'amazon'
       ? 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Cada pedido entra 3 a 4 dias depois do envio e fica "preso na reserva" até ~7 dias depois da entrega; o saldo aqui é reserva + disponível, e a cada 14 dias o repasse pro banco sai dele.'
       : 'O dia só fecha com todas as linhas resolvidas (vinculada a um pedido ou classificada). Reservas são dinheiro travado: entram e saem, não contam como perda.',

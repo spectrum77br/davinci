@@ -1366,6 +1366,42 @@ async def test_saldo_anterior_resolve_o_empate_do_ultimo_segundo(db, make_user):
     assert await _saldo_anterior(db, loja, date(2026, 10, 11)) == Decimal("0")
 
 
+async def test_saldo_anterior_nao_conta_duas_vezes_a_fatura_paga_com_o_segurado(db, make_user):
+    """28/10 (kia (ml) 27/10, "saldo inicial −362,32"): 16/10 terminou com venda,
+    segurado pra dívida e fatura no mesmo segundo — o saldo continuou 0, mas a soma das
+    linhas depois da âncora contava o débito da fatura inteiro. O dia seguinte começava
+    devendo 362,32 e o dia 27 (venda 302141 pagando a fatura, tudo certo) não fechava."""
+    from app.routers.conciliacao import _movimentos_do_dia, _saldo_anterior, _totais_do_dia
+
+    loja, _integ = await _loja(db, make_user)
+    hora = lambda dia, h, mi, s: datetime(2026, 10, dia, h, mi, s, tzinfo=UTC)  # noqa: E731
+    ancora = _mov(loja, "cobranca_divida", hora(16, 18, 21, 36), credito="200")
+    ancora.saldo_apos = Decimal("0")
+    venda = _mov(loja, "venda_liberada", hora(16, 21, 52, 18), credito="362.32")
+    venda.saldo_apos = Decimal("362.32")
+    segurado = _mov(loja, "cobranca_divida", hora(16, 21, 52, 18), debito="362.32")
+    segurado.saldo_apos = Decimal("0")
+    fatura = _mov(loja, "fatura_cobrada", hora(16, 21, 52, 18), debito="362.32")
+    fatura.saldo_apos = Decimal("0")
+    # 27/10 15:58:07: a venda 302141 libera e paga a fatura seguinte
+    venda27 = _mov(loja, "venda_liberada", hora(27, 18, 58, 7), credito="362.32")
+    venda27.saldo_apos = Decimal("362.32")
+    fatura27 = _mov(loja, "fatura_cobrada", hora(27, 18, 58, 7), debito="362.32")
+    fatura27.saldo_apos = Decimal("0")
+    db.add_all([ancora, venda, segurado, fatura, venda27, fatura27])
+    await db.commit()
+    saldo_ant = await _saldo_anterior(db, loja, date(2026, 10, 27))
+    assert saldo_ant == Decimal("0")
+    t = _totais_do_dia(await _movimentos_do_dia(db, loja, date(2026, 10, 27), saldo_ant), saldo_ant)
+    assert t["saldo_inicial"] == 0.0 and t["diferenca"] == 0.0
+    # fatura paga do disponível (sem segurado no grupo): soma simples, como antes
+    await db.delete(segurado)
+    await db.commit()
+    assert await _saldo_anterior(db, loja, date(2026, 10, 27)) == Decimal(
+        "0"
+    )  # 0 + 362,32 − 362,32
+
+
 async def test_status_lista_a_loja_ligada(db, make_user, auth_as, client):
     loja, _integ = await _loja(db, make_user)
     db.add(_mov(loja, "saque", datetime(2026, 10, 1, tzinfo=UTC), debito="9147.00"))

@@ -2728,6 +2728,20 @@ def _totais_do_dia(
         else None
     )
     saldo_informado = ultimo.saldo_apos if ultimo else None
+    if movs and all(m.origem == ORIGEM_TIKTOK for m in movs):
+        # 28/10 (atv 27/10): cada extrato da TikTok é um caixa próprio — o pago termina em
+        # 0 (o repasse zera) e o que ainda não foi pago termina no total dele. Com vários
+        # extratos no mesmo dia, a última linha era de um só: o ajuste de −3,18 esperando
+        # o desconto acusava "saldo não bate" ao lado de um extrato pago. Tem que dar = o
+        # que a TikTok ainda não pagou.
+        saldo_informado = sum(
+            (
+                (m.credito or Decimal("0")) - (m.debito or Decimal("0"))
+                for m in movs
+                if aguardando_repasse(m)
+            ),
+            Decimal("0"),
+        )
     return {
         "linhas": len(movs),
         "saldo_inicial": _num(saldo_inicial),
@@ -2783,7 +2797,17 @@ async def _saldo_anterior(
     for i, m in enumerate(ultimo):
         # a mais velha da janela pode ter gêmeas fora dela: não serve de âncora
         if por_instante[m.data] == 1 and m.saldo_apos is not None and i < len(ultimo) - 1:
-            return Decimal(m.saldo_apos) + soma_depois
+            # 28/10 (kia 27/10, "saldo inicial −362,32"): a fatura do ML paga com o segurado
+            # pra dívida não sai do saldo, e a soma das linhas depois da âncora contava o
+            # débito dela inteiro (kia 16/10 18:52:18: venda, segurado e fatura no mesmo
+            # segundo). A ordem do empate, como no próprio dia, diz quanto foi pago com o
+            # segurado — só o que encadeia (linha faltando continua aparecendo).
+            depois = _ordena_dia(ultimo[:i], Decimal(m.saldo_apos)) if i else []
+            pago = sum(
+                (getattr(x, "pago_com_reserva", None) or Decimal("0") for x in depois),
+                Decimal("0"),
+            )
+            return Decimal(m.saldo_apos) + soma_depois + pago
         soma_depois += (m.credito or Decimal("0")) - (m.debito or Decimal("0"))
     # tudo empatado: ordena o último dia pelo encadeamento (como antes)
     com_saldo = [m for m in ultimo if m.saldo_apos is not None]
