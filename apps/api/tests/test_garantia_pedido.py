@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from app.models import Garantia, GarantiaLog, UserRole
+from app.models import BlingOrder, Garantia, GarantiaLog, UserRole
 from app.models.atendimento import AtendimentoPedidoComprador
 from app.models.devolution import Devolution
 from app.services import garantia as svc
@@ -348,3 +348,27 @@ async def test_chat_do_tiktok_corta_na_proxima_compra_do_mesmo_cpf(db):
     por_pedido = {g.pedido_bling: g for g in await _garantias(db)}
     await db.refresh(por_pedido["310001"])
     assert por_pedido["310001"].solicitada_em is None
+
+
+async def test_compra_em_outra_loja_nao_corta_o_chat_desta(db):
+    """A próxima compra do mesmo CPF em OUTRA loja não é deste chat: a fala do
+    cliente continua contando para a garantia desta loja (revisão 28/10)."""
+    await _pedido(db)
+    await _nf(db)
+    segunda = COMPRA + timedelta(days=15)
+    await _pedido(db, numero="310002", numeroloja="261016TIKT0002", data=segunda)
+    await _nf(db, pedido="310002", numero="2612")  # o mesmo CPF
+    linha = (await db.execute(select(BlingOrder).where(BlingOrder.numero == "310002"))).scalar_one()
+    linha.loja = "L2"  # outra loja
+    await db.commit()
+    await _conversa(
+        db,
+        pedido="261001ABCD1234",
+        plataforma="tiktok",
+        canal="chat",
+        msgs=[("cliente", "o celular não liga", segunda + timedelta(days=3), ())],
+    )
+    await _rodar(db)
+    por_pedido = {g.pedido_bling: g for g in await _garantias(db)}
+    await db.refresh(por_pedido["310001"])
+    assert por_pedido["310001"].solicitacao_origem == gp.ORIGEM_MENSAGEM

@@ -183,13 +183,22 @@ function limparFiltros() {
   produtoAberto.value = ''
   aplicarVista()
 }
-// A garantia por produto: a linha abre os pedidos daquele produto na lista.
+// A garantia por produto: a linha abre os pedidos daquele produto na lista. O
+// departamento e a busca do produto ficam aqui (voltam iguais).
 const produtoAberto = ref('')
+const resumoDepartamento = ref('')
+const resumoBusca = ref('')
 function abrirProduto(p: { nome: string; ids: number[] }) {
   produtoAberto.value = p.nome
+  filtros.busca = ''
   filtros.ids = p.ids
   vista.value = 'conversas'
 }
+// Os ids do produto são uma foto do Resumo com os filtros daquela hora: mexer
+// num filtro da barra com o produto aberto volta para todos os pedidos.
+watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.origem, filtros.com_atendimento_no_mes, filtros.mostrar], () => {
+  if (filtros.ids?.length) fecharProduto()
+})
 function fecharProduto() {
   produtoAberto.value = ''
   filtros.ids = undefined
@@ -446,7 +455,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
 
     <!-- a linha da garantia por produto aberta na lista: os pedidos dela -->
     <p v-if="vista !== 'resumo' && filtros.ids?.length" class="-mt-1 flex flex-wrap items-center gap-2 text-xs" data-produto-aberto>
-      <span class="rounded-full border border-primary/40 bg-primary/5 px-2 py-0.5">Produto: <strong>{{ produtoAberto || 'escolhido' }}</strong> · {{ filtros.ids.length }} {{ filtros.ids.length === 1 ? 'pedido' : 'pedidos' }} de garantia</span>
+      <span class="rounded-full border border-primary/40 bg-primary/5 px-2 py-0.5">Produto: <strong>{{ produtoAberto || 'escolhido' }}</strong> · {{ total }} {{ total === 1 ? 'pedido' : 'pedidos' }} de garantia</span>
       <button type="button" class="text-primary underline-offset-2 hover:underline" @click="fecharProduto">ver todos os pedidos</button>
       <button type="button" class="text-primary underline-offset-2 hover:underline" @click="vista = 'resumo'">voltar para a garantia por produto</button>
     </p>
@@ -454,7 +463,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
     <!-- Garantia por produto: os filtros da barra valem (menos a busca) -->
     <template v-if="vista === 'resumo'">
       <p v-if="filtros.busca.trim()" class="-mt-1 text-xs text-muted-foreground">A busca vale só para a lista: a garantia por produto conta todas as garantias dos outros filtros.</p>
-      <GarantiaResumo :filtros="filtros" :versao="versaoResumo" @abrir="abrirProduto" />
+      <GarantiaResumo v-model:departamento="resumoDepartamento" v-model:busca="resumoBusca" :filtros="filtros" :versao="versaoResumo" @abrir="abrirProduto" />
     </template>
 
     <!-- carregando / vazio -->

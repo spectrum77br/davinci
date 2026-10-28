@@ -147,8 +147,14 @@ async def _tabela_de_precos(session: AsyncSession) -> dict[str, tuple[str, str, 
     """SKU sem lote → (id da linha da Tabela de Preços, nome, os SKUs da linha).
     O SKU "puro" da linha vale antes do SKU de kit (`dg053+a003` também daria
     `dg053`)."""
+    # Ordem fixa: o mesmo SKU em duas linhas fica sempre na mesma (a ativa e a
+    # mais antiga primeiro).
     linhas = (
-        await session.execute(select(PricingProduct.id, PricingProduct.sku, PricingProduct.name))
+        await session.execute(
+            select(PricingProduct.id, PricingProduct.sku, PricingProduct.name).order_by(
+                PricingProduct.is_active.desc(), PricingProduct.created_at, PricingProduct.id
+            )
+        )
     ).all()
     puros: dict[str, tuple[str, str, list[str]]] = {}
     de_kit: dict[str, tuple[str, str, list[str]]] = {}
@@ -263,7 +269,6 @@ async def resumo(
     do_cadastro = await _categorias_dos_produtos(session, {s for _, s in pares if s})
     tabela = await _tabela_de_precos(session)
 
-    deps: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # chave → [vendidas, pediram]
     linhas: dict[str, _Linha] = {}
     for r in registros:
         item = principais[r.id] or {}
@@ -278,13 +283,11 @@ async def resumo(
             linha = linhas.setdefault(f"sku:{base}", _Linha(f"sku:{base}", [base], None, False))
         linha.vendidas += 1
         linha.departamentos[dep] += 1
-        deps[dep][0] += 1
         if nome := nome_do_produto(item.get("descricao")):
             linha.nomes[nome] += 1
         if not r.pediu:
             continue
         linha.pediram += 1
-        deps[dep][1] += 1
         linha.pedidos.append(r.id)
         st = svc.status_em(r.data_inicio, r.fim_hardware, r.fim_software, dia)
         linha.status["entregue_sem_data" if r.entregue_sem_data else st] += 1
@@ -295,6 +298,17 @@ async def resumo(
             linha.software += a.get("software", 0)
 
     ordem = list(DEPARTAMENTOS)
+
+    # A linha vai inteira para o departamento da maioria das vendas (empate: a
+    # ordem fixa dos departamentos); as pílulas somam as LINHAS — o total da
+    # pílula bate com a soma da tabela.
+    def departamento_da(li: _Linha) -> str:
+        return max(li.departamentos.items(), key=lambda kv: (kv[1], -ordem.index(kv[0])))[0]
+
+    deps: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # chave → [vendidas, pediram]
+    for li in linhas.values():
+        deps[departamento_da(li)][0] += li.vendidas
+        deps[departamento_da(li)][1] += li.pediram
     return {
         "vendidas": len(registros),
         "pediram": len(ids),
@@ -308,7 +322,7 @@ async def resumo(
         "produtos": [
             {
                 "chave": li.chave,
-                "departamento": li.departamentos.most_common(1)[0][0],
+                "departamento": departamento_da(li),
                 "nome": li.nome or (li.nomes.most_common(1)[0][0] if li.nomes else li.skus[0]),
                 "skus": li.skus,
                 "na_tabela": li.na_tabela,

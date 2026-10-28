@@ -253,8 +253,8 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
     pedido no Bling (00:00 de São Paulo). Na conversa do comprador (uma para
     todos os pedidos dele: a do índice e o chat da Shopee/TikTok, também
     quando ligou pelo nº do pedido), só até o PRÓXIMO pedido dele — pelo índice
-    ou pela próxima compra do mesmo CPF: dali para baixo pode ser sobre o outro
-    (revisão 28/10)."""
+    ou, sem índice, pela próxima compra do mesmo CPF na mesma loja: dali para
+    baixo pode ser sobre o outro (revisões de 28/10)."""
     if not ids:
         return {}
     g, gc, c, m, p = (
@@ -274,6 +274,7 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         select(
             g.id.label("gid"),
             g.cpf.label("cpf"),
+            g.loja.label("loja"),
             func.coalesce(g.pedido_marketplace, "").label("pedido"),
             func.coalesce(hora_do_pedido, compra_da_garantia(), literal(INICIO)).label("compra"),
         )
@@ -281,9 +282,9 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         .cte("base")
     )
     quando = func.coalesce(m.enviada_em, m.created_at)
-    # O próximo pedido do comprador: pelo índice do comprador (Shopee) e, sem
-    # ele (o TikTok não tem índice), pela próxima compra do MESMO CPF — o
-    # LEAST do Postgres ignora o NULL.
+    # O próximo pedido do comprador: pelo índice do comprador (Shopee, com a
+    # hora) e, sem ele (o TikTok não tem índice), pela próxima compra do MESMO
+    # CPF na MESMA loja (a compra em outra loja não é deste chat).
     pelo_indice = (
         select(func.min(p.criado_em))
         .where(
@@ -302,6 +303,7 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         .join(bo, bo.numero == g2.pedido_bling)
         .where(
             g2.cpf == base.c.cpf,
+            g2.loja == base.c.loja,
             g2.id != base.c.gid,
             g2.descartada_em.is_(None),
             bo.data > base.c.compra,
@@ -309,7 +311,7 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         .correlate(base)
         .scalar_subquery()
     )
-    proximo = func.least(pelo_indice, pelo_cpf)
+    proximo = func.coalesce(pelo_indice, pelo_cpf)
     # Só na conversa do COMPRADOR (uma para todos os pedidos dele): a do
     # índice e o chat da Shopee/TikTok — também quando ligou pelo nº do
     # pedido. A conversa de um pedido só (ML pós-venda, e-mail) não corta.

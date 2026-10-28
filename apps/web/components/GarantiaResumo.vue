@@ -18,7 +18,6 @@ import {
   type FiltrosLista,
   type OrigemPedido,
   type Resumo,
-  type ResumoDepartamento,
   type ResumoProduto,
 } from '~/lib/garantias'
 
@@ -55,13 +54,14 @@ watch(
   { immediate: true, deep: true },
 )
 
-// O departamento escolhido (a pílula), guardado só nesta visita.
-const departamento = ref<ResumoDepartamento['chave'] | ''>('')
+// O departamento (a pílula) e a busca ficam na página (v-model): voltam iguais
+// depois de abrir os pedidos de um produto.
+const departamento = defineModel<string>('departamento', { default: '' })
+const busca = defineModel<string>('busca', { default: '' })
 const departamentoAtual = computed(() => {
   const deps = resumo.value?.departamentos || []
   return deps.find((d) => d.chave === departamento.value) || deps[0] || null
 })
-const busca = ref('')
 function plano(t: string) {
   return t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 }
@@ -122,7 +122,7 @@ function abrir(p: ResumoProduto) {
         <input v-model="busca" placeholder="buscar SKU ou produto…" class="w-56 rounded border bg-background px-2 py-1 text-sm" data-busca-produto>
       </div>
 
-      <div class="max-h-[calc(100vh-320px)] overflow-auto rounded-lg border">
+      <div class="max-h-[max(16rem,calc(100vh-320px))] overflow-auto rounded-lg border">
         <table class="w-full border-collapse text-sm" data-produtos>
           <thead class="sticky top-0 z-10 bg-muted">
             <tr>
@@ -174,7 +174,7 @@ function abrir(p: ResumoProduto) {
           </tbody>
           <tfoot v-if="produtos.length" class="sticky bottom-0 bg-muted font-medium">
             <tr data-total-departamento>
-              <td class="border border-border px-2 py-1.5" colspan="2">Total — {{ departamentoAtual?.nome }}</td>
+              <td class="border border-border px-2 py-1.5" colspan="2">{{ busca.trim() ? `Total da busca (${produtos.length} ${produtos.length === 1 ? 'produto' : 'produtos'})` : `Total — ${departamentoAtual?.nome}` }}</td>
               <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ numeroBR(soma((p) => p.vendidas)) }}</td>
               <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ numeroBR(soma((p) => p.pediram)) }}</td>
               <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ pct(soma((p) => p.pediram), soma((p) => p.vendidas)) }}</td>
