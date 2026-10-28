@@ -12,9 +12,10 @@
  * Ficou de fora, de propósito: a "Agenda automática" (ligar/pausar a agenda,
  * Pausar agora, Ligar agora), a Oferta Relâmpago, os alertas de crédito, as
  * tabelas de 7/30 dias, o gráfico Evolução e o "rodar ciclo agora". Na Shopee
- * quem liga e desliga os anúncios de verdade é o robô do Mac (18h–22h); a
- * agenda do DaVinci está desligada desde julho e ligá-la brigaria com ele — por
- * isso o aviso embaixo do mapa da Shopee.
+ * quem liga e desliga os anúncios de verdade é o robô do Mac; desde 28/10/2026
+ * ele segue ESTE mapa (lê GET /api/marketing/agent/horarios de 5 em 5 min). A
+ * agenda própria do DaVinci não age mais na Shopee (reconcile.py) — seria um
+ * segundo robô brigando com ele.
  *
  * 13/10/2026 (pedido do dono): o seletor "Conta" virou os botões Mala |
  * Celular | Eletro e a lista de TODAS as contas do segmento, uma embaixo da
@@ -625,7 +626,7 @@ onMounted(() => {
     </div>
 
     <p v-if="plataforma === 'shopee'" class="text-[11px] text-muted-foreground">
-      Os anúncios da Shopee são ligados e desligados pelo robô do Mac (18h–22h). Este mapa guarda os horários, mas ainda não comanda o robô.
+      Os anúncios da Shopee são ligados e desligados pelo robô do Mac seguindo este mapa. Ele relê os horários de 5 em 5 minutos.
     </p>
   </section>
 </template>

@@ -31,16 +31,17 @@ async def _wipe_marketing(db) -> None:
     await db.commit()
 
 
-async def _shopee_account(db, make_user, *, schedule_enabled=False, override_action=None):
+async def _shopee_account(db, make_user, *, schedule_enabled=False, override_action=None, platform="shopee"):
     user = await make_user()
     integ = Integration(
-        user_id=user.id, platform=IntegrationPlatform.SHOPEE, name="loja",
-        credentials=b"ignored-since-decrypt-is-patched", status="active",
+        user_id=user.id,
+        platform=IntegrationPlatform.SHOPEE if platform == "shopee" else IntegrationPlatform.ML,
+        name="loja", credentials=b"ignored-since-decrypt-is-patched", status="active",
     )
     db.add(integ)
     await db.flush()
     acc = MarketingAccount(
-        integration_id=integ.id, name="loja", platform="shopee",
+        integration_id=integ.id, name="loja", platform=platform,
         department="geral", acos_target=7.0,
         schedule_enabled=schedule_enabled, override_action=override_action,
     )
@@ -193,7 +194,7 @@ async def test_rate_limit_keeps_command_pending(db, make_user, monkeypatch, patc
 async def test_reconcile_enqueues_resume_on_drift(db, make_user):
     await _wipe_marketing(db)
     # override 'resume' → desired ON regardless of clock; campaign paused → drift.
-    _u, _i, acc = await _shopee_account(db, make_user, schedule_enabled=True, override_action="resume")
+    _u, _i, acc = await _shopee_account(db, make_user, schedule_enabled=True, override_action="resume", platform="ml")
     await _add_campaign(db, acc, "111", status="paused")
     await db.commit()
 
@@ -206,9 +207,22 @@ async def test_reconcile_enqueues_resume_on_drift(db, make_user):
     assert cmds[0].campaign_external_id is None
 
 
-async def test_reconcile_no_drift_no_enqueue(db, make_user):
+async def test_reconcile_nao_mexe_na_shopee(db, make_user):
+    """28/10/2026: a agenda da Shopee é do robô do Mac (GET /agent/horarios);
+    conta Shopee armada aqui não gera comando — senão seriam dois robôs."""
     await _wipe_marketing(db)
     _u, _i, acc = await _shopee_account(db, make_user, schedule_enabled=True, override_action="resume")
+    await db.commit()
+
+    r = await reconcile_schedules(db)
+    assert r["enqueued"] == 0
+    cmds = (await db.execute(select(MarketingCommand).where(MarketingCommand.account_id == acc.id))).scalars().all()
+    assert cmds == []
+
+
+async def test_reconcile_no_drift_no_enqueue(db, make_user):
+    await _wipe_marketing(db)
+    _u, _i, acc = await _shopee_account(db, make_user, schedule_enabled=True, override_action="resume", platform="ml")
     await _add_campaign(db, acc, "111", status="active")  # already on → no drift
     await db.commit()
 
@@ -218,7 +232,7 @@ async def test_reconcile_no_drift_no_enqueue(db, make_user):
 
 async def test_reconcile_dedups_open_command(db, make_user):
     await _wipe_marketing(db)
-    _u, _i, acc = await _shopee_account(db, make_user, schedule_enabled=True, override_action="pause")
+    _u, _i, acc = await _shopee_account(db, make_user, schedule_enabled=True, override_action="pause", platform="ml")
     await _add_campaign(db, acc, "111", status="active")  # desired off, active → drift → pause
     await db.commit()
 

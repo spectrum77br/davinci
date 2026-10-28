@@ -1176,6 +1176,63 @@ async def agent_heartbeat(
     return {"ok": True}
 
 
+@router.get("/agent/horarios", dependencies=[Depends(_require_agent_token)])
+async def agent_horarios(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Os horários dos anúncios da Shopee para o robô do Mac (marionete,
+    28/10/2026): o mapa de Conferência › Horários dos anúncios passa a mandar
+    no robô, que lê isto de 5 em 5 min e liga/pausa por perfil do AdsPower.
+    Só leitura — não cria comando nem mexe em `schedule_enabled`. A agenda
+    própria do DaVinci não age mais na Shopee (reconcile.py tirou a Shopee):
+    seriam dois robôs nos mesmos perfis.
+
+    `dia` 0=segunda … 6=domingo; `fim` 24 = meia-noite (a tela grava a hora
+    das 23h como 23→0). Conta arquivada ou sem perfil fica fora; conta sem
+    hora marcada vem com `blocos` vazio (o robô decide o que fazer)."""
+    accounts = (
+        await session.execute(
+            select(MarketingAccount).where(
+                MarketingAccount.platform == "shopee",
+                MarketingAccount.arquivada_em.is_(None),
+                MarketingAccount.adspower_user_id.is_not(None),
+            )
+        )
+    ).scalars().all()
+    blocos: dict[UUID, list[dict]] = {a.id: [] for a in accounts}
+    alterado: dict[UUID, datetime] = {}
+    if accounts:
+        rows = (
+            await session.execute(
+                select(MarketingSchedule)
+                .where(MarketingSchedule.account_id.in_(list(blocos)))
+                .order_by(MarketingSchedule.day_of_week, MarketingSchedule.start_hour)
+            )
+        ).scalars().all()
+        for s in rows:
+            blocos[s.account_id].append(
+                {
+                    "dia": s.day_of_week,
+                    "inicio": s.start_hour,
+                    "fim": 24 if s.end_hour == 0 else s.end_hour,
+                }
+            )
+            quando = s.updated_at or s.created_at
+            if quando and (s.account_id not in alterado or quando > alterado[s.account_id]):
+                alterado[s.account_id] = quando
+    contas = [
+        {
+            "adspower_user_id": a.adspower_user_id,
+            "nome": (a.name or "").strip(),
+            "blocos": blocos[a.id],
+            "alterado_em": alterado[a.id].isoformat() if a.id in alterado else None,
+        }
+        for a in sorted(accounts, key=lambda a: (a.name or "").strip().lower())
+    ]
+    logger.info("marketing_agent_horarios", contas=len(contas))
+    return {"gerado_em": datetime.now(UTC).isoformat(), "contas": contas}
+
+
 @router.get("/agent/status")
 async def agent_status(
     session: Annotated[AsyncSession, Depends(get_session)],

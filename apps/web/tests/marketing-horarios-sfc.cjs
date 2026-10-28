@@ -317,7 +317,7 @@ async function run() {
     assert.ok(html.includes('ACOS &lt; 10.0%'), 'legenda com o alvo')
     assert.ok(html.includes('ACOS médio (até 15.0%)'))
     for (const l of ['ACOS ruim', 'Ligado, sem dados', 'Desligado']) assert.ok(html.includes(l), `legenda: ${l}`)
-    assert.ok(html.includes('Os anúncios da Shopee são ligados e desligados pelo robô do Mac (18h–22h). Este mapa guarda os horários, mas ainda não comanda o robô.'), 'aviso do robô na Shopee')
+    assert.ok(html.includes('Os anúncios da Shopee são ligados e desligados pelo robô do Mac seguindo este mapa. Ele relê os horários de 5 em 5 minutos.'), 'aviso do robô na Shopee')
     assert.ok(!html.includes('<select'), 'sem o seletor antigo')
     assert.deepEqual(linhas(html).map((l) => l.nome), ['alfa malas'], 'a lista de Mala')
     assert.ok(html.includes('Contas de Mala (1)'))

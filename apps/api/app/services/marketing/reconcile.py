@@ -33,7 +33,12 @@ from datetime import UTC, datetime
 
 logger = structlog.get_logger()
 
-_RECONCILABLE_PLATFORMS = frozenset({"shopee", "ml"})
+# Shopee saiu em 28/10/2026: quem liga/pausa os Ads da Shopee é o robô do Mac
+# (marionete), seguindo o mapa de horários que ele lê em GET /agent/horarios.
+# Reconciliar a Shopee aqui também seria um segundo robô nos mesmos perfis do
+# AdsPower (o executor do Mac puxa /agent/lease). O ramo "shopee" abaixo ficou
+# sem uso de propósito, para não precisar refazer se um dia voltar.
+_RECONCILABLE_PLATFORMS = frozenset({"ml"})
 
 
 async def _has_open_command(session: AsyncSession, account_id) -> bool:
