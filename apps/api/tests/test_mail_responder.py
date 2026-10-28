@@ -226,14 +226,26 @@ async def test_freio_geral_do_env(db, cena, client, admin, monkeypatch):
     assert r.json()["detail"]["code"] == "envio_desligado"
 
 
-async def test_quem_so_le_nao_responde(db, cena, client, make_user, auth_as, monkeypatch):
+async def test_a_equipe_responde_e_quem_nao_ve_nao(
+    db, cena, client, make_user, auth_as, monkeypatch
+):
+    """28/10/2026, o Eduardo: "a pessoa já pode responder em todos" — quem vê a
+    caixa responde o e-mail também (ROTAS_DE_QUEM_RESPONDE): o job entra na
+    fila. Quem nem vê a caixa (o operador do estoque) leva 403 e nada sai."""
     _mid, conversa_id = await _conversa_do_email(db, cena)
     await _ligar_envio(db, cena.geral)
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "outra@davinci-test.com")
-    auth_as(await make_user(role=UserRole.ADMIN))
+    operador = await make_user(permissions={"controle_estoque": {"view": True}})
+    operador.stock_tags = ["estoque"]
+    await db.commit()
+    auth_as(operador)
     r = await _responder(client, conversa_id)
     assert r.status_code == 403
     assert await _jobs(db) == []
+    auth_as(await make_user(role=UserRole.USER))
+    r = await _responder(client, conversa_id)
+    assert r.status_code == 200, r.text
+    assert len(await _jobs(db)) == 1
 
 
 async def test_a_ia_nunca_responde_email(db, cena, admin):
