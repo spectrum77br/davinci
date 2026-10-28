@@ -205,7 +205,7 @@ function selecionar(id: number) {
 // "Só com conversa" não vale para a busca (corpoDaLista).
 const soComConversa = computed(() => !!filtros.com_conversa && !filtros.busca.trim())
 const versaoHistorico = ref(0)
-// "atualizar" também relê o resumo.
+// "atualizar", cadastrar e corrigir também releem o resumo.
 const versaoResumo = ref(0)
 
 // ─── detalhe e cadastro ─────────────────────────────────────────────────────
@@ -250,6 +250,7 @@ function aoSalvar(g: GarantiaDetalhe) {
     abrir(g.id, g.avisos || [])
   }
   void carregar()
+  versaoResumo.value++
 }
 function abrirDoForm(id: number) {
   formAberto.value = false
@@ -565,7 +566,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       :versao="versaoDetalhe"
       @fechar="fecharDetalhe"
       @corrigir="corrigir"
-      @mudou="carregar(); versaoHistorico++"
+      @mudou="carregar(); versaoHistorico++; versaoResumo++"
     />
     <GarantiaForm
       v-if="formAberto"
