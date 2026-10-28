@@ -395,6 +395,44 @@ class HistoricoOut(BaseModel):
     cortadas: int = 0
 
 
+class ResumoCategoriaOut(BaseModel):
+    nome: str
+    total: int
+    # Sem categoria no pedido nem no cadastro: veio pela família do SKU.
+    sem_categoria: bool = False
+
+
+class ResumoProdutoOut(BaseModel):
+    base: str  # o SKU base (dg053, u015…)
+    nome: str
+    total: int
+    # Alguma conversa ligada tem mensagem do CLIENTE desde a compra.
+    cliente_escreveu: int = 0
+    com_atendimento: int = 0
+
+
+class ResumoDepartamentoOut(BaseModel):
+    chave: str  # celular | eletro | acessorios | outros
+    nome: str
+    total: int
+    status: dict[str, int]
+    cliente_escreveu: int = 0
+    com_atendimento: int = 0
+    atendimentos_hardware: int = 0
+    atendimentos_software: int = 0
+    categorias: list[ResumoCategoriaOut] = []
+    produtos: list[ResumoProdutoOut] = []
+
+
+class ResumoOut(BaseModel):
+    """POST /api/garantias/resumo: as garantias por departamento (as
+    porcentagens a tela calcula das contagens)."""
+
+    total: int
+    hoje: date
+    departamentos: list[ResumoDepartamentoOut]
+
+
 class RegrasOut(BaseModel):
     meses_hardware: int
     meses_software: int

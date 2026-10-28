@@ -90,6 +90,7 @@ from app.schemas.garantia import (
     PrazoOut,
     PrazosPreviaOut,
     RegrasOut,
+    ResumoOut,
     SituacaoConversaOut,
     VinculoOut,
 )
@@ -620,34 +621,14 @@ async def _registrar_busca_por_cpf(
         await session.commit()
 
 
-@router.post("/lista", response_model=GarantiaListaOut)
-async def listar(
-    body: ListaFiltro,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_consultar)],
-) -> GarantiaListaOut:
-    """A tela principal (§4.1). CPF sempre mascarado. Os indicadores do topo
-    contam tudo o que a pessoa enxerga (sem os filtros), como os cartões que
-    filtram ao clicar. POST: a busca (nome/CPF) vai no corpo, fora do log de
-    acesso."""
-    dia = svc.hoje()
-    escopo = _clausula(await resolve_team_scope(session, user))
-    cpf = svc.cpf_da_busca(body.busca)
-    if cpf:
-        await _teto_da_busca_por_cpf(user)
+def _filtros_do_painel(body: ListaFiltro, escopo, dia) -> list:
+    """Os filtros da barra (escopo, origem, status, período, atendimento no
+    mês) — os MESMOS na lista e no Resumo. A busca e o "só com conversa" são
+    da lista. A descartada (pedido cancelado) nunca entra."""
     filtros = [escopo] if escopo is not None else []
-    # A garantia do robô descartada (pedido cancelado) sai da lista.
     filtros.append(Garantia.descartada_em.is_(None))
-    if (f := _filtro_busca(body.busca)) is not None:
-        filtros.append(f)
     if body.origem != "todas":
         filtros.append(Garantia.origem == body.origem)
-    if body.com_conversa:
-        filtros.append(
-            select(GarantiaConversa.garantia_id)
-            .where(GarantiaConversa.garantia_id == Garantia.id)
-            .exists()
-        )
     if body.status != "todos":
         filtros.append(svc.filtro_status(body.status, dia))
     de, ate = body.de, body.ate
@@ -673,6 +654,50 @@ async def listar(
                     GarantiaAtendimento.data_atendimento < fim,
                 )
             )
+        )
+    return filtros
+
+
+@router.post("/resumo", response_model=ResumoOut)
+async def resumo(
+    body: ListaFiltro,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_consultar)],
+) -> ResumoOut:
+    """Resumo (28/10/2026): as garantias por departamento (Celular, Eletro,
+    Acessórios…), com os filtros da barra (período, origem, status). Só
+    contagens — sem nome nem CPF."""
+    from app.services import garantia_resumo
+
+    dia = svc.hoje()
+    escopo = _clausula(await resolve_team_scope(session, user))
+    dados = await garantia_resumo.resumo(session, _filtros_do_painel(body, escopo, dia), dia)
+    return ResumoOut(**dados)
+
+
+@router.post("/lista", response_model=GarantiaListaOut)
+async def listar(
+    body: ListaFiltro,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_consultar)],
+) -> GarantiaListaOut:
+    """A tela principal (§4.1). CPF sempre mascarado. Os indicadores do topo
+    contam tudo o que a pessoa enxerga (sem os filtros), como os cartões que
+    filtram ao clicar. POST: a busca (nome/CPF) vai no corpo, fora do log de
+    acesso."""
+    dia = svc.hoje()
+    escopo = _clausula(await resolve_team_scope(session, user))
+    cpf = svc.cpf_da_busca(body.busca)
+    if cpf:
+        await _teto_da_busca_por_cpf(user)
+    filtros = _filtros_do_painel(body, escopo, dia)
+    if (f := _filtro_busca(body.busca)) is not None:
+        filtros.append(f)
+    if body.com_conversa:
+        filtros.append(
+            select(GarantiaConversa.garantia_id)
+            .where(GarantiaConversa.garantia_id == Garantia.id)
+            .exists()
         )
     total = (
         await session.execute(select(func.count()).select_from(Garantia).where(*filtros))

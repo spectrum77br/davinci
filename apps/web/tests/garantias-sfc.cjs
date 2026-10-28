@@ -237,6 +237,19 @@ const LINHA = {
   assert.deepEqual(L.corpoDaLista(f0), { limite: 100, offset: 0 })
   assert.deepEqual(L.corpoDaLista({ ...f0, busca: ' João ', status: 'expirada', periodo: 'entrega', de: '2026-01-01', ate: '', com_atendimento_no_mes: true }, 100),
     { limite: 100, offset: 100, busca: 'João', status: 'expirada', periodo: 'entrega', de: '2026-01-01', com_atendimento_no_mes: true })
+  // Resumo por departamento (28/10/2026): as porcentagens e o corpo do POST.
+  assert.equal(L.pct(4640, 5992), '77,4%')
+  assert.equal(L.pct(6, 5992), '0,1%')
+  assert.equal(L.pct(1, 5992), '<0,1%')
+  assert.equal(L.pct(5, 5), '100%')
+  assert.equal(L.pct(0, 10), '0%')
+  assert.equal(L.pct(3, 0), '0%')
+  assert.equal(L.largura(1, 5992), 1.5, 'o que não é zero aparece')
+  assert.equal(L.largura(0, 10), 0)
+  assert.equal(L.numeroBR(5992), (5992).toLocaleString('pt-BR'))
+  assert.deepEqual(L.corpoDoResumo({ ...f0, busca: '306200', ordem: 'atividade', com_conversa: true }), {}, 'a busca e o "só com conversa" são da lista')
+  assert.deepEqual(L.corpoDoResumo({ ...f0, status: 'ativa', periodo: 'entrega', de: '2026-10-01', ate: '', origem: 'robo' }),
+    { status: 'ativa', periodo: 'entrega', de: '2026-10-01', origem: 'robo' })
   // Garantia automática (28/10/2026): ordem, "só com conversa" e origem.
   assert.deepEqual(L.corpoDaLista({ ...f0, ordem: 'atividade', com_conversa: true, origem: 'robo' }),
     { limite: 100, offset: 0, ordem: 'atividade', com_conversa: true, origem: 'robo' })

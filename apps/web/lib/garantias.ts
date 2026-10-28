@@ -704,6 +704,63 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
   return q
 }
 
+// ─── resumo por departamento (28/10/2026) ───────────────────────────────────
+// POST /api/garantias/resumo: as garantias por departamento (a categoria do
+// produto no Bling, a mesma do Faturamento). Só contagens: as porcentagens
+// são feitas aqui, de um jeito só.
+export type ResumoCategoria = { nome: string; total: number; sem_categoria: boolean }
+// cliente_escreveu: alguma conversa ligada tem mensagem do CLIENTE desde a
+// compra (a mensagem automática da loja não conta).
+export type ResumoProduto = { base: string; nome: string; total: number; cliente_escreveu: number; com_atendimento: number }
+export type ResumoDepartamento = {
+  chave: 'celular' | 'eletro' | 'acessorios' | 'outros'
+  nome: string
+  total: number
+  // Os 4 status e, à parte, "entregue_sem_data" (o Bling já entregou, falta a
+  // data no DaVinci — fora do "Aguardando entrega").
+  status: Record<StatusGarantia | 'entregue_sem_data', number>
+  cliente_escreveu: number
+  com_atendimento: number
+  atendimentos_hardware: number
+  atendimentos_software: number
+  categorias: ResumoCategoria[]
+  produtos: ResumoProduto[]
+}
+export type Resumo = { total: number; hoje: string; departamentos: ResumoDepartamento[] }
+
+// O corpo do resumo: os filtros da barra (período, origem, status) — a
+// busca e o "só com conversa" são da lista.
+export function corpoDoResumo(f: FiltrosLista): Partial<CorpoLista> {
+  const q: Partial<CorpoLista> = {}
+  if (f.status && f.status !== 'todos') q.status = f.status
+  if (f.de || f.ate) {
+    q.periodo = f.periodo
+    if (f.de) q.de = f.de
+    if (f.ate) q.ate = f.ate
+  }
+  if (f.com_atendimento_no_mes) q.com_atendimento_no_mes = true
+  if (f.origem && f.origem !== 'todas') q.origem = f.origem
+  return q
+}
+
+// 77,4% — uma casa (sem casa quando é redondo); o que não chega a 0,1% vira
+// "<0,1%" (nunca um "0%" que não é zero); total 0 → "0%".
+export function pct(parte: number, total: number): string {
+  if (!total || !parte) return '0%'
+  const v = (parte / total) * 100
+  if (v < 0.05) return '<0,1%'
+  const arred = Math.round(v * 10) / 10
+  return `${(Number.isInteger(arred) ? arred.toFixed(0) : arred.toFixed(1)).replace('.', ',')}%`
+}
+// Largura da barra (0–100), com um mínimo visível para o que não é zero.
+export function largura(parte: number, total: number): number {
+  if (!total || !parte) return 0
+  return Math.max(1.5, Math.min(100, (parte / total) * 100))
+}
+export function numeroBR(n: number): string {
+  return (n || 0).toLocaleString('pt-BR')
+}
+
 // ─── histórico das conversas (garantia automática, 28/10/2026) ──────────────
 // GET /api/garantias/{id}/historico: as conversas ligadas à garantia, lidas
 // na hora do Atendimento (sem cópia), e os marcos (compra, entrega, outro

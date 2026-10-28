@@ -66,11 +66,13 @@ async function carregarRegras() {
 }
 
 // ─── vista: Conversas (padrão) ou Tabela ────────────────────────────────────
-type Vista = 'conversas' | 'tabela'
+// Resumo (28/10/2026): as garantias por departamento (GarantiaResumo).
+type Vista = 'conversas' | 'tabela' | 'resumo'
 const CHAVE_VISTA = 'garantias.vista'
 function vistaGuardada(): Vista {
   try {
-    return localStorage.getItem(CHAVE_VISTA) === 'tabela' ? 'tabela' : 'conversas'
+    const v = localStorage.getItem(CHAVE_VISTA)
+    return v === 'tabela' || v === 'resumo' ? v : 'conversas'
   } catch {
     return 'conversas'
   }
@@ -203,6 +205,8 @@ function selecionar(id: number) {
 // "Só com conversa" não vale para a busca (corpoDaLista).
 const soComConversa = computed(() => !!filtros.com_conversa && !filtros.busca.trim())
 const versaoHistorico = ref(0)
+// "atualizar" também relê o resumo.
+const versaoResumo = ref(0)
 
 // ─── detalhe e cadastro ─────────────────────────────────────────────────────
 const abertaId = ref<number | null>(null)
@@ -290,7 +294,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
   <div class="space-y-4">
     <PageHeader title="Painel de Garantia — Uranyx" description="Garantias dos produtos Uranyx: prazos de hardware e software a partir da entrega e os atendimentos vinculados no Atendimento.">
       <template #actions>
-        <Button size="sm" variant="ghost" :disabled="carregando" @click="carregar">
+        <Button size="sm" variant="ghost" :disabled="carregando" @click="carregar(); versaoResumo++">
           <RefreshCw class="mr-1 size-4" :class="{ 'animate-spin': carregando }" /> atualizar
         </Button>
         <Button size="sm" variant="outline" :aria-expanded="regrasAbertas" @click="regrasAbertas = !regrasAbertas">
@@ -348,11 +352,12 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
           <Input id="gar-ate" v-model="filtros.ate" type="date" class="h-9" :min="filtros.de || undefined" />
         </div>
       </div>
-      <div class="w-[calc(50%-0.25rem)] sm:w-40">
+      <div class="w-[calc(50%-0.25rem)] sm:w-52">
         <label for="gar-vista" class="mb-1 block text-xs font-medium text-muted-foreground">Visualização</label>
         <select id="gar-vista" v-model="vista" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-vista>
           <option value="conversas">Conversas</option>
           <option value="tabela">Tabela</option>
+          <option value="resumo">Resumo por departamento</option>
         </select>
       </div>
       <div v-if="vista === 'conversas'" class="w-[calc(50%-0.25rem)] sm:w-44">
@@ -406,8 +411,14 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       <AlertCircle class="size-4" /> {{ erro }} <button type="button" class="underline" @click="carregar">tentar de novo</button>
     </p>
 
+    <!-- Resumo por departamento: os filtros da barra valem (menos a busca) -->
+    <template v-if="vista === 'resumo'">
+      <p v-if="filtros.busca.trim()" class="-mt-1 text-xs text-muted-foreground">A busca vale só para a lista: o resumo conta todas as garantias dos outros filtros.</p>
+      <GarantiaResumo :filtros="filtros" :versao="versaoResumo" />
+    </template>
+
     <!-- carregando / vazio -->
-    <div v-if="!carregado && !erro" class="flex items-center justify-center gap-2 rounded-lg border py-14 text-sm text-muted-foreground" data-carregando>
+    <div v-else-if="!carregado && !erro" class="flex items-center justify-center gap-2 rounded-lg border py-14 text-sm text-muted-foreground" data-carregando>
       <Loader2 class="size-4 animate-spin" /> carregando garantias…
     </div>
     <EmptyState
