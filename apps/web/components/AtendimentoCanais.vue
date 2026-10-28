@@ -28,7 +28,12 @@
 // "Números do WhatsApp" (`AtendimentoZapNumeros`), SÓ para administrador
 // (`verZap`; a API dá 404 para os outros). Quem mexe é o admin que mexe na
 // caixa (`isAdmin`); o admin que só lê vê a tela sem os botões.
-import { Bot, Check, ChevronDown, Loader2, Radio, RefreshCw, RotateCcw, Search, ShieldAlert, TriangleAlert, Users } from 'lucide-vue-next'
+// Continuação (28/10/2026): nos comentários do Instagram, o interruptor
+// "Responder continuação" (só admin) — o DaVinci responde sozinho, em público,
+// quem pede a continuação do Reels em série, com o horário da parte seguinte
+// (services/atendimento/redes_continuacao.py). Libera SÓ essa resposta: o
+// modo da caixa (Observar) continua valendo para o resto.
+import { Bot, Check, Clapperboard, ChevronDown, Loader2, Radio, RefreshCw, RotateCcw, Search, ShieldAlert, TriangleAlert, Users } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import {
   ASSUNTOS_ORIENTACAO,
@@ -278,6 +283,34 @@ async function mudarAgente(c: Canal, ev: Event) {
   }
 }
 
+// ─── continuação do Reels (comentários do Instagram, só admin) ──────────────
+const CONTINUACAO_HINT = 'o DaVinci responde sozinho, em público, quem comenta pedindo a continuação ("continua", "parte 2"…) num Reels de série: "a parte 5 sai hoje às 19h" ou "já está no perfil". Só comentário feito depois de ligar; uma resposta por pessoa e por post, com limite por hora'
+
+async function mudarContinuacao(c: Canal, ev: Event) {
+  const caixa = ev.target as HTMLInputElement
+  const novo = caixa.checked
+  const loja = `${plataformaInfo(c.plataforma).nome} · ${contaDe(c)} · ${canalLabel(c.canal)}`
+  const aviso = novo
+    ? 'O DaVinci passa a responder SOZINHO, EM PÚBLICO, os comentários que pedem a continuação do Reels de série, com o horário da parte seguinte (ou que ela já está no perfil). Só os comentários feitos a partir de agora. O resto da caixa continua no modo de hoje.'
+    : 'O DaVinci para de responder a continuação sozinho nesta caixa.'
+  if (!confirm(`${novo ? 'Ligar' : 'Desligar'} a resposta automática da continuação em ${loja}?\n\n${aviso}`)) {
+    caixa.checked = !!c.auto_continuacao_desde
+    return
+  }
+  salvando.value = c.id
+  try {
+    const r = comoObjeto<Canal>(await api<unknown>(`/api/atendimento/canais/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: { auto_continuacao: novo } }), 'canal')
+    trocar(r ? { ...c, ...r } : { ...c, auto_continuacao_desde: novo ? new Date().toISOString() : null })
+    toasts.success(`${loja}: continuação automática ${novo ? 'ligada' : 'desligada'}`)
+  } catch (e: any) {
+    caixa.checked = !!c.auto_continuacao_desde
+    const er = erroDaApi(e, 'Não consegui mudar a continuação automática')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    salvando.value = null
+  }
+}
+
 const editandoOri = ref<string | null>(null)
 const oriEscolhidas = ref<string[]>([])
 function abrirOrientacao(c: Canal, aberto: boolean) {
@@ -486,6 +519,24 @@ async function sincronizar() {
                 />
                 <Bot class="size-3.5" :class="c.agente ? 'text-indigo-600 dark:text-indigo-300' : 'text-muted-foreground'" />
                 <span :class="c.agente ? 'font-medium text-indigo-700 dark:text-indigo-300' : 'text-muted-foreground'">Agente (Claude)</span>
+              </label>
+              <!-- Marcado numa caixa que não pode mais (rollback): ainda dá para desmarcar. -->
+              <label
+                v-if="c.auto_continuacao_disponivel || c.auto_continuacao_desde"
+                class="mt-1 flex w-fit items-center gap-1.5 text-[11px]"
+                :class="isAdmin ? 'cursor-pointer' : 'cursor-default opacity-70'"
+                :title="isAdmin ? CONTINUACAO_HINT : 'só admin liga ou desliga a continuação automática'"
+              >
+                <input
+                  type="checkbox"
+                  :checked="!!c.auto_continuacao_desde"
+                  :disabled="!isAdmin || salvando === c.id"
+                  :aria-label="`responder continuação sozinho em ${contaDe(c)} ${canalLabel(c.canal)}`"
+                  @change="mudarContinuacao(c, $event)"
+                />
+                <Clapperboard class="size-3.5" :class="c.auto_continuacao_desde ? 'text-pink-600 dark:text-pink-300' : 'text-muted-foreground'" />
+                <span :class="c.auto_continuacao_desde ? 'font-medium text-pink-700 dark:text-pink-300' : 'text-muted-foreground'">Responder continuação</span>
+                <span v-if="c.auto_continuacao_desde" class="text-[10px] text-muted-foreground">desde {{ fmtDataHora(c.auto_continuacao_desde) }}</span>
               </label>
             </td>
             <td class="px-3 py-2">

@@ -96,6 +96,11 @@ qualquer coisa — como as avaliações), pede `confirmar=true` ("Responder em
 PÚBLICO?") e só sai com a conta em modo `humano` na aba Lojas. A resposta
 nasce `enviando` (o índice de uma em voo por conversa) e vira `enviada`,
 `falhou` ou `revisar` (ambíguo) — a régua do `enviar`.
+
+A ÚNICA resposta que sai sem pessoa (28/10/2026): a da CONTINUAÇÃO do Reels
+em série no Instagram (`redes_continuacao.py`), logo depois da leitura de
+cada conta — só com o interruptor da conta ligado na aba Lojas
+(`auto_continuacao_desde`), que libera só ela, com a conta em observar.
 """
 
 from __future__ import annotations
@@ -144,6 +149,7 @@ from app.services.atendimento.constantes import (
     MSG_ENVIANDO,
     MSG_FALHOU,
     MSG_REVISAR,
+    ORIGEM_AUTO,
     ORIGEM_HUMANO,
     PLATAFORMA_INSTAGRAM,
     PLATAFORMAS_REDE,
@@ -1347,10 +1353,19 @@ async def rodada(
     proprio = cliente is None
     http = cliente or novo_cliente()
     resumo: dict[str, Any] = {"contas": len(contas), "por_conta": {}}
+    from app.services.atendimento import redes_continuacao
+
     try:
         for conta in contas:
             chave = f"{conta.plataforma}:{conta.conta_id or conta.rede_social_id}"
             resumo["por_conta"][chave] = await ler_conta(conta, cliente=http, agora=agora)
+            # A resposta automática da continuação (só Instagram, só com a
+            # conta ligada na aba Lojas): os comentários que esta leitura trouxe.
+            continuacao = await redes_continuacao.responder_da_conta(
+                conta, cliente=http, agora=agora
+            )
+            if continuacao is not None:
+                resumo["por_conta"][chave]["continuacao"] = continuacao
     finally:
         if proprio:
             await http.aclose()
@@ -1487,15 +1502,26 @@ def motivo_resposta(
     envio_ativo: bool,
     privado: bool,
     agora: datetime,
+    automatica: bool = False,
 ) -> tuple[str, str] | None:
     """Por que NÃO dá para responder este comentário agora (code, texto); None = dá.
 
     A ordem é a da explicação: primeiro o sistema (envio desligado), depois a
     conta (modo), depois o comentário. É a MESMA régua do POST e da tela.
+    `automatica` (a continuação, `redes_continuacao.py`): a conta vale com o
+    interruptor dela ligado, em qualquer modo — e só em público.
     """
     if not envio_ativo:
         return enviar.RECUSA_ENVIO_DESLIGADO, MOTIVO_ENVIO_DESLIGADO
-    if canal is None or canal.modo not in MODOS_QUE_ENVIAM:
+    liberada = (
+        canal is not None
+        and canal.auto_continuacao_desde is not None
+        and canal.plataforma == PLATAFORMA_INSTAGRAM
+        and not privado
+        if automatica
+        else canal is not None and canal.modo in MODOS_QUE_ENVIAM
+    )
+    if not liberada:
         return enviar.RECUSA_CANAL_EM_OBSERVACAO, MOTIVO_OBSERVAR
     if c.da_marca:
         return RECUSA_COMENTARIO_DA_MARCA, "Este comentário é da própria marca."
@@ -1860,8 +1886,14 @@ async def responder(
     privado: bool = False,
     cliente: httpx.AsyncClient | None = None,
     agora: datetime | None = None,
+    automatica: bool = False,
+    payload_extra: dict | None = None,
 ) -> AtendimentoMensagem:
     """Responde o comentário em PÚBLICO ou no Direct; devolve a mensagem gravada.
+
+    `automatica` = a resposta da continuação (`redes_continuacao.py`, sem
+    pessoa): vale com o interruptor da conta em vez do modo, sai com a origem
+    `davinci_auto` e leva `payload_extra` (a marca dela) na mensagem.
 
     Levanta `EnvioRecusado` quando uma trava impede (nada saiu): envio
     desligado (ANTES de tudo), sem confirmar, conta em observar, comentário
@@ -1878,7 +1910,9 @@ async def responder(
             AVISO_DIRECT if privado else f"Responder em PÚBLICO? {AVISO_PUBLICO}",
         )
     pub, canal, conta = await _contexto_da_acao(session, comentario)
-    motivo = motivo_resposta(comentario, canal, envio_ativo=True, privado=privado, agora=agora)
+    motivo = motivo_resposta(
+        comentario, canal, envio_ativo=True, privado=privado, agora=agora, automatica=automatica
+    )
     if motivo:
         raise EnvioRecusado(*motivo)
     if conta is None or not conta.token or not conta.conta_id:
@@ -1923,14 +1957,17 @@ async def responder(
             conversa_id=conversa.id,
             externo_id=None,
             autor=AUTOR_LOJA,
-            origem=ORIGEM_HUMANO,
+            origem=ORIGEM_AUTO if automatica else ORIGEM_HUMANO,
             autor_user_id=user.id if user is not None else None,
             tipo="texto",
             texto=normalizado,
             anexos=[],
             enviada_em=None,
             status=MSG_ENVIANDO,
-            payload={"comentario": {"id": comentario.externo_id, "acao": acao}},
+            payload={
+                **(payload_extra or {}),
+                "comentario": {"id": comentario.externo_id, "acao": acao},
+            },
         )
         await session.flush()
         try:
@@ -2013,7 +2050,7 @@ async def responder(
                     oculto=False,
                     da_marca=True,
                 ),
-                dados={"pelo_davinci": True},
+                dados={"pelo_davinci": True, **({"automatica": True} if automatica else {})},
             )
             linha.conversa_id = conversa.id
     elif r.ambiguo:

@@ -244,6 +244,7 @@ from app.services.atendimento.constantes import (
     ORIGEM_HUMANO,
     ORIGEM_NOTA,
     ORIGENS_DAVINCI,
+    PLATAFORMA_INSTAGRAM,
     PLATAFORMA_SITE,
     PLATAFORMA_WHATSAPP,
     PLATAFORMAS,
@@ -1731,6 +1732,17 @@ def _canal_out(
         auto_orientacao=list(canal.auto_orientacao or []),
         auto_agente=list(getattr(canal, "auto_agente", None) or []),
         agente_disponivel=_agente_cabe_no_canal(canal),
+        auto_continuacao_desde=_utc(canal.auto_continuacao_desde),
+        auto_continuacao_disponivel=_continuacao_cabe_no_canal(canal),
+    )
+
+
+def _continuacao_cabe_no_canal(canal: AtendimentoCanal) -> bool:
+    """A resposta automática da continuação: só nos comentários do Instagram."""
+    return (
+        canais_externos.eh_externo(canal)
+        and canal.plataforma == PLATAFORMA_INSTAGRAM
+        and canal.canal == CANAL_COMENTARIO
     )
 
 
@@ -4338,6 +4350,30 @@ async def editar_canal(
         escolhidas = set(body.auto_categorias)
         canal.auto_categorias = [c for c in ordem if c in escolhidas]
     _editar_agente_do_canal(canal, body, campos, eh_admin=eh_admin)
+    if "auto_continuacao" in campos and body.auto_continuacao is not None:
+        ligada = canal.auto_continuacao_desde is not None
+        if body.auto_continuacao != ligada:
+            # Responder em PÚBLICO como a marca, sem pessoa: só admin liga ou
+            # desliga (como o `humano` da rede social).
+            if not eh_admin:
+                raise HTTPException(
+                    403,
+                    detail={
+                        "code": "so_admin",
+                        "detail": "Só admin liga ou desliga a resposta automática da continuação.",
+                    },
+                )
+            if body.auto_continuacao and not _continuacao_cabe_no_canal(canal):
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "continuacao_so_instagram",
+                        "detail": "A resposta automática da continuação é só para os "
+                        "comentários do Instagram.",
+                    },
+                )
+            # Ligar marca a hora: comentário anterior não entra (nada de rajada).
+            canal.auto_continuacao_desde = datetime.now(UTC) if body.auto_continuacao else None
     await session.commit()
     await session.refresh(canal)
     integration = (
@@ -4353,6 +4389,7 @@ async def editar_canal(
         agente=canal.agente,
         auto_orientacao=len(canal.auto_orientacao or []),
         auto_agente=len(canal.auto_agente or []),
+        auto_continuacao=canal.auto_continuacao_desde is not None,
         user_id=str(user.id),
     )
     integracao = integration.name if integration else None

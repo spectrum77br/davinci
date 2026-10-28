@@ -710,6 +710,11 @@ class CanalOut(BaseModel):
     # (`agente_config.chave_do_agente`; a chave nunca sai daqui) e a
     # plataforma é uma das do agente (Shopee, ML, TikTok, Amazon).
     agente_disponivel: bool = False
+    # Comentários do Instagram (28/10/2026): a resposta automática, em
+    # público, de quem pede a continuação do Reels em série — desde quando
+    # está ligada (None = desligada) e se a caixa pode ter (só admin liga).
+    auto_continuacao_desde: datetime | None = None
+    auto_continuacao_disponivel: bool = False
 
 
 class CanalPatch(BaseModel):
@@ -720,6 +725,8 @@ class CanalPatch(BaseModel):
     agente: bool | None = None
     auto_orientacao: list[str] | None = None
     auto_agente: list[str] | None = None
+    # A resposta automática da continuação (só comentário do Instagram, só admin).
+    auto_continuacao: bool | None = None
 
     @field_validator("modo")
     @classmethod

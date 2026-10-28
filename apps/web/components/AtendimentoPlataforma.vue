@@ -68,6 +68,11 @@ export type Canal = {
   // (decisão 8: o dono marca depois do eval; nasce vazio).
   auto_agente?: string[]
   agente_disponivel?: boolean
+  // Comentários do Instagram (28/10/2026): a resposta automática, em público,
+  // de quem pede a continuação do Reels em série — desde quando (null =
+  // desligada) e se a caixa pode ter. Só admin liga.
+  auto_continuacao_desde?: string | null
+  auto_continuacao_disponivel?: boolean
 }
 // `a_conferir` = respostas nossas que a plataforma não confirmou (status
 // `revisar`) e que alguém precisa marcar se saíram ou não. Opcional por nível:

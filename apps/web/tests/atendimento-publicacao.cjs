@@ -170,5 +170,20 @@ assert.match(canais, /:disabled="soAdmin\(c, m\.value\)"/)
 // (26/10/2026: o Zap entra na mesma lista — Onda 2 de docs/zap/desenho.md.)
 assert.match(canais, /const HUMANO_SO_ADMIN = \[\.\.\.REDES, 'whatsapp'\]/)
 assert.match(canais, /modo === 'auto' \|\| \(!!c\.externo_ref && HUMANO_SO_ADMIN\.includes\(c\.plataforma\) && modo === 'humano'\)/)
+// A continuação automática (28/10/2026): o interruptor só nos comentários do
+// Instagram (o backend diz qual caixa pode), só admin mexe, PATCH com
+// `auto_continuacao`, e o template da aba compila.
+assert.match(canais, /v-if="c\.auto_continuacao_disponivel \|\| c\.auto_continuacao_desde"/)
+assert.match(canais, /:disabled="!isAdmin \|\| salvando === c\.id"[\s\S]{0,200}@change="mudarContinuacao\(c, \$event\)"/)
+assert.ok(canais.includes("body: { auto_continuacao: novo }"), 'o PATCH da continuação')
+assert.match(schemas, /class CanalOut\(BaseModel\):[\s\S]*?auto_continuacao_desde: datetime \| None = None\s+auto_continuacao_disponivel: bool = False/)
+assert.match(schemas, /class CanalPatch\(BaseModel\):[\s\S]*?auto_continuacao: bool \| None = None/)
+{
+  const f = path.resolve(__dirname, '../components/AtendimentoCanais.vue')
+  const d = parse(canais, { filename: f }).descriptor
+  const t = compileTemplate({ source: d.template.content, filename: f, id: 'canais', compilerOptions: { isTS: true } })
+  assert.deepEqual(t.errors, [], 'o template da aba Lojas compila')
+  compileScript(d, { id: 'canais' })
+}
 
 console.log('ok — atendimento-publicacao')

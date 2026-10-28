@@ -279,6 +279,14 @@ class AtendimentoCanal(Base, TimestampMixin):
     auto_agente: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
+    # Comentários do INSTAGRAM (28/10/2026, migration 0436): responder sozinho,
+    # em público, quem pede a continuação do Reels em série, com o horário do
+    # próximo episódio (`services/atendimento/redes_continuacao.py`). Libera SÓ
+    # essa resposta — o modo do canal segue valendo para o resto. NULL =
+    # desligado; preenchido = desde quando (comentário anterior não entra).
+    auto_continuacao_desde: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class AtendimentoConversa(Base, TimestampMixin):
