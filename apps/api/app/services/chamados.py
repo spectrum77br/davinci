@@ -591,6 +591,95 @@ async def chamado_da_devolucao(session: AsyncSession, dev: Devolution) -> Chamad
     ).scalar_one_or_none()
 
 
+async def item_do_pedido(session: AsyncSession, dev: Devolution) -> tuple[str, str] | None:
+    """O item VENDIDO de que a linha da devolução é um pedaço — (descrição,
+    SKU) da linha do pedido no Bling — quando a linha não é ela mesma um item
+    do pedido: componente de kit do Bling (`b021` → `b021.12`…), SKU com "+"
+    ou mala com vários tamanhos. As MESMAS regras que a aba Devoluções usa
+    para quebrar o pedido em linhas (`routers/devolutions._split_*`), ao
+    contrário. None quando a linha já é um item do pedido ou não dá para
+    saber de qual veio.
+
+    Kit no Painel de Chamados (Eduardo, 28/10/2026, pedido 299959): o chamado
+    é UM por pedido e vai com o nome do kit ("Kit 6 Malas Lisa M2"), não com o
+    da primeira mala lançada."""
+    numero = (dev.pedido_bling or "").strip()
+    sku = (dev.sku or "").strip().lower()
+    if not numero or not sku:
+        return None
+    linhas = (
+        await session.execute(
+            select(BlingOrder.item_codigo, BlingOrder.item_descricao)
+            .where(BlingOrder.numero == numero, BlingOrder.item_codigo.is_not(None))
+            .order_by(BlingOrder.item_index)
+        )
+    ).all()
+    if not linhas or any((c or "").strip().lower() == sku for c, _ in linhas):
+        return None
+    # Import tardio: o router importa este módulo.
+    from app.routers.devolutions import (
+        _split_compound_skus,
+        _split_kit_composition,
+        _split_mala_sizes,
+    )
+
+    achadas: dict[str, str] = {}
+    for codigo, descricao in linhas:
+        base = [{"sku": codigo, "produtos": descricao, "custo_produto": 0.0, "quantidade": 1}]
+        partes = _split_mala_sizes(
+            _split_compound_skus(await _split_kit_composition(session, base))
+        )
+        if any((p.get("sku") or "").strip().lower() == sku for p in partes):
+            achadas[(codigo or "").strip()] = (descricao or "").strip()
+    if len(achadas) != 1:
+        # Pedido de um item só: a linha da devolução só pode ter vindo dele
+        # (kit fora do cache da composição, por exemplo).
+        if len(linhas) != 1:
+            return None
+        achadas = {(linhas[0][0] or "").strip(): (linhas[0][1] or "").strip()}
+    codigo, descricao = next(iter(achadas.items()))
+    return (descricao or codigo, codigo)
+
+
+async def corrigir_kits_dos_chamados(session: AsyncSession) -> int:
+    """Uma vez (28/10/2026): o chamado de devolução já aberto com o nome do
+    componente ("Mala Lisa M2 tamanho 12") passa a ir com o do kit. Só o que
+    ainda está com o valor automático (o produto/SKU da linha que abriu o
+    chamado); o que uma pessoa editou fica. Registra no histórico do chamado.
+    NÃO commita. Devolve quantos mudaram."""
+    chamados = (
+        await session.execute(
+            select(Chamado).where(Chamado.origem == "devolucao", Chamado.origem_ref.is_not(None))
+        )
+    ).scalars().all()
+    mudou = 0
+    for ch in chamados:
+        try:
+            dev = await session.get(Devolution, UUID(str(ch.origem_ref)))
+        except ValueError:
+            continue
+        if dev is None:
+            continue
+        item = await item_do_pedido(session, dev)
+        if item is None:
+            continue
+        automatico = (ch.produto or "") in ("", dev.produtos or "") and (ch.sku or "") in (
+            "",
+            dev.sku or "",
+        )
+        if not automatico or (ch.produto, ch.sku) == item:
+            continue
+        de = f"{ch.produto or '-'} (SKU {ch.sku or '-'})"
+        ch.produto, ch.sku = item
+        session.add(
+            registrar_sistema(
+                ch, f"Produto do chamado: o kit {item[0]} (SKU {item[1]}) — antes {de}"
+            )
+        )
+        mudou += 1
+    return mudou
+
+
 async def abrir_chamado_devolucao(
     session: AsyncSession,
     dev: Devolution,
@@ -615,13 +704,16 @@ async def abrir_chamado_devolucao(
         return None
     if substituindo is None and await chamado_da_devolucao(session, dev) is not None:
         return None
+    # Kit (28/10/2026): o chamado é do pedido — vai com o item vendido (o kit),
+    # não com a primeira peça lançada.
+    item = await item_do_pedido(session, dev)
     ch = Chamado(
         data=datetime.now(SAO_PAULO).date(),
         pedido_bling=(dev.pedido_bling or "").strip() or None,
         pedido_marketplace=(dev.pedido_marketplace or "").strip() or None,
         conta=dev.conta,
-        produto=dev.produtos,
-        sku=dev.sku,
+        produto=item[0] if item else dev.produtos,
+        sku=item[1] if item else dev.sku,
         origem="devolucao",
         origem_ref=str(dev.id),
         canal="manual",
