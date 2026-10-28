@@ -20,6 +20,14 @@
 // Cores (as da etiqueta): Reclamação e Mediação em vermelho, Devolução em
 // roxo. As encerradas ficam recolhidas embaixo, numa linha cada.
 //
+// MINIMIZAR (28/10/2026, o dono: "não dá pra ler o conteúdo direito,
+// principalmente quando tem reclamação"): o corpo das abertas (status, motivo,
+// o que pede, a ação pendente, "Abrir na plataforma") recolhe pelo tipo, como
+// o chamado do e-mail (27/10/2026); a linha do título fica e, recolhida, diz
+// tipo · nº · status (o prazo continua à direita). Começa ABERTA; o navegador
+// lembra a escolha (uma chave só, vale para todas as conversas). Recolher só
+// esconde (v-show): o link da plataforma e o copiar o nº seguem iguais.
+//
 // Este bloco (não o setup) é o módulo dos ajudantes puros, testados em
 // tests/atendimento-reclamacao.cjs — por isso não importa nada.
 
@@ -244,6 +252,8 @@ export function ordenarReclamacoes(itens: Reclamacao[]): Reclamacao[] {
     return (t(b.encerrada_em) || 0) - (t(a.encerrada_em) || 0)
   })
 }
+
+export const RECLAMACAO_ABERTA_KEY = 'davinci.atendimento.reclamacaoAberta'
 </script>
 
 <script setup lang="ts">
@@ -298,6 +308,25 @@ watch(() => props.conversaId, () => {
 }, { immediate: true })
 defineExpose({ carregar })
 
+// Minimizar: o cartão começa aberto; o navegador lembra (sem localStorage, só não lembra).
+const cartaoAberto = ref(true)
+onMounted(() => {
+  try {
+    const salvo = localStorage.getItem(RECLAMACAO_ABERTA_KEY)
+    if (salvo !== null) cartaoAberto.value = salvo === '1'
+  } catch {
+    // sem localStorage — começa aberto
+  }
+})
+function alternar() {
+  cartaoAberto.value = !cartaoAberto.value
+  try {
+    localStorage.setItem(RECLAMACAO_ABERTA_KEY, cartaoAberto.value ? '1' : '0')
+  } catch {
+    // só não lembra
+  }
+}
+
 async function copiarNumero(r: Reclamacao) {
   if (!r.numero) return
   if (await copiar(r.numero)) toasts.success('Nº copiado')
@@ -310,16 +339,28 @@ async function copiarNumero(r: Reclamacao) {
     <div
       v-for="r in abertas"
       :key="r.id"
-      class="rounded-md border p-3 text-[13px] leading-5"
-      :class="corDoTipo(r.tipo).borda"
+      class="rounded-md border text-[13px] leading-5"
+      :class="[corDoTipo(r.tipo).borda, cartaoAberto ? 'p-3' : 'px-3 py-1.5']"
+      data-reclamacao
     >
       <div class="flex flex-wrap items-center gap-1.5">
-        <span class="inline-flex items-center gap-1 rounded px-1.5 py-px text-xs font-semibold" :class="corDoTipo(r.tipo).selo">
-          <Undo2 v-if="r.tipo === 'devolucao'" class="size-3.5" aria-hidden="true" />
-          <Scale v-else-if="r.mediacao" class="size-3.5" aria-hidden="true" />
-          <TriangleAlert v-else class="size-3.5" aria-hidden="true" />
-          {{ r.tipo_rotulo }}
-        </span>
+        <button
+          type="button"
+          class="-ml-1 inline-flex shrink-0 items-center gap-1 rounded px-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+          :aria-expanded="cartaoAberto"
+          :title="cartaoAberto ? 'minimizar (status, motivo e o que pede; a conversa ganha altura)' : 'mostrar status, motivo e o que pede'"
+          data-reclamacao-alternar
+          @click="alternar"
+        >
+          <ChevronDown v-if="cartaoAberto" class="size-3.5 shrink-0" aria-hidden="true" />
+          <ChevronRight v-else class="size-3.5 shrink-0" aria-hidden="true" />
+          <span class="inline-flex items-center gap-1 rounded px-1.5 py-px text-xs font-semibold" :class="corDoTipo(r.tipo).selo">
+            <Undo2 v-if="r.tipo === 'devolucao'" class="size-3.5" aria-hidden="true" />
+            <Scale v-else-if="r.mediacao" class="size-3.5" aria-hidden="true" />
+            <TriangleAlert v-else class="size-3.5" aria-hidden="true" />
+            {{ r.tipo_rotulo }}
+          </span>
+        </button>
         <span class="min-w-0 break-all font-semibold">{{ r.numero ? `nº ${r.numero}` : tituloReclamacao(r) }}</span>
         <button
           v-if="r.numero"
@@ -333,6 +374,13 @@ async function copiarNumero(r: Reclamacao) {
         </button>
         <span class="text-xs text-muted-foreground">· {{ r.plataforma_nome }}</span>
         <span
+          v-if="!cartaoAberto && statusLegivel(r)"
+          class="min-w-0 cursor-pointer truncate text-xs"
+          :title="[statusLegivel(r), r.motivo ? `Motivo: ${motivoLegivel(r.motivo)}` : ''].filter(Boolean).join('\n')"
+          data-reclamacao-resumo
+          @click="alternar"
+        >· {{ statusLegivel(r) }}</span>
+        <span
           v-if="prazoReclamacao(r, agora)"
           class="ml-auto rounded px-1.5 py-px text-xs font-medium tabular-nums"
           :class="prazoReclamacao(r, agora)!.cls"
@@ -340,27 +388,29 @@ async function copiarNumero(r: Reclamacao) {
         >{{ prazoReclamacao(r, agora)!.texto }}</span>
       </div>
 
-      <div v-if="statusLegivel(r)" class="mt-1" :title="r.status || undefined">{{ statusLegivel(r) }}</div>
-      <div v-if="r.motivo" class="text-muted-foreground" :title="r.motivo">Motivo: {{ motivoLegivel(r.motivo) }}</div>
-      <div v-if="r.solucao" class="text-muted-foreground">Pede: {{ r.solucao }}</div>
-      <div v-if="r.acao_pendente" class="mt-1 font-medium">
-        {{ r.acao_pendente }}<span v-if="r.prazo_em" class="font-normal text-muted-foreground"> — até {{ fmtDataHora(r.prazo_em) }}</span>
+      <div v-show="cartaoAberto" data-reclamacao-corpo>
+        <div v-if="statusLegivel(r)" class="mt-1" :title="r.status || undefined">{{ statusLegivel(r) }}</div>
+        <div v-if="r.motivo" class="text-muted-foreground" :title="r.motivo">Motivo: {{ motivoLegivel(r.motivo) }}</div>
+        <div v-if="r.solucao" class="text-muted-foreground">Pede: {{ r.solucao }}</div>
+        <div v-if="r.acao_pendente" class="mt-1 font-medium">
+          {{ r.acao_pendente }}<span v-if="r.prazo_em" class="font-normal text-muted-foreground"> — até {{ fmtDataHora(r.prazo_em) }}</span>
+        </div>
+        <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+          <span v-if="r.reputacao_afetada" class="rounded border border-red-500/50 px-1.5 py-px text-red-700 dark:text-red-300">Reputação afetada</span>
+          <span v-if="r.aberta_em" class="text-muted-foreground">aberta em {{ fmtDataHora(r.aberta_em) }}</span>
+          <AtendimentoAbrirPlataforma
+            v-if="r.url_plataforma"
+            :href="r.url_plataforma"
+            :perfil="perfil"
+            :conversa-id="conversaId"
+            class="ml-auto inline-flex items-center gap-1 rounded border bg-background px-2 py-0.5 hover:bg-muted"
+          >
+            <ExternalLink class="size-3.5" aria-hidden="true" />
+            {{ abrirEm(r.plataforma, r.plataforma_nome) }}
+          </AtendimentoAbrirPlataforma>
+        </div>
+        <div class="mt-1 text-xs text-muted-foreground">Só leitura aqui: responda e aja pela plataforma.</div>
       </div>
-      <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
-        <span v-if="r.reputacao_afetada" class="rounded border border-red-500/50 px-1.5 py-px text-red-700 dark:text-red-300">Reputação afetada</span>
-        <span v-if="r.aberta_em" class="text-muted-foreground">aberta em {{ fmtDataHora(r.aberta_em) }}</span>
-        <AtendimentoAbrirPlataforma
-          v-if="r.url_plataforma"
-          :href="r.url_plataforma"
-          :perfil="perfil"
-          :conversa-id="conversaId"
-          class="ml-auto inline-flex items-center gap-1 rounded border bg-background px-2 py-0.5 hover:bg-muted"
-        >
-          <ExternalLink class="size-3.5" aria-hidden="true" />
-          {{ abrirEm(r.plataforma, r.plataforma_nome) }}
-        </AtendimentoAbrirPlataforma>
-      </div>
-      <div class="mt-1 text-xs text-muted-foreground">Só leitura aqui: responda e aja pela plataforma.</div>
     </div>
 
     <div v-if="encerradas.length" class="rounded-md border text-xs">

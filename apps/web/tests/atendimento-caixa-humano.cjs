@@ -640,8 +640,11 @@ async function numeros() {
   assert.ok(faixa, 'a faixa existe')
   assert.match(faixa, /data-faixa-humano/)
   // O nome e a frase pela `faixaHumano` (14/10/2026: "Precisa de pessoa" na
-  // loja fora dos modos da Caixa Humano, com o title dizendo por quê).
-  assert.match(faixa, /<span class="font-semibold">\{\{ faixaHumano\(conversa\.humano\)\.nome \}\}<\/span> — \{\{ faixaHumano\(conversa\.humano\)\.frase \}\}: \{\{ rotulosHumano\(conversa\.humano\)\.join\(' · '\) \}\}/)
+  // loja fora dos modos da Caixa Humano, com o title dizendo por quê). Desde
+  // 28/10/2026 o nome fica no botão que recolhe e a frase com os motivos no
+  // corpo (tests/atendimento-recolher-caixas.cjs).
+  assert.match(faixa, /data-faixa-humano-alternar[\s\S]*?<span>\{\{ faixaHumano\(conversa\.humano\)\.nome \}\}<\/span>\s*<\/button>/)
+  assert.match(faixa, /data-faixa-humano-corpo>— \{\{ faixaHumano\(conversa\.humano\)\.frase \}\}: \{\{ rotulosHumano\(conversa\.humano\)\.join\(' · '\) \}\}<\/span>/)
   assert.match(faixa, /:title="conversa\.humano\.na_caixa === false \? tituloForaDaCaixaHumano : undefined"/)
   assert.match(conversaSfc.descriptor.scriptSetup.content, /A loja desta conversa não está \$\{modos \? textoModosHumano\(modos\) : 'nos modos da Caixa Humano'\}: ela não aparece na Caixa Humano \(mude em Lojas e modo\)\./)
   // Logo abaixo do cabeçalho, antes das outras faixas.

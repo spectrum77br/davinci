@@ -43,6 +43,11 @@ export function frasesDaEtiqueta(h: MudancaDeEtiqueta): { titulo: string; detalh
   const detalhe = [(h.motivo || '').trim(), h.por_nome ? `por ${h.por_nome}` : ''].filter(Boolean).join(' · ')
   return { titulo, detalhe }
 }
+
+// Minimizar a faixa da Caixa Humano e a sugestão da IA (28/10/2026): uma
+// chave por caixa, vale para todas as conversas ('1' aberta, '0' recolhida).
+export const CAIXA_HUMANO_ABERTA_KEY = 'davinci.atendimento.caixaHumanoAberta'
+export const SUGESTAO_IA_ABERTA_KEY = 'davinci.atendimento.sugestaoIaAberta'
 </script>
 
 <script setup lang="ts">
@@ -173,6 +178,7 @@ import {
   Check,
   CheckCheck,
   ChevronDown,
+  ChevronRight,
   Copy,
   ExternalLink,
   Globe,
@@ -217,7 +223,7 @@ import {
   type AbasResposta,
 } from '~/components/AtendimentoAbas.vue'
 import { etiquetaInfo } from '~/components/AtendimentoEtiqueta.vue'
-import { AVISO_EMAIL_NA_FILA, CODIGOS_CONFIRMAVEIS, LIMITE_RESPOSTA_EMAIL, TRAVAS_GERAIS_DO_EMAIL, corpoDoEmail, ehEmailDaPonte } from '~/components/AtendimentoEmailResposta.vue'
+import { AVISO_EMAIL_NA_FILA, CODIGOS_CONFIRMAVEIS, LIMITE_RESPOSTA_EMAIL, TRAVAS_GERAIS_DO_EMAIL, corpoDoEmail, ehEmailDaPonte, rotuloDosAvisos } from '~/components/AtendimentoEmailResposta.vue'
 import { conversasComEmail, ehCartaoDeEmail, urlDosCartoes, type CartaoEmail, type CartoesDaConversa } from '~/components/AtendimentoEmailCartao.vue'
 import { sinalDeEmails } from '~/components/AtendimentoEmailVenda.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
@@ -237,6 +243,7 @@ import {
   canalLabel,
   CODIGOS_ZAP_FRASE_DO_SERVIDOR,
   SINAIS_CLIENTE,
+  avisosDaSugestao,
   cartaoPedidoDe,
   cartaoProdutoDe,
   categoriaLabel,
@@ -273,6 +280,7 @@ import {
   respondidaNoPortalMagalu,
   respondidaNoSellerCenter,
   respondidaNoSellerCentral,
+  resumoHumano,
   rotuloDia,
   rotulosHumano,
   seloPrecisaDePessoa,
@@ -353,6 +361,47 @@ const tituloForaDaCaixaHumano = computed(() => {
   const modos = modosDaCaixaHumano(props.flags)
   return `A loja desta conversa não está ${modos ? textoModosHumano(modos) : 'nos modos da Caixa Humano'}: ela não aparece na Caixa Humano (mude em Lojas e modo).`
 })
+
+// ─── minimizar a faixa da Caixa Humano e a sugestão da IA ───────────────────
+// 28/10/2026, o dono: "tem que deixar diminuir essas caixas pois não dá pra
+// ler o conteúdo direito, principalmente quando tem reclamação". As duas
+// recolhem pela linha do título (chevron, aria-expanded), como o chamado e a
+// resposta do e-mail (27/10/2026); o cartão da disputa faz o mesmo no
+// AtendimentoReclamacao. Recolhidas: a faixa fica com o nome e os primeiros
+// motivos ("Reclamação aberta · Pediu atendente +1"); a sugestão, com o título
+// (assunto · confiança · "precisa de pessoa") e o selo "N avisos" do que
+// ficou escondido. Começam ABERTAS; o navegador lembra a escolha (uma chave
+// por caixa, vale para todas as conversas). Recolher só esconde (v-show):
+// "usar sugestão", copiar, "Descartar sugestão" (o motivo do descarte fica
+// fora da parte que recolhe) e a caixa de resposta seguem iguais.
+const caixaHumanoAberta = ref(true)
+const sugestaoIaAberta = ref(true)
+onMounted(() => {
+  try {
+    const humano = localStorage.getItem(CAIXA_HUMANO_ABERTA_KEY)
+    if (humano !== null) caixaHumanoAberta.value = humano === '1'
+    const sugestao = localStorage.getItem(SUGESTAO_IA_ABERTA_KEY)
+    if (sugestao !== null) sugestaoIaAberta.value = sugestao === '1'
+  } catch {
+    // sem localStorage — começam abertas
+  }
+})
+function alternarCaixaHumano() {
+  caixaHumanoAberta.value = !caixaHumanoAberta.value
+  try {
+    localStorage.setItem(CAIXA_HUMANO_ABERTA_KEY, caixaHumanoAberta.value ? '1' : '0')
+  } catch {
+    // só não lembra
+  }
+}
+function alternarSugestaoIa() {
+  sugestaoIaAberta.value = !sugestaoIaAberta.value
+  try {
+    localStorage.setItem(SUGESTAO_IA_ABERTA_KEY, sugestaoIaAberta.value ? '1' : '0')
+  } catch {
+    // só não lembra
+  }
+}
 
 // ─── caixa de resposta ──────────────────────────────────────────────────────
 const texto = ref('')
@@ -2733,16 +2782,38 @@ watch(() => props.conversaId, (novo, velho) => {
              quando ela sugeriu, fica no painel da sugestão). Some quando alguém
              responde. Da loja fora dos modos da Caixa Humano (14/10/2026: em
              Observar, o Duoke responde) ela não está lá: "Precisa de pessoa".
-             Laranja quando é a espera da IA ("A IA não respondeu", 14/10/2026). -->
+             Laranja quando é a espera da IA ("A IA não respondeu", 14/10/2026).
+             Recolhe pelo nome (28/10/2026): fica numa linha, com os primeiros
+             motivos. -->
         <div
           v-if="conversa.humano"
-          class="shrink-0 border-b px-3 py-1 text-xs"
+          class="flex shrink-0 items-start gap-1 border-b px-3 py-1 text-xs"
           :class="corHumano(conversa.humano).faixa"
           role="note"
           :title="conversa.humano.na_caixa === false ? tituloForaDaCaixaHumano : undefined"
           data-faixa-humano
         >
-          <UserRound class="mr-1 inline size-3.5 align-[-2px]" aria-hidden="true" /><span class="font-semibold">{{ faixaHumano(conversa.humano).nome }}</span> — {{ faixaHumano(conversa.humano).frase }}: {{ rotulosHumano(conversa.humano).join(' · ') }}
+          <button
+            type="button"
+            class="-ml-1 inline-flex shrink-0 items-center gap-1 rounded px-1 font-semibold hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+            :aria-expanded="caixaHumanoAberta"
+            :title="caixaHumanoAberta ? 'minimizar (fica numa linha, a conversa ganha altura)' : 'mostrar todos os motivos'"
+            data-faixa-humano-alternar
+            @click="alternarCaixaHumano"
+          >
+            <ChevronDown v-if="caixaHumanoAberta" class="size-3.5 shrink-0" aria-hidden="true" />
+            <ChevronRight v-else class="size-3.5 shrink-0" aria-hidden="true" />
+            <UserRound class="size-3.5 shrink-0" aria-hidden="true" />
+            <span>{{ faixaHumano(conversa.humano).nome }}</span>
+          </button>
+          <span v-show="caixaHumanoAberta" class="min-w-0 flex-1" data-faixa-humano-corpo>— {{ faixaHumano(conversa.humano).frase }}: {{ rotulosHumano(conversa.humano).join(' · ') }}</span>
+          <span
+            v-if="!caixaHumanoAberta"
+            class="min-w-0 flex-1 cursor-pointer truncate"
+            :title="rotulosHumano(conversa.humano).join(' · ')"
+            data-faixa-humano-resumo
+            @click="alternarCaixaHumano"
+          >{{ resumoHumano(conversa.humano) }}</span>
         </div>
         <!-- faixas: bloqueio, janela, fechada, não precisa, Ag. cancelamento -->
         <!-- Conversa da reclamação/mediação (canal 'reclamacao'): só leitura POR
@@ -3248,10 +3319,24 @@ watch(() => props.conversaId, (novo, velho) => {
             <button v-if="detalhe.envio.codigo === 'canal_em_observacao' && !conversa.somente_leitura && canEdit" type="button" class="shrink-0 underline" @click="emit('abrirAba', 'lojas')">abrir Lojas e modo</button>
           </div>
 
-          <!-- sugestão da IA -->
-          <div v-if="rascunho" class="space-y-1 rounded-md border border-violet-300/60 bg-violet-50/60 px-2.5 py-1.5 text-xs dark:border-violet-800/60 dark:bg-violet-900/15">
+          <!-- sugestão da IA. Recolhe pelo título (28/10/2026): ficam o assunto,
+               a confiança, o "precisa de pessoa", o selo dos avisos e os botões
+               (usar, copiar, descartar); o motivo do descarte fica fora da
+               parte que recolhe. -->
+          <div v-if="rascunho" class="space-y-1 rounded-md border border-violet-300/60 bg-violet-50/60 px-2.5 py-1.5 text-xs dark:border-violet-800/60 dark:bg-violet-900/15" data-sugestao-ia>
             <div class="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-              <span class="inline-flex items-center gap-1 font-medium text-violet-700 dark:text-violet-300"><Sparkles class="size-3.5" /> Sugestão da IA</span>
+              <button
+                type="button"
+                class="-ml-1 inline-flex items-center gap-1 rounded px-1 font-medium text-violet-700 hover:bg-violet-500/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary dark:text-violet-300"
+                :aria-expanded="sugestaoIaAberta"
+                :title="sugestaoIaAberta ? 'minimizar o porquê e os avisos da sugestão (a conversa ganha altura)' : 'mostrar o porquê e os avisos da sugestão'"
+                data-sugestao-ia-alternar
+                @click="alternarSugestaoIa"
+              >
+                <ChevronDown v-if="sugestaoIaAberta" class="size-3.5 shrink-0" aria-hidden="true" />
+                <ChevronRight v-else class="size-3.5 shrink-0" aria-hidden="true" />
+                <Sparkles class="size-3.5" /> Sugestão da IA
+              </button>
               <span v-if="rascunho.categoria" class="text-muted-foreground">· {{ categoriaLabel(rascunho.categoria) }}</span>
               <span v-if="rascunho.confianca !== null && rascunho.confianca !== undefined" class="text-muted-foreground">· {{ Math.round(rascunho.confianca * 100) }}% de confiança</span>
               <!-- O selo só na sugestão do turno ATUAL (14/10/2026, a régua da
@@ -3268,6 +3353,13 @@ watch(() => props.conversaId, (novo, velho) => {
                 title="o cliente escreveu de novo depois da mensagem que esta sugestão responde — confira se ela ainda serve"
                 data-sugestao-de-antes
               >de antes da última mensagem</span>
+              <span
+                v-if="!sugestaoIaAberta && avisosDaSugestao(rascunho)"
+                class="inline-flex cursor-pointer items-center gap-0.5 rounded bg-amber-500/20 px-1.5 text-[11px] text-amber-900 dark:text-amber-200"
+                title="avisos escondidos — clique para mostrar"
+                data-sugestao-ia-avisos-selo
+                @click="alternarSugestaoIa"
+              ><TriangleAlert class="size-3" aria-hidden="true" />{{ rotuloDosAvisos(avisosDaSugestao(rascunho)) }}</span>
               <span class="ml-auto flex flex-wrap items-center gap-1">
                 <button v-if="rascunho.texto && !usandoSugestao" type="button" class="rounded border border-violet-300/70 bg-background px-1.5 py-0.5 hover:bg-muted" @click="usarSugestao">usar sugestão</button>
                 <button v-if="rascunho.texto" type="button" class="rounded p-1 hover:bg-muted" title="copiar o texto da sugestão (para colar no Duoke, por exemplo)" @click="copiarTexto(rascunho.texto, 'Texto da sugestão')"><Copy class="size-3.5" /></button>
@@ -3278,13 +3370,15 @@ watch(() => props.conversaId, (novo, velho) => {
                 </template>
               </span>
             </div>
-            <div v-if="!rascunho.texto" class="italic text-muted-foreground">A IA não escreveu uma resposta que possa sair — responda você.</div>
-            <div v-if="rascunho.motivo" class="text-muted-foreground"><span class="font-medium">Por quê:</span> {{ rascunho.motivo }}</div>
-            <div v-if="rascunho.agente" class="flex items-start gap-1 text-[11px] text-indigo-700 dark:text-indigo-300" data-rastro-agente><Bot class="mt-px size-3.5 shrink-0" />{{ linhaDoAgente(rascunho.agente) }}</div>
-            <ul v-if="rascunho.validador_erros?.length" class="list-inside list-disc text-amber-800 dark:text-amber-300">
-              <li v-for="(v, i) in rascunho.validador_erros" :key="i">{{ v }}</li>
-            </ul>
-            <div v-if="descarte.aberto" class="space-y-1 pt-1">
+            <div v-show="sugestaoIaAberta" class="max-h-[22vh] space-y-1 overflow-y-auto overscroll-contain" data-sugestao-ia-corpo>
+              <div v-if="!rascunho.texto" class="italic text-muted-foreground">A IA não escreveu uma resposta que possa sair — responda você.</div>
+              <div v-if="rascunho.motivo" class="text-muted-foreground"><span class="font-medium">Por quê:</span> {{ rascunho.motivo }}</div>
+              <div v-if="rascunho.agente" class="flex items-start gap-1 text-[11px] text-indigo-700 dark:text-indigo-300" data-rastro-agente><Bot class="mt-px size-3.5 shrink-0" />{{ linhaDoAgente(rascunho.agente) }}</div>
+              <ul v-if="rascunho.validador_erros?.length" class="list-inside list-disc text-amber-800 dark:text-amber-300">
+                <li v-for="(v, i) in rascunho.validador_erros" :key="i">{{ v }}</li>
+              </ul>
+            </div>
+            <div v-if="descarte.aberto" class="space-y-1 pt-1" data-sugestao-ia-descarte>
               <div class="flex flex-wrap gap-1">
                 <button v-for="m in MOTIVOS_DESCARTE" :key="m" type="button" class="rounded-full border bg-background px-2 py-0.5 hover:bg-muted" :class="descarte.motivo === m ? 'border-primary text-primary' : ''" @click="descarte.motivo = m">{{ m }}</button>
               </div>

@@ -1220,6 +1220,12 @@ export function linhaDoAgente(a: AgenteResumo | null | undefined): string {
   if (avisos.length) partes.push(`Confira: ${avisos.join('; ')}`)
   return partes.join(' · ')
 }
+// Quantos avisos a sugestão RECOLHIDA esconde (28/10/2026): os do validador e
+// os "Confira" do agente — o selo "N avisos" da linha do título.
+export function avisosDaSugestao(r: Pick<Rascunho, 'validador_erros' | 'agente'> | null | undefined): number {
+  if (!r) return 0
+  return (r.validador_erros || []).filter(Boolean).length + (r.agente?.avisos || []).filter(Boolean).length
+}
 
 // Os FATOS que o agente pode afirmar (`atendimento_fatos`, spec 5.2): o
 // candidato espera o admin na aba do Manual; só o ativo vale.
@@ -1371,6 +1377,14 @@ export function chipHumano(h: HumanoConversa | null | undefined): { texto: strin
     mais: rs.length - 1,
     titulo: [`${f.nome} — ${f.frase}:`, ...rs.map((r) => `• ${r}`)].join('\n'),
   }
+}
+// A faixa da conversa RECOLHIDA (28/10/2026): os primeiros motivos numa linha
+// e "+N" os outros (aberta, a faixa mostra todos). '' sem `humano`.
+export function resumoHumano(h: HumanoConversa | null | undefined, n = 2): string {
+  if (!h) return ''
+  const rs = rotulosHumano(h)
+  const mais = rs.length - n
+  return rs.slice(0, n).join(' · ') + (mais > 0 ? ` +${mais}` : '')
 }
 // SÓ AS LOJAS NO AUTOMÁTICO (14/10/2026, o dono: "a Caixa Humano só para as
 // lojas que estão automáticas"): o servidor já filtra a lista e os números
