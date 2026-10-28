@@ -343,7 +343,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
           <option v-for="s in FILTROS_STATUS" :key="s.value" :value="s.value">{{ s.label }}</option>
         </select>
       </div>
-      <div class="w-[calc(50%-0.25rem)] sm:w-44">
+      <div class="w-[calc(50%-0.25rem)] sm:w-56">
         <label for="gar-periodo" class="mb-1 block text-xs font-medium text-muted-foreground">Período por</label>
         <select id="gar-periodo" v-model="filtros.periodo" class="h-9 w-full rounded-md border bg-background px-2 text-sm">
           <option value="pedido">data do pedido de garantia</option>

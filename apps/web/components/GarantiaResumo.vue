@@ -63,8 +63,11 @@ function barra(t: number, maior: number) {
   return Math.max(2, Math.min(100, (t / maior) * 100))
 }
 const maiorDepartamento = computed(() => Math.max(0, ...(resumo.value?.departamentos || []).map((d) => taxa(d.pediram, d.vendidas))))
+// A escala dos produtos: a maior taxa entre os que venderam 10 ou mais (1
+// pedido em 1 venda daria 100% e encolheria todas as barras).
 function maiorProduto(d: ResumoDepartamento) {
-  return Math.max(0, ...d.produtos.map((p) => taxa(p.pediram, p.vendidas)))
+  const base = d.produtos.filter((p) => p.vendidas >= 10)
+  return Math.max(0, ...(base.length ? base : d.produtos).map((p) => taxa(p.pediram, p.vendidas)))
 }
 
 // "Entregue — sem data no DaVinci" à parte do "Aguardando entrega" (a regra
