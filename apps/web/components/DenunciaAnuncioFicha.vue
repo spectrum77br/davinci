@@ -118,7 +118,8 @@ const abas = computed(() => [
   { k: 'resumo' as Aba, t: 'Resumo' },
   { k: 'loja' as Aba, t: `Na loja (${naLoja.value.length})` },
   { k: 'anatel' as Aba, t: `Na Anatel (${naAnatel.value.length})` },
-  { k: 'provas' as Aba, t: `Provas (${ficha.value?.provas.length || 0})` },
+  // 28/10: conta só o que vale (registros das denúncias e histórico ficam fechados dentro da aba)
+  { k: 'provas' as Aba, t: `Provas (${(ficha.value?.provas || []).filter((p) => (p.grupo ?? 'atual') === 'atual').length})` },
   { k: 'historico' as Aba, t: `Histórico (${ficha.value?.verificacoes.length || 0})` },
 ])
 </script>
@@ -252,7 +253,7 @@ const abas = computed(() => [
           </details>
           <details v-if="provasDa(d.id).length" class="w-full">
             <summary class="cursor-pointer text-muted-foreground">provas ({{ provasDa(d.id).length }})</summary>
-            <div class="mt-1"><DenunciaProvas :provas="provasDa(d.id)" /></div>
+            <div class="mt-1"><DenunciaProvas :provas="provasDa(d.id)" :agrupar="false" /></div>
           </details>
         </div>
       </div>
@@ -304,7 +305,7 @@ const abas = computed(() => [
           </details>
           <details v-if="provasDa(d.id).length" class="w-full">
             <summary class="cursor-pointer text-muted-foreground">provas ({{ provasDa(d.id).length }})</summary>
-            <div class="mt-1"><DenunciaProvas :provas="provasDa(d.id)" /></div>
+            <div class="mt-1"><DenunciaProvas :provas="provasDa(d.id)" :agrupar="false" /></div>
           </details>
         </div>
         <p v-if="d.obs" class="text-xs text-muted-foreground whitespace-pre-wrap">{{ d.obs }}</p>

@@ -9,6 +9,9 @@ export type Prova = {
   caso_id: number | null
   denuncia_id: number | null
   tipo: string | null
+  // 28/10: onde a prova aparece — "atual" (o que vale), "denuncias" (registros das denúncias na loja)
+  // ou "historico" (prints antigos e inválidos). Nada é apagado; os dois últimos ficam fechados.
+  grupo?: 'atual' | 'denuncias' | 'historico'
   nome: string
   mime: string | null
   tamanho: number | null

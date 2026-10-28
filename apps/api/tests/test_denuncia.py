@@ -246,6 +246,42 @@ async def test_resumo_conta_provas_fora_do_mega_e_ficha_traz_caminho(client, mak
     assert caminhos == {30: "/Fiscalização/Denuncias/A1 - loja_x/a.png", 31: None}
 
 
+async def test_ficha_agrupa_provas_atual_denuncias_historico(client, make_user, auth_as):
+    """28/10: a tela mostra só o que vale; prints antigos e inválidos vão pro histórico (nada é apagado)."""
+    await _carga(client)
+
+    def prova(pid, tipo, nome, em, obs=""):
+        return {"id": pid, "anuncio_id": "A1", "tipo": tipo, "nome_original": nome, "arquivo": f"A1/{nome}",
+                "enviado_em": em, "obs": obs}
+
+    await client.post(
+        "/api/denuncia/sync/provas",
+        json={"linhas": [
+            prova(40, "Captura no ato", "A1_20261001_100000.png", "2026-10-01 10:00:00"),
+            prova(41, "Captura no ato", "A1_20261001_100000.html", "2026-10-01 10:00:01"),
+            prova(42, "Captura no ato", "A1_20261020_100000.png", "2026-10-20 10:00:00"),
+            prova(43, "Captura no ato", "A1_20261020_100000.html", "2026-10-20 10:00:01"),
+            prova(44, "Captura inválida (tela de verificação)", "A1_20261025_100000.png", "2026-10-25 10:00:00"),
+            prova(45, "Captura no ato", "1_captura_A1.pdf", "2026-10-26 10:00:00",
+                  "Captura enviada à Anatel (SEI) — processo 53500.1"),
+            prova(46, "Registro da denúncia", "A1_modal.png", "2026-09-20 10:00:00"),
+            prova(47, "Foto", "foto.jpg", "2026-10-22 10:00:00"),
+        ]},
+        headers=H,
+    )
+    auth_as(await make_user(role=UserRole.ADMIN))
+    ficha = (await client.get("/api/denuncia/anuncios/A1")).json()
+    grupos = {p["id"]: p["grupo"] for p in ficha["provas"]}
+    assert grupos == {
+        40: "historico", 41: "historico",   # print antigo: já há um mais novo
+        42: "atual", 43: "atual",           # o último print (imagem + cópia da página)
+        44: "historico",                    # inválido, mesmo sendo o mais novo
+        45: "atual",                        # a cópia que foi à Anatel não conta como print
+        46: "denuncias",
+        47: "atual",
+    }
+
+
 async def test_pulso_marca_contato_sem_mandar_nada(client, db):
     assert (await db.execute(text("SELECT ultimo_envio_em FROM denuncia_remetentes"))).scalar() is None
     r = await client.post("/api/denuncia/sync/pulso", headers=H)

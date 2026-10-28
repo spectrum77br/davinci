@@ -14,12 +14,34 @@ import {
 } from 'lucide-vue-next'
 import { type Prova, dataBr, tamanho, urlProva } from '~/lib/denuncia'
 
-const props = withDefaults(defineProps<{ provas: Prova[]; inicial?: number }>(), { inicial: 15 })
+// 28/10 (Vinicius: "essa lista de prova enorme… muito print, muita besteira"): em cima só o que vale
+// (último print, o que foi à Anatel, provas do caso); os registros das denúncias e o histórico (prints
+// antigos e inválidos) ficam fechados. `agrupar=false` mostra tudo junto (lista de uma denúncia só).
+const props = withDefaults(defineProps<{ provas: Prova[]; inicial?: number; agrupar?: boolean }>(), {
+  inicial: 15,
+  agrupar: true,
+})
 
 const { api } = useApi()
 const todas = ref(false)
 const copiado = ref<number | null>(null)
-const visiveis = computed(() => (todas.value ? props.provas : props.provas.slice(0, props.inicial)))
+const abertos = ref<Record<string, boolean>>({})
+
+const atuais = computed(() =>
+  props.agrupar ? props.provas.filter((p) => (p.grupo ?? 'atual') === 'atual') : props.provas,
+)
+const visiveis = computed(() => (todas.value ? atuais.value : atuais.value.slice(0, props.inicial)))
+const fechados = computed(() =>
+  props.agrupar
+    ? [
+        { k: 'denuncias', titulo: 'Registros das denúncias na loja', itens: props.provas.filter((p) => p.grupo === 'denuncias') },
+        { k: 'historico', titulo: 'Histórico — prints antigos e inválidos', itens: props.provas.filter((p) => p.grupo === 'historico') },
+      ].filter((g) => g.itens.length)
+    : [],
+)
+// ordem do visualizador (← →): o que vale primeiro, depois os grupos fechados
+const ordem = computed(() => [...atuais.value, ...fechados.value.flatMap((g) => g.itens)])
+const blocos = computed(() => [{ k: 'atual', titulo: '', itens: visiveis.value }, ...fechados.value])
 
 function icone(p: Prova) {
   const m = p.mime || ''
@@ -66,7 +88,7 @@ const tipo = computed(() => {
   if (m === 'application/pdf') return 'pdf'
   return 'baixar'
 })
-const indice = computed(() => (aberta.value ? props.provas.findIndex((p) => p.id === aberta.value!.id) : -1))
+const indice = computed(() => (aberta.value ? ordem.value.findIndex((p) => p.id === aberta.value!.id) : -1))
 
 function parar() {
   if (timer) clearTimeout(timer)
@@ -104,7 +126,7 @@ function abrir(p: Prova) {
 
 function andar(passo: number) {
   const i = indice.value + passo
-  if (i >= 0 && i < props.provas.length) abrir(props.provas[i])
+  if (i >= 0 && i < ordem.value.length) abrir(ordem.value[i])
 }
 
 function fechar() {
@@ -125,44 +147,56 @@ onUnmounted(parar)
 <template>
   <div>
     <div v-if="provas.length === 0" class="text-sm text-muted-foreground">Nenhuma prova.</div>
-    <ul v-else class="divide-y rounded-lg border">
-      <li v-for="p in visiveis" :key="p.id" class="flex items-center gap-2 px-3 py-2 min-w-0">
-        <button
-          type="button"
-          class="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-primary"
-          :title="`abrir ${p.nome}`"
-          @click="abrir(p)"
-        >
-          <component :is="icone(p)" class="size-4 shrink-0 text-muted-foreground" />
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2 min-w-0">
-              <span class="text-xs font-medium shrink-0">{{ p.tipo || 'Prova' }}</span>
-              <span class="text-xs text-muted-foreground truncate underline-offset-2 hover:underline">{{ p.nome }}</span>
+    <div v-else-if="!atuais.length" class="text-sm text-muted-foreground">Nenhuma prova atual — as outras estão abaixo.</div>
+    <template v-for="b in blocos" :key="b.k">
+      <button
+        v-if="b.titulo"
+        type="button"
+        class="mt-2 flex items-center gap-1 text-xs text-muted-foreground hover:text-primary"
+        @click="abertos[b.k] = !abertos[b.k]"
+      >
+        <ChevronRight class="size-3.5 transition-transform" :class="{ 'rotate-90': abertos[b.k] }" />
+        {{ b.titulo }} ({{ b.itens.length }})
+      </button>
+      <ul v-if="b.itens.length && (!b.titulo || abertos[b.k])" class="divide-y rounded-lg border" :class="{ 'mt-1': b.titulo }">
+        <li v-for="p in b.itens" :key="p.id" class="flex items-center gap-2 px-3 py-2 min-w-0">
+          <button
+            type="button"
+            class="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-primary"
+            :title="`abrir ${p.nome}`"
+            @click="abrir(p)"
+          >
+            <component :is="icone(p)" class="size-4 shrink-0 text-muted-foreground" />
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="text-xs font-medium shrink-0">{{ p.tipo || 'Prova' }}</span>
+                <span class="text-xs text-muted-foreground truncate underline-offset-2 hover:underline">{{ p.nome }}</span>
+              </div>
+              <div class="text-[11px] text-muted-foreground truncate" :title="p.mega_caminho || ''">
+                {{ dataBr(p.enviado_em) }}<span v-if="p.tamanho"> · {{ tamanho(p.tamanho) }}</span>
+                <template v-if="p.mega_caminho"> · MEGA: {{ pasta(p.mega_caminho) }}</template>
+                <span v-else class="text-amber-700 dark:text-amber-400"> · ainda não está no MEGA</span>
+              </div>
             </div>
-            <div class="text-[11px] text-muted-foreground truncate" :title="p.mega_caminho || ''">
-              {{ dataBr(p.enviado_em) }}<span v-if="p.tamanho"> · {{ tamanho(p.tamanho) }}</span>
-              <template v-if="p.mega_caminho"> · MEGA: {{ pasta(p.mega_caminho) }}</template>
-              <span v-else class="text-amber-700 dark:text-amber-400"> · ainda não está no MEGA</span>
-            </div>
-          </div>
-        </button>
-        <Button
-          v-if="p.mega_caminho"
-          size="icon"
-          variant="ghost"
-          class="size-7 shrink-0"
-          :title="`copiar o caminho no MEGA:\n${p.mega_caminho}`"
-          @click="copiar(p)"
-        >
-          <Check v-if="copiado === p.id" class="size-3.5 text-emerald-600" />
-          <Copy v-else class="size-3.5" />
-        </Button>
-        <CloudOff v-else class="size-4 shrink-0 text-amber-600" />
-      </li>
-    </ul>
+          </button>
+          <Button
+            v-if="p.mega_caminho"
+            size="icon"
+            variant="ghost"
+            class="size-7 shrink-0"
+            :title="`copiar o caminho no MEGA:\n${p.mega_caminho}`"
+            @click="copiar(p)"
+          >
+            <Check v-if="copiado === p.id" class="size-3.5 text-emerald-600" />
+            <Copy v-else class="size-3.5" />
+          </Button>
+          <CloudOff v-else class="size-4 shrink-0 text-amber-600" />
+        </li>
+      </ul>
+    </template>
     <div class="mt-2 flex flex-wrap items-center gap-3">
-      <Button v-if="provas.length > inicial" size="sm" variant="ghost" @click="todas = !todas">
-        {{ todas ? 'mostrar menos' : `ver todas (${provas.length})` }}
+      <Button v-if="atuais.length > inicial" size="sm" variant="ghost" @click="todas = !todas">
+        {{ todas ? 'mostrar menos' : `ver todas (${atuais.length})` }}
       </Button>
       <p v-if="provas.length" class="text-[11px] text-muted-foreground">
         Clique na prova para ver aqui. Os originais ficam no MEGA da empresa (conta sac@makisa), pasta Fiscalização.
@@ -182,13 +216,13 @@ onUnmounted(parar)
               <DialogTitle class="truncate text-sm font-semibold">{{ aberta.tipo || 'Prova' }} · {{ aberta.nome }}</DialogTitle>
               <DialogDescription class="text-[11px] text-muted-foreground">
                 {{ dataBr(aberta.enviado_em) }}<span v-if="aberta.tamanho"> · {{ tamanho(aberta.tamanho) }}</span>
-                · {{ indice + 1 }} de {{ provas.length }}
+                · {{ indice + 1 }} de {{ ordem.length }}
               </DialogDescription>
             </div>
             <Button size="icon" variant="ghost" class="size-8" :disabled="indice <= 0" title="anterior (←)" @click="andar(-1)">
               <ChevronLeft class="size-4" />
             </Button>
-            <Button size="icon" variant="ghost" class="size-8" :disabled="indice >= provas.length - 1" title="próxima (→)" @click="andar(1)">
+            <Button size="icon" variant="ghost" class="size-8" :disabled="indice >= ordem.length - 1" title="próxima (→)" @click="andar(1)">
               <ChevronRight class="size-4" />
             </Button>
             <template v-if="estado === 'pronto'">

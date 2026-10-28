@@ -763,9 +763,50 @@ def _caber_no_teto(manter: Path) -> list[int]:
 # ─────────────────────────────────────────────────────────────── telas
 
 
-def _prova_resumo(p: DenunciaProva) -> dict:
+def _nome_prova(p: DenunciaProva) -> str:
     d = p.dados or {}
-    nome = d.get("nome_original") or os.path.basename(str(d.get("arquivo") or "")) or f"prova {p.id}"
+    return d.get("nome_original") or os.path.basename(str(d.get("arquivo") or "")) or f"prova {p.id}"
+
+
+_RE_EXTENSAO_PROVA = re.compile(r"\.(png|jpe?g|html?|pdf)$", re.I)
+
+
+def _print_do_anuncio(p: DenunciaProva) -> bool:
+    """Print da página tirado pelo robô (não a cópia que foi anexada à Anatel)."""
+    obs = str((p.dados or {}).get("obs") or "")
+    return p.tipo == "Captura no ato" and not obs.startswith("Captura enviada à Anatel")
+
+
+def _grupos_provas(provas: list[DenunciaProva]) -> dict[int, str]:
+    """28/10/2026 (Vinicius: "essa lista de prova enorme… muito print, muita besteira"): onde cada prova
+    aparece na tela. "atual" = o último print de cada anúncio (a imagem e a cópia da página, mesmo nome),
+    as cópias que foram à Anatel, o dossiê e as provas do caso; "denuncias" = os registros de cada
+    denúncia na loja (também aparecem na própria denúncia); "historico" = prints antigos (já há um mais
+    novo) e inválidos (captcha, outra página). Nada é apagado — só fica fechado na tela."""
+    ultimo: dict[str | None, tuple[tuple[str, int], str]] = {}
+    for p in provas:
+        if _print_do_anuncio(p):
+            chave = (str((p.dados or {}).get("enviado_em") or ""), p.id)
+            if p.anuncio_id not in ultimo or chave > ultimo[p.anuncio_id][0]:
+                ultimo[p.anuncio_id] = (chave, _RE_EXTENSAO_PROVA.sub("", _nome_prova(p)))
+    grupos: dict[int, str] = {}
+    for p in provas:
+        tipo = p.tipo or ""
+        if tipo.startswith("Captura inválida"):
+            grupos[p.id] = "historico"
+        elif _print_do_anuncio(p):
+            mais_novo = _RE_EXTENSAO_PROVA.sub("", _nome_prova(p)) == ultimo[p.anuncio_id][1]
+            grupos[p.id] = "atual" if mais_novo else "historico"
+        elif tipo == "Registro da denúncia":
+            grupos[p.id] = "denuncias"
+        else:
+            grupos[p.id] = "atual"
+    return grupos
+
+
+def _prova_resumo(p: DenunciaProva, grupo: str = "atual") -> dict:
+    d = p.dados or {}
+    nome = _nome_prova(p)
     tipo_mime = mimetypes.guess_type(nome)[0] or mimetypes.guess_type(str(d.get("arquivo") or ""))[0]
     return {
         "id": p.id,
@@ -773,6 +814,7 @@ def _prova_resumo(p: DenunciaProva) -> dict:
         "caso_id": p.caso_id,
         "denuncia_id": p.denuncia_id,
         "tipo": p.tipo,
+        "grupo": grupo,
         "nome": nome,
         "mime": tipo_mime,
         "tamanho": p.tamanho,
@@ -1385,6 +1427,7 @@ async def ver_anuncio(
             .order_by(DenunciaProva.id.desc())
         )
     ).scalars().all()
+    grupos = _grupos_provas(list(provas))
     verifs = (
         await session.execute(
             select(DenunciaVerificacao)
@@ -1430,7 +1473,7 @@ async def ver_anuncio(
         "status": {"na_loja": st["loja_st"], "na_anatel": st["anatel_st"]},
         "junto": junto,
         "denuncias": [{**(d.dados or {}), "id": d.id} for d in dens],
-        "provas": [_prova_resumo(p) for p in provas],
+        "provas": [_prova_resumo(p, grupos[p.id]) for p in provas],
         "verificacoes": [v.dados for v in verifs],
         "casos": [c.dados for c in casos],
         "compras": [c.dados for c in compras],
@@ -2402,6 +2445,7 @@ async def ver_caso(
             .order_by(DenunciaProva.id.desc())
         )
     ).scalars().all()
+    grupos = _grupos_provas(list(provas))
     # caso por loja: a lista de anúncios dela e as denúncias de todos
     excluido = (c.dados or {}).get("excluido_anuncio_id")
     ids = _anuncios_do_caso(c) or ([excluido] if excluido else [])
@@ -2438,7 +2482,7 @@ async def ver_caso(
         "anuncios_do_caso": do_caso,
         "anuncio": anuncio.dados if anuncio else None,
         "compras": [x.dados for x in compras],
-        "provas": [_prova_resumo(p) for p in provas],
+        "provas": [_prova_resumo(p, grupos[p.id]) for p in provas],
         "denuncias": [d.dados for d in dens],
         "anexos": await _anexos_do_caso(session, caso_id),
         "extra": _extra_dict(extra),
