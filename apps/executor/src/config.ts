@@ -52,6 +52,8 @@ export interface Config {
   tiktokPerfisExtra: Record<string, string>;
   // Conferência Shopee (só leitura; o servidor manda as lojas e as semanas)
   conferenciaLoginAuto: boolean;
+  // Quantas lojas da Conferência ao mesmo tempo (28/10/2026; antes 1). Teto 4.
+  conferenciaParalelo: number;
 }
 
 /** {"Loja 206081932": "k1dkfg0l"} → chave em minúsculas, sem acento, espaço
@@ -132,4 +134,5 @@ export const cfg: Config = {
   // (login_auto no job); "false" aqui proíbe o clique NESTA máquina mesmo
   // assim (loja deslogada volta "deslogada" sem tocar na tela de login).
   conferenciaLoginAuto: str("CONFERENCIA_LOGIN_AUTO", "true") !== "false",
+  conferenciaParalelo: Math.max(1, Math.min(4, int("CONFERENCIA_PARALELO", 3))),
 };

@@ -19,7 +19,8 @@
  * Cada máquina liga só as filas dela (EXECUTOR_FILAS): desde 24/09/2026 o
  * "Suspender entrega" do Melhor Envio roda no Mac Santiago, e a Shopee e o
  * Tuta ficam no executor do Eduardo. Desde 06/10/2026 há a `conferencia`
- * (Conferência Shopee, só leitura): uma loja por ciclo, depois das outras.
+ * (Conferência Shopee, só leitura); desde 28/10/2026 ela corre fora do ciclo
+ * serial, com até CONFERENCIA_PARALELO lojas ao mesmo tempo (padrão 3).
  */
 import "dotenv/config";
 
@@ -368,25 +369,8 @@ async function entregarConferencia(job: JobConferencia, r: ResultadoConferencia)
   return false;
 }
 
-/** Conferência Shopee: UMA loja por ciclo (cada uma leva alguns minutos;
- *  uma por vez deixa as outras filas respirarem entre as lojas). */
-async function processConferencia(): Promise<void> {
-  // AdsPower fora: nem pede trabalho — senão cada loja voltaria "erro" em
-  // segundos e a execução inteira se perdia.
-  if (!(await adspower.garantirAberto())) {
-    if (!adspowerForaAvisado) log.warn("conferência: AdsPower não responde — não puxo loja até ele voltar");
-    adspowerForaAvisado = true;
-    return;
-  }
-  adspowerForaAvisado = false;
-  let job: JobConferencia | null;
-  try {
-    job = await davinci.leaseConferencia(cfg.agentName);
-  } catch (err: any) {
-    log.warn(`lease conferência falhou: ${String(err?.message || err)}`);
-    return;
-  }
-  if (!job) return;
+/** Uma loja da Conferência: coleta e entrega ao DaVinci. */
+async function rodarConferencia(job: JobConferencia): Promise<void> {
   log.info(`conferência ${job.conta} (${job.adspower_user_id}): começando, tentativa ${job.tentativa}`);
   let r: ResultadoConferencia;
   try {
@@ -403,6 +387,48 @@ async function processConferencia(): Promise<void> {
     (entregue ? "" : " [NÃO entregue]");
   if (r.status === "ok" || r.status === "aguardando_afiliados" || r.status === "perfil_em_uso") log.info(msg);
   else log.warn(msg);
+}
+
+/** Conferência Shopee: até CONFERENCIA_PARALELO lojas ao mesmo tempo (28/10/2026,
+ *  pedido do dono; antes era uma por ciclo). Fica FORA do ciclo serial: o servidor
+ *  entrega uma loja por lease (FOR UPDATE SKIP LOCKED, nunca a mesma duas vezes) e
+ *  cada coleta abre o seu próprio perfil — perfil já aberto volta "perfil_em_uso".
+ *  Coleta é só leitura (chamadas de dentro da página), sem clique na tela. */
+let conferenciasRodando = 0;
+let enchendoConferencia = false;
+
+async function encherConferencia(): Promise<void> {
+  if (enchendoConferencia) return;
+  enchendoConferencia = true;
+  try {
+    while (conferenciasRodando < cfg.conferenciaParalelo) {
+      // AdsPower fora: nem pede trabalho — senão cada loja voltaria "erro" em
+      // segundos e a execução inteira se perdia.
+      if (!(await adspower.garantirAberto())) {
+        if (!adspowerForaAvisado) log.warn("conferência: AdsPower não responde — não puxo loja até ele voltar");
+        adspowerForaAvisado = true;
+        return;
+      }
+      adspowerForaAvisado = false;
+      let job: JobConferencia | null;
+      try {
+        job = await davinci.leaseConferencia(cfg.agentName);
+      } catch (err: any) {
+        log.warn(`lease conferência falhou: ${String(err?.message || err)}`);
+        return;
+      }
+      if (!job) return;
+      conferenciasRodando++;
+      void rodarConferencia(job).finally(() => {
+        conferenciasRodando--;
+        void encherConferencia(); // vaga livre: puxa a próxima loja na hora
+      });
+      // Espaça a abertura dos perfis (rate-limit ~1 req/s da Local API do AdsPower).
+      await sleep(cfg.profileGapMs);
+    }
+  } finally {
+    enchendoConferencia = false;
+  }
 }
 
 /** Um ciclo de trabalho: puxa as filas e drena SERIALMENTE (um perfil por vez). */
@@ -431,11 +457,6 @@ async function tick(): Promise<void> {
     for (let i = 0; i < logistica.length; i++) {
       if (commands.length || i > 0) await sleep(cfg.profileGapMs);
       await processLogisticaCommand(logistica[i]);
-    }
-    // Conferência Shopee por último: uma loja por ciclo.
-    if (cfg.filas.has("conferencia")) {
-      if (commands.length || logistica.length) await sleep(cfg.profileGapMs);
-      await processConferencia();
     }
   } catch (err: any) {
     log.error(`tick falhou: ${String(err?.message || err)}`);
@@ -591,7 +612,7 @@ async function main(): Promise<void> {
   }
   if (cfg.filas.has("conferencia")) {
     log.info(
-      "Conferência Shopee: ligada — uma loja por ciclo, só leitura" +
+      `Conferência Shopee: ligada — até ${cfg.conferenciaParalelo} loja(s) ao mesmo tempo, só leitura` +
         (cfg.conferenciaLoginAuto ? "" : " (CONFERENCIA_LOGIN_AUTO=false: nunca clica em Entrar)") +
         (cfg.filas.has("shopee") || cfg.filas.has("melhorenvio") ? "" : " (esta máquina não manda sinal de vida)")
     );
@@ -619,6 +640,13 @@ async function main(): Promise<void> {
   setInterval(() => {
     void tick();
   }, cfg.pollIntervalMs);
+  // Conferência no seu próprio laço (até CONFERENCIA_PARALELO lojas juntas).
+  if (cfg.filas.has("conferencia")) {
+    void encherConferencia();
+    setInterval(() => {
+      void encherConferencia();
+    }, cfg.pollIntervalMs);
+  }
 
   log.info(`rodando — puxando comandos a cada ${Math.round(cfg.pollIntervalMs / 1000)}s`);
 }
