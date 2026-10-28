@@ -352,6 +352,10 @@ async def ingerir_csv_amazon(
         if achado:
             m["pedido_bling"], m["bling_id"] = achado
     vendas_margem = await _gravar_vendas_da_margem(session, loja, movs, agora)
+    # 28/10 (o painel recomeçou em 24/10): o arquivo do robô cobre semanas; linha de antes
+    # do início da loja não entra no painel (viraria cobrança sem dono num dia que ele nem
+    # mostra). A venda dela continua indo pra Margem, acima.
+    movs = [m for m in movs if m["data"].astimezone(BRT).date() >= loja.inicio]
     ids_arquivo = [m["id_externo"] for m in movs] + [v for v in legados.values() if v]
     existentes = {
         m.id_externo: m

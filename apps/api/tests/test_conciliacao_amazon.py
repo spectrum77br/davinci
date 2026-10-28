@@ -837,6 +837,22 @@ async def test_ingerir_csv_amazon_grava_atualiza_e_nao_duplica(db, make_user):
     ]
 
 
+async def test_csv_amazon_ignora_linha_antes_do_inicio_da_loja(db, make_user):
+    """28/10 (o painel recomeçou em 24/10): o arquivo do robô cobre semanas; linha de
+    antes do início não entra no painel — senão a assinatura, a publicidade e a cobrança
+    do saldo de 02 a 08/10 viravam "sem dono" num dia que o painel nem mostra. A venda
+    da linha continua indo pra Margem."""
+    loja = await _loja_amazon(db, make_user, inicio=date(2026, 10, 16))
+    loja.modo_extrato = "upload"
+    await db.commit()
+    r = await ingerir_csv_amazon(db, loja, CSV_KFA, agora=datetime(2026, 10, 16, 13, tzinfo=UTC))
+    movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
+    assert [m.descricao for m in movs] == ["Lançamento do pedido 701-4878844-1794663"]
+    assert r["inseridos"] == 1 and r["linhas"] == 9
+    # o pedido preso de 15/10 ficou fora do painel, mas a venda dele foi pra Margem
+    assert r["vendas_margem"]["criadas"] == 2
+
+
 async def test_endpoint_upload_amazon_so_para_loja_por_arquivo(db, make_user, auth_as, client):
     loja = await _loja_amazon(db, make_user)
     await db.commit()
