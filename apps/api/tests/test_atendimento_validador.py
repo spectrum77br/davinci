@@ -237,8 +237,14 @@ def test_bloqueia_pedir_ou_condicionar_avaliacao(texto):
         "não precisa ir ao Procon",
     ],
 )
-def test_bloqueia_desestimular_reclamacao(texto):
-    assert "desestimula reclamação" in _v(texto), texto
+def test_desestimular_reclamacao_e_decisao_de_pessoa(texto):
+    """28/10/2026, o dono ("temos que perder essa trava pra ele aprender"): quem
+    responde pela tela pode mandar; a IA e o agente nunca mandam sozinhos (o
+    motivo segue só para eles, e não bloqueia a sugestão: ela fica para a pessoa)."""
+    assert "desestimula reclamação" not in _v(texto), texto
+    motivos_ia = _v(texto, origem=ORIGEM_IA)
+    assert "desestimula reclamação" in motivos_ia, texto
+    assert not so_da_ia(["desestimula reclamação"])
 
 
 def test_lacuna_literal_nao_sai():
@@ -521,11 +527,6 @@ def test_pergunta_publica_do_ml_nao_publica_preco():
         ("evite dar nota baixa", "pede ou condiciona avaliação"),
         ("não avalie mal", "pede ou condiciona avaliação"),
         # Desestimular reclamação, devolução e reembolso pela plataforma.
-        ("Nem precisa reclamar", "desestimula reclamação"),
-        ("Não vale a pena abrir disputa", "desestimula reclamação"),
-        ("Não abra devolução", "desestimula reclamação"),
-        ("Não solicite reembolso pela plataforma, a gente resolve aqui", "desestimula reclamação"),
-        ("desista da reclamação", "desestimula reclamação"),
         # Contato fora da loja, escrito para escapar.
         ("Me chama no zapp", "contato fora da loja (WhatsApp)"),
         ("uatizap", "contato fora da loja (WhatsApp)"),
@@ -550,6 +551,22 @@ def test_regras_duras_buracos_da_revisao(texto, motivo):
     # Duro para todos: a pessoa E a IA.
     assert motivo in _v(texto, origem=ORIGEM_HUMANO), texto
     assert motivo in _v(texto, origem=ORIGEM_IA), texto
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Nem precisa reclamar",
+        "Não vale a pena abrir disputa",
+        "Não abra devolução",
+        "Não solicite reembolso pela plataforma, a gente resolve aqui",
+        "desista da reclamação",
+    ],
+)
+def test_desestimular_reclamacao_buracos_da_revisao_so_na_ia(texto):
+    # 28/10/2026: desestimular reclamação é decisão de pessoa — a IA nunca manda sozinha.
+    assert "desestimula reclamação" not in _v(texto, origem=ORIGEM_HUMANO), texto
+    assert "desestimula reclamação" in _v(texto, origem=ORIGEM_IA), texto
 
 
 # ─────────────── Zap (WhatsApp da marca, Onda 2 — 26/10/2026) ───────────────
@@ -627,13 +644,19 @@ def test_zap_libera_contato_da_marca_e_nao_barra_a_toa(texto):
         # O que vale para a conversa venha de onde vier.
         ("por fora sai mais barato", "negociação fora da plataforma"),
         ("Nos avalie com 5 estrelas!", "pede ou condiciona avaliação"),
-        ("Não abra reclamação, resolvemos aqui", "desestimula reclamação"),
         ("Seu código é {rastreio}", "lacuna não preenchida ({rastreio})"),
     ],
 )
 def test_zap_barra_para_pessoa_e_ia(texto, motivo):
     assert motivo in _zap(texto), (texto, _zap(texto))
     assert motivo in _zap(texto, origem=ORIGEM_IA), (texto, _zap(texto, origem=ORIGEM_IA))
+
+
+def test_zap_desestimular_reclamacao_so_na_ia():
+    # 28/10/2026: no Zap também — a pessoa decide; a IA nunca manda sozinha.
+    texto = "Não abra reclamação, resolvemos aqui"
+    assert "desestimula reclamação" not in _zap(texto)
+    assert "desestimula reclamação" in _zap(texto, origem=ORIGEM_IA)
 
 
 # Revisão da Onda 2 (26/10/2026): o que passava e não podia.

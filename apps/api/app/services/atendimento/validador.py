@@ -988,11 +988,14 @@ def validar(
     if plataforma == "magalu" and _algum(_DOCUMENTO_MAGALU, plano):
         motivos.append(_MOTIVO_DOCUMENTO_MAGALU)
 
-    # Avaliação e reclamação: proibido para todos, em todas.
+    # Avaliação: proibido para todos, em todas.
     if _algum(_AVALIACAO, plano):
         motivos.append(_MOTIVO_AVALIACAO)
-    if _algum(_RECLAMACAO, plano):
-        motivos.append(_MOTIVO_RECLAMACAO)
+    # Reclamação (28/10/2026, o dono: "temos que perder essa trava pra ele aprender
+    # corretamente o que precisamos pra cada caso"): desestimular reclamação,
+    # disputa ou devolução é decisão de PESSOA — quem responde pela tela manda; a IA
+    # e o agente nunca mandam sozinhos (o motivo segue só para eles, logo abaixo: o
+    # rascunho vai para a pessoa, nunca no automático).
 
     lacunas = sorted({m.group(0) for m in _LACUNA.finditer(limpo)})
     if lacunas:
@@ -1000,6 +1003,8 @@ def validar(
 
     # Só IA: prazo e valor vinculam — só por lacuna preenchida pelo código.
     if origem == ORIGEM_IA:
+        if _algum(_RECLAMACAO, plano):
+            motivos.append(_MOTIVO_RECLAMACAO)
         do_prazo = _sem_prazo_da_regra(plano, prazos_de_garantia) if prazos_de_garantia else plano
         if _algum(_VALOR, _sem_variacao_de_memoria(_MEDIDA_DE_TELA.sub(" ", plano))):
             motivos.append(_MOTIVO_VALOR)
@@ -1051,6 +1056,9 @@ def so_da_ia(motivos: list[str]) -> bool:
     A IA usa isto para decidir entre deixar o rascunho na caixa (a pessoa
     corrige o que o envio de qualquer jeito barraria) e bloqueá-lo (o envio
     pela pessoa NÃO barraria — "frete grátis" inventado sairia num clique).
+    O "desestimula reclamação" (28/10/2026) NÃO está aqui de propósito: a
+    pessoa pode mandar, e o rascunho da IA que o tem fica na caixa para ela
+    decidir (nunca no automático: o motivo tira o `validador_ok`).
     """
     da_ia = {
         _MOTIVO_VALOR,

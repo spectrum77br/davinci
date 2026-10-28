@@ -2520,11 +2520,16 @@ def _ensina_o_proibido(texto: str | None, plataforma: str, canal: str) -> bool:
     Exemplo com promessa ensina promessa: a IA passaria a copiar o "deixe
     sua avaliação 5 estrelas" que alguém aprovou pelo tom. A lacuna sem dado
     (`{rastreio}` que ficou aberto na sugestão) ensina justamente a usar
-    lacuna — essa fica.
+    lacuna — essa fica. O "desestimula reclamação" também fica (28/10/2026, o
+    dono: o agente aprende com a equipe como tratar cada caso de devolução ou
+    reclamação; o rascunho que o repetir vai para a pessoa, nunca sai sozinho).
     """
     final = validador.normalizar(texto or "", plataforma=plataforma, canal=canal)
     motivos = validador.validar(final, plataforma=plataforma, canal=canal, origem=ORIGEM_IA)
-    return any(not m.startswith(validador._MOTIVO_LACUNA) for m in motivos)
+    return any(
+        not m.startswith(validador._MOTIVO_LACUNA) and m != validador._MOTIVO_RECLAMACAO
+        for m in motivos
+    )
 
 
 def _avaliacao_vale_aqui(conversa: AtendimentoConversa, avaliador: Any, *, so_admin: bool):
