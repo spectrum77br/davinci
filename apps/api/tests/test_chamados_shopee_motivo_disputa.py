@@ -34,5 +34,13 @@ def test_sem_uso_indevido_na_lista_nao_disputa_com_a_taxa(motivo):
 def test_demais_motivos_nao_mudaram():
     assert _shopee_reason_id(_shopee_reason(_TODOS, "danificado (outros)")) == 82
     assert _shopee_reason_id(_shopee_reason(_TODOS, "item faltando")) == 83
-    assert _shopee_reason_id(_shopee_reason(_TODOS, "golpe")) == 83
     assert _shopee_reason_id(_shopee_reason(_TODOS, "não recebido")) == 81
+
+
+def test_golpe_disputa_como_produto_diferente():
+    """301650 (28/10): voltou uma esmerilhadeira no lugar do celular; a disputa como
+    "pacote vazio" (83) perdeu. Golpe = o comprador trocou o produto → "produto
+    diferente do enviado" (84); sem o 84 na lista, o 83 de antes."""
+    assert _shopee_reason_id(_shopee_reason(_TODOS, "golpe")) == 84
+    sem_84 = [r for r in _TODOS if r["dispute_reason"] != 84]
+    assert _shopee_reason_id(_shopee_reason(sem_84, "golpe")) == 83

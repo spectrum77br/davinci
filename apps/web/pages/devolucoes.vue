@@ -216,7 +216,7 @@ const MOTIVOS_DEVOLUCAO = [
 ] as const
 
 // Motivos que abrem chamado automático (services/chamados_devolucao):
-// Golpe = pacote vazio; Danificado (foto); Item faltando; Não recebido;
+// Golpe = comprador trocou o produto ("produto diferente", 28/10); Danificado (foto); Item faltando; Não recebido;
 // Bloqueado (mala travada por senha). Item Incorreto NÃO abre (07/09).
 
 // Abertura automática na plataforma — o que a linha mostra enquanto não está "enviada".

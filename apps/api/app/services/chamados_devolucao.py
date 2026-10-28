@@ -105,14 +105,19 @@ PLAT_AMAZON = "amazon"
 # Plataformas em que a contestação sai pela API.
 COM_API = frozenset({PLAT_ML, PLAT_TIKTOK, PLAT_SHOPEE})
 
-# Motivo da tela (minúsculo) → motivo do ML (Eduardo 04/09: "situação golpe é
-# pacote vazio"). "Item incorreto" NÃO abre chamado em plataforma nenhuma
+# Motivo da tela (minúsculo) → motivo do ML. "Golpe" era "pacote vazio" (Eduardo
+# 04/09) até 28/10: no 301650 voltou uma esmerilhadeira no lugar do celular, a
+# disputa saiu como "vazio" e perdeu, e a 2ª virou "Não recebi" (culpa da
+# transportadora). Vinicius 28/10: Golpe = o comprador TROCOU o produto → "produto
+# diferente do enviado" nas três plataformas. O ML só aceita esse motivo com anexo:
+# sem foto nenhuma sai "pacote vazio", como antes (`_reason_ml`).
+# "Item incorreto" NÃO abre chamado em plataforma nenhuma
 # (Eduardo 07/09: "para item incorreto, não deve abrir chamado") — é produto
 # errado enviado por nós, não há o que contestar.
 MOTIVO_ML: dict[str, str] = {
     "item faltando": "SRF3",  # devolução incompleta
     "danificado (outros)": "SRF2",  # produto chegou danificado (exige foto)
-    "golpe": "SRF5",  # pacote veio sem o produto
+    "golpe": "SRF4",  # produto devolvido diferente do enviado (exige anexo)
     "não recebido": "SRF7",  # pacote não chegou (motivo do pacote, sem anexo)
     # "Bloqueado" = mala voltou travada por senha (Eduardo 04/09: "produto veio,
     # mas bloqueado por senha abre chamado tbm") → outro problema com o produto.
@@ -126,7 +131,7 @@ _TT = "reverse_reject_return_parcel_reason_"
 MOTIVO_TIKTOK: dict[str, str] = {
     "item faltando": _TT + "3",
     "danificado (outros)": _TT + "5",
-    "golpe": _TT + "3",  # pacote vazio = todos os itens faltando
+    "golpe": _TT + "1",  # produto devolvido não é o enviado
     "não recebido": _TT + "4",
     "bloqueado": _TT + "5",  # mala com senha = usada, não revendável
     "mudou de ideia": _TT + "5",
@@ -136,7 +141,7 @@ MOTIVO_TIKTOK: dict[str, str] = {
 MOTIVO_SHOPEE: dict[str, tuple[str, ...]] = {
     "item faltando": ("incomplete return", "missing"),
     "danificado (outros)": ("physical damage", "damage"),
-    "golpe": ("incomplete return", "wrong return product", "missing"),
+    "golpe": ("wrong return product", "incomplete return", "missing"),
     "não recebido": ("did not receive", "not receive"),
     "bloqueado": ("item is used", "used"),  # 28/09: ver _SHOPEE_PREF_PACOTE
     "mudou de ideia": ("item is used", "used"),
@@ -246,6 +251,16 @@ def _motivo(dev: Devolution) -> str:
 def reason_para(dev: Devolution) -> str | None:
     """Motivo do ML pro motivo da tela (None = não abre chamado)."""
     return MOTIVO_ML.get(_motivo(dev))
+
+
+def _reason_ml(dev: Devolution, fotos: list) -> str | None:
+    """`reason_para` com o anexo que vai junto: Golpe sem foto nenhuma (nem o cartão
+    do vídeo) sai "pacote vazio" (SRF5) — o "produto diferente" (SRF4) o ML recusa
+    sem anexo, e o chamado ficava "aguardando foto"."""
+    reason = reason_para(dev)
+    if reason == "SRF4" and _motivo(dev) == "golpe" and not fotos:
+        return "SRF5"
+    return reason
 
 
 def reason_tiktok(dev: Devolution) -> str | None:
@@ -1211,7 +1226,7 @@ async def _resolver_claim_ml(
 async def _disparar_ml(
     session: AsyncSession, ch: Chamado, dev: Devolution, fotos: list[DevolucaoAnexo], texto: str
 ) -> tuple[str, str]:
-    reason = reason_para(dev)
+    reason = _reason_ml(dev, fotos)
     if reason is None:
         raise _PendenteError("devolucao_motivo_sem_chamado")
     if reason in REASONS_DO_PACOTE:
@@ -1293,7 +1308,7 @@ def _tiktok_reason_por_texto(reasons: list[dict], motivo: str) -> str | None:
         "danificado (outros)": ("damaged", "danific", "inadequad", "usado", "used"),
         "bloqueado": ("damaged or used", "usado", "used", "inadequad"),
         "mudou de ideia": ("damaged or used", "usado", "used", "inadequad"),
-        "golpe": ("missing", "falt", "not the product", "diferente"),
+        "golpe": ("not the product", "diferente", "missing", "falt"),
         "item faltando": ("missing", "falt", "incomplet"),
         "não recebido": ("haven't received", "not received", "não receb"),
     }.get(motivo, ())
@@ -1662,7 +1677,7 @@ _SHOPEE_ID_SEM = {
 # motivo da tela → semânticas aceitas, na ordem de preferência
 _SHOPEE_PREF_PACOTE: dict[str, tuple[str, ...]] = {
     "danificado (outros)": ("danificado", "usado", "alegacao_incorreta"),
-    "golpe": ("incompleto", "produto_errado", "alegacao_incorreta"),
+    "golpe": ("produto_errado", "incompleto", "alegacao_incorreta"),
     "item faltando": ("incompleto", "alegacao_incorreta"),
     "não recebido": ("nao_recebi",),
     # sem o "uso indevido" na lista, não disputa (vai pra gente): o 86 perde
@@ -2395,6 +2410,8 @@ async def _disparar(
             for a in fotos:  # cartão órfão (link apagado / motivo trocado)
                 await session.delete(a)
             fotos = []
+    if plat == PLAT_ML:
+        reason = _reason_ml(dev, fotos)
     msg.texto = (texto_override or "").strip() or texto_padrao(
         dev, reason, fotos=len(fotos_reais), link_envio=link or None,
         cartao_video=cartao is not None, linhas=linhas,

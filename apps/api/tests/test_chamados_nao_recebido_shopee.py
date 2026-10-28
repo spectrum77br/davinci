@@ -244,7 +244,7 @@ async def test_outro_motivo_continua_igual_com_cartao_e_texto_padrao(client, mak
     assert d["reason"] == 84
     assert d["image_list"] == [{"module_index": 1, "requirement": "Photos",
                                 "image_url": ["https://fileproxy/video-expedicao.png"]}]
-    assert d["text"].startswith("Recebemos o pacote da devolução sem o produto dentro.")
+    assert d["text"].startswith("Recebemos a devolução e o produto devolvido é diferente do que enviamos.")
     assert "QR code" in d["text"] and "Comprovante da expedição (fotos/vídeo do envio): https://mega.nz/file/video-296007#K3yDoVideoNaMega0123456789abcdefghij" in d["text"]
 
 

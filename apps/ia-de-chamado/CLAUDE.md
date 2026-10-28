@@ -292,14 +292,36 @@ Assistente diz que o prazo de 3 dias acabou) — funcionou em 29/09 (294654):
 1. Página da devolução → avatar "Entre em contato com a Shopee".
 2. Botão **"Falar com o nosso atendimento"** → escolha **"Disputa de Reembolso e
    Devolução"** → um atendente humano entra em ~1 min e dá um protocolo.
-3. Explique em 2 mensagens curtas: o que voltou e por que não dá pra revender; o
-   reembolso já pago e o que já fizemos; peça **análise do caso e compensação**.
+3. Explique em 2 mensagens curtas: o que voltou (com as palavras do bloco "O motivo
+   da disputa" abaixo) e por que não dá pra revender; o reembolso já pago e o que
+   já fizemos; peça **análise do caso e compensação**.
 4. Se ele abrir uma disputa nova com **Upload Evidence**, o prazo é de ~1 dia:
    mande as fotos na mesma rodada (seção abaixo).
 5. O chat pergunta "Você gostaria que continuássemos?" e fecha em 60 s: responda
    (`vivo`) enquanto espera o atendente.
 6. O botão "Abrir solicitação de análise" do robô leva à Central de Educação — não
    é formulário.
+
+**O motivo da disputa que o atendente abre** (2ª disputa ou prazo vencido): quem
+marca o motivo é o atendente, e ele escolhe pelas **suas palavras**. No 301650
+(28/10) a IA escreveu "o produto não voltou na devolução" e a atendente abriu a 2ª
+disputa como "Não recebi o produto devolvido, mas consta como entregue". Num golpe
+do comprador, a culpa foi parar na transportadora. Por isso:
+- Antes de escrever, olhe as fotos (`anexos`) e diga o que **de fato** voltou.
+- **Golpe** (pacote entregue com outra coisa dentro: pedra, ferramenta, outro
+  aparelho): "o pacote da devolução foi ENTREGUE na loja, mas dentro veio <o quê> no
+  lugar de <produto>; o comprador trocou o produto, não é problema da entrega".
+  Peça o motivo **"produto diferente do enviado"**.
+- **Pacote entregue vazio**: "o pacote da devolução foi ENTREGUE, mas chegou vazio".
+  Peça o motivo **"pacote chegou vazio ou faltando peças"**.
+- Pacote entregue? Então nunca escreva "não voltou", "não recebemos o produto" nem
+  "não chegou": essas frases viram "Não recebi" (motivo da transportadora). "Não
+  recebi" só quando o pacote da devolução não chegou mesmo.
+- Mande a explicação e as fotos (etiqueta + o que veio dentro) **antes** de pedir a
+  abertura, pra o atendente abrir já sabendo o que aconteceu.
+- Depois que ele abrir, confira o motivo na página da devolução ("Razão da
+  disputa"). Saiu errado? Diga na hora ao atendente e peça a correção. Se ele não
+  corrigir, `humano` com o motivo que saiu e o que deveria ser.
 
 **Chat do Assistente (robô)**: responda curto, uma coisa por vez, clique nas
 opções; só mande tudo quando ele abrir o caminho (formulário, atendente).

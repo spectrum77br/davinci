@@ -240,7 +240,8 @@ async def test_nao_recebido_abre_na_hora_sem_foto(client, make_user, auth_as, db
 async def test_golpe_pacote_vazio_item_incorreto_e_bloqueado(client, make_user, auth_as, db, ml):
     user = await make_user(permissions=_perms())
     auth_as(user)
-    # Golpe = pacote veio vazio (SRF5): abre na hora, sem foto obrigatória
+    # Golpe = comprador trocou o produto (SRF4, 28/10), mas o ML exige anexo no
+    # SRF4: sem foto nem vídeo sai "pacote vazio" (SRF5), na hora, como antes
     await _seed_pedido(db, user, numero="293102", numeroloja="2000102")
     r = await client.post(
         "/api/devolutions",
@@ -434,7 +435,12 @@ async def test_texto_e_reason():
     dev = Devolution(conta="aguiar", motivo_devolucao="Golpe",
                      pedido_marketplace="2000000001", sku="b001.26", produtos="Mala",
                      observacao="veio uma mala velha")
-    assert svc.reason_para(dev) == "SRF5"
+    assert svc.reason_para(dev) == "SRF4"  # produto diferente do enviado (28/10)
+    assert svc._reason_ml(dev, [object()]) == "SRF4"
+    assert svc._reason_ml(dev, []) == "SRF5"  # o ML não aceita SRF4 sem anexo
+    assert svc.texto_padrao(dev, "SRF4").startswith(
+        "Recebemos a devolução e o produto devolvido é diferente do que enviamos."
+    )
     dev.motivo_devolucao = "Item Incorreto"
     assert svc.reason_para(dev) is None  # não abre chamado (07/09)
     dev.motivo_devolucao = "Dano funcional / Não funciona"
@@ -642,11 +648,11 @@ async def test_tiktok_aguarda_pacote_e_quick_refund(client, make_user, auth_as, 
     )
     assert r.status_code == 201, r.text
     assert r.json()["chamado_ml_erro"] == "tiktok_aguardando_pacote"
-    # pacote chegou → cron abre com motivo "faltam produtos" (pacote vazio)
+    # pacote chegou → cron abre com "produto devolvido não é o enviado" (28/10)
     fake.status = "BUYER_SHIPPED_ITEM"
     s = await svc.processar_pendentes(db)
     assert s["abertos"] == 1
-    assert fake.rejects[-1]["reason"] == "reverse_reject_return_parcel_reason_3"
+    assert fake.rejects[-1]["reason"] == "reverse_reject_return_parcel_reason_1"
     assert fake.rejects[-1]["images"] is None
     # quick refund → falha definitiva
     fake2 = _FakeTikTok(quick=True)
@@ -824,7 +830,7 @@ async def test_shopee_so_reembolso_pacote_vazio_usa_id_53(client, make_user, aut
     assert d["image_list"] == [{"module_index": 1,
                                 "requirement": "Anexe fotos/vídeos gerados por você no momento da expedição do pedido",
                                 "image_url": ["https://fileproxy/expedicao.jpg"]}]
-    assert "sem o produto dentro" in d["text"]
+    assert "diferente do que enviamos" in d["text"]
     # já contestada (PENDING_REQUEST → REQUESTED) não manda de novo
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "292617"))).scalar_one()
     msg = await _abertura(db, ch.id)
