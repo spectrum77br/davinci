@@ -1712,13 +1712,11 @@ async def test_caixa_humano_mais_recente_em_cima(client, db, make_user, pessoa, 
     turnos = {i["id"]: i["turno_em"] for i in r.json()["itens"]}
     assert turnos[str(a.id)].startswith((AGORA - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M"))
 
-    # A Caixa: o "Falta responder" é a régua do Duoke (14/10/2026,
-    # `pendente.py`) — o menu do Duoke depois do comprador responde, então a A
-    # sai dele; as outras vêm pelo prazo (a mais velha primeiro: a C, há 3 h).
-    # "Todas" pela última mensagem (a do menu, há 10 min).
+    # A Caixa: o menu do Duoke depois do comprador NÃO responde (28/10/2026,
+    # `pendente.comprador_por_ultimo`), então a A fica no "Falta responder";
+    # todas vêm pelo prazo. "Todas" pela última mensagem (a do menu, há 10 min).
     caixa = _ids(await client.get(f"{URL}/conversas", params={"filtro": "aguardando"}))
-    assert str(a.id) not in caixa
-    assert caixa[0] == str(convs[2].id)
+    assert str(a.id) in caixa
     assert _ids(await client.get(f"{URL}/conversas"))[0] == str(a.id)
 
     # Cursor da outra ordem: 422.
