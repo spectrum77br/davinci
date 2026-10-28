@@ -152,6 +152,13 @@ class EnvioFotoOut(BaseModel):
     # O teto da legenda quando é menor que o do texto da caixa (Zap: 1.024,
     # 27/10/2026); None = o limite do texto.
     legenda_max: int | None = None
+    # O PDF (28/10/2026): 'arquivo' = chega como PDF (pós-venda do ML);
+    # 'imagem' = o chat não aceita arquivo e o PDF vira imagem; None = sem anexo.
+    pdf: str | None = None
+    # A NF cheia do pedido para o atalho "Anexar a NF" (o número), ou por que
+    # não há (a frase da tela).
+    nf_numero: str | None = None
+    nf_motivo: str | None = None
 
 
 class TrocaAbertaOut(BaseModel):

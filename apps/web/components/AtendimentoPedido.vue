@@ -179,6 +179,12 @@ export type EnvioFoto = {
   legenda_permitida: boolean
   // O teto da legenda quando é menor que o do texto (Zap: 1.024, 27/10/2026).
   legenda_max?: number | null
+  // PDF (28/10/2026): 'arquivo' = chega como PDF (pós-venda do ML); 'imagem' =
+  // o chat não aceita arquivo e o PDF vira imagem; null = sem anexo aqui.
+  pdf?: 'arquivo' | 'imagem' | null
+  // A NF cheia do pedido para o atalho "NF" (o número), ou por que não há.
+  nf_numero?: string | null
+  nf_motivo?: string | null
 }
 export type Painel = {
   pedido: { numero_bling: string; bling_id: number | null; numeroloja: string | null; situacao_id: string | null; situacao: string | null } | null

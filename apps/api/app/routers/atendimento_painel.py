@@ -12,7 +12,9 @@ mesmo escopo por equipe (`_conversa_ou_404`):
        / "Abrir na plataforma", perfil do AdsPower e se a foto pode sair agora;
        e, com o pedido em 83955, o porquê (`ag_cancelamento`, item 4).
   POST /api/atendimento/conversas/{id}/notas    nota interna (só a equipe vê).
-  POST /api/atendimento/conversas/{id}/foto     UMA foto ao comprador (multipart:
+  GET  /api/atendimento/conversas/{id}/nf       a DANFE (PDF) da nota cheia do
+       pedido (28/10/2026, `danfe.py`) — a tela anexa e manda pelo /foto.
+  POST /api/atendimento/conversas/{id}/foto     UMA foto ou PDF ao comprador (multipart:
        `arquivo`, `legenda` no ML (obrigatória) e no Zap (opcional, 27/10/2026),
        `ultima_vista_id`, `confirmar`) — pelo caminho único de saída
        (`enviar.enviar_foto`): as mesmas travas e os mesmos códigos do POST
@@ -27,11 +29,22 @@ Registro no `main.py`: `app.include_router(atendimento_painel_router.router)`
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -56,7 +69,7 @@ from app.schemas.atendimento_painel import (
     NotaOut,
     PainelOut,
 )
-from app.services.atendimento import enviar, foto, instagram, painel
+from app.services.atendimento import danfe, enviar, foto, instagram, painel
 from app.services.atendimento.constantes import (
     PLATAFORMA_SITE,
     PLATAFORMA_WHATSAPP,
@@ -206,7 +219,12 @@ async def enviar_foto(
         raise _recusa_http(EnvioRecusado(enviar.RECUSA_FOTO_NAO_SUPORTADA, motivo))
     dados = await arquivo.read(foto.MAX_BYTES_UPLOAD + 1)
     try:
-        imagem = foto.validar_foto(dados, arquivo.filename, arquivo.content_type)
+        # A conferência e, no PDF (a NF), a conversão: o PDF só fica PDF onde a
+        # plataforma aceita arquivo (pós-venda do ML); nos chats sem arquivo vira
+        # imagem. PyMuPDF é síncrono: fora do laço de eventos.
+        imagem = await asyncio.to_thread(
+            foto.validar_para_a_caixa, c, dados, arquivo.filename, arquivo.content_type
+        )
     except foto.FotoInvalida as e:
         raise HTTPException(
             422,
@@ -228,6 +246,39 @@ async def enviar_foto(
         )
         raise _recusa_http(e) from e
     return ResponderOut(mensagem=_mensagem_out(m, conversa=c, nomes={user.id: _nome(user)}))
+
+
+@router.get("/conversas/{conversa_id}/nf")
+async def nf_do_pedido(
+    conversa_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_responde)],
+) -> Response:
+    """A DANFE (PDF) da nota CHEIA do pedido da conversa — o atalho "Anexar a NF".
+
+    Desenhada do XML autorizado (`danfe.py`); a tela anexa o arquivo e a
+    pessoa manda pelo POST /foto (o caminho único de saída). Só de quem
+    responde. Sem NF cheia autorizada → 404 com `code` e a frase da tela.
+    """
+    if instagram.e_instagram(conversa_id):
+        raise _somente_leitura()
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    try:
+        nf = await danfe.nf_da_conversa(session, c)
+        pdf = await danfe.pdf_da_nf(session, nf)
+    except danfe.NfIndisponivel as e:
+        raise HTTPException(404, detail={"code": e.code, "detail": e.detail}) from e
+    logger.info("atendimento_nf_gerada", conversa_id=str(c.id), nf_id=nf.id, bytes=len(pdf))
+    return Response(
+        content=pdf,
+        media_type=foto.PDF,
+        headers={
+            "Content-Disposition": f'inline; filename="{nf.nome_arquivo}"',
+            "X-NF-Numero": nf.numero,
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post("/adspower/aberto", response_model=AdsPowerAbertoOut)

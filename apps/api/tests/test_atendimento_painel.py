@@ -336,6 +336,7 @@ def test_rotas_novas_tem_a_trava_da_caixa():
         f"{URL}/conversas/{{conversa_id}}/painel",
         f"{URL}/conversas/{{conversa_id}}/notas",
         f"{URL}/conversas/{{conversa_id}}/foto",
+        f"{URL}/conversas/{{conversa_id}}/nf",
         f"{URL}/adspower/aberto",
     }
     for r in rotas:
@@ -358,6 +359,9 @@ async def test_rotas_novas_na_fase_de_observacao(db, client, make_user, auth_as,
     for caminho in (f"/conversas/{uuid4()}/notas", f"/conversas/{uuid4()}/foto"):
         r = await client.post(URL + caminho, json={"texto": "x"})
         assert r.status_code not in (401, 403), r.text
+    # A NF do pedido (28/10/2026): de quem responde — passa e cai no 404.
+    r = await client.get(f"{URL}/conversas/{uuid4()}/nf")
+    assert r.status_code == 404, r.text
 
 
 # ─────────────── estoque ───────────────

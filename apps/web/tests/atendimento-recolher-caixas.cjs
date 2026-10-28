@@ -271,6 +271,8 @@ async function principal() {
       usandoSugestao: false, usarSugestao: () => usou.push('usar'), copiarTexto: () => usou.push('copiar'), canEdit: true,
       descarte, MOTIVOS_DESCARTE: ['tom inadequado'], MAX_MOTIVO: 2000, confirmarDescarte: () => usou.push('descartar'),
       sugestaoIaAberta: x.sugestaoIaAberta, alternarSugestaoIa: x.alternarSugestaoIa,
+      // A oferta da NF (28/10/2026) fica fora do corpo recolhível: sem a ação, não aparece.
+      nfNoRascunho: C.nfNoRascunho, respondePorOutra: false,
     }
     let h = await renderizarTrecho(caixa, ctx)
     assert.ok(fechado(h, 'data-sugestao-ia-alternar', 'true'))

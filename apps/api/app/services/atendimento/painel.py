@@ -1160,9 +1160,11 @@ async def situacao_da_foto(session: AsyncSession, conversa: AtendimentoConversa)
     """Se o botão de foto pode enviar AGORA, e o porquê quando não pode.
 
     As mesmas travas do envio de texto (`enviar.motivo_para_nao_enviar`) +
-    a plataforma/caixa aceitar foto (`foto.motivo_sem_foto`).
+    a plataforma/caixa aceitar foto (`foto.motivo_sem_foto`). Com a NF cheia
+    do pedido (`danfe.nf_da_conversa`: o número, ou a frase de por que não há)
+    para o atalho "Anexar a NF".
     """
-    from app.services.atendimento import enviar, foto
+    from app.services.atendimento import danfe, enviar, foto
 
     base = {
         "tipos": sorted(foto.TIPOS_ACEITOS),
@@ -1170,7 +1172,22 @@ async def situacao_da_foto(session: AsyncSession, conversa: AtendimentoConversa)
         "legenda_obrigatoria": foto.legenda_obrigatoria(conversa),
         "legenda_permitida": foto.legenda_permitida(conversa),
         "legenda_max": foto.limite_da_legenda(conversa),
+        # 28/10/2026: como o PDF chega ('arquivo' no pós-venda do ML, 'imagem'
+        # nos chats sem arquivo) e a NF cheia do pedido para o atalho.
+        "pdf": foto.como_vai_o_pdf(conversa),
+        "nf_numero": None,
+        "nf_motivo": None,
     }
+    try:
+        async with session.begin_nested():
+            nf = await danfe.nf_da_conversa(session, conversa)
+        base["nf_numero"] = nf.numero
+    except danfe.NfIndisponivel as e:
+        base["nf_motivo"] = e.detail
+    except Exception as e:  # noqa: BLE001 — a NF não derruba o botão de anexo
+        logger.warning(
+            "atendimento_painel_nf_falhou", conversa_id=str(conversa.id), erro=type(e).__name__
+        )
     motivo = foto.motivo_sem_foto(conversa)
     if motivo:
         return {**base, "pode": False, "motivo": motivo, "codigo": enviar.RECUSA_FOTO_NAO_SUPORTADA}

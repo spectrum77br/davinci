@@ -31,7 +31,18 @@ Por plataforma (a resposta é a do chat da conversa):
                       (`whatsapp` + `zap`): o formato antigo (com a plataforma
                       da venda) continua sem foto.
   Amazon, Magalu, Temu, AliExpress, Instagram: sem foto pelo DaVinci (por
-  enquanto).
+  enquanto) — `motivo_sem_foto` diz à pessoa o caminho de cada plataforma.
+
+PDF (28/10/2026, a NF — "o primeiro empecilho" da equipe respondendo pelo
+DaVinci): o mesmo botão aceita PDF (até 10 MB, conferido pelos bytes e
+aberto pelo PyMuPDF: sem senha, com página). Só o PÓS-VENDA DO ML recebe o
+PDF como arquivo (`CAIXAS_COM_PDF`: o upload de anexo da doc oficial aceita
+JPG, PNG, PDF, HEIC e GIF até 25 MB). O chat da Shopee e o do TikTok não têm
+mensagem de arquivo (Shopee: nenhum `file` em 113 mil mensagens de 60 dias;
+TikTok: texto, imagem, vídeo e cartões) — lá o PDF vira UMA IMAGEM com as
+páginas empilhadas (`pdf_em_imagem`, até `MAX_PAGINAS_IMAGEM`) e sai pelo
+caminho da foto. O Zap também (a mídia `document` da Cloud API fica para
+depois). A NF do pedido em PDF vem do `danfe.py`.
 
 Tamanho: a tela aceita até 10 MB e até `MAX_PIXELS` de resolução (JPEG ou
 PNG, conferido pelos BYTES e pelo cabeçalho, não pelo nome); na hora de
@@ -71,7 +82,8 @@ from app.services.atendimento.constantes import (
 logger = structlog.get_logger()
 
 # ── O que se aceita ───────────────────────────────────────────────────────
-TIPOS_ACEITOS: dict[str, str] = {"image/jpeg": ".jpg", "image/png": ".png"}
+PDF = "application/pdf"
+TIPOS_ACEITOS: dict[str, str] = {"image/jpeg": ".jpg", "image/png": ".png", PDF: ".pdf"}
 # O que a TELA pode mandar ao DaVinci (antes da redução para a plataforma).
 MAX_BYTES_UPLOAD = 10 * 1024 * 1024
 # O teto de cada plataforma (medidos; ver `chamados_devolucao` e
@@ -108,6 +120,21 @@ CAIXAS_COM_LEGENDA_OPCIONAL = frozenset({(PLATAFORMA_WHATSAPP, CANAL_ZAP)})
 # a legenda em 1.024; o texto vai até 4.096).
 LIMITE_LEGENDA: dict[tuple[str, str], int] = {(PLATAFORMA_WHATSAPP, CANAL_ZAP): 1024}
 
+# (plataforma, caixa) que recebem o PDF como ARQUIVO; nas outras com foto, o
+# PDF vira imagem. O teto do arquivo na plataforma (ML: 25 MB, doc oficial).
+CAIXAS_COM_PDF = frozenset({("ml", CANAL_POS_VENDA)})
+MAX_BYTES_PDF_PLATAFORMA: dict[str, int] = {"ml": 25 * 1024 * 1024}
+# PDF que vira imagem: até 3 páginas empilhadas (a DANFE costuma ter 1); a
+# resolução sai do teto de pixels abaixo (A4 a ~150 dpi por página).
+MAX_PAGINAS_IMAGEM = 3
+MAX_PIXELS_PDF_IMAGEM = 7_000_000
+DPI_PDF_IMAGEM = 150
+MIN_DPI_PDF_IMAGEM = 60
+# Toda página vira a largura do A4 (pontos); página mais de 4× mais alta que
+# larga (ou o contrário) não é documento — é recusada.
+LARGURA_PDF_IMAGEM = 595.0
+MAX_PROPORCAO_PAGINA = 4.0
+
 # O ML: o anexo sobe para o site da conta (Brasil).
 ML_SITE = "MLB"
 
@@ -141,6 +168,8 @@ def tipo_pelo_conteudo(dados: bytes) -> str | None:
         return "image/jpeg"
     if dados.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
+    if dados.startswith(b"%PDF-"):
+        return PDF
     return None
 
 
@@ -210,8 +239,10 @@ def validar_foto(dados: bytes | None, nome: str | None, mime_declarado: str | No
         )
     mime = tipo_pelo_conteudo(dados)
     if mime is None:
-        raise FotoInvalida("foto_tipo", "Só dá para mandar foto JPG ou PNG.")
-    tamanho = dimensoes(dados)
+        raise FotoInvalida("foto_tipo", "Só dá para mandar foto JPG ou PNG, ou PDF.")
+    if mime == PDF:
+        _conferir_pdf(dados)
+    tamanho = dimensoes(dados) if mime != PDF else None
     if tamanho is not None and tamanho[0] * tamanho[1] > MAX_PIXELS:
         largura, altura = tamanho
         raise FotoInvalida(
@@ -231,14 +262,134 @@ def validar_foto(dados: bytes | None, nome: str | None, mime_declarado: str | No
     )
 
 
+def _conferir_pdf(dados: bytes) -> int:
+    """O PDF abre, não tem senha e tem página; devolve o nº de páginas."""
+    import pymupdf
+
+    try:
+        doc = pymupdf.open(stream=dados, filetype="pdf")
+    except Exception as e:  # noqa: BLE001 — PDF corrompido
+        raise FotoInvalida("pdf_invalido", "Não consegui abrir este PDF.") from e
+    try:
+        if doc.needs_pass or doc.is_encrypted:
+            raise FotoInvalida("pdf_senha", "O PDF tem senha: tire a senha e anexe de novo.")
+        if doc.page_count < 1:
+            raise FotoInvalida("pdf_invalido", "O PDF não tem página.")
+        return doc.page_count
+    finally:
+        doc.close()
+
+
+# O caminho de cada plataforma quando o anexo não sai pelo DaVinci (28/10/2026).
+_SEM_ANEXO: dict[str, str] = {
+    "amazon": (
+        "Amazon: anexo pelo DaVinci ainda não está liberado. Para mandar a NF (PDF), abra a "
+        "conversa no Seller Central (Mensagens do comprador) e use o anexo de lá."
+    ),
+    "magalu": (
+        "Magalu: anexo pelo DaVinci ainda não está liberado. Para mandar a NF (PDF), anexe "
+        "pelo portal do parceiro Magalu, no SAC/atendimento do pedido."
+    ),
+}
+
+
 def motivo_sem_foto(conversa: AtendimentoConversa) -> str | None:
-    """Por que esta conversa não aceita foto pelo DaVinci; None = aceita."""
+    """Por que esta conversa não aceita anexo pelo DaVinci (e o caminho); None = aceita."""
     par = (conversa.plataforma, conversa.canal)
     if par in CAIXAS_COM_FOTO:
         return None
     if conversa.plataforma == "ml":
-        return "Pergunta no anúncio do Mercado Livre não aceita foto — só texto."
-    return "Mandar foto por aqui ainda não está liberado para esta plataforma."
+        return (
+            "Pergunta no anúncio do Mercado Livre não aceita anexo — só texto. A NF vai pelas "
+            "mensagens do pedido (pós-venda), depois da compra."
+        )
+    if conversa.plataforma in _SEM_ANEXO:
+        return _SEM_ANEXO[conversa.plataforma]
+    return "Mandar anexo por aqui ainda não está liberado para esta plataforma."
+
+
+def aceita_pdf(conversa: AtendimentoConversa) -> bool:
+    """O PDF chega como ARQUIVO nesta caixa (pós-venda do ML)? Senão vira imagem."""
+    return (conversa.plataforma, conversa.canal) in CAIXAS_COM_PDF
+
+
+def como_vai_o_pdf(conversa: AtendimentoConversa) -> str | None:
+    """'arquivo' (chega como PDF), 'imagem' (vira imagem) ou None (sem anexo aqui)."""
+    if motivo_sem_foto(conversa):
+        return None
+    return "arquivo" if aceita_pdf(conversa) else "imagem"
+
+
+def pdf_em_imagem(anexo: Foto) -> Foto:
+    """O PDF como UMA imagem JPEG (páginas empilhadas) — para o chat sem arquivo.
+
+    Síncrona (PyMuPDF): quem chama da rota roda em thread. Cada página é
+    escalada para a MESMA largura (`LARGURA_PDF_IMAGEM`, a do A4) e a
+    resolução sai do teto de pixels; página de proporção absurda, PDF com
+    mais de `MAX_PAGINAS_IMAGEM` páginas ou que só caberia ilegível são
+    recusados (`FotoInvalida`) — revisão de 28/10: nada de bomba de memória.
+    """
+    import pymupdf
+
+    origem = pymupdf.open(stream=anexo.conteudo, filetype="pdf")
+    try:
+        if origem.page_count > MAX_PAGINAS_IMAGEM:
+            raise FotoInvalida(
+                "pdf_paginas",
+                f"Este chat não aceita PDF, e o PDF vira imagem só até {MAX_PAGINAS_IMAGEM} "
+                f"páginas (este tem {origem.page_count}). Mande só as páginas que importam.",
+            )
+        alturas: list[float] = []
+        for p in origem:
+            w, h = p.rect.width, p.rect.height
+            if w <= 0 or h <= 0 or h / w > MAX_PROPORCAO_PAGINA or w / h > MAX_PROPORCAO_PAGINA:
+                raise FotoInvalida(
+                    "pdf_pagina", "Uma página deste PDF tem um formato que não vira imagem."
+                )
+            alturas.append(h * LARGURA_PDF_IMAGEM / w)
+        largura, altura = LARGURA_PDF_IMAGEM, sum(alturas)
+        polegadas2 = (largura / 72) * (altura / 72)
+        dpi = min(DPI_PDF_IMAGEM, int((MAX_PIXELS_PDF_IMAGEM / polegadas2) ** 0.5))
+        if dpi < MIN_DPI_PDF_IMAGEM:
+            raise FotoInvalida(
+                "pdf_paginas", "Este PDF é grande demais para virar uma imagem legível."
+            )
+        alvo = pymupdf.open()
+        folha = alvo.new_page(width=largura, height=altura)
+        y = 0.0
+        for i, h in enumerate(alturas):
+            folha.show_pdf_page(pymupdf.Rect(0, y, largura, y + h), origem, i)
+            y += h
+        jpeg = folha.get_pixmap(dpi=dpi, alpha=False).tobytes("jpeg", jpg_quality=85)
+        alvo.close()
+    except FotoInvalida:
+        raise
+    except Exception as e:  # noqa: BLE001 — página que não renderiza
+        raise FotoInvalida("pdf_invalido", "Não consegui transformar este PDF em imagem.") from e
+    finally:
+        origem.close()
+    raiz = anexo.nome.rsplit(".", 1)[0] or "anexo"
+    return Foto(
+        conteudo=jpeg,
+        nome=f"{raiz}.jpg",
+        mime="image/jpeg",
+        sha256=hashlib.sha256(jpeg).hexdigest(),
+    )
+
+
+def para_a_caixa(conversa: AtendimentoConversa, anexo: Foto) -> Foto:
+    """O anexo como esta caixa recebe: PDF fica PDF só onde a plataforma aceita."""
+    if anexo.mime == PDF and not aceita_pdf(conversa):
+        return pdf_em_imagem(anexo)
+    return anexo
+
+
+def validar_para_a_caixa(
+    conversa: AtendimentoConversa, dados: bytes | None, nome: str | None, mime: str | None
+) -> Foto:
+    """`validar_foto` + `para_a_caixa` de uma vez — síncrona: a rota roda em thread
+    (abrir um PDF corrompido de 10 MB reconstrói a xref; não no laço de eventos)."""
+    return para_a_caixa(conversa, validar_foto(dados, nome, mime))
 
 
 def legenda_obrigatoria(conversa: AtendimentoConversa) -> bool:
@@ -266,6 +417,12 @@ def preparar_para(plataforma: str, foto: Foto) -> tuple[str, bytes, str]:
     """
     from app.services.chamados_devolucao import preparar_foto
 
+    if foto.mime == PDF:
+        # O PDF vai como está — só para quem recebe arquivo (`para_a_caixa`).
+        teto_pdf = MAX_BYTES_PDF_PLATAFORMA.get(plataforma)
+        if teto_pdf is None or foto.tamanho > teto_pdf:
+            raise FotoInvalida("pdf_nao_suportado", "Esta plataforma não recebe PDF por aqui.")
+        return foto.nome, foto.conteudo, foto.mime
     teto = MAX_BYTES_PLATAFORMA.get(plataforma, MAX_BYTES_PLATAFORMA["shopee"])
     anexo = SimpleNamespace(content_type=foto.mime, blob=foto.conteudo, filename=foto.nome)
     try:

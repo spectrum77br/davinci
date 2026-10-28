@@ -137,8 +137,9 @@ O canal em `observar` NÃO segura a automática (de propósito: a equipe segue
 no Duoke enquanto ela sai por aqui), nem as travas da IA (automático, vez).
 
 FOTO (01/10/2026): `enviar_foto` é o mesmo caminho para UMA imagem (Shopee,
-TikTok e pós-venda do ML; `foto.py`): mesmas travas, mesma linha em voo,
-mesma régua de resultado. O upload para a plataforma só acontece aqui —
+TikTok e pós-venda do ML; `foto.py`) — e, desde 28/10/2026, para o PDF da
+NF (arquivo no pós-venda do ML; imagem nos chats sem arquivo): mesmas
+travas, mesma linha em voo, mesma régua de resultado. O upload para a plataforma só acontece aqui —
 com o envio desligado, nada sobe. ZAP (27/10/2026, Onda 3 — §6.8): a foto do
 número de WhatsApp passa pelas MESMAS 14 travas do texto (`_destino_zap`; só
 admin, como o texto); a legenda é OPCIONAL e passa pelo validador (até 1.024
@@ -2044,16 +2045,19 @@ async def _preparar_foto(
             raise EnvioRecusado(RECUSA_FOTO_INVALIDA, e.detail) from e
 
     await aposentar_envios_presos(session, conversa_id=conversa.id)
+    # O PDF (a NF, 28/10/2026) só chega aqui como PDF no pós-venda do ML
+    # (`foto.para_a_caixa`): a linha é um ARQUIVO, sem URL de balão.
+    tipo = "arquivo" if foto.mime == foto_mod.PDF else "imagem"
     mensagem = AtendimentoMensagem(
         conversa_id=conversa.id,
         externo_id=None,
         autor=AUTOR_LOJA,
         origem=ORIGEM_HUMANO,
         autor_user_id=user.id if user is not None else None,
-        tipo="imagem",
+        tipo=tipo,
         texto=legenda_ok,
         # A URL só existe depois do upload (`_aplicar_resultado` põe).
-        anexos=[{"tipo": "imagem", "nome": foto.nome, "mime": foto.mime, "tamanho": foto.tamanho}],
+        anexos=[{"tipo": tipo, "nome": foto.nome, "mime": foto.mime, "tamanho": foto.tamanho}],
         enviada_em=None,
         status=MSG_ENVIANDO,
         rascunho_id=None,

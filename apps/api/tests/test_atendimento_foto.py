@@ -176,7 +176,7 @@ def test_validar_foto_pelos_bytes():
     for dados, code in (
         (b"", "foto_vazia"),
         (b"GIF89a....", "foto_tipo"),
-        (b"%PDF-1.4", "foto_tipo"),
+        (b"%PDF-1.4", "pdf_invalido"),
     ):
         with pytest.raises(foto.FotoInvalida) as e:
             foto.validar_foto(dados, "x", "image/gif")
@@ -229,7 +229,7 @@ async def test_quais_caixas_aceitam_foto(db, make_user):
     assert foto.motivo_sem_foto(shopee) is None
     assert not foto.legenda_obrigatoria(shopee)
     pergunta, _ = await _cenario(db, make_user, plataforma="ml", canal="pergunta", externo="q1")
-    assert "não aceita foto" in foto.motivo_sem_foto(pergunta)
+    assert "não aceita anexo" in foto.motivo_sem_foto(pergunta)
     pos, _ = await _cenario(db, make_user, plataforma="ml", canal="pos_venda", externo="p1")
     assert foto.motivo_sem_foto(pos) is None and foto.legenda_obrigatoria(pos)
     amazon, _ = await _cenario(db, make_user, plataforma="amazon", canal="email", externo="a1")
@@ -537,3 +537,82 @@ async def test_rota_foto_arquivo_invalido_e_envio(db, client, admin, make_user, 
     )
     assert m["anexos"][0]["url"] == "https://cf.shopee.com.br/file/abc"
     assert len([p for p in rede.feitos if "sellerchat" in p.url.path]) == 2
+
+
+# ─────────────── PDF (a NF, 28/10/2026) ───────────────
+
+
+def _pdf(paginas: int = 1) -> bytes:
+    import pymupdf
+
+    doc = pymupdf.open()
+    for i in range(paginas):
+        doc.new_page().insert_text((72, 72), f"NOTA FISCAL pagina {i + 1}")
+    return doc.tobytes()
+
+
+async def test_ml_manda_o_pdf_como_arquivo(db, make_user, monkeypatch):
+    def api(request):
+        if request.url.path == "/messages/attachments":
+            assert b'filename="NF_15.pdf"' in request.content
+            assert b"Content-Type: application/pdf" in request.content
+            assert b"%PDF-" in request.content
+            return httpx.Response(200, json={"id": "999_nf.pdf"})
+        if request.url.path == f"/messages/packs/2000009990/sellers/{SELLER}":
+            corpo = json.loads(request.content)
+            assert corpo["attachments"] == ["999_nf.pdf"]
+            assert corpo["text"] == "Segue a nota fiscal do seu pedido."
+            return httpx.Response(201, json={"id": "msg-ml-9"})
+        return httpx.Response(404, json={"error": "not_found"})
+
+    _Rede(monkeypatch, api)
+    _cliente(monkeypatch, _ml_real())
+    conversa, user = await _cenario(
+        db,
+        make_user,
+        plataforma="ml",
+        canal="pos_venda",
+        externo="2000009990",
+        comprador=str(COMPRADOR_ML),
+    )
+    anexo = foto.validar_foto(_pdf(), "NF_15.pdf", "application/pdf")
+    assert foto.para_a_caixa(conversa, anexo) is anexo
+    m = await enviar.enviar_foto(
+        db, conversa, anexo, legenda="Segue a nota fiscal do seu pedido.", user=user
+    )
+    assert m.status == "enviada", m.erro
+    assert m.tipo == "arquivo"
+    assert m.anexos[0]["mime"] == "application/pdf" and "url" not in m.anexos[0]
+    assert m.payload["envio"]["ml_anexo"] == "999_nf.pdf"
+
+
+async def test_rota_shopee_pdf_vira_imagem(db, client, admin, make_user, monkeypatch):
+    enviados: list[bytes] = []
+
+    def api(request):
+        if request.url.path.endswith("/sellerchat/upload_image"):
+            enviados.append(request.content)
+        return _shopee_ok(request)
+
+    _Rede(monkeypatch, api)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, _ = await _cenario(db, make_user, externo="conv-pdf")
+    r = await client.post(
+        f"{URL}/conversas/{conversa.id}/foto",
+        files={"arquivo": ("NF_15.pdf", _pdf(2), "application/pdf")},
+    )
+    assert r.status_code == 200, r.text
+    m = r.json()["mensagem"]
+    assert (m["status"], m["tipo"]) == ("enviada", "imagem")
+    assert m["anexos"][0]["nome"] == "NF_15.jpg"
+    assert len(enviados) == 1 and b"image/jpeg" in enviados[0]
+    assert b"%PDF-" not in enviados[0]
+
+    # Mais páginas do que cabe numa imagem: recusado antes de subir.
+    r = await client.post(
+        f"{URL}/conversas/{conversa.id}/foto",
+        files={"arquivo": ("grande.pdf", _pdf(foto.MAX_PAGINAS_IMAGEM + 1), "application/pdf")},
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["motivo"] == "pdf_paginas"
+    assert len(enviados) == 1
