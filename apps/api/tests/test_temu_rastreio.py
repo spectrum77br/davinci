@@ -30,6 +30,7 @@ from app.models import (
     BlingOrder,
     MargemAudit,
     NfEtiquetaArquivo,
+    StoreInfo,
     User,
     UserRole,
     UserStatus,
@@ -71,6 +72,24 @@ def test_nao_casa_pedaco_de_numero_maior():
 
 def test_pdf_quebrado_vale_sem_codigo():
     assert temu_rastreio.codigo_da_etiqueta(b"%PDF-1.7 lixo") is None
+
+
+def test_acha_codigo_correios_em_blocos_na_etiqueta_aliexpress():
+    texto = "NF:632 CONTRATO: 9912528050\nPedido:8216076315965477\nAD 240 461 125 BR"
+    cod = temu_rastreio.codigo_da_etiqueta(_pdf(texto))
+    assert cod == temu_rastreio.CodigoEtiqueta("AD240461125BR", 2151, "Correios")
+
+
+def test_acha_codigo_correios_grudado_no_picklist():
+    cod = temu_rastreio.codigo_da_etiqueta(
+        _pdf("Order No: 8215312706526857\nTracking No: AD240458157BR")
+    )
+    assert cod == temu_rastreio.CodigoEtiqueta("AD240458157BR", 2151, "Correios")
+
+
+def test_correios_com_digito_errado_nao_casa():
+    # Mesmo formato, DV trocado (o certo é 5): não é código dos Correios.
+    assert temu_rastreio.codigo_da_etiqueta(_pdf("AD240461126BR")) is None
 
 
 # ---- sonda (rota) ----
@@ -253,6 +272,7 @@ class Bling:
 
     def __init__(self, *, antes=21, depois=15):
         self.antes, self.depois = antes, depois
+        self.numero, self.numero_loja = 304816, PO
         self.leituras = 0
         self.escritas: list[tuple[int, int]] = []
 
@@ -265,8 +285,8 @@ class Bling:
             json={
                 "data": {
                     "id": BID,
-                    "numero": 304816,
-                    "numeroLoja": PO,
+                    "numero": self.numero,
+                    "numeroLoja": self.numero_loja,
                     "situacao": {"id": estado},
                 }
             },
@@ -666,3 +686,127 @@ async def test_registro_ilegivel_no_redis_vale_como_teto(redis_falso):
     lidos = await temu_rastreio._ler_consultas([AJ])
 
     assert lidos is not None and lidos[AJ]["n"] == temu_rastreio._MAX_CONSULTAS
+
+
+# ---- AliExpress: Correios da etiqueta (Vinicius, 27/10) ----
+
+ALI = "8216076315965477"
+AD = "AD240461125BR"
+LOJA_ALI = "205295441"
+ETIQUETA_EV = datetime(2026, 10, 22, 10, 57, tzinfo=UTC)  # 07:57 em Brasília
+POSTADO = datetime(2026, 10, 22, 13, 15, tzinfo=UTC)  # 10:15 em Brasília
+
+
+async def _pedido_ali(
+    db: AsyncSession, dono: User, *, plataforma: str = "aliexpress"
+) -> BlingOrder:
+    db.add(
+        StoreInfo(
+            user_id=dono.id, platform=plataforma, account_name="vita", bling_store_id=LOJA_ALI
+        )
+    )
+    row = BlingOrder(
+        bling_id=BID,
+        numero="305840",
+        numeroloja=ALI,
+        loja=LOJA_ALI,
+        item_index=0,
+        item_codigo="b104.20",
+        item_quantidade=1,
+        situacao="21",
+    )
+    db.add(row)
+    db.add(
+        NfEtiquetaArquivo(
+            pedido_bling="305840",
+            filename="e.pdf",
+            content_type="application/pdf",
+            blob=_pdf(f"Pedido:{ALI}\nAD 240 461 125 BR"),
+            created_at=AGORA - timedelta(hours=4),
+        )
+    )
+    await db.commit()
+    return row
+
+
+async def test_aliexpress_postado_fica_verde_com_a_hora_da_postagem(
+    db: AsyncSession, ambiente, operador
+):
+    bling, feitas, respostas = ambiente
+    bling.numero, bling.numero_loja = 305840, ALI
+    row = await _pedido_ali(db, operador)
+    respostas["gettrackinfo"] = _conhecido(
+        AD,
+        "InTransit",
+        None,
+        (ETIQUETA_EV, "Etiqueta emitida"),
+        (POSTADO, "Objeto postado"),
+        (POSTADO + timedelta(hours=2), "Objeto em transferência - por favor aguarde"),
+    )
+
+    resumo = await temu_rastreio.rodada(temu_rastreio.ALIEXPRESS)
+
+    assert resumo["candidatos"] == 1 and resumo["verdes"] == 1 and resumo["erros"] == 0
+    leitura = next(p for e, p in feitas if e == "gettrackinfo")
+    assert leitura == [{"number": AD, "carrier": 2151}]  # Correios
+    assert bling.escritas == [(BID, 15)]
+    await db.refresh(row)
+    assert row.situacao == "15" and row.em_andamento_data == date(2026, 10, 22)
+    ev = (await db.scalars(select(BlingEnvioEvento).where(BlingEnvioEvento.bling_id == BID))).one()
+    assert ev.occurred_at == POSTADO  # a postagem, não a etiqueta
+    origens = set(
+        (
+            await db.scalars(select(MargemAudit.origem).where(MargemAudit.pedido_bling == "305840"))
+        ).all()
+    )
+    assert origens == {"job_envio_aliexpress", "aliexpress_17track_postagem"}
+
+
+async def test_aliexpress_so_etiqueta_emitida_paga_consulta_e_nao_mexe(
+    db: AsyncSession, ambiente, operador, redis_falso
+):
+    bling, feitas, respostas = ambiente
+    row = await _pedido_ali(db, operador)
+    respostas["gettrackinfo"] = _conhecido(
+        AD, "InfoReceived", AGORA - timedelta(hours=4), (ETIQUETA_EV, "Etiqueta emitida")
+    )
+    respostas["getRealTimeTrackInfo"] = _conhecido(
+        AD, "InfoReceived", None, (ETIQUETA_EV, "Etiqueta emitida")
+    )
+
+    resumo = await temu_rastreio.rodada(temu_rastreio.ALIEXPRESS)
+
+    assert resumo["consultas_pagas"] == 1 and resumo["ainda_nao_saiu"] == 1
+    assert resumo["verdes"] == 0
+    consulta = next(p for e, p in feitas if e == "getRealTimeTrackInfo")
+    assert consulta == [{"number": AD, "carrier": 2151}]  # Correios não pede documento
+    assert json.loads(redis_falso.dados[f"ali17:consulta:{AD}"]) == {
+        "n": 1,
+        "ultima": AGORA.isoformat(),
+    }
+    assert bling.leituras == 0
+    await db.refresh(row)
+    assert row.situacao == "21"
+
+
+def test_etiqueta_emitida_nao_vale_como_hora_do_envio():
+    ti = _track("InTransit", (ETIQUETA_EV, "Etiqueta emitida"))
+    assert temu_rastreio._coletado_em(ti) is None
+
+
+async def test_rodada_da_temu_nao_pega_pedido_aliexpress(db: AsyncSession, ambiente, operador):
+    _bling, feitas, _respostas = ambiente
+    await _pedido_ali(db, operador)
+
+    resumo = await temu_rastreio.rodada()
+
+    assert resumo["candidatos"] == 0 and feitas == []
+
+
+async def test_aliexpress_ignora_loja_de_outra_plataforma(db: AsyncSession, ambiente, operador):
+    _bling, feitas, _respostas = ambiente
+    await _pedido_ali(db, operador, plataforma="shopee")
+
+    resumo = await temu_rastreio.rodada(temu_rastreio.ALIEXPRESS)
+
+    assert resumo["candidatos"] == 0 and feitas == []

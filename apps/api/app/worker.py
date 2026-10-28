@@ -3762,6 +3762,20 @@ async def temu_envio_sweep(ctx: dict) -> None:
         logger.exception("temu_envio_sweep_unhandled")
 
 
+async def aliexpress_envio_sweep(ctx: dict) -> None:
+    """Pedido AliExpress vermelho que os Correios já receberam → 15 no Bling.
+
+    Igual à Temu: o AliExpress marca "Enviado" na etiqueta e o Bling vem sem
+    rastreio; o código dos Correios (AD…BR) está na etiqueta e o 17track diz
+    quando foi postado. Ver app.services.temu_rastreio (ALIEXPRESS)."""
+    from app.services import temu_rastreio  # tardio: PyMuPDF + httpx
+
+    try:
+        await temu_rastreio.rodada(temu_rastreio.ALIEXPRESS)
+    except Exception:  # noqa: BLE001
+        logger.exception("aliexpress_envio_sweep_unhandled")
+
+
 async def nf_auto_enfileirar_tick(ctx: dict) -> None:
     """Sweep do auto-enfileirador de NF (pedidos Shopee/TikTok "Em aberto").
 
@@ -6076,6 +6090,9 @@ class WorkerSettingsMarketplace:
         # custa 1 crédito por pedido, só na 1ª vez). :04/:19/:34/:49 ficam
         # fora dos slots do recarregar da Logística acima.
         cron(temu_envio_sweep, minute={4, 19, 34, 49}, run_at_startup=False, timeout=600),
+        # AliExpress (27/10): a mesma rodada, com os Correios da etiqueta.
+        # :09/:24/:39/:54 também ficam fora dos slots da Logística e da Temu.
+        cron(aliexpress_envio_sweep, minute={9, 24, 39, 54}, run_at_startup=False, timeout=600),
     ]
     queue_name = ARQ_MARKETPLACE_QUEUE
     # Concorrência baixa — 1 tick por minuto, serializado pelo advisory

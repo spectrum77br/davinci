@@ -38,6 +38,16 @@ consulta rápida voltava vazia. Agora:
     17track buscou na transportadora nas últimas 3 h) de 3 em 3 h, das 8h às
     20h de Brasília, até 10 por código. Só Anjun: a J&T pediria o CPF de novo.
   * coletado → fica verde e sai da lista; as consultas param sozinhas.
+
+AliExpress (Vinicius, 27/10 — o 305840 foi postado 26/10 15:15 e ficou
+vermelho até alguém trocar à mão no dia seguinte): mesma armadilha. O
+AliExpress marca "Enviado" na etiqueta (UpSeller: 08:00) e o Bling vem sem
+logística nem objeto de postagem. A etiqueta é dos Correios (Sislogica, "BR
+local 3PL Standard Delivery") e o código AD…BR está no PDF. Mesma rodada, com
+`ALIEXPRESS`: candidatos pelas lojas cadastradas com plataforma aliexpress,
+17track como Correios (carrier 2151), "Etiqueta emitida" não conta e a hora
+do envio é a do "Objeto postado". A consulta na hora vale pros Correios (não
+pede documento).
 """
 
 from __future__ import annotations
@@ -56,7 +66,7 @@ import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingEnvioEvento, BlingOrder, NfEtiquetaArquivo
+from app.models import BlingEnvioEvento, BlingOrder, NfEtiquetaArquivo, StoreInfo
 from app.redis_client import redis
 from app.services import logistica_track
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
@@ -70,11 +80,24 @@ BASE_V24 = "https://api.17track.net/track/v2.4"
 
 ANJUN_CARRIER = 191915
 JT_CARRIER = 100797
+CORREIOS_CARRIER = logistica_track.CORREIOS_CARRIER
 
 # Fronteiras nos dois lados: a etiqueta tem PK-<19 dígitos>, PO-029-<17> e a
 # NF junta pode ter a chave de 44 dígitos — nenhum pedaço deles pode casar.
 _RE_ANJUN = re.compile(r"(?<![A-Z0-9])AJ\d{15}(?!\d)")
 _RE_JT = re.compile(r"(?<!\d)888\d{12}(?!\d)")
+# Correios (S10): 2 letras + 8 dígitos + DV + BR. A etiqueta imprime em blocos
+# ("AD 240 461 125 BR"); a declaração de conteúdo e o picklist, grudado.
+_RE_CORREIOS = re.compile(r"(?<![A-Z0-9])([A-Z]{2}) ?(\d{3}) ?(\d{3}) ?(\d{3}) ?BR(?![A-Z0-9])")
+_PESOS_S10 = (8, 6, 4, 2, 3, 5, 9, 7)
+
+
+def _dv_correios_ok(digitos: str) -> bool:
+    """Dígito verificador do S10 (o 9º dígito) — descarta número parecido."""
+    resto = sum(int(d) * p for d, p in zip(digitos[:8], _PESOS_S10, strict=True)) % 11
+    dv = 5 if resto == 0 else 0 if resto == 1 else 11 - resto
+    return dv == int(digitos[8])
+
 
 # Erros do /register que importam aqui (os demais voltam como número).
 _ERRO_JA_REGISTRADO = logistica_track.ERRO_JA_REGISTRADO
@@ -87,13 +110,14 @@ _MAX_EVENTOS = 8
 class CodigoEtiqueta:
     codigo: str
     carrier: int
-    transportadora: str  # "Anjun" | "J&T"
+    transportadora: str  # "Anjun" | "J&T" | "Correios"
 
 
 def codigo_da_etiqueta(pdf: bytes) -> CodigoEtiqueta | None:
-    """Código de rastreio impresso na etiqueta Temu; None se não achou ou se o
-    PDF não abre. Anjun primeiro: é a transportadora que a Temu usa desde
-    16/10 (a Barbosa era J&T até 13/10)."""
+    """Código de rastreio impresso na etiqueta (Temu ou AliExpress); None se
+    não achou ou se o PDF não abre. Anjun primeiro: é a transportadora que a
+    Temu usa desde 16/10 (a Barbosa era J&T até 13/10). Correios por último:
+    é a do AliExpress."""
     try:
         with fitz.open(stream=pdf, filetype="pdf") as doc:
             texto = "\n".join(p.get_text() for p in doc)
@@ -103,6 +127,10 @@ def codigo_da_etiqueta(pdf: bytes) -> CodigoEtiqueta | None:
         return CodigoEtiqueta(m.group(0), ANJUN_CARRIER, "Anjun")
     if m := _RE_JT.search(texto):
         return CodigoEtiqueta(m.group(0), JT_CARRIER, "J&T")
+    for m in _RE_CORREIOS.finditer(texto):
+        digitos = "".join(m.groups()[1:])
+        if _dv_correios_ok(digitos):
+            return CodigoEtiqueta(f"{m.group(1)}{digitos}BR", CORREIOS_CARRIER, "Correios")
     return None
 
 
@@ -241,7 +269,6 @@ _SAIU = frozenset(
     }
 )
 _LOTE = 40  # máximo do /register e do /gettrackinfo
-_LOCK_RODADA = 0x74656D75  # ascii "temu"
 _ERROS_BLING = frozenset({"bling_nao_confere", "bling_nao_confirmou", "bling_falhou"})
 
 # Fase 3 — quando perguntar ao 17track (ver docstring do módulo).
@@ -255,17 +282,53 @@ _CHAVE_CONSULTA = "temu17:consulta:"
 _TTL_CONSULTA = 15 * 24 * 3600
 
 
+@dataclass(frozen=True)
+class Plataforma:
+    """O que muda entre a rodada da Temu e a do AliExpress."""
+
+    nome: str  # prefixo dos logs
+    lock: int  # trava da rodada (namespace SYNC)
+    chave_consulta: str  # prefixo no Redis do contador de consultas pagas
+    origem: str  # margem_audit: quem trocou a situação
+    origem_hora: str  # margem_audit: de onde veio a hora do envio
+    pagas: frozenset[int]  # transportadoras com consulta na hora
+    # Lojas da tela Lojas com essa plataforma. None = Temu, que vai pelo
+    # número PO-…: nem toda loja Temu tem cadastro com o id do Bling.
+    plataforma_loja: str | None = None
+
+
+TEMU = Plataforma(
+    nome="temu",
+    lock=0x74656D75,  # ascii "temu"
+    chave_consulta=_CHAVE_CONSULTA,
+    origem="job_envio_temu",
+    origem_hora="temu_17track_coleta",
+    pagas=frozenset({ANJUN_CARRIER}),
+)
+ALIEXPRESS = Plataforma(
+    nome="aliexpress",
+    lock=0x616C6965,  # ascii "alie"
+    chave_consulta="ali17:consulta:",
+    origem="job_envio_aliexpress",
+    origem_hora="aliexpress_17track_postagem",
+    pagas=frozenset({CORREIOS_CARRIER}),
+    plataforma_loja="aliexpress",
+)
+
+
 def _agora() -> datetime:
     return datetime.now(UTC)
 
 
-async def _ler_consultas(codigos: list[str]) -> dict[str, dict[str, Any]] | None:
+async def _ler_consultas(
+    codigos: list[str], chave: str = _CHAVE_CONSULTA
+) -> dict[str, dict[str, Any]] | None:
     """{código: {"n", "ultima"}} só dos que já têm registro. None se o Redis
     falhou — aí a rodada não paga consulta nenhuma (sem contador, sem limite)."""
     if not codigos:
         return {}
     try:
-        valores = await redis.mget([f"{_CHAVE_CONSULTA}{c}" for c in codigos])
+        valores = await redis.mget([f"{chave}{c}" for c in codigos])
     except Exception as e:  # noqa: BLE001 — Redis fora não derruba a rodada
         logger.warning("temu_rastreio_redis_falhou", err=str(e)[:200])
         return None
@@ -283,10 +346,12 @@ async def _ler_consultas(codigos: list[str]) -> dict[str, dict[str, Any]] | None
     return saida
 
 
-async def _anotar_consulta(codigo: str, n: int, quando: datetime) -> None:
+async def _anotar_consulta(
+    codigo: str, n: int, quando: datetime, chave: str = _CHAVE_CONSULTA
+) -> None:
     try:
         await redis.set(
-            f"{_CHAVE_CONSULTA}{codigo}",
+            f"{chave}{codigo}",
             json.dumps({"n": n, "ultima": quando.isoformat()}),
             ex=_TTL_CONSULTA,
         )
@@ -339,13 +404,23 @@ async def _consultar_na_hora(c: httpx.AsyncClient, linha: dict[str, Any]) -> dic
     return None
 
 
-async def _candidatos(session: AsyncSession) -> list[BlingOrder]:
+async def _candidatos(session: AsyncSession, plat: Plataforma = TEMU) -> list[BlingOrder]:
     corte = datetime.now(UTC) - _JANELA
+    da_plataforma = (
+        BlingOrder.loja.in_(
+            select(StoreInfo.bling_store_id).where(
+                StoreInfo.platform == plat.plataforma_loja,
+                StoreInfo.bling_store_id.isnot(None),
+            )
+        )
+        if plat.plataforma_loja
+        else BlingOrder.numeroloja.like("PO-%")
+    )
     rows = (
         await session.execute(
             select(BlingOrder)
             .where(
-                BlingOrder.numeroloja.like("PO-%"),
+                da_plataforma,
                 BlingOrder.situacao.in_(_ABERTAS),
                 BlingOrder.item_index == 0,
                 BlingOrder.bling_id.isnot(None),
@@ -354,6 +429,8 @@ async def _candidatos(session: AsyncSession) -> list[BlingOrder]:
             .limit(500)
         )
     ).scalars()
+    if plat.plataforma_loja:
+        return list(rows)
     return [o for o in rows if _RE_PO_TEMU.fullmatch(o.numeroloja or "")]
 
 
@@ -398,20 +475,31 @@ async def _registrar(c: httpx.AsyncClient, linhas: list[dict[str, Any]]) -> list
 
 def _coletado_em(track_info: dict) -> datetime | None:
     """Hora do 1º evento da transportadora (o "Objeto coletado" da Anjun, a
-    entrega na agência da J&T) — só quando o status prova que saiu."""
+    entrega na agência da J&T, o "Objeto postado" dos Correios) — só quando o
+    status prova que saiu. "Etiqueta emitida" é de antes da postagem: não é a
+    hora do envio."""
     status = str(((track_info.get("latest_status") or {}).get("status")) or "")
     if status not in _SAIU:
         return None
-    eventos = logistica_track.eventos_de_track_info(track_info)
+    eventos = [
+        e
+        for e in logistica_track.eventos_de_track_info(track_info)
+        if not logistica_track.evento_pre_postagem(e.descricao)
+    ]
     return eventos[-1].quando if eventos else None
 
 
 async def _aplicar(
-    session: AsyncSession, bling: Any, cand: BlingOrder, coletado_em: datetime
+    session: AsyncSession,
+    bling: Any,
+    cand: BlingOrder,
+    coletado_em: datetime,
+    plat: Plataforma = TEMU,
 ) -> str:
-    """Pedido Temu coletado → 15 no Bling e no DaVinci. Mesmas travas da Magalu
-    (`magalu_shipment_sync.apply_magalu_shipment`): trava do ingest, relê as
-    linhas e o Bling, só grava depois de LER 15 no Bling. Devolve o motivo."""
+    """Pedido coletado/postado → 15 no Bling e no DaVinci. Mesmas travas da
+    Magalu (`magalu_shipment_sync.apply_magalu_shipment`): trava do ingest,
+    relê as linhas e o Bling, só grava depois de LER 15 no Bling. Devolve o
+    motivo."""
     bid, numero, po, loja = cand.bling_id, cand.numero, cand.numeroloja, cand.loja
     if coletado_em > datetime.now(UTC):
         return "hora_invalida"
@@ -498,7 +586,7 @@ async def _aplicar(
         sku=rows[0].item_codigo,
         valor_antigo=antiga,
         valor_novo=15,
-        origem="job_envio_temu",
+        origem=plat.origem,
         mudado_por=None,
     )
     await record_margem_audit(
@@ -509,15 +597,16 @@ async def _aplicar(
         sku=rows[0].item_codigo,
         valor_antigo=None,
         valor_novo=coletado_em.isoformat(),
-        origem="temu_17track_coleta",
+        origem=plat.origem_hora,
         mudado_por=None,
     )
     return "confirmado"
 
 
-async def rodada() -> dict[str, int]:
-    """Uma passada: pedidos Temu vermelhos → 17track → os coletados ficam
-    verdes. Contadores pro log (o cron não tem tela)."""
+async def rodada(plat: Plataforma = TEMU) -> dict[str, int]:
+    """Uma passada: pedidos vermelhos da plataforma → 17track → os coletados
+    (Temu) ou postados (AliExpress) ficam verdes. Contadores pro log (o cron
+    não tem tela)."""
     from app.db import session_scope
     from app.services.advisory_lock import SYNC_NAMESPACE
     from app.services.marketplace_shipment_check import (
@@ -549,13 +638,13 @@ async def rodada() -> dict[str, int]:
         travou = (
             await session.execute(
                 text("SELECT pg_try_advisory_xact_lock(:ns, :k)"),
-                {"ns": SYNC_NAMESPACE, "k": _LOCK_RODADA},
+                {"ns": SYNC_NAMESPACE, "k": plat.lock},
             )
         ).scalar()
         if not travou:
             resumo["ocupado"] = 1
             return resumo
-        cands = await _candidatos(session)
+        cands = await _candidatos(session, plat)
         resumo["candidatos"] = len(cands)
         agora = _agora()
         etiqueta_em = dict(
@@ -586,14 +675,14 @@ async def rodada() -> dict[str, int]:
         try:
             async with httpx.AsyncClient(timeout=40.0) as c:
                 lidos, nao_registrados = await _ler(c, list(linhas.values()))
-                anotados = await _ler_consultas(list(linhas))
+                anotados = await _ler_consultas(list(linhas), plat.chave_consulta)
                 novos = [linhas[n] for n in nao_registrados if n in linhas]
                 if novos:
                     aceitos = await _registrar(c, novos)
                     resumo["registrados"] = len(aceitos)
                     for codigo in aceitos:
                         pagas = ((anotados or {}).get(codigo) or {}).get("n", 0)
-                        await _anotar_consulta(codigo, pagas, agora)
+                        await _anotar_consulta(codigo, pagas, agora, plat.chave_consulta)
                 coletados = {
                     n: h for n, ti in lidos.items() if n in linhas and (h := _coletado_em(ti))
                 }
@@ -604,13 +693,13 @@ async def rodada() -> dict[str, int]:
                     if (
                         codigo not in linhas
                         or codigo in coletados
-                        or linhas[codigo]["carrier"] != ANJUN_CARRIER
+                        or linhas[codigo]["carrier"] not in plat.pagas
                         or _motivo_sem_consulta(agora, anotados.get(codigo), _sync_17track(ti))
                     ):
                         continue
                     pagas = (anotados.get(codigo) or {}).get("n", 0) + 1
                     # Anota antes de chamar: consulta que falhou também conta no teto.
-                    await _anotar_consulta(codigo, pagas, agora)
+                    await _anotar_consulta(codigo, pagas, agora, plat.chave_consulta)
                     if resumo["consultas_pagas"]:
                         await asyncio.sleep(logistica_track._PAUSA_ENTRE_LOTES)
                     resumo["consultas_pagas"] += 1
@@ -619,7 +708,7 @@ async def rodada() -> dict[str, int]:
                         novo = await _consultar_na_hora(c, linhas[codigo])
                     except logistica_track.Track17Error as e:
                         logger.warning(
-                            "temu_rastreio_consulta_falhou",
+                            f"{plat.nome}_rastreio_consulta_falhou",
                             pedido=pedido,
                             n=pagas,
                             err=str(e)[:200],
@@ -628,7 +717,7 @@ async def rodada() -> dict[str, int]:
                         continue
                     hora = _coletado_em(novo or {})
                     logger.info(
-                        "temu_rastreio_consulta_paga",
+                        f"{plat.nome}_rastreio_consulta_paga",
                         pedido=pedido,
                         n=pagas,
                         status=((novo or {}).get("latest_status") or {}).get("status"),
@@ -637,7 +726,7 @@ async def rodada() -> dict[str, int]:
                     if hora is not None:
                         coletados[codigo] = hora
         except logistica_track.Track17Error as e:
-            logger.warning("temu_rastreio_17track_falhou", err=str(e)[:200])
+            logger.warning(f"{plat.nome}_rastreio_17track_falhou", err=str(e)[:200])
             resumo["erros"] += 1
             return resumo
         resumo["ainda_nao_saiu"] = len(linhas) - len(coletados)
@@ -645,7 +734,7 @@ async def rodada() -> dict[str, int]:
             return resumo
         integracao = await _get_bling_integration(session)
         if integracao is None:
-            logger.warning("temu_rastreio_sem_bling")
+            logger.warning(f"{plat.nome}_rastreio_sem_bling")
             resumo["erros"] += 1
             return resumo
         # Igual à Magalu: savepoint por pedido não pode travar a linha da
@@ -655,15 +744,15 @@ async def rodada() -> dict[str, int]:
             o = pedido_do_codigo[codigo]
             try:
                 async with session.begin_nested():
-                    motivo = await _aplicar(session, bling, o, hora)
+                    motivo = await _aplicar(session, bling, o, hora, plat)
             except Exception as exc:  # noqa: BLE001 — um pedido não derruba os outros
                 resumo["erros"] += 1
                 logger.warning(
-                    "temu_rastreio_aplicar_falhou", pedido=o.numero, erro=type(exc).__name__
+                    f"{plat.nome}_rastreio_aplicar_falhou", pedido=o.numero, erro=type(exc).__name__
                 )
                 continue
             resumo["verdes"] += int(motivo == "confirmado")
             resumo["erros"] += int(motivo in _ERROS_BLING)
-            logger.info("temu_rastreio_aplicado", pedido=o.numero, motivo=motivo)
-    logger.info("temu_rastreio_rodada", **resumo)
+            logger.info(f"{plat.nome}_rastreio_aplicado", pedido=o.numero, motivo=motivo)
+    logger.info(f"{plat.nome}_rastreio_rodada", **resumo)
     return resumo
