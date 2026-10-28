@@ -299,12 +299,13 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     cada status do envio (`status_history.date_*`), mas NÃO data o substatus —
     esse fica com a última mexida no envio (`aprox`).
 
-    Carrinho (pack) com MAIS DE UM PACOTE (Vinicius, 28/10, 304770): as 2 malas
-    saíram em 2 envios, o 1º voltou pra loja (devolução pra revisar) e o 2º foi
-    entregue. Lia-se só o 1º pedido do pack — calhou de ser o entregue — e a
-    linha ficou "Pago | Entregue" com a devolução escondida. Agora lê TODOS os
-    pedidos do pack e a linha conta o que pede atenção (`_peso_atencao`); com
-    mais de um envio, a Localização diz qual envio está na tela."""
+    Carrinho (pack) com MAIS DE UM PEDIDO (Vinicius, 28/10, 304770): 2 malas,
+    um pedido do ML para cada, no mesmo envio. A mediação e a devolução (já
+    entregue na loja em 27/10) estavam no 2º pedido. Lia-se só o 1º pedido do
+    pack, e a linha ficou "Pago | Entregue" com a devolução escondida. Agora lê
+    TODOS os pedidos do pack e a linha conta o que pede atenção
+    (`_peso_atencao`). O mesmo vale pro carrinho que o ML divide em vários
+    envios: aí a Localização diz qual envio está na tela."""
     orders = await _orders_do_pedido(client, str(order_id))
     if not orders:
         raise RuntimeError(f"pack {order_id}: nenhum pedido do ML respondeu")

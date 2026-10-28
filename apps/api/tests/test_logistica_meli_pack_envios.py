@@ -1,11 +1,16 @@
-"""Carrinho (pack) do ML com mais de um pacote — a linha da Logística conta o
-pacote que pede atenção, não o 1º pedido do pack.
+"""Carrinho (pack) do ML com mais de um pedido — a linha da Logística conta o
+pedido que pede atenção, não só o 1º do pack.
 
-Caso real (Vinicius, 28/10, 304770, poofy): venda 2000015584560777 com 2
-malas que o ML mandou em 2 envios. O pacote do envio 48287849457 voltou pra
-loja em 27/10 ("Devolução para revisar até sexta-feira") e o outro foi
-entregue em Jales/SP em 21/10. O enrich lia só `pack.orders[0]` — o entregue
-— e a linha ficou "Pago | Entregue", sem reclamação nem devolução."""
+Caso real (Vinicius, 28/10, 304770, poofy): venda 2000015584560777, 2 malas,
+um pedido do ML para cada, no mesmo envio (entregue em Jales/SP em 21/10). A
+mediação e a devolução, entregue na loja em 27/10 ("Devolução para revisar
+até sexta-feira"), estavam no 2º pedido. O enrich lia só `pack.orders[0]` e a
+linha ficou "Pago | Entregue", sem reclamação nem devolução. Depois da
+correção, o ⟳ trouxe "Pago | Entregue | Entregue | Mediação | Aberta" e
+"Devolvido → loja (Piracicaba/SP)".
+
+O ML também divide carrinho em vários envios; aí a Localização diz qual envio
+a linha mostra."""
 
 from __future__ import annotations
 
@@ -104,34 +109,48 @@ _DEVOLUCAO_NA_LOJA = {
 }
 
 
-def _caso_304770():
-    # O 1º pedido do pack é o pacote ENTREGUE — o que se lia antes.
-    return FakePackML(
+@pytest.mark.asyncio
+async def test_caso_304770_mediacao_no_2o_pedido_do_mesmo_envio():
+    # O 1º pedido do pack, o que se lia antes, não tem mediação nenhuma.
+    client = FakePackML(
         orders=[
-            _pedido(2000013000000001, 48287849999),
+            _pedido(2000013000000001, 48287849457),
             _pedido(2000013000000002, 48287849457, mediacoes=[5590000001]),
         ],
-        shipments={
-            "48287849999": _envio("delivered", "SYRGISEPEBI67HBHDPZUZGQLL4"),
-            "48287849457": _envio("delivered", "MEL48287849457FMDOR01"),
-        },
-        claims={5590000001: {"stage": "claim", "status": "opened"}},
+        shipments={"48287849457": _envio("delivered", "SYRGISEPEBI67HBHDPZUZGQLL4")},
+        claims={5590000001: {"stage": "dispute", "status": "opened"}},
         returns={5590000001: _DEVOLUCAO_NA_LOJA},
     )
-
-
-@pytest.mark.asyncio
-async def test_pack_com_dois_envios_mostra_o_pacote_devolvido():
-    enr = await logistica_meli.build_enrichment(_caso_304770(), PACK)
+    enr = await logistica_meli.build_enrichment(client, PACK)
     meli = enr["meli_status"]
     assert meli["claim_status"] == "opened"
     assert meli["return_status"] == "delivered"
     assert enr["localizacao_devolucao"] is True
+    # Um envio só: sem "venda com N pacotes".
+    assert enr["localizacao"] == "Devolvido → loja (Piracicaba/SP)"
+    assert enr["rastreio"] == "SYRGISEPEBI67HBHDPZUZGQLL4"
+    assert client.envios_lidos == ["48287849457"]
+
+
+@pytest.mark.asyncio
+async def test_pack_com_dois_envios_mostra_o_pacote_devolvido():
+    # O 1º pedido do pack é o pacote ENTREGUE; o devolvido saiu noutro envio.
+    client = FakePackML(
+        orders=[_pedido(1, 10), _pedido(2, 20, mediacoes=[55])],
+        shipments={
+            "10": _envio("delivered", "SYRG10"),
+            "20": _envio("delivered", "MEL20FMDOR01"),
+        },
+        claims={55: {"stage": "claim", "status": "opened"}},
+        returns={55: _DEVOLUCAO_NA_LOJA},
+    )
+    enr = await logistica_meli.build_enrichment(client, PACK)
+    assert enr["meli_status"]["return_status"] == "delivered"
     assert enr["localizacao"] == (
-        "Devolvido → loja (Piracicaba/SP) · envio 48287849457 (venda com 2 pacotes)"
+        "Devolvido → loja (Piracicaba/SP) · envio 20 (venda com 2 pacotes)"
     )
     # O rastreio é o do pacote que a linha conta.
-    assert enr["rastreio"] == "MEL48287849457FMDOR01"
+    assert enr["rastreio"] == "MEL20FMDOR01"
 
 
 @pytest.mark.asyncio
@@ -146,20 +165,6 @@ async def test_pack_com_um_envio_so_continua_igual_e_le_o_envio_uma_vez():
     assert enr["meli_status"] == {"order_status": "paid", "ship_status": "delivered"}
     assert enr["localizacao"] == "Entregue → Jales/SP"
     assert client.envios_lidos == ["777"]
-
-
-@pytest.mark.asyncio
-async def test_pack_num_envio_so_com_reclamacao_no_2o_pedido():
-    # Mesmo envio, reclamação aberta no 2º pedido: antes ficava invisível (a
-    # varredura via a reclamação, mas o enrich relia o 1º pedido).
-    client = FakePackML(
-        orders=[_pedido(1, 777), _pedido(2, 777, mediacoes=[55])],
-        shipments={"777": _envio("delivered", "SYRG777")},
-        claims={55: {"stage": "claim", "status": "opened"}},
-    )
-    enr = await logistica_meli.build_enrichment(client, PACK)
-    assert enr["meli_status"]["claim_status"] == "opened"
-    assert "pacotes" not in enr["localizacao"]
 
 
 @pytest.mark.asyncio
