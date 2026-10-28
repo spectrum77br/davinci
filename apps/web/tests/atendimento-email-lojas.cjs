@@ -5,7 +5,8 @@
 // constante da API, GRUPOS_EMAIL_NA_BARRA_DE_LOJAS, que chega em
 // `grupos_na_barra` com o status de cada pasta) —, cada caixa abre e fecha
 // sozinha, TODA loja tem as caixas (a vazia diz por quê) e a aba E-mail é só
-// de admin. Sem rede e sem e-mail de verdade:
+// de admin (e, desde 28/10/2026, de quem tem a permissão `atendimento_email`
+// view). Sem rede e sem e-mail de verdade:
 //  - as funções puras (as caixas de cada linha da barra, o número e a bolinha,
 //    o porquê da caixa vazia, as lojas sem linha de chat, as URLs — nunca a
 //    lista de todas as lojas);
@@ -20,7 +21,7 @@
 //    e-mail tem que abrir ali na box principal, não ali na esquerda"): o
 //    cabeçalho, o texto inteiro, o código, os anexos pela rota da caixa, o
 //    "fechar";
-//  - a página: a aba E-mail só para admin, as caixas e as lojas abertas
+//  - a página: a aba E-mail só para admin (ou a permissão), as caixas e as lojas abertas
 //    lembradas POR PESSOA (localStorage com try), a barra, a lista e a conversa
 //    ligadas; o chat guardado.
 const assert = require('node:assert/strict')
@@ -730,12 +731,15 @@ async function principal() {
     // No celular: a lista some quando há conversa aberta (a do chat ou a de e-mail).
     assert.match(tpl, /:class="abertaNaCaixa \? 'hidden' : 'flex'"/)
     assert.match(tpl, /:class="abertaNaCaixa \? 'flex' : 'hidden'"/)
-    // A aba E-mail: só admin (as abas à mostra e o conteúdo).
+    // A aba E-mail: só admin ou a permissão `atendimento_email` view (as abas à mostra e o conteúdo).
     assert.match(tpl, /v-for="a in abasVisiveis"/)
     assert.doesNotMatch(tpl, /v-for="a in ABAS"/)
-    assert.match(tpl, /<template v-if="aba === 'mail' && ehAdmin">/)
+    assert.match(tpl, /<template v-if="aba === 'mail' && veAbaEmail">/)
+    // 28/10/2026 (o marrocos vendo a aba sem virar admin): admin OU a permissão, só o view.
+    assert.match(pagina, /const podeVerAbaEmail = useCan\('atendimento_email', 'view'\)\nconst veAbaEmail = computed\(\(\) => ehAdmin\.value \|\| podeVerAbaEmail\.value\)/)
+    assert.doesNotMatch(pagina, /abasDe\(ehAdmin|if \(!ehAdmin\.value\)|!porLoja && !ehAdmin|watch\(ehAdmin|'mail' && ehAdmin/, 'a aba E-mail não depende mais só do admin')
 
-    // ── a aba E-mail só para admin, de verdade (o trecho da página com dublês)
+    // ── a aba E-mail só para quem a vê, de verdade (o trecho da página com dublês)
     const trecho = (de, ate) => {
       const i = pagina.indexOf(de)
       const f = pagina.indexOf(ate, i)
@@ -743,10 +747,33 @@ async function principal() {
       return transpileTs(pagina.slice(i, f))
     }
     {
+      // A conta da página com o useCan de verdade (admin, permissão, sem permissão).
+      const corpo = trecho('const podeVerAbaEmail = ', 'function abasDe(')
+      let usuario = null
+      const can = {}
+      new Function('exports', 'require', 'useAuthStore', transpile(web('composables/useCan.ts')))(can, require, () => ({ user: usuario }))
+      const ve = (u) => {
+        usuario = u
+        return new Function('computed', 'useCan', 'ehAdmin', `${corpo}\nreturn veAbaEmail`)(Vue.computed, can.useCan, Vue.computed(() => u?.role === 'admin')).value
+      }
+      assert.equal(ve({ role: 'admin', permissions: {} }), true, 'admin')
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email: { view: true } } }), true, 'a permissão (o marrocos)')
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email: { view: false } } }), false)
+      assert.equal(ve({ role: 'user', permissions: { atendimento: { view: true, edit: true, delete: true } } }), false, 'o recurso da caixa não abre a aba')
+      assert.equal(ve({ role: 'user', permissions: {} }), false)
+      assert.equal(ve(null), false)
+      // A tela de Permissões: o recurso no grupo Pós-venda, com o rótulo do "ver".
+      const posVenda = can.RESOURCE_GROUPS.find((g) => g.label === 'Pós-venda')
+      assert.ok(posVenda.resources.includes('atendimento_email'))
+      assert.equal(can.RESOURCE_LABELS.atendimento_email, 'Atendimento — aba E-mail (ver)')
+      const permissoesApi = fs.readFileSync(path.resolve(__dirname, '../../api/app/schemas/permissions.py'), 'utf8')
+      assert.match(permissoesApi, /^ {4}"atendimento_email",$/m, 'o recurso no backend')
+    }
+    {
       const abas = trecho('type Aba = ', "const { api } = useApi()")
-      const ini = trecho('function abasDe(admin: boolean)', '// `?tab=lojas` abre direto na aba')
+      const ini = trecho('function abasDe(veEmail: boolean)', '// `?tab=lojas` abre direto na aba')
       const aba0 = trecho("const abaQuery = typeof route.query.tab", "const conversaQuery =")
-      const montarAbas = (admin, tab) => new Function('computed', 'ref', 'ehAdmin', 'route', 'Inbox', 'UserRound', 'Store', 'BookOpen', 'MessageSquareText', 'Bot', 'BarChart3', `${abas}\n${ini}\n${aba0}\nreturn { ABAS, abasVisiveis, aba }`)(
+      const montarAbas = (admin, tab) => new Function('computed', 'ref', 'veAbaEmail', 'route', 'Inbox', 'UserRound', 'Store', 'BookOpen', 'MessageSquareText', 'Bot', 'BarChart3', `${abas}\n${ini}\n${aba0}\nreturn { ABAS, abasVisiveis, aba }`)(
         Vue.computed, Vue.ref, Vue.ref(admin), { query: { tab } }, 'i', 'u', 's', 'b', 'm', 'bot', 'bar',
       )
       const admin = montarAbas(true, 'mail')
@@ -764,7 +791,7 @@ async function principal() {
       const montarLinks = (admin) => {
         const aba = Vue.ref('caixa')
         const avulsos = []
-        const out = new Function('ref', 'aba', 'abasVisiveis', 'ehAdmin', 'emailConversa', 'emailConversaLinha', 'chatDeOrigem', 'abrirEmailAvulsoNaCaixa', `${abrirAba}\n${doEmail}\nreturn { abrirAba, abrirConversaDoEmail }`)(
+        const out = new Function('ref', 'aba', 'abasVisiveis', 'veAbaEmail', 'emailConversa', 'emailConversaLinha', 'chatDeOrigem', 'abrirEmailAvulsoNaCaixa', `${abrirAba}\n${doEmail}\nreturn { abrirAba, abrirConversaDoEmail }`)(
           Vue.ref, aba, Vue.ref([{ value: 'caixa' }, { value: 'lojas' }, ...(admin ? [{ value: 'mail' }] : [])]), Vue.ref(admin), Vue.ref(null), Vue.ref(null), Vue.ref(null), (id, origem) => avulsos.push([id, origem]),
         )
         return { ...out, aba, avulsos }
@@ -787,7 +814,7 @@ async function principal() {
       const montarContagens = ({ admin, porLoja, resposta }) => {
         const pedidos = []
         const r = {
-          canSugerir: Vue.ref(true), querPorLoja: Vue.ref(porLoja), ehAdmin: Vue.ref(admin),
+          canSugerir: Vue.ref(true), querPorLoja: Vue.ref(porLoja), veAbaEmail: Vue.ref(admin),
           emailContagens: Vue.ref(null), emailPorLoja: Vue.ref(null), emailGruposNaBarra: Vue.ref([]), emailDias: Vue.ref(30), emailContagensProntas: Vue.ref(false),
         }
         const fn = new Function(...Object.keys(r), 'api', `let geracaoContagensEmail = 0\n${corpo}\nreturn carregarContagensEmail`)(
@@ -827,15 +854,15 @@ async function principal() {
         setItem: (k, v) => { if (quebrado) throw new Error('bloqueado'); guardado.set(k, v) },
       }
       const emailSitesNaBarra = Vue.ref(sites)
-      const nomes = ['ref', 'computed', 'watch', 'nextTick', 'onMounted', 'aba', 'filtros', 'selecionada', 'emailPorLoja', 'larguraJanela', 'lojasRecolhidas', 'canSugerir', 'ehAdmin', 'iniciou', 'auth', 'localStorage', 'carregarContagensEmail', 'carregarModelos', 'selecionar', 'emailSitesNaBarra', 'sitesSemANaoLida', 'emailsDoSite', 'gruposDoSite']
+      const nomes = ['ref', 'computed', 'watch', 'nextTick', 'onMounted', 'aba', 'filtros', 'selecionada', 'emailPorLoja', 'larguraJanela', 'lojasRecolhidas', 'canSugerir', 'veAbaEmail', 'iniciou', 'auth', 'localStorage', 'carregarContagensEmail', 'carregarModelos', 'selecionar', 'emailSitesNaBarra', 'sitesSemANaoLida', 'emailsDoSite', 'gruposDoSite']
       const corpo = `${transpileTs(pagina.slice(ini, fim))}\nreturn { emailsDaLoja, emailDaCaixaAberto, emailDaCaixaLinha, abrirEmailDaLoja, fecharEmailDaLoja, emailNaCaixa, emailNaCaixaLinha, emailNaCaixaVersao, emailNaCaixaSinal, emailNaCaixaOrigem, emailsNoCelular, querPorLoja, contagemDaLoja, emailNaTela, abertaNaCaixa, abrirEmailsDaLoja, trocarGrupoDaLoja, abrirEmailDaBarra, fecharEmailsDaLoja, fecharEmailNaCaixa, selecionarEmailNaCaixa, abrirEmailAvulsoNaCaixa, voltarAoChatDaCaixa, aoMudarEmailNaCaixa, aoVincularEmailNaCaixa, lojasEmailsAbertos, gruposEmailsAbertos, chaveDosEmailsAbertos, chaveDosGruposAbertos }`
-      const ehAdmin = Vue.ref(admin)
+      const veAbaEmail = Vue.ref(admin)
       const out = new Function(...nomes, corpo)(
-        Vue.ref, Vue.computed, Vue.watch, Vue.nextTick, (fn) => montados.push(fn), aba, filtros, selecionada, emailPorLoja, larguraJanela, lojasRecolhidas, Vue.ref(true), ehAdmin, true, { user: usuario ? { id: usuario } : null }, localStorage,
+        Vue.ref, Vue.computed, Vue.watch, Vue.nextTick, (fn) => montados.push(fn), aba, filtros, selecionada, emailPorLoja, larguraJanela, lojasRecolhidas, Vue.ref(true), veAbaEmail, true, { user: usuario ? { id: usuario } : null }, localStorage,
         () => { lidas.contagens++ }, () => { lidas.modelos++ }, (id) => { lidas.selecionadas.push(id); selecionada.value = id },
         emailSitesNaBarra, LJ.sitesSemANaoLida, LJ.emailsDoSite, LJ.gruposDoSite,
       )
-      return { ...out, aba, filtros, selecionada, larguraJanela, lojasRecolhidas, ehAdmin, montados, lidas, guardado, emailSitesNaBarra, async montar() { for (const fn of montados) fn(); await Vue.nextTick(); await esperar() } }
+      return { ...out, aba, filtros, selecionada, larguraJanela, lojasRecolhidas, veAbaEmail, montados, lidas, guardado, emailSitesNaBarra, async montar() { for (const fn of montados) fn(); await Vue.nextTick(); await esperar() } }
     }
     function filtros0() { return filtros() }
     const ATV = { chave: 'i-sh', integration_id: 'i-sh', store_info_id: '', plataforma: 'shopee', conta: 'ATV', grupo: 'problemas' }
@@ -1005,11 +1032,11 @@ async function principal() {
       b.abrirEmailAvulsoNaCaixa('e-9', { id: 'chat-1', aba: 'caixa' })
       b.abrirEmailsDaLoja(ATV)
       assert.deepEqual([b.emailNaCaixa.value, b.emailsDaLoja.value?.chave], [null, 'i-sh'])
-      // Deixou de ser admin com a aba E-mail aberta: volta para a Caixa.
-      b.ehAdmin.value = true
+      // Deixou de ver a aba E-mail (admin ou a permissão) com ela aberta: volta para a Caixa.
+      b.veAbaEmail.value = true
       b.aba.value = 'mail'
       await Vue.nextTick()
-      b.ehAdmin.value = false
+      b.veAbaEmail.value = false
       await Vue.nextTick()
       assert.equal(b.aba.value, 'caixa')
     }

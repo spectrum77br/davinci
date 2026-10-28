@@ -99,8 +99,9 @@ CATEGORIAS_PASTA = (*CATEGORIAS_PELA_PASTA, CATEGORIA_SITE)
 # grupo é AQUI: daqui saem os números por loja (GET /api/atendimento/email/
 # contagens?por_loja=true, que manda a lista em `grupos_na_barra`), os grupos
 # que a barra e a lista da loja mostram (o web não tem lista própria) e o que
-# quem NÃO é admin pode listar (GET /api/atendimento/conversas?caixa=email: só
-# pela loja e só destes grupos — a aba E-mail inteira é só de admin).
+# quem NÃO vê a aba E-mail pode listar (GET /api/atendimento/conversas?caixa=email:
+# só pela loja e só destes grupos — a aba E-mail inteira é de admin e, desde
+# 28/10/2026, de quem tem a permissão `atendimento_email` view).
 GRUPOS_EMAIL_NA_BARRA_DE_LOJAS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("problemas", "Problemas", ("problemas",)),
     ("envios", "Envios", ("envio",)),

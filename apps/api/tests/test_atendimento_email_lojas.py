@@ -523,6 +523,60 @@ async def test_admin_continua_com_a_aba_inteira(db, cena, client, admin):
     assert r.status_code == 200 and r.json()["itens"]
 
 
+async def test_quem_tem_a_permissao_da_aba_ve_a_aba_sem_virar_admin(
+    db, cena, client, quem_le, auth_as
+):
+    """28/10/2026, o Eduardo: "bote o user marrocos no davinci pra poder ver
+    tambem a aba de emails". A permissão `atendimento_email` view abre a aba
+    E-mail inteira para LER (as listas de todas as lojas, o chamado do site, a
+    saúde) a quem não é admin; as filas e as ações seguem de quem mexe."""
+    h = await _historico(db, cena)
+    assert quem_le.role == UserRole.USER
+
+    async def lista(**p):
+        return await client.get(f"{URL}/conversas", params={"caixa": "email", **p})
+
+    # Sem a permissão (com ela desligada, ou só com o recurso da caixa): 403, como desde 27/10.
+    for perms in (None, {"atendimento_email": {"view": False}}, {"atendimento": {"view": True}}):
+        quem_le.permissions = perms or {}
+        await db.commit()
+        r = await client.get(f"{EMAIL}/saude")
+        assert r.status_code == 403 and r.json()["detail"]["code"] == SO_ADMIN, (perms, r.text)
+        r = await lista(filtro="todas")
+        assert r.status_code == 403 and r.json()["detail"]["code"] == SO_ADMIN, (perms, r.text)
+
+    # Com a permissão: a aba inteira para ver.
+    quem_le.permissions = {"atendimento_email": {"view": True}}
+    await db.commit()
+    auth_as(quem_le)
+    r = await client.get(f"{EMAIL}/saude")
+    assert r.status_code == 200, r.text
+    assert "lojas_sem_caixa_lida" not in r.json(), "a faixa das lojas sem caixa lida é de quem mexe"
+    r = await lista(filtro="todas")
+    assert r.status_code == 200, r.text
+    assert h["novo"] in {i["id"] for i in r.json()["itens"]}, "a lista de todas as lojas"
+    for p in (
+        {"filtro": "aguardando"},
+        {"integration_id": str(cena.ml.id)},
+        {"integration_id": str(cena.ml.id), "tipo_email": "chamado"},
+        {"tipo_chamado": "sac"},
+    ):
+        r = await lista(**p)
+        assert r.status_code == 200, (p, r.text)
+    assert (await client.get(f"{EMAIL}/contagens")).status_code == 200
+    # Só VER: as filas (podem ter e-mail interno) e as ações seguem de quem mexe.
+    for rota in ("filas", "informativos", "envios", "pastas", "regras"):
+        r = await client.get(f"{EMAIL}/{rota}")
+        assert r.status_code == 403, (rota, r.text)
+        assert r.json()["detail"]["code"] == "atendimento_so_quem_mexe", rota
+    r = await client.post(f"{EMAIL}/reprocessar")
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "atendimento_so_leitura"
+    # (Responder pela conversa é de toda a equipe desde ea8412fe, 28/10/2026 — não é
+    # desta permissão.) E não virou admin: o /me segue sem mexer na caixa.
+    me = (await client.get("/api/auth/me")).json()
+    assert me["role"] == "user" and me["atendimento"] is True and me["atendimento_mexe"] is False
+
+
 async def test_loja_bloqueada_e_escopo_cortam_os_numeros(
     db, cena, client, make_user, auth_as, admin
 ):

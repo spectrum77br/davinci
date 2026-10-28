@@ -84,3 +84,18 @@ def pode_responder(user: User) -> bool:
 def so_le(user: User) -> bool:
     """Vê, mas não mexe: a tela esconde as ações e a API recusa a escrita (403)."""
     return pode_ver(user) and not pode_mexer(user)
+
+
+def ve_aba_email(user: User) -> bool:
+    """Vê a ABA E-MAIL inteira do /atendimento: admin, ou quem tem a permissão
+    `atendimento_email` view (28/10/2026, o Eduardo: "bote o user marrocos no
+    davinci pra poder ver tambem a aba de emails" — sem virar admin).
+
+    Só VER: as ações da aba seguem com `pode_mexer`, e a trava da caixa
+    (`pode_ver`, no router) vale antes. Quem não vê a aba lê e-mail só pela
+    barra de lojas da Caixa (403 `aba_email_so_admin` no resto). A mesma conta
+    do `useCan('atendimento_email', 'view')` do web (admin sempre passa)."""
+    if user.role == UserRole.ADMIN:
+        return True
+    perm = (user.permissions or {}).get("atendimento_email")
+    return isinstance(perm, dict) and perm.get("view") is True

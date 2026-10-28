@@ -122,20 +122,25 @@ const canSugerir = computed(() => auth.user?.atendimento === true)
 const agora = useRelogio()
 
 // A ABA E-MAIL é só de ADMIN (27/10/2026) — o Eduardo: quem não é admin vê
-// e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). A noção
-// de admin é a do app (o `role` do /me: `useIsAdmin`, o middleware admin.ts);
-// a API recusa as rotas da aba com 403 `aba_email_so_admin`. Quem não é admin
-// não vê a aba, e o `?tab=mail` (ou um `abrirAba('mail')`) cai na Caixa.
-function abasDe(admin: boolean) {
-  return ABAS.filter((a) => a.value !== 'mail' || admin)
+// e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). Desde
+// 28/10/2026 também de quem tem a permissão `atendimento_email` view (o
+// Eduardo: "bote o user marrocos no davinci pra poder ver tambem a aba de
+// emails") — só VER: as ações seguem com `mexe`. A noção de admin é a do app
+// (o `role` do /me: `useIsAdmin`); a API usa a mesma conta (`acesso.ve_aba_email`)
+// e recusa as rotas da aba com 403 `aba_email_so_admin`. Quem não vê a aba
+// não a tem nas abas, e o `?tab=mail` (ou um `abrirAba('mail')`) cai na Caixa.
+const podeVerAbaEmail = useCan('atendimento_email', 'view')
+const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value)
+function abasDe(veEmail: boolean) {
+  return ABAS.filter((a) => a.value !== 'mail' || veEmail)
 }
-const abasVisiveis = computed(() => abasDe(ehAdmin.value))
+const abasVisiveis = computed(() => abasDe(veAbaEmail.value))
 
 // `?tab=lojas` abre direto na aba; `?conversa=<id>` abre a conversa (é o link
 // que o alerta de prazo no Telegram manda) — com `?tab=mail`, a conversa de
-// e-mail na aba E-mail (quem não é admin: na Caixa).
+// e-mail na aba E-mail (quem não vê a aba: na Caixa).
 const abaQuery = typeof route.query.tab === 'string' ? route.query.tab : ''
-const aba = ref<Aba>(abasDe(ehAdmin.value).some((a) => a.value === abaQuery) ? (abaQuery as Aba) : 'caixa')
+const aba = ref<Aba>(abasDe(veAbaEmail.value).some((a) => a.value === abaQuery) ? (abaQuery as Aba) : 'caixa')
 const conversaQuery = typeof route.query.conversa === 'string' && route.query.conversa ? route.query.conversa : null
 const selecionada = ref<string | null>(aba.value === 'mail' ? null : conversaQuery)
 // A conversa de E-MAIL aberta na aba E-mail (13/10/2026): nunca na Caixa.
@@ -249,9 +254,9 @@ let geracaoContagensEmail = 0
 async function carregarContagensEmail() {
   // Sem o /atendimento, sem as conversas de e-mail (a rota recusaria): não pergunta.
   if (!canSugerir.value) return
-  // Quem não é admin não tem a aba E-mail (nem o número dela): só a barra pergunta.
+  // Quem não vê a aba E-mail não tem o número dela: só a barra pergunta.
   const porLoja = querPorLoja.value
-  if (!porLoja && !ehAdmin.value) return
+  if (!porLoja && !veAbaEmail.value) return
   const g = ++geracaoContagensEmail
   try {
     const recebidas = await api<ContagensDeConversa>(porLoja ? '/api/atendimento/email/contagens?por_loja=true' : '/api/atendimento/email/contagens')
@@ -685,9 +690,9 @@ function abrirConversaNaCaixa(id: string) {
 // `origem` = o chat de onde veio (o "voltar ao chat" da barra); das Filas e das
 // Caixas, nenhum.
 function abrirConversaDoEmail(id: string, origem: Origem | null = null) {
-  // Quem não é admin (27/10/2026): a conversa de e-mail abre na CAIXA, na
-  // coluna da conversa, com a barra do e-mail (a aba E-mail é só de admin).
-  if (!ehAdmin.value) {
+  // Quem não vê a aba E-mail (27/10/2026): a conversa de e-mail abre na CAIXA,
+  // na coluna da conversa, com a barra do e-mail.
+  if (!veAbaEmail.value) {
     abrirEmailAvulsoNaCaixa(id, origem)
     return
   }
@@ -923,8 +928,8 @@ function selecionarEmailNaCaixa(id: string, email?: EmailDaCaixa) {
   if (emailNaCaixa.value !== id) emailNaCaixaLinha.value = null
   emailNaCaixa.value = id
 }
-// A conversa de e-mail SEM a lista da loja (quem não é admin, 27/10/2026: a
-// aba E-mail é só de admin): o link de dentro do chat ou o `?conversa=` do
+// A conversa de e-mail SEM a lista da loja (quem não vê a aba E-mail — só
+// admin e a permissão `atendimento_email`, 27–28/10/2026): o link de dentro do chat ou o `?conversa=` do
 // alerta abrem a conversa de e-mail aqui na Caixa, com a barra do e-mail e o
 // "voltar ao chat" de onde saiu. A lista do chat continua.
 function abrirEmailAvulsoNaCaixa(id: string, origem: Origem | null = null) {
@@ -987,8 +992,8 @@ watch(
 watch(barraDeLojasNaTela, (v) => {
   if (v) emailsNoCelular.value = false
 })
-// Deixou de ser admin (o /me mudou): a aba E-mail some — volta para a Caixa.
-watch(ehAdmin, (v) => {
+// Deixou de ver a aba E-mail (o /me mudou): a aba some — volta para a Caixa.
+watch(veAbaEmail, (v) => {
   if (!v && aba.value === 'mail') aba.value = 'caixa'
 })
 watch(emailNaCaixa, (id) => {
@@ -1329,8 +1334,8 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
 
     <LazyAtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :ver-zap="ehAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
     <!-- E-mail: a Central (Caixas) e as Filas do e-mail das lojas (08/10/2026); a conversa de e-mail abre AQUI (13/10/2026) -->
-    <!-- só admin (27/10/2026): quem não é admin vê e-mail pela barra de lojas da Caixa -->
-    <template v-if="aba === 'mail' && ehAdmin">
+    <!-- só admin (27/10/2026) e quem tem a permissão atendimento_email view (28/10/2026): os outros veem e-mail pela barra de lojas da Caixa -->
+    <template v-if="aba === 'mail' && veAbaEmail">
       <div v-if="emailConversa" class="space-y-2" data-conversa-de-email>
         <AtendimentoEmailConversaBarra
           :conversa="emailConversaLinha"

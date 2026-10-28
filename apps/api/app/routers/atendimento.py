@@ -338,13 +338,15 @@ SO_LEITURA = {
     "caixa ficam com quem cuida do Atendimento.",
 }
 # A ABA E-MAIL INTEIRA é só de admin (27/10/2026) — o Eduardo: quem não é admin
-# vê e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). O 403
-# das rotas que só a aba usa (aqui, GET /conversas?caixa=email sem a loja; as
-# do e-mail em routers/atendimento_email.py, `_aba_inteira`).
+# vê e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). Desde
+# 28/10/2026 também de quem tem a permissão `atendimento_email` view (só ver:
+# `acesso.ve_aba_email`). O 403 das rotas que só a aba usa (aqui, GET
+# /conversas?caixa=email sem a loja; as do e-mail em routers/atendimento_email.py,
+# `_aba_inteira`). O `code` fica o mesmo (o web e os testes leem).
 ABA_EMAIL_SO_ADMIN = {
     "code": "aba_email_so_admin",
-    "detail": "A aba E-mail é só de admin: os e-mails de cada loja ficam na barra de "
-    "lojas da Caixa.",
+    "detail": "A aba E-mail é só de admin (ou de quem tem a permissão da aba E-mail): "
+    "os e-mails de cada loja ficam na barra de lojas da Caixa.",
 }
 
 
@@ -2664,8 +2666,9 @@ async def listar_conversas(
     (27/10/2026, só com `caixa=email`): um GRUPO da barra de lojas — as pastas
     Problemas · Envios · Devolução (`GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`): a
     conversa cujo e-mail recebido mais recente está numa pasta dele. Quem NÃO
-    é admin (a aba E-mail é só de admin, 27/10/2026) só lista o e-mail com a
-    loja e um grupo da barra; sem isso, 403.
+    vê a aba E-mail (só admin desde 27/10/2026 — e, desde 28/10, quem tem a
+    permissão `atendimento_email` view: `acesso.ve_aba_email`) só lista o
+    e-mail com a loja e um grupo da barra; sem isso, 403.
     """
     plataformas = _plataformas_do_filtro(plataforma)
     canal = (canal or "").strip().lower() or None
@@ -2697,11 +2700,12 @@ async def listar_conversas(
     grupo_email = (grupo_email or "").strip().lower() or None
     if grupo_email and (grupo_email not in mail_barra.chaves() or not caixa_email):
         raise HTTPException(422, detail={"code": "grupo_email_invalido"})
-    if caixa_email and user.role != UserRole.ADMIN:
-        # A aba E-mail é só de admin (27/10/2026): quem não é admin vê e-mail SÓ
-        # pela barra de lojas da Caixa — a lista de UMA loja, num GRUPO (pasta)
-        # que a barra mostra (`GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`). A lista de todas
-        # as lojas, o chamado do site e o e-mail fora dos grupos ficam na aba (403).
+    if caixa_email and not acesso.ve_aba_email(user):
+        # A aba E-mail é só de admin (27/10/2026) ou de quem tem a permissão
+        # `atendimento_email` view (28/10/2026): os outros veem e-mail SÓ pela
+        # barra de lojas da Caixa — a lista de UMA loja, num GRUPO (pasta) que a
+        # barra mostra (`GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`). A lista de todas as
+        # lojas, o chamado do site e o e-mail fora dos grupos ficam na aba (403).
         if (integration_id is None and store_info_id is None) or grupo_email is None:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail=ABA_EMAIL_SO_ADMIN)
     pastas_do_grupo = (

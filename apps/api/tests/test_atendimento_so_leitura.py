@@ -60,6 +60,9 @@ URL = "/api/atendimento"
 AGORA = datetime.now(UTC)
 DONO = "dono@davinci-test.com"
 TUDO = {"atendimento": {"view": True, "edit": True, "delete": True}}
+# A aba E-mail para ver (28/10/2026): a permissão `atendimento_email`. Só o view
+# vale — com edit e delete marcados, quem só lê continua sem mexer em nada.
+ABA_EMAIL = {"atendimento_email": {"view": True, "edit": True, "delete": True}}
 SO_LEITURA = "atendimento_so_leitura"
 
 
@@ -233,7 +236,7 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
     assert rota_email.LEITURAS_SO_DE_QUEM_MEXE <= existentes, (
         rota_email.LEITURAS_SO_DE_QUEM_MEXE - existentes
     )
-    # E as da aba E-mail que só admin faz (27/10/2026).
+    # E as da aba E-mail que só admin (e quem tem `atendimento_email` view) faz.
     assert rota_email.LEITURAS_SO_DE_ADMIN <= existentes, (
         rota_email.LEITURAS_SO_DE_ADMIN - existentes
     )
@@ -241,13 +244,19 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
 
 @pytest.mark.parametrize(
     "quem",
-    ["comum_sem_permissao", "comum_com_o_recurso_inteiro", "admin_fora_da_lista"],
+    [
+        "comum_sem_permissao",
+        "comum_com_o_recurso_inteiro",
+        "comum_com_a_aba_email",
+        "admin_fora_da_lista",
+    ],
 )
 async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as, quem):
     if quem == "admin_fora_da_lista":
         u = await make_user(role=UserRole.ADMIN)
     else:
-        u = await make_user(permissions=TUDO if quem == "comum_com_o_recurso_inteiro" else None)
+        perms = {"comum_com_o_recurso_inteiro": TUDO, "comum_com_a_aba_email": ABA_EMAIL}
+        u = await make_user(permissions=perms.get(quem))
     auth_as(u)
     chamadas = _chamadas()
     assert chamadas
@@ -258,8 +267,9 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
             # fica disponível a leitores ou a admins fora da lista operacional.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
         elif (metodo, molde) in rota_email.LEITURAS_SO_DE_ADMIN:
-            # A aba E-mail é só de admin (27/10/2026): a leitura que só ela faz.
-            if quem == "admin_fora_da_lista":
+            # A aba E-mail é só de admin (27/10/2026) — e de quem tem a permissão
+            # `atendimento_email` view (28/10/2026): a leitura que só ela faz.
+            if quem in ("admin_fora_da_lista", "comum_com_a_aba_email"):
                 assert r.status_code not in (401, 403), (metodo, caminho, r.status_code, r.text)
             else:
                 assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)

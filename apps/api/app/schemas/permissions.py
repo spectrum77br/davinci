@@ -50,6 +50,14 @@ Resource = Literal[
     # admin (SO_ADMIN em routers/atendimento.py) e o recurso saiu da tela de
     # Permissões; fica aqui para o JSON salvo validar e para quando abrir.
     "atendimento",
+    # Atendimento › aba E-mail (28/10/2026): a aba é só de admin desde 27/10;
+    # o Eduardo: "bote o user marrocos no davinci pra poder ver tambem a aba de
+    # emails". Só `view` vale: quem tem vê a aba E-mail inteira (as listas de
+    # todas as lojas, os chamados dos sites, a saúde das caixas) SEM virar
+    # admin. Mexer (responder, vincular, configurar caixa) continua de quem
+    # mexe no /atendimento (`acesso.pode_mexer`). Lida em
+    # services/atendimento/acesso.py:ve_aba_email; mesmo nome no useCan.ts.
+    "atendimento_email",
     # Legacy single-bucket — no longer used by any route after the
     # financeiro_* split below, but kept in the literal so stored
     # permissions JSON containing the old key still validates.

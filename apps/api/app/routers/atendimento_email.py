@@ -29,8 +29,8 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
     GET   …/conversas/{id}/previa   — como a resposta vai sair e as travas de agora
     GET   …/saude                   — as caixas da EMPRESA (a privada só para o
                                       dono/admin) — e, para quem mexe, as lojas
-                                      sem caixa lida. Desde 27/10/2026 só admin
-                                      (é só da aba E-mail)
+                                      sem caixa lida. Desde 27/10/2026 só de quem
+                                      vê a aba E-mail (é só dela)
 
   A ABA E-MAIL é só de ADMIN (27/10/2026, o dono): quem não é admin vê e-mail
   SÓ pela barra de lojas da Caixa — GET …/contagens?por_loja=true (os números
@@ -41,7 +41,10 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
   …/lojas/anexos/{id}: todo e-mail das pastas, também o que a ponte segurou
   como segurança) e a conversa de e-mail (as rotas "pela conversa" acima).
   As rotas que só a aba usa recusam quem não é admin com 403
-  `aba_email_so_admin` (`_aba_inteira`).
+  `aba_email_so_admin` (`_aba_inteira`). Desde 28/10/2026 a aba também é de
+  quem tem a permissão `atendimento_email` view (`acesso.ve_aba_email`; o
+  Eduardo: "bote o user marrocos no davinci pra poder ver tambem a aba de
+  emails") — só VER: as filas e as ações continuam de quem mexe.
 
   só quem MEXE (as filas podem ter e-mail de qualquer loja e de endereço interno):
     GET   …/filas                   — as contagens
@@ -238,20 +241,25 @@ def _admin(user: User) -> None:
 
 
 # A ABA E-MAIL INTEIRA é só de admin (27/10/2026) — o Eduardo: quem não é admin
-# vê e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). As rotas
-# que só a aba usa recusam com este 403; as que a barra e a conversa de e-mail
-# usam (as contagens por loja, a lista da loja em GET /conversas?caixa=email, a
-# conversa e os cartões dela) continuam para quem vê a loja, como antes.
+# vê e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). Desde
+# 28/10/2026 também de quem tem a permissão `atendimento_email` view
+# (`acesso.ve_aba_email`), sem virar admin. As rotas que só a aba usa recusam
+# os outros com este 403; as que a barra e a conversa de e-mail usam (as
+# contagens por loja, a lista da loja em GET /conversas?caixa=email, a conversa
+# e os cartões dela) continuam para quem vê a loja, como antes.
 ABA_SO_ADMIN = ABA_EMAIL_SO_ADMIN
 # As LEITURAS que só a aba E-mail faz e que, até 27/10/2026, quem só lê também
 # fazia (as outras já eram só de quem mexe — `LEITURAS_SO_DE_QUEM_MEXE`, e quem
-# mexe é sempre admin). `tests/test_atendimento_so_leitura.py` confere a lista.
+# mexe é sempre admin). O nome é de 27/10: hoje é admin OU quem tem a permissão
+# `atendimento_email` view. `tests/test_atendimento_so_leitura.py` confere a lista.
 LEITURAS_SO_DE_ADMIN = frozenset({("GET", f"{_PREFIXO}/saude")})
 
 
 def _aba_inteira(user: User) -> None:
-    """A rota é só da aba E-mail: só admin (o `role` do /me, o `admin.ts` do web)."""
-    if user.role != UserRole.ADMIN:
+    """A rota é só da aba E-mail: admin ou quem tem `atendimento_email` view
+    (`acesso.ve_aba_email`, a mesma conta do `useCan` do web). Só ver: as
+    ações seguem com `_mexe`."""
+    if not acesso.ve_aba_email(user):
         raise HTTPException(403, detail=ABA_SO_ADMIN)
 
 
@@ -975,8 +983,9 @@ async def contagens(
     `GRUPOS_EMAIL_NA_BARRA_DE_LOJAS`, que vão em `grupos_na_barra`) e o porquê
     da caixa vazia (`_contagens_por_loja`). A MESMA consulta, agrupada: os
     números de cima saem da soma dos grupos. A barra é o único caminho de quem
-    não é admin até o e-mail (a aba E-mail é só de admin): esta rota segue para
-    quem vê o /atendimento.
+    não vê a aba E-mail até o e-mail (a aba é de admin e de quem tem a
+    permissão `atendimento_email` view): esta rota segue para quem vê o
+    /atendimento.
 
     Rápida (27/10/2026, "otimiza pra abrir rápido"): o filtro de acesso é
     decidido uma vez por pedido (`administracao.visao_rapida`, o mesmo
@@ -2684,7 +2693,8 @@ async def salvar_regra(body: RegraIn, session: Session, user: Leitor) -> dict[st
 async def saude_das_caixas(session: Session, user: Leitor, response: Response) -> dict[str, Any]:
     """Uma linha por caixa: as da EMPRESA para todos; a privada só para o dono/admin.
 
-    Só a aba E-mail mostra (Filas): desde 27/10/2026, só admin (`_aba_inteira`)."""
+    Só a aba E-mail mostra (Filas): desde 27/10/2026, só quem vê a aba
+    (`_aba_inteira`: admin ou `atendimento_email` view)."""
     _aba_inteira(user)
     caixas = await saude.caixas_visiveis(session, user)
     saida: dict[str, Any] = {

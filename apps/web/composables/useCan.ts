@@ -29,6 +29,7 @@ export type Resource =
   | 'garantias_atendimento'
   | 'garantias_cpf'
   | 'atendimento'
+  | 'atendimento_email'
   | 'sincronizacoes'
   | 'sync_logs'
   | 'integracoes'
@@ -98,9 +99,14 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     // edit = Registrar atendimento ("Vincular à garantia" no /atendimento);
     // `garantias_cpf` view = ver o CPF completo no detalhe. Mesmos nomes em
     // apps/api/app/schemas/permissions.py.
+    // Atendimento › aba E-mail (28/10/2026): a aba é só de admin desde 27/10; o
+    // Eduardo pediu o marrocos vendo a aba também, sem virar admin. Só o `view`
+    // vale (a aba inteira para LER; mexer segue com `atendimento_mexe` do /me) —
+    // `acesso.ve_aba_email` na API, `veAbaEmail` em pages/atendimento.vue.
     resources: [
       'devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados',
       'garantias', 'garantias_atendimento', 'garantias_cpf',
+      'atendimento_email',
     ],
   },
   {
@@ -188,6 +194,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   garantias_atendimento: 'Garantias — Registrar atendimento (edit)',
   garantias_cpf: 'Garantias — Ver o CPF completo (view)',
   atendimento: 'Atendimento',
+  atendimento_email: 'Atendimento — aba E-mail (ver)',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',
   integracoes: 'Integrações',

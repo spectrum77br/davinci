@@ -112,8 +112,11 @@ const can = loadLib('../composables/useCan.ts', { useAuthStore: lojaFalsa })
 {
   const posVenda = can.RESOURCE_GROUPS.find((g) => g.label === 'Pós-venda')
   // Garantias (07/10/2026) entra no grupo com as três permissões do documento.
-  assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados', 'garantias', 'garantias_atendimento', 'garantias_cpf'],
+  // A aba E-mail (28/10/2026): `atendimento_email` view = vê a aba sem ser admin
+  // (só ver; mexer continua do /me, `atendimento_mexe`).
+  assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados', 'garantias', 'garantias_atendimento', 'garantias_cpf', 'atendimento_email'],
     'o recurso continua fora da tela de Permissões (quem vê e quem mexe vêm do /me)')
+  assert.equal(can.RESOURCE_LABELS.atendimento_email, 'Atendimento — aba E-mail (ver)')
   for (const g of can.RESOURCE_GROUPS) assert.ok(!g.resources.includes('atendimento'), `atendimento fora do grupo ${g.label}`)
   assert.ok(!can.RESOURCES.includes('atendimento'))
   assert.equal(can.RESOURCE_LABELS.atendimento, 'Atendimento', 'o rótulo continua (para quando a fase acabar)')

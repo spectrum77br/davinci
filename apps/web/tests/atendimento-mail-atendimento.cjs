@@ -311,8 +311,8 @@ async function principal() {
     assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:conversation-counts="emailContagens"\s+:refresh-conversation-counts="carregarContagensEmail"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
     // O número da aba E-mail (o e-mail saiu da Caixa Humano): o que falta responder nele.
     assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
-    // (27/10/2026: a aba E-mail só para admin.)
-    assert.match(paginaTpl, /<template v-if="aba === 'mail' && ehAdmin">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
+    // (27/10/2026: a aba E-mail só para admin; 28/10: ou a permissão atendimento_email.)
+    assert.match(paginaTpl, /<template v-if="aba === 'mail' && veAbaEmail">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
     assert.match(paginaTpl, /<AtendimentoEmailConversaBarra\s+:conversa="emailConversaLinha"\s+:pode-mexer="mexe"\s+:com-chat="!!chatDeOrigem"\s+@voltar="fecharConversaDoEmail"\s+@voltar-ao-chat="voltarAoChat"\s+@vinculado="aoVincularConversaDoEmail"\s+\/>/)
     assert.match(paginaTpl, /<AtendimentoConversa\s+:key="`\$\{emailConversa\}:\$\{emailConversaVersao\}`"\s+:conversa-id="emailConversa"[\s\S]*?:ativa="aba === 'mail'"\s+@mudou="aoMudarConversaDoEmail"[\s\S]*?@abrir-conversa="abrirConversaDoEmail"/)
   }
@@ -328,7 +328,7 @@ async function principal() {
       const st = { aba: Vue.ref('mail'), selecionada: Vue.ref(null), emailConversa: Vue.ref(null), emailConversaLinha: Vue.ref(null), emailConversaVersao: Vue.ref(0), chatDeOrigem: Vue.ref(null), itens: Vue.ref([]), emHumano: Vue.ref(false) }
       st.contagensLidas = 0
       st.listasRelidas = 0
-      const f = new Function('aba', 'selecionada', 'emailConversa', 'emailConversaLinha', 'emailConversaVersao', 'chatDeOrigem', 'itens', 'emHumano', 'selecionar', 'carregarResumo', 'carregarContagensEmail', 'atualizarLista', `const linhasAtualizadas = new Map(); let versaoDasLinhas = 0; const naCaixa = {value:true}; const carregando = {value:false}; const carregandoMais = {value:false}; let atualizandoLista = false; let linkDoChat = null\n// 27/10/2026: a aba E-mail é só de admin — aqui, o admin (o fluxo de sempre).\nconst ehAdmin = {value:true}; const abrirEmailAvulsoNaCaixa = () => { throw new Error('admin abre na aba E-mail') }\n${js}`)(
+      const f = new Function('aba', 'selecionada', 'emailConversa', 'emailConversaLinha', 'emailConversaVersao', 'chatDeOrigem', 'itens', 'emHumano', 'selecionar', 'carregarResumo', 'carregarContagensEmail', 'atualizarLista', `const linhasAtualizadas = new Map(); let versaoDasLinhas = 0; const naCaixa = {value:true}; const carregando = {value:false}; const carregandoMais = {value:false}; let atualizandoLista = false; let linkDoChat = null\n// 27/10/2026: a aba E-mail é só de quem a vê (admin ou a permissão) — aqui, quem vê (o fluxo de sempre).\nconst veAbaEmail = {value:true}; const abrirEmailAvulsoNaCaixa = () => { throw new Error('admin abre na aba E-mail') }\n${js}`)(
         st.aba, st.selecionada, st.emailConversa, st.emailConversaLinha, st.emailConversaVersao, st.chatDeOrigem, st.itens, st.emHumano, (id) => { st.selecionada.value = id }, () => {}, () => { st.contagensLidas++ }, () => { st.listasRelidas++ },
       )
       return { st, f }
