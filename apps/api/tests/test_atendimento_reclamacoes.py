@@ -15,7 +15,9 @@ não havia conversa nenhuma no atendimento).
 
 O que se mede: a reclamação vira linha em `atendimento_reclamacoes` e
 conversa `canal = 'reclamacao'` (mesmo sem mensagem), com o mediador como
-`mediador`, bloqueada (só leitura), com o prazo da plataforma; a etiqueta
+`mediador`, bloqueada só quando o ML não libera mensagem da loja (28/10/2026:
+`dados.destinos`, o comprador na etapa `claim` e o mediador na `dispute`),
+com o prazo da plataforma; a etiqueta
 muda na conversa da reclamação E no pack do mesmo pedido, e volta quando
 encerra; só GET; poucas chamadas (nada relido sem mudança, teto por conta);
 erro de uma conta não para as outras; o cron só com a leitura ligada; a rota
@@ -401,8 +403,10 @@ async def test_caso_297840_reclamacao_encerrada_vira_conversa_mesmo_sem_pack(db,
     assert (conversa.plataforma, conversa.integration_id) == ("ml", integ.id)
     assert conversa.pedido_marketplace == PEDIDO_ML
     assert conversa.canal_id is None
+    # Encerrada: o ML não aceita mais mensagem da loja.
     assert conversa.situacao == CONVERSA_BLOQUEADA
-    assert conversa.bloqueio_motivo == reclamacoes.BLOQUEIO_SO_LEITURA
+    assert conversa.bloqueio_motivo == reclamacoes.BLOQUEIO_ENCERRADA
+    assert conversa.dados["destinos"] == []
     assert conversa.aguardando_resposta is False and conversa.nao_lidas == 0
     assert conversa.dados["claim_ids"] == []  # encerrada
     assert ENDERECO_SECRETO not in json.dumps(conversa.dados, default=str)
@@ -1116,7 +1120,7 @@ async def test_conversa_da_reclamacao_abre_na_caixa_e_nao_envia(
 ):
     """A conversa nova (`canal = 'reclamacao'`, sem canal de leitura) abre no
     detalhe e na lista do router do atendimento e não deixa responder — nem
-    com o envio ligado (bloqueada: só leitura)."""
+    com o envio ligado — quando o ML não libera mensagem da loja (sem ação)."""
     integ = await _conta(db, await make_user())
     ml.conta()["abertas"] = [_claim()]
     ml.conta()["mensagens"][RECLAMACAO_ML] = [
@@ -1136,3 +1140,83 @@ async def test_conversa_da_reclamacao_abre_na_caixa_e_nao_envia(
     assert corpo["envio"]["pode_enviar"] is False
     r = await client.get("/api/atendimento/conversas")
     assert str(conversa.id) in {i["id"] for i in r.json()["itens"]}
+
+
+# ─────────────── responder (28/10/2026): para quem o ML libera ───────────────
+
+
+@pytest.mark.parametrize(
+    ("stage", "acoes", "destinos"),
+    [
+        ("claim", ["send_message_to_complainant", "open_dispute"], ["comprador"]),
+        ("dispute", ["send_message_to_mediator", "refund"], ["mediador"]),
+        ("dispute", ["refund"], []),
+    ],
+)
+def test_destinos_liberados_pela_acao_da_loja(stage, acoes, destinos):
+    claim = _claim(stage=stage, acoes=[{"action": a, "mandatory": False} for a in acoes])
+    assert reclamacoes.destinos_liberados(claim) == destinos
+    fechada = _claim(status="closed", stage=stage, acoes=[{"action": a} for a in acoes])
+    assert reclamacoes.destinos_liberados(fechada) == []
+
+
+async def test_mediacao_com_acao_desbloqueia_e_sem_acao_bloqueia(db, make_user, ml):
+    """A conversa só fica bloqueada sem destino liberado; o bloqueio velho
+    ("só leitura", de antes de 28/10) sai na leitura seguinte."""
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    c["abertas"] = [_claim(stage="dispute")]
+    await _sync(integ)
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert (conversa.situacao, conversa.bloqueio_motivo) == (
+        CONVERSA_BLOQUEADA,
+        reclamacoes.BLOQUEIO_SEM_ACAO,
+    )
+    # O bloqueio de antes (só leitura) e a mediação liberando o mediador.
+    conversa.bloqueio_motivo = reclamacoes.BLOQUEIO_SO_LEITURA
+    await db.commit()
+    c["abertas"] = [
+        _claim(
+            stage="dispute",
+            acoes=[{"action": "send_message_to_mediator", "mandatory": True}],
+            last_updated="2026-10-01T12:00:00.000-04:00",
+        )
+    ]
+    await _sync(integ, T0 + timedelta(minutes=10))
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert conversa.situacao != CONVERSA_BLOQUEADA
+    assert conversa.bloqueio_motivo is None
+    assert conversa.dados["destinos"] == ["mediador"]
+    # A IA continua de fora: a reclamação aberta é caso de pessoa.
+    assert conversa.dados["claim_ids"] == [RECLAMACAO_ML]
+    # Encerrou: bloqueia de novo, com o porquê.
+    c["abertas"] = []
+    c["encerradas"] = [_encerrada_297840(last_updated="2026-10-01T13:00:00.000-04:00")]
+    await _sync(integ, T0 + timedelta(minutes=20))
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert (conversa.situacao, conversa.bloqueio_motivo) == (
+        CONVERSA_BLOQUEADA,
+        reclamacoes.BLOQUEIO_ENCERRADA,
+    )
+    assert conversa.dados["destinos"] == []
+
+
+async def test_fechada_pela_pessoa_nao_volta_com_destino(db, make_user, ml):
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    acoes = [{"action": "send_message_to_complainant", "mandatory": False}]
+    c["abertas"] = [_claim(acoes=acoes)]
+    await _sync(integ)
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert conversa.dados["destinos"] == ["comprador"]
+    assert conversa.situacao != CONVERSA_BLOQUEADA
+    conversa.situacao = "fechada"
+    await db.commit()
+    c["abertas"] = [_claim(acoes=acoes, last_updated="2026-10-01T12:00:00.000-04:00")]
+    await _sync(integ, T0 + timedelta(minutes=10))
+    db.expire_all()
+    assert (await _conversa_da_reclamacao(db)).situacao == "fechada"

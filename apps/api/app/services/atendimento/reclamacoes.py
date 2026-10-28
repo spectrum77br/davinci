@@ -31,12 +31,18 @@ e `ATENDIMENTO_LEITURA_ATIVA`):
 
 Por que cada cuidado:
 
-- SÓ LEITURA. Nenhuma ação na reclamação sai daqui (os métodos de ação do
-  cliente do ML existem, para os chamados; este módulo não os chama). A
-  conversa da reclamação nasce BLOQUEADA, com o motivo "só leitura": a caixa
-  de resposta não aparece, a IA não sugere, e o envio recusa. Nada é marcado
-  como lido (o GET das mensagens da reclamação não tem `mark_as_read`; medido
-  em 01/10/2026: as mensagens já chegam lidas pelo Duoke segundos depois).
+- LER É SÓ LER. Nenhuma ação na reclamação sai daqui (este módulo não chama
+  os métodos de ação do cliente do ML). Nada é marcado como lido (o GET das
+  mensagens da reclamação não tem `mark_as_read`; medido em 01/10/2026: as
+  mensagens já chegam lidas pelo Duoke segundos depois).
+- QUEM RESPONDE É PESSOA, PELO DAVINCI (28/10/2026; antes, a conversa nascia
+  bloqueada "só leitura"): a leitura grava em `dados.destinos` para quem o ML
+  deixa a loja escrever AGORA (`destinos_liberados`: o comprador na etapa
+  `claim`, o mediador na `dispute`) e a conversa só fica BLOQUEADA quando não
+  há nenhum (encerrada, ou a etapa sem a ação de mensagem), com a frase do
+  porquê (`_situacao_da_conversa`). O envio é o caminho único
+  (`enviar._destino_reclamacao` → `ml.responder_reclamacao`): só pessoa, a IA
+  e a mensagem automática nunca.
 - POUCAS CHAMADAS, POR CONTA. Duas buscas por rodada; as mensagens (e a
   devolução, a reputação, o motivo e o pack) só quando a reclamação MEXEU
   (`last_updated` diferente do que já foi lido) e com teto por conta e rodada
@@ -95,11 +101,14 @@ from app.services.atendimento.constantes import (
     AUTOR_SISTEMA,
     CANAL_POS_VENDA,
     CANAL_RECLAMACAO,
+    CHAVE_DESTINOS_RECLAMACAO,
     CHAVE_PRAZO_LIDO_EM,
     CHAVE_PRAZO_PLATAFORMA,
     CHAVE_VEZ_DA_LOJA,
+    CONVERSA_ABERTA,
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
+    DESTINOS_RECLAMACAO,
     RECLAMACAO_TIPO_DEVOLUCAO,
     RECLAMACAO_TIPO_MEDIACAO,
     RECLAMACAO_TIPO_RECLAMACAO,
@@ -178,11 +187,19 @@ COMMIT_DEVOLUCOES_A_CADA = 20
 # O acontecimento que vai entre parênteses na linha do tempo da etiqueta.
 MOTIVO_ETIQUETA_ML = "leitura das reclamações do ML"
 
-# O que a caixa mostra no lugar da resposta (a conversa nasce bloqueada).
+# O que a caixa mostra no lugar da resposta quando o ML não deixa a loja
+# escrever. A de antes de 28/10/2026 (`BLOQUEIO_SO_LEITURA`) ainda está nas
+# conversas até a próxima leitura — que a troca (`_situacao_da_conversa`).
 BLOQUEIO_SO_LEITURA = (
     "Reclamação do Mercado Livre: só leitura no DaVinci — as respostas e as "
     "ações ficam no Mercado Livre."
 )
+BLOQUEIO_SEM_ACAO = (
+    "Reclamação do Mercado Livre: nesta etapa o ML não liberou mensagem da loja "
+    "(nem ao comprador, nem ao mediador). Acompanhe e faça as ações no Mercado Livre."
+)
+BLOQUEIO_ENCERRADA = "Reclamação encerrada no Mercado Livre: ela não aceita mais mensagem da loja."
+BLOQUEIOS_DA_RECLAMACAO = frozenset({BLOQUEIO_SO_LEITURA, BLOQUEIO_SEM_ACAO, BLOQUEIO_ENCERRADA})
 
 # ── O vocabulário do ML (medido em 01/10/2026) ────────────────────────────
 STATUS_ML_ABERTA = "opened"
@@ -342,6 +359,18 @@ def acao_pendente(claim: dict) -> tuple[str | None, datetime | None]:
         return None, None
     acao, quando = min(candidatas, key=lambda par: par[1])
     return _id(acao.get("action")).lower(), quando
+
+
+def destinos_liberados(claim: dict) -> list[str]:
+    """Para quem o ML deixa a loja escrever AGORA (`comprador`, `mediador`). PURA.
+
+    Pela ação da loja (`send_message_to_complainant` / `_to_mediator`, doc
+    "Gerenciar mensagem de uma reclamação"); encerrada → nenhum.
+    """
+    if not esta_aberta(claim):
+        return []
+    acoes = {_id(a.get("action")).lower() for a in acoes_da_loja(claim)}
+    return [destino for destino, (_, acao) in DESTINOS_RECLAMACAO.items() if acao in acoes]
 
 
 def encerrada_em(claim: dict) -> datetime | None:
@@ -795,6 +824,8 @@ def _dados_da_conversa(
         CHAVE_PRAZO_PLATAFORMA: _iso(linha.prazo_em) if aberta else None,
         CHAVE_PRAZO_LIDO_EM: _iso(agora),
         "relida_em": _iso(agora),
+        # Para quem a loja pode escrever agora (a caixa e o envio leem daqui).
+        CHAVE_DESTINOS_RECLAMACAO: destinos_liberados(claim) if aberta else [],
     }
     if pack_id:
         dados["pack_id"] = pack_id
@@ -816,8 +847,34 @@ async def _atualizar_conversa(
     if not await gravar.travar_linha(session, conversa):
         return
     conversa.dados = {**(conversa.dados or {}), **_dados_da_conversa(claim, linha, agora)}
+    _situacao_da_conversa(conversa)
     gravar.recalcular(conversa)
     await session.flush()
+
+
+def _situacao_da_conversa(conversa: AtendimentoConversa) -> None:
+    """Bloqueada só quando o ML não deixa a loja escrever (28/10/2026).
+
+    Com destino liberado (`dados.destinos`), a conversa sai do bloqueio — o de
+    qualquer motivo: a etapa da reclamação é a verdade, relida a cada rodada
+    (a recusa de um envio por "block" também passa). Sem nenhum, fica
+    bloqueada com o porquê (encerrada ou a etapa sem a ação de mensagem).
+    Fechada = a pessoa deu por resolvida: não volta.
+    """
+    if conversa.situacao == CONVERSA_FECHADA:
+        return
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    if dados.get(CHAVE_DESTINOS_RECLAMACAO):
+        if conversa.situacao == CONVERSA_BLOQUEADA:
+            # `recalcular` (logo depois) decide entre aberta e respondida.
+            conversa.situacao = CONVERSA_ABERTA
+            conversa.bloqueio_motivo = None
+        return
+    encerrada = dados.get("status_ml") == STATUS_ML_ENCERRADA
+    motivo = BLOQUEIO_ENCERRADA if encerrada else BLOQUEIO_SEM_ACAO
+    if conversa.situacao != CONVERSA_BLOQUEADA or conversa.bloqueio_motivo != motivo:
+        conversa.situacao = CONVERSA_BLOQUEADA
+        conversa.bloqueio_motivo = motivo
 
 
 async def _gravar_conversa(
@@ -845,14 +902,8 @@ async def _gravar_conversa(
         anuncio_id=itens[0] if itens else None,
         dados=dados,
     )
-    # Só leitura: a conversa da reclamação fica bloqueada (sem caixa de
-    # resposta, sem IA, o envio recusa). Fechada = a pessoa deu por
-    # resolvida: não volta.
-    if conversa.situacao != CONVERSA_FECHADA and (
-        conversa.situacao != CONVERSA_BLOQUEADA or conversa.bloqueio_motivo != BLOQUEIO_SO_LEITURA
-    ):
-        conversa.situacao = CONVERSA_BLOQUEADA
-        conversa.bloqueio_motivo = BLOQUEIO_SO_LEITURA
+    # Bloqueada só sem destino liberado pelo ML (a caixa some, o envio recusa).
+    _situacao_da_conversa(conversa)
     itens_msg: list[MensagemReclamacao] = []
     for m in leitura.mensagens:
         item = mensagem_da_reclamacao(m)

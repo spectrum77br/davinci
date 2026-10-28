@@ -172,6 +172,13 @@ export function tituloDaNf(
 //   é outra → a caixa da aba (AtendimentoAbaResposta, com as travas daquela
 //   conversa); Mediador → só leitura. Sem a rota (ou se ela falhar), a
 //   conversa fica como sempre foi.
+// - RECLAMAÇÃO DO ML (28/10/2026, "responder a mediação como no Duoke"): a
+//   caixa ganha as abas "Para o comprador" e "Para o Mercado Livre
+//   (mediador)" no lugar do "Responder" — só as que o ML libera agora
+//   (`envio.destinos`: o comprador na etapa de reclamação, o mediador na
+//   mediação). O destino segue a aba de mensagens aberta (Mediador →
+//   mediador, Reclamação → comprador) e vai no envio (`para`), no texto e no
+//   anexo. O balão da loja diz a quem foi (`mensagem.para`).
 // - Aguardando Cancelamento (item 4, fase 4a, 02/10/2026): com o pedido em
 //   83955, a FAIXA de uma linha (`data-faixa-ag-cancelamento`) com o porquê e
 //   se pode falar em cancelamento com o comprador (a trava interna da Margem
@@ -303,6 +310,8 @@ import {
   rotulosHumano,
   seloPrecisaDePessoa,
   sellerCenterDe,
+  ABA_DO_DESTINO,
+  destinoDaCaixa,
   statusDoErro,
   sugestaoDeAntes,
   tamanhoDoEnvio,
@@ -321,6 +330,7 @@ import {
   type EventoCliente,
   type ConversaResumo,
   type CorrecaoEmCurso,
+  type DestinoReclamacao,
   type Detalhe,
   type EtiquetaHistorico,
   type EtiquetaTroca,
@@ -1591,7 +1601,9 @@ async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boo
   if (!confirmaSePublica(d.conversa.canal, texto.value.trim())) return
   const id = d.conversa.id
   const nome = titulo(d.conversa)
-  const body: { texto: string; rascunho_id?: string; ultima_vista_id?: string; confirmar?: boolean; mail_message_id?: string; confirmar_nao_responde?: boolean } = { texto: texto.value.trim() }
+  const body: { texto: string; rascunho_id?: string; ultima_vista_id?: string; confirmar?: boolean; mail_message_id?: string; confirmar_nao_responde?: boolean; para?: string } = { texto: texto.value.trim() }
+  // Reclamação do ML: a quem vai (a aba da caixa).
+  if (destinosReclamacao.value.length && destinoCaixa.value) body.para = destinoCaixa.value
   if (baseRascunhoId.value && d.rascunho?.id === baseRascunhoId.value) body.rascunho_id = baseRascunhoId.value
   const vista = ultimaVista(d)
   if (vista) body.ultima_vista_id = vista
@@ -1615,6 +1627,7 @@ async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boo
     // Só relê a conversa que continua aberta: reler a A com a B na tela
     // descartava o carregamento da B (a geração é uma só).
     if (aberta(id)) await carregar(id, true)
+    if (body.para && m?.status !== 'falhou') await mostrarAbaDoDestino(id, body.para)
   } catch (e: any) {
     const code = e?.data?.detail?.code
     const st = statusDoErro(e)
@@ -2212,6 +2225,30 @@ const agCancelamento = computed(() => {
 // A nota interna funciona SEMPRE (até no modo observação): ela não sai para
 // ninguém. A escolha volta para "Responder" ao trocar de conversa.
 const modoCaixa = ref<'responder' | 'nota'>('responder')
+// Reclamação do ML (28/10/2026): para quem a caixa escreve. Só os destinos que
+// o ML libera agora; segue a aba de mensagens quando a pessoa troca de aba
+// (Mediador → mediador, Reclamação → comprador) e fica no que ela escolheu
+// enquanto continuar liberado.
+const destinosReclamacao = computed<DestinoReclamacao[]>(() => (conversa.value?.canal === 'reclamacao' ? detalhe.value?.envio?.destinos ?? [] : []))
+const destinoCaixa = ref<string | null>(null)
+watch(destinosReclamacao, (ds) => { destinoCaixa.value = destinoDaCaixa(ds, null, destinoCaixa.value) }, { immediate: true })
+watch(abaAtiva, (aba) => { destinoCaixa.value = destinoDaCaixa(destinosReclamacao.value, aba, destinoCaixa.value) })
+const rotuloDestino = computed(() => destinosReclamacao.value.find((x) => x.chave === destinoCaixa.value)?.rotulo ?? '')
+function escolherDestino(chave: string) {
+  modoCaixa.value = 'responder'
+  destinoCaixa.value = chave
+  // A conversa com esse destino fica à vista (a aba de mensagens dele), quando existe.
+  const aba = ABA_DO_DESTINO[chave]
+  if (aba && abasDaBarra.value.some((a) => a.chave === aba)) trocarAba(aba)
+}
+// Depois de mandar: as abas relidas (a primeira fala ao mediador cria a aba
+// Mediador) e a da conversa com o destino aberta — é lá que a mensagem mora.
+async function mostrarAbaDoDestino(id: string, chave: string) {
+  if (!aberta(id)) return
+  await carregarAbas(id)
+  const aba = ABA_DO_DESTINO[chave]
+  if (aberta(id) && aba && aba !== abaAtiva.value && abasDaBarra.value.some((a) => a.chave === aba)) trocarAba(aba)
+}
 function aoCriarNota(m: Mensagem) {
   const d = detalhe.value
   if (d && !d.mensagens.some((x) => x.id === m.id)) {
@@ -2341,6 +2378,8 @@ async function enviarFoto(opcoes?: { confirmar?: boolean }) {
   const fd = new FormData()
   fd.append('arquivo', f.arquivo, f.arquivo.name)
   if (legenda && envioFoto.value?.legenda_permitida) fd.append('legenda', legenda)
+  // Reclamação do ML: o anexo vai na mensagem ao destino da caixa.
+  if (destinosReclamacao.value.length && destinoCaixa.value) fd.append('para', destinoCaixa.value)
   const vista = ultimaVista(d)
   if (vista) fd.append('ultima_vista_id', vista)
   if (opcoes?.confirmar === true) fd.append('confirmar', 'true')
@@ -2891,11 +2930,18 @@ watch(() => props.conversaId, (novo, velho) => {
           >{{ resumoHumano(conversa.humano) }}</span>
         </div>
         <!-- faixas: bloqueio, janela, fechada, não precisa, Ag. cancelamento -->
-        <!-- Conversa da reclamação/mediação (canal 'reclamacao'): só leitura POR
-             ESCOLHA nossa (por enquanto) — não é a plataforma que bloqueou, e
-             "reabrir" não faz sentido aqui (02/10/2026). -->
-        <div v-if="conversa.canal === 'reclamacao'" class="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-700 dark:text-red-300">
-          <Lock class="mr-1 inline size-3.5" />Reclamação: por enquanto, só leitura no DaVinci — responda e faça as ações {{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome).replace(/^Abrir /, '') }} (botão "{{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome) }}" no cartão abre no perfil da loja).
+        <!-- Conversa da reclamação/mediação (canal 'reclamacao'). Desde 28/10/2026
+             a MENSAGEM sai por aqui (ao comprador ou ao mediador, o que o ML
+             liberar); as ações (reembolso, devolução, abrir mediação) seguem na
+             plataforma. Bloqueada = o ML não deixa a loja escrever agora — a
+             frase diz por quê; "reabrir" não faz sentido aqui. -->
+        <div v-if="conversa.canal === 'reclamacao'" class="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-700 dark:text-red-300" data-faixa-reclamacao>
+          <template v-if="destinosReclamacao.length">
+            <ShieldCheck class="mr-1 inline size-3.5" />Reclamação: a mensagem sai pela própria reclamação, {{ destinosReclamacao.length > 1 ? 'para quem você escolher na caixa' : destinosReclamacao[0].chave === 'mediador' ? 'só para o mediador (na mediação o ML não deixa falar direto com o comprador)' : 'para o comprador' }}. Reembolso, devolução e abrir mediação: {{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome).replace(/^Abrir /, '') }} (botão "{{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome) }}" no cartão).
+          </template>
+          <template v-else>
+            <Lock class="mr-1 inline size-3.5" />{{ conversa.situacao === 'bloqueada' && conversa.bloqueio_motivo ? conversa.bloqueio_motivo : 'Reclamação: o Mercado Livre não liberou mensagem da loja agora.' }} Ações: botão "{{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome) }}" no cartão abre no perfil da loja.
+          </template>
         </div>
         <!-- Conversa da avaliação de venda (canal 'avaliacao', RF8): a resposta é
              PÚBLICA; no ML ela nasce bloqueada porque a opinião não tem resposta
@@ -3116,6 +3162,8 @@ watch(() => props.conversaId, (novo, velho) => {
               <div v-else-if="lado(l.m) === 'loja'" class="mb-0.5 flex max-w-[85%] items-center gap-1 px-1 text-[11px] md:max-w-[75%]" :class="autorCls(l.m)" :title="origemHint(l.m)">
                 <Bot v-if="l.m.origem === 'davinci_ia'" class="size-3 shrink-0" />
                 <span class="truncate">{{ origemLabel(l.m, conversa.plataforma) }}</span>
+                <!-- reclamação do ML: a quem a loja escreveu -->
+                <span v-if="l.m.para" class="shrink-0 rounded px-1" :class="l.m.para === 'mediador' ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300' : 'bg-muted text-muted-foreground'" data-msg-para>→ {{ l.m.para === 'mediador' ? 'Mercado Livre (mediador)' : 'comprador' }}</span>
               </div>
               <div class="max-w-[85%] rounded-lg px-3 py-2 transition-shadow md:max-w-[75%]" :class="[balaoCls(l.m), destacadaId === l.m.id ? 'ring-2 ring-primary/70' : '']">
                 <div v-if="STATUS_MSG[l.m.status]" class="mb-1">
@@ -3267,7 +3315,23 @@ watch(() => props.conversaId, (novo, velho) => {
                para ninguém) e o botão de foto. Quem só lê (fase de observação)
                não escreve nada aqui: fica o "o que a IA responderia". -->
           <div v-if="!conversa.somente_leitura && canEdit" class="flex items-center gap-1 text-xs" role="tablist" aria-label="caixa de resposta">
+            <!-- Reclamação do ML: uma aba por destino liberado (no lugar do "Responder"). -->
+            <template v-if="destinosReclamacao.length">
+              <button
+                v-for="dst in destinosReclamacao"
+                :key="dst.chave"
+                type="button"
+                role="tab"
+                :aria-selected="modoCaixa === 'responder' && destinoCaixa === dst.chave"
+                class="rounded-md px-2 py-1"
+                :class="modoCaixa === 'responder' && destinoCaixa === dst.chave ? (dst.chave === 'mediador' ? 'bg-violet-100 font-medium text-violet-900 dark:bg-violet-900/30 dark:text-violet-200' : 'bg-muted font-medium text-foreground') : 'text-muted-foreground hover:bg-muted/60'"
+                :title="dst.chave === 'mediador' ? 'a mensagem vai para o mediador do Mercado Livre, dentro da reclamação' : 'a mensagem vai para o comprador, dentro da reclamação'"
+                :data-destino="dst.chave"
+                @click="escolherDestino(dst.chave)"
+              >{{ dst.rotulo }}</button>
+            </template>
             <button
+              v-else
               type="button"
               role="tab"
               :aria-selected="modoCaixa === 'responder'"
@@ -3548,7 +3612,7 @@ watch(() => props.conversaId, (novo, velho) => {
             rows="3"
             :disabled="!podeDigitar || enviando"
             class="block max-h-[40vh] min-h-[76px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
-            :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? 'Escreva a resposta PÚBLICA à avaliação… (Ctrl+Enter envia)' : 'Escreva a resposta… (Ctrl+Enter envia)') : 'Resposta desabilitada nesta conversa'"
+            :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? 'Escreva a resposta PÚBLICA à avaliação… (Ctrl+Enter envia)' : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (Ctrl+Enter envia)` : 'Escreva a resposta… (Ctrl+Enter envia)') : 'Resposta desabilitada nesta conversa'"
             aria-label="resposta ao comprador"
             @keydown="aoTeclar"
           />

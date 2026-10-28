@@ -150,6 +150,18 @@ caracteres); a nossa cópia vai para o disco junto da linha em voo
 do `cliente_da_integracao` (o Zap não tem loja); e o efeito de um erro da
 Meta é aplicado depois, como no texto (`_depois_do_zap`).
 
+RECLAMAÇÃO DO ML (28/10/2026): a conversa `canal = 'reclamacao'` responde
+pela própria reclamação (`ml.responder_reclamacao`, POST
+/post-purchase/v1/claims/{id}/actions/send-message) — ao COMPRADOR ou ao
+MEDIADOR, o `para` que a pessoa escolhe na tela. O mesmo caminho (travas,
+linha em voo, validador, régua de resultado) com o `_destino_reclamacao`: só
+pessoa (a IA sugere, nunca envia; a automática nunca), só para quem o ML
+libera agora (`dados.destinos`, relido pelo cron das reclamações), e a loja
+vem da integração da conversa (ela não tem canal próprio), com o modo do
+canal da loja. A foto/PDF vai como anexo da mensagem (`foto.enviar_imagem`).
+A linha leva `payload.para` (o `receiver_role`) — é o que a tela e as abas
+leem para dizer a quem foi.
+
 Texto de comprador (e o nosso) nunca vai para o log — só ids e estados.
 """
 
@@ -199,9 +211,12 @@ from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AVALIACAO_OBSERVOU,
     CANAL_AVALIACAO,
+    CANAL_POS_VENDA,
+    CANAL_RECLAMACAO,
     CANAL_ZAP,
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
+    DESTINOS_RECLAMACAO,
     MODO_AUTO,
     MODOS_QUE_ENVIAM,
     MOTIVO_ZAP_SO_PESSOA,
@@ -224,7 +239,9 @@ from app.services.atendimento.constantes import (
     RASCUNHO_ENVIADO,
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
+    ROTULO_DESTINO_RECLAMACAO,
     ResultadoEnvio,
+    destinos_da_reclamacao,
     motivo_canal_sem_envio,
     reclamacao_aberta,
 )
@@ -369,6 +386,26 @@ MOTIVO_AVALIACAO_SO_PESSOA = (
 # Amazon cujo e-mail não disse a conta: a pessoa escolhe a conta na tela
 # (PATCH /conversas/{id} com `integration_id`), e aí dá para responder.
 MOTIVO_AMAZON_SEM_CONTA = "Escolha de qual conta Amazon é esta conversa."
+# Reclamação do ML (28/10/2026): para quem a mensagem vai.
+RECUSA_DESTINO_INDISPONIVEL = "destino_indisponivel"
+MOTIVO_RECLAMACAO_SO_PESSOA = (
+    "Reclamação/mediação: quem responde é uma pessoa (a IA sugere, mas não envia)."
+)
+MOTIVO_RECLAMACAO_SEM_DESTINO = (
+    "Nesta etapa o Mercado Livre não liberou mensagem da loja nesta reclamação."
+)
+MOTIVO_RECLAMACAO_SEM_PARA = (
+    "Reclamação: escolha para quem vai a mensagem (o comprador ou o Mercado Livre) "
+    "na caixa de resposta e envie de novo."
+)
+
+
+def _exigir_para(conversa: AtendimentoConversa, para: str | None) -> None:
+    """O ENVIO na reclamação diz para quem (a faixa da tela, não: ela mostra o
+    primeiro liberado). Sem `para` — a tela antiga em cache, a oferta de troca,
+    um caminho novo — nada sai: a mensagem iria a um destino que ninguém escolheu."""
+    if conversa.canal == CANAL_RECLAMACAO and para is None:
+        raise EnvioRecusado(RECUSA_DESTINO_INDISPONIVEL, MOTIVO_RECLAMACAO_SEM_PARA)
 
 # Similaridade (difflib, 0–1) a partir da qual "a pessoa enviou a sugestão
 # como veio". Abaixo disso ela EDITOU — e a versão dela é a que ensina.
@@ -466,6 +503,13 @@ class _Destino:
     canal: AtendimentoCanal
     integration: Integration | None
     zap: zap.ZapDestino | None = None
+    # Reclamação do ML (28/10/2026): `comprador` ou `mediador` (DESTINOS_RECLAMACAO).
+    para: str | None = None
+
+    @property
+    def receiver_role(self) -> str | None:
+        """O `receiver_role` do ML para o `para` (None fora da reclamação)."""
+        return DESTINOS_RECLAMACAO[self.para][0] if self.para else None
 
 
 # ── Travas ────────────────────────────────────────────────────────────────
@@ -477,6 +521,7 @@ async def _destino(
     *,
     origem: str,
     rascunho_id: UUID | None = None,
+    para: str | None = None,
 ) -> _Destino:
     """Confere as travas que não dependem do texto; levanta `EnvioRecusado`.
 
@@ -542,6 +587,8 @@ async def _destino(
         )
     if conversa.canal == CANAL_AVALIACAO:
         return await _destino_avaliacao(session, conversa, origem=origem)
+    if conversa.canal == CANAL_RECLAMACAO:
+        return await _destino_reclamacao(session, conversa, origem=origem, para=para)
     if conversa.plataforma == "amazon" and conversa.integration_id is None:
         raise EnvioRecusado(RECUSA_SEM_INTEGRACAO, MOTIVO_AMAZON_SEM_CONTA)
     canal = (
@@ -762,16 +809,38 @@ async def _destino_avaliacao(
     avaliacao = await avaliacoes.avaliacao_da_conversa(session, conversa)
     if avaliacao is not None and avaliacao.resposta_loja:
         raise EnvioRecusado(RECUSA_AVALIACAO_JA_RESPONDIDA, "Esta avaliação já foi respondida.")
+    integration, canal = await _loja_da_conversa(session, conversa)
+    if integration is None:
+        raise EnvioRecusado(
+            RECUSA_SEM_INTEGRACAO,
+            "A loja desta avaliação não está mais conectada ao DaVinci.",
+        )
+    if canal is None:
+        raise EnvioRecusado(
+            RECUSA_CANAL_EM_OBSERVACAO,
+            "Esta loja está em modo observar: quem responde a avaliação é o de fora "
+            "(Seller Center ou o robô da loja).",
+        )
+    return _Destino(canal=canal, integration=integration)
+
+
+async def _loja_da_conversa(
+    session: AsyncSession, conversa: AtendimentoConversa, *, caixa: str | None = None
+) -> tuple[Integration | None, AtendimentoCanal | None]:
+    """A loja da conversa SEM canal próprio (avaliação, reclamação), RELIDA:
+    (integração ativa ou None, o canal dela num modo que envia ou None).
+
+    `caixa`: a caixa da loja que decide o modo quando ela existe (a reclamação
+    do ML segue o pós-venda: em `observar`, quem responde é o Duoke, mesmo com
+    a pergunta em humano). Sem ela, o primeiro canal num modo que envia.
+    """
     integration = (
         await session.get(Integration, conversa.integration_id, populate_existing=True)
         if conversa.integration_id is not None
         else None
     )
     if integration is None or integration.archived_at is not None:
-        raise EnvioRecusado(
-            RECUSA_SEM_INTEGRACAO,
-            "A loja desta avaliação não está mais conectada ao DaVinci.",
-        )
+        return None, None
     canais = (
         (
             await session.execute(
@@ -784,14 +853,59 @@ async def _destino_avaliacao(
         .scalars()
         .all()
     )
-    canal = next((c for c in canais if c.modo in MODOS_QUE_ENVIAM), None)
+    if caixa is not None and (dela := next((c for c in canais if c.canal == caixa), None)):
+        return integration, dela if dela.modo in MODOS_QUE_ENVIAM else None
+    return integration, next((c for c in canais if c.modo in MODOS_QUE_ENVIAM), None)
+
+
+def _frase_dos_destinos(destinos: list[str]) -> str:
+    """"ao mediador" / "ao comprador" / "ao comprador ou ao mediador"."""
+    nomes = {"comprador": "ao comprador", "mediador": "ao Mercado Livre (mediador)"}
+    return " ou ".join(nomes.get(d, d) for d in destinos)
+
+
+async def _destino_reclamacao(
+    session: AsyncSession, conversa: AtendimentoConversa, *, origem: str, para: str | None
+) -> _Destino:
+    """As travas da mensagem na RECLAMAÇÃO do ML (a conversa não tem canal próprio).
+
+    Só pessoa (a IA e a automática nunca: o que se diz ali entra na mediação);
+    só para quem o ML libera AGORA (`dados.destinos`, gravado pela leitura das
+    reclamações a partir das ações da loja); sem `para`, o primeiro liberado.
+    A loja é a integração da conversa, e o modo é o do canal da loja (em
+    `observar`, quem responde é o Duoke — como no chat).
+    """
+    if origem != ORIGEM_HUMANO:
+        raise EnvioRecusado(RECUSA_AUTO_DESLIGADO, MOTIVO_RECLAMACAO_SO_PESSOA)
+    if conversa.plataforma != "ml":
+        raise EnvioRecusado(
+            RECUSA_SOMENTE_LEITURA,
+            conversa.bloqueio_motivo or "Esta reclamação é só de leitura aqui.",
+        )
+    liberados = destinos_da_reclamacao(conversa.dados)
+    if para is not None and para not in DESTINOS_RECLAMACAO:
+        raise EnvioRecusado(RECUSA_DESTINO_INDISPONIVEL, "Destino da mensagem desconhecido.")
+    if not liberados:
+        raise EnvioRecusado(RECUSA_CONVERSA_BLOQUEADA, MOTIVO_RECLAMACAO_SEM_DESTINO)
+    escolhido = para or liberados[0]
+    if escolhido not in liberados:
+        raise EnvioRecusado(
+            RECUSA_DESTINO_INDISPONIVEL,
+            f"{ROTULO_DESTINO_RECLAMACAO[escolhido]}: não liberado nesta etapa da reclamação. "
+            f"Agora o Mercado Livre só deixa a loja escrever {_frase_dos_destinos(liberados)}.",
+        )
+    integration, canal = await _loja_da_conversa(session, conversa, caixa=CANAL_POS_VENDA)
+    if integration is None:
+        raise EnvioRecusado(
+            RECUSA_SEM_INTEGRACAO,
+            "A loja desta reclamação não está mais conectada ao DaVinci.",
+        )
     if canal is None:
         raise EnvioRecusado(
             RECUSA_CANAL_EM_OBSERVACAO,
-            "Esta loja está em modo observar: quem responde a avaliação é o de fora "
-            "(Seller Center ou o robô da loja).",
+            "Esta loja está em modo observar: quem responde é o Duoke/Seller Center.",
         )
-    return _Destino(canal=canal, integration=integration)
+    return _Destino(canal=canal, integration=integration, para=escolhido)
 
 
 def _motivo_ia_sem_vez(conversa: AtendimentoConversa) -> str | None:
@@ -858,7 +972,11 @@ async def _tem_envio_em_voo(session: AsyncSession, conversa_id: UUID) -> bool:
 
 
 async def motivo_para_nao_enviar(
-    session: AsyncSession, conversa: AtendimentoConversa, *, origem: str = ORIGEM_HUMANO
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    *,
+    origem: str = ORIGEM_HUMANO,
+    para: str | None = None,
 ) -> EnvioRecusado | None:
     """A recusa que o envio daria AGORA (sem olhar o texto); None = pode enviar.
 
@@ -880,7 +998,7 @@ async def motivo_para_nao_enviar(
             )
         return None
     try:
-        await _destino(session, conversa, origem=origem)
+        await _destino(session, conversa, origem=origem, para=para)
     except EnvioRecusado as recusa:
         return recusa
     if await _tem_envio_em_voo(session, conversa.id):
@@ -1056,6 +1174,7 @@ async def _chamar_plataforma(
     *,
     zap_destino: zap.ZapDestino | None = None,
     mensagem_id: UUID | None = None,
+    para: str | None = None,
 ) -> ResultadoEnvio:
     """Fala com a plataforma. Nunca levanta: o que der errado vira resultado.
 
@@ -1116,6 +1235,15 @@ async def _chamar_plataforma(
                 return ResultadoEnvio(ok=False, erro="sem_resposta_de_avaliacao")
             return await asyncio.wait_for(
                 responder(session, conversa, integration, cliente, texto),
+                timeout=TEMPO_MAXIMO_ENVIO_S,
+            )
+        if conversa.canal == CANAL_RECLAMACAO:
+            # A mensagem NA RECLAMAÇÃO (28/10/2026): ao comprador ou ao mediador.
+            responder = getattr(modulo, "responder_reclamacao", None)
+            if responder is None or para is None:
+                return ResultadoEnvio(ok=False, erro="sem_resposta_de_reclamacao")
+            return await asyncio.wait_for(
+                responder(session, conversa, integration, cliente, texto, para=para),
                 timeout=TEMPO_MAXIMO_ENVIO_S,
             )
         return await asyncio.wait_for(
@@ -1467,14 +1595,19 @@ async def _ja_avaliado(session: AsyncSession, rascunho_id: UUID) -> bool:
 
 
 async def _conferir_repetido(
-    session: AsyncSession, conversa: AtendimentoConversa, normalizado: str
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    normalizado: str,
+    *,
+    para: str | None = None,
 ) -> None:
     """A mesma resposta já saiu (ou está saindo) nesta conversa há pouco? → `envio_repetido`.
 
     Duplo clique, aba duplicada, a pessoa e a IA com a mesma frase: o índice
     de "uma em voo" só barra o que é SIMULTÂNEO; depois que a primeira saiu,
     a segunda passaria. Compara pelo texto normalizado (espaço, acento e
-    pontuação não fazem duas respostas diferentes).
+    pontuação não fazem duas respostas diferentes). Na reclamação, `para` (o
+    `receiver_role`): a mesma frase ao comprador e ao mediador não é repetida.
     """
     alvo = gravar.normalizar_para_comparar(normalizado)
     if not alvo:
@@ -1486,6 +1619,11 @@ async def _conferir_repetido(
                 AtendimentoMensagem.origem.in_(ORIGENS_DAVINCI),
                 AtendimentoMensagem.status.in_(_STATUS_QUE_SAIRAM),
                 AtendimentoMensagem.created_at >= datetime.now(UTC) - JANELA_REPETIDO,
+                *(
+                    (AtendimentoMensagem.payload["para"].astext == para,)
+                    if para is not None
+                    else ()
+                ),
             )
         )
     ).scalars()
@@ -1601,10 +1739,15 @@ async def _preparar_envio(
     origem: str,
     ultima_vista_id: UUID | None,
     confirmar: bool,
+    para: str | None = None,
 ) -> tuple[AtendimentoMensagem, _Destino, str, AtendimentoRascunho | None]:
     """Passos 0 e 1 do envio: trava, confere e grava a linha em voo (sem commit)."""
     await travar_conversa(session, conversa)
-    destino = await _destino(session, conversa, origem=origem, rascunho_id=rascunho_id)
+    destino = await _destino(
+        session, conversa, origem=origem, rascunho_id=rascunho_id, para=para
+    )
+    if origem == ORIGEM_HUMANO:
+        _exigir_para(conversa, para)
     try:
         normalizado = _preparar_texto(texto, conversa=conversa, origem=origem)
     except EnvioRecusado as recusa:
@@ -1616,7 +1759,7 @@ async def _preparar_envio(
         await session.refresh(rascunho)
     if origem == ORIGEM_IA:
         await _conferir_gatilho_ia(session, conversa, rascunho)
-    await _conferir_repetido(session, conversa, normalizado)
+    await _conferir_repetido(session, conversa, normalizado, para=destino.receiver_role)
     if ultima_vista_id is not None and not confirmar:
         await _conferir_mudou(session, conversa, ultima_vista_id)
 
@@ -1635,7 +1778,8 @@ async def _preparar_envio(
         enviada_em=None,
         status=MSG_ENVIANDO,
         rascunho_id=rascunho.id if rascunho is not None else None,
-        payload={},
+        # Reclamação: a quem foi (o `receiver_role`, o mesmo da leitura).
+        payload={"para": destino.receiver_role} if destino.para else {},
     )
     await session.flush()  # pendências de quem chamou fora do SAVEPOINT
     try:
@@ -1663,6 +1807,7 @@ async def enviar_resposta(
     confirmar: bool = False,
     confirmar_nao_responde: bool = False,
     mail_message_id: UUID | None = None,
+    para: str | None = None,
 ) -> AtendimentoMensagem:
     """Envia a resposta pela plataforma; devolve a mensagem gravada.
 
@@ -1682,6 +1827,9 @@ async def enviar_resposta(
     com `confirmar_nao_responde` (o "enviar mesmo assim" do remetente "não
     responder") e `mail_message_id` (qual e-mail responder; sem ele, o mais
     novo que não é nosso). A mensagem volta `enviando` — quem envia é o Mac.
+
+    RECLAMAÇÃO DO ML: `para` = `comprador` | `mediador` (sem ele, o primeiro
+    que o ML libera agora — `_destino_reclamacao`).
     """
     from app.services.mail_atendimento.ponte import e_conversa_da_ponte
 
@@ -1724,6 +1872,7 @@ async def enviar_resposta(
             origem=origem,
             ultima_vista_id=ultima_vista_id,
             confirmar=confirmar,
+            para=para,
         )
     except BaseException:
         await ponto.rollback()
@@ -1743,10 +1892,13 @@ async def enviar_resposta(
     )
 
     # ── 2. a plataforma (ou o simulador) ──────────────────────────────────
-    # Os nomeados SÓ com o Zap: um falso de 4 parâmetros (os testes) segue valendo.
+    # Os nomeados SÓ com o Zap (e o `para` só na reclamação): um falso de 4
+    # parâmetros (os testes) segue valendo.
     extra = (
         {"zap_destino": destino.zap, "mensagem_id": mensagem.id} if destino.zap is not None else {}
     )
+    if destino.para is not None:
+        extra["para"] = destino.para
     # Os ids enquanto os objetos estão carregados (o efeito do Zap roda depois
     # de um `_gravar_resultado` que pode ter terminado num rollback).
     conversa_id, mensagem_id = conversa.id, mensagem.id
@@ -1974,9 +2126,11 @@ TEMPO_MAXIMO_FOTO_S = 150
 
 
 async def _conferir_foto_repetida(
-    session: AsyncSession, conversa: AtendimentoConversa, sha256: str
+    session: AsyncSession, conversa: AtendimentoConversa, sha256: str, *, para: str | None = None
 ) -> None:
-    """A mesma imagem já saiu (ou está saindo) nesta conversa há pouco? → `envio_repetido`."""
+    """A mesma imagem já saiu (ou está saindo) nesta conversa há pouco? → `envio_repetido`.
+
+    Na reclamação, só a que foi ao MESMO destino (`para`, o `receiver_role`)."""
     repetida = await session.scalar(
         select(AtendimentoMensagem.id)
         .where(
@@ -1985,6 +2139,7 @@ async def _conferir_foto_repetida(
             AtendimentoMensagem.status.in_(_STATUS_QUE_SAIRAM),
             AtendimentoMensagem.created_at >= datetime.now(UTC) - JANELA_REPETIDO,
             AtendimentoMensagem.payload["foto"]["sha256"].astext == sha256,
+            *((AtendimentoMensagem.payload["para"].astext == para,) if para is not None else ()),
         )
         .limit(1)
     )
@@ -2005,6 +2160,7 @@ async def _preparar_foto(
     user: User | None,
     ultima_vista_id: UUID | None,
     confirmar: bool,
+    para: str | None = None,
 ) -> tuple[AtendimentoMensagem, _Destino, str | None, zap_midia.CopiaDeSaida | None]:
     """Passos 0 e 1 da foto: trava, confere e grava a linha em voo (sem commit).
 
@@ -2014,7 +2170,8 @@ async def _preparar_foto(
     from app.services.atendimento import foto as foto_mod
 
     await travar_conversa(session, conversa)
-    destino = await _destino(session, conversa, origem=ORIGEM_HUMANO)
+    destino = await _destino(session, conversa, origem=ORIGEM_HUMANO, para=para)
+    _exigir_para(conversa, para)
     motivo = foto_mod.motivo_sem_foto(conversa)
     if motivo:
         raise EnvioRecusado(RECUSA_FOTO_NAO_SUPORTADA, motivo)
@@ -2033,7 +2190,7 @@ async def _preparar_foto(
             RECUSA_FOTO_INVALIDA,
             "Nesta plataforma a foto vai sozinha: mande o texto pela caixa de resposta.",
         )
-    await _conferir_foto_repetida(session, conversa, foto.sha256)
+    await _conferir_foto_repetida(session, conversa, foto.sha256, para=destino.receiver_role)
     if ultima_vista_id is not None and not confirmar:
         await _conferir_mudou(session, conversa, ultima_vista_id)
     pronta: tuple[str, bytes, str] | None = None
@@ -2061,7 +2218,11 @@ async def _preparar_foto(
         enviada_em=None,
         status=MSG_ENVIANDO,
         rascunho_id=None,
-        payload={"foto": {"sha256": foto.sha256, "mime": foto.mime, "bytes": foto.tamanho}},
+        payload={
+            "foto": {"sha256": foto.sha256, "mime": foto.mime, "bytes": foto.tamanho},
+            # Reclamação: a quem foi (o `receiver_role`, o mesmo da leitura).
+            **({"para": destino.receiver_role} if destino.para else {}),
+        },
     )
     await session.flush()
     try:
@@ -2138,6 +2299,7 @@ async def _chamar_plataforma_foto(
     zap_destino: zap.ZapDestino | None = None,
     mensagem_id: UUID | None = None,
     copia: zap_midia.CopiaDeSaida | None = None,
+    para: str | None = None,
 ) -> ResultadoEnvio:
     """Sobe a foto e manda a mensagem. Nunca levanta (como `_chamar_plataforma`).
 
@@ -2176,9 +2338,11 @@ async def _chamar_plataforma_foto(
         cliente = await clientes.cliente_da_integracao(integration)
     except Exception as e:  # noqa: BLE001
         return ResultadoEnvio(ok=False, erro=f"cliente_indisponivel: {type(e).__name__}")
+    # Reclamação (28/10/2026): o anexo vai na mensagem ao comprador/mediador.
+    extra = {"para": para} if para is not None else {}
     try:
         return await asyncio.wait_for(
-            foto_mod.enviar_imagem(session, conversa, integration, cliente, foto, legenda),
+            foto_mod.enviar_imagem(session, conversa, integration, cliente, foto, legenda, **extra),
             timeout=TEMPO_MAXIMO_FOTO_S,
         )
     except TimeoutError:
@@ -2196,6 +2360,7 @@ async def enviar_foto(
     user: User | None,
     ultima_vista_id: UUID | None = None,
     confirmar: bool = False,
+    para: str | None = None,
 ) -> AtendimentoMensagem:
     """Envia UMA foto (já conferida: `foto.validar_foto`) na conversa; devolve a mensagem.
 
@@ -2222,6 +2387,7 @@ async def enviar_foto(
             user=user,
             ultima_vista_id=ultima_vista_id,
             confirmar=confirmar,
+            para=para,
         )
     except BaseException:
         await ponto.rollback()
@@ -2250,6 +2416,8 @@ async def enviar_foto(
         if destino.zap is not None
         else {}
     )
+    if destino.para is not None:
+        extra["para"] = destino.para
     conversa_id, mensagem_id = conversa.id, mensagem.id
     resultado = await _chamar_plataforma_foto(
         session, conversa, destino.integration, foto, legenda_ok, **extra
@@ -2383,6 +2551,9 @@ async def _destino_automatica(
     session: AsyncSession, conversa: AtendimentoConversa, *, codigo: str
 ) -> _Destino:
     """As travas da mensagem automática; levanta `EnvioRecusado`."""
+    if conversa.canal == CANAL_RECLAMACAO:
+        # Na reclamação/mediação só pessoa escreve (28/10/2026).
+        raise EnvioRecusado(RECUSA_AUTO_DESLIGADO, MOTIVO_RECLAMACAO_SO_PESSOA)
     motivo_sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
     if motivo_sem_envio:
         raise EnvioRecusado(RECUSA_CANAL_SEM_ENVIO, motivo_sem_envio)

@@ -338,6 +338,9 @@ class MensagemOut(BaseModel):
     entrega: str | None = None
     entrega_erro: str | None = None
     retida_pela_meta: bool = False
+    # Reclamação do ML (28/10/2026): a quem a fala da LOJA foi — "comprador"
+    # ou "mediador" (o `receiver_role` gravado em `payload.para`).
+    para: str | None = None
 
 
 class AcaoPessoaOut(BaseModel):
@@ -391,6 +394,13 @@ class RascunhoOut(BaseModel):
     agente: AgenteResumoOut | None = None
 
 
+class DestinoOut(BaseModel):
+    """Um destino da mensagem na reclamação: `comprador` ou `mediador`."""
+
+    chave: str
+    rotulo: str
+
+
 class EnvioOut(BaseModel):
     """Se a pessoa pode responder AGORA — as mesmas travas do envio."""
 
@@ -407,6 +417,9 @@ class EnvioOut(BaseModel):
     # Center, e a tela troca a caixa de envio pelo painel "O que a IA
     # responderia" (o primeiro teste em produção é só observando).
     modo_observacao: bool = False
+    # Reclamação do ML (28/10/2026): para quem a loja pode escrever AGORA, na
+    # ordem (o primeiro é o padrão da caixa). Vazio fora da reclamação.
+    destinos: list[DestinoOut] = Field(default_factory=list)
 
 
 class AvaliacaoResumoOut(BaseModel):
@@ -576,6 +589,9 @@ class ResponderIn(BaseModel):
     # ele, o mais novo que não é nosso).
     confirmar_nao_responde: bool = False
     mail_message_id: UUID | None = None
+    # Reclamação do ML (28/10/2026): a quem vai — "comprador" ou "mediador".
+    # Vazio = o primeiro que o ML libera agora. Fora da reclamação, ignorado.
+    para: Literal["comprador", "mediador"] | None = None
 
 
 class ResponderOut(BaseModel):

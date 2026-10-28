@@ -30,7 +30,7 @@ Registro no `main.py`: `app.include_router(atendimento_painel_router.router)`
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import structlog
@@ -199,8 +199,12 @@ async def enviar_foto(
     legenda: Annotated[str | None, Form(max_length=10_000)] = None,
     ultima_vista_id: Annotated[UUID | None, Form()] = None,
     confirmar: Annotated[bool, Form()] = False,
+    para: Annotated[Literal["comprador", "mediador"] | None, Form()] = None,
 ) -> ResponderOut:
     """Manda UMA foto ao comprador (Shopee, TikTok, pós-venda do ML e o Zap do número).
+
+    Na reclamação do ML (28/10/2026), a foto/PDF vai na mensagem da reclamação,
+    `para` o comprador ou o mediador (como o /responder).
 
     Trava → 409 com o `code` (texto/foto reprovados → 422), como o
     /responder. Erro da PLATAFORMA não é erro HTTP: volta 200 com a mensagem
@@ -211,7 +215,7 @@ async def enviar_foto(
         raise _somente_leitura()
     scope = await resolve_team_scope(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
-    recusa = await enviar.motivo_para_nao_enviar(session, c)
+    recusa = await enviar.motivo_para_nao_enviar(session, c, para=para)
     if recusa is not None:
         raise _recusa_http(recusa)
     motivo = foto.motivo_sem_foto(c)
@@ -239,6 +243,7 @@ async def enviar_foto(
             user=user,
             ultima_vista_id=ultima_vista_id,
             confirmar=confirmar,
+            para=para,
         )
     except EnvioRecusado as e:
         logger.info(

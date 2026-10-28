@@ -150,6 +150,7 @@ from app.schemas.atendimento import (
     CopiaAmazonIn,
     CopiaAmazonOut,
     DescartarIn,
+    DestinoOut,
     EnvioOut,
     EtiquetaHistoricoOut,
     EtiquetaIn,
@@ -215,6 +216,7 @@ from app.services.atendimento.constantes import (
     CANAL_COMENTARIO,
     CANAL_EMAIL,
     CANAL_PERGUNTA,
+    CANAL_RECLAMACAO,
     CANAL_ZAP,
     CATEGORIAS,
     CATEGORIAS_INFO,
@@ -261,11 +263,14 @@ from app.services.atendimento.constantes import (
     RASCUNHO_ENVIADO,
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
+    ROTULO_DESTINO_RECLAMACAO,
     STATUS_CANAL_PARADO,
     STATUS_CANAL_SEM_ENDPOINT,
     STATUS_CANAL_SESSAO_CAIU,
     TIPO_NOTA,
     TIPO_REGRA_CATEGORIA,
+    destino_da_mensagem,
+    destinos_da_reclamacao,
     e_chat_de_afiliado,
     limite_caracteres,
     motivo_canal_sem_envio,
@@ -1603,6 +1608,11 @@ def _mensagem_out(
         simulado=_simulado(m),
         email=_email_da_mensagem(m),
         do_afiliado=do_afiliado,
+        para=(
+            destino_da_mensagem(m.payload)
+            if conversa.canal == CANAL_RECLAMACAO and m.autor == AUTOR_LOJA
+            else None
+        ),
         **(_entrega_do_zap(m) if conversa.canal == CANAL_ZAP else {}),
     )
 
@@ -2944,10 +2954,15 @@ def _limite_da_resposta(conversa: AtendimentoConversa) -> int:
     return limite_caracteres(conversa.plataforma, conversa.canal)
 
 
-async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioOut:
+async def _envio(
+    session: AsyncSession, conversa: AtendimentoConversa, *, para: str | None = None
+) -> EnvioOut:
     # Modo observação = quem responde é o Duoke/Seller Center: a loja em
     # `observar` ou o envio desligado no servidor. A tela troca a caixa de
     # envio pelo "O que a IA responderia" (com 👍/👎 e "Copiar").
+    # Reclamação do ML (28/10/2026): `para` = o destino conferido (as abas
+    # Reclamação/Mediador); sem ele, o primeiro liberado. `destinos` diz à
+    # caixa para quem a loja pode escrever agora.
     envio_desligado = not get_settings().atendimento_envio_ativo
     sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
     if conversa.plataforma == "amazon" and conversa.integration_id is None and not sem_envio:
@@ -2963,12 +2978,15 @@ async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioO
             sla_horas=sla_horas(conversa.plataforma, conversa.canal),
             modo_observacao=envio_desligado,
         )
-    recusa = await enviar.motivo_para_nao_enviar(session, conversa)
+    recusa = await enviar.motivo_para_nao_enviar(session, conversa, para=para)
     canal = (
         await session.get(AtendimentoCanal, conversa.canal_id)
         if conversa.canal_id is not None
         else None
     )
+    if conversa.canal == CANAL_RECLAMACAO and canal is None:
+        # A reclamação não tem canal próprio: o modo é o do canal da loja.
+        _, canal = await enviar._loja_da_conversa(session, conversa)  # noqa: SLF001
     # Loja do robô (Temu/AliExpress): nada sai por aqui em modo nenhum — a
     # tela mostra a sugestão para COPIAR no Seller Center.
     so_le = conversa.plataforma in PLATAFORMAS_ROBO
@@ -2986,6 +3004,14 @@ async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioO
         modo_observacao=(
             not sem_envio
             and (envio_desligado or so_le or (canal is not None and canal.modo == MODO_OBSERVAR))
+        ),
+        destinos=(
+            [
+                DestinoOut(chave=d, rotulo=ROTULO_DESTINO_RECLAMACAO[d])
+                for d in destinos_da_reclamacao(conversa.dados)
+            ]
+            if conversa.canal == CANAL_RECLAMACAO and conversa.plataforma == "ml"
+            else []
         ),
     )
 
@@ -3319,6 +3345,7 @@ async def responder(
             confirmar=body.confirmar,
             confirmar_nao_responde=body.confirmar_nao_responde,
             mail_message_id=body.mail_message_id,
+            para=body.para,
         )
     except EnvioRecusado as e:
         logger.info(

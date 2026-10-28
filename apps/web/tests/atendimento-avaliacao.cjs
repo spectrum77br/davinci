@@ -554,6 +554,8 @@ async function testarCaixaDeBaixo() {
       'mostrarErroEnvio', 'toasts', 'erroDaApi', 'RELER_APOS_RECUSA', 'avaliacoesDados', 'perguntaRespostaPublica', 'confirm',
       // E-mail (08/10/2026): o pedaço do corpo que é do e-mail — vazio fora dele.
       'extrasDoEmail', 'CODIGOS_CONFIRMAVEIS',
+      // Reclamação do ML (28/10/2026): o destino da caixa — nenhum fora dela.
+      'destinosReclamacao', 'destinoCaixa', 'mostrarAbaDoDestino',
       js,
     )(
       detalhe, Vue.ref(true), Vue.ref([]), Vue.ref(null), () => 'Fulano', Vue.ref('  Obrigado pela avaliação!  '), Vue.ref(null), () => null,
@@ -562,6 +564,7 @@ async function testarCaixaDeBaixo() {
       Vue.ref({ itens: [], aviso: 'aviso do backend' }), A.perguntaRespostaPublica,
       (t) => { perguntas.push(t); return confirmar },
       () => ({}), new Set(['remetente_nao_responde', 'ja_respondido_pela_caixa']),
+      Vue.ref([]), Vue.ref(null), async () => {},
     )
     return { ...x, perguntas, chamadas }
   }

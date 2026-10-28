@@ -104,8 +104,11 @@ const constantes = api('services/atendimento/constantes.py')
     assert.deepEqual(tipo(ts_).sort(), campos(py).sort(), `${ts_} = ${py}`)
   }
   assert.match(abasSfc.fonte, /export interface AbaMensagem extends Mensagem \{/, 'a mensagem da aba é a Mensagem de sempre + a origem')
-  // O motivo do Mediador vem do backend; a tela não inventa outro.
-  assert.match(servico, /^MOTIVO_MEDIADOR = \(/m)
+  // O motivo da aba sem conversa vem do backend; a tela não inventa outro.
+  assert.match(servico, /^MOTIVO_MEDIADOR = /m)
+  // Reclamação do ML (28/10/2026): a aba Mediador responde pela reclamação.
+  assert.match(servico, /^def para_da_aba\(/m)
+  assert.match(rotas, /para=para,/)
 }
 
 // ------------------------------------------------ regras puras
@@ -312,6 +315,41 @@ async function principal() {
     assert.doesNotMatch(html, /<textarea/)
     await m.estado.enviar()
     assert.equal(m.chamadas.length, 0)
+  }
+
+  // Reclamação do ML (28/10/2026): a aba Mediador responde pela conversa da
+  // reclamação, PARA o mediador — o `para` vai no corpo e o cabeçalho diz.
+  {
+    const a = aba('mediador', {
+      conversas: [conv('c-recl', { canal: 'reclamacao', canal_rotulo: 'Reclamação' })],
+      responde: resp({ conversa_id: 'c-recl', canal: 'reclamacao', canal_rotulo: 'Reclamação', pode_enviar: true, codigo: null, motivo: null, limite_caracteres: 2000, ultima_vista_id: 'm-r9', para: 'mediador' }),
+    })
+    const m = montarResposta({ aba: a, canEdit: true, plataforma: 'ml', avisoPublica: null }, { respostaApi: { mensagem: msg('nova', 'c-recl', '2026-10-02T12:00:00Z', { autor: 'loja', status: 'enviada' }) } })
+    const html = await renderResposta(m)
+    assert.match(html, /data-destino-aba[^>]*>para o Mercado Livre \(mediador\)</)
+    assert.match(html, /<textarea/)
+    m.estado.texto = 'Pode solicitar as fotos.'
+    await m.estado.enviar()
+    assert.deepEqual(m.chamadas[0].opts, { method: 'POST', body: { texto: 'Pode solicitar as fotos.', ultima_vista_id: 'm-r9', para: 'mediador' } })
+    assert.deepEqual(m.avisos, ['Resposta enviada (para o Mercado Livre (mediador))'])
+    // Na mediação, a aba Reclamação (o comprador) fica travada com a frase do servidor.
+    const comprador = aba('reclamacao', { responde: resp({ conversa_id: 'c-recl', canal: 'reclamacao', canal_rotulo: 'Reclamação', codigo: 'destino_indisponivel', motivo: 'Para o comprador: não liberado nesta etapa da reclamação.', para: 'comprador' }) })
+    assert.equal(R.bloqueioDaAba(comprador, true), 'Para o comprador: não liberado nesta etapa da reclamação.')
+    assert.equal(R.destinoDaAba(comprador.responde), 'para o comprador')
+    assert.equal(R.destinoDaAba(resp()), '')
+    assert.match(A.tituloDaAba(a, 'pos_venda'), /responde ao mediador$/)
+    // O texto em escrita é por conversa E destino: o do comprador não aparece
+    // pronto na aba do mediador (as duas respondem pela mesma conversa).
+    const r2 = montarResposta({ aba: { ...comprador, conversas: a.conversas, responde: { ...comprador.responde, pode_enviar: true, codigo: null, motivo: null } }, canEdit: true, plataforma: 'ml', avisoPublica: null })
+    const tique = () => new Promise((ok) => setTimeout(ok, 0))
+    r2.estado.texto = 'ao comprador'
+    await tique()
+    r2.reativo.aba = a
+    await tique()
+    assert.equal(r2.estado.texto, '', 'na aba do mediador a caixa começa vazia')
+    r2.reativo.aba = { ...comprador, conversas: a.conversas }
+    await tique()
+    assert.equal(r2.estado.texto, 'ao comprador', 'de volta ao comprador, o texto dele')
   }
 
   // Envio desligado: a caixa aparece, desabilitada, com o porquê; nada sai.

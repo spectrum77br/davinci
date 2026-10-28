@@ -411,6 +411,8 @@ async def test_detalhe_com_rascunho_contexto_e_envio(client, db, make_user, pess
         "modo": "observar",
         "sla_horas": 12,
         "modo_observacao": True,
+        # Só a reclamação do ML tem destinos (28/10/2026).
+        "destinos": [],
     }
 
     _chaves.atendimento_envio_ativo = True

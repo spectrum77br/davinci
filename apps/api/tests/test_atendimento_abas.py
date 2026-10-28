@@ -409,7 +409,7 @@ async def test_ml_pack_junta_pergunta_reclamacao_mediador_e_avaliacao(db, client
     }
 
 
-async def test_ml_quem_responde_em_cada_aba_continua_bloqueado(db, client, admin):
+async def test_ml_quem_responde_em_cada_aba(db, client, admin):
     n = await _cenario_ml(db, admin)
     corpo = await _abas(client, n.pack.id)
     responde = {a["chave"]: a["responde"] for a in corpo["abas"]}
@@ -423,17 +423,17 @@ async def test_ml_quem_responde_em_cada_aba_continua_bloqueado(db, client, admin
     assert responde["avaliacao"]["conversa_id"] == str(n.aval.id)
     assert responde["avaliacao"]["publica"] is True
     assert responde["pos_venda"]["publica"] is False
-    # Mediador: só leitura, ninguém responde por aqui.
+    # Mediador (28/10/2026): responde a conversa da reclamação, para o
+    # mediador; a aba Reclamação, para o comprador. Fora dela, sem `para`.
     med = responde["mediador"]
-    assert med["conversa_id"] is None and med["pode_enviar"] is False
-    assert med["codigo"] == "somente_leitura"
-    assert med["motivo"] == abas.MOTIVO_MEDIADOR
+    assert med["conversa_id"] == str(n.recl.id) and med["para"] == "mediador"
+    assert responde["reclamacao"]["para"] == "comprador"
+    assert responde["pos_venda"]["para"] is None
     # Envio desligado: nenhuma aba deixa enviar, todas dizem por quê.
     for chave, r in responde.items():
         assert r["pode_enviar"] is False, chave
-        if chave != "mediador":
-            assert r["codigo"] == "envio_desligado", (chave, r)
-            assert r["limite_caracteres"]
+        assert r["codigo"] == "envio_desligado", (chave, r)
+        assert r["limite_caracteres"]
     # O `ultima_vista_id` é a última mensagem da conversa que responde.
     assert responde["reclamacao"]["ultima_vista_id"] == n.recl_msgs[-1]
     assert responde["pre_venda"]["ultima_vista_id"] == n.p5_msgs[-1]
@@ -1198,8 +1198,14 @@ def test_quem_responde():
     assert abas.quem_responde("pre_venda", [velha, nova], aberta) is nova
     assert abas.quem_responde("pre_venda", [velha, nova, esperando], aberta) is esperando
     assert abas.quem_responde("pos_venda", [aberta, nova], aberta) is aberta
-    assert abas.quem_responde("mediador", [aberta], aberta) is None
+    recl = _c(canal="reclamacao")
+    assert abas.quem_responde("mediador", [recl], aberta) is recl
     assert abas.quem_responde("email", [], aberta) is None
+    # Na reclamação, cada aba escreve para o seu destino (28/10/2026).
+    assert abas.para_da_aba("mediador", recl) == "mediador"
+    assert abas.para_da_aba("reclamacao", recl) == "comprador"
+    assert abas.para_da_aba("pos_venda", aberta) is None
+    assert abas.para_da_aba("mediador", None) is None
 
 
 def test_cursor_ida_e_volta():
@@ -1209,3 +1215,20 @@ def test_cursor_ida_e_volta():
     for ruim in ("sem-barra", "|" + str(uuid4()), "2026-10-01|nao-e-uuid"):
         with pytest.raises(ValueError):
             abas.ler_cursor(ruim)
+
+
+async def test_fala_da_loja_ao_mediador_mora_na_aba_mediador(db, client, admin):
+    """Como o "To Meli" do Duoke (28/10/2026): a aba Mediador é a conversa
+    inteira com o ML — o mediador E a loja escrevendo a ele."""
+    n = await _cenario_ml(db, admin)
+    ao_mediador = await db.get(AtendimentoMensagem, UUID(n.recl_msgs[3]))
+    ao_mediador.payload = {"papel": "respondent", "para": "mediator"}
+    await db.commit()
+    corpo = await _abas(client, n.pack.id)
+    med = _aba(corpo, "mediador")
+    assert [m["id"] for m in med["mensagens"]] == [n.recl_msgs[i] for i in (2, 3, 4)]
+    recl = _aba(corpo, "reclamacao")
+    assert n.recl_msgs[3] not in [m["id"] for m in recl["mensagens"]]
+    # Fora da reclamação, o `para` não muda a aba (a regra é só da reclamação).
+    loja = _c(canal="pos_venda")
+    assert abas.aba_da_mensagem(loja, "loja", T0, None, ao_mediador=True) == "pos_venda"

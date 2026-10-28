@@ -15,8 +15,9 @@
 //   reclamação) e com as das OUTRAS conversas daquela aba;
 // - a caixa de resposta responde no canal da aba ativa: pela conversa que
 //   `responde` aponta. É a aberta → a caixa de sempre; é outra → a caixa
-//   da aba (AtendimentoAbaResposta), com as travas daquela conversa; nenhuma
-//   (Mediador) → só leitura.
+//   da aba (AtendimentoAbaResposta), com as travas daquela conversa. Na
+//   reclamação do ML (28/10/2026) a aba Mediador responde ao mediador e a
+//   Reclamação ao comprador (`responde.para`), cada uma com a trava do ML.
 import type { Mensagem } from '~/components/AtendimentoPlataforma.vue'
 
 // A ordem e os nomes do backend (abas.ORDEM_ABAS / ROTULO_ABA; o
@@ -71,6 +72,9 @@ export interface AbaResponde {
   modo_observacao: boolean
   publica: boolean
   ultima_vista_id: string | null
+  // Reclamação do ML (28/10/2026): para quem a caixa desta aba escreve —
+  // 'mediador' (aba Mediador) ou 'comprador' (aba Reclamação). Vai no envio.
+  para?: string | null
 }
 export interface Aba {
   chave: string
@@ -125,7 +129,7 @@ export function abaInicial(r: AbasResposta | null | undefined, atual: string | n
   return visiveis[0].chave
 }
 
-// A caixa responde por OUTRA conversa nesta aba (ou por nenhuma: Mediador)?
+// A caixa responde por OUTRA conversa nesta aba (ou por nenhuma)?
 // Sem abas, ou na aba cuja conversa que responde é a aberta: a caixa de sempre.
 export function respondeOutra(aba: Aba | null | undefined, conversaId: string | null | undefined): boolean {
   if (!aba || !conversaId) return false
@@ -188,7 +192,10 @@ export function tituloDaAba(a: Aba, daConversa: string | null | undefined): stri
   const partes = [`${rotuloDaAba(a)}: ${msgs}`]
   if (a.chave === daConversa) partes.push('esta conversa')
   if (outras) partes.push(`${outras} ${outras === 1 ? 'outra conversa' : 'outras conversas'} do mesmo comprador e pedido`)
-  if (a.chave === 'mediador') partes.push('só leitura')
+  // Sem conversa que responda, a aba é só de leitura (desde 28/10/2026 o
+  // Mediador responde pela reclamação, para o mediador).
+  if (!a.responde?.conversa_id) partes.push('só leitura')
+  else if (a.responde.para === 'mediador') partes.push('responde ao mediador')
   return partes.join(' · ')
 }
 </script>

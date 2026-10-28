@@ -4,8 +4,10 @@
 // anúncio na Pré-venda, o pack na Pós-venda, a avaliação, o e-mail, o Zap),
 // a resposta sai POR ESSA conversa — `POST /conversas/{id}/responder`, o
 // caminho único de saída, com as travas dela (envio desligado, conversa
-// bloqueada, loja em observar…). Sem conversa que responda (Mediador): só
-// leitura, com o porquê.
+// bloqueada, loja em observar…). Sem conversa que responda: só leitura, com o
+// porquê. Na reclamação do ML (28/10/2026) a aba diz para quem escreve
+// (`responde.para`: Mediador → o mediador, Reclamação → o comprador), e o
+// `para` vai no envio.
 //
 // Pequena de propósito: sem sugestão da IA, foto ou respostas prontas — para
 // isso, "abrir a conversa" leva à conversa de origem, com a caixa completa.
@@ -17,7 +19,16 @@
 import type { Aba } from '~/components/AtendimentoAbas.vue'
 import { AVISO_SO_LEITURA, ERROS, motivoLegivel } from '~/components/AtendimentoPlataforma.vue'
 
-// O texto em escrita, por conversa de origem, enquanto a página está aberta:
+// Reclamação do ML: para quem esta aba escreve, em linguagem simples ('' fora dela).
+export function destinoDaAba(r: Pick<Aba['responde'], 'para'> | null | undefined): string {
+  if (r?.para === 'mediador') return 'para o Mercado Livre (mediador)'
+  if (r?.para === 'comprador') return 'para o comprador'
+  return ''
+}
+
+// O texto em escrita, por conversa de origem (e destino, na reclamação: as abas
+// Reclamação e Mediador respondem pela MESMA conversa — o texto ao comprador
+// não pode aparecer pronto na aba do mediador), enquanto a página está aberta:
 // a caixa some ao voltar para a aba da conversa (fora do componente).
 const rascunhosAba = new Map<string, string>()
 
@@ -84,16 +95,17 @@ const bloqueio = computed(() => {
   return bloqueioDaAba(props.aba, props.canEdit)
 })
 
-const texto = ref((conversaId.value && rascunhosAba.get(conversaId.value)) || '')
-watch(conversaId, (novo) => {
-  texto.value = (novo && rascunhosAba.get(novo)) || ''
+const chaveRascunho = computed(() => (conversaId.value ? `${conversaId.value}|${responde.value?.para || ''}` : null))
+const texto = ref((chaveRascunho.value && rascunhosAba.get(chaveRascunho.value)) || '')
+watch(chaveRascunho, (nova) => {
+  texto.value = (nova && rascunhosAba.get(nova)) || ''
   erro.value = null
 })
 watch(texto, (t) => {
-  const id = conversaId.value
-  if (!id) return
-  if (t.trim()) rascunhosAba.set(id, t)
-  else rascunhosAba.delete(id)
+  const chave = chaveRascunho.value
+  if (!chave) return
+  if (t.trim()) rascunhosAba.set(chave, t)
+  else rascunhosAba.delete(chave)
 })
 
 const limite = computed(() => (ehEmail.value ? LIMITE_RESPOSTA_EMAIL : 0) || responde.value?.limite_caracteres || 0)
@@ -108,13 +120,15 @@ const podeEnviar = computed(() => !bloqueio.value && !!tamanho.value && !acimaDo
 
 async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boolean }) {
   const id = conversaId.value
+  const chave = chaveRascunho.value
   const r = responde.value
   const t = texto.value.trim()
   if (!id || !r || !podeEnviar.value) return
   // Avaliação: a resposta aparece no anúncio, para qualquer comprador.
   if (r.publica && !confirm(perguntaRespostaPublica(props.avisoPublica, t))) return
-  const body: { texto: string; ultima_vista_id?: string; confirmar?: boolean; mail_message_id?: string; confirmar_nao_responde?: boolean } = { texto: t }
+  const body: { texto: string; ultima_vista_id?: string; confirmar?: boolean; mail_message_id?: string; confirmar_nao_responde?: boolean; para?: string } = { texto: t }
   if (r.ultima_vista_id) body.ultima_vista_id = r.ultima_vista_id
+  if (r.para) body.para = r.para
   if (opcoes?.confirmar === true) body.confirmar = true
   if (ehEmail.value) Object.assign(body, corpoDoEmail(props.mailMessageId, confirmouNaoResponde.value || opcoes?.confirmarNaoResponde === true))
   enviando.value = true
@@ -125,12 +139,12 @@ async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boo
     if (m?.status === 'falhou') {
       erro.value = { texto: 'A plataforma recusou — a resposta NÃO chegou ao comprador. O texto continua na caixa.', motivos: [] }
     } else {
-      rascunhosAba.delete(id)
-      if (conversaId.value === id) texto.value = ''
+      if (chave) rascunhosAba.delete(chave)
+      if (chaveRascunho.value === chave) texto.value = ''
       confirmouNaoResponde.value = false
       // E-mail: a resposta entrou na FILA (o Mac manda pelo Tuta) — o mesmo aviso da caixa de sempre.
       if (ehEmail.value) toasts.success(`${AVISO_EMAIL_NA_FILA.titulo} (${r.canal_rotulo || 'outra conversa'})`, AVISO_EMAIL_NA_FILA.texto)
-      else toasts.success(`Resposta enviada (${r.canal_rotulo || 'outra conversa'})`)
+      else toasts.success(`Resposta enviada (${destinoDaAba(r) || r.canal_rotulo || 'outra conversa'})`)
     }
     emit('enviada', m)
   } catch (e: any) {
@@ -157,9 +171,9 @@ function aoTeclar(e: KeyboardEvent) {
 
 <template>
   <div class="space-y-1.5" data-caixa-da-aba>
-    <!-- por onde sai (sem conversa — o Mediador —, o aviso abaixo já diz) -->
+    <!-- por onde sai (sem conversa, o aviso abaixo já diz) e, na reclamação, para quem -->
     <div v-if="conversaId" class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground">
-      <span>Responde em <span class="font-medium text-foreground">{{ responde.canal_rotulo || 'outra conversa' }}</span><template v-if="origem?.titulo"> · {{ origem.titulo }}</template></span>
+      <span>Responde em <span class="font-medium text-foreground">{{ responde.canal_rotulo || 'outra conversa' }}</span><template v-if="origem?.titulo"> · {{ origem.titulo }}</template><template v-if="destinoDaAba(responde)"> · <span class="font-medium text-foreground" data-destino-aba>{{ destinoDaAba(responde) }}</span></template></span>
       <button type="button" class="inline-flex items-center gap-0.5 underline hover:text-foreground" title="abrir a conversa de origem (com a caixa completa: IA, respostas prontas, foto)" @click="emit('abrirConversa', conversaId)">
         abrir a conversa <ExternalLink class="size-3" />
       </button>

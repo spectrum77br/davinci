@@ -16,7 +16,9 @@ O que volta, por aba (só as com conteúdo, e sempre a da conversa aberta):
     detalhe já as traz): vêm só as das outras conversas daquela aba;
   - `responde`: a conversa por onde a caixa responde nessa aba e se dá para
     enviar agora — as MESMAS travas do detalhe (`_envio`: envio desligado,
-    conversa bloqueada, loja em observar…). Mediador: só leitura, sem conversa.
+    conversa bloqueada, loja em observar…). Na reclamação do ML (28/10/2026)
+    também `para`: Mediador → o mediador, Reclamação → o comprador, cada um
+    com a trava do seu destino.
 E, no topo: `aba_da_conversa` (a aba padrão da tela) e `fora_da_aba` (as
 mensagens da conversa aberta que moram em outra aba: o pré-venda do chat da
 Shopee, o mediador da reclamação), para a tela mostrar cada uma no seu lugar;
@@ -89,7 +91,7 @@ class AbaConversaOut(BaseModel):
 class AbaRespondeOut(BaseModel):
     """Por onde a caixa responde nesta aba — e se dá para enviar agora."""
 
-    # None = ninguém responde por aqui (Mediador: só leitura).
+    # None = ninguém responde por aqui (aba sem conversa).
     conversa_id: str | None
     canal: str | None
     canal_rotulo: str | None
@@ -102,6 +104,9 @@ class AbaRespondeOut(BaseModel):
     publica: bool
     # A última mensagem daquela conversa (vai no envio: o `conversa_mudou`).
     ultima_vista_id: str | None
+    # Reclamação do ML (28/10/2026): para quem esta aba escreve — `comprador`
+    # ou `mediador` (vai no envio). None fora da reclamação.
+    para: str | None = None
 
 
 class AbaOut(BaseModel):
@@ -227,9 +232,14 @@ async def abas_da_conversa(
         )
         for a in escolhidas
     }
+    # Por (conversa, destino): na reclamação, cada aba tem o seu (`para_da_aba`).
     envios = {}
-    for c in {r.id: r for r in respondem.values() if r is not None}.values():
-        envios[c.id] = await _envio(session, c)
+    for chave, quem in respondem.items():
+        if quem is None:
+            continue
+        para = abas_svc.para_da_aba(chave, quem)
+        if (quem.id, para) not in envios:
+            envios[(quem.id, para)] = await _envio(session, quem, para=para)
 
     saida: list[AbaOut] = []
     for a in escolhidas:
@@ -262,7 +272,8 @@ async def abas_da_conversa(
                 ultima_vista_id=None,
             )
         else:
-            envio = envios[quem.id]
+            para = abas_svc.para_da_aba(a.chave, quem)
+            envio = envios[(quem.id, para)]
             vista = ultima[quem.id].id if quem.id in ultima else None
             responde = AbaRespondeOut(
                 conversa_id=str(quem.id),
@@ -275,6 +286,7 @@ async def abas_da_conversa(
                 modo_observacao=envio.modo_observacao,
                 publica=quem.canal == CANAL_AVALIACAO,
                 ultima_vista_id=str(vista) if vista is not None else None,
+                para=para,
             )
         saida.append(
             AbaOut(

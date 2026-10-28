@@ -76,7 +76,9 @@ NUNCA MISTURA (a regra que não pode falhar):
     `contato_generico`) nunca junta nada: dois compradores recebem do mesmo.
 
 A ABA DE CADA MENSAGEM (`aba_da_mensagem`, pura):
-  - autor `mediador` → Mediador;
+  - autor `mediador` → Mediador; e, desde 28/10/2026, a fala da LOJA na
+    reclamação dirigida ao mediador (`payload.para = mediator`) também — a
+    aba Mediador é a conversa com o ML inteira, como o "To Meli" do Duoke;
   - canal `reclamacao` → Reclamação (comprador, loja e os avisos do sistema);
   - pergunta → Pré-venda; pack (pos_venda), SAC e o e-mail DA AMAZON (o
     pós-venda da plataforma, a mesma regra da etiqueta) → Pós-venda;
@@ -90,8 +92,11 @@ A ABA DE CADA MENSAGEM (`aba_da_mensagem`, pura):
 QUEM RESPONDE EM CADA ABA (`quem_responde`): a conversa aberta, se ela está
 na aba (o chat da Shopee responde nas duas abas dele); senão a da aba que
 espera resposta, a mais recente. A caixa da tela responde NESSA conversa
-(`POST /conversas/{id}/responder`, com as travas de sempre). Mediador: só
-leitura — ninguém responde ao mediador por aqui (`MOTIVO_MEDIADOR`).
+(`POST /conversas/{id}/responder`, com as travas de sempre). Mediador
+(28/10/2026; antes, só leitura): responde a conversa da reclamação, `para` o
+mediador; na aba Reclamação, `para` o comprador (`para_da_aba`) — cada uma
+com as travas do destino (o ML só libera o comprador na etapa `claim` e o
+mediador na `dispute`).
 
 CONSULTAS (sem N+1, com qualquer tamanho de família): as candidatas (1), as
 reclamações e as avaliações do pedido (2), as que só elas trouxeram (0 ou
@@ -124,6 +129,7 @@ from app.models import (
 )
 from app.services.atendimento import separa_email
 from app.services.atendimento.constantes import (
+    AUTOR_LOJA,
     AUTOR_MEDIADOR,
     CANAL_AVALIACAO,
     CANAL_CARRINHO,
@@ -135,6 +141,9 @@ from app.services.atendimento.constantes import (
     CANAL_RECLAMACAO,
     CANAL_SAC,
     CANAL_ZAP,
+    DESTINOS_RECLAMACAO,
+    PARA_COMPRADOR,
+    PARA_MEDIADOR,
     PLATAFORMAS_EXTERNAS,
     e_chat_de_afiliado,
     e_nota,
@@ -146,6 +155,9 @@ from app.services.atendimento.etiqueta_fatos import (
     e_pos_venda,
 )
 from app.services.atendimento.gravar import chat_de_afiliado_sql
+
+# O `receiver_role` do mediador no ML (o `payload.para` da fala da loja a ele).
+PAPEL_MEDIADOR_ML = DESTINOS_RECLAMACAO[PARA_MEDIADOR][0]
 
 # ── As abas (o vocabulário que a tela lê) ─────────────────────────────────
 ABA_PRE_VENDA = "pre_venda"
@@ -257,10 +269,10 @@ _DOMINIOS_DE_AVISO = (
 )
 _RETRANSMISSAO_AMAZON = "marketplace.amazon."
 
-MOTIVO_MEDIADOR = (
-    "Mediador: só leitura. É a plataforma falando na reclamação — a resposta ao "
-    "mediador é dada na própria plataforma."
-)
+# A aba sem conversa que responda (não deveria acontecer: toda aba com
+# mensagem tem a conversa dela; desde 28/10/2026 o Mediador responde pela
+# conversa da reclamação). O nome ficou o de quando era a do Mediador.
+MOTIVO_MEDIADOR = "Esta aba é só de leitura."
 
 # Teto de conversas da família (as do pedido vêm primeiro na consulta).
 MAX_CONVERSAS = 200
@@ -541,14 +553,17 @@ def aba_da_mensagem(
     autor: str | None,
     momento: datetime | None,
     corte: datetime | None,
+    *,
+    ao_mediador: bool = False,
 ) -> str | None:
     """A aba de uma mensagem (PURA). None = conversa sem abas (carrinho, comentário).
 
     `corte` = o corte do chat entre Pré e Pós-venda (`Familia.corte_do_chat`).
+    `ao_mediador` = a fala da loja dirigida ao mediador (`Leve.ao_mediador`).
     """
     if conversa.canal in CANAIS_SEM_ABAS:
         return None
-    if autor == AUTOR_MEDIADOR:
+    if autor == AUTOR_MEDIADOR or (ao_mediador and conversa.canal == CANAL_RECLAMACAO):
         return ABA_MEDIADOR
     base = aba_do_canal(conversa)
     if base is not None:
@@ -935,6 +950,9 @@ class Leve:
     autor: str
     momento: datetime
     nota: bool
+    # A fala da LOJA dirigida ao mediador (`payload.para = mediator`, a
+    # reclamação do ML) — mora na aba Mediador (28/10/2026).
+    ao_mediador: bool = False
 
     @property
     def ordem(self) -> tuple[datetime, str]:
@@ -959,9 +977,15 @@ async def mensagens_leves(
         visivel = or_(m.conversa_id.in_(emails), visivel)
     linhas = (
         await session.execute(
-            select(m.id, m.conversa_id, m.autor, m.origem, m.tipo, momento.label("momento")).where(
-                m.conversa_id.in_(list(ids)), visivel
-            )
+            select(
+                m.id,
+                m.conversa_id,
+                m.autor,
+                m.origem,
+                m.tipo,
+                momento.label("momento"),
+                m.payload["para"].astext.label("para"),
+            ).where(m.conversa_id.in_(list(ids)), visivel)
         )
     ).all()
     leves = [
@@ -971,6 +995,7 @@ async def mensagens_leves(
             autor=linha.autor,
             momento=_utc(linha.momento) or _SEM_HORA,
             nota=e_nota(linha.origem, linha.tipo),
+            ao_mediador=linha.autor == AUTOR_LOJA and linha.para == PAPEL_MEDIADOR_ML,
         )
         for linha in linhas
     ]
@@ -1008,7 +1033,9 @@ def separar(fam: Familia, leves: Sequence[Leve]) -> Abas:
         conversa = por_conversa.get(m.conversa_id)
         if conversa is None:
             continue
-        chave = aba_da_mensagem(conversa, m.autor, m.momento, fam.corte_do_chat)
+        chave = aba_da_mensagem(
+            conversa, m.autor, m.momento, fam.corte_do_chat, ao_mediador=m.ao_mediador
+        )
         if chave is None:
             continue
         aba = por_aba[chave]
@@ -1068,8 +1095,12 @@ def ler_cursor(bruto: str | None) -> tuple[datetime, str] | None:
 def quem_responde(
     chave: str, conversas: Sequence[AtendimentoConversa], aberta: AtendimentoConversa
 ) -> AtendimentoConversa | None:
-    """A conversa por onde a caixa responde nesta aba. PURA. None = só leitura (Mediador)."""
-    if chave == ABA_MEDIADOR or not conversas:
+    """A conversa por onde a caixa responde nesta aba. PURA. None = sem conversa (só leitura).
+
+    Mediador (28/10/2026): a conversa da reclamação (a única com mediador),
+    `para` o mediador (`para_da_aba`).
+    """
+    if not conversas:
         return None
     if any(c.id == aberta.id for c in conversas):
         return aberta
@@ -1080,6 +1111,17 @@ def quem_responde(
             -(_utc(c.ultima_mensagem_em) or _SEM_HORA).timestamp(),
         ),
     )
+
+
+def para_da_aba(chave: str, quem: AtendimentoConversa | None) -> str | None:
+    """Para quem a caixa desta aba escreve na RECLAMAÇÃO (None fora dela). PURA.
+
+    Mediador → o mediador; qualquer outra aba que responde pela reclamação
+    (a Reclamação) → o comprador.
+    """
+    if quem is None or quem.canal != CANAL_RECLAMACAO:
+        return None
+    return PARA_MEDIADOR if chave == ABA_MEDIADOR else PARA_COMPRADOR
 
 
 def titulo_da_conversa(c: AtendimentoConversa) -> str | None:

@@ -342,6 +342,8 @@ export type Mensagem = {
   // grava como `sistema` (fora da fila), mas é gente — balão à esquerda,
   // com "Afiliado · <nome>" em cima (o `autor_nome`).
   do_afiliado?: boolean
+  // Reclamação do ML (28/10/2026): a quem a fala da LOJA foi ('comprador' | 'mediador').
+  para?: string | null
   // Zap (26/10/2026, Onda 2 — docs/zap/desenho.md §5.6): os tiques da nossa
   // resposta, pelo que a Meta avisou (sent · delivered · read · played ·
   // failed); a frase do erro da Meta; e a resposta segurada pela Meta
@@ -426,6 +428,23 @@ export type Envio = {
   // Loja em Observar OU envio desligado no servidor: no lugar da caixa de
   // envio, o painel "O que a IA responderia" (quem responde é o Duoke).
   modo_observacao?: boolean
+  // Reclamação do ML (28/10/2026): para quem a loja pode escrever AGORA (o
+  // comprador na etapa de reclamação, o mediador na mediação), na ordem.
+  destinos?: DestinoReclamacao[]
+}
+export type DestinoReclamacao = { chave: 'comprador' | 'mediador' | string; rotulo: string }
+// A aba de mensagens que mostra a conversa com cada destino (as abas RF2).
+export const ABA_DO_DESTINO: Record<string, string> = { comprador: 'reclamacao', mediador: 'mediador' }
+// O destino da caixa na reclamação: o da aba de mensagens aberta (Mediador →
+// mediador, Reclamação → comprador), se liberado; senão o que já estava; senão
+// o primeiro liberado. Vazio = fora da reclamação (ou nada liberado).
+export function destinoDaCaixa(destinos: DestinoReclamacao[] | null | undefined, aba: string | null | undefined, atual: string | null | undefined): string | null {
+  const chaves = (destinos || []).map((d) => d.chave)
+  if (!chaves.length) return null
+  const daAba = Object.keys(ABA_DO_DESTINO).find((d) => ABA_DO_DESTINO[d] === aba)
+  if (daAba && chaves.includes(daAba)) return daAba
+  if (atual && chaves.includes(atual)) return atual
+  return chaves[0]
 }
 
 // ─── cartões e retrato do pedido (spec Duoke 2.2/2.3) ───────────────────────
@@ -2221,6 +2240,11 @@ const ERROS_ENVIO: [RegExp, string][] = [
   // A foto do Zap (27/10/2026, Onda 3): o upload para a Meta falhou ANTES da
   // mensagem — nada chegou ao cliente.
   [/^zap_upload:|^zap_sem_copia/, 'A foto não subiu para a Meta — nada chegou ao cliente. Anexe de novo para tentar outra vez.'],
+  // Reclamação do ML (28/10/2026): conferida no ML na hora do envio — nada saiu.
+  [/reclamacao_sem_acao/, 'O Mercado Livre não libera mais mensagem para esse destino (a etapa da reclamação mudou) — nada saiu. A conversa atualiza em alguns minutos com para quem dá para escrever.'],
+  [/reclamacao_encerrada/, 'A reclamação foi encerrada no Mercado Livre — a mensagem não saiu.'],
+  [/reclamacao_ilegivel/, 'Não consegui conferir a reclamação no Mercado Livre agora — nada saiu. Tente de novo.'],
+  [/^ml upload/, 'O anexo não subiu para o Mercado Livre — nada saiu. Anexe de novo para tentar outra vez.'],
 ]
 export function erroEnvioLegivel(erro: string | null | undefined): string {
   const e = (erro || '').trim()

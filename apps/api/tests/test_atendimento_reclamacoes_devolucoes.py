@@ -995,7 +995,9 @@ async def test_conversa_da_devolucao_nunca_envia(db, make_user, monkeypatch):
     conversa.situacao = "aberta"
     await db.commit()
     recusa = await enviar.motivo_para_nao_enviar(db, conversa)
-    assert recusa is not None and recusa.code == enviar.RECUSA_SEM_INTEGRACAO
+    # Desde 28/10/2026 a reclamação tem destino próprio (`_destino_reclamacao`):
+    # só a do ML responde; a devolução da Shopee/TikTok é só leitura.
+    assert recusa is not None and recusa.code == enviar.RECUSA_SOMENTE_LEITURA
 
     await _ligar(db, T0 + timedelta(minutes=10), fabrica_cliente=_fabrica(_Plataforma()))
     conversa = await db.get(AtendimentoConversa, conversa_id)

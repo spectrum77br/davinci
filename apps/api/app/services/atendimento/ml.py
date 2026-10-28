@@ -16,6 +16,10 @@ O ML tem DUAS caixas por conta, e `canal.canal` diz qual este canal lê:
   Até 350 caracteres, só ISO-8859-1. O ML bloqueia a conversa (prazo
   vencido, pedido cancelado, mediação) — aí ela vira `bloqueada` com o
   `substatus` como motivo, e volta a abrir quando o ML reativa.
+- `reclamacao` (28/10/2026): a conversa da reclamação/mediação, que a
+  leitura das reclamações (`reclamacoes.py`) grava. Aqui só a SAÍDA
+  (`responder_reclamacao`): a mensagem ao comprador ou ao mediador pela
+  própria reclamação, até 2.000 caracteres, com anexo opcional.
 
 Por que cada leitura é assim:
 
@@ -80,9 +84,11 @@ from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     CANAL_PERGUNTA,
     CANAL_POS_VENDA,
+    CANAL_RECLAMACAO,
     CONVERSA_ABERTA,
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
+    DESTINOS_RECLAMACAO,
     MSG_ENVIADA,
     MSG_FALHOU,
     MSG_REVISAR,
@@ -1645,3 +1651,90 @@ async def enviar_texto(
             conversa=conversa,
         )
     return ResultadoEnvio(ok=False, erro=f"canal_desconhecido:{conversa.canal}")
+
+
+# ── Reclamação (28/10/2026) ───────────────────────────────────────────────
+
+
+def _acoes_da_loja(claim: Any) -> set[str]:
+    """As ações que o ML libera para a LOJA na reclamação (o player `respondent`)."""
+    acoes: set[str] = set()
+    for p in _lista(claim.get("players") if isinstance(claim, dict) else None):
+        if _id(p.get("role")).lower() == "respondent" or _id(p.get("type")).lower() == "seller":
+            acoes.update(_id(a.get("action")).lower() for a in _lista(p.get("available_actions")))
+    return acoes
+
+
+async def responder_reclamacao(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    integration: Integration | None,
+    cliente: Any,
+    texto: str,
+    *,
+    para: str,
+    subir_anexo: Callable[[str], Awaitable[str]] | None = None,
+) -> ResultadoEnvio:
+    """Manda `texto` NA reclamação do ML, ao comprador ou ao mediador. Nunca levanta.
+
+    Doc oficial "Gerenciar mensagem de uma reclamação": POST
+    /post-purchase/v1/claims/{id}/actions/send-message com `receiver_role`
+    (`complainant` | `mediator`), `message` e `attachments` (os `filename` do
+    upload em /claims/{id}/attachments). Antes, o GET da reclamação confere
+    que a ação da loja (`send_message_to_complainant` / `_to_mediator`) está
+    liberada AGORA — a etapa pode ter mudado depois da última leitura (o cron
+    relê de 10 em 10 min); sem ela, nada sai (falha limpa, com o porquê).
+    `subir_anexo(claim_id)` (a foto/PDF, `foto.py`) roda depois dessa
+    conferência e devolve o `filename`; falhou = nada saiu.
+
+    O ML responde "201 created" sem o id da mensagem: a linha fica sem id e a
+    leitura das reclamações a adota (mesmo texto, ±15 min — `gravar`).
+    Uma tentativa só (`_request_uma_vez`): mensagem não se desenvia.
+    """
+    if conversa.canal != CANAL_RECLAMACAO or para not in DESTINOS_RECLAMACAO:
+        return ResultadoEnvio(ok=False, erro=f"reclamacao_destino_invalido:{para}")
+    claim_id = _id(conversa.externo_id)
+    if not claim_id.isdigit():
+        return ResultadoEnvio(ok=False, erro="reclamacao_sem_id")
+    papel, acao = DESTINOS_RECLAMACAO[para]
+    try:
+        claim = await cliente.get_claim(claim_id)
+    except Exception as e:  # noqa: BLE001 — leitura: nada saiu, a pessoa tenta de novo
+        return ResultadoEnvio(ok=False, erro=f"reclamacao_ilegivel:{type(e).__name__}")
+    if _id((claim or {}).get("status")).lower() == "closed":
+        return ResultadoEnvio(ok=False, erro="reclamacao_encerrada")
+    if acao not in _acoes_da_loja(claim):
+        logger.info(
+            "atendimento_ml_reclamacao_sem_acao",
+            conversa_id=str(conversa.id),
+            acao=acao,
+            etapa=_id((claim or {}).get("stage")) or None,
+        )
+        return ResultadoEnvio(ok=False, erro=f"reclamacao_sem_acao:{acao}")
+    anexos: list[str] = []
+    if subir_anexo is not None:
+        try:
+            anexos.append(await subir_anexo(claim_id))
+        except Exception as e:  # noqa: BLE001 — upload não fala com ninguém: falha limpa
+            return ResultadoEnvio(ok=False, erro=f"ml {getattr(e, 'erro', type(e).__name__)}")
+    resultado = await _postar(
+        lambda: cliente._request_uma_vez(  # noqa: SLF001 — o mesmo cliente que lê
+            "POST",
+            f"/post-purchase/v1/claims/{claim_id}/actions/send-message",
+            json={"receiver_role": papel, "message": texto, "attachments": anexos},
+        ),
+        conversa=conversa,
+    )
+    # A resposta do ML não é a mensagem (às vezes é a própria reclamação, com
+    # o id DELA): a linha fica sem id para a leitura adotar pelo texto.
+    resultado.externo_id = None
+    # Quem bloqueia a conversa da reclamação é a leitura (pelas ações da loja,
+    # `reclamacoes._situacao_da_conversa`): um 4xx com "block" aqui só falha o
+    # envio — senão a conversa alternaria bloqueada/liberada a cada rodada.
+    resultado.bloqueio = None
+    resultado.payload = {
+        **{k: v for k, v in (resultado.payload or {}).items() if k != "id"},
+        "receiver_role": papel,
+        **({"ml_anexos": anexos} if anexos else {}),
+    }
+    return resultado

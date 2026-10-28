@@ -30,6 +30,14 @@ Por plataforma (a resposta é a do chat da conversa):
                       WhatsApp não devolve URL. Só o Zap DO NÚMERO
                       (`whatsapp` + `zap`): o formato antigo (com a plataforma
                       da venda) continua sem foto.
+  ML (reclamação)     28/10/2026, doc "Gerenciar mensagem de uma reclamação":
+                      `POST /post-purchase/v1/claims/{id}/attachments`
+                      (multipart `file`; JPG, PNG ou PDF até 5 MB; nome até
+                      125 caracteres [A-Za-z0-9_.-]) → `filename` → a
+                      mensagem ao comprador ou ao mediador com
+                      `attachments: [filename]` e um TEXTO (obrigatório, como
+                      no pós-venda). O upload só acontece depois de conferida
+                      a ação da loja (`ml.responder_reclamacao`).
   Amazon, Magalu, Temu, AliExpress, Instagram: sem foto pelo DaVinci (por
   enquanto) — `motivo_sem_foto` diz à pessoa o caminho de cada plataforma.
 
@@ -74,6 +82,7 @@ from app.models import AtendimentoConversa
 from app.services.atendimento.constantes import (
     CANAL_CHAT,
     CANAL_POS_VENDA,
+    CANAL_RECLAMACAO,
     CANAL_ZAP,
     PLATAFORMA_WHATSAPP,
     ResultadoEnvio,
@@ -108,11 +117,12 @@ CAIXAS_COM_FOTO = frozenset(
         ("shopee", CANAL_CHAT),
         ("tiktok", CANAL_CHAT),
         ("ml", CANAL_POS_VENDA),
+        ("ml", CANAL_RECLAMACAO),
         (PLATAFORMA_WHATSAPP, CANAL_ZAP),
     }
 )
 # No ML a foto vai DENTRO de uma mensagem com texto (obrigatório).
-CAIXAS_COM_LEGENDA = frozenset({("ml", CANAL_POS_VENDA)})
+CAIXAS_COM_LEGENDA = frozenset({("ml", CANAL_POS_VENDA), ("ml", CANAL_RECLAMACAO)})
 # No Zap a legenda é PERMITIDA sem ser obrigatória (§6.8): a foto pode ir
 # sozinha ou com uma frase — que passa pelo validador como qualquer resposta.
 CAIXAS_COM_LEGENDA_OPCIONAL = frozenset({(PLATAFORMA_WHATSAPP, CANAL_ZAP)})
@@ -122,8 +132,10 @@ LIMITE_LEGENDA: dict[tuple[str, str], int] = {(PLATAFORMA_WHATSAPP, CANAL_ZAP): 
 
 # (plataforma, caixa) que recebem o PDF como ARQUIVO; nas outras com foto, o
 # PDF vira imagem. O teto do arquivo na plataforma (ML: 25 MB, doc oficial).
-CAIXAS_COM_PDF = frozenset({("ml", CANAL_POS_VENDA)})
+CAIXAS_COM_PDF = frozenset({("ml", CANAL_POS_VENDA), ("ml", CANAL_RECLAMACAO)})
 MAX_BYTES_PDF_PLATAFORMA: dict[str, int] = {"ml": 25 * 1024 * 1024}
+# O anexo da RECLAMAÇÃO do ML tem teto próprio (doc: 5 MB, foto ou PDF).
+MAX_BYTES_RECLAMACAO_ML = 5_000_000
 # PDF que vira imagem: até 3 páginas empilhadas (a DANFE costuma ter 1); a
 # resolução sai do teto de pixels abaixo (A4 a ~150 dpi por página).
 MAX_PAGINAS_IMAGEM = 3
@@ -381,6 +393,13 @@ def para_a_caixa(conversa: AtendimentoConversa, anexo: Foto) -> Foto:
     """O anexo como esta caixa recebe: PDF fica PDF só onde a plataforma aceita."""
     if anexo.mime == PDF and not aceita_pdf(conversa):
         return pdf_em_imagem(anexo)
+    if (
+        anexo.mime == PDF
+        and (conversa.plataforma, conversa.canal) == ("ml", CANAL_RECLAMACAO)
+        and anexo.tamanho > MAX_BYTES_RECLAMACAO_ML
+    ):
+        # A foto é reduzida na hora de subir; o PDF não tem como (doc: 5 MB).
+        raise FotoInvalida("pdf_grande", "A reclamação do Mercado Livre aceita PDF de até 5 MB.")
     return anexo
 
 
@@ -409,21 +428,30 @@ def limite_da_legenda(conversa: AtendimentoConversa) -> int | None:
     return LIMITE_LEGENDA.get((conversa.plataforma, conversa.canal))
 
 
-def preparar_para(plataforma: str, foto: Foto) -> tuple[str, bytes, str]:
+def preparar_para(
+    plataforma: str, foto: Foto, *, teto_caixa: int | None = None
+) -> tuple[str, bytes, str]:
     """(nome, bytes, tipo) dentro do teto da plataforma — reduz se precisar.
 
     A redução é a das evidências de devolução (PyMuPDF, JPEG 85, encolhendo
     pela metade até caber). Levanta `FotoInvalida` se nem assim couber.
+    `teto_caixa`: o teto próprio da caixa (a reclamação do ML: 5 MB), para a
+    foto E para o PDF.
     """
     from app.services.chamados_devolucao import preparar_foto
 
     if foto.mime == PDF:
         # O PDF vai como está — só para quem recebe arquivo (`para_a_caixa`).
-        teto_pdf = MAX_BYTES_PDF_PLATAFORMA.get(plataforma)
-        if teto_pdf is None or foto.tamanho > teto_pdf:
+        teto_pdf = teto_caixa or MAX_BYTES_PDF_PLATAFORMA.get(plataforma)
+        if teto_pdf is None:
             raise FotoInvalida("pdf_nao_suportado", "Esta plataforma não recebe PDF por aqui.")
+        if foto.tamanho > teto_pdf:
+            raise FotoInvalida(
+                "pdf_grande",
+                f"O PDF passa do tamanho que a plataforma aceita ({teto_pdf // 1_000_000} MB).",
+            )
         return foto.nome, foto.conteudo, foto.mime
-    teto = MAX_BYTES_PLATAFORMA.get(plataforma, MAX_BYTES_PLATAFORMA["shopee"])
+    teto = teto_caixa or MAX_BYTES_PLATAFORMA.get(plataforma, MAX_BYTES_PLATAFORMA["shopee"])
     anexo = SimpleNamespace(content_type=foto.mime, blob=foto.conteudo, filename=foto.nome)
     try:
         return preparar_foto(anexo, max_bytes=teto)
@@ -444,11 +472,14 @@ async def enviar_imagem(
     cliente: Any,
     foto: Foto,
     legenda: str | None,
+    *,
+    para: str | None = None,
 ) -> ResultadoEnvio:
     """Sobe a foto e manda a mensagem com ela. Nunca levanta.
 
     O `payload` leva `imagem_url` (Shopee/TikTok: a URL da plataforma, que a
     tela mostra no balão) ou `ml_anexo` (ML: o id do anexo).
+    Reclamação do ML: `para` = `comprador` | `mediador` (`ml.responder_reclamacao`).
 
     O Zap NÃO passa por aqui (`zap.enviar_imagem`, com o destino montado
     pelas travas do Zap): chegar aqui com ele é um caminho novo que pulou as
@@ -456,11 +487,18 @@ async def enviar_imagem(
     """
     if conversa.plataforma == PLATAFORMA_WHATSAPP:
         return ResultadoEnvio(ok=False, erro="zap_sem_destino")
+    reclamacao = conversa.plataforma == "ml" and conversa.canal == CANAL_RECLAMACAO
     try:
-        nome, dados, mime = preparar_para(conversa.plataforma, foto)
+        nome, dados, mime = preparar_para(
+            conversa.plataforma,
+            foto,
+            teto_caixa=MAX_BYTES_RECLAMACAO_ML if reclamacao else None,
+        )
     except FotoInvalida as e:
         return ResultadoEnvio(ok=False, erro=f"{conversa.plataforma} {e.code}")
     try:
+        if reclamacao:
+            return await _ml_reclamacao(conversa, cliente, nome, dados, mime, legenda, para)
         if conversa.plataforma == "shopee":
             return await _shopee(conversa, cliente, nome, dados, mime)
         if conversa.plataforma == "tiktok":
@@ -581,13 +619,14 @@ class _UploadML(Exception):  # noqa: N818
         super().__init__(erro)
 
 
-async def _ml_subir_anexo(cliente: Any, nome: str, dados: bytes, mime: str) -> str:
-    """Sobe o anexo da mensagem pós-venda; devolve o id. Levanta `_UploadML`.
+async def _ml_upload(
+    cliente: Any, caminho: str, params: dict | None, nome: str, dados: bytes, mime: str
+) -> dict:
+    """O POST multipart (`file`) de um anexo no ML; devolve o corpo. Levanta `_UploadML`.
 
-    POST /messages/attachments?tag=post_sale&site_id=MLB (multipart `file`).
     O `MercadoLivreClient` não tem upload multipart genérico: a chamada é
     feita aqui com o token DELE (renovando como ele renova: vencido antes,
-    401 uma vez). Upload não fala com o comprador — repetir no 401 é seguro.
+    401 uma vez). Upload não fala com ninguém — repetir no 401 é seguro.
     """
     from app.services.marketplaces.ml import ML_API_BASE
 
@@ -601,8 +640,8 @@ async def _ml_subir_anexo(cliente: Any, nome: str, dados: bytes, mime: str) -> s
         }
         async with _http(120.0) as c:
             r = await c.post(
-                f"{ML_API_BASE}/messages/attachments",
-                params={"tag": "post_sale", "site_id": ML_SITE},
+                f"{ML_API_BASE}{caminho}",
+                params=params,
                 headers=headers,
                 files={"file": (nome, dados, mime)},
             )
@@ -624,10 +663,73 @@ async def _ml_subir_anexo(cliente: Any, nome: str, dados: bytes, mime: str) -> s
         corpo = r.json()
     except ValueError:
         corpo = None
-    anexo = str((corpo or {}).get("id") or "").strip() if isinstance(corpo, dict) else ""
+    return corpo if isinstance(corpo, dict) else {}
+
+
+async def _ml_subir_anexo(cliente: Any, nome: str, dados: bytes, mime: str) -> str:
+    """Sobe o anexo da mensagem pós-venda; devolve o id. Levanta `_UploadML`.
+
+    POST /messages/attachments?tag=post_sale&site_id=MLB (multipart `file`).
+    """
+    corpo = await _ml_upload(
+        cliente,
+        "/messages/attachments",
+        {"tag": "post_sale", "site_id": ML_SITE},
+        nome,
+        dados,
+        mime,
+    )
+    anexo = str(corpo.get("id") or "").strip()
     if not anexo:
         raise _UploadML("upload sem_id")
     return anexo
+
+
+async def _ml_subir_anexo_reclamacao(
+    cliente: Any, claim_id: str, nome: str, dados: bytes, mime: str
+) -> str:
+    """Sobe o anexo da mensagem na RECLAMAÇÃO; devolve o `filename`. Levanta `_UploadML`.
+
+    POST /post-purchase/v1/claims/{id}/attachments (multipart `file`; o nome
+    até 125 caracteres [A-Za-z0-9_.-] — o `_nome_limpo` já cabe).
+    """
+    corpo = await _ml_upload(
+        cliente,
+        f"/post-purchase/v1/claims/{claim_id}/attachments",
+        None,
+        _nome_limpo(nome, mime),
+        dados,
+        mime,
+    )
+    arquivo = str(corpo.get("filename") or corpo.get("file_name") or "").strip()
+    if not arquivo:
+        raise _UploadML("upload sem_filename")
+    return arquivo
+
+
+async def _ml_reclamacao(
+    conversa: AtendimentoConversa,
+    cliente: Any,
+    nome: str,
+    dados: bytes,
+    mime: str,
+    legenda: str | None,
+    para: str | None,
+) -> ResultadoEnvio:
+    """A foto/PDF na mensagem da reclamação (ao comprador ou ao mediador)."""
+    from app.services.atendimento import ml as adaptador_ml
+
+    if not (legenda or "").strip():
+        return ResultadoEnvio(ok=False, erro="ml legenda_vazia")
+    if para is None:
+        return ResultadoEnvio(ok=False, erro="reclamacao_sem_destino")
+
+    async def subir(claim_id: str) -> str:
+        return await _ml_subir_anexo_reclamacao(cliente, claim_id, nome, dados, mime)
+
+    return await adaptador_ml.responder_reclamacao(
+        None, conversa, None, cliente, legenda, para=para, subir_anexo=subir
+    )
 
 
 async def _ml(

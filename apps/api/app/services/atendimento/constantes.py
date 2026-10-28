@@ -366,8 +366,48 @@ LIMITE_CARACTERES: dict[tuple[str, str], int] = {
     (PLATAFORMA_FACEBOOK, CANAL_COMENTARIO): 8000,
     # Texto do WhatsApp (Cloud API): 4.096 caracteres por mensagem.
     (PLATAFORMA_WHATSAPP, CANAL_ZAP): 4096,
+    # Mensagem na reclamação do ML (28/10/2026): a doc não fixa o teto; 2.000
+    # é o contador do Duoke na caixa "To Meli" (a maior que a loja mandou em
+    # produção até aqui tinha 694).
+    ("ml", CANAL_RECLAMACAO): 2000,
 }
 LIMITE_PADRAO_CARACTERES = 1000
+
+# ── Para quem vai a mensagem na reclamação do ML (28/10/2026) ─────────────
+# A tela escolhe "Para o comprador" ou "Para o Mercado Livre (mediador)"; o ML
+# chama de `receiver_role` e só libera cada um pela AÇÃO da loja na
+# reclamação (`players[respondent].available_actions`, doc "Gerenciar
+# mensagem de uma reclamação"): ao comprador na etapa `claim`, ao mediador
+# na etapa `dispute` (com a mediação aberta, o ML não deixa falar direto com
+# o comprador). Destino → (receiver_role, a ação que libera).
+PARA_COMPRADOR = "comprador"
+PARA_MEDIADOR = "mediador"
+DESTINOS_RECLAMACAO: dict[str, tuple[str, str]] = {
+    PARA_COMPRADOR: ("complainant", "send_message_to_complainant"),
+    PARA_MEDIADOR: ("mediator", "send_message_to_mediator"),
+}
+ROTULO_DESTINO_RECLAMACAO = {
+    PARA_COMPRADOR: "Para o comprador",
+    PARA_MEDIADOR: "Para o Mercado Livre (mediador)",
+}
+# `dados.destinos` da conversa da reclamação: os destinos que o ML libera AGORA
+# (relidos a cada rodada do cron das reclamações).
+CHAVE_DESTINOS_RECLAMACAO = "destinos"
+
+
+def destino_da_mensagem(payload: object) -> str | None:
+    """A quem a fala da LOJA na reclamação foi (`payload.para` = o `receiver_role`
+    do ML) → `comprador` | `mediador`; None sem destino conhecido. PURA."""
+    para = payload.get("para") if isinstance(payload, dict) else None
+    return next((d for d, (papel, _) in DESTINOS_RECLAMACAO.items() if papel == para), None)
+
+
+def destinos_da_reclamacao(dados: object) -> list[str]:
+    """Os destinos liberados na conversa da reclamação (`dados.destinos`), na ordem. PURA."""
+    brutos = dados.get(CHAVE_DESTINOS_RECLAMACAO) if isinstance(dados, dict) else None
+    if not isinstance(brutos, list):
+        return []
+    return [d for d in DESTINOS_RECLAMACAO if d in brutos]
 
 # ── Autor × origem ────────────────────────────────────────────────────────
 # autor = QUEM escreveu na plataforma; origem = POR ONDE saiu.
