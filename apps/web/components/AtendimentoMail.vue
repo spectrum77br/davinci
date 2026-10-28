@@ -25,7 +25,7 @@ type FolderItem = { id: string | null; nome: string; caminho: string | null; tip
 type StoreItem = StoreBadge & { chave: string; quantidade: number; total: number }
 type IndexItem = { id: string; recebido_em: string; direcao: string; tem_anexos: boolean; ponte: string | null; conversa_id?: string | null; de: string | null; de_nome: string | null; assunto: string | null; assunto_oculto: boolean; pasta: { id: string; nome: string; tipo: string }; selo: StoreBadge }
 type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null }
-type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
+type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string | null; allowed_from_addresses?: string[]; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
 
 // `canOperate` = the person operates /atendimento (`atendimento_mexe`): sees the
 // Atendimento queues ("Filas", AtendimentoMailFilas). `canView` (13/10/2026) =
@@ -147,11 +147,13 @@ const configuring = ref(false)
 const resolving = ref('')
 
 const pending = computed(() => detail.value?.outbox.some((job) => ['queued', 'leased', 'uncertain'].includes(job.status)) ?? false)
-const canReply = computed(() => !deleting.value && !readOnly.value && detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value)
+const canReply = computed(() => !deleting.value && !readOnly.value && detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value && replyAddresses.value.includes(fromAddress.value))
 const canDelete = computed(() => canAdminister.value && !!detail.value && !readOnly.value && !sending.value && !deleting.value && !resolving.value && !pending.value)
 // Uma caixa filtrada não revela os aliases das outras lojas. Quem já podia
 // responder continua com o remetente deste e-mail autorizado no detalhe.
-const replyAddresses = computed(() => mailbox.value?.aliases.length ? mailbox.value.aliases : detail.value?.reply.from_address ? [detail.value.reply.from_address] : [])
+// The message detail applies strict sender and company mailbox rules. With an
+// older API, offer only its suggested sender instead of every mailbox alias.
+const replyAddresses = computed(() => detail.value?.reply.allowed_from_addresses ?? (detail.value?.reply.from_address ? [detail.value.reply.from_address] : []))
 const states: Record<string, string> = { online: 'Conectada', offline: 'Mac desconectado', login_required: 'Faça login no Mac', error: 'Conexão precisa de atenção' }
 const statuses: Record<string, string> = { queued: 'Na fila do Mac', leased: 'Envio em andamento', sent: 'Aceita pelo serviço de e-mail', failed: 'Não enviada', uncertain: 'Precisa conferir no Tuta — não reenviada' }
 
@@ -470,7 +472,7 @@ async function openMessage(id: string, preserveDraft = false) {
     if (disposed || section.value !== 'mailboxes' || generation !== detailGeneration || mailboxId.value !== selectedMailbox) return
     detail.value = result
     lastDetailAt = Date.now()
-    if (!preserveDraft) fromAddress.value = result.reply.from_address
+    if (!preserveDraft) fromAddress.value = result.reply.from_address || replyAddresses.value[0] || ''
   } catch (reason) {
     if (!disposed && generation === detailGeneration) {
       error.value = accessLost(reason) ? 'Este e-mail não está mais disponível para seu usuário. O rascunho foi preservado, mas a mensagem foi fechada.' : errorText(reason)
@@ -952,6 +954,7 @@ onBeforeUnmount(() => {
               <p class="break-all text-sm">Para: <strong>{{ detail.reply.to }}</strong></p>
               <p v-if="detail.reply_to && detail.reply_to !== detail.from_address" class="text-xs text-amber-700">A mensagem indica este endereço de resposta, diferente do remetente. Confira antes de enviar.</p>
               <label class="block text-sm">Remetente<select v-model="fromAddress" class="ml-2 max-w-full rounded border bg-background p-2" :disabled="sending || deleting"><option v-for="address in replyAddresses" :key="address" :value="address">{{ address }}</option></select></label>
+              <p v-if="!replyAddresses.includes(fromAddress)" class="text-xs text-muted-foreground">Escolha um remetente autorizado para este e-mail antes de enviar.</p>
               <textarea v-model="draft" rows="5" maxlength="100000" class="w-full rounded border bg-background p-3 text-sm" placeholder="Escreva sua resposta…" :disabled="sending || deleting || pending" aria-label="Texto da resposta" />
               <p v-if="!detail.reply.send_ready" class="text-xs text-muted-foreground">Envio indisponível. O Mac precisa estar conectado, com respostas habilitadas nesta caixa e no conector.</p>
               <p v-if="pending" class="text-xs text-muted-foreground">Confira a resposta pendente acima antes de preparar outra.</p>

@@ -167,7 +167,15 @@ async def test_selecionadas_filtra_caixa_indice_contagens_detalhe_anexos_e_nao_e
     pastas = (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/pastas")).json()
     assert pastas["pastas"][0]["total"] == 1
     assert sum(x["total"] for x in pastas["lojas"]) == 1
-    assert (await client.get(f"/api/mail/messages/{x.message_id}")).status_code == 200
+    cfg = await db.get(MailMailboxSettings, cena.geral.id)
+    cfg.remetente_estrito = False
+    await db.commit()
+    detalhe = await client.get(f"/api/mail/messages/{x.message_id}")
+    assert detalhe.status_code == 200
+    reply = detalhe.json()["reply"]
+    assert set(reply["allowed_from_addresses"]).issubset(
+        {*reply["receiving_aliases"], reply["from_address"]}
+    )
     assert (await client.get(f"/api/mail/messages/{outro_id}")).status_code == 404
     assert (await client.get(f"/api/mail/attachments/{outro_anexo}")).status_code == 404
     assert (

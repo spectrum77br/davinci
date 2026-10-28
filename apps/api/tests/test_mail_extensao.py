@@ -235,6 +235,7 @@ async def test_estrito_nunca_cai_no_principal(caixa, client, db):
     assert detalhe["reply"]["from_address"] is None
     assert detalhe["reply"]["can_reply"] is False
     assert detalhe["reply"]["receiving_aliases"] == []
+    assert detalhe["reply"]["allowed_from_addresses"] == []
     r = await _responder(client, mid)
     assert r.json()["detail"]["code"] == "no_receiving_alias"
     # Nem escolhendo o principal na mão.
@@ -252,12 +253,33 @@ async def test_estrito_usa_o_alias_que_recebeu_inclusive_em_copia(caixa, client,
     detalhe = (await client.get(f"{ROOT}/messages/{mid}")).json()
     assert detalhe["reply"]["from_address"] == "loja07@example.com"
     assert detalhe["reply"]["receiving_aliases"] == ["loja07@example.com", "loja09@example.com"]
+    assert detalhe["reply"]["allowed_from_addresses"] == [
+        "loja07@example.com",
+        "loja09@example.com",
+    ]
     # Outro alias da caixa que NÃO recebeu: recusado.
     r = await _responder(client, mid, from_address="loja01@example.com")
     assert r.json()["detail"]["code"] == "sender_not_receiving_alias"
     r = await _responder(client, mid, from_address="loja09@example.com")
     assert r.status_code == 202, r.text
     assert r.json()["from_address"] == "loja09@example.com"
+
+
+async def test_remetentes_do_detalhe_excluem_principal_da_empresa(caixa, client, db):
+    mid = await _ingerir(client, caixa, to=["principal@example.com", "loja07@example.com"])
+    privado = (await client.get(f"{ROOT}/messages/{mid}")).json()["reply"]
+    assert "principal@example.com" in privado["allowed_from_addresses"]
+
+    await _config(db, caixa, visibilidade="empresa")
+    empresa = (await client.get(f"{ROOT}/messages/{mid}")).json()["reply"]
+    assert empresa["from_address"] == "loja07@example.com"
+    assert empresa["allowed_from_addresses"] == GERAL_ALIASES
+
+    cfg = await db.get(MailMailboxSettings, UUID(caixa["id"]))
+    cfg.remetente_estrito = True
+    await db.commit()
+    estrito = (await client.get(f"{ROOT}/messages/{mid}")).json()["reply"]
+    assert estrito["allowed_from_addresses"] == ["loja07@example.com"]
 
 
 def test_alias_que_recebeu_pura():

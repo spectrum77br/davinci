@@ -255,6 +255,18 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
         )
     ).all()
     caixa_cfg = await mailbox_settings.config_da_caixa(session, mailbox.id)
+    reply = service.reply_envelope(
+        mailbox,
+        message,
+        strict=caixa_cfg.remetente_estrito,
+        main_allowed=not caixa_cfg.empresa,
+    )
+    if await mail_admin.tem_politica(session, mailbox.id, user):
+        # A message-scoped grant must not reveal the other stores' aliases.
+        visible_senders = {*reply["receiving_aliases"], reply["from_address"]}
+        reply["allowed_from_addresses"] = [
+            address for address in reply["allowed_from_addresses"] if address in visible_senders
+        ]
     response.headers["Cache-Control"] = "no-store"
     return {
         **service.message_view(message, detail=True),
@@ -263,12 +275,7 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
             for item in attachments
         ],
         "reply": {
-            **service.reply_envelope(
-                mailbox,
-                message,
-                strict=caixa_cfg.remetente_estrito,
-                main_allowed=not caixa_cfg.empresa,
-            ),
+            **reply,
             "send_ready": service.send_ready(mailbox),
         },
         "outbox": [service.outbox_view(job) for job in outbox],

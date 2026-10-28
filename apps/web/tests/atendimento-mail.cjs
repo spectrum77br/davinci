@@ -57,6 +57,7 @@ async function run() {
   await first.state.openMessage('message1')
   assert.equal(first.state.detail.reply.to, 'reply@example.com')
   assert.equal(first.state.fromAddress, 'support@example.com')
+  assert.deepEqual([...first.state.replyAddresses], ['support@example.com'], 'older APIs expose only the suggested sender')
   await first.state.refresh()
   assert.equal(first.calls.filter((call) => call.options.method === 'POST').length, 0, 'reading never queues a reply')
   first.state.draft = 'Human approved reply'
@@ -86,6 +87,24 @@ async function run() {
   const attempts = retry.calls.filter((call) => call.options.method === 'POST')
   assert.equal(attempts.length, 2)
   assert.equal(attempts[0].options.body.request_id, attempts[1].options.body.request_id)
+
+  const restricted = mount()
+  restricted.state.mailboxes = [mailbox]; restricted.state.mailboxId = 'box1'
+  await Vue.nextTick()
+  restricted.state.detail = {
+    ...structuredClone(incoming),
+    reply: { ...incoming.reply, allowed_from_addresses: ['support@example.com'] },
+  }
+  restricted.state.fromAddress = 'owner@example.com'
+  restricted.state.draft = 'Reply using the store address'
+  assert.deepEqual([...restricted.state.replyAddresses], ['support@example.com'])
+  await restricted.state.sendReply()
+  assert.equal(restricted.calls.filter((call) => call.options.method === 'POST').length, 0, 'a stale or forbidden draft sender cannot submit')
+  restricted.state.fromAddress = 'support@example.com'
+  assert.equal(restricted.state.canReply, true)
+  restricted.state.detail.reply.allowed_from_addresses = []
+  assert.deepEqual([...restricted.state.replyAddresses], [], 'an empty allowlist never falls back to the mailbox or suggested sender')
+  assert.equal(restricted.state.canReply, false)
 
   const blocked = mount()
   blocked.state.detail = { ...structuredClone(incoming), outbox: [{ id: 'job', status: 'uncertain', text: 'Maybe sent', created_at: '2026-10-08' }] }

@@ -112,7 +112,8 @@ def reply_envelope(
 ) -> dict:
     config = decrypt_json(mailbox.config_enc)
     content = decrypt_json(message.content_enc)
-    aliases = {address.lower() for address in config["aliases"]}
+    ordered_aliases = list(dict.fromkeys(address.lower() for address in config["aliases"]))
+    aliases = set(ordered_aliases)
     recipient = content.get("reply_to") or content["from_address"]
     received = receiving_aliases(aliases, content)
     if not main_allowed:
@@ -132,6 +133,15 @@ def reply_envelope(
         ).lower()
     else:
         sender = received[0] if received else None
+    allowed_from_addresses = (
+        received
+        if strict
+        else [
+            address
+            for address in ordered_aliases
+            if main_allowed or address != str(config["address"]).lower()
+        ]
+    )
     return {
         "to": recipient,
         "from_address": sender,
@@ -140,9 +150,10 @@ def reply_envelope(
         # receiving alias suggests none rather than the main address).
         "can_reply": message.direction == "inbound"
         and recipient.lower() not in aliases
-        and (sender is not None or not strict),
+        and bool(allowed_from_addresses),
         "strict_sender": strict,
         "receiving_aliases": received,
+        "allowed_from_addresses": allowed_from_addresses,
     }
 
 
