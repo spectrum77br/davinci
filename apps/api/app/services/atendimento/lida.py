@@ -80,14 +80,17 @@ VISTO NO DAVINCI (decisão do dono, 15/10/2026: os números da Caixa batem com
 o Duoke, e no Duoke abrir a conversa zera o número dela). Separado do "lida
 na plataforma" acima:
 
-  - `gravar_visto` grava `conversa.visto_em` quando a PESSOA que mexe
-    (`acesso.pode_mexer`) abre a conversa na tela — o mesmo gatilho (1,5 s
-    aberta com a aba visível, uma vez por abertura) — em QUALQUER modo de
-    loja (inclusive `observar`), com o envio ligado ou não, em qualquer
-    canal. NUNCA vai à plataforma: é a marca do DaVinci que o número da Caixa
-    lê (`pendente.nao_lidas_duoke`: só a mensagem do comprador que CHEGOU
-    depois dela conta). Quem só lê nunca grava (a rota dá 403 antes; aqui é
-    o cinto); a IA, os crons e os robôs não chamam.
+  - `gravar_visto` grava `conversa.visto_em` quando uma PESSOA que vê a
+    caixa (`acesso.pode_ver`; desde 28/10/2026 — antes só quem mexe) abre a
+    conversa na tela — o mesmo gatilho (1,5 s aberta com a aba visível, uma
+    vez por abertura) — em QUALQUER modo de loja (inclusive `observar`), com
+    o envio ligado ou não, em qualquer canal. NUNCA vai à plataforma: é a
+    marca do DaVinci que o número da Caixa lê (`pendente.nao_lidas_duoke`: só
+    a mensagem do comprador que CHEGOU depois dela conta). 28/10/2026, o
+    Eduardo, ao trocar o Duoke pelo DaVinci: "as notificações devem sumir se
+    clicado em algum atendimento" — como o Duoke "por loja", quem da equipe
+    abrir apaga para todos (só a marca do DaVinci; o /lida na plataforma
+    continua só de quem mexe). A IA, os crons e os robôs não chamam.
   - O QUE grava (15/10/2026, a revisão): ATÉ ONDE A PESSOA VIU, no relógio do
     DaVinci — a CHEGADA (`created_at`) da mensagem mais nova que a tela
     mostrava (`visto_ate`: o detalhe manda, a tela devolve no POST). O sync
@@ -399,19 +402,19 @@ async def gravar_visto(
 ) -> datetime | None:
     """Grava o "visto no DaVinci" (`visto_em`) e devolve o carimbo.
 
-    A PESSOA que mexe abriu a conversa na tela: em qualquer modo de loja e em
-    qualquer canal, sem ir à plataforma. `ate` = o `visto_ate` do detalhe que
-    a tela mostrava (a chegada da mensagem mais nova); sem ele, o relógio do
-    banco — e nunca depois dele (`LEAST`). Quem só lê (ou ninguém — IA,
-    crons) → `LidaRecusada(RECUSA_SO_LEITURA)`, nada gravado. Idempotente:
+    Uma PESSOA que vê a caixa abriu a conversa na tela: em qualquer modo de
+    loja e em qualquer canal, sem ir à plataforma. `ate` = o `visto_ate` do
+    detalhe que a tela mostrava (a chegada da mensagem mais nova); sem ele, o
+    relógio do banco — e nunca depois dele (`LEAST`). Quem não vê (ou
+    ninguém — IA, crons) → `LidaRecusada(RECUSA_SO_LEITURA)`, nada gravado. Idempotente:
     nunca anda para trás. Commita e relê a conversa.
 
     O marco nativo só avança quando a tela confirma o snapshot_id da epoch
     que realmente exibiu. Um POST antigo que atravessa a importação pode
     atualizar o visto legado, mas nunca consumir o seed recém-importado.
     """
-    if user is None or not acesso.pode_mexer(user):
-        raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem mexe no Atendimento marca como vista.")
+    if user is None or not acesso.pode_ver(user):
+        raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem vê o Atendimento marca como vista.")
     # O relógio do BANCO (o mesmo do `created_at` da mensagem), na hora do
     # UPDATE — o `now()` seria o começo desta transação.
     relogio = func.clock_timestamp()

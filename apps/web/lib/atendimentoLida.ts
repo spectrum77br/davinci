@@ -26,8 +26,9 @@
 // em QUALQUER modo de loja (inclusive Observar) e sem ir à plataforma. UMA
 // chamada por abertura (`rotaAoAbrir`): o /lida quando o detalhe diz
 // `marcar_lida` (ele grava o visto e marca na plataforma) e, senão, o
-// POST /api/atendimento/conversas/{id}/visto (só o visto). Quem só lê nunca
-// chama nenhum; o Direct do Instagram (`ig:`) não é conversa da Caixa.
+// POST /api/atendimento/conversas/{id}/visto (só o visto). Quem só lê chama
+// só o /visto (28/10/2026: abrir apaga a notificação para todos, como no
+// Duoke "por loja"); o Direct do Instagram (`ig:`) não é conversa da Caixa.
 // O POST leva `{ ate }` = o `visto_ate` do detalhe que a tela mostrava (a
 // chegada da mensagem mais nova): o servidor compara o visto com a CHEGADA da
 // mensagem — a que o sync trouxe depois (a pessoa não viu) continua contando.
@@ -58,16 +59,18 @@ export function querMarcarLida(d: DetalheParaLida | null | undefined, podeMexer:
   return n === null || n === undefined || n > 0
 }
 
-/** A tela grava o "visto no DaVinci" ao abrir esta conversa (15/10/2026)? */
-export function querMarcarVisto(d: DetalheParaLida | null | undefined, podeMexer: boolean): boolean {
+/** A tela grava o "visto no DaVinci" ao abrir esta conversa (15/10/2026)?
+ *  Quem só lê também (28/10/2026, o Eduardo: "as notificações devem sumir se
+ *  clicado em algum atendimento") — só o /visto; o /lida continua de quem mexe. */
+export function querMarcarVisto(d: DetalheParaLida | null | undefined): boolean {
   const id = d?.conversa?.id
-  return !!id && podeMexer && !id.startsWith('ig:')
+  return !!id && !id.startsWith('ig:')
 }
 
 /** Qual rota a abertura chama: o /lida (visto + plataforma), o /visto (só o visto) ou nenhuma. */
 export function rotaAoAbrir(d: DetalheParaLida | null | undefined, podeMexer: boolean): 'lida' | 'visto' | null {
   if (querMarcarLida(d, podeMexer)) return 'lida'
-  if (querMarcarVisto(d, podeMexer)) return 'visto'
+  if (querMarcarVisto(d)) return 'visto'
   return null
 }
 

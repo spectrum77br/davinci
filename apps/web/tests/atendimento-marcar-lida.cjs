@@ -102,15 +102,15 @@ function det(id, extra = {}) {
   assert.equal(L.querMarcarLida({ conversa: { id: 'z', nao_lidas: 0, canal: 'zap' }, marcar_lida: true }, false), false)
   assert.equal(L.querMarcarLida(null, true), false)
   // O visto (15/10/2026): quem mexe, em qualquer modo — só não o Direct (`ig:`) e quem só lê.
-  assert.equal(L.querMarcarVisto(det('a', { marcar_lida: false }), true), true)
-  assert.equal(L.querMarcarVisto(det('a'), false), false)
-  assert.equal(L.querMarcarVisto(det('ig:1', { marcar_lida: false }), true), false)
-  assert.equal(L.querMarcarVisto(null, true), false)
+  assert.equal(L.querMarcarVisto(det('a', { marcar_lida: false })), true)
+  assert.equal(L.querMarcarVisto(det('a')), true, 'quem só lê também grava o visto (28/10/2026)')
+  assert.equal(L.querMarcarVisto(det('ig:1', { marcar_lida: false })), false)
+  assert.equal(L.querMarcarVisto(null), false)
   // Uma rota por abertura: o /lida (que grava o visto também) ou o /visto.
   assert.equal(L.rotaAoAbrir(det('a'), true), 'lida')
   assert.equal(L.rotaAoAbrir(det('a', { marcar_lida: false }), true), 'visto', 'Observar: só o visto')
   assert.equal(L.rotaAoAbrir({ conversa: { id: 'a', nao_lidas: 0 }, marcar_lida: true }, true), 'visto', 'já lida: só o visto')
-  assert.equal(L.rotaAoAbrir(det('a'), false), null, 'quem só lê: nada')
+  assert.equal(L.rotaAoAbrir(det('a'), false), 'visto', 'quem só lê: só o visto (28/10/2026)')
   assert.equal(L.rotaAoAbrir(det('ig:1', { marcar_lida: false }), true), null)
 }
 
@@ -653,14 +653,15 @@ function marcador(extra = {}) {
     assert.equal(t.emitidos.length, 1)
   }
 
-  // Quem só lê, com mensagem nova na conversa aberta: nada.
+  // Quem só lê (28/10/2026): só o /visto — ao abrir e com mensagem nova na conversa aberta; nunca o /lida.
   {
     const t = await tela({ canEdit: false })
     await t.chegar('c1', 2, 'A')
     t.rel.avancar(5000)
     await t.chegar('c1', 3, 'B')
     await tique()
-    assert.deepEqual(t.posts, [])
+    assert.ok(t.posts.length >= 1)
+    assert.ok(t.posts.every(([url, metodo]) => url === '/api/atendimento/conversas/c1/visto' && metodo === 'POST'), JSON.stringify(t.posts))
   }
 
   // O /lida que não marcou na plataforma (falhou): o visto chega à linha, as não lidas ficam.
@@ -675,13 +676,13 @@ function marcador(extra = {}) {
     assert.deepEqual(t.emitidos.map(([e, c]) => [e, c.nao_lidas, c.visto_em]), [['mudou', 2, '2026-10-15T10:00:00+00:00']])
   }
 
-  // Quem só lê: nunca chama.
+  // Quem só lê (28/10/2026): só o /visto, uma vez por abertura — nunca o /lida.
   {
     const t = await tela({ canEdit: false })
     await t.chegar('c1')
     t.rel.avancar(60_000)
     await tique()
-    assert.deepEqual(t.posts, [])
+    assert.deepEqual(t.posts, [['/api/atendimento/conversas/c1/visto', 'POST']])
   }
 
   // Passou rápido: trocou de conversa antes de 1,5 s — a anterior não marca.
@@ -782,11 +783,12 @@ function marcador(extra = {}) {
     assert.match(schemas, /^ {4}visto_em: datetime \| None = None$/m)
     assert.match(P, /^ {2}visto_em\?: string \| null$/m, 'o tipo da linha tem o `visto_em`')
     assert.match(rota, /dependencies=\[Depends\(_so_admin\)\]/)
-    // Quem só lê NÃO tem esta escrita (fica fora do ROTAS_DE_QUEM_LE → 403).
+    // Quem só lê NÃO marca na plataforma (o /lida fica fora do ROTAS_DE_QUEM_LE → 403),
+    // mas grava o visto (28/10/2026: abrir apaga a notificação).
     const lista = rotaDetalhe.slice(rotaDetalhe.indexOf('ROTAS_DE_QUEM_LE = frozenset('), rotaDetalhe.indexOf('SO_LEITURA = {'))
     assert.ok(lista.length > 0)
     assert.doesNotMatch(lista, /\/lida/)
-    assert.doesNotMatch(lista, /\/visto/, 'quem só lê não grava o visto (403)')
+    assert.match(lista, /\("POST", "\/api\/atendimento\/conversas\/\{conversa_id\}\/visto"\)/, 'quem só lê grava o visto')
     assert.match(api('main.py'), /app\.include_router\(atendimento_lida_router\.router\)/)
     const servico = api('services/atendimento/lida.py')
     for (const p of ['"shopee": frozenset({CANAL_CHAT})', '"tiktok": frozenset({CANAL_CHAT})', '"ml": frozenset({CANAL_POS_VENDA})']) {

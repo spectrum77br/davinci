@@ -791,18 +791,41 @@ async def test_lida_com_a_plataforma_falhando_grava_o_visto(db, dono, client, pl
     assert r.json()["conversa"]["visto_em"] is not None
 
 
-async def test_quem_so_le_nao_grava_o_visto(db, make_user, auth_as, client, plataforma):
+async def test_quem_so_le_grava_o_visto_mas_nao_marca_na_plataforma(
+    db, make_user, auth_as, client, plataforma
+):
+    """28/10/2026, o Eduardo: "as notificações devem sumir se clicado em algum
+    atendimento" — a equipe que só lê abre a conversa e o número dela apaga
+    (o visto no DaVinci, como no Duoke "por loja"); o /lida na plataforma
+    continua só de quem mexe."""
     dono_loja = await make_user(email=DONO, role=UserRole.ADMIN)
-    integ, canal = await _loja(db, dono_loja, "shopee", "chat", "observar")
+    integ, canal = await _loja(db, dono_loja, "shopee", "chat", "humano")
     conversa = await _conversa(db, integ, canal)
     for leitor in (await make_user(), await make_user(role=UserRole.ADMIN)):
         auth_as(leitor)
-        for chamar in (_visto, _marcar):
-            r = await chamar(client, conversa)
-            assert r.status_code == 403, r.text
-            assert r.json()["detail"]["code"] == "atendimento_so_leitura"
-    assert await _visto_em(db, conversa) is None
+        r = await _marcar(client, conversa)
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "atendimento_so_leitura"
+        r = await _visto(client, conversa)
+        assert r.status_code == 200, r.text
+        assert r.json()["visto_em"] is not None
+    assert await _visto_em(db, conversa) is not None
+    assert await _nao_lidas(db, conversa) == 3, "o não lido da plataforma não muda"
     assert plataforma.chamadas == [] and plataforma.montados == []
+
+
+async def test_quem_nao_ve_a_caixa_nao_grava_o_visto(db, make_user, auth_as, client, plataforma):
+    dono_loja = await make_user(email=DONO, role=UserRole.ADMIN)
+    integ, canal = await _loja(db, dono_loja, "shopee", "chat", "observar")
+    conversa = await _conversa(db, integ, canal)
+    # O operador puro do estoque nem vê a caixa.
+    operador = await make_user(permissions={"controle_estoque": {"view": True}})
+    operador.stock_tags = ["estoque"]
+    await db.commit()
+    auth_as(operador)
+    r = await _visto(client, conversa)
+    assert r.status_code == 403, r.text
+    assert await _visto_em(db, conversa) is None
 
 
 async def test_visto_idempotente_nunca_volta_e_nao_mexe_no_updated_at(db, dono, client, plataforma):
@@ -953,13 +976,14 @@ async def test_sem_pessoa_o_servico_recusa(db, make_user, plataforma):
     with pytest.raises(lida.LidaRecusada):
         await lida.marcar_como_lida(db, conversa, user=leitor)
     assert await lida.marcar_ao_abrir(db, conversa, None) is False
-    for ninguem in (None, leitor):
-        with pytest.raises(lida.LidaRecusada) as e:
-            await lida.gravar_visto(db, conversa, ninguem)
-        assert e.value.code == lida.RECUSA_SO_LEITURA
+    # Ninguém (a IA, os crons) nunca grava o visto; quem só lê grava (28/10/2026).
+    with pytest.raises(lida.LidaRecusada) as e:
+        await lida.gravar_visto(db, conversa, None)
+    assert e.value.code == lida.RECUSA_SO_LEITURA
+    assert await _visto_em(db, conversa) is None
+    assert await lida.gravar_visto(db, conversa, leitor) is not None
     assert plataforma.chamadas == []
     assert await _nao_lidas(db, conversa) == 3
-    assert await _visto_em(db, conversa) is None
 
 
 _MARCAM = {

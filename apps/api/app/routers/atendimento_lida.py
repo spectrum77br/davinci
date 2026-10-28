@@ -38,7 +38,9 @@ desligado, a plataforma sem "lida", nada não lido: só grava `visto_em`, em
 qualquer modo de loja, e NUNCA vai à plataforma. Uma rota à parte, e não um
 modo do /lida, para o /lida continuar recusando (409) o que não marca na
 plataforma. Respostas:
-  - 403 `atendimento_so_leitura` — quem só lê (a trava e o serviço);
+  - quem só lê TAMBÉM grava (28/10/2026, `ROTAS_DE_QUEM_LE`: abrir a conversa
+    apaga a notificação dela para todos, como no Duoke "por loja"); 403 só para
+    quem nem vê a caixa;
   - 409 `nao_se_aplica` — o Direct do Instagram (não é conversa da Caixa);
   - 404 — fora do escopo da equipe ou não existe;
   - 200 `{visto_em, conversa}` — idempotente (abrir de novo só anda o
@@ -82,6 +84,7 @@ from app.routers.atendimento import (
     _conversa_ou_404,
     _conversa_out,
     _edit,
+    _quem_le,
     _so_admin,
 )
 from app.schemas.atendimento import ConversaOut
@@ -175,7 +178,7 @@ class VistoOut(BaseModel):
 async def marcar_visto(
     conversa_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_quem_le)],
     body: VistoIn | None = None,
 ) -> VistoOut:
     """Grava o "visto no DaVinci" (`visto_em`) — em qualquer modo, sem ir à plataforma.

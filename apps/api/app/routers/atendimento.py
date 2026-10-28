@@ -315,6 +315,8 @@ _METODOS_DE_LEITURA = frozenset({"GET", "HEAD", "OPTIONS"})
 #   - o registro de quem abriu o perfil da loja no AdsPower: é só o log de
 #     uma abertura que acontece no computador da pessoa ("Abrir na
 #     plataforma"), e o perfil só vem para quem vê o cadastro de Lojas.
+#   - o "visto" ao abrir a conversa (28/10/2026): apaga a notificação dela no
+#     DaVinci, como abrir no Duoke; o /lida na plataforma continua de quem mexe.
 # A nota interna NÃO entra: fica para sempre na linha do tempo da conversa
 # (não há como apagar), e o recado de quem só lê sobre a IA já vai na
 # correção do 👎. O caminho é o MOLDE da rota, como no decorador.
@@ -324,6 +326,10 @@ ROTAS_DE_QUEM_LE = frozenset(
         ("POST", "/api/atendimento/rascunhos/{rascunho_id}/avaliacao"),
         ("POST", "/api/atendimento/automacoes/previa"),
         ("POST", "/api/atendimento/adspower/aberto"),
+        # O "visto no DaVinci" ao abrir a conversa (28/10/2026, o Eduardo: "as
+        # notificações devem sumir se clicado em algum atendimento"): só a
+        # marca do DaVinci que apaga o número; nada vai à plataforma.
+        ("POST", "/api/atendimento/conversas/{conversa_id}/visto"),
     }
 )
 SO_LEITURA = {

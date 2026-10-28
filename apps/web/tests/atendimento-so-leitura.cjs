@@ -297,6 +297,7 @@ const conversa = sfc('../components/AtendimentoConversa.vue')
     'POST /api/atendimento/adspower/aberto',
     'POST /api/atendimento/automacoes/previa',
     'POST /api/atendimento/conversas/{conversa_id}/rascunho',
+    'POST /api/atendimento/conversas/{conversa_id}/visto',
     'POST /api/atendimento/rascunhos/{rascunho_id}/avaliacao',
   ])
   // E a tela chama exatamente essas para sugerir, avaliar, ver a prévia e registrar o AdsPower.

@@ -209,6 +209,8 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
         f"{URL}/rascunhos/{{rascunho_id}}/avaliacao",
         f"{URL}/automacoes/previa",
         f"{URL}/adspower/aberto",
+        # 28/10/2026: abrir a conversa apaga a notificação dela (só o visto no DaVinci).
+        f"{URL}/conversas/{{conversa_id}}/visto",
     }
     # A nota interna, o responder, a foto, a etiqueta etc. NÃO entram.
     for proibida in ("/notas", "/responder", "/foto", "/etiqueta", "/descartar", "/conferir"):
