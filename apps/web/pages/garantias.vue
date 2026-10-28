@@ -60,6 +60,9 @@ async function carregarRegras() {
   } catch {
     // fica o padrão (o mesmo do servidor hoje)
   }
+  // Robô desligado: ninguém liga conversa sozinho — "só com conversa"
+  // esconderia as garantias. Abre em "todas" (se a pessoa não escolheu).
+  if (!regras.value.vinculo_automatico && !mostrarEscolhido.value) mostrar.value = 'todas'
 }
 
 // ─── vista: Conversas (padrão) ou Tabela ────────────────────────────────────
@@ -75,6 +78,7 @@ function vistaGuardada(): Vista {
 const vista = ref<Vista>('conversas')
 // Conversas: "só com conversa" (padrão) ou todas as garantias.
 const mostrar = ref<'com_conversa' | 'todas'>('com_conversa')
+const mostrarEscolhido = ref(false)
 
 // ─── lista ──────────────────────────────────────────────────────────────────
 const filtros = reactive<FiltrosLista>({ ...FILTROS_PADRAO, ordem: 'atividade', com_conversa: true, origem: 'todas' })
@@ -99,19 +103,34 @@ const carregado = ref(false)
 const erro = ref('')
 let geracao = 0
 
-async function carregar() {
+// `trocouFiltro`: a lista é outra (filtro, busca, vista) — a garantia aberta
+// que não está mais nela dá lugar à primeira. Sem isso (atualizar, registrou
+// atendimento, corrigiu), a aberta continua aberta mesmo fora da 1ª página, e
+// a releitura traz de novo tudo o que já estava carregado.
+async function carregar(opcoes?: { trocouFiltro?: boolean }) {
+  const trocouFiltro = opcoes?.trocouFiltro === true
   const g = ++geracao
   carregando.value = true
   erro.value = ''
   try {
-    const r = await api<GarantiaLista>('/api/garantias/lista', { method: 'POST', body: corpoDaLista(filtros, 0) })
+    const limite = trocouFiltro ? LIMITE_PAGINA : Math.min(500, Math.max(LIMITE_PAGINA, itens.value.length))
+    const r = await api<GarantiaLista>('/api/garantias/lista', { method: 'POST', body: corpoDaLista(filtros, 0, limite) })
     if (g !== geracao) return
     itens.value = r.itens
     total.value = r.total
     indicadores.value = r.indicadores
     carregado.value = true
-    // A vista Conversas sempre tem uma aberta (a primeira, se a de antes saiu).
-    if (!itens.value.some((x) => x.id === selecionadaId.value)) selecionadaId.value = itens.value[0]?.id ?? null
+    const achada = itens.value.find((x) => x.id === selecionadaId.value)
+    if (achada) {
+      selecionadaLinha.value = achada
+    } else if (trocouFiltro || selecionadaId.value === null) {
+      // A vista Conversas abre a primeira — na tela larga; no celular a lista
+      // vem primeiro e nada é aberto (nem lido) sem a pessoa tocar.
+      const primeira = telaLarga() ? itens.value[0] ?? null : null
+      selecionadaId.value = primeira?.id ?? null
+      selecionadaLinha.value = primeira
+      if (!primeira) historicoNoCelular.value = false
+    }
   } catch (e) {
     if (g !== geracao) return
     erro.value = errosDaApi(e).geral || 'Não consegui carregar as garantias.'
@@ -140,9 +159,9 @@ async function carregarMais() {
 let atraso: ReturnType<typeof setTimeout> | null = null
 watch(() => filtros.busca, () => {
   if (atraso) clearTimeout(atraso)
-  atraso = setTimeout(carregar, 300)
+  atraso = setTimeout(() => carregar({ trocouFiltro: true }), 300)
 })
-watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.ordem, filtros.com_conversa, filtros.origem], () => { void carregar() })
+watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.ordem, filtros.com_conversa, filtros.origem], () => { void carregar({ trocouFiltro: true }) })
 
 const ativo = computed(() => cartaoAtivo(filtros))
 function clicarCartao(c: Cartao) {
@@ -160,13 +179,29 @@ const buscaParcialDeCpf = computed(() => {
 
 // ─── vista Conversas: a garantia aberta no histórico ───────────────────────
 const selecionadaId = ref<number | null>(null)
-const selecionada = computed(() => itens.value.find((x) => x.id === selecionadaId.value) || null)
+// A última linha conhecida da aberta: ela continua aberta mesmo quando a
+// releitura não a traz (fora da 1ª página).
+const selecionadaLinha = ref<GarantiaLinha | null>(null)
+const selecionada = computed(() =>
+  itens.value.find((x) => x.id === selecionadaId.value)
+  || (selecionadaLinha.value?.id === selecionadaId.value ? selecionadaLinha.value : null),
+)
 // No celular a lista e o histórico se revezam.
 const historicoNoCelular = ref(false)
+function telaLarga(): boolean {
+  try {
+    return typeof window === 'undefined' || window.matchMedia('(min-width: 768px)').matches
+  } catch {
+    return true
+  }
+}
 function selecionar(id: number) {
   selecionadaId.value = id
+  selecionadaLinha.value = itens.value.find((x) => x.id === id) || null
   historicoNoCelular.value = true
 }
+// "Só com conversa" não vale para a busca (corpoDaLista).
+const soComConversa = computed(() => !!filtros.com_conversa && !filtros.busca.trim())
 const versaoHistorico = ref(0)
 
 // ─── detalhe e cadastro ─────────────────────────────────────────────────────
@@ -322,7 +357,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       </div>
       <div v-if="vista === 'conversas'" class="w-[calc(50%-0.25rem)] sm:w-44">
         <label for="gar-mostrar" class="mb-1 block text-xs font-medium text-muted-foreground">Mostrar</label>
-        <select id="gar-mostrar" v-model="mostrar" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-mostrar>
+        <select id="gar-mostrar" v-model="mostrar" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-mostrar @change="mostrarEscolhido = true">
           <option value="com_conversa">só com conversa</option>
           <option value="todas">todas as garantias</option>
         </select>
@@ -378,10 +413,11 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
     <EmptyState
       v-else-if="carregado && !itens.length"
       :icon="ShieldCheck"
-      :title="temFiltro ? 'Nenhuma garantia com esses filtros' : filtros.com_conversa ? 'Nenhuma garantia com conversa ainda' : 'Nenhuma garantia cadastrada ainda'"
-      :description="temFiltro ? 'Mude a busca, o status ou o período.' : filtros.com_conversa ? 'Quando um cliente escrever sobre um pedido com garantia, ele aparece aqui. Em Mostrar, escolha &quot;todas as garantias&quot; para ver as outras.' : 'Cadastre a primeira pelo + Nova garantia: informe o pedido e a data de entrega vira o início da garantia.'"
+      :title="soComConversa ? (temFiltro ? 'Nenhuma garantia com conversa com esses filtros' : 'Nenhuma garantia com conversa ainda') : temFiltro ? 'Nenhuma garantia com esses filtros' : 'Nenhuma garantia cadastrada ainda'"
+      :description="soComConversa ? 'Em &quot;Mostrar&quot; está &quot;só com conversa&quot;: as garantias sem conversa do cliente ficam escondidas.' : temFiltro ? 'Mude a busca, o status ou o período.' : 'Cadastre a primeira pelo + Nova garantia: informe o pedido e a data de entrega vira o início da garantia.'"
       data-vazio
     >
+      <Button v-if="soComConversa" size="sm" variant="outline" data-mostrar-todas @click="mostrar = 'todas'; mostrarEscolhido = true">mostrar todas as garantias</Button>
       <Button v-if="temFiltro" size="sm" variant="outline" @click="limparFiltros">limpar filtros</Button>
       <Button v-else-if="acesso.cadastra" size="sm" @click="novaGarantia()"><Plus class="mr-1 size-4" /> Nova garantia</Button>
     </EmptyState>
@@ -407,7 +443,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
                   <span class="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">{{ g.ultima_mensagem_em ? dataHoraBR(g.ultima_mensagem_em) : dataCurta(g.criado_em) }}</span>
                 </div>
                 <div class="truncate text-xs text-muted-foreground">pedido {{ g.pedido_bling }}<template v-if="g.plataforma"> · {{ nomePlataforma(g.plataforma) }}</template> · NF {{ textoNf(g.nf_numero, g.nf_serie) }}</div>
-                <div v-if="g.ultima_previa" class="mt-0.5 truncate text-xs" :class="g.ultima_autor === 'cliente' ? 'text-foreground' : 'text-muted-foreground'">{{ g.ultima_autor === 'cliente' ? '' : 'Loja: ' }}{{ g.ultima_previa }}</div>
+                <div v-if="g.ultima_previa" class="mt-0.5 truncate text-xs" :class="g.ultima_autor === 'cliente' ? 'text-foreground' : 'text-muted-foreground'">{{ g.ultima_autor === 'loja' ? 'Loja: ' : g.ultima_autor === 'mediador' ? 'Mediador: ' : '' }}{{ g.ultima_previa }}</div>
                 <div class="mt-1 flex items-center gap-1.5">
                   <GarantiaStatus :status="g.status" :entregue-sem-data="g.entregue_sem_data" />
                   <span v-if="g.conversas" class="text-[10px] text-muted-foreground">{{ g.conversas }} {{ g.conversas === 1 ? 'conversa' : 'conversas' }}</span>
@@ -430,6 +466,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
           v-if="selecionada"
           :garantia="selecionada"
           :versao="versaoHistorico"
+          :automatico="regras.vinculo_automatico"
           class="h-[70vh] md:h-full"
           @detalhes="abrir"
           @mudou="carregar"

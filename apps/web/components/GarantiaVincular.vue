@@ -44,6 +44,11 @@ const props = defineProps<{
   conversa: ConversaDetalhe
   mensagens: Mensagem[]
   situacao: SituacaoConversa | null
+  // Aberto pelo Painel de Garantia (28/10/2026): "nenhuma marcada" = estas
+  // (as mensagens que o painel mostra, desde a compra) — sem isto o servidor
+  // copiaria as 100 mais recentes da conversa INTEIRA (que, no chat da
+  // Shopee/TikTok, tem os outros pedidos do comprador).
+  idsPadrao?: string[]
 }>()
 const emit = defineEmits<{
   (e: 'fechar'): void
@@ -160,6 +165,7 @@ async function vincular() {
     const corpo: Record<string, unknown> = { conversa_id: props.conversa.id, tipo_problema: tipo.value, solucao: sol }
     if (resumo.value.trim()) corpo.resumo = resumo.value.trim()
     if (escolhidas.value.length) corpo.mensagem_ids = escolhidas.value
+    else if (props.idsPadrao?.length) corpo.mensagem_ids = props.idsPadrao
     const at = await api<AtendimentoGarantia>(`/api/garantias/${escolhida.value.id}/atendimentos`, { method: 'POST', body: corpo })
     emit('vinculado', at)
   } catch (err) {

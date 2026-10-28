@@ -9,7 +9,7 @@ Painel de Garantia, ligada pelo número da NF, com o histórico das conversas
   ('manual' | 'robo') e a regra "manual tem autor"; `descartada_em` /
   `descartada_motivo` para a garantia do robô cujo pedido foi cancelado antes
   de qualquer atendimento (sai da lista, não se apaga — o log aponta para ela).
-* `garantia_log`: as ações `criou_automatico` e `descartou`.
+* `garantia_log`: as ações `criou_automatico`, `descartou` e `reativou`.
 * `garantia_conversas` (nova): ponteiro garantia × conversa. Sem cópia de
   texto — o painel lê `atendimento_mensagens` na hora.
 * `garantia_pendencias` (nova): o pedido que o robô viu e não criou (motivo).
@@ -21,8 +21,8 @@ As duas tabelas novas ficam fora do gatilho do Histórico (`historico/sql.py`,
 EXCLUIDAS): são escritas pela máquina. As garantias que já existem ficam
 `origem='manual'` (o default) — nada existente muda de valor.
 
-Revision ID: 0432_garantia_automatica
-Revises: 0431_mail_bridge_sync
+Revision ID: 0434_garantia_automatica
+Revises: 0433_atendimento_zap_saude
 """
 
 from collections.abc import Sequence
@@ -32,8 +32,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0432_garantia_automatica"
-down_revision: str | None = "0431_mail_bridge_sync"
+revision: str = "0434_garantia_automatica"
+down_revision: str | None = "0433_atendimento_zap_saude"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 SCHEMA = "davinci"
@@ -48,7 +48,7 @@ ACOES_ANTES = (
     "recalculou",
     "buscou_cpf",
 )
-ACOES_DEPOIS = (*ACOES_ANTES, "criou_automatico", "descartou")
+ACOES_DEPOIS = (*ACOES_ANTES, "criou_automatico", "descartou", "reativou")
 
 
 def _lista(valores: tuple[str, ...]) -> str:

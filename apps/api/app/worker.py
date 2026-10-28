@@ -3593,6 +3593,19 @@ async def garantias_automaticas(ctx: dict) -> None:
     logger.info("garantias_automaticas", **r.como_dict())
 
 
+async def garantias_conversas_diario(ctx: dict) -> None:
+    """Garantia automática: uma vez por dia, liga TODAS as conversas aos
+    pedidos das garantias (a volta de 15 min só olha as conversas mexidas nas
+    últimas horas). Ponteiro: nada é copiado."""
+    if not get_settings().garantia_automatica:
+        return
+    from app.services import garantia_auto
+
+    async with session_scope() as s:
+        novas = await garantia_auto.ligar_conversas(s)
+    logger.info("garantias_conversas_diario", conversas_ligadas=novas)
+
+
 async def alerts_cleanup(ctx: dict) -> None:
     """Delete alerts older than 60 days (B10). Carona diária da Ouvidoria:
     rodadas com mais de 30 dias (`ouvidoria_rodadas` cresce centenas de linhas
@@ -5216,6 +5229,7 @@ class WorkerSettings:
         historico_manutencao,
         garantias_recalcular_entrega,
         garantias_automaticas,
+        garantias_conversas_diario,
         condicao_especial_gc,
         func(mega_midias_recontar, timeout=2400),
         # 2 h: a 1ª rodada com os vídeos converte o acervo inteiro (2,9 GB).
@@ -5568,6 +5582,7 @@ class WorkerSettings:
         # fecham a hora com a entrega mais nova). Só banco, segundos.
         cron(garantias_recalcular_entrega, minute=57, run_at_startup=False),
         cron(garantias_automaticas, minute={7, 22, 37, 52}, run_at_startup=False),
+        cron(garantias_conversas_diario, hour=7, minute=43, run_at_startup=False),
         # Condição Especial de segmento encerrada há 30d (services/condicao_especial).
         cron(condicao_especial_gc, hour=6, minute=10, run_at_startup=False),  # 03:10 BRT
         # Recontagem das pastas do MEGA (fotos/vídeos/embalagens): 04:25 BRT,

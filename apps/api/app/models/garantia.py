@@ -23,7 +23,7 @@ Quatro tabelas:
   CPF completo, registrou atendimento, e o robô que recalculou a entrega
   (§6). Só inserção.
 
-Garantia automática (28/10/2026, migration 0432): o robô cria a garantia do
+Garantia automática (28/10/2026, migration 0434): o robô cria a garantia do
 pedido Uranyx pela NF de PRODUTO (`origem='robo'`, sem `criado_por`) e liga as
 conversas do pedido sozinho:
 
@@ -83,6 +83,8 @@ GARANTIA_LOG_ACOES = (
     # robô descartou (pedido cancelado antes de qualquer atendimento).
     "criou_automatico",
     "descartou",
+    # O pedido do Bling voltou de Cancelado: a do robô volta para a lista.
+    "reativou",
 )
 GARANTIA_ORIGENS = ("manual", "robo")
 # Como a conversa chegou à garantia: o nº do pedido na conversa (`pedido`) ou o

@@ -437,3 +437,103 @@ async def test_detalhe_da_garantia_do_robo(client, db, make_user, auth_as):
     assert r.status_code == 200, r.text
     assert r.json()["criado_por"] == {"id": None, "nome": "Sistema (garantia automática)"}
     assert r.json()["origem"] == "robo"
+
+
+async def test_pedido_que_sai_de_cancelado_reativa_a_garantia(db):
+    await _pedido(db)
+    await _nf(db)
+    await _rodar(db)
+    linha = (await db.execute(select(BlingOrder).where(BlingOrder.numero == "310001"))).scalar_one()
+    linha.situacao = "12"
+    await db.commit()
+    assert (await _rodar(db)).descartadas == 1
+    linha.situacao = "15"
+    await db.commit()
+    r = await _rodar(db)
+    assert r.reativadas == 1 and r.criadas == 0
+    [g] = await _garantias(db)
+    assert g.descartada_em is None and g.descartada_motivo is None
+    acoes = [
+        x.acao for x in (await db.execute(select(GarantiaLog).order_by(GarantiaLog.id))).scalars()
+    ]
+    assert acoes == ["criou_automatico", "descartou", "reativou"]
+
+
+async def test_cadastro_na_tela_e_troca_de_pedido_religam_as_conversas(
+    client, db, make_user, auth_as, monkeypatch
+):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "garantia_automatica", True)
+    auth_as(await make_user(role=UserRole.ADMIN))
+    await _pedido(db)
+    await _nf(db, doc="12345678000199")  # CNPJ: o robô não cria — a pessoa cadastra
+    await _pedido(db, numero="310009", numeroloja="261009NOVO0009")
+    await _nf(db, pedido="310009", numero="2999", doc=CPF_2)
+    velha = (await _conversa(db, pedido="261001ABCD1234")).id
+    nova = (await _conversa(db, pedido="261009NOVO0009")).id
+    r = await client.post(
+        "/api/garantias",
+        json={"pedido": "310001", "nf_numero": "2611", "cliente_nome": "Maria", "cpf": CPF},
+    )
+    assert r.status_code == 201, r.text
+    gid = r.json()["id"]
+    assert set((await db.execute(select(GarantiaConversa.conversa_id))).scalars()) == {velha}
+    r = await client.put(
+        f"/api/garantias/{gid}", json={"pedido": "310009", "nf_numero": "2999", "cpf": CPF_2}
+    )
+    assert r.status_code == 200, r.text
+    assert set((await db.execute(select(GarantiaConversa.conversa_id))).scalars()) == {nova}
+
+
+async def test_historico_resposta_que_nao_saiu_e_marcos_sem_hora(client, db, make_user, auth_as):
+    auth_as(await make_user(role=UserRole.ADMIN))
+    c = await _conversa(
+        db,
+        pedido="261001ABCD1234",
+        plataforma="ml",
+        canal="pos_venda",
+        msgs=[("cliente", "chegou quebrado", COMPRA + timedelta(days=5), ())],
+    )
+    db.add(
+        AtendimentoMensagem(
+            conversa_id=c.id,
+            externo_id=None,
+            autor="loja",
+            origem="davinci_humano",
+            tipo="texto",
+            texto="já enviamos a troca",
+            enviada_em=None,
+            status="falhou",
+        )
+    )
+    await db.commit()
+    await _pedido(db)
+    await _nf(db)
+    await _rodar(db)
+    [g] = await _garantias(db)
+    h = (await client.get(f"/api/garantias/{g.id}/historico")).json()
+    ultima = h["mensagens"][-1]
+    assert ultima["texto"] == "já enviamos a troca" and ultima["status"] == "falhou"
+    assert ultima["enviada_em"] is not None  # a hora da gravação, como no Atendimento
+    compra = next(m for m in h["marcos"] if m["tipo"] == "compra")
+    assert compra["sem_hora"] is True
+
+
+async def test_quem_nao_le_o_atendimento_so_ve_restrito_se_ha_conversa(
+    client, db, make_user, auth_as, monkeypatch
+):
+    from app.services.atendimento import acesso
+
+    monkeypatch.setattr(acesso, "pode_ver", lambda _u: False)
+    auth_as(await make_user(role=UserRole.ADMIN))
+    await _pedido(db)
+    await _nf(db)
+    await _rodar(db)
+    [g] = await _garantias(db)
+    h = (await client.get(f"/api/garantias/{g.id}/historico")).json()
+    assert h["restrito"] is False and h["mensagens"] == []
+    await _conversa(db, pedido="261001ABCD1234")
+    await _rodar(db)
+    h = (await client.get(f"/api/garantias/{g.id}/historico")).json()
+    assert h["restrito"] is True and h["mensagens"] == []

@@ -29,7 +29,9 @@ import {
   type SituacaoConversa,
 } from '~/lib/garantias'
 
-const props = defineProps<{ garantia: GarantiaLinha; versao?: number }>()
+// `automatico`: o robô está ligado (GET /regras) — só então a tela promete
+// que a conversa "aparece aqui sozinha".
+const props = defineProps<{ garantia: GarantiaLinha; versao?: number; automatico?: boolean }>()
 const emit = defineEmits<{ (e: 'detalhes', id: number): void; (e: 'mudou'): void }>()
 
 const { api } = useApi()
@@ -58,7 +60,10 @@ async function carregar() {
     if (g === geracao) carregando.value = false
   }
 }
-watch(() => [props.garantia.id, props.versao], () => { historico.value = null; void carregar() }, { immediate: true })
+// Várias fontes: o Vue compara valor a valor (a lista relida traz OUTRO
+// objeto da mesma garantia, e isso não pode reler o histórico nem gravar
+// "consultou" de novo).
+watch([() => props.garantia.id, () => props.versao], () => { historico.value = null; void carregar() }, { immediate: true })
 
 const linhas = computed(() => (historico.value ? linhasDoHistorico(historico.value) : []))
 const conversas = computed(() => historico.value?.conversas || [])
@@ -67,6 +72,21 @@ function hora(iso: string | null): string {
   if (!iso) return ''
   return new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
 }
+// A resposta da loja que NÃO saiu (ou ficou a conferir) — o selo do Atendimento.
+const STATUS_MSG: Record<string, { label: string; cls: string; hint: string }> = {
+  enviando: { label: 'enviando…', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'saindo para a plataforma' },
+  revisar: { label: 'a conferir', cls: 'bg-amber-500/20 text-amber-800 dark:text-amber-300', hint: 'a plataforma não confirmou — pode não ter chegado ao comprador' },
+  falhou: { label: 'não saiu', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'a plataforma recusou — a mensagem NÃO chegou ao comprador' },
+}
+// Quantas mensagens (fora as de sistema) cada conversa tem no histórico: só
+// dá para registrar atendimento de conversa com mensagem depois da compra.
+const mensagensPorConversa = computed(() => {
+  const n = new Map<string, number>()
+  for (const m of historico.value?.mensagens || []) {
+    if (m.autor !== 'sistema') n.set(m.conversa_id, (n.get(m.conversa_id) || 0) + 1)
+  }
+  return n
+})
 function rotuloConversa(c: HistoricoConversa | null): string {
   if (!c) return 'outra conversa'
   const canal = CANAL_ROTULO[c.canal] || c.canal
@@ -122,6 +142,10 @@ function falhouFoto(chave: string) { fotoFalhou.value = new Set([...fotoFalhou.v
 const registrando = ref<HistoricoConversa | null>(null)
 const mensagensDaConversa = computed<Mensagem[]>(() =>
   (historico.value?.mensagens || []).filter((m) => m.conversa_id === registrando.value?.id) as unknown as Mensagem[],
+)
+// "Nenhuma marcada" = as 100 mais recentes DO QUE A TELA MOSTRA (desde a compra).
+const idsPadrao = computed(() =>
+  mensagensDaConversa.value.filter((m) => m.autor !== 'sistema').slice(-100).map((m) => m.id),
 )
 const conversaDoModal = computed(() => {
   const c = registrando.value
@@ -196,7 +220,7 @@ function aoRegistrar(_a: AtendimentoGarantia) {
           <AtendimentoIconePlataforma :plataforma="c.plataforma" :tamanho="14" decorativo />
           <span class="max-w-[220px] truncate" :title="rotuloConversa(c)">{{ rotuloConversa(c) }}</span>
           <a :href="c.link" target="_blank" rel="noopener" class="rounded p-0.5 text-muted-foreground hover:text-foreground" title="abrir esta conversa no Atendimento"><ExternalLink class="size-3.5" /></a>
-          <button v-if="acesso.registra" type="button" class="rounded bg-primary/10 px-1.5 py-px font-medium text-primary hover:bg-primary/20" title="registrar o atendimento desta conversa na garantia (tipo, solução — copia as mensagens e baixa as fotos)" @click="registrando = c">
+          <button v-if="acesso.registra && mensagensPorConversa.get(c.id)" type="button" class="rounded bg-primary/10 px-1.5 py-px font-medium text-primary hover:bg-primary/20" title="registrar o atendimento desta conversa na garantia (tipo, solução — copia as mensagens e baixa as fotos)" @click="registrando = c">
             registrar atendimento
           </button>
         </li>
@@ -217,7 +241,7 @@ function aoRegistrar(_a: AtendimentoGarantia) {
         <div v-else-if="!historico.mensagens.length" class="mx-auto max-w-md space-y-1 py-8 text-center text-sm text-muted-foreground" data-sem-conversa>
           <MessageSquare class="mx-auto size-6 opacity-60" />
           <p>Nenhuma conversa do cliente sobre este pedido ainda.</p>
-          <p class="text-xs">Quando o cliente escrever (Shopee, TikTok, Mercado Livre, Amazon), a conversa aparece aqui sozinha.</p>
+          <p v-if="automatico" class="text-xs">Quando o cliente escrever (Shopee, TikTok, Mercado Livre, Amazon), a conversa aparece aqui sozinha.</p>
         </div>
         <template v-for="l in linhas" :key="l.chave">
           <div v-if="l.tipo === 'dia'" class="flex justify-center py-1">
@@ -231,7 +255,7 @@ function aoRegistrar(_a: AtendimentoGarantia) {
           <div v-else-if="l.tipo === 'marco'" class="flex justify-center" :data-marco="l.marco.tipo">
             <div class="flex max-w-[90%] items-start gap-1.5 rounded-md border px-2.5 py-1 text-[11px]" :class="MARCO_CLS[l.marco.tipo]">
               <ShieldCheck v-if="l.marco.tipo === 'atendimento' || l.marco.tipo === 'entrega'" class="mt-px size-3.5 shrink-0" />
-              <span class="break-words">{{ l.marco.texto }} <span class="opacity-70">· {{ hora(l.marco.em) }}</span></span>
+              <span class="break-words">{{ l.marco.texto }}<span v-if="!l.marco.sem_hora" class="opacity-70"> · {{ hora(l.marco.em) }}</span></span>
             </div>
           </div>
           <div v-else-if="ladoDaMensagem(l.m) === 'nota'" class="flex justify-center">
@@ -245,6 +269,9 @@ function aoRegistrar(_a: AtendimentoGarantia) {
           <div v-else class="flex flex-col" :class="ladoDaMensagem(l.m) === 'loja' ? 'items-end' : 'items-start'" :data-msg-id="l.m.id">
             <div class="mb-0.5 px-1 text-[11px] text-muted-foreground">{{ rotuloAutor(l.m) }}</div>
             <div class="max-w-[85%] rounded-lg px-3 py-2 md:max-w-[75%]" :class="balaoCls(l.m)">
+              <div v-if="l.m.status && STATUS_MSG[l.m.status]" class="mb-1">
+                <span class="inline-flex items-center rounded px-1.5 py-px text-[11px]" :class="STATUS_MSG[l.m.status].cls" :title="STATUS_MSG[l.m.status].hint" data-status-msg>{{ STATUS_MSG[l.m.status].label }}</span>
+              </div>
               <div v-if="l.m.texto" class="whitespace-pre-wrap break-words text-sm leading-relaxed"><template v-for="(p, i) in partes(l.m.texto)" :key="i"><a v-if="p.url" :href="p.v" target="_blank" rel="noopener noreferrer" class="break-all underline">{{ p.v }}</a><template v-else>{{ p.v }}</template></template></div>
               <div v-if="pecasDoHistorico(l.m).length" class="flex flex-wrap gap-2" :class="l.m.texto ? 'mt-2' : ''">
                 <template v-for="pc in pecasDoHistorico(l.m)" :key="pc.chave">
@@ -281,6 +308,7 @@ function aoRegistrar(_a: AtendimentoGarantia) {
       :conversa="conversaDoModal"
       :mensagens="mensagensDaConversa"
       :situacao="situacaoDoModal"
+      :ids-padrao="idsPadrao"
       @fechar="registrando = null"
       @vinculado="aoRegistrar"
     />

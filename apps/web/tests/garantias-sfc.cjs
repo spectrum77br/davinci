@@ -241,6 +241,7 @@ const LINHA = {
   assert.deepEqual(L.corpoDaLista({ ...f0, ordem: 'atividade', com_conversa: true, origem: 'robo' }),
     { limite: 100, offset: 0, ordem: 'atividade', com_conversa: true, origem: 'robo' })
   assert.deepEqual(L.corpoDaLista({ ...f0, ordem: 'cadastro', com_conversa: false, origem: 'todas' }), { limite: 100, offset: 0 })
+  assert.deepEqual(L.corpoDaLista({ ...f0, busca: '306200', ordem: 'atividade', com_conversa: true }), { limite: 100, offset: 0, busca: '306200', ordem: 'atividade' }, 'a busca procura também sem conversa')
   // O histórico: foto, vídeo (toca na tela), cartão e o anexo do ML sem link.
   const pecas = L.pecasDoHistorico({ id: 'm1', anexos: [
     { tipo: 'imagem', url: 'https://img.sp.mms.shopee.sg/a' },
@@ -390,7 +391,7 @@ const LINHA = {
   }
   const acoes = /GARANTIA_LOG_ACOES = \(([\s\S]*?)\n\)/.exec(api('models/garantia.py'))[1]
   const acoesPy = [...acoes.matchAll(/^ {4}"([a-z_]+)",/gm)].map((m) => m[1])
-  assert.deepEqual(acoesPy, ['cadastrou', 'alterou', 'consultou', 'registrou_atendimento', 'recalculou', 'buscou_cpf', 'criou_automatico', 'descartou'])
+  assert.deepEqual(acoesPy, ['cadastrou', 'alterou', 'consultou', 'registrou_atendimento', 'recalculou', 'buscou_cpf', 'criou_automatico', 'descartou', 'reativou'])
   for (const a of acoesPy) assert.ok(L.ACOES_LOG[a], `ação ${a}`)
   // As rotas que a tela chama existem (lista e busca são POST: o termo vai no corpo).
   assert.ok(!rotas.includes('@router.get("",') && !rotas.includes('@router.get("/busca"'), 'nada de busca por GET')

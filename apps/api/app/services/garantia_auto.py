@@ -84,6 +84,7 @@ MIN_NUMERO_PEDIDO = 8
 CANAIS_FORA = ("pergunta",)
 # Desde quando (para trás) a volta de rotina procura conversa nova/mexida.
 JANELA_LIGACAO = timedelta(hours=3)
+MOTIVO_CANCELADO = "pedido cancelado no Bling"
 
 
 @dataclass
@@ -93,6 +94,7 @@ class Resultado:
     pendencias: dict[str, int] = field(default_factory=dict)
     conversas_ligadas: int = 0
     descartadas: int = 0
+    reativadas: int = 0
     ids_criados: list[int] = field(default_factory=list)
 
     def como_dict(self) -> dict:
@@ -102,6 +104,7 @@ class Resultado:
             "pendencias": dict(self.pendencias),
             "conversas_ligadas": self.conversas_ligadas,
             "descartadas": self.descartadas,
+            "reativadas": self.reativadas,
         }
 
 
@@ -392,11 +395,50 @@ async def descartar_canceladas(session: AsyncSession, *, agora: datetime | None 
     await session.execute(
         update(Garantia)
         .where(Garantia.id.in_(ids))
-        .values(descartada_em=agora, descartada_motivo="pedido cancelado no Bling")
+        .values(descartada_em=agora, descartada_motivo=MOTIVO_CANCELADO)
     )
     for gid in ids:
         svc.registrar_log(
             session, gid, "descartou", None, detalhe="pedido cancelado no Bling", robo=ROTULO_ROBO
+        )
+    return len(ids)
+
+
+async def reativar_descancelados(session: AsyncSession) -> int:
+    """O cancelamento desfeito no Bling (ex.: o cancelamento indevido de
+    23/09): a garantia que o robô descartou volta para a lista. Só a que ele
+    mesmo descartou por cancelamento."""
+    ids = list(
+        (
+            await session.execute(
+                select(Garantia.id).where(
+                    Garantia.origem == "robo",
+                    Garantia.descartada_em.is_not(None),
+                    Garantia.descartada_motivo == MOTIVO_CANCELADO,
+                    exists().where(BlingOrder.numero == Garantia.pedido_bling),
+                    ~exists().where(
+                        BlingOrder.numero == Garantia.pedido_bling,
+                        BlingOrder.situacao == str(SITUACAO_CANCELADO),
+                    ),
+                )
+            )
+        ).scalars()
+    )
+    if not ids:
+        return 0
+    await session.execute(
+        update(Garantia)
+        .where(Garantia.id.in_(ids))
+        .values(descartada_em=None, descartada_motivo=None)
+    )
+    for gid in ids:
+        svc.registrar_log(
+            session,
+            gid,
+            "reativou",
+            None,
+            detalhe="o pedido saiu de Cancelado no Bling",
+            robo=ROTULO_ROBO,
         )
     return len(ids)
 
@@ -428,6 +470,7 @@ async def rodar(
     r.conversas_ligadas += await ligar_conversas(session, garantia_ids=r.ids_criados)
     r.conversas_ligadas += await ligar_conversas(session, desde=agora - JANELA_LIGACAO)
     r.descartadas = await descartar_canceladas(session, agora=agora)
+    r.reativadas = await reativar_descancelados(session)
     return r
 
 

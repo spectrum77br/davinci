@@ -522,7 +522,7 @@ _CLEANUP_TABLES = (
     "garantia_atendimento_anexos",
     "garantia_atendimentos",
     "garantia_log",
-    # Garantia automática (0432): o ponteiro (CASCADE nos dois lados) e as
+    # Garantia automática (0434): o ponteiro (CASCADE nos dois lados) e as
     # pendências do robô (sem FK).
     "garantia_conversas",
     "garantia_pendencias",

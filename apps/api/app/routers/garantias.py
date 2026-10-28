@@ -94,7 +94,7 @@ from app.schemas.garantia import (
     VinculoOut,
 )
 from app.services import garantia as svc
-from app.services.atendimento import acesso, separa_email
+from app.services.atendimento import acesso, cartoes_plataforma, separa_email
 from app.services.atendimento.contexto import _chaves_do_pedido
 from app.services.mail_atendimento import administracao as mail_admin
 from app.services.rate_limit import RateLimitError, sliding_window_check
@@ -953,6 +953,7 @@ async def cadastrar(
     )
     outras = await _outras_do_pedido(session, g.pedido_bling, g.id)
     await session.commit()
+    await _religar_conversas(session, g)
     avisos = svc.avisos_do_cadastro(pedido, cpf, nota, outras_do_pedido=outras)
     if entrega is None:
         avisos.append(pedido.aviso_sem_entrega)
@@ -1094,7 +1095,10 @@ async def historico(
     if dia_compra:
         marcos.append(
             HistoricoMarcoOut(
-                tipo="compra", em=dia_compra, texto=f"Compra — pedido {g.pedido_bling}"
+                tipo="compra",
+                em=dia_compra,
+                texto=f"Compra — pedido {g.pedido_bling}",
+                sem_hora=True,
             )
         )
     if g.entrega_em or g.data_inicio:
@@ -1107,6 +1111,7 @@ async def historico(
                 + (
                     f" ({svc.ORIGEM_ROTULOS.get(g.entrega_origem, '')})" if g.entrega_origem else ""
                 ),
+                sem_hora=g.entrega_em is None,
             )
         )
     for a in (
@@ -1126,7 +1131,14 @@ async def historico(
         )
     out = HistoricoOut(garantia_id=g.id, desde=desde, marcos=marcos)
     if not acesso.pode_ver(user):
-        out.restrito = True
+        # Quem não lê o Atendimento: só se há conversa (escondida) ligada.
+        out.restrito = bool(
+            await session.scalar(
+                select(func.count())
+                .select_from(GarantiaConversa)
+                .where(GarantiaConversa.garantia_id == g.id)
+            )
+        )
         out.marcos.sort(key=lambda m: m.em)
         return out
 
@@ -1152,18 +1164,24 @@ async def historico(
         return out
 
     m = AtendimentoMensagem
+    # Como o detalhe do Atendimento: a hora é a do envio ou, sem ela (envio
+    # que falhou ou ficou "a conferir"), a da gravação.
+    quando = func.coalesce(m.enviada_em, m.created_at)
     filtros = []
     for conv, como in ligadas:
+        conds = [m.conversa_id == conv.id]
         if _por_comprador(conv, como) and desde is not None:
-            filtros.append(and_(m.conversa_id == conv.id, m.enviada_em >= desde))
-        else:
-            filtros.append(m.conversa_id == conv.id)
+            conds.append(quando >= desde)
+        # O e-mail da ponte gravado numa conversa de chat não aparece no chat.
+        if (visivel := separa_email.mensagem_visivel_sql(conv, m)) is not None:
+            conds.append(visivel)
+        filtros.append(and_(*conds))
     mensagens = list(
         (
             await session.execute(
                 select(m)
                 .where(or_(*filtros))
-                .order_by(m.enviada_em.desc().nulls_last())
+                .order_by(quando.desc(), m.id.desc())
                 .limit(MAX_HISTORICO + 1)
             )
         ).scalars()
@@ -1219,9 +1237,11 @@ async def historico(
             autor=x.autor,
             origem=x.origem,
             tipo=x.tipo,
-            texto=x.texto,
+            # O cartão da plataforma gravado como "[Mensagem]" (devolução,
+            # envio, variação) com o texto do cartão, como o Atendimento mostra.
+            texto=cartoes_plataforma.texto_para_exibir(x),
             anexos=[a for a in (x.anexos or []) if isinstance(a, dict)],
-            enviada_em=x.enviada_em,
+            enviada_em=x.enviada_em or x.created_at,
             status=x.status,
         )
         for x in mensagens
@@ -1312,7 +1332,32 @@ async def corrigir(
     except IntegrityError as e:
         await session.rollback()
         raise _erro(409, "garantia_duplicada", "nf_numero") from e
+    if novo_pedido is not None:
+        await _religar_conversas(session, g, trocou_pedido=True)
     return await _detalhe(session, g, user, avisos=avisos)
+
+
+async def _religar_conversas(
+    session: AsyncSession, g: Garantia, *, trocou_pedido: bool = False
+) -> None:
+    """Garantia automática (28/10/2026), com o robô ligado: a garantia
+    cadastrada (ou corrigida) na tela ganha as conversas do pedido na hora; a
+    que mudou de pedido perde as do pedido antigo. Falha aqui não desfaz o
+    cadastro (já gravado): o robô liga na volta seguinte."""
+    if not get_settings().garantia_automatica:
+        return
+    from app.services import garantia_auto
+
+    try:
+        if trocou_pedido:
+            await session.execute(
+                GarantiaConversa.__table__.delete().where(GarantiaConversa.garantia_id == g.id)
+            )
+        await garantia_auto.ligar_conversas(session, garantia_ids=[g.id])
+        await session.commit()
+    except Exception:  # noqa: BLE001 — o cadastro já foi; o robô liga depois
+        await session.rollback()
+        logger.warning("garantia_religar_conversas_falhou", garantia_id=g.id, exc_info=True)
 
 
 @router.post("/{garantia_id}/recalcular", response_model=GarantiaSalvaOut)

@@ -330,6 +330,7 @@ export const ACOES_LOG: Record<string, string> = {
   buscou_cpf: 'Buscou pelo CPF completo',
   criou_automatico: 'Criou sozinho pela NF de produto',
   descartou: 'Descartou (pedido cancelado)',
+  reativou: 'Reativou (pedido saiu de Cancelado)',
 }
 export const CAMPOS_LOG: Record<string, string> = {
   pedido: 'Pedido',
@@ -696,7 +697,9 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
   }
   if (f.com_atendimento_no_mes) q.com_atendimento_no_mes = true
   if (f.ordem === 'atividade') q.ordem = 'atividade'
-  if (f.com_conversa) q.com_conversa = true
+  // "Só com conversa" não vale para a BUSCA: quem procura o CPF/NF/pedido
+  // quer achar a garantia mesmo sem conversa nenhuma.
+  if (f.com_conversa && !busca) q.com_conversa = true
   if (f.origem && f.origem !== 'todas') q.origem = f.origem
   return q
 }
@@ -732,6 +735,8 @@ export type HistoricoMarco = {
   em: string
   texto: string
   atendimento_id: number | null
+  // A data da compra (Bling) e a entrega sem instante: sem hora na tela.
+  sem_hora?: boolean
 }
 export type Historico = {
   garantia_id: number

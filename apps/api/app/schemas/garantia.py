@@ -378,6 +378,8 @@ class HistoricoMarcoOut(BaseModel):
     em: datetime
     texto: str
     atendimento_id: int | None = None
+    # A data da compra (Bling) e a entrega sem instante não têm hora certa.
+    sem_hora: bool = False
 
 
 class HistoricoOut(BaseModel):
