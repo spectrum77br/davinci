@@ -114,6 +114,7 @@ _MIGRATION_NOTIFICACOES = _VERSOES / "0416_atendimento_notificacoes_nativas.py"
 _MIGRATION_AGENTE = _VERSOES / "0420_atendimento_agente.py"
 _MIGRATION_ZAP = _VERSOES / "0432_atendimento_zap.py"
 _MIGRATION_ZAP_SAUDE = _VERSOES / "0433_atendimento_zap_saude.py"
+_MIGRATION_CONTINUACAO = _VERSOES / "0436_atendimento_canal_auto_continuacao.py"
 # A regra de palavras das pastas de e-mail (0387, a camada do atendimento sobre
 # a Central de e-mail) é conferida em `test_mail_atendimento_migration.py`,
 # junto das tabelas `mail_*` da mesma migration. As tabelas novas da 0420 (o
@@ -264,6 +265,10 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     assert zap_saude.revision == "0433_atendimento_zap_saude"
     assert zap_saude.down_revision == "0432_atendimento_zap"
     assert zap_saude.NUMERO_CASOS == zap_model.ZAP_NUMERO_CASOS
+    # 28/10/2026: a resposta automática da continuação nos comentários do Instagram.
+    continuacao = _carregar_migration(_MIGRATION_CONTINUACAO)
+    assert continuacao.revision == "0436_atendimento_canal_auto_continuacao"
+    assert continuacao.down_revision == "0435_marca_emails_sac_admin"
     # Os valores dos CHECKs da migration são cópia dos do model.
     for na_migration, no_model in (
         (zap.CONTA_STATUS, zap_model.ZAP_CONTA_STATUS),
@@ -347,6 +352,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     agente.SCHEMA = rascunho
     zap.SCHEMA = rascunho
     zap_saude.SCHEMA = rascunho
+    continuacao.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -596,6 +602,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         antes_da_0431 = await _catalogo(db, rascunho, rascunho)
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (zap_saude,))
+        await db.commit()
+
+        # 0436: o interruptor da continuação automática no canal.
+        antes_da_0436 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (continuacao,))
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho, rascunho)
@@ -917,6 +929,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "(recebido_em)" in defs["ix_atendimento_zap_eventos_recebido_em"]
         assert "(status, proxima_em)" in defs["ix_atendimento_zap_midias_status_proxima_em"]
         assert "(apagar_em)" in defs["ix_atendimento_zap_midias_apagar_em"]
+
+        # O downgrade da 0436 volta EXATAMENTE ao catálogo de antes dela.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (continuacao,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0436
 
         # O downgrade da 0431 volta EXATAMENTE ao catálogo de depois da 0430.
         conn = await db.connection()

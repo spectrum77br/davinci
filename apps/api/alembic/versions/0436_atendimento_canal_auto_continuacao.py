@@ -25,14 +25,18 @@ down_revision: str | None = "0435_marca_emails_sac_admin"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Constante de módulo: o teste do catálogo (`test_atendimento_migration.py`) troca
+# pelo schema de rascunho.
+SCHEMA = "davinci"
+
 
 def upgrade() -> None:
     op.add_column(
         "atendimento_canais",
         sa.Column("auto_continuacao_desde", sa.DateTime(timezone=True), nullable=True),
-        schema="davinci",
+        schema=SCHEMA,
     )
 
 
 def downgrade() -> None:
-    op.drop_column("atendimento_canais", "auto_continuacao_desde", schema="davinci")
+    op.drop_column("atendimento_canais", "auto_continuacao_desde", schema=SCHEMA)
