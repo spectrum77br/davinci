@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import and_, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models import BlingOrder
 from app.models.atendimento import (
@@ -250,9 +251,10 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
     conversas ligadas (fora as do SAC, que contam pelo formulário). A compra é
     a HORA do pedido no índice do comprador (Shopee/TikTok); sem ela, o dia do
     pedido no Bling (00:00 de São Paulo). Na conversa do comprador (uma para
-    todos os pedidos dele — também quando ligou pelo nº do pedido), só até o
-    PRÓXIMO pedido dele: dali para baixo pode ser sobre o outro (revisão
-    28/10)."""
+    todos os pedidos dele: a do índice e o chat da Shopee/TikTok, também
+    quando ligou pelo nº do pedido), só até o PRÓXIMO pedido dele — pelo índice
+    ou pela próxima compra do mesmo CPF: dali para baixo pode ser sobre o outro
+    (revisão 28/10)."""
     if not ids:
         return {}
     g, gc, c, m, p = (
@@ -271,6 +273,7 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
     base = (
         select(
             g.id.label("gid"),
+            g.cpf.label("cpf"),
             func.coalesce(g.pedido_marketplace, "").label("pedido"),
             func.coalesce(hora_do_pedido, compra_da_garantia(), literal(INICIO)).label("compra"),
         )
@@ -278,7 +281,10 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         .cte("base")
     )
     quando = func.coalesce(m.enviada_em, m.created_at)
-    proximo = (
+    # O próximo pedido do comprador: pelo índice do comprador (Shopee) e, sem
+    # ele (o TikTok não tem índice), pela próxima compra do MESMO CPF — o
+    # LEAST do Postgres ignora o NULL.
+    pelo_indice = (
         select(func.min(p.criado_em))
         .where(
             p.integration_id == c.integration_id,
@@ -288,6 +294,28 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         )
         .correlate(c, base)
         .scalar_subquery()
+    )
+    g2, bo = aliased(Garantia), aliased(BlingOrder)
+    pelo_cpf = (
+        select(func.min(bo.data))
+        .select_from(g2)
+        .join(bo, bo.numero == g2.pedido_bling)
+        .where(
+            g2.cpf == base.c.cpf,
+            g2.id != base.c.gid,
+            g2.descartada_em.is_(None),
+            bo.data > base.c.compra,
+        )
+        .correlate(base)
+        .scalar_subquery()
+    )
+    proximo = func.least(pelo_indice, pelo_cpf)
+    # Só na conversa do COMPRADOR (uma para todos os pedidos dele): a do
+    # índice e o chat da Shopee/TikTok — também quando ligou pelo nº do
+    # pedido. A conversa de um pedido só (ML pós-venda, e-mail) não corta.
+    do_comprador = or_(
+        gc.como == "comprador",
+        and_(c.plataforma.in_(("shopee", "tiktok")), c.canal == "chat"),
     )
     q = (
         select(base.c.gid, m.id, m.texto, quando.label("quando"), c.plataforma)
@@ -301,7 +329,7 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
             m.tipo == "texto",
             m.texto.is_not(None),
             quando >= base.c.compra,
-            or_(proximo.is_(None), quando < proximo),
+            or_(~do_comprador, proximo.is_(None), quando < proximo),
         )
         .order_by(base.c.gid, quando, m.id)
     )

@@ -296,3 +296,55 @@ def test_marcar_pela_pessoa_desfaz_o_nao_e_pedido_e_guarda_o_mais_antigo():
     nova = Garantia(origem="robo")
     gp.marcar_pela_pessoa(nova, antes, gp.ORIGEM_ATENDIMENTO)
     assert (nova.solicitada_em, nova.solicitacao_origem) == (antes, gp.ORIGEM_ATENDIMENTO)
+
+
+async def test_conversa_de_um_pedido_so_nao_corta_no_proximo_pedido(db, make_user):
+    """O pós-venda do ML é do PEDIDO (não do comprador): o outro pedido do
+    mesmo comprador não corta a conversa deste."""
+    loja = await _loja(db, await make_user(role=UserRole.ADMIN))
+    novo = COMPRA + timedelta(days=15)
+    await _conversa(
+        db,
+        pedido="261001ABCD1234",
+        plataforma="ml",
+        canal="pos_venda",
+        integ=loja,
+        comprador="88",
+        msgs=[("cliente", "o celular não liga", novo + timedelta(days=2), ())],
+    )
+    for pedido, criado in (("261001ABCD1234", COMPRA), ("261016NOVO0002", novo)):
+        db.add(
+            AtendimentoPedidoComprador(
+                integration_id=loja,
+                plataforma="ml",
+                comprador_id="88",
+                pedido=pedido,
+                criado_em=criado,
+            )
+        )
+    await db.commit()
+    await _pedido(db)
+    await _nf(db)
+    await _rodar(db)
+    assert (await _a_garantia(db)).solicitacao_origem == gp.ORIGEM_MENSAGEM
+
+
+async def test_chat_do_tiktok_corta_na_proxima_compra_do_mesmo_cpf(db):
+    """O TikTok não tem o índice do comprador: o próximo pedido é a próxima
+    compra do MESMO CPF (a outra garantia dele)."""
+    await _pedido(db)
+    await _nf(db)
+    segunda = COMPRA + timedelta(days=15)
+    await _pedido(db, numero="310002", numeroloja="261016TIKT0002", data=segunda)
+    await _nf(db, pedido="310002", numero="2612")  # o mesmo CPF
+    await _conversa(
+        db,
+        pedido="261001ABCD1234",
+        plataforma="tiktok",
+        canal="chat",
+        msgs=[("cliente", "o celular não liga", segunda + timedelta(days=3), ())],
+    )
+    await _rodar(db)
+    por_pedido = {g.pedido_bling: g for g in await _garantias(db)}
+    await db.refresh(por_pedido["310001"])
+    assert por_pedido["310001"].solicitada_em is None
