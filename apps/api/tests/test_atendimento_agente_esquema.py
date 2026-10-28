@@ -752,7 +752,7 @@ def test_configuracao_padrao_do_agente():
     # Rodada "fechar o eval" (23/10/2026): 5 → 8 pedidos, o último sem ferramentas.
     assert padrao["atendimento_agente_max_turnos"] == 8
     assert padrao["atendimento_agente_prazo_s"] == 60
-    assert padrao["atendimento_agente_teto_usd_dia"] == 10.0
+    assert padrao["atendimento_agente_teto_usd_dia"] == 30.0
     assert padrao["atendimento_agente_teto_usd_conversa"] == 0.50
     assert padrao["atendimento_agente_replay"] is False
     assert padrao["atendimento_agente_replay_plataformas"] == "shopee"

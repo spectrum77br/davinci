@@ -726,11 +726,13 @@ class Settings(BaseSettings):
     # (`ia.PRAZO_SUGERIR_COOPERATIVO_S`).
     atendimento_agente_prazo_s: int = 60
     # Teto de gasto (US$, pelo `usage` real, somado no Redis): por dia (fuso
-    # de São Paulo, replay incluído) e por conversa. Estourou: a conversa
+    # de São Paulo; o replay/eval tem o dia deles desde 28/10/2026) e por conversa. Estourou: a conversa
     # fica sem rascunho e a Caixa Humano a pega. Item 5 (23/10/2026): o Sonnet custa
     # ~US$ 0,035 por resposta (frio, com o cache gravado, 0,09–0,11) — o da conversa
-    # 0,05 → 0,50 (várias rodadas numa conversa) e o do dia 5 → 10.
-    atendimento_agente_teto_usd_dia: float = 10.0
+    # 0,05 → 0,50 (várias rodadas numa conversa) e o do dia 5 → 10. 28/10/2026 (o
+    # dono, "mude pra 30 dol"): 10 → 30 — o "Sugerir" de toda a equipe passou para o
+    # agente (o legado da Groq saiu) e soma no mesmo dia do automático.
+    atendimento_agente_teto_usd_dia: float = 30.0
     atendimento_agente_teto_usd_conversa: float = 0.50
     # O dia dos TESTES (o replay da noite, o eval e a calibração) é outro (o dono,
     # 28/10/2026: em 27/10 o eval comeu o dia único e o agente ao vivo parou às 13:06):

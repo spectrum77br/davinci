@@ -91,7 +91,7 @@ def test_5_o_padrao_e_o_sonnet_e_o_verificador_continua_no_haiku():
     assert _padrao("atendimento_agente_effort") == "medium"
     assert _padrao("atendimento_agente_prazo_s") == 60
     assert _padrao("atendimento_agente_teto_usd_conversa") == 0.50
-    assert _padrao("atendimento_agente_teto_usd_dia") == 10.0
+    assert _padrao("atendimento_agente_teto_usd_dia") == 30.0
     assert v.MODELO == HAIKU and v.argumentos("x")["model"] == HAIKU
     # O Sonnet 5.5 tem o fallback do servidor; o Haiku não.
     assert agente._com_fallback(SONNET) and not agente._com_fallback(HAIKU)
