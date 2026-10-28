@@ -674,6 +674,19 @@ async def test_d1_o_turno_informativo_responde_e_marca(falas):
         (["Já são três semanas sem o reembolso"], {}, {}),
         (["Quero o reembolso parcial"], {}, {}),
         (["Quero meu dinheiro de volta, o produto veio quebrado"], {}, {}),
+        # A revisão de 28/10/2026: o "quero o reembolso" só é informação SOZINHO, e o
+        # "duas semanas" só não é atraso longo quando é isso mesmo.
+        (["Quero o reembolso sem devolver o produto"], {}, {}),
+        (["Quero meu dinheiro de volta, não vou devolver"], {}, {}),
+        (["Quero o reembolso do frete"], {}, {}),
+        (["Quero o reembolso de um dos produtos"], {}, {}),
+        (["Quero meu dinheiro de volta ou que mandem outro"], {}, {}),
+        (["Quero o reembolso na minha conta do nubank"], {}, {}),
+        (["Quero o reembolso, o produto veio usado"], {}, {}),
+        (["Eu tô esperando o reembolso", "o produto é falsificado"], {}, {}),
+        (["Já faz mais de duas semanas que devolvi e nada do reembolso"], {}, {}),
+        (["Mais de 2 semanas esperando o reembolso"], {}, {}),
+        (["Faz duas semanas e meia que espero o reembolso"], {}, {}),
         (["Vou no Procon se não devolverem meu dinheiro"], {}, {}),
         (["Eu tô esperando o reembolso", "quero falar com uma pessoa"], {}, {}),
         (["Cadê meu reembolso? me manda a nota fiscal"], {}, {}),
@@ -703,6 +716,40 @@ async def test_d1_o_que_nao_e_informativo_continua_com_pessoa(falas, ctx_kw, con
     assert not r.ctx.responde_e_marca, falas
     assert r.decisao != VAI, (falas, r.codigos)
     assert r.ctx.acoes_pos_envio == []
+
+
+def _cartao_rr(situacao: str, rr_status: str = "request_submitted", devolucao: int = 7) -> Any:
+    conteudo = {
+        "rr_detail": {"return_id": devolucao, "status": 1, "translated_detail": []},
+        "tracking_info": {"rr_status": rr_status},
+        "card_title_for_sender": {
+            "translated_with_lang": [
+                {
+                    "text": f"Status do reembolso feito pelo comprador: {situacao}",
+                    "language": "pt-BR",
+                }
+            ]
+        },
+    }
+    m = _m("loja", "[Mensagem]", origem="externo", tipo="outro")
+    m.payload = {"message_type": "track_rr_status_card", "source": "server", "content": conteudo}
+    return m
+
+
+def test_d1_a_disputa_no_cartao_do_chat_fica_com_pessoa():
+    """A revisão de 28/10/2026: até a reclamação sincronizar (~1 h), a disputa só está
+    no cartão do chat — o D1 não pode responder por cima dela."""
+    disputa = _cartao_rr("Disputa com a Shopee solicitada")
+    assert acao_pessoa.disputa_nos_cartoes([disputa])
+    assert not acao_pessoa.disputa_nos_cartoes([_cartao_rr("Em análise pela Shopee")])
+    # O último cartão da MESMA solicitação é o que vale: encerrada, não é mais disputa.
+    assert not acao_pessoa.disputa_nos_cartoes(
+        [disputa, _cartao_rr("Reembolso concluído", rr_status="refund_completed")]
+    )
+    msgs = [_menu(), disputa, *_cli("Quero meu reembolso de volta")]
+    assert not acao_pessoa.responde_e_marca_do_turno(_conv(), _ctx_dev(), msgs, msgs[-1])
+    sem = [_menu(), _cartao_rr("Em análise pela Shopee"), *_cli("Quero meu reembolso de volta")]
+    assert acao_pessoa.responde_e_marca_do_turno(_conv(), _ctx_dev(), sem, sem[-1])
 
 
 def test_d1_sem_devolucao_aberta_nao_ha_o_que_marcar():

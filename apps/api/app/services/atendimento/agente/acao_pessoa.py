@@ -68,7 +68,7 @@ from __future__ import annotations
 
 import functools
 import re
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
@@ -1124,13 +1124,21 @@ _PEDIDO_NA_DEVOLUCAO = re.compile(
     r"|\bpreciso\s+que\b|\babsurd\w*|\bdescaso\b|\bgolpe\w*|\bfraude\w*"
 )
 # O atraso longo ("já faz 40 dias que devolvi"): fora do prazo comum da plataforma.
-# "Semanas" sem número ("faz semanas") ou de três para cima é atraso longo; "duas
-# semanas" (14 dias) não chega ao `DIAS_DE_ATRASO_LONGO` (28/10/2026, 1e2dd5ac: "já
-# fiz quase duas semanas" segurava o D1 que a régua dos dias deixaria passar).
 _ATRASO_LONGO = re.compile(
-    r"\b(?P<dias>\d{2,3})\s*dias\b|\b(?:um|1|dois|2|tres|3)\s+mes(?:es)?\b"
-    r"|(?<!\bduas\s)(?<!\b2\s)\bsemanas\b"
+    r"\b(?P<dias>\d{2,3})\s*dias\b|\b(?:um|1|dois|2|tres|3)\s+mes(?:es)?\b|\bsemanas\b"
 )
+# "Duas semanas" (14 dias) não chega ao `DIAS_DE_ATRASO_LONGO` (28/10/2026, 1e2dd5ac:
+# "já fiz quase duas semanas" segurava o D1 que a régua dos dias deixaria passar): sai
+# do texto antes do `_ATRASO_LONGO`. "Mais de duas semanas" e "duas semanas e meia"
+# (ou "e 5 dias") continuam longos; "semanas" sem número também.
+_DUAS_SEMANAS = re.compile(r"(?<!\bmais\sde\s)\b(?:duas|2)\s+semanas\b(?!\s+e\b)")
+
+
+def _atrasos_longos(plano: str) -> Iterator[re.Match[str]]:
+    """As menções de atraso do `_ATRASO_LONGO`, fora as "duas semanas" (`_DUAS_SEMANAS`)."""
+    return _ATRASO_LONGO.finditer(_DUAS_SEMANAS.sub(" ", plano))
+
+
 DIAS_DE_ATRASO_LONGO = 15
 
 
@@ -1147,7 +1155,7 @@ def pergunta_so_o_andamento(textos: Iterable[str | None]) -> bool:
     if any(_PEDIDO_NA_DEVOLUCAO.search(p) for p in planos):
         return False
     for p in planos:
-        for m in _ATRASO_LONGO.finditer(p):
+        for m in _atrasos_longos(p):
             if m.group("dias") is None or int(m.group("dias")) >= DIAS_DE_ATRASO_LONGO:
                 return False
     if not all(_DO_REEMBOLSO.search(p) or _ANDAMENTO_OU_PRAZO.search(p) for p in planos):
@@ -1292,14 +1300,29 @@ _DECISAO_NA_DEVOLUCAO = re.compile(
     r"|\briscad\w*|\bestragad\w*|\bavaria\w*|\bembalad\w*|\breceberam\b|\b(?:voce|voces|vc|vcs)\s+"
     r"(?:podem|pode|poderiam|poderia|consegue|conseguem|vao|vai|tem\s+como)\b"
     # "Quero o meu dinheiro de volta" com a devolução JÁ aberta é a própria solicitação
-    # (28/10/2026, 1e2dd5ac/25c0a87f: a equipe responde o status) — não é pedido à loja.
+    # (28/10/2026, 1e2dd5ac: a equipe responde o status) — não é pedido à loja. Só quando
+    # a FALA é só isso (até o fim, com "urgente", "logo", "por favor"…): "quero o
+    # reembolso sem devolver/do frete/na conta" continua pedido (a revisão de 28/10).
     r"|\bquer(?:o|ia|emos)\b(?!\s+saber)(?!\s+(?:(?:o|a|meu|minha|esse|essa|este|esta)\s+)?"
-    r"(?:dinheiro|reembolso|estorno|ressarcimento)\b)"
+    r"(?:dinheiro|reembolso|estorno|ressarcimento)(?:\s+de\s+volta)?"
+    r"(?:\s+(?:urgente|logo|agora|ja|rapido|hoje|por\s+favor|nada\s+mais|so\s+isso))*"
+    r"[\s.!?]*$)"
     r"|\bposso\b(?!\s+(?:acompanhar|ver|consultar|saber|postar|enviar|mandar|levar|entregar))"
     r"|\bpreciso\s+que\b|\babsurd\w*|\bdescaso\b|\bgolpe\w*|\bfraude\w*"
     r"|\bchamado\b|\bfoto\w*|\bvideo\w*|\bimage\w*|\bnota\s+fiscal\b|\bnf\b|\bdesconto\w*"
     r"|\bpessoa\b|\bhuman[oa]\b|\batendente\b|\bgerente\b|\bresponsavel\b"
     r"|\bresolv\w*|\bprovidenci\w*|\bfaz(?:em)?\s+alguma\s+coisa\b|\bme\s+ajud\w*"
+)
+# O que a fala do cliente relata ou pede e a régua acima não cobria (a revisão de
+# 28/10/2026, quando o "quero o dinheiro" deixou de segurar sozinho): o produto com
+# problema (o `_MOTIVO_COM_PROBLEMA` do cartão, sem o "falta" do "quanto tempo falta"),
+# ficar com ele, a troca, a conta do banco, o frete e a parte do pedido.
+_PROBLEMA_OU_PEDIDO_NA_FALA = re.compile(
+    r"\busad[oa]s?\b|\bfalsific\w*|\bpirata\b|\bvazi[oa]\b|\bdiferente\b|\bincomplet\w*"
+    r"|\bvencid\w*|\bnao\s+(?:funciona|liga|carrega|ligou|funcionou)\b"
+    r"|\boutr[oa]\s+(?:modelo|aparelho|produto|cor|item|celular)\b|\bmand\w*\s+outr[oa]\b"
+    r"|\bsem\s+devolv\w*|\bnao\s+(?:vou|quero|irei)\s+devolv\w*|\bnubank\b|\bbanco\b"
+    r"|\bpicpay\b|\bmercado\s+pago\b|\bfrete\b|\bum\s+dos\b|\buma\s+das\b|\bdiferenca\b"
 )
 # A fala curta que segue a do assunto ("Porque só dia 30", "e agora?", "?"): sem o
 # assunto, mas sem pedido nem problema, ela não tira o turno da informação.
@@ -1326,6 +1349,30 @@ def reclamacao_em_disputa(ctx: Mapping[str, Any] | None) -> bool:
     )
 
 
+def disputa_nos_cartoes(mensagens: Iterable[Any]) -> bool:
+    """O último cartão de alguma solicitação de devolução/reembolso da Shopee no chat está
+    em DISPUTA ("Disputa com a Shopee solicitada")? PURA. A ponte até a reclamação chegar
+    ao banco (~1 h, `devolucao_na_plataforma`): sem ela, `reclamacao_em_disputa` não vê
+    (a revisão de 28/10/2026). O cartão que não se lê não conta aqui."""
+    ultimo: dict[str, cartoes_plataforma.DevolucaoNoCartao] = {}
+    soltos: list[cartoes_plataforma.DevolucaoNoCartao] = []
+    for m in mensagens:
+        try:
+            d = cartoes_plataforma.devolucao_do_cartao(getattr(m, "payload", None))
+        except Exception:  # noqa: BLE001, S112 — o cartão ilegível já conta como aberto
+            continue
+        if d is None:
+            continue
+        if d.devolucao_id:
+            ultimo[d.devolucao_id] = d
+        else:
+            soltos.append(d)
+    return any(
+        not d.encerrada and "disputa" in _plano_de(d.situacao or "")
+        for d in (*ultimo.values(), *soltos)
+    )
+
+
 def turno_informativo_da_devolucao(textos: Iterable[str | None]) -> bool:
     """O turno do cliente, com a devolução já aberta, só pede INFORMAÇÃO (ver acima)?
     PURA (D1). Há fala útil (fora o reconhecimento, o cumprimento, o "6" do menu e o
@@ -1344,10 +1391,12 @@ def turno_informativo_da_devolucao(textos: Iterable[str | None]) -> bool:
         ):
             continue
         planos.append(plano)
-    if not planos or any(_DECISAO_NA_DEVOLUCAO.search(p) for p in planos):
+    if not planos or any(
+        _DECISAO_NA_DEVOLUCAO.search(p) or _PROBLEMA_OU_PEDIDO_NA_FALA.search(p) for p in planos
+    ):
         return False
     for p in planos:
-        for m in _ATRASO_LONGO.finditer(p):
+        for m in _atrasos_longos(p):
             if m.group("dias") is None or int(m.group("dias")) >= DIAS_DE_ATRASO_LONGO:
                 return False
     # O portão do dono (27/10/2026: "o D1 nunca valia"; Barbosa ao vivo, "Obrigado. Vocês
@@ -1430,6 +1479,8 @@ def responde_e_marca_do_turno(
         conversa, recentes, ctx, agora=agora
     )
     if not abertas or rotina_do_turno(conversa, ctx, recentes, gatilho, sinais_do_cliente):
+        return False
+    if disputa_nos_cartoes(recentes):
         return False
     rajada = ia.rajada_do_cliente(recentes, gatilho)
     if any(_e_anexo(m) for m in rajada):

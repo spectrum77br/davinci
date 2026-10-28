@@ -531,16 +531,50 @@ _MEDIDA_DE_TELA = re.compile(
     r"\b(?:tela|display|visor)\b[^\d\n.!?]{0,30}" + _TAMANHO_DE_TELA
     + r"|" + _TAMANHO_DE_TELA + r"\s*(?:de\s+)?(?:tela|display)\b"
 )
-# A variação de MEMÓRIA do celular ("12.64", "8,128", "4/64": RAM.armazenamento,
-# como os anúncios Uranyx escrevem — "F105 - 12.64 + 64 Sd Card", "Branco 12.64
-# está esgotada") não é preço: em 28/10/2026 ela barrava a resposta do agente como
-# "valor em R$" (b10e8d7b, c790959a). Só os pares de memória que existem (RAM de
-# 1 a 32, armazenamento de 8 a 1024); sai do texto antes de procurar valor, como
-# a medida de tela. "R$ 12.64" e "12,64 reais" continuam valor (o R$ e o "reais").
-_VARIACAO_DE_MEMORIA = re.compile(
+# A variação de MEMÓRIA do celular ("12.64 + 64 Sd Card", "F105 - 12.64", "Branco
+# 12.64 está esgotada": RAM.armazenamento, como os anúncios Uranyx escrevem) não é
+# preço: em 28/10/2026 ela barrava a resposta do agente como "valor em R$" (b10e8d7b,
+# c790959a). Só sai do texto (antes de procurar valor, como a medida de tela) o par
+# de memória que existe (RAM de 1 a 32, armazenamento de 8 a 1024) COM um sinal de
+# memória junto — o "+"/"gb"/"sd" depois, ou o código do modelo, a cor, "variação",
+# "versão", "memória" logo antes — e SEM sinal de preço por perto (a revisão de
+# 28/10: "12x de 32,64", "fica 12,64", "Valor: 24,64", "US$ 12,64" continuam valor).
+_PAR_DE_MEMORIA = re.compile(
     r"(?<![\d.,/])(?:1|2|3|4|6|8|12|16|24|32)\s*[.,/]\s*(?:8|16|32|64|128|256|512|1024)"
-    r"(?![\d]|[.,]\d)(?!\s*reais\b)"
+    r"(?![\d]|[.,]\d)"
 )
+_CORES = (
+    r"(?:preto|preta|branco|branca|azul|verde|laranja|prata|dourado|dourada|rosa|roxo|roxa"
+    r"|cinza|grafite|vermelho|vermelha|amarelo|amarela|lilas|bege|titanio|champagne)"
+)
+_MEMORIA_DEPOIS = re.compile(r"\s*(?:\+|gb\b|sd\b|" + _CORES + r"\b)")
+_MEMORIA_ANTES = re.compile(
+    r"(?:\b(?:variacao|variacoes|versao|versoes|memoria|modelo|opcao)\b\W*"
+    r"|\b[a-z]{1,3}\d{1,4}[a-z]?(?:\s+(?:pro|max|plus|ultra|lite|mini|se|neo))*\W*"
+    r"|\b" + _CORES + r"\b\W*)$"
+)
+_PRECO_ANTES = re.compile(
+    r"(?:\$|\bus\s*\$|\brs\b|\b(?:custa\w*|custo|preco\w*|valor\w*|fica|ficou|sai|saiu|por"
+    r"|pagar|paga|pago|parcel\w*|\d+\s*x|vezes|frete|reembols\w*|estorn\w*|diferenca|total"
+    r"|entre|desconto|cupom|promocao|apenas|somente|so)\b)[^\d]{0,12}$"
+)
+_PRECO_DEPOIS = re.compile(r"\s*(?:reais|real|rs|brl|conto|contos|\$)\b")
+
+
+def _sem_variacao_de_memoria(plano: str) -> str:
+    """O texto sem o par de memória com sinal de memória (ver `_PAR_DE_MEMORIA`)."""
+
+    def trocar(m: re.Match[str]) -> str:
+        antes, depois = plano[max(0, m.start() - 30) : m.start()], plano[m.end() : m.end() + 12]
+        if _PRECO_ANTES.search(antes) or _PRECO_DEPOIS.match(depois):
+            return m.group(0)
+        if _MEMORIA_DEPOIS.match(depois) or _MEMORIA_ANTES.search(antes):
+            return " "
+        return m.group(0)
+
+    return _PAR_DE_MEMORIA.sub(trocar, plano)
+
+
 _DIA_DA_SEMANA = r"(?:segunda|terca|quarta|quinta|sexta|sabado|domingo)"
 
 _VALOR = (
@@ -967,7 +1001,7 @@ def validar(
     # Só IA: prazo e valor vinculam — só por lacuna preenchida pelo código.
     if origem == ORIGEM_IA:
         do_prazo = _sem_prazo_da_regra(plano, prazos_de_garantia) if prazos_de_garantia else plano
-        if _algum(_VALOR, _VARIACAO_DE_MEMORIA.sub(" ", _MEDIDA_DE_TELA.sub(" ", plano))):
+        if _algum(_VALOR, _sem_variacao_de_memoria(_MEDIDA_DE_TELA.sub(" ", plano))):
             motivos.append(_MOTIVO_VALOR)
         if _PERCENTUAL.search(plano):
             motivos.append(_MOTIVO_PERCENTUAL)
