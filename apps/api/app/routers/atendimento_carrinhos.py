@@ -37,9 +37,9 @@ from app.deps.team_scope import resolve_team_scope
 from app.models import AtendimentoCanal, AtendimentoCarrinho, AtendimentoConversa, User
 from app.routers.atendimento import (
     _conversa_ou_404,
-    _edit,
     _no_escopo,
     _nome,
+    _responde,
     _so_admin,
     _uuid_ou_404,
     _view,
@@ -314,7 +314,7 @@ async def marcar_resolvido(
     carrinho_id: str,
     body: ResolvidoIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> ResolvidoOut:
     """Marcar como resolvido: sai de "aberto", a conversa sai da fila e a etiqueta volta.
 

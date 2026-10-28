@@ -42,11 +42,11 @@ from app.deps.team_scope import resolve_team_scope
 from app.models import AtendimentoAvaliacaoLoja, User
 from app.routers.atendimento import (
     _conversa_ou_404,
-    _edit,
     _mensagem_out,
     _no_escopo,
     _nome,
     _recusa_http,
+    _responde,
     _so_admin,
     _uuid_ou_404,
     _view,
@@ -227,7 +227,7 @@ async def responder_avaliacao(
     avaliacao_id: str,
     body: ResponderAvaliacaoIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> ResponderAvaliacaoOut:
     """Responde a avaliação — resposta PÚBLICA, pelo caminho único do envio.
 
@@ -281,7 +281,7 @@ async def marcar_tratada(
     avaliacao_id: str,
     body: TratadaIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> TratadaOut:
     """Marcar como tratada: sai da pendência e a etiqueta volta ao status anterior.
 

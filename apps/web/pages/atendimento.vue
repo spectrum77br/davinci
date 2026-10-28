@@ -104,11 +104,17 @@ const auth = useAuthStore()
 // desligadas com o AVISO_SO_LEITURA — inclusive para os outros admins. A API
 // recusa do mesmo jeito (403 `atendimento_so_leitura`).
 const mexe = computed(() => auth.user?.atendimento_mexe === true)
-const soLeitura = computed(() => !mexe.value)
+// O aviso de "só leitura" some para quem responde (28/10/2026).
+const soLeitura = computed(() => !mexe.value && auth.user?.atendimento_responde !== true)
 const podeEditar = useCan('atendimento', 'edit')
 const podeApagar = useCan('atendimento', 'delete')
 const ehAdmin = useIsAdmin()
 const canEdit = computed(() => mexe.value && podeEditar.value)
+// Responder e cuidar da CONVERSA (28/10/2026, o Eduardo: "ative resposta pra
+// todos — a IA só sugere por enquanto"): toda a equipe que vê a caixa. As
+// abas de configuração (Lojas e modo, Manual, Respostas prontas, Automáticas)
+// e o "Zerar não lidas" continuam no `canEdit` (quem mexe).
+const canResponder = computed(() => canEdit.value || auth.user?.atendimento_responde === true)
 const canDelete = computed(() => mexe.value && podeApagar.value)
 const isAdmin = computed(() => mexe.value && ehAdmin.value)
 // "Sugerir agora" e 👍/👎: todo mundo que vê a caixa (é o feedback que o dono quer).
@@ -1260,7 +1266,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
           v-if="selecionada"
           v-show="!emailNaTela"
           :conversa-id="selecionada"
-          :can-edit="canEdit"
+          :can-edit="canResponder"
           :can-sugerir="canSugerir"
           :modelos="modelos"
           :flags="resumo?.flags || null"
@@ -1293,7 +1299,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
             <AtendimentoConversa
               :key="`${emailNaCaixa}:${emailNaCaixaVersao}`"
               :conversa-id="emailNaCaixa"
-              :can-edit="canEdit"
+              :can-edit="canResponder"
               :can-sugerir="canSugerir"
               :modelos="modelos"
               :flags="resumo?.flags || null"
@@ -1339,7 +1345,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
             <AtendimentoConversa
               :key="`${emailConversa}:${emailConversaVersao}`"
               :conversa-id="emailConversa"
-              :can-edit="canEdit"
+              :can-edit="canResponder"
               :can-sugerir="canSugerir"
               :modelos="modelos"
               :flags="resumo?.flags || null"

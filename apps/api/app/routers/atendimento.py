@@ -348,11 +348,44 @@ ABA_EMAIL_SO_ADMIN = {
 }
 
 
+# As escritas de QUEM RESPONDE (28/10/2026, o Eduardo, ao trocar o Duoke pelo
+# DaVinci: "ative resposta pra todos — a IA só sugere por enquanto, mas a
+# pessoa já pode responder em todos"): toda pessoa que vê a caixa
+# (`acesso.pode_responder`) cuida da CONVERSA — responde, manda foto, nota,
+# etiqueta, fecha/"não precisa de resposta"/atribui/pausa a IA (o PATCH),
+# marca lida na plataforma, atualiza o pedido, descarta a sugestão, confere o
+# envio, a avaliação e o carrinho. Configurar a caixa continua só de quem
+# mexe (`acesso.pode_mexer`): modo das lojas, manual, automáticas, respostas
+# prontas, Zap, e-mail, troca, "Zerar não lidas", comentários das redes.
+ROTAS_DE_QUEM_RESPONDE = frozenset(
+    {
+        ("POST", "/api/atendimento/conversas/{conversa_id}/responder"),
+        ("POST", "/api/atendimento/conversas/{conversa_id}/foto"),
+        ("POST", "/api/atendimento/conversas/{conversa_id}/notas"),
+        ("POST", "/api/atendimento/conversas/{conversa_id}/etiqueta"),
+        ("PATCH", "/api/atendimento/conversas/{conversa_id}"),
+        ("POST", "/api/atendimento/conversas/{conversa_id}/lida"),
+        ("POST", "/api/atendimento/conversas/{conversa_id}/pedido/atualizar"),
+        ("POST", "/api/atendimento/conversas/{conversa_id}/amazon-copia"),
+        ("POST", "/api/atendimento/rascunhos/{rascunho_id}/descartar"),
+        ("POST", "/api/atendimento/mensagens/{mensagem_id}/conferir"),
+        ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/responder"),
+        ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/tratada"),
+        ("POST", "/api/atendimento/carrinhos/{carrinho_id}/resolvido"),
+    }
+)
+
+
 def _quem_le_passa(request: Request) -> bool:
     if request.method in _METODOS_DE_LEITURA:
         return True
     rota = request.scope.get("route")
     return (request.method, getattr(rota, "path", None)) in ROTAS_DE_QUEM_LE
+
+
+def _quem_responde_passa(request: Request) -> bool:
+    rota = request.scope.get("route")
+    return (request.method, getattr(rota, "path", None)) in ROTAS_DE_QUEM_RESPONDE
 
 
 async def _so_admin(
@@ -364,6 +397,8 @@ async def _so_admin(
     if not acesso.pode_ver(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "atendimento_restrito"})
     if _quem_le_passa(request):
+        return user
+    if _quem_responde_passa(request) and acesso.pode_responder(user):
         return user
     raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA)
 
@@ -389,6 +424,17 @@ async def _view(user: Annotated[User, Depends(require_active_user)]) -> User:
             )
         return user
     return await _view_fino(user)
+
+
+async def _responde(user: Annotated[User, Depends(require_active_user)]) -> User:
+    """As escritas de `ROTAS_DE_QUEM_RESPONDE` (28/10/2026): na fase de
+    observação, toda pessoa que vê a caixa (`acesso.pode_responder`); fora
+    dela, o `atendimento.edit` de sempre."""
+    if SO_ADMIN:
+        if not acesso.pode_responder(user):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA)
+        return user
+    return await _edit_fino(user)
 
 
 async def _quem_le(user: Annotated[User, Depends(require_active_user)]) -> User:
@@ -3219,7 +3265,7 @@ async def trocar_etiqueta(
     conversa_id: str,
     body: EtiquetaIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> EtiquetaTrocaOut:
     """Troca à mão da etiqueta (RF1). Fica no histórico com o nome de quem trocou.
 
@@ -3266,7 +3312,7 @@ async def responder(
     conversa_id: str,
     body: ResponderIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> ResponderOut:
     """Envia a resposta. Trava → 409 com o `code` (texto reprovado → 422).
 
@@ -3529,7 +3575,7 @@ async def _dentro_do_limite_pedido(integration_id: UUID, user_id: UUID) -> bool:
 async def atualizar_pedido(
     conversa_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> PedidoAtualizarOut:
     """Renova AGORA o retrato do pedido na plataforma (botão "atualizar" do painel Pedido).
 
@@ -3749,7 +3795,7 @@ async def editar_conversa(
     conversa_id: str,
     body: ConversaPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> ConversaUnicaOut:
     """Atribuir, pausar a IA, fechar/reabrir, "não precisa de resposta" e a conta Amazon."""
     if instagram.e_instagram(conversa_id):
@@ -3795,7 +3841,7 @@ async def escolher_copia_amazon(
     conversa_id: str,
     body: CopiaAmazonIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> ConversaUnicaOut:
     """A cópia do Seller Central que empatou: "Esta foi a respondida" / "Não foi esta".
 
@@ -3833,7 +3879,7 @@ async def conferir_mensagem(
     mensagem_id: UUID,
     body: ConferirIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> ConferirOut:
     """A resposta em `revisar` saiu ou não? A pessoa conferiu na plataforma.
 
@@ -3945,7 +3991,7 @@ async def descartar_rascunho(
     rascunho_id: UUID,
     body: DescartarIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> RascunhoUnicoOut:
     """A sugestão não serve — e o PORQUÊ fica para a revisão do manual."""
     r = await _rascunho_ou_404(session, rascunho_id, await resolve_team_scope(session, user))

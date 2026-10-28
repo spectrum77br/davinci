@@ -38,6 +38,7 @@ from app.config import get_settings
 from app.main import app
 from app.models import (
     AtendimentoCanal,
+    AtendimentoConversa,
     AtendimentoRascunho,
     DmConversa,
     DmMensagem,
@@ -212,9 +213,15 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
         # 28/10/2026: abrir a conversa apaga a notificação dela (só o visto no DaVinci).
         f"{URL}/conversas/{{conversa_id}}/visto",
     }
-    # A nota interna, o responder, a foto, a etiqueta etc. NÃO entram.
+    # A nota interna, o responder, a foto, a etiqueta etc. NÃO entram no de quem lê:
+    # são de quem RESPONDE (28/10/2026), outra lista, também de rotas de verdade.
     for proibida in ("/notas", "/responder", "/foto", "/etiqueta", "/descartar", "/conferir"):
         assert not any(p.endswith(proibida) for _, p in rota.ROTAS_DE_QUEM_LE), proibida
+        assert any(p.endswith(proibida) for _, p in rota.ROTAS_DE_QUEM_RESPONDE), proibida
+    assert rota.ROTAS_DE_QUEM_RESPONDE <= existentes, rota.ROTAS_DE_QUEM_RESPONDE - existentes
+    # Configurar a caixa nunca é de quem só responde.
+    for config in ("/canais/", "/regras", "/modelos", "/automacoes/", "/zap/", "/email/", "/zerar"):
+        assert not any(config in p for _, p in rota.ROTAS_DE_QUEM_RESPONDE), config
     # O robô fica de fora: sem a trava, só com o token dele.
     do_robo = [
         r for r in app.routes if isinstance(r, APIRoute) and r.path.startswith(URL + "/robo/")
@@ -262,8 +269,13 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
             # de qualquer loja e de endereço interno.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
             assert r.json()["detail"]["code"] == "atendimento_so_quem_mexe", (metodo, caminho)
-        elif metodo == "GET" or (metodo, molde) in rota.ROTAS_DE_QUEM_LE:
+        elif (
+            metodo == "GET"
+            or (metodo, molde) in rota.ROTAS_DE_QUEM_LE
+            or (metodo, molde) in rota.ROTAS_DE_QUEM_RESPONDE
+        ):
             # Passa da trava (cai no 404/409/422 da própria rota, ou 200).
+            # 28/10/2026: as ações da conversa (ROTAS_DE_QUEM_RESPONDE) também.
             assert r.status_code not in (401, 403), (metodo, caminho, r.status_code, r.text)
         else:
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
@@ -350,7 +362,7 @@ def ia_falsa(monkeypatch, _fase_de_observacao):
 
 
 @pytest.mark.parametrize("quem", ["comum", "admin_fora_da_lista"])
-async def test_quem_so_le_ve_sugere_e_avalia_mas_nao_responde(
+async def test_quem_so_le_ve_sugere_avalia_e_responde_mas_nao_configura(
     client, db, make_user, auth_as, dono, ia_falsa, quem
 ):
     integ, canal = await _loja(db, dono, "kfa")
@@ -389,20 +401,13 @@ async def test_quem_so_le_ve_sugere_e_avalia_mas_nao_responde(
     r = await client.post(f"{URL}/automacoes/previa", json={"automacao": "nao-existe"})
     assert r.status_code == 404
 
-    # Mexer: 403 com o código claro, e nada mudou.
+    # Configurar a caixa: 403 com o código claro, e nada mudou.
     escritas = [
-        ("POST", f"/conversas/{conversa.id}/responder", {"texto": "oi"}),
-        ("PATCH", f"/conversas/{conversa.id}", {"situacao": "fechada"}),
-        ("PATCH", f"/conversas/{conversa.id}", {"atribuido_a": str(u.id)}),
-        ("PATCH", f"/conversas/{conversa.id}", {"ia_pausada": True}),
-        ("POST", f"/conversas/{conversa.id}/etiqueta", {"etiqueta": "pos_venda"}),
-        ("POST", f"/conversas/{conversa.id}/notas", {"texto": "recado"}),
-        ("POST", f"/conversas/{conversa.id}/pedido/atualizar", None),
-        ("POST", f"/rascunhos/{rascunho_id}/descartar", {"motivo": "não serve"}),
         ("PATCH", f"/canais/{canal.id}", {"modo": "copiloto"}),
         ("POST", "/regras", {"quando": "a", "faca": "b"}),
         ("POST", "/modelos", {"titulo": "t", "texto": "x"}),
         ("POST", "/sincronizar", None),
+        ("POST", "/zerar-nao-lidas", None),
         ("PATCH", f"/automacoes/shopee_entregue/{integ.id}", {"modo": "simular"}),
         ("POST", "/automacoes/shopee_entregue/simular-nas-lojas-do-duoke", None),
     ]
@@ -410,11 +415,26 @@ async def test_quem_so_le_ve_sugere_e_avalia_mas_nao_responde(
         r = await client.request(metodo, URL + caminho, json=corpo)
         assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
         assert r.json()["detail"]["code"] == SO_LEITURA, (metodo, caminho)
-    await db.refresh(conversa)
     await db.refresh(canal)
-    assert conversa.situacao != "fechada"
-    assert conversa.atribuido_a is None and conversa.ia_pausada is False
     assert canal.modo == "observar"
+
+    # Cuidar da CONVERSA (28/10/2026, o Eduardo: "ative resposta pra todos"):
+    # a equipe responde, fecha, atribui, pausa a IA, etiqueta e anota.
+    r = await client.post(f"{URL}/conversas/{conversa.id}/responder", json={"texto": "oi"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "envio_desligado", r.text
+    for corpo in ({"atribuido_a": str(u.id)}, {"ia_pausada": True}):
+        r = await client.patch(f"{URL}/conversas/{conversa.id}", json=corpo)
+        assert r.status_code == 200, r.text
+    r = await client.post(f"{URL}/conversas/{conversa.id}/notas", json={"texto": "recado"})
+    assert r.status_code not in (401, 403), r.text
+    await db.refresh(conversa)
+    assert conversa.atribuido_a == u.id and conversa.ia_pausada is True
+    await db.execute(
+        update(AtendimentoConversa)
+        .where(AtendimentoConversa.id == conversa.id)
+        .values(atribuido_a=None, ia_pausada=False)
+    )
+    await db.commit()
 
     # O dono, na mesma conversa: passa da trava (o envio desligado é outro 409).
     auth_as(dono)

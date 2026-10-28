@@ -39,11 +39,11 @@ from app.deps.team_scope import resolve_team_scope
 from app.models import User
 from app.routers.atendimento import (
     _conversa_ou_404,
-    _edit,
     _mensagem_out,
     _nome,
     _quem_le,
     _recusa_http,
+    _responde,
     _so_admin,
     _somente_leitura,
     _view,
@@ -158,7 +158,7 @@ async def criar_nota(
     conversa_id: str,
     body: NotaIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> NotaOut:
     """Nota interna: nunca é enviada, não conta como resposta, a IA não lê."""
     if instagram.e_instagram(conversa_id):
@@ -181,7 +181,7 @@ async def criar_nota(
 async def enviar_foto(
     conversa_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
     arquivo: Annotated[UploadFile, File()],
     legenda: Annotated[str | None, Form(max_length=10_000)] = None,
     ultima_vista_id: Annotated[UUID | None, Form()] = None,

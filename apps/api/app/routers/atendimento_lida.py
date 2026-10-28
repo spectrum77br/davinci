@@ -85,6 +85,7 @@ from app.routers.atendimento import (
     _conversa_out,
     _edit,
     _quem_le,
+    _responde,
     _so_admin,
 )
 from app.schemas.atendimento import ConversaOut
@@ -125,7 +126,7 @@ class LidaOut(BaseModel):
 async def marcar_lida(
     conversa_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
     body: VistoIn | None = None,
 ) -> LidaOut:
     """Marca a conversa como lida NA PLATAFORMA (e zera `nao_lidas` se ela aceitou)."""

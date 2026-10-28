@@ -163,10 +163,22 @@ const pagina = sfc('../pages/atendimento.vue')
   for (const u of [ADMIN_FORA, COMUM, COM_RECURSO]) {
     assert.deepEqual(flags(u), { mexe: false, soLeitura: true, canEdit: false, canDelete: false, isAdmin: false, canSugerir: true }, u.id)
   }
+  // 28/10/2026: quem RESPONDE (o /me com `atendimento_responde`) cuida da conversa, sem configurar a caixa.
+  const responde = (u) => {
+    const js2 = trecho(setup, 'const mexe = computed', 'const agora = useRelogio()') + '\nreturn { soLeitura, canEdit, canResponder }'
+    const out = new Function('computed', 'auth', 'useCan', 'useIsAdmin', js2)(
+      Vue.computed, { user: u }, () => Vue.computed(() => false), () => Vue.computed(() => false),
+    )
+    return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v.value]))
+  }
+  assert.deepEqual(responde({ ...COMUM, atendimento_responde: true }), { soLeitura: false, canEdit: false, canResponder: true })
+  assert.deepEqual(responde(COMUM), { soLeitura: true, canEdit: false, canResponder: false })
 
   const tela = pagina.descriptor.template.content
   assert.match(tela, /v-if="soLeitura"[\s\S]{0,400}data-aviso-so-leitura[\s\S]{0,200}\{\{ AVISO_SO_LEITURA \}\}/, 'o aviso discreto para quem só lê')
-  assert.match(tela, /<AtendimentoConversa[\s\S]*?:can-edit="canEdit"\s+:can-sugerir="canSugerir"/)
+  // 28/10/2026: a conversa é de quem RESPONDE (toda a equipe); as abas de configuração seguem no canEdit.
+  assert.match(tela, /<AtendimentoConversa[\s\S]*?:can-edit="canResponder"\s+:can-sugerir="canSugerir"/)
+  assert.doesNotMatch(tela, /<AtendimentoConversa[^>]*:can-edit="canEdit"/)
   assert.match(tela, /<LazyAtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin"/)
   assert.match(tela, /<LazyAtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" \/>/)
   assert.match(tela, /<LazyAtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete"/)

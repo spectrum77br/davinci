@@ -390,20 +390,26 @@ async def test_ml_pos_venda_le_o_pack_marcando_e_zera(db, dono, client, platafor
 # ─────────────── quem NÃO marca ───────────────
 
 
-async def test_quem_so_le_leva_403_e_nada_e_chamado(db, make_user, auth_as, client, plataforma):
+async def test_a_equipe_marca_e_quem_nao_ve_leva_403(db, make_user, auth_as, client, plataforma):
+    """28/10/2026 (o Eduardo: "ative resposta pra todos"): quem RESPONDE — toda
+    a equipe que vê a caixa — marca lida na plataforma ao abrir; quem nem vê
+    a caixa (o operador do estoque) leva 403 e nada é chamado."""
     dono_loja = await make_user(email=DONO, role=UserRole.ADMIN)
     integ, canal = await _loja(db, dono_loja)
     conversa = await _conversa(db, integ, canal)
-    for leitor in (
-        await make_user(),  # equipe
-        await make_user(role=UserRole.ADMIN),  # admin fora de ATENDIMENTO_USUARIOS
-    ):
-        auth_as(leitor)
-        r = await _marcar(client, conversa)
-        assert r.status_code == 403, r.text
-        assert r.json()["detail"]["code"] == "atendimento_so_leitura"
+    operador = await make_user(permissions={"controle_estoque": {"view": True}})
+    operador.stock_tags = ["estoque"]
+    await db.commit()
+    auth_as(operador)
+    r = await _marcar(client, conversa)
+    assert r.status_code == 403, r.text
     assert plataforma.chamadas == [] and plataforma.montados == []
     assert await _nao_lidas(db, conversa) == 3
+    auth_as(await make_user())  # equipe
+    r = await _marcar(client, conversa)
+    assert r.status_code == 200 and r.json()["marcada"] is True, r.text
+    assert len(plataforma.chamadas) == 1
+    assert await _nao_lidas(db, conversa) == 0
 
 
 async def test_loja_em_observar_recusa_e_so_grava_o_visto(db, dono, client, plataforma):
@@ -677,8 +683,8 @@ async def test_detalhe_diz_marcar_lida_com_as_mesmas_travas(
     # Abrir o detalhe NÃO marca nada (quem marca é o POST, depois do atraso).
     assert plataforma.chamadas == [] and await _nao_lidas(db, cid) == 3
 
-    auth_as(await make_user())  # quem só lê
-    assert await _flag(client, cid) is False
+    auth_as(await make_user())  # a equipe responde (28/10/2026): marca também
+    assert await _flag(client, cid) is True
     auth_as(dono_loja)
 
     await db.execute(
@@ -791,21 +797,17 @@ async def test_lida_com_a_plataforma_falhando_grava_o_visto(db, dono, client, pl
     assert r.json()["conversa"]["visto_em"] is not None
 
 
-async def test_quem_so_le_grava_o_visto_mas_nao_marca_na_plataforma(
+async def test_quem_so_le_grava_o_visto_sem_ir_a_plataforma(
     db, make_user, auth_as, client, plataforma
 ):
     """28/10/2026, o Eduardo: "as notificações devem sumir se clicado em algum
-    atendimento" — a equipe que só lê abre a conversa e o número dela apaga
-    (o visto no DaVinci, como no Duoke "por loja"); o /lida na plataforma
-    continua só de quem mexe."""
+    atendimento" — a equipe abre a conversa e o número dela apaga (o visto no
+    DaVinci, como no Duoke "por loja"). O /visto nunca vai à plataforma."""
     dono_loja = await make_user(email=DONO, role=UserRole.ADMIN)
-    integ, canal = await _loja(db, dono_loja, "shopee", "chat", "humano")
+    integ, canal = await _loja(db, dono_loja, "shopee", "chat", "observar")
     conversa = await _conversa(db, integ, canal)
     for leitor in (await make_user(), await make_user(role=UserRole.ADMIN)):
         auth_as(leitor)
-        r = await _marcar(client, conversa)
-        assert r.status_code == 403, r.text
-        assert r.json()["detail"]["code"] == "atendimento_so_leitura"
         r = await _visto(client, conversa)
         assert r.status_code == 200, r.text
         assert r.json()["visto_em"] is not None
@@ -972,10 +974,13 @@ async def test_sem_pessoa_o_servico_recusa(db, make_user, plataforma):
     with pytest.raises(lida.LidaRecusada) as e:
         await lida.marcar_como_lida(db, conversa, user=None)
     assert e.value.code == lida.RECUSA_SO_LEITURA
-    leitor = await make_user()
+    operador = await make_user(permissions={"controle_estoque": {"view": True}})
+    operador.stock_tags = ["estoque"]
+    await db.commit()
     with pytest.raises(lida.LidaRecusada):
-        await lida.marcar_como_lida(db, conversa, user=leitor)
+        await lida.marcar_como_lida(db, conversa, user=operador)
     assert await lida.marcar_ao_abrir(db, conversa, None) is False
+    leitor = await make_user()
     # Ninguém (a IA, os crons) nunca grava o visto; quem só lê grava (28/10/2026).
     with pytest.raises(lida.LidaRecusada) as e:
         await lida.gravar_visto(db, conversa, None)

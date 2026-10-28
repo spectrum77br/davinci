@@ -333,8 +333,9 @@ async def conferir(
     (conectada, num modo em que o DaVinci responde). Canal e loja RELIDOS.
     No Zap (sem loja), o número no lugar da loja (`_conferir_zap`).
     """
-    if user is None or not acesso.pode_mexer(user):
-        raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem mexe no Atendimento marca como lida.")
+    # 28/10/2026: quem RESPONDE (toda a equipe que vê a caixa) também marca.
+    if user is None or not acesso.pode_responder(user):
+        raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem responde no Atendimento marca como lida.")
     if not se_aplica(conversa):
         raise LidaRecusada(RECUSA_NAO_SE_APLICA, MOTIVO_NAO_SE_APLICA)
     if not get_settings().atendimento_envio_ativo:

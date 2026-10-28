@@ -68,6 +68,19 @@ def pode_ver(user: User) -> bool:
     return pode_mexer(user) or not operador_de_estoque(user)
 
 
+def pode_responder(user: User) -> bool:
+    """Responde e cuida das conversas: toda pessoa que vê a caixa.
+
+    28/10/2026, o Eduardo, ao trocar o Duoke pelo DaVinci: "ative resposta pra
+    todos — a IA só sugere por enquanto, mas a pessoa já pode responder em
+    todos". Vale para as ações DA CONVERSA (`routers/atendimento.py`,
+    `ROTAS_DE_QUEM_RESPONDE`: responder, foto, nota, etiqueta, fechar, marcar
+    lida...). Configurar a caixa (modo das lojas, manual, automáticas,
+    respostas prontas, Zap, zerar não lidas) continua de `pode_mexer`.
+    """
+    return pode_ver(user)
+
+
 def so_le(user: User) -> bool:
     """Vê, mas não mexe: a tela esconde as ações e a API recusa a escrita (403)."""
     return pode_ver(user) and not pode_mexer(user)

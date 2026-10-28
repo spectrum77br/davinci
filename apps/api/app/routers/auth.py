@@ -401,6 +401,11 @@ async def me(
     # da IA e dá 👍/👎. As duas vêm SEMPRE, true ou false.
     extra["atendimento"] = atendimento_acesso.pode_ver(user)
     extra["atendimento_mexe"] = extra["atendimento"] and atendimento_acesso.pode_mexer(user)
+    # 28/10/2026: `atendimento_responde` = responde e cuida da conversa (toda a
+    # equipe que vê); `atendimento_mexe` fica para configurar a caixa.
+    extra["atendimento_responde"] = extra["atendimento"] and atendimento_acesso.pode_responder(
+        user
+    )
     # Módulo App Uranyx (06/10/2026): a mesma regra da trava da API. Vem
     # SEMPRE, true ou false (contrato conteudo-e-catalogo-v1, seção 6).
     extra["app_uranyx"] = app_uranyx_acesso.liberado(user)

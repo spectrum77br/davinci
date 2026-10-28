@@ -23,6 +23,9 @@ export type AuthUser = {
   // dá 👍/👎. As duas vêm sempre (true/false).
   atendimento?: boolean
   atendimento_mexe?: boolean
+  // 28/10/2026: responde e cuida da conversa (toda a equipe que vê a caixa);
+  // `atendimento_mexe` fica para configurar a caixa.
+  atendimento_responde?: boolean
   // Módulo App Uranyx (06/10/2026): true só para admin que está em
   // APP_URANYX_USUARIOS no .env da api (hoje thorfinn e heisenberg).
   app_uranyx?: boolean
