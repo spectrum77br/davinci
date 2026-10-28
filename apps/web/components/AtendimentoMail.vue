@@ -5,7 +5,7 @@ import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 import type { ComposeAction, ComposeSource } from '~/lib/mailCompose'
 
-type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean; leitura_filtrada?: boolean }
+type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean; leitura_filtrada?: boolean; pode_responder?: boolean }
 type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean; store?: StoreBadge; folder_id?: string; subject_hidden?: boolean; conversation_id?: string | null }
 // Folders and store badges ("Caixas", 09/10/2026 — the owner: "bring the store
 // name here too; keep it separate and looking like Tuta"). routers/mail_caixa.py:
@@ -53,6 +53,9 @@ const mailbox = computed(() => mailboxes.value.find((item) => item.id === mailbo
 // "Quem mais vê" (09/10/2026): the API marks a mailbox the person only READS
 // (`so_leitura`): no reply, no resolve, no settings, no token.
 const readOnly = computed(() => mailbox.value?.so_leitura === true)
+// Só lê a caixa, mas RESPONDE o e-mail recebido (permissão `atendimento_email`
+// ver+editar, 28/10/2026): só o formulário de resposta e o "Saiu/Não saiu".
+const canAnswer = computed(() => !readOnly.value || mailbox.value?.pode_responder === true)
 const messages = ref<Summary[]>([])
 const detail = ref<Detail | null>(null)
 const loading = ref(false)
@@ -150,7 +153,7 @@ const configuring = ref(false)
 const resolving = ref('')
 
 const pending = computed(() => detail.value?.outbox.some((job) => ['queued', 'leased', 'uncertain'].includes(job.status)) ?? false)
-const canReply = computed(() => !deleting.value && !readOnly.value && detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value && replyAddresses.value.includes(fromAddress.value))
+const canReply = computed(() => !deleting.value && canAnswer.value && detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value && replyAddresses.value.includes(fromAddress.value))
 const canDelete = computed(() => canAdminister.value && !!detail.value && !readOnly.value && !sending.value && !deleting.value && !resolving.value && !pending.value)
 // Uma caixa filtrada não revela os aliases das outras lojas. Quem já podia
 // responder continua com o remetente deste e-mail autorizado no detalhe.
@@ -814,7 +817,7 @@ onBeforeUnmount(() => {
           <select v-model="mailboxId" aria-label="Caixa de e-mail" :disabled="sending || deleting || composerActive" class="max-w-full rounded border bg-background p-2 text-sm"><option v-for="item in mailboxes" :key="item.id" :value="item.id">{{ item.label }}<template v-if="item.address"> · {{ item.address }}</template><template v-else-if="item.leitura_filtrada"> · acesso por lojas</template></option></select>
           <span class="text-sm">{{ states[mailbox.state] || 'Conexão precisa de atenção' }}</span>
           <span class="text-xs text-muted-foreground">Última leitura: {{ date(mailbox.last_sync_at) }}</span>
-          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
+          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ mailbox.pode_responder ? (mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa e pode respondê-los (sem configurar).' : 'Você responde os e-mails desta caixa (sem configurar).') : mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
           <button v-if="isAdmin && !readOnly" class="ml-auto rounded border px-3 py-2 text-xs" @click="changeSending">{{ mailbox.send_enabled ? 'Desativar respostas' : 'Permitir respostas humanas' }}</button>
           <button v-if="isAdmin && !readOnly" class="inline-flex items-center gap-1 rounded border px-3 py-2 text-xs" :aria-expanded="configuring" data-mail-configure @click="configuring = !configuring"><Settings2 class="h-3.5 w-3.5" /> Configurar</button>
         </div>
@@ -975,14 +978,14 @@ onBeforeUnmount(() => {
                 <p class="break-all text-xs text-muted-foreground">{{ job.from_address }} → {{ job.to }}</p>
                 <p v-if="job.status === 'failed' && jobFailure(job.error_code)" class="text-xs text-red-700">{{ jobFailure(job.error_code) }}</p>
                 <p class="whitespace-pre-wrap break-words text-sm">{{ job.text }}</p>
-                <div v-if="job.status === 'uncertain' && !readOnly" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
+                <div v-if="job.status === 'uncertain' && canAnswer" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
                   <span class="text-xs text-muted-foreground">Conferiu nos Enviados do Tuta?</span>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, true)">Saiu</button>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, false)">Não saiu</button>
                 </div>
               </div>
             </section>
-            <form v-if="detail.reply.can_reply && !readOnly" class="space-y-3 border-t pt-4" @submit.prevent="sendReply">
+            <form v-if="detail.reply.can_reply && canAnswer" class="space-y-3 border-t pt-4" @submit.prevent="sendReply">
               <h4 class="font-medium">Responder</h4>
               <p class="break-all text-sm">Para: <strong>{{ detail.reply.to }}</strong></p>
               <p v-if="detail.reply_to && detail.reply_to !== detail.from_address" class="text-xs text-amber-700">A mensagem indica este endereço de resposta, diferente do remetente. Confira antes de enviar.</p>
@@ -991,7 +994,7 @@ onBeforeUnmount(() => {
               <textarea v-model="draft" rows="5" maxlength="100000" class="w-full rounded border bg-background p-3 text-sm" placeholder="Escreva sua resposta…" :disabled="sending || deleting || pending" aria-label="Texto da resposta" />
               <p v-if="!detail.reply.send_ready" class="text-xs text-muted-foreground">Envio indisponível. O Mac precisa estar conectado, com respostas habilitadas nesta caixa e no conector.</p>
               <p v-if="pending" class="text-xs text-muted-foreground">Confira a resposta pendente acima antes de preparar outra.</p>
-              <button v-if="!mailbox.leitura_filtrada" type="button" class="mr-2 inline-flex items-center gap-2 rounded border px-3 py-2 text-sm disabled:opacity-40" :disabled="sending || deleting || pending" data-mail-reply-attachments @click="openComposer('reply')"><Paperclip class="size-4" /> Anexos / CC / CCO</button>
+              <button v-if="!readOnly && !mailbox.leitura_filtrada" type="button" class="mr-2 inline-flex items-center gap-2 rounded border px-3 py-2 text-sm disabled:opacity-40" :disabled="sending || deleting || pending" data-mail-reply-attachments @click="openComposer('reply')"><Paperclip class="size-4" /> Anexos / CC / CCO</button>
               <button class="inline-flex items-center gap-2 rounded bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-40" :disabled="!canReply || !draft.trim() || sending"><Send class="h-4 w-4" />{{ sending ? 'Registrando…' : 'Conferir e enviar resposta' }}</button>
             </form>
           </article>

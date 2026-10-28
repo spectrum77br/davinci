@@ -57,6 +57,8 @@ Resource = Literal[
     # admin. Mexer (responder, vincular, configurar caixa) continua de quem
     # mexe no /atendimento (`acesso.pode_mexer`). Lida em
     # services/atendimento/acesso.py:ve_aba_email; mesmo nome no useCan.ts.
+    # 28/10/2026: `edit` (junto com o view) = RESPONDER o e-mail recebido nas
+    # caixas que a pessoa vê (`acesso.responde_email`), sem virar admin.
     "atendimento_email",
     # Legacy single-bucket — no longer used by any route after the
     # financeiro_* split below, but kept in the literal so stored

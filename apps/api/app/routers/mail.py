@@ -146,6 +146,10 @@ async def list_mailboxes(session: Session, user: ActiveUser, response: Response)
         item = service.mailbox_view(mailbox)
         if not service.allowed(mailbox, user):
             item["so_leitura"] = True
+            # Só lê a caixa, mas pode RESPONDER o e-mail recebido (permissão
+            # `atendimento_email` ver+editar, 28/10/2026): a tela mostra só o
+            # formulário de resposta; o resto da caixa continua só leitura.
+            item["pode_responder"] = await mail_admin.pode_responder_caixa(session, mailbox, user)
         if await mail_admin.tem_politica(session, mailbox.id, user):
             # A concessão é de mensagens, não da lista de aliases das outras lojas.
             item.update(address="", aliases=[], leitura_filtrada=True)
@@ -310,8 +314,13 @@ async def download_attachment(attachment_id: UUID, session: Session, user: Activ
 
 @router.post("/messages/{message_id}/reply", status_code=202)
 async def reply(message_id: UUID, request: Request, session: Session, user: ActiveUser):
-    message, mailbox = await user_message(session, message_id, user, lock=True)
-    await require_operator(session, mailbox, user)
+    # Dono/admin como sempre, ou quem tem `atendimento_email` ver+editar e vê a
+    # caixa (28/10/2026). Quem não pode recebe o mesmo 404 de antes.
+    message, mailbox = await user_message(session, message_id, user, lock=True, read=True)
+    if not await mail_admin.pode_responder_caixa(session, mailbox, user):
+        raise fail("mailbox_not_found")
+    if await mailbox_settings.bloqueia_resposta(session, mailbox.id, user):
+        raise fail("atendimento_permission_required", 403)
     mailbox = await session.scalar(
         select(MailMailbox)
         .where(MailMailbox.id == mailbox.id)
@@ -332,13 +341,29 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
     # A person checked Tuta; never resends. Owner/admin only, like reading.
     job = await session.get(MailOutbox, job_id)
     mailbox = await session.get(MailMailbox, job.mailbox_id) if job else None
-    if job is None or mailbox is None or not service.allowed(mailbox, user):
+    if job is None or mailbox is None:
         raise fail("job_not_found")
-    if decrypt_json(job.content_enc).get("action") is not None and (
+    dono = service.allowed(mailbox, user)
+    # Quem só responde (`atendimento_email` ver+editar, 28/10/2026) confere
+    # apenas a PRÓPRIA resposta simples (sem ação do compositor).
+    acao = decrypt_json(job.content_enc).get("action")
+    propria = (
+        not dono
+        and acao is None
+        and job.author_user_id == user.id
+        and await mail_admin.pode_responder_caixa(session, mailbox, user)
+    )
+    if not (dono or propria):
+        raise fail("job_not_found")
+    if acao is not None and (
         job.author_user_id != user.id or not await mail_composer.can_compose(session, mailbox, user)
     ):
         raise fail("job_not_found")
-    await require_operator(session, mailbox, user)
+    if propria:
+        if await mailbox_settings.bloqueia_resposta(session, mailbox.id, user):
+            raise fail("atendimento_permission_required", 403)
+    else:
+        await require_operator(session, mailbox, user)
     job = await session.scalar(
         select(MailOutbox)
         .where(MailOutbox.id == job_id)

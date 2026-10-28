@@ -184,6 +184,12 @@ async def bloqueia_sem_mexer(session: AsyncSession, mailbox_id: UUID, user: User
     return cfg.empresa and not acesso.pode_mexer(user)
 
 
+async def bloqueia_resposta(session: AsyncSession, mailbox_id: UUID, user: User) -> bool:
+    """A mesma trava, só para RESPONDER (e conferir a própria resposta):
+    também passa quem tem `atendimento_email` ver+editar (28/10/2026)."""
+    return await bloqueia_sem_mexer(session, mailbox_id, user) and not acesso.responde_email(user)
+
+
 async def trava_de_envio(
     session: AsyncSession,
     cfg: ConfigCaixa,

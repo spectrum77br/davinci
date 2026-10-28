@@ -386,6 +386,19 @@ async def pode_ver_caixa(session: AsyncSession, mailbox: MailMailbox, user: User
     )
 
 
+async def pode_responder_caixa(session: AsyncSession, mailbox: MailMailbox, user: User) -> bool:
+    """Responde e-mail recebido nesta caixa: o dono/admin de sempre, ou quem
+    tem `atendimento_email` ver+editar (`acesso.responde_email`, 28/10/2026) E
+    vê a caixa. Vale na rota /reply, no "Saiu/Não saiu" da própria resposta e
+    na conferência do Mac antes de enviar (`mail_central.lease`)."""
+    from app.services import mail_central
+    from app.services.atendimento import acesso
+
+    if not await pode_ver_caixa(session, mailbox, user):
+        return False
+    return mail_central.allowed(mailbox, user) or acesso.responde_email(user)
+
+
 async def tem_politica(session: AsyncSession, mailbox_id: UUID, user: User) -> bool:
     return user.role != UserRole.ADMIN and bool(
         await session.scalar(

@@ -146,7 +146,9 @@ async function principal() {
     assert.match(central, /def list_messages[\s\S]*?await readable_mailbox\(/)
     assert.match(central, /def get_message[\s\S]*?user_message\(session, message_id, user, read=True\)/)
     assert.match(central, /def download_attachment[\s\S]*?read=True\)/)
-    assert.match(central, /def reply\([\s\S]*?user_message\(session, message_id, user, lock=True\)\n/)
+    // 28/10/2026: o leitor só responde com `atendimento_email` ver+editar
+    // (`pode_responder_caixa`); sem ela, o mesmo 404 de antes.
+    assert.match(central, /def reply\([\s\S]*?user_message\(session, message_id, user, lock=True, read=True\)\n\s+if not await mail_admin\.pode_responder_caixa\(session, mailbox, user\):\n\s+raise fail\("mailbox_not_found"\)/)
     assert.match(central, /def resolve_outbox[\s\S]*?service\.allowed\(mailbox, user\)/)
   }
 

@@ -99,3 +99,18 @@ def ve_aba_email(user: User) -> bool:
         return True
     perm = (user.permissions or {}).get("atendimento_email")
     return isinstance(perm, dict) and perm.get("view") is True
+
+
+def responde_email(user: User) -> bool:
+    """RESPONDE e-mail pela aba E-mail (28/10/2026, o Eduardo: "passe para o
+    usuario marrocos acesso para ele conseguir responder os emails de dentro do
+    davinci, hoje so adm pode"): quem NÃO é admin e tem a permissão
+    `atendimento_email` com ver E editar. Só responder o e-mail recebido, nas
+    caixas que a pessoa vê (`mail_admin.pode_responder_caixa`): escrever e-mail
+    novo, encaminhar, anexos e configurar a caixa continuam do dono/admin.
+    Admin fica de fora de propósito: ele segue as regras de sempre (dono/admin
+    e, na caixa da empresa, só quem mexe — `pode_mexer`)."""
+    if user.status != UserStatus.ACTIVE or user.role == UserRole.ADMIN:
+        return False
+    perm = (user.permissions or {}).get("atendimento_email")
+    return isinstance(perm, dict) and perm.get("view") is True and perm.get("edit") is True
