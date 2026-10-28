@@ -250,6 +250,9 @@ const LINHA = {
   assert.deepEqual(L.corpoDoResumo({ ...f0, busca: '306200', ordem: 'atividade', com_conversa: true }), {}, 'a busca e o "só com conversa" são da lista')
   assert.deepEqual(L.corpoDoResumo({ ...f0, status: 'ativa', periodo: 'entrega', de: '2026-10-01', ate: '', origem: 'robo' }),
     { status: 'ativa', periodo: 'entrega', de: '2026-10-01', origem: 'robo' })
+  // SAC do site: ":" entre o rótulo e o valor colados (só na tela).
+  assert.equal(L.formularioSacLegivel('CPF529.982.247-25\nNúmero da nota fiscal (se disponível)—\nNúmero do pedido: 123456\n1. Dados'),
+    'CPF: 529.982.247-25\nNúmero da nota fiscal (se disponível): —\nNúmero do pedido: 123456\n1. Dados')
   // Garantia automática (28/10/2026): ordem, "só com conversa" e origem.
   assert.deepEqual(L.corpoDaLista({ ...f0, ordem: 'atividade', com_conversa: true, origem: 'robo' }),
     { limite: 100, offset: 0, ordem: 'atividade', com_conversa: true, origem: 'robo' })

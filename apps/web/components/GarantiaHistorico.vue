@@ -16,6 +16,7 @@ import {
   CANAL_ROTULO,
   dataCurta,
   errosDaApi,
+  formularioSacLegivel,
   ladoDaMensagem,
   linhasDoHistorico,
   nomePlataforma,
@@ -67,6 +68,22 @@ watch([() => props.garantia.id, () => props.versao], () => { historico.value = n
 
 const linhas = computed(() => (historico.value ? linhasDoHistorico(historico.value) : []))
 const conversas = computed(() => historico.value?.conversas || [])
+// SAC do site: a conversa do protocolo. O e-mail do formulário vira um cartão
+// com o texto inteiro (ele chega como mensagem de sistema do e-mail).
+const conversaPorId = computed(() => new Map(conversas.value.map((c) => [c.id, c])))
+function protocoloDa(m: HistoricoMensagem): string | null {
+  return conversaPorId.value.get(m.conversa_id)?.protocolo || null
+}
+function linkDa(m: HistoricoMensagem): string {
+  return conversaPorId.value.get(m.conversa_id)?.link || '/atendimento'
+}
+const sacAberto = ref<Set<string>>(new Set())
+function alternarSac(id: string) {
+  const s = new Set(sacAberto.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  sacAberto.value = s
+}
 
 function hora(iso: string | null): string {
   if (!iso) return ''
@@ -89,6 +106,7 @@ const mensagensPorConversa = computed(() => {
 })
 function rotuloConversa(c: HistoricoConversa | null): string {
   if (!c) return 'outra conversa'
+  if (c.protocolo) return `SAC do site · protocolo ${c.protocolo}`
   const canal = CANAL_ROTULO[c.canal] || c.canal
   return `${nomePlataforma(c.plataforma) || c.plataforma} · ${canal}${c.comprador_nome ? ` · ${c.comprador_nome}` : ''}`
 }
@@ -261,6 +279,20 @@ function aoRegistrar(_a: AtendimentoGarantia) {
           <div v-else-if="ladoDaMensagem(l.m) === 'nota'" class="flex justify-center">
             <div class="max-w-[85%] whitespace-pre-wrap break-words rounded-md border border-amber-300/70 bg-amber-50 px-3 py-1.5 text-xs text-amber-900 dark:border-amber-800/60 dark:bg-amber-900/25 dark:text-amber-200">
               <span class="font-medium">Nota interna:</span> {{ l.m.texto }}
+            </div>
+          </div>
+          <!-- SAC do site: o e-mail do formulário inteiro, num cartão -->
+          <div v-else-if="protocoloDa(l.m) && ladoDaMensagem(l.m) === 'sistema'" class="flex justify-center" data-sac-formulario>
+            <div class="w-full max-w-[90%] rounded-lg border border-amber-300/70 bg-amber-50/60 px-3 py-2 text-sm dark:border-amber-800/60 dark:bg-amber-900/20 md:max-w-[80%]">
+              <div class="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                <span class="font-semibold text-amber-900 dark:text-amber-200">📋 Formulário do SAC do site · protocolo {{ protocoloDa(l.m) }}</span>
+                <span class="text-muted-foreground">{{ hora(l.m.enviada_em) }}</span>
+                <a :href="linkDa(l.m)" target="_blank" rel="noopener" class="ml-auto inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-xs hover:bg-muted" title="abre o e-mail no Atendimento, com os links das fotos e do vídeo (válidos por 30 dias)">
+                  <ExternalLink class="size-3" /> ver o e-mail completo (fotos e vídeo)
+                </a>
+              </div>
+              <div class="whitespace-pre-wrap break-words text-[13px] leading-relaxed" :class="sacAberto.has(l.m.id) ? '' : 'max-h-64 overflow-hidden'">{{ formularioSacLegivel(l.m.texto) }}</div>
+              <button type="button" class="mt-1 text-xs text-primary underline-offset-2 hover:underline" @click="alternarSac(l.m.id)">{{ sacAberto.has(l.m.id) ? 'mostrar menos' : 'ler o formulário inteiro' }}</button>
             </div>
           </div>
           <div v-else-if="ladoDaMensagem(l.m) === 'sistema'" class="flex justify-center">

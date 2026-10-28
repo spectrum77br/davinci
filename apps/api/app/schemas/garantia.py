@@ -355,6 +355,8 @@ class HistoricoConversaOut(BaseModel):
     como: str  # 'pedido' | 'comprador'
     link: str
     email: bool = False
+    # SAC do site (28/10/2026): o protocolo do formulário (US-26-NNNN).
+    protocolo: str | None = None
 
 
 class HistoricoMensagemOut(BaseModel):

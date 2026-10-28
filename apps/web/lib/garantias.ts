@@ -775,6 +775,8 @@ export type HistoricoConversa = {
   como: 'pedido' | 'comprador'
   link: string
   email: boolean
+  // SAC do site (28/10/2026): o protocolo do formulário (US-26-NNNN).
+  protocolo?: string | null
 }
 export type HistoricoMensagem = {
   id: string
@@ -803,6 +805,27 @@ export type Historico = {
   marcos: HistoricoMarco[]
   desde: string | null
   cortadas: number
+}
+
+// O e-mail do formulário do SAC chega com o rótulo colado no valor
+// ("CPF529.982.247-25", "Número do pedido261027QC4PXFRR"): na tela, um ":"
+// entre os dois. Só na exibição — o texto gravado não muda.
+const ROTULOS_SAC = [
+  'Nome completo (conforme consta na compra)', 'CPF', 'E-mail', 'Telefone/WhatsApp', 'CEP', 'Endereço completo',
+  'Local da compra (site, marketplace ou loja física)', 'Nome da loja/vendedor', 'Número do pedido', 'Data da compra',
+  'Data de recebimento', 'Número da nota fiscal (se disponível)', 'Número da nota fiscal', 'Valor pago', 'Modelo', 'Cor',
+  'Voltagem (127V ou 220V)', 'Número de série', 'Data em que o problema foi identificado', 'Descrição detalhada do defeito',
+  'O produto sofreu queda, contato com líquidos ou foi utilizado em voltagem diferente da indicada?',
+  'Tipo de conexão utilizada (tomada direta, extensão ou adaptador)',
+].sort((a, b) => b.length - a.length)
+export function formularioSacLegivel(texto: string | null | undefined): string {
+  return (texto || '').split('\n').map((linha) => {
+    const r = ROTULOS_SAC.find((x) => linha.startsWith(x))
+    if (!r) return linha
+    const resto = linha.slice(r.length)
+    if (!resto || /^\s*:/.test(resto)) return linha
+    return `${r}${r.endsWith('?') ? '' : ':'} ${resto.trimStart()}`
+  }).join('\n')
 }
 
 // Um anexo da mensagem, do jeito que a tela desenha: foto (miniatura que

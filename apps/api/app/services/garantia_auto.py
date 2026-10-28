@@ -479,6 +479,11 @@ async def rodar(
             r.ids_criados.append(resultado.id)
     r.conversas_ligadas += await ligar_conversas(session, garantia_ids=r.ids_criados)
     r.conversas_ligadas += await ligar_conversas(session, desde=agora - JANELA_LIGACAO)
+    # O SAC do site (28/10/2026): o protocolo liga pelo CPF + NF/pedido do
+    # formulário (services/garantia_sac.py).
+    from app.services import garantia_sac
+
+    r.conversas_ligadas += await garantia_sac.ligar_sac(session, desde=agora - JANELA_LIGACAO)
     r.descartadas = await descartar_canceladas(session, agora=agora)
     r.reativadas = await reativar_descancelados(session)
     return r
@@ -501,5 +506,8 @@ async def retroativo(session: AsyncSession, *, desde: date = INICIO_DAS_NOTAS) -
         if r.avaliados < LOTE:
             break
     total.conversas_ligadas += await ligar_conversas(session)
+    from app.services import garantia_sac
+
+    total.conversas_ligadas += await garantia_sac.ligar_sac(session)
     await session.commit()
     return total

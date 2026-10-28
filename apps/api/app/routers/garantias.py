@@ -95,6 +95,7 @@ from app.schemas.garantia import (
     VinculoOut,
 )
 from app.services import garantia as svc
+from app.services import garantia_sac
 from app.services.atendimento import acesso, cartoes_plataforma, separa_email
 from app.services.atendimento.contexto import _chaves_do_pedido
 from app.services.mail_atendimento import administracao as mail_admin
@@ -1252,6 +1253,7 @@ async def historico(
             como=como,
             link=svc.LINK_CONVERSA.format(id=conv.id),
             email=separa_email.e_conversa_de_email(conv),
+            protocolo=garantia_sac.protocolo_da_conversa(conv),
         )
         for conv, como in ligadas
     ]
