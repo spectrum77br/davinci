@@ -1181,6 +1181,8 @@ async def historico(
             )
         ).all()
         if _conversa_no_escopo(scope, conv.integration_id)
+        # O SAC em que outra pessoa escreveu sai já (o robô desliga na volta).
+        and not (garantia_sac.protocolo_da_conversa(conv) and garantia_sac.com_outra_pessoa(conv))
     ]
     if not ligadas:
         out.restrito = bool(
@@ -1242,6 +1244,13 @@ async def historico(
                 )
             )
 
+    # SAC do site: qual mensagem é o formulário (vira o cartão, pelo conteúdo).
+    formularios = set()
+    for conv, _como in ligadas:
+        if garantia_sac.protocolo_da_conversa(conv):
+            f = await garantia_sac.mensagem_do_formulario(session, conv)
+            if f is not None:
+                formularios.add(f.id)
     out.conversas = [
         HistoricoConversaOut(
             id=conv.id,
@@ -1270,6 +1279,7 @@ async def historico(
             anexos=[a for a in (x.anexos or []) if isinstance(a, dict)],
             enviada_em=x.enviada_em or x.created_at,
             status=x.status,
+            formulario_sac=x.id in formularios,
         )
         for x in mensagens
     ]

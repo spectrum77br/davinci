@@ -68,8 +68,8 @@ watch([() => props.garantia.id, () => props.versao], () => { historico.value = n
 
 const linhas = computed(() => (historico.value ? linhasDoHistorico(historico.value) : []))
 const conversas = computed(() => historico.value?.conversas || [])
-// SAC do site: a conversa do protocolo. O e-mail do formulário vira um cartão
-// com o texto inteiro (ele chega como mensagem de sistema do e-mail).
+// SAC do site: a conversa do protocolo. O e-mail do formulário (o servidor
+// marca qual é: formulario_sac) vira um cartão com o texto inteiro.
 const conversaPorId = computed(() => new Map(conversas.value.map((c) => [c.id, c])))
 function protocoloDa(m: HistoricoMensagem): string | null {
   return conversaPorId.value.get(m.conversa_id)?.protocolo || null
@@ -282,7 +282,7 @@ function aoRegistrar(_a: AtendimentoGarantia) {
             </div>
           </div>
           <!-- SAC do site: o e-mail do formulário inteiro, num cartão -->
-          <div v-else-if="protocoloDa(l.m) && ladoDaMensagem(l.m) === 'sistema'" class="flex justify-center" data-sac-formulario>
+          <div v-else-if="l.m.formulario_sac" class="flex justify-center" data-sac-formulario>
             <div class="w-full max-w-[90%] rounded-lg border border-amber-300/70 bg-amber-50/60 px-3 py-2 text-sm dark:border-amber-800/60 dark:bg-amber-900/20 md:max-w-[80%]">
               <div class="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                 <span class="font-semibold text-amber-900 dark:text-amber-200">📋 Formulário do SAC do site · protocolo {{ protocoloDa(l.m) }}</span>

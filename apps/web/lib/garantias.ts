@@ -788,6 +788,8 @@ export type HistoricoMensagem = {
   anexos: Record<string, unknown>[]
   enviada_em: string | null
   status: string | null
+  // SAC do site: é o e-mail do formulário (o servidor decide pelo conteúdo).
+  formulario_sac?: boolean
 }
 export type HistoricoMarco = {
   tipo: 'compra' | 'entrega' | 'outro_pedido' | 'atendimento'
@@ -818,10 +820,18 @@ const ROTULOS_SAC = [
   'O produto sofreu queda, contato com líquidos ou foi utilizado em voltagem diferente da indicada?',
   'Tipo de conexão utilizada (tomada direta, extensão ou adaptador)',
 ].sort((a, b) => b.length - a.length)
+// Cada rótulo vale uma vez e só na linha que abre parágrafo (o formulário põe
+// uma linha em branco entre os campos): a continuação da descrição fica como o
+// cliente escreveu ("Correios entregou…" não vira "Cor: reios…").
 export function formularioSacLegivel(texto: string | null | undefined): string {
-  return (texto || '').split('\n').map((linha) => {
-    const r = ROTULOS_SAC.find((x) => linha.startsWith(x))
+  const usados = new Set<string>()
+  let anterior = ''
+  return (texto || '').split('\n').map((linha, i) => {
+    const abre = i === 0 || !anterior.trim()
+    anterior = linha
+    const r = abre ? ROTULOS_SAC.find((x) => !usados.has(x) && linha.startsWith(x)) : undefined
     if (!r) return linha
+    usados.add(r)
     const resto = linha.slice(r.length)
     if (!resto || /^\s*:/.test(resto)) return linha
     return `${r}${r.endsWith('?') ? '' : ':'} ${resto.trimStart()}`

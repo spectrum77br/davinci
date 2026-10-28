@@ -369,6 +369,8 @@ class HistoricoMensagemOut(BaseModel):
     anexos: list[dict[str, Any]] = []
     enviada_em: datetime | None = None
     status: str | None = None
+    # SAC do site (28/10/2026): é o e-mail do formulário (o cartão da tela).
+    formulario_sac: bool = False
 
 
 class HistoricoMarcoOut(BaseModel):

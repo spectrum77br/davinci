@@ -57,6 +57,7 @@ from app.models.garantia import (
 from app.models.nf import NfNota
 from app.services import garantia as svc
 from app.services.atendimento.agente.ferramentas import LINHA_URANYX, linha_do_item
+from app.services.atendimento.constantes import PLATAFORMA_SITE
 from app.services.bling_situacoes import (
     SITUACAO_AGUARDANDO_CANCELAMENTO_STR,
     SITUACAO_CANCELADO,
@@ -316,7 +317,9 @@ async def ligar_conversas(
     if garantia_ids is not None and not garantia_ids:
         return 0
     c, g, p = AtendimentoConversa, Garantia, AtendimentoPedidoComprador
-    base_c = [c.canal.notin_(CANAIS_FORA)]
+    # O e-mail do site (SAC) só liga pelo CPF do formulário (garantia_sac): o
+    # pedido citado sozinho pode ser o de outra pessoa (revisão de 28/10/2026).
+    base_c = [c.canal.notin_(CANAIS_FORA), c.plataforma != PLATAFORMA_SITE]
     mexida_c = _recente(desde, c.created_at, c.updated_at, c.ultima_mensagem_em)
     chaves_ml = (
         select(
