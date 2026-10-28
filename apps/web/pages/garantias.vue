@@ -70,7 +70,8 @@ async function carregarRegras() {
 }
 
 // ─── vista: Conversas (padrão) ou Tabela ────────────────────────────────────
-// Resumo (28/10/2026): as garantias por departamento (GarantiaResumo).
+// Resumo (28/10/2026): a garantia por produto, no visual da Tabela de Preços
+// (GarantiaResumo); a linha do produto abre os pedidos dele na vista Conversas.
 type Vista = 'conversas' | 'tabela' | 'resumo'
 const CHAVE_VISTA = 'garantias.vista'
 function vistaGuardada(): Vista {
@@ -170,16 +171,28 @@ watch(() => filtros.busca, () => {
   if (atraso) clearTimeout(atraso)
   atraso = setTimeout(() => carregar({ trocouFiltro: true }), 300)
 })
-watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.ordem, filtros.com_conversa, filtros.origem, filtros.mostrar], () => { void carregar({ trocouFiltro: true }) })
+watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.ordem, filtros.com_conversa, filtros.origem, filtros.mostrar, filtros.ids], () => { void carregar({ trocouFiltro: true }) })
 
 const ativo = computed(() => cartaoAtivo(filtros))
 function clicarCartao(c: Cartao) {
   Object.assign(filtros, filtroDoCartao(filtros, c))
 }
-const temFiltro = computed(() => !!(filtros.busca.trim() || filtros.status !== 'todos' || filtros.de || filtros.ate || filtros.com_atendimento_no_mes || (filtros.origem && filtros.origem !== 'todas')))
+const temFiltro = computed(() => !!(filtros.busca.trim() || filtros.status !== 'todos' || filtros.de || filtros.ate || filtros.com_atendimento_no_mes || (filtros.origem && filtros.origem !== 'todas') || filtros.ids?.length))
 function limparFiltros() {
-  Object.assign(filtros, { ...FILTROS_PADRAO, origem: 'todas' })
+  Object.assign(filtros, { ...FILTROS_PADRAO, origem: 'todas', ids: undefined })
+  produtoAberto.value = ''
   aplicarVista()
+}
+// A garantia por produto: a linha abre os pedidos daquele produto na lista.
+const produtoAberto = ref('')
+function abrirProduto(p: { nome: string; ids: number[] }) {
+  produtoAberto.value = p.nome
+  filtros.ids = p.ids
+  vista.value = 'conversas'
+}
+function fecharProduto() {
+  produtoAberto.value = ''
+  filtros.ids = undefined
 }
 const buscaParcialDeCpf = computed(() => {
   const d = filtros.busca.replace(/\D/g, '')
@@ -377,7 +390,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
         <select id="gar-vista" v-model="vista" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-vista>
           <option value="conversas">Conversas</option>
           <option value="tabela">Tabela</option>
-          <option value="resumo">Resumo por departamento</option>
+          <option value="resumo">Garantia por produto</option>
         </select>
       </div>
       <div v-if="vista !== 'resumo'" class="w-[calc(50%-0.25rem)] sm:w-52">
@@ -431,10 +444,17 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       <AlertCircle class="size-4" /> {{ erro }} <button type="button" class="underline" @click="carregar">tentar de novo</button>
     </p>
 
-    <!-- Resumo por departamento: os filtros da barra valem (menos a busca) -->
+    <!-- a linha da garantia por produto aberta na lista: os pedidos dela -->
+    <p v-if="vista !== 'resumo' && filtros.ids?.length" class="-mt-1 flex flex-wrap items-center gap-2 text-xs" data-produto-aberto>
+      <span class="rounded-full border border-primary/40 bg-primary/5 px-2 py-0.5">Produto: <strong>{{ produtoAberto || 'escolhido' }}</strong> · {{ filtros.ids.length }} {{ filtros.ids.length === 1 ? 'pedido' : 'pedidos' }} de garantia</span>
+      <button type="button" class="text-primary underline-offset-2 hover:underline" @click="fecharProduto">ver todos os pedidos</button>
+      <button type="button" class="text-primary underline-offset-2 hover:underline" @click="vista = 'resumo'">voltar para a garantia por produto</button>
+    </p>
+
+    <!-- Garantia por produto: os filtros da barra valem (menos a busca) -->
     <template v-if="vista === 'resumo'">
-      <p v-if="filtros.busca.trim()" class="-mt-1 text-xs text-muted-foreground">A busca vale só para a lista: o resumo conta todas as garantias dos outros filtros.</p>
-      <GarantiaResumo :filtros="filtros" :versao="versaoResumo" />
+      <p v-if="filtros.busca.trim()" class="-mt-1 text-xs text-muted-foreground">A busca vale só para a lista: a garantia por produto conta todas as garantias dos outros filtros.</p>
+      <GarantiaResumo :filtros="filtros" :versao="versaoResumo" @abrir="abrirProduto" />
     </template>
 
     <!-- carregando / vazio -->

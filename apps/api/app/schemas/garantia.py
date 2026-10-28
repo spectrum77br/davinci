@@ -100,6 +100,9 @@ class ListaFiltro(BaseModel):
     # Pedido de garantia (28/10/2026): o Painel mostra só quem PEDIU; "todas"
     # mostra também a venda sem pedido. A busca procura em todas.
     mostrar: Literal["pedidos", "todas"] = "pedidos"
+    # A garantia por produto (28/10/2026): a linha do produto abre os pedidos
+    # dela (os ids que o Resumo mandou).
+    ids: list[int] | None = Field(default=None, max_length=2000)
     limite: int = Field(default=200, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
@@ -420,46 +423,44 @@ class HistoricoOut(BaseModel):
     cortadas: int = 0
 
 
-class ResumoCategoriaOut(BaseModel):
-    nome: str
-    vendidas: int
-    pediram: int = 0
-    # Sem categoria no pedido nem no cadastro: veio pela família do SKU.
-    sem_categoria: bool = False
-
-
-class ResumoProdutoOut(BaseModel):
-    base: str  # o SKU base (dg053, u015…)
-    nome: str
-    vendidas: int
-    pediram: int = 0
-    com_atendimento: int = 0
-
-
 class ResumoDepartamentoOut(BaseModel):
     chave: str  # celular | eletro | acessorios | outros
     nome: str
     vendidas: int
-    # Pedido de garantia (28/10/2026): a porcentagem é pediram ÷ vendidas.
     pediram: int = 0
-    # Dos pedidos: a situação da garantia hoje e de onde veio o pedido.
+
+
+class ResumoProdutoOut(BaseModel):
+    """Uma linha da garantia por produto: o produto da Tabela de Preços (o
+    modelo, com as cores juntas) ou o SKU vendido fora dela."""
+
+    chave: str
+    departamento: str
+    nome: str
+    skus: list[str]
+    na_tabela: bool = True
+    vendidas: int
+    pediram: int = 0
+    # Dos PEDIDOS: a situação da garantia hoje e de onde veio o pedido.
     status: dict[str, int]
     origens: dict[str, int] = {}
     com_atendimento: int = 0
     atendimentos_hardware: int = 0
     atendimentos_software: int = 0
-    categorias: list[ResumoCategoriaOut] = []
-    produtos: list[ResumoProdutoOut] = []
+    # Os ids das garantias com pedido (a linha abre a lista delas).
+    pedidos: list[int] = []
 
 
 class ResumoOut(BaseModel):
-    """POST /api/garantias/resumo: as vendas com garantia e os pedidos de
-    garantia por departamento (as porcentagens a tela calcula das contagens)."""
+    """POST /api/garantias/resumo: a garantia por produto (28/10/2026) — as
+    vendas com garantia e os pedidos de garantia por produto e por
+    departamento (as porcentagens a tela calcula das contagens)."""
 
     vendidas: int
     pediram: int
     hoje: date
     departamentos: list[ResumoDepartamentoOut]
+    produtos: list[ResumoProdutoOut]
 
 
 class RegrasOut(BaseModel):

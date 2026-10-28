@@ -1,31 +1,32 @@
 <script setup lang="ts">
-// Resumo do Painel de Garantia (28/10/2026) — por DEPARTAMENTO (Celular,
-// Eletro, Acessórios…): quantos PEDIRAM garantia sobre quantos foram vendidos
-// com nota ("a garantia é só para o pessoal que solicita", Eduardo, 28/10). E,
-// dos pedidos: a situação da garantia, de onde veio o pedido (mensagem do
-// cliente, SAC do site, devolução por defeito…), os atendimentos registrados
-// e os produtos. POST /api/garantias/resumo com os filtros da barra (período,
-// origem, status). Departamento = a categoria do produto no Bling, a mesma do
-// Faturamento; sem ela, a família do SKU. Só contagens: nada de nome nem CPF.
-// Barras: um tom só (a cor da marca) sobre o trilho cinza; o comprimento é a
-// porcentagem de quem pediu, na escala da MAIOR do quadro (o número e a
-// porcentagem sempre escritos ao lado — a cor nunca sozinha).
-import { AlertCircle, Loader2, PieChart } from 'lucide-vue-next'
+// Garantia por produto (28/10/2026) — no visual da aba Produtos da Tabela de
+// Preços ("pode usar a nossa Tabela de Preços, aba Produtos, como referência…
+// é tudo relacionado à garantia", Eduardo): as pílulas de departamento em cima
+// e uma linha por produto da Tabela de Preços (o modelo, com as cores juntas),
+// só com colunas de garantia — vendidas com nota, quantos PEDIRAM garantia e a
+// porcentagem, de onde veio o pedido, a situação da garantia e os atendimentos.
+// O produto vendido que não está na Tabela de Preços entra pelo SKU. Clicar na
+// linha abre os pedidos daquele produto (emit 'abrir'). POST
+// /api/garantias/resumo com os filtros da barra. Só contagens.
+import { AlertCircle, Loader2 } from 'lucide-vue-next'
 import {
   ORIGEM_PEDIDO,
   corpoDoResumo,
   errosDaApi,
   numeroBR,
   pct,
-  statusInfo,
   type FiltrosLista,
   type OrigemPedido,
   type Resumo,
   type ResumoDepartamento,
-  type StatusGarantia,
+  type ResumoProduto,
 } from '~/lib/garantias'
 
 const props = defineProps<{ filtros: FiltrosLista; versao?: number }>()
+const emit = defineEmits<{
+  // A linha do produto: os pedidos dela na lista.
+  (e: 'abrir', produto: { nome: string; ids: number[] }): void
+}>()
 
 const { api } = useApi()
 const resumo = ref<Resumo | null>(null)
@@ -43,7 +44,7 @@ async function carregar() {
     resumo.value = r
   } catch (e) {
     if (g !== geracao) return
-    erro.value = errosDaApi(e).geral || 'Não consegui carregar o resumo.'
+    erro.value = errosDaApi(e).geral || 'Não consegui carregar a garantia por produto.'
   } finally {
     if (g === geracao) carregando.value = false
   }
@@ -54,155 +55,143 @@ watch(
   { immediate: true, deep: true },
 )
 
-// A taxa (0–1) e a barra na escala da maior taxa do grupo.
-function taxa(pediram: number, vendidas: number) {
-  return vendidas ? pediram / vendidas : 0
+// O departamento escolhido (a pílula), guardado só nesta visita.
+const departamento = ref<ResumoDepartamento['chave'] | ''>('')
+const departamentoAtual = computed(() => {
+  const deps = resumo.value?.departamentos || []
+  return deps.find((d) => d.chave === departamento.value) || deps[0] || null
+})
+const busca = ref('')
+function plano(t: string) {
+  return t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 }
-function barra(t: number, maior: number) {
-  if (!t || !maior) return 0
-  return Math.max(2, Math.min(100, (t / maior) * 100))
+const produtos = computed<ResumoProduto[]>(() => {
+  const dep = departamentoAtual.value?.chave
+  const termo = plano(busca.value.trim())
+  return (resumo.value?.produtos || []).filter((p) =>
+    p.departamento === dep && (!termo || plano(`${p.nome} ${p.skus.join(' ')}`).includes(termo)))
+})
+const ORIGENS: OrigemPedido[] = ['mensagem', 'sac', 'devolucao']
+// O nome curto da coluna (o completo fica na dica e na legenda embaixo).
+const ORIGEM_CURTA: Partial<Record<OrigemPedido, string>> = { mensagem: 'Mensagem', sac: 'SAC', devolucao: 'Devolução' }
+function outras(p: ResumoProduto) {
+  return (p.origens.atendimento || 0) + (p.origens.manual || 0) + (p.origens.pessoa || 0)
 }
-const maiorDepartamento = computed(() => Math.max(0, ...(resumo.value?.departamentos || []).map((d) => taxa(d.pediram, d.vendidas))))
-// A escala dos produtos: a maior taxa entre os que venderam 10 ou mais (1
-// pedido em 1 venda daria 100% e encolheria todas as barras).
-function maiorProduto(d: ResumoDepartamento) {
-  const base = d.produtos.filter((p) => p.vendidas >= 10)
-  return Math.max(0, ...(base.length ? base : d.produtos).map((p) => taxa(p.pediram, p.vendidas)))
+function aguardando(p: ResumoProduto) {
+  return (p.status.aguardando_entrega || 0) + (p.status.entregue_sem_data || 0)
 }
-
-// "Entregue — sem data no DaVinci" à parte do "Aguardando entrega" (a regra
-// do painel: nunca dizer "aguardando" de quem já recebeu).
-type ChaveStatus = StatusGarantia | 'entregue_sem_data'
-const STATUS_ORDEM: ChaveStatus[] = ['ativa', 'somente_software', 'aguardando_entrega', 'entregue_sem_data', 'expirada']
-function rotuloStatus(s: ChaveStatus) {
-  return s === 'entregue_sem_data' ? statusInfo('aguardando_entrega', true) : statusInfo(s)
+function soma(campo: (p: ResumoProduto) => number) {
+  return produtos.value.reduce((n, p) => n + campo(p), 0)
 }
-const ORIGEM_ORDEM = Object.keys(ORIGEM_PEDIDO) as OrigemPedido[]
-function origens(d: ResumoDepartamento) {
-  return ORIGEM_ORDEM.filter((o) => (d.origens[o] || 0) > 0)
-}
-// Os produtos de cada departamento: os 10 com mais pedidos; "ver todos" abre o resto.
-const abertos = ref<Set<string>>(new Set())
-function produtosVisiveis(d: ResumoDepartamento) {
-  return abertos.value.has(d.chave) ? d.produtos : d.produtos.slice(0, 10)
-}
-function alternar(chave: string) {
-  const s = new Set(abertos.value)
-  if (s.has(chave)) s.delete(chave)
-  else s.add(chave)
-  abertos.value = s
-}
-function atendimentos(d: ResumoDepartamento) {
-  return d.atendimentos_hardware + d.atendimentos_software
+function abrir(p: ResumoProduto) {
+  if (p.pedidos.length) emit('abrir', { nome: p.nome, ids: p.pedidos })
 }
 </script>
 
 <template>
-  <section class="space-y-4" data-garantia-resumo>
+  <section class="space-y-3" data-garantia-resumo>
     <p v-if="erro" role="alert" class="flex items-center gap-2 text-sm text-destructive">
       <AlertCircle class="size-4" /> {{ erro }} <button type="button" class="underline" @click="carregar">tentar de novo</button>
     </p>
-    <div v-else-if="!resumo" class="flex items-center justify-center gap-2 rounded-lg border py-14 text-sm text-muted-foreground"><Loader2 class="size-4 animate-spin" /> montando o resumo…</div>
+    <div v-else-if="!resumo" class="flex items-center justify-center gap-2 rounded-lg border py-14 text-sm text-muted-foreground"><Loader2 class="size-4 animate-spin" /> montando a garantia por produto…</div>
     <template v-else>
-      <p class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-        <PieChart class="size-3.5" />
-        <span><strong class="text-foreground">{{ numeroBR(resumo.pediram) }}</strong> {{ resumo.pediram === 1 ? 'pedido de garantia' : 'pedidos de garantia' }} em <strong class="text-foreground">{{ numeroBR(resumo.vendidas) }}</strong> vendas com nota (<strong class="text-foreground">{{ pct(resumo.pediram, resumo.vendidas) }}</strong>) — por departamento, a categoria do produto no Bling (a mesma do Faturamento).</span>
-        <Loader2 v-if="carregando" class="size-3 animate-spin" />
-      </p>
-      <p v-if="!resumo.departamentos.length" class="rounded-lg border py-10 text-center text-sm text-muted-foreground">Nenhuma venda com esses filtros.</p>
-
-      <!-- quanto pediu garantia em cada departamento -->
-      <div v-if="resumo.departamentos.length" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4" data-departamentos>
-        <a
+      <!-- pílulas de departamento (como a Tabela de Preços) -->
+      <div class="flex flex-wrap gap-2" data-departamentos>
+        <button
           v-for="d in resumo.departamentos"
           :key="d.chave"
-          :href="`#dep-${d.chave}`"
-          class="rounded-xl border bg-card p-3 transition-colors hover:bg-muted/50 sm:p-4"
+          type="button"
+          class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors"
+          :class="departamentoAtual?.chave === d.chave ? 'border-primary bg-primary text-primary-foreground' : 'border-border hover:bg-muted'"
           :data-departamento="d.chave"
+          @click="departamento = d.chave"
         >
-          <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">{{ d.nome }}</div>
-          <div class="mt-1 flex items-baseline gap-2">
-            <span class="text-2xl font-semibold tabular-nums" data-pct>{{ pct(d.pediram, d.vendidas) }}</span>
-            <span class="text-xs text-muted-foreground">pediram garantia</span>
-          </div>
-          <div class="text-xs tabular-nums text-muted-foreground">{{ numeroBR(d.pediram) }} {{ d.pediram === 1 ? 'pedido' : 'pedidos' }} em {{ numeroBR(d.vendidas) }} {{ d.vendidas === 1 ? 'venda' : 'vendas' }}</div>
-          <div class="mt-2 h-2 rounded-full bg-muted" :title="`${d.nome}: ${numeroBR(d.pediram)} pedidos em ${numeroBR(d.vendidas)} vendas (${pct(d.pediram, d.vendidas)}) — a barra cheia é o departamento com a maior porcentagem`">
-            <div class="h-2 rounded-full bg-primary" :style="{ width: `${barra(taxa(d.pediram, d.vendidas), maiorDepartamento)}%` }" />
-          </div>
-          <div class="mt-2 flex flex-wrap gap-x-1.5 text-xs text-muted-foreground">
-            <template v-for="(c, i) in d.categorias" :key="c.nome">
-              <span v-if="i" aria-hidden="true">·</span>
-              <span :class="c.sem_categoria ? 'italic' : ''" :title="`${c.nome}: ${numeroBR(c.pediram)} pedidos em ${numeroBR(c.vendidas)} vendas${c.sem_categoria ? ' (sem categoria no pedido nem no cadastro do produto: entrou pela família do SKU)' : ''}`">{{ c.nome }} {{ pct(c.pediram, c.vendidas) }}</span>
-            </template>
-          </div>
-        </a>
+          {{ d.nome }} <span class="tabular-nums" data-pct>· {{ pct(d.pediram, d.vendidas) }}</span>
+          <span class="text-xs tabular-nums opacity-80">({{ numeroBR(d.pediram) }} de {{ numeroBR(d.vendidas) }})</span>
+        </button>
+        <Loader2 v-if="carregando" class="size-4 animate-spin self-center text-muted-foreground" />
       </div>
 
-      <!-- cada departamento em detalhe -->
-      <article v-for="d in resumo.departamentos" :id="`dep-${d.chave}`" :key="`det-${d.chave}`" class="scroll-mt-16 space-y-3 rounded-lg border bg-card p-4" :data-detalhe="d.chave">
-        <header class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h2 class="text-base font-semibold">{{ d.nome }}</h2>
-          <span class="text-sm tabular-nums text-muted-foreground">{{ numeroBR(d.pediram) }} {{ d.pediram === 1 ? 'pedido de garantia' : 'pedidos de garantia' }} em {{ numeroBR(d.vendidas) }} vendas · {{ pct(d.pediram, d.vendidas) }}</span>
-        </header>
-
-        <template v-if="d.pediram">
-          <!-- de onde vieram os pedidos -->
-          <div class="flex flex-wrap items-center gap-1.5 text-xs" data-origens>
-            <span class="text-muted-foreground">De onde vieram:</span>
-            <span v-for="o in origens(d)" :key="o" class="rounded-full border px-2 py-0.5 tabular-nums" :data-origem="o">{{ ORIGEM_PEDIDO[o].emoji }} {{ ORIGEM_PEDIDO[o].rotulo }} <strong>{{ numeroBR(d.origens[o] || 0) }}</strong></span>
-          </div>
-
-          <!-- situação da garantia de quem pediu -->
-          <div class="grid grid-cols-2 gap-2 md:grid-cols-5">
-            <div v-for="s in STATUS_ORDEM" :key="s" class="rounded-md border px-3 py-2" :data-status="s" :title="rotuloStatus(s).dica || ''">
-              <div class="truncate text-xs text-muted-foreground">{{ rotuloStatus(s).emoji }} {{ rotuloStatus(s).rotulo }}</div>
-              <div class="flex items-baseline justify-between gap-2">
-                <span class="text-lg font-semibold tabular-nums">{{ numeroBR(d.status[s] || 0) }}</span>
-                <span class="text-xs tabular-nums text-muted-foreground">{{ pct(d.status[s] || 0, d.pediram) }}</span>
-              </div>
-            </div>
-          </div>
+      <div class="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h3 class="text-base font-semibold">Garantia por produto — {{ departamentoAtual?.nome || '—' }}</h3>
           <p class="text-xs text-muted-foreground">
-            Com atendimento registrado: <strong class="text-foreground tabular-nums">{{ numeroBR(d.com_atendimento) }}</strong> de {{ numeroBR(d.pediram) }} pedidos ({{ pct(d.com_atendimento, d.pediram) }})<template v-if="atendimentos(d)"> — hardware {{ numeroBR(d.atendimentos_hardware) }} · software {{ numeroBR(d.atendimentos_software) }}</template>.
+            {{ produtos.length }} produto(s) — clique na linha para ver os pedidos de garantia daquele produto
           </p>
-        </template>
-        <p v-else class="text-xs text-muted-foreground">Nenhum pedido de garantia neste departamento.</p>
-
-        <!-- produtos (modelos) -->
-        <div class="overflow-x-auto rounded-md border">
-          <table class="w-full text-sm" :data-produtos="d.chave">
-            <thead class="bg-muted text-left">
-              <tr>
-                <th class="px-3 py-2 font-medium">Produto</th>
-                <th class="px-3 py-2 text-right font-medium">Vendidas</th>
-                <th class="whitespace-nowrap px-3 py-2 text-right font-medium">Pediram garantia</th>
-                <th class="w-[28%] px-3 py-2 font-medium">% que pediu</th>
-                <th class="whitespace-nowrap px-3 py-2 text-right font-medium" title="pedidos deste produto com pelo menos um atendimento registrado">Com atendimento</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="p in produtosVisiveis(d)" :key="p.base" class="border-t">
-                <td class="px-3 py-2">
-                  <div>{{ p.nome }}</div>
-                  <div class="font-mono text-xs text-muted-foreground">{{ p.base }}</div>
-                </td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ numeroBR(p.vendidas) }}</td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ numeroBR(p.pediram) }}</td>
-                <td class="px-3 py-2">
-                  <div class="flex items-center gap-2" :title="`${p.nome}: ${numeroBR(p.pediram)} pedidos em ${numeroBR(p.vendidas)} vendas (${pct(p.pediram, p.vendidas)})`">
-                    <div class="h-2 flex-1 rounded-full bg-muted"><div class="h-2 rounded-full bg-primary" :style="{ width: `${barra(taxa(p.pediram, p.vendidas), maiorProduto(d))}%` }" /></div>
-                    <span class="w-12 text-right text-xs tabular-nums">{{ pct(p.pediram, p.vendidas) }}</span>
-                  </div>
-                </td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ numeroBR(p.com_atendimento) }}</td>
-              </tr>
-            </tbody>
-          </table>
         </div>
-        <button v-if="d.produtos.length > 10" type="button" class="text-xs text-primary underline-offset-2 hover:underline" @click="alternar(d.chave)">
-          {{ abertos.has(d.chave) ? 'mostrar só os 10 com mais pedidos' : `ver todos os ${d.produtos.length} produtos` }}
-        </button>
-      </article>
+        <input v-model="busca" placeholder="buscar SKU ou produto…" class="w-56 rounded border bg-background px-2 py-1 text-sm" data-busca-produto>
+      </div>
+
+      <div class="max-h-[calc(100vh-320px)] overflow-auto rounded-lg border">
+        <table class="w-full border-collapse text-sm" data-produtos>
+          <thead class="sticky top-0 z-10 bg-muted">
+            <tr>
+              <th class="min-w-[120px] border-b border-border px-2 py-2 text-left font-medium">SKU</th>
+              <th class="min-w-[220px] border-b border-border px-2 py-2 text-left font-medium">Produto</th>
+              <th class="w-20 border-b border-border px-2 py-2 text-right font-medium" title="vendas com nota fiscal de produto (cada uma é uma garantia)">Vendidas</th>
+              <th class="w-20 border-b border-border px-2 py-2 text-right font-medium" title="clientes que pediram garantia (mensagem, SAC, devolução por defeito, atendimento ou cadastro à mão)">Pediram</th>
+              <th class="w-16 border-b border-border px-2 py-2 text-right font-medium">%</th>
+              <th v-for="o in ORIGENS" :key="o" class="w-24 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" :title="`pedidos que vieram de: ${ORIGEM_PEDIDO[o].rotulo}`">{{ ORIGEM_PEDIDO[o].emoji }} {{ ORIGEM_CURTA[o] }}</th>
+              <th class="w-16 border-b border-border px-2 py-2 text-right font-medium" title="pedidos que vieram de atendimento registrado, cadastro à mão ou marcados pela equipe">Outros</th>
+              <th class="w-20 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" title="dos pedidos: garantia ativa hoje (hardware e software)">🟢 Ativas</th>
+              <th class="w-20 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" title="dos pedidos: só o software ainda coberto">🔵 Só SW</th>
+              <th class="w-24 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" title="dos pedidos: aguardando a data de entrega (inclui os já entregues no Bling sem data no DaVinci)">🟡 Aguard.</th>
+              <th class="w-20 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" title="dos pedidos: garantia vencida">🔴 Expir.</th>
+              <th class="w-24 border-b border-border px-2 py-2 text-right font-medium" title="pedidos com atendimento registrado (hardware / software)">Atend.</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!produtos.length">
+              <td colspan="14" class="py-6 text-center text-muted-foreground">{{ busca.trim() ? 'Nenhum produto com essa busca.' : 'Nenhuma venda neste departamento com esses filtros.' }}</td>
+            </tr>
+            <tr
+              v-for="p in produtos"
+              :key="p.chave"
+              class="hover:bg-muted/40"
+              :class="p.pedidos.length ? 'cursor-pointer' : ''"
+              :title="p.pedidos.length ? `ver os ${p.pedidos.length} pedidos de garantia de ${p.nome}` : 'nenhum pedido de garantia'"
+              :data-produto="p.chave"
+              @click="abrir(p)"
+            >
+              <td class="border border-border px-2 py-1.5 font-mono text-xs">{{ p.skus.join(', ') }}</td>
+              <td class="border border-border px-2 py-1.5">
+                {{ p.nome }}
+                <span v-if="!p.na_tabela" class="ml-1 whitespace-nowrap rounded bg-muted px-1 text-[10px] text-muted-foreground" title="vendido, mas sem linha na Tabela de Preços">fora da Tabela de Preços</span>
+              </td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ numeroBR(p.vendidas) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right font-semibold tabular-nums">{{ numeroBR(p.pediram) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ pct(p.pediram, p.vendidas) }}</td>
+              <td v-for="o in ORIGENS" :key="o" class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.origens[o] ? '' : 'text-muted-foreground'">{{ p.origens[o] || 0 }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="outras(p) ? '' : 'text-muted-foreground'">{{ outras(p) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.status.ativa ? '' : 'text-muted-foreground'">{{ p.status.ativa || 0 }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.status.somente_software ? '' : 'text-muted-foreground'">{{ p.status.somente_software || 0 }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="aguardando(p) ? '' : 'text-muted-foreground'">{{ aguardando(p) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.status.expirada ? '' : 'text-muted-foreground'">{{ p.status.expirada || 0 }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.com_atendimento ? '' : 'text-muted-foreground'">
+                {{ p.com_atendimento }}<span v-if="p.com_atendimento" class="text-[10px] text-muted-foreground"> ({{ p.atendimentos_hardware }}/{{ p.atendimentos_software }})</span>
+              </td>
+            </tr>
+          </tbody>
+          <tfoot v-if="produtos.length" class="sticky bottom-0 bg-muted font-medium">
+            <tr data-total-departamento>
+              <td class="border border-border px-2 py-1.5" colspan="2">Total — {{ departamentoAtual?.nome }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ numeroBR(soma((p) => p.vendidas)) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ numeroBR(soma((p) => p.pediram)) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ pct(soma((p) => p.pediram), soma((p) => p.vendidas)) }}</td>
+              <td v-for="o in ORIGENS" :key="o" class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.origens[o] || 0) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma(outras) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.status.ativa || 0) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.status.somente_software || 0) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma(aguardando) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.status.expirada || 0) }}</td>
+              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.com_atendimento) }}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p class="text-xs text-muted-foreground">
+        Mensagem = o cliente escreveu no chat ou por e-mail · SAC = o formulário do site · Devolução = devolução por defeito · Outros = atendimento registrado, cadastro à mão ou marcado pela equipe. Situação e atendimentos contam só os pedidos.
+      </p>
     </template>
   </section>
 </template>

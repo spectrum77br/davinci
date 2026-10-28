@@ -1,8 +1,8 @@
-"""Resumo do Painel de Garantia (28/10/2026): as vendas com garantia e os
-PEDIDOS de garantia por departamento (Celular, Eletro, Acessórios), pela
-categoria do item no pedido do Bling — a mesma do Faturamento —, com o cadastro
-do produto e a família do SKU de reserva. A porcentagem da tela é pediram ÷
-vendidas ("a garantia é só para o pessoal que solicita", Eduardo, 28/10)."""
+"""Resumo do Painel de Garantia (28/10/2026): a garantia POR PRODUTO — uma
+linha por produto da Tabela de Preços (o modelo, com as cores juntas), as
+vendas com garantia e os PEDIDOS de garantia (a porcentagem da tela é pediram ÷
+vendidas), e o total por departamento (Celular, Eletro, Acessórios) pela
+categoria do item no pedido do Bling — a mesma do Faturamento."""
 
 import uuid
 from datetime import UTC, date, datetime
@@ -17,7 +17,9 @@ from app.models import (
     Product,
     UserRole,
 )
+from app.models.pricing import PricingProduct
 from app.models.product import ProductCategory
+from app.models.segment import Segment
 from app.services import garantia as svc
 from app.services import garantia_resumo as resumo
 
@@ -112,13 +114,31 @@ async def _garantia(
     return g
 
 
-async def test_resumo_por_departamento(client, db, make_user, auth_as):
+async def _tabela(db, dono, *linhas):
+    """Linhas da Tabela de Preços: (skus separados por vírgula, nome)."""
+    seg = Segment(name="Celular", slug=f"celular-{dono.id.hex[:6]}")
+    db.add(seg)
+    await db.flush()
+    for skus, nome in linhas:
+        db.add(PricingProduct(user_id=dono.id, sku=skus, name=nome, segment_id=seg.id))
+    await db.commit()
+
+
+async def test_resumo_por_produto(client, db, make_user, auth_as):
     dono = await make_user(role=UserRole.ADMIN)
     auth_as(dono)
     # Cadastro do produto sem categoria no pedido (dg101 — o T8 novo).
     db.add(ProductCategory(bling_category_id=8680318, name="Celular"))
     db.add(Product(user_id=dono.id, sku="dg101.pi", name="Uranyx T8", category="8680318"))
     await db.commit()
+    # A Tabela de Preços: o A17 com as cores juntas; o kit não rouba o SKU puro.
+    await _tabela(
+        db,
+        dono,
+        ("dg052,dg053,dg054", "uranyx A17 pro max 12.128"),
+        ("dg053+a003", "kit A17 + fone"),
+        ("u015", "airfryer 4L"),
+    )
     await _garantia(
         db,
         "300001",
@@ -127,8 +147,10 @@ async def test_resumo_por_departamento(client, db, make_user, auth_as):
         "Celular Kit",
         pedido="mensagem",
     )
-    await _garantia(db, "300002", "dg053.ci", "A17 Pro Max - Laranja", "Celular")
-    await _garantia(db, "300003", "dg101.pi", "Uranyx T8 - Preto", None, entrega=None, pedido="sac")
+    await _garantia(db, "300002", "dg054.ci", "A17 Pro Max - Branco", "Celular")
+    g3 = await _garantia(
+        db, "300003", "dg101.pi", "Uranyx T8 - Preto", None, entrega=None, pedido="sac"
+    )
     g4 = await _garantia(db, "300004", "u015", "Air Fryer 4L", "Eletro", pedido="atendimento")
     await _garantia(db, "300005", "a001.sp", "Fone com fio", None)  # sem categoria nenhuma
     db.add(
@@ -151,36 +173,43 @@ async def test_resumo_por_departamento(client, db, make_user, auth_as):
     assert r.status_code == 200, r.text
     h = r.json()
     assert (h["vendidas"], h["pediram"]) == (5, 3)
-    deps = {d["chave"]: d for d in h["departamentos"]}
-    # Em ordem de pedidos (celular 2, eletro 1, acessórios 0).
-    assert [d["chave"] for d in h["departamentos"]] == ["celular", "eletro", "acessorios"]
-    cel = deps["celular"]
-    assert (cel["vendidas"], cel["pediram"]) == (3, 2)
-    assert {c["nome"]: (c["vendidas"], c["pediram"]) for c in cel["categorias"]} == {
-        "Celular Kit": (1, 1),
-        "Celular": (2, 1),  # a do pedido (dg053.ci) + a do cadastro (dg101.pi)
-    }
-    # A situação e a origem: só dos pedidos.
-    assert cel["status"]["aguardando_entrega"] == 1 and cel["status"]["ativa"] == 1
-    assert cel["origens"]["mensagem"] == 1 and cel["origens"]["sac"] == 1
-    assert [(p["base"], p["vendidas"], p["pediram"]) for p in cel["produtos"]] == [
-        ("dg053", 2, 1),
-        ("dg101", 1, 1),
+    # As pílulas: o total por departamento, em ordem de pedidos.
+    assert [(d["chave"], d["vendidas"], d["pediram"]) for d in h["departamentos"]] == [
+        ("celular", 3, 2),
+        ("eletro", 1, 1),
+        ("acessorios", 1, 0),
     ]
-    assert cel["produtos"][0]["nome"] == "A17 Pro Max - Laranja"
-    ele = deps["eletro"]
-    assert (ele["vendidas"], ele["pediram"], ele["com_atendimento"]) == (1, 1, 1)
-    assert ele["atendimentos_hardware"] == 1
-    ace = deps["acessorios"]
-    assert (ace["vendidas"], ace["pediram"]) == (1, 0)
-    assert ace["categorias"] == [
-        {"nome": "sem categoria no Bling", "vendidas": 1, "pediram": 0, "sem_categoria": True}
-    ]
+    por = {p["chave"].split(":", 1)[0] + ":" + p["skus"][0]: p for p in h["produtos"]}
+    a17 = next(p for p in h["produtos"] if p["skus"] == ["dg052", "dg053", "dg054"])
+    assert (a17["nome"], a17["na_tabela"], a17["departamento"]) == (
+        "uranyx A17 pro max 12.128",
+        True,
+        "celular",
+    )
+    assert (a17["vendidas"], a17["pediram"], a17["origens"]["mensagem"]) == (2, 1, 1)
+    assert a17["status"]["ativa"] == 1 and len(a17["pedidos"]) == 1
+    # Fora da Tabela de Preços: pelo SKU, com a descrição da venda.
+    t8 = por["sku:dg101"]
+    assert (t8["na_tabela"], t8["nome"], t8["pediram"]) == (False, "Uranyx T8 - Preto", 1)
+    assert t8["status"]["aguardando_entrega"] == 1 and t8["pedidos"] == [g3.id]
+    ar = next(p for p in h["produtos"] if p["skus"] == ["u015"])
+    assert (ar["departamento"], ar["com_atendimento"], ar["atendimentos_hardware"]) == (
+        "eletro",
+        1,
+        1,
+    )
+    # Em ordem de pedidos; o produto sem pedido fica no fim.
+    assert h["produtos"][-1]["pediram"] == 0
 
     # Os filtros da barra valem nas vendidas e nos pedidos: só as aguardando entrega.
     r = await client.post("/api/garantias/resumo", json={"status": "aguardando_entrega"})
     assert (r.json()["vendidas"], r.json()["pediram"]) == (1, 1)
-    assert r.json()["departamentos"][0]["produtos"][0]["base"] == "dg101"
+    assert r.json()["produtos"][0]["skus"] == ["dg101"]
+    # A linha abre os pedidos dela na lista.
+    itens = (await client.post("/api/garantias/lista", json={"ids": a17["pedidos"]})).json()[
+        "itens"
+    ]
+    assert [i["pedido_bling"] for i in itens] == ["300001"]
 
 
 async def test_resumo_sem_as_descartadas_e_sem_o_nao_e_pedido(client, db, make_user, auth_as):
@@ -193,7 +222,7 @@ async def test_resumo_sem_as_descartadas_e_sem_o_nao_e_pedido(client, db, make_u
     await db.commit()
     h = (await client.post("/api/garantias/resumo", json={})).json()
     assert (h["vendidas"], h["pediram"]) == (1, 0)
-    assert h["departamentos"][0]["chave"] == "eletro"
+    assert h["departamentos"][0]["chave"] == "eletro" and len(h["produtos"]) == 1
 
 
 async def test_periodo_pelo_pedido_conta_so_os_pedidos(client, db, make_user, auth_as):
@@ -220,5 +249,6 @@ async def test_entregue_sem_data_fica_fora_do_aguardando(client, db, make_user, 
     linha = (await db.execute(select(BlingOrder).where(BlingOrder.numero == "300031"))).scalar_one()
     linha.situacao = "83953"  # Entregue no Bling, sem data no DaVinci
     await db.commit()
-    st = (await client.post("/api/garantias/resumo", json={})).json()["departamentos"][0]["status"]
+    [p] = (await client.post("/api/garantias/resumo", json={})).json()["produtos"]
+    st = p["status"]
     assert (st["aguardando_entrega"], st["entregue_sem_data"]) == (1, 1)

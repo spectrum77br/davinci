@@ -694,9 +694,10 @@ async def resumo(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_consultar)],
 ) -> ResumoOut:
-    """Resumo (28/10/2026): as garantias por departamento (Celular, Eletro,
-    Acessórios…), com os filtros da barra (período, origem, status). Só
-    contagens — sem nome nem CPF."""
+    """Resumo (28/10/2026): a garantia por produto — as vendas com garantia e
+    os pedidos de garantia por produto da Tabela de Preços e por departamento,
+    com os filtros da barra (período, origem, status). Só contagens — sem nome
+    nem CPF."""
     from app.services import garantia_resumo
 
     dia = svc.hoje()
@@ -728,6 +729,8 @@ async def listar(
     if cpf:
         await _teto_da_busca_por_cpf(user)
     filtros = _filtros_do_painel(body, escopo, dia)
+    if body.ids:
+        filtros.append(Garantia.id.in_(body.ids))
     if (f := _filtro_busca(body.busca)) is not None:
         filtros.append(f)
     elif body.mostrar == "pedidos" or _filtros_do_pedido(body):

@@ -692,6 +692,8 @@ export type FiltrosLista = {
   // Pedido de garantia (28/10/2026): o Painel é dos pedidos; "todas" mostra
   // também a venda sem pedido.
   mostrar?: 'pedidos' | 'todas'
+  // A garantia por produto: a linha do produto abre os pedidos dela.
+  ids?: number[]
 }
 
 export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'pedido', de: '', ate: '', com_atendimento_no_mes: false, mostrar: 'pedidos' }
@@ -711,6 +713,7 @@ export type CorpoLista = {
   com_conversa?: boolean
   origem?: 'robo' | 'manual'
   mostrar?: 'todas'
+  ids?: number[]
 }
 
 /**
@@ -734,20 +737,25 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
   if (f.com_conversa && !busca) q.com_conversa = true
   if (f.origem && f.origem !== 'todas') q.origem = f.origem
   if (f.mostrar === 'todas') q.mostrar = 'todas'
+  if (f.ids?.length) q.ids = f.ids
   return q
 }
 
 // ─── resumo por departamento (28/10/2026) ───────────────────────────────────
-// POST /api/garantias/resumo: as vendas com garantia e os PEDIDOS de
-// garantia por departamento (a categoria do produto no Bling, a mesma do
-// Faturamento). A porcentagem é pediram ÷ vendidas ("a garantia é só para o
-// pessoal que solicita", Eduardo, 28/10). Só contagens: as porcentagens são
-// feitas aqui, de um jeito só.
-export type ResumoCategoria = { nome: string; vendidas: number; pediram: number; sem_categoria: boolean }
-export type ResumoProduto = { base: string; nome: string; vendidas: number; pediram: number; com_atendimento: number }
-export type ResumoDepartamento = {
-  chave: 'celular' | 'eletro' | 'acessorios' | 'outros'
+// POST /api/garantias/resumo: a garantia POR PRODUTO (28/10/2026) — uma
+// linha por produto da Tabela de Preços (o modelo, com as cores juntas), com
+// as vendas com garantia, os PEDIDOS de garantia (a porcentagem é pediram ÷
+// vendidas — "a garantia é só para o pessoal que solicita", Eduardo), de onde
+// veio o pedido, a situação e os atendimentos; e o total por departamento (as
+// pílulas). Só contagens: as porcentagens são feitas aqui, de um jeito só.
+export type ResumoDepartamento = { chave: 'celular' | 'eletro' | 'acessorios' | 'outros'; nome: string; vendidas: number; pediram: number }
+export type ResumoProduto = {
+  chave: string
+  departamento: ResumoDepartamento['chave']
   nome: string
+  skus: string[]
+  // false = vendido, mas sem linha na Tabela de Preços (entra pelo SKU).
+  na_tabela: boolean
   vendidas: number
   pediram: number
   // Dos PEDIDOS: os 4 status e, à parte, "entregue_sem_data" (o Bling já
@@ -757,10 +765,10 @@ export type ResumoDepartamento = {
   com_atendimento: number
   atendimentos_hardware: number
   atendimentos_software: number
-  categorias: ResumoCategoria[]
-  produtos: ResumoProduto[]
+  // As garantias com pedido (a linha abre a lista delas).
+  pedidos: number[]
 }
-export type Resumo = { vendidas: number; pediram: number; hoje: string; departamentos: ResumoDepartamento[] }
+export type Resumo = { vendidas: number; pediram: number; hoje: string; departamentos: ResumoDepartamento[]; produtos: ResumoProduto[] }
 
 // O corpo do resumo: os filtros da barra (período, origem, status) — a
 // busca e o "só com conversa" são da lista.
