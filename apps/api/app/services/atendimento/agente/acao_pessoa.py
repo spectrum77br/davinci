@@ -1124,8 +1124,12 @@ _PEDIDO_NA_DEVOLUCAO = re.compile(
     r"|\bpreciso\s+que\b|\babsurd\w*|\bdescaso\b|\bgolpe\w*|\bfraude\w*"
 )
 # O atraso longo ("já faz 40 dias que devolvi"): fora do prazo comum da plataforma.
+# "Semanas" sem número ("faz semanas") ou de três para cima é atraso longo; "duas
+# semanas" (14 dias) não chega ao `DIAS_DE_ATRASO_LONGO` (28/10/2026, 1e2dd5ac: "já
+# fiz quase duas semanas" segurava o D1 que a régua dos dias deixaria passar).
 _ATRASO_LONGO = re.compile(
-    r"\b(?P<dias>\d{2,3})\s*dias\b|\b(?:um|1|dois|2|tres|3)\s+mes(?:es)?\b|\bsemanas\b"
+    r"\b(?P<dias>\d{2,3})\s*dias\b|\b(?:um|1|dois|2|tres|3)\s+mes(?:es)?\b"
+    r"|(?<!\bduas\s)(?<!\b2\s)\bsemanas\b"
 )
 DIAS_DE_ATRASO_LONGO = 15
 
@@ -1287,7 +1291,10 @@ _DECISAO_NA_DEVOLUCAO = re.compile(
     r"|\bprocess(?:o|ar|arei|aremos)\b|\bjudicia\w*|\bquebr\w*|\bdanific\w*|\bamass\w*|\bdefeit\w*"
     r"|\briscad\w*|\bestragad\w*|\bavaria\w*|\bembalad\w*|\breceberam\b|\b(?:voce|voces|vc|vcs)\s+"
     r"(?:podem|pode|poderiam|poderia|consegue|conseguem|vao|vai|tem\s+como)\b"
-    r"|\bquer(?:o|ia|emos)\b(?!\s+saber)"
+    # "Quero o meu dinheiro de volta" com a devolução JÁ aberta é a própria solicitação
+    # (28/10/2026, 1e2dd5ac/25c0a87f: a equipe responde o status) — não é pedido à loja.
+    r"|\bquer(?:o|ia|emos)\b(?!\s+saber)(?!\s+(?:(?:o|a|meu|minha|esse|essa|este|esta)\s+)?"
+    r"(?:dinheiro|reembolso|estorno|ressarcimento)\b)"
     r"|\bposso\b(?!\s+(?:acompanhar|ver|consultar|saber|postar|enviar|mandar|levar|entregar))"
     r"|\bpreciso\s+que\b|\babsurd\w*|\bdescaso\b|\bgolpe\w*|\bfraude\w*"
     r"|\bchamado\b|\bfoto\w*|\bvideo\w*|\bimage\w*|\bnota\s+fiscal\b|\bnf\b|\bdesconto\w*"
@@ -1297,6 +1304,26 @@ _DECISAO_NA_DEVOLUCAO = re.compile(
 # A fala curta que segue a do assunto ("Porque só dia 30", "e agora?", "?"): sem o
 # assunto, mas sem pedido nem problema, ela não tira o turno da informação.
 MAX_PALAVRAS_FALA_CURTA = 10
+
+
+def reclamacao_em_disputa(ctx: Mapping[str, Any] | None) -> bool:
+    """Alguma reclamação/devolução aberta do pedido está em DISPUTA? PURA (28/10/2026,
+    25c0a87f: a loja contestou e o cliente só pedia o reembolso). Na disputa — a loja
+    contestou, a Shopee julgando, a TikTok com o pacote recusado — o que se diz entra
+    nela e o reembolso não é certo: pessoa, nunca o D1. O status é o rótulo da tela
+    (`reclamacoes_devolucoes.STATUS_TELA`, o mesmo de `contexto`)."""
+    from app.services.atendimento.reclamacoes_devolucoes import STATUS_TELA
+
+    em_disputa = {
+        STATUS_TELA["shopee"]["SELLER_DISPUTE"],
+        STATUS_TELA["shopee"]["JUDGING"],
+        STATUS_TELA["tiktok"]["REJECT_RECEIVE_PACKAGE"],
+    }
+    ctx = ctx if isinstance(ctx, Mapping) else {}
+    return any(
+        isinstance(r, dict) and r.get("aberta") and r.get("status") in em_disputa
+        for r in ctx.get("reclamacoes") or []
+    )
 
 
 def turno_informativo_da_devolucao(textos: Iterable[str | None]) -> bool:
@@ -1377,7 +1404,8 @@ def responde_e_marca_do_turno(
     """O turno pode ser respondido E continuar marcado para pessoa (D1, ver acima)? PURA
     (fora a chave). Todas juntas: a chave ligada; Shopee ou TikTok; fora o canal de
     reclamação e a reclamação do ML (`claim_ids`); nenhuma reclamação de OUTRA conversa
-    (o cartão Cliente); nenhum chamado no pedido; a devolução/reclamação ABERTA na
+    (o cartão Cliente); nenhum chamado no pedido; nenhuma em disputa
+    (`reclamacao_em_disputa`); a devolução/reclamação ABERTA na
     plataforma (o contexto, o retrato em devolução ou o cartão aberto); a devolução de
     rotina não (ela nem precisa de pessoa); `acoes` (as do código, quando já se sabem)
     só as de `ACOES_POS_ENVIO`; nenhum anexo no turno; e o turno informativo
@@ -1392,6 +1420,7 @@ def responde_e_marca_do_turno(
         or constantes.reclamacao_aberta(getattr(conversa, "dados", None))
         or "reclamacao_aberta" in sinais_do_cliente
         or ctx.get("chamados")
+        or reclamacao_em_disputa(ctx)
     ):
         return False
     if acoes is not None and not set(acoes) <= ACOES_POS_ENVIO:

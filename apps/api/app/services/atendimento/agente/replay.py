@@ -1676,19 +1676,21 @@ async def _um(conversa_id: UUID, gatilho_id: UUID, as_of: datetime) -> ReplayGat
         return await rodar_gatilho(s, conversa, as_of, gravar=True, gatilho_id=gatilho_id)
 
 
-# A parte do teto do DIA que o replay, o eval e a calibração podem gastar
-# (ajuste r3 de 20/10/2026): o dia é um só (`custo.CHAVE_DIA`), mas o resto
-# fica de reserva para o agente AO VIVO — antes o replay das 02:00 podia gastar
-# o dia inteiro e pausar a Kia até a meia-noite.
-REPLAY_FRACAO_DO_DIA = 0.5
+# A parte do teto do dia DOS TESTES que o replay, o eval e a calibração podem
+# gastar. Desde 28/10/2026 (o dono) o dia dos testes é outro
+# (`custo.CHAVE_DIA_REPLAY`, `atendimento_agente_teto_usd_dia_replay`): o agente
+# AO VIVO tem o dia dele inteiro — em 27/10 o eval somou US$ 10 no dia único
+# (que só reservava a metade, ajuste r3 de 20/10) e o ao vivo parou das 13:06 à
+# meia-noite. Aqui a fração só deixa os testes pararem antes do próprio teto.
+REPLAY_FRACAO_DO_DIA = 1.0
 
 
 async def parte_do_dia_gasta(agora: datetime | None = None) -> bool:
-    """O gasto do dia já chegou à parte do replay/eval (`REPLAY_FRACAO_DO_DIA` do teto)?"""
-    teto = float(get_settings().atendimento_agente_teto_usd_dia or 0)
+    """O gasto dos testes no dia já chegou à parte deles (`REPLAY_FRACAO_DO_DIA` do teto deles)?"""
+    teto = custo.teto_do_dia(replay=True)
     if teto <= 0:
         return False
-    return await custo.gasto_do_dia(agora) >= REPLAY_FRACAO_DO_DIA * teto
+    return await custo.gasto_do_dia(agora, replay=True) >= REPLAY_FRACAO_DO_DIA * teto
 
 
 async def replay_noturno(

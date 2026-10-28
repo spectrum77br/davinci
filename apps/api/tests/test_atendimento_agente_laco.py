@@ -1365,7 +1365,9 @@ async def test_replay_soma_na_chave_propria_da_conversa_e_com_o_teto_da_vez(peca
     ao_vivo = custo.CHAVE_CONVERSA.format(schema=s, dia=dia, conversa=conversa.id)
     do_replay = custo.CHAVE_CONVERSA_REPLAY.format(schema=s, dia=dia, conversa=conversa.id)
     assert ao_vivo not in pecas.redis.valores and float(pecas.redis.valores[do_replay]) > 0
-    assert float(pecas.redis.valores[custo.CHAVE_DIA.format(schema=s, dia=dia)]) > 0
+    # 28/10/2026: o dia dos testes é outro — o do agente ao vivo nem existe.
+    assert float(pecas.redis.valores[custo.CHAVE_DIA_REPLAY.format(schema=s, dia=dia)]) > 0
+    assert custo.CHAVE_DIA.format(schema=s, dia=dia) not in pecas.redis.valores
 
 
 async def test_o_tempo_estourado_conta_e_na_segunda_vez_vai_para_pessoa(pecas):

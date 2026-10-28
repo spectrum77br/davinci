@@ -725,6 +725,10 @@ class Settings(BaseSettings):
     # 0,05 → 0,50 (várias rodadas numa conversa) e o do dia 5 → 10.
     atendimento_agente_teto_usd_dia: float = 10.0
     atendimento_agente_teto_usd_conversa: float = 0.50
+    # O dia dos TESTES (o replay da noite, o eval e a calibração) é outro (o dono,
+    # 28/10/2026: em 27/10 o eval comeu o dia único e o agente ao vivo parou às 13:06):
+    # o gasto deles nunca tira o do agente ao vivo (`agente.custo.CHAVE_DIA_REPLAY`).
+    atendimento_agente_teto_usd_dia_replay: float = 20.0
     # O VERIFICADOR semântico do agente (20/10/2026,
     # `services/atendimento/agente/verificador.py`): depois das checagens de
     # frase, UMA requisição ao Haiku 5.5 (sem ferramentas, mesmo teto em

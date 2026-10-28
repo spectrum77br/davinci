@@ -626,6 +626,15 @@ TURNOS_D1 = [
     ["Já solicitei meu reembolso", "Pois o pedido não chegou"],
     ["Já solicitei meu reembolso", "Pois o pedido não chegou", "6"],
     ["Como faço para postar o produto de volta?"],
+    # 28/10/2026 (1e2dd5ac, anonimizado): o "quero o dinheiro de volta" com a devolução
+    # já aberta é a própria solicitação, e "quase duas semanas" não chega a 15 dias.
+    [
+        "Porque já fiz quase duas semanas",
+        "Pôr favor manda o dinheiro do reembolso",
+        "Eu quero esse dinheiro urgente",
+        "Eu só quero o dinheiro de volta",
+    ],
+    ["Quero meu reembolso de volta"],
 ]
 
 
@@ -661,11 +670,26 @@ async def test_d1_o_turno_informativo_responde_e_marca(falas):
         (["Eu tô esperando o dinheiro", "meu pix é a chave do celular"], {}, {}),
         (["O reembolso não caiu e o produto veio quebrado"], {}, {}),
         (["Já faz 40 dias que pedi o reembolso"], {}, {}),
+        (["Faz semanas que espero o reembolso"], {}, {}),
+        (["Já são três semanas sem o reembolso"], {}, {}),
+        (["Quero o reembolso parcial"], {}, {}),
+        (["Quero meu dinheiro de volta, o produto veio quebrado"], {}, {}),
         (["Vou no Procon se não devolverem meu dinheiro"], {}, {}),
         (["Eu tô esperando o reembolso", "quero falar com uma pessoa"], {}, {}),
         (["Cadê meu reembolso? me manda a nota fiscal"], {}, {}),
         # O chamado no pedido, a reclamação do ML e o canal de reclamação.
         (["Eu tô esperando o dinheiro do celular"], {"chamados": [{"status": "aberto"}]}, {}),
+        # 28/10/2026 (25c0a87f): a reclamação em DISPUTA (a loja contestou) é da pessoa.
+        (
+            ["Quero meu reembolso de volta"],
+            {"reclamacoes": [_reclamacao(status="Loja contestou")]},
+            {},
+        ),
+        (
+            ["Eu tô esperando o dinheiro do celular"],
+            {"reclamacoes": [_reclamacao(status="Em análise pela Shopee (disputa)")]},
+            {},
+        ),
         (["Eu tô esperando o dinheiro do celular"], {}, {"plataforma": "ml"}),
         (["Eu tô esperando o dinheiro do celular"], {}, {"canal": constantes.CANAL_RECLAMACAO}),
     ],

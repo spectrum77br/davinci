@@ -1063,19 +1063,25 @@ async def test_com_o_redis_fora_o_verificador_ve_o_gasto_do_laco(monkeypatch):
     assert e.value.qual == custo.TETO_CONVERSA
 
 
-@pytest.mark.parametrize(("gasto", "parou"), [(2.4, False), (2.5, True), (4.0, True)])
-async def test_o_replay_e_o_eval_param_na_metade_do_dia(monkeypatch, gasto, parou):
+@pytest.mark.parametrize(("gasto", "parou"), [(4.9, False), (5.0, True), (8.0, True)])
+async def test_o_replay_e_o_eval_param_no_teto_do_dia_deles(monkeypatch, gasto, parou):
+    """28/10/2026: os testes têm o dia deles (`custo.CHAVE_DIA_REPLAY`) — param no
+    teto DELES e nunca olham (nem comem) o dia do agente ao vivo."""
     from app.config import get_settings
     from app.services.atendimento.agente import custo
 
-    monkeypatch.setattr(get_settings(), "atendimento_agente_teto_usd_dia", 5.0)
+    monkeypatch.setattr(get_settings(), "atendimento_agente_teto_usd_dia_replay", 5.0)
+    monkeypatch.setattr(get_settings(), "atendimento_agente_teto_usd_dia", 0.01)
+    lados: list[bool] = []
 
-    async def gasto_do_dia(agora=None):
-        return gasto
+    async def gasto_do_dia(agora=None, *, replay=False):
+        lados.append(replay)
+        return gasto if replay else 999.0
 
     monkeypatch.setattr(custo, "gasto_do_dia", gasto_do_dia)
     assert await replay.parte_do_dia_gasta() is parou
-    monkeypatch.setattr(get_settings(), "atendimento_agente_teto_usd_dia", 0)
+    assert lados == [True]
+    monkeypatch.setattr(get_settings(), "atendimento_agente_teto_usd_dia_replay", 0)
     assert await replay.parte_do_dia_gasta() is False
 
 

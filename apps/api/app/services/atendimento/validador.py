@@ -531,6 +531,16 @@ _MEDIDA_DE_TELA = re.compile(
     r"\b(?:tela|display|visor)\b[^\d\n.!?]{0,30}" + _TAMANHO_DE_TELA
     + r"|" + _TAMANHO_DE_TELA + r"\s*(?:de\s+)?(?:tela|display)\b"
 )
+# A variação de MEMÓRIA do celular ("12.64", "8,128", "4/64": RAM.armazenamento,
+# como os anúncios Uranyx escrevem — "F105 - 12.64 + 64 Sd Card", "Branco 12.64
+# está esgotada") não é preço: em 28/10/2026 ela barrava a resposta do agente como
+# "valor em R$" (b10e8d7b, c790959a). Só os pares de memória que existem (RAM de
+# 1 a 32, armazenamento de 8 a 1024); sai do texto antes de procurar valor, como
+# a medida de tela. "R$ 12.64" e "12,64 reais" continuam valor (o R$ e o "reais").
+_VARIACAO_DE_MEMORIA = re.compile(
+    r"(?<![\d.,/])(?:1|2|3|4|6|8|12|16|24|32)\s*[.,/]\s*(?:8|16|32|64|128|256|512|1024)"
+    r"(?![\d]|[.,]\d)(?!\s*reais\b)"
+)
 _DIA_DA_SEMANA = r"(?:segunda|terca|quarta|quinta|sexta|sabado|domingo)"
 
 _VALOR = (
@@ -957,7 +967,7 @@ def validar(
     # Só IA: prazo e valor vinculam — só por lacuna preenchida pelo código.
     if origem == ORIGEM_IA:
         do_prazo = _sem_prazo_da_regra(plano, prazos_de_garantia) if prazos_de_garantia else plano
-        if _algum(_VALOR, _MEDIDA_DE_TELA.sub(" ", plano)):
+        if _algum(_VALOR, _VARIACAO_DE_MEMORIA.sub(" ", _MEDIDA_DE_TELA.sub(" ", plano))):
             motivos.append(_MOTIVO_VALOR)
         if _PERCENTUAL.search(plano):
             motivos.append(_MOTIVO_PERCENTUAL)

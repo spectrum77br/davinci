@@ -191,6 +191,7 @@ def avisos(monkeypatch) -> list[str]:
 def tetos(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "atendimento_agente_teto_usd_dia", 5.0)
+    monkeypatch.setattr(s, "atendimento_agente_teto_usd_dia_replay", 10.0)
     monkeypatch.setattr(s, "atendimento_agente_teto_usd_conversa", 0.05)
     return s
 
@@ -802,6 +803,42 @@ async def test_teto_do_dia_para_e_avisa_uma_vez(redis_falso, avisos, tetos):
         await custo.registrar(caro, "claude-haiku-5-5")
     assert len(avisos) == 1
     assert "teto do dia" in avisos[0] and "0.01" in avisos[0]
+
+
+async def test_os_testes_tem_o_dia_deles_e_nao_param_o_ao_vivo(redis_falso, avisos, tetos):
+    """28/10/2026 (o dono): em 27/10 o eval somou US$ 10 no dia único e o agente ao
+    vivo parou das 13:06 à meia-noite. O replay/eval/calibração somam no dia DELES,
+    com o teto deles; o ao vivo só olha o dele."""
+    tetos.atendimento_agente_teto_usd_dia = 0.01
+    tetos.atendimento_agente_teto_usd_dia_replay = 0.02
+    caro = {"input_tokens": 0, "output_tokens": 30_000}  # US$ 0,015
+    agora = datetime(2026, 10, 27, 16, 0, tzinfo=UTC)  # 27/10 13:00 em São Paulo
+    schema = get_settings().database_schema
+    dia = f"atd:agente:usd:{schema}:2026-10-27"
+    await custo.registrar(caro, "claude-haiku-5-5", conversa_id=uuid4(), replay=True, agora=agora)
+    assert float(redis_falso.valores[f"{dia}:replay"]) == pytest.approx(0.015)
+    assert dia not in redis_falso.valores
+    assert await custo.gasto_do_dia(agora) == 0.0
+    assert await custo.gasto_do_dia(agora, replay=True) == pytest.approx(0.015)
+    # O ao vivo segue: o teto dele (0,01) não viu o gasto dos testes (0,015).
+    await custo.conferir_teto(conversa_id=uuid4(), agora=agora)
+    # Os testes param no teto DELES, com o aviso deles (uma vez).
+    with pytest.raises(custo.TetoEstourado) as erro:
+        await custo.registrar(
+            caro, "claude-haiku-5-5", conversa_id=uuid4(), replay=True, agora=agora
+        )
+    assert erro.value.qual == custo.TETO_DIA and erro.value.teto == 0.02
+    with pytest.raises(custo.TetoEstourado):
+        await custo.conferir_teto(conversa_id=uuid4(), replay=True, agora=agora)
+    assert len(avisos) == 1 and "testes" in avisos[0] and "ao vivo segue" in avisos[0]
+    await custo.conferir_teto(conversa_id=uuid4(), agora=agora)
+    # E o ao vivo, quando passa do dele, avisa com o aviso dele.
+    with pytest.raises(custo.TetoEstourado):
+        await custo.registrar(caro, "claude-haiku-5-5", conversa_id=uuid4(), agora=agora)
+    assert len(avisos) == 2 and "Caixa Humano" in avisos[1]
+    # A estimativa do replay também cai no dia dos testes.
+    await custo.registrar_estimativa(0.5, replay=True, agora=agora)
+    assert await custo.gasto_do_dia(agora) == pytest.approx(0.015)
 
 
 async def test_aviso_que_nao_saiu_tenta_de_novo(redis_falso, monkeypatch, tetos):

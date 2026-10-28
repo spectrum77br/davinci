@@ -47,7 +47,8 @@ Ajuste r3 de 20/10/2026:
   - o cliente próprio SEM novas tentativas (`MAX_RETRIES = 0`, como ao vivo):
     cada requisição cobrada passa pelo `registrar`/`registrar_estimativa`;
   - não começa com o dia já na parte do replay/eval
-    (`replay.REPLAY_FRACAO_DO_DIA` do teto do dia: a reserva do ao vivo).
+    (`replay.REPLAY_FRACAO_DO_DIA` do teto do dia DOS TESTES — desde 28/10/2026
+    os testes têm o dia deles e nunca comem o do agente ao vivo).
 
 Ajuste rf3 de 21/10/2026: o grupo `fresco2` (40 casos: as paráfrases que a
 re-revisão r3 achou passando na 1ª camada em prazo_envio, rastreio e
@@ -690,8 +691,9 @@ async def principal(
         return NA_JANELA
     if await replay.parte_do_dia_gasta():
         print(
-            "o gasto do dia já passou da parte do replay/eval "
-            f"({replay.REPLAY_FRACAO_DO_DIA:.0%} do teto do dia): nada rodou",
+            "o gasto dos testes no dia já chegou ao teto deles "
+            f"({replay.REPLAY_FRACAO_DO_DIA:.0%} de atendimento_agente_teto_usd_dia_replay): "
+            "nada rodou",
             file=eco,
         )
         return PAROU_NO_TETO

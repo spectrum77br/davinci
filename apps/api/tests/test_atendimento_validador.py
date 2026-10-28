@@ -452,6 +452,38 @@ def test_so_ia_buracos_da_revisao(texto, motivo):
     assert so_da_ia(motivos_ia)
 
 
+_MOTIVO_VALOR = "valor em R$ só pode vir do sistema"
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # 28/10/2026 (b10e8d7b, c790959a): a variação de memória não é preço.
+        "Olá! O seu pedido é o Uranyx F105 12.64 + 64 Sd Card, variação F105 - 12.64 GB.",
+        "O modelo é o A17 Pro Max, com a 12.128 Laranja. A cor Branco 12.64 está esgotada.",
+        "Temos a versão 8,256 e a 4/64.",
+        "A variação 6.32 está disponível.",
+    ],
+)
+def test_so_ia_variacao_de_memoria_nao_e_valor(texto):
+    assert _MOTIVO_VALOR not in _v(texto, origem=ORIGEM_IA), texto
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "custa R$ 12.64",
+        "fica 12,64 reais",
+        "sai por 59.90",
+        "sai por 2.256,00",
+        "sai por 1.128,00 no pix",
+        "Esse modelo custa 199,90.",
+    ],
+)
+def test_so_ia_preco_perto_da_memoria_continua_valor(texto):
+    assert _MOTIVO_VALOR in _v(texto, origem=ORIGEM_IA), texto
+
+
 def test_pergunta_publica_do_ml_nao_publica_preco():
     assert "valor em R$ só pode vir do sistema" in _v(
         "Custa 199,90.", plataforma="ml", canal="pergunta", origem=ORIGEM_IA

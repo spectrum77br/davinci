@@ -35,8 +35,9 @@ decisão 12). Nada é enviado nem vira rascunho; a sessão é só leitura.
 Este script: recusa sem a chave e dentro da janela; roda 4 conversas por vez
 (`--concorrencia`); para de começar item novo quando o gasto DESTA execução
 chega ao `--teto-usd` (padrão US$ 2) ou quando o relógio entra numa janela
-(o teto do DIA do agente, `atendimento_agente_teto_usd_dia`, também vale:
-parada "teto"); imprime o custo até ali a cada item. `--gravar` também grava
+(o teto do DIA dos testes, `atendimento_agente_teto_usd_dia_replay`, também
+vale: parada "teto"; desde 28/10/2026 ele é separado do dia do agente ao
+vivo); imprime o custo até ali a cada item. `--gravar` também grava
 em `atendimento_agente_replay` (só para UM braço: a linha é por gatilho e dia).
 Saída: 0 ok; 2 sem chave; 3 na janela; 4 parou no teto; 5 parou na janela; 6 parou
 no provedor (sem crédito ou no limite da API).
@@ -249,7 +250,7 @@ async def principal(
                 estado["codigo"] = PAROU_NA_JANELA
                 return
             if not legado and await replay.parte_do_dia_gasta():
-                # A reserva do agente ao vivo (`replay.REPLAY_FRACAO_DO_DIA`).
+                # O teto do dia dos testes (`replay.REPLAY_FRACAO_DO_DIA`).
                 estado["codigo"] = PAROU_NO_TETO
                 return
             estado["em_voo"] += 1

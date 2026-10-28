@@ -11,11 +11,15 @@ incluso). O preço é por modelo e, no Haiku 5.5, por TAMANHO do prompt: até
 `registrar` soma o custo de cada requisição no Redis, no dia de São Paulo
 (`atd:agente:usd:{schema}:{AAAA-MM-DD}`) e na conversa naquele dia
 (`atd:agente:usd:{schema}:{AAAA-MM-DD}:conversa:{id}`), e levanta
-`TetoEstourado` quando a soma passa do teto. O DIA é um só (replay e eval
-somam junto, decisão do dono); a CONVERSA do replay/eval tem chave própria
-(`…:replay:conversa:{id}`, revisão de 20/10/2026: a noite não come o teto da
-conversa ao vivo) e pode ter outro teto (`teto_conversa`: o braço Sonnet do
-eval custa ~10× o Haiku). O teto do DIA avisa no Telegram uma vez por dia.
+`TetoEstourado` quando a soma passa do teto. O DIA do agente AO VIVO e o
+dos TESTES (o replay da noite, o eval e a calibração) são separados (o dono,
+28/10/2026: em 27/10 o eval somou US$ 10 no dia único e o agente ao vivo
+parou das 13:06 à meia-noite): os testes somam em `…:{AAAA-MM-DD}:replay`,
+com o teto deles (`atendimento_agente_teto_usd_dia_replay`), e nunca comem
+o teto do ao vivo (`atendimento_agente_teto_usd_dia`). A CONVERSA do
+replay/eval também tem chave própria (`…:replay:conversa:{id}`, revisão de
+20/10/2026) e pode ter outro teto (`teto_conversa`: o braço Sonnet do eval
+custa ~10× o Haiku). O teto de cada DIA avisa no Telegram uma vez por dia.
 A requisição que estourou o tempo não devolve o `usage` (o servidor pode ter
 cobrado): `registrar_estimativa` soma o custo provável dela no dia. O schema
 na chave é o mesmo cuidado do `ia._CHAVE_TETO`: os testes de cada lote rodam
@@ -43,12 +47,15 @@ from app.redis_client import redis
 
 logger = structlog.get_logger()
 
-# A chave do dia e a da conversa (o schema separa produção e testes).
+# A chave do dia e a da conversa (o schema separa produção e testes); o dia
+# dos testes (replay, eval, calibração) é outro (28/10/2026).
 CHAVE_DIA = "atd:agente:usd:{schema}:{dia}"
+CHAVE_DIA_REPLAY = "atd:agente:usd:{schema}:{dia}:replay"
 CHAVE_CONVERSA = "atd:agente:usd:{schema}:{dia}:conversa:{conversa}"
 CHAVE_CONVERSA_REPLAY = "atd:agente:usd:{schema}:{dia}:replay:conversa:{conversa}"
-# O aviso do teto do dia no Telegram: um por dia.
+# O aviso do teto do dia no Telegram: um por dia (e um do dia dos testes).
 CHAVE_AVISO = "atd:agente:usd:{schema}:{dia}:avisado"
+CHAVE_AVISO_REPLAY = "atd:agente:usd:{schema}:{dia}:replay:avisado"
 TTL_S = 2 * 24 * 3600
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
@@ -285,18 +292,27 @@ def _chaves(
 ) -> tuple[str, str | None]:
     schema = get_settings().database_schema
     modelo = CHAVE_CONVERSA_REPLAY if replay else CHAVE_CONVERSA
+    do_dia = CHAVE_DIA_REPLAY if replay else CHAVE_DIA
     da_conversa = (
         modelo.format(schema=schema, dia=dia, conversa=conversa_id)
         if conversa_id is not None
         else None
     )
-    return CHAVE_DIA.format(schema=schema, dia=dia), da_conversa
+    return do_dia.format(schema=schema, dia=dia), da_conversa
 
 
-def _tetos(teto_conversa: float | None = None) -> tuple[float, float]:
+def teto_do_dia(*, replay: bool = False) -> float:
+    """O teto do dia em dólar: o do agente ao vivo ou o dos testes (<= 0 = sem teto)."""
+    s = get_settings()
+    if replay:
+        return float(s.atendimento_agente_teto_usd_dia_replay or 0)
+    return float(s.atendimento_agente_teto_usd_dia or 0)
+
+
+def _tetos(teto_conversa: float | None = None, *, replay: bool = False) -> tuple[float, float]:
     s = get_settings()
     return (
-        float(s.atendimento_agente_teto_usd_dia or 0),
+        teto_do_dia(replay=replay),
         float(
             s.atendimento_agente_teto_usd_conversa or 0 if teto_conversa is None else teto_conversa
         ),
@@ -340,19 +356,26 @@ async def avisar_uma_vez_por_dia(tipo: str, texto: str) -> None:
             pass
 
 
-async def _avisar_teto_do_dia(dia: str, gasto: float, teto: float) -> None:
-    """Uma vez por dia (SET NX no Redis): o agente parou pelo teto do dia."""
-    chave = CHAVE_AVISO.format(schema=get_settings().database_schema, dia=dia)
+async def _avisar_teto_do_dia(dia: str, gasto: float, teto: float, *, replay: bool = False) -> None:
+    """Uma vez por dia (SET NX no Redis): o agente (ou os testes) parou pelo teto do dia."""
+    modelo = CHAVE_AVISO_REPLAY if replay else CHAVE_AVISO
+    chave = modelo.format(schema=get_settings().database_schema, dia=dia)
     try:
         if not await redis.set(chave, "1", nx=True, ex=TTL_S):
             return
     except Exception as e:  # noqa: BLE001
         logger.warning("atendimento_agente_teto_indisponivel", err=type(e).__name__)
         return
-    texto = (
-        f"🤖 <b>Atendimento</b>: o agente (Claude) parou pelo teto do dia — "
-        f"US$ {gasto:.2f} de US$ {teto:.2f} em {dia}. As conversas seguem para a Caixa Humano."
-    )
+    if replay:
+        texto = (
+            f"🤖 <b>Atendimento</b>: os testes do agente (replay, eval, calibração) pararam "
+            f"pelo teto deles — US$ {gasto:.2f} de US$ {teto:.2f} em {dia}. O agente ao vivo segue."
+        )
+    else:
+        texto = (
+            f"🤖 <b>Atendimento</b>: o agente (Claude) parou pelo teto do dia — "
+            f"US$ {gasto:.2f} de US$ {teto:.2f} em {dia}. As conversas seguem para a Caixa Humano."
+        )
     if not await _avisar_telegram(texto):
         # Não saiu: devolve a marca para a próxima tentativa avisar.
         try:
@@ -362,12 +385,19 @@ async def _avisar_teto_do_dia(dia: str, gasto: float, teto: float) -> None:
 
 
 async def _conferir(
-    dia: str, gasto_dia: float, gasto_conversa: float | None, teto_da_vez: float | None = None
+    dia: str,
+    gasto_dia: float,
+    gasto_conversa: float | None,
+    teto_da_vez: float | None = None,
+    *,
+    replay: bool = False,
 ) -> None:
-    teto_dia, teto_conversa = _tetos(teto_da_vez)
+    teto_dia, teto_conversa = _tetos(teto_da_vez, replay=replay)
     if teto_dia > 0 and gasto_dia > teto_dia:
-        logger.warning("atendimento_agente_teto_dia", gasto=round(gasto_dia, 4), teto=teto_dia)
-        await _avisar_teto_do_dia(dia, gasto_dia, teto_dia)
+        logger.warning(
+            "atendimento_agente_teto_dia", gasto=round(gasto_dia, 4), teto=teto_dia, replay=replay
+        )
+        await _avisar_teto_do_dia(dia, gasto_dia, teto_dia, replay=replay)
         raise TetoEstourado(TETO_DIA, gasto_dia, teto_dia)
     if teto_conversa > 0 and gasto_conversa is not None and gasto_conversa > teto_conversa:
         logger.warning(
@@ -415,12 +445,12 @@ async def registrar(
         respostas = await pipe.execute()
     except Exception as e:  # noqa: BLE001 — Redis fora: segue (ver o topo)
         logger.warning("atendimento_agente_teto_indisponivel", err=type(e).__name__)
-        await _conferir(dia, 0.0, gasto_conversa, teto_conversa)
+        await _conferir(dia, 0.0, gasto_conversa, teto_conversa, replay=replay)
         return custo
     gasto_dia = float(respostas[0])
     if chave_conversa is not None:
         gasto_conversa = max(float(respostas[2]), gasto_conversa or 0.0)
-    await _conferir(dia, gasto_dia, gasto_conversa, teto_conversa)
+    await _conferir(dia, gasto_dia, gasto_conversa, teto_conversa, replay=replay)
     return custo
 
 
@@ -474,7 +504,7 @@ async def conferir_teto(
     """Levanta `TetoEstourado` se o dia (ou a conversa) já passou do teto. Não soma nada.
 
     Antes de cada conversa e de cada turno (spec 7.4): o gasto de outra
-    rodada (ou do replay da noite) também conta no DIA. Redis fora: só o
+    rodada do MESMO lado (ao vivo, ou os testes) conta no dia dele. Redis fora: só o
     `uso` (+ o `gasto_previo`). `replay`, `teto_conversa` e `gasto_previo`:
     ver `registrar`.
     """
@@ -490,9 +520,9 @@ async def conferir_teto(
     if chave_conversa is not None:
         gasto_conversa = max(_float(valores[1]), gasto_conversa or 0.0)
     # "Passou" aqui é ATINGIU: com o teto já gasto, a próxima requisição passa.
-    teto_dia, teto_da_conversa = _tetos(teto_conversa)
+    teto_dia, teto_da_conversa = _tetos(teto_conversa, replay=replay)
     if teto_dia > 0 and gasto_dia >= teto_dia:
-        await _avisar_teto_do_dia(dia, gasto_dia, teto_dia)
+        await _avisar_teto_do_dia(dia, gasto_dia, teto_dia, replay=replay)
         raise TetoEstourado(TETO_DIA, gasto_dia, teto_dia)
     if teto_da_conversa > 0 and gasto_conversa is not None and gasto_conversa >= teto_da_conversa:
         raise TetoEstourado(TETO_CONVERSA, gasto_conversa, teto_da_conversa)
@@ -506,9 +536,10 @@ def _float(valor: Any) -> float:
     return numero if math.isfinite(numero) else 0.0
 
 
-async def gasto_do_dia(agora: datetime | None = None) -> float:
-    """O gasto do dia em dólar (a tela e o relatório). Redis fora = 0."""
-    chave_dia, _ = _chaves(None, dia_de_hoje(agora))
+async def gasto_do_dia(agora: datetime | None = None, *, replay: bool = False) -> float:
+    """O gasto do dia em dólar: o do agente ao vivo (a tela e o relatório) ou, com
+    `replay`, o dos testes. Redis fora = 0."""
+    chave_dia, _ = _chaves(None, dia_de_hoje(agora), replay=replay)
     try:
         return _float(await redis.get(chave_dia))
     except Exception:  # noqa: BLE001

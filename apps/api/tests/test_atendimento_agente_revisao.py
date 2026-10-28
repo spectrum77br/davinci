@@ -636,7 +636,9 @@ def test_par_sem_dado_pessoal_fica():
 def test_o_replay_tem_a_chave_propria_da_conversa_e_o_teto_da_vez():
     dia_ao_vivo, conversa_ao_vivo = custo._chaves("c1", "2026-10-20")
     dia_replay, conversa_replay = custo._chaves("c1", "2026-10-20", replay=True)
-    assert dia_ao_vivo == dia_replay and conversa_ao_vivo != conversa_replay
+    # 28/10/2026: o dia dos testes também é outro (o eval não para o ao vivo).
+    assert dia_ao_vivo != dia_replay and dia_replay.endswith(":2026-10-20:replay")
+    assert conversa_ao_vivo != conversa_replay
     assert ":replay:conversa:c1" in (conversa_replay or "")
     assert custo._tetos(0.5)[1] == 0.5 and custo._tetos(0)[1] == 0
     # A requisição que estourou o tempo: o custo provável entra no teto.
