@@ -372,3 +372,26 @@ async def test_compra_em_outra_loja_nao_corta_o_chat_desta(db):
     por_pedido = {g.pedido_bling: g for g in await _garantias(db)}
     await db.refresh(por_pedido["310001"])
     assert por_pedido["310001"].solicitacao_origem == gp.ORIGEM_MENSAGEM
+
+
+async def test_lista_mostra_a_frase_do_pedido_e_o_historico_destaca(client, db, make_user, auth_as):
+    """ "Aparecer as mensagens das pessoas que pediram a garantia daquele
+    produto" (28/10): a lista traz a frase do pedido e o histórico marca a
+    mensagem em que o cliente pediu."""
+    auth_as(await make_user(role=UserRole.ADMIN))
+    await _pedido(db)
+    await _nf(db)
+    await _conversa(
+        db,
+        pedido="261001ABCD1234",
+        msgs=[
+            ("loja", "Olá, a sua mensagem foi recebida", COMPRA + timedelta(days=9), ()),
+            ("cliente", "o celular   parou de funcionar", COMPRA + timedelta(days=10), ()),
+            ("loja", "manda um vídeo, por favor", COMPRA + timedelta(days=10, hours=1), ()),
+        ],
+    )
+    await _rodar(db)
+    [item] = (await client.post("/api/garantias/lista", json={})).json()["itens"]
+    assert item["pedido_trecho"] == "o celular parou de funcionar"
+    h = (await client.get(f"/api/garantias/{item['id']}/historico")).json()
+    assert [m["pedido_garantia"] for m in h["mensagens"]] == [False, True, False]

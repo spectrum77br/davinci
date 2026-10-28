@@ -169,6 +169,9 @@ class GarantiaLinhaOut(BaseModel):
     pedido_origem: str | None = None
     pedido_origem_rotulo: str | None = None
     nao_e_pedido: bool = False
+    # A frase do pedido: a mensagem do cliente (só para quem lê o Atendimento)
+    # ou o motivo da devolução por defeito.
+    pedido_trecho: str | None = None
     conversas: int = 0
     # A conversa ligada com a mensagem mais recente (a prévia só para quem lê
     # o Atendimento, e nunca de conversa de e-mail).
@@ -395,6 +398,8 @@ class HistoricoMensagemOut(BaseModel):
     status: str | None = None
     # SAC do site (28/10/2026): é o e-mail do formulário (o cartão da tela).
     formulario_sac: bool = False
+    # É a mensagem em que o cliente pediu a garantia (a tela destaca).
+    pedido_garantia: bool = False
 
 
 class HistoricoMarcoOut(BaseModel):

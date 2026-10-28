@@ -37,6 +37,7 @@ import {
   numeroBR,
   pct,
   rotuloDoPedido,
+  rotuloDoPedidoComTrecho,
   textoNf,
   type Cartao,
   type FiltrosLista,
@@ -504,7 +505,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
                 </div>
                 <div class="truncate text-xs text-muted-foreground">pedido {{ g.pedido_bling }}<template v-if="g.plataforma"> · {{ nomePlataforma(g.plataforma) }}</template> · NF {{ textoNf(g.nf_numero, g.nf_serie) }}</div>
                 <div v-if="g.ultima_previa" class="mt-0.5 truncate text-xs" :class="g.ultima_autor === 'cliente' ? 'text-foreground' : 'text-muted-foreground'">{{ g.ultima_autor === 'loja' ? 'Loja: ' : g.ultima_autor === 'mediador' ? 'Mediador: ' : '' }}{{ g.ultima_previa }}</div>
-                <div class="mt-0.5 truncate text-[11px]" :class="g.pedido_em && !g.nao_e_pedido ? 'text-foreground' : 'text-muted-foreground'" data-pedido>{{ rotuloDoPedido(g) }}</div>
+                <div class="mt-0.5 truncate text-[11px]" :class="g.pedido_em && !g.nao_e_pedido ? 'text-foreground' : 'text-muted-foreground'" :title="g.pedido_trecho || ''" data-pedido>{{ rotuloDoPedidoComTrecho(g) }}</div>
                 <div class="mt-1 flex items-center gap-1.5">
                   <GarantiaStatus :status="g.status" :entregue-sem-data="g.entregue_sem_data" />
                   <span v-if="g.conversas" class="text-[10px] text-muted-foreground">{{ g.conversas }} {{ g.conversas === 1 ? 'conversa' : 'conversas' }}</span>
@@ -567,7 +568,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
                 <div class="font-medium">{{ g.cliente_nome }}</div>
                 <div class="text-xs text-muted-foreground">pedido {{ g.pedido_bling }}<template v-if="g.plataforma"> · {{ nomePlataforma(g.plataforma) }}</template></div>
               </td>
-              <td class="whitespace-nowrap px-3 py-2.5 text-xs" :class="g.pedido_em && !g.nao_e_pedido ? '' : 'text-muted-foreground'" data-pedido>{{ rotuloDoPedido(g) }}</td>
+              <td class="whitespace-nowrap px-3 py-2.5 text-xs" :class="g.pedido_em && !g.nao_e_pedido ? '' : 'text-muted-foreground'" :title="g.pedido_trecho || ''" data-pedido>{{ rotuloDoPedido(g) }}</td>
               <td class="whitespace-nowrap px-3 py-2.5 font-mono text-xs">{{ g.cpf_mascarado || '—' }}</td>
               <td class="whitespace-nowrap px-3 py-2.5 font-mono">{{ textoNf(g.nf_numero, g.nf_serie) }}</td>
               <td class="whitespace-nowrap px-3 py-2.5 tabular-nums">{{ dataCurta(g.data_inicio) }}</td>

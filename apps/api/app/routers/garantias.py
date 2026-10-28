@@ -63,6 +63,7 @@ from app.models.atendimento import (
     AtendimentoMensagem,
     AtendimentoPedidoComprador,
 )
+from app.models.devolution import Devolution
 from app.models.garantia import GarantiaConversa
 from app.schemas.garantia import (
     AnexoOut,
@@ -324,10 +325,63 @@ async def _linhas(
     contagem = await _contagem_atendimentos(session, [g.id for g in garantias])
     situacoes = await _situacoes(session, garantias)
     conversas = await _conversas_das(session, [g.id for g in garantias], user)
+    trechos = await _trechos_do_pedido(session, garantias, user)
     return [
-        _linha(g, contagem.get(g.id, 0), dia, situacoes.get(g.pedido_bling), conversas.get(g.id))
+        _linha(
+            g,
+            contagem.get(g.id, 0),
+            dia,
+            situacoes.get(g.pedido_bling),
+            {**(conversas.get(g.id) or {}), "pedido_trecho": trechos.get(g.id)},
+        )
         for g in garantias
     ]
+
+
+async def _trechos_do_pedido(
+    session: AsyncSession, garantias: list[Garantia], user: User | None
+) -> dict[int, str]:
+    """A frase do PEDIDO de garantia de cada uma (28/10/2026: "aparecer as
+    mensagens das pessoas que pediram a garantia daquele produto"): a mensagem
+    do cliente que o robô achou — com a regra da prévia (quem lê o
+    Atendimento, conversa no escopo, fora o e-mail) — ou o motivo da devolução
+    por defeito."""
+    saida: dict[int, str] = {}
+    por_msg: dict[UUID, int] = {}
+    por_dev: dict[UUID, int] = {}
+    for g in garantias:
+        if not g.solicitacao_ref or g.nao_solicitada_em is not None:
+            continue
+        try:
+            ref = UUID(g.solicitacao_ref)
+        except ValueError:
+            continue
+        if g.solicitacao_origem == garantia_pedido.ORIGEM_MENSAGEM:
+            por_msg[ref] = g.id
+        elif g.solicitacao_origem == garantia_pedido.ORIGEM_DEVOLUCAO:
+            por_dev[ref] = g.id
+    if por_dev:
+        for did, motivo, condicao in (
+            await session.execute(
+                select(
+                    Devolution.id, Devolution.motivo_devolucao, Devolution.condicao_produto
+                ).where(Devolution.id.in_(list(por_dev)))
+            )
+        ).all():
+            saida[por_dev[did]] = f"devolução: {motivo or condicao or 'por defeito'}"
+    if por_msg and user is not None and acesso.pode_ver(user):
+        scope = await resolve_team_scope(session, user)
+        m, c = AtendimentoMensagem, AtendimentoConversa
+        for mid, texto, integracao, email in (
+            await session.execute(
+                select(m.id, m.texto, c.integration_id, separa_email.conversa_de_email_sql(c))
+                .join(c, c.id == m.conversa_id)
+                .where(m.id.in_(list(por_msg)))
+            )
+        ).all():
+            if texto and not email and _conversa_no_escopo(scope, integracao):
+                saida[por_msg[mid]] = " ".join(texto.split())[:160]
+    return saida
 
 
 def _entrega(g: Garantia) -> EntregaOut:
@@ -1328,6 +1382,11 @@ async def historico(
             enviada_em=x.enviada_em or x.created_at,
             status=x.status,
             formulario_sac=x.id in formularios,
+            pedido_garantia=(
+                g.solicitacao_origem == garantia_pedido.ORIGEM_MENSAGEM
+                and g.nao_solicitada_em is None
+                and str(x.id) == g.solicitacao_ref
+            ),
         )
         for x in mensagens
     ]

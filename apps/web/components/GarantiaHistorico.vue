@@ -54,7 +54,11 @@ async function carregar() {
     if (g !== geracao) return
     historico.value = h
     await nextTick()
-    if (rolagem.value) rolagem.value.scrollTop = rolagem.value.scrollHeight
+    // Abre na mensagem em que o cliente pediu a garantia (destacada); sem
+    // ela, no fim, como o Atendimento.
+    const pedido = rolagem.value?.querySelector('[data-pedido-garantia]')
+    if (pedido) pedido.scrollIntoView({ block: 'center' })
+    else if (rolagem.value) rolagem.value.scrollTop = rolagem.value.scrollHeight
   } catch (e) {
     if (g !== geracao) return
     erro.value = errosDaApi(e).geral || 'Não consegui carregar o histórico.'
@@ -302,9 +306,9 @@ function aoRegistrar(_a: AtendimentoGarantia) {
           <div v-else-if="ladoDaMensagem(l.m) === 'sistema'" class="flex justify-center">
             <div class="max-w-[85%] whitespace-pre-wrap break-words px-3 py-0.5 text-center text-[11px] text-muted-foreground">{{ l.m.texto || (pecasDoHistorico(l.m)[0]?.nome ?? '') }}</div>
           </div>
-          <div v-else class="flex flex-col" :class="ladoDaMensagem(l.m) === 'loja' ? 'items-end' : 'items-start'" :data-msg-id="l.m.id">
-            <div class="mb-0.5 px-1 text-[11px] text-muted-foreground">{{ rotuloAutor(l.m) }}</div>
-            <div class="max-w-[85%] rounded-lg px-3 py-2 md:max-w-[75%]" :class="balaoCls(l.m)">
+          <div v-else class="flex flex-col" :class="ladoDaMensagem(l.m) === 'loja' ? 'items-end' : 'items-start'" :data-msg-id="l.m.id" :data-pedido-garantia="l.m.pedido_garantia ? '' : undefined">
+            <div class="mb-0.5 px-1 text-[11px] text-muted-foreground">{{ rotuloAutor(l.m) }}<span v-if="l.m.pedido_garantia" class="ml-1.5 rounded-full bg-amber-500/15 px-1.5 py-px font-medium text-amber-800 dark:text-amber-200">pedido de garantia</span></div>
+            <div class="max-w-[85%] rounded-lg px-3 py-2 md:max-w-[75%]" :class="[balaoCls(l.m), l.m.pedido_garantia ? 'ring-2 ring-amber-400' : '']">
               <div v-if="l.m.status && STATUS_MSG[l.m.status]" class="mb-1">
                 <span class="inline-flex items-center rounded px-1.5 py-px text-[11px]" :class="STATUS_MSG[l.m.status].cls" :title="STATUS_MSG[l.m.status].hint" data-status-msg>{{ STATUS_MSG[l.m.status].label }}</span>
               </div>

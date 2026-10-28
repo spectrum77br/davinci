@@ -49,6 +49,9 @@ export type GarantiaLinha = {
   pedido_origem?: OrigemPedido | null
   pedido_origem_rotulo?: string | null
   nao_e_pedido?: boolean
+  // A frase do pedido: a mensagem do cliente (só para quem lê o Atendimento)
+  // ou o motivo da devolução por defeito.
+  pedido_trecho?: string | null
 }
 
 export type OrigemPedido = 'mensagem' | 'sac' | 'devolucao' | 'atendimento' | 'manual' | 'pessoa'
@@ -65,6 +68,15 @@ export function rotuloDoPedido(g: Pick<GarantiaLinha, 'pedido_em' | 'pedido_orig
   if (!g.pedido_em || !g.pedido_origem) return 'sem pedido de garantia'
   const o = ORIGEM_PEDIDO[g.pedido_origem]
   return `${o ? `${o.emoji} ${o.rotulo}` : g.pedido_origem} · ${dataBR(g.pedido_em)}`
+}
+
+// Na lista: a frase do pedido quando há ("💬 “o celular parou de funcionar” ·
+// 27/10/2026"); sem ela, de onde veio e o dia.
+export function rotuloDoPedidoComTrecho(g: Pick<GarantiaLinha, 'pedido_em' | 'pedido_origem' | 'nao_e_pedido' | 'pedido_trecho'>): string {
+  if (!g.pedido_trecho || g.nao_e_pedido || !g.pedido_em || !g.pedido_origem) return rotuloDoPedido(g)
+  const o = ORIGEM_PEDIDO[g.pedido_origem]
+  const frase = g.pedido_origem === 'mensagem' ? `“${g.pedido_trecho}”` : g.pedido_trecho
+  return `${o ? `${o.emoji} ` : ''}${frase} · ${dataBR(g.pedido_em)}`
 }
 
 export type Indicadores = {
@@ -832,6 +844,8 @@ export type HistoricoMensagem = {
   status: string | null
   // SAC do site: é o e-mail do formulário (o servidor decide pelo conteúdo).
   formulario_sac?: boolean
+  // É a mensagem em que o cliente pediu a garantia (fica destacada).
+  pedido_garantia?: boolean
 }
 export type HistoricoMarco = {
   tipo: 'compra' | 'entrega' | 'outro_pedido' | 'atendimento'
