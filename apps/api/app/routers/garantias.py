@@ -1327,37 +1327,38 @@ async def corrigir(
     g.atualizado_por = user.id
     for campo, de, para in mudancas:
         svc.registrar_log(session, g.id, "alterou", user, campo=campo, anterior=de, novo=para)
+    if novo_pedido is not None:
+        # As conversas eram do pedido ANTIGO (pode ser outra pessoa): saem
+        # junto com a troca, com o robô ligado ou não.
+        await session.execute(
+            GarantiaConversa.__table__.delete().where(GarantiaConversa.garantia_id == g.id)
+        )
     try:
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
         raise _erro(409, "garantia_duplicada", "nf_numero") from e
     if novo_pedido is not None:
-        await _religar_conversas(session, g, trocou_pedido=True)
+        await _religar_conversas(session, g)
     return await _detalhe(session, g, user, avisos=avisos)
 
 
-async def _religar_conversas(
-    session: AsyncSession, g: Garantia, *, trocou_pedido: bool = False
-) -> None:
+async def _religar_conversas(session: AsyncSession, g: Garantia) -> None:
     """Garantia automática (28/10/2026), com o robô ligado: a garantia
-    cadastrada (ou corrigida) na tela ganha as conversas do pedido na hora; a
-    que mudou de pedido perde as do pedido antigo. Falha aqui não desfaz o
-    cadastro (já gravado): o robô liga na volta seguinte."""
+    cadastrada (ou que mudou de pedido) na tela ganha as conversas do pedido na
+    hora. Melhor esforço, num SAVEPOINT: a falha não desfaz o cadastro (já
+    gravado) nem expira a garantia da resposta — o robô liga depois."""
     if not get_settings().garantia_automatica:
         return
     from app.services import garantia_auto
 
+    gid = g.id
     try:
-        if trocou_pedido:
-            await session.execute(
-                GarantiaConversa.__table__.delete().where(GarantiaConversa.garantia_id == g.id)
-            )
-        await garantia_auto.ligar_conversas(session, garantia_ids=[g.id])
+        async with session.begin_nested():
+            await garantia_auto.ligar_conversas(session, garantia_ids=[gid])
         await session.commit()
     except Exception:  # noqa: BLE001 — o cadastro já foi; o robô liga depois
-        await session.rollback()
-        logger.warning("garantia_religar_conversas_falhou", garantia_id=g.id, exc_info=True)
+        logger.warning("garantia_religar_conversas_falhou", garantia_id=gid, exc_info=True)
 
 
 @router.post("/{garantia_id}/recalcular", response_model=GarantiaSalvaOut)

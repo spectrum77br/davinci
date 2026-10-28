@@ -537,3 +537,62 @@ async def test_quem_nao_le_o_atendimento_so_ve_restrito_se_ha_conversa(
     await _rodar(db)
     h = (await client.get(f"/api/garantias/{g.id}/historico")).json()
     assert h["restrito"] is True and h["mensagens"] == []
+
+
+async def test_troca_de_pedido_tira_as_conversas_mesmo_com_o_robo_desligado(
+    client, db, make_user, auth_as
+):
+    auth_as(await make_user(role=UserRole.ADMIN))
+    await _pedido(db)
+    await _nf(db)
+    await _conversa(db, pedido="261001ABCD1234")
+    await _rodar(db)  # o robô (ligado nesta hora) criou e ligou
+    [g] = await _garantias(db)
+    await _pedido(db, numero="310009", numeroloja="261009NOVO0009")
+    await _nf(db, pedido="310009", numero="2999", doc=CPF_2)
+    assert len(set((await db.execute(select(GarantiaConversa.conversa_id))).scalars())) == 1
+    r = await client.put(
+        f"/api/garantias/{g.id}", json={"pedido": "310009", "nf_numero": "2999", "cpf": CPF_2}
+    )
+    assert r.status_code == 200, r.text
+    assert not list((await db.execute(select(GarantiaConversa.conversa_id))).scalars())
+    h = (await client.get(f"/api/garantias/{g.id}/historico")).json()
+    assert h["conversas"] == [] and h["mensagens"] == []
+
+
+async def test_falha_ao_ligar_nao_derruba_o_cadastro(client, db, make_user, auth_as, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "garantia_automatica", True)
+
+    async def _quebra(*_a, **_k):
+        raise RuntimeError("lock")
+
+    monkeypatch.setattr(auto, "ligar_conversas", _quebra)
+    auth_as(await make_user(role=UserRole.ADMIN))
+    await _pedido(db)
+    await _nf(db, doc="12345678000199")
+    r = await client.post(
+        "/api/garantias",
+        json={"pedido": "310001", "nf_numero": "2611", "cliente_nome": "Maria", "cpf": CPF},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["pedido_bling"] == "310001"
+
+
+async def test_liga_a_conversa_do_ml_pelo_pack(db):
+    await _pedido(db, numeroloja="2000012345678901")
+    await _nf(db)
+    c = AtendimentoConversa(
+        plataforma="ml",
+        canal="pos_venda",
+        externo_id="pack-1",
+        pedido_marketplace="2000099999999999",  # o order; o Bling gravou o pack
+        dados={"pack_id": "2000012345678901"},
+    )
+    db.add(c)
+    await db.commit()
+    cid = c.id
+    r = await _rodar(db)
+    assert r.conversas_ligadas == 1
+    assert set((await db.execute(select(GarantiaConversa.conversa_id))).scalars()) == {cid}

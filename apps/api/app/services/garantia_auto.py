@@ -41,6 +41,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import structlog
 from sqlalchemy import and_, exists, func, literal, or_, select, update
+from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -317,27 +318,36 @@ async def ligar_conversas(
     c, g, p = AtendimentoConversa, Garantia, AtendimentoPedidoComprador
     base_c = [c.canal.notin_(CANAIS_FORA)]
     mexida_c = _recente(desde, c.created_at, c.updated_at, c.ultima_mensagem_em)
+    chaves_ml = (
+        select(
+            c.id.label("conversa_id"),
+            func.unnest(
+                pg_array(
+                    [
+                        c.dados["pack_id"].astext,
+                        c.dados["order_id"].astext,
+                        c.dados[("pedido_mkt", "pedido")].astext,
+                    ]
+                )
+            ).label("chave"),
+        )
+        .where(c.plataforma == "ml", *base_c, *mexida_c)
+        .subquery()
+    )
     consultas = [
         # 1) o nº do pedido na conversa
         select(g.id, c.id, literal("pedido"))
         .select_from(g)
         .join(c, c.pedido_marketplace == g.pedido_marketplace)
         .where(*_garantias_vivas(garantia_ids), *base_c, *mexida_c),
-        # 2) ML: o pack/order do retrato (o Bling grava ora um, ora outro)
-        select(g.id, c.id, literal("pedido"))
+        # 2) ML: o pack/order do retrato (o Bling grava ora um, ora outro).
+        # As chaves saem UMA vez por conversa (unnest) e a ligação é por
+        # igualdade — vira hash join; o OR sobre o JSONB virava garantias ×
+        # conversas (revisão de 28/10/2026).
+        select(g.id, chaves_ml.c.conversa_id, literal("pedido"))
         .select_from(g)
-        .join(
-            c,
-            and_(
-                c.plataforma == "ml",
-                or_(
-                    c.dados["pack_id"].astext == g.pedido_marketplace,
-                    c.dados["order_id"].astext == g.pedido_marketplace,
-                    c.dados[("pedido_mkt", "pedido")].astext == g.pedido_marketplace,
-                ),
-            ),
-        )
-        .where(*_garantias_vivas(garantia_ids), *base_c, *mexida_c),
+        .join(chaves_ml, chaves_ml.c.chave == g.pedido_marketplace)
+        .where(*_garantias_vivas(garantia_ids)),
         # 3) a conversa do comprador (Shopee/TikTok): o índice diz de quem é o pedido
         select(g.id, c.id, literal("comprador"))
         .select_from(g)
