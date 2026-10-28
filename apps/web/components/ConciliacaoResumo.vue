@@ -124,6 +124,7 @@ type Agir = {
 type Resumo = {
   dia: string
   mes: string
+  inicio?: string | null
   lojas: LojaResumo[]
   agir: Agir[]
   por_plataforma: Record<string, Mes & { dinheiro?: Dinheiro; cobrancas?: Cobrancas; resultado_mes?: ResultadoMes }>
@@ -202,6 +203,9 @@ function fmtSinal(v: number | null | undefined) {
 const mesLabel = computed(() => {
   const m = dados.value?.mes
   if (!m) return ''
+  // 28/10: o painel recomeçou em 24/10 — no mês do início, o quadro diz "de 24/10"
+  const ini = dados.value?.inicio
+  if (ini && ini.slice(0, 7) === m && ini.slice(8) !== '01') return `de ${fmtDia(ini + 'T12:00:00')}`
   const [y, mm] = m.split('-')
   return new Date(Number(y), Number(mm) - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
 })
@@ -376,6 +380,12 @@ watch(dia, (v) => {
     dia.value = ontem // o watch dispara de novo com o dia travado
     return
   }
+  // 28/10 (Vinicius: "deixa como se tivesse início dia 24/10"): nem antes do início
+  const ini = dados.value?.inicio
+  if (ini && v < ini) {
+    dia.value = ini
+    return
+  }
   carregar()
 })
 // Sem `await` no setup: componente síncrono. Com top-level await, trocar de uma
@@ -391,8 +401,8 @@ onMounted(() => {
     <div class="flex flex-wrap items-center gap-2 text-xs">
       <div class="inline-flex items-center gap-1 rounded-md border bg-card px-1 py-0.5">
         <span class="px-1 font-semibold text-muted-foreground">Dia</span>
-        <button type="button" class="rounded px-1 py-0.5 hover:bg-muted" title="dia anterior" @click="dia = somaDias(dia, -1)"><ChevronLeft class="size-3.5" /></button>
-        <input v-model="dia" type="date" class="bg-transparent outline-none" />
+        <button type="button" class="rounded px-1 py-0.5 hover:bg-muted disabled:opacity-40" title="dia anterior" :disabled="!!dados?.inicio && dia <= dados.inicio" @click="dia = somaDias(dia, -1)"><ChevronLeft class="size-3.5" /></button>
+        <input v-model="dia" type="date" :min="dados?.inicio || undefined" class="bg-transparent outline-none" />
         <button type="button" class="rounded px-1 py-0.5 hover:bg-muted" title="dia seguinte" @click="avancarDia()"><ChevronRight class="size-3.5" /></button>
         <button type="button" class="rounded px-1.5 py-0.5 text-muted-foreground underline" @click="dia = ontemISO()">ontem</button>
       </div>

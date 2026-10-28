@@ -600,6 +600,7 @@ async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_ant
         "renomeados": 0,
         "recuperados": [],
         "desfeitos": [],
+        "refeitos": [],
         "dias_reabertos": [],
     }
 
@@ -637,6 +638,7 @@ async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_ant
         "renomeados": 1,
         "recuperados": ["2", "3"],
         "desfeitos": [],
+        "refeitos": [],
         "dias_reabertos": ["2026-10-11", "2026-10-12"],
     }
     assert not any("/statement_transactions" in p for p, _ in cliente.chamadas)
@@ -651,10 +653,73 @@ async def test_repasse_que_paga_varios_extratos_entra_em_cada_um_e_repara_os_ant
         "renomeados": 0,
         "recuperados": [],
         "desfeitos": [],
+        "refeitos": [],
         "dias_reabertos": [],
     }
     fechados = await fechar_dias_prontos(db, loja)
     assert {"2026-10-11", "2026-10-12"} <= set(fechados["fechados"])
+
+
+async def _saques(db) -> list[ConciliacaoMovimento]:
+    return list(
+        (
+            await db.execute(
+                select(ConciliacaoMovimento)
+                .where(ConciliacaoMovimento.tipo == "saque")
+                .order_by(ConciliacaoMovimento.data)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def test_pagamento_com_extrato_de_antes_do_inicio_nao_vira_diferenca(db, make_user):
+    """28/10 (o painel recomeçou em 24/10; atv 25/10 +7.455,74): o pagamento de 26/10
+    cobriu extratos de antes do início, que não são lidos — o último extrato levava a
+    diferença e o dia acusava "saldo não bate". O de antes entra só na conta do
+    pagamento: nem linha, nem transação, nem repasse dele no painel."""
+    loja = await _loja_tiktok(db, make_user, inicio=date(2026, 10, 24))
+    d22, d25, d26 = date(2026, 10, 22), date(2026, 10, 25), date(2026, 10, 26)
+    cliente = _TikTokFalsa(
+        [_extrato(2, d22, "344.45", 910), _extrato(3, d25, "344.45", 910)],
+        {"3": [_tx(30, PEDIDO)]},
+        [_repasse(910, "688.90", d26)],  # um pagamento pros dois extratos
+    )
+    r = await run_tiktok_sync(db, loja, cliente, agora=datetime(2026, 10, 27, 12, tzinfo=UTC))
+    assert not r["erros"] and r["inseridos"] == 2
+    lidos = [p for p, _ in cliente.chamadas if p.endswith("/statement_transactions")]
+    assert lidos == [f"{ROTA_EXTRATOS}/3/statement_transactions"]
+    (saque,) = await _saques(db)
+    assert saque.debito == Decimal("344.45") and "diferença" not in saque.descricao
+    assert saque.raw["_extratos_do_pagamento"] == ["2", "3"]
+
+
+async def test_repasse_gravado_sem_ver_o_extrato_de_antes_e_refeito(db, make_user):
+    """28/10: o repasse que entrou com a diferença (lido antes da correção, sem o extrato
+    de 22/10) é refeito quando a leitura passa a ver o pagamento inteiro; o dia reabre
+    pra conferir. Linha mexida à mão não é refeita."""
+    loja = await _loja_tiktok(db, make_user, inicio=date(2026, 10, 24))
+    d22, d25, d26 = date(2026, 10, 22), date(2026, 10, 25), date(2026, 10, 26)
+    agora = datetime(2026, 10, 27, 12, tzinfo=UTC)
+    so_o_de_depois = _TikTokFalsa(
+        [_extrato(3, d25, "344.45", 910)], {"3": [_tx(30, PEDIDO)]}, [_repasse(910, "688.90", d26)]
+    )
+    await run_tiktok_sync(db, loja, so_o_de_depois, agora=agora)
+    (saque,) = await _saques(db)
+    assert saque.debito == Decimal("688.90") and "diferença +344.45" in saque.descricao
+    inteiro = _TikTokFalsa(
+        [_extrato(2, d22, "344.45", 910), _extrato(3, d25, "344.45", 910)],
+        {"3": [_tx(30, PEDIDO)]},
+        [_repasse(910, "688.90", d26)],
+    )
+    r = await run_tiktok_sync(db, loja, inteiro, agora=agora)
+    assert r["repasses"]["refeitos"] == ["3"]
+    await db.refresh(saque)
+    assert saque.debito == Decimal("344.45") and "diferença" not in saque.descricao
+    # rodada seguinte: nada a refazer
+    r = await run_tiktok_sync(db, loja, inteiro, agora=agora)
+    assert r["repasses"]["refeitos"] == []
 
 
 async def test_repasse_leva_o_valor_pago_e_a_diferenca_fica_no_ultimo_extrato(db, make_user):

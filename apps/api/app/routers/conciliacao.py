@@ -2919,6 +2919,7 @@ async def extrato_do_dia(
     return {
         "loja": alvo.conta,
         "dia": dia.isoformat(),
+        "inicio": alvo.inicio.isoformat(),  # 28/10: a tela não volta antes do início
         "movimentos": linhas,
         "totais": _totais_do_dia(movs, saldo_ant),
         "contagem": contagem,
@@ -3899,6 +3900,10 @@ async def _resumo_dos_dias(
     quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda
     têm pendência (com o nome e o motivo), mais a obs do que aconteceu no dia."""
     de = ate - timedelta(days=n - 1)
+    if lojas:
+        # 28/10 (Vinicius: "deixa como se tivesse início dia 24/10"): antes do início de
+        # todas as lojas não há dia — a lista não mostra "todos fechados" vazios
+        de = max(de, min(loja.inicio for loja in lojas))
     ini_dt, _ = _janela_dia(de)
     _, fim_dt = _janela_dia(ate)
     agora = datetime.now(UTC)
@@ -4468,6 +4473,9 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
     return {
         "dia": dia.isoformat(),
         "mes": mes_ini.isoformat()[:7],
+        # 28/10: o painel começa no início mais antigo das lojas (24/10); a tela não
+        # volta antes dele
+        "inicio": min(loja.inicio for loja in lojas).isoformat() if lojas else None,
         "lojas": lojas_out,
         # a lista fica fixa nos últimos 15 dias até ontem (clicar num dia só troca a
         # tabela de cima; antes cada clique empurrava a lista pro passado — 16/10)

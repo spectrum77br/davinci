@@ -75,6 +75,7 @@ type Totais = {
 type Extrato = {
   loja: string
   dia: string
+  inicio?: string // 28/10: início da loja — a tela não volta antes dele
   movimentos: Mov[]
   totais: Totais
   contagem: Record<string, number>
@@ -280,8 +281,8 @@ onMounted(() => {
   <div class="space-y-3">
     <div class="flex flex-wrap items-center gap-2 text-xs">
       <div class="inline-flex items-center gap-1 rounded-md border bg-card px-1 py-0.5">
-        <button type="button" class="rounded px-1 py-0.5 hover:bg-muted" title="dia anterior" @click="dia = somaDias(dia, -1)"><ChevronLeft class="size-3.5" /></button>
-        <input v-model="dia" type="date" class="bg-transparent outline-none" />
+        <button type="button" class="rounded px-1 py-0.5 hover:bg-muted disabled:opacity-40" title="dia anterior" :disabled="!!dados?.inicio && dia <= dados.inicio" @click="dia = somaDias(dia, -1)"><ChevronLeft class="size-3.5" /></button>
+        <input v-model="dia" type="date" :min="dados?.inicio" class="bg-transparent outline-none" />
         <button type="button" class="rounded px-1 py-0.5 hover:bg-muted disabled:opacity-40" title="dia seguinte" :disabled="dia >= ontemISO()" @click="dia = somaDias(dia, 1)"><ChevronRight class="size-3.5" /></button>
         <button type="button" class="rounded px-1.5 py-0.5 text-muted-foreground underline" @click="dia = ontemISO()">ontem</button>
       </div>

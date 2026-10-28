@@ -36,6 +36,11 @@ BRT = ZoneInfo("America/Sao_Paulo")
 ROTA_EXTRATOS = "/finance/202309/statements"
 ROTA_REPASSES = "/finance/202309/payments"
 ZERO = Decimal("0")
+# 28/10 (o painel recomeçou em 24/10): um pagamento cobre extratos de vários dias. Os
+# extratos de antes do início são lidos (só a lista, sem transações) pra conta do
+# pagamento fechar — sem eles o último extrato levava a diferença (atv 25/10 +7.455,74;
+# Barbosa 26/10 +7.590,11).
+FOLGA_PAGAMENTO_DIAS = 30
 
 
 def _d(v: Any) -> Decimal:
@@ -419,9 +424,12 @@ async def _reparar_repasses(
     repasses: dict[str, dict[str, Any]] | None,
     rows_sync: dict[str, ConciliacaoSync],
     agora: datetime,
+    *,
+    grupos: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Repasse gravado com a identidade antiga (nº do pagamento) ganha a do extrato que
-    ele representa; extrato pago e já lido sem a sua linha de repasse ganha uma — e o
+    ele representa; extrato pago e já lido sem a sua linha de repasse ganha uma; repasse
+    gravado sem ver todos os extratos do pagamento é refeito (`_refazer_repasse`) — e o
     dia, se estava fechado, reabre pra conferência (fecha de novo sozinho se bater)."""
     vazio = {"renomeados": 0, "recuperados": [], "dias_reabertos": []}
     if repasses is None:
@@ -451,8 +459,10 @@ async def _reparar_repasses(
         await session.flush()
     recuperados: list[str] = []
     desfeitos: list[str] = []
+    refeitos: list[str] = []
     dias: set[date] = set()
-    grupos = extratos_por_pagamento(extratos)
+    if grupos is None:
+        grupos = extratos_por_pagamento(extratos)
     for st in extratos:
         sid = str(st.get("id") or "")
         status = str(st.get("payment_status") or "").upper()
@@ -477,9 +487,13 @@ async def _reparar_repasses(
                 desfeitos.append(sid)
                 dias.add(dia_do_extrato(st))
             continue
-        if f"repasse:{sid}" in gravados:
-            continue
         pid = str(st.get("payment_id") or "")
+        linha = gravados.get(f"repasse:{sid}")
+        if linha is not None:
+            if _refazer_repasse(linha, st, repasses.get(pid), grupos.get(pid)):
+                refeitos.append(sid)
+                dias.add(dia_do_extrato(st))
+            continue
         rep = repasse_para_movimento(
             st, repasses.get(pid), ordem=int(row.linhas or 0), grupo=grupos.get(pid)
         )
@@ -490,24 +504,50 @@ async def _reparar_repasses(
             row.detalhe = {**(row.detalhe or {}), "repasse_recuperado_em": agora.isoformat()}
             recuperados.append(sid)
             dias.add(dia_do_extrato(st))
-    if desfeitos:
+    if desfeitos or refeitos:
         await session.flush()
     reabertos = await reabrir_dias(session, loja, dias, motivo="repasse da TikTok recuperado")
-    if renomeados or recuperados or desfeitos:
+    if renomeados or recuperados or desfeitos or refeitos:
         logger.info(
             "conciliacao_tiktok_repasses_reparados",
             loja=loja.conta,
             renomeados=renomeados,
             recuperados=recuperados,
             desfeitos=desfeitos,
+            refeitos=refeitos,
             dias_reabertos=reabertos,
         )
     return {
         "renomeados": renomeados,
         "recuperados": recuperados,
         "desfeitos": desfeitos,
+        "refeitos": refeitos,
         "dias_reabertos": reabertos,
     }
+
+
+def _refazer_repasse(
+    linha: ConciliacaoMovimento,
+    statement: dict[str, Any],
+    pagamento: dict[str, Any] | None,
+    grupo: list[dict[str, Any]] | None,
+) -> bool:
+    """28/10: repasse gravado quando a leitura não via todos os extratos do pagamento
+    (os de antes do início da loja) — o último extrato levava a diferença. Quando a
+    leitura passa a ver MAIS extratos do mesmo pagamento, o valor é refeito. Nunca com
+    menos (a janela de leitura anda e os velhos saem dela) nem em linha mexida à mão."""
+    if linha.vinculado_por:
+        return False
+    antes = set((linha.raw or {}).get("_extratos_do_pagamento") or [])
+    novo = repasse_para_movimento(statement, pagamento, ordem=0, grupo=grupo)
+    if not antes or novo is None:
+        return False
+    if not antes < set(novo["raw"].get("_extratos_do_pagamento") or []):
+        return False
+    linha.credito, linha.debito = novo["credito"], novo["debito"]
+    linha.descricao = novo["descricao"]
+    linha.raw = novo["raw"]
+    return True
 
 
 def _reemitido(row: ConciliacaoSync) -> bool:
@@ -566,11 +606,14 @@ async def run_tiktok_sync(
     integration = await session.get(Integration, loja.integration_id)
     lojas_bling = await bling_store_ids_da_loja(session, integration) if integration else set()
     try:
-        extratos = await ler_extratos(cliente, t_de, t_ate)
+        todos = await ler_extratos(cliente, t_de - FOLGA_PAGAMENTO_DIAS * 86400, t_ate)
     except Exception as e:  # noqa: BLE001
         resumo["erros"].append({"erro": f"{type(e).__name__}: {str(e)[:300]}"})
         logger.warning("conciliacao_tiktok_falhou", loja=loja.conta, erro=str(e)[:300])
         return resumo
+    # os de antes do início só entram na conta do pagamento (`grupos`), não no painel
+    extratos = [st for st in todos if int(st.get("statement_time") or 0) >= t_de]
+    grupos = extratos_por_pagamento(todos)
     repasses: dict[str, dict[str, Any]] | None
     try:
         repasses = await ler_repasses(cliente, t_de - 7 * 86400, t_ate)
@@ -584,9 +627,8 @@ async def run_tiktok_sync(
         "SEM_REPASSE": "sem_repasse",
     }
     resumo["repasses"] = await _reparar_repasses(
-        session, loja, extratos, repasses, rows_sync, agora
+        session, loja, extratos, repasses, rows_sync, agora, grupos=grupos
     )
-    grupos = extratos_por_pagamento(extratos)
     for st in extratos:
         sid = str(st.get("id") or "")
         if not sid:
