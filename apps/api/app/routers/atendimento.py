@@ -626,21 +626,10 @@ def _chave_limite_pessoa(user_id: UUID) -> str:
     return f"atd:pedido:atualizar:pessoa:{user_id}"
 
 
-# "Sugerir agora" de quem só lê (fase de observação, 07/10/2026): a caixa
-# abriu para a equipe inteira. Dois freios, só para quem só lê (quem mexe
-# segue sem nenhum, como antes):
-#   - um teto por PESSOA por hora, para ninguém gastar o dia do servidor
-#     sozinho;
-#   - o teto DIÁRIO da IA (`atendimento_ia_teto_diario`, o freio de gasto do
-#     cron — `ia._dentro_do_teto`): o clique de quem só lê conta no mesmo
-#     contador do dia e para quando ele acaba. Conta 1 chamada por clique (a
-#     classificação, quando há regra de assunto, é a 2ª e fica de fora).
-SUGERIR_POR_HORA_QUEM_LE = 30
-_JANELA_SUGERIR_S = 3600
-TETO_DIARIO_IA = {
-    "code": "teto_diario_ia",
-    "detail": "As sugestões da IA de hoje acabaram (teto diário do servidor) — amanhã voltam.",
-}
+# "Sugerir agora" (28/10/2026, o dono: "tire total essa trava"): sem limite de
+# sugestões por pessoa nem por dia — a equipe toda ensina e testa o agente. Até
+# 28/10 quem só lia tinha 30 por hora e contava no teto diário da IA. O freio de
+# gasto que fica é o teto em dólar do agente (`agente.custo`, o dia e a conversa).
 
 # O "Sugerir" no canal com o AGENTE (Claude, spec 3.4, 20/10/2026): síncrono,
 # com prazo de 40 s — o agente consulta pedido, anúncio e manual em vários
@@ -665,30 +654,6 @@ PLATAFORMAS_AGENTE = ("shopee", "ml", "tiktok", "amazon")
 def _so_le(user: User) -> bool:
     """Fase de observação e a pessoa NÃO está na lista de quem mexe."""
     return SO_ADMIN and not acesso.pode_mexer(user)
-
-
-def _chave_sugerir_pessoa(user_id: UUID) -> str:
-    return f"atd:sugerir:pessoa:{user_id}"
-
-
-async def _dentro_do_limite_sugerir(user: User) -> bool:
-    """Quem só lê pede até SUGERIR_POR_HORA_QUEM_LE sugestões por hora.
-
-    Quem mexe não conta. A validade é reposta se a chave ficou sem ela (o
-    processo caiu entre o INCR e o EXPIRE) — senão a pessoa ficaria barrada
-    para sempre, como no `_contar_na_janela`. Redis fora do ar = deixa passar
-    (o limite por minuto do provedor segura)."""
-    if not _so_le(user):
-        return True
-    chave = _chave_sugerir_pessoa(user.id)
-    try:
-        usadas = int(await redis.incr(chave))
-        if usadas == 1 or await redis.ttl(chave) < 0:
-            await redis.expire(chave, _JANELA_SUGERIR_S)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("atendimento_sugerir_limite_indisponivel", err=type(e).__name__)
-        return True
-    return usadas <= SUGERIR_POR_HORA_QUEM_LE
 
 
 # ── Ajudantes ─────────────────────────────────────────────────────────────
@@ -3406,27 +3371,14 @@ async def pedir_rascunho(
         )
     from app.services.atendimento import ia as ia_svc
 
-    if not await _dentro_do_limite_sugerir(user):
-        raise HTTPException(
-            429,
-            detail={
-                "code": "limite_sugestoes",
-                "detail": f"Você já pediu {SUGERIR_POR_HORA_QUEM_LE} sugestões nesta hora — "
-                "tente de novo daqui a pouco.",
-            },
-        )
     # O id antes de tudo: o prazo estourado do agente desfaz a transação (e
     # expira a conversa carregada).
     conversa_id = c.id
     canal = await session.get(AtendimentoCanal, c.canal_id) if c.canal_id else None
     com_agente = agente_config.agente_ligado(get_settings(), canal)
     # O pedido pela tela (`forcar=True`) não passa pelo teto diário dentro da
-    # IA; o de quem só lê passa aqui (ver SUGERIR_POR_HORA_QUEM_LE). No canal
-    # com o agente, o contador é o DELE (ajuste r3: o "Sugerir" do agente
-    # gastava o teto do legado).
-    teto_de_quem = {"chave": ia_svc._CHAVE_TETO_AGENTE} if com_agente else {}
-    if _so_le(user) and not await ia_svc._dentro_do_teto(1, **teto_de_quem):
-        raise HTTPException(429, detail=TETO_DIARIO_IA)
+    # IA e, desde 28/10/2026, nem por limite de pessoa (ver acima): só o teto em
+    # dólar do agente, logo abaixo.
 
     if not com_agente:
         r = await ia_svc.gerar_rascunho(session, c, forcar=True)

@@ -91,7 +91,10 @@ from tests.test_atendimento_ia import (
 # exemplo da equipe usado passa a ser evidência (`_SAIDA`) e o buscar_respostas_equipe
 # fica "só o TOM; nada deles vale como dado" (`_FERRAMENTAS`) — 9 caracteres a menos; o
 # resto vai no bloco 2 (`prompt.COMO_A_EQUIPE_RESPONDE`) (antes "6edf4627eca7db37").
-RETRATO_BLOCO_GERAL = "633eaf94186a21ee"
+# 28/10/2026 (o dono: "temos que perder essa trava"): a devolução/reclamação é tratada
+# como a equipe da loja trata, o cliente decide — no lugar do "nunca desestimule
+# reclamação" (antes "633eaf94186a21ee").
+RETRATO_BLOCO_GERAL = "b5bb3c081a415e6b"
 
 
 def _geral() -> str:

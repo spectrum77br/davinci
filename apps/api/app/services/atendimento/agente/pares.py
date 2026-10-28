@@ -410,9 +410,9 @@ def _filtro(
     if not ia._par_seguro(cliente, resposta):
         _somar(contagem, "inseguros")
         return False
-    if ia._ensina_o_proibido(resposta, plataforma, canal) or ensina_o_que_o_agente_nao_faz(
-        resposta
-    ):
+    if ia._ensina_o_proibido(
+        resposta, plataforma, canal, de_pessoa=True
+    ) or ensina_o_que_o_agente_nao_faz(resposta):
         _somar(contagem, "proibidos")
         return False
     return True

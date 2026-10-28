@@ -20,7 +20,9 @@ Duas camadas:
        INTEIRA); Amazon: emoji (a política de mensagens proíbe); Magalu: CPF
        e CNPJ (a moderação dela barra a resposta, de pessoa também);
      • pedir ou condicionar avaliação ("5 estrelas", "nos avalie", "mude a
-       sua nota") e desestimular reclamação ("não precisa abrir reclamação");
+       sua nota"). Desestimular reclamação/devolução ("não precisa abrir
+       reclamação", "não precisa devolver") e link: desde 28/10/2026 só fora da
+       PESSOA (a IA, o agente, a automática) — quem responde pela tela decide;
      • lacuna não preenchida (`{rastreio}` saindo literal para o cliente).
 
 ZAP (`plataforma='whatsapp'` + `canal='zap'`, 26/10/2026 — docs/zap/desenho.md §7):
@@ -28,8 +30,8 @@ ZAP (`plataforma='whatsapp'` + `canal='zap'`, 26/10/2026 — docs/zap/desenho.md
    WhatsApp. O bloco de contato fora da loja (e-mail, WhatsApp, link,
    telefone, @perfil, rede social) NÃO gera motivo ali (os `_apagar` seguem
    rodando: um link com "pix" no caminho não vira falso PIX). Continuam:
-   vazio, limite, lacuna, avaliação, reclamação, "por fora" e as regras só da
-   IA. E entra uma regra SÓ do Zap, para PESSOA e IA, pela política do
+   vazio, limite, lacuna, avaliação, reclamação (fora da pessoa), "por fora" e
+   as regras só da IA. E entra uma regra SÓ do Zap, para PESSOA e IA, pela política do
    WhatsApp ("Don't share or ask people to share full length individual
    payment card numbers, financial account numbers…" — whatsappbusiness.com/
    policy): número de cartão (13 a 19 dígitos que passam no Luhn, com cara de
@@ -74,6 +76,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from app.services.atendimento.constantes import (
     CANAL_ZAP,
+    ORIGEM_HUMANO,
     ORIGEM_IA,
     PLATAFORMA_WHATSAPP,
     limite_caracteres,
@@ -484,6 +487,38 @@ _RECLAMACAO = (
         r"(?:a\s+|sua\s+|essa\s+|esta\s+|o\s+|seu\s+|a\s+sua\s+|o\s+seu\s+|da\s+|do\s+"
         r"|dessa\s+|desta\s+|da\s+sua\s+|do\s+seu\s+)?"
         r"(?:reclam\w*|disputa\w*|media[cç]\w*|denuncia\w*|chamado|contestac\w*)"
+    ),
+)
+
+# Desestimular a DEVOLUÇÃO ou o reembolso (28/10/2026, a revisão da trava): o
+# `_RECLAMACAO` só olhava reclamação/disputa/mediação; com o agente tratando a
+# devolução como a equipe trata, "não precisa devolver", "evite o reembolso",
+# "não siga com a devolução" e "sugerimos não…" não podem sair sozinhos. Vale
+# junto com o `_RECLAMACAO` (fora da pessoa). Sem o "antes de" (o "a Shopee
+# analisa antes de liberar o reembolso" é o andamento, não desestímulo).
+_ALVO_DEVOLUCAO = r"(?:devoluc\w*|devolv\w*|reembols\w*|estorn\w*)"
+_DESESTIMULA_DEVOLUCAO = (
+    re.compile(
+        r"\b(?:nao|nem)\s+(?:precisa(?:ra|mos)?|e\s+(?:necessario|preciso|recomendado)"
+        r"|ha\s+(?:necessidade|motivo)|tem\s+(?:necessidade|por\s*que|motivo)|vale\s+a\s+pena"
+        r"|compensa|recomendamos|aconselhamos)\b"
+        rf"(?:\s+\w+){{0,3}}?\s+{_ALVO_DEVOLUCAO}"
+    ),
+    re.compile(
+        r"\b(?:evite|evitem|evitar|sem\s+necessidade\s+de|desnecessari[oa])\b"
+        rf"(?:\s+\w+){{0,3}}?\s+{_ALVO_DEVOLUCAO}"
+    ),
+    re.compile(
+        r"\bnao\s+(?:siga|sigam|prossiga|prossigam|continue|continuem)\s+(?:com\s+)?"
+        r"(?:a\s+|o\s+|sua\s+|seu\s+|essa\s+|esse\s+)?"
+        rf"(?:{_ALVO_DEVOLUCAO}|reclam\w*|disputa\w*)"
+    ),
+    re.compile(r"\b(?:sugerimos|recomendamos|aconselhamos)\s+(?:que\s+(?:voce\s+)?)?nao\b"),
+    re.compile(
+        r"\b(?:cancel(?:e|ar|a)|desist(?:a|ir)|retir(?:e|ar))\s+"
+        r"(?:a\s+|sua\s+|essa\s+|esta\s+|o\s+|seu\s+|da\s+|do\s+|dessa\s+|desta\s+|da\s+sua\s+"
+        r"|do\s+seu\s+)?"
+        rf"{_ALVO_DEVOLUCAO}"
     ),
 )
 
@@ -944,7 +979,10 @@ def validar(
         # O link inteiro sai antes (o caminho não vira PIX nem documento).
         plano = _apagar(_URL_INTEIRA_ZAP, plano)
     if _algum(_LINK, plano):
-        if not zap:
+        # Link (28/10/2026, o dono: "tem que deixar enviar link na conversa"): quem
+        # responde pela tela manda (o risco da plataforma é decisão dela); a IA, o
+        # agente e a automática seguem sem link.
+        if not zap and origem != ORIGEM_HUMANO:
             motivos.append(_MOTIVO_LINK)
         plano = _apagar(_LINK, plano)
     if not zap:
@@ -993,9 +1031,13 @@ def validar(
         motivos.append(_MOTIVO_AVALIACAO)
     # Reclamação (28/10/2026, o dono: "temos que perder essa trava pra ele aprender
     # corretamente o que precisamos pra cada caso"): desestimular reclamação,
-    # disputa ou devolução é decisão de PESSOA — quem responde pela tela manda; a IA
-    # e o agente nunca mandam sozinhos (o motivo segue só para eles, logo abaixo: o
-    # rascunho vai para a pessoa, nunca no automático).
+    # disputa ou devolução é decisão de PESSOA — quem responde pela tela manda. Fora
+    # dela (a IA e o agente, a automática que sai para todo comprador da regra) o
+    # motivo segue: o rascunho vai para a pessoa, nunca sai sozinho.
+    if origem != ORIGEM_HUMANO and (
+        _algum(_RECLAMACAO, plano) or _algum(_DESESTIMULA_DEVOLUCAO, plano)
+    ):
+        motivos.append(_MOTIVO_RECLAMACAO)
 
     lacunas = sorted({m.group(0) for m in _LACUNA.finditer(limpo)})
     if lacunas:
@@ -1003,8 +1045,6 @@ def validar(
 
     # Só IA: prazo e valor vinculam — só por lacuna preenchida pelo código.
     if origem == ORIGEM_IA:
-        if _algum(_RECLAMACAO, plano):
-            motivos.append(_MOTIVO_RECLAMACAO)
         do_prazo = _sem_prazo_da_regra(plano, prazos_de_garantia) if prazos_de_garantia else plano
         if _algum(_VALOR, _sem_variacao_de_memoria(_MEDIDA_DE_TELA.sub(" ", plano))):
             motivos.append(_MOTIVO_VALOR)

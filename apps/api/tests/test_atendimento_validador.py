@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.atendimento.constantes import ORIGEM_HUMANO, ORIGEM_IA
+from app.services.atendimento.constantes import ORIGEM_AUTO, ORIGEM_HUMANO, ORIGEM_IA
 from app.services.atendimento.validador import normalizar, so_da_ia, validar
 
 
@@ -165,8 +165,12 @@ def test_bloqueia_rede_social(texto):
         "amzn.to/3abc",
     ],
 )
-def test_bloqueia_link(texto):
-    assert "link" in _v(texto)
+def test_link_so_fora_da_pessoa(texto):
+    """28/10/2026, o dono ("tem que deixar enviar link na conversa"): quem responde
+    pela tela manda; a IA, o agente e a automática seguem sem link."""
+    assert "link" not in _v(texto, origem=ORIGEM_HUMANO), texto
+    assert "link" in _v(texto, origem=ORIGEM_IA), texto
+    assert "link" in _v(texto, origem=ORIGEM_AUTO), texto
 
 
 @pytest.mark.parametrize(
@@ -537,8 +541,6 @@ def test_pergunta_publica_do_ml_nao_publica_preco():
         ("fala no discord", "contato fora da loja (rede social)"),
         ("fulano@uol", "contato fora da loja (e-mail)"),
         ("fulano [arroba] uol [ponto] com", "contato fora da loja (e-mail)"),
-        ("nossaloja ponto com ponto br", "link"),
-        ("nossaloja . com . br", "link"),
         # Pagamento por fora.
         ("transfere pra minha conta", "pagamento fora da plataforma (conta bancária)"),
         ("deposita na conta", "pagamento fora da plataforma (conta bancária)"),
@@ -567,6 +569,45 @@ def test_desestimular_reclamacao_buracos_da_revisao_so_na_ia(texto):
     # 28/10/2026: desestimular reclamação é decisão de pessoa — a IA nunca manda sozinha.
     assert "desestimula reclamação" not in _v(texto, origem=ORIGEM_HUMANO), texto
     assert "desestimula reclamação" in _v(texto, origem=ORIGEM_IA), texto
+
+
+@pytest.mark.parametrize("texto", ["nossaloja ponto com ponto br", "nossaloja . com . br"])
+def test_link_escrito_para_escapar_so_fora_da_pessoa(texto):
+    assert "link" not in _v(texto, origem=ORIGEM_HUMANO), texto
+    assert "link" in _v(texto, origem=ORIGEM_IA), texto
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # A revisão de 28/10/2026: a devolução e o reembolso também, não só a reclamação.
+        "Não precisa fazer a devolução, vamos resolver por aqui.",
+        "Não precisa devolver, vamos te ajudar a configurar.",
+        "Não é necessário pedir reembolso, podemos ajudar por aqui.",
+        "Sugerimos não seguir com a devolução.",
+        "Não siga com a devolução, o ciclo da bateria leva uns dias.",
+        "Evite abrir a devolução agora.",
+        "Desista da devolução que resolvemos.",
+    ],
+)
+def test_desestimular_devolucao_fora_da_pessoa(texto):
+    assert "desestimula reclamação" not in _v(texto, origem=ORIGEM_HUMANO), texto
+    assert "desestimula reclamação" in _v(texto, origem=ORIGEM_IA), texto
+    # A automática sai para todo comprador da regra: fica fora da pessoa também.
+    assert "desestimula reclamação" in _v(texto, origem=ORIGEM_AUTO), texto
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "A Shopee analisa o produto antes de liberar o reembolso.",
+        "O reembolso é feito pela plataforma após a chegada do aparelho.",
+        "Você acompanha a devolução em Minhas Compras > o pedido.",
+        "A solicitação de devolução e reembolso já está aberta na Shopee.",
+    ],
+)
+def test_o_andamento_da_devolucao_nao_e_desestimulo(texto):
+    assert "desestimula reclamação" not in _v(texto, origem=ORIGEM_IA), texto
 
 
 # ─────────────── Zap (WhatsApp da marca, Onda 2 — 26/10/2026) ───────────────

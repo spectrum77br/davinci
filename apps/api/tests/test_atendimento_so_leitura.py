@@ -49,7 +49,6 @@ from app.models import (
     UserStatus,
 )
 from app.models.pricing import StoreInfo
-from app.redis_client import redis
 from app.routers import atendimento as rota
 from app.routers import atendimento_email as rota_email
 from app.security.cipher import encrypt_json
@@ -378,7 +377,6 @@ async def test_quem_so_le_ve_sugere_avalia_e_responde_mas_nao_configura(
     integ, canal = await _loja(db, dono, "kfa")
     conversa = await _conversa(db, integ, canal, "c1")
     u = await make_user(role=UserRole.ADMIN if quem == "admin_fora_da_lista" else UserRole.USER)
-    await redis.delete(rota._chave_sugerir_pessoa(u.id))
     auth_as(u)
 
     lista = await client.get(f"{URL}/conversas")
@@ -549,83 +547,21 @@ async def test_quem_so_le_preenche_a_nota_da_linha_sem_nota(client, db, make_use
     assert await _de_outra_pessoa(client, conversa.id) == {str(r.id): True}
 
 
-async def test_sugerir_tem_teto_por_hora_para_quem_so_le(
-    client, db, make_user, auth_as, dono, ia_falsa
-):
-    integ, canal = await _loja(db, dono, "kfa")
-    conversa = await _conversa(db, integ, canal, "c1")
-    leitor = await make_user()
-    chave = rota._chave_sugerir_pessoa(leitor.id)
-    await redis.set(chave, rota.SUGERIR_POR_HORA_QUEM_LE - 1, ex=60)
-    try:
-        auth_as(leitor)
-        r = await client.post(f"{URL}/conversas/{conversa.id}/rascunho")
-        assert r.status_code == 200, r.text
-        r = await client.post(f"{URL}/conversas/{conversa.id}/rascunho")
-        assert r.status_code == 429
-        assert r.json()["detail"]["code"] == "limite_sugestoes"
-        assert len(ia_falsa) == 1, "o teto barra antes de chamar a IA"
-    finally:
-        await redis.delete(chave)
-    # Quem mexe não tem teto (nem conta).
-    await redis.delete(rota._chave_sugerir_pessoa(dono.id))
-    auth_as(dono)
-    for _ in range(2):
-        assert (await client.post(f"{URL}/conversas/{conversa.id}/rascunho")).status_code == 200
-    assert await redis.get(rota._chave_sugerir_pessoa(dono.id)) is None
-
-
-async def test_contador_por_hora_sem_validade_ganha_validade(
-    client, db, make_user, auth_as, dono, ia_falsa
-):
-    """O processo caiu entre o INCR e o EXPIRE: a chave sem validade travaria a
-    pessoa para sempre — o próximo pedido repõe a validade."""
-    integ, canal = await _loja(db, dono, "kfa")
-    conversa = await _conversa(db, integ, canal, "c1")
-    leitor = await make_user()
-    chave = rota._chave_sugerir_pessoa(leitor.id)
-    await redis.set(chave, 3)  # sem validade
-    try:
-        assert await redis.ttl(chave) == -1
-        auth_as(leitor)
-        r = await client.post(f"{URL}/conversas/{conversa.id}/rascunho")
-        assert r.status_code == 200, r.text
-        assert 0 < await redis.ttl(chave) <= rota._JANELA_SUGERIR_S
-    finally:
-        await redis.delete(chave)
-
-
-async def test_sugerir_de_quem_so_le_conta_no_teto_diario_da_ia(
+async def test_sugerir_sem_limite_para_quem_so_le(
     client, db, make_user, auth_as, dono, ia_falsa, _fase_de_observacao, monkeypatch
 ):
-    """O pedido pela tela não passa pelo teto diário dentro da IA (`forcar`); o
-    de quem só lê conta no MESMO contador do dia (o freio de gasto do cron) e
-    para quando ele acaba. Quem mexe segue fora dele, como antes."""
+    """28/10/2026, o dono ("tire total essa trava"): quem só lê pede quantas
+    sugestões quiser — nem o limite por hora (era 30) nem o teto diário da IA
+    barram o "Sugerir"; o freio de gasto é o teto em dólar do agente."""
     integ, canal = await _loja(db, dono, "kfa")
     conversa = await _conversa(db, integ, canal, "c1")
     leitor = await make_user()
     monkeypatch.setattr(_fase_de_observacao, "atendimento_ia_teto_diario", 2)
-    dia = datetime.now(ia.SAO_PAULO).strftime("%Y-%m-%d")
-    chave = ia._CHAVE_TETO.format(_fase_de_observacao.database_schema, dia)
-    await redis.delete(chave)
-    await redis.delete(rota._chave_sugerir_pessoa(leitor.id))
-    try:
-        auth_as(leitor)
-        for _ in range(2):
-            r = await client.post(f"{URL}/conversas/{conversa.id}/rascunho")
-            assert r.status_code == 200, r.text
+    auth_as(leitor)
+    for _ in range(35):
         r = await client.post(f"{URL}/conversas/{conversa.id}/rascunho")
-        assert r.status_code == 429
-        assert r.json()["detail"] == rota.TETO_DIARIO_IA
-        assert len(ia_falsa) == 2, "o teto barra antes de chamar a IA"
-        # Quem mexe não é barrado nem conta (o pedido dele é o de sempre).
-        auth_as(dono)
-        assert (await client.post(f"{URL}/conversas/{conversa.id}/rascunho")).status_code == 200
-        assert len(ia_falsa) == 3
-        assert int(await redis.get(chave)) == 3  # as 2 do leitor + a barrada
-    finally:
-        await redis.delete(chave)
-        await redis.delete(rota._chave_sugerir_pessoa(leitor.id))
+        assert r.status_code == 200, r.text
+    assert len(ia_falsa) == 35
 
 
 # ─────────────── escopo por equipe, com a trava ligada ───────────────

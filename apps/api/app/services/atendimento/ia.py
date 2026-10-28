@@ -2514,20 +2514,24 @@ def _par_seguro(cliente: str | None, resposta: str | None) -> bool:
     return not _tem_injecao(_LACUNA.sub(" ", resposta or ""))
 
 
-def _ensina_o_proibido(texto: str | None, plataforma: str, canal: str) -> bool:
+def _ensina_o_proibido(
+    texto: str | None, plataforma: str, canal: str, *, de_pessoa: bool = False
+) -> bool:
     """O validador reprovaria este texto se a IA o escrevesse? (lacuna aberta não conta)
 
     Exemplo com promessa ensina promessa: a IA passaria a copiar o "deixe
     sua avaliação 5 estrelas" que alguém aprovou pelo tom. A lacuna sem dado
     (`{rastreio}` que ficou aberto na sugestão) ensina justamente a usar
-    lacuna — essa fica. O "desestimula reclamação" também fica (28/10/2026, o
-    dono: o agente aprende com a equipe como tratar cada caso de devolução ou
-    reclamação; o rascunho que o repetir vai para a pessoa, nunca sai sozinho).
+    lacuna — essa fica. `de_pessoa` (28/10/2026, o dono: o agente aprende com a
+    equipe como tratar cada caso de devolução ou reclamação): na resposta e na
+    correção de PESSOA o "desestimula reclamação" também fica (o rascunho que o
+    repetir vai para a pessoa, nunca sai sozinho); no 👍 de rascunho da IA, não.
     """
     final = validador.normalizar(texto or "", plataforma=plataforma, canal=canal)
     motivos = validador.validar(final, plataforma=plataforma, canal=canal, origem=ORIGEM_IA)
     return any(
-        not m.startswith(validador._MOTIVO_LACUNA) and m != validador._MOTIVO_RECLAMACAO
+        not m.startswith(validador._MOTIVO_LACUNA)
+        and not (de_pessoa and m == validador._MOTIVO_RECLAMACAO)
         for m in motivos
     )
 
