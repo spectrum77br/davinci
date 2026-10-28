@@ -297,7 +297,98 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     `datas` = quando cada campo mudou, pelo que o ML conta (ver
     logistica_datas). O ML data o pedido (`date_closed`/`cancel_detail.date`) e
     cada status do envio (`status_history.date_*`), mas NÃO data o substatus —
-    esse fica com a última mexida no envio (`aprox`)."""
+    esse fica com a última mexida no envio (`aprox`).
+
+    Carrinho (pack) com MAIS DE UM PACOTE (Vinicius, 28/10, 304770): as 2 malas
+    saíram em 2 envios, o 1º voltou pra loja (devolução pra revisar) e o 2º foi
+    entregue. Lia-se só o 1º pedido do pack — calhou de ser o entregue — e a
+    linha ficou "Pago | Entregue" com a devolução escondida. Agora lê TODOS os
+    pedidos do pack e a linha conta o que pede atenção (`_peso_atencao`); com
+    mais de um envio, a Localização diz qual envio está na tela."""
+    orders = await _orders_do_pedido(client, str(order_id))
+    if not orders:
+        raise RuntimeError(f"pack {order_id}: nenhum pedido do ML respondeu")
+    # Pedidos do mesmo pack costumam dividir UM envio: lido uma vez só.
+    envios: dict[str, tuple[dict, str | None]] = {}
+    pares = [(o, await _ler_pedido(client, o, str(order_id), envios)) for o in orders]
+    # Empate fica com o 1º do pack (`max` devolve o primeiro maior) — o mesmo
+    # pedido que se lia antes.
+    order, enr = max(pares, key=lambda par: _peso_atencao(par[1]["meli_status"]))
+    ids_envio = {_envio_id(o) for o, _ in pares} - {""}
+    if len(ids_envio) > 1:
+        enr["localizacao"] = _com_envio_do_pack(
+            enr.get("localizacao"), _envio_id(order), len(ids_envio)
+        )
+        logger.info(
+            "logistica_meli_pack_varios_envios",
+            pedido=order_id,
+            envios=sorted(ids_envio),
+            escolhido=_envio_id(order),
+        )
+    return enr
+
+
+def _envio_id(order: dict) -> str:
+    return str((order.get("shipping") or {}).get("id") or "").strip()
+
+
+def _peso_atencao(meli: dict[str, str]) -> int:
+    """Quanto o pedido pede atenção, pra escolher qual pedido do pack a linha
+    conta: reclamação aberta > devolução > reclamação fechada / envio que não
+    chegou ou está voltando > a caminho > entregue > cancelado. Cancelado fica
+    por último de propósito: um item cancelado antes de sair não pode puxar a
+    linha (e a regra da aba Status, que mexe no Bling) pra "Cancelado" enquanto
+    o outro pacote segue com o comprador."""
+    if (meli.get("claim_status") or "") == "opened":
+        return 5
+    if logistica_rules.localizacao_devolucao(meli.get("return_status")):
+        return 4
+    if (
+        meli.get("claim_status")
+        or meli.get("ship_status") == "not_delivered"
+        or logistica_rules.pacote_volta_pelo_envio("Mercado Livre", meli)
+    ):
+        return 3
+    if meli.get("order_status") == "cancelled":
+        return 0
+    if meli.get("ship_status") == "delivered":
+        return 1
+    return 2
+
+
+def _com_envio_do_pack(localizacao: str | None, envio_id: str, pacotes: int) -> str:
+    """Localização da linha de um carrinho com vários envios: diz QUAL envio a
+    linha mostra, com o mesmo número do "Envio #…" da venda no ML. Não numera
+    "pacote 1 de 2": a API não diz em que ordem o ML mostra os pacotes."""
+    sufixo = f"venda com {pacotes} pacotes"
+    if envio_id:
+        sufixo = f"envio {envio_id} ({sufixo})"
+    loc = (localizacao or "").strip()
+    return f"{loc} · {sufixo}" if loc else sufixo
+
+
+async def _envio_do_pedido(
+    client: MercadoLivreClient, ship_id: str, envios: dict[str, tuple[dict, str | None]]
+) -> tuple[dict, str | None]:
+    """(shipment, previsão) do envio, lido uma vez por pack (`envios` = cache)."""
+    if ship_id not in envios:
+        try:
+            sh = await client.get_shipment(ship_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("logistica_meli_shipment_failed", ship_id=ship_id, err=str(e)[:200])
+            sh = {}
+        envios[ship_id] = (sh, await _ship_previsao(client, sh, ship_id))
+    return envios[ship_id]
+
+
+async def _ler_pedido(
+    client: MercadoLivreClient,
+    order: dict,
+    order_id: str,
+    envios: dict[str, tuple[dict, str | None]],
+) -> dict[str, Any]:
+    """A leitura de UM pedido do ML (o `build_enrichment` de antes do pack com
+    vários envios); `order_id` = o número da linha, só pros logs."""
     out: dict[str, str] = {}
     datas: dict[str, dict[str, str]] = {}
     rastreio: str | None = None
@@ -308,7 +399,6 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     # Tipo de envio (Flex = self_service), lido do MESMO envio — sem chamada a
     # mais. Vazio quando o envio não respondeu: "não sei" não vira "não é Flex".
     envio: dict[str, Any] = {}
-    order = await _fetch_order(client, str(order_id))
 
     cancel_detail = order.get("cancel_detail") or {}
     st = (order.get("status") or "").strip()
@@ -343,11 +433,7 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     shipping = order.get("shipping") or {}
     ship_id = shipping.get("id")
     if ship_id:
-        try:
-            sh = await client.get_shipment(str(ship_id))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("logistica_meli_shipment_failed", order_id=order_id, err=str(e)[:200])
-            sh = {}
+        sh, previsao = await _envio_do_pedido(client, str(ship_id), envios)
         # O ML guarda a data de CADA status do envio aqui
         # ({"date_shipped": ..., "date_delivered": ...}) — data oficial, sem
         # nenhuma chamada extra.
@@ -377,7 +463,6 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
             rastreio = tn
         envio = flex_envio.campos_envio(flex_envio.PLATAFORMA_ML, sh)
         destino = _ship_destino(sh)
-        previsao = await _ship_previsao(client, sh, str(ship_id))
     else:
         ship_status = (shipping.get("status") or "").strip()
         if ship_status:
@@ -913,6 +998,13 @@ async def _reclamacoes_por_pedido(
     return out
 
 
+def _mexeu_depois(order: dict, lido_em: datetime | None) -> bool:
+    """O pedido do search mexeu depois da última leitura da linha? Sem uma das
+    datas, na dúvida, sim."""
+    mexeu = iso_to_dt(order.get("date_last_updated"))
+    return lido_em is None or mexeu is None or mexeu > lido_em
+
+
 async def sweep_pos_venda(session: AsyncSession) -> dict:
     """Re-olha TODAS as linhas ML da janela — inclusive as resolvidas que o
     painel esconde — e devolve os ids cuja situação de pós-venda MUDOU.
@@ -1051,7 +1143,15 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 continue
             ship_local = (meli.get("ship_status") or "").strip().lower()
             order_local = (meli.get("order_status") or "").strip().lower()
+            # Pack com vários envios (28/10): a linha conta o pedido que pede
+            # atenção, então outro pedido do pack pode estar "entregue" com a
+            # linha mostrando o pacote ainda a caminho — descompasso legítimo,
+            # que marcaria a linha a cada rodada. No pack só conta o pedido
+            # que mexeu DEPOIS da última leitura.
+            no_pack = bool(por_pack.get(pedido))
             for o in cands:
+                if no_pack and not _mexeu_depois(o, r.status_lido_em):
+                    continue
                 tags = {str(t).strip().lower() for t in (o.get("tags") or [])}
                 st = str(o.get("status") or "").strip().lower()
                 if (
