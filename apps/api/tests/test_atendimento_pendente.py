@@ -153,9 +153,9 @@ async def _mundo(db, make_user) -> dict[str, tuple[AtendimentoConversa, bool]]:
         c[nome] = (await _cena(db, integ, canal, nome, *falas, **campos), esperado)
 
     await caso("cliente_por_ultimo", True, ("loja", 90), ("cliente", 60))
-    # O menu do robô do Duoke depois do comprador NÃO responde (28/10/2026, o
-    # Eduardo: "tem que mostrar todas que faltam realmente").
-    await caso("menu_do_duoke", True, ("cliente", 60), ("loja", 59, MENU_DUOKE))
+    # O menu do robô do Duoke depois do comprador: para o Duoke, respondeu (a
+    # régua do chat); no filtro da Caixa ela entra pela bolinha (28/10/2026).
+    await caso("menu_do_duoke", False, ("cliente", 60), ("loja", 59, MENU_DUOKE))
     # ...mas não lida na plataforma: pendente.
     await caso("menu_e_nao_lida", True, ("cliente", 60), ("loja", 59, MENU_DUOKE), nao_lidas=2)
     # O aviso do sistema depois da resposta não reabre; depois do comprador não fecha.
@@ -341,6 +341,17 @@ async def test_resumo_e_lista_contam_pela_regua_do_duoke(
     marcadas_esperadas = {nome for nome, (_, e) in na_caixa.items() if e}
     esperados = {nome for nome, (c, e) in na_caixa.items() if e and pendente.do_chat(c)}
     assert marcadas_esperadas - esperados == {"reclamacao_vez_da_loja"}
+    # 28/10/2026: e toda conversa de chat com bolinha (`falta_responder_na_caixa`).
+    nomes = {str(c.id): n for n, (c, _) in mundo.items()}
+    todas = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
+    bolinha = {
+        nomes[i["id"]]
+        for i in todas
+        if (i.get("numero_duoke") or 0) > 0 and pendente.do_chat(mundo[nomes[i["id"]]][0])
+    }
+    assert "menu_do_duoke" in bolinha
+    esperados |= bolinha
+    marcadas_esperadas |= bolinha
     r = (await client.get(f"{URL}/resumo")).json()
     for plat in ("shopee", "ml", "tiktok"):
         da_plat = sum(
@@ -356,14 +367,12 @@ async def test_resumo_e_lista_contam_pela_regua_do_duoke(
     r = await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 100})
     assert r.status_code == 200, r.text
     itens = r.json()["itens"]
-    nomes = {str(c.id): n for n, (c, _) in mundo.items()}
     assert {nomes[i["id"]] for i in itens} == esperados
     assert all(i["falta_responder"] for i in itens)
     # Em "Todas", a linha diz se está no "Falta responder" (a tela relê os números).
-    todas = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
     marcadas = {nomes[i["id"]] for i in todas if i["falta_responder"]}
     assert marcadas == marcadas_esperadas
-    # O menu do robô não responde (28/10/2026): na fila e no "Falta responder".
+    # O menu do robô com bolinha: na fila e no "Falta responder" (28/10/2026).
     menu = next(i for i in todas if nomes[i["id"]] == "menu_do_duoke")
     assert menu["aguardando_resposta"] is True and menu["falta_responder"] is True
 
@@ -655,10 +664,13 @@ async def test_numero_do_duoke_python_e_sql_sao_gemeos(db, make_user):
     # A 0028 não fecha a vez.
     assert mundo["figurinha_0028"][0].aguardando_resposta
     # O robô NÃO zera e a fila continua igual (o menu não fecha a vez); com
-    # ele por último, a linha fica no "Falta responder" (28/10/2026) e o número fica.
+    # ele por último, a régua do chat diz respondida e o número fica — no
+    # "Falta responder" da Caixa ela entra pela bolinha (28/10/2026).
     robo = mundo["robo_por_ultimo"][0]
     assert robo.aguardando_resposta and robo.ultima_da_loja_em is None
-    assert pendente.falta_responder(robo), "o robô não é resposta de pessoa: falta responder"
+    assert not pendente.falta_responder(robo), "para o Duoke, o robô respondeu"
+    assert pendente.falta_responder_na_caixa(robo, 2), "mas tem bolinha: está no filtro"
+    assert not pendente.falta_responder_na_caixa(robo, 0), "aberta: sai, como no Duoke"
     # A janela anda com o relógio: daqui a 7 dias, o que hoje conta sai.
     depois = AGORA + pendente.JANELA_DO_NUMERO
     quatro = mundo["quatro"][0]

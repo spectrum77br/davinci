@@ -283,19 +283,14 @@ def pela_fila(conversa: Any) -> bool:
 
 
 def comprador_por_ultimo(conversa: Any) -> bool:
-    """(a): o comprador falou depois da última resposta de PESSOA da loja? PURA.
+    """(a): a última mensagem que não é do sistema é do comprador? PURA.
 
-    28/10/2026, o Eduardo, com o Duoke desligado ("tem que mostrar todas que
-    faltam realmente"): o menu do robô ("Olá, por favor selecione sua
-    dúvida…"), a campanha e o cartão da Shopee NÃO respondem o comprador — o
-    lado da loja é a `ultima_da_loja_em` da fila (`gravar.recalcular`: sem a
-    automática, menos a que fecha o turno só de cartão). Até aqui era a
-    `ultima_loja_qualquer_em` (qualquer mensagem da loja, como o "Pendente"
-    do Duoke de 14/10), e a conversa em que só o robô respondeu ficava com a
-    bolinha e fora do "Falta responder" (Marquezini: 84 não lidas, 5 no filtro).
+    Qualquer mensagem da loja depois dele responde, até a automática (o
+    "Pendente" do Duoke, 14/10/2026). A conversa em que só o robô respondeu e
+    ninguém abriu entra pela bolinha (`falta_responder_na_caixa`, 28/10/2026).
     """
     do_cliente = _utc(getattr(conversa, "ultima_do_cliente_em", None))
-    da_loja = _utc(getattr(conversa, "ultima_da_loja_em", None))
+    da_loja = _utc(getattr(conversa, "ultima_loja_qualquer_em", None))
     return do_cliente is not None and (da_loja is None or do_cliente > da_loja)
 
 
@@ -353,8 +348,8 @@ def comprador_por_ultimo_sql(c: Any = AtendimentoConversa):
     return and_(
         c.ultima_do_cliente_em.is_not(None),
         or_(
-            c.ultima_da_loja_em.is_(None),
-            c.ultima_do_cliente_em > c.ultima_da_loja_em,
+            c.ultima_loja_qualquer_em.is_(None),
+            c.ultima_do_cliente_em > c.ultima_loja_qualquer_em,
         ),
     )
 
@@ -673,10 +668,12 @@ def falta_responder_na_caixa(
 
     28/10/2026, o Eduardo: "quero que mostre todas que têm notificação, igual
     no Duoke — o número tá batendo, só não tá aparecendo as notificações
-    ali". A régua do chat (`falta_responder_no_chat`) OU a conversa de chat
-    com mensagem não lida no número (`numero` = `nao_lidas_duoke`): a
-    pergunta do FAQ que o comprador clicou e o turno que o cartão fechou na
-    fila têm bolinha e entram também. A gêmea de `falta_responder_na_caixa_sql`.
+    ali". O "Pendente" do Duoke: a régua do chat (`falta_responder_no_chat`:
+    o comprador por último, qualquer mensagem da loja responde) OU a conversa
+    de chat com mensagem não lida no número (`numero` = `nao_lidas_duoke`) —
+    a que só o robô respondeu, a pergunta do FAQ que o comprador clicou.
+    Abriu (o visto apaga a bolinha) e só o robô tinha respondido: sai, como
+    no Duoke. A gêmea de `falta_responder_na_caixa_sql`.
     """
     return falta_responder_no_chat(conversa, agora) or (do_chat(conversa) and (numero or 0) > 0)
 
