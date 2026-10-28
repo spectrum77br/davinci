@@ -683,8 +683,8 @@ async def test_7_ver_garantia_traz_os_periodos_e_os_fatos(db: AsyncSession, make
 async def test_7_o_envio_aceita_o_caminho_so_no_rascunho_do_agente_marcado(
     db: AsyncSession, make_user, ligado, plataforma
 ):
-    """O link barrava o envio de qualquer origem: só o rascunho `ag1` com a marca
-    `isencoes` passa, e só com a frase exata."""
+    """O link barrava o envio de qualquer origem (até 28/10/2026, quando a pessoa
+    passou a poder mandar link)."""
     conversa, user = await _cenario(db, make_user)
     texto = DEPOIS_DOS_90
 
@@ -704,27 +704,13 @@ async def test_7_o_envio_aceita_o_caminho_so_no_rascunho_do_agente_marcado(
         await db.refresh(r)
         return r
 
+    # 28/10/2026 (o dono: "tem que deixar enviar link na conversa"): o link não barra
+    # mais o envio da PESSOA — nem sem a marca, nem com outro link junto. A IA, o
+    # agente e a automática seguem sem link (`test_atendimento_validador`).
     sem_marca = await _rascunho(None)
-    e = await _recusa(
-        enviar.enviar_resposta(db, conversa, texto, user=user, rascunho_id=sem_marca.id)
-    )
-    assert e.code == "texto_invalido" and "link" in e.detail
-    sem_marca.status = RASCUNHO_DESCARTADO  # um pendente por conversa
-    await db.commit()
-    # Outro link junto: recusa mesmo com a marca.
-    marcado = await _rascunho([checagens.ISENCAO_CAMINHO_URANYX])
-    e = await _recusa(
-        enviar.enviar_resposta(
-            db, conversa, texto + " Veja também www.exemplo.com.", user=user, rascunho_id=marcado.id
-        )
-    )
-    assert e.code == "texto_invalido" and "link" in e.detail
-    # Sem rascunho (a pessoa escrevendo do zero): recusa.
-    e = await _recusa(enviar.enviar_resposta(db, conversa, texto, user=user))
-    assert e.code == "texto_invalido"
-    # O rascunho marcado, com a frase exata: sai.
-    m = await enviar.enviar_resposta(db, conversa, texto, user=user, rascunho_id=marcado.id)
-    assert m.texto == texto and plataforma.chamadas == [texto]
+    com_outro = texto + " Veja também www.exemplo.com."
+    m = await enviar.enviar_resposta(db, conversa, com_outro, user=user, rascunho_id=sem_marca.id)
+    assert m.texto == com_outro and plataforma.chamadas == [com_outro]
 
 
 # ═══════════════ 8. a condição só pelo título ═══════════════

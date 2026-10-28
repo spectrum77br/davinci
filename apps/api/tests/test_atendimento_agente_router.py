@@ -1140,21 +1140,22 @@ async def test_os_assuntos_de_produto_nunca_entram_no_auto_agente(
     assert r.status_code == 200 and r.json()["auto_agente"] == ["rastreio"]
 
 
-@pytest.mark.parametrize(("agente", "chave_esperada"), [(True, "agente"), (False, "legado")])
-async def test_o_sugerir_de_quem_so_le_conta_no_teto_de_quem_responde(
-    client, db, make_user, pessoa, com_chave, ia_ligada, monkeypatch, agente, chave_esperada
+@pytest.mark.parametrize("agente", [True, False])
+async def test_o_sugerir_de_quem_so_le_nao_tem_teto_de_chamadas(
+    client, db, make_user, pessoa, com_chave, ia_ligada, monkeypatch, agente
 ):
-    """O "Sugerir" de quem só lê num canal com o agente gastava o teto diário do
-    LEGADO: agora conta no do agente (ajuste r3)."""
+    """28/10/2026, o dono ("tire total essa trava"): o "Sugerir" de quem só lê não
+    consulta mais o teto diário de chamadas (nem o do agente, nem o do legado) —
+    o freio é o teto em dólar do agente."""
     conversa, _gatilho = await _canal_com_agente(db, make_user, agente=agente)
     monkeypatch.setattr(rota, "SO_ADMIN", True)
     usadas: list[str] = []
 
     async def teto(chamadas: int = 1, *, chave: str = ia._CHAVE_TETO) -> bool:
-        usadas.append("agente" if chave == ia._CHAVE_TETO_AGENTE else "legado")
+        usadas.append(chave)
         return False
 
     monkeypatch.setattr(ia, "_dentro_do_teto", teto)
     r = await client.post(f"{URL}/conversas/{conversa.id}/rascunho")
-    assert r.status_code == 429
-    assert usadas == [chave_esperada]
+    assert r.status_code != 429, r.text
+    assert usadas == []
