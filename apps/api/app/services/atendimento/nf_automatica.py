@@ -47,6 +47,29 @@ mesmos bytes, inclusive a mandada pela pessoa no botão "NF") segura.
 
 Chave geral: `ATENDIMENTO_NF_AUTOMATICA` (padrão ligado; desligada, tudo fica
 com a pessoa). Só ids e códigos no log, nunca dado do cliente.
+
+REVISÃO DE 29/10/2026 (os casos reais de 28/10 nas lojas no automático):
+
+- O pedido claro (item 2) aceita o DOCUMENTO que faltou na caixa — "Não veio
+  nota fiscal..nem recibo nada documento" (Barbosa e5fe56d4, `nf:pedido_nao_
+  claro`): "nem", "nada", "nenhum", recibo, documento e comprovante entram na
+  lista do que pode. O PRODUTO que não veio continua com a pessoa, agora por
+  regra explícita no `_NAO_E_SO_A_NF` ("não veio nada", "não chegou o pedido",
+  "nem o produto", "nenhum produto", "o pacote não chegou" — antes "não recebi
+  o pedido, cadê a nota" passava pela lista).
+- A CHAVE DE ACESSO da nota é pedido da NF (Barbosa 75fd5e5d, 17:03: "pode
+  mandar a chave de acesso para eu emitir a nota fiscal"): a DANFE traz a
+  chave impressa e no código de barras. Só com a nota nomeada no turno (a
+  "chave de acesso" sozinha pode ser a de um aplicativo); "para eu emitir/
+  imprimir/baixar/consultar" é o que o cliente faz com ela e não sobra.
+- A NF que ainda não está no sistema (`nf_nao_chegou`, `nf_so_embalagem`)
+  continua com a pessoa: o texto padrão da equipe promete "enviaremos a nota
+  em até 1 dia útil" (o validador barra prazo vindo da IA) e cumprir a
+  promessa pede um caminho novo — mandar a NF na conversa já respondida e
+  devolver à Caixa Humano depois do prazo — que não entra sem a medição de
+  produção (o que a equipe faz depois desse texto). O caso Vita 95704e8d (`nf:checagens`) é outro: o agente deu
+  confiança baixa porque o pedido é de 07/08 (Entregue) e não tem NF nenhuma no
+  `nf_nota` (o coletor sobe desde 19/08) — entregue e sem NF é anormal: pessoa.
 """
 
 from __future__ import annotations
@@ -105,7 +128,16 @@ class NaoSai(Exception):  # noqa: N818 — nome do domínio
 
 # ── O pedido claro (PURA) ─────────────────────────────────────────────────
 
-_DOC = r"(?:nota(?:\s+fiscal)?|nf-?e?|nfe)"
+# Revisão de 29/10 (Barbosa 75fd5e5d, "pode mandar a chave de acesso para eu emitir a nota
+# fiscal"): a chave de acesso está na DANFE (impressa e no código de barras) — pedir a chave
+# DA NOTA é pedir a NF. Só com a nota nomeada no turno (`_NOMEIA_A_NF`): "a chave de
+# acesso" sozinha pode ser a do aplicativo/produto.
+_DOC = r"(?:nota(?:\s+fiscal)?|nf-?e?|nfe|chave\s+de\s+acesso)"
+_NOMEIA_A_NF = re.compile(r"\b(?:nota|notas|nf|nfe)\b")
+# O que o cliente faz com a NF ("para eu emitir/imprimir/baixar/consultar"): não sobra.
+_O_CLIENTE_FAZ = re.compile(r"\b(?:para|pra)\s+(?:eu\s+)?(?:emitir|imprimir|baixar|consultar)\b")
+# O que veio (ou não) na entrega — o produto, não o documento.
+_O_PRODUTO = r"(?:nada|produto|produtos|pedido|compra|caixa|pacote|encomenda|embalagem)"
 _PEDE = re.compile(
     # "me manda a nota", "pode enviar a nf?", "passa a nota fiscal"
     r"\b(?:manda|mande|mandar|mandem|envia|envie|enviar|enviem|passa|passe|passar)\b"
@@ -131,13 +163,26 @@ _NAO_E_SO_A_NF = re.compile(
     r"garantia|mandam|enviam|emitem|emite|acompanha\w*|vem\s+com)\b"
     r"|\bja\s+(?:recebi|tenho|veio|chegou)\s+(?:a\s+)?" + _DOC + r"\b"
     r"|\bnao\s+precis\w*\b"
+    # Revisão de 29/10: o PRODUTO que não veio ("não veio nada", "não chegou o pedido",
+    # "nem o produto", "nenhum produto", "o pacote não chegou") é reclamação, não pedido
+    # da NF — mesmo com as palavras da lista. "A nota DO pedido não veio" e "NA caixa não
+    # veio" continuam pedido da NF (o produto ali é complemento).
+    r"|\bnao\s+(?:veio|vieram|chegou|chegaram|recebi|tinha|tem|estava|foi)\s+"
+    r"(?:(?:o|a|os|as|meu|minha|nem|ainda)\s+){0,2}" + _O_PRODUTO + r"\b"
+    r"|\b(?:nem|nenhum|nenhuma|sem)\s+(?:(?:o|a|os|as|meu|minha|um|uma)\s+)?" + _O_PRODUTO + r"\b"
+    r"|(?<![dn][aoe] )(?<![dn][ao]s )\b"
+    + _O_PRODUTO
+    + r"\s+(?:ainda\s+)?nao\s+(?:veio|vieram|chegou|chegaram)\b"
 )
 
 
 # Revisão de 28/10: a régua é a LISTA DO QUE PODE — tirando o pedido da NF e a
 # cortesia, nada pode sobrar ("no meu cpf", "no nome da minha esposa", "do
-# outro pedido", "nem o produto", "faltando o cabo" vão para a pessoa). Número
-# (CPF, pedido) também não: a palavra com dígito não está na lista.
+# outro pedido", "faltando o cabo" vão para a pessoa). Número (CPF, pedido)
+# também não: a palavra com dígito não está na lista. Revisão de 29/10 (Barbosa,
+# "Não veio nota fiscal..nem recibo nada documento"): o documento que faltou na
+# caixa entra — "nem", "nada", "nenhum", recibo, documento, comprovante —; o
+# produto que não veio fica com a pessoa pelo `_NAO_E_SO_A_NF`.
 _PALAVRAS_DO_PEDIDO = frozenset(
     """
     oi ola ei bom boa dia tarde noite tudo bem ok certo sim por favor pf pfv porfavor
@@ -148,7 +193,9 @@ _PALAVRAS_DO_PEDIDO = frozenset(
     preciso precisava precisaria quero queria gostaria necessito eu vou querer receber
     solicito solicitar solicitacao
     nao veio vieram recebi chegou encontrei achei tinha estava foi cade ainda
+    nem nada nenhum nenhuma
     nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
+    recibo recibos documento documentos comprovante comprovantes chave acesso
     a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
     esse este essa esta junto caixa pacote embalagem pedido compra produto
     """.split()
@@ -190,9 +237,9 @@ def pedido_claro(textos: Sequence[str | None]) -> bool:
     plano = " ".join(validador.plano_de(" ".join(t for t in textos if t)).split())
     if not plano or len(plano) > 400:
         return False
-    if not _PEDE.search(plano) or _NAO_E_SO_A_NF.search(plano):
+    if not _PEDE.search(plano) or _NAO_E_SO_A_NF.search(plano) or not _NOMEIA_A_NF.search(plano):
         return False
-    palavras = re.findall(r"[a-z0-9]+", plano)
+    palavras = re.findall(r"[a-z0-9]+", _O_CLIENTE_FAZ.sub(" ", plano))
     return all(p in _PALAVRAS_DO_PEDIDO for p in palavras)
 
 

@@ -249,6 +249,17 @@ async def test_manda_a_imagem_da_nf_e_a_frase(db, make_user, ligado, plataforma)
     assert r.status == RASCUNHO_ENVIADO
 
 
+async def test_documento_que_faltou_na_caixa_manda_a_nf(db, make_user, ligado, plataforma):
+    """Revisão de 29/10 (Barbosa e5fe56d4): "nem recibo nada documento" é o pedido da NF."""
+    conversa, gatilho = await _cenario(
+        db, make_user, texto="Não veio nota fiscal..nem recibo nada documento"
+    )
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
+
+
 async def test_a_nf_nunca_sai_duas_vezes_na_conversa(db, make_user, ligado, plataforma):
     conversa, gatilho = await _cenario(db, make_user)
     r = await _rascunho(db, conversa, gatilho)
@@ -392,6 +403,12 @@ async def test_chave_geral_desligada(db, make_user, ligado, plataforma, monkeypa
         "manda a nota fiscal dos dois pedidos",
         "não recebi a nota fiscal nem o produto",
         "não veio a nota fiscal e veio faltando o cabo",
+        # Revisão de 29/10: o produto que não veio, com as palavras da lista.
+        "não chegou nada, cadê a nota fiscal?",
+        "não recebi o pedido, cadê a nota fiscal?",
+        "o produto ainda não chegou, me manda a nota fiscal",
+        "não veio nenhum produto nem nota fiscal",
+        "não veio nota fiscal nem nada",
     ],
 )
 async def test_pedido_ambiguo_ou_que_exige_pessoa(db, make_user, ligado, plataforma, texto):
@@ -445,6 +462,23 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("dei nota 5 pra vocês", False),
         ("eu vou querer a nota fiscal", True),
         ("solicito a nota fiscal do pedido", True),
+        # Revisão de 29/10 (Barbosa e5fe56d4): o documento que faltou na caixa.
+        ("Não veio nota fiscal..nem recibo nada documento", True),
+        ("não recebi nota fiscal nenhuma", True),
+        ("não veio nada", False),
+        ("não veio nada, cadê a nota?", False),
+        ("não recebi a nota fiscal nem o produto", False),
+        ("nao recebi o pedido, cade a nota fiscal", False),
+        ("não chegou ainda o pedido, manda a nota", False),
+        ("o pacote não chegou, preciso da nota fiscal", False),
+        ("veio vazio, cadê a nota", False),
+        ("a nota do pedido não veio", True),
+        ("a nota fiscal da compra não chegou", True),
+        # A chave de acesso está na DANFE (Barbosa 75fd5e5d, 28/10 17:03) — só com a nota.
+        ("Boa tarde por favor pode mandar a chave de acesso para eu emitir a nota fiscal", True),
+        ("pode me passar a chave de acesso da nf?", True),
+        ("manda a chave de acesso", False),
+        ("manda a chave de acesso para eu emitir a nota fiscal de devolução", False),
         ("", False),
     ],
 )
