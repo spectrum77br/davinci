@@ -198,10 +198,15 @@ mensagem do comprador soma: o aviso do mediador não).
 O CHAT DE AFILIADO DA SHOPEE (29/10/2026, o dono: "afiliados não tá dando pra
 ver no comunicador e no duoke dá"): a fala do afiliado conta no número desde
 15/10/2026 (`do_comprador_no_numero`: `sistema` com o `from_id` dele); no
-"Falta responder" ele entra também pela fala dele por último
-(`afiliado_esperando`) — aberto e sem resposta, continua lá, como no
-"Pendente" do Duoke. A fila de verdade (`aguardando_resposta`) não muda: a
-IA, a automática e a Caixa Humano nunca o pegam.
+"Falta responder" ele entra também pela fala dele depois da última resposta
+de PESSOA (`afiliado_esperando`) — aberto e sem resposta de pessoa, continua
+lá. Aqui a automática NÃO responde, ao contrário do chat do comprador: no
+chat de afiliado a única que chega é o menu do robô do Duoke ("selecione sua
+dúvida: 1 - Entrega…"), que não fala com o afiliado (produção, 29/10/2026: em
+9 dos 16 chats de afiliado, a única da loja depois da fala dele). O
+"Pendente" do Duoke nesses chats não foi conferido (o Duoke não foi aberto).
+A fila de verdade (`aguardando_resposta`) não muda: a IA, a automática e a
+Caixa Humano nunca o pegam.
 """
 
 from __future__ import annotations
@@ -331,23 +336,30 @@ def turno_recente_sql(c: Any = AtendimentoConversa, agora: datetime | None = Non
 
 
 def afiliado_esperando(conversa: Any, agora: datetime | None = None) -> bool:
-    """Chat de AFILIADO da Shopee com a fala dele por último, nos últimos 7 dias? PURA.
+    """Chat de AFILIADO da Shopee esperando PESSOA, com a fala dele nos últimos 7 dias? PURA.
 
     29/10/2026, o dono: "afiliados não tá dando pra ver no comunicador e no
     duoke dá". A fala do afiliado é `sistema` (`shopee.py`: não abre a vez na
     fila, e a `ultima_do_cliente_em` fica vazia), então a régua (a) nunca o
-    via: aberto sem resposta, ele saía do "Falta responder" com a bolinha —
-    no "Pendente" do Duoke ele fica até alguém responder. Aqui: a última
-    mensagem da conversa (fora a nota) é mais nova que a última da loja
-    (qualquer uma, até a automática; a que falhou não saiu) — no chat de
-    afiliado toda `sistema` é do afiliado (produção, 29/10/2026: 90 de 90).
-    A gêmea de `afiliado_esperando_sql`.
+    via: aberto sem resposta, ele saía do "Falta responder" com a bolinha.
+    Aqui: a última mensagem da conversa (fora a nota) é mais nova que a
+    última resposta de PESSOA da loja (`ultima_da_loja_em`: a automática não
+    conta, a que falhou não saiu; no chat de afiliado sem o turno só de
+    cartão, `gravar.recalcular_conversa`) — no chat de afiliado toda
+    `sistema` é do afiliado (produção, 29/10/2026: 90 de 90). NÃO a
+    `ultima_loja_qualquer_em` do chat do comprador: o menu do robô do Duoke
+    chega 10 a 24 h depois da fala do afiliado e, por ela, nenhum dos 16
+    chats de afiliado entrava (revisão de 29/10/2026). O que fica de fora: a
+    automática que chega depois da resposta de pessoa SEM fala nova do
+    afiliado também o deixa lá (a conversa não guarda a última fala dele;
+    produção: 1 das 40 automáticas, em 01/10/2026, o ciclo de 12 h do robô) —
+    erra para mostrar. A gêmea de `afiliado_esperando_sql`.
     """
     plataforma, dados = getattr(conversa, "plataforma", None), getattr(conversa, "dados", None)
     if not e_chat_de_afiliado(plataforma, dados):
         return False
     ultima = _utc(getattr(conversa, "ultima_mensagem_em", None))
-    da_loja = _utc(getattr(conversa, "ultima_loja_qualquer_em", None))
+    da_loja = _utc(getattr(conversa, "ultima_da_loja_em", None))
     if ultima is None or (da_loja is not None and ultima <= da_loja):
         return False
     return ultima > _utc(agora or datetime.now(UTC)) - JANELA_DO_NUMERO
@@ -360,8 +372,8 @@ def afiliado_esperando_sql(c: Any = AtendimentoConversa, agora: datetime | None 
         gravar.chat_de_afiliado_sql(c),
         func.coalesce(c.ultima_mensagem_em > limite, false()),
         or_(
-            c.ultima_loja_qualquer_em.is_(None),
-            func.coalesce(c.ultima_mensagem_em > c.ultima_loja_qualquer_em, false()),
+            c.ultima_da_loja_em.is_(None),
+            func.coalesce(c.ultima_mensagem_em > c.ultima_da_loja_em, false()),
         ),
     )
 

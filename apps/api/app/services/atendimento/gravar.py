@@ -113,6 +113,7 @@ from app.services.atendimento.constantes import (
     TIPO_SHOPEE_FIGURINHA,
     TIPO_TIKTOK_CARTAO_PEDIDO,
     TRECHOS_CAMPANHA_COM_USUARIO,
+    e_chat_de_afiliado,
     e_mensagem_automatica,
     e_nota,
     e_resposta_automatica,
@@ -1331,7 +1332,16 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
     )
     if primeira_escrita is not None:
         fechou = fechou.where(momento < _quando(primeira_escrita))
-    so_cartao = await _uma(fechou.order_by(momento.desc(), AtendimentoMensagem.created_at.desc()))
+    # No chat de AFILIADO da Shopee não há turno só de cartão (29/10/2026): o
+    # comprador nunca escreve (a fala do afiliado é `sistema`), e a campanha
+    # fecharia a vez sem fala nenhuma — a `ultima_da_loja_em` dele é só a
+    # resposta de PESSOA, o lado da loja do "Falta responder" do afiliado
+    # (`pendente.afiliado_esperando`). A fila dele não muda (nunca tem a vez).
+    so_cartao = (
+        None
+        if e_chat_de_afiliado(conversa.plataforma, conversa.dados)
+        else await _uma(fechou.order_by(momento.desc(), AtendimentoMensagem.created_at.desc()))
+    )
 
     conversa.ultima_mensagem_em = None
     conversa.ultima_mensagem_resumo = None

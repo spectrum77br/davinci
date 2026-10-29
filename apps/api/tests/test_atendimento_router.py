@@ -1270,8 +1270,15 @@ async def test_chat_de_afiliado_na_lista_no_filtro_no_resumo_e_a_pessoa_responde
     (loja,) = r["lojas"]
     assert (r["afiliados"], shopee["afiliados"], loja["afiliados"]) == (1, 1, 1)
     assert loja["nao_lidas_duoke"] == 2, "o afiliado soma no número da loja, como no Duoke"
-    # Alguém abriu e não respondeu: a bolinha some, o "Falta responder" fica
-    # (o "Pendente" do Duoke) — e a fila de verdade continua sem ele.
+    # O menu do robô do Duoke chega depois (revisão de 29/10/2026: a única da
+    # loja depois do afiliado em 9 dos 16 chats de produção) e alguém abriu
+    # sem responder: a bolinha some, o "Falta responder" fica até a PESSOA
+    # responder — e a fila de verdade continua sem ele.
+    await gravar.gravar_mensagem(
+        db, af, externo_id="af-robo", autor="loja",
+        texto="Olá, por favor selecione sua dúvida e logo te atenderemos: 1 - Entrega",
+        enviada_em=AGORA - timedelta(minutes=30),
+    )
     af.visto_em = datetime.now(UTC)
     await db.commit()
     (linha,) = (await client.get(f"{URL}/conversas?filtro=afiliado")).json()["itens"]
@@ -1300,6 +1307,10 @@ async def test_chat_de_afiliado_na_lista_no_filtro_no_resumo_e_a_pessoa_responde
     assert r.status_code == 200
     m = r.json()["mensagem"]
     assert (m["status"], m["autor"], m["origem"]) == ("enviada", "loja", "davinci_humano")
+    # A pessoa respondeu: sai do "Falta responder".
+    assert str(af.id) not in _ids(await client.get(f"{URL}/conversas?filtro=aguardando"))
+    (linha,) = (await client.get(f"{URL}/conversas?filtro=afiliado")).json()["itens"]
+    assert linha["falta_responder"] is False
 
 
 async def test_regra_que_vale_para_loja_no_auto_so_admin(

@@ -237,15 +237,24 @@ async def _mundo(db, make_user) -> dict[str, tuple[AtendimentoConversa, bool]]:
         canal_nome="email",
     )
     # O chat de AFILIADO da Shopee (29/10/2026, o dono: "afiliados não tá dando
-    # pra ver no comunicador"): a fala dele é `sistema` e, por último, espera a
-    # loja como o comprador espera — aberto sem resposta, continua no "Falta
-    # responder" (o "Pendente" do Duoke). A loja respondendo (até a
-    # automática) tira; a que falhou não; 7 dias parado, sai.
+    # pra ver no comunicador"): a fala dele é `sistema` e, depois da última
+    # resposta de PESSOA, espera a loja — aberto sem resposta, continua no
+    # "Falta responder". Só a pessoa respondendo tira: o menu do robô do Duoke
+    # (a única da loja depois do afiliado em 9 dos 16 chats de produção,
+    # revisão de 29/10/2026) e a campanha, não (nem refeita do zero, sem turno
+    # só de cartão); a que falhou não; 7 dias parado, sai.
     afiliado = {"afiliado": True}
     await caso("afiliado_por_ultimo", True, ("loja", 90), ("sistema", 60), dados=afiliado)
     await caso("afiliado_respondido", False, ("sistema", 60), ("loja", 30), dados=afiliado)
     await caso(
-        "afiliado_automatica", False, ("sistema", 60), ("loja", 59, MENU_DUOKE), dados=afiliado
+        "afiliado_automatica", True, ("sistema", 60), ("loja", 59, MENU_DUOKE), dados=afiliado
+    )
+    await caso(
+        "afiliado_campanha", True, ("sistema", 60), ("loja", 59, JA_SEGUE), dados=afiliado
+    )
+    await caso(
+        "afiliado_robo_e_pessoa", False,
+        ("sistema", 90), ("loja", 85, MENU_DUOKE), ("loja", 80), dados=afiliado,
     )
     await caso("afiliado_so_loja", False, ("loja", 30), dados=afiliado)
     await caso("afiliado_parado", False, ("sistema", 60 * 24 * 8), dados=afiliado)
