@@ -327,7 +327,7 @@ class PainelOut(BaseModel):
     pedido: PedidoPainelOut | None = None
     estoque: EstoqueOut = Field(default_factory=EstoqueOut)
     margem: MargemOut | None = None
-    # Quem não tem a permissão da Margem não recebe o bloco (a tela diz por quê).
+    # Quem não é admin não recebe o bloco nem vê a seção (`painel.ve_margem_do_pedido`).
     ve_margem: bool = False
     observacoes_bling: ObservacoesBlingOut | None = None
     links: LinksOut = Field(default_factory=LinksOut)

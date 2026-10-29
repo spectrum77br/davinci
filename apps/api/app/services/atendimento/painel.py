@@ -571,6 +571,17 @@ def ve_lucro(user: User | None) -> bool:
     return user is not None and user.role == UserRole.ADMIN
 
 
+def ve_margem_do_pedido(user: User | None) -> bool:
+    """A seção Margem do painel (a margem do pedido, a mínima e o lucro): só administrador.
+
+    29/10/2026, o Eduardo: "só admin vai poder ver a parte de margem que tem ali no
+    atendimento [...] só essa parte de margem, o resto vê". Quem tem a permissão da
+    aba Margem sem ser admin continua com o resto que segue o `ve_margem` (o recado
+    do robô da Margem, o custo da troca); só esta seção sai.
+    """
+    return user is not None and user.role == UserRole.ADMIN
+
+
 def margem_final(linha: dict) -> float | None:
     """A margem da coluna "Margem" da aba Margem, para UMA linha-item.
 
@@ -1440,7 +1451,7 @@ async def painel_da_conversa(
 
     margem = None
     margem_falhou = False
-    if pedido is not None and ve_margem(user):
+    if pedido is not None and ve_margem_do_pedido(user):
         margem, ok = await _seguro(
             session,
             "margem",
@@ -1595,7 +1606,7 @@ async def painel_da_conversa(
             if margem is not None
             else ({"falhou": True, "itens": []} if margem_falhou else None)
         ),
-        "ve_margem": ve_margem(user),
+        "ve_margem": ve_margem_do_pedido(user),
         # Quem não vê a Margem não lê o recado do robô dela (a máscara do cartão).
         "observacoes_bling": observacoes_tela,
         "links": links_do_pedido(conversa, pedido, ids_shopee),

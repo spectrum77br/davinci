@@ -980,11 +980,8 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
           <span v-else-if="!trocaForaDe83955.pode_retomar" class="shrink-0 text-[10px] text-muted-foreground">alguém está conduzindo agora</span>
         </section>
 
-        <!-- MARGEM (a mesma da aba Margem) -->
-        <section v-if="pnl && pnl.pedido && !pnl.ve_margem" class="text-[11px] text-muted-foreground">
-          <Percent class="mr-1 inline size-3.5" />A margem aparece para quem tem acesso à aba Margem.
-        </section>
-        <section v-else-if="margemPedido" class="space-y-1.5">
+        <!-- MARGEM (a mesma da aba Margem): só admin (29/10/2026) — para os outros, nada. -->
+        <section v-if="pnl?.ve_margem && margemPedido" class="space-y-1.5">
           <div class="flex items-center gap-1.5 text-[13px] font-semibold">
             <Percent class="size-4 text-muted-foreground" /> Margem
             <span v-if="margemPedido.status" class="rounded px-1.5 py-px text-[10px] font-medium" :class="STATUS_MARGEM_CLS[margemPedido.status] || 'bg-muted'">{{ margemPedido.status }}</span>

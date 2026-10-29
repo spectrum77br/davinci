@@ -560,6 +560,10 @@ async def test_quem_ve_a_margem(make_user):
     assert painel.ve_margem(adm) and painel.ve_lucro(adm)
     assert painel.ve_margem(com) and not painel.ve_lucro(com)
     assert not painel.ve_margem(sem) and not painel.ve_margem(None)
+    # 29/10/2026: a seção Margem do painel é só de admin, mesmo com a permissão da aba.
+    assert painel.ve_margem_do_pedido(adm)
+    assert not painel.ve_margem_do_pedido(com) and not painel.ve_margem_do_pedido(sem)
+    assert not painel.ve_margem_do_pedido(None)
 
 
 # ─────────────── observações do Bling ───────────────
@@ -957,6 +961,27 @@ async def test_painel_sem_permissao_de_margem(db, client, make_user, auth_as, mo
     r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
     assert r.status_code == 200, r.text
     assert (r.json()["ve_margem"], r.json()["margem"]) == (False, None)
+
+
+async def test_painel_margem_so_para_admin(db, client, make_user, auth_as, monkeypatch, bling):
+    """29/10/2026, o Eduardo: "só admin vai poder ver a parte de margem que tem ali no
+    atendimento" — quem tem a aba Margem sem ser admin não recebe a seção."""
+    monkeypatch.setattr(rota, "SO_ADMIN", False)
+    u = await make_user(
+        permissions={"atendimento": {"view": True, "edit": True}, "margem": {"view": True}}
+    )
+    auth_as(u)
+    integ, canal = await _loja(db, u)
+    conversa = await _conversa(db, integ, canal, pedido="250925ABC")
+    await _pedido_bling(db, numero="297840", numeroloja="250925ABC", itens=(("dg053.ci", 2),))
+    await _linha_margem(
+        db, pedido="297840", sku="dg053.ci", plataforma="amazon", custo=100, valorbase=120
+    )
+    await db.commit()
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    assert (r.json()["ve_margem"], r.json()["margem"]) == (False, None)
+    assert r.json()["pedido"]["numero_bling"] == "297840"
 
 
 async def test_painel_sem_pedido_no_bling_usa_o_retrato(db, client, admin, make_user):
