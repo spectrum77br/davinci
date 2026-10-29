@@ -158,16 +158,19 @@ MOTIVO_EMAIL_SO_PESSOA = (
 # padrão da API não traz — o Duoke mostra (com o selo "parceiro") e conta no
 # número da loja. O DaVinci lê (`shopee.py`, com `dados.afiliado = true`) e
 # conta no número (`pendente.do_comprador_no_numero`: a fala do afiliado é
-# `sistema` com o `from_id` dele = o `comprador_id` da conversa), mas NÃO
-# responde: o envio em chat de afiliado pede `business_type` +
-# `conversation_id` no `send_message`, nunca medido — sem eles a mensagem
-# iria para um chat de COMPRADOR com a mesma pessoa. A IA (cron, "Sugerir",
-# automático), a mensagem automática e a Caixa Humano ficam de fora pela
-# mesma trava dos canais sem envio.
+# `sistema` com o `from_id` dele = o `comprador_id` da conversa).
+# 29/10/2026, o dono: "afiliados não tá dando pra ver no comunicador e no
+# duoke dá, queria que desse pra ver ali também" — a PESSOA responde por aqui
+# (`enviar._destino` deixa passar só `ORIGEM_HUMANO`; o `send_message` vai
+# com `business_type` 11 + `conversation_id`, `shopee.negocio_do_envio`, e a
+# resposta que a Shopee puser noutro chat vira `revisar`). A IA (cron,
+# "Sugerir", automático, agente), a mensagem automática e a Caixa Humano
+# continuam de fora pela mesma trava dos canais sem envio: a régua abaixo
+# segue devolvendo a frase (só pessoa), como no Zap do número.
 CHAVE_AFILIADO = "afiliado"
-MOTIVO_AFILIADO_SEM_ENVIO = (
-    "Chat de afiliado da Shopee: o envio por este chat ainda não existe no DaVinci "
-    "(nem a IA). Responda pelo Duoke ou pelo Seller Center."
+MOTIVO_AFILIADO_SO_PESSOA = (
+    "Chat de afiliado da Shopee: quem responde é uma pessoa (a IA não sugere nem envia, "
+    "nem a mensagem automática)."
 )
 
 
@@ -187,11 +190,14 @@ def motivo_canal_sem_envio(canal: str | None, plataforma: str | None, dados: obj
     Zap (26/10/2026, Onda 2): o do número de WhatsApp (`whatsapp`) responde
     por PESSOA (`MOTIVO_ZAP_SO_PESSOA`; o envio desvia antes, em
     `enviar._destino_zap`); o com a plataforma da venda, nunca.
+
+    Chat de afiliado (29/10/2026): também só PESSOA (`MOTIVO_AFILIADO_SO_PESSOA`;
+    o `enviar._destino` deixa passar só a origem `davinci_humano`).
     """
     if canal == CANAL_ZAP:
         return MOTIVO_ZAP_SO_PESSOA if plataforma == PLATAFORMA_WHATSAPP else MOTIVO_ZAP_SEM_ENVIO
     if e_chat_de_afiliado(plataforma, dados):
-        return MOTIVO_AFILIADO_SEM_ENVIO
+        return MOTIVO_AFILIADO_SO_PESSOA
     if canal != CANAL_EMAIL:
         return None
     fonte = dados.get("fonte") if isinstance(dados, dict) else None

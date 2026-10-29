@@ -41,7 +41,8 @@ Mensagem para comprador não se desenvia; por isso a ordem abaixo é rígida:
                              ainda não existe no DaVinci, e sem esta trava
                              cairiam no adaptador do marketplace da venda
                              (`constantes.motivo_canal_sem_envio`). No Zap do
-                             número (Onda 2), a IA e a automática (só pessoa);
+                             número (Onda 2) e no chat de afiliado da Shopee
+                             (29/10/2026), a IA e a automática (só pessoa);
        somente_leitura     — plataforma sem adaptador de envio (Instagram) ou
                              lida pelo robô do Mac mini (Temu, AliExpress:
                              "responda no Seller Center");
@@ -219,6 +220,7 @@ from app.services.atendimento.constantes import (
     DESTINOS_RECLAMACAO,
     MODO_AUTO,
     MODOS_QUE_ENVIAM,
+    MOTIVO_AFILIADO_SO_PESSOA,
     MOTIVO_ZAP_SO_PESSOA,
     MSG_ENVIADA,
     MSG_ENVIANDO,
@@ -547,6 +549,14 @@ async def _destino(
         # (com a plataforma da venda) cai na régua abaixo e segue recusado.
         return await _destino_zap(session, conversa, origem=origem)
     motivo_sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
+    if motivo_sem_envio == MOTIVO_AFILIADO_SO_PESSOA and origem == ORIGEM_HUMANO:
+        # Chat de AFILIADO da Shopee (29/10/2026, o dono: "afiliados não tá
+        # dando pra ver no comunicador e no duoke dá, queria que desse pra ver
+        # ali também"): a PESSOA responde pelo caminho de sempre — o adaptador
+        # manda com `business_type` 11 + `conversation_id`
+        # (`shopee.negocio_do_envio`). A IA e a foto da IA seguem recusadas
+        # aqui; a automática, no `_destino_automatica`.
+        motivo_sem_envio = None
     if motivo_sem_envio:
         # E-mail do Tuta e Zap (05/10/2026): a PRIMEIRA trava, antes até do
         # envio desligado (a tela diz o porquê de verdade) e de qualquer

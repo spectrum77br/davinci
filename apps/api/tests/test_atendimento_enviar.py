@@ -45,7 +45,7 @@ from app.security.cipher import decrypt_json, encrypt_json
 from app.services.atendimento import clientes, enviar, gravar, validador
 from app.services.atendimento import shopee as adaptador_shopee
 from app.services.atendimento.constantes import (
-    MOTIVO_AFILIADO_SEM_ENVIO,
+    MOTIVO_AFILIADO_SO_PESSOA,
     MOTIVO_TUTA_SEM_ENVIO,
     MOTIVO_ZAP_SEM_ENVIO,
     ResultadoEnvio,
@@ -1725,10 +1725,11 @@ async def test_email_do_tuta_e_zap_nunca_caem_no_adaptador_do_marketplace(
 
 
 def test_regua_do_chat_de_afiliado():
-    """15/10/2026: o chat de afiliado da Shopee (`dados.afiliado = true`) não
-    sai pelo DaVinci — só o booleano do JSON e só na Shopee."""
+    """15/10/2026: o chat de afiliado da Shopee (`dados.afiliado = true`) fica
+    fora da IA e da automática — só o booleano do JSON e só na Shopee. Desde
+    29/10/2026 a frase diz "só pessoa" (a pessoa responde, `_destino`)."""
     assert motivo_canal_sem_envio("chat", "shopee", {"afiliado": True}) == (
-        MOTIVO_AFILIADO_SEM_ENVIO
+        MOTIVO_AFILIADO_SO_PESSOA
     )
     for canal, plat, dados in (
         ("chat", "shopee", {"afiliado": False}),
@@ -1739,13 +1740,14 @@ def test_regua_do_chat_de_afiliado():
         assert motivo_canal_sem_envio(canal, plat, dados) is None, (canal, plat, dados)
 
 
-async def test_chat_de_afiliado_nunca_sai_pelo_davinci(
+async def test_chat_de_afiliado_so_a_pessoa_responde(
     db, make_user, ligado, plataforma, monkeypatch
 ):
-    """O envio em chat de afiliado pede `business_type` + `conversation_id`
-    (nunca medido): pelo `to_id`, a resposta cairia num chat de COMPRADOR com
-    a mesma pessoa. Pessoa, IA, automático e foto: todos recusados antes do
-    adaptador — mesmo com uma fala de "cliente" esperando."""
+    """29/10/2026 (o dono: "afiliados não tá dando pra ver no comunicador e no
+    duoke dá, queria que desse pra ver ali também"): a PESSOA responde o chat
+    de afiliado pelo caminho de sempre (o adaptador manda com `business_type`
+    11); a IA, a foto da IA e a mensagem automática continuam recusadas antes
+    do adaptador — mesmo com a loja no automático."""
     da_loja, user = await _cenario(db, make_user)
     afiliado = await _contato(
         db, da_loja, canal_nome="chat", dados={"afiliado": True}, contato="777"
@@ -1754,17 +1756,24 @@ async def test_chat_de_afiliado_nunca_sai_pelo_davinci(
     await db.execute(update(AtendimentoCanal).values(modo="auto"))
     await db.commit()
 
-    recusa = await enviar.motivo_para_nao_enviar(db, afiliado)
+    # A faixa da tela e o botão: a pessoa pode.
+    assert await enviar.motivo_para_nao_enviar(db, afiliado) is None
+    # A IA não (nem a sugestão vira envio), nem a foto dela, nem a automática.
+    recusa = await enviar.motivo_para_nao_enviar(db, afiliado, origem="davinci_ia")
     assert recusa is not None
-    assert (recusa.code, recusa.detail) == ("canal_sem_envio", MOTIVO_AFILIADO_SEM_ENVIO)
-    e = await _recusa(enviar.enviar_resposta(db, afiliado, "Oi!", user=user))
-    assert (e.code, e.detail) == ("canal_sem_envio", MOTIVO_AFILIADO_SEM_ENVIO)
+    assert (recusa.code, recusa.detail) == ("canal_sem_envio", MOTIVO_AFILIADO_SO_PESSOA)
     e = await _recusa(enviar.enviar_resposta(db, afiliado, "Oi!", user=None, origem="davinci_ia"))
+    assert (e.code, e.detail) == ("canal_sem_envio", MOTIVO_AFILIADO_SO_PESSOA)
+    e = await _recusa(enviar._destino(db, afiliado, origem="davinci_ia"))
     assert e.code == "canal_sem_envio"
-    e = await _recusa(enviar.enviar_foto(db, afiliado, object(), user=user))
-    assert e.code == "canal_sem_envio"
+    e = await _recusa(enviar._destino_automatica(db, afiliado, codigo="pedido_recebido"))
+    assert (e.code, e.detail) == ("canal_sem_envio", MOTIVO_AFILIADO_SO_PESSOA)
     assert await _mensagens_da_loja(db, afiliado.id) == []
     assert plataforma.chamadas == []
+
+    m = await enviar.enviar_resposta(db, afiliado, "Oi, tudo certo com a parceria!", user=user)
+    assert (m.status, m.origem, m.autor_user_id) == ("enviada", "davinci_humano", user.id)
+    assert plataforma.chamadas == ["Oi, tudo certo com a parceria!"]
 
 
 async def test_trava_do_tuta_e_zap_vem_antes_do_envio_desligado(db, make_user, plataforma):

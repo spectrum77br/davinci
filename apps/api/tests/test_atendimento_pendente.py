@@ -236,6 +236,27 @@ async def _mundo(db, make_user) -> dict[str, tuple[AtendimentoConversa, bool]]:
         dados={"fonte": "tuta"},
         canal_nome="email",
     )
+    # O chat de AFILIADO da Shopee (29/10/2026, o dono: "afiliados não tá dando
+    # pra ver no comunicador"): a fala dele é `sistema` e, por último, espera a
+    # loja como o comprador espera — aberto sem resposta, continua no "Falta
+    # responder" (o "Pendente" do Duoke). A loja respondendo (até a
+    # automática) tira; a que falhou não; 7 dias parado, sai.
+    afiliado = {"afiliado": True}
+    await caso("afiliado_por_ultimo", True, ("loja", 90), ("sistema", 60), dados=afiliado)
+    await caso("afiliado_respondido", False, ("sistema", 60), ("loja", 30), dados=afiliado)
+    await caso(
+        "afiliado_automatica", False, ("sistema", 60), ("loja", 59, MENU_DUOKE), dados=afiliado
+    )
+    await caso("afiliado_so_loja", False, ("loja", 30), dados=afiliado)
+    await caso("afiliado_parado", False, ("sistema", 60 * 24 * 8), dados=afiliado)
+    await caso(
+        "afiliado_nao_precisa", False, ("sistema", 60), dados=afiliado,
+        sem_resposta_necessaria=True,
+    )
+    await caso("afiliado_fechado", False, ("sistema", 60), dados=afiliado, situacao="fechada")
+    falhou_af = await _cena(db, integ, canal, "afiliado_falhou", ("sistema", 60), dados=afiliado)
+    await _nossa(db, falhou_af, 30, status="falhou")
+    c["afiliado_falhou"] = (falhou_af, True)
     await caso("fechada", False, ("cliente", 60), situacao="fechada")
     await caso("fechada_nao_lida", False, ("cliente", 60), situacao="fechada", nao_lidas=1)
     await caso("nao_precisa", False, ("cliente", 60), sem_resposta_necessaria=True)

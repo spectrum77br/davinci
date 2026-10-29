@@ -310,6 +310,35 @@ async def test_shopee_sobe_e_manda_a_imagem(db, make_user, monkeypatch):
     assert len(rede.feitos) == antes
 
 
+async def test_shopee_foto_no_chat_de_afiliado_vai_com_a_conversa(db, make_user, monkeypatch):
+    """29/10/2026: a pessoa manda foto no chat de AFILIADO — o `send_message`
+    leva `business_type` 11 + o `conversation_id`; se a Shopee devolver outra
+    conversa (pôs no chat de comprador da mesma pessoa), a linha fica `revisar`."""
+    corpos: list[dict] = []
+    volta = {"conversation_id": "379920374879551489"}
+
+    def api(request):
+        if request.url.path.endswith("/sellerchat/upload_image"):
+            return httpx.Response(200, json={"error": "", "response": {"url": "https://cf/x"}})
+        corpos.append(json.loads(request.content))
+        return httpx.Response(200, json={"error": "", "response": {"message_id": "m-1", **volta}})
+
+    _Rede(monkeypatch, api)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user, externo="379920374879551489")
+    conversa.dados = {"afiliado": True}
+    await db.commit()
+    m = await enviar.enviar_foto(db, conversa, foto.validar_foto(JPG, "a.jpg"), user=user)
+    assert (m.status, m.externo_id) == ("enviada", "m-1")
+    assert (corpos[-1]["business_type"], corpos[-1]["conversation_id"]) == (
+        11,
+        379920374879551489,
+    )
+    volta["conversation_id"] = "555"
+    m = await enviar.enviar_foto(db, conversa, foto.validar_foto(PNG, "b.png"), user=user)
+    assert (m.status, m.erro) == ("revisar", "shopee afiliado_outro_chat")
+
+
 async def test_shopee_upload_falhou_nao_saiu(db, make_user, monkeypatch):
     def api(request):
         if request.url.path.endswith("/upload_image"):

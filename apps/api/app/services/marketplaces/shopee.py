@@ -60,8 +60,11 @@ SHOPEE_TEST_BASE = "https://partner.test-stable.shopeemobile.com"
 # `business_type=11` as quatro respondem, no mesmo formato (o item não traz
 # o campo — quem pediu sabe de que lista é). O envio
 # (`send_message`) pede `business_type` + `conversation_id` (EcomPHP/
-# shopee-php, PR 7 e 9, nov/2024) — NÃO medido, e o DaVinci não envia em
-# chat de afiliado (`constantes.motivo_canal_sem_envio`).
+# shopee-php, PR 7 e 9, nov/2024). 29/10/2026: a PESSOA responde o chat de
+# afiliado pelo DaVinci com os dois (`chat_send_message`); ainda NÃO medido
+# em produção — a resposta que voltar com OUTRO `conversation_id` (a Shopee
+# ignorou o parâmetro e mandou no chat de comprador da mesma pessoa) vira
+# `revisar` (`atendimento/shopee.foi_para_outro_chat`).
 NEGOCIO_COMPRADOR = 0
 NEGOCIO_AFILIADO = 11
 
@@ -736,6 +739,8 @@ class ShopeeClient:
         order_sn: str = "",
         sticker_id: str = "",
         sticker_package_id: str = "",
+        business_type: int = NEGOCIO_COMPRADOR,
+        conversation_id: int | str | None = None,
     ) -> dict:
         """Manda UMA mensagem pro comprador no chat da loja
         (POST /api/v2/sellerchat/send_message). `text` → `message_type=text`;
@@ -752,10 +757,21 @@ class ShopeeClient:
         o Duoke manda e a leitura grava (`atendimento_mensagens.payload`, 7
         dias: 1.940 cartões `{"order_sn"}` e 969 figurinhas
         `{"sticker_id": "0007", "sticker_package_id": "br_shoppito"}`, os dois
-        `source=openapi`, `status=normal`)."""
+        `source=openapi`, `status=normal`).
+
+        Chat de AFILIADO (29/10/2026): `business_type=NEGOCIO_AFILIADO` com o
+        `conversation_id` da conversa (sem ele, `ValueError` antes de sair —
+        pelo `to_id` sozinho a mensagem iria ao chat de comprador da mesma
+        pessoa). No chat do comprador o corpo é byte a byte o de antes."""
         tipos = [bool(text), bool(image_url), bool(order_sn), bool(sticker_id)]
         if sum(tipos) != 1:
             raise ValueError("chat_send_message: mande texto OU imagem OU pedido OU figurinha")
+        negocio: dict[str, Any] = {}
+        if business_type:
+            conversa = str(conversation_id or "").strip()
+            if not conversa.isdigit():
+                raise ValueError("chat_send_message: chat de afiliado sem o conversation_id")
+            negocio = {"business_type": int(business_type), "conversation_id": int(conversa)}
         if image_url:
             corpo = {"message_type": "image", "content": {"image_url": image_url}}
         elif order_sn:
@@ -775,7 +791,7 @@ class ShopeeClient:
         return await self._call(
             "POST",
             "/api/v2/sellerchat/send_message",
-            json={"to_id": int(to_id), **corpo},
+            json={"to_id": int(to_id), **corpo, **negocio},
             what="shopee_chat_send",
         )
 

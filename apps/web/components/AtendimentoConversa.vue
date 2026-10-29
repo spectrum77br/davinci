@@ -1844,10 +1844,11 @@ const gerandoIds = reactive(new Set<string>())
 const gerando = computed(() => gerandoIds.has(props.conversaId))
 // Fechada/bloqueada: o backend não gera (e o botão só levaria a um "não
 // sugeriu nada" sem explicação). No Zap a IA não entra (nem sugere, nem
-// envia — premissa P8 de docs/zap/desenho.md): o backend recusaria.
+// envia — premissa P8 de docs/zap/desenho.md): o backend recusaria. Nem no
+// chat de AFILIADO da Shopee (29/10/2026): lá só a pessoa responde.
 const podeSugerir = computed(() => {
   const c = conversa.value
-  return !!c && c.canal !== 'zap' && canAvaliar.value && !c.somente_leitura && !c.ia_pausada && c.situacao !== 'fechada' && c.situacao !== 'bloqueada'
+  return !!c && c.canal !== 'zap' && !c.afiliado && canAvaliar.value && !c.somente_leitura && !c.ia_pausada && c.situacao !== 'fechada' && c.situacao !== 'bloqueada'
     && props.flags?.ia_ativa !== false && !rascunho.value
 })
 // Por que não veio sugestão, quando a API diz (`motivo`). Sem motivo, a frase
@@ -3196,8 +3197,8 @@ watch(() => props.conversaId, (novo, velho) => {
             </div>
             <div v-else class="flex flex-col" :class="lado(l.m) === 'cliente' || lado(l.m) === 'mediador' || lado(l.m) === 'afiliado' ? 'items-start' : 'items-end'" :data-msg-id="l.m.id">
               <div v-if="lado(l.m) === 'mediador'" class="mb-0.5 px-1 text-[11px] font-medium text-violet-700 dark:text-violet-300" title="a plataforma falando na reclamação (mediação)">Mediador · {{ plataformaInfo(conversa.plataforma).nome }}</div>
-              <!-- o afiliado da Shopee: conta no número, a resposta é pelo Duoke/Seller Center -->
-              <div v-else-if="lado(l.m) === 'afiliado'" class="mb-0.5 px-1 text-[11px] font-medium text-amber-800 dark:text-amber-300" title="afiliado da Shopee (criador de conteúdo) — conta no número da Caixa; a resposta é pelo Duoke ou pelo Seller Center" data-msg-afiliado>{{ origemLabel(l.m, conversa.plataforma) }}</div>
+              <!-- o afiliado da Shopee: conta no número; desde 29/10/2026 a pessoa responde por aqui -->
+              <div v-else-if="lado(l.m) === 'afiliado'" class="mb-0.5 px-1 text-[11px] font-medium text-amber-800 dark:text-amber-300" title="afiliado da Shopee (criador de conteúdo) — conta no número da Caixa; responda por aqui (só pessoa: a IA e as automações não entram)" data-msg-afiliado>{{ origemLabel(l.m, conversa.plataforma) }}</div>
               <!-- por onde a resposta da loja saiu (o Duoke mostra o atendente aqui) -->
               <div v-else-if="lado(l.m) === 'loja'" class="mb-0.5 flex max-w-[85%] items-center gap-1 px-1 text-[11px] md:max-w-[75%]" :class="autorCls(l.m)" :title="origemHint(l.m)">
                 <Bot v-if="l.m.origem === 'davinci_ia'" class="size-3 shrink-0" />
@@ -3278,6 +3279,8 @@ watch(() => props.conversaId, (novo, velho) => {
                   <div class="font-medium">Não sabemos se chegou ao comprador.</div>
                   <!-- Zap: não há caixa da Meta onde conferir; o aviso de entrega concilia (revisão, 26/10/2026). -->
                   <div v-if="ehZap" data-zap-revisar>{{ ZAP_REVISAR.balao }}</div>
+                  <!-- Chat de afiliado (29/10/2026): a Shopee devolveu OUTRA conversa — saiu, mas no chat de comprador da mesma pessoa. -->
+                  <div v-else-if="l.m.erro === 'shopee afiliado_outro_chat'" data-afiliado-outro-chat>A Shopee pôs esta resposta no chat de comprador desta pessoa, não no chat de afiliado. Confira no Seller Center e marque aqui — o DaVinci não manda de novo sozinho.</div>
                   <div v-else>A plataforma não confirmou o envio. Confira lá e marque aqui — o DaVinci não manda de novo sozinho.</div>
                   <div v-if="canEdit" class="flex flex-wrap gap-1 pt-0.5">
                     <button

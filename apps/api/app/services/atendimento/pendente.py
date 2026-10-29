@@ -194,6 +194,14 @@ fala do comprador tem a mensagem dele gravada (medido em produção em
 cliente) — inclusive o e-mail da Amazon, a pergunta do ML e o SAC da Magalu,
 que contam pela mesma régua (onde a vez é da plataforma, como no SAC, só a
 mensagem do comprador soma: o aviso do mediador não).
+
+O CHAT DE AFILIADO DA SHOPEE (29/10/2026, o dono: "afiliados não tá dando pra
+ver no comunicador e no duoke dá"): a fala do afiliado conta no número desde
+15/10/2026 (`do_comprador_no_numero`: `sistema` com o `from_id` dele); no
+"Falta responder" ele entra também pela fala dele por último
+(`afiliado_esperando`) — aberto e sem resposta, continua lá, como no
+"Pendente" do Duoke. A fila de verdade (`aguardando_resposta`) não muda: a
+IA, a automática e a Caixa Humano nunca o pegam.
 """
 
 from __future__ import annotations
@@ -224,6 +232,7 @@ from app.services.atendimento.constantes import (
     MSG_FALHOU,
     ORIGEM_NOTA,
     TIPO_NOTA,
+    e_chat_de_afiliado,
     e_mensagem_automatica,
     e_nota,
 )
@@ -321,11 +330,48 @@ def turno_recente_sql(c: Any = AtendimentoConversa, agora: datetime | None = Non
     return func.coalesce(c.ultima_do_cliente_em > limite, false())
 
 
+def afiliado_esperando(conversa: Any, agora: datetime | None = None) -> bool:
+    """Chat de AFILIADO da Shopee com a fala dele por último, nos últimos 7 dias? PURA.
+
+    29/10/2026, o dono: "afiliados não tá dando pra ver no comunicador e no
+    duoke dá". A fala do afiliado é `sistema` (`shopee.py`: não abre a vez na
+    fila, e a `ultima_do_cliente_em` fica vazia), então a régua (a) nunca o
+    via: aberto sem resposta, ele saía do "Falta responder" com a bolinha —
+    no "Pendente" do Duoke ele fica até alguém responder. Aqui: a última
+    mensagem da conversa (fora a nota) é mais nova que a última da loja
+    (qualquer uma, até a automática; a que falhou não saiu) — no chat de
+    afiliado toda `sistema` é do afiliado (produção, 29/10/2026: 90 de 90).
+    A gêmea de `afiliado_esperando_sql`.
+    """
+    plataforma, dados = getattr(conversa, "plataforma", None), getattr(conversa, "dados", None)
+    if not e_chat_de_afiliado(plataforma, dados):
+        return False
+    ultima = _utc(getattr(conversa, "ultima_mensagem_em", None))
+    da_loja = _utc(getattr(conversa, "ultima_loja_qualquer_em", None))
+    if ultima is None or (da_loja is not None and ultima <= da_loja):
+        return False
+    return ultima > _utc(agora or datetime.now(UTC)) - JANELA_DO_NUMERO
+
+
+def afiliado_esperando_sql(c: Any = AtendimentoConversa, agora: datetime | None = None):
+    """SQL de `afiliado_esperando` (nunca NULL)."""
+    limite = _utc(agora or datetime.now(UTC)) - JANELA_DO_NUMERO
+    return and_(
+        gravar.chat_de_afiliado_sql(c),
+        func.coalesce(c.ultima_mensagem_em > limite, false()),
+        or_(
+            c.ultima_loja_qualquer_em.is_(None),
+            func.coalesce(c.ultima_mensagem_em > c.ultima_loja_qualquer_em, false()),
+        ),
+    )
+
+
 def falta_responder(conversa: Any, agora: datetime | None = None) -> bool:
     """A conversa conta no "Falta responder" da Caixa (igual ao Duoke)? PURA.
 
     A gêmea de `falta_responder_sql` (o teste confere as duas). No chat, só o
     turno dos últimos 7 dias (`turno_recente`); a fila da plataforma tem o prazo dela.
+    O chat de afiliado pela fala dele (`afiliado_esperando`, 29/10/2026).
     """
     if pela_fila(conversa):
         return bool(getattr(conversa, "aguardando_resposta", False))
@@ -333,6 +379,8 @@ def falta_responder(conversa: Any, agora: datetime | None = None) -> bool:
         return False
     if getattr(conversa, "sem_resposta_necessaria", False):
         return False
+    if afiliado_esperando(conversa, agora):
+        return True
     if not turno_recente(conversa, agora):
         return False
     return nao_lida_conta(conversa) or comprador_por_ultimo(conversa)
@@ -373,8 +421,13 @@ def falta_responder_sql(c: Any = AtendimentoConversa, agora: datetime | None = N
             not_(fila),
             c.situacao != CONVERSA_FECHADA,
             c.sem_resposta_necessaria.is_(False),
-            turno_recente_sql(c, agora),
-            or_(nao_lida_conta_sql(c), comprador_por_ultimo_sql(c)),
+            or_(
+                and_(
+                    turno_recente_sql(c, agora),
+                    or_(nao_lida_conta_sql(c), comprador_por_ultimo_sql(c)),
+                ),
+                afiliado_esperando_sql(c, agora),
+            ),
         ),
     )
 

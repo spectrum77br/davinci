@@ -205,7 +205,8 @@ class ConversaResumoOut(BaseModel):
     # 02/10/2026): selo "pergunta" e frente da fila no Mídia/"Falta responder".
     eh_pergunta: bool = False
     # Chat de AFILIADO da Shopee (15/10/2026, `dados.afiliado`): o selo
-    # "afiliado" na lista — conta no número da Caixa, mas não sai pelo DaVinci.
+    # "Afiliado" na lista — conta no número da Caixa e, desde 29/10/2026, a
+    # PESSOA responde por aqui (a IA e as automações nunca).
     afiliado: bool = False
     somente_leitura: bool = False
     # Há resposta NOSSA em `revisar` (timeout, envio interrompido): pode ter
@@ -1090,6 +1091,10 @@ class PlataformaResumoOut(BaseModel):
     # daqui com o e-mail — os números deles: GET /api/atendimento/email/contagens.)
     # Na Caixa Humano (09/10/2026): falta responder e a IA não pode.
     humano: int = 0
+    # Chats de AFILIADO da Shopee NÃO fechados (29/10/2026, o dono: "afiliados
+    # não tá dando pra ver no comunicador e no duoke dá") — o número do filtro
+    # "Afiliados" do menu Filtrar (`filtro=afiliado`).
+    afiliados: int = 0
 
 
 class LojaResumoOut(BaseModel):
@@ -1137,6 +1142,8 @@ class LojaResumoOut(BaseModel):
     status_motivo: str | None = None
     # Conversas NÃO fechadas da loja por etiqueta (ver PlataformaResumoOut).
     etiquetas: dict[str, int] = Field(default_factory=dict)
+    # Chats de afiliado não fechados da loja (ver PlataformaResumoOut).
+    afiliados: int = 0
     # Na Caixa Humano (ver PlataformaResumoOut).
     humano: int = 0
 
@@ -1212,6 +1219,8 @@ class ResumoOut(BaseModel):
     humano: int = 0
     # O número do Duoke somando as plataformas (o número da aba Caixa).
     nao_lidas_duoke: int = 0
+    # Chats de afiliado não fechados, somando as plataformas (29/10/2026).
+    afiliados: int = 0
     lojas: list[LojaResumoOut]
     canais: list[CanalOut]
     flags: FlagsOut

@@ -55,7 +55,7 @@ from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AUTOR_SISTEMA,
     CHAVE_AFILIADO,
-    MOTIVO_AFILIADO_SEM_ENVIO,
+    MOTIVO_AFILIADO_SO_PESSOA,
     MSG_ENVIADA,
     MSG_FALHOU,
     ORIGEM_CLIENTE,
@@ -110,6 +110,8 @@ class ShopeeFalso:
         self.chamadas_negocio: list[tuple[str, int]] = []
         self.resposta_envio: Any = {"message_id": "9000000000000000001"}
         self.enviados: list[tuple[str, str]] = []
+        # O que o envio levou além do `to_id` (o chat de afiliado, 29/10/2026).
+        self.negocios_envio: list[dict] = []
 
     # — montagem do cenário —
 
@@ -280,8 +282,11 @@ class ShopeeFalso:
             },
         }
 
-    async def chat_send_message(self, to_id, *, text: str = "", image_url: str = "") -> dict:
+    async def chat_send_message(
+        self, to_id, *, text: str = "", image_url: str = "", **negocio
+    ) -> dict:
         self.enviados.append((str(to_id), text))
+        self.negocios_envio.append(negocio)
         if isinstance(self.resposta_envio, BaseException):
             raise self.resposta_envio
         return self.resposta_envio
@@ -1181,13 +1186,18 @@ async def test_afiliado_conta_no_numero_da_caixa_como_no_duoke(db, make_user, te
     # A fala do afiliado conta (1, como no Duoke); a da loja de 40 dias atrás
     # é a última resposta de pessoa.
     assert await _numero(db, af) == (1, 1)
-    # O que conta para o número NÃO entra no "Falta responder" da fila.
-    assert not pendente.falta_responder(af)
+    # A FILA de verdade continua sem ele (a IA, a automática, a Caixa Humano)...
+    assert af.aguardando_resposta is False
+    # ...mas, desde 29/10/2026 (o dono: "afiliados não tá dando pra ver no
+    # comunicador"), a fala dele por último está no "Falta responder" da Caixa,
+    # como no "Pendente" do Duoke.
+    assert pendente.falta_responder(af)
 
-    # Respondeu pelo Seller Center/Duoke: zera.
+    # Respondeu pelo Seller Center/Duoke: zera e sai do "Falta responder".
     f.conversa("AF1", msg("AF1", AGORA - timedelta(minutes=30), da_loja=True, afiliado=True))
     await _rodar(db, canal, integ, f)
     assert await _numero(db, af) == (0, 0)
+    assert not pendente.falta_responder(af)
 
     # Ele escreveu de novo (duas vezes): 2.
     f.conversa(
@@ -1230,7 +1240,7 @@ async def test_afiliado_fica_fora_da_ia_do_envio_e_do_marcar_lida(db, make_user,
     convs = await _conversas(db)
     a, af = convs["A"], convs["AF1"]
 
-    assert motivo_canal_sem_envio(af.canal, af.plataforma, af.dados) == MOTIVO_AFILIADO_SEM_ENVIO
+    assert motivo_canal_sem_envio(af.canal, af.plataforma, af.dados) == MOTIVO_AFILIADO_SO_PESSOA
     assert motivo_canal_sem_envio(a.canal, a.plataforma, a.dados) is None
     # O cron da IA corta pelo mesmo SQL (`ia._sql_canal_sem_envio`).
     cortadas = set(
@@ -1557,6 +1567,73 @@ async def test_envio_sem_comprador_ou_vazio_nem_chama_a_shopee(db, make_user):
     r2 = await shopee.enviar_texto(db, conv, integ, f, "   ")
     assert (r2.ok, r2.erro) == (False, "shopee texto_vazio")
     assert f.enviados == []
+
+
+async def test_envio_no_chat_de_afiliado_vai_com_business_type_e_a_conversa(db, make_user):
+    """29/10/2026 (o dono: "afiliados não tá dando pra ver no comunicador"): a
+    pessoa responde o chat de afiliado — o `send_message` leva `business_type`
+    11 + o `conversation_id`; no chat do comprador, o corpo de sempre."""
+    integ, conv = await _conversa_para_envio(db, make_user)
+    conv.externo_id = "379920374879551489"
+    conv.dados = {"afiliado": True}
+    await db.commit()
+    f = ShopeeFalso()
+    f.resposta_envio = {"message_id": "2302748948493123953", "conversation_id": conv.externo_id}
+    r = await shopee.enviar_texto(db, conv, integ, f, "Oi, tudo certo com a parceria!")
+    assert r.ok and not r.ambiguo and r.externo_id == "2302748948493123953"
+    assert f.enviados == [(str(COMPRADOR), "Oi, tudo certo com a parceria!")]
+    assert f.negocios_envio == [
+        {"business_type": NEGOCIO_AFILIADO, "conversation_id": "379920374879551489"}
+    ]
+    # A Shopee ignorou o parâmetro e pôs no chat de COMPRADOR da mesma pessoa
+    # (outro `conversation_id`): saiu, mas não ali — `revisar`, nunca retenta.
+    f.resposta_envio = {"message_id": "2302748948493123954", "conversation_id": "555"}
+    r = await shopee.enviar_texto(db, conv, integ, f, "oi de novo")
+    assert (r.ok, r.ambiguo, r.erro) == (False, True, shopee.ERRO_AFILIADO_OUTRO_CHAT)
+    # Sem o campo na resposta não dá para saber: vale como saiu.
+    f.resposta_envio = {"message_id": "2302748948493123955"}
+    assert (await shopee.enviar_texto(db, conv, integ, f, "e agora")).ok
+    # O chat do comprador: nada além do `to_id` (e a outra conversa não importa).
+    conv.dados = {}
+    await db.commit()
+    f.negocios_envio.clear()
+    f.resposta_envio = {"message_id": "1", "conversation_id": "555"}
+    assert (await shopee.enviar_texto(db, conv, integ, f, "oi")).ok
+    assert f.negocios_envio == [{}]
+    assert shopee.negocio_do_envio(conv) == {}
+
+
+async def test_cliente_manda_o_chat_de_afiliado_com_os_dois_campos(monkeypatch):
+    """O corpo do `send_message` no chat de afiliado (29/10/2026): `business_type`
+    e `conversation_id` numéricos; sem a conversa, nada sai (pelo `to_id`
+    sozinho iria ao chat de comprador)."""
+    corpos: list[dict] = []
+
+    async def _call(self, method, path, *, params=None, json=None, what="shopee"):
+        corpos.append(json)
+        return {"message_id": "1", "conversation_id": "42"}
+
+    monkeypatch.setattr(ShopeeClient, "_call", _call)
+    cliente = ShopeeClient({"shop_id": SHOP, "access_token": "t", "expires_at": 9_999_999_999})
+    await cliente.chat_send_message(
+        77, text="Oi", business_type=NEGOCIO_AFILIADO, conversation_id="42"
+    )
+    assert corpos[-1] == {
+        "to_id": 77,
+        "message_type": "text",
+        "content": {"text": "Oi"},
+        "business_type": 11,
+        "conversation_id": 42,
+    }
+    # O do comprador: byte a byte o de antes.
+    await cliente.chat_send_message(77, text="Oi")
+    assert corpos[-1] == {"to_id": 77, "message_type": "text", "content": {"text": "Oi"}}
+    for sem in (None, "", "conv-x"):
+        with pytest.raises(ValueError):
+            await cliente.chat_send_message(
+                77, text="Oi", business_type=NEGOCIO_AFILIADO, conversation_id=sem
+            )
+    assert len(corpos) == 2
 
 
 async def test_envio_com_to_id_invalido_nao_saiu(db, make_user):

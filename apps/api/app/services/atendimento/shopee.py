@@ -81,8 +81,12 @@ próprio e cursor próprio em `cursor["afiliado"]`, no mesmo formato), e o
 não lido dela. A conversa ganha `dados.afiliado = true` e o `comprador_id` é
 o do afiliado (`to_id`); a fala dele vira `sistema` com `from_id` = esse id
 — conta no número da Caixa como no Duoke (`pendente.do_comprador_no_numero`)
-sem abrir a vez na fila: a IA, a automática e a Caixa Humano não pegam (e o
-DaVinci não envia nesse chat — `constantes.motivo_canal_sem_envio`). A
+sem abrir a vez na fila: a IA, a automática e a Caixa Humano não pegam
+(`constantes.motivo_canal_sem_envio`). Desde 29/10/2026 (o dono: "afiliados
+não tá dando pra ver no comunicador e no duoke dá") a PESSOA responde por
+aqui: `enviar_texto` e a foto mandam com `business_type` 11 + o
+`conversation_id` (`negocio_do_envio`), e a resposta que a Shopee devolver
+com outro `conversation_id` vira `revisar` (`foi_para_outro_chat`). A
 resposta da loja no chat de afiliado (pelo Seller Center/Duoke) é `loja`:
 zera o número, como a resposta de pessoa no Duoke. Falha na lista de
 afiliados não derruba a rodada (fica no log e o cursor dela espera). A
@@ -478,6 +482,53 @@ def _negocio_da_conversa(conversa: AtendimentoConversa) -> int:
     if e_chat_de_afiliado(conversa.plataforma, conversa.dados):
         return NEGOCIO_AFILIADO
     return NEGOCIO_COMPRADOR
+
+
+def negocio_do_envio(conversa: AtendimentoConversa) -> dict[str, Any]:
+    """O que o `chat_send_message` leva além do `to_id` (29/10/2026). PURA.
+
+    No chat de AFILIADO, `business_type` 11 + o `conversation_id` (o
+    `externo_id` da conversa: o id da Shopee, numérico); no do comprador,
+    nada — o corpo de sempre.
+    """
+    if _negocio_da_conversa(conversa) == NEGOCIO_COMPRADOR:
+        return {}
+    return {"business_type": NEGOCIO_AFILIADO, "conversation_id": conversa.externo_id}
+
+
+def foi_para_outro_chat(conversa: AtendimentoConversa, resposta: Any) -> bool:
+    """A resposta do envio no chat de afiliado voltou com OUTRA conversa? PURA.
+
+    O envio com `business_type` 11 nunca foi medido (29/10/2026): se a Shopee
+    ignorar o parâmetro, a mensagem sai pelo `to_id` no chat de COMPRADOR da
+    mesma pessoa e a resposta traz o `conversation_id` dele. Sem o campo, não
+    dá para saber — vale como saiu (a próxima leitura confere).
+    """
+    if _negocio_da_conversa(conversa) == NEGOCIO_COMPRADOR or not isinstance(resposta, dict):
+        return False
+    voltou = str(resposta.get("conversation_id") or "").strip()
+    return bool(voltou) and voltou != str(conversa.externo_id or "").strip()
+
+
+# O erro da linha que a Shopee pôs noutro chat (`foi_para_outro_chat`): saiu,
+# mas não onde a pessoa escreveu — `revisar`, nunca se retenta.
+ERRO_AFILIADO_OUTRO_CHAT = "shopee afiliado_outro_chat"
+
+
+def conferir_chat_do_afiliado(
+    conversa: AtendimentoConversa, resultado: ResultadoEnvio
+) -> ResultadoEnvio:
+    """O envio que saiu no chat de afiliado foi para OUTRA conversa → `revisar`."""
+    if resultado.ok and foi_para_outro_chat(conversa, resultado.payload):
+        logger.warning(
+            "atendimento_shopee_afiliado_outro_chat",
+            conversa_id=str(conversa.id),
+            voltou=str((resultado.payload or {}).get("conversation_id")),
+        )
+        return ResultadoEnvio(
+            ok=False, ambiguo=True, erro=ERRO_AFILIADO_OUTRO_CHAT, payload=resultado.payload
+        )
+    return resultado
 
 
 def _afiliado_sql() -> Any:
@@ -1478,16 +1529,20 @@ async def enviar_texto(
     """Envia `texto` na conversa. Timeout/erro sem código = ambiguo. Nunca levanta.
 
     A Shopee não responde "na conversa": manda para o comprador (`to_id`),
-    que é o `comprador_id` gravado pela leitura.
+    que é o `comprador_id` gravado pela leitura. No chat de AFILIADO
+    (29/10/2026), com `business_type` 11 + o `conversation_id`
+    (`negocio_do_envio`); voltou outra conversa → `revisar`.
     """
     to_id = str(conversa.comprador_id or "").strip()
     if not to_id:
         return ResultadoEnvio(ok=False, erro="shopee sem_comprador")
     if not (texto or "").strip():
         return ResultadoEnvio(ok=False, erro="shopee texto_vazio")
-    return await _envio(
-        lambda: cliente.chat_send_message(to_id, text=texto), conversa_id=conversa.id
+    negocio = negocio_do_envio(conversa)
+    resultado = await _envio(
+        lambda: cliente.chat_send_message(to_id, text=texto, **negocio), conversa_id=conversa.id
     )
+    return conferir_chat_do_afiliado(conversa, resultado)
 
 
 # ── Partes da mensagem automática (05/10/2026) ────────────────────────────

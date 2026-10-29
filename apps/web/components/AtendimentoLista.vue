@@ -50,6 +50,10 @@ export const FILTROS_MENU: OpcaoFiltro[] = [
   { value: 'a_conferir', label: 'A conferir', hint: 'resposta enviada pelo DaVinci que a plataforma não confirmou — confira se chegou ao comprador' },
   { value: 'minhas', label: 'Minhas', hint: 'conversas atribuídas a você' },
   { value: 'fechadas', label: 'Fechadas', hint: 'fechadas por alguém da equipe' },
+  // Chat de AFILIADO da Shopee (29/10/2026, o dono: "afiliados não tá dando
+  // pra ver no comunicador e no duoke dá, queria que desse pra ver ali
+  // também"): os abertos, como o selo "parceiro" do Duoke (`filtro=afiliado`).
+  { value: 'afiliado', label: 'Afiliados', hint: 'chat de afiliado da Shopee (o criador de conteúdo que divulga a loja): responda por aqui — só pessoa, a IA e as automações não entram' },
   // (13/10/2026: o "E-mail sem vínculo" saiu do menu — o e-mail não está mais
   // na Caixa; a fila dele é E-mail › Filas › Sem vínculo.)
   // Pela ETIQUETA (status atual, 01/10/2026), da mais urgente para a menos —
@@ -76,7 +80,8 @@ export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 // Na Caixa Humano (09/10/2026) o menu Filtrar não mostra o que nunca entra
 // nela: a fechada, o carrinho do site e as redes (Mídia) — o servidor só põe
 // lá o que falta responder num canal que tem resposta.
-export const FILTROS_FORA_DA_HUMANO = new Set(['fechadas', 'carrinho', 'midia'])
+// O chat de afiliado também (29/10/2026): a IA nunca o pega, então nunca está lá.
+export const FILTROS_FORA_DA_HUMANO = new Set(['fechadas', 'carrinho', 'midia', 'afiliado'])
 export function opcoesDoFiltrar(caixa: string | null | undefined): OpcaoFiltro[] {
   return caixa === 'humano' ? FILTROS_MENU.filter((f) => !FILTROS_FORA_DA_HUMANO.has(f.value)) : FILTROS_MENU
 }
@@ -260,6 +265,13 @@ function naHumano(linhas: ({ humano?: number } | null | undefined)[]): number | 
   if (!linhas.length || !linhas.every((x) => typeof x?.humano === 'number')) return null
   return linhas.reduce((s, x) => s + (Number(x?.humano) || 0), 0)
 }
+// Os chats de AFILIADO abertos (29/10/2026) das plataformas escolhidas: a que
+// não tem conversa conta zero; a API antiga (sem o campo) não tem número.
+function afiliadosDe(linhas: { afiliados?: number }[]): number | null {
+  if (!linhas.length) return 0
+  if (!linhas.every((x) => typeof x?.afiliados === 'number')) return null
+  return linhas.reduce((s, x) => s + (Number(x.afiliados) || 0), 0)
+}
 const contagem = computed((): Record<string, number | null> => {
   const r = props.resumo
   if (!r) return {}
@@ -280,6 +292,7 @@ const contagem = computed((): Record<string, number | null> => {
       vencendo: null,
       a_conferir: semIntegracao.a_conferir ?? null,
       humano: naHumano([semIntegracao]),
+      afiliado: semIntegracao.afiliados ?? null,
       ...porEtiqueta([semIntegracao.etiquetas]),
     }
   }
@@ -291,6 +304,7 @@ const contagem = computed((): Record<string, number | null> => {
       vencendo: null,
       a_conferir: l?.a_conferir ?? null,
       humano: l ? naHumano([l]) : 0,
+      afiliado: l ? (l.afiliados ?? null) : 0,
       ...porEtiqueta(l ? [l.etiquetas] : []),
     }
   }
@@ -304,6 +318,8 @@ const contagem = computed((): Record<string, number | null> => {
     vencidas: ps.reduce((s, p) => s + (p.vencidas || 0), 0),
     a_conferir: porPlataforma ? ps.reduce((s, p) => s + (p.a_conferir || 0), 0) : (f.plataforma ? null : (r.a_conferir ?? null)),
     humano: f.plataforma ? (ps.length ? naHumano(ps) : 0) : naHumano([r]),
+    // Os chats de afiliado abertos (29/10/2026); a API antiga não manda: sem número.
+    afiliado: f.plataforma ? afiliadosDe(ps) : (r.afiliados ?? null),
     // Sem plataforma escolhida, o total do topo; com ela, o da plataforma
     // (a que não tem conversa não manda `etiquetas`: conta zero).
     ...(f.plataforma
@@ -315,6 +331,8 @@ function contadorCls(value: string, n: number | null | undefined) {
   if (!n) return 'bg-muted text-muted-foreground'
   if (value === 'vencidas') return 'bg-red-500 text-white'
   if (value === 'vencendo' || value === 'a_conferir') return 'bg-amber-500 text-white'
+  // Afiliados (29/10/2026): a cor do selo da linha.
+  if (value === 'afiliado') return 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
   // Etiqueta: a cor dela (Reclamação vermelho, Devolução roxo…).
   if (FILTROS_ETIQUETA.has(value)) return ETIQUETAS_INFO[value]?.cls || 'bg-primary/15 text-primary'
   return 'bg-primary/15 text-primary'
@@ -515,6 +533,7 @@ const VAZIO: Record<string, string> = {
   a_conferir: 'Nenhuma resposta esperando conferência — tudo que saiu pelo DaVinci foi confirmado.',
   minhas: 'Nenhuma conversa atribuída a você.',
   fechadas: 'Nenhuma conversa fechada com esses filtros.',
+  afiliado: 'Nenhum chat de afiliado aberto com esses filtros.',
   todas: 'Nenhuma conversa com esses filtros.',
 }
 // Os comentários das redes não entram no "Falta responder" (só o chat,
@@ -837,14 +856,15 @@ function mover(delta: number) {
                   <span class="font-bold" aria-hidden="true">?</span> pergunta
                 </span>
                 <!-- Chat de afiliado da Shopee (15/10/2026): o criador de conteúdo que
-                     divulga a loja — conta no número, responde-se pelo Duoke. -->
+                     divulga a loja — conta no número; desde 29/10/2026 responde-se
+                     por aqui (só pessoa) e tem o filtro "Afiliados". -->
                 <span
                   v-if="c.afiliado"
                   class="rounded px-1.5 py-px font-medium"
                   :class="selo(c.id === selecionada, 'bg-amber-500/15 text-amber-800 dark:text-amber-300')"
-                  title="chat de afiliado da Shopee (criador de conteúdo): conta no número da Caixa; a resposta é pelo Duoke ou pelo Seller Center"
+                  title="chat de afiliado da Shopee (criador de conteúdo): conta no número da Caixa; responda por aqui — só pessoa, a IA e as automações não entram"
                   data-selo-afiliado
-                >afiliado</span>
+                >Afiliado</span>
                 <span
                   v-if="c.envio_a_conferir"
                   class="inline-flex items-center gap-0.5 rounded px-1.5 py-px font-medium"

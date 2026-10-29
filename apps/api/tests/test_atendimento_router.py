@@ -43,7 +43,11 @@ from app.redis_client import redis
 from app.routers import atendimento as rota
 from app.security.cipher import encrypt_json
 from app.services.atendimento import contexto, gravar, ia, validador
-from app.services.atendimento.constantes import MOTIVO_TUTA_SEM_ENVIO, MOTIVO_ZAP_SEM_ENVIO
+from app.services.atendimento.constantes import (
+    MOTIVO_AFILIADO_SO_PESSOA,
+    MOTIVO_TUTA_SEM_ENVIO,
+    MOTIVO_ZAP_SEM_ENVIO,
+)
 
 URL = "/api/atendimento"
 AGORA = datetime.now(UTC)
@@ -832,6 +836,8 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
         # 14/10/2026: o número do Duoke — o Direct não tem o não lido da
         # plataforma, conta 1 por conversa esperando.
         "nao_lidas_duoke": 1,
+        # 29/10/2026: o chat de afiliado é só da Shopee.
+        "afiliados": 0,
     } in resumo["plataformas"]
 
 
@@ -1214,6 +1220,86 @@ async def test_email_do_tuta_e_zap_mostram_a_trava_na_tela(
     d = (await client.get(f"{URL}/conversas/{c.id}")).json()
     assert (d["envio"]["codigo"], d["envio"]["motivo"]) == ("canal_sem_envio", frase)
     assert d["envio"]["modo_observacao"] is False
+
+
+async def test_chat_de_afiliado_na_lista_no_filtro_no_resumo_e_a_pessoa_responde(
+    client, db, make_user, pessoa, _chaves
+):
+    """29/10/2026, o dono: "afiliados não tá dando pra ver no comunicador e no
+    duoke dá, queria que desse pra ver ali também". O chat de afiliado da
+    Shopee aparece como qualquer conversa (com o selo), tem o filtro
+    `afiliado` e o número dele no /resumo, conta no número da loja e no
+    "Falta responder" pela bolinha, e a PESSOA responde — a IA não sugere."""
+    _chaves.atendimento_envio_ativo = True
+    _chaves.atendimento_simulador = True
+    _chaves.atendimento_ia_ativa = True
+    dono = await make_user()
+    integ, canal = await _loja(db, dono, modo="humano")
+    comprador = await _conversa(db, integ, canal, "C1", cliente_ha=timedelta(hours=2))
+    af, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma="shopee",
+        canal_nome="chat",
+        externo_id="379920374879551489",
+        comprador_id="777",
+        comprador_nome="criador_teste",
+        dados={"afiliado": True},
+    )
+    # A fala do afiliado é `sistema` com o `from_id` dele (`shopee.py`).
+    await gravar.gravar_mensagem(
+        db, af, externo_id="af-1", autor="sistema", texto="quero divulgar",
+        enviada_em=AGORA - timedelta(hours=1), payload={"from_id": 777},
+    )
+    await db.commit()
+
+    todas = (await client.get(f"{URL}/conversas")).json()["itens"]
+    assert {i["id"]: i["afiliado"] for i in todas} == {
+        str(comprador.id): False,
+        str(af.id): True,
+    }
+    so_afiliado = (await client.get(f"{URL}/conversas?filtro=afiliado")).json()["itens"]
+    assert [(i["id"], i["numero_duoke"], i["falta_responder"]) for i in so_afiliado] == [
+        (str(af.id), 1, True)
+    ]
+    falta = _ids(await client.get(f"{URL}/conversas?filtro=aguardando"))
+    assert str(af.id) in falta and str(comprador.id) in falta
+    r = (await client.get(f"{URL}/resumo")).json()
+    shopee = next(p for p in r["plataformas"] if p["plataforma"] == "shopee")
+    (loja,) = r["lojas"]
+    assert (r["afiliados"], shopee["afiliados"], loja["afiliados"]) == (1, 1, 1)
+    assert loja["nao_lidas_duoke"] == 2, "o afiliado soma no número da loja, como no Duoke"
+    # Alguém abriu e não respondeu: a bolinha some, o "Falta responder" fica
+    # (o "Pendente" do Duoke) — e a fila de verdade continua sem ele.
+    af.visto_em = datetime.now(UTC)
+    await db.commit()
+    (linha,) = (await client.get(f"{URL}/conversas?filtro=afiliado")).json()["itens"]
+    assert (linha["numero_duoke"], linha["falta_responder"]) == (0, True)
+    assert linha["aguardando_resposta"] is False
+    assert str(af.id) in _ids(await client.get(f"{URL}/conversas?filtro=aguardando"))
+    # Fechado sai do filtro (e do número do filtro), como em "todas".
+    af.situacao = "fechada"
+    await db.commit()
+    assert _ids(await client.get(f"{URL}/conversas?filtro=afiliado")) == []
+    assert (await client.get(f"{URL}/resumo")).json()["afiliados"] == 0
+    af.situacao = "aberta"
+    await db.commit()
+
+    d = (await client.get(f"{URL}/conversas/{af.id}")).json()
+    assert d["conversa"]["afiliado"] is True
+    assert d["envio"]["pode_enviar"] is True
+    assert d["envio"]["modo_observacao"] is False
+    # A IA nunca entra no chat de afiliado.
+    r = await client.post(f"{URL}/conversas/{af.id}/rascunho")
+    assert r.status_code == 409
+    assert r.json()["detail"] == {"code": "canal_sem_envio", "detail": MOTIVO_AFILIADO_SO_PESSOA}
+    r = await client.post(
+        f"{URL}/conversas/{af.id}/responder", json={"texto": "Oi! Pode divulgar sim."}
+    )
+    assert r.status_code == 200
+    m = r.json()["mensagem"]
+    assert (m["status"], m["autor"], m["origem"]) == ("enviada", "loja", "davinci_humano")
 
 
 async def test_regra_que_vale_para_loja_no_auto_so_admin(

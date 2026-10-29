@@ -524,6 +524,8 @@ async def _shopee(
         _PISTAS_AMBIGUAS,
         _codigo_shopee,
         _erro_operacao,
+        conferir_chat_do_afiliado,
+        negocio_do_envio,
     )
 
     to_id = str(conversa.comprador_id or "").strip()
@@ -537,9 +539,10 @@ async def _shopee(
     except RuntimeError as exc:
         codigo = _codigo_shopee(exc) or "erro"
         return ResultadoEnvio(ok=False, erro=f"shopee upload {codigo}")
-    # 2. A mensagem com a imagem: a mesma régua do texto.
+    # 2. A mensagem com a imagem: a mesma régua do texto — no chat de
+    # AFILIADO (29/10/2026), com `business_type` 11 + o `conversation_id`.
     try:
-        resp = await cliente.chat_send_message(to_id, image_url=url)
+        resp = await cliente.chat_send_message(to_id, image_url=url, **negocio_do_envio(conversa))
     except httpx.HTTPStatusError as exc:
         return ResultadoEnvio(ok=False, erro=f"shopee token_http_{exc.response.status_code}")
     except httpx.HTTPError as exc:
@@ -553,10 +556,13 @@ async def _shopee(
         return ResultadoEnvio(ok=False, ambiguo=True, erro=_erro_operacao(exc))
     resp = resp if isinstance(resp, dict) else {}
     message_id = str(resp.get("message_id") or "").strip()
-    return ResultadoEnvio(
-        ok=True,
-        externo_id=message_id or None,
-        payload={**resp, "imagem_url": url},
+    return conferir_chat_do_afiliado(
+        conversa,
+        ResultadoEnvio(
+            ok=True,
+            externo_id=message_id or None,
+            payload={**resp, "imagem_url": url},
+        ),
     )
 
 
