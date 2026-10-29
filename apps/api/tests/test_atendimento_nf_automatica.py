@@ -472,6 +472,8 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("não chegou ainda o pedido, manda a nota", False),
         ("o pacote não chegou, preciso da nota fiscal", False),
         ("veio vazio, cadê a nota", False),
+        ("ainda não chegou, preciso da nota fiscal", False),
+        ("boa tarde, não recebi a nota fiscal", True),
         ("a nota do pedido não veio", True),
         ("a nota fiscal da compra não chegou", True),
         # A chave de acesso está na DANFE (Barbosa 75fd5e5d, 28/10 17:03) — só com a nota.

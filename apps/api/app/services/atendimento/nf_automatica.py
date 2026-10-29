@@ -56,7 +56,8 @@ REVISÃO DE 29/10/2026 (os casos reais de 28/10 nas lojas no automático):
   lista do que pode. O PRODUTO que não veio continua com a pessoa, agora por
   regra explícita no `_NAO_E_SO_A_NF` ("não veio nada", "não chegou o pedido",
   "nem o produto", "nenhum produto", "o pacote não chegou" — antes "não recebi
-  o pedido, cadê a nota" passava pela lista).
+  o pedido, cadê a nota" passava pela lista) e pelo trecho do "não chegou" sem
+  o documento nele ("ainda não chegou, preciso da nota", `_NAO_VEIO`).
 - A CHAVE DE ACESSO da nota é pedido da NF (Barbosa 75fd5e5d, 17:03: "pode
   mandar a chave de acesso para eu emitir a nota fiscal"): a DANFE traz a
   chave impressa e no código de barras. Só com a nota nomeada no turno (a
@@ -67,9 +68,10 @@ REVISÃO DE 29/10/2026 (os casos reais de 28/10 nas lojas no automático):
   em até 1 dia útil" (o validador barra prazo vindo da IA) e cumprir a
   promessa pede um caminho novo — mandar a NF na conversa já respondida e
   devolver à Caixa Humano depois do prazo — que não entra sem a medição de
-  produção (o que a equipe faz depois desse texto). O caso Vita 95704e8d (`nf:checagens`) é outro: o agente deu
-  confiança baixa porque o pedido é de 07/08 (Entregue) e não tem NF nenhuma no
-  `nf_nota` (o coletor sobe desde 19/08) — entregue e sem NF é anormal: pessoa.
+  produção (o que a equipe faz depois desse texto). O caso Vita 95704e8d
+  (`nf:checagens`) é outro: o agente deu confiança baixa porque o pedido é de
+  07/08 (Entregue) e não tem NF nenhuma no `nf_nota` (o coletor sobe desde
+  19/08) — entregue e sem NF é anormal: pessoa.
 """
 
 from __future__ import annotations
@@ -232,12 +234,24 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
     return plano.strip(" .!") == "2"
 
 
+# Revisão de 29/10: o "não veio/chegou/recebi" de cada trecho fala do DOCUMENTO; sem ele no
+# trecho ("ainda não chegou, preciso da nota") quem não chegou é o produto → pessoa.
+_NAO_VEIO = re.compile(r"\bnao\s+(?:veio|vieram|chegou|chegaram|recebi|tinha|tem|estava)\b")
+_NOME_DO_DOC = re.compile(
+    r"\b(?:nota|notas|nf|nfe|recibo|recibos|documento|documentos|comprovante|comprovantes|chave)\b"
+)
+
+
 def pedido_claro(textos: Sequence[str | None]) -> bool:
     """O turno do cliente PEDE a NF do pedido, e só isso? PURA."""
     plano = " ".join(validador.plano_de(" ".join(t for t in textos if t)).split())
     if not plano or len(plano) > 400:
         return False
     if not _PEDE.search(plano) or _NAO_E_SO_A_NF.search(plano) or not _NOMEIA_A_NF.search(plano):
+        return False
+    if any(
+        _NAO_VEIO.search(t) and not _NOME_DO_DOC.search(t) for t in re.split(r"[,.;:!?]+", plano)
+    ):
         return False
     palavras = re.findall(r"[a-z0-9]+", _O_CLIENTE_FAZ.sub(" ", plano))
     return all(p in _PALAVRAS_DO_PEDIDO for p in palavras)
