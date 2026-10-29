@@ -8,15 +8,17 @@
 // O produto vendido que não está na Tabela de Preços entra pelo SKU. Clicar na
 // linha abre os pedidos daquele produto (emit 'abrir'). POST
 // /api/garantias/resumo com os filtros da barra. Só contagens.
-import { AlertCircle, Loader2 } from 'lucide-vue-next'
+// 29/10/2026 ("sem emojis, igual aos nossos painéis do DaVinci"): as mesmas
+// classes da aba Produtos — cabeçalho simples com a explicação miúda embaixo
+// (como os kits), SKU numa linha cortada em 20 letras, números em texto
+// pequeno — e a ordem pelo título da coluna.
+import { AlertCircle, ArrowDown, ArrowUp, Loader2 } from 'lucide-vue-next'
 import {
-  ORIGEM_PEDIDO,
   corpoDoResumo,
   errosDaApi,
   numeroBR,
   pct,
   type FiltrosLista,
-  type OrigemPedido,
   type Resumo,
   type ResumoProduto,
 } from '~/lib/garantias'
@@ -25,6 +27,8 @@ const props = defineProps<{ filtros: FiltrosLista; versao?: number }>()
 const emit = defineEmits<{
   // A linha do produto: os pedidos dela na lista.
   (e: 'abrir', produto: { nome: string; ids: number[] }): void
+  // Todos os pedidos de garantia na lista (sem escolher produto).
+  (e: 'todos'): void
 }>()
 
 const { api } = useApi()
@@ -54,10 +58,11 @@ watch(
   { immediate: true, deep: true },
 )
 
-// O departamento (a pílula) e a busca ficam na página (v-model): voltam iguais
-// depois de abrir os pedidos de um produto.
+// O departamento (a pílula), a busca e a ordem ficam na página (v-model):
+// voltam iguais depois de abrir os pedidos de um produto.
 const departamento = defineModel<string>('departamento', { default: '' })
 const busca = defineModel<string>('busca', { default: '' })
+const ordem = defineModel<{ coluna: string; desc: boolean }>('ordem', { default: () => ({ coluna: 'pediram', desc: true }) })
 const departamentoAtual = computed(() => {
   const deps = resumo.value?.departamentos || []
   return deps.find((d) => d.chave === departamento.value) || deps[0] || null
@@ -71,15 +76,50 @@ const produtos = computed<ResumoProduto[]>(() => {
   return (resumo.value?.produtos || []).filter((p) =>
     p.departamento === dep && (!termo || plano(`${p.nome} ${p.skus.join(' ')}`).includes(termo)))
 })
-const ORIGENS: OrigemPedido[] = ['mensagem', 'sac', 'devolucao']
-// O nome curto da coluna (o completo fica na dica e na legenda embaixo).
-const ORIGEM_CURTA: Partial<Record<OrigemPedido, string>> = { mensagem: 'Mensagem', sac: 'SAC', devolucao: 'Devolução' }
-function outras(p: ResumoProduto) {
-  return (p.origens.atendimento || 0) + (p.origens.manual || 0) + (p.origens.pessoa || 0)
+
+// As colunas de número. A explicação (`dica`) aparece ao passar o mouse no
+// título ("deixe sem a subinformação e, com o mouse por cima, aparece
+// explicando", 29/10/2026).
+type Coluna = { chave: string; rotulo: string; dica: string; valor: (p: ResumoProduto) => number }
+const taxa = (p: ResumoProduto) => (p.vendidas ? p.pediram / p.vendidas : 0)
+const COLUNAS: Coluna[] = [
+  { chave: 'vendidas', rotulo: 'Vendidas', dica: 'Vendas com nota fiscal de produto: cada venda é uma garantia.', valor: (p) => p.vendidas },
+  { chave: 'pediram', rotulo: 'Pediram', dica: 'Clientes que pediram garantia: por mensagem, SAC, devolução por defeito, atendimento registrado ou cadastro à mão.', valor: (p) => p.pediram },
+  { chave: 'pct', rotulo: '%', dica: 'De cada 100 vendidas, quantas pediram garantia.', valor: taxa },
+  { chave: 'mensagem', rotulo: 'Mensagem', dica: 'O cliente escreveu pedindo a garantia no chat da plataforma ou por e-mail.', valor: (p) => p.origens.mensagem || 0 },
+  { chave: 'sac', rotulo: 'SAC', dica: 'O cliente preencheu o formulário do SAC no site.', valor: (p) => p.origens.sac || 0 },
+  { chave: 'devolucao', rotulo: 'Devolução', dica: 'Devolução por defeito (dano funcional, danificado ou manutenção).', valor: (p) => p.origens.devolucao || 0 },
+  { chave: 'outros', rotulo: 'Outros', dica: 'Atendimento registrado, garantia cadastrada à mão ou marcada pela equipe.', valor: (p) => (p.origens.atendimento || 0) + (p.origens.manual || 0) + (p.origens.pessoa || 0) },
+  { chave: 'ativa', rotulo: 'Ativa', dica: 'Dos que pediram: garantia de hardware e de software dentro do prazo.', valor: (p) => p.status.ativa || 0 },
+  { chave: 'somente_software', rotulo: 'Só software', dica: 'Dos que pediram: o hardware já venceu; só o software ainda está coberto.', valor: (p) => p.status.somente_software || 0 },
+  { chave: 'aguardando', rotulo: 'Aguardando', dica: 'Dos que pediram: a garantia ainda não começou a contar — falta a data de entrega no DaVinci (inclui os já entregues no Bling).', valor: (p) => (p.status.aguardando_entrega || 0) + (p.status.entregue_sem_data || 0) },
+  { chave: 'expirada', rotulo: 'Expirada', dica: 'Dos que pediram: a garantia já venceu.', valor: (p) => p.status.expirada || 0 },
+  { chave: 'atendimentos', rotulo: 'Atendidos', dica: 'Pedidos com atendimento registrado na garantia (entre parênteses: de hardware / de software).', valor: (p) => p.com_atendimento },
+]
+
+function ordenar(chave: string) {
+  ordem.value = ordem.value.coluna === chave
+    ? { coluna: chave, desc: !ordem.value.desc }
+    : { coluna: chave, desc: chave !== 'sku' && chave !== 'nome' }
 }
-function aguardando(p: ResumoProduto) {
-  return (p.status.aguardando_entrega || 0) + (p.status.entregue_sem_data || 0)
-}
+const linhas = computed<ResumoProduto[]>(() => {
+  const { coluna, desc } = ordem.value
+  const col = COLUNAS.find((c) => c.chave === coluna)
+  const dir = desc ? -1 : 1
+  return [...produtos.value].sort((a, b) => {
+    let d = 0
+    if (coluna === 'nome') d = a.nome.localeCompare(b.nome, 'pt-BR')
+    else if (coluna === 'sku') d = (a.skus[0] || '').localeCompare(b.skus[0] || '', 'pt-BR', { numeric: true })
+    else if (col) d = col.valor(a) - col.valor(b)
+    return d * dir || b.pediram - a.pediram || b.vendidas - a.vendidas || a.nome.localeCompare(b.nome, 'pt-BR')
+  })
+})
+const sentido = (chave: string) => (ordem.value.coluna === chave ? (ordem.value.desc ? 'descending' : 'ascending') : undefined)
+// As colunas no mesmo tamanho (29/10/2026: "umas estão maiores, outras
+// menores"): a tabela de largura fixa por coluna — todas as de número com a
+// mesma largura, o SKU fixo (cortado com "…", a lista inteira no mouse) e o
+// Produto com o que sobrar. Abaixo da largura mínima, ela rola para o lado.
+const LARGURA_NUMERO = 'w-[81px]'
 function soma(campo: (p: ResumoProduto) => number) {
   return produtos.value.reduce((n, p) => n + campo(p), 0)
 }
@@ -116,82 +156,98 @@ function abrir(p: ResumoProduto) {
         <div>
           <h3 class="text-base font-semibold">Garantia por produto — {{ departamentoAtual?.nome || '—' }}</h3>
           <p class="text-xs text-muted-foreground">
-            {{ produtos.length }} produto(s) — clique na linha para ver os pedidos de garantia daquele produto
+            {{ produtos.length }} produto(s) — clique na linha para ver os pedidos de garantia daquele produto · clique no título da coluna para ordenar
           </p>
         </div>
-        <input v-model="busca" placeholder="buscar SKU ou produto…" class="w-56 rounded border bg-background px-2 py-1 text-sm" data-busca-produto>
+        <div class="flex flex-wrap items-center gap-2">
+          <button type="button" class="btn btn-sm" data-ver-todos @click="emit('todos')">Ver todos os pedidos de garantia</button>
+          <input v-model="busca" placeholder="buscar SKU ou produto…" class="w-56 rounded border bg-background px-2 py-1 text-sm" data-busca-produto>
+        </div>
       </div>
 
       <div class="max-h-[max(16rem,calc(100vh-320px))] overflow-auto rounded-lg border">
-        <table class="w-full border-collapse text-sm" data-produtos>
+        <table class="w-full min-w-[1270px] table-fixed border-collapse text-sm" data-produtos>
+          <colgroup>
+            <col class="w-[112px]">
+            <col>
+            <col v-for="c in COLUNAS" :key="c.chave" :class="LARGURA_NUMERO">
+          </colgroup>
           <thead class="sticky top-0 z-10 bg-muted">
-            <tr>
-              <th class="min-w-[120px] border-b border-border px-2 py-2 text-left font-medium">SKU</th>
-              <th class="min-w-[220px] border-b border-border px-2 py-2 text-left font-medium">Produto</th>
-              <th class="w-20 border-b border-border px-2 py-2 text-right font-medium" title="vendas com nota fiscal de produto (cada uma é uma garantia)">Vendidas</th>
-              <th class="w-20 border-b border-border px-2 py-2 text-right font-medium" title="clientes que pediram garantia (mensagem, SAC, devolução por defeito, atendimento ou cadastro à mão)">Pediram</th>
-              <th class="w-16 border-b border-border px-2 py-2 text-right font-medium">%</th>
-              <th v-for="o in ORIGENS" :key="o" class="w-24 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" :title="`pedidos que vieram de: ${ORIGEM_PEDIDO[o].rotulo}`">{{ ORIGEM_PEDIDO[o].emoji }} {{ ORIGEM_CURTA[o] }}</th>
-              <th class="w-16 border-b border-border px-2 py-2 text-right font-medium" title="pedidos que vieram de atendimento registrado, cadastro à mão ou marcados pela equipe">Outros</th>
-              <th class="w-20 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" title="dos pedidos: garantia ativa hoje (hardware e software)">🟢 Ativas</th>
-              <th class="w-20 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" title="dos pedidos: só o software ainda coberto">🔵 Só SW</th>
-              <th class="w-24 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" title="dos pedidos: aguardando a data de entrega (inclui os já entregues no Bling sem data no DaVinci)">🟡 Aguard.</th>
-              <th class="w-20 whitespace-nowrap border-b border-border px-2 py-2 text-right font-medium" title="dos pedidos: garantia vencida">🔴 Expir.</th>
-              <th class="w-24 border-b border-border px-2 py-2 text-right font-medium" title="pedidos com atendimento registrado (hardware / software)">Atend.</th>
+            <tr data-colunas>
+              <!-- O cabeçalho num padrão só (29/10/2026: "tudo reto"): só o nome,
+                   numa linha; a explicação aparece com o mouse em cima. -->
+              <th class="whitespace-nowrap border-b border-border px-2 py-2 text-left text-xs font-medium" title="As cores do modelo, como na Tabela de Preços." :aria-sort="sentido('sku')" data-coluna="sku">
+                <button type="button" class="flex items-center gap-1" @click="ordenar('sku')">
+                  <span class="truncate">SKU</span><ArrowDown v-if="sentido('sku') === 'descending'" class="size-3 shrink-0" /><ArrowUp v-else-if="sentido('sku')" class="size-3 shrink-0" />
+                </button>
+              </th>
+              <th class="whitespace-nowrap border-b border-border px-2 py-2 text-left text-xs font-medium" title="O modelo na Tabela de Preços (o vendido que não está nela entra pelo SKU)." :aria-sort="sentido('nome')" data-coluna="nome">
+                <button type="button" class="flex items-center gap-1" @click="ordenar('nome')">
+                  <span class="truncate">Produto</span><ArrowDown v-if="sentido('nome') === 'descending'" class="size-3 shrink-0" /><ArrowUp v-else-if="sentido('nome')" class="size-3 shrink-0" />
+                </button>
+              </th>
+              <th
+                v-for="c in COLUNAS"
+                :key="c.chave"
+                class="overflow-hidden whitespace-nowrap border-b border-border px-1 py-2 text-right text-xs font-medium"
+                :title="c.dica"
+                :aria-sort="sentido(c.chave)"
+                :data-coluna="c.chave"
+              >
+                <button type="button" class="flex w-full items-center justify-end gap-1" @click="ordenar(c.chave)">
+                  <ArrowDown v-if="sentido(c.chave) === 'descending'" class="size-3 shrink-0" /><ArrowUp v-else-if="sentido(c.chave)" class="size-3 shrink-0" /><span class="min-w-0 truncate">{{ c.rotulo }}</span>
+                </button>
+              </th>
             </tr>
           </thead>
           <tbody>
-            <tr v-if="!produtos.length">
-              <td colspan="14" class="py-6 text-center text-muted-foreground">{{ busca.trim() ? 'Nenhum produto com essa busca.' : 'Nenhuma venda neste departamento com esses filtros.' }}</td>
+            <tr v-if="!linhas.length">
+              <td :colspan="2 + COLUNAS.length" class="py-6 text-center text-muted-foreground">{{ busca.trim() ? 'Nenhum produto com essa busca.' : 'Nenhuma venda neste departamento com esses filtros.' }}</td>
             </tr>
             <tr
-              v-for="p in produtos"
+              v-for="p in linhas"
               :key="p.chave"
-              class="hover:bg-muted/40"
+              class="hover:bg-accent/30"
               :class="p.pedidos.length ? 'cursor-pointer' : ''"
               :title="p.pedidos.length ? `ver os ${p.pedidos.length} pedidos de garantia de ${p.nome}` : 'nenhum pedido de garantia'"
               :data-produto="p.chave"
               @click="abrir(p)"
             >
-              <td class="border border-border px-2 py-1.5 font-mono text-xs">{{ p.skus.join(', ') }}</td>
-              <td class="border border-border px-2 py-1.5">
+              <td class="border border-border px-2 py-1.5 font-mono text-xs" :title="p.skus.join(',')">
+                <span class="block truncate">{{ p.skus.join(',') || '—' }}</span>
+              </td>
+              <td class="border border-border px-2 py-1.5 text-xs">
                 {{ p.nome }}
                 <span v-if="!p.na_tabela" class="ml-1 whitespace-nowrap rounded bg-muted px-1 text-[10px] text-muted-foreground" title="vendido, mas sem linha na Tabela de Preços">fora da Tabela de Preços</span>
               </td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ numeroBR(p.vendidas) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right font-semibold tabular-nums">{{ numeroBR(p.pediram) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ pct(p.pediram, p.vendidas) }}</td>
-              <td v-for="o in ORIGENS" :key="o" class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.origens[o] ? '' : 'text-muted-foreground'">{{ p.origens[o] || 0 }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="outras(p) ? '' : 'text-muted-foreground'">{{ outras(p) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.status.ativa ? '' : 'text-muted-foreground'">{{ p.status.ativa || 0 }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.status.somente_software ? '' : 'text-muted-foreground'">{{ p.status.somente_software || 0 }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="aguardando(p) ? '' : 'text-muted-foreground'">{{ aguardando(p) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.status.expirada ? '' : 'text-muted-foreground'">{{ p.status.expirada || 0 }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums" :class="p.com_atendimento ? '' : 'text-muted-foreground'">
-                {{ p.com_atendimento }}<span v-if="p.com_atendimento" class="text-[10px] text-muted-foreground"> ({{ p.atendimentos_hardware }}/{{ p.atendimentos_software }})</span>
+              <td
+                v-for="c in COLUNAS"
+                :key="c.chave"
+                class="border border-border px-1.5 py-1.5 text-right text-xs tabular-nums"
+                :class="[
+                  c.chave === 'pediram' ? 'font-semibold' : '',
+                  c.valor(p) || c.chave === 'vendidas' ? '' : 'text-muted-foreground',
+                  c.chave === 'pct' && p.vendidas < 10 ? 'text-muted-foreground' : '',
+                ]"
+                :title="c.chave === 'pct' && p.vendidas < 10 ? 'poucas vendas (menos de 10): a % ainda diz pouco' : undefined"
+              >
+                <template v-if="c.chave === 'pct'">{{ pct(p.pediram, p.vendidas) }}</template>
+                <template v-else-if="c.chave === 'atendimentos'">{{ p.com_atendimento }}<span v-if="p.com_atendimento" class="text-muted-foreground"> ({{ p.atendimentos_hardware }} / {{ p.atendimentos_software }})</span></template>
+                <template v-else>{{ numeroBR(c.valor(p)) }}</template>
               </td>
             </tr>
           </tbody>
-          <tfoot v-if="produtos.length" class="sticky bottom-0 bg-muted font-medium">
+          <tfoot v-if="linhas.length" class="sticky bottom-0 bg-muted font-medium">
             <tr data-total-departamento>
-              <td class="border border-border px-2 py-1.5" colspan="2">{{ busca.trim() ? `Total da busca (${produtos.length} ${produtos.length === 1 ? 'produto' : 'produtos'})` : `Total — ${departamentoAtual?.nome}` }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ numeroBR(soma((p) => p.vendidas)) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ numeroBR(soma((p) => p.pediram)) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ pct(soma((p) => p.pediram), soma((p) => p.vendidas)) }}</td>
-              <td v-for="o in ORIGENS" :key="o" class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.origens[o] || 0) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma(outras) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.status.ativa || 0) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.status.somente_software || 0) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma(aguardando) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.status.expirada || 0) }}</td>
-              <td class="border border-border px-2 py-1.5 text-right tabular-nums">{{ soma((p) => p.com_atendimento) }}</td>
+              <td class="border border-border px-2 py-1.5 text-xs" colspan="2">{{ busca.trim() ? `Total da busca (${produtos.length} ${produtos.length === 1 ? 'produto' : 'produtos'})` : `Total — ${departamentoAtual?.nome}` }}</td>
+              <td v-for="c in COLUNAS" :key="c.chave" class="border border-border px-1.5 py-1.5 text-right text-xs tabular-nums">
+                <template v-if="c.chave === 'pct'">{{ pct(soma((p) => p.pediram), soma((p) => p.vendidas)) }}</template>
+                <template v-else>{{ numeroBR(soma(c.valor)) }}</template>
+              </td>
             </tr>
           </tfoot>
         </table>
       </div>
-      <p class="text-xs text-muted-foreground">
-        Mensagem = o cliente escreveu no chat ou por e-mail · SAC = o formulário do site · Devolução = devolução por defeito · Outros = atendimento registrado, cadastro à mão ou marcado pela equipe. Situação e atendimentos contam só os pedidos.
-      </p>
     </template>
   </section>
 </template>

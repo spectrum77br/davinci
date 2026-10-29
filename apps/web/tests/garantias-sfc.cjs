@@ -500,18 +500,75 @@ async function testarPagina() {
   await new Promise((r) => setTimeout(r, 0))
   assert.equal(m.estado.itens.length, 2)
   assert.equal(m.estado.indicadores.ativas, 128)
-  // Garantia automática (28/10/2026): a vista padrão é Conversas — mais nova em
-  // cima. Pedido de garantia (28/10): o padrão é só os PEDIDOS (o servidor
-  // filtra sem precisar do campo); "todas as vendas" manda mostrar=todas. A
-  // Tabela é a lista de antes.
-  assert.deepEqual(chamadas.find((c) => c.url === '/api/garantias/lista').opts, { method: 'POST', body: { limite: 100, offset: 0, ordem: 'atividade' } })
+  // Garantia por produto (29/10/2026): a tela abre nela; a lista de Conversas
+  // (mais nova em cima) abre pelo produto clicado, pela busca ou pelo "ver
+  // todos os pedidos". Pedido de garantia (28/10): a lista é só dos PEDIDOS (o
+  // servidor filtra sem precisar do campo). A Tabela é a lista de antes, com o
+  // "Mostrar" (todas as vendas manda mostrar=todas).
+  assert.deepEqual(chamadas.find((c) => c.url === '/api/garantias/lista').opts, { method: 'POST', body: { limite: 100, offset: 0 } })
+  assert.equal(m.estado.vista, 'resumo')
+  // Cada troca relê a lista UMA vez, já com tudo trocado (revisão 29/10: a
+  // busca mandava 2-3 pedidos — o CPF colado contava 2-3 vezes no teto).
+  const listas = () => chamadas.filter((c) => c.url === '/api/garantias/lista')
+  const espera = (ms) => new Promise((r) => setTimeout(r, ms))
+  assert.equal(listas().length, 1, 'abrir a tela lê a lista uma vez')
+  let n = listas().length
+  m.estado.abrirProduto({ nome: 'A17', ids: [7, 8] })
+  await espera(0)
   assert.equal(m.estado.vista, 'conversas')
+  assert.equal(listas().length, n + 1, 'abrir o produto: uma leitura')
+  assert.deepEqual(listas().at(-1).opts.body, { limite: 100, offset: 0, ordem: 'atividade', ids: [7, 8] })
+  n = listas().length
+  m.estado.voltarParaProdutos()
+  await espera(0)
+  assert.equal(m.estado.vista, 'resumo')
+  assert.equal(m.estado.filtros.ids, undefined)
+  assert.equal(listas().length, n + 1, 'voltar: uma leitura')
+  assert.equal(m.estado.selecionadaId, null, 'na garantia por produto nada fica aberto escondido')
+  n = listas().length
+  m.estado.verTodosOsPedidos()
+  await espera(0)
+  assert.equal(m.estado.vista, 'conversas')
+  assert.equal(m.estado.abertoPor, 'todos')
+  assert.equal(listas().length, n + 1, 'ver todos: uma leitura')
+  m.estado.voltarParaProdutos()
+  await espera(0)
+  // Buscar na garantia por produto abre a lista com o que achou — depois da
+  // pausa, com uma leitura só e o termo inteiro; apagar volta.
+  n = listas().length
+  m.estado.filtros.busca = 'm'
+  await espera(50)
+  m.estado.filtros.busca = 'maria'
+  await espera(0)
+  assert.equal(listas().length, n, 'nada sai enquanto digita')
+  assert.equal(m.estado.vista, 'resumo')
+  await espera(350)
+  assert.equal(m.estado.vista, 'conversas')
+  assert.equal(m.estado.abertoPor, 'busca')
+  assert.equal(listas().length, n + 1, 'a busca: uma leitura só')
+  assert.equal(listas().at(-1).opts.body.busca, 'maria', 'com o termo inteiro')
+  m.estado.filtros.busca = ''
+  await espera(350)
+  assert.equal(m.estado.vista, 'resumo')
+  // O seletor não tem "Conversas": na lista aberta ele mostra a garantia por produto.
+  m.estado.abrirProduto({ nome: 'A17', ids: [7] })
+  await espera(0)
+  assert.equal(m.estado.vistaDoSeletor, 'resumo')
+  m.estado.vistaDoSeletor = 'tabela'
+  await espera(0)
+  assert.equal(m.estado.vista, 'tabela')
+  assert.equal(m.estado.filtros.ids, undefined, 'a Tabela não fica presa no produto')
+  // O "Mostrar" é da Tabela (as regras falsas estão com o robô desligado: ela
+  // abre em "todas as vendas"); trocar relê uma vez.
+  assert.equal(m.estado.mostrar, 'todas')
+  assert.deepEqual(listas().at(-1).opts.body, { limite: 100, offset: 0, mostrar: 'todas' })
+  n = listas().length
+  m.estado.mostrar = 'pedidos'
+  await espera(0)
+  assert.equal(listas().length, n + 1, 'o Mostrar relê a Tabela uma vez')
+  assert.deepEqual(listas().at(-1).opts.body, { limite: 100, offset: 0 })
   m.estado.mostrar = 'todas'
-  await new Promise((r) => setTimeout(r, 0))
-  assert.deepEqual(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body, { limite: 100, offset: 0, ordem: 'atividade', mostrar: 'todas' })
-  m.estado.vista = 'tabela'
-  await new Promise((r) => setTimeout(r, 0))
-  assert.deepEqual(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body, { limite: 100, offset: 0, mostrar: 'todas' })
+  await espera(0)
   // A busca (nome/CPF) vai no corpo, nunca na URL.
   m.estado.filtros.busca = '529.982.247-25'
   await m.estado.carregar()
@@ -546,8 +603,12 @@ async function testarPagina() {
     const cx = comEstado(componente('../pages/garantias.vue', g))
     await html(appCom(cx.C, {}, g, ST))
     await cx.estado.carregar()
-    // A vista Conversas: a lista no estilo do Atendimento, com a garantia aberta.
+    // A lista de Conversas (aberta pelo "ver todos os pedidos"): no estilo do
+    // Atendimento, com a garantia aberta e o caminho de volta.
+    cx.estado.verTodosOsPedidos()
+    await new Promise((r) => setTimeout(r, 0))
     const hc = await html(appCom(cx.mesmo, {}, g, ST))
+    assert.match(hc, /voltar para a garantia por produto/)
     assert.match(hc, /data-vista-conversas/)
     assert.match(hc, /data-lista-conversas/)
     assert.equal(cx.estado.selecionadaId, 7, 'a primeira garantia já vem aberta')
@@ -577,12 +638,19 @@ async function testarPagina() {
   {
     const g = { user: CONSULTA, api: async (url) => (url === '/api/garantias/lista' ? { ...LISTA, itens: [], total: 0 } : L.REGRAS_PADRAO) }
     const cx = comEstado(componente('../pages/garantias.vue', g))
-    const carregandoHtml = await html(appCom(cx.C, {}, g))
+    // A tela abre na garantia por produto (ela tem o próprio "montando…").
+    const inicioHtml = await html(appCom(cx.C, {}, g))
+    assert.match(inicioHtml, /<GarantiaResumo/)
+    assert.ok(!/data-nova-garantia/.test(inicioHtml))
+    // A lista (Tabela/Conversas) tem o "carregando" dela.
+    cx.estado.vista = 'tabela'
+    const carregandoHtml = await html(appCom(cx.mesmo, {}, g))
     assert.match(carregandoHtml, /data-carregando/)
-    assert.ok(!/data-nova-garantia/.test(carregandoHtml))
     await cx.estado.carregar()
     // Pedido de garantia (28/10): o Painel vazio fala dos PEDIDOS e oferece
     // mostrar todas as vendas.
+    cx.estado.vista = 'tabela'
+    cx.estado.aplicarVista()
     const vazioPedidos = await html(appCom(cx.mesmo, {}, g))
     assert.match(vazioPedidos, /Nenhum pedido de garantia ainda/)
     assert.match(vazioPedidos, /data-mostrar-todas/)

@@ -19,6 +19,10 @@
 // "Tabela" é a de antes. O robô cria a garantia pela NF de produto; o selo
 // ✨ marca as criadas sozinhas. Pedido de garantia (28/10/2026): o Painel
 // mostra só quem PEDIU (mensagem, SAC, devolução por defeito, atendimento).
+// 29/10/2026 (Eduardo: "esse filtro de conversas precisa ter? só vamos
+// precisar quando eu clicar no produto"): a tela abre na garantia por produto;
+// a lista de Conversas só abre pelo produto clicado, pela busca ou pelo "ver
+// todos os pedidos" — sempre com o "voltar para a garantia por produto".
 import { AlertCircle, ArrowLeft, Info, Loader2, Plus, RefreshCw, Search, ShieldCheck, Sparkles } from 'lucide-vue-next'
 import {
   CARTOES,
@@ -70,20 +74,23 @@ async function carregarRegras() {
   if (!regras.value.vinculo_automatico && !mostrarEscolhido.value) mostrar.value = 'todas'
 }
 
-// ─── vista: Conversas (padrão) ou Tabela ────────────────────────────────────
+// ─── vista: Garantia por produto (padrão) ou Tabela ─────────────────────────
 // Resumo (28/10/2026): a garantia por produto, no visual da Tabela de Preços
-// (GarantiaResumo); a linha do produto abre os pedidos dele na vista Conversas.
+// (GarantiaResumo). A vista Conversas não está no seletor (29/10/2026): abre
+// pelo produto clicado, pela busca ou pelo "ver todos os pedidos" (abertoPor).
 type Vista = 'conversas' | 'tabela' | 'resumo'
 const CHAVE_VISTA = 'garantias.vista'
 function vistaGuardada(): Vista {
   try {
-    const v = localStorage.getItem(CHAVE_VISTA)
-    return v === 'tabela' || v === 'resumo' ? v : 'conversas'
+    return localStorage.getItem(CHAVE_VISTA) === 'tabela' ? 'tabela' : 'resumo'
   } catch {
-    return 'conversas'
+    return 'resumo'
   }
 }
-const vista = ref<Vista>('conversas')
+const vista = ref<Vista>('resumo')
+// Por que a lista de Conversas está aberta: o produto clicado, a busca ou
+// todos os pedidos de garantia.
+const abertoPor = ref<'produto' | 'busca' | 'todos' | null>(null)
 // Pedido de garantia (28/10/2026): o Painel é de quem PEDIU a garantia
 // ("a garantia é só para o pessoal que solicita", Eduardo); "todas" mostra
 // também a venda sem pedido. A busca acha todas.
@@ -91,19 +98,32 @@ const mostrar = ref<'pedidos' | 'todas'>('pedidos')
 const mostrarEscolhido = ref(false)
 
 // ─── lista ──────────────────────────────────────────────────────────────────
-const filtros = reactive<FiltrosLista>({ ...FILTROS_PADRAO, ordem: 'atividade', com_conversa: false, origem: 'todas' })
+// Nasce como a vista de entrada (a garantia por produto: ordem 'cadastro') e
+// com o `ids` já criado — a 1ª troca não relê a lista a mais (revisão 29/10).
+const filtros = reactive<FiltrosLista>({ ...FILTROS_PADRAO, ordem: 'cadastro', com_conversa: false, origem: 'todas', ids: undefined })
 function aplicarVista() {
   filtros.ordem = vista.value === 'conversas' ? 'atividade' : 'cadastro'
   filtros.com_conversa = false
-  filtros.mostrar = mostrar.value
+  // O "Mostrar" é da Tabela; nas Conversas o produto/os pedidos são sempre
+  // os pedidos de garantia (e a busca acha todas).
+  filtros.mostrar = vista.value === 'tabela' ? mostrar.value : 'pedidos'
 }
-watch([vista, mostrar], () => {
+// A vista guarda a escolha (a lista de Conversas é um pedaço da garantia por
+// produto: não fica guardada). Quem troca de vista relê a lista (trocarDeVista).
+watch(vista, () => {
   aplicarVista()
+  if (vista.value === 'conversas') return
   try {
     localStorage.setItem(CHAVE_VISTA, vista.value)
   } catch {
     // sem armazenamento local: vale só nesta visita
   }
+})
+// O "Mostrar" (é da Tabela): relê só quando muda o que a lista traz.
+watch(mostrar, () => {
+  const antes = filtros.mostrar
+  aplicarVista()
+  if (filtros.mostrar !== antes) void carregar({ trocouFiltro: true })
 })
 const itens = ref<GarantiaLinha[]>([])
 const total = ref(0)
@@ -136,8 +156,9 @@ async function carregar(opcoes?: { trocouFiltro?: boolean }) {
       selecionadaLinha.value = achada
     } else if (trocouFiltro || selecionadaId.value === null) {
       // A vista Conversas abre a primeira — na tela larga; no celular a lista
-      // vem primeiro e nada é aberto (nem lido) sem a pessoa tocar.
-      const primeira = telaLarga() ? itens.value[0] ?? null : null
+      // vem primeiro e nada é aberto (nem lido) sem a pessoa tocar. Nas outras
+      // vistas a lista é só dos números: nada fica escolhido escondido.
+      const primeira = vista.value === 'conversas' && telaLarga() ? itens.value[0] ?? null : null
       selecionadaId.value = primeira?.id ?? null
       selecionadaLinha.value = primeira
       if (!primeira) historicoNoCelular.value = false
@@ -167,12 +188,67 @@ async function carregarMais() {
   }
 }
 
+// As trocas de vista (abrir produto, ver todos, buscar, voltar, seletor, limpar)
+// mexem em vários filtros de uma vez: nenhum watcher relê no meio e a lista é
+// relida UMA vez, já com tudo trocado (revisão 29/10: a busca mandava 2-3
+// pedidos — o CPF colado contava 2-3 vezes no teto e no log).
+let emTroca = false
 let atraso: ReturnType<typeof setTimeout> | null = null
+function trocarDeVista(mudar: () => void) {
+  emTroca = true
+  try {
+    mudar()
+    aplicarVista()
+  } finally {
+    void nextTick(() => { emTroca = false })
+  }
+  if (atraso) clearTimeout(atraso)
+  atraso = null
+  void carregar({ trocouFiltro: true })
+}
+// A lista de Conversas que abre é outra: nada da anterior fica na tela nem
+// aberto (nem lido) até ela chegar.
+function entrarNasConversas(por: 'produto' | 'busca' | 'todos', ids?: number[], nome = '') {
+  abertoPor.value = por
+  produtoAberto.value = nome
+  filtros.ids = ids
+  selecionadaId.value = null
+  selecionadaLinha.value = null
+  historicoNoCelular.value = false
+  itens.value = []
+  carregado.value = false
+  vista.value = 'conversas'
+}
+// A busca relê depois da pausa de 300 ms. Na garantia por produto, buscar
+// (nome/CPF/NF/pedido) abre a lista com o que achou; apagar a busca volta para
+// a garantia por produto. Na Tabela a busca filtra a própria tabela.
 watch(() => filtros.busca, () => {
   if (atraso) clearTimeout(atraso)
-  atraso = setTimeout(() => carregar({ trocouFiltro: true }), 300)
+  atraso = null
+  if (emTroca) return
+  atraso = setTimeout(buscaAssentou, 300)
 })
-watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.ordem, filtros.com_conversa, filtros.origem, filtros.mostrar, filtros.ids], () => { void carregar({ trocouFiltro: true }) })
+function buscaAssentou() {
+  atraso = null
+  const termo = filtros.busca.trim()
+  if (vista.value !== 'tabela') {
+    if (termo && abertoPor.value !== 'busca') return trocarDeVista(() => entrarNasConversas('busca'))
+    if (!termo && abertoPor.value === 'busca') return voltarParaProdutos()
+  }
+  void carregar({ trocouFiltro: true })
+}
+// Os filtros da barra relêem a lista. Os ids do produto são uma foto do
+// Resumo com os filtros daquela hora: mexer num filtro da barra com o produto
+// aberto volta para todos os pedidos — na mesma releitura.
+watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.com_atendimento_no_mes, filtros.com_conversa, filtros.origem], () => {
+  if (emTroca) return
+  if (filtros.ids?.length) {
+    if (vista.value === 'conversas') abertoPor.value = 'todos'
+    produtoAberto.value = ''
+    filtros.ids = undefined
+  }
+  void carregar({ trocouFiltro: true })
+})
 
 const ativo = computed(() => cartaoAtivo(filtros))
 function clicarCartao(c: Cartao) {
@@ -180,29 +256,62 @@ function clicarCartao(c: Cartao) {
 }
 const temFiltro = computed(() => !!(filtros.busca.trim() || filtros.status !== 'todos' || filtros.de || filtros.ate || filtros.com_atendimento_no_mes || (filtros.origem && filtros.origem !== 'todas') || filtros.ids?.length))
 function limparFiltros() {
-  Object.assign(filtros, { ...FILTROS_PADRAO, origem: 'todas', ids: undefined })
-  produtoAberto.value = ''
-  aplicarVista()
+  trocarDeVista(() => {
+    Object.assign(filtros, { ...FILTROS_PADRAO, origem: 'todas', ids: undefined })
+    produtoAberto.value = ''
+    if (vista.value === 'conversas') {
+      abertoPor.value = null
+      vista.value = 'resumo'
+    }
+  })
 }
 // A garantia por produto: a linha abre os pedidos daquele produto na lista. O
-// departamento e a busca do produto ficam aqui (voltam iguais).
+// departamento, a busca e a ordem da tabela ficam aqui (voltam iguais).
 const produtoAberto = ref('')
 const resumoDepartamento = ref('')
 const resumoBusca = ref('')
+const resumoOrdem = ref({ coluna: 'pediram', desc: true })
 function abrirProduto(p: { nome: string; ids: number[] }) {
-  produtoAberto.value = p.nome
-  filtros.busca = ''
-  filtros.ids = p.ids
-  vista.value = 'conversas'
+  trocarDeVista(() => {
+    filtros.busca = ''
+    entrarNasConversas('produto', p.ids, p.nome)
+  })
 }
-// Os ids do produto são uma foto do Resumo com os filtros daquela hora: mexer
-// num filtro da barra com o produto aberto volta para todos os pedidos.
-watch(() => [filtros.status, filtros.periodo, filtros.de, filtros.ate, filtros.origem, filtros.com_atendimento_no_mes, filtros.mostrar], () => {
-  if (filtros.ids?.length) fecharProduto()
+function verTodosOsPedidos() {
+  trocarDeVista(() => {
+    filtros.busca = ''
+    entrarNasConversas('todos')
+  })
+}
+function voltarParaProdutos() {
+  trocarDeVista(() => {
+    abertoPor.value = null
+    produtoAberto.value = ''
+    filtros.ids = undefined
+    filtros.busca = ''
+    selecionadaId.value = null
+    selecionadaLinha.value = null
+    historicoNoCelular.value = false
+    vista.value = 'resumo'
+  })
+}
+// O seletor de Visualização: a lista de Conversas é um pedaço da garantia por
+// produto (o seletor continua nela); trocar para a Tabela fecha a lista.
+const vistaDoSeletor = computed<'resumo' | 'tabela'>({
+  get: () => (vista.value === 'tabela' ? 'tabela' : 'resumo'),
+  set: (v) => {
+    if (v === 'resumo') return voltarParaProdutos()
+    trocarDeVista(() => {
+      abertoPor.value = null
+      produtoAberto.value = ''
+      filtros.ids = undefined
+      vista.value = 'tabela'
+    })
+  },
 })
+// O "ver todos os pedidos" do aviso do produto.
 function fecharProduto() {
-  produtoAberto.value = ''
-  filtros.ids = undefined
+  trocarDeVista(() => entrarNasConversas('todos'))
 }
 const buscaParcialDeCpf = computed(() => {
   const d = filtros.busca.replace(/\D/g, '')
@@ -397,13 +506,12 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       </div>
       <div class="w-[calc(50%-0.25rem)] sm:w-52">
         <label for="gar-vista" class="mb-1 block text-xs font-medium text-muted-foreground">Visualização</label>
-        <select id="gar-vista" v-model="vista" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-vista>
-          <option value="conversas">Conversas</option>
-          <option value="tabela">Tabela</option>
+        <select id="gar-vista" v-model="vistaDoSeletor" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-vista>
           <option value="resumo">Garantia por produto</option>
+          <option value="tabela">Tabela</option>
         </select>
       </div>
-      <div v-if="vista !== 'resumo'" class="w-[calc(50%-0.25rem)] sm:w-52">
+      <div v-if="vista === 'tabela'" class="w-[calc(50%-0.25rem)] sm:w-52">
         <label for="gar-mostrar" class="mb-1 block text-xs font-medium text-muted-foreground">Mostrar</label>
         <select id="gar-mostrar" v-model="mostrar" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-mostrar @change="mostrarEscolhido = true">
           <option value="pedidos">pedidos de garantia</option>
@@ -454,17 +562,20 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       <AlertCircle class="size-4" /> {{ erro }} <button type="button" class="underline" @click="carregar">tentar de novo</button>
     </p>
 
-    <!-- a linha da garantia por produto aberta na lista: os pedidos dela -->
-    <p v-if="vista !== 'resumo' && filtros.ids?.length" class="-mt-1 flex flex-wrap items-center gap-2 text-xs" data-produto-aberto>
-      <span class="rounded-full border border-primary/40 bg-primary/5 px-2 py-0.5">Produto: <strong>{{ produtoAberto || 'escolhido' }}</strong> · {{ total }} {{ total === 1 ? 'pedido' : 'pedidos' }} de garantia</span>
-      <button type="button" class="text-primary underline-offset-2 hover:underline" @click="fecharProduto">ver todos os pedidos</button>
-      <button type="button" class="text-primary underline-offset-2 hover:underline" @click="vista = 'resumo'">voltar para a garantia por produto</button>
+    <!-- a lista de Conversas aberta: de onde ela veio e o caminho de volta -->
+    <p v-if="vista === 'conversas'" class="-mt-1 flex flex-wrap items-center gap-2 text-xs" :data-produto-aberto="abertoPor === 'produto' ? '' : undefined" data-lista-aberta>
+      <span class="rounded-full border border-primary/40 bg-primary/5 px-2 py-0.5">
+        <template v-if="abertoPor === 'produto'">Produto: <strong>{{ produtoAberto || 'escolhido' }}</strong><template v-if="carregado"> · {{ total }} {{ total === 1 ? 'pedido' : 'pedidos' }} de garantia</template></template>
+        <template v-else-if="abertoPor === 'busca'">Busca: <strong>“{{ filtros.busca.trim() }}”</strong><template v-if="carregado"> · {{ total }} {{ total === 1 ? 'garantia' : 'garantias' }}</template></template>
+        <template v-else>Todos os pedidos de garantia<template v-if="carregado"> · {{ total }}</template></template>
+      </span>
+      <button v-if="abertoPor === 'produto'" type="button" class="text-primary underline-offset-2 hover:underline" @click="fecharProduto">ver todos os pedidos</button>
+      <button type="button" class="text-primary underline-offset-2 hover:underline" data-voltar-produtos @click="voltarParaProdutos">voltar para a garantia por produto</button>
     </p>
 
-    <!-- Garantia por produto: os filtros da barra valem (menos a busca) -->
+    <!-- Garantia por produto: os filtros da barra valem; a busca abre a lista -->
     <template v-if="vista === 'resumo'">
-      <p v-if="filtros.busca.trim()" class="-mt-1 text-xs text-muted-foreground">A busca vale só para a lista: a garantia por produto conta todas as garantias dos outros filtros.</p>
-      <GarantiaResumo v-model:departamento="resumoDepartamento" v-model:busca="resumoBusca" :filtros="filtros" :versao="versaoResumo" @abrir="abrirProduto" />
+      <GarantiaResumo v-model:departamento="resumoDepartamento" v-model:busca="resumoBusca" v-model:ordem="resumoOrdem" :filtros="filtros" :versao="versaoResumo" @abrir="abrirProduto" @todos="verTodosOsPedidos" />
     </template>
 
     <!-- carregando / vazio -->
@@ -475,10 +586,10 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       v-else-if="carregado && !itens.length"
       :icon="ShieldCheck"
       :title="soPedidos ? (temFiltro ? 'Nenhum pedido de garantia com esses filtros' : 'Nenhum pedido de garantia ainda') : temFiltro ? 'Nenhuma garantia com esses filtros' : 'Nenhuma garantia cadastrada ainda'"
-      :description="soPedidos ? 'Em &quot;Mostrar&quot; está &quot;pedidos de garantia&quot;: as vendas em que o cliente não pediu garantia ficam escondidas.' : temFiltro ? 'Mude a busca, o status ou o período.' : 'Cadastre a primeira pelo + Nova garantia: informe o pedido e a data de entrega vira o início da garantia.'"
+      :description="soPedidos && vista === 'tabela' ? 'Em &quot;Mostrar&quot; está &quot;pedidos de garantia&quot;: as vendas em que o cliente não pediu garantia ficam escondidas.' : temFiltro ? 'Mude a busca, o status ou o período.' : soPedidos ? 'Ninguém pediu garantia ainda: as vendas em que o cliente não pediu ficam só na Tabela.' : 'Cadastre a primeira pelo + Nova garantia: informe o pedido e a data de entrega vira o início da garantia.'"
       data-vazio
     >
-      <Button v-if="soPedidos" size="sm" variant="outline" data-mostrar-todas @click="mostrar = 'todas'; mostrarEscolhido = true">mostrar todas as vendas</Button>
+      <Button v-if="soPedidos && vista === 'tabela'" size="sm" variant="outline" data-mostrar-todas @click="mostrar = 'todas'; mostrarEscolhido = true">mostrar todas as vendas</Button>
       <Button v-if="temFiltro" size="sm" variant="outline" @click="limparFiltros">limpar filtros</Button>
       <Button v-else-if="acesso.cadastra" size="sm" @click="novaGarantia()"><Plus class="mr-1 size-4" /> Nova garantia</Button>
     </EmptyState>
