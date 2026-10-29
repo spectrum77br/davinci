@@ -53,7 +53,8 @@ REVISÃO DE 29/10/2026 (os casos reais de 28/10 nas lojas no automático):
 - O pedido claro (item 2) aceita o DOCUMENTO que faltou na caixa — "Não veio
   nota fiscal..nem recibo nada documento" (Barbosa e5fe56d4, `nf:pedido_nao_
   claro`): "nem", "nada", "nenhum", recibo, documento e comprovante entram na
-  lista do que pode. O PRODUTO que não veio continua com a pessoa, agora por
+  lista do que pode, e o "mas"/"ou"/"também" de "o pedido chegou mas não veio
+  a nota fiscal". O PRODUTO que não veio continua com a pessoa, agora por
   regra explícita no `_NAO_E_SO_A_NF` ("não veio nada", "não chegou o pedido",
   "nem o produto", "nenhum produto", "o pacote não chegou" — antes "não recebi
   o pedido, cadê a nota" passava pela lista) e pelo trecho do "não chegou" sem
@@ -183,8 +184,9 @@ _NAO_E_SO_A_NF = re.compile(
 # outro pedido", "faltando o cabo" vão para a pessoa). Número (CPF, pedido)
 # também não: a palavra com dígito não está na lista. Revisão de 29/10 (Barbosa,
 # "Não veio nota fiscal..nem recibo nada documento"): o documento que faltou na
-# caixa entra — "nem", "nada", "nenhum", recibo, documento, comprovante —; o
-# produto que não veio fica com a pessoa pelo `_NAO_E_SO_A_NF`.
+# caixa entra — "nem", "nada", "nenhum", recibo, documento, comprovante —, e o
+# "mas"/"ou"/"também" de "o pedido chegou mas não veio a nota"; o produto que não
+# veio fica com a pessoa pelo `_NAO_E_SO_A_NF` e pelo trecho (`_NAO_VEIO`).
 _PALAVRAS_DO_PEDIDO = frozenset(
     """
     oi ola ei bom boa dia tarde noite tudo bem ok certo sim por favor pf pfv porfavor
@@ -195,7 +197,7 @@ _PALAVRAS_DO_PEDIDO = frozenset(
     preciso precisava precisaria quero queria gostaria necessito eu vou querer receber
     solicito solicitar solicitacao
     nao veio vieram recebi chegou encontrei achei tinha estava foi cade ainda
-    nem nada nenhum nenhuma
+    nem nada nenhum nenhuma mas ou tambem
     nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
     recibo recibos documento documentos comprovante comprovantes chave acesso
     a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
@@ -235,8 +237,10 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
 
 
 # Revisão de 29/10: o "não veio/chegou/recebi" de cada trecho fala do DOCUMENTO; sem ele no
-# trecho ("ainda não chegou, preciso da nota") quem não chegou é o produto → pessoa.
+# trecho ("ainda não chegou, preciso da nota", "manda a nota mas ainda não chegou") quem
+# não chegou é o produto → pessoa. O trecho acaba na pontuação, no "mas", "porém" e "e".
 _NAO_VEIO = re.compile(r"\bnao\s+(?:veio|vieram|chegou|chegaram|recebi|tinha|tem|estava)\b")
+_TRECHOS = re.compile(r"[,.;:!?]+|\b(?:mas|porem|e)\b")
 _NOME_DO_DOC = re.compile(
     r"\b(?:nota|notas|nf|nfe|recibo|recibos|documento|documentos|comprovante|comprovantes|chave)\b"
 )
@@ -249,9 +253,7 @@ def pedido_claro(textos: Sequence[str | None]) -> bool:
         return False
     if not _PEDE.search(plano) or _NAO_E_SO_A_NF.search(plano) or not _NOMEIA_A_NF.search(plano):
         return False
-    if any(
-        _NAO_VEIO.search(t) and not _NOME_DO_DOC.search(t) for t in re.split(r"[,.;:!?]+", plano)
-    ):
+    if any(_NAO_VEIO.search(t) and not _NOME_DO_DOC.search(t) for t in _TRECHOS.split(plano)):
         return False
     palavras = re.findall(r"[a-z0-9]+", _O_CLIENTE_FAZ.sub(" ", plano))
     return all(p in _PALAVRAS_DO_PEDIDO for p in palavras)
