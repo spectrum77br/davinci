@@ -417,6 +417,15 @@ async def test_chave_geral_desligada(db, make_user, ligado, plataforma, monkeypa
         "não recebi a nota fiscal ou o produto",
         "não veio a chave, manda a nota fiscal",
         "manda a chave de acesso do produto e a nota fiscal",
+        # Segunda revisão de segurança de 29/10 (passavam pela lista).
+        "o pedido chegou mas não veio a nota e um produto",
+        "pode mandar a nota mas e o produto?",
+        "quero meu produto e a nota fiscal",
+        "o produto não estava na caixa manda a nota",
+        "vou mandar o documento pra nota",
+        "essa nota não é minha, manda a minha nota",
+        "recebi o pedido mas a nota não é minha manda a minha nota",
+        "não quero a nota fiscal",
     ],
 )
 async def test_pedido_ambiguo_ou_que_exige_pessoa(db, make_user, ligado, plataforma, texto):
@@ -533,6 +542,58 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("não recebi a chave nem a nota fiscal", False),
         ("manda a chave e a nota fiscal", False),
         ("manda a chave de acesso da nota fiscal do pedido", True),
+        # Segunda revisão de segurança de 29/10. O "mas" só antes do "não" (ou do lugar).
+        ("o pedido chegou mas nao veio a nota e um produto", False),
+        ("O PEDIDO CHEGOU MAS NAO VEIO A NOTA E UM PRODUTO", False),
+        ("O pedido chegou, mas não veio a nota e o produto", False),
+        ("pedido chegou mas nao veio a nf e o produto 😡", False),
+        ("pode mandar a nota mas e o produto?", False),
+        ("vcs podem mandar a nota mas e o meu pedido??", False),
+        ("Manda a nota fiscal, mas e a minha compra?", False),
+        ("chegou o pacote mas nao veio a nota fiscal e a caixa", False),
+        ("manda a nota mas a minha", False),
+        ("pode mandar a nota mas da minha compra", False),
+        ("mas e aí, manda a nota", False),
+        ("recebi a caixa mas na embalagem não tinha a nota", True),
+        # O produto ao lado da nota, pedido ou com "não".
+        ("quero meu produto e a nota fiscal", False),
+        ("preciso do produto e da nota", False),
+        ("Manda o produto e a nota fiscal", False),
+        ("me envia o pedido e a nota", False),
+        ("quero receber o produto e a nota", False),
+        ("manda a nota e o pedido de novo", False),
+        ("nao veio a nota e o produto", False),
+        ("nao veio nota e pedido", False),
+        ("cadê o pedido e a nota fiscal não veio", False),
+        ("o produto nao estava na caixa manda a nota", False),
+        ("o produto nao tinha na caixa manda a nota", False),
+        ("nao veio a nota o produto nao", False),
+        ("ainda nao chegou preciso da nota", False),
+        ("recebi o pedido e a caixa não tinha a nota", True),
+        ("o pedido não tinha a nota fiscal", True),
+        ("recebi o produto e a nota não veio", True),
+        # O recibo/documento/comprovante só grudado no "nem/nada/ou".
+        ("vou mandar o documento pra nota", False),
+        ("preciso mandar o documento pra nota?", False),
+        ("vou enviar o comprovante pra receber a nota", False),
+        ("manda a nota e os documentos", False),
+        ("nao veio a nota fiscal e nem recibo do produto", True),
+        # A nota que não é a dele, a "certa", o "não quero" e outra nota.
+        ("essa nota nao e minha manda a minha nota", False),
+        ("manda a nota de novo essa nao e minha", False),
+        ("manda a nota o pedido nao e meu", False),
+        ("manda a nota do pedido certo", False),
+        ("manda a nota fiscal mas do pedido certo", False),
+        ("nao quero a nota", False),
+        ("nao gostaria de receber a nota", False),
+        ("nao queria a nota, queria o produto", False),
+        ("manda a segunda nota", False),
+        ("nao veio a nota de um produto", False),
+        ("manda a nota desse pedido e tambem a nota do pedido", False),
+        ("preciso da segunda via da nota fiscal por favor", True),
+        # O "emitir" só com o "eu"; a "chave de acesso" com o "nem" é outra coisa.
+        ("manda a nota pra emitir", False),
+        ("nao veio a chave de acesso nem a nota", False),
     ],
 )
 def test_pedido_claro(texto, claro):
@@ -544,6 +605,23 @@ def test_pedido_claro_em_duas_falas():
     assert nf_automatica.pedido_claro(["oi", "não veio a nota fiscal"]) is True
     assert nf_automatica.pedido_claro(["o produto nem veio", "cadê a nota fiscal?"]) is False
     assert nf_automatica.pedido_claro(["recebi a caixa mas nada do produto", "manda a nf"]) is False
+    # Segunda revisão de 29/10: cada fala é um trecho.
+    assert nf_automatica.pedido_claro(["Não veio a nota", "O produto não"]) is False
+    assert nf_automatica.pedido_claro(["Ainda não chegou", "Manda a nota fiscal pfv"]) is False
+    assert nf_automatica.pedido_claro(["nao veio a nota e", "o produto"]) is False
+    assert (
+        nf_automatica.pedido_claro(
+            ["chegou o pedido mas a nota nao e minha", "manda a minha nota pfv"]
+        )
+        is False
+    )
+    assert (
+        nf_automatica.pedido_claro(
+            ["boa tarde", "recebi a caixa mas nao veio a nota e o produto", "pfv"]
+        )
+        is False
+    )
+    assert nf_automatica.pedido_claro(["boa tarde", "não veio a nota fiscal", "pode mandar?"])
 
 
 def test_conferir_xml_pega_chave_trocada():
@@ -804,6 +882,36 @@ def test_pedido_pelo_menu():
     assert nf_automatica.pedido_pelo_menu([oi, menu, dois], oi) is False
 
 
+@pytest.mark.parametrize(
+    ("antes", "pelo_menu"),
+    [
+        ([], True),
+        (["oi"], True),
+        (["boa tarde, tudo bem?", "por favor"], True),
+        (["não veio a nota fiscal"], True),
+        # O "2" de um menu anterior é a mesma escolha; o "6" (atendente) não.
+        (["oi", "2"], True),
+        (["6"], False),
+        # Segunda revisão de 29/10: o problema escrito ANTES do menu, na mesma rajada.
+        (["Recebi a nota de outra pessoa, com outro nome"], False),
+        (["essa nota que veio na caixa nao e minha"], False),
+        (["o pedido chegou mas nao veio a nota e um produto"], False),
+        (["comprei 2, chegou so 1"], False),
+        (["oi", "o produto veio quebrado"], False),
+    ],
+)
+def test_pedido_pelo_menu_olha_o_que_veio_antes_do_menu(antes, pelo_menu):
+    from types import SimpleNamespace as M
+
+    falas = [M(id=i, autor="cliente", texto=t) for i, t in enumerate(antes)]
+    menu = M(id=90, autor="loja", texto="Escolha: 1 - Rastreio 2 - Nota fiscal 6 - Atendente")
+    dois = M(id=91, autor="cliente", texto="2")
+    assert nf_automatica.pedido_pelo_menu([*falas, menu, dois], dois) is pelo_menu
+    # A resposta real da loja antes corta a rajada: o que veio antes dela não conta.
+    loja = M(id=89, autor="loja", texto="Olá! Já verificamos o seu pedido.", origem="externo")
+    assert nf_automatica.pedido_pelo_menu([*falas, loja, menu, dois], dois) is True
+
+
 async def test_resposta_2_ao_menu_manda_a_nf(db, make_user, ligado, plataforma):
     conversa, _ = await _cenario(db, make_user, texto="oi")
     await _msg(
@@ -818,3 +926,24 @@ async def test_resposta_2_ao_menu_manda_a_nf(db, make_user, ligado, plataforma):
     r = await _rascunho(db, conversa, gatilho)
     await ia._talvez_enviar(db, conversa, r)
     assert _decisao(r) == "enviado_nf", _decisao(r)
+
+
+async def test_2_do_menu_com_o_problema_escrito_antes_fica_com_a_pessoa(
+    db, make_user, ligado, plataforma
+):
+    """Segunda revisão de 29/10: o menu sai logo depois da 1ª fala — ela também conta."""
+    conversa, _ = await _cenario(
+        db, make_user, texto="Recebi a nota de outra pessoa, com outro nome"
+    )
+    await _msg(
+        db,
+        conversa,
+        "Escolha uma opção: 1 - Rastreio 2 - Nota fiscal 3 - Encerramento da compra",
+        autor="loja",
+        origem="davinci_auto",
+        ha=timedelta(minutes=2),
+    )
+    gatilho = await _msg(db, conversa, "2", ha=timedelta(minutes=1))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:pedido_nao_claro" and plataforma == []
