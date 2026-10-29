@@ -414,7 +414,8 @@ teste não precisar de banco.
   `disputa_com_pessoa`, condição `pular_em_disputa_com_pessoa`, ligada; é o
   DaVinci falando no chat da disputa e contando como resposta da loja; decisão
   do Eduardo, §12). Nenhuma automação vale com a IA em `auto` no canal
-  (`ia_no_automatico`): no automático, quem fala é a IA.
+  (`ia_no_automatico`): no automático, quem fala é a IA. (A resposta da avaliação:
+  a pública sai, só o chat fica — §17.6.)
 - **Teto por comprador** (só o que é mensagem normal, não campanha: menu, opções,
   "aguarde"): no máximo 3 do DaVinci depois da última mensagem do comprador
   (`teto_comprador`). A Shopee tem `reach_5_message_limit` e o bloqueio de
@@ -3207,9 +3208,10 @@ que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
   dias e comprador calado > 7; sem a data do pedido, também) → manda só a
   pública (as duas faixas, desde o §17.5); no modo enviar, o Duoke já respondeu (a pública
   ou o chat dele depois da avaliação) → `duoke_mandou` + disjuntor; a IA no
-  automático continua pulando (`ia_no_automatico`), menos com a condição nova
-  `com_ia_no_automatico` ligada na regra da loja. O teto do dia e o `auto_reply`
-  da campanha valem como em toda campanha.
+  automático segura só o CHAT (`ia_no_automatico` vira "sem chat": a pública sai,
+  §17.6), menos com a condição nova `com_ia_no_automatico` ligada na regra da loja
+  (aí vai o chat também). O teto do dia e o `auto_reply` da campanha valem como em
+  toda campanha.
 
 ### 17.3 Para ligar (o Eduardo)
 
@@ -3303,22 +3305,54 @@ respondida pelo DaVinci** (`dados.respondida_pelo_davinci`: 0, de sempre; com
   (`envio_em_andamento`) enquanto a nossa está em voo — até a avaliação ser relida
   30 min depois da marca ainda sem resposta (`avaliacoes.publica_em_voo`); a linha
   `enviando` nunca é retentada (vira `revisar`).
-- **Pessoa respondeu antes** (outro texto, pela caixa ou na Shopee):
-  `pessoa_respondeu` — não vai nada, nem a pública nem a pergunta (a pessoa
-  assumiu; antes, em Enviar, a pública da equipe não segurava a pergunta).
-- **Sem como mandar o chat** (sem conversa, fora da janela, com pessoa): só a
-  pública, como na 4–5★. O chat que falha depois da pública: `revisar` + disjuntor
-  (`parte_falhou`), como na 4–5★.
+- **Pessoa respondeu antes** (outro texto, pela caixa ou na Shopee): a nossa
+  pública não vai (nunca duas); em Enviar, a pergunta no chat ainda vai
+  (`publica_de_pessoa`, §17.6) — no modo seco, `pessoa_respondeu` (não vai nada).
+- **Sem como mandar o chat** (sem conversa, fora da janela, com pessoa, a IA no
+  automático sem a condição): só a pública, como na 4–5★. O chat que falha depois
+  da pública: `revisar` + disjuntor (`parte_falhou`), como na 4–5★.
 - **A nota que muda** (5→2 ou 2→5): a linha da faixa antiga pula
   (`estrelas_mudaram`); a da faixa nova pula se a antiga já saiu ou sairia, ou se a
   avaliação tem a marca da automação (`avaliacao_ja_atendida`). Nunca duas
   respostas de faixas diferentes.
 
-**O que sobra:** (1) entre a conferência da caixa "Responder em público" e a linha
-em voo dela há uma janela de milissegundos em que a automação ainda pode começar;
-não sabemos se a Shopee recusa o segundo `reply_comment`. (2) Na transição (3
-dias depois de Enviar) a decisão espera até 5 h, e a 1–3★ vira pendência da equipe
-em 1 h (`CARENCIA_NOTA_BAIXA`): quem responder à mão nesse meio-tempo faz a
-automação pular (`pessoa_respondeu`) — nunca duas. (3) O texto fixo postado à mão
-na Shopee (fora do DaVinci) é lido como o Duoke ligado e volta a regra para
-Simular (o lado seguro).
+**O que sobra:** (1) não sabemos se a Shopee recusa o segundo `reply_comment`
+(nunca chamamos dois: §17.6). (2) Na transição (3 dias depois de Enviar) a decisão
+espera até 5 h, e a 1–3★ vira pendência da equipe em 1 h (`CARENCIA_NOTA_BAIXA`):
+quem responder em público nesse meio-tempo leva a pública — a nossa não vai, a
+pergunta sim (§17.6). (3) O texto fixo postado à mão na Shopee (fora do DaVinci) é
+lido como o Duoke ligado e volta a regra para Simular (o lado seguro).
+
+### 17.6 A revisão da 1–3★ pública (29/10/2026, à noite)
+
+- **Duas públicas pela caixa "Responder em público"** (a trava lia a avaliação
+  velha): a rota carrega a avaliação no começo do pedido e, com
+  `expire_on_commit=False`, o `_destino_avaliacao` recebia a mesma cópia — não via
+  a resposta nem a marca em voo da automática que saísse nesse meio (até os 5 s da
+  trava da conversa). E as duas não se esperavam: a automática trava a AVALIAÇÃO, a
+  pessoa travava a CONVERSA. Agora o envio pela conversa `avaliacao` trava e relê a
+  avaliação antes da conversa (`enviar._travar_avaliacao`, dentro do
+  `travar_conversa`; a mesma ordem da leitura e da pendência das avaliações) até a
+  linha em voo da pessoa ser commitada: a automática espera e vê o `enviando` da
+  pessoa (`_publica_de_pessoa` → volta para a próxima rodada); a pessoa que chega
+  depois vê a marca ou a resposta (409 `envio_em_andamento`/`ja_respondida`).
+  Ocupada mais de 5 s → `conversa_ocupada`. O `_destino_avaliacao` relê
+  (`avaliacao_da_conversa(relida=True)`), e o `depois_da_resposta` e o
+  `gravar_resposta_automatica` regravam o `dados` sobre a avaliação travada e
+  relida (antes, a cópia velha apagava o `dados.automacao` e a marca em voo).
+- **A pública de pessoa segura só a nossa pública:** a 1–3★ vira pendência da
+  equipe em 1 h, na mesma hora da automática (depois da transição, 60 a 90 min).
+  Em Enviar, a resposta de pessoa (`pessoa_respondeu` da avaliação) vira
+  `publica_de_pessoa`: a nossa pública sai das partes e a pergunta no chat vai, se
+  puder sair (sem chat ou a regra sem chat → `pessoa_respondeu`, não vai nada). No
+  modo seco continua `pessoa_respondeu`: o Duoke não manda nada depois da pessoa, e
+  a comparação ficaria torta. (Decisão em aberto para o Eduardo: a outra saída era
+  não abrir — ou adiar — a pendência da 1–3★ com a regra em Enviar.)
+- **A IA no automático (Barbosa, Kia, Vita) segura só o chat:** antes a regra
+  inteira pulava (`ia_no_automatico`) e, na troca, a pública padrão que o Duoke
+  posta hoje parava de sair sem aviso (Barbosa ~0,27 1–3★/dia, Vita ~0,17; e a
+  4–5★ das três). A pública não passa pela IA: `cat.chat_segurado_pela_ia` vira
+  "sem chat" (`_sem_chat_da_avaliacao` e `decidir`), só a pública sai; com a
+  condição `com_ia_no_automatico` ligada, vai o chat também. A regra só com o chat
+  continua pulando (`ia_no_automatico`). Na aba Automáticas a condição se chama
+  "Mandar também o chat com a IA no automático".

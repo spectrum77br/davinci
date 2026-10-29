@@ -1773,25 +1773,33 @@ async def conversa_para_responder(
 
 
 async def avaliacao_da_conversa(
-    session: AsyncSession, conversa: AtendimentoConversa
+    session: AsyncSession, conversa: AtendimentoConversa, *, relida: bool = False
 ) -> AtendimentoAvaliacaoLoja | None:
-    """A avaliação dona da conversa `avaliacao` (pelo id guardado, ou pelo `externo_id`)."""
+    """A avaliação dona da conversa `avaliacao` (pelo id guardado, ou pelo `externo_id`).
+
+    `relida=True`: do banco agora, por cima da cópia da sessão (29/10/2026 —
+    a da rota é do começo do pedido; com `expire_on_commit=False`, o
+    `session.get` devolveria ela sem ir ao banco)."""
     if conversa.canal != CANAL_AVALIACAO:
         return None
     aid = _id(_dict(conversa.dados).get("avaliacao_id"))
     if aid:
         try:
-            achada = await session.get(AtendimentoAvaliacaoLoja, UUID(aid))
+            achada = await session.get(
+                AtendimentoAvaliacaoLoja, UUID(aid), populate_existing=relida
+            )
         except ValueError:
             achada = None
         if achada is not None:
             return achada
     return (
         await session.execute(
-            select(AtendimentoAvaliacaoLoja).where(
+            select(AtendimentoAvaliacaoLoja)
+            .where(
                 AtendimentoAvaliacaoLoja.integration_id == conversa.integration_id,
                 AtendimentoAvaliacaoLoja.comentario_id == conversa.externo_id,
             )
+            .execution_options(populate_existing=relida)
         )
     ).scalar_one_or_none()
 
@@ -1873,6 +1881,9 @@ async def gravar_resposta_automatica(
     mesmo do Duoke. A marca em voo sai. A pendente (se já era) sai da fila.
     """
     agora = agora or _agora()
+    # Travada e RELIDA (29/10/2026): a cópia é de antes da Shopee (até 90 s) — a
+    # leitura das avaliações pode ter gravado no `dados` nesse meio.
+    await gravar.travar_linha(session, a)
     a.resposta_loja = indice.texto_curto(texto, indice.TEXTO_AVALIACAO_MAX)
     a.resposta_em = agora
     dados = {
@@ -1907,6 +1918,11 @@ async def depois_da_resposta(
     a = await avaliacao_da_conversa(session, conversa)
     if a is None or not mensagem.texto:
         return False
+    # Travada e RELIDA (29/10/2026, a revisão): a cópia da sessão é a do começo
+    # do pedido (a rota a carregou antes do envio); regravar o `dados` dela
+    # apagaria o que a leitura das avaliações (ou a automação) gravou nesse
+    # meio. Sem `espera`: a resposta já saiu, isto espera o que for preciso.
+    await gravar.travar_linha(session, a)
     a.resposta_loja = indice.texto_curto(mensagem.texto, indice.TEXTO_AVALIACAO_MAX)
     a.resposta_em = _utc(mensagem.enviada_em) or agora
     a.dados = {

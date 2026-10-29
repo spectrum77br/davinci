@@ -25,6 +25,7 @@ do Duoke aqui também em todas as plataformas possíveis". Aqui, com banco:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -1269,10 +1270,9 @@ async def test_avaliacao_na_loja_com_a_ia_no_automatico_so_com_a_condicao(db, pr
     )
     await _rodada()
     por = {x.chave: x for x in await _linhas(db)}
-    assert (por["avaliacao:301"].estado, por["avaliacao:301"].motivo) == (
-        "pulado",
-        "ia_no_automatico",
-    )
+    # 29/10/2026 (a revisão): sem a condição, a IA no automático segura só o CHAT —
+    # a pública sai (a do Duoke de hoje, em Barbosa, Kia e Vita, não some na troca).
+    assert (por["avaliacao:301"].estado, por["avaliacao:301"].motivo) == ("simulado", None)
     assert por["avaliacao:302"].estado == "simulado"
     assert proibido == []
 
@@ -1404,12 +1404,12 @@ async def test_avaliacao_ruim_o_duoke_ainda_ligado_pula_e_dispara_o_disjuntor(db
     assert boa.modo == "enviar", "só a regra da faixa"
 
 
-async def test_avaliacao_ruim_pessoa_que_respondeu_antes_segura_a_publica_e_a_pergunta(
-    db, publica_ligada
-):
+async def test_avaliacao_ruim_pessoa_que_respondeu_antes_segura_so_a_publica(db, publica_ligada):
     """Respondida por PESSOA antes da nossa (outro texto na Shopee, ou o padrão pela
-    caixa "Responder em público" do DaVinci): nunca duas públicas, e a pergunta também
-    não vai (a pessoa assumiu). Não é o Duoke: nada de disjuntor."""
+    caixa "Responder em público" do DaVinci): nunca duas públicas — mas a pergunta no
+    chat ainda vai (29/10/2026, a revisão: a 1–3★ vira pendência da equipe em 1 h, na
+    mesma hora da automática, e a pergunta é o pedido do dono). Não é o Duoke: nada
+    de disjuntor."""
     integ, canal, _, ruim = await _cenario_enviar(db, "minas")
     criada = T - timedelta(hours=2)
     await _conversa(db, integ, canal, comprador="82", pedido="251005OUTRO0042")
@@ -1442,12 +1442,48 @@ async def test_avaliacao_ruim_pessoa_que_respondeu_antes_segura_a_publica_e_a_pe
     por = {x.chave: x for x in await _linhas(db)}
     for c in ("602", "603"):
         assert (por[f"avaliacao:{c}"].estado, por[f"avaliacao:{c}"].motivo) == (
-            "pulado",
-            "pessoa_respondeu",
+            "enviado",
+            None,
         ), c
-    assert publica_ligada.publicas == [] and publica_ligada.auto_replies == []
+    assert publica_ligada.publicas == [], "nunca duas públicas"
+    assert len(publica_ligada.auto_replies) == 2, "a pergunta vai"
+    assert all("?" in t for t in publica_ligada.auto_replies)
     await db.refresh(ruim)
     assert (ruim.modo, ruim.disjuntor_motivo) == ("enviar", None)
+
+
+async def test_avaliacao_ruim_pessoa_que_respondeu_no_modo_seco_e_sem_chat_nao_vai_nada(
+    db, publica_ligada
+):
+    """A pública de PESSOA: em Enviar sem como mandar a pergunta (sem conversa), nada
+    vai; no modo seco a linha pula como antes (o Duoke não manda nada depois da pessoa
+    — a comparação não fica torta)."""
+    integ, _, _, _ = await _cenario_enviar(db, "inova")
+    seco, canal_seco = await _loja(db, await _dono(db), "mega")
+    await _regra(db, seco, "shopee_avaliacao_ruim")
+    await _conversa(db, seco, canal_seco, comprador="86", pedido="251005OUTRO0046")
+    criada = T - timedelta(hours=2)
+    resposta = {
+        "resposta": "Olá! Já te chamamos no chat para resolver.",
+        "resposta_em": criada + timedelta(minutes=30),
+    }
+    await _avaliacao(db, integ, "605", estrelas=1, criado=criada, comprador="85", **resposta)
+    await _avaliacao(
+        db,
+        seco,
+        "606",
+        estrelas=2,
+        criado=criada,
+        pedido="251005OUTRO0046",
+        comprador="86",
+        **resposta,
+    )
+    await _rodada()
+    por = {x.chave: x for x in await _linhas(db)}
+    for c in ("605", "606"):
+        x = por[f"avaliacao:{c}"]
+        assert (x.estado, x.motivo) == ("pulado", "pessoa_respondeu"), c
+    assert publica_ligada.publicas == [] and publica_ligada.auto_replies == []
 
 
 async def test_avaliacao_ruim_espera_a_resposta_de_pessoa_que_esta_saindo(db, publica_ligada):
@@ -1478,8 +1514,133 @@ async def test_avaliacao_ruim_espera_a_resposta_de_pessoa_que_esta_saindo(db, pu
     await db.commit()
     await _rodada(T + timedelta(minutes=2))
     [x] = await _linhas(db, chave="avaliacao:604")
-    assert (x.estado, x.motivo) == ("pulado", "pessoa_respondeu")
-    assert publica_ligada.publicas == [] and publica_ligada.auto_replies == []
+    # A pública é da pessoa; a pergunta no chat ainda vai (29/10/2026, a revisão).
+    assert (x.estado, x.motivo) == ("enviado", None)
+    assert publica_ligada.publicas == [] and len(publica_ligada.auto_replies) == 1
+
+
+class _CaixaDaPessoa(AdaptadorComPublica):
+    """O da Shopee com a caixa "Responder em público" da PESSOA (a conversa `avaliacao`)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.de_pessoa: list[str] = []
+
+    async def responder_avaliacao(self, session, conversa, integration, cliente, texto):
+        self.de_pessoa.append(texto)
+        return ResultadoEnvio(ok=True, externo_id=f"resposta:{conversa.externo_id}")
+
+
+async def _caixa_da_pessoa(db, monkeypatch, nome_loja, comentario, comprador, pedido):
+    falso = _CaixaDaPessoa()
+    monkeypatch.setattr(enviar, "adaptador", lambda _plataforma: falso)
+    integ, canal, _, _ = await _cenario_enviar(db, nome_loja)
+    canal.modo = "copiloto"  # a pessoa responde pela caixa (a loja fora de observar)
+    await db.commit()
+    await _conversa(db, integ, canal, comprador=comprador, pedido=pedido)
+    a = await _avaliacao(
+        db,
+        integ,
+        comentario,
+        estrelas=1,
+        criado=T - timedelta(hours=2),
+        pedido=pedido,
+        comprador=comprador,
+    )
+    from app.services.atendimento import avaliacoes
+
+    await avaliacoes.garantir_conversa(db, a, T)
+    await db.commit()
+    return falso, a
+
+
+async def test_caixa_da_pessoa_rele_a_avaliacao_e_nao_manda_a_segunda(
+    db, client, pessoa, publica_ligada, monkeypatch
+):
+    """29/10/2026 (a revisão): a rota POST /avaliacoes/{id}/responder carrega a
+    avaliação no começo do pedido; a automática sai inteira nesse meio (até 5 s da
+    trava da conversa). O envio da pessoa relê a avaliação travada: 409
+    `ja_respondida`, a pública não vai duas vezes, e o `dados` da nossa fica."""
+    from app.services.atendimento import avaliacoes
+
+    falso, a = await _caixa_da_pessoa(db, monkeypatch, "kfa", "905", "95", "251005REV00005")
+    original = avaliacoes.conversa_para_responder
+
+    async def _no_meio(session, av, **k):
+        await _rodada()
+        return await original(session, av, **k)
+
+    monkeypatch.setattr(avaliacoes, "conversa_para_responder", _no_meio)
+    r = await client.post(
+        f"/api/atendimento/avaliacoes/{a.id}/responder",
+        json={"texto": "Oi, sentimos muito, vamos resolver pelo chat."},
+    )
+    [x] = await _linhas(db, chave="avaliacao:905")
+    assert x.estado == "enviado" and falso.publicas == [("905", cat.TEXTO_AVALIACAO_RUIM_PUBLICA)]
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "ja_respondida"
+    assert falso.de_pessoa == [], "a segunda pública não sai"
+    novo = (
+        await db.execute(
+            select(AtendimentoAvaliacaoLoja)
+            .where(AtendimentoAvaliacaoLoja.id == a.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert novo.resposta_loja == cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    assert novo.dados["automacao"] == "shopee_avaliacao_ruim"
+
+
+async def test_caixa_da_pessoa_e_automacao_ao_mesmo_tempo_se_esperam(
+    db, pessoa, publica_ligada, monkeypatch
+):
+    """A pessoa passou da conferência da caixa (a avaliação travada) e a automática
+    roda AO MESMO TEMPO (outra sessão): ela espera a trava, vê a linha em voo da
+    pessoa e volta para a próxima rodada (`envio_em_andamento`) — que manda só a
+    pergunta no chat. Nunca duas públicas."""
+    import app.db as _db
+
+    falso, a = await _caixa_da_pessoa(db, monkeypatch, "minas", "902", "92", "251005REV00002")
+    from app.services.atendimento import avaliacoes
+
+    conversa_av = await avaliacoes.conversa_para_responder(db, a)
+    await db.commit()
+    eu = await db.scalar(text("select pg_backend_pid()"))
+    original = enviar._conferir_repetido
+    rodada: list[asyncio.Task] = []
+    esperou: list[bool] = []
+
+    async def _no_meio(session, conversa, normalizado, **k):
+        # Entre a conferência da caixa e a linha em voo da pessoa.
+        if not rodada:
+            rodada.append(asyncio.create_task(_rodada()))
+            for _ in range(100):
+                await asyncio.sleep(0.1)
+                async with _db.SessionLocal() as outra:
+                    presa = await outra.scalar(
+                        text(
+                            "select count(*) from pg_stat_activity "
+                            "where :eu = any(pg_blocking_pids(pid))"
+                        ),
+                        {"eu": eu},
+                    )
+                if presa:
+                    esperou.append(True)
+                    break
+        return await original(session, conversa, normalizado, **k)
+
+    monkeypatch.setattr(enviar, "_conferir_repetido", _no_meio)
+    m = await enviar.enviar_resposta(
+        db, conversa_av, "Oi, sentimos muito, já te chamamos no chat.", user=pessoa
+    )
+    await rodada[0]
+    assert esperou == [True], "a automática esperou a trava da avaliação"
+    assert m.status == "enviada" and len(falso.de_pessoa) == 1
+    [x] = await _linhas(db, chave="avaliacao:902")
+    assert x.estado == "agendado" and falso.publicas == []
+    await _rodada(T + timedelta(minutes=2))
+    [x] = await _linhas(db, chave="avaliacao:902")
+    assert x.estado == "enviado" and falso.publicas == [], "só a pergunta"
+    assert len(falso.auto_replies) == 1
 
 
 async def test_avaliacao_ruim_a_marca_em_voo_diz_que_a_publica_e_nossa(

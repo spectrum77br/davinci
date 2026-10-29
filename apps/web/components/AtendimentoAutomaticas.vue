@@ -412,8 +412,8 @@ export const CONDICOES: Record<string, { label: string; unidade?: string; hint?:
   so_sem_avaliacao: { label: 'Só se o comprador ainda não avaliou' },
   so_com_conversa: { label: 'Só se já houver conversa com o comprador' },
   um_por_comprador_h: { label: 'Um por comprador a cada', unidade: 'h', hint: 'como o Duoke: quem já recebeu um nas últimas 24 h não recebe outro (o Duoke manda de novo a partir de ~27 h)' },
-  // A avaliação na loja com a IA no automático (29/10/2026): desligada, a regra respeita a trava de sempre.
-  com_ia_no_automatico: { label: 'Mandar também com a IA no automático', hint: 'a resposta do comprador à pergunta da 1–3★ vai para a Caixa Humano, não para a IA' },
+  // A avaliação na loja com a IA no automático (29/10/2026): desligada, só a pública sai (ela não passa pela IA).
+  com_ia_no_automatico: { label: 'Mandar também o chat com a IA no automático', hint: 'a resposta pública sai sempre; ligada, a mensagem no chat também (a resposta do comprador à pergunta da 1–3★ vai para a Caixa Humano, não para a IA)' },
 }
 export function rotuloCondicao(chave: string): string {
   return CONDICOES[chave]?.label || chave

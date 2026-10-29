@@ -1453,13 +1453,29 @@ def test_decidir_da_avaliacao_queixa_atendida_chat_e_ia_no_automatico():
     so_chat = _regra_av(partes=[{"tipo": "texto", "texto": "Oi!"}])
     for aut in (boa, ruim):
         assert cat.decidir(aut, {"sem_chat": "sem_conversa"}, so_chat) == "sem_conversa"
-    # A IA no automático: a trava de sempre, menos com a condição ligada.
-    assert cat.decidir(boa, {"canal_auto": True}, r) == "ia_no_automatico"
+    # A IA no automático (29/10/2026, a revisão): segura só o CHAT da avaliação —
+    # a pública sai (Barbosa, Kia, Vita); a regra só com o chat não manda. Com a
+    # condição ligada, vai tudo. As outras automações: a trava de sempre.
+    auto = {"canal_auto": True}
+    for aut in (boa, ruim):
+        assert cat.decidir(aut, auto, r) is None
+        assert cat.chat_segurado_pela_ia(aut, auto, r) == "ia_no_automatico"
+        assert cat.decidir(aut, auto, so_chat) == "ia_no_automatico"
     com = _regra_av(condicoes={"com_ia_no_automatico": True})
-    assert cat.decidir(boa, {"canal_auto": True}, com) is None
-    assert cat.decidir(ruim, {"canal_auto": True}, com) is None
+    assert cat.decidir(boa, auto, com) is None
+    assert cat.decidir(ruim, auto, com) is None
+    assert cat.chat_segurado_pela_ia(ruim, auto, com) is None
     menu = cat.CATALOGO["shopee_menu"]
-    assert cat.decidir(menu, {"canal_auto": True}, com) == "ia_no_automatico"
+    assert cat.decidir(menu, auto, com) == "ia_no_automatico"
+    assert cat.chat_segurado_pela_ia(menu, auto, r) is None
+    # A pública que uma PESSOA já deu (1–3★ em enviar): só a pergunta vai; sem
+    # como mandar o chat (ou a regra sem chat), nada.
+    pessoa = {"publica_de_pessoa": True}
+    assert cat.decidir(ruim, pessoa, r) is None
+    assert cat.decidir(ruim, {**pessoa, "sem_chat": "sem_conversa"}, r) == "pessoa_respondeu"
+    assert cat.decidir(ruim, {**pessoa, **auto}, r) == "pessoa_respondeu"
+    so_publica = _regra_av(partes=[{"tipo": "resposta_publica", "texto": "Obrigado!"}])
+    assert cat.decidir(ruim, pessoa, so_publica) == "pessoa_respondeu"
     # A queixa é diferença combinada (fica fora da %).
     assert cat.divergencia_do_motivo("queixa_no_comentario", boa) == "queixa_no_comentario"
     assert "queixa_no_comentario" in cat.DIVERGENCIAS

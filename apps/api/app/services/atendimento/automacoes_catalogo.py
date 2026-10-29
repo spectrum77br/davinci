@@ -910,13 +910,15 @@ def _montar() -> dict[str, Automacao]:
             descricao=(
                 "Avaliação de 4 ou 5 estrelas lida pelo DaVinci (a cada 30 min) → 1 h depois: o "
                 "agradecimento público e no chat (o Duoke: mediana de 1h20). Com queixa no "
-                "comentário, fica para pessoa; sem como mandar o chat, só a pública."
+                "comentário, fica para pessoa; sem como mandar o chat (ou com a IA no "
+                "automático, sem a condição), só a pública."
             ),
             partes=(_publica(TEXTO_AGRADECER_PUBLICA), _texto(TEXTO_AGRADECER_CHAT)),
             atraso_min=60,
             validade=_h(24),
             lojas_duoke=SHOPEE_AVALIACAO,
-            # Na loja com a IA no automático, só com a condição ligada (29/10/2026).
+            # Na loja com a IA no automático, o CHAT só com a condição ligada; a
+            # pública sai sempre (29/10/2026, `chat_segurado_pela_ia`).
             condicoes={"com_ia_no_automatico": False},
             campanha=True,
             estrelas=(4, 5),
@@ -940,8 +942,9 @@ def _montar() -> dict[str, Automacao]:
             descricao=(
                 "Avaliação de 1 a 3 estrelas lida pelo DaVinci (a cada 30 min) → 1 h depois: a "
                 "resposta pública padrão (a mesma de hoje) e a pergunta no chat (o que "
-                "aconteceu?); sem como mandar o chat, só a pública. A resposta do comprador "
-                "vai para a equipe."
+                "aconteceu?); sem como mandar o chat (ou com a IA no automático, sem a "
+                "condição), só a pública; já respondida por alguém da equipe, só a pergunta. "
+                "A resposta do comprador vai para a equipe."
             ),
             # 29/10/2026, Eduardo ("Automática, texto padrão"): a pública volta,
             # com o texto que sai hoje (82 das 87 1–3★ respondidas em 30 dias;
@@ -1157,6 +1160,30 @@ def partes_da_regra(
 
 def tem_resposta_publica(partes: Iterable[dict]) -> bool:
     return any(isinstance(p, dict) and p.get("tipo") == PARTE_RESPOSTA_PUBLICA for p in partes)
+
+
+def tem_chat(partes: Iterable[dict]) -> bool:
+    """Alguma parte vai pelo CHAT (não é a resposta pública)?"""
+    return any(isinstance(p, dict) and p.get("tipo") != PARTE_RESPOSTA_PUBLICA for p in partes)
+
+
+def chat_segurado_pela_ia(aut: Automacao, f: dict, regra: Any = None) -> str | None:
+    """A avaliação na loja com a IA no automático: o CHAT dela não sai. PURA.
+
+    29/10/2026 (a revisão): antes a regra inteira pulava (`ia_no_automatico`)
+    e, nas lojas com a IA do chat no automático (Barbosa, Kia, Vita), a
+    pública padrão que o Duoke posta hoje parava de sair quando a regra fosse
+    para Enviar. A pública não passa pela IA: sai sempre. O chat, só com a
+    condição `com_ia_no_automatico` ligada — a resposta do comprador à
+    pergunta vai para a Caixa Humano (`humano.triar`), não para a IA.
+    """
+    if (
+        aut.alvo == ALVO_AVALIACAO
+        and f.get("canal_auto")
+        and not _cond(regra, aut, "com_ia_no_automatico", False)
+    ):
+        return "ia_no_automatico"
+    return None
 
 
 # ── A queixa no comentário da avaliação boa (29/10/2026) ──────────────────
@@ -2299,12 +2326,9 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
         return "sem_texto"
     if f.get("canal_sem_acesso"):
         return "loja_sem_acesso"
-    if f.get("canal_auto") and not (
-        # A avaliação na loja com a IA no automático: só com a condição ligada
-        # (29/10/2026) — a resposta do comprador à pergunta vai para a Caixa
-        # Humano (`humano.triar`), não para a IA.
-        aut.alvo == ALVO_AVALIACAO and _cond(regra, aut, "com_ia_no_automatico", False)
-    ):
+    if f.get("canal_auto") and aut.alvo != ALVO_AVALIACAO:
+        # A avaliação na loja com a IA no automático é só o CHAT dela
+        # (`chat_segurado_pela_ia`, abaixo): a pública não passa pela IA.
         return "ia_no_automatico"
     if f.get("conversa_bloqueada"):
         return "conversa_bloqueada"
@@ -2408,13 +2432,16 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
             return "avaliacao_ja_atendida"
         if aut.tipo == TIPO_AVALIACAO_BOA and f.get("queixa_no_comentario"):
             return "queixa_no_comentario"
-        # O chat que não pode sair (sem conversa, fora da janela, com pessoa):
-        # ainda manda a pública (a 4–5★ e, desde 29/10/2026, a 1–3★); a regra
-        # sem pública não manda nada.
-        sem_chat = f.get("sem_chat")
-        if sem_chat and not tem_resposta_publica(
-            partes_da_regra(aut, getattr(regra, "partes", None))
-        ):
+        valem = partes_da_regra(aut, getattr(regra, "partes", None))
+        # O chat que não pode sair (sem conversa, fora da janela, com pessoa, a
+        # IA no automático): ainda manda a pública (a 4–5★ e, desde 29/10/2026,
+        # a 1–3★); a regra sem pública não manda nada.
+        sem_chat = f.get("sem_chat") or chat_segurado_pela_ia(aut, f, regra)
+        # A pública que uma PESSOA já deu (1–3★ em enviar, `publica_de_pessoa`)
+        # segura só a nossa pública: a pergunta ainda vai, se puder sair.
+        if f.get("publica_de_pessoa") and (sem_chat or not tem_chat(valem)):
+            return "pessoa_respondeu"
+        if sem_chat and not tem_resposta_publica(valem):
             return sem_chat
     if aut.plataforma == "shopee" and f.get("janela_shopee_ok") is False:
         return "fora_da_janela_shopee"

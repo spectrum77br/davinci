@@ -819,7 +819,9 @@ async def _destino_avaliacao(
         )
     from app.services.atendimento import avaliacoes
 
-    avaliacao = await avaliacoes.avaliacao_da_conversa(session, conversa)
+    # RELIDA (29/10/2026): no envio ela já veio travada (`_travar_avaliacao`);
+    # na faixa da tela, a cópia da sessão pode ser do começo do pedido.
+    avaliacao = await avaliacoes.avaliacao_da_conversa(session, conversa, relida=True)
     if avaliacao is not None and avaliacao.resposta_loja:
         raise EnvioRecusado(RECUSA_AVALIACAO_JA_RESPONDIDA, "Esta avaliação já foi respondida.")
     if avaliacao is not None and avaliacoes.publica_em_voo(avaliacao):
@@ -1033,13 +1035,42 @@ async def travar_conversa(session: AsyncSession, conversa: AtendimentoConversa) 
     """Trava e relê a conversa, esperando no máximo 5 s; ocupada → `conversa_ocupada`.
 
     A rodada do sync segura a conversa enquanto grava (e fala com a API da
-    loja): em vez de a tela pendurar, a pessoa ouve "tente de novo".
+    loja): em vez de a tela pendurar, a pessoa ouve "tente de novo". Na
+    AVALIAÇÃO, a avaliação vem antes, travada e relida (`_travar_avaliacao`).
     """
+    if conversa.canal == CANAL_AVALIACAO:
+        await _travar_avaliacao(session, conversa)
     if not await gravar.travar_linha(session, conversa, espera=gravar.ESPERA_TRAVA_TELA):
         raise EnvioRecusado(
             RECUSA_CONVERSA_OCUPADA,
             "A leitura da loja está gravando esta conversa agora. Tente de novo em "
             "alguns segundos.",
+        )
+
+
+async def _travar_avaliacao(session: AsyncSession, conversa: AtendimentoConversa) -> None:
+    """A avaliação da conversa travada e RELIDA, antes da conversa (29/10/2026).
+
+    A revisão: a rota "Responder em público" carrega a avaliação no começo do
+    pedido, e a cópia na sessão não via a pública da automação que saiu nesse
+    meio — iam duas, e a pública não se apaga. A automação trava a mesma linha
+    (`enviar_automatica_resposta_publica`, `FOR UPDATE`) para conferir a
+    resposta de pessoa e gravar a marca em voo; aqui ela fica travada até a
+    linha em voo da pessoa ser commitada. Quem chega depois espera e vê a
+    outra (a marca, a resposta, ou o `enviando` da pessoa). Antes da conversa:
+    a ordem da leitura e da pendência das avaliações (avaliação, depois
+    conversa), sem deadlock. Ocupada mais de 5 s → `conversa_ocupada`.
+    """
+    from app.services.atendimento import avaliacoes
+
+    avaliacao = await avaliacoes.avaliacao_da_conversa(session, conversa)
+    if avaliacao is None:
+        return
+    if not await gravar.travar_linha(session, avaliacao, espera=gravar.ESPERA_TRAVA_TELA):
+        raise EnvioRecusado(
+            RECUSA_CONVERSA_OCUPADA,
+            "A automação ou a leitura da loja está gravando esta avaliação agora. Tente "
+            "de novo em alguns segundos.",
         )
 
 

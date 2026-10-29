@@ -1879,7 +1879,8 @@ async def _extras(
             duoke_publica = cat.publica_do_duoke(resposta, dados_av) is not None
             # Respondida por PESSOA (a resposta não é a do Duoke): o DaVinci não
             # responde de novo — nem a pública (nunca duas) nem o chat (a pessoa
-            # assumiu). A do Duoke não conta no modo seco (é a comparação).
+            # assumiu); na 1–3★ em Enviar, a pergunta ainda vai (`publica_de_pessoa`,
+            # em `_avaliar`). A do Duoke não conta no modo seco (é a comparação).
             extras["pessoa_respondeu"] = bool(resposta) and not duoke_publica and not nossa
             extras["avaliacao_ja_atendida"] = nossa or linha.id in atendidas
             # Na transição, a decisão espera a avaliação relida depois da espera
@@ -2101,18 +2102,24 @@ def _validade_e_abertura(
 
 def _sem_chat_da_avaliacao(
     ctx: _Contexto,
+    aut: cat.Automacao,
+    regra: AtendimentoAutomacaoRegra,
     linha: AtendimentoAutomacaoRegistro,
     conversa: AtendimentoConversa | None,
     fatos: dict,
 ) -> str | None:
     """Por que a mensagem do CHAT da avaliação não sai (None = sai). PURA sobre o contexto.
 
-    29/10/2026: sem conversa com o comprador; a conversa bloqueada ou com uma
-    pessoa (atribuída, IA pausada, ou alguém da equipe já falou com ele depois
-    da avaliação); fora da janela de mensagem da Shopee (o pedido com mais de
-    30 dias e o comprador calado há mais de 7 — sem a data do pedido, também
-    não: na dúvida o chat não vai, a recusa da Shopee dispararia o disjuntor).
+    29/10/2026: a loja com a IA no automático sem a condição ligada
+    (`cat.chat_segurado_pela_ia`); sem conversa com o comprador; a conversa
+    bloqueada ou com uma pessoa (atribuída, IA pausada, ou alguém da equipe já
+    falou com ele depois da avaliação); fora da janela de mensagem da Shopee
+    (o pedido com mais de 30 dias e o comprador calado há mais de 7 — sem a
+    data do pedido, também não: na dúvida o chat não vai, a recusa da Shopee
+    dispararia o disjuntor).
     """
+    if ia := cat.chat_segurado_pela_ia(aut, fatos, regra):
+        return ia
     if conversa is None:
         return "sem_conversa"
     if conversa.situacao == CONVERSA_BLOQUEADA:
@@ -2194,7 +2201,19 @@ def _avaliar(
         else:
             fatos["janela_shopee_ok"] = True
     if aut.alvo == cat.ALVO_AVALIACAO:
-        fatos["sem_chat"] = _sem_chat_da_avaliacao(ctx, linha, conversa, fatos)
+        fatos["sem_chat"] = _sem_chat_da_avaliacao(ctx, aut, regra, linha, conversa, fatos)
+        if (
+            aut.tipo == cat.TIPO_AVALIACAO_RUIM
+            and modo == cat.MODO_ENVIAR
+            and fatos.get("pessoa_respondeu")
+        ):
+            # 29/10/2026 (a revisão): a 1–3★ vira pendência da equipe em 1 h, na
+            # mesma hora da automática — a pública da PESSOA segura só a nossa
+            # pública (nunca duas); a pergunta no chat, o pedido do dono, ainda
+            # vai (o chat com pessoa já cai no `sem_chat`). No modo seco, não: o
+            # Duoke não manda nada depois da pessoa, e a comparação ficaria torta.
+            fatos["pessoa_respondeu"] = False
+            fatos["publica_de_pessoa"] = True
     valores = None
     if aut.tipo == cat.TIPO_NAO_PAGO:
         valor = cat.valor_cupom(ctx.nomes_loja.get(linha.integration_id), fatos.get("total_pedido"))
@@ -2268,6 +2287,9 @@ def _avaliar(
         # A avaliação (4–5★ ou 1–3★) sem como mandar o chat: só a resposta
         # pública (`decidir` já pulou a regra que não tem pública).
         partes = [p for p in partes if p.get("tipo") == cat.PARTE_RESPOSTA_PUBLICA]
+    if fatos.get("publica_de_pessoa"):
+        # A pública já é da pessoa: só o chat (`decidir` já pulou a sem chat).
+        partes = [p for p in partes if p.get("tipo") != cat.PARTE_RESPOSTA_PUBLICA]
     tipo = "envio" if modo == cat.MODO_ENVIAR else "seco"
     teto = (
         "teto_dia"
