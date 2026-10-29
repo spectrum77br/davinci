@@ -33,6 +33,7 @@ números e códigos.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -186,6 +187,11 @@ MOTIVOS: dict[str, str] = {
     "sem_valor": "Sem o valor do pedido (o índice ainda não o trouxe)",
     # Resposta da avaliação.
     "estrelas_mudaram": "O comprador mudou a nota da avaliação",
+    # 29/10/2026: a 4–5★ com queixa escrita fica para pessoa; a conversa do
+    # comprador com alguém da equipe; a avaliação que já teve a automática.
+    "queixa_no_comentario": "A avaliação boa tem queixa no comentário: fica para pessoa",
+    "conversa_com_pessoa": "A conversa do comprador está com uma pessoa (atribuída ou IA pausada)",
+    "avaliacao_ja_atendida": "Esta avaliação já teve a mensagem automática (a nota mudou depois)",
     # Uma regra em ENVIAR numa automação que só simula (o PATCH recusa; é a rede).
     "so_simulacao": "Só simulação: esta automação não envia",
 }
@@ -214,6 +220,9 @@ DIVERGENCIAS: dict[str, str] = {
         "Não pago: o pedido foi pago ou cancelado entre os 30 min do Duoke e a hora em que "
         "o DaVinci o viu (o índice de pedidos é de hora em hora)"
     ),
+    "queixa_no_comentario": (
+        "Avaliação 4–5★ com queixa no comentário: o DaVinci deixa para pessoa (o Duoke agradece)"
+    ),
 }
 
 # Automações que SÓ SIMULAM (05/10/2026, à noite: "deixe só pra mostrar que ele
@@ -225,10 +234,9 @@ SO_SIMULAR: dict[str, str] = {
         "o cupom (R$ 5 a R$ 30) é o da loja no painel do Duoke/Shopee: falta confirmar que "
         "ele existe em cada loja antes de o DaVinci prometê-lo no chat"
     ),
-    "avaliacao_publica": (
-        "a resposta da avaliação é PÚBLICA, e o envio pelo DaVinci continua proibido "
-        "(só pessoa responde avaliação) até uma decisão de propósito"
-    ),
+    # A resposta da avaliação saiu daqui em 29/10/2026 (a decisão do Eduardo,
+    # §17 do doc): "de 5 estrelas manda uma agradecendo e tudo; e um 3 abaixo
+    # tem que ter ali a questão perguntar e tentar entender melhor o porquê".
     "tiktok_abrir_conversa": (
         "o envio exigiria abrir a conversa pela API da TikTok (Create Conversation) e "
         "mandar o cartão do pedido (ORDER_CARD), que o DaVinci não tem"
@@ -372,6 +380,42 @@ TEXTO_AVALIACAO_RUIM_PUBLICA = (
 # muito…"; 22 de 22 iguais em 7 dias, 05/10/2026): o mesmo aqui (sem o nome,
 # "Sentimos muito…").
 TEXTO_AVALIACAO_RUIM_CHAT = "{comprador} " + TEXTO_AVALIACAO_RUIM_PUBLICA
+
+# Os textos do DaVinci para a avaliação (29/10/2026, Eduardo: "de 5 estrelas
+# manda uma agradecendo e tudo; e um 3 abaixo tem que ter ali a questão
+# perguntar e tentar entender melhor o porquê dessa nota"). Curtos e VARIADOS
+# (uma versão por bloco, `SEPARADOR_VARIANTES`; a avaliação escolhe uma, sempre
+# a mesma — `escolher_variante`), sem contato, link nem promoção, sem pedir
+# nada. Nenhum leva as duas frases do modelo do Duoke (`ASSINATURAS_AVALIACAO`):
+# senão o comparador leria a nossa resposta como a dele. A 1–3★ só PERGUNTA, no
+# chat: nunca pede para mudar ou tirar a nota, não oferece nada em troca (a
+# política da Shopee) e não promete; a resposta PÚBLICA dela fica com pessoa.
+SEPARADOR_VARIANTES = "||"
+TEXTO_AGRADECER_PUBLICA = "\n||\n".join(
+    (
+        "Muito obrigado pela avaliação! 😊 Ficamos felizes que você gostou.",
+        "Obrigado pela confiança e pela avaliação! 🙏",
+        "Que bom que você gostou! Obrigado pela avaliação. 😊",
+        "Agradecemos de coração pela sua avaliação! 🙏",
+    )
+)
+TEXTO_AGRADECER_CHAT = "\n||\n".join(
+    (
+        "Oi, {comprador}! Muito obrigado pela sua avaliação. 😊",
+        "Oi, {comprador}! Passando para agradecer a sua avaliação. 🙏",
+        "Oi, {comprador}! Obrigado pela confiança e pela avaliação. 😊",
+    )
+)
+TEXTO_ENTENDER_CHAT = "\n||\n".join(
+    (
+        "Oi, {comprador}! Vimos a sua avaliação e queremos entender o que aconteceu. Pode nos "
+        "contar o que não saiu como você esperava?",
+        "Oi, {comprador}! Sentimos que a sua experiência não foi a ideal. Pode nos contar o que "
+        "aconteceu? Queremos entender para ver como podemos ajudar.",
+        "Oi, {comprador}! Recebemos a sua avaliação. O que aconteceu com o seu pedido? Queremos "
+        "entender melhor para ver como podemos ajudar.",
+    )
+)
 
 PARTE_CARTAO = {"tipo": "cartao_pedido"}
 PARTE_FIGURINHA = {"tipo": "figurinha", "figurinha": "0007", "pacote": "br_shoppito"}
@@ -549,6 +593,9 @@ class Automacao:
     compara_na_conversa: bool = False
     # A resposta da avaliação: a faixa de estrelas (inclusive).
     estrelas: tuple[int, int] | None = None
+    # A resposta PÚBLICA desta fica com pessoa (a 1–3★, 29/10/2026): o motor
+    # tira a parte pública (`partes_da_regra`) e o PATCH recusa uma.
+    publica_com_pessoa: bool = False
 
     @property
     def espera_padrao(self) -> timedelta:
@@ -842,21 +889,23 @@ def _montar() -> dict[str, Automacao]:
             codigo="shopee_avaliacao_boa",
             plataforma="shopee",
             canal=CANAL_CHAT,
-            nome="Resposta da avaliação 4 e 5★ (pública + chat)",
+            nome="Agradecimento da avaliação 4 e 5★ (pública + chat)",
             tipo=TIPO_AVALIACAO_BOA,
             gatilho=GATILHO_AVALIACAO,
             alvo=ALVO_AVALIACAO,
             familia=FAMILIA_PEDIDO,
             descricao=(
-                "Avaliação de 4 ou 5 estrelas lida pelo DaVinci (a cada 30 min) → 1 h depois: a "
-                "resposta pública e a mensagem no chat (o Duoke: mediana de 1h20)."
+                "Avaliação de 4 ou 5 estrelas lida pelo DaVinci (a cada 30 min) → 1 h depois: o "
+                "agradecimento público e no chat (o Duoke: mediana de 1h20). Com queixa no "
+                "comentário, fica para pessoa; sem como mandar o chat, só a pública."
             ),
-            partes=(_publica(TEXTO_AVALIACAO_BOA_PUBLICA), _texto(TEXTO_AVALIACAO_BOA_CHAT)),
+            partes=(_publica(TEXTO_AGRADECER_PUBLICA), _texto(TEXTO_AGRADECER_CHAT)),
             atraso_min=60,
             validade=_h(24),
             lojas_duoke=SHOPEE_AVALIACAO,
+            # Na loja com a IA no automático, só com a condição ligada (29/10/2026).
+            condicoes={"com_ia_no_automatico": False},
             campanha=True,
-            so_simular="avaliacao_publica",
             estrelas=(4, 5),
             # A resposta do Duoke chega até ~18 h depois (KFA, 1.079 min, 7 dias
             # até 05/10/2026): a janela é de 24 h para não dar "só DaVinci".
@@ -868,22 +917,24 @@ def _montar() -> dict[str, Automacao]:
             codigo="shopee_avaliacao_ruim",
             plataforma="shopee",
             canal=CANAL_CHAT,
-            nome="Resposta da avaliação 1 a 3★ (pública + chat)",
+            nome="Pergunta da avaliação 1 a 3★ (só chat)",
             tipo=TIPO_AVALIACAO_RUIM,
             gatilho=GATILHO_AVALIACAO,
             alvo=ALVO_AVALIACAO,
             familia=FAMILIA_PEDIDO,
             descricao=(
                 "Avaliação de 1 a 3 estrelas lida pelo DaVinci (a cada 30 min) → 1 h depois: a "
-                "resposta pública (desculpas, chama no chat) e a mensagem no chat."
+                "pergunta no chat (o que aconteceu?). A resposta pública fica com pessoa; a "
+                "resposta do comprador vai para a equipe."
             ),
-            partes=(_publica(TEXTO_AVALIACAO_RUIM_PUBLICA), _texto(TEXTO_AVALIACAO_RUIM_CHAT)),
+            partes=(_texto(TEXTO_ENTENDER_CHAT),),
             atraso_min=60,
             validade=_h(24),
             lojas_duoke=SHOPEE_AVALIACAO,
+            condicoes={"com_ia_no_automatico": False},
             campanha=True,
-            so_simular="avaliacao_publica",
             estrelas=(1, 3),
+            publica_com_pessoa=True,
             # A resposta do Duoke chega até ~18 h depois (KFA, 1.079 min, 7 dias
             # até 05/10/2026): a janela é de 24 h para não dar "só DaVinci".
             comparar=("evento", timedelta(0), _h(24)),
@@ -1039,6 +1090,93 @@ def partes_padrao(aut: Automacao, nome_loja: str | None = None) -> list[dict]:
     if aut.codigo == "shopee_entregue" and nome_normalizado(nome_loja) in SHOPEE_MALA:
         partes = [dict(PARTE_CARTAO), _texto(TEXTO_ENTREGUE_MALA)]
     return partes
+
+
+# A semente ANTIGA da resposta da avaliação (a migration 0371: os textos do
+# Duoke, iguais nas 14 lojas, versão 1 e ninguém mexeu — SELECT em produção,
+# 29/10/2026). A regra que ainda tem exatamente ela vale pelo padrão novo
+# (`partes_da_regra`): sem migration, e o texto que alguém editar fica.
+PARTES_SEMENTE_ANTIGA: dict[str, list[dict]] = {
+    "shopee_avaliacao_boa": [
+        _publica(TEXTO_AVALIACAO_BOA_PUBLICA),
+        _texto(TEXTO_AVALIACAO_BOA_CHAT),
+    ],
+    "shopee_avaliacao_ruim": [
+        _publica(TEXTO_AVALIACAO_RUIM_PUBLICA),
+        _texto(TEXTO_AVALIACAO_RUIM_CHAT),
+    ],
+}
+
+
+def partes_da_regra(
+    aut: Automacao, partes: Iterable[dict] | None, nome_loja: str | None = None
+) -> list[dict]:
+    """As partes que VALEM para a regra (o motor, a prévia e a tela leem daqui). PURA.
+
+    Sem partes, o padrão da loja; com a semente antiga da avaliação, o padrão
+    novo (29/10/2026). Na automação com a resposta pública com pessoa
+    (`publica_com_pessoa`, a 1–3★), a parte pública nunca vale.
+    """
+    salvas = [dict(p) for p in (partes or []) if isinstance(p, dict)]
+    if not salvas or salvas == PARTES_SEMENTE_ANTIGA.get(aut.codigo):
+        salvas = partes_padrao(aut, nome_loja)
+    if aut.publica_com_pessoa:
+        salvas = [p for p in salvas if p.get("tipo") != PARTE_RESPOSTA_PUBLICA]
+    return salvas
+
+
+def tem_resposta_publica(partes: Iterable[dict]) -> bool:
+    return any(isinstance(p, dict) and p.get("tipo") == PARTE_RESPOSTA_PUBLICA for p in partes)
+
+
+# ── A queixa no comentário da avaliação boa (29/10/2026) ──────────────────
+# A 4–5★ com problema escrito não recebe o agradecimento pronto: fica para
+# pessoa (o registro mostra `queixa_no_comentario`). Larga de propósito —
+# errar para o lado da pessoa custa um agradecimento escrito à mão; errar para
+# o outro é agradecer quem reclamou. Sobre o texto sem acento e em minúsculas
+# (`normalizar_inicio`). Medido em produção (30 dias até 29/10/2026, Shopee):
+# das 2.244 avaliações 4–5★, 735 com texto e 166 com alguma destas pistas (7%
+# de todas, ~5,5 por dia); nas 1–3★ com texto, 30 de 42.
+# As negações que são ELOGIO ("sem nenhum problema", "nenhum defeito", "não
+# demorou") saem antes.
+_SEM_QUEIXA = re.compile(
+    r"\b(sem|nenhum|nenhuma|zero|nao tive|nao teve|nao deu|livre de)( nenhum| nenhuma| qualquer)?"
+    r" (problemas?|defeitos?|avarias?|danos?|riscos?|arranhao|arranhoes|atrasos?|demora)\b"
+    r"|\bnao demorou\b|\bnada de atraso\b"
+)
+_QUEIXA = re.compile(
+    "|".join(
+        (
+            # O produto chegou com dano.
+            r"defeit|quebr|estrag|danific|amassad|riscad|trincad|arranhad|rachad|manchad"
+            r"|furad|rasgad|avariad",
+            # Não funciona, veio errado ou faltando.
+            r"nao (funciona|funcionou|liga|ligou|carrega|carregou|veio|chegou|recebi|serve"
+            r"|serviu|encaixa|cabe|condiz|corresponde)|parou de|\berrad|faltand|veio sem"
+            r"|faltou|incomplet|diferente d",
+            # Devolução, troca, garantia, reembolso.
+            r"devolv|devolu|reembols|estorn|garantia|troca",
+            r"problema",
+            # Atraso e extravio.
+            r"demor|atras|nao entreg|extravi",
+            # Insatisfação.
+            r"pessim|horrivel|ruim|decepc|nao gostei|nao recomendo|insatisf|arrepend|golpe"
+            r"|engan|falsific|replica|pirata|\busad|mentir|lixo|porcaria|vergonha|absurd"
+            r"|descaso|desrespeit",
+            # A ressalva ("bom, mas…", "porém…").
+            r"\bmas\b|porem|pena que|infelizmente|\bso que\b|apesar|deixou a desejar"
+            r"|esperava mais|poderia ser melhor",
+        )
+    )
+)
+
+
+def comentario_com_queixa(texto: str | None) -> bool:
+    """O comentário da avaliação traz queixa ou problema (então: pessoa)? PURA."""
+    t = normalizar_inicio(texto)
+    if not t:
+        return False
+    return _QUEIXA.search(_SEM_QUEIXA.sub(" ", t)) is not None
 
 
 def modo_semente(aut: Automacao, nome_loja: str | None) -> str:
@@ -1371,6 +1509,26 @@ def _preencher(texto: str, valores: dict[str, str] | None) -> str:
     return texto
 
 
+def variantes(texto: str | None) -> list[str]:
+    """As versões do texto: os blocos separados por uma linha só com `||`. PURA."""
+    blocos: list[list[str]] = [[]]
+    for linha in str(texto or "").split("\n"):
+        if linha.strip() == SEPARADOR_VARIANTES:
+            blocos.append([])
+        else:
+            blocos[-1].append(linha)
+    return ["\n".join(b).strip() for b in blocos] if len(blocos) > 1 else [str(texto or "")]
+
+
+def escolher_variante(n: int, semente: str | None, indice: int = 0) -> int:
+    """Qual das `n` versões sai: sempre a mesma para a mesma `semente` (a chave
+    da linha) — a decisão, a reconferência e a prévia concordam. Sem semente, a
+    primeira. PURA."""
+    if n <= 1 or not semente:
+        return 0
+    return int(hashlib.sha256(f"{semente}:{indice}".encode()).hexdigest()[:8], 16) % n
+
+
 def renderizar(
     partes: Iterable[dict],
     *,
@@ -1378,6 +1536,7 @@ def renderizar(
     plataforma: str,
     canal: str,
     valores: dict[str, str] | None = None,
+    semente: str | None = None,
 ) -> tuple[list[dict], list[str]]:
     """As partes prontas para sair + os motivos do validador (vazio = pode).
 
@@ -1386,14 +1545,15 @@ def renderizar(
     qualquer jeito, e a mensagem sem o nome continua a mesma. `valores`
     preenche as lacunas próprias da automação (o cupom do "carrinho"). A
     resposta PÚBLICA da avaliação passa pelo validador do canal dela
-    (`avaliacao`: 500 caracteres na Shopee).
+    (`avaliacao`: 500 caracteres na Shopee). O texto com VERSÕES (`variantes`,
+    29/10/2026) valida todas e sai a de `escolher_variante(semente)`.
     """
     from app.services.atendimento import validador
     from app.services.atendimento.constantes import CANAL_AVALIACAO
 
     saida: list[dict] = []
     motivos: list[str] = []
-    for parte in partes:
+    for indice, parte in enumerate(partes):
         if not isinstance(parte, dict):
             motivos.append("parte inválida")
             continue
@@ -1404,26 +1564,33 @@ def renderizar(
             saida.append(dict(parte))
             continue
         canal_parte = CANAL_AVALIACAO if tipo == PARTE_RESPOSTA_PUBLICA else canal
-        bruto = _preencher(str(parte.get("texto") or ""), valores)
-        tentativas = [renderizar_texto(bruto, comprador)]
-        if comprador and PLACEHOLDER_COMPRADOR in bruto:
-            tentativas.append(renderizar_texto(bruto, None))
-        ultimo: list[str] = []
-        pronto = None
-        for t in tentativas:
-            normalizado = validador.normalizar(t, plataforma=plataforma, canal=canal_parte)
-            ultimo = list(
-                validador.validar(
-                    normalizado, plataforma=plataforma, canal=canal_parte, origem=ORIGEM_AUTO
+        versoes = variantes(parte.get("texto"))
+        prontos: list[str | None] = []
+        for versao in versoes:
+            bruto = _preencher(versao, valores)
+            tentativas = [renderizar_texto(bruto, comprador)]
+            if comprador and PLACEHOLDER_COMPRADOR in bruto:
+                tentativas.append(renderizar_texto(bruto, None))
+            ultimo: list[str] = []
+            pronto = None
+            for t in tentativas:
+                normalizado = validador.normalizar(t, plataforma=plataforma, canal=canal_parte)
+                ultimo = list(
+                    validador.validar(
+                        normalizado, plataforma=plataforma, canal=canal_parte, origem=ORIGEM_AUTO
+                    )
                 )
-            )
-            if not ultimo:
-                pronto = normalizado
-                break
-        if pronto is None:
-            motivos.extend(ultimo or ["texto vazio"])
+                if not ultimo:
+                    pronto = normalizado
+                    break
+            if pronto is None:
+                motivos.extend(ultimo or ["texto vazio"])
+            prontos.append(pronto)
+        if any(p is None for p in prontos):
             continue
-        saida.append({"tipo": tipo, "texto": pronto})
+        saida.append(
+            {"tipo": tipo, "texto": prontos[escolher_variante(len(prontos), semente, indice)]}
+        )
     if not any(p.get("tipo") == "texto" for p in saida) and not motivos:
         motivos.append("sem texto")
     return saida, list(dict.fromkeys(motivos))
@@ -2056,7 +2223,12 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
         return "sem_texto"
     if f.get("canal_sem_acesso"):
         return "loja_sem_acesso"
-    if f.get("canal_auto"):
+    if f.get("canal_auto") and not (
+        # A avaliação na loja com a IA no automático: só com a condição ligada
+        # (29/10/2026) — a resposta do comprador à pergunta vai para a Caixa
+        # Humano (`humano.triar`), não para a IA.
+        aut.alvo == ALVO_AVALIACAO and _cond(regra, aut, "com_ia_no_automatico", False)
+    ):
         return "ia_no_automatico"
     if f.get("conversa_bloqueada"):
         return "conversa_bloqueada"
@@ -2154,6 +2326,19 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
         # A avaliação já respondida por PESSOA (a resposta não é a do Duoke).
         if f.get("pessoa_respondeu"):
             return "pessoa_respondeu"
+        # Nunca duas vezes para a mesma avaliação (29/10/2026): a outra faixa
+        # já saiu (ou sairia) para ela e o comprador mudou a nota depois.
+        if f.get("avaliacao_ja_atendida"):
+            return "avaliacao_ja_atendida"
+        if aut.tipo == TIPO_AVALIACAO_BOA and f.get("queixa_no_comentario"):
+            return "queixa_no_comentario"
+        # O chat que não pode sair (sem conversa, fora da janela, com pessoa):
+        # a 4–5★ ainda manda a pública; sem pública, não manda nada.
+        sem_chat = f.get("sem_chat")
+        if sem_chat and not tem_resposta_publica(
+            partes_da_regra(aut, getattr(regra, "partes", None))
+        ):
+            return sem_chat
     if aut.plataforma == "shopee" and f.get("janela_shopee_ok") is False:
         return "fora_da_janela_shopee"
     return None
@@ -2184,6 +2369,7 @@ def divergencia_do_motivo(motivo: str | None, aut: Automacao | None = None) -> s
     ):
         return "exclusao_disputa"
     return {
+        "queixa_no_comentario": "queixa_no_comentario",
         "atrasado": "motor_atrasado",
         "teto_dia": "teto_dia",
         "teto_comprador": "teto_comprador",

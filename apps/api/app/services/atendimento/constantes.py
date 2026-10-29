@@ -1313,6 +1313,14 @@ MENSAGENS_DAVINCI_FORA: tuple[str, ...] = (
     r"|que alegria saber que sua mala ja chegou"
     r"|so passando para saber se esta tudo certo com o seu produto)",
     r"^ja segue nossa loja aqui",
+    # O agradecimento da 4–5★ e a pergunta da 1–3★ no chat (29/10/2026,
+    # `automacoes_catalogo.TEXTO_AGRADECER_CHAT`/`TEXTO_ENTENDER_CHAT`), com e
+    # sem o nome ("Oi, fulana! …" / "Oi! …").
+    r"^oi(,|!) .*(muito obrigado pela sua avaliacao|passando para agradecer a sua avaliacao"
+    r"|obrigado pela confianca e pela avaliacao"
+    r"|vimos a sua avaliacao e queremos entender o que aconteceu"
+    r"|sentimos que a sua experiencia nao foi a ideal"
+    r"|recebemos a sua avaliacao\. o que aconteceu com o seu pedido)",
 )
 # Campanhas do Duoke que começam pelo USUÁRIO do comprador, sem saudação
 # ("fulana.123 já segue nossa loja aqui no TikTok? …"). No TikTok chegam como

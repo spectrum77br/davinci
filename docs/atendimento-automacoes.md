@@ -51,7 +51,7 @@ Regras desta entrega:
 |---|---|
 | Modelo | 2 tabelas novas (migration `0366_atendimento_automacoes`). **Regras**: automação × loja, com modo `desligado`/`simular`/`enviar`, partes da mensagem com `{placeholders}`, atraso, horário, condições, o disjuntor e `enviar_desde`. **Registro**: alvo × automação, uma linha por pedido, conversa, comprador ou mensagem, conforme a automação. Estado `agendado` → `simulado`/`enviado`/`pulado`(+motivo)/`falhou`/`revisar`, `so_duoke`, e a comparação com o Duoke (com `divergencia` e `alerta`). A migration **semeia** as regras: `simular` nas lojas onde o Duoke manda hoje, `desligado` no resto. |
 | Motor | Cron `atendimento_automacoes` nos minutos pares, logo depois da leitura das caixas (minutos ímpares). Uma rodada por vez (trava no Redis). Em cada rodada: **descobrir** gatilhos (mensagem do comprador, pedido pago no Bling, entregue/concluído na varredura da Logística) → **decidir** os que venceram → **comparar** com o Duoke. |
-| Automações desta entrega | **Shopee:** menu + respostas 1, 2, 3, 5 e 6 **na hora**; "aguarde" da ATV; pedido recebido; entregue (celular/mala, em horário comercial); convite para seguir; "ficou alguma dúvida" 2 h e 26 h; pós-conclusão 4 h. **TikTok:** "aguarde", convite e "ficou alguma dúvida" 2 h e 24 h. **ML:** menu do pós-venda e respostas das opções, com até 350 caracteres. São cerca de 7.300 textos por semana hoje no Duoke. **Só simulação (05/10, noite, §15):** Shopee pedido não pago com cupom ("carrinho") e resposta da avaliação 4–5★ e 1–3★ (pública + chat); TikTok "pedido recebido" (cartão + texto). |
+| Automações desta entrega | **Shopee:** menu + respostas 1, 2, 3, 5 e 6 **na hora**; "aguarde" da ATV; pedido recebido; entregue (celular/mala, em horário comercial); convite para seguir; "ficou alguma dúvida" 2 h e 26 h; pós-conclusão 4 h. **TikTok:** "aguarde", convite e "ficou alguma dúvida" 2 h e 24 h. **ML:** menu do pós-venda e respostas das opções, com até 350 caracteres. São cerca de 7.300 textos por semana hoje no Duoke. **Só simulação (05/10, noite, §15):** Shopee pedido não pago com cupom ("carrinho") e resposta da avaliação 4–5★ e 1–3★ (pública + chat — **envia desde 29/10/2026**, §17); TikTok "pedido recebido" (cartão + texto). |
 | Fora desta entrega | Nenhuma automação do Duoke: as que não dá para enviar entram só em simulação (§15). Fora ficam as mensagens nativas da Shopee e da TikTok, as respostas rápidas que a equipe digita no Duoke e o que o próprio DaVinci já manda (§5, conferido por SELECT). |
 | Modo seco | O motor roda de verdade e grava "mandaria X às HH:MM" (`simulado`). O comparador procura a mesma automação do Duoke na mesma conversa ou pedido, pela assinatura do texto do modelo ou pelo payload, dentro de uma janela. O estado do robô (sessão do menu, intervalo do "aguarde", ciclo da dúvida) é medido **só com o que o DaVinci mandaria** (§6.1). A tela mostra, por automação × loja, a % que bateu (a menor entre precisão e cobertura) e o **critério da troca de cada loja** em 7 dias — é ele que diz quando dá para trocar. |
 | Envio | Só pelo `enviar.py` (função nova `enviar_automatica`), com origem própria `davinci_auto` e a marca `payload.automacao`. A régua `e_mensagem_automatica`, a fila, a métrica e a IA reconhecem as duas (e o cartão do pedido da campanha do Duoke). Teto por loja e família por dia, 3 mensagens normais por comprador sem resposta dele, chave única por alvo, linha em voo, nunca retenta o ambíguo; na troca, espera a leitura e não manda se o Duoke mandou depois do gatilho; o disjuntor volta a regra para `simular`. Entra junto a correção do `ia._humano_respondeu_recente`. |
@@ -3123,3 +3123,97 @@ from atendimento_automacao_registros r
 where r.automacao='shopee_duvida_2h' and r.duoke='mandou' and (r.estado='so_duoke' or r.estado='pulado') and r.divergencia is null
 order by r.evento_em;
 ```
+
+---
+
+## 17. A avaliação ENVIA (29/10/2026)
+
+Eduardo, 29/10/2026: "as avaliações ele deveria conseguir mandar a mensagem
+automaticamente: de 5 estrelas manda uma agradecendo e tudo; e um 3 abaixo tem
+que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
+É a decisão de propósito do §12, item 13: `shopee_avaliacao_boa` e
+`shopee_avaliacao_ruim` saíram do `so_simular` (as outras que só simulam ficam).
+
+### 17.1 Os números (SELECT em produção, só leitura, 29/10/2026)
+
+- **Volume (14 dias):** Shopee 5★ 1.022 (73/dia), 4★ 40 (2,9/dia), 1–3★ 42
+  (3/dia). Por loja (4–5★/dia): ATV 15, vortan 10, Barbosa 9, Minas 9, mega 8,
+  Inova 6, kfa 6, Jlas 3, Vita 3, Kia 2, mini 1,4, Poofy 0,9, Victor Mei 0,4,
+  aguiar 0,1. ML: 63 5★ em 14 dias, **sem resposta pela API** (`pode_responder`
+  falso nas 131 de 30 dias). TikTok: sem endpoint de avaliação (nenhuma no banco).
+- **O que o Duoke faz (60 dias):** a pública "Obrigado pela confiança! 🙏 Volte
+  sempre que precisar!" em 99% das 4–5★ (2.229 em 30 dias; a 4★ igual à 5★:
+  40 de 40 em 14 dias) e o chat "Obrigado pela confiança, {comprador}! …" como
+  resposta automática (gravado como `sistema`: 1.400 em 21 dias). Nas 1–3★, a
+  pública FIXA "Sentimos muito pela experiência 😔 …" em **84 de 84** (30 dias) e
+  o chat "{comprador} Sentimos muito…" — nenhuma pergunta. Em 18 de 62 conversas
+  de 1–3★ a equipe escreveu outra coisa em 72 h; o comprador escreveu em 16.
+- **O modo seco (7 dias):** 4–5★ bateu 100% nas lojas fora do automático (ATV
+  93, Minas 69, vortan 68, mega 48, Inova 40, kfa 37 — acima de 30 casos; Jlas
+  17, mini 9, Poofy 8, Victor Mei 7 — abaixo de 30); Barbosa, Kia e Vita (IA no
+  automático) pularam todas (`ia_no_automatico`). 1–3★: 1 a 5 casos por loja em
+  7 dias — o critério (30 casos) não fecha em loja nenhuma.
+- **A janela da Shopee:** 49 de 1.109 avaliações (4,4%) chegaram com o pedido
+  com mais de 30 dias.
+- **Queixa no comentário** (o detector abaixo, 30 dias): das 2.244 4–5★, 735 com
+  texto e 166 com queixa (~5,5/dia). Nas 1–3★ com texto: 30 de 42.
+
+### 17.2 O que mudou
+
+- **4–5★ (`shopee_avaliacao_boa`, "Agradecimento"):** a pública e o chat com os
+  textos NOVOS (`TEXTO_AGRADECER_PUBLICA`, `TEXTO_AGRADECER_CHAT`): curtos,
+  VARIADOS (4 e 3 versões; uma por bloco, separadas por uma linha só com `||`;
+  `escolher_variante` pela chave da linha — a decisão, a reconferência e a
+  prévia escolhem a mesma), sem contato, link nem promoção, sem pedir nada e sem
+  as duas frases do modelo do Duoke (o comparador leria a nossa como a dele).
+  Com **queixa no comentário** (`comentario_com_queixa`: dano, não funciona,
+  faltando, devolução, atraso, insatisfação, "mas/porém"; as negações de elogio
+  — "sem nenhum problema", "não demorou" — saem antes) não manda: `pulado:
+  queixa_no_comentario`, diferença combinada (fora da %); a avaliação fica para
+  a equipe pela pendência de sempre (4–5★ sem resposta vira pendência em 24 h).
+  A 4★ segue a 5★ (o Duoke e a equipe fazem igual: 40 de 40).
+- **1–3★ (`shopee_avaliacao_ruim`, "Pergunta"):** SÓ o chat, a pergunta
+  (`TEXTO_ENTENDER_CHAT`, 3 versões: "Vimos a sua avaliação e queremos entender
+  o que aconteceu…?"). Nunca pede para mudar ou tirar a nota, não oferece nada,
+  não promete. A **pública fica com pessoa** (`publica_com_pessoa`: o motor tira
+  a parte pública, o PATCH recusa com 422 `publica_com_pessoa`). PROPOSTA (não
+  ligada): a equipe/Duoke posta sempre o mesmo texto fixo (84 de 84) — se o
+  Eduardo quiser, é tirar o `publica_com_pessoa` e pôr de volta a parte pública.
+- **A resposta do comprador vai para a equipe:** a pergunta é `davinci_auto`
+  com a marca do motor (não fecha a vez dele: a resposta dele cai em "Falta
+  responder") e a triagem da Caixa Humano ganhou o motivo `avaliacao` para a
+  conversa com a pergunta nos últimos 7 dias (`humano.pergunta_da_avaliacao_ruim`,
+  nas duas réguas): a IA não responde sozinha e, na loja no Automático, vai para
+  a Caixa Humano.
+- **A semente antiga** (os textos do Duoke da migration 0371, iguais nas 14
+  lojas, versão 1) vale pelo padrão novo (`partes_da_regra`) — sem migration; o
+  texto que alguém editar fica.
+- **O envio da pública** (`enviar.enviar_automatica_resposta_publica` →
+  `shopee.responder_comentario`, o mesmo `reply_comment` da conversa
+  `avaliacao`): as travas da automática + a avaliação RELIDA e travada (sem
+  resposta, `pode_responder`); saiu, grava na avaliação com `dados.automacao`
+  (`avaliacoes.gravar_resposta_automatica`) — o comparador não a lê como a do
+  Duoke e o motor não a lê como de pessoa.
+- **Guardas da linha** (`automacoes._sem_chat_da_avaliacao` e `decidir`): nunca
+  duas para a mesma avaliação (a outra faixa já decidida ou a pública nossa:
+  `avaliacao_ja_atendida`); a conversa atribuída ou com a IA pausada
+  (`conversa_com_pessoa`), bloqueada, alguém da equipe já falou com o comprador
+  depois da avaliação, sem conversa ou fora da janela da Shopee (pedido > 30
+  dias e comprador calado > 7; sem a data do pedido, também) → a 4–5★ manda só
+  a pública, a 1–3★ não manda; no modo enviar, o Duoke já respondeu (a pública
+  ou o chat dele depois da avaliação) → `duoke_mandou` + disjuntor; a IA no
+  automático continua pulando (`ia_no_automatico`), menos com a condição nova
+  `com_ia_no_automatico` ligada na regra da loja. O teto do dia e o `auto_reply`
+  da campanha valem como em toda campanha.
+
+### 17.3 Para ligar (o Eduardo)
+
+1. `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY`: o chat das duas é campanha da
+   Shopee (sai como resposta automática, como o Duoke). Antes, o roteiro 4a (o
+   teste de permissão do `send_autoreply_message`, §7.3) — nunca rodado.
+2. `ATENDIMENTO_AUTOMACOES_ENVIO=true` (com `ATENDIMENTO_ENVIO_ATIVO`, que já é o
+   freio único). Em 29/10/2026 nenhuma regra está em `enviar` (300 em simular,
+   132 desligadas): ligar a chave não faz sair mais nada.
+3. Na aba Automáticas, loja por loja: desligar a resposta de avaliação no Duoke
+   daquela loja e pôr a regra em Enviar (marcando "desliguei no Duoke"; nas
+   lojas abaixo de 30 casos em 7 dias, também "sei que o critério não passou").

@@ -22,9 +22,11 @@ leitura das caixas nos ímpares; UMA por vez, trava no Redis):
          "Cliente" (`descobrir_indice`), com a mesma chave;
        • (05/10, noite — SÓ SIMULAÇÃO, `Automacao.so_simular`) o pedido
          criado e não pago pelo índice (`descobrir_nao_pagos`, o "carrinho"
-         com cupom; o índice é de hora em hora), a avaliação pela leitura das
-         avaliações (`descobrir_avaliacoes`) e o aviso de pedido da TikTok pela
-         leitura da caixa (`descobrir_tiktok_pedidos`).
+         com cupom; o índice é de hora em hora) e o aviso de pedido da TikTok
+         pela leitura da caixa (`descobrir_tiktok_pedidos`); a avaliação pela
+         leitura das avaliações (`descobrir_avaliacoes`) — esta ENVIA desde
+         29/10/2026 (a resposta pública pelo `enviar.
+         enviar_automatica_resposta_publica`, o chat como as outras).
      Grava `INSERT … ON CONFLICT DO NOTHING` pela chave única.
   2. DECIDIR — as linhas que venceram (até 200 por rodada, no máximo 50 da
      mesma regra: a fila parada de uma loja não segura as outras): validade,
@@ -1116,8 +1118,9 @@ async def descobrir_avaliacoes(
     A fonte é a leitura das avaliações (`atendimento_avaliacoes_loja`, a cada
     30 min). O evento é a hora da avaliação na Shopee; a faixa de estrelas
     escolhe a automação. A conversa do comprador (para a mensagem do chat) é a
-    do pedido, a do comprador do índice ou a do usuário dele na loja. SÓ
-    SIMULAÇÃO: a resposta é pública e o envio continua proibido.
+    do pedido, a do comprador do índice ou a do usuário dele na loja. Desde
+    29/10/2026 envia (a regra em `enviar`): a 4–5★ o agradecimento público e
+    no chat, a 1–3★ só a pergunta no chat (a pública fica com pessoa).
     """
     ativas = _ativas_do_gatilho(regras, cat.GATILHO_AVALIACAO)
     if not ativas:
@@ -1387,7 +1390,14 @@ def _fatos_comuns(ctx: _Contexto, aut: cat.Automacao, linha: AtendimentoAutomaca
         "canal_auto": canal is not None and canal.modo == MODO_AUTO,
         "conversa_bloqueada": conversa is not None and conversa.situacao == CONVERSA_BLOQUEADA,
         "etiqueta": conversa.etiqueta if conversa is not None else None,
+        # A conversa com alguém da equipe ("Atribuir a mim" ou a IA pausada).
+        "conversa_com_pessoa": conversa is not None
+        and (conversa.atribuido_a is not None or bool(conversa.ia_pausada)),
     }
+    if aut.alvo == cat.ALVO_AVALIACAO:
+        # Na avaliação, a conversa é só a do CHAT: bloqueada, ela tira o chat
+        # (`_sem_chat_da_avaliacao`), não a resposta pública.
+        fatos["conversa_bloqueada"] = False
     if conversa is not None and aut.plataforma == "ml":
         dados = conversa.dados if isinstance(conversa.dados, dict) else {}
         fatos["via_agente"] = bool(dados.get("via_agente"))
@@ -1724,6 +1734,7 @@ async def avaliacoes_das_linhas(session: AsyncSession, linhas: list[Any]) -> dic
                 _A.comentario_id,
                 _A.pedido,
                 _A.estrelas,
+                _A.texto,
                 _A.resposta_loja,
                 _A.resposta_em,
                 _A.comprador_nome_loja,
@@ -1740,6 +1751,58 @@ async def avaliacoes_das_linhas(session: AsyncSession, linhas: list[Any]) -> dic
     ).all()
     por = {(r.integration_id, r.comentario_id): r for r in linhas_av}
     return {x.id: por[(x.integration_id, c)] for x, c in alvo if (x.integration_id, c) in por}
+
+
+async def _avaliacoes_atendidas(session: AsyncSession, linhas: list[Any]) -> set[UUID]:
+    """As linhas de avaliação cuja MESMA avaliação já teve a outra faixa (29/10/2026).
+
+    A chave (`avaliacao:<comentario>`) é a mesma nas duas automações; o comprador
+    que muda a nota (5 → 2) faria nascer a segunda. Conta a linha JÁ DECIDIDA que
+    saiu ou sairia (o simulado também: é o que o comprador teria visto). A ainda
+    `agendado` não: ela vai ser decidida pela nota de agora (`estrelas_mudaram`).
+    """
+    if not linhas:
+        return set()
+    decididas = tuple(e for e in cat.ESTADOS_QUE_SAEM if e != cat.ESTADO_AGENDADO)
+    outras = (
+        await session.execute(
+            select(_R.integration_id, _R.chave, _R.automacao).where(
+                _R.integration_id.in_(sorted({x.integration_id for x in linhas}, key=str)),
+                _R.chave.in_(sorted({x.chave for x in linhas})),
+                _R.estado.in_(decididas),
+            )
+        )
+    ).all()
+    return {
+        x.id
+        for x in linhas
+        if any(
+            (o.integration_id, o.chave) == (x.integration_id, x.chave)
+            and o.automacao != x.automacao
+            for o in outras
+        )
+    }
+
+
+async def _chats_duoke_da_avaliacao(
+    session: AsyncSession, linhas: list[Any], *, agora: datetime
+) -> dict[UUID, list[datetime]]:
+    """Linha de avaliação → a hora do chat de avaliação do Duoke depois dela (modo enviar)."""
+    alvo = [x for x in linhas if x.conversa_id and x.evento_em is not None]
+    if not alvo:
+        return {}
+    from app.services.atendimento import automacoes_comparar
+
+    chats = await automacoes_comparar.chats_de_avaliacao(
+        session, [x.conversa_id for x in alvo], min(_utc(x.evento_em) for x in alvo), agora
+    )
+    saida: dict[UUID, list[datetime]] = {}
+    for x in alvo:
+        tipo = cat.CATALOGO[x.automacao].tipo
+        saida[x.id] = [
+            em for _, em, t in chats.get(x.conversa_id, []) if t == tipo and em >= _utc(x.evento_em)
+        ]
+    return saida
 
 
 async def _ja_recebeu_carrinho(
@@ -1775,6 +1838,10 @@ async def _extras(
     reclamacoes = await _fatos_de_reclamacao(session, linhas)
     pedidos = await _fatos_de_pedido(session, linhas, agora=ctx.agora)
     avaliacoes = await avaliacoes_das_linhas(session, linhas)
+    atendidas = await _avaliacoes_atendidas(session, [x for x in linhas if x.id in avaliacoes])
+    chats_duoke = await _chats_duoke_da_avaliacao(
+        session, [x for x in linhas if x.id in avaliacoes], agora=ctx.agora
+    )
     saida: dict[UUID, dict] = {}
     for linha in linhas:
         aut = cat.CATALOGO.get(linha.automacao)
@@ -1799,11 +1866,24 @@ async def _extras(
             menor, maior = aut.estrelas or (1, 5)
             extras["estrelas_mudaram"] = not (menor <= int(av.estrelas or 0) <= maior)
             resposta = (av.resposta_loja or "").strip()
+            dados_av = av.dados if isinstance(av.dados, dict) else {}
+            # A pública que a PRÓPRIA automação deu (`dados.automacao`, 29/10/2026)
+            # não é pessoa: é a avaliação já atendida (a nota mudou de faixa depois).
+            nossa = bool(dados_av.get("automacao"))
             # Respondida por PESSOA (a resposta não é a do Duoke): o DaVinci não
             # responde de novo. A do Duoke não conta no modo seco (é a comparação).
-            extras["pessoa_respondeu"] = (
-                bool(resposta) and cat.assinatura_avaliacao(resposta) is None
-            )
+            duoke_publica = bool(resposta) and cat.assinatura_avaliacao(resposta) is not None
+            extras["pessoa_respondeu"] = bool(resposta) and not duoke_publica and not nossa
+            extras["avaliacao_ja_atendida"] = nossa or linha.id in atendidas
+            # 29/10/2026: a 4–5★ com queixa escrita fica para pessoa.
+            extras["queixa_no_comentario"] = cat.comentario_com_queixa(av.texto)
+            # Modo enviar: o Duoke já respondeu (a pública dele, ou o chat dele
+            # depois da avaliação) — a troca não manda em dobro, e o disjuntor.
+            depois = list(chats_duoke.get(linha.id, []))
+            if duoke_publica and not nossa:
+                em = _utc(av.resposta_em)
+                depois.append(em - cat.ATRASO_RESPOSTA_EM_SHOPEE if em else ctx.agora)
+            extras["duoke_depois"] = sorted(depois)
             nome = " ".join((av.comprador_nome_loja or "").split())
             if nome and linha.id not in ctx.nomes:
                 ctx.nomes[linha.id] = nome
@@ -2009,6 +2089,43 @@ def _validade_e_abertura(
     return validade, abre
 
 
+def _sem_chat_da_avaliacao(
+    ctx: _Contexto,
+    linha: AtendimentoAutomacaoRegistro,
+    conversa: AtendimentoConversa | None,
+    fatos: dict,
+) -> str | None:
+    """Por que a mensagem do CHAT da avaliação não sai (None = sai). PURA sobre o contexto.
+
+    29/10/2026: sem conversa com o comprador; a conversa bloqueada ou com uma
+    pessoa (atribuída, IA pausada, ou alguém da equipe já falou com ele depois
+    da avaliação); fora da janela de mensagem da Shopee (o pedido com mais de
+    30 dias e o comprador calado há mais de 7 — sem a data do pedido, também
+    não: na dúvida o chat não vai, a recusa da Shopee dispararia o disjuntor).
+    """
+    if conversa is None:
+        return "sem_conversa"
+    if conversa.situacao == CONVERSA_BLOQUEADA:
+        return "conversa_bloqueada"
+    if fatos.get("conversa_com_pessoa"):
+        return "conversa_com_pessoa"
+    evento = _utc(linha.evento_em)
+    if evento is not None and any(
+        m.pessoa_da_loja and m.em >= evento for m in ctx.msgs.get(conversa.id, [])
+    ):
+        return "pessoa_respondeu"
+    agora = ctx.agora
+    criado = fatos.get("pedido_criado_em")
+    ultima = _utc(conversa.ultima_do_cliente_em)
+    if not (
+        (criado is not None and agora - _utc(criado) <= JANELA_SHOPEE_PEDIDO)
+        or (ultima is not None and agora - ultima <= JANELA_SHOPEE_COMPRADOR)
+        or fatos.get("devolucao_aberta")
+    ):
+        return "fora_da_janela_shopee"
+    return None
+
+
 def _avaliar(
     ctx: _Contexto,
     aut: cat.Automacao,
@@ -2066,6 +2183,8 @@ def _avaliar(
             )
         else:
             fatos["janela_shopee_ok"] = True
+    if aut.alvo == cat.ALVO_AVALIACAO:
+        fatos["sem_chat"] = _sem_chat_da_avaliacao(ctx, linha, conversa, fatos)
     valores = None
     if aut.tipo == cat.TIPO_NAO_PAGO:
         valor = cat.valor_cupom(ctx.nomes_loja.get(linha.integration_id), fatos.get("total_pedido"))
@@ -2119,14 +2238,20 @@ def _avaliar(
         linha.id
     )
     partes, motivos = cat.renderizar(
-        regra.partes or cat.partes_padrao(aut),
+        cat.partes_da_regra(aut, regra.partes, ctx.nomes_loja.get(linha.integration_id)),
         comprador=comprador,
         plataforma=aut.plataforma,
         canal=aut.canal,
         valores=valores,
+        # A versão do texto é sempre a mesma para a mesma linha (29/10/2026).
+        semente=linha.chave,
     )
     if motivos:
         return _Veredito("pular", modo, "texto_invalido")
+    if fatos.get("sem_chat"):
+        # A 4–5★ sem como mandar o chat: só a resposta pública (`decidir` já
+        # pulou a que não tem pública).
+        partes = [p for p in partes if p.get("tipo") == cat.PARTE_RESPOSTA_PUBLICA]
     tipo = "envio" if modo == cat.MODO_ENVIAR else "seco"
     teto = (
         "teto_dia"
@@ -2143,9 +2268,11 @@ def _avaliar(
         )
         return _Veredito("pular", modo, teto, teto if modo == cat.MODO_SIMULAR else None)
     if modo == cat.MODO_ENVIAR:
-        if conversa is None:
+        so_publica = all(p.get("tipo") == cat.PARTE_RESPOSTA_PUBLICA for p in partes)
+        if conversa is None and not so_publica:
             # Sem conversa no DaVinci: só a Shopee manda, pelo comprador do
-            # pedido (`to_id`). Sem ele ainda, espera o índice trazê-lo.
+            # pedido (`to_id`). Sem ele ainda, espera o índice trazê-lo. (A
+            # resposta pública da avaliação não precisa de conversa.)
             if not (aut.plataforma == "shopee" and aut.alvo == cat.ALVO_PEDIDO and linha.pedido):
                 return _Veredito("pular", modo, "sem_conversa")
             if not ctx.compradores.get(linha.id):
@@ -2347,6 +2474,35 @@ async def _enviar(
         )
 
     for i, parte in enumerate(partes):
+        if parte.get("tipo") == cat.PARTE_RESPOSTA_PUBLICA:
+            # A resposta PÚBLICA da avaliação (29/10/2026): pelo `reply_comment`,
+            # sem conversa — a avaliação relida e travada lá dentro.
+            try:
+                saiu = await envio.enviar_automatica_resposta_publica(
+                    session,
+                    integration_id=linha.integration_id,
+                    codigo=aut.codigo,
+                    comentario_id=comentario_da_chave(linha.chave) or "",
+                    parte=parte,
+                    registro_id=linha.id,
+                )
+            except envio.EnvioRecusado as recusa:
+                await session.refresh(linha)
+                if not saidas and recusa.code in envio.RECUSAS_TEMPORARIAS:
+                    linha.estado = cat.ESTADO_AGENDADO  # nada saiu: a próxima rodada
+                    linha.updated_at = _agora()
+                    await session.commit()
+                    return
+                await parou(i, cat.ESTADO_PULADO, recusa.code, saidas)
+                return
+            await session.refresh(linha)
+            if saiu.status != "enviada":
+                estado = cat.ESTADO_REVISAR if saiu.status == "revisar" else cat.ESTADO_FALHOU
+                await parou(i, estado, saiu.erro or saiu.status or "", saidas)
+                return
+            saidas += 1
+            await session.commit()
+            continue
         if conversa is None:
             try:
                 saiu = await envio.enviar_automatica_sem_conversa(

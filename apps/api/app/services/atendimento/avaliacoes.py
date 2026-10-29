@@ -1794,6 +1794,37 @@ async def avaliacao_da_conversa(
     ).scalar_one_or_none()
 
 
+async def gravar_resposta_automatica(
+    session: AsyncSession,
+    a: AtendimentoAvaliacaoLoja,
+    texto: str,
+    *,
+    codigo: str,
+    registro_id: UUID | None,
+    agora: datetime | None = None,
+) -> None:
+    """A resposta pública da AUTOMAÇÃO saiu (29/10/2026): grava na avaliação. Commita.
+
+    Como `depois_da_resposta`, sem conversa: `dados.automacao` (o código) diz
+    que foi a automática — o comparador não a lê como a do Duoke e o motor não
+    a lê como de pessoa. A pendente (se já era) sai da fila.
+    """
+    agora = agora or _agora()
+    a.resposta_loja = indice.texto_curto(texto, indice.TEXTO_AVALIACAO_MAX)
+    a.resposta_em = agora
+    a.dados = {
+        **_dict(a.dados),
+        "respondida_pelo_davinci": True,
+        "automacao": codigo,
+        "registro_id": str(registro_id) if registro_id else None,
+    }
+    a.atualizado_em = agora
+    await session.flush()
+    if a.pendente_desde is not None:
+        await resolver(session, a, motivo=MOTIVO_ETIQUETA_DAVINCI, agora=agora)
+    await session.commit()
+
+
 async def depois_da_resposta(
     session: AsyncSession,
     conversa: AtendimentoConversa,

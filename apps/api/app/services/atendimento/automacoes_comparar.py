@@ -571,7 +571,12 @@ async def _comparar_avaliacoes(
             continue
         a, b = janelas[x.id]
         resposta = (av.resposta_loja or "").strip()
-        tipo = cat.assinatura_avaliacao(resposta) if resposta else None
+        dados = av.dados if isinstance(av.dados, dict) else {}
+        # A pública da PRÓPRIA automação (`dados.automacao`, 29/10/2026) nunca é
+        # a do Duoke — nem com o texto dele (senão o disjuntor desligaria a regra).
+        tipo = (
+            cat.assinatura_avaliacao(resposta) if resposta and not dados.get("automacao") else None
+        )
         chat = next(
             (
                 (mid, em)

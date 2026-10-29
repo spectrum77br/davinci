@@ -388,6 +388,8 @@ export const ERROS_AUTOMACAO: Record<string, string> = {
   criterio_nao_passou: 'O critério da troca não passou nesta loja nos últimos 7 dias: marque que você sabe disso para trocar mesmo assim.',
   texto_invalido: 'O texto não passa no validador',
   parte_invalida: 'A resposta pública só existe na resposta da avaliação.',
+  // 29/10/2026: a pública da 1–3★ fica com pessoa (a automação só pergunta no chat).
+  publica_com_pessoa: 'Na avaliação de 1 a 3★ a resposta pública fica com a equipe: a automação só manda a pergunta no chat.',
   janela_invalida: 'Horário inválido: o início tem que ser antes do fim (HH:MM).',
   condicao_desconhecida: 'Condição desconhecida para esta automação.',
   condicao_invalida: 'Valor inválido numa condição.',
@@ -411,6 +413,8 @@ export const CONDICOES: Record<string, { label: string; unidade?: string; hint?:
   so_sem_avaliacao: { label: 'Só se o comprador ainda não avaliou' },
   so_com_conversa: { label: 'Só se já houver conversa com o comprador' },
   um_por_comprador_h: { label: 'Um por comprador a cada', unidade: 'h', hint: 'como o Duoke: quem já recebeu um nas últimas 24 h não recebe outro (o Duoke manda de novo a partir de ~27 h)' },
+  // A avaliação na loja com a IA no automático (29/10/2026): desligada, a regra respeita a trava de sempre.
+  com_ia_no_automatico: { label: 'Mandar também com a IA no automático', hint: 'a resposta do comprador à pergunta da 1–3★ vai para a Caixa Humano, não para a IA' },
 }
 export function rotuloCondicao(chave: string): string {
   return CONDICOES[chave]?.label || chave
@@ -1788,6 +1792,9 @@ onMounted(() => {
                     </div>
                   </template>
 
+                  <p v-if="aut.alvo === 'avaliacao'" class="text-[11px] text-muted-foreground" data-variantes>
+                    Várias versões do mesmo texto: separe com uma linha só com <code class="rounded bg-muted px-1 font-mono">||</code> — cada avaliação recebe uma delas (sempre a mesma).
+                  </p>
                   <div class="rounded-md border bg-background px-2 py-1.5 text-[11px]" data-placeholders>
                     <div class="mb-0.5 font-medium">Lacunas que o DaVinci troca na hora de mandar</div>
                     <ul class="space-y-0.5">

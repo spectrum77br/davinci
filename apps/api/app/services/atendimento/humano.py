@@ -455,6 +455,32 @@ def _avaliacao_ruim(conversa: Any) -> bool:
     return estrelas <= NOTA_BAIXA_AVALIACAO
 
 
+# A pergunta da 1–3★ que a automação mandou no chat (29/10/2026, Eduardo: "um 3
+# abaixo tem que ter ali a questão perguntar e tentar entender melhor o porquê
+# dessa nota"): a resposta do comprador é para a EQUIPE — o motivo `avaliacao`
+# (a Caixa Humano na loja no Automático; a IA não responde sozinha, `ia.
+# _motivos_humano_para_auto`). Só pela marca do motor (`payload.automacao`).
+# Vale por 7 dias (a janela de mensagem da Shopee). Sem subir o VERSAO:
+# nenhuma conversa tem essa marca antes desta versão.
+CODIGO_PERGUNTA_AVALIACAO = "shopee_avaliacao_ruim"
+JANELA_PERGUNTA_AVALIACAO = timedelta(days=7)
+
+
+def pergunta_da_avaliacao_ruim(recentes: Sequence[Any], agora: datetime | None = None) -> bool:
+    """A loja mandou, nas últimas trocas e nos últimos 7 dias, a pergunta automática
+    da avaliação 1–3★? PURA (com `agora`; sem ele, o relógio)."""
+    agora = _utc(agora) or datetime.now(UTC)
+    for m in recentes or ():
+        payload = getattr(m, "payload", None)
+        marca = payload.get("automacao") if isinstance(payload, dict) else None
+        if not (isinstance(marca, dict) and marca.get("codigo") == CODIGO_PERGUNTA_AVALIACAO):
+            continue
+        em = _utc(getattr(m, "enviada_em", None) or getattr(m, "created_at", None))
+        if em is None or agora - em <= JANELA_PERGUNTA_AVALIACAO:
+            return True
+    return False
+
+
 def _falta_dado(pistas: Sequence[str], ctx: dict, pedido_nao_achado: bool) -> bool:
     """Pergunta de rastreio/prazo/NF sem o dado para responder ("lacuna sem dado")."""
     pede = [p for p in pistas if p in _CATEGORIAS_DE_PEDIDO]
@@ -591,8 +617,10 @@ def triar(
         motivos.add(HUMANO_DEVOLUCAO)
     if ctx.get("chamados"):
         motivos.add(HUMANO_CHAMADO)
-    if _avaliacao_ruim(conversa) or any(
-        n <= NOTA_BAIXA_AVALIACAO for n in ia._avaliacoes_pendentes(ctx)
+    if (
+        _avaliacao_ruim(conversa)
+        or any(n <= NOTA_BAIXA_AVALIACAO for n in ia._avaliacoes_pendentes(ctx))
+        or pergunta_da_avaliacao_ruim(recentes, agora)
     ):
         motivos.add(HUMANO_AVALIACAO)
     if motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados) == (
@@ -719,8 +747,10 @@ def _triar_do_agente(
         motivos.add(HUMANO_DEVOLUCAO)
     if ctx.get("chamados"):
         motivos.add(HUMANO_CHAMADO)
-    if _avaliacao_ruim(conversa) or any(
-        n <= NOTA_BAIXA_AVALIACAO for n in ia._avaliacoes_pendentes(ctx)
+    if (
+        _avaliacao_ruim(conversa)
+        or any(n <= NOTA_BAIXA_AVALIACAO for n in ia._avaliacoes_pendentes(ctx))
+        or pergunta_da_avaliacao_ruim(recentes, agora)
     ):
         motivos.add(HUMANO_AVALIACAO)
     if motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados) == (

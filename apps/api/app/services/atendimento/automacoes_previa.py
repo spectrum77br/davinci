@@ -337,9 +337,15 @@ async def montar(
     if de_verdade:
         partes = await _partes_que_sairam(session, x, hora)
     elif aut is not None and x.estado != cat.ESTADO_SO_DUOKE:
-        base = (regra.partes if regra is not None else None) or cat.partes_padrao(aut, nome_loja)
+        base = cat.partes_da_regra(aut, regra.partes if regra is not None else None, nome_loja)
         prontas, motivos = cat.renderizar(
-            base, comprador=comprador, plataforma=aut.plataforma, canal=aut.canal, valores=valores
+            base,
+            comprador=comprador,
+            plataforma=aut.plataforma,
+            canal=aut.canal,
+            valores=valores,
+            # A mesma versão do texto que o motor escolhe para a linha (29/10/2026).
+            semente=x.chave,
         )
         pedido_cartao = x.pedido
         nota_cartao = None

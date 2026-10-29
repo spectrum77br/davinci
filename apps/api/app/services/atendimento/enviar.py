@@ -3289,6 +3289,134 @@ async def enviar_automatica_sem_conversa(
     return EnvioSemConversa(status=MSG_ENVIADA, conversa_id=conversa.id, mensagem_id=mensagem.id)
 
 
+async def enviar_automatica_resposta_publica(
+    session: AsyncSession,
+    *,
+    integration_id: UUID,
+    codigo: str,
+    comentario_id: str,
+    parte: dict,
+    registro_id: UUID | None,
+) -> EnvioSemConversa:
+    """A resposta PÚBLICA da avaliação pela automação (29/10/2026). Nunca duas.
+
+    Eduardo, 29/10/2026: "de 5 estrelas manda uma agradecendo e tudo". As
+    travas da mensagem automática (freio único, chave das automações,
+    `shopee_mensagens_comprador`, `auto_reply` da campanha, a regra RELIDA em
+    `enviar`), só Shopee, só a automação da avaliação que tem resposta pública
+    (a 1–3★ fica com pessoa: `publica_com_pessoa`), e a AVALIAÇÃO relida e
+    travada (`FOR UPDATE`): sem resposta ainda, a plataforma deixa responder.
+    Quem trava contra duplicar é também o registro `enviando` do motor (chave
+    única), commitado antes daqui. Saiu: grava na avaliação (`avaliacoes.
+    gravar_resposta_automatica`, com `dados.automacao`) — o comparador não a
+    lê como a do Duoke. `EnvioRecusado` = nada saiu; sem conversa, não há
+    mensagem (o `mensagem_id` fica vazio).
+    """
+    from app.models import AtendimentoAvaliacaoLoja
+    from app.services.atendimento import automacoes_catalogo as catalogo
+    from app.services.atendimento import avaliacoes
+
+    integration = await session.get(Integration, integration_id, populate_existing=True)
+    if integration is None or integration.archived_at is not None:
+        raise EnvioRecusado(RECUSA_SEM_INTEGRACAO, "A loja não está mais conectada ao DaVinci.")
+    plataforma = str(getattr(integration.platform, "value", integration.platform) or "").lower()
+    if plataforma not in PLATAFORMAS_RESPONDEM_AVALIACAO:
+        raise EnvioRecusado(
+            RECUSA_SOMENTE_LEITURA, "Esta plataforma não deixa responder a avaliação pela API."
+        )
+    aut = _travas_gerais_automatica(plataforma, codigo, "chat")
+    if aut.alvo != catalogo.ALVO_AVALIACAO or aut.publica_com_pessoa:
+        raise EnvioRecusado(
+            RECUSA_REGRA_NAO_ENVIA, "Esta automação não responde a avaliação em público."
+        )
+    texto = str((parte or {}).get("texto") or "").strip()
+    if (parte or {}).get("tipo") != catalogo.PARTE_RESPOSTA_PUBLICA or not texto:
+        raise EnvioRecusado(RECUSA_PARTE_NAO_SUPORTADA, "Parte da resposta pública sem texto.")
+    await _regra_em_enviar(session, codigo, integration_id)
+    avaliacao = (
+        await session.execute(
+            select(AtendimentoAvaliacaoLoja)
+            .where(
+                AtendimentoAvaliacaoLoja.integration_id == integration_id,
+                AtendimentoAvaliacaoLoja.comentario_id == str(comentario_id or ""),
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if avaliacao is None or not avaliacao.pode_responder:
+        raise EnvioRecusado(
+            RECUSA_SOMENTE_LEITURA, "A avaliação não está no DaVinci ou não deixa responder."
+        )
+    if (avaliacao.resposta_loja or "").strip():
+        raise EnvioRecusado(RECUSA_AVALIACAO_JA_RESPONDIDA, "Esta avaliação já foi respondida.")
+    await session.commit()  # solta a trava: a plataforma pode demorar
+    logger.info(
+        "atendimento_automatica_publica_iniciada",
+        integration_id=str(integration_id),
+        automacao=codigo,
+        registro_id=str(registro_id) if registro_id else None,
+    )
+    s = get_settings()
+    if s.atendimento_simulador and s.is_prod:
+        resultado = ResultadoEnvio(ok=False, erro="simulador_em_producao")
+    elif vai_para_o_simulador(plataforma):
+        resultado = ResultadoEnvio(ok=True, externo_id=f"sim:{uuid4()}", payload={})
+    else:
+        try:
+            cliente = await clientes.cliente_da_integracao(integration)
+        except Exception as e:  # noqa: BLE001 — nada saiu: o cliente não montou
+            cliente = None
+            resultado = ResultadoEnvio(ok=False, erro=f"cliente_indisponivel: {type(e).__name__}")
+        if cliente is not None:
+            responder = getattr(adaptador(plataforma), "responder_comentario", None)
+            if responder is None:
+                resultado = ResultadoEnvio(ok=False, erro="sem_resposta_de_avaliacao")
+            else:
+                try:
+                    resultado = await asyncio.wait_for(
+                        responder(cliente, avaliacao.comentario_id, texto),
+                        timeout=TEMPO_MAXIMO_ENVIO_S,
+                    )
+                except TimeoutError:
+                    resultado = ResultadoEnvio(ok=False, ambiguo=True, erro="timeout")
+                except Exception as e:  # noqa: BLE001 — levantou: pode ter saído
+                    resultado = ResultadoEnvio(
+                        ok=False, ambiguo=True, erro=f"erro_inesperado: {type(e).__name__}"
+                    )
+    if not resultado.ok:
+        status = MSG_REVISAR if resultado.ambiguo else MSG_FALHOU
+        logger.info(
+            "atendimento_automatica_publica_concluida",
+            integration_id=str(integration_id),
+            automacao=codigo,
+            status=status,
+        )
+        return EnvioSemConversa(
+            status=status, erro=(resultado.erro or "envio_falhou")[:500], saiu=False
+        )
+    try:
+        await avaliacoes.gravar_resposta_automatica(
+            session, avaliacao, texto, codigo=codigo, registro_id=registro_id
+        )
+    except DBAPIError as e:
+        # SAIU: sem gravar, a leitura seguinte das avaliações traz a resposta.
+        await session.rollback()
+        logger.error(
+            "atendimento_automatica_publica_nao_gravada",
+            integration_id=str(integration_id),
+            automacao=codigo,
+            err=type(e).__name__,
+        )
+    logger.info(
+        "atendimento_automatica_publica_concluida",
+        integration_id=str(integration_id),
+        automacao=codigo,
+        status=MSG_ENVIADA,
+    )
+    return EnvioSemConversa(status=MSG_ENVIADA, saiu=True)
+
+
 @dataclass
 class _ConversaDaLoja:
     """O bastante de uma conversa para o validador (plataforma e caixa)."""

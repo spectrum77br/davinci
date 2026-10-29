@@ -1637,7 +1637,22 @@ async def responder_avaliacao(
     resposta que saiu daqui não volta duplicada. Timeout/erro sem código =
     ambíguo (`revisar`, nunca se retenta).
     """
-    comentario = str(conversa.externo_id or "").strip()
+    return await responder_comentario(
+        cliente, str(conversa.externo_id or ""), texto, conversa_id=conversa.id
+    )
+
+
+async def responder_comentario(
+    cliente: Any, comentario: str, texto: str, *, conversa_id: Any = None
+) -> ResultadoEnvio:
+    """O `reply_comment` de UMA avaliação pelo id dela. Nunca levanta.
+
+    O corpo da `responder_avaliacao` (a conversa `avaliacao`), também usado
+    sem conversa pela resposta pública da automação (29/10/2026,
+    `enviar.enviar_automatica_resposta_publica`): o mesmo contrato e o mesmo
+    `externo_id` (`resposta:<comment_id>`).
+    """
+    comentario = str(comentario or "").strip()
     if not comentario.isdigit():
         return ResultadoEnvio(ok=False, erro="shopee avaliacao_sem_id")
     if not (texto or "").strip():
@@ -1662,7 +1677,7 @@ async def responder_avaliacao(
     except Exception as exc:  # noqa: BLE001 — envio nunca levanta; sem saber, é ambíguo
         logger.warning(
             "atendimento_shopee_avaliacao_inesperado",
-            conversa_id=str(conversa.id),
+            conversa_id=str(conversa_id) if conversa_id else None,
             erro=type(exc).__name__,
         )
         return ResultadoEnvio(ok=False, ambiguo=True, erro=f"shopee {type(exc).__name__}")

@@ -132,6 +132,30 @@ def _triar(msgs, *, conv=None, ctx=None, so_humano=SO_HUMANO, **kw) -> humano.Tr
     )
 
 
+def test_a_resposta_a_pergunta_automatica_da_avaliacao_ruim_vai_para_pessoa():
+    """29/10/2026: a 1–3★ pergunta no chat ("o que aconteceu?"); a resposta é da equipe."""
+    marca = {"automacao": {"codigo": "shopee_avaliacao_ruim", "parte": "texto", "indice": 0}}
+    pergunta = _loja("Oi, ana! Vimos a sua avaliação e queremos entender.", payload=marca)
+    t = _triar([pergunta, _cli("achei que era maior")])
+    assert "avaliacao" in t.motivos
+    # Com o agente no canal também (a IA não responde sozinha).
+    t = _triar([pergunta, _cli("achei que era maior")], agente=True, agora=AGORA)
+    assert "avaliacao" in t.motivos
+    # O agradecimento da 4–5★ não é motivo; nem o texto parecido sem a marca do motor.
+    obrigado = _loja(
+        "Oi, ana! Muito obrigado pela sua avaliação.",
+        payload={"automacao": {"codigo": "shopee_avaliacao_boa"}},
+    )
+    assert "avaliacao" not in _triar([obrigado, _cli("achei que era maior")]).motivos
+    sem_marca = _loja("Oi, ana! Vimos a sua avaliação e queremos entender.")
+    assert "avaliacao" not in _triar([sem_marca, _cli("achei que era maior")]).motivos
+    # Vale por 7 dias.
+    velha = SimpleNamespace(autor="loja", payload=marca, enviada_em=AGORA - timedelta(days=8))
+    nova = SimpleNamespace(autor="loja", payload=marca, enviada_em=AGORA - timedelta(days=6))
+    assert not humano.pergunta_da_avaliacao_ruim([velha], AGORA)
+    assert humano.pergunta_da_avaliacao_ruim([nova], AGORA)
+
+
 def test_a_ia_consegue_nao_tem_motivo():
     """Pergunta comum com o dado à mão: fica só na Caixa."""
     assert _triar([_cli("Esse carregador serve no Moto G?")]).motivos == ()

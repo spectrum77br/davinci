@@ -1145,25 +1145,24 @@ def test_o_cupom_entra_no_texto_e_sem_valor_o_validador_barra():
 
 
 def test_resposta_da_avaliacao_publica_mais_chat_com_o_nome():
+    """29/10/2026: a 4–5★ agradece em público e no chat; a 1–3★ só pergunta no chat."""
     boa = cat.CATALOGO["shopee_avaliacao_boa"]
     partes, motivos = cat.renderizar(
         cat.partes_padrao(boa), comprador="ana.paula", plataforma="shopee", canal="chat"
     )
     assert motivos == []
     assert [p["tipo"] for p in partes] == ["resposta_publica", "texto"]
-    assert partes[0]["texto"] == "Obrigado pela confiança! 🙏 Volte sempre que precisar!"
-    assert partes[1]["texto"] == "Obrigado pela confiança, ana.paula! 🙏 Volte sempre que precisar!"
+    # Sem semente, a 1ª versão de cada texto.
+    assert partes[0]["texto"] == cat.variantes(cat.TEXTO_AGRADECER_PUBLICA)[0]
+    assert partes[1]["texto"] == "Oi, ana.paula! Muito obrigado pela sua avaliação. 😊"
     ruim = cat.CATALOGO["shopee_avaliacao_ruim"]
-    partes, _ = cat.renderizar(
+    assert ruim.publica_com_pessoa and not boa.publica_com_pessoa
+    partes, motivos = cat.renderizar(
         cat.partes_padrao(ruim), comprador=None, plataforma="shopee", canal="chat"
     )
-    assert partes[1]["texto"] == cat.TEXTO_AVALIACAO_RUIM_PUBLICA, "sem o nome: só o público"
-    # O chat do Duoke (22 de 22): o usuário, um espaço e o texto público, sem vírgula.
-    partes, _ = cat.renderizar(
-        cat.partes_padrao(ruim), comprador="ana.paula", plataforma="shopee", canal="chat"
-    )
-    assert partes[1]["texto"] == "ana.paula " + cat.TEXTO_AVALIACAO_RUIM_PUBLICA
-    assert partes[0]["texto"] == cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    assert motivos == [] and [p["tipo"] for p in partes] == ["texto"], "só o chat"
+    assert partes[0]["texto"].startswith("Oi! Vimos a sua avaliação")
+    assert partes[0]["texto"].endswith("?"), "pergunta"
     # A resposta do Duoke chega até ~18 h depois: a janela de comparação é de 24 h.
     for aut in (boa, ruim):
         assert cat.janela_comparacao(aut, T0, T0 + timedelta(hours=1)) == (
@@ -1206,12 +1205,13 @@ def test_assinatura_da_avaliacao_nao_pega_pessoa():
 
 
 def test_so_simulam_e_a_semente_das_novas():
+    # A resposta da avaliação saiu daqui em 29/10/2026 (envia).
     novas = (
         "shopee_nao_pago",
-        "shopee_avaliacao_boa",
-        "shopee_avaliacao_ruim",
         "tiktok_pedido_recebido",
     )
+    assert not cat.CATALOGO["shopee_avaliacao_boa"].so_simular
+    assert not cat.CATALOGO["shopee_avaliacao_ruim"].so_simular
     for codigo in novas:
         aut = cat.CATALOGO[codigo]
         assert aut.so_simular in cat.SO_SIMULAR, codigo
@@ -1253,3 +1253,124 @@ def test_divergencia_do_carrinho_e_campanha():
     assert cat.divergencia_do_motivo("devolucao", aut) == "exclusao_disputa"
     assert "visto_de_hora_em_hora" in cat.DIVERGENCIAS
     assert aut.diferenca_combinada == "visto_de_hora_em_hora"
+
+
+# ── A avaliação envia (29/10/2026) ────────────────────────────────────────
+# Eduardo: "as avaliações ele deveria conseguir mandar a mensagem
+# automaticamente: de 5 estrelas manda uma agradecendo e tudo; e um 3 abaixo
+# tem que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
+
+
+def test_versoes_do_texto_validadas_todas_e_sempre_a_mesma_pela_chave():
+    assert cat.variantes("a\n||\nb\n  ||  \nc") == ["a", "b", "c"]
+    assert cat.variantes("sem versões") == ["sem versões"]
+    assert cat.variantes("a || b") == ["a || b"], "só a linha sozinha separa"
+    escolhidas = {cat.escolher_variante(4, f"avaliacao:{n}") for n in range(40)}
+    assert escolhidas == {0, 1, 2, 3}, "as versões se espalham"
+    assert cat.escolher_variante(4, "avaliacao:9") == cat.escolher_variante(4, "avaliacao:9")
+    assert cat.escolher_variante(4, None) == 0 and cat.escolher_variante(1, "x") == 0
+    # Uma versão que não passa no validador barra a parte inteira.
+    ruim = [{"tipo": "texto", "texto": "Oi!\n||\nme chama no 11 99999-8888"}]
+    _, motivos = cat.renderizar(ruim, comprador=None, plataforma="shopee", canal="chat")
+    assert motivos
+    boa = cat.CATALOGO["shopee_avaliacao_boa"]
+    a = cat.renderizar(
+        cat.partes_padrao(boa), comprador="x.y", plataforma="shopee", canal="chat", semente="k1"
+    )
+    b = cat.renderizar(
+        cat.partes_padrao(boa), comprador="x.y", plataforma="shopee", canal="chat", semente="k1"
+    )
+    assert a == b
+
+
+def test_textos_da_avaliacao_curtos_sem_contato_e_nunca_a_assinatura_do_duoke():
+    for codigo in ("shopee_avaliacao_boa", "shopee_avaliacao_ruim"):
+        aut = cat.CATALOGO[codigo]
+        for parte in cat.partes_padrao(aut):
+            for versao in cat.variantes(parte["texto"]):
+                for nome in ("ana.paula", None):
+                    t = cat.renderizar_texto(versao, nome)
+                    # O comparador nunca lê a nossa como a do Duoke (o disjuntor).
+                    assert cat.assinatura_avaliacao(t) is None, t
+                    assert len(t) <= 200 and "http" not in t and "@" not in t, t
+                    baixo = t.lower()
+                    for proibido in ("cupom", "desconto", "whatsapp", "nota", "estrela", "mude"):
+                        assert proibido not in baixo, (proibido, t)
+                    if parte["tipo"] == "texto":
+                        assert e_mensagem_automatica(t), t
+        if aut.tipo == cat.TIPO_AVALIACAO_RUIM:
+            assert all("?" in v for v in cat.variantes(cat.TEXTO_ENTENDER_CHAT)), "pergunta"
+
+
+def test_a_semente_antiga_vale_pelo_padrao_novo_e_a_publica_da_ruim_nunca():
+    boa = cat.CATALOGO["shopee_avaliacao_boa"]
+    ruim = cat.CATALOGO["shopee_avaliacao_ruim"]
+    antiga_boa = [dict(p) for p in cat.PARTES_SEMENTE_ANTIGA["shopee_avaliacao_boa"]]
+    assert cat.partes_da_regra(boa, antiga_boa) == cat.partes_padrao(boa)
+    assert cat.partes_da_regra(boa, None) == cat.partes_padrao(boa)
+    # A semente antiga é a da migration 0371 (os textos do Duoke).
+    assert antiga_boa[0]["texto"] == cat.TEXTO_AVALIACAO_BOA_PUBLICA
+    editada = [{"tipo": "resposta_publica", "texto": "Valeu!"}, {"tipo": "texto", "texto": "Oi!"}]
+    assert cat.partes_da_regra(boa, editada) == editada, "o texto editado fica"
+    antiga_ruim = cat.PARTES_SEMENTE_ANTIGA["shopee_avaliacao_ruim"]
+    assert cat.partes_da_regra(ruim, antiga_ruim) == cat.partes_padrao(ruim)
+    assert [p["tipo"] for p in cat.partes_da_regra(ruim, editada)] == ["texto"]
+    assert cat.tem_resposta_publica(cat.partes_da_regra(boa, None))
+    assert not cat.tem_resposta_publica(cat.partes_da_regra(ruim, None))
+
+
+@pytest.mark.parametrize(
+    ("texto", "queixa"),
+    [
+        (None, False),
+        ("", False),
+        ("Perfeito, chegou rápido!", False),
+        ("Produto chegou certinho, sem nenhum problema!", False),
+        ("Chegou antes do prazo, não demorou nada", False),
+        ("Nenhum defeito, recomendo", False),
+        ("isso que eu queria", False),
+        ("Ótimo, mas veio sem carregador", True),
+        ("Gostei, porém demorou", True),
+        ("Veio com defeito na tela", True),
+        ("veio faltando peça", True),
+        ("Não funciona o carregador", True),
+        ("Quero devolver", True),
+        ("Bom, só que a cor veio errada", True),
+        ("Celular usado!!", True),
+    ],
+)
+def test_queixa_no_comentario(texto, queixa):
+    assert cat.comentario_com_queixa(texto) is queixa
+
+
+def _regra_av(partes=None, condicoes=None):
+    return SimpleNamespace(partes=partes, condicoes=condicoes or {})
+
+
+def test_decidir_da_avaliacao_queixa_atendida_chat_e_ia_no_automatico():
+    boa = cat.CATALOGO["shopee_avaliacao_boa"]
+    ruim = cat.CATALOGO["shopee_avaliacao_ruim"]
+    r = _regra_av()
+    assert cat.decidir(boa, {}, r) is None
+    assert cat.decidir(boa, {"queixa_no_comentario": True}, r) == "queixa_no_comentario"
+    assert cat.decidir(ruim, {"queixa_no_comentario": True}, r) is None, "a 1–3★ pergunta"
+    for aut in (boa, ruim):
+        assert cat.decidir(aut, {"avaliacao_ja_atendida": True}, r) == "avaliacao_ja_atendida"
+    # O chat que não sai: a 4–5★ ainda manda a pública; a 1–3★ (só chat) não manda.
+    for motivo in ("sem_conversa", "fora_da_janela_shopee", "conversa_com_pessoa"):
+        assert cat.decidir(boa, {"sem_chat": motivo}, r) is None
+        assert cat.decidir(ruim, {"sem_chat": motivo}, r) == motivo
+    so_chat = _regra_av(partes=[{"tipo": "texto", "texto": "Oi!"}])
+    assert cat.decidir(boa, {"sem_chat": "sem_conversa"}, so_chat) == "sem_conversa"
+    # A IA no automático: a trava de sempre, menos com a condição ligada.
+    assert cat.decidir(boa, {"canal_auto": True}, r) == "ia_no_automatico"
+    com = _regra_av(condicoes={"com_ia_no_automatico": True})
+    assert cat.decidir(boa, {"canal_auto": True}, com) is None
+    assert cat.decidir(ruim, {"canal_auto": True}, com) is None
+    menu = cat.CATALOGO["shopee_menu"]
+    assert cat.decidir(menu, {"canal_auto": True}, com) == "ia_no_automatico"
+    # A queixa é diferença combinada (fica fora da %).
+    assert cat.divergencia_do_motivo("queixa_no_comentario", boa) == "queixa_no_comentario"
+    assert "queixa_no_comentario" in cat.DIVERGENCIAS
+    for m in ("queixa_no_comentario", "conversa_com_pessoa", "avaliacao_ja_atendida"):
+        assert m in cat.MOTIVOS

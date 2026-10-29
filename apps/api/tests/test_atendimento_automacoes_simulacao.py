@@ -55,6 +55,7 @@ from app.services.atendimento import (
 )
 from app.services.atendimento import automacoes_catalogo as cat
 from app.services.atendimento import shopee as shopee_atd
+from app.services.atendimento.constantes import ResultadoEnvio
 from app.services.marketplaces.shopee import ShopeeClient
 from tests.test_atendimento_automacoes_motor import (
     DESDE,
@@ -554,10 +555,9 @@ async def test_so_simula_nem_com_a_regra_em_enviar_e_tudo_ligado(
     assert tudo_ligado.envios == [] and tudo_ligado.partes == []
     assert tudo_ligado.auto_replies == []
     # O envio recusa a automação que só simula, com qualquer chave.
+    # (A resposta da avaliação saiu desta lista em 29/10/2026: ela envia.)
     for codigo, plataforma in (
         ("shopee_nao_pago", "shopee"),
-        ("shopee_avaliacao_boa", "shopee"),
-        ("shopee_avaliacao_ruim", "shopee"),
         ("tiktok_pedido_recebido", "tiktok"),
     ):
         with pytest.raises(enviar.EnvioRecusado) as e:
@@ -571,11 +571,12 @@ async def test_so_simula_nem_com_a_regra_em_enviar_e_tudo_ligado(
     assert set(aut["placeholders"]) == {"comprador", "valor_cupom"}
     loja = aut["lojas"][0]
     assert loja["pode_enviar"] is False and loja["por_que_nao_enviar"][0] == "so_simulacao"
+    # A resposta da avaliação (29/10/2026) vai para Enviar com tudo pronto.
     url = f"/api/atendimento/automacoes/shopee_avaliacao_boa/{integ.id}"
     r = await client.patch(
         url, json={"modo": "enviar", "desliguei_no_duoke": True, "troca_sem_criterio": True}
     )
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "so_simulacao"
+    assert r.status_code == 200 and r.json()["regra"]["modo"] == "enviar", r.text
     r = await client.patch(url, json={"modo": "simular"})
     assert r.status_code == 200 and r.json()["regra"]["modo"] == "simular"
     # A regra que JÁ está em enviar (direto no banco) não fica nele: qualquer
@@ -616,8 +617,9 @@ async def test_so_simula_nem_com_a_regra_em_enviar_e_tudo_ligado(
     r = await client.post(
         "/api/atendimento/automacoes/previa", json={"automacao": "shopee_avaliacao_ruim"}
     )
-    assert [p["tipo"] for p in r.json()["partes"]] == ["resposta_publica", "texto"]
-    assert r.json()["partes"][1]["texto"] == "maria.silva " + cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    # A 1–3★ só pergunta no chat (29/10/2026); a pública fica com pessoa.
+    assert [p["tipo"] for p in r.json()["partes"]] == ["texto"]
+    assert r.json()["partes"][0]["texto"].startswith("Oi, maria.silva! Vimos a sua avaliação")
 
 
 # ── A resposta da avaliação ───────────────────────────────────────────────
@@ -692,7 +694,13 @@ async def test_avaliacao_simula_e_compara_com_a_resposta_publica_do_duoke(db, pr
     assert x1.conversa_id == conversa.id and x1.devido_em == criada + timedelta(hours=1)
     assert (x1.duoke, x1.duoke_mensagem_id, x1.duoke_em) == ("mandou", chat.id, chat_em)
     x2 = por["avaliacao:c2"]
-    assert (x2.automacao, x2.estado, x2.duoke) == ("shopee_avaliacao_ruim", "simulado", "pendente")
+    # A 1–3★ só tem o chat (29/10/2026): sem conversa com o comprador, não manda.
+    assert (x2.automacao, x2.estado, x2.motivo, x2.duoke) == (
+        "shopee_avaliacao_ruim",
+        "pulado",
+        "sem_conversa",
+        "pendente",
+    )
     x3 = por["avaliacao:c3"]
     assert (x3.estado, x3.motivo) == ("pulado", "pessoa_respondeu")
     x4 = por["avaliacao:c4"]
@@ -1025,13 +1033,11 @@ async def test_previa_da_avaliacao_publica_e_chat_e_a_resposta_do_duoke(db, clie
     assert linha.duoke == "mandou"
     corpo = (await client.get(f"/api/atendimento/automacoes/registro/{linha.id}/previa")).json()
     dv = corpo["davinci"]["partes"]
-    assert [p["tipo"] for p in dv] == ["resposta_publica", "texto"]
-    assert dv[0]["texto"].startswith("Sentimos muito pela experiência")
-    assert dv[1]["texto"] == "joana.k " + cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    # 29/10/2026: o DaVinci só pergunta no chat (a versão da linha, pela chave).
+    assert [p["tipo"] for p in dv] == ["texto"]
+    assert dv[0]["texto"].startswith("Oi, joana.k! ") and "?" in dv[0]["texto"]
     dk = corpo["duoke"]["partes"]
     assert [p["tipo"] for p in dk] == ["resposta_publica", "texto"]
-    # O que o comprador receberia é o MESMO que o Duoke mandou (público e chat).
-    assert [p["texto"] for p in dv] == [p["texto"] for p in dk]
     assert dk[0]["em"].startswith((criada + timedelta(minutes=80)).isoformat()[:16])
     assert "59 min" in dk[0]["nota"]
     assert "SEGREDO" not in json.dumps(corpo), "o texto da avaliação (do comprador) nunca sai"
@@ -1053,3 +1059,207 @@ async def test_previa_404_fora_da_equipe_e_linha_que_nao_existe(db, client, pess
     assert r.status_code == 404
     n = await db.scalar(select(func.count()).select_from(AtendimentoMensagem))
     assert n == 0
+
+
+# ── A avaliação ENVIA (29/10/2026) ────────────────────────────────────────
+# Eduardo: "as avaliações ele deveria conseguir mandar a mensagem
+# automaticamente: de 5 estrelas manda uma agradecendo e tudo; e um 3 abaixo
+# tem que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
+
+
+class AdaptadorComPublica(AdaptadorComAutoReply):
+    """O da Shopee com a resposta pública da avaliação (`responder_comentario`)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.publicas: list[tuple[str, str]] = []
+        self.resultado_publica = ResultadoEnvio(ok=True, externo_id="resposta:x")
+
+    async def responder_comentario(self, cliente, comentario, texto, *, conversa_id=None):
+        self.publicas.append((comentario, texto))
+        return self.resultado_publica
+
+
+@pytest.fixture
+def publica_ligada(monkeypatch, _chaves) -> AdaptadorComPublica:
+    """Tudo ligado, a resposta automática e a pública no adaptador."""
+    _chaves.atendimento_envio_ativo = True
+    _chaves.atendimento_automacoes_envio = True
+    _chaves.atendimento_automacoes_shopee_auto_reply = True
+    falso = AdaptadorComPublica()
+    monkeypatch.setattr(enviar, "adaptador", lambda _plataforma: falso)
+
+    async def _cliente(_integ):
+        return object()
+
+    monkeypatch.setattr(clientes, "cliente_da_integracao", _cliente)
+    return falso
+
+
+async def _cenario_enviar(db, nome_loja="atv"):
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono, nome_loja)
+    boa = await _regra(db, integ, "shopee_avaliacao_boa", modo="enviar", enviar_desde=DESDE)
+    ruim = await _regra(db, integ, "shopee_avaliacao_ruim", modo="enviar", enviar_desde=DESDE)
+    # A regra de produção ainda tem a semente antiga (os textos do Duoke).
+    for regra in (boa, ruim):
+        regra.partes = [dict(p) for p in cat.PARTES_SEMENTE_ANTIGA[regra.automacao]]
+    await db.commit()
+    return integ, canal, boa, ruim
+
+
+async def test_avaliacao_boa_agradece_em_publico_e_no_chat_e_a_ruim_so_pergunta(db, publica_ligada):
+    integ, canal, boa, ruim = await _cenario_enviar(db)
+    criada = T - timedelta(hours=2)
+    c5 = await _conversa(db, integ, canal, comprador="77", pedido=SN)
+    c2 = await _conversa(db, integ, canal, comprador="78", nome="joao.z", pedido="251005OUTRO0001")
+    a5 = await _avaliacao(db, integ, "101", estrelas=5, criado=criada, pedido=SN)
+    await _avaliacao(
+        db, integ, "102", estrelas=2, criado=criada, pedido="251005OUTRO0001", comprador="78"
+    )
+    await _rodada()
+    por = {x.chave: x for x in await _linhas(db)}
+    x5, x2 = por["avaliacao:101"], por["avaliacao:102"]
+    assert (x5.estado, x5.modo, x5.conversa_id) == ("enviado", "enviar", c5.id)
+    assert (x2.estado, x2.modo, x2.conversa_id) == ("enviado", "enviar", c2.id)
+    # A pública só da 4–5★, com uma das versões novas (nunca o texto do Duoke).
+    [(comentario, publica)] = publica_ligada.publicas
+    assert comentario == "101" and publica in cat.variantes(cat.TEXTO_AGRADECER_PUBLICA)
+    # O chat das duas como resposta automática; a da 1–3★ é a pergunta.
+    agradece, pergunta = sorted(publica_ligada.auto_replies, key=lambda t: "?" in t)
+    assert agradece.startswith("Oi, maria.silva! ") and "?" not in agradece
+    assert pergunta.startswith("Oi, joao.z! ") and "?" in pergunta
+    assert publica_ligada.envios == [] and publica_ligada.partes == []
+    # A avaliação ganhou a resposta, marcada como da automação.
+    await db.refresh(a5)
+    assert a5.resposta_loja == publica and a5.dados["automacao"] == "shopee_avaliacao_boa"
+    # O comparador não lê a nossa pública como a do Duoke: nada de disjuntor.
+    await _rodada(T + timedelta(minutes=4))
+    await db.refresh(boa)
+    await db.refresh(ruim)
+    assert (boa.modo, ruim.modo) == ("enviar", "enviar")
+    [x5] = await _linhas(db, chave="avaliacao:101")
+    assert x5.duoke == "pendente", "nem 'mandou': a pública é nossa"
+    # Nunca duas: a rodada seguinte não manda de novo; a nota que muda (5 → 2)
+    # não faz a 1–3★ perguntar a quem já foi agradecido.
+    a5.estrelas = 2
+    await db.commit()
+    linha = await _agendada(
+        db,
+        (await automacoes.regras_por_chave(db))[("shopee_avaliacao_ruim", integ.id)],
+        evento=criada,
+        devido=T,
+        conversa=c5,
+        chave="avaliacao:101",
+    )
+    await _rodada(T + timedelta(minutes=6))
+    await db.refresh(linha)
+    assert (linha.estado, linha.motivo) == ("pulado", "avaliacao_ja_atendida")
+    assert len(publica_ligada.publicas) == 1 and len(publica_ligada.auto_replies) == 2
+
+
+async def test_avaliacao_com_pessoa_queixa_duoke_e_ia_no_automatico(db, publica_ligada):
+    integ, canal, boa, ruim = await _cenario_enviar(db, "mega")
+    dono = await _dono(db)
+    criada = T - timedelta(hours=2)
+    # 4–5★ com a conversa atribuída a alguém: só a pública (o chat é da pessoa).
+    c1 = await _conversa(db, integ, canal, comprador="71", pedido="251005OUTRO0011")
+    c1.atribuido_a = dono.id
+    # 1–3★ com a IA pausada na conversa: não pergunta.
+    c2 = await _conversa(db, integ, canal, comprador="72", pedido="251005OUTRO0012")
+    c2.ia_pausada = True
+    await db.commit()
+    await _avaliacao(
+        db, integ, "201", estrelas=5, criado=criada, pedido="251005OUTRO0011", comprador="71"
+    )
+    await _avaliacao(
+        db, integ, "202", estrelas=1, criado=criada, pedido="251005OUTRO0012", comprador="72"
+    )
+    # 5★ com queixa escrita: fica para pessoa (diferença combinada).
+    q = await _avaliacao(db, integ, "203", estrelas=5, criado=criada, comprador="73")
+    q.texto = "Gostei, mas veio sem o carregador"
+    # 5★ que o Duoke já respondeu depois da troca: não duplica, e o disjuntor.
+    await _avaliacao(
+        db,
+        integ,
+        "204",
+        estrelas=5,
+        criado=criada,
+        comprador="74",
+        resposta=cat.TEXTO_AVALIACAO_BOA_PUBLICA,
+        resposta_em=criada + timedelta(minutes=70),
+    )
+    await db.commit()
+    await _rodada()
+    por = {x.chave: x for x in await _linhas(db)}
+    assert por["avaliacao:201"].estado == "enviado"
+    assert [c for c, _ in publica_ligada.publicas] == ["201"], "só a pública da 201"
+    assert (por["avaliacao:202"].estado, por["avaliacao:202"].motivo) == (
+        "pulado",
+        "conversa_com_pessoa",
+    )
+    x3 = por["avaliacao:203"]
+    assert (x3.estado, x3.motivo, x3.divergencia) == (
+        "pulado",
+        "queixa_no_comentario",
+        "queixa_no_comentario",
+    )
+    assert (por["avaliacao:204"].estado, por["avaliacao:204"].motivo) == (
+        "pulado",
+        "duoke_mandou",
+    )
+    assert publica_ligada.auto_replies == [], "nenhum chat: atribuída, pausada, queixa, Duoke"
+    await db.refresh(boa)
+    assert (boa.modo, boa.disjuntor_motivo) == ("simular", "duoke_ainda_ligado")
+
+
+async def test_avaliacao_na_loja_com_a_ia_no_automatico_so_com_a_condicao(db, proibido):
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono, "kia")
+    canal.modo = "auto"
+    await db.commit()
+    await _regra(db, integ, "shopee_avaliacao_boa")
+    await _regra(db, integ, "shopee_avaliacao_ruim", condicoes={"com_ia_no_automatico": True})
+    criada = T - timedelta(hours=2)
+    await _conversa(db, integ, canal, comprador="61", pedido="251005OUTRO0021")
+    await _conversa(db, integ, canal, comprador="62", pedido="251005OUTRO0022")
+    await _avaliacao(
+        db, integ, "301", estrelas=5, criado=criada, pedido="251005OUTRO0021", comprador="61"
+    )
+    await _avaliacao(
+        db, integ, "302", estrelas=3, criado=criada, pedido="251005OUTRO0022", comprador="62"
+    )
+    await _rodada()
+    por = {x.chave: x for x in await _linhas(db)}
+    assert (por["avaliacao:301"].estado, por["avaliacao:301"].motivo) == (
+        "pulado",
+        "ia_no_automatico",
+    )
+    assert por["avaliacao:302"].estado == "simulado"
+    assert proibido == []
+
+
+async def test_patch_da_avaliacao_a_publica_da_ruim_fica_com_pessoa(db, client, pessoa):
+    integ, _ = await _loja(db, pessoa, "atv")
+    regra = await _regra(db, integ, "shopee_avaliacao_ruim")
+    regra.partes = [dict(p) for p in cat.PARTES_SEMENTE_ANTIGA["shopee_avaliacao_ruim"]]
+    await db.commit()
+    url = f"/api/atendimento/automacoes/shopee_avaliacao_ruim/{integ.id}"
+    r = await client.patch(
+        url,
+        json={
+            "partes": [
+                {"tipo": "resposta_publica", "texto": "Sentimos muito."},
+                {"tipo": "texto", "texto": "Oi, {comprador}! O que aconteceu?"},
+            ]
+        },
+    )
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "publica_com_pessoa"
+    # A tela mostra o padrão novo para a semente antiga (a pergunta, sem a pública).
+    r = await client.get("/api/atendimento/automacoes", params={"plataforma": "shopee"})
+    aut = next(a for a in r.json()["automacoes"] if a["codigo"] == "shopee_avaliacao_ruim")
+    partes = aut["lojas"][0]["regra"]["partes"]
+    assert [p["tipo"] for p in partes] == ["texto"]
+    assert partes[0]["texto"] == cat.TEXTO_ENTENDER_CHAT
+    assert aut["lojas"][0]["regra"]["condicoes"] == {"com_ia_no_automatico": False}
+    assert aut["so_simulacao"] is None

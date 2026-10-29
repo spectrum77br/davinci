@@ -188,7 +188,8 @@ def _regra_out(
         "id": regra.id,
         "modo": regra.modo,
         "padrao": False,
-        "partes": list(regra.partes or cat.partes_padrao(aut, nome_integracao)),
+        # As que VALEM (a semente antiga da avaliação mostra o padrão novo, 29/10/2026).
+        "partes": cat.partes_da_regra(aut, regra.partes, nome_integracao),
         "atraso_min": regra.atraso_min,
         "janela_inicio": _hhmm(regra.janela_inicio),
         "janela_fim": _hhmm(regra.janela_fim),
@@ -833,6 +834,9 @@ async def mudar_regra(
         ):
             # A resposta PÚBLICA só existe na resposta da avaliação.
             raise HTTPException(422, detail={"code": "parte_invalida"})
+        if aut.publica_com_pessoa and cat.tem_resposta_publica(partes):
+            # A pública da 1–3★ fica com pessoa (29/10/2026): só a pergunta no chat.
+            raise HTTPException(422, detail={"code": "publica_com_pessoa"})
         _, motivos = cat.renderizar(
             partes,
             comprador=NOME_EXEMPLO,

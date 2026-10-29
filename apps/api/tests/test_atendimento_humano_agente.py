@@ -185,8 +185,11 @@ def _triar_origem(
         motivos.add(HUMANO_DEVOLUCAO)
     if ctx.get("chamados"):
         motivos.add(HUMANO_CHAMADO)
-    if _o_avaliacao_ruim(conversa) or any(
-        n <= NOTA_BAIXA_AVALIACAO for n in ia._avaliacoes_pendentes(ctx)
+    # 29/10/2026: a pergunta automática da 1–3★ nas últimas trocas também.
+    if (
+        _o_avaliacao_ruim(conversa)
+        or any(n <= NOTA_BAIXA_AVALIACAO for n in ia._avaliacoes_pendentes(ctx))
+        or humano.pergunta_da_avaliacao_ruim(recentes)
     ):
         motivos.add(HUMANO_AVALIACAO)
     if motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados) == (
