@@ -996,8 +996,9 @@ def validar(
     # quando e a pessoa digitando" — a devolução em dinheiro da roda que não veio sai
     # por Pix): no marketplace quem responde pela tela decide; a IA, o agente e a
     # automática seguem barrados. No Zap a regra é a da política do WhatsApp, para
-    # pessoa e IA (a frase é a da decisão, bloqueado "por enquanto").
-    pix_e_conta_valem = zap or origem != ORIGEM_HUMANO
+    # pessoa e IA (a frase é a da decisão, bloqueado "por enquanto"). Na Magalu a
+    # moderação da plataforma recusa Pix e conta de quem quer que escreva: barra todos.
+    pix_e_conta_valem = zap or origem != ORIGEM_HUMANO or plataforma == "magalu"
     if _PIX.search(plano) and pix_e_conta_valem:
         motivos.append(_MOTIVO_ZAP_PIX if zap else _MOTIVO_PIX)
     if _algum(_BANCO, plano) and pix_e_conta_valem:
