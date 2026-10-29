@@ -1096,11 +1096,18 @@ def publica_ligada(monkeypatch, _chaves) -> AdaptadorComPublica:
     return falso
 
 
-async def _cenario_enviar(db, nome_loja="atv"):
+# Passada a TRANSIÇÃO (a espera dela pelo Duoke e pela avaliação relida tem os
+# testes próprios, abaixo).
+DEPOIS_DA_TRANSICAO = T - automacoes.TRANSICAO - timedelta(days=1)
+
+
+async def _cenario_enviar(db, nome_loja="atv", enviar_desde=DEPOIS_DA_TRANSICAO):
     dono = await _dono(db)
     integ, canal = await _loja(db, dono, nome_loja)
-    boa = await _regra(db, integ, "shopee_avaliacao_boa", modo="enviar", enviar_desde=DESDE)
-    ruim = await _regra(db, integ, "shopee_avaliacao_ruim", modo="enviar", enviar_desde=DESDE)
+    boa = await _regra(db, integ, "shopee_avaliacao_boa", modo="enviar", enviar_desde=enviar_desde)
+    ruim = await _regra(
+        db, integ, "shopee_avaliacao_ruim", modo="enviar", enviar_desde=enviar_desde
+    )
     # A regra de produção ainda tem a semente antiga (os textos do Duoke).
     for regra in (boa, ruim):
         regra.partes = [dict(p) for p in cat.PARTES_SEMENTE_ANTIGA[regra.automacao]]
@@ -1263,3 +1270,147 @@ async def test_patch_da_avaliacao_a_publica_da_ruim_fica_com_pessoa(db, client, 
     assert partes[0]["texto"] == cat.TEXTO_ENTENDER_CHAT
     assert aut["lojas"][0]["regra"]["condicoes"] == {"com_ia_no_automatico": False}
     assert aut["so_simulacao"] is None
+
+
+# ── A troca da avaliação (29/10/2026, a revisão) ─────────────────────────
+
+
+async def test_avaliacao_na_transicao_espera_o_p99_do_duoke_e_a_avaliacao_relida(
+    db, publica_ligada
+):
+    integ, canal, boa, _ = await _cenario_enviar(db, enviar_desde=DESDE)
+    criada = T - timedelta(hours=1, minutes=5)
+    await _conversa(db, integ, canal, comprador="77", pedido=SN)
+    a = await _avaliacao(db, integ, "401", estrelas=5, criado=criada, pedido=SN)
+    # O `devido_em` (1 h) passou, mas na transição a decisão espera o Duoke.
+    await _rodada()
+    [x] = await _linhas(db, chave="avaliacao:401")
+    assert x.estado == "agendado" and publica_ligada.publicas == []
+    # Passada a espera (5 h depois da avaliação), com a avaliação lida antes dela: espera.
+    depois = criada + timedelta(hours=5, minutes=10)
+    await _rodada(depois)
+    [x] = await _linhas(db, chave="avaliacao:401")
+    assert x.estado == "agendado" and publica_ligada.publicas == []
+    # Relida depois da espera, sem a resposta do Duoke: sai.
+    a.atualizado_em = criada + timedelta(hours=5, minutes=5)
+    await db.commit()
+    await _rodada(depois + timedelta(minutes=2))
+    [x] = await _linhas(db, chave="avaliacao:401")
+    assert x.estado == "enviado"
+    assert [c for c, _ in publica_ligada.publicas] == ["401"]
+    assert len(publica_ligada.auto_replies) == 1
+    await db.refresh(boa)
+    assert boa.modo == "enviar"
+
+
+async def test_avaliacao_na_transicao_o_duoke_que_responde_depois_da_hora_dispara_o_disjuntor(
+    db, publica_ligada
+):
+    """O Eduardo marca "desliguei no Duoke", mas a resposta de avaliação dele (outra
+    opção do painel) segue ligada: a dele sai 1h20 depois da avaliação; a nossa, com
+    a espera 0, saía em 1 h — e o comprador recebia as duas."""
+    integ, canal, boa, _ = await _cenario_enviar(db, enviar_desde=DESDE)
+    criada = T - timedelta(hours=1, minutes=5)
+    conversa = await _conversa(db, integ, canal, comprador="77", pedido=SN)
+    a = await _avaliacao(db, integ, "402", estrelas=5, criado=criada, pedido=SN)
+    await _rodada()
+    assert publica_ligada.publicas == [] and publica_ligada.auto_replies == []
+    duoke_em = criada + timedelta(minutes=80)
+    a.resposta_loja = cat.TEXTO_AVALIACAO_BOA_PUBLICA
+    a.resposta_em = duoke_em + cat.ATRASO_RESPOSTA_EM_SHOPEE
+    a.atualizado_em = criada + timedelta(hours=5, minutes=5)
+    await db.commit()
+    await _msg(
+        db,
+        conversa,
+        autor="sistema",
+        texto="Obrigado pela confiança, maria.silva! 🙏 Volte sempre que precisar!",
+        em=duoke_em,
+    )
+    await _rodada(criada + timedelta(hours=5, minutes=10))
+    [x] = await _linhas(db, chave="avaliacao:402")
+    assert (x.estado, x.motivo) == ("pulado", "duoke_mandou")
+    assert publica_ligada.publicas == [] and publica_ligada.auto_replies == []
+    await db.refresh(boa)
+    assert (boa.modo, boa.disjuntor_motivo) == ("simular", "duoke_ainda_ligado")
+
+
+async def test_avaliacao_a_publica_fixa_da_equipe_nao_e_o_duoke_ainda_ligado(db, publica_ligada):
+    """Desligado o Duoke, a pública da 1–3★ é da equipe — com o mesmo texto fixo dele
+    (84 de 84 em 30 dias). Não é "Duoke ainda ligado": nem depois da pergunta, nem
+    antes, nem na avaliação sem linha nossa; nem o chat dele colado à mão, nem a
+    resposta de pessoa pela caixa do DaVinci com o texto antigo da 4–5★."""
+    integ, canal, boa, ruim = await _cenario_enviar(db)
+    criada = T - timedelta(hours=2)
+    await _conversa(db, integ, canal, comprador="91", nome="joao.z", pedido="251005OUTRO0031")
+    await _conversa(db, integ, canal, comprador="92", nome="ana.k", pedido="251005OUTRO0032")
+    c3 = await _conversa(db, integ, canal, comprador="93", nome="rui.m", pedido="251005OUTRO0033")
+    a1 = await _avaliacao(
+        db, integ, "501", estrelas=2, criado=criada, pedido="251005OUTRO0031", comprador="91"
+    )
+    # A equipe postou o texto fixo ANTES da pergunta (à mão, na Shopee).
+    await _avaliacao(
+        db,
+        integ,
+        "502",
+        estrelas=3,
+        criado=criada,
+        pedido="251005OUTRO0032",
+        comprador="92",
+        resposta=cat.TEXTO_AVALIACAO_RUIM_PUBLICA,
+        resposta_em=criada + timedelta(minutes=20) + cat.ATRASO_RESPOSTA_EM_SHOPEE,
+    )
+    # Alguém colou o chat do Duoke à mão (`externo`): a pessoa falou, a pergunta não vai.
+    await _avaliacao(
+        db, integ, "503", estrelas=1, criado=criada, pedido="251005OUTRO0033", comprador="93"
+    )
+    await _msg(
+        db,
+        c3,
+        autor="loja",
+        texto="rui.m " + cat.TEXTO_AVALIACAO_RUIM_PUBLICA,
+        em=criada + timedelta(minutes=30),
+    )
+    # Lida tarde (30 h, fora da descoberta): sem linha nossa, com o texto fixo da equipe.
+    await _avaliacao(
+        db,
+        integ,
+        "504",
+        estrelas=2,
+        criado=T - timedelta(hours=30),
+        pedido="251005OUTRO0034",
+        comprador="94",
+        resposta=cat.TEXTO_AVALIACAO_RUIM_PUBLICA,
+        resposta_em=T - timedelta(hours=26),
+    )
+    # A 4–5★ com queixa (fica para pessoa).
+    q = await _avaliacao(db, integ, "505", estrelas=5, criado=criada, comprador="95")
+    q.texto = "Gostei, mas veio sem a capa"
+    await db.commit()
+    await _rodada()
+    por = {x.chave: x for x in await _linhas(db)}
+    assert por["avaliacao:501"].estado == "enviado"
+    assert por["avaliacao:502"].estado == "enviado", "a pública é da equipe: a pergunta vai"
+    assert (por["avaliacao:503"].estado, por["avaliacao:503"].motivo) == (
+        "pulado",
+        "pessoa_respondeu",
+    )
+    assert por["avaliacao:505"].motivo == "queixa_no_comentario"
+    assert "duoke:avaliacao:504" not in por, "não é 'só Duoke'"
+    assert len(publica_ligada.auto_replies) == 2 and publica_ligada.publicas == []
+    # Depois da pergunta, a equipe posta o texto fixo; e alguém responde a 4–5★ com
+    # queixa pela caixa "Responder em público" do DaVinci, com o texto antigo do Duoke.
+    a1.resposta_loja = cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    a1.resposta_em = T + timedelta(minutes=30) + cat.ATRASO_RESPOSTA_EM_SHOPEE
+    a1.atualizado_em = T + timedelta(minutes=40)
+    q.resposta_loja = cat.TEXTO_AVALIACAO_BOA_PUBLICA
+    q.resposta_em = T + timedelta(minutes=20)
+    q.dados = {**(q.dados or {}), "respondida_pelo_davinci": True}
+    q.atualizado_em = T + timedelta(minutes=20)
+    await db.commit()
+    await _rodada(T + timedelta(hours=1))
+    await db.refresh(boa)
+    await db.refresh(ruim)
+    assert (boa.modo, boa.disjuntor_motivo) == ("enviar", None)
+    assert (ruim.modo, ruim.disjuntor_motivo) == ("enviar", None)
+    assert all(x.duoke != "mandou" for x in await _linhas(db)), "nenhuma é do Duoke"

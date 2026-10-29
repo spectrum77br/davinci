@@ -489,7 +489,10 @@ async def chats_de_avaliacao(
     """A mensagem do CHAT que o Duoke manda junto com a resposta da avaliação.
 
     Conversa → [(mensagem, hora, tipo)], só de FORA (sem a marca do motor), pelas
-    duas frases do modelo (`automacoes_catalogo.assinatura_avaliacao`).
+    duas frases do modelo (`automacoes_catalogo.assinatura_avaliacao`) e só a
+    resposta AUTOMÁTICA (`origem = sistema`; 29/10/2026, a revisão): no chat, a
+    do Duoke é ela (2.429 de 2.430 em 30 dias, SELECT em produção) — a
+    pessoa que cola o modelo à mão (`externo`) não é o Duoke ligado.
     """
     if not conversa_ids:
         return {}
@@ -499,6 +502,7 @@ async def chats_de_avaliacao(
             select(_M.id, _M.conversa_id, _momento(), func.left(_M.texto, 600)).where(
                 _M.conversa_id.in_(sorted(set(conversa_ids), key=str)),
                 _de_fora(),
+                _M.origem == ORIGEM_SISTEMA,
                 _no_intervalo(ini, fim),
                 or_(
                     minusculo.like(_trecho_like("obrigado pela confianca")),
@@ -521,8 +525,11 @@ def hora_da_resposta_publica(resposta_em: datetime | None) -> datetime | None:
     return em - cat.ATRASO_RESPOSTA_EM_SHOPEE if em is not None else None
 
 
-def _lida_em(av: Any) -> datetime | None:
-    """Quando a leitura das avaliações viu esta avaliação pela última vez."""
+def avaliacao_lida_em(av: Any) -> datetime | None:
+    """Quando a leitura das avaliações viu esta avaliação pela última vez.
+
+    O comparador (o `nao_mandou`) e, na transição, o motor (29/10/2026: a
+    decisão espera a avaliação relida depois da espera do Duoke)."""
     dados = av.dados if isinstance(getattr(av, "dados", None), dict) else {}
     conferida = None
     try:
@@ -536,7 +543,11 @@ def _lida_em(av: Any) -> datetime | None:
 
 
 async def _comparar_avaliacoes(
-    session: AsyncSession, linhas: list[AtendimentoAutomacaoRegistro], *, agora: datetime
+    session: AsyncSession,
+    linhas: list[AtendimentoAutomacaoRegistro],
+    *,
+    agora: datetime,
+    regras: dict[tuple[str, UUID], AtendimentoAutomacaoRegra] | None = None,
 ) -> tuple[int, int]:
     """As respostas de avaliação: pela resposta PÚBLICA que a avaliação já tem.
 
@@ -545,11 +556,15 @@ async def _comparar_avaliacoes(
     Casou o modelo dele → `mandou`, com a hora do chat (achado na conversa do
     comprador) ou o `resposta_em` menos os 59 min que a Shopee grava a mais. Sem
     a resposta do Duoke e com a avaliação relida depois do fim da janela (ou
-    respondida por pessoa) → `nao_mandou`; senão continua pendente.
+    respondida por pessoa) → `nao_mandou`; senão continua pendente. A pública
+    que saiu pelo DaVinci e a da equipe na 1–3★ em `enviar` não são o Duoke
+    (`automacoes_catalogo.publica_do_duoke`, 29/10/2026): lá vale só o chat.
     """
     if not linhas:
         return 0, 0
     from app.services.atendimento.automacoes import avaliacoes_das_linhas
+
+    regras = regras or {}
 
     avaliacoes = await avaliacoes_das_linhas(session, linhas)
     janelas = {
@@ -571,11 +586,11 @@ async def _comparar_avaliacoes(
             continue
         a, b = janelas[x.id]
         resposta = (av.resposta_loja or "").strip()
-        dados = av.dados if isinstance(av.dados, dict) else {}
-        # A pública da PRÓPRIA automação (`dados.automacao`, 29/10/2026) nunca é
-        # a do Duoke — nem com o texto dele (senão o disjuntor desligaria a regra).
-        tipo = (
-            cat.assinatura_avaliacao(resposta) if resposta and not dados.get("automacao") else None
+        # A pública que saiu pelo DaVinci (a da automação ou a de alguém na caixa)
+        # e a da equipe na 1–3★ em `enviar` nunca são a do Duoke — nem com o texto
+        # dele (senão o disjuntor desligaria a regra).
+        tipo = cat.publica_do_duoke(
+            aut, resposta, av.dados, regras.get((x.automacao, x.integration_id))
         )
         chat = next(
             (
@@ -597,7 +612,7 @@ async def _comparar_avaliacoes(
                 usadas.add(chat[0])
             mandou += 1
             continue
-        lida = _lida_em(av)
+        lida = avaliacao_lida_em(av)
         if agora > b and ((lida is not None and lida > b) or (resposta and tipo is None)):
             x.duoke = cat.DUOKE_NAO_MANDOU
             x.comparado_em = agora
@@ -1042,6 +1057,7 @@ async def _so_duoke_avaliacoes(
                 A.resposta_loja,
                 A.resposta_em,
                 A.criado_em,
+                A.dados,
             ).where(
                 A.integration_id.in_(integs),
                 A.plataforma == "shopee",
@@ -1058,6 +1074,8 @@ async def _so_duoke_avaliacoes(
         if regra is None:
             continue
         aut = cat.CATALOGO[codigo]
+        if cat.publica_do_duoke(aut, r.resposta_loja, r.dados, regra) is None:
+            continue  # pelo DaVinci, ou a da equipe na 1–3★ em `enviar` (29/10/2026)
         ligada = max(_utc(regra.ligada_desde) or motor_desde, motor_desde)
         duoke_em = hora_da_resposta_publica(r.resposta_em)
         if _utc(r.criado_em) < ligada or duoke_em is None:
@@ -1195,12 +1213,12 @@ async def comparar(
         and x.pedido
     ]
     de_avaliacao = [x for x in abertas if cat.CATALOGO[x.automacao].alvo == cat.ALVO_AVALIACAO]
+    regras = await regras_por_chave(session, ativas=False)
     m1, n1 = await _comparar_conversas(session, de_conversa, agora=agora, ultimo_ok=ultimo_ok)
     m2, n2 = await _comparar_pedidos(session, de_pedido, agora=agora, ultimo_ok=ultimo_ok)
-    m3, n3 = await _comparar_avaliacoes(session, de_avaliacao, agora=agora)
+    m3, n3 = await _comparar_avaliacoes(session, de_avaliacao, agora=agora, regras=regras)
     await _alertas_e_divergencias(session, de_conversa + de_pedido + de_avaliacao)
     await session.flush()
-    regras = await regras_por_chave(session, ativas=False)
     so = await _so_duoke(session, agora=agora, motor_desde=_utc(motor_desde), regras=regras)
     so += await _so_duoke_avaliacoes(
         session, agora=agora, motor_desde=_utc(motor_desde), regras=regras

@@ -59,7 +59,8 @@ PEDIDO (pedido recebido, entregue, pós), pela mesma régua do comparador
 (`automacoes_comparar.duoke_dos_pedidos`: o cartão do pedido do Duoke ou a
 conversa do pedido). Na TRANSIÇÃO (`TRANSICAO` depois de `enviar_desde`) a
 decisão ainda espera a leitura da loja passar do `devido_em` + a espera do
-Duoke; depois, não espera (só atrasaria o comprador). E o disjuntor: o Duoke
+Duoke (na avaliação, também a avaliação relida: a pública dele vem por essa
+leitura); depois, não espera (só atrasaria o comprador). E o disjuntor: o Duoke
 mandou depois de a regra ir para `enviar` → a regra volta sozinha para
 `simular` ("Duoke ainda ligado?") NA HORA, e o resto do lote já decide em
 `simular`. Campanha da Shopee só sai como resposta automática (`auto_reply`):
@@ -1835,6 +1836,8 @@ async def _extras(
 ) -> dict[UUID, dict]:
     """Os fatos do banco de cada linha: reclamação/devolução, pedido, convite, compra,
     o "carrinho" do mesmo comprador e a avaliação de agora."""
+    from app.services.atendimento import automacoes_comparar
+
     reclamacoes = await _fatos_de_reclamacao(session, linhas)
     pedidos = await _fatos_de_pedido(session, linhas, agora=ctx.agora)
     avaliacoes = await avaliacoes_das_linhas(session, linhas)
@@ -1867,20 +1870,34 @@ async def _extras(
             extras["estrelas_mudaram"] = not (menor <= int(av.estrelas or 0) <= maior)
             resposta = (av.resposta_loja or "").strip()
             dados_av = av.dados if isinstance(av.dados, dict) else {}
+            regra_av = ctx.regras.get((linha.automacao, linha.integration_id))
             # A pública que a PRÓPRIA automação deu (`dados.automacao`, 29/10/2026)
             # não é pessoa: é a avaliação já atendida (a nota mudou de faixa depois).
             nossa = bool(dados_av.get("automacao"))
+            # A do Duoke: o modelo dele, menos a que saiu pelo DaVinci (a nossa ou
+            # a de alguém na caixa) e a da equipe na 1–3★ em `enviar` — que posta
+            # o texto fixo dele à mão (`cat.publica_do_duoke`, 29/10/2026).
+            duoke_publica = cat.publica_do_duoke(aut, resposta, dados_av, regra_av) is not None
             # Respondida por PESSOA (a resposta não é a do Duoke): o DaVinci não
             # responde de novo. A do Duoke não conta no modo seco (é a comparação).
-            duoke_publica = bool(resposta) and cat.assinatura_avaliacao(resposta) is not None
-            extras["pessoa_respondeu"] = bool(resposta) and not duoke_publica and not nossa
+            # Na 1–3★ em `enviar` a pública é da equipe de propósito: não segura
+            # a pergunta no chat (a pessoa que falou no chat segura, `_sem_chat`).
+            extras["pessoa_respondeu"] = (
+                bool(resposta)
+                and not duoke_publica
+                and not nossa
+                and not cat.publica_da_equipe(aut, regra_av)
+            )
             extras["avaliacao_ja_atendida"] = nossa or linha.id in atendidas
+            # Na transição, a decisão espera a avaliação relida depois da espera
+            # do Duoke (a pública dele chega pela leitura das avaliações).
+            extras["avaliacao_lida_em"] = automacoes_comparar.avaliacao_lida_em(av)
             # 29/10/2026: a 4–5★ com queixa escrita fica para pessoa.
             extras["queixa_no_comentario"] = cat.comentario_com_queixa(av.texto)
             # Modo enviar: o Duoke já respondeu (a pública dele, ou o chat dele
             # depois da avaliação) — a troca não manda em dobro, e o disjuntor.
             depois = list(chats_duoke.get(linha.id, []))
-            if duoke_publica and not nossa:
+            if duoke_publica:
                 em = _utc(av.resposta_em)
                 depois.append(em - cat.ATRASO_RESPOSTA_EM_SHOPEE if em else ctx.agora)
             extras["duoke_depois"] = sorted(depois)
@@ -2214,6 +2231,12 @@ def _avaliar(
             canal = ctx.canais.get((linha.integration_id, aut.canal))
             lido = _utc(canal.ultimo_ok_em) if canal is not None else None
             if agora < espera or lido is None or lido < espera:
+                return _Veredito("esperar", modo)
+            # A avaliação (29/10/2026, a revisão): a pública do Duoke chega pela
+            # leitura das AVALIAÇÕES, não pela caixa — espera ela também passar
+            # da espera (a do Duoke é de 4 h: o p99 dele, `ESPERA_DUOKE_AVALIACAO`).
+            lida_av = fatos.get("avaliacao_lida_em")
+            if aut.alvo == cat.ALVO_AVALIACAO and (lida_av is None or _utc(lida_av) < espera):
                 return _Veredito("esperar", modo)
         duoke = fatos.get("duoke_depois") or []
         if duoke:

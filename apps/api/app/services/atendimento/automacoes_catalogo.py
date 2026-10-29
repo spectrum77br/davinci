@@ -390,12 +390,14 @@ TEXTO_AVALIACAO_RUIM_CHAT = "{comprador} " + TEXTO_AVALIACAO_RUIM_PUBLICA
 # senão o comparador leria a nossa resposta como a dele. A 1–3★ só PERGUNTA, no
 # chat: nunca pede para mudar ou tirar a nota, não oferece nada em troca (a
 # política da Shopee) e não promete; a resposta PÚBLICA dela fica com pessoa.
+# Todas NEUTRAS (29/10/2026, a revisão): nenhuma diz que o comprador gostou — a
+# 4–5★ com queixa que o detector não pegar não lê "que bom que você gostou".
 SEPARADOR_VARIANTES = "||"
 TEXTO_AGRADECER_PUBLICA = "\n||\n".join(
     (
-        "Muito obrigado pela avaliação! 😊 Ficamos felizes que você gostou.",
+        "Muito obrigado pela sua avaliação! 😊",
         "Obrigado pela confiança e pela avaliação! 🙏",
-        "Que bom que você gostou! Obrigado pela avaliação. 😊",
+        "Obrigado por avaliar a sua compra! 😊",
         "Agradecemos de coração pela sua avaliação! 🙏",
     )
 )
@@ -623,6 +625,17 @@ def _min(n: float) -> timedelta:
 
 def _h(n: float) -> timedelta:
     return timedelta(hours=n)
+
+
+# A espera da TROCA na resposta da avaliação (29/10/2026, a revisão): com 0, a
+# guarda "o Duoke já respondeu" só pegava a resposta dele que já estava lá — e
+# a do Duoke sai quase sempre DEPOIS da nossa (1 h). Medido (SELECT em
+# produção, 30 dias até 29/10/2026, a pública do Duoke menos os 59 min do
+# `resposta_em`): 4–5★ p50 83 min, p90 223, p99 269 (2.225); 1–3★ p50 74, p90
+# 211, máx 266 (87). Com 4 h depois do `devido_em` (1 h), a decisão da
+# transição espera até 5 h depois da avaliação: passa do p99 das duas faixas
+# (99,2% e 100% chegam antes).
+ESPERA_DUOKE_AVALIACAO = timedelta(hours=4)
 
 
 def _opcoes(plataforma: str, canal: str, lojas: frozenset[str]) -> list[Automacao]:
@@ -912,6 +925,8 @@ def _montar() -> dict[str, Automacao]:
             comparar=("evento", timedelta(0), _h(24)),
             atraso_max_duoke=_h(24),
             so_duoke_espera=_h(3),
+            # Na transição, espera o Duoke (o p99 dele) e a leitura da avaliação.
+            espera_duoke=ESPERA_DUOKE_AVALIACAO,
         ),
         Automacao(
             codigo="shopee_avaliacao_ruim",
@@ -940,6 +955,8 @@ def _montar() -> dict[str, Automacao]:
             comparar=("evento", timedelta(0), _h(24)),
             atraso_max_duoke=_h(24),
             so_duoke_espera=_h(3),
+            # Na transição, espera o Duoke (o p99 dele) e a leitura da avaliação.
+            espera_duoke=ESPERA_DUOKE_AVALIACAO,
         ),
         Automacao(
             codigo="tiktok_aguarde",
@@ -1135,14 +1152,21 @@ def tem_resposta_publica(partes: Iterable[dict]) -> bool:
 # errar para o lado da pessoa custa um agradecimento escrito à mão; errar para
 # o outro é agradecer quem reclamou. Sobre o texto sem acento e em minúsculas
 # (`normalizar_inicio`). Medido em produção (30 dias até 29/10/2026, Shopee):
-# das 2.244 avaliações 4–5★, 735 com texto e 166 com alguma destas pistas (7%
-# de todas, ~5,5 por dia); nas 1–3★ com texto, 30 de 42.
+# das 2.244 avaliações 4–5★, 735 com texto e 177 com alguma destas pistas (8%
+# de todas, ~5,9 por dia; 166 antes da revisão abaixo); nas 1–3★ com texto, 30 de 42.
 # As negações que são ELOGIO ("sem nenhum problema", "nenhum defeito", "não
-# demorou") saem antes.
+# demorou", "não trava", "não esquenta", "nada lento") saem antes.
+# 29/10/2026, a revisão (as mesmas 735): o celular que trava, lento, a bateria
+# fraca, esquenta, "dificuldade no touch", "não presta", "não conecta", "não é
+# original", o "só é um pouco…" e o "mais" no lugar do "mas" ("lindo mais tá
+# travando") passavam como elogio — e recebiam o agradecimento público.
 _SEM_QUEIXA = re.compile(
     r"\b(sem|nenhum|nenhuma|zero|nao tive|nao teve|nao deu|livre de)( nenhum| nenhuma| qualquer)?"
-    r" (problemas?|defeitos?|avarias?|danos?|riscos?|arranhao|arranhoes|atrasos?|demora)\b"
+    r" (problemas?|defeitos?|avarias?|danos?|riscos?|arranhao|arranhoes|atrasos?|demora"
+    r"|dificuldades?|travamentos?|travadas?)\b"
     r"|\bnao demorou\b|\bnada de atraso\b"
+    r"|\b(nao|nunca|nem|sem)( (esta|ta|fica|ficou|deu|e))? (trav|esquent)\w*"
+    r"|\b(nao e|nada|nem um pouco) (lent[oa]|frac[oa]|fals[oa]|fake)\b"
 )
 _QUEIXA = re.compile(
     "|".join(
@@ -1152,8 +1176,12 @@ _QUEIXA = re.compile(
             r"|furad|rasgad|avariad",
             # Não funciona, veio errado ou faltando.
             r"nao (funciona|funcionou|liga|ligou|carrega|carregou|veio|chegou|recebi|serve"
-            r"|serviu|encaixa|cabe|condiz|corresponde)|parou de|\berrad|faltand|veio sem"
-            r"|faltou|incomplet|diferente d",
+            r"|serviu|encaixa|cabe|condiz|corresponde|presta|prestou|conecta|conectou|pareia"
+            r"|pareou|emparelha|reconhece|dura|durou|segura|aguenta|vale)|parou de|\berrad"
+            r"|faltand|veio sem|faltou|incomplet|diferente d",
+            # O desempenho (29/10/2026): trava, lento, fraco, esquenta, dificuldade.
+            r"\btrav(a|as|am|ando|ou|aram|ar|ado|ada|ados|adas|adinho|amento|amentos)\b"
+            r"|\blent[oa]s?\b|\blentidao\b|\bfrac[oa]s?\b|\bfraquinh[oa]s?\b|esquent|dificuldade",
             # Devolução, troca, garantia, reembolso.
             r"devolv|devolu|reembols|estorn|garantia|troca",
             r"problema",
@@ -1162,10 +1190,11 @@ _QUEIXA = re.compile(
             # Insatisfação.
             r"pessim|horrivel|ruim|decepc|nao gostei|nao recomendo|insatisf|arrepend|golpe"
             r"|engan|falsific|replica|pirata|\busad|mentir|lixo|porcaria|vergonha|absurd"
-            r"|descaso|desrespeit",
-            # A ressalva ("bom, mas…", "porém…").
-            r"\bmas\b|porem|pena que|infelizmente|\bso que\b|apesar|deixou a desejar"
-            r"|esperava mais|poderia ser melhor",
+            r"|descaso|desrespeit|nao e (o )?original|\bfals[oa]s?\b|\bfake\b",
+            # A ressalva ("bom, mas…", "porém…", "só é um pouco…", e o "mais" no
+            # lugar do "mas": "lindo mais tá travando").
+            r"\bmas\b|porem|pena que|infelizmente|\bso que\b|\bso e\b|apesar|deixou a desejar"
+            r"|esperava mais|poderia ser melhor|\bmais (ta|esta|e(?! mais)|veio|nao|so)\b",
         )
     )
 )
@@ -1270,6 +1299,35 @@ def assinatura_avaliacao(texto: str | None) -> str | None:
         if frase in n and outra in n:
             return tipo
     return None
+
+
+def publica_da_equipe(aut: Automacao, regra: Any = None) -> bool:
+    """A resposta PÚBLICA da avaliação é da equipe (não do Duoke nem nossa)? PURA.
+
+    29/10/2026, a revisão: na automação com a pública com pessoa (a 1–3★) e a
+    regra em `enviar`, o Duoke está desligado e a pública é a da equipe — que
+    posta o mesmo texto fixo dele (84 de 84 em 30 dias). Ela não é sinal do
+    Duoke (o disjuntor desligaria a pergunta) nem segura a pergunta no chat.
+    """
+    return aut.publica_com_pessoa and getattr(regra, "modo", None) == MODO_ENVIAR
+
+
+def publica_do_duoke(
+    aut: Automacao, resposta: str | None, dados: dict | None, regra: Any = None
+) -> str | None:
+    """A resposta PÚBLICA da avaliação conta como a do Duoke: o tipo, ou None. PURA.
+
+    O modelo dele (`assinatura_avaliacao`), menos (29/10/2026) a que saiu pelo
+    DaVinci — a da automação (`dados.automacao`) ou a de alguém na caixa
+    "Responder em público" (`dados.respondida_pelo_davinci`) — e a da equipe
+    (`publica_da_equipe`). O motor, o comparador e o "só Duoke" leem daqui.
+    """
+    d = dados if isinstance(dados, dict) else {}
+    if not (resposta or "").strip() or d.get("automacao") or d.get("respondida_pelo_davinci"):
+        return None
+    if publica_da_equipe(aut, regra):
+        return None
+    return assinatura_avaliacao(resposta)
 
 
 def estrelas_da_faixa(estrelas: int | None) -> str | None:

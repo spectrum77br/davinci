@@ -3156,7 +3156,12 @@ que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
 - **A janela da Shopee:** 49 de 1.109 avaliações (4,4%) chegaram com o pedido
   com mais de 30 dias.
 - **Queixa no comentário** (o detector abaixo, 30 dias): das 2.244 4–5★, 735 com
-  texto e 166 com queixa (~5,5/dia). Nas 1–3★ com texto: 30 de 42.
+  texto e 177 com queixa (~5,9/dia; 166 antes da revisão do §17.4). Nas 1–3★ com
+  texto: 30 de 42.
+- **Quando o Duoke responde a avaliação** (a pública menos os 59 min, 30 dias):
+  4–5★ p50 83 min, p90 223, p99 269 (2.225); 1–3★ p50 74, p90 211, máx 266 (87).
+  O chat dele é sempre a resposta automática (`origem = sistema`: 2.429 de 2.430
+  no canal `chat`).
 
 ### 17.2 O que mudou
 
@@ -3217,3 +3222,37 @@ que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
 3. Na aba Automáticas, loja por loja: desligar a resposta de avaliação no Duoke
    daquela loja e pôr a regra em Enviar (marcando "desliguei no Duoke"; nas
    lojas abaixo de 30 casos em 7 dias, também "sei que o critério não passou").
+4. Avisar a equipe: a pública da 4–5★ que ficou para pessoa (`queixa_no_comentario`)
+   vai pela caixa "Responder em público" do DaVinci, ou com outro texto — o modelo
+   do Duoke ("Obrigado pela confiança! 🙏 Volte sempre que precisar!") postado à mão
+   na Shopee é lido como o Duoke ligado e volta a regra para Simular. Na 1–3★ o
+   texto fixo de sempre pode (§17.4).
+
+### 17.4 A revisão (29/10/2026)
+
+- **A queixa que passava:** nas mesmas 735, ~8 queixas claras de 4–5★ não eram
+  pegas (trava, lento, bateria fraca, esquenta, "dificuldade no touch", o "mais" no
+  lugar do "mas") e recebiam o agradecimento pronto. O detector ganhou trava/lento/
+  fraco/esquenta/dificuldade, "não presta/conecta/pareia/dura/vale", "não é
+  original", falso, "só é…" e "mais tá/é/veio/não/só" — com as negações de elogio
+  ("não trava", "nunca travou", "não esquenta", "nada lento", "não é falso", "sem
+  dificuldade") tiradas antes: 166 → 177 marcadas. E as 4 versões da pública são
+  NEUTRAS (nenhuma diz "você gostou"): a queixa que ainda passar não lê "que bom
+  que você gostou".
+- **A espera da troca** (`ESPERA_DUOKE_AVALIACAO`): era 0 — a guarda "o Duoke já
+  respondeu" só via a resposta que já estava lá, e a dele sai quase sempre depois
+  da nossa 1 h. Agora, nos 3 dias da transição, a decisão espera 4 h depois do
+  `devido_em` (5 h depois da avaliação, acima do p99 das duas faixas), a caixa
+  lida depois disso E a avaliação relida depois disso (`avaliacao_lida_em`: a
+  pública do Duoke chega pela leitura das avaliações, não pela caixa). O Duoke
+  ainda ligado é pego antes de o comprador receber as duas (pula + disjuntor).
+- **A pública da equipe não é o Duoke** (`publica_do_duoke`): nunca a que saiu pelo
+  DaVinci (`dados.automacao` ou `dados.respondida_pelo_davinci` — a caixa
+  "Responder em público"); e, na 1–3★ com a regra em Enviar (`publica_da_equipe`),
+  nenhuma — desligado o Duoke, a pública é da equipe, que posta o mesmo texto fixo
+  (84 de 84). Ela não dispara o disjuntor (motor, comparador e "só Duoke") nem
+  segura a pergunta no chat (a pessoa que falou no chat segura). O sinal do Duoke
+  na 1–3★ em Enviar fica sendo o chat dele, e o chat só conta como Duoke na
+  resposta AUTOMÁTICA (`sistema`): o modelo colado à mão (`externo`) é pessoa. O
+  que sobra: na 4–5★, a pública do modelo do Duoke postada à mão fora do DaVinci
+  não se distingue dele (o item 4 do §17.3).

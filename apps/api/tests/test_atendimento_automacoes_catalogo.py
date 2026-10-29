@@ -1337,10 +1337,70 @@ def test_a_semente_antiga_vale_pelo_padrao_novo_e_a_publica_da_ruim_nunca():
         ("Quero devolver", True),
         ("Bom, só que a cor veio errada", True),
         ("Celular usado!!", True),
+        # 29/10/2026, a revisão: as queixas de 4–5★ que passavam (produção).
+        ("Lindo mais tá travando um pouco", True),
+        ("Achei que o celular esquenta demais, e a bateria é fraca", True),
+        ("trava bastante é lento", True),
+        ("Bom, só é um pouco lento", True),
+        ("um pouco lento, com alguma dificuldade no touch", True),
+        ("a bateria é muito fraca", True),
+        ("travou duas vezes", True),
+        ("Não presta", True),
+        ("Não conecta no celular", True),
+        ("Produto não é original", True),
+        ("produto falso", True),
+        ("a bateria não dura nada", True),
+        # E o elogio com a mesma palavra continua elogio.
+        ("Não trava, muito rápido", False),
+        ("Celular top, não tá travando nada", False),
+        ("nunca travou e não esquenta", False),
+        ("nada lento, recomendo", False),
+        ("Original, não é falso", False),
+        ("Sem dificuldade nenhuma para instalar", False),
+        ("Gostei demais e recomendo", False),
+        ("Comprarei mais e mais", False),
+        ("Bateria dura o dia todo", False),
     ],
 )
 def test_queixa_no_comentario(texto, queixa):
     assert cat.comentario_com_queixa(texto) is queixa
+
+
+def test_agradecimento_publico_neutro_e_a_espera_da_troca():
+    """29/10/2026, a revisão: nenhuma versão diz que o comprador gostou (a queixa que
+    o detector não pegar não lê "que bom que você gostou"); e, na transição, a
+    decisão espera o p99 do Duoke (a resposta dele sai depois da nossa 1 h)."""
+    for versao in cat.variantes(cat.TEXTO_AGRADECER_PUBLICA) + cat.variantes(
+        cat.TEXTO_AGRADECER_CHAT
+    ):
+        assert "gostou" not in versao.lower() and "felizes" not in versao.lower(), versao
+    for codigo in ("shopee_avaliacao_boa", "shopee_avaliacao_ruim"):
+        aut = cat.CATALOGO[codigo]
+        assert aut.espera_duoke == cat.ESPERA_DUOKE_AVALIACAO == timedelta(hours=4)
+        # O p99 medido (269 min depois da avaliação) cabe na espera e na validade.
+        assert aut.espera_padrao + aut.espera_duoke > timedelta(minutes=269)
+        assert aut.espera_padrao + aut.espera_duoke < aut.validade
+
+
+def test_publica_do_duoke_menos_a_do_davinci_e_a_da_equipe_na_ruim_em_enviar():
+    boa = cat.CATALOGO["shopee_avaliacao_boa"]
+    ruim = cat.CATALOGO["shopee_avaliacao_ruim"]
+    simular = SimpleNamespace(modo="simular")
+    enviar = SimpleNamespace(modo="enviar")
+    obrigado, sentimos = cat.TEXTO_AVALIACAO_BOA_PUBLICA, cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    assert cat.publica_do_duoke(boa, obrigado, {}, enviar) == cat.TIPO_AVALIACAO_BOA
+    assert cat.publica_do_duoke(ruim, sentimos, {}, simular) == cat.TIPO_AVALIACAO_RUIM
+    assert cat.publica_do_duoke(ruim, sentimos, None, None) == cat.TIPO_AVALIACAO_RUIM
+    assert cat.publica_do_duoke(boa, "Valeu, obrigada!", {}, enviar) is None, "pessoa"
+    assert cat.publica_do_duoke(boa, None, {}, enviar) is None
+    # Pelo DaVinci (a automação, ou alguém na caixa "Responder em público"): nunca.
+    for dados in ({"automacao": "shopee_avaliacao_boa"}, {"respondida_pelo_davinci": True}):
+        assert cat.publica_do_duoke(boa, obrigado, dados, enviar) is None
+        assert cat.publica_do_duoke(ruim, sentimos, dados, simular) is None
+    # A 1–3★ em enviar: a pública é da equipe (o texto fixo dele, à mão).
+    assert cat.publica_da_equipe(ruim, enviar) and not cat.publica_da_equipe(ruim, simular)
+    assert not cat.publica_da_equipe(boa, enviar)
+    assert cat.publica_do_duoke(ruim, sentimos, {}, enviar) is None
 
 
 def _regra_av(partes=None, condicoes=None):
