@@ -150,6 +150,9 @@ async def list_mailboxes(session: Session, user: ActiveUser, response: Response)
             # `atendimento_email` ver+editar, 28/10/2026): a tela mostra só o
             # formulário de resposta; o resto da caixa continua só leitura.
             item["pode_responder"] = await mail_admin.pode_responder_caixa(session, mailbox, user)
+            # ... e ESCREVE e-mail novo (Nova mensagem, rascunhos, encaminhar,
+            # anexos) quando vê a caixa inteira (29/10/2026).
+            item["pode_compor"] = await mail_composer.can_compose(session, mailbox, user)
         if await mail_admin.tem_politica(session, mailbox.id, user):
             # A concessão é de mensagens, não da lista de aliases das outras lojas.
             item.update(address="", aliases=[], leitura_filtrada=True)
@@ -265,7 +268,7 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
     )
     dono = service.allowed(mailbox, user)
     responde = dono or await mail_admin.pode_responder_caixa(session, mailbox, user)
-    pode_compor = await mail_composer.can_compose(session, mailbox, user) if dono else False
+    pode_compor = await mail_composer.can_compose(session, mailbox, user) if responde else False
     outbox = []
     async for job in outbox_rows:
         item = service.outbox_view(job)
@@ -274,7 +277,7 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
         # A mesma regra do POST /outbox/{id}/resolve (28/10/2026).
         item["pode_conferir"] = bool(
             (dono and (acao is None or (propria and pode_compor)))
-            or (responde and not dono and acao is None and propria)
+            or (responde and not dono and propria and (acao is None or pode_compor))
         )
         outbox.append(item)
     caixa_cfg = await mailbox_settings.config_da_caixa(session, mailbox.id)
@@ -366,7 +369,8 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
         raise fail("job_not_found")
     dono = service.allowed(mailbox, user)
     # Quem só responde (`atendimento_email` ver+editar, 28/10/2026) confere
-    # apenas a PRÓPRIA resposta simples (sem ação do compositor).
+    # apenas o PRÓPRIO envio: a resposta simples e, desde 29/10/2026, o do
+    # compositor (Nova mensagem/encaminhar) enquanto ainda pode compor.
     acao = decrypt_json(job.content_enc).get("action")
     propria = (
         not dono
@@ -374,15 +378,15 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
         and job.author_user_id == user.id
         and await mail_admin.pode_responder_caixa(session, mailbox, user)
     )
-    if not (dono or propria):
+    if not (dono or propria or acao is not None):
         raise fail("job_not_found")
     if acao is not None and (
         job.author_user_id != user.id or not await mail_composer.can_compose(session, mailbox, user)
     ):
         raise fail("job_not_found")
-    if acao is None and job.author_user_id == user.id:
-        # A própria resposta simples: a mesma trava de responder (dono não-admin
-        # com a permissão também confere a dele na caixa da empresa).
+    if job.author_user_id == user.id:
+        # O próprio envio: a mesma trava de responder (dono não-admin com a
+        # permissão também confere o dele na caixa da empresa).
         if await mailbox_settings.bloqueia_resposta(session, mailbox.id, user):
             raise fail("atendimento_permission_required", 403)
     else:
@@ -404,7 +408,9 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
 
 
 async def compose_mailbox(session, mailbox_id, user, *, lock=False):
-    mailbox = await user_mailbox(session, mailbox_id, user)
+    # Who sees the mailbox (404 otherwise); composing is `can_compose`: the
+    # owner/admin, or `atendimento_email` view+edit on the whole mailbox.
+    mailbox = await readable_mailbox(session, mailbox_id, user)
     if not await mail_composer.can_compose(session, mailbox, user):
         raise fail("compose_not_allowed", 403)
     if lock:

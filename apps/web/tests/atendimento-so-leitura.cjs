@@ -116,7 +116,7 @@ const can = loadLib('../composables/useCan.ts', { useAuthStore: lojaFalsa })
   // (só ver; mexer continua do /me, `atendimento_mexe`).
   assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados', 'garantias', 'garantias_atendimento', 'garantias_cpf', 'atendimento_email'],
     'o recurso continua fora da tela de Permissões (quem vê e quem mexe vêm do /me)')
-  assert.equal(can.RESOURCE_LABELS.atendimento_email, 'Atendimento — aba E-mail: ver (view) e responder (edit)')
+  assert.equal(can.RESOURCE_LABELS.atendimento_email, 'Atendimento — aba E-mail: ver (view) e responder/enviar (edit)')
   for (const g of can.RESOURCE_GROUPS) assert.ok(!g.resources.includes('atendimento'), `atendimento fora do grupo ${g.label}`)
   assert.ok(!can.RESOURCES.includes('atendimento'))
   assert.equal(can.RESOURCE_LABELS.atendimento, 'Atendimento', 'o rótulo continua (para quando a fase acabar)')

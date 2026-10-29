@@ -765,7 +765,7 @@ async function principal() {
       // A tela de Permissões: o recurso no grupo Pós-venda, com o rótulo do "ver".
       const posVenda = can.RESOURCE_GROUPS.find((g) => g.label === 'Pós-venda')
       assert.ok(posVenda.resources.includes('atendimento_email'))
-      assert.equal(can.RESOURCE_LABELS.atendimento_email, 'Atendimento — aba E-mail: ver (view) e responder (edit)')
+      assert.equal(can.RESOURCE_LABELS.atendimento_email, 'Atendimento — aba E-mail: ver (view) e responder/enviar (edit)')
       const permissoesApi = fs.readFileSync(path.resolve(__dirname, '../../api/app/schemas/permissions.py'), 'utf8')
       assert.match(permissoesApi, /^ {4}"atendimento_email",$/m, 'o recurso no backend')
     }

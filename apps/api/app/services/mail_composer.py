@@ -22,11 +22,13 @@ MAX_REQUEST_BYTES = 25 * 1024 * 1024
 async def can_compose(session, mailbox, user):
     # A filtered grant authorizes individual messages, not a free composer
     # with arbitrary recipients or aliases from other stores.
+    # Owner/admin as always, or whoever has `atendimento_email` view+edit and
+    # sees the WHOLE mailbox (29/10/2026: "libere para o usuario marrocos poder
+    # enviar a mensagem"): Nova mensagem, rascunhos, encaminhar, anexos.
     return (
-        mail_central.allowed(mailbox, user)
-        and await mail_admin.pode_ver_caixa(session, mailbox, user)
+        await mail_admin.pode_responder_caixa(session, mailbox, user)
         and not await mail_admin.tem_politica(session, mailbox.id, user)
-        and not await mailbox_settings.bloqueia_sem_mexer(session, mailbox.id, user)
+        and not await mailbox_settings.bloqueia_resposta(session, mailbox.id, user)
     )
 
 

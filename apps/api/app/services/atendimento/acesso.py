@@ -105,9 +105,11 @@ def responde_email(user: User) -> bool:
     """RESPONDE e-mail pela aba E-mail (28/10/2026, o Eduardo: "passe para o
     usuario marrocos acesso para ele conseguir responder os emails de dentro do
     davinci, hoje so adm pode"): quem NÃO é admin e tem a permissão
-    `atendimento_email` com ver E editar. Só responder o e-mail recebido, nas
-    caixas que a pessoa vê (`mail_admin.pode_responder_caixa`): escrever e-mail
-    novo, encaminhar, anexos e configurar a caixa continuam do dono/admin.
+    `atendimento_email` com ver E editar. Responde o e-mail recebido nas caixas
+    que a pessoa vê (`mail_admin.pode_responder_caixa`) e, desde 29/10/2026
+    ("libere para o usuario marrocos poder enviar a mensagem"), escreve e-mail
+    novo, encaminha e manda anexos nas caixas que vê INTEIRAS
+    (`mail_composer.can_compose`). Configurar a caixa continua do dono/admin.
     Admin fica de fora de propósito: ele segue as regras de sempre (dono/admin
     e, na caixa da empresa, só quem mexe — `pode_mexer`)."""
     if user.status != UserStatus.ACTIVE or user.role == UserRole.ADMIN:

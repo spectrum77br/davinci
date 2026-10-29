@@ -514,9 +514,10 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
     async for job in jobs:
         if len(result) >= LEASE_BATCH:
             break
-        # Recheck the author still has access before dispatching a queued reply.
-        # Composer jobs (`action`): owner/admin. A plain reply: also whoever has
-        # `atendimento_email` view+edit and still sees the mailbox (28/10/2026).
+        # Recheck the author still has access before dispatching a queued reply:
+        # the owner/admin, or whoever has `atendimento_email` view+edit and
+        # still sees the mailbox (plain reply 28/10/2026, composer 29/10/2026;
+        # composer jobs also recheck `can_compose` below).
         from app.services.mail_atendimento import administracao as mail_admin
 
         author = await session.get(User, job.author_user_id)
@@ -524,11 +525,7 @@ async def lease(session: AsyncSession, mailbox: MailMailbox) -> list[dict]:
         if (
             author is None
             or author.status.value != "active"
-            or not (
-                allowed(mailbox, author)
-                if payload.get("action") is not None
-                else await mail_admin.pode_responder_caixa(session, mailbox, author)
-            )
+            or not await mail_admin.pode_responder_caixa(session, mailbox, author)
         ):
             job.status = "failed"
             job.error_code = "author_access_revoked"

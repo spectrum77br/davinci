@@ -5,7 +5,7 @@ import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 import type { ComposeAction, ComposeSource } from '~/lib/mailCompose'
 
-type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean; leitura_filtrada?: boolean; pode_responder?: boolean }
+type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean; leitura_filtrada?: boolean; pode_responder?: boolean; pode_compor?: boolean }
 type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean; store?: StoreBadge; folder_id?: string; subject_hidden?: boolean; conversation_id?: string | null }
 // Folders and store badges ("Caixas", 09/10/2026 — the owner: "bring the store
 // name here too; keep it separate and looking like Tuta"). routers/mail_caixa.py:
@@ -56,6 +56,9 @@ const readOnly = computed(() => mailbox.value?.so_leitura === true)
 // Só lê a caixa, mas RESPONDE o e-mail recebido (permissão `atendimento_email`
 // ver+editar, 28/10/2026): só o formulário de resposta e o "Saiu/Não saiu".
 const canAnswer = computed(() => !readOnly.value || mailbox.value?.pode_responder === true)
+// ... e escreve e-mail novo, encaminha e manda anexos quando vê a caixa
+// inteira (29/10/2026): o compositor inteiro, sem configurar a caixa.
+const canCompose = computed(() => !readOnly.value || mailbox.value?.pode_compor === true)
 const messages = ref<Summary[]>([])
 const detail = ref<Detail | null>(null)
 const loading = ref(false)
@@ -588,7 +591,7 @@ async function changeSending() {
 }
 
 async function openComposer(action: ComposeAction) {
-  if (!detail.value || readOnly.value || mailbox.value?.leitura_filtrada || deleting.value || sending.value) return
+  if (!detail.value || !canCompose.value || mailbox.value?.leitura_filtrada || deleting.value || sending.value) return
   await composer.value?.open(action, detail.value, action === 'reply' ? draft.value : '', fromAddress.value)
 }
 async function composerSent(sourceId: string | null) {
@@ -733,7 +736,7 @@ onBeforeUnmount(() => {
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
         <p v-if="section === 'queues'" class="text-sm text-muted-foreground">{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
         <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Acessos por pessoa, loja e venda, regras de exibição e lixeira do DaVinci.</p>
-        <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável, aos administradores e a quem um admin liberar (só leitura; quem tem a permissão "Atendimento — aba E-mail: responder" também responde).</p>
+        <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável, aos administradores e a quem um admin liberar (só leitura; quem tem a permissão "Atendimento — aba E-mail: responder" também responde e envia).</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
         <button v-if="isAdmin" class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" @click="showSetup = !showSetup"><Plus class="h-4 w-4" /> Cadastrar caixa</button>
@@ -817,7 +820,7 @@ onBeforeUnmount(() => {
           <select v-model="mailboxId" aria-label="Caixa de e-mail" :disabled="sending || deleting || composerActive" class="max-w-full rounded border bg-background p-2 text-sm"><option v-for="item in mailboxes" :key="item.id" :value="item.id">{{ item.label }}<template v-if="item.address"> · {{ item.address }}</template><template v-else-if="item.leitura_filtrada"> · acesso por lojas</template></option></select>
           <span class="text-sm">{{ states[mailbox.state] || 'Conexão precisa de atenção' }}</span>
           <span class="text-xs text-muted-foreground">Última leitura: {{ date(mailbox.last_sync_at) }}</span>
-          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ mailbox.pode_responder ? (mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa e pode respondê-los (sem configurar).' : 'Você responde os e-mails desta caixa (sem configurar).') : mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
+          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ mailbox.pode_responder ? (mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa e pode respondê-los (sem configurar).' : mailbox.pode_compor ? 'Você responde e envia e-mails desta caixa (sem configurar).' : 'Você responde os e-mails desta caixa (sem configurar).') : mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
           <button v-if="isAdmin && !readOnly" class="ml-auto rounded border px-3 py-2 text-xs" @click="changeSending">{{ mailbox.send_enabled ? 'Desativar respostas' : 'Permitir respostas humanas' }}</button>
           <button v-if="isAdmin && !readOnly" class="inline-flex items-center gap-1 rounded border px-3 py-2 text-xs" :aria-expanded="configuring" data-mail-configure @click="configuring = !configuring"><Settings2 class="h-3.5 w-3.5" /> Configurar</button>
         </div>
@@ -831,7 +834,7 @@ onBeforeUnmount(() => {
         />
 
         <AtendimentoMailComposer
-          v-if="!readOnly"
+          v-if="canCompose"
           ref="composer"
           :key="mailbox.id"
           :mailbox-id="mailbox.id"
@@ -962,7 +965,7 @@ onBeforeUnmount(() => {
                 </section>
               </div>
             </header>
-            <div v-if="!readOnly && !mailbox.leitura_filtrada" class="flex flex-wrap gap-2" data-mail-message-actions>
+            <div v-if="canCompose && !mailbox.leitura_filtrada" class="flex flex-wrap gap-2" data-mail-message-actions>
               <button v-if="detail.reply.can_reply" type="button" :disabled="sending || deleting || pending" class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm disabled:opacity-40" @click="openComposer('reply')"><Send class="size-4" /> Responder com anexos</button>
               <button v-if="detail.reply.can_reply" type="button" :disabled="sending || deleting || pending" class="rounded border px-3 py-2 text-sm disabled:opacity-40" @click="openComposer('reply_all')">Responder a todos</button>
               <button type="button" :disabled="sending || deleting || pending" class="rounded border px-3 py-2 text-sm disabled:opacity-40" @click="openComposer('forward')">Encaminhar</button>
@@ -994,7 +997,7 @@ onBeforeUnmount(() => {
               <textarea v-model="draft" rows="5" maxlength="100000" class="w-full rounded border bg-background p-3 text-sm" placeholder="Escreva sua resposta…" :disabled="sending || deleting || pending" aria-label="Texto da resposta" />
               <p v-if="!detail.reply.send_ready" class="text-xs text-muted-foreground">Envio indisponível. O Mac precisa estar conectado, com respostas habilitadas nesta caixa e no conector.</p>
               <p v-if="pending" class="text-xs text-muted-foreground">Confira a resposta pendente acima antes de preparar outra.</p>
-              <button v-if="!readOnly && !mailbox.leitura_filtrada" type="button" class="mr-2 inline-flex items-center gap-2 rounded border px-3 py-2 text-sm disabled:opacity-40" :disabled="sending || deleting || pending" data-mail-reply-attachments @click="openComposer('reply')"><Paperclip class="size-4" /> Anexos / CC / CCO</button>
+              <button v-if="canCompose && !mailbox.leitura_filtrada" type="button" class="mr-2 inline-flex items-center gap-2 rounded border px-3 py-2 text-sm disabled:opacity-40" :disabled="sending || deleting || pending" data-mail-reply-attachments @click="openComposer('reply')"><Paperclip class="size-4" /> Anexos / CC / CCO</button>
               <button class="inline-flex items-center gap-2 rounded bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-40" :disabled="!canReply || !draft.trim() || sending"><Send class="h-4 w-4" />{{ sending ? 'Registrando…' : 'Conferir e enviar resposta' }}</button>
             </form>
           </article>

@@ -10,8 +10,13 @@ emails de dentro do davinci, hoje so adm pode". A regra:
   • quem não vê a caixa não responde (404), mesmo com a permissão;
   • o Mac confere de novo na hora de enviar: tirou a permissão, a resposta
     na fila falha com `author_access_revoked`;
-  • "Saiu/Não saiu" só da PRÓPRIA resposta; e-mail novo, encaminhar e
-    configurar a caixa continuam do dono/admin.
+  • "Saiu/Não saiu" só da PRÓPRIA resposta; configurar a caixa continua do
+    dono/admin.
+
+29/10/2026 ("libere para o usuario marrocos poder enviar a mensagem"): quem
+responde e vê a caixa INTEIRA também escreve e-mail novo (Nova mensagem,
+rascunhos, encaminhar, anexos — `mail_composer.can_compose`); concessão
+filtrada por loja continua sem o compositor.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from sqlalchemy import select
 from app.models import UserRole, UserStatus
 from app.models.mail import MailOutbox
 from tests.test_mail_central import ROOT, account, claim, enable, ingest  # noqa: F401
-from tests.test_mail_composer import company
+from tests.test_mail_composer import company, compose, send
 from tests.test_mail_leitores import _por_leitores
 
 RESPONDE = {"atendimento_email": {"view": True, "edit": True, "delete": False}}
@@ -146,15 +151,88 @@ async def test_saiu_nao_saiu_so_da_propria(client, account, make_user, auth_as, 
     assert r.status_code == 200, r.text
 
 
-async def test_nao_escreve_novo_nem_configura(client, account, make_user, auth_as):  # noqa: F811
+async def test_escreve_novo_mas_nao_configura(client, account, make_user, auth_as, db):  # noqa: F811
     _, marrocos = await _cena(client, account, make_user, permissoes=RESPONDE)
     box = account["mailbox"]["id"]
     auth_as(marrocos)
-    # e-mail novo/encaminhar: a trava é no envio (o contexto é de leitura)
-    novo = {"request_id": str(uuid4()), "to": ["x@example.com"], "subject": "novo", "text": "oi"}
-    assert (await client.post(f"{ROOT}/mailboxes/{box}/send", json=novo)).status_code in (403, 404)
+    itens = (await client.get(f"{ROOT}/mailboxes")).json()["items"]
+    assert (itens[0]["so_leitura"], itens[0]["pode_compor"]) == (True, True)
+    contexto = (await client.get(f"{ROOT}/mailboxes/{box}/compose-context")).json()
+    assert contexto["can_compose"] is True and "support@example.com" in contexto["allowed_from_addresses"]
+    rascunho = await client.post(f"{ROOT}/mailboxes/{box}/drafts", json={"subject": "rascunho"})
+    assert rascunho.status_code == 201, rascunho.text
+    r = await send(client, account, compose(text="Mensagem nova do marrocos"))
+    assert r.status_code == 202, r.text
+    meus = (await client.get(f"{ROOT}/mailboxes/{box}/outbox")).json()["items"]
+    assert [j["id"] for j in meus] == [r.json()["id"]]
+    jobs = await claim(client, account)
+    assert [j["id"] for j in jobs] == [r.json()["id"]], "o Mac pega o e-mail novo (autor ainda pode)"
+    # configurar a caixa continua do dono/admin
     assert (await client.patch(f"{ROOT}/mailboxes/{box}", json={"label": "x"})).status_code == 403
     assert (await client.post(f"{ROOT}/mailboxes/{box}/token")).status_code == 403
+
+
+async def test_so_ver_nao_escreve_novo(client, account, make_user, auth_as, db):  # noqa: F811
+    _, pessoa = await _cena(client, account, make_user, permissoes=SO_VE)
+    box = account["mailbox"]["id"]
+    auth_as(pessoa)
+    assert (await client.get(f"{ROOT}/mailboxes")).json()["items"][0]["pode_compor"] is False
+    assert (await client.get(f"{ROOT}/mailboxes/{box}/compose-context")).json()["can_compose"] is False
+    assert (await send(client, account, compose())).status_code == 403
+    assert (await client.post(f"{ROOT}/mailboxes/{box}/drafts", json={})).status_code == 403
+    assert await db.scalar(select(MailOutbox.id)) is None
+
+
+async def test_sem_ver_a_caixa_nao_escreve_novo(client, account, make_user, auth_as, db):  # noqa: F811
+    _, pessoa = await _cena(client, account, make_user, permissoes=RESPONDE, leitor=False)
+    auth_as(pessoa)
+    assert (await send(client, account, compose())).status_code == 404
+    assert await db.scalar(select(MailOutbox.id)) is None
+
+
+async def test_perdeu_a_permissao_o_mac_nao_envia_o_novo(client, account, make_user, auth_as, db):  # noqa: F811
+    _, marrocos = await _cena(client, account, make_user, permissoes=RESPONDE)
+    auth_as(marrocos)
+    r = await send(client, account, compose())
+    assert r.status_code == 202, r.text
+    marrocos.permissions = SO_VE
+    await db.commit()
+    assert await claim(client, account) == []
+    job = await db.get(MailOutbox, UUID(r.json()["id"]))
+    await db.refresh(job)
+    assert (job.status, job.error_code) == ("failed", "author_access_revoked")
+
+
+async def test_caixa_da_empresa_escreve_novo(client, account, make_user, auth_as, db, monkeypatch):  # noqa: F811
+    await company(db, account, monkeypatch)
+    _, marrocos = await _cena(client, account, make_user, permissoes=RESPONDE)
+    so_ve = await make_user(role=UserRole.USER, permissions=SO_VE)
+    assert (await _por_leitores(client, account["mailbox"]["id"], [marrocos.id, so_ve.id])).status_code == 200
+    auth_as(so_ve)
+    assert (await send(client, account, compose())).status_code == 403
+    auth_as(marrocos)
+    r = await send(client, account, compose())
+    assert r.status_code == 202, r.text
+
+
+async def test_saiu_nao_saiu_do_proprio_e_mail_novo(client, account, make_user, auth_as, db):  # noqa: F811
+    _, marrocos = await _cena(client, account, make_user, permissoes=RESPONDE)
+    r_admin = await send(client, account, compose(text="do dono"))
+    assert r_admin.status_code == 202, r_admin.text
+    auth_as(marrocos)
+    r_marrocos = await send(client, account, compose(text="do marrocos"))
+    assert r_marrocos.status_code == 202, r_marrocos.text
+    for job in await claim(client, account):
+        receipt = await client.post(
+            f"{account['agent']}/outbox/{job['id']}/receipt",
+            headers=account["headers"],
+            json={"lease_token": job["lease_token"], "status": "uncertain"},
+        )
+        assert receipt.status_code == 200, receipt.text
+    resolve = f"{ROOT}/outbox/{{}}/resolve"
+    assert (await client.post(resolve.format(r_admin.json()["id"]), json={"saiu": True})).status_code == 404
+    r = await client.post(resolve.format(r_marrocos.json()["id"]), json={"saiu": True})
+    assert r.status_code == 200, r.text
 
 
 # ── concessão FILTRADA por loja (revisão de 28/10/2026) ──────────────────────
