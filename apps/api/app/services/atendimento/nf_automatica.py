@@ -68,8 +68,13 @@ REVISÃO DE 29/10/2026 (os casos reais de 28/10 nas lojas no automático):
   continua com a pessoa: o texto padrão da equipe promete "enviaremos a nota
   em até 1 dia útil" (o validador barra prazo vindo da IA) e cumprir a
   promessa pede um caminho novo — mandar a NF na conversa já respondida e
-  devolver à Caixa Humano depois do prazo — que não entra sem a medição de
-  produção (o que a equipe faz depois desse texto). O caso Vita 95704e8d
+  devolver à Caixa Humano depois do prazo. Medido em produção (30 dias até
+  29/10): dos 67 pedidos claros da NF (56 pelo "2" do menu), 28 já tinham a
+  cheia no DaVinci, 23 nunca a receberam no `nf_nota` (só a de embalagem, ou
+  pedido de antes do coletor — entregues) e só 3, em lojas fora do automático,
+  eram o "ainda não emitida" normal; depois do texto padrão a equipe manda
+  anexo em 60% (39% em 1 dia). Prometer seria atrasar a pessoa em 1 dia útil
+  sem cumprir: fica com a pessoa. O caso Vita 95704e8d
   (`nf:checagens`) é outro: o agente deu confiança baixa porque o pedido é de
   07/08 (Entregue) e não tem NF nenhuma no `nf_nota` (o coletor sobe desde
   19/08) — entregue e sem NF é anormal: pessoa.
