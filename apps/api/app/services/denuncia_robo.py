@@ -152,7 +152,8 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
     "prints": {
         "passos": [
             "Tira o print da página de cada anúncio que vai à Anatel e ainda não tem print que valha.",
-            "Só vale print da página do próprio anúncio, sem captcha, com a cópia da página, de até 15 dias.",
+            "Só vale print da página do próprio anúncio, sem captcha, com a cópia da página.",
+            "O primeiro print bom é o que vai à Anatel e não vence: depois dele o robô não tira outro (29/10).",
             "Captcha na tela: não salva, para aquele site e deixa a conta descansar.",
             "Shopee no perfil 148, com 1 a 2 min entre um print e outro; Mercado Livre no perfil 50.",
             "Se a ligação com o navegador cai no meio, reconecta e tenta o mesmo anúncio de novo.",
