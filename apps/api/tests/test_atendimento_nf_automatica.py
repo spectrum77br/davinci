@@ -409,10 +409,29 @@ async def test_chave_geral_desligada(db, make_user, ligado, plataforma, monkeypa
         "o produto ainda não chegou, me manda a nota fiscal",
         "não veio nenhum produto nem nota fiscal",
         "não veio nota fiscal nem nada",
+        # Revisão de segurança de 29/10: o conectivo solto (sem "não") e a "chave" sozinha.
+        "recebi a caixa mas nada do produto, manda a nota fiscal",
+        "o pedido nem chegou, manda a nota",
+        "manda a nota fiscal, nem recebi ainda",
+        "não veio a nota fiscal, o produto também não",
+        "não recebi a nota fiscal ou o produto",
+        "não veio a chave, manda a nota fiscal",
+        "manda a chave de acesso do produto e a nota fiscal",
     ],
 )
 async def test_pedido_ambiguo_ou_que_exige_pessoa(db, make_user, ligado, plataforma, texto):
     conversa, gatilho = await _cenario(db, make_user, texto=texto)
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:pedido_nao_claro" and plataforma == []
+
+
+async def test_produto_que_nao_veio_na_fala_de_antes_fica_com_a_pessoa(
+    db, make_user, ligado, plataforma
+):
+    """Revisão de segurança de 29/10: "nada do produto" numa fala e "manda a nota" na outra."""
+    conversa, gatilho = await _cenario(db, make_user, texto="manda a nota fiscal")
+    await _msg(db, conversa, "recebi a caixa mas nada do produto", ha=timedelta(minutes=7))
     r = await _rascunho(db, conversa, gatilho)
     await ia._talvez_enviar(db, conversa, r)
     assert _decisao(r) == "nf:pedido_nao_claro" and plataforma == []
@@ -487,10 +506,44 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("manda a chave de acesso", False),
         ("manda a chave de acesso para eu emitir a nota fiscal de devolução", False),
         ("", False),
+        # Revisão de segurança de 29/10: "nem/nada/nenhum/ou/também" só grudados no papel.
+        ("não veio nota fiscal nem recibo", True),
+        ("não recebi nenhuma nota fiscal", True),
+        ("pode mandar a nota fiscal ou o recibo?", True),
+        ("não veio a nota fiscal nem o comprovante", True),
+        ("nada do produto ainda, manda a nota fiscal", False),
+        ("nem chegou ainda, manda a nota fiscal", False),
+        ("ainda nem chegou o pedido, manda a nota", False),
+        ("o produto nem chegou ainda, manda a nota fiscal", False),
+        ("chegou nada, manda a nota fiscal", False),
+        ("recebi nada, manda a nota fiscal", False),
+        ("ainda nada, manda a nota fiscal", False),
+        ("chegou nenhum, cadê a nota fiscal", False),
+        ("nao veio nota fiscal e o produto tambem nao", False),
+        ("não veio a nota fiscal e a caixa também não", False),
+        ("manda a nota fiscal e também o produto", False),
+        ("quero a nota fiscal e o pedido também", False),
+        ("cadê a nota fiscal ou o produto", False),
+        ("não chegou a nota fiscal ou o pedido", False),
+        # O verbo subentendido sem o "também" (passava antes desta revisão).
+        ("não veio a nota fiscal e o produto não", False),
+        ("manda a nota fiscal mas o produto não", False),
+        # A "chave" sozinha é a que não veio na caixa; só a "chave de acesso" (da nota).
+        ("a chave não veio, manda a nota fiscal", False),
+        ("não recebi a chave nem a nota fiscal", False),
+        ("manda a chave e a nota fiscal", False),
+        ("manda a chave de acesso da nota fiscal do pedido", True),
     ],
 )
 def test_pedido_claro(texto, claro):
     assert nf_automatica.pedido_claro([texto]) is claro
+
+
+def test_pedido_claro_em_duas_falas():
+    """O turno junta as falas: o produto que não veio na de antes segura a NF."""
+    assert nf_automatica.pedido_claro(["oi", "não veio a nota fiscal"]) is True
+    assert nf_automatica.pedido_claro(["o produto nem veio", "cadê a nota fiscal?"]) is False
+    assert nf_automatica.pedido_claro(["recebi a caixa mas nada do produto", "manda a nf"]) is False
 
 
 def test_conferir_xml_pega_chave_trocada():
