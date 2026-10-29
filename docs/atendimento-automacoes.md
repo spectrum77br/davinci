@@ -3177,13 +3177,13 @@ que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
   queixa_no_comentario`, diferença combinada (fora da %); a avaliação fica para
   a equipe pela pendência de sempre (4–5★ sem resposta vira pendência em 24 h).
   A 4★ segue a 5★ (o Duoke e a equipe fazem igual: 40 de 40).
-- **1–3★ (`shopee_avaliacao_ruim`, "Pergunta"):** SÓ o chat, a pergunta
-  (`TEXTO_ENTENDER_CHAT`, 3 versões: "Vimos a sua avaliação e queremos entender
-  o que aconteceu…?"). Nunca pede para mudar ou tirar a nota, não oferece nada,
-  não promete. A **pública fica com pessoa** (`publica_com_pessoa`: o motor tira
-  a parte pública, o PATCH recusa com 422 `publica_com_pessoa`). PROPOSTA (não
-  ligada): a equipe/Duoke posta sempre o mesmo texto fixo (84 de 84) — se o
-  Eduardo quiser, é tirar o `publica_com_pessoa` e pôr de volta a parte pública.
+- **1–3★ (`shopee_avaliacao_ruim`, "Resposta"):** a pública PADRÃO de hoje
+  (`TEXTO_AVALIACAO_RUIM_PUBLICA`, "Sentimos muito pela experiência 😔 …", a
+  mesma do Duoke) e a pergunta no chat (`TEXTO_ENTENDER_CHAT`, 3 versões: "Vimos
+  a sua avaliação e queremos entender o que aconteceu…?"). Nunca pede para mudar
+  ou tirar a nota, não oferece nada, não promete. (Até a tarde de 29/10/2026 a
+  pública ficava com pessoa — `publica_com_pessoa`, 422 no PATCH; saiu com a
+  resposta do Eduardo, "Automática, texto padrão": §17.5.)
 - **A resposta do comprador vai para a equipe:** a pergunta é `davinci_auto`
   com a marca do motor (não fecha a vez dele: a resposta dele cai em "Falta
   responder") e a triagem da Caixa Humano ganhou o motivo `avaliacao` para a
@@ -3204,8 +3204,8 @@ que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
   `avaliacao_ja_atendida`); a conversa atribuída ou com a IA pausada
   (`conversa_com_pessoa`), bloqueada, alguém da equipe já falou com o comprador
   depois da avaliação, sem conversa ou fora da janela da Shopee (pedido > 30
-  dias e comprador calado > 7; sem a data do pedido, também) → a 4–5★ manda só
-  a pública, a 1–3★ não manda; no modo enviar, o Duoke já respondeu (a pública
+  dias e comprador calado > 7; sem a data do pedido, também) → manda só a
+  pública (as duas faixas, desde o §17.5); no modo enviar, o Duoke já respondeu (a pública
   ou o chat dele depois da avaliação) → `duoke_mandou` + disjuntor; a IA no
   automático continua pulando (`ia_no_automatico`), menos com a condição nova
   `com_ia_no_automatico` ligada na regra da loja. O teto do dia e o `auto_reply`
@@ -3225,8 +3225,9 @@ que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
 4. Avisar a equipe: a pública da 4–5★ que ficou para pessoa (`queixa_no_comentario`)
    vai pela caixa "Responder em público" do DaVinci, ou com outro texto — o modelo
    do Duoke ("Obrigado pela confiança! 🙏 Volte sempre que precisar!") postado à mão
-   na Shopee é lido como o Duoke ligado e volta a regra para Simular. Na 1–3★ o
-   texto fixo de sempre pode (§17.4).
+   na Shopee é lido como o Duoke ligado e volta a regra para Simular. Na 1–3★ a
+   pública agora é AUTOMÁTICA (§17.5): a equipe não posta mais o texto fixo à mão
+   — postado assim na Shopee, ele também é lido como o Duoke ligado.
 
 ### 17.4 A revisão (29/10/2026)
 
@@ -3246,13 +3247,78 @@ que ter ali a questão perguntar e tentar entender melhor o porquê dessa nota".
   lida depois disso E a avaliação relida depois disso (`avaliacao_lida_em`: a
   pública do Duoke chega pela leitura das avaliações, não pela caixa). O Duoke
   ainda ligado é pego antes de o comprador receber as duas (pula + disjuntor).
-- **A pública da equipe não é o Duoke** (`publica_do_duoke`): nunca a que saiu pelo
-  DaVinci (`dados.automacao` ou `dados.respondida_pelo_davinci` — a caixa
-  "Responder em público"); e, na 1–3★ com a regra em Enviar (`publica_da_equipe`),
-  nenhuma — desligado o Duoke, a pública é da equipe, que posta o mesmo texto fixo
-  (84 de 84). Ela não dispara o disjuntor (motor, comparador e "só Duoke") nem
-  segura a pergunta no chat (a pessoa que falou no chat segura). O sinal do Duoke
-  na 1–3★ em Enviar fica sendo o chat dele, e o chat só conta como Duoke na
-  resposta AUTOMÁTICA (`sistema`): o modelo colado à mão (`externo`) é pessoa. O
-  que sobra: na 4–5★, a pública do modelo do Duoke postada à mão fora do DaVinci
-  não se distingue dele (o item 4 do §17.3).
+- **A pública que saiu pelo DaVinci não é o Duoke** (`publica_do_duoke`): nunca a
+  da automação (`dados.automacao`) nem a de alguém na caixa "Responder em público"
+  (`dados.respondida_pelo_davinci`). Ela não dispara o disjuntor (motor, comparador
+  e "só Duoke"). O chat só conta como Duoke na resposta AUTOMÁTICA (`sistema`): o
+  modelo colado à mão (`externo`) é pessoa. (Nesta revisão a 1–3★ em Enviar também
+  tirava a pública do texto fixo — `publica_da_equipe`, a equipe postava à mão;
+  saiu no §17.5: a pública da 1–3★ é automática.) O que sobra: a pública do modelo
+  do Duoke postada à mão fora do DaVinci não se distingue dele (o item 4 do §17.3).
+
+### 17.5 A 1–3★ responde em público (29/10/2026, à tarde)
+
+Perguntado "Nas avaliações de 1 a 3★, a resposta PÚBLICA também vai automática
+com o texto padrão de hoje?", o Eduardo: "Automática, texto padrão". Ele desliga a
+resposta de avaliação do Duoke loja por loja e põe as regras em Enviar em todas as
+lojas Shopee (a Aguiar não tem resposta de avaliação no Duoke).
+
+**Os números (SELECT em produção, só leitura, 30 dias até 29/10/2026):** 88
+avaliações 1–3★ na Shopee (~2,9/dia; no máximo 6 num dia). Por loja, por dia:
+vortan 0,57, ATV 0,47, Inova 0,33, mega 0,30, Barbosa 0,27, Minas 0,23, kfa 0,23,
+Jlas 0,20, Vita 0,17, mini 0,07, Victor Mei 0,07, Poofy 0,03 (Kia e Aguiar, 0).
+87 respondidas: 82 com o texto padrão, 5 de pessoa (outro texto). **Nenhuma 1–3★
+respondida pelo DaVinci** (`dados.respondida_pelo_davinci`: 0, de sempre; com
+`dados.automacao`: 0). As 14 regras da 1–3★ estão na versão 1 com a semente 0371
+(13 em Simular, a Aguiar desligada, nenhuma em Enviar); o registro tem 61
+`simulado` e 4 `pulado`.
+
+**O que mudou:**
+
+- **A regra** (`shopee_avaliacao_ruim`, "Resposta da avaliação 1 a 3★ (pública +
+  pergunta no chat)"): as partes são a pública `TEXTO_AVALIACAO_RUIM_PUBLICA` e a
+  pergunta `TEXTO_ENTENDER_CHAT`, a mesma 1 h, a pública primeiro. Saiu o
+  `publica_com_pessoa`: o PATCH aceita a parte pública (sem o 422), a aba
+  Automáticas mostra as duas, e a prévia da linha também. A semente 0371 e o
+  padrão só com o chat da tarde de 29/10 (`PARTES_PADRAO_ANTERIOR`) valem pelo
+  padrão novo (`partes_da_regra`); o texto que alguém editar fica.
+- **Quem mandou, pela marca, nunca pelo texto** (o padrão da 1–3★ É o do Duoke):
+  `publica_da_automacao` = `dados.automacao` (saiu) ou `dados.automacao_em_voo`
+  (`MARCA_PUBLICA_EM_VOO`: gravada com a avaliação travada, ANTES do
+  `reply_comment`; sai quando a Shopee recusa; fica no ambíguo, no processo que
+  morreu e no banco que falhou depois de a Shopee aceitar — a resposta que a
+  leitura trouxer é nossa). `publica_do_duoke(resposta, dados)` tira a da
+  automação e a da caixa "Responder em público"; o motor, o comparador, o "só
+  Duoke" e a prévia leem daqui. Saiu o `publica_da_equipe`: a equipe não posta
+  mais o texto fixo à mão.
+- **O Duoke ainda ligado** (a regra em Enviar e o Duoke não desligado): a pública
+  dele (sem marca) é dele — `duoke_mandou` + disjuntor, como na 4–5★; o chat dele
+  (`sistema`) também. Na transição a decisão espera o p99 dele (§17.4). Se a nossa
+  sair antes da dele, o chat dele ainda dispara o disjuntor pelo comparador (a
+  pública dele, por cima da nossa, a Shopee recusa ou não — não medido).
+- **Nunca duas públicas** (a pública não se apaga): a avaliação relida e travada
+  sem resposta; a resposta de PESSOA pela caixa da avaliação saindo agora →
+  `envio_em_andamento` (temporária: a próxima rodada vê o resultado), saída ou
+  ambígua → `ja_respondida`; a caixa "Responder em público" recusa
+  (`envio_em_andamento`) enquanto a nossa está em voo — até a avaliação ser relida
+  30 min depois da marca ainda sem resposta (`avaliacoes.publica_em_voo`); a linha
+  `enviando` nunca é retentada (vira `revisar`).
+- **Pessoa respondeu antes** (outro texto, pela caixa ou na Shopee):
+  `pessoa_respondeu` — não vai nada, nem a pública nem a pergunta (a pessoa
+  assumiu; antes, em Enviar, a pública da equipe não segurava a pergunta).
+- **Sem como mandar o chat** (sem conversa, fora da janela, com pessoa): só a
+  pública, como na 4–5★. O chat que falha depois da pública: `revisar` + disjuntor
+  (`parte_falhou`), como na 4–5★.
+- **A nota que muda** (5→2 ou 2→5): a linha da faixa antiga pula
+  (`estrelas_mudaram`); a da faixa nova pula se a antiga já saiu ou sairia, ou se a
+  avaliação tem a marca da automação (`avaliacao_ja_atendida`). Nunca duas
+  respostas de faixas diferentes.
+
+**O que sobra:** (1) entre a conferência da caixa "Responder em público" e a linha
+em voo dela há uma janela de milissegundos em que a automação ainda pode começar;
+não sabemos se a Shopee recusa o segundo `reply_comment`. (2) Na transição (3
+dias depois de Enviar) a decisão espera até 5 h, e a 1–3★ vira pendência da equipe
+em 1 h (`CARENCIA_NOTA_BAIXA`): quem responder à mão nesse meio-tempo faz a
+automação pular (`pessoa_respondeu`) — nunca duas. (3) O texto fixo postado à mão
+na Shopee (fora do DaVinci) é lido como o Duoke ligado e volta a regra para
+Simular (o lado seguro).

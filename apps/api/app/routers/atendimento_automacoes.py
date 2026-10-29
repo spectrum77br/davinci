@@ -832,11 +832,9 @@ async def mudar_regra(
         if aut.alvo != cat.ALVO_AVALIACAO and any(
             p["tipo"] == cat.PARTE_RESPOSTA_PUBLICA for p in partes
         ):
-            # A resposta PÚBLICA só existe na resposta da avaliação.
+            # A resposta PÚBLICA só existe na resposta da avaliação (as duas faixas:
+            # a 1–3★ também, desde 29/10/2026 — "Automática, texto padrão").
             raise HTTPException(422, detail={"code": "parte_invalida"})
-        if aut.publica_com_pessoa and cat.tem_resposta_publica(partes):
-            # A pública da 1–3★ fica com pessoa (29/10/2026): só a pergunta no chat.
-            raise HTTPException(422, detail={"code": "publica_com_pessoa"})
         _, motivos = cat.renderizar(
             partes,
             comprador=NOME_EXEMPLO,

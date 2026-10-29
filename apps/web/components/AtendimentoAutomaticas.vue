@@ -387,9 +387,8 @@ export const ERROS_AUTOMACAO: Record<string, string> = {
   confirmar_duoke: 'Marque que você já desligou esta automação desta loja no Duoke.',
   criterio_nao_passou: 'O critério da troca não passou nesta loja nos últimos 7 dias: marque que você sabe disso para trocar mesmo assim.',
   texto_invalido: 'O texto não passa no validador',
+  // A pública vale nas duas faixas da avaliação (29/10/2026: a 1–3★ também, "Automática, texto padrão").
   parte_invalida: 'A resposta pública só existe na resposta da avaliação.',
-  // 29/10/2026: a pública da 1–3★ fica com pessoa (a automação só pergunta no chat).
-  publica_com_pessoa: 'Na avaliação de 1 a 3★ a resposta pública fica com a equipe: a automação só manda a pergunta no chat.',
   janela_invalida: 'Horário inválido: o início tem que ser antes do fim (HH:MM).',
   condicao_desconhecida: 'Condição desconhecida para esta automação.',
   condicao_invalida: 'Valor inválido numa condição.',

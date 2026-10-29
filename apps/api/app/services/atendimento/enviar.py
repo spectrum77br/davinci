@@ -822,6 +822,14 @@ async def _destino_avaliacao(
     avaliacao = await avaliacoes.avaliacao_da_conversa(session, conversa)
     if avaliacao is not None and avaliacao.resposta_loja:
         raise EnvioRecusado(RECUSA_AVALIACAO_JA_RESPONDIDA, "Esta avaliação já foi respondida.")
+    if avaliacao is not None and avaliacoes.publica_em_voo(avaliacao):
+        # 29/10/2026: a resposta pública automática está saindo (ou pode ter
+        # saído): nunca duas públicas — a pública não se apaga.
+        raise EnvioRecusado(
+            RECUSA_ENVIO_EM_ANDAMENTO,
+            "A resposta automática desta avaliação está saindo (ou pode ter saído): "
+            "confira na Shopee antes de responder.",
+        )
     integration, canal = await _loja_da_conversa(session, conversa)
     if integration is None:
         raise EnvioRecusado(
@@ -3289,6 +3297,30 @@ async def enviar_automatica_sem_conversa(
     return EnvioSemConversa(status=MSG_ENVIADA, conversa_id=conversa.id, mensagem_id=mensagem.id)
 
 
+async def _publica_de_pessoa(session: AsyncSession, avaliacao: Any) -> str | None:
+    """A resposta de PESSOA na conversa da avaliação ("Responder em público").
+
+    29/10/2026: `enviando` (recente) = saindo agora; `enviada`/`revisar` (ou a
+    `enviando` presa, que vira `revisar`) = saiu ou pode ter saído — a pública
+    não se apaga, a automação não responde por cima. None = nenhuma.
+    """
+    if avaliacao.conversa_id is None:
+        return None
+    recente = AtendimentoMensagem.created_at >= datetime.now(UTC) - ENVIO_PRESO
+    linhas = (
+        await session.execute(
+            select(AtendimentoMensagem.status, recente).where(
+                AtendimentoMensagem.conversa_id == avaliacao.conversa_id,
+                AtendimentoMensagem.autor == AUTOR_LOJA,
+                AtendimentoMensagem.status.in_(_STATUS_QUE_SAIRAM),
+            )
+        )
+    ).all()
+    status = [MSG_REVISAR if s == MSG_ENVIANDO and not novo else s for s, novo in linhas]
+    saiu = next((s for s in status if s != MSG_ENVIANDO), None)
+    return saiu or (MSG_ENVIANDO if status else None)
+
+
 async def enviar_automatica_resposta_publica(
     session: AsyncSession,
     *,
@@ -3300,12 +3332,16 @@ async def enviar_automatica_resposta_publica(
 ) -> EnvioSemConversa:
     """A resposta PÚBLICA da avaliação pela automação (29/10/2026). Nunca duas.
 
-    Eduardo, 29/10/2026: "de 5 estrelas manda uma agradecendo e tudo". As
-    travas da mensagem automática (freio único, chave das automações,
-    `shopee_mensagens_comprador`, `auto_reply` da campanha, a regra RELIDA em
-    `enviar`), só Shopee, só a automação da avaliação que tem resposta pública
-    (a 1–3★ fica com pessoa: `publica_com_pessoa`), e a AVALIAÇÃO relida e
-    travada (`FOR UPDATE`): sem resposta ainda, a plataforma deixa responder.
+    Eduardo, 29/10/2026: "de 5 estrelas manda uma agradecendo e tudo"; e, na
+    1–3★, "Automática, texto padrão". As travas da mensagem automática (freio
+    único, chave das automações, `shopee_mensagens_comprador`, `auto_reply` da
+    campanha, a regra RELIDA em `enviar`), só Shopee, só a automação da
+    avaliação, e a AVALIAÇÃO relida e travada (`FOR UPDATE`): sem resposta
+    ainda, a plataforma deixa responder, e sem resposta de PESSOA pela caixa
+    "Responder em público" saindo ou ambígua (`_publica_de_pessoa`). A marca em
+    voo vai junto com a trava solta (`avaliacoes.marcar_publica_em_voo`, ANTES
+    da plataforma): segura a caixa enquanto isto fala com a Shopee, e diz que a
+    resposta que a leitura trouxer é nossa — o texto da 1–3★ é o do Duoke.
     Quem trava contra duplicar é também o registro `enviando` do motor (chave
     única), commitado antes daqui. Saiu: grava na avaliação (`avaliacoes.
     gravar_resposta_automatica`, com `dados.automacao`) — o comparador não a
@@ -3325,7 +3361,7 @@ async def enviar_automatica_resposta_publica(
             RECUSA_SOMENTE_LEITURA, "Esta plataforma não deixa responder a avaliação pela API."
         )
     aut = _travas_gerais_automatica(plataforma, codigo, "chat")
-    if aut.alvo != catalogo.ALVO_AVALIACAO or aut.publica_com_pessoa:
+    if aut.alvo != catalogo.ALVO_AVALIACAO:
         raise EnvioRecusado(
             RECUSA_REGRA_NAO_ENVIA, "Esta automação não responde a avaliação em público."
         )
@@ -3350,7 +3386,16 @@ async def enviar_automatica_resposta_publica(
         )
     if (avaliacao.resposta_loja or "").strip():
         raise EnvioRecusado(RECUSA_AVALIACAO_JA_RESPONDIDA, "Esta avaliação já foi respondida.")
-    await session.commit()  # solta a trava: a plataforma pode demorar
+    de_pessoa = await _publica_de_pessoa(session, avaliacao)
+    if de_pessoa == MSG_ENVIANDO:
+        # Saindo agora: a próxima rodada vê o resultado (temporária).
+        raise EnvioRecusado(
+            RECUSA_ENVIO_EM_ANDAMENTO, "Há uma resposta pública sendo enviada nesta avaliação."
+        )
+    if de_pessoa is not None:
+        raise EnvioRecusado(RECUSA_AVALIACAO_JA_RESPONDIDA, "Esta avaliação já foi respondida.")
+    avaliacoes.marcar_publica_em_voo(avaliacao, codigo=codigo, registro_id=registro_id)
+    await session.commit()  # grava a marca e solta a trava: a plataforma pode demorar
     logger.info(
         "atendimento_automatica_publica_iniciada",
         integration_id=str(integration_id),
@@ -3386,6 +3431,9 @@ async def enviar_automatica_resposta_publica(
                     )
     if not resultado.ok:
         status = MSG_REVISAR if resultado.ambiguo else MSG_FALHOU
+        if not resultado.ambiguo:
+            # A Shopee recusou: nada saiu, a marca sai. No ambíguo ela fica.
+            await avaliacoes.desmarcar_publica_em_voo(session, avaliacao)
         logger.info(
             "atendimento_automatica_publica_concluida",
             integration_id=str(integration_id),
@@ -3400,7 +3448,8 @@ async def enviar_automatica_resposta_publica(
             session, avaliacao, texto, codigo=codigo, registro_id=registro_id
         )
     except DBAPIError as e:
-        # SAIU: sem gravar, a leitura seguinte das avaliações traz a resposta.
+        # SAIU: sem gravar, a leitura seguinte das avaliações traz a resposta —
+        # e a marca em voo (já gravada) diz que ela é nossa, não do Duoke.
         await session.rollback()
         logger.error(
             "atendimento_automatica_publica_nao_gravada",

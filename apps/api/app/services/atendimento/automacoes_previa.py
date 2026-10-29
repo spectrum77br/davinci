@@ -303,10 +303,22 @@ async def montar(
         principal = await session.get(AtendimentoMensagem, x.duoke_mensagem_id)
         if principal is not None and principal.autor != AUTOR_CLIENTE:
             duoke = await _do_duoke_junto(session, principal, base=hora)
+    # A pública que ESTA linha deu (29/10/2026): fica do nosso lado, nunca no do
+    # Duoke — o padrão da 1–3★ é o texto dele, quem diz é a marca na avaliação.
+    publica_nossa: str | None = None
     if aut is not None and aut.alvo == cat.ALVO_AVALIACAO:
         av = (await automacoes.avaliacoes_das_linhas(session, [x])).get(x.id)
         resposta = (av.resposta_loja or "").strip() if av is not None else ""
-        if resposta:
+        dados_av = av.dados if av is not None and isinstance(av.dados, dict) else {}
+        if resposta and cat.publica_da_automacao(dados_av):
+            marca = dados_av.get(cat.MARCA_PUBLICA_EM_VOO)
+            donos = {
+                str(dados_av.get("registro_id")),
+                str(marca.get("registro_id") if isinstance(marca, dict) else None),
+            }
+            publica_nossa = resposta if str(x.id) in donos else None
+        elif resposta:
+            do_duoke = cat.publica_do_duoke(resposta, dados_av)
             em = automacoes_comparar.hora_da_resposta_publica(av.resposta_em)
             duoke.insert(
                 0,
@@ -315,11 +327,11 @@ async def montar(
                     texto=resposta,
                     em=em,
                     base=hora,
-                    principal=cat.assinatura_avaliacao(resposta) == aut.tipo,
+                    principal=do_duoke == aut.tipo,
                     nota=(
                         "resposta pública gravada na avaliação (a hora é a da Shopee "
                         "menos os 59 min que ela grava a mais)"
-                        if cat.assinatura_avaliacao(resposta)
+                        if do_duoke
                         else "resposta pública de PESSOA (não é o modelo do Duoke)"
                     ),
                 ),
@@ -332,10 +344,26 @@ async def montar(
     comprador = await _nome_do_comprador(session, x, conversa)
     valores = await _valores(session, x, aut, nome_loja) if aut is not None else {}
     motivos: list[str] = []
-    de_verdade = bool(x.mensagem_ids)
+    de_verdade = bool(x.mensagem_ids) or publica_nossa is not None
     partes: list[dict[str, Any]] = []
     if de_verdade:
         partes = await _partes_que_sairam(session, x, hora)
+        if publica_nossa is not None:
+            # A pública não tem mensagem: a que a avaliação guarda, antes do chat.
+            for p in partes:
+                p["principal"] = False
+            partes.insert(
+                0,
+                _parte(
+                    cat.PARTE_RESPOSTA_PUBLICA,
+                    texto=publica_nossa,
+                    em=hora,
+                    base=hora,
+                    principal=True,
+                    nota="resposta pública que saiu pela automação (gravada na avaliação)",
+                ),
+            )
+            hora_tipo = "saiu"
     elif aut is not None and x.estado != cat.ESTADO_SO_DUOKE:
         base = cat.partes_da_regra(aut, regra.partes if regra is not None else None, nome_loja)
         prontas, motivos = cat.renderizar(

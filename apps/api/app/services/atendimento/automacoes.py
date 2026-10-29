@@ -1121,7 +1121,7 @@ async def descobrir_avaliacoes(
     escolhe a automação. A conversa do comprador (para a mensagem do chat) é a
     do pedido, a do comprador do índice ou a do usuário dele na loja. Desde
     29/10/2026 envia (a regra em `enviar`): a 4–5★ o agradecimento público e
-    no chat, a 1–3★ só a pergunta no chat (a pública fica com pessoa).
+    no chat, a 1–3★ a resposta pública padrão e a pergunta no chat.
     """
     ativas = _ativas_do_gatilho(regras, cat.GATILHO_AVALIACAO)
     if not ativas:
@@ -1870,24 +1870,17 @@ async def _extras(
             extras["estrelas_mudaram"] = not (menor <= int(av.estrelas or 0) <= maior)
             resposta = (av.resposta_loja or "").strip()
             dados_av = av.dados if isinstance(av.dados, dict) else {}
-            regra_av = ctx.regras.get((linha.automacao, linha.integration_id))
-            # A pública que a PRÓPRIA automação deu (`dados.automacao`, 29/10/2026)
-            # não é pessoa: é a avaliação já atendida (a nota mudou de faixa depois).
-            nossa = bool(dados_av.get("automacao"))
+            # A pública que a PRÓPRIA automação deu (ou pode ter dado: a marca em
+            # voo, 29/10/2026) não é pessoa: é a avaliação já atendida (a nota mudou
+            # de faixa depois). Pela marca, nunca pelo texto (o da 1–3★ é o do Duoke).
+            nossa = cat.publica_da_automacao(dados_av)
             # A do Duoke: o modelo dele, menos a que saiu pelo DaVinci (a nossa ou
-            # a de alguém na caixa) e a da equipe na 1–3★ em `enviar` — que posta
-            # o texto fixo dele à mão (`cat.publica_do_duoke`, 29/10/2026).
-            duoke_publica = cat.publica_do_duoke(aut, resposta, dados_av, regra_av) is not None
+            # a de alguém na caixa) — `cat.publica_do_duoke`, 29/10/2026.
+            duoke_publica = cat.publica_do_duoke(resposta, dados_av) is not None
             # Respondida por PESSOA (a resposta não é a do Duoke): o DaVinci não
-            # responde de novo. A do Duoke não conta no modo seco (é a comparação).
-            # Na 1–3★ em `enviar` a pública é da equipe de propósito: não segura
-            # a pergunta no chat (a pessoa que falou no chat segura, `_sem_chat`).
-            extras["pessoa_respondeu"] = (
-                bool(resposta)
-                and not duoke_publica
-                and not nossa
-                and not cat.publica_da_equipe(aut, regra_av)
-            )
+            # responde de novo — nem a pública (nunca duas) nem o chat (a pessoa
+            # assumiu). A do Duoke não conta no modo seco (é a comparação).
+            extras["pessoa_respondeu"] = bool(resposta) and not duoke_publica and not nossa
             extras["avaliacao_ja_atendida"] = nossa or linha.id in atendidas
             # Na transição, a decisão espera a avaliação relida depois da espera
             # do Duoke (a pública dele chega pela leitura das avaliações).
@@ -2272,8 +2265,8 @@ def _avaliar(
     if motivos:
         return _Veredito("pular", modo, "texto_invalido")
     if fatos.get("sem_chat"):
-        # A 4–5★ sem como mandar o chat: só a resposta pública (`decidir` já
-        # pulou a que não tem pública).
+        # A avaliação (4–5★ ou 1–3★) sem como mandar o chat: só a resposta
+        # pública (`decidir` já pulou a regra que não tem pública).
         partes = [p for p in partes if p.get("tipo") == cat.PARTE_RESPOSTA_PUBLICA]
     tipo = "envio" if modo == cat.MODO_ENVIAR else "seco"
     teto = (

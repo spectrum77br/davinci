@@ -1145,7 +1145,8 @@ def test_o_cupom_entra_no_texto_e_sem_valor_o_validador_barra():
 
 
 def test_resposta_da_avaliacao_publica_mais_chat_com_o_nome():
-    """29/10/2026: a 4–5★ agradece em público e no chat; a 1–3★ só pergunta no chat."""
+    """29/10/2026: a 4–5★ agradece em público e no chat; a 1–3★ responde em público
+    com o texto padrão de hoje ("Automática, texto padrão") e pergunta no chat."""
     boa = cat.CATALOGO["shopee_avaliacao_boa"]
     partes, motivos = cat.renderizar(
         cat.partes_padrao(boa), comprador="ana.paula", plataforma="shopee", canal="chat"
@@ -1156,13 +1157,15 @@ def test_resposta_da_avaliacao_publica_mais_chat_com_o_nome():
     assert partes[0]["texto"] == cat.variantes(cat.TEXTO_AGRADECER_PUBLICA)[0]
     assert partes[1]["texto"] == "Oi, ana.paula! Muito obrigado pela sua avaliação. 😊"
     ruim = cat.CATALOGO["shopee_avaliacao_ruim"]
-    assert ruim.publica_com_pessoa and not boa.publica_com_pessoa
     partes, motivos = cat.renderizar(
         cat.partes_padrao(ruim), comprador=None, plataforma="shopee", canal="chat"
     )
-    assert motivos == [] and [p["tipo"] for p in partes] == ["texto"], "só o chat"
-    assert partes[0]["texto"].startswith("Oi! Vimos a sua avaliação")
-    assert partes[0]["texto"].endswith("?"), "pergunta"
+    assert motivos == [] and [p["tipo"] for p in partes] == ["resposta_publica", "texto"]
+    # A pública é EXATAMENTE o texto padrão de hoje (o mesmo do Duoke).
+    assert partes[0]["texto"] == cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    assert partes[1]["texto"].startswith("Oi! Vimos a sua avaliação")
+    assert partes[1]["texto"].endswith("?"), "pergunta"
+    assert "pública" in ruim.nome and "pública padrão" in ruim.descricao
     # A resposta do Duoke chega até ~18 h depois: a janela de comparação é de 24 h.
     for aut in (boa, ruim):
         assert cat.janela_comparacao(aut, T0, T0 + timedelta(hours=1)) == (
@@ -1290,6 +1293,13 @@ def test_textos_da_avaliacao_curtos_sem_contato_e_nunca_a_assinatura_do_duoke():
             for versao in cat.variantes(parte["texto"]):
                 for nome in ("ana.paula", None):
                     t = cat.renderizar_texto(versao, nome)
+                    if codigo == "shopee_avaliacao_ruim" and parte["tipo"] == "resposta_publica":
+                        # A exceção de propósito (29/10/2026, "texto padrão"): a
+                        # pública da 1–3★ É o modelo do Duoke — quem a mandou se
+                        # sabe pela marca (`publica_do_duoke`), não pelo texto.
+                        assert t == cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+                        assert cat.assinatura_avaliacao(t) == cat.TIPO_AVALIACAO_RUIM
+                        continue
                     # O comparador nunca lê a nossa como a do Duoke (o disjuntor).
                     assert cat.assinatura_avaliacao(t) is None, t
                     assert len(t) <= 200 and "http" not in t and "@" not in t, t
@@ -1302,7 +1312,7 @@ def test_textos_da_avaliacao_curtos_sem_contato_e_nunca_a_assinatura_do_duoke():
             assert all("?" in v for v in cat.variantes(cat.TEXTO_ENTENDER_CHAT)), "pergunta"
 
 
-def test_a_semente_antiga_vale_pelo_padrao_novo_e_a_publica_da_ruim_nunca():
+def test_a_semente_antiga_e_o_padrao_so_chat_valem_pelo_padrao_com_a_publica():
     boa = cat.CATALOGO["shopee_avaliacao_boa"]
     ruim = cat.CATALOGO["shopee_avaliacao_ruim"]
     antiga_boa = [dict(p) for p in cat.PARTES_SEMENTE_ANTIGA["shopee_avaliacao_boa"]]
@@ -1314,9 +1324,20 @@ def test_a_semente_antiga_vale_pelo_padrao_novo_e_a_publica_da_ruim_nunca():
     assert cat.partes_da_regra(boa, editada) == editada, "o texto editado fica"
     antiga_ruim = cat.PARTES_SEMENTE_ANTIGA["shopee_avaliacao_ruim"]
     assert cat.partes_da_regra(ruim, antiga_ruim) == cat.partes_padrao(ruim)
-    assert [p["tipo"] for p in cat.partes_da_regra(ruim, editada)] == ["texto"]
-    assert cat.tem_resposta_publica(cat.partes_da_regra(boa, None))
-    assert not cat.tem_resposta_publica(cat.partes_da_regra(ruim, None))
+    # 29/10/2026 ("Automática, texto padrão"): a pública da 1–3★ vale — a editada
+    # fica inteira, e o padrão só com o chat da tarde vale pelo de agora.
+    assert cat.partes_da_regra(ruim, editada) == editada
+    so_chat = [{"tipo": "texto", "texto": cat.TEXTO_ENTENDER_CHAT}]
+    assert so_chat == cat.PARTES_PADRAO_ANTERIOR["shopee_avaliacao_ruim"]
+    assert cat.partes_da_regra(ruim, so_chat) == cat.partes_padrao(ruim)
+    outro_chat = [{"tipo": "texto", "texto": "Oi, {comprador}! O que houve?"}]
+    assert cat.partes_da_regra(ruim, outro_chat) == outro_chat, "só o chat editado fica"
+    for aut in (boa, ruim):
+        assert cat.tem_resposta_publica(cat.partes_da_regra(aut, None))
+        assert cat.partes_da_regra(aut, None)[0]["tipo"] == "resposta_publica", "a pública antes"
+    assert cat.partes_da_regra(ruim, None)[0]["texto"] == cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    # A semente do botão grava o padrão de agora (com a pública).
+    assert cat.regra_semente(ruim, "atv")["partes"] == cat.partes_padrao(ruim)
 
 
 @pytest.mark.parametrize(
@@ -1382,25 +1403,33 @@ def test_agradecimento_publico_neutro_e_a_espera_da_troca():
         assert aut.espera_padrao + aut.espera_duoke < aut.validade
 
 
-def test_publica_do_duoke_menos_a_do_davinci_e_a_da_equipe_na_ruim_em_enviar():
-    boa = cat.CATALOGO["shopee_avaliacao_boa"]
-    ruim = cat.CATALOGO["shopee_avaliacao_ruim"]
-    simular = SimpleNamespace(modo="simular")
-    enviar = SimpleNamespace(modo="enviar")
+def test_publica_do_duoke_pela_marca_nunca_pelo_texto():
+    """29/10/2026: a pública da 1–3★ é o texto padrão — o mesmo do Duoke. Quem
+    mandou se sabe pela marca na avaliação (a da automação, também a em voo, e a da
+    caixa "Responder em público"); sem marca, o modelo é o do Duoke (ainda ligado),
+    em qualquer modo da regra."""
     obrigado, sentimos = cat.TEXTO_AVALIACAO_BOA_PUBLICA, cat.TEXTO_AVALIACAO_RUIM_PUBLICA
-    assert cat.publica_do_duoke(boa, obrigado, {}, enviar) == cat.TIPO_AVALIACAO_BOA
-    assert cat.publica_do_duoke(ruim, sentimos, {}, simular) == cat.TIPO_AVALIACAO_RUIM
-    assert cat.publica_do_duoke(ruim, sentimos, None, None) == cat.TIPO_AVALIACAO_RUIM
-    assert cat.publica_do_duoke(boa, "Valeu, obrigada!", {}, enviar) is None, "pessoa"
-    assert cat.publica_do_duoke(boa, None, {}, enviar) is None
-    # Pelo DaVinci (a automação, ou alguém na caixa "Responder em público"): nunca.
-    for dados in ({"automacao": "shopee_avaliacao_boa"}, {"respondida_pelo_davinci": True}):
-        assert cat.publica_do_duoke(boa, obrigado, dados, enviar) is None
-        assert cat.publica_do_duoke(ruim, sentimos, dados, simular) is None
-    # A 1–3★ em enviar: a pública é da equipe (o texto fixo dele, à mão).
-    assert cat.publica_da_equipe(ruim, enviar) and not cat.publica_da_equipe(ruim, simular)
-    assert not cat.publica_da_equipe(boa, enviar)
-    assert cat.publica_do_duoke(ruim, sentimos, {}, enviar) is None
+    assert cat.publica_do_duoke(obrigado, {}) == cat.TIPO_AVALIACAO_BOA
+    assert cat.publica_do_duoke(sentimos, {}) == cat.TIPO_AVALIACAO_RUIM
+    assert cat.publica_do_duoke(sentimos, None) == cat.TIPO_AVALIACAO_RUIM
+    assert cat.publica_do_duoke("Valeu, obrigada!", {}) is None, "pessoa"
+    assert cat.publica_do_duoke(None, {}) is None
+    em_voo = {cat.MARCA_PUBLICA_EM_VOO: {"automacao": "shopee_avaliacao_ruim"}}
+    for dados in (
+        {"automacao": "shopee_avaliacao_ruim"},
+        em_voo,
+        {"respondida_pelo_davinci": True},
+    ):
+        assert cat.publica_do_duoke(obrigado, dados) is None
+        assert cat.publica_do_duoke(sentimos, dados) is None
+    # A da automação (saiu ou em voo) é nossa; a da caixa é de pessoa.
+    assert cat.publica_da_automacao({"automacao": "shopee_avaliacao_ruim"})
+    assert cat.publica_da_automacao(em_voo)
+    assert not cat.publica_da_automacao({"respondida_pelo_davinci": True})
+    assert not cat.publica_da_automacao(None) and not cat.publica_da_automacao({})
+    # Saiu o "da equipe" e o "com pessoa" (a pública da 1–3★ é automática).
+    assert not hasattr(cat, "publica_da_equipe")
+    assert not hasattr(cat.CATALOGO["shopee_avaliacao_ruim"], "publica_com_pessoa")
 
 
 def _regra_av(partes=None, condicoes=None):
@@ -1416,12 +1445,14 @@ def test_decidir_da_avaliacao_queixa_atendida_chat_e_ia_no_automatico():
     assert cat.decidir(ruim, {"queixa_no_comentario": True}, r) is None, "a 1–3★ pergunta"
     for aut in (boa, ruim):
         assert cat.decidir(aut, {"avaliacao_ja_atendida": True}, r) == "avaliacao_ja_atendida"
-    # O chat que não sai: a 4–5★ ainda manda a pública; a 1–3★ (só chat) não manda.
+    # O chat que não sai: as duas faixas ainda mandam a pública (a 1–3★ também,
+    # 29/10/2026); a regra só com o chat não manda.
     for motivo in ("sem_conversa", "fora_da_janela_shopee", "conversa_com_pessoa"):
         assert cat.decidir(boa, {"sem_chat": motivo}, r) is None
-        assert cat.decidir(ruim, {"sem_chat": motivo}, r) == motivo
+        assert cat.decidir(ruim, {"sem_chat": motivo}, r) is None
     so_chat = _regra_av(partes=[{"tipo": "texto", "texto": "Oi!"}])
-    assert cat.decidir(boa, {"sem_chat": "sem_conversa"}, so_chat) == "sem_conversa"
+    for aut in (boa, ruim):
+        assert cat.decidir(aut, {"sem_chat": "sem_conversa"}, so_chat) == "sem_conversa"
     # A IA no automático: a trava de sempre, menos com a condição ligada.
     assert cat.decidir(boa, {"canal_auto": True}, r) == "ia_no_automatico"
     com = _regra_av(condicoes={"com_ia_no_automatico": True})

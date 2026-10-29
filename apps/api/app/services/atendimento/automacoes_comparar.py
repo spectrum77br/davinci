@@ -543,11 +543,7 @@ def avaliacao_lida_em(av: Any) -> datetime | None:
 
 
 async def _comparar_avaliacoes(
-    session: AsyncSession,
-    linhas: list[AtendimentoAutomacaoRegistro],
-    *,
-    agora: datetime,
-    regras: dict[tuple[str, UUID], AtendimentoAutomacaoRegra] | None = None,
+    session: AsyncSession, linhas: list[AtendimentoAutomacaoRegistro], *, agora: datetime
 ) -> tuple[int, int]:
     """As respostas de avaliação: pela resposta PÚBLICA que a avaliação já tem.
 
@@ -557,14 +553,13 @@ async def _comparar_avaliacoes(
     comprador) ou o `resposta_em` menos os 59 min que a Shopee grava a mais. Sem
     a resposta do Duoke e com a avaliação relida depois do fim da janela (ou
     respondida por pessoa) → `nao_mandou`; senão continua pendente. A pública
-    que saiu pelo DaVinci e a da equipe na 1–3★ em `enviar` não são o Duoke
-    (`automacoes_catalogo.publica_do_duoke`, 29/10/2026): lá vale só o chat.
+    que saiu pelo DaVinci não é o Duoke — pela marca, não pelo texto: o padrão
+    da 1–3★ é o dele (`automacoes_catalogo.publica_do_duoke`, 29/10/2026); lá
+    vale só o chat (o Duoke ainda ligado manda o dele: dispara o disjuntor).
     """
     if not linhas:
         return 0, 0
     from app.services.atendimento.automacoes import avaliacoes_das_linhas
-
-    regras = regras or {}
 
     avaliacoes = await avaliacoes_das_linhas(session, linhas)
     janelas = {
@@ -586,12 +581,10 @@ async def _comparar_avaliacoes(
             continue
         a, b = janelas[x.id]
         resposta = (av.resposta_loja or "").strip()
-        # A pública que saiu pelo DaVinci (a da automação ou a de alguém na caixa)
-        # e a da equipe na 1–3★ em `enviar` nunca são a do Duoke — nem com o texto
-        # dele (senão o disjuntor desligaria a regra).
-        tipo = cat.publica_do_duoke(
-            aut, resposta, av.dados, regras.get((x.automacao, x.integration_id))
-        )
+        # A pública que saiu pelo DaVinci (a da automação, também a em voo, ou a
+        # de alguém na caixa) nunca é a do Duoke — nem com o texto dele, que é o
+        # padrão da 1–3★ (senão o disjuntor desligaria a regra).
+        tipo = cat.publica_do_duoke(resposta, av.dados)
         chat = next(
             (
                 (mid, em)
@@ -1074,8 +1067,8 @@ async def _so_duoke_avaliacoes(
         if regra is None:
             continue
         aut = cat.CATALOGO[codigo]
-        if cat.publica_do_duoke(aut, r.resposta_loja, r.dados, regra) is None:
-            continue  # pelo DaVinci, ou a da equipe na 1–3★ em `enviar` (29/10/2026)
+        if cat.publica_do_duoke(r.resposta_loja, r.dados) is None:
+            continue  # pelo DaVinci (a marca, 29/10/2026): não é o Duoke
         ligada = max(_utc(regra.ligada_desde) or motor_desde, motor_desde)
         duoke_em = hora_da_resposta_publica(r.resposta_em)
         if _utc(r.criado_em) < ligada or duoke_em is None:
@@ -1213,12 +1206,12 @@ async def comparar(
         and x.pedido
     ]
     de_avaliacao = [x for x in abertas if cat.CATALOGO[x.automacao].alvo == cat.ALVO_AVALIACAO]
-    regras = await regras_por_chave(session, ativas=False)
     m1, n1 = await _comparar_conversas(session, de_conversa, agora=agora, ultimo_ok=ultimo_ok)
     m2, n2 = await _comparar_pedidos(session, de_pedido, agora=agora, ultimo_ok=ultimo_ok)
-    m3, n3 = await _comparar_avaliacoes(session, de_avaliacao, agora=agora, regras=regras)
+    m3, n3 = await _comparar_avaliacoes(session, de_avaliacao, agora=agora)
     await _alertas_e_divergencias(session, de_conversa + de_pedido + de_avaliacao)
     await session.flush()
+    regras = await regras_por_chave(session, ativas=False)
     so = await _so_duoke(session, agora=agora, motor_desde=_utc(motor_desde), regras=regras)
     so += await _so_duoke_avaliacoes(
         session, agora=agora, motor_desde=_utc(motor_desde), regras=regras

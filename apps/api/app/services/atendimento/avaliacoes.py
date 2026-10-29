@@ -76,7 +76,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import DateTime, and_, cast, func, or_, select, text
+from sqlalchemy import DateTime, Text, and_, cast, func, literal, or_, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.db as _db
@@ -93,6 +94,7 @@ from app.models import (
 from app.redis_client import redis
 from app.services import links_shopee
 from app.services.atendimento import etiqueta_fatos, gravar, indexar, indice, reclamacoes
+from app.services.atendimento.automacoes_catalogo import MARCA_PUBLICA_EM_VOO
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
@@ -1794,6 +1796,66 @@ async def avaliacao_da_conversa(
     ).scalar_one_or_none()
 
 
+# A resposta pública da AUTOMAÇÃO em voo (29/10/2026, `automacoes_catalogo.
+# MARCA_PUBLICA_EM_VOO`): gravada antes do `reply_comment`, ela segura a caixa
+# "Responder em público" — a pública não se apaga, e nunca vão duas. Saiu, vira
+# `dados.automacao`; a Shopee recusou, sai. No ambíguo (timeout) ela fica, e a
+# caixa só solta quando a avaliação for relida (`conferida_em`) este tanto
+# depois dela, ainda sem resposta: aí a nossa não saiu (o envio leva até 90 s).
+ESPERA_PUBLICA_EM_VOO = timedelta(minutes=30)
+
+
+def marcar_publica_em_voo(
+    a: AtendimentoAvaliacaoLoja,
+    *,
+    codigo: str,
+    registro_id: UUID | None,
+    agora: datetime | None = None,
+) -> None:
+    """A automação vai chamar o `reply_comment` desta avaliação: a marca. Não commita."""
+    a.dados = {
+        **_dict(a.dados),
+        MARCA_PUBLICA_EM_VOO: {
+            "automacao": codigo,
+            "registro_id": str(registro_id) if registro_id else None,
+            "em": _iso(agora or _agora()),
+        },
+    }
+
+
+async def desmarcar_publica_em_voo(session: AsyncSession, a: AtendimentoAvaliacaoLoja) -> None:
+    """A Shopee recusou a pública da automação (nada saiu): a marca sai. Commita.
+
+    No SQL (`dados - chave`): a leitura das avaliações pode ter mexido no `dados`
+    enquanto a Shopee respondia (sem a trava). Falhou o banco: a marca fica (só
+    segura a caixa até a releitura, `publica_em_voo`)."""
+    tabela = AtendimentoAvaliacaoLoja
+    try:
+        await session.execute(
+            update(tabela)
+            .where(tabela.id == a.id)
+            .values(dados=tabela.dados.op("-")(literal(MARCA_PUBLICA_EM_VOO, Text)))
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+    except DBAPIError:
+        await session.rollback()
+        logger.warning("atendimento_avaliacao_marca_em_voo_ficou", avaliacao_id=str(a.id))
+
+
+def publica_em_voo(a: AtendimentoAvaliacaoLoja) -> bool:
+    """A pública da automação pode estar saindo (ou ter saído sem o banco saber)? PURA.
+
+    A marca vale até a avaliação ser relida `ESPERA_PUBLICA_EM_VOO` depois dela
+    ainda sem resposta (com resposta, quem segura é a própria resposta)."""
+    marca = _dict(a.dados).get(MARCA_PUBLICA_EM_VOO)
+    if not marca:
+        return False
+    em = indice.de_iso(_dict(marca).get("em"))
+    lida = _conferida_em(a)
+    return em is None or lida is None or lida < em + ESPERA_PUBLICA_EM_VOO
+
+
 async def gravar_resposta_automatica(
     session: AsyncSession,
     a: AtendimentoAvaliacaoLoja,
@@ -1807,17 +1869,20 @@ async def gravar_resposta_automatica(
 
     Como `depois_da_resposta`, sem conversa: `dados.automacao` (o código) diz
     que foi a automática — o comparador não a lê como a do Duoke e o motor não
-    a lê como de pessoa. A pendente (se já era) sai da fila.
+    a lê como de pessoa. Pela marca, nunca pelo texto: o padrão da 1–3★ é o
+    mesmo do Duoke. A marca em voo sai. A pendente (se já era) sai da fila.
     """
     agora = agora or _agora()
     a.resposta_loja = indice.texto_curto(texto, indice.TEXTO_AVALIACAO_MAX)
     a.resposta_em = agora
-    a.dados = {
+    dados = {
         **_dict(a.dados),
         "respondida_pelo_davinci": True,
         "automacao": codigo,
         "registro_id": str(registro_id) if registro_id else None,
     }
+    dados.pop(MARCA_PUBLICA_EM_VOO, None)
+    a.dados = dados
     a.atualizado_em = agora
     await session.flush()
     if a.pendente_desde is not None:

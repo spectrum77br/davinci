@@ -1273,12 +1273,13 @@ async function principal() {
         partes: [parte({ tipo: 'cartao_pedido', pedido: '2510050ABC', diferenca_s: -1200 }), parte({ texto: 'Oi! 👋 Notamos que você deixou alguns itens no carrinho 💸 R$20 OFF', principal: true, diferenca_s: -1199 })],
       },
     }
+    // 29/10/2026 ("Automática, texto padrão"): a 1–3★ manda a pública padrão e a pergunta no chat.
     const previaAvaliacao = {
       linha: linhaReg({ id: 'l-3', automacao: 'shopee_avaliacao_ruim', alvo: 'avaliacao' }),
-      automacao: { codigo: 'shopee_avaliacao_ruim', nome: 'Resposta da avaliação 1 a 3★', plataforma: 'shopee', tipo: 'avaliacao_ruim', so_simulacao: 'avaliacao_publica', so_simulacao_texto: 'a resposta da avaliação é PÚBLICA' },
+      automacao: { codigo: 'shopee_avaliacao_ruim', nome: 'Resposta da avaliação 1 a 3★ (pública + pergunta no chat)', plataforma: 'shopee', tipo: 'avaliacao_ruim', so_simulacao: null, so_simulacao_texto: null },
       davinci: {
         sairia: false, de_verdade: false, estado: 'pulado', motivo: 'pessoa_respondeu', motivo_texto: 'Alguém da equipe já respondeu', hora: ISO, hora_tipo: 'devido', comprador: null, valores: {},
-        partes: [parte({ tipo: 'resposta_publica', texto: 'Sentimos muito pela experiência 😔', principal: true }), parte({ texto: 'Sentimos muito pela experiência 😔' })],
+        partes: [parte({ tipo: 'resposta_publica', texto: 'Sentimos muito pela experiência 😔 Não foi o atendimento que buscamos oferecer.', principal: true }), parte({ texto: 'Oi! Vimos a sua avaliação e queremos entender o que aconteceu. Pode nos contar?' })],
         motivos_validador: [], versao_regra: 1, versao_da_linha: 1,
       },
       duoke: { estado: 'nao_mandou', comparacao: 'bateu', diferenca_s: null, em: null, janela_de: ISO, janela_ate: ISO, partes: [] },
@@ -1353,6 +1354,9 @@ async function principal() {
     const p4 = html.slice(html.indexOf('data-previa-linha'))
     // A avaliação: a resposta PÚBLICA num quadro próprio; não sairia (o porquê); o Duoke não mandou.
     assert.match(p4, /data-parte-davinci="resposta_publica"[\s\S]*Resposta pública na avaliação/)
+    // A 1–3★ (29/10/2026): a pública padrão primeiro, depois a pergunta no chat.
+    assert.match(p4, /data-lado="davinci"[\s\S]*data-parte-davinci="resposta_publica"[\s\S]*Sentimos muito pela experiência[\s\S]*data-parte-davinci="texto"[\s\S]*Vimos a sua avaliação/)
+    assert.doesNotMatch(p4.slice(0, p4.indexOf('data-lado="davinci"')), /só simulação/, 'a 1–3★ não só simula')
     assert.match(p4, /data-nao-sairia[^>]*>Não sairia: Alguém da equipe já respondeu\./)
     assert.match(p4, /data-sem-duoke[^>]*>O Duoke não mandou \(procurado de /)
     assert.doesNotMatch(p4, /R\$20 OFF/, 'a resposta lenta da outra linha não entrou')

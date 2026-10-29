@@ -386,10 +386,13 @@ TEXTO_AVALIACAO_RUIM_CHAT = "{comprador} " + TEXTO_AVALIACAO_RUIM_PUBLICA
 # perguntar e tentar entender melhor o porquê dessa nota"). Curtos e VARIADOS
 # (uma versão por bloco, `SEPARADOR_VARIANTES`; a avaliação escolhe uma, sempre
 # a mesma — `escolher_variante`), sem contato, link nem promoção, sem pedir
-# nada. Nenhum leva as duas frases do modelo do Duoke (`ASSINATURAS_AVALIACAO`):
-# senão o comparador leria a nossa resposta como a dele. A 1–3★ só PERGUNTA, no
-# chat: nunca pede para mudar ou tirar a nota, não oferece nada em troca (a
-# política da Shopee) e não promete; a resposta PÚBLICA dela fica com pessoa.
+# nada. Nenhum dos NOVOS leva as duas frases do modelo do Duoke
+# (`ASSINATURAS_AVALIACAO`). A 1–3★ PERGUNTA no chat: nunca pede para mudar ou
+# tirar a nota, não oferece nada em troca (a política da Shopee) e não promete.
+# A resposta PÚBLICA da 1–3★ é o texto padrão de hoje, o MESMO do Duoke
+# (`TEXTO_AVALIACAO_RUIM_PUBLICA`; 29/10/2026, Eduardo: "Automática, texto
+# padrão"): quem a mandou se sabe pela marca na avaliação (`dados.automacao`,
+# `MARCA_PUBLICA_EM_VOO`), nunca pelo texto (`publica_do_duoke`).
 # Todas NEUTRAS (29/10/2026, a revisão): nenhuma diz que o comprador gostou — a
 # 4–5★ com queixa que o detector não pegar não lê "que bom que você gostou".
 SEPARADOR_VARIANTES = "||"
@@ -595,9 +598,6 @@ class Automacao:
     compara_na_conversa: bool = False
     # A resposta da avaliação: a faixa de estrelas (inclusive).
     estrelas: tuple[int, int] | None = None
-    # A resposta PÚBLICA desta fica com pessoa (a 1–3★, 29/10/2026): o motor
-    # tira a parte pública (`partes_da_regra`) e o PATCH recusa uma.
-    publica_com_pessoa: bool = False
 
     @property
     def espera_padrao(self) -> timedelta:
@@ -932,24 +932,27 @@ def _montar() -> dict[str, Automacao]:
             codigo="shopee_avaliacao_ruim",
             plataforma="shopee",
             canal=CANAL_CHAT,
-            nome="Pergunta da avaliação 1 a 3★ (só chat)",
+            nome="Resposta da avaliação 1 a 3★ (pública + pergunta no chat)",
             tipo=TIPO_AVALIACAO_RUIM,
             gatilho=GATILHO_AVALIACAO,
             alvo=ALVO_AVALIACAO,
             familia=FAMILIA_PEDIDO,
             descricao=(
                 "Avaliação de 1 a 3 estrelas lida pelo DaVinci (a cada 30 min) → 1 h depois: a "
-                "pergunta no chat (o que aconteceu?). A resposta pública fica com pessoa; a "
-                "resposta do comprador vai para a equipe."
+                "resposta pública padrão (a mesma de hoje) e a pergunta no chat (o que "
+                "aconteceu?); sem como mandar o chat, só a pública. A resposta do comprador "
+                "vai para a equipe."
             ),
-            partes=(_texto(TEXTO_ENTENDER_CHAT),),
+            # 29/10/2026, Eduardo ("Automática, texto padrão"): a pública volta,
+            # com o texto que sai hoje (82 das 87 1–3★ respondidas em 30 dias;
+            # as outras 5, de pessoa — SELECT em produção, 29/10/2026).
+            partes=(_publica(TEXTO_AVALIACAO_RUIM_PUBLICA), _texto(TEXTO_ENTENDER_CHAT)),
             atraso_min=60,
             validade=_h(24),
             lojas_duoke=SHOPEE_AVALIACAO,
             condicoes={"com_ia_no_automatico": False},
             campanha=True,
             estrelas=(1, 3),
-            publica_com_pessoa=True,
             # A resposta do Duoke chega até ~18 h depois (KFA, 1.079 min, 7 dias
             # até 05/10/2026): a janela é de 24 h para não dar "só DaVinci".
             comparar=("evento", timedelta(0), _h(24)),
@@ -1111,8 +1114,9 @@ def partes_padrao(aut: Automacao, nome_loja: str | None = None) -> list[dict]:
 
 # A semente ANTIGA da resposta da avaliação (a migration 0371: os textos do
 # Duoke, iguais nas 14 lojas, versão 1 e ninguém mexeu — SELECT em produção,
-# 29/10/2026). A regra que ainda tem exatamente ela vale pelo padrão novo
-# (`partes_da_regra`): sem migration, e o texto que alguém editar fica.
+# 29/10/2026, de novo à tarde: as 14 regras da 1–3★ com ela, versão 1). A regra
+# que ainda tem exatamente ela vale pelo padrão novo (`partes_da_regra`): sem
+# migration, e o texto que alguém editar fica.
 PARTES_SEMENTE_ANTIGA: dict[str, list[dict]] = {
     "shopee_avaliacao_boa": [
         _publica(TEXTO_AVALIACAO_BOA_PUBLICA),
@@ -1123,6 +1127,14 @@ PARTES_SEMENTE_ANTIGA: dict[str, list[dict]] = {
         _texto(TEXTO_AVALIACAO_RUIM_CHAT),
     ],
 }
+# O padrão da 1–3★ que durou a tarde de 29/10/2026 (só a pergunta no chat, a
+# pública com pessoa; não chegou a produção): a regra salva com ele exatamente
+# (a semente do botão grava o padrão da hora) vale pelo padrão de agora, com a
+# pública ("Automática, texto padrão"). Para mandar só o chat, tira-se a pública
+# E muda-se o texto do chat — igual ao padrão anterior, volta a pública.
+PARTES_PADRAO_ANTERIOR: dict[str, list[dict]] = {
+    "shopee_avaliacao_ruim": [_texto(TEXTO_ENTENDER_CHAT)],
+}
 
 
 def partes_da_regra(
@@ -1130,15 +1142,16 @@ def partes_da_regra(
 ) -> list[dict]:
     """As partes que VALEM para a regra (o motor, a prévia e a tela leem daqui). PURA.
 
-    Sem partes, o padrão da loja; com a semente antiga da avaliação, o padrão
-    novo (29/10/2026). Na automação com a resposta pública com pessoa
-    (`publica_com_pessoa`, a 1–3★), a parte pública nunca vale.
+    Sem partes, o padrão da loja; com a semente antiga da avaliação (ou o
+    padrão anterior da 1–3★, só o chat), o padrão de agora (29/10/2026).
     """
     salvas = [dict(p) for p in (partes or []) if isinstance(p, dict)]
-    if not salvas or salvas == PARTES_SEMENTE_ANTIGA.get(aut.codigo):
+    if (
+        not salvas
+        or salvas == PARTES_SEMENTE_ANTIGA.get(aut.codigo)
+        or salvas == PARTES_PADRAO_ANTERIOR.get(aut.codigo)
+    ):
         salvas = partes_padrao(aut, nome_loja)
-    if aut.publica_com_pessoa:
-        salvas = [p for p in salvas if p.get("tipo") != PARTE_RESPOSTA_PUBLICA]
     return salvas
 
 
@@ -1301,31 +1314,36 @@ def assinatura_avaliacao(texto: str | None) -> str | None:
     return None
 
 
-def publica_da_equipe(aut: Automacao, regra: Any = None) -> bool:
-    """A resposta PÚBLICA da avaliação é da equipe (não do Duoke nem nossa)? PURA.
+# A resposta pública da AUTOMAÇÃO foi à plataforma e o resultado ainda não
+# voltou (29/10/2026): a marca na avaliação (`dados`), gravada ANTES do
+# `reply_comment` (`avaliacoes.marcar_publica_em_voo`). Saiu → vira
+# `dados.automacao`; a Shopee recusou → sai. Fica no ambíguo (timeout), no
+# processo que morreu e no banco que falhou depois de a Shopee aceitar: a
+# resposta que a leitura trouxer é NOSSA — com o texto padrão da 1–3★, igual ao
+# do Duoke, só a marca diz quem mandou.
+MARCA_PUBLICA_EM_VOO = "automacao_em_voo"
 
-    29/10/2026, a revisão: na automação com a pública com pessoa (a 1–3★) e a
-    regra em `enviar`, o Duoke está desligado e a pública é a da equipe — que
-    posta o mesmo texto fixo dele (84 de 84 em 30 dias). Ela não é sinal do
-    Duoke (o disjuntor desligaria a pergunta) nem segura a pergunta no chat.
-    """
-    return aut.publica_com_pessoa and getattr(regra, "modo", None) == MODO_ENVIAR
+
+def publica_da_automacao(dados: dict | None) -> bool:
+    """A resposta pública da avaliação saiu (ou pode ter saído) pela automação? PURA."""
+    d = dados if isinstance(dados, dict) else {}
+    return bool(d.get("automacao") or d.get(MARCA_PUBLICA_EM_VOO))
 
 
-def publica_do_duoke(
-    aut: Automacao, resposta: str | None, dados: dict | None, regra: Any = None
-) -> str | None:
+def publica_do_duoke(resposta: str | None, dados: dict | None) -> str | None:
     """A resposta PÚBLICA da avaliação conta como a do Duoke: o tipo, ou None. PURA.
 
     O modelo dele (`assinatura_avaliacao`), menos (29/10/2026) a que saiu pelo
-    DaVinci — a da automação (`dados.automacao`) ou a de alguém na caixa
-    "Responder em público" (`dados.respondida_pelo_davinci`) — e a da equipe
-    (`publica_da_equipe`). O motor, o comparador e o "só Duoke" leem daqui.
+    DaVinci — a da automação (`publica_da_automacao`: a marca, não o texto, que
+    na 1–3★ é o mesmo dele) ou a de alguém na caixa "Responder em público"
+    (`dados.respondida_pelo_davinci`). Com a regra em Enviar e o Duoke ainda
+    ligado, a dele (sem marca) segue sendo dele: pula a nossa e dispara o
+    disjuntor. A equipe não posta mais o texto fixo à mão (29/10/2026: a pública
+    da 1–3★ é automática); quem postar assim na Shopee conta como o Duoke — o lado
+    seguro. O motor, o comparador e o "só Duoke" leem daqui.
     """
     d = dados if isinstance(dados, dict) else {}
-    if not (resposta or "").strip() or d.get("automacao") or d.get("respondida_pelo_davinci"):
-        return None
-    if publica_da_equipe(aut, regra):
+    if not (resposta or "").strip() or publica_da_automacao(d) or d.get("respondida_pelo_davinci"):
         return None
     return assinatura_avaliacao(resposta)
 
@@ -2391,7 +2409,8 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
         if aut.tipo == TIPO_AVALIACAO_BOA and f.get("queixa_no_comentario"):
             return "queixa_no_comentario"
         # O chat que não pode sair (sem conversa, fora da janela, com pessoa):
-        # a 4–5★ ainda manda a pública; sem pública, não manda nada.
+        # ainda manda a pública (a 4–5★ e, desde 29/10/2026, a 1–3★); a regra
+        # sem pública não manda nada.
         sem_chat = f.get("sem_chat")
         if sem_chat and not tem_resposta_publica(
             partes_da_regra(aut, getattr(regra, "partes", None))
