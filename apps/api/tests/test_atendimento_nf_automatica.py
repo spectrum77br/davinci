@@ -869,6 +869,18 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("comprei dois e só veio uma nota, manda a outra", False),
         ("comprei o celular e nao chegou, manda a nota", False),
         ("aguardo o envio do pedido e me manda a nota fiscal", False),
+        ("boa tarde, comprei um relogio e nao veio a nota fiscal, pode me mandar?", True),
+        # O "comprei" solto é o produto sem trava: fica fora da lista.
+        ("nao veio o que comprei so a nota fiscal", False),
+        ("o celular que comprei nao veio so a nota fiscal", False),
+        ("quero o que comprei, me manda a nota fiscal", False),
+        ("e o que eu comprei? manda a nota fiscal", False),
+        ("comprei e nao veio so a nota fiscal", False),
+        # O produto depois do "e do/da" também é o produto pedido.
+        ("preciso da nota fiscal e do produto", False),
+        ("preciso do envio da nota fiscal e do produto", False),
+        ("quero o envio da nota fiscal e do pedido", False),
+        ("preciso do envio da nota fiscal", True),
     ],
 )
 def test_pedido_claro(texto, claro):
@@ -955,6 +967,18 @@ def test_figurinha_e_conversar_com_vendedor_nao_contam_como_fala():
     assert nf_automatica.pedido_pelo_menu([vendedor, menu, dois], dois) is True
     depois = M(id=95, autor="cliente", texto="[Figurinha]")
     assert nf_automatica.pedido_pelo_menu([menu, dois, depois], depois) is True
+    # Terceira revisão de 30/10: o "2" que a loja já respondeu não vale de novo para a figurinha
+    # ou o botão do FAQ que vêm depois (é outro turno).
+    resposta = M(id=96, autor="loja", texto="Segue em anexo a sua nota fiscal", origem="externo")
+    tarde = M(id=97, autor="cliente", texto="[Figurinha]", payload={"message_type": "sticker"})
+    assert nf_automatica.pedido_pelo_menu([menu, dois, resposta, tarde], tarde) is False
+    botao = M(
+        id=98,
+        autor="cliente",
+        texto="Conversar com Vendedor",
+        payload={"message_type": "faq_liveagent"},
+    )
+    assert nf_automatica.pedido_pelo_menu([menu, dois, resposta, botao], botao) is False
     # Escrito pelo cliente (sem o botão do FAQ) e o "Falar com atendente" continuam contando.
     digitado = M(id=3, autor="cliente", texto="conversar com vendedor")
     assert nf_automatica.pedido_pelo_menu([digitado, menu, dois], dois) is False
@@ -1275,6 +1299,21 @@ def test_pedido_pelo_menu():
         (["onde está o meu pedido? e a nota fiscal?"], False),
         (["vocês enviam a nota fiscal do outro pedido?"], False),
         (["vocês enviam a nota fiscal?", "e é original?"], False),
+        (["a nota fiscal já está disponível?"], True),
+        (["a nota fiscal?", "boa tarde", "poderia me passar aqui"], True),
+        # A chegada, a posse, o estoque e o pedido junto não são a pergunta da NF; e a pergunta
+        # da entrega ou do produto não é o elogio.
+        (["veio so a nota fiscal"], False),
+        (["recebi só a nota fiscal"], False),
+        (["chegou so a nota fiscal", "e o produto?"], False),
+        (["queria saber do meu pedido e da nota fiscal"], False),
+        (["e o meu pedido?", "e a nota fiscal?"], False),
+        (["esta disponivel? voces enviam a nota fiscal?"], False),
+        (["ainda tem? voces enviam nota fiscal?"], False),
+        (["o meu pedido chegou?"], False),
+        (["veio o relógio?"], False),
+        (["o celular?"], False),
+        (["oi! tudo bem e vc?"], True),
     ],
 )
 def test_pedido_pelo_menu_olha_o_que_veio_antes_do_menu(antes, pelo_menu):
