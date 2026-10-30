@@ -12,6 +12,8 @@
 // branco no quadrado azul (30/09/2026, idem: o azul da marca e a inicial);
 // Carrefour = o logo da marca desenhado aqui (30/10/2026: chevron vermelho,
 // forma azul e o "C" branco no vão — o dono pediu "igual do carrefour").
+// Netshoes = "N" branco no quadrado roxo (30/10/2026: a loja Netshoes Poofy
+// entra pelos e-mails da loja na barra — só a cor da marca e a inicial).
 // Facebook = "f" branco no círculo azul; Site = globo branco no quadrado
 // verde-azulado (02/10/2026: os sites Charlots e Uranyx — não é marca).
 // WhatsApp = balão branco com o fone no círculo verde (19/10/2026, o Zap —
@@ -28,6 +30,7 @@ const NOMES: Record<string, string> = {
   amazon: 'Amazon',
   magalu: 'Magalu',
   carrefour: 'Carrefour',
+  netshoes: 'Netshoes',
   temu: 'Temu',
   aliexpress: 'AliExpress',
   instagram: 'Instagram',
@@ -114,6 +117,12 @@ const letra = computed(() => (cod.value[0] || '?').toUpperCase())
       <rect x="2" y="2" width="20" height="20" rx="5" fill="#fff" stroke="#E5E7EB" stroke-width="0.5" />
       <path d="M3.4 12 L10.6 4.6 H14.2 L8.6 12 L14.2 19.4 H10.6 Z" fill="#E30613" />
       <path d="M16 5.2 C12.7 7 11.1 9.3 11.1 12 C11.1 14.7 12.7 17 16 18.8 L21.2 12 Z" fill="#004E9F" />
+    </template>
+
+    <!-- Netshoes: "N" branco no quadrado roxo -->
+    <template v-else-if="cod === 'netshoes'">
+      <rect x="2" y="2" width="20" height="20" rx="5" fill="#5C2D91" />
+      <text x="12" y="17.2" text-anchor="middle" font-size="14" font-weight="800" font-family="Arial, Helvetica, sans-serif" fill="#fff">N</text>
     </template>
 
     <!-- Temu: "T" branco no quadrado laranja -->

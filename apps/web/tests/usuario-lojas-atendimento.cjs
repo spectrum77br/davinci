@@ -159,6 +159,10 @@ async function principal() {
     assert.equal(L.linhaTemCaixas({ externo_ref: 'amazon:vr', integration_id: null }), true)
     assert.equal(L.linhaTemCaixas({ externo_ref: 'site:uranyx', integration_id: null }), false)
     assert.equal(L.linhaTemCaixas({ integration_id: 'i1' }), true)
+    // A Netshoes (só e-mail da loja na barra) tem o ícone dela, não a bolinha cinza.
+    const icone = web('components/AtendimentoIconePlataforma.vue')
+    assert.match(icone, /netshoes: 'Netshoes'/)
+    assert.match(icone, /<template v-else-if="cod === 'netshoes'">\s*<rect[^>]*fill="#5C2D91"/)
   }
 
   // ------------------------------------------------ funções puras
