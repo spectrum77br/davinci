@@ -153,6 +153,12 @@ meu celular não veio com nota fiscal"):
   antes que não é pedido claro: pré-venda ("vocês enviam a nota?", "acompanha
   nota?"), "é original?", e-mail, "aguardo a emissão", descrição na nota, várias
   compras, garantia da Apple e alguns pedidos com palavra fora da lista.
+- Terceira revisão de 30/10 (para passar o código no ar nas lojas no automático): antes do
+  "2", a pergunta de como receber a NF ("a nota fiscal vocês envia por aqui?", "queria saber
+  se vocês enviam a nota fiscal", `_pergunta_da_nf`) vale como o pedido; e entram o "comprei"
+  e "o envio da nota". Medido de novo (pull de 30/10): conversas com a NF certa 53, 23 nas
+  lojas no automático (no ar: 57 e 22); as 4 do automático que só o código no ar mandava são
+  "é original?", o número de série na nota e 2 pedidos com palavra rara.
 """
 
 from __future__ import annotations
@@ -229,6 +235,9 @@ _O_CLIENTE_FAZ = re.compile(
     r"|\b(?:manda|mande|mandar|mandem|envia|envie|enviar|enviem|passa|passe|passar|"
     r"encaminha|encaminhe|encaminhar|encaminhem)\s+ela\b"
     r"|\bse\s+(?:(?:vc|voce|vcs|voces)\s+)?(?:puder|puderem|possivel|for\s+possivel)\b"
+    # Terceira revisão de 30/10: "(aguardo) o envio da nota fiscal" — o "envio" só grudado no
+    # documento (o "envio do pedido" é a entrega).
+    r"|\b(?:o\s+)?envio\s+da\s+(?=" + _DOC + r"\b)"
 )
 # Revisão de 30/10: "como faço para receber/ter acesso à nota fiscal?", "como consigo a nf?" —
 # o que se responde é a NF. O "como" só nesta forma, grudado no documento ("como faço para
@@ -393,6 +402,7 @@ _PALAVRAS_DO_PEDIDO = (
         nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
         a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
         esse este essa esta junto caixa pacote embalagem pedido compra produto
+        comprei
         """.split()
     )
 )
@@ -459,7 +469,9 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
         for m in ia.rajada_do_cliente(recentes[:ultimo], None)
         if m.texto and not _sem_fala(m) and validador.plano_de(m.texto).strip(" .!\n") != "2"
     ]
-    return all(_so_cortesia(t) or _so_elogio(t) for t in antes) or pedido_claro(antes)
+    return all(_so_cortesia(t) or _so_elogio(t) or _pergunta_da_nf(t) for t in antes) or (
+        pedido_claro(antes)
+    )
 
 
 def textos_do_turno(recentes: Sequence[Any], rajada: Sequence[Any]) -> list[str | None]:
@@ -513,6 +525,43 @@ def _so_elogio(texto: str) -> bool:
     """
     palavras = re.findall(r"[a-z0-9]+", _grafia(validador.plano_de(texto)))
     return bool(palavras) and all(p in _PALAVRAS_DO_ELOGIO for p in palavras)
+
+
+# Terceira revisão de 30/10 (comparado com o código no ar, o "2" com a PERGUNTA de como receber
+# a NF antes deixava de sair: "a nota fiscal vocês envia por aqui? || 2" no Kia bac84b0c,
+# "queria saber se vocês enviam a nota fiscal || 2", "onde ela está disponível? || 2"): antes
+# do "2" do menu ela vale como o pedido — o "2" logo depois é a escolha da NF. A pergunta da
+# compra ("vem com nota?", "acompanha nf?", "tem nota fiscal?") continua segurando, e as
+# outras travas também (o "não", o número, o produto, a garantia, o CPF).
+_ENVIAM = re.compile(r"\b(?:enviam|mandam)\b")
+_TEM_NOTA = re.compile(r"\b(?:tem|teria|tera|possui)\s+(?:(?:a|uma)\s+)?" + _DOC + r"\b")
+# O produto só como complemento da nota ("a nota fiscal do pedido"); solto ("onde está o meu
+# pedido? e a nota fiscal?") é outra pergunta.
+_COMPLEMENTO = re.compile(
+    r"\bd[aoe]s?\s+(?:(?:meu|minha|seu|sua|este|esse|esta|essa)\s+)?" + _O_PRODUTO + r"\b"
+)
+_O_PRODUTO_SOLTO = re.compile(r"\b" + _O_PRODUTO + r"\b")
+_PALAVRAS_DA_PERGUNTA = _PALAVRAS_DO_PEDIDO | frozenset(
+    """
+    onde disponivel saber se ela dele como tenho acesso consigo ver baixar emitida sera
+    """.split()
+)
+
+
+def _pergunta_da_nf(texto: str) -> bool:
+    """A pergunta de como receber a NF ("vocês enviam a nota fiscal por aqui?")? PURA.
+
+    Só vale antes do "2" do menu (`pedido_pelo_menu`); sem o "2", fica com a pessoa.
+    """
+    plano = " ".join(_grafia(validador.plano_de(texto)).split())
+    if not plano or len(plano) > 200 or not _NOMEIA_A_NF.search(plano):
+        return False
+    if _NAO_VEIO.search(plano) or _TEM_NOTA.search(plano):
+        return False
+    resto = _ENVIAM.sub(" ", plano)
+    if _NAO_E_SO_A_NF.search(resto) or _O_PRODUTO_SOLTO.search(_COMPLEMENTO.sub(" ", resto)):
+        return False
+    return all(p in _PALAVRAS_DA_PERGUNTA for p in re.findall(r"[a-z0-9]+", resto))
 
 
 def _so_cortesia(texto: str) -> bool:

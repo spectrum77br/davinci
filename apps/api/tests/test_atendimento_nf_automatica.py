@@ -863,6 +863,12 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("se puder mandar a nota e o carregador", False),
         ("o produto acompanha nota fiscal?", False),
         ("o relógio não acompanhou o carregador nem a nota", False),
+        # Terceira revisão de 30/10: o "comprei" e o "envio da nota" (o "envio do pedido", não).
+        ("comprei o celular, e nao veio com nota. preciso que me envie a nota fiscal", True),
+        ("me envia a nota fiscal, por favor. aguardo o envio da nota fiscal", True),
+        ("comprei dois e só veio uma nota, manda a outra", False),
+        ("comprei o celular e nao chegou, manda a nota", False),
+        ("aguardo o envio do pedido e me manda a nota fiscal", False),
     ],
 )
 def test_pedido_claro(texto, claro):
@@ -1253,6 +1259,22 @@ def test_pedido_pelo_menu():
         (["chegou tudo certo mas o fone não"], False),
         (["veio tudo certinho, só faltou o carregador"], False),
         (["chegou tudo certinho", "é original?"], False),
+        # Terceira revisão de 30/10: a pergunta de como receber a NF, com o "2" logo depois, é o
+        # pedido; a pergunta da compra e a que traz outro assunto, não.
+        (["oi bom dia ! a nota fiscal vocês envia por aqui ?"], True),
+        (["queria saber se vocês enviam a nota fiscal"], True),
+        (["preciso da nota fiscal, onde ela está disponível?"], True),
+        (["Favor enviasse a NF"], True),
+        (["vem com nota fiscal?"], False),
+        (["acompanha nota fiscal?"], False),
+        (["gostaria de saber se tem nota fiscal"], False),
+        (["vocês emitem nota fiscal?"], False),
+        (["a nf será emitida no meu cpf?"], False),
+        (["vocês enviam a nota fiscal no email?"], False),
+        (["vocês enviam a nota fiscal e a garantia?"], False),
+        (["onde está o meu pedido? e a nota fiscal?"], False),
+        (["vocês enviam a nota fiscal do outro pedido?"], False),
+        (["vocês enviam a nota fiscal?", "e é original?"], False),
     ],
 )
 def test_pedido_pelo_menu_olha_o_que_veio_antes_do_menu(antes, pelo_menu):
