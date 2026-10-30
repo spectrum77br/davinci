@@ -287,6 +287,16 @@ async def test_grafia_documento_sozinho_e_ausencia_mandam_a_nf(
     assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
 
 
+async def test_foto_no_turno_do_pedido_escrito_fica_com_a_pessoa(db, make_user, ligado, plataforma):
+    """Terceira revisão de 30/10: a foto (o defeito, o item errado) junto do pedido escrito."""
+    conversa, _ = await _cenario(db, make_user, texto="boa noite")
+    await _msg(db, conversa, None, tipo="imagem", ha=timedelta(minutes=2))
+    gatilho = await _msg(db, conversa, "me manda a nota fiscal", ha=timedelta(minutes=1))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:pedido_nao_claro" and plataforma == []
+
+
 async def test_pedido_escrito_com_o_2_do_menu_no_meio_manda_a_nf(db, make_user, ligado, plataforma):
     """Revisão de 30/10 (Barbosa f1875dc1): o "2" do menu no meio do pedido escrito."""
     conversa, _ = await _cenario(
@@ -890,8 +900,22 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("comprei o celular e so veio a caixa, manda a nota fiscal", False),
         ("comprei o celular e ainda nao veio nem a nota fiscal", False),
         ("comprei o celular de novo, manda a nota fiscal", False),
-        ("comprei o celular, pode me mandar a nota fiscal?", True),
-        ("bom dia comprei um celular e queria a nota fiscal", True),
+        # O "comprei" antes do pedido escrito fica fora (amplificava as outras brechas).
+        ("comprei o celular, pode me mandar a nota fiscal?", False),
+        ("bom dia comprei um celular e queria a nota fiscal", False),
+        ("comprei, me manda a nota fiscal, veio a caixa só", False),
+        # A caixa em qualquer ordem; joia/top depois do "e"; o trecho que é só o produto.
+        ("chegou a caixa só, manda a nota fiscal", False),
+        ("só tinha a caixa, manda a nota fiscal", False),
+        ("veio só um pacote, manda a nota fiscal", False),
+        ("e a joia? manda a nota fiscal", False),
+        ("manda a nota fiscal e o top", False),
+        ("manda a nota fiscal - o pedido?", False),
+        ("manda a nota fiscal. o pedido foi?", False),
+        ("e o meu ainda? manda a nota fiscal", False),
+        ("me envia a nota fiscal junto com o produto", False),
+        ("preciso da nota fiscal e ainda do produto", False),
+        ("vocês vão conseguir enviar a nota fiscal por aqui?", True),
         ("o celular que comprei veio so a caixa manda a nota fiscal", False),
         ("comprei e nao veio a nota, veio so a caixa", False),
         ("o celular so veio a caixa, manda a nota fiscal", False),
@@ -1004,6 +1028,27 @@ def test_o_2_que_responde_a_loja_ou_vem_com_foto_fica_com_a_pessoa():
     # A loja pergunta o número ou a escolha: o "2" responde a ela.
     quantas = loja(4, "Quantas unidades vieram com defeito?")
     assert nf_automatica.pedido_pelo_menu([oi, menu, quantas, dois], dois) is False
+    for pergunta in ("Pode me informar a quantidade de itens?", "Em que dia chegou?", "Qtd?"):
+        p = loja(4, pergunta)
+        assert nf_automatica.pedido_pelo_menu([oi, menu, p, dois], dois) is False, pergunta
+    # A foto com legenda (Shopee "image_with_text") e o áudio também são mídia.
+    legenda = M(
+        id=12,
+        autor="cliente",
+        texto="olha isso",
+        origem="externo",
+        tipo="outro",
+        payload={"message_type": "image_with_text"},
+    )
+    assert nf_automatica.pedido_pelo_menu([oi, menu, legenda, dois], dois) is False
+    audio = cliente(13, None, tipo="audio")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, dois, audio], audio) is False
+    # O "sim" que responde a pergunta da loja antes do menu não é a cortesia.
+    cancelar = loja(0, "Deseja cancelar o pedido?")
+    sim = cliente(1, "sim")
+    assert nf_automatica.pedido_pelo_menu([cancelar, sim, menu, dois], dois) is False
+    pede = cliente(1, "oi, pode me mandar a nota fiscal?")
+    assert nf_automatica.pedido_pelo_menu([cancelar, pede, menu, dois], dois) is True
 
 
 def test_o_2_de_um_menu_anterior_e_a_mesma_escolha():
@@ -1346,9 +1391,9 @@ def test_pedido_pelo_menu():
         (["oi"], True),
         (["boa tarde, tudo bem?", "por favor"], True),
         (["não veio a nota fiscal"], True),
-        # O "2" sem menu antes dele responde outra coisa (o de um menu anterior: o teste
-        # test_o_2_de_um_menu_anterior_e_a_mesma_escolha); o "6" (atendente) também segura.
-        (["oi", "2"], False),
+        # O "2" sem nada da loja antes dele é a escolha de um menu de antes (o que respondeu a
+        # pergunta da loja não: test_o_2_de_um_menu_anterior_e_a_mesma_escolha); o "6" segura.
+        (["oi", "2"], True),
         (["6"], False),
         # Segunda revisão de 29/10: o problema escrito ANTES do menu, na mesma rajada.
         (["Recebi a nota de outra pessoa, com outro nome"], False),
@@ -1406,6 +1451,9 @@ def test_pedido_pelo_menu():
         (["onde consigo ver a nota fiscal?"], True),
         (["vocês enviam nota fiscal? ela está disponível?"], False),
         (["está disponível a nota fiscal?"], False),
+        (["show, e o meu"], False),
+        (["lindo, o pedido foi"], False),
+        (["2"], True),
         (["chegou hoje, muito tarde"], False),
         (["show, e o pedido"], False),
         (["otimo, aguardo o meu pedido"], False),

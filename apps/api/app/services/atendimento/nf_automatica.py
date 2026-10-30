@@ -153,12 +153,18 @@ meu celular não veio com nota fiscal"):
   antes que não é pedido claro: pré-venda ("vocês enviam a nota?", "acompanha
   nota?"), "é original?", e-mail, "aguardo a emissão", descrição na nota, várias
   compras, garantia da Apple e alguns pedidos com palavra fora da lista.
-- Terceira revisão de 30/10 (para passar o código no ar nas lojas no automático): antes do
-  "2", a pergunta de como receber a NF ("a nota fiscal vocês envia por aqui?", "queria saber
-  se vocês enviam a nota fiscal", `_pergunta_da_nf`) vale como o pedido; e entram o "comprei"
-  e "o envio da nota". Medido de novo (pull de 30/10): conversas com a NF certa 53, 23 nas
-  lojas no automático (no ar: 57 e 22); as 4 do automático que só o código no ar mandava são
-  "é original?", o número de série na nota e 2 pedidos com palavra rara.
+- Terceira revisão de 30/10 (três conferências independentes, cada furo reproduzido ponta a
+  ponta): antes do "2", a pergunta de como receber a NF ("a nota fiscal vocês envia por
+  aqui?", "onde está a nota fiscal?", `_pergunta_da_nf`) vale como o pedido; o "2" que responde
+  a loja (o cliente escreveu entre o menu e a resposta, ou ela pediu número/escolha) e o
+  "sim" à pergunta da loja antes do menu ficam com a pessoa; a foto, o vídeo ou o arquivo no
+  turno também; "veio só a caixa", o "comprei" solto, "e o meu?", o trecho que é só o produto,
+  "e do/desse/ainda do produto" e a chegada sozinha como elogio, idem.
+- Medido nos 60 dias (até 30/10), só no ponto em que o rascunho sai de verdade (90 s de
+  silêncio do cliente, o cron de 1 min) e pela hora da plataforma, lido mascarado envio por
+  envio: o código no ar manda a NF em 45 conversas (16 nas lojas no automático) — 42 certas
+  (15), 1 errada (o cabo que não veio, engolido) e 2 repetidas (a loja já tinha mandado a
+  NF); esta régua manda em 45 (21) — 45 certas (21), nenhuma errada, nenhuma repetida.
 """
 
 from __future__ import annotations
@@ -310,6 +316,10 @@ _NAO_E_SO_A_NF = re.compile(
     r"|\b(?:so\s+(?:(?:veio|vieram|chegou|chegaram|recebi)\s+)?|"
     r"(?:veio|vieram|chegou|chegaram|recebi)\s+so\s+)(?:(?:a|o|as|os)\s+)?"
     r"(?:caixa|caixinha|embalagem|pacote)\b"
+    r"|\b(?:caixa|caixinha|embalagem|pacote)\b(?:\s+\w+){0,2}?\s+so\b|\bso\s+tinha\b"
+    r"|\bso\s+(?:um|uma)\s+(?:caixa|caixinha|pacote|embalagem)\b"
+    # "e a joia?", "e o top" — a palavra da cortesia/do elogio que é o produto.
+    r"|\be\s+(?:d?[ao]s?\s+)?(?:joia|top)\b"
     # Revisão de 29/10: o PRODUTO que não veio ("não veio nada", "não chegou o pedido",
     # "o pacote não chegou") é reclamação, não pedido da NF — mesmo com as palavras da
     # lista ("nem o produto" e "nenhum produto" sobram: o "nem/nenhum" só vale grudado no
@@ -336,8 +346,8 @@ _NAO_E_SO_A_NF = re.compile(
     + _O_DOC_LOGO_DEPOIS
     # O produto depois do "e" ("não veio a nota e o produto", "manda a nota e o pedido",
     # "chegou mas não veio a nota e um produto", "cadê a nota e cadê o pedido").
-    + r"|\be\s+(?:cade\s+)?(?:(?:o|a|os|as|do|da|dos|das|desse|deste|dessa|desta|meu|minha|um|uma)"
-    r"\s+){0,2}"
+    + r"|\be\s+(?:cade\s+|ainda\s+|tambem\s+)?"
+    r"(?:(?:o|a|os|as|do|da|dos|das|desse|deste|dessa|desta|meu|minha|um|uma)\s+){0,2}"
     + _O_PRODUTO
     + r"\b(?!\s+nao"
     + _FALTOU_O_PAPEL
@@ -403,6 +413,7 @@ _PALAVRAS_DO_PEDIDO = (
         encaminha encaminhe encaminhar encaminhem
         preciso precisava precisaria quero queria gostaria necessito eu vou querer receber
         solicito solicitar solicitacao que q so mesmo enviasse enviassem mandasse mandassem
+        vao conseguir
         nao veio vieram recebi chegou encontrei achei tinha estava foi cade ainda
         nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
         a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
@@ -414,6 +425,7 @@ _E_VOCE = frozenset("e vc voce vcs voces".split())
 # "show, e o pedido", "ótimo, aguardo o meu pedido" é a pergunta da entrega sem o "?".
 _ELOGIO_QUE_PERGUNTA = re.compile(
     r"\be\s+(?:(?:o|a|os|as|meu|minha)\s+){0,2}" + _O_PRODUTO + r"\b|\baguardo\b"
+    r"|\be\s+(?:o|a)\s+(?:meu|minha|seu|sua)\b|\b(?:pedido|produto|meu|minha)\s+(?:foi|hoje)\b"
 )
 _PALAVRAS_DO_ELOGIO = (
     _CORTESIA
@@ -435,8 +447,13 @@ _FIGURINHA = constantes.rotulo_tipo_plataforma("sticker")
 _O_NUMERO_2 = re.compile(r"\b(?:2|dois|duas|segund[oa])\b")
 # A resposta da loja que pede um número ou uma escolha ("Quantas unidades vieram com defeito?",
 # "Qual o problema?", "uma ou duas?"): o "2" depois responde a ela.
-_PEDE_NUMERO = re.compile(r"\b(?:quant[oa]s?|qual|quais|numero|opcao|opcoes|uma\s+ou)\b")
-_TIPOS_DE_MIDIA = frozenset(("imagem", "video", "arquivo"))
+_PEDE_NUMERO = re.compile(
+    r"\b(?:quant[oa]s?|quantidade|qtd\w*|qt[sd]e?|qnt\w*|qual|quais|numero|opcao|opcoes|uma\s+ou"
+    r"|que\s+(?:dia|horas)|mais\s+de\s+uma?|digito|ii)\b"
+)
+_TIPOS_DE_MIDIA = frozenset(("imagem", "video", "arquivo", "audio"))
+# A foto/vídeo com legenda da Shopee chega como "outro" com o texto da legenda.
+_MIDIA_COM_TEXTO = frozenset(("image_with_text", "video_with_text"))
 # "chegou muito tarde", "veio de noite" — o "tarde/noite" fora do "boa tarde/noite" é queixa.
 _TARDE_SOLTO = re.compile(r"(?<!\bboa )\b(?:tarde|noite)\b")
 _CONVERSAR_COM_VENDEDOR = "conversar com vendedor"
@@ -492,7 +509,7 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
     if plano.strip(" .!") != "2":
         return False
     rajada = ia.rajada_do_cliente(recentes[:ultimo], None)
-    if any(_midia(m) for m in rajada):
+    if any(_midia(m) for m in rajada) or _responde_a_pergunta_da_loja(recentes, rajada):
         return False
     antes = [
         m.texto
@@ -505,12 +522,37 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
     return not falas or _pergunta_da_nf(" . ".join(falas)) or pedido_claro(antes)
 
 
+# "sim", "ok", "pode" depois da pergunta da loja ("Deseja cancelar?") é a resposta a ela.
+_RESPOSTA_CURTA = frozenset("sim s ss nao ok pode quero isso claro aham uhum certo".split())
+
+
+def _responde_a_pergunta_da_loja(recentes: Sequence[Any], rajada: Sequence[Any]) -> bool:
+    """A rajada antes do menu começa respondendo "sim/ok" a uma pergunta da loja? PURA."""
+    from app.services.atendimento import ia
+
+    if not rajada:
+        return False
+    i = next((j for j, x in enumerate(recentes) if x.id == rajada[0].id), 0)
+    loja = next((x for x in reversed(recentes[:i]) if x.autor == constantes.AUTOR_LOJA), None)
+    if loja is None or not ia.resposta_da_loja(loja) or "?" not in (loja.texto or ""):
+        return False
+    for m in rajada:
+        palavras = set(re.findall(r"[a-z0-9]+", validador.plano_de(m.texto or "")))
+        if palavras & _RESPOSTA_CURTA and palavras <= _RESPOSTA_CURTA | _CORTESIA:
+            return True
+    return False
+
+
 def _midia(m: Any) -> bool:
     """A foto, o vídeo ou o arquivo do cliente (o defeito, o item errado): fala que não lemos.
 
     O cartão do produto/pedido não entra (é o pedido de que se fala). PURA.
     """
-    return m.autor == constantes.AUTOR_CLIENTE and getattr(m, "tipo", None) in _TIPOS_DE_MIDIA
+    if m.autor != constantes.AUTOR_CLIENTE:
+        return False
+    payload = getattr(m, "payload", None)
+    tipo = payload.get("message_type") if isinstance(payload, dict) else None
+    return getattr(m, "tipo", None) in _TIPOS_DE_MIDIA or tipo in _MIDIA_COM_TEXTO
 
 
 def _2_de_outro_menu(recentes: Sequence[Any], m: Any) -> bool:
@@ -519,7 +561,7 @@ def _2_de_outro_menu(recentes: Sequence[Any], m: Any) -> bool:
         return False
     i = next((j for j, x in enumerate(recentes) if x.id == m.id), 0)
     loja = next((x for x in reversed(recentes[:i]) if x.autor == constantes.AUTOR_LOJA), None)
-    return loja is not None and bool(_MENU_NF.search(validador.plano_de(loja.texto or "")))
+    return loja is None or bool(_MENU_NF.search(validador.plano_de(loja.texto or "")))
 
 
 def _o_2_responde_a_loja(recentes: Sequence[Any], menu: int, resposta: int) -> bool:
@@ -776,7 +818,13 @@ _O_PRODUTO_LOGO = (
     r"embalagem)\b)"
 )
 _JUNTO_COM = (
-    (re.compile(r"\bjunto\s+com\s+" + _O_PRODUTO_LOGO), "junto "),
+    (
+        re.compile(
+            r"\b(nao\s+(?:veio|vieram|chegou|chegaram)(?:\s+\w+){0,4}?)\s+junto\s+com\s+"
+            + _O_PRODUTO_LOGO
+        ),
+        r"\1 junto ",
+    ),
     (
         re.compile(r"\b(nao\s+(?:veio|vieram|chegou|chegaram))\s+com\s+" + _O_PRODUTO_LOGO),
         r"\1 junto ",
@@ -808,10 +856,8 @@ _COMPREI = (
         re.compile(
             r"(?<!\bque )(?<!\bque eu )(?<!\bq )(?<!\bq eu )\bcomprei(?:\s+aqui)?\s*"
             r"(?=(?:(?:(?:o|a|os|as|um|uma|meu|minha|esse|este|essa|esta)\s+)?produtos?\s*)?,?\s*"
-            r"(?:(?:e|mas|porem|so\s+que)\s+(?:a\s+(?:nota|nf|nfe)|nao\s+(?:veio|vieram|chegou|recebi)"
-            r"\s+(?:com\s+)?(?:(?:a|as|o|uma)\s+)?(?:nota|nf|nfe))"
-            r"|(?:e\s+)?(?:pode|poderia|podem|me|manda|mande|envia|envie|preciso|precisava|queria|quero"
-            r"|gostaria)\b))"
+            r"(?:e|mas|porem|so\s+que)\s+(?:a\s+(?:nota|nf|nfe)|nao\s+(?:veio|vieram|chegou|recebi)"
+            r"\s+(?:com\s+)?(?:(?:a|as|o|uma)\s+)?(?:nota|nf|nfe))\b)"
         ),
         # Fica o "recebi": o trecho não vira só o produto ("o produto, e não veio nota").
         "recebi ",
@@ -849,19 +895,19 @@ _APAGADA = "this message was deleted"
 _SO_O_PRODUTO = re.compile(
     r"(?:e\s+)?(?:(?:o|a|os|as|meu|minha|desse|deste|dessa|desta)\s+){0,2}"
     + _O_PRODUTO
-    + r"(?:\s+(?:tambem|ainda|ja))?"
+    + r"(?:\s+(?:tambem|ainda|ja|foi|hoje|junto|de\s+novo))?"
 )
 # "e o meu? manda a nota fiscal": o "meu/minha" sem o nome do que é (o "o meu não veio a nota"
 # fica nas travas do pronome).
 _MEU_SOLTO_NO_PEDIDO = re.compile(
     r"\b(?:meu|minha)\b(?!\s+(?:nota|notas|nf|nfe|pedido|compra|produto|encomenda|caixa|pacote"
-    r"|ainda|tambem|nao)\b)"
+    r"|nao|(?:ainda|tambem)\s+nao)\b)"
 )
 
 
 def _so_o_produto(fala: str) -> bool:
     """Algum trecho da fala é só o produto ("o pedido?", "o produto ainda", "e o pedido também")?"""
-    for trecho in re.split(r"[,.;!?]+", fala):
+    for trecho in re.split(r"[^a-z0-9\s]+", fala):
         palavras = [p for p in re.findall(r"[a-z0-9]+", trecho) if p not in _CORTESIA]
         if palavras and _SO_O_PRODUTO.fullmatch(" ".join(palavras)):
             return True
@@ -1288,7 +1334,11 @@ async def _travas_da_conversa(
     if ultima is None or not ia._cobre(rascunho, ultima):
         # O cliente escreveu de novo depois do turno que este rascunho responde.
         return "turno_mudou"
-    textos = textos_do_turno(recentes, ia.rajada_do_cliente(recentes, gatilho))
+    rajada = ia.rajada_do_cliente(recentes, gatilho)
+    # A foto, o vídeo ou o arquivo no turno (o defeito, o item errado) fica com a pessoa.
+    if any(_midia(m) for m in rajada):
+        return "pedido_nao_claro"
+    textos = textos_do_turno(recentes, rajada)
     if not pedido_claro(textos) and not pedido_pelo_menu(recentes, gatilho):
         return "pedido_nao_claro"
     if await ia._motivos_humano_para_auto(session, conversa, rascunho, nf_automatica=True):
