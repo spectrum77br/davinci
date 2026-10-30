@@ -247,3 +247,13 @@ def test_netshoes_e_plataforma_de_pasta():
     assert "netshoes" in PLATAFORMAS_PASTA
     # A regra da pasta entra pelo SQL do deploy (a semente é a da migration 0387).
     assert regras.TIPO_PLATAFORMA == "plataforma"
+
+
+async def test_a_lista_aceita_a_netshoes(client, make_user, auth_as):
+    """O menu Plataforma mostra a Netshoes (só e-mail): a lista do chat vem vazia, sem 422."""
+    from app.models import UserRole
+
+    auth_as(await make_user(role=UserRole.ADMIN))
+    r = await client.get("/api/atendimento/conversas", params={"plataforma": "netshoes"})
+    assert r.status_code == 200, r.text
+    assert r.json()["itens"] == []

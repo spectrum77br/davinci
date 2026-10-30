@@ -56,6 +56,9 @@ export const GRUPOS_CAIXA: GrupoCaixa[] = [
   { valor: 'amazon', plataformas: ['amazon'], nome: 'Amazon' },
   { valor: 'magalu', plataformas: ['magalu'], nome: 'Magalu' },
   { valor: 'carrefour', plataformas: ['carrefour'], nome: 'Carrefour' },
+  // Netshoes (30/10/2026): sem chat, só os e-mails da loja na barra — entra no
+  // menu pela loja dela nos e-mails (`extras`), não pelo /resumo.
+  { valor: 'netshoes', plataformas: ['netshoes'], nome: 'Netshoes' },
   { valor: 'temu', plataformas: ['temu'], nome: 'Temu' },
   { valor: 'aliexpress', plataformas: ['aliexpress'], nome: 'AliExpress' },
   { valor: 'site', plataformas: ['site'], nome: 'Sites' },
@@ -143,11 +146,12 @@ export function textoCurtoDoNumero(numero: NumeroDaCaixa = 'aguardando'): string
 // "falta responder" ou o número do chip) — e a que está escolhida fica
 // sempre, para ela ver o que está filtrando. Na Caixa Humano o número muda,
 // as plataformas não.
-export function chipsDoResumo(resumo: Resumo | null | undefined, atual = '', numero: NumeroDaCaixa = 'aguardando'): ChipPlataforma[] {
+// `extras`: as plataformas que só têm loja pelos e-mails (a Netshoes, 30/10/2026).
+export function chipsDoResumo(resumo: Resumo | null | undefined, atual = '', numero: NumeroDaCaixa = 'aguardando', extras: readonly string[] = []): ChipPlataforma[] {
   if (!resumo) return []
   const escolhidas = plataformasDoValor(atual)
   const escolhida = (g: GrupoCaixa) => escolhidas.length > 0 && escolhidas.every((p) => g.plataformas.includes(p))
-  const comLoja = new Set((resumo.lojas || []).map((l) => l.plataforma))
+  const comLoja = new Set([...(resumo.lojas || []).map((l) => l.plataforma), ...extras])
   // Na Caixa Humano só das lojas no Automático (14/10/2026): a plataforma sem
   // nenhum canal nos modos dela sai do menu — a menos que ainda tenha conversa
   // contada lá ou seja a escolhida (a pessoa vê o que está filtrando).
@@ -220,11 +224,11 @@ export function contadorChip(n: number): string {
 import { Check, ChevronDown } from 'lucide-vue-next'
 import { onClickOutside } from '@vueuse/core'
 
-const props = defineProps<{ resumo: Resumo | null; numero?: NumeroDaCaixa }>()
+const props = defineProps<{ resumo: Resumo | null; numero?: NumeroDaCaixa; extras?: string[] }>()
 const filtros = defineModel<FiltrosLista>('filtros', { required: true })
 
 const campo = computed<NumeroDaCaixa>(() => (props.numero === 'humano' || props.numero === 'nao_lidas_duoke' ? props.numero : 'aguardando'))
-const chips = computed(() => chipsDoResumo(props.resumo, filtros.value.plataforma, campo.value))
+const chips = computed(() => chipsDoResumo(props.resumo, filtros.value.plataforma, campo.value, props.extras || []))
 const total = computed(() => (props.resumo?.plataformas || []).reduce((s, p) => s + numeroDe(p, campo.value), 0))
 // O que o botão mostra: a plataforma do corte da barra (inteira ou com uma
 // loja dela escolhida) ou "Todas" — a barra inteira, mesmo com uma loja

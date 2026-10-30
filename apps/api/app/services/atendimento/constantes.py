@@ -67,8 +67,10 @@ PLATAFORMA_WHATSAPP = "whatsapp"
 PLATAFORMAS_REDE = (PLATAFORMA_INSTAGRAM, PLATAFORMA_FACEBOOK)
 PLATAFORMAS_EXTERNAS = (PLATAFORMA_SITE, *PLATAFORMAS_REDE, PLATAFORMA_WHATSAPP)
 # O que o filtro `?plataforma=` da lista aceita (a caixa + as externas; o
-# Instagram também traz as DMs do adaptador).
-PLATAFORMAS_LISTA = PLATAFORMAS_CAIXA + PLATAFORMAS_EXTERNAS
+# Instagram também traz as DMs do adaptador). A Netshoes (30/10/2026) só tem os
+# e-mails da loja: o menu Plataforma a mostra e a lista do chat vem vazia.
+PLATAFORMA_NETSHOES = "netshoes"
+PLATAFORMAS_LISTA = (*PLATAFORMAS_CAIXA, *PLATAFORMAS_EXTERNAS, PLATAFORMA_NETSHOES)
 
 CANAL_CHAT = "chat"
 CANAL_PERGUNTA = "pergunta"

@@ -239,6 +239,9 @@ const emailContagens = ref<ContagensDeConversa | null>(null)
 // A última leitura COM os números por loja e as pastas da barra (a API manda a
 // lista: a escolha do dono mora lá, GRUPOS_EMAIL_NA_BARRA_DE_LOJAS) e a janela.
 const emailPorLoja = ref<EmailsDaLoja[] | null>(null)
+// As plataformas que só têm loja pelos e-mails (a Netshoes, 30/10/2026): entram no
+// menu Plataforma (AtendimentoFiltroPlataforma, `extras`).
+const plataformasSoEmail = computed(() => [...new Set((emailPorLoja.value || []).filter((e) => !e.integration_id && e.plataforma).map((e) => e.plataforma as string))])
 const emailGruposNaBarra = ref<GrupoDaBarra[]>([])
 // As caixas SAC e Admin de cada site (27/10/2026: `sites_na_barra`, só para quem vê todas as equipes).
 const emailSitesNaBarra = ref<SiteDaBarra[]>([])
@@ -1158,7 +1161,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
     />
     <!-- A plataforma (08/10/2026: "ver só Mercado Livre, só Shopee"): um botão que abre o menu com a logo e o número de cada uma (14/10/2026: o do Duoke, mensagens não lidas esperando resposta), acima da Caixa; escolher corta a barra de lojas (09/10/2026). Na Caixa Humano, os números dela. -->
     <div v-if="naCaixa" class="flex flex-wrap items-center gap-2">
-    <AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? 'humano' : 'nao_lidas_duoke'" />
+    <AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? 'humano' : 'nao_lidas_duoke'" :extras="plataformasSoEmail" />
     <!-- "Zerar não lidas" (15/10/2026): o "Limpar não lidas" do Duoke, na loja/plataforma do filtro -->
     <button
       v-if="!emHumano && canEdit"

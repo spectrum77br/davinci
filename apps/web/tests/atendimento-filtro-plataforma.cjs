@@ -100,8 +100,8 @@ function filtros(o = {}) {
 // ------------------------------------------------ funções puras
 {
   // A ordem do Eduardo, e "Redes" = Instagram + Facebook; o WhatsApp (o Zap,
-  // 19/10/2026) no fim.
-  assert.deepEqual(F.GRUPOS_CAIXA.map((g) => g.nome), ['Mercado Livre', 'Shopee', 'TikTok', 'Amazon', 'Magalu', 'Carrefour', 'Temu', 'AliExpress', 'Sites', 'Redes', 'WhatsApp'])
+  // 19/10/2026) no fim; a Netshoes (30/10/2026, só e-mail) depois do Carrefour.
+  assert.deepEqual(F.GRUPOS_CAIXA.map((g) => g.nome), ['Mercado Livre', 'Shopee', 'TikTok', 'Amazon', 'Magalu', 'Carrefour', 'Netshoes', 'Temu', 'AliExpress', 'Sites', 'Redes', 'WhatsApp'])
   assert.deepEqual(F.GRUPOS_CAIXA.find((g) => g.nome === 'WhatsApp').plataformas, ['whatsapp'])
   assert.deepEqual(F.GRUPOS_CAIXA.find((g) => g.nome === 'Redes').plataformas, ['instagram', 'facebook'])
   assert.equal(F.GRUPOS_CAIXA.find((g) => g.nome === 'Redes').valor, 'instagram,facebook')
@@ -253,8 +253,8 @@ async function principal() {
   const pagina = web('pages/atendimento.vue')
   const chips = (pagina.match(/<AtendimentoFiltroPlataforma[^>]*\/>/) || [])[0] || ''
   // Na Caixa e na Caixa Humano (09/10/2026: com os números dela; 14/10/2026:
-  // na Caixa, o número do Duoke).
-  assert.equal(chips, '<AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? \'humano\' : \'nao_lidas_duoke\'" />')
+  // na Caixa, o número do Duoke; 30/10/2026: as plataformas só de e-mail, a Netshoes).
+  assert.equal(chips, '<AtendimentoFiltroPlataforma v-if="naCaixa" v-model:filtros="filtros" :resumo="resumo" :numero="emHumano ? \'humano\' : \'nao_lidas_duoke\'" :extras="plataformasSoEmail" />')
   // No bloco medido acima da Caixa (a altura da Caixa conta com ele), sem
   // classe de "só tela larga/estreita": à vista em qualquer largura.
   const iTopo = pagina.indexOf('<div ref="topoEl"')

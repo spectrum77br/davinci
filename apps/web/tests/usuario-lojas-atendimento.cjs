@@ -163,6 +163,12 @@ async function principal() {
     const icone = web('components/AtendimentoIconePlataforma.vue')
     assert.match(icone, /netshoes: 'Netshoes'/)
     assert.match(icone, /<template v-else-if="cod === 'netshoes'">\s*<rect[^>]*fill="#5C2D91"/)
+    // E no menu Plataforma, pela loja dela nos e-mails (sem chat no /resumo).
+    const F = requerer('~/components/AtendimentoFiltroPlataforma.vue')
+    const resumo = { plataformas: [], lojas: [{ plataforma: 'shopee' }], canais: [] }
+    assert.deepEqual(F.chipsDoResumo(resumo).map((c) => c.valor), ['shopee'])
+    assert.deepEqual(F.chipsDoResumo(resumo, '', 'aguardando', ['netshoes']).map((c) => c.valor), ['shopee', 'netshoes'])
+    assert.match(caixa, /:extras="plataformasSoEmail"/)
   }
 
   // ------------------------------------------------ funções puras
