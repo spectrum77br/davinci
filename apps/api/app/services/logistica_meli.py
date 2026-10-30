@@ -241,13 +241,18 @@ def _claim_momento(claim: dict) -> str:
 
 
 async def _claim_mais_recente(
-    client: MercadoLivreClient, order: dict, order_id: str
+    client: MercadoLivreClient, order: dict, order_id: str, *, buscar: bool = False
 ) -> tuple[Any, dict]:
     """Entre as mediações do pedido, a mais RECENTE (pela resolução/última
     mexida). Devolve (claim_id, claim); (None, {}) se não há mediação; e
     (id, {}) se a única não pôde ser lida. Uma falha numa das leituras não
-    derruba as outras — fica sem aquela."""
+    derruba as outras — fica sem aquela.
+
+    `buscar`: o pedido dá sinal de reclamação (`_sinal_de_reclamacao`) — sem
+    nada em `order.mediations`, procura pela busca de reclamações."""
     ids = _mediation_ids(order)
+    if not ids and buscar:
+        ids = await _mediacoes_pela_busca(client, order, order_id)
     if not ids:
         return None, {}
     lidos: list[tuple[Any, dict]] = []
@@ -282,6 +287,60 @@ def _mediation_ids(order: dict) -> list[Any]:
         if cid and cid not in out:
             out.append(cid)
     return out
+
+
+def _sinal_de_reclamacao(meli: dict[str, str]) -> bool:
+    """O pedido teve reclamação, pelo que o pedido e o envio contam: cancelado
+    por mediação, ou o envio marcado "reclamado" (`claimed_me`, que o ML não
+    tira quando a reclamação acaba)."""
+    return meli.get("cancel_group") == "mediations" or meli.get("ship_substatus") == "claimed_me"
+
+
+async def _mediacoes_pela_busca(
+    client: MercadoLivreClient, order: dict, order_id: str
+) -> list[Any]:
+    """Ids das reclamações achadas pela BUSCA, pro pedido com sinal de
+    reclamação e `order.mediations` vazio.
+
+    Caso 301741 (ML marquezini, venda 2000018829075218, envio 48187290435,
+    30/10): o ML mostrava "Mediação finalizada. Te demos o dinheiro" e a
+    Logística "Cancelado | Enviado | Reclamação aberta | Mediação", sem etapa,
+    situação nem beneficiado da mediação — o pedido não listava a mediação
+    e o enrich só olhava ali. Procura pelo pedido e, sem nada, pelo envio.
+    Uma busca que falha não derruba a leitura — fica sem aquela. O log diz
+    onde achou, pra conferir no 1º ⟳."""
+    recursos = [("order", str(order.get("id") or "").strip())]
+    envio = _envio_id(order)
+    if envio:
+        recursos.append(("shipment", envio))
+    for recurso, rid in recursos:
+        if not rid:
+            continue
+        try:
+            achadas = await client.buscar_reclamacoes_do_recurso(recurso, rid)
+        except Exception as e:  # noqa: BLE001
+            logger.info(
+                "logistica_meli_busca_mediacao_falhou",
+                order_id=order_id,
+                recurso=recurso,
+                err=str(e)[:200],
+            )
+            continue
+        ids: list[Any] = []
+        for c in achadas:
+            cid = c.get("id")
+            if cid and cid not in ids:
+                ids.append(cid)
+        logger.info(
+            "logistica_meli_mediacao_pela_busca",
+            order_id=order_id,
+            recurso=recurso,
+            recurso_id=rid,
+            claim_ids=ids,
+        )
+        if ids:
+            return ids
+    return []
 
 
 async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[str, Any]:
@@ -479,7 +538,9 @@ async def _ler_pedido(
     # código pegava "o primeiro", mostrando Beneficiado = Vendedor quando o
     # ML já tinha devolvido R$ 2.152 ao cliente. Vale a mais RECENTE: é o
     # desfecho que a tela do ML mostra e o que o dinheiro seguiu.
-    claim_id, claim = await _claim_mais_recente(client, order, order_id)
+    claim_id, claim = await _claim_mais_recente(
+        client, order, order_id, buscar=_sinal_de_reclamacao(out)
+    )
     if claim_id:
         # A reclamação só datou ela inteira (last_updated) — vale pros 3 campos
         # que saem dela como estimativa.

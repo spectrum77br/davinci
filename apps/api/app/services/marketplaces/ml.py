@@ -1528,6 +1528,27 @@ class MercadoLivreClient:
         corpo = r.json()
         return corpo if isinstance(corpo, dict) else {}
 
+    async def buscar_reclamacoes_do_recurso(self, resource: str, resource_id: str) -> list[dict]:
+        """Reclamações de UM recurso (`resource` = order | shipment...) pela
+        busca (GET /post-purchase/v1/claims/search?resource=&resource_id=).
+
+        Para o pedido que teve reclamação mas não a lista em
+        `order.mediations` (301741, 30/10). Devolve só as que o ML disse ser
+        daquele recurso — se a API ignorar o filtro, nada de outro pedido
+        entra. Levanta em não-2xx."""
+        params = {"resource": resource, "resource_id": str(resource_id), "limit": 50}
+        r = await self._request("GET", "/post-purchase/v1/claims/search", params=params)
+        r.raise_for_status()
+        corpo = r.json()
+        dados = corpo.get("data") if isinstance(corpo, dict) else None
+        return [
+            c
+            for c in (dados or [])
+            if isinstance(c, dict)
+            and str(c.get("resource") or "").strip().lower() == resource
+            and str(c.get("resource_id") or "").strip() == str(resource_id)
+        ]
+
     async def mensagens_da_reclamacao(self, claim_id: str | int) -> list[dict]:
         """As mensagens da reclamação (GET /post-purchase/v1/claims/{id}/messages).
 
