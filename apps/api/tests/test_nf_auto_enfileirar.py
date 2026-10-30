@@ -129,8 +129,10 @@ def _sem_espera_do_tipo_de_envio(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _FakeRedis:
-    """Redis em memória: SET NX / DELETE (marcas dos avisos) e INCR / TTL /
-    EXPIRE (contador de recusas da 83955)."""
+    """Redis em memória: SET NX / DELETE (marcas dos avisos), INCR / TTL /
+    EXPIRE (contador de recusas da 83955) e GET / MGET (relógio e pulo dos
+    adiados do sem estoque — a validade não corre: quem decide é o relógio
+    `_agora_ts` que os testes avançam)."""
 
     def __init__(self) -> None:
         self.chaves: dict[str, str] = {}
@@ -164,6 +166,25 @@ class _FakeRedis:
         self.validade[chave] = segundos
         return chave in self.chaves
 
+    async def get(self, chave: str):
+        return self.chaves.get(chave)
+
+    async def mget(self, chaves: list[str]):
+        return [self.chaves.get(c) for c in chaves]
+
+
+class _Relogio:
+    """Relógio dos adiamentos do sem estoque (`nf_auto_enfileirar._agora_ts`)."""
+
+    def __init__(self) -> None:
+        self.t = 1_800_000_000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def avanca(self, minutos: float) -> None:
+        self.t += minutos * 60
+
 
 @pytest.fixture(autouse=True)
 def _redis_falso(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
@@ -173,6 +194,15 @@ def _redis_falso(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     falso = _FakeRedis()
     monkeypatch.setattr(nf_auto_enfileirar, "redis", falso)
     return falso
+
+
+@pytest.fixture(autouse=True)
+def relogio(monkeypatch: pytest.MonkeyPatch) -> _Relogio:
+    """Relógio parado: os adiados só voltam (e a dúvida só vence) quando o
+    teste avança o tempo — como os ticks de 2 min do sweep."""
+    r = _Relogio()
+    monkeypatch.setattr(nf_auto_enfileirar, "_agora_ts", r)
+    return r
 
 
 @pytest_asyncio.fixture
@@ -893,12 +923,15 @@ async def test_sem_estoque_fifo_considera_quem_segura_fora_do_lote(
 
 @pytest.mark.asyncio
 async def test_sweep_sem_estoque_fifo_ingest_atrasado_antigo_passa(
-    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch, limpa_kits: None
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch, limpa_kits: None,
+    relogio: _Relogio,
 ):
     """30/10 08:18: o Bling já reservava 9 pedidos da b026.18 (saldo −6), mas
     o espelho só tinha os 2 mais antigos (kit b026.12.18) + 1 Em digitação.
-    Físico 4: os conhecidos cabem — o déficit é dos que ainda não entraram.
-    Os 2 antigos seguem pra fila (antes iam pra Aguardando Cancelamento)."""
+    Físico 4: os conhecidos cabem; o virtual manda os dois — DÚVIDA: ficam
+    ADIADOS (nem 83955, nem fila) enquanto o espelho alcança o Bling. Se a
+    dúvida dura mais que o prazo (10 min), decide a regra do físico: os 2
+    seguem pra fila (nunca 83955 sem certeza)."""
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
     agora = datetime.now(UTC)
     await _seed_pedido(
@@ -926,11 +959,26 @@ async def test_sweep_sem_estoque_fifo_ingest_atrasado_antigo_passa(
 
     summary = await run_auto_enfileirar_nf()
     assert summary["sem_estoque"] == 0
-    assert summary["enfileirados"] == 2
+    assert summary["adiados_duvida"] == 2
+    assert summary["enfileirados"] == 0
     assert fake.chamadas == []
     # UMA leitura: os componentes do kit do lote, virtual e físico juntos (o
     # saldo do próprio kit com composição não decide nada — nem é lido)
     assert fake.pedidos_saldos == [["501", "503"]]
+
+    # 2 min depois: adiados há pouco não tomam vaga do tick
+    relogio.avanca(2)
+    assert (await run_auto_enfileirar_nf())["candidatos"] == 0
+    # 6 min: voltam, a dúvida continua (dentro do prazo) — adiados de novo
+    relogio.avanca(4)
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 2 and summary["adiados_duvida"] == 2
+    # 12 min: venceu o prazo — regra do físico, os dois seguem pra fila
+    relogio.avanca(6)
+    summary = await run_auto_enfileirar_nf()
+    assert summary.get("adiados_duvida", 0) == 0
+    assert summary["enfileirados"] == 2
+    assert fake.chamadas == []
 
 
 @pytest.mark.asyncio
@@ -1112,16 +1160,17 @@ async def test_sem_estoque_fifo_fantasma_nao_absorve_o_deficit(
 
 @pytest.mark.parametrize(("saldo_kit", "vao"), [(-2.0, {"830001", "830002"}), (3.0, set())])
 @pytest.mark.asyncio
-async def test_sem_estoque_fifo_kit_sem_composicao_desliga_o_fisico(
+async def test_sem_estoque_fifo_kit_sem_composicao_adia_e_depois_decide_o_virtual(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch,
-    saldo_kit: float, vao: set[str],
+    saldo_kit: float, vao: set[str], relogio: _Relogio,
 ):
     """Peça 501 com virtual −2 e físico 4: os 2 pedidos que o espelho conhece
-    cabem no físico. Mas um kit SEM composição no cache (a sync é semanal)
-    segura peça e está com saldo negativo — pode estar prendendo a 501 sem o
-    espelho ver. Sem saber qual peça, nada de físico: D = −virtual = 2 e os
-    dois vão (o lado seguro). Kit sem composição com saldo positivo não
-    prende peça curta: o físico vale e ninguém vai."""
+    cabem no físico; o virtual manda os dois — DÚVIDA (adiados). Um kit SEM
+    composição no cache (a sync é semanal) segura peça e está com saldo
+    negativo — pode estar prendendo a 501 sem o espelho ver: vencido o prazo,
+    decide o VIRTUAL (D = 2, os dois vão — o lado seguro) e sai o aviso do kit.
+    Kit sem composição com saldo positivo não prende peça curta: vencido o
+    prazo decide o físico e ninguém vai."""
     from app.routers.nf import _pedidos_sem_estoque, _sem_estoque_fifo
 
     for numero, bling_id in (("830001", 700001), ("830002", 700002)):
@@ -1145,12 +1194,24 @@ async def test_sem_estoque_fifo_kit_sem_composicao_desliga_o_fisico(
         nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
     )
 
-    assert set(await _pedidos_sem_estoque(db, ["830001", "830002"])) == vao
+    # só com certeza: ninguém (a conferência pura não mexe no relógio)
+    assert await _pedidos_sem_estoque(db, ["830001", "830002"]) == {}
     # o kit vai na MESMA leitura da peça
     assert fake.pedidos_saldos == [["501", "950"]]
-    # quem chama avisa quando o físico foi desligado pelo kit
     res = await _sem_estoque_fifo(db, ["830001", "830002"])
+    assert res.lote == {}
+    assert set(res.duvidas) == {"830001", "830002"}
+    assert res.vencem_83955 == frozenset(vao)
+    # quem chama avisa quando o kit sem composição deixou pedido na dúvida
     assert res.kits_sem_composicao == ([950] if vao else [])
+    # dentro do prazo, segue adiado
+    relogio.avanca(9)
+    assert (await _sem_estoque_fifo(db, ["830001", "830002"])).lote == {}
+    # vencido o prazo: virtual com o kit suspeito, físico sem ele
+    relogio.avanca(2)
+    res = await _sem_estoque_fifo(db, ["830001", "830002"])
+    assert set(res.lote) == vao
+    assert res.duvidas == {}
 
 
 @pytest.mark.asyncio

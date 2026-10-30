@@ -26,8 +26,17 @@ componentes; a peça fica com os pedidos mais ANTIGOS — FIFO, ver
                    Negativo que cai num pedido FORA da passada (ex.: ML/Amazon)
                    não é movido: vira aviso Threema;
   - sem leitura  → pedido que leva produto que o Bling não respondeu (consulta
-                   falhou) é ADIADO: nem 83955, nem fila, nem marca — a
-                   próxima passada confere de novo;
+                   falhou) é ADIADO: nem 83955, nem fila, nem marca — uma
+                   passada adiante confere de novo. Teto: 30 min sem leitura
+                   → status 'erro' (sai do sweep) + 1 aviso Threema por
+                   pedido/dia — nunca 83955;
+  - na dúvida    → a conta com o saldo físico e a só com o virtual discordam
+                   (o espelho ainda não tem todos os pedidos que reservam a
+                   peça): ADIADO por até 10 min (relógio no Redis); vencido,
+                   decide a regra do físico (com kit sem composição, a do
+                   virtual) e fica o warning;
+  - adiados      → não ocupam as vagas do tick: o `_candidatos` pula por 5 min
+                   quem foi adiado (marca no Redis) e os mais novos entram;
   - com estoque  → gera a planilha por faturador e cria os NfCommand de
                    `import_avulsa` (source='auto') — daí a cadeia normal segue
                    (import → emitir_nf_upseller → imprimir_etiqueta).
@@ -52,7 +61,8 @@ flag `nf_auto_enfileirar` (checada no wrapper do worker) — default DESLIGADO.
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -190,10 +200,32 @@ _MAX_POR_TICK = 30
 # dia; o TTL só limpa.
 _AVISO_FORA_DO_LOTE_PREFIXO = "nf:sem_estoque:fora_do_lote:"
 _AVISO_FORA_DO_LOTE_TTL_S = 36 * 3600
-# Aviso de kit sem composição no cache que desligou o físico do sem estoque
-# (kit/dia) — sem ele a conta conservadora repete em silêncio até a sync
-# semanal dos kits.
+# Aviso de kit sem composição no cache que deixou pedido na dúvida do sem
+# estoque (kit/dia) — vencido o prazo decide o virtual, e sem o aviso isso
+# repete em silêncio até a sync semanal dos kits.
 _AVISO_KIT_SEM_COMPOSICAO_PREFIXO = "nf:sem_estoque:kit_sem_composicao:"
+
+# Adiados do sem estoque (sem leitura no Bling / dúvida físico × virtual) não
+# ocupam as vagas do tick: `_candidatos` pula por `_PULAR_ADIADO_S` quem foi
+# adiado (a marca guarda a hora; a validade só limpa) e os mais novos entram.
+_PULAR_ADIADO_PREFIXO = "nf:sem_estoque:pular:"
+_PULAR_ADIADO_S = 5 * 60
+# Relógio do 1º adiamento por motivo ("duvida" / "sem_leitura") e pedido —
+# validade de um dia; zera quando o pedido sai do adiamento.
+_ADIADO_DESDE_PREFIXO = "nf:sem_estoque:adiado_desde:"
+_ADIADO_DESDE_TTL_S = 26 * 3600
+# Dúvida físico × virtual: o espelho costuma alcançar o Bling em minutos.
+PRAZO_DUVIDA_S = 10 * 60
+# Sem leitura no Bling por mais que isso: 'erro' no painel + 1 aviso por dia.
+_TETO_SEM_LEITURA_S = 30 * 60
+_AVISO_SEM_LEITURA_PREFIXO = "nf:sem_estoque:sem_leitura_aviso:"
+
+
+def _agora_ts() -> float:
+    """Relógio dos adiamentos (segundos; os testes trocam)."""
+    return time.time()
+
+
 # PATCH 83955 recusado: a passada tenta de novo (sem marca), com TETO — na
 # `_MAX_RECUSAS_83955`ª recusa do dia o pedido ganha 'erro' no painel (sai do
 # sweep: tentativa única) + 1 aviso. Contador no Redis, chave com o dia.
@@ -343,6 +375,10 @@ async def run_auto_enfileirar_nf() -> dict:
             )
         numeros = [n for n in numeros if n not in bloqueio]
 
+        # Adiados desta passada que o próximo tick não pega (`_candidatos` os
+        # pula por alguns minutos): sem leitura, dúvida e os da prioridade.
+        adiados_prio: set[str] = set()
+
         # 1c) PRIORIDADE de estoque (Tabela de Preços → coluna Prioridade):
         #     troca o SKU do pedido pra tag prioritária ANTES do check de
         #     estoque — espelho atualizado na MESMA sessão, então o
@@ -359,6 +395,9 @@ async def run_auto_enfileirar_nf() -> dict:
                     logger.info("nf_auto_enfileirar_prioridade_adiados", pedidos=sorted(adiados))
                     summary["adiados_prioridade"] = len(adiados)
                     numeros = [n for n in numeros if n not in adiados]
+                    # A espera do tipo de envio (Flex) já tem prazo próprio e
+                    # curto: esses voltam no tick seguinte, sem pulo.
+                    adiados_prio = adiados - set(prio.get("adiados_envio") or [])
             except Exception:  # noqa: BLE001
                 logger.exception("nf_auto_enfileirar_prioridade_falhou")
 
@@ -376,6 +415,27 @@ async def run_auto_enfileirar_nf() -> dict:
         if adiados_estoque:
             summary["adiados_estoque"] = len(adiados_estoque)
             logger.info("nf_auto_enfileirar_estoque_adiados", pedidos=sorted(adiados_estoque))
+        # Dúvida físico × virtual (o espelho ainda não alcançou o Bling):
+        # ADIADO até o prazo (nem 83955, nem fila, nem marca) — vencido,
+        # `_sem_estoque_fifo` já devolve a decisão em `lote` ou deixa passar.
+        duvidas = (
+            {n: s for n, s in conferencia.duvidas.items() if n not in adiados_estoque}
+            if conferencia
+            else {}
+        )
+        if duvidas:
+            summary["adiados_duvida"] = len(duvidas)
+            logger.info("nf_auto_enfileirar_estoque_duvida", pedidos=duvidas)
+        # Teto do sem leitura: 30 min sem o Bling devolver o saldo → 'erro' no
+        # painel (sai do sweep) + aviso. Nunca 83955.
+        esgotados = (
+            await _teto_sem_leitura(session, numeros, conferencia.adiados)
+            if conferencia
+            else {}
+        )
+        if esgotados:
+            summary["sem_leitura_erro"] = len(esgotados)
+        await marcar_adiados((adiados_prio | adiados_estoque | set(duvidas)) - set(esgotados))
         if conferencia and conferencia.kits_sem_composicao:
             try:
                 async with session.begin_nested():
@@ -458,7 +518,9 @@ async def run_auto_enfileirar_nf() -> dict:
             except Exception:  # noqa: BLE001
                 logger.exception("nf_sem_estoque_fora_do_lote_aviso_falhou")
         restantes = [
-            n for n in numeros if n not in sem_estoque and n not in adiados_estoque
+            n
+            for n in numeros
+            if n not in sem_estoque and n not in adiados_estoque and n not in duvidas
         ]
         if not restantes and not fragmentado:
             return summary
@@ -691,7 +753,7 @@ async def _avisar_negativo_fora_do_lote(session, fora: dict[str, list[str]]) -> 
     gerais = _destinatarios_sem_estoque()
     if not gerais or not fora:
         return
-    vai_conferir = set(await _candidatos(session, limite=None))
+    vai_conferir = set(await _candidatos(session, limite=None, pular_adiados=False))
     pendentes = {n: s for n, s in fora.items() if n not in vai_conferir}
     if not pendentes:
         return
@@ -724,12 +786,13 @@ async def _avisar_negativo_fora_do_lote(session, fora: dict[str, list[str]]) -> 
 
 async def avisar_kit_sem_composicao(session, kits: list[int]) -> None:
     """Aviso Threema (grupo do sem estoque) quando um kit SEM composição no
-    cache segura peça com saldo negativo e, por isso, o sem estoque ficou sem
-    o saldo físico (`nf_sem_estoque_kit_sem_composicao`): a conta fica no
-    virtual — o lado seguro, mas que pode mandar pra Aguardando Cancelamento
-    pedido que tinha peça. Sem o aviso a regra repete isso em silêncio até a
-    sync semanal dos kits. Um aviso por kit/dia (marca no Redis). BEST-EFFORT
-    (vale pro sweep e pro botão Enfileirar)."""
+    cache segura peça com saldo negativo e, por isso, pedido do lote ficou na
+    dúvida físico × virtual (`nf_sem_estoque_duvida_fisico_virtual`): adiado
+    até o prazo e, vencido, decide o virtual — o lado seguro, mas que pode
+    mandar pra Aguardando Cancelamento pedido que tinha peça. Sem o aviso a
+    regra repete isso em silêncio até a sync semanal dos kits. Um aviso por
+    kit/dia (marca no Redis). BEST-EFFORT (vale pro sweep e pro botão
+    Enfileirar)."""
     gerais = _destinatarios_sem_estoque()
     if not gerais or not kits:
         return
@@ -753,11 +816,89 @@ async def avisar_kit_sem_composicao(session, kits: list[int]) -> None:
             ).all()
         )
         return (
-            "Sem estoque conferido SEM o saldo físico: kit sem composição no DaVinci"
-            " segurando peça com saldo negativo (não dá pra saber qual peça ele"
-            " prende). Pode ir pra Aguardando Cancelamento pedido que tinha peça."
-            " Confira a composição no Bling e rode a sync dos kits:\n"
+            "Sem estoque na dúvida: kit sem composição no DaVinci segurando peça"
+            " com saldo negativo (não dá pra saber qual peça ele prende). Os"
+            " pedidos que dependem do saldo físico ficam adiados até"
+            f" {PRAZO_DUVIDA_S // 60} min e depois decide o saldo virtual — pode ir"
+            " pra Aguardando Cancelamento pedido que tinha peça. Confira a"
+            " composição no Bling e rode a sync dos kits:\n"
             + "\n".join(f"Kit {skus.get(k) or 'sem SKU no DaVinci'} (id Bling {k})" for k in novos)
+        )
+
+    await _enviar_aviso(_texto, gerais, marcas, evento=evento)
+
+
+async def _teto_sem_leitura(
+    session, numeros: list[str], adiados: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Adiado por falta de leitura do Bling há `_TETO_SEM_LEITURA_S` ou mais:
+    status 'erro' no painel com o motivo (sai do sweep — mesmo padrão do teto
+    da 83955) + 1 aviso Threema por pedido/dia. NUNCA vai pra 83955 (o
+    estoque não foi conferido). Quem voltou a ter leitura zera o relógio.
+    Redis fora = sem relógio: segue adiado (warning)."""
+    relogio = await relogio_adiamento(
+        "sem_leitura", list(adiados), zerar=[n for n in numeros if n not in adiados]
+    )
+    if not adiados:
+        return {}
+    if relogio is None:
+        logger.warning("nf_sem_estoque_sem_leitura_sem_relogio", pedidos=adiados)
+        return {}
+    esgotados = {
+        n: skus for n, skus in adiados.items() if relogio.get(n, 0.0) >= _TETO_SEM_LEITURA_S
+    }
+    if not esgotados:
+        return {}
+    from app.routers.nf import _marcar_faturamento
+
+    for numero, skus in esgotados.items():
+        await _marcar_faturamento(
+            session,
+            [numero],
+            status_txt="erro",
+            erro=(
+                "Sem estoque NÃO conferido — o Bling não devolveu o saldo de "
+                + ", ".join(skus)
+                + f" por mais de {_TETO_SEM_LEITURA_S // 60} min. Saiu da fila"
+                " automática: confira o produto no Bling e enfileire à mão."
+            ),
+        )
+    logger.warning(
+        "nf_auto_enfileirar_sem_leitura_teto",
+        pedidos=esgotados,
+        minutos={n: round(relogio[n] / 60, 1) for n in esgotados},
+    )
+    try:
+        async with session.begin_nested():
+            await _avisar_sem_leitura(session, esgotados)
+    except Exception:  # noqa: BLE001
+        logger.exception("nf_sem_estoque_sem_leitura_aviso_falhou")
+    return esgotados
+
+
+async def _avisar_sem_leitura(session, pedidos: dict[str, list[str]]) -> None:
+    """Aviso Threema (grupo do sem estoque): o Bling não devolveu o saldo do
+    pedido por mais de `_TETO_SEM_LEITURA_S` e ele saiu da fila automática
+    com 'erro' — alguém confere e enfileira à mão. Um aviso por pedido/dia.
+    BEST-EFFORT."""
+    gerais = _destinatarios_sem_estoque()
+    if not gerais or not pedidos:
+        return
+    dia = _agora_brt().strftime("%Y%m%d")
+    chave_de = {f"{_AVISO_SEM_LEITURA_PREFIXO}{dia}:{n}": n for n in sorted(pedidos)}
+    evento = "nf_sem_estoque_sem_leitura"
+    marcas = await _marcar_hoje(list(chave_de), _ADIADO_DESDE_TTL_S, evento=evento)
+    if not marcas:
+        return
+    novos = {chave_de[c]: pedidos[chave_de[c]] for c in marcas}
+
+    async def _texto() -> str:
+        return await _linhas_pedidos(
+            session,
+            novos,
+            "Sem estoque NÃO conferido — o Bling não devolveu o saldo por mais de"
+            f" {_TETO_SEM_LEITURA_S // 60} min. O pedido saiu da fila automática (Erro"
+            " no painel); confira o produto no Bling e enfileire à mão:",
         )
 
     await _enviar_aviso(_texto, gerais, marcas, evento=evento)
@@ -1149,7 +1290,9 @@ async def _escrever_observacao_restricao(
     )
 
 
-async def _candidatos(session, *, limite: int | None = _MAX_POR_TICK) -> list[str]:
+async def _candidatos(
+    session, *, limite: int | None = _MAX_POR_TICK, pular_adiados: bool = True
+) -> list[str]:
     """Pedidos elegíveis pro sweep, já deduplicados contra fila e histórico.
 
     Elegível = "Em aberto" (6), loja ativa COM faturador atribuído, dentro
@@ -1158,7 +1301,9 @@ async def _candidatos(session, *, limite: int | None = _MAX_POR_TICK) -> list[st
     `nf_auto_ml_amazon`. `item_index==0` porque bling_orders tem uma linha
     por item. Dedupe duplo: comando ativo na fila OU qualquer
     status_faturamento já registrado (tentativa única). `limite=None` = todos
-    (sem o teto do tick).
+    (sem o teto do tick). `pular_adiados`: fora quem o sem estoque adiou há
+    menos de `_PULAR_ADIADO_S` (sem leitura / dúvida) — senão os adiados de
+    número menor tomam as vagas do tick e o pedido novo nunca entra.
     """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
     # Flags: sem nenhuma, o sweep segue só com Shopee/TikTok; `nf_auto_ml`
@@ -1236,9 +1381,79 @@ async def _candidatos(session, *, limite: int | None = _MAX_POR_TICK) -> list[st
     from app.routers.nf import _em_fila
 
     em_fila = await _em_fila(session, "import_avulsa")
-    return [
-        n for n in numeros if n not in ja_tratados and n not in em_fila
-    ][:limite]
+    numeros = [n for n in numeros if n not in ja_tratados and n not in em_fila]
+    if pular_adiados and numeros:
+        recentes = await _adiados_recentes(numeros)
+        if recentes:
+            logger.info("nf_auto_enfileirar_adiados_pulados", pedidos=sorted(recentes))
+            numeros = [n for n in numeros if n not in recentes]
+    return numeros[:limite]
+
+
+async def _adiados_recentes(numeros: list[str]) -> set[str]:
+    """Quem o sem estoque adiou há menos de `_PULAR_ADIADO_S`. Redis fora =
+    ninguém (o sweep segue como antes, só sem o pulo)."""
+    agora = _agora_ts()
+    try:
+        valores = await redis.mget([f"{_PULAR_ADIADO_PREFIXO}{n}" for n in numeros])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nf_sem_estoque_pular_leitura_falhou", erro=str(exc)[:200])
+        return set()
+    out: set[str] = set()
+    for numero, valor in zip(numeros, valores, strict=False):
+        try:
+            if valor is not None and agora - float(valor) < _PULAR_ADIADO_S:
+                out.add(numero)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def marcar_adiados(numeros: Iterable[str]) -> None:
+    """Marca "adiado agora": o `_candidatos` pula estes por `_PULAR_ADIADO_S`.
+    BEST-EFFORT (Redis fora = sem pulo)."""
+    numeros = sorted(set(numeros))
+    if not numeros:
+        return
+    agora = f"{_agora_ts():.0f}"
+    try:
+        for n in numeros:
+            await redis.set(f"{_PULAR_ADIADO_PREFIXO}{n}", agora, ex=_PULAR_ADIADO_S)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nf_sem_estoque_pular_marca_falhou", erro=str(exc)[:200])
+
+
+async def relogio_adiamento(
+    motivo: str, adiar: list[str], *, zerar: Iterable[str] = ()
+) -> dict[str, float] | None:
+    """numero → segundos desde o 1º adiamento por `motivo` ("duvida" /
+    "sem_leitura"); quem não tinha relógio começa agora (0). `zerar`: pedidos
+    que saíram desse adiamento (o relógio recomeça se voltarem). None = Redis
+    fora — quem chama segue adiando, sem prazo (nunca decide no escuro)."""
+    agora = _agora_ts()
+    zerar = sorted(set(zerar))
+
+    def _chave(n: str) -> str:
+        return f"{_ADIADO_DESDE_PREFIXO}{motivo}:{n}"
+
+    try:
+        if zerar:
+            await redis.delete(*[_chave(n) for n in zerar])
+        if not adiar:
+            return {}
+        for n in adiar:
+            await redis.set(_chave(n), f"{agora:.0f}", nx=True, ex=_ADIADO_DESDE_TTL_S)
+        valores = await redis.mget([_chave(n) for n in adiar])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nf_sem_estoque_relogio_falhou", motivo=motivo, erro=str(exc)[:200])
+        return None
+    out: dict[str, float] = {}
+    for n, valor in zip(adiar, valores, strict=False):
+        try:
+            out[n] = max(0.0, agora - float(valor)) if valor is not None else 0.0
+        except (TypeError, ValueError):
+            out[n] = 0.0
+    return out
 
 
 async def _filtra_estoques_do_sabado(

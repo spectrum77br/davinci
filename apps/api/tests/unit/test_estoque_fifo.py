@@ -9,7 +9,7 @@ reservada pra ele); quem estourou o saldo foram os mais novos.
 
 import pytest
 
-from app.services.estoque_fifo import PedidoPecas, negativos_fifo
+from app.services.estoque_fifo import PedidoPecas, conferir_fifo, negativos_fifo
 
 _AUTO = object()
 
@@ -167,20 +167,20 @@ def test_deficit_maior_que_os_pedidos_marca_todos_os_que_podem():
     assert set(neg) == {"100001", "100002"}
 
 
-def test_sem_bling_id_o_numero_entra_no_lugar_da_ordem():
-    """Revisão R7: sem o `bling_id`, a ordem é o NÚMERO como inteiro — não o
-    fim da fila. Antes o pedido sem id virava o "mais novo" por infinito,
-    absorvia o déficit (e não dá pra mover pedido sem id no Bling) e o novo
-    de verdade passava sem peça."""
+def test_sem_bling_id_e_o_mais_novo_fim_da_fila():
+    """Sem o `bling_id` o pedido é o MAIS NOVO (fim da fila): número e
+    `bling_id` são escalas diferentes (306580 × 27258985905) — com o número no
+    lugar do id ele seria sempre o mais antigo e ficaria com a peça de quem
+    reservou antes dele."""
     neg = negativos_fifo(
         {"x": -1},
         [
             _p("300000", {"x": 1}, ordem=None),
-            _p("830001", {"x": 1}, ordem=700001),
-            _p("830002", {"x": 1}, ordem=700002),
+            _p("830001", {"x": 1}, ordem=27258985905),
+            _p("830002", {"x": 1}, ordem=27259023872),
         ],
     )
-    assert neg == {"830002": {"x"}}
+    assert neg == {"300000": {"x"}}
 
 
 def test_sem_bling_id_e_numero_nao_inteiro_e_o_mais_novo():
@@ -192,22 +192,80 @@ def test_sem_bling_id_e_numero_nao_inteiro_e_o_mais_novo():
     assert neg == {"306539.1": {"x"}}
 
 
+def test_r8_reserva_que_o_espelho_nao_ve_e_duvida_nao_passa_direto():
+    """Revisão R8: o Bling reserva X (mais antigo, fora do espelho) e B (novo,
+    no lote); físico 1 → virtual −1. O físico diz que os conhecidos (só o B)
+    cabem; o virtual diz que o B estoura. As contas discordam: o B é DÚVIDA
+    (quem chama adia — nem 83955, nem fila) até o espelho alcançar o Bling."""
+    conf = conferir_fifo({"p": -1.0}, [PedidoPecas("B", 200, {"p": 1.0})], {"p": 1.0})
+    assert conf.certos == {}
+    assert conf.duvidas == {"B": {"p"}}
+    # quando o X entra no espelho, a dúvida acaba: o B é o negativo certo
+    conf = conferir_fifo(
+        {"p": -1.0},
+        [PedidoPecas("X", 100, {"p": 1.0}), PedidoPecas("B", 200, {"p": 1.0})],
+        {"p": 1.0},
+    )
+    assert conf.certos == {"B": {"p"}}
+    assert conf.duvidas == {}
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Limite conhecido do físico (revisão R8): reserva que o espelho não vê é"
-        " tratada como de pedido MAIS NOVO (ingest atrasado de 30/10). Se ela for"
-        " de um MAIS ANTIGO (fora da janela de 30 dias, situação velha no"
-        " espelho), o novo do lote passa. Decisão pendente com o Eduardo."
+        "Limite conhecido (revisão R8), agora só no caso PERMANENTE: a dúvida"
+        " físico × virtual adia o B pelo prazo (10 min) e, se o X entra no espelho"
+        " nesse tempo, o B vai (coberto: test_a1/test_a3 da regressão). Se o X"
+        " nunca entra (fora da janela de 30 dias, situação velha no espelho), vencido"
+        " o prazo decide a regra do físico — esta conta — e o B passa."
     ),
 )
 def test_ingest_atrasado_do_mais_antigo_o_novo_do_lote_nao_passa():
-    """Revisão R8: o Bling reserva X (mais antigo, fora do espelho) e B (novo,
-    no lote); físico 1 → virtual −1. O B não tem peça — mas o físico diz que
-    os conhecidos (só o B) cabem e ninguém vai. Strict: quando a regra mudar,
-    este teste passa e o marcador tem de sair."""
+    """Revisão R8, depois do prazo: a regra do físico sozinha (o X nunca
+    entrou no espelho) deixa o B passar. Strict: quando a regra mudar, este
+    teste passa e o marcador tem de sair."""
     neg = negativos_fifo({"p": -1.0}, [PedidoPecas("B", 200, {"p": 1.0})], {"p": 1.0})
     assert neg == {"B": {"p"}}
+
+
+def test_conferir_fifo_o_fisico_nunca_marca_quem_o_virtual_poupa():
+    """A dúvida é sempre "o virtual manda, o físico deixa": o déficit do físico
+    nunca passa do virtual e a ordem é a mesma."""
+    pedidos = [
+        _p("100001", {"x": 1, "y": 1}),
+        _p("100002", {"x": 1}),
+        _p("100003", {"y": 2}),
+        _p("100004", {"x": 1, "y": 1}),
+    ]
+    for fis_x in (0, 1, 2, 3):
+        for fis_y in (0, 1, 2, 3, 4):
+            conf = conferir_fifo({"x": -2, "y": -3}, pedidos, {"x": fis_x, "y": fis_y})
+            for n in conf.pelo_fisico:
+                assert n in conf.pelo_virtual, (fis_x, fis_y, n)
+            assert set(conf.duvidas) == set(conf.pelo_virtual) - set(conf.pelo_fisico)
+
+
+def test_conferir_fifo_sem_fisico_nao_tem_duvida():
+    pedidos = [_p("100001", {"x": 1}), _p("100002", {"x": 1})]
+    conf = conferir_fifo({"x": -1}, pedidos)
+    assert conf.certos == {"100002": {"x"}}
+    assert conf.duvidas == {}
+
+
+def test_conferir_fifo_caso_30_10_as_8h18():
+    """30/10 08:18: só o 306575 (Em digitação), o 306580 e o 306581 no
+    espelho; o Bling já reservava os 9 (virtual −6, físico 4). O físico diz
+    que os conhecidos cabem; o virtual manda os dois pra 83955 — DÚVIDA (antes
+    a regra do físico os deixava passar na hora e, quando um mais antigo
+    chegava atrasado no espelho, era ELE que ia pra 83955)."""
+    pedidos = [
+        _p("306575", {"b026.18": 1}, garantido=True),
+        _p("306580", {"b026.18": 1}),
+        _p("306581", {"b026.18": 1}),
+    ]
+    conf = conferir_fifo({"b026.18": -6}, pedidos, {"b026.18": 4})
+    assert conf.certos == {}
+    assert set(conf.duvidas) == {"306580", "306581"}
 
 
 def test_kit_mais_e_o_simples_disputam_o_componente():

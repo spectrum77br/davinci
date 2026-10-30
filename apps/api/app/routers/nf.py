@@ -89,7 +89,7 @@ from app.services.bling_situacoes import SITUACAO_ENVIADO_ETIQUETA as _SITUACAO_
 from app.services.bling_situacoes import (
     SITUACOES_ENVIADO_ETIQUETA_STR as _SITUACOES_ENVIADO_ETIQUETA_STR,
 )
-from app.services.estoque_fifo import PedidoPecas, negativos_fifo
+from app.services.estoque_fifo import PedidoPecas, conferir_fifo
 from app.services.melhor_envio import (
     MelhorEnvioApiError,
     MelhorEnvioClient,
@@ -1187,31 +1187,57 @@ async def _saldos_bling(
 class _SemEstoque(NamedTuple):
     # numero → SKUs: pedidos DO LOTE que estouram o saldo (vão pra 83955).
     lote: dict[str, list[str]]
-    # numero → SKUs: o FIFO aponta, mas o pedido NÃO está no lote (ex.: ML /
-    # Amazon que o sweep não confere) — nunca é movido daqui, só avisado.
+    # numero → SKUs: o FIFO aponta (com certeza), mas o pedido NÃO está no lote
+    # (ex.: ML / Amazon que o sweep não confere) — nunca é movido daqui, só
+    # avisado.
     fora_do_lote: dict[str, list[str]]
     # numero → SKUs sem leitura no Bling: pedido do lote ADIADO nesta passada
     # (nem 83955, nem fila, nem marca) — a próxima confere de novo.
     adiados: dict[str, list[str]]
-    # Kits sem composição no cache que desligaram o físico nesta passada (aviso).
+    # Kits sem composição no cache segurando peça curta com pedido do lote na
+    # dúvida por causa deles (aviso).
     kits_sem_composicao: list[int]
+    # numero → SKUs: a conta com o físico e a só com o virtual discordam
+    # (uma manda pra 83955, a outra deixa). ADIADO, como o sem leitura, até o
+    # prazo (`_aplicar_prazo_duvida`); vencido, sai daqui pra `lote` ou pra fila.
+    duvidas: dict[str, list[str]] = {}  # noqa: RUF012 — nunca mutado
+    # Das dúvidas, quem vai pra 83955 quando o prazo vencer (as outras ficam com
+    # a peça): regra do físico; com kit sem composição suspeito, a do virtual.
+    vencem_83955: frozenset[str] = frozenset()
+    duvida_pelo_virtual: bool = False
 
 
 def _nada() -> _SemEstoque:
-    return _SemEstoque({}, {}, {}, [])
+    return _SemEstoque({}, {}, {}, [], {}, frozenset(), False)
 
 
 async def _pedidos_sem_estoque(
     session: AsyncSession, numeros: list[str]
 ) -> dict[str, list[str]]:
-    """Pedidos do lote que estouram o saldo VIRTUAL — conferido AO VIVO, por
-    FIFO. Devolve numero → SKUs do pedido. Ver `_sem_estoque_fifo` (o negativo
-    fora do lote e os adiados por falta de leitura só vão pro log daqui; quem
-    enfileira usa `_sem_estoque_fifo` e respeita os adiados)."""
-    return (await _sem_estoque_fifo(session, numeros)).lote
+    """Pedidos do lote que estouram o saldo VIRTUAL com CERTEZA — conferido
+    AO VIVO, por FIFO. Devolve numero → SKUs do pedido. Só confere (não mexe
+    no relógio da dúvida): o negativo fora do lote, os adiados por falta de
+    leitura e as dúvidas físico × virtual ficam de fora daqui; quem enfileira
+    usa `_sem_estoque_fifo` e respeita adiados e dúvidas."""
+    return (await _sem_estoque_fifo(session, numeros, prazo=False)).lote
 
 
-async def _sem_estoque_fifo(session: AsyncSession, numeros: list[str]) -> _SemEstoque:
+async def _sem_estoque_fifo(
+    session: AsyncSession, numeros: list[str], *, prazo: bool = True
+) -> _SemEstoque:
+    """Quem estoura o saldo VIRTUAL — conferido AO VIVO, por FIFO.
+
+    `prazo=False`: só confere (nada no Redis) — a dúvida volta crua em
+    `duvidas`, sem o relógio decidir (conferência de quem só olha). Ver
+    `_conferir_sem_estoque` (a regra) e `_aplicar_prazo_duvida` (o prazo).
+    """
+    res = await _conferir_sem_estoque(session, numeros)
+    if prazo and numeros:
+        res = await _aplicar_prazo_duvida(numeros, res)
+    return res
+
+
+async def _conferir_sem_estoque(session: AsyncSession, numeros: list[str]) -> _SemEstoque:
     """Quem estoura o saldo VIRTUAL — conferido AO VIVO, por FIFO.
 
     A fonte é o Bling (`GET /estoques/saldos` → `saldoVirtualTotal`), nunca o
@@ -1239,6 +1265,16 @@ async def _sem_estoque_fifo(session: AsyncSession, numeros: list[str]) -> _SemEs
     nem pra fila nesta passada — sai em `adiados` e a próxima confere de novo.
     A exceção é o pedido que já estoura uma peça LIDA: esse vai (é certo,
     qualquer que seja o saldo da outra peça).
+
+    Dúvida do físico (`estoque_fifo.conferir_fifo`): só vai pra 83955 quem as
+    DUAS contas (com o físico e só com o virtual) mandam. Quando discordam, o
+    pedido sai em `duvidas` (adiado): a reserva que o espelho não vê pode ser
+    de um pedido MAIS ANTIGO que ainda não entrou (30/10: o 306580 chegou
+    depois do 306581) — o espelho alcança o Bling em minutos. Kit SEM
+    composição no cache com saldo negativo (ou sem leitura) prende peça que o
+    espelho não enxerga como dele: ele não desliga mais o físico de tudo — os
+    pedidos que dependem do físico caem na dúvida e, vencido o prazo, decide o
+    virtual (e sai o aviso do kit).
     """
     if not numeros:
         return _nada()
@@ -1353,7 +1389,7 @@ async def _sem_estoque_fifo(session: AsyncSession, numeros: list[str]) -> _SemEs
                 pedidos=sem_leitura_lote,
                 pecas=sorted(sem_leitura),
             )
-        return _SemEstoque({}, {}, sem_leitura_lote, [])
+        return _nada()._replace(adiados=sem_leitura_lote)
     pids_curtos = {int(p[3:]) for p in curtas if p.startswith("id:")}
     skus_curtos = {p[4:] for p in curtas if p.startswith("sku:")}
     if pids_curtos and client is not None:
@@ -1419,21 +1455,13 @@ async def _sem_estoque_fifo(session: AsyncSession, numeros: list[str]) -> _SemEs
     }
     # Kit SEM composição no cache com saldo negativo (ou sem leitura) prende
     # componente que o espelho não enxerga como dele: a reserva dele cairia
-    # nos "que ainda não entraram" e o déficit encolheria. Sem saber qual
-    # peça ele prende, nada de físico nesta passada (D = −virtual: o lado
-    # seguro contra vender sem peça) — e quem chama avisa (senão a regra
-    # repete o erro em silêncio até a sync semanal dos kits).
+    # nos "que ainda não entraram" e o déficit do físico encolheria. Não
+    # desliga o físico de tudo: quem depende dele fica na dúvida e, vencido o
+    # prazo, decide o virtual (o lado seguro contra vender sem peça).
     suspeitos = sorted(
         k for k in sem_composicao if (v := _virtual(k)) is None or v < 0
     )
-    kits_aviso: list[int] = []
-    if fisicos and suspeitos:
-        logger.warning(
-            "nf_sem_estoque_kit_sem_composicao", kits=suspeitos, pecas=sorted(fisicos)
-        )
-        fisicos = {}
-        kits_aviso = suspeitos
-    negativos = negativos_fifo(
+    conf = conferir_fifo(
         saldos,
         [
             PedidoPecas(
@@ -1451,20 +1479,31 @@ async def _sem_estoque_fifo(session: AsyncSession, numeros: list[str]) -> _SemEs
         ],
         fisicos,
     )
+    certos = conf.certos
+    em_duvida = conf.duvidas
+    regra_do_prazo = conf.pelo_virtual if suspeitos else conf.pelo_fisico
 
     faltando = {
         n: s
         for n in dict.fromkeys(numeros)
-        if n in negativos and (s := _skus_com(n, negativos[n]))
+        if n in certos and (s := _skus_com(n, certos[n]))
+    }
+    duvidas = {
+        n: s
+        for n in dict.fromkeys(numeros)
+        if n in em_duvida and n not in faltando and (s := _skus_com(n, em_duvida[n]))
     }
     fora = {
         n: s
-        for n in sorted(set(negativos) - lote)
-        if (s := _skus_com(n, negativos[n]))
+        for n in sorted(set(certos) - lote)
+        if (s := _skus_com(n, certos[n]))
     }
     adiados = {n: s for n, s in sem_leitura_lote.items() if n not in faltando}
+    kits_aviso = suspeitos if duvidas else []
     poupados = sorted(
-        n for n in lote if pecas.get(n) and n not in faltando and n not in adiados
+        n
+        for n in lote
+        if pecas.get(n) and n not in faltando and n not in adiados and n not in duvidas
     )
     if poupados:
         # Tinham peça com saldo negativo, mas são os mais antigos: a peça é deles.
@@ -1473,11 +1512,70 @@ async def _sem_estoque_fifo(session: AsyncSession, numeros: list[str]) -> _SemEs
         logger.warning(
             "nf_sem_estoque_adiado_sem_leitura", pedidos=adiados, pecas=sorted(sem_leitura)
         )
+    if duvidas:
+        logger.warning(
+            "nf_sem_estoque_duvida_fisico_virtual",
+            pedidos=duvidas,
+            kits_sem_composicao=suspeitos,
+            fisicos={p: fisicos[p] for p in sorted(fisicos)},
+        )
     if fora:
         # O negativo é um pedido que ninguém conferiu agora (ex.: ML/Amazon fora
         # do sweep): não move sozinho — quem chama decide se avisa.
         logger.warning("nf_sem_estoque_fifo_negativo_fora_do_lote", pedidos=fora)
-    return _SemEstoque(faltando, fora, adiados, kits_aviso)
+    return _SemEstoque(
+        faltando,
+        fora,
+        adiados,
+        kits_aviso,
+        duvidas,
+        frozenset(n for n in duvidas if n in regra_do_prazo),
+        bool(suspeitos),
+    )
+
+
+async def _aplicar_prazo_duvida(numeros: list[str], res: _SemEstoque) -> _SemEstoque:
+    """Prazo da dúvida físico × virtual: o relógio do 1º adiamento fica no
+    Redis (chave por pedido, validade de um dia). Dentro do prazo o pedido
+    segue ADIADO; vencido, decide a regra do prazo — a do físico (a peça fica
+    com quem o espelho conhece) ou, com kit sem composição suspeito, a do
+    virtual — com warning. Pedido do lote que saiu da dúvida zera o relógio.
+    Redis fora = sem relógio: a dúvida segue adiada (nunca 83955 no escuro) e
+    fica o warning."""
+    from app.services import nf_auto_enfileirar as auto
+
+    zerar = [n for n in dict.fromkeys(numeros) if n not in res.duvidas and n not in res.adiados]
+    relogio = await auto.relogio_adiamento("duvida", list(res.duvidas), zerar=zerar)
+    if not res.duvidas:
+        return res
+    if relogio is None:
+        logger.warning("nf_sem_estoque_duvida_sem_relogio", pedidos=res.duvidas)
+        return res
+    # Quem também está sem leitura segue adiado: o teto do sem leitura decide.
+    vencidas = [
+        n
+        for n in res.duvidas
+        if n not in res.adiados and relogio.get(n, 0.0) >= auto.PRAZO_DUVIDA_S
+    ]
+    if not vencidas:
+        return res
+    vao = {n: res.duvidas[n] for n in vencidas if n in res.vencem_83955}
+    logger.warning(
+        "nf_sem_estoque_duvida_vencida",
+        regra="virtual (kit sem composição)" if res.duvida_pelo_virtual else "fisico",
+        vao_83955=vao,
+        ficam=sorted(set(vencidas) - set(vao)),
+        minutos={n: round(relogio[n] / 60, 1) for n in vencidas},
+    )
+    lote = {
+        n: s
+        for n in dict.fromkeys(numeros)
+        if (s := res.lote.get(n) or vao.get(n))
+    }
+    return res._replace(
+        lote=lote,
+        duvidas={n: s for n, s in res.duvidas.items() if n not in vencidas},
+    )
 
 
 async def _marcar_aguardando_cancelamento(
@@ -1794,7 +1892,9 @@ async def enfileirar_importacao(
     peça, o antigo segue) NÃO entra na fila: vai pra Aguardando Cancelamento no
     Bling e sai como pulado — não faz sentido emitir NF/etiqueta de peça que
     não existe. Pedido cujo saldo o Bling não respondeu também sai como pulado
-    (adiado, sem marca): nunca entra na fila sem conferir o estoque."""
+    (adiado, sem marca): nunca entra na fila sem conferir o estoque. Idem o
+    pedido na dúvida físico × virtual (o espelho ainda não alcançou o Bling):
+    adiado até o prazo da dúvida, depois decide a regra do prazo."""
     # PRIORIDADE de estoque (Tabela de Preços → coluna Prioridade): troca o
     # SKU pra tag prioritária ANTES do check de estoque — o check abaixo e a
     # NF já enxergam o SKU novo. Falha aqui nunca trava o enfileiramento.
@@ -1827,9 +1927,11 @@ async def enfileirar_importacao(
     candidatos = [n for n in body.numeros if n not in adiados]
     conferencia = await _sem_estoque_fifo(session, candidatos) if candidatos else _nada()
     sem_estoque = conferencia.lote
-    # Pedido que leva produto sem leitura no Bling (consulta falhou): fica de
-    # fora desta vez, sem marca — nunca passa sem conferir o estoque.
+    # Pedido que leva produto sem leitura no Bling (consulta falhou) ou na
+    # dúvida físico × virtual: fica de fora desta vez, sem marca — nunca passa
+    # sem conferir o estoque, nunca vai pra 83955 sem certeza.
     adiados_estoque = conferencia.adiados
+    duvidas = {n: s for n, s in conferencia.duvidas.items() if n not in adiados_estoque}
     if conferencia.kits_sem_composicao:
         from app.services.nf_auto_enfileirar import avisar_kit_sem_composicao
 
@@ -1882,8 +1984,22 @@ async def enfileirar_importacao(
             ),
         }
         for numero, skus in adiados_estoque.items()
+    ] + [
+        {
+            "numero": numero,
+            "motivo": (
+                f"estoque em dúvida ({', '.join(skus)}): o saldo físico e o virtual do"
+                " Bling discordam — o espelho ainda não tem todos os pedidos que"
+                " reservam a peça; tente de novo em alguns minutos"
+            ),
+        }
+        for numero, skus in duvidas.items()
     ]
-    numeros = [n for n in candidatos if n not in sem_estoque and n not in adiados_estoque]
+    numeros = [
+        n
+        for n in candidatos
+        if n not in sem_estoque and n not in adiados_estoque and n not in duvidas
+    ]
     res = (
         await nf_emissao_gerar.gerar_por_faturador(session, numeros)
         if numeros
