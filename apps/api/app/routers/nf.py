@@ -2174,6 +2174,13 @@ async def _linha_etiqueta(session: AsyncSession, pedido_bling: str) -> NfEtiquet
 # Janela do casamento nota → pedido. Nota emitida hoje casa com pedido recente;
 # fora disso o risco de pegar um homônimo antigo do mesmo CPF é maior que o ganho.
 _NOTA_JANELA = timedelta(days=30)
+# 30/10/2026 — "faça esse ajuste para termos mais entregas de NF automaticamente
+# quando é requisitado": a janela é contada da EMISSÃO da nota, dos dois lados
+# (pedido de até 30 dias antes até 1 dia depois — o pedido do Bling vem só com a
+# data, 00:00 de SP). Contada de hoje, a nota antiga re-enviada pelo robô casava
+# com o pedido NOVO do mesmo CPF: vínculo errado em Pós Vendas/garantia e, se o
+# novo já tem a sua nota cheia, a do pedido certo nunca saía no automático.
+_NOTA_FOLGA_DEPOIS = timedelta(days=1)
 
 
 async def _pedido_informado(
@@ -2218,9 +2225,13 @@ async def _casar_pedido_da_nota(
     devolve None: a nota fica guardada sem pedido e uma passada futura tenta de
     novo, em vez de casar errado.
     """
-    if not nota.destinatario_doc:
+    # Sem data de emissão não há âncora pra janela: não adivinha (a nota entra
+    # sem pedido; só o `pedido_bling` informado casa).
+    if not nota.destinatario_doc or nota.data_emissao is None:
         return None
-    cutoff = datetime.now(UTC) - _NOTA_JANELA
+    emissao = nota.data_emissao
+    if emissao.tzinfo is None:
+        emissao = emissao.replace(tzinfo=UTC)
     rows = (
         await session.execute(
             select(BlingOrder.numero, BlingOrder.nome_destinatario)
@@ -2228,7 +2239,8 @@ async def _casar_pedido_da_nota(
                 BlingOrder.documento_destinatario == nota.destinatario_doc,
                 BlingOrder.numero.is_not(None),
                 BlingOrder.situacao.is_distinct_from("excluido"),
-                BlingOrder.data >= cutoff,
+                BlingOrder.data >= emissao - _NOTA_JANELA,
+                BlingOrder.data <= emissao + _NOTA_FOLGA_DEPOIS,
             )
             .distinct()
         )
@@ -2286,7 +2298,10 @@ async def nf_agent_nf_xml(
         session.add(row)
 
     pedido = await _pedido_informado(session, nota, pedido_bling)
-    if pedido is None:
+    # 30/10/2026: a adivinhação pelo CPF só preenche nota SEM pedido. Trocar um
+    # vínculo existente só com o `pedido_bling` informado e validado — re-subir
+    # o XML sem ele não pode mover a nota pra outra compra do mesmo comprador.
+    if pedido is None and not row.pedido_bling:
         pedido = await _casar_pedido_da_nota(session, nota)
     row.numero = nota.numero
     row.serie = nota.serie

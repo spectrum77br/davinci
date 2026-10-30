@@ -9,7 +9,7 @@ do destinatário — e, se houver mais de um candidato, pelo nome.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -23,6 +23,7 @@ from app.services import nf_xml
 
 _TOKEN = "nf-agent-test-token"
 _CHAVE = "35260867773725000193550020000002521674103009"
+_BRT = timezone(timedelta(hours=-3))
 
 
 def _xml(
@@ -34,8 +35,11 @@ def _xml(
     dest_nome: str = "Joel Fernandes Bezerra",
     valor: str = "17.20",
     com_protocolo: bool = True,
+    emissao: datetime | None = None,
 ) -> bytes:
-    """Um `<nfeProc>` reduzido, com a mesma forma do arquivo real do Upseller."""
+    """Um `<nfeProc>` reduzido, com a mesma forma do arquivo real do Upseller.
+    Emitida agora (hora de SP) se `emissao` não vier."""
+    dh = (emissao or datetime.now(_BRT)).astimezone(_BRT).isoformat(timespec="seconds")
     prot = (
         f"<protNFe versao='4.00'><infProt><chNFe>{chave}</chNFe>"
         "<nProt>135263554419629</nProt><cStat>100</cStat>"
@@ -46,7 +50,7 @@ def _xml(
         "<nfeProc versao='4.00' xmlns='http://www.portalfiscal.inf.br/nfe'>"
         f"<NFe><infNFe Id='NFe{chave}' versao='4.00'>"
         f"<ide><cUF>35</cUF><mod>55</mod><serie>2</serie><nNF>{numero}</nNF>"
-        "<dhEmi>2026-08-27T16:51:31-03:00</dhEmi></ide>"
+        f"<dhEmi>{dh}</dhEmi></ide>"
         "<emit><CNPJ>67773725000193</CNPJ>"
         "<xNome>VORTAN INTERMEDIACOES LTDA</xNome></emit>"
         f"<dest><{doc_tag}>{doc}</{doc_tag}><xNome>{dest_nome}</xNome></dest>"
@@ -122,12 +126,13 @@ async def _seed_pedido(
     nome: str,
     bling_id: int,
     dias_atras: int = 1,
+    data: datetime | None = None,
 ) -> None:
     db.add(
         BlingOrder(
             bling_id=bling_id,
             numero=numero,
-            data=datetime.now(UTC) - timedelta(days=dias_atras),
+            data=data or datetime.now(UTC) - timedelta(days=dias_atras),
             loja="205527077",
             situacao="15",
             item_index=0,
@@ -337,3 +342,107 @@ async def test_nf_xml_pedido_informado_desempata_e_valida_cpf(
     assert r.status_code == 200, r.text
     await db.refresh(row)
     assert row.pedido_bling == "295021"
+
+
+async def _subir_com_pedido(client: AsyncClient, raw: bytes, pedido: str):
+    return await client.post(
+        "/api/nf-cadastro/agent/nf-xml",
+        files={"file": (f"{_CHAVE}.xml", raw, "application/xml")},
+        data={"pedido_bling": pedido},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+
+
+@pytest.mark.asyncio
+async def test_nf_xml_nota_antiga_nao_casa_com_pedido_novo(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """30/10/2026: a janela conta da EMISSÃO, não de hoje. Nota de 60 dias atrás
+    re-enviada pelo robô, e o único pedido do CPF é de ontem (outra compra) →
+    fica sem pedido. Idem com `pedido_bling` informado que não está no espelho
+    (cai na adivinhação, que também não casa)."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    await _seed_pedido(
+        db, numero="299001", doc="01197255419",
+        nome="Joel Fernandes Bezerra", bling_id=900021,
+    )
+    antiga = _xml(emissao=datetime.now(UTC) - timedelta(days=60))
+
+    r = await _subir(client, antiga)
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] is None
+
+    r = await _subir_com_pedido(client, antiga, "288888")  # não existe no espelho
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] is None
+
+
+@pytest.mark.asyncio
+async def test_nf_xml_nota_antiga_casa_pelo_dia_da_emissao(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Nota de 60 dias atrás casa com o pedido feito 1 dia antes dela, mesmo
+    passado dos 30 dias de hoje (o reenvio dos dias que falharam funciona). O
+    pedido de ontem (depois da nota) e o de 95 dias (30+ antes dela) não contam."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    await _seed_pedido(
+        db, numero="289096", doc="01197255419",
+        nome="Joel Fernandes Bezerra", bling_id=900031, dias_atras=61,
+    )
+    await _seed_pedido(
+        db, numero="299001", doc="01197255419",
+        nome="Joel Fernandes Bezerra", bling_id=900032, dias_atras=1,
+    )
+    await _seed_pedido(
+        db, numero="270001", doc="01197255419",
+        nome="Joel Fernandes Bezerra", bling_id=900033, dias_atras=95,
+    )
+
+    r = await _subir(client, _xml(emissao=datetime.now(UTC) - timedelta(days=60)))
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] == "289096"
+
+
+@pytest.mark.asyncio
+async def test_nf_xml_resubida_nao_troca_pedido_por_adivinhacao(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """30/10/2026: nota já casada pelo `pedido_bling` informado não muda de
+    pedido quando o XML volta sem ele (a adivinhação acharia a compra nova do
+    mesmo CPF). Só outro pedido informado E validado troca o vínculo."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    # pedido de 40 dias: fora da janela da adivinhação, aceito só se informado
+    await _seed_pedido(
+        db, numero="291000", doc="01197255419",
+        nome="Joel Fernandes Bezerra", bling_id=900041, dias_atras=40,
+    )
+    await _seed_pedido(
+        db, numero="299002", doc="01197255419",
+        nome="Joel Fernandes Bezerra", bling_id=900042, dias_atras=1,
+    )
+    await _seed_pedido(
+        db, numero="295777", doc="99988877766", nome="Outra Pessoa",
+        bling_id=900043,
+    )
+
+    r = await _subir_com_pedido(client, _xml(), "291000")
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] == "291000"
+
+    r = await _subir(client, _xml())  # sem pedido: a adivinhação daria 299002
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] == "291000"
+
+    r = await _subir_com_pedido(client, _xml(), "295777")  # CPF de outro
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] == "291000"
+
+    r = await _subir_com_pedido(client, _xml(), "299002")  # informado e válido
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] == "299002"
+    db.expire_all()
+    rows = (
+        await db.execute(select(NfNota).where(NfNota.chave == _CHAVE))
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].pedido_bling == "299002"
