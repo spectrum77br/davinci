@@ -1270,7 +1270,8 @@ async def _conferir_sem_estoque(session: AsyncSession, numeros: list[str]) -> _S
     DUAS contas (com o físico e só com o virtual) mandam. Quando discordam, o
     pedido sai em `duvidas` (adiado): a reserva que o espelho não vê pode ser
     de um pedido MAIS ANTIGO que ainda não entrou (30/10: o 306580 chegou
-    depois do 306581) — o espelho alcança o Bling em minutos. Kit SEM
+    depois do 306581) — o espelho alcança o Bling em minutos (pelo webhook)
+    ou até a varredura de hora em hora (webhook perdido). Kit SEM
     composição no cache com saldo negativo (ou sem leitura) prende peça que o
     espelho não enxerga como dele: ele não desliga mais o físico de tudo — os
     pedidos que dependem do físico caem na dúvida e, vencido o prazo, decide o
@@ -1551,7 +1552,7 @@ async def _aplicar_prazo_duvida(numeros: list[str], res: _SemEstoque) -> _SemEst
     if relogio is None:
         logger.warning("nf_sem_estoque_duvida_sem_relogio", pedidos=res.duvidas)
         return res
-    # Quem também está sem leitura segue adiado: o teto do sem leitura decide.
+    # Quem também está sem leitura segue adiado (sem teto) até o Bling ler.
     vencidas = [
         n
         for n in res.duvidas

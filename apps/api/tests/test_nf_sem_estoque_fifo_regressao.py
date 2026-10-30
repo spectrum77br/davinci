@@ -3,10 +3,11 @@ achados.
 
 Regra do Eduardo (30/10): a peça fica com o pedido mais ANTIGO (ordem de
 entrada no Bling); só os mais novos que estouram o saldo vão pra Aguardando
-Cancelamento (83955). Nunca 83955 sem certeza; na dúvida, ADIA por pouco
-tempo (nem 83955, nem fila, nem marca). Mas a fila automática nunca pode
-parar em silêncio: adiado não ocupa as vagas do tick, a dúvida tem prazo e o
-sem leitura tem teto (erro no painel + aviso).
+Cancelamento (83955). Nunca 83955 sem certeza; na dúvida, ADIA (nem 83955,
+nem fila, nem marca). Mas a fila automática nunca pode parar em silêncio:
+adiado não ocupa as vagas do tick, a dúvida tem prazo (65 min — uma volta da
+varredura de hora em hora) e o sem leitura avisa (UM aviso agregado, no
+máximo um por hora) e segue sozinho quando o Bling volta.
 
 R8 no cálculo puro fica em tests/unit/test_estoque_fifo.py; de ponta a ponta
 (o mais antigo chega atrasado no espelho) é o A1 e o A3 daqui.
@@ -445,10 +446,12 @@ async def test_kit_sem_composicao_adia_decide_o_virtual_e_avisa_uma_vez_por_dia(
     avisos_kit = [t for t, _r in _FakeThreema.enviados if "kit sem composição" in t]
     assert len(avisos_kit) == 1
     assert "Kit kitnovo (id Bling 950)" in avisos_kit[0]
-    assert "adiados até 10 min" in avisos_kit[0]
+    assert "adiados até 65 min" in avisos_kit[0]
 
     relogio.avanca(6)
     assert (await run_auto_enfileirar_nf())["adiados_duvida"] == 1  # dentro do prazo
+    relogio.avanca(54)
+    assert (await run_auto_enfileirar_nf())["adiados_duvida"] == 1  # 60 min: ainda
     relogio.avanca(6)
     s3 = await run_auto_enfileirar_nf()
     # vencido o prazo com o kit suspeito: decide o virtual — D = 1, vai
@@ -773,20 +776,30 @@ async def test_a8_kit_sem_composicao_sem_leitura_adia_em_vez_de_mandar_os_antigo
     assert fila == ["830001", "830002", "830003", "830004"]
 
 
+def _avisos_sem_leitura() -> list[tuple[str, list[str]]]:
+    return [(t, r) for t, r in _FakeThreema.enviados if "esperando o Bling" in t]
+
+
 @pytest.mark.asyncio
-async def test_a9_adiados_nao_tomam_as_vagas_do_tick_e_tem_teto(
+async def test_a9_adiados_nao_tomam_as_vagas_do_tick_e_esperam_o_bling_sem_marca(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch, relogio: _Relogio
 ):
-    """30 pedidos com produto que o Bling nunca devolve (número menor = vêm
+    """30 pedidos com produto que o Bling não devolve (número menor = vêm
     primeiro nos candidatos) + 1 pedido bom. Antes: os 30 adiados tomavam as
     30 vagas de todo tick e o bom nunca entrava. Agora o adiado é pulado por
-    alguns minutos (o bom entra no tick seguinte) e, com 30 min sem leitura,
-    sai do sweep com 'erro' + UM aviso — nunca 83955."""
+    alguns minutos (o bom entra no tick seguinte).
+
+    Queda longa do Bling (29/10 17:07 → 30/10 08:08): o adiado NÃO ganha
+    marca — com 'erro' ele sairia da fila automática e alguém teria de repor
+    um por um à mão. Com 30 min sem leitura sai UM aviso AGREGADO no Threema,
+    no máximo um por hora; quando o Bling volta, os 30 seguem sozinhos pra
+    fila. Nunca 83955."""
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
     _threema(monkeypatch)
+    monkeypatch.setattr(nf_auto_enfileirar, "_AVISO_SEM_LEITURA_MAX_LINHAS", 10)
     pedidos = {700100 + i: [(556, 1)] for i in range(30)}
     pedidos[700200] = [(555, 1)]
-    fake = _BlingVivo({555: 50}, {}, pedidos)  # 556 nunca volta (produto excluído)
+    fake = _BlingVivo({555: 50}, {}, pedidos)  # o Bling não devolve o 556
     _usa(monkeypatch, fake)
     for i in range(30):
         _espelho(db, f"8300{i:02d}", 700100 + i, [(556, "velho", 1)], dias=3)
@@ -804,33 +817,76 @@ async def test_a9_adiados_nao_tomam_as_vagas_do_tick_e_tem_teto(
     fila, fats = await _estado(db)
     assert fila == ["830100"]
     assert fake.chamadas == []
-    assert {n: st for n, st in fats.items() if n != "830100"} == {
-        f"8300{i:02d}": "erro" for i in range(30)
-    }
-    assert sum(r.get("sem_leitura_erro", 0) for r in resumos) == 30
-    erro = (
-        await db.execute(
-            select(NfFaturamento.erro_faturamento).where(NfFaturamento.pedido_bling == "830000")
-        )
-    ).scalar_one()
-    assert "não devolveu o saldo de velho por mais de 30 min" in erro
-    [(texto, recipients)] = [
-        (t, r) for t, r in _FakeThreema.enviados if "NÃO conferido" in t
-    ]
+    assert fats == {"830100": "processando"}  # nenhuma marca nos 30
+    assert sum(r.get("sem_leitura_longa", 0) for r in resumos) == 30
+    [(texto, recipients)] = _avisos_sem_leitura()
     assert recipients == ["7KMPCBS5"]
-    assert "Pedido 830000" in texto and "Pedido 830029" in texto
-    # depois do teto, sai do sweep: nada de aviso novo
-    await _passadas(relogio, 3)
-    assert len([t for t, _r in _FakeThreema.enviados if "NÃO conferido" in t]) == 1
+    assert texto.startswith(
+        "30 pedidos esperando o Bling responder o estoque desde 05:00 (mais de 30 min"
+    )
+    assert "Pedido 830000" in texto and "Pedido 830009" in texto and ": velho" in texto
+    assert "Pedido 830010" not in texto and texto.endswith("… e mais 20")
+
+    # seguem candidatos (com o pulo) e adiados — sem aviso novo dentro da hora
+    resumos = await _passadas(relogio, 28)  # até 88 min
+    assert sum(r.get("sem_leitura_longa", 0) for r in resumos) == 9 * 30
+    assert len(_avisos_sem_leitura()) == 1
+    # uma hora depois do 1º aviso, sai outro (o Bling continua fora)
+    await _passadas(relogio, 1)  # 90 min
+    assert len(_avisos_sem_leitura()) == 2
+    assert _avisos_sem_leitura()[1][0].startswith("30 pedidos esperando")
+
+    # o Bling voltou: os 30 seguem sozinhos pra fila, ninguém repõe à mão
+    fake.fisico[556] = 50
+    await _passadas(relogio, 3)  # 96 min
+    fila, fats = await _estado(db)
+    assert fila == sorted([f"8300{i:02d}" for i in range(30)] + ["830100"])
+    assert set(fats.values()) == {"processando"}
+    assert fake.chamadas == []
+    assert len(_avisos_sem_leitura()) == 2
 
 
 @pytest.mark.asyncio
-async def test_sem_leitura_que_volta_zera_o_relogio_do_teto(
+async def test_aviso_sem_leitura_agrega_quem_esta_em_outra_passada(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch, relogio: _Relogio
 ):
-    """O teto é de 30 min SEGUIDOS sem leitura: o Bling voltou a responder
-    (e o pedido continuou adiado por outro motivo) — o relógio recomeça."""
+    """35 pedidos sem leitura: o teto do tick (30) e o pulo dos adiados
+    espalham a fila em duas passadas (30 + 5). O aviso conta TODOS os que
+    esperam o Bling há 30 min ou mais, não só os da passada que avisou."""
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    _threema(monkeypatch)
+    fake = _BlingVivo({}, {}, {700100 + i: [(556, 1)] for i in range(35)})
+    _usa(monkeypatch, fake)
+    for i in range(35):
+        _espelho(db, f"8300{i:02d}", 700100 + i, [(556, "velho", 1)], dias=3)
+    await db.commit()
+
+    s1 = await run_auto_enfileirar_nf()
+    assert s1["candidatos"] == 30
+    [s2] = await _passadas(relogio, 1)
+    assert s2["candidatos"] == 5
+    await _passadas(relogio, 14)  # 30 min: só os 30 da 1ª passada passaram de 30
+    [(texto, _r)] = _avisos_sem_leitura()
+    assert texto.startswith("30 pedidos esperando")
+    resumos = await _passadas(relogio, 30)  # 90 min: a passada é a dos 30
+    assert resumos[-1]["sem_leitura_longa"] == 30
+    assert len(_avisos_sem_leitura()) == 2
+    texto = _avisos_sem_leitura()[1][0]
+    assert texto.startswith("35 pedidos esperando o Bling responder o estoque desde 05:00")
+    assert "Pedido 830034" in texto
+    assert await _estado(db) == ([], {})
+    assert fake.chamadas == []
+
+
+@pytest.mark.asyncio
+async def test_sem_leitura_que_volta_zera_o_relogio_do_aviso(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch, relogio: _Relogio
+):
+    """O aviso é de 30 min SEGUIDOS sem leitura: o Bling voltou a responder
+    (e o pedido continuou adiado por outro motivo) — o relógio recomeça. E
+    nem com o aviso o pedido ganha marca."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    _threema(monkeypatch)
     fake = _BlingVivo({555: 1}, {}, {700001: [(555, 1)], 700000: [(555, 1)]})
     fake.omite = {555}
     _usa(monkeypatch, fake)
@@ -841,9 +897,15 @@ async def test_sem_leitura_que_volta_zera_o_relogio_do_teto(
     # volta a leitura: o 700000 (antigo, fora do espelho) deixa o 830001 na dúvida
     fake.omite = set()
     await _passadas(relogio, 3)
-    # some de novo: o relógio do sem leitura recomeçou — 20 min ainda não é teto
+    # some de novo: o relógio do sem leitura recomeçou — 12 min ainda não avisa
     fake.omite = {555}
-    await _passadas(relogio, 10)
+    resumos = await _passadas(relogio, 10)
+    assert not any(r.get("sem_leitura_longa") for r in resumos)
+    assert _avisos_sem_leitura() == []
+    # 30 min seguidos sem leitura: aí sim, o aviso — e nada de marca
+    resumos = await _passadas(relogio, 8)
+    assert sum(r.get("sem_leitura_longa", 0) for r in resumos) == 1
+    assert len(_avisos_sem_leitura()) == 1
     _fila, fats = await _estado(db)
     assert fats == {}
     assert fake.chamadas == []
@@ -864,8 +926,8 @@ async def test_redis_fora_o_sweep_segue_e_a_duvida_fica_adiada(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch, relogio: _Relogio
 ):
     """Sem Redis não há relógio: a dúvida e o sem leitura seguem ADIADOS (nunca
-    83955 no escuro), sem teto e sem pulo — e o sweep não quebra: o pedido bom
-    entra na fila."""
+    83955 no escuro), sem prazo, sem aviso e sem pulo — e o sweep não quebra:
+    o pedido bom entra na fila."""
     monkeypatch.setattr(nf_auto_enfileirar, "redis", _RedisFora())
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
     fake = _BlingVivo(
@@ -881,7 +943,7 @@ async def test_redis_fora_o_sweep_segue_e_a_duvida_fica_adiada(
     s1 = await run_auto_enfileirar_nf()
     assert s1["adiados_duvida"] == 1 and s1["adiados_estoque"] == 1
     assert s1["enfileirados"] == 1
-    resumos = await _passadas(relogio, 20)  # 40 min: sem relógio, sem prazo nem teto
+    resumos = await _passadas(relogio, 35)  # 70 min: sem relógio, sem prazo nem aviso
     assert all(r["adiados_duvida"] == 1 and r["adiados_estoque"] == 1 for r in resumos)
     fila, fats = await _estado(db)
     assert fila == ["830004"]
@@ -936,7 +998,13 @@ async def test_botao_enfileirar_pula_a_duvida_com_motivo(
     assert "estoque em dúvida (b1)" in pulado["motivo"]
     assert fake.chamadas == []
 
-    relogio.avanca(11)
+    # 60 min: ainda dentro do prazo — segue pulado com o motivo
+    relogio.avanca(60)
+    r = await client.post("/api/nf-cadastro/faturamento/enfileirar", json={"numeros": ["830002"]})
+    assert r.status_code == 422, r.text
+    [pulado] = r.json()["detail"]["pulados"]
+    assert "estoque em dúvida (b1)" in pulado["motivo"]
+    relogio.avanca(6)
     r = await client.post("/api/nf-cadastro/faturamento/enfileirar", json={"numeros": ["830002"]})
     assert r.status_code == 200, r.text
     assert r.json()["pedidos_ok"] == 1

@@ -27,14 +27,17 @@ componentes; a peça fica com os pedidos mais ANTIGOS — FIFO, ver
                    não é movido: vira aviso Threema;
   - sem leitura  → pedido que leva produto que o Bling não respondeu (consulta
                    falhou) é ADIADO: nem 83955, nem fila, nem marca — uma
-                   passada adiante confere de novo. Teto: 30 min sem leitura
-                   → status 'erro' (sai do sweep) + 1 aviso Threema por
-                   pedido/dia — nunca 83955;
+                   passada adiante confere de novo, sem teto: numa queda
+                   longa do Bling ele segue candidato e entra sozinho quando
+                   o Bling volta. Com 30 min sem leitura sai UM aviso
+                   AGREGADO no Threema (no máximo 1 por hora) com quem está
+                   esperando — nunca 83955, nunca 'erro';
   - na dúvida    → a conta com o saldo físico e a só com o virtual discordam
                    (o espelho ainda não tem todos os pedidos que reservam a
-                   peça): ADIADO por até 10 min (relógio no Redis); vencido,
-                   decide a regra do físico (com kit sem composição, a do
-                   virtual) e fica o warning;
+                   peça): ADIADO por até 65 min (relógio no Redis) — uma
+                   volta da varredura de hora em hora, que traz o pedido cujo
+                   webhook se perdeu; vencido, decide a regra do físico (com
+                   kit sem composição, a do virtual) e fica o warning;
   - adiados      → não ocupam as vagas do tick: o `_candidatos` pula por 5 min
                    quem foi adiado (marca no Redis) e os mais novos entram;
   - com estoque  → gera a planilha por faturador e cria os NfCommand de
@@ -214,11 +217,20 @@ _PULAR_ADIADO_S = 5 * 60
 # validade de um dia; zera quando o pedido sai do adiamento.
 _ADIADO_DESDE_PREFIXO = "nf:sem_estoque:adiado_desde:"
 _ADIADO_DESDE_TTL_S = 26 * 3600
-# Dúvida físico × virtual: o espelho costuma alcançar o Bling em minutos.
-PRAZO_DUVIDA_S = 10 * 60
-# Sem leitura no Bling por mais que isso: 'erro' no painel + 1 aviso por dia.
-_TETO_SEM_LEITURA_S = 30 * 60
-_AVISO_SEM_LEITURA_PREFIXO = "nf:sem_estoque:sem_leitura_aviso:"
+# Dúvida físico × virtual: pelo webhook o espelho alcança o Bling em minutos,
+# mas quando o webhook do pedido se perde quem o traz é a varredura de hora em
+# hora (`bling_orders_period_sync_tick`, minuto :20) — até ~60 min de atraso.
+# O prazo cobre uma volta dela; o pulo de `_PULAR_ADIADO_S` já impede que o
+# adiado trave as vagas do tick enquanto espera.
+PRAZO_DUVIDA_S = 65 * 60
+# Sem leitura no Bling por mais que isso: UM aviso agregado no Threema (no
+# máximo um a cada `_AVISO_SEM_LEITURA_INTERVALO_S`). O pedido NÃO ganha
+# marca: segue candidato e entra sozinho quando o Bling volta.
+_SEM_LEITURA_AVISO_S = 30 * 60
+_AVISO_SEM_LEITURA_CHAVE = "nf:sem_estoque:sem_leitura_aviso"
+_AVISO_SEM_LEITURA_INTERVALO_S = 3600
+# Linhas de pedido no aviso (o Threema corta a mensagem em 3500 bytes).
+_AVISO_SEM_LEITURA_MAX_LINHAS = 40
 
 
 def _agora_ts() -> float:
@@ -426,16 +438,17 @@ async def run_auto_enfileirar_nf() -> dict:
         if duvidas:
             summary["adiados_duvida"] = len(duvidas)
             logger.info("nf_auto_enfileirar_estoque_duvida", pedidos=duvidas)
-        # Teto do sem leitura: 30 min sem o Bling devolver o saldo → 'erro' no
-        # painel (sai do sweep) + aviso. Nunca 83955.
-        esgotados = (
-            await _teto_sem_leitura(session, numeros, conferencia.adiados)
+        # Sem leitura há 30 min ou mais: só o aviso agregado (1 por hora) — o
+        # pedido segue adiado, sem marca, e entra sozinho quando o Bling volta.
+        # Nunca 83955, nunca 'erro'.
+        longos = (
+            await _sem_leitura_longa(session, numeros, conferencia.adiados)
             if conferencia
             else {}
         )
-        if esgotados:
-            summary["sem_leitura_erro"] = len(esgotados)
-        await marcar_adiados((adiados_prio | adiados_estoque | set(duvidas)) - set(esgotados))
+        if longos:
+            summary["sem_leitura_longa"] = len(longos)
+        await marcar_adiados(adiados_prio | adiados_estoque | set(duvidas))
         if conferencia and conferencia.kits_sem_composicao:
             try:
                 async with session.begin_nested():
@@ -828,14 +841,18 @@ async def avisar_kit_sem_composicao(session, kits: list[int]) -> None:
     await _enviar_aviso(_texto, gerais, marcas, evento=evento)
 
 
-async def _teto_sem_leitura(
+async def _sem_leitura_longa(
     session, numeros: list[str], adiados: dict[str, list[str]]
 ) -> dict[str, list[str]]:
-    """Adiado por falta de leitura do Bling há `_TETO_SEM_LEITURA_S` ou mais:
-    status 'erro' no painel com o motivo (sai do sweep — mesmo padrão do teto
-    da 83955) + 1 aviso Threema por pedido/dia. NUNCA vai pra 83955 (o
-    estoque não foi conferido). Quem voltou a ter leitura zera o relógio.
-    Redis fora = sem relógio: segue adiado (warning)."""
+    """Adiados por falta de leitura do Bling há `_SEM_LEITURA_AVISO_S` ou mais.
+
+    NÃO ganham marca nenhuma: seguem candidatos (com o pulo de
+    `_PULAR_ADIADO_S`) e entram sozinhos quando o Bling volta — numa queda
+    longa (29/10 17:07 → 30/10 08:08) um 'erro' por pedido deixaria dezenas
+    parados à mão. Só sai UM aviso agregado no Threema (`_avisar_sem_leitura`,
+    no máximo um por hora). NUNCA 83955 (o estoque não foi conferido). Quem
+    voltou a ter leitura zera o relógio. Redis fora = sem relógio nem aviso:
+    segue adiado (warning)."""
     relogio = await relogio_adiamento(
         "sem_leitura", list(adiados), zerar=[n for n in numeros if n not in adiados]
     )
@@ -844,64 +861,112 @@ async def _teto_sem_leitura(
     if relogio is None:
         logger.warning("nf_sem_estoque_sem_leitura_sem_relogio", pedidos=adiados)
         return {}
-    esgotados = {
-        n: skus for n, skus in adiados.items() if relogio.get(n, 0.0) >= _TETO_SEM_LEITURA_S
+    longos = {
+        n: skus for n, skus in adiados.items() if relogio.get(n, 0.0) >= _SEM_LEITURA_AVISO_S
     }
-    if not esgotados:
+    if not longos:
         return {}
-    from app.routers.nf import _marcar_faturamento
-
-    for numero, skus in esgotados.items():
-        await _marcar_faturamento(
-            session,
-            [numero],
-            status_txt="erro",
-            erro=(
-                "Sem estoque NÃO conferido — o Bling não devolveu o saldo de "
-                + ", ".join(skus)
-                + f" por mais de {_TETO_SEM_LEITURA_S // 60} min. Saiu da fila"
-                " automática: confira o produto no Bling e enfileire à mão."
-            ),
-        )
     logger.warning(
-        "nf_auto_enfileirar_sem_leitura_teto",
-        pedidos=esgotados,
-        minutos={n: round(relogio[n] / 60, 1) for n in esgotados},
+        "nf_auto_enfileirar_sem_leitura_longa",
+        pedidos=longos,
+        minutos={n: round(relogio[n] / 60, 1) for n in longos},
     )
     try:
         async with session.begin_nested():
-            await _avisar_sem_leitura(session, esgotados)
+            await _avisar_sem_leitura(session, longos)
     except Exception:  # noqa: BLE001
         logger.exception("nf_sem_estoque_sem_leitura_aviso_falhou")
-    return esgotados
+    return longos
 
 
-async def _avisar_sem_leitura(session, pedidos: dict[str, list[str]]) -> None:
-    """Aviso Threema (grupo do sem estoque): o Bling não devolveu o saldo do
-    pedido por mais de `_TETO_SEM_LEITURA_S` e ele saiu da fila automática
-    com 'erro' — alguém confere e enfileira à mão. Um aviso por pedido/dia.
+async def _avisar_sem_leitura(session, longos: dict[str, list[str]]) -> None:
+    """UM aviso AGREGADO no Threema (grupo do sem estoque) quando a passada tem
+    pedido sem leitura há `_SEM_LEITURA_AVISO_S`: "N pedidos esperando o Bling
+    responder o estoque desde HH:MM". Dedupe: no máximo um a cada
+    `_AVISO_SEM_LEITURA_INTERVALO_S` (a marca guarda a hora do último aviso).
+    Ninguém precisa enfileirar à mão — quando o Bling volta, eles seguem
+    sozinhos. Redis fora = não avisa (melhor que repetir a cada passada).
     BEST-EFFORT."""
     gerais = _destinatarios_sem_estoque()
-    if not gerais or not pedidos:
+    if not gerais or not longos:
         return
-    dia = _agora_brt().strftime("%Y%m%d")
-    chave_de = {f"{_AVISO_SEM_LEITURA_PREFIXO}{dia}:{n}": n for n in sorted(pedidos)}
+    agora = _agora_ts()
     evento = "nf_sem_estoque_sem_leitura"
-    marcas = await _marcar_hoje(list(chave_de), _ADIADO_DESDE_TTL_S, evento=evento)
-    if not marcas:
+    try:
+        ultimo = await redis.get(_AVISO_SEM_LEITURA_CHAVE)
+        try:
+            if ultimo is not None and agora - float(ultimo) < _AVISO_SEM_LEITURA_INTERVALO_S:
+                return
+        except (TypeError, ValueError):
+            pass
+        await redis.set(
+            _AVISO_SEM_LEITURA_CHAVE, f"{agora:.0f}", ex=2 * _AVISO_SEM_LEITURA_INTERVALO_S
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"{evento}_dedupe_falhou", erro=str(exc)[:200])
         return
-    novos = {chave_de[c]: pedidos[chave_de[c]] for c in marcas}
 
     async def _texto() -> str:
-        return await _linhas_pedidos(
+        esperando = await _esperando_o_bling(session, agora, longos)
+        total = len(esperando)
+        inicio = datetime.fromtimestamp(min(d for d, _s in esperando.values()), _TZ_BRT)
+        hoje = datetime.fromtimestamp(agora, _TZ_BRT).date()
+        quando = inicio.strftime("%H:%M" if inicio.date() == hoje else "%d/%m %H:%M")
+        mostrar = sorted(esperando)[:_AVISO_SEM_LEITURA_MAX_LINHAS]
+        texto = await _linhas_pedidos(
             session,
-            novos,
-            "Sem estoque NÃO conferido — o Bling não devolveu o saldo por mais de"
-            f" {_TETO_SEM_LEITURA_S // 60} min. O pedido saiu da fila automática (Erro"
-            " no painel); confira o produto no Bling e enfileire à mão:",
+            {n: esperando[n][1] for n in mostrar},
+            f"{total} pedido{'s' if total != 1 else ''} esperando o Bling responder o"
+            f" estoque desde {quando} (mais de {_SEM_LEITURA_AVISO_S // 60} min sem"
+            " leitura). Seguem adiados — sem marca, sem Aguardando Cancelamento — e"
+            " entram na fila sozinhos quando o Bling responder; se o Bling não está"
+            " fora, confira o produto:",
         )
+        if total > len(mostrar):
+            texto += f"\n… e mais {total - len(mostrar)}"
+        return texto
 
-    await _enviar_aviso(_texto, gerais, marcas, evento=evento)
+    await _enviar_aviso(_texto, gerais, [_AVISO_SEM_LEITURA_CHAVE], evento=evento)
+
+
+async def _esperando_o_bling(
+    session, agora: float, longos: dict[str, list[str]]
+) -> dict[str, tuple[float, list[str]]]:
+    """numero → (desde quando, SKUs) de TODO candidato do sweep com o relógio
+    do sem leitura vencido — não só os desta passada (o pulo dos adiados
+    espalha a fila pelas passadas). Os desta passada vão com os SKUs sem
+    leitura; os outros, com os SKUs do pedido."""
+    vivos = await _candidatos(session, limite=None, pular_adiados=False)
+    alvos = list(dict.fromkeys([*vivos, *longos]))
+    valores = await redis.mget([f"{_ADIADO_DESDE_PREFIXO}sem_leitura:{n}" for n in alvos])
+    desde: dict[str, float] = {}
+    for numero, valor in zip(alvos, valores, strict=False):
+        try:
+            ts = float(valor)
+        except (TypeError, ValueError):
+            continue
+        if agora - ts >= _SEM_LEITURA_AVISO_S:
+            desde[numero] = ts
+    for numero in longos:
+        desde.setdefault(numero, agora - _SEM_LEITURA_AVISO_S)
+    skus: dict[str, list[str]] = {n: list(s) for n, s in longos.items()}
+    outros = [n for n in desde if n not in skus]
+    if outros:
+        for numero, sku in (
+            await session.execute(
+                select(BlingOrder.numero, BlingOrder.item_codigo)
+                .where(
+                    BlingOrder.numero.in_(outros),
+                    BlingOrder.item_codigo.is_not(None),
+                    BlingOrder.situacao.is_distinct_from("excluido"),
+                )
+                .order_by(BlingOrder.numero, BlingOrder.item_index)
+            )
+        ).all():
+            lista = skus.setdefault(numero, [])
+            if sku not in lista:
+                lista.append(sku)
+    return {n: (ts, skus.get(n, [])) for n, ts in desde.items()}
 
 
 async def _contar_recusas_83955(numeros: list[str]) -> dict[str, int]:

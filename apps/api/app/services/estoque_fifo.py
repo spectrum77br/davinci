@@ -32,7 +32,8 @@ espelho não vê é de ALGUÉM — se for de um pedido mais antigo que ainda nã
 entrou no espelho (30/10: o 306580 chegou depois do 306581), o físico deixa
 passar o novo e manda o antigo pra 83955 quando ele chega. Quando a conta com
 o físico e a conta só com o virtual discordam sobre um pedido, ele é DÚVIDA:
-quem chama adia por pouco tempo (o espelho alcança o Bling em minutos) e só
+quem chama adia por um prazo (o espelho alcança o Bling em minutos pelo
+webhook, ou na varredura de hora em hora quando o webhook se perde) e só
 depois decide pela regra do prazo. O físico nunca marca quem o virtual poupa
 (o déficit dele é menor e a ordem é a mesma), então a dúvida é sempre "o
 virtual manda pra 83955, o físico deixa".
@@ -174,7 +175,7 @@ def conferir_fifo(
     fisicos: Mapping[str, float] | None = None,
 ) -> ConferenciaFifo:
     """`negativos_fifo` com e sem o físico. Quem chama decide o que fazer com
-    a dúvida (o sem estoque adia por pouco tempo e, vencido o prazo, segue a
+    a dúvida (o sem estoque adia até o prazo e, vencido, segue a
     regra do físico)."""
     pedidos = list(pedidos)
     virtual = negativos_fifo(saldos, pedidos)

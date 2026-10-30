@@ -214,7 +214,7 @@ def test_r8_reserva_que_o_espelho_nao_ve_e_duvida_nao_passa_direto():
     strict=True,
     reason=(
         "Limite conhecido (revisão R8), agora só no caso PERMANENTE: a dúvida"
-        " físico × virtual adia o B pelo prazo (10 min) e, se o X entra no espelho"
+        " físico × virtual adia o B pelo prazo (65 min) e, se o X entra no espelho"
         " nesse tempo, o B vai (coberto: test_a1/test_a3 da regressão). Se o X"
         " nunca entra (fora da janela de 30 dias, situação velha no espelho), vencido"
         " o prazo decide a regra do físico — esta conta — e o B passa."

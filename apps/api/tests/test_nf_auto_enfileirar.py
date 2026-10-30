@@ -930,8 +930,9 @@ async def test_sweep_sem_estoque_fifo_ingest_atrasado_antigo_passa(
     o espelho só tinha os 2 mais antigos (kit b026.12.18) + 1 Em digitação.
     Físico 4: os conhecidos cabem; o virtual manda os dois — DÚVIDA: ficam
     ADIADOS (nem 83955, nem fila) enquanto o espelho alcança o Bling. Se a
-    dúvida dura mais que o prazo (10 min), decide a regra do físico: os 2
-    seguem pra fila (nunca 83955 sem certeza)."""
+    dúvida dura mais que o prazo (65 min — uma volta da varredura de hora em
+    hora, que traz o pedido cujo webhook se perdeu), decide a regra do
+    físico: os 2 seguem pra fila (nunca 83955 sem certeza)."""
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
     agora = datetime.now(UTC)
     await _seed_pedido(
@@ -973,7 +974,13 @@ async def test_sweep_sem_estoque_fifo_ingest_atrasado_antigo_passa(
     relogio.avanca(4)
     summary = await run_auto_enfileirar_nf()
     assert summary["candidatos"] == 2 and summary["adiados_duvida"] == 2
-    # 12 min: venceu o prazo — regra do físico, os dois seguem pra fila
+    # 60 min: a varredura de hora em hora ainda pode trazer o antigo — segue
+    # na dúvida, adiado de novo
+    relogio.avanca(54)
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 2 and summary["adiados_duvida"] == 2
+    assert summary["enfileirados"] == 0
+    # 66 min: venceu o prazo — regra do físico, os dois seguem pra fila
     relogio.avanca(6)
     summary = await run_auto_enfileirar_nf()
     assert summary.get("adiados_duvida", 0) == 0
@@ -1204,10 +1211,10 @@ async def test_sem_estoque_fifo_kit_sem_composicao_adia_e_depois_decide_o_virtua
     assert res.vencem_83955 == frozenset(vao)
     # quem chama avisa quando o kit sem composição deixou pedido na dúvida
     assert res.kits_sem_composicao == ([950] if vao else [])
-    # dentro do prazo, segue adiado
-    relogio.avanca(9)
+    # dentro do prazo (64 min), segue adiado
+    relogio.avanca(64)
     assert (await _sem_estoque_fifo(db, ["830001", "830002"])).lote == {}
-    # vencido o prazo: virtual com o kit suspeito, físico sem ele
+    # vencido o prazo (66 min): virtual com o kit suspeito, físico sem ele
     relogio.avanca(2)
     res = await _sem_estoque_fifo(db, ["830001", "830002"])
     assert set(res.lote) == vao
