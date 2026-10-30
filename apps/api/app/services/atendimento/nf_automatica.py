@@ -306,6 +306,10 @@ _NAO_E_SO_A_NF = re.compile(
     r"garantia|mandam|enviam|emitem|emite|acompanha\w*|vem\s+com)\b"
     r"|\bja\s+(?:recebi|tenho|veio|chegou)\s+(?:a\s+)?" + _DOC + r"\b"
     r"|\bnao\s+precis\w*\b"
+    # Terceira revisão de 30/10: "veio só a caixa", "só chegou a embalagem" — o produto não veio.
+    r"|\b(?:so\s+(?:(?:veio|vieram|chegou|chegaram|recebi)\s+)?|"
+    r"(?:veio|vieram|chegou|chegaram|recebi)\s+so\s+)(?:(?:a|o|as|os)\s+)?"
+    r"(?:caixa|caixinha|embalagem|pacote)\b"
     # Revisão de 29/10: o PRODUTO que não veio ("não veio nada", "não chegou o pedido",
     # "o pacote não chegou") é reclamação, não pedido da NF — mesmo com as palavras da
     # lista ("nem o produto" e "nenhum produto" sobram: o "nem/nenhum" só vale grudado no
@@ -407,9 +411,7 @@ _PALAVRAS_DO_PEDIDO = (
     )
 )
 _E_VOCE = frozenset("e vc voce vcs voces".split())
-# A chegada dita sem pergunta ("chegou", "recebi, obrigado", "chegou tudo certo") é o elogio;
 # "show, e o pedido", "ótimo, aguardo o meu pedido" é a pergunta da entrega sem o "?".
-_CHEGOU_BEM = frozenset("chegou chegaram veio vieram recebi certo bem ok".split())
 _ELOGIO_QUE_PERGUNTA = re.compile(
     r"\be\s+(?:(?:o|a|os|as|meu|minha)\s+){0,2}" + _O_PRODUTO + r"\b|\baguardo\b"
 )
@@ -430,7 +432,11 @@ _PALAVRAS_DO_ELOGIO = (
 # || 2 || o meu celular não veio com nota fiscal" — o Vita 95704e8d de 29/10): não contam como
 # fala, como a foto sem texto. O "Falar com atendente" (o 6 do menu) continua contando.
 _FIGURINHA = constantes.rotulo_tipo_plataforma("sticker")
-_O_NUMERO_2 = re.compile(r"\b(?:2|dois)\b")
+_O_NUMERO_2 = re.compile(r"\b(?:2|dois|duas|segund[oa])\b")
+# A resposta da loja que pede um número ou uma escolha ("Quantas unidades vieram com defeito?",
+# "Qual o problema?", "uma ou duas?"): o "2" depois responde a ela.
+_PEDE_NUMERO = re.compile(r"\b(?:quant[oa]s?|qual|quais|numero|opcao|opcoes|uma\s+ou)\b")
+_TIPOS_DE_MIDIA = frozenset(("imagem", "video", "arquivo"))
 # "chegou muito tarde", "veio de noite" — o "tarde/noite" fora do "boa tarde/noite" é queixa.
 _TARDE_SOLTO = re.compile(r"(?<!\bboa )\b(?:tarde|noite)\b")
 _CONVERSAR_COM_VENDEDOR = "conversar com vendedor"
@@ -479,28 +485,41 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
     if not depois or gatilho is None or all(m.id != gatilho.id for m in depois):
         return False
     # A foto ou o vídeo junto do "2" (o defeito, o item errado) é fala que não lemos: pessoa.
-    if any(not (m.texto or "").strip() and not _sem_fala(m) for m in depois):
+    if any(_midia(m) for m in depois):
         return False
     falas = (m.texto or "" for m in depois if not _sem_fala(m))
     plano = " ".join(validador.plano_de(" ".join(falas)).split())
     if plano.strip(" .!") != "2":
         return False
+    rajada = ia.rajada_do_cliente(recentes[:ultimo], None)
+    if any(_midia(m) for m in rajada):
+        return False
     antes = [
         m.texto
-        for m in ia.rajada_do_cliente(recentes[:ultimo], None)
-        if m.texto and not _sem_fala(m) and validador.plano_de(m.texto).strip(" .!\n") != "2"
+        for m in rajada
+        if m.texto and not _sem_fala(m) and not _2_de_outro_menu(recentes, m)
     ]
     # A pergunta da NF é julgada na rajada inteira ("e o meu pedido? || e a nota fiscal?" é outra
-    # pergunta junto), tirando só a cortesia e o elogio — trecho a trecho ("Chegou certinho, a
-    # nota fiscal vocês enviam por aqui?"); o "muito tarde" não é cortesia.
-    falas = [
-        f
-        for t in antes
-        for f in re.findall(r"[^,.;!?]+[,.;!?]*", t)
-        if re.search(r"[a-z0-9]", validador.plano_de(f))
-        and (_TARDE_SOLTO.search(validador.plano_de(f)) or not (_so_cortesia(f) or _so_elogio(f)))
-    ]
+    # pergunta junto), tirando só as mensagens de cortesia e de elogio.
+    falas = [t for t in antes if not (_so_cortesia(t) or _so_elogio(t))]
     return not falas or _pergunta_da_nf(" . ".join(falas)) or pedido_claro(antes)
+
+
+def _midia(m: Any) -> bool:
+    """A foto, o vídeo ou o arquivo do cliente (o defeito, o item errado): fala que não lemos.
+
+    O cartão do produto/pedido não entra (é o pedido de que se fala). PURA.
+    """
+    return m.autor == constantes.AUTOR_CLIENTE and getattr(m, "tipo", None) in _TIPOS_DE_MIDIA
+
+
+def _2_de_outro_menu(recentes: Sequence[Any], m: Any) -> bool:
+    """O "2" antes do menu atual escolheu a NF num menu anterior (e não respondeu a loja)? PURA."""
+    if validador.plano_de(m.texto or "").strip(" .!\n") != "2":
+        return False
+    i = next((j for j, x in enumerate(recentes) if x.id == m.id), 0)
+    loja = next((x for x in reversed(recentes[:i]) if x.autor == constantes.AUTOR_LOJA), None)
+    return loja is not None and bool(_MENU_NF.search(validador.plano_de(loja.texto or "")))
 
 
 def _o_2_responde_a_loja(recentes: Sequence[Any], menu: int, resposta: int) -> bool:
@@ -514,12 +533,16 @@ def _o_2_responde_a_loja(recentes: Sequence[Any], menu: int, resposta: int) -> b
     for m in recentes[menu + 1 : resposta]:
         if m.autor != constantes.AUTOR_CLIENTE or _sem_fala(m):
             continue
-        if not (m.texto or "").strip() or not _so_cortesia(m.texto):
+        if _midia(m) or not _so_cortesia(m.texto or ""):
             return True
     from app.services.atendimento import ia
 
     return any(
-        ia.resposta_da_loja(m) and _O_NUMERO_2.search(validador.plano_de(m.texto or ""))
+        ia.resposta_da_loja(m)
+        and (
+            _O_NUMERO_2.search(validador.plano_de(m.texto or ""))
+            or _PEDE_NUMERO.search(validador.plano_de(m.texto or ""))
+        )
         for m in recentes[menu + 1 : resposta + 1]
     )
 
@@ -583,7 +606,7 @@ def _so_elogio(texto: str) -> bool:
         return True
     if "?" in plano or _TARDE_SOLTO.search(plano) or _ELOGIO_QUE_PERGUNTA.search(plano):
         return False
-    return any(p in _ELOGIO or p in _CHEGOU_BEM for p in palavras)
+    return any(p in _ELOGIO for p in palavras)
 
 
 # Terceira revisão de 30/10 (comparado com o código no ar, o "2" com a PERGUNTA de como receber
@@ -609,7 +632,10 @@ _O_PRODUTO_SOLTO = re.compile(r"\b" + _O_PRODUTO + r"\b")
 _ESTA = r"(?:ja\s+)?(?:esta|ta|fica|estara|sera)\s+(?:ja\s+)?disponivel\b"
 _DISPONIVEL_DA_NOTA = re.compile(r"\b(nota(?:\s+fiscal)?|nf|nfe)\s+" + _ESTA)
 _DISPONIVEL_A_NOTA = re.compile(
-    r"\b(?:onde\s+)?" + _ESTA + r"\s+(?=(?:a\s+)?(?:nota|nf|nfe)\b)|\bfoi\s+(?=emitida\b)"
+    r"\bfoi\s+(?=emitida\b)"
+    # "onde está a nota fiscal?", "onde consigo ver a nf?" — o "onde" só grudado na nota.
+    r"|\bonde\s+(?:eu\s+)?(?:esta|fica|ta|vejo|encontro|acho|baixo|pego|consigo\s+(?:ver|baixar|pegar))"
+    r"\s+(?=(?:(?:a|minha|a\s+minha)\s+)?(?:nota|nf|nfe)\b)"
 )
 _ELA_DISPONIVEL = re.compile(r"\b(?:onde\s+)?ela\s+" + _ESTA)
 _COMO_TENHO_ACESSO = re.compile(r"\bcomo\s+(?:eu\s+)?(?:tenho|terei|posso\s+ter)\s+acesso\b")
@@ -634,6 +660,8 @@ def _pergunta_da_nf(texto: str) -> bool:
 
     Só vale antes do "2" do menu (`pedido_pelo_menu`); sem o "2", fica com a pessoa.
     """
+    # A quebra de linha é frase ("está disponível\na nota fiscal vocês enviam?" são duas).
+    texto = re.sub(r"\s*\n+\s*", " . ", texto or "")
     plano = " ".join(_grafia(validador.plano_de(texto)).split())
     if not plano or len(plano) > 200 or not _NOMEIA_A_NF.search(plano):
         return False
@@ -642,7 +670,7 @@ def _pergunta_da_nf(texto: str) -> bool:
     resto = _DISPONIVEL_A_NOTA.sub(" ", _DISPONIVEL_DA_NOTA.sub(r"\1", _ENVIAM.sub(" ", plano)))
     resto = _COMO_TENHO_ACESSO.sub(" como acesso ", resto)
     ela = _ELA_DISPONIVEL.search(resto)
-    if ela and _NOMEIA_A_NF.search(resto[: ela.start()]):
+    if ela and _NOMEIA_A_NF.search(re.split(r"[?.!]", resto[: ela.start()])[-1]):
         resto = resto[: ela.start()] + " " + resto[ela.end() :]
     if _NAO_E_SO_A_NF.search(resto) or _MEU_SOLTO.search(resto):
         return False
@@ -780,10 +808,13 @@ _COMPREI = (
         re.compile(
             r"(?<!\bque )(?<!\bque eu )(?<!\bq )(?<!\bq eu )\bcomprei(?:\s+aqui)?\s*"
             r"(?=(?:(?:(?:o|a|os|as|um|uma|meu|minha|esse|este|essa|esta)\s+)?produtos?\s*)?,?\s*"
-            r"(?:e|mas|porem|so\s+que)\s+(?:a\s+(?:nota|nf|nfe)|nao\s+(?:veio|vieram|chegou|recebi)"
-            r"\s+(?:com\s+)?(?:(?:a|as|o|uma)\s+)?(?:nota|nf|nfe))\b)"
+            r"(?:(?:e|mas|porem|so\s+que)\s+(?:a\s+(?:nota|nf|nfe)|nao\s+(?:veio|vieram|chegou|recebi)"
+            r"\s+(?:com\s+)?(?:(?:a|as|o|uma)\s+)?(?:nota|nf|nfe))"
+            r"|(?:e\s+)?(?:pode|poderia|podem|me|manda|mande|envia|envie|preciso|precisava|queria|quero"
+            r"|gostaria)\b))"
         ),
-        "",
+        # Fica o "recebi": o trecho não vira só o produto ("o produto, e não veio nota").
+        "recebi ",
     ),
 )
 # O "&" e o "+" são o "e" ("a nota fiscal & o produto").
@@ -818,15 +849,30 @@ _APAGADA = "this message was deleted"
 _SO_O_PRODUTO = re.compile(
     r"(?:e\s+)?(?:(?:o|a|os|as|meu|minha|desse|deste|dessa|desta)\s+){0,2}"
     + _O_PRODUTO
-    + r"(?:\s+tambem)?"
+    + r"(?:\s+(?:tambem|ainda|ja))?"
 )
+# "e o meu? manda a nota fiscal": o "meu/minha" sem o nome do que é (o "o meu não veio a nota"
+# fica nas travas do pronome).
+_MEU_SOLTO_NO_PEDIDO = re.compile(
+    r"\b(?:meu|minha)\b(?!\s+(?:nota|notas|nf|nfe|pedido|compra|produto|encomenda|caixa|pacote"
+    r"|ainda|tambem|nao)\b)"
+)
+
+
+def _so_o_produto(fala: str) -> bool:
+    """Algum trecho da fala é só o produto ("o pedido?", "o produto ainda", "e o pedido também")?"""
+    for trecho in re.split(r"[,.;!?]+", fala):
+        palavras = [p for p in re.findall(r"[a-z0-9]+", trecho) if p not in _CORTESIA]
+        if palavras and _SO_O_PRODUTO.fullmatch(" ".join(palavras)):
+            return True
+    return False
 
 
 def pedido_claro(textos: Sequence[str | None]) -> bool:
     """O turno do cliente PEDE a NF do pedido, e só isso? PURA."""
     falas = [_grafia(validador.plano_de(t)) for t in textos if t]
     falas = [f for f in falas if " ".join(f.split()).strip(" .") != _APAGADA]
-    if any(_SO_O_PRODUTO.fullmatch(" ".join(re.findall(r"[a-z0-9]+", f))) for f in falas):
+    if any(_so_o_produto(f) for f in falas) or any(_MEU_SOLTO_NO_PEDIDO.search(f) for f in falas):
         return False
     plano = " ".join(" ".join(falas).split())
     if not plano or len(plano) > 400:

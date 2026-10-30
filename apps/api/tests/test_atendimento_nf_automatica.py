@@ -890,6 +890,14 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("comprei o celular e so veio a caixa, manda a nota fiscal", False),
         ("comprei o celular e ainda nao veio nem a nota fiscal", False),
         ("comprei o celular de novo, manda a nota fiscal", False),
+        ("comprei o celular, pode me mandar a nota fiscal?", True),
+        ("bom dia comprei um celular e queria a nota fiscal", True),
+        ("o celular que comprei veio so a caixa manda a nota fiscal", False),
+        ("comprei e nao veio a nota, veio so a caixa", False),
+        ("o celular so veio a caixa, manda a nota fiscal", False),
+        ("e o meu? manda a nota fiscal", False),
+        ("manda a nota fiscal, o pedido?", False),
+        ("o meu não veio a nota fiscal, manda por favor", True),
         ("não veio o que comprei e não veio a nota, manda a nota", False),
         # O "&" e o "+" são o "e"; "e desse produto" também é o produto.
         ("preciso da nota fiscal & do produto", False),
@@ -986,9 +994,34 @@ def test_o_2_que_responde_a_loja_ou_vem_com_foto_fica_com_a_pessoa():
     # A saudação da equipe (sem número, sem fala do cliente no meio) não muda o "2".
     ola = loja(4, "Olá! Em que posso ajudar?")
     assert nf_automatica.pedido_pelo_menu([oi, menu, ola, dois], dois) is True
-    foto = cliente(10, None)
+    foto = cliente(10, None, tipo="imagem")
     assert nf_automatica.pedido_pelo_menu([oi, menu, dois, foto], foto) is False
     assert nf_automatica.pedido_pelo_menu([oi, menu, foto, dois], dois) is False
+    assert nf_automatica.pedido_pelo_menu([foto, menu, dois], dois) is False
+    # O cartão do pedido/produto não é a mídia: o pedido de que se fala.
+    cartao = cliente(11, None, tipo="pedido")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, cartao, dois], dois) is True
+    # A loja pergunta o número ou a escolha: o "2" responde a ela.
+    quantas = loja(4, "Quantas unidades vieram com defeito?")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, quantas, dois], dois) is False
+
+
+def test_o_2_de_um_menu_anterior_e_a_mesma_escolha():
+    from types import SimpleNamespace as M
+
+    def cliente(i, t):
+        return M(id=i, autor="cliente", texto=t, origem="externo", payload={})
+
+    def loja(i, t):
+        return M(id=i, autor="loja", texto=t, origem="externo", payload={})
+
+    menu1, menu2 = loja(1, _MENU_DUOKE), loja(3, _MENU_DUOKE)
+    um, dois = cliente(2, "2"), cliente(4, "2")
+    assert nf_automatica.pedido_pelo_menu([menu1, um, menu2, dois], dois) is True
+    # O "2" que respondeu a pergunta da loja antes do menu não é a escolha da NF.
+    faltou = cliente(0, "veio faltando item")
+    quantos = loja(1, "Quantos faltaram?")
+    assert nf_automatica.pedido_pelo_menu([faltou, quantos, um, menu2, dois], dois) is False
 
 
 def test_a_fala_que_e_so_o_produto_pede_o_produto():
@@ -1313,8 +1346,9 @@ def test_pedido_pelo_menu():
         (["oi"], True),
         (["boa tarde, tudo bem?", "por favor"], True),
         (["não veio a nota fiscal"], True),
-        # O "2" de um menu anterior é a mesma escolha; o "6" (atendente) não.
-        (["oi", "2"], True),
+        # O "2" sem menu antes dele responde outra coisa (o de um menu anterior: o teste
+        # test_o_2_de_um_menu_anterior_e_a_mesma_escolha); o "6" (atendente) também segura.
+        (["oi", "2"], False),
         (["6"], False),
         # Segunda revisão de 29/10: o problema escrito ANTES do menu, na mesma rajada.
         (["Recebi a nota de outra pessoa, com outro nome"], False),
@@ -1362,14 +1396,20 @@ def test_pedido_pelo_menu():
         (["o celular?"], False),
         (["oi! tudo bem e vc?"], True),
         # A chegada sem pergunta é o elogio; com a entrega pedida junto ou o "muito tarde", não.
-        (["chegou, obrigada"], True),
-        (["Recebi o produto, tudo certo"], True),
-        (["Chegou! A nota fiscal vocês enviam por aqui?"], True),
+        # A chegada sozinha não é o elogio (pode ser a queixa: "chegou 😡").
+        (["chegou, obrigada"], False),
+        (["Recebi o produto, tudo certo"], False),
+        (["Chegou! A nota fiscal vocês enviam por aqui?"], False),
+        (["chegou 😡"], False),
+        (["veio tudo certinho, só veio a caixa"], False),
+        (["onde está a nota fiscal?"], True),
+        (["onde consigo ver a nota fiscal?"], True),
+        (["vocês enviam nota fiscal? ela está disponível?"], False),
+        (["está disponível a nota fiscal?"], False),
         (["chegou hoje, muito tarde"], False),
         (["show, e o pedido"], False),
         (["otimo, aguardo o meu pedido"], False),
         # O "ela" e o "disponível" só da nota; o "meu" sem o nome; a posse.
-        (["está disponível a nota fiscal?"], True),
         (["a nota fiscal já foi emitida?"], True),
         (["como tenho acesso a nota fiscal?"], True),
         (["onde ela esta? e a nota fiscal?"], False),
