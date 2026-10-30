@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { loadInlineImages, MAIL_FRAME_SANDBOX, renderMailHtml, type MailAttachment } from '~/lib/mailHtml'
 
-const props = defineProps<{ html: string; text: string; attachments: MailAttachment[] }>()
+// `attachmentUrl`: who fetches the inline (cid:) images. The /atendimento store
+// email passes its own attachment route (the team has no access to /api/mail).
+const props = defineProps<{ html: string; text: string; attachments: MailAttachment[]; attachmentUrl?: (id: string) => string }>()
 const { api } = useApi()
 const srcdoc = ref('')
 const showText = ref(false)
@@ -27,7 +29,7 @@ async function prepare() {
   try {
     const rendered = build()
     const images = await loadInlineImages(props.attachments, rendered.contentIds, (id) =>
-      api<Blob>(`/api/mail/attachments/${encodeURIComponent(id)}`, { responseType: 'blob', timeout: 15_000, retry: 0 }),
+      api<Blob>(props.attachmentUrl ? props.attachmentUrl(id) : `/api/mail/attachments/${encodeURIComponent(id)}`, { responseType: 'blob', timeout: 15_000, retry: 0 }),
     )
     if (current !== generation) return
     inlineImages = images

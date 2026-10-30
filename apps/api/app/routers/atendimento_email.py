@@ -158,6 +158,7 @@ from app.services.mail_atendimento import (
     chamados,
     classificacao,
     codigos,
+    html_caixa,
     ponte,
     regras,
     responder,
@@ -1757,12 +1758,15 @@ async def _email_da_caixa_ou_404(
 async def email_da_caixa(
     message_id: UUID, session: Session, user: Leitor, response: Response
 ) -> dict[str, Any]:
-    """O e-mail inteiro de UMA linha da caixa da barra (nunca HTML).
+    """O e-mail inteiro de UMA linha da caixa da barra.
 
     A mesma régua da lista (um e-mail das pastas da barra, ligado a uma loja, no
     escopo da equipe, com o filtro de acesso da pessoa); fora dela, 404 (nunca
     diz que o e-mail existe). O texto: os links de acesso removidos e a senha
-    escrita mascarada; o código fica (`barra_lojas.texto_da_caixa`, o dono)."""
+    escrita mascarada; o código fica (`barra_lojas.texto_da_caixa`, o dono).
+    O HTML (30/10/2026, a tela igual à aba E-mail): a mesma régua no HTML, ou
+    None — e a tela mostra o texto (`html_caixa.limpar`). A imagem embutida
+    (cid:) vem pela rota do anexo daqui, pelo `content_id`; nunca pelo /api/mail."""
     meta, message, integ, ficha = await _email_da_caixa_ou_404(session, user, message_id)
     response.headers["Cache-Control"] = "no-store"
     pasta = await session.get(MailFolder, meta.folder_id) if meta.folder_id else None
@@ -1775,7 +1779,12 @@ async def email_da_caixa(
         do_site = barra_lojas.site_da_pasta(pasta.nome, pasta.caminho, pasta.chave)
         loja = next((st.nome for st in barra_lojas.sites() if st.chave == do_site), None)
     email = ponte.decifrar(message)
-    assunto, corpo, links = barra_lojas.texto_da_caixa(email.assunto, texto.legivel(email.texto))
+    legivel = texto.legivel(email.texto)
+    assunto, corpo, links = barra_lojas.texto_da_caixa(email.assunto, legivel)
+    bruto = email.conteudo.get("html")
+    html, links_html = html_caixa.limpar(
+        email.assunto, legivel, bruto if isinstance(bruto, str) else None
+    )
     anexos = (
         await session.scalars(select(MailAttachment).where(MailAttachment.message_id == message.id))
     ).all()
@@ -1793,6 +1802,8 @@ async def email_da_caixa(
         "assunto": assunto,
         "texto": corpo,
         "links_removidos": links,
+        "html": html,
+        "html_links_removidos": links_html,
         "anexos": [
             {
                 "id": str(a.id),
@@ -1800,7 +1811,7 @@ async def email_da_caixa(
                 **{
                     k: v
                     for k, v in decrypt_json(a.metadata_enc).items()
-                    if k in ("filename", "content_type")
+                    if k in ("filename", "content_type", "content_id")
                 },
             }
             for a in anexos

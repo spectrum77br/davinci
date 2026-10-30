@@ -10,7 +10,17 @@
 // anexos pela rota da caixa. A linha da lista fica acesa; o "fechar" volta para
 // o "Escolha um e-mail na lista". A conversa de e-mail continua abrindo na
 // AtendimentoConversa. Funções puras aqui em cima (tests/atendimento-email-lojas.cjs).
+//
+// FORMATADO como na aba E-mail (30/10/2026) — o Eduardo, com o encaminhado da
+// Amirom aberto nas duas telas: "temos de replicar o que acontece em e-mail ali
+// pra parte de email que quem trabalha no atendimento consegue ver". A API
+// manda o `html` já sem os links de acesso (html_caixa.limpar) e a mensagem
+// abre no mesmo AtendimentoMailBody da aba (iframe isolado, "Ver texto",
+// "Ampliar mensagem"); a imagem embutida vem pela rota do anexo da CAIXA, nunca
+// pelo /api/mail. Sem `html` (o e-mail só de texto, ou a limpeza não fechou), o
+// texto como antes.
 import type { EmailDaCaixa } from '~/components/AtendimentoLojas.vue'
+import type { MailAttachment } from '~/lib/mailHtml'
 
 export type EmailDaLojaDetalhe = {
   id: string
@@ -24,7 +34,9 @@ export type EmailDaLojaDetalhe = {
   assunto?: string | null
   texto: string | null
   links_removidos?: number
-  anexos?: { id: string; filename?: string; content_type?: string; tamanho?: number }[]
+  html?: string | null
+  html_links_removidos?: number
+  anexos?: { id: string; filename?: string; content_type?: string; content_id?: string | null; tamanho?: number }[]
 }
 type Linha = Pick<EmailDaCaixa, 'id' | 'assunto' | 'de' | 'recebido_em' | 'pasta'> & Partial<Pick<EmailDaCaixa, 'de_nome' | 'seguranca' | 'comprador_nome'>>
 
@@ -38,6 +50,21 @@ export function remetenteDoEmail(e: { de?: string | null; de_nome?: string | nul
 export function textoDosLinksRemovidos(n: number | null | undefined): string {
   const k = Number(n) || 0
   return k > 0 ? `${k} link(s) de acesso removido(s)` : ''
+}
+// Os links tirados do que abre primeiro: a mensagem formatada, se veio; senão o texto.
+export function linksRemovidosDoEmail(d: Pick<EmailDaLojaDetalhe, 'html' | 'links_removidos' | 'html_links_removidos'> | null | undefined): number {
+  if (!d) return 0
+  return Number(d.html ? d.html_links_removidos : d.links_removidos) || 0
+}
+// Os anexos no formato do AtendimentoMailBody (o `content_id` liga a imagem embutida).
+export function anexosDoCorpo(anexos: EmailDaLojaDetalhe['anexos']): MailAttachment[] {
+  return (anexos || []).map((a) => ({
+    id: a.id,
+    filename: a.filename || 'anexo',
+    size: Number(a.tamanho) || 0,
+    content_type: a.content_type || null,
+    content_id: a.content_id || null,
+  }))
 }
 // O cabeçalho: o e-mail lido manda; enquanto carrega (ou no que faltar), a
 // linha da lista que já estava na tela.
@@ -97,7 +124,8 @@ watch(() => props.emailId, () => { void carregar() })
 onMounted(() => { void carregar() })
 
 const cabecalho = computed(() => cabecalhoDoEmail(detalhe.value, props.linha))
-const linksRemovidos = computed(() => textoDosLinksRemovidos(detalhe.value?.links_removidos))
+const linksRemovidos = computed(() => textoDosLinksRemovidos(linksRemovidosDoEmail(detalhe.value)))
+const anexosDaMensagem = computed(() => anexosDoCorpo(detalhe.value?.anexos))
 </script>
 
 <template>
@@ -134,7 +162,8 @@ const linksRemovidos = computed(() => textoDosLinksRemovidos(detalhe.value?.link
         <div v-else-if="!detalhe" class="flex justify-center py-10"><Loader2 class="size-5 animate-spin" /></div>
         <template v-else>
           <p v-if="linksRemovidos" class="text-xs text-muted-foreground" data-links-removidos>{{ linksRemovidos }}</p>
-          <pre class="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed" data-texto-do-email>{{ detalhe.texto || '(e-mail sem texto)' }}</pre>
+          <AtendimentoMailBody v-if="detalhe.html" :key="detalhe.id" :html="detalhe.html" :text="detalhe.texto || ''" :attachments="anexosDaMensagem" :attachment-url="urlDoAnexoDaCaixa" data-html-do-email />
+          <pre v-else class="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed" data-texto-do-email>{{ detalhe.texto || '(e-mail sem texto)' }}</pre>
           <section v-if="detalhe.anexos?.length" class="space-y-1 border-t pt-3" aria-label="anexos" data-anexos-do-email>
             <div class="inline-flex items-center gap-1 text-[11px] uppercase tracking-wider text-muted-foreground"><Paperclip class="size-3.5" aria-hidden="true" />Anexos</div>
             <a

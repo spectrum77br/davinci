@@ -711,6 +711,99 @@ async function principal() {
     assert.equal(f.emitidos.length, 0)
   }
 
+  // ------------------------------------------------ o e-mail da loja FORMATADO, como na aba E-mail (30/10/2026)
+  // O Eduardo, com o encaminhado da Amirom aberto nas duas telas: "temos de
+  // replicar o que acontece em e-mail ali pra parte de email que quem trabalha
+  // no atendimento consegue ver". O `html` (já sem os links de acesso, da API)
+  // abre no MESMO AtendimentoMailBody da aba; a imagem embutida vem pela rota da
+  // caixa (nunca /api/mail); sem `html`, o texto como antes.
+  {
+    // As funções puras: o número de links tirados do que abre primeiro; os anexos no formato do corpo.
+    assert.equal(EA.linksRemovidosDoEmail({ html: '<p>x</p>', html_links_removidos: 3, links_removidos: 2 }), 3)
+    assert.equal(EA.linksRemovidosDoEmail({ html: null, html_links_removidos: 3, links_removidos: 2 }), 2)
+    assert.equal(EA.linksRemovidosDoEmail({ html: '<p>x</p>' }), 0)
+    assert.equal(EA.linksRemovidosDoEmail(null), 0)
+    assert.deepEqual(EA.anexosDoCorpo([{ id: 'a1', filename: 'logo.png', content_type: 'image/png', content_id: '<logo@x>', tamanho: 70 }, { id: 'a2' }]), [
+      { id: 'a1', filename: 'logo.png', size: 70, content_type: 'image/png', content_id: '<logo@x>' },
+      { id: 'a2', filename: 'anexo', size: 0, content_type: null, content_id: null },
+    ])
+    assert.deepEqual(EA.anexosDoCorpo(undefined), [])
+
+    const URL_F = '/api/atendimento/email/lojas/emails/f1'
+    const formatado = {
+      id: 'f1', estado: 'informativo', recebido_em: '2026-10-28T15:33:00Z', pasta: 'informativo', loja: '7buyers', conversa_id: null, seguranca: false,
+      de: 'vendas@amiromexpress.com', de_nome: 'Caio - Amirom', reply_to: [], assunto: 'Fwd: Planilha Produtos - Amirom Express',
+      texto: 'Bom dia.\n\nreenviando para sua apreciação.', links_removidos: 1, html_links_removidos: 2,
+      html: '<p>Bom dia.</p><blockquote><table><tr><td>Assunto:</td></tr></table></blockquote><img src="cid:logo@amirom">',
+      anexos: [{ id: 'img 1', filename: 'logo.png', content_type: 'image/png', content_id: '<logo@amirom>', tamanho: 70 }, { id: 'pl', filename: 'planilha.xlsx', content_type: 'application/vnd.ms-excel', tamanho: 4096 }],
+    }
+    const corpos = []
+    const CORPO = { props: ['html', 'text', 'attachments', 'attachmentUrl'], setup(p) { corpos.push(p); return () => Vue.h('section', { 'data-corpo-stub': p.html }) } }
+    const v = montar('../components/AtendimentoEmailDaLojaAberto.vue', { emailId: 'f1', linha: null, loja: '7buyers' }, {
+      respostas: { [URL_F]: formatado, '/api/atendimento/email/lojas/emails/t1': { ...formatado, id: 't1', html: null, texto: 'Só texto.' } },
+      filhos: { AtendimentoMailBody: CORPO },
+    })
+    await v.montar()
+    let html = await v.html()
+    // A mensagem no corpo da aba E-mail (o html da API, o texto para o "Ver texto", os anexos com o Content-ID).
+    assert.match(html, /data-corpo-stub="&lt;p&gt;Bom dia\.&lt;\/p&gt;/)
+    assert.doesNotMatch(html, /data-texto-do-email/, 'sem o texto corrido quando há a mensagem formatada')
+    const corpo = corpos.at(-1)
+    assert.equal(corpo.html, formatado.html)
+    assert.equal(corpo.text, formatado.texto)
+    assert.deepEqual(corpo.attachments.map((a) => [a.id, a.content_id, a.size]), [['img 1', '<logo@amirom>', 70], ['pl', null, 4096]])
+    // A imagem embutida: pela rota do anexo da CAIXA (a equipe não tem o /api/mail).
+    assert.equal(corpo.attachmentUrl('img 1'), '/api/atendimento/email/lojas/anexos/img%201')
+    // O resto da tela continua: o cabeçalho, o aviso (o número do HTML), os anexos para baixar, o "fechar".
+    assert.match(html, /data-assunto-do-email>Fwd: Planilha Produtos - Amirom Express<\/h2>/)
+    assert.match(html, /data-de-do-email><span class="text-muted-foreground">De<\/span> Caio - Amirom &lt;vendas@amiromexpress\.com&gt;<\/div>/)
+    assert.match(html, /data-pasta-do-email>informativo</)
+    assert.match(html, /data-links-removidos>2 link\(s\) de acesso removido\(s\)</)
+    assert.deepEqual([...html.matchAll(/href="([^"]+)"[^>]*data-anexo-do-email/g)].map((x) => x[1]), ['/api/atendimento/email/lojas/anexos/img%201', '/api/atendimento/email/lojas/anexos/pl'])
+    assert.match(html, /data-fechar-email-da-loja>/)
+    // Sem `html` (só texto, ou a limpeza não fechou): o texto como antes, e o número do texto.
+    v.reativo.emailId = 't1'
+    await esperar()
+    html = await v.html()
+    assert.doesNotMatch(html, /data-corpo-stub/)
+    assert.match(html, /data-texto-do-email>Só texto\.<\/pre>/)
+    assert.match(html, /data-links-removidos>1 link\(s\) de acesso removido\(s\)</)
+    // O template: o corpo da aba (nunca v-html), com a rota da caixa e a chave do e-mail.
+    const fonte = sfc('../components/AtendimentoEmailDaLojaAberto.vue').descriptor.template.content
+    assert.match(fonte, /<AtendimentoMailBody v-if="detalhe\.html" :key="detalhe\.id" :html="detalhe\.html" :text="detalhe\.texto \|\| ''" :attachments="anexosDaMensagem" :attachment-url="urlDoAnexoDaCaixa"/)
+    assert.match(fonte, /<pre v-else [^>]*data-texto-do-email>/)
+    assert.doesNotMatch(fonte, /v-html|\/api\/mail/)
+
+    // O AtendimentoMailBody de verdade (setup, DOM do jsdom): com `attachmentUrl`, a imagem
+    // embutida é pedida pela rota da caixa; sem ele, a aba E-mail continua no /api/mail.
+    const { JSDOM } = require('jsdom')
+    const { window } = new JSDOM('', { url: 'https://davinci.invalid/' })
+    const libMod = { exports: {} }
+    new Function('require', 'module', 'exports', 'window', ts.transpileModule(web('lib/mailHtml.ts'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText)(require, libMod, libMod.exports, window)
+    const lib = { ...libMod.exports, renderMailHtml: (h, o) => libMod.exports.renderMailHtml(h, { ...o, window }) }
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jzWQAAAAASUVORK5CYII=', 'base64')
+    const corpoSfc = sfc('../components/AtendimentoMailBody.vue')
+    const corpoScript = compileScript(corpoSfc.descriptor, { id: 'corpo' })
+    async function abrirCorpo(extra) {
+      const pedidos = []
+      const montados = []
+      const g = { ref: Vue.ref, watch: Vue.watch, onMounted: (f) => montados.push(f), onBeforeUnmount: () => {}, useApi: () => ({ api: async (u) => { pedidos.push(u); return new Blob([png]) } }) }
+      const mod = { exports: {} }
+      new Function('require', 'module', 'exports', ...Object.keys(g), transpile(corpoScript.content))((n) => (n === '~/lib/mailHtml' ? lib : require(n)), mod, mod.exports, ...Object.values(g))
+      const props = Vue.reactive({ html: '<p>Bom dia.</p><img src="cid:logo@amirom">', text: 'Bom dia.', attachments: EA.anexosDoCorpo(formatado.anexos.map((a) => ({ ...a, tamanho: a.id === 'img 1' ? png.length : a.tamanho }))), ...extra })
+      const estado = Vue.proxyRefs(mod.exports.default.setup(props, { expose: () => {} }))
+      for (const f of montados) f()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+      return { pedidos, estado }
+    }
+    const daCaixa = await abrirCorpo({ attachmentUrl: requerer('~/components/AtendimentoLojaEmails.vue').urlDoAnexoDaCaixa })
+    assert.deepEqual(daCaixa.pedidos, ['/api/atendimento/email/lojas/anexos/img%201'], 'só a imagem embutida, pela rota da caixa')
+    assert.match(daCaixa.estado.srcdoc, /<img src="data:image\/png;base64,/, 'a imagem embutida aparece na mensagem')
+    const daAba = await abrirCorpo({})
+    assert.deepEqual(daAba.pedidos, ['/api/mail/attachments/img%201'], 'a aba E-mail não muda')
+  }
+
   // ------------------------------------------------ a página
   {
     const pagina = web('pages/atendimento.vue')
@@ -1102,6 +1195,10 @@ async function principal() {
     assert.match(email, /@router\.get\("\/lojas\/emails"\)/)
     assert.match(email, /@router\.get\("\/lojas\/emails\/\{message_id\}"\)/)
     assert.match(email, /@router\.get\("\/lojas\/anexos\/\{attachment_id\}"\)/)
+    // O HTML limpo (30/10/2026): a mesma régua do texto, e o Content-ID do anexo para a imagem embutida.
+    assert.match(email, /html, links_html = html_caixa\.limpar\(/)
+    assert.match(email, /"html": html,\n        "html_links_removidos": links_html,/)
+    assert.match(email, /if k in \("filename", "content_type", "content_id"\)/)
     assert.match(email, /integration_id: Annotated\[UUID \| None, Query\(\)\] = None,\n    store_info_id: Annotated\[UUID \| None, Query\(\)\] = None,\n\) -> dict\[str, Any\]:\n    """Uma fila:/)
     assert.match(api('routers/atendimento.py'), /store_info_id: Annotated\[UUID \| None, Query\(\)\] = None,\n    grupo_email: Annotated\[str \| None, Query\(max_length=32\)\] = None,\n\) -> ListaConversasOut:/)
     // A escolha do dono: UMA constante, na API (o web não tem lista própria de quais pastas aparecem).
