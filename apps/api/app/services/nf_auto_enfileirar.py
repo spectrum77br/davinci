@@ -4,9 +4,10 @@ Faz sozinho o que o botão "Enfileirar" do Painel Faturamento faz: a cada tick
 varre os pedidos com situacao=6 ("Em aberto") de lojas com faturador
 atribuído — Shopee/TikTok/Amazon contínuos; ML segue o HORÁRIO da tela Lojas
 (correios contínuo, agência nos horários da loja, sábado uma vez só e domingo
-nunca — ver `loja_emite_agora`) —, confere o ESTOQUE antes de tudo (kit
-confere o saldo do próprio SKU do kit; saldo virtual negativo = peça não
-existe) e:
+nunca — ver `loja_emite_agora`) —, confere o ESTOQUE antes de tudo (saldo
+virtual negativo = falta peça; kit confere pelos componentes quando a
+composição está no cache; a peça fica com os pedidos mais ANTIGOS — FIFO, ver
+`routers/nf.py::_pedidos_sem_estoque`) e:
 
   - restrição    → Shopee + produto Apple (pelo nome) + destino RJ não é
                    enviado: "restrição" nas Observações do pedido no Bling +
@@ -15,7 +16,8 @@ existe) e:
                    casa nenhuma Exceção vai pra Aguardando Cancelamento do
                    mesmo jeito, MESMO com o automático do ML desligado (a NF
                    do ML sai pelo robô do Eduardo, fora desta fila);
-  - sem estoque  → "Sem estoque — saldo negativo: <SKUs>" nas Observações +
+  - sem estoque  → só os pedidos MAIS NOVOS que estouram o saldo: "Sem
+                   estoque — saldo negativo: <SKUs>" nas Observações +
                    Aguardando Cancelamento no Bling + status 'sem_estoque'
                    (não emite NF/etiqueta de peça que não existe);
   - com estoque  → gera a planilha por faturador e cria os NfCommand de
@@ -334,8 +336,10 @@ async def run_auto_enfileirar_nf() -> dict:
             except Exception:  # noqa: BLE001
                 logger.exception("nf_auto_enfileirar_prioridade_falhou")
 
-        # 1) Estoque primeiro: saldo virtual negativo → Aguardando Cancelamento.
-        #    Só os candidatos NOVOS — o backlog já passou no check ao entrar.
+        # 1) Estoque primeiro: saldo virtual negativo → Aguardando Cancelamento
+        #    SÓ pros mais novos que estouram o saldo (FIFO: o antigo já tem a
+        #    peça reservada e segue). Só os candidatos NOVOS — o backlog já
+        #    passou no check ao entrar.
         #    Mesma ordem da restrição: recado nas Observações (GET→PUT)
         #    PRIMEIRO, situação (PATCH 83955) DEPOIS.
         sem_estoque = await _pedidos_sem_estoque(session, numeros) if numeros else {}
