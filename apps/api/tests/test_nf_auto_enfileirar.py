@@ -128,6 +128,53 @@ def _sem_espera_do_tipo_de_envio(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(get_settings(), "flex_espera_envio_min", 0)
 
 
+class _FakeRedis:
+    """Redis em memória: SET NX / DELETE (marcas dos avisos) e INCR / TTL /
+    EXPIRE (contador de recusas da 83955)."""
+
+    def __init__(self) -> None:
+        self.chaves: dict[str, str] = {}
+        self.validade: dict[str, int] = {}
+
+    async def set(self, chave: str, valor: str, nx: bool = False, ex: int | None = None):
+        if nx and chave in self.chaves:
+            return None
+        self.chaves[chave] = valor
+        if ex:
+            self.validade[chave] = ex
+        return True
+
+    async def delete(self, *chaves: str) -> int:
+        for c in chaves:
+            self.chaves.pop(c, None)
+            self.validade.pop(c, None)
+        return len(chaves)
+
+    async def incr(self, chave: str) -> int:
+        n = int(self.chaves.get(chave, "0")) + 1
+        self.chaves[chave] = str(n)
+        return n
+
+    async def ttl(self, chave: str) -> int:
+        if chave not in self.chaves:
+            return -2
+        return self.validade.get(chave, -1)
+
+    async def expire(self, chave: str, segundos: int) -> bool:
+        self.validade[chave] = segundos
+        return chave in self.chaves
+
+
+@pytest.fixture(autouse=True)
+def _redis_falso(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
+    """Marcas de aviso e contador de recusas da 83955 ficam em memória, um
+    Redis novo por teste — o contador do dia nunca vaza entre testes (nem
+    entre rodadas da suíte num Redis de verdade)."""
+    falso = _FakeRedis()
+    monkeypatch.setattr(nf_auto_enfileirar, "redis", falso)
+    return falso
+
+
 @pytest_asyncio.fixture
 async def admin(db: AsyncSession) -> User:
     email = f"adm-{uuid.uuid4().hex[:6]}@davinci-test.com"
@@ -881,17 +928,19 @@ async def test_sweep_sem_estoque_fifo_ingest_atrasado_antigo_passa(
     assert summary["sem_estoque"] == 0
     assert summary["enfileirados"] == 2
     assert fake.chamadas == []
-    # UMA leitura: o kit do lote e os componentes dele, virtual e físico juntos
-    assert fake.pedidos_saldos == [["501", "503", "902"]]
+    # UMA leitura: os componentes do kit do lote, virtual e físico juntos (o
+    # saldo do próprio kit com composição não decide nada — nem é lido)
+    assert fake.pedidos_saldos == [["501", "503"]]
 
 
 @pytest.mark.asyncio
 async def test_sem_estoque_fifo_bling_falhou_nao_marca(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
-    """Consulta ao Bling falhando e sem evidência local de negativo: ninguém
-    vai pra Aguardando Cancelamento (nunca sem certeza)."""
-    from app.routers.nf import _pedidos_sem_estoque
+    """Consulta ao Bling falhando: ninguém vai pra Aguardando Cancelamento
+    (nunca sem certeza) — e o pedido também não passa sem conferência: sai
+    ADIADO, mesmo com o local dizendo que tem (o cache é clampado em 0)."""
+    from app.routers.nf import _pedidos_sem_estoque, _sem_estoque_fifo
 
     await _seed_pedido(
         db, numero="830001", loja="930001", sku="b1", bling_id=700001,
@@ -908,6 +957,9 @@ async def test_sem_estoque_fifo_bling_falhou_nao_marca(
         nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(_Falha())
     )
     assert await _pedidos_sem_estoque(db, ["830001"]) == {}
+    res = await _sem_estoque_fifo(db, ["830001"])
+    assert res.lote == {}
+    assert res.adiados == {"830001": ["b1"]}
 
 
 class _FakeThreema:
@@ -1070,7 +1122,7 @@ async def test_sem_estoque_fifo_kit_sem_composicao_desliga_o_fisico(
     espelho ver. Sem saber qual peça, nada de físico: D = −virtual = 2 e os
     dois vão (o lado seguro). Kit sem composição com saldo positivo não
     prende peça curta: o físico vale e ninguém vai."""
-    from app.routers.nf import _pedidos_sem_estoque
+    from app.routers.nf import _pedidos_sem_estoque, _sem_estoque_fifo
 
     for numero, bling_id in (("830001", 700001), ("830002", 700002)):
         await _seed_pedido(
@@ -1096,6 +1148,9 @@ async def test_sem_estoque_fifo_kit_sem_composicao_desliga_o_fisico(
     assert set(await _pedidos_sem_estoque(db, ["830001", "830002"])) == vao
     # o kit vai na MESMA leitura da peça
     assert fake.pedidos_saldos == [["501", "950"]]
+    # quem chama avisa quando o físico foi desligado pelo kit
+    res = await _sem_estoque_fifo(db, ["830001", "830002"])
+    assert res.kits_sem_composicao == ([950] if vao else [])
 
 
 @pytest.mark.asyncio
@@ -1170,24 +1225,6 @@ async def test_sweep_sem_estoque_bling_recusou_83955_fica_sem_marca(
     ).scalar_one()
     assert fat.status_faturamento == "sem_estoque"
     assert len(_FakeThreema.enviados) == 1
-
-
-class _FakeRedis:
-    """SET NX / DELETE em memória (marca do aviso fora do lote)."""
-
-    def __init__(self) -> None:
-        self.chaves: dict[str, str] = {}
-
-    async def set(self, chave: str, valor: str, nx: bool = False, ex: int | None = None):
-        if nx and chave in self.chaves:
-            return None
-        self.chaves[chave] = valor
-        return True
-
-    async def delete(self, *chaves: str) -> int:
-        for c in chaves:
-            self.chaves.pop(c, None)
-        return len(chaves)
 
 
 @pytest.mark.asyncio

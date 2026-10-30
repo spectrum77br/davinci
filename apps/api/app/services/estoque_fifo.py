@@ -28,8 +28,10 @@ o mais antigo era conferido contra o saldo já comido pelos 9) fica com os mais
 novos, que é o que ele é. Nunca passa do déficit que o próprio Bling mostra.
 
 "Peça" é o que o Bling reserva: o produto simples ou, no kit, cada componente
-(b026.12.18 e b026.18.24 disputam a mesma b026.18). Cálculo PURO — quem chama
-busca os saldos e os pedidos e decide o que fazer com o resultado.
+(b026.12.18 e b026.18.24 disputam a mesma b026.18; o kit "+" dg075.pi+a004.pi
+disputa a dg075.pi com o simples). Kit com composição conhecida conta SEMPRE
+pelos componentes — o saldo do próprio kit não decide nada. Cálculo PURO —
+quem chama busca os saldos e os pedidos e decide o que fazer com o resultado.
 """
 from __future__ import annotations
 
@@ -44,8 +46,9 @@ _EPS = 1e-9
 class PedidoPecas:
     """Um pedido na disputa pela peça.
 
-    `ordem`: ordem de entrada no Bling (o `bling_id` do pedido). `pecas`:
-    peça → unidades que o pedido leva (kit já aberto nos componentes).
+    `ordem`: ordem de entrada no Bling (o `bling_id` do pedido; None = usa o
+    número como inteiro). `pecas`: peça → unidades que o pedido leva (kit já
+    aberto nos componentes).
     `reserva`: está numa situação que segura peça no Bling (o saldo virtual
     já desconta). `garantido`: já está com a peça (etiqueta subida / já na
     fila da NF) — nunca é escolhido como negativo.
@@ -60,12 +63,14 @@ class PedidoPecas:
 
 def _antiguidade(p: PedidoPecas) -> tuple:
     """Chave FIFO: ordem de entrada no Bling (`bling_id`); sem ela, o número
-    do pedido como inteiro. Sem nenhum dos dois = o mais novo (não dá pra
-    provar que reservou antes)."""
+    do pedido como inteiro entra no lugar (o pedido não vai pro fim da fila só
+    por faltar o id). Sem nenhum dos dois (número que não é inteiro) = o mais
+    novo."""
     inf = float("inf")
-    ordem = int(p.ordem) if p.ordem is not None else inf
     n = (p.numero or "").strip()
-    return (ordem, int(n), n) if n.isdigit() else (ordem, inf, n)
+    numero = int(n) if n.isdigit() else inf
+    ordem = int(p.ordem) if p.ordem is not None else numero
+    return (ordem, numero, n)
 
 
 def negativos_fifo(

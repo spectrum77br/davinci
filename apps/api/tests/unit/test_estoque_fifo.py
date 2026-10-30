@@ -7,6 +7,8 @@ estão RESERVADOS, e os negativos deixa". A peça é do pedido mais antigo (já
 reservada pra ele); quem estourou o saldo foram os mais novos.
 """
 
+import pytest
+
 from app.services.estoque_fifo import PedidoPecas, negativos_fifo
 
 _AUTO = object()
@@ -165,12 +167,62 @@ def test_deficit_maior_que_os_pedidos_marca_todos_os_que_podem():
     assert set(neg) == {"100001", "100002"}
 
 
-def test_sem_bling_id_conta_como_o_mais_novo():
-    """Sem a ordem de entrada não dá pra provar que reservou antes."""
+def test_sem_bling_id_o_numero_entra_no_lugar_da_ordem():
+    """Revisão R7: sem o `bling_id`, a ordem é o NÚMERO como inteiro — não o
+    fim da fila. Antes o pedido sem id virava o "mais novo" por infinito,
+    absorvia o déficit (e não dá pra mover pedido sem id no Bling) e o novo
+    de verdade passava sem peça."""
     neg = negativos_fifo(
-        {"x": -1}, [_p("100009", {"x": 1}), _p("100001", {"x": 1}, ordem=None)]
+        {"x": -1},
+        [
+            _p("300000", {"x": 1}, ordem=None),
+            _p("830001", {"x": 1}, ordem=700001),
+            _p("830002", {"x": 1}, ordem=700002),
+        ],
     )
-    assert neg == {"100001": {"x"}}
+    assert neg == {"830002": {"x"}}
+
+
+def test_sem_bling_id_e_numero_nao_inteiro_e_o_mais_novo():
+    """Sem id e sem número inteiro (ex. avulso "306539.1") não dá pra provar
+    que reservou antes: é o mais novo."""
+    neg = negativos_fifo(
+        {"x": -1}, [_p("100009", {"x": 1}), _p("306539.1", {"x": 1}, ordem=None)]
+    )
+    assert neg == {"306539.1": {"x"}}
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Limite conhecido do físico (revisão R8): reserva que o espelho não vê é"
+        " tratada como de pedido MAIS NOVO (ingest atrasado de 30/10). Se ela for"
+        " de um MAIS ANTIGO (fora da janela de 30 dias, situação velha no"
+        " espelho), o novo do lote passa. Decisão pendente com o Eduardo."
+    ),
+)
+def test_ingest_atrasado_do_mais_antigo_o_novo_do_lote_nao_passa():
+    """Revisão R8: o Bling reserva X (mais antigo, fora do espelho) e B (novo,
+    no lote); físico 1 → virtual −1. O B não tem peça — mas o físico diz que
+    os conhecidos (só o B) cabem e ninguém vai. Strict: quando a regra mudar,
+    este teste passa e o marcador tem de sair."""
+    neg = negativos_fifo({"p": -1.0}, [PedidoPecas("B", 200, {"p": 1.0})], {"p": 1.0})
+    assert neg == {"B": {"p"}}
+
+
+def test_kit_mais_e_o_simples_disputam_o_componente():
+    """Revisão R3 (cálculo puro): o kit "+" dg075.pi+a004.pi aberto nos
+    componentes disputa a dg075.pi com o simples mais antigo — físico 1,
+    virtual −1: vai só o kit (mais novo), com ou sem o físico."""
+    pedidos = [
+        _p("830001", {"dg075.pi": 1}),
+        _p("830002", {"dg075.pi": 1, "a004.pi": 1}),
+    ]
+    saldos = {"dg075.pi": -1, "a004.pi": 200}
+    assert negativos_fifo(saldos, pedidos, {"dg075.pi": 1, "a004.pi": 200}) == {
+        "830002": {"dg075.pi"}
+    }
+    assert negativos_fifo(saldos, pedidos) == {"830002": {"dg075.pi"}}
 
 
 def test_ingest_atrasado_o_fisico_poe_o_deficit_em_quem_o_espelho_nao_viu():
