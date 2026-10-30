@@ -103,7 +103,9 @@ CATEGORIAS_PASTA = (*CATEGORIAS_PELA_PASTA, CATEGORIA_SITE)
 # só pela loja e só destes grupos — a aba E-mail inteira é de admin e, desde
 # 28/10/2026, de quem tem a permissão `atendimento_email` view).
 GRUPOS_EMAIL_NA_BARRA_DE_LOJAS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("problemas", "Problemas", ("problemas",)),
+    # 30/10/2026: a pasta "netshoes" (o SAC da Netshoes por e-mail) entra na caixa
+    # Problemas — o Eduardo: "pra netshoes só chegar o e-mail da loja dela tá ok".
+    ("problemas", "Problemas", ("problemas", "netshoes")),
     ("envios", "Envios", ("envio",)),
     ("devolucao", "Devolução", ("devoluçoes", "devolucoes", "devoluções")),
     ("informativo", "Informativo", ("informativo",)),

@@ -49,6 +49,9 @@ export type GrupoCaixa = { valor: string; plataformas: string[]; nome: string }
 // A ordem do Eduardo (07/10/2026). O WhatsApp (19/10/2026, o Zap — todos os
 // números juntos) entra no fim, depois das Redes, como a aba Zap vem depois
 // do E-mail.
+// As plataformas SEM chat nenhum no DaVinci, só os e-mails da loja (30/10/2026):
+// no menu pela loja nos e-mails (`extras`) e, na barra, a linha da loja sempre.
+export const PLATAFORMAS_SO_EMAIL: readonly string[] = ['netshoes']
 export const GRUPOS_CAIXA: GrupoCaixa[] = [
   { valor: 'ml', plataformas: ['ml'], nome: 'Mercado Livre' },
   { valor: 'shopee', plataformas: ['shopee'], nome: 'Shopee' },

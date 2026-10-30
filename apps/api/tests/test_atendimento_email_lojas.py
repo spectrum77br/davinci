@@ -172,6 +172,9 @@ def test_os_grupos_sao_uma_constante_so():
         "Devoluções": "devolucao",
         "devolucoes": "devolucao",
         "Informativo": "informativo",
+        # 30/10/2026: a pasta da Netshoes cai na caixa Problemas da loja dela.
+        "netshoes": "problemas",
+        "Netshoes": "problemas",
         "informativos": None,
         "envio erro": None,
         "problema ml": None,

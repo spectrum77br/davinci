@@ -19,7 +19,7 @@
 // - cortada, o número de "Todas · Shopee" é o da plataforma no /resumo (o
 //   mesmo do botão do topo e da lista: conta também a conversa sem loja
 //   identificada, que não tem linha na barra).
-import { GRUPOS_CAIXA, aguardandoDe, corteDaBarra, numeroDe, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
+import { GRUPOS_CAIXA, PLATAFORMAS_SO_EMAIL, aguardandoDe, corteDaBarra, numeroDe, plataformasDoValor, topoDoValor } from '~/components/AtendimentoFiltroPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import { lojaNosModos, nomeDoGrupo } from '~/components/AtendimentoPlataforma.vue'
 
@@ -598,9 +598,12 @@ const gruposDaLoja = computed(() => gruposDaBarra(props.gruposEmail))
 const dias = computed(() => Number(props.diasEmail) || 30)
 // Só a loja que TEM e-mail numa das caixas (27/10/2026, o Eduardo: "criou lojas a
 // mais ali no atendimento"): a ficha sem chat e sem e-mail nas pastas não vira linha.
+// A plataforma SEM chat nenhum (a Netshoes, 30/10/2026: "não vi ela aparecendo")
+// é a exceção: a linha da loja aparece sempre, com as caixas vazias.
 const lojasSoEmail = computed<LojaBarra[]>(() => {
   if (!props.emails || props.numero === 'humano') return []
-  const comEmail = (e: EmailsDaLoja) => gruposDaLoja.value.some((g) => numeroDoGrupo(e, g.chave) > 0)
+  const comEmail = (e: EmailsDaLoja) =>
+    PLATAFORMAS_SO_EMAIL.includes(e.plataforma || '') || gruposDaLoja.value.some((g) => numeroDoGrupo(e, g.chave) > 0)
   return lojasSemLinha(props.emails, lojas.value).filter(comEmail).map((e) => ({
     chave: chaveSoEmail(e),
     integration_id: '',
