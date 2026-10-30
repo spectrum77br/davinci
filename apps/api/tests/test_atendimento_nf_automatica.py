@@ -302,6 +302,33 @@ async def test_pedido_escrito_com_o_2_do_menu_no_meio_manda_a_nf(db, make_user, 
     assert _decisao(r) == "enviado_nf", _decisao(r)
 
 
+@pytest.mark.parametrize(
+    ("antes", "tipo", "depois"),
+    [
+        # Revisão da revisão de 30/10: o Vita 95704e8d de 29/10 — o botão "Conversar com
+        # vendedor" do FAQ da Shopee, o menu, o "2" e o pedido escrito.
+        ("Conversar com vendedor", "faq_liveagent", "O meu celular não veio com nota fiscal"),
+        # O elogio do que chegou antes do menu e o "2" sozinho.
+        ("veio tudo certinho, muito obrigada!", None, None),
+    ],
+)
+async def test_2_do_menu_com_o_botao_do_faq_ou_o_elogio_antes_manda_a_nf(
+    db, make_user, ligado, plataforma, antes, tipo, depois
+):
+    conversa, primeira = await _cenario(db, make_user, texto=antes)
+    if tipo is not None:
+        primeira.payload = {"message_type": tipo}
+        await db.commit()
+    await _msg(db, conversa, _MENU_DUOKE, autor="loja", origem="externo", ha=timedelta(minutes=3))
+    gatilho = await _msg(db, conversa, "2", ha=timedelta(minutes=2))
+    if depois is not None:
+        gatilho = await _msg(db, conversa, depois, ha=timedelta(minutes=1))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
+
+
 async def test_2_do_menu_nao_libera_o_acessorio_escrito_depois(db, make_user, ligado, plataforma):
     """O "2" sai das falas, o resto passa pela régua: o carregador que não veio → pessoa."""
     conversa, _ = await _cenario(db, make_user, texto="oi")
@@ -488,6 +515,11 @@ async def test_chave_geral_desligada(db, make_user, ligado, plataforma, monkeypa
         "o celular veio sem nota, quero devolver",
         "a danfe veio com o nome errado",
         "tem nota fiscal?",
+        # Revisão da revisão de 30/10: o "que" da lista não abre o produto que não veio.
+        "manda a nota fiscal do produto que não veio",
+        "me manda a nota fiscal só que ainda não chegou",
+        "me manda a nota fiscal que o meu ainda não chegou",
+        "o carregador não veio junto com o produto, manda a nota",
     ],
 )
 async def test_pedido_ambiguo_ou_que_exige_pessoa(db, make_user, ligado, plataforma, texto):
@@ -789,6 +821,48 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("como faço para receber o produto e a nota?", False),
         ("como faço pra devolver e pegar a nota?", False),
         ("como posso ter nota fiscal?", False),
+        # Revisão da revisão de 30/10: o "que (ainda) não" da oração do produto e o pronome no
+        # lugar do produto ficam com a pessoa; o "só que" corta o trecho como o "mas".
+        ("me manda a nota fiscal só que ainda não chegou", False),
+        ("manda a nota fiscal do pedido que ainda não chegou", False),
+        ("manda a nota fiscal do produto que não veio", False),
+        ("manda a nota fiscal do celular que não veio", False),
+        ("preciso da nota fiscal do produto que não recebi", False),
+        ("quero a nota fiscal da compra que não recebi", False),
+        ("cadê a nota fiscal do pedido que não veio", False),
+        ("nota fiscal do pedido que não chegou", False),
+        ("preciso da nota fiscal do relógio q não chegou", False),
+        ("me manda a nota fiscal que o meu ainda não chegou", False),
+        ("preciso da nota fiscal que o mesmo ainda não chegou", False),
+        ("preciso da nota fiscal mesmo que ainda não chegou", False),
+        ("manda a nota fiscal que a minha compra ainda não chegou", False),
+        ("manda a nota fiscal so q ainda nao chegou", False),
+        ("o pedido chegou só que não veio a nota fiscal", True),
+        ("chegou o celular, só que não veio a nota fiscal", True),
+        ("é que não veio a nota fiscal", True),
+        ("manda a nf que não chegou", True),
+        ("o meu não veio com nota fiscal", True),
+        ("eu mesmo não recebi a nota fiscal", True),
+        # Revisão da revisão de 30/10 (comparado com o código no ar): o elogio, o cumprimento
+        # escrito de outro jeito, "enviar ela", "se puder", "junto com o produto" e "não
+        # acompanhou a nota" — com as mesmas travas do produto, do acessório e do problema.
+        ("veio tudo certinho, me manda a nota fiscal", True),
+        ("chegou tudo perfeito, só não veio a nota fiscal", True),
+        ("oie não recebi a nota fiscal", True),
+        ("opa, tudo joia? por favor, preciso da nf", True),
+        ("a nota fiscal do produto nao chegou junto com o mesmo, favor me enviar ela", True),
+        ("não veio a nota fiscal junto com o produto. se puder enviar por aqui, por favor", True),
+        ("a nota fiscal não veio com o relógio", True),
+        ("o relógio não acompanhou a nota fiscal", True),
+        ("manda a nota pra ela", False),
+        ("o carregador não veio junto com o produto, manda a nota", False),
+        ("o produto não veio junto com a caixa, manda a nota", False),
+        ("não veio com o produto, manda a nota", False),
+        ("a nota veio com o produto errado", False),
+        ("chegou tudo certinho mas não veio a nota e o fone", False),
+        ("se puder mandar a nota e o carregador", False),
+        ("o produto acompanha nota fiscal?", False),
+        ("o relógio não acompanhou o carregador nem a nota", False),
     ],
 )
 def test_pedido_claro(texto, claro):
@@ -855,6 +929,45 @@ def test_o_2_do_menu_sai_das_falas_do_turno():
     # O que veio antes do menu passa pela mesma régua.
     vem = M(id=1, autor="cliente", texto="vem com nota fiscal?")
     textos = nf_automatica.textos_do_turno([vem, menu, dois, de_novo], [vem, dois, de_novo])
+    assert nf_automatica.pedido_claro(textos) is False
+
+
+def test_figurinha_e_conversar_com_vendedor_nao_contam_como_fala():
+    """Revisão da revisão de 30/10: a figurinha e o botão do FAQ da Shopee não são fala."""
+    from types import SimpleNamespace as M
+
+    menu = M(id=90, autor="loja", texto=_MENU_DUOKE, origem="externo")
+    dois = M(id=91, autor="cliente", texto="2")
+    figurinha = M(id=1, autor="cliente", texto="[Figurinha]", payload={"message_type": "sticker"})
+    vendedor = M(
+        id=2,
+        autor="cliente",
+        texto="Conversar com vendedor",
+        payload={"message_type": "faq_liveagent"},
+    )
+    assert nf_automatica.pedido_pelo_menu([figurinha, menu, dois], dois) is True
+    assert nf_automatica.pedido_pelo_menu([vendedor, menu, dois], dois) is True
+    depois = M(id=95, autor="cliente", texto="[Figurinha]")
+    assert nf_automatica.pedido_pelo_menu([menu, dois, depois], depois) is True
+    # Escrito pelo cliente (sem o botão do FAQ) e o "Falar com atendente" continuam contando.
+    digitado = M(id=3, autor="cliente", texto="conversar com vendedor")
+    assert nf_automatica.pedido_pelo_menu([digitado, menu, dois], dois) is False
+    atendente = M(id=4, autor="cliente", texto="Falar com atendente", payload={})
+    assert nf_automatica.pedido_pelo_menu([atendente, menu, dois], dois) is False
+    # No turno: o pedido escrito depois do "2" passa (o Vita 95704e8d de 29/10); o acessório
+    # que não veio continua com a pessoa.
+    celular = M(id=92, autor="cliente", texto="O meu celular não veio com nota fiscal")
+    textos = nf_automatica.textos_do_turno(
+        [vendedor, menu, dois, celular], [vendedor, dois, celular]
+    )
+    assert textos == [celular.texto] and nf_automatica.pedido_claro(textos) is True
+    nota = M(id=93, autor="cliente", texto="nota fiscal")
+    textos = nf_automatica.textos_do_turno([figurinha, menu, dois, nota], [figurinha, dois, nota])
+    assert textos == [nota.texto] and nf_automatica.pedido_claro(textos) is True
+    carregador = M(id=94, autor="cliente", texto="não veio o carregador nem a nota")
+    textos = nf_automatica.textos_do_turno(
+        [figurinha, menu, dois, carregador], [figurinha, dois, carregador]
+    )
     assert nf_automatica.pedido_claro(textos) is False
 
 
@@ -1132,6 +1245,14 @@ def test_pedido_pelo_menu():
         (["o pedido chegou mas nao veio a nota e um produto"], False),
         (["comprei 2, chegou so 1"], False),
         (["oi", "o produto veio quebrado"], False),
+        # Revisão da revisão de 30/10: o elogio do que chegou vale como a cortesia; com o
+        # problema ou outra pergunta, não.
+        (["oi! tudo bem e vc?", "veio tudo certinho, muito obrigada!"], True),
+        (["bom dia! chegou tudo certinho, amei o aparelho muito bom"], True),
+        (["opa, tudo joia?"], True),
+        (["chegou tudo certo mas o fone não"], False),
+        (["veio tudo certinho, só faltou o carregador"], False),
+        (["chegou tudo certinho", "é original?"], False),
     ],
 )
 def test_pedido_pelo_menu_olha_o_que_veio_antes_do_menu(antes, pelo_menu):

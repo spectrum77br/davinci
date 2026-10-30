@@ -128,17 +128,31 @@ meu celular não veio com nota fiscal"):
 - O "2" que escolheu "Nota fiscal" no menu sai das falas do turno
   (`textos_do_turno`): o pedido escrito junto passa; o resto do turno, inclusive
   o que veio antes do menu, continua na mesma régua.
+- Revisão da revisão (comparado com o código no ar, a régua de 29/10 do que vem
+  antes do "2" fazia sair MENOS NF: "veio tudo certinho, muito obrigada! || 2",
+  "[Figurinha] || 2", "Conversar com vendedor || 2 || o meu celular não veio com
+  nota fiscal" — o próprio Vita 95704e8d): a figurinha e o botão "Conversar com
+  vendedor" do FAQ da Shopee não contam como fala (`_sem_fala`); o elogio do que
+  chegou, sem "não" nem problema, vale como a cortesia antes do menu e entra na
+  lista (`_so_elogio`); o cumprimento escrito de outro jeito ("oie", "opa, tudo
+  joia?"), "enviar ela", "se puder", "junto com o produto/o mesmo" e "não
+  acompanhou a nota". E o "que" que entrou na lista não abre o produto que não
+  veio: o "que (ainda) não" só vale logo depois do documento ou com ele logo
+  depois do verbo ("a nota do pedido que não chegou", "da compra que não
+  recebi", "mesmo que ainda não chegou", "que o meu ainda não chegou" → pessoa)
+  e o "só que" corta o trecho como o "mas".
 - Medido nos turnos reais de 60 dias (até 30/10, todas as lojas; 378 turnos e
-  759 parciais que citam o documento): passam 42 turnos e 84 parciais (a
+  759 parciais que citam o documento): passam 48 turnos e 107 parciais (a
   revisão de 29/10 sozinha: 18 e 34; o código no ar: 62 e 95, mas 53 e 71 deles
   só pelo "2" do menu sem olhar o que veio antes). Conversas em que a NF certa
-  sairia (a cheia única, o CPF do pedido, o comprador conferido): 43, 20 nas
-  lojas no automático (29/10: 21 e 10; no ar: 57 e 22). Das 42 conversas novas,
-  27 têm a NF certa (15 no automático); lidas todas, 1 era pergunta de
-  pré-venda ("vc manda a nota fiscal do aparelho?", sem pedido: não sai). O que
-  o código no ar mandava e continua com a pessoa é o "2" com texto antes que não
-  é pedido claro (pré-venda, "é original?", série na nota, e-mail e alguns
-  pedidos com palavra fora da lista).
+  sairia (a cheia única, o CPF do pedido, o comprador conferido): 51, 21 nas
+  lojas no automático (29/10: 21 e 10; no ar: 57 e 22). Das 54 conversas novas,
+  34 têm a NF certa (16 no automático); lidas todas, nenhuma é outro assunto
+  (1 pergunta de pré-venda sem pedido: não sai). As 17 conversas (5 no
+  automático) em que o código no ar mandava e esta régua não são o "2" com texto
+  antes que não é pedido claro: pré-venda ("vocês enviam a nota?", "acompanha
+  nota?"), "é original?", e-mail, "aguardo a emissão", descrição na nota, várias
+  compras, garantia da Apple e alguns pedidos com palavra fora da lista.
 """
 
 from __future__ import annotations
@@ -210,6 +224,11 @@ _O_CLIENTE_FAZ = re.compile(
     # Revisão de 30/10: "(e) preciso dela", "vou precisar dela" — a dela é a nota do turno ("a
     # nota dela", de outra pessoa, continua fora da lista).
     r"|\b(?:preciso|precisava|precisaria|vou\s+precisar)\s+dela\b"
+    # Revisão da revisão de 30/10: "(favor me) enviar/mandar ela" — a "ela" é a nota do turno, só
+    # logo depois do verbo do pedido — e o "se puder/se possível" da cortesia.
+    r"|\b(?:manda|mande|mandar|mandem|envia|envie|enviar|enviem|passa|passe|passar|"
+    r"encaminha|encaminhe|encaminhar|encaminhem)\s+ela\b"
+    r"|\bse\s+(?:(?:vc|voce|vcs|voces)\s+)?(?:puder|puderem|possivel|for\s+possivel)\b"
 )
 # Revisão de 30/10: "como faço para receber/ter acesso à nota fiscal?", "como consigo a nf?" —
 # o que se responde é a NF. O "como" só nesta forma, grudado no documento ("como faço para
@@ -242,6 +261,13 @@ _O_PRODUTO = r"(?:nada|produto|produtos|pedido|compra|caixa|pacote|encomenda|emb
 _FALTOU_O_PAPEL = (
     r"(?:\s+(?:tinha|tem|estava)\s+(?:(?:a|as|o|os|nem)\s+)?" + _PAPEL + r"\b"
     r"|\s+(?:veio|vieram)\s+(?:(?:a|as|o|os)\s+)?(?:nota|nf|nfe)\b)"
+)
+# Revisão da revisão de 30/10: depois do "não" do "que" e do pronome, o documento logo depois
+# do verbo é quem não veio ("é que não veio a nota", "o meu não veio a nota"); sem o "nem" ("o
+# meu não veio nem a nota" é o produto).
+_O_DOC_LOGO_DEPOIS = (
+    r"(?!\s+(?:veio|vieram|chegou|chegaram|recebi|tinha|tem|estava|foi)\s+"
+    r"(?:(?:a|as|o|os|minha)\s+){0,2}(?:nota|nf|nfe)\b)"
 )
 _PEDE = re.compile(
     # "me manda a nota", "pode enviar a nf?", "passa a nota fiscal", "encaminha a nota" (30/10)
@@ -284,6 +310,17 @@ _NAO_E_SO_A_NF = re.compile(
     r"(?!"
     + _FALTOU_O_PAPEL
     + r")"
+    # Revisão da revisão de 30/10 (o "que" entrou na lista): o "que (ainda) não" só fala do
+    # documento logo depois dele ("a nota fiscal que não veio") ou com ele logo depois do verbo
+    # ("é que não veio a nota", "por que não veio a nota fiscal", "só que não veio a nota"); fora
+    # disso é a oração do produto ("a nota do pedido que não chegou", "do celular que não veio",
+    # "da compra que não recebi", "mesmo que ainda não chegou") → pessoa. O pronome no lugar do
+    # produto também ("que o meu ainda não chegou", "o mesmo não veio") — só "o meu não veio a
+    # nota" / "o mesmo não tinha a nota" é o documento.
+    + r"|(?<!\bnota )(?<!\bfiscal )(?<!\bnf )(?<!\bnfe )\b(?:que|q)\s+(?:ainda\s+|tambem\s+)?nao\b"
+    + _O_DOC_LOGO_DEPOIS
+    + r"|\b(?:meu|minha|mesmo|mesma)\s+(?:ainda\s+|tambem\s+)?nao\b"
+    + _O_DOC_LOGO_DEPOIS
     # O produto depois do "e" ("não veio a nota e o produto", "manda a nota e o pedido",
     # "chegou mas não veio a nota e um produto", "cadê a nota e cadê o pedido").
     + r"|\be\s+(?:cade\s+)?(?:(?:o|a|os|as|meu|minha|um|uma)\s+){0,2}"
@@ -322,26 +359,61 @@ _NAO_E_SO_A_NF = re.compile(
 # 60 dias ("por gentileza", "muito obrigado", "fico no aguardo") e o "que/q",
 # o "só", o "mesmo" e o pedido no subjuntivo ("gostaria que me enviasse a nota fiscal", "só não
 # veio a nota", "pode enviar por aqui mesmo") — o "dela" não ("a nota dela" é de outra pessoa).
+# Revisão da revisão de 30/10: o cumprimento escrito de outro jeito ("oie, não recebi a nota
+# fiscal" no Barbosa a7d23156, "opa, tudo joia? preciso da nf"), como no `ia._CORTESIA`.
 _CORTESIA = frozenset(
     """
     oi ola ei bom boa dia tarde noite tudo bem ok certo sim por favor pf pfv porfavor
     obrigado obrigada obg grato grata agradeco desde ja gentileza muito aguardo fico
+    oii oiii oie oiee olaa opa joia blz beleza valeu tranquilo
     """.split()
 )
-_PALAVRAS_DO_PEDIDO = _CORTESIA | frozenset(
+# Revisão da revisão de 30/10 (comparado com o código no ar, o "2" com o elogio antes deixava
+# de sair: "veio tudo certinho, muito obrigada! || 2", "chegou tudo certinho, o aparelho muito
+# bom || 2"): o ELOGIO do que chegou, sem "não" e sem problema, entra na lista do que pode e,
+# sozinho, vale como a cortesia antes do menu (`_so_elogio`).
+_ELOGIO = frozenset(
     """
-    pode poderia podem poderiam consegue conseguem conseguiria tem como teria seria possivel
-    voce voces vc vcs me mim pra para pro por aqui ai la
-    manda mande mandar mandem envia envie enviar enviem passa passe passar
-    encaminha encaminhe encaminhar encaminhem
-    preciso precisava precisaria quero queria gostaria necessito eu vou querer receber
-    solicito solicitar solicitacao que q so mesmo enviasse enviassem mandasse mandassem
-    nao veio vieram recebi chegou encontrei achei tinha estava foi cade ainda
-    nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
-    a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
-    esse este essa esta junto caixa pacote embalagem pedido compra produto
+    certinho certinha direitinho perfeito perfeita perfeitamente otimo otima excelente
+    lindo linda amei adorei gostei top show parabens satisfeito satisfeita
     """.split()
 )
+_PALAVRAS_DO_PEDIDO = (
+    _CORTESIA
+    | _ELOGIO
+    | frozenset(
+        """
+        pode poderia podem poderiam consegue conseguem conseguiria tem como teria seria possivel
+        voce voces vc vcs me mim pra para pro por aqui ai la
+        manda mande mandar mandem envia envie enviar enviem passa passe passar
+        encaminha encaminhe encaminhar encaminhem
+        preciso precisava precisaria quero queria gostaria necessito eu vou querer receber
+        solicito solicitar solicitacao que q so mesmo enviasse enviassem mandasse mandassem
+        nao veio vieram recebi chegou encontrei achei tinha estava foi cade ainda
+        nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
+        a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
+        esse este essa esta junto caixa pacote embalagem pedido compra produto
+        """.split()
+    )
+)
+_PALAVRAS_DO_ELOGIO = (
+    _CORTESIA
+    | _ELOGIO
+    | frozenset(
+        """
+        chegou chegaram veio vieram recebi foi e vc voce vcs voces aqui hoje
+        a o as os meu minha produto pedido compra
+        """.split()
+    )
+)
+# O que o cliente "fala" sem escrever: a figurinha (o rótulo `constantes.rotulo_tipo_plataforma`
+# — Shopee `sticker`, TikTok `emoticons`) e o botão "Conversar com vendedor" do FAQ da Shopee
+# (`faq_liveagent`: é por ele que o comprador chega ao chat da loja, antes do menu). Nos 60 dias
+# seguravam o "2" e o pedido escrito ("[Figurinha] || 2 || nota fiscal", "Conversar com vendedor
+# || 2 || o meu celular não veio com nota fiscal" — o Vita 95704e8d de 29/10): não contam como
+# fala, como a foto sem texto. O "Falar com atendente" (o 6 do menu) continua contando.
+_FIGURINHA = constantes.rotulo_tipo_plataforma("sticker")
+_CONVERSAR_COM_VENDEDOR = "conversar com vendedor"
 
 
 # O menu do robô da loja (o do Duoke, 28/10/2026): "Escolha uma opção: 1 - Rastreio
@@ -358,7 +430,9 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
     sai logo depois da PRIMEIRA fala do cliente, então o que ele escreveu ANTES do
     menu na mesma rajada ("recebi a nota de outra pessoa" → menu → "2") também
     conta: só cortesia, o "2" de um menu anterior ou o próprio pedido claro da NF
-    (a foto sem texto não conta).
+    (a foto sem texto não conta). Revisão da revisão de 30/10: o elogio do que chegou
+    (`_so_elogio`) também, e a figurinha e o "Conversar com vendedor" não contam
+    (`_sem_fala`), nem antes nem depois do menu.
     """
     from app.services.atendimento import ia
 
@@ -376,15 +450,16 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
     depois = [m for m in recentes[ultimo + 1 :] if m.autor == constantes.AUTOR_CLIENTE]
     if not depois or gatilho is None or all(m.id != gatilho.id for m in depois):
         return False
-    plano = " ".join(validador.plano_de(" ".join(m.texto or "" for m in depois)).split())
+    falas = (m.texto or "" for m in depois if not _sem_fala(m))
+    plano = " ".join(validador.plano_de(" ".join(falas)).split())
     if plano.strip(" .!") != "2":
         return False
     antes = [
-        t
-        for t in (m.texto for m in ia.rajada_do_cliente(recentes[:ultimo], None))
-        if t and validador.plano_de(t).strip(" .!\n") != "2"
+        m.texto
+        for m in ia.rajada_do_cliente(recentes[:ultimo], None)
+        if m.texto and not _sem_fala(m) and validador.plano_de(m.texto).strip(" .!\n") != "2"
     ]
-    return all(_so_cortesia(t) for t in antes) or pedido_claro(antes)
+    return all(_so_cortesia(t) or _so_elogio(t) for t in antes) or pedido_claro(antes)
 
 
 def textos_do_turno(recentes: Sequence[Any], rajada: Sequence[Any]) -> list[str | None]:
@@ -395,8 +470,9 @@ def textos_do_turno(recentes: Sequence[Any], rajada: Sequence[Any]) -> list[str 
     envie a nota fiscal || 2 || me envie a nota fiscal por aqui"; em 60 dias, 16 decisões, 12
     em lojas no automático). Só sai o "2" que vem depois do menu e antes de uma resposta real
     da loja; o resto do turno passa pela MESMA régua — o que veio antes do menu também ("vem
-    com nota fiscal? || 2", "conversar com vendedor || 2 || …" continuam com a pessoa) — e os
-    outros números do menu (3 cancelamento, 5 garantia, 6 atendente) seguram.
+    com nota fiscal? || 2" continua com a pessoa) — e os outros números do menu (3
+    cancelamento, 5 garantia, 6 atendente) seguram. Revisão da revisão de 30/10: a figurinha e
+    o botão "Conversar com vendedor" da Shopee também saem (`_sem_fala`).
     """
     from app.services.atendimento import ia
 
@@ -415,7 +491,28 @@ def textos_do_turno(recentes: Sequence[Any], rajada: Sequence[Any]) -> list[str 
         resposta = max((j for j in respostas if j < i), default=-1)
         return any(resposta < j < i for j in menus)
 
-    return [m.texto for m in rajada if not escolheu_a_nf(m)]
+    return [m.texto for m in rajada if not escolheu_a_nf(m) and not _sem_fala(m)]
+
+
+def _sem_fala(m: Any) -> bool:
+    """A figurinha ou o botão "Conversar com vendedor" do FAQ da Shopee (`_FIGURINHA`)? PURA."""
+    texto = (m.texto or "").strip()
+    if texto == _FIGURINHA:
+        return True
+    payload = getattr(m, "payload", None)
+    tipo = payload.get("message_type") if isinstance(payload, dict) else None
+    plano = " ".join(validador.plano_de(texto).split()).strip(" .!")
+    return tipo == "faq_liveagent" and plano == _CONVERSAR_COM_VENDEDOR
+
+
+def _so_elogio(texto: str) -> bool:
+    """Só o elogio do que chegou ("veio tudo certinho, muito obrigada!", "tudo bem e vc?")? PURA.
+
+    Sem "não", sem número e sem nenhuma palavra fora da lista (`_PALAVRAS_DO_ELOGIO`): "chegou
+    tudo certo mas…", "veio quebrado", "chegou só 1" e o "6" do menu continuam contando.
+    """
+    palavras = re.findall(r"[a-z0-9]+", _grafia(validador.plano_de(texto)))
+    return bool(palavras) and all(p in _PALAVRAS_DO_ELOGIO for p in palavras)
 
 
 def _so_cortesia(texto: str) -> bool:
@@ -438,10 +535,12 @@ def _so_cortesia(texto: str) -> bool:
 # Segunda revisão de 29/10: cada FALA também é um trecho ("Não veio a nota || O produto
 # não", "Ainda não chegou || Manda a nota") — o "eu queria a nota || não veio" fica com a
 # pessoa (1 dos 27 turnos reais de 60 dias que passavam) — e o pedido que começa outra
-# frase sem a vírgula também ("ainda não chegou preciso da nota").
+# frase sem a vírgula também ("ainda não chegou preciso da nota"). Revisão da revisão de 30/10:
+# o "só que" é o mesmo "mas" ("me manda a nota fiscal só que ainda não chegou" → pessoa; "o
+# pedido chegou só que não veio a nota" passa).
 _NAO_VEIO = re.compile(r"\bnao\b")
 _TRECHOS = re.compile(
-    r"[,.;:!?]+|\b(?:mas|porem|e)\b"
+    r"[,.;:!?]+|\b(?:mas|porem|e|so\s+q(?:ue)?)\b"
     r"|(?=\b(?:preciso|precisava|quero|queria|gostaria|cade|manda|mande|envia|envie)\b)"
 )
 _NOME_DO_DOC = re.compile(r"\b" + _PAPEL + r"\b")
@@ -479,6 +578,13 @@ _ANTES_DA_NOTA = r"(?=(?:(?:a|as|o|os|uma)\s+)?(?:nota|nf|nfe)\b)"
 _NAO_ANTES = r"(?<!nao )(?<!nao veio )(?<!nao esta )(?<!nao estava )(?<!nao ficou )"
 _SEM_A_NOTA = (
     (re.compile(r"\bnao\s+(?:veio|vieram|chegou|chegaram)\s+com\s+" + _ANTES_DA_NOTA), "nao veio "),
+    # Revisão da revisão de 30/10: "o relógio não acompanhou a nota fiscal" — o "acompanha" da
+    # pergunta da compra ("acompanha nota?") continua no `_NAO_E_SO_A_NF`; negado e no passado é
+    # a ausência.
+    (
+        re.compile(r"\bnao\s+(?:acompanhou|acompanharam|acompanhava)\s+" + _ANTES_DA_NOTA),
+        "nao veio ",
+    ),
     (
         re.compile(_NAO_ANTES + r"\b(?:veio|vieram|chegou|chegaram)\s+sem\s+" + _ANTES_DA_NOTA),
         "nao veio ",
@@ -495,6 +601,23 @@ _SEM_A_NOTA = (
         "nao veio ",
     ),
 )
+# - Revisão da revisão de 30/10 ("a nota fiscal do produto não chegou junto com o mesmo, favor
+#   me enviar ela", "não veio a nota fiscal junto com o produto. se puder enviar por aqui"): o
+#   "com" de "junto com" e de "não veio/chegou com" sai quando o PRODUTO (ou "o mesmo") vem logo
+#   depois — o documento é quem não veio; o produto que não veio continua nas travas ("o produto
+#   não veio junto com a caixa", "não veio com o produto" sem a nota no trecho) e "veio com o
+#   produto errado" sobra.
+_O_PRODUTO_LOGO = (
+    r"(?=(?:o|a|os|as)\s+(?:mesmo|mesma|produto|produtos|pedido|compra|caixa|pacote|encomenda|"
+    r"embalagem)\b)"
+)
+_JUNTO_COM = (
+    (re.compile(r"\bjunto\s+com\s+" + _O_PRODUTO_LOGO), "junto "),
+    (
+        re.compile(r"\b(nao\s+(?:veio|vieram|chegou|chegaram))\s+com\s+" + _O_PRODUTO_LOGO),
+        r"\1 junto ",
+    ),
+)
 # O documento SOZINHO no turno ("a notafiscal?", "Nota fiscal por favor", "boa tarde, nota
 # fiscal", "a nf do pedido?") é o pedido da NF — é o que o cliente escreve no lugar do "2" do
 # menu. Só com a nota nomeada por inteiro: a "nota" sozinha pode ser a da avaliação ("a nota?")
@@ -508,7 +631,7 @@ _SO_O_DOCUMENTO = re.compile(
 def _grafia(plano: str) -> str:
     """A grafia do documento, o aparelho e a ausência na forma que as réguas leem. PURA."""
     plano = " ".join(plano.split())
-    for regra, troca in (*_GRAFIAS, (_O_APARELHO, "produto"), *_SEM_A_NOTA):
+    for regra, troca in (*_GRAFIAS, (_O_APARELHO, "produto"), *_SEM_A_NOTA, *_JUNTO_COM):
         plano = regra.sub(troca, plano)
     return plano
 
