@@ -7,16 +7,16 @@ estão RESERVADOS, e os negativos deixa". A peça é do pedido mais antigo (já
 reservada pra ele); quem estourou o saldo foram os mais novos.
 """
 
-from datetime import UTC, datetime
-
 from app.services.estoque_fifo import PedidoPecas, negativos_fifo
 
-D29 = datetime(2026, 10, 29, 3, tzinfo=UTC)  # meia-noite BRT, como no espelho
-D30 = datetime(2026, 10, 30, 3, tzinfo=UTC)
+_AUTO = object()
 
 
-def _p(numero, pecas, data=D29, **kw):
-    return PedidoPecas(numero=numero, data=data, pecas=pecas, **kw)
+def _p(numero, pecas, ordem=_AUTO, **kw):
+    """`ordem` = bling_id; por padrão anda junto com o número (como no Bling)."""
+    if ordem is _AUTO:
+        ordem = 20_000_000_000 + int(numero)
+    return PedidoPecas(numero=numero, ordem=ordem, pecas=pecas, **kw)
 
 
 def test_caso_da_queixa_antigo_reservado_passa_e_o_novo_vai():
@@ -24,21 +24,23 @@ def test_caso_da_queixa_antigo_reservado_passa_e_o_novo_vai():
     reservada e segue; só o mais novo é o negativo."""
     neg = negativos_fifo(
         {"b026.18": -1},
-        [_p("306580", {"b026.18": 1}), _p("306633", {"b026.18": 1}, data=D30)],
+        [_p("306580", {"b026.18": 1}), _p("306633", {"b026.18": 1})],
     )
     assert neg == {"306633": {"b026.18"}}
 
 
 def test_rajada_de_30_10_tres_pecas_nove_pedidos():
     """O caso real do b026.18: 3 peças livres e 9 pedidos (saldo −6), mais o
-    306575 já em Em digitação. Ficam com a peça os 3 mais antigos; vão os 6
-    mais novos (o 306633 é de 30/10, os outros de 29/10)."""
+    306575 já em Em digitação. Ficam com a peça os 3 que entraram primeiro no
+    Bling; vão os 6 mais novos."""
     pedidos = [_p("306575", {"b026.18": 1}, garantido=True)]
     pedidos += [
         _p(n, {"b026.18": 1})
-        for n in ("306580", "306581", "306589", "306616", "306620", "306622", "306624", "306636")
+        for n in (
+            "306580", "306581", "306589", "306616", "306620", "306622", "306624", "306633",
+            "306636",
+        )
     ]
-    pedidos.append(_p("306633", {"b026.18": 1}, data=D30))
     neg = negativos_fifo({"b026.18": -6}, pedidos)
     assert set(neg) == {"306616", "306620", "306622", "306624", "306633", "306636"}
     assert not {"306575", "306580", "306581", "306589"} & set(neg)
@@ -100,17 +102,21 @@ def test_multi_sku_so_a_peca_negativa_conta():
     assert neg == {"100002": {"x"}}
 
 
-def test_empate_de_data_desempata_pelo_numero():
-    """Mesma data (o espelho só guarda o dia): o número maior é o mais novo —
+def test_sem_bling_id_o_numero_como_inteiro_decide():
+    """Sem a ordem de entrada no Bling, o número maior é o mais novo —
     comparado como número (100000 > 99999)."""
-    neg = negativos_fifo({"x": -1}, [_p("100000", {"x": 1}), _p("99999", {"x": 1})])
+    neg = negativos_fifo(
+        {"x": -1}, [_p("100000", {"x": 1}, ordem=None), _p("99999", {"x": 1}, ordem=None)]
+    )
     assert neg == {"100000": {"x"}}
 
 
-def test_data_vence_o_numero():
-    """Data do pedido primeiro: o 100001 é de 30/10, mais novo que o 100009."""
+def test_ordem_de_entrada_no_bling_decide():
+    """Quem entrou por último no Bling (bling_id maior) reservou por último —
+    é ele o negativo, mesmo com número menor (a data da venda não entra)."""
     neg = negativos_fifo(
-        {"x": -1}, [_p("100001", {"x": 1}, data=D30), _p("100009", {"x": 1}, data=D29)]
+        {"x": -1},
+        [_p("100001", {"x": 1}, ordem=700009), _p("100009", {"x": 1}, ordem=700001)],
     )
     assert neg == {"100001": {"x"}}
 
@@ -159,9 +165,10 @@ def test_deficit_maior_que_os_pedidos_marca_todos_os_que_podem():
     assert set(neg) == {"100001", "100002"}
 
 
-def test_sem_data_conta_como_o_mais_novo():
+def test_sem_bling_id_conta_como_o_mais_novo():
+    """Sem a ordem de entrada não dá pra provar que reservou antes."""
     neg = negativos_fifo(
-        {"x": -1}, [_p("100009", {"x": 1}), _p("100001", {"x": 1}, data=None)]
+        {"x": -1}, [_p("100009", {"x": 1}), _p("100001", {"x": 1}, ordem=None)]
     )
     assert neg == {"100001": {"x"}}
 

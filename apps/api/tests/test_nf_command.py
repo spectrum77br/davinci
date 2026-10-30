@@ -246,6 +246,48 @@ async def test_enfileirar_pula_pedido_sem_estoque(
 
 
 @pytest.mark.asyncio
+async def test_enfileirar_bling_recusou_83955_nao_marca_sem_estoque(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """O Bling recusou a Aguardando Cancelamento: o pedido sem estoque fica fora
+    da fila, mas SEM a marca 'sem_estoque' no painel (o próximo Enfileirar/
+    sweep tenta de novo) — e o motivo diz que o Bling não aceitou."""
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    db.add(Product(user_id=admin.id, sku="x1", name="Produto X", stock=-3))
+    db.add(Product(user_id=admin.id, sku="dg053.ci", name="Capa", stock=5))
+    await db.commit()
+
+    class _Recusa(_FakeBlingSituacao):
+        async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
+            raise RuntimeError("400 situação inválida")
+
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(_Recusa())
+    )
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/enfileirar",
+        json={"numeros": ["830001", "830002"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pedidos_ok"] == 1
+    assert [p["numero"] for p in body["pulados"]] == ["830002"]
+    assert "não aceitou" in body["pulados"][0]["motivo"]
+
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert [n for c in cmds for n in c.numeros] == ["830001"]
+    fats = {f.pedido_bling: f for f in (await db.execute(select(NfFaturamento))).scalars().all()}
+    assert "830002" not in fats or fats["830002"].status_faturamento is None
+    situacao = (
+        await db.execute(select(BlingOrder.situacao).where(BlingOrder.numero == "830002"))
+    ).scalar()
+    assert situacao == "15"
+
+
+@pytest.mark.asyncio
 async def test_enfileirar_pedido_adiado_pela_prioridade_nao_vai_para_aguardando_cancelamento(
     db: AsyncSession, client: AsyncClient, admin: User,
     auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,

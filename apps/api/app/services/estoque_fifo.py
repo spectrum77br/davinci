@@ -11,8 +11,10 @@ SKU negativo. O mais antigo, conferido primeiro, ia embora, soltava a reserva
 invés de mudar os que estão negativos, ele muda os que já estão RESERVADOS, e
 os negativos deixa").
 
-Regra: déficit D da peça; anda do pedido MAIS NOVO pro mais antigo (data do
-pedido, desempate pelo número) marcando como negativo até cobrir D. Pedido
+Regra: déficit D da peça; anda do pedido MAIS NOVO pro mais antigo (ordem de
+entrada no Bling — o `bling_id` —, que é a ordem em que a reserva foi feita;
+a data da venda não serve: pedido vendido ontem que o marketplace só soltou
+hoje reservou depois) marcando como negativo até cobrir D. Pedido
 marcado solta TODAS as peças dele (vai inteiro pra 83955), então desconta de
 todas. Quem já está com a peça garantida (Em digitação, ou Em aberto já na
 fila da NF) nunca é o negativo. Pedido que NÃO segura peça no Bling (ex.: já
@@ -33,7 +35,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 
 # Folga de ponto flutuante (quantidade de componente vem de Numeric).
 _EPS = 1e-9
@@ -43,25 +44,28 @@ _EPS = 1e-9
 class PedidoPecas:
     """Um pedido na disputa pela peça.
 
-    `pecas`: peça → unidades que o pedido leva (kit já aberto nos
-    componentes). `reserva`: está numa situação que segura peça no Bling (o
-    saldo virtual já desconta). `garantido`: já está com a peça (etiqueta
-    subida / já na fila da NF) — nunca é escolhido como negativo.
+    `ordem`: ordem de entrada no Bling (o `bling_id` do pedido). `pecas`:
+    peça → unidades que o pedido leva (kit já aberto nos componentes).
+    `reserva`: está numa situação que segura peça no Bling (o saldo virtual
+    já desconta). `garantido`: já está com a peça (etiqueta subida / já na
+    fila da NF) — nunca é escolhido como negativo.
     """
 
     numero: str
-    data: datetime | None
+    ordem: int | None
     pecas: Mapping[str, float] = field(default_factory=dict)
     reserva: bool = True
     garantido: bool = False
 
 
 def _antiguidade(p: PedidoPecas) -> tuple:
-    """Chave FIFO: data do pedido, desempate pelo número (numérico quando dá).
-    Sem data = o mais novo (não dá pra provar que chegou antes)."""
-    ts = p.data.timestamp() if p.data is not None else float("inf")
+    """Chave FIFO: ordem de entrada no Bling (`bling_id`); sem ela, o número
+    do pedido como inteiro. Sem nenhum dos dois = o mais novo (não dá pra
+    provar que reservou antes)."""
+    inf = float("inf")
+    ordem = int(p.ordem) if p.ordem is not None else inf
     n = (p.numero or "").strip()
-    return (ts, 0, int(n), n) if n.isdigit() else (ts, 1, 0, n)
+    return (ordem, int(n), n) if n.isdigit() else (ordem, inf, n)
 
 
 def negativos_fifo(

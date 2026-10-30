@@ -19,7 +19,10 @@ composição está no cache; a peça fica com os pedidos mais ANTIGOS — FIFO, 
   - sem estoque  → só os pedidos MAIS NOVOS que estouram o saldo: "Sem
                    estoque — saldo negativo: <SKUs>" nas Observações +
                    Aguardando Cancelamento no Bling + status 'sem_estoque'
-                   (não emite NF/etiqueta de peça que não existe);
+                   só se o Bling ACEITOU a 83955 (senão fica sem marca e a
+                   próxima passada tenta de novo) — não emite NF/etiqueta de
+                   peça que não existe. Negativo que cai num pedido FORA da
+                   passada (ex.: ML/Amazon) não é movido: vira aviso Threema;
   - com estoque  → gera a planilha por faturador e cria os NfCommand de
                    `import_avulsa` (source='auto') — daí a cadeia normal segue
                    (import → emitir_nf_upseller → imprimir_etiqueta).
@@ -53,6 +56,7 @@ from sqlalchemy import func, or_, select, text
 from app.config import get_settings
 from app.db import session_scope
 from app.models import BlingOrder, NfCommand, NfFaturamento, NfImpressao, StoreInfo
+from app.redis_client import redis
 from app.services import nf_emissao_gerar, threema
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.prioridade_estoque import aplicar_prioridade_estoque
@@ -176,6 +180,11 @@ _CANDIDATE_WINDOW = timedelta(days=7)
 # vez quando a flag liga com backlog acumulado; o resto entra nos próximos.
 _MAX_POR_TICK = 30
 
+# Marca do aviso de negativo FORA do lote (pedido/SKU/dia) — a chave já leva o
+# dia; o TTL só limpa.
+_AVISO_FORA_DO_LOTE_PREFIXO = "nf:sem_estoque:fora_do_lote:"
+_AVISO_FORA_DO_LOTE_TTL_S = 36 * 3600
+
 # Restrição Shopee: produto Apple NÃO é enviado pro Rio de Janeiro. Pedido
 # que casa (loja Shopee + destino RJ + nome do item com uma das palavras)
 # não gera NF/etiqueta: vai pra Aguardando Cancelamento com "restrição" nas
@@ -245,7 +254,7 @@ async def run_auto_enfileirar_nf() -> dict:
             _em_fila,
             _marcar_aguardando_cancelamento,
             _marcar_faturamento,
-            _pedidos_sem_estoque,
+            _sem_estoque_fifo,
         )
 
         # 0) Backlog fundível: pendings do próprio sweep que o executor ainda
@@ -342,17 +351,22 @@ async def run_auto_enfileirar_nf() -> dict:
         #    passou no check ao entrar.
         #    Mesma ordem da restrição: recado nas Observações (GET→PUT)
         #    PRIMEIRO, situação (PATCH 83955) DEPOIS.
-        sem_estoque = await _pedidos_sem_estoque(session, numeros) if numeros else {}
+        conferencia = await _sem_estoque_fifo(session, numeros) if numeros else None
+        sem_estoque = conferencia.lote if conferencia else {}
         if sem_estoque:
             await escrever_observacoes(
                 session,
                 {n: observacao_sem_estoque(skus) for n, skus in sem_estoque.items()},
                 evento="nf_sem_estoque_observacao",
             )
-            await _marcar_aguardando_cancelamento(session, list(sem_estoque))
+            movidos = await _marcar_aguardando_cancelamento(session, list(sem_estoque))
             # Erro por pedido com os SKUs negativos — o painel mostra no
-            # tooltip do badge "Sem estoque" QUAL peça travou.
+            # tooltip do badge "Sem estoque" QUAL peça travou. Só pra quem o
+            # Bling ACEITOU (igual à trava do ML): quem falhou fica sem marca,
+            # fora da fila, e a próxima passada tenta de novo.
             for numero, skus in sem_estoque.items():
+                if numero not in movidos:
+                    continue
                 await _marcar_faturamento(
                     session,
                     [numero],
@@ -362,12 +376,28 @@ async def run_auto_enfileirar_nf() -> dict:
                         + ", ".join(skus)
                     ),
                 )
-            summary["sem_estoque"] = len(sem_estoque)
-            logger.info(
-                "nf_auto_enfileirar_sem_estoque",
-                pedidos={n: skus for n, skus in sem_estoque.items()},
-            )
-            await _notificar_sem_estoque(session, sem_estoque)
+            falharam = sorted(set(sem_estoque) - movidos)
+            if falharam:
+                summary["sem_estoque_pendente"] = len(falharam)
+                logger.warning("nf_auto_enfileirar_sem_estoque_pendente", pedidos=falharam)
+            summary["sem_estoque"] = len(movidos)
+            if movidos:
+                logger.info(
+                    "nf_auto_enfileirar_sem_estoque",
+                    pedidos={n: skus for n, skus in sem_estoque.items() if n in movidos},
+                )
+                await _notificar_sem_estoque(
+                    session, {n: s for n, s in sem_estoque.items() if n in movidos}
+                )
+        if conferencia and conferencia.fora_do_lote:
+            # O FIFO apontou um pedido que não está nesta passada (ex.: ML/Amazon
+            # que o sweep não confere): não move — avisa quem decide. Savepoint:
+            # erro aqui nunca deixa a transação do sweep abortada.
+            try:
+                async with session.begin_nested():
+                    await _avisar_negativo_fora_do_lote(session, conferencia.fora_do_lote)
+            except Exception:  # noqa: BLE001
+                logger.exception("nf_sem_estoque_fora_do_lote_aviso_falhou")
         restantes = [n for n in numeros if n not in sem_estoque]
         if not restantes and not fragmentado:
             return summary
@@ -477,48 +507,13 @@ async def _notificar_sem_estoque(
     if not gerais or not sem_estoque:
         return
     try:
-        # Rótulo = "plataforma conta equipe N" (ex. "shopee vortan equipe 2")
-        # — nome da loja + equipe de vendas a que ela pertence (pedido do
-        # usuário 17/08); equipe NULL fica de fora.
-        lojas = {
-            numero: " ".join(
-                p
-                for p in (
-                    plataforma,
-                    conta,
-                    f"equipe {equipe}" if equipe is not None else None,
-                )
-                if p
-            )
-            for numero, plataforma, conta, equipe in (
-                await session.execute(
-                    select(
-                        BlingOrder.numero,
-                        func.max(func.lower(StoreInfo.platform)),
-                        func.max(StoreInfo.account_name),
-                        func.max(StoreInfo.commercial_team),
-                    )
-                    .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
-                    .where(BlingOrder.numero.in_(list(sem_estoque)))
-                    .group_by(BlingOrder.numero)
-                )
-            ).all()
-        }
-
-        def _texto(pedidos: dict[str, list[str]]) -> str:
-            linhas = [
-                f"Pedido {numero}"
-                + (f" ({lojas[numero]})" if lojas.get(numero) else "")
-                + ": " + ", ".join(skus)
-                for numero, skus in sorted(pedidos.items())
-            ]
-            return (
-                "Estoque negativo — movido pra Aguardando Cancelamento:\n"
-                + "\n".join(linhas)
-            )
-
+        texto = await _linhas_pedidos(
+            session,
+            sem_estoque,
+            "Estoque negativo — movido pra Aguardando Cancelamento:",
+        )
         client = threema.ThreemaClient(contexto="estoque")
-        result = await client.send_to_all(_texto(sem_estoque), gerais)
+        result = await client.send_to_all(texto, gerais)
         logger.info(
             "nf_auto_enfileirar_threema",
             sent=result.get("sent"),
@@ -526,6 +521,106 @@ async def _notificar_sem_estoque(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("nf_sem_estoque_threema_falhou", erro=str(exc))
+
+
+async def _linhas_pedidos(session, pedidos: dict[str, list[str]], titulo: str) -> str:
+    """Texto do aviso: título + "Pedido N (loja): SKUs" por pedido."""
+    # Rótulo = "plataforma conta equipe N" (ex. "shopee vortan equipe 2")
+    # — nome da loja + equipe de vendas a que ela pertence (pedido do
+    # usuário 17/08); equipe NULL fica de fora.
+    lojas = {
+        numero: " ".join(
+            p
+            for p in (
+                plataforma,
+                conta,
+                f"equipe {equipe}" if equipe is not None else None,
+            )
+            if p
+        )
+        for numero, plataforma, conta, equipe in (
+            await session.execute(
+                select(
+                    BlingOrder.numero,
+                    func.max(func.lower(StoreInfo.platform)),
+                    func.max(StoreInfo.account_name),
+                    func.max(StoreInfo.commercial_team),
+                )
+                .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
+                .where(BlingOrder.numero.in_(list(pedidos)))
+                .group_by(BlingOrder.numero)
+            )
+        ).all()
+    }
+    linhas = [
+        f"Pedido {numero}"
+        + (f" ({lojas[numero]})" if lojas.get(numero) else "")
+        + ": " + ", ".join(skus)
+        for numero, skus in sorted(pedidos.items())
+    ]
+    return titulo + "\n" + "\n".join(linhas)
+
+
+async def _avisar_negativo_fora_do_lote(session, fora: dict[str, list[str]]) -> None:
+    """Aviso Threema (mesmo grupo do sem estoque) quando o FIFO aponta como
+    negativo um pedido que NÃO está nesta passada — ex.: ML/Amazon, que o
+    sweep não confere. Ele NÃO é movido: alguém decide (o warning
+    `nf_sem_estoque_fifo_negativo_fora_do_lote` fica no log de qualquer jeito).
+
+    Pedido que o próprio sweep ainda vai conferir (passou do teto do tick,
+    adiado pela prioridade) fica de fora — ele vai pra 83955 sozinho. Um aviso
+    por pedido/SKU/dia (marca no Redis, a passada é a cada 2 min); Redis fora
+    = não avisa (melhor que repetir a cada passada). BEST-EFFORT."""
+    gerais = threema.parse_recipients(
+        get_settings().nf_sem_estoque_threema_recipients
+    )
+    if not gerais or not fora:
+        return
+    vai_conferir = set(await _candidatos(session, limite=None))
+    pendentes = {n: s for n, s in fora.items() if n not in vai_conferir}
+    if not pendentes:
+        return
+    dia = _agora_brt().strftime("%Y%m%d")
+    novos: dict[str, list[str]] = {}
+    marcas: list[str] = []
+    try:
+        for numero, skus in sorted(pendentes.items()):
+            for sku in skus:
+                chave = f"{_AVISO_FORA_DO_LOTE_PREFIXO}{dia}:{numero}:{sku}"
+                if await redis.set(chave, "1", nx=True, ex=_AVISO_FORA_DO_LOTE_TTL_S):
+                    marcas.append(chave)
+                    novos.setdefault(numero, []).append(sku)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nf_sem_estoque_fora_do_lote_dedupe_falhou", erro=str(exc)[:200])
+        return
+    if not novos:
+        return
+    try:
+        texto = await _linhas_pedidos(
+            session,
+            novos,
+            "Estoque negativo — o pedido MAIS NOVO não está na fila automática."
+            " NÃO foi movido; confira antes de emitir:",
+        )
+        result = await threema.ThreemaClient(contexto="estoque").send_to_all(texto, gerais)
+        if not result.get("sent"):
+            raise RuntimeError(f"nenhum envio: {result.get('failed')}")
+        logger.info(
+            "nf_sem_estoque_fora_do_lote_threema",
+            pedidos=novos,
+            sent=result.get("sent"),
+            failed=result.get("failed"),
+        )
+    except threema.ThreemaConfigError as exc:
+        # Canal desligado/sem config: tentar de novo a cada passada não adianta.
+        logger.warning("nf_sem_estoque_fora_do_lote_threema_sem_config", erro=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nf_sem_estoque_fora_do_lote_threema_falhou", erro=str(exc)[:200])
+        # Desfaz a marca: a próxima passada tenta avisar de novo.
+        try:
+            await redis.delete(*marcas)
+        except Exception as exc_redis:  # noqa: BLE001
+            logger.warning("nf_sem_estoque_fora_do_lote_marca_ficou", erro=str(exc_redis)[:200])
 
 
 async def _pedidos_restricao(
@@ -867,7 +962,7 @@ async def _escrever_observacao_restricao(
     )
 
 
-async def _candidatos(session) -> list[str]:
+async def _candidatos(session, *, limite: int | None = _MAX_POR_TICK) -> list[str]:
     """Pedidos elegíveis pro sweep, já deduplicados contra fila e histórico.
 
     Elegível = "Em aberto" (6), loja ativa COM faturador atribuído, dentro
@@ -875,7 +970,8 @@ async def _candidatos(session) -> list[str]:
     — horário da tela Lojas). ML/Amazon ainda dependem da flag mestre
     `nf_auto_ml_amazon`. `item_index==0` porque bling_orders tem uma linha
     por item. Dedupe duplo: comando ativo na fila OU qualquer
-    status_faturamento já registrado (tentativa única).
+    status_faturamento já registrado (tentativa única). `limite=None` = todos
+    (sem o teto do tick).
     """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
     # Flags: sem nenhuma, o sweep segue só com Shopee/TikTok; `nf_auto_ml`
@@ -955,7 +1051,7 @@ async def _candidatos(session) -> list[str]:
     em_fila = await _em_fila(session, "import_avulsa")
     return [
         n for n in numeros if n not in ja_tratados and n not in em_fila
-    ][:_MAX_POR_TICK]
+    ][:limite]
 
 
 async def _filtra_estoques_do_sabado(

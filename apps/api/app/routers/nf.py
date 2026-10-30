@@ -12,7 +12,7 @@ import json
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, NamedTuple
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -30,8 +30,9 @@ from fastapi import (
 )
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import asc, func, or_, select, text, update
+from sqlalchemy import and_, asc, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import get_settings
 from app.db import get_session
@@ -1020,12 +1021,29 @@ _SITUACOES_QUE_RESERVAM = ("6", *_SITUACOES_ENVIADO_ETIQUETA_STR)
 # Pedido Em aberto que já entrou na fila da NF (passou no check antes): a peça
 # é dele — nunca é o "negativo" de um pedido conferido depois.
 _STATUS_PECA_GARANTIDA = ("processando", "ok")
+# Quem segura a peça no espelho: só pedido dos últimos 30 dias e nunca o
+# excluído. O espelho tem fantasma (21 de 2025, 6 de maio que nunca saíram) —
+# sem a janela ele entraria na fila FIFO e absorveria o déficit.
+_JANELA_SEGURAM = timedelta(days=30)
 
 
 def _peca(produto_id: int | None, sku: str | None) -> str:
     """Chave da peça no FIFO: o id do produto no Bling (o mesmo do componente
     do kit); sem id, o SKU."""
     return f"id:{int(produto_id)}" if produto_id else f"sku:{sku}"
+
+
+def _segura_peca(corte: datetime) -> tuple:
+    """Filtros do espelho pra quem segura peça no Bling: situação que reserva,
+    dentro da janela e sem linha 'excluido' do mesmo pedido."""
+    excluido = aliased(BlingOrder)
+    return (
+        BlingOrder.situacao.in_(_SITUACOES_QUE_RESERVAM),
+        BlingOrder.data >= corte,
+        ~exists().where(
+            excluido.numero == BlingOrder.numero, excluido.situacao == "excluido"
+        ),
+    )
 
 
 async def _composicao_kits(
@@ -1050,12 +1068,49 @@ async def _composicao_kits(
     return comp
 
 
-async def _saldos_fisicos(client, produto_ids: set[int]) -> dict[int, float]:
-    """Saldo FÍSICO no Bling (`GET /estoques/saldos`, até 50 ids por chamada).
-    BEST-EFFORT: qualquer falha devolve {} e o FIFO fica só no saldo virtual
-    (conservador: a reserva de quem o espelho não viu pesa nos conhecidos)."""
+async def _kits_sem_composicao(
+    session: AsyncSession, numeros: list[str], corte: datetime
+) -> set[int]:
+    """Kits (`formato='E'`) SEM composição no cache que estão no lote ou
+    seguram peça no espelho. Não dá pra saber qual componente eles prendem —
+    o saldo deles vai na mesma leitura do Bling pra ver se algum está curto."""
+    kits = select(Product.bling_product_id).where(
+        Product.formato == "E", Product.bling_product_id.is_not(None)
+    )
+    com_composicao = select(BlingKitComponent.kit_bling_product_id)
+    return {
+        int(k)
+        for k in (
+            await session.execute(
+                select(BlingOrder.item_produto_id)
+                .where(BlingOrder.item_produto_id.in_(kits))
+                .where(BlingOrder.item_produto_id.not_in(com_composicao))
+                .where(or_(BlingOrder.numero.in_(numeros), and_(*_segura_peca(corte))))
+                .distinct()
+            )
+        ).scalars().all()
+        if k
+    }
+
+
+def _num(valor) -> float | None:
+    try:
+        return None if valor is None else float(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _saldos_bling(
+    client, produto_ids: set[int]
+) -> dict[int, tuple[float | None, float | None]]:
+    """produto → (saldo virtual, saldo físico) numa leitura só do Bling:
+    `GET /estoques/saldos` em lotes de 50 ids, os dois da MESMA resposta (foto
+    consistente; 1 chamada a cada 50 produtos, em vez de 1 `get_product` por
+    SKU + 1 a mais pro físico). Qualquer lote falhando devolve {}: nada
+    confirmado, e quem chama cai no check local como antes (sem evidência de
+    negativo não bloqueia)."""
     ids = sorted(produto_ids)
-    out: dict[int, float] = {}
+    out: dict[int, tuple[float | None, float | None]] = {}
     try:
         for i in range(0, len(ids), 50):
             r = await client._request(  # noqa: SLF001
@@ -1069,21 +1124,38 @@ async def _saldos_fisicos(client, produto_ids: set[int]) -> dict[int, float]:
                     pid = int((row.get("produto") or {}).get("id") or 0)
                 except (TypeError, ValueError):
                     continue
-                fisico = row.get("saldoFisicoTotal")
-                if pid and fisico is not None:
-                    out[pid] = float(fisico)
+                if pid:
+                    out[pid] = (
+                        _num(row.get("saldoVirtualTotal")),
+                        _num(row.get("saldoFisicoTotal")),
+                    )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("nf_sem_estoque_fisico_falhou", produtos=len(ids), erro=str(exc)[:200])
+        logger.warning("nf_sem_estoque_bling_falhou", produtos=len(ids), erro=str(exc)[:200])
         return {}
     return out
+
+
+class _SemEstoque(NamedTuple):
+    # numero → SKUs: pedidos DO LOTE que estouram o saldo (vão pra 83955).
+    lote: dict[str, list[str]]
+    # numero → SKUs: o FIFO aponta, mas o pedido NÃO está no lote (ex.: ML /
+    # Amazon que o sweep não confere) — nunca é movido daqui, só avisado.
+    fora_do_lote: dict[str, list[str]]
 
 
 async def _pedidos_sem_estoque(
     session: AsyncSession, numeros: list[str]
 ) -> dict[str, list[str]]:
-    """Pedidos que estouram o saldo VIRTUAL — conferido AO VIVO, por FIFO.
+    """Pedidos do lote que estouram o saldo VIRTUAL — conferido AO VIVO, por
+    FIFO. Devolve numero → SKUs do pedido. Ver `_sem_estoque_fifo` (o negativo
+    fora do lote só vai pro log daqui)."""
+    return (await _sem_estoque_fifo(session, numeros)).lote
 
-    A fonte é o Bling (`get_product` → `estoque.saldoVirtualTotal`), nunca o
+
+async def _sem_estoque_fifo(session: AsyncSession, numeros: list[str]) -> _SemEstoque:
+    """Quem estoura o saldo VIRTUAL — conferido AO VIVO, por FIFO.
+
+    A fonte é o Bling (`GET /estoques/saldos` → `saldoVirtualTotal`), nunca o
     `products.stock` local: o sync clampa negativo pra 0 no cache (pro push),
     então o local é estruturalmente cego pra saldo negativo. O virtual já
     desconta a reserva dos pedidos em aberto: 0 ainda é atendível, negativo é
@@ -1091,26 +1163,26 @@ async def _pedidos_sem_estoque(
     integração/id/erro na consulta cai no check local, best-effort).
 
     FIFO (Eduardo 30/10): negativo NÃO derruba todo pedido com o SKU — a peça
-    fica com os mais antigos (já reservada pra eles) e só os MAIS NOVOS que
-    estouram o déficit são devolvidos (`estoque_fifo.negativos_fifo`). Quem
+    fica com os mais antigos (ordem de entrada no Bling) e só os MAIS NOVOS que
+    estouram o déficit são o negativo (`estoque_fifo.negativos_fifo`). Quem
     segura a peça sai do espelho local (`bling_orders` nas situações que
-    reservam, de qualquer loja). Kit com composição no cache e saldo negativo
-    é conferido pelos componentes — é neles que o Bling reserva, e kits
-    diferentes disputam o mesmo componente. Com peça curta, 1 GET a mais
-    (`/estoques/saldos`) traz o físico: a reserva de pedido que ainda não
-    entrou no espelho fica com ele (é o mais novo), não com os conhecidos.
-    Devolve numero → SKUs do pedido.
+    reservam, 30 dias, de qualquer loja). Kit com composição no cache e saldo
+    negativo é conferido pelos componentes — é neles que o Bling reserva, e
+    kits diferentes disputam o mesmo componente. UMA leitura no Bling
+    (`_saldos_bling`) traz o virtual e o físico de tudo: com peça curta, o
+    físico deixa a reserva de pedido que ainda não entrou no espelho com ele
+    (é o mais novo), não com os conhecidos.
     """
     if not numeros:
-        return {}
+        return _SemEstoque({}, {})
     colunas = (
         BlingOrder.numero,
+        BlingOrder.bling_id,
         BlingOrder.item_index,
         BlingOrder.item_codigo,
         BlingOrder.item_produto_id,
         BlingOrder.item_quantidade,
         BlingOrder.situacao,
-        BlingOrder.data,
     )
     itens = (
         await session.execute(
@@ -1122,29 +1194,23 @@ async def _pedidos_sem_estoque(
     ).all()
     skus = {r.item_codigo for r in itens if r.item_codigo}
     if not skus:
-        return {}
+        return _SemEstoque({}, {})
     pid_por_sku: dict[str, int] = {}
     for r in itens:
         if r.item_codigo and r.item_produto_id:
             pid_por_sku.setdefault(r.item_codigo, int(r.item_produto_id))
 
     client = await nf_emissao_gerar._bling_client_opt(session)
-    vivo: dict[int, float | None] = {}
+    corte = datetime.now(UTC) - _JANELA_SEGURAM
+    # Uma leitura só no Bling: os produtos do lote + os componentes dos kits
+    # do lote (cache) + os kits sem composição que seguram peça.
+    pids_lote = set(pid_por_sku.values())
+    kits_lote = await _composicao_kits(session, pids_lote)
+    sem_composicao = await _kits_sem_composicao(session, numeros, corte)
+    bling: dict[int, tuple[float | None, float | None]] = {}
 
-    async def _saldo_vivo(pid: int, sku: str | None) -> float | None:
-        """Saldo virtual do produto no Bling (1 GET por produto na passada);
-        None = não deu pra saber."""
-        if pid not in vivo:
-            try:
-                data = await client.get_product(pid)
-                saldo = (data.get("estoque") or {}).get("saldoVirtualTotal")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "nf_sem_estoque_bling_falhou", sku=sku, produto_id=pid, erro=str(exc)
-                )
-                saldo = None
-            vivo[pid] = None if saldo is None else float(saldo)
-        return vivo[pid]
+    def _virtual(pid: int | None) -> float | None:
+        return bling.get(pid, (None, None))[0] if pid is not None else None
 
     # peça → saldo virtual. Peça fora do mapa é desconhecida e não bloqueia.
     saldos: dict[str, float] = {}
@@ -1153,9 +1219,11 @@ async def _pedidos_sem_estoque(
         logger.warning("nf_sem_estoque_sem_bling_fallback_local", skus=len(skus))
         fallback_local = set(skus)
     else:
+        componentes = {c for comps in kits_lote.values() for c, _q in comps}
+        bling = await _saldos_bling(client, pids_lote | componentes | sem_composicao)
         for sku in skus:
             pid = pid_por_sku.get(sku)
-            saldo = await _saldo_vivo(pid, sku) if pid is not None else None
+            saldo = _virtual(pid)
             if saldo is None:
                 fallback_local.add(sku)
             else:
@@ -1171,29 +1239,23 @@ async def _pedidos_sem_estoque(
             saldos[_peca(pid_por_sku.get(sku), sku)] = float(stock)
 
     # Kit negativo com composição no cache → confere pelos componentes. Se
-    # algum componente não responder (ou nenhum vier negativo), fica o saldo
-    # do próprio kit, como antes.
+    # algum componente não veio (ou nenhum veio negativo), fica o saldo do
+    # próprio kit, como antes.
     expandir: dict[int, list[tuple[int, float]]] = {}
-    kits_lote: dict[int, list[tuple[int, float]]] = {}
-    if client is not None:
-        kits_neg = {
-            pid_por_sku[s]
-            for s in skus
-            if s in pid_por_sku and saldos.get(_peca(pid_por_sku[s], s), 0.0) < 0
-        }
-        kits_lote = await _composicao_kits(session, kits_neg)
-        for kit, comps in kits_lote.items():
-            saldos_c = [await _saldo_vivo(c, None) for c, _q in comps]
-            if any(s is None for s in saldos_c) or not any(s < 0 for s in saldos_c):
-                continue
-            expandir[kit] = comps
-            saldos.pop(_peca(kit, None), None)
-            for (c, _q), s in zip(comps, saldos_c, strict=True):
-                saldos[_peca(c, None)] = s
+    for kit, comps in kits_lote.items():
+        if saldos.get(_peca(kit, None), 0.0) >= 0:
+            continue
+        saldos_c = [_virtual(c) for c, _q in comps]
+        if any(s is None for s in saldos_c) or not any(s < 0 for s in saldos_c):
+            continue
+        expandir[kit] = comps
+        saldos.pop(_peca(kit, None), None)
+        for (c, _q), s in zip(comps, saldos_c, strict=True):
+            saldos[_peca(c, None)] = s
 
     curtas = {p for p, v in saldos.items() if v < 0}
     if not curtas:
-        return {}
+        return _SemEstoque({}, {})
     pids_curtos = {int(p[3:]) for p in curtas if p.startswith("id:")}
     skus_curtos = {p[4:] for p in curtas if p.startswith("sku:")}
     if pids_curtos:
@@ -1231,7 +1293,7 @@ async def _pedidos_sem_estoque(
     seguram = (
         await session.execute(
             select(*colunas)
-            .where(BlingOrder.situacao.in_(_SITUACOES_QUE_RESERVAM))
+            .where(*_segura_peca(corte))
             .where(BlingOrder.item_codigo.is_not(None))
             .where(or_(*filtros))
             .distinct()
@@ -1239,14 +1301,18 @@ async def _pedidos_sem_estoque(
     ).all()
     lote = set(numeros)
     vistos: set[tuple] = set()
+    linhas: dict[str, list] = {}
     pecas: dict[str, dict[str, float]] = {}
-    situacao_data: dict[str, tuple[str, datetime | None]] = {}
+    situacao_ordem: dict[str, tuple[str, int | None]] = {}
     for r in [*itens, *seguram]:
         chave = (r.numero, r.item_index, r.item_codigo)
         if chave in vistos:
             continue
         vistos.add(chave)
-        situacao_data.setdefault(r.numero, (str(r.situacao or ""), r.data))
+        situacao_ordem.setdefault(
+            r.numero, (str(r.situacao or ""), int(r.bling_id) if r.bling_id else None)
+        )
+        linhas.setdefault(r.numero, []).append(r)
         soma = pecas.setdefault(r.numero, {})
         for p, q in _pecas_do_item(r).items():
             if p in curtas:
@@ -1261,39 +1327,39 @@ async def _pedidos_sem_estoque(
         ).all()
         if st in _STATUS_PECA_GARANTIDA
     }
-    # Físico das peças simples curtas (kit inteiro fica só no virtual: o
-    # físico do kit não enxerga a reserva dos outros SKUs que levam o mesmo
-    # componente). É ele que separa a reserva dos pedidos que o espelho já
-    # conhece da de quem ainda não entrou (ingest atrasado de 30/10).
-    fisicos: dict[str, float] = {}
-    if client is not None and pids_curtos:
-        kits_inteiros = set(kits_lote) - set(expandir)
-        kits_inteiros |= {
-            int(k)
-            for k in (
-                await session.execute(
-                    select(Product.bling_product_id)
-                    .where(Product.bling_product_id.in_(pids_curtos))
-                    .where(Product.formato == "E")
-                )
-            ).scalars().all()
-        }
-        fisicos = {
-            _peca(pid, None): f
-            for pid, f in (
-                await _saldos_fisicos(client, pids_curtos - kits_inteiros)
-            ).items()
-        }
+    # Físico das peças simples curtas, da MESMA leitura (kit inteiro fica só
+    # no virtual: o físico do kit não enxerga a reserva dos outros SKUs que
+    # levam o mesmo componente). É ele que separa a reserva dos pedidos que o
+    # espelho já conhece da de quem ainda não entrou (ingest atrasado de 30/10).
+    kits_inteiros = (set(kits_lote) - set(expandir)) | sem_composicao
+    fisicos = {
+        _peca(pid, None): bling[pid][1]
+        for pid in pids_curtos - kits_inteiros
+        if pid in bling and bling[pid][1] is not None
+    }
+    # Kit SEM composição no cache com saldo negativo (ou sem leitura) prende
+    # componente que o espelho não enxerga como dele: a reserva dele cairia
+    # nos "que ainda não entraram" e o déficit encolheria. Sem saber qual
+    # peça ele prende, nada de físico nesta passada (D = −virtual: o lado
+    # seguro contra vender sem peça).
+    suspeitos = sorted(
+        k for k in sem_composicao if (v := _virtual(k)) is None or v < 0
+    )
+    if fisicos and suspeitos:
+        logger.warning(
+            "nf_sem_estoque_kit_sem_composicao", kits=suspeitos, pecas=sorted(fisicos)
+        )
+        fisicos = {}
     negativos = negativos_fifo(
         saldos,
         [
             PedidoPecas(
                 numero=n,
-                data=situacao_data[n][1],
+                ordem=situacao_ordem[n][1],
                 pecas=p,
-                reserva=situacao_data[n][0] in _SITUACOES_QUE_RESERVAM,
+                reserva=situacao_ordem[n][0] in _SITUACOES_QUE_RESERVAM,
                 garantido=(
-                    situacao_data[n][0] in _SITUACOES_ENVIADO_ETIQUETA_STR
+                    situacao_ordem[n][0] in _SITUACOES_ENVIADO_ETIQUETA_STR
                     or n in na_fila
                 ),
             )
@@ -1302,32 +1368,44 @@ async def _pedidos_sem_estoque(
         ],
         fisicos,
     )
-    ordem = {n: i for i, n in reversed(list(enumerate(numeros)))}
-    faltando: dict[str, list[str]] = {}
-    for r in sorted(itens, key=lambda r: (ordem[r.numero], r.item_index or 0)):
-        neg = negativos.get(r.numero)
-        if neg and neg & set(_pecas_do_item(r)) and r.item_codigo not in faltando.get(
-            r.numero, []
-        ):
-            faltando.setdefault(r.numero, []).append(r.item_codigo)
+
+    def _skus_negativos(numero: str) -> list[str]:
+        out: list[str] = []
+        for r in sorted(linhas[numero], key=lambda r: r.item_index or 0):
+            if negativos[numero] & set(_pecas_do_item(r)) and r.item_codigo not in out:
+                out.append(r.item_codigo)
+        return out
+
+    faltando = {
+        n: s for n in dict.fromkeys(numeros) if n in negativos and (s := _skus_negativos(n))
+    }
+    fora = {n: s for n in sorted(set(negativos) - lote) if (s := _skus_negativos(n))}
     poupados = sorted(n for n in lote if pecas.get(n) and n not in faltando)
     if poupados:
         # Tinham peça com saldo negativo, mas são os mais antigos: a peça é deles.
         logger.info("nf_sem_estoque_fifo_poupados", pedidos=poupados)
-    return faltando
+    if fora:
+        # O negativo é um pedido que ninguém conferiu agora (ex.: ML/Amazon fora
+        # do sweep): não move sozinho — quem chama decide se avisa.
+        logger.warning("nf_sem_estoque_fifo_negativo_fora_do_lote", pedidos=fora)
+    return _SemEstoque(faltando, fora)
 
 
 async def _marcar_aguardando_cancelamento(
     session: AsyncSession, numeros: list[str]
-) -> None:
+) -> set[str]:
     """Move os pedidos sem estoque pra "Aguardando Cancelamento" no Bling.
 
     BEST-EFFORT igual ao `_marcar_enviado_etiqueta`: falha no Bling só loga (o
     pedido fica de fora da fila do mesmo jeito, e a situação pode ser corrigida
     à mão). Espelha na `bling_orders` pra a tela refletir sem esperar o sync.
+
+    Devolve quem ESTÁ em Aguardando Cancelamento agora (o Bling aceitou, ou já
+    estava): só esses levam a marca no painel — quem falhou fica sem marca
+    pra próxima passada tentar de novo (mesmo desenho do `_travar_ml`).
     """
     if not numeros:
-        return
+        return set()
     rows = (
         await session.execute(
             select(BlingOrder.numero, BlingOrder.bling_id, BlingOrder.situacao)
@@ -1341,12 +1419,13 @@ async def _marcar_aguardando_cancelamento(
         for r in rows
         if str(r.situacao or "") != str(_SITUACAO_AGUARDANDO_CANCELAMENTO)
     }
+    movidos = {r.numero for r in rows} - set(pendentes)
     if not pendentes:
-        return
+        return movidos
     client = await nf_emissao_gerar._bling_client_opt(session)
     if client is None:
         logger.warning("nf_aguardando_cancelamento_sem_bling", numeros=list(pendentes))
-        return
+        return movidos
     for numero, bling_id in pendentes.items():
         try:
             await client.update_order_situacao(
@@ -1362,7 +1441,9 @@ async def _marcar_aguardando_cancelamento(
             .where(BlingOrder.numero == numero)
             .values(situacao=str(_SITUACAO_AGUARDANDO_CANCELAMENTO))
         )
+        movidos.add(numero)
         logger.info("nf_aguardando_cancelamento", numero=numero)
+    return movidos
 
 
 async def _enfileirar_emissao_upseller(
@@ -1655,13 +1736,7 @@ async def enfileirar_importacao(
     ]
     candidatos = [n for n in body.numeros if n not in adiados]
     sem_estoque = await _pedidos_sem_estoque(session, candidatos) if candidatos else {}
-    pulados_estoque = [
-        {
-            "numero": numero,
-            "motivo": f"sem estoque ({', '.join(skus)}) — Aguardando Cancelamento",
-        }
-        for numero, skus in sem_estoque.items()
-    ]
+    movidos: set[str] = set()
     if sem_estoque:
         # Recado nas Observações ANTES da situação (o PUT leva o body inteiro).
         from app.services.nf_auto_enfileirar import escrever_observacoes, observacao_sem_estoque
@@ -1671,10 +1746,13 @@ async def enfileirar_importacao(
             {n: observacao_sem_estoque(skus) for n, skus in sem_estoque.items()},
             evento="nf_sem_estoque_observacao",
         )
-        await _marcar_aguardando_cancelamento(session, list(sem_estoque))
+        movidos = await _marcar_aguardando_cancelamento(session, list(sem_estoque))
         # Erro por pedido com os SKUs negativos — o painel mostra no tooltip
-        # do badge "Sem estoque" QUAL peça travou (sem ir caçar no log).
+        # do badge "Sem estoque" QUAL peça travou (sem ir caçar no log). Só
+        # pra quem o Bling ACEITOU: quem falhou fica sem marca e fora da fila.
         for numero, skus in sem_estoque.items():
+            if numero not in movidos:
+                continue
             await _marcar_faturamento(
                 session,
                 [numero],
@@ -1682,6 +1760,18 @@ async def enfileirar_importacao(
                 erro=f"Aguardando Cancelamento — saldo negativo: {', '.join(skus)}",
             )
         await session.commit()
+    pulados_estoque = [
+        {
+            "numero": numero,
+            "motivo": (
+                f"sem estoque ({', '.join(skus)}) — Aguardando Cancelamento"
+                if numero in movidos
+                else f"sem estoque ({', '.join(skus)}) — o Bling não aceitou Aguardando"
+                " Cancelamento; tente de novo em alguns minutos"
+            ),
+        }
+        for numero, skus in sem_estoque.items()
+    ]
     numeros = [n for n in candidatos if n not in sem_estoque]
     res = (
         await nf_emissao_gerar.gerar_por_faturador(session, numeros)

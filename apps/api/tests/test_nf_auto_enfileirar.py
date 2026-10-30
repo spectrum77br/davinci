@@ -57,28 +57,58 @@ def _BRT(ano: int, mes: int, dia: int, hora: int) -> datetime:
     return datetime(ano, mes, dia, hora, tzinfo=ZoneInfo("America/Sao_Paulo"))
 
 
+class _RespostaSaldos:
+    def __init__(self, data: list[dict]) -> None:
+        self._data = data
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return {"data": self._data}
+
+
 class _FakeBlingSituacao:
     """Captura os PATCH de situação que o motor manda pro Bling e serve o
-    saldo VIVO (`get_product`) do check de estoque ao vivo. Pra restrição,
-    serve o pedido (`get_order`) e captura o PUT das Observações."""
+    saldo VIVO do check de estoque (`GET /estoques/saldos`: virtual e físico
+    na mesma resposta). Pra restrição, serve o pedido (`get_order`) e captura
+    o PUT das Observações."""
 
     def __init__(
         self,
         saldos: dict[int, float] | None = None,
         orders: dict[int, dict] | None = None,
+        fisicos: dict[int, float] | None = None,
     ) -> None:
         self.chamadas: list[tuple[int, int]] = []
         self.saldos = saldos or {}
+        self.fisicos = fisicos or {}
         self.orders = orders or {}
         self.puts: list[tuple[int, dict]] = []
         self.eventos: list[tuple[str, int]] = []
+        self.pedidos_saldos: list[list[str]] = []
 
     async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
         self.chamadas.append((bling_order_id, situacao_id))
         self.eventos.append(("situacao", bling_order_id))
 
     async def get_product(self, bling_product_id: int) -> dict:
-        return {"estoque": {"saldoVirtualTotal": self.saldos[bling_product_id]}}
+        raise AssertionError("o check de estoque lê tudo do /estoques/saldos")
+
+    async def _request(self, method: str, path: str, params=None):
+        assert (method, path) == ("GET", "/estoques/saldos")
+        ids = [v for k, v in params or [] if k == "idsProdutos[]"]
+        assert len(ids) <= 50
+        self.pedidos_saldos.append(ids)
+        linhas = []
+        for i in map(int, ids):
+            if i not in self.saldos and i not in self.fisicos:
+                continue
+            linha: dict = {"produto": {"id": i}, "saldoVirtualTotal": self.saldos.get(i)}
+            if i in self.fisicos:
+                linha["saldoFisicoTotal"] = self.fisicos[i]
+            linhas.append(linha)
+        return _RespostaSaldos(linhas)
 
     async def get_order(self, bling_order_id: int) -> dict:
         return self.orders[bling_order_id]
@@ -423,6 +453,11 @@ async def test_sweep_flag_so_ml_entra_ml_e_nao_amazon(
     db.add(Product(user_id=admin.id, sku="a5", name="A5", stock=2))
     db.add(Product(user_id=admin.id, sku="a6", name="A6", stock=-1))  # sem estoque
     await db.commit()
+    # o Bling aceita a 83955 (sem ele o pedido ficaria sem marca, pra tentar de novo)
+    fake = _FakeBlingSituacao(orders={700001: {"id": 700001, "observacoes": ""}})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
 
     summary = await run_auto_enfileirar_nf()
     assert summary["candidatos"] == 2  # só os dois do ML
@@ -780,9 +815,10 @@ async def test_sem_estoque_fifo_considera_quem_segura_fora_do_lote(
 ):
     """A fila FIFO é de TODO pedido que segura a peça no Bling (qualquer
     loja/plataforma), não só dos conferidos agora: o pedido mais novo Em
-    aberto fica com o déficit; Em digitação/já enfileirado tem a peça
-    garantida; Aguardando Cancelamento não reserva."""
-    from app.routers.nf import _pedidos_sem_estoque
+    aberto fica com o déficit (fora do lote: só apontado, nunca movido); Em
+    digitação/já enfileirado tem a peça garantida; Aguardando Cancelamento
+    não reserva."""
+    from app.routers.nf import _pedidos_sem_estoque, _sem_estoque_fifo
 
     agora = datetime.now(UTC)
     await _seed_pedido(
@@ -803,38 +839,9 @@ async def test_sem_estoque_fifo_considera_quem_segura_fora_do_lote(
 
     faltando = await _pedidos_sem_estoque(db, ["830001"])
     assert faltando == ({"830001": ["b1"]} if antigo_vai else {})
-
-
-class _RespostaSaldos:
-    def __init__(self, data: list[dict]) -> None:
-        self._data = data
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return {"data": self._data}
-
-
-class _FakeBlingComFisico(_FakeBlingSituacao):
-    """Serve também o `GET /estoques/saldos` (saldo físico por produto)."""
-
-    def __init__(self, *, fisicos: dict[int, float], **kw) -> None:
-        super().__init__(**kw)
-        self.fisicos = fisicos
-        self.pedidos_saldos: list[list[str]] = []
-
-    async def _request(self, method: str, path: str, params=None):
-        assert (method, path) == ("GET", "/estoques/saldos")
-        ids = [v for k, v in params or [] if k == "idsProdutos[]"]
-        self.pedidos_saldos.append(ids)
-        return _RespostaSaldos(
-            [
-                {"produto": {"id": int(i)}, "saldoFisicoTotal": self.fisicos[int(i)]}
-                for i in ids
-                if int(i) in self.fisicos
-            ]
-        )
+    fora = (await _sem_estoque_fifo(db, ["830001"])).fora_do_lote
+    assert fora == ({} if antigo_vai else {"830009": ["b1"]})
+    assert fake.chamadas == []  # conferir nunca move ninguém
 
 
 @pytest.mark.asyncio
@@ -863,7 +870,7 @@ async def test_sweep_sem_estoque_fifo_ingest_atrasado_antigo_passa(
             )
         )
     await db.commit()
-    fake = _FakeBlingComFisico(
+    fake = _FakeBlingSituacao(
         saldos={902: -6.0, 501: -6.0, 503: 197.0}, fisicos={501: 4.0}
     )
     monkeypatch.setattr(
@@ -874,8 +881,8 @@ async def test_sweep_sem_estoque_fifo_ingest_atrasado_antigo_passa(
     assert summary["sem_estoque"] == 0
     assert summary["enfileirados"] == 2
     assert fake.chamadas == []
-    # só a peça simples curta vai no GET do físico (1 chamada)
-    assert fake.pedidos_saldos == [["501"]]
+    # UMA leitura: o kit do lote e os componentes dele, virtual e físico juntos
+    assert fake.pedidos_saldos == [["501", "503", "902"]]
 
 
 @pytest.mark.asyncio
@@ -894,7 +901,7 @@ async def test_sem_estoque_fifo_bling_falhou_nao_marca(
     await db.commit()
 
     class _Falha(_FakeBlingSituacao):
-        async def get_product(self, bling_product_id: int) -> dict:
+        async def _request(self, method: str, path: str, params=None):
             raise RuntimeError("429")
 
     monkeypatch.setattr(
@@ -976,6 +983,265 @@ async def test_sweep_sem_estoque_sem_recipients_nao_avisa(
     summary = await run_auto_enfileirar_nf()
     assert summary["sem_estoque"] == 1
     assert _FakeThreema.enviados == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_fifo_ordem_de_entrada_no_bling_nao_a_data(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """A antiguidade é a ordem em que o pedido entrou no Bling (bling_id) — é
+    nela que a reserva foi feita. O 830001 foi vendido antes (data mais
+    velha), mas entrou no Bling depois: ele é o mais novo e vai."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    agora = datetime.now(UTC)
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="b1", bling_id=700009,
+        item_produto_id=555, data=agora - timedelta(days=3),
+    )
+    await _seed_pedido(
+        db, numero="830002", loja="930001", sku="b1", bling_id=700002,
+        item_produto_id=555, data=agora - timedelta(days=1),
+    )
+    await db.commit()
+    fake = _FakeBlingSituacao(
+        saldos={555: -1.0}, orders={700009: {"id": 700009, "observacoes": ""}}
+    )
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["sem_estoque"] == 1
+    assert fake.chamadas == [(700009, 83955)]
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert [n for c in cmds for n in c.numeros] == ["830002"]
+
+
+@pytest.mark.parametrize("fantasma", ["antigo", "excluido"])
+@pytest.mark.asyncio
+async def test_sem_estoque_fifo_fantasma_nao_absorve_o_deficit(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch, fantasma: str
+):
+    """Pedido Em aberto no espelho há mais de 30 dias (fantasma: o ingest
+    perdeu a saída dele) ou com linha 'excluido' não segura peça. Sem o
+    filtro ele seria o "mais novo" e absorveria o déficit, deixando passar o
+    pedido do lote sem peça."""
+    from app.routers.nf import _sem_estoque_fifo
+
+    agora = datetime.now(UTC)
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="b1", bling_id=700001,
+        item_produto_id=555,
+    )
+    await _seed_pedido(
+        db, numero="830009", loja="930009", sku="b1", bling_id=700009,
+        item_produto_id=555,
+        data=agora - timedelta(days=45 if fantasma == "antigo" else 1),
+    )
+    if fantasma == "excluido":
+        db.add(
+            BlingOrder(
+                bling_id=700009, numero="830009", loja="930009", situacao="excluido",
+                item_index=1, item_codigo="c9", item_quantidade=1,
+                data=agora - timedelta(days=1),
+            )
+        )
+    await db.commit()
+    fake = _FakeBlingSituacao(saldos={555: -1.0})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    res = await _sem_estoque_fifo(db, ["830001"])
+    assert res.lote == {"830001": ["b1"]}
+    assert res.fora_do_lote == {}
+
+
+@pytest.mark.parametrize(("saldo_kit", "vao"), [(-2.0, {"830001", "830002"}), (3.0, set())])
+@pytest.mark.asyncio
+async def test_sem_estoque_fifo_kit_sem_composicao_desliga_o_fisico(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch,
+    saldo_kit: float, vao: set[str],
+):
+    """Peça 501 com virtual −2 e físico 4: os 2 pedidos que o espelho conhece
+    cabem no físico. Mas um kit SEM composição no cache (a sync é semanal)
+    segura peça e está com saldo negativo — pode estar prendendo a 501 sem o
+    espelho ver. Sem saber qual peça, nada de físico: D = −virtual = 2 e os
+    dois vão (o lado seguro). Kit sem composição com saldo positivo não
+    prende peça curta: o físico vale e ninguém vai."""
+    from app.routers.nf import _pedidos_sem_estoque
+
+    for numero, bling_id in (("830001", 700001), ("830002", 700002)):
+        await _seed_pedido(
+            db, numero=numero, loja="930001", sku="b026.18", bling_id=bling_id,
+            item_produto_id=501,
+        )
+    await _seed_pedido(
+        db, numero="830000", loja="930009", sku="kitnovo", bling_id=700000,
+        item_produto_id=950, situacao="21",
+    )
+    db.add(
+        Product(
+            user_id=admin.id, sku="kitnovo", name="Kit novo", stock=0,
+            formato="E", bling_product_id=950,
+        )
+    )
+    await db.commit()
+    fake = _FakeBlingSituacao(saldos={501: -2.0, 950: saldo_kit}, fisicos={501: 4.0})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    assert set(await _pedidos_sem_estoque(db, ["830001", "830002"])) == vao
+    # o kit vai na MESMA leitura da peça
+    assert fake.pedidos_saldos == [["501", "950"]]
+
+
+@pytest.mark.asyncio
+async def test_saldos_bling_em_lotes_de_50():
+    """Até 50 ids por chamada; virtual e físico da mesma linha."""
+    from app.routers.nf import _saldos_bling
+
+    fake = _FakeBlingSituacao(saldos={i: float(i) for i in range(1, 121)}, fisicos={7: 3.0})
+    out = await _saldos_bling(fake, set(range(1, 121)))
+    assert [len(x) for x in fake.pedidos_saldos] == [50, 50, 20]
+    assert out[7] == (7.0, 3.0)
+    assert out[100] == (100.0, None)
+
+
+@pytest.mark.asyncio
+async def test_sweep_sem_estoque_bling_recusou_83955_fica_sem_marca(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """O Bling recusou a 83955: o pedido NÃO leva 'sem_estoque' (nem o motivo)
+    no painel — fica sem marca e fora da fila, e a próxima passada tenta de
+    novo (igual à trava do ML). Sem aviso de "movido"."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="b1", bling_id=700001,
+        item_produto_id=555,
+    )
+    await db.commit()
+
+    class _Recusa(_FakeBlingSituacao):
+        async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
+            raise RuntimeError("400 situação inválida")
+
+    recusa = _Recusa(saldos={555: -1.0}, orders={700001: {"id": 700001, "observacoes": ""}})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(recusa)
+    )
+    monkeypatch.setattr(
+        get_settings(), "nf_sem_estoque_threema_recipients", "7KMPCBS5", raising=False
+    )
+    _FakeThreema.enviados = []
+    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["sem_estoque"] == 0
+    assert summary["sem_estoque_pendente"] == 1
+    assert summary["enfileirados"] == 0
+    assert _FakeThreema.enviados == []
+    db.expire_all()
+    assert (await db.execute(select(NfCommand))).scalars().all() == []
+    assert (
+        await db.execute(
+            select(NfFaturamento.status_faturamento).where(
+                NfFaturamento.pedido_bling == "830001"
+            )
+        )
+    ).scalar_one_or_none() is None
+    situacao = (
+        await db.execute(select(BlingOrder.situacao).where(BlingOrder.numero == "830001"))
+    ).scalar()
+    assert situacao == "6"
+
+    # próxima passada: o Bling aceita e aí sim a marca entra
+    ok = _FakeBlingSituacao(saldos={555: -1.0}, orders={700001: {"id": 700001, "observacoes": ""}})
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(ok))
+    summary2 = await run_auto_enfileirar_nf()
+    assert summary2["candidatos"] == 1
+    assert summary2["sem_estoque"] == 1
+    assert ok.chamadas == [(700001, 83955)]
+    db.expire_all()
+    fat = (
+        await db.execute(select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001"))
+    ).scalar_one()
+    assert fat.status_faturamento == "sem_estoque"
+    assert len(_FakeThreema.enviados) == 1
+
+
+class _FakeRedis:
+    """SET NX / DELETE em memória (marca do aviso fora do lote)."""
+
+    def __init__(self) -> None:
+        self.chaves: dict[str, str] = {}
+
+    async def set(self, chave: str, valor: str, nx: bool = False, ex: int | None = None):
+        if nx and chave in self.chaves:
+            return None
+        self.chaves[chave] = valor
+        return True
+
+    async def delete(self, *chaves: str) -> int:
+        for c in chaves:
+            self.chaves.pop(c, None)
+        return len(chaves)
+
+
+@pytest.mark.asyncio
+async def test_sweep_negativo_fora_do_lote_nao_move_e_avisa_uma_vez(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """O FIFO aponta como negativo um pedido ML (o sweep não confere ML): o
+    Shopee mais antigo segue pra fila e o ML NÃO é movido — vira aviso no
+    Threema, UMA vez por pedido/SKU/dia (a passada é a cada 2 min)."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_loja(db, admin, plataforma="ml", bling_store_id="930009", com_faturador=False)
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="b1", bling_id=700001, item_produto_id=555,
+    )
+    await _seed_pedido(
+        db, numero="830009", loja="930009", sku="b1", bling_id=700009, item_produto_id=555,
+    )
+    await db.commit()
+    fake = _FakeBlingSituacao(saldos={555: -1.0})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+    monkeypatch.setattr(
+        get_settings(), "nf_sem_estoque_threema_recipients", "7KMPCBS5", raising=False
+    )
+    _FakeThreema.enviados = []
+    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
+    marcas = _FakeRedis()
+    monkeypatch.setattr(nf_auto_enfileirar, "redis", marcas)
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["sem_estoque"] == 0
+    assert summary["enfileirados"] == 1
+    assert fake.chamadas == []
+    [(texto, recipients)] = _FakeThreema.enviados
+    assert recipients == ["7KMPCBS5"]
+    assert "NÃO foi movido" in texto
+    assert "Pedido 830009 (ml loja 930009): b1" in texto
+
+    # 2ª passada com um Shopee novo da mesma peça (saldo −2): ele vai pra
+    # 83955; o ML continua apontado, mas o aviso dele já saiu hoje.
+    await _seed_pedido(
+        db, numero="830010", loja="930001", sku="b1", bling_id=700010, item_produto_id=555,
+    )
+    await db.commit()
+    fake.saldos[555] = -2.0
+    fake.orders[700010] = {"id": 700010, "observacoes": ""}
+    summary2 = await run_auto_enfileirar_nf()
+    assert summary2["sem_estoque"] == 1
+    assert fake.chamadas == [(700010, 83955)]
+    assert len(_FakeThreema.enviados) == 2
+    texto2 = _FakeThreema.enviados[1][0]
+    assert "movido pra Aguardando Cancelamento" in texto2
+    assert "830009" not in texto2
 
 
 @pytest.mark.asyncio
