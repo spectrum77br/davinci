@@ -1114,7 +1114,7 @@ async def _contagens_por_loja(
             ),
             (c.situacao != CONVERSA_FECHADA).label("aberta"),
             c.aguardando_resposta.is_(True).label("esperando"),
-            pastas.grupo_sql(ultima.c.folder_id).label("grupo"),
+            pastas.grupo_sql(ultima.c.folder_id, ultima.c.plataforma).label("grupo"),
         )
         .select_from(c)
         .outerjoin(ultima, ultima.c.conversa_id == c.id)
@@ -1182,7 +1182,7 @@ async def _contagens_por_loja(
         select(
             integ.label("integration_id"),
             case((integ.is_(None), ficha), else_=None).label("ficha"),
-            pastas.grupo_sql(m.folder_id).label("grupo"),
+            pastas.grupo_sql(m.folder_id, m.plataforma).label("grupo"),
             and_(*barra_lojas.email_da_caixa_sql(pastas, None, m)).label("na_caixa"),
         )
         .join(MailMessage, MailMessage.id == m.message_id)

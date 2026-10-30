@@ -41,6 +41,7 @@ from tests.test_atendimento_amazon_email import (
     redis_falso,
 )
 from tests.test_atendimento_enviar import amazon, ligado
+from tests.test_mail_ponte import cena
 
 pytestmark = pytest.mark.lojas_por_pessoa
 
@@ -244,7 +245,13 @@ async def test_o_editor_junta_o_canal_da_amazon_com_a_ficha(db, make_user):
 
 
 def test_netshoes_e_plataforma_de_pasta():
+    from app.services.mail_atendimento import suspeito
+
     assert "netshoes" in PLATAFORMAS_PASTA
+    # Sem pasta própria: o remetente oficial decide a loja Netshoes do alias.
+    assert suspeito.plataforma_do_dominio("netshoes.com.br") == "netshoes"
+    assert suspeito.plataforma_do_dominio("marketplace.netshoes.com.br") == "netshoes"
+    assert suspeito.plataforma_do_dominio("netshoes-promo.com") is None
     # A regra da pasta entra pelo SQL do deploy (a semente é a da migration 0387).
     assert regras.TIPO_PLATAFORMA == "plataforma"
 
@@ -256,4 +263,42 @@ async def test_a_lista_aceita_a_netshoes(client, make_user, auth_as):
     auth_as(await make_user(role=UserRole.ADMIN))
     r = await client.get("/api/atendimento/conversas", params={"plataforma": "netshoes"})
     assert r.status_code == 200, r.text
+    assert r.json()["itens"] == []
+
+
+async def test_email_da_netshoes_na_entrada_cai_na_caixa_problemas_da_loja(
+    db, cena, client, auth_as
+):
+    """O e-mail da Netshoes chega no endereço que a Poofy usa em várias plataformas,
+    na Entrada (sem pasta nova no Tuta): o remetente decide a loja Netshoes e a
+    barra mostra o e-mail na caixa Problemas dela (30/10/2026)."""
+    from app.models import StoreInfo
+    from tests.test_atendimento_email_lojas import _pastas_ligadas, _por_loja
+    from tests.test_mail_ponte import entrar, meta_de, rodar
+
+    netshoes = StoreInfo(
+        user_id=cena.dono.id, platform="netshoes", account_name="Oliveira", email="21max"
+    )
+    db.add(netshoes)
+    await db.commit()
+    await _pastas_ligadas(db, cena)
+    mid = await entrar(
+        db, cena.geral, pasta="INBOX", para=["21max@tuta.com"], de="sac@netshoes.com.br",
+        assunto="Novo protocolo de atendimento",
+    )  # fmt: skip
+    await rodar(db)
+    meta = await meta_de(db, mid)
+    assert (meta.store_info_id, meta.plataforma) == (netshoes.id, "netshoes")
+    auth_as(cena.dono)
+    lojas = await _por_loja(client)
+    assert lojas[str(netshoes.id)]["grupos"]["problemas"]["emails"] == 1
+    r = await client.get(
+        "/api/atendimento/email/lojas/emails",
+        params={"grupo": "problemas", "store_info_id": str(netshoes.id)},
+    )
+    assert r.status_code == 200 and [i["id"] for i in r.json()["itens"]] == [str(mid)]
+    r = await client.get(
+        "/api/atendimento/email/lojas/emails",
+        params={"grupo": "envios", "store_info_id": str(netshoes.id)},
+    )
     assert r.json()["itens"] == []

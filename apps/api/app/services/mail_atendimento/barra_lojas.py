@@ -104,6 +104,21 @@ SEM_PASTA = "sem_pasta"
 _ORDEM_STATUS = (LIGA, SEM_CATEGORIA, OUTRA_CATEGORIA, SO_CONTAR, SEM_PASTA)
 
 _KINDS_SO_CONTAR = (KIND_SPAM, KIND_LIXEIRA, KIND_RASCUNHOS)
+# A plataforma SEM chat no DaVinci (a Netshoes, 30/10/2026 — o Eduardo: "quando
+# chega no sac poofy separar pra netshoes aqui no código nosso"): o e-mail dela
+# que não está numa pasta da barra (a Entrada, por exemplo) vai para a caixa
+# Problemas da loja, sem pasta nova no Tuta. Lixeira, spam e rascunhos não.
+PLATAFORMAS_SO_EMAIL = ("netshoes",)
+GRUPO_DO_SO_EMAIL = "problemas"
+
+
+def so_email_fora_da_barra_sql(plataforma, folder_id, todas: list[UUID]):
+    """O e-mail (ou a conversa) da plataforma só de e-mail FORA das pastas da barra."""
+    lixo = select(MailFolder.id).where(MailFolder.tipo_tuta.in_(_KINDS_SO_CONTAR))
+    fora = folder_id.notin_(lixo)
+    if todas:
+        fora = and_(folder_id.notin_(todas), fora)
+    return and_(plataforma.in_(PLATAFORMAS_SO_EMAIL), or_(folder_id.is_(None), fora))
 
 # O endereço da loja para a ponte.
 ALIAS_NA_PONTE = "na_ponte"
@@ -198,9 +213,17 @@ class PastasDaBarra:
             return self.por_grupo.get(grupo, [])
         return [i for lista in self.por_grupo.values() for i in lista]
 
-    def grupo_sql(self, folder_id):
-        """O grupo (a chave) da pasta, em SQL — NULL fora dos grupos."""
+    def grupo_sql(self, folder_id, plataforma=None):
+        """O grupo (a chave) da pasta, em SQL — NULL fora dos grupos. Com a
+        `plataforma`: a só de e-mail fora das pastas vai para Problemas (30/10/2026)."""
         ramos = [(folder_id.in_(ids), literal(g)) for g, ids in self.por_grupo.items() if ids]
+        if plataforma is not None and GRUPO_DO_SO_EMAIL in self.por_grupo:
+            ramos.append(
+                (
+                    so_email_fora_da_barra_sql(plataforma, folder_id, self.ids()),
+                    literal(GRUPO_DO_SO_EMAIL),
+                )
+            )
         return case(*ramos, else_=None) if ramos else literal(None)
 
 
@@ -249,7 +272,8 @@ def loja_do_email_sql(i, m=MailMessageMeta):
 def email_da_caixa_sql(pastas: PastasDaBarra, grupo: str | None = None, m=MailMessageMeta):
     """WHERE do e-mail que a caixa de um grupo (ou de qualquer grupo) mostra."""
     ids = pastas.ids(grupo)
-    if not ids:
+    so_email = grupo in (None, GRUPO_DO_SO_EMAIL)
+    if not ids and not so_email:
         return (literal(False),)
     todas = pastas.ids()
     original = aliased(MailMessageMeta)
@@ -258,8 +282,11 @@ def email_da_caixa_sql(pastas: PastasDaBarra, grupo: str | None = None, m=MailMe
             original.message_id == m.duplicado_de, original.folder_id.in_(todas)
         )
     )
+    na_pasta = m.folder_id.in_(ids) if ids else literal(False)
+    if so_email:
+        na_pasta = or_(na_pasta, so_email_fora_da_barra_sql(m.plataforma, m.folder_id, todas))
     return (
-        m.folder_id.in_(ids),
+        na_pasta,
         or_(
             m.estado.in_(ESTADOS_NA_CAIXA),
             and_(m.estado == ESTADO_IGNORADO, m.motivo.in_(IGNORADOS_NA_CAIXA)),
@@ -295,6 +322,7 @@ def ultima_pasta_recebida():
             m.conversa_id.label("conversa_id"),
             m.folder_id.label("folder_id"),
             m.alias_recebido.label("alias"),
+            m.plataforma.label("plataforma"),
         )
         .join(mm, mm.id == m.message_id)
         .where(m.conversa_id.is_not(None), mm.direction != "sent")
@@ -304,10 +332,16 @@ def ultima_pasta_recebida():
     )
 
 
-def conversas_do_grupo_sql(pastas: list[UUID]):
-    """As conversas cujo e-mail recebido mais recente está numa destas pastas."""
+def conversas_do_grupo_sql(pastas: list[UUID], so_email_fora_de: list[UUID] | None = None):
+    """As conversas cujo e-mail recebido mais recente está numa destas pastas — e,
+    com `so_email_fora_de` (as pastas da barra, no grupo Problemas), a da
+    plataforma só de e-mail fora delas (30/10/2026)."""
     u = ultima_pasta_recebida()
-    return select(u.c.conversa_id).where(u.c.folder_id.in_(pastas))
+    cond = u.c.folder_id.in_(pastas) if pastas else literal(False)
+    if so_email_fora_de is not None:
+        fora = so_email_fora_da_barra_sql(u.c.plataforma, u.c.folder_id, so_email_fora_de)
+        cond = or_(cond, fora)
+    return select(u.c.conversa_id).where(cond)
 
 
 # ── O endereço da loja ─────────────────────────────────────────────────────

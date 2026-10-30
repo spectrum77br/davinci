@@ -2349,6 +2349,7 @@ async def _listar_marketplace(
     store_info_id: UUID | None = None,
     fichas_da_loja: set[UUID] | None = None,
     pastas_do_grupo: list[UUID] | None = None,
+    pastas_so_email: list[UUID] | None = None,
     filtro_email: Any = None,
 ) -> list[dict[str, Any]]:
     from app.services.atendimento import humano as humano_svc
@@ -2394,10 +2395,13 @@ async def _listar_marketplace(
     if caixa_email and pastas_do_grupo is not None:
         # Um GRUPO da barra de lojas (27/10/2026, as pastas Problemas · Envios ·
         # Devolução): a conversa cujo e-mail RECEBIDO mais recente está numa das
-        # pastas dele (`barra_lojas`, a mesma régua dos números).
+        # pastas dele (`barra_lojas`, a mesma régua dos números). Na Problemas,
+        # também a da plataforma só de e-mail fora das pastas (a Netshoes, 30/10/2026).
         consulta = consulta.where(
-            AtendimentoConversa.id.in_(mail_barra.conversas_do_grupo_sql(pastas_do_grupo))
-            if pastas_do_grupo
+            AtendimentoConversa.id.in_(
+                mail_barra.conversas_do_grupo_sql(pastas_do_grupo, so_email_fora_de=pastas_so_email)
+            )
+            if pastas_do_grupo or pastas_so_email is not None
             else false()
         )
     if caixa_email and store_info_id is not None:
@@ -2771,8 +2775,10 @@ async def listar_conversas(
         # lojas, o chamado do site e o e-mail fora dos grupos ficam na aba (403).
         if (integration_id is None and store_info_id is None) or grupo_email is None:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail=ABA_EMAIL_SO_ADMIN)
-    pastas_do_grupo = (
-        (await mail_barra.pastas_da_barra(session)).ids(grupo_email) if grupo_email else None
+    barra = await mail_barra.pastas_da_barra(session) if grupo_email else None
+    pastas_do_grupo = barra.ids(grupo_email) if barra is not None else None
+    pastas_so_email = (
+        barra.ids() if barra is not None and grupo_email == mail_barra.GRUPO_DO_SO_EMAIL else None
     )
     filtro_email = None
     if caixa_email:
@@ -2825,6 +2831,7 @@ async def listar_conversas(
             store_info_id=store_info_id,
             fichas_da_loja=fichas_da_loja,
             pastas_do_grupo=pastas_do_grupo,
+            pastas_so_email=pastas_so_email,
             filtro_email=filtro_email,
         )
     quer_instagram = (

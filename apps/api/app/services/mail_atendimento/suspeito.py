@@ -57,6 +57,9 @@ DOMINIOS_OFICIAIS: dict[str, tuple[str, ...]] = {
     "aliexpress": ("aliexpress.com", "aliexpress.us", "alibaba.com", "aliexpress.ru"),
     "magalu": ("magalu.com", "magalu.com.br", "magazineluiza.com.br", "luizalabs.com"),
     "shein": ("shein.com", "shein.com.br", "sheingroup.com", "shein.co.uk"),
+    # 30/10/2026: o SAC da Netshoes por e-mail (sem pasta própria: o remetente
+    # decide a loja Netshoes do alias, mesmo na pasta "problemas").
+    "netshoes": ("netshoes.com.br", "netshoes.com"),
 }
 # A "marca" de cada plataforma no domínio e no nome de exibição.
 MARCAS: dict[str, tuple[str, ...]] = {
@@ -68,6 +71,7 @@ MARCAS: dict[str, tuple[str, ...]] = {
     "aliexpress": ("aliexpress", "alibaba"),
     "magalu": ("magalu", "magazineluiza"),
     "shein": ("shein",),
+    "netshoes": ("netshoes",),
 }
 # No nome de exibição ("Mercado Livre <x@golpe.com>").
 _NOMES = {
@@ -79,6 +83,7 @@ _NOMES = {
     "aliexpress": ("aliexpress",),
     "magalu": ("magalu", "magazine luiza"),
     "shein": ("shein",),
+    "netshoes": ("netshoes",),
 }
 
 M_AUTH = "auth"
