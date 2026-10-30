@@ -732,12 +732,16 @@ def _ve_o_zap(scope: TeamScope) -> bool:
 
 
 def _zap_escondido(scope: TeamScope, obj: Any) -> bool:
-    """A conversa (ou o canal) é do Zap do número e a pessoa não é admin? PURA."""
-    return (
+    """A conversa (ou o canal) é do Zap do número e a pessoa não é admin nem tem o
+    número? PURA. Desde 30/10/2026 o vendedor vê o Zap das lojas dele (o canal do
+    número nas lojas da pessoa, `escopo.CANAL`)."""
+    if not (
         getattr(obj, "plataforma", None) == PLATAFORMA_WHATSAPP
         and getattr(obj, "canal", None) == CANAL_ZAP
-        and not _ve_o_zap(scope)
-    )
+    ) or _ve_o_zap(scope):
+        return False
+    canal_id = obj.canal_id if isinstance(obj, AtendimentoConversa) else getattr(obj, "id", None)
+    return canal_id is None or canal_id not in scope.canal_ids
 
 
 def _sem_zap_sql(scope: TeamScope, coluna):

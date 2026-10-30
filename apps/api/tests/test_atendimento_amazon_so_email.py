@@ -302,3 +302,55 @@ async def test_email_da_netshoes_na_entrada_cai_na_caixa_problemas_da_loja(
         params={"grupo": "envios", "store_info_id": str(netshoes.id)},
     )
     assert r.json()["itens"] == []
+
+
+async def test_zap_do_numero_so_para_quem_tem_o_numero(db, make_user, client, auth_as):
+    """30/10/2026: o vendedor vê e responde o Zap dos números das lojas dele; o outro
+    vendedor, não (404); o admin vê todos. A tela dos números continua só do admin."""
+    from app.services.atendimento import gravar
+
+    canal = AtendimentoCanal(
+        plataforma="whatsapp",
+        canal="zap",
+        externo_ref="zap:123456",
+        modo="humano",
+        status="ok",
+        cursor={canais_externos.CHAVE_CURSOR: {"nome": "Mini"}},
+    )
+    db.add(canal)
+    await db.flush()
+    conversa, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=None,
+        plataforma="whatsapp",
+        canal_nome="zap",
+        externo_id="5511999990000",
+        comprador_id="5511999990000",
+    )
+    await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id="wamid.1",
+        autor="cliente",
+        texto="oi",
+        enviada_em=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    await db.commit()
+    londres, israel = await make_user(), await make_user()
+    await dar_lojas(db, londres, escopo.chave(escopo.CANAL, canal.id))
+    await dar_lojas(db, israel, escopo.chave(escopo.FICHA, canal.id))
+
+    auth_as(londres)
+    assert (await client.get(f"/api/atendimento/conversas/{conversa.id}")).status_code == 200
+    r = (await client.get("/api/atendimento/resumo")).json()
+    assert [lj["conta"] for lj in r["lojas"]] == ["Mini"]
+    assert await enviar._responde_o_zap(db, londres, conversa) is True
+    assert (await client.get("/api/atendimento/zap/numeros")).status_code == 404
+
+    auth_as(israel)
+    assert (await client.get(f"/api/atendimento/conversas/{conversa.id}")).status_code == 404
+    assert await enviar._responde_o_zap(db, israel, conversa) is False
+
+    lojas = {lj["chave"]: lj for lj in await escopo.lojas_para_vincular(db)}
+    assert lojas[escopo.chave(escopo.CANAL, canal.id)]["plataforma"] == "whatsapp"

@@ -145,8 +145,8 @@ async def lojas_para_vincular(session: AsyncSession) -> list[dict[str, Any]]:
     )
     nomes_chat = await lojas_svc.nomes_das_lojas(session, integracoes)
     da_integracao = await rotear.integracoes_das_fichas(session)
-    # Os canais SEM integração que são loja: o do robô (Temu/AliExpress) e a
-    # Amazon só de e-mail ("amazon:<tag>", 30/10/2026).
+    # Os canais SEM integração que são loja: o do robô (Temu/AliExpress), a
+    # Amazon só de e-mail ("amazon:<tag>") e o número do WhatsApp (30/10/2026).
     sem_integracao = (
         (
             await session.execute(
@@ -155,6 +155,8 @@ async def lojas_para_vincular(session: AsyncSession) -> list[dict[str, Any]]:
                     or_(
                         AtendimentoCanal.robo_perfil_id.is_not(None),
                         AtendimentoCanal.externo_ref.like(f"{canais_externos.PREFIXO_AMAZON}%"),
+                        # O número do WhatsApp da loja (30/10/2026): linha própria.
+                        AtendimentoCanal.externo_ref.like(f"{canais_externos.PREFIXO_ZAP}%"),
                     ),
                 )
             )

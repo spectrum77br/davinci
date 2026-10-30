@@ -339,6 +339,21 @@ RECUSA_ZAP_TETO_DIA = "zap_teto_dia"
 # rota já esconde a conversa de quem não é admin (404); isto é o cinto no
 # caminho único, para qualquer outro caminho que chegue com uma pessoa.
 RECUSA_ZAP_SO_ADMIN = "zap_so_admin"
+
+
+async def _responde_o_zap(session: AsyncSession, user: User | None, conversa) -> bool:
+    """Quem responde o Zap do número: o admin, ou (30/10/2026) o vendedor que tem o
+    número nas lojas dele (`atendimento_lojas_pessoa`, a chave do canal)."""
+    if user is None:
+        return False
+    if user.role == UserRole.ADMIN:
+        return True
+    from app.services.atendimento import escopo
+
+    if conversa.canal_id is None:
+        return False
+    chaves = await escopo.chaves_da_pessoa(session, user.id)
+    return escopo.chave(escopo.CANAL, conversa.canal_id) in chaves
 MOTIVO_ZAP_ENVIO_DESLIGADO = "Zap: o envio pelo DaVinci está desligado. Responda pelo Duoke."
 MOTIVO_ZAP_SEM_NUMERO = "Este número de WhatsApp não está mais cadastrado no DaVinci."
 MOTIVO_ZAP_NUMERO_PAUSADO = (
@@ -1917,7 +1932,7 @@ async def enviar_resposta(
         conversa.canal == CANAL_ZAP
         and conversa.plataforma == PLATAFORMA_WHATSAPP
         and origem == ORIGEM_HUMANO
-        and (user is None or user.role != UserRole.ADMIN)
+        and not await _responde_o_zap(session, user, conversa)
     ):
         # Zap do número: só administrador (26/10/2026). A IA e a automática
         # caem na trava 1 do `_destino_zap`, com a frase delas.
@@ -2443,7 +2458,7 @@ async def enviar_foto(
     if (
         conversa.canal == CANAL_ZAP
         and conversa.plataforma == PLATAFORMA_WHATSAPP
-        and (user is None or user.role != UserRole.ADMIN)
+        and not await _responde_o_zap(session, user, conversa)
     ):
         # Zap do número: só administrador (o mesmo cinto do texto).
         raise EnvioRecusado(RECUSA_ZAP_SO_ADMIN, MOTIVO_ZAP_SO_ADMIN)
