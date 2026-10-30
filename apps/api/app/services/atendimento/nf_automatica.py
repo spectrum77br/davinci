@@ -332,7 +332,8 @@ _NAO_E_SO_A_NF = re.compile(
     + _O_DOC_LOGO_DEPOIS
     # O produto depois do "e" ("não veio a nota e o produto", "manda a nota e o pedido",
     # "chegou mas não veio a nota e um produto", "cadê a nota e cadê o pedido").
-    + r"|\be\s+(?:cade\s+)?(?:(?:o|a|os|as|do|da|dos|das|meu|minha|um|uma)\s+){0,2}"
+    + r"|\be\s+(?:cade\s+)?(?:(?:o|a|os|as|do|da|dos|das|desse|deste|dessa|desta|meu|minha|um|uma)"
+    r"\s+){0,2}"
     + _O_PRODUTO
     + r"\b(?!\s+nao"
     + _FALTOU_O_PAPEL
@@ -406,6 +407,12 @@ _PALAVRAS_DO_PEDIDO = (
     )
 )
 _E_VOCE = frozenset("e vc voce vcs voces".split())
+# A chegada dita sem pergunta ("chegou", "recebi, obrigado", "chegou tudo certo") é o elogio;
+# "show, e o pedido", "ótimo, aguardo o meu pedido" é a pergunta da entrega sem o "?".
+_CHEGOU_BEM = frozenset("chegou chegaram veio vieram recebi certo bem ok".split())
+_ELOGIO_QUE_PERGUNTA = re.compile(
+    r"\be\s+(?:(?:o|a|os|as|meu|minha)\s+){0,2}" + _O_PRODUTO + r"\b|\baguardo\b"
+)
 _PALAVRAS_DO_ELOGIO = (
     _CORTESIA
     | _ELOGIO
@@ -423,6 +430,9 @@ _PALAVRAS_DO_ELOGIO = (
 # || 2 || o meu celular não veio com nota fiscal" — o Vita 95704e8d de 29/10): não contam como
 # fala, como a foto sem texto. O "Falar com atendente" (o 6 do menu) continua contando.
 _FIGURINHA = constantes.rotulo_tipo_plataforma("sticker")
+_O_NUMERO_2 = re.compile(r"\b(?:2|dois)\b")
+# "chegou muito tarde", "veio de noite" — o "tarde/noite" fora do "boa tarde/noite" é queixa.
+_TARDE_SOLTO = re.compile(r"(?<!\bboa )\b(?:tarde|noite)\b")
 _CONVERSAR_COM_VENDEDOR = "conversar com vendedor"
 
 
@@ -461,10 +471,15 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
     # o "Conversar com vendedor" dias depois ("menu || 2 || a NF da equipe || [Figurinha]") é
     # outro turno.
     resposta = max((i for i, m in enumerate(recentes) if ia.resposta_da_loja(m)), default=-1)
+    if resposta > ultimo and _o_2_responde_a_loja(recentes, ultimo, resposta):
+        return False
     depois = [
         m for m in recentes[max(ultimo, resposta) + 1 :] if m.autor == constantes.AUTOR_CLIENTE
     ]
     if not depois or gatilho is None or all(m.id != gatilho.id for m in depois):
+        return False
+    # A foto ou o vídeo junto do "2" (o defeito, o item errado) é fala que não lemos: pessoa.
+    if any(not (m.texto or "").strip() and not _sem_fala(m) for m in depois):
         return False
     falas = (m.texto or "" for m in depois if not _sem_fala(m))
     plano = " ".join(validador.plano_de(" ".join(falas)).split())
@@ -476,9 +491,37 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
         if m.texto and not _sem_fala(m) and validador.plano_de(m.texto).strip(" .!\n") != "2"
     ]
     # A pergunta da NF é julgada na rajada inteira ("e o meu pedido? || e a nota fiscal?" é outra
-    # pergunta junto), tirando só a cortesia e o elogio.
-    falas = [t for t in antes if not (_so_cortesia(t) or _so_elogio(t))]
+    # pergunta junto), tirando só a cortesia e o elogio — trecho a trecho ("Chegou certinho, a
+    # nota fiscal vocês enviam por aqui?"); o "muito tarde" não é cortesia.
+    falas = [
+        f
+        for t in antes
+        for f in re.findall(r"[^,.;!?]+[,.;!?]*", t)
+        if re.search(r"[a-z0-9]", validador.plano_de(f))
+        and (_TARDE_SOLTO.search(validador.plano_de(f)) or not (_so_cortesia(f) or _so_elogio(f)))
+    ]
     return not falas or _pergunta_da_nf(" . ".join(falas)) or pedido_claro(antes)
+
+
+def _o_2_responde_a_loja(recentes: Sequence[Any], menu: int, resposta: int) -> bool:
+    """O "2" depois de uma resposta real da loja (que veio depois do menu) responde a ELA? PURA.
+
+    Terceira revisão de 30/10: "menu || veio faltando um item || 'Quantos chegaram?' || 2", "menu
+    || 'Prefere 1 - aguardar ou 2 - cancelar?' || 2", "menu || quero cancelar || 'Digite 2 para
+    confirmar' || 2": o cliente escreveu entre o menu e a resposta (só a cortesia, a figurinha
+    e o botão do FAQ não contam), ou a resposta da loja tem o próprio número.
+    """
+    for m in recentes[menu + 1 : resposta]:
+        if m.autor != constantes.AUTOR_CLIENTE or _sem_fala(m):
+            continue
+        if not (m.texto or "").strip() or not _so_cortesia(m.texto):
+            return True
+    from app.services.atendimento import ia
+
+    return any(
+        ia.resposta_da_loja(m) and _O_NUMERO_2.search(validador.plano_de(m.texto or ""))
+        for m in recentes[menu + 1 : resposta + 1]
+    )
 
 
 def textos_do_turno(recentes: Sequence[Any], rajada: Sequence[Any]) -> list[str | None]:
@@ -538,7 +581,9 @@ def _so_elogio(texto: str) -> bool:
     # elogio — só o cumprimento ("tudo bem e vc?") ou com a palavra do elogio, sem pergunta.
     if all(p in _CORTESIA or p in _E_VOCE for p in palavras):
         return True
-    return "?" not in plano and any(p in _ELOGIO for p in palavras)
+    if "?" in plano or _TARDE_SOLTO.search(plano) or _ELOGIO_QUE_PERGUNTA.search(plano):
+        return False
+    return any(p in _ELOGIO or p in _CHEGOU_BEM for p in palavras)
 
 
 # Terceira revisão de 30/10 (comparado com o código no ar, o "2" com a PERGUNTA de como receber
@@ -557,11 +602,20 @@ _COMPLEMENTO = re.compile(
     + r"\b"
 )
 _O_PRODUTO_SOLTO = re.compile(r"\b" + _O_PRODUTO + r"\b")
-# O "disponível" só com a nota (ou o "ela" dela) de sujeito: "onde ela está disponível?", "a nota
-# fiscal já está disponível?"; "está disponível? vocês enviam a nota?" é a pergunta do estoque.
-_DISPONIVEL = re.compile(
-    r"\b(?:ela|nota(?:\s+fiscal)?|nf|nfe)\s+(?:ja\s+)?(?:esta|ta|fica|estara|sera)\s+"
-    r"(?:ja\s+)?disponivel\b"
+# O "disponível" só da nota: com ela de sujeito ("a nota fiscal já está disponível?"), logo antes
+# dela ("está disponível a nota fiscal?") ou o "ela" DEPOIS de a nota ser nomeada ("preciso da
+# nota fiscal, onde ela está disponível?"); "está disponível? vocês enviam a nota?" e "ela está
+# disponível?" sem a nota antes são a pergunta do estoque. E "a nota já foi emitida?".
+_ESTA = r"(?:ja\s+)?(?:esta|ta|fica|estara|sera)\s+(?:ja\s+)?disponivel\b"
+_DISPONIVEL_DA_NOTA = re.compile(r"\b(nota(?:\s+fiscal)?|nf|nfe)\s+" + _ESTA)
+_DISPONIVEL_A_NOTA = re.compile(
+    r"\b(?:onde\s+)?" + _ESTA + r"\s+(?=(?:a\s+)?(?:nota|nf|nfe)\b)|\bfoi\s+(?=emitida\b)"
+)
+_ELA_DISPONIVEL = re.compile(r"\b(?:onde\s+)?ela\s+" + _ESTA)
+_COMO_TENHO_ACESSO = re.compile(r"\bcomo\s+(?:eu\s+)?(?:tenho|terei|posso\s+ter)\s+acesso\b")
+# "o meu?", "a minha?" sem o nome do que é: outra pergunta.
+_MEU_SOLTO = re.compile(
+    r"\b(?:meu|minha)\b(?!\s+(?:nota|nf|nfe|pedido|compra|produto|encomenda|caixa|pacote)\b)"
 )
 # A pergunta tem o seu vocabulário: sem a chegada e a posse ("veio só a nota fiscal", "recebi a
 # nota fiscal", "ainda tem? vocês enviam nota?" ficam com a pessoa).
@@ -572,7 +626,7 @@ _PALAVRAS_DA_PERGUNTA = (
         so veio vieram chegou recebi foi ainda cade tem encontrei achei tinha estava
         """.split()
     )
-) | frozenset("onde saber se ela dele como tenho acesso consigo ver baixar emitida sera".split())
+) | frozenset("saber se como acesso consigo ver baixar emitida sera".split())
 
 
 def _pergunta_da_nf(texto: str) -> bool:
@@ -585,8 +639,14 @@ def _pergunta_da_nf(texto: str) -> bool:
         return False
     if _NAO_VEIO.search(plano) or _TEM_NOTA.search(plano):
         return False
-    resto = _DISPONIVEL.sub(" ela ", _ENVIAM.sub(" ", plano))
-    if _NAO_E_SO_A_NF.search(resto) or _O_PRODUTO_SOLTO.search(_COMPLEMENTO.sub(r"\1", resto)):
+    resto = _DISPONIVEL_A_NOTA.sub(" ", _DISPONIVEL_DA_NOTA.sub(r"\1", _ENVIAM.sub(" ", plano)))
+    resto = _COMO_TENHO_ACESSO.sub(" como acesso ", resto)
+    ela = _ELA_DISPONIVEL.search(resto)
+    if ela and _NOMEIA_A_NF.search(resto[: ela.start()]):
+        resto = resto[: ela.start()] + " " + resto[ela.end() :]
+    if _NAO_E_SO_A_NF.search(resto) or _MEU_SOLTO.search(resto):
+        return False
+    if _O_PRODUTO_SOLTO.search(_COMPLEMENTO.sub(r"\1", resto)):
         return False
     return all(p in _PALAVRAS_DA_PERGUNTA for p in re.findall(r"[a-z0-9]+", resto))
 
@@ -704,21 +764,40 @@ _SO_O_DOCUMENTO = re.compile(
 )
 
 
-# - Terceira revisão de 30/10: o "comprei" só na frase que abre ("comprei o celular, e não veio
-#   com nota") — some e o produto fica nas MESMAS travas. Solto ele seria o produto sem trava
-#   ("não veio o que comprei, só a nota fiscal", "cadê o que comprei?") e fica fora da lista.
-_COMPREI_O_PRODUTO = re.compile(
-    r"\bcomprei\s+(?=(?:(?:o|a|os|as|um|uma|meu|minha)\s+)?produtos?\b)"
+# - Terceira revisão de 30/10: o "comprei" só some quando o que vem depois é a NOTA que não veio
+#   ("comprei o celular, e não veio com nota", "comprei e não veio a nota fiscal", "comprei o
+#   produto mas não veio a nota") — o produto fica nas MESMAS travas; "<produto> que comprei" é
+#   o produto e "a nota do que comprei" é a nota do produto. Solto ele seria o produto sem trava
+#   ("não veio o que comprei, só a nota fiscal", "comprei um relógio e veio um celular, manda a
+#   nota", "comprei o celular de novo") e fica fora da lista.
+_COMPREI = (
+    (re.compile(r"\b(produtos?)\s+(?:que|q)\s+(?:eu\s+)?comprei\b"), r"\1"),
+    (
+        re.compile(r"\b(nota\s+fiscal|nota|nf|nfe)\s+do\s+que\s+(?:eu\s+)?comprei\b"),
+        r"\1 do produto",
+    ),
+    (
+        re.compile(
+            r"(?<!\bque )(?<!\bque eu )(?<!\bq )(?<!\bq eu )\bcomprei(?:\s+aqui)?\s*"
+            r"(?=(?:(?:(?:o|a|os|as|um|uma|meu|minha|esse|este|essa|esta)\s+)?produtos?\s*)?,?\s*"
+            r"(?:e|mas|porem|so\s+que)\s+(?:a\s+(?:nota|nf|nfe)|nao\s+(?:veio|vieram|chegou|recebi)"
+            r"\s+(?:com\s+)?(?:(?:a|as|o|uma)\s+)?(?:nota|nf|nfe))\b)"
+        ),
+        "",
+    ),
 )
+# O "&" e o "+" são o "e" ("a nota fiscal & o produto").
+_E_COMERCIAL = re.compile(r"\s*[&+]\s*")
 
 
 def _grafia(plano: str) -> str:
     """A grafia do documento, o aparelho e a ausência na forma que as réguas leem. PURA."""
     plano = " ".join(plano.split())
     for regra, troca in (
+        (_E_COMERCIAL, " e "),
         *_GRAFIAS,
         (_O_APARELHO, "produto"),
-        (_COMPREI_O_PRODUTO, ""),
+        *_COMPREI,
         *_SEM_A_NOTA,
         *_JUNTO_COM,
     ):
@@ -735,12 +814,20 @@ def _so_o_documento(plano: str) -> bool:
 # O aviso da Shopee no lugar da fala que o cliente apagou (30/10: segurava 6 turnos em 60 dias,
 # "bom dia || This message was deleted || o pedido chegou || mas não veio a nota fiscal").
 _APAGADA = "this message was deleted"
+# A fala que é só o produto ("manda a nota fiscal || o pedido?") pede o produto também.
+_SO_O_PRODUTO = re.compile(
+    r"(?:e\s+)?(?:(?:o|a|os|as|meu|minha|desse|deste|dessa|desta)\s+){0,2}"
+    + _O_PRODUTO
+    + r"(?:\s+tambem)?"
+)
 
 
 def pedido_claro(textos: Sequence[str | None]) -> bool:
     """O turno do cliente PEDE a NF do pedido, e só isso? PURA."""
     falas = [_grafia(validador.plano_de(t)) for t in textos if t]
     falas = [f for f in falas if " ".join(f.split()).strip(" .") != _APAGADA]
+    if any(_SO_O_PRODUTO.fullmatch(" ".join(re.findall(r"[a-z0-9]+", f))) for f in falas):
+        return False
     plano = " ".join(" ".join(falas).split())
     if not plano or len(plano) > 400:
         return False

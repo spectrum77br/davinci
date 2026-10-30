@@ -881,6 +881,20 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("preciso do envio da nota fiscal e do produto", False),
         ("quero o envio da nota fiscal e do pedido", False),
         ("preciso do envio da nota fiscal", True),
+        # O "comprei" só some quando a nota é o que não veio; "<produto> que comprei" é o produto.
+        ("comprei e não veio a nota fiscal, me manda por favor", True),
+        ("comprei o produto mas não veio a nota fiscal, pode me enviar?", True),
+        ("manda a nota fiscal do celular que comprei", True),
+        ("me manda a nota fiscal do que eu comprei", True),
+        ("comprei um relógio e veio um celular, manda a nota fiscal", False),
+        ("comprei o celular e so veio a caixa, manda a nota fiscal", False),
+        ("comprei o celular e ainda nao veio nem a nota fiscal", False),
+        ("comprei o celular de novo, manda a nota fiscal", False),
+        ("não veio o que comprei e não veio a nota, manda a nota", False),
+        # O "&" e o "+" são o "e"; "e desse produto" também é o produto.
+        ("preciso da nota fiscal & do produto", False),
+        ("manda a nota fiscal + o produto", False),
+        ("preciso da nota fiscal e desse produto", False),
     ],
 )
 def test_pedido_claro(texto, claro):
@@ -948,6 +962,39 @@ def test_o_2_do_menu_sai_das_falas_do_turno():
     vem = M(id=1, autor="cliente", texto="vem com nota fiscal?")
     textos = nf_automatica.textos_do_turno([vem, menu, dois, de_novo], [vem, dois, de_novo])
     assert nf_automatica.pedido_claro(textos) is False
+
+
+def test_o_2_que_responde_a_loja_ou_vem_com_foto_fica_com_a_pessoa():
+    """Terceira revisão de 30/10: o "2" depois da resposta real da loja responde a ela quando o
+    cliente escreveu entre o menu e a resposta ou ela tem o próprio número; e a foto junto do "2"
+    não é lida."""
+    from types import SimpleNamespace as M
+
+    def cliente(i, t, **k):
+        return M(id=i, autor="cliente", texto=t, origem="externo", payload={}, **k)
+
+    def loja(i, t):
+        return M(id=i, autor="loja", texto=t, origem="externo", payload={})
+
+    menu, dois = loja(2, _MENU_DUOKE), cliente(9, "2")
+    oi = cliente(1, "oi")
+    faltou = cliente(3, "veio faltando um item")
+    quantos = loja(4, "Olá! Quantos itens chegaram para você?")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, faltou, quantos, dois], dois) is False
+    opcoes = loja(4, "Prefere 1 - aguardar ou 2 - cancelar?")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, opcoes, dois], dois) is False
+    # A saudação da equipe (sem número, sem fala do cliente no meio) não muda o "2".
+    ola = loja(4, "Olá! Em que posso ajudar?")
+    assert nf_automatica.pedido_pelo_menu([oi, menu, ola, dois], dois) is True
+    foto = cliente(10, None)
+    assert nf_automatica.pedido_pelo_menu([oi, menu, dois, foto], foto) is False
+    assert nf_automatica.pedido_pelo_menu([oi, menu, foto, dois], dois) is False
+
+
+def test_a_fala_que_e_so_o_produto_pede_o_produto():
+    assert nf_automatica.pedido_claro(["manda a nota fiscal", "o pedido?"]) is False
+    assert nf_automatica.pedido_claro(["preciso da nota fiscal", "e o produto também"]) is False
+    assert nf_automatica.pedido_claro(["preciso da nota fiscal", "do pedido"]) is True
 
 
 def test_figurinha_e_conversar_com_vendedor_nao_contam_como_fala():
@@ -1314,6 +1361,22 @@ def test_pedido_pelo_menu():
         (["veio o relógio?"], False),
         (["o celular?"], False),
         (["oi! tudo bem e vc?"], True),
+        # A chegada sem pergunta é o elogio; com a entrega pedida junto ou o "muito tarde", não.
+        (["chegou, obrigada"], True),
+        (["Recebi o produto, tudo certo"], True),
+        (["Chegou! A nota fiscal vocês enviam por aqui?"], True),
+        (["chegou hoje, muito tarde"], False),
+        (["show, e o pedido"], False),
+        (["otimo, aguardo o meu pedido"], False),
+        # O "ela" e o "disponível" só da nota; o "meu" sem o nome; a posse.
+        (["está disponível a nota fiscal?"], True),
+        (["a nota fiscal já foi emitida?"], True),
+        (["como tenho acesso a nota fiscal?"], True),
+        (["onde ela esta? e a nota fiscal?"], False),
+        (["onde ela esta", "e a nota fiscal"], False),
+        (["e o meu? e a nota fiscal?"], False),
+        (["ela esta disponivel? voces enviam nota fiscal?"], False),
+        (["eu tenho a nota fiscal"], False),
     ],
 )
 def test_pedido_pelo_menu_olha_o_que_veio_antes_do_menu(antes, pelo_menu):
