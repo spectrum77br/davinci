@@ -440,7 +440,9 @@ async def test_tela_mostra_o_email_protegido_para_quem_le(db, cena, client, auth
     assert linha["mensagens_total"] == 0 and "emails_total" not in linha
 
 
-async def test_quem_nao_le_a_loja_ve_so_que_o_email_existe(db, cena, client, auth_as, make_user):
+async def test_outra_equipe_nem_abre_os_emails_do_chamado(db, cena, client, auth_as, make_user):
+    """30/10/2026 (equipes Londres/Israel/Marrocos): o chamado de loja de outra
+    equipe nem abre — antes a pessoa via que o e-mail existia, sem o texto."""
     pasta = await _pasta_chamado(db, cena)
     ch, meta = await _ligado(db, cena, pasta, anexos=[("foto.jpg", "image/jpeg", b"jpeg!")])
     cena.loja_ml.sales_team = 1
@@ -450,11 +452,10 @@ async def test_quem_nao_le_a_loja_ve_so_que_o_email_existe(db, cena, client, aut
     await db.commit()
     auth_as(outra_equipe)
 
-    d = (await client.get(f"/api/chamados/{ch.id}/emails")).json()
-    assert d["total"] == 1 and d["ocultos"] == 1
-    (item,) = d["itens"]
-    assert item["pode_ler"] is False
-    assert not ({"texto", "assunto", "de", "de_nome", "anexos"} & item.keys())
+    r = await client.get(f"/api/chamados/{ch.id}/emails")
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "pedido_de_outra_equipe"
+    assert "texto" not in r.text and "Dúvida" not in r.text
     anexo_id = await db.scalar(
         select(MailAttachment.id).where(MailAttachment.message_id == meta.message_id)
     )

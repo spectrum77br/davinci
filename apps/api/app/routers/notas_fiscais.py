@@ -17,6 +17,13 @@ Fluxo:
 Tokens: o cron `bling_notas_token_refresh` renova a cada 5h (AT dura 6h);
 se um token estiver vencido aqui, fazemos o refresh on-demand reusando os
 helpers do próprio cron (commit imediato — o Bling rotaciona o RT).
+
+Equipe de vendas (30/10/2026): quem é de uma equipe (101 Londres, 102
+Israel, 103 Marrocos) só vê no Pós Vendas os pedidos das lojas dela, e o XML
+de uma nota só sai se ela for de pedido da equipe (403
+`pedido_de_outra_equipe`). A consulta direta às contas de emissão (lista ao
+vivo e exports) mistura as notas de todas as equipes: fica só para quem não
+tem equipe. Admin e quem não tem equipe: como sempre.
 """
 from __future__ import annotations
 
@@ -38,13 +45,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from pydantic import BaseModel
-from sqlalchemy import func, literal, select
+from sqlalchemy import func, literal, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
+from app.deps.team_scope import resolve_team_scope
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -58,14 +66,6 @@ from app.models.enums import UserRole
 from app.models.nf import NfEtiquetaArquivo, NfNota
 from app.models.pricing import StoreInfo
 from app.schemas.products import JobCreatedOut
-from app.services.pos_vendas import (
-    JANELA_ANTES_DIAS,
-    JANELA_DEPOIS_DIAS,
-    Casamento,
-    NotaIn,
-    PedidoIn,
-    match_notas,
-)
 from app.services.bling_notas_token_refresh import (
     _apply_token_payload,
     _post_oauth_token,
@@ -73,6 +73,14 @@ from app.services.bling_notas_token_refresh import (
 from app.services.marketplaces.bling import (
     BLING_API_BASE,
     _acquire_bling_rate_slot,
+)
+from app.services.pos_vendas import (
+    JANELA_ANTES_DIAS,
+    JANELA_DEPOIS_DIAS,
+    Casamento,
+    NotaIn,
+    PedidoIn,
+    match_notas,
 )
 from app.worker_pool import get_arq_pool
 
@@ -297,14 +305,148 @@ _PERM = require_permission("notas_fiscais", "view")
 _ContaIds = Annotated[list[UUID], Query(alias="conta")]
 
 
+# ─── equipe de vendas ─────────────────────────────────────────────────
+#
+# Eduardo, 30/10/2026: três equipes — 101 Londres, 102 Israel, 103
+# Marrocos — e quem é de uma equipe só enxerga as lojas dela. Aqui a equipe
+# cerca os PEDIDOS do Pós Vendas pela loja do Bling (`BlingOrder.loja`), a
+# régua do Controle de Estoque.
+
+
+async def _lojas_da_equipe(session: AsyncSession, user: User) -> set[str] | None:
+    """Lojas do Bling (`BlingOrder.loja`) que o chamador enxerga. None = sem
+    cerca de equipe (admin / sem equipe). Vazio = equipe sem loja cadastrada:
+    não vê pedido nenhum (nunca "tudo")."""
+    scope = await resolve_team_scope(session, user)
+    if scope.unrestricted:
+        return None
+    return set(scope.bling_store_ids)
+
+
+async def _exigir_sem_equipe(session: AsyncSession, user: User) -> None:
+    """403 para quem é de equipe na consulta direta às contas de emissão
+    (lista ao vivo do Bling e exports): a conta de nota não é de loja — a
+    avulsa fatura para todas as equipes — e a lista traz nota que nem é de
+    pedido (entrada, devolução). Não dá para cercar pela loja sem adivinhar;
+    a equipe usa o Pós Vendas, que já vem cercado."""
+    if await _lojas_da_equipe(session, user) is not None:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "contas_de_todas_as_equipes",
+                "message": (
+                    "As contas de emissão misturam as notas de todas as "
+                    "equipes: essa consulta é só para quem não tem equipe."
+                ),
+            },
+        )
+
+
+def _so_digitos(valor: str | None) -> str:
+    return "".join(ch for ch in valor or "" if ch.isdigit())
+
+
+async def _nota_da_equipe(
+    session: AsyncSession,
+    lojas: set[str],
+    *,
+    pedido: str | None,
+    complemento: str | None,
+    cpf: str | None,
+    emissao: datetime | None,
+) -> bool:
+    """A nota é de pedido das `lojas`? As chaves do casamento do Pós Vendas
+    (`match_notas`), na mesma ordem de força:
+
+    1. chave exata — o pedido que a nota já traz (`nf_nota`, coletor) ou o
+       complemento == numeroloja (`bling_notas_emitidas`): se ela aponta
+       pedido, vale a loja DELE e o CPF nem é olhado (a nota do pedido de
+       outra equipe não vira da equipe porque o mesmo cliente comprou nas
+       duas); pedido sem loja da equipe barra;
+    2. sem chave exata: o CPF do destinatário num pedido da equipe enviado
+       na janela do casamento em torno da emissão. Cliente que comprou nas
+       duas equipes na mesma janela casa nas duas por aqui — o id da nota só
+       chega à tela da equipe dona da linha (o casamento é um só).
+
+    Nada disso → não dá para provar que é da equipe."""
+    if not lojas:
+        return False
+    bo = BlingOrder
+    exatas = []
+    if pedido:
+        exatas.append(bo.numero == pedido)
+    if complemento:
+        exatas.append(bo.numeroloja == complemento)
+    if exatas:
+        lojas_exatas = set(
+            (await session.execute(select(bo.loja).where(or_(*exatas)).distinct()))
+            .scalars()
+            .all()
+        )
+        if lojas_exatas:
+            return bool(lojas_exatas & lojas)
+    doc = _so_digitos(cpf)
+    if not doc or emissao is None:
+        return False
+    # Casador: envio − JANELA_ANTES ≤ emissão ≤ envio + JANELA_DEPOIS.
+    dia = emissao.date()
+    achou = (
+        await session.execute(
+            select(bo.numero)
+            .where(
+                bo.loja.in_(sorted(lojas)),
+                bo.em_andamento_data.between(
+                    dia - timedelta(days=JANELA_DEPOIS_DIAS),
+                    dia + timedelta(days=JANELA_ANTES_DIAS),
+                ),
+                func.regexp_replace(bo.documento_destinatario, "[^0-9]", "", "g") == doc,
+            )
+            .limit(1)
+        )
+    ).first()
+    return achou is not None
+
+
+async def _exigir_nota_da_equipe(
+    session: AsyncSession,
+    lojas: set[str] | None,
+    *,
+    pedido: str | None,
+    complemento: str | None,
+    cpf: str | None,
+    emissao: datetime | None,
+) -> None:
+    """403 `pedido_de_outra_equipe` (a régua do Controle de Estoque) se a
+    nota não é de pedido da equipe do chamador. `lojas` None = sem cerca.
+    Roda ANTES de pedir o XML ao Bling."""
+    if lojas is None:
+        return
+    if not await _nota_da_equipe(
+        session,
+        lojas,
+        pedido=pedido,
+        complemento=complemento,
+        cpf=cpf,
+        emissao=emissao,
+    ):
+        raise HTTPException(
+            403,
+            detail={
+                "code": "pedido_de_outra_equipe",
+                "message": "nota de pedido de outra equipe",
+            },
+        )
+
+
 # ─── endpoints ────────────────────────────────────────────────────────
 
 
 @router.get("/contas", response_model=ContasOut)
 async def list_contas(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(_PERM)],
+    user: Annotated[User, Depends(_PERM)],
 ) -> ContasOut:
+    await _exigir_sem_equipe(session, user)
     rows = (
         await session.execute(
             select(BlingNota)
@@ -318,11 +460,12 @@ async def list_contas(
 @router.get("", response_model=NotasPage)
 async def list_notas(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(_PERM)],
+    user: Annotated[User, Depends(_PERM)],
     date_from: date = Query(...),
     date_to: date = Query(...),
     conta: _ContaIds = [],  # noqa: B006
 ) -> NotasPage:
+    await _exigir_sem_equipe(session, user)
     _validate_range(date_from, date_to)
     rows, erros = await _fetch_all(session, conta, date_from, date_to)
     return NotasPage(
@@ -631,12 +774,13 @@ async def build_xlsx(
 @router.get("/export.xml")
 async def export_xml(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(_PERM)],
+    user: Annotated[User, Depends(_PERM)],
     date_from: date = Query(...),
     date_to: date = Query(...),
     conta: _ContaIds = [],  # noqa: B006
 ) -> StreamingResponse:
     """ZIP com os XMLs das notas do período (síncrono, até MAX_XML_NOTAS)."""
+    await _exigir_sem_equipe(session, user)
     _validate_range(date_from, date_to)
     rows, erros = await _fetch_all(session, conta, date_from, date_to)
     _check_export_size(rows, erros)
@@ -660,12 +804,13 @@ async def export_xml(
 @router.get("/export.xlsx")
 async def export_xlsx(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(_PERM)],
+    user: Annotated[User, Depends(_PERM)],
     date_from: date = Query(...),
     date_to: date = Query(...),
     conta: _ContaIds = [],  # noqa: B006
 ) -> StreamingResponse:
     """Planilha "NF-e Report" do período (síncrono, até MAX_XML_NOTAS)."""
+    await _exigir_sem_equipe(session, user)
     _validate_range(date_from, date_to)
     rows, erros = await _fetch_all(session, conta, date_from, date_to)
     _check_export_size(rows, erros)
@@ -711,6 +856,7 @@ async def enqueue_export_job(
     """Enfileira o export como BackgroundJob — sem o teto de 500 do
     síncrono (o worker foge do timeout do proxy). O front faz polling em
     GET /api/jobs/{id} e baixa em GET /export-job/{id}/download."""
+    await _exigir_sem_equipe(session, user)
     _validate_range(body.date_from, body.date_to)
     job = BackgroundJob(
         type=BackgroundJobType.EXPORT_NOTAS_FISCAIS,
@@ -740,7 +886,10 @@ async def download_export_job(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_PERM)],
 ) -> FileResponse:
-    """Baixa o arquivo gerado por um export job concluído."""
+    """Baixa o arquivo gerado por um export job concluído. Quem é de equipe
+    não baixa nem o que pediu antes de ganhar a equipe: o arquivo tem as
+    notas de todas."""
+    await _exigir_sem_equipe(session, user)
     job = await session.get(BackgroundJob, job_id)
     if job is None or job.type != BackgroundJobType.EXPORT_NOTAS_FISCAIS:
         raise HTTPException(404, detail={"code": "job_not_found"})
@@ -827,16 +976,31 @@ async def list_pos_vendas(
                 "message": f"período máximo de {MAX_POS_VENDAS_DAYS} dias",
             },
         )
-    items = await montar_pos_vendas(session, date_from, date_to)
+    items = await montar_pos_vendas(
+        session,
+        date_from,
+        date_to,
+        lojas_equipe=await _lojas_da_equipe(session, user),
+    )
     return PosVendasPage(items=items, total=len(items))
 
 
 async def montar_pos_vendas(
-    session: AsyncSession, date_from: date, date_to: date
+    session: AsyncSession,
+    date_from: date,
+    date_to: date,
+    *,
+    lojas_equipe: set[str] | None = None,
 ) -> list[PosVendaRowOut]:
     """As linhas do Pós Vendas (pedidos enviados no período + as duas notas
     casadas). Fora da rota porque o Vigia de Nota Cheia (Ouvidoria) confere
-    exatamente o que esta tela mostra."""
+    exatamente o que esta tela mostra.
+
+    `lojas_equipe` = cerca de equipe (None = todas; vazio = nenhuma). O
+    casamento roda com TODOS os pedidos do período e a cerca só escolhe as
+    linhas que saem: cada nota vai para um pedido só, e casar só os da
+    equipe deixaria a equipe com a nota (pelo CPF) que é do pedido de outra
+    — e a mesma linha sairia diferente para o admin."""
     bo = BlingOrder
     pedidos_rows = (
         await session.execute(
@@ -865,7 +1029,13 @@ async def montar_pos_vendas(
         )
     ).all()
 
-    numeros = [r.numero for r in pedidos_rows]
+    visiveis = [
+        r for r in pedidos_rows if lojas_equipe is None or r.loja in lojas_equipe
+    ]
+    if not visiveis:
+        return []
+
+    numeros = [r.numero for r in visiveis]
     # pedido → (liberada pro despacho, impressa pela 1ª vez)
     etiquetas: dict[str, tuple[datetime, datetime | None]] = {}
     if numeros:
@@ -1006,7 +1176,7 @@ async def montar_pos_vendas(
         return nota_by_key[key].model_copy(update={"via": via})
 
     items: list[PosVendaRowOut] = []
-    for r in pedidos_rows:
+    for r in visiveis:
         c = casamentos.get(r.numero) or Casamento()
         etq_emissao, etq_impressa = etiquetas.get(r.numero, (None, None))
         si = stores.get(r.loja) if r.loja else None
@@ -1045,7 +1215,10 @@ async def download_pos_venda_xml(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_PERM)],
 ) -> Response:
-    """XML autorizado de UMA nota (botão XML da tabela Pós Vendas)."""
+    """XML autorizado de UMA nota (botão XML da tabela Pós Vendas). Quem é
+    de equipe só baixa nota de pedido das lojas dela (403
+    `pedido_de_outra_equipe`)."""
+    lojas = await _lojas_da_equipe(session, user)
     ne = await session.get(BlingNotaEmitida, nota_id)
     if ne is None:
         # Nota vinda do coletor: o XML assinado já está guardado aqui, não
@@ -1053,6 +1226,14 @@ async def download_pos_venda_xml(
         n = await session.get(NfNota, nota_id)
         if n is None:
             raise HTTPException(404, detail={"code": "nota_nao_encontrada"})
+        await _exigir_nota_da_equipe(
+            session,
+            lojas,
+            pedido=n.pedido_bling,
+            complemento=None,  # o XML não repete o nº do marketplace
+            cpf=n.destinatario_doc,
+            emissao=n.data_emissao,
+        )
         return Response(
             content=n.xml,
             media_type="application/xml",
@@ -1060,6 +1241,14 @@ async def download_pos_venda_xml(
                 "Content-Disposition": f'attachment; filename="{n.chave}.xml"'
             },
         )
+    await _exigir_nota_da_equipe(
+        session,
+        lojas,
+        pedido=None,
+        complemento=ne.complemento,
+        cpf=ne.cpf_dest,
+        emissao=ne.data_emissao,
+    )
     conta = await session.get(BlingNota, ne.conta_id)
     if conta is None:
         raise HTTPException(404, detail={"code": "conta_nao_encontrada"})

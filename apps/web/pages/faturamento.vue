@@ -22,6 +22,7 @@ type FaturamentoLinha = {
   faturamento: number
   ticket_medio: number
 }
+type EquipeOpcao = { numero: number; nome: string }
 type FaturamentoOut = {
   itens: FaturamentoLinha[]
   total_pedidos: number
@@ -29,6 +30,8 @@ type FaturamentoOut = {
   start: string
   end: string
   teams: number[]
+  // As mesmas equipes de `teams`, com o nome (30/10/2026).
+  equipes?: EquipeOpcao[]
   team: number | null
 }
 
@@ -60,8 +63,11 @@ const data = ref<FaturamentoOut | null>(null)
 
 // Filtro de equipe: null = todas as lojas do escopo do usuário. O <select> só
 // aparece quando o backend devolve mais de uma equipe (admin ou multi-equipe).
+// Desde 30/10/2026 é a equipe de vendas pelo nome (Londres, Israel,
+// Marrocos); API sem `equipes` (a de antes) cai em "Equipe N".
 const team = ref<number | null>(null)
-const teams = computed(() => data.value?.teams ?? [])
+const equipes = computed<EquipeOpcao[]>(() => data.value?.equipes
+  ?? (data.value?.teams ?? []).map((numero) => ({ numero, nome: `Equipe ${numero}` })))
 const department = ref('')
 const mobileFiltersOpen = ref(false)
 // "Catálogo" saiu do filtro em 06/10/2026 (o catálogo do ML virou grupo
@@ -229,7 +235,7 @@ function fmtInt(n: number | null | undefined): string {
 
       <!-- Filtro de equipe: só aparece quando há mais de uma equipe disponível
            (admin ou usuário multi-equipe). null = todas as lojas do escopo. -->
-      <div v-if="teams.length > 1" class="faturamento-filter-group">
+      <div v-if="equipes.length > 1" class="faturamento-filter-group">
         <label for="faturamento-equipe" class="ml-2 text-xs text-muted-foreground">Equipe:</label>
         <select
           id="faturamento-equipe"
@@ -239,7 +245,7 @@ function fmtInt(n: number | null | undefined): string {
           @change="load"
         >
           <option :value="null">Todas as equipes</option>
-          <option v-for="t in teams" :key="t" :value="t">Equipe {{ t }}</option>
+          <option v-for="e in equipes" :key="e.numero" :value="e.numero">{{ e.nome }}</option>
         </select>
       </div>
 

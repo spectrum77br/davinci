@@ -30,7 +30,7 @@ from sqlalchemy.orm import selectinload
 
 from app.db import get_session
 from app.deps.auth import get_current_user, require_permission
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import TeamScope, clausula_conta, resolve_team_scope
 from app.models import (
     BlingOrder,
     Chamado,
@@ -857,14 +857,19 @@ async def delete_status_anexo(
 
 def _team_scope_clause(scope: TeamScope):
     """Restringe a Logística à equipe do usuário (não-admin com equipe). Casa
-    por `conta` (nome da conta normalizado) OU por `pedido_bling` de um pedido
-    das lojas da equipe (bling_orders.loja == bling_store_id). Retorna None
-    quando irrestrito (admin / sem equipe). Sem chaves = clause que zera."""
+    pela loja da linha — `plataforma` + `conta` — OU por `pedido_bling` de um
+    pedido das lojas da equipe (bling_orders.loja == bling_store_id). Retorna
+    None quando irrestrito (admin / sem equipe). Sem chaves = clause que zera.
+
+    A conta sozinha vazava (30/10/2026): "inova", "barbosa", "mega" e "eron"
+    são lojas de equipes diferentes em plataformas diferentes, e a Shopee
+    inova aparecia para a equipe do ML inova (`team_scope.clausula_conta`)."""
     if scope.unrestricted:
         return None
     ors = []
-    if scope.account_names:
-        ors.append(func.lower(func.btrim(Logistica.conta)).in_(scope.account_names))
+    pela_conta = clausula_conta(scope, Logistica.plataforma, Logistica.conta)
+    if pela_conta is not None:
+        ors.append(pela_conta)
     if scope.bling_store_ids:
         ors.append(
             Logistica.pedido_bling.in_(
@@ -876,6 +881,27 @@ def _team_scope_clause(scope: TeamScope):
     if not ors:
         return text("1=0")
     return or_(*ors)
+
+
+async def _exigir_linha_da_equipe(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> None:
+    """Os botões de uma linha (atualizar, mensagem e situação no Bling,
+    chamado, editar, excluir) só valem na linha que a pessoa enxerga na lista:
+    a de outra equipe é 404, como no Reembolso (30/10/2026)."""
+    clausula = _team_scope_clause(await resolve_team_scope(session, user))
+    if clausula is None:
+        return
+    linha = await session.execute(
+        select(Logistica.id).where(Logistica.id == logistica_id, clausula)
+    )
+    if linha.first() is None:
+        raise HTTPException(404, detail="Not Found")
+
+
+_DA_EQUIPE = [Depends(_exigir_linha_da_equipe)]
 
 
 # Aba Flex (02/10/2026): rótulos de `logistica.plataforma` que têm Flex — o
@@ -1113,7 +1139,11 @@ async def robo_foto(
     )
 
 
-@router.post("/{logistica_id}/suspender-entrega", response_model=LogisticaOut)
+@router.post(
+    "/{logistica_id}/suspender-entrega",
+    response_model=LogisticaOut,
+    dependencies=_DA_EQUIPE,
+)
 async def suspender_entrega(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1297,7 +1327,7 @@ async def create_logistica(
     )
 
 
-@router.post("/{logistica_id}/atualizar-meli", response_model=LogisticaOut)
+@router.post("/{logistica_id}/atualizar-meli", response_model=LogisticaOut, dependencies=_DA_EQUIPE)
 async def atualizar_meli(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1334,7 +1364,11 @@ async def atualizar_meli(
     )
 
 
-@router.post("/{logistica_id}/atualizar-shopee", response_model=LogisticaOut)
+@router.post(
+    "/{logistica_id}/atualizar-shopee",
+    response_model=LogisticaOut,
+    dependencies=_DA_EQUIPE,
+)
 async def atualizar_shopee(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1370,7 +1404,11 @@ async def atualizar_shopee(
     )
 
 
-@router.post("/{logistica_id}/atualizar-tiktok", response_model=LogisticaOut)
+@router.post(
+    "/{logistica_id}/atualizar-tiktok",
+    response_model=LogisticaOut,
+    dependencies=_DA_EQUIPE,
+)
 async def atualizar_tiktok(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1407,7 +1445,11 @@ async def atualizar_tiktok(
     )
 
 
-@router.post("/{logistica_id}/atualizar-amazon", response_model=LogisticaOut)
+@router.post(
+    "/{logistica_id}/atualizar-amazon",
+    response_model=LogisticaOut,
+    dependencies=_DA_EQUIPE,
+)
 async def atualizar_amazon(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1444,7 +1486,11 @@ async def atualizar_amazon(
     )
 
 
-@router.post("/{logistica_id}/atualizar-rastreio", response_model=AtualizarRastreioOut)
+@router.post(
+    "/{logistica_id}/atualizar-rastreio",
+    response_model=AtualizarRastreioOut,
+    dependencies=_DA_EQUIPE,
+)
 async def atualizar_rastreio(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1541,7 +1587,11 @@ async def atualizar_rastreio(
     )
 
 
-@router.post("/{logistica_id}/enviar-threema", response_model=EnviarThreemaOut)
+@router.post(
+    "/{logistica_id}/enviar-threema",
+    response_model=EnviarThreemaOut,
+    dependencies=_DA_EQUIPE,
+)
 async def enviar_threema_pedido(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1616,7 +1666,7 @@ async def _mensagem_chamado_para(session: AsyncSession, c: Logistica) -> str | N
     return None
 
 
-@router.post("/{logistica_id}/enviar-chamado", response_model=LogisticaOut)
+@router.post("/{logistica_id}/enviar-chamado", response_model=LogisticaOut, dependencies=_DA_EQUIPE)
 async def enviar_chamado(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1663,7 +1713,11 @@ async def enviar_chamado(
     )
 
 
-@router.post("/{logistica_id}/mensagem-bling/preview", response_model=MensagemBlingPreviewOut)
+@router.post(
+    "/{logistica_id}/mensagem-bling/preview",
+    response_model=MensagemBlingPreviewOut,
+    dependencies=_DA_EQUIPE,
+)
 async def preview_mensagem_bling(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1687,7 +1741,11 @@ async def preview_mensagem_bling(
     return MensagemBlingPreviewOut(**data)
 
 
-@router.post("/{logistica_id}/mensagem-bling", response_model=MensagemBlingOut)
+@router.post(
+    "/{logistica_id}/mensagem-bling",
+    response_model=MensagemBlingOut,
+    dependencies=_DA_EQUIPE,
+)
 async def aplicar_mensagem_bling(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1714,7 +1772,11 @@ async def aplicar_mensagem_bling(
     return MensagemBlingOut(**data)
 
 
-@router.post("/{logistica_id}/alterar-status-bling/preview", response_model=StatusBlingPreviewOut)
+@router.post(
+    "/{logistica_id}/alterar-status-bling/preview",
+    response_model=StatusBlingPreviewOut,
+    dependencies=_DA_EQUIPE,
+)
 async def preview_alterar_status_bling(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1740,7 +1802,11 @@ async def preview_alterar_status_bling(
     return StatusBlingPreviewOut(**data)
 
 
-@router.post("/{logistica_id}/alterar-status-bling", response_model=StatusBlingOut)
+@router.post(
+    "/{logistica_id}/alterar-status-bling",
+    response_model=StatusBlingOut,
+    dependencies=_DA_EQUIPE,
+)
 async def aplicar_alterar_status_bling(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1770,7 +1836,7 @@ async def aplicar_alterar_status_bling(
     return StatusBlingOut(**data)
 
 
-@router.patch("/{logistica_id}", response_model=LogisticaOut)
+@router.patch("/{logistica_id}", response_model=LogisticaOut, dependencies=_DA_EQUIPE)
 async def patch_logistica(
     logistica_id: UUID,
     body: LogisticaPatch,
@@ -1836,7 +1902,7 @@ async def patch_logistica(
     )
 
 
-@router.delete("/{logistica_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{logistica_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=_DA_EQUIPE)
 async def delete_logistica(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],

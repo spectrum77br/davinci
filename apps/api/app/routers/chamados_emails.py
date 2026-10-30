@@ -37,7 +37,7 @@ from app.deps.auth import require_permission
 from app.models import MailAttachment, User, UserRole
 from app.models.mail_atendimento import MailMessageMeta
 from app.routers.atendimento import SO_ADMIN as ATENDIMENTO_SO_ADMIN
-from app.routers.chamados import _get, _ids_do_caso
+from app.routers.chamados import _get_da_equipe, _ids_do_caso
 from app.security.cipher import decrypt_bytes, decrypt_json
 from app.services.atendimento import acesso
 from app.services.mail_atendimento import posvenda
@@ -121,7 +121,8 @@ async def ligar_email(
         session, user, [meta], ve_o_atendimento=_le_os_emails(user)
     ):
         raise HTTPException(404, detail={"code": "email_nao_encontrado"})
-    chamado = await _get(session, body.chamado_id)
+    # Equipe (30/10/2026): chamado de loja de outra equipe → 403, como na aba.
+    chamado = await _get_da_equipe(session, user, body.chamado_id)
     try:
         r = await posvenda.ligar_a_mao(session, meta, chamado, user)
     except posvenda.LigacaoError as e:
@@ -139,7 +140,7 @@ async def emails_do_chamado(
     response: Response,
 ) -> dict[str, Any]:
     """Os e-mails ligados ao chamado (às linhas do CASO, como o histórico)."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     response.headers["Cache-Control"] = "no-store"
     return await posvenda.emails_do_chamado(
         session, user, await _ids_do_caso(session, ch), ve_o_atendimento=_le_os_emails(user)

@@ -30,7 +30,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import HTMLResponse
-from sqlalchemy import Text, and_, case, cast, func, literal, or_, select
+from sqlalchemy import Text, and_, case, cast, false, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
@@ -38,6 +38,7 @@ from sqlalchemy.orm import defer, selectinload
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
+from app.deps.team_scope import TeamScope, clausula_conta, resolve_team_scope
 from app.models import (
     BlingOrder,
     Chamado,
@@ -47,6 +48,7 @@ from app.models import (
     ChamadoIaRegra,
     ChamadoLeitor,
     ChamadoMensagem,
+    ChamadoPedido,
     DevolucaoAnexo,
     Devolution,
     Logistica,
@@ -388,6 +390,130 @@ def _ler_anexo(file: UploadFile, raw: bytes) -> None:
         raise HTTPException(413, detail={"code": "chamado_anexo_muito_grande"})
 
 
+# ------------------------------------------------------------- equipe de vendas
+# Eduardo, 30/10/2026: três equipes — 101 Londres, 102 Israel, 103 Marrocos — e
+# cada uma só enxerga as lojas dela, em todas as telas. O chamado é da equipe do
+# PEDIDO: `pedido_bling` (ou, no chamado em lote, qualquer pedido de
+# `chamado_pedidos`) numa loja do Bling da equipe. Sem pedido no espelho (nº
+# digitado à mão, pedido fora do bling_orders), vale a conta da linha, pela
+# plataforma + nome (`team_scope.clausula_conta`, a régua da Logística e do
+# Reembolso). Com pedido no espelho, o pedido manda: a conta da linha não puxa
+# pra uma equipe o chamado de pedido da loja de outra. Admin e quem não tem
+# equipe: sem filtro, como sempre. Equipe sem loja nenhuma: não vê nada.
+_CHAMADO_FORA_DA_EQUIPE = "Esse chamado não é de uma loja da sua equipe."
+_PEDIDO_FORA_DA_EQUIPE = "Esse pedido não é de uma loja da sua equipe."
+
+
+def _clausula_equipe(scope: TeamScope):
+    """WHERE da equipe numa consulta com `chamados` no FROM; None = irrestrito.
+    Sem chave nenhuma (equipe sem loja), zera — nunca "tudo"."""
+    if scope.unrestricted:
+        return None
+    # correlate(Chamado) explícito: numa consulta que já tenha bling_orders no
+    # FROM, a auto-correlação levaria o espelho junto e o EXISTS ficaria sem FROM.
+    pedido_da_linha = (
+        select(BlingOrder.id)
+        .where(BlingOrder.numero == func.trim(Chamado.pedido_bling))
+        .correlate(Chamado)
+    )
+    pedido_do_lote = (
+        select(ChamadoPedido.id)
+        .join(BlingOrder, BlingOrder.numero == ChamadoPedido.pedido_bling)
+        .where(ChamadoPedido.chamado_id == Chamado.id)
+        .correlate(Chamado)
+    )
+    ors = []
+    if scope.bling_store_ids:
+        lojas = sorted(scope.bling_store_ids)
+        ors.append(pedido_da_linha.where(BlingOrder.loja.in_(lojas)).exists())
+        ors.append(pedido_do_lote.where(BlingOrder.loja.in_(lojas)).exists())
+    pela_conta = clausula_conta(scope, Chamado.plataforma, Chamado.conta)
+    if pela_conta is not None:
+        ors.append(and_(~pedido_da_linha.exists(), ~pedido_do_lote.exists(), pela_conta))
+    return or_(*ors) if ors else false()
+
+
+async def _clausula_do_usuario(session: AsyncSession, user: User):
+    """A cerca da equipe do usuário nos chamados (None = vê tudo)."""
+    return _clausula_equipe(await resolve_team_scope(session, user))
+
+
+def _fora_da_equipe(mensagem: str, **extra) -> HTTPException:
+    """403 `pedido_de_outra_equipe` — o código do Controle de Estoque. A tela
+    dos Chamados não traduz o código: mostra o `message`."""
+    return HTTPException(
+        403, detail={"code": "pedido_de_outra_equipe", **extra, "message": mensagem}
+    )
+
+
+async def _na_cerca(session: AsyncSession, clausula, chamado_id: UUID) -> bool:
+    return (
+        await session.execute(select(Chamado.id).where(Chamado.id == chamado_id, clausula))
+    ).scalar_one_or_none() is not None
+
+
+async def _exigir_da_equipe(session: AsyncSession, user: User, chamado_id: UUID) -> None:
+    """403 quando o chamado não é da equipe do usuário — a MESMA régua da
+    lista, no banco. Roda antes de mostrar ou mexer em qualquer coisa dele."""
+    clausula = await _clausula_do_usuario(session, user)
+    if clausula is not None and not await _na_cerca(session, clausula, chamado_id):
+        raise _fora_da_equipe(_CHAMADO_FORA_DA_EQUIPE)
+
+
+async def _get_da_equipe(session: AsyncSession, user: User, chamado_id: UUID) -> Chamado:
+    """`_get` com a cerca da equipe: 404 se não existe, 403 se é de outra equipe."""
+    ch = await _get(session, chamado_id)
+    await _exigir_da_equipe(session, user, ch.id)
+    return ch
+
+
+async def _exigir_pedido_achado_da_equipe(
+    session: AsyncSession, scope: TeamScope, digitado: str, info: dict | None
+) -> None:
+    """O pedido que o espelho ACHA — pelo nº do Bling ou pelo da plataforma
+    (`svc.lookup_pedido`) — tem de ser de loja da equipe. A cerca da lista só
+    compara o nº do Bling: sem isto, abrir chamado com o nº da plataforma de
+    um pedido de outra equipe copiava os dados dele (revisão de 30/10)."""
+    if scope.unrestricted or info is None:
+        return
+    numero = str(info.get("pedido_bling") or "")
+    da_equipe = bool(scope.bling_store_ids) and (
+        await session.execute(
+            select(BlingOrder.id)
+            .where(
+                BlingOrder.numero == numero,
+                BlingOrder.loja.in_(sorted(scope.bling_store_ids)),
+            )
+            .limit(1)
+        )
+    ).first() is not None
+    if not da_equipe:
+        raise _fora_da_equipe(_PEDIDO_FORA_DA_EQUIPE, pedidos=[digitado.strip()])
+
+
+async def _conferir_equipe_gravando(session: AsyncSession, user: User, ch: Chamado) -> None:
+    """Chamado novo (ou com pedido/conta/protocolo trocados) que a pessoa da
+    equipe não enxergaria depois: desfaz a transação e recusa — senão a linha
+    sumiria da tela de quem a gravou (o caso do Reembolso, 289662). E o caso
+    (protocolo + conta) não pode juntar linha de outra equipe: as mensagens
+    dela viriam junto. Admin e sem equipe: nada (nem o flush)."""
+    clausula = await _clausula_do_usuario(session, user)
+    if clausula is None:
+        return
+    await session.flush()
+    if not await _na_cerca(session, clausula, ch.id):
+        await session.rollback()
+        raise _fora_da_equipe(_PEDIDO_FORA_DA_EQUIPE)
+    irmas = [i for i in await _ids_do_caso(session, ch) if i != ch.id]
+    if irmas and (
+        await session.execute(
+            select(Chamado.id).where(Chamado.id.in_(irmas), ~clausula).limit(1)
+        )
+    ).first() is not None:
+        await session.rollback()
+        raise _fora_da_equipe(_CHAMADO_FORA_DA_EQUIPE)
+
+
 # ------------------------------------------------------------- estáticas
 # (antes das rotas /{chamado_id} — path param UUID não cai pro próximo match)
 
@@ -404,12 +530,17 @@ async def situacoes(
 @router.get("/pedido-lookup", response_model=ChamadoLookupOut)
 async def pedido_lookup(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "view"))],
+    user: Annotated[User, Depends(require_permission("chamados", "view"))],
     pedido: str = Query(..., min_length=1),
 ) -> ChamadoLookupOut:
     info = await svc.lookup_pedido(session, pedido)
     if info is None:
         raise HTTPException(404, detail={"code": "chamado_pedido_nao_encontrado"})
+    # Equipe (30/10/2026): é o 1º passo de abrir chamado, e a resposta traz os
+    # dados do pedido.
+    await _exigir_pedido_achado_da_equipe(
+        session, await resolve_team_scope(session, user), pedido, info
+    )
     return ChamadoLookupOut(**info)
 
 
@@ -417,13 +548,14 @@ async def pedido_lookup(
 async def get_anexo(
     anexo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "view"))],
+    user: Annotated[User, Depends(require_permission("chamados", "view"))],
 ) -> Response:
     a = (
         await session.execute(select(ChamadoAnexo).where(ChamadoAnexo.id == anexo_id))
     ).scalar_one_or_none()
     if a is None:
         raise HTTPException(404, detail={"code": "chamado_anexo_not_found"})
+    await _exigir_da_equipe(session, user, a.chamado_id)
     return Response(
         content=a.blob,
         media_type=a.content_type,
@@ -435,13 +567,14 @@ async def get_anexo(
 async def delete_anexo(
     anexo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> None:
     a = (
         await session.execute(select(ChamadoAnexo).where(ChamadoAnexo.id == anexo_id))
     ).scalar_one_or_none()
     if a is None:
         raise HTTPException(404, detail={"code": "chamado_anexo_not_found"})
+    await _exigir_da_equipe(session, user, a.chamado_id)
     await session.delete(a)
     await session.commit()
 
@@ -452,7 +585,7 @@ async def delete_anexo(
 @router.get("", response_model=ChamadoPage)
 async def list_chamados(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "view"))],
+    user: Annotated[User, Depends(require_permission("chamados", "view"))],
     search: str | None = Query(None),
     origem: str | None = Query(None),
     plataforma: str | None = Query(None),
@@ -462,7 +595,10 @@ async def list_chamados(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> ChamadoPage:
-    conds = []
+    # Equipe (30/10/2026): a cerca vale pras linhas, pro total e pros dropdowns
+    # de plataforma/conta (senão eles contam as lojas das outras equipes).
+    equipe = await _clausula_do_usuario(session, user)
+    conds = [] if equipe is None else [equipe]
     if juridico:
         # Aba Jurídico: tudo que já foi encaminhado, aberto ou resolvido.
         conds.append(Chamado.juridico_enviado_at.is_not(None))
@@ -510,12 +646,13 @@ async def list_chamados(
         .scalars()
         .all()
     )
+    q_plataformas = select(func.lower(Chamado.plataforma)).distinct()
+    if equipe is not None:
+        q_plataformas = q_plataformas.where(equipe)
     plataformas = sorted(
         {
             svc.plataforma_canonica(p)
-            for p in (
-                await session.execute(select(func.lower(Chamado.plataforma)).distinct())
-            ).scalars()
+            for p in (await session.execute(q_plataformas)).scalars()
             if (p or "").strip()
         }
     )
@@ -527,6 +664,8 @@ async def list_chamados(
         .group_by(func.lower(Chamado.conta))
         .order_by(func.lower(func.min(Chamado.conta)))
     )
+    if equipe is not None:
+        q_contas = q_contas.where(equipe)
     if cond_plataforma is not None:
         q_contas = q_contas.where(cond_plataforma)
     contas = [c for c in (await session.execute(q_contas)).scalars() if c]
@@ -564,6 +703,12 @@ async def create_chamado(
         observacao=body.observacao,
         created_by=user.id,
     )
+    scope = await resolve_team_scope(session, user)
+    if not scope.unrestricted:
+        digitado = ch.pedido_bling or ch.pedido_marketplace or ""
+        await _exigir_pedido_achado_da_equipe(
+            session, scope, digitado, await svc.lookup_pedido(session, digitado)
+        )
     # Espelho do pedido preenche o que veio vazio (data/pedidos/produto/sku/
     # conta/status). Sem pedido no espelho, fica o que o operador digitou.
     await svc.preencher_do_pedido(session, ch)
@@ -573,6 +718,8 @@ async def create_chamado(
         ch.data = datetime.now(svc.SAO_PAULO).date()
     session.add(ch)
     await session.flush()
+    # Equipe (30/10/2026): chamado de pedido (ou conta) de outra equipe não nasce.
+    await _conferir_equipe_gravando(session, user, ch)
     session.add(
         svc.registrar_sistema(ch, f"Chamado registrado (origem {ch.origem}) por {_autor(user)}")
     )
@@ -587,9 +734,9 @@ async def patch_chamado(
     chamado_id: UUID,
     body: ChamadoPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> ChamadoOut:
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     data = body.model_dump(exclude_unset=True)
     if "canal" in data and data["canal"] not in CANAIS:
         raise HTTPException(422, detail={"code": "chamado_canal_invalido"})
@@ -607,6 +754,17 @@ async def patch_chamado(
     if ligando_auto and ch.auto_ultimo_envio_at is None:
         # Ligar não dispara na hora: a 1ª réplica automática sai N dias depois.
         ch.auto_ultimo_envio_at = datetime.now(UTC)
+    if data.keys() & {"pedido_bling", "pedido_marketplace", "plataforma", "conta", "chamado"}:
+        # Equipe (30/10/2026): trocar o pedido/conta/protocolo não leva o
+        # chamado pra loja (nem pro caso) de outra equipe — é o mesmo que abrir
+        # chamado lá.
+        scope = await resolve_team_scope(session, user)
+        if not scope.unrestricted and data.keys() & {"pedido_bling", "pedido_marketplace"}:
+            digitado = ch.pedido_bling or ch.pedido_marketplace or ""
+            await _exigir_pedido_achado_da_equipe(
+                session, scope, digitado, await svc.lookup_pedido(session, digitado)
+            )
+        await _conferir_equipe_gravando(session, user, ch)
     await session.commit()
     await session.refresh(ch)
     return await _one_out(session, ch)
@@ -616,9 +774,9 @@ async def patch_chamado(
 async def delete_chamado(
     chamado_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "delete"))],
+    user: Annotated[User, Depends(require_permission("chamados", "delete"))],
 ) -> None:
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     await session.delete(ch)
     await session.commit()
 
@@ -726,9 +884,9 @@ async def _mensagens_do_caso(
 async def list_mensagens(
     chamado_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "view"))],
+    user: Annotated[User, Depends(require_permission("chamados", "view"))],
 ) -> list[ChamadoMensagemOut]:
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     rows = await _mensagens_do_caso(session, ch, com_anexos=True, sem_excluidas=True)
     out = [_mensagem_out(m) for m in rows]
     # 24/09: as análises da IA de Chamado levam o ✓/✗ (a pessoa avalia no histórico)
@@ -792,12 +950,12 @@ async def excluir_mensagem(
     ).scalar_one_or_none()
     if m is None or m.excluida_at is not None:
         raise HTTPException(404, detail={"code": "chamado_mensagem_not_found"})
+    ch = await _get_da_equipe(session, user, m.chamado_id)
     if m.tipo in _TIPOS_SEM_LIXEIRA:
         raise HTTPException(422, detail={"code": "chamado_mensagem_abertura"})
     if m.direcao == "enviada" and m.status == "enviando":
         raise HTTPException(422, detail={"code": "chamado_mensagem_na_fila"})
     cancelar = m.direcao == "enviada" and m.status == "pendente"
-    ch = await _get(session, m.chamado_id)
     alvo = [m]
     irmas = [i for i in await _ids_do_caso(session, ch) if i != ch.id]
     if irmas and m.created_at is not None:
@@ -851,7 +1009,7 @@ async def replicar(
     """Réplica MANUAL: grava no histórico (quem/quando), guarda as fotos e
     despacha pelo canal do chamado (api → ML na hora; robo → fila; manual →
     só registro). Falha de envio não perde a mensagem: fica `falhou` + erro."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     texto = (texto or "").strip()
     if not texto:
         raise HTTPException(422, detail={"code": "chamado_mensagem_vazia"})
@@ -909,7 +1067,7 @@ async def upload_anexo_auto(
     file: Annotated[UploadFile, File(...)],
 ) -> ChamadoAnexoOut:
     """Foto da RÉPLICA AUTOMÁTICA (vai junto de `auto_mensagem` a cada envio)."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     raw = await file.read()
     _ler_anexo(file, raw)
     a = ChamadoAnexo(
@@ -940,7 +1098,7 @@ async def encaminhar_juridico(
     """Encaminha o chamado ao jurídico: aviso no Threema (destinatários do
     Informar `juridico`) com o link do dossiê (histórico + fotos), carimba
     quem/quando e registra no histórico. Pode repetir (reenvio)."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     try:
         r = await chamados_juridico.encaminhar(session, ch, user, body.observacao)
     except svc.ChamadoError as e:
@@ -1023,7 +1181,7 @@ async def alterar_status_bling(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> AlterarStatusOut:
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     try:
         res = await svc.aplicar_status_bling(session, ch, body.situacao, actor_id=user.id)
     except svc.ChamadoError as e:
@@ -1052,7 +1210,7 @@ async def resolver(
     Vinicius 19/09: a janela mostra "status atual do Bling e o que vai trocar,
     obrigatório" (422 `chamado_situacao_obrigatoria`); chamado sem pedido no
     Bling não tem o que trocar, continua opcional. Reabrir não exige nada."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     if body.resolvido and body.valor_recuperado is None:
         raise HTTPException(422, detail={"code": "chamado_valor_obrigatorio"})
     if body.resolvido and (ch.pedido_bling or "").strip() and not body.situacao:
@@ -1131,7 +1289,7 @@ async def exclusao_preview(
     no Bling, se a nova situação é obrigatória, se a disputa já foi aberta na
     plataforma e os lançamentos de devolução do pedido (marcados por padrão os
     de motivo que abre chamado)."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     numero = (ch.pedido_bling or "").strip()
     status_map = await svc.status_bling_atual_map(session, {numero}) if numero else {}
     abertura_enviada = (
@@ -1215,7 +1373,7 @@ async def excluir_chamado(
     se ninguém mexeu (mesma regra da lixeira da aba Devoluções — caso 300978);
     a resposta diz quantos saíram e quais ficaram. A situação NÃO é mexida
     aqui além da que a pessoa escolheu."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     if (ch.pedido_bling or "").strip() and not body.situacao:
         raise HTTPException(422, detail={"code": "chamado_situacao_obrigatoria"})
     if body.devolucoes and not _pode(user, "devolucoes", "delete"):
@@ -1338,7 +1496,7 @@ async def reler_na_plataforma(
     de tela e a Shopee responde "The return you queried doesn't exist". Aqui
     "Atualizar" passa a significar FURAR A FILA da leitura — o caso vai pro topo
     e o robô o lê no próximo poll, em vez de bater numa porta que não existe."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     if await chamados_leitura.e_caso_de_tela(session, ch):
         cid = ch.id  # antes do commit: ele expira a linha (ver `sync_um`)
         await chamados_leitura.furar_a_fila(session, ch)
@@ -1374,7 +1532,7 @@ async def instruir_robo(
     Vale em qualquer canal e em chamado Encerrado (é o jeito de o robô voltar num
     caso que a plataforma fechou). Em Concluído (resolvido por pessoa) NÃO: a
     pessoa reabre pela aba antes de instruir — 422 `chamado_concluido` (19/09)."""
-    ch = await _get(session, chamado_id)
+    ch = await _get_da_equipe(session, user, chamado_id)
     if ch.resolvido:
         raise HTTPException(422, detail={"code": "chamado_concluido"})
     m = svc.nova_mensagem(

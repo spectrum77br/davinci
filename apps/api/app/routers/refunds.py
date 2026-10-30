@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import (
+    TeamScope,
+    clausula_conta,
+    conta_no_escopo,
+    resolve_team_scope,
+)
 from app.models import BlingOrder, Refund, SituacaoBling, User
 from app.schemas.refunds import (
     RefundCreate,
@@ -67,10 +72,10 @@ def _search_clause(search: str):
 
 def _team_scope_clause(scope: TeamScope, user_id: UUID):
     """Restringe os reembolsos à equipe do usuário (não-admin com equipe). Casa
-    por `created_by` (o que ele mesmo lançou) OU por `conta` (nome da conta
-    normalizado) OU por `pedido_bling` de um pedido das lojas da equipe
-    (bling_orders.loja == bling_store_id). Retorna None quando irrestrito
-    (admin / sem equipe).
+    por `created_by` (o que ele mesmo lançou) OU pela loja da linha
+    (`plataforma` + `conta`) OU por `pedido_bling` de um pedido das lojas da
+    equipe (bling_orders.loja == bling_store_id). Retorna None quando
+    irrestrito (admin / sem equipe).
 
     O ramo `created_by` NÃO é conveniência: o POST não valida escopo, então
     quem lançasse um reembolso de conta fora da própria equipe gravava uma
@@ -83,18 +88,19 @@ def _team_scope_clause(scope: TeamScope, user_id: UUID):
     é dele.
 
     Atenção ao casamento por `conta`: os reembolsos gravam o nome com a
-    plataforma na frente ("Shopee ATV") e `store_info.account_name` guarda só
-    "atv", então esse ramo não casa nada hoje (0 de 961 linhas em 18/09/2026).
-    Está mantido de propósito, para quando as duas grafias forem unificadas;
-    a visibilidade real vem do `pedido_bling` e, agora, do `created_by`.
+    plataforma na frente ("Shopee ATV", quase sempre com a coluna `plataforma`
+    vazia) e `store_info.account_name` guarda só "atv"; comparando o nome
+    sozinho esse ramo não casava nada (0 de 961 linhas em 18/09/2026). Desde
+    30/10/2026 casa pela plataforma + nome (`team_scope.clausula_conta`: o
+    prefixo, a coluna ou, sem nenhum dos dois, só o nome exclusivo da equipe),
+    para "inova" da Shopee não cair na equipe do "inova" do ML.
     """
     if scope.unrestricted:
         return None
     ors = [Refund.created_by == user_id]
-    if scope.account_names:
-        ors.append(
-            func.lower(func.btrim(Refund.conta)).in_(scope.account_names)
-        )
+    pela_conta = clausula_conta(scope, Refund.plataforma, Refund.conta)
+    if pela_conta is not None:
+        ors.append(pela_conta)
     if scope.bling_store_ids:
         ors.append(
             Refund.pedido_bling.in_(
@@ -104,6 +110,30 @@ def _team_scope_clause(scope: TeamScope, user_id: UUID):
             )
         )
     return or_(*ors)
+
+
+async def _pedido_de_outra_equipe(session: AsyncSession, scope: TeamScope, *pedidos: str) -> bool:
+    """O pedido (nº do Bling ou da plataforma) é de uma loja FORA da equipe do
+    usuário? Só diz sim quando o pedido existe no espelho do Bling e nenhuma
+    linha dele é de loja da equipe (30/10/2026, equipes: a busca e o custo do
+    pedido não mostram pedido de outra equipe). Irrestrito: nunca."""
+    if scope.unrestricted:
+        return False
+    numeros = [p.strip() for p in pedidos if p and p.strip()]
+    if not numeros:
+        return False
+    lojas = (
+        await session.execute(
+            select(BlingOrder.loja)
+            .where(or_(BlingOrder.numero.in_(numeros), BlingOrder.numeroloja.in_(numeros)))
+            .distinct()
+        )
+    ).scalars().all()
+    return bool(lojas) and not any(str(lj) in scope.bling_store_ids for lj in lojas if lj)
+
+
+def _erro_outra_equipe() -> HTTPException:
+    return HTTPException(403, detail={"code": "pedido_de_outra_equipe"})
 
 
 async def _situacoes_by_pedido(
@@ -306,8 +336,13 @@ async def export_refunds(
     data_inicio: date | None = Query(None),
     data_fim: date | None = Query(None),
 ) -> StreamingResponse:
-    """Exporta os reembolsos (com os mesmos filtros da lista) em XLSX."""
+    """Exporta os reembolsos (com os mesmos filtros da lista) em XLSX — e o
+    mesmo recorte de equipe da lista (30/10/2026: o botão é escondido na tela,
+    mas a rota estava aberta para quem chamasse direto)."""
     where = _build_where(search, platform, tipo, conferido, data_inicio, data_fim)
+    team_clause = _team_scope_clause(await resolve_team_scope(session, _u), _u.id)
+    if team_clause is not None:
+        where = [*where, team_clause]
     rows = (
         await session.execute(
             select(Refund)
@@ -461,6 +496,8 @@ async def lookup_refund_order(
     pedido = pedido.strip()
     if not pedido:
         raise HTTPException(422, detail={"code": "pedido_required"})
+    if await _pedido_de_outra_equipe(session, await resolve_team_scope(session, _u), pedido):
+        raise _erro_outra_equipe()
 
     params = {"pedido": pedido, "pedido_bling": None}
 
@@ -551,12 +588,12 @@ async def _reembolsos_ja_lancados(
     # ela já poderia ver na lista: fora disso vai só a existência e a data, que
     # bastam para ela parar e perguntar, sem expor número de outra equipe.
     scope = await resolve_team_scope(session, user)
-    contas_visiveis = set() if scope.unrestricted else scope.account_names
 
     def _visivel(r: Refund) -> bool:
         if scope.unrestricted or r.created_by == user.id:
             return True
-        return (r.conta or "").strip().lower() in contas_visiveis
+        # A mesma régua da conta na lista (plataforma + nome, 30/10/2026).
+        return conta_no_escopo(scope, r.plataforma, r.conta)
 
     return {
         "reembolsos_existentes": len(achados),
@@ -586,6 +623,8 @@ async def get_order_cost(
     conta = conta.strip()
     if not pedido_bling or not conta:
         raise HTTPException(422, detail={"code": "pedido_and_conta_required"})
+    if await _pedido_de_outra_equipe(session, await resolve_team_scope(session, _u), pedido_bling):
+        raise _erro_outra_equipe()
 
     row = (
         await session.execute(
@@ -656,7 +695,13 @@ async def patch_refund(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("reembolso", "edit"))],
 ) -> RefundOut:
-    row = (await session.execute(select(Refund).where(Refund.id == refund_id))).scalar_one_or_none()
+    # Só a linha que a pessoa enxerga na lista (o recorte de equipe): a de
+    # outra equipe é "não encontrada" (30/10/2026).
+    onde = [Refund.id == refund_id]
+    team_clause = _team_scope_clause(await resolve_team_scope(session, _u), _u.id)
+    if team_clause is not None:
+        onde.append(team_clause)
+    row = (await session.execute(select(Refund).where(*onde))).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "refund_not_found"})
 
@@ -707,7 +752,11 @@ async def delete_refund(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("reembolso", "delete"))],
 ) -> None:
-    row = (await session.execute(select(Refund).where(Refund.id == refund_id))).scalar_one_or_none()
+    onde = [Refund.id == refund_id]
+    team_clause = _team_scope_clause(await resolve_team_scope(session, _u), _u.id)
+    if team_clause is not None:
+        onde.append(team_clause)
+    row = (await session.execute(select(Refund).where(*onde))).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "refund_not_found"})
     pedido_bling = row.pedido_bling

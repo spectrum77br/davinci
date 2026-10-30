@@ -7,6 +7,9 @@ Cobre:
     max(total) (não a soma das linhas).
   * situacao faturável ('6', '15', '83953') conta; demais são ignoradas; o
     filtro de período funciona.
+  * Filtro "Equipe" = equipe de vendas com nome (30/10/2026): admin vê
+    Londres/Israel/Marrocos, 102 traz só Israel, quem é de equipe não pede
+    a de outra (403).
 """
 from __future__ import annotations
 
@@ -265,3 +268,165 @@ async def test_mesma_equipe_comercial_preserva_contas_individuais(
     response = await client.get("/api/faturamento", params={"team": 1})
     assert response.status_code == 200, response.text
     assert {row["store_id"] for row in response.json()["itens"]} == {lojas["ml"]["store_id"]}
+
+
+# ── Filtro "Equipe" pelas equipes de vendas (30/10/2026) ────────────────────
+# 101 Londres e 102 Israel (Celular/Eletro), 103 Marrocos (Mala). A comercial
+# é 1 em toda loja, como na produção: se ela voltasse a ser o filtro, a tela
+# teria uma equipe só e o <select> sumiria.
+async def _seed_tres_equipes(db: AsyncSession, owner: User) -> dict[str, str]:
+    plano = (
+        ("londres_ml", "2101", "ml", 101),
+        ("londres_shopee", "2102", "shopee", 101),
+        ("israel_ml", "2201", "ml", 102),
+        ("israel_amazon", "2202", "amazon", 102),
+        ("marrocos_ml", "2301", "ml", 103),
+        ("sem_equipe", "2401", "magalu", None),
+    )
+    lojas: dict[str, str] = {}
+    for chave, bling_store_id, plataforma, equipe in plano:
+        si = StoreInfo(
+            user_id=owner.id,
+            platform=plataforma,
+            account_name=chave,
+            bling_store_id=bling_store_id,
+            sales_team=equipe,
+            commercial_team=1,
+        )
+        db.add(si)
+        await db.flush()
+        lojas[chave] = str(si.id)
+    await db.commit()
+    return lojas
+
+
+async def _seed_vendas_das_equipes(db: AsyncSession, lojas: dict[str, str]) -> None:
+    vendas = (
+        (9101, "londres_ml", "100.00", 1),
+        (9201, "israel_ml", "200.00", 2),
+        (9202, "israel_amazon", "50.00", 1),
+        (9301, "marrocos_ml", "400.00", 1),
+    )
+    for bling_id, chave, total, n_itens in vendas:
+        await _seed_pedido(
+            db,
+            bling_id=bling_id,
+            store_id=lojas[chave],
+            total=Decimal(total),
+            data=_HOJE,
+            n_itens=n_itens,
+        )
+    # Pedido de loja sem cadastro: só entra na visão sem filtro de equipe.
+    db.add(
+        BlingOrder(
+            bling_id=9901,
+            numero="9901",
+            item_codigo="sku-orfao",
+            item_index=0,
+            situacao="83953",
+            total=Decimal("70.00"),
+            data=_HOJE,
+            loja="9999",
+        )
+    )
+    await db.commit()
+
+
+def _faturamento_params(**extra) -> dict:
+    return {"start": _PERIODO[0], "end": _PERIODO[1], **extra}
+
+
+_TRES_EQUIPES = [
+    {"numero": 101, "nome": "Londres"},
+    {"numero": 102, "nome": "Israel"},
+    {"numero": 103, "nome": "Marrocos"},
+]
+
+
+@pytest.mark.asyncio
+async def test_equipe_admin_ve_londres_israel_marrocos(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable[[User | None], None], owner: User
+):
+    lojas = await _seed_tres_equipes(db, owner)
+    await _seed_vendas_das_equipes(db, lojas)
+    auth_as(await _seed_user(db, role=UserRole.ADMIN, sales_teams=None))
+
+    r = await client.get("/api/faturamento", params=_faturamento_params())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["equipes"] == _TRES_EQUIPES
+    # A lista antiga, só com os números, segue igual para quem já a lê.
+    assert body["teams"] == [101, 102, 103]
+    assert body["team"] is None
+    # Sem filtro: todas as lojas (até a sem equipe) e o pedido órfão.
+    ids = {it["store_id"] for it in body["itens"]}
+    assert set(lojas.values()) <= ids
+    assert "9999" in ids
+    assert body["total_pedidos"] == 5
+    assert Decimal(str(body["total_faturamento"])) == Decimal("820.00")
+
+    # A equipe comercial (1 em toda loja) não é mais o filtro.
+    r = await client.get("/api/faturamento", params=_faturamento_params(team=1))
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"]["code"] == "team_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_equipe_filtro_102_traz_so_lojas_de_israel(
+    db: AsyncSession, client: AsyncClient, auth_as: Callable[[User | None], None], owner: User
+):
+    lojas = await _seed_tres_equipes(db, owner)
+    await _seed_vendas_das_equipes(db, lojas)
+    auth_as(await _seed_user(db, role=UserRole.ADMIN, sales_teams=None))
+
+    r = await client.get("/api/faturamento", params=_faturamento_params(team=102))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    israel = {lojas["israel_ml"], lojas["israel_amazon"]}
+    assert {it["store_id"] for it in body["itens"]} == israel
+    # O pedido de 2 itens conta uma vez; Londres, Marrocos e o órfão ficam fora.
+    assert body["total_pedidos"] == 2
+    assert Decimal(str(body["total_faturamento"])) == Decimal("250.00")
+    assert body["team"] == 102
+    # As opções não encolhem com o filtro: dá para trocar de equipe.
+    assert body["equipes"] == _TRES_EQUIPES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("equipes_do_usuario", "outras"), (([102], (101, 103)), ([101, 102], (103,)))
+)
+async def test_equipe_usuario_de_equipe_nao_pede_a_de_outra(
+    db: AsyncSession,
+    client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+    owner: User,
+    equipes_do_usuario: list[int],
+    outras: tuple[int, ...],
+):
+    lojas = await _seed_tres_equipes(db, owner)
+    await _seed_vendas_das_equipes(db, lojas)
+    auth_as(await _seed_user(db, role=UserRole.USER, sales_teams=equipes_do_usuario))
+    das_equipes = {
+        101: {lojas["londres_ml"], lojas["londres_shopee"]},
+        102: {lojas["israel_ml"], lojas["israel_amazon"]},
+    }
+
+    r = await client.get("/api/faturamento", params=_faturamento_params())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Só as lojas dele, sem a sem-equipe nem o órfão; o filtro só oferece as
+    # equipes dele (uma só → a tela esconde o <select>).
+    minhas = set().union(*(das_equipes[n] for n in equipes_do_usuario))
+    assert {it["store_id"] for it in body["itens"]} == minhas
+    assert body["equipes"] == [e for e in _TRES_EQUIPES if e["numero"] in equipes_do_usuario]
+    assert body["teams"] == equipes_do_usuario
+
+    r = await client.get("/api/faturamento", params=_faturamento_params(team=102))
+    assert r.status_code == 200, r.text
+    assert {it["store_id"] for it in r.json()["itens"]} == das_equipes[102]
+
+    for outra in outras:
+        r = await client.get("/api/faturamento", params=_faturamento_params(team=outra))
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "team_not_allowed"

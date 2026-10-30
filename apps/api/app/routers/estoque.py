@@ -24,6 +24,9 @@ Scoping:
     orders whose SKU ends with `.{stock_tag}` and `situacao = 'A'`,
     `formato = 'S'` (simples — kits aren't operated by warehouse).
   * Anyone without role=admin AND without stock_tag → 403.
+  * Equipe de vendas (30/10/2026): quem tem equipe (users.sales_teams) só vê
+    os PEDIDOS das lojas dela (BlingOrder.loja), POR CIMA da tag — lista,
+    atrasados, envios, vídeos, etiquetas e chamados. Estoque não muda.
 """
 from __future__ import annotations
 
@@ -36,12 +39,13 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import Date, and_, cast, func, or_, select
+from sqlalchemy import Date, and_, cast, exists, false, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
+from app.deps.team_scope import nome_da_equipe, resolve_team_scope
 from app.models import (
     BlingEnvioEvento,
     BlingOrder,
@@ -265,6 +269,62 @@ def _tags_pedidos(user: User, tag: str | None) -> list[str] | None:
     if user.role != UserRole.ADMIN and _pedidos_todas_tags(user):
         return _parse_tag_override(tag) or None
     return _resolve_tags(user, tag)
+
+
+# Equipe de vendas (Eduardo, 30/10/2026: 101 Londres, 102 Israel, 103
+# Marrocos — cada uma só enxerga as lojas dela). Aqui a equipe cerca os
+# PEDIDOS pela loja do Bling, por cima da tag (interseção, nunca no lugar
+# dela). Estoque fica de fora: o saldo é do galpão, não da loja. Admin e quem
+# não tem equipe (o pessoal do galpão) seguem vendo como sempre.
+
+
+async def _lojas_da_equipe(session: AsyncSession, user: User) -> set[str] | None:
+    """Lojas do Bling (`BlingOrder.loja`) que o chamador enxerga. None = sem
+    cerca de equipe. Vazio = equipe sem loja cadastrada: não vê pedido
+    nenhum (nunca "tudo")."""
+    scope = await resolve_team_scope(session, user)
+    if scope.unrestricted:
+        return None
+    return set(scope.bling_store_ids)
+
+
+def _na_equipe(coluna, lojas: set[str] | None):
+    """WHERE da cerca de equipe numa coluna de loja; None = sem cerca."""
+    if lojas is None:
+        return None
+    if not lojas:
+        return false()
+    return coluna.in_(sorted(lojas))
+
+
+def _equipe_out(user: User, lojas: set[str] | None) -> dict[str, Any] | None:
+    """Pra tela avisar que a lista está cercada pela equipe (None = não está)."""
+    if lojas is None:
+        return None
+    numeros: set[int] = set()
+    for t in user.sales_teams or []:
+        try:
+            numeros.add(int(t))
+        except (TypeError, ValueError):
+            continue
+    return {
+        "numeros": sorted(numeros),
+        "nomes": [nome_da_equipe(n) for n in sorted(numeros)],
+    }
+
+
+async def _exigir_pedido_da_equipe(session: AsyncSession, user: User, pedidos: list[str]) -> None:
+    """403 `pedido_de_outra_equipe` se algum dos `pedidos` não é de loja da
+    equipe do chamador. Pedido que nem está no espelho do Bling também barra:
+    não dá pra provar que é da equipe. Roda ANTES de olhar etiqueta/vídeo/
+    chamado, pra resposta não contar o que existe no pedido de outra equipe."""
+    lojas = await _lojas_da_equipe(session, user)
+    if lojas is None:
+        return
+    da_equipe = await _pedidos_na_cerca(session, pedidos, None, lojas=lojas)
+    fora = [p for p in pedidos if p not in da_equipe]
+    if fora:
+        raise HTTPException(403, detail={"code": "pedido_de_outra_equipe", "pedidos": fora})
 
 
 def _resolve_dates(
@@ -532,6 +592,9 @@ async def list_estoque_pedidos(
     # Gerente de etiquetas: sem cerca de tag AQUI (e só aqui — o /produtos
     # e o /envios continuam passando por _resolve_tags).
     tags = _tags_pedidos(user, tag)
+    # Equipe de vendas (30/10/2026): só as lojas da equipe, por cima da tag.
+    lojas = await _lojas_da_equipe(session, user)
+    cerca_equipe = _na_equipe(BlingOrder.loja, lojas)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
     # HOJE em BRT — usado tanto no corte anti-zumbi quanto no "pin" da
@@ -580,6 +643,8 @@ async def list_estoque_pedidos(
         # BlingOrder.item_codigo since pedidos are filtered by the
         # ordered item's SKU.
         where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
+    if cerca_equipe is not None:
+        where.append(cerca_equipe)
 
     # Data de referência: ship date se confirmado, senão HOJE (BRT).
     effective_date = func.coalesce(BlingOrder.em_andamento_data, today_brt)
@@ -959,7 +1024,8 @@ async def list_estoque_pedidos(
     # effective_date desses é a própria em_andamento_data (passada), então
     # eles NÃO aparecem no filtro de hoje — por isso a contagem vem à
     # parte. O chip "atrasados" no topo da aba os mostra quando o operador
-    # está no dia de hoje. Respeita o filtro de tag (mesma regra da lista).
+    # está no dia de hoje. Respeita o filtro de tag e a equipe (mesma regra
+    # da lista).
     atr_where: list = [
         BlingOrder.situacao.in_(_SITUACOES_ENVIADO_ETIQUETA),
         BlingOrder.em_andamento_data.isnot(None),
@@ -969,6 +1035,8 @@ async def list_estoque_pedidos(
     ]
     if tags is not None:
         atr_where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
+    if cerca_equipe is not None:
+        atr_where.append(cerca_equipe)
     atrasados_rows = (await session.execute(
         select(
             BlingOrder.em_andamento_data,
@@ -986,6 +1054,8 @@ async def list_estoque_pedidos(
         "data": result,
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
         "atrasados": atrasados,
+        # Lista cercada pela equipe de vendas? (None = não; a tela avisa.)
+        "equipe": _equipe_out(user, lojas),
     }
 
 
@@ -1042,6 +1112,13 @@ async def marcar_previsoes_impressas(
     imprimir o papel pode carimbar — não é edição de dado de negócio.
     """
     numeros = sorted({(n or "").strip() for n in payload.pedidos} - {""})
+    lojas = await _lojas_da_equipe(session, user)
+    if lojas is not None and numeros:
+        # Equipe (30/10/2026): só carimba o papel das lojas dela — o carimbo
+        # aparece na tela da outra equipe como "já separado". Pula em vez de
+        # recusar: o papel já saiu e a tela não espera resposta.
+        da_equipe = await _pedidos_na_cerca(session, numeros, None, lojas=lojas)
+        numeros = [n for n in numeros if n in da_equipe]
     if not numeros:
         return {"marcados": 0}
     stmt = (
@@ -1154,9 +1231,16 @@ async def get_pedidos_etiquetas_lote(
     IGNORADOS (o operador seleciona um bloco e imprime o que está pronto) —
     404 só quando nenhum dos selecionados tem etiqueta. Carimba `impressa_em`
     nos que entraram no PDF, pra tela marcar "Impressa" e evitar duplicidade.
+
+    Equipe (30/10/2026): pedido de loja de outra equipe RECUSA o lote inteiro
+    (403 `pedido_de_outra_equipe`, com a lista) em vez de ser pulado. A tela
+    da equipe só mostra os pedidos dela, então isso só acontece com seleção
+    velha ou forjada; pular entregaria um PDF faltando etiqueta sem ninguém
+    perceber. Recusando, nada sai na impressora e nada é carimbado.
     """
     # dict.fromkeys: dedupe preservando a ordem da seleção.
     pedidos = [p for p in dict.fromkeys(payload.pedidos) if p]
+    await _exigir_pedido_da_equipe(session, user, pedidos)
     rows = (
         await session.execute(
             select(NfEtiquetaArquivo).where(
@@ -1224,7 +1308,9 @@ async def get_pedido_etiqueta(
 
     Autenticado por cookie — o botão "Imprimir Etiqueta" abre a URL numa aba
     nova e o browser manda o cookie sozinho. 404 se ainda não há etiqueta
-    (a etapa de visualização da NF automática não rodou pra este pedido)."""
+    (a etapa de visualização da NF automática não rodou pra este pedido).
+    Quem tem equipe só abre etiqueta de pedido das lojas dela (403)."""
+    await _exigir_pedido_da_equipe(session, user, [pedido_bling])
     row = (
         await session.execute(
             select(NfEtiquetaArquivo).where(
@@ -1299,6 +1385,8 @@ async def abrir_chamado_pedido(
     reclamação do comprador — nelas o botão devolve o motivo em vez de criar
     uma linha que ninguém vai enviar."""
     pedido = (pedido_bling or "").strip()
+    # Equipe (30/10/2026): não fala com o marketplace por loja de outra equipe.
+    await _exigir_pedido_da_equipe(session, user, [pedido])
     itens = list(
         (
             await session.execute(select(BlingOrder).where(BlingOrder.numero == pedido))
@@ -1424,10 +1512,12 @@ async def chamados_atraso_preview(
     grava nada. Mesmas DUAS permissões do botão de pedido parado."""
     from app.services import chamados_atraso
 
+    tags = _tags_pedidos(user, None)
     return await chamados_atraso.montar(
         session,
         body.pedidos,
-        tags=_tags_pedidos(user, None),
+        tags=tags,
+        lojas_equipe=await _lojas_da_equipe(session, user),
         motivos=body.motivos,
         incluir=body.incluir,
         motivo_outro=body.motivo_outro,
@@ -1447,12 +1537,15 @@ async def chamados_atraso_abrir(
     pronto pra abrir no Seller Center. Cada pedido fica ligado ao chamado."""
     from app.services import chamados_atraso
 
+    tags = _tags_pedidos(user, None)
+    lojas = await _lojas_da_equipe(session, user)
     try:
         abertos = await chamados_atraso.abrir(
             session,
             [g.model_dump() for g in body.grupos],
             user=user,
-            tags=_tags_pedidos(user, None),
+            tags=tags,
+            lojas_equipe=lojas,
         )
     except chamados_atraso.AtrasoError as e:
         await session.rollback()
@@ -1484,6 +1577,7 @@ async def list_estoque_envios(
     ),
 ) -> dict[str, Any]:
     tags = _resolve_tags(user, tag)
+    lojas = await _lojas_da_equipe(session, user)
     # Envios tab defaults to last 7 days when no window is set, matching
     # the page's date-picker default.
     today = datetime.now(_BRT).date()
@@ -1504,6 +1598,16 @@ async def list_estoque_envios(
     if tags is not None:
         ledger_where.append(
             or_(*[_sql_clause_for_tag(BlingEnvioEvento.item_codigo, t) for t in tags])
+        )
+    if lojas is not None:
+        # Equipe (30/10/2026): o ledger não guarda a loja — o evento é da
+        # equipe quando o pedido dele (mesmo bling_id) é de loja dela. Vale
+        # também pros vídeos do dia, que reusam este `ledger_where`.
+        ledger_where.append(
+            exists().where(
+                BlingOrder.bling_id == BlingEnvioEvento.bling_id,
+                _na_equipe(BlingOrder.loja, lojas),
+            )
         )
     ledger_rows = (
         await session.execute(
@@ -1615,6 +1719,8 @@ async def list_estoque_envios(
         "total_envios": total_envios,
         "total_conferido": total_conferido,
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
+        # Contagem cercada pela equipe de vendas? (None = não; a tela avisa.)
+        "equipe": _equipe_out(user, lojas),
     }
 
 
@@ -2414,15 +2520,23 @@ def _videos_pendentes_where():
 
 
 async def _pedidos_na_cerca(
-    session: AsyncSession, pedidos: list[str], tags: list[str] | None
+    session: AsyncSession,
+    pedidos: list[str],
+    tags: list[str] | None,
+    *,
+    lojas: set[str] | None = None,
 ) -> set[str]:
     """Dentre `pedidos`, os que têm ALGUM item cujo SKU cai nas `tags` do
-    chamador (None = sem cerca). Mesma clause da aba Pedidos."""
+    chamador (None = sem cerca) e, se `lojas` vier, de loja da equipe dele
+    (None = sem cerca de equipe). Mesmas clauses da aba Pedidos."""
     if not pedidos:
         return set()
     where = [BlingOrder.numero.in_(pedidos)]
     if tags is not None:
         where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
+    cerca_equipe = _na_equipe(BlingOrder.loja, lojas)
+    if cerca_equipe is not None:
+        where.append(cerca_equipe)
     rows = (
         await session.execute(select(BlingOrder.numero).where(and_(*where)).distinct())
     ).scalars().all()
@@ -2440,8 +2554,10 @@ async def list_videos_pendentes(
     dia: a trava vale enquanto houver pendência. Uma entrada por PEDIDO, com
     os itens dentro (a tela mostra pedido, cliente, SKU, qtd e etiqueta).
     `trava` = True quando algum item cai numa tag marcada em "Trava de vídeo"
-    no cadastro do chamador (tranca a aba); False = só aviso."""
+    no cadastro do chamador (tranca a aba); False = só aviso. Quem tem equipe
+    de vendas só vê (e só tranca por) pedido das lojas dela."""
     tags = _tags_pedidos(user, tag)
+    lojas = await _lojas_da_equipe(session, user)
     trava_tags: set[str] = set()
     if user.role != UserRole.ADMIN:
         trava_tags = {
@@ -2456,7 +2572,9 @@ async def list_videos_pendentes(
     ).scalars().all()
     if not pendentes:
         return {"data": [], "total": 0}
-    visiveis = await _pedidos_na_cerca(session, [r.pedido_bling for r in pendentes], tags)
+    visiveis = await _pedidos_na_cerca(
+        session, [r.pedido_bling for r in pendentes], tags, lojas=lojas
+    )
     pendentes = [r for r in pendentes if r.pedido_bling in visiveis]
     if not pendentes:
         return {"data": [], "total": 0}
@@ -2582,6 +2700,9 @@ async def responder_video_pendente(
             422, detail={"code": "motivo_curto", "message": "Explique por que não tem o vídeo"}
         )
 
+    # Equipe (30/10/2026): antes de olhar a pendência, pra não contar o que
+    # existe no pedido de outra equipe.
+    await _exigir_pedido_da_equipe(session, user, [pedido_bling])
     row = await session.get(DevolucaoRastreio, pedido_bling)
     if row is None or row.video_solicitado_em is None or row.video_enviado_em is not None:
         raise HTTPException(404, detail={"code": "video_nao_pendente"})
@@ -2723,9 +2844,11 @@ async def salvar_video_pedido(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
 ) -> dict[str, Any]:
-    """Salva (ou troca) o link do vídeo da embalagem do pedido."""
+    """Salva (ou troca) o link do vídeo da embalagem do pedido. Quem tem
+    equipe de vendas só mexe em pedido das lojas dela (403)."""
     pedido_bling = pedido_bling.strip()
     link = normalizar_link_mega(body.link)
+    await _exigir_pedido_da_equipe(session, user, [pedido_bling])
     existe = (
         await session.execute(
             select(BlingOrder.numero).where(BlingOrder.numero == pedido_bling).limit(1)
@@ -2757,7 +2880,9 @@ async def remover_video_pedido(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
 ) -> Response:
-    """Tira o link (colado no pedido errado, por exemplo)."""
+    """Tira o link (colado no pedido errado, por exemplo). Equipe: só de
+    pedido das lojas dela (403), checado antes de dizer se há vídeo."""
+    await _exigir_pedido_da_equipe(session, user, [pedido_bling.strip()])
     row = await session.get(EstoquePedidoVideo, pedido_bling.strip())
     if row is None:
         raise HTTPException(404, detail={"code": "video_nao_encontrado"})

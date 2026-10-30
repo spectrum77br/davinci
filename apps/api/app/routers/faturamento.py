@@ -17,6 +17,9 @@ Definições fixadas com o operador:
   escopo de quem é restrito a equipes (órfão não tem equipe).
 - Escopo por equipe via user_scope(StoreInfo, user) + filtro `team`. Admin
   vê tudo; usuário com sales_teams vê só lojas da(s) sua(s) equipe(s).
+- O filtro "Equipe" é a equipe de VENDAS (store_info.sales_team), com nome:
+  101 Londres, 102 Israel, 103 Marrocos (30/10/2026). A comercial
+  (commercial_team) segue no Valuation, não aqui.
 - Período: default últimos 90 dias.
 """
 from __future__ import annotations
@@ -25,16 +28,32 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
+from app.deps.team_scope import nome_da_equipe
 from app.models import BlingOrder, Segment, StoreInfo, User, UserRole
 from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut
 from app.services.store_departments import resolve_store_departments
 
 router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
+
+
+class EquipeFaturamento(BaseModel):
+    """Uma opção do filtro "Equipe": o número de store_info.sales_team e o nome."""
+
+    numero: int
+    nome: str
+
+
+class FaturamentoEquipesOut(FaturamentoOut):
+    # 30/10/2026: as equipes com nome (Londres/Israel/Marrocos) AO LADO de
+    # `teams`, que segue só com os números — quem lê a lista antiga não quebra.
+    equipes: list[EquipeFaturamento] = []
+
 
 # Bling situação IDs que contam pro faturamento da empresa:
 #   '6'     → Em aberto
@@ -44,7 +63,7 @@ router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
 _SITUACOES_FATURAVEIS = ("6", "15", "83953")
 
 
-@router.get("", response_model=FaturamentoOut)
+@router.get("", response_model=FaturamentoEquipesOut)
 async def list_faturamento(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("faturamento", "view"))],
@@ -52,7 +71,7 @@ async def list_faturamento(
     end: datetime | None = Query(None),
     team: int | None = Query(None),
     department: str | None = Query(None),
-) -> FaturamentoOut:
+) -> FaturamentoEquipesOut:
     """Resumo por loja, no período, dos pedidos entregues.
 
     Parte do roster de lojas (store_info) — toda loja do escopo aparece,
@@ -76,14 +95,15 @@ async def list_faturamento(
     if start is None:
         start = end - timedelta(days=90)
 
-    # Equipes comerciais entre as lojas que o usuário já pode consultar.
-    # A organização não concede acesso às contas de outros membros.
+    # Equipes de VENDAS entre as lojas que o usuário já pode consultar
+    # (30/10/2026: era a comercial, que é 1 em toda loja e escondia o
+    # filtro). Admin vê as três; quem é de equipe, só a(s) dele.
     teams_avail = (
         await session.execute(
-            select(StoreInfo.commercial_team)
-            .where(StoreInfo.commercial_team.isnot(None), user_scope(StoreInfo, user))
+            select(StoreInfo.sales_team)
+            .where(StoreInfo.sales_team.isnot(None), user_scope(StoreInfo, user))
             .distinct()
-            .order_by(StoreInfo.commercial_team)
+            .order_by(StoreInfo.sales_team)
         )
     ).scalars().all()
 
@@ -94,7 +114,7 @@ async def list_faturamento(
     # user_scope já restringe ao escopo do usuário; `team` afunila mais.
     scope_clauses = [user_scope(StoreInfo, user)]
     if team is not None:
-        scope_clauses.append(StoreInfo.commercial_team == team)
+        scope_clauses.append(StoreInfo.sales_team == team)
 
     # A classificação vem da mesma regra de Lojas, carregada em lote.
     # O filtro afunila o roster antes de montar linhas e somar seus totais.
@@ -231,12 +251,13 @@ async def list_faturamento(
     # nome pra a lista ficar estável.
     itens.sort(key=lambda x: (-x.faturamento, (x.loja or "").lower()))
 
-    return FaturamentoOut(
+    return FaturamentoEquipesOut(
         itens=itens,
         total_pedidos=total_pedidos,
         total_faturamento=round(total_faturamento, 2),
         start=start,
         end=end,
         teams=list(teams_avail),
+        equipes=[EquipeFaturamento(numero=n, nome=nome_da_equipe(n)) for n in teams_avail],
         team=team,
     )

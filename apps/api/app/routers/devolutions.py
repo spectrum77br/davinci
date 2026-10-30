@@ -10,12 +10,13 @@ import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from openpyxl import Workbook
-from sqlalchemy import desc, func, or_, select, text, update
+from sqlalchemy import Text, and_, cast, desc, false, func, null, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
+from app.deps.team_scope import TeamScope, clausula_conta, conta_no_escopo, resolve_team_scope
 from app.models import (
     BlingOrder,
     Chamado,
@@ -307,6 +308,178 @@ def _build_where(
     return where
 
 
+# ── Equipe de vendas (Eduardo, 30/10/2026) ──────────────────────────────
+# Três equipes — 101 Londres, 102 Israel, 103 Marrocos — e quem é de uma
+# equipe só enxerga as devoluções das lojas dela, em tudo da tela: abas
+# Lançamentos, Acompanhamento e Fraude, cards, exportação e a busca do pedido
+# para lançar. Mexer (salvar, excluir, estoque, anexo, vídeo, situação) no que
+# é de outra equipe: 403 `pedido_de_outra_equipe`, o código do Controle de
+# Estoque. Admin e quem não tem equipe: nada muda. A tag de estoque não entra
+# aqui; equipe sem loja cadastrada não vê nada (nunca "tudo").
+#
+# A LINHA de devolução é da equipe pelo pedido (`bling_orders.loja` do número
+# entre as lojas da equipe) OU pela conta escrita nela — o apelido da loja
+# que a busca do pedido copia ("Shopee ATV", "ML Jlas 2", "TikTok Mini") — na
+# régua plataforma + nome de `team_scope.clausula_conta`, a mesma da Logística
+# e do Reembolso ("Shopee Inova" é da Marrocos, "ML Inova" da Israel). O
+# PEDIDO do Bling (Acompanhamento/Fraude, busca do pedido, atualizar
+# clientes) é da equipe pela loja, como no Controle de Estoque.
+
+# `devolutions` não tem coluna de plataforma: ela vem na frente da conta
+# ("Shopee ATV") ou não vem, e `clausula_conta` cobre os dois casos.
+_SEM_PLATAFORMA = cast(null(), Text)
+
+
+def _erro_outra_equipe(pedido: str | None = None, message: str | None = None) -> HTTPException:
+    """403 de quem mexe no que é de loja de outra equipe, com a frase pronta
+    para a tela (ela mostra `message`). Por id de linha, o número do pedido
+    não volta: quem não vê a linha não fica sabendo de que pedido ela é."""
+    detail: dict = {"code": "pedido_de_outra_equipe"}
+    if pedido:
+        detail["pedidos"] = [pedido]
+    detail["message"] = message or (
+        f"O pedido {pedido} é de uma loja de outra equipe de vendas."
+        if pedido
+        else "Esta devolução é de uma loja de outra equipe de vendas."
+    )
+    return HTTPException(403, detail=detail)
+
+
+def _erro_conta_fora_da_equipe(conta: str | None, pedido: str | None = None) -> HTTPException:
+    return _erro_outra_equipe(
+        pedido,
+        f"A conta {(conta or '').strip() or '(vazia)'} não é de uma loja da sua equipe "
+        "de vendas.",
+    )
+
+
+def _lojas_da_equipe(scope: TeamScope) -> set[str] | None:
+    """Lojas do Bling (`BlingOrder.loja`) que a pessoa enxerga. None = sem
+    cerca; vazio = equipe sem loja cadastrada (não vê pedido nenhum)."""
+    return None if scope.unrestricted else set(scope.bling_store_ids)
+
+
+def _cerca_loja(coluna, lojas: set[str] | None):
+    """WHERE da cerca de equipe numa coluna de loja; None = sem cerca."""
+    if lojas is None:
+        return None
+    if not lojas:
+        return false()
+    return coluna.in_(sorted(lojas))
+
+
+def _clausula_equipe(scope: TeamScope):
+    """WHERE da equipe numa consulta de `Devolution` (lista, cards,
+    exportação, linha única); None = irrestrito. Sem chave = zera."""
+    if scope.unrestricted:
+        return None
+    ors = []
+    if scope.bling_store_ids:
+        # EXISTS correlacionado (índice do número), não IN (todos os números
+        # das lojas da equipe): o espelho tem anos de pedidos, a tabela de
+        # devoluções é pequena.
+        ors.append(
+            select(BlingOrder.id)
+            .where(
+                BlingOrder.numero == Devolution.pedido_bling,
+                BlingOrder.loja.in_(sorted(scope.bling_store_ids)),
+            )
+            .correlate(Devolution)
+            .exists()
+        )
+    pela_conta = clausula_conta(scope, _SEM_PLATAFORMA, Devolution.conta)
+    if pela_conta is not None:
+        # A conta só decide quando o pedido não está no espelho: lá manda a
+        # loja (a régua do lançamento), senão uma conta trocada na linha a
+        # levaria para outra equipe.
+        no_espelho = (
+            select(BlingOrder.id)
+            .where(BlingOrder.numero == Devolution.pedido_bling, BlingOrder.loja.isnot(None))
+            .correlate(Devolution)
+            .exists()
+        )
+        ors.append(and_(pela_conta, ~no_espelho))
+    return or_(*ors) if ors else false()
+
+
+async def _exigir_devolucao_da_equipe(
+    session: AsyncSession, scope: TeamScope, devolution_id: UUID
+) -> None:
+    """403 se a linha não é da equipe. Roda a MESMA cláusula da lista no
+    banco: o que a pessoa vê é o que ela mexe, e nada além. Vem antes de
+    qualquer outra trava (409 de estoque etc.), que contaria como a linha está."""
+    clausula = _clausula_equipe(scope)
+    if clausula is None:
+        return
+    da_equipe = (
+        await session.execute(
+            select(Devolution.id).where(Devolution.id == devolution_id, clausula)
+        )
+    ).first()
+    if da_equipe is None:
+        raise _erro_outra_equipe()
+
+
+async def _lojas_do_pedido(session: AsyncSession, pedido: str) -> set[str]:
+    """Lojas do Bling dos itens do pedido no espelho (vazio = fora dele)."""
+    lojas = (
+        await session.execute(
+            select(BlingOrder.loja).where(BlingOrder.numero == pedido).distinct()
+        )
+    ).scalars()
+    return {loja for loja in lojas if loja}
+
+
+async def _pedido_da_equipe(session: AsyncSession, scope: TeamScope, pedido: str) -> bool:
+    """O pedido é da equipe: no espelho do Bling, algum item dele é de loja
+    da equipe; fora do espelho, há devolução dele lançada na conta da equipe
+    (a régua da aba Lançamentos, de onde também se muda a situação)."""
+    if scope.unrestricted:
+        return True
+    lojas_do_pedido = await _lojas_do_pedido(session, pedido)
+    if lojas_do_pedido:
+        return bool(lojas_do_pedido & scope.bling_store_ids)
+    pela_conta = clausula_conta(scope, _SEM_PLATAFORMA, Devolution.conta)
+    if pela_conta is None:
+        return False
+    lancada = (
+        await session.execute(
+            select(Devolution.id).where(Devolution.pedido_bling == pedido, pela_conta).limit(1)
+        )
+    ).first()
+    return lancada is not None
+
+
+async def _exigir_pedido_da_equipe(session: AsyncSession, scope: TeamScope, pedido: str) -> None:
+    """403 `pedido_de_outra_equipe` (com o pedido) se ele não é da equipe.
+    Pedido que nem está no espelho, sem devolução da equipe, também barra:
+    não dá pra provar que é dela. Roda antes do 404, pra não contar o que
+    existe em outra equipe."""
+    if not await _pedido_da_equipe(session, scope, pedido):
+        raise _erro_outra_equipe(pedido)
+
+
+async def _exigir_lancamento_da_equipe(
+    session: AsyncSession, scope: TeamScope, pedido: str | None, conta: str | None
+) -> None:
+    """Lançar devolução de pedido de outra equipe (ou levar uma linha para
+    ele, trocando pedido/conta): 403. Pedido no espelho do Bling: manda a
+    loja dele — a conta digitada não basta, senão bastaria escrever a conta
+    da própria equipe. Pedido fora do espelho, ou sem pedido: manda a conta,
+    na régua da lista (a linha nasce visível para quem a lançou)."""
+    if scope.unrestricted:
+        return
+    pedido = (pedido or "").strip()
+    if pedido:
+        lojas_do_pedido = await _lojas_do_pedido(session, pedido)
+        if lojas_do_pedido:
+            if lojas_do_pedido & scope.bling_store_ids:
+                return
+            raise _erro_outra_equipe(pedido)
+    if not conta_no_escopo(scope, None, conta):
+        raise _erro_conta_fora_da_equipe(conta, pedido or None)
+
+
 def _cliente_scalar_subquery():
     """Nome do cliente mora em bling_orders (nome_destinatario), não em
     devolutions — subquery correlacionada pelo número do pedido (grão de
@@ -531,7 +704,7 @@ async def _chamado_devolucao_apos_commit(
 @router.get("", response_model=DevolutionPage)
 async def list_devolutions(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     search: str | None = Query(None),
@@ -549,6 +722,10 @@ async def list_devolutions(
         search, reembolso, tag, data_inicio, data_fim, condicao, manutencao,
         prazo_dias, prazo_vencido, tag_destino,
     )
+    # Equipe de vendas: a lista E os cards (mesmo `where`) só com a equipe.
+    equipe = _clausula_equipe(await resolve_team_scope(session, user))
+    if equipe is not None:
+        where.append(equipe)
 
     stmt = (
         select(Devolution, _cliente_scalar_subquery().label("cliente"))
@@ -867,7 +1044,9 @@ def _com_status_da_devolucao(
     return d
 
 
-async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
+async def acompanhamento_rows(
+    session: AsyncSession, *, lojas: set[str] | None = None
+) -> list[dict]:
     """Linhas da aba Acompanhamento: TODOS os pedidos hoje em 'Aguardando
     Devolução' (83957) no Bling — uma linha por item, com nome do cliente, dia
     em que entrou na situação e rastreio/última localização.
@@ -877,7 +1056,17 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
     aba (devolucao_rastreio) SOBRESCREVE o automático quando preenchida —
     Eduardo 03/09: "nao esta puxando o rastreio, isso tem que ser automatico".
     `localizacao_data` é a última movimentação vista (ver
-    _ultima_movimentacao). Compartilhada com o botão Informar."""
+    _ultima_movimentacao). Compartilhada com o botão Informar.
+
+    `lojas` = cerca da equipe de vendas pela loja do Bling (30/10/2026): None
+    = todas (o Informar e quem não tem equipe); vazio = nenhuma linha."""
+    if lojas is not None and not lojas:
+        return []
+    params: dict = {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO}
+    filtro_loja = ""
+    if lojas is not None:
+        filtro_loja = "AND v.bling_loja_id::text = ANY(:lojas)"
+        params["lojas"] = sorted(lojas)
     rows = (
         await session.execute(
             text(
@@ -972,12 +1161,13 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     LIMIT 1
                 ) lg ON TRUE
                 WHERE v.situacao = :situacao
+                  {filtro_loja}
                 ORDER BY bo.aguardando_devolucao_data ASC NULLS FIRST,
                          v.pedido_bling, v.sku
                 LIMIT 2000
                 """  # noqa: S608
             ),
-            {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO},
+            params,
         )
     ).mappings().all()
     out: list[dict] = []
@@ -1129,6 +1319,7 @@ async def solicitar_video(
     o link (ou responder "não tenho o vídeo"). Chamado com o link já
     preenchido = "apaguei, refaz": o link some e `motivo` vai pra equipe."""
     pedido_bling = pedido_bling.strip()
+    await _exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido_bling)
     row = await _rastreio_do_pedido(session, pedido_bling)
     motivo = ((body.motivo if body else None) or "").strip() or None
     tinha_resposta = row.video_enviado_em is not None
@@ -1161,6 +1352,7 @@ async def cancelar_video(
     """Cancela a solicitação (pedido por engano): a equipe destrava e a coluna
     volta a "solicitar". Apaga também link/motivo já respondidos."""
     pedido_bling = pedido_bling.strip()
+    await _exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido_bling)
     row = await session.get(DevolucaoRastreio, pedido_bling)
     if row is None:
         raise HTTPException(404, detail={"code": "pedido_not_found"})
@@ -1181,12 +1373,15 @@ async def cancelar_video(
 @router.get("/acompanhamento", response_model=AcompanhamentoOut)
 async def list_acompanhamento(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
 ) -> AcompanhamentoOut:
     """Aba Acompanhamento (ver acompanhamento_rows). A lista volta inteira
     (teto de segurança de 2000 linhas); busca e filtros são do front, como na
-    aba Pedidos do Controle de Estoque."""
-    rows = await acompanhamento_rows(session)
+    aba Pedidos do Controle de Estoque. As abas Acompanhamento e Fraude (e os
+    contadores delas) saem desta lista: quem tem equipe só recebe os pedidos
+    das lojas da equipe."""
+    lojas = _lojas_da_equipe(await resolve_team_scope(session, user))
+    rows = await acompanhamento_rows(session, lojas=lojas)
 
     hoje_sp = datetime.now(SAO_PAULO).date()
     items: list[AcompanhamentoItemOut] = []
@@ -1210,6 +1405,7 @@ async def patch_acompanhamento_rastreio(
     (edição inline da aba Acompanhamento). `localizacao_data` é carimbada
     sozinha quando a localização MUDA — é a data da última movimentação vista."""
     pedido_bling = pedido_bling.strip()
+    await _exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido_bling)
     exists = (
         await session.execute(
             select(func.count()).select_from(BlingOrder).where(BlingOrder.numero == pedido_bling)
@@ -1433,6 +1629,7 @@ async def alterar_situacao_bling(
     abas Acompanhamento/Fraude sem esperar a sincronização) e grava na
     auditoria quem mudou."""
     pedido = pedido_bling.strip()
+    await _exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
     alvo = int(body.situacao_id)
     sit = (
         await session.execute(
@@ -1502,7 +1699,7 @@ async def alterar_situacao_bling(
 @router.get("/export.xlsx")
 async def export_devolutions(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
     search: str | None = Query(None),
     reembolso: bool | None = Query(None),
     tag: str | None = Query(None),
@@ -1519,6 +1716,9 @@ async def export_devolutions(
         search, reembolso, tag, data_inicio, data_fim, condicao, manutencao,
         prazo_dias, prazo_vencido, tag_destino,
     )
+    equipe = _clausula_equipe(await resolve_team_scope(session, user))
+    if equipe is not None:
+        where.append(equipe)
     rows = (
         await session.execute(
             select(Devolution, _cliente_scalar_subquery().label("cliente"))
@@ -1591,18 +1791,29 @@ async def export_devolutions(
 @router.get("/order-lookup", response_model=list[DevolutionLookupOut])
 async def lookup_devolution_order(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
     pedido: str = Query(..., min_length=1),
 ) -> list[DevolutionLookupOut]:
     pedido = pedido.strip()
     if not pedido:
         raise HTTPException(422, detail={"code": "pedido_required"})
 
+    # Equipe de vendas: a busca só traz pedido das lojas da equipe (o
+    # lançamento de pedido de outra equipe é recusado no POST); equipe sem
+    # loja cadastrada não acha nada.
+    lojas = _lojas_da_equipe(await resolve_team_scope(session, user))
+    if lojas is not None and not lojas:
+        return []
     q_like = f"%{pedido}%"
     # Termo só de dígitos é nº de pedido/CEP: não buscar dentro do nome do
     # destinatário, pois nicknames de marketplace embutem datas/números que
     # casariam por substring e trariam pedidos de outros clientes.
     name_clause = "" if pedido.isdigit() else "OR v.nome_destinatario ILIKE :q_like"
+    params: dict = {"pedido": pedido, "q_like": q_like}
+    loja_clause = ""
+    if lojas is not None:
+        loja_clause = "AND v.bling_loja_id::text = ANY(:lojas)"
+        params["lojas"] = sorted(lojas)
     rows = (
         await session.execute(
             text(
@@ -1641,12 +1852,13 @@ async def lookup_devolution_order(
                         OR v.cep_destino ILIKE :q_like
                         {name_clause}
                     )
+                    {loja_clause}
                 ) t
                 WHERE t._pedido_rank <= 50
                 ORDER BY t.data DESC NULLS LAST, t.pedido_bling, t.sku, t._unit_num
                 """  # noqa: S608
             ),
-            {"pedido": pedido, "q_like": q_like},
+            params,
         )
     ).mappings().all()
 
@@ -2052,6 +2264,11 @@ async def create_devolution(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
 ) -> DevolutionOut:
+    # Equipe de vendas: pedido de loja de outra equipe não se lança (antes de
+    # qualquer trava ou efeito — estoque, reembolso, situação, chamado).
+    await _exigir_lancamento_da_equipe(
+        session, await resolve_team_scope(session, user), body.pedido_bling, body.conta
+    )
     # Estoque no ADD: Novo/Usado/Trocado sempre processam (automático). Manutenção
     # só processa se o operador ligou o toggle no rascunho (já decidiu Novo/Usado/
     # Sucata no modal). Extraviado e Sucata (condição) nunca devolvem estoque.
@@ -2173,10 +2390,22 @@ async def patch_devolution(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+    escopo = await resolve_team_scope(session, user)
+    await _exigir_devolucao_da_equipe(session, escopo, row.id)
 
     data = body.model_dump(exclude_unset=True)
     if data.get("conta") is None and "conta" in data:
         raise HTTPException(422, detail={"code": "conta_required"})
+    # Trocar o pedido ou a conta não pode levar a linha para outra equipe (a
+    # tela não manda nenhum dos dois; só a API). Pedido novo: a regra do
+    # lançamento. Conta nova: de loja da equipe — escrita à mão, ela passaria
+    # a mostrar a linha para a equipe dona daquela conta.
+    novo_pedido = data["pedido_bling"] if "pedido_bling" in data else row.pedido_bling
+    nova_conta = data["conta"] if "conta" in data else row.conta
+    if novo_pedido != row.pedido_bling:
+        await _exigir_lancamento_da_equipe(session, escopo, novo_pedido, nova_conta)
+    if nova_conta != row.conta and not conta_no_escopo(escopo, None, nova_conta):
+        raise _erro_conta_fora_da_equipe(nova_conta)
     # Entrada sendo conferida no Bling (respondeu erro depois de receber):
     # mexer no que define o estoque agora lançaria de novo ou deixaria a
     # entrada sem dono — espera a conferência (até 10 min).
@@ -2458,6 +2687,7 @@ async def tentar_estoque_de_novo(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+    await _exigir_devolucao_da_equipe(session, await resolve_team_scope(session, user), row.id)
     st = status_estoque(row)
     if st == ESTOQUE_CONFERINDO:
         raise HTTPException(409, detail={"code": "estoque_conferindo", "message": _MSG_CONFERINDO})
@@ -2557,6 +2787,7 @@ async def estoque_ja_entrou(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+    await _exigir_devolucao_da_equipe(session, await resolve_team_scope(session, user), row.id)
     if status_estoque(row) != ESTOQUE_SEM_CONFIRMACAO:
         raise HTTPException(
             409,
@@ -2637,6 +2868,7 @@ async def pedir_senha_de_novo(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+    await _exigir_devolucao_da_equipe(session, await resolve_team_scope(session, user), row.id)
     try:
         linha = await devolucao_mensagem_comprador.pedir_de_novo(
             session, row, quem=(user.name or user.email or "").strip()
@@ -2760,6 +2992,7 @@ async def upload_anexo(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+    await _exigir_devolucao_da_equipe(session, await resolve_team_scope(session, user), row.id)
     ctype = (file.content_type or "").lower()
     if ctype not in _ANEXO_TIPOS_FOTO | _ANEXO_TIPOS_VIDEO:
         raise HTTPException(400, detail={"code": "devolucao_anexo_tipo_invalido"})
@@ -2792,11 +3025,14 @@ async def upload_anexo(
 async def get_anexo(
     anexo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
 ) -> Response:
     a = await session.get(DevolucaoAnexo, anexo_id)
     if a is None:
         raise HTTPException(404, detail={"code": "devolucao_anexo_not_found"})
+    await _exigir_devolucao_da_equipe(
+        session, await resolve_team_scope(session, user), a.devolution_id
+    )
     return Response(
         content=a.blob,
         media_type=a.content_type,
@@ -2808,11 +3044,14 @@ async def get_anexo(
 async def delete_anexo(
     anexo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
 ) -> Response:
     a = await session.get(DevolucaoAnexo, anexo_id)
     if a is None:
         raise HTTPException(404, detail={"code": "devolucao_anexo_not_found"})
+    await _exigir_devolucao_da_equipe(
+        session, await resolve_team_scope(session, user), a.devolution_id
+    )
     await session.delete(a)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -2821,7 +3060,7 @@ async def delete_anexo(
 @router.post("/backfill-addresses", status_code=status.HTTP_200_OK)
 async def backfill_addresses(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
     limit: int = Query(50, ge=1, le=200),
 ) -> dict:
     """Re-fetch delivery addresses from Bling for devolution orders that have
@@ -2837,21 +3076,20 @@ async def backfill_addresses(
     # gravados antes do fix do nome genérico (transporte.contato.nome era a
     # CONTA "Amazon DBA"/"Amazon KFA", não o cliente) — o botão "atualizar
     # clientes" da aba re-busca e conserta esses também.
-    rows = (
-        await session.execute(
-            select(BlingOrder.id, BlingOrder.bling_id, BlingOrder.numero)
-            .where(
-                BlingOrder.situacao.in_(_SITUACOES),
-                or_(
-                    BlingOrder.nome_destinatario.is_(None),
-                    BlingOrder.nome_destinatario.ilike("amazon%"),
-                ),
-                BlingOrder.bling_id.is_not(None),
-            )
-            .order_by(desc(BlingOrder.data))
-            .limit(limit)
-        )
-    ).all()
+    stmt = select(BlingOrder.id, BlingOrder.bling_id, BlingOrder.numero).where(
+        BlingOrder.situacao.in_(_SITUACOES),
+        or_(
+            BlingOrder.nome_destinatario.is_(None),
+            BlingOrder.nome_destinatario.ilike("amazon%"),
+        ),
+        BlingOrder.bling_id.is_not(None),
+    )
+    # Equipe de vendas: quem tem equipe só atualiza (e só conta) os pedidos
+    # das lojas dela; equipe sem loja cadastrada não mexe em nada.
+    cerca = _cerca_loja(BlingOrder.loja, _lojas_da_equipe(await resolve_team_scope(session, user)))
+    if cerca is not None:
+        stmt = stmt.where(cerca)
+    rows = (await session.execute(stmt.order_by(desc(BlingOrder.data)).limit(limit))).all()
 
     if not rows:
         return {"processed": 0, "updated": 0, "failed": 0, "message": "Nenhum pedido sem endereço encontrado"}
@@ -2967,6 +3205,7 @@ async def delete_devolution(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+    await _exigir_devolucao_da_equipe(session, await resolve_team_scope(session, user), row.id)
     pedido = (row.pedido_bling or "").strip() or None
     segurava = status_estoque(row) in ESTOQUE_PENDENTES
     # Situação que as linhas pediam ANTES (com a que sai): só recalcula se a
@@ -3172,7 +3411,7 @@ async def _desfazer_chamado_apos_exclusao(
 async def get_devolution(
     devolution_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
 ) -> DevolutionOut:
     """Uma linha só — a tela relê as que estão "conferindo" a entrada no Bling
     (0421) sem recarregar a lista. Fica no FIM do arquivo: as rotas GET fixas
@@ -3182,4 +3421,5 @@ async def get_devolution(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+    await _exigir_devolucao_da_equipe(session, await resolve_team_scope(session, user), row.id)
     return await _completar_out(session, row, DevolutionOut.model_validate(row))

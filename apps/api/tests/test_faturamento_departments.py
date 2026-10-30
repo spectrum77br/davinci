@@ -28,16 +28,17 @@ async def department_roster(db, make_user):
     db.add(child)
     await db.flush()
 
-    # Equipe comercial organiza as lojas; sales_team continua sendo a trava
-    # de acesso. Mesmos nomes em plataformas diferentes não misturam tipos.
+    # sales_team é a trava de acesso e, desde 30/10/2026, o filtro "Equipe";
+    # a comercial (1/2) fica de ruído, não decide nada no Faturamento.
+    # Mesmos nomes em plataformas diferentes não misturam tipos.
     plan = (
         ("legacy_ml", "ml", "kfa", 11, 1, None),
         ("kfa2", "mercadolivre", "kfa2", 22, 1, None),
         ("shopee", "shopee", "kfa", 11, 2, None),
         ("explicit_fk", "mercadolivre", "Outro nome", 22, 2, None),
         ("site", "site", "kfa", 11, 1, ["mala"]),
-        ("carrefour", "carrefour", "kfa", 22, 1, ["mala", "catalogo"]),
-        ("netshoes", "netshoes", "kfa", 11, 2, ["eletro", "mala"]),
+        ("carrefour", "carrefour", "kfa", 22, 1, None),
+        ("netshoes", "netshoes", "kfa", 11, 2, None),
         ("child_only", "amazon", "Só subtipo", 22, 2, None),
         ("zero", "amazon", "Sem vendas", 11, 1, None),
         ("untyped", "magalu", "Sem tipo", 22, 2, None),
@@ -68,6 +69,22 @@ async def department_roster(db, make_user):
                              store_info_id=stores[store_key].id if store_key else None))
     db.add(PricingAccount(user_id=owner.id, name="Só subtipo", platform=PricingPlatform.AMAZON,
                          segment_id=child.id, store_info_id=stores["child_only"].id))
+    # Carrefour e Netshoes têm tabela de preços desde a 0379 (07/10/2026): o
+    # tipo vem da conta ligada à loja; o manual ficou só para o Site.
+    for store_key, platform, slugs in (
+        ("carrefour", PricingPlatform.CARREFOUR, ("mala", "catalogo")),
+        ("netshoes", PricingPlatform.NETSHOES, ("eletro", "mala")),
+    ):
+        for slug in slugs:
+            db.add(
+                PricingAccount(
+                    user_id=owner.id,
+                    name=f"kfa {slug}",
+                    platform=platform,
+                    segment_id=roots[slug].id,
+                    store_info_id=stores[store_key].id,
+                )
+            )
     await db.commit()
     return {"owner": owner, "stores": stores, "roots": roots}
 
@@ -188,18 +205,33 @@ async def test_admin_can_filter_each_root_with_financial_totals_of_matching_stor
     assert body["total_pedidos"] == orders
 
 
-async def test_admin_department_and_commercial_team_filters_intersect(
+async def test_admin_department_and_sales_team_filters_intersect(
     db, client, auth_as, department_roster,
 ):
     auth_as(department_roster["owner"])
     stores = department_roster["stores"]
     await _seed_revenue(db, stores)
-    body = await _revenue(client, department="mala", team=2)
-    assert {row["store_id"] for row in body["itens"]} == _ids(stores, "netshoes")
-    assert body["total_faturamento"] == 0
-    assert body["total_pedidos"] == 0
-    assert body["teams"] == [1, 2]
-    assert body["team"] == 2
+    body = await _revenue(client, department="mala", team=22)
+    assert {row["store_id"] for row in body["itens"]} == _ids(stores, "carrefour")
+    assert body["total_faturamento"] == 50
+    assert body["total_pedidos"] == 1
+    assert body["teams"] == [11, 22]
+    # Equipe sem nome cadastrado aparece como "Equipe N".
+    assert body["equipes"] == [
+        {"numero": 11, "nome": "Equipe 11"},
+        {"numero": 22, "nome": "Equipe 22"},
+    ]
+    assert body["team"] == 22
+    body = await _revenue(client, department="mala", team=11)
+    assert {row["store_id"] for row in body["itens"]} == _ids(
+        stores, "legacy_ml", "site", "netshoes", "zero"
+    )
+    assert body["total_faturamento"] == 425.25
+    assert body["total_pedidos"] == 3
+    # A comercial (1/2) não é mais o filtro: pedir por ela é equipe que não há.
+    response = await client.get("/api/faturamento", params={**PERIOD, "team": 2})
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "team_not_allowed"
 
 
 async def test_valid_department_without_stores_returns_zero_without_orphan_revenue(
@@ -245,14 +277,23 @@ async def test_revenue_viewer_sees_types_without_store_permission_but_cannot_fil
         assert set(reported) == _ids(stores, "legacy_ml", "shopee", "site", "netshoes", "zero")
         assert body["total_faturamento"] == 825.25
         assert body["total_pedidos"] == 4
-        body = await _revenue(client, team=1)
-        assert {row["store_id"] for row in body["itens"]} == _ids(
-            stores, "legacy_ml", "site", "zero",
-        )
-        assert body["total_faturamento"] == 425.25
+        # Uma equipe só: o filtro não tem o que escolher (a tela esconde).
+        assert body["teams"] == [11]
+        assert (await _revenue(client, team=11))["itens"] == body["itens"]
+        response = await client.get("/api/faturamento", params={**PERIOD, "team": 22})
+        assert response.status_code == 403, response.text
+        assert response.json()["detail"]["code"] == "team_not_allowed"
     else:
         assert "orphan-99" in reported
         assert body["total_faturamento"] == 1190.25
+        # Sem equipe vê tudo e pode afunilar; com filtro o órfão fica de fora.
+        assert body["teams"] == [11, 22]
+        body = await _revenue(client, team=22)
+        assert {row["store_id"] for row in body["itens"]} == _ids(
+            stores, "kfa2", "explicit_fk", "carrefour", "child_only", "untyped"
+        )
+        assert body["total_faturamento"] == 305
+        assert body["total_pedidos"] == 4
     for department in ("mala", "unknown-root", ""):
         response = await client.get("/api/faturamento", params={
             **PERIOD, "department": department,

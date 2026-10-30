@@ -34,7 +34,11 @@ from app.models import (
     User,
 )
 from app.models.chamado import CANAIS
-from app.routers.chamados import _trabalho_do_cerebro
+from app.routers.chamados import (
+    _clausula_do_usuario,
+    _exigir_da_equipe,
+    _trabalho_do_cerebro,
+)
 from app.schemas.chamados import (
     IaAvaliacaoIn,
     IaAvaliacaoOut,
@@ -90,7 +94,11 @@ async def _nomes(session: AsyncSession, ids: set[UUID | None]) -> dict[UUID, str
 
 
 async def _decisoes_out(
-    session: AsyncSession, ia: ChamadoCerebro, mensagem_id: UUID | None = None
+    session: AsyncSession,
+    ia: ChamadoCerebro,
+    mensagem_id: UUID | None = None,
+    *,
+    equipe=None,
 ) -> list[IaDecisaoOut]:
     q = (
         select(ChamadoMensagem, Chamado, ChamadoIaAvaliacao)
@@ -103,6 +111,9 @@ async def _decisoes_out(
     else:
         # 25/09: decisão escondida pela lixeirinha do histórico sai da lista também
         q = q.where(ChamadoMensagem.excluida_at.is_(None))
+    if equipe is not None:
+        # Equipe (30/10/2026): só as decisões nos chamados da equipe.
+        q = q.where(equipe)
     rows = (
         await session.execute(q.order_by(ChamadoMensagem.created_at.desc()).limit(_DECISOES))
     ).all()
@@ -156,15 +167,17 @@ async def _regras_out(session: AsyncSession) -> list[IaRegraOut]:
 @router.get("", response_model=IaEstadoOut)
 async def estado(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "view"))],
+    user: Annotated[User, Depends(require_permission("chamados", "view"))],
 ) -> IaEstadoOut:
     ia = await _ia(session)
+    # Equipe (30/10/2026): o "esperando" e as decisões contam só os chamados
+    # da equipe; o manual e o liga/desliga são da IA, iguais pra todos.
+    equipe = await _clausula_do_usuario(session, user)
+    trabalho = _trabalho_do_cerebro(None, list(CANAIS)).order_by(None)
+    if equipe is not None:
+        trabalho = trabalho.where(equipe)
     esperando = (
-        await session.execute(
-            select(func.count()).select_from(
-                _trabalho_do_cerebro(None, list(CANAIS)).order_by(None).subquery()
-            )
-        )
+        await session.execute(select(func.count()).select_from(trabalho.subquery()))
     ).scalar_one()
     return IaEstadoOut(
         nome=ia.nome,
@@ -173,7 +186,7 @@ async def estado(
         ultima_passada=ia.last_used_at,
         esperando=esperando,
         regras=await _regras_out(session),
-        decisoes=await _decisoes_out(session, ia),
+        decisoes=await _decisoes_out(session, ia, equipe=equipe),
     )
 
 
@@ -256,7 +269,7 @@ async def apagar_regra(
 
 
 async def _decisao_da_ia(
-    session: AsyncSession, mensagem_id: UUID
+    session: AsyncSession, mensagem_id: UUID, user: User
 ) -> tuple[ChamadoCerebro, ChamadoMensagem, Chamado]:
     ia = await _ia(session)
     m = await session.get(ChamadoMensagem, mensagem_id)
@@ -264,6 +277,8 @@ async def _decisao_da_ia(
         raise HTTPException(404, detail={"code": "decisao_nao_encontrada"})
     ch = await session.get(Chamado, m.chamado_id)
     assert ch is not None
+    # Equipe (30/10/2026): decisão em chamado de outra equipe → 403, como na aba.
+    await _exigir_da_equipe(session, user, ch.id)
     return ia, m, ch
 
 
@@ -277,7 +292,7 @@ async def avaliar(
     """✓/✗ numa decisão. No ✗, a correção vira instrução no chamado — a IA refaz
     na próxima passada — salvo `refazer: false` (avaliação dada ao fechar o
     chamado) ou chamado Concluído: aí fica só o aprendizado."""
-    ia, m, ch = await _decisao_da_ia(session, mensagem_id)
+    ia, m, ch = await _decisao_da_ia(session, mensagem_id, user)
     av = (
         await session.execute(
             select(ChamadoIaAvaliacao).where(ChamadoIaAvaliacao.mensagem_id == m.id)
@@ -314,10 +329,10 @@ async def avaliar(
 async def desfazer_avaliacao(
     mensagem_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> IaDecisaoOut:
     """Tira o ✓/✗ (a instrução que o ✗ mandou continua no histórico)."""
-    ia, m, _ch = await _decisao_da_ia(session, mensagem_id)
+    ia, m, _ch = await _decisao_da_ia(session, mensagem_id, user)
     av = (
         await session.execute(
             select(ChamadoIaAvaliacao).where(ChamadoIaAvaliacao.mensagem_id == m.id)

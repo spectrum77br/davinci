@@ -408,6 +408,13 @@ const pedidos = ref<PedidoRow[]>([])
 // gerada em dia passado e ainda não confirmados. O chip do topo os exibe
 // só quando o operador está no filtro de hoje.
 const pedidosAtrasadosRaw = ref<{ date: string; count: number }[]>([])
+// Equipe de vendas (30/10/2026): quem é de uma equipe (Londres, Israel,
+// Marrocos) só vê pedidos e envios das lojas dela. A API já cerca e diz a
+// equipe; a tela só avisa, pra ninguém achar que pedido sumiu.
+type EquipeInfo = { numeros: number[]; nomes: string[] } | null
+const equipeNomes = ref<string[]>([])
+// "Equipe Londres" / "Equipe 104" — a API já manda "Equipe N" para equipe sem nome.
+const rotuloEquipe = (nomes: string[]) => `Equipe ${nomes.map((n) => n.replace(/^Equipe /, '')).join(', ')}`
 const envios = ref<{
   items: EnvioRow[]
   total: number                 // sum of conferido envios (footer "Total")
@@ -582,11 +589,14 @@ async function loadPedidos() {
     if (!canUseTagFilter.value && isGerenteEtiquetas.value && tagOverride.value)
       qs.push(`tag=${tagOverride.value}`)
     if (statusFilter.value !== 'all') qs.push(`status=${statusFilter.value}`)
-    const r = await api<{ data: PedidoRow[]; atrasados?: { date: string; count: number }[] }>(
-      `/api/estoque/pedidos?${qs.join('&')}`,
-    )
+    const r = await api<{
+      data: PedidoRow[]
+      atrasados?: { date: string; count: number }[]
+      equipe?: EquipeInfo
+    }>(`/api/estoque/pedidos?${qs.join('&')}`)
     pedidos.value = r.data || []
     pedidosAtrasadosRaw.value = r.atrasados || []
+    equipeNomes.value = r.equipe?.nomes || []
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'load_failed'
     pedidos.value = []
@@ -607,12 +617,14 @@ async function loadEnvios() {
       total: number
       total_envios: number
       total_conferido: number
+      equipe?: EquipeInfo
     }>(`/api/estoque/envios?${qs.join('&')}`)
     envios.value = {
       items: r.data || [],
       total: r.total ?? 0,
       total_envios: r.total_envios ?? 0,
     }
+    equipeNomes.value = r.equipe?.nomes || []
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'load_failed'
     envios.value = { items: [], total: 0, total_envios: 0 }
@@ -676,18 +688,31 @@ const nfProcessing = ref(false)
 const nfCurrentFile = ref<string | null>(null)
 const nfResults = ref<NfResult[]>([])
 const nfFileInputRef = ref<HTMLInputElement | null>(null)
+// Equipe de vendas (30/10/2026): quem é de uma equipe só recebe da API as
+// lojas ML dela (e o envio recusa loja de fora). Vazio = sem cerca de equipe.
+const nfEquipeNomes = ref<string[]>([])
 
 const nfSuccessCount = computed(() => nfResults.value.filter((r) => r.success).length)
 const nfFailCount = computed(() => nfResults.value.filter((r) => !r.success).length)
 
 async function loadNfStores() {
   try {
-    const r = await api<{ stores: string[] }>('/api/nf/stores')
-    nfStores.value = r.stores || []
+    const r = await api<{
+      stores: string[]
+      equipe?: { numeros: number[]; nomes: string[] } | null
+    }>('/api/nf/stores')
+    // Pré-seleciona só o que a API devolveu (para a equipe, só as lojas dela).
+    nfStores.value = [...new Set(r.stores || [])]
     nfSelectedStores.value = new Set(nfStores.value)
+    nfEquipeNomes.value = r.equipe?.nomes || []
   } catch (e: any) {
     console.error('Falha lojas NF:', e)
   }
+}
+// 403 `loja_de_outra_equipe`: o servidor recusou ANTES de chamar o ML.
+function nfErroEquipe(lojas: string[] | undefined): string {
+  return `Não enviado: loja(s) de outra equipe na seleção (${(lojas || []).join(', ')}). `
+    + 'A lista de lojas foi atualizada; confira e envie de novo.'
 }
 function onNfFileChange(ev: Event) {
   const inp = ev.target as HTMLInputElement
@@ -718,7 +743,14 @@ async function processNfFiles() {
   if (!nfFiles.value.length || !nfSelectedStores.value.size) return
   nfProcessing.value = true
   nfResults.value = []
+  // Loja de outra equipe na seleção: a seleção é a mesma pra todos os
+  // arquivos, então os seguintes nem vão ao servidor (mesma recusa).
+  let barradoEquipe: string | null = null
   for (const file of nfFiles.value) {
+    if (barradoEquipe) {
+      nfResults.value.push({ filename: file.name, success: false, error: barradoEquipe, attempts_details: [] })
+      continue
+    }
     nfCurrentFile.value = file.name
     const fd = new FormData()
     fd.append('file', file)
@@ -727,16 +759,20 @@ async function processNfFiles() {
       const r = await api<NfResult>('/api/nf/upload', { method: 'POST', body: fd })
       nfResults.value.push({ filename: file.name, ...r })
     } catch (e: any) {
+      const det = e?.data?.detail
+      if (det?.code === 'loja_de_outra_equipe') barradoEquipe = nfErroEquipe(det.lojas)
       nfResults.value.push({
         filename: file.name,
         success: false,
-        error: e?.data?.detail?.code || e?.message || 'erro',
+        error: barradoEquipe || det?.code || e?.message || 'erro',
         attempts_details: [],
       })
     }
   }
   nfCurrentFile.value = null
   nfProcessing.value = false
+  // A lista estava velha (a equipe ou a loja mudou): busca a da equipe de novo.
+  if (barradoEquipe) void loadNfStores()
 }
 
 onMounted(() => {
@@ -1611,6 +1647,7 @@ const ATRASO_EXCLUSAO: Record<string, string> = {
   sem_numero_marketplace: 'sem nº do pedido na plataforma',
   ja_tem_chamado: 'já tem chamado de atraso aberto',
   fora_da_sua_tag: 'pedido de outra operação',
+  fora_da_sua_equipe: 'pedido de loja de outra equipe',
   pedido_nao_encontrado: 'pedido não encontrado',
   motivo_outro_obrigatorio: 'escreva o motivo do chamado (opção "outro")',
 }
@@ -1764,6 +1801,7 @@ const CHAMADO_ERROS: Record<string, string> = {
   pedido_ja_enviado: 'Esse pedido já foi enviado.',
   pedido_ja_tem_chamado: 'Já existe chamado aberto para esse pedido. Continue por ele na aba Chamados.',
   pedido_fora_da_sua_tag: 'Esse pedido é de outra operação, fora das suas tags.',
+  pedido_de_outra_equipe: 'Esse pedido é de uma loja de outra equipe.',
   no_stock_tag: 'Seu usuário não tem tag de estoque definida. Peça para um administrador configurar.',
 }
 // Prazo de envio já vencido: pinta o botão de vermelho (é o caso que o
@@ -1884,6 +1922,18 @@ async function executarLote(pedidos: string[], comRelatorio: boolean) {
         + 'A etiqueta chega sozinha em até ~1h; se continuar sem, avise o responsável.',
       )
       return
+    }
+    if (resp.status === 403) {
+      // Equipe (30/10/2026): pedido de loja de outra equipe na seleção — o
+      // servidor recusa o lote inteiro (nada impresso, nada carimbado).
+      const det = (await resp.json().catch(() => null))?.detail
+      if (det?.code === 'pedido_de_outra_equipe') {
+        alert(
+          `Pedido(s) de loja de outra equipe na seleção: ${(det.pedidos || []).join(', ')}. `
+          + 'Nada foi impresso. Recarregue a lista e selecione de novo.',
+        )
+        return
+      }
     }
     if (!resp.ok) throw new Error(String(resp.status))
     const blob = await resp.blob()
@@ -2374,6 +2424,13 @@ async function conferirTodos() {
     </div>
     <p v-if="mobileTable && tab !== 'upload-nf'" class="stock-scroll-hint text-xs text-muted-foreground">
       Deslize a tabela para os lados para ver todos os detalhes.
+    </p>
+    <!-- Equipe de vendas (30/10/2026): a lista vem cercada pelas lojas da equipe. -->
+    <p
+      v-if="(tab === 'pedidos' || tab === 'envios') && equipeNomes.length"
+      class="text-xs text-muted-foreground"
+    >
+      {{ rotuloEquipe(equipeNomes) }}: aqui aparecem só os pedidos das lojas da sua equipe.
     </p>
 
     <!-- TAB: ESTOQUE ────────────────────────────────────────────────── -->
@@ -3243,8 +3300,12 @@ async function conferirTodos() {
             {{ nfSelectedStores.size }} de {{ nfStores.length }} selecionada(s)
           </span>
         </div>
+        <!-- Equipe de vendas (30/10/2026): a lista vem cercada pelas lojas da equipe. -->
+        <p v-if="nfEquipeNomes.length" class="text-xs text-muted-foreground">
+          {{ rotuloEquipe(nfEquipeNomes) }}: aqui aparecem só as lojas ML da sua equipe.
+        </p>
         <div v-if="!nfStores.length" class="text-xs text-muted-foreground">
-          Nenhuma integração ML ativa encontrada.
+          {{ nfEquipeNomes.length ? 'Nenhuma loja ML ativa da sua equipe.' : 'Nenhuma integração ML ativa encontrada.' }}
         </div>
         <div v-else class="flex flex-wrap gap-1.5">
           <button

@@ -1,6 +1,8 @@
 // Run from apps/web: node tests/faturamento-tipos.cjs
 // Compile and render the real page; only Nuxt auth/API boundaries are mocked.
 // The type filter is admin-only; mobile cards retain the desktop rows and totals.
+// Equipe (30/10/2026): the select lists the sales teams by name (Londres,
+// Israel, Marrocos) and only shows up when there is more than one to pick.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -50,7 +52,12 @@ const RESPONSE = {
       pedidos: 1, faturamento: 20, ticket_medio: 20 },
   ],
   total_pedidos: 4, total_faturamento: 420,
-  start: '2026-10-01T00:00:00', end: '2026-11-01T00:00:00', teams: [1, 2], team: null,
+  start: '2026-10-01T00:00:00', end: '2026-11-01T00:00:00', teams: [101, 102, 103],
+  equipes: [
+    { numero: 101, nome: 'Londres' }, { numero: 102, nome: 'Israel' },
+    { numero: 103, nome: 'Marrocos' },
+  ],
+  team: null,
 }
 
 async function page(role) {
@@ -90,6 +97,13 @@ function textContent(markup) {
 function tagContents(markup, tag) {
   return [...markup.matchAll(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, 'g'))]
     .map((match) => textContent(match[1]))
+}
+// [value, label] of each Equipe option, or null when the select is not rendered.
+function teamOptions(html) {
+  const select = html.match(/<select\b[^>]*id="faturamento-equipe"[^>]*>([\s\S]*?)<\/select>/)
+  if (!select) return null
+  return [...select[1].matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/g)]
+    .map(([, attrs, label]) => [attrs.match(/\bvalue="([^"]*)"/)?.[1] ?? null, textContent(label)])
 }
 function mobileSection(html) {
   const match = html.match(/<section\b[^>]*aria-label="Faturamento por loja"[^>]*>([\s\S]*?)<\/section>/)
@@ -145,12 +159,17 @@ async function run() {
   assert.match(html, />Eletro<\/span>/, 'multiple store types are displayed')
   assert.match(html, /colspan="3"[^>]*>Total<\/td>/)
   assert.equal(admin.query().has('department'), false, 'initial load has no type restriction')
+  assert.equal(admin.query().has('team'), false, 'initial load has no team restriction')
+  assert.deepEqual(teamOptions(html), [
+    [null, 'Todas as equipes'], ['101', 'Londres'], ['102', 'Israel'], ['103', 'Marrocos'],
+  ], 'admin picks the sales teams by name; the value sent is the team number')
+  assert.doesNotMatch(html, /Equipe 10[123]/, 'no bare team numbers when the API sends names')
 
   admin.state.department = 'mala'
-  admin.state.team = 2
+  admin.state.team = 102
   await admin.state.load()
   assert.equal(admin.query().get('department'), 'mala')
-  assert.equal(admin.query().get('team'), '2', 'type filter preserves team selection')
+  assert.equal(admin.query().get('team'), '102', 'type filter preserves team selection')
   assert.ok(admin.query().get('start'))
   assert.ok(admin.query().get('end'))
   html = await admin.html()
@@ -178,6 +197,21 @@ async function run() {
   assert.equal(admin.query().has('department'), false, 'guard follows the current user role')
   assert.doesNotMatch(await admin.html(), /id="faturamento-tipo"/)
 
+  // A team member gets only their own team back: nothing to pick, no select.
+  reader.state.data = { ...RESPONSE, teams: [102], equipes: [{ numero: 102, nome: 'Israel' }] }
+  assert.equal(teamOptions(await reader.html()), null, 'single team hides the select')
+  // Someone in two teams can still switch between them, by name.
+  reader.state.data = { ...RESPONSE, teams: [101, 102], equipes: RESPONSE.equipes.slice(0, 2) }
+  assert.deepEqual(teamOptions(await reader.html()), [
+    [null, 'Todas as equipes'], ['101', 'Londres'], ['102', 'Israel'],
+  ])
+  // An API without `equipes` (the one before 30/10) still yields a usable list.
+  const { equipes: _ignored, ...semNomes } = RESPONSE
+  reader.state.data = { ...semNomes, teams: [1, 2] }
+  assert.deepEqual(teamOptions(await reader.html()), [
+    [null, 'Todas as equipes'], ['1', 'Equipe 1'], ['2', 'Equipe 2'],
+  ])
+
   const refreshed = { ...RESPONSE, itens: [RESPONSE.itens[1]], total_pedidos: 1, total_faturamento: 100 }
   reader.state.data = refreshed
   assertMobileCards(await reader.html(), refreshed)
@@ -203,5 +237,5 @@ async function run() {
 }
 
 run().then(() => {
-  console.log('PASS: real Faturamento SFC renders types for readers; type filter/query admin-only; period/team preserved; mobile cards/desktop values and totals agree after refresh; empty/loading states')
+  console.log('PASS: real Faturamento SFC renders types for readers; type filter/query admin-only; period/team preserved; Equipe select by name (Londres/Israel/Marrocos), hidden with one team, "Equipe N" without names; mobile cards/desktop values and totals agree after refresh; empty/loading states')
 }).catch((error) => { console.error(error); process.exitCode = 1 })

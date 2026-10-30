@@ -400,6 +400,7 @@ async def montar(
     numeros: list[str],
     *,
     tags: list[str] | None,
+    lojas_equipe: set[str] | None = None,
     motivos: dict[str, str] | None = None,
     incluir: dict[str, bool] | None = None,
     motivo_outro: dict[str, str] | None = None,
@@ -408,7 +409,8 @@ async def montar(
     """Conferência: classifica cada pedido selecionado e monta um grupo por
     loja com o texto pronto. `motivos`/`incluir` = escolhas da tela (pedido →
     motivo | marcado), que vencem o cálculo quando permitidas; `motivo_outro`
-    = texto livre por loja (chave). Não grava nada."""
+    = texto livre por loja (chave). `lojas_equipe` = lojas do Bling da equipe
+    de vendas do chamador (None = sem equipe, vê todas). Não grava nada."""
     agora = agora or datetime.now(BRT)
     limpos: list[str] = []
     for n in numeros:
@@ -465,6 +467,14 @@ async def montar(
             )
             continue
         cabeca = rows[0]
+        # Equipe de vendas (30/10/2026): quem tem equipe não abre chamado por
+        # loja de outra equipe. Sem o nº da plataforma na resposta: é dado do
+        # pedido da outra equipe.
+        if lojas_equipe is not None and str(cabeca.loja or "") not in lojas_equipe:
+            excluidos.append(
+                Excluido(numero, None, "fora_da_sua_equipe", "pedido de loja de outra equipe")
+            )
+            continue
         mk = (cabeca.numeroloja or "").strip() or None
         # Mesma cerca de tag da listagem: quem só enxerga a própria operação
         # não abre chamado de pedido de outro time só por saber o número.
@@ -545,11 +555,14 @@ async def abrir(
     *,
     user: User,
     tags: list[str] | None,
+    lojas_equipe: set[str] | None = None,
 ) -> list[dict]:
     """Abre os chamados conferidos na tela: reclassifica os pedidos (a regra
     vale de novo — pedido que ganhou chamado nesse meio-tempo fica fora), usa
     o texto editado na tela quando veio, senão o texto padrão. Só os pedidos
-    marcados entram. NÃO commita."""
+    marcados entram. `lojas_equipe` = cerca da equipe de vendas, como no
+    `montar`.
+    NÃO commita."""
     abertos: list[dict] = []
     for gin in grupos_in:
         chave_in = str(gin.get("chave") or "")
@@ -565,6 +578,7 @@ async def abrir(
             session,
             numeros,
             tags=tags,
+            lojas_equipe=lojas_equipe,
             motivos=motivos,
             incluir=dict.fromkeys(numeros, True),
             motivo_outro={chave_in: livre},
